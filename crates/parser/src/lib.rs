@@ -19,6 +19,7 @@
 //!
 //! The AST (`ast`) mirrors the Go `ast` package names and is not stable yet.
 #![warn(missing_docs)]
+#![forbid(unsafe_code)]
 
 mod actions_rt;
 #[allow(missing_docs)]

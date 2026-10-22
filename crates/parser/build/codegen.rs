@@ -247,11 +247,11 @@ pub fn generate(grammar_src: &str, want_dump: bool) -> Generated {
     }
     c.push_str("}\n");
     // The LR automaton guarantees the stack shape: the value below the top for production p's
-    // k-th symbol always has that symbol's type. A mismatch would be a generator bug.
+    // k-th symbol always has that symbol's type. A mismatch would be a generator bug; we keep the
+    // check in release builds too (measured cost is within noise) rather than rely on `unsafe`.
     c.push_str(
         "macro_rules! pop { ($st:ident, $v:ident) => { match $st.pop() { Some(V::$v(x)) => x, \
-         _ => if cfg!(debug_assertions) { unreachable!(\"value stack type mismatch\") } \
-         else { unsafe { std::hint::unreachable_unchecked() } } } }; }\n",
+         _ => unreachable!(\"value stack type mismatch\") } }; }\n",
     );
     let span_ty = "crate::span::Span";
     let mut red_names = Vec::new();
