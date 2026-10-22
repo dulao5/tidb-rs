@@ -1,0 +1,3881 @@
+{
+ "_generated": "by tools/parser-port/convert_typed.py from pkg/parser/parser.y of TiDB 4cee7f2084. Regenerate with: tools/parser-port/regen.sh <tidb-checkout>",
+ "nonterminals": 759,
+ "productions": 3234,
+ "distinct_rust_types": 258,
+ "type_buckets": {
+  "AST enum (Expr/Stmt/ResultSetNode)": 193,
+  "Box<concrete AST struct>": 172,
+  "Vec<_>": 137,
+  "String": 77,
+  "primitive": 73,
+  "value struct / enum (CIStr, Op, JoinType, ...)": 71,
+  "catch-all Item (Box<dyn Any>)": 27,
+  "unit (untyped in goyacc)": 9
+ },
+ "type_source": {
+  "assert": 441,
+  "tag": 253,
+  "catch_all": 27,
+  "own_action": 15,
+  "untyped": 9,
+  "assert_majority": 6,
+  "handport": 5,
+  "passthrough": 3
+ },
+ "catch_all_reasons": {
+  "catch_all(unknown)": 17,
+  "catch_all(assert)": 10
+ },
+ "option_wrapped": 45,
+ "action_kinds": {
+  "placeholder": 1825,
+  "implicit_passthrough": 1021,
+  "ported": 110,
+  "bool_const": 101,
+  "nil": 57,
+  "explicit_passthrough": 57,
+  "empty_list": 27,
+  "unit": 19,
+  "implicit_passthrough_type_mismatch->placeholder": 10,
+  "explicit_passthrough_type_mismatch->placeholder": 7
+ },
+ "passthrough_mismatch_pairs": {
+  "TOKEN -> Item": 5,
+  "Item -> Box<TypesFieldType>": 3,
+  "Item -> IndexType": 2,
+  "Item -> Box<Constraint>": 2,
+  "Item -> Box<MViewRefreshClause>": 1,
+  "TOKEN -> Expr": 1,
+  "Item -> FrameExtent": 1,
+  "Item -> Box<AuthRoleIdentity>": 1,
+  "Expr -> Option<Box<PatternLikeOrIlikeExpr>>": 1
+ },
+ "stub_types_generated": 156,
+ "catch_all_nonterminals": [
+  "CharsetOpt",
+  "Constraint",
+  "ConstraintVectorIndex",
+  "DateAndTimeType",
+  "EqOpt",
+  "FormatOpt",
+  "IgnoreLines",
+  "IndexNameAndTypeOpt",
+  "IndexTypeName",
+  "LinesTerminated",
+  "LocalOpt",
+  "MViewRefreshClause",
+  "Match",
+  "NumLiteral",
+  "NumericType",
+  "OnDeleteUpdateOpt",
+  "OptWild",
+  "OptionalBraces",
+  "RolenameComposed",
+  "RolenameWithoutIdent",
+  "ShowProfileArgsOpt",
+  "Starting",
+  "StatsPersistentVal",
+  "StringType",
+  "TableElement",
+  "TableElementList",
+  "WindowFrameBetween"
+ ],
+ "types": {
+  "Start": [
+   "Vec<Stmt>",
+   null,
+   "handport"
+  ],
+  "AlterTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SplitIndexListOpt": [
+   "Vec<SplitIndexOption>",
+   "[]*ast.SplitIndexOption",
+   "assert"
+  ],
+  "SplitIndexList": [
+   "Vec<SplitIndexOption>",
+   "[]*ast.SplitIndexOption",
+   "assert"
+  ],
+  "SplitIndexOption": [
+   "Box<SplitIndexOption>",
+   "*ast.SplitIndexOption",
+   "assert"
+  ],
+  "ResourceGroupOptionList": [
+   "Vec<ResourceGroupOption>",
+   "[]*ast.ResourceGroupOption",
+   "assert"
+  ],
+  "ResourceGroupPriorityOption": [
+   "u64",
+   "uint64",
+   "assert"
+  ],
+  "ResourceGroupRunawayOptionList": [
+   "Vec<ResourceGroupRunawayOption>",
+   "[]*ast.ResourceGroupRunawayOption",
+   "assert"
+  ],
+  "ResourceGroupRunawayWatchOption": [
+   "RunawayWatchType",
+   "ast.RunawayWatchType",
+   "assert"
+  ],
+  "ResourceGroupRunawayActionOption": [
+   "Box<ResourceGroupRunawayActionOption>",
+   "*ast.ResourceGroupRunawayActionOption",
+   "assert"
+  ],
+  "DirectResourceGroupRunawayOption": [
+   "Box<ResourceGroupRunawayOption>",
+   "*ast.ResourceGroupRunawayOption",
+   "assert"
+  ],
+  "WatchDurationOption": [
+   "String",
+   "string",
+   "assert"
+  ],
+  "DirectResourceGroupOption": [
+   "Box<ResourceGroupOption>",
+   "*ast.ResourceGroupOption",
+   "assert"
+  ],
+  "ResourceGroupBackgroundOptionList": [
+   "Vec<ResourceGroupBackgroundOption>",
+   "[]*ast.ResourceGroupBackgroundOption",
+   "assert"
+  ],
+  "DirectResourceGroupBackgroundOption": [
+   "Box<ResourceGroupBackgroundOption>",
+   "*ast.ResourceGroupBackgroundOption",
+   "assert"
+  ],
+  "PlacementOptionList": [
+   "Vec<PlacementOption>",
+   "[]*ast.PlacementOption",
+   "assert"
+  ],
+  "DirectPlacementOption": [
+   "Box<PlacementOption>",
+   "*ast.PlacementOption",
+   "assert"
+  ],
+  "PlacementPolicyOption": [
+   "Box<PlacementOption>",
+   "*ast.PlacementOption",
+   "assert"
+  ],
+  "AttributesOpt": [
+   "Box<AttributesSpec>",
+   "*ast.AttributesSpec",
+   "assert"
+  ],
+  "StatsOptionsOpt": [
+   "Box<StatsOptionsSpec>",
+   "*ast.StatsOptionsSpec",
+   "assert"
+  ],
+  "AlterTableSpecSingleOpt": [
+   "Option<Box<AlterTableSpec>>",
+   "*ast.AlterTableSpec",
+   "assert"
+  ],
+  "LocationLabelList": [
+   "Vec<String>",
+   "[]string",
+   "assert"
+  ],
+  "AlterTableSpec": [
+   "Box<AlterTableSpec>",
+   "*ast.AlterTableSpec",
+   "assert"
+  ],
+  "ReorganizePartitionRuleOpt": [
+   "Box<AlterTableSpec>",
+   "*ast.AlterTableSpec",
+   "assert"
+  ],
+  "AllOrPartitionNameList": [
+   "Vec<CIStr>",
+   "[]ast.CIStr",
+   "assert"
+  ],
+  "WithValidationOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "WithValidation": [
+   "bool",
+   "bool",
+   "own_action"
+  ],
+  "WithClustered": [
+   "PrimaryKeyType",
+   "ast.PrimaryKeyType",
+   "assert"
+  ],
+  "GlobalOrLocalOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "AlgorithmClause": [
+   "AlgorithmType",
+   "ast.AlgorithmType",
+   "assert"
+  ],
+  "LockClause": [
+   "LockType",
+   "ast.LockType",
+   "assert"
+  ],
+  "Writeable": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "KeyOrIndex": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "KeyOrIndexOpt": [
+   "()",
+   null,
+   "untyped"
+  ],
+  "ColumnKeywordOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ColumnPosition": [
+   "Box<ColumnPosition>",
+   "*ast.ColumnPosition",
+   "assert"
+  ],
+  "AlterTableSpecListOpt": [
+   "Vec<AlterTableSpec>",
+   "[]*ast.AlterTableSpec",
+   "assert"
+  ],
+  "AlterTableSpecList": [
+   "Vec<AlterTableSpec>",
+   "[]*ast.AlterTableSpec",
+   "assert"
+  ],
+  "PartitionNameList": [
+   "Vec<CIStr>",
+   "[]ast.CIStr",
+   "assert"
+  ],
+  "ConstraintKeywordOpt": [
+   "Option<String>",
+   "string",
+   "assert"
+  ],
+  "Symbol": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "RenameTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "TableToTableList": [
+   "Vec<TableToTable>",
+   "[]*ast.TableToTable",
+   "assert"
+  ],
+  "TableToTable": [
+   "Box<TableToTable>",
+   "*ast.TableToTable",
+   "assert"
+  ],
+  "RenameUserStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "UserToUserList": [
+   "Vec<UserToUser>",
+   "[]*ast.UserToUser",
+   "assert"
+  ],
+  "UserToUser": [
+   "Box<UserToUser>",
+   "*ast.UserToUser",
+   "assert"
+  ],
+  "RecoverTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "FlashbackToTimestampStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "FlashbackTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "FlashbackToNewName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FlashbackDatabaseStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DistributeTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CancelDistributionJobStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SplitRegionStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SplitOptionBetween": [
+   "Box<SplitOption>",
+   "*ast.SplitOption",
+   "assert"
+  ],
+  "SplitOption": [
+   "Box<SplitOption>",
+   "*ast.SplitOption",
+   "assert"
+  ],
+  "SplitSyntaxOption": [
+   "Box<SplitSyntaxOption>",
+   "*ast.SplitSyntaxOption",
+   "assert"
+  ],
+  "AnalyzeTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AllColumnsOrPredicateColumnsOpt": [
+   "ColumnChoice",
+   "ast.ColumnChoice",
+   "assert"
+  ],
+  "AnalyzeOptionListOpt": [
+   "Vec<AnalyzeOpt>",
+   "[]ast.AnalyzeOpt",
+   "assert"
+  ],
+  "AnalyzeOptionList": [
+   "Vec<AnalyzeOpt>",
+   "[]ast.AnalyzeOpt",
+   "assert"
+  ],
+  "AnalyzeOption": [
+   "AnalyzeOpt",
+   "ast.AnalyzeOpt",
+   "assert"
+  ],
+  "Assignment": [
+   "Box<Assignment>",
+   "*ast.Assignment",
+   "assert"
+  ],
+  "AssignmentList": [
+   "Vec<Assignment>",
+   "[]*ast.Assignment",
+   "assert"
+  ],
+  "BeginTransactionStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "BinlogStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ColumnDef": [
+   "Box<ColumnDef>",
+   "*ast.ColumnDef",
+   "assert"
+  ],
+  "ColumnName": [
+   "Box<ColumnName>",
+   "*ast.ColumnName",
+   "assert"
+  ],
+  "ColumnNameList": [
+   "Vec<ColumnName>",
+   "[]*ast.ColumnName",
+   "assert"
+  ],
+  "ColumnNameListOpt": [
+   "Vec<ColumnName>",
+   "[]*ast.ColumnName",
+   "assert"
+  ],
+  "IdentListWithParenOpt": [
+   "Vec<CIStr>",
+   "[]ast.CIStr",
+   "assert"
+  ],
+  "IdentList": [
+   "Vec<CIStr>",
+   "[]ast.CIStr",
+   "assert"
+  ],
+  "ColumnNameOrUserVarListOpt": [
+   "Vec<ColumnNameOrUserVar>",
+   "[]*ast.ColumnNameOrUserVar",
+   "assert"
+  ],
+  "ColumnNameOrUserVariableList": [
+   "Vec<ColumnNameOrUserVar>",
+   "[]*ast.ColumnNameOrUserVar",
+   "assert"
+  ],
+  "ColumnNameOrUserVariable": [
+   "Box<ColumnNameOrUserVar>",
+   "*ast.ColumnNameOrUserVar",
+   "assert"
+  ],
+  "ColumnNameOrUserVarListOptWithBrackets": [
+   "Vec<ColumnNameOrUserVar>",
+   "[]*ast.ColumnNameOrUserVar",
+   "assert"
+  ],
+  "CommitStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "PrimaryOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "NotSym": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "EnforcedOrNot": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "EnforcedOrNotOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "EnforcedOrNotOrNotNullOpt": [
+   "i64",
+   "int",
+   "assert"
+  ],
+  "ColumnOption": [
+   "Box<ColumnOption>",
+   "*ast.ColumnOption",
+   "assert_majority"
+  ],
+  "AutoRandomOpt": [
+   "AutoRandomOption",
+   "ast.AutoRandomOption",
+   "assert"
+  ],
+  "StorageMedia": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ColumnFormat": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "GeneratedAlways": [
+   "()",
+   null,
+   "untyped"
+  ],
+  "VirtualOrStored": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "ColumnOptionList": [
+   "ColumnOptionList",
+   "ast.ColumnOptionList",
+   "assert"
+  ],
+  "ColumnOptionListOpt": [
+   "ColumnOptionList",
+   "ast.ColumnOptionList",
+   "assert"
+  ],
+  "ConstraintElem": [
+   "Box<Constraint>",
+   "*ast.Constraint",
+   "assert"
+  ],
+  "Match": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "MatchOpt": [
+   "MatchType",
+   "ast.MatchType",
+   "assert"
+  ],
+  "ReferDef": [
+   "Box<ReferenceDef>",
+   "*ast.ReferenceDef",
+   "assert"
+  ],
+  "OnDelete": [
+   "Box<OnDeleteOpt>",
+   "*ast.OnDeleteOpt",
+   "own_action"
+  ],
+  "OnUpdate": [
+   "Box<OnUpdateOpt>",
+   "*ast.OnUpdateOpt",
+   "own_action"
+  ],
+  "OnDeleteUpdateOpt": [
+   "Item",
+   "[2]interface{}",
+   "catch_all(assert)"
+  ],
+  "ReferOpt": [
+   "ReferOptionType",
+   "ast.ReferOptionType",
+   "assert"
+  ],
+  "DefaultValueExpr": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "BuiltinFunction": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "NowSymOptionFractionParentheses": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "NowSymOptionFraction": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "NextValueForSequenceParentheses": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "NextValueForSequence": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "NowSymFunc": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "NowSym": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "CurdateSym": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "SignedLiteral": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "NumLiteral": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "StatsType": [
+   "u8",
+   "uint8",
+   "assert"
+  ],
+  "BindingStatusType": [
+   "BindingStatusType",
+   "ast.BindingStatusType",
+   "assert"
+  ],
+  "CreateStatisticsStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DropStatisticsStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CreateIndexStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "IndexPartSpecificationListOpt": [
+   "Vec<IndexPartSpecification>",
+   "[]*ast.IndexPartSpecification",
+   "assert"
+  ],
+  "IndexPartSpecificationList": [
+   "Vec<IndexPartSpecification>",
+   "[]*ast.IndexPartSpecification",
+   "assert"
+  ],
+  "IndexPartSpecification": [
+   "Box<IndexPartSpecification>",
+   "*ast.IndexPartSpecification",
+   "assert"
+  ],
+  "IndexLockAndAlgorithmOpt": [
+   "Option<Box<IndexLockAndAlgorithm>>",
+   "*ast.IndexLockAndAlgorithm",
+   "assert"
+  ],
+  "IndexKeyTypeOpt": [
+   "IndexKeyType",
+   "ast.IndexKeyType",
+   "assert"
+  ],
+  "AlterDatabaseStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CreateDatabaseStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DBName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "PolicyName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ResourceGroupName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "DatabaseOption": [
+   "Box<DatabaseOption>",
+   "*ast.DatabaseOption",
+   "assert"
+  ],
+  "DatabaseOptionListOpt": [
+   "Vec<DatabaseOption>",
+   "[]*ast.DatabaseOption",
+   "assert"
+  ],
+  "DatabaseOptionList": [
+   "Vec<DatabaseOption>",
+   "[]*ast.DatabaseOption",
+   "assert"
+  ],
+  "CreateTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "OnCommitOpt": [
+   "Option<bool>",
+   "bool",
+   "assert"
+  ],
+  "DefaultKwdOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "PartitionOpt": [
+   "Option<Box<PartitionOptions>>",
+   "*ast.PartitionOptions",
+   "assert"
+  ],
+  "GlobalOrLocal": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "UpdateIndexElem": [
+   "Box<Constraint>",
+   "*ast.Constraint",
+   "assert"
+  ],
+  "UpdateIndexesList": [
+   "Vec<Constraint>",
+   "[]*ast.Constraint",
+   "assert"
+  ],
+  "UpdateIndexesOpt": [
+   "Vec<Constraint>",
+   "[]*ast.Constraint",
+   "assert"
+  ],
+  "SubPartitionMethod": [
+   "Box<PartitionMethod>",
+   "*ast.PartitionMethod",
+   "assert"
+  ],
+  "PartitionKeyAlgorithmOpt": [
+   "Option<Box<PartitionKeyAlgorithm>>",
+   "*ast.PartitionKeyAlgorithm",
+   "assert"
+  ],
+  "PartitionMethod": [
+   "Box<PartitionMethod>",
+   "*ast.PartitionMethod",
+   "assert"
+  ],
+  "PartitionIntervalOpt": [
+   "Option<Box<PartitionInterval>>",
+   "*ast.PartitionInterval",
+   "assert"
+  ],
+  "IntervalExpr": [
+   "PartitionIntervalExpr",
+   "ast.PartitionIntervalExpr",
+   "assert"
+  ],
+  "NullPartOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "MaxValPartOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "FirstAndLastPartOpt": [
+   "PartitionInterval",
+   "ast.PartitionInterval",
+   "assert"
+  ],
+  "LinearOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "SubPartitionOpt": [
+   "Option<Box<PartitionMethod>>",
+   "*ast.PartitionMethod",
+   "assert"
+  ],
+  "SubPartitionNumOpt": [
+   "u64",
+   "uint64",
+   "assert"
+  ],
+  "PartitionNumOpt": [
+   "u64",
+   "uint64",
+   "assert"
+  ],
+  "PartitionDefinitionListOpt": [
+   "Vec<PartitionDefinition>",
+   "[]*ast.PartitionDefinition",
+   "assert"
+  ],
+  "PartitionDefinitionList": [
+   "Vec<PartitionDefinition>",
+   "[]*ast.PartitionDefinition",
+   "assert"
+  ],
+  "PartitionDefinition": [
+   "Box<PartitionDefinition>",
+   "*ast.PartitionDefinition",
+   "assert"
+  ],
+  "SubPartDefinitionListOpt": [
+   "Vec<SubPartitionDefinition>",
+   "[]*ast.SubPartitionDefinition",
+   "assert"
+  ],
+  "SubPartDefinitionList": [
+   "Vec<SubPartitionDefinition>",
+   "[]*ast.SubPartitionDefinition",
+   "assert"
+  ],
+  "SubPartDefinition": [
+   "Box<SubPartitionDefinition>",
+   "*ast.SubPartitionDefinition",
+   "assert"
+  ],
+  "PartDefOptionList": [
+   "Vec<TableOption>",
+   "[]*ast.TableOption",
+   "assert"
+  ],
+  "PartDefOption": [
+   "Box<TableOption>",
+   "*ast.TableOption",
+   "assert"
+  ],
+  "PartDefValuesOpt": [
+   "PartitionDefinitionClause",
+   "ast.PartitionDefinitionClause",
+   "assert"
+  ],
+  "DuplicateOpt": [
+   "OnDuplicateKeyHandlingType",
+   "ast.OnDuplicateKeyHandlingType",
+   "assert"
+  ],
+  "AsOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "CreateTableSelectOpt": [
+   "Box<CreateTableStmt>",
+   "*ast.CreateTableStmt",
+   "assert"
+  ],
+  "CreateViewSelectOpt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "LikeTableWithOrWithoutParen": [
+   "Box<TableName>",
+   "*ast.TableName",
+   "assert"
+  ],
+  "CreateViewStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "OrReplace": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "ViewAlgorithm": [
+   "ViewAlgorithm",
+   "ast.ViewAlgorithm",
+   "assert"
+  ],
+  "ViewDefiner": [
+   "Box<AuthUserIdentity>",
+   "*auth.UserIdentity",
+   "assert"
+  ],
+  "ViewSQLSecurity": [
+   "ViewSecurity",
+   "ast.ViewSecurity",
+   "assert"
+  ],
+  "ViewName": [
+   "Box<TableName>",
+   "*ast.TableName",
+   "assert"
+  ],
+  "ViewFieldList": [
+   "Vec<CIStr>",
+   "[]ast.CIStr",
+   "assert"
+  ],
+  "ColumnList": [
+   "Vec<CIStr>",
+   "[]ast.CIStr",
+   "assert"
+  ],
+  "ViewCheckOption": [
+   "Option<ViewCheckOption>",
+   "ast.ViewCheckOption",
+   "assert"
+  ],
+  "CreateMaterializedViewStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "MViewTableOptionListOpt": [
+   "Box<MviewCreateOptions>",
+   "*mviewCreateOptions",
+   "assert"
+  ],
+  "MViewTableOptionList": [
+   "Box<MviewCreateOptions>",
+   "*mviewCreateOptions",
+   "assert"
+  ],
+  "MViewTableOption": [
+   "Box<MviewCreateOptions>",
+   "*mviewCreateOptions",
+   "assert"
+  ],
+  "MViewRefreshClauseOpt": [
+   "Box<MViewRefreshClause>",
+   "*ast.MViewRefreshClause",
+   "assert"
+  ],
+  "MViewAttributesOpt": [
+   "String",
+   "string",
+   "assert"
+  ],
+  "MViewRefreshClause": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "MViewStartWithOrNextOpt": [
+   "Option<Box<MViewRefreshClause>>",
+   "*ast.MViewRefreshClause",
+   "assert"
+  ],
+  "MViewStartWithOrNext": [
+   "Box<MViewRefreshClause>",
+   "*ast.MViewRefreshClause",
+   "own_action"
+  ],
+  "CreateMaterializedViewLogStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "MLogCreateOptionListOpt": [
+   "Box<MlogCreateOptions>",
+   "*mlogCreateOptions",
+   "assert"
+  ],
+  "MLogCreateOptionList": [
+   "Box<MlogCreateOptions>",
+   "*mlogCreateOptions",
+   "assert"
+  ],
+  "MLogCreateOption": [
+   "Box<MlogCreateOptions>",
+   "*mlogCreateOptions",
+   "assert"
+  ],
+  "MLogPurgeClauseOpt": [
+   "Box<MLogPurgeClause>",
+   "*ast.MLogPurgeClause",
+   "assert"
+  ],
+  "MLogPurgeClause": [
+   "Box<MLogPurgeClause>",
+   "*ast.MLogPurgeClause",
+   "own_action"
+  ],
+  "MLogStartWithOpt": [
+   "Option<Expr>",
+   "ast.ExprNode",
+   "assert"
+  ],
+  "MLogAccumulationAlertClauseOpt": [
+   "Box<MLogAccumulationAlertClause>",
+   "*ast.MLogAccumulationAlertClause",
+   "assert"
+  ],
+  "MLogAccumulationAlertClause": [
+   "Box<MLogAccumulationAlertClause>",
+   "*ast.MLogAccumulationAlertClause",
+   "own_action"
+  ],
+  "AlterMaterializedViewStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterMaterializedViewActionList": [
+   "Vec<AlterMaterializedViewAction>",
+   "[]*ast.AlterMaterializedViewAction",
+   "assert"
+  ],
+  "AlterMaterializedViewAction": [
+   "Box<AlterMaterializedViewAction>",
+   "*ast.AlterMaterializedViewAction",
+   "assert"
+  ],
+  "AlterMaterializedViewLogStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterMaterializedViewLogActionList": [
+   "Vec<AlterMaterializedViewLogAction>",
+   "[]*ast.AlterMaterializedViewLogAction",
+   "assert"
+  ],
+  "AlterMaterializedViewLogAction": [
+   "Box<AlterMaterializedViewLogAction>",
+   "*ast.AlterMaterializedViewLogAction",
+   "assert"
+  ],
+  "AlterMLogPurgeClause": [
+   "Box<MLogPurgeClause>",
+   "*ast.MLogPurgeClause",
+   "assert"
+  ],
+  "DropMaterializedViewStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DropMaterializedViewLogStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "PurgeMaterializedViewLogStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CancelMaterializedViewJobStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "RefreshMaterializedViewStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "RefreshMaterializedViewObserveOpt": [
+   "RefreshMaterializedViewObserveType",
+   "ast.RefreshMaterializedViewObserveType",
+   "assert"
+  ],
+  "RefreshWithAsyncModeOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "RefreshCompleteMode": [
+   "RefreshMaterializedViewCompleteType",
+   "ast.RefreshMaterializedViewCompleteType",
+   "assert"
+  ],
+  "DoStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DeleteWithoutUsingStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DeleteWithUsingStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DeleteFromStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DatabaseSym": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "DropDatabaseStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DropIndexStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DropTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "OptTemporary": [
+   "TemporaryKeyword",
+   "ast.TemporaryKeyword",
+   "assert"
+  ],
+  "DropViewStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DropUserStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DropRoleStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DropStatsStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "RestrictOrCascadeOpt": [
+   "()",
+   null,
+   "untyped"
+  ],
+  "TableOrTables": [
+   "()",
+   null,
+   "untyped"
+  ],
+  "EqOpt": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "EmptyStmt": [
+   "Option<Stmt>",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "TraceStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ExplainSym": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ExplainStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ExplainFormatType": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "SavepointStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ReleaseSavepointStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "BRIEStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "BRIETables": [
+   "Box<BRIEStmt>",
+   "*ast.BRIEStmt",
+   "assert"
+  ],
+  "DBNameList": [
+   "Vec<String>",
+   "[]string",
+   "assert"
+  ],
+  "BRIEOptions": [
+   "Vec<BRIEOption>",
+   "[]*ast.BRIEOption",
+   "assert"
+  ],
+  "BRIEIntegerOptionName": [
+   "BRIEOptionType",
+   "ast.BRIEOptionType",
+   "assert"
+  ],
+  "BRIEBooleanOptionName": [
+   "BRIEOptionType",
+   "ast.BRIEOptionType",
+   "assert"
+  ],
+  "BRIEStringOptionName": [
+   "BRIEOptionType",
+   "ast.BRIEOptionType",
+   "assert"
+  ],
+  "BRIEKeywordOptionName": [
+   "BRIEOptionType",
+   "ast.BRIEOptionType",
+   "assert"
+  ],
+  "BRIEOption": [
+   "Box<BRIEOption>",
+   "*ast.BRIEOption",
+   "assert"
+  ],
+  "LengthNum": [
+   "u64",
+   "uint64",
+   "assert"
+  ],
+  "Int64Num": [
+   "i64",
+   "int64",
+   "assert"
+  ],
+  "NUM": [
+   "i64",
+   "int64",
+   "assert"
+  ],
+  "Boolean": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "OptionLevel": [
+   "BRIEOptionLevel",
+   "ast.BRIEOptionLevel",
+   "assert"
+  ],
+  "CancelImportStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "Expression": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "DefaultOrExpression": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "MaxValueOrExpression": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "FulltextSearchModifierOpt": [
+   "i64",
+   "int",
+   "assert"
+  ],
+  "logOr": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "logAnd": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ExpressionList": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "assert"
+  ],
+  "MaxValueOrExpressionList": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "assert"
+  ],
+  "DefaultOrExpressionList": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "assert"
+  ],
+  "ExpressionListOpt": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "assert"
+  ],
+  "FuncDatetimePrecListOpt": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "assert"
+  ],
+  "FuncDatetimePrecList": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "own_action"
+  ],
+  "BoolPri": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "CompareOp": [
+   "Op",
+   "opcode.Op",
+   "assert"
+  ],
+  "BetweenOrNotOp": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "IsOrNotOp": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "InOrNotOp": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "LikeOrNotOp": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "IlikeOrNotOp": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "RegexpOrNotOp": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "AnyOrAll": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "PredicateExpr": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "RegexpSym": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "LikeOrIlikeEscapeOpt": [
+   "Box<LikeEscapeSpec>",
+   "*likeEscapeSpec",
+   "assert"
+  ],
+  "Field": [
+   "Box<SelectField>",
+   "*ast.SelectField",
+   "assert"
+  ],
+  "FieldAsNameOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FieldAsName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FieldList": [
+   "Vec<SelectField>",
+   "[]*ast.SelectField",
+   "assert"
+  ],
+  "WithRollupClause": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "GroupByClause": [
+   "Box<GroupByClause>",
+   "*ast.GroupByClause",
+   "own_action"
+  ],
+  "HavingClause": [
+   "Option<Box<HavingClause>>",
+   "*ast.HavingClause",
+   "assert"
+  ],
+  "AsOfClauseOpt": [
+   "Option<Box<AsOfClause>>",
+   "*ast.AsOfClause",
+   "assert"
+  ],
+  "AsOfClause": [
+   "Box<AsOfClause>",
+   "*ast.AsOfClause",
+   "assert"
+  ],
+  "IfExists": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "IfNotExists": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "IgnoreOptional": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "IndexName": [
+   "Box<NullString>",
+   "*ast.NullString",
+   "assert"
+  ],
+  "IndexOptionList": [
+   "Option<Box<IndexOption>>",
+   "*ast.IndexOption",
+   "assert"
+  ],
+  "IndexOption": [
+   "Box<IndexOption>",
+   "*ast.IndexOption",
+   "assert"
+  ],
+  "IndexNameAndTypeOpt": [
+   "Item",
+   "[]interface{}",
+   "catch_all(assert)"
+  ],
+  "IndexTypeOpt": [
+   "Option<IndexType>",
+   "ast.IndexType",
+   "assert"
+  ],
+  "IndexType": [
+   "IndexType",
+   "ast.IndexType",
+   "assert"
+  ],
+  "IndexTypeName": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "IndexInvisible": [
+   "IndexVisibility",
+   "ast.IndexVisibility",
+   "assert"
+  ],
+  "Identifier": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "UnReservedKeyword": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "TiDBKeyword": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "NotKeywordToken": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "CallStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureCall": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "InsertIntoStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "IntoOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "InsertValues": [
+   "Box<InsertStmt>",
+   "*ast.InsertStmt",
+   "assert"
+  ],
+  "ValueSym": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ValuesList": [
+   "Vec<Vec<Expr>>",
+   "[][]ast.ExprNode",
+   "assert"
+  ],
+  "RowValue": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "assert"
+  ],
+  "ValuesOpt": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "own_action"
+  ],
+  "Values": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "assert"
+  ],
+  "ExprOrDefault": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "ColumnSetValueList": [
+   "Box<InsertStmt>",
+   "*ast.InsertStmt",
+   "assert"
+  ],
+  "InsertRowAliasOpt": [
+   "Option<Box<InsertRowAlias>>",
+   "*insertRowAlias",
+   "assert"
+  ],
+  "OnDuplicateKeyUpdate": [
+   "Vec<Assignment>",
+   "[]*ast.Assignment",
+   "assert"
+  ],
+  "ReturningClause": [
+   "Vec<SelectField>",
+   "[]*ast.SelectField",
+   "assert"
+  ],
+  "ReplaceIntoStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "Literal": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "StringLiteral": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "AlterOrderList": [
+   "Vec<AlterOrderItem>",
+   "[]*ast.AlterOrderItem",
+   "assert"
+  ],
+  "AlterOrderItem": [
+   "Box<AlterOrderItem>",
+   "*ast.AlterOrderItem",
+   "assert"
+  ],
+  "OrderBy": [
+   "Box<OrderByClause>",
+   "*ast.OrderByClause",
+   "assert"
+  ],
+  "ByList": [
+   "Vec<ByItem>",
+   "[]*ast.ByItem",
+   "assert"
+  ],
+  "ByItem": [
+   "Box<ByItem>",
+   "*ast.ByItem",
+   "assert"
+  ],
+  "Order": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "OptOrder": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "OrderByOptional": [
+   "Option<Box<OrderByClause>>",
+   "*ast.OrderByClause",
+   "assert"
+  ],
+  "BitExpr": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "SimpleIdent": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "SimpleExpr": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "ArrayKwdOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "DistinctKwd": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "DistinctOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "DefaultFalseDistinctOpt": [
+   "bool",
+   "bool",
+   "own_action"
+  ],
+  "DefaultTrueDistinctOpt": [
+   "bool",
+   "bool",
+   "own_action"
+  ],
+  "BuggyDefaultFalseDistinctOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "FunctionNameConflict": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "OptionalBraces": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "FunctionNameOptionalBraces": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FunctionNameDatetimePrecision": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FunctionCallKeyword": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "FunctionCallNonKeyword": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "GetFormatSelector": [
+   "GetFormatSelectorType",
+   "ast.GetFormatSelectorType",
+   "assert"
+  ],
+  "FunctionNameDateArith": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FunctionNameDateArithMultiForms": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "TrimDirection": [
+   "TrimDirectionType",
+   "ast.TrimDirectionType",
+   "assert"
+  ],
+  "FunctionNameSequence": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "SumExpr": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "OptGConcatSeparator": [
+   "Expr",
+   "ast.ExprNode",
+   "assert"
+  ],
+  "FunctionCallGeneric": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "FuncDatetimePrec": [
+   "Option<Expr>",
+   "ast.ExprNode",
+   "assert"
+  ],
+  "TimeUnit": [
+   "TimeUnitType",
+   "ast.TimeUnitType",
+   "assert"
+  ],
+  "TimestampUnit": [
+   "TimeUnitType",
+   "ast.TimeUnitType",
+   "assert"
+  ],
+  "ExpressionOpt": [
+   "Option<Expr>",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "WhenClauseList": [
+   "Vec<WhenClause>",
+   "[]*ast.WhenClause",
+   "assert"
+  ],
+  "WhenClause": [
+   "Box<WhenClause>",
+   "*ast.WhenClause",
+   "assert"
+  ],
+  "ElseOpt": [
+   "Option<Expr>",
+   "ast.ExprNode",
+   "assert"
+  ],
+  "CastType": [
+   "Box<TypesFieldType>",
+   "*types.FieldType",
+   "assert"
+  ],
+  "Priority": [
+   "u8",
+   "mysql.PriorityEnum",
+   "handport"
+  ],
+  "PriorityOpt": [
+   "u8",
+   "mysql.PriorityEnum",
+   "handport"
+  ],
+  "TableName": [
+   "Box<TableName>",
+   "*ast.TableName",
+   "assert"
+  ],
+  "TableNameList": [
+   "Vec<TableName>",
+   "[]*ast.TableName",
+   "assert"
+  ],
+  "TableNameOptWild": [
+   "Box<TableName>",
+   "*ast.TableName",
+   "assert"
+  ],
+  "TableAliasRefList": [
+   "Vec<TableName>",
+   "[]*ast.TableName",
+   "assert"
+  ],
+  "OptWild": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "QuickOptional": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "PreparedStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "PrepareSQL": [
+   "Expr",
+   "ast.ExprNode",
+   "passthrough"
+  ],
+  "ExecuteStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "UserVariableList": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "assert"
+  ],
+  "DeallocateStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DeallocateSym": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "RollbackStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CompletionTypeWithinTransaction": [
+   "CompletionType",
+   "ast.CompletionType",
+   "assert"
+  ],
+  "ShutdownStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "RestartStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "HelpStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SelectStmtBasic": [
+   "Box<SelectStmt>",
+   "*ast.SelectStmt",
+   "assert"
+  ],
+  "SelectStmtFromDualTable": [
+   "Box<SelectStmt>",
+   "*ast.SelectStmt",
+   "assert"
+  ],
+  "SelectStmtFromTable": [
+   "Box<SelectStmt>",
+   "*ast.SelectStmt",
+   "assert"
+  ],
+  "TableSampleOpt": [
+   "Option<Box<TableSample>>",
+   "*ast.TableSample",
+   "assert"
+  ],
+  "TableSampleMethodOpt": [
+   "SampleMethodType",
+   "ast.SampleMethodType",
+   "assert"
+  ],
+  "TableSampleUnitOpt": [
+   "SampleClauseUnitType",
+   "ast.SampleClauseUnitType",
+   "assert"
+  ],
+  "RepeatableOpt": [
+   "Option<Expr>",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "SelectStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SelectStmtWithClause": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "WithClause": [
+   "Box<WithClause>",
+   "*ast.WithClause",
+   "assert"
+  ],
+  "WithList": [
+   "Box<WithClause>",
+   "*ast.WithClause",
+   "assert"
+  ],
+  "CommonTableExpr": [
+   "Box<CommonTableExpression>",
+   "*ast.CommonTableExpression",
+   "assert"
+  ],
+  "FromDual": [
+   "()",
+   null,
+   "untyped"
+  ],
+  "WindowClauseOptional": [
+   "Vec<WindowSpec>",
+   "[]ast.WindowSpec",
+   "assert"
+  ],
+  "WindowDefinitionList": [
+   "Vec<WindowSpec>",
+   "[]ast.WindowSpec",
+   "assert"
+  ],
+  "WindowDefinition": [
+   "WindowSpec",
+   "ast.WindowSpec",
+   "assert"
+  ],
+  "WindowName": [
+   "CIStr",
+   "ast.CIStr",
+   "assert"
+  ],
+  "WindowSpec": [
+   "WindowSpec",
+   "ast.WindowSpec",
+   "assert"
+  ],
+  "WindowSpecDetails": [
+   "WindowSpec",
+   "ast.WindowSpec",
+   "assert"
+  ],
+  "OptExistingWindowName": [
+   "CIStr",
+   "ast.CIStr",
+   "assert"
+  ],
+  "OptPartitionClause": [
+   "Option<Box<PartitionByClause>>",
+   "*ast.PartitionByClause",
+   "assert"
+  ],
+  "OptWindowOrderByClause": [
+   "Option<Box<OrderByClause>>",
+   "*ast.OrderByClause",
+   "assert"
+  ],
+  "OptWindowFrameClause": [
+   "Option<Box<FrameClause>>",
+   "*ast.FrameClause",
+   "assert"
+  ],
+  "WindowFrameUnits": [
+   "FrameType",
+   "ast.FrameType",
+   "assert"
+  ],
+  "WindowFrameExtent": [
+   "FrameExtent",
+   "ast.FrameExtent",
+   "assert"
+  ],
+  "WindowFrameStart": [
+   "FrameBound",
+   "ast.FrameBound",
+   "assert"
+  ],
+  "WindowFrameBetween": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "WindowFrameBound": [
+   "FrameBound",
+   "ast.FrameBound",
+   "assert"
+  ],
+  "OptWindowingClause": [
+   "Option<Box<WindowSpec>>",
+   "*ast.WindowSpec",
+   "assert"
+  ],
+  "WindowingClause": [
+   "WindowSpec",
+   "ast.WindowSpec",
+   "assert"
+  ],
+  "WindowNameOrSpec": [
+   "WindowSpec",
+   "ast.WindowSpec",
+   "assert"
+  ],
+  "WindowFuncCall": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "OptLeadLagInfo": [
+   "Vec<Expr>",
+   "[]ast.ExprNode",
+   "assert"
+  ],
+  "OptLLDefault": [
+   "Option<Expr>",
+   "ast.ExprNode",
+   "assert"
+  ],
+  "OptNullTreatment": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "OptFromFirstLast": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "TableRefsClause": [
+   "Box<TableRefsClause>",
+   "*ast.TableRefsClause",
+   "assert"
+  ],
+  "TableRefs": [
+   "Box<Join>",
+   "*ast.Join",
+   "assert_majority"
+  ],
+  "EscapedTableRef": [
+   "ResultSetNode",
+   "ast.ResultSetNode",
+   "assert_majority"
+  ],
+  "TableRef": [
+   "ResultSetNode",
+   "ast.ResultSetNode",
+   "assert_majority"
+  ],
+  "TableFactor": [
+   "ResultSetNode",
+   "*ast.TableSource",
+   "handport"
+  ],
+  "PartitionNameListOpt": [
+   "Vec<CIStr>",
+   "[]ast.CIStr",
+   "assert"
+  ],
+  "TableAsNameOpt": [
+   "CIStr",
+   "ast.CIStr",
+   "assert"
+  ],
+  "TableAsNameOptDelete": [
+   "CIStr",
+   "ast.CIStr",
+   "assert"
+  ],
+  "TableAsName": [
+   "CIStr",
+   "ast.CIStr",
+   "assert"
+  ],
+  "IndexHintType": [
+   "IndexHintType",
+   "ast.IndexHintType",
+   "assert"
+  ],
+  "IndexHintScope": [
+   "IndexHintScope",
+   "ast.IndexHintScope",
+   "assert"
+  ],
+  "IndexHint": [
+   "Box<IndexHint>",
+   "*ast.IndexHint",
+   "assert"
+  ],
+  "IndexNameList": [
+   "Vec<CIStr>",
+   "[]ast.CIStr",
+   "assert"
+  ],
+  "IndexHintList": [
+   "Vec<IndexHint>",
+   "[]*ast.IndexHint",
+   "assert"
+  ],
+  "IndexHintListOpt": [
+   "Vec<IndexHint>",
+   "[]*ast.IndexHint",
+   "assert"
+  ],
+  "JoinTable": [
+   "Box<Join>",
+   "*ast.Join",
+   "own_action"
+  ],
+  "JoinType": [
+   "JoinType",
+   "ast.JoinType",
+   "assert"
+  ],
+  "OuterOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "CrossOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "LimitClause": [
+   "Option<Box<Limit>>",
+   "*ast.Limit",
+   "assert"
+  ],
+  "LimitOption": [
+   "Expr",
+   "ast.ExprNode",
+   "assert_majority"
+  ],
+  "RowOrRows": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FirstOrNext": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FetchFirstOpt": [
+   "Expr",
+   "ast.ExprNode",
+   "assert"
+  ],
+  "SelectStmtLimit": [
+   "Box<Limit>",
+   "*ast.Limit",
+   "assert"
+  ],
+  "SelectStmtLimitOpt": [
+   "Option<Box<Limit>>",
+   "*ast.Limit",
+   "assert"
+  ],
+  "SelectStmtOpt": [
+   "Box<SelectStmtOpts>",
+   "*ast.SelectStmtOpts",
+   "assert"
+  ],
+  "SelectStmtOpts": [
+   "Box<SelectStmtOpts>",
+   "*ast.SelectStmtOpts",
+   "assert"
+  ],
+  "SelectStmtOptsList": [
+   "Box<SelectStmtOpts>",
+   "*ast.SelectStmtOpts",
+   "assert"
+  ],
+  "TableOptimizerHints": [
+   "Vec<TableOptimizerHint>",
+   "[]*ast.TableOptimizerHint",
+   "assert"
+  ],
+  "TableOptimizerHintsOpt": [
+   "Vec<TableOptimizerHint>",
+   "[]*ast.TableOptimizerHint",
+   "assert"
+  ],
+  "SelectStmtSQLCache": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "SelectStmtFieldList": [
+   "Box<FieldList>",
+   "*ast.FieldList",
+   "assert"
+  ],
+  "SelectStmtGroup": [
+   "Option<Box<GroupByClause>>",
+   "*ast.GroupByClause",
+   "assert"
+  ],
+  "SelectStmtIntoOption": [
+   "Option<Box<SelectIntoOption>>",
+   "*ast.SelectIntoOption",
+   "assert"
+  ],
+  "SubSelect": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "SelectLockOpt": [
+   "Option<Box<SelectLockInfo>>",
+   "*ast.SelectLockInfo",
+   "assert"
+  ],
+  "OfTablesOpt": [
+   "Vec<TableName>",
+   "[]*ast.TableName",
+   "assert"
+  ],
+  "SetOprStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SetOprStmtWoutLimitOrderBy": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SetOprStmtWithLimitOrderBy": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SetOprClauseList": [
+   "Vec<AstNode>",
+   "[]ast.Node",
+   "assert"
+  ],
+  "SetOprClause": [
+   "Vec<AstNode>",
+   "[]ast.Node",
+   "assert"
+  ],
+  "SetOpr": [
+   "Box<SetOprType>",
+   "*ast.SetOprType",
+   "assert"
+  ],
+  "SetOprOpt": [
+   "bool",
+   "bool",
+   "passthrough"
+  ],
+  "SetStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SetRoleStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SetDefaultRoleStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SetDefaultRoleOpt": [
+   "Box<SetRoleStmt>",
+   "*ast.SetRoleStmt",
+   "assert"
+  ],
+  "SetRoleOpt": [
+   "Box<SetRoleStmt>",
+   "*ast.SetRoleStmt",
+   "assert"
+  ],
+  "TransactionChars": [
+   "Vec<VariableAssignment>",
+   "[]*ast.VariableAssignment",
+   "assert"
+  ],
+  "TransactionChar": [
+   "Vec<VariableAssignment>",
+   "[]*ast.VariableAssignment",
+   "assert"
+  ],
+  "IsolationLevel": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "SetExpr": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "EqOrAssignmentEq": [
+   "()",
+   null,
+   "untyped"
+  ],
+  "VariableName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ConfigItemName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "VariableAssignment": [
+   "Box<VariableAssignment>",
+   "*ast.VariableAssignment",
+   "assert"
+  ],
+  "CharsetNameOrDefault": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "CharsetName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "CollationName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "VariableAssignmentList": [
+   "Vec<VariableAssignment>",
+   "[]*ast.VariableAssignment",
+   "assert"
+  ],
+  "Variable": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "SystemVariable": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "UserVariable": [
+   "Expr",
+   "ast.ExprNode",
+   "tag"
+  ],
+  "Username": [
+   "Box<AuthUserIdentity>",
+   "*auth.UserIdentity",
+   "assert"
+  ],
+  "UsernameList": [
+   "Vec<AuthUserIdentity>",
+   "[]*auth.UserIdentity",
+   "assert"
+  ],
+  "PasswordOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "AuthString": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "RoleNameString": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "RolenameComposed": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "RolenameWithoutIdent": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "Rolename": [
+   "Box<AuthRoleIdentity>",
+   "*auth.RoleIdentity",
+   "assert"
+  ],
+  "RolenameList": [
+   "Vec<AuthRoleIdentity>",
+   "[]*auth.RoleIdentity",
+   "assert"
+  ],
+  "AdminStmtLimitOpt": [
+   "Box<LimitSimple>",
+   "*ast.LimitSimple",
+   "assert"
+  ],
+  "BDRRole": [
+   "BDRRole",
+   "ast.BDRRole",
+   "assert"
+  ],
+  "AdminStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterJobOptionList": [
+   "Vec<AlterJobOption>",
+   "[]*ast.AlterJobOption",
+   "assert"
+  ],
+  "AlterJobOption": [
+   "Box<AlterJobOption>",
+   "*ast.AlterJobOption",
+   "assert"
+  ],
+  "AdminShowSlow": [
+   "Box<ShowSlow>",
+   "*ast.ShowSlow",
+   "assert"
+  ],
+  "HandleRangeList": [
+   "Vec<HandleRange>",
+   "[]ast.HandleRange",
+   "assert"
+  ],
+  "HandleRange": [
+   "HandleRange",
+   "ast.HandleRange",
+   "assert"
+  ],
+  "NumList": [
+   "Vec<i64>",
+   "[]int64",
+   "assert"
+  ],
+  "ShowStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ShowPlacementTarget": [
+   "Box<ShowStmt>",
+   "*ast.ShowStmt",
+   "assert"
+  ],
+  "ShowProfileTypesOpt": [
+   "Vec<i64>",
+   "[]int",
+   "assert"
+  ],
+  "ShowProfileTypes": [
+   "Vec<i64>",
+   "[]int",
+   "assert"
+  ],
+  "ShowProfileType": [
+   "i64",
+   "int",
+   "assert"
+  ],
+  "ShowProfileArgsOpt": [
+   "Item",
+   "*int64",
+   "catch_all(assert)"
+  ],
+  "UsingRoles": [
+   "Vec<AuthRoleIdentity>",
+   "[]*auth.RoleIdentity",
+   "assert"
+  ],
+  "ShowIndexKwd": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FromOrIn": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ShowTargetFilterable": [
+   "Box<ShowStmt>",
+   "*ast.ShowStmt",
+   "assert"
+  ],
+  "ShowLikeOrWhereOpt": [
+   "Option<Box<PatternLikeOrIlikeExpr>>",
+   "*ast.PatternLikeOrIlikeExpr",
+   "assert_majority"
+  ],
+  "ShowImportJobTarget": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "ShowImportJobsTarget": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "GlobalScope": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "StatementScope": [
+   "StatementScope",
+   "ast.StatementScope",
+   "assert"
+  ],
+  "OptFull": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "ShowDatabaseNameOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ShowTableAliasOpt": [
+   "Box<TableName>",
+   "*ast.TableName",
+   "assert"
+  ],
+  "Replica": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FlushStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "PluginNameList": [
+   "Vec<String>",
+   "[]string",
+   "assert"
+  ],
+  "FlushOption": [
+   "Box<FlushStmt>",
+   "*ast.FlushStmt",
+   "assert"
+  ],
+  "LogTypeOpt": [
+   "LogType",
+   "ast.LogType",
+   "assert"
+  ],
+  "ClusterOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "NoWriteToBinLogAliasOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "TableNameListOpt": [
+   "Vec<TableName>",
+   "[]*ast.TableName",
+   "assert"
+  ],
+  "WithReadLockOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "Statement": [
+   "Option<Stmt>",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "TraceableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ExplainableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "StatementList": [
+   "Vec<Stmt>",
+   "?",
+   "handport"
+  ],
+  "Constraint": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "ConstraintVectorIndex": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "ConstraintColumnarIndex": [
+   "Box<Constraint>",
+   "*ast.Constraint",
+   "assert"
+  ],
+  "ConstraintWithColumnarIndex": [
+   "Box<Constraint>",
+   "*ast.Constraint",
+   "assert"
+  ],
+  "CheckConstraintKeyword": [
+   "()",
+   null,
+   "untyped"
+  ],
+  "TableElement": [
+   "Item",
+   "interface{}",
+   "catch_all(assert)"
+  ],
+  "TableElementList": [
+   "Item",
+   "[]interface{}",
+   "catch_all(assert)"
+  ],
+  "TableElementListOpt": [
+   "Box<CreateTableStmt>",
+   "*ast.CreateTableStmt",
+   "assert"
+  ],
+  "TableOption": [
+   "Box<TableOption>",
+   "*ast.TableOption",
+   "assert"
+  ],
+  "ForceOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "StatsPersistentVal": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "CreateTableOptionListOpt": [
+   "Vec<TableOption>",
+   "[]*ast.TableOption",
+   "assert"
+  ],
+  "CreateTableOptionList": [
+   "Vec<TableOption>",
+   "[]*ast.TableOption",
+   "assert"
+  ],
+  "CreateTableOption": [
+   "Box<TableOption>",
+   "*ast.TableOption",
+   "assert"
+  ],
+  "TableOptionList": [
+   "Vec<TableOption>",
+   "[]*ast.TableOption",
+   "assert"
+  ],
+  "CreateSequenceTableOptionListOpt": [
+   "Vec<TableOption>",
+   "[]*ast.TableOption",
+   "assert"
+  ],
+  "OptTable": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "TruncateTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "RowFormat": [
+   "u64",
+   "uint64",
+   "assert"
+  ],
+  "Type": [
+   "Box<TypesFieldType>",
+   "*types.FieldType",
+   "assert"
+  ],
+  "NumericType": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "IntegerType": [
+   "u8",
+   "byte",
+   "assert"
+  ],
+  "BooleanType": [
+   "u8",
+   "byte",
+   "assert"
+  ],
+  "OptInteger": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FixedPointType": [
+   "u8",
+   "byte",
+   "assert"
+  ],
+  "FloatingPointType": [
+   "u8",
+   "byte",
+   "assert"
+  ],
+  "BitValueType": [
+   "u8",
+   "byte",
+   "assert"
+  ],
+  "StringType": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "Char": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "NChar": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "Varchar": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "NVarchar": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "Year": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "BlobType": [
+   "Box<TypesFieldType>",
+   "*types.FieldType",
+   "assert"
+  ],
+  "TextType": [
+   "Box<TypesFieldType>",
+   "*types.FieldType",
+   "assert"
+  ],
+  "OptCharsetWithOptBinary": [
+   "Box<OptBinary>",
+   "*ast.OptBinary",
+   "assert"
+  ],
+  "DateAndTimeType": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "FieldLen": [
+   "i64",
+   "int",
+   "assert"
+  ],
+  "OptFieldLen": [
+   "i64",
+   "int",
+   "assert"
+  ],
+  "FieldOpt": [
+   "Box<TypeOpt>",
+   "*ast.TypeOpt",
+   "assert"
+  ],
+  "FieldOpts": [
+   "Vec<TypeOpt>",
+   "[]*ast.TypeOpt",
+   "assert"
+  ],
+  "FloatOpt": [
+   "Box<FloatOpt>",
+   "*ast.FloatOpt",
+   "assert"
+  ],
+  "Precision": [
+   "Box<FloatOpt>",
+   "*ast.FloatOpt",
+   "own_action"
+  ],
+  "OptBinMod": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "OptVectorElementType": [
+   "Box<VectorElementType>",
+   "*ast.VectorElementType",
+   "assert"
+  ],
+  "OptBinary": [
+   "Box<OptBinary>",
+   "*ast.OptBinary",
+   "assert"
+  ],
+  "OptCharset": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "CharsetKw": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "OptCollate": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "StringList": [
+   "Vec<String>",
+   "[]string",
+   "assert"
+  ],
+  "TextString": [
+   "Box<TextString>",
+   "*ast.TextString",
+   "assert"
+  ],
+  "TextStringList": [
+   "Vec<TextString>",
+   "[]*ast.TextString",
+   "assert"
+  ],
+  "StringName": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "StringNameOrBRIEOptionKeyword": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "UpdateStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "UpdateStmtNoWith": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "UseStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "WhereClause": [
+   "Expr",
+   "ast.ExprNode",
+   "passthrough"
+  ],
+  "WhereClauseOptional": [
+   "Option<Expr>",
+   "ast.ExprNode",
+   "assert"
+  ],
+  "CreateUserStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CreateRoleStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterUserStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterInstanceStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterRangeStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "InstanceOption": [
+   "Box<AlterInstanceStmt>",
+   "*ast.AlterInstanceStmt",
+   "assert"
+  ],
+  "UserSpec": [
+   "Box<UserSpec>",
+   "*ast.UserSpec",
+   "assert"
+  ],
+  "UserSpecList": [
+   "Vec<UserSpec>",
+   "[]*ast.UserSpec",
+   "assert"
+  ],
+  "AlterUserSpec": [
+   "Box<UserSpec>",
+   "*ast.UserSpec",
+   "assert"
+  ],
+  "AlterUserSpecList": [
+   "Vec<UserSpec>",
+   "[]*ast.UserSpec",
+   "assert"
+  ],
+  "AuthOptionWithPassword": [
+   "Box<AuthOption>",
+   "*ast.AuthOption",
+   "assert"
+  ],
+  "ConnectionOptions": [
+   "Vec<ResourceOption>",
+   "[]*ast.ResourceOption",
+   "assert"
+  ],
+  "ConnectionOptionList": [
+   "Vec<ResourceOption>",
+   "[]*ast.ResourceOption",
+   "assert"
+  ],
+  "ConnectionOption": [
+   "Box<ResourceOption>",
+   "*ast.ResourceOption",
+   "assert"
+  ],
+  "RequireClauseOpt": [
+   "Vec<AuthTokenOrTLSOption>",
+   "[]*ast.AuthTokenOrTLSOption",
+   "assert"
+  ],
+  "RequireClause": [
+   "Vec<AuthTokenOrTLSOption>",
+   "[]*ast.AuthTokenOrTLSOption",
+   "own_action"
+  ],
+  "RequireList": [
+   "Vec<AuthTokenOrTLSOption>",
+   "[]*ast.AuthTokenOrTLSOption",
+   "assert"
+  ],
+  "RequireListElement": [
+   "Box<AuthTokenOrTLSOption>",
+   "*ast.AuthTokenOrTLSOption",
+   "assert"
+  ],
+  "CommentOrAttributeOption": [
+   "Option<Box<CommentOrAttributeOption>>",
+   "*ast.CommentOrAttributeOption",
+   "assert"
+  ],
+  "ResourceGroupNameOption": [
+   "Option<Box<ResourceGroupNameOption>>",
+   "*ast.ResourceGroupNameOption",
+   "assert"
+  ],
+  "AlterPasswordOrLockOptions": [
+   "Vec<PasswordOrLockOption>",
+   "[]*ast.PasswordOrLockOption",
+   "assert"
+  ],
+  "AlterPasswordOrLockOptionList": [
+   "Vec<PasswordOrLockOption>",
+   "[]*ast.PasswordOrLockOption",
+   "assert"
+  ],
+  "AlterPasswordOrLockOption": [
+   "Box<PasswordOrLockOption>",
+   "*ast.PasswordOrLockOption",
+   "assert"
+  ],
+  "PasswordOrLockOptions": [
+   "Vec<PasswordOrLockOption>",
+   "[]*ast.PasswordOrLockOption",
+   "assert"
+  ],
+  "PasswordOrLockOptionList": [
+   "Vec<PasswordOrLockOption>",
+   "[]*ast.PasswordOrLockOption",
+   "assert"
+  ],
+  "PasswordOrLockOption": [
+   "Box<PasswordOrLockOption>",
+   "*ast.PasswordOrLockOption",
+   "assert"
+  ],
+  "AuthOption": [
+   "Option<Box<AuthOption>>",
+   "*ast.AuthOption",
+   "assert"
+  ],
+  "AuthPlugin": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "HashString": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "RoleSpec": [
+   "Box<UserSpec>",
+   "*ast.UserSpec",
+   "assert"
+  ],
+  "RoleSpecList": [
+   "Vec<UserSpec>",
+   "[]*ast.UserSpec",
+   "assert"
+  ],
+  "BindableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CreateBindingStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "StringLitOrUserVariableList": [
+   "Vec<StringOrUserVar>",
+   "[]*ast.StringOrUserVar",
+   "assert"
+  ],
+  "StringLitOrUserVariable": [
+   "Box<StringOrUserVar>",
+   "*ast.StringOrUserVar",
+   "assert"
+  ],
+  "DropBindingStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SetBindingStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "RecommendIndexStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "RecommendIndexOptionListOpt": [
+   "Vec<RecommendIndexOption>",
+   "[]ast.RecommendIndexOption",
+   "assert"
+  ],
+  "RecommendIndexOptionList": [
+   "Vec<RecommendIndexOption>",
+   "[]ast.RecommendIndexOption",
+   "assert"
+  ],
+  "RecommendIndexOption": [
+   "RecommendIndexOption",
+   "ast.RecommendIndexOption",
+   "assert"
+  ],
+  "GrantStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "GrantProxyStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "GrantRoleStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "WithGrantOptionOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "ExtendedPriv": [
+   "Vec<String>",
+   "[]string",
+   "assert"
+  ],
+  "RoleOrPrivElem": [
+   "Box<RoleOrPriv>",
+   "*ast.RoleOrPriv",
+   "assert"
+  ],
+  "RoleOrPrivElemList": [
+   "Vec<RoleOrPriv>",
+   "[]*ast.RoleOrPriv",
+   "assert"
+  ],
+  "PrivElem": [
+   "Box<PrivElem>",
+   "*ast.PrivElem",
+   "own_action"
+  ],
+  "PrivType": [
+   "MysqlPrivilegeType",
+   "mysql.PrivilegeType",
+   "assert"
+  ],
+  "ObjectType": [
+   "ObjectTypeType",
+   "ast.ObjectTypeType",
+   "assert"
+  ],
+  "PrivLevel": [
+   "Box<GrantLevel>",
+   "*ast.GrantLevel",
+   "assert"
+  ],
+  "RevokeStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "RevokeRoleStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "LoadDataStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "LowPriorityOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "FormatOpt": [
+   "Item",
+   "*string",
+   "catch_all(assert)"
+  ],
+  "IgnoreLines": [
+   "Item",
+   "*uint64",
+   "catch_all(assert)"
+  ],
+  "CharsetOpt": [
+   "Item",
+   "*string",
+   "catch_all(assert)"
+  ],
+  "LocalOpt": [
+   "Item",
+   "?",
+   "catch_all(unknown)"
+  ],
+  "Fields": [
+   "Option<Box<FieldsClause>>",
+   "*ast.FieldsClause",
+   "assert"
+  ],
+  "FieldsOrColumns": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "FieldItemList": [
+   "Vec<FieldItem>",
+   "[]*ast.FieldItem",
+   "assert"
+  ],
+  "FieldItem": [
+   "Box<FieldItem>",
+   "*ast.FieldItem",
+   "assert"
+  ],
+  "FieldTerminator": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "Lines": [
+   "Option<Box<LinesClause>>",
+   "*ast.LinesClause",
+   "assert"
+  ],
+  "Starting": [
+   "Item",
+   "*string",
+   "catch_all(assert)"
+  ],
+  "LinesTerminated": [
+   "Item",
+   "*string",
+   "catch_all(assert)"
+  ],
+  "LoadDataSetSpecOpt": [
+   "Vec<Assignment>",
+   "[]*ast.Assignment",
+   "assert"
+  ],
+  "LoadDataSetList": [
+   "Vec<Assignment>",
+   "[]*ast.Assignment",
+   "assert"
+  ],
+  "LoadDataSetItem": [
+   "Box<Assignment>",
+   "*ast.Assignment",
+   "assert"
+  ],
+  "LoadDataOptionListOpt": [
+   "Vec<LoadDataOpt>",
+   "[]*ast.LoadDataOpt",
+   "assert"
+  ],
+  "LoadDataOptionList": [
+   "Vec<LoadDataOpt>",
+   "[]*ast.LoadDataOpt",
+   "assert"
+  ],
+  "LoadDataOption": [
+   "Box<LoadDataOpt>",
+   "*ast.LoadDataOpt",
+   "assert"
+  ],
+  "ImportIntoStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ImportFromSelectStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "UnlockTablesStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "LockTablesStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "TablesTerminalSym": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "TableLock": [
+   "TableLock",
+   "ast.TableLock",
+   "assert"
+  ],
+  "LockType": [
+   "TableLockType",
+   "ast.TableLockType",
+   "assert"
+  ],
+  "TableLockList": [
+   "Vec<TableLock>",
+   "[]ast.TableLock",
+   "assert"
+  ],
+  "NonTransactionalDMLStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ShardableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DryRunOptions": [
+   "i64",
+   "int",
+   "assert"
+  ],
+  "OptionalShardColumn": [
+   "Box<ColumnName>",
+   "*ast.ColumnName",
+   "assert"
+  ],
+  "OptimizeTableStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "KillStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "KillOrKillTiDB": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "LoadStatsStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "LockStatsStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "UnlockStatsStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "RefreshStatsStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "StatsObjectList": [
+   "Vec<StatsObject>",
+   "[]*ast.StatsObject",
+   "assert"
+  ],
+  "RefreshStatsModeOpt": [
+   "Option<Box<RefreshStatsMode>>",
+   "*ast.RefreshStatsMode",
+   "assert"
+  ],
+  "RefreshStatsMode": [
+   "RefreshStatsMode",
+   "ast.RefreshStatsMode",
+   "assert"
+  ],
+  "RefreshStatsClusterOpt": [
+   "bool",
+   "bool",
+   "assert"
+  ],
+  "StatsObject": [
+   "Box<StatsObject>",
+   "*ast.StatsObject",
+   "assert"
+  ],
+  "DropPolicyStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CreateResourceGroupStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterResourceGroupStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DropResourceGroupStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CreatePolicyStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "MaskingPolicyStateOpt": [
+   "Box<MaskingPolicyState>",
+   "*ast.MaskingPolicyState",
+   "assert"
+  ],
+  "MaskingPolicyRestrictOnOpt": [
+   "MaskingPolicyRestrictOps",
+   "ast.MaskingPolicyRestrictOps",
+   "assert"
+  ],
+  "MaskingPolicyRestrictOperationList": [
+   "MaskingPolicyRestrictOps",
+   "ast.MaskingPolicyRestrictOps",
+   "assert"
+  ],
+  "MaskingPolicyRestrictOperation": [
+   "MaskingPolicyRestrictOps",
+   "ast.MaskingPolicyRestrictOps",
+   "assert"
+  ],
+  "CreateMaskingPolicyStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterPolicyStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CreateSequenceStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CreateSequenceOptionListOpt": [
+   "Vec<SequenceOption>",
+   "[]*ast.SequenceOption",
+   "assert"
+  ],
+  "SequenceOptionList": [
+   "Vec<SequenceOption>",
+   "[]*ast.SequenceOption",
+   "assert"
+  ],
+  "SequenceOption": [
+   "Box<SequenceOption>",
+   "*ast.SequenceOption",
+   "assert"
+  ],
+  "SignedNum": [
+   "i64",
+   "int64",
+   "assert"
+  ],
+  "DropSequenceStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterSequenceStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "AlterSequenceOptionList": [
+   "Vec<SequenceOption>",
+   "[]*ast.SequenceOption",
+   "assert"
+  ],
+  "AlterSequenceOption": [
+   "Box<SequenceOption>",
+   "*ast.SequenceOption",
+   "assert"
+  ],
+  "EncryptionOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ValuesStmtList": [
+   "Vec<RowExpr>",
+   "[]*ast.RowExpr",
+   "assert"
+  ],
+  "RowStmt": [
+   "Box<RowExpr>",
+   "*ast.RowExpr",
+   "assert"
+  ],
+  "PlanReplayerStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "PlanReplayerDumpOpt": [
+   "Option<Box<AsOfClause>>",
+   "*ast.AsOfClause",
+   "assert"
+  ],
+  "TrafficStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "TrafficCaptureOptList": [
+   "Vec<TrafficOption>",
+   "[]*ast.TrafficOption",
+   "assert"
+  ],
+  "TrafficCaptureOpt": [
+   "Box<TrafficOption>",
+   "*ast.TrafficOption",
+   "assert"
+  ],
+  "TrafficReplayOptList": [
+   "Vec<TrafficOption>",
+   "[]*ast.TrafficOption",
+   "assert"
+  ],
+  "TrafficReplayOpt": [
+   "Box<TrafficOption>",
+   "*ast.TrafficOption",
+   "assert"
+  ],
+  "OptSpPdparams": [
+   "Vec<StoreParameter>",
+   "[]*ast.StoreParameter",
+   "assert"
+  ],
+  "SpPdparams": [
+   "Vec<StoreParameter>",
+   "[]*ast.StoreParameter",
+   "assert"
+  ],
+  "SpPdparam": [
+   "Box<StoreParameter>",
+   "*ast.StoreParameter",
+   "assert"
+  ],
+  "SpOptInout": [
+   "i64",
+   "int",
+   "assert"
+  ],
+  "ProcedureStatementStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureCursorSelectStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureUnlabeledBlock": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureDeclIdents": [
+   "Vec<String>",
+   "[]string",
+   "assert"
+  ],
+  "ProcedureOptDefault": [
+   "Option<Expr>",
+   "ast.ExprNode",
+   "assert"
+  ],
+  "ProcedureDecl": [
+   "DeclNode",
+   "ast.DeclNode",
+   "assert"
+  ],
+  "ProcedureHandlerType": [
+   "i64",
+   "int",
+   "assert"
+  ],
+  "ProcedureHcondList": [
+   "Vec<ErrNode>",
+   "[]ast.ErrNode",
+   "assert"
+  ],
+  "ProcedureHcond": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedurceCond": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "optValue": [
+   "()",
+   null,
+   "untyped"
+  ],
+  "ProcedureOpenCur": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureFetchInto": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureCloseCur": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureOptFetchNo": [
+   "()",
+   null,
+   "untyped"
+  ],
+  "ProcedureFetchList": [
+   "Vec<String>",
+   "[]string",
+   "assert"
+  ],
+  "ProcedureDeclsOpt": [
+   "Vec<DeclNode>",
+   "[]ast.DeclNode",
+   "assert"
+  ],
+  "ProcedureDecls": [
+   "Vec<DeclNode>",
+   "[]ast.DeclNode",
+   "assert"
+  ],
+  "ProcedureProcStmts": [
+   "Vec<Stmt>",
+   "[]ast.StmtNode",
+   "assert"
+  ],
+  "ProcedureProcStmt1s": [
+   "Vec<Stmt>",
+   "[]ast.StmtNode",
+   "assert"
+  ],
+  "ProcedureBlockContent": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureIfstmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureIf": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "procedurceElseIfs": [
+   "Option<Stmt>",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureCaseStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SimpleWhenThenList": [
+   "Vec<SimpleWhenThenStmt>",
+   "[]*ast.SimpleWhenThenStmt",
+   "assert"
+  ],
+  "SearchedWhenThenList": [
+   "Vec<SearchWhenThenStmt>",
+   "[]*ast.SearchWhenThenStmt",
+   "assert"
+  ],
+  "SimpleWhenThen": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "SearchWhenThen": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ElseCaseOpt": [
+   "Vec<Stmt>",
+   "[]ast.StmtNode",
+   "assert"
+  ],
+  "ProcedureSimpleCase": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureSearchedCase": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureUnlabelLoopBlock": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureUnlabelLoopStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureLabeledBlock": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedurceLabelOpt": [
+   "String",
+   "string",
+   "tag"
+  ],
+  "ProcedurelabeledLoopStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureIterate": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureLeave": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "ProcedureProcStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CreateProcedureStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "DropProcedureStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CalibrateResourceStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "CalibrateOption": [
+   "Box<CalibrateResourceStmt>",
+   "*ast.CalibrateResourceStmt",
+   "assert"
+  ],
+  "DynamicCalibrateOptionList": [
+   "Vec<DynamicCalibrateResourceOption>",
+   "[]*ast.DynamicCalibrateResourceOption",
+   "assert"
+  ],
+  "DynamicCalibrateResourceOption": [
+   "Box<DynamicCalibrateResourceOption>",
+   "*ast.DynamicCalibrateResourceOption",
+   "assert"
+  ],
+  "CalibrateResourceWorkloadOption": [
+   "CalibrateResourceType",
+   "ast.CalibrateResourceType",
+   "assert"
+  ],
+  "AddQueryWatchStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ],
+  "QueryWatchOptionList": [
+   "Vec<QueryWatchOption>",
+   "[]*ast.QueryWatchOption",
+   "assert"
+  ],
+  "QueryWatchOption": [
+   "Box<QueryWatchOption>",
+   "*ast.QueryWatchOption",
+   "assert"
+  ],
+  "QueryWatchTextOption": [
+   "Box<QueryWatchTextOption>",
+   "*ast.QueryWatchTextOption",
+   "assert"
+  ],
+  "DropQueryWatchStmt": [
+   "Stmt",
+   "ast.StmtNode",
+   "tag"
+  ]
+ }
+}
