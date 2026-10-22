@@ -14,5 +14,8 @@ publish.workspace = true
 cfgrammar = "0.15"
 lrtable = "0.15"
 
+[dev-dependencies]
+serde_json = "1"
+
 [lints]
 workspace = true
