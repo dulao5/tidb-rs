@@ -1,10 +1,18 @@
 [package]
 name = "tidb-parser"
 version = "0.0.0"
+description = "TiDB SQL parser: TiDB's parser.y on a build-time LR table generator and a small custom LR driver"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+
+[dependencies]
+
+[build-dependencies]
+# Only used at build time, to compute the LR automaton from grammar/tidb_typed.y.
+cfgrammar = "0.15"
+lrtable = "0.15"
 
 [lints]
 workspace = true
