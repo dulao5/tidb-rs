@@ -1070,9 +1070,45 @@ impl SelectStmt {
     }
 
     fn restore_body(&self, out: &mut String) -> R {
-        if self.kind != SelectStmtKind::Select {
-            return Err("unported TABLE/VALUES".into());
+        match self.kind {
+            SelectStmtKind::Select => self.restore_select_core(out)?,
+            SelectStmtKind::Table => {
+                out.push_str("TABLE ");
+                self.from
+                    .as_ref()
+                    .ok_or("TABLE without table")?
+                    .table_refs
+                    .restore(out)?;
+            }
+            SelectStmtKind::Values => {
+                out.push_str("VALUES ");
+                for (i, row) in self.lists.iter().enumerate() {
+                    if i != 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str("ROW(");
+                    list(out, &row.values, ",")?;
+                    out.push(')');
+                }
+            }
         }
+        if let Some(ob) = &self.order_by {
+            out.push(' ');
+            ob.restore(out)?;
+        }
+        if let Some(l) = &self.limit {
+            out.push(' ');
+            l.restore(out)?;
+        }
+        if let Some(l) = &self.lock_info {
+            l.restore(out)?;
+        }
+        unported_if(&self.select_into_opt, "into")?;
+        Ok(())
+    }
+
+    /// The `SelectStmtKindSelect` branch of `SelectStmt.Restore`.
+    fn restore_select_core(&self, out: &mut String) -> R {
         out.push_str("SELECT ");
         let o = &self.select_stmt_opts;
         // SelectStmtBasic moves the hints from the options into SelectStmt.TableHints.
@@ -1150,18 +1186,6 @@ impl SelectStmt {
                 w.restore(out)?;
             }
         }
-        if let Some(ob) = &self.order_by {
-            out.push(' ');
-            ob.restore(out)?;
-        }
-        if let Some(l) = &self.limit {
-            out.push(' ');
-            l.restore(out)?;
-        }
-        if let Some(l) = &self.lock_info {
-            l.restore(out)?;
-        }
-        unported_if(&self.select_into_opt, "into")?;
         Ok(())
     }
 }

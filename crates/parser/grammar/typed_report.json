@@ -29,9 +29,9 @@
  },
  "option_wrapped": 45,
  "action_kinds": {
-  "placeholder": 1381,
+  "placeholder": 1374,
   "implicit_passthrough": 1022,
-  "ported": 564,
+  "ported": 571,
   "bool_const": 101,
   "nil": 56,
   "explicit_passthrough": 53,

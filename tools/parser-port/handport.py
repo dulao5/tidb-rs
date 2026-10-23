@@ -1332,6 +1332,31 @@ act("SelectStmtOpt", "TableOptimizerHints",
 act("TableName", "'*' '.' Identifier",
     "Box::new(TableName { schema: CIStr::new(\"*\"), name: CIStr::new($3), ..Default::default() })")
 
+# --- TABLE t / VALUES ROW(...) ---------------------------------------------------------------------
+def wildcard_fields():
+    return "Box::new(FieldList { fields: vec![SelectField { wild_card: Some(Box::default()), ..Default::default() }] })"
+
+
+act("SelectStmt", "tableKwd TableName OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption", """{
+        let ts = ResultSetNode::TableSource(Box::new(TableSource { source: ResultSetNode::TableName($2), as_name: CIStr::default() }));
+        let from = Box::new(TableRefsClause { table_refs: Box::new(Join { left: Some(ts), ..Default::default() }) });
+        Stmt::Select(Box::new(SelectStmt {
+            kind: SelectStmtKind::Table, fields: %s, from: Some(from),
+            order_by: $3, limit: $4, lock_info: $5, select_into_opt: $6, ..Default::default()
+        }))
+    }""" % wildcard_fields())
+act("SelectStmt", "values ValuesStmtList OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption", """{
+        Stmt::Select(Box::new(SelectStmt {
+            kind: SelectStmtKind::Values, fields: %s, lists: $2,
+            order_by: $3, limit: $4, lock_info: $5, select_into_opt: $6, ..Default::default()
+        }))
+    }""" % wildcard_fields())
+act("ValuesStmtList", "RowStmt", "vec![*$1]")
+act("ValuesStmtList", "ValuesStmtList ',' RowStmt", "{ let mut v = $1; v.push(*$3); v }")
+act("RowStmt", "row RowValue", "Box::new(RowExpr { values: $2 })")
+act("Values", "Values ',' ExprOrDefault", "{ let mut v = $1; v.push($3); v }")
+act("Values", "ExprOrDefault", "vec![$1]")
+
 ACTIONS = A
 
 PROGRAMS = r'''

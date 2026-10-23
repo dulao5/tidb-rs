@@ -1061,6 +1061,8 @@ pub struct SelectStmt {
     pub with_before_braces: bool,
     /// `AfterSetOperator`: the operator preceding this SELECT in a set operation.
     pub after_set_operator: Option<SetOprType>,
+    /// `Lists`: the rows of a `VALUES ROW(...), ...` statement.
+    pub lists: Vec<RowExpr>,
     pub select_stmt_opts: Box<SelectStmtOpts>,
     pub distinct: bool,
     pub fields: Box<FieldList>,

@@ -2369,8 +2369,8 @@ ValuesOpt -> Vec<Expr>:
   | Values { $1 }
   ;
 Values -> Vec<Expr>:
-    Values ',' ExprOrDefault { ph("Values#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ExprOrDefault { ph("Values#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    Values ',' ExprOrDefault { { let mut v = $1; v.push($3); v } }
+  | ExprOrDefault { vec![$1] }
   ;
 ExprOrDefault -> Expr:
     Expression { $1 }
@@ -3180,8 +3180,20 @@ SelectStmt -> Stmt:
         if let Some(i) = $5 { st.select_into_opt = Some(i); }
         Stmt::Select(st)
     } }
-  | tableKwd TableName OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption { ph("SelectStmt#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | values ValuesStmtList OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption { ph("SelectStmt#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+  | tableKwd TableName OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption { {
+        let ts = ResultSetNode::TableSource(Box::new(TableSource { source: ResultSetNode::TableName($2), as_name: CIStr::default() }));
+        let from = Box::new(TableRefsClause { table_refs: Box::new(Join { left: Some(ts), ..Default::default() }) });
+        Stmt::Select(Box::new(SelectStmt {
+            kind: SelectStmtKind::Table, fields: Box::new(FieldList { fields: vec![SelectField { wild_card: Some(Box::default()), ..Default::default() }] }), from: Some(from),
+            order_by: $3, limit: $4, lock_info: $5, select_into_opt: $6, ..Default::default()
+        }))
+    } }
+  | values ValuesStmtList OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption { {
+        Stmt::Select(Box::new(SelectStmt {
+            kind: SelectStmtKind::Values, fields: Box::new(FieldList { fields: vec![SelectField { wild_card: Some(Box::default()), ..Default::default() }] }), lists: $2,
+            order_by: $3, limit: $4, lock_info: $5, select_into_opt: $6, ..Default::default()
+        }))
+    } }
   ;
 SelectStmtWithClause -> Stmt:
     WithClause SelectStmt { {
@@ -5327,11 +5339,11 @@ EncryptionOpt -> String:
     stringLit { ph("EncryptionOpt#0", $span, vec![]) }
   ;
 ValuesStmtList -> Vec<RowExpr>:
-    RowStmt { ph("ValuesStmtList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ValuesStmtList ',' RowStmt { ph("ValuesStmtList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    RowStmt { vec![*$1] }
+  | ValuesStmtList ',' RowStmt { { let mut v = $1; v.push(*$3); v } }
   ;
 RowStmt -> Box<RowExpr>:
-    row RowValue { ph("RowStmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    row RowValue { Box::new(RowExpr { values: $2 }) }
   ;
 PlanReplayerStmt -> Stmt:
     plan replayer dump PlanReplayerDumpOpt explain ExplainableStmt { ph("PlanReplayerStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }

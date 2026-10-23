@@ -16,7 +16,7 @@ const ALLOWLIST: &[(&str, &str)] = &[(
 
 /// Number of cases fully inside the ported subset at the time of the port; it may only grow as
 /// more actions are ported.
-const MIN_COVERED: usize = 1085;
+const MIN_COVERED: usize = 1146;
 
 fn restore_all(stmts: &[Stmt]) -> Result<String, String> {
     let mut out = String::new();
