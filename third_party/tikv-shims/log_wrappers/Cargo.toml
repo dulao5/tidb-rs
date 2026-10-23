@@ -1,0 +1,11 @@
+[package]
+name = "log_wrappers"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Shim: Value/hex_encode_upper only (redaction config dropped)"
+
+[dependencies]
+slog = { workspace = true }
+hex = "0.4"

@@ -1,0 +1,10 @@
+[package]
+name = "file_system"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Shim: only calc_crc32_bytes"
+
+[dependencies]
+crc32fast = "1.2"
