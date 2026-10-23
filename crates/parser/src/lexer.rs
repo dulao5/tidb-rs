@@ -87,10 +87,6 @@ struct Ids {
     full_join_type: u32,
 }
 
-const CHARSETS: &[&str] = &[
-    "utf8", "utf8mb4", "ascii", "latin1", "binary", "gbk", "gb18030",
-];
-
 impl TokenTable {
     pub fn new() -> Self {
         let by_name: HashMap<&'static str, u32> = TOKEN_IDS.iter().copied().collect();
@@ -289,6 +285,13 @@ impl<'a> Lexer<'a> {
                 b'X' | b'x' if self.peek_at(1) == b'\'' => {
                     self.p += 2;
                     self.digits_then_quote(|c| c.is_ascii_hexdigit())?;
+                    // ParseHexStr: x'..' needs an even number of digits ("hex literal" error).
+                    if !(self.p - start - 3).is_multiple_of(2) {
+                        return Err(LexError {
+                            pos: start,
+                            msg: "invalid hexadecimal format, must even numbers".into(),
+                        });
+                    }
                     self.push(t.hex_lit, start)
                 }
                 b'B' | b'b' if self.peek_at(1) == b'\'' => {
@@ -540,9 +543,9 @@ impl<'a> Lexer<'a> {
             self.p += 1
         }
         let lit = &self.src[start..self.p];
-        // _charset introducer
+        // _charset introducer (handleIdent: any charset GetCharsetInfo knows, even unsupported)
         if let Some(cs) = lit.strip_prefix('_')
-            && CHARSETS.iter().any(|c| c.eq_ignore_ascii_case(cs))
+            && crate::charset::introducer_charset(cs).is_some()
         {
             return self.push(t.underscore_cs, start);
         }

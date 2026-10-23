@@ -2,56 +2,55 @@
  "_generated": "by tools/parser-port/convert_typed.py from pkg/parser/parser.y of TiDB 4cee7f2084. Regenerate with: tools/parser-port/regen.sh <tidb-checkout>",
  "nonterminals": 759,
  "productions": 3234,
- "distinct_rust_types": 258,
+ "distinct_rust_types": 259,
  "type_buckets": {
   "AST enum (Expr/Stmt/ResultSetNode)": 193,
   "Box<concrete AST struct>": 172,
   "Vec<_>": 137,
   "String": 77,
   "primitive": 73,
-  "value struct / enum (CIStr, Op, JoinType, ...)": 71,
-  "catch-all Item (Box<dyn Any>)": 27,
+  "value struct / enum (CIStr, Op, JoinType, ...)": 73,
+  "catch-all Item (Box<dyn Any>)": 25,
   "unit (untyped in goyacc)": 9
  },
  "type_source": {
   "assert": 441,
   "tag": 253,
-  "catch_all": 27,
+  "catch_all": 25,
   "own_action": 15,
   "untyped": 9,
+  "handport": 7,
   "assert_majority": 6,
-  "handport": 5,
   "passthrough": 3
  },
  "catch_all_reasons": {
-  "catch_all(unknown)": 17,
+  "catch_all(unknown)": 15,
   "catch_all(assert)": 10
  },
  "option_wrapped": 45,
  "action_kinds": {
-  "placeholder": 1825,
-  "implicit_passthrough": 1021,
-  "ported": 110,
+  "placeholder": 1566,
+  "implicit_passthrough": 1022,
+  "ported": 377,
   "bool_const": 101,
   "nil": 57,
-  "explicit_passthrough": 57,
-  "empty_list": 27,
+  "explicit_passthrough": 53,
+  "empty_list": 26,
   "unit": 19,
-  "implicit_passthrough_type_mismatch->placeholder": 10,
-  "explicit_passthrough_type_mismatch->placeholder": 7
+  "explicit_passthrough_type_mismatch->placeholder": 7,
+  "implicit_passthrough_type_mismatch->placeholder": 6
  },
  "passthrough_mismatch_pairs": {
-  "TOKEN -> Item": 5,
-  "Item -> Box<TypesFieldType>": 3,
+  "Item -> Box<FieldType>": 3,
+  "TOKEN -> Item": 2,
   "Item -> IndexType": 2,
   "Item -> Box<Constraint>": 2,
   "Item -> Box<MViewRefreshClause>": 1,
   "TOKEN -> Expr": 1,
-  "Item -> FrameExtent": 1,
   "Item -> Box<AuthRoleIdentity>": 1,
   "Expr -> Option<Box<PatternLikeOrIlikeExpr>>": 1
  },
- "stub_types_generated": 156,
+ "stub_types_generated": 139,
  "catch_all_nonterminals": [
   "CharsetOpt",
   "Constraint",
@@ -66,7 +65,6 @@
   "LocalOpt",
   "MViewRefreshClause",
   "Match",
-  "NumLiteral",
   "NumericType",
   "OnDeleteUpdateOpt",
   "OptWild",
@@ -78,8 +76,7 @@
   "StatsPersistentVal",
   "StringType",
   "TableElement",
-  "TableElementList",
-  "WindowFrameBetween"
+  "TableElementList"
  ],
  "types": {
   "Start": [
@@ -628,9 +625,9 @@
    "tag"
   ],
   "NumLiteral": [
-   "Item",
+   "Datum",
    "?",
-   "catch_all(unknown)"
+   "handport"
   ],
   "StatsType": [
    "u8",
@@ -1813,7 +1810,7 @@
    "assert"
   ],
   "CastType": [
-   "Box<TypesFieldType>",
+   "Box<FieldType>",
    "*types.FieldType",
    "assert"
   ],
@@ -2043,9 +2040,9 @@
    "assert"
   ],
   "WindowFrameBetween": [
-   "Item",
+   "FrameExtent",
    "?",
-   "catch_all(unknown)"
+   "handport"
   ],
   "WindowFrameBound": [
    "FrameBound",
@@ -2758,7 +2755,7 @@
    "assert"
   ],
   "Type": [
-   "Box<TypesFieldType>",
+   "Box<FieldType>",
    "*types.FieldType",
    "assert"
   ],
@@ -2828,12 +2825,12 @@
    "tag"
   ],
   "BlobType": [
-   "Box<TypesFieldType>",
+   "Box<FieldType>",
    "*types.FieldType",
    "assert"
   ],
   "TextType": [
-   "Box<TypesFieldType>",
+   "Box<FieldType>",
    "*types.FieldType",
    "assert"
   ],

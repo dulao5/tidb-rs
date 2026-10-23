@@ -15,7 +15,7 @@ const ALLOWLIST: &[(&str, &str)] = &[(
 
 /// Number of SELECT cases fully inside the ported subset at the time of the port; it may
 /// only grow as more actions are ported.
-const MIN_COVERED: usize = 296;
+const MIN_COVERED: usize = 750;
 
 fn restore_all(stmts: &[Stmt]) -> Result<String, String> {
     let mut out = String::new();
@@ -42,15 +42,21 @@ fn select_restore_matches_tidb() {
         .collect();
     let (mut covered, mut unported) = (0, 0);
     let mut mismatches = Vec::new();
+    // First unported production hit by each uncovered case, to prioritise the porting work.
+    let mut buckets: std::collections::BTreeMap<String, usize> = Default::default();
     for c in &cases {
         let opts = ParseOptions {
             window_functions: c.window,
         };
         let out = parse(&c.src, &opts).unwrap_or_else(|e| panic!("{:?}: {e}", c.src));
         // Err = the statement touches a production that is still a placeholder.
-        let Ok(got) = restore_all(&out.stmts) else {
-            unported += 1;
-            continue;
+        let got = match restore_all(&out.stmts) {
+            Ok(got) => got,
+            Err(why) => {
+                unported += 1;
+                *buckets.entry(why).or_default() += 1;
+                continue;
+            }
         };
         covered += 1;
         let want = c.restore.as_deref().unwrap();
@@ -64,6 +70,11 @@ fn select_restore_matches_tidb() {
         cases.len(),
         mismatches.len()
     );
+    let mut top: Vec<_> = buckets.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    for (why, n) in top.iter().take(40) {
+        eprintln!("  {n:>4}  {why}");
+    }
     let unexpected: Vec<_> = mismatches
         .iter()
         .filter(|(src, ..)| !ALLOWLIST.iter().any(|(a, _)| a == src))

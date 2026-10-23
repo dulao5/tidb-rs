@@ -53,6 +53,7 @@ class TypeMapper:
     def stub(self, go):
         pkg, _, name = go.rpartition(".")
         rust = name if pkg in ("ast", "") else pkg.capitalize() + name
+        rust = handport.TYPE_NAMES.get(go, rust)
         rust = re.sub(r"\W", "", rust)
         rust = rust[0].upper() + rust[1:]
         if rust in ("Node", "Item", "Tok", "Span", "Any", "Box", "Vec", "Option", "String", "Ctx", "R"):

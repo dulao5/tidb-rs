@@ -5,6 +5,7 @@
 #   crates/parser/grammar/typed_report.json  type-inference / action-kind statistics
 #   crates/parser/src/gen_types.rs           stub types for Go AST types not yet hand-written
 #   crates/parser/src/keywords_gen.rs        keyword tables from misc.go
+#   crates/parser/src/charset_gen.rs         charset / collation tables from charset/charset.go
 #   crates/parser/tests/data/all_cases.jsonl test corpus from parser_test.go
 #
 # Usage: tools/parser-port/regen.sh <tidb-checkout> [--check-tables]
@@ -19,7 +20,7 @@
 set -eu
 
 if [ $# -lt 1 ]; then
-  sed -n '2,17p' "$0"
+  sed -n '2,18p' "$0"
   exit 2
 fi
 TIDB=$(cd "$1" && pwd)
@@ -41,8 +42,9 @@ echo "source: $PARSER_PORT_SOURCE ($P)"
 $PY "$HERE/convert_typed.py" "$P/parser.y" "$CRATE/grammar/tidb_typed.y" \
   "$CRATE/src/gen_types.rs" "$CRATE/grammar/typed_report.json" >/dev/null
 $PY "$HERE/gen_keywords.py" "$P/misc.go" "$CRATE/src/keywords_gen.rs"
+$PY "$HERE/gen_charset.py" "$P/charset/charset.go" "$CRATE/src/charset_gen.rs"
 $PY "$HERE/extract_tests.py" "$P/parser_test.go" "$CRATE/tests/data/all_cases.jsonl"
-echo "regenerated grammar, gen_types.rs, keywords_gen.rs and the test corpus"
+echo "regenerated grammar, gen_types.rs, keywords_gen.rs, charset_gen.rs and the test corpus"
 
 if [ "$CHECK_TABLES" = "--check-tables" ]; then
   TMP=$(mktemp -d)

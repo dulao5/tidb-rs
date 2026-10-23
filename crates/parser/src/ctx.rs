@@ -28,6 +28,9 @@ pub struct Ctx {
     pub errors: RefCell<Vec<Diagnostic>>,
     /// `parser.lastErrorAsWarn()` / `AppendWarn` lands here.
     pub warnings: RefCell<Vec<Diagnostic>>,
+    /// goyacc `parser.explicitCharset`: set by `CastType` (CHAR ... CHARSET x), consumed and
+    /// reset by the enclosing CAST/CONVERT action.
+    pub explicit_charset: Cell<bool>,
     /// Set by an action that did `return 1` in goyacc. The driver checks it after every
     /// reduction and stops immediately, like goyacc.
     pub abort: Cell<bool>,
@@ -48,6 +51,13 @@ impl Ctx {
             pos,
         });
         self.abort.set(true);
+    }
+    /// goyacc `yylex.AppendError(err)` without `return 1`: the parse continues but fails.
+    pub fn error(&self, msg: impl Into<String>, pos: usize) {
+        self.errors.borrow_mut().push(Diagnostic {
+            msg: msg.into(),
+            pos,
+        });
     }
     #[allow(dead_code)]
     pub fn warn(&self, msg: impl Into<String>, pos: usize) {

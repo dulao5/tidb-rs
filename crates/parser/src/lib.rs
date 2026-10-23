@@ -10,8 +10,8 @@
 //! Architecture (see `README.md` for details and porting status):
 //!
 //! * `grammar/tidb_typed.y` is generated from TiDB's `parser.y` by `tools/parser-port`; every
-//!   production has a typed Rust action. Only the SELECT core is hand-ported so far; other
-//!   productions build placeholder nodes (`Node`), so their AST is not usable yet.
+//!   production has a typed Rust action. Only the SELECT core and expressions are hand-ported
+//!   so far; other productions build placeholder nodes (`Node`), so their AST is not usable yet.
 //! * `build.rs` computes the LR(1) automaton with cfgrammar/lrtable at build time and emits
 //!   comb-packed tables plus one reducer function per production.
 //! * At runtime a hand-written lexer feeds a small table-driven LR driver; no parser generator
@@ -24,6 +24,10 @@
 mod actions_rt;
 #[allow(missing_docs)]
 pub mod ast;
+#[allow(missing_docs)]
+mod charset;
+#[rustfmt::skip]
+mod charset_gen;
 mod ctx;
 mod driver;
 /// Stub types for Go AST types the grammar references but which are not ported yet.
@@ -35,6 +39,7 @@ pub mod gen_types;
 #[rustfmt::skip]
 mod keywords_gen;
 mod lexer;
+mod restore;
 mod span;
 
 /// Generated value enum, reducers and production metadata (`build/codegen.rs`).

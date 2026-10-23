@@ -79,7 +79,12 @@ pub trait SrcText {
 
 /// Token text as goyacc's `yylval.ident` would hold it: quotes stripped / unescaped.
 pub fn tok_text<L: SrcText + ?Sized>(l: &L, t: &Tok) -> String {
-    let s = l.src_str(tok_span(t));
+    unquote_text(l.src_str(tok_span(t)))
+}
+
+/// The lexer value of an identifier / string token text: back-quoted names and quoted strings
+/// are unquoted (and unescaped), anything else is returned as is.
+pub fn unquote_text(s: &str) -> String {
     let b = s.as_bytes();
     if b.len() >= 2 && b[0] == b'`' {
         return s[1..s.len() - 1].replace("``", "`");

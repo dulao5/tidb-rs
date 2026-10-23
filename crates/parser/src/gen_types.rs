@@ -203,9 +203,6 @@ impl FromNode for BRIEOptionType { fn from_node(n: Node) -> Self { BRIEOptionTyp
 /// Go: ast.BRIEOptionLevel
 #[derive(Debug, Default)] pub struct BRIEOptionLevel(pub Option<Box<Node>>);
 impl FromNode for BRIEOptionLevel { fn from_node(n: Node) -> Self { BRIEOptionLevel(Some(Box::new(n))) } }
-/// Go: likeEscapeSpec
-#[derive(Debug, Default)] pub struct LikeEscapeSpec(pub Option<Box<Node>>);
-impl FromNode for LikeEscapeSpec { fn from_node(n: Node) -> Self { LikeEscapeSpec(Some(Box::new(n))) } }
 /// Go: ast.AsOfClause
 #[derive(Debug, Default)] pub struct AsOfClause(pub Option<Box<Node>>);
 impl FromNode for AsOfClause { fn from_node(n: Node) -> Self { AsOfClause(Some(Box::new(n))) } }
@@ -230,21 +227,6 @@ impl FromNode for InsertRowAlias { fn from_node(n: Node) -> Self { InsertRowAlia
 /// Go: ast.AlterOrderItem
 #[derive(Debug, Default)] pub struct AlterOrderItem(pub Option<Box<Node>>);
 impl FromNode for AlterOrderItem { fn from_node(n: Node) -> Self { AlterOrderItem(Some(Box::new(n))) } }
-/// Go: ast.GetFormatSelectorType
-#[derive(Debug, Default)] pub struct GetFormatSelectorType(pub Option<Box<Node>>);
-impl FromNode for GetFormatSelectorType { fn from_node(n: Node) -> Self { GetFormatSelectorType(Some(Box::new(n))) } }
-/// Go: ast.TrimDirectionType
-#[derive(Debug, Default)] pub struct TrimDirectionType(pub Option<Box<Node>>);
-impl FromNode for TrimDirectionType { fn from_node(n: Node) -> Self { TrimDirectionType(Some(Box::new(n))) } }
-/// Go: ast.TimeUnitType
-#[derive(Debug, Default)] pub struct TimeUnitType(pub Option<Box<Node>>);
-impl FromNode for TimeUnitType { fn from_node(n: Node) -> Self { TimeUnitType(Some(Box::new(n))) } }
-/// Go: ast.WhenClause
-#[derive(Debug, Default)] pub struct WhenClause(pub Option<Box<Node>>);
-impl FromNode for WhenClause { fn from_node(n: Node) -> Self { WhenClause(Some(Box::new(n))) } }
-/// Go: types.FieldType
-#[derive(Debug, Default)] pub struct TypesFieldType(pub Option<Box<Node>>);
-impl FromNode for TypesFieldType { fn from_node(n: Node) -> Self { TypesFieldType(Some(Box::new(n))) } }
 /// Go: ast.CompletionType
 #[derive(Debug, Default)] pub struct CompletionType(pub Option<Box<Node>>);
 impl FromNode for CompletionType { fn from_node(n: Node) -> Self { CompletionType(Some(Box::new(n))) } }
@@ -263,24 +245,6 @@ impl FromNode for WithClause { fn from_node(n: Node) -> Self { WithClause(Some(B
 /// Go: ast.CommonTableExpression
 #[derive(Debug, Default)] pub struct CommonTableExpression(pub Option<Box<Node>>);
 impl FromNode for CommonTableExpression { fn from_node(n: Node) -> Self { CommonTableExpression(Some(Box::new(n))) } }
-/// Go: ast.WindowSpec
-#[derive(Debug, Default)] pub struct WindowSpec(pub Option<Box<Node>>);
-impl FromNode for WindowSpec { fn from_node(n: Node) -> Self { WindowSpec(Some(Box::new(n))) } }
-/// Go: ast.PartitionByClause
-#[derive(Debug, Default)] pub struct PartitionByClause(pub Option<Box<Node>>);
-impl FromNode for PartitionByClause { fn from_node(n: Node) -> Self { PartitionByClause(Some(Box::new(n))) } }
-/// Go: ast.FrameClause
-#[derive(Debug, Default)] pub struct FrameClause(pub Option<Box<Node>>);
-impl FromNode for FrameClause { fn from_node(n: Node) -> Self { FrameClause(Some(Box::new(n))) } }
-/// Go: ast.FrameType
-#[derive(Debug, Default)] pub struct FrameType(pub Option<Box<Node>>);
-impl FromNode for FrameType { fn from_node(n: Node) -> Self { FrameType(Some(Box::new(n))) } }
-/// Go: ast.FrameExtent
-#[derive(Debug, Default)] pub struct FrameExtent(pub Option<Box<Node>>);
-impl FromNode for FrameExtent { fn from_node(n: Node) -> Self { FrameExtent(Some(Box::new(n))) } }
-/// Go: ast.FrameBound
-#[derive(Debug, Default)] pub struct FrameBound(pub Option<Box<Node>>);
-impl FromNode for FrameBound { fn from_node(n: Node) -> Self { FrameBound(Some(Box::new(n))) } }
 /// Go: ast.IndexHintType
 #[derive(Debug, Default)] pub struct IndexHintType(pub Option<Box<Node>>);
 impl FromNode for IndexHintType { fn from_node(n: Node) -> Self { IndexHintType(Some(Box::new(n))) } }
@@ -332,9 +296,6 @@ impl FromNode for HandleRange { fn from_node(n: Node) -> Self { HandleRange(Some
 /// Go: ast.ShowStmt
 #[derive(Debug, Default)] pub struct ShowStmt(pub Option<Box<Node>>);
 impl FromNode for ShowStmt { fn from_node(n: Node) -> Self { ShowStmt(Some(Box::new(n))) } }
-/// Go: ast.PatternLikeOrIlikeExpr
-#[derive(Debug, Default)] pub struct PatternLikeOrIlikeExpr(pub Option<Box<Node>>);
-impl FromNode for PatternLikeOrIlikeExpr { fn from_node(n: Node) -> Self { PatternLikeOrIlikeExpr(Some(Box::new(n))) } }
 /// Go: ast.StatementScope
 #[derive(Debug, Default)] pub struct StatementScope(pub Option<Box<Node>>);
 impl FromNode for StatementScope { fn from_node(n: Node) -> Self { StatementScope(Some(Box::new(n))) } }
@@ -344,18 +305,9 @@ impl FromNode for FlushStmt { fn from_node(n: Node) -> Self { FlushStmt(Some(Box
 /// Go: ast.LogType
 #[derive(Debug, Default)] pub struct LogType(pub Option<Box<Node>>);
 impl FromNode for LogType { fn from_node(n: Node) -> Self { LogType(Some(Box::new(n))) } }
-/// Go: ast.OptBinary
-#[derive(Debug, Default)] pub struct OptBinary(pub Option<Box<Node>>);
-impl FromNode for OptBinary { fn from_node(n: Node) -> Self { OptBinary(Some(Box::new(n))) } }
 /// Go: ast.TypeOpt
 #[derive(Debug, Default)] pub struct TypeOpt(pub Option<Box<Node>>);
 impl FromNode for TypeOpt { fn from_node(n: Node) -> Self { TypeOpt(Some(Box::new(n))) } }
-/// Go: ast.FloatOpt
-#[derive(Debug, Default)] pub struct FloatOpt(pub Option<Box<Node>>);
-impl FromNode for FloatOpt { fn from_node(n: Node) -> Self { FloatOpt(Some(Box::new(n))) } }
-/// Go: ast.VectorElementType
-#[derive(Debug, Default)] pub struct VectorElementType(pub Option<Box<Node>>);
-impl FromNode for VectorElementType { fn from_node(n: Node) -> Self { VectorElementType(Some(Box::new(n))) } }
 /// Go: ast.TextString
 #[derive(Debug, Default)] pub struct TextString(pub Option<Box<Node>>);
 impl FromNode for TextString { fn from_node(n: Node) -> Self { TextString(Some(Box::new(n))) } }
@@ -437,9 +389,6 @@ impl FromNode for MaskingPolicyRestrictOps { fn from_node(n: Node) -> Self { Mas
 /// Go: ast.SequenceOption
 #[derive(Debug, Default)] pub struct SequenceOption(pub Option<Box<Node>>);
 impl FromNode for SequenceOption { fn from_node(n: Node) -> Self { SequenceOption(Some(Box::new(n))) } }
-/// Go: ast.RowExpr
-#[derive(Debug, Default)] pub struct RowExpr(pub Option<Box<Node>>);
-impl FromNode for RowExpr { fn from_node(n: Node) -> Self { RowExpr(Some(Box::new(n))) } }
 /// Go: ast.TrafficOption
 #[derive(Debug, Default)] pub struct TrafficOption(pub Option<Box<Node>>);
 impl FromNode for TrafficOption { fn from_node(n: Node) -> Self { TrafficOption(Some(Box::new(n))) } }

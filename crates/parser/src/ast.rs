@@ -1,12 +1,9 @@
-//! Minimal hand-written Rust AST for the SELECT core (mirrors tidb/pkg/parser/ast field names),
-//! plus a Restore() port (DefaultRestoreFlags: single-quoted strings, uppercase keywords,
-//! back-quoted names) used to verify the hand-ported actions against parser_test.go.
+//! Hand-written Rust AST for the ported subset (SELECT core and expressions); mirrors the
+//! node and field names of tidb/pkg/parser/ast. `Restore()` lives in `src/restore.rs`.
 use crate::span::Span;
 
 use crate::actions_rt::{FromNode, Node};
 use crate::gen_types::*;
-
-pub type R = Result<(), String>;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CIStr {
@@ -55,7 +52,8 @@ pub enum Op {
     NullEQ,
 }
 impl Op {
-    fn literal(self) -> (&'static str, bool) {
+    /// Text of the operator and whether it is a keyword (`opcode.Op.Restore`, `IsKeyword`).
+    pub fn literal(self) -> (&'static str, bool) {
         use Op::*;
         match self {
             LogicAnd => ("AND", true),
@@ -91,34 +89,333 @@ impl FromNode for Op {
     }
 }
 
+// Function names the grammar builds (`ast.*` constants in functions.go).
+pub const DATE_LITERAL: &str = "'tidb`.(dateliteral";
+pub const TIME_LITERAL: &str = "'tidb`.(timeliteral";
+pub const TIMESTAMP_LITERAL: &str = "'tidb`.(timestampliteral";
+pub const JSON_MEMBER_OF: &str = "json_memberof";
+pub const JSON_EXTRACT: &str = "json_extract";
+pub const JSON_UNQUOTE: &str = "json_unquote";
+pub const WEIGHT_STRING: &str = "weight_string";
+pub const CONCAT: &str = "concat";
+pub const INTERVAL: &str = "interval";
+pub const CHAR_FUNC: &str = "char_func";
+pub const INSERT_FUNC: &str = "insert_func";
+pub const PASSWORD_FUNC: &str = "password";
+pub const NEXT_VAL: &str = "nextval";
+pub const LAST_VAL: &str = "lastval";
+pub const SET_VAL: &str = "setval";
+pub const AGG_FUNC_GROUP_CONCAT: &str = "group_concat";
+pub const AGG_FUNC_VAR_POP: &str = "var_pop";
+pub const AGG_FUNC_STDDEV_POP: &str = "stddev_pop";
+
+/// Value of a `ValueExpr` (the test-driver `Datum` kinds the parser produces).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Datum {
     Null,
+    /// KindInt64 with `IsBooleanFlag` (TRUE / FALSE literals).
     Bool(bool),
     Int(i64),
     Uint(u64),
     Float(f64),
+    /// `MyDecimal`, kept as its canonical string.
     Decimal(String),
     Str(String),
+    /// `HexLiteral` (x'..' / 0x..).
+    Hex(Vec<u8>),
+    /// `BitLiteral` (b'..' / 0b..).
+    Bit(Vec<u8>),
+}
+
+/// `ast.ValueExpr` (test_driver.ValueExpr): a datum plus the charset/collation of its type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValueExpr {
+    pub datum: Datum,
+    /// `Type.GetCharset()`: the parser charset for strings, "binary" for other kinds (as
+    /// `DefaultTypeForValue` sets it), or an explicit `_charset` introducer.
+    pub charset: &'static str,
+    pub collate: &'static str,
+    /// `projectionOffset` (`-1` = unset); set when adjacent string literals are concatenated.
+    pub projection_offset: i32,
+}
+impl ValueExpr {
+    /// `ast.NewValueExpr(value, charset, collate)` with test_driver's `DefaultTypeForValue`.
+    pub fn new(datum: Datum, charset: &'static str, collate: &'static str) -> Self {
+        let (charset, collate) = match datum {
+            Datum::Str(_) => (charset, collate),
+            _ => (crate::charset::CHARSET_BIN, crate::charset::COLLATION_BIN),
+        };
+        ValueExpr {
+            datum,
+            charset,
+            collate,
+            projection_offset: -1,
+        }
+    }
+}
+
+/// `ast.FuncCallExprType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FuncCallExprType {
+    #[default]
+    Keyword,
+    Generic,
+}
+
+/// `ast.TimeUnitType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeUnitType {
+    #[default]
+    Invalid,
+    Microsecond,
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+    SecondMicrosecond,
+    MinuteMicrosecond,
+    MinuteSecond,
+    HourMicrosecond,
+    HourSecond,
+    HourMinute,
+    DayMicrosecond,
+    DaySecond,
+    DayMinute,
+    DayHour,
+    YearMonth,
+}
+impl FromNode for TimeUnitType {
+    fn from_node(_: Node) -> Self {
+        TimeUnitType::Invalid
+    }
+}
+
+/// `ast.GetFormatSelectorType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GetFormatSelectorType {
+    #[default]
+    Date,
+    Datetime,
+    Time,
+}
+impl FromNode for GetFormatSelectorType {
+    fn from_node(_: Node) -> Self {
+        GetFormatSelectorType::Date
+    }
+}
+
+/// `ast.TrimDirectionType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrimDirectionType {
+    #[default]
+    BothDefault,
+    Both,
+    Leading,
+    Trailing,
+}
+impl FromNode for TrimDirectionType {
+    fn from_node(_: Node) -> Self {
+        TrimDirectionType::BothDefault
+    }
+}
+
+/// `ast.CastFunctionType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastFunctionType {
+    Cast,
+    Convert,
+    BinaryOperator,
+}
+
+/// `types.UnspecifiedLength`.
+pub const UNSPECIFIED_LENGTH: i64 = -1;
+
+/// `mysql.Type*` codes used by the cast grammar.
+pub mod mysql_type {
+    pub const FLOAT: u8 = 4;
+    pub const DOUBLE: u8 = 5;
+    pub const LONGLONG: u8 = 8;
+    pub const DATE: u8 = 10;
+    pub const DURATION: u8 = 11;
+    pub const DATETIME: u8 = 12;
+    pub const YEAR: u8 = 13;
+    pub const JSON: u8 = 0xf5;
+    pub const NEW_DECIMAL: u8 = 0xf6;
+    pub const VAR_STRING: u8 = 0xfd;
+    pub const STRING: u8 = 0xfe;
+    pub const TIDB_VECTOR_FLOAT32: u8 = 0xe1;
+}
+/// `mysql.*Flag` bits used by the cast grammar.
+pub mod mysql_flag {
+    pub const UNSIGNED: u32 = 1 << 5;
+    pub const BINARY: u32 = 1 << 7;
+    pub const PARSE_TO_JSON: u32 = 1 << 18;
+}
+
+/// `types.FieldType` (the fields the parser sets). Built by the cast grammar (`CastType`);
+/// the column-definition grammar is not ported yet and yields `unported`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldType {
+    pub tp: u8,
+    pub flag: u32,
+    pub flen: i64,
+    pub decimal: i64,
+    pub charset: String,
+    pub collate: String,
+    pub array: bool,
+    /// Built by a placeholder action (kind of the production).
+    pub unported: Option<&'static str>,
+}
+impl FieldType {
+    /// `types.NewFieldType(tp)`.
+    pub fn new(tp: u8) -> Self {
+        FieldType {
+            tp,
+            flag: 0,
+            flen: UNSPECIFIED_LENGTH,
+            decimal: UNSPECIFIED_LENGTH,
+            charset: String::new(),
+            collate: String::new(),
+            array: false,
+            unported: None,
+        }
+    }
+    /// `SetCharset(charset.CharsetBin); SetCollate(charset.CollationBin)`.
+    pub fn set_bin(&mut self) {
+        self.charset = crate::charset::CHARSET_BIN.to_string();
+        self.collate = crate::charset::COLLATION_BIN.to_string();
+    }
+}
+impl FromNode for FieldType {
+    fn from_node(n: Node) -> Self {
+        FieldType {
+            unported: Some(n.kind),
+            ..FieldType::new(0)
+        }
+    }
+}
+
+/// `mysql.GetDefaultFieldLengthAndDecimalForCast`.
+pub fn default_length_and_decimal_for_cast(tp: u8) -> (i64, i64) {
+    use mysql_type::*;
+    match tp {
+        STRING => (0, -1),
+        DATE => (10, 0),
+        DATETIME => (19, 0),
+        NEW_DECIMAL => (10, 0),
+        DURATION => (10, 0),
+        LONGLONG => (22, 0),
+        DOUBLE => (22, -1),
+        FLOAT => (12, -1),
+        JSON => (4194304, 0),
+        _ => (-1, -1),
+    }
+}
+
+/// `ast.FloatOpt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloatOpt {
+    pub flen: i64,
+    pub decimal: i64,
+}
+impl FromNode for FloatOpt {
+    fn from_node(_: Node) -> Self {
+        FloatOpt {
+            flen: UNSPECIFIED_LENGTH,
+            decimal: UNSPECIFIED_LENGTH,
+        }
+    }
+}
+
+/// `ast.OptBinary`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OptBinary {
+    pub is_binary: bool,
+    pub charset: String,
+}
+impl FromNode for OptBinary {
+    fn from_node(_: Node) -> Self {
+        OptBinary::default()
+    }
+}
+
+/// `ast.VectorElementType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VectorElementType {
+    pub tp: u8,
+}
+impl FromNode for VectorElementType {
+    fn from_node(_: Node) -> Self {
+        VectorElementType::default()
+    }
+}
+
+/// Parser-internal `likeEscapeSpec` (LIKE ... ESCAPE).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LikeEscapeSpec {
+    pub escape: String,
+    pub explicit: bool,
+}
+impl FromNode for LikeEscapeSpec {
+    fn from_node(_: Node) -> Self {
+        LikeEscapeSpec {
+            escape: "\\".into(),
+            explicit: false,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum Expr {
+    /// `ColumnNameExpr`.
     Column(Box<ColumnName>),
-    Value(Box<Datum>),
+    Value(Box<ValueExpr>),
+    ParamMarker(Box<ParamMarkerExpr>),
     Binary(Box<BinaryOperationExpr>),
     Unary(Box<UnaryOperationExpr>),
     FuncCall(Box<FuncCallExpr>),
+    FuncCast(Box<FuncCastExpr>),
+    JSONSumCrc32(Box<JSONSumCrc32Expr>),
+    Aggregate(Box<AggregateFuncExpr>),
+    Window(Box<WindowFuncExpr>),
+    /// `ParenthesesExpr`.
     Paren(Box<Expr>),
     PatternIn(Box<PatternInExpr>),
+    PatternLike(Box<PatternLikeOrIlikeExpr>),
+    PatternRegexp(Box<PatternRegexpExpr>),
     Between(Box<BetweenExpr>),
     IsNull(Box<IsNullExpr>),
+    IsTruth(Box<IsTruthExpr>),
+    Case(Box<CaseExpr>),
+    Subquery(Box<SubqueryExpr>),
+    Exists(Box<ExistsSubqueryExpr>),
+    CompareSubquery(Box<CompareSubqueryExpr>),
+    Variable(Box<VariableExpr>),
+    Row(Box<RowExpr>),
+    SetCollation(Box<SetCollationExpr>),
+    Default(Box<DefaultExpr>),
+    /// `ValuesExpr` (`VALUES(col)`).
+    Values(Box<ColumnName>),
+    MatchAgainst(Box<MatchAgainst>),
+    /// `TableNameExpr` (sequence functions).
+    TableName(Box<TableName>),
+    /// `TimeUnitExpr`.
+    TimeUnit(TimeUnitType),
+    /// `GetFormatSelectorExpr`.
+    GetFormatSelector(GetFormatSelectorType),
+    /// `TrimDirectionExpr`.
+    TrimDirection(TrimDirectionType),
+    /// `PositionExpr` (ORDER/GROUP BY position).
     Position(i64),
     Unported(Box<Node>),
 }
 impl Default for Expr {
     fn default() -> Self {
-        Expr::Value(Box::new(Datum::Null))
+        Expr::Value(Box::new(ValueExpr::new(Datum::Null, "", "")))
     }
 }
 impl FromNode for Expr {
@@ -127,6 +424,12 @@ impl FromNode for Expr {
     }
 }
 
+#[derive(Debug)]
+pub struct ParamMarkerExpr {
+    /// Byte offset of the `?`.
+    pub offset: usize,
+    pub order: usize,
+}
 #[derive(Debug)]
 pub struct BinaryOperationExpr {
     pub op: Op,
@@ -140,15 +443,73 @@ pub struct UnaryOperationExpr {
 }
 #[derive(Debug, Default)]
 pub struct FuncCallExpr {
-    pub generic: bool,
+    pub tp: FuncCallExprType,
     pub schema: CIStr,
     pub fn_name: CIStr,
     pub args: Vec<Expr>,
 }
 #[derive(Debug)]
+pub struct FuncCastExpr {
+    pub expr: Expr,
+    pub tp: Box<FieldType>,
+    pub function_type: CastFunctionType,
+    pub explicit_char_set: bool,
+}
+#[derive(Debug)]
+pub struct JSONSumCrc32Expr {
+    pub expr: Expr,
+    pub tp: Box<FieldType>,
+    pub explicit_char_set: bool,
+}
+#[derive(Debug, Default)]
+pub struct AggregateFuncExpr {
+    pub f: String,
+    pub args: Vec<Expr>,
+    pub distinct: bool,
+    pub order: Option<Box<OrderByClause>>,
+}
+#[derive(Debug, Default)]
+pub struct WindowFuncExpr {
+    pub name: String,
+    pub args: Vec<Expr>,
+    pub distinct: bool,
+    pub ignore_null: bool,
+    pub from_last: bool,
+    pub spec: WindowSpec,
+}
+#[derive(Debug)]
 pub struct PatternInExpr {
     pub expr: Expr,
     pub list: Vec<Expr>,
+    pub not: bool,
+    /// `Sel`: a `SubqueryExpr`.
+    pub sel: Option<Expr>,
+}
+#[derive(Debug)]
+pub struct PatternLikeOrIlikeExpr {
+    pub expr: Expr,
+    pub pattern: Expr,
+    pub not: bool,
+    pub escape: u8,
+    pub escape_explicit: bool,
+    pub is_like: bool,
+}
+impl FromNode for PatternLikeOrIlikeExpr {
+    fn from_node(n: Node) -> Self {
+        PatternLikeOrIlikeExpr {
+            expr: Expr::from_node(n),
+            pattern: Expr::default(),
+            not: false,
+            escape: b'\\',
+            escape_explicit: false,
+            is_like: true,
+        }
+    }
+}
+#[derive(Debug)]
+pub struct PatternRegexpExpr {
+    pub expr: Expr,
+    pub pattern: Expr,
     pub not: bool,
 }
 #[derive(Debug)]
@@ -162,6 +523,193 @@ pub struct BetweenExpr {
 pub struct IsNullExpr {
     pub expr: Expr,
     pub not: bool,
+}
+#[derive(Debug)]
+pub struct IsTruthExpr {
+    pub expr: Expr,
+    pub not: bool,
+    pub true_: i64,
+}
+#[derive(Debug, Default)]
+pub struct WhenClause {
+    pub expr: Expr,
+    pub result: Expr,
+}
+impl FromNode for WhenClause {
+    fn from_node(n: Node) -> Self {
+        WhenClause {
+            expr: Expr::from_node(n),
+            result: Expr::default(),
+        }
+    }
+}
+#[derive(Debug)]
+pub struct CaseExpr {
+    pub value: Option<Expr>,
+    pub when_clauses: Vec<WhenClause>,
+    pub else_clause: Option<Expr>,
+}
+#[derive(Debug)]
+pub struct SubqueryExpr {
+    pub query: ResultSetNode,
+    pub multi_rows: bool,
+    pub exists: bool,
+}
+#[derive(Debug)]
+pub struct ExistsSubqueryExpr {
+    /// A `SubqueryExpr`.
+    pub sel: Expr,
+    pub not: bool,
+}
+#[derive(Debug)]
+pub struct CompareSubqueryExpr {
+    pub l: Expr,
+    pub op: Op,
+    /// A `SubqueryExpr`.
+    pub r: Expr,
+    pub all: bool,
+}
+#[derive(Debug, Default)]
+pub struct VariableExpr {
+    pub name: String,
+    pub is_global: bool,
+    pub is_instance: bool,
+    pub is_system: bool,
+    pub explicit_scope: bool,
+    pub value: Option<Expr>,
+}
+#[derive(Debug)]
+pub struct RowExpr {
+    pub values: Vec<Expr>,
+}
+impl FromNode for RowExpr {
+    fn from_node(n: Node) -> Self {
+        RowExpr {
+            values: vec![Expr::from_node(n)],
+        }
+    }
+}
+#[derive(Debug)]
+pub struct SetCollationExpr {
+    pub expr: Expr,
+    pub collate: String,
+}
+#[derive(Debug, Default)]
+pub struct DefaultExpr {
+    pub name: Option<Box<ColumnName>>,
+}
+#[derive(Debug)]
+pub struct MatchAgainst {
+    pub column_names: Vec<ColumnName>,
+    pub against: Expr,
+    /// `ast.FulltextSearchModifier`.
+    pub modifier: i64,
+}
+/// `ast.WindowSpec`.
+#[derive(Debug, Default)]
+pub struct WindowSpec {
+    pub name: CIStr,
+    /// `Ref`: the window this one is based on (`w2 AS (w1 ORDER BY a)`).
+    pub ref_: CIStr,
+    pub partition_by: Option<Box<PartitionByClause>>,
+    pub order_by: Option<Box<OrderByClause>>,
+    pub frame: Option<Box<FrameClause>>,
+    /// `OVER w` (as opposed to `OVER (w)`).
+    pub only_alias: bool,
+    /// Built by a placeholder action (kind of the production).
+    pub unported: Option<&'static str>,
+}
+impl FromNode for WindowSpec {
+    fn from_node(n: Node) -> Self {
+        WindowSpec {
+            unported: Some(n.kind),
+            ..Default::default()
+        }
+    }
+}
+/// `ast.PartitionByClause`.
+#[derive(Debug, Default)]
+pub struct PartitionByClause {
+    pub items: Vec<ByItem>,
+}
+impl FromNode for PartitionByClause {
+    fn from_node(n: Node) -> Self {
+        PartitionByClause {
+            items: vec![ByItem::from_node(n)],
+        }
+    }
+}
+/// `ast.FrameType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FrameType {
+    #[default]
+    Rows,
+    Ranges,
+    Groups,
+}
+impl FromNode for FrameType {
+    fn from_node(_: Node) -> Self {
+        FrameType::Rows
+    }
+}
+/// `ast.BoundType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoundType {
+    #[default]
+    Following,
+    Preceding,
+    CurrentRow,
+}
+/// `ast.FrameBound`.
+#[derive(Debug, Default)]
+pub struct FrameBound {
+    pub tp: BoundType,
+    pub unbounded: bool,
+    pub expr: Option<Expr>,
+    pub unit: TimeUnitType,
+}
+impl FromNode for FrameBound {
+    fn from_node(n: Node) -> Self {
+        FrameBound {
+            expr: Some(Expr::from_node(n)),
+            ..Default::default()
+        }
+    }
+}
+/// `ast.FrameExtent`.
+#[derive(Debug, Default)]
+pub struct FrameExtent {
+    pub start: FrameBound,
+    pub end: FrameBound,
+}
+impl FromNode for FrameExtent {
+    fn from_node(n: Node) -> Self {
+        FrameExtent {
+            start: FrameBound::from_node(n),
+            end: FrameBound::default(),
+        }
+    }
+}
+/// `ast.FrameClause`.
+#[derive(Debug, Default)]
+pub struct FrameClause {
+    pub tp: FrameType,
+    pub extent: FrameExtent,
+}
+impl FromNode for FrameClause {
+    fn from_node(n: Node) -> Self {
+        FrameClause {
+            tp: FrameType::Rows,
+            extent: FrameExtent::from_node(n),
+        }
+    }
+}
+
+/// `ast.FulltextSearchModifier*`.
+pub mod fulltext_modifier {
+    pub const BOOLEAN_MODE: i64 = 1;
+    pub const MODE_MASK: i64 = 0xF;
+    pub const WITH_QUERY_EXPANSION: i64 = 1 << 4;
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -417,410 +965,5 @@ impl FromNode for Limit {
             count: Expr::from_node(n),
             offset: None,
         }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Restore (port of the Go Restore methods for the subset above, DefaultRestoreFlags)
-// ---------------------------------------------------------------------------------------------
-fn name(out: &mut String, s: &str) {
-    out.push('`');
-    out.push_str(&s.replace('`', "``"));
-    out.push('`');
-}
-
-fn go_float_e(f: f64) -> String {
-    // strconv.FormatFloat(f, 'e', -1, 64): shortest repr, exponent with sign and >= 2 digits
-    let s = format!("{f:e}");
-    let (m, e) = s.split_once('e').unwrap();
-    let (sign, digits) = if let Some(d) = e.strip_prefix('-') {
-        ('-', d)
-    } else {
-        ('+', e)
-    };
-    format!("{m}e{sign}{digits:0>2}")
-}
-
-impl Datum {
-    fn restore(&self, out: &mut String) -> R {
-        match self {
-            Datum::Null => out.push_str("NULL"),
-            Datum::Bool(b) => out.push_str(if *b { "TRUE" } else { "FALSE" }),
-            Datum::Int(i) => out.push_str(&i.to_string()),
-            Datum::Uint(u) => out.push_str(&u.to_string()),
-            Datum::Float(f) => out.push_str(&go_float_e(*f)),
-            Datum::Decimal(d) => out.push_str(d),
-            Datum::Str(s) => {
-                // NewValueExpr(s, parser.charset="utf8mb4", ...) -> restored with its introducer
-                out.push_str("_UTF8MB4");
-                // KindString with the default utf8mb4 charset -> "_utf8mb4'...'"? No: the Go
-                // ValueExpr only gets a charset when the literal has an explicit introducer.
-                out.push('\'');
-                out.push_str(&s.replace('\'', "''"));
-                out.push('\'');
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Expr {
-    pub fn restore(&self, out: &mut String) -> R {
-        match self {
-            Expr::Column(c) => c.restore(out),
-            Expr::Value(d) => d.restore(out),
-            Expr::Binary(b) => {
-                b.l.restore(out)?;
-                let (lit, kw) = b.op.literal();
-                if kw {
-                    out.push(' ');
-                }
-                out.push_str(lit);
-                if kw {
-                    out.push(' ');
-                }
-                b.r.restore(out)
-            }
-            Expr::Unary(u) => {
-                out.push_str(u.op.literal().0);
-                u.v.restore(out)
-            }
-            Expr::FuncCall(f) => {
-                if !f.schema.o.is_empty() {
-                    name(out, &f.schema.o);
-                    out.push('.');
-                }
-                if f.generic {
-                    name(out, &f.fn_name.o);
-                } else {
-                    out.push_str(&f.fn_name.o.to_uppercase());
-                }
-                out.push('(');
-                for (i, a) in f.args.iter().enumerate() {
-                    if i != 0 {
-                        out.push_str(", ");
-                    }
-                    a.restore(out)?;
-                }
-                out.push(')');
-                Ok(())
-            }
-            Expr::Paren(e) => {
-                out.push('(');
-                e.restore(out)?;
-                out.push(')');
-                Ok(())
-            }
-            Expr::PatternIn(p) => {
-                p.expr.restore(out)?;
-                out.push_str(if p.not { " NOT IN " } else { " IN " });
-                out.push('(');
-                for (i, e) in p.list.iter().enumerate() {
-                    if i != 0 {
-                        out.push(',');
-                    }
-                    e.restore(out)?;
-                }
-                out.push(')');
-                Ok(())
-            }
-            Expr::Between(b) => {
-                b.expr.restore(out)?;
-                out.push_str(if b.not { " NOT BETWEEN " } else { " BETWEEN " });
-                b.left.restore(out)?;
-                out.push_str(" AND ");
-                b.right.restore(out)
-            }
-            Expr::IsNull(n) => {
-                n.expr.restore(out)?;
-                out.push_str(if n.not { " IS NOT NULL" } else { " IS NULL" });
-                Ok(())
-            }
-            Expr::Position(n) => {
-                out.push_str(&n.to_string());
-                Ok(())
-            }
-            Expr::Unported(n) => Err(format!("unported expr {}", n.kind)),
-        }
-    }
-}
-
-impl ColumnName {
-    fn restore(&self, out: &mut String) -> R {
-        if !self.schema.o.is_empty() {
-            name(out, &self.schema.o);
-            out.push('.');
-        }
-        if !self.table.o.is_empty() {
-            name(out, &self.table.o);
-            out.push('.');
-        }
-        name(out, &self.name.o);
-        Ok(())
-    }
-}
-
-impl Stmt {
-    pub fn restore(&self, out: &mut String) -> R {
-        match self {
-            Stmt::Select(s) => s.restore(out),
-            Stmt::Unported(n) => Err(format!("unported stmt {}", n.kind)),
-        }
-    }
-}
-
-fn unported_if<T>(o: &Option<T>, what: &str) -> R {
-    if o.is_some() {
-        Err(format!("unported {what}"))
-    } else {
-        Ok(())
-    }
-}
-
-impl SelectStmt {
-    pub fn restore(&self, out: &mut String) -> R {
-        if self.kind != SelectStmtKind::Select {
-            return Err("unported TABLE/VALUES".into());
-        }
-        out.push_str("SELECT ");
-        let o = &self.select_stmt_opts;
-        if !o.table_hints.is_empty() {
-            return Err("unported hints".into());
-        }
-        match o.priority {
-            1 => out.push_str("LOW_PRIORITY "),
-            2 => out.push_str("HIGH_PRIORITY "),
-            3 => out.push_str("DELAYED "),
-            _ => {}
-        }
-        if o.sql_small_result {
-            out.push_str("SQL_SMALL_RESULT ");
-        }
-        if o.sql_big_result {
-            out.push_str("SQL_BIG_RESULT ");
-        }
-        if o.sql_buffer_result {
-            out.push_str("SQL_BUFFER_RESULT ");
-        }
-        if !o.sql_cache {
-            out.push_str("SQL_NO_CACHE ");
-        }
-        if o.calc_found_rows {
-            out.push_str("SQL_CALC_FOUND_ROWS ");
-        }
-        if self.distinct {
-            out.push_str("DISTINCT ");
-        } else if o.explicit_all {
-            out.push_str("ALL ");
-        }
-        if o.straight_join {
-            out.push_str("STRAIGHT_JOIN ");
-        }
-        for (i, f) in self.fields.fields.iter().enumerate() {
-            if i != 0 {
-                out.push(',');
-            }
-            f.restore(out)?;
-        }
-        if let Some(from) = &self.from {
-            out.push_str(" FROM ");
-            from.table_refs.restore(out)?;
-        }
-        if self.from.is_none() && self.where_.is_some() {
-            out.push_str(" FROM DUAL");
-        }
-        if let Some(w) = &self.where_ {
-            out.push_str(" WHERE ");
-            w.restore(out)?;
-        }
-        if let Some(g) = &self.group_by {
-            out.push_str(" GROUP BY ");
-            for (i, it) in g.items.iter().enumerate() {
-                if i != 0 {
-                    out.push(',');
-                }
-                it.restore(out)?;
-            }
-            if g.rollup {
-                out.push_str(" WITH ROLLUP");
-            }
-        }
-        if let Some(h) = &self.having {
-            out.push_str(" HAVING ");
-            h.expr.restore(out)?;
-        }
-        if !self.window_specs.is_empty() {
-            return Err("unported WINDOW".into());
-        }
-        if let Some(ob) = &self.order_by {
-            out.push_str(" ORDER BY ");
-            for (i, it) in ob.items.iter().enumerate() {
-                if i != 0 {
-                    out.push(',');
-                }
-                it.restore(out)?;
-            }
-        }
-        if let Some(l) = &self.limit {
-            out.push_str(" LIMIT ");
-            if let Some(off) = &l.offset {
-                off.restore(out)?;
-                out.push(',');
-            }
-            l.count.restore(out)?;
-        }
-        unported_if(&self.lock_info, "lock")?;
-        unported_if(&self.select_into_opt, "into")?;
-        Ok(())
-    }
-}
-
-impl SelectField {
-    fn restore(&self, out: &mut String) -> R {
-        if let Some(w) = &self.wild_card {
-            if !w.schema.o.is_empty() {
-                name(out, &w.schema.o);
-                out.push('.');
-            }
-            if !w.table.o.is_empty() {
-                name(out, &w.table.o);
-                out.push('.');
-            }
-            out.push('*');
-        }
-        if let Some(e) = &self.expr {
-            e.restore(out)?;
-        }
-        if !self.as_name.o.is_empty() {
-            out.push_str(" AS ");
-            name(out, &self.as_name.o);
-        }
-        Ok(())
-    }
-}
-
-impl ByItem {
-    fn restore(&self, out: &mut String) -> R {
-        self.expr.restore(out)?;
-        if self.desc {
-            out.push_str(" DESC");
-        }
-        Ok(())
-    }
-}
-
-impl ResultSetNode {
-    fn restore(&self, out: &mut String) -> R {
-        match self {
-            ResultSetNode::TableName(t) => t.restore_with_alias(out, &CIStr::default()),
-            ResultSetNode::TableSource(t) => t.restore(out),
-            ResultSetNode::Join(j) => j.restore(out),
-            ResultSetNode::Select(_) => Err("unported subquery".into()),
-            ResultSetNode::Unported(n) => Err(format!("unported resultset {}", n.kind)),
-        }
-    }
-}
-
-impl TableSource {
-    fn restore(&self, out: &mut String) -> R {
-        match &self.source {
-            ResultSetNode::TableName(tn) => tn.restore_with_alias(out, &self.as_name),
-            ResultSetNode::TableSource(_) => Err("nested table source".into()),
-            ResultSetNode::Join(j) => {
-                j.restore(out)?;
-                if !self.as_name.o.is_empty() {
-                    out.push_str(" AS ");
-                    name(out, &self.as_name.o);
-                }
-                Ok(())
-            }
-            ResultSetNode::Select(_) | ResultSetNode::Unported(_) => self.source.restore(out),
-        }
-    }
-}
-
-impl TableName {
-    pub fn restore_with_alias(&self, out: &mut String, as_name: &CIStr) -> R {
-        if !self.schema.o.is_empty() {
-            name(out, &self.schema.o);
-            out.push('.');
-        }
-        name(out, &self.name.o);
-        if !self.partition_names.is_empty() {
-            out.push_str(" PARTITION(");
-            for (i, p) in self.partition_names.iter().enumerate() {
-                if i != 0 {
-                    out.push_str(", ");
-                }
-                name(out, &p.o);
-            }
-            out.push(')');
-        }
-        if !as_name.o.is_empty() {
-            out.push_str(" AS ");
-            name(out, &as_name.o);
-        }
-        unported_if(&self.as_of, "as of")?;
-        if !self.index_hints.is_empty() {
-            return Err("unported index hints".into());
-        }
-        unported_if(&self.table_sample, "tablesample")
-    }
-}
-
-impl Join {
-    fn restore(&self, out: &mut String) -> R {
-        let left = self.left.as_ref().ok_or("join without left")?;
-        let left_is_join = matches!(left, ResultSetNode::Join(_));
-        let mut use_comma_join = false;
-        if let ResultSetNode::Join(lj) = left
-            && lj.right.is_none()
-            && let Some(ResultSetNode::TableSource(ts)) = &lj.left
-            && matches!(ts.source, ResultSetNode::Select(_))
-        {
-            use_comma_join = true;
-        }
-        if left_is_join && !use_comma_join {
-            out.push('(');
-        }
-        left.restore(out)?;
-        if left_is_join && !use_comma_join {
-            out.push(')');
-        }
-        let Some(right) = &self.right else {
-            return Ok(());
-        };
-        if self.natural_join {
-            out.push_str(" NATURAL");
-        }
-        match self.tp {
-            JoinType::LeftJoin => out.push_str(" LEFT"),
-            JoinType::RightJoin => out.push_str(" RIGHT"),
-            JoinType::FullJoin => out.push_str(" FULL OUTER"),
-            JoinType::CrossJoin => {}
-        }
-        if self.straight_join {
-            out.push_str(" STRAIGHT_JOIN ");
-        } else if use_comma_join {
-            out.push_str(", ");
-        } else {
-            out.push_str(" JOIN ");
-        }
-        let right_is_join = matches!(right, ResultSetNode::Join(_));
-        if right_is_join {
-            out.push('(');
-        }
-        right.restore(out)?;
-        if right_is_join {
-            out.push(')');
-        }
-        if let Some(on) = &self.on {
-            out.push_str(" ON ");
-            on.expr.restore(out)?;
-        }
-        if !self.using.is_empty() {
-            return Err("unported USING".into());
-        }
-        Ok(())
     }
 }

@@ -575,13 +575,13 @@ ColumnDef -> Box<ColumnDef>:
   | ColumnName serial ColumnOptionListOpt { ph("ColumnDef#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
   ;
 ColumnName -> Box<ColumnName>:
-    Identifier { ph("ColumnName#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | Identifier '.' Identifier { ph("ColumnName#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | Identifier '.' Identifier '.' Identifier { ph("ColumnName#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    Identifier { Box::new(ColumnName { name: CIStr::new($1), ..Default::default() }) }
+  | Identifier '.' Identifier { Box::new(ColumnName { table: CIStr::new($1), name: CIStr::new($3), ..Default::default() }) }
+  | Identifier '.' Identifier '.' Identifier { Box::new(ColumnName { schema: CIStr::new($1), table: CIStr::new($3), name: CIStr::new($5) }) }
   ;
 ColumnNameList -> Vec<ColumnName>:
-    ColumnName { ph("ColumnNameList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ColumnNameList ',' ColumnName { ph("ColumnNameList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    ColumnName { vec![*$1] }
+  | ColumnNameList ',' ColumnName { { let mut v = $1; v.push(*$3); v } }
   ;
 ColumnNameListOpt -> Vec<ColumnName>:
      { Vec::new() }
@@ -763,8 +763,8 @@ NextValueForSequenceParentheses -> Expr:
   | NextValueForSequence { $1 }
   ;
 NextValueForSequence -> Expr:
-    next value forKwd TableName { ph("NextValueForSequence#0", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | nextval '(' TableName ')' { ph("NextValueForSequence#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    next value forKwd TableName { call(NEXT_VAL, vec![Expr::TableName($4)]) }
+  | nextval '(' TableName ')' { call(NEXT_VAL, vec![Expr::TableName($3)]) }
   ;
 NowSymFunc -> String:
     currentTs { tok_text($lexer, &$1) }
@@ -786,10 +786,10 @@ SignedLiteral -> Expr:
   | '+' NumLiteral { ph("SignedLiteral#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
   | '-' NumLiteral { ph("SignedLiteral#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
   ;
-NumLiteral -> Item:
-    intLit { ph("NumLiteral#0", $span, vec![]) }
-  | floatLit { ph("NumLiteral#1", $span, vec![]) }
-  | decLit { ph("NumLiteral#2", $span, vec![]) }
+NumLiteral -> Datum:
+    intLit { int_lit_datum($lexer.src_str(tok_span(&$1))) }
+  | floatLit { Datum::Float($lexer.src_str(tok_span(&$1)).parse().unwrap_or(0.0)) }
+  | decLit { Datum::Decimal(normalize_decimal($lexer.src_str(tok_span(&$1)))) }
   ;
 StatsType -> u8:
     cardinality { ph("StatsType#0", $span, vec![]) }
@@ -1407,7 +1407,17 @@ LengthNum -> u64:
     NUM { $1 as u64 }
   ;
 Int64Num -> i64:
-    NUM { ph("Int64Num#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    NUM { {
+        // getInt64FromNUM: NUM holds an uint64 above MaxInt64
+        let s = $lexer.src_str($span);
+        match s.parse::<i64>() {
+            Ok(v) => v,
+            Err(_) => {
+                p.fail(format!("{s} is out of range [–9223372036854775808,9223372036854775807]"), $span.start());
+                0
+            }
+        }
+    } }
   ;
 NUM -> i64:
     intLit { $lexer.src_str(tok_span(&$1)).parse::<i64>().unwrap_or(0) }
@@ -1426,18 +1436,23 @@ CancelImportStmt -> Stmt:
     cancel importKwd job Int64Num { ph("CancelImportStmt#0", $span, vec![Box::new($4) as Box<dyn Any>]) }
   ;
 Expression -> Expr:
-    singleAtIdentifier assignmentEq Expression %prec assignmentEq { ph("Expression#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    singleAtIdentifier assignmentEq Expression %prec assignmentEq { Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1))), value: Some($3), ..Default::default() })) }
   | Expression logOr Expression %prec pipes { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::LogicOr, l: $1, r: $3 })) }
   | Expression xor Expression %prec xor { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::LogicXor, l: $1, r: $3 })) }
   | Expression logAnd Expression %prec andand { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::LogicAnd, l: $1, r: $3 })) }
   | not Expression %prec not { {
-        // goyacc: if $2 is *ast.ExistsSubqueryExpr, flip its Not flag instead (unported: EXISTS)
-        Expr::Unary(Box::new(UnaryOperationExpr { op: Op::Not, v: $2 }))
+        match $2 {
+            Expr::Exists(mut e) => {
+                e.not = !e.not;
+                Expr::Exists(e)
+            }
+            other => Expr::Unary(Box::new(UnaryOperationExpr { op: Op::Not, v: other })),
+        }
     } }
-  | match '(' ColumnNameList ')' against '(' BitExpr FulltextSearchModifierOpt ')' { ph("Expression#5", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | BoolPri IsOrNotOp trueKwd %prec is { ph("Expression#6", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | BoolPri IsOrNotOp falseKwd %prec is { ph("Expression#7", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | BoolPri IsOrNotOp unknown %prec is { ph("Expression#8", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | match '(' ColumnNameList ')' against '(' BitExpr FulltextSearchModifierOpt ')' { Expr::MatchAgainst(Box::new(MatchAgainst { column_names: $3, against: $7, modifier: $8 })) }
+  | BoolPri IsOrNotOp trueKwd %prec is { Expr::IsTruth(Box::new(IsTruthExpr { expr: $1, not: !$2, true_: 1 })) }
+  | BoolPri IsOrNotOp falseKwd %prec is { Expr::IsTruth(Box::new(IsTruthExpr { expr: $1, not: !$2, true_: 0 })) }
+  | BoolPri IsOrNotOp unknown %prec is { Expr::IsNull(Box::new(IsNullExpr { expr: $1, not: !$2 })) }
   | BoolPri { $1 }
   ;
 DefaultOrExpression -> Expr:
@@ -1449,11 +1464,11 @@ MaxValueOrExpression -> Expr:
   | BitExpr { $1 }
   ;
 FulltextSearchModifierOpt -> i64:
-     { ph("FulltextSearchModifierOpt#0", $span, vec![]) }
-  | in natural language mode { ph("FulltextSearchModifierOpt#1", $span, vec![]) }
-  | in natural language mode with query expansion { ph("FulltextSearchModifierOpt#2", $span, vec![]) }
-  | in booleanType mode { ph("FulltextSearchModifierOpt#3", $span, vec![]) }
-  | with query expansion { ph("FulltextSearchModifierOpt#4", $span, vec![]) }
+     { 0 }
+  | in natural language mode { 0 }
+  | in natural language mode with query expansion { fulltext_modifier::WITH_QUERY_EXPANSION }
+  | in booleanType mode { fulltext_modifier::BOOLEAN_MODE }
+  | with query expansion { fulltext_modifier::WITH_QUERY_EXPANSION }
   ;
 logOr -> String:
     pipesAsOr { tok_text($lexer, &$1) }
@@ -1484,13 +1499,20 @@ FuncDatetimePrecListOpt -> Vec<Expr>:
   | FuncDatetimePrecList { $1 }
   ;
 FuncDatetimePrecList -> Vec<Expr>:
-    intLit { ph("FuncDatetimePrecList#0", $span, vec![]) }
+    intLit { vec![val(int_lit_datum($lexer.src_str(tok_span(&$1))), p)] }
   ;
 BoolPri -> Expr:
     BoolPri IsOrNotOp null %prec is { Expr::IsNull(Box::new(IsNullExpr { expr: $1, not: !$2 })) }
   | BoolPri CompareOp PredicateExpr %prec eq { Expr::Binary(Box::new(BinaryOperationExpr { op: $2, l: $1, r: $3 })) }
-  | BoolPri CompareOp AnyOrAll SubSelect %prec eq { ph("BoolPri#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | BoolPri CompareOp singleAtIdentifier assignmentEq PredicateExpr %prec assignmentEq { ph("BoolPri#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | BoolPri CompareOp AnyOrAll SubSelect %prec eq { {
+        let mut sq = $4;
+        if let Expr::Subquery(s) = &mut sq { s.multi_rows = true; }
+        Expr::CompareSubquery(Box::new(CompareSubqueryExpr { op: $2, l: $1, r: sq, all: $3 }))
+    } }
+  | BoolPri CompareOp singleAtIdentifier assignmentEq PredicateExpr %prec assignmentEq { {
+        let variable = Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$3))), value: Some($5), ..Default::default() }));
+        Expr::Binary(Box::new(BinaryOperationExpr { op: $2, l: $1, r: variable }))
+    } }
   | PredicateExpr { $1 }
   ;
 CompareOp -> Op:
@@ -1533,13 +1555,39 @@ AnyOrAll -> bool:
   | all { true }
   ;
 PredicateExpr -> Expr:
-    BitExpr InOrNotOp '(' ExpressionList ')' { Expr::PatternIn(Box::new(PatternInExpr { expr: $1, not: !$2, list: $4 })) }
-  | BitExpr InOrNotOp SubSelect { ph("PredicateExpr#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    BitExpr InOrNotOp '(' ExpressionList ')' { Expr::PatternIn(Box::new(PatternInExpr { expr: $1, not: !$2, list: $4, sel: None })) }
+  | BitExpr InOrNotOp SubSelect { {
+        let mut sq = $3;
+        if let Expr::Subquery(s) = &mut sq { s.multi_rows = true; }
+        Expr::PatternIn(Box::new(PatternInExpr { expr: $1, not: !$2, list: Vec::new(), sel: Some(sq) }))
+    } }
   | BitExpr BetweenOrNotOp BitExpr and PredicateExpr { Expr::Between(Box::new(BetweenExpr { expr: $1, left: $3, right: $5, not: !$2 })) }
-  | BitExpr LikeOrNotOp SimpleExpr LikeOrIlikeEscapeOpt { ph("PredicateExpr#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | BitExpr IlikeOrNotOp SimpleExpr LikeOrIlikeEscapeOpt { ph("PredicateExpr#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | BitExpr RegexpOrNotOp SimpleExpr { ph("PredicateExpr#5", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | BitExpr memberof '(' SimpleExpr ')' { ph("PredicateExpr#6", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | BitExpr LikeOrNotOp SimpleExpr LikeOrIlikeEscapeOpt { {
+        let spec = $4;
+        if spec.escape.len() > 1 {
+            // goyacc: yylex.AppendError(ErrWrongArguments.GenWithStackByArgs("ESCAPE")); return 1
+            p.fail("Incorrect arguments to ESCAPE", $span.start());
+        }
+        // ESCAPE '' is explicit with no escape character (Escape = 0).
+        let escape = spec.escape.as_bytes().first().copied().unwrap_or(0);
+        Expr::PatternLike(Box::new(PatternLikeOrIlikeExpr {
+            expr: $1, pattern: $3, not: !$2, escape, escape_explicit: spec.explicit, is_like: true,
+        }))
+    } }
+  | BitExpr IlikeOrNotOp SimpleExpr LikeOrIlikeEscapeOpt { {
+        let spec = $4;
+        if spec.escape.len() > 1 {
+            // goyacc: yylex.AppendError(ErrWrongArguments.GenWithStackByArgs("ESCAPE")); return 1
+            p.fail("Incorrect arguments to ESCAPE", $span.start());
+        }
+        // ESCAPE '' is explicit with no escape character (Escape = 0).
+        let escape = spec.escape.as_bytes().first().copied().unwrap_or(0);
+        Expr::PatternLike(Box::new(PatternLikeOrIlikeExpr {
+            expr: $1, pattern: $3, not: !$2, escape, escape_explicit: spec.explicit, is_like: false,
+        }))
+    } }
+  | BitExpr RegexpOrNotOp SimpleExpr { Expr::PatternRegexp(Box::new(PatternRegexpExpr { expr: $1, pattern: $3, not: !$2 })) }
+  | BitExpr memberof '(' SimpleExpr ')' { call(JSON_MEMBER_OF, vec![$1, $4]) }
   | BitExpr { $1 }
   ;
 RegexpSym -> String:
@@ -1547,8 +1595,8 @@ RegexpSym -> String:
   | rlike { tok_text($lexer, &$1) }
   ;
 LikeOrIlikeEscapeOpt -> Box<LikeEscapeSpec>:
-     %prec empty { ph("LikeOrIlikeEscapeOpt#0", $span, vec![]) }
-  | escape stringLit { ph("LikeOrIlikeEscapeOpt#1", $span, vec![]) }
+     %prec empty { Box::new(LikeEscapeSpec { escape: "\\".into(), explicit: false }) }
+  | escape stringLit { Box::new(LikeEscapeSpec { escape: tok_text($lexer, &$2), explicit: true }) }
   ;
 Field -> Box<SelectField>:
     '*' %prec '*' { Box::new(SelectField { wild_card: Some(Box::new(WildCardField::default())), ..Default::default() }) }
@@ -2349,22 +2397,83 @@ ReplaceIntoStmt -> Stmt:
     replace TableOptimizerHintsOpt PriorityOpt IntoOpt TableName PartitionNameListOpt InsertValues { ph("ReplaceIntoStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
   ;
 Literal -> Expr:
-    falseKwd { Expr::Value(Box::new(Datum::Bool(false))) }
-  | null { Expr::Value(Box::new(Datum::Null)) }
-  | trueKwd { Expr::Value(Box::new(Datum::Bool(true))) }
-  | floatLit { Expr::Value(Box::new(Datum::Float($lexer.src_str(tok_span(&$1)).parse().unwrap_or(0.0)))) }
-  | decLit { Expr::Value(Box::new(Datum::Decimal(normalize_decimal($lexer.src_str(tok_span(&$1)))))) }
-  | intLit { Expr::Value(Box::new(int_lit_datum($lexer.src_str(tok_span(&$1))))) }
+    falseKwd { val(Datum::Bool(false), p) }
+  | null { val(Datum::Null, p) }
+  | trueKwd { val(Datum::Bool(true), p) }
+  | floatLit { val(Datum::Float($lexer.src_str(tok_span(&$1)).parse().unwrap_or(0.0)), p) }
+  | decLit { val(Datum::Decimal(normalize_decimal($lexer.src_str(tok_span(&$1)))), p) }
+  | intLit { val(int_lit_datum($lexer.src_str(tok_span(&$1))), p) }
   | StringLiteral %prec lowerThanStringLitToken { $1 }
-  | underscoreCS stringLit { ph("Literal#7", $span, vec![]) }
-  | hexLit { ph("Literal#8", $span, vec![]) }
-  | bitLit { ph("Literal#9", $span, vec![]) }
-  | underscoreCS hexLit { ph("Literal#10", $span, vec![]) }
-  | underscoreCS bitLit { ph("Literal#11", $span, vec![]) }
+  | underscoreCS stringLit { {
+        // See https://dev.mysql.com/doc/refman/5.7/en/charset-literal.html
+        let cs = underscore_cs($lexer.src_str(tok_span(&$1)));
+        match crate::charset::get_default_collation_legacy(cs) {
+            None => {
+                p.fail(format!("Unsupported character introducer: '{cs}'"), $span.start());
+                Expr::default()
+            }
+            Some(co) => {
+                // tp.SetCharset/SetCollate after NewValueExpr; flags only matter for evaluation.
+                let mut expr = ValueExpr::new(Datum::Str(tok_text($lexer, &$2)), cs, co);
+                expr.charset = cs;
+                expr.collate = co;
+                Expr::Value(Box::new(expr))
+            }
+        }
+    } }
+  | hexLit { val(hex_lit($lexer.src_str(tok_span(&$1))), p) }
+  | bitLit { val(bit_lit($lexer.src_str(tok_span(&$1))), p) }
+  | underscoreCS hexLit { {
+        // See https://dev.mysql.com/doc/refman/5.7/en/charset-literal.html
+        let cs = underscore_cs($lexer.src_str(tok_span(&$1)));
+        match crate::charset::get_default_collation_legacy(cs) {
+            None => {
+                p.fail(format!("Unsupported character introducer: '{cs}'"), $span.start());
+                Expr::default()
+            }
+            Some(co) => {
+                // tp.SetCharset/SetCollate after NewValueExpr; flags only matter for evaluation.
+                let mut expr = ValueExpr::new(hex_lit($lexer.src_str(tok_span(&$2))), cs, co);
+                expr.charset = cs;
+                expr.collate = co;
+                Expr::Value(Box::new(expr))
+            }
+        }
+    } }
+  | underscoreCS bitLit { {
+        // See https://dev.mysql.com/doc/refman/5.7/en/charset-literal.html
+        let cs = underscore_cs($lexer.src_str(tok_span(&$1)));
+        match crate::charset::get_default_collation_legacy(cs) {
+            None => {
+                p.fail(format!("Unsupported character introducer: '{cs}'"), $span.start());
+                Expr::default()
+            }
+            Some(co) => {
+                // tp.SetCharset/SetCollate after NewValueExpr; flags only matter for evaluation.
+                let mut expr = ValueExpr::new(bit_lit($lexer.src_str(tok_span(&$2))), cs, co);
+                expr.charset = cs;
+                expr.collate = co;
+                Expr::Value(Box::new(expr))
+            }
+        }
+    } }
   ;
 StringLiteral -> Expr:
-    stringLit { Expr::Value(Box::new(Datum::Str(tok_text($lexer, &$1)))) }
-  | StringLiteral stringLit { ph("StringLiteral#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    stringLit { val(Datum::Str(tok_text($lexer, &$1)), p) }
+  | StringLiteral stringLit { {
+        // Fix #4239: the first string literal is the projection name.
+        let (str_lit, off) = match &$1 {
+            Expr::Value(v) => match &v.datum {
+                Datum::Str(s) => (s.clone(), v.projection_offset),
+                _ => (String::new(), v.projection_offset),
+            },
+            _ => (String::new(), -1),
+        };
+        let first_len = str_lit.len() as i32;
+        let mut expr = ValueExpr::new(Datum::Str(str_lit + &tok_text($lexer, &$2)), p.charset, p.collation);
+        expr.projection_offset = if off >= 0 { off } else { first_len };
+        Expr::Value(Box::new(expr))
+    } }
   ;
 AlterOrderList -> Vec<AlterOrderItem>:
     AlterOrderItem { ph("AlterOrderList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
@@ -2404,9 +2513,9 @@ BitExpr -> Expr:
   | BitExpr rsh BitExpr %prec rsh { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::RightShift, l: $1, r: $3 })) }
   | BitExpr '+' BitExpr %prec '+' { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::Plus, l: $1, r: $3 })) }
   | BitExpr '-' BitExpr %prec '-' { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::Minus, l: $1, r: $3 })) }
-  | BitExpr '+' interval Expression TimeUnit %prec '+' { ph("BitExpr#6", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | BitExpr '-' interval Expression TimeUnit %prec '+' { ph("BitExpr#7", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | interval Expression TimeUnit '+' BitExpr %prec '+' { ph("BitExpr#8", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | BitExpr '+' interval Expression TimeUnit %prec '+' { call("DATE_ADD", vec![$1, $4, Expr::TimeUnit($5)]) }
+  | BitExpr '-' interval Expression TimeUnit %prec '+' { call("DATE_SUB", vec![$1, $4, Expr::TimeUnit($5)]) }
+  | interval Expression TimeUnit '+' BitExpr %prec '+' { call("DATE_ADD", vec![$5, $2, Expr::TimeUnit($3)]) }
   | BitExpr '*' BitExpr %prec '*' { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::Mul, l: $1, r: $3 })) }
   | BitExpr '/' BitExpr %prec '/' { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::Div, l: $1, r: $3 })) }
   | BitExpr '%' BitExpr %prec '%' { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::Mod, l: $1, r: $3 })) }
@@ -2425,37 +2534,103 @@ SimpleExpr -> Expr:
   | FunctionCallKeyword { $1 }
   | FunctionCallNonKeyword { $1 }
   | FunctionCallGeneric { $1 }
-  | SimpleExpr collate CollationName { ph("SimpleExpr#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | SimpleExpr collate CollationName { Expr::SetCollation(Box::new(SetCollationExpr { expr: $1, collate: $3 })) }
   | WindowFuncCall { $1 }
   | Literal { $1 }
-  | paramMarker { ph("SimpleExpr#7", $span, vec![]) }
+  | paramMarker { Expr::ParamMarker(Box::new(ParamMarkerExpr { offset: tok_span(&$1).start(), order: 0 })) }
   | Variable { $1 }
   | SumExpr { $1 }
   | '!' SimpleExpr %prec neg { Expr::Unary(Box::new(UnaryOperationExpr { op: Op::Not2, v: $2 })) }
   | '~' SimpleExpr %prec neg { Expr::Unary(Box::new(UnaryOperationExpr { op: Op::BitNeg, v: $2 })) }
   | '-' SimpleExpr %prec neg { Expr::Unary(Box::new(UnaryOperationExpr { op: Op::Minus, v: $2 })) }
   | '+' SimpleExpr %prec neg { Expr::Unary(Box::new(UnaryOperationExpr { op: Op::Plus, v: $2 })) }
-  | SimpleExpr pipes SimpleExpr { ph("SimpleExpr#14", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | SimpleExpr pipes SimpleExpr { call(CONCAT, vec![$1, $3]) }
   | not2 SimpleExpr %prec neg { Expr::Unary(Box::new(UnaryOperationExpr { op: Op::Not2, v: $2 })) }
   | SubSelect %prec neg { $1 }
   | '(' Expression ')' { {
         // goyacc: parser.setNodeText(expr, src[startOffset(yyS[yypt-1]) : endOffset(yyS[yypt])])
         Expr::Paren(Box::new($2))
     } }
-  | '(' ExpressionList ',' Expression ')' { ph("SimpleExpr#18", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | row '(' ExpressionList ',' Expression ')' { ph("SimpleExpr#19", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | exists SubSelect { ph("SimpleExpr#20", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | '{' Identifier Expression '}' { ph("SimpleExpr#21", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | binaryType SimpleExpr %prec neg { ph("SimpleExpr#22", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | builtinCast '(' Expression as CastType ArrayKwdOpt ')' { ph("SimpleExpr#23", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | jsonSumCrc32 '(' Expression as CastType array ')' { ph("SimpleExpr#24", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | caseKwd ExpressionOpt WhenClauseList ElseOpt end { ph("SimpleExpr#25", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | convert '(' Expression ',' CastType ')' { ph("SimpleExpr#26", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | convert '(' Expression using CharsetName ')' { ph("SimpleExpr#27", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | defaultKwd '(' SimpleIdent ')' { ph("SimpleExpr#28", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | values '(' SimpleIdent ')' %prec lowerThanInsertValues { ph("SimpleExpr#29", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | SimpleIdent jss stringLit { ph("SimpleExpr#30", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SimpleIdent juss stringLit { ph("SimpleExpr#31", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | '(' ExpressionList ',' Expression ')' { { let mut values = $2; values.push($4); Expr::Row(Box::new(RowExpr { values })) } }
+  | row '(' ExpressionList ',' Expression ')' { { let mut values = $3; values.push($5); Expr::Row(Box::new(RowExpr { values })) } }
+  | exists SubSelect { {
+        let mut sq = $2;
+        if let Expr::Subquery(s) = &mut sq { s.exists = true; }
+        Expr::Exists(Box::new(ExistsSubqueryExpr { sel: sq, not: false }))
+    } }
+  | '{' Identifier Expression '}' { {
+        // ODBC escape syntax, see https://dev.mysql.com/doc/refman/5.7/en/expressions.html
+        let mut expr = $3;
+        let name = match $2.as_str() {
+            "d" => DATE_LITERAL,
+            "t" => TIME_LITERAL,
+            "ts" => TIMESTAMP_LITERAL,
+            _ => return expr,
+        };
+        // tp := $3.GetType(); tp.SetCharset(""); tp.SetCollate("")
+        if let Expr::Value(v) = &mut expr {
+            v.charset = "";
+            v.collate = "";
+        }
+        call(name, vec![expr])
+    } }
+  | binaryType SimpleExpr %prec neg { {
+        // See https://dev.mysql.com/doc/refman/5.7/en/cast-functions.html#operator_binary
+        let mut tp = FieldType::new(mysql_type::STRING);
+        tp.set_bin();
+        tp.flag |= mysql_flag::BINARY;
+        Expr::FuncCast(Box::new(FuncCastExpr { expr: $2, tp: Box::new(tp), function_type: CastFunctionType::BinaryOperator, explicit_char_set: false }))
+    } }
+  | builtinCast '(' Expression as CastType ArrayKwdOpt ')' { {
+        // See https://dev.mysql.com/doc/refman/5.7/en/cast-functions.html#function_cast
+        let mut tp = $5;
+        let (default_flen, default_decimal) = default_length_and_decimal_for_cast(tp.tp);
+        if tp.flen == UNSPECIFIED_LENGTH { tp.flen = default_flen; }
+        if tp.decimal == UNSPECIFIED_LENGTH { tp.decimal = default_decimal; }
+        let is_array = $6;
+        tp.array = is_array;
+        let explicit_charset = p.explicit_charset.get();
+        if is_array && !explicit_charset && tp.charset != crate::charset::CHARSET_BIN {
+            tp.charset = crate::charset::CHARSET_UTF8MB4.into();
+            tp.collate = crate::charset::COLLATION_UTF8MB4.into();
+        }
+        p.explicit_charset.set(false);
+        Expr::FuncCast(Box::new(FuncCastExpr { expr: $3, tp, function_type: CastFunctionType::Cast, explicit_char_set: explicit_charset }))
+    } }
+  | jsonSumCrc32 '(' Expression as CastType array ')' { {
+        // Copied from CAST, except that ARRAY is enforced to be true.
+        let mut tp = $5;
+        let (default_flen, default_decimal) = default_length_and_decimal_for_cast(tp.tp);
+        if tp.flen == UNSPECIFIED_LENGTH { tp.flen = default_flen; }
+        if tp.decimal == UNSPECIFIED_LENGTH { tp.decimal = default_decimal; }
+        tp.array = true;
+        let explicit_charset = p.explicit_charset.get();
+        if !explicit_charset && tp.charset != crate::charset::CHARSET_BIN {
+            tp.charset = crate::charset::CHARSET_UTF8MB4.into();
+            tp.collate = crate::charset::COLLATION_UTF8MB4.into();
+        }
+        p.explicit_charset.set(false);
+        Expr::JSONSumCrc32(Box::new(JSONSumCrc32Expr { expr: $3, tp, explicit_char_set: explicit_charset }))
+    } }
+  | caseKwd ExpressionOpt WhenClauseList ElseOpt end { Expr::Case(Box::new(CaseExpr { value: $2, when_clauses: $3, else_clause: $4 })) }
+  | convert '(' Expression ',' CastType ')' { {
+        // See https://dev.mysql.com/doc/refman/5.7/en/cast-functions.html#function_convert
+        let mut tp = $5;
+        let (default_flen, default_decimal) = default_length_and_decimal_for_cast(tp.tp);
+        if tp.flen == UNSPECIFIED_LENGTH { tp.flen = default_flen; }
+        if tp.decimal == UNSPECIFIED_LENGTH { tp.decimal = default_decimal; }
+        let explicit_charset = p.explicit_charset.get();
+        p.explicit_charset.set(false);
+        Expr::FuncCast(Box::new(FuncCastExpr { expr: $3, tp, function_type: CastFunctionType::Convert, explicit_char_set: explicit_charset }))
+    } }
+  | convert '(' Expression using CharsetName ')' { call(tok_text($lexer, &$1), vec![$3, val_nocs(Datum::Str($5))]) }
+  | defaultKwd '(' SimpleIdent ')' { Expr::Default(Box::new(DefaultExpr { name: Some(column_of($3)) })) }
+  | values '(' SimpleIdent ')' %prec lowerThanInsertValues { Expr::Values(column_of($3)) }
+  | SimpleIdent jss stringLit { call(JSON_EXTRACT, vec![$1, val(Datum::Str(tok_text($lexer, &$3)), p)]) }
+  | SimpleIdent juss stringLit { {
+        let extract = call(JSON_EXTRACT, vec![$1, val(Datum::Str(tok_text($lexer, &$3)), p)]);
+        call(JSON_UNQUOTE, vec![extract])
+    } }
   ;
 ArrayKwdOpt -> bool:
      { false }
@@ -2534,53 +2709,56 @@ FunctionNameDatetimePrecision -> String:
   | utcTimestamp { tok_text($lexer, &$1) }
   ;
 FunctionCallKeyword -> Expr:
-    FunctionNameConflict '(' ExpressionListOpt ')' { ph("FunctionCallKeyword#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | interval '(' Expression ',' Expression ')' { ph("FunctionCallKeyword#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | interval '(' Expression ',' Expression ',' ExpressionList ')' { ph("FunctionCallKeyword#2", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | builtinUser '(' ExpressionListOpt ')' { ph("FunctionCallKeyword#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | FunctionNameOptionalBraces OptionalBraces { ph("FunctionCallKeyword#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | builtinCurDate '(' ')' { ph("FunctionCallKeyword#5", $span, vec![]) }
-  | FunctionNameDatetimePrecision FuncDatetimePrec { ph("FunctionCallKeyword#6", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | charType '(' ExpressionList ')' { ph("FunctionCallKeyword#7", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | charType '(' ExpressionList using CharsetName ')' { ph("FunctionCallKeyword#8", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | dateType stringLit { ph("FunctionCallKeyword#9", $span, vec![]) }
-  | timeType stringLit { ph("FunctionCallKeyword#10", $span, vec![]) }
-  | timestampType stringLit { ph("FunctionCallKeyword#11", $span, vec![]) }
-  | insert '(' ExpressionListOpt ')' { ph("FunctionCallKeyword#12", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | mod '(' Expression ',' Expression ')' { ph("FunctionCallKeyword#13", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | password '(' ExpressionListOpt ')' { ph("FunctionCallKeyword#14", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    FunctionNameConflict '(' ExpressionListOpt ')' { call($1, $3) }
+  | interval '(' Expression ',' Expression ')' { call(INTERVAL, vec![$3, $5]) }
+  | interval '(' Expression ',' Expression ',' ExpressionList ')' { { let mut args = vec![$3, $5]; args.extend($7); call(INTERVAL, args) } }
+  | builtinUser '(' ExpressionListOpt ')' { call(tok_text($lexer, &$1), $3) }
+  | FunctionNameOptionalBraces OptionalBraces { call($1, Vec::new()) }
+  | builtinCurDate '(' ')' { call(tok_text($lexer, &$1), Vec::new()) }
+  | FunctionNameDatetimePrecision FuncDatetimePrec { { let mut args = Vec::new(); if let Some(e) = $2 { args.push(e); } call($1, args) } }
+  | charType '(' ExpressionList ')' { { let mut args = $3; args.push(val(Datum::Null, p)); call(CHAR_FUNC, args) } }
+  | charType '(' ExpressionList using CharsetName ')' { { let mut args = $3; args.push(val_nocs(Datum::Str($5))); call(CHAR_FUNC, args) } }
+  | dateType stringLit { call(DATE_LITERAL, vec![val_nocs(Datum::Str(tok_text($lexer, &$2)))]) }
+  | timeType stringLit { call(TIME_LITERAL, vec![val_nocs(Datum::Str(tok_text($lexer, &$2)))]) }
+  | timestampType stringLit { call(TIMESTAMP_LITERAL, vec![val_nocs(Datum::Str(tok_text($lexer, &$2)))]) }
+  | insert '(' ExpressionListOpt ')' { call(INSERT_FUNC, $3) }
+  | mod '(' Expression ',' Expression ')' { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::Mod, l: $3, r: $5 })) }
+  | password '(' ExpressionListOpt ')' { call(PASSWORD_FUNC, $3) }
   ;
 FunctionCallNonKeyword -> Expr:
-    builtinCurTime '(' FuncDatetimePrecListOpt ')' { ph("FunctionCallNonKeyword#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | builtinSysDate '(' FuncDatetimePrecListOpt ')' { ph("FunctionCallNonKeyword#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | FunctionNameDateArithMultiForms '(' Expression ',' Expression ')' { ph("FunctionCallNonKeyword#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | FunctionNameDateArithMultiForms '(' Expression ',' interval Expression TimeUnit ')' { ph("FunctionCallNonKeyword#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | FunctionNameDateArith '(' Expression ',' interval Expression TimeUnit ')' { ph("FunctionCallNonKeyword#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | builtinExtract '(' TimeUnit from Expression ')' { ph("FunctionCallNonKeyword#5", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | getFormat '(' GetFormatSelector ',' Expression ')' { ph("FunctionCallNonKeyword#6", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinPosition '(' BitExpr in Expression ')' { ph("FunctionCallNonKeyword#7", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinSubstring '(' Expression ',' Expression ')' { ph("FunctionCallNonKeyword#8", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinSubstring '(' Expression from Expression ')' { ph("FunctionCallNonKeyword#9", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinSubstring '(' Expression ',' Expression ',' Expression ')' { ph("FunctionCallNonKeyword#10", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | builtinSubstring '(' Expression from Expression forKwd Expression ')' { ph("FunctionCallNonKeyword#11", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | timestampAdd '(' TimestampUnit ',' Expression ',' Expression ')' { ph("FunctionCallNonKeyword#12", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | timestampDiff '(' TimestampUnit ',' Expression ',' Expression ')' { ph("FunctionCallNonKeyword#13", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | builtinTrim '(' Expression ')' { ph("FunctionCallNonKeyword#14", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | builtinTrim '(' Expression from Expression ')' { ph("FunctionCallNonKeyword#15", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinTrim '(' TrimDirection from Expression ')' { ph("FunctionCallNonKeyword#16", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinTrim '(' TrimDirection Expression from Expression ')' { ph("FunctionCallNonKeyword#17", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | weightString '(' Expression ')' { ph("FunctionCallNonKeyword#18", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | weightString '(' Expression as Char FieldLen ')' { ph("FunctionCallNonKeyword#19", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | weightString '(' Expression as binaryType FieldLen ')' { ph("FunctionCallNonKeyword#20", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    builtinCurTime '(' FuncDatetimePrecListOpt ')' { call(tok_text($lexer, &$1), $3) }
+  | builtinSysDate '(' FuncDatetimePrecListOpt ')' { call(tok_text($lexer, &$1), $3) }
+  | FunctionNameDateArithMultiForms '(' Expression ',' Expression ')' { call($1, vec![$3, $5, Expr::TimeUnit(TimeUnitType::Day)]) }
+  | FunctionNameDateArithMultiForms '(' Expression ',' interval Expression TimeUnit ')' { call($1, vec![$3, $6, Expr::TimeUnit($7)]) }
+  | FunctionNameDateArith '(' Expression ',' interval Expression TimeUnit ')' { call($1, vec![$3, $6, Expr::TimeUnit($7)]) }
+  | builtinExtract '(' TimeUnit from Expression ')' { call(tok_text($lexer, &$1), vec![Expr::TimeUnit($3), $5]) }
+  | getFormat '(' GetFormatSelector ',' Expression ')' { call(tok_text($lexer, &$1), vec![Expr::GetFormatSelector($3), $5]) }
+  | builtinPosition '(' BitExpr in Expression ')' { call(tok_text($lexer, &$1), vec![$3, $5]) }
+  | builtinSubstring '(' Expression ',' Expression ')' { call(tok_text($lexer, &$1), vec![$3, $5]) }
+  | builtinSubstring '(' Expression from Expression ')' { call(tok_text($lexer, &$1), vec![$3, $5]) }
+  | builtinSubstring '(' Expression ',' Expression ',' Expression ')' { call(tok_text($lexer, &$1), vec![$3, $5, $7]) }
+  | builtinSubstring '(' Expression from Expression forKwd Expression ')' { call(tok_text($lexer, &$1), vec![$3, $5, $7]) }
+  | timestampAdd '(' TimestampUnit ',' Expression ',' Expression ')' { call(tok_text($lexer, &$1), vec![Expr::TimeUnit($3), $5, $7]) }
+  | timestampDiff '(' TimestampUnit ',' Expression ',' Expression ')' { call(tok_text($lexer, &$1), vec![Expr::TimeUnit($3), $5, $7]) }
+  | builtinTrim '(' Expression ')' { call(tok_text($lexer, &$1), vec![$3]) }
+  | builtinTrim '(' Expression from Expression ')' { call(tok_text($lexer, &$1), vec![$5, $3]) }
+  | builtinTrim '(' TrimDirection from Expression ')' { {
+        let space_val = val(Datum::Str(" ".into()), p);
+        call(tok_text($lexer, &$1), vec![$5, space_val, Expr::TrimDirection($3)])
+    } }
+  | builtinTrim '(' TrimDirection Expression from Expression ')' { call(tok_text($lexer, &$1), vec![$6, $4, Expr::TrimDirection($3)]) }
+  | weightString '(' Expression ')' { call(tok_text($lexer, &$1), vec![$3]) }
+  | weightString '(' Expression as Char FieldLen ')' { call(tok_text($lexer, &$1), vec![$3, val(Datum::Str("CHAR".into()), p), val(Datum::Int($6), p)]) }
+  | weightString '(' Expression as binaryType FieldLen ')' { call(tok_text($lexer, &$1), vec![$3, val(Datum::Str("BINARY".into()), p), val(Datum::Int($6), p)]) }
   | FunctionNameSequence { $1 }
-  | builtinTranslate '(' Expression ',' Expression ',' Expression ')' { ph("FunctionCallNonKeyword#22", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | compress '(' ExpressionListOpt ')' { ph("FunctionCallNonKeyword#23", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | builtinTranslate '(' Expression ',' Expression ',' Expression ')' { call(tok_text($lexer, &$1), vec![$3, $5, $7]) }
+  | compress '(' ExpressionListOpt ')' { call(tok_text($lexer, &$1), $3) }
   ;
 GetFormatSelector -> GetFormatSelectorType:
-    dateType { ph("GetFormatSelector#0", $span, vec![]) }
-  | datetimeType { ph("GetFormatSelector#1", $span, vec![]) }
-  | timeType { ph("GetFormatSelector#2", $span, vec![]) }
-  | timestampType { ph("GetFormatSelector#3", $span, vec![]) }
+    dateType { GetFormatSelectorType::Date }
+  | datetimeType { GetFormatSelectorType::Datetime }
+  | timeType { GetFormatSelectorType::Time }
+  | timestampType { GetFormatSelectorType::Datetime }
   ;
 FunctionNameDateArith -> String:
     builtinDateAdd { tok_text($lexer, &$1) }
@@ -2591,125 +2769,233 @@ FunctionNameDateArithMultiForms -> String:
   | subDate { tok_text($lexer, &$1) }
   ;
 TrimDirection -> TrimDirectionType:
-    both { ph("TrimDirection#0", $span, vec![]) }
-  | leading { ph("TrimDirection#1", $span, vec![]) }
-  | trailing { ph("TrimDirection#2", $span, vec![]) }
+    both { TrimDirectionType::Both }
+  | leading { TrimDirectionType::Leading }
+  | trailing { TrimDirectionType::Trailing }
   ;
 FunctionNameSequence -> Expr:
-    lastval '(' TableName ')' { ph("FunctionNameSequence#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | setval '(' TableName ',' SignedNum ')' { ph("FunctionNameSequence#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    lastval '(' TableName ')' { call(LAST_VAL, vec![Expr::TableName($3)]) }
+  | setval '(' TableName ',' SignedNum ')' { call(SET_VAL, vec![Expr::TableName($3), val(Datum::Int($5), p)]) }
   | NextValueForSequence { $1 }
   ;
 SumExpr -> Expr:
-    avg '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { ph("SumExpr#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinApproxCountDistinct '(' ExpressionList ')' { ph("SumExpr#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | builtinApproxPercentile '(' ExpressionList ')' { ph("SumExpr#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | builtinBitAnd '(' Expression ')' OptWindowingClause { ph("SumExpr#3", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinBitAnd '(' all Expression ')' OptWindowingClause { ph("SumExpr#4", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinBitOr '(' Expression ')' OptWindowingClause { ph("SumExpr#5", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinBitOr '(' all Expression ')' OptWindowingClause { ph("SumExpr#6", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinBitXor '(' Expression ')' OptWindowingClause { ph("SumExpr#7", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinBitXor '(' all Expression ')' OptWindowingClause { ph("SumExpr#8", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinCount '(' DistinctKwd ExpressionList ')' { ph("SumExpr#9", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | builtinCount '(' all Expression ')' OptWindowingClause { ph("SumExpr#10", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinCount '(' Expression ')' OptWindowingClause { ph("SumExpr#11", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinCount '(' '*' ')' OptWindowingClause { ph("SumExpr#12", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | builtinGroupConcat '(' BuggyDefaultFalseDistinctOpt ExpressionList OrderByOptional OptGConcatSeparator ')' OptWindowingClause { ph("SumExpr#13", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | builtinMax '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { ph("SumExpr#14", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinMaxCount '(' Expression ')' OptWindowingClause { ph("SumExpr#15", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinMaxCount '(' all Expression ')' OptWindowingClause { ph("SumExpr#16", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinMin '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { ph("SumExpr#17", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinMinCount '(' Expression ')' OptWindowingClause { ph("SumExpr#18", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinMinCount '(' all Expression ')' OptWindowingClause { ph("SumExpr#19", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinSum '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { ph("SumExpr#20", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinSumInt '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { ph("SumExpr#21", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinStddevPop '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { ph("SumExpr#22", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinStddevSamp '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { ph("SumExpr#23", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinVarPop '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { ph("SumExpr#24", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | builtinVarSamp '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { ph("SumExpr#25", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | jsonArrayagg '(' Expression ')' OptWindowingClause { ph("SumExpr#26", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | jsonArrayagg '(' all Expression ')' OptWindowingClause { ph("SumExpr#27", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | jsonObjectAgg '(' Expression ',' Expression ')' OptWindowingClause { ph("SumExpr#28", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | jsonObjectAgg '(' all Expression ',' Expression ')' OptWindowingClause { ph("SumExpr#29", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | jsonObjectAgg '(' Expression ',' all Expression ')' OptWindowingClause { ph("SumExpr#30", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | jsonObjectAgg '(' all Expression ',' all Expression ')' OptWindowingClause { ph("SumExpr#31", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
+    avg '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], $3, $6) }
+  | builtinApproxCountDistinct '(' ExpressionList ')' { agg_func(tok_text($lexer, &$1), $3, false, None) }
+  | builtinApproxPercentile '(' ExpressionList ')' { agg_func(tok_text($lexer, &$1), $3, false, None) }
+  | builtinBitAnd '(' Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$3], false, $5) }
+  | builtinBitAnd '(' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], false, $6) }
+  | builtinBitOr '(' Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$3], false, $5) }
+  | builtinBitOr '(' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], false, $6) }
+  | builtinBitXor '(' Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$3], false, $5) }
+  | builtinBitXor '(' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], false, $6) }
+  | builtinCount '(' DistinctKwd ExpressionList ')' { agg_func(tok_text($lexer, &$1), $4, true, None) }
+  | builtinCount '(' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], false, $6) }
+  | builtinCount '(' Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$3], false, $5) }
+  | builtinCount '(' '*' ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![val(Datum::Int(1), p)], false, $5) }
+  | builtinGroupConcat '(' BuggyDefaultFalseDistinctOpt ExpressionList OrderByOptional OptGConcatSeparator ')' OptWindowingClause { {
+        let mut args = $4;
+        args.push($6);
+        match $8 {
+            Some(spec) => Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), args, distinct: $3, spec: *spec, ..Default::default() })),
+            None => Expr::Aggregate(Box::new(AggregateFuncExpr { f: tok_text($lexer, &$1), args, distinct: $3, order: $5 })),
+        }
+    } }
+  | builtinMax '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], $3, $6) }
+  | builtinMaxCount '(' Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$3], false, $5) }
+  | builtinMaxCount '(' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], false, $6) }
+  | builtinMin '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], $3, $6) }
+  | builtinMinCount '(' Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$3], false, $5) }
+  | builtinMinCount '(' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], false, $6) }
+  | builtinSum '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], $3, $6) }
+  | builtinSumInt '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], $3, $6) }
+  | builtinStddevPop '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { agg_or_window(AGG_FUNC_STDDEV_POP.to_string(), vec![$4], $3, $6) }
+  | builtinStddevSamp '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], $3, $6) }
+  | builtinVarPop '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { agg_or_window(AGG_FUNC_VAR_POP.to_string(), vec![$4], $3, $6) }
+  | builtinVarSamp '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], $3, $6) }
+  | jsonArrayagg '(' Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$3], false, $5) }
+  | jsonArrayagg '(' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4], false, $6) }
+  | jsonObjectAgg '(' Expression ',' Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$3, $5], false, $7) }
+  | jsonObjectAgg '(' all Expression ',' Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4, $6], false, $8) }
+  | jsonObjectAgg '(' Expression ',' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$3, $6], false, $8) }
+  | jsonObjectAgg '(' all Expression ',' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4, $7], false, $9) }
   ;
 OptGConcatSeparator -> Expr:
-     { ph("OptGConcatSeparator#0", $span, vec![]) }
-  | separator stringLit { ph("OptGConcatSeparator#1", $span, vec![]) }
+     { val(Datum::Str(",".into()), p) }
+  | separator stringLit { val(Datum::Str(tok_text($lexer, &$2)), p) }
   ;
 FunctionCallGeneric -> Expr:
-    identifier '(' ExpressionListOpt ')' { Expr::FuncCall(Box::new(FuncCallExpr { fn_name: CIStr::new(tok_text($lexer, &$1)), args: $3, ..Default::default() })) }
-  | Identifier '.' Identifier '(' ExpressionListOpt ')' { ph("FunctionCallGeneric#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    identifier '(' ExpressionListOpt ')' { call(tok_text($lexer, &$1), $3) }
+  | Identifier '.' Identifier '(' ExpressionListOpt ')' { {
+        let tp = if is_in_token_map(&$3) { FuncCallExprType::Keyword } else { FuncCallExprType::Generic };
+        Expr::FuncCall(Box::new(FuncCallExpr { tp, schema: CIStr::new($1), fn_name: CIStr::new($3), args: $5 }))
+    } }
   ;
 FuncDatetimePrec -> Option<Expr>:
      { None }
   | '(' ')' { None }
-  | '(' intLit ')' { ph("FuncDatetimePrec#2", $span, vec![]) }
+  | '(' intLit ')' { Some(val(int_lit_datum($lexer.src_str(tok_span(&$2))), p)) }
   ;
 TimeUnit -> TimeUnitType:
     TimestampUnit { $1 }
-  | secondMicrosecond { ph("TimeUnit#1", $span, vec![]) }
-  | minuteMicrosecond { ph("TimeUnit#2", $span, vec![]) }
-  | minuteSecond { ph("TimeUnit#3", $span, vec![]) }
-  | hourMicrosecond { ph("TimeUnit#4", $span, vec![]) }
-  | hourSecond { ph("TimeUnit#5", $span, vec![]) }
-  | hourMinute { ph("TimeUnit#6", $span, vec![]) }
-  | dayMicrosecond { ph("TimeUnit#7", $span, vec![]) }
-  | daySecond { ph("TimeUnit#8", $span, vec![]) }
-  | dayMinute { ph("TimeUnit#9", $span, vec![]) }
-  | dayHour { ph("TimeUnit#10", $span, vec![]) }
-  | yearMonth { ph("TimeUnit#11", $span, vec![]) }
+  | secondMicrosecond { TimeUnitType::SecondMicrosecond }
+  | minuteMicrosecond { TimeUnitType::MinuteMicrosecond }
+  | minuteSecond { TimeUnitType::MinuteSecond }
+  | hourMicrosecond { TimeUnitType::HourMicrosecond }
+  | hourSecond { TimeUnitType::HourSecond }
+  | hourMinute { TimeUnitType::HourMinute }
+  | dayMicrosecond { TimeUnitType::DayMicrosecond }
+  | daySecond { TimeUnitType::DaySecond }
+  | dayMinute { TimeUnitType::DayMinute }
+  | dayHour { TimeUnitType::DayHour }
+  | yearMonth { TimeUnitType::YearMonth }
   ;
 TimestampUnit -> TimeUnitType:
-    microsecond { ph("TimestampUnit#0", $span, vec![]) }
-  | second { ph("TimestampUnit#1", $span, vec![]) }
-  | minute { ph("TimestampUnit#2", $span, vec![]) }
-  | hour { ph("TimestampUnit#3", $span, vec![]) }
-  | day { ph("TimestampUnit#4", $span, vec![]) }
-  | week { ph("TimestampUnit#5", $span, vec![]) }
-  | month { ph("TimestampUnit#6", $span, vec![]) }
-  | quarter { ph("TimestampUnit#7", $span, vec![]) }
-  | yearType { ph("TimestampUnit#8", $span, vec![]) }
-  | sqlTsiSecond { ph("TimestampUnit#9", $span, vec![]) }
-  | sqlTsiMinute { ph("TimestampUnit#10", $span, vec![]) }
-  | sqlTsiHour { ph("TimestampUnit#11", $span, vec![]) }
-  | sqlTsiDay { ph("TimestampUnit#12", $span, vec![]) }
-  | sqlTsiWeek { ph("TimestampUnit#13", $span, vec![]) }
-  | sqlTsiMonth { ph("TimestampUnit#14", $span, vec![]) }
-  | sqlTsiQuarter { ph("TimestampUnit#15", $span, vec![]) }
-  | sqlTsiYear { ph("TimestampUnit#16", $span, vec![]) }
+    microsecond { TimeUnitType::Microsecond }
+  | second { TimeUnitType::Second }
+  | minute { TimeUnitType::Minute }
+  | hour { TimeUnitType::Hour }
+  | day { TimeUnitType::Day }
+  | week { TimeUnitType::Week }
+  | month { TimeUnitType::Month }
+  | quarter { TimeUnitType::Quarter }
+  | yearType { TimeUnitType::Year }
+  | sqlTsiSecond { TimeUnitType::Second }
+  | sqlTsiMinute { TimeUnitType::Minute }
+  | sqlTsiHour { TimeUnitType::Hour }
+  | sqlTsiDay { TimeUnitType::Day }
+  | sqlTsiWeek { TimeUnitType::Week }
+  | sqlTsiMonth { TimeUnitType::Month }
+  | sqlTsiQuarter { TimeUnitType::Quarter }
+  | sqlTsiYear { TimeUnitType::Year }
   ;
 ExpressionOpt -> Option<Expr>:
      { None }
   | Expression { Some($1) }
   ;
 WhenClauseList -> Vec<WhenClause>:
-    WhenClause { ph("WhenClauseList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | WhenClauseList WhenClause { ph("WhenClauseList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    WhenClause { vec![*$1] }
+  | WhenClauseList WhenClause { { let mut v = $1; v.push(*$2); v } }
   ;
 WhenClause -> Box<WhenClause>:
-    when Expression then Expression { ph("WhenClause#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    when Expression then Expression { Box::new(WhenClause { expr: $2, result: $4 }) }
   ;
 ElseOpt -> Option<Expr>:
      { None }
   | elseKwd Expression { Some($2) }
   ;
-CastType -> Box<TypesFieldType>:
-    binaryType OptFieldLen { ph("CastType#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | Char OptFieldLen OptBinary { ph("CastType#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | dateType { ph("CastType#2", $span, vec![]) }
-  | yearType { ph("CastType#3", $span, vec![]) }
-  | datetimeType OptFieldLen { ph("CastType#4", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | decimalType FloatOpt { ph("CastType#5", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | timeType OptFieldLen { ph("CastType#6", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | signed OptInteger { ph("CastType#7", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | unsigned OptInteger { ph("CastType#8", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | jsonType { ph("CastType#9", $span, vec![]) }
-  | doubleType { ph("CastType#10", $span, vec![]) }
-  | floatType FloatOpt { ph("CastType#11", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | realType { ph("CastType#12", $span, vec![]) }
-  | vectorType OptVectorElementType OptFieldLen { ph("CastType#13", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+CastType -> Box<FieldType>:
+    binaryType OptFieldLen { {
+        let mut tp = FieldType::new(mysql_type::VAR_STRING);
+        tp.flen = $2; // TODO (Go): Flen should be the flen of expression
+        if tp.flen != UNSPECIFIED_LENGTH { tp.tp = mysql_type::STRING; }
+        tp.set_bin();
+        tp.flag |= mysql_flag::BINARY;
+        Box::new(tp)
+    } }
+  | Char OptFieldLen OptBinary { {
+        let mut tp = FieldType::new(mysql_type::VAR_STRING);
+        tp.flen = $2; // TODO (Go): Flen should be the flen of expression
+        let ob = $3;
+        tp.charset = ob.charset.clone();
+        if ob.is_binary {
+            tp.flag |= mysql_flag::BINARY;
+            tp.set_bin();
+        } else if !tp.charset.is_empty() {
+            match crate::charset::get_default_collation(&tp.charset) {
+                Some(co) => tp.collate = co.to_string(),
+                None => p.fail(format!("Get collation error for charset: {}", tp.charset), $span.start()),
+            }
+            p.explicit_charset.set(true);
+        } else {
+            tp.charset = p.charset.to_string();
+            tp.collate = p.collation.to_string();
+        }
+        Box::new(tp)
+    } }
+  | dateType { { let mut tp = FieldType::new(mysql_type::DATE); tp.set_bin(); tp.flag |= mysql_flag::BINARY; Box::new(tp) } }
+  | yearType { { let mut tp = FieldType::new(mysql_type::YEAR); tp.set_bin(); tp.flag |= mysql_flag::BINARY; Box::new(tp) } }
+  | datetimeType OptFieldLen { {
+        let mut tp = FieldType::new(mysql_type::DATETIME);
+        tp.flen = default_length_and_decimal_for_cast(mysql_type::DATETIME).0;
+        tp.decimal = $2;
+        if tp.decimal > 0 { tp.flen += 1 + tp.decimal; }
+        tp.set_bin();
+        tp.flag |= mysql_flag::BINARY;
+        Box::new(tp)
+    } }
+  | decimalType FloatOpt { {
+        let fopt = $2;
+        let mut tp = FieldType::new(mysql_type::NEW_DECIMAL);
+        tp.flen = fopt.flen;
+        tp.decimal = fopt.decimal;
+        tp.set_bin();
+        tp.flag |= mysql_flag::BINARY;
+        Box::new(tp)
+    } }
+  | timeType OptFieldLen { {
+        let mut tp = FieldType::new(mysql_type::DURATION);
+        tp.flen = default_length_and_decimal_for_cast(mysql_type::DURATION).0;
+        tp.decimal = $2;
+        if tp.decimal > 0 { tp.flen += 1 + tp.decimal; }
+        tp.set_bin();
+        tp.flag |= mysql_flag::BINARY;
+        Box::new(tp)
+    } }
+  | signed OptInteger { { let mut tp = FieldType::new(mysql_type::LONGLONG); tp.set_bin(); tp.flag |= mysql_flag::BINARY; Box::new(tp) } }
+  | unsigned OptInteger { { let mut tp = FieldType::new(mysql_type::LONGLONG); tp.flag |= mysql_flag::UNSIGNED | mysql_flag::BINARY; tp.set_bin(); Box::new(tp) } }
+  | jsonType { {
+        let mut tp = FieldType::new(mysql_type::JSON);
+        tp.flag |= mysql_flag::BINARY | mysql_flag::PARSE_TO_JSON;
+        tp.charset = crate::charset::DEFAULT_CHARSET.into();
+        tp.collate = crate::charset::COLLATION_UTF8MB4.into();
+        Box::new(tp)
+    } }
+  | doubleType { {
+        let mut tp = FieldType::new(mysql_type::DOUBLE);
+        let (flen, decimal) = default_length_and_decimal_for_cast(tp.tp);
+        tp.flen = flen;
+        tp.decimal = decimal;
+        tp.flag |= mysql_flag::BINARY;
+        tp.set_bin();
+        Box::new(tp)
+    } }
+  | floatType FloatOpt { {
+        let fopt = $2;
+        let mut t = mysql_type::FLOAT;
+        if fopt.flen >= 54 {
+            // goyacc: yylex.AppendError(ErrTooBigPrecision...) (no return 1)
+            p.error(format!("Too-big precision {} specified for 'CAST'. Maximum is 53.", fopt.flen), $span.start());
+        } else if fopt.flen >= 25 {
+            t = mysql_type::DOUBLE;
+        }
+        let mut tp = FieldType::new(t);
+        let (flen, decimal) = default_length_and_decimal_for_cast(tp.tp);
+        tp.flen = flen;
+        tp.decimal = decimal;
+        tp.flag |= mysql_flag::BINARY;
+        tp.set_bin();
+        Box::new(tp)
+    } }
+  | realType { {
+        let mut tp = FieldType::new(mysql_type::DOUBLE);
+        let (flen, decimal) = default_length_and_decimal_for_cast(tp.tp);
+        tp.flen = flen;
+        tp.decimal = decimal;
+        tp.flag |= mysql_flag::BINARY;
+        tp.set_bin();
+        Box::new(tp)
+    } }
+  | vectorType OptVectorElementType OptFieldLen { {
+        if $2.tp != mysql_type::FLOAT {
+            // goyacc: yylex.AppendError(yylex.Errorf("Only VECTOR is supported for now")) (no return 1)
+            p.error("Only VECTOR is supported for now", $span.start());
+        }
+        let mut tp = FieldType::new(mysql_type::TIDB_VECTOR_FLOAT32);
+        tp.flen = $3;
+        tp.decimal = 0;
+        tp.set_bin();
+        Box::new(tp)
+    } }
   ;
 Priority -> u8:
     lowPriority { 1 }
@@ -2917,94 +3203,106 @@ FromDual -> ():
   ;
 WindowClauseOptional -> Vec<WindowSpec>:
      { Vec::new() }
-  | window WindowDefinitionList { ph("WindowClauseOptional#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | window WindowDefinitionList { $2 }
   ;
 WindowDefinitionList -> Vec<WindowSpec>:
-    WindowDefinition { ph("WindowDefinitionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | WindowDefinitionList ',' WindowDefinition { ph("WindowDefinitionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    WindowDefinition { vec![$1] }
+  | WindowDefinitionList ',' WindowDefinition { { let mut v = $1; v.push($3); v } }
   ;
 WindowDefinition -> WindowSpec:
-    WindowName as WindowSpec { ph("WindowDefinition#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    WindowName as WindowSpec { { let mut spec = $3; spec.name = $1; spec } }
   ;
 WindowName -> CIStr:
-    Identifier { ph("WindowName#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    Identifier { CIStr::new($1) }
   ;
 WindowSpec -> WindowSpec:
-    '(' WindowSpecDetails ')' { ph("WindowSpec#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    '(' WindowSpecDetails ')' { $2 }
   ;
 WindowSpecDetails -> WindowSpec:
-    OptExistingWindowName OptPartitionClause OptWindowOrderByClause OptWindowFrameClause { ph("WindowSpecDetails#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    OptExistingWindowName OptPartitionClause OptWindowOrderByClause OptWindowFrameClause { WindowSpec { ref_: $1, partition_by: $2, order_by: $3, frame: $4, ..Default::default() } }
   ;
 OptExistingWindowName -> CIStr:
-     { ph("OptExistingWindowName#0", $span, vec![]) }
+     { CIStr::default() }
   | WindowName { $1 }
   ;
 OptPartitionClause -> Option<Box<PartitionByClause>>:
      { None }
-  | partition by ByList { ph("OptPartitionClause#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | partition by ByList { Some(Box::new(PartitionByClause { items: $3 })) }
   ;
 OptWindowOrderByClause -> Option<Box<OrderByClause>>:
      { None }
-  | order by ByList { ph("OptWindowOrderByClause#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | order by ByList { Some(Box::new(OrderByClause { items: $3 })) }
   ;
 OptWindowFrameClause -> Option<Box<FrameClause>>:
      { None }
-  | WindowFrameUnits WindowFrameExtent { ph("OptWindowFrameClause#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | WindowFrameUnits WindowFrameExtent { Some(Box::new(FrameClause { tp: $1, extent: $2 })) }
   ;
 WindowFrameUnits -> FrameType:
-    rows { ph("WindowFrameUnits#0", $span, vec![]) }
-  | rangeKwd { ph("WindowFrameUnits#1", $span, vec![]) }
-  | groups { ph("WindowFrameUnits#2", $span, vec![]) }
+    rows { FrameType::Rows }
+  | rangeKwd { FrameType::Ranges }
+  | groups { FrameType::Groups }
   ;
 WindowFrameExtent -> FrameExtent:
-    WindowFrameStart { ph("WindowFrameExtent#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | WindowFrameBetween { ph("WindowFrameExtent#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    WindowFrameStart { FrameExtent { start: $1, end: FrameBound { tp: BoundType::CurrentRow, ..Default::default() } } }
+  | WindowFrameBetween { $1 }
   ;
 WindowFrameStart -> FrameBound:
-    unbounded preceding { ph("WindowFrameStart#0", $span, vec![]) }
-  | NumLiteral preceding { ph("WindowFrameStart#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | paramMarker preceding { ph("WindowFrameStart#2", $span, vec![]) }
-  | interval Expression TimeUnit preceding { ph("WindowFrameStart#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | current row { ph("WindowFrameStart#4", $span, vec![]) }
+    unbounded preceding { FrameBound { tp: BoundType::Preceding, unbounded: true, ..Default::default() } }
+  | NumLiteral preceding { FrameBound { tp: BoundType::Preceding, expr: Some(val($1, p)), ..Default::default() } }
+  | paramMarker preceding { FrameBound { tp: BoundType::Preceding, expr: Some(Expr::ParamMarker(Box::new(ParamMarkerExpr { offset: tok_span(&$1).start(), order: 0 }))), ..Default::default() } }
+  | interval Expression TimeUnit preceding { FrameBound { tp: BoundType::Preceding, expr: Some($2), unit: $3, ..Default::default() } }
+  | current row { FrameBound { tp: BoundType::CurrentRow, ..Default::default() } }
   ;
-WindowFrameBetween -> Item:
-    between WindowFrameBound and WindowFrameBound { ph("WindowFrameBetween#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+WindowFrameBetween -> FrameExtent:
+    between WindowFrameBound and WindowFrameBound { FrameExtent { start: $2, end: $4 } }
   ;
 WindowFrameBound -> FrameBound:
     WindowFrameStart { $1 }
-  | unbounded following { ph("WindowFrameBound#1", $span, vec![]) }
-  | NumLiteral following { ph("WindowFrameBound#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | paramMarker following { ph("WindowFrameBound#3", $span, vec![]) }
-  | interval Expression TimeUnit following { ph("WindowFrameBound#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | unbounded following { FrameBound { tp: BoundType::Following, unbounded: true, ..Default::default() } }
+  | NumLiteral following { FrameBound { tp: BoundType::Following, expr: Some(val($1, p)), ..Default::default() } }
+  | paramMarker following { FrameBound { tp: BoundType::Following, expr: Some(Expr::ParamMarker(Box::new(ParamMarkerExpr { offset: tok_span(&$1).start(), order: 0 }))), ..Default::default() } }
+  | interval Expression TimeUnit following { FrameBound { tp: BoundType::Following, expr: Some($2), unit: $3, ..Default::default() } }
   ;
 OptWindowingClause -> Option<Box<WindowSpec>>:
      { None }
-  | WindowingClause { ph("OptWindowingClause#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | WindowingClause { Some(Box::new($1)) }
   ;
 WindowingClause -> WindowSpec:
-    over WindowNameOrSpec { ph("WindowingClause#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    over WindowNameOrSpec { $2 }
   ;
 WindowNameOrSpec -> WindowSpec:
-    WindowName { ph("WindowNameOrSpec#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    WindowName { WindowSpec { name: $1, only_alias: true, ..Default::default() } }
   | WindowSpec { $1 }
   ;
 WindowFuncCall -> Expr:
-    rowNumber '(' ')' WindowingClause { ph("WindowFuncCall#0", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | rank '(' ')' WindowingClause { ph("WindowFuncCall#1", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | denseRank '(' ')' WindowingClause { ph("WindowFuncCall#2", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | cumeDist '(' ')' WindowingClause { ph("WindowFuncCall#3", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | percentRank '(' ')' WindowingClause { ph("WindowFuncCall#4", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | ntile '(' SimpleExpr ')' WindowingClause { ph("WindowFuncCall#5", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | lead '(' Expression OptLeadLagInfo ')' OptNullTreatment WindowingClause { ph("WindowFuncCall#6", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | lag '(' Expression OptLeadLagInfo ')' OptNullTreatment WindowingClause { ph("WindowFuncCall#7", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | firstValue '(' Expression ')' OptNullTreatment WindowingClause { ph("WindowFuncCall#8", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | lastValue '(' Expression ')' OptNullTreatment WindowingClause { ph("WindowFuncCall#9", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | nthValue '(' Expression ',' SimpleExpr ')' OptFromFirstLast OptNullTreatment WindowingClause { ph("WindowFuncCall#10", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
+    rowNumber '(' ')' WindowingClause { Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), spec: $4, ..Default::default() })) }
+  | rank '(' ')' WindowingClause { Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), spec: $4, ..Default::default() })) }
+  | denseRank '(' ')' WindowingClause { Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), spec: $4, ..Default::default() })) }
+  | cumeDist '(' ')' WindowingClause { Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), spec: $4, ..Default::default() })) }
+  | percentRank '(' ')' WindowingClause { Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), spec: $4, ..Default::default() })) }
+  | ntile '(' SimpleExpr ')' WindowingClause { Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), args: vec![$3], spec: $5, ..Default::default() })) }
+  | lead '(' Expression OptLeadLagInfo ')' OptNullTreatment WindowingClause { {
+        let mut args = vec![$3];
+        args.extend($4);
+        Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), args, ignore_null: $6, spec: $7, ..Default::default() }))
+    } }
+  | lag '(' Expression OptLeadLagInfo ')' OptNullTreatment WindowingClause { {
+        let mut args = vec![$3];
+        args.extend($4);
+        Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), args, ignore_null: $6, spec: $7, ..Default::default() }))
+    } }
+  | firstValue '(' Expression ')' OptNullTreatment WindowingClause { Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), args: vec![$3], ignore_null: $5, spec: $6, ..Default::default() })) }
+  | lastValue '(' Expression ')' OptNullTreatment WindowingClause { Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), args: vec![$3], ignore_null: $5, spec: $6, ..Default::default() })) }
+  | nthValue '(' Expression ',' SimpleExpr ')' OptFromFirstLast OptNullTreatment WindowingClause { Expr::Window(Box::new(WindowFuncExpr { name: tok_text($lexer, &$1), args: vec![$3, $5], from_last: $7, ignore_null: $8, spec: $9, ..Default::default() })) }
   ;
 OptLeadLagInfo -> Vec<Expr>:
      { Vec::new() }
-  | ',' NumLiteral OptLLDefault { ph("OptLeadLagInfo#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ',' paramMarker OptLLDefault { ph("OptLeadLagInfo#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | ',' NumLiteral OptLLDefault { { let mut args = vec![val($2, p)]; if let Some(d) = $3 { args.push(d); } args } }
+  | ',' paramMarker OptLLDefault { {
+        let mut args = vec![Expr::ParamMarker(Box::new(ParamMarkerExpr { offset: tok_span(&$2).start(), order: 0 }))];
+        if let Some(d) = $3 { args.push(d); }
+        args
+    } }
   ;
 OptLLDefault -> Option<Expr>:
      { None }
@@ -3049,7 +3347,12 @@ TableFactor -> ResultSetNode:
         if let Some(a) = $4 { tn.as_of = Some(a); }
         ResultSetNode::TableSource(Box::new(TableSource { source: ResultSetNode::TableName(tn), as_name: $3 }))
     } }
-  | SubSelect TableAsNameOpt { ph("TableFactor#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | SubSelect TableAsNameOpt { {
+        match $1 {
+            Expr::Subquery(sq) => ResultSetNode::TableSource(Box::new(TableSource { source: sq.query, as_name: $2 })),
+            other => unreachable!("SubSelect yields a SubqueryExpr, got {other:?}"),
+        }
+    } }
   | lateral SubSelect TableAsName IdentListWithParenOpt { ph("TableFactor#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
   | '(' TableRefs ')' { {
         let mut j = $2;
@@ -3108,17 +3411,20 @@ JoinTable -> Box<Join>:
         let on = Box::new(OnCondition { expr: $5 });
         Box::new(Join { left: Some($1), right: Some($3), tp: JoinType::CrossJoin, on: Some(on), ..Default::default() })
     } }
-  | TableRef CrossOpt TableRef using '(' ColumnNameList ')' { ph("JoinTable#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+  | TableRef CrossOpt TableRef using '(' ColumnNameList ')' { Box::new(Join { left: Some($1), right: Some($3), tp: JoinType::CrossJoin, using: $6, ..Default::default() }) }
   | TableRef JoinType OuterOpt join TableRef on Expression { {
         let on = Box::new(OnCondition { expr: $7 });
         Box::new(Join { left: Some($1), right: Some($5), tp: $2, on: Some(on), ..Default::default() })
     } }
-  | TableRef JoinType OuterOpt join TableRef using '(' ColumnNameList ')' { ph("JoinTable#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | TableRef natural join TableRef { ph("JoinTable#5", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | TableRef natural JoinType OuterOpt join TableRef { ph("JoinTable#6", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+  | TableRef JoinType OuterOpt join TableRef using '(' ColumnNameList ')' { Box::new(Join { left: Some($1), right: Some($5), tp: $2, using: $8, ..Default::default() }) }
+  | TableRef natural join TableRef { Box::new(Join { left: Some($1), right: Some($4), natural_join: true, ..Default::default() }) }
+  | TableRef natural JoinType OuterOpt join TableRef { Box::new(Join { left: Some($1), right: Some($6), tp: $3, natural_join: true, ..Default::default() }) }
   | TableRef straightJoin TableRef { Box::new(Join { left: Some($1), right: Some($3), straight_join: true, ..Default::default() }) }
-  | TableRef straightJoin TableRef on Expression { ph("JoinTable#8", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | TableRef straightJoin TableRef using '(' ColumnNameList ')' { ph("JoinTable#9", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+  | TableRef straightJoin TableRef on Expression { {
+        let on = Box::new(OnCondition { expr: $5 });
+        Box::new(Join { left: Some($1), right: Some($3), straight_join: true, on: Some(on), ..Default::default() })
+    } }
+  | TableRef straightJoin TableRef using '(' ColumnNameList ')' { Box::new(Join { left: Some($1), right: Some($3), straight_join: true, using: $6, ..Default::default() }) }
   ;
 JoinType -> JoinType:
     left { JoinType::LeftJoin }
@@ -3139,8 +3445,8 @@ LimitClause -> Option<Box<Limit>>:
   | limit LimitOption { ph("LimitClause#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
   ;
 LimitOption -> Expr:
-    LengthNum { Expr::Value(Box::new(Datum::Uint($1))) }
-  | paramMarker { ph("LimitOption#1", $span, vec![]) }
+    LengthNum { val(Datum::Uint($1), p) }
+  | paramMarker { Expr::ParamMarker(Box::new(ParamMarkerExpr { offset: tok_span(&$1).start(), order: 0 })) }
   ;
 RowOrRows -> String:
     row { tok_text($lexer, &$1) }
@@ -3151,14 +3457,14 @@ FirstOrNext -> String:
   | next { tok_text($lexer, &$1) }
   ;
 FetchFirstOpt -> Expr:
-     { ph("FetchFirstOpt#0", $span, vec![]) }
+     { val(Datum::Uint(1), p) }
   | LimitOption { $1 }
   ;
 SelectStmtLimit -> Box<Limit>:
     limit LimitOption { Box::new(Limit { count: $2, offset: None }) }
   | limit LimitOption ',' LimitOption { Box::new(Limit { offset: Some($2), count: $4 }) }
   | limit LimitOption offset LimitOption { Box::new(Limit { offset: Some($4), count: $2 }) }
-  | fetch FirstOrNext FetchFirstOpt RowOrRows only { ph("SelectStmtLimit#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | fetch FirstOrNext FetchFirstOpt RowOrRows only { Box::new(Limit { count: $3, offset: None }) }
   ;
 SelectStmtLimitOpt -> Option<Box<Limit>>:
      { None }
@@ -3228,10 +3534,16 @@ SelectStmtIntoOption -> Option<Box<SelectIntoOption>>:
   | into outfile stringLit Fields Lines { ph("SelectStmtIntoOption#1", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
   ;
 SubSelect -> Expr:
-    '(' SelectStmt ')' { ph("SubSelect#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | '(' SetOprStmt ')' { ph("SubSelect#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | '(' SelectStmtWithClause ')' { ph("SubSelect#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | '(' SubSelect ')' { ph("SubSelect#3", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    '(' SelectStmt ')' { subquery(stmt_to_result_set($2)) }
+  | '(' SetOprStmt ')' { subquery(stmt_to_result_set($2)) }
+  | '(' SelectStmtWithClause ')' { subquery(stmt_to_result_set($2)) }
+  | '(' SubSelect ')' { {
+        // Redundant brackets like '((select 1))': re-wrap the inner query in a fresh SubqueryExpr.
+        match $2 {
+            Expr::Subquery(sq) => subquery(sq.query),
+            other => other,
+        }
+    } }
   ;
 SelectLockOpt -> Option<Box<SelectLockInfo>>:
      { None }
@@ -3365,12 +3677,29 @@ CharsetNameOrDefault -> Expr:
   | defaultKwd { ph("CharsetNameOrDefault#1", $span, vec![]) }
   ;
 CharsetName -> String:
-    StringName { ph("CharsetName#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | binaryType { ph("CharsetName#1", $span, vec![]) }
+    StringName { {
+        // Validate the charset name like MySQL; keep the canonical (lower-case) name.
+        match crate::charset::get_charset_info(&$1) {
+            Ok((name, _)) => name.to_string(),
+            Err(_) => {
+                p.fail(format!("Unknown character set: '{}'", $1), $span.start());
+                String::new()
+            }
+        }
+    } }
+  | binaryType { crate::charset::CHARSET_BIN.to_string() }
   ;
 CollationName -> String:
-    StringName { ph("CollationName#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | binaryType { ph("CollationName#1", $span, vec![]) }
+    StringName { {
+        match crate::charset::get_collation_by_name(&$1) {
+            Some(name) => name.to_string(),
+            None => {
+                p.fail(format!("Unknown collation: '{}'", $1), $span.start());
+                String::new()
+            }
+        }
+    } }
+  | binaryType { crate::charset::COLLATION_BIN.to_string() }
   ;
 VariableAssignmentList -> Vec<VariableAssignment>:
     VariableAssignment { ph("VariableAssignmentList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
@@ -3381,10 +3710,28 @@ Variable -> Expr:
   | UserVariable { $1 }
   ;
 SystemVariable -> Expr:
-    doubleAtIdentifier { ph("SystemVariable#0", $span, vec![]) }
+    doubleAtIdentifier { {
+        let mut v = at_ident_text($lexer.src_str(tok_span(&$1))).to_lowercase();
+        let (mut is_global, mut is_instance, mut explicit_scope) = (false, false, true);
+        if let Some(r) = v.strip_prefix("@@global.") {
+            is_global = true;
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@instance.") {
+            is_instance = true;
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@session.") {
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@local.") {
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@") {
+            v = r.to_string();
+            explicit_scope = false;
+        }
+        Expr::Variable(Box::new(VariableExpr { name: v, is_global, is_instance, is_system: true, explicit_scope, value: None }))
+    } }
   ;
 UserVariable -> Expr:
-    singleAtIdentifier { ph("UserVariable#0", $span, vec![]) }
+    singleAtIdentifier { Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1))), ..Default::default() })) }
   ;
 Username -> Box<AuthUserIdentity>:
     StringName { ph("Username#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
@@ -3971,7 +4318,7 @@ RowFormat -> u64:
   | rowFormat EqOpt tokudbSnappy { ph("RowFormat#13", $span, vec![Box::new($2) as Box<dyn Any>]) }
   | rowFormat EqOpt tokudbUncompressed { ph("RowFormat#14", $span, vec![Box::new($2) as Box<dyn Any>]) }
   ;
-Type -> Box<TypesFieldType>:
+Type -> Box<FieldType>:
     NumericType { ph("Type#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
   | StringType { ph("Type#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
   | DateAndTimeType { ph("Type#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
@@ -4070,14 +4417,14 @@ Year -> String:
     yearType { tok_text($lexer, &$1) }
   | sqlTsiYear { tok_text($lexer, &$1) }
   ;
-BlobType -> Box<TypesFieldType>:
+BlobType -> Box<FieldType>:
     tinyblobType { ph("BlobType#0", $span, vec![]) }
   | blobType OptFieldLen { ph("BlobType#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
   | mediumblobType { ph("BlobType#2", $span, vec![]) }
   | longblobType { ph("BlobType#3", $span, vec![]) }
   | long varbinaryType { ph("BlobType#4", $span, vec![]) }
   ;
-TextType -> Box<TypesFieldType>:
+TextType -> Box<FieldType>:
     tinytextType { ph("TextType#0", $span, vec![]) }
   | textType OptFieldLen { ph("TextType#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
   | mediumtextType { ph("TextType#2", $span, vec![]) }
@@ -4085,9 +4432,13 @@ TextType -> Box<TypesFieldType>:
   ;
 OptCharsetWithOptBinary -> Box<OptBinary>:
     OptBinary { $1 }
-  | ascii { ph("OptCharsetWithOptBinary#1", $span, vec![]) }
-  | unicodeSym { ph("OptCharsetWithOptBinary#2", $span, vec![]) }
-  | byteType { ph("OptCharsetWithOptBinary#3", $span, vec![]) }
+  | ascii { Box::new(OptBinary { is_binary: false, charset: crate::charset::CHARSET_LATIN1.into() }) }
+  | unicodeSym { {
+        // charset.GetCharsetInfo("ucs2") fails (ucs2 is not supported)
+        p.fail("Unknown character set: 'ucs2'", $span.start());
+        Box::new(OptBinary::default())
+    } }
+  | byteType { Box::new(OptBinary { is_binary: false, charset: crate::charset::CHARSET_BIN.into() }) }
   ;
 DateAndTimeType -> Item:
     dateType { ph("DateAndTimeType#0", $span, vec![]) }
@@ -4097,10 +4448,10 @@ DateAndTimeType -> Item:
   | Year OptFieldLen FieldOpts { ph("DateAndTimeType#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
   ;
 FieldLen -> i64:
-    '(' LengthNum ')' { ph("FieldLen#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    '(' LengthNum ')' { $2 as i64 }
   ;
 OptFieldLen -> i64:
-     { ph("OptFieldLen#0", $span, vec![]) }
+     { UNSPECIFIED_LENGTH }
   | FieldLen { $1 }
   ;
 FieldOpt -> Box<TypeOpt>:
@@ -4113,29 +4464,29 @@ FieldOpts -> Vec<TypeOpt>:
   | FieldOpts FieldOpt { ph("FieldOpts#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
   ;
 FloatOpt -> Box<FloatOpt>:
-     { ph("FloatOpt#0", $span, vec![]) }
-  | FieldLen { ph("FloatOpt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+     { Box::new(FloatOpt { flen: UNSPECIFIED_LENGTH, decimal: UNSPECIFIED_LENGTH }) }
+  | FieldLen { Box::new(FloatOpt { flen: $1, decimal: UNSPECIFIED_LENGTH }) }
   | Precision { $1 }
   ;
 Precision -> Box<FloatOpt>:
-    '(' LengthNum ',' LengthNum ')' { ph("Precision#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    '(' LengthNum ',' LengthNum ')' { Box::new(FloatOpt { flen: $2 as i64, decimal: $4 as i64 }) }
   ;
 OptBinMod -> bool:
      { false }
   | binaryType { true }
   ;
 OptVectorElementType -> Box<VectorElementType>:
-     { ph("OptVectorElementType#0", $span, vec![]) }
-  | '<' floatType '>' { ph("OptVectorElementType#1", $span, vec![]) }
-  | '<' doubleType '>' { ph("OptVectorElementType#2", $span, vec![]) }
+     { Box::new(VectorElementType { tp: mysql_type::FLOAT }) }
+  | '<' floatType '>' { Box::new(VectorElementType { tp: mysql_type::FLOAT }) }
+  | '<' doubleType '>' { Box::new(VectorElementType { tp: mysql_type::DOUBLE }) }
   ;
 OptBinary -> Box<OptBinary>:
-     { ph("OptBinary#0", $span, vec![]) }
-  | binaryType OptCharset { ph("OptBinary#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | CharsetKw CharsetName OptBinMod { ph("OptBinary#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+     { Box::new(OptBinary { is_binary: false, charset: String::new() }) }
+  | binaryType OptCharset { Box::new(OptBinary { is_binary: true, charset: $2 }) }
+  | CharsetKw CharsetName OptBinMod { Box::new(OptBinary { is_binary: $3, charset: $2 }) }
   ;
 OptCharset -> String:
-     { ph("OptCharset#0", $span, vec![]) }
+     { String::new() }
   | CharsetKw CharsetName { $2 }
   ;
 CharsetKw -> String:
@@ -4733,7 +5084,18 @@ SequenceOption -> Box<SequenceOption>:
 SignedNum -> i64:
     Int64Num { $1 }
   | '+' Int64Num { $2 }
-  | '-' NUM { ph("SignedNum#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | '-' NUM { {
+        let s = $lexer.src_str(Span::new(tok_span(&$1).end(), $span.end())).trim();
+        let unsigned_num = s.parse::<u64>().unwrap_or(u64::MAX);
+        if unsigned_num > 9223372036854775808 {
+            p.fail("the Signed Value should be at the range of [-9223372036854775808, 9223372036854775807].", $span.start());
+            0
+        } else if unsigned_num == 9223372036854775808 {
+            i64::MIN
+        } else {
+            -(unsigned_num as i64)
+        }
+    } }
   ;
 DropSequenceStmt -> Stmt:
     drop sequence IfExists TableNameList { ph("DropSequenceStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
@@ -5067,13 +5429,118 @@ fn is_incorrect_identifier_name(name: &str) -> bool {
 /// ByItem: a bare integer literal in ORDER/GROUP BY is a column position (ast.PositionExpr).
 fn position_expr(e: Expr) -> Expr {
     match e {
-        Expr::Value(d) => match *d {
+        Expr::Value(v) => match v.datum {
             Datum::Int(i) => Expr::Position(i),
             Datum::Bool(b) => Expr::Position(b as i64),
-            other => Expr::Value(Box::new(other)),
+            _ => Expr::Value(v),
         },
         e => e,
     }
+}
+
+/// ast.NewValueExpr(x, parser.charset, parser.collation)
+fn val(d: Datum, p: &Ctx) -> Expr {
+    Expr::Value(Box::new(ValueExpr::new(d, p.charset, p.collation)))
+}
+
+/// ast.NewValueExpr(x, "", "")
+fn val_nocs(d: Datum) -> Expr {
+    Expr::Value(Box::new(ValueExpr::new(d, "", "")))
+}
+
+/// &ast.FuncCallExpr{FnName: ast.NewCIStr(name), Args: args}
+fn call(name: impl Into<String>, args: Vec<Expr>) -> Expr {
+    Expr::FuncCall(Box::new(FuncCallExpr { fn_name: CIStr::new(name), args, ..Default::default() }))
+}
+
+/// $n.(*ast.ColumnNameExpr).Name -- SimpleIdent always builds a ColumnNameExpr.
+fn column_of(e: Expr) -> Box<ColumnName> {
+    match e {
+        Expr::Column(c) => c,
+        other => unreachable!("SimpleIdent yields a ColumnNameExpr, got {other:?}"),
+    }
+}
+
+/// &ast.SubqueryExpr{Query: rs}
+fn subquery(query: ResultSetNode) -> Expr {
+    Expr::Subquery(Box::new(SubqueryExpr { query, multi_rows: false, exists: false }))
+}
+
+/// $n.(*ast.SelectStmt) / (*ast.SetOprStmt) as an ast.ResultSetNode.
+fn stmt_to_result_set(s: Stmt) -> ResultSetNode {
+    match s {
+        Stmt::Select(s) => ResultSetNode::Select(s),
+        Stmt::Unported(n) => ResultSetNode::Unported(n),
+    }
+}
+
+/// &ast.AggregateFuncExpr{F: f, Args: args, Distinct: distinct}
+fn agg_func(f: String, args: Vec<Expr>, distinct: bool, order: Option<Box<OrderByClause>>) -> Expr {
+    Expr::Aggregate(Box::new(AggregateFuncExpr { f, args, distinct, order }))
+}
+
+/// SumExpr: a WindowFuncExpr when an OVER clause follows, else an AggregateFuncExpr.
+fn agg_or_window(f: String, args: Vec<Expr>, distinct: bool, spec: Option<Box<WindowSpec>>) -> Expr {
+    match spec {
+        Some(spec) => Expr::Window(Box::new(WindowFuncExpr { name: f, args, distinct, spec: *spec, ..Default::default() })),
+        None => agg_func(f, args, distinct, None),
+    }
+}
+
+/// goyacc isInTokenMap: exact (case-sensitive) lookup in tokenMap.
+fn is_in_token_map(s: &str) -> bool {
+    crate::keywords_gen::KEYWORDS.iter().any(|(k, _)| *k == s)
+}
+
+/// Lexer value of an underscoreCS token: the canonical charset name (`N'..'` is utf8).
+fn underscore_cs(text: &str) -> &'static str {
+    if text.eq_ignore_ascii_case("n") {
+        return "utf8";
+    }
+    crate::charset::introducer_charset(&text[1..]).unwrap_or("")
+}
+
+/// Lexer value of a single/doubleAtIdentifier (lexer.go startWithAt): `@x` -> "x",
+/// `@'x'` -> "x", `@@global.x` -> "@@global.x", `@@global.'x'` -> "@@global.x".
+fn at_ident_text(raw: &str) -> String {
+    let quoted = |s: &str| s.starts_with(['\'', '"', '`']);
+    if let Some(rest) = raw.strip_prefix("@@") {
+        let lower = rest.to_ascii_lowercase();
+        let plen = ["global.", "session.", "local."]
+            .iter()
+            .find(|p| lower.starts_with(*p))
+            .map_or(0, |p| p.len());
+        let (prefix, name) = rest.split_at(plen);
+        if quoted(name) {
+            return format!("@@{prefix}{}", unquote_text(name));
+        }
+        return raw.to_string();
+    }
+    let name = &raw[1..];
+    if quoted(name) { unquote_text(name) } else { name.to_string() }
+}
+
+/// ParseHexStr: x'..' / X'..' / 0x.. (the lexer guarantees the digits).
+fn hex_lit(s: &str) -> Datum {
+    let digits = if s.starts_with('0') { &s[2..] } else { s[2..].trim_end_matches('\'') };
+    let padded = if digits.len() % 2 == 1 { format!("0{digits}") } else { digits.to_string() };
+    let bytes = (0..padded.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&padded[i..i + 2], 16).unwrap_or(0))
+        .collect();
+    Datum::Hex(bytes)
+}
+
+/// ParseBitStr: b'..' / B'..' / 0b.. (the lexer guarantees the digits).
+fn bit_lit(s: &str) -> Datum {
+    let digits = if s.starts_with('0') { &s[2..] } else { s[2..].trim_end_matches('\'') };
+    let aligned = digits.len().div_ceil(8) * 8;
+    let padded = format!("{}{digits}", "0".repeat(aligned - digits.len()));
+    let bytes = (0..padded.len())
+        .step_by(8)
+        .map(|i| u8::from_str_radix(&padded[i..i + 8], 2).unwrap_or(0))
+        .collect();
+    Datum::Bit(bytes)
 }
 
 /// ast.NewCrossJoin: re-associates `a JOIN (b LEFT JOIN c ...)` into `(a JOIN b) LEFT JOIN c`.
@@ -5103,15 +5570,22 @@ fn new_cross_join(left: ResultSetNode, right: ResultSetNode) -> Box<Join> {
     rj
 }
 
+/// toInt: int64 if it fits, else uint64, else (out of uint64 range) a decimal.
 fn int_lit_datum(s: &str) -> Datum {
     match s.parse::<i64>() {
         Ok(i) => Datum::Int(i),
-        Err(_) => Datum::Uint(s.parse::<u64>().unwrap_or(u64::MAX)),
+        Err(_) => match s.parse::<u64>() {
+            Ok(u) => Datum::Uint(u),
+            Err(_) => Datum::Decimal(normalize_decimal(s)),
+        },
     }
 }
 
+/// MyDecimal.FromString + String(): no leading zeros in the integer part, no trailing '.'.
 fn normalize_decimal(s: &str) -> String {
-    let s = if s.starts_with('.') { format!("0{s}") } else { s.to_string() };
-    if s.ends_with('.') { s[..s.len() - 1].to_string() } else { s }
+    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+    let int = int.trim_start_matches('0');
+    let int = if int.is_empty() { "0" } else { int };
+    if frac.is_empty() { int.to_string() } else { format!("{int}.{frac}") }
 }
 

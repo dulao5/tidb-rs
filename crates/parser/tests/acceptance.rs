@@ -5,7 +5,7 @@ use tidb_parser::{ParseOptions, parse};
 
 /// Invalid statements we must keep rejecting. The rest are grammar-valid in parser.y and
 /// rejected by Go actions that are not ported yet (they become placeholders here).
-const MIN_INVALID_REJECTED: usize = 613;
+const MIN_INVALID_REJECTED: usize = 616;
 
 #[test]
 fn corpus_acceptance() {
