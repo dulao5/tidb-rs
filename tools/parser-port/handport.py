@@ -21,6 +21,8 @@ TYPES = {
     "NumLiteral": "Datum",
     # Go: ast.FrameExtent, never asserted (only passed through WindowFrameExtent).
     "WindowFrameBetween": "FrameExtent",
+    # Go: *ast.PatternLikeOrIlikeExpr (LIKE, with a nil Expr) or the WHERE ast.ExprNode.
+    "ShowLikeOrWhereOpt": "Option<ShowLikeOrWhere>",
 }
 
 A = {}
@@ -913,6 +915,244 @@ act("OptLeadLagInfo", "',' paramMarker OptLLDefault", """{
     }""")
 act("OptLLDefault", "',' Expression", "Some($2)")
 
+# --- transactions ----------------------------------------------------------------------------------
+def begin(syms, fields=""):
+    act("BeginTransactionStmt", syms, "Stmt::Begin(Box::new(BeginStmt { %s..Default::default() }))" % fields)
+
+
+begin("begin")
+begin("begin pessimistic", 'mode: "PESSIMISTIC", ')
+begin("begin optimistic", 'mode: "OPTIMISTIC", ')
+begin("start transaction")
+begin("start transaction read write")
+begin("start transaction with consistent snapshot")
+begin("start transaction with causal consistency only", "causal_consistency_only: true, ")
+begin("start transaction read only", "read_only: true, ")
+begin("start transaction read only AsOfClause", "read_only: true, as_of: Some($5), ")
+act("CommitStmt", "commit", "Stmt::Commit(Box::default())")
+act("CommitStmt", "commit CompletionTypeWithinTransaction",
+    "Stmt::Commit(Box::new(CommitStmt { completion_type: $2 }))")
+act("RollbackStmt", "rollback", "Stmt::Rollback(Box::default())")
+act("RollbackStmt", "rollback CompletionTypeWithinTransaction",
+    "Stmt::Rollback(Box::new(RollbackStmt { completion_type: $2, ..Default::default() }))")
+act("RollbackStmt", "rollback to Identifier",
+    "Stmt::Rollback(Box::new(RollbackStmt { savepoint_name: $3, ..Default::default() }))")
+act("RollbackStmt", "rollback to savepoint Identifier",
+    "Stmt::Rollback(Box::new(RollbackStmt { savepoint_name: $4, ..Default::default() }))")
+for syms, ct in [("and chain no release", "Chain"), ("and no chain release", "Release"),
+                 ("and no chain no release", "Default"), ("and chain", "Chain"),
+                 ("and no chain", "Default"), ("release", "Release"), ("no release", "Default")]:
+    act("CompletionTypeWithinTransaction", syms, "CompletionType::" + ct)
+act("AsOfClause", "asof timestampType Expression", "Box::new(AsOfClause { ts_expr: $3 })")
+
+# --- USE / SET -----------------------------------------------------------------------------------
+act("UseStmt", "use DBName", "Stmt::Use(Box::new(UseStmt { db_name: $2 }))")
+act("SetStmt", "set VariableAssignmentList", "Stmt::Set(Box::new(SetStmt { variables: $2 }))")
+act("SetStmt", "set global transaction TransactionChars", """{
+        let mut vars = $4;
+        for v in &mut vars { v.is_global = true; }
+        Stmt::Set(Box::new(SetStmt { variables: vars }))
+    }""")
+act("SetStmt", "set session transaction TransactionChars", "Stmt::Set(Box::new(SetStmt { variables: $4 }))")
+act("SetStmt", "set transaction TransactionChars", """{
+        let mut assigns = $3;
+        for a in &mut assigns {
+            if a.name == "tx_isolation" {
+                // A special session variable that make setting tx_isolation take effect one time.
+                a.name = "tx_isolation_one_shot".into();
+            }
+        }
+        Stmt::Set(Box::new(SetStmt { variables: assigns }))
+    }""")
+act("TransactionChars", "TransactionChar", "$1")
+act("TransactionChars", "TransactionChars ',' TransactionChar", "{ let mut v = $1; v.extend($3); v }")
+TX_VAR = "vec![VariableAssignment { name: %s.into(), value: %s, is_system: true, ..Default::default() }]"
+act("TransactionChar", "isolation level IsolationLevel", TX_VAR % ('"tx_isolation"', "val(Datum::Str($3), p)"))
+act("TransactionChar", "read write", TX_VAR % ('"tx_read_only"', 'val(Datum::Str("0".into()), p)'))
+act("TransactionChar", "read only", TX_VAR % ('"tx_read_only"', 'val(Datum::Str("1".into()), p)'))
+act("TransactionChar", "read only AsOfClause", TX_VAR % ('"tx_read_ts"', "$3.ts_expr"))
+for syms, lvl in [("repeatable read", "REPEATABLE-READ"), ("read committed", "READ-COMMITTED"),
+                  ("read uncommitted", "READ-UNCOMMITTED"), ("serializable", "SERIALIZABLE")]:
+    act("IsolationLevel", syms, '"%s".to_string()' % lvl)
+act("SetExpr", "on", 'val(Datum::Str("ON".into()), p)')
+act("SetExpr", "binaryType", 'val(Datum::Str("BINARY".into()), p)')
+act("ExprOrDefault", "defaultKwd", "Expr::Default(Box::default())")
+act("VariableName", "Identifier '.' Identifier", 'format!("{}.{}", $1, $3)')
+for syms, fields in [("VariableName EqOrAssignmentEq SetExpr", "name: $1, value: $3"),
+                     ("global VariableName EqOrAssignmentEq SetExpr", "name: $2, value: $4, is_global: true"),
+                     ("instance VariableName EqOrAssignmentEq SetExpr", "name: $2, value: $4, is_instance: true"),
+                     ("session VariableName EqOrAssignmentEq SetExpr", "name: $2, value: $4"),
+                     ("local VariableName EqOrAssignmentEq SetExpr", "name: $2, value: $4")]:
+    act("VariableAssignment", syms,
+        "Box::new(VariableAssignment { %s, is_system: true, ..Default::default() })" % fields)
+act("VariableAssignment", "doubleAtIdentifier EqOrAssignmentEq SetExpr", """{
+        let mut v = at_ident_text($lexer.src_str(tok_span(&$1))).to_lowercase();
+        let (mut is_global, mut is_instance) = (false, false);
+        if let Some(r) = v.strip_prefix("@@global.") {
+            is_global = true;
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@instance.") {
+            is_instance = true;
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@session.") {
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@local.") {
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@") {
+            v = r.to_string();
+        }
+        Box::new(VariableAssignment { name: v, value: $3, is_global, is_instance, is_system: true, ..Default::default() })
+    }""")
+act("VariableAssignment", "singleAtIdentifier EqOrAssignmentEq Expression",
+    "Box::new(VariableAssignment { name: at_ident_text($lexer.src_str(tok_span(&$1))), value: $3, ..Default::default() })")
+SET_NAMES = "Box::new(VariableAssignment { name: SET_NAMES.into(), value: val_nocs(Datum::Str($2)), %s..Default::default() })"
+act("VariableAssignment", "names CharsetName", SET_NAMES % "")
+act("VariableAssignment", "names CharsetName collate defaultKwd", SET_NAMES % "")
+act("VariableAssignment", "names CharsetName collate StringName",
+    SET_NAMES % "extend_value: Some(Box::new(ValueExpr::new(Datum::Str($4), \"\", \"\"))), ")
+act("VariableAssignment", "names defaultKwd",
+    "Box::new(VariableAssignment { name: SET_NAMES.into(), value: Expr::Default(Box::default()), ..Default::default() })")
+act("VariableAssignment", "CharsetKw CharsetNameOrDefault",
+    "Box::new(VariableAssignment { name: SET_CHARSET.into(), value: $2, ..Default::default() })")
+act("CharsetNameOrDefault", "CharsetName", "val_nocs(Datum::Str($1))")
+act("CharsetNameOrDefault", "defaultKwd", "Expr::Default(Box::default())")
+act("VariableAssignmentList", "VariableAssignment", "vec![*$1]")
+act("VariableAssignmentList", "VariableAssignmentList ',' VariableAssignment", "{ let mut v = $1; v.push(*$3); v }")
+
+# --- SHOW ----------------------------------------------------------------------------------------
+def show(tp, fields=""):
+    """&ast.ShowStmt{Tp: ast.Show<tp>, <fields>}"""
+    return "Box::new(ShowStmt { tp: ShowStmtType::%s, %s..Default::default() })" % (tp, fields)
+
+
+def show_stmt(syms, code):
+    act("ShowStmt", syms, "Stmt::Show(%s)" % code)
+
+
+act("ShowStmt", "show ShowTargetFilterable ShowLikeOrWhereOpt", """{
+        let mut stmt = $2;
+        match $3 {
+            Some(ShowLikeOrWhere::Like(pattern)) => stmt.pattern = Some(pattern),
+            Some(ShowLikeOrWhere::Where(expr)) => stmt.where_ = Some(expr),
+            None => {}
+        }
+        Stmt::Show(stmt)
+    }""")
+show_stmt("show create tableKwd TableName", show("CreateTable", "table: Some($4), "))
+show_stmt("show create view TableName", show("CreateView", "table: Some($4), "))
+show_stmt("show create database IfNotExists DBName", show("CreateDatabase", "if_not_exists: $4, db_name: $5, "))
+show_stmt("show create sequence TableName", show("CreateSequence", "table: Some($4), "))
+show_stmt("show create placement policy PolicyName", show("CreatePlacementPolicy", "db_name: $5, "))
+show_stmt("show create resource group ResourceGroupName", show("CreateResourceGroup", "resource_group_name: $5, "))
+show_stmt("show masking policies forKwd TableName WhereClauseOptional",
+          show("MaskingPolicies", "table: Some($5), where_: $6, "))
+act("ShowStmt", "show tableKwd TableName PartitionNameListOpt regions WhereClauseOptional", """{
+        let mut table = $3;
+        table.partition_names = $4;
+        Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Regions, table: Some(table), where_: $6, ..Default::default() }))
+    }""")
+show_stmt("show tableKwd TableName next_row_id", show("TableNextRowId", "table: Some($3), "))
+act("ShowStmt", "show tableKwd TableName PartitionNameListOpt index Identifier regions WhereClauseOptional", """{
+        let mut table = $3;
+        table.partition_names = $4;
+        Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Regions, table: Some(table), index_name: CIStr::new($6), where_: $8, ..Default::default() }))
+    }""")
+show_stmt("show grants", show("Grants"))
+show_stmt("show master status", show("MasterStatus"))
+show_stmt("show binaryType log status", show("BinlogStatus"))
+show_stmt("show Replica status", show("ReplicaStatus"))
+show_stmt("show OptFull processlist", show("ProcessList", "full: $2, "))
+show_stmt("show profiles", show("Profiles"))
+show_stmt("show privileges", show("Privileges"))
+show_stmt("show builtins", show("Builtins"))
+show_stmt("show ShowImportJobTarget Int64Num", show("ImportJobs", "import_job_id: Some($3), import_job_raw: $2, "))
+show_stmt("show distribution job Int64Num", show("DistributionJobs", "distribution_job_id: Some($4), "))
+show_stmt("show create procedure TableName", show("CreateProcedure", "procedure: Some($4), "))
+act("ShowStmt", "show tableKwd TableName PartitionNameListOpt distributions WhereClauseOptional", """{
+        let mut table = $3;
+        table.partition_names = $4;
+        Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Distributions, table: Some(table), where_: $6, ..Default::default() }))
+    }""")
+
+
+def stats_table(name):
+    """&ast.TableName{Name: ast.NewCIStr(name), Schema: ast.NewCIStr(mysql.SystemDB)}"""
+    return 'table: Some(Box::new(TableName { name: CIStr::new("%s"), schema: CIStr::new("mysql"), ..Default::default() })), ' % name
+
+
+for syms, code in [
+        ("engines", show("Engines")),
+        ("storageClass transitions", show("StorageClassTransitions")),
+        ("databases", show("Databases")),
+        ("config", show("Config")),
+        ("CharsetKw", show("Charset")),
+        ("OptFull tables ShowDatabaseNameOpt", show("Tables", "db_name: $3, full: $1, ")),
+        ("open tables ShowDatabaseNameOpt", show("OpenTables", "db_name: $3, ")),
+        ("tableKwd status ShowDatabaseNameOpt", show("TableStatus", "db_name: $3, ")),
+        ("ShowIndexKwd FromOrIn TableName", show("Index", "table: Some($3), ")),
+        ("ShowIndexKwd FromOrIn Identifier FromOrIn Identifier",
+         show("Index", "table: Some(Box::new(TableName { name: CIStr::new($3), schema: CIStr::new($5), ..Default::default() })), ")),
+        ("OptFull FieldsOrColumns ShowTableAliasOpt ShowDatabaseNameOpt",
+         show("Columns", "table: Some($3), db_name: $4, full: $1, ")),
+        ("extended OptFull FieldsOrColumns ShowTableAliasOpt ShowDatabaseNameOpt",
+         show("Columns", "table: Some($4), db_name: $5, full: $2, extended: true, ")),
+        ("builtinCount '(' '*' ')' warnings", show("Warnings", "count_warnings_or_errors: true, ")),
+        ("warnings", show("Warnings")),
+        ("builtinCount '(' '*' ')' identSQLErrors", show("Errors", "count_warnings_or_errors: true, ")),
+        ("identSQLErrors", show("Errors")),
+        ("GlobalScope variables", show("Variables", "global_scope: $1, ")),
+        ("GlobalScope status", show("Status", "global_scope: $1, ")),
+        ("GlobalScope bindings", show("Bindings", "global_scope: $1, ")),
+        ("collation", show("Collation")),
+        ("triggers ShowDatabaseNameOpt", show("Triggers", "db_name: $2, ")),
+        ("bindingCache status", show("BindingCacheStatus")),
+        ("procedure status", show("ProcedureStatus")),
+        ("function status", show("FunctionStatus")),
+        ("events ShowDatabaseNameOpt", show("Events", "db_name: $2, ")),
+        ("plugins", show("Plugins")),
+        ("sessionStates", show("SessionStates")),
+        ("statsExtended", show("StatsExtended")),
+        ("statsMeta", show("StatsMeta", stats_table("STATS_META"))),
+        ("statsHistograms", show("StatsHistograms", stats_table("STATS_HISTOGRAMS"))),
+        ("statsTopN", show("StatsTopN")),
+        ("statsBuckets", show("StatsBuckets", stats_table("STATS_BUCKETS"))),
+        ("statsHealthy", show("StatsHealthy")),
+        ("statsLocked", show("StatsLocked", stats_table("STATS_TABLE_LOCKED"))),
+        ("histogramsInFlight", show("HistogramsInFlight")),
+        ("columnStatsUsage", show("ColumnStatsUsage")),
+        ("affinity", show("Affinity")),
+        ("analyze status", show("AnalyzeStatus")),
+        ("backups", show("Backups")),
+        ("restores", show("Restores")),
+        ("placement", show("Placement")),
+        ("placement labels", show("PlacementLabels")),
+        ("importKwd groups", show("ImportGroups")),
+        ("importKwd group stringLit", show("ImportGroups", "show_group_key: tok_text($lexer, &$3), ")),
+        ("ShowImportJobsTarget", show("ImportJobs", "import_job_raw: $1, ")),
+        ("distribution jobs", show("DistributionJobs"))]:
+    act("ShowTargetFilterable", syms, code)
+act("ShowLikeOrWhereOpt", "", "None")
+act("ShowLikeOrWhereOpt", "like SimpleExpr", "Some(ShowLikeOrWhere::Like($2))")
+act("ShowLikeOrWhereOpt", "where Expression", "Some(ShowLikeOrWhere::Where($2))")
+act("ShowDatabaseNameOpt", "", "String::new()")
+act("ShowTableAliasOpt", "FromOrIn TableName", "$2")
+
+# --- statement list entries ------------------------------------------------------------------------
+act("Statement", "SubSelect", """{
+        match $1 {
+            Expr::Subquery(sq) => match sq.query {
+                ResultSetNode::Select(mut s) => {
+                    s.is_in_braces = true;
+                    Some(Stmt::Select(s))
+                }
+                // A set operation: not ported yet.
+                ResultSetNode::Unported(n) => Some(Stmt::Unported(n)),
+                other => unreachable!("SubSelect yields a SELECT or a set operation, got {other:?}"),
+            },
+            other => unreachable!("SubSelect yields a SubqueryExpr, got {other:?}"),
+        }
+    }""")
+
 ACTIONS = A
 
 PROGRAMS = r'''
@@ -969,6 +1209,7 @@ fn stmt_to_result_set(s: Stmt) -> ResultSetNode {
     match s {
         Stmt::Select(s) => ResultSetNode::Select(s),
         Stmt::Unported(n) => ResultSetNode::Unported(n),
+        other => unreachable!("a SELECT or set operation, got {other:?}"),
     }
 }
 

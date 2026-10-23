@@ -727,7 +727,223 @@ impl FromNode for ColumnName {
 #[derive(Debug)]
 pub enum Stmt {
     Select(Box<SelectStmt>),
+    /// `BeginStmt` (BEGIN / START TRANSACTION).
+    Begin(Box<BeginStmt>),
+    Commit(Box<CommitStmt>),
+    Rollback(Box<RollbackStmt>),
+    Use(Box<UseStmt>),
+    Set(Box<SetStmt>),
+    Show(Box<ShowStmt>),
     Unported(Box<Node>),
+}
+
+/// `ast.BeginStmt`.
+#[derive(Debug, Default)]
+pub struct BeginStmt {
+    /// `ast.Pessimistic` / `ast.Optimistic`, or empty.
+    pub mode: &'static str,
+    pub causal_consistency_only: bool,
+    pub read_only: bool,
+    pub as_of: Option<Box<AsOfClause>>,
+}
+
+/// `ast.CompletionType` (COMMIT / ROLLBACK ... AND CHAIN / RELEASE).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompletionType {
+    #[default]
+    Default,
+    Chain,
+    Release,
+}
+impl FromNode for CompletionType {
+    fn from_node(_: Node) -> Self {
+        CompletionType::Default
+    }
+}
+
+/// `ast.CommitStmt`.
+#[derive(Debug, Default)]
+pub struct CommitStmt {
+    pub completion_type: CompletionType,
+}
+
+/// `ast.RollbackStmt`.
+#[derive(Debug, Default)]
+pub struct RollbackStmt {
+    pub completion_type: CompletionType,
+    pub savepoint_name: String,
+}
+
+/// `ast.UseStmt`.
+#[derive(Debug, Default)]
+pub struct UseStmt {
+    pub db_name: String,
+}
+
+/// `ast.AsOfClause` (`AS OF TIMESTAMP expr`).
+#[derive(Debug)]
+pub struct AsOfClause {
+    pub ts_expr: Expr,
+}
+impl FromNode for AsOfClause {
+    fn from_node(n: Node) -> Self {
+        AsOfClause {
+            ts_expr: Expr::from_node(n),
+        }
+    }
+}
+
+/// `ast.SetNames`: `VariableAssignment.Name` of `SET NAMES`.
+pub const SET_NAMES: &str = "SetNAMES";
+/// `ast.SetCharset`: `VariableAssignment.Name` of `SET CHARSET`.
+pub const SET_CHARSET: &str = "SetCharset";
+/// `ast.TiDBCloudStorageURI`.
+pub const TIDB_CLOUD_STORAGE_URI: &str = "tidb_cloud_storage_uri";
+
+/// `ast.SetStmt`.
+#[derive(Debug, Default)]
+pub struct SetStmt {
+    pub variables: Vec<VariableAssignment>,
+}
+
+/// `ast.VariableAssignment`.
+#[derive(Debug, Default)]
+pub struct VariableAssignment {
+    pub name: String,
+    pub value: Expr,
+    pub is_instance: bool,
+    pub is_global: bool,
+    pub is_system: bool,
+    /// `ExtendValue`: the collation of `SET NAMES cs COLLATE co`.
+    pub extend_value: Option<Box<ValueExpr>>,
+    /// Built by a placeholder action (kind of the production).
+    pub unported: Option<&'static str>,
+}
+impl FromNode for VariableAssignment {
+    fn from_node(n: Node) -> Self {
+        VariableAssignment {
+            unported: Some(n.kind),
+            ..Default::default()
+        }
+    }
+}
+
+/// `ast.ShowStmtType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShowStmtType {
+    #[default]
+    None,
+    Engines,
+    Databases,
+    Tables,
+    TableStatus,
+    Columns,
+    Warnings,
+    Charset,
+    Variables,
+    Status,
+    Collation,
+    CreateTable,
+    CreateView,
+    CreateUser,
+    CreateSequence,
+    CreatePlacementPolicy,
+    Grants,
+    Triggers,
+    ProcedureStatus,
+    FunctionStatus,
+    Index,
+    ProcessList,
+    CreateDatabase,
+    Config,
+    Events,
+    StatsExtended,
+    StatsMeta,
+    StatsHistograms,
+    StatsTopN,
+    StatsBuckets,
+    StatsHealthy,
+    StatsLocked,
+    HistogramsInFlight,
+    ColumnStatsUsage,
+    Plugins,
+    Profile,
+    Profiles,
+    MasterStatus,
+    Privileges,
+    Errors,
+    Bindings,
+    BindingCacheStatus,
+    OpenTables,
+    AnalyzeStatus,
+    Regions,
+    Builtins,
+    TableNextRowId,
+    Backups,
+    Restores,
+    Placement,
+    PlacementForDatabase,
+    PlacementForTable,
+    PlacementForPartition,
+    PlacementLabels,
+    SessionStates,
+    CreateResourceGroup,
+    ImportJobs,
+    ImportGroups,
+    CreateProcedure,
+    BinlogStatus,
+    ReplicaStatus,
+    Distributions,
+    DistributionJobs,
+    Affinity,
+    StorageClassTransitions,
+    MaskingPolicies,
+}
+
+/// `ast.ShowStmt` (the fields the ported alternatives set).
+#[derive(Debug, Default)]
+pub struct ShowStmt {
+    pub tp: ShowStmtType,
+    pub db_name: String,
+    pub table: Option<Box<TableName>>,
+    pub procedure: Option<Box<TableName>>,
+    pub index_name: CIStr,
+    pub resource_group_name: String,
+    pub full: bool,
+    pub if_not_exists: bool,
+    pub extended: bool,
+    pub count_warnings_or_errors: bool,
+    pub global_scope: bool,
+    /// `Pattern.Pattern` of `SHOW ... LIKE pattern`.
+    pub pattern: Option<Expr>,
+    pub where_: Option<Expr>,
+    pub show_group_key: String,
+    pub import_job_id: Option<i64>,
+    pub import_job_raw: bool,
+    pub distribution_job_id: Option<i64>,
+    /// Built by a placeholder action (kind of the production).
+    pub unported: Option<&'static str>,
+}
+impl FromNode for ShowStmt {
+    fn from_node(n: Node) -> Self {
+        ShowStmt {
+            unported: Some(n.kind),
+            ..Default::default()
+        }
+    }
+}
+
+/// `ShowLikeOrWhereOpt`: Go yields either a `*PatternLikeOrIlikeExpr` with a nil `Expr`
+/// (`LIKE pattern`) or the `WHERE` expression; the Rust grammar keeps the two apart.
+#[derive(Debug)]
+pub enum ShowLikeOrWhere {
+    Like(Expr),
+    Where(Expr),
+}
+impl FromNode for ShowLikeOrWhere {
+    fn from_node(n: Node) -> Self {
+        ShowLikeOrWhere::Where(Expr::from_node(n))
+    }
 }
 impl FromNode for Stmt {
     fn from_node(n: Node) -> Self {
@@ -746,6 +962,8 @@ pub enum SelectStmtKind {
 #[derive(Debug, Default)]
 pub struct SelectStmt {
     pub kind: SelectStmtKind,
+    /// `IsInBraces`: a parenthesised SELECT used as a statement (or set-operation operand).
+    pub is_in_braces: bool,
     pub select_stmt_opts: Box<SelectStmtOpts>,
     pub distinct: bool,
     pub fields: Box<FieldList>,

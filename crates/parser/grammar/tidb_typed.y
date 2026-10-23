@@ -557,15 +557,15 @@ AssignmentList -> Vec<Assignment>:
   | AssignmentList ',' Assignment { ph("AssignmentList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
   ;
 BeginTransactionStmt -> Stmt:
-    begin { ph("BeginTransactionStmt#0", $span, vec![]) }
-  | begin pessimistic { ph("BeginTransactionStmt#1", $span, vec![]) }
-  | begin optimistic { ph("BeginTransactionStmt#2", $span, vec![]) }
-  | start transaction { ph("BeginTransactionStmt#3", $span, vec![]) }
-  | start transaction read write { ph("BeginTransactionStmt#4", $span, vec![]) }
-  | start transaction with consistent snapshot { ph("BeginTransactionStmt#5", $span, vec![]) }
-  | start transaction with causal consistency only { ph("BeginTransactionStmt#6", $span, vec![]) }
-  | start transaction read only { ph("BeginTransactionStmt#7", $span, vec![]) }
-  | start transaction read only AsOfClause { ph("BeginTransactionStmt#8", $span, vec![Box::new($5) as Box<dyn Any>]) }
+    begin { Stmt::Begin(Box::new(BeginStmt { ..Default::default() })) }
+  | begin pessimistic { Stmt::Begin(Box::new(BeginStmt { mode: "PESSIMISTIC", ..Default::default() })) }
+  | begin optimistic { Stmt::Begin(Box::new(BeginStmt { mode: "OPTIMISTIC", ..Default::default() })) }
+  | start transaction { Stmt::Begin(Box::new(BeginStmt { ..Default::default() })) }
+  | start transaction read write { Stmt::Begin(Box::new(BeginStmt { ..Default::default() })) }
+  | start transaction with consistent snapshot { Stmt::Begin(Box::new(BeginStmt { ..Default::default() })) }
+  | start transaction with causal consistency only { Stmt::Begin(Box::new(BeginStmt { causal_consistency_only: true, ..Default::default() })) }
+  | start transaction read only { Stmt::Begin(Box::new(BeginStmt { read_only: true, ..Default::default() })) }
+  | start transaction read only AsOfClause { Stmt::Begin(Box::new(BeginStmt { read_only: true, as_of: Some($5), ..Default::default() })) }
   ;
 BinlogStmt -> Stmt:
     binlog stringLit { ph("BinlogStmt#0", $span, vec![]) }
@@ -612,8 +612,8 @@ ColumnNameOrUserVarListOptWithBrackets -> Vec<ColumnNameOrUserVar>:
   | '(' ColumnNameOrUserVarListOpt ')' { ph("ColumnNameOrUserVarListOptWithBrackets#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
   ;
 CommitStmt -> Stmt:
-    commit { ph("CommitStmt#0", $span, vec![]) }
-  | commit CompletionTypeWithinTransaction { ph("CommitStmt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    commit { Stmt::Commit(Box::default()) }
+  | commit CompletionTypeWithinTransaction { Stmt::Commit(Box::new(CommitStmt { completion_type: $2 })) }
   ;
 PrimaryOpt -> String:
      { ph("PrimaryOpt#0", $span, vec![]) }
@@ -1654,7 +1654,7 @@ AsOfClauseOpt -> Option<Box<AsOfClause>>:
   | AsOfClause { Some($1) }
   ;
 AsOfClause -> Box<AsOfClause>:
-    asof timestampType Expression { ph("AsOfClause#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    asof timestampType Expression { Box::new(AsOfClause { ts_expr: $3 }) }
   ;
 IfExists -> bool:
      { false }
@@ -2374,7 +2374,7 @@ Values -> Vec<Expr>:
   ;
 ExprOrDefault -> Expr:
     Expression { $1 }
-  | defaultKwd { ph("ExprOrDefault#1", $span, vec![]) }
+  | defaultKwd { Expr::Default(Box::default()) }
   ;
 ColumnSetValueList -> Box<InsertStmt>:
     ColumnName EqOrAssignmentEq ExprOrDefault { ph("ColumnSetValueList#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
@@ -3061,19 +3061,19 @@ DeallocateSym -> String:
   | drop { tok_text($lexer, &$1) }
   ;
 RollbackStmt -> Stmt:
-    rollback { ph("RollbackStmt#0", $span, vec![]) }
-  | rollback CompletionTypeWithinTransaction { ph("RollbackStmt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rollback to Identifier { ph("RollbackStmt#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | rollback to savepoint Identifier { ph("RollbackStmt#3", $span, vec![Box::new($4) as Box<dyn Any>]) }
+    rollback { Stmt::Rollback(Box::default()) }
+  | rollback CompletionTypeWithinTransaction { Stmt::Rollback(Box::new(RollbackStmt { completion_type: $2, ..Default::default() })) }
+  | rollback to Identifier { Stmt::Rollback(Box::new(RollbackStmt { savepoint_name: $3, ..Default::default() })) }
+  | rollback to savepoint Identifier { Stmt::Rollback(Box::new(RollbackStmt { savepoint_name: $4, ..Default::default() })) }
   ;
 CompletionTypeWithinTransaction -> CompletionType:
-    and chain no release { ph("CompletionTypeWithinTransaction#0", $span, vec![]) }
-  | and no chain release { ph("CompletionTypeWithinTransaction#1", $span, vec![]) }
-  | and no chain no release { ph("CompletionTypeWithinTransaction#2", $span, vec![]) }
-  | and chain { ph("CompletionTypeWithinTransaction#3", $span, vec![]) }
-  | and no chain { ph("CompletionTypeWithinTransaction#4", $span, vec![]) }
-  | release { ph("CompletionTypeWithinTransaction#5", $span, vec![]) }
-  | no release { ph("CompletionTypeWithinTransaction#6", $span, vec![]) }
+    and chain no release { CompletionType::Chain }
+  | and no chain release { CompletionType::Release }
+  | and no chain no release { CompletionType::Default }
+  | and chain { CompletionType::Chain }
+  | and no chain { CompletionType::Default }
+  | release { CompletionType::Release }
+  | no release { CompletionType::Default }
   ;
 ShutdownStmt -> Stmt:
     shutdown { ph("ShutdownStmt#0", $span, vec![]) }
@@ -3595,14 +3595,27 @@ SetOprOpt -> bool:
     DefaultTrueDistinctOpt { $1 }
   ;
 SetStmt -> Stmt:
-    set VariableAssignmentList { ph("SetStmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    set VariableAssignmentList { Stmt::Set(Box::new(SetStmt { variables: $2 })) }
   | set password EqOrAssignmentEq PasswordOpt { ph("SetStmt#1", $span, vec![Box::new($4) as Box<dyn Any>]) }
   | set password EqOrAssignmentEq PasswordOpt retain current password { ph("SetStmt#2", $span, vec![Box::new($4) as Box<dyn Any>]) }
   | set password forKwd Username EqOrAssignmentEq PasswordOpt { ph("SetStmt#3", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
   | set password forKwd Username EqOrAssignmentEq PasswordOpt retain current password { ph("SetStmt#4", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | set global transaction TransactionChars { ph("SetStmt#5", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | set session transaction TransactionChars { ph("SetStmt#6", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | set transaction TransactionChars { ph("SetStmt#7", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | set global transaction TransactionChars { {
+        let mut vars = $4;
+        for v in &mut vars { v.is_global = true; }
+        Stmt::Set(Box::new(SetStmt { variables: vars }))
+    } }
+  | set session transaction TransactionChars { Stmt::Set(Box::new(SetStmt { variables: $4 })) }
+  | set transaction TransactionChars { {
+        let mut assigns = $3;
+        for a in &mut assigns {
+            if a.name == "tx_isolation" {
+                // A special session variable that make setting tx_isolation take effect one time.
+                a.name = "tx_isolation_one_shot".into();
+            }
+        }
+        Stmt::Set(Box::new(SetStmt { variables: assigns }))
+    } }
   | set config Identifier ConfigItemName EqOrAssignmentEq SetExpr { ph("SetStmt#8", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
   | set config stringLit ConfigItemName EqOrAssignmentEq SetExpr { ph("SetStmt#9", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
   | set sessionStates stringLit { ph("SetStmt#10", $span, vec![]) }
@@ -3625,24 +3638,24 @@ SetRoleOpt -> Box<SetRoleStmt>:
   | defaultKwd { ph("SetRoleOpt#2", $span, vec![]) }
   ;
 TransactionChars -> Vec<VariableAssignment>:
-    TransactionChar { ph("TransactionChars#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TransactionChars ',' TransactionChar { ph("TransactionChars#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    TransactionChar { $1 }
+  | TransactionChars ',' TransactionChar { { let mut v = $1; v.extend($3); v } }
   ;
 TransactionChar -> Vec<VariableAssignment>:
-    isolation level IsolationLevel { ph("TransactionChar#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | read write { ph("TransactionChar#1", $span, vec![]) }
-  | read only { ph("TransactionChar#2", $span, vec![]) }
-  | read only AsOfClause { ph("TransactionChar#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    isolation level IsolationLevel { vec![VariableAssignment { name: "tx_isolation".into(), value: val(Datum::Str($3), p), is_system: true, ..Default::default() }] }
+  | read write { vec![VariableAssignment { name: "tx_read_only".into(), value: val(Datum::Str("0".into()), p), is_system: true, ..Default::default() }] }
+  | read only { vec![VariableAssignment { name: "tx_read_only".into(), value: val(Datum::Str("1".into()), p), is_system: true, ..Default::default() }] }
+  | read only AsOfClause { vec![VariableAssignment { name: "tx_read_ts".into(), value: $3.ts_expr, is_system: true, ..Default::default() }] }
   ;
 IsolationLevel -> String:
-    repeatable read { ph("IsolationLevel#0", $span, vec![]) }
-  | read committed { ph("IsolationLevel#1", $span, vec![]) }
-  | read uncommitted { ph("IsolationLevel#2", $span, vec![]) }
-  | serializable { ph("IsolationLevel#3", $span, vec![]) }
+    repeatable read { "REPEATABLE-READ".to_string() }
+  | read committed { "READ-COMMITTED".to_string() }
+  | read uncommitted { "READ-UNCOMMITTED".to_string() }
+  | serializable { "SERIALIZABLE".to_string() }
   ;
 SetExpr -> Expr:
-    on { ph("SetExpr#0", $span, vec![]) }
-  | binaryType { ph("SetExpr#1", $span, vec![]) }
+    on { val(Datum::Str("ON".into()), p) }
+  | binaryType { val(Datum::Str("BINARY".into()), p) }
   | ExprOrDefault { $1 }
   ;
 EqOrAssignmentEq -> ():
@@ -3651,7 +3664,7 @@ EqOrAssignmentEq -> ():
   ;
 VariableName -> String:
     Identifier { $1 }
-  | Identifier '.' Identifier { ph("VariableName#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | Identifier '.' Identifier { format!("{}.{}", $1, $3) }
   ;
 ConfigItemName -> String:
     Identifier { $1 }
@@ -3659,22 +3672,39 @@ ConfigItemName -> String:
   | Identifier '-' ConfigItemName { ph("ConfigItemName#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
   ;
 VariableAssignment -> Box<VariableAssignment>:
-    VariableName EqOrAssignmentEq SetExpr { ph("VariableAssignment#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | global VariableName EqOrAssignmentEq SetExpr { ph("VariableAssignment#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | instance VariableName EqOrAssignmentEq SetExpr { ph("VariableAssignment#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | session VariableName EqOrAssignmentEq SetExpr { ph("VariableAssignment#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | local VariableName EqOrAssignmentEq SetExpr { ph("VariableAssignment#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | doubleAtIdentifier EqOrAssignmentEq SetExpr { ph("VariableAssignment#5", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | singleAtIdentifier EqOrAssignmentEq Expression { ph("VariableAssignment#6", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | names CharsetName { ph("VariableAssignment#7", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | names CharsetName collate defaultKwd { ph("VariableAssignment#8", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | names CharsetName collate StringName { ph("VariableAssignment#9", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | names defaultKwd { ph("VariableAssignment#10", $span, vec![]) }
-  | CharsetKw CharsetNameOrDefault { ph("VariableAssignment#11", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    VariableName EqOrAssignmentEq SetExpr { Box::new(VariableAssignment { name: $1, value: $3, is_system: true, ..Default::default() }) }
+  | global VariableName EqOrAssignmentEq SetExpr { Box::new(VariableAssignment { name: $2, value: $4, is_global: true, is_system: true, ..Default::default() }) }
+  | instance VariableName EqOrAssignmentEq SetExpr { Box::new(VariableAssignment { name: $2, value: $4, is_instance: true, is_system: true, ..Default::default() }) }
+  | session VariableName EqOrAssignmentEq SetExpr { Box::new(VariableAssignment { name: $2, value: $4, is_system: true, ..Default::default() }) }
+  | local VariableName EqOrAssignmentEq SetExpr { Box::new(VariableAssignment { name: $2, value: $4, is_system: true, ..Default::default() }) }
+  | doubleAtIdentifier EqOrAssignmentEq SetExpr { {
+        let mut v = at_ident_text($lexer.src_str(tok_span(&$1))).to_lowercase();
+        let (mut is_global, mut is_instance) = (false, false);
+        if let Some(r) = v.strip_prefix("@@global.") {
+            is_global = true;
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@instance.") {
+            is_instance = true;
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@session.") {
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@local.") {
+            v = r.to_string();
+        } else if let Some(r) = v.strip_prefix("@@") {
+            v = r.to_string();
+        }
+        Box::new(VariableAssignment { name: v, value: $3, is_global, is_instance, is_system: true, ..Default::default() })
+    } }
+  | singleAtIdentifier EqOrAssignmentEq Expression { Box::new(VariableAssignment { name: at_ident_text($lexer.src_str(tok_span(&$1))), value: $3, ..Default::default() }) }
+  | names CharsetName { Box::new(VariableAssignment { name: SET_NAMES.into(), value: val_nocs(Datum::Str($2)), ..Default::default() }) }
+  | names CharsetName collate defaultKwd { Box::new(VariableAssignment { name: SET_NAMES.into(), value: val_nocs(Datum::Str($2)), ..Default::default() }) }
+  | names CharsetName collate StringName { Box::new(VariableAssignment { name: SET_NAMES.into(), value: val_nocs(Datum::Str($2)), extend_value: Some(Box::new(ValueExpr::new(Datum::Str($4), "", ""))), ..Default::default() }) }
+  | names defaultKwd { Box::new(VariableAssignment { name: SET_NAMES.into(), value: Expr::Default(Box::default()), ..Default::default() }) }
+  | CharsetKw CharsetNameOrDefault { Box::new(VariableAssignment { name: SET_CHARSET.into(), value: $2, ..Default::default() }) }
   ;
 CharsetNameOrDefault -> Expr:
-    CharsetName { ph("CharsetNameOrDefault#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | defaultKwd { ph("CharsetNameOrDefault#1", $span, vec![]) }
+    CharsetName { val_nocs(Datum::Str($1)) }
+  | defaultKwd { Expr::Default(Box::default()) }
   ;
 CharsetName -> String:
     StringName { {
@@ -3702,8 +3732,8 @@ CollationName -> String:
   | binaryType { crate::charset::COLLATION_BIN.to_string() }
   ;
 VariableAssignmentList -> Vec<VariableAssignment>:
-    VariableAssignment { ph("VariableAssignmentList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | VariableAssignmentList ',' VariableAssignment { ph("VariableAssignmentList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    VariableAssignment { vec![*$1] }
+  | VariableAssignmentList ',' VariableAssignment { { let mut v = $1; v.push(*$3); v } }
   ;
 Variable -> Expr:
     SystemVariable { $1 }
@@ -3841,33 +3871,53 @@ NumList -> Vec<i64>:
   | NumList ',' Int64Num { ph("NumList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
   ;
 ShowStmt -> Stmt:
-    show ShowTargetFilterable ShowLikeOrWhereOpt { ph("ShowStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | show create tableKwd TableName { ph("ShowStmt#1", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | show create view TableName { ph("ShowStmt#2", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | show create database IfNotExists DBName { ph("ShowStmt#3", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | show create sequence TableName { ph("ShowStmt#4", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | show create placement policy PolicyName { ph("ShowStmt#5", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | show create resource group ResourceGroupName { ph("ShowStmt#6", $span, vec![Box::new($5) as Box<dyn Any>]) }
+    show ShowTargetFilterable ShowLikeOrWhereOpt { {
+        let mut stmt = $2;
+        match $3 {
+            Some(ShowLikeOrWhere::Like(pattern)) => stmt.pattern = Some(pattern),
+            Some(ShowLikeOrWhere::Where(expr)) => stmt.where_ = Some(expr),
+            None => {}
+        }
+        Stmt::Show(stmt)
+    } }
+  | show create tableKwd TableName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreateTable, table: Some($4), ..Default::default() })) }
+  | show create view TableName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreateView, table: Some($4), ..Default::default() })) }
+  | show create database IfNotExists DBName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreateDatabase, if_not_exists: $4, db_name: $5, ..Default::default() })) }
+  | show create sequence TableName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreateSequence, table: Some($4), ..Default::default() })) }
+  | show create placement policy PolicyName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreatePlacementPolicy, db_name: $5, ..Default::default() })) }
+  | show create resource group ResourceGroupName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreateResourceGroup, resource_group_name: $5, ..Default::default() })) }
   | show create user Username { ph("ShowStmt#7", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | show masking policies forKwd TableName WhereClauseOptional { ph("ShowStmt#8", $span, vec![Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | show tableKwd TableName PartitionNameListOpt regions WhereClauseOptional { ph("ShowStmt#9", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | show tableKwd TableName next_row_id { ph("ShowStmt#10", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | show tableKwd TableName PartitionNameListOpt index Identifier regions WhereClauseOptional { ph("ShowStmt#11", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | show grants { ph("ShowStmt#12", $span, vec![]) }
+  | show masking policies forKwd TableName WhereClauseOptional { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::MaskingPolicies, table: Some($5), where_: $6, ..Default::default() })) }
+  | show tableKwd TableName PartitionNameListOpt regions WhereClauseOptional { {
+        let mut table = $3;
+        table.partition_names = $4;
+        Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Regions, table: Some(table), where_: $6, ..Default::default() }))
+    } }
+  | show tableKwd TableName next_row_id { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::TableNextRowId, table: Some($3), ..Default::default() })) }
+  | show tableKwd TableName PartitionNameListOpt index Identifier regions WhereClauseOptional { {
+        let mut table = $3;
+        table.partition_names = $4;
+        Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Regions, table: Some(table), index_name: CIStr::new($6), where_: $8, ..Default::default() }))
+    } }
+  | show grants { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Grants, ..Default::default() })) }
   | show grants forKwd Username UsingRoles { ph("ShowStmt#13", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | show master status { ph("ShowStmt#14", $span, vec![]) }
-  | show binaryType log status { ph("ShowStmt#15", $span, vec![]) }
-  | show Replica status { ph("ShowStmt#16", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | show OptFull processlist { ph("ShowStmt#17", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | show profiles { ph("ShowStmt#18", $span, vec![]) }
+  | show master status { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::MasterStatus, ..Default::default() })) }
+  | show binaryType log status { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::BinlogStatus, ..Default::default() })) }
+  | show Replica status { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::ReplicaStatus, ..Default::default() })) }
+  | show OptFull processlist { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::ProcessList, full: $2, ..Default::default() })) }
+  | show profiles { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Profiles, ..Default::default() })) }
   | show profile ShowProfileTypesOpt ShowProfileArgsOpt SelectStmtLimitOpt { ph("ShowStmt#19", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | show privileges { ph("ShowStmt#20", $span, vec![]) }
-  | show builtins { ph("ShowStmt#21", $span, vec![]) }
+  | show privileges { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Privileges, ..Default::default() })) }
+  | show builtins { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Builtins, ..Default::default() })) }
   | show placement forKwd ShowPlacementTarget { ph("ShowStmt#22", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | show ShowImportJobTarget Int64Num { ph("ShowStmt#23", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | show distribution job Int64Num { ph("ShowStmt#24", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | show create procedure TableName { ph("ShowStmt#25", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | show tableKwd TableName PartitionNameListOpt distributions WhereClauseOptional { ph("ShowStmt#26", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+  | show ShowImportJobTarget Int64Num { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::ImportJobs, import_job_id: Some($3), import_job_raw: $2, ..Default::default() })) }
+  | show distribution job Int64Num { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::DistributionJobs, distribution_job_id: Some($4), ..Default::default() })) }
+  | show create procedure TableName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreateProcedure, procedure: Some($4), ..Default::default() })) }
+  | show tableKwd TableName PartitionNameListOpt distributions WhereClauseOptional { {
+        let mut table = $3;
+        table.partition_names = $4;
+        Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Distributions, table: Some(table), where_: $6, ..Default::default() }))
+    } }
   ;
 ShowPlacementTarget -> Box<ShowStmt>:
     DatabaseSym DBName { ph("ShowPlacementTarget#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
@@ -3911,57 +3961,57 @@ FromOrIn -> String:
   | in { tok_text($lexer, &$1) }
   ;
 ShowTargetFilterable -> Box<ShowStmt>:
-    engines { ph("ShowTargetFilterable#0", $span, vec![]) }
-  | storageClass transitions { ph("ShowTargetFilterable#1", $span, vec![]) }
-  | databases { ph("ShowTargetFilterable#2", $span, vec![]) }
-  | config { ph("ShowTargetFilterable#3", $span, vec![]) }
-  | CharsetKw { ph("ShowTargetFilterable#4", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | OptFull tables ShowDatabaseNameOpt { ph("ShowTargetFilterable#5", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | open tables ShowDatabaseNameOpt { ph("ShowTargetFilterable#6", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | tableKwd status ShowDatabaseNameOpt { ph("ShowTargetFilterable#7", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | ShowIndexKwd FromOrIn TableName { ph("ShowTargetFilterable#8", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ShowIndexKwd FromOrIn Identifier FromOrIn Identifier { ph("ShowTargetFilterable#9", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | OptFull FieldsOrColumns ShowTableAliasOpt ShowDatabaseNameOpt { ph("ShowTargetFilterable#10", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | extended OptFull FieldsOrColumns ShowTableAliasOpt ShowDatabaseNameOpt { ph("ShowTargetFilterable#11", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | builtinCount '(' '*' ')' warnings { ph("ShowTargetFilterable#12", $span, vec![]) }
-  | warnings { ph("ShowTargetFilterable#13", $span, vec![]) }
-  | builtinCount '(' '*' ')' identSQLErrors { ph("ShowTargetFilterable#14", $span, vec![]) }
-  | identSQLErrors { ph("ShowTargetFilterable#15", $span, vec![]) }
-  | GlobalScope variables { ph("ShowTargetFilterable#16", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | GlobalScope status { ph("ShowTargetFilterable#17", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | GlobalScope bindings { ph("ShowTargetFilterable#18", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | collation { ph("ShowTargetFilterable#19", $span, vec![]) }
-  | triggers ShowDatabaseNameOpt { ph("ShowTargetFilterable#20", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | bindingCache status { ph("ShowTargetFilterable#21", $span, vec![]) }
-  | procedure status { ph("ShowTargetFilterable#22", $span, vec![]) }
-  | function status { ph("ShowTargetFilterable#23", $span, vec![]) }
-  | events ShowDatabaseNameOpt { ph("ShowTargetFilterable#24", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | plugins { ph("ShowTargetFilterable#25", $span, vec![]) }
-  | sessionStates { ph("ShowTargetFilterable#26", $span, vec![]) }
-  | statsExtended { ph("ShowTargetFilterable#27", $span, vec![]) }
-  | statsMeta { ph("ShowTargetFilterable#28", $span, vec![]) }
-  | statsHistograms { ph("ShowTargetFilterable#29", $span, vec![]) }
-  | statsTopN { ph("ShowTargetFilterable#30", $span, vec![]) }
-  | statsBuckets { ph("ShowTargetFilterable#31", $span, vec![]) }
-  | statsHealthy { ph("ShowTargetFilterable#32", $span, vec![]) }
-  | statsLocked { ph("ShowTargetFilterable#33", $span, vec![]) }
-  | histogramsInFlight { ph("ShowTargetFilterable#34", $span, vec![]) }
-  | columnStatsUsage { ph("ShowTargetFilterable#35", $span, vec![]) }
-  | affinity { ph("ShowTargetFilterable#36", $span, vec![]) }
-  | analyze status { ph("ShowTargetFilterable#37", $span, vec![]) }
-  | backups { ph("ShowTargetFilterable#38", $span, vec![]) }
-  | restores { ph("ShowTargetFilterable#39", $span, vec![]) }
-  | placement { ph("ShowTargetFilterable#40", $span, vec![]) }
-  | placement labels { ph("ShowTargetFilterable#41", $span, vec![]) }
-  | importKwd groups { ph("ShowTargetFilterable#42", $span, vec![]) }
-  | importKwd group stringLit { ph("ShowTargetFilterable#43", $span, vec![]) }
-  | ShowImportJobsTarget { ph("ShowTargetFilterable#44", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | distribution jobs { ph("ShowTargetFilterable#45", $span, vec![]) }
+    engines { Box::new(ShowStmt { tp: ShowStmtType::Engines, ..Default::default() }) }
+  | storageClass transitions { Box::new(ShowStmt { tp: ShowStmtType::StorageClassTransitions, ..Default::default() }) }
+  | databases { Box::new(ShowStmt { tp: ShowStmtType::Databases, ..Default::default() }) }
+  | config { Box::new(ShowStmt { tp: ShowStmtType::Config, ..Default::default() }) }
+  | CharsetKw { Box::new(ShowStmt { tp: ShowStmtType::Charset, ..Default::default() }) }
+  | OptFull tables ShowDatabaseNameOpt { Box::new(ShowStmt { tp: ShowStmtType::Tables, db_name: $3, full: $1, ..Default::default() }) }
+  | open tables ShowDatabaseNameOpt { Box::new(ShowStmt { tp: ShowStmtType::OpenTables, db_name: $3, ..Default::default() }) }
+  | tableKwd status ShowDatabaseNameOpt { Box::new(ShowStmt { tp: ShowStmtType::TableStatus, db_name: $3, ..Default::default() }) }
+  | ShowIndexKwd FromOrIn TableName { Box::new(ShowStmt { tp: ShowStmtType::Index, table: Some($3), ..Default::default() }) }
+  | ShowIndexKwd FromOrIn Identifier FromOrIn Identifier { Box::new(ShowStmt { tp: ShowStmtType::Index, table: Some(Box::new(TableName { name: CIStr::new($3), schema: CIStr::new($5), ..Default::default() })), ..Default::default() }) }
+  | OptFull FieldsOrColumns ShowTableAliasOpt ShowDatabaseNameOpt { Box::new(ShowStmt { tp: ShowStmtType::Columns, table: Some($3), db_name: $4, full: $1, ..Default::default() }) }
+  | extended OptFull FieldsOrColumns ShowTableAliasOpt ShowDatabaseNameOpt { Box::new(ShowStmt { tp: ShowStmtType::Columns, table: Some($4), db_name: $5, full: $2, extended: true, ..Default::default() }) }
+  | builtinCount '(' '*' ')' warnings { Box::new(ShowStmt { tp: ShowStmtType::Warnings, count_warnings_or_errors: true, ..Default::default() }) }
+  | warnings { Box::new(ShowStmt { tp: ShowStmtType::Warnings, ..Default::default() }) }
+  | builtinCount '(' '*' ')' identSQLErrors { Box::new(ShowStmt { tp: ShowStmtType::Errors, count_warnings_or_errors: true, ..Default::default() }) }
+  | identSQLErrors { Box::new(ShowStmt { tp: ShowStmtType::Errors, ..Default::default() }) }
+  | GlobalScope variables { Box::new(ShowStmt { tp: ShowStmtType::Variables, global_scope: $1, ..Default::default() }) }
+  | GlobalScope status { Box::new(ShowStmt { tp: ShowStmtType::Status, global_scope: $1, ..Default::default() }) }
+  | GlobalScope bindings { Box::new(ShowStmt { tp: ShowStmtType::Bindings, global_scope: $1, ..Default::default() }) }
+  | collation { Box::new(ShowStmt { tp: ShowStmtType::Collation, ..Default::default() }) }
+  | triggers ShowDatabaseNameOpt { Box::new(ShowStmt { tp: ShowStmtType::Triggers, db_name: $2, ..Default::default() }) }
+  | bindingCache status { Box::new(ShowStmt { tp: ShowStmtType::BindingCacheStatus, ..Default::default() }) }
+  | procedure status { Box::new(ShowStmt { tp: ShowStmtType::ProcedureStatus, ..Default::default() }) }
+  | function status { Box::new(ShowStmt { tp: ShowStmtType::FunctionStatus, ..Default::default() }) }
+  | events ShowDatabaseNameOpt { Box::new(ShowStmt { tp: ShowStmtType::Events, db_name: $2, ..Default::default() }) }
+  | plugins { Box::new(ShowStmt { tp: ShowStmtType::Plugins, ..Default::default() }) }
+  | sessionStates { Box::new(ShowStmt { tp: ShowStmtType::SessionStates, ..Default::default() }) }
+  | statsExtended { Box::new(ShowStmt { tp: ShowStmtType::StatsExtended, ..Default::default() }) }
+  | statsMeta { Box::new(ShowStmt { tp: ShowStmtType::StatsMeta, table: Some(Box::new(TableName { name: CIStr::new("STATS_META"), schema: CIStr::new("mysql"), ..Default::default() })), ..Default::default() }) }
+  | statsHistograms { Box::new(ShowStmt { tp: ShowStmtType::StatsHistograms, table: Some(Box::new(TableName { name: CIStr::new("STATS_HISTOGRAMS"), schema: CIStr::new("mysql"), ..Default::default() })), ..Default::default() }) }
+  | statsTopN { Box::new(ShowStmt { tp: ShowStmtType::StatsTopN, ..Default::default() }) }
+  | statsBuckets { Box::new(ShowStmt { tp: ShowStmtType::StatsBuckets, table: Some(Box::new(TableName { name: CIStr::new("STATS_BUCKETS"), schema: CIStr::new("mysql"), ..Default::default() })), ..Default::default() }) }
+  | statsHealthy { Box::new(ShowStmt { tp: ShowStmtType::StatsHealthy, ..Default::default() }) }
+  | statsLocked { Box::new(ShowStmt { tp: ShowStmtType::StatsLocked, table: Some(Box::new(TableName { name: CIStr::new("STATS_TABLE_LOCKED"), schema: CIStr::new("mysql"), ..Default::default() })), ..Default::default() }) }
+  | histogramsInFlight { Box::new(ShowStmt { tp: ShowStmtType::HistogramsInFlight, ..Default::default() }) }
+  | columnStatsUsage { Box::new(ShowStmt { tp: ShowStmtType::ColumnStatsUsage, ..Default::default() }) }
+  | affinity { Box::new(ShowStmt { tp: ShowStmtType::Affinity, ..Default::default() }) }
+  | analyze status { Box::new(ShowStmt { tp: ShowStmtType::AnalyzeStatus, ..Default::default() }) }
+  | backups { Box::new(ShowStmt { tp: ShowStmtType::Backups, ..Default::default() }) }
+  | restores { Box::new(ShowStmt { tp: ShowStmtType::Restores, ..Default::default() }) }
+  | placement { Box::new(ShowStmt { tp: ShowStmtType::Placement, ..Default::default() }) }
+  | placement labels { Box::new(ShowStmt { tp: ShowStmtType::PlacementLabels, ..Default::default() }) }
+  | importKwd groups { Box::new(ShowStmt { tp: ShowStmtType::ImportGroups, ..Default::default() }) }
+  | importKwd group stringLit { Box::new(ShowStmt { tp: ShowStmtType::ImportGroups, show_group_key: tok_text($lexer, &$3), ..Default::default() }) }
+  | ShowImportJobsTarget { Box::new(ShowStmt { tp: ShowStmtType::ImportJobs, import_job_raw: $1, ..Default::default() }) }
+  | distribution jobs { Box::new(ShowStmt { tp: ShowStmtType::DistributionJobs, ..Default::default() }) }
   ;
-ShowLikeOrWhereOpt -> Option<Box<PatternLikeOrIlikeExpr>>:
+ShowLikeOrWhereOpt -> Option<ShowLikeOrWhere>:
      { None }
-  | like SimpleExpr { ph("ShowLikeOrWhereOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | where Expression { ph("ShowLikeOrWhereOpt#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | like SimpleExpr { Some(ShowLikeOrWhere::Like($2)) }
+  | where Expression { Some(ShowLikeOrWhere::Where($2)) }
   ;
 ShowImportJobTarget -> bool:
     importKwd job { false }
@@ -3987,11 +4037,11 @@ OptFull -> bool:
   | full { true }
   ;
 ShowDatabaseNameOpt -> String:
-     { ph("ShowDatabaseNameOpt#0", $span, vec![]) }
+     { String::new() }
   | FromOrIn DBName { $2 }
   ;
 ShowTableAliasOpt -> Box<TableName>:
-    FromOrIn TableName { ph("ShowTableAliasOpt#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    FromOrIn TableName { $2 }
   ;
 Replica -> String:
     replica { tok_text($lexer, &$1) }
@@ -4130,7 +4180,20 @@ Statement -> Option<Stmt>:
   | SetOprStmt { Some($1) }
   | SelectStmt { Some($1) }
   | SelectStmtWithClause { Some($1) }
-  | SubSelect { ph("Statement#90", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SubSelect { {
+        match $1 {
+            Expr::Subquery(sq) => match sq.query {
+                ResultSetNode::Select(mut s) => {
+                    s.is_in_braces = true;
+                    Some(Stmt::Select(s))
+                }
+                // A set operation: not ported yet.
+                ResultSetNode::Unported(n) => Some(Stmt::Unported(n)),
+                other => unreachable!("SubSelect yields a SELECT or a set operation, got {other:?}"),
+            },
+            other => unreachable!("SubSelect yields a SubqueryExpr, got {other:?}"),
+        }
+    } }
   | SetStmt { Some($1) }
   | SetBindingStmt { Some($1) }
   | SetRoleStmt { Some($1) }
@@ -4529,7 +4592,7 @@ UpdateStmtNoWith -> Stmt:
   | update TableOptimizerHintsOpt PriorityOpt IgnoreOptional TableRefs set AssignmentList WhereClauseOptional ReturningClause { ph("UpdateStmtNoWith#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
   ;
 UseStmt -> Stmt:
-    use DBName { ph("UseStmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    use DBName { Stmt::Use(Box::new(UseStmt { db_name: $2 })) }
   ;
 WhereClause -> Expr:
     where Expression { $2 }
@@ -5471,6 +5534,7 @@ fn stmt_to_result_set(s: Stmt) -> ResultSetNode {
     match s {
         Stmt::Select(s) => ResultSetNode::Select(s),
         Stmt::Unported(n) => ResultSetNode::Unported(n),
+        other => unreachable!("a SELECT or set operation, got {other:?}"),
     }
 }
 

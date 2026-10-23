@@ -5,11 +5,11 @@
  "distinct_rust_types": 259,
  "type_buckets": {
   "AST enum (Expr/Stmt/ResultSetNode)": 193,
-  "Box<concrete AST struct>": 172,
+  "Box<concrete AST struct>": 171,
   "Vec<_>": 137,
   "String": 77,
+  "value struct / enum (CIStr, Op, JoinType, ...)": 74,
   "primitive": 73,
-  "value struct / enum (CIStr, Op, JoinType, ...)": 73,
   "catch-all Item (Box<dyn Any>)": 25,
   "unit (untyped in goyacc)": 9
  },
@@ -19,8 +19,8 @@
   "catch_all": 25,
   "own_action": 15,
   "untyped": 9,
-  "handport": 7,
-  "assert_majority": 6,
+  "handport": 8,
+  "assert_majority": 5,
   "passthrough": 3
  },
  "catch_all_reasons": {
@@ -29,15 +29,15 @@
  },
  "option_wrapped": 45,
  "action_kinds": {
-  "placeholder": 1566,
+  "placeholder": 1435,
   "implicit_passthrough": 1022,
-  "ported": 377,
+  "ported": 510,
   "bool_const": 101,
-  "nil": 57,
+  "nil": 56,
   "explicit_passthrough": 53,
   "empty_list": 26,
   "unit": 19,
-  "explicit_passthrough_type_mismatch->placeholder": 7,
+  "explicit_passthrough_type_mismatch->placeholder": 6,
   "implicit_passthrough_type_mismatch->placeholder": 6
  },
  "passthrough_mismatch_pairs": {
@@ -47,10 +47,9 @@
   "Item -> Box<Constraint>": 2,
   "Item -> Box<MViewRefreshClause>": 1,
   "TOKEN -> Expr": 1,
-  "Item -> Box<AuthRoleIdentity>": 1,
-  "Expr -> Option<Box<PatternLikeOrIlikeExpr>>": 1
+  "Item -> Box<AuthRoleIdentity>": 1
  },
- "stub_types_generated": 139,
+ "stub_types_generated": 135,
  "catch_all_nonterminals": [
   "CharsetOpt",
   "Constraint",
@@ -2555,9 +2554,9 @@
    "assert"
   ],
   "ShowLikeOrWhereOpt": [
-   "Option<Box<PatternLikeOrIlikeExpr>>",
+   "Option<ShowLikeOrWhere>",
    "*ast.PatternLikeOrIlikeExpr",
-   "assert_majority"
+   "handport"
   ],
   "ShowImportJobTarget": [
    "bool",

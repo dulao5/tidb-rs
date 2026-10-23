@@ -475,7 +475,7 @@ impl Expr {
                 out.push(')');
                 Ok(())
             }
-            Expr::TableName(t) => t.restore_with_alias(out, &CIStr::default()),
+            Expr::TableName(t) => t.restore(out),
             Expr::TimeUnit(u) => {
                 out.push_str(u.as_str());
                 Ok(())
@@ -659,8 +659,381 @@ impl Stmt {
     pub fn restore(&self, out: &mut String) -> R {
         match self {
             Stmt::Select(s) => s.restore(out),
+            Stmt::Begin(b) => b.restore(out),
+            Stmt::Commit(c) => {
+                out.push_str("COMMIT");
+                c.completion_type.restore(out);
+                Ok(())
+            }
+            Stmt::Rollback(r) => {
+                out.push_str("ROLLBACK");
+                if !r.savepoint_name.is_empty() {
+                    out.push_str(" TO ");
+                    out.push_str(&r.savepoint_name);
+                }
+                r.completion_type.restore(out);
+                Ok(())
+            }
+            Stmt::Use(u) => {
+                out.push_str("USE ");
+                name(out, &u.db_name);
+                Ok(())
+            }
+            Stmt::Set(s) => {
+                out.push_str("SET ");
+                for (i, v) in s.variables.iter().enumerate() {
+                    if i != 0 {
+                        out.push_str(", ");
+                    }
+                    v.restore(out)?;
+                }
+                Ok(())
+            }
+            Stmt::Show(s) => s.restore(out),
             Stmt::Unported(n) => Err(format!("unported stmt {}", n.kind)),
         }
+    }
+}
+
+impl BeginStmt {
+    fn restore(&self, out: &mut String) -> R {
+        if self.mode.is_empty() {
+            if self.read_only {
+                out.push_str("START TRANSACTION READ ONLY");
+                if let Some(a) = &self.as_of {
+                    out.push(' ');
+                    return a.restore(out);
+                }
+            } else if self.causal_consistency_only {
+                out.push_str("START TRANSACTION WITH CAUSAL CONSISTENCY ONLY");
+            } else {
+                out.push_str("START TRANSACTION");
+            }
+        } else {
+            out.push_str("BEGIN ");
+            keyword(out, self.mode);
+        }
+        Ok(())
+    }
+}
+
+impl CompletionType {
+    fn restore(self, out: &mut String) {
+        match self {
+            CompletionType::Default => {}
+            CompletionType::Chain => out.push_str(" AND CHAIN"),
+            CompletionType::Release => out.push_str(" RELEASE"),
+        }
+    }
+}
+
+impl AsOfClause {
+    fn restore(&self, out: &mut String) -> R {
+        out.push_str("AS OF TIMESTAMP ");
+        self.ts_expr.restore(out)
+    }
+}
+
+/// `embeddingAPIKeySysVars`: values restored as `'******'`.
+const EMBEDDING_API_KEY_SYS_VARS: &[&str] = &[
+    "tidb_exp_embed_jina_ai_api_key",
+    "tidb_exp_embed_openai_api_key",
+    "tidb_exp_embed_cohere_api_key",
+    "tidb_exp_embed_huggingface_api_key",
+    "tidb_exp_embed_nvidia_nim_api_key",
+    "tidb_exp_embed_gemini_api_key",
+];
+
+impl VariableAssignment {
+    fn restore(&self, out: &mut String) -> R {
+        if let Some(kind) = self.unported {
+            return Err(format!("unported variable assignment {kind}"));
+        }
+        if self.is_system {
+            out.push_str("@@");
+            out.push_str(if self.is_global {
+                "GLOBAL"
+            } else if self.is_instance {
+                "INSTANCE"
+            } else {
+                "SESSION"
+            });
+            out.push('.');
+        } else if self.name != SET_NAMES && self.name != SET_CHARSET {
+            out.push('@');
+        }
+        if self.name == SET_NAMES {
+            out.push_str("NAMES ");
+        } else if self.name == SET_CHARSET {
+            out.push_str("CHARSET ");
+        } else {
+            name(out, &self.name);
+            out.push('=');
+        }
+        let lower = self.name.to_lowercase();
+        if self.is_system && EMBEDDING_API_KEY_SYS_VARS.contains(&lower.as_str()) {
+            string(out, "******");
+        } else if self.name == TIDB_CLOUD_STORAGE_URI {
+            // Go writes RedactURL(value) here; URL redaction is not ported.
+            return Err("unported RedactURL".into());
+        } else {
+            self.value.restore(out)?;
+        }
+        if let Some(ev) = &self.extend_value {
+            out.push_str(" COLLATE ");
+            ev.restore_with(out, false)?;
+        }
+        Ok(())
+    }
+}
+
+impl ShowStmt {
+    fn restore(&self, out: &mut String) -> R {
+        use ShowStmtType as T;
+        if let Some(kind) = self.unported {
+            return Err(format!("unported show {kind}"));
+        }
+        let table = |out: &mut String| -> R {
+            self.table
+                .as_ref()
+                .ok_or("SHOW without table")?
+                .restore(out)
+        };
+        let db_name_opt = |out: &mut String| {
+            if !self.db_name.is_empty() {
+                out.push_str(" IN ");
+                name(out, &self.db_name);
+            }
+        };
+        let like_or_where = |out: &mut String| -> R {
+            if let Some(p) = &self.pattern {
+                out.push_str(" LIKE ");
+                p.restore(out)
+            } else if let Some(w) = &self.where_ {
+                out.push_str(" WHERE ");
+                w.restore(out)
+            } else {
+                Ok(())
+            }
+        };
+        let full = |out: &mut String| {
+            if self.full {
+                out.push_str("FULL ");
+            }
+        };
+        let global_scope = |out: &mut String| {
+            out.push_str(if self.global_scope {
+                "GLOBAL "
+            } else {
+                "SESSION "
+            });
+        };
+        out.push_str("SHOW ");
+        match self.tp {
+            T::BinlogStatus => out.push_str("BINARY LOG STATUS"),
+            T::CreateTable => {
+                out.push_str("CREATE TABLE ");
+                table(out)?;
+            }
+            T::CreateProcedure => {
+                out.push_str("CREATE PROCEDURE ");
+                self.procedure
+                    .as_ref()
+                    .ok_or("SHOW without procedure")?
+                    .restore(out)?;
+            }
+            T::CreateView => {
+                out.push_str("CREATE VIEW ");
+                table(out)?;
+            }
+            T::CreateDatabase => {
+                out.push_str("CREATE DATABASE ");
+                if self.if_not_exists {
+                    out.push_str("IF NOT EXISTS ");
+                }
+                name(out, &self.db_name);
+            }
+            T::CreateSequence => {
+                out.push_str("CREATE SEQUENCE ");
+                table(out)?;
+            }
+            T::CreatePlacementPolicy => {
+                out.push_str("CREATE PLACEMENT POLICY ");
+                name(out, &self.db_name);
+            }
+            T::CreateResourceGroup => {
+                out.push_str("CREATE RESOURCE GROUP ");
+                name(out, &self.resource_group_name);
+            }
+            T::MaskingPolicies => {
+                out.push_str("MASKING POLICIES FOR ");
+                table(out)?;
+                if let Some(w) = &self.where_ {
+                    out.push_str(" WHERE ");
+                    w.restore(out)?;
+                }
+            }
+            // `SHOW GRANTS` without FOR (the user / role forms are not ported).
+            T::Grants => out.push_str("GRANTS"),
+            T::MasterStatus => out.push_str("MASTER STATUS"),
+            T::ProcessList => {
+                full(out);
+                out.push_str("PROCESSLIST");
+            }
+            T::StatsExtended
+            | T::StatsMeta
+            | T::StatsLocked
+            | T::StatsHistograms
+            | T::StatsTopN
+            | T::StatsBuckets
+            | T::StatsHealthy
+            | T::HistogramsInFlight
+            | T::ColumnStatsUsage => {
+                out.push_str(match self.tp {
+                    T::StatsExtended => "STATS_EXTENDED",
+                    T::StatsMeta => "STATS_META",
+                    T::StatsLocked => "STATS_LOCKED",
+                    T::StatsHistograms => "STATS_HISTOGRAMS",
+                    T::StatsTopN => "STATS_TOPN",
+                    T::StatsBuckets => "STATS_BUCKETS",
+                    T::StatsHealthy => "STATS_HEALTHY",
+                    T::HistogramsInFlight => "HISTOGRAMS_IN_FLIGHT",
+                    _ => "COLUMN_STATS_USAGE",
+                });
+                like_or_where(out)?;
+            }
+            T::Profiles => out.push_str("PROFILES"),
+            T::Privileges => out.push_str("PRIVILEGES"),
+            T::Builtins => out.push_str("BUILTINS"),
+            T::ImportJobs => {
+                if self.import_job_raw {
+                    out.push_str("RAW ");
+                }
+                if let Some(id) = self.import_job_id {
+                    out.push_str("IMPORT JOB ");
+                    out.push_str(&id.to_string());
+                } else {
+                    out.push_str("IMPORT JOBS");
+                    like_or_where(out)?;
+                }
+            }
+            T::ImportGroups => {
+                if !self.show_group_key.is_empty() {
+                    out.push_str("IMPORT GROUP ");
+                    string(out, &self.show_group_key);
+                } else {
+                    out.push_str("IMPORT GROUPS");
+                    like_or_where(out)?;
+                }
+            }
+            T::DistributionJobs => {
+                if let Some(id) = self.distribution_job_id {
+                    out.push_str("DISTRIBUTION JOB ");
+                    out.push_str(&id.to_string());
+                } else {
+                    out.push_str("DISTRIBUTION JOBS");
+                    like_or_where(out)?;
+                }
+            }
+            // ShowTargetFilterable
+            _ => {
+                match self.tp {
+                    T::Engines => out.push_str("ENGINES"),
+                    T::Config => out.push_str("CONFIG"),
+                    T::Databases => out.push_str("DATABASES"),
+                    T::Charset => out.push_str("CHARSET"),
+                    T::Tables => {
+                        full(out);
+                        out.push_str("TABLES");
+                        db_name_opt(out);
+                    }
+                    T::OpenTables => {
+                        out.push_str("OPEN TABLES");
+                        db_name_opt(out);
+                    }
+                    T::TableStatus => {
+                        out.push_str("TABLE STATUS");
+                        db_name_opt(out);
+                    }
+                    T::Index => {
+                        out.push_str("INDEX IN ");
+                        table(out)?;
+                    }
+                    T::Columns => {
+                        if self.extended {
+                            out.push_str("EXTENDED ");
+                        }
+                        full(out);
+                        out.push_str("COLUMNS");
+                        if let Some(t) = &self.table {
+                            out.push_str(" IN ");
+                            t.restore(out)?;
+                        }
+                        db_name_opt(out);
+                    }
+                    T::Warnings => out.push_str("WARNINGS"),
+                    T::Errors => out.push_str("ERRORS"),
+                    T::Variables => {
+                        global_scope(out);
+                        out.push_str("VARIABLES");
+                    }
+                    T::Status => {
+                        global_scope(out);
+                        out.push_str("STATUS");
+                    }
+                    T::Collation => out.push_str("COLLATION"),
+                    T::Triggers => {
+                        out.push_str("TRIGGERS");
+                        db_name_opt(out);
+                    }
+                    T::ProcedureStatus => out.push_str("PROCEDURE STATUS"),
+                    T::FunctionStatus => out.push_str("FUNCTION STATUS"),
+                    T::Events => {
+                        out.push_str("EVENTS");
+                        db_name_opt(out);
+                    }
+                    T::Plugins => out.push_str("PLUGINS"),
+                    T::Bindings => {
+                        global_scope(out);
+                        out.push_str("BINDINGS");
+                    }
+                    T::BindingCacheStatus => out.push_str("BINDING_CACHE STATUS"),
+                    T::AnalyzeStatus => out.push_str("ANALYZE STATUS"),
+                    T::Distributions => {
+                        out.push_str("TABLE ");
+                        table(out)?;
+                        out.push_str(" DISTRIBUTIONS");
+                        return like_or_where(out);
+                    }
+                    T::Regions => {
+                        out.push_str("TABLE ");
+                        table(out)?;
+                        if !self.index_name.o.is_empty() {
+                            out.push_str(" INDEX ");
+                            name(out, &self.index_name.o);
+                        }
+                        out.push_str(" REGIONS");
+                        return like_or_where(out);
+                    }
+                    T::TableNextRowId => {
+                        out.push_str("TABLE ");
+                        table(out)?;
+                        out.push_str(" NEXT_ROW_ID");
+                        return Ok(());
+                    }
+                    T::Backups => out.push_str("BACKUPS"),
+                    T::Restores => out.push_str("RESTORES"),
+                    T::Placement => out.push_str("PLACEMENT"),
+                    T::PlacementLabels => out.push_str("PLACEMENT LABELS"),
+                    T::SessionStates => out.push_str("SESSION_STATES"),
+                    T::ReplicaStatus => out.push_str("REPLICA STATUS"),
+                    T::StorageClassTransitions => out.push_str("STORAGE_CLASS TRANSITIONS"),
+                    _ => return Err("Unknown ShowStmt type".into()),
+                }
+                like_or_where(out)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -674,6 +1047,16 @@ fn unported_if<T>(o: &Option<T>, what: &str) -> R {
 
 impl SelectStmt {
     pub fn restore(&self, out: &mut String) -> R {
+        if self.is_in_braces {
+            out.push('(');
+            self.restore_body(out)?;
+            out.push(')');
+            return Ok(());
+        }
+        self.restore_body(out)
+    }
+
+    fn restore_body(&self, out: &mut String) -> R {
         if self.kind != SelectStmtKind::Select {
             return Err("unported TABLE/VALUES".into());
         }
@@ -901,7 +1284,7 @@ impl ByItem {
 impl ResultSetNode {
     fn restore(&self, out: &mut String) -> R {
         match self {
-            ResultSetNode::TableName(t) => t.restore_with_alias(out, &CIStr::default()),
+            ResultSetNode::TableName(t) => t.restore(out),
             ResultSetNode::TableSource(t) => t.restore(out),
             ResultSetNode::Join(j) => j.restore(out),
             ResultSetNode::Select(s) => s.restore(out),
@@ -939,12 +1322,15 @@ impl TableSource {
 }
 
 impl TableName {
-    pub fn restore_with_alias(&self, out: &mut String, as_name: &CIStr) -> R {
+    fn restore_name(&self, out: &mut String) {
         if !self.schema.o.is_empty() {
             name(out, &self.schema.o);
             out.push('.');
         }
         name(out, &self.name.o);
+    }
+
+    fn restore_partitions(&self, out: &mut String) {
         if !self.partition_names.is_empty() {
             out.push_str(" PARTITION(");
             for (i, p) in self.partition_names.iter().enumerate() {
@@ -955,14 +1341,40 @@ impl TableName {
             }
             out.push(')');
         }
+    }
+
+    fn restore_index_hints(&self) -> R {
+        if !self.index_hints.is_empty() {
+            return Err("unported index hints".into());
+        }
+        Ok(())
+    }
+
+    /// `TableName.Restore`.
+    pub fn restore(&self, out: &mut String) -> R {
+        self.restore_name(out);
+        self.restore_partitions(out);
+        self.restore_index_hints()?;
+        if let Some(a) = &self.as_of {
+            out.push(' ');
+            a.restore(out)?;
+        }
+        unported_if(&self.table_sample, "tablesample")
+    }
+
+    /// The `*TableName` branch of `TableSource.Restore`.
+    pub fn restore_with_alias(&self, out: &mut String, as_name: &CIStr) -> R {
+        self.restore_name(out);
+        self.restore_partitions(out);
         if !as_name.o.is_empty() {
             out.push_str(" AS ");
             name(out, &as_name.o);
         }
-        unported_if(&self.as_of, "as of")?;
-        if !self.index_hints.is_empty() {
-            return Err("unported index hints".into());
+        if let Some(a) = &self.as_of {
+            out.push(' ');
+            a.restore(out)?;
         }
+        self.restore_index_hints()?;
         unported_if(&self.table_sample, "tablesample")
     }
 }

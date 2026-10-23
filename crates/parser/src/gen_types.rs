@@ -203,9 +203,6 @@ impl FromNode for BRIEOptionType { fn from_node(n: Node) -> Self { BRIEOptionTyp
 /// Go: ast.BRIEOptionLevel
 #[derive(Debug, Default)] pub struct BRIEOptionLevel(pub Option<Box<Node>>);
 impl FromNode for BRIEOptionLevel { fn from_node(n: Node) -> Self { BRIEOptionLevel(Some(Box::new(n))) } }
-/// Go: ast.AsOfClause
-#[derive(Debug, Default)] pub struct AsOfClause(pub Option<Box<Node>>);
-impl FromNode for AsOfClause { fn from_node(n: Node) -> Self { AsOfClause(Some(Box::new(n))) } }
 /// Go: ast.NullString
 #[derive(Debug, Default)] pub struct NullString(pub Option<Box<Node>>);
 impl FromNode for NullString { fn from_node(n: Node) -> Self { NullString(Some(Box::new(n))) } }
@@ -227,9 +224,6 @@ impl FromNode for InsertRowAlias { fn from_node(n: Node) -> Self { InsertRowAlia
 /// Go: ast.AlterOrderItem
 #[derive(Debug, Default)] pub struct AlterOrderItem(pub Option<Box<Node>>);
 impl FromNode for AlterOrderItem { fn from_node(n: Node) -> Self { AlterOrderItem(Some(Box::new(n))) } }
-/// Go: ast.CompletionType
-#[derive(Debug, Default)] pub struct CompletionType(pub Option<Box<Node>>);
-impl FromNode for CompletionType { fn from_node(n: Node) -> Self { CompletionType(Some(Box::new(n))) } }
 /// Go: ast.TableSample
 #[derive(Debug, Default)] pub struct TableSample(pub Option<Box<Node>>);
 impl FromNode for TableSample { fn from_node(n: Node) -> Self { TableSample(Some(Box::new(n))) } }
@@ -272,9 +266,6 @@ impl FromNode for SetOprType { fn from_node(n: Node) -> Self { SetOprType(Some(B
 /// Go: ast.SetRoleStmt
 #[derive(Debug, Default)] pub struct SetRoleStmt(pub Option<Box<Node>>);
 impl FromNode for SetRoleStmt { fn from_node(n: Node) -> Self { SetRoleStmt(Some(Box::new(n))) } }
-/// Go: ast.VariableAssignment
-#[derive(Debug, Default)] pub struct VariableAssignment(pub Option<Box<Node>>);
-impl FromNode for VariableAssignment { fn from_node(n: Node) -> Self { VariableAssignment(Some(Box::new(n))) } }
 /// Go: auth.RoleIdentity
 #[derive(Debug, Default)] pub struct AuthRoleIdentity(pub Option<Box<Node>>);
 impl FromNode for AuthRoleIdentity { fn from_node(n: Node) -> Self { AuthRoleIdentity(Some(Box::new(n))) } }
@@ -293,9 +284,6 @@ impl FromNode for ShowSlow { fn from_node(n: Node) -> Self { ShowSlow(Some(Box::
 /// Go: ast.HandleRange
 #[derive(Debug, Default)] pub struct HandleRange(pub Option<Box<Node>>);
 impl FromNode for HandleRange { fn from_node(n: Node) -> Self { HandleRange(Some(Box::new(n))) } }
-/// Go: ast.ShowStmt
-#[derive(Debug, Default)] pub struct ShowStmt(pub Option<Box<Node>>);
-impl FromNode for ShowStmt { fn from_node(n: Node) -> Self { ShowStmt(Some(Box::new(n))) } }
 /// Go: ast.StatementScope
 #[derive(Debug, Default)] pub struct StatementScope(pub Option<Box<Node>>);
 impl FromNode for StatementScope { fn from_node(n: Node) -> Self { StatementScope(Some(Box::new(n))) } }
