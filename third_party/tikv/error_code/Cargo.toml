@@ -1,0 +1,25 @@
+[package]
+name = "error_code"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+name = "error_code"
+path = "src/lib.rs"
+
+[[bin]]
+name = "error_code_gen"
+path = "bin.rs"
+required-features = ["raft"]
+
+[features]
+# Error codes of raft and raftstore errors. Needs kvproto and raft.
+raft = ["dep:kvproto", "dep:raft"]
+
+[dependencies]
+kvproto = { workspace = true, optional = true }
+lazy_static = "1.3"
+raft = { workspace = true, optional = true }
+tikv_alloc = { workspace = true }
