@@ -1153,6 +1153,42 @@ act("Statement", "SubSelect", """{
         }
     }""")
 
+# --- index hints, locking reads --------------------------------------------------------------------
+act("IndexHintList", "IndexHint", "vec![*$1]")
+act("IndexHintList", "IndexHintList IndexHint", "{ let mut v = $1; v.push(*$2); v }")
+act("IndexHint", "IndexHintType IndexHintScope '(' IndexNameList ')'",
+    "Box::new(IndexHint { index_names: $4, hint_type: $1, hint_scope: $2, unported: None })")
+for tok, tp in [("use", "Use"), ("ignore", "Ignore"), ("force", "Force")]:
+    act("IndexHintType", f"{tok} KeyOrIndex", "IndexHintType::" + tp)
+act("IndexHintScope", "", "IndexHintScope::ForScan")
+act("IndexHintScope", "forKwd join", "IndexHintScope::ForJoin")
+act("IndexHintScope", "forKwd order by", "IndexHintScope::ForOrderBy")
+act("IndexHintScope", "forKwd group by", "IndexHintScope::ForGroupBy")
+act("IndexNameList", "Identifier", "vec![CIStr::new($1)]")
+act("IndexNameList", "IndexNameList ',' Identifier", "{ let mut v = $1; v.push(CIStr::new($3)); v }")
+act("IndexNameList", "primary", "vec![CIStr::new(tok_text($lexer, &$1))]")
+act("IndexNameList", "IndexNameList ',' primary", "{ let mut v = $1; v.push(CIStr::new(tok_text($lexer, &$3))); v }")
+LOCK = "Some(Box::new(SelectLockInfo { lock_type: SelectLockType::%s, tables: $3, ..Default::default() }))"
+for syms, tp in [("forKwd update OfTablesOpt", "ForUpdate"), ("forKwd share OfTablesOpt", "ForShare"),
+                 ("forKwd update OfTablesOpt nowait", "ForUpdateNoWait"),
+                 ("forKwd share OfTablesOpt nowait", "ForShareNoWait"),
+                 ("forKwd update OfTablesOpt skip locked", "ForUpdateSkipLocked"),
+                 ("forKwd share OfTablesOpt skip locked", "ForShareSkipLocked")]:
+    act("SelectLockOpt", syms, LOCK % tp)
+act("SelectLockOpt", "forKwd update OfTablesOpt wait NUM",
+    "Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec: $5 as u64, tables: $3, unported: None }))")
+act("SelectLockOpt", "lock in share mode",
+    "Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShare, ..Default::default() }))")
+act("OfTablesOpt", "of TableNameList", "$2")
+act("TableNameList", "TableName", "vec![*$1]")
+act("TableNameList", "TableNameList ',' TableName", "{ let mut v = $1; v.push(*$3); v }")
+act("TableAsNameOpt", "", "CIStr::default()")
+act("EscapedTableRef", "'{' Identifier TableRef '}'", """{
+        // ODBC escape syntax for outer join is { OJ join_table }; use an Identifier for OJ.
+        $3
+    }""")
+act("OuterOpt", "", "String::new()")
+
 ACTIONS = A
 
 PROGRAMS = r'''

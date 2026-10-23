@@ -1148,7 +1148,9 @@ impl SelectStmt {
             }
             l.count.restore(out)?;
         }
-        unported_if(&self.lock_info, "lock")?;
+        if let Some(l) = &self.lock_info {
+            l.restore(out)?;
+        }
         unported_if(&self.select_into_opt, "into")?;
         Ok(())
     }
@@ -1343,9 +1345,10 @@ impl TableName {
         }
     }
 
-    fn restore_index_hints(&self) -> R {
-        if !self.index_hints.is_empty() {
-            return Err("unported index hints".into());
+    fn restore_index_hints(&self, out: &mut String) -> R {
+        for h in &self.index_hints {
+            out.push(' ');
+            h.restore(out)?;
         }
         Ok(())
     }
@@ -1354,7 +1357,7 @@ impl TableName {
     pub fn restore(&self, out: &mut String) -> R {
         self.restore_name(out);
         self.restore_partitions(out);
-        self.restore_index_hints()?;
+        self.restore_index_hints(out)?;
         if let Some(a) = &self.as_of {
             out.push(' ');
             a.restore(out)?;
@@ -1374,8 +1377,98 @@ impl TableName {
             out.push(' ');
             a.restore(out)?;
         }
-        self.restore_index_hints()?;
+        self.restore_index_hints(out)?;
         unported_if(&self.table_sample, "tablesample")
+    }
+}
+
+impl IndexHint {
+    fn restore(&self, out: &mut String) -> R {
+        if let Some(kind) = self.unported {
+            return Err(format!("unported index hint {kind}"));
+        }
+        out.push_str(match self.hint_type {
+            IndexHintType::Use => "USE INDEX",
+            IndexHintType::Ignore => "IGNORE INDEX",
+            IndexHintType::Force => "FORCE INDEX",
+            IndexHintType::OrderIndex => "ORDER INDEX",
+            IndexHintType::NoOrderIndex => "NO ORDER INDEX",
+        });
+        out.push_str(match self.hint_scope {
+            IndexHintScope::ForScan => "",
+            IndexHintScope::ForJoin => " FOR JOIN",
+            IndexHintScope::ForOrderBy => " FOR ORDER BY",
+            IndexHintScope::ForGroupBy => " FOR GROUP BY",
+        });
+        out.push_str(" (");
+        for (i, n) in self.index_names.iter().enumerate() {
+            if i != 0 {
+                out.push_str(", ");
+            }
+            name(out, &n.o);
+        }
+        out.push(')');
+        Ok(())
+    }
+}
+
+impl SelectLockInfo {
+    /// The `LockInfo` part of `SelectStmt.Restore` (leading space included).
+    fn restore(&self, out: &mut String) -> R {
+        use SelectLockType as L;
+        if let Some(kind) = self.unported {
+            return Err(format!("unported lock {kind}"));
+        }
+        out.push(' ');
+        let of_tables = |out: &mut String| -> R {
+            if !self.tables.is_empty() {
+                out.push_str(" OF ");
+                for (i, t) in self.tables.iter().enumerate() {
+                    if i != 0 {
+                        out.push_str(", ");
+                    }
+                    t.restore(out)?;
+                }
+            }
+            Ok(())
+        };
+        match self.lock_type {
+            L::None => {}
+            L::ForUpdateNoWait | L::ForShareNoWait => {
+                out.push_str(if self.lock_type == L::ForUpdateNoWait {
+                    "FOR UPDATE"
+                } else {
+                    "FOR SHARE"
+                });
+                of_tables(out)?;
+                out.push_str(" NOWAIT");
+            }
+            L::ForUpdateWaitN => {
+                out.push_str("FOR UPDATE");
+                of_tables(out)?;
+                out.push_str(" WAIT");
+                out.push_str(&format!(" {}", self.wait_sec));
+            }
+            L::ForUpdateSkipLocked | L::ForShareSkipLocked => {
+                out.push_str(if self.lock_type == L::ForUpdateSkipLocked {
+                    "FOR UPDATE"
+                } else {
+                    "FOR SHARE"
+                });
+                of_tables(out)?;
+                out.push_str(" SKIP LOCKED");
+            }
+            L::ForUpdate | L::ForShare => {
+                // ctx.WriteKeyWord(n.LockInfo.LockType.String())
+                out.push_str(if self.lock_type == L::ForUpdate {
+                    "FOR UPDATE"
+                } else {
+                    "FOR SHARE"
+                });
+                of_tables(out)?;
+            }
+        }
+        Ok(())
     }
 }
 

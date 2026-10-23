@@ -3019,8 +3019,8 @@ TableName -> Box<TableName>:
   | '*' '.' Identifier { ph("TableName#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
   ;
 TableNameList -> Vec<TableName>:
-    TableName { ph("TableNameList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TableNameList ',' TableName { ph("TableNameList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    TableName { vec![*$1] }
+  | TableNameList ',' TableName { { let mut v = $1; v.push(*$3); v } }
   ;
 TableNameOptWild -> Box<TableName>:
     Identifier OptWild { ph("TableNameOptWild#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
@@ -3332,7 +3332,10 @@ TableRefs -> Box<Join>:
   ;
 EscapedTableRef -> ResultSetNode:
     TableRef %prec lowerThanSetKeyword { $1 }
-  | '{' Identifier TableRef '}' { ph("EscapedTableRef#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | '{' Identifier TableRef '}' { {
+        // ODBC escape syntax for outer join is { OJ join_table }; use an Identifier for OJ.
+        $3
+    } }
   ;
 TableRef -> ResultSetNode:
     TableFactor { $1 }
@@ -3365,7 +3368,7 @@ PartitionNameListOpt -> Vec<CIStr>:
   | partition '(' PartitionNameList ')' { $3 }
   ;
 TableAsNameOpt -> CIStr:
-     %prec empty { ph("TableAsNameOpt#0", $span, vec![]) }
+     %prec empty { CIStr::default() }
   | TableAsName { $1 }
   ;
 TableAsNameOptDelete -> CIStr:
@@ -3377,29 +3380,29 @@ TableAsName -> CIStr:
   | as Identifier { CIStr::new($2) }
   ;
 IndexHintType -> IndexHintType:
-    use KeyOrIndex { ph("IndexHintType#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | ignore KeyOrIndex { ph("IndexHintType#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | force KeyOrIndex { ph("IndexHintType#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    use KeyOrIndex { IndexHintType::Use }
+  | ignore KeyOrIndex { IndexHintType::Ignore }
+  | force KeyOrIndex { IndexHintType::Force }
   ;
 IndexHintScope -> IndexHintScope:
-     { ph("IndexHintScope#0", $span, vec![]) }
-  | forKwd join { ph("IndexHintScope#1", $span, vec![]) }
-  | forKwd order by { ph("IndexHintScope#2", $span, vec![]) }
-  | forKwd group by { ph("IndexHintScope#3", $span, vec![]) }
+     { IndexHintScope::ForScan }
+  | forKwd join { IndexHintScope::ForJoin }
+  | forKwd order by { IndexHintScope::ForOrderBy }
+  | forKwd group by { IndexHintScope::ForGroupBy }
   ;
 IndexHint -> Box<IndexHint>:
-    IndexHintType IndexHintScope '(' IndexNameList ')' { ph("IndexHint#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    IndexHintType IndexHintScope '(' IndexNameList ')' { Box::new(IndexHint { index_names: $4, hint_type: $1, hint_scope: $2, unported: None }) }
   ;
 IndexNameList -> Vec<CIStr>:
      { Vec::new() }
-  | Identifier { ph("IndexNameList#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | IndexNameList ',' Identifier { ph("IndexNameList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | primary { ph("IndexNameList#3", $span, vec![]) }
-  | IndexNameList ',' primary { ph("IndexNameList#4", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | Identifier { vec![CIStr::new($1)] }
+  | IndexNameList ',' Identifier { { let mut v = $1; v.push(CIStr::new($3)); v } }
+  | primary { vec![CIStr::new(tok_text($lexer, &$1))] }
+  | IndexNameList ',' primary { { let mut v = $1; v.push(CIStr::new(tok_text($lexer, &$3))); v } }
   ;
 IndexHintList -> Vec<IndexHint>:
-    IndexHint { ph("IndexHintList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | IndexHintList IndexHint { ph("IndexHintList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    IndexHint { vec![*$1] }
+  | IndexHintList IndexHint { { let mut v = $1; v.push(*$2); v } }
   ;
 IndexHintListOpt -> Vec<IndexHint>:
      { Vec::new() }
@@ -3432,7 +3435,7 @@ JoinType -> JoinType:
   | fullJoinType { JoinType::FullJoin }
   ;
 OuterOpt -> String:
-     { ph("OuterOpt#0", $span, vec![]) }
+     { String::new() }
   | outer { tok_text($lexer, &$1) }
   ;
 CrossOpt -> String:
@@ -3547,18 +3550,18 @@ SubSelect -> Expr:
   ;
 SelectLockOpt -> Option<Box<SelectLockInfo>>:
      { None }
-  | forKwd update OfTablesOpt { ph("SelectLockOpt#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | forKwd share OfTablesOpt { ph("SelectLockOpt#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | forKwd update OfTablesOpt nowait { ph("SelectLockOpt#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | forKwd update OfTablesOpt wait NUM { ph("SelectLockOpt#4", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | forKwd share OfTablesOpt nowait { ph("SelectLockOpt#5", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | forKwd update OfTablesOpt skip locked { ph("SelectLockOpt#6", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | forKwd share OfTablesOpt skip locked { ph("SelectLockOpt#7", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | lock in share mode { ph("SelectLockOpt#8", $span, vec![]) }
+  | forKwd update OfTablesOpt { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdate, tables: $3, ..Default::default() })) }
+  | forKwd share OfTablesOpt { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShare, tables: $3, ..Default::default() })) }
+  | forKwd update OfTablesOpt nowait { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateNoWait, tables: $3, ..Default::default() })) }
+  | forKwd update OfTablesOpt wait NUM { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec: $5 as u64, tables: $3, unported: None })) }
+  | forKwd share OfTablesOpt nowait { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShareNoWait, tables: $3, ..Default::default() })) }
+  | forKwd update OfTablesOpt skip locked { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateSkipLocked, tables: $3, ..Default::default() })) }
+  | forKwd share OfTablesOpt skip locked { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShareSkipLocked, tables: $3, ..Default::default() })) }
+  | lock in share mode { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShare, ..Default::default() })) }
   ;
 OfTablesOpt -> Vec<TableName>:
      { Vec::new() }
-  | of TableNameList { ph("OfTablesOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | of TableNameList { $2 }
   ;
 SetOprStmt -> Stmt:
     SetOprStmtWoutLimitOrderBy { $1 }

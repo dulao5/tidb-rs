@@ -239,24 +239,12 @@ impl FromNode for WithClause { fn from_node(n: Node) -> Self { WithClause(Some(B
 /// Go: ast.CommonTableExpression
 #[derive(Debug, Default)] pub struct CommonTableExpression(pub Option<Box<Node>>);
 impl FromNode for CommonTableExpression { fn from_node(n: Node) -> Self { CommonTableExpression(Some(Box::new(n))) } }
-/// Go: ast.IndexHintType
-#[derive(Debug, Default)] pub struct IndexHintType(pub Option<Box<Node>>);
-impl FromNode for IndexHintType { fn from_node(n: Node) -> Self { IndexHintType(Some(Box::new(n))) } }
-/// Go: ast.IndexHintScope
-#[derive(Debug, Default)] pub struct IndexHintScope(pub Option<Box<Node>>);
-impl FromNode for IndexHintScope { fn from_node(n: Node) -> Self { IndexHintScope(Some(Box::new(n))) } }
-/// Go: ast.IndexHint
-#[derive(Debug, Default)] pub struct IndexHint(pub Option<Box<Node>>);
-impl FromNode for IndexHint { fn from_node(n: Node) -> Self { IndexHint(Some(Box::new(n))) } }
 /// Go: ast.TableOptimizerHint
 #[derive(Debug, Default)] pub struct TableOptimizerHint(pub Option<Box<Node>>);
 impl FromNode for TableOptimizerHint { fn from_node(n: Node) -> Self { TableOptimizerHint(Some(Box::new(n))) } }
 /// Go: ast.SelectIntoOption
 #[derive(Debug, Default)] pub struct SelectIntoOption(pub Option<Box<Node>>);
 impl FromNode for SelectIntoOption { fn from_node(n: Node) -> Self { SelectIntoOption(Some(Box::new(n))) } }
-/// Go: ast.SelectLockInfo
-#[derive(Debug, Default)] pub struct SelectLockInfo(pub Option<Box<Node>>);
-impl FromNode for SelectLockInfo { fn from_node(n: Node) -> Self { SelectLockInfo(Some(Box::new(n))) } }
 /// Go: ast.Node
 #[derive(Debug, Default)] pub struct AstNode(pub Option<Box<Node>>);
 impl FromNode for AstNode { fn from_node(n: Node) -> Self { AstNode(Some(Box::new(n))) } }

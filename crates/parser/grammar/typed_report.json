@@ -29,9 +29,9 @@
  },
  "option_wrapped": 45,
  "action_kinds": {
-  "placeholder": 1435,
+  "placeholder": 1407,
   "implicit_passthrough": 1022,
-  "ported": 510,
+  "ported": 538,
   "bool_const": 101,
   "nil": 56,
   "explicit_passthrough": 53,
@@ -49,7 +49,7 @@
   "TOKEN -> Expr": 1,
   "Item -> Box<AuthRoleIdentity>": 1
  },
- "stub_types_generated": 135,
+ "stub_types_generated": 131,
  "catch_all_nonterminals": [
   "CharsetOpt",
   "Constraint",

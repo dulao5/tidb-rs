@@ -1127,6 +1127,87 @@ impl FromNode for TableName {
     }
 }
 
+/// `ast.IndexHintType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndexHintType {
+    #[default]
+    Use,
+    Ignore,
+    Force,
+    OrderIndex,
+    NoOrderIndex,
+}
+impl FromNode for IndexHintType {
+    fn from_node(_: Node) -> Self {
+        IndexHintType::Use
+    }
+}
+
+/// `ast.IndexHintScope`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndexHintScope {
+    #[default]
+    ForScan,
+    ForJoin,
+    ForOrderBy,
+    ForGroupBy,
+}
+impl FromNode for IndexHintScope {
+    fn from_node(_: Node) -> Self {
+        IndexHintScope::ForScan
+    }
+}
+
+/// `ast.IndexHint` (`USE INDEX (a, b)` ...).
+#[derive(Debug, Default)]
+pub struct IndexHint {
+    pub index_names: Vec<CIStr>,
+    pub hint_type: IndexHintType,
+    pub hint_scope: IndexHintScope,
+    /// Built by a placeholder action (kind of the production).
+    pub unported: Option<&'static str>,
+}
+impl FromNode for IndexHint {
+    fn from_node(n: Node) -> Self {
+        IndexHint {
+            unported: Some(n.kind),
+            ..Default::default()
+        }
+    }
+}
+
+/// `ast.SelectLockType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectLockType {
+    #[default]
+    None,
+    ForUpdate,
+    ForShare,
+    ForUpdateNoWait,
+    ForUpdateWaitN,
+    ForShareNoWait,
+    ForUpdateSkipLocked,
+    ForShareSkipLocked,
+}
+
+/// `ast.SelectLockInfo` (`FOR UPDATE [OF t] [NOWAIT | WAIT n | SKIP LOCKED]`, ...).
+#[derive(Debug, Default)]
+pub struct SelectLockInfo {
+    pub lock_type: SelectLockType,
+    pub wait_sec: u64,
+    pub tables: Vec<TableName>,
+    /// Built by a placeholder action (kind of the production).
+    pub unported: Option<&'static str>,
+}
+impl FromNode for SelectLockInfo {
+    fn from_node(n: Node) -> Self {
+        SelectLockInfo {
+            unported: Some(n.kind),
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ByItem {
     pub expr: Expr,
