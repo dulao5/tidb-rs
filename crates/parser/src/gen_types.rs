@@ -233,24 +233,12 @@ impl FromNode for SampleMethodType { fn from_node(n: Node) -> Self { SampleMetho
 /// Go: ast.SampleClauseUnitType
 #[derive(Debug, Default)] pub struct SampleClauseUnitType(pub Option<Box<Node>>);
 impl FromNode for SampleClauseUnitType { fn from_node(n: Node) -> Self { SampleClauseUnitType(Some(Box::new(n))) } }
-/// Go: ast.WithClause
-#[derive(Debug, Default)] pub struct WithClause(pub Option<Box<Node>>);
-impl FromNode for WithClause { fn from_node(n: Node) -> Self { WithClause(Some(Box::new(n))) } }
-/// Go: ast.CommonTableExpression
-#[derive(Debug, Default)] pub struct CommonTableExpression(pub Option<Box<Node>>);
-impl FromNode for CommonTableExpression { fn from_node(n: Node) -> Self { CommonTableExpression(Some(Box::new(n))) } }
 /// Go: ast.TableOptimizerHint
 #[derive(Debug, Default)] pub struct TableOptimizerHint(pub Option<Box<Node>>);
 impl FromNode for TableOptimizerHint { fn from_node(n: Node) -> Self { TableOptimizerHint(Some(Box::new(n))) } }
 /// Go: ast.SelectIntoOption
 #[derive(Debug, Default)] pub struct SelectIntoOption(pub Option<Box<Node>>);
 impl FromNode for SelectIntoOption { fn from_node(n: Node) -> Self { SelectIntoOption(Some(Box::new(n))) } }
-/// Go: ast.Node
-#[derive(Debug, Default)] pub struct AstNode(pub Option<Box<Node>>);
-impl FromNode for AstNode { fn from_node(n: Node) -> Self { AstNode(Some(Box::new(n))) } }
-/// Go: ast.SetOprType
-#[derive(Debug, Default)] pub struct SetOprType(pub Option<Box<Node>>);
-impl FromNode for SetOprType { fn from_node(n: Node) -> Self { SetOprType(Some(Box::new(n))) } }
 /// Go: ast.SetRoleStmt
 #[derive(Debug, Default)] pub struct SetRoleStmt(pub Option<Box<Node>>);
 impl FromNode for SetRoleStmt { fn from_node(n: Node) -> Self { SetRoleStmt(Some(Box::new(n))) } }

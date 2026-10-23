@@ -659,6 +659,7 @@ impl Stmt {
     pub fn restore(&self, out: &mut String) -> R {
         match self {
             Stmt::Select(s) => s.restore(out),
+            Stmt::SetOpr(s) => s.restore(out),
             Stmt::Begin(b) => b.restore(out),
             Stmt::Commit(c) => {
                 out.push_str("COMMIT");
@@ -1047,13 +1048,25 @@ fn unported_if<T>(o: &Option<T>, what: &str) -> R {
 
 impl SelectStmt {
     pub fn restore(&self, out: &mut String) -> R {
+        if self.with_before_braces {
+            self.with
+                .as_ref()
+                .ok_or("WithBeforeBraces without With")?
+                .restore(out)?;
+        }
         if self.is_in_braces {
             out.push('(');
-            self.restore_body(out)?;
-            out.push(')');
-            return Ok(());
         }
-        self.restore_body(out)
+        if !self.with_before_braces
+            && let Some(w) = &self.with
+        {
+            w.restore(out)?;
+        }
+        self.restore_body(out)?;
+        if self.is_in_braces {
+            out.push(')');
+        }
+        Ok(())
     }
 
     fn restore_body(&self, out: &mut String) -> R {
@@ -1062,7 +1075,8 @@ impl SelectStmt {
         }
         out.push_str("SELECT ");
         let o = &self.select_stmt_opts;
-        if !o.table_hints.is_empty() {
+        // SelectStmtBasic moves the hints from the options into SelectStmt.TableHints.
+        if !o.table_hints.is_empty() || !self.table_hints.is_empty() {
             return Err("unported hints".into());
         }
         match o.priority {
@@ -1141,17 +1155,139 @@ impl SelectStmt {
             ob.restore(out)?;
         }
         if let Some(l) = &self.limit {
-            out.push_str(" LIMIT ");
-            if let Some(off) = &l.offset {
-                off.restore(out)?;
-                out.push(',');
-            }
-            l.count.restore(out)?;
+            out.push(' ');
+            l.restore(out)?;
         }
         if let Some(l) = &self.lock_info {
             l.restore(out)?;
         }
         unported_if(&self.select_into_opt, "into")?;
+        Ok(())
+    }
+}
+
+impl Limit {
+    fn restore(&self, out: &mut String) -> R {
+        out.push_str("LIMIT ");
+        if let Some(off) = &self.offset {
+            off.restore(out)?;
+            out.push(',');
+        }
+        self.count.restore(out)
+    }
+}
+
+impl SetOprType {
+    /// `SetOprType.String()`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SetOprType::Union => "UNION",
+            SetOprType::UnionAll => "UNION ALL",
+            SetOprType::Except => "EXCEPT",
+            SetOprType::ExceptAll => "EXCEPT ALL",
+            SetOprType::Intersect => "INTERSECT",
+            SetOprType::IntersectAll => "INTERSECT ALL",
+        }
+    }
+}
+
+/// `ctx.WriteKeyWord(" " + AfterSetOperator.String() + " ")` (Go would panic on a nil operator).
+fn set_operator(out: &mut String, op: Option<SetOprType>) -> R {
+    let op = op.ok_or("set operation operand without operator")?;
+    out.push(' ');
+    out.push_str(op.as_str());
+    out.push(' ');
+    Ok(())
+}
+
+impl SetOprSelectList {
+    fn restore(&self, out: &mut String) -> R {
+        if let Some(w) = &self.with {
+            w.restore(out)?;
+        }
+        for (i, node) in self.selects.iter().enumerate() {
+            match node {
+                SetOprNode::Select(s) => {
+                    if i != 0 {
+                        set_operator(out, s.after_set_operator)?;
+                    }
+                    s.restore(out)?;
+                }
+                SetOprNode::List(l) => {
+                    if i != 0 {
+                        set_operator(out, l.after_set_operator)?;
+                    }
+                    out.push('(');
+                    l.restore(out)?;
+                    out.push(')');
+                }
+                SetOprNode::Unported(n) => return Err(format!("unported set operand {}", n.kind)),
+            }
+        }
+        if let Some(o) = &self.order_by {
+            out.push(' ');
+            o.restore(out)?;
+        }
+        if let Some(l) = &self.limit {
+            out.push(' ');
+            l.restore(out)?;
+        }
+        Ok(())
+    }
+}
+
+impl SetOprStmt {
+    pub fn restore(&self, out: &mut String) -> R {
+        if let Some(w) = &self.with {
+            w.restore(out)?;
+        }
+        if self.is_in_braces {
+            out.push('(');
+        }
+        self.select_list.restore(out)?;
+        if let Some(o) = &self.order_by {
+            out.push(' ');
+            o.restore(out)?;
+        }
+        if let Some(l) = &self.limit {
+            out.push(' ');
+            l.restore(out)?;
+        }
+        if self.is_in_braces {
+            out.push(')');
+        }
+        Ok(())
+    }
+}
+
+impl WithClause {
+    fn restore(&self, out: &mut String) -> R {
+        if let Some(kind) = self.unported {
+            return Err(format!("unported with clause {kind}"));
+        }
+        out.push_str("WITH ");
+        if self.is_recursive {
+            out.push_str("RECURSIVE ");
+        }
+        for (i, cte) in self.ctes.iter().enumerate() {
+            if i != 0 {
+                out.push_str(", ");
+            }
+            name(out, &cte.name.o);
+            if !cte.col_name_list.is_empty() {
+                out.push_str(" (");
+                for (j, c) in cte.col_name_list.iter().enumerate() {
+                    if j != 0 {
+                        out.push_str(", ");
+                    }
+                    name(out, &c.o);
+                }
+                out.push(')');
+            }
+            out.push_str(" AS ");
+            cte.query.restore(out)?;
+        }
+        out.push(' ');
         Ok(())
     }
 }
@@ -1290,6 +1426,7 @@ impl ResultSetNode {
             ResultSetNode::TableSource(t) => t.restore(out),
             ResultSetNode::Join(j) => j.restore(out),
             ResultSetNode::Select(s) => s.restore(out),
+            ResultSetNode::SetOpr(s) => s.restore(out),
             ResultSetNode::Unported(n) => Err(format!("unported resultset {}", n.kind)),
         }
     }
@@ -1308,9 +1445,9 @@ impl TableSource {
                 }
                 Ok(())
             }
-            ResultSetNode::Select(s) => {
+            ResultSetNode::Select(_) | ResultSetNode::SetOpr(_) => {
                 out.push('(');
-                s.restore(out)?;
+                self.source.restore(out)?;
                 out.push(')');
                 if !self.as_name.o.is_empty() {
                     out.push_str(" AS ");
@@ -1480,7 +1617,10 @@ impl Join {
         if let ResultSetNode::Join(lj) = left
             && lj.right.is_none()
             && let Some(ResultSetNode::TableSource(ts)) = &lj.left
-            && matches!(ts.source, ResultSetNode::Select(_))
+            && matches!(
+                ts.source,
+                ResultSetNode::Select(_) | ResultSetNode::SetOpr(_)
+            )
         {
             use_comma_join = true;
         }

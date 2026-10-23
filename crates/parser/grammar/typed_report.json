@@ -14,12 +14,12 @@
   "unit (untyped in goyacc)": 9
  },
  "type_source": {
-  "assert": 441,
+  "assert": 439,
   "tag": 253,
   "catch_all": 25,
   "own_action": 15,
+  "handport": 10,
   "untyped": 9,
-  "handport": 8,
   "assert_majority": 5,
   "passthrough": 3
  },
@@ -29,9 +29,9 @@
  },
  "option_wrapped": 45,
  "action_kinds": {
-  "placeholder": 1407,
+  "placeholder": 1381,
   "implicit_passthrough": 1022,
-  "ported": 538,
+  "ported": 564,
   "bool_const": 101,
   "nil": 56,
   "explicit_passthrough": 53,
@@ -49,7 +49,7 @@
   "TOKEN -> Expr": 1,
   "Item -> Box<AuthRoleIdentity>": 1
  },
- "stub_types_generated": 131,
+ "stub_types_generated": 127,
  "catch_all_nonterminals": [
   "CharsetOpt",
   "Constraint",
@@ -2294,14 +2294,14 @@
    "tag"
   ],
   "SetOprClauseList": [
-   "Vec<AstNode>",
+   "Vec<SetOprNode>",
    "[]ast.Node",
-   "assert"
+   "handport"
   ],
   "SetOprClause": [
-   "Vec<AstNode>",
+   "Vec<SetOprNode>",
    "[]ast.Node",
-   "assert"
+   "handport"
   ],
   "SetOpr": [
    "Box<SetOprType>",

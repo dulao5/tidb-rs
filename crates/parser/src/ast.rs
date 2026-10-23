@@ -1,5 +1,7 @@
 //! Hand-written Rust AST for the ported subset (SELECT core and expressions); mirrors the
 //! node and field names of tidb/pkg/parser/ast. `Restore()` lives in `src/restore.rs`.
+use std::rc::Rc;
+
 use crate::span::Span;
 
 use crate::actions_rt::{FromNode, Node};
@@ -727,6 +729,8 @@ impl FromNode for ColumnName {
 #[derive(Debug)]
 pub enum Stmt {
     Select(Box<SelectStmt>),
+    /// `SetOprStmt` (UNION / EXCEPT / INTERSECT).
+    SetOpr(Box<SetOprStmt>),
     /// `BeginStmt` (BEGIN / START TRANSACTION).
     Begin(Box<BeginStmt>),
     Commit(Box<CommitStmt>),
@@ -951,6 +955,92 @@ impl FromNode for Stmt {
     }
 }
 
+/// `ast.SetOprType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SetOprType {
+    #[default]
+    Union,
+    UnionAll,
+    Except,
+    ExceptAll,
+    Intersect,
+    IntersectAll,
+}
+impl FromNode for SetOprType {
+    fn from_node(_: Node) -> Self {
+        SetOprType::Union
+    }
+}
+
+/// An element of `SetOprSelectList.Selects` (`[]ast.Node` in Go).
+#[derive(Debug)]
+pub enum SetOprNode {
+    Select(Box<SelectStmt>),
+    /// A parenthesised operand that is itself a list (`SetOprSelectList`).
+    List(Box<SetOprSelectList>),
+    Unported(Box<Node>),
+}
+impl FromNode for SetOprNode {
+    fn from_node(n: Node) -> Self {
+        SetOprNode::Unported(Box::new(n))
+    }
+}
+
+/// `ast.SetOprSelectList`.
+#[derive(Debug, Default)]
+pub struct SetOprSelectList {
+    pub with: Option<Rc<WithClause>>,
+    pub after_set_operator: Option<SetOprType>,
+    pub selects: Vec<SetOprNode>,
+    pub limit: Option<Box<Limit>>,
+    pub order_by: Option<Box<OrderByClause>>,
+}
+
+/// `ast.SetOprStmt`.
+#[derive(Debug, Default)]
+pub struct SetOprStmt {
+    pub is_in_braces: bool,
+    pub select_list: Box<SetOprSelectList>,
+    pub order_by: Option<Box<OrderByClause>>,
+    pub limit: Option<Box<Limit>>,
+    pub with: Option<Rc<WithClause>>,
+}
+
+/// `ast.WithClause`.
+#[derive(Debug, Default)]
+pub struct WithClause {
+    pub is_recursive: bool,
+    pub ctes: Vec<CommonTableExpression>,
+    /// Built by a placeholder action (kind of the production).
+    pub unported: Option<&'static str>,
+}
+impl FromNode for WithClause {
+    fn from_node(n: Node) -> Self {
+        WithClause {
+            unported: Some(n.kind),
+            ..Default::default()
+        }
+    }
+}
+
+/// `ast.CommonTableExpression`.
+#[derive(Debug, Default)]
+pub struct CommonTableExpression {
+    pub name: CIStr,
+    /// A `SubqueryExpr`.
+    pub query: Expr,
+    pub col_name_list: Vec<CIStr>,
+    pub is_recursive: bool,
+}
+impl FromNode for CommonTableExpression {
+    fn from_node(n: Node) -> Self {
+        CommonTableExpression {
+            query: Expr::from_node(n),
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum SelectStmtKind {
     #[default]
@@ -964,6 +1054,13 @@ pub struct SelectStmt {
     pub kind: SelectStmtKind,
     /// `IsInBraces`: a parenthesised SELECT used as a statement (or set-operation operand).
     pub is_in_braces: bool,
+    /// `With`; shared (`Rc`) where Go shares the `*WithClause` with an enclosing
+    /// `SetOprSelectList`.
+    pub with: Option<Rc<WithClause>>,
+    /// `WithBeforeBraces`: `WITH ... (SELECT ...)`.
+    pub with_before_braces: bool,
+    /// `AfterSetOperator`: the operator preceding this SELECT in a set operation.
+    pub after_set_operator: Option<SetOprType>,
     pub select_stmt_opts: Box<SelectStmtOpts>,
     pub distinct: bool,
     pub fields: Box<FieldList>,
@@ -1044,6 +1141,7 @@ pub enum ResultSetNode {
     TableSource(Box<TableSource>),
     Join(Box<Join>),
     Select(Box<SelectStmt>),
+    SetOpr(Box<SetOprStmt>),
     Unported(Box<Node>),
 }
 impl FromNode for ResultSetNode {

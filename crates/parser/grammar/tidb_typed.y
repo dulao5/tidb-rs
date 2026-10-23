@@ -592,8 +592,8 @@ IdentListWithParenOpt -> Vec<CIStr>:
   | '(' IdentList ')' { $2 }
   ;
 IdentList -> Vec<CIStr>:
-    Identifier { ph("IdentList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | IdentList ',' Identifier { ph("IdentList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Identifier { vec![CIStr::new($1)] }
+  | IdentList ',' Identifier { { let mut v = $1; v.push(CIStr::new($3)); v } }
   ;
 ColumnNameOrUserVarListOpt -> Vec<ColumnNameOrUserVar>:
      { Vec::new() }
@@ -3016,7 +3016,7 @@ TableName -> Box<TableName>:
         }
         Box::new(TableName { schema: CIStr::new(schema), name: CIStr::new($3), ..Default::default() })
     } }
-  | '*' '.' Identifier { ph("TableName#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | '*' '.' Identifier { Box::new(TableName { schema: CIStr::new("*"), name: CIStr::new($3), ..Default::default() }) }
   ;
 TableNameList -> Vec<TableName>:
     TableName { vec![*$1] }
@@ -3184,19 +3184,52 @@ SelectStmt -> Stmt:
   | values ValuesStmtList OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption { ph("SelectStmt#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
   ;
 SelectStmtWithClause -> Stmt:
-    WithClause SelectStmt { ph("SelectStmtWithClause#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | WithClause SubSelect { ph("SelectStmtWithClause#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    WithClause SelectStmt { {
+        match $2 {
+            Stmt::Select(mut sel) => {
+                sel.with = Some(std::rc::Rc::from($1));
+                Stmt::Select(sel)
+            }
+            other => other,
+        }
+    } }
+  | WithClause SubSelect { {
+        let with = std::rc::Rc::from($1);
+        match $2 {
+            Expr::Subquery(sq) => match sq.query {
+                ResultSetNode::Select(mut x) => {
+                    x.is_in_braces = true;
+                    x.with_before_braces = true;
+                    x.with = Some(with);
+                    Stmt::Select(x)
+                }
+                ResultSetNode::SetOpr(mut x) => {
+                    x.is_in_braces = true;
+                    x.with = Some(with);
+                    Stmt::SetOpr(x)
+                }
+                ResultSetNode::Unported(n) => Stmt::Unported(n),
+                other => unreachable!("SubSelect yields a SELECT or a set operation, got {other:?}"),
+            },
+            other => unreachable!("SubSelect yields a SubqueryExpr, got {other:?}"),
+        }
+    } }
   ;
 WithClause -> Box<WithClause>:
     with WithList { $2 }
-  | with recursive WithList { ph("WithClause#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | with recursive WithList { {
+        let mut ws = $3;
+        ws.is_recursive = true;
+        for cte in &mut ws.ctes { cte.is_recursive = true; }
+        ws
+    } }
   ;
 WithList -> Box<WithClause>:
-    WithList ',' CommonTableExpr { ph("WithList#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | CommonTableExpr { ph("WithList#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    WithList ',' CommonTableExpr { { let mut ws = $1; ws.ctes.push(*$3); ws } }
+  | CommonTableExpr { { let mut ctes = Vec::with_capacity(4); ctes.push(*$1); Box::new(WithClause { is_recursive: false, ctes, unported: None }) } }
   ;
 CommonTableExpr -> Box<CommonTableExpression>:
-    Identifier IdentListWithParenOpt as SubSelect { ph("CommonTableExpr#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    Identifier IdentListWithParenOpt as SubSelect { Box::new(CommonTableExpression { name: CIStr::new($1), col_name_list: $2, query: $4, is_recursive: false }) }
   ;
 FromDual -> ():
     from dual { () }
@@ -3474,7 +3507,7 @@ SelectStmtLimitOpt -> Option<Box<Limit>>:
   | SelectStmtLimit { Some($1) }
   ;
 SelectStmtOpt -> Box<SelectStmtOpts>:
-    TableOptimizerHints { ph("SelectStmtOpt#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    TableOptimizerHints { { let mut opt = Box::new(SelectStmtOpts { sql_cache: true, ..Default::default() }); opt.table_hints = $1; opt } }
   | DistinctOpt { {
         let mut opt = Box::new(SelectStmtOpts { sql_cache: true, ..Default::default() });
         if $1 { opt.distinct = true; } else { opt.distinct = false; opt.explicit_all = true; }
@@ -3566,33 +3599,141 @@ OfTablesOpt -> Vec<TableName>:
 SetOprStmt -> Stmt:
     SetOprStmtWoutLimitOrderBy { $1 }
   | SetOprStmtWithLimitOrderBy { $1 }
-  | WithClause SetOprStmtWithLimitOrderBy { ph("SetOprStmt#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | WithClause SetOprStmtWoutLimitOrderBy { ph("SetOprStmt#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | WithClause SetOprStmtWithLimitOrderBy { {
+        match $2 {
+            Stmt::SetOpr(mut set_opr) => {
+                set_opr.with = Some(std::rc::Rc::from($1));
+                Stmt::SetOpr(set_opr)
+            }
+            other => other,
+        }
+    } }
+  | WithClause SetOprStmtWoutLimitOrderBy { {
+        match $2 {
+            Stmt::SetOpr(mut set_opr) => {
+                set_opr.with = Some(std::rc::Rc::from($1));
+                Stmt::SetOpr(set_opr)
+            }
+            other => other,
+        }
+    } }
   ;
 SetOprStmtWoutLimitOrderBy -> Stmt:
-    SetOprClauseList SetOpr SelectStmt { ph("SetOprStmtWoutLimitOrderBy#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | SetOprClauseList SetOpr SubSelect { ph("SetOprStmtWoutLimitOrderBy#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    SetOprClauseList SetOpr SelectStmt { {
+        let mut list = $1;
+        let mut set_opr = Box::new(SetOprStmt::default());
+        match $3 {
+            Stmt::Select(mut st) => {
+                set_opr.limit = st.limit.take();
+                set_opr.order_by = st.order_by.take();
+                st.after_set_operator = Some(*$2);
+                list.push(SetOprNode::Select(st));
+            }
+            // A SELECT variant that is still a placeholder.
+            Stmt::Unported(n) => list.push(SetOprNode::Unported(n)),
+            other => unreachable!("SelectStmt yields a SELECT, got {other:?}"),
+        }
+        set_opr.select_list = Box::new(SetOprSelectList { selects: list, ..Default::default() });
+        Stmt::SetOpr(set_opr)
+    } }
+  | SetOprClauseList SetOpr SubSelect { {
+        let mut list = $1;
+        let (selects, with, limit2, order_by2) = subselect_operand($3);
+        list.push(SetOprNode::List(Box::new(SetOprSelectList {
+            selects, with, limit: limit2, order_by: order_by2, after_set_operator: Some(*$2),
+        })));
+        let mut set_opr = Box::new(SetOprStmt { select_list: Box::new(SetOprSelectList { selects: list, ..Default::default() }), ..Default::default() });
+        
+        Stmt::SetOpr(set_opr)
+    } }
   ;
 SetOprStmtWithLimitOrderBy -> Stmt:
-    SetOprClauseList SetOpr SubSelect OrderBy { ph("SetOprStmtWithLimitOrderBy#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | SetOprClauseList SetOpr SubSelect SelectStmtLimit { ph("SetOprStmtWithLimitOrderBy#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | SetOprClauseList SetOpr SubSelect OrderBy SelectStmtLimit { ph("SetOprStmtWithLimitOrderBy#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | SubSelect OrderBy { ph("SetOprStmtWithLimitOrderBy#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | SubSelect SelectStmtLimit { ph("SetOprStmtWithLimitOrderBy#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | SubSelect OrderBy SelectStmtLimit { ph("SetOprStmtWithLimitOrderBy#5", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    SetOprClauseList SetOpr SubSelect OrderBy { {
+        let mut list = $1;
+        let (selects, with, limit2, order_by2) = subselect_operand($3);
+        list.push(SetOprNode::List(Box::new(SetOprSelectList {
+            selects, with, limit: limit2, order_by: order_by2, after_set_operator: Some(*$2),
+        })));
+        let mut set_opr = Box::new(SetOprStmt { select_list: Box::new(SetOprSelectList { selects: list, ..Default::default() }), ..Default::default() });
+        set_opr.order_by = Some($4);
+        Stmt::SetOpr(set_opr)
+    } }
+  | SetOprClauseList SetOpr SubSelect SelectStmtLimit { {
+        let mut list = $1;
+        let (selects, with, limit2, order_by2) = subselect_operand($3);
+        list.push(SetOprNode::List(Box::new(SetOprSelectList {
+            selects, with, limit: limit2, order_by: order_by2, after_set_operator: Some(*$2),
+        })));
+        let mut set_opr = Box::new(SetOprStmt { select_list: Box::new(SetOprSelectList { selects: list, ..Default::default() }), ..Default::default() });
+        set_opr.limit = Some($4);
+        Stmt::SetOpr(set_opr)
+    } }
+  | SetOprClauseList SetOpr SubSelect OrderBy SelectStmtLimit { {
+        let mut list = $1;
+        let (selects, with, limit2, order_by2) = subselect_operand($3);
+        list.push(SetOprNode::List(Box::new(SetOprSelectList {
+            selects, with, limit: limit2, order_by: order_by2, after_set_operator: Some(*$2),
+        })));
+        let mut set_opr = Box::new(SetOprStmt { select_list: Box::new(SetOprSelectList { selects: list, ..Default::default() }), ..Default::default() });
+        set_opr.order_by = Some($4);set_opr.limit = Some($5);
+        Stmt::SetOpr(set_opr)
+    } }
+  | SubSelect OrderBy { {
+        let (selects, with, limit, order_by) = subselect_operand($1);
+        let list = vec![SetOprNode::List(Box::new(SetOprSelectList { selects, with, limit, order_by, after_set_operator: None }))];
+        let mut set_opr = Box::new(SetOprStmt { select_list: Box::new(SetOprSelectList { selects: list, ..Default::default() }), ..Default::default() });
+        set_opr.order_by = Some($2);
+        Stmt::SetOpr(set_opr)
+    } }
+  | SubSelect SelectStmtLimit { {
+        let (selects, with, limit, order_by) = subselect_operand($1);
+        let list = vec![SetOprNode::List(Box::new(SetOprSelectList { selects, with, limit, order_by, after_set_operator: None }))];
+        let mut set_opr = Box::new(SetOprStmt { select_list: Box::new(SetOprSelectList { selects: list, ..Default::default() }), ..Default::default() });
+        set_opr.limit = Some($2);
+        Stmt::SetOpr(set_opr)
+    } }
+  | SubSelect OrderBy SelectStmtLimit { {
+        let (selects, with, limit, order_by) = subselect_operand($1);
+        let list = vec![SetOprNode::List(Box::new(SetOprSelectList { selects, with, limit, order_by, after_set_operator: None }))];
+        let mut set_opr = Box::new(SetOprStmt { select_list: Box::new(SetOprSelectList { selects: list, ..Default::default() }), ..Default::default() });
+        set_opr.order_by = Some($2);set_opr.limit = Some($3);
+        Stmt::SetOpr(set_opr)
+    } }
   ;
-SetOprClauseList -> Vec<AstNode>:
+SetOprClauseList -> Vec<SetOprNode>:
     SetOprClause { $1 }
-  | SetOprClauseList SetOpr SetOprClause { ph("SetOprClauseList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | SetOprClauseList SetOpr SetOprClause { {
+        let mut list1 = $1;
+        let mut list2 = $3;
+        match list2.first_mut() {
+            Some(SetOprNode::Select(x)) => x.after_set_operator = Some(*$2),
+            Some(SetOprNode::List(x)) => x.after_set_operator = Some(*$2),
+            _ => {}
+        }
+        list1.extend(list2);
+        list1
+    } }
   ;
-SetOprClause -> Vec<AstNode>:
-    SelectStmt { ph("SetOprClause#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SubSelect { ph("SetOprClause#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+SetOprClause -> Vec<SetOprNode>:
+    SelectStmt { {
+        match $1 {
+            Stmt::Select(st) => vec![SetOprNode::Select(st)],
+            Stmt::Unported(n) => vec![SetOprNode::Unported(n)],
+            other => unreachable!("SelectStmt yields a SELECT, got {other:?}"),
+        }
+    } }
+  | SubSelect { {
+        let is_select = matches!(&$1, Expr::Subquery(sq) if matches!(sq.query, ResultSetNode::Select(_)));
+        let (selects, with, limit, order_by) = subselect_operand($1);
+        // Go: a plain SELECT operand becomes &ast.SetOprSelectList{Selects: []ast.Node{x}} (no With).
+        let with = if is_select { None } else { with };
+        vec![SetOprNode::List(Box::new(SetOprSelectList { selects, with, limit, order_by, after_set_operator: None }))]
+    } }
   ;
 SetOpr -> Box<SetOprType>:
-    union SetOprOpt { ph("SetOpr#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | except SetOprOpt { ph("SetOpr#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | intersect SetOprOpt { ph("SetOpr#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    union SetOprOpt { Box::new(if $2 { SetOprType::Union } else { SetOprType::UnionAll }) }
+  | except SetOprOpt { Box::new(if $2 { SetOprType::Except } else { SetOprType::ExceptAll }) }
+  | intersect SetOprOpt { Box::new(if $2 { SetOprType::Intersect } else { SetOprType::IntersectAll }) }
   ;
 SetOprOpt -> bool:
     DefaultTrueDistinctOpt { $1 }
@@ -4190,7 +4331,10 @@ Statement -> Option<Stmt>:
                     s.is_in_braces = true;
                     Some(Stmt::Select(s))
                 }
-                // A set operation: not ported yet.
+                ResultSetNode::SetOpr(mut s) => {
+                    s.is_in_braces = true;
+                    Some(Stmt::SetOpr(s))
+                }
                 ResultSetNode::Unported(n) => Some(Stmt::Unported(n)),
                 other => unreachable!("SubSelect yields a SELECT or a set operation, got {other:?}"),
             },
@@ -5536,8 +5680,31 @@ fn subquery(query: ResultSetNode) -> Expr {
 fn stmt_to_result_set(s: Stmt) -> ResultSetNode {
     match s {
         Stmt::Select(s) => ResultSetNode::Select(s),
+        Stmt::SetOpr(s) => ResultSetNode::SetOpr(s),
         Stmt::Unported(n) => ResultSetNode::Unported(n),
         other => unreachable!("a SELECT or set operation, got {other:?}"),
+    }
+}
+
+/// The `switch x := $n.(*ast.SubqueryExpr).Query.(type)` of the set-operation actions: the
+/// operand's selects, With, Limit and OrderBy (a SELECT keeps its own With / Limit / OrderBy;
+/// Go shares the With pointer, hence the `Rc`).
+#[allow(clippy::type_complexity)]
+fn subselect_operand(e: Expr) -> (Vec<SetOprNode>, Option<std::rc::Rc<WithClause>>, Option<Box<Limit>>, Option<Box<OrderByClause>>) {
+    match e {
+        Expr::Subquery(sq) => match sq.query {
+            ResultSetNode::Select(x) => {
+                let with = x.with.clone();
+                (vec![SetOprNode::Select(x)], with, None, None)
+            }
+            ResultSetNode::SetOpr(x) => {
+                let x = *x;
+                (x.select_list.selects, x.with, x.limit, x.order_by)
+            }
+            ResultSetNode::Unported(n) => (vec![SetOprNode::Unported(n)], None, None, None),
+            other => unreachable!("SubSelect yields a SELECT or a set operation, got {other:?}"),
+        },
+        other => unreachable!("SubSelect yields a SubqueryExpr, got {other:?}"),
     }
 }
 
