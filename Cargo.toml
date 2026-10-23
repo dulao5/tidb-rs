@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/server",
+  "crates/mysql-protocol",
   "crates/parser",
   "crates/query-smoke",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).

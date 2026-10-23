@@ -1,0 +1,21 @@
+[package]
+name = "tidb-mysql-protocol"
+version = "0.0.0"
+description = "MySQL wire-protocol server layer (handshake, auth, commands, result encoding) for tidb-rs"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom = "0.3"
+sha1 = "0.10"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+mysql_async = { version = "0.37", default-features = false, features = ["minimal"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true
