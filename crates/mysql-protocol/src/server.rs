@@ -14,6 +14,7 @@ use crate::constants::{
     DEFAULT_MAX_ALLOWED_PACKET, DEFAULT_SERVER_VERSION, auth_plugin, capability,
 };
 use crate::handler::SessionFactory;
+use crate::tls::TlsConfig;
 
 /// Protocol-level server settings.
 #[derive(Clone, Debug)]
@@ -27,6 +28,19 @@ pub struct ServerConfig {
     pub capability: u32,
     /// Largest accepted command payload.
     pub max_allowed_packet: usize,
+    /// TLS configuration; when set, `CLIENT_SSL` is advertised and clients may upgrade.
+    pub tls: Option<TlsConfig>,
+}
+
+impl ServerConfig {
+    /// Capability flags sent in the handshake: `capability`, plus `CLIENT_SSL` with TLS.
+    pub fn advertised_capability(&self) -> u32 {
+        if self.tls.is_some() {
+            self.capability | capability::CLIENT_SSL
+        } else {
+            self.capability
+        }
+    }
 }
 
 impl Default for ServerConfig {
@@ -36,6 +50,7 @@ impl Default for ServerConfig {
             default_auth_plugin: auth_plugin::MYSQL_NATIVE_PASSWORD.to_string(),
             capability: capability::SERVER_DEFAULT,
             max_allowed_packet: DEFAULT_MAX_ALLOWED_PACKET,
+            tls: None,
         }
     }
 }
@@ -65,6 +80,7 @@ impl<F: SessionFactory> Server<F> {
     ) -> io::Result<()> {
         info!(addr = %listener.local_addr()?, "MySQL protocol server listening");
         let mut conns = JoinSet::new();
+        let started = std::time::Instant::now();
         tokio::pin!(shutdown);
         loop {
             // Reap finished connection tasks.
@@ -88,7 +104,7 @@ impl<F: SessionFactory> Server<F> {
                     let config = Arc::clone(&self.config);
                     let factory = Arc::clone(&self.factory);
                     conns.spawn(async move {
-                        crate::conn::run(stream, peer.to_string(), id, &config, &*factory).await;
+                        crate::conn::run(stream, peer.to_string(), id, started, &config, &*factory).await;
                     });
                 }
             }

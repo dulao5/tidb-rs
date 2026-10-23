@@ -16,6 +16,7 @@ src/params.rs     COM_STMT_EXECUTE parameter decoding (null bitmap, types, long 
 src/handler.rs    SessionFactory / SessionHandler: the execution boundary
 src/conn.rs       per-connection state machine (handshake, auth switch, commands)
 src/server.rs     tokio listener, one task per connection, connection ids, shutdown
+src/tls.rs        rustls server config (PEM files or auto-generated cert), TLS upgrade streams
 ```
 
 ## Execution boundary
@@ -47,7 +48,7 @@ decoded `Param`s.
 ## Behaviour mirrored from TiDB
 
 - Capabilities: TiDB's `defaultCapability` minus what isn't implemented yet (compression,
-  `LOCAL_FILES`, `MULTI_STATEMENTS`, and TLS, which TiDB only adds when configured). Server
+  `LOCAL_FILES`, `MULTI_STATEMENTS`), plus `CLIENT_SSL` when TLS is configured. Server
   version `8.0.11-TiDB-<release>`, collation 46 (`utf8mb4_bin`), handshake status `AUTOCOMMIT`.
 - Auth: only `mysql_native_password` is verified. As TiDB does for native-password accounts, the
   server sends an AuthSwitchRequest to `mysql_native_password` when the client answers with
@@ -68,6 +69,25 @@ decoded `Param`s.
   scramble (`TestCheckScramble`), binary date/time (`TestDumpBinaryTime`), and parameter
   decoding (`TestParseExecArgs`).
 
+## TLS
+
+- Upgrade: `ServerConfig::tls` set means `CLIENT_SSL` is advertised. A first client packet with
+  `CLIENT_SSL` is an SSLRequest. The server runs the rustls handshake on the same socket and
+  reads the HandshakeResponse over TLS, continuing the sequence ids: SSLRequest 1, response 2,
+  OK 3. TLS bytes the client sent right behind the SSLRequest may already be in the read
+  buffer, so they are replayed to rustls (`tls::Rewind`). Plain connections keep working on a
+  TLS-enabled server. An SSLRequest to a server without TLS gets error 1235.
+- Certificates mirror TiDB's `LoadTLSCertificates`:
+  - `--ssl-cert`/`--ssl-key` use the given PEM files.
+  - Otherwise `--auto-tls` (default on, as in TiDB's shipped `config.toml.example`) generates a
+    self-signed certificate at startup. It uses CN `TiDB_Server_Auto_Generated_Server_Certificate`
+    and 90 days validity, with `localhost` and the listen host as SANs.
+  - `--ssl-ca` verifies client certificates when presented (`VerifyClientCertIfGiven`).
+  - Invalid configured certificates stop startup, as in TiDB.
+- rustls with the ring provider (no OpenSSL), TLS 1.2 and 1.3.
+- The negotiated cipher reaches the session as `ConnectionInfo::tls_cipher`. The stub reports
+  `@@have_ssl`.
+
 ## Decision: own implementation rather than `opensrv-mysql`
 
 The main existing crate is `opensrv-mysql` (Databend's fork of `msql-srv`). It was considered
@@ -84,14 +104,18 @@ and not used:
   tracking, multi-statement results and streaming result sets. That is easier in about 2k lines
   we own and test byte-for-byte against TiDB than inside a third-party shim API.
 - Cost. Without a third-party protocol crate, the runtime deps are only `tokio`, `sha1`,
-  `getrandom` and `tracing`. `mysql_async` is a dev-dependency, used to test with a real client.
+  `getrandom` and `tracing`, plus `tokio-rustls` and `rcgen` (ring) for TLS. `mysql_async` is a dev-dependency, used to test with a real client.
 
 ## Known gaps
 
-- No TLS. TLS-mandatory clients cannot connect. One example is MariaDB Connector/C 3.4+, which
-  is what Homebrew's `sysbench` links; libmysqlclient and the `mysql` CLI fall back to
-  plaintext. No compression, no `caching_sha2_password` verification (always switched to
-  native), no `COM_CHANGE_USER`.
+- TLS differences from TiDB:
+  - Auto-generated keys are ECDSA P-256 instead of TiDB's RSA (ring cannot generate RSA).
+  - The certificate is kept in memory and not rotated; TiDB writes it to its temp dir and
+    re-creates it every 30 days.
+  - No `require-secure-transport`, no `tls-version` setting.
+  - No `Ssl_cipher` status variable (no `SHOW STATUS` yet).
+- No compression, no `caching_sha2_password` verification (always switched to native), no
+  `COM_CHANGE_USER`.
 - No multi-statements, so `CLIENT_MULTI_STATEMENTS` is not advertised. Cursors are not
   supported: `COM_STMT_FETCH` returns 1235, and `CURSOR_TYPE_READ_ONLY` gets the full result
   without `SERVER_STATUS_CURSOR_EXISTS`.

@@ -24,6 +24,7 @@ pub mod handshake;
 pub mod packet;
 pub mod params;
 mod server;
+pub mod tls;
 pub mod value;
 
 pub use auth::Credential;

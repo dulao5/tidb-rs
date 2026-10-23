@@ -3,7 +3,7 @@
 
 use std::io;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 
 use crate::constants::MAX_PAYLOAD_LEN;
 
@@ -50,7 +50,8 @@ impl std::error::Error for PacketError {}
 /// [`flush`]: PacketIo::flush
 #[derive(Debug)]
 pub struct PacketIo<S> {
-    stream: BufStream<S>,
+    // Like tokio's BufStream, but keeping access to the read buffer (see `into_parts`).
+    stream: BufReader<BufWriter<S>>,
     seq: u8,
     max_allowed_packet: usize,
 }
@@ -58,7 +59,10 @@ pub struct PacketIo<S> {
 impl<S: AsyncRead + AsyncWrite + Unpin> PacketIo<S> {
     pub fn new(stream: S, max_allowed_packet: usize) -> Self {
         PacketIo {
-            stream: BufStream::with_capacity(16 * 1024, 16 * 1024, stream),
+            stream: BufReader::with_capacity(
+                16 * 1024,
+                BufWriter::with_capacity(16 * 1024, stream),
+            ),
             seq: 0,
             max_allowed_packet,
         }
@@ -67,6 +71,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PacketIo<S> {
     /// Next sequence id expected/used.
     pub fn sequence(&self) -> u8 {
         self.seq
+    }
+
+    /// Continues with a given sequence id (after replacing the underlying stream).
+    pub fn set_sequence(&mut self, seq: u8) {
+        self.seq = seq;
+    }
+
+    /// Returns the stream and the bytes already read from it but not consumed. Pending writes
+    /// must have been flushed.
+    pub fn into_parts(self) -> (S, Vec<u8>) {
+        let buffered = self.stream.buffer().to_vec();
+        (self.stream.into_inner().into_inner(), buffered)
+    }
+
+    /// The underlying stream.
+    pub fn get_ref(&self) -> &S {
+        self.stream.get_ref().get_ref()
     }
 
     /// Resets the sequence id; called before reading each command.

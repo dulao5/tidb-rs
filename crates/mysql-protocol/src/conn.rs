@@ -6,7 +6,7 @@ use std::io;
 use std::time::Instant;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::auth::{Credential, generate_salt};
 use crate::codec::{Reader, put_lenenc_int, put_lenenc_str};
@@ -17,6 +17,7 @@ use crate::handshake::{HandshakeResponse, InitialHandshake, auth_switch_request}
 use crate::packet::{PacketError, PacketIo};
 use crate::params::decode_params;
 use crate::server::ServerConfig;
+use crate::tls::{MaybeTls, Rewind};
 use crate::value::{
     ColumnDef, ColumnType, encode_binary_row, encode_column_count, encode_text_row,
 };
@@ -57,26 +58,24 @@ pub(crate) async fn run<S, F>(
     stream: S,
     peer: String,
     connection_id: u64,
+    started: Instant,
     config: &ServerConfig,
     factory: &F,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
 {
-    let mut io = PacketIo::new(stream, config.max_allowed_packet);
-    let mut conn = match handshake(&mut io, &peer, connection_id, config, factory).await {
-        Ok(Some(handler_and_caps)) => {
-            let (handler, capability) = handler_and_caps;
-            Conn {
-                io,
-                capability,
-                handler,
-                stmts: HashMap::new(),
-                next_stmt_id: 1,
-                started: Instant::now(),
-            }
-        }
-        Ok(None) => return,
+    let io = PacketIo::new(MaybeTls::Plain(stream), config.max_allowed_packet);
+    let mut conn = match handshake(io, &peer, connection_id, config, factory).await {
+        Ok((io, Some((handler, capability)))) => Conn {
+            io,
+            capability,
+            handler,
+            stmts: HashMap::new(),
+            next_stmt_id: 1,
+            started,
+        },
+        Ok((_, None)) => return,
         Err(e) => {
             debug!(connection_id, %peer, error = %e, "handshake failed");
             return;
@@ -109,15 +108,71 @@ async fn write_err<S: AsyncRead + AsyncWrite + Unpin>(
     io.flush().await
 }
 
-/// Performs the connection phase. Returns `None` after an orderly rejection (an ERR packet
-/// was sent), `Err` on I/O failure.
+/// The session and effective capability flags of an authenticated connection.
+type Accepted<F> = Option<(<F as SessionFactory>::Session, u32)>;
+
+/// Performs the connection phase, including the TLS upgrade after an SSLRequest. Returns the
+/// (possibly upgraded) packet stream, and `None` after an orderly rejection (an ERR packet was
+/// sent); `Err` on I/O or TLS failure.
 async fn handshake<S, F>(
-    io: &mut PacketIo<S>,
+    mut io: PacketIo<MaybeTls<S>>,
     peer: &str,
     connection_id: u64,
     config: &ServerConfig,
     factory: &F,
-) -> Result<Option<(F::Session, u32)>, String>
+) -> Result<(PacketIo<MaybeTls<S>>, Accepted<F>), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: SessionFactory,
+{
+    let outcome = handshake_inner(&mut io, peer, connection_id, config, factory).await?;
+    match outcome {
+        Outcome::Done(accepted) => Ok((io, accepted)),
+        Outcome::Upgrade { salt, seq } => {
+            // Switch to TLS. Bytes the client sent right behind the SSLRequest (its
+            // ClientHello) may already sit in the read buffer: replay them to rustls.
+            let Some(tls) = &config.tls else {
+                return Err("TLS upgrade without TLS config".into());
+            };
+            let (stream, buffered) = io.into_parts();
+            let MaybeTls::Plain(stream) = stream else {
+                return Err("TLS requested twice".into());
+            };
+            let acceptor = tokio_rustls::TlsAcceptor::from(tls.clone());
+            let tls_stream = acceptor
+                .accept(Rewind::new(buffered, stream))
+                .await
+                .map_err(|e| format!("TLS handshake failed: {e}"))?;
+            let mut io = PacketIo::new(
+                MaybeTls::Tls(Box::new(tls_stream)),
+                config.max_allowed_packet,
+            );
+            io.set_sequence(seq);
+            let data = io.read_packet().await.map_err(|e| e.to_string())?;
+            let accepted =
+                authenticate(&mut io, &data, &salt, peer, connection_id, config, factory).await?;
+            Ok((io, accepted))
+        }
+    }
+}
+
+enum Outcome<F: SessionFactory> {
+    Done(Accepted<F>),
+    /// The client sent an SSLRequest; continue over TLS with this salt and sequence id.
+    Upgrade {
+        salt: [u8; crate::auth::SALT_LEN],
+        seq: u8,
+    },
+}
+
+/// Sends the initial handshake and handles the first client packet.
+async fn handshake_inner<S, F>(
+    io: &mut PacketIo<MaybeTls<S>>,
+    peer: &str,
+    connection_id: u64,
+    config: &ServerConfig,
+    factory: &F,
+) -> Result<Outcome<F>, String>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
@@ -127,7 +182,7 @@ where
         server_version: &config.server_version,
         connection_id: connection_id as u32,
         salt: &salt,
-        capability: config.capability,
+        capability: config.advertised_capability(),
         collation: collation::UTF8MB4_BIN as u8,
         status: crate::constants::status::AUTOCOMMIT,
         auth_plugin: &config.default_auth_plugin,
@@ -137,7 +192,43 @@ where
     io.flush().await.map_err(io_err)?;
 
     let data = io.read_packet().await.map_err(|e| e.to_string())?;
-    let resp = match HandshakeResponse::parse(&data) {
+    if data.len() >= 4 && u32::from_le_bytes([data[0], data[1], data[2], data[3]]) & CLIENT_SSL != 0
+    {
+        if config.tls.is_some() {
+            // SSLRequest: the handshake response follows over TLS (TiDB upgradeToTLS).
+            return Ok(Outcome::Upgrade {
+                salt,
+                seq: io.sequence(),
+            });
+        }
+        // TLS is not advertised, so a conforming client never asks for it.
+        let e = SqlError::not_supported("SSL");
+        write_err(io, CLIENT_PROTOCOL_41, &e)
+            .await
+            .map_err(io_err)?;
+        return Ok(Outcome::Done(None));
+    }
+    authenticate(io, &data, &salt, peer, connection_id, config, factory)
+        .await
+        .map(Outcome::Done)
+}
+
+/// Parses the handshake response, authenticates and opens the session.
+async fn authenticate<S, F>(
+    io: &mut PacketIo<MaybeTls<S>>,
+    data: &[u8],
+    salt: &[u8; crate::auth::SALT_LEN],
+    peer: &str,
+    connection_id: u64,
+    config: &ServerConfig,
+    factory: &F,
+) -> Result<Accepted<F>, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: SessionFactory,
+{
+    let io_err = |e: io::Error| e.to_string();
+    let resp = match HandshakeResponse::parse(data) {
         Ok(r) => r,
         Err(e) => {
             write_err(io, CLIENT_PROTOCOL_41, &e)
@@ -146,13 +237,7 @@ where
             return Ok(None);
         }
     };
-    if resp.capability & CLIENT_SSL != 0 {
-        // TLS is not advertised, so a conforming client never asks for it.
-        let e = SqlError::not_supported("SSL");
-        write_err(io, resp.capability, &e).await.map_err(io_err)?;
-        return Ok(None);
-    }
-    let capability = resp.capability & config.capability;
+    let capability = resp.capability & config.advertised_capability();
 
     // Only mysql_native_password is verified; any other plugin the client picked (typically
     // caching_sha2_password, libmysqlclient 8.x's default) is switched to it, which is what
@@ -166,7 +251,7 @@ where
     {
         io.write_packet(&auth_switch_request(
             auth_plugin::MYSQL_NATIVE_PASSWORD,
-            &salt,
+            salt,
         ))
         .await
         .map_err(io_err)?;
@@ -176,7 +261,7 @@ where
 
     let host = peer_host(peer);
     let verified = match factory.lookup_user(&resp.user, host).await {
-        Some(cred @ Credential::NativePassword(_)) => cred.verify_native(&salt, &auth),
+        Some(cred @ Credential::NativePassword(_)) => cred.verify_native(salt, &auth),
         None => false,
     };
     if !verified {
@@ -192,6 +277,7 @@ where
         database: resp.database.clone(),
         collation: resp.collation,
         capability,
+        tls_cipher: io.get_ref().cipher(),
     };
     let mut handler = match factory.open_session(&info) {
         Ok(h) => h,
@@ -229,6 +315,7 @@ struct Conn<S, H> {
     handler: H,
     stmts: HashMap<u32, StmtState>,
     next_stmt_id: u32,
+    /// When the server started (for COM_STATISTICS uptime).
     started: Instant,
 }
 
@@ -283,6 +370,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             }
             command::QUERY => {
                 let sql = sql_text(body)?;
+                trace!(sql, "COM_QUERY");
                 let resp = self.handler.query(sql).await?;
                 self.write_response(resp, false).await
             }
@@ -341,6 +429,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
 
     async fn stmt_prepare(&mut self, body: &[u8]) -> Result<(), ConnError> {
         let sql = sql_text(body)?;
+        trace!(sql, "COM_STMT_PREPARE");
         let id = self.next_stmt_id;
         self.next_stmt_id = self.next_stmt_id.checked_add(1).unwrap_or(1);
         let info = self.handler.prepare(id, sql).await?;

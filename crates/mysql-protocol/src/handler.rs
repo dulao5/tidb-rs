@@ -71,6 +71,8 @@ pub struct ConnectionInfo {
     pub collation: u8,
     /// Effective capability flags (client & server).
     pub capability: u32,
+    /// Negotiated TLS cipher suite (e.g. `TLS13_AES_128_GCM_SHA256`); `None` for plain TCP.
+    pub tls_cipher: Option<String>,
 }
 
 /// Per-connection SQL session. All methods are called sequentially from the connection's task.
