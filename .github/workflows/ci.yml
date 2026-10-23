@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Native build dependencies of the vendored TiKV crates:
+      # - tipb -> grpcio-sys builds gRPC C++ with CMake (needs a C++ compiler,
+      #   cmake; CMAKE_POLICY_VERSION_MINIMUM is set in .cargo/config.toml).
+      # - tipb's build script runs protoc (>= 3.1); without one in PATH it
+      #   builds protoc from source, which is slow and needs autotools.
+      # - tidb_query_expr -> openssl-sys (system OpenSSL), flate2 -> libz-sys.
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libssl-dev zlib1g-dev protobuf-compiler
+      # CMake and Xcode's clang ship with the macOS runner image.
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf openssl@3
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      # Installs the toolchain pinned in rust-toolchain.toml (with rustfmt, clippy).
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          cmake --version | head -n 1
+          protoc --version
+
+      - name: rustfmt (first-party crates)
+        run: cargo fmt --check $(tools/first-party.sh)
+
+      - name: clippy (first-party crates)
+        run: cargo clippy --no-deps --all-targets --locked $(tools/first-party.sh) -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --locked
