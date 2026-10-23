@@ -1,5 +1,6 @@
 // Go baseline for crates/parser/examples/bench.rs: TiDB's own parser (lex + parse + full AST)
 // over the same corpus. Run through bench.sh, which builds it against a TiDB checkout.
+// `restore` mode (restore.sh) records TiDB's Restore() text for a list of statements.
 package main
 
 import (
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/format"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
 
@@ -38,7 +40,47 @@ func load(path string) []Case {
 	return cs
 }
 
+// restore prints, for every non-empty line of path that does not start with '#', a JSON
+// record {"src", "restore"} with TiDB's Restore() text of the statements (joined by "; ", as
+// parser_test.go does), or {"src", "error"} when the line does not parse.
+func restore(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	p := parser.New()
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		rec := map[string]string{"src": line}
+		stmts, _, err := p.Parse(line, "", "")
+		if err != nil {
+			rec["error"] = err.Error()
+		} else {
+			var parts []string
+			for _, st := range stmts {
+				var sb strings.Builder
+				if err := st.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)); err != nil {
+					panic(err)
+				}
+				parts = append(parts, sb.String())
+			}
+			rec["restore"] = strings.Join(parts, "; ")
+		}
+		if err := enc.Encode(rec); err != nil {
+			panic(err)
+		}
+	}
+}
+
 func main() {
+	if os.Args[1] == "restore" {
+		restore(os.Args[2])
+		return
+	}
 	cases := load(os.Args[2])
 	p := parser.New()
 	switch os.Args[1] {

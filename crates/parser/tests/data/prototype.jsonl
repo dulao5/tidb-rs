@@ -1,0 +1,84 @@
+{"_generated": "by tools/parser-port/go-baseline/restore.sh from prototype.sql with pkg/parser of TiDB 4cee7f2084"}
+{"restore":"SELECT `c` FROM `sbtest1` WHERE `id`=?","src":"SELECT c FROM sbtest1 WHERE id=?"}
+{"restore":"SELECT `c` FROM `sbtest1` WHERE `id` BETWEEN ? AND ?","src":"SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?"}
+{"restore":"SELECT SUM(`k`) FROM `sbtest1` WHERE `id` BETWEEN ? AND ?","src":"SELECT SUM(k) FROM sbtest1 WHERE id BETWEEN ? AND ?"}
+{"restore":"SELECT `c` FROM `sbtest1` WHERE `id` BETWEEN ? AND ? ORDER BY `c`","src":"SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c"}
+{"restore":"SELECT DISTINCT `c` FROM `sbtest1` WHERE `id` BETWEEN ? AND ? ORDER BY `c`","src":"SELECT DISTINCT c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c"}
+{"restore":"SELECT `c` FROM `sbtest1` WHERE `id`=4991","src":"SELECT c FROM sbtest1 WHERE id=4991"}
+{"restore":"SELECT `c` FROM `sbtest7` WHERE `id` BETWEEN 5018 AND 5117","src":"SELECT c FROM sbtest7 WHERE id BETWEEN 5018 AND 5117"}
+{"restore":"SELECT SUM(`k`) FROM `sbtest1` WHERE `id` BETWEEN 5018 AND 5117","src":"SELECT SUM(k) FROM sbtest1 WHERE id BETWEEN 5018 AND 5117"}
+{"restore":"SELECT `c` FROM `sbtest3` WHERE `id` BETWEEN 5018 AND 5117 ORDER BY `c`","src":"SELECT c FROM sbtest3 WHERE id BETWEEN 5018 AND 5117 ORDER BY c"}
+{"restore":"SELECT DISTINCT `c` FROM `sbtest10` WHERE `id` BETWEEN 5018 AND 5117 ORDER BY `c`","src":"SELECT DISTINCT c FROM sbtest10 WHERE id BETWEEN 5018 AND 5117 ORDER BY c"}
+{"restore":"START TRANSACTION","src":"BEGIN"}
+{"restore":"COMMIT","src":"COMMIT"}
+{"restore":"START TRANSACTION","src":"START TRANSACTION"}
+{"restore":"START TRANSACTION READ ONLY","src":"START TRANSACTION READ ONLY"}
+{"restore":"START TRANSACTION","src":"START TRANSACTION WITH CONSISTENT SNAPSHOT"}
+{"restore":"ROLLBACK","src":"ROLLBACK"}
+{"restore":"START TRANSACTION; SELECT `c` FROM `sbtest1` WHERE `id`=1; COMMIT","src":"begin; select c from sbtest1 where id = 1; commit"}
+{"restore":"SELECT @@`version_comment` LIMIT 1","src":"SELECT @@version_comment LIMIT 1"}
+{"restore":"SELECT @@`version_comment` LIMIT 1","src":"select @@version_comment limit 1"}
+{"restore":"SELECT DATABASE(),USER() LIMIT 1","src":"SELECT DATABASE(), USER() LIMIT 1"}
+{"restore":"SELECT USER()","src":"select USER()"}
+{"restore":"SELECT DATABASE()","src":"SELECT DATABASE()"}
+{"restore":"SELECT VERSION()","src":"SELECT VERSION()"}
+{"restore":"SELECT CONNECTION_ID()","src":"SELECT CONNECTION_ID()"}
+{"restore":"SELECT NOW()","src":"SELECT NOW()"}
+{"restore":"SELECT CURRENT_TIMESTAMP(6)","src":"SELECT CURRENT_TIMESTAMP(6)"}
+{"restore":"SELECT 1","src":"SELECT 1"}
+{"restore":"SELECT 1","src":"select 1 from dual"}
+{"restore":"SELECT @@`max_allowed_packet`","src":"SELECT @@max_allowed_packet"}
+{"restore":"SELECT @@`tx_isolation`","src":"SELECT @@tx_isolation"}
+{"restore":"SELECT @@SESSION.`transaction_read_only`","src":"SELECT @@session.transaction_read_only"}
+{"restore":"SELECT @@GLOBAL.`version`,@@SESSION.`autocommit`","src":"SELECT @@GLOBAL.version, @@session.autocommit"}
+{"restore":"SELECT @@SESSION.`auto_increment_increment` AS `auto_increment_increment`,@@`character_set_client` AS `character_set_client`,@@`character_set_connection` AS `character_set_connection`,@@`character_set_results` AS `character_set_results`,@@`character_set_server` AS `character_set_server`,@@`collation_server` AS `collation_server`,@@`collation_connection` AS `collation_connection`,@@`init_connect` AS `init_connect`,@@`interactive_timeout` AS `interactive_timeout`,@@`license` AS `license`,@@`lower_case_table_names` AS `lower_case_table_names`,@@`max_allowed_packet` AS `max_allowed_packet`,@@`net_write_timeout` AS `net_write_timeout`,@@`performance_schema` AS `performance_schema`,@@`query_cache_size` AS `query_cache_size`,@@`query_cache_type` AS `query_cache_type`,@@`sql_mode` AS `sql_mode`,@@`system_time_zone` AS `system_time_zone`,@@`time_zone` AS `time_zone`,@@`transaction_isolation` AS `transaction_isolation`,@@`wait_timeout` AS `wait_timeout`","src":"/* mysql-connector-java-8.0.30 */SELECT  @@session.auto_increment_increment AS auto_increment_increment, @@character_set_client AS character_set_client, @@character_set_connection AS character_set_connection, @@character_set_results AS character_set_results, @@character_set_server AS character_set_server, @@collation_server AS collation_server, @@collation_connection AS collation_connection, @@init_connect AS init_connect, @@interactive_timeout AS interactive_timeout, @@license AS license, @@lower_case_table_names AS lower_case_table_names, @@max_allowed_packet AS max_allowed_packet, @@net_write_timeout AS net_write_timeout, @@performance_schema AS performance_schema, @@query_cache_size AS query_cache_size, @@query_cache_type AS query_cache_type, @@sql_mode AS sql_mode, @@system_time_zone AS system_time_zone, @@time_zone AS time_zone, @@transaction_isolation AS transaction_isolation, @@wait_timeout AS wait_timeout"}
+{"restore":"USE `sbtest`","src":"USE sbtest"}
+{"restore":"USE `sbtest`","src":"use `sbtest`"}
+{"restore":"SET NAMES 'utf8mb4'","src":"SET NAMES utf8mb4"}
+{"restore":"SET NAMES 'utf8mb4' COLLATE 'utf8mb4_general_ci'","src":"SET NAMES utf8mb4 COLLATE utf8mb4_general_ci"}
+{"restore":"SET NAMES 'utf8' COLLATE 'utf8_general_ci'","src":"SET NAMES 'utf8' COLLATE 'utf8_general_ci'"}
+{"restore":"SET NAMES 'latin1'","src":"SET NAMES latin1"}
+{"restore":"SET NAMES DEFAULT","src":"SET NAMES DEFAULT"}
+{"restore":"SET CHARSET 'utf8mb4'","src":"SET CHARACTER SET utf8mb4"}
+{"restore":"SET CHARSET DEFAULT","src":"SET CHARSET DEFAULT"}
+{"restore":"SET @@SESSION.`autocommit`=1","src":"SET autocommit=1"}
+{"restore":"SET @@SESSION.`autocommit`=0","src":"SET autocommit=0"}
+{"restore":"SET @@SESSION.`AUTOCOMMIT`=1","src":"SET AUTOCOMMIT = 1"}
+{"restore":"SET @@SESSION.`autocommit`=1","src":"SET @@autocommit = 1"}
+{"restore":"SET @@SESSION.`autocommit`=0","src":"SET SESSION autocommit = 0"}
+{"restore":"SET @@GLOBAL.`autocommit`=_UTF8MB4'ON'","src":"SET GLOBAL autocommit = ON"}
+{"restore":"SET @@SESSION.`sql_mode`=_UTF8MB4'STRICT_TRANS_TABLES'","src":"SET sql_mode='STRICT_TRANS_TABLES'"}
+{"restore":"SET @@SESSION.`sql_mode`=CONCAT(CONCAT(@@`sql_mode`, _UTF8MB4',STRICT_ALL_TABLES'), _UTF8MB4',NO_AUTO_VALUE_ON_ZERO')","src":"SET @@SESSION.sql_mode = CONCAT(CONCAT(@@sql_mode, ',STRICT_ALL_TABLES'), ',NO_AUTO_VALUE_ON_ZERO')"}
+{"restore":"SET @@SESSION.`tx_isolation`=_UTF8MB4'READ-COMMITTED'","src":"SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"}
+{"restore":"SET @@SESSION.`tx_isolation_one_shot`=_UTF8MB4'REPEATABLE-READ'","src":"SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"}
+{"restore":"SET @@GLOBAL.`tx_isolation`=_UTF8MB4'SERIALIZABLE', @@GLOBAL.`tx_read_only`=_UTF8MB4'0'","src":"SET GLOBAL TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE"}
+{"restore":"SET @@SESSION.`tx_read_only`=_UTF8MB4'1'","src":"SET SESSION TRANSACTION READ ONLY"}
+{"restore":"SET @@SESSION.`transaction_isolation`=_UTF8MB4'REPEATABLE-READ'","src":"SET @@session.transaction_isolation = 'REPEATABLE-READ'"}
+{"restore":"SET @@SESSION.`character_set_results`=NULL","src":"SET character_set_results = NULL"}
+{"restore":"SET @@SESSION.`net_write_timeout`=600","src":"SET net_write_timeout=600"}
+{"restore":"SET @@SESSION.`SQL_SELECT_LIMIT`=DEFAULT","src":"SET SQL_SELECT_LIMIT=DEFAULT"}
+{"restore":"SET @@SESSION.`time_zone`=_UTF8MB4'+00:00'","src":"SET time_zone = '+00:00'"}
+{"restore":"SET @`a`=1, @@SESSION.`max_execution_time`=1000","src":"SET @a = 1, @@session.max_execution_time = 1000"}
+{"restore":"SET @@SESSION.`tidb_isolation_read_engines`=_UTF8MB4'tikv'","src":"SET @@tidb_isolation_read_engines = 'tikv'"}
+{"restore":"SHOW SESSION VARIABLES LIKE _UTF8MB4'sql_mode'","src":"SHOW VARIABLES LIKE 'sql_mode'"}
+{"restore":"SHOW SESSION VARIABLES LIKE _UTF8MB4'lower_case_%'","src":"SHOW VARIABLES LIKE 'lower_case_%'"}
+{"restore":"SHOW SESSION VARIABLES LIKE _UTF8MB4'version%'","src":"SHOW SESSION VARIABLES LIKE 'version%'"}
+{"restore":"SHOW GLOBAL VARIABLES WHERE `Variable_name`=_UTF8MB4'version'","src":"SHOW GLOBAL VARIABLES WHERE Variable_name = 'version'"}
+{"restore":"SHOW SESSION VARIABLES","src":"SHOW VARIABLES"}
+{"restore":"SHOW WARNINGS","src":"SHOW WARNINGS"}
+{"restore":"SHOW WARNINGS","src":"SHOW COUNT(*) WARNINGS"}
+{"restore":"SHOW ERRORS","src":"SHOW ERRORS"}
+{"restore":"SHOW DATABASES","src":"SHOW DATABASES"}
+{"restore":"SHOW TABLES","src":"SHOW TABLES"}
+{"restore":"SHOW FULL TABLES IN `sbtest` LIKE _UTF8MB4'sbtest%'","src":"SHOW FULL TABLES FROM sbtest LIKE 'sbtest%'"}
+{"restore":"SHOW CREATE TABLE `sbtest1`","src":"SHOW CREATE TABLE sbtest1"}
+{"restore":"SHOW COLUMNS IN `sbtest1`","src":"SHOW COLUMNS FROM sbtest1"}
+{"restore":"SHOW FULL COLUMNS IN `sbtest1` IN `sbtest`","src":"SHOW FULL COLUMNS FROM sbtest1 FROM sbtest"}
+{"restore":"SHOW INDEX IN `sbtest1`","src":"SHOW INDEX FROM sbtest1"}
+{"restore":"SHOW TABLE STATUS LIKE _UTF8MB4'sbtest1'","src":"SHOW TABLE STATUS LIKE 'sbtest1'"}
+{"restore":"SHOW GLOBAL STATUS LIKE _UTF8MB4'Threads%'","src":"SHOW GLOBAL STATUS LIKE 'Threads%'"}
+{"restore":"SHOW COLLATION","src":"SHOW COLLATION"}
+{"restore":"SHOW CHARSET","src":"SHOW CHARACTER SET"}
+{"restore":"SHOW ENGINES","src":"SHOW ENGINES"}
+{"restore":"SHOW PROCESSLIST","src":"SHOW PROCESSLIST"}
+{"restore":"SHOW FULL PROCESSLIST","src":"SHOW FULL PROCESSLIST"}
