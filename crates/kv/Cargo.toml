@@ -1,0 +1,19 @@
+[package]
+name = "tidb-kv"
+version = "0.0.0"
+description = "Thin snapshot-read wrapper over tikv-client: TSO, point gets, scans and coprocessor requests"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures = { workspace = true }
+thiserror = { workspace = true }
+tikv-client = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

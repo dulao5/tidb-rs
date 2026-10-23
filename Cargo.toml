@@ -5,6 +5,7 @@ members = [
   "crates/mysql-protocol",
   "crates/parser",
   "crates/query-smoke",
+  "crates/kv",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
   # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
   "third_party/tikv/codec",
@@ -59,17 +60,27 @@ log_wrappers = { path = "third_party/tikv-shims/log_wrappers" }
 tikv_alloc = { path = "third_party/tikv-shims/tikv_alloc" }
 tikv_util = { path = "third_party/tikv-shims/tikv_util" }
 tracker = { path = "third_party/tikv-shims/tracker" }
+# First-party crates.
+tidb-kv = { path = "crates/kv" }
+# TiKV Rust client: our fork with `Snapshot::coprocessor` (branch tidb-rs/coprocessor).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "f7f51da8f386bde8d417ad897f99f484fea9a093", default-features = false }
 # External crates.
 bytes = "1.11"
 chrono = { version = "0.4", default-features = false }
+futures = "0.3"
 heck = "0.3"
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
 openssl = "0.10.80"
+protobuf = "2.8"
 raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/tikv/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
+thiserror = "1.0"
 time = { version = "0.2.23" }
 tipb = { git = "https://github.com/pingcap/tipb.git" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
 
 # Same patches as TiKV; Cargo.lock pins the git revisions TiKV's lock uses.
