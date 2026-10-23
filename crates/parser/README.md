@@ -50,37 +50,53 @@ runtime: src/lexer.rs (hand-written, TiDB token classification, keyword tables f
 
 | Action kind | Productions |
 |---|---:|
-| Hand-ported from Go (`tools/parser-port/handport.py`) | 110 |
-| Passthrough `$$ = $k` | 1,078 |
-| Constants (`true`/`false`, `nil` → `None`/default, empty list, unit) | 204 |
-| **Placeholder** `ph(...)`: builds a generic `Node` holding its children | 1,842 |
+| Hand-ported from Go (`tools/parser-port/handport.py`) | 571 |
+| Passthrough `$$ = $k` | 1,075 |
+| Constants (`true`/`false`, `nil` → `None`/default, empty list, unit) | 202 |
+| **Placeholder** `ph(...)`: builds a generic `Node` holding its children | 1,386 |
 
-Hand-ported (with `Restore()` in `src/ast.rs`): the statement list; SELECT and its variants,
-select options (incl. the ALL+DISTINCT error), priority; field list; table references, table
-names (incl. the bad-schema error), aliases, partition lists, joins (faithful `NewCrossJoin`
-re-association); expressions: OR/XOR/AND/NOT, comparisons, IN, BETWEEN, IS NULL, bit and
-arithmetic operators, unary operators, parentheses, column names, literals, generic function
-calls; GROUP BY, HAVING, ORDER BY, LIMIT.
+Hand-ported (AST in `src/ast.rs`, `Restore()` in `src/restore.rs`):
+
+- Queries: SELECT and its options (incl. the ALL+DISTINCT error), field list, FROM with joins
+  (faithful `NewCrossJoin` re-association), derived tables, index hints, AS OF TIMESTAMP,
+  WHERE / GROUP BY [WITH ROLLUP] / HAVING / WINDOW / ORDER BY / LIMIT / FETCH, locking reads
+  (FOR UPDATE/SHARE ... NOWAIT/WAIT/SKIP LOCKED), UNION/EXCEPT/INTERSECT, WITH [RECURSIVE],
+  `TABLE t`, `VALUES ROW(...)`.
+- Expressions: all operators and predicates (IN / BETWEEN / LIKE ... ESCAPE / REGEXP /
+  IS [NOT] NULL|TRUE|FALSE / MEMBER OF / MATCH ... AGAINST / ANY / ALL / EXISTS), literals incl.
+  charset introducers, hex/bit and DATE/TIME/TIMESTAMP literals, `?` markers, user and system
+  variables, COLLATE, CASE, row constructors, subqueries, generic and special-syntax function
+  calls (CAST/CONVERT with the cast-type grammar, TRIM, SUBSTRING, EXTRACT, POSITION,
+  DATE_ADD/INTERVAL, TIMESTAMPADD, GET_FORMAT, WEIGHT_STRING, CHAR, sequences, ...),
+  aggregates and window functions.
+- Session statements: BEGIN / START TRANSACTION, COMMIT, ROLLBACK, USE, SET (variables, NAMES,
+  CHARSET, TRANSACTION), SHOW (every `ShowTargetFilterable` form with LIKE/WHERE, SHOW CREATE
+  TABLE/VIEW/DATABASE/..., PROCESSLIST, REGIONS, ...).
 
 Placeholder (grammar accepted, AST is a `Node`/stub type from `src/gen_types.rs`): everything
-else, notably DDL, DML other than SELECT, SET/SHOW/ADMIN, keyword functions
-(`FunctionCallKeyword`/`NonKeyword`), aggregates (`SumExpr`), window specs, TABLESAMPLE, user
-variables, INTO, hints (the nested hint grammar is not ported). 27 nonterminals still use the
-catch-all type `Item = Box<dyn Any>` and need manual typing. Only the default parser mode is
-supported (`ParseOptions::window_functions`; no MariaDB / REAL_AS_FLOAT / ANSI_QUOTES /
-charset options yet).
+else, notably DDL, INSERT/UPDATE/DELETE, EXPLAIN, ADMIN, GRANT, SET PASSWORD/ROLE/CONFIG, SHOW
+GRANTS FOR / CREATE USER / PROFILE, TABLESAMPLE, SELECT ... INTO, LATERAL, optimizer hints
+(the nested hint grammar is not ported). Restore reports any placeholder it meets as
+`unported ...`, so a statement is either fully inside the ported subset or flagged. Only the
+default parser mode is supported (`ParseOptions::window_functions`; no MariaDB / REAL_AS_FLOAT /
+ANSI_QUOTES / charset options yet).
 
 Semantic actions that reject input in Go but are placeholders here make us accept some invalid
-statements: 613 of 706 invalid corpus statements are rejected today.
+statements: 616 of 706 invalid corpus statements are rejected today.
 
 ### Tests (`cargo test -p tidb-parser`, < 1 s after build)
 
 - `tests/acceptance.rs`: all 4,140 default-mode cases of TiDB's `parser_test.go`
-  (`tests/data/all_cases.jsonl`): 3,434/3,434 valid accepted; invalid rejected 613/706
-  (asserted ≥ 613).
-- `tests/restore_golden.rs`: of 863 SELECT cases with an expected `Restore()` text, the 296
-  that are fully inside the ported subset restore byte-identically, except one allowlisted
-  case (raw latin1 bytes in the Go source that a `&str` cannot carry).
+  (`tests/data/all_cases.jsonl`): 3,434/3,434 valid accepted; invalid rejected 616/706
+  (asserted ≥ 616).
+- `tests/restore_golden.rs`: of the 3,434 cases with an expected `Restore()` text, the 1,146
+  that are fully inside the ported subset restore byte-identically (and round-trip through a
+  second parse), except one allowlisted case (raw latin1 bytes in the Go source that a `&str`
+  cannot carry).
+- `tests/prototype.rs`: the prototype workload (`tests/data/prototype.sql`: sysbench
+  oltp_read_only plus the statements MySQL clients/drivers send around a session) must restore
+  byte-identically to TiDB's text, recorded by the Go parser in `tests/data/prototype.jsonl`
+  (`tools/parser-port/go-baseline/restore.sh <tidb-checkout> <sql-file>`).
 - `tests/driver.rs` + unit tests in `src/driver.rs`: error positions, end-of-input errors,
   action aborts, stack reuse after errors, table consistency.
 
@@ -94,6 +110,10 @@ Apple M4 Pro, rustc 1.89, 2026-10-23; three runs):
 | `parse` per statement (lex + parse + AST) | 787K – 819K |
 | batched, 50 statements per call | 842K – 870K |
 | Go TiDB parser, same corpus (`tools/parser-port/go-baseline/bench.sh`), same session | 491K – 533K |
+
+With 571 productions hand-ported (2026-10-23, same machine, shared and noisy), best of five
+alternating runs: 824K single / 860K batched vs. 813K / 864K for the 110-production state, i.e.
+no measurable change.
 
 Go runs real actions everywhere; ours allocate placeholder nodes for unported productions, so
 expect the full port to land lower (spike estimate: 600–900K stmts/s).
@@ -111,8 +131,10 @@ tools/parser-port/regen.sh <tidb-checkout> [--check-tables]
 
 rewrites `grammar/tidb_typed.y`, `grammar/typed_report.json`, `src/gen_types.rs`,
 `src/keywords_gen.rs` and `tests/data/all_cases.jsonl` (each records the TiDB commit in its
-header). Porting an action = add it to `tools/parser-port/handport.py` (plus AST/Restore in
-`src/ast.rs`), regenerate, and extend the restore-golden coverage.
+header). Porting an action = add it to `tools/parser-port/handport.py` (plus the AST in
+`src/ast.rs` and its Restore in `src/restore.rs`), regenerate, and check the restore-golden
+coverage. `cargo run -p tidb-parser --example restore -- "<sql>"` (or `-- --corpus [FILTER]`)
+prints our restore text, for comparison with Go's.
 
 ## Open design points
 
