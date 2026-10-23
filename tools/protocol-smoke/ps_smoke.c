@@ -7,7 +7,7 @@
 #include <string.h>
 #include <time.h>
 
-static int port, secs, text_mode;
+static int port, secs, text_mode, use_tls;
 static long long total;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -18,7 +18,7 @@ static void *worker(void *arg) {
   (void)arg;
   mysql_thread_init();
   MYSQL *c = mysql_init(NULL);
-  unsigned int ssl = SSL_MODE_DISABLED;
+  unsigned int ssl = use_tls ? SSL_MODE_REQUIRED : SSL_MODE_DISABLED;
   mysql_options(c, MYSQL_OPT_SSL_MODE, &ssl);
   if (!mysql_real_connect(c, "127.0.0.1", "root", "", NULL, port, NULL, 0)) DIE("connect: %s", mysql_error(c));
   long long n = 0; double t0 = now(); unsigned seed = (unsigned)(size_t)&n;
@@ -53,7 +53,8 @@ static void *worker(void *arg) {
 }
 
 int main(int argc, char **argv) {
-  if (argc < 5) { fprintf(stderr, "usage: %s port threads secs ps|text\n", argv[0]); return 2; }
+  if (argc < 5) { fprintf(stderr, "usage: %s port threads secs ps|text [tls]\n", argv[0]); return 2; }
+  use_tls = argc > 5 && !strcmp(argv[5], "tls");
   port = atoi(argv[1]); int threads = atoi(argv[2]); secs = atoi(argv[3]); text_mode = !strcmp(argv[4], "text");
   printf("client library %s\n", mysql_get_client_info());
   mysql_library_init(0, NULL, NULL);
@@ -61,6 +62,6 @@ int main(int argc, char **argv) {
   for (int i = 0; i < threads; i++) pthread_create(&th[i], NULL, worker, NULL);
   for (int i = 0; i < threads; i++) pthread_join(th[i], NULL);
   double el = now() - t0;
-  printf("%s: %d threads, %lld statements in %.1fs = %.0f qps\n", argv[4], threads, total, el, total / el);
+  printf("%s%s: %d threads, %lld statements in %.1fs = %.0f qps\n", argv[4], use_tls ? "+tls" : "", threads, total, el, total / el);
   return 0;
 }

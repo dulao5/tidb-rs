@@ -8,9 +8,11 @@
 mod stub;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use clap::Parser;
 use tidb_mysql_protocol::constants::auth_plugin;
+use tidb_mysql_protocol::tls::{self, TlsConfig};
 use tidb_mysql_protocol::{Credential, Server, ServerConfig};
 use tracing::{error, info};
 
@@ -34,6 +36,19 @@ struct Args {
     #[arg(long, default_value = auth_plugin::MYSQL_NATIVE_PASSWORD,
           value_parser = [auth_plugin::MYSQL_NATIVE_PASSWORD, auth_plugin::CACHING_SHA2_PASSWORD])]
     default_auth_plugin: String,
+    /// Generate a self-signed certificate at startup when --ssl-cert/--ssl-key are not given
+    /// (TiDB's security.auto-tls). `--auto-tls=false` disables TLS in that case.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    auto_tls: bool,
+    /// PEM certificate (chain) for TLS connections (TiDB security.ssl-cert).
+    #[arg(long, requires = "ssl_key")]
+    ssl_cert: Option<PathBuf>,
+    /// PEM private key for --ssl-cert (TiDB security.ssl-key).
+    #[arg(long, requires = "ssl_cert")]
+    ssl_key: Option<PathBuf>,
+    /// PEM CA bundle; client certificates are verified when presented (TiDB security.ssl-ca).
+    #[arg(long)]
+    ssl_ca: Option<PathBuf>,
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
     log_level: tracing::Level,
@@ -53,14 +68,25 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let tls = match tls_config(&args) {
+        Ok(tls) => tls,
+        Err(e) => {
+            // Like TiDB: invalid configured certificates halt startup rather than silently
+            // downgrading connections.
+            error!(error = %e, "failed to set up TLS");
+            std::process::exit(2);
+        }
+    };
     let config = ServerConfig {
         default_auth_plugin: args.default_auth_plugin.clone(),
+        tls,
         ..ServerConfig::default()
     };
     let factory = stub::StubFactory {
         user: args.user.clone(),
         credential: Credential::native_from_password(&args.password),
         server_version: config.server_version.clone(),
+        tls_enabled: config.tls.is_some(),
     };
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -86,4 +112,32 @@ fn main() {
         error!(%addr, error = %e, "server failed");
         std::process::exit(1);
     }
+}
+
+/// TLS configuration from the flags, mirroring TiDB's `LoadTLSCertificates`: the given
+/// certificate and key, else an auto-generated self-signed certificate if `--auto-tls`.
+fn tls_config(args: &Args) -> std::io::Result<Option<TlsConfig>> {
+    if let (Some(cert), Some(key)) = (&args.ssl_cert, &args.ssl_key) {
+        let config = tls::load_tls_config(cert, key, args.ssl_ca.as_deref())?;
+        info!(cert = %cert.display(), client_verification = args.ssl_ca.is_some(), "secure connection is enabled");
+        return Ok(Some(config));
+    }
+    if !args.auto_tls {
+        info!("TLS is disabled (no --ssl-cert/--ssl-key and --auto-tls=false)");
+        return Ok(None);
+    }
+    let mut names = vec!["localhost"];
+    if !args.host.is_empty()
+        && args.host != "0.0.0.0"
+        && args.host != "::"
+        && args.host != "localhost"
+    {
+        names.push(&args.host);
+    }
+    let config = tls::auto_tls_config(&names)?;
+    info!(
+        ?names,
+        "secure connection is enabled with an auto-generated self-signed certificate"
+    );
+    Ok(Some(config))
 }

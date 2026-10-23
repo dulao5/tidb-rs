@@ -18,6 +18,8 @@ pub struct StubFactory {
     pub user: String,
     pub credential: Credential,
     pub server_version: String,
+    /// Whether TLS is enabled (`@@have_ssl`).
+    pub tls_enabled: bool,
 }
 
 impl SessionFactory for StubFactory {
@@ -27,10 +29,22 @@ impl SessionFactory for StubFactory {
         (user == self.user).then(|| self.credential.clone())
     }
 
-    fn open_session(&self, _info: &ConnectionInfo) -> Result<StubSession, SqlError> {
+    fn open_session(&self, info: &ConnectionInfo) -> Result<StubSession, SqlError> {
+        let host = info
+            .peer
+            .rsplit_once(':')
+            .map_or(info.peer.as_str(), |(h, _)| h);
         Ok(StubSession {
             server_version: self.server_version.clone(),
             current_db: None,
+            user: format!(
+                "{}@{}",
+                info.user,
+                host.trim_matches(|c| c == '[' || c == ']')
+            ),
+            current_user: format!("{}@%", info.user),
+            connection_id: info.connection_id,
+            have_ssl: if self.tls_enabled { "YES" } else { "DISABLED" },
             stmts: Default::default(),
         })
     }
@@ -41,6 +55,12 @@ impl SessionFactory for StubFactory {
 pub struct StubSession {
     server_version: String,
     current_db: Option<String>,
+    /// `USER()`: `user@client-host`.
+    user: String,
+    /// `CURRENT_USER()`: the matched account, `user@%`.
+    current_user: String,
+    connection_id: u64,
+    have_ssl: &'static str,
     /// Prepared statements: id -> normalised SQL.
     stmts: std::collections::HashMap<u32, String>,
 }
@@ -62,17 +82,6 @@ fn unsupported(sql: &str) -> SqlError {
     SqlError::not_supported(s)
 }
 
-fn single_value(name: &str, col: ColumnDef, v: Value) -> Response {
-    let mut col = col;
-    col.name = name.to_string();
-    col.org_name = String::new();
-    Response::ResultSet(ResultSet {
-        columns: vec![col],
-        rows: vec![vec![v]],
-        warnings: 0,
-    })
-}
-
 impl StubSession {
     /// The few system variables clients read while connecting, with TiDB's defaults.
     fn sysvar(&self, name: &str) -> Option<(ColumnDef, Value)> {
@@ -91,9 +100,13 @@ impl StubSession {
             "character_set_client"
             | "character_set_connection"
             | "character_set_results"
-            | "character_set_server" => string("utf8mb4"),
-            "collation_connection" | "collation_server" => string("utf8mb4_bin"),
+            | "character_set_server"
+            | "character_set_database" => string("utf8mb4"),
+            "collation_connection" | "collation_server" | "collation_database" => {
+                string("utf8mb4_bin")
+            }
             "time_zone" | "system_time_zone" => string("SYSTEM"),
+            "have_ssl" | "have_openssl" => string(self.have_ssl),
             "sql_mode" => string(
                 "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
             ),
@@ -101,83 +114,85 @@ impl StubSession {
         }
     }
 
-    /// Answers a constant `SELECT`, if `norm` is one the stub knows. `original` provides the
-    /// column name with its original spelling.
-    fn constant_select(&self, norm: &str, original: &str) -> Option<Response> {
-        let expr = norm.strip_prefix("select ")?;
-        let expr = expr.strip_suffix(" limit 1").unwrap_or(expr);
-        let string_col = || ColumnDef::new("", ColumnType::VarString);
-        match expr {
-            "version()" => {
-                return Some(single_value(
-                    expr,
-                    string_col(),
-                    self.server_version.as_str().into(),
-                ));
+    /// Evaluates one select-list item the stub knows (`item` with its original spelling).
+    fn item(&self, item: &str) -> Option<(ColumnDef, Value)> {
+        let lower = item.to_ascii_lowercase();
+        let string = |v: Value| Some((ColumnDef::new("", ColumnType::VarString), v));
+        match lower.as_str() {
+            "version()" => return string(self.server_version.as_str().into()),
+            "database()" | "schema()" => {
+                return string(self.current_db.as_deref().map_or(Value::Null, Value::from));
             }
-            "database()" => {
-                let v = self.current_db.as_deref().map_or(Value::Null, Value::from);
-                return Some(single_value("database()", string_col(), v));
+            "user()" | "session_user()" | "system_user()" => {
+                return string(self.user.as_str().into());
+            }
+            "current_user()" | "current_user" => return string(self.current_user.as_str().into()),
+            "connection_id()" => {
+                let col = ColumnDef::new("", ColumnType::LongLong)
+                    .with_flags(column_flag::NOT_NULL | column_flag::UNSIGNED);
+                return Some((col, Value::UInt(self.connection_id)));
             }
             _ => {}
         }
-        // A list of system variables: SELECT @@version_comment, SELECT @@a, @@session.b.
-        if expr.starts_with("@@") {
-            // Select list with the original spelling, for the column names.
-            let orig = original.trim().trim_end_matches(';').trim()["select".len()..].trim();
-            let orig = match orig.len().checked_sub("limit 1".len()) {
-                Some(n)
-                    if orig.is_char_boundary(n) && orig[n..].eq_ignore_ascii_case("limit 1") =>
-                {
-                    orig[..n].trim()
-                }
-                _ => orig,
-            };
-            let mut columns = Vec::new();
-            let mut row = Vec::new();
-            for (item, name) in expr.split(',').zip(orig.split(',')) {
-                let var = item.trim().strip_prefix("@@")?;
-                let var = var
-                    .strip_prefix("session.")
-                    .or_else(|| var.strip_prefix("global."))
-                    .unwrap_or(var);
-                let (col, v) = self.sysvar(var)?;
-                let mut col = col;
-                col.name = name.trim().to_string();
-                col.org_name = String::new();
-                columns.push(col);
-                row.push(v);
-            }
-            return Some(Response::ResultSet(ResultSet {
-                columns,
-                rows: vec![row],
-                warnings: 0,
-            }));
+        if let Some(var) = lower.strip_prefix("@@") {
+            let var = var
+                .strip_prefix("session.")
+                .or_else(|| var.strip_prefix("global."))
+                .unwrap_or(var);
+            return self.sysvar(var);
         }
         // Integer literal: SELECT 1, SELECT -42.
-        if let Ok(i) = expr.parse::<i64>() {
-            let name = original.trim().trim_end_matches(';').trim()["select".len()..].trim();
+        if let Ok(i) = item.parse::<i64>() {
             let col = ColumnDef::new("", ColumnType::LongLong)
                 .with_flags(column_flag::NOT_NULL)
-                .with_length(expr.len() as u32);
-            return Some(single_value(name, col, Value::Int(i)));
+                .with_length(item.len() as u32);
+            return Some((col, Value::Int(i)));
         }
         // Single-quoted string literal without embedded quotes: SELECT 'abc'.
-        if expr.len() >= 2
-            && expr.starts_with('\'')
-            && expr.ends_with('\'')
-            && !expr[1..expr.len() - 1].contains('\'')
-        {
-            let start = original.find('\'')? + 1;
-            let end = original.rfind('\'')?;
-            let s = &original[start..end];
-            return Some(single_value(
-                s,
-                string_col().with_flags(column_flag::NOT_NULL),
-                s.into(),
-            ));
+        let s = item.strip_prefix('\'')?.strip_suffix('\'')?;
+        if s.contains('\'') {
+            return None;
         }
-        None
+        let col = ColumnDef::new("", ColumnType::VarString).with_flags(column_flag::NOT_NULL);
+        Some((col, s.into()))
+    }
+
+    /// Answers `SELECT <item>, <item>... [LIMIT 1]` when every item is one the stub knows
+    /// (see [`Self::item`]); column names keep the original spelling.
+    fn constant_select(&self, original: &str) -> Option<Response> {
+        let sql = original.trim().trim_end_matches(';').trim();
+        if sql.len() < 7 || !sql[..7].eq_ignore_ascii_case("select ") {
+            return None;
+        }
+        let mut list = sql[7..].trim();
+        if let Some(n) = list.len().checked_sub(" limit 1".len())
+            && list.is_char_boundary(n)
+            && list[n..].eq_ignore_ascii_case(" limit 1")
+        {
+            list = list[..n].trim();
+        }
+        let mut columns = Vec::new();
+        let mut row = Vec::new();
+        // Splitting on ',' is good enough for the items above (no commas inside them).
+        for item in list.split(',') {
+            let item = item.trim();
+            let (mut col, v) = self.item(item)?;
+            col.name = match &v {
+                // MySQL names a string literal column after its value.
+                Value::Bytes(b) if item.starts_with('\'') => {
+                    String::from_utf8_lossy(b).into_owned()
+                }
+                _ => item.to_string(),
+            };
+            col.org_name = String::new();
+            columns.push(col);
+            row.push(v);
+        }
+        Some(Response::ResultSet(ResultSet {
+            columns,
+            rows: vec![row],
+            warnings: 0,
+        }))
     }
 }
 
@@ -223,7 +238,7 @@ fn param_column(p: &Param) -> ColumnDef {
 impl SessionHandler for StubSession {
     async fn query(&mut self, sql: &str) -> Result<Response, SqlError> {
         let norm = normalize(sql);
-        if let Some(resp) = self.constant_select(&norm, sql) {
+        if let Some(resp) = self.constant_select(sql) {
             return Ok(resp);
         }
         if norm.starts_with("set ") {
@@ -257,7 +272,7 @@ impl SessionHandler for StubSession {
                 columns: vec![ColumnDef::new("?", ColumnType::VarString)],
             });
         }
-        if let Some(Response::ResultSet(rs)) = self.constant_select(&norm, sql) {
+        if let Some(Response::ResultSet(rs)) = self.constant_select(sql) {
             self.stmts.insert(stmt_id, sql.to_string());
             return Ok(PreparedInfo {
                 param_count: 0,
@@ -281,9 +296,7 @@ impl SessionHandler for StubSession {
                 warnings: 0,
             }));
         }
-        let norm = normalize(sql);
-        self.constant_select(&norm, sql)
-            .ok_or_else(|| unsupported(sql))
+        self.constant_select(sql).ok_or_else(|| unsupported(sql))
     }
 
     fn close(&mut self, stmt_id: u32) {
@@ -305,6 +318,10 @@ mod tests {
         StubSession {
             server_version: "v".into(),
             current_db: None,
+            user: "root@127.0.0.1".into(),
+            current_user: "root@%".into(),
+            connection_id: 9,
+            have_ssl: "YES",
             stmts: Default::default(),
         }
     }
@@ -341,6 +358,16 @@ mod tests {
         assert_eq!(s.query("USE `sbtest`").await.unwrap(), Response::ok());
         let r = rs(s.query("select database()").await.unwrap());
         assert_eq!(r.rows[0][0], Value::from("sbtest"));
+        // What the mysql CLI's `status` command sends.
+        let r = rs(s.query("select DATABASE(), USER() limit 1").await.unwrap());
+        assert_eq!(r.columns[1].name, "USER()");
+        assert_eq!(
+            r.rows[0],
+            vec![Value::from("sbtest"), Value::from("root@127.0.0.1")]
+        );
+        let r = rs(s.query("SELECT CONNECTION_ID(), @@have_ssl").await.unwrap());
+        assert_eq!(r.rows[0], vec![Value::UInt(9), Value::from("YES")]);
+        assert!(s.query("select database(), nope()").await.is_err());
         let e = s.query("select * from t").await.unwrap_err();
         assert_eq!(e.code, 1235);
         assert_eq!(

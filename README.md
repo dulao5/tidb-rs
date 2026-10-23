@@ -14,7 +14,8 @@ third_party/tikv-shims  stand-ins for the TiKV-internal crates they depend on
 tools/parser-port   converters that regenerate the parser's grammar/keyword/test inputs from a
                     TiDB checkout (regen.sh)
 tools/sync-tikv-query.sh  re-vendors third_party/tikv from a TiKV commit
-tools/protocol-smoke  libmysqlclient load generator for the protocol layer (prepared `SELECT ?`)
+tools/protocol-smoke  protocol smoke/perf clients: libmysqlclient (ps_smoke.c) and a sysbench lua
+                    script (prepared `SELECT ?` and text `SELECT 1`)
 ```
 
 Building needs a C++ compiler, CMake, protoc (>= 3.1) and OpenSSL (grpcio-sys and openssl-sys are
