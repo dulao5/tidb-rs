@@ -1,0 +1,19 @@
+[package]
+name = "tidb-query-smoke"
+version = "0.0.0"
+description = "Smoke tests proving the vendored TiKV query crates are usable from first-party code"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+tidb_query_datatype = { workspace = true }
+tidb_query_expr = { workspace = true }
+tipb = { workspace = true }
+tipb_helper = { workspace = true }
+
+[lints]
+workspace = true

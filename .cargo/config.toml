@@ -1,0 +1,4 @@
+[env]
+# grpcio-sys (pulled in by tipb) bundles c-ares/abseil CMake projects that
+# declare cmake_minimum_required < 3.5, which CMake 4 rejects.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

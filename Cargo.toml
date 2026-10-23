@@ -1,11 +1,30 @@
 [workspace]
 resolver = "2"
-members = ["crates/server", "crates/parser"]
+members = [
+  "crates/server",
+  "crates/parser",
+  "crates/query-smoke",
+  # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
+  # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
+  "third_party/tikv/codec",
+  "third_party/tikv/collections",
+  "third_party/tikv/error_code",
+  "third_party/tikv/panic_hook",
+  "third_party/tikv/profiler",
+  "third_party/tikv/tidb_query_aggr",
+  "third_party/tikv/tidb_query_codegen",
+  "third_party/tikv/tidb_query_common",
+  "third_party/tikv/tidb_query_datatype",
+  "third_party/tikv/tidb_query_expr",
+  "third_party/tikv/tipb_helper",
+  # Stand-ins for TiKV-internal crates the vendored crates depend on.
+  "third_party/tikv-shims/*",
+]
 
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.89"
+rust-version = "1.93"
 publish = false
 
 [workspace.lints.rust]
@@ -15,6 +34,51 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 [workspace.lints.clippy]
 dbg_macro = "warn"
 todo = "warn"
+
+# The vendored TiKV crates refer to these with `{ workspace = true }`. Specs
+# follow TiKV's root Cargo.toml.
+[workspace.dependencies]
+# Vendored TiKV crates.
+codec = { path = "third_party/tikv/codec" }
+collections = { path = "third_party/tikv/collections" }
+error_code = { path = "third_party/tikv/error_code" }
+panic_hook = { path = "third_party/tikv/panic_hook" }
+profiler = { path = "third_party/tikv/profiler" }
+tidb_query_aggr = { path = "third_party/tikv/tidb_query_aggr" }
+tidb_query_codegen = { path = "third_party/tikv/tidb_query_codegen" }
+tidb_query_common = { path = "third_party/tikv/tidb_query_common" }
+tidb_query_datatype = { path = "third_party/tikv/tidb_query_datatype" }
+tidb_query_expr = { path = "third_party/tikv/tidb_query_expr" }
+tipb_helper = { path = "third_party/tikv/tipb_helper" }
+# Shims for TiKV-internal crates.
+api_version = { path = "third_party/tikv-shims/api_version" }
+crypto = { path = "third_party/tikv-shims/crypto" }
+file_system = { path = "third_party/tikv-shims/file_system" }
+log_wrappers = { path = "third_party/tikv-shims/log_wrappers" }
+tikv_alloc = { path = "third_party/tikv-shims/tikv_alloc" }
+tikv_util = { path = "third_party/tikv-shims/tikv_util" }
+tracker = { path = "third_party/tikv-shims/tracker" }
+# External crates.
+bytes = "1.11"
+chrono = { version = "0.4", default-features = false }
+heck = "0.3"
+kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+openssl = "0.10.80"
+raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
+slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog-global = { version = "0.1", git = "https://github.com/tikv/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
+time = { version = "0.2.23" }
+tipb = { git = "https://github.com/pingcap/tipb.git" }
+yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
+
+# Same patches as TiKV; Cargo.lock pins the git revisions TiKV's lock uses.
+[patch.crates-io]
+# tipb (and kvproto) are generated for PingCAP's rust-protobuf 2.8 fork.
+protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
+protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
+# Only resolved, never built here (optional deps of error_code/tidb_query_common).
+raft = { git = "https://github.com/tikv/raft-rs", branch = "master" }
+raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 
 [profile.dev.build-override]
 # Parser table generation runs in build.rs; unoptimised it is very slow.
