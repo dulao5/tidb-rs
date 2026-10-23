@@ -3285,6 +3285,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-ab"
+version = "0.0.0"
+dependencies = [
+ "clap 4.6.7",
+ "mysql_async",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "tidb-distsql"
 version = "0.0.0"
 dependencies = [

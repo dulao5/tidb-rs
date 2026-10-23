@@ -1,0 +1,21 @@
+[package]
+name = "tidb-ab"
+version = "0.0.0"
+description = "A/B result comparison harness: Go TiDB (A) vs tidb-rs (B) on the same cluster"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ab"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+mysql_async = { version = "0.37", default-features = false, features = ["minimal", "ring", "rustls-tls", "tls12"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

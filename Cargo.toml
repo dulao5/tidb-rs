@@ -8,6 +8,7 @@ members = [
   "crates/kv",
   "crates/meta",
   "crates/distsql",
+  "tools/ab",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
   # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
   "third_party/tikv/codec",
