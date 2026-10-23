@@ -44,8 +44,10 @@ fn tables() -> &'static Tables {
     static T: OnceLock<Tables> = OnceLock::new();
     T.get_or_init(|| {
         let mut it = RAW
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c));
         let mut take = |n: usize| -> Vec<u32> { (&mut it).take(n).collect() };
         let h = take(4);
         let (ns, al, gl) = (h[0] as usize, h[1] as usize, h[2] as usize);
