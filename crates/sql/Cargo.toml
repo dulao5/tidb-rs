@@ -1,0 +1,17 @@
+[package]
+name = "tidb-sql"
+version = "0.0.0"
+description = "Statement lowering, name resolution, handle-range building and physical planning for the read-only node"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tidb-distsql = { workspace = true }
+tidb-meta = { workspace = true }
+tidb-mysql-protocol = { workspace = true }
+tidb-parser = { workspace = true }
+
+[lints]
+workspace = true

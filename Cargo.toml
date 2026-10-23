@@ -8,6 +8,9 @@ members = [
   "crates/kv",
   "crates/meta",
   "crates/distsql",
+  "crates/sql",
+  # "crates/executor",
+  # "crates/session",
   "tools/ab",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
   # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
@@ -67,6 +70,11 @@ tracker = { path = "third_party/tikv-shims/tracker" }
 tidb-distsql = { path = "crates/distsql" }
 tidb-kv = { path = "crates/kv" }
 tidb-meta = { path = "crates/meta" }
+tidb-mysql-protocol = { path = "crates/mysql-protocol" }
+tidb-parser = { path = "crates/parser" }
+tidb-sql = { path = "crates/sql" }
+tidb-executor = { path = "crates/executor" }
+tidb-session = { path = "crates/session" }
 # TiKV Rust client: our fork with `Snapshot::coprocessor` (branch tidb-rs/coprocessor).
 tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "f7f51da8f386bde8d417ad897f99f484fea9a093", default-features = false }
 # External crates.
