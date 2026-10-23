@@ -20,6 +20,9 @@ third_party/tikv-shims  stand-ins for the TiKV-internal crates they depend on
 tools/parser-port   converters that regenerate the parser's grammar/keyword/test inputs from a
                     TiDB checkout (regen.sh)
 tools/sync-tikv-query.sh  re-vendors third_party/tikv from a TiKV commit
+tools/ab            A/B harness: same queries on Go TiDB and tidb-rs, compares rows, column metadata
+                    and errors (text + prepared); with scripts/ for playground, sysbench load/runs
+                    (see tools/ab/README.md)
 tools/protocol-smoke  protocol smoke/perf clients: libmysqlclient (ps_smoke.c) and a sysbench lua
                     script (prepared `SELECT ?` and text `SELECT 1`)
 ```

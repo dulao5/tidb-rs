@@ -6,7 +6,7 @@
 #
 #   -e host:port  endpoint for `run`                       (default 127.0.0.1:27000)
 #   -n name       label used in file names for `run`       (default: the endpoint)
-#   -a / -b       endpoints A (Go TiDB) / B (tidb-rs)      (default 127.0.0.1:27000 / 127.0.0.1:4001)
+#   -a / -b       endpoints A (Go TiDB) / B (tidb-rs)      (default 127.0.0.1:27000 / 127.0.0.1:27001)
 #   -T threads    space- or comma-separated thread counts  (default "1 8 16")
 #   -d seconds    duration of each run                     (default 30)
 #   -t tables     sbtest tables                            (default 1)
@@ -31,7 +31,7 @@ cmd=${1:-}
 endpoint=127.0.0.1:27000
 name=
 a=127.0.0.1:27000
-b=127.0.0.1:4001
+b=127.0.0.1:27001
 threads="1 8 16"
 duration=30
 tables=1
