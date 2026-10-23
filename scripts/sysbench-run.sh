@@ -66,15 +66,21 @@ run_one() {
     local file=$outdir/$stamp-${label//[:\/]/_}-t$t.txt
     local lat=$file.lat
     rm -rf "$lat" && mkdir -p "$lat"
+    local rc=0
+    # The braces' 2>/dev/null swallows bash's "Segmentation fault" job message: sysbench 1.0.20
+    # crashes after a failed thread_init (e.g. the server rejects the prepared statements).
     # shellcheck disable=SC2086
-    sysbench "$script_dir/oltp_read_only_lat.lua" --lat_dir="$lat" \
+    { sysbench "$script_dir/oltp_read_only_lat.lua" --lat_dir="$lat" \
         --mysql-host="$host" --mysql-port="$port" --mysql-user="${MYSQL_USER:-root}" \
         --mysql-db="$db" --tables="$tables" --table-size="$size" \
         --skip_trx=on --db-ps-mode=auto --threads="$t" --time="$duration" \
-        --report-interval=10 $extra run >"$file" 2>&1 || true
+        --report-interval=10 $extra run >"$file" 2>&1; } 2>/dev/null || rc=$?
+    if [ "$rc" -ge 128 ]; then
+        echo "FATAL: sysbench killed by signal $((rc - 128))" >>"$file"
+    fi
     # p95 from our own histogram (see oltp_read_only_lat.lua): bucket b = up to exp((b+1)/50) us.
     local p95
-    p95=$(cat "$lat"/thread-*.txt 2>/dev/null | awk '
+    p95=$( (cat "$lat"/thread-*.txt 2>/dev/null || true) | awk '
         { n[$1] += $2; total += $2 }
         END {
             if (total == 0) { print "-"; exit }
@@ -116,8 +122,9 @@ case $cmd in
         echo
         echo "B/A QPS ratio:"
         awk 'NR > 1 { split($1, e, ":"); q[e[1], $2] = $3; ts[$2] = 1 }
-             END { for (t in ts) if (q["A", t] + 0 > 0)
-                       printf "  threads %4s: %.2f\n", t, q["B", t] / q["A", t] }' "$rows" | sort -k2 -n
+             END { for (t in ts)
+                       if (q["A", t] + 0 > 0 && q["B", t] + 0 > 0) printf "  threads %4s: %.2f\n", t, q["B", t] / q["A", t]
+                       else printf "  threads %4s: n/a\n", t }' "$rows" | sort -k2 -n
         ;;
     *) sed -n '2,25p' "$0" >&2; exit 2 ;;
 esac
