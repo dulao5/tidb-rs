@@ -3295,6 +3295,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-meta"
+version = "0.0.0"
+dependencies = [
+ "codec",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tidb-kv",
+ "tokio",
+]
+
+[[package]]
 name = "tidb-mysql-protocol"
 version = "0.0.0"
 dependencies = [

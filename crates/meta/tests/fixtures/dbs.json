@@ -1,0 +1,1 @@
+[{"id": 112, "db_name": {"O": "sbtest", "L": "sbtest"}, "charset": "utf8mb4", "collate": "utf8mb4_bin", "Deprecated": {}, "state": 5, "policy_ref_info": null}, {"id": 1, "db_name": {"O": "mysql", "L": "mysql"}, "charset": "utf8mb4", "collate": "utf8mb4_bin", "Deprecated": {}, "state": 5, "policy_ref_info": null}]
