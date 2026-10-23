@@ -1,5 +1,6 @@
-//! Restore-golden test: every SELECT case that falls fully inside the hand-ported subset must
-//! restore byte-identically to the `Restore()` text expected by TiDB's parser_test.go.
+//! Restore-golden test: every case of TiDB's parser_test.go that falls fully inside the
+//! hand-ported subset must restore byte-identically to the expected `Restore()` text, and (as in
+//! Go's `RunRestoreTest`) the restored text must parse again and restore to the same text.
 mod common;
 
 use tidb_parser::{ParseOptions, ast::Stmt, parse};
@@ -13,9 +14,9 @@ const ALLOWLIST: &[(&str, &str)] = &[(
      which we restore unchanged",
 )];
 
-/// Number of SELECT cases fully inside the ported subset at the time of the port; it may
-/// only grow as more actions are ported.
-const MIN_COVERED: usize = 750;
+/// Number of cases fully inside the ported subset at the time of the port; it may only grow as
+/// more actions are ported.
+const MIN_COVERED: usize = 753;
 
 fn restore_all(stmts: &[Stmt]) -> Result<String, String> {
     let mut out = String::new();
@@ -29,19 +30,14 @@ fn restore_all(stmts: &[Stmt]) -> Result<String, String> {
 }
 
 #[test]
-fn select_restore_matches_tidb() {
+fn restore_matches_tidb() {
     let cases: Vec<_> = common::default_mode()
         .into_iter()
         .filter(|c| c.ok && c.restore.is_some())
-        .filter(|c| {
-            c.src
-                .trim_start()
-                .to_ascii_lowercase()
-                .starts_with("select")
-        })
         .collect();
     let (mut covered, mut unported) = (0, 0);
     let mut mismatches = Vec::new();
+    let mut unstable = Vec::new();
     // First unported production hit by each uncovered case, to prioritise the porting work.
     let mut buckets: std::collections::BTreeMap<String, usize> = Default::default();
     for c in &cases {
@@ -62,10 +58,23 @@ fn select_restore_matches_tidb() {
         let want = c.restore.as_deref().unwrap();
         if got != want {
             mismatches.push((c.src.clone(), want.to_string(), got));
+            continue;
+        }
+        // Round trip: the restored text parses and restores to itself.
+        let again = parse(&got, &opts)
+            .map_err(|e| e.to_string())
+            .and_then(|o| restore_all(&o.stmts));
+        if again.as_deref() != Ok(got.as_str()) {
+            unstable.push(format!(
+                "src : {}
+restored: {got}
+again   : {again:?}",
+                c.src
+            ));
         }
     }
     eprintln!(
-        "SELECT cases with expected restore: {}, inside ported subset: {covered}, \
+        "cases with expected restore: {}, inside ported subset: {covered}, \
          touching unported productions: {unported}, mismatches: {}",
         cases.len(),
         mismatches.len()
@@ -84,6 +93,11 @@ fn select_restore_matches_tidb() {
         unexpected.is_empty(),
         "restore mismatches:\n{}",
         unexpected.join("\n\n")
+    );
+    assert!(
+        unstable.is_empty(),
+        "restored text does not round-trip:\n{}",
+        unstable.join("\n\n")
     );
     for (src, _) in ALLOWLIST {
         assert!(
