@@ -3285,6 +3285,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-distsql"
+version = "0.0.0"
+dependencies = [
+ "collections",
+ "protobuf",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tidb-kv",
+ "tidb-meta",
+ "tidb_query_datatype",
+ "tipb",
+ "tipb_helper",
+ "tokio",
+]
+
+[[package]]
 name = "tidb-kv"
 version = "0.0.0"
 dependencies = [

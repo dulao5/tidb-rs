@@ -1,0 +1,25 @@
+[package]
+name = "tidb-distsql"
+version = "0.0.0"
+description = "Record-key ranges, tipb DAG construction and SelectResponse decoding for TiKV coprocessor reads"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+collections = { workspace = true }
+protobuf = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tidb-kv = { workspace = true }
+tidb-meta = { workspace = true }
+tidb_query_datatype = { workspace = true }
+tipb = { workspace = true }
+tipb_helper = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

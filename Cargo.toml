@@ -7,6 +7,7 @@ members = [
   "crates/query-smoke",
   "crates/kv",
   "crates/meta",
+  "crates/distsql",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
   # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
   "third_party/tikv/codec",
@@ -62,6 +63,7 @@ tikv_alloc = { path = "third_party/tikv-shims/tikv_alloc" }
 tikv_util = { path = "third_party/tikv-shims/tikv_util" }
 tracker = { path = "third_party/tikv-shims/tracker" }
 # First-party crates.
+tidb-distsql = { path = "crates/distsql" }
 tidb-kv = { path = "crates/kv" }
 tidb-meta = { path = "crates/meta" }
 # TiKV Rust client: our fork with `Snapshot::coprocessor` (branch tidb-rs/coprocessor).
