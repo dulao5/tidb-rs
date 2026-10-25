@@ -229,3 +229,75 @@ fn literal_column(l: Literal) -> (ColumnDef, Value) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tidb_sql::Statement;
+
+    use super::*;
+
+    fn env() -> ConstEnv<'static> {
+        ConstEnv {
+            server_version: "8.0.11-TiDB-tidb-rs",
+            current_db: Some("sbtest"),
+            user: "root@127.0.0.1",
+            current_user: "root@%",
+            connection_id: 9,
+            have_ssl: "YES",
+            autocommit: true,
+            charset: "utf8mb4",
+            collation: "utf8mb4_general_ci",
+        }
+    }
+
+    fn run(sql: &str, params: &[Literal]) -> Result<ResultSet, SqlError> {
+        let l = tidb_sql::parse_and_lower(sql)?;
+        let Statement::Select(s) = l.stmt else {
+            panic!("{sql}")
+        };
+        env().select(&s, params)
+    }
+
+    #[test]
+    fn connect_time_queries() {
+        let r = run("select @@version_comment limit 1", &[]).unwrap();
+        assert_eq!(r.rows, vec![vec![Value::from(VERSION_COMMENT)]]);
+        assert_eq!(r.columns[0].name, "@@version_comment");
+        let r = run("SELECT DATABASE(), USER() LIMIT 1", &[]).unwrap();
+        assert_eq!(r.columns[1].name, "USER()");
+        assert_eq!(
+            r.rows[0],
+            vec![Value::from("sbtest"), Value::from("root@127.0.0.1")]
+        );
+        let r = run("SELECT @@max_allowed_packet, @@autocommit", &[]).unwrap();
+        assert_eq!(r.rows[0], vec![Value::UInt(64 << 20), Value::Int(1)]);
+        assert!(r.columns[0].is_unsigned());
+        let r = run("SELECT @@collation_connection", &[]).unwrap();
+        assert_eq!(r.rows[0][0], Value::from("utf8mb4_general_ci"));
+        assert_eq!(run("SELECT @@no_such_var", &[]).unwrap_err().code, 1193);
+    }
+
+    #[test]
+    fn literals_and_params() {
+        let r = run("SELECT 1, -2, 'abc' AS s, 1.5, NULL, ?", &[Literal::Int(7)]).unwrap();
+        assert_eq!(
+            r.rows[0],
+            vec![
+                Value::Int(1),
+                Value::Int(-2),
+                Value::from("abc"),
+                Value::Decimal("1.5".into()),
+                Value::Null,
+                Value::Int(7)
+            ]
+        );
+        assert_eq!(r.columns[2].name, "s");
+        assert_eq!(r.columns[3].column_length, 6);
+        let r = run("SELECT 'Hello'", &[]).unwrap();
+        assert_eq!(r.columns[0].name, "Hello");
+        assert!(run("SELECT 1 LIMIT 0", &[]).unwrap().rows.is_empty());
+        assert_eq!(run("SELECT c", &[]).unwrap_err().code, 1054);
+        assert_eq!(run("SELECT *", &[]).unwrap_err().code, 1096);
+        assert_eq!(run("SELECT 1 WHERE 1 = 1", &[]).unwrap_err().code, 1235);
+    }
+}
