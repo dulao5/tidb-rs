@@ -79,6 +79,17 @@ impl SessionFactory for Factory {
             .peer
             .rsplit_once(':')
             .map_or(info.peer.as_str(), |(h, _)| h);
+        // Go: the handshake collation sets character_set_client/connection/results and
+        // collation_connection; unknown ids fall back to the server default.
+        let (charset, collation) = match info.collation {
+            45 => ("utf8mb4", "utf8mb4_general_ci"),
+            224 => ("utf8mb4", "utf8mb4_unicode_ci"),
+            255 => ("utf8mb4", "utf8mb4_0900_ai_ci"),
+            33 => ("utf8", "utf8_general_ci"),
+            83 => ("utf8", "utf8_bin"),
+            63 => ("binary", "binary"),
+            _ => ("utf8mb4", "utf8mb4_bin"),
+        };
         Ok(Session {
             shared: self.shared.clone(),
             current_db: None,
@@ -89,9 +100,9 @@ impl SessionFactory for Factory {
             ),
             current_user: format!("{}@%", info.user),
             connection_id: info.connection_id,
-            charset: "utf8mb4".to_owned(),
-            collation: "utf8mb4_bin".to_owned(),
-            results_charset: Some("utf8mb4".to_owned()),
+            charset: charset.to_owned(),
+            collation: collation.to_owned(),
+            results_charset: Some(charset.to_owned()),
             stmts: HashMap::new(),
         })
     }
@@ -221,7 +232,11 @@ impl Session {
 
     async fn select(&self, sel: &Select, params: &[Literal]) -> Result<ResultSet, SqlError> {
         if sel.from.is_none() {
-            return self.const_env().select(sel, params);
+            let mut rs = self.const_env().select(sel, params)?;
+            for c in &mut rs.columns {
+                apply_result_charset(c, self.results_charset.as_deref());
+            }
+            return Ok(rs);
         }
         let (ts, is) = self.begin_read().await?;
         let plan = tidb_sql::plan_select(

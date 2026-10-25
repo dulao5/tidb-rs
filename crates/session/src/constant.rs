@@ -36,22 +36,38 @@ pub struct ConstEnv<'a> {
 }
 
 impl ConstEnv<'_> {
-    /// The few system variables clients read while connecting, with TiDB's defaults.
-    fn sysvar(&self, name: &str) -> Option<(ColumnType, Value)> {
-        let int = |v: i64| Some((ColumnType::LongLong, Value::Int(v)));
-        let string = |v: &str| Some((ColumnType::VarString, Value::from(v)));
+    /// The few system variables clients read while connecting, with TiDB's defaults and
+    /// result types (Go `SysVar.GetNativeValType`: unsigned and boolean variables are
+    /// LONGLONG, everything else a string in the connection charset).
+    fn sysvar(&self, name: &str) -> Option<(ColumnDef, Value)> {
+        let unsigned = |v: u64| {
+            let col = ColumnDef::new("", ColumnType::LongLong).with_flags(column_flag::UNSIGNED);
+            Some((col, Value::UInt(v)))
+        };
+        let boolean = |v: bool| {
+            Some((
+                ColumnDef::new("", ColumnType::LongLong),
+                Value::Int(i64::from(v)),
+            ))
+        };
+        let string = |v: &str| {
+            let col = ColumnDef::new("", ColumnType::VarString)
+                .with_length(5)
+                .with_decimals(31);
+            Some((col, Value::from(v)))
+        };
         match name {
             "version_comment" => string(VERSION_COMMENT),
             "version" => string(self.server_version),
-            "max_allowed_packet" => int(64 << 20),
-            "wait_timeout" | "interactive_timeout" => int(28800),
-            "net_write_timeout" => int(60),
-            "net_read_timeout" => int(30),
-            "autocommit" => int(i64::from(self.autocommit)),
-            "auto_increment_increment" | "auto_increment_offset" => int(1),
-            "lower_case_table_names" => int(2),
+            "max_allowed_packet" => unsigned(64 << 20),
+            "wait_timeout" | "interactive_timeout" => unsigned(28800),
+            "net_write_timeout" => unsigned(60),
+            "net_read_timeout" => unsigned(30),
+            "auto_increment_increment" | "auto_increment_offset" => unsigned(1),
+            "autocommit" => boolean(self.autocommit),
+            "transaction_read_only" | "tx_read_only" => boolean(false),
+            "lower_case_table_names" => string("2"),
             "transaction_isolation" | "tx_isolation" => string("REPEATABLE-READ"),
-            "transaction_read_only" | "tx_read_only" => int(0),
             "character_set_client" | "character_set_connection" | "character_set_results" => {
                 string(self.charset)
             }
@@ -69,7 +85,16 @@ impl ConstEnv<'_> {
     }
 
     fn func(&self, name: &str) -> Option<(ColumnDef, Value)> {
-        let string = |v: Value| Some((ColumnDef::new("", ColumnType::VarString), v));
+        // Go: VARCHAR(64) in utf8mb4 (length 256), decimals unspecified.
+        let string = |v: Value| {
+            let mut col = ColumnDef::new("", ColumnType::VarString)
+                .with_length(256)
+                .with_decimals(31);
+            if v != Value::Null {
+                col.flags |= column_flag::NOT_NULL;
+            }
+            Some((col, v))
+        };
         match name {
             "version" => string(self.server_version.into()),
             "database" | "schema" => string(self.current_db.map_or(Value::Null, Value::from)),
@@ -87,12 +112,9 @@ impl ConstEnv<'_> {
     fn item(&self, e: &Expr, params: &[Literal]) -> Result<(ColumnDef, Value), SqlError> {
         let unsupported = || SqlError::not_supported("this expression in a SELECT without FROM");
         match e {
-            Expr::SysVar { name, .. } => {
-                let (ty, v) = self.sysvar(name).ok_or_else(|| {
-                    SqlError::new(1193, format!("Unknown system variable '{name}'"))
-                })?;
-                Ok((ColumnDef::new("", ty), v))
-            }
+            Expr::SysVar { name, .. } => self
+                .sysvar(name)
+                .ok_or_else(|| SqlError::new(1193, format!("Unknown system variable '{name}'"))),
             Expr::Func { name } => self.func(name).ok_or_else(unsupported),
             Expr::Literal(_) | Expr::Param(_) | Expr::Neg(_) => {
                 Ok(literal_column(eval_const(e, params)?))
@@ -180,10 +202,13 @@ fn literal_column(l: Literal) -> (ColumnDef, Value) {
         ),
         Literal::Decimal(s) => {
             let frac = s.split_once('.').map_or(0, |(_, f)| f.len());
+            // Go `DefaultTypeForValue`: flen = len + 1 (the point); the column length adds
+            // the sign and, with a fraction, the point again.
+            let len = s.len() + 2 + usize::from(frac > 0);
             (
                 ColumnDef::new("", ColumnType::NewDecimal)
                     .with_flags(not_null)
-                    .with_length(s.len() as u32)
+                    .with_length(len as u32)
                     .with_decimals(frac as u8),
                 Value::Decimal(s),
             )
@@ -197,7 +222,8 @@ fn literal_column(l: Literal) -> (ColumnDef, Value) {
         Literal::Str(s) => {
             let mut col = ColumnDef::new("", ColumnType::VarString)
                 .with_flags(not_null)
-                .with_length(s.chars().count() as u32 * 4);
+                .with_length(s.chars().count() as u32 * 4)
+                .with_decimals(31);
             col.charset = collation::UTF8MB4_BIN;
             (col, Value::from(s))
         }
