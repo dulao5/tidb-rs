@@ -431,12 +431,15 @@ fn names_aliases_and_wildcards() {
     // Normal path: table name as stored.
     let p = plan("SELECT c FROM SBTEST1 WHERE id BETWEEN 1 AND 2");
     assert_eq!(p.columns[0].table, "sbtest1");
-    // Go's PointGet fast path: table name as written, wildcard columns without org_name.
+    // Go's PointGet fast path: table name as written (checked against v8.5.8 with tools/ab).
     let p = plan("SELECT c, sbtest1.* FROM SBTEST1 WHERE id = 1");
     assert_eq!(p.columns[0].table, "SBTEST1");
     assert_eq!(p.columns[0].org_name, "c");
-    assert_eq!(p.columns[1].org_name, "");
+    assert_eq!(p.columns[1].org_name, "id");
     assert_eq!(p.columns[1].name, "id");
+    // ... but not at prepare time, which uses the normal planner.
+    let p = plan_with("SELECT c FROM SBTEST1 WHERE id = 1", &[], true).unwrap();
+    assert_eq!(p.columns[0].table, "sbtest1");
     // Qualified table name.
     let p = plan("SELECT sbtest.sbtest1.c FROM sbtest.sbtest1 WHERE id = 1");
     assert_eq!(p.columns[0].schema, "sbtest");

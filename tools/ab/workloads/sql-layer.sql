@@ -1,0 +1,70 @@
+-- The read-only node's supported subset beyond the five sysbench statements, against
+-- sbtest.sbtest1 as loaded by scripts/sysbench-prepare.sh. Unsupported forms at the end must
+-- fail on B with 1235 (or the same error as A).
+SELECT * FROM sbtest1 WHERE id = 7;
+SELECT id, k, c, pad FROM sbtest1 WHERE id BETWEEN 10 AND 20;
+SELECT sbtest1.c, t.k FROM sbtest1 t WHERE t.id = 3;
+SELECT t.* FROM sbtest1 AS t WHERE id = 3;
+SELECT sbtest.sbtest1.id FROM sbtest.sbtest1 WHERE sbtest.sbtest1.id = 42;
+SELECT c AS cc, k kk FROM sbtest1 WHERE id = 9;
+SELECT ID, K FROM SBTEST1 WHERE ID = 11;
+SELECT c FROM sbtest1 WHERE id = '12';
+SELECT c FROM sbtest1 WHERE id = 12.0;
+SELECT c FROM sbtest1 WHERE id = 12.5;
+SELECT c FROM sbtest1 WHERE id = -1;
+SELECT c FROM sbtest1 WHERE id = 99999999999999999999;
+SELECT c FROM sbtest1 WHERE id = NULL;
+SELECT c FROM sbtest1 WHERE 5 = id;
+SELECT c FROM sbtest1 WHERE id = 5 AND id = 6;
+SELECT c FROM sbtest1 WHERE id = 5 LIMIT 1;
+SELECT c FROM sbtest1 WHERE id = 5 LIMIT 0;
+SELECT id FROM sbtest1 WHERE id > 99990;
+SELECT id FROM sbtest1 WHERE id >= 99990 AND id < 99995;
+SELECT id FROM sbtest1 WHERE id <= 5;
+SELECT id FROM sbtest1 WHERE id < 5.5 AND id > 1.5;
+SELECT id FROM sbtest1 WHERE id BETWEEN 30 AND 20;
+SELECT id FROM sbtest1 WHERE id BETWEEN -5 AND 3;
+SELECT id FROM sbtest1 WHERE id BETWEEN 12490 AND 12510;
+SELECT id, k FROM sbtest1 WHERE id BETWEEN 1 AND 100 LIMIT 5;
+SELECT id, k FROM sbtest1 WHERE id BETWEEN 1 AND 100 LIMIT 5, 3;
+SELECT id FROM sbtest1 WHERE id BETWEEN 1 AND 100 ORDER BY id DESC;
+SELECT id FROM sbtest1 WHERE id BETWEEN 1 AND 100 ORDER BY id DESC LIMIT 3;
+SELECT id FROM sbtest1 WHERE id BETWEEN 1 AND 100 ORDER BY id LIMIT 2 OFFSET 4;
+SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 50 ORDER BY c DESC;
+SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 50 ORDER BY c LIMIT 7;
+SELECT id, c FROM sbtest1 WHERE id BETWEEN 1 AND 50 ORDER BY 2;
+SELECT id, c AS x FROM sbtest1 WHERE id BETWEEN 1 AND 50 ORDER BY x DESC;
+SELECT id FROM sbtest1 WHERE id BETWEEN 1 AND 50 ORDER BY k, id;
+SELECT COUNT(*) FROM sbtest1;
+SELECT COUNT(*) FROM sbtest1 WHERE id BETWEEN 100 AND 50;
+SELECT COUNT(1), COUNT(k), SUM(k), MIN(k), MAX(k), MIN(c), MAX(pad) FROM sbtest1 WHERE id BETWEEN 1 AND 30000;
+SELECT SUM(k) FROM sbtest1 WHERE id = 5;
+SELECT SUM(k) AS s, COUNT(*) AS n FROM sbtest1 WHERE id = 1000000;
+SELECT MAX(id), MIN(id) FROM sbtest1;
+SELECT SUM(id) FROM sbtest1;
+SELECT k, COUNT(*) FROM sbtest1 WHERE id BETWEEN 1 AND 2000 GROUP BY k ORDER BY k;
+SELECT k, SUM(id) FROM sbtest1 WHERE id BETWEEN 1 AND 2000 GROUP BY k ORDER BY 2 DESC, k LIMIT 10;
+SELECT DISTINCT k FROM sbtest1 WHERE id BETWEEN 1 AND 500 ORDER BY k DESC;
+SELECT DISTINCT k, c FROM sbtest1 WHERE id BETWEEN 1 AND 20 ORDER BY k, c;
+--sorted_result
+SELECT DISTINCT k FROM sbtest1 WHERE id BETWEEN 1 AND 500;
+SELECT DISTINCT c FROM sbtest1 WHERE id = 77 ORDER BY c;
+SELECT DISTINCT COUNT(*) FROM sbtest1 WHERE id BETWEEN 1 AND 10;
+-- errors that must match
+SELECT c FROM nosuch WHERE id = 1;
+SELECT nosuch FROM sbtest1 WHERE id = 1;
+SELECT c FROM sbtest1 WHERE nosuch = 1;
+SELECT x.c FROM sbtest1 WHERE id = 1;
+SELECT c FROM sbtest1 WHERE id = 1 ORDER BY nosuch;
+SELECT c FROM nodb.sbtest1 WHERE id = 1;
+-- unsupported (1235 on B)
+SELECT c FROM sbtest1 WHERE k = 5;
+SELECT c FROM sbtest1 WHERE id = 1 OR id = 2;
+SELECT c FROM sbtest1 WHERE id IN (1, 2);
+SELECT CONCAT(c, 'x') FROM sbtest1 WHERE id = 1;
+SELECT id + 1 FROM sbtest1 WHERE id = 1;
+SELECT AVG(k) FROM sbtest1 WHERE id BETWEEN 1 AND 10;
+SELECT c FROM sbtest1 a JOIN sbtest1 b ON a.id = b.id WHERE a.id = 1;
+SELECT c FROM sbtest1 WHERE id = (SELECT 1);
+SELECT c FROM sbtest1 WHERE id = 1 FOR UPDATE;
+SELECT k FROM sbtest1 GROUP BY k HAVING COUNT(*) > 1;

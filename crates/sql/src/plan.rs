@@ -303,7 +303,10 @@ impl Resolved<'_> {
                         };
                         return Err(SqlError::new(1051, format!("Unknown table '{name}'")));
                     }
-                    for (idx, col) in self.table.columns.iter().enumerate() {
+                    let mut cols: Vec<(usize, &ColumnInfo)> =
+                        self.table.columns.iter().enumerate().collect();
+                    cols.sort_by_key(|(_, c)| c.offset);
+                    for (idx, col) in cols {
                         if col.is_public() && !col.hidden {
                             items.push(Item {
                                 kind: ItemKind::Col(idx),
@@ -650,7 +653,13 @@ impl Resolved<'_> {
 
         let range = self.handle_range()?;
         let limit = self.limit()?;
-        let fast = self.fast_point_get();
+        // Go's prepare describes the statement through the normal planner; the fast path only
+        // applies to executions.
+        let fast = if self.cx.describe_only {
+            None
+        } else {
+            self.fast_point_get()
+        };
 
         // Columns read from storage, in order of first use.
         let mut scan_columns: Vec<usize> = Vec::new();
@@ -855,24 +864,9 @@ impl Resolved<'_> {
 
         // --- Result metadata ---
         if let Some(is_dual) = fast {
-            // Go's fast path: table name as written; wildcard columns have no org_name.
-            let mut field_idx = 0;
-            let mut wild_items = Vec::new();
-            for f in &sel.fields {
-                match f {
-                    Field::Wildcard { .. } => {
-                        let n = self.table.columns.len();
-                        wild_items.extend(field_idx..field_idx + n);
-                        field_idx += n;
-                    }
-                    Field::Expr { .. } => field_idx += 1,
-                }
-            }
-            for (i, it) in items.iter_mut().enumerate() {
+            // Go's fast path names the table as written (not the stored name).
+            for it in &mut items {
                 it.names.table = self.fast_tbl_name.clone();
-                if wild_items.contains(&i) {
-                    it.names.org_name.clear();
-                }
             }
             if is_dual {
                 source = Source::Dual;
