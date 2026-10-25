@@ -123,6 +123,11 @@ ROLLBACK, `SET autocommit=0`, user variables, SET GLOBAL, any other SET; all oth
   use tikv-client's resolver with TiDB-like budgets, not client-go's exact behaviour.
 - Constant SELECT metadata is matched for the forms the CLI and connectors send (and
   `workloads/constants.sql`), not for arbitrary expressions (which are rejected anyway).
+  Known difference: a statement such as `SELECT DATABASE()` prepared while no database was
+  selected and executed after `USE` returns no NOT_NULL flag on Go (likely flags fixed at
+  prepare time; not confirmed in the Go source), while tidb-rs computes them at execute time
+  (NOT_NULL). Seen with `ab file constants.sql` without
+  `-D`; with `-D sbtest` there is no mismatch.
 - Time zone: DAG requests use UTC; correct for the supported types (TIMESTAMP is rejected).
 
 ## Performance notes
