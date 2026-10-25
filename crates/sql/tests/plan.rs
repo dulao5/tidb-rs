@@ -104,7 +104,8 @@ fn schema() -> InfoSchema {
     let mut ts = sbtest1.clone();
     ts.id = 117;
     ts.name = name("withts");
-    ts.columns.push(col(5, "ts", 4, int_ft(tp::TIMESTAMP, 19, 0)));
+    ts.columns
+        .push(col(5, "ts", 4, int_ft(tp::TIMESTAMP, 19, 0)));
     InfoSchema::new(
         1,
         vec![(
@@ -268,31 +269,60 @@ fn ranges_and_edge_cases() {
         limit: None,
         agg: None,
     };
-    assert_eq!(src("SELECT c FROM sbtest1 WHERE id BETWEEN 10 AND 5"), Source::Dual);
+    assert_eq!(
+        src("SELECT c FROM sbtest1 WHERE id BETWEEN 10 AND 5"),
+        Source::Dual
+    );
     assert_eq!(
         src("SELECT c FROM sbtest1 WHERE id BETWEEN 5 AND 5"),
         Source::PointGet { handle: 5 }
     );
-    assert_eq!(src("SELECT c FROM sbtest1 WHERE id > 3 AND id <= 9"), reader(4, 9));
-    assert_eq!(src("SELECT c FROM sbtest1 WHERE 3 < id AND 9 >= id"), reader(4, 9));
-    assert_eq!(src("SELECT c FROM sbtest1 WHERE id < 5.5 AND id >= -2.5"), reader(-2, 5));
+    assert_eq!(
+        src("SELECT c FROM sbtest1 WHERE id > 3 AND id <= 9"),
+        reader(4, 9)
+    );
+    assert_eq!(
+        src("SELECT c FROM sbtest1 WHERE 3 < id AND 9 >= id"),
+        reader(4, 9)
+    );
+    assert_eq!(
+        src("SELECT c FROM sbtest1 WHERE id < 5.5 AND id >= -2.5"),
+        reader(-2, 5)
+    );
     assert_eq!(src("SELECT c FROM sbtest1 WHERE id = 5.5"), Source::Dual);
-    assert_eq!(src("SELECT c FROM sbtest1 WHERE id = '6'"), Source::PointGet { handle: 6 });
+    assert_eq!(
+        src("SELECT c FROM sbtest1 WHERE id = '6'"),
+        Source::PointGet { handle: 6 }
+    );
     assert_eq!(src("SELECT c FROM sbtest1 WHERE id = NULL"), Source::Dual);
-    assert_eq!(src("SELECT c FROM sbtest1 WHERE id BETWEEN NULL AND 5"), Source::Dual);
-    assert_eq!(src("SELECT c FROM sbtest1 WHERE id = 1 AND id = 2"), Source::Dual);
+    assert_eq!(
+        src("SELECT c FROM sbtest1 WHERE id BETWEEN NULL AND 5"),
+        Source::Dual
+    );
+    assert_eq!(
+        src("SELECT c FROM sbtest1 WHERE id = 1 AND id = 2"),
+        Source::Dual
+    );
     assert_eq!(
         src("SELECT c FROM sbtest1 WHERE id = -9223372036854775808"),
         Source::PointGet { handle: i64::MIN }
     );
-    assert_eq!(src("SELECT c FROM sbtest1 WHERE id = 9223372036854775808"), Source::Dual);
     assert_eq!(
-        src("SELECT c FROM sbtest1 WHERE id BETWEEN -99999999999999999999 AND 99999999999999999999"),
+        src("SELECT c FROM sbtest1 WHERE id = 9223372036854775808"),
+        Source::Dual
+    );
+    assert_eq!(
+        src(
+            "SELECT c FROM sbtest1 WHERE id BETWEEN -99999999999999999999 AND 99999999999999999999"
+        ),
         reader(i64::MIN, i64::MAX)
     );
     assert_eq!(src("SELECT c FROM sbtest1"), reader(i64::MIN, i64::MAX));
     // Beyond INT's range: no row can match, Go's fast path makes it a TableDual.
-    assert_eq!(src("SELECT c FROM sbtest1 WHERE id = 3000000000"), Source::Dual);
+    assert_eq!(
+        src("SELECT c FROM sbtest1 WHERE id = 3000000000"),
+        Source::Dual
+    );
     // Prepared parameters, including numeric strings.
     let p = plan_with(
         "SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?",
@@ -328,12 +358,7 @@ fn limit_and_handle_order() {
          \x20   └─TableReader keep_order:true\n\
          \x20     └─TableRangeScan sbtest1 range:[-9223372036854775808,9223372036854775807] columns:[c, k]\n"
     );
-    let p = plan_with(
-        "SELECT c FROM sbtest1 LIMIT ?",
-        &[Literal::Int(4)],
-        false,
-    )
-    .unwrap();
+    let p = plan_with("SELECT c FROM sbtest1 LIMIT ?", &[Literal::Int(4)], false).unwrap();
     assert_eq!(p.limit.unwrap().count, 4);
     assert_eq!(
         plan_with("SELECT c FROM sbtest1 LIMIT ?", &[Literal::Int(-1)], false)
@@ -346,14 +371,19 @@ fn limit_and_handle_order() {
 #[test]
 fn aggregates_and_group_by() {
     assert_eq!(
-        explain("SELECT k, COUNT(*), MAX(c) FROM sbtest1 WHERE id < 100 GROUP BY k ORDER BY 2 DESC"),
+        explain(
+            "SELECT k, COUNT(*), MAX(c) FROM sbtest1 WHERE id < 100 GROUP BY k ORDER BY 2 DESC"
+        ),
         "Projection [firstrow(#2), count(#0), max(#1)]\n\
          └─Sort [count(#0):desc]\n\
          \x20 └─HashAgg(final) funcs:[firstrow(#0), count(#1), max(#2)] group_by:[#3]\n\
          \x20   └─TableReader keep_order:false\n\
          \x20     └─HashAgg(cop partial) funcs:[firstrow(k), count(id), max(c)] group_by:[k]\n\
          \x20       └─TableRangeScan sbtest1 range:[-9223372036854775808,99] columns:[k, id, c]\n"
-            .replace("firstrow(#2), count(#0), max(#1)", "firstrow(#0), count(#1), max(#2)")
+            .replace(
+                "firstrow(#2), count(#0), max(#1)",
+                "firstrow(#0), count(#1), max(#2)"
+            )
             .replace("Sort [count(#0):desc]", "Sort [count(#1):desc]")
     );
     // Aggregation over a point get runs completely at the root.
@@ -380,7 +410,12 @@ fn names_aliases_and_wildcards() {
     let names: Vec<_> = p
         .columns
         .iter()
-        .map(|c| format!("{}/{}/{}/{}/{}", c.schema, c.table, c.org_table, c.name, c.org_name))
+        .map(|c| {
+            format!(
+                "{}/{}/{}/{}/{}",
+                c.schema, c.table, c.org_table, c.name, c.org_name
+            )
+        })
         .collect();
     assert_eq!(
         names,
@@ -410,9 +445,15 @@ fn names_aliases_and_wildcards() {
 #[test]
 fn resolution_errors() {
     let e = err("SELECT c FROM nope WHERE id = 1");
-    assert_eq!((e.code, e.message.as_str()), (1146, "Table 'sbtest.nope' doesn't exist"));
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (1146, "Table 'sbtest.nope' doesn't exist")
+    );
     let e = err("SELECT c FROM nodb.sbtest1");
-    assert_eq!((e.code, e.message.as_str()), (1146, "Table 'nodb.sbtest1' doesn't exist"));
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (1146, "Table 'nodb.sbtest1' doesn't exist")
+    );
     let e = err("SELECT x FROM sbtest1");
     assert_eq!(
         (e.code, e.message.as_str()),

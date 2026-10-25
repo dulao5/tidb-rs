@@ -1,0 +1,19 @@
+[package]
+name = "tidb-executor"
+version = "0.0.0"
+description = "Root executors of the read-only node: point get / table reader sources, final and complete hash aggregation, sort, limit and result conversion"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tidb-distsql = { workspace = true }
+tidb-kv = { workspace = true }
+tidb-meta = { workspace = true }
+tidb-mysql-protocol = { workspace = true }
+tidb-sql = { workspace = true }
+tidb_query_datatype = { workspace = true }
+
+[lints]
+workspace = true

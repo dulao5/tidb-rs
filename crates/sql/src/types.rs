@@ -191,10 +191,7 @@ mod tests {
             org_name: "c".into(),
         };
         // c CHAR(120) NOT NULL, utf8mb4: length 480, STRING, collation 46.
-        let c = column_def(
-            &ft(tp::STRING, flag::NOT_NULL, 120, 0, "utf8mb4"),
-            &names,
-        );
+        let c = column_def(&ft(tp::STRING, flag::NOT_NULL, 120, 0, "utf8mb4"), &names);
         assert_eq!(c.column_type, ColumnType::String);
         assert_eq!(c.column_length, 480);
         assert_eq!(c.charset, 46);
@@ -235,10 +232,7 @@ mod tests {
 
     #[test]
     fn varchar_unspecified_and_wrapping() {
-        let v = column_def(
-            &ft(tp::VARCHAR, 0, 10, 0, "utf8"),
-            &FieldNames::default(),
-        );
+        let v = column_def(&ft(tp::VARCHAR, 0, 10, 0, "utf8"), &FieldNames::default());
         assert_eq!(v.column_type, ColumnType::VarString);
         assert_eq!(v.column_length, 30);
         let dbl = column_def(
@@ -263,10 +257,7 @@ mod tests {
 
     #[test]
     fn result_charset_override() {
-        let mut c = column_def(
-            &ft(tp::STRING, 0, 10, 0, "utf8mb4"),
-            &FieldNames::default(),
-        );
+        let mut c = column_def(&ft(tp::STRING, 0, 10, 0, "utf8mb4"), &FieldNames::default());
         apply_result_charset(&mut c, Some("utf8"));
         assert_eq!(c.charset, 83);
         let mut n = column_def(&ft(tp::LONG, 0, 11, 0, "binary"), &FieldNames::default());

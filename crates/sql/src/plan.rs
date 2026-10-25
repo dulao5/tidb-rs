@@ -224,9 +224,9 @@ pub fn plan_select(sel: &Select, is: &InfoSchema, cx: PlanContext<'_>) -> Result
             .ok_or_else(|| SqlError::new(1046, "No database selected"))?
             .to_owned()
     };
-    let table = is.table_by_name(&db, &from.name).ok_or_else(|| {
-        SqlError::new(1146, format!("Table '{db}.{}' doesn't exist", from.name))
-    })?;
+    let table = is
+        .table_by_name(&db, &from.name)
+        .ok_or_else(|| SqlError::new(1146, format!("Table '{db}.{}' doesn't exist", from.name)))?;
     table
         .check_int_handle_readable()
         .map_err(|e| unsupported(e.to_string()))?;
@@ -293,8 +293,8 @@ impl Resolved<'_> {
             match f {
                 Field::Wildcard { schema, table } => {
                     let schema_ok = schema.is_empty() || schema.eq_ignore_ascii_case(&self.db);
-                    let table_ok = table.is_empty()
-                        || table.to_lowercase() == self.tbl_as_name.to_lowercase();
+                    let table_ok =
+                        table.is_empty() || table.to_lowercase() == self.tbl_as_name.to_lowercase();
                     if !schema_ok || !table_ok {
                         let name = if schema.is_empty() {
                             table.clone()
@@ -629,9 +629,9 @@ impl Resolved<'_> {
                     let by_alias = c.table.is_empty() && c.schema.is_empty();
                     let item = by_alias
                         .then(|| {
-                            items
-                                .iter()
-                                .position(|i| !i.alias.is_empty() && i.alias.to_lowercase() == lower)
+                            items.iter().position(|i| {
+                                !i.alias.is_empty() && i.alias.to_lowercase() == lower
+                            })
                         })
                         .flatten();
                     match item {
@@ -639,7 +639,11 @@ impl Resolved<'_> {
                         None => Target::Column(self.resolve_column(c, "order clause")?),
                     }
                 }
-                _ => return Err(unsupported("ORDER BY items other than columns or positions")),
+                _ => {
+                    return Err(unsupported(
+                        "ORDER BY items other than columns or positions",
+                    ));
+                }
             };
             order_targets.push((target, *desc));
         }
@@ -693,9 +697,7 @@ impl Resolved<'_> {
                 let fi = match target {
                     Target::Item(i) => func_of_item[*i],
                     Target::Column(col) => {
-                        if let Some(i) = items
-                            .iter()
-                            .position(|it| it.kind == ItemKind::Col(*col))
+                        if let Some(i) = items.iter().position(|it| it.kind == ItemKind::Col(*col))
                         {
                             func_of_item[i]
                         } else if group_cols.contains(col) {
@@ -744,7 +746,10 @@ impl Resolved<'_> {
                     keep_order: false,
                     limit: None,
                     agg: Some(PushedAgg {
-                        funcs: root_funcs.iter().map(|f| to_pushed(f.kind, f.arg)).collect(),
+                        funcs: root_funcs
+                            .iter()
+                            .map(|f| to_pushed(f.kind, f.arg))
+                            .collect(),
                         group_by: group_scan.clone(),
                     }),
                 },

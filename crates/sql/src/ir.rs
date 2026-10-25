@@ -162,11 +162,19 @@ pub enum Expr {
     },
     And(Box<Expr>, Box<Expr>),
     /// An aggregate; `COUNT(*)` has the argument `Literal(Int(1))`, as in TiDB's AST.
-    Agg { name: AggName, arg: Box<Expr> },
+    Agg {
+        name: AggName,
+        arg: Box<Expr>,
+    },
     /// `@@[scope.]name`.
-    SysVar { name: String, global: bool },
+    SysVar {
+        name: String,
+        global: bool,
+    },
     /// A function call without arguments (`DATABASE()`, `USER()`, ...); name lower-cased.
-    Func { name: String },
+    Func {
+        name: String,
+    },
     /// `ORDER BY 1` / `GROUP BY 1`.
     Position(i64),
 }
@@ -292,7 +300,11 @@ pub fn lower_statement(stmt: &ast::Stmt, sql: &str) -> Result<Lowered, SqlError>
                     errors: s.tp == ast::ShowStmtType::Errors,
                 }
             }
-            _ => return Err(unsupported("SHOW statements other than SHOW WARNINGS/ERRORS")),
+            _ => {
+                return Err(unsupported(
+                    "SHOW statements other than SHOW WARNINGS/ERRORS",
+                ));
+            }
         },
         ast::Stmt::SetOpr(_) => return Err(unsupported("UNION/EXCEPT/INTERSECT")),
         ast::Stmt::Unported(n) => {
@@ -337,9 +349,10 @@ impl Lowerer<'_> {
         if !s.window_specs.is_empty() {
             return Err(unsupported("WINDOW"));
         }
-        if s.lock_info.as_ref().is_some_and(|l| {
-            l.unported.is_some() || l.lock_type != ast::SelectLockType::None
-        }) {
+        if s.lock_info
+            .as_ref()
+            .is_some_and(|l| l.unported.is_some() || l.lock_type != ast::SelectLockType::None)
+        {
             return Err(unsupported("locking reads (FOR UPDATE/SHARE)"));
         }
         if s.select_into_opt.is_some() {
@@ -503,10 +516,7 @@ impl Lowerer<'_> {
                     }
                     ast::Op::LogicOr => return Err(unsupported("OR")),
                     other => {
-                        return Err(unsupported(format!(
-                            "operator {}",
-                            other.literal().0
-                        )));
+                        return Err(unsupported(format!("operator {}", other.literal().0)));
                     }
                 };
                 Expr::Cmp(op, Box::new(self.expr(&b.l)?), Box::new(self.expr(&b.r)?))
@@ -811,7 +821,9 @@ mod tests {
 
     #[test]
     fn distinct_order_limit() {
-        let s = select("SELECT DISTINCT c FROM sbtest1 WHERE id BETWEEN 1 AND 5 ORDER BY c DESC LIMIT 2, 3");
+        let s = select(
+            "SELECT DISTINCT c FROM sbtest1 WHERE id BETWEEN 1 AND 5 ORDER BY c DESC LIMIT 2, 3",
+        );
         assert!(s.distinct);
         assert!(s.order_by[0].desc);
         let l = s.limit.unwrap();

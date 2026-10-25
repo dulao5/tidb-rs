@@ -116,9 +116,10 @@ pub fn param_literal(v: &Value) -> Result<Literal, SqlError> {
         Value::Float(f) => Literal::Float(f64::from(*f)),
         Value::Double(d) => Literal::Float(*d),
         Value::Decimal(s) => Literal::Decimal(s.clone()),
-        Value::Bytes(b) => Literal::Str(String::from_utf8(b.clone()).map_err(|_| {
-            SqlError::not_supported("non-UTF-8 string parameters")
-        })?),
+        Value::Bytes(b) => Literal::Str(
+            String::from_utf8(b.clone())
+                .map_err(|_| SqlError::not_supported("non-UTF-8 string parameters"))?,
+        ),
         Value::DateTime(_) | Value::Time(_) => {
             return Err(SqlError::not_supported("date/time parameters"));
         }
@@ -228,7 +229,7 @@ impl Interval {
     pub fn to_i64(self) -> Option<(i64, i64)> {
         let lo = self.lo.max(i128::from(i64::MIN));
         let hi = self.hi.min(i128::from(i64::MAX));
-        (lo <= hi).then(|| (lo as i64, hi as i64))
+        (lo <= hi).then_some((lo as i64, hi as i64))
     }
 }
 
@@ -307,7 +308,10 @@ mod tests {
         assert_eq!(r(CmpOp::Lt, "-5.5"), Some((i64::MIN, -6)));
         // Beyond i64.
         assert_eq!(r(CmpOp::Eq, "9223372036854775808"), None);
-        assert_eq!(r(CmpOp::Le, "9223372036854775808"), Some((i64::MIN, i64::MAX)));
+        assert_eq!(
+            r(CmpOp::Le, "9223372036854775808"),
+            Some((i64::MIN, i64::MAX))
+        );
         assert_eq!(r(CmpOp::Gt, "9223372036854775807"), None);
         assert_eq!(r(CmpOp::Lt, "-9223372036854775808"), None);
         assert_eq!(
@@ -347,7 +351,10 @@ mod tests {
             literal_num(&Literal::Str("42".into())).unwrap(),
             Some(Num::int(42))
         );
-        assert_eq!(literal_num(&Literal::Str("x".into())).unwrap_err().code, 1235);
+        assert_eq!(
+            literal_num(&Literal::Str("x".into())).unwrap_err().code,
+            1235
+        );
         assert_eq!(literal_num(&Literal::Null).unwrap(), None);
         assert_eq!(
             param_literal(&Value::Bytes(b"17".to_vec())).unwrap(),
