@@ -95,6 +95,10 @@ pub fn sql_state(code: u16) -> &'static str {
         code::ER_BAD_DB => "42000",
         code::ER_NET_PACKET_TOO_LARGE => "08S01",
         code::ER_NOT_SUPPORTED_YET => "42000",
+        // ER_PARSE_ERROR, ER_BAD_FIELD_ERROR, ER_BAD_TABLE_ERROR, ER_NO_SUCH_TABLE.
+        1064 => "42000",
+        1054 => "42S22",
+        1051 | 1146 => "42S02",
         code::ER_NOT_SUPPORTED_AUTH_MODE => "08004",
         _ => "HY000",
     }

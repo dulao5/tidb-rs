@@ -3382,10 +3382,26 @@ name = "tidb-server"
 version = "0.0.0"
 dependencies = [
  "clap 4.6.7",
+ "tidb-distsql",
+ "tidb-kv",
+ "tidb-meta",
  "tidb-mysql-protocol",
+ "tidb-session",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tidb-session"
+version = "0.0.0"
+dependencies = [
+ "tidb-distsql",
+ "tidb-executor",
+ "tidb-kv",
+ "tidb-meta",
+ "tidb-mysql-protocol",
+ "tidb-sql",
 ]
 
 [[package]]

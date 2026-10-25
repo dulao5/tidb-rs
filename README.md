@@ -4,8 +4,8 @@ Experimental Rust implementation of the TiDB SQL layer, starting as a read-only 
 alongside Go TiDB in the same cluster. See `docs/adr/0001-scope-and-baseline.md`.
 
 ```
-crates/server       tidb-server binary: MySQL protocol on 127.0.0.1:4001, wired to a stub
-                    session handler until the SQL layer lands (`tidb-server --help`)
+crates/server       tidb-server binary: MySQL protocol on 127.0.0.1:4001 over the SQL sessions
+                    of crates/session, reading the cluster behind `--pd` (`tidb-server --help`)
 crates/mysql-protocol  MySQL wire-protocol server layer (see crates/mysql-protocol/README.md)
 crates/parser       SQL parser ported from TiDB's parser.y (see crates/parser/README.md)
 crates/query-smoke  smoke tests for the vendored TiKV query crates
@@ -15,6 +15,12 @@ crates/meta         TiDB schema meta (DBInfo/TableInfo JSON) read at a snapshot;
                     the per-statement schema cache (docs/adr/0003-schema-loading.md)
 crates/distsql      record key ranges, tipb DAG building (scan/partial agg/limit), response and
                     row decoding; cluster tests vs Go TiDB (TIDB_RS_PD, TIDB_RS_TIDB_PORT)
+crates/sql          statement IR, name resolution, handle ranges, physical plans and result
+                    column metadata (docs/adr/0004-prototype-sql-layer.md)
+crates/executor     root executors: point get / table reader sources, final and complete hash
+                    aggregation, collation-aware sort, limit, datum -> protocol value conversion
+crates/session      SessionFactory/SessionHandler: autocommit reads at a fresh TSO, prepared
+                    statements, SET/USE/constant SELECTs
 third_party/tikv    TiKV's tidb_query_* crates, vendored unmodified (see PROVENANCE.md)
 third_party/tikv-shims  stand-ins for the TiKV-internal crates they depend on
 tools/parser-port   converters that regenerate the parser's grammar/keyword/test inputs from a

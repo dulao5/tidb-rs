@@ -1,0 +1,19 @@
+[package]
+name = "tidb-session"
+version = "0.0.0"
+description = "SQL sessions of the read-only node: SessionFactory/SessionHandler over the planner and executors"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tidb-distsql = { workspace = true }
+tidb-executor = { workspace = true }
+tidb-kv = { workspace = true }
+tidb-meta = { workspace = true }
+tidb-mysql-protocol = { workspace = true }
+tidb-sql = { workspace = true }
+
+[lints]
+workspace = true

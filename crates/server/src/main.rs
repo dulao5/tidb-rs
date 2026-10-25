@@ -1,19 +1,22 @@
 //! Read-only TiDB-compatible SQL node (prototype). See docs/adr/0001.
 //!
-//! For now the MySQL protocol layer is wired to a stub session handler (`stub.rs`) that only
-//! answers a few constant statements; the SQL layer replaces it in later tasks.
+//! The MySQL protocol layer is wired to the SQL sessions of `tidb-session`, which read from the
+//! TiKV cluster behind `--pd` (see docs/adr/0004-prototype-sql-layer.md).
 
 #![forbid(unsafe_code)]
-
-mod stub;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
+use tidb_distsql::DagContext;
+use tidb_kv::KvClient;
+use tidb_meta::SchemaCache;
 use tidb_mysql_protocol::constants::auth_plugin;
 use tidb_mysql_protocol::tls::{self, TlsConfig};
 use tidb_mysql_protocol::{Credential, Server, ServerConfig};
+use tidb_session::Factory;
+use tidb_session::Shared;
 use tracing::{error, info};
 
 #[derive(Debug, Parser)]
@@ -49,6 +52,9 @@ struct Args {
     /// PEM CA bundle; client certificates are verified when presented (TiDB security.ssl-ca).
     #[arg(long)]
     ssl_ca: Option<PathBuf>,
+    /// PD endpoints of the cluster (`host:port`, comma-separated or repeated).
+    #[arg(long, required = true, value_delimiter = ',')]
+    pd: Vec<String>,
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
     log_level: tracing::Level,
@@ -82,13 +88,6 @@ fn main() {
         tls,
         ..ServerConfig::default()
     };
-    let factory = stub::StubFactory {
-        user: args.user.clone(),
-        credential: Credential::native_from_password(&args.password),
-        server_version: config.server_version.clone(),
-        tls_enabled: config.tls.is_some(),
-    };
-
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -100,6 +99,27 @@ fn main() {
         }
     };
     let result = runtime.block_on(async move {
+        let kv = KvClient::connect(args.pd.clone())
+            .await
+            .map_err(|e| std::io::Error::other(format!("connect to PD {:?}: {e}", args.pd)))?;
+        let schema = SchemaCache::new(kv.clone());
+        let new_collation = tidb_session::detect_new_collation(&kv, &schema)
+            .await
+            .map_err(|e| std::io::Error::other(format!("read mysql.tidb: {e}")))?;
+        info!(pd = ?args.pd, new_collation, "connected to the cluster");
+        let dag = DagContext {
+            new_collation_enabled: new_collation,
+            ..DagContext::select_utc()
+        };
+        let factory = Factory::new(Shared {
+            kv,
+            schema,
+            dag,
+            user: args.user.clone(),
+            credential: Credential::native_from_password(&args.password),
+            server_version: config.server_version.clone(),
+            tls_enabled: config.tls.is_some(),
+        });
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let shutdown = async {
             if tokio::signal::ctrl_c().await.is_ok() {

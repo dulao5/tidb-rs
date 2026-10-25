@@ -8,7 +8,11 @@ publish.workspace = true
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+tidb-distsql = { workspace = true }
+tidb-kv = { workspace = true }
+tidb-meta = { workspace = true }
 tidb-mysql-protocol = { path = "../mysql-protocol" }
+tidb-session = { workspace = true }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std"] }
