@@ -345,7 +345,12 @@ impl Session {
             .as_ref()
             .and_then(|s| s.registry().admit(Instant::now()));
         let synced = match admitted {
-            Some(admission) => self.synced_read(sel, params, admission, &mut ts).await?,
+            Some(admission) => {
+                // A TSO requested before admission (the node entered synced mode in between)
+                // may predate the admitted schema's load; take a fresh one instead.
+                ts = None;
+                self.synced_read(sel, params, admission).await?
+            }
             None => None,
         };
         let (plan, rows) = match synced {
@@ -398,7 +403,6 @@ impl Session {
         sel: &Select,
         params: &[Literal],
         admission: Admission,
-        ts: &mut Option<TsFuture>,
     ) -> Result<Option<(tidb_sql::Plan, Vec<Vec<tidb_distsql::Datum>>)>, SqlError> {
         let Admission { schema, guard } = admission;
         let plan = self.plan(sel, &schema, params)?;
@@ -408,11 +412,7 @@ impl Session {
         let mut snapshot = if max_ts_point_get(&plan) {
             self.shared.kv.latest_snapshot()
         } else {
-            let start_ts = ts
-                .take()
-                .unwrap_or_else(|| TsFuture::request(&self.shared.kv))
-                .wait()
-                .await?;
+            let start_ts = TsFuture::request(&self.shared.kv).wait().await?;
             self.timer.mark(Phase::Tso);
             self.shared.kv.snapshot(start_ts)
         };
