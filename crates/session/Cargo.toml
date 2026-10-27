@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 futures = { workspace = true }
 tidb-distsql = { workspace = true }
+tidb-domain = { workspace = true }
 tidb-executor = { workspace = true }
 tidb-kv = { workspace = true }
 tidb-meta = { workspace = true }

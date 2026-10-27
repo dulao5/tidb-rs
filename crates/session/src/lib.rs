@@ -1,7 +1,15 @@
 //! SQL sessions of the read-only node: implements the protocol layer's [`SessionFactory`] /
 //! [`SessionHandler`] on top of the planner (`tidb-sql`) and executors (`tidb-executor`).
 //!
-//! Every SELECT runs as its own autocommit read: a fresh TSO `start_ts`, the schema visible
+//! **Synced mode** (`--schema-sync`, ADR 0005): while the node is registered and in sync with
+//! the cluster (`tidb_domain::Registry::admit`), a SELECT uses the newest schema loaded in the
+//! background and holds a metadata-lock entry until its response is written. Autocommit point
+//! gets by handle read at MaxTS without a TSO; other reads take a TSO but no schema check. If
+//! the node left sync before the read finished, the result is discarded and the statement
+//! runs on the path below.
+//!
+//! **Fallback / `--schema-sync=off`** (ADR 0003): every SELECT runs as its own autocommit
+//! read: a fresh TSO `start_ts`, the schema visible
 //! at that timestamp, and a KV snapshot at it. The TSO request is sent as soon as the
 //! statement is known to read a table and awaited only when the read needs it. The statement
 //! is planned with the newest cached schema and the schema-version check at `start_ts` runs
@@ -17,8 +25,12 @@ pub mod timing;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tidb_distsql::DagContext;
+use tidb_domain::Admission;
+use tidb_domain::SchemaSync;
+use tidb_domain::StmtGuard;
 use tidb_executor::ExecContext;
 use tidb_kv::KvClient;
 use tidb_meta::InfoSchema;
@@ -61,6 +73,8 @@ pub struct Shared {
     pub credential: Credential,
     pub server_version: String,
     pub tls_enabled: bool,
+    /// Schema sync (ADR 0005); `None` with `--schema-sync=off`.
+    pub sync: Option<SchemaSync>,
 }
 
 /// Creates [`Session`]s.
@@ -120,6 +134,7 @@ impl SessionFactory for Factory {
             results_charset: Some(charset.to_owned()),
             stmts: HashMap::new(),
             timer: Timer::default(),
+            mdl: None,
         })
     }
 }
@@ -141,6 +156,9 @@ pub struct Session {
     stmts: HashMap<u32, Arc<Lowered>>,
     /// Phase timing (`timing`), off by default.
     timer: Timer,
+    /// Metadata-lock entry of the current synced statement, released once its response has
+    /// been written (`command_done`).
+    mdl: Option<StmtGuard>,
 }
 
 fn kv_error(e: impl std::fmt::Display) -> SqlError {
@@ -165,6 +183,17 @@ impl TsFuture {
 /// Whether running the statement will need a start timestamp (a SELECT that reads a table).
 fn needs_ts(lowered: &Lowered) -> bool {
     matches!(&lowered.stmt, Statement::Select(sel) if sel.from.is_some())
+}
+
+/// Whether the plan is an autocommit point get that reads at MaxTS (Go:
+/// `IsPointGetWithPKOrUniqueKeyByAutoCommit`): a handle point get with nothing on top, not
+/// on a cached table. Every statement here is autocommit.
+fn max_ts_point_get(plan: &tidb_sql::Plan) -> bool {
+    matches!(plan.source, tidb_sql::plan::Source::PointGet { .. })
+        && plan.agg.is_none()
+        && plan.sort.is_empty()
+        && plan.limit.is_none()
+        && plan.table.cache_table_status == 0
 }
 
 fn ok() -> Response {
@@ -238,6 +267,27 @@ impl Session {
         }
     }
 
+    /// Whether statements may currently run in synced mode (no early TSO is requested then).
+    fn synced_mode(&self) -> bool {
+        self.shared
+            .sync
+            .as_ref()
+            .is_some_and(|s| s.registry().admissible(Instant::now()))
+    }
+
+    /// The schema to resolve names with: the synced one, else the one visible at a fresh TSO.
+    async fn name_schema(&mut self) -> Result<Arc<InfoSchema>, SqlError> {
+        if let Some(is) = self
+            .shared
+            .sync
+            .as_ref()
+            .and_then(|s| s.registry().schema_if_admissible(Instant::now()))
+        {
+            return Ok(is);
+        }
+        Ok(self.begin_read().await?.1)
+    }
+
     /// A start timestamp and the schema visible at it.
     async fn begin_read(&mut self) -> Result<(u64, Arc<InfoSchema>), SqlError> {
         let ts = self.shared.kv.current_ts().await.map_err(kv_error)?;
@@ -288,10 +338,25 @@ impl Session {
             }
             return Ok(rs);
         }
-        let ts = ts.unwrap_or_else(|| TsFuture::request(&self.shared.kv));
-        let (plan, rows) = match self.optimistic_read(sel, params, ts).await? {
-            Ok(done) => done,
-            Err((start_ts, raw)) => self.checked_read(sel, params, start_ts, raw).await?,
+        let mut ts = ts;
+        let admitted = self
+            .shared
+            .sync
+            .as_ref()
+            .and_then(|s| s.registry().admit(Instant::now()));
+        let synced = match admitted {
+            Some(admission) => self.synced_read(sel, params, admission, &mut ts).await?,
+            None => None,
+        };
+        let (plan, rows) = match synced {
+            Some(done) => done,
+            None => {
+                let ts = ts.unwrap_or_else(|| TsFuture::request(&self.shared.kv));
+                match self.optimistic_read(sel, params, ts).await? {
+                    Ok(done) => done,
+                    Err((start_ts, raw)) => self.checked_read(sel, params, start_ts, raw).await?,
+                }
+            }
         };
         let rows = tidb_executor::finish(&plan, rows, self.shared.dag.new_collation_enabled)?;
         self.timer.mark(Phase::Finish);
@@ -321,6 +386,47 @@ impl Session {
                 describe_only: false,
             },
         )
+    }
+
+    /// Synced mode (ADR 0005): plan with the newest loaded schema, narrow the statement's
+    /// metadata-lock entry to the table, and read at MaxTS (point gets) or at a fresh TSO.
+    /// `None` if the node left sync before the read finished: the result may come from data
+    /// two schema versions ahead, so it is discarded and the caller takes the fallback path.
+    #[allow(clippy::type_complexity)]
+    async fn synced_read(
+        &mut self,
+        sel: &Select,
+        params: &[Literal],
+        admission: Admission,
+        ts: &mut Option<TsFuture>,
+    ) -> Result<Option<(tidb_sql::Plan, Vec<Vec<tidb_distsql::Datum>>)>, SqlError> {
+        let Admission { schema, guard } = admission;
+        let plan = self.plan(sel, &schema, params)?;
+        guard.set_tables(vec![plan.table.id]);
+        self.timer.set_kind(Kind::of(&plan));
+        self.timer.mark(Phase::Plan);
+        let mut snapshot = if max_ts_point_get(&plan) {
+            self.shared.kv.latest_snapshot()
+        } else {
+            let start_ts = ts
+                .take()
+                .unwrap_or_else(|| TsFuture::request(&self.shared.kv))
+                .wait()
+                .await?;
+            self.timer.mark(Phase::Tso);
+            self.shared.kv.snapshot(start_ts)
+        };
+        let cx = ExecContext {
+            dag: self.shared.dag.clone(),
+            schema_version: schema.version(),
+        };
+        let rows = tidb_executor::read_source(&plan, &mut snapshot, &cx).await;
+        self.timer.mark(Phase::KvRead);
+        if !guard.results_valid() {
+            return Ok(None);
+        }
+        self.mdl = Some(guard);
+        Ok(Some((plan, rows?)))
     }
 
     /// Plan with the newest cached schema and read at `start_ts` while checking, concurrently
@@ -534,6 +640,7 @@ fn params_to_literals(params: Vec<Param>) -> Result<Vec<Literal>, SqlError> {
 impl SessionHandler for Session {
     async fn query(&mut self, sql: &str) -> Result<Response, SqlError> {
         self.timer.begin();
+        self.mdl = None;
         let lowered = tidb_sql::parse_and_lower(sql)?;
         self.timer.mark(Phase::Parse);
         if lowered.param_count > 0 {
@@ -542,7 +649,8 @@ impl SessionHandler for Session {
                 "You have an error in your SQL syntax; '?' is only allowed in prepared statements",
             ));
         }
-        let ts = needs_ts(&lowered).then(|| TsFuture::request(&self.shared.kv));
+        let ts =
+            (needs_ts(&lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
         self.run(&lowered, &[], ts).await
     }
 
@@ -555,7 +663,7 @@ impl SessionHandler for Session {
         if let Statement::Select(sel) = &lowered.stmt {
             if sel.from.is_some() {
                 // Resolve names now, like Go's prepare: unknown tables/columns fail here.
-                let (_, is) = self.begin_read().await?;
+                let is = self.name_schema().await?;
                 let plan = tidb_sql::plan_select(
                     sel,
                     &is,
@@ -587,13 +695,16 @@ impl SessionHandler for Session {
             .cloned()
             .ok_or_else(|| SqlError::unknown_stmt(stmt_id, "stmt_execute"))?;
         self.timer.begin();
-        let ts = needs_ts(&lowered).then(|| TsFuture::request(&self.shared.kv));
+        self.mdl = None;
+        let ts =
+            (needs_ts(&lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
         let params = params_to_literals(params)?;
         self.timer.mark(Phase::Parse);
         self.run(&lowered, &params, ts).await
     }
 
     fn command_done(&mut self, write: std::time::Duration, total: std::time::Duration) {
+        self.mdl = None;
         self.timer.end(write, total);
     }
 
@@ -602,7 +713,7 @@ impl SessionHandler for Session {
     }
 
     async fn use_db(&mut self, db: &str) -> Result<(), SqlError> {
-        let (_, is) = self.begin_read().await?;
+        let is = self.name_schema().await?;
         if is.schema_by_name(db).is_none() {
             return Err(SqlError::bad_db(db));
         }

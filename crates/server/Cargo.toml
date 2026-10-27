@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tidb-distsql = { workspace = true }
+tidb-domain = { workspace = true }
 tidb-kv = { workspace = true }
 tidb-meta = { workspace = true }
 tidb-mysql-protocol = { path = "../mysql-protocol" }

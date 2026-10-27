@@ -3519,6 +3519,7 @@ version = "0.0.0"
 dependencies = [
  "clap 4.6.7",
  "tidb-distsql",
+ "tidb-domain",
  "tidb-kv",
  "tidb-meta",
  "tidb-mysql-protocol",
@@ -3534,6 +3535,7 @@ version = "0.0.0"
 dependencies = [
  "futures",
  "tidb-distsql",
+ "tidb-domain",
  "tidb-executor",
  "tidb-kv",
  "tidb-meta",

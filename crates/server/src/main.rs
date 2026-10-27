@@ -5,11 +5,16 @@
 
 #![forbid(unsafe_code)]
 
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Parser;
 use tidb_distsql::DagContext;
+use tidb_domain::SchemaSync;
+use tidb_domain::ServerInfo;
+use tidb_domain::SyncConfig;
 use tidb_kv::KvClient;
 use tidb_meta::SchemaCache;
 use tidb_mysql_protocol::constants::auth_plugin;
@@ -17,7 +22,7 @@ use tidb_mysql_protocol::tls::{self, TlsConfig};
 use tidb_mysql_protocol::{Credential, Server, ServerConfig};
 use tidb_session::Factory;
 use tidb_session::Shared;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Parser)]
 #[command(name = "tidb-server", about = "tidb-rs read-only SQL node (prototype)")]
@@ -62,6 +67,30 @@ struct Args {
     /// seconds; 0 (the default) disables collection.
     #[arg(long, value_name = "SECS", default_value_t = 0)]
     stmt_timing: u64,
+    /// Join TiDB's schema sync (ADR 0005): register in PD's etcd as a TiDB server, keep the
+    /// schema loaded in the background and follow the metadata-lock protocol, so statements
+    /// use the in-memory schema and autocommit point gets read at MaxTS. The DDL owner then
+    /// waits for this node. `--schema-sync=false` keeps the per-statement schema check of
+    /// ADR 0003 and writes nothing to etcd.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    schema_sync: bool,
+    /// IP address published in the server info (`ip`); together with --port it must be
+    /// unique among all TiDB servers. Default: --host, or the address used to reach PD when
+    /// --host is a wildcard.
+    #[arg(long)]
+    advertise_address: Option<IpAddr>,
+    /// `status_port` published in the server info. Nothing listens there: 0 (the default)
+    /// makes Go TiDB's cluster-table fan-out to this node fail at once with a warning.
+    #[arg(long, default_value_t = 0)]
+    advertise_status_port: u16,
+    /// Synced mode needs a completed reload + MDL cycle within SECS, and the node may lag the
+    /// cluster's schema version at most SECS; otherwise it deregisters (DDL stops waiting
+    /// for it) and statements fall back until it is in sync again.
+    #[arg(long, value_name = "SECS", default_value_t = 5.0)]
+    schema_sync_max_staleness: f64,
+    /// Test hook: while this file exists the schema sync loop does nothing, as if stuck.
+    #[arg(long, hide = true)]
+    schema_sync_stall_file: Option<PathBuf>,
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
     log_level: tracing::Level,
@@ -118,10 +147,29 @@ fn main() {
             new_collation_enabled: new_collation,
             ..DagContext::select_utc()
         };
+        let sync = if args.schema_sync {
+            let ip = advertise_ip(&args);
+            let info = ServerInfo::new(
+                ip.to_string(),
+                u32::from(args.port),
+                u32::from(args.advertise_status_port),
+            );
+            let mut cfg = SyncConfig::new(args.pd.clone(), info, dag.clone());
+            cfg.limits.max_staleness = Duration::from_secs_f64(args.schema_sync_max_staleness);
+            cfg.stall_file = args.schema_sync_stall_file.clone();
+            let sync = SchemaSync::start(kv.clone(), cfg)
+                .await
+                .map_err(|e| std::io::Error::other(format!("start schema sync: {e}")))?;
+            Some(sync)
+        } else {
+            info!("schema sync is off: every statement checks the schema version (ADR 0003)");
+            None
+        };
         let factory = Factory::new(Shared {
             kv,
             schema,
             dag,
+            sync: sync.clone(),
             user: args.user.clone(),
             credential: Credential::native_from_password(&args.password),
             server_version: config.server_version.clone(),
@@ -141,8 +189,22 @@ fn main() {
         }
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let shutdown = async {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                info!("received Ctrl-C");
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::select! {
+                r = tokio::signal::ctrl_c() => r?,
+                _ = term.recv() => {}
+            }
+            info!("received SIGINT/SIGTERM");
+            Ok::<(), std::io::Error>(())
+        };
+        let shutdown = async {
+            if let Err(e) = shutdown.await {
+                warn!(error = %e, "signal handling failed; shutting down");
+            }
+            // Leave the cluster first, so DDL stops waiting for this node at once.
+            if let Some(sync) = &sync {
+                sync.shutdown().await;
             }
         };
         Server::new(config, factory).serve(listener, shutdown).await
@@ -151,6 +213,34 @@ fn main() {
         error!(%addr, error = %e, "server failed");
         std::process::exit(1);
     }
+}
+
+/// The IP published in the server info: --advertise-address, else --host unless it is a
+/// wildcard, else the local address of a route to the first PD endpoint.
+fn advertise_ip(args: &Args) -> IpAddr {
+    if let Some(ip) = args.advertise_address {
+        return ip;
+    }
+    if let Ok(ip) = args.host.parse::<IpAddr>()
+        && !ip.is_unspecified()
+    {
+        return ip;
+    }
+    let pd = args
+        .pd
+        .first()
+        .map(String::as_str)
+        .unwrap_or("127.0.0.1:2379");
+    let pd = pd
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect(pd)?;
+            s.local_addr()
+        })
+        .map(|a| a.ip())
+        .unwrap_or(IpAddr::from([127, 0, 0, 1]))
 }
 
 /// TLS configuration from the flags, mirroring TiDB's `LoadTLSCertificates`: the given
