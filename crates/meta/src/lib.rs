@@ -17,6 +17,7 @@ mod reader;
 pub use crate::infoschema::CacheStats;
 pub use crate::infoschema::InfoSchema;
 pub use crate::infoschema::SchemaCache;
+pub use crate::infoschema::SchemaCheck;
 pub use crate::reader::MetaReader;
 
 #[derive(Debug, thiserror::Error)]

@@ -139,6 +139,33 @@ struct CacheEntry {
 pub struct CacheStats {
     pub hits: u64,
     pub full_loads: u64,
+    /// [`SchemaCache::check_at`] calls that confirmed the candidate schema.
+    pub checks_passed: u64,
+    /// [`SchemaCache::check_at`] calls that rejected it (the statement must re-plan).
+    pub checks_failed: u64,
+}
+
+/// Result of [`SchemaCache::check_at`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchemaCheck {
+    /// The candidate is exactly the schema visible at `start_ts`.
+    Valid,
+    /// It may not be; `raw` is the version key read at `start_ts`, to be passed to
+    /// [`SchemaCache::info_schema_with_raw`].
+    Stale { raw: i64 },
+}
+
+/// The acceptance rule of [`SchemaCache::check_at`]: a candidate of version `candidate` is the
+/// schema visible at `start_ts` iff the version key read at `start_ts` is `raw ==
+/// candidate` and the cache entry of `raw` proves that its diff was already visible at or
+/// before `start_ts` (so the effective version at `start_ts` is `raw`, not `raw - 1`). This is
+/// exactly the condition under which [`SchemaCache::info_schema_at`] returns the cached entry
+/// after a single get.
+fn check_accepts(entry: Option<&CacheEntry>, candidate: i64, raw: i64, start_ts: u64) -> bool {
+    raw == candidate
+        && entry.is_some_and(|e| {
+            e.schema.version() == raw && e.diff_seen_at.is_some_and(|t| t <= start_ts)
+        })
 }
 
 /// Versioned cache of [`InfoSchema`]s, consulted once per statement with its `start_ts`.
@@ -167,9 +194,44 @@ impl SchemaCache {
     /// fully visible at `start_ts`. Costs one point get when the cache is warm, two when the
     /// version key alone is not conclusive, and a full reload when the version is unknown.
     pub async fn info_schema_at(&self, start_ts: u64) -> Result<Arc<InfoSchema>> {
+        let raw = self.raw_version_at(start_ts).await?;
+        self.info_schema_with_raw(start_ts, raw).await
+    }
+
+    /// The version key `m SchemaVersionKey` at `start_ts` (one point get).
+    async fn raw_version_at(&self, start_ts: u64) -> Result<i64> {
+        let mut snapshot = self.kv.snapshot(start_ts);
+        MetaReader::new(&mut snapshot).schema_version().await
+    }
+
+    /// A schema to plan a statement with before the schema visible at its `start_ts` is
+    /// known: the newest cached one. The statement may only use results obtained with it after
+    /// [`SchemaCache::check_at`] returned [`SchemaCheck::Valid`] for its `start_ts` (see
+    /// ADR 0003, "Optimistic schema check").
+    pub fn candidate(&self) -> Option<Arc<InfoSchema>> {
+        self.latest()
+    }
+
+    /// Check that `candidate` is the schema visible at `start_ts`: reads the version key at
+    /// `start_ts` (one point get, meant to run concurrently with the statement's data read at
+    /// the same `start_ts`) and applies the cache-hit rule of [`SchemaCache::info_schema_at`].
+    pub async fn check_at(&self, candidate: &InfoSchema, start_ts: u64) -> Result<SchemaCheck> {
+        let raw = self.raw_version_at(start_ts).await?;
+        let mut state = self.state.lock().expect("schema cache lock");
+        if check_accepts(state.entries.get(&raw), candidate.version(), raw, start_ts) {
+            state.stats.checks_passed += 1;
+            Ok(SchemaCheck::Valid)
+        } else {
+            state.stats.checks_failed += 1;
+            Ok(SchemaCheck::Stale { raw })
+        }
+    }
+
+    /// [`SchemaCache::info_schema_at`] when the version key at `start_ts` is already known to
+    /// be `raw` (saves its get).
+    pub async fn info_schema_with_raw(&self, start_ts: u64, raw: i64) -> Result<Arc<InfoSchema>> {
         let mut snapshot = self.kv.snapshot(start_ts);
         let mut reader = MetaReader::new(&mut snapshot);
-        let raw = reader.schema_version().await?;
         if let Some(hit) = self.lookup(raw, |e| e.diff_seen_at.is_some_and(|t| t <= start_ts)) {
             return Ok(hit);
         }
@@ -256,6 +318,32 @@ mod tests {
             state,
             ..TableInfo::default()
         }
+    }
+
+    fn entry(version: i64, diff_seen_at: Option<u64>) -> CacheEntry {
+        CacheEntry {
+            schema: Arc::new(InfoSchema::new(version, vec![])),
+            diff_seen_at,
+        }
+    }
+
+    #[test]
+    fn check_accepts_only_a_proven_cache_hit() {
+        let seen = entry(10, Some(100));
+        // Same version, diff seen before (or at) start_ts: the cached schema is the visible one.
+        assert!(check_accepts(Some(&seen), 10, 10, 100));
+        assert!(check_accepts(Some(&seen), 10, 10, 150));
+        // The diff was only seen later than start_ts: at start_ts the effective version may
+        // still be 9.
+        assert!(!check_accepts(Some(&seen), 10, 10, 99));
+        // Diff never seen (entry loaded as `raw - 1` effective): not provable from the cache.
+        assert!(!check_accepts(Some(&entry(10, None)), 10, 10, 150));
+        // A DDL committed between the candidate's load and start_ts.
+        assert!(!check_accepts(Some(&entry(11, Some(100))), 10, 11, 150));
+        // start_ts older than the candidate (a concurrent statement loaded a newer version).
+        assert!(!check_accepts(Some(&seen), 11, 10, 150));
+        // Version key not in the cache at all.
+        assert!(!check_accepts(None, 10, 10, 150));
     }
 
     #[test]

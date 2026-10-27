@@ -18,7 +18,8 @@ the schema that is visible at its own `start_ts`:
    `InfoSchema`, and cache it under the effective version (8 versions are kept).
 5. Plan the statement with that `InfoSchema` and read data at the same `start_ts`.
 
-Steady state costs one point get per statement. Step 3 needs a second get only when the
+Steady state costs one point get per statement (run concurrently with the data read; see
+"Optimistic schema check"). Step 3 needs a second get only when the
 cache cannot already prove that the diff of the version exists at `start_ts`. A cache entry
 records the earliest timestamp at which its diff was seen. Any later `start_ts` with the same
 version key must also see that diff. Reloads are full reloads; schema diffs are not applied
@@ -46,6 +47,35 @@ incrementally.
 - **Concurrent statements with older timestamps** can still need an older version. They do
   not evict or overwrite newer cache entries, because entries are keyed by version and
   several are kept.
+
+## Optimistic schema check (2026-10-27)
+
+Steps 2-5 above are serial: the version get must finish before planning and the data read
+can start. Sessions now overlap them (`SchemaCache::candidate` / `check_at`,
+`tidb_session::Session::optimistic_read`):
+
+1. Plan the statement with the newest cached `InfoSchema` (the *candidate*, version `c`).
+2. With the statement's `start_ts`, issue the version get (step 2) and the data read
+   **concurrently**, both at `start_ts`.
+3. Accept the read's result (rows or error) only if the version key at `start_ts` is
+   `raw == c` and the cache entry of `c` records `diff_seen_at <= start_ts`. This is exactly
+   the condition under which step 4 returns that cache entry after one get. Otherwise discard
+   the result and continue with step 3 using the `raw` just read (`info_schema_with_raw`),
+   then plan and read again at the same `start_ts`. If planning with the candidate fails, take
+   the full path too: the error may come from a stale schema.
+
+Why the guarantee is unchanged: an accepted statement used the schema that the serial path
+would have chosen for the same `start_ts` (version `c` identifies the meta content exactly;
+see "Why the effective version"), the same plan, and a read at the same `start_ts`. Its
+result is therefore identical. A result computed with any other schema is never returned,
+not even as an error. The only cost of a wrong guess is a second read after a DDL; the
+statement then behaves exactly as before. Statements whose `start_ts` is older than the
+newest cached version (a concurrent statement already loaded a newer one) are rejected and
+then served from the cache by the full path.
+
+The TSO request is also sent as soon as the statement is known to read a table (after parsing
+for COM_QUERY, before binding parameters for COM_STMT_EXECUTE), and awaited only after
+planning. Statements without a table, `SET` and `USE` do not request one early.
 
 ## What this does not cover
 
