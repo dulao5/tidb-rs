@@ -80,7 +80,7 @@ tidb-session = { path = "crates/session" }
 # TiKV Rust client: our fork with `Snapshot::coprocessor` and several connections per store
 # (branch tidb-rs/perf, on top of tidb-rs/coprocessor).
 # TEMPORARY: local clone, branch tidb-rs/maxts (MaxTS point gets); switch back to the pushed fork URL.
-tikv-client = { git = "file:///Users/du-zhigang/.slock/agents/4e290aa1-0152-4fca-95a4-03ab60358460/projects/ref/client-rust", rev = "6f49d3863bcf9f471df489922e902e13d81d2886", default-features = false }
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "6f49d3863bcf9f471df489922e902e13d81d2886", default-features = false }
 # External crates.
 bytes = "1.11"
 chrono = { version = "0.4", default-features = false }
