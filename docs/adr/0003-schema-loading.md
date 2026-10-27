@@ -73,6 +73,20 @@ statement then behaves exactly as before. Statements whose `start_ts` is older t
 newest cached version (a concurrent statement already loaded a newer one) are rejected and
 then served from the cache by the full path.
 
+**Shared version reads.** Concurrent statements share the version-key read. The check for a
+statement at `start_ts` may use a read at any `read_ts >= start_ts`. It uses the newest
+completed read if that one's `read_ts >= start_ts`, otherwise joins the in-flight read if its
+`read_ts` is large enough, otherwise starts a read at the newest `start_ts` any statement has
+passed to the check (a TSO that PD has issued). The acceptance rule is the same: `raw == c`
+and `diff_seen_at <= start_ts`. It stays exact because the version key only ever increases
+in commit order: every DDL increments it inside a transaction, and `FLASHBACK CLUSTER`
+rewrites only the `m DBs` / `m DB:{id}` keys and then increments the version too. The key is
+`c` at `diff_seen_at`, because that is how `diff_seen_at` is recorded, and `c` at
+`read_ts`. So it is `c` at every timestamp in between, `start_ts` included, and the diff of
+`c` is visible there. When the read was not at exactly `start_ts`, a rejected statement
+re-reads the version key at its own `start_ts` on the full path. At 16 sysbench threads this
+cuts the version reads to about 0.4 per statement.
+
 The TSO request is also sent as soon as the statement is known to read a table (after parsing
 for COM_QUERY, before binding parameters for COM_STMT_EXECUTE), and awaited only after
 planning. Statements without a table, `SET` and `USE` do not request one early.

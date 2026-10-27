@@ -27,6 +27,9 @@ pub enum Error {
     /// A meta value could not be decoded.
     #[error("corrupt meta: {0}")]
     Corrupt(String),
+    /// An error of a read shared by several statements.
+    #[error(transparent)]
+    Shared(std::sync::Arc<Error>),
 }
 
 impl Error {

@@ -361,7 +361,7 @@ impl Session {
         self.timer.mark(Phase::KvRead);
         match check.map_err(kv_error)? {
             SchemaCheck::Valid => Ok(Ok((plan, rows?))),
-            SchemaCheck::Stale { raw } => Ok(Err((start_ts, Some(raw)))),
+            SchemaCheck::Stale { raw } => Ok(Err((start_ts, raw))),
         }
     }
 

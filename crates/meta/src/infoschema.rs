@@ -4,6 +4,12 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+
+use futures::FutureExt;
+use futures::future::BoxFuture;
+use futures::future::Shared;
 
 use tidb_kv::KvClient;
 use tidb_kv::KvSnapshot;
@@ -143,6 +149,8 @@ pub struct CacheStats {
     pub checks_passed: u64,
     /// [`SchemaCache::check_at`] calls that rejected it (the statement must re-plan).
     pub checks_failed: u64,
+    /// Version-key reads issued by [`SchemaCache::check_at`] (several checks share one).
+    pub version_reads: u64,
 }
 
 /// Result of [`SchemaCache::check_at`].
@@ -150,17 +158,19 @@ pub struct CacheStats {
 pub enum SchemaCheck {
     /// The candidate is exactly the schema visible at `start_ts`.
     Valid,
-    /// It may not be; `raw` is the version key read at `start_ts`, to be passed to
-    /// [`SchemaCache::info_schema_with_raw`].
-    Stale { raw: i64 },
+    /// It may not be. `raw` is the version key at `start_ts` if it was read at exactly
+    /// `start_ts` (to be passed to [`SchemaCache::info_schema_with_raw`]).
+    Stale { raw: Option<i64> },
 }
 
 /// The acceptance rule of [`SchemaCache::check_at`]: a candidate of version `candidate` is the
-/// schema visible at `start_ts` iff the version key read at `start_ts` is `raw ==
-/// candidate` and the cache entry of `raw` proves that its diff was already visible at or
-/// before `start_ts` (so the effective version at `start_ts` is `raw`, not `raw - 1`). This is
-/// exactly the condition under which [`SchemaCache::info_schema_at`] returns the cached entry
-/// after a single get.
+/// schema visible at `start_ts` if the version key read at some `read_ts >= start_ts` is
+/// `raw == candidate` and the cache entry of `raw` proves that the key already was `raw`, with
+/// its diff visible, at `diff_seen_at <= start_ts`. The version key only ever increases with
+/// commit order (each DDL increments it in a transaction), so it is `raw` at every timestamp
+/// in `[diff_seen_at, read_ts]`, in particular at `start_ts`, and the effective version there
+/// is `raw`, not `raw - 1`. With `read_ts == start_ts` this is exactly the condition under
+/// which [`SchemaCache::info_schema_at`] returns the cached entry after a single get.
 fn check_accepts(entry: Option<&CacheEntry>, candidate: i64, raw: i64, start_ts: u64) -> bool {
     raw == candidate
         && entry.is_some_and(|e| {
@@ -174,6 +184,20 @@ fn check_accepts(entry: Option<&CacheEntry>, candidate: i64, raw: i64, start_ts:
 pub struct SchemaCache {
     kv: KvClient,
     state: Mutex<CacheState>,
+    /// Newest `start_ts` passed to [`SchemaCache::check_at`] (a TSO PD has issued).
+    max_ts: AtomicU64,
+    probes: Mutex<Probes>,
+}
+
+/// A version-key read shared by concurrent checks.
+type Probe = Shared<BoxFuture<'static, std::result::Result<i64, Arc<crate::Error>>>>;
+
+/// Version-key reads of [`SchemaCache::check_at`]: the one in flight with the newest read
+/// timestamp, and the newest completed one.
+#[derive(Default)]
+struct Probes {
+    inflight: Option<(u64, Probe)>,
+    done: Option<(u64, i64)>,
 }
 
 #[derive(Default)]
@@ -187,6 +211,8 @@ impl SchemaCache {
         SchemaCache {
             kv,
             state: Mutex::default(),
+            max_ts: AtomicU64::new(0),
+            probes: Mutex::default(),
         }
     }
 
@@ -212,18 +238,72 @@ impl SchemaCache {
         self.latest()
     }
 
-    /// Check that `candidate` is the schema visible at `start_ts`: reads the version key at
-    /// `start_ts` (one point get, meant to run concurrently with the statement's data read at
-    /// the same `start_ts`) and applies the cache-hit rule of [`SchemaCache::info_schema_at`].
+    /// Check that `candidate` is the schema visible at `start_ts`, by reading the version key
+    /// at some timestamp `>= start_ts` and applying [`check_accepts`]. Meant to run
+    /// concurrently with the statement's data read at `start_ts`.
+    ///
+    /// Concurrent checks share reads: a check uses the newest completed read if its timestamp
+    /// is `>= start_ts`, else joins the in-flight read if that one's is, else starts a read at
+    /// the newest `start_ts` seen so far (a timestamp PD has issued, so the read is a normal
+    /// snapshot read), which later checks with smaller `start_ts` can join.
     pub async fn check_at(&self, candidate: &InfoSchema, start_ts: u64) -> Result<SchemaCheck> {
-        let raw = self.raw_version_at(start_ts).await?;
+        self.max_ts.fetch_max(start_ts, Ordering::Relaxed);
+        let (read_ts, probe) = {
+            let mut probes = self.probes.lock().expect("schema probe lock");
+            match (&probes.done, &probes.inflight) {
+                (Some((t, raw)), _) if *t >= start_ts => {
+                    let (t, raw) = (*t, *raw);
+                    drop(probes);
+                    return Ok(self.decide(candidate, start_ts, t, raw));
+                }
+                (_, Some((t, probe))) if *t >= start_ts => (*t, probe.clone()),
+                _ => {
+                    let read_ts = self.max_ts.load(Ordering::Relaxed).max(start_ts);
+                    let kv = self.kv.clone();
+                    let probe = async move {
+                        let mut snapshot = kv.snapshot(read_ts);
+                        MetaReader::new(&mut snapshot)
+                            .schema_version()
+                            .await
+                            .map_err(Arc::new)
+                    }
+                    .boxed()
+                    .shared();
+                    probes.inflight = Some((read_ts, probe.clone()));
+                    self.state
+                        .lock()
+                        .expect("schema cache lock")
+                        .stats
+                        .version_reads += 1;
+                    (read_ts, probe)
+                }
+            }
+        };
+        let raw = probe.await.map_err(crate::Error::Shared)?;
+        {
+            let mut probes = self.probes.lock().expect("schema probe lock");
+            if probes.done.is_none_or(|(t, _)| t < read_ts) {
+                probes.done = Some((read_ts, raw));
+            }
+            if probes.inflight.as_ref().is_some_and(|(t, _)| *t == read_ts) {
+                probes.inflight = None;
+            }
+        }
+        Ok(self.decide(candidate, start_ts, read_ts, raw))
+    }
+
+    /// Apply [`check_accepts`] to a version key `raw` read at `read_ts >= start_ts`.
+    fn decide(&self, candidate: &InfoSchema, start_ts: u64, read_ts: u64, raw: i64) -> SchemaCheck {
+        debug_assert!(read_ts >= start_ts);
         let mut state = self.state.lock().expect("schema cache lock");
         if check_accepts(state.entries.get(&raw), candidate.version(), raw, start_ts) {
             state.stats.checks_passed += 1;
-            Ok(SchemaCheck::Valid)
+            SchemaCheck::Valid
         } else {
             state.stats.checks_failed += 1;
-            Ok(SchemaCheck::Stale { raw })
+            SchemaCheck::Stale {
+                raw: (read_ts == start_ts).then_some(raw),
+            }
         }
     }
 
@@ -330,7 +410,8 @@ mod tests {
     #[test]
     fn check_accepts_only_a_proven_cache_hit() {
         let seen = entry(10, Some(100));
-        // Same version, diff seen before (or at) start_ts: the cached schema is the visible one.
+        // Same version, diff seen before (or at) start_ts: the cached schema is the visible one
+        // (whether `raw` was read at start_ts or later: the key is `raw` throughout).
         assert!(check_accepts(Some(&seen), 10, 10, 100));
         assert!(check_accepts(Some(&seen), 10, 10, 150));
         // The diff was only seen later than start_ts: at start_ts the effective version may

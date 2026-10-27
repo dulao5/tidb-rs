@@ -3337,6 +3337,7 @@ name = "tidb-meta"
 version = "0.0.0"
 dependencies = [
  "codec",
+ "futures",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
