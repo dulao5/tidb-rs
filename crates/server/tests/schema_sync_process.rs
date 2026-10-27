@@ -11,7 +11,6 @@
 //!     cargo test -p tidb-server --test schema_sync_process -- --nocapture --test-threads 1
 //! ```
 
-use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
@@ -209,8 +208,7 @@ fn stall_file_deregisters_and_recovers() {
         return;
     };
     create_table(&go);
-    let stall =
-        PathBuf::from(std::env::temp_dir()).join(format!("tidb-rs-stall-{}", std::process::id()));
+    let stall = std::env::temp_dir().join(format!("tidb-rs-stall-{}", std::process::id()));
     let _ = std::fs::remove_file(&stall);
     let node = Node::start(
         &pd,
