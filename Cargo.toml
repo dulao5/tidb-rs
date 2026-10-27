@@ -11,6 +11,7 @@ members = [
   "crates/sql",
   "crates/executor",
   "crates/session",
+  "crates/domain",
   "tools/ab",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
   # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
@@ -68,6 +69,7 @@ tikv_util = { path = "third_party/tikv-shims/tikv_util" }
 tracker = { path = "third_party/tikv-shims/tracker" }
 # First-party crates.
 tidb-distsql = { path = "crates/distsql" }
+tidb-domain = { path = "crates/domain" }
 tidb-kv = { path = "crates/kv" }
 tidb-meta = { path = "crates/meta" }
 tidb-mysql-protocol = { path = "crates/mysql-protocol" }
