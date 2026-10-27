@@ -402,6 +402,18 @@ impl Registry {
             .collect()
     }
 
+    /// Whether no statement of the current epoch uses a schema older than `version` (on any
+    /// table). `all_schema_versions/<ddl_id>` is advanced only then: with
+    /// `tidb_enable_metadata_lock=OFF` the owner waits on that key instead of the per-job
+    /// reports, and this keeps the two-version bound for in-flight statements in that mode too.
+    pub(crate) fn drained_below(&self, version: i64) -> bool {
+        let state = self.lock();
+        !state
+            .entries
+            .values()
+            .any(|e| e.epoch == state.epoch && e.version < version)
+    }
+
     /// Number of in-flight synced statements (all epochs).
     pub fn in_flight(&self) -> usize {
         self.lock().entries.len()
@@ -569,8 +581,11 @@ mod tests {
             vec![false],
             "a still runs"
         );
+        assert!(!r.drained_below(11), "a is still on 10");
         drop(a);
         assert_eq!(r.jobs_ready(&[job(11, &[200])]), vec![true]);
+        assert!(r.drained_below(11), "b is on 11");
+        assert!(!r.drained_below(12));
         drop(b);
         assert_eq!(r.in_flight(), 0);
         // Installing an older version is ignored.

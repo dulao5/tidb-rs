@@ -316,20 +316,25 @@ impl Inner {
                 continue;
             }
             let mut ok = true;
+            let mut self_pending = false;
             let loaded = self.registry.loaded_version();
             if loaded > self_version_put
                 && let Some(v) = loaded
             {
-                match self.put_self_version(v).await {
-                    Ok(()) => self_version_put = loaded,
-                    Err(e) => {
-                        ok = false;
-                        warn!(error = %e, "updating all_schema_versions failed");
+                if !self.registry.drained_below(v) {
+                    self_pending = true;
+                } else {
+                    match self.put_self_version(v).await {
+                        Ok(()) => self_version_put = loaded,
+                        Err(e) => {
+                            ok = false;
+                            warn!(error = %e, "updating all_schema_versions failed");
+                        }
                     }
                 }
             }
             let (still_pending, report_ok) = self.report(&jobs, &mut reported).await;
-            pending = still_pending;
+            pending = still_pending || self_pending;
             if full && ok && report_ok {
                 self.registry.cycle_completed(started);
             }
