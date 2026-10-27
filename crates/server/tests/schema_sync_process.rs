@@ -19,6 +19,14 @@ use std::time::Instant;
 
 const DB: &str = "tidb_rs_proc_it";
 
+/// The tests share `DB` and measure how long Go TiDB's DDL waits for registered nodes, so they
+/// must not run concurrently (a killed node would stall the others' DDL for the lease TTL).
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn mysql(port: &str, sql: &str) -> Result<String, String> {
     let out = Command::new("mysql")
         .args([
@@ -164,6 +172,7 @@ fn graceful_stop_releases_ddl_at_once() {
     let Some((pd, go)) = cluster() else {
         return;
     };
+    let _serial = serial();
     create_table(&go);
     let baseline = timed_ddl(&go, &format!("ALTER TABLE {DB}.t ADD COLUMN c1 INT"));
 
@@ -207,6 +216,7 @@ fn stall_file_deregisters_and_recovers() {
     let Some((pd, go)) = cluster() else {
         return;
     };
+    let _serial = serial();
     create_table(&go);
     let stall = std::env::temp_dir().join(format!("tidb-rs-stall-{}", std::process::id()));
     let _ = std::fs::remove_file(&stall);
@@ -251,6 +261,7 @@ fn kill_9_blocks_ddl_until_lease_expiry() {
     let Some((pd, go)) = cluster() else {
         return;
     };
+    let _serial = serial();
     if std::env::var("TIDB_RS_SLOW").is_err() {
         eprintln!("TIDB_RS_SLOW not set; skipping the 90 s lease wait");
         return;
