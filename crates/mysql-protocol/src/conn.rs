@@ -371,8 +371,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             command::QUERY => {
                 let sql = sql_text(body)?;
                 trace!(sql, "COM_QUERY");
-                let resp = self.handler.query(sql).await?;
-                self.write_response(resp, false).await
+                let start = Instant::now();
+                let resp = self.handler.query(sql).await;
+                self.write_timed(start, resp, false).await
             }
             command::PING => self.write_ok(&OkInfo::default()).await,
             command::STATISTICS => {
@@ -484,6 +485,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
     }
 
     async fn stmt_execute(&mut self, body: &[u8]) -> Result<(), ConnError> {
+        let start = Instant::now();
         if body.len() < 9 {
             return Err(SqlError::malformed().into());
         }
@@ -518,8 +520,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         } else {
             Vec::new()
         };
-        let resp = self.handler.execute(id, params).await?;
-        self.write_response(resp, true).await
+        let resp = self.handler.execute(id, params).await;
+        self.write_timed(start, resp, true).await
+    }
+
+    /// Write a statement's response and report the timings to the handler.
+    async fn write_timed(
+        &mut self,
+        start: Instant,
+        resp: Result<Response, SqlError>,
+        binary: bool,
+    ) -> Result<(), ConnError> {
+        let written = Instant::now();
+        let result = match resp {
+            Ok(resp) => self.write_response(resp, binary).await,
+            Err(e) => Err(e.into()),
+        };
+        let end = Instant::now();
+        self.handler.command_done(end - written, end - start);
+        result
     }
 
     fn stmt_send_long_data(&mut self, body: &[u8]) -> Result<(), ConnError> {

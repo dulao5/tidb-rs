@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod constant;
+pub mod timing;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,6 +41,9 @@ use tidb_sql::ranges::param_literal;
 use tidb_sql::types::apply_result_charset;
 
 use crate::constant::ConstEnv;
+use crate::timing::Kind;
+use crate::timing::Phase;
+use crate::timing::Timer;
 
 /// State shared by all sessions.
 pub struct Shared {
@@ -104,6 +108,7 @@ impl SessionFactory for Factory {
             collation: collation.to_owned(),
             results_charset: Some(charset.to_owned()),
             stmts: HashMap::new(),
+            timer: Timer::default(),
         })
     }
 }
@@ -123,6 +128,8 @@ pub struct Session {
     results_charset: Option<String>,
     /// Prepared statements by id.
     stmts: HashMap<u32, Arc<Lowered>>,
+    /// Phase timing (`timing`), off by default.
+    timer: Timer,
 }
 
 fn kv_error(e: impl std::fmt::Display) -> SqlError {
@@ -201,14 +208,16 @@ impl Session {
     }
 
     /// A start timestamp and the schema visible at it.
-    async fn begin_read(&self) -> Result<(u64, Arc<InfoSchema>), SqlError> {
+    async fn begin_read(&mut self) -> Result<(u64, Arc<InfoSchema>), SqlError> {
         let ts = self.shared.kv.current_ts().await.map_err(kv_error)?;
+        self.timer.mark(Phase::Tso);
         let is = self
             .shared
             .schema
             .info_schema_at(ts)
             .await
             .map_err(kv_error)?;
+        self.timer.mark(Phase::Schema);
         Ok((ts, is))
     }
 
@@ -230,7 +239,7 @@ impl Session {
         }
     }
 
-    async fn select(&self, sel: &Select, params: &[Literal]) -> Result<ResultSet, SqlError> {
+    async fn select(&mut self, sel: &Select, params: &[Literal]) -> Result<ResultSet, SqlError> {
         if sel.from.is_none() {
             let mut rs = self.const_env().select(sel, params)?;
             for c in &mut rs.columns {
@@ -248,12 +257,17 @@ impl Session {
                 describe_only: false,
             },
         )?;
+        self.timer.set_kind(Kind::of(&plan));
+        self.timer.mark(Phase::Plan);
         let mut snapshot = self.shared.kv.snapshot(ts);
         let cx = ExecContext {
             dag: self.shared.dag.clone(),
             schema_version: is.version(),
         };
-        let rows = tidb_executor::execute(&plan, &mut snapshot, &cx).await?;
+        let rows = tidb_executor::read_source(&plan, &mut snapshot, &cx).await?;
+        self.timer.mark(Phase::KvRead);
+        let rows = tidb_executor::finish(&plan, rows, cx.dag.new_collation_enabled)?;
+        self.timer.mark(Phase::Finish);
         let mut columns = plan.columns;
         for c in &mut columns {
             apply_result_charset(c, self.results_charset.as_deref());
@@ -404,7 +418,9 @@ fn params_to_literals(params: Vec<Param>) -> Result<Vec<Literal>, SqlError> {
 
 impl SessionHandler for Session {
     async fn query(&mut self, sql: &str) -> Result<Response, SqlError> {
+        self.timer.begin();
         let lowered = tidb_sql::parse_and_lower(sql)?;
+        self.timer.mark(Phase::Parse);
         if lowered.param_count > 0 {
             return Err(SqlError::new(
                 1064,
@@ -454,8 +470,14 @@ impl SessionHandler for Session {
             .get(&stmt_id)
             .cloned()
             .ok_or_else(|| SqlError::unknown_stmt(stmt_id, "stmt_execute"))?;
+        self.timer.begin();
         let params = params_to_literals(params)?;
+        self.timer.mark(Phase::Parse);
         self.run(&lowered, &params).await
+    }
+
+    fn command_done(&mut self, write: std::time::Duration, total: std::time::Duration) {
+        self.timer.end(write, total);
     }
 
     fn close(&mut self, stmt_id: u32) {

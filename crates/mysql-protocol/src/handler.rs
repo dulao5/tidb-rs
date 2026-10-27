@@ -106,6 +106,11 @@ pub trait SessionHandler: Send + 'static {
     /// `COM_INIT_DB` and the handshake's default database.
     fn use_db(&mut self, db: &str) -> impl Future<Output = Result<(), SqlError>> + Send;
 
+    /// Called after a COM_QUERY / COM_STMT_EXECUTE response was flushed (also after errors):
+    /// `write` is the time spent encoding and writing the response, `total` the time since the
+    /// command packet was read. For statistics only; the default ignores it.
+    fn command_done(&mut self, _write: std::time::Duration, _total: std::time::Duration) {}
+
     /// Server status flags for OK/EOF packets. Read-only autocommit node: always
     /// `SERVER_STATUS_AUTOCOMMIT` unless overridden.
     fn status_flags(&self) -> u16 {

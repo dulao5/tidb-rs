@@ -55,6 +55,10 @@ struct Args {
     /// PD endpoints of the cluster (`host:port`, comma-separated or repeated).
     #[arg(long, required = true, value_delimiter = ',')]
     pd: Vec<String>,
+    /// Log per-statement phase timings (average microseconds by statement shape) every SECS
+    /// seconds; 0 (the default) disables collection.
+    #[arg(long, value_name = "SECS", default_value_t = 0)]
+    stmt_timing: u64,
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
     log_level: tracing::Level,
@@ -120,6 +124,18 @@ fn main() {
             server_version: config.server_version.clone(),
             tls_enabled: config.tls.is_some(),
         });
+        if args.stmt_timing > 0 {
+            tidb_session::timing::set_enabled(true);
+            let every = std::time::Duration::from_secs(args.stmt_timing);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(every);
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    info!("statement timing\n{}", tidb_session::timing::report());
+                }
+            });
+        }
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let shutdown = async {
             if tokio::signal::ctrl_c().await.is_ok() {
