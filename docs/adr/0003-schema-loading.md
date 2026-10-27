@@ -1,6 +1,8 @@
 # ADR 0003: Schema loading for the read-only node
 
 - Status: proposed (2026-10-23)
+- Update (2026-10-27): with `--schema-sync` (default) the node joins TiDB's schema sync and
+  uses this design only as the fallback while it is not provably in sync; see ADR 0005.
 - Context: ADR 0001, "Correctness requirements for the read-only node". Code: `crates/meta`
   (`MetaReader`, `InfoSchema`, `SchemaCache`), `crates/kv`.
 
