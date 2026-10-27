@@ -55,6 +55,9 @@ struct Args {
     /// PD endpoints of the cluster (`host:port`, comma-separated or repeated).
     #[arg(long, required = true, value_delimiter = ',')]
     pd: Vec<String>,
+    /// gRPC connections to each TiKV store (TiDB: tikv-client.grpc-connection-count).
+    #[arg(long, default_value_t = 4)]
+    tikv_connections: usize,
     /// Log per-statement phase timings (average microseconds by statement shape) every SECS
     /// seconds; 0 (the default) disables collection.
     #[arg(long, value_name = "SECS", default_value_t = 0)]
@@ -103,7 +106,7 @@ fn main() {
         }
     };
     let result = runtime.block_on(async move {
-        let kv = KvClient::connect(args.pd.clone())
+        let kv = KvClient::connect_with(args.pd.clone(), args.tikv_connections)
             .await
             .map_err(|e| std::io::Error::other(format!("connect to PD {:?}: {e}", args.pd)))?;
         let schema = SchemaCache::new(kv.clone());

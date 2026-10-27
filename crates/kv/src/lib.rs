@@ -96,9 +96,19 @@ pub struct KvClient {
 }
 
 impl KvClient {
-    /// Connect to the PD endpoints (`host:port`).
+    /// Connect to the PD endpoints (`host:port`), with one connection per TiKV store.
     pub async fn connect(pd_endpoints: Vec<String>) -> Result<KvClient> {
-        let inner = TransactionClient::new(pd_endpoints)
+        Self::connect_with(pd_endpoints, 1).await
+    }
+
+    /// Connect to the PD endpoints, opening `store_connections` gRPC connections to each TiKV
+    /// store (client-go: `grpc-connection-count`, default 4). Requests are spread over them.
+    pub async fn connect_with(
+        pd_endpoints: Vec<String>,
+        store_connections: usize,
+    ) -> Result<KvClient> {
+        let config = tikv_client::Config::default().with_grpc_connection_count(store_connections);
+        let inner = TransactionClient::new_with_config(pd_endpoints, config)
             .await
             .map_err(Error::from)?;
         Ok(KvClient {

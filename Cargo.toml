@@ -75,8 +75,10 @@ tidb-parser = { path = "crates/parser" }
 tidb-sql = { path = "crates/sql" }
 tidb-executor = { path = "crates/executor" }
 tidb-session = { path = "crates/session" }
-# TiKV Rust client: our fork with `Snapshot::coprocessor` (branch tidb-rs/coprocessor).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "f7f51da8f386bde8d417ad897f99f484fea9a093", default-features = false }
+# TiKV Rust client: our fork with `Snapshot::coprocessor` and several connections per store
+# (branch tidb-rs/perf, on top of tidb-rs/coprocessor). Not pushed yet: points at the local
+# clone; switch back to https://github.com/dulao5/client-rust.git with the same rev once pushed.
+tikv-client = { git = "file:///Users/du-zhigang/.slock/agents/4e290aa1-0152-4fca-95a4-03ab60358460/projects/ref/client-rust", rev = "f5597e2cdac7bf1e2c24999ba71f13eb7c9f48b2", default-features = false }
 # External crates.
 bytes = "1.11"
 chrono = { version = "0.4", default-features = false }
