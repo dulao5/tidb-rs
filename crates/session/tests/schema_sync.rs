@@ -366,3 +366,42 @@ async fn stuck_sync_loop_deregisters_and_falls_back() {
     env.same(&mut s, "SELECT * FROM a ORDER BY id").await;
     env.stop().await;
 }
+
+/// Restores `tidb_enable_metadata_lock` on drop.
+struct MdlOff(String);
+
+impl Drop for MdlOff {
+    fn drop(&mut self) {
+        go_sql(&self.0, "SET GLOBAL tidb_enable_metadata_lock = ON");
+    }
+}
+
+/// With `tidb_enable_metadata_lock=OFF` the owner waits on `all_schema_versions/<ddl_id>`
+/// instead of per-job reports. The node advances that key only once no in-flight statement
+/// uses an older schema (on any table: there is no table list without MDL), so the two-version
+/// bound still holds for its statements.
+#[tokio::test(flavor = "multi_thread")]
+async fn mdl_off_waits_for_older_statements() {
+    let _serial = SERIAL.lock().await;
+    let Some(env) = setup(39_104).await else {
+        return;
+    };
+    go_sql(&env.port, "SET GLOBAL tidb_enable_metadata_lock = OFF");
+    let _restore = MdlOff(env.port.clone());
+    let mut s = env.session().await;
+    let (_, r) = rows(s.query("SELECT * FROM a ORDER BY id").await.unwrap());
+    assert_eq!(r.len(), 3);
+    let mut ddl = go_spawn(&env.port, &format!("ALTER TABLE {DB}.b ADD COLUMN x INT"));
+    assert!(
+        wait_child(&mut ddl, Duration::from_secs(3)).await.is_none(),
+        "without MDL, any DDL waits for the older in-flight statement"
+    );
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    let took = wait_child(&mut ddl, Duration::from_secs(20)).await;
+    println!("MDL off: DDL finished {took:?} after the statement ended");
+    assert!(took.is_some());
+    let mut s2 = env.session().await;
+    env.same(&mut s2, "SELECT * FROM b").await;
+    drop(_restore);
+    env.stop().await;
+}

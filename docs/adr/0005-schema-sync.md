@@ -212,11 +212,28 @@ depends on the sync loop being healthy.
 A long synced statement on a table holds back DDL steps on that table until it ends, exactly
 like a Go TiDB statement. Statements on other tables do not.
 
+## Results (sysbench oltp_read_only, 1 table × 100k rows, 8 regions, 30 s per run)
+
+Same playground, all runs in one session; `--skip_trx=on --db-ps-mode=auto`. QPS:
+
+| threads | Go TiDB | tidb-rs synced | ratio | tidb-rs `--schema-sync=false` | phase A final (m4a) |
+|--:|--:|--:|--:|--:|--:|
+| 1 | 5,221 | 6,467 | 1.24 | 4,757 | 4,722 |
+| 8 | 20,571 | 22,760 | 1.11 | 15,877 | 15,708 |
+| 16 | 27,865 | 27,769 | 1.00 | 20,832 | 20,610 |
+
+p95 (ms per event) synced vs Go: 2.44 / 2.98, 5.43 / 6.00, 8.96 / 9.51. With
+`--schema-sync=false`, throughput matches phase A within noise.
+
+Under load: 60 s of t16 sysbench on the synced node while Go TiDB ran ADD COLUMN / DROP COLUMN
+on `sbtest1` in a loop gave 27,667 QPS and 0 errors. All 266 DDLs succeeded (p50 198 ms,
+max 473 ms).
+
 ## User-visible caveats (from the audit)
 
-- While the node is registered, every DDL step also waits for its reload and MDL report
-  (about +30 ms per ADD COLUMN in our runs: 104 ms → 136 ms). A crashed node blocks DDL for
-  up to 90 s.
+- While the node is registered, every DDL step also waits for its reload and MDL report.
+  An idle ADD/DROP COLUMN pair went from p50 118 ms to 157 ms per DDL (30 DDLs each, the
+  node registered vs. not). A crashed node blocks DDL for up to 90 s.
 - The node is listed in `information_schema.tidb_servers_info` and `cluster_info`.
   `inspection_result` flags the git hash as inconsistent, and `/info/all` and `/upgrade/show`
   report a version mismatch.
