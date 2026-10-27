@@ -2,8 +2,13 @@
 //! [`SessionHandler`] on top of the planner (`tidb-sql`) and executors (`tidb-executor`).
 //!
 //! Every SELECT runs as its own autocommit read: a fresh TSO `start_ts`, the schema visible
-//! at that timestamp (`SchemaCache::info_schema_at`), and a KV snapshot at it. Prepared
-//! statements keep the lowered statement and are re-planned on every execute.
+//! at that timestamp, and a KV snapshot at it. The TSO request is sent as soon as the
+//! statement is known to read a table and awaited only when the read needs it. The statement
+//! is planned with the newest cached schema and the schema-version check at `start_ts` runs
+//! concurrently with the data read; a result is used only if the check proves that schema is
+//! the one visible at `start_ts`, otherwise the statement is re-planned and re-read with it
+//! (ADR 0003, "Optimistic schema check"). Prepared statements keep the lowered statement and
+//! are re-planned on every execute.
 
 #![forbid(unsafe_code)]
 
@@ -18,6 +23,7 @@ use tidb_executor::ExecContext;
 use tidb_kv::KvClient;
 use tidb_meta::InfoSchema;
 use tidb_meta::SchemaCache;
+use tidb_meta::SchemaCheck;
 use tidb_mysql_protocol::ConnectionInfo;
 use tidb_mysql_protocol::Credential;
 use tidb_mysql_protocol::OkInfo;
@@ -68,6 +74,11 @@ impl Factory {
         Factory {
             shared: Arc::new(shared),
         }
+    }
+
+    /// The state shared by this factory's sessions.
+    pub fn shared(&self) -> &Shared {
+        &self.shared
     }
 }
 
@@ -134,6 +145,26 @@ pub struct Session {
 
 fn kv_error(e: impl std::fmt::Display) -> SqlError {
     SqlError::unknown(e.to_string())
+}
+
+/// A start timestamp requested from PD ahead of the point where it is needed (Go's
+/// `txnFuture`): the request is sent when this is created.
+struct TsFuture(tokio::task::JoinHandle<tidb_kv::Result<u64>>);
+
+impl TsFuture {
+    fn request(kv: &KvClient) -> TsFuture {
+        let kv = kv.clone();
+        TsFuture(tokio::spawn(async move { kv.current_ts().await }))
+    }
+
+    async fn wait(self) -> Result<u64, SqlError> {
+        self.0.await.map_err(kv_error)?.map_err(kv_error)
+    }
+}
+
+/// Whether running the statement will need a start timestamp (a SELECT that reads a table).
+fn needs_ts(lowered: &Lowered) -> bool {
+    matches!(&lowered.stmt, Statement::Select(sel) if sel.from.is_some())
 }
 
 fn ok() -> Response {
@@ -221,9 +252,14 @@ impl Session {
         Ok((ts, is))
     }
 
-    async fn run(&mut self, lowered: &Lowered, params: &[Literal]) -> Result<Response, SqlError> {
+    async fn run(
+        &mut self,
+        lowered: &Lowered,
+        params: &[Literal],
+        ts: Option<TsFuture>,
+    ) -> Result<Response, SqlError> {
         match &lowered.stmt {
-            Statement::Select(sel) => self.select(sel, params).await.map(Response::ResultSet),
+            Statement::Select(sel) => self.select(sel, params, ts).await.map(Response::ResultSet),
             Statement::Use(db) => {
                 self.use_db(db).await?;
                 Ok(ok())
@@ -239,7 +275,12 @@ impl Session {
         }
     }
 
-    async fn select(&mut self, sel: &Select, params: &[Literal]) -> Result<ResultSet, SqlError> {
+    async fn select(
+        &mut self,
+        sel: &Select,
+        params: &[Literal],
+        ts: Option<TsFuture>,
+    ) -> Result<ResultSet, SqlError> {
         if sel.from.is_none() {
             let mut rs = self.const_env().select(sel, params)?;
             for c in &mut rs.columns {
@@ -247,26 +288,12 @@ impl Session {
             }
             return Ok(rs);
         }
-        let (ts, is) = self.begin_read().await?;
-        let plan = tidb_sql::plan_select(
-            sel,
-            &is,
-            PlanContext {
-                current_db: self.current_db.as_deref(),
-                params,
-                describe_only: false,
-            },
-        )?;
-        self.timer.set_kind(Kind::of(&plan));
-        self.timer.mark(Phase::Plan);
-        let mut snapshot = self.shared.kv.snapshot(ts);
-        let cx = ExecContext {
-            dag: self.shared.dag.clone(),
-            schema_version: is.version(),
+        let ts = ts.unwrap_or_else(|| TsFuture::request(&self.shared.kv));
+        let (plan, rows) = match self.optimistic_read(sel, params, ts).await? {
+            Ok(done) => done,
+            Err((start_ts, raw)) => self.checked_read(sel, params, start_ts, raw).await?,
         };
-        let rows = tidb_executor::read_source(&plan, &mut snapshot, &cx).await?;
-        self.timer.mark(Phase::KvRead);
-        let rows = tidb_executor::finish(&plan, rows, cx.dag.new_collation_enabled)?;
+        let rows = tidb_executor::finish(&plan, rows, self.shared.dag.new_collation_enabled)?;
         self.timer.mark(Phase::Finish);
         let mut columns = plan.columns;
         for c in &mut columns {
@@ -277,6 +304,94 @@ impl Session {
             rows,
             warnings: 0,
         })
+    }
+
+    fn plan(
+        &self,
+        sel: &Select,
+        is: &InfoSchema,
+        params: &[Literal],
+    ) -> Result<tidb_sql::Plan, SqlError> {
+        tidb_sql::plan_select(
+            sel,
+            is,
+            PlanContext {
+                current_db: self.current_db.as_deref(),
+                params,
+                describe_only: false,
+            },
+        )
+    }
+
+    /// Plan with the newest cached schema and read at `start_ts` while checking, concurrently
+    /// and at the same `start_ts`, that this schema is the one visible there. Returns the plan
+    /// and source rows if the check passed (read errors are returned only then), else
+    /// `Err((start_ts, raw version key if read))` for [`Session::checked_read`].
+    #[allow(clippy::type_complexity)]
+    async fn optimistic_read(
+        &mut self,
+        sel: &Select,
+        params: &[Literal],
+        ts: TsFuture,
+    ) -> Result<Result<(tidb_sql::Plan, Vec<Vec<tidb_distsql::Datum>>), (u64, Option<i64>)>, SqlError>
+    {
+        let planned = self
+            .shared
+            .schema
+            .candidate()
+            .and_then(|is| self.plan(sel, &is, params).ok().map(|plan| (is, plan)));
+        self.timer.mark(Phase::Plan);
+        let start_ts = ts.wait().await?;
+        self.timer.mark(Phase::Tso);
+        // No cached schema yet, or planning failed with it (it may not be the right one):
+        // take the checked path, which reports genuine planning errors.
+        let Some((is, plan)) = planned else {
+            return Ok(Err((start_ts, None)));
+        };
+        self.timer.set_kind(Kind::of(&plan));
+        let mut snapshot = self.shared.kv.snapshot(start_ts);
+        let cx = ExecContext {
+            dag: self.shared.dag.clone(),
+            schema_version: is.version(),
+        };
+        let (check, rows) = futures::join!(
+            self.shared.schema.check_at(&is, start_ts),
+            tidb_executor::read_source(&plan, &mut snapshot, &cx)
+        );
+        self.timer.mark(Phase::KvRead);
+        match check.map_err(kv_error)? {
+            SchemaCheck::Valid => Ok(Ok((plan, rows?))),
+            SchemaCheck::Stale { raw } => Ok(Err((start_ts, Some(raw)))),
+        }
+    }
+
+    /// The statement at `start_ts` with the schema visible there, as `begin_read` does
+    /// (`raw`: the version key at `start_ts`, if already read).
+    async fn checked_read(
+        &mut self,
+        sel: &Select,
+        params: &[Literal],
+        start_ts: u64,
+        raw: Option<i64>,
+    ) -> Result<(tidb_sql::Plan, Vec<Vec<tidb_distsql::Datum>>), SqlError> {
+        let schema = &self.shared.schema;
+        let is = match raw {
+            Some(raw) => schema.info_schema_with_raw(start_ts, raw).await,
+            None => schema.info_schema_at(start_ts).await,
+        }
+        .map_err(kv_error)?;
+        self.timer.mark(Phase::Schema);
+        let plan = self.plan(sel, &is, params)?;
+        self.timer.set_kind(Kind::of(&plan));
+        self.timer.mark(Phase::Plan);
+        let mut snapshot = self.shared.kv.snapshot(start_ts);
+        let cx = ExecContext {
+            dag: self.shared.dag.clone(),
+            schema_version: is.version(),
+        };
+        let rows = tidb_executor::read_source(&plan, &mut snapshot, &cx).await?;
+        self.timer.mark(Phase::KvRead);
+        Ok((plan, rows))
     }
 
     fn set(&mut self, assignments: &[SetAssignment]) -> Result<(), SqlError> {
@@ -427,7 +542,8 @@ impl SessionHandler for Session {
                 "You have an error in your SQL syntax; '?' is only allowed in prepared statements",
             ));
         }
-        self.run(&lowered, &[]).await
+        let ts = needs_ts(&lowered).then(|| TsFuture::request(&self.shared.kv));
+        self.run(&lowered, &[], ts).await
     }
 
     async fn prepare(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
@@ -471,9 +587,10 @@ impl SessionHandler for Session {
             .cloned()
             .ok_or_else(|| SqlError::unknown_stmt(stmt_id, "stmt_execute"))?;
         self.timer.begin();
+        let ts = needs_ts(&lowered).then(|| TsFuture::request(&self.shared.kv));
         let params = params_to_literals(params)?;
         self.timer.mark(Phase::Parse);
-        self.run(&lowered, &params).await
+        self.run(&lowered, &params, ts).await
     }
 
     fn command_done(&mut self, write: std::time::Duration, total: std::time::Duration) {

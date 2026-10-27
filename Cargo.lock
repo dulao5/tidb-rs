@@ -3396,12 +3396,14 @@ dependencies = [
 name = "tidb-session"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "tidb-distsql",
  "tidb-executor",
  "tidb-kv",
  "tidb-meta",
  "tidb-mysql-protocol",
  "tidb-sql",
+ "tokio",
 ]
 
 [[package]]
