@@ -279,16 +279,21 @@ impl SchemaCache {
                 }
             }
         };
-        let raw = probe.await.map_err(crate::Error::Shared)?;
+        let result = probe.await;
         {
             let mut probes = self.probes.lock().expect("schema probe lock");
-            if probes.done.is_none_or(|(t, _)| t < read_ts) {
-                probes.done = Some((read_ts, raw));
-            }
+            // Clear the in-flight read on failure too, so later checks retry instead of
+            // joining a failed read.
             if probes.inflight.as_ref().is_some_and(|(t, _)| *t == read_ts) {
                 probes.inflight = None;
             }
+            if let Ok(raw) = result
+                && probes.done.is_none_or(|(t, _)| t < read_ts)
+            {
+                probes.done = Some((read_ts, raw));
+            }
         }
+        let raw = result.map_err(crate::Error::Shared)?;
         Ok(self.decide(candidate, start_ts, read_ts, raw))
     }
 
