@@ -37,6 +37,9 @@ pub use tikv_client::CopRequest;
 pub use tikv_client::CopResponse;
 pub use tikv_client::transaction::REQ_TYPE_DAG;
 
+/// The read timestamp of [`KvClient::latest_snapshot`] (Go: `math.MaxUint64`).
+pub const MAX_TS: u64 = u64::MAX;
+
 /// A key-value pair returned by gets and scans.
 pub type KvPair = (Vec<u8>, Vec<u8>);
 
@@ -131,6 +134,15 @@ impl KvClient {
             .await
             .map_err(Error::from)?
             .version())
+    }
+
+    /// A snapshot that reads the latest committed version of each key without a TSO
+    /// (TiDB's MaxTS autocommit point get). Only point gets are meant to use it: they are sent
+    /// at high priority and handle locks like client-go does for `math.MaxUint64` reads (see
+    /// `docs/adr/0005-schema-sync.md`). Every get observes some committed state at or after
+    /// the moment it is sent; different gets of one such snapshot are not one snapshot.
+    pub fn latest_snapshot(&self) -> KvSnapshot {
+        self.snapshot(MAX_TS)
     }
 
     /// A read-only snapshot at `ts` (a TSO version).
