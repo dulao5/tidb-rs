@@ -1,0 +1,21 @@
+[package]
+name = "tidb-metrics"
+version = "0.0.0"
+description = "Prometheus metrics of tidb-rs under Go TiDB v8.5's names, labels and buckets, plus a Go-compatible text exposition"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# One prometheus version for the whole tree: tidb_query_common and tikv-client use 0.13 too.
+prometheus = { version = "0.13", default-features = false }
+# getrusage / getrlimit for the process collector (safe wrappers; our crates forbid unsafe).
+nix = { version = "0.29", default-features = false, features = ["feature", "resource"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Resident and virtual memory size of the own task (`proc_pidinfo(PROC_PIDTASKINFO)`).
+libproc = "0.14"
+
+[lints]
+workspace = true
