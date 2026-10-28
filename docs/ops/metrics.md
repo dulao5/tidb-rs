@@ -52,6 +52,23 @@ Add it with `additional_scrape_conf` on the monitoring server.
 
 ## Add tidb-rs to a tiup playground
 
+`scripts/playground-join.sh` does all of this for a running playground (one started with
+monitoring, i.e. without `--without-monitor`):
+
+```sh
+cargo build --release
+scripts/playground-join.sh start            # tidb-rs on 4001, status port 10081, joins the only running playground
+scripts/playground-join.sh start -t <tag> -P 4002 -s 10082 -- --log-level debug   # pick playground/ports, extra flags
+scripts/playground-join.sh status           # every node the script started in that playground
+scripts/playground-join.sh register         # re-add the targets after the playground rewrote targets.json
+scripts/playground-join.sh stop             # SIGTERM (deregisters at once), removes the targets
+```
+
+It reads the PD endpoints from the playground's pd-server processes, keeps the log and pid file
+in `~/.tiup/data/<tag>/tidb-rs-<port>/`, and edits `targets.json` as described below. Stop
+tidb-rs before the playground: once PD is gone, tidb-rs cannot deregister, and a restarted
+playground keeps waiting for the stale entry until its 90 s lease expires.
+
 Playground's Prometheus uses file-based discovery. Its `prometheus.yml` scrapes `targets.json`
 next to it, and Prometheus re-reads that file on change, so no restart is needed.
 
