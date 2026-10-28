@@ -19,6 +19,9 @@
 
 mod error;
 
+use std::time::Duration;
+use std::time::Instant;
+
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -127,7 +130,25 @@ impl KvClient {
     }
 
     /// A fresh timestamp from PD's TSO (TiDB's `start_ts`), as the 64-bit TSO version.
+    /// Awaited at once, like Go's `GetTS` (`GetTSAsync().Wait()`).
     pub async fn current_ts(&self) -> Result<u64> {
+        let start = Instant::now();
+        let ts = self.fetch_ts().await;
+        tikv_client::metrics::tso_wait(Duration::ZERO, start.elapsed());
+        ts
+    }
+
+    /// Request a timestamp now and wait for it later (Go `GetTSAsync` / `Wait`, TiDB's
+    /// `txnFuture`). Must be called inside a tokio runtime.
+    pub fn ts_future(&self) -> TsFuture {
+        let kv = self.clone();
+        TsFuture {
+            handle: tokio::spawn(async move { kv.fetch_ts().await }),
+            requested: Instant::now(),
+        }
+    }
+
+    async fn fetch_ts(&self) -> Result<u64> {
         Ok(self
             .inner
             .current_timestamp()
@@ -155,6 +176,35 @@ impl KvClient {
             ts,
         }
     }
+}
+
+/// A timestamp requested from PD ahead of the point where it is needed.
+pub struct TsFuture {
+    handle: tokio::task::JoinHandle<Result<u64>>,
+    requested: Instant,
+}
+
+impl TsFuture {
+    /// Wait for the timestamp, recording PD client's `tso_async_wait` (request to wait) and
+    /// `wait` (the wait itself) like pd/client's `tso.Request.Wait`.
+    pub async fn wait(self) -> Result<u64> {
+        let waiting = Instant::now();
+        let ts = match self.handle.await {
+            Ok(ts) => ts,
+            Err(e) => Err(Error::from(tikv_client::Error::JoinError(e))),
+        };
+        tikv_client::metrics::tso_wait(
+            waiting.saturating_duration_since(self.requested),
+            waiting.elapsed(),
+        );
+        ts
+    }
+}
+
+/// Register tikv-client's client-go / PD client metrics (`tidb_tikvclient_*`,
+/// `pd_client_*`) so they are exported from the start.
+pub fn register_client_metrics() {
+    tikv_client::metrics::register();
 }
 
 /// Reads at one snapshot timestamp. Locks met on the read path are resolved (or waited for)

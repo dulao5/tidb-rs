@@ -11,8 +11,6 @@ publish.workspace = true
 futures = { workspace = true }
 thiserror = { workspace = true }
 tikv-client = { workspace = true }
-
-[dev-dependencies]
 tokio = { workspace = true }
 
 [lints]

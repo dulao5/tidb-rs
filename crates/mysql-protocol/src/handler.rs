@@ -112,8 +112,9 @@ pub trait SessionHandler: Send + 'static {
     fn command_done(&mut self, _write: std::time::Duration, _total: std::time::Duration) {}
 
     /// Type of the statement the last `COM_QUERY` / `COM_STMT_EXECUTE` ran (Go
-    /// `StmtCtx.StmtType`, e.g. `Select`): the `sql_type` of
-    /// `tidb_server_handle_query_duration_seconds`. `General` if unknown (e.g. a parse error).
+    /// `StmtCtx.StmtType`, e.g. `Select`; it outlives the statement, so other commands report
+    /// it too): the `sql_type` of `tidb_server_handle_query_duration_seconds`. `General` if
+    /// unknown (no statement yet, a parse error, after a prepare).
     fn stmt_type(&self) -> tidb_metrics::StmtType {
         tidb_metrics::StmtType::General
     }

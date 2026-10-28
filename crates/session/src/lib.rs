@@ -254,16 +254,15 @@ fn kv_error(e: impl std::fmt::Display) -> SqlError {
 
 /// A start timestamp requested from PD ahead of the point where it is needed (Go's
 /// `txnFuture`): the request is sent when this is created.
-struct TsFuture(tokio::task::JoinHandle<tidb_kv::Result<u64>>);
+struct TsFuture(tidb_kv::TsFuture);
 
 impl TsFuture {
     fn request(kv: &KvClient) -> TsFuture {
-        let kv = kv.clone();
-        TsFuture(tokio::spawn(async move { kv.current_ts().await }))
+        TsFuture(kv.ts_future())
     }
 
     async fn wait(self) -> Result<u64, SqlError> {
-        self.0.await.map_err(kv_error)?.map_err(kv_error)
+        self.0.wait().await.map_err(kv_error)
     }
 }
 

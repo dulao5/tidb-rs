@@ -153,6 +153,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    tidb_kv::register_client_metrics();
     let result = runtime.block_on(async move {
         // Bind the status port first: its real port is what the server info advertises.
         let status_listener = if args.status_port == 0 {

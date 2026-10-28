@@ -410,16 +410,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         }
     }
 
-    /// Record a finished command: `query_total`, `handle_query_duration_seconds` (by the type of
-    /// the statement it ran; `general` for commands that run none), `execute_error_total`,
-    /// the packet bytes; then the connection is idle again.
+    /// Record a finished command: `query_total`, `handle_query_duration_seconds` (by the
+    /// session's statement type, which, as Go's `StmtCtx.StmtType`, is still the previous
+    /// statement's for commands that run none), `execute_error_total`, the packet bytes; then
+    /// the connection is idle again.
     fn command_metrics(&mut self, cmd: u8, start: Instant, error: Option<&str>) {
-        let stmt_type = match cmd {
-            command::QUERY | command::STMT_EXECUTE => self.handler.stmt_type(),
-            _ => tidb_metrics::StmtType::General,
-        };
         let now = Instant::now();
-        tidb_metrics::command_finished(cmd, stmt_type, now - start, error);
+        tidb_metrics::command_finished(cmd, self.handler.stmt_type(), now - start, error);
         self.io.flush_counts();
         self.last_active = now;
     }
