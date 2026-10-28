@@ -34,19 +34,18 @@ Add it with `additional_scrape_conf` on the monitoring server.
      - host: 10.0.1.10
        additional_scrape_conf:
          scrape_configs:
-           - job_name: "tidb"            # must be "tidb": the dashboard filters on job="tidb"
+           - job_name: "tidb-rs"         # tiup already owns a job named "tidb"; job names must be unique
              honor_labels: true
              static_configs:
                - targets: ["10.0.1.21:10081"]   # tidb-rs --status-host:--status-port
+             relabel_configs:
+               - target_label: job       # the dashboard filters on job="tidb"
+                 replacement: tidb
    ```
 
-   tiup merges `additional_scrape_conf` into the generated `prometheus.yml`. If its own `tidb`
-   job already exists, Prometheus refuses duplicate job names. In that case add the target to
-   the existing job: edit `conf/prometheus.yml` on the monitoring host and add the address to
-   the `tidb` job's `static_configs.targets`. A later `tiup cluster reload -R prometheus`
-   overwrites that edit, so re-apply it after reloads.
-   *(Check against your tiup version: whether tiup merges a same-named job or rejects it
-   depends on the version. Neither path was exercised here; see "Verified" below.)*
+   A separate job avoids clashing with tiup's generated `tidb` job, and the relabel rule gives
+   its series `job="tidb"`, so the dashboard treats the node like a Go TiDB.
+   *(Not yet exercised on a deployed cluster; see "Verified" below.)*
 2. Run `tiup cluster reload <cluster> -R prometheus`.
 3. Open Grafana, then *<cluster>-TiDB*, and pick the tidb-rs address in **Instance**. The
    variable lists every `instance` of `tidb_server_connections`.
