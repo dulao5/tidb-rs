@@ -83,7 +83,8 @@ Results are compared with Go TiDB on the same cluster (`tools/ab`) and must matc
 
 ## Performance
 
-tidb-rs compared with Go TiDB on the same cluster, Mac mini (Apple M4 Pro):
+sysbench `oltp_read_only`, tidb-rs compared with Go TiDB on the same cluster, Mac mini (Apple
+M4 Pro):
 
 | concurrency | CPU usage | QPS | P999 latency |
 |--:|--:|--:|--:|
