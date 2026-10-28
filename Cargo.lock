@@ -3579,11 +3579,17 @@ dependencies = [
 name = "tidb-server"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "clap 4.6.7",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde_json",
  "tidb-distsql",
  "tidb-domain",
  "tidb-kv",
  "tidb-meta",
+ "tidb-metrics",
  "tidb-mysql-protocol",
  "tidb-session",
  "tokio",

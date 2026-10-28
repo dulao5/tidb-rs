@@ -80,6 +80,8 @@ impl Node {
         let port = free_port();
         let child = Command::new(env!("CARGO_BIN_EXE_tidb-server"))
             .args(["--pd", pd, "--host", "127.0.0.1", "-P", &port.to_string()])
+            // Several nodes run at once: no fixed status port.
+            .args(["--status-port", "0"])
             .args(extra)
             .stdout(Stdio::null())
             .stderr(Stdio::null())

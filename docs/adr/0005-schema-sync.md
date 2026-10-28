@@ -39,10 +39,11 @@ the node then behaves exactly as in phase A and writes nothing to etcd.
     global KILL never routes here), `labels` is empty (in particular no `zone`), and
     `disable_rpc` is `true`. v8.5 ignores `disable_rpc`; newer TiDB uses it to skip the node
     for TiDB-to-TiDB RPC.
-  - `status_port` is `--advertise-status-port`, default **0**. Nothing listens there:
-    connecting to port 0 fails immediately on Linux and macOS, so Go's cluster-table fan-out
-    (`CLUSTER_*`, `cluster_config`, `cluster_load`, ...) fails fast with a warning instead of
-    hanging on a dial or gRPC timeout.
+  - `status_port` is the port of the status server (`--status-port`, default 10081, which
+    serves `/metrics` and `/status` and 404s everything else), or `--advertise-status-port`,
+    or 0 with `--status-port 0`. Go's cluster-table fan-out (`CLUSTER_*`, `cluster_config`,
+    `cluster_load`, ...) to this node fails fast with a warning either way: see
+    `docs/adr/0006-metrics.md`, "Status port".
 - `/tidb/ddl/all_schema_versions/<ddl_id>` = the loaded version (used by the owner when
   `tidb_enable_metadata_lock=OFF`). It is put at registration and advanced after each reload,
   but only once no in-flight synced statement uses an older version (see "MDL").

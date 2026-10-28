@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+mod status;
+
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -79,10 +81,19 @@ struct Args {
     /// --host is a wildcard.
     #[arg(long)]
     advertise_address: Option<IpAddr>,
-    /// `status_port` published in the server info. Nothing listens there: 0 (the default)
-    /// makes Go TiDB's cluster-table fan-out to this node fail at once with a warning.
-    #[arg(long, default_value_t = 0)]
-    advertise_status_port: u16,
+    /// Address of the status HTTP server (`/metrics`, `/status`; TiDB's status.status-host).
+    /// Default: --host.
+    #[arg(long)]
+    status_host: Option<String>,
+    /// Port of the status HTTP server (TiDB's status.status-port; 10081 avoids clashing with a
+    /// Go TiDB on 10080, as 4001 does for --port). 0 disables it.
+    #[arg(long, default_value_t = 10081)]
+    status_port: u16,
+    /// `status_port` published in the server info. Default: the status server's port, or 0
+    /// (nothing listens: Go TiDB's cluster-table fan-out to this node fails at once with a
+    /// warning) with --status-port 0.
+    #[arg(long)]
+    advertise_status_port: Option<u16>,
     /// Synced mode needs a completed reload + MDL cycle within SECS, and the node may lag the
     /// cluster's schema version at most SECS; otherwise it deregisters (DDL stops waiting
     /// for it) and statements fall back until it is in sync again.
@@ -124,6 +135,14 @@ fn main() {
         tls,
         ..ServerConfig::default()
     };
+    tidb_metrics::init(&tidb_metrics::ServerFacts {
+        version: tidb_domain::serverinfo::version_string()
+            .split_once("-TiDB-")
+            .map(|(_, v)| v.to_owned())
+            .unwrap_or_default(),
+        git_hash: tidb_domain::serverinfo::GIT_HASH.to_owned(),
+        maxprocs: worker_threads(),
+    });
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -135,6 +154,26 @@ fn main() {
         }
     };
     let result = runtime.block_on(async move {
+        // Bind the status port first: its real port is what the server info advertises.
+        let status_listener = if args.status_port == 0 {
+            None
+        } else {
+            let host = args.status_host.as_deref().unwrap_or(&args.host);
+            let listener = tokio::net::TcpListener::bind((host, args.status_port))
+                .await
+                .map_err(|e| {
+                    std::io::Error::other(format!(
+                        "listen on status address {host}:{}: {e}",
+                        args.status_port
+                    ))
+                })?;
+            Some(listener)
+        };
+        let advertised_status_port = match (args.advertise_status_port, &status_listener) {
+            (Some(p), _) => p,
+            (None, Some(l)) => l.local_addr()?.port(),
+            (None, None) => 0,
+        };
         let kv = KvClient::connect_with(args.pd.clone(), args.tikv_connections)
             .await
             .map_err(|e| std::io::Error::other(format!("connect to PD {:?}: {e}", args.pd)))?;
@@ -152,7 +191,7 @@ fn main() {
             let info = ServerInfo::new(
                 ip.to_string(),
                 u32::from(args.port),
-                u32::from(args.advertise_status_port),
+                u32::from(advertised_status_port),
             );
             let mut cfg = SyncConfig::new(args.pd.clone(), info, dag.clone());
             cfg.limits.max_staleness = Duration::from_secs_f64(args.schema_sync_max_staleness);
@@ -188,6 +227,16 @@ fn main() {
             });
         }
         let listener = tokio::net::TcpListener::bind(addr).await?;
+        let (stop_status, status_stopped) = tokio::sync::oneshot::channel::<()>();
+        if let Some(status_listener) = status_listener {
+            let info = status::StatusInfo {
+                version: config.server_version.clone(),
+                git_hash: tidb_domain::serverinfo::GIT_HASH.to_owned(),
+            };
+            tokio::spawn(status::serve(status_listener, info, async move {
+                let _ = status_stopped.await;
+            }));
+        }
         let shutdown = async {
             let mut term =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -206,6 +255,7 @@ fn main() {
             if let Some(sync) = &sync {
                 sync.shutdown().await;
             }
+            let _ = stop_status.send(());
         };
         Server::new(config, factory).serve(listener, shutdown).await
     });
@@ -213,6 +263,16 @@ fn main() {
         error!(%addr, error = %e, "server failed");
         std::process::exit(1);
     }
+}
+
+/// Worker threads of the multi-threaded runtime (tokio: `TOKIO_WORKER_THREADS`, else the
+/// available parallelism), reported as `tidb_server_maxprocs` (Go: `GOMAXPROCS`).
+fn worker_threads() -> usize {
+    std::env::var("TOKIO_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
 /// The IP published in the server info: --advertise-address, else --host unless it is a
