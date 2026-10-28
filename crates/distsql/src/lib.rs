@@ -89,8 +89,14 @@ pub async fn select(
     if let Some((min, max)) = options.paging {
         req = req.paging(min, max);
     }
+    let paging = options.paging.is_some();
+    let start = std::time::Instant::now();
+    let responses = snapshot.coprocessor(req).await?.collect_all().await?;
+    // Go `selectResult.fetchResp`: the time spent waiting for coprocessor responses, recorded
+    // once the last one arrived.
+    tidb_metrics::distsql_query(start.elapsed(), paging);
     let mut out = SelectRows::default();
-    for resp in snapshot.coprocessor(req).await?.collect_all().await? {
+    for resp in responses {
         let part = decode_select_response(&resp.data, &plan.output_types)?;
         out.rows.extend(part.rows);
         out.warnings.extend(part.warnings);

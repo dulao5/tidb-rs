@@ -23,8 +23,10 @@
 pub mod constant;
 pub mod timing;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use tidb_distsql::DagContext;
@@ -36,6 +38,8 @@ use tidb_kv::KvClient;
 use tidb_meta::InfoSchema;
 use tidb_meta::SchemaCache;
 use tidb_meta::SchemaCheck;
+use tidb_metrics::ExpensiveExec;
+use tidb_metrics::StmtType;
 use tidb_mysql_protocol::ConnectionInfo;
 use tidb_mysql_protocol::Credential;
 use tidb_mysql_protocol::OkInfo;
@@ -135,6 +139,7 @@ impl SessionFactory for Factory {
             stmts: HashMap::new(),
             timer: Timer::default(),
             mdl: None,
+            stmt: StmtMetrics::default(),
         })
     }
 }
@@ -159,6 +164,88 @@ pub struct Session {
     /// Metadata-lock entry of the current synced statement, released once its response has
     /// been written (`command_done`).
     mdl: Option<StmtGuard>,
+    /// Prometheus bookkeeping of the statement in flight.
+    stmt: StmtMetrics,
+}
+
+/// What the Go session metrics need to know about the statement in flight: its type and how
+/// its time splits into parse / compile / execute (Go `SessionVars.DurationParse`,
+/// `DurationCompile`, `GetExecuteDuration`), and whether it ran in a transaction with a start
+/// timestamp (Go records `tidb_session_transaction_duration_seconds` when such an autocommit
+/// transaction commits; MaxTS point gets never activate one).
+#[derive(Default)]
+struct StmtMetrics {
+    /// A statement got past parsing; cleared once recorded.
+    active: bool,
+    stmt_type: Option<StmtType>,
+    parse: Duration,
+    /// Planning time (a `Cell`: `plan` takes `&self`).
+    compile: Cell<Duration>,
+    took_ts: bool,
+    failed: bool,
+}
+
+impl StmtMetrics {
+    /// A statement of type `t` starts executing after `parse` (`COM_QUERY`: parsing,
+    /// `COM_STMT_EXECUTE`: decoding parameters, which Go does not count as parsing).
+    fn start(&mut self, t: StmtType, parse: Duration) {
+        *self = StmtMetrics {
+            active: true,
+            stmt_type: Some(t),
+            parse,
+            ..StmtMetrics::default()
+        };
+        tidb_metrics::statement(t);
+    }
+
+    /// The statement's response was written; `total` is the whole command (Go: total cost).
+    fn finish(&mut self, total: Duration) {
+        if !std::mem::take(&mut self.active) {
+            return;
+        }
+        let compile = self.compile.get();
+        tidb_metrics::compile_duration(compile);
+        tidb_metrics::execute_duration(total.saturating_sub(self.parse + compile));
+        if self.took_ts && !self.failed {
+            tidb_metrics::transaction(total.saturating_sub(self.parse), true);
+        }
+        if total >= tidb_metrics::SLOW_THRESHOLD {
+            tidb_metrics::slow_query(total);
+        }
+    }
+}
+
+/// Go `ast.GetStmtLabel`.
+fn stmt_type(stmt: &Statement) -> StmtType {
+    match stmt {
+        Statement::Select(_) => StmtType::Select,
+        Statement::Use(_) => StmtType::Use,
+        Statement::Set(_) => StmtType::Set,
+        Statement::Begin => StmtType::Begin,
+        Statement::Commit => StmtType::Commit,
+        Statement::Rollback => StmtType::Rollback,
+        Statement::ShowWarnings { .. } => StmtType::Show,
+    }
+}
+
+/// The executors Go's builder counts in `tidb_executor_expensive_total` for this plan: the root
+/// aggregation (`HashAgg` with GROUP BY, `StreamAgg` for a scalar aggregate over a pushed
+/// partial one, as Go plans the sysbench statements) and the root sort (`TopN` with a limit).
+fn count_expensive(plan: &tidb_sql::Plan) {
+    if let Some(agg) = &plan.agg {
+        tidb_metrics::expensive(if agg.group_by.is_empty() {
+            ExpensiveExec::StreamAgg
+        } else {
+            ExpensiveExec::HashAgg
+        });
+    }
+    if !plan.sort.is_empty() {
+        tidb_metrics::expensive(if plan.limit.is_some() {
+            ExpensiveExec::TopN
+        } else {
+            ExpensiveExec::Sort
+        });
+    }
 }
 
 fn kv_error(e: impl std::fmt::Display) -> SqlError {
@@ -363,6 +450,7 @@ impl Session {
                 }
             }
         };
+        count_expensive(&plan);
         let rows = tidb_executor::finish(&plan, rows, self.shared.dag.new_collation_enabled)?;
         self.timer.mark(Phase::Finish);
         let mut columns = plan.columns;
@@ -382,7 +470,8 @@ impl Session {
         is: &InfoSchema,
         params: &[Literal],
     ) -> Result<tidb_sql::Plan, SqlError> {
-        tidb_sql::plan_select(
+        let start = Instant::now();
+        let plan = tidb_sql::plan_select(
             sel,
             is,
             PlanContext {
@@ -390,7 +479,10 @@ impl Session {
                 params,
                 describe_only: false,
             },
-        )
+        );
+        let compile = &self.stmt.compile;
+        compile.set(compile.get() + start.elapsed());
+        plan
     }
 
     /// Synced mode (ADR 0005): plan with the newest loaded schema, narrow the statement's
@@ -413,6 +505,7 @@ impl Session {
             self.shared.kv.latest_snapshot()
         } else {
             let start_ts = TsFuture::request(&self.shared.kv).wait().await?;
+            self.stmt.took_ts = true;
             self.timer.mark(Phase::Tso);
             self.shared.kv.snapshot(start_ts)
         };
@@ -448,6 +541,7 @@ impl Session {
             .and_then(|is| self.plan(sel, &is, params).ok().map(|plan| (is, plan)));
         self.timer.mark(Phase::Plan);
         let start_ts = ts.wait().await?;
+        self.stmt.took_ts = true;
         self.timer.mark(Phase::Tso);
         // No cached schema yet, or planning failed with it (it may not be the right one):
         // take the checked path, which reports genuine planning errors.
@@ -639,9 +733,53 @@ fn params_to_literals(params: Vec<Param>) -> Result<Vec<Literal>, SqlError> {
 
 impl SessionHandler for Session {
     async fn query(&mut self, sql: &str) -> Result<Response, SqlError> {
+        let r = self.query_inner(sql).await;
+        self.stmt.failed = r.is_err();
+        r
+    }
+
+    async fn prepare(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
+        self.stmt.stmt_type = None;
+        self.prepare_inner(stmt_id, sql).await
+    }
+
+    async fn execute(&mut self, stmt_id: u32, params: Vec<Param>) -> Result<Response, SqlError> {
+        let r = self.execute_inner(stmt_id, params).await;
+        self.stmt.failed = r.is_err();
+        r
+    }
+
+    fn command_done(&mut self, write: std::time::Duration, total: std::time::Duration) {
+        self.mdl = None;
+        self.timer.end(write, total);
+        self.stmt.finish(total);
+    }
+
+    fn stmt_type(&self) -> StmtType {
+        self.stmt.stmt_type.unwrap_or(StmtType::General)
+    }
+
+    fn close(&mut self, stmt_id: u32) {
+        self.stmts.remove(&stmt_id);
+    }
+
+    async fn use_db(&mut self, db: &str) -> Result<(), SqlError> {
+        // COM_INIT_DB and the handshake's database: Go runs them as a `USE` statement.
+        tidb_metrics::statement(StmtType::Use);
+        self.use_db_inner(db).await
+    }
+}
+
+impl Session {
+    async fn query_inner(&mut self, sql: &str) -> Result<Response, SqlError> {
         self.timer.begin();
         self.mdl = None;
+        self.stmt.stmt_type = None;
+        let start = Instant::now();
         let lowered = tidb_sql::parse_and_lower(sql)?;
+        let parse = start.elapsed();
+        tidb_metrics::parse_duration(parse);
+        self.stmt.start(stmt_type(&lowered.stmt), parse);
         self.timer.mark(Phase::Parse);
         if lowered.param_count > 0 {
             return Err(SqlError::new(
@@ -654,7 +792,7 @@ impl SessionHandler for Session {
         self.run(&lowered, &[], ts).await
     }
 
-    async fn prepare(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
+    async fn prepare_inner(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
         let lowered = tidb_sql::parse_and_lower(sql)?;
         let param_count = u16::try_from(lowered.param_count).map_err(|_| {
             SqlError::new(1390, "Prepared statement contains too many placeholders")
@@ -688,7 +826,12 @@ impl SessionHandler for Session {
         })
     }
 
-    async fn execute(&mut self, stmt_id: u32, params: Vec<Param>) -> Result<Response, SqlError> {
+    async fn execute_inner(
+        &mut self,
+        stmt_id: u32,
+        params: Vec<Param>,
+    ) -> Result<Response, SqlError> {
+        self.stmt.stmt_type = None;
         let lowered = self
             .stmts
             .get(&stmt_id)
@@ -696,23 +839,18 @@ impl SessionHandler for Session {
             .ok_or_else(|| SqlError::unknown_stmt(stmt_id, "stmt_execute"))?;
         self.timer.begin();
         self.mdl = None;
+        let start = Instant::now();
         let ts =
             (needs_ts(&lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
         let params = params_to_literals(params)?;
+        self.stmt.start(stmt_type(&lowered.stmt), start.elapsed());
+        // No plan cache: every execute plans again (Go counts a prepared plan cache miss).
+        tidb_metrics::plan_cache_miss_prepared();
         self.timer.mark(Phase::Parse);
         self.run(&lowered, &params, ts).await
     }
 
-    fn command_done(&mut self, write: std::time::Duration, total: std::time::Duration) {
-        self.mdl = None;
-        self.timer.end(write, total);
-    }
-
-    fn close(&mut self, stmt_id: u32) {
-        self.stmts.remove(&stmt_id);
-    }
-
-    async fn use_db(&mut self, db: &str) -> Result<(), SqlError> {
+    async fn use_db_inner(&mut self, db: &str) -> Result<(), SqlError> {
         let is = self.name_schema().await?;
         if is.schema_by_name(db).is_none() {
             return Err(SqlError::bad_db(db));

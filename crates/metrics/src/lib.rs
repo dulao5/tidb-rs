@@ -149,6 +149,25 @@ pub fn command_label(cmd: u8) -> &'static str {
     }
 }
 
+/// The `type` of `tidb_server_execute_error_total` for a MySQL error code (Go
+/// `metrics.ExecuteErrorToLabel`: the `class:code` RFC code of a `terror.Error`, `unknown`
+/// for other errors). Codes whose Go error class is unambiguous for the statements this node
+/// runs get Go's label; the rest are `unknown`.
+pub fn error_label(code: u16) -> &'static str {
+    match code {
+        // parser.ErrParse
+        1064 => "parser:1064",
+        // infoschema.ErrTableNotExists / ErrDatabaseNotExists
+        1146 => "schema:1146",
+        1049 => "schema:1049",
+        // plannererrors.ErrUnknownColumn / ErrNoDB / ErrNonUniq
+        1054 => "planner:1054",
+        1046 => "planner:1046",
+        1052 => "planner:1052",
+        _ => "unknown",
+    }
+}
+
 /// The commands whose `query_total` children Go creates at start-up
 /// (`server/metrics.InitMetricsVars`).
 const NAMED_COMMANDS: [u8; 13] = [

@@ -65,16 +65,23 @@ pub(crate) async fn run<S, F>(
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
 {
+    // Go counts the connection from accept (`newConn`) until it is closed.
+    let _gauge = ConnectionGauge::new();
+    let accepted = Instant::now();
     let io = PacketIo::new(MaybeTls::Plain(stream), config.max_allowed_packet);
     let mut conn = match handshake(io, &peer, connection_id, config, factory).await {
-        Ok((io, Some((handler, capability)))) => Conn {
-            io,
-            capability,
-            handler,
-            stmts: HashMap::new(),
-            next_stmt_id: 1,
-            started,
-        },
+        Ok((mut io, Some((handler, capability)))) => {
+            io.flush_counts();
+            Conn {
+                io,
+                capability,
+                handler,
+                stmts: HashMap::new(),
+                next_stmt_id: 1,
+                started,
+                last_active: accepted,
+            }
+        }
         Ok((_, None)) => return,
         Err(e) => {
             debug!(connection_id, %peer, error = %e, "handshake failed");
@@ -88,6 +95,22 @@ pub(crate) async fn run<S, F>(
     }
     let _ = conn.io.shutdown().await;
     debug!(connection_id, "connection closed");
+}
+
+/// `tidb_server_connections` for one connection: up when created, down when dropped.
+struct ConnectionGauge;
+
+impl ConnectionGauge {
+    fn new() -> Self {
+        tidb_metrics::connection_opened();
+        ConnectionGauge
+    }
+}
+
+impl Drop for ConnectionGauge {
+    fn drop(&mut self) {
+        tidb_metrics::connection_closed();
+    }
 }
 
 /// Writes an ERR packet (`#` + SQLSTATE only for 4.1 clients).
@@ -317,6 +340,9 @@ struct Conn<S, H> {
     next_stmt_id: u32,
     /// When the server started (for COM_STATISTICS uptime).
     started: Instant,
+    /// When the previous command finished (Go `clientConn.lastActive`), for
+    /// `tidb_server_conn_idle_duration_seconds`.
+    last_active: Instant,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
@@ -325,40 +351,77 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             self.io.reset_sequence();
             let data = match self.io.read_packet().await {
                 Ok(d) => d,
-                Err(PacketError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => return,
+                Err(PacketError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                    // Go: any read failure, a client closing without COM_QUIT included.
+                    tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
+                    return;
+                }
                 Err(PacketError::TooLarge) => {
                     let e = SqlError::new(
                         code::ER_NET_PACKET_TOO_LARGE,
                         PacketError::TooLarge.to_string(),
                     );
                     let _ = write_err(&mut self.io, self.capability, &e).await;
+                    tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
                     return;
                 }
                 Err(e) => {
                     warn!(connection_id, error = %e, "read packet failed, closing connection");
+                    tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
                     return;
                 }
             };
+            // Go `clientConn.Run` / `dispatch` / `addMetrics`.
+            let start = Instant::now();
+            tidb_metrics::command_started(start.saturating_duration_since(self.last_active));
+            let cmd = data.first().copied();
             let result = match data.split_first() {
                 None => Err(ConnError::Sql(SqlError::malformed())),
-                Some((&command::QUIT, _)) => return,
+                Some((&command::QUIT, _)) => {
+                    self.command_metrics(command::QUIT, start, None);
+                    tidb_metrics::disconnected(tidb_metrics::Disconnect::Ok);
+                    return;
+                }
                 Some((&cmd, body)) => self.dispatch(cmd, body).await,
             };
-            match result {
-                Ok(()) => {}
+            let (error, keep_going) = match result {
+                Ok(()) => (None, true),
                 Err(ConnError::Sql(e)) => {
                     debug!(connection_id, error = %e, "command failed");
-                    if let Err(e) = write_err(&mut self.io, self.capability, &e).await {
-                        debug!(connection_id, error = %e, "write error packet failed");
-                        return;
+                    let label = tidb_metrics::error_label(e.code);
+                    match write_err(&mut self.io, self.capability, &e).await {
+                        Ok(()) => (Some(label), true),
+                        Err(e) => {
+                            debug!(connection_id, error = %e, "write error packet failed");
+                            (Some(label), false)
+                        }
                     }
                 }
                 Err(ConnError::Fatal(e)) => {
                     debug!(connection_id, error = %e, "connection error");
-                    return;
+                    (Some("unknown"), false)
                 }
+            };
+            self.command_metrics(cmd.unwrap_or(command::SLEEP), start, error);
+            if !keep_going {
+                tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
+                return;
             }
         }
+    }
+
+    /// Record a finished command: `query_total`, `handle_query_duration_seconds` (by the type of
+    /// the statement it ran; `general` for commands that run none), `execute_error_total`,
+    /// the packet bytes; then the connection is idle again.
+    fn command_metrics(&mut self, cmd: u8, start: Instant, error: Option<&str>) {
+        let stmt_type = match cmd {
+            command::QUERY | command::STMT_EXECUTE => self.handler.stmt_type(),
+            _ => tidb_metrics::StmtType::General,
+        };
+        let now = Instant::now();
+        tidb_metrics::command_finished(cmd, stmt_type, now - start, error);
+        self.io.flush_counts();
+        self.last_active = now;
     }
 
     async fn dispatch(&mut self, cmd: u8, body: &[u8]) -> Result<(), ConnError> {

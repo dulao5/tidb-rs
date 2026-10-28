@@ -111,6 +111,13 @@ pub trait SessionHandler: Send + 'static {
     /// command packet was read. For statistics only; the default ignores it.
     fn command_done(&mut self, _write: std::time::Duration, _total: std::time::Duration) {}
 
+    /// Type of the statement the last `COM_QUERY` / `COM_STMT_EXECUTE` ran (Go
+    /// `StmtCtx.StmtType`, e.g. `Select`): the `sql_type` of
+    /// `tidb_server_handle_query_duration_seconds`. `General` if unknown (e.g. a parse error).
+    fn stmt_type(&self) -> tidb_metrics::StmtType {
+        tidb_metrics::StmtType::General
+    }
+
     /// Server status flags for OK/EOF packets. Read-only autocommit node: always
     /// `SERVER_STATUS_AUTOCOMMIT` unless overridden.
     fn status_flags(&self) -> u16 {

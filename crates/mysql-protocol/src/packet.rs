@@ -54,6 +54,33 @@ pub struct PacketIo<S> {
     stream: BufReader<BufWriter<S>>,
     seq: u8,
     max_allowed_packet: usize,
+    counts: IoCounts,
+}
+
+/// Bytes read and written since the last [`IoCounts::flush`] into
+/// `tidb_server_packet_io_bytes`. Counting per packet locally and publishing once per command
+/// keeps the shared counters off the per-row path; dropping flushes the rest.
+#[derive(Debug, Default)]
+struct IoCounts {
+    read: u64,
+    written: u64,
+}
+
+impl IoCounts {
+    fn flush(&mut self) {
+        if self.read > 0 {
+            tidb_metrics::packet_in(std::mem::take(&mut self.read) as usize);
+        }
+        if self.written > 0 {
+            tidb_metrics::packet_out(std::mem::take(&mut self.written) as usize);
+        }
+    }
+}
+
+impl Drop for IoCounts {
+    fn drop(&mut self) {
+        self.flush();
+    }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> PacketIo<S> {
@@ -65,7 +92,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PacketIo<S> {
             ),
             seq: 0,
             max_allowed_packet,
+            counts: IoCounts::default(),
         }
+    }
+
+    /// Publish the bytes counted so far to `tidb_server_packet_io_bytes`.
+    pub fn flush_counts(&mut self) {
+        self.counts.flush();
     }
 
     /// Next sequence id expected/used.
@@ -117,6 +150,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PacketIo<S> {
             payload.resize(start + len, 0);
             self.stream.read_exact(&mut payload[start..]).await?;
             if len < MAX_PAYLOAD_LEN {
+                // Go counts the payload of the logical packet, without headers.
+                self.counts.read += payload.len() as u64;
                 return Ok(payload);
             }
         }
@@ -125,6 +160,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PacketIo<S> {
     /// Buffers one logical packet, splitting it if needed. A payload whose length is a multiple
     /// of `MAX_PAYLOAD_LEN` is terminated by an empty packet.
     pub async fn write_packet(&mut self, payload: &[u8]) -> io::Result<()> {
+        // Go counts the logical packet with one 4-byte header.
+        self.counts.written += payload.len() as u64 + 4;
         let mut rest = payload;
         loop {
             let n = rest.len().min(MAX_PAYLOAD_LEN);

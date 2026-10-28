@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tidb-kv = { workspace = true }
 tidb-meta = { workspace = true }
+tidb-metrics = { workspace = true }
 tidb_query_datatype = { workspace = true }
 tipb = { workspace = true }
 tipb_helper = { workspace = true }

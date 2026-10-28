@@ -14,6 +14,7 @@ tidb-domain = { workspace = true }
 tidb-executor = { workspace = true }
 tidb-kv = { workspace = true }
 tidb-meta = { workspace = true }
+tidb-metrics = { workspace = true }
 tidb-mysql-protocol = { workspace = true }
 tidb-sql = { workspace = true }
 tokio = { workspace = true }
