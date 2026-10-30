@@ -209,7 +209,7 @@ fn parse_replace_regex(arg: &str) -> Result<Vec<(Regex, String)>, String> {
 /// Parses `--replace_column 1 <x> 3 <y>`.
 fn parse_replace_column(arg: &str) -> Result<Vec<(usize, String)>, String> {
     let f: Vec<&str> = arg.split_whitespace().collect();
-    if f.len() % 2 != 0 {
+    if !f.len().is_multiple_of(2) {
         return Err(format!("bad replace_column {arg:?}"));
     }
     f.chunks(2)
@@ -280,7 +280,12 @@ fn brief(o: &Outcome) -> String {
 }
 
 /// Judges a read: (verdict, kind, detail).
-fn judge(a: &Outcome, b: &Outcome, ordered: bool, status_only: bool) -> (StmtOutcome, String, String) {
+fn judge(
+    a: &Outcome,
+    b: &Outcome,
+    ordered: bool,
+    status_only: bool,
+) -> (StmtOutcome, String, String) {
     if let Outcome::Error { code, message, .. } = b
         && *code == ER_NOT_SUPPORTED_YET
     {
@@ -313,13 +318,12 @@ fn judge(a: &Outcome, b: &Outcome, ordered: bool, status_only: bool) -> (StmtOut
             (StmtOutcome::Match, String::new(), String::new())
         }
         _ => match compare(a, b, ordered) {
-            Verdict::Match | Verdict::BothError => (StmtOutcome::Match, String::new(), String::new()),
+            Verdict::Match | Verdict::BothError => {
+                (StmtOutcome::Match, String::new(), String::new())
+            }
             Verdict::Unsupported => (StmtOutcome::Unsupported, String::new(), String::new()),
             Verdict::Mismatch(d) => {
-                let kind = if matches!(
-                    (a, b),
-                    (Outcome::Rows { .. }, Outcome::Rows { .. })
-                ) {
+                let kind = if matches!((a, b), (Outcome::Rows { .. }, Outcome::Rows { .. })) {
                     mismatch_kind(&d)
                 } else {
                     "shape"
@@ -383,15 +387,7 @@ impl Runner<'_> {
 
     async fn new_conn(&self, user: &str, password: &str, db: Option<&str>) -> Result<Conn, String> {
         let mk = |label, ep: &str| {
-            Side::new(
-                label,
-                ep,
-                user,
-                password,
-                db,
-                self.ep.tls,
-                self.ep.timeout,
-            )
+            Side::new(label, ep, user, password, db, self.ep.tls, self.ep.timeout)
         };
         let mut a = mk("A", &self.ep.a)?;
         a.ensure_connected().await?;
@@ -485,7 +481,9 @@ impl Runner<'_> {
                         }
                         Err(e) => {
                             // mysql-tester would abort the file here.
-                            eprintln!("{test}:{line}: connect {name} failed on A: {e}; rest of file skipped");
+                            eprintln!(
+                                "{test}:{line}: connect {name} failed on A: {e}; rest of file skipped"
+                            );
                             break;
                         }
                     }
@@ -516,7 +514,17 @@ impl Runner<'_> {
                     };
                     let t0 = Instant::now();
                     let rec = self
-                        .run_stmt(test, line, &cur, conn, &sql, &p, warnings, result_log, &mut counts)
+                        .run_stmt(
+                            test,
+                            line,
+                            &cur,
+                            conn,
+                            &sql,
+                            &p,
+                            warnings,
+                            result_log,
+                            &mut counts,
+                        )
                         .await;
                     let ms = t0.elapsed().as_millis();
                     self.write_stmt(&rec.as_rec(test, line, &cur, &sql, ms), &mut counts);
@@ -642,9 +650,7 @@ impl Runner<'_> {
                 let mut ob = conn.b.query(sql).await;
                 // A read right after DDL: B's schema sync should already have the new schema
                 // (the DDL owner waits for it). Retry once to detect lag.
-                if !a_failed
-                    && matches!(error_code(&ob), Some(1146 | 1049 | 1054 | 1051 | 1046))
-                {
+                if !a_failed && matches!(error_code(&ob), Some(1146 | 1049 | 1054 | 1051 | 1046)) {
                     tokio::time::sleep(Duration::from_millis(1500)).await;
                     let again = conn.b.query(sql).await;
                     if error_code(&again) != error_code(&ob) {
@@ -746,7 +752,10 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
         });
     }
     if tests.is_empty() {
-        return Err(format!("no .test files selected under {}", opts.dir.display()));
+        return Err(format!(
+            "no .test files selected under {}",
+            opts.dir.display()
+        ));
     }
     std::fs::create_dir_all(&opts.out_dir)
         .map_err(|e| format!("{}: {e}", opts.out_dir.display()))?;
@@ -768,28 +777,12 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
     .map_err(|e| e.to_string())?;
     writeln!(w.files, "{FILE_COLUMNS}").map_err(|e| e.to_string())?;
 
-    let mut admin = Side::new(
-        "A",
-        &ep.a,
-        &ep.user,
-        &ep.password,
-        None,
-        ep.tls,
-        ep.timeout,
-    )?;
+    let mut admin = Side::new("A", &ep.a, &ep.user, &ep.password, None, ep.tls, ep.timeout)?;
     admin
         .ensure_connected()
         .await
         .map_err(|e| format!("cannot connect to A: {e}"))?;
-    let mut b_probe = Side::new(
-        "B",
-        &ep.b,
-        &ep.user,
-        &ep.password,
-        None,
-        ep.tls,
-        ep.timeout,
-    )?;
+    let mut b_probe = Side::new("B", &ep.b, &ep.user, &ep.password, None, ep.tls, ep.timeout)?;
     b_probe
         .ensure_connected()
         .await
@@ -897,15 +890,30 @@ mod tests {
 
     #[test]
     fn judges() {
-        assert_eq!(judge(&rows(&["1"]), &rows(&["1"]), true, false).0, StmtOutcome::Match);
+        assert_eq!(
+            judge(&rows(&["1"]), &rows(&["1"]), true, false).0,
+            StmtOutcome::Match
+        );
         let (v, k, _) = judge(&rows(&["1"]), &rows(&["2"]), false, false);
         assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "rows"));
         let (v, k, _) = judge(&rows(&["1", "2"]), &rows(&["2", "1"]), true, false);
         assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "order"));
-        assert_eq!(judge(&rows(&["1"]), &rows(&["2"]), false, true).0, StmtOutcome::Match);
-        assert_eq!(judge(&rows(&[]), &err(1235), false, false).0, StmtOutcome::Unsupported);
-        assert_eq!(judge(&rows(&[]), &err(1105), false, false).0, StmtOutcome::BError);
-        assert_eq!(judge(&err(1146), &err(1146), false, false).0, StmtOutcome::Match);
+        assert_eq!(
+            judge(&rows(&["1"]), &rows(&["2"]), false, true).0,
+            StmtOutcome::Match
+        );
+        assert_eq!(
+            judge(&rows(&[]), &err(1235), false, false).0,
+            StmtOutcome::Unsupported
+        );
+        assert_eq!(
+            judge(&rows(&[]), &err(1105), false, false).0,
+            StmtOutcome::BError
+        );
+        assert_eq!(
+            judge(&err(1146), &err(1146), false, false).0,
+            StmtOutcome::Match
+        );
         let (v, k, _) = judge(&err(1146), &err(1105), false, false);
         assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "error"));
         let (v, k, _) = judge(&err(1146), &rows(&[]), false, false);
@@ -928,7 +936,10 @@ mod tests {
         let Outcome::Rows { rows, .. } = o else {
             panic!()
         };
-        assert_eq!(rows[0], vec!["\"<num> Bytes c\"".to_string(), "<x>".to_string()]);
+        assert_eq!(
+            rows[0],
+            vec!["\"<num> Bytes c\"".to_string(), "<x>".to_string()]
+        );
         assert_eq!(db_name("executor/aggregate"), "executor__aggregate");
         assert_eq!(tsv("a\tb\nc\\"), "a\\tb\\nc\\\\");
     }

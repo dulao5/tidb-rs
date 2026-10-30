@@ -12,7 +12,11 @@ use crate::sql::{Word, words};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     /// `--cmd arg` (cmd lower-cased, `;` stripped from the end).
-    Directive { line: usize, cmd: String, arg: String },
+    Directive {
+        line: usize,
+        cmd: String,
+        arg: String,
+    },
     /// A SQL statement without its trailing `;`.
     Query { line: usize, sql: String },
     /// `connect (name, host, user, password, db)`.
@@ -109,7 +113,9 @@ fn query_item(line: usize, q: &str) -> Option<Item> {
         return None;
     }
     let lower = sql.to_ascii_lowercase();
-    let first = lower.split(|c: char| c.is_whitespace() || c == '(').next()?;
+    let first = lower
+        .split(|c: char| c.is_whitespace() || c == '(')
+        .next()?;
     let rest = sql[first.len()..].trim();
     match first {
         "connect" => {
@@ -174,8 +180,16 @@ pub fn classify(sql: &str, prepared_read: impl Fn(&str) -> Option<bool>) -> Clas
                 let stmt = w[a + 2..].iter().position(|x| {
                     matches!(
                         x.text.as_str(),
-                        "SELECT" | "TABLE" | "VALUES" | "WITH" | "INSERT" | "UPDATE" | "DELETE"
-                            | "REPLACE" | "LOAD" | "IMPORT"
+                        "SELECT"
+                            | "TABLE"
+                            | "VALUES"
+                            | "WITH"
+                            | "INSERT"
+                            | "UPDATE"
+                            | "DELETE"
+                            | "REPLACE"
+                            | "LOAD"
+                            | "IMPORT"
                     )
                 });
                 return match stmt.map(|p| select_class(&w[a + 2 + p..])) {
@@ -322,7 +336,10 @@ pub fn txn_effect(sql: &str) -> TxnEffect {
         }
         "SET" => {
             let i = w.iter().position(|x| {
-                let t = x.text.trim_start_matches("@@SESSION.").trim_start_matches("@@");
+                let t = x
+                    .text
+                    .trim_start_matches("@@SESSION.")
+                    .trim_start_matches("@@");
                 t == "AUTOCOMMIT"
             });
             match i.and_then(|i| w.get(i + 1)).map(|x| x.text.as_str()) {
@@ -435,26 +452,56 @@ mod tests {
     fn classifies() {
         let none = |_: &str| None;
         assert_eq!(classify("select * from t", none), Class::Read("select"));
-        assert_eq!(classify("(select 1) union (select 2)", none), Class::Read("select"));
+        assert_eq!(
+            classify("(select 1) union (select 2)", none),
+            Class::Read("select")
+        );
         assert_eq!(classify("show create table t", none), Class::Read("show"));
-        assert_eq!(classify("explain format='brief' select 1", none), Class::Read("explain"));
+        assert_eq!(
+            classify("explain format='brief' select 1", none),
+            Class::Read("explain")
+        );
         assert_eq!(classify("desc t", none), Class::Read("explain"));
-        assert_eq!(classify("explain analyze select 1", none), Class::Read("explain"));
-        assert_eq!(classify("explain analyze insert into t values (1)", none), Class::Write);
-        assert_eq!(classify("explain insert into t values (1)", none), Class::Read("explain"));
+        assert_eq!(
+            classify("explain analyze select 1", none),
+            Class::Read("explain")
+        );
+        assert_eq!(
+            classify("explain analyze insert into t values (1)", none),
+            Class::Write
+        );
+        assert_eq!(
+            classify("explain insert into t values (1)", none),
+            Class::Read("explain")
+        );
         assert_eq!(classify("select * from t for update", none), Class::Write);
         assert_eq!(classify("select 1 into @a", none), Class::Session);
-        assert_eq!(classify("with x as (select 1) delete from t", none), Class::Write);
+        assert_eq!(
+            classify("with x as (select 1) delete from t", none),
+            Class::Write
+        );
         assert_eq!(classify("set @@tidb_x = 1", none), Class::Session);
         assert_eq!(classify("set global tidb_x = 1", none), Class::Write);
         assert_eq!(classify("use test", none), Class::Session);
         assert_eq!(classify("prepare s from 'select 1'", none), Class::Session);
-        assert_eq!(classify("execute s using @a", |_| Some(true)), Class::Read("select"));
+        assert_eq!(
+            classify("execute s using @a", |_| Some(true)),
+            Class::Read("select")
+        );
         assert_eq!(classify("execute s", |_| Some(false)), Class::Write);
         assert_eq!(classify("insert into t values (1)", none), Class::Write);
         assert_eq!(classify("admin show ddl jobs", none), Class::Write);
-        assert_eq!(classify("select insert('abc', 1, 1, 'x'), replace(a, 'b', 'c') from t", none), Class::Read("select"));
-        assert_eq!(classify("explain analyze format='brief' select 1", none), Class::Read("explain"));
+        assert_eq!(
+            classify(
+                "select insert('abc', 1, 1, 'x'), replace(a, 'b', 'c') from t",
+                none
+            ),
+            Class::Read("select")
+        );
+        assert_eq!(
+            classify("explain analyze format='brief' select 1", none),
+            Class::Read("explain")
+        );
     }
 
     #[test]
@@ -463,22 +510,28 @@ mod tests {
             prepare_parts("prepare stmt from 'select ? from t where a=''x'''"),
             Some(("stmt".into(), Some("select ? from t where a='x'".into())))
         );
-        assert_eq!(
-            prepare_parts("PREPARE s FROM @q"),
-            Some(("s".into(), None))
-        );
+        assert_eq!(prepare_parts("PREPARE s FROM @q"), Some(("s".into(), None)));
         assert_eq!(txn_effect("begin"), TxnEffect::Begin);
         assert_eq!(txn_effect("start transaction read only"), TxnEffect::Begin);
         assert_eq!(txn_effect("commit"), TxnEffect::End);
         assert_eq!(txn_effect("create table t (a int)"), TxnEffect::End);
-        assert_eq!(txn_effect("create temporary table t (a int)"), TxnEffect::None);
+        assert_eq!(
+            txn_effect("create temporary table t (a int)"),
+            TxnEffect::None
+        );
         assert_eq!(txn_effect("set autocommit = 0"), TxnEffect::AutocommitOff);
-        assert_eq!(txn_effect("set @@session.autocommit=ON"), TxnEffect::AutocommitOn);
+        assert_eq!(
+            txn_effect("set @@session.autocommit=ON"),
+            TxnEffect::AutocommitOn
+        );
         assert_eq!(
             local_temporary_table("create temporary table if not exists tmp1 (a int)"),
             Some("tmp1".into())
         );
-        assert_eq!(local_temporary_table("create global temporary table g (a int)"), None);
+        assert_eq!(
+            local_temporary_table("create global temporary table g (a int)"),
+            None
+        );
         let names = ["tmp1".to_string()].into_iter().collect();
         assert!(mentions("select * from test.tmp1", &names));
         assert!(!mentions("select 'tmp1' from t", &names));

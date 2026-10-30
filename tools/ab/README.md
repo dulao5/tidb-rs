@@ -82,13 +82,86 @@ and USE also run on B so both sessions stay in sync. SELECT-like statements also
 prepared statements without parameters unless `--no-prepared`. Examples:
 `workloads/constants.sql` (no data needed), `workloads/sample.sql` (setup section).
 
+## Integration tests
+
+`integrationtest --dir <tidb>/tests/integrationtest/t [tests...]` runs TiDB's integration tests
+(the mysql-tester `.test` files) in **hybrid mode**: tidb-rs only executes autocommit reads, so
+every statement runs on Go TiDB (A), exactly as mysql-tester would run it, and the reads also run
+on tidb-rs (B) and are compared with A's answer, live on the same cluster and data. A is the
+reference, not the `.result` files (those are recorded on TiDB master by a mock-store server).
+Tests are selected by name (`executor/aggregate`) or prefix (`executor/`); default all, in
+mysql-tester's order (sorted by name), one file after the other.
+
+`scripts/integrationtest.sh [-t tag] [-o offset] [-d tests-dir] [-O out-dir] [-k] [-- tests...]`
+does the whole run: build, `playground.sh start -c tools/ab/integrationtest.toml` (the
+integration tests' TiDB settings that apply to a TiKV cluster), turn off the ingest backfill,
+join tidb-rs (`playground-join.sh`), run `ab integrationtest`, write `run.tsv` (commits,
+version, date, runner, duration) and tear everything down (`-k` keeps it). Like TiDB's
+`run-tests.sh` it sets `TZ=Asia/Shanghai`. A full run of the 263 files takes about an hour on a
+laptop; it needs tiup, mysql, git and curl and should work unchanged on Linux CI.
+
+Per file, as mysql-tester does: create database `<test name with / -> __>` and connect to it
+(A and B), run the file, drop the database. Statements are read like mysql-tester reads them
+(`#` comments, `--directive` and `-- directive` lines, SQL up to a line ending in `;`).
+
+What happens to a statement:
+
+| class | statements | A | B |
+|---|---|---|---|
+| read | SELECT/TABLE/VALUES/WITH without locking or INTO OUTFILE/DUMPFILE/@var and without a data-changing WITH; SHOW; EXPLAIN/DESC/DESCRIBE (EXPLAIN ANALYZE only of a read); EXECUTE of a prepared read | runs | runs, compared |
+| session | session SET, USE, PREPARE, DEALLOCATE, SELECT ... INTO @var | runs | mirrored (not compared); a rejection is counted in `b_set_rejected` |
+| write | everything else: DML, DDL, transactions, SET GLOBAL, ADMIN, locking reads, ... | runs | - |
+
+Outcome per statement:
+
+- `match`: B answered like A: same rows (as multisets, in order when the statement has a
+  top-level ORDER BY and no `--sorted_result`), same column metadata, or the same error code
+  (also when the test expects the error). With `--enable_warnings`, `SHOW WARNINGS` must match
+  too. Under `--disable_result_log` only success vs error is compared. `--replace_regex` and
+  `--replace_column` are applied to both sides' values first.
+- `mismatch`: B answered differently. Kinds: `rows` (wrong values or row count), `order`,
+  `columns` (names or count), `metadata` (type, length, flags, charset), `error` (different
+  error code, or B returned a result where A failed), `shape` (result set vs OK), `warnings`.
+- `unsupported`: B answered 1235 (`ER_NOT_SUPPORTED_YET`), or B could not log in as the user of
+  a `connect` (tidb-rs has a single account).
+- `b_error`: A succeeded and B failed otherwise (other error code, timeout, lost connection).
+- `a_error`: A failed and the test does not expect an error (`--error`). Any class; not scored.
+  Mostly features of TiDB master missing in the release under test.
+- `skipped`: a read not sent to B: inside a transaction on A (BEGIN/START TRANSACTION until
+  COMMIT/ROLLBACK/DDL, or `autocommit=0`), or naming a local temporary table of A's session.
+- `write`: a session or write statement that A ran as the test expected.
+
+After a B error 1146/1049/1054/1051/1046 on a read that A answered, B is asked again after 1.5 s;
+if the answer changes, the statement's kind gets `retried` (schema-sync lag; ADR 0005 says this
+should not happen because the DDL owner waits for tidb-rs).
+
+`connect (name, host, user, password, db)` opens a session pair as that user, `connection`
+switches, `disconnect` closes (and falls back to `default`). `--echo`, `--enable_info`,
+`--remove_file` and `--sleep` do not affect what is compared and are ignored. The session time
+zone is the process's (`TZ`), not set by SQL.
+
+Output in `--out-dir`:
+
+- `statements.tsv`: one row per statement: file, line, connection, class, outcome, kind (mismatch
+  kind, B error code, skip reason, `session`), detail (B's message, the diff, A's error), elapsed
+  ms, SQL. Fields are escaped (`\t`, `\n`, `\\`).
+- `files.tsv`: per file: statements, reads, match, mismatch, unsupported, b_error, a_error,
+  skipped, write, b_set_rejected, retried, seconds.
+- `mismatches.jsonl`: every mismatch and b_error with both answers (columns and up to
+  `--report-rows` rows) and the session statements B had rejected in that connection.
+
+The tidb-rs-tracker imports the directory (`scripts/tracker.py import-integration`) and
+publishes per-file counts, reasons and every mismatch (R1).
+
 ## Scripts
 
-- `scripts/playground.sh start|stop|status|clean [-t tag] [-o offset] [-v version]`: defaults
+- `scripts/playground.sh start|stop|status|clean [-t tag] [-o offset] [-v version] [-c toml]`: defaults
   maya-ab / 23000 / v8.5.8. Starts `tiup playground` in the background (no TiFlash, no
   monitor) with Go TiDB `security.auto-tls`, waits until TiDB answers, prints the addresses.
   `stop` interrupts the playground and then kills whatever is left of that tag only (processes
   whose arguments point into `~/.tiup/data/<tag>/`). `clean` also runs `tiup clean <tag>`.
+  `-c` appends a TOML file to Go TiDB's config.
+- `scripts/integrationtest.sh`: the integration-test run end to end (see above).
 - `scripts/sysbench-prepare.sh [-H host] [-P port] [-d db] [-t tables] [-s size] [-r regions]`:
   recreates the database, loads with `--auto_inc=off` (ids 1..size), optionally
   `SPLIT TABLE ... REGIONS n`, then ANALYZE. It turns off `tidb_ddl_enable_fast_reorg` and
