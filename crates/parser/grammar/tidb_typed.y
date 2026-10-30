@@ -1404,7 +1404,15 @@ BRIEOption -> Box<BRIEOption>:
   | gcTTL EqOpt stringLit { ph("BRIEOption#20", $span, vec![Box::new($2) as Box<dyn Any>]) }
   ;
 LengthNum -> u64:
-    NUM { $1 as u64 }
+    NUM { {
+        // getUint64FromNUM: NUM holds an int64, or an uint64 above MaxInt64 (which NUM's
+        // i64 value cannot carry), so read it from the source text.
+        let s = $lexer.src_str($span);
+        s.parse::<u64>().unwrap_or_else(|_| {
+            p.fail(format!("{s} is out of range [0,18446744073709551615]"), $span.start());
+            0
+        })
+    } }
   ;
 Int64Num -> i64:
     NUM { {
@@ -3598,7 +3606,7 @@ SelectLockOpt -> Option<Box<SelectLockInfo>>:
   | forKwd update OfTablesOpt { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdate, tables: $3, ..Default::default() })) }
   | forKwd share OfTablesOpt { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShare, tables: $3, ..Default::default() })) }
   | forKwd update OfTablesOpt nowait { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateNoWait, tables: $3, ..Default::default() })) }
-  | forKwd update OfTablesOpt wait NUM { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec: $5 as u64, tables: $3, unported: None })) }
+  | forKwd update OfTablesOpt wait LengthNum { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec: $5, tables: $3, unported: None })) }
   | forKwd share OfTablesOpt nowait { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShareNoWait, tables: $3, ..Default::default() })) }
   | forKwd update OfTablesOpt skip locked { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateSkipLocked, tables: $3, ..Default::default() })) }
   | forKwd share OfTablesOpt skip locked { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShareSkipLocked, tables: $3, ..Default::default() })) }

@@ -533,6 +533,10 @@ impl<'a> Lexer<'a> {
             }
             return self.push(t.identifier, start);
         }
+        // Go's toInt: an integer beyond uint64 is a decimal literal.
+        if tok == t.int_lit && self.src[start..self.p].parse::<u64>().is_err() {
+            tok = t.dec_lit;
+        }
         self.push(tok, start)
     }
 

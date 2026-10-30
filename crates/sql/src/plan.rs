@@ -665,6 +665,9 @@ impl Resolved<'_> {
         let mut scan_columns: Vec<usize> = Vec::new();
 
         let source_kind = match range {
+            // Go's logical optimizer turns LIMIT 0 into TableDual: nothing is read. (Pushing a
+            // Limit 0 down would also crash TiKV, which asserts a non-empty batch.)
+            _ if limit.is_some_and(|l| l.count == 0) => SourceKind::Dual,
             None => SourceKind::Dual,
             Some((lo, hi)) if lo == hi => SourceKind::Point(lo),
             Some((lo, hi)) => SourceKind::Range(lo, hi),

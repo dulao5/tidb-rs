@@ -100,6 +100,27 @@ fn table_scan_of_sbtest1() {
 }
 
 #[test]
+fn limit_zero_is_never_pushed() {
+    // TiKV v8.5 panics the store on a pushed Limit 0; the planner turns LIMIT 0 into a
+    // dual source, and the builder refuses it as a last line of defense.
+    let t = table("sbtest1");
+    let spec = |limit| DagSpec {
+        table: &t,
+        columns: t.public_columns(),
+        desc: false,
+        aggregation: None,
+        limit,
+    };
+    let ctx = DagContext::select_utc();
+    assert!(build_dag(&spec(Some(0)), &ctx).is_err());
+    let plan = build_dag(&spec(Some(u64::MAX)), &ctx).unwrap();
+    assert_eq!(
+        plan.request.get_executors()[1].get_limit().get_limit(),
+        u64::MAX
+    );
+}
+
+#[test]
 fn partial_aggregation() {
     let t = table("sbtest1");
     let k = t.find_column("k").unwrap();

@@ -320,6 +320,11 @@ pub fn build_dag(spec: &DagSpec<'_>, ctx: &DagContext) -> Result<DagPlan> {
     if spec.columns.is_empty() {
         return Err(Error::Unsupported("table scan without columns".to_owned()));
     }
+    if spec.limit == Some(0) {
+        // TiKV (v8.5) asserts on the empty batch a pushed Limit 0 asks its scan for and
+        // panics the whole store. Go never pushes one (LIMIT 0 plans as TableDual).
+        return Err(Error::Unsupported("pushed-down Limit 0".to_owned()));
+    }
     let mut executors = Vec::new();
 
     let mut scan = TableScan::default();

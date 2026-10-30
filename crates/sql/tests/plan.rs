@@ -360,6 +360,28 @@ fn limit_and_handle_order() {
     );
     let p = plan_with("SELECT c FROM sbtest1 LIMIT ?", &[Literal::Int(4)], false).unwrap();
     assert_eq!(p.limit.unwrap().count, 4);
+    // LIMIT 0 reads nothing (Go: TableDual); a pushed Limit 0 would crash TiKV.
+    for sql in [
+        "SELECT c FROM sbtest1 LIMIT 0",
+        "SELECT c FROM sbtest1 LIMIT 5, 0",
+        "SELECT c FROM sbtest1 WHERE id = 3 LIMIT 0",
+        "SELECT c FROM sbtest1 ORDER BY k LIMIT 0",
+        "SELECT count(*) FROM sbtest1 LIMIT 0",
+    ] {
+        assert!(matches!(plan(sql).source, Source::Dual), "{sql}");
+    }
+    let p = plan_with("SELECT c FROM sbtest1 LIMIT ?", &[Literal::Int(0)], false).unwrap();
+    assert!(matches!(p.source, Source::Dual));
+    // Counts above MaxInt64 are uint64 (Go getUint64FromNUM), not 0.
+    for n in [9223372036854775808u64, u64::MAX] {
+        let p = plan(&format!("SELECT c FROM sbtest1 LIMIT {n}"));
+        assert_eq!(p.limit.unwrap().count, n);
+        assert!(
+            matches!(p.source, Source::TableReader { limit: Some(l), .. } if l == n),
+            "{:?}",
+            p.source
+        );
+    }
     assert_eq!(
         plan_with("SELECT c FROM sbtest1 LIMIT ?", &[Literal::Int(-1)], false)
             .unwrap_err()
