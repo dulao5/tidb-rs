@@ -55,6 +55,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Recorded before the run, so later edits to the checkout do not change it.
+commit=$(git -C "$repo" rev-parse HEAD)
+dirty=$(git -C "$repo" status --porcelain --untracked-files=no | grep -q . && echo yes || echo no)
+
 echo "== build"
 (cd "$repo" && cargo build --release -p tidb-server -p tidb-ab)
 
@@ -83,8 +87,8 @@ cp "$HOME/.tiup/data/$tag/tidb-rs-$b_port/tidb-rs.log" "$out/tidb-rs.log" 2>/dev
 tidb_version=$(mysql -h 127.0.0.1 -P "$a_port" -u root -N -e 'SELECT version()' | sed 's/.*-TiDB-//')
 {
     printf 'key\tvalue\n'
-    printf 'tidb_rs_commit\t%s\n' "$(git -C "$repo" rev-parse HEAD)"
-    printf 'tidb_rs_dirty\t%s\n' "$(git -C "$repo" status --porcelain --untracked-files=no | grep -q . && echo yes || echo no)"
+    printf 'tidb_rs_commit\t%s\n' "$commit"
+    printf 'tidb_rs_dirty\t%s\n' "$dirty"
     printf 'tidb_version\t%s\n' "${tidb_version:-$version}"
     printf 'tests_commit\t%s\n' "$(git -C "$tests_dir" rev-parse HEAD 2>/dev/null || echo unknown)"
     printf 'date\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
