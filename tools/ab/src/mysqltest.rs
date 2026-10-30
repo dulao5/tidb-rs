@@ -368,6 +368,29 @@ pub fn local_temporary_table(sql: &str) -> Option<String> {
     Some(name)
 }
 
+/// Statements that would break the shared cluster for the rest of the run, with the reason.
+/// They are not run. `SET GLOBAL tidb_enable_ddl = OFF` is expected to fail on a single-server
+/// test cluster (error 8246), but tidb-rs registers as a TiDB server, so Go TiDB accepts it and
+/// the cluster has no DDL owner any more.
+pub fn cluster_hazard(sql: &str) -> Option<&'static str> {
+    let w = words(sql);
+    if w.first().is_none_or(|x| x.text != "SET") {
+        return None;
+    }
+    let i = w.iter().position(|x| {
+        x.text
+            .trim_start_matches("@@GLOBAL.")
+            .trim_start_matches("@@")
+            == "TIDB_ENABLE_DDL"
+    })?;
+    match w.get(i + 1).map(|x| x.text.as_str()) {
+        Some("0" | "OFF" | "FALSE") => {
+            Some("would disable DDL on the shared cluster (tidb-rs counts as a TiDB server)")
+        }
+        _ => None,
+    }
+}
+
 /// Whether a statement's answer depends on the session's history, which differs between A and
 /// B because writes run on A only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -578,6 +601,8 @@ mod tests {
             local_temporary_table("create global temporary table g (a int)"),
             None
         );
+        assert!(cluster_hazard("set @@global.tidb_enable_ddl=false").is_some());
+        assert!(cluster_hazard("set global tidb_enable_ddl = on").is_none());
         assert_eq!(history("show warnings"), History::Previous);
         assert_eq!(history("show count(*) errors"), History::Previous);
         assert_eq!(

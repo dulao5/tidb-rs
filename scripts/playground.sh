@@ -11,7 +11,7 @@
 # Only processes of the given tag are ever touched: other playgrounds on this machine (other
 # tags/offsets) are left alone.
 #
-# -c appends a TOML file to Go TiDB's config (e.g. tools/ab/integrationtest.toml, the settings
+# -c adds a TOML file to Go TiDB's config (e.g. tools/ab/integrationtest.toml, the settings
 # of TiDB's integration tests).
 #
 # Go TiDB is started with security.auto-tls so TLS-only clients (Homebrew sysbench links
@@ -82,13 +82,16 @@ start() {
         exit 1
     fi
     local cfg=$state_dir/$tag-tidb.toml
-    cat >"$cfg" <<'EOF'
+    # The extra config goes first so that its top-level keys stay top-level (it must not have
+    # a [security] table of its own).
+    : >"$cfg"
+    if [ -n "$extra_config" ]; then
+        { cat "$extra_config"; echo; } >>"$cfg"
+    fi
+    cat >>"$cfg" <<'EOF'
 [security]
 auto-tls = true
 EOF
-    if [ -n "$extra_config" ]; then
-        { echo; cat "$extra_config"; } >>"$cfg"
-    fi
     echo "starting tiup playground $version tag=$tag offset=$offset (log: $log)"
     nohup tiup playground "$version" --tag "$tag" --db 1 --pd 1 --kv 1 --tiflash 0 \
         --port-offset "$offset" --without-monitor --db.config "$cfg" >"$log" 2>&1 &

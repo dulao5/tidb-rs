@@ -577,6 +577,11 @@ impl Runner<'_> {
         let history = mysqltest::history(sql);
         let prev_on_both = std::mem::replace(&mut conn.last_on_both, false);
 
+        if let Some(why) = mysqltest::cluster_hazard(sql) {
+            out.verdict = StmtOutcome::Skipped;
+            out.kind = why.into();
+            return out;
+        }
         let oa = conn.a.query(sql).await;
         let a_failed = matches!(oa, Outcome::Error { .. } | Outcome::Client(_));
         if !a_failed {

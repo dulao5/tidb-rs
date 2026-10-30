@@ -134,6 +134,11 @@ Outcome per statement:
   on A only, and `LAST_INSERT_ID()` / `@@tidb_last_txn_info` / `@@tidb_last_query_info` always.
 - `write`: a session or write statement that A ran as the test expected.
 
+One statement is never run: `SET GLOBAL tidb_enable_ddl = OFF` (`ddl/db_integration`). The test
+expects error 8246 because the test server is the only TiDB, but tidb-rs registers as a TiDB
+server (ADR 0005), so Go TiDB accepts it and the cluster loses its DDL owner. It is counted as
+`skipped`.
+
 After a B error 1146/1049/1054/1051/1046 on a read that A answered, B is asked again after 1.5 s;
 if the answer changes, the statement's kind gets `retried` (schema-sync lag; ADR 0005 says this
 should not happen because the DDL owner waits for tidb-rs).
