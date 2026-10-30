@@ -324,9 +324,11 @@ pub fn txn_effect(sql: &str) -> TxnEffect {
     match first.text.as_str() {
         "BEGIN" => TxnEffect::Begin,
         "START" if second == "TRANSACTION" => TxnEffect::Begin,
+        // ROLLBACK TO [SAVEPOINT] s keeps the transaction open.
+        "ROLLBACK" if second == "TO" => TxnEffect::None,
         "COMMIT" | "ROLLBACK" => TxnEffect::End,
         "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "RENAME" | "GRANT" | "REVOKE" | "LOCK"
-        | "UNLOCK" | "ANALYZE" | "FLUSH" => {
+        | "UNLOCK" | "FLUSH" => {
             // CREATE/DROP TEMPORARY TABLE do not commit.
             if second == "TEMPORARY" {
                 TxnEffect::None
@@ -601,6 +603,10 @@ mod tests {
         assert_eq!(txn_effect("begin"), TxnEffect::Begin);
         assert_eq!(txn_effect("start transaction read only"), TxnEffect::Begin);
         assert_eq!(txn_effect("commit"), TxnEffect::End);
+        assert_eq!(txn_effect("rollback to s1"), TxnEffect::None);
+        // TiDB's ANALYZE does not commit the open transaction.
+        assert_eq!(txn_effect("analyze table t"), TxnEffect::None);
+        assert_eq!(txn_effect("rollback to savepoint s1"), TxnEffect::None);
         assert_eq!(txn_effect("create table t (a int)"), TxnEffect::End);
         assert_eq!(
             txn_effect("create temporary table t (a int)"),
