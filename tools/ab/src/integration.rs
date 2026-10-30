@@ -270,6 +270,25 @@ fn error_code(o: &Outcome) -> Option<u16> {
     }
 }
 
+/// Whether an error names something tidb-rs does not have at all (system schemas,
+/// `_tidb_rowid` of a table with an integer handle), so retrying for schema lag is pointless.
+fn names_system_object(o: &Outcome) -> bool {
+    let Outcome::Error { message, .. } = o else {
+        return false;
+    };
+    let m = message.to_ascii_lowercase();
+    [
+        "'information_schema.",
+        "'mysql.",
+        "'performance_schema.",
+        "'metrics_schema.",
+        "'sys.",
+        "_tidb_rowid",
+    ]
+    .iter()
+    .any(|x| m.contains(x))
+}
+
 fn brief(o: &Outcome) -> String {
     match o {
         Outcome::Rows { columns, rows, .. } => {
@@ -673,10 +692,12 @@ impl Runner<'_> {
                 }
                 let mut oa = oa;
                 let mut ob = conn.b.query(sql).await;
-                conn.last_on_both = true;
                 // A read right after DDL: B's schema sync should already have the new schema
                 // (the DDL owner waits for it). Retry once to detect lag.
-                if !a_failed && matches!(error_code(&ob), Some(1146 | 1049 | 1054 | 1051 | 1046)) {
+                if !a_failed
+                    && matches!(error_code(&ob), Some(1146 | 1049 | 1054 | 1051 | 1046))
+                    && !names_system_object(&ob)
+                {
                     tokio::time::sleep(Duration::from_millis(1500)).await;
                     let again = conn.b.query(sql).await;
                     if error_code(&again) != error_code(&ob) {
@@ -725,6 +746,9 @@ impl Runner<'_> {
                     });
                     let _ = writeln!(self.w.mismatches, "{rec}");
                 }
+                // Only an identical answer leaves the same warnings behind (B keeps none after
+                // an error, A keeps the error).
+                conn.last_on_both = v == StmtOutcome::Match;
                 out.verdict = v;
                 out.kind = kind;
                 out.detail = detail;
