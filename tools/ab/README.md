@@ -97,8 +97,14 @@ does the whole run: build, `playground.sh start -c tools/ab/integrationtest.toml
 integration tests' TiDB settings that apply to a TiKV cluster), turn off the ingest backfill,
 join tidb-rs (`playground-join.sh`), run `ab integrationtest`, write `run.tsv` (commits,
 version, date, runner, duration) and tear everything down (`-k` keeps it). Like TiDB's
-`run-tests.sh` it sets `TZ=Asia/Shanghai`. A full run of the 263 files takes about an hour on a
-laptop; it needs tiup, mysql, git and curl and should work unchanged on Linux CI.
+`run-tests.sh` it sets `TZ=Asia/Shanghai`. A full run of the 263 files (52k statements) took
+3.6 h on a Mac mini (M4 Pro); about 2.5 h of it are ~280 ANALYZE statements at 40 s each: Go
+TiDB's ANALYZE broadcasts a stats-delta flush to every registered TiDB server through its status
+port (`executor.flushStatsDeltaForAnalyze`), and tidb-rs's status port does not serve that
+request, so Go retries for about 40 s (the same effect as for `CLUSTER_*` tables). It needs
+tiup, mysql, git and curl and should work unchanged on Linux CI. On a nearly full disk the
+ingest backfill fails (`8256 ... no enough space`) for files that turn
+`tidb_ddl_enable_fast_reorg` back on; those statements count as `a_error`.
 
 Per file, as mysql-tester does: create database `<test name with / -> __>` and connect to it
 (A and B), run the file, drop the database. Statements are read like mysql-tester reads them
