@@ -368,6 +368,52 @@ pub fn local_temporary_table(sql: &str) -> Option<String> {
     Some(name)
 }
 
+/// Whether a statement's answer depends on the session's history, which differs between A and
+/// B because writes run on A only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum History {
+    None,
+    /// Depends on the previous statement only (SHOW WARNINGS, @@warning_count, ROW_COUNT(),
+    /// FOUND_ROWS(), @@last_plan_from_cache, ...): comparable if that one also ran on B.
+    Previous,
+    /// Depends on earlier statements of the session (LAST_INSERT_ID(), @@tidb_last_txn_info,
+    /// @@tidb_last_query_info): never comparable.
+    Session,
+}
+
+pub fn history(sql: &str) -> History {
+    let w = words(sql);
+    let t = |i: usize| w.get(i).map_or("", |x| x.text.as_str());
+    if t(0) == "SHOW"
+        && (matches!(t(1), "WARNINGS" | "ERRORS")
+            || (t(1) == "COUNT" && matches!(t(2), "WARNINGS" | "ERRORS")))
+    {
+        return History::Previous;
+    }
+    let mut h = History::None;
+    for x in &w {
+        let v = x
+            .text
+            .trim_start_matches("@@SESSION.")
+            .trim_start_matches("@@");
+        match v {
+            "LAST_INSERT_ID" | "TIDB_LAST_TXN_INFO" | "TIDB_LAST_QUERY_INFO" | "IDENTITY" => {
+                return History::Session;
+            }
+            "WARNING_COUNT"
+            | "ERROR_COUNT"
+            | "ROW_COUNT"
+            | "FOUND_ROWS"
+            | "LAST_PLAN_FROM_CACHE"
+            | "LAST_PLAN_FROM_BINDING"
+            | "LAST_SQL_USE_ALLOC"
+            | "TIDB_LAST_PLAN_REPLAYER_TOKEN" => h = History::Previous,
+            _ => {}
+        }
+    }
+    h
+}
+
 /// Whether `sql` mentions any of `names` (lower-case, unqualified) as a word.
 pub fn mentions(sql: &str, names: &std::collections::BTreeSet<String>) -> bool {
     if names.is_empty() {
@@ -532,6 +578,14 @@ mod tests {
             local_temporary_table("create global temporary table g (a int)"),
             None
         );
+        assert_eq!(history("show warnings"), History::Previous);
+        assert_eq!(history("show count(*) errors"), History::Previous);
+        assert_eq!(
+            history("select @@warning_count, row_count()"),
+            History::Previous
+        );
+        assert_eq!(history("select last_insert_id()"), History::Session);
+        assert_eq!(history("select a from t"), History::None);
         let names = ["tmp1".to_string()].into_iter().collect();
         assert!(mentions("select * from test.tmp1", &names));
         assert!(!mentions("select 'tmp1' from t", &names));

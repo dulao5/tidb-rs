@@ -128,7 +128,10 @@ Outcome per statement:
 - `a_error`: A failed and the test does not expect an error (`--error`). Any class; not scored.
   Mostly features of TiDB master missing in the release under test.
 - `skipped`: a read not sent to B: inside a transaction on A (BEGIN/START TRANSACTION until
-  COMMIT/ROLLBACK/DDL, or `autocommit=0`), or naming a local temporary table of A's session.
+  COMMIT/ROLLBACK/DDL, or `autocommit=0`), naming a local temporary table of A's session, or
+  depending on session history B does not share: SHOW WARNINGS/ERRORS, `@@warning_count`,
+  `ROW_COUNT()`, `FOUND_ROWS()`, `@@last_plan_from_cache`, ... right after a statement that ran
+  on A only, and `LAST_INSERT_ID()` / `@@tidb_last_txn_info` / `@@tidb_last_query_info` always.
 - `write`: a session or write statement that A ran as the test expected.
 
 After a B error 1146/1049/1054/1051/1046 on a read that A answered, B is asked again after 1.5 s;

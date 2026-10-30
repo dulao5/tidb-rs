@@ -95,6 +95,8 @@ struct Conn {
     temp_tables: BTreeSet<String>,
     /// Session statements B rejected (still possibly in effect on A).
     rejected: Vec<String>,
+    /// The previous statement ran on B too (so SHOW WARNINGS etc. are comparable).
+    last_on_both: bool,
 }
 
 /// Directives that apply to the next statement only.
@@ -417,6 +419,7 @@ impl Runner<'_> {
             prepared: BTreeMap::new(),
             temp_tables: BTreeSet::new(),
             rejected: Vec::new(),
+            last_on_both: false,
         })
     }
 
@@ -571,6 +574,8 @@ impl Runner<'_> {
             counts.reads += 1;
         }
         let expect_error = p.error.is_some();
+        let history = mysqltest::history(sql);
+        let prev_on_both = std::mem::replace(&mut conn.last_on_both, false);
 
         let oa = conn.a.query(sql).await;
         let a_failed = matches!(oa, Outcome::Error { .. } | Outcome::Client(_));
@@ -619,7 +624,10 @@ impl Runner<'_> {
                         out.detail = format!("B rejected: {}", brief(&ob));
                         conn.rejected.push(truncate(sql, 120));
                     }
-                    _ => conn.b.log_session(sql),
+                    _ => {
+                        conn.b.log_session(sql);
+                        conn.last_on_both = true;
+                    }
                 }
                 out
             }
@@ -635,6 +643,18 @@ impl Runner<'_> {
                     out.kind = "in transaction".into();
                     return out;
                 }
+                let why = match history {
+                    mysqltest::History::Session => Some("depends on session history"),
+                    mysqltest::History::Previous if !prev_on_both => {
+                        Some("depends on a previous statement that ran on A only")
+                    }
+                    _ => None,
+                };
+                if let Some(why) = why {
+                    out.verdict = StmtOutcome::Skipped;
+                    out.kind = why.into();
+                    return out;
+                }
                 if mysqltest::mentions(sql, &conn.temp_tables) {
                     out.verdict = StmtOutcome::Skipped;
                     out.kind = "local temporary table".into();
@@ -648,6 +668,7 @@ impl Runner<'_> {
                 }
                 let mut oa = oa;
                 let mut ob = conn.b.query(sql).await;
+                conn.last_on_both = true;
                 // A read right after DDL: B's schema sync should already have the new schema
                 // (the DDL owner waits for it). Retry once to detect lag.
                 if !a_failed && matches!(error_code(&ob), Some(1146 | 1049 | 1054 | 1051 | 1046)) {
