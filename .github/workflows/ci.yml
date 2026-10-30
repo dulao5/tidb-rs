@@ -7,6 +7,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # grpcio-sys 0.10 bundles gRPC 1.44 / abseil, whose headers use uint8_t
+  # without <cstdint>; GCC 13 (ubuntu-24.04) no longer pulls it in
+  # transitively, so the gRPC build fails. Force-include it.
+  CXXFLAGS: -include cstdint
 
 jobs:
   check:
