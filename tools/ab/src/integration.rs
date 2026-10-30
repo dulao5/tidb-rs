@@ -684,12 +684,6 @@ impl Runner<'_> {
                     out.kind = "local temporary table".into();
                     return out;
                 }
-                if let Some(why) = mysqltest::b_hazard(sql) {
-                    out.verdict = StmtOutcome::BError;
-                    out.kind = "not sent".into();
-                    out.detail = why.into();
-                    return out;
-                }
                 if let Some(e) = &conn.b_login {
                     out.verdict = StmtOutcome::Unsupported;
                     out.kind = "login".into();
