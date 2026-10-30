@@ -1,0 +1,9 @@
+# Go TiDB settings of TiDB's integration tests (tests/integrationtest/config.toml) that a tiup
+# playground on TiKV accepts. Appended to the playground's TiDB config by
+# `scripts/playground.sh start -c tools/ab/integrationtest.toml` (scripts/integrationtest.sh).
+# Not taken over: lease = "0" and stats-lease = "0" (mockstore settings), enable-new-charset
+# (removed option); new collations are on by default.
+enable-table-lock = true
+
+[experimental]
+allow-expression-index = true

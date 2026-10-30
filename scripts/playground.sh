@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start/stop a tiup playground (1 PD, 1 TiKV, 1 Go TiDB, no TiFlash) for the tidb-rs A/B harness.
 #
-#   scripts/playground.sh start  [-t tag] [-o port-offset] [-v version]
+#   scripts/playground.sh start  [-t tag] [-o port-offset] [-v version] [-c extra-tidb.toml]
 #   scripts/playground.sh status [-t tag] [-o port-offset]
 #   scripts/playground.sh stop   [-t tag]
 #   scripts/playground.sh clean  [-t tag]      # stop + `tiup clean <tag>`
@@ -10,6 +10,9 @@
 # PLAYGROUND_VERSION). Ports are default+offset: TiDB 4000+o, PD 2379+o, TiDB status 10080+o.
 # Only processes of the given tag are ever touched: other playgrounds on this machine (other
 # tags/offsets) are left alone.
+#
+# -c appends a TOML file to Go TiDB's config (e.g. tools/ab/integrationtest.toml, the settings
+# of TiDB's integration tests).
 #
 # Go TiDB is started with security.auto-tls so TLS-only clients (Homebrew sysbench links
 # MariaDB Connector/C, which insists on TLS) can connect.
@@ -20,12 +23,14 @@ cmd=${1:-}
 tag=${PLAYGROUND_TAG:-maya-ab}
 offset=${PLAYGROUND_OFFSET:-23000}
 version=${PLAYGROUND_VERSION:-v8.5.8}
-while getopts "t:o:v:" opt; do
+extra_config=${PLAYGROUND_TIDB_CONFIG:-}
+while getopts "t:o:v:c:" opt; do
     case $opt in
         t) tag=$OPTARG ;;
         o) offset=$OPTARG ;;
         v) version=$OPTARG ;;
-        *) echo "usage: $0 start|stop|status|clean [-t tag] [-o offset] [-v version]" >&2; exit 2 ;;
+        c) extra_config=$OPTARG ;;
+        *) echo "usage: $0 start|stop|status|clean [-t tag] [-o offset] [-v version] [-c extra-tidb.toml]" >&2; exit 2 ;;
     esac
 done
 
@@ -81,6 +86,9 @@ start() {
 [security]
 auto-tls = true
 EOF
+    if [ -n "$extra_config" ]; then
+        { echo; cat "$extra_config"; } >>"$cfg"
+    fi
     echo "starting tiup playground $version tag=$tag offset=$offset (log: $log)"
     nohup tiup playground "$version" --tag "$tag" --db 1 --pd 1 --kv 1 --tiflash 0 \
         --port-offset "$offset" --without-monitor --db.config "$cfg" >"$log" 2>&1 &

@@ -6,6 +6,8 @@
 
 mod compare;
 mod exec;
+mod integration;
+mod mysqltest;
 mod rng;
 mod sql;
 mod workload;
@@ -105,6 +107,16 @@ enum Workload {
         /// Do not also run SELECTs as prepared statements.
         #[arg(long)]
         no_prepared: bool,
+    },
+    /// TiDB's integration tests (mysql-tester `.test` files) in hybrid mode: every statement
+    /// on A, reads also on B and compared. Writes statements.tsv, files.tsv and
+    /// mismatches.jsonl to --out-dir.
+    Integrationtest {
+        /// `tests/integrationtest/t` of a TiDB checkout.
+        #[arg(long)]
+        dir: PathBuf,
+        /// Tests to run (`executor/aggregate`, or a prefix ending in `/`); default all.
+        tests: Vec<String>,
     },
 }
 
@@ -397,9 +409,27 @@ async fn table_size(a: &mut Side) -> Result<i64, String> {
 }
 
 async fn run(cli: Cli) -> Result<bool, String> {
+    if let Workload::Integrationtest { dir, tests } = &cli.workload {
+        let ep = integration::Endpoints {
+            a: cli.a.clone(),
+            b: cli.b.clone(),
+            user: cli.user.clone(),
+            password: cli.password.clone(),
+            tls: cli.tls,
+            timeout: Duration::from_secs(cli.timeout),
+        };
+        let opts = integration::Options {
+            dir: dir.clone(),
+            only: tests.clone(),
+            out_dir: cli.out_dir.clone(),
+            report_rows: cli.report_rows,
+            verbose: cli.verbose,
+        };
+        return integration::run(&ep, &opts).await;
+    }
     let default_db = match &cli.workload {
         Workload::Sysbench { .. } => Some("sbtest".to_string()),
-        Workload::File { .. } => None,
+        Workload::File { .. } | Workload::Integrationtest { .. } => None,
     };
     let db = cli.db.clone().or(default_db);
     let timeout = Duration::from_secs(cli.timeout);
@@ -478,6 +508,7 @@ async fn run(cli: Cli) -> Result<bool, String> {
             let extra = setup_name.as_deref().zip(setup_src.as_deref());
             workload::file_cases(&path.display().to_string(), &src, extra, !no_prepared)
         }
+        Workload::Integrationtest { .. } => unreachable!("handled above"),
     };
 
     std::fs::create_dir_all(&cli.out_dir).map_err(|e| format!("{}: {e}", cli.out_dir.display()))?;

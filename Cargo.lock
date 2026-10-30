@@ -3458,6 +3458,7 @@ version = "0.0.0"
 dependencies = [
  "clap 4.6.7",
  "mysql_async",
+ "regex",
  "serde_json",
  "tokio",
 ]
