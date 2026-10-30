@@ -684,6 +684,12 @@ impl Runner<'_> {
                     out.kind = "local temporary table".into();
                     return out;
                 }
+                if let Some(why) = mysqltest::b_hazard(sql) {
+                    out.verdict = StmtOutcome::BError;
+                    out.kind = "not sent".into();
+                    out.detail = why.into();
+                    return out;
+                }
                 if let Some(e) = &conn.b_login {
                     out.verdict = StmtOutcome::Unsupported;
                     out.kind = "login".into();
@@ -890,6 +896,18 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
             c.get("a_error"),
             c.get("skipped"),
         );
+        // A dead cluster turns every later statement into an error: stop instead.
+        if let o @ (Outcome::Error { .. } | Outcome::Client(_)) = r
+            .admin
+            .query("SELECT COUNT(*) FROM mysql.tidb WHERE variable_name = 'bootstrapped'")
+            .await
+        {
+            return Err(format!(
+                "cluster unhealthy after {t} (A: {}); stopping. Results so far are in {}",
+                brief(&o),
+                opts.out_dir.display()
+            ));
+        }
         r.totals.statements += c.statements;
         r.totals.reads += c.reads;
         r.totals.b_set_rejected += c.b_set_rejected;

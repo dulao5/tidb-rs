@@ -137,7 +137,9 @@ Outcome per statement:
 One statement is never run: `SET GLOBAL tidb_enable_ddl = OFF` (`ddl/db_integration`). The test
 expects error 8246 because the test server is the only TiDB, but tidb-rs registers as a TiDB
 server (ADR 0005), so Go TiDB accepts it and the cluster loses its DDL owner. It is counted as
-`skipped`.
+`skipped`. Reads with a LIMIT of 2^63 or more are not sent to B and count as `b_error`
+(kind `not sent`): tidb-rs pushes such a Limit to TiKV, and TiKV v8.5.8 panics
+(`assertion failed: scan_rows > 0`), which stops the cluster.
 
 After a B error 1146/1049/1054/1051/1046 on a read that A answered, B is asked again after 1.5 s;
 if the answer changes, the statement's kind gets `retried`. Errors naming system schemas or

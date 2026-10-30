@@ -391,6 +391,24 @@ pub fn cluster_hazard(sql: &str) -> Option<&'static str> {
     }
 }
 
+/// Reads that must not be sent to B because they break the shared cluster. A LIMIT count of
+/// 2^63 or more from tidb-rs makes TiKV v8.5.8 panic (`assertion failed: scan_rows > 0` in its
+/// scan executor) and the whole cluster stops; Go TiDB pushes the same Limit without harm.
+pub fn b_hazard(sql: &str) -> Option<&'static str> {
+    let w = words(sql);
+    for (i, x) in w.iter().enumerate() {
+        if x.text != "LIMIT" {
+            continue;
+        }
+        for y in w.iter().skip(i + 1).take(3) {
+            if y.text.parse::<u128>().is_ok_and(|n| n >= 1 << 63) {
+                return Some("not sent: a LIMIT >= 2^63 from tidb-rs crashes TiKV");
+            }
+        }
+    }
+    None
+}
+
 /// Whether a statement's answer depends on the session's history, which differs between A and
 /// B because writes run on A only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,6 +621,9 @@ mod tests {
         );
         assert!(cluster_hazard("set @@global.tidb_enable_ddl=false").is_some());
         assert!(cluster_hazard("set global tidb_enable_ddl = on").is_none());
+        assert!(b_hazard("select * from t limit 18446744073709551615 offset 1").is_some());
+        assert!(b_hazard("select * from t limit 1, 9223372036854775808").is_some());
+        assert!(b_hazard("select * from t limit 9223372036854775807").is_none());
         assert_eq!(history("show warnings"), History::Previous);
         assert_eq!(history("show count(*) errors"), History::Previous);
         assert_eq!(
