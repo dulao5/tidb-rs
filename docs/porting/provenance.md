@@ -30,11 +30,12 @@ fn ...
 // go-l3: ADR-0007 tidb_query_datatype::codec::row::v2   (L3 同源替换，指向 ADR)
 // go-exception: EXC-A4 types.BinaryJSON.Unquote           (被例外 spec 取代的 Go 函数)
 // go-fix: pingcap/tidb@<commit> <issue>                   (移植了 v8.5.8 之后上游对安全或数据正确性问题的修复，宪章第一条 2)
+// go-std: strconv.FormatFloat L2 (<理由>)                (移植的 Go 标准库函数，文件头可写 //! go-file: $GOROOT/src/strconv/ftoa.go)
 // glue: <理由>                                             (Go 中没有对应物的胶水代码)
 ```
 
 - **符号写法**与 tracker 的 `go_funcs.tsv` 一致：方法写 `Type.Method`（不区分指针接收者），函数写函数名。匿名函数归入外层函数。
-- **等级**：`L1` 可省略；`L1` 后可以跟方括号里的映射规则 ID（见 [mappings.md](mappings.md)），只写 ID，不写理由。`L2` 必须在括号里写一句理由。
+- **等级**：必须显式写出（包括 `L1`），否则 lint 无法区分漏写和默认值；`L1` 后可以跟方括号里的映射规则 ID（见 [mappings.md](mappings.md)），只写 ID，不写理由。`L2` 必须在括号里写一句理由。
 - 多个 Go 函数合并成一个 Rust 函数时，写多行 `// go:`。
 
 ## 校验（tidb-rs CI 中的 lint）

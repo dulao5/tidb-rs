@@ -33,7 +33,18 @@ Go TiDB 的很多写法只是因为 Go 运行时才那样写（goroutine、chann
 | M-TICK | 后台 goroutine 定时轮询（expensivequery 检查 `max_execution_time`、`servermemorylimit` 读堆用量、SQLKiller 检查连接存活） | 运行时定时器：每条语句一个 deadline，到期发送与 Go 相同的 KILL 信号。判断逻辑（选谁、发什么信号、日志）仍按 L1 | N3 | — |
 | M-MEM | `memory.Tracker.Consume` 按估算值记账 | `TrackedAlloc`：按实际分配记到同一棵 tracker 树；超限动作链按 L1 | A1 | — |
 | M-POOL | `sync.Pool`、`chunk.Allocator` 等为减轻 GC 的对象复用 | 删除。相关变量按"接受并返回 warning"处理（N8） | A1、N8 | — |
+| M-INT | Go 定宽整数：`int`、`int8`…`uint64`、下标、溢出回绕 | `int` → `isize`（下标处 `as usize`），其余同宽对应；Go 中可能回绕的运算一律显式写 `wrapping_*` / `as` 截断（Rust debug 构建溢出会 panic），并在块 plan 中列出位置 | D01.2 试点 | debug 构建跑全部向量 |
+| M-ALIAS | 输出参数可以与输入是同一个对象（如 `x.Round(x, …)`、`DecimalAdd(a, b, a)`） | 提供"写入另一个对象"和"原地"两个入口；核心函数接收输入的快照（`Copy` 类型）和"是同一对象"标志。前提是逐行确认 Go 对输入的读取都在对输出的写入之前，并在函数注释中写明 | D01.2 试点 | — |
+| M-ERRVAL | 返回 `error`，或返回 `(T, error)` 且出错时 T 仍有意义（如 `ToInt` 返回 `MaxInt64` + `ErrOverflow`） | 只返回 `error` → `Result<(), Error>`；`(T, error)` 中所有出错路径的 T 都是零值 → `Result<T, Error>`，否则 → `(T, Result<(), Error>)`。修改接收者并返回错误的方法，出错时接收者的内容与 Go 相同 | D01.2 试点 | 向量比对出错时的值 |
+| M-NAME | Go 方法名与 Rust 标准 trait 的方法同名（`String`、`ToString`、`Clone`、`Hash`、`Equal` 等） | 保留 Go 名的 snake_case 作为固有方法（如 `to_string() -> Vec<u8>`）；需要 `Display` 等 trait 时委托给它，委托代码标 `glue:` | D01.2 试点 | — |
 | M-ERR | `errors.Trace` / `errors.Annotate` 包装调用栈 | 错误码 + 可选的创建点调用栈；不移植包装函数 | D00.2 块 spec | — |
+
+## 移植模块的统一约定
+
+- **lint**：模仿 Go 分支结构的代码会触发一些 clippy 风格 lint（`int_plus_one`、`needless_range_loop`、`manual_range_contains`、`needless_late_init`、`field_reassign_with_default`、`manual_slice_fill`）。这些在 workspace 的移植 crate 中统一 allow，正确性 lint 全部保留。不要在单个文件中各写一份。
+- **注释**：Go 注释原样复制；其中缩进 4 格的段落会被 rustdoc 当作代码块，要用 ```` ```text ```` 包起来。
+- **浮点**：Go 允许编译器把 `x*y + z` 融合为 FMA（arm64 上会发生），Rust 不会。含乘加的浮点逻辑在块 spec 中标出，向量要在 amd64 和 arm64 上各生成一次比对。
+- **全局分配器**：workspace 统一使用 jemalloc（与 A1 的实例内存度量一致），基准和服务端用同一个分配器。
 
 ## 机器检查的落地
 

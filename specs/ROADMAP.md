@@ -55,7 +55,7 @@
 
 | 层 | 块 | 内容 | Go 行数 | 文件数 | 需要边界桩 / 接口的依赖（引用数 ≥ 10） |
 |---|---|---|--:|--:|---|
-| L1 | D00.2 | 常量、错误码与配置（parser/mysql、terror、errno、dbterror、config） | 1,281 | 13 | — |
+| L1 | D00.2 | 常量、错误码与配置（parser/mysql、terror、errno、dbterror、config）。**P1 第一个块**：几乎所有块都引用错误码；`parser/mysql` 的常量放进一个不依赖语法表生成的小 crate | 1,281 | 13 | — |
 | L1 | D01.6 | Vector 类型 | 409 | 2 | — |
 | L1 | D01.7 | Chunk 与列存（列格式按 N5a，内存部分按 A1） | 3,082 | 11 | D01.5(11), D15.1(10) |
 | L1 | D01.9 | Collation 与字符集 | 637 | 10 | — |
@@ -189,7 +189,7 @@
 1. **基础设计 spec 确认**：N1（计划树/表达式树表示）、N2（会话状态拆分）、N3（并发与取消）、A1（内存模型）、A4（JSON），以及 **N4**（表达式求值框架：D08.1 和全部内置函数的代码形态取决于它）、**N8**（系统变量注册表：D05.1、D05.2 依赖它）、**N5a**（根节点内存中的列格式：D01.7 依赖它）。"定稿"包括验收指标的 Go 基线已经实测、数字已回填。
 2. **全局映射规则表**（[docs/porting/mappings.md](../docs/porting/mappings.md)）与基础 spec 一起定稿，对应的 lint 配置进入 CI。
 3. **两个试点**（方法论第 8 节）：流程试点 **D01.2 MyDecimal**，之后做一次上游同步演练；设计试点 **D09.7 列裁剪**（spike，不合入，不计覆盖率），产出 N1 的修订和 plan 模板中的固定写法。
-4. **工具**：govec（Go 测试用例表 → 输入输出向量）、来源标注抽取与 lint、并排对照生成、`go_renames.tsv`。
+4. **工具**：govec（Go 测试用例表 → 输入输出向量；已完成第一版，tracker PR #1）、来源标注抽取与 lint（D01.2 试点的 `scripts/converge.py` 迁入 tracker，并输出 `rs_provenance.tsv`）、并排对照生成、`go_renames.tsv`。
 5. **tracker 支持块**：`blocks.tsv`（块定义与阶段）、`func_blocks.tsv`（函数 → 块）、块依赖表（已完成）；按块统计移植覆盖率、测试行数和测试归属的报表；`stubs.tsv` 记录桩的三类。
 6. **PoC 代码定性**：逐文件标注 `glue: poc`，列出各自将被哪个块替换。
 
