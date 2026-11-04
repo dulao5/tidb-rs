@@ -9,6 +9,8 @@ pub mod errors;
 pub mod gostd;
 mod helper;
 pub mod mydecimal;
+#[cfg(test)]
+mod mydecimal_test;
 
 pub use errors::Error;
 pub use mydecimal::{
