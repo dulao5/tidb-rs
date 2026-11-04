@@ -3627,6 +3627,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-types"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tidb_query_aggr"
 version = "0.0.1"
 dependencies = [
