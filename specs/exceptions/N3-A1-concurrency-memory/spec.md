@@ -1,6 +1,6 @@
 # N3+A1：并发、取消、错误边界与统一内存模型（基础设计 spec，草案）
 
-状态：草案。类型：实现例外（基础设计），合并 N3（含 A2）与 A1。计划定稿：P1 之前（A1 的执行器部分在 P4 前复核）。
+状态：草案（2026-11-04 按 PR #2 评审修订：执行模型改为固定大小的任务池，见 3.1）。类型：实现例外（基础设计），合并 N3（含 A2）与 A1。本 spec 中的映射规则 ID（`M-xx`）见 [docs/porting/mappings.md](../../../docs/porting/mappings.md)。计划定稿：P1 之前（A1 的执行器部分在 P4 前复核）。
 
 所属块：D00.3（sqlkiller、servermemorylimit、expensivequery、disk）、D01.7 / D01.10（chunk 与落盘容器）、D07.2（copr 迭代器）、D12.0（exec 框架）、D15.1（util/memory）；同时约束 D12 所有带 worker 的算子。
 
@@ -41,9 +41,10 @@ v8.5.8 中的事实：
 
 | 方案 | 做法 | 优点 | 缺点 |
 |---|---|---|---|
-| a. 全异步 | `async fn next()`，worker 是 tokio task | 与 client-rust、网络层同一个运行时；PoC 现状 | trait 对象上的 async 递归每次 `Next` 都要 `Box<Pin<Future>>`；CPU 密集的算子（hash 构建、排序、聚合）会阻塞 tokio worker，要到处 `block_in_place`；future 在任意 `.await` 处被 drop 就等于取消，与 Go 显式的 Close 顺序不一致；Go 的阻塞式 channel/select 代码要改写成 async 形态，L1 对照变差。**否决** |
-| b. rayon | worker 作为 rayon job | 数据并行很方便 | Go 的 worker 大量阻塞在 channel 上，rayon 线程被阻塞会耗尽池子甚至死锁（生产者和消费者都在同一个固定大小的池里）；rayon 不适合长生命周期的流水线 worker。**否决作为 worker 载体**（可在 N6/A5 中用于算子内部的纯计算并行，另议） |
-| c. 同步算子 + 专用执行线程池 + 异步 I/O 边界 | `Next` 是同步函数；Go 的 goroutine 映射为执行线程池（ExecPool）上的任务，允许阻塞；channel 用 crossbeam（`select!` 对应 Go 的 `select`）；KV/coprocessor 请求仍是 tokio task，通过同时支持同步与异步两端的有界 channel（如 flume）把结果交给同步侧 | 代码形状与 Go 最接近（阻塞 recv、select、WaitGroup 都有直接对应物）；CPU 工作不占用 tokio 线程；Close 顺序可以逐行对应 | 一条语句的执行要从 tokio 连接任务切换到 ExecPool 线程（两次 channel 跳转，估计每语句数微秒）；需要自己写一个弹性线程池 |
+| a. 全异步，共用网络运行时 | `async fn next()`，worker 是 tokio task，与网络、KV 共用一个运行时 | PoC 现状；与 client-rust 同一运行时 | CPU 密集的算子会占住网络线程；没有让出点时大查询会饿死其他连接。**否决** |
+| b. rayon | worker 作为 rayon job | 数据并行方便 | Go 的 worker 大量阻塞在 channel 上，固定大小的 rayon 池会被耗尽甚至死锁；不适合长生命周期的流水线 worker。**否决作为 worker 载体**（可在 N6/A5 中用于算子内部的纯计算并行，另议） |
+| c. 同步 `Next` + 弹性线程池 | 每个 goroutine 一个 OS 线程，channel 用 crossbeam，KV 用 flume 桥接到 tokio | 写法与 Go 的阻塞式 channel/select 最像 | goroutine 是 M:N 的轻量任务，1:1 的 OS 线程运行模型与它最不像：64 个并发分析型会话、每条查询 30–60 个 worker 就是数千个线程，每个 chunk 跨 2–3 次线程切换；需要自写弹性线程池和同步/异步桥接。**否决**（初稿曾推荐，2026-11-04 评审后撤回） |
+| d. async `Next` + 专用的固定大小任务池（参照 TiKV） | 执行器在一个与网络分开、线程数等于核数的任务池上运行；goroutine 映射为 task；检查点处协作式让出 | 运行模型与 goroutine 一致（M:N、廉价）；线程数固定；KV 请求直接 await，没有桥接；有 TiKV 的成熟做法可循（多级队列、准入控制） | 执行器中禁止任何阻塞（用 lint 强制）；future 被 drop 即取消，显式 Close 的顺序要靠 3.5 的规则保证。**采用** |
 
 **2.2 OOM/kill 的错误边界**
 
@@ -54,40 +55,58 @@ v8.5.8 中的事实：
 
 ### 3. 建议
 
-#### 3.1 执行模型：同步 `Next` + ExecPool（方案 c）
+#### 3.1 执行模型：async `Next` + 固定大小的任务池（方案 d，参照 TiKV）
 
-1. **算子接口**：`trait Executor: Send { fn open(&mut self, ctx) -> Result<()>; fn next(&mut self, ctx, chk: &mut Chunk) -> Result<()>; fn close(&mut self) -> Result<()>; ... }`，方法与 Go 的 `Executor` 接口一一对应。`Send` 是必须的：Go 的 fetcher goroutine 会在另一个 goroutine 里调用子节点的 `Next`（如 `projectionInputFetcher.run`），Rust 中子执行器要能移交给 worker 线程。不要求 `Sync`。
-2. **ExecPool**：进程级弹性线程池，语义接近 tokio 的 blocking pool：有空闲线程就复用，没有就新建，空闲超时（如 60s）回收。**不设会导致死锁的硬上限**（Go 的 goroutine 也没有上限；流水线式 worker 互相等待，固定大小的池会死锁），只设一个很高的保护上限（如 4096），超过时语句报错而不是排队，并打指标。线程栈默认 2MiB，可配置。
-3. **每个 goroutine 对应一个 ExecPool 任务**。数量严格等于 Go 的数量（由同一个 `Concurrency` getter 决定），所以 `tidb_executor_concurrency` 等变量含义不变。
-4. **channel 映射**：Go 的有缓冲 channel → `crossbeam_channel::bounded(n)`（容量相同）；无缓冲 → `bounded(0)`；`close(ch)` → drop 发送端；`select` → `crossbeam::select!`；`sync.WaitGroup` → 保存 `JoinHandle` 并 join；`channel.Clear` → drain。
-5. **同步/异步边界只有一处**：coprocessor（D07.2）和点查等 KV 访问。`copIteratorWorker` 映射为 tokio task（数量 = `tidb_distsql_scan_concurrency`，`sendRate` 映射为同容量的信号量），把响应送进 flume channel；执行器侧的 `copIterator::next` 在 ExecPool 线程上同步 `recv`。点查之类的单次请求在 ExecPool 线程上用 `Handle::block_on`。
-6. **语句的根执行**放在 ExecPool 线程上；连接任务（tokio，N7 范围）通过有界 channel 收结果并写网络包。这样网络写阻塞不会占用执行线程，`FinishResultSet` 的情形（卡在网络写）由连接任务直接丢弃写 future 解决。
+> 2026-11-04 修订：评审指出方案 c（每个 goroutine 一个 OS 线程）"写法最像 Go、运行模型最不像 Go"：goroutine 是 M:N 调度的轻量任务，Rust 里最接近它的是工作窃取线程池上的 task，不是 1:1 的 OS 线程；高并发分析型负载下方案 c 会产生数千个线程。项目负责人同意改为参照 TiKV 的线程池模型。
+
+TiKV 的做法（`release-8.5` 分支）可以直接作为模板：
+
+| 要素 | TiKV 的做法 | 位置 |
+|---|---|---|
+| 固定大小、按核数确定的工作窃取池，与网络线程分开 | unified read pool（底层 yatp），`max-thread-count`，不弹性增长 | `src/read_pool.rs` |
+| 任务是 future，CPU 密集的工作协作式让出 | coprocessor 按时间片 `yatp::task::future::reschedule().await` | `src/coprocessor/endpoint.rs` |
+| 多级反馈队列 | 按任务累计 CPU 时间降级，大扫描不会饿死点查 | `src/read_pool.rs`（`Extras::new_multilevel`） |
+| 准入控制 | `max_tasks_per_worker`，超过时报 busy | `src/read_pool.rs` |
+
+1. **算子接口**：`Executor` trait 的 `open` / `next` / `close` 是 async，方法与 Go 的 `Executor` 接口一一对应；trait 对象上的调用每次 `Next` 一个装箱 future。一次 `Next` 产出一个 chunk（默认最多 1024 行），一次小分配可以忽略；TiKV 的 batch executor 同样按 batch 动态分派。`Executor: Send`，不要求 `Sync`。
+2. **ExecPool**：进程级、固定线程数（默认等于核数）的任务池，与网络运行时分开。第一步用一个**专用的 tokio 多线程运行时**实现，放在 `ExecPool` trait 后面。原因：`tikv-client` 依赖 tokio（定时器、I/O、tonic），它的 future 在 tokio 运行时里可以直接 await；yatp 线程上要 poll 它们需要额外处理。多级队列是计划中的升级：若"大扫描并发时的点查 p99"基准（第 5 节）不达标，换成 yatp，并按宪章登记为来自 TiKV 的 L3 和 ADR。
+3. **每个 goroutine 对应一个 task**（`M-GO`）：`go worker.run()` → `pool.spawn(async move { worker.run().await })`。数量严格等于 Go 的数量（由同一个 `Concurrency` getter 决定），`tidb_executor_concurrency` 等变量含义不变；物理并行度由池大小决定，这与 goroutine 和 GOMAXPROCS 的关系相同。
+4. **channel 映射**（`M-CH`、`M-WG`）：有缓冲 channel → 容量相同的异步有界 channel；无缓冲 → 容量为 0 的 rendezvous（无法直接表达时用容量 1 加确认，在 plan 模板里固定一种写法）；`close(ch)` → drop 发送端；`select` → `select!`；`sync.WaitGroup` → 保存 `JoinHandle`，关闭时逐个 await。只能使用**取消安全**的 channel 原语（在 `select!` 中被放弃的分支不会丢数据），选型在试点中确定并写进 plan 模板。
+5. **让出点与 kill 检查点合并**（`M-KILL`）：`ctx.checkpoint().await` 放在 Go 的 `HandleSQLKillerSignal` 同一位置（`exec::next` 前后等），同时做 kill 检查、内存检查（第二部分 3.3）和让出 CPU。任何不经过 `Next` 就连续处理多个 chunk 的循环（hash build、sort、聚合合并）每处理一个 chunk 调用一次。不新增其他位置。
+6. **KV 访问没有同步/异步边界**：coprocessor 迭代器的 worker（数量 = `tidb_distsql_scan_concurrency`，`sendRate` 映射为同容量的信号量）就是同一个池上的 task，直接 await `tikv-client` 的请求。需要确认 client-rust 的请求 future 被 drop 时会取消请求（待试点验证）。
+7. **禁止阻塞**（`M-BLOCK`、`M-LOCK`）：执行器代码中不得阻塞线程。落盘 I/O 走 `spawn_blocking` 或单独的阻塞池；await 期间不得持有锁；执行器 crate 中不得 `std::thread::spawn` 或 `block_on`。这些用 clippy 强制（见 [mappings.md](../../../docs/porting/mappings.md)）。
+8. **准入**：Go 没有拒绝行为，SQL 节点的并发语句数已经被连接数限制。默认排队，不拒绝；排队上限可配置，超过时报一个新的、明确的错误码（不复用 1317），并打指标。
+9. **会话与语句**：连接 task 在网络运行时；语句（含规划，规划也是 CPU 工作）在 ExecPool 上执行。`Session` 整体 move 进语句 future，结束时随结果返回，因此要求 `Session: Send`（见 N2）。网络写由连接 task 负责，执行侧通过有界 channel 交出结果；`FinishResultSet` 的情形（卡在网络写）由连接 task 直接丢弃写 future 解决。
+10. **调度与 Go 的差异**：Go 没有优先级；换成 yatp 后，混合负载下点查会比 Go 更快。这不是用户可见的语义，作为实现例外声明。
 
 #### 3.2 Worker 的写法（L2 映射规则）
 
 - worker 需要的共享状态放进 `Arc<…Shared>`（只读部分 + 原子量 + `Mutex`），worker 闭包 `move` 进去，满足 `'static`。Go 中 worker 直接读 `e.xxx` 字段的地方，改成读 `shared.xxx`；这是唯一的结构性改动，统一登记为 L2。
-- `RunWithRecover(exec, recoverFn)` → `pool.spawn_with_recover(name, exec, on_exit: FnOnce(Option<PanicError>))`：`on_exit` 无论是否 panic 都调用，保持 Go 的"退出钩子"语义。
+- `RunWithRecover(exec, recoverFn)` → `pool.spawn_with_recover(name, fut, on_exit: FnOnce(Option<PanicError>))`：future 外包一层 `catch_unwind`，`on_exit` 无论是否 panic 都调用，保持 Go 的"退出钩子"语义。
 - worker 读取 `SessionVars` 的地方（Go 里常见 `e.Ctx().GetSessionVars()...`）只能读 N2 提供的 `Send + Sync` 语句快照（见第 6 节）。
 
 #### 3.3 取消：`SqlKiller` + 唤醒
 
 1. `SQLKiller` 按 L1 移植（信号取值、`SendKillSignal` 的 CAS、`HandleSignal` 的错误映射、连接存活检查、`FinishResultSet`/`Reset`），放在 `Arc` 里，KILL、内存控制器、expensivequery 都能拿到。
-2. **增加一个唤醒通道（L2，Go 里由 `ctx.Done()`、`closeCh` 分担）**：`SendKillSignal` 成功后同时触发一个 `CancelToken`（内部是一个只关闭、不发送的 channel + tokio `CancellationToken`）。所有阻塞等待都写成 `select!{ recv(data) , recv(cancel) }`，异步侧用 `token.cancelled()`。这样被 kill 的语句不会卡在 channel 上等到下一个检查点。
+2. **增加一个唤醒通道（`M-GOCTX`，Go 里由 `ctx.Done()`、`closeCh` 分担）**：`SendKillSignal` 成功后同时触发一个 `CancelToken`（tokio `CancellationToken`）。所有等待都经过 `ctx.send` / `ctx.recv`，内部是 `select!{ data, token.cancelled() }`；直接调用 channel 的 `send` / `recv` 被 lint 禁止。这样被 kill 的语句不会卡在 channel 上等到下一个检查点，关闭时也不会因为某个 worker 卡在没人读的 channel 上而 join 不返回。
 3. **检查点保持 Go 的位置**：`exec::next` 前后（`HandleSQLKillerSignal`）、`HandleKillSignal` 调用点、内存检查点（第二部分 3.3）、KV 层读取 `Killed`。不新增检查点，除非某个长循环在 Go 中依赖 `Consume` 的 panic 来中断（这种情况在该块 plan 中登记）。
 4. 每个算子自己的 `closeCh/finishCh` 继续存在（关闭语义不同于 kill：比如 Limit 提前结束），映射为算子私有的 `CancelToken`，并作为语句级 token 的子 token。
-5. `max_execution_time`：expensivequery 的 100ms 扫描循环 L1 移植，跑在一个后台线程上，超时调用 `Server::kill(id, query=true, max_execution_time=true, …)`。
+5. `max_execution_time`（`M-TICK`）：Go 靠 expensivequery 每 100ms 扫一遍进程表。Rust 改为每条语句一个 deadline 定时器，到期调用与 Go 相同的 `Server::kill(id, query=true, max_execution_time=true, …)`。判断逻辑、日志按 L1 移植；比扫表精确，也没有 O(会话数) 的扫描。Go 约 100ms 的粒度不是用户契约。SQLKiller 每秒检查一次连接存活、`servermemorylimit` 每 100ms 读堆用量（第二部分）同理改为定时器。
 
 #### 3.4 错误边界
 
 1. **Go 中"当作控制流"的 panic 一律改成 `Result`**：`Tracker::consume`、`HandleKillSignal`、`PanicOnExceed::action` 都返回 `Result`。调用点加 `?`。Go 的函数签名没有 error 而内部会因 Consume panic 时，Rust 签名加上 `Result`，统一登记为 L2（"panic→Result"）。
-2. **`catch_unwind` 只在线程边界**：ExecPool 任务入口（转换成 `GetRecoverError` 等价的错误，经 `on_exit` 送入结果 channel）、语句入口（对应 `ExecStmt.Exec` / `recordSet.Next` 的 recover，保持 "execute sql panic" 日志和 `%v` 形式的报错文本）、连接循环（对应 `clientConn.Run`）。算子内部不写 `catch_unwind`。这些 panic 只来自 bug（越界、`unwrap`），release 构建保持 `panic = "unwind"`。
+2. **`catch_unwind` 只在 task 边界**（`M-PANIC`）：ExecPool 任务入口（转换成 `GetRecoverError` 等价的错误，经 `on_exit` 送入结果 channel）、语句入口（对应 `ExecStmt.Exec` / `recordSet.Next` 的 recover，保持 "execute sql panic" 日志和 `%v` 形式的报错文本）、连接循环（对应 `clientConn.Run`）。算子内部不写 `catch_unwind`。这些 panic 只来自 bug（越界、`unwrap`），release 构建保持 `panic = "unwind"`。
+4. **锁一律用 `parking_lot`**（`M-LOCK`，无毒化）。std `Mutex` 被 panic 的 task 毒化后，同一语句的其他 worker 会全部报 `PoisonError`，用户看到的就不是 Go 的报错文本。
 3. 由于 OOM/kill 不再是 panic，`ExecStmt.Exec` 中"只吞四种错误，其余继续 panic"的分支在 Rust 中退化为：四种错误按普通错误返回；真正的 panic 照 Go 的层次继续上抛到连接层。报错文本与 Go 相同。
 
 #### 3.5 Close 与 Drop
 
-1. **`close()` 保留且必须显式调用**，顺序逐行对应 Go：先取消（对应 `close(closeCh)`）→ drain channel → **join 全部 worker**（比 Go 严格：Go 有时只等 `waiterWg`）→ 注册 runtime stats → 释放磁盘 → 关闭子节点（返回第一个错误）。显式 Close 有可见副作用（EXPLAIN ANALYZE 统计、慢日志），不能只靠 Drop。
+1. **`close()` 保留且必须显式调用**，顺序逐行对应 Go：先取消（对应 `close(closeCh)`）→ drain channel → **await 全部 worker 的 `JoinHandle`**（比 Go 严格：Go 有时只等 `waiterWg`）→ **fetcher 归还子执行器** → 注册 runtime stats → 释放磁盘 → 关闭子节点（返回第一个错误）。显式 Close 有可见副作用（EXPLAIN ANALYZE 统计、慢日志），不能只靠 Drop。
+   - 子执行器的所有权：Go 的 fetcher 在另一个 goroutine 里调用子节点的 `Next`（如 `projectionInputFetcher.run`），Rust 中子执行器被 move 进 fetcher task。fetcher 退出时把子执行器作为 `JoinHandle` 的返回值交回，父节点 Close 时取回后再关闭。这是所有带 fetcher 的算子共用的模板规则。
 2. **Drop 是安全网**：未 Close 就被丢弃（错误路径、unwind）时，Drop 取消并 join worker、删除落盘文件、内存记账随缓冲区释放自动归零；但不注册 stats。
-3. "Close 与 Next 并发"在 Rust 中不存在：外部（KILL、内存控制器、`FinishResultSet`）只发信号，Close 永远由持有者线程执行。
+3. "Close 与 Next 并发"在 Rust 中不存在：外部（KILL、内存控制器、`FinishResultSet`）只发信号，Close 永远由持有者执行。
+4. future 被 drop 即取消：语句 future 只在连接断开或 Drop 安全网的情形下被 drop；正常路径和 KILL 都走显式 Close。
 
 ### 4. 对 L1 移植的影响（示例：投影的并行执行）
 
@@ -107,35 +126,37 @@ e.fetcher.outputCh <- output
 Rust（示意）：
 
 ```rust
-// go: executor/projection.go (*ProjectionExec).parallelExecute L2 (channel→crossbeam; Consume→自动记账+检查点)
-let Some(mut output) = ctx.recv(&self.output_rx)? else { return Ok(()) }; // recv 同时监听 cancel，被 kill 时返回 1317/3024/8175…
-ctx.recv(&output.done)?.transpose()?;                                     // worker 错误（含 panic 转换）
-chk.swap_columns(&mut output.chk);                                        // 列缓冲带记账句柄，交换时改挂到本算子
-self.mem.checkpoint()?;                                                   // 对应 Go 的 Consume：执行超限动作
-ctx.send(&self.fetcher_output_tx, output)?;
+// go: executor/projection.go (*ProjectionExec).parallelExecute L1 [M-CH, M-MEM]
+let Some(mut output) = ctx.recv(&mut self.output_rx).await? else { return Ok(()) }; // recv 同时监听 cancel，被 kill 时返回 1317/3024/8175…
+ctx.recv(&mut output.done).await?.transpose()?;                                  // worker 错误（含 panic 转换）
+chk.swap_columns(&mut output.chk);                                               // 列缓冲带记账句柄，交换时改挂到本算子
+ctx.checkpoint().await?;                                                         // 对应 Go 的 Consume：执行超限动作，并让出
+ctx.send(&self.fetcher_output_tx, output).await?;
 ```
 
 启动 worker（Go：`e.wg.Add(1); go e.workers[i].run(ctx)`）：
 
 ```rust
-// go: (*ProjectionExec).prepare L2
+// go: (*ProjectionExec).prepare L1 [M-GO]
 for w in workers {
-    self.handles.push(ctx.pool.spawn_with_recover("projection-worker", move || w.run(), on_panic_send(out_tx.clone())));
+    self.handles.push(ctx.pool.spawn_with_recover("projection-worker", w.run(), on_panic_send(out_tx.clone())));
 }
 ```
 
-分支、channel 容量、worker 数量、错误传递路径都和 Go 相同；变化只在载体（channel 类型、共享状态放进 `Arc`、panic→Result），统一登记为 L2，并把映射表写进 plan 模板。
+分支、channel 容量、worker 数量、错误传递路径都和 Go 相同；变化只在载体（task、异步 channel、共享状态放进 `Arc`、panic→Result），都由全局映射规则覆盖，所以仍是 L1，标注只引用规则 ID。
 
 ### 5. 验收（N3）
 
 | 项目 | 指标 |
 |---|---|
 | KILL 延迟 | TPC-H SF10 的 Q1、Q9、Q18、Q21 在 CPU 密集阶段执行 `KILL QUERY`，从发出到被杀会话收到 1317 的 p99 ≤ 100ms，且不高于同环境 Go 的实测值 |
-| 线程不泄漏 | 测试框架在每条语句结束后断言该语句的 ExecPool 任务数为 0（对应 Go 测试中的 goleak）；sysbench 1 小时后线程数回到基线 ±5% |
+| task 不泄漏 | 测试框架在每条语句结束后断言该语句在 ExecPool 上的 task 数为 0（对应 Go 测试中的 goleak）；进程线程数固定，不随负载增长 |
+| 池指标 | 导出队列长度、运行中 task 数、入队等待时间（对应 yatp 的指标） |
 | 资源释放 | KILL / 超时 / 内存超限 / worker panic 四种中止路径下，语句结束后该语句的内存记账为 0、落盘文件为 0 |
 | 必须通过的 Go 测试 | `executor/test/jointest/hashjoin` `TestKillDuringBuild`、`TestKillDuringProbe`；`executor/test/executor` `TestQueryWithKill`；`executor` `TestKillTableReader`；`executor/test/simpletest` `TestKillStmt`；`session/test/variable` `TestMaxExecutionTime`；`sessionctx/variable` `TestMaxExecutionTime`；`util/sqlkiller` 全部；`server/tests/commontest` `TestClientDisconnectKillsAutocommitInsert`；各算子的 `*RandomFail` / `randomPanic` 类 failpoint 测试（`join` `TestHashJoinRandomFail`、`aggregate` `TestRandomFail`） |
 | 并发度语义 | 对每个并发度变量，构造查询断言实际 worker 数与 Go 相同（读 runtime stats 中的 concurrency 字段，与 Go 的 EXPLAIN ANALYZE 对比） |
-| 性能 | sysbench oltp_point_select / read_only QPS 不低于当前 PoC 基线（衡量根执行切换到 ExecPool 的开销）；TPC-H 22 条查询总耗时不高于 Go |
+| 性能 | sysbench oltp_point_select / read_only QPS 不低于当前 PoC 基线；TPC-H 22 条查询总耗时不高于 Go |
+| 高并发分析负载 | 64 个并发会话跑 TPC-H Q1、Q9：吞吐不低于 Go；同时运行的 sysbench 点查 p99 不高于 Go（这是多级队列要解决的场景，不达标时换 yatp，见 3.1 第 2 条） |
 
 ---
 
@@ -158,7 +179,7 @@ v8.5.8 中的事实：
 | 实例级：`servermemorylimit.Handle.Run` 每 100ms 读 `HeapInuse`，超过 `tidb_server_memory_limit` 时向 `MemUsageTop1Tracker`（且 ≥ `tidb_server_memory_limit_sess_min_size`，默认 128MB）发 `ServerMemoryExceeded`；60s 杀不掉就 `FinishResultSet`；之后 `runtime.GC()`；记录到 `MEMORY_USAGE_OPS_HISTORY` | `util/servermemorylimit/servermemorylimit.go`（176 行）`killSessIfNeeded` L102 | 判断逻辑 L1；"堆使用量"的来源必须换（无 Go runtime） |
 | 与 Go runtime 绑定的部分：`tidb_server_memory_limit_gc_trigger`、`tidb_enable_gogc_tuner`、`tidb_gogc_tuner_*`、`util/gctuner`（31 个函数）、`memoryusagealarm` 写 goroutine/heap profile、`Tracker.Release` 的 GC finalizer | `util/gctuner/*`、`util/memoryusagealarm`（330 行，块 X）、`tracker.go` L550 | 没有对应物，需要特性层面的决定（待定 3） |
 | Chunk：列存，`Column{length, nullBitmap, offsets []int64, data, elemBuf}`；`MemoryUsage()` = 各列 `Sizeof + cap(...)` 之和 | `util/chunk/column.go`（636 行）L73；`chunk.go`（518）L185 | 布局 L1（编解码、`Row` 访问依赖它）；`MemoryUsage` 改为读取实际容量 |
-| 复用池：`chunk.Allocator`（会话级，`maxFreeChunks=64`、每类型 256 列），受 `tidb_enable_reuse_chunk` 控制 | `util/chunk/alloc.go`（202 行）、`pool.go`；`SessionVars.GetChunkAllocator`（session.go L1833） | 由统一缓冲区的复用池取代，变量含义保持 |
+| 复用池：`chunk.Allocator`（会话级，`maxFreeChunks=64`、每类型 256 列），受 `tidb_enable_reuse_chunk` 控制 | `util/chunk/alloc.go`（202 行）、`pool.go`；`SessionVars.GetChunkAllocator`（session.go L1833） | 删除（`M-POOL`），变量按 Go 运行时专属变量处理（见 3.2） |
 | 落盘容器：`RowContainer`、`SortedRowContainer`、`DataInDiskByRows`、`DataInDiskByChunks` | `row_container.go`、`row_in_disk.go`（284）、`chunk_in_disk.go`（289）、`row_container_reader.go`（81） | 落盘文件格式是内部的，可以重设计；对外语义（何时落盘、磁盘列）保持 |
 | 用户可见的内存/磁盘数值：EXPLAIN ANALYZE 的 `memory`/`disk` 列 = 语句 tracker 树中 label 等于 plan ID 的节点的 `MaxConsumed`（`FormatBytes` 格式）；慢日志 `Mem_max`/`Disk_max`；statements_summary `AVG_MEM/MAX_MEM/MAX_DISK`；`PROCESSLIST.MEM/DISK`；`MEMORY_USAGE` 表 | `planner/core/common_plans.go` `getRuntimeInfo`（L1116，`SearchTrackerWithoutLock(p.ID())`）、`getRuntimeInfoStr` L1107–1111；`sessionctx/variable/slow_log.go` L176–178；`util/stmtsummary/reader.go` L290–293；`infoschema/tables.go` L865、L1665–1690 | 列、格式、归属算子保持；数值不可能与 Go 逐字节相同（见 3.5） |
 | 规模：executor、util/chunk、distsql、store/copr 中共有约 235 处 `Consume(` 调用 | 统计自 v8.5.8 源码 | 每处都要有映射结论 |
@@ -169,7 +190,7 @@ v8.5.8 中的事实：
 |---|---|---|---|
 | a. 照搬估算 | 移植全部 `Consume(delta)` 和估算公式 | 数值最接近 Go | 把 Go 的偏差和漏记一起搬过来；Rust 的数据结构（N5、N6）与 Go 不同，公式本身就不成立；放弃了 A1 的收益 |
 | b. 全局分配器钩子 | `#[global_allocator]` 按线程当前语句记账 | 覆盖率最高、对代码零侵入 | 线程间传递的数据（worker 产出、共享缓冲）归属错乱；分配路径里无法执行动作链（日志、锁、落盘都会递归分配）；无法区分算子，EXPLAIN ANALYZE 的按算子列做不出来 |
-| c. 带记账的缓冲区 + 保留 Tracker 树和动作链 | 所有大块内存（chunk 列、行容器、哈希表、聚合状态、排序缓冲、copr 响应）都从同一种"记账缓冲区"分配，分配/释放时自动计入所属 tracker；超限动作在检查点执行 | 记的是真实容量；Drop 自动归零；树、标签、动作链、报错都按 L1 保留；落盘可以按缓冲区页整体计算 | 小对象、未改造的分配不计入（需设覆盖率指标）；数值与 Go 不同 |
+| c. 带记账的缓冲区 + 保留 Tracker 树和动作链 | 所有大块内存（chunk 列、行容器、哈希表、聚合状态、排序缓冲、copr 响应）都通过同一个记账分配器 `TrackedAlloc` 分配，分配/释放时自动计入所属 tracker；超限动作在检查点执行 | 记的是真实容量；Drop 自动归零；树、标签、动作链、报错都按 L1 保留 | 小对象、未改造的分配不计入（需设覆盖率指标）；数值与 Go 不同 |
 
 ### 3. 建议（方案 c）
 
@@ -186,27 +207,28 @@ v8.5.8 中的事实：
 |---|---|---|
 | 算子中的 `Consume(±delta)` 和估算公式 | 删除 delta 计算；正向 Consume 的位置改为 `mem.checkpoint()?`；负向 Consume（释放）删除，由 Drop 完成 | 例外（A1），按调用点登记 |
 | `Chunk.MemoryUsage()` 的公式 | 返回实际缓冲容量之和（与 Go 公式同口径：cap 之和 + 结构体大小） | L2 |
-| `chunk.Allocator` / `pool.go` 复用池 | 统一缓冲区的页池（语句级 + 会话级缓存），`tidb_enable_reuse_chunk` 控制是否在会话级缓存 | 例外（A1） |
-| RowContainer 的异步落盘与 `RWMutex` | 落盘请求只置标志，由持有者在下一次 `Add`/检查点同步完成；不再需要读写锁 | 例外（A1），动作触发顺序不变 |
-| 落盘文件格式（`row_in_disk.go`、`chunk_in_disk.go`） | 以缓冲页为单位顺序写出，可选压缩 | 例外（A1），格式内部 |
+| `chunk.Allocator` / `pool.go` 复用池 | 删除（`M-POOL`：这是 Go 绕开 GC 的做法）。`tidb_enable_reuse_chunk` 按 Go 运行时专属变量处理：接受，设为非默认值时返回 warning（N8） | 例外（A1） |
+| RowContainer 的异步落盘与 `RWMutex` | 落盘请求只置标志，由持有者在下一次 `Add`/检查点完成（写文件经 `spawn_blocking`，持有者 await 它）；不再需要读写锁 | 例外（A1），动作触发顺序不变 |
+| 落盘文件格式（`row_in_disk.go`、`chunk_in_disk.go`） | 第一步按 Go 的格式移植；是否改格式随 N5/N6 再定 | 内部格式，暂按 L1 |
 | `servermemorylimit` 读 `HeapInuse` | 读 jemalloc 统计（`stats.allocated`，或 `resident`，待定 4） | L3（同源：TiKV 也用 jemalloc 统计） |
 | `Tracker.Release` 的 GC finalizer、gctuner、`runtime.GC()` | 无对应物 | 特性例外（待定 3） |
 
 #### 3.3 记账与检查点（核心机制）
 
-1. **记账缓冲区 `TrackedBuf` / 页池**：所有大块内存通过一个实现 `allocator_api2::Allocator` 的 `TrackedAlloc` 分配（`Vec<u8, TrackedAlloc>`、`hashbrown::HashMap<_, _, _, TrackedAlloc>`、bump arena 都能用）。`TrackedAlloc` 持有一个 tracker 叶子节点的句柄，分配/释放时把**实际字节数**记进去。
+1. **`TrackedAlloc`**（`M-MEM`）：所有大块内存通过一个实现 `allocator_api2::Allocator` 的 `TrackedAlloc` 分配，它把字节数记到 tracker 后转发给 jemalloc，自己不管理内存（`Vec<u8, TrackedAlloc>`、`hashbrown::HashMap<_, _, _, TrackedAlloc>`、bump arena 都能用）。`TrackedAlloc` 持有一个 tracker 叶子节点的句柄，分配/释放时把**实际字节数**记进去。
 2. **热路径只做原子加**：分配路径中不执行动作、不打日志、不加锁。每个线程按句柄批量累计，满 64KiB（或释放）时才沿父链传播；越过硬/软限额时只在对应节点上置"已超限"标志。批量误差上界 = 64KiB × 该语句线程数，在验收中计入。
 3. **检查点执行动作链**：`mem.checkpoint() -> Result<()>` 检查标志，按 Go `Consume` 的顺序执行：先 `HandleSignal`（kill），再硬限额动作链，再软限额动作链。动作若是 `PanicOnExceed` 就发 `QueryMemoryExceeded` 信号并返回 8175；若是 spill 就置落盘标志；若是 LOG 就打 8001 文本的日志。检查点放在 Go 中正向 `Consume` 的同一位置，再加上 `exec::next` 前后——所以"在哪一步报错"与 Go 相同，只是报错依据的是实际字节数。
 4. **归属**：缓冲区记在分配它的 tracker 上；`Chunk::swap_columns`、把 chunk 交给父算子等"所有权转移"时改挂到接收方 tracker（一次原子减一次原子加），对应 Go 在 `SwapColumns` 后 `Consume(delta)` 的惯例，使 EXPLAIN ANALYZE 的按算子数值归属与 Go 一致。
 5. **磁盘**：`DiskTracker` 同一棵树，落盘文件写入/删除时记账；文件句柄由 RAII 持有，Drop 删除。
 
-#### 3.4 统一缓冲区与可计算预算
+#### 3.4 页池与可计算预算：推后
 
-- 统一的最小单位是**页**（如 64KiB，大列单独分配），chunk 列、行容器、哈希表的变长键区、聚合状态 arena、排序缓冲、copr 响应缓冲都从页池取页。
-- 一个算子的内存 = 它持有的页数 × 页大小 + 定长结构，可以在 `open` 时按并发度、`tidb_max_chunk_size`、字段类型算出下限（"可计算预算"）。第一阶段只用于观测（写入 runtime stats），不改变 Go 的触发规则。
-- 落盘以页或页组为单位，因此"释放多少内存"在落盘前就能算出来；spill action 的 `hasEnoughDataToSpill` 判断可以用精确值。
-- 与 N5：从 coprocessor 响应零拷贝解码时，chunk 列借用响应页（`Arc` 共享）。共享页只记账一次，记在 copr/reader 的 tracker 上，最后一个引用释放时归零。这会让一部分内存从 Go 的"消费算子"挪到"读取算子"名下，属于 3.5 中声明的差异。
-- 与 N6：哈希表、聚合、排序的结构由 N6 决定，但必须使用 `TrackedAlloc` 和页池；它们的落盘必须通过本 spec 的动作链触发（优先级沿用 Go 的 `DefSpillPriority`）。
+> 2026-11-04 修订：初稿让所有大块内存走 64KiB 页池、算子内存按页数计算。这是 Umbra/Velox 一类系统的做法；TiKV 没有页池，用的是 jemalloc 加粗粒度的显式记账（`MemoryQuota`）。A1 的核心收益（按实际分配记账、Drop 归零、动作链 L1）只需要 `TrackedAlloc`，不需要页池，而页池有写出"第二个分配器"的风险。
+
+- **第一步只做 `TrackedAlloc`**。
+- 页池和"可计算预算"推到 N5/N6 定稿时，由实测决定要不要做。
+- 与 N5：从 coprocessor 响应零拷贝解码时，chunk 列借用响应缓冲（`Arc` 共享）。共享缓冲只记账一次，记在 copr/reader 的 tracker 上，最后一个引用释放时归零。这会让一部分内存从 Go 的"消费算子"挪到"读取算子"名下，属于 3.5 中声明的差异。
+- 与 N6：哈希表、聚合、排序的结构由 N6 决定，但必须使用 `TrackedAlloc`；它们的落盘必须通过本 spec 的动作链触发（优先级沿用 Go 的 `DefSpillPriority`）。`Vec<T, A>` 这类带分配器参数的容器在生态里穿透性差（很多 crate 只接受 `Vec<T>`），N6 定稿前要验证 sort、hash 的实现能否全程带着 `TrackedAlloc`，否则达不到第 5 节的记账覆盖率。
 
 #### 3.5 用户可见语义的兼容契约
 
@@ -227,6 +249,8 @@ v8.5.8 中的事实：
 - 单调与归零：每个 tracker 在语句结束后为 0；`MaxConsumed` ≥ 任一时刻的当前值。
 - 精度：限额执行误差 ≤ `max(5%×quota, 批量误差上界 + 一个 chunk)`——Go 做不到这一点，这是 A1 的收益。
 - 量级：同一查询的总内存与 Go 相比在 [0.3×, 1.5×] 内（不作为门禁，只作为异常报警）。
+
+**运维指引**：混合集群里，同一条 SQL、同一个 `tidb_mem_quota_query`，可能在 Go 节点能跑而在 tidb-rs 被 8175 取消，或者反过来。发布时附一份说明，用实测的比值带宽（目前假设 [0.3×, 1.5×]）告诉用户配额该怎么设，带宽随 TPC-H 实测更新。
 
 **测试处理规则**：断言具体字节数的 Go 测试（如 `util/chunk` `TestChunkMemoryUsage`、`TestListMemoryUsage`、`join` `TestConcurrentMapMemoryUsage`）标记为"数值不对照"，改写为上面的性质测试，在块 plan 中逐个列出；依赖"配额刚好卡在 Go 的数值上"的测试（如用某个具体 `tidb_mem_quota_query` 值来逼出落盘）允许重新标定配额，要写明原值、新值和理由。
 
@@ -265,7 +289,7 @@ err?;
 | 项目 | 指标 |
 |---|---|
 | 必须通过的 Go 测试（行为类） | `util/memory`：`TestAttachTo`、`TestDetach`、`TestReplaceChild`、`TestMaxConsumed`、`TestOOMAction`、`TestOOMActionPriority`、`TestErrorCode`、`TestGlobalTracker`、`TestSetLabel*`、`TestToString`、`TestFormatBytesWithPrune`；`util/chunk`：`TestSpillAction`、`TestSpillActionDeadLock`、`TestSortedRowContainerSortSpillAction`、`TestInterruptedDuringSpilling`、`TestPanicWhenSpillToDisk`、`TestReadAfterSpillWithRowContainerReader`；执行器：`TestOOMActionPriority`、`TestSessionRootTrackerDetach`、`TestOOMPanicInHashJoinWhenFetchBuildRows`、`TestMemoryAndDiskUsageAfterClose`、`TestExplainAnalyzeMemory`、`TestExplainAnalyzeCTEMemoryAndDiskInfo`、各算子 `TestFallBackAction`、hash join / sort / topn / agg / CTE 的 spill 测试（`inner_join_spill_test.go`、`outer_join_spill_test.go`、`sort_spill_test.go`、`parallel_sort_spill_test.go`、`topn_spill_test.go`、`agg_spill_test.go`、`cte` `TestSpillToDisk`）；`TestGlobalMemoryControl`、`TestGlobalMemoryControl2`、`servermemorylimit` `TestMemoryUsageOpsHistory`；`sessionctx/variable` 的 `TestTiDBMemQuotaQuery`、`TestTiDBServerMemoryLimit*`；`session/test/variable` `TestCoprocessorOOMAction`；`distsql` `TestSelectMemTracker`（按"数值不对照"规则改写后通过） |
-| 记账覆盖率 | TPC-H SF10 每条查询：峰值时 tracker 根节点 / 该语句线程的 jemalloc 已分配增量 ≥ 0.9 |
+| 记账覆盖率（含 N6 的哈希、排序结构） | TPC-H SF10 每条查询：峰值时 tracker 根节点 / 该语句线程的 jemalloc 已分配增量 ≥ 0.9 |
 | 限额精度 | `tidb_mem_quota_query = Q`、`tidb_mem_oom_action=CANCEL` 下跑 TPC-H 重查询（Q9、Q18、Q21），实际峰值分配 ≤ Q + 3.5 节的误差上界；开启落盘时查询成功且结果正确 |
 | 内存占用 | 默认配置下 TPC-H SF10 22 条查询各自的进程 RSS 峰值 ≤ Go 的 70%；sysbench oltp_read_only 稳态 RSS ≤ Go 的 70% |
 | 记账开销 | sysbench oltp_read_only、TPC-H：关闭记账（编译开关）与开启记账的 CPU 差 ≤ 2% |
@@ -279,20 +303,27 @@ err?;
 |---|---|
 | N1（arena 计划） | 执行器从 N1 的拥有型不可变物理计划（`Arc` 节点）构建，持有 `Arc` 不借用 arena，所以可以 `Send` 给 worker。tracker 标签继续用 plan ID（EXPLAIN ANALYZE 用它查找）。优化阶段的 arena 本身也应记在语句 tracker 下（Go 不记，属于新增观测，不参与限额，待定 6）。 |
 | N2（会话 / 语句上下文拆分） | `SqlKiller`、会话根 tracker 必须放在"跨线程可见"的会话共享部分（KILL、内存控制器、expensivequery 从其他线程访问）；`StmtCtx` 持有语句 `MemTracker`/`DiskTracker`/`RuntimeStatsColl`，以 `Arc` 形式交给执行器。N2 需要提供一个 `ExecCtx`（`Send + Sync`、廉价 clone）：killer、取消 token、语句 tracker、并发度快照、只读变量快照、ExecPool 句柄。worker 只能用它，不能碰 `SessionVars`。 |
-| N5（值表示与零拷贝） | 共享响应页的记账规则见 3.4；chunk 列的缓冲统一来自页池。 |
-| N6（hash agg / join / sort 数据结构） | 必须用 `TrackedAlloc` 和页池；落盘由本 spec 的动作链触发；并发结构（partial/final worker、build/probe worker）沿用本 spec 的 ExecPool 与映射规则。 |
+| N5（值表示与零拷贝）、N5a（列格式） | 共享响应缓冲的记账规则见 3.4；chunk 列的缓冲用 `TrackedAlloc` 分配。 |
+| N6（hash agg / join / sort 数据结构） | 必须用 `TrackedAlloc`；落盘由本 spec 的动作链触发；并发结构（partial/final worker、build/probe worker）沿用本 spec 的 ExecPool 与映射规则。 |
+| A2（算子内部的 worker 结构） | **刻意保留 Go 的形状**：HashAgg 的 fetcher → partial → final、HashJoin 的 build/probe worker、IndexLookUp 的 index/table worker 都是为 goroutine 设计的结构，Rust 引擎（DataFusion、Velox、TiKV 的 coprocessor）用的是分区/morsel 并行。移植阶段仍按 Go 的结构移植：P4 以它为形状，并发度变量和 EXPLAIN ANALYZE 的 concurrency 字段都暴露它。这是一条显式决定，不是 Rust 侧的设计；以后改成分区并行时，走新的例外 spec（暂记为 N9）。 |
 | N7（结果集编码与网络层） | 根执行在 ExecPool、网络写在 tokio 的分工，以及 `FinishResultSet` 的实现，需要 N7 配合。 |
 
-## 第四部分　待定（需要项目负责人决定）
+## 第四部分　决定与待定
 
-1. **同步 `Next` + ExecPool + 异步 I/O 边界**（第一部分 3.1）是否确认？这是对 PoC 全异步执行的推翻，影响 D07、D12 全部代码形态。
-2. **ExecPool 上限策略**：建议"弹性、无死锁硬上限、超高保护上限时报错"。是否接受报错（Go 没有对应行为），还是改为排队（有死锁风险）？
-3. **Go runtime 专属变量与列**（`tidb_server_memory_limit_gc_trigger`、`tidb_enable_gogc_tuner`、`tidb_gogc_tuner_*`、`tidb_memory_usage_alarm_*` 的 profile 输出、`MEMORY_USAGE.GC_LAST/GC_TOTAL`）：宪章第五条不允许"接受后静默忽略"。建议作为特性例外：读取返回 Go 默认值；设置为默认值时接受；设置为其他值时接受并返回 warning "has no effect in tidb-rs"；GC 列返回 NULL/0。也可以选择设置非默认值时报错。
-4. **实例内存的度量**：`tidb_server_memory_limit` 对比 jemalloc 的 `allocated` 还是 `resident`？前者接近 Go 的 `HeapInuse` 语义，后者更接近 OOM 风险。默认值"总内存 80%"是否保持。
-5. **数值类测试的处理规则**（"数值不对照"改写为性质测试、允许重标定配额）是否接受？这会让一批 Go 单测不能原样移植。
-6. **优化器 arena、plan cache 等是否纳入语句 tracker**：Go 不记；纳入后 `Mem_max` 会变大，可能更早触发配额。建议只观测、不计入限额。
-7. **RowContainer 改为同步落盘**：Go 异步落盘时，读取方可以和落盘并发；改为同步后落盘期间该算子停顿。性能是否需要另设指标？
-8. **点查快速路径**：点查是否允许不经 ExecPool、直接在 tokio 任务内以异步方式执行（会让点查执行器成为唯一的异步算子，偏离"同步 Next"的统一规则）？建议先不做，以 sysbench 实测决定。
+已决定（2026-11-04，项目负责人确认 PR #2 评审意见）：
+
+1. **执行模型**：async `Next` + 专用的固定大小任务池（方案 d，3.1）。第一步用专用 tokio 运行时，是否换 yatp 由高并发分析负载下的点查 p99 基准决定。
+2. **池的上限策略**：固定线程数；语句默认排队，排队上限可配置，超限报新的错误码并打指标（3.1 第 8 条）。
+3. **Go runtime 专属变量与列**（`tidb_server_memory_limit_gc_trigger`、`tidb_enable_gogc_tuner`、`tidb_gogc_tuner_*`、`tidb_enable_reuse_chunk`、`tidb_memory_usage_alarm_*` 的 profile 输出、`MEMORY_USAGE.GC_LAST/GC_TOTAL`）：读取返回 Go 默认值；设为默认值时接受；设为其他值时接受并返回 warning "has no effect in tidb-rs"；GC 列返回 NULL/0。完整清单在 N8 中维护。
+4. **实例内存的度量**：限额判断用 jemalloc 的 `resident`（更接近 OOM 风险），归属用 `allocated`，两者都导出指标。
+5. **数值类测试**：改写为性质测试、允许重新标定配额（3.5）。
+6. **点查快速路径**：先不做；但把"是否经过 ExecPool"设计成调度上的选择，而不是另一套执行器，实测后切换不需要改算子代码。
+
+待定：
+
+7. **优化器 arena、plan cache 等是否纳入语句 tracker**：Go 不记；纳入后 `Mem_max` 会变大，可能更早触发配额。建议只观测、不计入限额。
+8. **RowContainer 改为由持有者完成落盘**：Go 异步落盘时，读取方可以和落盘并发；改后落盘期间该算子停顿。性能是否需要另设指标？
+9. **数字门槛**（KILL 延迟、RSS 70%、记账开销 2% 等）：定稿前先在 Go 上实测基线并回填。
 
 ## 附：我不确定的地方
 

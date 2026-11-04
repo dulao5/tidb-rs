@@ -1,6 +1,6 @@
 # A4：JSON（二进制格式兼容，实现按 Rust 重新设计）（例外 spec，草案）
 
-状态：草案。类型：实现例外。计划定稿：P1 开工前（ROADMAP §3 第 4 条、§5 第 1 条）。
+状态：草案（2026-11-04 按 PR #2 评审修订：待确认问题已有结论，`jsonvec` 并入通用的 `govec`，单行/向量化的写法以 N4 为准）。类型：实现例外。计划定稿：P1 开工前（ROADMAP §3 第 4 条、§5 第 1 条）。
 依据：宪章第三条 1(b)（"JSON 性能"）；例外清单 A4；methodology Q3（编码格式复用 TiKV `tidb_query_datatype`，L3；值语义从 Go 移植；JSON 作为例外 A4）。
 
 ## 1. 替换的 Go 范围
@@ -166,13 +166,13 @@ PoC 已经把 TiKV 的 `tidb_query_datatype` 原样放在 `projects/tidb-rs/thir
 
 ### 5.7 JSON 函数（D08.10）
 
-函数类、签名、参数检查、NULL 处理、报错顺序按 L1 移植（单行和向量化两个版本都要有），只把内部调用换成 §5.3–5.6 的接口。`JSON_SCHEMA_VALID` 依赖 Go 第三方库 `qri-io/jsonschema v0.2.1`，处理方式见 §8。
+函数类、签名、参数检查、NULL 处理、报错顺序按 L1 移植，只把内部调用换成 §5.3–5.6 的接口。Go 中单行（`evalXxx`）和向量化（`vecEvalXxx`）两个版本如何对应到 Rust，按 N4（表达式求值框架）的统一规则处理，本 spec 不单独规定。`JSON_SCHEMA_VALID` 依赖 Go 第三方库 `qri-io/jsonschema v0.2.1`，处理方式见 §8。
 
 ## 6. 验证
 
 ### 6.1 Go 差分向量
 
-在 tracker 仓库下写一个小 Go 程序 `tools/jsonvec`，`go.mod` 用 `replace` 指向本地 v8.5.8 源码，Go 工具链固定为 v8.5.8 `go.mod` 声明的 **go 1.25.12**（`strconv`、`encoding/json` 的行为随 Go 版本可能变化）。输出 JSONL，每行 `{op, args, out_bin_hex, out_text, err_code, err_msg, warnings}`：
+JSON 是通用向量工具 **govec** 的第一个用户（方法论 §5；Decimal、Time、convert、collation、ranger 也用它）。在 tracker 仓库的 govec 下实现 JSON 部分（下文仍称 `jsonvec`），`go.mod` 用 `replace` 指向本地 v8.5.8 源码，Go 工具链固定为 v8.5.8 `go.mod` 声明的 **go 1.25.12**（`strconv`、`encoding/json` 的行为随 Go 版本可能变化）。输出 JSONL，每行 `{op, args, out_bin_hex, out_text, err_code, err_msg, warnings}`：
 
 | op | 调用的 Go 入口 |
 |---|---|
@@ -221,14 +221,14 @@ PoC 已经把 TiKV 的 `tidb_query_datatype` 原样放在 `projects/tidb-rs/thir
 
 在函数阶段之前，所有 JSON 函数按宪章第五条返回统一的"不支持"错误，并在 tracker 中登记边界桩。下推判定（D08.3，P2）只需要函数签名枚举，不依赖函数实现。
 
-## 8. 待确认问题
+## 8. 决定（2026-11-04，PR #2 评审）
 
-1. **逐字节一致**：建议把"所有构造路径输出的二进制与 Go 逐字节一致"作为硬性契约（理由见 §3.1）。是否同意？如果只要求"合法布局 + 语义一致"，§5.1 中按 L1 对应的构造算法可以放宽。
-2. **JSON_SCHEMA_VALID**：Go 依赖 `qri-io/jsonschema v0.2.1`。选项：(a) 移植该库用到的部分；(b) 用 Rust `jsonschema` crate，并用差分向量找出差异再逐条处理；(c) 暂时作为边界桩报错。建议先 (c)，函数阶段再评估 (a)/(b)。
-3. **D08.10 的排期**：建议放在 P5，与其他函数族一起；之前全部报"不支持"。是否需要提前（例如有 JSON 列的 TPC/sysbench 之外的回归基线）？
-4. **TiKV 差异**：§4 表中的 1–5 也是现在 TiDB 与 TiKV 下推之间的不一致。是否由我们整理后向 TiKV 上游报告？（不影响本例外的实现。）
-5. **损坏的二进制**：Go 越界 panic，执行层 recover 后变成什么错误取决于调用位置。Rust 改为返回错误，建议统一用内部错误码，差分向量不覆盖损坏输入。是否接受？
-6. **`jsonvec` 放在哪里**：建议放 tracker 仓库，向量文件随 tidb-rs 入库，上游同步时重新生成并 diff。
+1. **逐字节一致是硬性契约**：所有构造路径输出的二进制与 Go 逐字节一致（`JSON_STORAGE_SIZE`、codec key、行校验和都依赖它）。
+2. **JSON_SCHEMA_VALID**：先作为边界桩报错，函数阶段再评估移植 `qri-io/jsonschema` 用到的部分还是用 Rust crate 加差分。
+3. **D08.10 的排期**：放在 P5，与其他函数族一起；之前全部报"不支持"。
+4. **TiKV 差异**：§4 的表整理后作为 issue 报给 TiKV 上游（它们也是 TiDB 与 TiKV 下推之间的不一致）。
+5. **损坏的二进制**：统一返回内部错误码，差分向量不覆盖损坏输入。
+6. **向量工具**：不做 A4 专属的工具，作为 govec 的一部分放在 tracker 仓库；向量文件随 tidb-rs 入库，上游同步时重新生成并 diff。
 
 ## 9. 不确定之处（写给评审）
 

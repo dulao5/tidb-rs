@@ -1,6 +1,6 @@
 # N2：会话与语句上下文的共享状态拆分（基础设计 spec，草案）
 
-状态：草案。类型：实现例外（基础设计）。计划定稿：P1 之前。相关：N1（计划表示）、N3+A1（并发、取消、内存）、N8（系统变量注册表）。
+状态：草案（2026-11-04 按 PR #2 评审修订：会话不再绑定线程，而是一个可以在任务之间转移的 `Send` 值）。类型：实现例外（基础设计）。计划定稿：P1 之前。相关：N1（计划表示）、N3+A1（并发、取消、内存）、N8（系统变量注册表）。
 
 ## 1. 要解决的问题
 
@@ -34,9 +34,9 @@ Go 的 `SessionVars` 和 `StatementContext` 是两个巨大的可变结构体，
 ### 3.1 三层结构
 
 ```text
-Session（连接线程独占，&mut）
+Session（Send；同一时刻只有一个任务持有，&mut）
  ├── SessionVars            可变；SET 语句、事务状态、用户变量、prepared 语句等
- │     └── 系统变量：只存改过的值，其余查 N8 的静态注册表
+ │     └── 系统变量：Go 的类型化字段按 L1 保留；字符串形式的值 = 会话建立时的全局值快照（共享只读）+ 本会话改过的值（以 N8 定稿为准）
  ├── shared: Arc<SessionShared>        跨线程共享，字段都是原子或内部加锁
  │     ├── killer: SqlKiller           （原子信号；KILL / max_execution_time / 内存超限都写这里）
  │     ├── 会话根内存 tracker            （A1；内存控制器、expensivequery 从其他线程读）
@@ -49,7 +49,9 @@ Session（连接线程独占，&mut）
                                            内存与磁盘 tracker（A1 定义）、执行详情
 ```
 
-- **会话线程**：拥有 `Session`，以 `&mut` 访问 `SessionVars`。解析、绑定、优化、`SET`、事务控制都在这里，按 Go 的顺序执行，没有锁。
+- **持有会话的任务**：同一时刻只有一个任务拥有 `Session`，以 `&mut` 访问 `SessionVars`。按 N3 3.1 第 9 条，连接任务（网络运行时）在语句之间持有会话；执行一条语句时，把 `Session` 整体 move 进语句 future，在 ExecPool 上完成解析、绑定、优化、执行、`SET`、事务控制，结束时随结果交还连接任务。全程按 Go 的顺序执行，没有锁。
+  - 这要求 **`Session: Send`**（不要求 `Sync`）。直接后果：parser AST 目前持有 `Rc`（ADR 0004），prepared statement 若在会话中保存 AST，会话就不是 `Send`。要么 AST 改为 `Arc` 或拥有型结构，要么会话只保存降级后的 IR。这是 P1 中 D02 要处理的事，记入该块 spec。
+  - 下文的"会话线程"一律指"持有会话的任务"。
 - **执行器 worker**：只拿到 N3+A1 中定义的 `ExecCtx`（`Send + Sync`、廉价 clone：`Arc<StmtCtx>`、killer、取消令牌、语句 tracker、线程池句柄）。读变量直接读冻结值，追加 warning 走内部锁。worker 拿不到 `SessionVars`，编译器会拒绝在 worker 里写会话状态。
 - **其他会话**：只能通过 `SessionManager` 拿到对方的 `Arc<SessionShared>`，读 `ProcessInfo` 快照、发送 KILL。`ProcessInfo` 里放 `Arc<StmtCtx>`，因此 Go 的引用计数 + 冻结协议直接由 `Arc` 代替（L2）。
 
@@ -60,9 +62,11 @@ Go 中"实时读 SessionVars"和"读快照"的语义差别只在一种情况下�
 | 情况 | Go 行为 | 处理 |
 |---|---|---|
 | `SELECT @a := @a + 1 ...` 等用户变量赋值 | 逐行读写 SessionVars 中的用户变量 | 用户变量不进冻结快照；`StmtCtx` 持有一个对用户变量表的共享句柄（`Arc<Mutex<UserVars>>`，只在含赋值的语句上加锁），语义与 Go 一致。对应上游 `GetUserVarsReader` |
-| `SET_VAR` hint | 语句开始时临时改 SessionVars，结束后恢复 | 在冻结前应用，冻结值即包含 hint；结束后无需恢复 |
+| `SET_VAR` hint | 规划开始时通过 `SetSystemVarWithOldValAsRet` 写入会话的实际字段，规划期间直接读这些字段；旧值记在 `StmtCtx.SetVarHintRestore`，**下一条语句开始时**恢复（`planner/optimize.go:194-227`、`executor/select.go:933-940`） | 按 L1 照搬：规划前写入 `SessionVars`（规划读的就是它），冻结值自然包含 hint；旧值记在会话里，下一条语句开始时恢复，时机与 Go 相同 |
 | 存储过程、触发器 | TiDB 不支持 | 不涉及 |
 | `last_insert_id`、`found_rows`、`row_count` | 语句结束时写回 SessionVars | 语句结束后由会话线程从 `StmtCtx` 取回、写回（与 Go 的写回时机相同） |
+
+**系统变量的初始值**：会话不是从编译期默认值开始，而是在第一次 `Parse` / `ExecuteStmt` / `PrepareStmt` 时载入当时的全局值（`session.go` `loadCommonGlobalVariablesIfNeeded`），并执行各变量的 `SetSession` 钩子填充类型化字段；之后的 `SET GLOBAL` 不影响已有会话。27 个带 `GetSession` 钩子的变量由字段计算得出，不单独存储。存储细节见 N8。
 
 冻结的具体字段列表 = 上游 `exprstatic.EvalContext`/`ExprContext` 的字段 + `DistSQLContext` + `RangerContext` + 执行器各 `*ExecutorContext` 用到的字段。P1 第一项工作就是从 v8.5.8 的这些结构机械地生成清单，每个字段标注来源变量。
 
@@ -105,7 +109,7 @@ if self.ctx.vars.track_aggregate_memory_usage {
 
 ## 5. 验收
 
-1. **编译期**：执行器 worker 的闭包只捕获 `Send + Sync` 的 `Arc<StmtCtx>`、执行器上下文和取消令牌；`SessionVars` 不实现 `Sync`，无法被 worker 捕获（用一个 `compile_fail` 测试固定这一点）。
+1. **编译期**：执行器 worker 只捕获 `Send + Sync` 的 `Arc<StmtCtx>`、执行器上下文和取消令牌；`SessionVars` 不实现 `Sync`，无法被 worker 共享（用一个 `compile_fail` 测试固定这一点）。另加两条静态断言：`ExecCtx: Send + Sync`（防止将来有人往里放 `Rc`）、`Session: Send`。
 2. **行为**：tracker 中 v8.5.8 与以下特性相关的测试全部归到对应块并通过：用户变量赋值（`SELECT @a:=...`）、`SET_VAR` hint、`last_insert_id`/`found_rows`/`row_count`、warning 数量与顺序、SHOW PROCESSLIST、KILL 和 `max_execution_time`。
 3. **并发**：并发执行 SHOW PROCESSLIST / KILL 与长语句的压力测试，在 `loom` 或 TSan 下无数据竞争报告。
 4. **性能**：建连成本和每连接内存（与 N8 一起量）不高于 Go；sysbench 点查每语句的上下文创建开销不高于 Go 的复用方案。
