@@ -90,7 +90,7 @@
 
 ## 4. 验收
 
-1. **函数级**：govec 向量 `vectors/v8.5.8/decimal.jsonl`（tracker PR #1，27,641 条，26 个操作）全部回放通过，比对规则见 tracker `govec/README.md`：`s`、`str`、`err.code`、内部状态 `st` 一致；Go 会 panic 的记录 Rust 返回错误。
+1. **函数级**：govec 向量 `vectors/v8.5.8/decimal.jsonl`（tracker PR #1，27,641 条，26 个操作）全部回放通过，比对规则见 tracker `govec/README.md`：`s`、`str`、`err.code`、内部状态 `st` 一致；Go 会 panic 的记录 Rust 也 panic（由 task 边界转换成错误，`M-PANIC`）。
 2. **单测**：`TestReset`（没有用例表）翻译为 Rust 单测；其余 29 个测试已被向量覆盖，不再逐个翻译。
 3. **来源标注**：58 个函数 100% 有 `// go:` 标注；converge 检查（标注 ⇔ 函数清单）通过。
 4. **端到端**（方法论 §6，P1 退出条件之一）：PoC 中 `crates/executor/src/agg.rs`、`crates/distsql/src/{dag,decode}.rs` 对 TiKV `Decimal` 的使用改为本块的 `MyDecimal`，sysbench oltp_read_only 与 R1 的 decimal 相关结果不回退。这一步作为单独的任务，可以放在块合入之后。
