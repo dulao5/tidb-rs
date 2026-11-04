@@ -1,6 +1,6 @@
 # ROADMAP：tidb-rs 只读阶段的功能块计划（v8.5.8）
 
-状态：P0 草案，团队评审中。规则见 [CONSTITUTION.md](../CONSTITUTION.md)，方法见 [docs/porting/methodology.md](../docs/porting/methodology.md)，例外见 [exceptions/](exceptions/README.md)。
+状态：P0 草案，团队评审中；2026-11-04 按 PR #1 评审意见修订。规则见 [CONSTITUTION.md](../CONSTITUTION.md)，方法见 [docs/porting/methodology.md](../docs/porting/methodology.md)，例外见 [exceptions/](exceptions/README.md)。
 
 ## 1. 数据来源与口径
 
@@ -13,26 +13,28 @@
 
 ## 2. 总量
 
-| 阶段 | 块数 | Go 函数体行数 | 内容 |
-|---|--:|--:|---|
-| P1 地基 | 20 | 53.5k | 常量、类型、编码、chunk、元数据模型、上下文接口、系统变量与 SessionVars、表达式框架与核心函数 |
-| P2 读取链路 | 11 | 39.9k | meta/InfoSchema/table、schema 同步、kv driver、coprocessor、distsql、下推判定、协议层、执行统计结构 |
-| P3 优化器 | 29 | 77.7k | planbuilder、表达式改写、逻辑规则、物理优化、ranger、代价、基数估算、统计信息加载、hint |
-| P4 执行器 | 14 | 47.3k | 执行器框架与各算子、落盘容器、会话主流程 |
-| P5 外围 | 13 | 62.7k | 字符串/时间/杂项函数、SHOW/EXPLAIN/SET、infoschema 内存表、权限、binding、可观测性、HTTP 接口 |
-| 例外（EXC） | 6 | 13.7k | JSON（A4）、coprocessor cache 与 plan cache（A3）、内存配额（A1）、废弃/非默认路径（B1–B5） |
-| 推迟（D1） | 1 | 5.3k | TiFlash / MPP |
-| 按需（工具） | 1 | 11.7k | `util/*`：被已排期的块用到时整文件移植 |
-| 不移植（X） | 5 | 161.8k | DDL、写路径、ANALYZE、lightning、BR、disttask、TTL、bootstrap、mock store、测试工具 |
-| 已完成 | 3 | 19.1k | parser（语法表同构移植）、metrics |
+| 阶段 | 块数 | Go 函数体行数 | Go 单测行数¹ | 内容 |
+|---|--:|--:|--:|---|
+| P1 地基 | 20 | 53.5k | 44.0k | 常量、类型、编码、chunk、元数据模型、上下文接口、系统变量与 SessionVars、表达式框架与核心函数 |
+| P2 读取链路 | 11 | 39.9k | 37.0k | meta/InfoSchema/table、schema 同步、kv driver、coprocessor、distsql、下推判定、协议层、执行统计结构 |
+| P3 优化器 | 29 | 77.7k | 32.6k | planbuilder、表达式改写、逻辑规则、物理优化、ranger、代价、基数估算、统计信息加载、hint |
+| P4 执行器 | 14 | 47.3k | 23.4k | 执行器框架与各算子、落盘容器、会话主流程 |
+| P5 外围 | 13 | 62.7k | 56.3k | 字符串/时间/杂项函数、SHOW/EXPLAIN/SET、infoschema 内存表、权限、binding、可观测性、HTTP 接口 |
+| 例外（EXC） | 6 | 13.7k | 10.3k | JSON（A4）、coprocessor cache 与 plan cache（A3）、内存配额（A1）、废弃/非默认路径（B1–B5） |
+| 推迟（D1） | 1 | 5.3k | 1.1k | TiFlash / MPP |
+| 按需（工具） | 1 | 11.7k | 14.6k | `util/*`：被已排期的块用到时整文件移植 |
+| 不移植（X） | 5 | 161.8k | 152.2k | DDL、写路径、ANALYZE、lightning、BR、disttask、TTL、bootstrap、mock store、测试工具 |
+| 已完成 | 3 | 19.1k | 14.9k | parser（语法表同构移植）、metrics |
 
-只读主线 P1–P4 约 22 万行函数体（源码约 33 万行）。
+只读主线 P1–P4 约 22 万行函数体（源码约 33 万行），直接对应的 Go 单测约 14 万行。
+
+¹ 粗略统计：`foo_test.go` 归入 `foo.go` 所属的块，没有同名源文件的归入所在包函数最多的块；另有约 11 万行测试在只有测试的包里（如 `planner/core/casetest`，多为 SQL 级测试），未计入。测试工作量按宪章第七条处理：能用 govec 向量回放的不逐个翻译；依赖存储的用 SQL 级对照覆盖。tracker 会给出逐块的精确数字。
 
 ## 3. 依赖结构的结论
 
 1. **不存在无环的移植顺序**。按函数级引用，P1–P5 的 84 个块构成一个强连通分量：Go TiDB 的模块之间普遍互相引用（大部分经由 `sessionctx.Context`、`expression`、`chunk`、`types` 等中心文件）。所以只能按阶段推进，把"早期阶段引用后期阶段"的地方逐个处理。
 2. **阶段调整**：根据反向引用，把 kv 接口（D07.0）、系统变量与 SessionVars（D05.1、D05.2）、Vector 类型（D01.6）提前到 P1；把执行统计数据结构（D14.0）提前到 P2；把会话主流程（D05.3）推后到 P4（之前继续用 PoC 的会话层）。
-3. **剩余的跨阶段引用**（引用数前列）都按"接口先行 + 边界桩"处理：
+3. **剩余的跨阶段引用**（引用数前列）都按"接口先行 + 边界桩"处理。边界桩按宪章第四条 3 分为临时、永久不支持、委托三类；指向 X（不移植）的引用属于委托或永久类，不会随某个块完成而消失，排期时与临时桩分开统计：
 
 | 引用方 → 被引用方 | 引用数 | 处理 |
 |---|--:|---|
@@ -55,14 +57,14 @@
 |---|---|---|--:|--:|---|
 | L1 | D00.2 | 常量、错误码与配置（parser/mysql、terror、errno、dbterror、config） | 1,281 | 13 | — |
 | L1 | D01.6 | Vector 类型 | 409 | 2 | — |
-| L1 | D01.7 | Chunk 与列存（内存部分按 A1） | 3,082 | 11 | D01.5(11), D15.1(10) |
+| L1 | D01.7 | Chunk 与列存（列格式按 N5a，内存部分按 A1） | 3,082 | 11 | D01.5(11), D15.1(10) |
 | L1 | D01.9 | Collation 与字符集 | 637 | 10 | — |
 | L1 | D07.0 | kv 接口与 key 类型（pkg/kv） | 1,348 | 15 | — |
-| L1 | D08.1 | 表达式框架（Expression、Column、Constant、ScalarFunction、Schema、求值与向量化接口） | 4,208 | 13 | EXC.B(33) |
+| L1 | D08.1 | 表达式框架（Expression、Column、Constant、ScalarFunction、Schema、求值与向量化接口；按 N4） | 4,208 | 13 | EXC.B(33) |
 | L2 | D01.1 | Datum、FieldType 与类型辅助 | 3,906 | 13 | D01.5(21) |
 | L2 | D06.1 | 元数据模型（meta/model） | 3,176 | 10 | — |
 | L3 | D00.1 | 上下文接口骨架（sessionctx、planctx、exprctx、stmtctx、errctx、base 接口） | 2,773 | 29 | — |
-| L3 | D01.2 | Decimal（MyDecimal） | 2,004 | 1 | — |
+| L3 | D01.2 | Decimal（MyDecimal；流程试点） | 2,004 | 1 | — |
 | L3 | D01.3 | 时间与 Duration | 3,400 | 3 | — |
 | L3 | D08.2 | 函数注册、类型推导、常量折叠与传播、collation 推导 | 2,385 | 9 | — |
 | L4 | D01.4 | 类型转换（convert）与溢出、截断 | 883 | 3 | D01.5(63) |
@@ -115,7 +117,7 @@
 | L6 | D09.10 | join 重排与 join 消除 | 3,487 | 8 | — |
 | L6 | D09.2 | 表达式改写（expression_rewriter，AST → Expression） | 2,835 | 2 | — |
 | L6 | D09.6 | 子查询与去关联 | 1,012 | 16 | — |
-| L6 | D09.7 | 列裁剪与投影消除（spec-kit 试点候选） | 772 | 22 | D06.6(12) |
+| L6 | D09.7 | 列裁剪与投影消除（P0 设计试点 spike 的对象，正式移植仍在 P3） | 772 | 22 | D06.6(12) |
 | L6 | D09.8 | 谓词下推、谓词简化、外连接转内连接、约束 | 886 | 20 | — |
 | L6 | D09.9 | 聚合相关规则（下推、消除、skew、max/min） | 1,394 | 4 | — |
 | L6 | D10.6 | 基数估算（cardinality） | 3,526 | 30 | — |
@@ -184,10 +186,12 @@
 
 ## 5. 开工前的前置条件（P0 剩余工作）
 
-1. **基础设计 spec 确认**：N1（计划树/表达式树表示）、N2（会话状态拆分）、N3（并发与取消）、A1（内存模型）、A4（JSON）。
-2. **spec-kit 试点**：建议 **D09.7 列裁剪与投影消除**（772 行，22 个文件）。它体现了"规则横切算子"的结构，也能验证 N1 的表示方案和来源标注规范。P1 开工前完成试点。
-3. **tracker 支持块**：`blocks.tsv`（块定义与阶段）、`func_blocks.tsv`（函数 → 块）、块依赖表，以及按块统计移植覆盖率和测试归属的报表。
-4. **PoC 代码定性**：逐文件标注 `glue: poc`，列出各自将被哪个块替换。
+1. **基础设计 spec 确认**：N1（计划树/表达式树表示）、N2（会话状态拆分）、N3（并发与取消）、A1（内存模型）、A4（JSON），以及 **N4**（表达式求值框架：D08.1 和全部内置函数的代码形态取决于它）、**N8**（系统变量注册表：D05.1、D05.2 依赖它）、**N5a**（根节点内存中的列格式：D01.7 依赖它）。"定稿"包括验收指标的 Go 基线已经实测、数字已回填。
+2. **全局映射规则表**（[docs/porting/mappings.md](../docs/porting/mappings.md)）与基础 spec 一起定稿，对应的 lint 配置进入 CI。
+3. **两个试点**（方法论第 8 节）：流程试点 **D01.2 MyDecimal**，之后做一次上游同步演练；设计试点 **D09.7 列裁剪**（spike，不合入，不计覆盖率），产出 N1 的修订和 plan 模板中的固定写法。
+4. **工具**：govec（Go 测试用例表 → 输入输出向量）、来源标注抽取与 lint、并排对照生成、`go_renames.tsv`。
+5. **tracker 支持块**：`blocks.tsv`（块定义与阶段）、`func_blocks.tsv`（函数 → 块）、块依赖表（已完成）；按块统计移植覆盖率、测试行数和测试归属的报表；`stubs.tsv` 记录桩的三类。
+6. **PoC 代码定性**：逐文件标注 `glue: poc`，列出各自将被哪个块替换。
 
 ## 6. 维护
 
