@@ -19,7 +19,7 @@
 | `crates/types/src/errors.rs` | 5 个错误 + `terror.Log` 的临时桩（`glue: stub blocked-by D00.2`） |
 | `crates/types/src/gostd.rs` | Go 标准库行为的按需移植：`strings.TrimSpace`、`utf8.DecodeRune/DecodeLastRune`、`strconv.FormatFloat(f,'g',-1,64)`（含 Ryū 的平局取偶规则）、`encoding/json` 解码 `jsonMyDecimal` 的语义 |
 | `crates/types/src/mydecimal_test.rs` | `TestReset` |
-| `crates/types/tests/govec_decimal.rs` | 向量回放；`tests/vectors/v8.5.8/decimal.jsonl` + README（tracker `334bd88`，sha256 `7fef6576…457f08`） |
+| `crates/types/tests/govec_decimal.rs` | 向量回放；`tests/vectors/v8.5.8/decimal.jsonl` + README（tracker `e9da322`，sha256 `abca8bf5…19b42ac`；初版为 `334bd88`） |
 | `crates/types/benches/mydecimal.rs` | Go 的 5 个基准（criterion 0.3） |
 | `scripts/converge.py` | 收敛检查第一版 |
 
@@ -59,6 +59,15 @@
 
 第一次运行 27,636/27,641 通过。剩下 5 条都是 `to_float64` 的结果格式化：浮点值恰好落在两个最短候选的正中（如 979980073090831.25），Go 的 Ryū（`ryuDigits32`）取偶，Rust 的 `{:e}` 向上取。修正后另用 Go 生成 120 万个浮点（随机位模式、二进制有理数、短十进制、特殊值）比对 `FormatFloat 'g' -1`，全部一致。
 **教训**：向量里浮点格式化的平局只有 5 条，而且只出现在测试框架自己的输出编码上；`FromFloat64` 用的是同一个函数，向量却没有覆盖到它的平局。依赖标准库行为的地方，需要单独做大样本的差分测试（建议 govec 增加 `go-std` 领域：`FormatFloat`、`ParseFloat`、`TrimSpace`）。
+
+### 向量更新（tracker PR #1 评审之后，31,620 条全部通过）
+
+tracker `e9da322` 按评审追加了两类记录，原有 27,641 条不变：
+
+- 别名调用 `add/sub/mul/div/mod_alias`（1,795 条，`f(x,y,x)`、`f(x,y,y)`、`f(x,x,x)`）：Rust 按 `M-ALIAS` 先复制被别名的输入再调用，`round_inplace` 走 `round_in_place`。全部一致，不需要改 Rust。
+- 链式调用 `<producer>_then_<consumer>`（2,184 条）：`FromInt`/`FromUint`/`Round`/加/乘的结果对象（`digitsInt` 按字取整、溢出后的 `-0`、截断后 `digitsFrac=31` 等）直接交给 `to_bin`、`round`、`shift`、`to_hash_key`、`compare` 等。Rust 实现不需要改。第一次回放有 3 条不一致（`mul_then_to_bin/props/compare`，Go 记为 panic、Rust 正常返回），原因在 govec：链式 op 对中间对象调用了 `ToString`/`String`，而截断后的乘法结果在 `ToString` 中越界 panic，consumer 本身并不 panic。govec 已修正为不编码中间对象（tracker `e9da322`）。
+
+错误比对一直包括 `msg`（未填充的模板），tracker README 已把这一条写入回放规则。
 
 ### 收敛检查
 

@@ -5,6 +5,12 @@
 //! float strings) must be equal; errors must match by code (the message is compared too);
 //! `err.name == "panic"` records must panic in Rust as well (checked with `catch_unwind`);
 //! `err.name == "other"` (Go encoding/json errors) must be an error without a MySQL code.
+//!
+//! `*_alias` ops are Go calls whose `to` is one of the inputs (`f(x, y, x)`, `f(x, y, y)`,
+//! `f(x, x, x)`); per mapping rule `M-ALIAS` the Rust caller copies the aliased input first
+//! (`MyDecimal: Copy`). `round_inplace` uses the in-place entry `round_in_place`.
+//! `<producer>_then_<consumer>` ops hand the producer's result object (not re-parsed) to the
+//! consumer as its first decimal; err is the producer's error, else the consumer's.
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -66,40 +72,108 @@ fn dec_out(d: &MyDecimal) -> Value {
     })
 }
 
-struct Args<'a>(&'a [Value]);
+/// Arguments of one op. In the consumer step of a chained op, `first` is the producer's
+/// result and replaces decimal argument 0.
+struct Args<'a> {
+    v: &'a [Value],
+    first: Option<MyDecimal>,
+}
 
 impl Args<'_> {
     fn str(&self, i: usize) -> &str {
-        self.0[i].as_str().unwrap()
+        self.v[i].as_str().unwrap()
     }
     fn int(&self, i: usize) -> isize {
-        self.0[i].as_i64().unwrap() as isize
+        self.v[i].as_i64().unwrap() as isize
     }
     /// Decimal argument: FromString, error ignored (as govec does).
     fn dec(&self, i: usize) -> MyDecimal {
+        if let (0, Some(d)) = (i, self.first) {
+            return d;
+        }
         let mut d = MyDecimal::default();
         let _ = d.from_string(self.str(i).as_bytes());
         d
     }
 }
 
+/// Ops whose result can feed a chained op: (number of args, result, error).
+const PRODUCERS: &[(&str, usize)] = &[
+    ("from_int", 1),
+    ("from_uint", 1),
+    ("round", 3),
+    ("add", 2),
+    ("mul", 2),
+];
+
+fn produce(op: &str, a: &Args<'_>) -> (MyDecimal, Result<(), Error>) {
+    let mut to = MyDecimal::default();
+    let err = match op {
+        "from_int" => {
+            to.from_int(a.v[0].as_i64().unwrap());
+            Ok(())
+        }
+        "from_uint" => {
+            to.from_uint(a.v[0].as_u64().unwrap());
+            Ok(())
+        }
+        "round" => a.dec(0).round(&mut to, a.int(1), mode(a.str(2))),
+        "add" => decimal_add(&a.dec(0), &a.dec(1), &mut to),
+        "mul" => decimal_mul(&a.dec(0), &a.dec(1), &mut to),
+        _ => panic!("not a producer: {op}"),
+    };
+    (to, err)
+}
+
 fn exec(op: &str, args: &[Value]) -> (Value, Result<(), Error>) {
-    let a = Args(args);
+    if let Some((p, c)) = op.split_once("_then_") {
+        let n = PRODUCERS.iter().find(|(name, _)| *name == p).unwrap().1;
+        let (d, perr) = produce(
+            p,
+            &Args {
+                v: &args[..n],
+                first: None,
+            },
+        );
+        // Placeholder for the consumer's first decimal, replaced by `first`.
+        let mut rest = vec![Value::Null];
+        rest.extend_from_slice(&args[n..]);
+        let (out, cerr) = exec_op(
+            c,
+            &Args {
+                v: &rest,
+                first: Some(d),
+            },
+        );
+        return (out, perr.and(cerr));
+    }
+    exec_op(
+        op,
+        &Args {
+            v: args,
+            first: None,
+        },
+    )
+}
+
+fn exec_op(op: &str, a: &Args<'_>) -> (Value, Result<(), Error>) {
+    let args = a.v;
     match op {
         "from_string" => {
             let mut d = MyDecimal::default();
             let err = d.from_string(a.str(0).as_bytes());
             (dec_out(&d), err)
         }
-        "from_int" => {
-            let mut d = MyDecimal::default();
-            d.from_int(args[0].as_i64().unwrap());
-            (dec_out(&d), Ok(()))
+        "from_int" | "from_uint" | "round" | "add" | "mul" => {
+            let (d, err) = produce(op, a);
+            (dec_out(&d), err)
         }
-        "from_uint" => {
-            let mut d = MyDecimal::default();
-            d.from_uint(args[0].as_u64().unwrap());
-            (dec_out(&d), Ok(()))
+        "to_string" => {
+            let d = a.dec(0);
+            (
+                json!({"s": String::from_utf8(d.to_string()).unwrap(), "str": d.string()}),
+                Ok(()),
+            )
         }
         "from_float64" => {
             let mut d = MyDecimal::default();
@@ -118,12 +192,6 @@ fn exec(op: &str, args: &[Value]) -> (Value, Result<(), Error>) {
             let (v, err) = a.dec(0).to_float64();
             (json!(gostd::format_float_g(v)), err)
         }
-        "round" => {
-            let d = a.dec(0);
-            let mut to = MyDecimal::default();
-            let err = d.round(&mut to, a.int(1), mode(a.str(2)));
-            (dec_out(&to), err)
-        }
         "round_inplace" => {
             let mut d = a.dec(0);
             let err = d.round_in_place(a.int(1), mode(a.str(2)));
@@ -134,16 +202,48 @@ fn exec(op: &str, args: &[Value]) -> (Value, Result<(), Error>) {
             let err = d.shift(a.int(1));
             (dec_out(&d), err)
         }
-        "add" | "sub" | "mul" | "mod" => {
+        "sub" | "mod" => {
             let (x, y) = (a.dec(0), a.dec(1));
             let mut to = MyDecimal::default();
             let err = match op {
-                "add" => decimal_add(&x, &y, &mut to),
                 "sub" => decimal_sub(&x, &y, &mut to),
-                "mul" => decimal_mul(&x, &y, &mut to),
                 _ => decimal_mod(&x, &y, &mut to),
             };
             (dec_out(&to), err)
+        }
+        "add_alias" | "sub_alias" | "mul_alias" | "mod_alias" | "div_alias" => {
+            let (mut x, mut y) = (a.dec(0), a.dec(1));
+            // div has fracIncr before the alias arg.
+            let (frac_incr, alias) = match op {
+                "div_alias" => (a.int(2), a.int(3)),
+                _ => (0, a.int(2)),
+            };
+            let f = |x: &MyDecimal, y: &MyDecimal, to: &mut MyDecimal| match op {
+                "add_alias" => decimal_add(x, y, to),
+                "sub_alias" => decimal_sub(x, y, to),
+                "mul_alias" => decimal_mul(x, y, to),
+                "mod_alias" => decimal_mod(x, y, to),
+                _ => decimal_div(x, y, to, frac_incr),
+            };
+            // M-ALIAS: Go's f(x, y, x) etc.; copy the aliased input, then write into it.
+            match alias {
+                1 => {
+                    let x0 = x;
+                    let err = f(&x0, &y, &mut x);
+                    (dec_out(&x), err)
+                }
+                2 => {
+                    let y0 = y;
+                    let err = f(&x, &y0, &mut y);
+                    (dec_out(&y), err)
+                }
+                3 => {
+                    let x0 = x;
+                    let err = f(&x0, &x0, &mut x);
+                    (dec_out(&x), err)
+                }
+                _ => panic!("bad alias {alias}"),
+            }
         }
         "div" => {
             let (x, y) = (a.dec(0), a.dec(1));
