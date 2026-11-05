@@ -30,11 +30,12 @@ Go TiDB 的很多写法只是因为 Go 运行时才那样写（goroutine、chann
 | M-LOCK | `sync.Mutex` / `RWMutex` | `parking_lot` 的锁（无毒化）；不得跨 `await` 持有 | N3 | 禁用 `std::sync::Mutex`；`clippy::await_holding_lock` |
 | M-SNAP | `atomic.Pointer` / `atomic.Value` 发布快照 | `ArcSwap` | N2 | — |
 | M-DEFER | `defer` | `Drop` / scope guard | — | — |
-| M-TICK | 后台 goroutine 定时轮询（expensivequery 检查 `max_execution_time`、`servermemorylimit` 读堆用量、SQLKiller 检查连接存活） | 运行时定时器：每条语句一个 deadline，到期发送与 Go 相同的 KILL 信号。判断逻辑（选谁、发什么信号、日志）仍按 L1 | N3 | — |
+| M-TICK | 后台 goroutine 定时轮询 | 运行时定时器。按语句的（expensivequery 检查 `max_execution_time`）：每条语句一个 deadline，到期发送与 Go 相同的 KILL 信号。按进程的（`servermemorylimit` 每 100ms 读内存用量、SQLKiller 检查连接存活）：一个周期定时器，周期与 Go 相同。判断逻辑（选谁、发什么信号、日志）仍按 L1 | N3 | — |
 | M-MEM | `memory.Tracker.Consume` 按估算值记账 | `TrackedAlloc`：按实际分配记到同一棵 tracker 树；超限动作链按 L1 | A1 | — |
 | M-POOL | `sync.Pool`、`chunk.Allocator` 等为减轻 GC 的对象复用 | 删除。相关变量按"接受并返回 warning"处理（N8） | A1、N8 | — |
 | M-INT | Go 定宽整数：`int`、`int8`…`uint64`、下标、溢出回绕 | `int` → `isize`（下标处 `as usize`），其余同宽对应；Go 中可能回绕的运算一律显式写 `wrapping_*` / `as` 截断（Rust debug 构建溢出会 panic），并在块 plan 中列出位置 | D01.2 试点 | debug 构建跑全部向量 |
-| M-ALIAS | 输出参数可以与输入是同一个对象（如 `x.Round(x, …)`、`DecimalAdd(a, b, a)`） | 提供"写入另一个对象"和"原地"两个入口；核心函数接收输入的快照（`Copy` 类型）和"是同一对象"标志。前提是逐行确认 Go 对输入的读取都在对输出的写入之前，并在函数注释中写明 | D01.2 试点 | — |
+| M-ALIAS | 输出参数可以与输入是同一个对象（如 `x.Round(x, …)`、`DecimalAdd(a, b, a)`） | 提供"写入另一个对象"和"原地"两个入口；核心函数接收输入的快照（`Copy` 类型）和"是同一对象"标志。前提是逐行确认 Go 对输入的读取都在对输出的写入之前，并在函数注释中写明 另外，Go 的切片别名（`buf[:n:n]`、`SharedBytes`、`MakeRef`）→ `Bytes` / `ColBuf::Shared` 加写时复制 | D01.2 试点、N5a | 共享列的写入口在 debug 构建下断言引用计数为 1（N5a） |
+| M-MAPORDER | 按 map 的随机顺序遍历（如会话初始化时逐个调用变量钩子） | 用确定的顺序（如注册表顺序），并要求该处逻辑不依赖顺序；块 plan 中逐处登记并说明为什么与顺序无关 | N8 | — |
 | M-ERRVAL | 返回 `error`，或返回 `(T, error)` 且出错时 T 仍有意义（如 `ToInt` 返回 `MaxInt64` + `ErrOverflow`） | 只返回 `error` → `Result<(), Error>`；`(T, error)` 中所有出错路径的 T 都是零值 → `Result<T, Error>`，否则 → `(T, Result<(), Error>)`。修改接收者并返回错误的方法，出错时接收者的内容与 Go 相同 | D01.2 试点 | 向量比对出错时的值 |
 | M-NAME | Go 方法名与 Rust 标准 trait 的方法同名（`String`、`ToString`、`Clone`、`Hash`、`Equal` 等） | 保留 Go 名的 snake_case 作为固有方法（如 `to_string() -> Vec<u8>`）；需要 `Display` 等 trait 时委托给它，委托代码标 `glue:` | D01.2 试点 | — |
 | M-ERR | `errors.Trace` / `errors.Annotate` 包装调用栈 | 错误码 + 可选的创建点调用栈；不移植包装函数 | D00.2 块 spec | — |
