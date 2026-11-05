@@ -41,7 +41,7 @@ pub struct SessionShared { pub killer: SqlKiller, pub mem_root: Arc<MemTracker>,
 pub struct StmtCtx { pub vars: FrozenVars, pub cop_meta: CopRequestMeta, /* warnings, rows, runtime stats, mem/disk tracker … */ }
 pub struct PlanCtx<'s> { /* &'s mut SessionVars, &'s StmtCtx, InfoSchema, PlanArena */ }
 impl<'s> PlanCtx<'s> {
-    pub fn split(&mut self) -> (&mut PlanArena, &EvalCtx);   // 唯一允许的同时借用写法（N1 §4）
+    pub fn split(&mut self) -> (&mut PlanArena, &mut EvalCtx); // 唯一允许的同时借用写法（N1 §4）；EvalCtx 含 &mut WarnBuf（常量折叠会产生 warning），所以是可变借用
 }
 pub struct EvalCtx;   // 对应 Go exprstatic.EvalContext：冻结快照的视图
 pub struct BuildCtx;  // 对应 Go exprctx.BuildContext：列 ID 分配器、plan cache 标志等

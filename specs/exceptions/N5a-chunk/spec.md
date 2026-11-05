@@ -71,6 +71,7 @@ pub enum ColBuf {
 }
 ```
 
+- **debug 断言**：`Column` 的所有写入口在 debug 构建下断言 `Arc::strong_count == 1`，大于 1 时 panic 而不是复制。写时复制和 Go 的指针别名在"通过一个别名写、从另一个读"时结果不同，而且是静默的；本 spec 没有审计全部 `MakeRef` 调用点，这条断言让漏掉的别名写入在测试里暴露出来。需要复制的地方显式调用 `make_mut_cow()`。
 - 写入 `Shared` 时先复制成 `Owned`（写时复制）。Go 用三下标切片把容量限制为长度，`append` 时同样会重新分配并复制，所以复制时机与 Go 相同，不是新增复制。
 - 列在 chunk 中存为 `Arc<Column>`：`MakeRef` = `Arc::clone`，`SwapColumns` = 交换 `Vec<Arc<Column>>`，写入走 `Arc::make_mut`。`Reset` 对共享的列直接换成一个新的空列，不复制。
 - `Chunk: Send`（N3 的 async 任务会在线程间移动它）；`RespBytes: Send + Sync`。
@@ -86,7 +87,7 @@ pub enum ColBuf {
 Go 从 gRPC 缓冲到列 0 次复制。Rust 要做到不多于 Go，需要：
 
 1. gRPC 层收到的消息缓冲转成 `Bytes`（一次接收复制，与 Go 相同，不可避免）。
-2. `coprocessor.Response.data`、`SelectResponse.chunks[i].rows_data` **不用 rust-protobuf 生成的 `Vec<u8>` 字段**，改为手写的最小解析器：只解析这两层消息的字段边界，把 `rows_data` 作为 `Bytes::slice` 返回。其余字段（`warnings`、`execution_summaries`、`output_counts` 等）仍用生成代码解析各自的子消息。对应 Go 的 `SharedBytes` 自定义类型，按 L2 登记。
+2. `coprocessor.Response.data`、`SelectResponse.chunks[i].rows_data` 要以 `Bytes` 切片交出。**先试 prost**：client-rust 已经用 tonic + prost 生成 kvproto，prost 可以把 `bytes` 字段生成为 `bytes::Bytes`（`Config::bytes`），从 `Bytes` 解码时是零拷贝切片；tipb 改用 prost 生成并对 `rows_data` 开 `Bytes`，同时去掉 grpcio 依赖（N3 改为 tokio 后已无理由保留）。要验证的是 tonic 的 `DecodeBuf` 是否把接收缓冲零拷贝交给 prost。不成立时才退回下面的手写方案：只解析这两层消息的字段边界，把 `rows_data` 作为 `Bytes::slice` 返回。其余字段（`warnings`、`execution_summaries`、`output_counts` 等）仍用生成代码解析各自的子消息。对应 Go 的 `SharedBytes` 自定义类型，按 L2 登记。
 3. `Codec::decode_column` 让三个缓冲都成为 `ColBuf::Shared`（对应 `codec.go:109-148`），0 复制。
 4. `Decoder::reuse_interm_chk` 需要把 `offsets` 减去 `offsets[0]`（`codec.go:296-302`）。Go 原地改写响应缓冲；Rust 只在 `delta != 0` 时把该列的 `offsets` 复制成 `Owned` 再改（每行 8 字节，`data` 仍共享）。这是相对 Go 唯一新增的复制，登记为 L2，并在验收中计量。
 5. `Decoder::decode`（拼接小块）照 Go 复制。
@@ -170,13 +171,14 @@ buffer.slice(num_data_bytes as usize..)
 | 复制次数 | 用计数分配器测：TPC-H SF10 Q1、Q6 全表扫描，从 gRPC 缓冲到根节点 `Selection` 输入的复制字节数 ≤ Go 同路径（Go 为接收复制 + 小块拼接复制）+ `ReuseIntermChk` 的 offsets 复制；后者占 `rows_data` 的比例单独报告 |
 | 记账 | 共享缓冲只记一次；语句结束后 tracker 为 0；TPC-H 每条查询 copr reader 节点的 `MaxConsumed` ≥ 实际收到的 `rows_data` 字节数 |
 | 性能 | `util/chunk` 的 Go 基准（`BenchmarkAppend*`、`BenchmarkAccess`、`BenchmarkDecode`、`BenchmarkDecodeToChunk*`、`BenchmarkEncodeChunk` 等）对应项不低于 Go；sysbench `oltp_read_only` 与 TPC-H 22 条的解码 CPU 占比不高于 Go |
+| 非对齐读取 | `ColView::i64()` 等非对齐读取在 aarch64 和 x86-64 上各跑一次 `BenchmarkAccess` 对照，确认生成的是普通加载 |
 | 静态 | `Chunk: Send`；`ColView` 不能比输入 chunk 活得长（编译期保证）；`RowHandle: Send + Sync` |
 
 ## 6. 待定项（需要项目负责人决定）
 
 1. **选方案 a（移植 Go Chunk）**，ADR 0007 第 1 条中的"chunk wire format L3"改为"chunk 编解码按 L1 从 Go 移植（`codec.go` 353 行）"，因为 TiKV 侧没有可用的解码代码。
 2. **对齐的做法**：建议 1 字节对齐的小端视图类型（3.3）。备选：(a) 读到不对齐的列时复制一次使其对齐——简单，但对 TiKV 响应几乎每列都会触发，等于放弃零拷贝；(b) 只提供按行读取的非对齐访问器，向量函数体不拿切片——慢。
-3. **手写 coprocessor 响应的最小解析器**（3.4 第 2 条）：是在 N5a 定下来，还是并入 A6（P2）。P1 可以先用生成代码（多两次复制，与 PoC 一样），P2 前换掉。建议 P1 先接受，A6 中实现并用第 5 节"复制次数"指标验收。
+3. **零拷贝解码的实现路径**（3.4 第 2 条）：修订后建议 P1 中验证 prost 的 `Bytes` 路径（同时把 tipb 换成 prost 生成、去掉 grpcio）；不成立再在 A6 手写解析器。用第 5 节"复制次数"指标验收。
 4. **`RowHandle` 的写法**（3.6）是否接受为全局映射规则 `M-ROW`。
 
 ## 7. 与其他 spec 的关系

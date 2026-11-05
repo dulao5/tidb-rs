@@ -87,7 +87,8 @@ pub struct SysVar {
    - `globals: Arc<GlobalVarsSnapshot>`：domain 每次重建缓存时生成的不可变快照（内容 = Go 的 `sysVarCache.session`，按注册表下标存成 `Box<[Option<Arc<str>>]>`）。会话在 Go 调 `loadCommonGlobalVariablesIfNeeded` 的同一时机取一次 `Arc`，之后不再变。这保留了 Go 的语义：之后的 SET GLOBAL 不影响已有会话。
    - `delta: HashMap<&'static str, String>`：本会话 SET、SET_VAR、`wait_timeout` 覆盖等写入的值。
    - `get_system_var(name)`：先 `delta`，再 `globals`；`warning_count`/`error_count` 照 Go 特判。
-3. **初始化仍然逐个执行 `SetSession`**（L1）：快照里有 288 个值，对其中 255 个有钩子的变量按快照值调钩子，设置强类型字段。顺序：Go 遍历 map，顺序随机；Rust 用注册表顺序（确定），把"Go 中依赖顺序的钩子"列为审计项（§7）。
+3. **钩子顺序的机械检查**（`M-MAPORDER`）：D05.1 的 plan 中做一项机械检查——钩子函数体中不读取 `SessionVars` 的其他字段；不满足的（含 `Depended` 的 4 个）逐个列入审计，说明为何与顺序无关或如何固定顺序。
+4. **初始化仍然逐个执行 `SetSession`**（L1）：快照里有 288 个值，对其中 255 个有钩子的变量按快照值调钩子，设置强类型字段。顺序：Go 遍历 map，顺序随机；Rust 用注册表顺序（确定），把"Go 中依赖顺序的钩子"列为审计项（§7）。
 4. **后续优化（不在本 spec 承诺）**：domain 在重建快照时顺便用一个模板 `SessionVars` 跑一遍钩子，新会话直接 `clone` 模板的强类型部分。前提是审计 255 个钩子都是"只写字段、不依赖连接信息、无副作用"。不满足的单独跑。做不做由 §5 的建连指标决定。
 5. **这样做破坏/不破坏什么**：
 

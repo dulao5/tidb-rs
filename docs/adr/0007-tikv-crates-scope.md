@@ -25,7 +25,9 @@ ADR 0001 §4 is therefore superseded. This ADR records which parts of the vendor
    is a byte format that Go TiDB, TiKV and the stored data already share:
    - `codec`: byte and number codecs;
    - `tidb_query_datatype::codec`: datum and memcomparable key encoding, table and index key
-     codecs, row format v1/v2. (The chunk wire format is *not* taken from TiKV: TiKV only
+     codecs, row format v1/v2. Row-format decoding is used only at the coprocessor boundary
+     (point get, and responses not in chunk format); coprocessor requests ask for `TypeChunk`
+     responses, and nothing on the root side computes on the decoded TiKV types. (The chunk wire format is *not* taken from TiKV: TiKV only
      encodes chunks, and its decoder is test-only and copies. Decoding is ported from Go's
      `util/chunk/codec.go` as L1, see the N5a spec.);
    - collation weight tables (data only; comparison semantics are ported from Go);

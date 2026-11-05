@@ -96,7 +96,7 @@ pub struct BuiltinFunc {
 
 1. **逐行版本（`evalXxx`）是规格。** 函数体只从它移植。理由：Go 自己在向量化不可用时退回它；向量化版本有错时 Go 的做法是关掉向量化（3 处证据见 1.1）；常量折叠和规划期只用它。
 2. 向量化版本（`vecEvalXxx`）不移植，只作为三种用途的参照：(a) 它是否改变"参数是否被求值"（如上面的惰性/整列差异）——由驱动复现；(b) 它是否有回退逐行的逻辑——由 `vec = eager_then_row_fallback` 复现；(c) 它在每个 chunk 只做一次的事情（如常量参数预处理）——函数体内用签名状态的懒缓存实现（见 3.5），不改变可见行为。
-3. govec 对每个签名分别跑 Go 的 `evalXxx` 和 `vecEvalXxx`，Rust 两种驱动分别比对。若 Go 两版在同一输入上值或错误码不同（第 1 条之外的"真分歧"），登记为"Go 内部不一致"，默认按逐行版实现、开 issue，并把该签名的 `vectorized` 标为待评审。
+3. govec 对每个签名分别跑 Go 的 `evalXxx` 和 `vecEvalXxx`，Rust 两种驱动分别比对。若 Go 两版在同一输入上值或错误码不同（第 1 条之外的"真分歧"），登记为"Go 内部不一致"。**处理（2026-11-05 修订，依据 PR #3 评审）**：按宪章第一条 2"看起来是 bug 也照搬"，两种驱动各自与 Go 的对应版本一致——这类签名保留第二份函数体，只给向量驱动用（`tidb_enable_vectorized_expression` 默认 ON，混合集群中用户在 Go 节点看到的是向量版行为）；同时向上游报 issue。数量要等 govec 跑完 591 个签名才知道，预计是个位数。
 4. 向量化文件中的非求值辅助函数（如 `doSleep` 在 `builtin_miscellaneous_vec.go`）照常 L1 移植，tracker 中按函数归属。
 5. 本规则作为新的映射规则 `M-EVAL` 写入 `docs/porting/mappings.md`；A4 §5.7 已改为引用本条，无需再改。
 
@@ -107,6 +107,7 @@ pub struct BuiltinFunc {
 - `Constant` 节点在向量驱动下每 chunk 调一次常量的取值逻辑（含 `ParamMarker`、`DeferredExpr`），结果作为标量参与计算，不物化成整列；逐行驱动下每行调一次。与 Go 的 warning 次数一致。
 - 程序本身不可变、`Send + Sync`，可在 worker 间共享；每个 worker 持有一个 `RpnState`（中间列、签名缓存、关联列取值）。
 - RPN 只是向量驱动的内部形式；逐行驱动直接遍历 `Arc<Expr>`，两者调同一个函数体。
+- **逐行驱动同样带 `&mut RpnState`**（至少带关联列槽表和签名缓存）。否则在 Apply 内层用逐行驱动求值时（Go 判为不可向量化的表达式、`tidb_enable_vectorized_expression=OFF`），关联列取不到值，两条路径会分叉。
 
 ### 3.5 可变状态的去处（回答 N1 6.4）
 
@@ -128,6 +129,7 @@ pub struct BuiltinFunc {
 
 ### 3.7 上下文、错误与 warning
 
+- `EvalCtx<'a>` 另带一个 `SqlKiller` 句柄（N2 中本来就是 `Arc`），`SLEEP` 每 10ms 检查 KILL、长字符串函数中的检查点都通过它。
 - `EvalCtx<'a>`：`&'a` N2 冻结快照（sql_mode、`TypeCtx`/`ErrCtx` 的级别、时区、div_precision_increment、当前时间、参数值、可选属性）+ `&'a mut WarnBuf`。`HandleError`、`HandleTruncate` 按 L1 决定"报错还是 warning"。
 - `WarnBuf` 是本次求值调用（一个 chunk 或一次规划期求值）的局部 warning 列表，结束时一次性追加到 `StmtCtx`。`WarningCount`/`TruncateWarnings` 只作用于局部列表。Go 中并行 worker 共享 `StmtCtx` 时 `TruncateWarnings` 可能截掉别的 worker 的 warning，Rust 中不会；单线程时顺序与 Go 相同。
 - collation：`getFunction` 时确定并存入 `BaseBuiltinFunc`（L1），函数体通过 `sig.collator()` 取。
@@ -200,6 +202,11 @@ fn cast_string_as_int(ctx: &mut EvalCtx, sig: &BuiltinFunc, args: &mut Args) -> 
 
 ## 5. 验收（指标均为初拟，先测 Go 基线再定）
 
+**定稿前的门禁（N4 自己的试点）**："一份函数体、宏生成向量驱动"能否在性能上成立，要在定稿前用宏的原型验证：对 5 个热点签名（`PlusInt`、`LTInt`、`CastIntAsReal`、`ConcatString`、`LikeString`）和 Go 的 `BenchmarkVectorizedBuiltin*` 对比。达不到"不低于 Go"就改宏的设计（例如严格签名按空位图分段生成紧循环、函数体 `#[inline(always)]`），而不是回到两份实现。
+
+**编译时间**：591 个签名 × 两种驱动 × 按类型单态化，与 TiKV 的 `tidb_query_expr` 同量级。D08.4–D08.10 每个函数族一个 crate，宏展开的代码不集中在一个编译单元里。
+
+
 | 项目 | 指标 |
 |---|---|
 | 函数级对照 | govec 对 591 个签名生成向量（复用 `builtin_*_test.go` 与 `bench_test.go` 的 `vecExprBenchCases` 输入，加随机输入）。每条记录值、NULL、错误码与文案、warning 列表（含顺序）；Rust 逐行驱动对 Go `evalXxx`、向量驱动对 Go `vecEvalXxx`（Go 中 `vectorized()` 为 false 的签名两边都对 `evalXxx`）全部一致 |
@@ -211,7 +218,7 @@ fn cast_string_as_int(ctx: &mut EvalCtx, sig: &BuiltinFunc, args: &mut Args) -> 
 
 ## 6. 待定项（需要项目负责人决定）
 
-1. **"Go 内部不一致"的默认处理**：建议按逐行版实现并开 issue（3.3 第 3 条）。也可以选择"按 Go 默认配置下用户看到的版本（向量化版）"，那样该签名要保留两份函数体。
+1. **"Go 内部不一致"的默认处理**：修订后建议两种驱动各自与 Go 一致，分歧签名保留第二份函数体（3.3 第 3 条）。
 2. **是否依赖 TiKV RPN 框架**：建议不依赖（3.6），ADR 0007 第 3 条据此定稿为"不使用，删除 vendored `tidb_query_expr`"。
 3. **阻塞型函数**：放阻塞池（建议），还是把逐行驱动做成 async（会让所有函数体沾上 async，不建议）。
 4. **SIMD**：本 spec 只保证单态化循环；某个签名需要手写 SIMD 时按 A5 单独申请，并用本 spec 的 govec 向量做等价性门禁。
