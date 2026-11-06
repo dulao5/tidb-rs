@@ -46,6 +46,22 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 dbg_macro = "warn"
 todo = "warn"
 
+# Style lints a faithful Go port may allow, module-wide (`#![allow(...)]`) in a ported file:
+# they would rewrite Go's expressions and control flow (`x+1 <= n` -> `x < n`, index loops
+# -> iterators, late initialisation in branches, struct-update syntax), and the port keeps
+# Go's form for side-by-side review. Correctness lints are never allowed module-wide.
+# Cargo's [lints] cannot target modules, so this is the one list; scripts/converge.py checks
+# that every ported file's `#![allow]` is a subset of it (docs/porting/mappings.md, "lint").
+[workspace.metadata.porting]
+style-lint-allow = [
+  "clippy::int_plus_one",
+  "clippy::field_reassign_with_default",
+  "clippy::needless_late_init",
+  "clippy::manual_range_contains",
+  "clippy::manual_slice_fill",
+  "clippy::needless_range_loop",
+]
+
 # The vendored TiKV crates refer to these with `{ workspace = true }`. Specs
 # follow TiKV's root Cargo.toml.
 [workspace.dependencies]

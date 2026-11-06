@@ -16,6 +16,7 @@
 // Style lints that would rewrite Go's expressions and control flow (`x+1 <= n` → `x < n`,
 // index loops → iterators, late initialisation in branches, struct-update syntax). A
 // faithful port keeps Go's form so it can be compared side by side; correctness lints stay.
+// Must be a subset of `[workspace.metadata.porting] style-lint-allow` (checked by converge).
 #![allow(
     clippy::int_plus_one,
     clippy::field_reassign_with_default,

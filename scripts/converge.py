@@ -15,20 +15,26 @@ Checks, per Rust file:
   * every function of the block in a go-file is annotated exactly once with `// go:`;
   * every `fn` outside `#[cfg(test)]` / test files carries some annotation
     (`go:`, `go-part:`, `go-std:`, `go-l3:`, `go-exception:`, `glue:`);
-  * the `// go:` annotations follow Go's source order (reported, not an error).
+  * the `// go:` annotations follow Go's source order (reported, not an error);
+  * every lint in a module-level `#![allow(...)]` is in the workspace list
+    `[workspace.metadata.porting] style-lint-allow` of Cargo.toml; item-level `#[allow]`s
+    are listed for the reviewer (reported, not an error).
 
 Exit status 1 if anything is missing, extra, duplicated, malformed or unannotated.
 """
 
 import argparse
 import csv
+import os
 import re
 import sys
+import tomllib
 from collections import defaultdict
 
 ANN_RE = re.compile(r"^\s*//\s*(go|go-part|go-std|go-l3|go-exception|go-fix|glue):\s*(.*)$")
 FILE_RE = re.compile(r"^\s*//!\s*go-file:\s*(\S+)")
 FN_RE = re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(const\s+)?(unsafe\s+)?fn\s+(\w+)")
+ALLOW_RE = re.compile(r"^\s*#(!?)\[allow\(")
 LEVEL_RE = re.compile(r"^(L1(\s+\[M-[A-Z]+(,\s*M-[A-Z]+)*\])?|L2\s+\(.+\)|L3)$")
 
 
@@ -63,6 +69,36 @@ def parse_go_annotation(text, go_files, funcs):
     return path, symbol, level, f"symbol {symbol} not in {candidates} (func_blocks.tsv)"
 
 
+def load_lint_allow(path):
+    with open(path, "rb") as f:
+        meta = tomllib.load(f).get("workspace", {}).get("metadata", {}).get("porting", {})
+    if "style-lint-allow" not in meta:
+        sys.exit(f"converge: {path} has no [workspace.metadata.porting] style-lint-allow")
+    return set(meta["style-lint-allow"])
+
+
+def scan_allows(path):
+    """[(line_no, module_level, [lint, ...])] for every #[allow(...)] / #![allow(...)]."""
+    lines = open(path).read().splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        m = ALLOW_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        start = i
+        text = lines[i]
+        while ")]" not in text and i + 1 < len(lines):
+            i += 1
+            text += " " + lines[i]
+        body = text.split("allow(", 1)[1].split(")]", 1)[0]
+        lints = [x.strip() for x in body.split(",") if x.strip()]
+        out.append((start + 1, m.group(1) == "!", lints))
+        i += 1
+    return out
+
+
 def scan(path, funcs):
     lines = open(path).read().splitlines()
     go_files = [m.group(1) for line in lines if (m := FILE_RE.match(line))]
@@ -95,8 +131,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--block", required=True)
     ap.add_argument("--func-blocks", required=True, help="tracker data/func_blocks.tsv")
+    ap.add_argument("--workspace-toml",
+                    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Cargo.toml"),
+                    help="Cargo.toml with [workspace.metadata.porting] style-lint-allow")
     ap.add_argument("files", nargs="+")
     args = ap.parse_args()
+    lint_allow = load_lint_allow(args.workspace_toml)
 
     funcs = load_funcs(args.func_blocks)
     expected = {k for k, (b, _) in funcs.items() if b == args.block}
@@ -108,7 +148,16 @@ def main():
     kinds = defaultdict(int)
     levels = defaultdict(int)
     covered_files = set()
+    item_allows = []
     for rs in args.files:
+        for line_no, module_level, lints in scan_allows(rs):
+            if not module_level:
+                item_allows.append(f"{rs}:{line_no}: #[allow({', '.join(lints)})]")
+                continue
+            for lint in lints:
+                if lint not in lint_allow:
+                    problems.append(f"{rs}:{line_no}: #![allow({lint})] is not in the workspace "
+                                    f"style-lint-allow list")
         go_files, anns, _, unannotated = scan(rs, funcs)
         covered_files.update(go_files)
         order = []
@@ -160,6 +209,8 @@ def main():
         print(f"ERROR: {p}")
     for o in other_blocks:
         print(f"info: {o}")
+    for a in item_allows:
+        print(f"info: item-level {a}")
     bad = missing or not_covered or dups or problems
     print("converge: FAIL" if bad else "converge: OK")
     return 1 if bad else 0
