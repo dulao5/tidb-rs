@@ -254,7 +254,12 @@ pub const MY_DECIMAL_STRUCT_SIZE: usize = 40;
 /// MyDecimal represents a decimal value.
 ///
 /// The layout is Go's (`#[repr(C)]`, same field order, 40 bytes): chunk's wire format is the
-/// in-memory layout of this struct.
+/// in-memory layout of this struct ([`MyDecimal::from_wire`], [`MyDecimal::as_wire`]).
+///
+/// `==` is the derived field-by-field equality, like Go's struct `==` (and `TestReset`'s
+/// deep equality): it compares the representation, not the value. `1.0 == 1.00` is false
+/// (different `digitsFrac`), `-0` and `0` differ, and so do equal values with different
+/// leftover words. For SQL value comparison use [`MyDecimal::compare`], which Go uses too.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MyDecimal {
