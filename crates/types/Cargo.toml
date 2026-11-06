@@ -15,9 +15,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.5"
 # The govec vectors are committed as .jsonl.gz.
 flate2 = "1.0"
+# Benchmarks run on the server's allocator.
+tikv-jemallocator = { workspace = true }
 
 [[bench]]
 name = "mydecimal"

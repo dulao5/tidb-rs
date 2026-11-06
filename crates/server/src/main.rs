@@ -26,6 +26,10 @@ use tidb_session::Factory;
 use tidb_session::Shared;
 use tracing::{error, info, warn};
 
+// Process-wide allocator: jemalloc (A1 / P0 decision D7), the same one the benchmarks use.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Debug, Parser)]
 #[command(name = "tidb-server", about = "tidb-rs read-only SQL node (prototype)")]
 struct Args {

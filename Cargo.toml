@@ -88,6 +88,8 @@ tidb-types = { path = "crates/types" }
 tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "2fc142f5dbf68e8c9546f18308826976e13f855c", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 bytes = "1.11"
+# Global allocator of the server and the benchmarks (A1 / P0 decision D7: jemalloc).
+tikv-jemallocator = "0.6"
 chrono = { version = "0.4", default-features = false }
 futures = "0.3"
 heck = "0.3"

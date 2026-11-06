@@ -2,11 +2,19 @@
 //!
 //! Go: `go test -bench 'Round|ToFloat64|ToBin|ToHashKey' -run '^$' ./pkg/types/`
 //! Rust: `cargo bench -p tidb-types --bench mydecimal`
+//!
+//! The global allocator is jemalloc, as in the server (A1 / P0 decision D7); Go's numbers
+//! are with Go's runtime allocator. Allocation-heavy benchmarks (ToBin, ToHashKey) depend
+//! on it.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use tidb_types::{
-    MODE_CEILING, MODE_HALF_UP, MODE_TRUNCATE, MyDecimal, new_dec_from_float_for_test,
+    MODE_CEILING, MODE_HALF_UP, MODE_TRUNCATE, MyDecimal, gostd, new_dec_from_float_for_test,
 };
+
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 const NUM_TEST_DEC: usize = 1000;
 
@@ -96,8 +104,8 @@ fn benchmark_to_float64(c: &mut Criterion) {
         b.iter(|| {
             for d in &test_dec {
                 // Go: strconv.ParseFloat(testDec[j].String(), 64)
-                let f = black_box(d).string().parse::<f64>().unwrap_or(0.0);
-                black_box(f);
+                let (f, err) = gostd::parse_float(&black_box(d).string());
+                let _ = black_box((f, err));
             }
         })
     });
