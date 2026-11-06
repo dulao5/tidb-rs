@@ -41,7 +41,7 @@ v8.5.8 中的事实：
 
 | 方案 | 做法 | 优点 | 缺点 |
 |---|---|---|---|
-| a. 全异步，共用网络运行时 | `async fn next()`，worker 是 tokio task，与网络、KV 共用一个运行时 | PoC 现状；与 client-rust 同一运行时 | CPU 密集的算子会占住网络线程；没有让出点时大查询会饿死其他连接。**否决** |
+| a. 全异步，共用网络运行时 | `async fn next()`，worker 是 tokio task，与网络、KV 共用一个运行时 | PoC 现状；与 client-rust 同一运行时 | CPU 密集的算子会占住网络线程；没有让出点时大查询会饿死其他连接。**否决**（2026-11-06 注：方案 d 修订后也只有一个运行时，区别在于 d 有按时间片让出的检查点、有界队列和停顿检测，正是这里列出的缺点的解法） |
 | b. rayon | worker 作为 rayon job | 数据并行方便 | Go 的 worker 大量阻塞在 channel 上，固定大小的 rayon 池会被耗尽甚至死锁；不适合长生命周期的流水线 worker。**否决作为 worker 载体**（可在 N6/A5 中用于算子内部的纯计算并行，另议） |
 | c. 同步 `Next` + 弹性线程池 | 每个 goroutine 一个 OS 线程，channel 用 crossbeam，KV 用 flume 桥接到 tokio | 写法与 Go 的阻塞式 channel/select 最像 | goroutine 是 M:N 的轻量任务，1:1 的 OS 线程运行模型与它最不像：64 个并发分析型会话、每条查询 30–60 个 worker 就是数千个线程，每个 chunk 跨 2–3 次线程切换；需要自写弹性线程池和同步/异步桥接。**否决**（初稿曾推荐，2026-11-04 评审后撤回） |
 | d. async `Next` + 专用的固定大小任务池（参照 TiKV） | 执行器在一个与网络分开、线程数等于核数的任务池上运行；goroutine 映射为 task；检查点处协作式让出 | 运行模型与 goroutine 一致（M:N、廉价）；线程数固定；KV 请求直接 await，没有桥接；有 TiKV 的成熟做法可循（多级队列、准入控制） | 执行器中禁止任何阻塞（用 lint 强制）；future 被 drop 即取消，显式 Close 的顺序要靠 3.5 的规则保证。**采用** |
@@ -57,6 +57,8 @@ v8.5.8 中的事实：
 
 #### 3.1 执行模型：async `Next` + 固定大小的任务池（方案 d，参照 TiKV）
 
+> 2026-11-06 修订（PR #2 补充评审三，Seastar / SEDA 复查）：去掉独立的网络运行时，语句在接收它的线程上跑完（第 2、9 条）；checkpoint 改为按时间片让出（第 5 条）；新增 3.6 节，把运行时边界上的三个队列（Q1 语句准入、Q2 发往 TiKV 的在途窗口、Q3 阻塞池）和过载行为写成契约；新增 3.7 节，后台任务遵守同一纪律。原则：Seastar 决定代码在哪里跑（不交接、按时间片协作让出、全部 `Send` 以保留拓扑可换），SEDA 决定在哪里排队（只在资源边界、有界、可观测、过载在入口处理）；Go 已有的限制按 L1 移植，Go 没有的新行为默认关闭、作为功能例外。
+>
 > 2026-11-04 修订：评审指出方案 c（每个 goroutine 一个 OS 线程）"写法最像 Go、运行模型最不像 Go"：goroutine 是 M:N 调度的轻量任务，Rust 里最接近它的是工作窃取线程池上的 task，不是 1:1 的 OS 线程；高并发分析型负载下方案 c 会产生数千个线程。项目负责人同意改为参照 TiKV 的线程池模型。
 
 TiKV 的做法（`release-8.5` 分支）可以直接作为模板：
@@ -69,14 +71,17 @@ TiKV 的做法（`release-8.5` 分支）可以直接作为模板：
 | 准入控制 | `max_tasks_per_worker`，超过时报 busy | `src/read_pool.rs` |
 
 1. **算子接口**：`Executor` trait 的 `open` / `next` / `close` 是 async，方法与 Go 的 `Executor` 接口一一对应；trait 对象上的调用每次 `Next` 一个装箱 future。一次 `Next` 产出一个 chunk（默认最多 1024 行），一次小分配可以忽略；TiKV 的 batch executor 同样按 batch 动态分派。`Executor: Send`，不要求 `Sync`。
-2. **ExecPool**：进程级、固定线程数（默认等于核数）的任务池，与网络运行时分开。第一步用一个**专用的 tokio 多线程运行时**实现，放在 `ExecPool` trait 后面。原因：`tikv-client` 依赖 tokio（定时器、I/O、tonic），它的 future 在 tokio 运行时里可以直接 await；yatp 线程上要 poll 它们需要额外处理。多级队列是计划中的升级：若"大扫描并发时的点查 p99"基准（第 5 节）不达标，换成 yatp，并按宪章登记为来自 TiKV 的 L3 和 ADR。
+2. **只有一个运行时，语句不交接**（2026-11-06 修订）：进程只有一个 tokio 运行时，网络、语句执行、KV 客户端都在上面，不再有"网络运行时 → ExecPool"的交接。连接 task 就是语句 task：规划和根执行器都在接收这条连接的 task 里跑完，只有计划里带并行 worker（Go 起 goroutine 的地方）时才 `pool.spawn`。PoC 就是零交接的，这是它点查能到 Go 1.0–1.2 倍的原因之一；原稿的两次跨运行时交接对点查是纯开销。"CPU 工作卡住网络"由第 5 条的按时间片让出解决。
+   - `ExecPool` trait 保留，实现暴露两种拓扑：**Steal**（tokio `multi_thread`，工作窃取，默认）和 **NoSteal**（N 个 tokio `current_thread` 运行时各占一个线程，accept 后挑一个运行时，连接之后留在那个线程；设计参照 pingora-runtime 的 NoSteal，不引 pingora 依赖，约百行）。数据库连接比代理连接更长、负载更不均，所以 NoSteal 只作可选项。两种拓扑跑同一套测试（第 5 节），这是"调度器可替换"的机器证明。
+   - 所有执行器代码和 future 必须 `Send`、不依赖线程局部状态。这是同时保留两种拓扑的前提：`!Send` 的 `Rc` future 会把代码永远锁在单线程模式。行和 chunk 的处理路径上不 clone `Arc`（worker 按 `&ExecCtx` 借用）作为编码约定写进 plan 模板，由基准兜底；clippy 无法机械判断哪段代码属于这条路径，不做 lint。
+   - 多级队列仍是计划中的升级：若"大扫描并发时的点查 p99"基准不达标，换成 yatp，并按宪章登记为来自 TiKV 的 L3 和 ADR。`tikv-client` 依赖 tokio，所以第一步用 tokio。
 3. **每个 goroutine 对应一个 task**（`M-GO`）：`go worker.run()` → `pool.spawn(async move { worker.run().await })`。数量严格等于 Go 的数量（由同一个 `Concurrency` getter 决定），`tidb_executor_concurrency` 等变量含义不变；物理并行度由池大小决定，这与 goroutine 和 GOMAXPROCS 的关系相同。
 4. **channel 映射**（`M-CH`、`M-WG`）：有缓冲 channel → 容量相同的异步有界 channel；无缓冲 → 容量为 0 的 rendezvous（无法直接表达时用容量 1 加确认，在 plan 模板里固定一种写法）；`close(ch)` → drop 发送端；`select` → `select!`；`sync.WaitGroup` → 保存 `JoinHandle`，关闭时逐个 await。只能使用**取消安全**的 channel 原语（在 `select!` 中被放弃的分支不会丢数据），选型在试点中确定并写进 plan 模板。
-5. **让出点与 kill 检查点合并**（`M-KILL`）：`ctx.checkpoint().await` 放在 Go 的 `HandleSQLKillerSignal` 同一位置（`exec::next` 前后等），同时做 kill 检查、内存检查（第二部分 3.3）和让出 CPU。任何不经过 `Next` 就连续处理多个 chunk 的循环（hash build、sort、聚合合并）每处理一个 chunk 调用一次。不新增其他位置。
-6. **KV 访问没有同步/异步边界**：coprocessor 迭代器的 worker（数量 = `tidb_distsql_scan_concurrency`，`sendRate` 映射为同容量的信号量）就是同一个池上的 task，直接 await `tikv-client` 的请求。需要确认 client-rust 的请求 future 被 drop 时会取消请求（待试点验证）。
+5. **检查点：kill / 内存检查按 Go 的位置，让出按时间片**（`M-KILL`，2026-11-06 修订）：`ctx.checkpoint().await` 放在 Go 的 `HandleSQLKillerSignal` 同一位置（`exec::next` 前后等），以及任何不经过 `Next` 就连续处理数据的循环（hash build、sort、merge、聚合 final 合并的内循环）。每次调用都做 kill 检查和内存检查（第二部分 3.3，都是一次原子读）；**是否让出 CPU 按时间片决定**：计数器每 N 次看一次时钟，本片运行超过 quantum（默认 1ms）才让出。这是 TiKV `RescheduleChecker` 的模式（`components/tidb_query_common/src/storage/scanner.rs`：每 32 个 key 看一次时钟，超过 1ms `reschedule().await`）。Rust 没有 Go sysmon 的抢占，这个原语加 3.6 的停顿检测就是抢占的替代品。checkpoint 同时记录本片 CPU 时间，归到语句和 resource group；按组的调度份额以后加，钩子现在留（`ExecCtx` 字段，见 foundation-interfaces）。调用接口不变。
+6. **KV 访问没有同步/异步边界**：coprocessor 迭代器的 worker（数量 = `tidb_distsql_scan_concurrency`，`sendRate` 按 L1 映射为同容量的信号量，它限制的是已收到、未被消费的响应，管的是内存）就是同一个运行时上的 task，直接 await `tikv-client` 的请求。另有服务器级的在途窗口 Q2（3.6），限制的是发往每个 store 的在途 RPC。需要确认 client-rust 的请求 future 被 drop 时会取消请求（待试点验证）。每个 cop 请求都带上 TiKV 调度依赖的字段：priority、resource group name、override priority、task_id（语句级，Go `request_builder.go` 的 `TaskID`）、busy_threshold（与 Go 相同的取值）、deadline（`max_execution_time`）。
 7. **禁止阻塞**（`M-BLOCK`、`M-LOCK`）：执行器代码中不得阻塞线程。落盘 I/O 走 `spawn_blocking` 或单独的阻塞池；await 期间不得持有锁；执行器 crate 中不得 `std::thread::spawn` 或 `block_on`。这些用 clippy 强制（见 [mappings.md](../../../docs/porting/mappings.md)）。
-8. **准入**：Go 没有拒绝行为，SQL 节点的并发语句数已经被连接数限制。默认排队，不拒绝；排队上限可配置，超过时报一个新的、明确的错误码（不复用 1317），并打指标。
-9. **会话与语句**：连接 task 在网络运行时；语句（含规划，规划也是 CPU 工作）在 ExecPool 上执行。`Session` 整体 move 进语句 future，结束时随结果返回，因此要求 `Session: Send`（见 N2）。网络写由连接 task 负责，执行侧通过有界 channel 交出结果；`FinishResultSet` 的情形（卡在网络写）由连接 task 直接丢弃写 future 解决。
+8. **准入**：见 3.6 的 Q1。Go 已有 `token-limit`（默认 1000，满了排队等待，不拒绝），按 L1 移植；按 resource group 分份额、过载时拒绝是功能例外，默认关闭。
+9. **会话与语句**（2026-11-06 修订）：连接 task 持有 `Session`，语句在同一个 task 里执行，不再 move 到另一个运行时；但 `Session: Send` 的要求保留（Steal 拓扑下 task 会在线程间迁移，见 N2）。结果直接从语句 task 写网络；`FinishResultSet` 的情形（卡在网络写）由 KILL 触发写 future 的取消解决。
 10. **调度与 Go 的差异**：Go 没有优先级；换成 yatp 后，混合负载下点查会比 Go 更快。这不是用户可见的语义，作为实现例外声明。
 
 #### 3.2 Worker 的写法（L2 映射规则）
@@ -107,6 +112,32 @@ TiKV 的做法（`release-8.5` 分支）可以直接作为模板：
 2. **Drop 是安全网**：未 Close 就被丢弃（错误路径、unwind）时，Drop 取消并 join worker、删除落盘文件、内存记账随缓冲区释放自动归零；但不注册 stats。
 3. "Close 与 Next 并发"在 Rust 中不存在：外部（KILL、内存控制器、`FinishResultSet`）只发信号，Close 永远由持有者执行。
 4. future 被 drop 即取消：语句 future 只在连接断开或 Drop 安全网的情形下被 drop；正常路径和 KILL 都走显式 Close。
+
+#### 3.6 运行时边界、队列与过载（2026-11-06 新增）
+
+SEDA 的作者在 2010 年的回顾里否定了"每个阶段一个线程池、阶段间全部排队"，保留了有界队列、准入控制、按阶段观测和过载时在入口挡住。tidb-rs 只在三个资源边界排队，算子和 worker 类型不单独建池：
+
+| 队列 | 位置 | 容量与满时行为（默认 = Go） | 新增能力（功能例外，默认关闭） |
+|---|---|---|---|
+| **Q1 语句准入** | 连接 task 开始执行一条语句前 | L1 移植 Go `token-limit`（`server/server.go` `getToken`，默认 1000），满了排队等待 | 按 resource group 分份额；排队超过上限时报新的明确错误码（不复用 1317） |
+| **Q2 发往 TiKV 的在途窗口** | 每个 store 一个服务器级窗口，`ExecCtx` 可拿到的共享对象 | 默认无限；Go 的 `tidb_store_limit`（默认 0 即关闭，超限返回 client-go `ErrTokenLimit`）按 L1 保留在同一对象里 | 窗口加性增、乘性减（AIMD）；按 resource group 分份额 |
+| **Q3 阻塞池** | `spawn_blocking`：落盘 I/O、SLEEP / GET_LOCK（N4 D20） | 有界，满了排队 | — |
+
+Q2 的规则：
+
+1. **按在途 RPC 计数**：请求发出时占一个名额，响应到达即释放，不管上层是否已消费。否则 IndexLookUp 的索引侧响应占着名额、表侧请求发不出去，会死锁。结果缓冲多少仍由 Go 的 `sendRate` 管（3.1 第 6 条）。
+2. **语句内上限不变**：Go 的 `tidb_distsql_scan_concurrency` 等仍是每个 copIterator 的上限，Q2 在它之上封顶。
+3. **拥塞信号用被动信号**：每个 cop 响应的 ExecDetails 里有 TiKV 侧的调度等待时间（`schedule_wait`），AIMD 用它调窗口。不用 `estimated_wait_ms`：TiKV 只在请求带 `busy_threshold` 时才算它，而且是以拒绝该请求（`ServerIsBusy`）的方式返回（`src/read_pool.rs` `check_busy_threshold`），用它探测拥塞等于每次多一次重试。
+4. **resource group**：Go 在 client-go 里已有按 resource group 的 RU 限流（resource control 拦截器）。那部分按 L1 移植时接在 Q2 上，Q2 的分份额不另写一套。
+5. **为什么必须现在定**：cop wait 主要来自 SQL 节点的开环发送。一条 IndexLookUp 最多 75 个以上在途 cop 请求（`executor/distsql.go`、`store/copr/coprocessor.go`），几十条并发就是几千个任务压到一个 TiKV，TiKV 再公平也只能排队，而 SQL 节点看不到这个队列。默认无限就是 Go 的行为，所以策略可以以后再打开；但 Q2 必须是 `ExecCtx` 上的共享对象，不能是 copIterator 的局部变量，这一条碰接口。
+
+**观测**：三个队列都导出深度和等待时间指标。语句级记录 Q1 等待、Q2 等待、TiKV 回传的 cop wait 与 process 时间、poll 停顿次数、按组 CPU，进 EXPLAIN ANALYZE 的执行信息和指标。**不加进慢日志**：`INFORMATION_SCHEMA.SLOW_QUERY` 的列和慢日志格式是兼容契约，有工具解析；Go 已有的 cop wait 字段照旧。
+
+**poll 停顿检测**：单次 poll 超过阈值（默认 10ms）计数并打日志，覆盖语句和后台 task。它是 3.1 第 5 条时间片让出的兜底，用来发现漏放 checkpoint 的循环。
+
+#### 3.7 后台任务（2026-11-06 新增）
+
+schema reload 的 diff、统计加载、plan cache 淘汰等后台任务，在 Go 里靠运行时抢占兜底；在单运行时的 Rust 里，它们和语句共用线程，会卡住语句。规则：后台任务和执行器一样遵守 `M-BLOCK`，长循环按 3.1 第 5 条放时间片让出点，否则放到 Q3。停顿检测覆盖后台任务。
 
 ### 4. 对 L1 移植的影响（示例：投影的并行执行）
 
@@ -155,7 +186,12 @@ for w in workers {
 | 资源释放 | KILL / 超时 / 内存超限 / worker panic 四种中止路径下，语句结束后该语句的内存记账为 0、落盘文件为 0 |
 | 必须通过的 Go 测试 | `executor/test/jointest/hashjoin` `TestKillDuringBuild`、`TestKillDuringProbe`；`executor/test/executor` `TestQueryWithKill`；`executor` `TestKillTableReader`；`executor/test/simpletest` `TestKillStmt`；`session/test/variable` `TestMaxExecutionTime`；`sessionctx/variable` `TestMaxExecutionTime`；`util/sqlkiller` 全部；`server/tests/commontest` `TestClientDisconnectKillsAutocommitInsert`；各算子的 `*RandomFail` / `randomPanic` 类 failpoint 测试（`join` `TestHashJoinRandomFail`、`aggregate` `TestRandomFail`） |
 | 并发度语义 | 对每个并发度变量，构造查询断言实际 worker 数与 Go 相同（读 runtime stats 中的 concurrency 字段，与 Go 的 EXPLAIN ANALYZE 对比） |
-| 性能 | sysbench oltp_point_select / read_only QPS 不低于当前 PoC 基线；TPC-H 22 条查询总耗时不高于 Go |
+| 性能 | sysbench oltp_point_select / read_only QPS 不低于当前 PoC 基线（去掉交接后路径与 PoC 一样长）；TPC-H 22 条查询总耗时不高于 Go |
+| 两种拓扑 | Steal 拓扑每个 PR 跑全部测试；NoSteal 拓扑 nightly 跑同一套测试。可抓出两类只在一种拓扑下暴露的 bug：`current_thread` 下 task 同步等待自己 spawn 的 task 会死锁；依赖线程局部状态的代码只在工作窃取下出错 |
+| 停顿检测 | 测试和基准中 poll 停顿（> 10ms）计数为 0，后台任务包括在内 |
+| 队列指标 | Q1 / Q2 / Q3 的深度与等待时间指标存在且在基准中有读数 |
+| cop 请求字段 | 用 mock TiKV 断言每个 cop 请求都带 priority、resource group name、override priority、task_id、busy_threshold、deadline，取值与 Go 对同一语句的请求相同 |
+| 过载 | 负载升到饱和点的 2 倍、5 倍时，吞吐不低于峰值的 90%，已接纳语句的 p99 有上界且不高于 Go（默认配置，即 Go 行为；AIMD 打开时另测） |
 | 高并发分析负载 | 64 个并发会话跑 TPC-H Q1、Q9：吞吐不低于 Go；同时运行的 sysbench 点查 p99 不高于 Go（这是多级队列要解决的场景，不达标时换 yatp，见 3.1 第 2 条） |
 
 ---
@@ -306,14 +342,14 @@ err?;
 | N5（值表示与零拷贝）、N5a（列格式） | 共享响应缓冲的记账规则见 3.4；chunk 列的缓冲用 `TrackedAlloc` 分配。 |
 | N6（hash agg / join / sort 数据结构） | 必须用 `TrackedAlloc`；落盘由本 spec 的动作链触发；并发结构（partial/final worker、build/probe worker）沿用本 spec 的 ExecPool 与映射规则。 |
 | A2（算子内部的 worker 结构） | **刻意保留 Go 的形状**：HashAgg 的 fetcher → partial → final、HashJoin 的 build/probe worker、IndexLookUp 的 index/table worker 都是为 goroutine 设计的结构，Rust 引擎（DataFusion、Velox、TiKV 的 coprocessor）用的是分区/morsel 并行。移植阶段仍按 Go 的结构移植：P4 以它为形状，并发度变量和 EXPLAIN ANALYZE 的 concurrency 字段都暴露它。这是一条显式决定，不是 Rust 侧的设计；以后改成分区并行时，走新的例外 spec（暂记为 N9）。 |
-| N7（结果集编码与网络层） | 根执行在 ExecPool、网络写在 tokio 的分工，以及 `FinishResultSet` 的实现，需要 N7 配合。 |
+| N7（结果集编码与网络层） | 语句和网络写在同一个 task（3.1 第 9 条），`FinishResultSet` 靠取消写 future 实现，需要 N7 配合。 |
 
 ## 第四部分　决定与待定
 
 已决定（2026-11-04，项目负责人确认 PR #2 评审意见）：
 
 1. **执行模型**：async `Next` + 专用的固定大小任务池（方案 d，3.1）。第一步用专用 tokio 运行时，是否换 yatp 由高并发分析负载下的点查 p99 基准决定。
-2. **池的上限策略**：固定线程数；语句默认排队，排队上限可配置，超限报新的错误码并打指标（3.1 第 8 条）。
+2. **池的上限策略**：固定线程数；语句默认排队，排队上限可配置，超限报新的错误码并打指标（3.1 第 8 条）。（2026-11-06 由 3.6 的 Q1 细化：默认 = Go `token-limit`；拒绝是功能例外。）
 3. **Go runtime 专属变量与列**（`tidb_server_memory_limit_gc_trigger`、`tidb_enable_gogc_tuner`、`tidb_gogc_tuner_*`、`tidb_enable_reuse_chunk`、`tidb_memory_usage_alarm_*` 的 profile 输出、`MEMORY_USAGE.GC_LAST/GC_TOTAL`）：读取返回 Go 默认值；设为默认值时接受；设为其他值时接受并返回 warning "has no effect in tidb-rs"；GC 列返回 NULL/0。完整清单在 N8 中维护。
 4. **实例内存的度量**：限额判断用 jemalloc 的 `resident`（更接近 OOM 风险），归属用 `allocated`，两者都导出指标。
 5. **数值类测试**：改写为性质测试、允许重新标定配额（3.5）。
@@ -324,6 +360,10 @@ err?;
 7. **优化器 arena、plan cache 等是否纳入语句 tracker**：Go 不记；纳入后 `Mem_max` 会变大，可能更早触发配额。建议只观测、不计入限额。
 8. **RowContainer 改为由持有者完成落盘**：Go 异步落盘时，读取方可以和落盘并发；改后落盘期间该算子停顿。性能是否需要另设指标？
 9. **数字门槛**（KILL 延迟、RSS 70%、记账开销 2% 等）：定稿前先在 Go 上实测基线并回填。
+10. **（2026-11-06）单运行时、语句不交接、Steal 默认 / NoSteal 可选**（3.1 第 2、9 条）。
+11. **（2026-11-06）checkpoint 按时间片让出**（3.1 第 5 条）。
+12. **（2026-11-06）Q1 / Q2 / Q3 与过载契约**（3.6）：默认全部等于 Go；Q1 按组份额与拒绝、Q2 的 AIMD 与按组份额是功能例外，默认关闭，由基准决定是否打开。
+13. **（2026-11-06）新观测字段不进慢日志**（3.6）。
 
 ## 附：我不确定的地方
 

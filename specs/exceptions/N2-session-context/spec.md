@@ -49,7 +49,7 @@ Session（Send；同一时刻只有一个任务持有，&mut）
                                            内存与磁盘 tracker（A1 定义）、执行详情
 ```
 
-- **持有会话的任务**：同一时刻只有一个任务拥有 `Session`，以 `&mut` 访问 `SessionVars`。按 N3 3.1 第 9 条，连接任务（网络运行时）在语句之间持有会话；执行一条语句时，把 `Session` 整体 move 进语句 future，在 ExecPool 上完成解析、绑定、优化、执行、`SET`、事务控制，结束时随结果交还连接任务。全程按 Go 的顺序执行，没有锁。
+- **持有会话的任务**：同一时刻只有一个任务拥有 `Session`，以 `&mut` 访问 `SessionVars`。按 N3 3.1 第 9 条（2026-11-06 修订），连接任务持有会话，语句在同一个 task 里完成解析、绑定、优化、执行、`SET`、事务控制，不交接到别的运行时。Steal 拓扑下这个 task 会在线程间迁移，所以仍要求 `Session: Send`。全程按 Go 的顺序执行，没有锁。
   - 这要求 **`Session: Send`**（不要求 `Sync`）。直接后果：parser AST 目前持有 `Rc`（ADR 0004），prepared statement 若在会话中保存 AST，会话就不是 `Send`。要么 AST 改为 `Arc` 或拥有型结构，要么会话只保存降级后的 IR。这是 P1 中 D02 要处理的事，记入该块 spec。
   - 下文的"会话线程"一律指"持有会话的任务"。
 - **执行器 worker**：只拿到 N3+A1 中定义的 `ExecCtx`（`Send + Sync`、廉价 clone：`Arc<StmtCtx>`、killer、取消令牌、语句 tracker、线程池句柄）。读变量直接读冻结值，追加 warning 走内部锁。worker 拿不到 `SessionVars`，编译器会拒绝在 worker 里写会话状态。
