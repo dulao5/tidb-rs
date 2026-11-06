@@ -16,6 +16,11 @@ Checks, per Rust file:
   * every `fn` outside `#[cfg(test)]` / test files carries some annotation
     (`go:`, `go-part:`, `go-std:`, `go-l3:`, `go-exception:`, `glue:`);
   * the `// go:` annotations follow Go's source order (reported, not an error);
+  * every mapping rule ID in `L1 [M-..]` is a rule of docs/porting/mappings.md;
+  * with --fma-sites (tracker data/go_fma_sites.tsv, mapping rule M-FMA): every Go line
+    that gc fuses into FMA on some target, in a Go file the Rust file ports, has a
+    `[M-FMA] <file>.go:<line>` comment in the Rust file, and the `go:` annotation of its
+    function carries M-FMA; every such comment names a registered line;
   * every lint in a module-level `#![allow(...)]` is in the workspace list
     `[workspace.metadata.porting] style-lint-allow` of Cargo.toml; item-level `#[allow]`s
     are listed for the reviewer (reported, not an error).
@@ -36,6 +41,29 @@ FILE_RE = re.compile(r"^\s*//!\s*go-file:\s*(\S+)")
 FN_RE = re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(const\s+)?(unsafe\s+)?fn\s+(\w+)")
 ALLOW_RE = re.compile(r"^\s*#(!?)\[allow\(")
 LEVEL_RE = re.compile(r"^(L1(\s+\[M-[A-Z]+(,\s*M-[A-Z]+)*\])?|L2\s+\(.+\)|L3)$")
+RULES_RE = re.compile(r"\[(M-[A-Z]+(?:,\s*M-[A-Z]+)*)\]")
+FMA_MARK_RE = re.compile(r"//.*\[M-FMA\]\s+(\S+\.go):(\d+)")
+FMA_TARGETS_END = "instrs"  # go_fma_sites.tsv: target columns are between symbol and instrs
+
+
+def load_rules(path):
+    """Mapping rule IDs: first cell of the rule table rows of mappings.md."""
+    with open(path, encoding="utf-8") as f:
+        return {m.group(1) for line in f if (m := re.match(r"^\|\s*(M-[A-Z]+)\s*\|", line))}
+
+
+def load_fma_sites(path):
+    """(file, line) -> (symbol, fused targets) for lines fused on at least one target."""
+    sites = {}
+    with open(path, newline="") as f:
+        rows = csv.DictReader(f, delimiter="\t")
+        cols = rows.fieldnames
+        targets = cols[cols.index("symbol") + 1: cols.index(FMA_TARGETS_END)]
+        for row in rows:
+            fused = [t for t in targets if row[t] == "yes"]
+            if fused:
+                sites[(row["file"], int(row["line"]))] = (row["symbol"], fused)
+    return sites
 
 
 def load_funcs(path):
@@ -127,6 +155,34 @@ def scan(path, funcs):
     return go_files, anns, errors, unannotated
 
 
+def check_fma(rs, go_files, sym_rules, sites, problems):
+    """Rule M-FMA, see the module doc. Returns the number of registered sites checked."""
+    marks = set()
+    for n, line in enumerate(open(rs).read().splitlines(), 1):
+        m = FMA_MARK_RE.search(line)
+        if not m:
+            continue
+        name, ln = m.group(1), int(m.group(2))
+        files = [f for f in go_files if f == name or f.endswith("/" + name)]
+        if not files or (files[0], ln) not in sites:
+            problems.append(f"{rs}:{n}: [M-FMA] {name}:{ln} is not a fused line of go_fma_sites.tsv "
+                            f"in this file's go-files")
+            continue
+        marks.add((files[0], ln))
+    checked = 0
+    for (f, ln), (sym, fused) in sorted(sites.items()):
+        if f not in go_files:
+            continue
+        checked += 1
+        if (f, ln) not in marks:
+            problems.append(f"{rs}: {f}:{ln} ({sym}) is fused by gc on {', '.join(fused)}; "
+                            f"no `// [M-FMA] {os.path.basename(f)}:{ln}` comment")
+        for s in sym.split(","):
+            if "M-FMA" not in sym_rules.get(s, ()):
+                problems.append(f"{rs}: {s} contains fused line {f}:{ln}; its annotation lacks [M-FMA]")
+    return checked
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--block", required=True)
@@ -134,9 +190,17 @@ def main():
     ap.add_argument("--workspace-toml",
                     default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Cargo.toml"),
                     help="Cargo.toml with [workspace.metadata.porting] style-lint-allow")
+    ap.add_argument("--mappings",
+                    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "porting",
+                                         "mappings.md"),
+                    help="docs/porting/mappings.md (mapping rule IDs)")
+    ap.add_argument("--fma-sites", help="tracker data/go_fma_sites.tsv (rule M-FMA)")
     ap.add_argument("files", nargs="+")
     args = ap.parse_args()
     lint_allow = load_lint_allow(args.workspace_toml)
+    rules = load_rules(args.mappings)
+    fma_sites = load_fma_sites(args.fma_sites) if args.fma_sites else None
+    fma_checked = 0
 
     funcs = load_funcs(args.func_blocks)
     expected = {k for k, (b, _) in funcs.items() if b == args.block}
@@ -146,6 +210,7 @@ def main():
     problems = []
     other_blocks = []
     kinds = defaultdict(int)
+    rule_uses = defaultdict(int)
     levels = defaultdict(int)
     covered_files = set()
     item_allows = []
@@ -161,8 +226,18 @@ def main():
         go_files, anns, _, unannotated = scan(rs, funcs)
         covered_files.update(go_files)
         order = []
+        sym_rules = defaultdict(set)  # Go symbol -> rule IDs of its `go:` annotation
         for line_no, kind, text in anns:
             kinds[kind] += 1
+            for m in RULES_RE.finditer(text):
+                for rule in re.split(r",\s*", m.group(1)):
+                    if rule not in rules:
+                        problems.append(f"{rs}:{line_no}: mapping rule {rule} is not in {args.mappings}")
+                    rule_uses[rule] += 1
+            if kind == "go" and text.split():
+                parts = text.split()
+                sym = parts[1] if parts[0].endswith(".go") and len(parts) > 1 else parts[0]
+                sym_rules[sym].update(r for m in RULES_RE.finditer(text) for r in re.split(r",\s*", m.group(1)))
             if kind != "go":
                 continue
             f, sym, level, err = parse_go_annotation(text, go_files, funcs)
@@ -178,6 +253,8 @@ def main():
             order.append((start, sym, line_no, f))
         for line_no, name in unannotated:
             problems.append(f"{rs}:{line_no}: fn {name} has no provenance annotation")
+        if fma_sites is not None:
+            fma_checked += check_fma(rs, go_files, sym_rules, fma_sites, problems)
         # Go order within each Go file.
         by_file = defaultdict(list)
         for start, sym, line_no, f in order:
@@ -197,6 +274,9 @@ def main():
     print(f"block {args.block}: {len(expected)} Go functions in {len(expected_files)} file(s)")
     print(f"annotations: " + ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
     print(f"go: levels: " + ", ".join(f"{k}={v}" for k, v in sorted(levels.items())))
+    print(f"mapping rules: " + (", ".join(f"{k}={v}" for k, v in sorted(rule_uses.items())) or "none"))
+    if fma_sites is not None:
+        print(f"M-FMA: {fma_checked} registered site(s) in the ported Go files")
     print(f"matched {len(expected & set(seen))}/{len(expected)}, missing {len(missing)}, "
           f"extra {len(extra)}, duplicated {len(dups)}")
     for f in not_covered:
