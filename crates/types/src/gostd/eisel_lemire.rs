@@ -1,7 +1,6 @@
 //! go-file: $GOROOT/src/strconv/eisel_lemire.go
 //!
-//! `eiselLemire64`, used by `parse_float` only to decide whether Go's ParseFloat takes its
-//! slow path (see `gostd::go_takes_slow_path`).
+//! `eiselLemire64`, the fast path of Go's ParseFloat (`gostd::atof64`).
 
 /// `eiselLemire64`: `man * 10^exp10` as a float64 if the Eisel-Lemire fast path can decide
 /// it; `None` where Go's returns `ok == false`.

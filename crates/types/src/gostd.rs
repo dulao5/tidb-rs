@@ -360,11 +360,12 @@ fn num_error(s: &[u8], err: NumErrKind) -> NumError {
 ///
 /// Go's syntax is kept: `inf`/`infinity`/`nan` in any case (NaN without a sign), `_` digit
 /// separators where `underscoreOK` allows them, hexadecimal mantissas with a mandatory `p`
-/// exponent (`0x1p-2`), exponents clamped at 10000 while reading. The decimal value comes
-/// from Rust's correctly rounded `str::parse::<f64>` on the digits and exponent Go's
-/// `readFloat` found (Go's conversion is correctly rounded as well); hexadecimal values are
+/// exponent (`0x1p-2`), exponents clamped at 10000 while reading. Decimal values take Go's
+/// path: `atof64exact`, then `eiselLemire64`, then the slow path, where Rust's correctly
+/// rounded `str::parse::<f64>` stands in for Go's `decimal` conversion (also correctly
+/// rounded) on the digits and decimal point Go's `decimal.set` uses; hexadecimal values are
 /// Go's `atofHex`.
-// go-std: strconv.ParseFloat L2 (bitSize 64 only; decimal digits converted by Rust's str::parse)
+// go-std: strconv.ParseFloat L2 (bitSize 64 only; the decimal slow path converts with Rust's str::parse)
 pub fn parse_float(s: &str) -> (f64, Result<(), NumError>) {
     let s = s.as_bytes();
     let (f, n, err) = atof64(s);
@@ -378,7 +379,7 @@ pub fn parse_float(s: &str) -> (f64, Result<(), NumError>) {
     (f, err)
 }
 
-// go-std: strconv.atof64 L2 (no eiselLemire/decimal slow path: Rust's str::parse is the converter)
+// go-std: strconv.atof64 L2 (the decimal slow path converts with Rust's str::parse)
 fn atof64(s: &[u8]) -> (f64, usize, Result<(), NumError>) {
     if let Some((val, n)) = special(s) {
         return (val, n, Ok(()));
@@ -394,30 +395,55 @@ fn atof64(s: &[u8]) -> (f64, usize, Result<(), NumError>) {
         return (f, r.i, err);
     }
 
-    // All significant digits and the (clamped) decimal point position Go's readFloat found;
-    // Rust's parser rounds correctly however many digits there are.
-    //
-    // Go converts with atof64exact / eiselLemire64 and falls back to decimal.set +
-    // floatBits, which places the decimal point counting at most 800 digits: an integer
-    // part longer than 800 digits loses the excess, e.g. ParseFloat("1" + 1000 zeros +
-    // "e-500") is 1e299 in Go, not +Inf. dp_slow differs from dp only in that case, and
-    // then Go's choice of path decides the value (see go_takes_slow_path).
-    let dp = if r.dp_slow != r.dp && go_takes_slow_path(&r) {
-        r.dp_slow
-    } else {
-        r.dp
-    };
-    let mut text = String::with_capacity(r.digits.len() + 24);
-    if r.neg {
-        text.push('-');
+    // Go: try pure floating-point arithmetic conversion, and if that fails,
+    // the Eisel-Lemire algorithm.
+    if !r.trunc
+        && let Some(f) = atof64exact(r.mantissa, r.exp, r.neg)
+    {
+        return (f, r.i, Ok(()));
     }
-    let f = if r.digits.is_empty() {
-        text.push('0');
-        text.parse::<f64>().expect("zero")
+    if let Some(f) = eisel_lemire::eisel_lemire64(r.mantissa, r.exp, r.neg) {
+        if !r.trunc {
+            return (f, r.i, Ok(()));
+        }
+        // Even if the mantissa was truncated, we may
+        // have found the correct result. Confirm by
+        // converting the upper mantissa bound.
+        if eisel_lemire::eisel_lemire64(r.mantissa + 1, r.exp, r.neg) == Some(f) {
+            return (f, r.i, Ok(()));
+        }
+    }
+
+    // Slow fallback. Go's decimal.set + floatBits round correctly; Rust's parser does the
+    // same on the digits and the decimal point position decimal.set computes. That position
+    // counts at most 800 digits (len(decimal.d)), so an integer part longer than 800 digits
+    // loses the excess: ParseFloat("1" + 1000 zeros + "e-500") is 1e299 in Go, not +Inf.
+    let dp = r.dp_slow;
+    let f = if !r.underscores && !r.exp_clamped && dp == r.dp {
+        // s[:n] is plain decimal syntax that Rust's parser reads as Go does.
+        std::str::from_utf8(&s[..r.i])
+            .expect("ASCII prefix of a str")
+            .parse::<f64>()
+            .expect("readFloat validated the syntax")
     } else {
-        text.push_str(std::str::from_utf8(&r.digits).expect("ASCII digits"));
-        text.push('e');
-        text.push_str(&(dp - r.digits.len() as i64).to_string());
+        // Significant digits (no sign, point, '_' or leading zeros) and the exponent.
+        let mut text = String::with_capacity(r.i + 24);
+        if r.neg {
+            text.push('-');
+        }
+        let mut nd: i64 = 0;
+        for &c in &s[..r.mant_end] {
+            if c.is_ascii_digit() && (c != b'0' || nd > 0) {
+                text.push(char::from(c));
+                nd += 1;
+            }
+        }
+        if nd == 0 {
+            text.push('0');
+        } else {
+            text.push('e');
+            text.push_str(&(dp - nd).to_string());
+        }
         text.parse::<f64>().expect("digits and exponent")
     };
     if f.is_infinite() {
@@ -427,24 +453,45 @@ fn atof64(s: &[u8]) -> (f64, usize, Result<(), NumError>) {
     (f, r.i, Ok(()))
 }
 
-/// Whether Go's `atof64` falls back to its slow path (`decimal.set` + `floatBits`) for a
-/// decimal input. Only asked when the slow path's decimal point differs, i.e. for 19 or more
-/// significant digits, where `atof64exact` never applies (the mantissa exceeds 2^52).
-// go-std: strconv.atof64 L2 (only the fast-path decision; the value is computed by the caller)
-fn go_takes_slow_path(r: &ReadFloat) -> bool {
-    match eisel_lemire::eisel_lemire64(r.mantissa, r.exp, r.neg) {
-        None => true,
-        Some(f) => {
-            if !r.trunc {
-                return false;
+// go-std: strconv.atof64exact L1
+fn atof64exact(mantissa: u64, mut exp: i64, neg: bool) -> Option<f64> {
+    if mantissa >> 52 != 0 {
+        return None;
+    }
+    let mut f = mantissa as f64;
+    if neg {
+        f = -f;
+    }
+    match exp {
+        // an integer.
+        0 => Some(f),
+        // Exact integers are <= 10^15.
+        // Exact powers of ten are <= 10^22.
+        1..=37 => {
+            // int * 10^k
+            // If exponent is big but number of digits is not,
+            // can move a few zeros into the integer part.
+            if exp > 22 {
+                f *= FLOAT64_POW10[(exp - 22) as usize];
+                exp = 22;
             }
-            // Even if the mantissa was truncated, we may
-            // have found the correct result. Confirm by
-            // converting the upper mantissa bound.
-            eisel_lemire::eisel_lemire64(r.mantissa + 1, r.exp, r.neg) != Some(f)
+            if f > 1e15 || f < -1e15 {
+                // the exponent was really too large.
+                return None;
+            }
+            Some(f * FLOAT64_POW10[exp as usize])
         }
+        // int / 10^k
+        -22..=-1 => Some(f / FLOAT64_POW10[(-exp) as usize]),
+        _ => None,
     }
 }
+
+// Exact powers of 10.
+const FLOAT64_POW10: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
 
 /// `strconv.special`: a signed infinity or an unsigned NaN at the start of `s`, and its length.
 // go-std: strconv.special L1
@@ -495,7 +542,7 @@ fn common_prefix_len_ignore_case(s: &[u8], prefix: &[u8]) -> usize {
     n
 }
 
-/// Result of `readFloat`; `digits`/`dp` are kept for the decimal conversion (Go hands
+/// Result of `readFloat`; the fields after `ok` are kept for the decimal conversion (Go hands
 /// `s[:n]` to its own converters instead).
 struct ReadFloat {
     mantissa: u64,
@@ -505,14 +552,18 @@ struct ReadFloat {
     hex: bool,
     i: usize,
     ok: bool,
-    digits: Vec<u8>,
+    /// End of the mantissa (start of the exponent) in `s`.
+    mant_end: usize,
+    underscores: bool,
+    /// An exponent digit was dropped by Go's `e < 10000` clamp.
+    exp_clamped: bool,
     dp: i64,
     /// The decimal point as Go's slow path (`decimal.set`) computes it: it counts at most
     /// 800 digits (`len(decimal.d)`) when it places the point, see `atof64`.
     dp_slow: i64,
 }
 
-// go-std: strconv.readFloat L2 (also collects the significant decimal digits)
+// go-std: strconv.readFloat L2 (also reports what atof64's decimal conversion needs)
 fn read_float(s: &[u8]) -> ReadFloat {
     let mut r = ReadFloat {
         mantissa: 0,
@@ -522,7 +573,9 @@ fn read_float(s: &[u8]) -> ReadFloat {
         hex: false,
         i: 0,
         ok: false,
-        digits: Vec::new(),
+        mant_end: 0,
+        underscores: false,
+        exp_clamped: false,
         dp: 0,
         dp_slow: 0,
     };
@@ -581,7 +634,6 @@ fn read_float(s: &[u8]) -> ReadFloat {
                 continue;
             }
             nd += 1;
-            r.digits.push(c);
             if nd_slow < 800 {
                 nd_slow += 1;
             }
@@ -608,6 +660,7 @@ fn read_float(s: &[u8]) -> ReadFloat {
         i += 1;
     }
     r.i = i;
+    r.mant_end = i;
     if !sawdigits {
         return r;
     }
@@ -654,6 +707,8 @@ fn read_float(s: &[u8]) -> ReadFloat {
             }
             if e < 10000 {
                 e = e * 10 + i64::from(s[i] - b'0');
+            } else {
+                r.exp_clamped = true;
             }
             i += 1;
         }
@@ -672,6 +727,7 @@ fn read_float(s: &[u8]) -> ReadFloat {
     if underscores && !underscore_ok(&s[..i]) {
         return r;
     }
+    r.underscores = underscores;
 
     r.dp = dp;
     r.ok = true;
