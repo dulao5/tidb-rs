@@ -120,3 +120,10 @@ opt-level = 3
 
 [profile.release.build-override]
 opt-level = 3
+
+# Optimised, but integer overflow panics as in debug builds. CI runs the Go-ported crates'
+# tests (vector replay, overflow fuzz) under it as well: a wrap Go relies on must be written
+# wrapping_* (mapping rule M-INT), and optimisation must not hide a missed one.
+[profile.release-checked]
+inherits = "release"
+overflow-checks = true

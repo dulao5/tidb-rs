@@ -65,3 +65,11 @@ jobs:
 
       - name: test
         run: cargo test --workspace --locked
+
+      # Go-ported crates again, optimised but with integer overflow checks (profile
+      # release-checked): vector replay plus a few minutes of the overflow fuzz. A Go
+      # wrap that is not written wrapping_* (M-INT) panics here.
+      - name: test (release-checked, Go-ported crates)
+        env:
+          TIDB_TYPES_FUZZ_ITERS: "500000000"
+        run: cargo test --profile release-checked --locked -p tidb-types
