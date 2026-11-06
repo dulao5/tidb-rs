@@ -118,6 +118,13 @@ QPS and p95 of sysbench `oltp_read_only` on a tiup playground (v8.5.8, 1 PD / 1 
    - Build a cherry-pick pipeline from Go TiDB to tidb-rs.
    - Explore how AI agents can port code, test and verify autonomously.
 
+## Porting rules
+
+After the prototype, tidb-rs is ported from Go TiDB v8.5.8 by plan, block by block, keeping the Go
+structure. The rules are in [CONSTITUTION.md](CONSTITUTION.md) (Chinese); the method and phases in
+[docs/porting/methodology.md](docs/porting/methodology.md); deliberate deviations from Go are listed in
+[specs/exceptions/](specs/exceptions/README.md).
+
 ## Layout
 
 ```
