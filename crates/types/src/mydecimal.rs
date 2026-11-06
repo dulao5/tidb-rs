@@ -2248,6 +2248,8 @@ pub fn decimal_mul(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> 
         idx_to = start_to;
         idx2 = start2;
         while idx2 >= stop2 {
+            // int64 bounds: valid words give p < 1e18; any two int32 words give
+            // |p| <= 2^62, and hi*wb <= 2^62 + wb: no int64 wrap even for invalid words.
             let p =
                 i64::from(from1.word_buf[idx1 as usize]) * i64::from(from2.word_buf[idx2 as usize]);
             let hi = (p / i64::from(WORD_BASE)) as i32;
@@ -2490,6 +2492,12 @@ fn do_div_mod(
        on the fly for the purpose of guesstimation only.
        It's also faster, as we're saving on normalization of from2.
     */
+    //
+    // int64 bounds (M-INT). For a valid divisor (words in [0, wb), leading word w >= 1)
+    // normFactor = wb/(w+1) is in [0, wb/2]. For any int32 words (UnmarshalJSON and
+    // from_wire do not check them, nor does Go) |normFactor| <= wb and every product
+    // below is at most wb * 2^31 ~ 2.1e18 < 2^63: these two lines cannot wrap. A divisor
+    // word of -1 makes w+1 == 0 and panics with an integer divide by zero, as in Go.
     let wb = i64::from(WORD_BASE);
     let norm_factor = wb / i64::from(from2.word_buf[start2 as usize].wrapping_add(1));
     let mut norm2 = (norm_factor * i64::from(from2.word_buf[start2 as usize])) as i32;
@@ -2512,22 +2520,38 @@ fn do_div_mod(
             guess = 0;
         } else {
             /* D3: make a guess */
-            let mut x = i64::from(tmp1[start1 as usize]) + i64::from(dcarry) * wb;
+            // int64 bounds for valid words (w = from2.wordBuf[start2] in [1, wb)):
+            // - x = tmp1[start1] + dcarry*wb < wb^2 = 1e18. The partial remainder is below
+            //   the divisor, so dcarry <= w and x < (w+1)*wb, hence normFactor*x <= wb^2;
+            //   normFactor*y/wb < 5e17; the sum stays below 1.5e18.
+            // - guess is clamped to [0, wb); guess*w and wordBuf[start2+1]*guess < 1e18.
+            // - Knuth's D3 guess is at most 2 above the true digit (TAOCP 4.3.1, Thm B), so
+            //   x - guess*w is in (-2w, 2wb) and (x - guess*w)*wb + y in (-2e18, 2e18).
+            // Invalid words (unchecked by UnmarshalJSON and from_wire, as in Go) can push
+            // these past 2^63, where Go's int64 arithmetic wraps: wrapping_* keeps that.
+            let mut x = i64::from(tmp1[start1 as usize]).wrapping_add(i64::from(dcarry) * wb);
             let y = i64::from(tmp1[(start1 + 1) as usize]);
-            guess = (norm_factor * x + norm_factor * y / wb) / i64::from(norm2);
+            guess = norm_factor
+                .wrapping_mul(x)
+                .wrapping_add(norm_factor * y / wb)
+                .wrapping_div(i64::from(norm2));
             if guess >= wb {
                 guess = wb - 1;
             }
 
             if len2 > 0 {
                 /* remove normalization */
-                if i64::from(from2.word_buf[(start2 + 1) as usize]) * guess
-                    > (x - guess * i64::from(from2.word_buf[start2 as usize])) * wb + y
+                if i64::from(from2.word_buf[(start2 + 1) as usize]).wrapping_mul(guess)
+                    > x.wrapping_sub(guess.wrapping_mul(i64::from(from2.word_buf[start2 as usize])))
+                        .wrapping_mul(wb)
+                        .wrapping_add(y)
                 {
                     guess -= 1;
                 }
-                if i64::from(from2.word_buf[(start2 + 1) as usize]) * guess
-                    > (x - guess * i64::from(from2.word_buf[start2 as usize])) * wb + y
+                if i64::from(from2.word_buf[(start2 + 1) as usize]).wrapping_mul(guess)
+                    > x.wrapping_sub(guess.wrapping_mul(i64::from(from2.word_buf[start2 as usize])))
+                        .wrapping_mul(wb)
+                        .wrapping_add(y)
                 {
                     guess -= 1;
                 }
@@ -2539,7 +2563,9 @@ fn do_div_mod(
             let mut carry: i32 = 0;
             while idx2 > start2 {
                 idx2 -= 1;
-                x = guess * i64::from(from2.word_buf[idx2 as usize]);
+                // Valid words: guess and the word are below wb, x < 1e18. With invalid
+                // words guess can be any int64 (Go wraps), hence wrapping_mul.
+                x = guess.wrapping_mul(i64::from(from2.word_buf[idx2 as usize]));
                 let hi = (x / wb) as i32;
                 let lo = (x - i64::from(hi) * wb) as i32;
                 (tmp1[idx1 as usize], carry) = sub2(tmp1[idx1 as usize], lo, carry);
