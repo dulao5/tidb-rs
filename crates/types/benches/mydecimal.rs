@@ -103,6 +103,34 @@ fn benchmark_to_float64(c: &mut Criterion) {
     });
 }
 
+/// Not in Go's benchmark file: FromFloat64 (`strconv.FormatFloat(f, 'g', -1, 64)` + FromString)
+/// on 1000 random bit-pattern doubles and on 1000 values `k*0.1+0.2` (typically 17 digits).
+fn benchmark_from_float64(c: &mut Criterion) {
+    let mut rng = Rng(0x2026_1106);
+    let mut random_bits = Vec::with_capacity(NUM_TEST_DEC);
+    while random_bits.len() < NUM_TEST_DEC {
+        let f = f64::from_bits(rng.next_u64());
+        if f.is_finite() {
+            random_bits.push(f);
+        }
+    }
+    let tenths: Vec<f64> = (0..NUM_TEST_DEC).map(|k| k as f64 * 0.1 + 0.2).collect();
+    for (name, input) in [
+        ("BenchmarkFromFloat64RandomBits", &random_bits),
+        ("BenchmarkFromFloat64Tenths", &tenths),
+    ] {
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                for f in input {
+                    let mut d = MyDecimal::default();
+                    let err = d.from_float64(black_box(*f));
+                    let _ = black_box((d, err));
+                }
+            })
+        });
+    }
+}
+
 fn benchmark_my_decimal_to_bin_or_hash_cases() -> Vec<MyDecimal> {
     [
         "1.000000000000",
@@ -158,6 +186,7 @@ criterion_group!(
     benches,
     benchmark_round,
     benchmark_to_float64,
+    benchmark_from_float64,
     benchmark_my_decimal_to_bin,
     benchmark_my_decimal_to_hash_key
 );

@@ -6,9 +6,9 @@
 //! go-file: $GOROOT/src/strconv/ftoa.go
 //! go-file: $GOROOT/src/encoding/json/decode.go
 //!
-//! Only the logic is ported; the shortest round-trip digits of a float come from Rust's
-//! formatter (both produce the shortest digit string that parses back to the same float and,
-//! among those, the closest one), and JSON syntax comes from serde_json.
+//! Only the logic is ported; the shortest round-trip digits of a float come from the ryu
+//! crate (the same Ryū algorithm as Go's `ftoaryu.go`), and JSON syntax comes from
+//! serde_json.
 
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::Value;
@@ -84,7 +84,7 @@ pub(crate) fn trim_space(s: &[u8]) -> &[u8] {
 }
 
 /// `strconv.FormatFloat(f, 'g', -1, 64)`.
-// go-std: strconv.FormatFloat L2 (only fmt 'g', prec -1, bitSize 64; shortest digits from Rust's {:e})
+// go-std: strconv.FormatFloat L2 (only fmt 'g', prec -1, bitSize 64; shortest digits from the ryu crate)
 pub fn format_float_g(f: f64) -> String {
     if f.is_nan() {
         return "NaN".to_string();
@@ -93,23 +93,7 @@ pub fn format_float_g(f: f64) -> String {
         return if f.is_sign_negative() { "-Inf" } else { "+Inf" }.to_string();
     }
     let neg = f.is_sign_negative();
-    // Shortest round-trip digits: "d.ddde±x".
-    let e = format!("{:e}", f.abs());
-    let (mant, exp) = e.split_once('e').expect("LowerExp output has an exponent");
-    let exp: isize = exp.parse().expect("LowerExp exponent is an integer");
-    let mut d: Vec<u8> = mant.bytes().filter(|b| *b != b'.').collect();
-    let mut dp = exp + 1;
-    if f == 0.0 {
-        // Go's ryuFtoaShortest: zero has nd = 0, dp = 0.
-        d.clear();
-        dp = 0;
-    }
-    ryu_tie_to_even(f.abs(), &mut d, exp);
-    let digs = DecimalSlice {
-        nd: d.len() as isize,
-        d,
-        dp,
-    };
+    let digs = ryu_ftoa_shortest(f.abs());
     let mut dst = Vec::with_capacity(24);
     // FormatFloat(.., 'g', -1, ..): shortest, prec = digs.nd.
     let prec = digs.nd;
@@ -117,58 +101,59 @@ pub fn format_float_g(f: f64) -> String {
     String::from_utf8(dst).expect("formatted float is ASCII")
 }
 
-/// Go's `ryuDigits32` rounds the last shortest digit half-to-even when the float lies exactly
-/// halfway between the two shortest candidates (`cNextDigit == 5 && c0 && central&1 == 1`);
-/// Rust's shortest formatter rounds such a tie up (e.g. 979980073090831.25: Go
-/// "9.799800730908312e+14", Rust "9.799800730908313e+14").
+/// `ryuFtoaShortest`: the shortest decimal digits that parse back to `f` (finite, `f >= 0`)
+/// and the decimal point position, without trailing zeros; zero is `nd = 0, dp = 0`.
 ///
-/// A tie needs the exact binary value to end in a 5 right after the shortest digits, which
-/// is only possible when those digits are about as many as the 53-bit mantissa holds (the
-/// two neighbours 10^k apart must both be within half an ulp), so only results with at
-/// least 15 digits are checked, against the exact expansion of the float.
-// go-std: strconv.ryuDigits32 L2 (only its round-half-even rule, applied to Rust's shortest digits)
-fn ryu_tie_to_even(f: f64, d: &mut Vec<u8>, exp: isize) {
-    let nd = d.len();
-    if nd < 15 {
-        return;
+/// Go's `ryuFtoaShortest` and the ryu crate are the same algorithm (Ryū, Adams 2018),
+/// including the round-half-even choice between two shortest candidates (e.g.
+/// 979980073090831.25 is "9799800730908312", where Rust's `{:e}` gives "...313"). The crate
+/// only exposes the formatted string, so its digits and exponent are read back from it.
+// go-std: strconv.ryuFtoaShortest L2 (ryu crate)
+fn ryu_ftoa_shortest(f: f64) -> DecimalSlice {
+    let mut digs = DecimalSlice {
+        d: Vec::with_capacity(17),
+        nd: 0,
+        dp: 0,
+    };
+    if f == 0.0 {
+        return digs;
     }
-    // An f64 has at most 767 significant decimal digits; 800 makes the expansion exact.
-    let exact = format!("{f:.800e}");
-    let (mant, e) = exact
-        .split_once('e')
-        .expect("LowerExp output has an exponent");
-    if e.parse::<isize>().expect("LowerExp exponent is an integer") != exp {
-        return;
-    }
-    let ex: Vec<u8> = mant.bytes().filter(|b| *b != b'.').collect();
-    if ex[nd] != b'5' || ex[nd + 1..].iter().any(|b| *b != b'0') {
-        return;
-    }
-    // Exact tie between ex[..nd] (round down) and ex[..nd] + 1 (round up): keep the even one.
-    let mut down = ex[..nd].to_vec();
-    if (down[nd - 1] - b'0').is_multiple_of(2) {
-        *d = down;
-        return;
-    }
-    // Round up: increment the decimal digit string. All nines would carry into a new
-    // leading digit; Rust then rounds up too and its exponent differs (returned above).
-    if down.iter().all(|b| *b == b'9') {
-        return;
-    }
-    let mut i = nd - 1;
-    loop {
-        if down[i] == b'9' {
-            down[i] = b'0';
-            i -= 1;
+    let mut buf = ryu::Buffer::new();
+    // "1234.5", "0.00012345", "12340000000.0", "1e30", "1.234e-7".
+    let s = buf.format_finite(f).as_bytes();
+    let (mant, exp) = match s.iter().position(|&b| b == b'e') {
+        Some(i) => (&s[..i], parse_exp(&s[i + 1..])),
+        None => (s, 0),
+    };
+    let mut point = None;
+    for &b in mant {
+        if b == b'.' {
+            point = Some(digs.d.len() as isize);
+        } else if b == b'0' && digs.d.is_empty() {
+            // Leading zeros of "0.000123" only move the decimal point.
+            point = point.map(|p| p - 1);
         } else {
-            down[i] += 1;
-            break;
+            digs.d.push(b);
         }
     }
-    while down.last() == Some(&b'0') {
-        down.pop();
+    while digs.d.last() == Some(&b'0') {
+        digs.d.pop();
     }
-    *d = down;
+    digs.nd = digs.d.len() as isize;
+    digs.dp = point.unwrap_or(mant.len() as isize) + exp;
+    digs
+}
+
+/// The exponent of ryu's scientific form: `-?[0-9]{1,3}`.
+fn parse_exp(e: &[u8]) -> isize {
+    let (neg, e) = match e.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, e),
+    };
+    let v = e
+        .iter()
+        .fold(0isize, |v, &b| v * 10 + isize::from(b - b'0'));
+    if neg { -v } else { v }
 }
 
 struct DecimalSlice {
@@ -510,5 +495,36 @@ fn store_int32(v: &Value, dst: &mut i32) -> Result<(), &'static str> {
             None => Err("number"),
         },
         other => Err(kind(other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_float_g_matches_go() {
+        // Expected strings from Go 1.25 strconv.FormatFloat(f, 'g', -1, 64).
+        for (f, want) in [
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (1.0, "1"),
+            (0.1, "0.1"),
+            (1e-4, "0.0001"),
+            (1e-5, "1e-05"),
+            (123456.0, "123456"),
+            (1234567.0, "1.234567e+06"),
+            (1e20, "1e+20"),
+            (1e21, "1e+21"),
+            (5e-324, "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+            // 979980073090831.25 exactly: a tie between ...312 and ...313.
+            (979_980_073_090_831.0 + 0.25, "9.799800730908312e+14"),
+            (0.30000000000000004, "0.30000000000000004"),
+            (f64::NAN, "NaN"),
+            (f64::NEG_INFINITY, "-Inf"),
+        ] {
+            assert_eq!(format_float_g(f), want, "{f:e}");
+        }
     }
 }
