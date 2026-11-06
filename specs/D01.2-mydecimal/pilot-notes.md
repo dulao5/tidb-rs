@@ -19,7 +19,7 @@
 | `crates/types/src/errors.rs` | 5 个错误 + `terror.Log` 的临时桩（`glue: stub blocked-by D00.2`） |
 | `crates/types/src/gostd.rs`、`gostd/eisel_lemire.rs` | Go 标准库行为的按需移植：`strings.TrimSpace`、`utf8.DecodeRune/DecodeLastRune`、`strconv.FormatFloat(f,'g',-1,64)`（最短数字取自 `ryu` crate）、`strconv.ParseFloat`（Go 形状，见"评审跟进"）、`encoding/json` 解码 `jsonMyDecimal` 的语义 |
 | `crates/types/src/mydecimal_test.rs` | `TestReset` |
-| `crates/types/tests/govec_decimal.rs` | 向量回放；`tests/vectors/v8.5.8/decimal.jsonl.gz` + README（tracker `6366acd`，33,149 条；之前为 `e9da322` 的 31,620 条明文、初版 `334bd88`） |
+| `crates/types/tests/govec_decimal.rs` | 向量回放；`tests/vectors/v8.5.8/{amd64,arm64}/decimal.jsonl.gz` + README（tracker `5087818`，每份 33,831 条，按 Rust 的 target_arch 选一份；之前为 `6366acd` 的 33,149 条单份、`e9da322` 的 31,620 条明文、初版 `334bd88`） |
 | `crates/types/tests/fuzz_decimal.rs` | 无 Go 对照的随机测试，只查整数溢出 panic（评审跟进 3） |
 | `crates/types/benches/mydecimal.rs` | Go 的 5 个基准 + FromFloat64 两个（criterion 0.5，jemalloc） |
 | `scripts/converge.py` | 收敛检查第一版 |
@@ -103,11 +103,11 @@ ToBin/ToHashKey 比 Go 慢 7–8%，原因是分配：Go 每次调用 1 次分�
 
 | Rust | 等级 | 原因 |
 |---|---|---|
-| `round`（`MyDecimal.Round`） | L2 | Go 允许 `to == d`，并用 `to != d` 决定是否复制 `wordBuf` 并重设 `digitsInt`（这正是 round 与 round_inplace 内部状态不同的原因）。Rust 中核心函数接收 `d` 的快照和 `to_is_d` 标志；已逐行核对：Go 中对 `d` 的所有读取都发生在对 `to` 的第一次"之后不返回"的写入之前，所以读快照等价于读别名指针。对外是 `round(&self, to)` 与 `round_in_place(&mut self)` 两个入口（标 `go-part`） |
-| `validate_args`（`validateArgs`） | L2 | `to == nil` 与 `f1 == to`、`f2 == to` 三个分支在 Rust 类型下不可能出现（`to: &mut`，`f1/f2: &`），所以没有移植。需要原地运算的调用方先复制（`MyDecimal: Copy`） |
+| `round`（`MyDecimal.Round`） | L1 [M-ALIAS]（原为 L2，`M-ALIAS` 合入 main 后改） | Go 允许 `to == d`，并用 `to != d` 决定是否复制 `wordBuf` 并重设 `digitsInt`（这正是 round 与 round_inplace 内部状态不同的原因）。Rust 中核心函数接收 `d` 的快照和 `to_is_d` 标志；已逐行核对：Go 中对 `d` 的所有读取都发生在对 `to` 的第一次"之后不返回"的写入之前，所以读快照等价于读别名指针。对外是 `round(&self, to)` 与 `round_in_place(&mut self)` 两个入口（标 `go-part`） |
+| `validate_args`（`validateArgs`） | L1 [M-ALIAS]（原为 L2） | `f1 == to`、`f2 == to` 的复制由调用方完成（`M-ALIAS`，`MyDecimal: Copy`）。`to == nil` 分支没有对应：`&mut` 不能为空，v8.5.8 中没有调用方传 nil，而且 Go 的 DecimalAdd 等在 validateArgs 之后马上写 `to.resultFrac`，传 nil 本来就会 panic |
 | `gostd.rs` 中的标准库移植 | `go-std:` L1/L2 | `FormatFloat` 的最短位数取自 `ryu` crate（与 Go `ftoaryu.go` 同一算法），移植 Go 的 `formatDigits/fmtE/fmtF`；`ParseFloat` 移植 Go 的语法、`atof64exact`、`eiselLemire64`、`atofHex`，只有慢路径的十进制转换用 Rust `parse::<f64>()`（同样正确舍入）；`DecodeRune` 的校验用 `from_utf8`；`json.Unmarshal` 用 serde_json 做语法、Go 的结构体解码规则自己写 |
 
-其余 56 个函数都是 L1。
+现在 58 个函数全部是 L1（规则 ID 的使用：`M-ALIAS` 9、`M-INT` 25、`M-ERRVAL` 25、`M-NAME` 1、`M-FMA` 2，见第二轮评审跟进）。
 
 `encoding/json` 未覆盖的 Go 行为（向量里没有，记录在案）：键的 Unicode 大小写折叠（只做了 ASCII 不区分大小写）；字面量 `-0` 写入整数字段（serde_json 把它当作浮点，Rust 报类型错误、Go 接受）；字符串中的非法 UTF-8；错误文案。`WriteBin` 在 Go 中可以在已有容量内重切片，未写到的字节保留旧内容；Rust 的 `resize` 填 0。按代码路径看所有字节都会被写到，所以没有可见差异，但没有向量能证明这一点。
 
@@ -175,7 +175,7 @@ Rust debug 构建溢出会 panic，所以凡是 Go 可能回绕的地方都写�
     - 有意义的 `(T, error)` 返回值清单；
     - 性能验收的环境（CPU、分配器、Go 版本、Go 基准的 `-count`）。
 15. **converge 需要的输入**：`func_blocks.tsv` 足够做 1:1 检查。建议脚本进 tracker 时同时输出 `rs_provenance.tsv`（provenance.md 已定义列），并把"Rust 顺序与 Go 不一致"作为警告。另外 `go:` 后面可省略 `L1` 的规定会让 lint 难以区分"漏写等级"和"默认 L1"，建议要求显式写等级。
-16. **浮点 FMA**：Go 规范允许把 `x*y + z` 融合成一条 FMA 指令（gc 在 arm64 等平台上会这样做），Rust 不会自动融合。`ToFloat64` 的 `f += float64(x) * pow10off81[…]` 因此可能在最后一位上与 Rust 不同；但随后 `math.Round(f*unit)/unit` 舍入到 resultFrac 位，通常会掩盖这种差别。本次 ≤12 位路径的向量全部一致。govec 文件头没有记录 GOARCH，建议加上，并在 amd64 和 arm64 各生成一次比对；凡是 Go 代码里有乘加的浮点逻辑，spec 都应提示这一点。
+16. **浮点 FMA**（第二轮评审更正）：Go 规范允许把 `x*y + z` 融合成一条 FMA 指令，Rust 不会自动融合。原先这里认为 `math.Round(f*unit)/unit` "通常会掩盖"差别、并以"≤12 位路径的向量全部一致"为证据，这个判断**不成立**：向量里没有 `resultFrac < digitsFrac` 的对象，而只有这类对象（`DecimalDiv` 的结果）会让舍入位落在 .5 边界上。`DecimalDiv(50.77, 32, 4)` 后 `ToFloat64`，Go arm64 得 1.586563，amd64 得 1.586562，原来的 Rust 在 arm64 上得 1.586562。而且是否融合取决于平台和具体位置，只能看汇编（例如 amd64 v3 融合 `vector_functions.go` 的几处，却不融合 `mydecimal.go` 的两处）。处理见"第二轮评审跟进"：新规则 `M-FMA`、tracker 登记表 `data/go_fma_sites.tsv`、按目标分开的向量。
 
 ## 评审跟进（PR #4，Fable 评审，2026-11-06）
 
@@ -246,5 +246,50 @@ jemalloc 让 ToBin/ToHashKey 快了约 2%，但没有"转正"：仍比 Go 慢 3�
 - `to_string() -> Vec<u8>` 与 `ToString` 的冲突：main 上 mappings 的 `M-NAME` 已列出（`String`、`ToString`、`Clone`、`Hash`、`Equal`），不再另记。
 - 向量 `.jsonl.gz` 入库（tracker `6366acd`：govec `Gzip = true`，README 定为所有领域的规矩），本仓库用 `flate2` 读，6.7 MB → 0.49 MB。
 - lint allow 清单：放在根 `Cargo.toml` 的 `[workspace.metadata.porting] style-lint-allow`（pilot-notes 9 说的"workspace 统一一份"；Cargo 的 `[lints]` 不能按模块），`scripts/converge.py` 检查每个移植文件的 `#![allow]` ⊆ 清单，item 级 `#[allow]` 列出供评审（本块两处：`inherent_to_string`、`absurd_extreme_comparisons`）。main 上 mappings.md 的 "lint" 一段合入后应指向这里。
-- 向量条数：33,149（27,641 基本、1,795 别名、2,184 链式、1,529 脏接收者）。
+- 向量条数：33,149（27,641 基本、1,795 别名、2,184 链式、1,529 脏接收者）。（第二轮后为每个目标 33,831 条，见下。）
 
+## 第二轮评审跟进（PR #4，Lucky 评审）
+
+### 1. FMA（必须改）
+
+- **规则**：main 的 mappings.md 新增 `M-FMA`：Go 浮点乘加位置按"每个位置 × 每个目标"移植，Go 在该目标上融合的用 `f64::mul_add`，不融合的分开乘和加；amd64 基线为 GOAMD64=v1（Go 默认值，v8.5.8 的 Makefile 没有设置），v1 不融合任何位置。原来"移植模块的统一约定"中的"浮点"一条改为指向本规则。
+- **登记表**：tracker `scripts/go_fma_sites.py` 对每个目标交叉编译 `go build -gcflags=<包>=-S`，收集 `FMADDD`/`FMADDS`/`VFMADD231SD`/`FNMSUBD` 等指令并映射回源码行，写入 `data/go_fma_sites.tsv`（tracker.py 的表，CI `--check`）。`pkg/types` 共 8 行：
+
+  | 位置 | amd64 v1 | amd64 v3 | arm64 | ppc64le / s390x / riscv64 / loong64 |
+  |---|---|---|---|---|
+  | mydecimal.go:1118、1125（`ToFloat64`） | 否 | 否 | `FMADDD` | 是 |
+  | vector_functions.go:44、100、101、102（float32） | 否 | `VFMADD231SS` | `FMADDS` | 是 |
+  | vector_functions.go:152（`L2Norm`） | 否 | `VFMADD231SD` | `FMADDD` | 是 |
+  | vector_functions.go:71（`InnerProduct`，float32） | 否 | 否 | `FMADDS` | 是 |
+
+  评审只查了 `FMADDD`，所以没看到 arm64 上 float32 的几处（`FMADDS`）。本块用到的 Go 标准库（`strconv`、`encoding/json`、`strings`、`unicode/utf8`）没有融合位置；`math` 包在 arm64 上有约 136 行融合（`Log`、`Exp`、`Pow`、三角函数等），以后移植 SQL 数学函数的块要用这张表（`-p math`）。
+- **Rust**：`to_float64` 的两处改为调用 `to_float64_madd`：aarch64（以及登记表中融合的 ppc64le、riscv64、loong64，未测试）用 `mul_add`，其他（x86_64）分开计算。s390x 是大端，被线上格式的小端断言排除。标注 `// go: MyDecimal.ToFloat64 L1 [M-ERRVAL, M-FMA]`，两处各有 `// [M-FMA] mydecimal.go:<行>` 注释；`converge.py --fma-sites <tracker>/data/go_fma_sites.tsv` 检查登记表中每个在已移植 Go 文件里的位置都有这样的注释、函数的 `go:` 标注带 `M-FMA`，并且注释不指向登记表外的行（故障注入：删注释、去掉规则 ID、写错行号都能报出）。单测 `to_float64_fma_per_target` 用评审的例子按架构断言。
+- **向量**：govec 文件头加 `goamd64`，每个目标一份（`amd64` = v1、`arm64`），`--check` 只与同一目标的文件比较；`div` 加为链式 producer；新增 `sys/fma`（评审的 4 个例子）、300 条随机 `x/j`、以及只保留结果依赖融合的随机 `x/j` 共 40 条（按 Go 源码重算的 ToFloat64 模型分别用 `math.FMA` 和禁止融合的写法计算，结果不同即保留；与生成平台无关）。两份文件恰好有 44 条不同。govec 的 `TestFMA` 用登记表的结论和模型核对 Go 的实际输出，`TestTargetsDiffer` 要求两份文件只在 `*to_float64` 上不同。tracker CI 改为 `ubuntu-latest` 与 `ubuntu-24.04-arm` 的 matrix；本仓库 CI 新增 aarch64 job（`tidb-types`，debug 和 release-checked）。
+- **验证**：本机 aarch64 回放 `arm64` 33,831/33,831；把 aarch64 也改成不融合时恰好 44 条失败（反证）。不融合的代码路径（即 x86_64 路径）回放 `amd64` 33,831/33,831（在 aarch64 上模拟，本机没有 Rosetta，`--target x86_64-apple-darwin` 只做了编译和 clippy）。**`amd64` 向量不是在 amd64 上生成的**：本机没有 Rosetta，Docker Desktop 启动失败，所以用 `-gcflags=all=-d=fmahash=n`（gc 不融合任何乘加，等同 amd64 v1 的行为）在 darwin/arm64 上生成，文件头写 amd64/v1；它与 arm64 文件的差别正好是模型预测的 44 条。真正在 amd64 上的验证是 tracker CI 的 linux/amd64 `govec.sh --check` 和本仓库 x86_64 CI 的回放。
+
+### 2. 映射规则 ID
+
+所有适用的位置都改写了规则 ID（converge 统计：`M-ALIAS` 9、`M-INT` 25、`M-ERRVAL` 25、`M-NAME` 1、`M-FMA` 2），converge 检查规则 ID 都在 mappings.md 中。取法：Go 签名返回 `error` 的函数标 `M-ERRVAL`；函数体有 `wrapping_*` 或缩窄 `as` 转换的标 `M-INT`；`Round`（及 `round`/`round_in_place` 两个 `go-part`）、`validateArgs`、`DecimalAdd/Sub/Mul/Div/Mod` 标 `M-ALIAS`；`ToString` 标 `M-NAME`。`Round`、`validateArgs` 由 L2 改为 L1，本块不再有 L2。
+
+### 3. 小项
+
+- `gostd.rs` 的 15 个函数补了标注（`go-std: strconv.syntaxError`、`encoding/json.decodeState.literalStore/array/object`、`UnmarshalTypeError.Error` 的 L2，`glue:` 用于 serde 的 `expecting` 和读 ryu 指数）；converge 的文件列表加入 `gostd.rs`、`gostd/eisel_lemire.rs`。
+- 线上格式：`from_wire`/`as_wire` 写明假定小端序，并加 `const _: () = assert!(cfg!(target_endian = "little"))`。
+- Go panic 记录：309 条（PR 描述原写 286，是只算基本操作的数；别名和链式记录也会 panic）。
+- **gostd 以后单独成 crate**：D01.1 等后续块都会用到 gostd，建议以后拆成 `tidb-gostd`，`tidb-types` 的公开 API 不再带 strconv 的仿制品。本 PR 不做。
+
+converge 命令（本轮起包括 gostd 和 FMA 登记表）：
+
+```
+scripts/converge.py --block D01.2 --func-blocks <tracker>/data/func_blocks.tsv \
+    --fma-sites <tracker>/data/go_fma_sites.tsv \
+    crates/types/src/mydecimal.rs crates/types/src/helper.rs \
+    crates/types/src/gostd.rs crates/types/src/gostd/eisel_lemire.rs
+
+annotations: glue=6, go=61, go-part=4, go-std=34
+go: levels: L1=61
+mapping rules: M-ALIAS=9, M-ERRVAL=25, M-FMA=2, M-INT=25, M-NAME=1
+M-FMA: 2 registered site(s) in the ported Go files
+matched 58/58, missing 0, extra 0, duplicated 0
+converge: OK
+```
