@@ -3631,6 +3631,7 @@ name = "tidb-types"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "flate2",
  "ryu",
  "serde",
  "serde_json",

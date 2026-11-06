@@ -1,4 +1,4 @@
-//! Replays the Go-generated vectors `tests/vectors/v8.5.8/decimal.jsonl` (tracker
+//! Replays the Go-generated vectors `tests/vectors/v8.5.8/decimal.jsonl.gz` (tracker
 //! `govec`, see the README next to the file) against the Rust port.
 //!
 //! Rules (tracker `govec/README.md`): outputs (`s`, `str`, internal state `st`, ints, hex,
@@ -11,9 +11,12 @@
 //! (`MyDecimal: Copy`). `round_inplace` uses the in-place entry `round_in_place`.
 //! `<producer>_then_<consumer>` ops hand the producer's result object (not re-parsed) to the
 //! consumer as its first decimal; err is the producer's error, else the consumer's.
+//! `dirty_<op>` ops run op on a receiver / `to` that `from_string(args[0])` left behind
+//! (Go's From* methods do not reset the fields they do not write).
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use tidb_types::{
     Error, MODE_CEILING, MODE_HALF_UP, MODE_TRUNCATE, MyDecimal, RoundMode, decimal_add,
@@ -23,7 +26,7 @@ use tidb_types::{
 
 const VECTORS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/vectors/v8.5.8/decimal.jsonl"
+    "/tests/vectors/v8.5.8/decimal.jsonl.gz"
 );
 
 fn hex(b: &[u8]) -> String {
@@ -101,6 +104,8 @@ static WIRE_CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 struct Args<'a> {
     v: &'a [Value],
     first: Option<MyDecimal>,
+    /// The receiver / `to` of a `dirty_<op>`; otherwise ops write into a fresh MyDecimal.
+    recv: Option<MyDecimal>,
 }
 
 impl Args<'_> {
@@ -119,6 +124,10 @@ impl Args<'_> {
         let _ = d.from_string(self.str(i).as_bytes());
         d
     }
+    /// The object the op writes into (govec's `argReader.to`).
+    fn to(&self) -> MyDecimal {
+        self.recv.unwrap_or_default()
+    }
 }
 
 /// Ops whose result can feed a chained op: (number of args, result, error).
@@ -131,7 +140,7 @@ const PRODUCERS: &[(&str, usize)] = &[
 ];
 
 fn produce(op: &str, a: &Args<'_>) -> (MyDecimal, Result<(), Error>) {
-    let mut to = MyDecimal::default();
+    let mut to = a.to();
     let err = match op {
         "from_int" => {
             to.from_int(a.v[0].as_i64().unwrap());
@@ -157,6 +166,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Result<(), Error>) {
             &Args {
                 v: &args[..n],
                 first: None,
+                recv: None,
             },
         );
         // Placeholder for the consumer's first decimal, replaced by `first`.
@@ -167,15 +177,33 @@ fn exec(op: &str, args: &[Value]) -> (Value, Result<(), Error>) {
             &Args {
                 v: &rest,
                 first: Some(d),
+                recv: None,
             },
         );
         return (out, perr.and(cerr));
+    }
+    if let Some(inner) = op.strip_prefix("dirty_") {
+        let recv = Args {
+            v: args,
+            first: None,
+            recv: None,
+        }
+        .dec(0);
+        return exec_op(
+            inner,
+            &Args {
+                v: &args[1..],
+                first: None,
+                recv: Some(recv),
+            },
+        );
     }
     exec_op(
         op,
         &Args {
             v: args,
             first: None,
+            recv: None,
         },
     )
 }
@@ -184,7 +212,7 @@ fn exec_op(op: &str, a: &Args<'_>) -> (Value, Result<(), Error>) {
     let args = a.v;
     match op {
         "from_string" => {
-            let mut d = MyDecimal::default();
+            let mut d = a.to();
             let err = d.from_string(a.str(0).as_bytes());
             (dec_out(&d), err)
         }
@@ -200,7 +228,7 @@ fn exec_op(op: &str, a: &Args<'_>) -> (Value, Result<(), Error>) {
             )
         }
         "from_float64" => {
-            let mut d = MyDecimal::default();
+            let mut d = a.to();
             let err = d.from_float64(parse_float(a.str(0)));
             (dec_out(&d), err)
         }
@@ -228,7 +256,7 @@ fn exec_op(op: &str, a: &Args<'_>) -> (Value, Result<(), Error>) {
         }
         "sub" | "mod" => {
             let (x, y) = (a.dec(0), a.dec(1));
-            let mut to = MyDecimal::default();
+            let mut to = a.to();
             let err = match op {
                 "sub" => decimal_sub(&x, &y, &mut to),
                 _ => decimal_mod(&x, &y, &mut to),
@@ -271,7 +299,7 @@ fn exec_op(op: &str, a: &Args<'_>) -> (Value, Result<(), Error>) {
         }
         "div" => {
             let (x, y) = (a.dec(0), a.dec(1));
-            let mut to = MyDecimal::default();
+            let mut to = a.to();
             let err = decimal_div(&x, &y, &mut to, a.int(2));
             (dec_out(&to), err)
         }
@@ -282,7 +310,7 @@ fn exec_op(op: &str, a: &Args<'_>) -> (Value, Result<(), Error>) {
             (json!(hex(&b)), err)
         }
         "from_bin" => {
-            let mut d = MyDecimal::default();
+            let mut d = a.to();
             let (n, err) = d.from_bin(&unhex(a.str(0)), a.int(1), a.int(2));
             (json!({"n": n, "dec": dec_out(&d)}), err)
         }
@@ -329,7 +357,7 @@ fn exec_op(op: &str, a: &Args<'_>) -> (Value, Result<(), Error>) {
             )
         }
         "unmarshal_json" => {
-            let mut d = MyDecimal::default();
+            let mut d = a.to();
             let err = d.unmarshal_json(a.str(0).as_bytes());
             (dec_out(&d), err)
         }
@@ -388,7 +416,10 @@ fn check(rec: &Value) -> Option<String> {
 
 #[test]
 fn govec_decimal() {
-    let text = std::fs::read_to_string(VECTORS).unwrap();
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(VECTORS).unwrap())
+        .read_to_string(&mut text)
+        .unwrap();
     let mut lines = text.lines();
     let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(header["domain"], "decimal");
@@ -422,14 +453,14 @@ fn govec_decimal() {
 
     assert_eq!(n, header["records"].as_u64().unwrap() as usize);
     eprintln!(
-        "{:<16} {:>7} {:>7} {:>7}",
+        "{:<22} {:>7} {:>7} {:>7}",
         "op", "records", "passed", "panics"
     );
     for (op, (total, passed, panics)) in &stats {
-        eprintln!("{op:<16} {total:>7} {passed:>7} {panics:>7}");
+        eprintln!("{op:<22} {total:>7} {passed:>7} {panics:>7}");
     }
     let passed: usize = stats.values().map(|s| s.1).sum();
-    eprintln!("{:<16} {:>7} {:>7}", "total", n, passed);
+    eprintln!("{:<22} {:>7} {:>7}", "total", n, passed);
     eprintln!(
         "wire round trips: {}",
         WIRE_CHECKS.load(std::sync::atomic::Ordering::Relaxed)
