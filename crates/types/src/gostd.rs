@@ -149,6 +149,7 @@ fn ryu_ftoa_shortest(f: f64) -> DecimalSlice {
 }
 
 /// The exponent of ryu's scientific form: `-?[0-9]{1,3}`.
+// glue: reads the exponent of ryu's scientific output (Go's ryuFtoaShortest fills a decimalSlice directly)
 fn parse_exp(e: &[u8]) -> isize {
     let (neg, e) = match e.split_first() {
         Some((b'-', rest)) => (true, rest),
@@ -347,6 +348,7 @@ impl fmt::Display for NumError {
 
 impl std::error::Error for NumError {}
 
+// go-std: strconv.syntaxError L2 (also strconv.rangeError: one constructor, the kind is an argument)
 fn num_error(s: &[u8], err: NumErrKind) -> NumError {
     NumError {
         func: "ParseFloat",
@@ -912,32 +914,41 @@ const TYPE_NAME: &str = "types.jsonMyDecimal";
 impl<'de> Visitor<'de> for TopLevel {
     type Value = Decoded;
 
+    // glue: required by serde's Visitor; never reached for valid JSON
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("any JSON value")
     }
 
+    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: null into a struct is a no-op)
     fn visit_unit<E: de::Error>(self) -> Result<Decoded, E> {
         Ok(Decoded::Ok(JsonMyDecimal::default()))
     }
+    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a bool literal into a struct is an UnmarshalTypeError)
     fn visit_bool<E: de::Error>(self, _: bool) -> Result<Decoded, E> {
         Ok(type_error("bool"))
     }
+    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a i64 literal into a struct is an UnmarshalTypeError)
     fn visit_i64<E: de::Error>(self, _: i64) -> Result<Decoded, E> {
         Ok(type_error("number"))
     }
+    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a u64 literal into a struct is an UnmarshalTypeError)
     fn visit_u64<E: de::Error>(self, _: u64) -> Result<Decoded, E> {
         Ok(type_error("number"))
     }
+    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a f64 literal into a struct is an UnmarshalTypeError)
     fn visit_f64<E: de::Error>(self, _: f64) -> Result<Decoded, E> {
         Ok(type_error("number"))
     }
+    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a str literal into a struct is an UnmarshalTypeError)
     fn visit_str<E: de::Error>(self, _: &str) -> Result<Decoded, E> {
         Ok(type_error("string"))
     }
+    // go-std: encoding/json.decodeState.array L2 (serde visitor: an array into a struct is an UnmarshalTypeError)
     fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Decoded, A::Error> {
         while seq.next_element::<IgnoredAny>()?.is_some() {}
         Ok(type_error("array"))
     }
+    // go-std: encoding/json.decodeState.object L2 (serde visitor over the fields of jsonMyDecimal; key match exact, then ASCII case-insensitive)
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Decoded, A::Error> {
         let mut r = JsonMyDecimal::default();
         let mut first_err: Option<String> = None;
@@ -1008,12 +1019,14 @@ impl<'de> Visitor<'de> for TopLevel {
     }
 }
 
+// go-std: encoding/json.UnmarshalTypeError.Error L2 (message of a top-level type mismatch, built directly)
 fn type_error(kind: &str) -> Decoded {
     Decoded::TypeError(format!(
         "json: cannot unmarshal {kind} into Go value of type {TYPE_NAME}"
     ))
 }
 
+// go-std: encoding/json.decodeState.literalStore L2 (JSON kind name used in UnmarshalTypeError.Value)
 fn kind(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -1025,6 +1038,7 @@ fn kind(v: &Value) -> &'static str {
     }
 }
 
+// go-std: encoding/json.decodeState.literalStore L2 (number into an int8 field; reflect.Value.OverflowInt rejects out-of-range values)
 fn store_int8(v: &Value, dst: &mut i8) -> Result<(), &'static str> {
     match v {
         Value::Null => Ok(()),
@@ -1039,6 +1053,7 @@ fn store_int8(v: &Value, dst: &mut i8) -> Result<(), &'static str> {
     }
 }
 
+// go-std: encoding/json.decodeState.literalStore L2 (number into an int32 field; reflect.Value.OverflowInt rejects out-of-range values)
 fn store_int32(v: &Value, dst: &mut i32) -> Result<(), &'static str> {
     match v {
         Value::Null => Ok(()),
