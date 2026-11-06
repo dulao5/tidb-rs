@@ -503,6 +503,13 @@ impl MyDecimal {
     }
 
     /// FromString parses decimal from string.
+    ///
+    /// Like Go, this does not reset the receiver first. `negative` is set for a leading
+    /// `-` and is cleared only when all nine words end up zero, so on a receiver that held
+    /// a negative value `"2"` parses as -2; words past the parsed digits keep their old
+    /// values (and count in that all-zero test). Error paths that Go answers with
+    /// `*d = zeroMyDecimal` do reset everything. Parse into `MyDecimal::default()` (Go
+    /// callers use `new(MyDecimal)`) unless the old state is wanted.
     // go: MyDecimal.FromString L1
     pub fn from_string(&mut self, str: &[u8]) -> Result<(), Error> {
         let mut str = str;
@@ -1162,6 +1169,10 @@ impl MyDecimal {
     }
 
     /// FromInt sets the decimal value from int64.
+    ///
+    /// Like Go, this does not reset the receiver: `negative` is only set (for `val < 0`),
+    /// never cleared, and `resultFrac` and the unused words keep their old values. Use a
+    /// fresh `MyDecimal::default()` (Go: `NewDecFromInt`) unless that is intended.
     // go: MyDecimal.FromInt L1
     pub fn from_int(&mut self, val: i64) -> &mut MyDecimal {
         let u_val: u64;
@@ -1175,6 +1186,10 @@ impl MyDecimal {
     }
 
     /// FromUint sets the decimal value from uint64.
+    ///
+    /// Like Go, this does not reset the receiver: `negative`, `resultFrac` and the unused
+    /// words keep their old values (a negative receiver gives a negative result). Use a
+    /// fresh `MyDecimal::default()` (Go: `NewDecFromUint`) unless that is intended.
     // go: MyDecimal.FromUint L1
     pub fn from_uint(&mut self, val: u64) -> &mut MyDecimal {
         let mut x = val;
@@ -1277,6 +1292,8 @@ impl MyDecimal {
     }
 
     /// FromFloat64 creates a decimal from float64 value.
+    ///
+    /// Goes through `from_string`, so the receiver is not reset either (see there).
     // go: MyDecimal.FromFloat64 L1
     pub fn from_float64(&mut self, f: f64) -> Result<(), Error> {
         let s = gostd::format_float_g(f);
@@ -1536,6 +1553,11 @@ impl MyDecimal {
     }
 
     /// FromBin Restores decimal from its binary fixed-length representation.
+    ///
+    /// Like Go, this does not reset the receiver: it sets `negative`, `resultFrac`, the
+    /// digit counts and the words it reads; the other words keep their old values. An
+    /// invalid precision/frac (`DecimalBinSize` error, size over 40) returns before
+    /// touching the receiver at all; bad word values reset it to zero.
     // go: MyDecimal.FromBin L1
     pub fn from_bin(
         &mut self,
