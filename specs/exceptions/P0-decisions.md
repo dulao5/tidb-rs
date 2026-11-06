@@ -59,7 +59,7 @@
 | D32 | N3 3.1 第 2、9 条 | 运行时拓扑 | 只有一个 tokio 运行时，语句在连接 task 内执行、不交接；Steal 默认、NoSteal 可选，两种拓扑过同一套测试（NoSteal 在 nightly） | 建议 |
 | D33 | N3 3.1 第 5 条 | checkpoint 的形状 | kill / 内存检查在 Go 的每个检查点做；让出按时间片（默认 1ms）；记录 CPU 片 | 建议 |
 | D34 | N3 3.6 | Q1 语句准入 | L1 移植 Go `token-limit`（默认 1000，排队）；按 resource group 分份额、过载拒绝是功能例外，默认关闭 | 建议 |
-| D35 | N3 3.6 | Q2 发往 TiKV 的在途窗口 | 服务器级每 store 一个窗口，挂在 `ExecCtx`；按在途 RPC 计数；默认无限，含 `tidb_store_limit` 的 L1 语义；AIMD（用 `schedule_wait`）和按组份额是功能例外，默认关闭，由基准决定 | 建议 |
+| D35 | N3 3.6 | Q2 发往 TiKV 的在途窗口 | 服务器级每 store 一个窗口，挂在 `ExecCtx`；按在途 RPC 计数；默认无限，含 `tidb_store_limit` 的 L1 语义；AIMD（用 `read_pool_schedule_wait_nanos`）和按组份额是功能例外，默认关闭，由基准决定 | 建议 |
 | D36 | N3 3.6 | 新观测字段 | 只进 EXPLAIN ANALYZE 和指标，不进慢日志 / `SLOW_QUERY` | 建议 |
 | D37 | N3 3.7 | 后台任务 | 与执行器同一纪律：不阻塞、长循环按时间片让出，否则进阻塞池；停顿检测覆盖 | 建议 |
 | D38 | PR #4 试点发现 2 | D00.2（terror / errno）排为 P1 第一个块，作为所有块的前置 | 采纳（ROADMAP 已按此排） | 建议 |

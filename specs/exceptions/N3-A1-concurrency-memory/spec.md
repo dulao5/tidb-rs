@@ -127,7 +127,7 @@ Q2 的规则：
 
 1. **按在途 RPC 计数**：请求发出时占一个名额，响应到达即释放，不管上层是否已消费。否则 IndexLookUp 的索引侧响应占着名额、表侧请求发不出去，会死锁。结果缓冲多少仍由 Go 的 `sendRate` 管（3.1 第 6 条）。
 2. **语句内上限不变**：Go 的 `tidb_distsql_scan_concurrency` 等仍是每个 copIterator 的上限，Q2 在它之上封顶。
-3. **拥塞信号用被动信号**：每个 cop 响应的 ExecDetails 里有 TiKV 侧的调度等待时间（`schedule_wait`），AIMD 用它调窗口。不用 `estimated_wait_ms`：TiKV 只在请求带 `busy_threshold` 时才算它，而且是以拒绝该请求（`ServerIsBusy`）的方式返回（`src/read_pool.rs` `check_busy_threshold`），用它探测拥塞等于每次多一次重试。
+3. **拥塞信号用被动信号**：每个 cop 响应的 ExecDetails 里有 TiKV 侧的调度等待时间（`ScanDetailV2.read_pool_schedule_wait_nanos`，kvproto 字段 13；TiKV `src/coprocessor/tracker.rs` 写入），AIMD 用它调窗口。不用 `estimated_wait_ms`：TiKV 只在请求带 `busy_threshold` 时才算它，而且是以拒绝该请求（`ServerIsBusy`）的方式返回（`src/read_pool.rs` `check_busy_threshold`），用它探测拥塞等于每次多一次重试。
 4. **resource group**：Go 在 client-go 里已有按 resource group 的 RU 限流（resource control 拦截器）。那部分按 L1 移植时接在 Q2 上，Q2 的分份额不另写一套。
 5. **为什么必须现在定**：cop wait 主要来自 SQL 节点的开环发送。一条 IndexLookUp 最多 75 个以上在途 cop 请求（`executor/distsql.go`、`store/copr/coprocessor.go`），几十条并发就是几千个任务压到一个 TiKV，TiKV 再公平也只能排队，而 SQL 节点看不到这个队列。默认无限就是 Go 的行为，所以策略可以以后再打开；但 Q2 必须是 `ExecCtx` 上的共享对象，不能是 copIterator 的局部变量，这一条碰接口。
 
