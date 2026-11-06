@@ -65,12 +65,36 @@ fn dec_out(d: &MyDecimal) -> Value {
         json!(i64::from(j["Negative"].as_bool().unwrap())),
     ];
     st.extend(j["WordBuf"].as_array().unwrap().iter().cloned());
+    check_wire(d, &st);
     json!({
         "s": String::from_utf8(d.to_string()).unwrap(),
         "str": d.string(),
         "st": st,
     })
 }
+
+/// Every decimal result also checks the chunk wire image: `as_wire` must be the 40-byte Go
+/// struct image of the state `st` (compared with Go's `st` by the record check), and
+/// `from_wire` must give the same object back.
+fn check_wire(d: &MyDecimal, st: &[Value]) {
+    let mut want = Vec::with_capacity(40);
+    for v in &st[..4] {
+        want.push(v.as_i64().unwrap() as u8);
+    }
+    for v in &st[4..] {
+        want.extend_from_slice(&(v.as_i64().unwrap() as i32).to_le_bytes());
+    }
+    let w = d.as_wire();
+    assert_eq!(&w[..], &want[..], "as_wire of {st:?}");
+    assert_eq!(
+        MyDecimal::from_wire(&w).as_ref(),
+        Ok(d),
+        "from_wire of {st:?}"
+    );
+    WIRE_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+static WIRE_CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Arguments of one op. In the consumer step of a chained op, `first` is the producer's
 /// result and replaces decimal argument 0.
@@ -406,6 +430,10 @@ fn govec_decimal() {
     }
     let passed: usize = stats.values().map(|s| s.1).sum();
     eprintln!("{:<16} {:>7} {:>7}", "total", n, passed);
+    eprintln!(
+        "wire round trips: {}",
+        WIRE_CHECKS.load(std::sync::atomic::Ordering::Relaxed)
+    );
     for f in failures.iter().take(40) {
         eprintln!("FAIL {f}");
     }

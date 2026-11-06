@@ -276,6 +276,51 @@ const _: () = assert!(std::mem::offset_of!(MyDecimal, negative) == 3);
 const _: () = assert!(std::mem::offset_of!(MyDecimal, word_buf) == 4);
 
 impl MyDecimal {
+    /// The decimal stored in chunk wire format: the 40-byte in-memory image of Go's
+    /// `MyDecimal` (`digitsInt`, `digitsFrac`, `resultFrac` as int8, `negative` as one byte,
+    /// then `wordBuf` as nine little-endian int32; N5a §3.3).
+    ///
+    /// Go reinterprets the bytes with `*(*MyDecimal)(unsafe.Pointer(&b[0]))` and checks
+    /// nothing. Here byte 3 must be 0 or 1, the only valid bit patterns of a Rust `bool`;
+    /// anything else is `ErrBadNumber`. The other fields are not checked, as in Go: invalid
+    /// values behave (or panic) later exactly as they do in Go.
+    // glue: Go's unsafe.Pointer cast of a chunk column element (util/chunk/column.go), N5a
+    pub fn from_wire(b: &[u8; MY_DECIMAL_STRUCT_SIZE]) -> Result<MyDecimal, Error> {
+        let negative = match b[3] {
+            0 => false,
+            1 => true,
+            _ => return Err(ERR_BAD_NUMBER),
+        };
+        let mut word_buf = [0i32; MAX_WORD_BUF_LEN];
+        for (i, w) in word_buf.iter_mut().enumerate() {
+            let at = 4 + 4 * i;
+            *w = i32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        }
+        Ok(MyDecimal {
+            digits_int: b[0] as i8,
+            digits_frac: b[1] as i8,
+            result_frac: b[2] as i8,
+            negative,
+            word_buf,
+        })
+    }
+
+    /// The chunk wire format of the decimal (see [`MyDecimal::from_wire`]).
+    // glue: Go's unsafe.Pointer cast of a chunk column element (util/chunk/column.go), N5a
+    pub fn as_wire(&self) -> [u8; MY_DECIMAL_STRUCT_SIZE] {
+        let mut b = [0u8; MY_DECIMAL_STRUCT_SIZE];
+        b[0] = self.digits_int as u8;
+        b[1] = self.digits_frac as u8;
+        b[2] = self.result_frac as u8;
+        b[3] = u8::from(self.negative);
+        for (i, w) in self.word_buf.iter().enumerate() {
+            b[4 + 4 * i..8 + 4 * i].copy_from_slice(&w.to_le_bytes());
+        }
+        b
+    }
+}
+
+impl MyDecimal {
     /// IsNegative returns whether a decimal is negative.
     // go: MyDecimal.IsNegative L1
     pub fn is_negative(&self) -> bool {
