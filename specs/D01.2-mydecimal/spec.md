@@ -90,8 +90,8 @@
 
 ## 4. 验收
 
-1. **函数级**：govec 向量 `vectors/v8.5.8/decimal.jsonl`（tracker PR #1，31,620 条：26 个基本操作 27,641 条，别名调用 `*_alias` 1,795 条，链式调用 `*_then_*` 2,184 条）全部回放通过，比对规则见 tracker `govec/README.md`：`s`、`str`、`err.code` 与未填充的 `err.msg`、内部状态 `st` 一致；别名调用按 `M-ALIAS` 先复制被别名的输入；Go 会 panic 的记录 Rust 也 panic（由 task 边界转换成错误，`M-PANIC`）。
+1. **函数级**：govec 向量 `vectors/v8.5.8/decimal.jsonl.gz`（tracker PR #1，33,149 条：26 个基本操作 27,641 条，别名调用 `*_alias` 1,795 条，链式调用 `*_then_*` 2,184 条，脏接收者 `dirty_*` 1,529 条）全部回放通过，并在 debug 和 `release-checked`（开溢出检查）两种构建下各跑一次，比对规则见 tracker `govec/README.md`：`s`、`str`、`err.code` 与未填充的 `err.msg`、内部状态 `st` 一致；别名调用按 `M-ALIAS` 先复制被别名的输入；Go 会 panic 的记录 Rust 也 panic（由 task 边界转换成错误，`M-PANIC`）。
 2. **单测**：`TestReset`（没有用例表）翻译为 Rust 单测；其余 29 个测试已被向量覆盖，不再逐个翻译。
 3. **来源标注**：58 个函数 100% 有 `// go:` 标注；converge 检查（标注 ⇔ 函数清单）通过。
 4. **端到端**（方法论 §6，P1 退出条件之一）：PoC 中 `crates/executor/src/agg.rs`、`crates/distsql/src/{dag,decode}.rs` 对 TiKV `Decimal` 的使用改为本块的 `MyDecimal`，sysbench oltp_read_only 与 R1 的 decimal 相关结果不回退。这一步作为单独的任务，可以放在块合入之后。
-5. **性能**：Go `mydecimal_benchmark_test.go` 的 5 个基准在 Rust 中对应实现，结果不低于 Go（初拟，先测 Go 基线）。
+5. **性能**：Go `mydecimal_benchmark_test.go` 的 5 个基准在 Rust 中对应实现，Rust 以 jemalloc 为全局分配器（与 server 相同），结果不低于 Go。含分配的基准（ToBin、ToHashKey：每次调用一次分配）建议以"差距不超过 5%"为准（待维护者确认）；见 pilot-notes"评审跟进 7"。

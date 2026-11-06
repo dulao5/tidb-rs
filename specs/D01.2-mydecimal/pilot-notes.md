@@ -17,10 +17,11 @@
 | `crates/types/src/mydecimal.rs` | 58 个函数，Go 顺序；`//! go-file: pkg/types/mydecimal.go` |
 | `crates/types/src/helper.rs` | `isSpace`、`isDigit`、`strToInt`（D01.1 的叶子函数，L1） |
 | `crates/types/src/errors.rs` | 5 个错误 + `terror.Log` 的临时桩（`glue: stub blocked-by D00.2`） |
-| `crates/types/src/gostd.rs` | Go 标准库行为的按需移植：`strings.TrimSpace`、`utf8.DecodeRune/DecodeLastRune`、`strconv.FormatFloat(f,'g',-1,64)`（含 Ryū 的平局取偶规则）、`encoding/json` 解码 `jsonMyDecimal` 的语义 |
+| `crates/types/src/gostd.rs`、`gostd/eisel_lemire.rs` | Go 标准库行为的按需移植：`strings.TrimSpace`、`utf8.DecodeRune/DecodeLastRune`、`strconv.FormatFloat(f,'g',-1,64)`（最短数字取自 `ryu` crate）、`strconv.ParseFloat`（Go 形状，见"评审跟进"）、`encoding/json` 解码 `jsonMyDecimal` 的语义 |
 | `crates/types/src/mydecimal_test.rs` | `TestReset` |
-| `crates/types/tests/govec_decimal.rs` | 向量回放；`tests/vectors/v8.5.8/decimal.jsonl` + README（tracker `e9da322`，sha256 `abca8bf5…19b42ac`；初版为 `334bd88`） |
-| `crates/types/benches/mydecimal.rs` | Go 的 5 个基准（criterion 0.3） |
+| `crates/types/tests/govec_decimal.rs` | 向量回放；`tests/vectors/v8.5.8/decimal.jsonl.gz` + README（tracker `6366acd`，33,149 条；之前为 `e9da322` 的 31,620 条明文、初版 `334bd88`） |
+| `crates/types/tests/fuzz_decimal.rs` | 无 Go 对照的随机测试，只查整数溢出 panic（评审跟进 3） |
+| `crates/types/benches/mydecimal.rs` | Go 的 5 个基准 + FromFloat64 两个（criterion 0.5，jemalloc） |
 | `scripts/converge.py` | 收敛检查第一版 |
 
 ### 向量回放（27,641 条全部通过）
@@ -104,7 +105,7 @@ ToBin/ToHashKey 比 Go 慢 7–8%，原因是分配：Go 每次调用 1 次分�
 |---|---|---|
 | `round`（`MyDecimal.Round`） | L2 | Go 允许 `to == d`，并用 `to != d` 决定是否复制 `wordBuf` 并重设 `digitsInt`（这正是 round 与 round_inplace 内部状态不同的原因）。Rust 中核心函数接收 `d` 的快照和 `to_is_d` 标志；已逐行核对：Go 中对 `d` 的所有读取都发生在对 `to` 的第一次"之后不返回"的写入之前，所以读快照等价于读别名指针。对外是 `round(&self, to)` 与 `round_in_place(&mut self)` 两个入口（标 `go-part`） |
 | `validate_args`（`validateArgs`） | L2 | `to == nil` 与 `f1 == to`、`f2 == to` 三个分支在 Rust 类型下不可能出现（`to: &mut`，`f1/f2: &`），所以没有移植。需要原地运算的调用方先复制（`MyDecimal: Copy`） |
-| `gostd.rs` 中的标准库移植 | `go-std:` L1/L2 | `FormatFloat` 的最短位数取自 Rust `{:e}`，只移植 Go 的 `formatDigits/fmtE/fmtF` 和平局取偶规则；`ParseFloat` 用 Rust `parse::<f64>()`（同样正确舍入）；`DecodeRune` 的校验用 `from_utf8`；`json.Unmarshal` 用 serde_json 做语法、Go 的结构体解码规则自己写 |
+| `gostd.rs` 中的标准库移植 | `go-std:` L1/L2 | `FormatFloat` 的最短位数取自 `ryu` crate（与 Go `ftoaryu.go` 同一算法），移植 Go 的 `formatDigits/fmtE/fmtF`；`ParseFloat` 移植 Go 的语法、`atof64exact`、`eiselLemire64`、`atofHex`，只有慢路径的十进制转换用 Rust `parse::<f64>()`（同样正确舍入）；`DecodeRune` 的校验用 `from_utf8`；`json.Unmarshal` 用 serde_json 做语法、Go 的结构体解码规则自己写 |
 
 其余 56 个函数都是 L1。
 
@@ -175,3 +176,75 @@ Rust debug 构建溢出会 panic，所以凡是 Go 可能回绕的地方都写�
     - 性能验收的环境（CPU、分配器、Go 版本、Go 基准的 `-count`）。
 15. **converge 需要的输入**：`func_blocks.tsv` 足够做 1:1 检查。建议脚本进 tracker 时同时输出 `rs_provenance.tsv`（provenance.md 已定义列），并把"Rust 顺序与 Go 不一致"作为警告。另外 `go:` 后面可省略 `L1` 的规定会让 lint 难以区分"漏写等级"和"默认 L1"，建议要求显式写等级。
 16. **浮点 FMA**：Go 规范允许把 `x*y + z` 融合成一条 FMA 指令（gc 在 arm64 等平台上会这样做），Rust 不会自动融合。`ToFloat64` 的 `f += float64(x) * pow10off81[…]` 因此可能在最后一位上与 Rust 不同；但随后 `math.Round(f*unit)/unit` 舍入到 resultFrac 位，通常会掩盖这种差别。本次 ≤12 位路径的向量全部一致。govec 文件头没有记录 GOARCH，建议加上，并在 amd64 和 arm64 各生成一次比对；凡是 Go 代码里有乘加的浮点逻辑，spec 都应提示这一点。
+
+## 评审跟进（PR #4，Fable 评审，2026-11-06）
+
+逐条处理结果。数字均为 Apple M4 Pro；Go 为 go1.25.12 `-count 5` 中位数，Rust 为 criterion 0.5 中位数，同一天重跑。
+
+### 1. `FromFloat64` 的最短数字改用 `ryu` crate
+
+`ryu_tie_to_even`（对 ≥15 位的结果做 800 位精确展开）删除，`gostd::ryu_ftoa_shortest` 从 `ryu::Buffer` 的输出读回数字串和小数点位置，接已移植的 `formatDigits/fmtE/fmtF`（`go-std: strconv.ryuFtoaShortest L2 (ryu crate)`）。`ryu` 已在 lock 中（serde_json 的依赖）。验收：原来那 120 万个 Go `FormatFloat(f,'g',-1,64)` 输出（同一生成器、同一种子重新生成，与 11-04 的文件逐字节相同）全部一致；979980073090831.25 等平局在单测里。
+
+| 基准（每次 1000 个值，ns/值） | 改前 | 改后 | Go |
+|---|--:|--:|--:|
+| `FromFloat64`，随机位型 double | 15,508 | 97 | 93 |
+| `FromFloat64`，`k*0.1+0.2` | 751 | 63 | 59 |
+
+剩下约 5% 是 `String` 分配（Go 的 `FormatFloat` 也返回新串，再 `[]byte(s)`）。
+
+### 2. 线上格式入口
+
+`MyDecimal::from_wire(&[u8; 40]) -> Result<MyDecimal, Error>` 与 `as_wire(&self) -> [u8; 40]`：字节 0–2 为三个 int8，字节 3 为 `negative`，其后 9 个小端 int32（N5a §3.3）。`from_wire` 只检查字节 3 ∈ {0, 1}，否则返回 `ErrBadNumber`（Go 不检查；Rust `bool` 的其他位型是 UB）；其余字段照 Go 不检查。没有 unsafe，没有引入 zerocopy。向量回放对每个十进制结果（22,747 个对象）检查 `as_wire` 等于由 Go 的 `st` 拼出的 40 字节，且 `from_wire` 还原出同一对象；单测覆盖布局和非法 bool。标注是 `glue:`（Go 中对应的是 `util/chunk/column.go` 的 `unsafe.Pointer` 转换，不是 `mydecimal.go` 的函数）。
+
+### 3. 回绕点
+
+- (a) `doDivMod` 的 normFactor、D3、D4 和 `DecimalMul` 的乘积处写了 int64 界（有效字：D3 的 `x < (w+1)·wb`、`normFactor·x ≤ wb²`、`(x − guess·w)·wb + y ∈ (−2e18, 2e18)`；`DecimalMul` 的 int32×int32 对任何字都不越界）。**顺带发现**：`UnmarshalJSON` 和 `from_wire` 不检查字的范围（Go 也不查），非法字可以让 D3/D4 的 int64 中间量越界，Go 在那里静默回绕，Rust 原来会在开溢出检查的构建里 panic。这几处改为 `wrapping_*`（`M-INT`），有效字的结果不变。
+- (b) 新 profile `release-checked`（release + `overflow-checks = true`），CI 增加一步在它下面跑 `tidb-types` 的全部测试（向量回放 + 5 亿步 fuzz，本机 5 千万步 10 秒）。
+- (c) `tests/fuzz_decimal.rs`：随机 `FromString` 串（含 0/9 连串、指数、尾部垃圾、全角数字）、边界整数、浮点，所有 op 的结果回填进对象池，接收者一半是脏的；只把 `attempt to … with overflow` 当失败，Go 式 panic（越界、makeslice）计数。默认 3 万步（debug 约 2 秒），`TIDB_TYPES_FUZZ_ITERS` / `TIDB_TYPES_FUZZ_SEED` 可调。本机跑过 debug 300 万步、release-checked 5 千万步，无溢出。故障注入（把 `ToInt` 的 `wrapping_mul` 改成 `*`）第 0 步即报出；把 `stringSize` 的 int8 加法改回普通加法则报不出，因为从合法输入出发这条路径只会得到负数而不会越界（向量中 `mul` 的 makeslice panic 来自 `digitsFrac` 的回绕，不来自这里）。
+
+### 4. `parse_float` 按 Go 签名
+
+`gostd::parse_float(&str) -> (f64, Result<(), NumError>)`（`M-ERRVAL`）。`NumError { func, num, err: NumErrKind::{Syntax, Range} }`，文案同 Go。溢出返回 ±Inf + `Range`，语法错误返回 0 + `Syntax`，下溢返回 ±0 不报错。移植了 `special`、`readFloat`、`underscoreOK`、`atof64exact`、`eiselLemire64`（连同 696 项的表）、`atofHex`；只有慢路径用 Rust `parse::<f64>()`。
+
+- **十六进制**：移植了。TiDB 中 `strconv.ParseFloat` 有 25 处非测试调用，`types.StrToFloat` 先经 `getValidFloatPrefix` 只留下十进制，但系统变量（`sysvar.go` 等）直接解析用户输入，`SET ... = '0x1p-2'` 在 Go 中会被接受。
+- **Go 的意外行为**（照样复现）：慢路径 `decimal.set` 在放小数点时只数前 800 位数字，所以整数部分超过 800 位时多出的位数丢失，`ParseFloat("1" + 1000 个 0 + "e-500")` 在 Go 中是 `1e299`，不是 +Inf；`"1_000"` 是 1000（`underscoreOK` 允许十进制里的下划线）；`"+nan"`、`"-nan"` 是语法错误而 `"-inf"` 可以；Go 的 NaN 位型是 `0x7FF8000000000001`。
+- 差分：92 万个输入（随机记号串、十进制与十六进制字面量、`FormatFloat 'g'/'x'` 的往返、700–1200 位长数字串）与 Go 比对值的位型、错误种类和文案，全部一致。
+- 性能：`BenchmarkToFloat64Old`（`ParseFloat(String())`）42.4 µs，Go 47.1 µs（原来直接 `str::parse` 是 33.9 µs）。
+- **`ToFloat64` 出错时的值**：改为保留 `ParseFloat` 的返回值，与 Go 相同。但用 Go 验证后，这里出错时的值是 0 而不是 ±Inf：`String()` 最多 81 位整数，不可能溢出；可达的只有非法状态（`UnmarshalJSON` 写入负字等）导致 `String()` 出现非数字字符，ParseFloat 报语法错误、值为 0。单测用 Go 的结果覆盖了两个这样的状态。
+- spec 模板第 14 条（标准库清单）应把 `strconv.ParseFloat` 标为"需要按 Go 语义移植"：溢出要 `ErrRange`、接受十六进制和下划线、800 位规则。D01.1 的 `StrToFloat` 直接用 `gostd::parse_float`。
+
+### 5. 脏接收者
+
+- (a) `from_string`、`from_int`、`from_uint`、`from_float64`、`from_bin` 的文档写明"不重置其他字段，按 Go"，并写出后果。
+- (b) govec 新增 `dirty_<op>`（tracker `5a51dbe`）：接收者 / `to` 先 `FromString` 一个脏值（负数、带小数、9 字占满、解析失败的状态），再执行 `from_string from_int from_uint from_float64 from_bin unmarshal_json round add sub mul div mod`。1,529 条，追加在原记录之后，原 31,620 条不变；两次生成逐字节相同，`--check` 与 `go test` 通过。Go 的实际行为：接收者为 `-123.456` 时 `FromString("2")` 得 **-2**，`FromUint(5)` 得 **-5**（`FromString` 只在 9 个字全为 0 时清 `negative`，残留的高位字也算在内）。Rust 回放 1,529 条第一次就全部通过，移植不需要改。
+
+### 6. 交给 D00.2：错误比较的两种语义
+
+本块的 `Error` 桩按 class + code 比较（`PartialEq`），等于 Go 的 `terror.Error.Equal`。Go 代码里常见的 `err == ErrTruncated` 是**指针相等**：哨兵经 `GenWithStackByArgs` 生成的新错误与哨兵不相等，`errors.Cause`/`Equal` 才相等。本块所有比较对象都是裸哨兵（`fixWordCntError` 等直接返回 `ErrOverflow`），两种语义结果相同，所以桩可以只给一种。D00.2 需要：
+
+1. 提供两种比较：按 code 的 `is()`（对应 `terror.ErrorEqual` / `Equal` / `errors.Is` 一类）和哨兵同一性（对应 `err == ErrXxx`）；后者在 Rust 里可以是"未带参数的哨兵"标志位，而不是地址；
+2. 移植指南要求每个比较点按 Go 的写法选其一，并在需要时注明；Go 用 `==` 比较一个可能被 `GenWithStackByArgs` 包装过的错误时，Go 的结果就是 false，Rust 必须同样为 false；
+3. govec 的 `errOf` 先按同一性、再按 `Equal` 命名错误，回放只比 code 和文案，所以向量无法区分这两种语义；D00.2 的向量需要单独的 op。
+
+### 7. 分配器与基准
+
+`tidb-server` 和本 crate 的基准都用 `tikv-jemallocator` 作 `#[global_allocator]`（A1 / P0 D7），criterion 0.3 → 0.5，`black_box` 用 `std::hint::black_box`。
+
+| 基准 | Go ns/op | Rust（jemalloc） | Rust/Go | Rust（系统 malloc，同日） |
+|---|--:|--:|--:|--:|
+| BenchmarkRound | 297.6 | 294.5 | 0.99 | 281.2 |
+| BenchmarkToFloat64New | 3,422 | 2,774 | 0.81 | 2,740 |
+| BenchmarkToFloat64Old | 47,141 | 42,435 | 0.90 | — |
+| BenchmarkMyDecimalToBin | 265.7 | 279.7 | 1.05 | 282.5 |
+| BenchmarkMyDecimalToHashKey | 281.7 | 289.0 | 1.03 | 295.4 |
+
+jemalloc 让 ToBin/ToHashKey 快了约 2%，但没有"转正"：仍比 Go 慢 3–5%，几次运行在 272–280 / 284–289 之间波动。差距是每次调用一次 malloc/free 对 Go 的 bump 分配 + GC 摊销，计算部分（复用缓冲时 149 ns）比 Go 快。spec §4.5 改为写明分配器，含分配的基准建议另定口径（差距 ≤ 5%，待确认）。
+
+### 三、小项
+
+- `#[derive(PartialEq, Eq)]`：在 `MyDecimal` 文档写明 `==` 比较表示（`1.0 != 1.00`），值比较用 `compare`。`TestReset` 保持 Go 的深比较（Go 的 `require.Equal` 就是逐字段）。
+- `to_string() -> Vec<u8>` 与 `ToString` 的冲突：main 上 mappings 的 `M-NAME` 已列出（`String`、`ToString`、`Clone`、`Hash`、`Equal`），不再另记。
+- 向量 `.jsonl.gz` 入库（tracker `6366acd`：govec `Gzip = true`，README 定为所有领域的规矩），本仓库用 `flate2` 读，6.7 MB → 0.49 MB。
+- lint allow 清单：放在根 `Cargo.toml` 的 `[workspace.metadata.porting] style-lint-allow`（pilot-notes 9 说的"workspace 统一一份"；Cargo 的 `[lints]` 不能按模块），`scripts/converge.py` 检查每个移植文件的 `#![allow]` ⊆ 清单，item 级 `#[allow]` 列出供评审（本块两处：`inherent_to_string`、`absurd_extreme_comparisons`）。main 上 mappings.md 的 "lint" 一段合入后应指向这里。
+- 向量条数：33,149（27,641 基本、1,795 别名、2,184 链式、1,529 脏接收者）。
+
