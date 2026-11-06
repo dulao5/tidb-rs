@@ -1,5 +1,10 @@
-//! Replays the Go-generated vectors `tests/vectors/v8.5.8/decimal.jsonl.gz` (tracker
-//! `govec`, see the README next to the file) against the Rust port.
+//! Replays the Go-generated vectors `tests/vectors/v8.5.8/<target>/decimal.jsonl.gz`
+//! (tracker `govec`, see the README there) against the Rust port.
+//!
+//! The vectors depend on the target: Go gc fuses float `x*y + z` into FMA on arm64 and not
+//! on amd64 (GOAMD64=v1), which changes `ToFloat64` of some `DecimalDiv` results (mapping
+//! rule `M-FMA`). The test replays the set of the Go target matching the Rust target arch:
+//! `x86_64` -> `amd64`, `aarch64` -> `arm64`; other arches have no vector set and fail.
 //!
 //! Rules (tracker `govec/README.md`): outputs (`s`, `str`, internal state `st`, ints, hex,
 //! float strings) must be equal; errors must match by code (the message is compared too);
@@ -24,10 +29,21 @@ use tidb_types::{
     decimal_sub, gostd, new_max_or_min_dec,
 };
 
-const VECTORS: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/vectors/v8.5.8/decimal.jsonl.gz"
-);
+/// Go target (govec `vec.Target`) whose vectors this Rust target must reproduce.
+const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
+    "amd64"
+} else if cfg!(target_arch = "aarch64") {
+    "arm64"
+} else {
+    "unsupported"
+};
+
+fn vectors() -> String {
+    format!(
+        "{}/tests/vectors/v8.5.8/{GO_TARGET}/decimal.jsonl.gz",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -137,6 +153,7 @@ const PRODUCERS: &[(&str, usize)] = &[
     ("round", 3),
     ("add", 2),
     ("mul", 2),
+    ("div", 3),
 ];
 
 fn produce(op: &str, a: &Args<'_>) -> (MyDecimal, Result<(), Error>) {
@@ -153,6 +170,7 @@ fn produce(op: &str, a: &Args<'_>) -> (MyDecimal, Result<(), Error>) {
         "round" => a.dec(0).round(&mut to, a.int(1), mode(a.str(2))),
         "add" => decimal_add(&a.dec(0), &a.dec(1), &mut to),
         "mul" => decimal_mul(&a.dec(0), &a.dec(1), &mut to),
+        "div" => decimal_div(&a.dec(0), &a.dec(1), &mut to, a.int(2)),
         _ => panic!("not a producer: {op}"),
     };
     (to, err)
@@ -417,13 +435,20 @@ fn check(rec: &Value) -> Option<String> {
 #[test]
 fn govec_decimal() {
     let mut text = String::new();
-    flate2::read::GzDecoder::new(std::fs::File::open(VECTORS).unwrap())
+    let path = vectors();
+    let file = std::fs::File::open(&path)
+        .unwrap_or_else(|e| panic!("{path}: {e} (no Go vector set for this target arch)"));
+    flate2::read::GzDecoder::new(file)
         .read_to_string(&mut text)
         .unwrap();
     let mut lines = text.lines();
     let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(header["domain"], "decimal");
     assert_eq!(header["tidb"], "v8.5.8");
+    assert_eq!(header["goarch"], GO_TARGET.split('.').next().unwrap());
+    if GO_TARGET == "amd64" {
+        assert_eq!(header["goamd64"], "v1");
+    }
 
     // Expected panics would print their messages; keep the output readable.
     let hook = std::panic::take_hook();

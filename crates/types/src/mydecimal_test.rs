@@ -96,3 +96,25 @@ fn to_float64_error_value() {
         assert_eq!((f.to_bits(), e), (bits, err), "{json}");
     }
 }
+
+// glue: M-FMA check of ToFloat64 on a DecimalDiv result (resultFrac 6 < digitsFrac 9). Go
+// gc fuses mydecimal.go:1118/1125 into FMADDD on arm64 and not on amd64 (GOAMD64=v1), so Go
+// gives 1.586563 on arm64 and 1.586562 on amd64 (tracker govec `sys/fma` records).
+#[test]
+fn to_float64_fma_per_target() {
+    let (mut a, mut b, mut q) = (
+        MyDecimal::default(),
+        MyDecimal::default(),
+        MyDecimal::default(),
+    );
+    assert!(a.from_string(b"50.77").is_ok());
+    assert!(b.from_string(b"32").is_ok());
+    assert!(crate::mydecimal::decimal_div(&a, &b, &mut q, 4).is_ok());
+    assert_eq!(q.string(), "1.586563");
+    let want = if cfg!(target_arch = "aarch64") {
+        1.586563
+    } else {
+        1.586562
+    };
+    assert_eq!(q.to_float64(), (want, Ok(())));
+}

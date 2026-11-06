@@ -125,6 +125,42 @@ const ZERO_MY_DECIMAL: MyDecimal = MyDecimal {
 #[rustfmt::skip]
 const POW10OFF81: [f64; 163] = [1e-81, 1e-80, 1e-79, 1e-78, 1e-77, 1e-76, 1e-75, 1e-74, 1e-73, 1e-72, 1e-71, 1e-70, 1e-69, 1e-68, 1e-67, 1e-66, 1e-65, 1e-64, 1e-63, 1e-62, 1e-61, 1e-60, 1e-59, 1e-58, 1e-57, 1e-56, 1e-55, 1e-54, 1e-53, 1e-52, 1e-51, 1e-50, 1e-49, 1e-48, 1e-47, 1e-46, 1e-45, 1e-44, 1e-43, 1e-42, 1e-41, 1e-40, 1e-39, 1e-38, 1e-37, 1e-36, 1e-35, 1e-34, 1e-33, 1e-32, 1e-31, 1e-30, 1e-29, 1e-28, 1e-27, 1e-26, 1e-25, 1e-24, 1e-23, 1e-22, 1e-21, 1e-20, 1e-19, 1e-18, 1e-17, 1e-16, 1e-15, 1e-14, 1e-13, 1e-12, 1e-11, 1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22, 1e23, 1e24, 1e25, 1e26, 1e27, 1e28, 1e29, 1e30, 1e31, 1e32, 1e33, 1e34, 1e35, 1e36, 1e37, 1e38, 1e39, 1e40, 1e41, 1e42, 1e43, 1e44, 1e45, 1e46, 1e47, 1e48, 1e49, 1e50, 1e51, 1e52, 1e53, 1e54, 1e55, 1e56, 1e57, 1e58, 1e59, 1e60, 1e61, 1e62, 1e63, 1e64, 1e65, 1e66, 1e67, 1e68, 1e69, 1e70, 1e71, 1e72, 1e73, 1e74, 1e75, 1e76, 1e77, 1e78, 1e79, 1e80, 1e81];
 
+/// `f + x * y` the way Go gc compiles the word sums `f += float64(x) * pow10off81[...]` of
+/// `ToFloat64` (mydecimal.go:1118 and :1125) on the same target (mapping rule `M-FMA`;
+/// tracker `data/go_fma_sites.tsv`, from the `-gcflags=-S` assembly of go1.25.12):
+///
+/// | Go target | both sites | Rust target |
+/// |---|---|---|
+/// | amd64 GOAMD64=v1 (default, baseline) | not fused | `x86_64`: separate multiply and add |
+/// | amd64 GOAMD64=v3 (informational) | not fused | (same) |
+/// | arm64 | `FMADDD` | `aarch64`: `f64::mul_add` (one `fmadd` instruction) |
+/// | ppc64le, riscv64, loong64 | fused | `f64::mul_add`; no vector set, untested |
+/// | s390x | fused | none: big-endian, excluded by the wire format assertion |
+///
+/// Rust never contracts `x * y + z` by itself, so the non-fused form is exact Go v1 behaviour.
+// go-part: MyDecimal.ToFloat64 L1 [M-FMA]
+#[inline(always)]
+fn to_float64_madd(f: f64, x: f64, y: f64) -> f64 {
+    #[cfg(any(
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little"),
+        target_arch = "riscv64",
+        target_arch = "loongarch64"
+    ))]
+    {
+        x.mul_add(y, f)
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little"),
+        target_arch = "riscv64",
+        target_arch = "loongarch64"
+    )))]
+    {
+        f + x * y
+    }
+}
+
 /// get the zero of MyDecimal with the specified result fraction digits
 // go: zeroMyDecimalWithFrac L1
 fn zero_my_decimal_with_frac(frac: i8) -> MyDecimal {
@@ -135,7 +171,7 @@ fn zero_my_decimal_with_frac(frac: i8) -> MyDecimal {
 }
 
 /// add adds a and b and carry, returns the sum and new carry.
-// go: add L1
+// go: add L1 [M-INT]
 fn add(a: i32, b: i32, carry: i32) -> (i32, i32) {
     let mut sum = a.wrapping_add(b).wrapping_add(carry);
     let new_carry;
@@ -150,7 +186,7 @@ fn add(a: i32, b: i32, carry: i32) -> (i32, i32) {
 
 /// add2 adds a and b and carry, returns the sum and new carry.
 /// It is only used in DecimalMul.
-// go: add2 L1
+// go: add2 L1 [M-INT]
 fn add2(a: i32, b: i32, mut carry: i32) -> (i32, i32) {
     let mut sum = i64::from(a) + i64::from(b) + i64::from(carry);
     if sum >= i64::from(WORD_BASE) {
@@ -168,7 +204,7 @@ fn add2(a: i32, b: i32, mut carry: i32) -> (i32, i32) {
 }
 
 /// sub subtracts b and carry from a, returns the diff and new carry.
-// go: sub L1
+// go: sub L1 [M-INT]
 fn sub(a: i32, b: i32, carry: i32) -> (i32, i32) {
     let mut diff = a.wrapping_sub(b).wrapping_sub(carry);
     let new_carry;
@@ -183,7 +219,7 @@ fn sub(a: i32, b: i32, carry: i32) -> (i32, i32) {
 
 /// sub2 subtracts b and carry from a, returns the diff and new carry.
 /// the new carry may be 2.
-// go: sub2 L1
+// go: sub2 L1 [M-INT]
 fn sub2(a: i32, b: i32, carry: i32) -> (i32, i32) {
     let mut diff = a.wrapping_sub(b).wrapping_sub(carry);
     let mut new_carray;
@@ -201,7 +237,7 @@ fn sub2(a: i32, b: i32, carry: i32) -> (i32, i32) {
 }
 
 /// fixWordCntError limits word count in wordBufLen, and returns overflow or truncate error.
-// go: fixWordCntError L1
+// go: fixWordCntError L1 [M-ERRVAL]
 fn fix_word_cnt_error(words_int: isize, words_frac: isize) -> (isize, isize, Result<(), Error>) {
     if words_int + words_frac > WORD_BUF_LEN {
         if words_int > WORD_BUF_LEN {
@@ -280,11 +316,19 @@ const _: () = assert!(std::mem::size_of::<MyDecimal>() == MY_DECIMAL_STRUCT_SIZE
 const _: () = assert!(std::mem::align_of::<MyDecimal>() == 4);
 const _: () = assert!(std::mem::offset_of!(MyDecimal, negative) == 3);
 const _: () = assert!(std::mem::offset_of!(MyDecimal, word_buf) == 4);
+// The wire format is Go's in-memory image, i.e. native byte order; from_wire/as_wire write
+// the words little-endian. Every platform TiDB is released for (amd64, arm64) is
+// little-endian; a big-endian build would disagree with Go's chunks on the same host.
+const _: () = assert!(
+    cfg!(target_endian = "little"),
+    "MyDecimal wire format assumes a little-endian target"
+);
 
 impl MyDecimal {
     /// The decimal stored in chunk wire format: the 40-byte in-memory image of Go's
     /// `MyDecimal` (`digitsInt`, `digitsFrac`, `resultFrac` as int8, `negative` as one byte,
-    /// then `wordBuf` as nine little-endian int32; N5a §3.3).
+    /// then `wordBuf` as nine little-endian int32; N5a §3.3). Go writes native byte order;
+    /// this assumes a little-endian target (asserted at compile time).
     ///
     /// Go reinterprets the bytes with `*(*MyDecimal)(unsafe.Pointer(&b[0]))` and checks
     /// nothing. Here byte 3 must be 0 or 1, the only valid bit patterns of a Rust `bool`;
@@ -358,7 +402,7 @@ impl MyDecimal {
         }
     }
 
-    // go: MyDecimal.stringSize L1
+    // go: MyDecimal.stringSize L1 [M-INT]
     fn string_size(&self) -> isize {
         // sign, zero integer and dot.
         // Go: int(d.digitsInt + d.digitsFrac + 3) adds in int8 and wraps.
@@ -418,7 +462,7 @@ impl MyDecimal {
     ///      str       - result string
     ///      errCode   - eDecOK/eDecTruncate/eDecOverflow
     /// ```
-    // go: MyDecimal.ToString L1
+    // go: MyDecimal.ToString L1 [M-INT, M-NAME]
     #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> Vec<u8> {
         // Go make([]byte, n) panics for a negative n; so does the huge usize here.
@@ -516,7 +560,7 @@ impl MyDecimal {
     /// values (and count in that all-zero test). Error paths that Go answers with
     /// `*d = zeroMyDecimal` do reset everything. Parse into `MyDecimal::default()` (Go
     /// callers use `new(MyDecimal)`) unless the old state is wanted.
-    // go: MyDecimal.FromString L1
+    // go: MyDecimal.FromString L1 [M-INT, M-ERRVAL]
     pub fn from_string(&mut self, str: &[u8]) -> Result<(), Error> {
         let mut str = str;
         for i in 0..str.len() {
@@ -674,7 +718,7 @@ impl MyDecimal {
     ///  eDecOK          OK
     ///  eDecOverflow    operation lead to overflow, number is untoched
     ///  eDecTruncated   number was rounded to fit into buffer
-    // go: MyDecimal.Shift L1
+    // go: MyDecimal.Shift L1 [M-INT, M-ERRVAL]
     pub fn shift(&mut self, shift: isize) -> Result<(), Error> {
         let mut err: Result<(), Error> = Ok(());
         if shift == 0 {
@@ -965,7 +1009,7 @@ impl MyDecimal {
 /// return, so reading the snapshot is the same as reading through the aliased pointer.
 /// A free function (not a method) because `d` and `to` are separate parameters; the two
 /// public entry points `round` and `round_in_place` follow it.
-// go: MyDecimal.Round L2 (Go's to == d aliasing is passed as a snapshot plus the to_is_d flag)
+// go: MyDecimal.Round L1 [M-ALIAS, M-INT, M-ERRVAL]
 fn round(
     d: &MyDecimal,
     to: &mut MyDecimal,
@@ -1157,7 +1201,7 @@ fn round(
 impl MyDecimal {
     /// Round rounds the decimal to "frac" digits into `to` (a different decimal; for Go's
     /// `d.Round(d, ...)` use [`MyDecimal::round_in_place`]).
-    // go-part: MyDecimal.Round
+    // go-part: MyDecimal.Round L1 [M-ALIAS]
     pub fn round(
         &self,
         to: &mut MyDecimal,
@@ -1168,7 +1212,7 @@ impl MyDecimal {
     }
 
     /// Go's `d.Round(d, frac, roundMode)`.
-    // go-part: MyDecimal.Round
+    // go-part: MyDecimal.Round L1 [M-ALIAS]
     pub fn round_in_place(&mut self, frac: isize, round_mode: RoundMode) -> Result<(), Error> {
         let d = *self;
         round(&d, self, true, frac, round_mode)
@@ -1179,7 +1223,7 @@ impl MyDecimal {
     /// Like Go, this does not reset the receiver: `negative` is only set (for `val < 0`),
     /// never cleared, and `resultFrac` and the unused words keep their old values. Use a
     /// fresh `MyDecimal::default()` (Go: `NewDecFromInt`) unless that is intended.
-    // go: MyDecimal.FromInt L1
+    // go: MyDecimal.FromInt L1 [M-INT]
     pub fn from_int(&mut self, val: i64) -> &mut MyDecimal {
         let u_val: u64;
         if val < 0 {
@@ -1196,7 +1240,7 @@ impl MyDecimal {
     /// Like Go, this does not reset the receiver: `negative`, `resultFrac` and the unused
     /// words keep their old values (a negative receiver gives a negative result). Use a
     /// fresh `MyDecimal::default()` (Go: `NewDecFromUint`) unless that is intended.
-    // go: MyDecimal.FromUint L1
+    // go: MyDecimal.FromUint L1 [M-INT]
     pub fn from_uint(&mut self, val: u64) -> &mut MyDecimal {
         let mut x = val;
         let mut word_idx: isize = 1;
@@ -1217,7 +1261,7 @@ impl MyDecimal {
     }
 
     /// ToInt returns int part of the decimal, returns the result and errcode.
-    // go: MyDecimal.ToInt L1
+    // go: MyDecimal.ToInt L1 [M-INT, M-ERRVAL]
     pub fn to_int(&self) -> (i64, Result<(), Error>) {
         let wb = i64::from(WORD_BASE);
         let mut x: i64 = 0;
@@ -1266,7 +1310,7 @@ impl MyDecimal {
     }
 
     /// ToUint returns int part of the decimal, returns the result and errcode.
-    // go: MyDecimal.ToUint L1
+    // go: MyDecimal.ToUint L1 [M-INT, M-ERRVAL]
     pub fn to_uint(&self) -> (u64, Result<(), Error>) {
         if self.negative {
             return (0, Err(ERR_OVERFLOW));
@@ -1300,14 +1344,20 @@ impl MyDecimal {
     /// FromFloat64 creates a decimal from float64 value.
     ///
     /// Goes through `from_string`, so the receiver is not reset either (see there).
-    // go: MyDecimal.FromFloat64 L1
+    // go: MyDecimal.FromFloat64 L1 [M-ERRVAL]
     pub fn from_float64(&mut self, f: f64) -> Result<(), Error> {
         let s = gostd::format_float_g(f);
         self.from_string(s.as_bytes())
     }
 
     /// ToFloat64 converts decimal to float64 value.
-    // go: MyDecimal.ToFloat64 L1
+    ///
+    /// The two word sums `f += float64(x) * pow10off81[...]` are multiply-adds that Go gc
+    /// fuses into one FMA instruction on some targets only (mapping rule `M-FMA`), which can
+    /// change the result in the last digit when `resultFrac < digitsFrac` (e.g. `DecimalDiv`
+    /// results: `50.77 / 32` with fracIncr 4 gives 1.586563 on arm64, 1.586562 on amd64).
+    /// They go through [`to_float64_madd`], which follows Go per target.
+    // go: MyDecimal.ToFloat64 L1 [M-ERRVAL, M-FMA]
     pub fn to_float64(&self) -> (f64, Result<(), Error>) {
         let mut f: f64 = 0.0;
         let mut err = Ok(());
@@ -1336,8 +1386,12 @@ impl MyDecimal {
             let x = self.word_buf[word_idx as usize];
             word_idx += 1;
             // Equivalent to f += float64(x) * math.Pow10((wordsInt-wordIdx)*digitsPerWord)
-            f += f64::from(x)
-                * POW10OFF81[((words_int - word_idx) * DIGITS_PER_WORD + POW10OFF) as usize];
+            // [M-FMA] mydecimal.go:1118
+            f = to_float64_madd(
+                f,
+                f64::from(x),
+                POW10OFF81[((words_int - word_idx) * DIGITS_PER_WORD + POW10OFF) as usize],
+            );
             i += DIGITS_PER_WORD;
         }
         let frac_start = word_idx;
@@ -1346,8 +1400,12 @@ impl MyDecimal {
             let x = self.word_buf[word_idx as usize];
             word_idx += 1;
             // Equivalent to f += float64(x) * math.Pow10(-digitsPerWord*(wordIdx-fracStart))
-            f += f64::from(x)
-                * POW10OFF81[(-DIGITS_PER_WORD * (word_idx - frac_start) + POW10OFF) as usize];
+            // [M-FMA] mydecimal.go:1125
+            f = to_float64_madd(
+                f,
+                f64::from(x),
+                POW10OFF81[(-DIGITS_PER_WORD * (word_idx - frac_start) + POW10OFF) as usize],
+            );
             i += DIGITS_PER_WORD;
         }
         // Equivalent to unit := math.Pow10(int(d.resultFrac))
@@ -1365,7 +1423,7 @@ impl MyDecimal {
     ///
     /// See Go's comment on `ToBin` for the format. Go returns `([]byte, error)`; the bytes
     /// are meaningful together with ErrTruncated / ErrOverflow.
-    // go: MyDecimal.ToBin L1
+    // go: MyDecimal.ToBin L1 [M-ERRVAL]
     pub fn to_bin(&self, precision: isize, frac: isize) -> (Vec<u8>, Result<(), Error>) {
         self.write_bin(precision, frac, Vec::new())
     }
@@ -1374,7 +1432,7 @@ impl MyDecimal {
     ///
     /// Go appends to `buf` (re-slicing within its capacity when it fits); Rust takes the
     /// `Vec` by value, grows it with zeroed bytes and returns it.
-    // go: MyDecimal.WriteBin L1
+    // go: MyDecimal.WriteBin L1 [M-INT, M-ERRVAL]
     pub fn write_bin(
         &self,
         precision: isize,
@@ -1512,7 +1570,7 @@ impl MyDecimal {
 
     /// ToHashKey removes the leading and trailing zeros and generates a hash key.
     /// Two Decimals dec0 and dec1 with different fraction will generate the same hash keys if dec0.Compare(dec1) == 0.
-    // go: MyDecimal.ToHashKey L1
+    // go: MyDecimal.ToHashKey L1 [M-INT, M-ERRVAL]
     pub fn to_hash_key(&self) -> (Vec<u8>, Result<(), Error>) {
         let (_, digits_int) = self.remove_leading_zeros();
         let (_, digits_frac) = self.remove_trailing_zeros();
@@ -1564,7 +1622,7 @@ impl MyDecimal {
     /// digit counts and the words it reads; the other words keep their old values. An
     /// invalid precision/frac (`DecimalBinSize` error, size over 40) returns before
     /// touching the receiver at all; bad word values reset it to zero.
-    // go: MyDecimal.FromBin L1
+    // go: MyDecimal.FromBin L1 [M-INT, M-ERRVAL]
     pub fn from_bin(
         &mut self,
         bin: &[u8],
@@ -1687,7 +1745,7 @@ impl MyDecimal {
 }
 
 /// DecimalBinSize returns the size of array to hold a binary representation of a decimal.
-// go: DecimalBinSize L1
+// go: DecimalBinSize L1 [M-ERRVAL]
 pub fn decimal_bin_size(precision: isize, frac: isize) -> Result<isize, Error> {
     let digits_int = precision - frac;
     let words_int = digits_int / DIGITS_PER_WORD;
@@ -1707,7 +1765,7 @@ pub fn decimal_bin_size(precision: isize, frac: isize) -> Result<isize, Error> {
         + DIG2BYTES[x_frac as usize])
 }
 
-// go: readWord L1
+// go: readWord L1 [M-INT]
 fn read_word(b: &[u8], size: isize) -> i32 {
     let mut x: i32 = 0;
     match size {
@@ -1738,7 +1796,7 @@ fn read_word(b: &[u8], size: isize) -> i32 {
     x
 }
 
-// go: writeWord L1
+// go: writeWord L1 [M-INT]
 fn write_word(b: &mut [u8], word: i32, size: isize) {
     let v = word as u32;
     match size {
@@ -1786,7 +1844,7 @@ impl MyDecimal {
     ///
     /// Go marshals `jsonMyDecimal{DigitsInt, DigitsFrac, ResultFrac, Negative, WordBuf}`
     /// with encoding/json; the output is written directly in the same form.
-    // go: MyDecimal.MarshalJSON L1
+    // go: MyDecimal.MarshalJSON L1 [M-ERRVAL]
     pub fn marshal_json(&self) -> Result<Vec<u8>, Error> {
         let words: Vec<String> = self.word_buf.iter().map(i32::to_string).collect();
         Ok(format!(
@@ -1801,7 +1859,7 @@ impl MyDecimal {
     }
 
     /// UnmarshalJSON implements Unmarshaler.UnmarshalJSON interface.
-    // go: MyDecimal.UnmarshalJSON L1
+    // go: MyDecimal.UnmarshalJSON L1 [M-ERRVAL]
     pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
         let r = gostd::json_unmarshal_my_decimal(data);
         match r {
@@ -1832,7 +1890,7 @@ pub fn decimal_neg(from: &MyDecimal) -> MyDecimal {
 /// DecimalAdd adds two decimals, sets the result to 'to'.
 /// Note: DO NOT use `from1` or `from2` as `to` since the metadata
 /// of `to` may be changed during evaluating.
-// go: DecimalAdd L1
+// go: DecimalAdd L1 [M-ALIAS, M-ERRVAL]
 pub fn decimal_add(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> Result<(), Error> {
     let (from1, from2) = validate_args(from1, from2, to);
     to.result_frac = from1.result_frac.max(from2.result_frac);
@@ -1843,7 +1901,7 @@ pub fn decimal_add(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> 
 }
 
 /// DecimalSub subs one decimal from another, sets the result to 'to'.
-// go: DecimalSub L1
+// go: DecimalSub L1 [M-ALIAS, M-ERRVAL]
 pub fn decimal_sub(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> Result<(), Error> {
     let (from1, from2) = validate_args(from1, from2, to);
     to.result_frac = from1.result_frac.max(from2.result_frac);
@@ -1854,9 +1912,12 @@ pub fn decimal_sub(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> 
 }
 
 /// Go also copies `f1`/`f2` when they are the same pointer as `to`, and returns early when
-/// `to` is nil. Neither can happen here: `to` is `&mut` and `f1`/`f2` are shared borrows, so
-/// a caller that wants `to == from` copies `from` first (`MyDecimal: Copy`).
-// go: validateArgs L2 (nil and aliasing branches are excluded by Rust's borrow rules)
+/// `to` is nil. Aliasing follows `M-ALIAS`: `to` is `&mut` and `f1`/`f2` are shared borrows,
+/// so a caller that wants `to == from` copies `from` first (`MyDecimal: Copy`), which is
+/// exactly Go's copy. The nil branch has no counterpart: `&mut` cannot be null, no caller in
+/// v8.5.8 passes a nil `to`, and Go's DecimalAdd/Sub/Mul/Div/Mod write `to.resultFrac` right
+/// after this call, so a nil `to` would panic there anyway.
+// go: validateArgs L1 [M-ALIAS]
 fn validate_args<'a>(
     f1: &'a MyDecimal,
     f2: &'a MyDecimal,
@@ -1873,7 +1934,7 @@ fn validate_args<'a>(
 }
 
 /// Go returns `(cmp int, err error)`; every error return has cmp = 0.
-// go: doSub L1
+// go: doSub L1 [M-INT, M-ERRVAL]
 fn do_sub<'a>(
     mut from1: &'a MyDecimal,
     mut from2: &'a MyDecimal,
@@ -2049,7 +2110,7 @@ fn do_sub<'a>(
     err.map(|()| 0)
 }
 
-// go: doAdd L1
+// go: doAdd L1 [M-INT, M-ERRVAL]
 fn do_add(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> Result<(), Error> {
     let mut words_int1 = digits_to_words(from1.digits_int as isize);
     let mut words_frac1 = digits_to_words(from1.digits_frac as isize);
@@ -2161,7 +2222,7 @@ fn do_add(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> Result<()
     err
 }
 
-// go: maxDecimal L1
+// go: maxDecimal L1 [M-INT]
 fn max_decimal(precision: isize, mut frac: isize, to: &mut MyDecimal) {
     let mut digits_int = precision - frac;
     to.negative = false;
@@ -2211,7 +2272,7 @@ fn max_decimal(precision: isize, mut frac: isize, to: &mut MyDecimal) {
 ///    algorithms, 7-digit numbers can be multiplied with a naive O(n*n)
 ///    method.
 /// ```
-// go: DecimalMul L1
+// go: DecimalMul L1 [M-ALIAS, M-INT, M-ERRVAL]
 pub fn decimal_mul(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> Result<(), Error> {
     let (from1, from2) = validate_args(from1, from2, to);
     let err;
@@ -2349,7 +2410,7 @@ pub fn decimal_mul(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> 
 /// from2    - divisor
 /// to       - quotient
 /// fracIncr - increment of fraction
-// go: DecimalDiv L1
+// go: DecimalDiv L1 [M-ALIAS, M-INT, M-ERRVAL]
 pub fn decimal_div(
     from1: &MyDecimal,
     from2: &MyDecimal,
@@ -2390,7 +2451,7 @@ pub fn decimal_div(
 ///
 ///   thus, there's no requirement for M or N to be integers
 /// ```
-// go: DecimalMod L1
+// go: DecimalMod L1 [M-ALIAS, M-ERRVAL]
 pub fn decimal_mod(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> Result<(), Error> {
     let (from1, from2) = validate_args(from1, from2, to);
     to.result_frac = from1.result_frac.max(from2.result_frac);
@@ -2399,7 +2460,7 @@ pub fn decimal_mod(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> 
 
 /// Go takes `to, mod *MyDecimal`, exactly one of them non-nil, and writes through `to = mod`
 /// when `mod` is set; `is_mod` replaces the later `mod != nil` tests.
-// go: doDivMod L1
+// go: doDivMod L1 [M-INT, M-ERRVAL]
 fn do_div_mod(
     from1: &MyDecimal,
     from2: &MyDecimal,
@@ -2703,7 +2764,7 @@ fn do_div_mod(
 }
 
 /// DecimalPeak returns the length of the encoded decimal.
-// go: DecimalPeak L1
+// go: DecimalPeak L1 [M-ERRVAL]
 pub fn decimal_peak(b: &[u8]) -> Result<isize, Error> {
     if b.len() < 3 {
         return Err(ERR_BAD_NUMBER);
