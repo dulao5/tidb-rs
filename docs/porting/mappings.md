@@ -24,9 +24,9 @@ Go TiDB 的很多写法只是因为 Go 运行时才那样写（goroutine、chann
 | M-GO | `go f()` 启动 worker | 在 ExecPool 上 `spawn` 一个 task；worker 数量与 Go 相同，物理并行度由池大小决定 | N3 | 执行器 crate 禁止 `std::thread::spawn` |
 | M-CH | channel 收发、`select` | 取消安全的异步 channel，容量照抄 Go；`select!`。所有收发都经过 `ctx.send` / `ctx.recv`，同时监听取消 | N3 | 禁止直接调用 channel 的 `send` / `recv` |
 | M-WG | `sync.WaitGroup`、`errgroup` | 保存 `JoinHandle`，关闭时逐个 `await` | N3 | — |
-| M-KILL | `HandleSQLKillerSignal` 等检查点；hash build、sort 等不经过 `Next` 的循环 | `ctx.checkpoint().await`，放在 Go 的检查点位置；不经过 `Next` 的循环每处理一个 chunk 调用一次。它同时做 KILL 检查、内存检查（A1）和让出 CPU | N3、A1 | — |
+| M-KILL | `HandleSQLKillerSignal` 等检查点；hash build、sort 等不经过 `Next` 的循环 | `ctx.checkpoint().await`，放在 Go 的检查点位置；不经过 `Next` 的循环（hash build、sort、merge、聚合 final 合并的内循环）也调用。每次都做 KILL 检查和内存检查（A1）；超过时间片（默认 1ms，TiKV `RescheduleChecker` 的模式）才让出 CPU | N3、A1 | — |
 | M-PANIC | 用 `panic` / `recover` 处理内存超限、KILL 和运行时错误 | 返回 `Result`；只在 task 边界用 `catch_unwind` 兜底，转成与 Go 相同的错误文本 | N3 | — |
-| M-BLOCK | 在 goroutine 里直接做阻塞 I/O（落盘等） | `spawn_blocking` 或专用阻塞池 | N3 | 执行器 crate 禁止 `Runtime::block_on` |
+| M-BLOCK | 在 goroutine 里直接做阻塞 I/O（落盘等）；后台任务的长循环 | `spawn_blocking` 或专用阻塞池（N3 3.6 的 Q3）；后台任务的长循环放时间片让出点（N3 3.7） | N3 | 执行器 crate 禁止 `Runtime::block_on` |
 | M-LOCK | `sync.Mutex` / `RWMutex` | `parking_lot` 的锁（无毒化）；不得跨 `await` 持有 | N3 | 禁用 `std::sync::Mutex`；`clippy::await_holding_lock` |
 | M-SNAP | `atomic.Pointer` / `atomic.Value` 发布快照 | `ArcSwap` | N2 | — |
 | M-DEFER | `defer` | `Drop` / scope guard | — | — |
