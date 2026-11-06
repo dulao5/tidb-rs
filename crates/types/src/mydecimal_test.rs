@@ -61,3 +61,38 @@ fn wire_round_trip_and_invalid_bool() {
     assert_eq!(o.get_digits_int(), -9);
     assert_eq!(o.as_wire(), odd);
 }
+
+// glue: ToFloat64's error path (states only UnmarshalJSON / from_wire can build); expected
+// values from Go v8.5.8.
+#[test]
+fn to_float64_error_value() {
+    use crate::errors::ERR_OVERFLOW;
+    for (json, s, bits, err) in [
+        (
+            r#"{"DigitsInt":13,"DigitsFrac":9,"ResultFrac":9,"Negative":false,"WordBuf":[12,345678901,-1,0,0,0,0,0,0]}"#,
+            "12345678901.00000000/",
+            0u64,
+            Err(ERR_OVERFLOW),
+        ),
+        (
+            r#"{"DigitsInt":18,"DigitsFrac":0,"ResultFrac":0,"Negative":false,"WordBuf":[5,-1999999999,0,0,0,0,0,0,0]}"#,
+            "5'''''''''",
+            0,
+            Err(ERR_OVERFLOW),
+        ),
+        (
+            r#"{"DigitsInt":18,"DigitsFrac":0,"ResultFrac":0,"Negative":true,"WordBuf":[1000000000,999999999,0,0,0,0,0,0,0]}"#,
+            "-000000000999999999",
+            0xc1cdcd64ff800000,
+            Ok(()),
+        ),
+    ] {
+        let mut d = MyDecimal::default();
+        assert!(d.unmarshal_json(json.as_bytes()).is_ok());
+        assert_eq!(d.string(), s);
+        let (f, e) = d.to_float64();
+        // Go: f is ParseFloat's value, 0 for a syntax error (a range error, ±Inf, needs
+        // more than 308 digits, which 9 words cannot hold).
+        assert_eq!((f.to_bits(), e), (bits, err), "{json}");
+    }
+}

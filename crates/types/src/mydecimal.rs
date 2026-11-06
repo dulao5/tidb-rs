@@ -1298,9 +1298,11 @@ impl MyDecimal {
         // The initial threshold here is 15, we adjusted it to 12 for compatibility with previous.
         // We did a full test of 12 significant digits to make sure it's correct and behaves as before.
         if digits_int + digits_frac > 12 {
-            match gostd::parse_float(&self.string()) {
-                Ok(v) => f = v,
-                Err(()) => err = Err(ERR_OVERFLOW),
+            // Go: f, err = strconv.ParseFloat(...); f keeps ParseFloat's value on error.
+            let parse_err;
+            (f, parse_err) = gostd::parse_float(&self.string());
+            if parse_err.is_err() {
+                err = Err(ERR_OVERFLOW);
             }
             return (f, err);
         }

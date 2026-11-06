@@ -4,11 +4,15 @@
 //! go-file: $GOROOT/src/strings/strings.go
 //! go-file: $GOROOT/src/unicode/utf8/utf8.go
 //! go-file: $GOROOT/src/strconv/ftoa.go
+//! go-file: $GOROOT/src/strconv/atof.go
+//! go-file: $GOROOT/src/strconv/atoi.go
 //! go-file: $GOROOT/src/encoding/json/decode.go
 //!
 //! Only the logic is ported; the shortest round-trip digits of a float come from the ryu
 //! crate (the same Ryū algorithm as Go's `ftoaryu.go`), and JSON syntax comes from
 //! serde_json.
+
+mod eisel_lemire;
 
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::Value;
@@ -297,12 +301,507 @@ fn fmt_f(dst: &mut Vec<u8>, neg: bool, d: &DecimalSlice, prec: isize) {
     }
 }
 
-/// `strconv.ParseFloat(s, 64)` for the decimal strings `MyDecimal.String` produces. Rust's
-/// parser is correctly rounded like Go's; the error carries no detail since the only caller
-/// maps every error to ErrOverflow.
-// go-std: strconv.ParseFloat L2 (Rust's correctly rounded str::parse::<f64>; decimal syntax only)
-pub(crate) fn parse_float(s: &str) -> Result<f64, ()> {
-    s.parse::<f64>().map_err(|_| ())
+/// `strconv.ErrSyntax` / `strconv.ErrRange`: the `Err` field of a `*strconv.NumError`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumErrKind {
+    /// `strconv.ErrSyntax`: "invalid syntax".
+    Syntax,
+    /// `strconv.ErrRange`: "value out of range".
+    Range,
+}
+
+/// `*strconv.NumError` as `ParseFloat` returns it. Callers test `err` the way Go tests
+/// `err.(*strconv.NumError).Err == strconv.ErrRange` (or `errors.Is`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NumError {
+    /// The failing function (`"ParseFloat"`).
+    pub func: &'static str,
+    /// The input.
+    pub num: String,
+    /// Why it failed.
+    pub err: NumErrKind,
+}
+
+impl fmt::Display for NumError {
+    // go-std: strconv.NumError.Error L2 (strconv.Quote simplified: ASCII escapes only)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let why = match self.err {
+            NumErrKind::Syntax => "invalid syntax",
+            NumErrKind::Range => "value out of range",
+        };
+        write!(f, "strconv.{}: parsing \"", self.func)?;
+        for c in self.num.chars() {
+            match c {
+                '"' => f.write_str("\\\"")?,
+                '\\' => f.write_str("\\\\")?,
+                '\n' => f.write_str("\\n")?,
+                '\t' => f.write_str("\\t")?,
+                '\r' => f.write_str("\\r")?,
+                c if (c as u32) < 0x20 || c as u32 == 0x7f => write!(f, "\\x{:02x}", c as u32)?,
+                c => write!(f, "{c}")?,
+            }
+        }
+        write!(f, "\": {why}")
+    }
+}
+
+impl std::error::Error for NumError {}
+
+fn num_error(s: &[u8], err: NumErrKind) -> NumError {
+    NumError {
+        func: "ParseFloat",
+        num: String::from_utf8_lossy(s).into_owned(),
+        err,
+    }
+}
+
+/// `strconv.ParseFloat(s, 64)`, Go-shaped (`M-ERRVAL`): the value is meaningful together
+/// with the error. Overflow is `±Inf` with an `ErrRange` error; a syntax error is `0`.
+///
+/// Go's syntax is kept: `inf`/`infinity`/`nan` in any case (NaN without a sign), `_` digit
+/// separators where `underscoreOK` allows them, hexadecimal mantissas with a mandatory `p`
+/// exponent (`0x1p-2`), exponents clamped at 10000 while reading. The decimal value comes
+/// from Rust's correctly rounded `str::parse::<f64>` on the digits and exponent Go's
+/// `readFloat` found (Go's conversion is correctly rounded as well); hexadecimal values are
+/// Go's `atofHex`.
+// go-std: strconv.ParseFloat L2 (bitSize 64 only; decimal digits converted by Rust's str::parse)
+pub fn parse_float(s: &str) -> (f64, Result<(), NumError>) {
+    let s = s.as_bytes();
+    let (f, n, err) = atof64(s);
+    let not_syntax = match &err {
+        Ok(()) => true,
+        Err(e) => e.err != NumErrKind::Syntax,
+    };
+    if n != s.len() && not_syntax {
+        return (0.0, Err(num_error(s, NumErrKind::Syntax)));
+    }
+    (f, err)
+}
+
+// go-std: strconv.atof64 L2 (no eiselLemire/decimal slow path: Rust's str::parse is the converter)
+fn atof64(s: &[u8]) -> (f64, usize, Result<(), NumError>) {
+    if let Some((val, n)) = special(s) {
+        return (val, n, Ok(()));
+    }
+
+    let r = read_float(s);
+    if !r.ok {
+        return (0.0, r.i, Err(num_error(s, NumErrKind::Syntax)));
+    }
+
+    if r.hex {
+        let (f, err) = atof_hex(&s[..r.i], r.mantissa, r.exp, r.neg, r.trunc);
+        return (f, r.i, err);
+    }
+
+    // All significant digits and the (clamped) decimal point position Go's readFloat found;
+    // Rust's parser rounds correctly however many digits there are.
+    //
+    // Go converts with atof64exact / eiselLemire64 and falls back to decimal.set +
+    // floatBits, which places the decimal point counting at most 800 digits: an integer
+    // part longer than 800 digits loses the excess, e.g. ParseFloat("1" + 1000 zeros +
+    // "e-500") is 1e299 in Go, not +Inf. dp_slow differs from dp only in that case, and
+    // then Go's choice of path decides the value (see go_takes_slow_path).
+    let dp = if r.dp_slow != r.dp && go_takes_slow_path(&r) {
+        r.dp_slow
+    } else {
+        r.dp
+    };
+    let mut text = String::with_capacity(r.digits.len() + 24);
+    if r.neg {
+        text.push('-');
+    }
+    let f = if r.digits.is_empty() {
+        text.push('0');
+        text.parse::<f64>().expect("zero")
+    } else {
+        text.push_str(std::str::from_utf8(&r.digits).expect("ASCII digits"));
+        text.push('e');
+        text.push_str(&(dp - r.digits.len() as i64).to_string());
+        text.parse::<f64>().expect("digits and exponent")
+    };
+    if f.is_infinite() {
+        // Go: decimal.floatBits overflow -> ±Inf and ErrRange.
+        return (f, r.i, Err(num_error(s, NumErrKind::Range)));
+    }
+    (f, r.i, Ok(()))
+}
+
+/// Whether Go's `atof64` falls back to its slow path (`decimal.set` + `floatBits`) for a
+/// decimal input. Only asked when the slow path's decimal point differs, i.e. for 19 or more
+/// significant digits, where `atof64exact` never applies (the mantissa exceeds 2^52).
+// go-std: strconv.atof64 L2 (only the fast-path decision; the value is computed by the caller)
+fn go_takes_slow_path(r: &ReadFloat) -> bool {
+    match eisel_lemire::eisel_lemire64(r.mantissa, r.exp, r.neg) {
+        None => true,
+        Some(f) => {
+            if !r.trunc {
+                return false;
+            }
+            // Even if the mantissa was truncated, we may
+            // have found the correct result. Confirm by
+            // converting the upper mantissa bound.
+            eisel_lemire::eisel_lemire64(r.mantissa + 1, r.exp, r.neg) != Some(f)
+        }
+    }
+}
+
+/// `strconv.special`: a signed infinity or an unsigned NaN at the start of `s`, and its length.
+// go-std: strconv.special L1
+fn special(s: &[u8]) -> Option<(f64, usize)> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut sign = 1.0;
+    let mut nsign = 0;
+    let mut t = s;
+    match s[0] {
+        b'+' | b'-' | b'i' | b'I' => {
+            if s[0] == b'+' || s[0] == b'-' {
+                if s[0] == b'-' {
+                    sign = -1.0;
+                }
+                nsign = 1;
+                t = &s[1..];
+            }
+            let mut n = common_prefix_len_ignore_case(t, b"infinity");
+            // Anything longer than "inf" is ok, but if we
+            // don't have "infinity", only consume "inf".
+            if 3 < n && n < 8 {
+                n = 3;
+            }
+            if n == 3 || n == 8 {
+                return Some((f64::INFINITY * sign, nsign + n));
+            }
+        }
+        b'n' | b'N' if common_prefix_len_ignore_case(t, b"nan") == 3 => {
+            // Go's math.NaN() is 0x7FF8000000000001.
+            return Some((f64::from_bits(0x7FF8_0000_0000_0001), 3));
+        }
+        _ => {}
+    }
+    None
+}
+
+// go-std: strconv.commonPrefixLenIgnoreCase L1
+fn common_prefix_len_ignore_case(s: &[u8], prefix: &[u8]) -> usize {
+    let n = prefix.len().min(s.len());
+    for i in 0..n {
+        let c = s[i].to_ascii_lowercase();
+        if c != prefix[i] {
+            return i;
+        }
+    }
+    n
+}
+
+/// Result of `readFloat`; `digits`/`dp` are kept for the decimal conversion (Go hands
+/// `s[:n]` to its own converters instead).
+struct ReadFloat {
+    mantissa: u64,
+    exp: i64,
+    neg: bool,
+    trunc: bool,
+    hex: bool,
+    i: usize,
+    ok: bool,
+    digits: Vec<u8>,
+    dp: i64,
+    /// The decimal point as Go's slow path (`decimal.set`) computes it: it counts at most
+    /// 800 digits (`len(decimal.d)`) when it places the point, see `atof64`.
+    dp_slow: i64,
+}
+
+// go-std: strconv.readFloat L2 (also collects the significant decimal digits)
+fn read_float(s: &[u8]) -> ReadFloat {
+    let mut r = ReadFloat {
+        mantissa: 0,
+        exp: 0,
+        neg: false,
+        trunc: false,
+        hex: false,
+        i: 0,
+        ok: false,
+        digits: Vec::new(),
+        dp: 0,
+        dp_slow: 0,
+    };
+    // decimal.set's digit count, capped at len(decimal.d) = 800.
+    let mut nd_slow: i64 = 0;
+    let mut underscores = false;
+    let mut i = 0;
+
+    // optional sign
+    if i >= s.len() {
+        return r;
+    }
+    match s[i] {
+        b'+' => i += 1,
+        b'-' => {
+            i += 1;
+            r.neg = true;
+        }
+        _ => {}
+    }
+
+    // digits
+    let mut base: u64 = 10;
+    let mut max_mant_digits = 19; // 10^19 fits in uint64
+    let mut exp_char = b'e';
+    if i + 2 < s.len() && s[i] == b'0' && s[i + 1].eq_ignore_ascii_case(&b'x') {
+        base = 16;
+        max_mant_digits = 16; // 16^16 fits in uint64
+        i += 2;
+        exp_char = b'p';
+        r.hex = true;
+    }
+    let mut sawdot = false;
+    let mut sawdigits = false;
+    let mut nd: i64 = 0;
+    let mut nd_mant: i64 = 0;
+    let mut dp: i64 = 0;
+    while i < s.len() {
+        let c = s[i];
+        if c == b'_' {
+            underscores = true;
+        } else if c == b'.' {
+            if sawdot {
+                break;
+            }
+            sawdot = true;
+            dp = nd;
+            r.dp_slow = nd_slow;
+        } else if c.is_ascii_digit() {
+            sawdigits = true;
+            if c == b'0' && nd == 0 {
+                // ignore leading zeros
+                dp -= 1;
+                r.dp_slow -= 1;
+                i += 1;
+                continue;
+            }
+            nd += 1;
+            r.digits.push(c);
+            if nd_slow < 800 {
+                nd_slow += 1;
+            }
+            if nd_mant < max_mant_digits {
+                r.mantissa *= base;
+                r.mantissa += u64::from(c - b'0');
+                nd_mant += 1;
+            } else if c != b'0' {
+                r.trunc = true;
+            }
+        } else if base == 16 && (b'a'..=b'f').contains(&c.to_ascii_lowercase()) {
+            sawdigits = true;
+            nd += 1;
+            if nd_mant < max_mant_digits {
+                r.mantissa *= 16;
+                r.mantissa += u64::from(c.to_ascii_lowercase() - b'a' + 10);
+                nd_mant += 1;
+            } else {
+                r.trunc = true;
+            }
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    r.i = i;
+    if !sawdigits {
+        return r;
+    }
+    if !sawdot {
+        dp = nd;
+        r.dp_slow = nd_slow;
+    }
+
+    if base == 16 {
+        dp *= 4;
+        nd_mant *= 4;
+    }
+
+    // optional exponent moves decimal point.
+    // if we read a very large, very long number,
+    // just be sure to move the decimal point by
+    // a lot (say, 100000).  it doesn't matter if it's
+    // not the exact number.
+    if i < s.len() && s[i].to_ascii_lowercase() == exp_char {
+        i += 1;
+        r.i = i;
+        if i >= s.len() {
+            return r;
+        }
+        let mut esign = 1;
+        match s[i] {
+            b'+' => i += 1,
+            b'-' => {
+                i += 1;
+                esign = -1;
+            }
+            _ => {}
+        }
+        r.i = i;
+        if i >= s.len() || !s[i].is_ascii_digit() {
+            return r;
+        }
+        let mut e: i64 = 0;
+        while i < s.len() && (s[i].is_ascii_digit() || s[i] == b'_') {
+            if s[i] == b'_' {
+                underscores = true;
+                i += 1;
+                continue;
+            }
+            if e < 10000 {
+                e = e * 10 + i64::from(s[i] - b'0');
+            }
+            i += 1;
+        }
+        r.i = i;
+        dp += e * esign;
+        r.dp_slow += e * esign;
+    } else if base == 16 {
+        // Must have exponent.
+        return r;
+    }
+
+    if r.mantissa != 0 {
+        r.exp = dp - nd_mant;
+    }
+
+    if underscores && !underscore_ok(&s[..i]) {
+        return r;
+    }
+
+    r.dp = dp;
+    r.ok = true;
+    r
+}
+
+// go-std: strconv.underscoreOK L1
+fn underscore_ok(s: &[u8]) -> bool {
+    // saw tracks the last character (class) we saw:
+    // ^ for beginning of number,
+    // 0 for a digit or base prefix,
+    // _ for an underscore,
+    // ! for none of the above.
+    let mut saw = b'^';
+    let mut i = 0;
+    let mut s = s;
+
+    // Optional sign.
+    if !s.is_empty() && (s[0] == b'-' || s[0] == b'+') {
+        s = &s[1..];
+    }
+
+    // Optional base prefix.
+    let mut hex = false;
+    if s.len() >= 2 && s[0] == b'0' && matches!(s[1].to_ascii_lowercase(), b'b' | b'o' | b'x') {
+        i = 2;
+        saw = b'0'; // base prefix counts as a digit for "underscore as digit separator"
+        hex = s[1].eq_ignore_ascii_case(&b'x');
+    }
+
+    // Number proper.
+    while i < s.len() {
+        // Digits are always okay.
+        if s[i].is_ascii_digit() || hex && (b'a'..=b'f').contains(&s[i].to_ascii_lowercase()) {
+            saw = b'0';
+            i += 1;
+            continue;
+        }
+        // Underscore must follow digit.
+        if s[i] == b'_' {
+            if saw != b'0' {
+                return false;
+            }
+            saw = b'_';
+            i += 1;
+            continue;
+        }
+        // Underscore must also be followed by digit.
+        if saw == b'_' {
+            return false;
+        }
+        // Saw non-digit, non-underscore.
+        saw = b'!';
+        i += 1;
+    }
+    saw != b'_'
+}
+
+// go-std: strconv.atofHex L1 (float64info only)
+fn atof_hex(
+    s: &[u8],
+    mut mantissa: u64,
+    mut exp: i64,
+    neg: bool,
+    trunc: bool,
+) -> (f64, Result<(), NumError>) {
+    const MANTBITS: u32 = 52;
+    const EXPBITS: u32 = 11;
+    const BIAS: i64 = -1023;
+    let max_exp = (1i64 << EXPBITS) + BIAS - 2;
+    let min_exp = BIAS + 1;
+    exp += i64::from(MANTBITS); // mantissa now implicitly divided by 2^mantbits.
+
+    // Shift mantissa and exponent to bring representation into float range.
+    // Eventually we want a mantissa with a leading 1-bit followed by mantbits other bits.
+    // For rounding, we need two more, where the bottom bit represents
+    // whether that bit or any later bit was non-zero.
+    // (If the mantissa has already lost non-zero bits, trunc is true,
+    // and we OR in a 1 below after shifting left appropriately.)
+    while mantissa != 0 && mantissa >> (MANTBITS + 2) == 0 {
+        mantissa <<= 1;
+        exp -= 1;
+    }
+    if trunc {
+        mantissa |= 1;
+    }
+    while mantissa >> (1 + MANTBITS + 2) != 0 {
+        mantissa = mantissa >> 1 | mantissa & 1;
+        exp += 1;
+    }
+
+    // If exponent is too negative,
+    // denormalize in hopes of making it representable.
+    // (The -2 is for the rounding bits.)
+    while mantissa > 1 && exp < min_exp - 2 {
+        mantissa = mantissa >> 1 | mantissa & 1;
+        exp += 1;
+    }
+
+    // Round using two bottom bits.
+    let mut round = mantissa & 3;
+    mantissa >>= 2;
+    round |= mantissa & 1; // round to even (round up if mantissa is odd)
+    exp += 2;
+    if round == 3 {
+        mantissa += 1;
+        if mantissa == 1 << (1 + MANTBITS) {
+            mantissa >>= 1;
+            exp += 1;
+        }
+    }
+
+    if mantissa >> MANTBITS == 0 {
+        // Denormal or zero.
+        exp = BIAS;
+    }
+    let mut err = Ok(());
+    if exp > max_exp {
+        // infinity and range error
+        mantissa = 1 << MANTBITS;
+        exp = max_exp + 1;
+        err = Err(num_error(s, NumErrKind::Range));
+    }
+
+    let mut bits = mantissa & ((1 << MANTBITS) - 1);
+    bits |= (((exp - BIAS) & ((1 << EXPBITS) - 1)) as u64) << MANTBITS;
+    if neg {
+        bits |= 1 << MANTBITS << EXPBITS;
+    }
+    (f64::from_bits(bits), err)
 }
 
 /// The fields of Go's `jsonMyDecimal` as `encoding/json.Unmarshal` fills them.
@@ -526,5 +1025,65 @@ mod tests {
         ] {
             assert_eq!(format_float_g(f), want, "{f:e}");
         }
+    }
+
+    #[test]
+    fn parse_float_matches_go() {
+        // Expected values and errors from Go 1.25 strconv.ParseFloat(s, 64).
+        let long = |zeros: usize, tail: &str| format!("1{}{tail}", "0".repeat(zeros));
+        for (s, bits, kind) in [
+            (
+                "1e400".to_string(),
+                0x7ff0000000000000u64,
+                Some(NumErrKind::Range),
+            ),
+            (
+                "-1e400".to_string(),
+                0xfff0000000000000,
+                Some(NumErrKind::Range),
+            ),
+            ("1e-400".to_string(), 0, None),
+            ("-1e-400".to_string(), 0x8000000000000000, None),
+            (
+                "1.7976931348623159e308".to_string(),
+                0x7ff0000000000000,
+                Some(NumErrKind::Range),
+            ),
+            (
+                "1.7976931348623158e308".to_string(),
+                0x7fefffffffffffff,
+                None,
+            ),
+            ("-infinity".to_string(), 0xfff0000000000000, None),
+            ("nan".to_string(), 0x7ff8000000000001, None),
+            ("+nan".to_string(), 0, Some(NumErrKind::Syntax)),
+            ("0x1p-2".to_string(), 0x3fd0000000000000, None),
+            ("0x1.8p1".to_string(), 0x4008000000000000, None),
+            ("0x1".to_string(), 0, Some(NumErrKind::Syntax)),
+            (
+                "0x1p1024".to_string(),
+                0x7ff0000000000000,
+                Some(NumErrKind::Range),
+            ),
+            ("0x1p-1074".to_string(), 1, None),
+            ("1_000".to_string(), 0x408f400000000000, None),
+            ("1__0".to_string(), 0, Some(NumErrKind::Syntax)),
+            (" 1".to_string(), 0, Some(NumErrKind::Syntax)),
+            ("1.".to_string(), 0x3ff0000000000000, None),
+            ("+.5".to_string(), 0x3fe0000000000000, None),
+            ("".to_string(), 0, Some(NumErrKind::Syntax)),
+            // Go's slow path counts at most 800 digits when placing the decimal point.
+            (long(1000, "e-500"), 1e299f64.to_bits(), None),
+            (long(1000, ""), 0x7ff0000000000000, Some(NumErrKind::Range)),
+            (long(800, "e-500"), 1e300f64.to_bits(), None),
+        ] {
+            let (f, err) = parse_float(&s);
+            assert_eq!(f.to_bits(), bits, "{s}");
+            assert_eq!(err.as_ref().err().map(|e| e.err), kind, "{s}");
+        }
+        assert_eq!(
+            parse_float("1e400").1.unwrap_err().to_string(),
+            "strconv.ParseFloat: parsing \"1e400\": value out of range"
+        );
     }
 }
