@@ -139,7 +139,7 @@ pub struct SysVar {
 | `Registry`（静态表 + 名字索引） | 进程 `static` | 不可变，`Sync`；钩子是 `fn` 指针，天然 `Send + Sync` |
 | 实例覆盖层、`GlobalVarsCache` 当前快照 | domain，`ArcSwap` | 读无锁；写只在启动、重建时 |
 | 88 个进程级原子量 | `static Atomic*` | L1 |
-| `SessionVars`（强类型字段 + `globals` + `delta`） | 会话独占，`&mut` | 必须 `Send`（N3 §3.1 第 9 条：语句在 ExecPool 上执行，会话整体 move 进语句 future），不要求 `Sync`；不得含 `Rc`/`RefCell` |
+| `SessionVars`（强类型字段 + `globals` + `delta`） | 会话独占，`&mut` | 必须 `Send`（N3 §3.1 第 9 条：Steal 拓扑下语句 task 会在线程间迁移），不要求 `Sync`；不得含 `Rc`/`RefCell` |
 | 执行器 worker | 只读 N2 的冻结快照（`ExecCtx`） | 不访问注册表以外的任何变量存储 |
 
 钩子的签名带 `&mut SessionVars`，只能在会话线程上调用；`SetGlobal` 在缓存重建时由 domain 的内部会话调用（Go 同样用 `sysSessionPool` 中的会话，`domain/sysvar_cache.go:108-114`）。
