@@ -41,7 +41,7 @@ pub struct SessionShared { pub killer: SqlKiller, pub mem_root: Arc<MemTracker>,
 pub struct StmtCtx { pub vars: FrozenVars, pub cop_meta: CopRequestMeta, /* warnings, rows, runtime stats, mem/disk tracker … */ }
 pub struct PlanCtx<'s> { /* &'s mut SessionVars, &'s StmtCtx, InfoSchema, PlanArena */ }
 impl<'s> PlanCtx<'s> {
-    pub fn split(&mut self) -> (&mut PlanArena, &EvalCtx);   // 唯一允许的同时借用写法（N1 §4）
+    pub fn split(&mut self) -> (&mut PlanArena, &mut EvalCtx); // 唯一允许的同时借用写法（N1 §4）；EvalCtx 含 &mut WarnBuf（常量折叠会产生 warning），所以是可变借用
 }
 pub struct EvalCtx;   // 对应 Go exprstatic.EvalContext：冻结快照的视图
 pub struct BuildCtx;  // 对应 Go exprctx.BuildContext：列 ID 分配器、plan cache 标志等
@@ -94,9 +94,28 @@ pub struct BinaryJson { /* 拥有型，字节与 Go 逐字节一致 */ }
 pub struct JsonRef<'a> { /* 借用视图，读取层复用 TiKV 布局代码（ADR 0007） */ }
 ```
 
-## 3. 待补
+## 3. N4、N5a、N8 的类型
 
-- **N4**：`Expression` 的结构（规划侧树）、执行侧编译后的形式、内置函数的签名。
-- **N5a**：`Chunk` / `Column` 的类型（Go Chunk 移植或 TiKV 列类型），以及它与 `TrackedAlloc` 的关系。
-- **N8**：`SessionVars` 中系统变量的存储方式、注册表的类型。
-- **N5a**（补充）：`Chunk` 的输出分区数固定为 1。以后加分区并行，是新增一类交换算子，不改 `Executor` 接口。
+```rust
+// ---- N4 表达式 ----
+pub enum Expression { Column(Column), CorrelatedColumn(CorrelatedColumn), Constant(Constant), ScalarFunction(ScalarFunction) }
+pub struct BuiltinFunc { pub sig: &'static SigDesc, pub base: BaseBuiltinFunc, pub meta: SigMeta }
+pub struct RpnProgram { /* 后序节点：ColumnRef / Constant / Call；Send + Sync，worker 间共享 */ }
+pub struct RpnState   { /* 每个 worker 一份：中间列、签名缓存、关联列槽；不是 Sync */ }
+pub struct EvalCtx<'a> { /* &'a 冻结快照 + &'a mut WarnBuf */ }
+// 函数体：#[eval_fn(sig = DivideReal)] fn divide_real(ctx: &mut EvalCtx, sig: &BuiltinFunc, a: f64, b: f64) -> Result<Option<f64>>
+
+// ---- N5a 列格式 ----
+pub struct Chunk { /* Vec<Arc<Column>>, sel, 记账账户 */ }        // Send
+pub struct Column { /* length, null_bitmap/offsets/data: ColBuf */ }
+pub enum ColBuf { Owned(Vec<u8, TrackedAlloc>), Shared(RespBytes) } // 写时复制
+pub struct Row<'a> { chk: &'a Chunk, idx: usize }                  // 调用内借用
+pub struct RowHandle { chk: Arc<Chunk>, idx: u32 }                 // 跨 Next 持有（M-ROW）
+
+// ---- N8 系统变量 ----
+pub struct SysVar { /* 静态字段 + 钩子 fn 指针 + runtime_only */ }
+pub static REGISTRY: LazyLock<Registry>;                           // 不可变；实例覆盖层用 ArcSwap
+pub struct SessionVars { /* Go 的类型化字段 + globals: Arc<GlobalVarsSnapshot> + delta */ } // Send，不是 Sync
+```
+
+- `Chunk` 的输出分区数固定为 1（N3 2026-11-06）。以后加分区并行，是新增一类交换算子，不改 `Executor` 接口。

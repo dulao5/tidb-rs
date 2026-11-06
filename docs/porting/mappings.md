@@ -38,6 +38,8 @@ Go TiDB 的很多写法只是因为 Go 运行时才那样写（goroutine、chann
 | M-MAPORDER | 按 map 的随机顺序遍历（如会话初始化时逐个调用变量钩子） | 用确定的顺序（如注册表顺序），并要求该处逻辑不依赖顺序；块 plan 中逐处登记并说明为什么与顺序无关 | N8 | — |
 | M-ERRVAL | 返回 `error`，或返回 `(T, error)` 且出错时 T 仍有意义（如 `ToInt` 返回 `MaxInt64` + `ErrOverflow`） | 只返回 `error` → `Result<(), Error>`；`(T, error)` 中所有出错路径的 T 都是零值 → `Result<T, Error>`，否则 → `(T, Result<(), Error>)`。修改接收者并返回错误的方法，出错时接收者的内容与 Go 相同 | D01.2 试点 | 向量比对出错时的值 |
 | M-NAME | Go 方法名与 Rust 标准 trait 的方法同名（`String`、`ToString`、`Clone`、`Hash`、`Equal` 等） | 保留 Go 名的 snake_case 作为固有方法（如 `to_string() -> Vec<u8>`）；需要 `Display` 等 trait 时委托给它，委托代码标 `glue:` | D01.2 试点 | — |
+| M-EVAL | 内置函数的逐行版 `evalXxx` 和向量化版 `vecEvalXxx` 两份实现 | 函数体只按逐行版移植一份，宏生成逐行和向量两种驱动；在 Go 走向量化的地方走向量驱动。两版不一致时以逐行版为准并开 issue | N4 | govec 对两种驱动分别比对 |
+| M-ROW | 跨 `Next` 调用保存 `chunk.Row` | `RowHandle { Arc<Chunk>, idx }`；调用内仍用借用的 `Row<'a>` | N5a | — |
 | M-ERR | `errors.Trace` / `errors.Annotate` 包装调用栈 | 错误码 + 可选的创建点调用栈；不移植包装函数 | D00.2 块 spec | — |
 
 ## 移植模块的统一约定

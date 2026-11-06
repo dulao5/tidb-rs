@@ -25,7 +25,11 @@ ADR 0001 §4 is therefore superseded. This ADR records which parts of the vendor
    is a byte format that Go TiDB, TiKV and the stored data already share:
    - `codec`: byte and number codecs;
    - `tidb_query_datatype::codec`: datum and memcomparable key encoding, table and index key
-     codecs, row format v1/v2, the chunk wire format used in coprocessor responses;
+     codecs, row format v1/v2. Row-format decoding is used only at the coprocessor boundary
+     (point get, and responses not in chunk format); coprocessor requests ask for `TypeChunk`
+     responses, and nothing on the root side computes on the decoded TiKV types. (The chunk wire format is *not* taken from TiKV: TiKV only
+     encodes chunks, and its decoder is test-only and copies. Decoding is ported from Go's
+     `util/chunk/codec.go` as L1, see the N5a spec.);
    - collation weight tables (data only; comparison semantics are ported from Go);
    - the binary-JSON reading layer, as defined by the A4 spec.
 
@@ -39,9 +43,12 @@ ADR 0001 §4 is therefore superseded. This ADR records which parts of the vendor
    at the coprocessor boundary while decoding, but are converted to the ported Go types before
    any root-side computation.
 
-3. **`tidb_query_expr`: framework only, decided by N4.** Whether tidb-rs reuses TiKV's RPN
-   evaluator and `#[rpn_fn]` macro as the execution-side framework is decided by the N4 spec
-   (expression evaluation). Function bodies are not reused in any case (point 2).
+3. **`tidb_query_expr`: not used.** The N4 spec (expression evaluation) takes TiKV's RPN design
+   as a reference but not its code: the evaluator and builder only work on TiKV's
+   `VectorValue` / `LazyBatchColumnVec`, TiKV's `EvalContext` and `tipb::Expr`, and the
+   `#[rpn_fn]` macro lacks lazy arguments, access to argument types and expressions, and the
+   row-mode fallback on warnings that Go's control functions use. The vendored crate is removed
+   together with the PoC `query-smoke` test. Function bodies are not reused in any case (point 2).
 
 4. **`tidb_query_aggr`: removed** once D12.4 (aggregate functions) lands.
 
@@ -54,7 +61,7 @@ ADR 0001 §4 is therefore superseded. This ADR records which parts of the vendor
    | `crates/distsql/src/{decode,dag}.rs` | `expr::EvalContext`, `mysql::Decimal` | D01.2, D00.1 |
    | `crates/executor/src/agg.rs` | `mysql::Decimal`, `RoundMode` | D01.2, D12.4 |
    | `crates/executor/src/compare.rs` | `Collator` comparison | D01.9 |
-   | `crates/query-smoke/tests/smoke.rs` | `RpnExpressionBuilder` (spike test only) | N4 |
+   | `crates/query-smoke/tests/smoke.rs` | `RpnExpressionBuilder` (spike test only) | removed with the crate (point 3) |
 
 6. **Branch policy is unchanged.** Changes to the vendored crates are made on the TiKV branch
    `rust-tidb/stable-rpn-fn` and re-synced. Differences between TiKV and Go found while porting
