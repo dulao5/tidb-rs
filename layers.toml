@@ -1,0 +1,196 @@
+# crate 分层表（N0，specs/exceptions/N0-crate-layering/spec.md）。
+#
+# 每个 workspace 成员必须在这里登记。scripts/check_layers.py 在 CI 中按本表检查
+# `cargo metadata` 的依赖（含 dev / build 依赖）：
+#   - layered crate 只能依赖 rank 严格更小的 layered crate（不允许同层、不允许向上）；
+#   - layered crate 不能依赖 legacy crate；
+#   - third_party crate 只能被 `users` 中列出的 crate 依赖；
+#   - legacy crate 不受方向约束（可以依赖 layered crate，以便逐步换上移植代码）。
+#
+# 规划中的 crate（planned = true）还没有建立，只用来固定位置；建立时去掉 planned。
+# blocks 是 tracker data/blocks.tsv 中的功能块 ID，每个块恰好属于一个 crate。
+
+# ---------------------------------------------------------------- layered
+[crate.tidb-base]
+rank = 0
+planned = true
+blocks = ["D00.2"]   # parser/mysql 常量、errno、terror、dbterror、config
+
+[crate.tidb-metrics]
+rank = 0
+blocks = ["D14.1"]
+
+[crate.tidb-parser]
+rank = 1
+blocks = ["D02.1", "D02.2"]
+
+[crate.tidb-memory]
+rank = 1
+planned = true
+blocks = ["D15.1"]   # A1
+
+[crate.tidb-types]
+rank = 2
+blocks = ["D01.1", "D01.2", "D01.3", "D01.4", "D01.5", "D01.6", "D01.9"]
+
+[crate.tidb-model]
+rank = 2
+planned = true
+blocks = ["D06.1"]
+
+[crate.tidb-chunk]
+rank = 3
+planned = true
+blocks = ["D01.7", "D01.10"]
+
+[crate.tidb-kv]
+rank = 5
+planned = true
+blocks = ["D07.0"]
+
+[crate.tidb-execdetails]
+rank = 3
+planned = true
+blocks = ["D14.0"]
+
+[crate.tidb-codec]
+rank = 4
+planned = true
+blocks = ["D01.8"]   # util/codec
+
+[crate.tidb-tablecodec]
+rank = 6
+planned = true
+blocks = ["D01.11"]  # tablecodec、rowcodec（依赖 kv）
+
+[crate.tidb-sessionctx]
+rank = 7
+planned = true
+blocks = ["D00.1", "D05.1", "D05.2"]
+
+[crate.tidb-expression]
+rank = 8
+planned = true
+blocks = ["D08.1", "D08.2", "D08.8", "D08.12", "D08.11"]   # D08.8 CAST：框架的隐式转换机制（N0 评审）
+
+[crate.tidb-privilege]
+rank = 8
+planned = true
+blocks = ["D04.1"]
+
+[crate.tidb-expr-compare]
+rank = 9
+planned = true
+blocks = ["D08.4"]
+
+[crate.tidb-expr-arith]
+rank = 9
+planned = true
+blocks = ["D08.5"]
+
+[crate.tidb-expr-string]
+rank = 9
+planned = true
+blocks = ["D08.6"]
+
+[crate.tidb-expr-time]
+rank = 9
+planned = true
+blocks = ["D08.7"]
+
+[crate.tidb-expr-misc]
+rank = 9
+planned = true
+blocks = ["D08.9"]
+
+[crate.tidb-expr-json]
+rank = 9
+planned = true
+blocks = ["D08.10"]
+
+[crate.tidb-infoschema]
+rank = 9
+planned = true
+blocks = ["D06.2", "D06.3", "D06.4", "D06.6"]
+
+[crate.tidb-observe]
+rank = 10
+planned = true
+blocks = ["D14.2", "D15.2"]
+
+[crate.tidb-statistics]
+rank = 10
+planned = true
+blocks = ["D11.1", "D11.2"]
+
+[crate.tidb-store]
+rank = 11
+planned = true
+blocks = ["D07.1", "D07.2", "D07.3", "D07.4"]
+
+[crate.tidb-sessiontxn]
+rank = 11
+planned = true
+blocks = ["D05.4"]
+
+[crate.tidb-expr-pushdown]
+rank = 12
+planned = true
+blocks = ["D08.3"]
+
+[crate.tidb-domain]
+rank = 12
+planned = true
+blocks = ["D06.5"]
+
+[crate.tidb-planner]
+rank = 13
+planned = true
+blocks = [
+  "D09.0", "D09.1", "D09.2", "D09.3", "D09.4", "D09.5", "D09.6", "D09.7", "D09.8", "D09.9",
+  "D09.10", "D09.11", "D09.12", "D09.13", "D09.14", "D09.16",
+  "D10.1", "D10.2", "D10.3", "D10.4", "D10.5", "D10.6", "D10.7", "D10.8", "D10.9", "D10.10", "D10.11",
+  "D13.1", "D13.2", "D13.3",
+]
+
+[crate.tidb-executor]
+rank = 14
+planned = true
+blocks = [
+  "D12.0", "D12.1", "D12.2", "D12.3", "D12.4", "D12.5", "D12.6", "D12.7", "D12.8", "D12.9",
+  "D12.10", "D12.11", "D12.12", "D12.13",
+]
+
+[crate.tidb-session]
+rank = 15
+planned = true
+blocks = ["D05.3"]
+
+[crate.tidb-server]
+rank = 16
+planned = true
+blocks = ["D03.1", "D03.2"]
+
+# ---------------------------------------------------------------- 不建 crate 的块
+# --blocks 检查时，P1–P5 与 EXC 的块必须在上面登记，或列在这里并写明原因。
+[unassigned]
+blocks = [
+  "EXC.B",   # 例外 B：cascades、代价模型 v1、静态分区，不移植
+  "D00.3",   # util/*：按需整文件移植，每个文件放进用到它的最底层 crate（N0 §3）
+]
+phases = ["P1", "P2", "P3", "P4", "P5", "EXC", "DONE"]
+
+# ---------------------------------------------------------------- legacy（PoC）
+# 被移植代码逐步替换；新代码不得依赖。下列包名与规划中的 crate 同名的，
+# 在建立同名新 crate 之前先改名为 poc-*（N0 §5）。
+[legacy]
+crates = [
+  "tidb-server", "tidb-mysql-protocol", "tidb-kv", "tidb-meta", "tidb-distsql", "tidb-sql",
+  "tidb-executor", "tidb-session", "tidb-domain", "tidb-query-smoke", "tidb-ab",
+]
+
+# ---------------------------------------------------------------- third_party（ADR 0007）
+# third_party/ 下的包（vendored TiKV crate 及其 shim）按路径识别，不在此登记。
+# 它们只复用字节格式；layered crate 要使用，必须在这里列出，并在 PR 中说明理由。
+[third_party.users]
+tidb-codec = ["codec"]

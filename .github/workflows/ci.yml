@@ -57,6 +57,10 @@ jobs:
           cmake --version | head -n 1
           protoc --version
 
+      # N0: crate layering (layers.toml). Fails on upward / same-rank / legacy dependencies.
+      - name: crate layering
+        run: python3 scripts/check_layers.py
+
       - name: rustfmt (first-party crates)
         run: cargo fmt --check $(tools/first-party.sh)
 
