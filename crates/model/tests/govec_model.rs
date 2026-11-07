@@ -153,7 +153,7 @@ fn roundtrip(name: &str, base: Option<&[u8]>, text: &[u8]) -> (Value, Option<Str
     )
 }
 
-fn table_out(t: &TableInfo, p: &Value) -> Value {
+fn table_out(t: &TableInfo, p: &Value, id: i64) -> Value {
     let mut o = serde_json::Map::new();
     let mut put = |k: &str, v: Value| {
         o.insert(k.to_owned(), v);
@@ -178,7 +178,6 @@ fn table_out(t: &TableInfo, p: &Value) -> Value {
         "find_index_by_name",
         id_of(t.find_index_by_name(probe(p, "index")), |x| x.id),
     );
-    let id = p["id"].as_f64().unwrap() as i64;
     put(
         "find_column_by_id",
         id_of(t.find_column_by_id(id), |c| c.offset as i64),
@@ -345,7 +344,7 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<String>) {
             t.columns.as_mut().unwrap()[0].default_value = AnyValue::Value(JValue::Number(f));
             (mo(t.marshal_json()), None)
         }
-        "table" => (table_out(&table(&a[0]), &a[1]), None),
+        "table" => (table_out(&table(&a[0]), &a[1], i(&a[2])), None),
         "column" => {
             let c = column(&a[0]);
             let out = json!({
