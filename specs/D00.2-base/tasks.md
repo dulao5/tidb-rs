@@ -12,7 +12,7 @@
 | T6 [P] | `errno/infoschema.rs`、`kv.rs` | T1 | `errno_stats`、`store_type` 通过 | 完成 |
 | T7 | govec 领域 `base`（tracker）与 Rust 回放 `tests/govec_base.rs` | T3–T6 | 7,998 条全部通过（arm64） | 完成 |
 | T8 | converge：93 个函数标注齐全 | T3–T6 | `matched 93/93, missing 0`（第二部分的文件缺失属预期） | 完成 |
-| T9 | amd64 向量：tracker PR 的 CI（`ubuntu-latest`）上传的 artifact `govec-vectors-ubuntu-latest` 中的 `amd64/base.jsonl.gz` 提交到 tracker 和本 crate | T7 | x86_64 上 `cargo test -p tidb-base` 通过 | **待做**（作者机器不能运行 amd64） |
+| T9 | amd64 向量：tracker PR 的 CI（`ubuntu-latest`）上传的 artifact `govec-vectors-ubuntu-latest` 中的 `amd64/base.jsonl.gz` 提交到 tracker 和本 crate | T7 | x86_64 上 `cargo test -p tidb-base` 通过 | 完成（tracker PR #3 的 CI 生成；与 arm64 除首行外相同） |
 | T10 | 第二部分：`pkg/config`（44 个函数）| T1 | 单独 PR | 未开始 |
 | T11 | tracker 归属调整（plan §5）：`ExecuteErrorToLabel`、`WarnAppender`、`ColumnNeedRestoredData` | — | tracker PR | 未开始（随对应块） |
 | T12 | `types/errors.rs` 的临时桩（D01.2 试点留下）换成本块的 `Error`/原型 | T4 | D01.1 开工时 | 未开始 |
