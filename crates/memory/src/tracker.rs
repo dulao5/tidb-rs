@@ -475,7 +475,7 @@ impl Tracker {
         if bs == 0 {
             return Ok(());
         }
-        let walk = self.walk(bs, false);
+        let walk = self.walk(bs, Grown::Keep);
         if bs > 0 { walk.act() } else { Ok(()) }
     }
 
@@ -491,7 +491,7 @@ impl Tracker {
     // glue: A1 3.3 hot path (the loop of Go Consume, without the actions)
     pub fn record(self: &Arc<Self>, bs: i64) {
         if bs != 0 {
-            let _ = self.walk(bs, bs > 0);
+            let _ = self.walk(bs, if bs > 0 { Grown::Mark } else { Grown::Keep });
         }
     }
 
@@ -508,11 +508,16 @@ impl Tracker {
         if !self.grew.swap(false, SeqCst) {
             return Ok(());
         }
-        self.walk(0, false).act()
+        // One growth runs the chain once (Go: one Consume(+) calls tryAction once). The
+        // ancestors' flags were set by the same growth, so clear them on the way up; a later
+        // ancestor checkpoint then does nothing. The reverse order (ancestor first) cannot
+        // clear the descendants' flags, so the memory checkpoint is called on the operator
+        // tracker that TrackedAlloc records into (Go calls Consume on the leaf; A1 3.3).
+        self.walk(0, Grown::Clear).act()
     }
 
     // go-part: Tracker.Consume (the loop up the parent chain; bs == 0 only evaluates)
-    fn walk(self: &Arc<Self>, bs: i64, mark_grown: bool) -> Walk {
+    fn walk(self: &Arc<Self>, bs: i64, grown: Grown) -> Walk {
         let mut w = Walk::default();
         let mut next = Some(self.clone());
         while let Some(tracker) = next {
@@ -540,8 +545,10 @@ impl Tracker {
                 w.root_exceed_for_soft_limit = Some(tracker.clone());
             }
 
-            if mark_grown && !tracker.grew.load(SeqCst) {
-                tracker.grew.store(true, SeqCst);
+            match grown {
+                Grown::Mark if !tracker.grew.load(SeqCst) => tracker.grew.store(true, SeqCst),
+                Grown::Clear => tracker.grew.store(false, SeqCst),
+                _ => {}
             }
             if bs != 0 {
                 loop {
@@ -1074,4 +1081,15 @@ pub fn MetricsTypes(label: isize) -> Option<[&'static str; 3]> {
         LabelForGlobalAnalyzeMemory => Some(["analyze", "inuse", "released"]),
         _ => None,
     }
+}
+
+/// What a walk up the parent chain does with the A1 "grew since the last checkpoint" flags.
+#[derive(Clone, Copy)]
+enum Grown {
+    /// Leave them (evaluation only).
+    Keep,
+    /// `record` of a growth: set them.
+    Mark,
+    /// A checkpoint that runs the chain: clear the ancestors' (its own is already taken).
+    Clear,
 }

@@ -133,3 +133,17 @@ fn transient_peak_between_checkpoints_is_not_seen() {
     assert!(log.lock().is_empty());
     assert_eq!(t.max_consumed(), 5000);
 }
+
+/// One growth runs the chain once even when the leaf and then an ancestor checkpoint (N3
+/// calls the checkpoint in the Next of operators at several levels). Go: one Consume(+) calls
+/// tryAction once. PR #13 review.
+#[test]
+fn one_growth_runs_once_across_leaf_then_ancestor() {
+    let (root, log) = setup();
+    let leaf = new_tracker(2, -1);
+    leaf.attach_to(&root).unwrap();
+    leaf.record(2000);
+    leaf.checkpoint().unwrap();
+    root.checkpoint().unwrap();
+    assert_eq!(*log.lock(), vec!["spill"]);
+}
