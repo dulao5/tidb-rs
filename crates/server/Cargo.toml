@@ -25,7 +25,10 @@ tidb-runtime = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std"] }
+# "tracing-log": `init()` also installs a LogTracer, so crates that log through the `log` facade
+# (tidb-base terror/config, tidb-types collate/time, tidb-parser gocharset, ...) reach this
+# subscriber. Without it their records were dropped (PR #18 review).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std", "tracing-log"] }
 
 [lints]
 workspace = true
