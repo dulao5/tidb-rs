@@ -57,7 +57,7 @@ crate `crates/base`（包名 `tidb-base`，N0 rank 0）。N0 把几个 Go 包放
 | `errors.Error.fillLineAndFile` | `#[track_caller]` 代替 `runtime.Caller` | 文件路径是 Rust 源文件 |
 | gofmt：非 `Format` 的 Stringer 在错误输出中 | Go 用反射打印值，port 打印方法结果 | TiDB 的错误参数中未见；向量中无此情况 |
 | gofmt：`%+v` 的 pingcap 错误 | Go 打印调用栈，port 只打印消息 | 只用于日志 |
-| `strings.ToUpper`（`FormatSQLModeStr`、`Str2Priority`） | 多字符大写映射（如 `ß`）保持原字符，其余用 Rust 映射 | 与 Go 的简单映射一致；向量覆盖 `ß` |
+| `strings.ToUpper`（`FormatSQLModeStr`、`Str2Priority`） | ~~单字符近似~~ 第二部分评审后改为精确：`unicode.ToUpper` 按 rsgen 生成的 `CASE_RANGES` 实现（L1） | 无；govec `config` 的 `case_table` 逐码位核对 |
 | gofmt：`%p`（`%P`）用于 `[]byte` 参数 | Go 打印切片底层数组的地址（`0xc000…`，每次运行不同），port 没有地址可打印，按其他非法动词的方式逐元素输出（`[%!p(uint8=1) …]`） | 地址无意义且不可复现；TiDB 的错误参数中没有 `%p`；向量的随机格式不生成 `%p` + `[]byte` |
 
 
@@ -70,9 +70,9 @@ crate `crates/base`（包名 `tidb-base`，N0 rank 0）。N0 把几个 Go 包放
 | `tidb-base` → `tidb-parser`（2） | `PriorityEnum.Restore` → `format.RestoreCtx`、`RestoreCtx.WriteKeyWord` | **接口反转**（N0 §4 第 2 条）：`tidb-base` 定义 trait `mysql::RestoreKeyWord { fn write_key_word(&mut self, &str) }`，`PriorityEnum::restore(&mut dyn RestoreKeyWord)`；parser 的 `RestoreCtx` 实现它（parser 移植到用到时） |
 | `tidb-metrics` → `tidb-base` 同层（1） | `metrics.ExecuteErrorToLabel`（`pkg/metrics/server.go`）用到 `terror.Error` 类型 | **第二部分已处理**：tracker 把 `ExecuteErrorToLabel` 改归 D00.2，移植在 `metrics.rs`（只读 `RFCCode`，不依赖 prometheus）。tidb-metrics 中按错误码近似的 `error_label(code)` 在 metrics 下次修改时改为调用它 |
 | `tidb-types` → `tidb-sessionctx`（3） | `types.Context.AppendWarning`、`NewContext` → `util/context.WarnAppender`（接口） | **第二部分已处理**：接口 `WarnAppender`（及其两个方法声明）改归 D00.2，`tidb-base` 的 `contextutil::WarnAppender` trait。选 base 而不是 types：使用方是 `types.Context`（D01.1）和 `errctx`（D00.1）两侧，接口只依赖 `Error`，放在 rank 0 两侧都能用，也不必让 `errctx` 为一个 trait 依赖 `tidb-types`。`funcWarnAppender` 等实现留在 D00.1 |
-| `ColumnNeedRestoredData`（`pkg/types/etc.go`，原归 D01.1） | 参数是 `*model.IndexColumn`、`[]*model.ColumnInfo` | **第二部分已处理**：改归 D06.1。留下一处 `tidb-model` → `tidb-types` 同层引用（它调用 `types.NeedRestoredData`，后者依赖 collate，不能一起下移）；需要 D06.1 / D01.1 开工时决定 model 与 types 的相对 rank，或把这个函数放到两者之上的调用方 |
+| `ColumnNeedRestoredData`（`pkg/types/etc.go`，原归 D01.1） | 参数是 `*model.IndexColumn`、`[]*model.ColumnInfo` | **第二部分已处理**：改归 D06.1。它调用 `types.NeedRestoredData`（依赖 collate，不能一起下移），所以评审中把 `tidb-model` 定为 rank 3（types 之上），`tidb-execdetails` 随之为 4 |
 
-tracker 的 `scripts/blocks/rules.py` 增加三条规则（PR 见 tasks T11），重新生成 `func_blocks.tsv`、`block_edges.tsv` 后，`check_layers.py --block-edges` 的向上/同层引用从 130 降到 124：
+tracker 的 `scripts/blocks/rules.py` 增加三条规则（PR 见 tasks T11），重新生成 `func_blocks.tsv`、`block_edges.tsv` 后，`check_layers.py --block-edges` 的向上/同层引用从 130 降到 124；评审后 `layers.toml` 把 `tidb-model` 改为 rank 3、`tidb-execdetails` 改为 rank 4（execdetails → model），剩下的 model → types 同层引用消失，为 123，没有新增同层引用：
 
 ```text
 - cross-crate Go references: 58821, downward 58691 (99.78%), upward/same-rank 130
@@ -81,6 +81,10 @@ tracker 的 `scripts/blocks/rules.py` 增加三条规则（PR 见 tasks T11）�
 -    3  tidb-types -> tidb-model (same rank)  D01.1->D06.1(3)
 +    1  tidb-model -> tidb-types (same rank)  D06.1->D01.1(1)
 -    1  tidb-metrics -> tidb-base (same rank)  D14.1->D00.2(1)
+# tidb-model rank 3, tidb-execdetails rank 4:
+-cross-crate Go references: 58844, downward 58720 (99.79%), upward/same-rank 124
++cross-crate Go references: 58844, downward 58721 (99.79%), upward/same-rank 123
+-    1  tidb-model -> tidb-types (same rank)  D06.1->D01.1(1)
 ```
 
 ## 6. 测试
@@ -113,17 +117,18 @@ rsgen（`govec/cmd/rsgen/config.go`）用反射遍历 `config.Config{}` 和 `tik
 | Go | Rust | 说明 |
 |---|---|---|
 | `toml.DecodeFile(path, c)` 的反射合一 | `gotoml::decode` 遍历 `GoStruct` | L1；`typeFields`（嵌入提升、tag 优先、支配规则）照移植 |
-| Go map 的随机迭代（`unifyStruct`、`ErrConfigInstanceSection.Error`、`Valid` 的存储列表、`NameMappings`） | 按键序 | 有两个以上解码错误的文件，Go 报其中随机一个，Rust 报键序第一个；解码出错后 Go 的部分配置取决于顺序（`InitializeConfig` 随即 panic，无影响）；同一节有两项要移到 `[instance]` 时 Go 的消息顺序随机。这些情况不进向量（生成器按结构判断：单叶子解码错误数 ≤ 1、无大小写折叠重复键、每节最多一项迁移、`Valid` 不在存储名上失败） |
+| Go map 的随机迭代（M-MAPORDER；`unifyStruct`、`ErrConfigInstanceSection.Error`、`Valid` 的存储列表、`NameMappings`） | 按键序 | 有两个以上解码错误的文件，Go 报其中随机一个，Rust 报键序第一个；解码出错后 Go 的部分配置取决于顺序（`InitializeConfig` 随即 panic，无影响）；同一节有两项要移到 `[instance]` 时 Go 的消息顺序随机。这些情况不进向量（生成器按结构判断：单叶子解码错误数 ≤ 1、无大小写折叠重复键、每节最多一项迁移、`Valid` 不在存储名上失败） |
 | `NewConfig()` 浅拷贝 `defaultConf` | 值语义 | Go 中 `Load` 写入默认切片（容量足够时）或默认 `Labels` map 会改到 `defaultConf` 本身（别名）；Rust 没有这个别名。向量从去别名的副本开始 |
 | `*ErrConfigValidationFailed`、`*ErrConfigInstanceSection`（调用方做类型断言） | `Load` 返回 `LoadError` 枚举；其余错误是 `Error`（M-ERR） | `ErrConfigInstanceSection` 在 Go 中持有全局切片的指针，`error()` 同样读取全局量 |
+| `tikvutil.CommitterConcurrency` | `tikvutil::CommitterConcurrency`（`AtomicI32` 静态量） | 评审后 `pkg/util/tikvutil` 归入 D00.2，不再是边界副本 |
 | `ConflictOptions`、`DeprecatedOptions`、`TikvConfigLock` | `parking_lot::Mutex` 静态量 | M-LOCK；与 Go 一样跨 `Load` 累积 |
-| `globalConf atomic.Pointer[Config]` | `RwLock<Arc<Config>>`，首次访问时执行 `init` | `GetGlobalConfig` 返回 `Arc<Config>` |
+| `globalConf atomic.Pointer[Config]`，client-go 的全局配置 | `ArcSwap<Config>` / `ArcSwap<TikvConfig>`（M-SNAP），首次访问时执行 `init` | `get_global_config()` 返回 `Guard<Arc<Config>>`（读时不写共享缓存行），`get_global_config_arc()` 返回持有的快照 |
 | `AtomicBool`（嵌入 `atomic.Bool`）的 JSON | JSON bool | 嵌入类型提升的 `MarshalJSON` 优先于 `AtomicBool.MarshalText`（向量确认） |
 | `CloneConf`（JSON 往返） | 克隆后应用往返的效果：`json:"-"` 字段清零、非法 `nullableBool` 变为未设置；`NaN`/`Inf` 时返回 `json: unsupported value` | 向量逐字段核对 |
 | TOML 本地日期时间（无时区） | 按 UTC | Go 用进程所在时区；只影响写入 `nullableBool`/`AtomicBool` 时错误消息里的时间文本，向量只用带时区的时间 |
 | `encoding/json` 解码错误的消息 | 不移植文本 | 只用于 `nullableBool.UnmarshalJSON` 的出错判断，向量只比较是否出错 |
-| `strings.EqualFold`、`ToLower` | 单字符的 Rust 大小写映射（`İ` → `i` 特判） | 与 Go 的简单折叠在 BMP 常用字符上一致 |
-| `TiKVClient.Valid` 的 `time.Duration(f * 1e9)` | `go_float_to_i64`：x86_64 上越界和 NaN 为 `MinInt64`，aarch64 上饱和 | 与两种目标上的 Go 一致（向量各自生成） |
+| `strings.EqualFold`、`ToLower`、`unicode.SimpleFold` | 精确移植：rsgen 生成 `CASE_RANGES`（`unicode.CaseRanges`）和 `FOLD_ORBIT`（Go 的 `asciiFold` + `caseOrbit`） | 无；govec `config` 的 `simple_fold_table`、`case_table`（全部码位）、`equal_fold` 核对 |
+| `TiKVClient.Valid` 的 `time.Duration(f * 1e9)` | `gostd::conv::f64_to_i64`（映射规则 M-F2I）：x86_64 上越界和 NaN 为 `MinInt64`，aarch64 上饱和 | 与两种目标上的 Go 一致；`gostd::conv` 覆盖全部整数宽度，govec `config` 的 `f2i` 按目标核对 |
 | `InitializeConfig` 的 `os.Exit` / `terror.MustNil` | 返回 `InitializeExit::Exit(code)` / panic | L2；单测覆盖 |
 | `TableLockDelayClean`（可替换的函数变量） | 普通函数 | 测试替换不移植 |
 
@@ -132,7 +137,6 @@ rsgen（`govec/cmd/rsgen/config.go`）用反射遍历 `config.Config{}` 和 `tik
 | Rust | Go | 类别 | 何时替换 |
 |---|---|---|---|
 | `tiflashcompute_is_valid_auto_scaler_config` | `tiflashcompute.IsValidAutoScalerConfig`（DEF.MPP） | 块外纯函数的副本 | 不替换（rank 0 不能依赖 DEF.MPP） |
-| `tikvutil_CommitterConcurrency` | `tikvutil.CommitterConcurrency` | 块外包级变量 | `pkg/util/tikvutil` 归属确定后（只有这一个变量，可直接并入本块） |
 | `versioninfo_TiDBEdition` | `versioninfo.TiDBEdition` | 链接期变量 | 版本信息块 |
 | `LogConfig`、`Log::to_log_config` | `logutil.LogConfig`（`zaplog.Config`） | 运行时结构的形状 | 日志块构建 logger 时使用 |
 | `TracingConfiguration` | jaeger `config.Configuration` | 运行时结构的形状 | 不移植 tracing |

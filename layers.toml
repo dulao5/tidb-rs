@@ -33,7 +33,7 @@ rank = 2
 blocks = ["D01.1", "D01.2", "D01.3", "D01.4", "D01.5", "D01.6", "D01.9"]
 
 [crate.tidb-model]
-rank = 2
+rank = 3   # above tidb-types: model calls types (D00.2 part 2 review); D06.1 -> D01.1
 planned = true
 blocks = ["D06.1"]
 
@@ -48,7 +48,7 @@ planned = true
 blocks = ["D07.0"]
 
 [crate.tidb-execdetails]
-rank = 3
+rank = 4   # above tidb-model (execdetails -> model), with tidb-model at 3
 planned = true
 blocks = ["D14.0"]
 

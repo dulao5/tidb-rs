@@ -335,7 +335,7 @@ impl MetaData {
                     f = Some(ff);
                     break;
                 }
-                if f.is_none() && equal_fold(ff.name, key) {
+                if f.is_none() && crate::gostd::equal_fold(ff.name, key) {
                     f = Some(ff);
                 }
             }
@@ -488,42 +488,5 @@ impl MetaData {
         }
         f.extend_from_slice(format.as_bytes());
         DecodeError::Msg(String::from_utf8_lossy(&gofmt::sprintf(f, args)).into_owned())
-    }
-}
-
-/// `strings.EqualFold` reports whether s and t, interpreted as UTF-8 strings, are equal
-/// under simple Unicode case-folding.
-// go-std: strings.EqualFold L2 (simple folding approximated by single-char lower/upper mappings)
-fn equal_fold(s: &str, t: &str) -> bool {
-    let mut a = s.chars();
-    let mut b = t.chars();
-    loop {
-        match (a.next(), b.next()) {
-            (None, None) => return true,
-            (Some(x), Some(y)) => {
-                if x == y {
-                    continue;
-                }
-                let fold = |c: char| {
-                    let mut l = c.to_lowercase();
-                    match (l.next(), l.next()) {
-                        (Some(l), None) => l,
-                        _ => c,
-                    }
-                };
-                if fold(x) != fold(y) {
-                    // Go's orbit: k/K/U+212A, s/S/U+017F
-                    let special = |c: char| match c {
-                        '\u{212A}' => 'k',
-                        '\u{17F}' => 's',
-                        c => fold(c),
-                    };
-                    if special(x) != special(y) {
-                        return false;
-                    }
-                }
-            }
-            _ => return false,
-        }
     }
 }

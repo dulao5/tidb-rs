@@ -22,6 +22,7 @@ pub mod metrics;
 pub mod mysql;
 pub mod terror;
 mod terror_registry;
+pub mod tikvutil;
 
 pub use errors::Error;
 pub use gofmt::Arg;

@@ -40,8 +40,8 @@ ANN_RE = re.compile(r"^\s*//\s*(go|go-part|go-std|go-dep|go-l3|go-exception|go-f
 FILE_RE = re.compile(r"^\s*//!\s*go-file:\s*(\S+)")
 FN_RE = re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(const\s+)?(unsafe\s+)?fn\s+(\w+)")
 ALLOW_RE = re.compile(r"^\s*#(!?)\[allow\(")
-LEVEL_RE = re.compile(r"^(L1(\s+\[M-[A-Z]+(,\s*M-[A-Z]+)*\])?|L2\s+\(.+\)|L3)$")
-RULES_RE = re.compile(r"\[(M-[A-Z]+(?:,\s*M-[A-Z]+)*)\]")
+LEVEL_RE = re.compile(r"^(L1(\s+\[M-[A-Z][A-Z0-9]*(,\s*M-[A-Z][A-Z0-9]*)*\])?|L2\s+\(.+\)|L3)$")
+RULES_RE = re.compile(r"\[(M-[A-Z][A-Z0-9]*(?:,\s*M-[A-Z][A-Z0-9]*)*)\]")
 FMA_MARK_RE = re.compile(r"//.*\[M-FMA\]\s+(\S+\.go):(\d+)")
 FMA_TARGETS_END = "instrs"  # go_fma_sites.tsv: target columns are between symbol and instrs
 
@@ -49,7 +49,7 @@ FMA_TARGETS_END = "instrs"  # go_fma_sites.tsv: target columns are between symbo
 def load_rules(path):
     """Mapping rule IDs: first cell of the rule table rows of mappings.md."""
     with open(path, encoding="utf-8") as f:
-        return {m.group(1) for line in f if (m := re.match(r"^\|\s*(M-[A-Z]+)\s*\|", line))}
+        return {m.group(1) for line in f if (m := re.match(r"^\|\s*(M-[A-Z][A-Z0-9]*)\s*\|", line))}
 
 
 def load_fma_sites(path):

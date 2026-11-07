@@ -18,10 +18,11 @@ pub mod reflect;
 mod types_gen;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool as StdAtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool as StdAtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
-use parking_lot::{Mutex, RwLock};
+use arc_swap::{ArcSwap, Guard};
+use parking_lot::Mutex;
 
 pub use config_util::*;
 pub use reflect::{
@@ -141,19 +142,19 @@ fn os_temp_dir() -> String {
     }
 }
 
-/// InstanceConfigSection indicates a config session that has options moved to [instance]
+/// InstanceConfigSection indicates a config session that has options moved to `[instance]`
 /// session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InstanceConfigSection {
     /// SectionName indicates the origin section name.
     pub section_name: String,
-    /// NameMappings maps the origin name to the name in [instance]. (Go map: random
+    /// NameMappings maps the origin name to the name in `[instance]`. (Go map: random
     /// iteration order; sorted here.)
     pub name_mappings: BTreeMap<String, String>,
 }
 
 /// sectionMovedToInstance records all config section and options that should be moved to
-/// [instance].
+/// `[instance]`.
 static sectionMovedToInstance: LazyLock<Vec<InstanceConfigSection>> = LazyLock::new(|| {
     let sec = |name: &str, m: &[(&str, &str)]| InstanceConfigSection {
         section_name: name.to_owned(),
@@ -194,12 +195,12 @@ static sectionMovedToInstance: LazyLock<Vec<InstanceConfigSection>> = LazyLock::
     ]
 });
 
-/// ConflictOptions indicates the conflict config options existing in both [instance] and
+/// ConflictOptions indicates the conflict config options existing in both `[instance]` and
 /// other sections in config file.
 pub static ConflictOptions: Mutex<Vec<InstanceConfigSection>> = Mutex::new(Vec::new());
 
 /// DeprecatedOptions indicates the config options existing in some other sections in config
-/// file. They should be moved to [instance] section.
+/// file. They should be moved to `[instance]` section.
 pub static DeprecatedOptions: Mutex<Vec<InstanceConfigSection>> = Mutex::new(Vec::new());
 
 /// TikvConfigLock protects against concurrent tikv config refresh
@@ -312,7 +313,8 @@ impl Config {
     // go: Config.GetTiKVConfig L1
     pub fn get_tikv_config(&self) -> TikvConfig {
         TikvConfig {
-            committer_concurrency: tikvutil_CommitterConcurrency.load(Ordering::SeqCst) as isize,
+            committer_concurrency: crate::tikvutil::CommitterConcurrency.load(Ordering::SeqCst)
+                as isize,
             max_txn_ttl: self.performance.max_txn_ttl,
             tikv_client: self.tikv_client.clone(),
             security: self.security.cluster_security(),
@@ -335,11 +337,6 @@ impl Config {
         }
     }
 }
-
-/// `tikvutil.CommitterConcurrency` (pkg/util/tikvutil, a one-variable package used only
-/// here; boundary copy).
-// Go: var CommitterConcurrency = atomic.NewInt32(128)
-pub static tikvutil_CommitterConcurrency: AtomicI32 = AtomicI32::new(128);
 
 // go: encodeDefTempStorageDir L1
 fn encode_def_temp_storage_dir(
@@ -533,15 +530,17 @@ pub fn default_trx_summary() -> TrxSummary {
 /// The process-wide configs: `globalConf` of this package and the global config of client-go
 /// (`tikvcfg.StoreGlobalConfig`, stored by `StoreGlobalConfig`). Initialised on first use by
 /// `init` (Go: at package initialisation).
+/// Both are published snapshots (Go `atomic.Pointer`): `ArcSwap` (mapping rule M-SNAP), so
+/// that the hot `GetGlobalConfig` does not write shared cache lines.
 struct Globals {
-    conf: RwLock<Arc<Config>>,
-    tikv: RwLock<Arc<TikvConfig>>,
+    conf: ArcSwap<Config>,
+    tikv: ArcSwap<TikvConfig>,
 }
 
 static GLOBALS: LazyLock<Globals> = LazyLock::new(|| {
     let g = Globals {
-        conf: RwLock::new(Arc::new(defaults_gen::default_conf())),
-        tikv: RwLock::new(Arc::new(defaults_gen::tikv_default_config())),
+        conf: ArcSwap::from_pointee(defaults_gen::default_conf()),
+        tikv: ArcSwap::from_pointee(defaults_gen::tikv_default_config()),
     };
     init(&g);
     g
@@ -556,9 +555,18 @@ pub fn new_config() -> Config {
 /// GetGlobalConfig returns the global configuration for this server. It should store
 /// configuration from command line and configuration file. Other parts of the system can
 /// read the global configuration use this function.
-// go: GetGlobalConfig L1
-pub fn get_global_config() -> Arc<Config> {
-    GLOBALS.conf.read().clone()
+///
+/// The guard derefs to the config (`get_global_config().port`); it is meant for short
+/// reads. Keep a snapshot with `Guard::into_inner` / [`get_global_config_arc`].
+// go: GetGlobalConfig L1 [M-SNAP]
+pub fn get_global_config() -> Guard<Arc<Config>> {
+    GLOBALS.conf.load()
+}
+
+/// [`get_global_config`] as an owned snapshot (Go: keeping the `*Config`).
+// glue: ArcSwap::load_full (M-SNAP)
+pub fn get_global_config_arc() -> Arc<Config> {
+    GLOBALS.conf.load_full()
 }
 
 /// StoreGlobalConfig stores a new config to the globalConf. It mostly uses in the test to
@@ -571,15 +579,15 @@ pub fn store_global_config(config: Arc<Config>) {
 // glue: StoreGlobalConfig on the globals being initialised (Go's init runs before any use)
 fn store_global_config_in(g: &Globals, config: Arc<Config>) {
     let cfg = config.get_tikv_config();
-    *g.conf.write() = config;
+    g.conf.store(config);
     let _guard = TikvConfigLock.lock();
-    *g.tikv.write() = Arc::new(cfg);
+    g.tikv.store(Arc::new(cfg));
 }
 
 /// `tikvcfg.GetGlobalConfig` (client-go's global, stored by [`store_global_config`]).
 // glue: boundary of client-go config.GetGlobalConfig
-pub fn tikv_get_global_config() -> Arc<TikvConfig> {
-    GLOBALS.tikv.read().clone()
+pub fn tikv_get_global_config() -> Guard<Arc<TikvConfig>> {
+    GLOBALS.tikv.load()
 }
 
 /// removedConfig contains items that are no longer supported. they might still be in the
@@ -667,7 +675,7 @@ pub fn initialize_config(
     config_strict: bool,
     enforce_cmd_args: impl FnOnce(&mut Config),
 ) -> Result<(), InitializeExit> {
-    let mut cfg = (*get_global_config()).clone();
+    let mut cfg = Config::clone(&get_global_config());
     if !conf_path.is_empty() {
         let mut err: Option<Vec<u8>> = None;
         if let Err(e) = cfg.load(conf_path) {
@@ -1100,7 +1108,7 @@ impl TikvTxnLocalLatches {
 
 impl TikvTiKVClient {
     /// Valid checks if this config is valid.
-    // go-dep: github.com/tikv/client-go/v2@v2.0.8-0.20260803075849-c3b50791b9fb.TiKVClient.Valid L1
+    // go-dep: github.com/tikv/client-go/v2@v2.0.8-0.20260803075849-c3b50791b9fb.TiKVClient.Valid L1 [M-F2I]
     pub fn valid(&self) -> Result<(), Error> {
         if self.grpc_connection_count == 0 {
             return Err(errors::new(
@@ -1117,7 +1125,7 @@ impl TikvTiKVClient {
             ));
         }
         // GetGrpcKeepAliveTimeout: time.Duration(GrpcKeepAliveTimeout * float64(time.Second))
-        let timeout = go_float_to_i64(self.grpc_keep_alive_timeout * 1e9);
+        let timeout = crate::gostd::conv::f64_to_i64(self.grpc_keep_alive_timeout * 1e9); // [M-F2I]
         if timeout < 50_000_000 {
             return Err(errors::errorf(
                 "grpc-keepalive-timeout should be at least 0.05, but got %f",
@@ -1128,24 +1136,12 @@ impl TikvTiKVClient {
     }
 }
 
-/// Go's `int64(f)` conversion (truncation; out-of-range and NaN give the amd64/arm64 result
-/// `math.MinInt64` on amd64, saturation on arm64).
-// glue: Go float64 -> int64 conversion
-fn go_float_to_i64(f: f64) -> i64 {
-    if cfg!(target_arch = "x86_64")
-        && (f.is_nan() || f >= 9.223_372_036_854_776e18 || f < -9.223_372_036_854_776e18)
-    {
-        return i64::MIN;
-    }
-    f as i64
-}
-
 /// UpdateGlobal updates the global config, and provide a restore function that can be used
 /// to restore to the original.
 // go: UpdateGlobal L1
 pub fn update_global(f: impl FnOnce(&mut Config)) {
     let g = get_global_config();
-    let mut new_conf = (*g).clone();
+    let mut new_conf = Config::clone(&g);
     f(&mut new_conf);
     store_global_config(Arc::new(new_conf));
 }
@@ -1153,7 +1149,7 @@ pub fn update_global(f: impl FnOnce(&mut Config)) {
 /// RestoreFunc gets a function that restore the config to the current value.
 // go: RestoreFunc L1
 pub fn restore_func() -> impl FnOnce() {
-    let g = get_global_config();
+    let g = get_global_config_arc();
     move || store_global_config(g)
 }
 

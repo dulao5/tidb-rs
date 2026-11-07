@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use tidb_base::config::{self, Config, GoStruct, LoadError, NullableBool, ValRef, nbTrue, nbUnset};
 use tidb_base::gofmt::{self, Arg};
-use tidb_base::gostd::json as gojson;
+use tidb_base::gostd::{self, json as gojson};
 use tidb_base::{dbterror, errors, metrics};
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
@@ -239,7 +239,7 @@ fn exec(op: &str, a: &[Value]) -> Value {
     let st = |i: usize| String::from_utf8(gs_bytes(&a[i])).unwrap();
     match op {
         "default_conf" => {
-            json!({"new": dump(&config::new_config(), "Config"), "global": dump(&*config::get_global_config(), "Config")})
+            json!({"new": dump(&config::new_config(), "Config"), "global": dump(&**config::get_global_config(), "Config")})
         }
         "defaults" => json!({
             "pessimistic": dump(&config::default_pessimistic_txn(), "PessimisticTxn"),
@@ -390,6 +390,41 @@ fn exec(op: &str, a: &[Value]) -> Value {
             };
             json!(metrics::execute_error_to_label(&err))
         }
+        "f2i" => {
+            use tidb_base::gostd::conv;
+            let f = f64::from_bits(st(0).parse::<u64>().unwrap());
+            let v = match st(1).as_str() {
+                "int64" | "int" => conv::f64_to_i64(f).to_string(),
+                "int32" => conv::f64_to_i32(f).to_string(),
+                "int16" => conv::f64_to_i16(f).to_string(),
+                "int8" => conv::f64_to_i8(f).to_string(),
+                "uint64" | "uint" => conv::f64_to_u64(f).to_string(),
+                "uint32" => conv::f64_to_u32(f).to_string(),
+                "uint16" => conv::f64_to_u16(f).to_string(),
+                "uint8" => conv::f64_to_u8(f).to_string(),
+                t => panic!("type {t}"),
+            };
+            json!(v)
+        }
+        "simple_fold_table" => Value::Array(
+            (0..=0x10FFFFu32)
+                .filter_map(char::from_u32)
+                .filter_map(|r| {
+                    let f = gostd::simple_fold(r);
+                    (f != r).then(|| json!([r as u32, f as u32]))
+                })
+                .collect(),
+        ),
+        "case_table" => Value::Array(
+            (0..=0x10FFFFu32)
+                .filter_map(char::from_u32)
+                .filter_map(|r| {
+                    let (u, l) = (gostd::to_upper_rune(r), gostd::to_lower_rune(r));
+                    (u != r || l != r).then(|| json!([r as u32, u as u32, l as u32]))
+                })
+                .collect(),
+        ),
+        "equal_fold" => json!(gostd::equal_fold(&st(0), &st(1))),
         _ => panic!("unknown op {op}"),
     }
 }

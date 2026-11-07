@@ -46,6 +46,7 @@
 | `pkg/config/const.go` | 0 | `config/mod.rs`（`DefRowsForSampleRate`） |
 | `pkg/metrics/server.go`（只有 `ExecuteErrorToLabel`，归属调整并入） | 1 | `metrics.rs` |
 | `pkg/util/context/warn.go`（只有接口 `WarnAppender`，归属调整并入，无函数） | 0 | `contextutil.rs`（trait） |
+| `pkg/util/tikvutil/tikvutil.go`（一个变量 `CommitterConcurrency`，评审后并入） | 0 | `tikvutil.rs` |
 
 `Config` 的 27 个结构体（含 client-go 的 `TiKVClient`、`PDClient`、`TxnLocalLatches`、`AsyncCommit`、`CoprocessorCache`、`Security`、`PessimisticTxn`、`Config`，logutil / pingcap/log 的 `FileLogConfig`）由 rsgen 按 Go 类型反射生成：字段顺序、Go 名、`toml` / `json` tag、嵌入关系与 Go 相同；默认值取自 `config.NewConfig()` 和 `tikvcfg.DefaultConfig()` 的运行时值（`tmp-storage-path` 与 Go 一样在启动时按环境计算）。
 
@@ -81,7 +82,7 @@
 | 类别 | Go 引用 | 处理 |
 |---|---|---|
 | 纯函数，块外（DEF.MPP） | `tiflashcompute.IsValidAutoScalerConfig` | 边界副本（`glue:`，3 行），避免 rank 0 向上依赖 |
-| 包级变量，块外小包 | `tikvutil.CommitterConcurrency`、`versioninfo.TiDBEdition` | 边界副本（静态量，默认值相同） |
+| 链接期变量，块外 | `versioninfo.TiDBEdition` | 边界副本（静态量，默认值相同）。`tikvutil.CommitterConcurrency` 在评审后随 `pkg/util/tikvutil` 归入 D00.2（`tikvutil.rs`） |
 | 第三方运行时：日志 | `logutil.NewLogConfig` / `zaplog.Config`、`logutil.BgLogger().Warn` | `ToLogConfig` 返回只含被设置字段的 `LogConfig` 结构；警告走 `log` crate。logger 本身由日志块构建 |
 | 第三方运行时：tracing | `jaeger-client-go/config.Configuration` | `ToTracingConfig` 返回只含被设置字段的 `TracingConfiguration`；tracing 不移植 |
 | 第三方全局：client-go | `tikvcfg.StoreGlobalConfig` / `GetGlobalConfig` | 与 `globalConf` 一起保存在本模块（`tikv_get_global_config`），client-go 的移植到来时改为调用它 |
@@ -99,7 +100,8 @@ mappings.md 中 `M-ERR` 的依据是本 spec。规则：
 4. **原型是 `LazyLock<Error>` 静态量**，名字与 Go 变量相同。Go 在包初始化时执行 `ClassX.NewStd(code)`，Rust 在第一次使用时执行，结果相同。
 5. **注册表是静态表**：Go 的 `ErrClassToMySQLCodes` 由所有包的初始化填充，tidb-server 启动后冻结（`RegisterFinish`）。Rust 用从 tidb-server 的包集合生成的静态表（656 个错误码），`initError` 只检查不插入（debug 断言）。`ToSQLError` 对未注册的码返回 1105，与 Go 相同。
 6. **Go 的 string 是字节串**：消息模板、`Error()`、`GetMsg()`、`SQLError` 的消息和 `fmt` 的 Go `string` 参数都是字节（`Vec<u8>`、`Cow<'static, [u8]>`、`Arg::Str`），非 UTF-8 的字节按 Go 的规则处理（宽度和精度中每个非法字节算一个 rune，`%s` 原样输出，`%q` 输出 `\xNN`）。例如 `CAST(0xFF41 AS SIGNED)` 的 warning 中原始字节 `ff 41` 原样保留。`Display` 只用于日志，有损转换。Go 的 `[]byte` 参数是 `Arg::Bytes`；字节没有到 `Arg` 的 `From` 转换，必须显式选 `Arg::go_string` 或 `Arg::Bytes`，避免混淆。
-7. **错误码常量是 `u16`**（MySQL 线上格式），`ErrClass::new_std` 等接受 `impl IntoErrCode`（Go 的无类型常量隐式转换）。
+7. **被类型断言的错误类型 → 枚举**：Go 调用方对具体错误类型做类型断言或 type switch 的地方，Rust 返回枚举，每个被断言的类型一个变体，再加一个 `Other(Error)`。例：`Config::load` 返回 `LoadError { ValidationFailed(ErrConfigValidationFailed), InstanceSection(ErrConfigInstanceSection), Other(Error) }`，因为 `InitializeConfig` 断言前两种类型。枚举有 `error() -> Vec<u8>`。
+8. **错误码常量是 `u16`**（MySQL 线上格式），`ErrClass::new_std` 等接受 `impl IntoErrCode`（Go 的无类型常量隐式转换）。
 
 ## 5. 验收
 
@@ -110,11 +112,12 @@ mappings.md 中 `M-ERR` 的依据是本 spec。规则：
    - 目标：两个目标的记录相同（本领域没有 FMA 相关的浮点运算）。arm64 的文件在本地生成，amd64 的文件取自 tracker PR 的 CI 产物（作者机器不能运行 amd64）。
    - 另外用评审中的差分 fuzz 复核（不入库）：30 万组随机格式与参数（含非 UTF-8）、100 万个 float32/float64 的 `%v %g %e %G %E` 与带精度格式，与 Go 逐字节一致，无 panic。
 2. **来源标注**：138 个函数 100% 有 `// go:` 标注；`go-std`（Go 标准库）、`go-dep`（pingcap/errors、BurntSushi/toml、client-go、zap）、`glue` 覆盖其余函数；converge `matched 138/138, missing 0`，`converge: OK`。
-3. **函数级（govec，tracker 领域 `config`，第二部分）**：`vectors/v8.5.8/<目标>/config.jsonl.gz`，5,109 条记录全部回放通过：
+3. **函数级（govec，tracker 领域 `config`，第二部分）**：`vectors/v8.5.8/<目标>/config.jsonl.gz`，8,399 条记录全部回放通过（评审后增加了 `gostd` 的 3,290 条，见下）：
    - 4,129 条 `load`（`Config.Load` + `Valid`，加载前后逐字段对比）：Go 的示例 `config.toml.example`、从 `config_test.go` 抽出的 30 段 TOML、每个字段 × 各类 TOML 值（错误类型、整数范围、`Duration` 字符串、`nullableBool`/`AtomicBool` 的各种写法、大小写折叠的键）、未知键、已移除的键、移到 `[instance]` 的键（含冲突）、`Valid` 的每条边界、115 条 lexer/parser 边界和 1,177 条随机破坏的片段。其中 1,680 条以解码错误结束（比对错误文本），584 条 `ErrConfigValidationFailed`，96 条 `ErrConfigInstanceSection`，129 条 `Valid` 报错；
    - `GetJSONConfig`（154）、`CloneConf`（152）、`MergeConfigItems`（240）、`FlattenConfigItems`（36）、`RemovedVariableCheck`（106）、`ContainHiddenConfig`、`nullableBool`/`AtomicBool` 的文本与 JSON、`ToLogConfig`、`ToTracingConfig`、`GetTiKVConfig`、全局配置函数、`UpdateTempStoragePath`、`ExecuteErrorToLabel`；
+   - `gostd`：2,960 条 `f2i`（浮点到 10 种整数类型的转换，M-F2I）、全部码位的 `SimpleFold` 与 `ToUpper`/`ToLower` 表、328 条 `strings.EqualFold`；
    - Go 结果依赖 map 迭代顺序的用例不入向量（生成器按结构判断，见 plan §7.3）；
    - `InitializeConfig`（调用 `os.Exit`）和只被它调用的 `isAllRemovedConfigItems` 豁免，由 Rust 单测覆盖。
-   - 目标：两个目标的记录除 5 条外相同，这 5 条是 `grpc-keepalive-timeout` 取 `1e30`、`inf` 等值时 `time.Duration(f * 1e9)` 溢出 int64：amd64 得 `MinInt64`，`Valid` 报错；arm64 饱和，`Valid` 通过。Rust 的 `go_float_to_i64` 按目标复现。amd64 的文件取自 tracker PR #4 的 CI 产物（run 42344887641）。
+   - 目标：两个目标的 `f2i` 记录在越界和 NaN 上不同（M-F2I）；其余记录除 5 条外相同，这 5 条是 `grpc-keepalive-timeout` 取 `1e30`、`inf` 等值时 `time.Duration(f * 1e9)` 溢出 int64：amd64 得 `MinInt64`，`Valid` 报错；arm64 饱和，`Valid` 通过。Rust 的 `go_float_to_i64` 按目标复现。amd64 的文件取自 tracker PR #4 的 CI 产物。
 4. **分层**：`check_layers.py` 通过（`tidb-base` rank 0，无 tidb-rs 依赖）。
 5. **单测**：Go 的 `errname_test.go`、`terror_test.go`、`const_test.go`、`privs_test.go`、`type_test.go`、`error_test.go`、`infoschema_test.go` 没有逐个翻译。govec `base` 的用例是生成的（每个模板、每个注册码、每张表），没有抄这些测试的用例表；这些测试检查的性质（表无重复且完整、格式化、类与 RFC 码、`ErrorEqual`、SQL mode、权限、统计计数）都在向量中。Rust 侧另有几个单测（gofmt 基本格式、注册表有序、`ErrCritical`；第二部分：`InitializeConfig` 的各条路径、`isAllRemovedConfigItems`）。`config_test.go` 的 TOML 片段进入 govec `config` 的语料（见上）。

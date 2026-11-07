@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Published config snapshots (Go atomic.Pointer, mapping rule M-SNAP).
+arc-swap = "1"
 # terror.Log / Call / MustNil and getMySQLErrorCode's warnings (Go: pingcap/log, i.e. zap).
 log = "0.4"
 # Go sync.RWMutex (mapping rule M-LOCK).
