@@ -95,7 +95,7 @@ Go 的 `Time` 内嵌 `coreTime`（一个 `uint64`，低 4 位是 fsp 和类型�
 |---|---|---|
 | 1 | `Time.UnmarshalJSON` 的 JSON 语法错误文本是 serde_json 的 | 与 MyDecimal 相同（D01.2）。类型错误的文本（`json: cannot unmarshal number 1.5 into Go value of type types.CoreTime`）与 Go 一致 |
 | 2 | `Duration.RoundFrac`、`DateTimeIsOverflow` 不再有 `loc == nil` 时退回 `time.Local` 的分支 | Rust 的 `Context` 总是持有一个 Location，`nil` 不可能出现 |
-| 3 | 没有移植 Go 的 `zoneinfo.zip` 和 `time/tzdata` 回退；没有保留 `Location` 的查找缓存 | TiDB 两者都不链接。缓存只是加速，命中时的结果与 `lookup` 相同 |
+| 3 | 没有移植 `time/tzdata`（内嵌）和 `$GOROOT/lib/time/zoneinfo.zip` 这两个回退 | TiDB 两者都不链接。`$ZONEINFO` 指向 zip 文件的情况已支持（D01.3 后续 PR）；`Location` 的查找缓存也已按 L1 移植 |
 | 4 | `gotime::now()` 不带单调时钟读数 | 移植代码中没有对两个 `Now()` 相减的地方 |
 | 5 | `StrToInt` 只实现了 `parseDatetime` 唯一调用点的输入形状，即纯数字串，作为 D01.4 的边界桩 | 该处的 `seps[0]` 来自 `ParseTimeFromFloatString`，是 `strconv` 格式化出的数字串 |
 | 6 | `scanTimeArgs` 参数个数不符时的错误参数（`[]string` 的格式化）是近似实现 | 调用方总是按 `len(seps)` 选择分支，这条路径不可达 |

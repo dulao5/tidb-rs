@@ -8,10 +8,9 @@
 //! zone abbreviations in `Time.String`) must be Go's, so this is a port, not chrono-tz
 //! (whose compiled-in tz database and gap handling differ). See `specs/D01.3-time/spec.md`.
 //!
-//! Not ported: Go's `zoneinfo.zip` / `$GOROOT` and `time/tzdata` fallbacks (TiDB links
-//! neither; a name missing from the system database is `unknown time zone`), and the
-//! lookup cache (`cacheStart`/`cacheEnd`/`cacheZone`, a pure speed-up: a cache hit returns
-//! what `lookup` computes).
+//! Not ported: the `time/tzdata` (embedded) and `$GOROOT/lib/time/zoneinfo.zip` fallbacks
+//! (TiDB links neither; a name missing from the system database is `unknown time zone`).
+//! `$ZONEINFO` naming a zip file is supported, as in Go.
 
 #![allow(clippy::needless_late_init)]
 
@@ -28,6 +27,19 @@ pub struct Location {
     tx: Vec<ZoneTrans>,
     /// The TZ string from the end of the TZif file, for times after the last transition.
     extend: String,
+
+    // Most lookups will be for the current time.
+    // To avoid the binary search through tx, keep a
+    // static one-element cache that gives the correct
+    // zone for the time when the Location was created.
+    // if cacheStart <= t < cacheEnd,
+    // lookup can return cacheZone.
+    // The units for cacheStart and cacheEnd are seconds
+    // since January 1, 1970 UTC, to match the argument
+    // to lookup.
+    cache_start: i64,
+    cache_end: i64,
+    cache_zone: Option<Zone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,10 +58,10 @@ struct ZoneTrans {
 const ALPHA: i64 = i64::MIN;
 const OMEGA: i64 = i64::MAX;
 
-/// The result of `Location.lookup`.
+/// The result of `Location.lookup` (the name borrows from the Location).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ZoneInfo {
-    pub name: String,
+pub struct ZoneInfo<'a> {
+    pub name: &'a str,
     pub offset: i32,
     pub start: i64,
     pub end: i64,
@@ -62,6 +74,9 @@ static UTC: LazyLock<Arc<Location>> = LazyLock::new(|| {
         zone: Vec::new(),
         tx: Vec::new(),
         extend: String::new(),
+        cache_start: 0,
+        cache_end: 0,
+        cache_zone: None,
     })
 });
 
@@ -102,10 +117,40 @@ impl Location {
     /// lookup returns information about the time zone in use at an instant in time
     /// expressed as seconds since January 1, 1970 00:00:00 UTC.
     // go-std: time.Location.lookup L1
-    pub fn lookup(&self, sec: i64) -> ZoneInfo {
+    pub fn lookup(&self, sec: i64) -> ZoneInfo<'_> {
         if self.zone.is_empty() {
             return ZoneInfo {
-                name: "UTC".to_owned(),
+                name: "UTC",
+                offset: 0,
+                start: ALPHA,
+                end: OMEGA,
+                is_dst: false,
+            };
+        }
+
+        if let Some(zone) = &self.cache_zone
+            && self.cache_start <= sec
+            && sec < self.cache_end
+        {
+            return ZoneInfo {
+                name: &zone.name,
+                offset: zone.offset,
+                start: self.cache_start,
+                end: self.cache_end,
+                is_dst: zone.is_dst,
+            };
+        }
+        self.lookup_uncached(sec)
+    }
+
+    /// `lookup` without the cache check (the rest of Go's `lookup`); public so that tests
+    /// can check that the cache answers as the search does.
+    // go-std: time.Location.lookup L2 (the part after the cache check)
+    #[doc(hidden)]
+    pub fn lookup_uncached(&self, sec: i64) -> ZoneInfo<'_> {
+        if self.zone.is_empty() {
+            return ZoneInfo {
+                name: "UTC",
                 offset: 0,
                 start: ALPHA,
                 end: OMEGA,
@@ -121,7 +166,7 @@ impl Location {
                 self.tx[0].when
             };
             return ZoneInfo {
-                name: zone.name.clone(),
+                name: &zone.name,
                 offset: zone.offset,
                 start: ALPHA,
                 end,
@@ -157,7 +202,7 @@ impl Location {
             return z;
         }
         ZoneInfo {
-            name: zone.name.clone(),
+            name: &zone.name,
             offset: zone.offset,
             start,
             end,
@@ -222,6 +267,13 @@ pub fn fixed_zone(name: &str, offset: i32) -> Arc<Location> {
             index: 0,
         }],
         extend: String::new(),
+        cache_start: ALPHA,
+        cache_end: OMEGA,
+        cache_zone: Some(Zone {
+            name: name.to_owned(),
+            offset,
+            is_dst: false,
+        }),
     })
 }
 
@@ -232,10 +284,9 @@ pub fn fixed_zone(name: &str, offset: i32) -> Arc<Location> {
 /// The return values are as for lookup, plus ok which reports whether the
 /// parse succeeded.
 // go-std: time.tzset L1
-fn tzset(s: &str, last_tx_sec: i64, sec: i64) -> Option<ZoneInfo> {
-    let (std_name, s) = tzset_name(s)?;
+fn tzset(s: &str, last_tx_sec: i64, sec: i64) -> Option<ZoneInfo<'_>> {
+    let (mut std_name, s) = tzset_name(s)?;
     let (std_offset, s) = tzset_offset(s)?;
-    let mut std_name = std_name.to_owned();
     let mut std_offset = -std_offset;
 
     if s.is_empty() || s.as_bytes()[0] == b',' {
@@ -249,8 +300,7 @@ fn tzset(s: &str, last_tx_sec: i64, sec: i64) -> Option<ZoneInfo> {
         });
     }
 
-    let (dst_name, s) = tzset_name(s)?;
-    let mut dst_name = dst_name.to_owned();
+    let (mut dst_name, s) = tzset_name(s)?;
     let (mut dst_offset, mut s) = if s.is_empty() || s.as_bytes()[0] == b',' {
         (std_offset + SECONDS_PER_HOUR as i32, s)
     } else {
@@ -595,22 +645,34 @@ pub fn load_location(name: &str) -> Result<Arc<Location>, String> {
     }
 
     let mut first_err: Option<String> = None;
-    if let Ok(zoneinfo) = std::env::var("ZONEINFO")
-        && !zoneinfo.is_empty()
-    {
-        match load_tzinfo_from_dir(&zoneinfo, name) {
+    let zoneinfo: &str = &ZONEINFO;
+    if !zoneinfo.is_empty() {
+        match load_tzinfo_from_dir_or_zip(zoneinfo, name) {
             Ok(data) => match load_location_from_tzdata(name, &data) {
                 Ok(z) => return Ok(Arc::new(z)),
                 Err(e) => first_err = Some(e),
             },
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => first_err = Some(go_io_err(&e)),
-            Err(_) => {}
+            Err(TzError::Other(e)) => first_err = Some(e),
+            Err(TzError::NotFound) => {}
         }
     }
     match load_location_sources(name, PLATFORM_ZONE_SOURCES) {
         Ok(z) => Ok(Arc::new(z)),
         Err(e) => Err(first_err.unwrap_or(e)),
     }
+}
+
+/// `$ZONEINFO`, read once per process like Go (`zoneinfoOnce`).
+static ZONEINFO: LazyLock<String> = LazyLock::new(|| std::env::var("ZONEINFO").unwrap_or_default());
+
+/// The error of reading tz data: Go's `syscall.ENOENT` (try the next source) or another
+/// error (its message).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TzError {
+    /// `syscall.ENOENT`.
+    NotFound,
+    /// Any other error, with Go's message.
+    Other(String),
 }
 
 /// containsDotDot reports whether s contains "..".
@@ -630,14 +692,159 @@ const PLATFORM_ZONE_SOURCES: &[&str] = &[
     "/etc/zoneinfo",
 ];
 
-// go-std: time.loadTzinfoFromDirOrZip L2 (directories only)
-fn load_tzinfo_from_dir(dir: &str, name: &str) -> std::io::Result<Vec<u8>> {
+/// loadTzinfoFromDirOrZip returns the contents of the file with the given name
+/// in dir. dir can either be an uncompressed zip file, or a directory.
+// go-std: time.loadTzinfoFromDirOrZip L1
+pub fn load_tzinfo_from_dir_or_zip(dir: &str, name: &str) -> Result<Vec<u8>, TzError> {
+    if dir.len() > 4 && dir.ends_with(".zip") {
+        return load_tzinfo_from_zip(dir, name);
+    }
     let path = if dir.is_empty() {
         name.to_owned()
     } else {
         format!("{dir}/{name}")
     };
-    std::fs::read(path)
+    read_file(&path)
+}
+
+/// `os.ReadFile`-like read of a tz file (Go `readFile`; the 10 MB limit is not checked).
+// go-std: time.readFile L2 (no maxFileSize check)
+fn read_file(path: &str) -> Result<Vec<u8>, TzError> {
+    std::fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            TzError::NotFound
+        } else {
+            TzError::Other(go_io_err(&e))
+        }
+    })
+}
+
+/// get4 returns the little-endian 32-bit value at the start of b.
+// go-std: time.get4 L1
+fn get4(b: &[u8]) -> usize {
+    if b.len() < 4 {
+        return 0;
+    }
+    usize::from(b[0]) | usize::from(b[1]) << 8 | usize::from(b[2]) << 16 | usize::from(b[3]) << 24
+}
+
+/// get2 returns the little-endian 16-bit value at the start of b.
+// go-std: time.get2 L1
+fn get2(b: &[u8]) -> usize {
+    if b.len() < 2 {
+        return 0;
+    }
+    usize::from(b[0]) | usize::from(b[1]) << 8
+}
+
+/// loadTzinfoFromZip returns the contents of the file with the given name
+/// in the given uncompressed zip file.
+// go-std: time.loadTzinfoFromZip L2 (the file is read whole instead of with pread; the same bytes are examined)
+fn load_tzinfo_from_zip(zipfile: &str, name: &str) -> Result<Vec<u8>, TzError> {
+    let data = read_file(zipfile)?;
+    let corrupt = || TzError::Other(format!("corrupt zip file {zipfile}"));
+    // preadn reads exactly len(buf) bytes at off; a negative off is from the end.
+    let preadn = |n: usize, off: isize| -> Option<&[u8]> {
+        let start = if off < 0 {
+            data.len().checked_sub(off.unsigned_abs())?
+        } else {
+            off as usize
+        };
+        data.get(start..start.checked_add(n)?)
+    };
+
+    const ZECHEADER: usize = 0x06054b50;
+    const ZCHEADER: usize = 0x02014b50;
+    const ZTAILSIZE: usize = 22;
+
+    const ZHEADERSIZE: usize = 30;
+    const ZHEADER: usize = 0x04034b50;
+
+    let buf = preadn(ZTAILSIZE, -(ZTAILSIZE as isize)).ok_or_else(corrupt)?;
+    if get4(buf) != ZECHEADER {
+        return Err(corrupt());
+    }
+    let n = get2(&buf[10..]);
+    let size = get4(&buf[12..]);
+    let off = get4(&buf[16..]);
+
+    let mut buf = preadn(size, off as isize).ok_or_else(corrupt)?;
+
+    for _ in 0..n {
+        // zip entry layout:
+        //	0	magic[4]
+        //	4	madevers[1]
+        //	5	madeos[1]
+        //	6	extvers[1]
+        //	7	extos[1]
+        //	8	flags[2]
+        //	10	meth[2]
+        //	12	modtime[2]
+        //	14	moddate[2]
+        //	16	crc[4]
+        //	20	csize[4]
+        //	24	uncsize[4]
+        //	28	namelen[2]
+        //	30	xlen[2]
+        //	32	fclen[2]
+        //	34	disknum[2]
+        //	36	iattr[2]
+        //	38	eattr[4]
+        //	42	off[4]
+        //	46	name[namelen]
+        //	46+namelen+xlen+fclen - next header
+        //
+        if get4(buf) != ZCHEADER {
+            break;
+        }
+        let meth = get2(&buf[10..]);
+        let size = get4(&buf[24..]);
+        let namelen = get2(&buf[28..]);
+        let mut xlen = get2(&buf[30..]);
+        let fclen = get2(&buf[32..]);
+        let off = get4(&buf[42..]);
+        let zname = &buf[46..46 + namelen];
+        buf = &buf[46 + namelen + xlen + fclen..];
+        if zname != name.as_bytes() {
+            continue;
+        }
+        if meth != 0 {
+            return Err(TzError::Other(format!(
+                "unsupported compression for {name} in {zipfile}"
+            )));
+        }
+
+        // zip per-file header layout:
+        //	0	magic[4]
+        //	4	extvers[1]
+        //	5	extos[1]
+        //	6	flags[2]
+        //	8	meth[2]
+        //	10	modtime[2]
+        //	12	moddate[2]
+        //	14	crc[4]
+        //	18	csize[4]
+        //	22	uncsize[4]
+        //	26	namelen[2]
+        //	28	xlen[2]
+        //	30	name[namelen]
+        //	30+namelen+xlen - file data
+        //
+        let hdr = preadn(ZHEADERSIZE + namelen, off as isize).ok_or_else(corrupt)?;
+        if get4(hdr) != ZHEADER
+            || get2(&hdr[8..]) != meth
+            || get2(&hdr[26..]) != namelen
+            || &hdr[30..30 + namelen] != name.as_bytes()
+        {
+            return Err(corrupt());
+        }
+        xlen = get2(&hdr[28..]);
+
+        let body = preadn(size, (off + 30 + namelen + xlen) as isize).ok_or_else(corrupt)?;
+        return Ok(body.to_vec());
+    }
+
+    Err(TzError::NotFound)
 }
 
 // glue: Go's syscall error text for a failed tz file read (rare: permission errors)
@@ -651,7 +858,7 @@ fn go_io_err(e: &std::io::Error) -> String {
 fn load_location_sources(name: &str, sources: &[&str]) -> Result<Location, String> {
     let mut first_err: Option<String> = None;
     for source in sources {
-        match load_tzinfo_from_dir(source, name) {
+        match load_tzinfo_from_dir_or_zip(source, name) {
             Ok(data) => match load_location_from_tzdata(name, &data) {
                 Ok(z) => return Ok(z),
                 Err(e) => {
@@ -660,12 +867,12 @@ fn load_location_sources(name: &str, sources: &[&str]) -> Result<Location, Strin
                     }
                 }
             },
-            Err(e) => {
-                // Go: a directory read gives EISDIR, not ENOENT.
-                if first_err.is_none() && e.kind() != std::io::ErrorKind::NotFound {
-                    first_err = Some(go_io_err(&e));
+            Err(TzError::Other(e)) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
                 }
             }
+            Err(TzError::NotFound) => {}
         }
     }
     if let Some(e) = first_err {
@@ -748,7 +955,7 @@ fn byte_string(p: &[u8]) -> String {
 /// initialized from the IANA Time Zone database-formatted data.
 /// The data should be in the format of a standard IANA time zone file
 /// (for example, the content of /etc/localtime on Unix systems).
-// go-std: time.LoadLocationFromTZData L1 (without filling the lookup cache)
+// go-std: time.LoadLocationFromTZData L1
 pub fn load_location_from_tzdata(name: &str, data: &[u8]) -> Result<Location, String> {
     let bad = || ERR_BAD_DATA.to_owned();
     let mut d = DataIo {
@@ -912,12 +1119,55 @@ pub fn load_location_from_tzdata(name: &str, data: &[u8]) -> Result<Location, St
         });
     }
 
-    Ok(Location {
+    let mut l = Location {
         name: name.to_owned(),
         zone: zones,
         tx,
         extend,
-    })
+        cache_start: 0,
+        cache_end: 0,
+        cache_zone: None,
+    };
+
+    // Fill in the cache with information about right now,
+    // since that will be the most common lookup.
+    let sec = runtime_now();
+    for i in 0..l.tx.len() {
+        if l.tx[i].when <= sec && (i + 1 == l.tx.len() || sec < l.tx[i + 1].when) {
+            l.cache_start = l.tx[i].when;
+            l.cache_end = OMEGA;
+            l.cache_zone = Some(l.zone[usize::from(l.tx[i].index)].clone());
+            if i + 1 < l.tx.len() {
+                l.cache_end = l.tx[i + 1].when;
+            } else if !l.extend.is_empty()
+                && let Some(z) = tzset(&l.extend, l.cache_start, sec)
+            {
+                let zone = Zone {
+                    name: z.name.to_owned(),
+                    offset: z.offset,
+                    is_dst: z.is_dst,
+                };
+                let (start, end) = (z.start, z.end);
+                l.cache_start = start;
+                l.cache_end = end;
+                // Go points cacheZone at the matching entry of l.zone (findZone) or a new
+                // zone; both carry the same name, offset and isDST.
+                l.cache_zone = Some(zone);
+            }
+            break;
+        }
+    }
+
+    Ok(l)
+}
+
+/// The current Unix second (Go `runtimeNow`, the wall-clock part).
+// go-std: time.runtimeNow L2 (seconds only)
+fn runtime_now() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(e) => -(e.duration().as_secs() as i64) - 1,
+    }
 }
 
 /// initLocal: `time.Local` from `$TZ` or `/etc/localtime`.
@@ -961,5 +1211,8 @@ fn init_local() -> Location {
         zone: Vec::new(),
         tx: Vec::new(),
         extend: String::new(),
+        cache_start: 0,
+        cache_end: 0,
+        cache_zone: None,
     }
 }

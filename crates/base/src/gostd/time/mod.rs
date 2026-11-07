@@ -12,8 +12,8 @@ mod zoneinfo;
 
 pub use instant::{Month, Time, Weekday, date, now, unix, weekday_string};
 pub use zoneinfo::{
-    Location, ZoneInfo, fixed_zone, is_local, is_utc, load_location, load_location_from_tzdata,
-    local, utc,
+    Location, TzError, ZoneInfo, fixed_zone, is_local, is_utc, load_location,
+    load_location_from_tzdata, load_tzinfo_from_dir_or_zip, local, utc,
 };
 
 /// `time.Duration` (nanoseconds).
