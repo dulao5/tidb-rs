@@ -21,7 +21,7 @@ blocks = ["D14.1"]
 
 [crate.tidb-parser]
 rank = 1
-blocks = ["D02.1", "D02.2"]
+blocks = ["D02.1", "D02.2", "D02.3"]   # D02.3: parser model/types/auth/duration（忠实移植）
 
 [crate.tidb-memory]
 rank = 1
