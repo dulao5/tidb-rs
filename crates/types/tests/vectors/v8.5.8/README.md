@@ -64,3 +64,18 @@ Replayed by `tests/govec_vector.rs`.
 | `amd64/vector.jsonl.gz` sha256 | `dd598d395cb3a25c2e3bd891092c4cafcec9bbf6b83db0686445c1dd77ff04ba` (CI linux/amd64, GOAMD64=v1) |
 | `arm64/vector.jsonl.gz` sha256 | `2efb8e86bc9e41d3ce75c54766a31a0310ed2e635ca45ab63fc081d4f901a6bb` |
 | generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 31337) |
+
+## collate (block D01.9)
+
+`<target>/collate.jsonl.gz` are copied unmodified from tidb-rs-tracker
+`vectors/v8.5.8/<target>/collate.jsonl.gz` (branch `govec/collate-D01.9`): 46,736 records of
+`pkg/util/collate`, `pkg/parser/charset/charset.go` and `pkg/util/stringutil`, including
+SHA-256 digests of `Key`, `KeyWithoutTrimRightSpace` and `Compare` over all code points for 8
+collations. The two targets have the same records. Replayed by `tests/govec_collate.rs`.
+
+| | |
+|---|---|
+| tracker commit | `82396f9` (branch `govec/collate-D01.9`) |
+| `amd64/collate.jsonl.gz` sha256 | `abe9f09d0ad86e9138b193659733d3211032e708ecc43120d51b9362a3d12194` (CI linux/amd64, GOAMD64=v1) |
+| `arm64/collate.jsonl.gz` sha256 | `7f708d29d166268e0f74695f3fe2eb10614588ad68c5de3d1060f70f0a1aa22d` |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261109) |

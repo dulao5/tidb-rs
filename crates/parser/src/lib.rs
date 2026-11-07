@@ -41,6 +41,9 @@ pub mod types;
 mod charset_gen;
 mod ctx;
 mod driver;
+/// Port of `pkg/parser/charset/charset.go` and the GBK encoder (Go identifiers, M-GONAME).
+#[allow(missing_docs)]
+pub mod gocharset;
 /// Stub types for Go AST types the grammar references but which are not ported yet.
 #[allow(missing_docs)]
 #[rustfmt::skip]

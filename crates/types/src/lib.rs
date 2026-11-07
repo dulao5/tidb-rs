@@ -1,11 +1,12 @@
 //! Port of Go TiDB v8.5.8 `pkg/types` (so far blocks D01.2 `MyDecimal`, D01.3 time and
-//! Duration, with `types.Context`, and D01.6 `VectorFloat32`).
+//! Duration, with `types.Context`, D01.6 `VectorFloat32`, and D01.9 `util/collate`).
 //!
 //! The Go code is the specification: every function maps to one Go function (see the
 //! `// go:` annotations and `specs/D01.2-mydecimal/`).
 
 #![forbid(unsafe_code)]
 
+pub mod collate;
 pub mod context;
 pub mod core_time;
 pub mod errors;
@@ -16,6 +17,7 @@ mod jsoniter;
 pub mod mydecimal;
 #[cfg(test)]
 mod mydecimal_test;
+pub mod stringutil;
 pub mod time;
 mod util_parser;
 pub mod vector;
