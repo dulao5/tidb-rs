@@ -129,22 +129,11 @@ pub fn is_digit_byte(b: u8) -> bool {
     is_digit(char::from(b))
 }
 
-/// `strings.ToUpper`: ASCII fast path; other runes use Rust's uppercase mapping when it is a
-/// single character (Go's `unicode.ToUpper` is the simple mapping, it never expands a rune).
-// go-std: strings.ToUpper L2 (unicode.ToUpper approximated by single-char char::to_uppercase)
+/// `strings.ToUpper` for a valid UTF-8 string: `unicode.ToUpper` on every rune (Go's
+/// simple case mapping, which never expands a rune).
+// go-std: strings.ToUpper L1
 pub fn to_upper(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii() {
-                return c.to_ascii_uppercase();
-            }
-            let mut up = c.to_uppercase();
-            match (up.next(), up.next()) {
-                (Some(u), None) => u,
-                _ => c,
-            }
-        })
-        .collect()
+    s.chars().map(to_upper_rune).collect()
 }
 
 pub(crate) mod ftoaryu;
@@ -214,3 +203,139 @@ pub fn is_print(r: char) -> bool {
     })
     .is_ok()
 }
+
+/// `unicode.IsLetter` reports whether the rune is a letter (category L).
+// go-std: unicode.IsLetter L1
+pub fn is_letter(r: char) -> bool {
+    use unicode_tables::{Ll, Lm, Lo, Lt, Lu};
+    is_one_of(&[&Lu, &Ll, &Lt, &Lm, &Lo], r)
+}
+
+/// `strings.ToLower` for a valid UTF-8 string: `unicode.ToLower` on every rune.
+// go-std: strings.ToLower L1
+pub fn to_lower(s: &str) -> String {
+    s.chars().map(to_lower_rune).collect()
+}
+
+/// `unicode.UpperCase`, `LowerCase`, `TitleCase`: indices into the deltas of a case range.
+const UPPER_CASE: usize = 0;
+const LOWER_CASE: usize = 1;
+/// `unicode.MaxRune`: a delta above it is `unicode.UpperLower` (runes alternate upper and
+/// lower case).
+const MAX_RUNE: i32 = 0x10FFFF;
+
+/// `unicode.to`: maps the rune using the specified case mapping (`unicode.CaseRanges`).
+// go-std: unicode.to L1
+fn to_case(case: usize, r: char) -> char {
+    let ranges = unicode_tables::CASE_RANGES;
+    let r32 = r as u32;
+    // binary search over ranges
+    let (mut lo, mut hi) = (0, ranges.len());
+    while lo < hi {
+        let m = lo + (hi - lo) / 2;
+        let (clo, chi, delta) = ranges[m];
+        if clo <= r32 && r32 <= chi {
+            let d = delta[case];
+            if d > MAX_RUNE {
+                // In an Upper-Lower sequence, which always starts with an UpperCase letter,
+                // the real deltas always look like: {0, 1, 0} (UpperCase (Lower is next)),
+                // {-1, 0, -1} (LowerCase (Upper, Title are previous)). The characters at
+                // even offsets from the beginning of the sequence are upper case; the ones
+                // at odd offsets are lower. The correct mapping can be done by clearing or
+                // setting the low bit in the sequence offset. The constants UpperCase and
+                // TitleCase are even while LowerCase is odd so we take the low bit from case.
+                return char::from_u32(clo + (((r32 - clo) & !1) | (case as u32 & 1))).unwrap_or(r);
+            }
+            return char::from_u32((r32 as i64 + i64::from(d)) as u32).unwrap_or(r);
+        }
+        if r32 < clo {
+            hi = m;
+        } else {
+            lo = m + 1;
+        }
+    }
+    r
+}
+
+/// `unicode.ToUpper` maps the rune to upper case.
+// go-std: unicode.ToUpper L1
+pub fn to_upper_rune(r: char) -> char {
+    if r.is_ascii() {
+        return r.to_ascii_uppercase();
+    }
+    to_case(UPPER_CASE, r)
+}
+
+/// `unicode.ToLower` maps the rune to lower case.
+// go-std: unicode.ToLower L1
+pub fn to_lower_rune(r: char) -> char {
+    if r.is_ascii() {
+        return r.to_ascii_lowercase();
+    }
+    to_case(LOWER_CASE, r)
+}
+
+/// `unicode.SimpleFold` iterates over Unicode code points equivalent under the
+/// Unicode-defined simple case folding: the smallest rune > r if one exists, or else the
+/// smallest rune >= 0. (`asciiFold` and `caseOrbit` are the generated `FOLD_ORBIT`.)
+// go-std: unicode.SimpleFold L1
+pub fn simple_fold(r: char) -> char {
+    let orbit = unicode_tables::FOLD_ORBIT;
+    if let Ok(i) = orbit.binary_search_by_key(&(r as u32), |&(from, _)| from) {
+        return char::from_u32(orbit[i].1).unwrap_or(r);
+    }
+    // No folding specified. This is a one- or two-element equivalence class containing
+    // rune and ToLower(rune) and ToUpper(rune) if they are different from rune.
+    let l = to_lower_rune(r);
+    if l != r {
+        return l;
+    }
+    to_upper_rune(r)
+}
+
+/// `strings.EqualFold` reports whether s and t, interpreted as UTF-8 strings, are equal
+/// under simple Unicode case-folding, which is a more general form of case-insensitivity.
+// go-std: strings.EqualFold L1 (valid UTF-8 input)
+pub fn equal_fold(s: &str, t: &str) -> bool {
+    let mut tc = t.chars();
+    for mut sr in s.chars() {
+        let Some(mut tr) = tc.next() else {
+            return false;
+        };
+        // If they match, keep going; if not, return false.
+        // Easy case.
+        if tr == sr {
+            continue;
+        }
+        // Make sr < tr to simplify what follows.
+        if tr < sr {
+            std::mem::swap(&mut tr, &mut sr);
+        }
+        // Fast check for ASCII.
+        if tr.is_ascii() {
+            // ASCII only, sr/tr must be upper/lower case
+            if sr.is_ascii_uppercase() && tr as u32 == sr as u32 + 32 {
+                continue;
+            }
+            return false;
+        }
+        // General case. SimpleFold(x) returns the next equivalent rune > x or wraps around
+        // to smaller values.
+        let mut r = simple_fold(sr);
+        while r != sr && r < tr {
+            r = simple_fold(r);
+        }
+        if r == tr {
+            continue;
+        }
+        return false;
+    }
+    // One string is empty. Are both?
+    tc.next().is_none()
+}
+
+pub mod conv;
+pub mod json;
+pub mod path;
+pub mod strconv;
+pub mod time;

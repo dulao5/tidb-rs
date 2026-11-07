@@ -31,9 +31,9 @@
 | 1 | `tidb-parser` | D02.1、D02.2 | parser | 已有 |
 | 1 | `tidb-memory` | D15.1 | util/memory（A1） | 规划 |
 | 2 | `tidb-types` | D01.1–D01.6、D01.9 | types、util/collate、util/charset | 已有（D01.2） |
-| 2 | `tidb-model` | D06.1 | meta/model、`resolve.ResultField` | 规划 |
 | 3 | `tidb-chunk` | D01.7、D01.10 | util/chunk、util/disk | 规划 |
-| 3 | `tidb-execdetails` | D14.0 | util/execdetails | 规划 |
+| 3 | `tidb-model` | D06.1 | meta/model、`resolve.ResultField`、`types.ColumnNeedRestoredData`（D00.2 第二部分评审：model 调用 types，rank 从 2 改为 3） | 规划 |
+| 4 | `tidb-execdetails` | D14.0 | util/execdetails（随 model 从 3 改为 4：execdetails → model） | 规划 |
 | 4 | `tidb-codec` | D01.8 | util/codec | 规划 |
 | 5 | `tidb-kv` | D07.0 | kv | 规划（与 PoC 同名，见 §5） |
 | 6 | `tidb-tablecodec` | D01.11 | tablecodec、util/rowcodec | 规划 |
