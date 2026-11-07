@@ -11,6 +11,9 @@
 //! The batching error is at most 64 KiB per live handle; [`TrackedAlloc::flush`] records the
 //! rest (and dropping the last clone of a handle does).
 //!
+//! `record` takes each ancestor's parent lock in turn and may set a metric: code that
+//! allocates through a `TrackedAlloc` must not hold a tracker lock (it would lock itself).
+//!
 //! The pending counter is per handle (shared by its clones), not per thread: one atomic add
 //! per allocation. A per-thread split is an optimisation left to the benchmark (A1 §5
 //! "记账开销").
