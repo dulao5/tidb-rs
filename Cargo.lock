@@ -3561,6 +3561,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-base"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "log",
+ "parking_lot 0.12.5",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tidb-distsql"
 version = "0.0.0"
 dependencies = [

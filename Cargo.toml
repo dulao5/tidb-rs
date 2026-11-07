@@ -14,6 +14,7 @@ members = [
   "crates/domain",
   "crates/metrics",
   "crates/types",
+  "crates/base",
   "tools/ab",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
   # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
@@ -60,6 +61,11 @@ style-lint-allow = [
   "clippy::manual_range_contains",
   "clippy::manual_slice_fill",
   "clippy::needless_range_loop",
+  # Go identifiers kept for constants, statics and Go-named functions of generated/ported
+  # tables (`mysql::ErrDupEntry`, `formatENUS`), so ported code reads like Go (D00.2 plan).
+  "non_upper_case_globals",
+  "non_snake_case",
+  "non_camel_case_types",
 ]
 
 # The vendored TiKV crates refer to these with `{ workspace = true }`. Specs
@@ -97,6 +103,7 @@ tidb-sql = { path = "crates/sql" }
 tidb-executor = { path = "crates/executor" }
 tidb-session = { path = "crates/session" }
 tidb-types = { path = "crates/types" }
+tidb-base = { path = "crates/base" }
 # TiKV Rust client: our fork with `Snapshot::coprocessor` and several connections per store
 # (branch tidb-rs/perf, on top of tidb-rs/coprocessor).
 # TEMPORARY: local clone, branch tidb-rs/metrics (client-go/PD metrics, feature
