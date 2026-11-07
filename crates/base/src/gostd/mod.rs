@@ -214,3 +214,36 @@ pub fn is_print(r: char) -> bool {
     })
     .is_ok()
 }
+
+/// `unicode.IsLetter` reports whether the rune is a letter (category L).
+// go-std: unicode.IsLetter L1
+pub fn is_letter(r: char) -> bool {
+    use unicode_tables::{Ll, Lm, Lo, Lt, Lu};
+    is_one_of(&[&Lu, &Ll, &Lt, &Lm, &Lo], r)
+}
+
+/// `strings.ToLower`: ASCII fast path; other runes use Rust's lowercase mapping when it is a
+/// single character (Go's `unicode.ToLower` is the simple mapping; `İ` maps to `i`).
+// go-std: strings.ToLower L2 (unicode.ToLower approximated by single-char char::to_lowercase)
+pub fn to_lower(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii() {
+                return c.to_ascii_lowercase();
+            }
+            if c == '\u{130}' {
+                return 'i';
+            }
+            let mut low = c.to_lowercase();
+            match (low.next(), low.next()) {
+                (Some(l), None) => l,
+                _ => c,
+            }
+        })
+        .collect()
+}
+
+pub mod json;
+pub mod path;
+pub mod strconv;
+pub mod time;

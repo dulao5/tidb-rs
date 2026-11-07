@@ -1341,7 +1341,7 @@ fn fixed_digits(v: f64, n: usize) -> (String, isize) {
 
 /// `strconv.AppendFloat` / `FormatFloat(v, fmt, prec, size)` for fmt `b e E f g G x X`.
 // go-std: strconv.genericFtoa L1 (fixed-precision digits: see fixed_digits)
-fn append_float(v: f64, fmt: u8, prec: isize, size: u8) -> String {
+pub(crate) fn append_float(v: f64, fmt: u8, prec: isize, size: u8) -> String {
     let (bits, mantbits, expbits, bias): (u64, u32, u32, i32) = if size == 32 {
         (u64::from((v as f32).to_bits()), 23, 8, -127)
     } else {

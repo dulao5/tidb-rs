@@ -12,6 +12,8 @@ publish.workspace = true
 log = "0.4"
 # Go sync.RWMutex (mapping rule M-LOCK).
 parking_lot = "0.12"
+# os.Geteuid / user.Current().Uid in pkg/config (hasRootPrivilege, tempStorageDirName).
+rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 # The govec vectors are committed as .jsonl.gz.
