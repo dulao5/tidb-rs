@@ -17,6 +17,7 @@ members = [
   "crates/base",
   "crates/runtime",
   "crates/memory",
+  "crates/model",
   "tools/ab",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
   # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
@@ -106,6 +107,7 @@ tidb-types = { path = "crates/types" }
 tidb-base = { path = "crates/base" }
 tidb-runtime = { path = "crates/runtime" }
 tidb-memory = { path = "crates/memory" }
+tidb-model = { path = "crates/model" }
 # TiKV Rust client: our fork with `Snapshot::coprocessor` and several connections per store
 # (branch tidb-rs/perf, on top of tidb-rs/coprocessor).
 # TEMPORARY: local clone, branch tidb-rs/metrics (client-go/PD metrics, feature

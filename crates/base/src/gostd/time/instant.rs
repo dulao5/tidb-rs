@@ -506,6 +506,467 @@ impl Time {
     }
 }
 
+impl Default for Time {
+    // glue: Go's zero value time.Time{}
+    fn default() -> Time {
+        Time::zero()
+    }
+}
+
+impl PartialEq for Time {
+    /// Go's `==` on `time.Time`: the same instant representation and the same `*Location`.
+    // glue: Go struct equality of time.Time (wall, ext, loc pointer)
+    fn eq(&self, other: &Time) -> bool {
+        self.sec == other.sec
+            && self.nsec == other.nsec
+            && match (&self.loc, &other.loc) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl Time {
+    /// `appendFormatRFC3339` with nanoseconds: `2006-01-02T15:04:05.999999999Z07:00`.
+    // go-std: time.Time.appendFormatRFC3339 L1 (nanos = true)
+    fn append_format_rfc3339_nano(&self, b: &mut Vec<u8>) {
+        let (_, offset, abs) = self.locabs();
+        let (year, month, day) = AbsDays(abs_seconds_days(abs)).date();
+        append_int(b, year, 4);
+        b.push(b'-');
+        append_int(b, month, 2);
+        b.push(b'-');
+        append_int(b, day, 2);
+        b.push(b'T');
+        let (hour, min, sec) = abs_clock(abs);
+        append_int(b, hour, 2);
+        b.push(b':');
+        append_int(b, min, 2);
+        b.push(b':');
+        append_int(b, sec, 2);
+        // appendNano with stdFracSecond9: trailing zeros trimmed, no '.' if all zero.
+        if self.nsec != 0 {
+            b.push(b'.');
+            append_int(b, i64::from(self.nsec), 9);
+            while b.last() == Some(&b'0') {
+                b.pop();
+            }
+        }
+        if offset == 0 {
+            b.push(b'Z');
+            return;
+        }
+        let mut zone = offset / 60; // convert to minutes
+        if zone < 0 {
+            b.push(b'-');
+            zone = -zone;
+        } else {
+            b.push(b'+');
+        }
+        append_int(b, i64::from(zone / 60), 2);
+        b.push(b':');
+        append_int(b, i64::from(zone % 60), 2);
+    }
+
+    /// `appendStrictRFC3339`: the RFC 3339 form, or an error when it would not be valid RFC
+    /// 3339 (the year is not 4 digits wide, or the zone offset is 24 hours or more).
+    // go-std: time.Time.appendStrictRFC3339 L1
+    pub fn append_strict_rfc3339(&self) -> Result<String, String> {
+        let mut b = Vec::new();
+        self.append_format_rfc3339_nano(&mut b);
+        let num2 = |b: &[u8]| 10 * (i32::from(b[0]) - 48) + (i32::from(b[1]) - 48);
+        if b[4] != b'-' {
+            return Err("year outside of range [0,9999]".to_owned());
+        }
+        if *b.last().unwrap_or(&0) != b'Z' {
+            let c = b[b.len() - 6];
+            if c.is_ascii_digit() || num2(&b[b.len() - 5..]) >= 24 {
+                return Err("timezone hour outside of range [0,23]".to_owned());
+            }
+        }
+        Ok(String::from_utf8_lossy(&b).into_owned())
+    }
+
+    /// `parseStrictRFC3339` (`Time.UnmarshalJSON`'s parser): the RFC 3339 fast path, else
+    /// `Parse(RFC3339, s)`. Go 1.25 disables the strict re-checks after `Parse` (go.dev/issue
+    /// 54580, `case true: return t, nil`), so what `Parse` accepts is accepted (a one-digit
+    /// hour, a comma before the fraction, a `+24:00` offset).
+    // go-std: time.parseStrictRFC3339 L1
+    pub fn parse_strict_rfc3339(s: &str) -> Result<Time, String> {
+        match parse_rfc3339(s.as_bytes()) {
+            Some(t) => Ok(t),
+            None => parse_layout_rfc3339(s.as_bytes()),
+        }
+    }
+}
+
+/// `parseRFC3339`: the fast path of RFC 3339 parsing. The zone of a non-`Z` time is a fixed
+/// zone with the parsed offset (Go uses `Local` when its offset matches, which prints the
+/// same).
+// go-std: time.parseRFC3339 L2 (fixed zone instead of Local)
+fn parse_rfc3339(b: &[u8]) -> Option<Time> {
+    {
+        let fail = || None;
+        let mut ok = true;
+        let mut parse_uint = |s: &[u8], min: i64, max: i64| -> i64 {
+            let mut x: i64 = 0;
+            for &c in s {
+                if !c.is_ascii_digit() {
+                    ok = false;
+                    return min;
+                }
+                x = x * 10 + i64::from(c - b'0');
+            }
+            if x < min || max < x {
+                ok = false;
+                return min;
+            }
+            x
+        };
+        if b.len() < "2006-01-02T15:04:05".len() {
+            return fail();
+        }
+        let year = parse_uint(&b[0..4], 0, 9999);
+        let month = parse_uint(&b[5..7], 1, 12);
+        let day = parse_uint(&b[8..10], 1, i64::from(super::days_in(month as i32, year)));
+        let hour = parse_uint(&b[11..13], 0, 23);
+        let min = parse_uint(&b[14..16], 0, 59);
+        let sec = parse_uint(&b[17..19], 0, 59);
+        if !ok || !(b[4] == b'-' && b[7] == b'-' && b[10] == b'T' && b[13] == b':' && b[16] == b':')
+        {
+            return fail();
+        }
+        let mut rest = &b[19..];
+        let mut nsec: i64 = 0;
+        if rest.len() >= 2 && rest[0] == b'.' && rest[1].is_ascii_digit() {
+            let mut n = 2;
+            while n < rest.len() && rest[n].is_ascii_digit() {
+                n += 1;
+            }
+            // parseNanoseconds: the first 9 digits, scaled.
+            let digits = &rest[1..n];
+            let mut v: i64 = 0;
+            for (i, &c) in digits.iter().enumerate() {
+                if i == 9 {
+                    break;
+                }
+                v = v * 10 + i64::from(c - b'0');
+            }
+            for _ in digits.len().min(9)..9 {
+                v *= 10;
+            }
+            nsec = v;
+            rest = &rest[n..];
+        }
+        let mut t = date(year, month, day, hour, min, sec, nsec, &super::utc());
+        if !(rest.len() == 1 && rest[0] == b'Z') {
+            if rest.len() != "-07:00".len() {
+                return fail();
+            }
+            let mut ok2 = true;
+            let mut pu = |s: &[u8], min: i64, max: i64| -> i64 {
+                let mut x: i64 = 0;
+                for &c in s {
+                    if !c.is_ascii_digit() {
+                        ok2 = false;
+                        return min;
+                    }
+                    x = x * 10 + i64::from(c - b'0');
+                }
+                if x < min || max < x {
+                    ok2 = false;
+                    return min;
+                }
+                x
+            };
+            let hr = pu(&rest[1..3], 0, 23);
+            let mm = pu(&rest[4..6], 0, 59);
+            if !ok2 || !((rest[0] == b'-' || rest[0] == b'+') && rest[3] == b':') {
+                return fail();
+            }
+            let mut zone_offset = (hr * 60 + mm) * 60;
+            if rest[0] == b'-' {
+                zone_offset = -zone_offset;
+            }
+            t.add_sec(-zone_offset);
+            t.set_loc(super::fixed_zone("", zone_offset as i32));
+        }
+        Some(t)
+    }
+}
+
+/// The layout `time.RFC3339`.
+const RFC3339: &str = "2006-01-02T15:04:05Z07:00";
+
+/// The layout elements of `RFC3339` that `parse` handles (`nextStdChunk`).
+#[derive(Clone, Copy)]
+enum RfcStd {
+    LongYear,
+    ZeroMonth,
+    ZeroDay,
+    Hour,
+    ZeroMinute,
+    ZeroSecond,
+    Iso8601ColonTz,
+}
+
+/// `parse(RFC3339, value, UTC, Local)`, i.e. `time.Parse(time.RFC3339, value)`: the general
+/// layout parser walked over the chunks of the RFC 3339 layout (prefix, element, element
+/// text), with Go's error values (`ParseError`).
+// go-std: time.parse L2 (the RFC3339 layout only; a numeric zone is a fixed zone, not Local)
+fn parse_layout_rfc3339(avalue: &[u8]) -> Result<Time, String> {
+    // ParseError.Error.
+    let cannot = |layout_elem: &str, value_elem: &[u8]| {
+        format!(
+            "parsing time {} as {}: cannot parse {} as {}",
+            time_quote(avalue),
+            time_quote(RFC3339.as_bytes()),
+            time_quote(value_elem),
+            time_quote(layout_elem.as_bytes())
+        )
+    };
+    let message = |msg: &str| format!("parsing time {}{msg}", time_quote(avalue));
+    const CHUNKS: [(&str, RfcStd, &str); 7] = [
+        ("", RfcStd::LongYear, "2006"),
+        ("-", RfcStd::ZeroMonth, "01"),
+        ("-", RfcStd::ZeroDay, "02"),
+        ("T", RfcStd::Hour, "15"),
+        (":", RfcStd::ZeroMinute, "04"),
+        (":", RfcStd::ZeroSecond, "05"),
+        ("", RfcStd::Iso8601ColonTz, "Z07:00"),
+    ];
+    let mut value = avalue;
+    let (mut year, mut month, mut day) = (0i64, -1i64, -1i64);
+    let (mut hour, mut min, mut sec, mut nsec) = (0i64, 0i64, 0i64, 0i64);
+    let mut utc_zone = false;
+    let mut zone_offset: i64 = -1;
+    for (prefix, std, stdstr) in CHUNKS {
+        value = match skip(value, prefix.as_bytes()) {
+            Ok(v) => v,
+            Err(v) => return Err(cannot(prefix, v)),
+        };
+        let hold = value;
+        let mut range_err = "";
+        let mut bad = false;
+        match std {
+            RfcStd::LongYear => {
+                if value.len() < 4 || !is_digit(value, 0) {
+                    bad = true;
+                } else {
+                    let p = &value[..4];
+                    value = &value[4..];
+                    match atoi(p) {
+                        Some(x) => year = x,
+                        None => bad = true,
+                    }
+                }
+            }
+            RfcStd::ZeroMonth => match getnum(value, true) {
+                Some((n, rest)) => {
+                    month = n;
+                    value = rest;
+                    if month <= 0 || 12 < month {
+                        range_err = "month";
+                    }
+                }
+                None => bad = true,
+            },
+            RfcStd::ZeroDay => match getnum(value, true) {
+                Some((n, rest)) => {
+                    day = n;
+                    value = rest;
+                }
+                None => bad = true,
+            },
+            RfcStd::Hour => match getnum(value, false) {
+                Some((n, rest)) => {
+                    hour = n;
+                    value = rest;
+                    if 24 <= hour {
+                        range_err = "hour";
+                    }
+                }
+                None => bad = true,
+            },
+            RfcStd::ZeroMinute => match getnum(value, true) {
+                Some((n, rest)) => {
+                    min = n;
+                    value = rest;
+                    if 60 <= min {
+                        range_err = "minute";
+                    }
+                }
+                None => bad = true,
+            },
+            RfcStd::ZeroSecond => match getnum(value, true) {
+                Some((n, rest)) => {
+                    sec = n;
+                    value = rest;
+                    if 60 <= sec {
+                        range_err = "second";
+                    } else if value.len() >= 2
+                        && (value[0] == b'.' || value[0] == b',')
+                        && is_digit(value, 1)
+                    {
+                        // A fractional second the layout does not have (the next chunk
+                        // is the zone, not stdFracSecond0/9): parseNanoseconds.
+                        let mut n = 2;
+                        while n < value.len() && is_digit(value, n) {
+                            n += 1;
+                        }
+                        let nbytes = n.min(10);
+                        let mut ns = atoi(&value[1..nbytes]).unwrap_or(0);
+                        for _ in nbytes..10 {
+                            ns *= 10;
+                        }
+                        nsec = ns;
+                        value = &value[n..];
+                    }
+                }
+                None => bad = true,
+            },
+            RfcStd::Iso8601ColonTz => {
+                if !value.is_empty() && value[0] == b'Z' {
+                    value = &value[1..];
+                    utc_zone = true;
+                } else if value.len() < 6 || value[3] != b':' {
+                    bad = true;
+                } else {
+                    let (sign, hourb, minb) = (value[0], &value[1..3], &value[4..6]);
+                    value = &value[6..];
+                    let hr = getnum(hourb, true);
+                    let mm = if hr.is_some() {
+                        getnum(minb, true)
+                    } else {
+                        None
+                    };
+                    let (h, m) = (hr.map_or(0, |x| x.0), mm.map_or(0, |x| x.0));
+                    bad = mm.is_none();
+                    if h > 24 {
+                        range_err = "time zone offset hour";
+                    }
+                    if m > 60 {
+                        range_err = "time zone offset minute";
+                    }
+                    zone_offset = (h * 60 + m) * 60;
+                    match sign {
+                        b'+' => {}
+                        b'-' => zone_offset = -zone_offset,
+                        _ => bad = true,
+                    }
+                }
+            }
+        }
+        if !range_err.is_empty() {
+            return Err(message(&format!(": {range_err} out of range")));
+        }
+        if bad {
+            return Err(cannot(stdstr, hold));
+        }
+    }
+    if !value.is_empty() {
+        return Err(message(&format!(": extra text: {}", time_quote(value))));
+    }
+    if day < 1 || day > i64::from(super::days_in(month as i32, year)) {
+        return Err(message(": day out of range"));
+    }
+    if utc_zone {
+        return Ok(date(year, month, day, hour, min, sec, nsec, &super::utc()));
+    }
+    let mut t = date(year, month, day, hour, min, sec, nsec, &super::utc());
+    t.add_sec(-zone_offset);
+    t.set_loc(super::fixed_zone("", zone_offset as i32));
+    Ok(t)
+}
+
+/// `isDigit(s, i)`.
+// go-std: time.isDigit L1
+fn is_digit(s: &[u8], i: usize) -> bool {
+    s.get(i).is_some_and(u8::is_ascii_digit)
+}
+
+/// `getnum`: one or two digits (`fixed`: exactly two); `None` is `errBad`.
+// go-std: time.getnum L1
+fn getnum(s: &[u8], fixed: bool) -> Option<(i64, &[u8])> {
+    if !is_digit(s, 0) {
+        return None;
+    }
+    if !is_digit(s, 1) {
+        if fixed {
+            return None;
+        }
+        return Some((i64::from(s[0] - b'0'), &s[1..]));
+    }
+    Some((
+        i64::from(s[0] - b'0') * 10 + i64::from(s[1] - b'0'),
+        &s[2..],
+    ))
+}
+
+/// `skip`: removes the layout prefix from the value (the RFC 3339 layout has no spaces);
+/// `Err` carries the value at the mismatch.
+// go-std: time.skip L2 (no space handling: the RFC3339 layout has no spaces)
+fn skip<'a>(mut value: &'a [u8], mut prefix: &[u8]) -> Result<&'a [u8], &'a [u8]> {
+    while !prefix.is_empty() {
+        if value.is_empty() || value[0] != prefix[0] {
+            return Err(value);
+        }
+        prefix = &prefix[1..];
+        value = &value[1..];
+    }
+    Ok(value)
+}
+
+/// `atoi`: an optionally signed decimal integer without trailing text (`leadingInt`'s
+/// overflow check at 2^63); `None` is `errAtoi`.
+// go-std: time.atoi L1
+// go-std: time.leadingInt L1
+fn atoi(mut s: &[u8]) -> Option<i64> {
+    let mut neg = false;
+    if !s.is_empty() && (s[0] == b'-' || s[0] == b'+') {
+        neg = s[0] == b'-';
+        s = &s[1..];
+    }
+    let mut x: u64 = 0;
+    let mut i = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        if x > (1 << 63) / 10 {
+            return None;
+        }
+        x = x * 10 + u64::from(s[i] - b'0');
+        if x > 1 << 63 {
+            return None;
+        }
+        i += 1;
+    }
+    if i < s.len() {
+        return None;
+    }
+    let x = x as i64; // int(q): 2^63 wraps, as in Go
+    Some(if neg { x.wrapping_neg() } else { x })
+}
+
+/// `quote` of package time (used by `ParseError`): every byte of a non-ASCII or control
+/// character, and every invalid byte, as `\xNN`; `"` and `\` escaped.
+// go-std: time.quote L1
+fn time_quote(s: &[u8]) -> String {
+    let mut buf = String::with_capacity(s.len() + 2);
+    buf.push('"');
+    for &b in s {
+        if !(b' '..0x80).contains(&b) {
+            buf.push_str(&format!("\\x{b:02x}"));
+        } else {
+            if b == b'"' || b == b'\\' {
+                buf.push('\\');
+            }
+            buf.push(b as char);
+        }
+    }
+    buf.push('"');
+    buf
+}
+
 /// appendInt appends the decimal form of x to b and returns the result.
 /// If the decimal form (excluding sign) is shorter than width, the result is padded with leading 0's.
 /// Duplicates functionality in strconv, but avoids dependency.

@@ -1,0 +1,22 @@
+[package]
+name = "tidb-model"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/meta/model (block D06.1): the schema structs stored in TiKV and their encoding/json form"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), Go fmt, encoding/json (gostd::json) and the time package.
+tidb-base = { workspace = true }
+# CIStr, FieldType, UserIdentity, ParseDuration (block D02.3).
+tidb-parser = { workspace = true }
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

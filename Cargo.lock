@@ -3689,6 +3689,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-model"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "serde_json",
+ "tidb-base",
+ "tidb-parser",
+]
+
+[[package]]
 name = "tidb-mysql-protocol"
 version = "0.0.0"
 dependencies = [

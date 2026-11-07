@@ -40,7 +40,6 @@ blocks = ["D01.1", "D01.2", "D01.3", "D01.4", "D01.5", "D01.6", "D01.9"]
 
 [crate.tidb-model]
 rank = 3   # above tidb-types: model calls types (D00.2 part 2 review); D06.1 -> D01.1
-planned = true
 blocks = ["D06.1"]
 
 [crate.tidb-chunk]
