@@ -10,7 +10,7 @@
 | T4 [P] | `meminfo.rs`、`memstats.rs`、`cgroup.rs` | T1 | 单元测试；本机读数合理 | 完成 |
 | T5 | `alloc.rs`：`TrackedAlloc` | T3 | 单元测试 | 完成 |
 | T6 | govec 领域 `memory`（tracker）与 Rust 回放 `tests/govec_memory.rs` | T3 | 1,850 条在 arm64 全部通过；改坏一条会报错 | 完成 |
-| T7 | amd64 向量：tracker PR 的 CI artifact `govec-vectors-ubuntu-latest` 中的 `amd64/memory.jsonl.gz` 提交到 tracker 和本 crate | T6 | x86_64 上 `cargo test -p tidb-memory` 通过 | 待做 |
+| T7 | amd64 向量：tracker PR 的 CI artifact `govec-vectors-ubuntu-latest` 中的 `amd64/memory.jsonl.gz` 提交到 tracker 和本 crate | T6 | x86_64 上 `cargo test -p tidb-memory` 通过 | 完成（tracker PR #5 的 CI 生成；与 arm64 除首行外相同） |
 | T8 | 并发测试 `tests/concurrency.rs`、基准 `benches/tracker.rs` | T3、T5 | 见 plan §6 | 完成 |
 | T9 | converge：76 个函数标注齐全 | T3、T4 | `matched 76/76` | 完成 |
 | T10 | `ExecCtx::checkpoint` 接 `Tracker::checkpoint`；`SqlKiller::set_on_kill` 接 `CancellationToken`（N3 3.3 第 2 条） | — | D00.1 | 未开始 |
