@@ -7,6 +7,8 @@ use crate::span::Span;
 use crate::actions_rt::{FromNode, Node};
 use crate::gen_types::*;
 
+/// glue: poc — hand-written stand-in for `model.CIStr` used by the PoC AST; the faithful
+/// port is [`crate::model::CIStr`] (D02.3). Replaced when the AST nodes are ported.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CIStr {
     pub o: String,
@@ -258,6 +260,9 @@ pub mod mysql_flag {
     pub const PARSE_TO_JSON: u32 = 1 << 18;
 }
 
+/// glue: poc — hand-written stand-in; the faithful port is [`crate::types::FieldType`]
+/// (D02.3). Replaced when the AST nodes that hold it are ported.
+///
 /// `types.FieldType` (the fields the parser sets). Built by the cast grammar (`CastType`);
 /// the column-definition grammar is not ported yet and yields `unported`.
 #[derive(Debug, Clone, PartialEq)]

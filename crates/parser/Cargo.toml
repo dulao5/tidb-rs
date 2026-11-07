@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Errors (M-ERR), Go fmt, encoding/json and the mysql constants (N0 rank 0).
+tidb-base = { workspace = true }
 
 [build-dependencies]
 # Only used at build time, to compute the LR automaton from grammar/tidb_typed.y.
@@ -16,6 +18,8 @@ lrtable = "0.15"
 
 [dev-dependencies]
 serde_json = "1"
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
 
 [lints]
 workspace = true
