@@ -110,7 +110,7 @@ Go 快约 6 倍的原因不在运行时：Go 的计划是 `IndexReader(HashAgg c
 | 点查、read_only 的 QPS 不低于 PoC 基线 | **通过**：wired / base 在 ps 为 1.03 / 1.00 / 1.00，ro 为 0.99 / 1.01 / 1.02（分别对应 8 / 32 / 64 线程） |
 | 大扫描并发下点查的 p99 | 接入前后相同（1.31ms），Go 为 0.75ms，差距见上 |
 | 过载 2×、5× | 饱和点取 64 个线程：之后 QPS 的增长不到线程数增长的 1/10，延迟随线程数线性增加。2×（128）和 5×（320）时，吞吐为 64 线程时的 107%、121%，没有崩塌；p99 有上界（5.3ms、16.3ms），与 base 相同。但 **比 Go 高**（Go 为 4.6ms、11.4ms）：base 同样如此，属于 PoC 执行路径。打开 `--token-limit 64` 后 p99 降到 9.5ms，低于 Go，但吞吐只有峰值的 84%，低于 90% 的目标 |
-| 停顿（修订后：稳态窗口内 `on_cpu`、`blocked` 为 0） | 稳态 `on_cpu` 为 0（macOS、Linux）；稳态 `blocked`：Linux 为 0（Lucky 复现），macOS 无法判定。Linux 收尾时有 blocked 和 preempted，单独报告。见 §4.2 |
+| 停顿（修订后：稳态窗口内 `on_cpu`、`blocked` 为 0） | 稳态 `on_cpu` 为 0（macOS、Linux）；稳态 `blocked`：macOS 无法判定；Linux 待用修正后的窗口重测（PR #10 第二轮评审发现，旧脚本的窗口从 sysbench 进程启动起算，在 Lucky 的机器上几乎全落在建连阶段，那次的"稳态为 0"不成立）。Linux 收尾时有 blocked 和 preempted，单独报告。见 §4.2 |
 | 队列指标有读数 | Q1 有；Q2、Q3 没有，见 §5 |
 
 ## 4. 停顿
@@ -172,7 +172,7 @@ macOS 上 off_cpu 分不出被抢占还是阻塞。
 
 **采样顺序已修正**：现在线程 CPU 和切换次数的两次采样包住 poll 的 `[start, end]`，after 样本只在停顿时读取。之前 `start` 在 before 样本之前，`start` 和 before 之间发生的切换看不到，Lucky 在 Linux 上实测有 3 次 preempted 因此被误判成 off_cpu。
 
-**按时间窗口统计**：`scripts/n3-bench.sh` 在每次运行的开始前、开始后 1 秒、结束前 1 秒、结束后各抓一次 `/metrics`。中间一段为稳态，前后两段（预热和收尾）单独报告，边距可用 `STEADY_SKIP_START` / `STEADY_SKIP_END` 配置。
+**按时间窗口统计**：`scripts/n3-bench.sh` 在每次运行的开始前、sysbench 输出 "Threads started!"（`--time` 从这里开始计）之后 1 秒、结束前 1 秒、结束后各抓一次 `/metrics`。sysbench 从启动到 "Threads started!" 可能要十几秒（Lucky 的 Linux 机器上 320 线程约 11.8 秒，对 Go TiDB 也一样），所以窗口不能按进程启动时刻计算；最早的版本就是这样算的，在那台机器上窗口几乎全落在建连阶段。中间一段为稳态，前后两段（预热和收尾）单独报告，边距可用 `STEADY_SKIP_START` / `STEADY_SKIP_END` 配置。
 
 本机（macOS）重测，320 线程过载 3 次，打开分类：
 
@@ -198,7 +198,7 @@ macOS 上 off_cpu 分不出被抢占还是阻塞。
 - 我们 connection task 上的 blocked 与 tonic 连接 task 同因，即 h2 的锁；
 - 收尾时的 preempted 只是 sysbench 收尾时的 CPU 突发。
 
-结论：过载下的停顿与语句执行无关。Linux 上集中在所有客户端同时断开的收尾时刻（连接关闭、h2 锁排队），macOS 上是持续的 CPU 超额订阅。N3 §5 改为只在稳态窗口内判定 `on_cpu`、`blocked` 为 0。
+结论（部分是推测，见上文）：本机过载下的停顿是持续的 CPU 超额订阅，`on_cpu` 为 0；Linux 上看到的停顿集中在所有客户端同时断开的收尾时刻，原因推测为连接关闭和 h2 锁排队，待 bpftrace 后续任务确认，稳态窗口内的计数待用修正后的脚本重测。N3 §5 改为只在稳态窗口内判定 `on_cpu`、`blocked` 为 0。
 
 **日志**：runtime 之前用 `log` 宏，tidb-server 的 tracing subscriber 没有 log 桥接，停顿警告和 `spawn_with_recover` 的 panic 日志都丢了。现在 runtime 改用 `tracing`：tidb-server 本来就用 tracing，改宏比安装全局的 `LogTracer` 更直接。`crates/runtime/tests/logs.rs` 测试停顿和 panic 两条日志都能被 tracing subscriber 收到。本次重测中，server 日志里能看到全部 116 条停顿警告。
 

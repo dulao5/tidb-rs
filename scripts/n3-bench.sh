@@ -20,8 +20,8 @@
 #              stall window                            [1 / 1]
 #
 # Stall windows (tidb-rs only; N3 §5): /metrics is scraped before the run, STEADY_SKIP_START s
-# into it, STEADY_SKIP_END s before its end, and after sysbench exits. Stalls by cause in the
-# middle interval are the steady state (on_cpu and blocked must be 0); the rest (warm-up, and
+# after sysbench prints "Threads started!" (where its --time starts), STEADY_SKIP_END s before
+# its end, and after sysbench exits. Stalls by cause in the middle interval are the steady state (on_cpu and blocked must be 0); the rest (warm-up, and
 # the teardown when all clients finish and disconnect at once) are reported separately in the
 # `extra` column as `steady[...] edges[...]`.
 # Appends one line per run to $OUT/results.tsv:
@@ -112,6 +112,17 @@ run() {
         --threads="$t" --time="$dur" $args run >"$file" 2>&1; } 2>/dev/null &
     local sb=$!
     if [ -n "$server_pid" ]; then
+        # sysbench's --time starts at "Threads started!", which can be seconds after launch
+        # (320 Lua threads take ~12 s to initialise on some machines). Anchor the window there.
+        local w=0
+        until grep -q 'Threads started!' "$file" 2>/dev/null; do
+            sleep 0.1
+            w=$((w + 1))
+            if [ $w -ge 600 ] || ! kill -0 "$sb" 2>/dev/null; then
+                echo "n3-bench: no 'Threads started!' after $((w / 10)) s; window unanchored" >&2
+                break
+            fi
+        done
         sleep "$skip_start"
         s1=$(stalls)
         sleep "$(awk -v d="$dur" -v a="$skip_start" -v b="$skip_end" 'BEGIN { v = d - a - b; print (v > 0 ? v : 0) }')"
