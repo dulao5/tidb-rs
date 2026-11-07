@@ -14,7 +14,7 @@ Checks, per Rust file:
     those files (or in <path>), with a valid level (`L1`, `L1 [M-..]`, `L2 (reason)`, `L3`);
   * every function of the block in a go-file is annotated exactly once with `// go:`;
   * every `fn` outside `#[cfg(test)]` / test files carries some annotation
-    (`go:`, `go-part:`, `go-std:`, `go-l3:`, `go-exception:`, `glue:`);
+    (`go:`, `go-part:`, `go-std:`, `go-dep:`, `go-l3:`, `go-exception:`, `glue:`);
   * the `// go:` annotations follow Go's source order (reported, not an error);
   * every mapping rule ID in `L1 [M-..]` is a rule of docs/porting/mappings.md;
   * with --fma-sites (tracker data/go_fma_sites.tsv, mapping rule M-FMA): every Go line
@@ -36,7 +36,7 @@ import sys
 import tomllib
 from collections import defaultdict
 
-ANN_RE = re.compile(r"^\s*//\s*(go|go-part|go-std|go-l3|go-exception|go-fix|glue):\s*(.*)$")
+ANN_RE = re.compile(r"^\s*//\s*(go|go-part|go-std|go-dep|go-l3|go-exception|go-fix|glue):\s*(.*)$")
 FILE_RE = re.compile(r"^\s*//!\s*go-file:\s*(\S+)")
 FN_RE = re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(const\s+)?(unsafe\s+)?fn\s+(\w+)")
 ALLOW_RE = re.compile(r"^\s*#(!?)\[allow\(")

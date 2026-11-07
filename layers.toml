@@ -13,7 +13,6 @@
 # ---------------------------------------------------------------- layered
 [crate.tidb-base]
 rank = 0
-planned = true
 blocks = ["D00.2"]   # parser/mysql 常量、errno、terror、dbterror、config
 
 [crate.tidb-metrics]

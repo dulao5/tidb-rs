@@ -84,7 +84,7 @@ jobs:
   # on an aarch64 runner. tidb-types only builds C code (jemalloc for the bench, miniz)
   # that the runner image's compiler handles; none of the TiKV native deps.
   types-arm64:
-    name: tidb-types (ubuntu-24.04-arm)
+    name: Go-ported crates (ubuntu-24.04-arm)
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +92,6 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: cargo test --locked -p tidb-types
+        run: cargo test --locked -p tidb-types -p tidb-base
       - name: test (release-checked)
         run: cargo test --profile release-checked --locked -p tidb-types

@@ -1,0 +1,23 @@
+[package]
+name = "tidb-base"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 constants, error codes and errors (block D00.2: parser/mysql, parser/terror, errno, util/dbterror, kv.StoreType)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# terror.Log / Call / MustNil and getMySQLErrorCode's warnings (Go: pingcap/log, i.e. zap).
+log = "0.4"
+# Go sync.RWMutex (mapping rule M-LOCK).
+parking_lot = "0.12"
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
