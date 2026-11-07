@@ -65,3 +65,29 @@ jobs:
 
       - name: test
         run: cargo test --workspace --locked
+
+      # Go-ported crates again, optimised but with integer overflow checks (profile
+      # release-checked): vector replay plus a few minutes of the overflow fuzz. A Go
+      # wrap that is not written wrapping_* (M-INT) panics here.
+      - name: test (release-checked, Go-ported crates)
+        env:
+          TIDB_TYPES_FUZZ_ITERS: "500000000"
+        run: cargo test --profile release-checked --locked -p tidb-types
+
+  # The Go vectors depend on the target (mapping rule M-FMA: gc fuses some float
+  # multiply-adds into FMA on arm64 and not on amd64 GOAMD64=v1). The check job
+  # (x86_64) replays vectors/v8.5.8/amd64; this job replays vectors/v8.5.8/arm64
+  # on an aarch64 runner. tidb-types only builds C code (jemalloc for the bench, miniz)
+  # that the runner image's compiler handles; none of the TiKV native deps.
+  types-arm64:
+    name: tidb-types (ubuntu-24.04-arm)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: test
+        run: cargo test --locked -p tidb-types
+      - name: test (release-checked)
+        run: cargo test --profile release-checked --locked -p tidb-types

@@ -1,0 +1,29 @@
+[package]
+name = "tidb-types"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/types (block D01.2: MyDecimal)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# strconv.FormatFloat shortest digits: the same Ryū algorithm as Go's ftoaryu.go.
+ryu = "1.0"
+# MyDecimal.UnmarshalJSON: Go encoding/json semantics on top of serde_json (see gostd.rs).
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+# Benchmarks run on the server's allocator.
+tikv-jemallocator = { workspace = true }
+
+[[bench]]
+name = "mydecimal"
+harness = false
+
+[lints]
+workspace = true

@@ -40,13 +40,14 @@ Go TiDB 的很多写法只是因为 Go 运行时才那样写（goroutine、chann
 | M-NAME | Go 方法名与 Rust 标准 trait 的方法同名（`String`、`ToString`、`Clone`、`Hash`、`Equal` 等） | 保留 Go 名的 snake_case 作为固有方法（如 `to_string() -> Vec<u8>`）；需要 `Display` 等 trait 时委托给它，委托代码标 `glue:` | D01.2 试点 | — |
 | M-EVAL | 内置函数的逐行版 `evalXxx` 和向量化版 `vecEvalXxx` 两份实现 | 函数体只按逐行版移植一份，宏生成逐行和向量两种驱动；在 Go 走向量化的地方走向量驱动。两版不一致时以逐行版为准并开 issue | N4 | govec 对两种驱动分别比对 |
 | M-ROW | 跨 `Next` 调用保存 `chunk.Row` | `RowHandle { Arc<Chunk>, idx }`；调用内仍用借用的 `Row<'a>` | N5a | — |
+| M-FMA | 浮点乘加 `x*y + z`（含 `f += x*y`）。Go 规范允许编译器把它融合成一条 FMA 指令（只舍入一次），gc 是否融合取决于**平台**（GOARCH，amd64 还取决于 GOAMD64）和**具体位置**，只能从生成的汇编判断，不能从源码形状推断 | 按位置、按目标平台写：Go 在该目标上融合的位置用 `f64::mul_add`，不融合的用分开的乘和加（Rust 自己从不融合）。用 `#[cfg(target_arch = ...)]` 区分，条件照登记表写。amd64 的基线是 GOAMD64=v1（Go 的默认值，v8.5.8 的 Makefile 没有设置），v1 不融合任何位置；v3 只作参考。登记表是 tracker 的 `data/go_fma_sites.tsv`（`scripts/go_fma_sites.py` 对每个目标做 `go build -gcflags=<包>=-S`，扫描 `FMADDD`/`VFMADD231SD` 等指令并映射回源码行，每行 = 一个位置 × 各目标 yes/no）。函数标注写 `[M-FMA]`，每个位置旁注释 `// [M-FMA] <文件>.go:<行>`。向量按目标分别生成（govec 的 `vectors/<版本>/<目标>/`），测试按 Rust 的 target_arch 回放对应的一份 | D01.2 评审 | `converge.py --fma-sites`：登记表中在任一目标上融合、且所在 Go 文件已移植的每个位置，Rust 中都有 `[M-FMA] 文件:行` 注释，所在函数的 `go:` 标注带 `M-FMA`；注释不能指向登记表外的行 |
 | M-ERR | `errors.Trace` / `errors.Annotate` 包装调用栈 | 错误码 + 可选的创建点调用栈；不移植包装函数 | D00.2 块 spec | — |
 
 ## 移植模块的统一约定
 
 - **lint**：模仿 Go 分支结构的代码会触发一些 clippy 风格 lint（`int_plus_one`、`needless_range_loop`、`manual_range_contains`、`needless_late_init`、`field_reassign_with_default`、`manual_slice_fill`）。这些在 workspace 的移植 crate 中统一 allow，正确性 lint 全部保留。不要在单个文件中各写一份。
 - **注释**：Go 注释原样复制；其中缩进 4 格的段落会被 rustdoc 当作代码块，要用 ```` ```text ```` 包起来。
-- **浮点**：Go 允许编译器把 `x*y + z` 融合为 FMA（arm64 上会发生），Rust 不会。含乘加的浮点逻辑在块 spec 中标出，向量要在 amd64 和 arm64 上各生成一次比对。
+- **浮点**：乘加按 `M-FMA` 处理。块 plan 中列出本块在登记表里的位置；没有登记的乘加（各目标都不融合）照 Go 写分开的乘和加即可。Go 升级工具链后要重新生成登记表，融合位置可能变化。
 - **全局分配器**：workspace 统一使用 jemalloc（与 A1 的实例内存度量一致），基准和服务端用同一个分配器。
 
 ## 机器检查的落地
