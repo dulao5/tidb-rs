@@ -77,7 +77,7 @@ TiKV 的做法（`release-8.5` 分支）可以直接作为模板：
    - 多级队列仍是计划中的升级：若"大扫描并发时的点查 p99"基准不达标，换成 yatp，并按宪章登记为来自 TiKV 的 L3 和 ADR。`tikv-client` 依赖 tokio，所以第一步用 tokio。
 3. **每个 goroutine 对应一个 task**（`M-GO`）：`go worker.run()` → `pool.spawn(async move { worker.run().await })`。数量严格等于 Go 的数量（由同一个 `Concurrency` getter 决定），`tidb_executor_concurrency` 等变量含义不变；物理并行度由池大小决定，这与 goroutine 和 GOMAXPROCS 的关系相同。
 4. **channel 映射**（`M-CH`、`M-WG`）：有缓冲 channel → 容量相同的异步有界 channel；无缓冲 → 容量为 0 的 rendezvous（无法直接表达时用容量 1 加确认，在 plan 模板里固定一种写法）；`close(ch)` → drop 发送端；`select` → `select!`；`sync.WaitGroup` → 保存 `JoinHandle`，关闭时逐个 await。只能使用**取消安全**的 channel 原语（在 `select!` 中被放弃的分支不会丢数据），选型在试点中确定并写进 plan 模板。
-5. **检查点：kill / 内存检查按 Go 的位置，让出按时间片**（`M-KILL`，2026-11-06 修订）：`ctx.checkpoint().await` 放在 Go 的 `HandleSQLKillerSignal` 同一位置（`exec::next` 前后等），以及任何不经过 `Next` 就连续处理数据的循环（hash build、sort、merge、聚合 final 合并的内循环）。每次调用都做 kill 检查和内存检查（第二部分 3.3，都是一次原子读）；**是否让出 CPU 按时间片决定**：计数器每 N 次看一次时钟，本片运行超过 quantum（默认 1ms）才让出。这是 TiKV `RescheduleChecker` 的模式（`components/tidb_query_common/src/storage/scanner.rs`：每 32 个 key 看一次时钟，超过 1ms `reschedule().await`）。Rust 没有 Go sysmon 的抢占，这个原语加 3.6 的停顿检测就是抢占的替代品。checkpoint 同时记录本片 CPU 时间，归到语句和 resource group；按组的调度份额以后加，钩子现在留（`ExecCtx` 字段，见 foundation-interfaces）。调用接口不变。
+5. **检查点：kill / 内存检查按 Go 的位置，让出按时间片**（`M-KILL`，2026-11-06 修订）：`ctx.checkpoint().await` 放在 Go 的 `HandleSQLKillerSignal` 同一位置（`exec::next` 前后等），以及任何不经过 `Next` 就连续处理数据的循环（hash build、sort、merge、聚合 final 合并的内循环）。每次调用都做 kill 检查和内存检查（第二部分 3.3，都是一次原子读）；**是否让出 CPU 按时间片决定**：本次 poll 运行超过 quantum（默认 1ms）才让出。Go 的检查点是 chunk 级的（`internal/exec/executor.go:448`、`:462`，每次 `exec.Next` 前后各一次，一次 `Next` 可能要几百微秒），所以 `ctx.checkpoint()` **每次调用都看时钟**（约 30ns）；2026-11-07 按 PR #8 评审修订，原稿"每 N 次看一次"会让 400µs 一次的 `Next` 每次 poll 跑到约 12.8ms。真正逐行调用的内层循环（hash build、sort 等）用显式的 `CheckpointStride::new(n)`，每 n 次看一次时钟，这才是 TiKV `RescheduleChecker` 的模式（`components/tidb_query_common/src/storage/scanner.rs`：每 32 个 key 看一次时钟，超过 1ms `reschedule().await`）。Rust 没有 Go sysmon 的抢占，这个原语加 3.6 的停顿检测就是抢占的替代品。checkpoint 同时记录本片 CPU 时间，归到语句和 resource group；按组的调度份额以后加，钩子现在留（`ExecCtx` 字段，见 foundation-interfaces）。调用接口不变。
 6. **KV 访问没有同步/异步边界**：coprocessor 迭代器的 worker（数量 = `tidb_distsql_scan_concurrency`，`sendRate` 按 L1 映射为同容量的信号量，它限制的是已收到、未被消费的响应，管的是内存）就是同一个运行时上的 task，直接 await `tikv-client` 的请求。另有服务器级的在途窗口 Q2（3.6），限制的是发往每个 store 的在途 RPC。需要确认 client-rust 的请求 future 被 drop 时会取消请求（待试点验证）。每个 cop 请求都带上 TiKV 调度依赖的字段：priority、resource group name、override priority、task_id（语句级，Go `request_builder.go` 的 `TaskID`）、busy_threshold（与 Go 相同的取值）、deadline（`max_execution_time`）。
 7. **禁止阻塞**（`M-BLOCK`、`M-LOCK`）：执行器代码中不得阻塞线程。落盘 I/O 走 `spawn_blocking` 或单独的阻塞池；await 期间不得持有锁；执行器 crate 中不得 `std::thread::spawn` 或 `block_on`。这些用 clippy 强制（见 [mappings.md](../../../docs/porting/mappings.md)）。
 8. **准入**：见 3.6 的 Q1。Go 已有 `token-limit`（默认 1000，满了排队等待，不拒绝），按 L1 移植；按 resource group 分份额、过载时拒绝是功能例外，默认关闭。
@@ -115,13 +115,15 @@ TiKV 的做法（`release-8.5` 分支）可以直接作为模板：
 
 #### 3.6 运行时边界、队列与过载（2026-11-06 新增）
 
+> 实现位置（2026-11-07）：ExecPool 与两种拓扑、checkpoint 时间片、poll 停顿检测、Q1、Q2、Q3 和对应指标都在 crate `tidb-runtime`（N0 rank 1），设计说明见 [runtime-skeleton.md](runtime-skeleton.md)。
+
 SEDA 的作者在 2010 年的回顾里否定了"每个阶段一个线程池、阶段间全部排队"，保留了有界队列、准入控制、按阶段观测和过载时在入口挡住。tidb-rs 只在三个资源边界排队，算子和 worker 类型不单独建池：
 
 | 队列 | 位置 | 容量与满时行为（默认 = Go） | 新增能力（功能例外，默认关闭） |
 |---|---|---|---|
 | **Q1 语句准入** | 连接 task 开始执行一条语句前 | L1 移植 Go `token-limit`（`server/server.go` `getToken`，默认 1000），满了排队等待 | 按 resource group 分份额；排队超过上限时报新的明确错误码（不复用 1317） |
 | **Q2 发往 TiKV 的在途窗口** | 每个 store 一个服务器级窗口，`ExecCtx` 可拿到的共享对象 | 默认无限；Go 的 `tidb_store_limit`（默认 0 即关闭，超限返回 client-go `ErrTokenLimit`）按 L1 保留在同一对象里 | 窗口加性增、乘性减（AIMD）；按 resource group 分份额 |
-| **Q3 阻塞池** | `spawn_blocking`：落盘 I/O、SLEEP / GET_LOCK（N4 D20） | 有界，满了排队 | — |
+| **Q3 阻塞池** | `spawn_blocking`：只放真正阻塞的工作（落盘 I/O 等）。**按类别分别限额**（落盘、其他各一份），一类占满不会饿死另一类（D43）。SLEEP 和 GET_LOCK 不进 Q3：SLEEP 用 async 定时器，按 Go 的 sleep 循环语义检查 KILL；GET_LOCK 本来就是 async | 有界，满了排队 | — |
 
 Q2 的规则：
 

@@ -142,7 +142,7 @@ pub struct BuiltinFunc {
 
 ### 3.9 阻塞型函数
 
-`SLEEP`、`GET_LOCK` 等在 `SigDesc` 中标 `blocking`。含这类签名的程序由执行器放到阻塞池执行（`M-BLOCK`），函数体内 10ms 检查 KILL 的逻辑 L1 保留。见待定 3。
+`SLEEP`、`GET_LOCK` 等在 `SigDesc` 中标 `blocking`。2026-11-07 修订（D43，取代 D20）：它们**不进阻塞池**。`SLEEP` 用 async 定时器等待，按 Go 的 sleep 循环语义（每 10ms 检查 KILL）移植；求值仍是同步的，含 `SLEEP` 的程序由执行器用一个只为它准备的异步驱动逐行求值，到 `SLEEP` 时 await 定时器。具体写法在 D08.9 落地时定。`GET_LOCK` 本来就是 async。阻塞池（N3 Q3）只放真正阻塞的工作。
 
 ## 4. 对 L1 移植的影响（示例）
 
@@ -220,7 +220,7 @@ fn cast_string_as_int(ctx: &mut EvalCtx, sig: &BuiltinFunc, args: &mut Args) -> 
 
 1. **"Go 内部不一致"的默认处理**：修订后建议两种驱动各自与 Go 一致，分歧签名保留第二份函数体（3.3 第 3 条）。
 2. **是否依赖 TiKV RPN 框架**：建议不依赖（3.6），ADR 0007 第 3 条据此定稿为"不使用，删除 vendored `tidb_query_expr`"。
-3. **阻塞型函数**：放阻塞池（建议），还是把逐行驱动做成 async（会让所有函数体沾上 async，不建议）。
+3. **阻塞型函数**：放阻塞池（建议），还是把逐行驱动做成 async（会让所有函数体沾上 async，不建议）。 **已决定（D43，2026-11-07）**：都不采用。`SLEEP` 用 async 定时器，只给含 `SLEEP` 的程序配一个异步驱动，其余函数体不受影响；不进阻塞池（见 3.9）。
 4. **SIMD**：本 spec 只保证单态化循环；某个签名需要手写 SIMD 时按 A5 单独申请，并用本 spec 的 govec 向量做等价性门禁。
 
 ## 7. 与其他 spec 的关系

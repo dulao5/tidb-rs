@@ -24,11 +24,11 @@ Go TiDB 的很多写法只是因为 Go 运行时才那样写（goroutine、chann
 | M-GO | `go f()` 启动 worker | 在 ExecPool 上 `spawn` 一个 task；worker 数量与 Go 相同，物理并行度由池大小决定 | N3 | 执行器 crate 禁止 `std::thread::spawn` |
 | M-CH | channel 收发、`select` | 取消安全的异步 channel，容量照抄 Go；`select!`。所有收发都经过 `ctx.send` / `ctx.recv`，同时监听取消 | N3 | 禁止直接调用 channel 的 `send` / `recv` |
 | M-WG | `sync.WaitGroup`、`errgroup` | 保存 `JoinHandle`，关闭时逐个 `await` | N3 | — |
-| M-KILL | `HandleSQLKillerSignal` 等检查点；hash build、sort 等不经过 `Next` 的循环 | `ctx.checkpoint().await`，放在 Go 的检查点位置；不经过 `Next` 的循环（hash build、sort、merge、聚合 final 合并的内循环）也调用。每次都做 KILL 检查和内存检查（A1）；超过时间片（默认 1ms，TiKV `RescheduleChecker` 的模式）才让出 CPU | N3、A1 | — |
+| M-KILL | `HandleSQLKillerSignal` 等检查点；hash build、sort 等不经过 `Next` 的循环 | `ctx.checkpoint().await`，放在 Go 的检查点位置；不经过 `Next` 的循环（hash build、sort、merge、聚合 final 合并的内循环）也调用。每次都做 KILL 检查和内存检查（A1），也每次都看时钟（Go 的检查点是 chunk 级的），本次 poll 超过时间片（默认 1ms）才让出 CPU。逐行调用的内层循环用 `CheckpointStride::new(n)`，每 n 次看一次时钟（TiKV `RescheduleChecker` 的模式） | N3、A1 | — |
 | M-PANIC | 用 `panic` / `recover` 处理内存超限、KILL 和运行时错误 | 返回 `Result`；只在 task 边界用 `catch_unwind` 兜底，转成与 Go 相同的错误文本 | N3 | — |
 | M-BLOCK | 在 goroutine 里直接做阻塞 I/O（落盘等）；后台任务的长循环 | `spawn_blocking` 或专用阻塞池（N3 3.6 的 Q3）；后台任务的长循环放时间片让出点（N3 3.7） | N3 | 执行器 crate 禁止 `Runtime::block_on` |
 | M-LOCK | `sync.Mutex` / `RWMutex` | `parking_lot` 的锁（无毒化）；不得跨 `await` 持有 | N3 | 禁用 `std::sync::Mutex`；`clippy::await_holding_lock` |
-| M-SNAP | `atomic.Pointer` / `atomic.Value` 发布快照 | `ArcSwap` | N2 | — |
+| M-SNAP | `atomic.Pointer` / `atomic.Value` 发布快照 | `ArcSwap`。`load()` 返回的 guard 只用于短暂持有（一次读取、一个表达式内）：guard 占用 arc-swap 每个线程为数不多的快速槽位，长时间持有或同时持有多个时，之后的 `load()` 会退化到较慢的路径（每次增减引用计数）。需要跨 await 或长时间持有快照时，用 `load_full()`，或该模块提供的 `*_arc()` 访问函数（如 `get_global_config_arc()`），拿到独立的 `Arc` | N2 | — |
 | M-DEFER | `defer` | `Drop` / scope guard | — | — |
 | M-TICK | 后台 goroutine 定时轮询 | 运行时定时器。按语句的（expensivequery 检查 `max_execution_time`）：每条语句一个 deadline，到期发送与 Go 相同的 KILL 信号。按进程的（`servermemorylimit` 每 100ms 读内存用量、SQLKiller 检查连接存活）：一个周期定时器，周期与 Go 相同。判断逻辑（选谁、发什么信号、日志）仍按 L1 | N3 | — |
 | M-MEM | `memory.Tracker.Consume` 按估算值记账 | `TrackedAlloc`：按实际分配记到同一棵 tracker 树；超限动作链按 L1 | A1 | — |

@@ -37,7 +37,7 @@
 | D17 | A4 | 损坏的 JSON 二进制 | 返回内部错误码 | 已决定 |
 | D18 | N4 | Go 逐行版与向量版"真分歧" | 两种驱动各自与 Go 一致，分歧签名保留第二份函数体，同时报上游 | 建议 |
 | D19 | N4 | 是否依赖 TiKV RPN 框架代码 | 不依赖，只参照设计；删除 vendored `tidb_query_expr` | 建议 |
-| D20 | N4 | 阻塞型函数（SLEEP、GET_LOCK） | 放阻塞池执行，不把求值做成 async | 建议 |
+| D20 | N4 | 阻塞型函数（SLEEP、GET_LOCK） | ~~放阻塞池执行，不把求值做成 async~~ 被 D43 取代（2026-11-07） | 取代 |
 | D21 | N4 | SIMD | 本 spec 只保证单态化循环；手写 SIMD 按 A5 逐个申请 | 建议 |
 | D22 | N4 | 定稿门禁 | 定稿前用宏原型对 5 个热点签名做基准，不低于 Go | 建议 |
 | D23 | N5a | 列格式 | 移植 Go Chunk（L1） | 建议 |
@@ -57,7 +57,7 @@
 | # | 来源 | 事项 | 建议 | 状态 |
 |---|---|---|---|---|
 | D32 | N3 3.1 第 2、9 条 | 运行时拓扑 | 只有一个 tokio 运行时，语句在连接 task 内执行、不交接；Steal 默认、NoSteal 可选，两种拓扑过同一套测试（NoSteal 在 nightly） | 建议 |
-| D33 | N3 3.1 第 5 条 | checkpoint 的形状 | kill / 内存检查在 Go 的每个检查点做；让出按时间片（默认 1ms）；记录 CPU 片 | 建议 |
+| D33 | N3 3.1 第 5 条 | checkpoint 的形状 | kill / 内存检查在 Go 的每个检查点做；让出按时间片（默认 1ms）；记录 CPU 片。2026-11-07（PR #8 评审）：默认每次调用都看时钟；逐行的内层循环用显式的 `CheckpointStride` | 建议 |
 | D34 | N3 3.6 | Q1 语句准入 | L1 移植 Go `token-limit`（默认 1000，排队）；按 resource group 分份额、过载拒绝是功能例外，默认关闭 | 建议 |
 | D35 | N3 3.6 | Q2 发往 TiKV 的在途窗口 | 服务器级每 store 一个窗口，挂在 `ExecCtx`；按在途 RPC 计数；默认无限，含 `tidb_store_limit` 的 L1 语义；AIMD（用 `read_pool_schedule_wait_nanos`）和按组份额是功能例外，默认关闭，由基准决定 | 建议 |
 | D36 | N3 3.6 | 新观测字段 | 只进 EXPLAIN ANALYZE 和指标，不进慢日志 / `SLOW_QUERY` | 建议 |
@@ -66,6 +66,7 @@
 | D39 | PR #4 评审 | govec 向量文件格式 | `.jsonl.gz` 入库，测试用 `flate2` 读 | 建议 |
 | D40 | N0 §3 | crate 分层表 | `layers.toml` 作为 P1–P5 的初始分层（31 个正式 crate，按块级引用排 rank，99.78% 的跨 crate 引用向下）；依赖只能指向 rank 更小的 crate，CI 检查 | 建议 |
 | D41 | N0 §4 | 反向引用与全局注册表 | 只允许下沉、接口反转、边界桩三种处理；不合并 crate、不用 `dyn Any` 绕过；Go 的包级注册表由 `tidb-server` 启动时显式注册，不用 `inventory`/`linkme`/`ctor` | 建议 |
+| D43 | N3 3.6 Q3（PR #8 评审，取代 D20） | 阻塞池与 SLEEP / GET_LOCK | SLEEP 用 async 定时器实现，按 Go 的 sleep 循环语义（每 10ms 检查 KILL）移植，D08.9 落地时定具体写法，不占 Q3 的名额；GET_LOCK 本来就是 async；Q3 只放真正阻塞的工作（落盘 I/O 等），按类别分别限额（落盘、其他），一类占满不会饿死另一类。理由：用户发起大量 `SLEEP` 就能占满共用的阻塞池，饿死落盘 I/O，内存降不下来 | 采纳（协调人 2026-11-07） |
 | D42 | N0 §5 | PoC crate | 列为 legacy，新代码不得依赖；与正式 crate 同名的 5 个在 D07.0 前改名为 `poc-*`、移到 `crates/poc/`（只做机械改名的 PR） | 建议 |
 
 ## 三、确认之后

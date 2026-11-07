@@ -3689,6 +3689,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-runtime"
+version = "0.0.0"
+dependencies = [
+ "criterion 0.5.1",
+ "log",
+ "parking_lot 0.12.5",
+ "prometheus",
+ "tidb-base",
+ "tokio",
+]
+
+[[package]]
 name = "tidb-server"
 version = "0.0.0"
 dependencies = [
