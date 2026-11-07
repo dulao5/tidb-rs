@@ -11,12 +11,37 @@
 //! | 100, 101, 102 | CosineDistance | not fused | `FMADDS` |
 //! | 152 | L2Norm (float64) | not fused | `FMADDD` |
 //!
-//! On x86_64 the sums and products also follow gc's operand order when both operands are
-//! NaN ([`add32`], [`mul32`]): SSE returns the destination's NaN, and LLVM may swap the
-//! operands of these commutative operations (tidb-rs PR #16, x86_64 CI).
+//! **NaN results.** Which NaN comes out of an operation with NaN operands depends on the
+//! hardware rule and on which register gc puts each operand in, and LLVM may order the
+//! operands of commutative operations (and the two multiplicands of `fma`) differently
+//! (tidb-rs PR #16: x86_64 CI, and Lucky's arm64 review):
 //!
-//! [`madd32`] / [`madd64`] follow Go per target: `mul_add` (one `fmadd` instruction) where
-//! gc fuses, a separate multiply and add elsewhere (Rust never contracts by itself).
+//! - x86 SSE (`ADDSS`/`MULSS`, amd64): with two NaN operands the result is the first source,
+//!   the destination register, quieted; with one, that NaN quieted.
+//! - ARM (`FADDS`, `FMADDS`, arm64, FPCR.DN = 0): the first signalling NaN in operand order
+//!   (`FMADD`: addend, Rn, Rm; two operands: Rn, Rm), quieted; if none, the first quiet NaN
+//!   in the same order; and a quiet-NaN addend with an infinite × zero product gives the
+//!   default NaN `0x7FC00000` (`FPMulAdd`).
+//! - An invalid operation without NaN operands (Inf − Inf, 0 × Inf) gives the hardware's
+//!   default NaN: x86 `0xFFC00000`, ARM `0x7FC00000`; Rust gets it from the same hardware.
+//!
+//! gc's operand order, from `go build -gcflags=-S` of `pkg/types` (go1.25.12):
+//!
+//! | Go line | amd64 | arm64 |
+//! |---|---|---|
+//! | 44 `distance += diff * diff` | same operand | `FMADDS diff, acc, diff, acc` |
+//! | 71 `distance += va[i] * vb[i]` | `MULSS vb, va` (va first), `ADDSS prod, acc` | `FMADDS va, acc, vb, acc`: Rn = vb, Rm = va |
+//! | 100 `distance += va[i] * vb[i]` | as line 71 | `FMADDS vb, acc, va, acc`: Rn = va, Rm = vb |
+//! | 101, 102, 152 | same operand | same operand |
+//! | 137 `distance += diff` (L1) | `ADDSS diff, acc` (acc first) | `FADDS diff, acc, acc`: Rn = acc |
+//!
+//! The subtractions (`va[i] - vb[i]`) keep their operand order in LLVM as in gc, so the
+//! hardware applies the rule itself. The distance loops run twice when needed: a fast loop
+//! with plain operations, and only if its result is NaN, the `EXACT` loop whose helpers
+//! ([`add32`], [`mul32`], [`madd32`], [`madd64`]) choose the NaN by the rules above. Data
+//! that Go creates never contains NaN (parse and create reject it), so the fast loop is the
+//! normal path. `CosineDistance` needs no `EXACT` loop: a NaN sum returns Go's canonical
+//! `math.NaN()`.
 
 use tidb_base::gofmt::Arg;
 use tidb_base::gostd::math as gomath;
@@ -24,65 +49,81 @@ use tidb_base::{Error, errors};
 
 use crate::vector::{VectorFloat32, init_vector_float32};
 
-/// `z + x*y` as gc compiles it at the fused sites of this file (see the module table).
+#[cfg(any(
+    target_arch = "aarch64",
+    all(target_arch = "powerpc64", target_endian = "little"),
+    target_arch = "riscv64",
+    target_arch = "loongarch64"
+))]
+macro_rules! fused {
+    ($fused:expr, $unfused:expr) => {
+        $fused
+    };
+}
+#[cfg(not(any(
+    target_arch = "aarch64",
+    all(target_arch = "powerpc64", target_endian = "little"),
+    target_arch = "riscv64",
+    target_arch = "loongarch64"
+)))]
+macro_rules! fused {
+    ($fused:expr, $unfused:expr) => {
+        $unfused
+    };
+}
+
+/// `z + x*y` as gc compiles it at the fused sites of this file (see the module table):
+/// one `fmadd` where gc fuses, a separate multiply and add elsewhere (Rust never contracts
+/// by itself). `ARM_YX`: on arm64 gc puts `y` in Rn and `x` in Rm (line 71); otherwise `x`
+/// in Rn. With `EXACT`, NaN operands give gc's NaN (module doc).
 // glue: the multiply-add of the M-FMA sites (module table)
 #[inline(always)]
-fn madd32(z: f32, x: f32, y: f32) -> f32 {
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "powerpc64", target_endian = "little"),
-        target_arch = "riscv64",
-        target_arch = "loongarch64"
-    ))]
-    {
-        x.mul_add(y, z)
-    }
-    #[cfg(not(any(
-        target_arch = "aarch64",
-        all(target_arch = "powerpc64", target_endian = "little"),
-        target_arch = "riscv64",
-        target_arch = "loongarch64"
-    )))]
-    {
-        add32(z, mul32(x, y))
-    }
+fn madd32<const EXACT: bool, const ARM_YX: bool>(z: f32, x: f32, y: f32) -> f32 {
+    fused!(
+        {
+            #[cfg(target_arch = "aarch64")]
+            if EXACT {
+                let (n, m) = if ARM_YX { (y, x) } else { (x, y) };
+                if let Some(r) = arm_fmadd_nan32(z, n, m) {
+                    return r;
+                }
+            }
+            x.mul_add(y, z)
+        },
+        add32::<EXACT>(z, mul32::<EXACT>(x, y))
+    )
 }
 
-/// [`madd32`] for the float64 sum of `L2Norm`.
+/// [`madd32`] for the float64 sum of `L2Norm` (line 152, the same operand twice).
 // glue: the multiply-add of the M-FMA site of L2Norm (module table)
 #[inline(always)]
-fn madd64(z: f64, x: f64, y: f64) -> f64 {
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "powerpc64", target_endian = "little"),
-        target_arch = "riscv64",
-        target_arch = "loongarch64"
-    ))]
-    {
-        x.mul_add(y, z)
-    }
-    #[cfg(not(any(
-        target_arch = "aarch64",
-        all(target_arch = "powerpc64", target_endian = "little"),
-        target_arch = "riscv64",
-        target_arch = "loongarch64"
-    )))]
-    {
-        add64(z, x * y)
-    }
+fn madd64<const EXACT: bool>(z: f64, x: f64, y: f64) -> f64 {
+    fused!(
+        {
+            #[cfg(target_arch = "aarch64")]
+            if EXACT && let Some(r) = arm_fmadd_nan64(z, x, y) {
+                return r;
+            }
+            x.mul_add(y, z)
+        },
+        add64::<EXACT>(z, x * y)
+    )
 }
 
-/// `a + b` where Go accumulates `a += b`: gc emits `ADDSS b, a` on amd64 (the accumulator
-/// is the destination), and when both operands are NaN SSE returns the destination's NaN
-/// (quieted). LLVM treats `fadd` as commutative and may put `b` in the destination
-/// register, which would return `b`'s NaN, so on x86_64 the two-NaN case is decided here.
-/// One NaN operand, or none, is the hardware's result in either order.
-// glue: NaN propagation of gc's operand order (x86_64)
+/// `a + b` where Go accumulates `a += b`: gc's first operand is `a` on both targets (amd64
+/// destination, arm64 Rn). With `EXACT`, NaN operands give gc's NaN.
+// glue: NaN propagation of gc's operand order
 #[inline(always)]
-fn add32(a: f32, b: f32) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    if a.is_nan() && b.is_nan() {
-        return f32::from_bits(a.to_bits() | 0x0040_0000);
+fn add32<const EXACT: bool>(a: f32, b: f32) -> f32 {
+    if EXACT {
+        #[cfg(target_arch = "x86_64")]
+        if a.is_nan() && b.is_nan() {
+            return quiet32(a);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if let Some(r) = arm_nan2_32(a, b) {
+            return r;
+        }
     }
     a + b
 }
@@ -91,10 +132,10 @@ fn add32(a: f32, b: f32) -> f32 {
 // glue: NaN propagation of gc's operand order (x86_64)
 #[inline(always)]
 #[allow(dead_code)]
-fn mul32(x: f32, y: f32) -> f32 {
+fn mul32<const EXACT: bool>(x: f32, y: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
-    if x.is_nan() && y.is_nan() {
-        return f32::from_bits(x.to_bits() | 0x0040_0000);
+    if EXACT && x.is_nan() && y.is_nan() {
+        return quiet32(x);
     }
     x * y
 }
@@ -103,12 +144,103 @@ fn mul32(x: f32, y: f32) -> f32 {
 // glue: NaN propagation of gc's operand order (x86_64)
 #[inline(always)]
 #[allow(dead_code)]
-fn add64(a: f64, b: f64) -> f64 {
+fn add64<const EXACT: bool>(a: f64, b: f64) -> f64 {
     #[cfg(target_arch = "x86_64")]
-    if a.is_nan() && b.is_nan() {
-        return f64::from_bits(a.to_bits() | 0x0008_0000_0000_0000);
+    if EXACT && a.is_nan() && b.is_nan() {
+        return quiet64(a);
     }
     a + b
+}
+
+/// A NaN quieted as the hardware does (the quiet bit set, payload and sign kept).
+// glue: NaN quieting of the hardware rules (module doc)
+#[inline(always)]
+#[allow(dead_code)]
+fn quiet32(v: f32) -> f32 {
+    f32::from_bits(v.to_bits() | 0x0040_0000)
+}
+
+/// [`quiet32`] for float64.
+// glue: NaN quieting of the hardware rules (module doc)
+#[inline(always)]
+#[allow(dead_code)]
+fn quiet64(v: f64) -> f64 {
+    f64::from_bits(v.to_bits() | 0x0008_0000_0000_0000)
+}
+
+/// ARM two-operand NaN rule (`FPProcessNaNs`): the first signalling NaN of (n, m),
+/// quieted, else the first quiet NaN; `None` without NaN operands.
+// glue: ARM NaN propagation (FPProcessNaNs)
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn arm_nan2_32(n: f32, m: f32) -> Option<f32> {
+    let snan = |v: f32| v.is_nan() && v.to_bits() & 0x0040_0000 == 0;
+    if snan(n) {
+        Some(quiet32(n))
+    } else if snan(m) {
+        Some(quiet32(m))
+    } else if n.is_nan() {
+        Some(n)
+    } else if m.is_nan() {
+        Some(m)
+    } else {
+        None
+    }
+}
+
+/// ARM `FMADD` NaN rule (`FPMulAdd`: `FPProcessNaNs3` over addend, Rn, Rm; then a
+/// quiet-NaN addend with an infinite × zero product gives the default NaN).
+// glue: ARM NaN propagation (FPMulAdd)
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn arm_fmadd_nan32(a: f32, n: f32, m: f32) -> Option<f32> {
+    let snan = |v: f32| v.is_nan() && v.to_bits() & 0x0040_0000 == 0;
+    let r = if snan(a) {
+        quiet32(a)
+    } else if snan(n) {
+        quiet32(n)
+    } else if snan(m) {
+        quiet32(m)
+    } else if a.is_nan() {
+        a
+    } else if n.is_nan() {
+        n
+    } else if m.is_nan() {
+        m
+    } else {
+        return None;
+    };
+    if a.is_nan() && !snan(a) && ((n.is_infinite() && m == 0.0) || (n == 0.0 && m.is_infinite())) {
+        return Some(f32::from_bits(0x7fc0_0000));
+    }
+    Some(r)
+}
+
+/// [`arm_fmadd_nan32`] for float64 (`FMADDD`).
+// glue: ARM NaN propagation (FPMulAdd)
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn arm_fmadd_nan64(a: f64, n: f64, m: f64) -> Option<f64> {
+    let snan = |v: f64| v.is_nan() && v.to_bits() & 0x0008_0000_0000_0000 == 0;
+    let r = if snan(a) {
+        quiet64(a)
+    } else if snan(n) {
+        quiet64(n)
+    } else if snan(m) {
+        quiet64(m)
+    } else if a.is_nan() {
+        a
+    } else if n.is_nan() {
+        n
+    } else if m.is_nan() {
+        m
+    } else {
+        return None;
+    };
+    if a.is_nan() && !snan(a) && ((n.is_infinite() && m == 0.0) || (n == 0.0 && m.is_infinite())) {
+        return Some(f64::from_bits(0x7ff8_0000_0000_0000));
+    }
+    Some(r)
 }
 
 impl VectorFloat32<'_> {
@@ -129,15 +261,23 @@ impl VectorFloat32<'_> {
     pub fn l2_squared_distance(&self, b: &VectorFloat32<'_>) -> Result<f64, Error> {
         self.check_identical_dims(b)?;
 
-        let mut distance: f32 = 0.0;
         let va = self.elements();
         let vb = b.elements();
-
-        for (x, y) in va.iter().zip(vb.iter()) {
-            // Hope this can be vectorized.
-            let diff = x - y;
-            distance = madd32(distance, diff, diff); // [M-FMA] vector_functions.go:44
-        }
+        let run = |exact: bool| {
+            let mut distance: f32 = 0.0;
+            for (x, y) in va.iter().zip(vb.iter()) {
+                // Hope this can be vectorized.
+                let diff = x - y;
+                distance = if exact {
+                    madd32::<true, false>(distance, diff, diff) // [M-FMA] vector_functions.go:44
+                } else {
+                    madd32::<false, false>(distance, diff, diff) // [M-FMA] vector_functions.go:44
+                };
+            }
+            distance
+        };
+        let d = run(false);
+        let distance = if d.is_nan() { run(true) } else { d };
 
         Ok(distance as f64)
     }
@@ -154,14 +294,22 @@ impl VectorFloat32<'_> {
     pub fn inner_product(&self, b: &VectorFloat32<'_>) -> Result<f64, Error> {
         self.check_identical_dims(b)?;
 
-        let mut distance: f32 = 0.0;
         let va = self.elements();
         let vb = b.elements();
-
-        for (x, y) in va.iter().zip(vb.iter()) {
-            // Hope this can be vectorized.
-            distance = madd32(distance, x, y); // [M-FMA] vector_functions.go:71
-        }
+        let run = |exact: bool| {
+            let mut distance: f32 = 0.0;
+            for (x, y) in va.iter().zip(vb.iter()) {
+                // Hope this can be vectorized.
+                distance = if exact {
+                    madd32::<true, true>(distance, x, y) // [M-FMA] vector_functions.go:71
+                } else {
+                    madd32::<false, true>(distance, x, y) // [M-FMA] vector_functions.go:71
+                };
+            }
+            distance
+        };
+        let d = run(false);
+        let distance = if d.is_nan() { run(true) } else { d };
 
         Ok(distance as f64)
     }
@@ -188,9 +336,9 @@ impl VectorFloat32<'_> {
 
         for (x, y) in va.iter().zip(vb.iter()) {
             // Hope this can be vectorized.
-            distance = madd32(distance, x, y); // [M-FMA] vector_functions.go:100
-            norma = madd32(norma, x, x); // [M-FMA] vector_functions.go:101
-            normb = madd32(normb, y, y); // [M-FMA] vector_functions.go:102
+            distance = madd32::<false, false>(distance, x, y); // [M-FMA] vector_functions.go:100
+            norma = madd32::<false, false>(norma, x, x); // [M-FMA] vector_functions.go:101
+            normb = madd32::<false, false>(normb, y, y); // [M-FMA] vector_functions.go:102
         }
 
         let mut similarity = distance as f64 / (norma as f64 * normb as f64).sqrt();
@@ -212,18 +360,26 @@ impl VectorFloat32<'_> {
     pub fn l1_distance(&self, b: &VectorFloat32<'_>) -> Result<f64, Error> {
         self.check_identical_dims(b)?;
 
-        let mut distance: f32 = 0.0;
         let va = self.elements();
         let vb = b.elements();
-
-        for (x, y) in va.iter().zip(vb.iter()) {
-            // Hope this can be vectorized.
-            let mut diff = x - y;
-            if diff < 0.0 {
-                diff = -diff;
+        let run = |exact: bool| {
+            let mut distance: f32 = 0.0;
+            for (x, y) in va.iter().zip(vb.iter()) {
+                // Hope this can be vectorized.
+                let mut diff = x - y;
+                if diff < 0.0 {
+                    diff = -diff;
+                }
+                distance = if exact {
+                    add32::<true>(distance, diff)
+                } else {
+                    add32::<false>(distance, diff)
+                };
             }
-            distance = add32(distance, diff);
-        }
+            distance
+        };
+        let d = run(false);
+        let distance = if d.is_nan() { run(true) } else { d };
 
         Ok(distance as f64)
     }
@@ -233,12 +389,20 @@ impl VectorFloat32<'_> {
     pub fn l2_norm(&self) -> f64 {
         // Note: We align the impl with pgvector: Only l2_norm use double
         // precision during calculation.
-        let mut norm: f64 = 0.0;
-
-        for x in self.elements().iter() {
-            // Hope this can be vectorized.
-            norm = madd64(norm, x as f64, x as f64); // [M-FMA] vector_functions.go:152
-        }
+        let run = |exact: bool| {
+            let mut norm: f64 = 0.0;
+            for x in self.elements().iter() {
+                // Hope this can be vectorized.
+                norm = if exact {
+                    madd64::<true>(norm, x as f64, x as f64) // [M-FMA] vector_functions.go:152
+                } else {
+                    madd64::<false>(norm, x as f64, x as f64) // [M-FMA] vector_functions.go:152
+                };
+            }
+            norm
+        };
+        let n = run(false);
+        let norm = if n.is_nan() { run(true) } else { n };
         norm.sqrt()
     }
 

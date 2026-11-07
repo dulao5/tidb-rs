@@ -35,7 +35,8 @@ Go 的 `ZeroCopyDeserializeVectorFloat32` 返回的向量与输入共享内存�
 
 - **M-FMA**：登记表中本块有 6 个位置（vector_functions.go:44、71、100、101、102 的 float32 累加和 :152 的 float64 累加），arm64 融合，amd64 GOAMD64=v1 不融合。`madd32` / `madd64` 按目标平台选择 `mul_add` 或分开的乘加，写法与 D01.2 的 `to_float64_madd` 一致。距离记录因此在两个目标上不同，tracker 的 `targetDiffs` 按 op 登记。
 - **NaN 的位**：`CosineDistance` 返回 Go 的 `math.NaN()`（`0x7FF8000000000001`），Rust 的 `f64::NAN` 位不同，改用 `gostd::math::nan()`。`NegativeInnerProduct` 的 `d * -1` 被 gc 改写成取负（NaN 的符号位翻转），Rust 写成 `-d`。
-- **默认 NaN 的符号**：无效运算（Inf−Inf、0×Inf）得到硬件的默认 NaN，amd64 上带符号位（`0xFFF8…`），arm64 上不带。Go 和 Rust 在同一硬件上得到同样的位，不需要特别处理，但两个目标的向量在这些记录上不同（38 条）。
+- **默认 NaN 的符号**：无效运算（Inf−Inf、0×Inf）得到硬件的默认 NaN，amd64 上带符号位（`0xFFF8…`），arm64 上不带。Go 和 Rust 在同一硬件上得到同样的位，不需要特别处理，但两个目标的向量在这些记录上不同。
+- **NaN 操作数的传播**（PR #16 评审）：结果是哪个 NaN，取决于硬件规则和 gc 把操作数放在哪个寄存器。x86 SSE 两个 NaN 时返回目标寄存器的（第一个源）；ARM 先按 addend、Rn、Rm 的顺序找 SNaN，没有再找 QNaN，addend 是 QNaN 且乘积是 ∞×0 时给默认 NaN。LLVM 认为加法、乘法和 fma 的两个乘数可交换，操作数顺序不一定与 gc 相同。所以距离函数先用普通运算算一遍，只有结果是 NaN 时，才按 gc 的操作数顺序（`-gcflags=-S` 核对，见 `vector_functions.rs` 模块注释中的表）和目标平台的规则逐元素重算（`EXACT` 循环）。Go 自己创建的向量不含 NaN，正常数据只走快路径。`CosineDistance` 遇到 NaN 返回规范 NaN，不需要重算。
 - float64 → float32 的转换（`float32(v)`）和 Rust 的 `as f32` 都是就近舍入、溢出为 ±Inf，所以 `[1e39]` 解析得到含 +Inf 的向量，与 Go 相同。
 
 ### 2.4 jsoniter 照搬

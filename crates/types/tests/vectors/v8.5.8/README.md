@@ -47,3 +47,20 @@ Replayed by `tests/govec_time.rs`.
 | `amd64/time.jsonl.gz` sha256 | `19abff457405d74cf7747d857dee0c1cd67693900ef817e59f70aa7af211f098` (CI linux/amd64, GOAMD64=v1) |
 | `arm64/time.jsonl.gz` sha256 | `7047d0331fdd6921111327b494d97205ee253241a6532bef1204d17dc8ed6887` |
 | generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261107); the targets differ in 3 records (`parse_time_float64` of NaN, +Inf, 1e19) |
+
+## vector (block D01.6)
+
+`<target>/vector.jsonl.gz` are copied unmodified from tidb-rs-tracker
+`vectors/v8.5.8/<target>/vector.jsonl.gz` (branch `govec/vector-D01.6`): 91,762 records of
+`pkg/types` vector.go and vector_functions.go plus the jsoniter parser. Inputs include NaN
+bit patterns (QNaN with payloads, SNaN, negative SNaN, all ones), so the replay checks
+which NaN each distance returns under gc's operand order on each target. The targets
+differ in 1,851 `distance` records (M-FMA rounding, and the x86 / ARM NaN rules).
+Replayed by `tests/govec_vector.rs`.
+
+| | |
+|---|---|
+| tracker commit | `bbb75e6` (branch `govec/vector-D01.6`) |
+| `amd64/vector.jsonl.gz` sha256 | `dd598d395cb3a25c2e3bd891092c4cafcec9bbf6b83db0686445c1dd77ff04ba` (CI linux/amd64, GOAMD64=v1) |
+| `arm64/vector.jsonl.gz` sha256 | `2efb8e86bc9e41d3ce75c54766a31a0310ed2e635ca45ab63fc081d4f901a6bb` |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 31337) |
