@@ -2,11 +2,14 @@
 //!
 //! The tables `defaultLengthAndDecimal(ForCast)` are in `util_gen.rs` (generated).
 
+// Go identifiers for constants and statics (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 use super::*;
 
-/// `lengthAndDecimal`.
+/// `lengthAndDecimal` (Go struct).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct lengthAndDecimal {
+pub struct LengthAndDecimal {
     pub length: i64,
     pub decimal: isize,
 }

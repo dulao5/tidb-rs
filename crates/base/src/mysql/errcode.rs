@@ -4,6 +4,9 @@
 
 //! go-file: pkg/parser/mysql/errcode.go
 
+// Generated data keeps Go's identifiers (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 // MySQL error code.
 // This value is numeric. It is not portable to other database systems.
 

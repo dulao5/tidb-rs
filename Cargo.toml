@@ -61,11 +61,9 @@ style-lint-allow = [
   "clippy::manual_range_contains",
   "clippy::manual_slice_fill",
   "clippy::needless_range_loop",
-  # Go identifiers kept for constants, statics and Go-named functions of generated/ported
-  # tables (`mysql::ErrDupEntry`, `formatENUS`), so ported code reads like Go (D00.2 plan).
+  # Go identifiers kept for constants, statics and tables (mapping rule M-GONAME:
+  # `mysql::ErrDupEntry`); functions and types follow Rust naming.
   "non_upper_case_globals",
-  "non_snake_case",
-  "non_camel_case_types",
 ]
 
 # The vendored TiKV crates refer to these with `{ workspace = true }`. Specs

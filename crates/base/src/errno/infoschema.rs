@@ -5,6 +5,9 @@
 //! that are generating high error/warning counts, in which case
 //! the system probably has other issues already.
 
+// Go identifiers for constants and statics (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 use std::collections::HashMap;
 use std::time::SystemTime;
 

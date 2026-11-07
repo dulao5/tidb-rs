@@ -10,10 +10,14 @@
 //! ([`ErrClassToMySQLCodes`], from the Go v8.5.8 tidb-server package set, see
 //! `terror_registry.rs`); `initError` checks that the code is in it instead of inserting.
 
+// Go identifiers for constants and statics (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::errors::{self, ErrCode, Error, IntoErrCode};
+use crate::gofmt::Arg;
 use crate::gomap::GoMap;
 use crate::mysql::{self, ErrMessage};
 
@@ -76,17 +80,17 @@ static ErrClass2Desc: GoMap<ErrClass, &str> = GoMap::new(ERR_CLASS_2_DESC);
 /// `code2ErrClassMap`: class description -> class (Go: a `sync.Map` filled by
 /// `initError`). It holds exactly the classes that registered at least one error code,
 /// which is the key set of [`ErrClassToMySQLCodes`].
-pub struct code2ErrClassMap;
+pub struct Code2ErrClassMap;
 
 /// `rfcCode2errClass`.
-static rfcCode2errClass: code2ErrClassMap = new_code2_err_class_map();
+static rfcCode2errClass: Code2ErrClassMap = new_code2_err_class_map();
 
 // go: newCode2ErrClassMap L2 (static registry, see module doc)
-const fn new_code2_err_class_map() -> code2ErrClassMap {
-    code2ErrClassMap
+const fn new_code2_err_class_map() -> Code2ErrClassMap {
+    Code2ErrClassMap
 }
 
-impl code2ErrClassMap {
+impl Code2ErrClassMap {
     // go: code2ErrClassMap.Get L2 (static registry, see module doc)
     pub fn get(&self, key: &str) -> (ErrClass, bool) {
         for (class, _) in ErrClassToMySQLCodes.iter() {
@@ -289,11 +293,7 @@ impl ErrClass {
     /// so it's goroutine-safe
     /// and often be used to create Error came from other systems like TiKV.
     // go: ErrClass.Synthesize L1
-    pub fn synthesize(
-        self,
-        code: impl IntoErrCode,
-        message: impl Into<Cow<'static, str>>,
-    ) -> Error {
+    pub fn synthesize(self, code: impl IntoErrCode, message: impl errors::IntoGoString) -> Error {
         let code = code.into_err_code();
         let desc = ErrClass2Desc.get(&self).copied().unwrap_or("");
         errors::normalize(
@@ -310,7 +310,7 @@ impl ErrClass {
 // go: ToSQLError L1
 pub fn to_sql_error(e: &Error) -> mysql::SQLError {
     let code = get_mysql_error_code(e);
-    mysql::new_errf(code, "%s", &[], crate::go_args![e.get_msg()])
+    mysql::new_errf(code, "%s", &[], vec![Arg::go_string(e.get_msg())])
 }
 
 /// `defaultMySQLErrorCode` (set to `mysql.ErrUnknown` by `init`).
@@ -452,12 +452,12 @@ mod tests {
 
     #[test]
     fn critical() {
-        assert_eq!(ErrCritical.error(), "[global:3]critical error %v");
+        assert_eq!(ErrCritical.error(), b"[global:3]critical error %v");
         assert_eq!(
             ErrCritical
                 .gen_with_stack_by_args(crate::go_args!["x"])
                 .error(),
-            "[global:3]critical error x"
+            b"[global:3]critical error x"
         );
     }
 }

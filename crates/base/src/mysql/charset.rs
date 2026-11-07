@@ -3,6 +3,9 @@
 //! Constants and the tables `CharsetIDs`, `Collations`, `CollationNames` are in
 //! `charset_gen.rs` (generated).
 
+// Go identifiers for constants and statics (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 use super::*;
 use crate::gostd::RangeTable;
 use crate::gostd::unicode_tables as u;

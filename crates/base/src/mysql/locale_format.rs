@@ -1,7 +1,7 @@
 //! go-file: pkg/parser/mysql/locale_format.go
 
 use crate::errors::{self, Error};
-use crate::gostd::{is_digit, is_digit_byte};
+use crate::gostd::{decode_rune, is_digit, is_digit_byte};
 
 /// Go `strconv.ParseUint(s, 10, 64)` (success only; the error value is not used here).
 // go-std: strconv.ParseUint L2 (base 10, bitSize 64; returns None on any error)
@@ -19,19 +19,20 @@ fn parse_uint(s: &[u8]) -> Option<u64> {
     Some(n)
 }
 
-/// `formatENUS`. Works on the bytes of the Go strings (a non-ASCII digit in `number` is cut
-/// at byte offsets as in Go); the result is converted to a Rust string lossily.
+/// `formatENUS`, on the bytes of the Go strings.
 // go: formatENUS L1 [M-INT]
-#[allow(clippy::if_same_then_else)] // Go's three `continue` branches
-pub fn formatENUS(number: &str, precision: &str) -> Result<String, Error> {
+pub fn format_en_us(number: &[u8], precision: &[u8]) -> Result<Vec<u8>, Error> {
     let mut buffer: Vec<u8> = Vec::new();
-    let mut precision: &[u8] = precision.as_bytes();
+    let mut precision: &[u8] = precision;
     let number_owned: Vec<u8>;
-    let mut number: &[u8] = number.as_bytes();
+    let mut number: &[u8] = number;
     if is_digit_byte(precision[0]) {
-        let ps = std::str::from_utf8(precision).unwrap_or("");
-        for (i, v) in ps.char_indices() {
+        // for i, v := range precision
+        let mut i = 0;
+        while i < precision.len() {
+            let (v, w) = decode_rune(&precision[i..]);
             if is_digit(v) {
+                i += w;
                 continue;
             }
             precision = &precision[..i];
@@ -59,19 +60,18 @@ pub fn formatENUS(number: &str, precision: &str) -> Result<String, Error> {
             buffer.push(b'.');
             buffer.extend(std::iter::repeat_n(b'0', position as usize));
         }
-        return Ok(String::from_utf8_lossy(&buffer).into_owned());
+        return Ok(buffer);
     } else if &number[..1] == b"-" {
         buffer.push(b'-');
         number = &number[1..];
     }
 
-    let ns = String::from_utf8_lossy(number).into_owned();
-    for (i, v) in ns.char_indices() {
-        if is_digit(v) {
-            continue;
-        } else if i == 1 && number[1] == b'.' {
-            continue;
-        } else if v == '.' && number[1] != b'.' {
+    // for i, v := range number
+    let mut i = 0;
+    while i < number.len() {
+        let (v, w) = decode_rune(&number[i..]);
+        if is_digit(v) || (i == 1 && number[1] == b'.') || (v == '.' && number[1] != b'.') {
+            i += w;
             continue;
         }
         number = &number[..i];
@@ -112,7 +112,7 @@ pub fn formatENUS(number: &str, precision: &str) -> Result<String, Error> {
         }
     }
 
-    Ok(String::from_utf8_lossy(&buffer).into_owned())
+    Ok(buffer)
 }
 
 /// `strings.Replace(s, old, new, 1)`.
@@ -125,11 +125,11 @@ fn replace1(s: &[u8], old: &[u8], new: &[u8]) -> Vec<u8> {
 }
 
 // go: formatZHCN L1
-pub fn formatZHCN(_: &str, _: &str) -> Result<String, Error> {
+pub fn format_zh_cn(_: &[u8], _: &[u8]) -> Result<Vec<u8>, Error> {
     Err(errors::new("not implemented"))
 }
 
 // go: formatNotSupport L1
-pub fn formatNotSupport(_: &str, _: &str) -> Result<String, Error> {
+pub fn format_not_support(_: &[u8], _: &[u8]) -> Result<Vec<u8>, Error> {
     Err(errors::new("not support for the specific locale"))
 }

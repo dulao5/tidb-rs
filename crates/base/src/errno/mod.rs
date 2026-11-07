@@ -4,8 +4,6 @@
 //! `errcode.rs` and `errname.rs` are generated from the Go source (tracker
 //! `govec/cmd/rsgen`) and checked against Go by the govec domain "base".
 
-#![allow(non_upper_case_globals)]
-
 mod errcode;
 mod errname;
 mod infoschema;

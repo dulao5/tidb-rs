@@ -2,6 +2,9 @@
 //!
 //! Only `StoreType` (N0: moved to block D00.2, the rest of `pkg/kv` is block D07.0).
 
+// Go identifiers for constants and statics (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 /// StoreType represents the type of a store.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoreType(pub u8);

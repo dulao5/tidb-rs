@@ -13,23 +13,28 @@
 //! * `%!d(string=x)` for a verb the argument does not support, `%!d(MISSING)`,
 //!   `%!(EXTRA string=x)`, `%!(NOVERB)`, `%!(BADWIDTH)`, `%!(BADPREC)`.
 //!
-//! Strings are Rust `String`s (valid UTF-8). A Go string or `[]byte` argument with invalid
-//! UTF-8 is converted lossily before formatting (`Arg::from(&[u8])`), so such bytes print as
-//! U+FFFD instead of raw bytes — the one known difference (see the block plan).
+//! * `%U`, float verbs `b e E f F g G x X` with Go's shortest digits (`ftoaryu.go`,
+//!   ported in `gostd::ftoaryu`) and widths/precisions up to Go's limit of 1e6.
+//!
+//! **Go strings are byte strings**: a Go `string` argument is [`Arg::Str`] over bytes, and
+//! the result is `Vec<u8>`. Invalid UTF-8 counts as one rune per byte for width and
+//! precision, prints as-is with `%s`, and as `\xNN` with `%q`, exactly as in Go.
 
 #![allow(clippy::needless_range_loop)]
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
+use crate::gostd;
+
 /// One `interface{}` argument of a Go `fmt` call, with its dynamic Go type.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Arg {
     /// `nil` interface.
     Nil,
-    /// Go `string`.
-    Str(Cow<'static, str>),
-    /// Go `[]byte` (converted lossily if not UTF-8).
+    /// Go `string` (bytes, not necessarily UTF-8).
+    Str(Cow<'static, [u8]>),
+    /// Go `[]byte`.
     Bytes(Vec<u8>),
     /// Signed integer of Go type `.1` (`"int"`, `"int64"`, ...).
     Int(i64, &'static str),
@@ -41,12 +46,12 @@ pub enum Arg {
     Bool(bool),
     /// A value with an `Error()` or `String()` method (Go `error`, `fmt.Stringer`) and no
     /// `Format` method: the method's result and the Go type name (for `%T` and bad verbs).
-    Stringer(String, &'static str),
+    Stringer(Vec<u8>, &'static str),
     /// A pingcap/errors error (`errors.New`'s `*errors.fundamental`, `errors.Trace`'s
     /// `*errors.withStack`), whose `Format` method prints the message for `%v` and `%s`
     /// (ignoring width and precision), `%q` of it for `%q`, and nothing for other verbs.
     /// A tidb-rs [`crate::Error`] argument is this (Go errors are passed `Trace`d).
-    Error(String),
+    Error(Vec<u8>),
     /// `errors.redactFormatter` (pingcap/errors, `RedactLogMarker`): formats the wrapped value
     /// with the same verb and flags, then encloses it in `‹›`, doubling `‹` and `›` inside.
     Redact(Box<Arg>),
@@ -76,36 +81,33 @@ impl Arg {
     }
 }
 
+impl Arg {
+    /// A Go `string` argument from bytes. Bytes have no `From` conversion on purpose: a Go
+    /// `string` is `Arg::go_string(b)`, a Go `[]byte` is `Arg::Bytes(b)`.
+    // glue: Go string(bytes) argument
+    pub fn go_string(b: impl Into<Cow<'static, [u8]>>) -> Arg {
+        Arg::Str(b.into())
+    }
+}
 impl From<&'static str> for Arg {
     // glue: Go string argument
     fn from(s: &'static str) -> Self {
-        Arg::Str(Cow::Borrowed(s))
+        Arg::Str(Cow::Borrowed(s.as_bytes()))
     }
 }
 impl From<String> for Arg {
     // glue: Go string argument
     fn from(s: String) -> Self {
-        Arg::Str(Cow::Owned(s))
+        Arg::Str(Cow::Owned(s.into_bytes()))
     }
 }
 impl From<&String> for Arg {
     // glue: Go string argument
     fn from(s: &String) -> Self {
-        Arg::Str(Cow::Owned(s.clone()))
+        Arg::Str(Cow::Owned(s.clone().into_bytes()))
     }
 }
-impl From<&[u8]> for Arg {
-    // glue: Go []byte argument
-    fn from(b: &[u8]) -> Self {
-        Arg::Bytes(b.to_vec())
-    }
-}
-impl From<Vec<u8>> for Arg {
-    // glue: Go []byte argument
-    fn from(b: Vec<u8>) -> Self {
-        Arg::Bytes(b)
-    }
-}
+
 impl From<&crate::errors::Error> for Arg {
     // glue: Go error argument (a pingcap/errors value, see Arg::Error)
     fn from(e: &crate::errors::Error) -> Self {
@@ -175,9 +177,37 @@ struct Flags {
     prec: isize,
 }
 
+/// `fmt.buffer`: bytes, with the `String`-like appends the port uses.
+#[derive(Default)]
+struct Buf(Vec<u8>);
+
+impl Buf {
+    // glue: buffer.writeString
+    fn push_str(&mut self, s: &str) {
+        self.0.extend_from_slice(s.as_bytes());
+    }
+    // glue: buffer.write
+    fn push_bytes(&mut self, b: &[u8]) {
+        self.0.extend_from_slice(b);
+    }
+    // glue: buffer.writeRune
+    fn push(&mut self, c: char) {
+        let mut b = [0u8; 4];
+        self.0.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
+    }
+}
+
+impl std::fmt::Write for Buf {
+    // glue: write! into the buffer
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.push_str(s);
+        Ok(())
+    }
+}
+
 /// `fmt.pp`.
 struct Pp {
-    buf: String,
+    buf: Buf,
     f: Flags,
     erroring: bool,
     good_arg_num: bool,
@@ -185,25 +215,25 @@ struct Pp {
 
 /// `fmt.Sprintf`.
 // go-std: fmt.Sprintf L1
-pub fn sprintf(format: &str, a: &[Arg]) -> String {
+pub fn sprintf(format: impl AsRef<[u8]>, a: &[Arg]) -> Vec<u8> {
     let mut p = Pp::new();
-    p.do_printf(format, a);
-    p.buf
+    p.do_printf(format.as_ref(), a);
+    p.buf.0
 }
 
 /// `fmt.Sprint`.
 // go-std: fmt.Sprint L1
-pub fn sprint(a: &[Arg]) -> String {
+pub fn sprint(a: &[Arg]) -> Vec<u8> {
     let mut p = Pp::new();
     p.do_print(a);
-    p.buf
+    p.buf.0
 }
 
 impl Pp {
     // glue: newPrinter
     fn new() -> Pp {
         Pp {
-            buf: String::new(),
+            buf: Buf::default(),
             f: Flags::default(),
             erroring: false,
             good_arg_num: true,
@@ -225,8 +255,8 @@ impl Pp {
     }
 
     // go-std: fmt.pp.doPrintf L1 (argument indexes `[n]` are reported as BADINDEX)
-    fn do_printf(&mut self, format: &str, a: &[Arg]) {
-        let fb = format.as_bytes();
+    fn do_printf(&mut self, format: &[u8], a: &[Arg]) {
+        let fb = format;
         let end = fb.len();
         let mut arg_num = 0usize;
         let mut i = 0usize;
@@ -238,7 +268,7 @@ impl Pp {
                 i += 1;
             }
             if i > lasti {
-                self.buf.push_str(&format[lasti..i]);
+                self.buf.push_bytes(&format[lasti..i]);
             }
             if i >= end {
                 // done processing format string
@@ -361,8 +391,12 @@ impl Pp {
                 break;
             }
 
-            let verb = format[i..].chars().next().unwrap_or('\u{fffd}');
-            i += verb.len_utf8();
+            let (verb, size) = if fb[i] < 0x80 {
+                (char::from(fb[i]), 1)
+            } else {
+                gostd::decode_rune(&fb[i..])
+            };
+            i += size;
 
             if verb == '%' {
                 // Percent does not absorb operands and ignores f.wid and f.prec.
@@ -413,12 +447,12 @@ impl Pp {
     fn arg_number(
         &mut self,
         arg_num: usize,
-        format: &str,
+        format: &[u8],
         i: usize,
         num_args: usize,
         reordered: &mut bool,
     ) -> (usize, usize, bool) {
-        let fb = format.as_bytes();
+        let fb = format;
         if fb.len() <= i || fb[i] != b'[' {
             return (arg_num, i, false);
         }
@@ -435,7 +469,7 @@ impl Pp {
     fn print_arg(&mut self, arg: &Arg, verb: char) {
         if *arg == Arg::Nil {
             match verb {
-                'T' | 'v' => self.pad_string("<nil>"),
+                'T' | 'v' => self.pad("<nil>"),
                 _ => self.bad_verb(arg, verb),
             }
             return;
@@ -443,7 +477,7 @@ impl Pp {
         // %T (the value's type) is special; we always do it first.
         if verb == 'T' {
             let t = arg.type_string();
-            self.fmt_s(&t);
+            self.fmt_s(t.as_bytes());
             return;
         }
         match arg {
@@ -483,10 +517,10 @@ impl Pp {
             Arg::Error(msg) => {
                 match verb {
                     // `%+v` also prints the stack in Go; the port has no Go stack to print.
-                    'v' | 's' => self.buf.push_str(msg),
+                    'v' | 's' => self.buf.push_bytes(msg),
                     'q' => {
-                        let q = sprintf("%q", &[Arg::from(msg.clone())]);
-                        self.buf.push_str(&q);
+                        let q = sprintf("%q", &[Arg::go_string(msg.clone())]);
+                        self.buf.push_bytes(&q);
                     }
                     _ => {}
                 }
@@ -512,11 +546,12 @@ impl Pp {
 
     /// `errors.redactFormatter.Format`: `fmt.Sprintf(fmt.FormatString(f, verb), e.arg)`
     /// enclosed in `‹›` with `‹`/`›` doubled.
-    // go-std: github.com/pingcap/errors.redactFormatter.Format L1
+    // go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.redactFormatter.Format L1
     fn redact_format(&mut self, arg: &Arg, verb: char) {
-        let origin = sprintf(&self.format_string(verb), std::slice::from_ref(arg));
+        let origin = sprintf(self.format_string(verb), std::slice::from_ref(arg));
         self.buf.push('‹');
-        for c in origin.chars() {
+        // `for _, c := range origin`: an invalid byte is U+FFFD.
+        for c in gostd::runes(&origin) {
             if c == '‹' || c == '›' {
                 self.buf.push(c);
                 self.buf.push(c);
@@ -531,18 +566,19 @@ impl Pp {
     // go-std: fmt.FormatString L1
     fn format_string(&self, verb: char) -> String {
         let mut s = String::from("%");
-        // Flags (the State reports sharpV / plusV as '#' / '+').
-        if self.f.plus || self.f.plus_v {
-            s.push('+');
-        }
-        if self.f.sharp || self.f.sharp_v {
-            s.push('#');
-        }
+        // for _, c := range " +-#0" { if state.Flag(int(c)) ... } (Flag reports sharpV / plusV
+        // as '#' / '+').
         if self.f.space {
             s.push(' ');
         }
+        if self.f.plus || self.f.plus_v {
+            s.push('+');
+        }
         if self.f.minus {
             s.push('-');
+        }
+        if self.f.sharp || self.f.sharp_v {
+            s.push('#');
         }
         if self.f.zero {
             s.push('0');
@@ -578,12 +614,12 @@ impl Pp {
     // go-std: fmt.pp.fmtBool L1
     fn fmt_bool(&mut self, arg: &Arg, v: bool, verb: char) {
         match verb {
-            't' | 'v' => self.pad_string(if v { "true" } else { "false" }),
+            't' | 'v' => self.pad(if v { "true" } else { "false" }),
             _ => self.bad_verb(arg, verb),
         }
     }
 
-    // go-std: fmt.pp.fmtInteger L1 (verbs q, U not supported: bad verb)
+    // go-std: fmt.pp.fmtInteger L1
     fn fmt_integer(&mut self, arg: &Arg, v: u64, is_signed: bool, verb: char) {
         match verb {
             'v' => {
@@ -609,8 +645,8 @@ impl Pp {
                 self.pad(&q);
             }
             'c' => {
-                // fmt.fmtC
-                let c = if v > u64::from(u32::MAX) {
+                // fmt.fmtC (utf8.AppendRune writes RuneError for an invalid rune)
+                let c = if v > 0x10ffff {
                     '\u{fffd}'
                 } else {
                     char::from_u32(v as u32).unwrap_or('\u{fffd}')
@@ -619,8 +655,65 @@ impl Pp {
                 let s = c.encode_utf8(&mut b).to_owned();
                 self.pad(&s);
             }
+            'U' => self.fmt_unicode(v),
             _ => self.bad_verb(arg, verb),
         }
+    }
+
+    /// `fmtUnicode` formats a uint64 as "U+0078" or with f.sharp set as "U+0078 'x'".
+    // go-std: fmt.fmt.fmtUnicode L1
+    fn fmt_unicode(&mut self, mut u: u64) {
+        let mut prec: isize = 4;
+        // If the precision is set explicitly use that.
+        let mut width = 68usize;
+        if self.f.prec_present && self.f.prec > 4 {
+            prec = self.f.prec;
+            // Compute space needed for "U+" , number, " '", character, "'".
+            width = width.max((2 + prec + 2 + 4 + 1) as usize);
+        }
+        let mut buf = vec![0u8; width];
+        // Format into buf, ending at buf[i]. Formatting numbers is easier right-to-left.
+        let mut i = buf.len();
+        // For %#U we want to add a space and a quoted character at the end of the buffer.
+        if self.f.sharp && u <= 0x10ffff && char::from_u32(u as u32).is_some_and(gostd::is_print) {
+            let c = char::from_u32(u as u32).unwrap_or('\u{fffd}');
+            i -= 1;
+            buf[i] = b'\'';
+            let mut e = [0u8; 4];
+            let enc = c.encode_utf8(&mut e).as_bytes();
+            i -= enc.len();
+            buf[i..i + enc.len()].copy_from_slice(enc);
+            i -= 1;
+            buf[i] = b'\'';
+            i -= 1;
+            buf[i] = b' ';
+        }
+        // Format the Unicode code point u as a hexadecimal number.
+        while u >= 16 {
+            i -= 1;
+            buf[i] = UDIGITS[(u & 0xF) as usize];
+            prec -= 1;
+            u >>= 4;
+        }
+        i -= 1;
+        buf[i] = UDIGITS[u as usize];
+        prec -= 1;
+        // Add zeros in front of the number until requested precision is reached.
+        while prec > 0 {
+            i -= 1;
+            buf[i] = b'0';
+            prec -= 1;
+        }
+        // Add a leading "U+".
+        i -= 1;
+        buf[i] = b'+';
+        i -= 1;
+        buf[i] = b'U';
+        let old_zero = self.f.zero;
+        self.f.zero = false;
+        let b = buf[i..].to_vec();
+        self.pad(&b);
+        self.f.zero = old_zero;
     }
 
     // go-std: fmt.pp.fmt0x64 L1
@@ -728,8 +821,8 @@ impl Pp {
         // or the f.zero flag is ignored due to an explicitly set precision.
         let old_zero = self.f.zero;
         self.f.zero = false;
-        let s = String::from_utf8_lossy(&buf[i..]).into_owned();
-        self.pad(&s);
+        let b = buf[i..].to_vec();
+        self.pad(&b);
         self.f.zero = old_zero;
     }
 
@@ -775,8 +868,7 @@ impl Pp {
             if num[1] == b'N' && !self.f.space && !self.f.plus {
                 num.remove(0);
             }
-            let n = String::from_utf8_lossy(&num).into_owned();
-            self.pad(&n);
+            self.pad(&num);
             self.f.zero = old_zero;
             return;
         }
@@ -843,20 +935,18 @@ impl Pp {
             {
                 self.buf.push(char::from(num[0]));
                 self.write_padding(self.f.wid - num.len() as isize);
-                self.buf.push_str(&String::from_utf8_lossy(&num[1..]));
+                self.buf.push_bytes(&num[1..]);
                 return;
             }
-            let n = String::from_utf8_lossy(&num).into_owned();
-            self.pad(&n);
+            self.pad(&num);
             return;
         }
         // No sign to show and the number is positive; just print the unsigned number.
-        let n = String::from_utf8_lossy(&num[1..]).into_owned();
-        self.pad(&n);
+        self.pad(&num[1..]);
     }
 
     // go-std: fmt.pp.fmtString L1
-    fn fmt_string(&mut self, arg: &Arg, v: &str, verb: char) {
+    fn fmt_string(&mut self, arg: &Arg, v: &[u8], verb: char) {
         match verb {
             'v' => {
                 if self.f.sharp_v {
@@ -866,8 +956,8 @@ impl Pp {
                 }
             }
             's' => self.fmt_s(v),
-            'x' => self.fmt_sbx(v.as_bytes(), LDIGITS),
-            'X' => self.fmt_sbx(v.as_bytes(), UDIGITS),
+            'x' => self.fmt_sbx(v, LDIGITS),
+            'X' => self.fmt_sbx(v, UDIGITS),
             'q' => self.fmt_q(v),
             _ => self.bad_verb(arg, verb),
         }
@@ -898,14 +988,12 @@ impl Pp {
                 }
             }
             's' => {
-                let s = String::from_utf8_lossy(v).into_owned();
-                self.fmt_s(&s);
+                self.fmt_s(v);
             }
             'x' => self.fmt_sbx(v, LDIGITS),
             'X' => self.fmt_sbx(v, UDIGITS),
             'q' => {
-                let s = String::from_utf8_lossy(v).into_owned();
-                self.fmt_q(&s);
+                self.fmt_q(v);
             }
             _ => {
                 // printValue of a []uint8 with another verb: element by element.
@@ -944,46 +1032,45 @@ impl Pp {
     }
 
     // go-std: fmt.fmt.pad L1
-    fn pad(&mut self, b: &str) {
+    fn pad(&mut self, b: impl AsRef<[u8]>) {
+        let b = b.as_ref();
         if !self.f.wid_present || self.f.wid == 0 {
-            self.buf.push_str(b);
+            self.buf.push_bytes(b);
             return;
         }
-        let width = self.f.wid - b.chars().count() as isize;
+        let width = self.f.wid - gostd::rune_count(b) as isize;
         if !self.f.minus {
             // left padding
             self.write_padding(width);
-            self.buf.push_str(b);
+            self.buf.push_bytes(b);
         } else {
             // right padding
-            self.buf.push_str(b);
+            self.buf.push_bytes(b);
             self.write_padding(width);
         }
     }
 
-    // go-std: fmt.fmt.padString L1
-    fn pad_string(&mut self, s: &str) {
-        self.pad(s);
-    }
-
     // go-std: fmt.fmt.truncateString L1
-    fn truncate_string<'a>(&self, s: &'a str) -> &'a str {
+    fn truncate_string<'a>(&self, s: &'a [u8]) -> &'a [u8] {
         if self.f.prec_present {
             let mut n = self.f.prec;
-            for (i, _) in s.char_indices() {
+            let mut i = 0;
+            // for i := range s (rune starts; an invalid byte is one rune)
+            while i < s.len() {
                 n -= 1;
                 if n < 0 {
                     return &s[..i];
                 }
+                i += gostd::decode_rune(&s[i..]).1;
             }
         }
         s
     }
 
     // go-std: fmt.fmt.fmtS L1
-    fn fmt_s(&mut self, s: &str) {
-        let s = self.truncate_string(s).to_owned();
-        self.pad_string(&s);
+    fn fmt_s(&mut self, s: &[u8]) {
+        let s = self.truncate_string(s).to_vec();
+        self.pad(&s);
     }
 
     // go-std: fmt.fmt.fmtSbx L1
@@ -1045,10 +1132,14 @@ impl Pp {
     }
 
     // go-std: fmt.fmt.fmtQ L1
-    fn fmt_q(&mut self, s: &str) {
-        let s = self.truncate_string(s).to_owned();
+    fn fmt_q(&mut self, s: &[u8]) {
+        let s = self.truncate_string(s).to_vec();
         if self.f.sharp && can_backquote(&s) {
-            self.pad_string(&format!("`{s}`"));
+            let mut q = Vec::with_capacity(s.len() + 2);
+            q.push(b'`');
+            q.extend_from_slice(&s);
+            q.push(b'`');
+            self.pad(&q);
             return;
         }
         let q = quote(&s, self.f.plus);
@@ -1126,90 +1217,130 @@ fn int_from_arg(a: &[Arg], arg_num: usize) -> (isize, bool, usize) {
 }
 
 /// `strconv.QuoteRune` / `QuoteRuneToASCII` (`ascii`).
-// go-std: strconv.appendQuotedRuneWith L2 (IsPrint approximated, see quote)
-fn quote_rune(r: char, ascii: bool) -> String {
-    let q = quote(&r.to_string(), ascii);
-    let inner = &q[1..q.len() - 1];
-    let inner = match inner {
-        "\\\"" => "\"".to_owned(),
-        "'" => "\\'".to_owned(),
-        _ => inner.to_owned(),
-    };
-    format!("'{inner}'")
+// go-std: strconv.appendQuotedRuneWith L1
+fn quote_rune(r: char, ascii: bool) -> Vec<u8> {
+    // utf8.ValidRune is guaranteed by char.
+    let mut buf = vec![b'\''];
+    append_escaped_rune(&mut buf, r, b'\'', ascii);
+    buf.push(b'\'');
+    buf
 }
 
 /// `strconv.CanBackquote`.
 // go-std: strconv.CanBackquote L1
-fn can_backquote(s: &str) -> bool {
-    s.chars()
-        .all(|c| c != '`' && c != '\u{feff}' && (c == '\t' || !(c < ' ' || c == '\u{7f}')))
+fn can_backquote(mut s: &[u8]) -> bool {
+    while !s.is_empty() {
+        let (r, wid) = gostd::decode_rune(s);
+        s = &s[wid..];
+        if wid > 1 {
+            if r == '\u{feff}' {
+                return false; // BOMs are invisible and should not be quoted.
+            }
+            continue; // All other multibyte runes are correctly encoded and assumed printable.
+        }
+        if r == '\u{fffd}' {
+            return false;
+        }
+        if (r < ' ' && r != '\t') || r == '`' || r == '\u{7f}' {
+            return false;
+        }
+    }
+    true
 }
 
 /// `strconv.Quote` / `QuoteToASCII` (`ascii`).
-// go-std: strconv.appendQuotedWith L2 (IsPrint approximated by !char::is_control, see module doc)
-fn quote(s: &str, ascii: bool) -> String {
-    let mut b = String::with_capacity(s.len() + 2);
-    b.push('"');
-    for r in s.chars() {
-        if r == '"' || r == '\\' {
-            b.push('\\');
-            b.push(r);
+// go-std: strconv.appendQuotedWith L1
+fn quote(mut s: &[u8], ascii: bool) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(3 * s.len() / 2 + 2);
+    buf.push(b'"');
+    while !s.is_empty() {
+        let (r, width) = if s[0] < 0x80 {
+            (char::from(s[0]), 1)
+        } else {
+            gostd::decode_rune(s)
+        };
+        if width == 1 && r == '\u{fffd}' {
+            buf.extend_from_slice(b"\\x");
+            buf.push(LDIGITS[usize::from(s[0] >> 4)]);
+            buf.push(LDIGITS[usize::from(s[0] & 0xF)]);
+            s = &s[width..];
             continue;
         }
-        if ascii {
-            if r < '\u{80}' && !r.is_control() {
-                b.push(r);
-                continue;
-            }
-        } else if !r.is_control() && r != '\u{ad}' {
-            b.push(r);
-            continue;
+        append_escaped_rune(&mut buf, r, b'"', ascii);
+        s = &s[width..];
+    }
+    buf.push(b'"');
+    buf
+}
+
+// go-std: strconv.appendEscapedRune L1 (graphicOnly false)
+fn append_escaped_rune(buf: &mut Vec<u8>, r: char, quote: u8, ascii: bool) {
+    let mut e = [0u8; 4];
+    if r == char::from(quote) || r == '\\' {
+        // always backslashed
+        buf.push(b'\\');
+        buf.extend_from_slice(r.encode_utf8(&mut e).as_bytes());
+        return;
+    }
+    if ascii {
+        if (r as u32) < 0x80 && gostd::is_print(r) {
+            buf.push(r as u8);
+            return;
         }
-        match r {
-            '\u{7}' => b.push_str("\\a"),
-            '\u{8}' => b.push_str("\\b"),
-            '\u{c}' => b.push_str("\\f"),
-            '\n' => b.push_str("\\n"),
-            '\r' => b.push_str("\\r"),
-            '\t' => b.push_str("\\t"),
-            '\u{b}' => b.push_str("\\v"),
-            _ => {
-                let c = r as u32;
-                if c < 0x20 || c == 0x7f {
-                    let _ = write!(b, "\\x{c:02x}");
-                } else if c < 0x10000 {
-                    let _ = write!(b, "\\u{c:04x}");
-                } else {
-                    let _ = write!(b, "\\U{c:08x}");
+    } else if gostd::is_print(r) {
+        buf.extend_from_slice(r.encode_utf8(&mut e).as_bytes());
+        return;
+    }
+    match r {
+        '\u{7}' => buf.extend_from_slice(b"\\a"),
+        '\u{8}' => buf.extend_from_slice(b"\\b"),
+        '\u{c}' => buf.extend_from_slice(b"\\f"),
+        '\n' => buf.extend_from_slice(b"\\n"),
+        '\r' => buf.extend_from_slice(b"\\r"),
+        '\t' => buf.extend_from_slice(b"\\t"),
+        '\u{b}' => buf.extend_from_slice(b"\\v"),
+        _ => {
+            let c = r as u32;
+            if c < u32::from(b' ') || c == 0x7f {
+                buf.extend_from_slice(b"\\x");
+                buf.push(LDIGITS[(c >> 4) as usize & 0xF]);
+                buf.push(LDIGITS[c as usize & 0xF]);
+            } else if c < 0x10000 {
+                buf.extend_from_slice(b"\\u");
+                for sh in (0..16).step_by(4).rev() {
+                    buf.push(LDIGITS[(c >> sh) as usize & 0xF]);
+                }
+            } else {
+                buf.extend_from_slice(b"\\U");
+                for sh in (0..32).step_by(4).rev() {
+                    buf.push(LDIGITS[(c >> sh) as usize & 0xF]);
                 }
             }
         }
     }
-    b.push('"');
-    b
 }
 
-/// Decimal digits of `|v|` without trailing zeros and the decimal point position `dp`
-/// (`v = 0.d1d2... × 10^dp`, Go's `decimalSlice`); `prec`: `None` for the shortest digits
-/// that round-trip, else that many significant digits (correctly rounded).
-// glue: digits from Rust's `{:e}` formatting (shortest: same digits as Go's Ryū)
-fn float_digits(v: f64, size: u8, prec: Option<usize>) -> (String, i32) {
+/// `n` correctly rounded significant decimal digits of `|v|` (Go: `ryuFtoaFixed*` /
+/// `bigFtoa`) without trailing zeros, and the decimal point position `dp`
+/// (`v = 0.d1d2... × 10^dp`, Go's `decimalSlice`). Rust's `{:.*e}` prints the exactly
+/// rounded value (ties to even, as Go's `decimal.Round`); a double has at most 767
+/// significant digits, so more than 800 requested digits need no more than 800 computed
+/// (Rust's formatting also limits precision to 65535).
+// glue: fixed-precision digits from Rust's float formatting (Go's are exact too)
+fn fixed_digits(v: f64, n: usize) -> (String, isize) {
     if v == 0.0 {
         return (String::new(), 0);
     }
-    let s = match prec {
-        None if size == 32 => format!("{:e}", v.abs() as f32),
-        None => format!("{:e}", v.abs()),
-        Some(p) => format!("{:.*e}", p.saturating_sub(1), v.abs()),
-    };
+    let n = n.clamp(1, 800);
+    let s = format!("{:.*e}", n - 1, v.abs());
     let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
     let digits: String = mant.chars().filter(char::is_ascii_digit).collect();
     let digits = digits.trim_end_matches('0').to_owned();
-    (digits, exp.parse::<i32>().unwrap_or(0) + 1)
+    (digits, exp.parse::<isize>().unwrap_or(0) + 1)
 }
 
 /// `strconv.AppendFloat` / `FormatFloat(v, fmt, prec, size)` for fmt `b e E f g G x X`.
-// go-std: strconv.genericFtoa L2 (decimal digits from Rust's float formatting, see float_digits)
+// go-std: strconv.genericFtoa L1 (fixed-precision digits: see fixed_digits)
 fn append_float(v: f64, fmt: u8, prec: isize, size: u8) -> String {
     let (bits, mantbits, expbits, bias): (u64, u32, u32, i32) = if size == 32 {
         (u64::from((v as f32).to_bits()), 23, 8, -127)
@@ -1246,16 +1377,29 @@ fn append_float(v: f64, fmt: u8, prec: isize, size: u8) -> String {
     }
     if fmt == b'f' && prec >= 0 {
         // Fixed precision: Rust's {:.*} is the exactly rounded value, as Go's bigFtoa.
-        let s = format!("{:.*}", prec as usize, v.abs());
+        // A double has at most 1074 fractional digits; beyond them the digits are zeros
+        // (and Rust's formatting limits precision to 65535).
+        let p = (prec as usize).min(1100);
+        let mut s = format!("{:.*}", p, v.abs());
+        s.extend(std::iter::repeat_n('0', prec as usize - p));
         return if neg { format!("-{s}") } else { s };
     }
 
     let shortest = prec < 0;
     let mut prec = prec;
     let (digs, dp) = if shortest {
-        let (d, dp) = float_digits(v, size, None);
-        let nd = d.len() as isize;
-        let dpp = dp as isize;
+        // Use Ryu algorithm.
+        let mut dd = gostd::ftoaryu::DecimalSlice::new();
+        let flt = if size == 32 {
+            &gostd::ftoaryu::FLOAT32INFO
+        } else {
+            &gostd::ftoaryu::FLOAT64INFO
+        };
+        gostd::ftoaryu::ryu_ftoa_shortest(&mut dd, mant, exp - mantbits as i32, flt);
+        let d = String::from_utf8_lossy(dd.digits()).into_owned();
+        let dp = dd.dp;
+        let nd = dd.nd;
+        let dpp = dp;
         // Precision for shortest representation mode.
         match fmt {
             b'e' | b'E' => prec = (nd - 1).max(0),
@@ -1277,9 +1421,9 @@ fn append_float(v: f64, fmt: u8, prec: isize, size: u8) -> String {
             }
             _ => {}
         }
-        float_digits(v, size, Some(digits.max(1) as usize))
+        fixed_digits(v, digits.max(1) as usize)
     };
-    format_digits(neg, &digs, dp as isize, shortest, prec, fmt)
+    format_digits(neg, &digs, dp, shortest, prec, fmt)
 }
 
 /// `strconv.formatDigits`.
@@ -1499,27 +1643,58 @@ fn fmt_x(prec: isize, fmt: u8, neg: bool, mut mant: u64, mut exp: i32, mantbits:
 mod tests {
     use super::*;
 
+    fn sf(f: &str, a: &[Arg]) -> String {
+        String::from_utf8(sprintf(f, a)).unwrap()
+    }
+    fn sp(a: &[Arg]) -> String {
+        String::from_utf8(sprint(a)).unwrap()
+    }
+
     #[test]
+    #[allow(clippy::excessive_precision)] // exact binary values written out
     fn basics() {
-        assert_eq!(sprintf("a %s b %d", &go_args!["x", 5i64]), "a x b 5");
-        assert_eq!(sprintf("%-.3s|", &go_args!["abcdef"]), "abc|");
-        assert_eq!(sprintf("%d", &go_args!["?"]), "%!d(string=?)");
-        assert_eq!(sprintf("%d %d", &go_args![1isize]), "1 %!d(MISSING)");
-        assert_eq!(sprintf("%d", &go_args![1isize, "x"]), "1%!(EXTRA string=x)");
-        assert_eq!(sprintf("%#v", &go_args!["a\"b"]), "\"a\\\"b\"");
-        assert_eq!(sprintf("%T", &go_args![1u64]), "uint64");
-        assert_eq!(sprintf("%v", &[Arg::Nil]), "<nil>");
-        assert_eq!(sprint(&go_args![1isize, 2isize, "a", 3isize]), "1 2a3");
-        assert_eq!(sprintf("%.*s", &go_args![2isize, "abc"]), "ab");
-        assert_eq!(sprintf("%v", &go_args![1.5f64]), "1.5");
-        assert_eq!(sprintf("%v", &go_args![1e21f64]), "1e+21");
-        assert_eq!(sprintf("%v", &go_args![123456789.0f64]), "1.23456789e+08");
-        assert_eq!(sprintf("%v", &go_args![0.0001f64]), "0.0001");
-        assert_eq!(sprintf("%v", &go_args![0.00001f64]), "1e-05");
-        assert_eq!(sprintf("%v", &go_args![123456.0f64]), "123456");
+        assert_eq!(sf("a %s b %d", &go_args!["x", 5i64]), "a x b 5");
+        assert_eq!(sf("%-.3s|", &go_args!["abcdef"]), "abc|");
+        assert_eq!(sf("%d", &go_args!["?"]), "%!d(string=?)");
+        assert_eq!(sf("%d %d", &go_args![1isize]), "1 %!d(MISSING)");
+        assert_eq!(sf("%d", &go_args![1isize, "x"]), "1%!(EXTRA string=x)");
+        assert_eq!(sf("%#v", &go_args!["a\"b"]), "\"a\\\"b\"");
+        assert_eq!(sf("%T", &go_args![1u64]), "uint64");
+        assert_eq!(sf("%v", &[Arg::Nil]), "<nil>");
+        assert_eq!(sp(&go_args![1isize, 2isize, "a", 3isize]), "1 2a3");
+        assert_eq!(sf("%.*s", &go_args![2isize, "abc"]), "ab");
+        assert_eq!(sf("%v", &go_args![1.5f64]), "1.5");
+        assert_eq!(sf("%v", &go_args![1e21f64]), "1e+21");
+        assert_eq!(sf("%v", &go_args![123456789.0f64]), "1.23456789e+08");
+        assert_eq!(sf("%v", &go_args![0.0001f64]), "0.0001");
+        assert_eq!(sf("%v", &go_args![0.00001f64]), "1e-05");
+        assert_eq!(sf("%v", &go_args![123456.0f64]), "123456");
         assert_eq!(
-            sprintf("%-.4s", &[Arg::Redact(Box::new(Arg::from("ab‹cdef")))]),
+            sf("%-.4s", &[Arg::Redact(Box::new(Arg::from("ab‹cdef")))]),
             "‹ab‹‹c›"
         );
+        // Go strings are bytes; %x of an invalid byte, %q escapes it, precision counts it.
+        assert_eq!(
+            sprintf(
+                "%s|%q|%.2s",
+                &[
+                    Arg::go_string(&b"a\xffb"[..]),
+                    Arg::go_string(&b"ab\xdd$"[..]),
+                    Arg::go_string(&b"\xff\xfeZ"[..])
+                ]
+            ),
+            b"a\xffb|\"ab\\xdd$\"|\xff\xfe".to_vec()
+        );
+        // Go's shortest digits round ties to even.
+        assert_eq!(sf("%v", &[Arg::from(-367872.625f32)]), "-367872.62");
+        assert_eq!(
+            sf("%v", &[Arg::from(-1154740326697035.25f64)]),
+            "-1.1547403266970352e+15"
+        );
+        assert_eq!(
+            sf("%U|%#U", &go_args![0x13i64, 0x78i64]),
+            "U+0013|U+0078 'x'"
+        );
+        assert_eq!(sf("%*d", &go_args![70000isize, 1isize]).len(), 70000);
     }
 }

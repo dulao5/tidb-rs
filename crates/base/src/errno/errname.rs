@@ -4,6 +4,9 @@
 
 //! go-file: pkg/errno/errname.go
 
+// Generated data keeps Go's identifiers (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 #[allow(unused_imports)]
 use super::errcode::*;
 use crate::gomap::GoMap;

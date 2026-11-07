@@ -6,6 +6,7 @@
 //! (tracker `govec/cmd/rsgen`); `ReorgRetryableErrCodes` / `ReorgRetryableErrMsgs` of
 //! `ddl_terror.go` are not ported (DDL reorganisation only, see the block spec).
 
+// Go identifiers for constants and statics (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
 mod ddl_terror;
@@ -76,7 +77,7 @@ impl ErrClass {
     pub fn synthesize(
         self,
         code: impl IntoErrCode,
-        message: impl Into<std::borrow::Cow<'static, str>>,
+        message: impl crate::errors::IntoGoString,
     ) -> Error {
         self.0.synthesize(code, message)
     }

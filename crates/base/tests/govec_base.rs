@@ -45,6 +45,22 @@ fn unhex(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// A Go string as govec writes it (`vec.GoString`): a JSON string, or {"hex"} if not UTF-8.
+fn gs(b: &[u8]) -> Value {
+    match std::str::from_utf8(b) {
+        Ok(s) => json!(s),
+        Err(_) => json!({"hex": b.iter().map(|x| format!("{x:02x}")).collect::<String>()}),
+    }
+}
+
+/// The bytes of a `vec.GoString` value.
+fn gs_bytes(v: &Value) -> Vec<u8> {
+    match v.as_str() {
+        Some(s) => s.as_bytes().to_vec(),
+        None => unhex(v["hex"].as_str().unwrap()),
+    }
+}
+
 fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
@@ -53,8 +69,12 @@ fn leak(s: String) -> &'static str {
 fn arg(v: &Value) -> Arg {
     let t = v["t"].as_str().unwrap();
     let x = &v["v"];
+    let s = || match v.get("hex") {
+        Some(h) => unhex(h.as_str().unwrap()),
+        None => x.as_str().unwrap().as_bytes().to_vec(),
+    };
     match t {
-        "string" => Arg::from(x.as_str().unwrap().to_owned()),
+        "string" => Arg::go_string(s()),
         "int" => Arg::Int(x.as_i64().unwrap(), "int"),
         "int8" | "int16" | "int32" | "int64" => Arg::Int(x.as_i64().unwrap(), leak(t.to_owned())),
         "uint" | "uint8" | "uint16" | "uint32" | "uint64" => {
@@ -65,7 +85,7 @@ fn arg(v: &Value) -> Arg {
         "bool" => Arg::Bool(x.as_bool().unwrap()),
         "nil" => Arg::Nil,
         "bytes" => Arg::Bytes(unhex(x.as_str().unwrap())),
-        "error" => Arg::Error(x.as_str().unwrap().to_owned()),
+        "error" => Arg::Error(s()),
         _ => panic!("unknown typed arg {t}"),
     }
 }
@@ -83,13 +103,13 @@ fn with_redact<R>(mode: &str, f: impl FnOnce() -> R) -> R {
 
 fn terr(proto: &Error, generated: &Error) -> Value {
     json!({
-        "code": proto.code(), "rfc": proto.rfc_code(), "template": proto.message_template(),
-        "redact": proto.redact_args_pos(), "msg": generated.get_msg(), "error": generated.error(),
+        "code": proto.code(), "rfc": proto.rfc_code(), "template": gs(proto.message_template()),
+        "redact": proto.redact_args_pos(), "msg": gs(&generated.get_msg()), "error": gs(&generated.error()),
     })
 }
 
 fn sql_err(e: &SQLError) -> Value {
-    json!({"code": e.code, "state": e.state, "message": e.message, "error": e.error()})
+    json!({"code": e.code, "state": e.state, "message": gs(&e.message), "error": gs(&e.error())})
 }
 
 fn pairs<K: serde::Serialize, V>(
@@ -216,14 +236,14 @@ fn mk_err(v: &Value) -> Option<Error> {
 }
 
 /// Runs one record; Ok(out) or Err(error message) like Go's (out, err).
-fn exec(op: &str, a: &[Value]) -> Result<Value, String> {
+fn exec(op: &str, a: &[Value]) -> Result<Value, Value> {
     let s = |i: usize| a[i].as_str().unwrap();
     let i = |i: usize| a[i].as_i64().unwrap();
     let u = |i: usize| a[i].as_u64().unwrap();
     Ok(match op {
         "table" => table(s(0)),
-        "sprintf" => json!(gofmt::sprintf(s(0), &args(&a[1]))),
-        "sprint" => json!(gofmt::sprint(&args(&a[0]))),
+        "sprintf" | "sprintf_rand" => gs(&gofmt::sprintf(gs_bytes(&a[0]), &args(&a[1]))),
+        "sprint" => gs(&gofmt::sprint(&args(&a[0]))),
         "new_err" => sql_err(&with_redact(s(2), || {
             mysql::new_err(u(0) as u16, args(&a[1]))
         })),
@@ -252,11 +272,11 @@ fn exec(op: &str, a: &[Value]) -> Result<Value, String> {
             with_redact(s(2), || terr(p, &p.gen_with_stack_by_args(args(&a[1]))))
         }
         "synthesize" => {
-            let e = terror::ErrClass(i(0) as isize).synthesize(i(1) as isize, s(2).to_owned());
+            let e = terror::ErrClass(i(0) as isize).synthesize(i(1) as isize, gs_bytes(&a[2]));
             terr(&e, &e)
         }
         "to_sql_error" => {
-            let e = terror::ErrClass(i(0) as isize).synthesize(i(1) as isize, s(2).to_owned());
+            let e = terror::ErrClass(i(0) as isize).synthesize(i(1) as isize, gs_bytes(&a[2]));
             sql_err(&terror::to_sql_error(&e))
         }
         "err_class" => {
@@ -317,7 +337,7 @@ fn exec(op: &str, a: &[Value]) -> Result<Value, String> {
             let mut k = KeyWords(String::new());
             PriorityEnum(i(0) as isize)
                 .restore(&mut k)
-                .map_err(|e| e.error())?;
+                .map_err(|e| gs(&e.error()))?;
             json!(k.0)
         }
         "has_cursor_exists_flag" => json!(mysql::has_cursor_exists_flag(u(0) as u16)),
@@ -369,7 +389,7 @@ fn exec(op: &str, a: &[Value]) -> Result<Value, String> {
         "auth_clear_text" => json!(mysql::is_auth_plugin_clear_text(s(0))),
         "format_locale" => {
             let f = mysql::get_locale_format_function(s(0));
-            json!(f(s(1), s(2)).map_err(|e| e.error())?)
+            gs(&f(&gs_bytes(&a[1]), &gs_bytes(&a[2])).map_err(|e| gs(&e.error()))?)
         }
         "errno_stats" => {
             errno::flush_stats();

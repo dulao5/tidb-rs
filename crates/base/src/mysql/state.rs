@@ -4,6 +4,9 @@
 
 //! go-file: pkg/parser/mysql/state.go
 
+// Generated data keeps Go's identifiers (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 #[allow(unused_imports)]
 use super::*;
 #[allow(unused_imports)]

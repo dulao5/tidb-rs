@@ -4,6 +4,9 @@
 
 //! go-file: pkg/parser/mysql/util.go
 
+// Generated data keeps Go's identifiers (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 #[allow(unused_imports)]
 use super::*;
 #[allow(unused_imports)]
@@ -13,178 +16,178 @@ use crate::gomap::GoMap;
 /// from CREATE TABLE when they are unspecified.
 ///
 /// Go `map` literal; entries sorted by key (generated).
-pub static defaultLengthAndDecimal: GoMap<u8, lengthAndDecimal> = GoMap::new(&[
+pub static defaultLengthAndDecimal: GoMap<u8, LengthAndDecimal> = GoMap::new(&[
     (
         TypeTiny,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 4,
             decimal: 0,
         },
     ),
     (
         TypeShort,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 6,
             decimal: 0,
         },
     ),
     (
         TypeLong,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 11,
             decimal: 0,
         },
     ),
     (
         TypeFloat,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 12,
             decimal: -1,
         },
     ),
     (
         TypeDouble,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 22,
             decimal: -1,
         },
     ),
     (
         TypeNull,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 0,
             decimal: 0,
         },
     ),
     (
         TypeTimestamp,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 19,
             decimal: 0,
         },
     ),
     (
         TypeLonglong,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 20,
             decimal: 0,
         },
     ),
     (
         TypeInt24,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 9,
             decimal: 0,
         },
     ),
     (
         TypeDate,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 10,
             decimal: 0,
         },
     ),
     (
         TypeDuration,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 10,
             decimal: 0,
         },
     ),
     (
         TypeDatetime,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 19,
             decimal: 0,
         },
     ),
     (
         TypeYear,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 4,
             decimal: 0,
         },
     ),
     (
         TypeVarchar,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 5,
             decimal: 0,
         },
     ),
     (
         TypeBit,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 1,
             decimal: 0,
         },
     ),
     (
         TypeJSON,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 4294967295,
             decimal: 0,
         },
     ),
     (
         TypeNewDecimal,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 10,
             decimal: 0,
         },
     ),
     (
         TypeEnum,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: -1,
             decimal: 0,
         },
     ),
     (
         TypeSet,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: -1,
             decimal: 0,
         },
     ),
     (
         TypeTinyBlob,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 255,
             decimal: 0,
         },
     ),
     (
         TypeMediumBlob,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 16777215,
             decimal: 0,
         },
     ),
     (
         TypeLongBlob,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 4294967295,
             decimal: 0,
         },
     ),
     (
         TypeBlob,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 65535,
             decimal: 0,
         },
     ),
     (
         TypeVarString,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 5,
             decimal: 0,
         },
     ),
     (
         TypeString,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 1,
             decimal: 0,
         },
@@ -195,66 +198,66 @@ pub static defaultLengthAndDecimal: GoMap<u8, lengthAndDecimal> = GoMap::new(&[
 /// from CAST when they are unspecified.
 ///
 /// Go `map` literal; entries sorted by key (generated).
-pub static defaultLengthAndDecimalForCast: GoMap<u8, lengthAndDecimal> = GoMap::new(&[
+pub static defaultLengthAndDecimalForCast: GoMap<u8, LengthAndDecimal> = GoMap::new(&[
     (
         TypeFloat,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 12,
             decimal: -1,
         },
     ),
     (
         TypeDouble,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 22,
             decimal: -1,
         },
     ),
     (
         TypeLonglong,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 22,
             decimal: 0,
         },
     ),
     (
         TypeDate,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 10,
             decimal: 0,
         },
     ),
     (
         TypeDuration,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 10,
             decimal: 0,
         },
     ),
     (
         TypeDatetime,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 19,
             decimal: 0,
         },
     ),
     (
         TypeJSON,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 4194304,
             decimal: 0,
         },
     ),
     (
         TypeNewDecimal,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 10,
             decimal: 0,
         },
     ),
     (
         TypeString,
-        lengthAndDecimal {
+        LengthAndDecimal {
             length: 0,
             decimal: -1,
         },

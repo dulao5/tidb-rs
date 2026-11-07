@@ -3,6 +3,9 @@
 //! Constants and the maps of this file are in `const_gen.rs` (generated); this file has the
 //! types, the variables and the functions.
 
+// Go identifiers for constants and statics (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 use std::ops::{BitAnd, BitOr, Not};
 use std::sync::LazyLock;
 
@@ -17,7 +20,7 @@ use super::{
     ModePipesAsConcat, ModeRealAsFloat, ModeStrictAllTables, ModeStrictTransTables, SQLError,
     ServerStatusCursorExists,
 };
-use super::{formatENUS, formatNotSupport, formatZHCN, mysqlCompatibilityVersion, new_err};
+use super::{format_en_us, format_not_support, format_zh_cn, mysqlCompatibilityVersion, new_err};
 use crate::errors::{self, Error};
 use crate::go_args;
 
@@ -224,23 +227,23 @@ pub fn get_sql_mode(s: &str) -> (SQLMode, Result<(), SQLError>) {
 }
 
 /// FormatFunc is the locale format function signature.
-pub type FormatFunc = fn(&str, &str) -> Result<String, Error>;
+pub type FormatFunc = fn(&[u8], &[u8]) -> Result<Vec<u8>, Error>;
 
 /// GetLocaleFormatFunction get the format function for sepcific locale.
 // go: GetLocaleFormatFunction L1
 pub fn get_locale_format_function(loc: &str) -> FormatFunc {
-    match locale2FormatFunction(loc) {
+    match locale2_format_function(loc) {
         Some(f) => f,
-        None => formatNotSupport,
+        None => format_not_support,
     }
 }
 
 /// locale2FormatFunction is the string represent of locale format function.
 // glue: Go map literal locale2FormatFunction (two entries, function values)
-fn locale2FormatFunction(loc: &str) -> Option<FormatFunc> {
+fn locale2_format_function(loc: &str) -> Option<FormatFunc> {
     match loc {
-        "en_US" => Some(formatENUS),
-        "zh_CN" => Some(formatZHCN),
+        "en_US" => Some(format_en_us),
+        "zh_CN" => Some(format_zh_cn),
         _ => None,
     }
 }

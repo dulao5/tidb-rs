@@ -4,6 +4,9 @@
 
 //! go-file: pkg/util/dbterror/plannererrors/planner_terror.go
 
+// Generated data keeps Go's identifiers (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 use std::sync::LazyLock;
 
 #[allow(unused_imports)]

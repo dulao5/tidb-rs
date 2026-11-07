@@ -4,6 +4,9 @@
 
 //! go-file: pkg/parser/terror/terror.go
 
+// Generated data keeps Go's identifiers (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 use crate::errors::ErrCode;
 use crate::gomap::GoMap;
 use crate::terror::ErrClass;

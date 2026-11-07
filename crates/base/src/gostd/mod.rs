@@ -146,3 +146,71 @@ pub fn to_upper(s: &str) -> String {
         })
         .collect()
 }
+
+pub(crate) mod ftoaryu;
+mod powers;
+
+/// `utf8.DecodeRune`: the rune at the start of `s` and its width; `(RuneError, 1)` for an
+/// invalid or incomplete encoding, `(RuneError, 0)` for empty input.
+// go-std: unicode/utf8.DecodeRune L2 (validity by std::str::from_utf8)
+pub fn decode_rune(s: &[u8]) -> (char, usize) {
+    if s.is_empty() {
+        return ('\u{fffd}', 0);
+    }
+    let want = match s[0] {
+        0x00..=0x7f => return (char::from(s[0]), 1),
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return ('\u{fffd}', 1),
+    };
+    if s.len() >= want
+        && let Ok(t) = std::str::from_utf8(&s[..want])
+        && let Some(c) = t.chars().next()
+    {
+        return (c, want);
+    }
+    ('\u{fffd}', 1)
+}
+
+/// `utf8.RuneCount`: invalid bytes count one each.
+// go-std: unicode/utf8.RuneCount L2 (via decode_rune)
+pub fn rune_count(mut s: &[u8]) -> usize {
+    let mut n = 0;
+    while !s.is_empty() {
+        s = &s[decode_rune(s).1..];
+        n += 1;
+    }
+    n
+}
+
+/// `for _, r := range s` over a Go string: an invalid byte yields U+FFFD.
+// glue: Go range over a string
+pub fn runes(mut s: &[u8]) -> impl Iterator<Item = char> + '_ {
+    std::iter::from_fn(move || {
+        if s.is_empty() {
+            return None;
+        }
+        let (r, w) = decode_rune(s);
+        s = &s[w..];
+        Some(r)
+    })
+}
+
+/// `strconv.IsPrint`: Go's printable runes (letters, marks, numbers, punctuation, symbols
+/// and U+0020), from the generated table `IS_PRINT`.
+// go-std: strconv.IsPrint L2 (table generated from Go's IsPrint)
+pub fn is_print(r: char) -> bool {
+    let r = r as u32;
+    let t = unicode_tables::IS_PRINT;
+    t.binary_search_by(|(lo, hi)| {
+        if *hi < r {
+            std::cmp::Ordering::Less
+        } else if *lo > r {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    })
+    .is_ok()
+}

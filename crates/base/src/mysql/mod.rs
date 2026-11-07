@@ -6,8 +6,6 @@
 //! generated from the Go source (tracker `govec/cmd/rsgen`) and checked against Go by the
 //! govec domain "base".
 
-#![allow(non_upper_case_globals)]
-
 mod charset;
 mod charset_gen;
 #[path = "const.rs"]

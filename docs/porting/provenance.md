@@ -31,6 +31,9 @@ fn ...
 // go-exception: EXC-A4 types.BinaryJSON.Unquote           (被例外 spec 取代的 Go 函数)
 // go-fix: pingcap/tidb@<commit> <issue>                   (移植了 v8.5.8 之后上游对安全或数据正确性问题的修复，宪章第一条 2)
 // go-std: strconv.FormatFloat L2 (<理由>)                (移植的 Go 标准库函数，文件头可写 //! go-file: $GOROOT/src/strconv/ftoa.go)
+// go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Normalize L1
+                                                          (移植的第三方 Go 模块函数：模块路径@go.mod 中固定的版本.符号；
+                                                           标准库随工具链升级，第三方模块随 go.mod 升级，追踪方式不同，所以与 go-std 分开)
 // glue: <理由>                                             (Go 中没有对应物的胶水代码)
 ```
 

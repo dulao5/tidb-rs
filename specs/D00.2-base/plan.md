@@ -12,8 +12,8 @@ crate `crates/base`（包名 `tidb-base`，N0 rank 0）。N0 把几个 Go 包放
 | `pkg/util/dbterror/terror.go` | `dbterror/mod.rs` | |
 | `pkg/util/dbterror/ddl_terror.go`、`exeerrors/`、`plannererrors/` | `dbterror/ddl_terror.rs`（`pub use` 到 `dbterror::`）、`dbterror::exeerrors`、`dbterror::plannererrors` | 原型全部生成；每个文件另有 `ALL`（按名字列出原型，测试和工具用） |
 | `pkg/kv/kv.go`（`StoreType`） | `kv.rs` | N0 下沉；`pkg/kv` 其余部分是 D07.0 |
-| pingcap/errors | `errors.rs` | go-std（§1.1 of spec） |
-| Go fmt、strconv 格式化 | `gofmt.rs` | go-std |
+| pingcap/errors | `errors.rs` | go-dep（§1.1 of spec） |
+| Go fmt、strconv 格式化 | `gofmt.rs`、`gostd/ftoaryu.rs`（最短浮点）、`gostd/powers.rs`（10 的幂表） | go-std |
 | Go unicode | `gostd/` | go-std；类别表生成 |
 | — | `gomap.rs` | glue：Go 只读 map 字面量 → 排好序的静态表 |
 
@@ -31,7 +31,8 @@ crate `crates/base`（包名 `tidb-base`，N0 rank 0）。N0 把几个 Go 包放
 | Go | Rust | 等级 |
 |---|---|---|
 | `error`（`*errors.Error` 与其他） | `tidb_base::Error`（§4 of spec，`M-ERR`） | L1 [M-ERR] |
-| `fmt.Sprintf(format, args ...interface{})` | `gofmt::sprintf(format, &[Arg])`，`Arg` 带 Go 动态类型；`go_args![...]` 构造 | go-std |
+| Go `string`（消息、错误文本、`fmt` 参数与结果） | 字节：`Vec<u8>` / `&[u8]` / `Cow<'static, [u8]>`；构造接口用 `IntoGoString`（字面量、`String`、字节） | L1 [M-ERR] |
+| `fmt.Sprintf(format, args ...interface{})` | `gofmt::sprintf(format: impl AsRef<[u8]>, &[Arg]) -> Vec<u8>`，`Arg` 带 Go 动态类型；`go_args![...]` 构造；Go string 字节用 `Arg::go_string`，`[]byte` 用 `Arg::Bytes` | go-std |
 | 包级 `map` 字面量（只读） | `GoMap<K, V>` 静态表，`get` 二分查找；迭代按键序（Go 随机序，`M-MAPORDER`） | glue |
 | 包级 `var ErrX = ClassY.NewStd(...)` | `pub static ErrX: LazyLock<Error>` | L1 [M-ERR] |
 | `type SQLMode int64` 等具名整数类型 | newtype + 需要的位运算 trait | L1 |
@@ -41,7 +42,7 @@ crate `crates/base`（包名 `tidb-base`，N0 rank 0）。N0 把几个 Go 包放
 | `log.Error/Warn/Fatal`（pingcap/log） | `log` crate；`Fatal` 记日志后 `process::exit(1)` | L1 |
 | Go 方法名与 Rust trait 方法同名（`String`、`Error`） | 固有方法 `string()`、`error()`，`Display` 委托 | L1 [M-NAME] |
 
-**命名约定（新增，需评审确认）**：常量、静态量和生成表保持 Go 原名（`mysql::TypeLonglong`、`mysql::ErrDupEntry`、`terror::ClassDDL`、`dbterror::plannererrors::ErrUnknownColumn`），不转成 SCREAMING_CASE。理由：上千个错误码和类型常量是其他块移植时逐字对照的名字，大小写转换有歧义（`ErrDBaccessDenied`），保留原名后移植代码与 Go 并排时一眼可对上。为此在 workspace 的 `style-lint-allow` 中增加了 `non_upper_case_globals`、`non_snake_case`、`non_camel_case_types`（只允许在移植文件的模块级使用，函数名仍是 snake_case）。如果评审认为应当进 mappings.md，建议作为一条规则（如 `M-CONSTNAME`）。
+**命名约定（映射规则 `M-GONAME`，评审已确认）**：常量、静态量（含 395 个原型）和数据表保持 Go 原名（`mysql::TypeLonglong`、`mysql::ErrDupEntry`、`terror::ClassDDL`、`dbterror::plannererrors::ErrUnknownColumn`），便于与 Go 逐个 grep 对照。函数和方法仍按 `M-NAME` 用 snake_case（`formatENUS` → `format_en_us`，来源标注写 Go 名），类型用 CamelCase（Go 的 `lengthAndDecimal` → `LengthAndDecimal`、`code2ErrClassMap` → `Code2ErrClassMap`）。workspace 的 `style-lint-allow` 只增加 `non_upper_case_globals`，并且只在声明或在 `match` 中使用 Go 名常量的文件里模块级放开（生成的文件自带）；crate 级不放开。
 
 ## 4. L2 偏离与已知差异
 
@@ -52,12 +53,10 @@ crate `crates/base`（包名 `tidb-base`，N0 rank 0）。N0 把几个 Go 包放
 | `PriorityEnum.Restore` | `format.RestoreCtx` 换成 trait `RestoreKeyWord`（§5） | 无 |
 | `Privileges.Has` | 切片类型别名上的方法 → 自由函数 `privileges_has` | 无 |
 | `errors.Error.fillLineAndFile` | `#[track_caller]` 代替 `runtime.Caller` | 文件路径是 Rust 源文件 |
-| gofmt：非 UTF-8 的 Go 字符串 / `[]byte` 参数 | Rust 字符串必须是 UTF-8，`%s` 按 lossy 转换（U+FFFD） | Go 原样输出字节；只影响参数含二进制数据的错误消息 |
-| gofmt：`%q` 的 `IsPrint` | 用 `!char::is_control()` 近似 | 只影响含未分配码位或格式字符（如 U+200B）的 `%q` |
 | gofmt：非 `Format` 的 Stringer 在错误输出中 | Go 用反射打印值，port 打印方法结果 | TiDB 的错误参数中未见；向量中无此情况 |
 | gofmt：`%+v` 的 pingcap 错误 | Go 打印调用栈，port 只打印消息 | 只用于日志 |
 | `strings.ToUpper`（`FormatSQLModeStr`、`Str2Priority`） | 多字符大写映射（如 `ß`）保持原字符，其余用 Rust 映射 | 与 Go 的简单映射一致；向量覆盖 `ß` |
-| `formatENUS` | 在字节上处理，结果 lossy 转成 Rust 字符串 | 输入来自数值格式化（ASCII），无影响 |
+
 
 ## 5. 反向引用与处理（N0 §4）
 
