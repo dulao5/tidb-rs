@@ -12,6 +12,8 @@ getrandom = "0.3"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 sha1 = "0.10"
 tidb-metrics = { workspace = true }
+# N3 runtime: statement admission (Q1) and the ExecPool connections run on.
+tidb-runtime = { workspace = true }
 time = "0.3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }

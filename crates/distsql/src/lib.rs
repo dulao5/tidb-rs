@@ -97,6 +97,10 @@ pub async fn select(
     tidb_metrics::distsql_query(start.elapsed(), paging);
     let mut out = SelectRows::default();
     for resp in responses {
+        // N3 checkpoint (M-KILL) per decoded response, the PoC's counterpart of Go's
+        // per-`Next` check: yields once this poll has used its time slice, so decoding a
+        // large result does not hold the worker. No KILL hook yet in the PoC.
+        let Ok(()) = tidb_runtime::checkpoint(&()).await;
         let part = decode_select_response(&resp.data, &plan.output_types)?;
         out.rows.extend(part.rows);
         out.warnings.extend(part.warnings);

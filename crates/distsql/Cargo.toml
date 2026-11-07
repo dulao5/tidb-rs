@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# N3 checkpoint between coprocessor responses (chunk-level, like Go's exec.Next).
+tidb-runtime = { workspace = true }
 collections = { workspace = true }
 protobuf = { workspace = true }
 serde_json = { workspace = true }

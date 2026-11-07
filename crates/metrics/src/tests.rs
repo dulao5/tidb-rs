@@ -14,6 +14,7 @@ fn facts() -> ServerFacts {
 fn exposition_matches_go_definitions() {
     init(&facts());
     command_started(Duration::from_millis(3));
+    token_acquired(Duration::from_nanos(900));
     packet_in(10);
     packet_out(20);
     statement(StmtType::Select);
@@ -27,6 +28,7 @@ fn exposition_matches_go_definitions() {
     distsql_query(Duration::from_millis(2), true);
     multi_query(2);
     command_finished(0x17, StmtType::Select, Duration::from_millis(1), None);
+    token_released();
     command_finished(
         0x03,
         StmtType::General,

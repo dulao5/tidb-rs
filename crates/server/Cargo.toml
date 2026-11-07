@@ -20,6 +20,8 @@ tidb-meta = { workspace = true }
 tidb-metrics = { workspace = true }
 tidb-mysql-protocol = { path = "../mysql-protocol" }
 tidb-session = { workspace = true }
+# N3 runtime: ExecPool, statement admission, stall detection.
+tidb-runtime = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing = "0.1"

@@ -61,6 +61,7 @@ pub(crate) async fn run<S, F>(
     started: Instant,
     config: &ServerConfig,
     factory: &F,
+    admission: Option<tidb_runtime::Admission>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
@@ -80,6 +81,8 @@ pub(crate) async fn run<S, F>(
                 next_stmt_id: 1,
                 started,
                 last_active: accepted,
+                admission,
+                token: None,
             }
         }
         Ok((_, None)) => return,
@@ -343,6 +346,11 @@ struct Conn<S, H> {
     /// When the previous command finished (Go `clientConn.lastActive`), for
     /// `tidb_server_conn_idle_duration_seconds`.
     last_active: Instant,
+    /// Q1 statement admission (Go `server.concurrentLimiter`, `token-limit`); `None` admits
+    /// everything (tests).
+    admission: Option<tidb_runtime::Admission>,
+    /// The token of the command in progress (Go: taken in `dispatch`, put back in its defer).
+    token: Option<tidb_runtime::admission::Token>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
@@ -374,6 +382,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             // Go `clientConn.Run` / `dispatch` / `addMetrics`.
             let start = Instant::now();
             tidb_metrics::command_started(start.saturating_duration_since(self.last_active));
+            // Go `dispatch`: `token := cc.server.getToken()` before running the command; it
+            // waits, never rejects. `releaseToken` is in `command_metrics` (Go's defer).
+            let wait_start = Instant::now();
+            if let Some(a) = &self.admission {
+                self.token = Some(a.get().await);
+            }
+            tidb_metrics::token_acquired(wait_start.elapsed());
             let cmd = data.first().copied();
             let result = match data.split_first() {
                 None => Err(ConnError::Sql(SqlError::malformed())),
@@ -417,6 +432,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
     fn command_metrics(&mut self, cmd: u8, start: Instant, error: Option<&str>) {
         let now = Instant::now();
         tidb_metrics::command_finished(cmd, self.handler.stmt_type(), now - start, error);
+        self.token = None;
+        tidb_metrics::token_released();
         self.io.flush_counts();
         self.last_active = now;
     }

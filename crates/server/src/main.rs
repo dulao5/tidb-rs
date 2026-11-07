@@ -106,6 +106,15 @@ struct Args {
     /// Test hook: while this file exists the schema sync loop does nothing, as if stuck.
     #[arg(long, hide = true)]
     schema_sync_stall_file: Option<PathBuf>,
+    /// Concurrently executing commands (TiDB's token-limit, `server.concurrentLimiter`): a
+    /// command waits for a token, it is never rejected. 0 means 1000 and the value is capped
+    /// at 1048576, as Go's `Config.Valid` does.
+    #[arg(long, default_value_t = 1000)]
+    token_limit: usize,
+    /// Thread topology of the runtime (N3 3.1): `steal` (work-stealing, default) or
+    /// `no-steal` (one current-thread runtime per worker; a connection stays on its thread).
+    #[arg(long, default_value = "steal", value_parser = ["steal", "no-steal"])]
+    runtime_topology: String,
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
     log_level: tracing::Level,
@@ -147,16 +156,39 @@ fn main() {
         git_hash: tidb_domain::serverinfo::GIT_HASH.to_owned(),
         maxprocs: worker_threads(),
     });
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match tidb_runtime::Runtime::new(tidb_runtime::RuntimeConfig {
+        topology: if args.runtime_topology == "no-steal" {
+            tidb_runtime::Topology::NoSteal
+        } else {
+            tidb_runtime::Topology::Steal
+        },
+        worker_threads: worker_threads(),
+        thread_name: "tidb-rs-worker".to_owned(),
+        ..tidb_runtime::RuntimeConfig::default()
+    }) {
         Ok(rt) => rt,
         Err(e) => {
             error!(error = %e, "failed to start the async runtime");
             std::process::exit(1);
         }
     };
+    tidb_runtime::metrics::init();
+    // Go `Config.Valid`: token-limit 0 -> 1000, at most MaxTokenLimit (1 << 20).
+    let token_limit = match args.token_limit {
+        0 => 1000,
+        n => n.min(1 << 20),
+    };
+    let admission = match tidb_runtime::Admission::new(&tidb_runtime::AdmissionConfig {
+        token_limit,
+        ..tidb_runtime::AdmissionConfig::default()
+    }) {
+        Ok(a) => a,
+        Err(e) => {
+            error!(error = %e, "invalid admission configuration");
+            std::process::exit(2);
+        }
+    };
+    let pool = runtime.pool().clone();
     tidb_kv::register_client_metrics();
     let result = runtime.block_on(async move {
         // Bind the status port first: its real port is what the server info advertises.
@@ -222,7 +254,7 @@ fn main() {
         if args.stmt_timing > 0 {
             tidb_session::timing::set_enabled(true);
             let every = std::time::Duration::from_secs(args.stmt_timing);
-            tokio::spawn(async move {
+            pool.spawn("stmt-timing", async move {
                 let mut tick = tokio::time::interval(every);
                 tick.tick().await;
                 loop {
@@ -238,9 +270,12 @@ fn main() {
                 version: config.server_version.clone(),
                 git_hash: tidb_domain::serverinfo::GIT_HASH.to_owned(),
             };
-            tokio::spawn(status::serve(status_listener, info, async move {
-                let _ = status_stopped.await;
-            }));
+            pool.spawn(
+                "status-server",
+                status::serve(status_listener, info, async move {
+                    let _ = status_stopped.await;
+                }),
+            );
         }
         let shutdown = async {
             let mut term =
@@ -262,7 +297,10 @@ fn main() {
             }
             let _ = stop_status.send(());
         };
-        Server::new(config, factory).serve(listener, shutdown).await
+        Server::new(config, factory)
+            .with_runtime(pool, admission)
+            .serve(listener, shutdown)
+            .await
     });
     if let Err(e) = result {
         error!(%addr, error = %e, "server failed");
