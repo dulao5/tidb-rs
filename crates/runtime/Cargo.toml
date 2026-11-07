@@ -1,0 +1,24 @@
+[package]
+name = "tidb-runtime"
+version = "0.0.0"
+description = "Execution runtime skeleton of tidb-rs (N3): ExecPool and topologies, time-sliced checkpoints, poll-stall detection, Q1 statement admission, Q2 per-store in-flight windows, Q3 blocking pool"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The one runtime of the process (N3 3.1); tikv-client is on tokio too.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
+# Go sync.Mutex / RWMutex (mapping rule M-LOCK).
+parking_lot = "0.12"
+# Same version as tidb-metrics, tidb_query_common and tikv-client: one default registry.
+prometheus = { version = "0.13", default-features = false }
+# Panic and store-token warnings (Go: logutil.BgLogger(), i.e. zap).
+log = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
+
+[lints]
+workspace = true

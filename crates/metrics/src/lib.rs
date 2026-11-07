@@ -601,6 +601,20 @@ pub fn command_started(idle: Duration) {
     GET_TOKEN_DURATION.observe(0.0);
 }
 
+/// A statement-admission token was obtained after waiting `wait` (Go `server.getToken`):
+/// `tokens` + 1, and the wait in **microseconds**, truncated, in this "seconds" histogram (Go
+/// observes `time.Since(start).Nanoseconds() / 1e3`). For the token limiter of
+/// `tidb-runtime` (N3 Q1); the PoC switches from [`command_started`]'s zero wait to this.
+pub fn token_acquired(wait: Duration) {
+    TOKENS.inc();
+    GET_TOKEN_DURATION.observe((wait.as_nanos() / 1000) as f64);
+}
+
+/// The token was put back (Go `server.releaseToken`): `tokens` - 1.
+pub fn token_released() {
+    TOKENS.dec();
+}
+
 /// End of a command (Go `clientConn.addMetrics` + `releaseToken`): `query_total` by command
 /// and result, the handling time by the type of the last statement, and an execute error.
 pub fn command_finished(cmd: u8, stmt_type: StmtType, elapsed: Duration, error: Option<&str>) {

@@ -28,6 +28,13 @@ rank = 1
 planned = true
 blocks = ["D15.1"]   # A1
 
+# N3 runtime: ExecPool and topologies, checkpoint time slice, poll-stall detection, Q1
+# admission (util/tokenlimiter.go, a D00.3 file), Q2 per-store window (its type must be
+# below every crate that carries ExecCtx), Q3 blocking pool. No Go block of its own.
+[crate.tidb-runtime]
+rank = 1
+blocks = []
+
 [crate.tidb-types]
 rank = 2
 blocks = ["D01.1", "D01.2", "D01.3", "D01.4", "D01.5", "D01.6", "D01.9"]
