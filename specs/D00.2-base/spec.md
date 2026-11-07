@@ -115,5 +115,6 @@ mappings.md 中 `M-ERR` 的依据是本 spec。规则：
    - `GetJSONConfig`（154）、`CloneConf`（152）、`MergeConfigItems`（240）、`FlattenConfigItems`（36）、`RemovedVariableCheck`（106）、`ContainHiddenConfig`、`nullableBool`/`AtomicBool` 的文本与 JSON、`ToLogConfig`、`ToTracingConfig`、`GetTiKVConfig`、全局配置函数、`UpdateTempStoragePath`、`ExecuteErrorToLabel`；
    - Go 结果依赖 map 迭代顺序的用例不入向量（生成器按结构判断，见 plan §7.3）；
    - `InitializeConfig`（调用 `os.Exit`）和只被它调用的 `isAllRemovedConfigItems` 豁免，由 Rust 单测覆盖。
+   - 目标：两个目标的记录除 5 条外相同，这 5 条是 `grpc-keepalive-timeout` 取 `1e30`、`inf` 等值时 `time.Duration(f * 1e9)` 溢出 int64：amd64 得 `MinInt64`，`Valid` 报错；arm64 饱和，`Valid` 通过。Rust 的 `go_float_to_i64` 按目标复现。amd64 的文件取自 tracker PR #4 的 CI 产物（run 42344887641）。
 4. **分层**：`check_layers.py` 通过（`tidb-base` rank 0，无 tidb-rs 依赖）。
 5. **单测**：Go 的 `errname_test.go`、`terror_test.go`、`const_test.go`、`privs_test.go`、`type_test.go`、`error_test.go`、`infoschema_test.go` 没有逐个翻译。govec `base` 的用例是生成的（每个模板、每个注册码、每张表），没有抄这些测试的用例表；这些测试检查的性质（表无重复且完整、格式化、类与 RFC 码、`ErrorEqual`、SQL mode、权限、统计计数）都在向量中。Rust 侧另有几个单测（gofmt 基本格式、注册表有序、`ErrCritical`；第二部分：`InitializeConfig` 的各条路径、`isAllRemovedConfigItems`）。`config_test.go` 的 TOML 片段进入 govec `config` 的语料（见上）。
