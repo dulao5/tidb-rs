@@ -147,11 +147,11 @@ static POLL_STALLS: LazyLock<IntCounterVec> = LazyLock::new(|| {
         IntCounterVec::new(
             Opts::new(
                 "poll_stalls_total",
-                "Polls that ran longer than the stall threshold",
+                "Polls that ran longer than the stall threshold, by task and cause (on_cpu, blocked, preempted, off_cpu, unclassified)",
             )
             .namespace("tidb_rs")
             .subsystem("runtime"),
-            &["task"],
+            &["task", "cause"],
         )
         .expect("valid metric"),
     )
@@ -256,8 +256,10 @@ pub(crate) struct TaskMetrics {
 impl TaskMetrics {
     /// Record a stalled poll (rare: resolved on demand).
     // glue: N3 3.6 stall metric
-    pub(crate) fn stall(&self, d: Duration) {
-        POLL_STALLS.with_label_values(&[self.name]).inc();
+    pub(crate) fn stall(&self, d: Duration, cause: crate::stall::StallCause) {
+        POLL_STALLS
+            .with_label_values(&[self.name, cause.as_str()])
+            .inc();
         POLL_STALL_DURATION.observe(d.as_secs_f64());
     }
 }

@@ -612,6 +612,11 @@ pub fn token_released() {
     TOKENS.dec();
 }
 
+/// Current value of `tidb_server_tokens` (tests).
+pub fn tokens() -> i64 {
+    TOKENS.get()
+}
+
 /// End of a command (Go `clientConn.addMetrics`): `query_total` by command and result, the
 /// handling time by the type of the last statement, and an execute error.
 pub fn command_finished(cmd: u8, stmt_type: StmtType, elapsed: Duration, error: Option<&str>) {

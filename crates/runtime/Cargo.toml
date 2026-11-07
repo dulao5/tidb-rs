@@ -18,6 +18,9 @@ parking_lot = "0.12"
 prometheus = { version = "0.13", default-features = false }
 # Panic and store-token warnings (Go: logutil.BgLogger(), i.e. zap).
 log = "0.4"
+# Thread CPU time and per-thread rusage for stall classification (safe wrappers; the crate
+# forbids unsafe). Same version as tidb-metrics.
+nix = { version = "0.29", default-features = false, features = ["time", "resource"] }
 
 [dev-dependencies]
 criterion = "0.5"

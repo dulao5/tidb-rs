@@ -97,11 +97,16 @@ impl<F: SessionFactory> Server<F> {
     ) -> io::Result<()> {
         info!(addr = %listener.local_addr()?, "MySQL protocol server listening");
         let mut conns: Vec<JoinHandle<()>> = Vec::new();
+        // Finished connection tasks are reaped when the list has doubled since the last reap,
+        // so accepting stays amortised O(1) however many connections are open.
+        let mut reap_at = 64;
         let started = std::time::Instant::now();
         tokio::pin!(shutdown);
         loop {
-            // Reap finished connection tasks.
-            conns.retain(|h| !h.is_finished());
+            if conns.len() >= reap_at {
+                conns.retain(|h| !h.is_finished());
+                reap_at = (conns.len() * 2).max(64);
+            }
             tokio::select! {
                 () = &mut shutdown => break,
                 accepted = listener.accept() => {

@@ -122,3 +122,50 @@ fn spin(d: Duration) {
         std::hint::spin_loop();
     }
 }
+
+/// Classification (PR #9 review): a poll that spins is `on_cpu`; a poll that sleeps in a
+/// blocking call is `blocked` on Linux (voluntary switch) and `off_cpu` where the platform has
+/// no per-thread switch counts (macOS). Neither is `preempted`.
+#[test]
+fn stall_causes() {
+    use tidb_runtime::stall::StallCause;
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = Runtime::new(RuntimeConfig {
+        worker_threads: 1,
+        slice: SliceConfig {
+            stall_threshold: Duration::from_millis(50),
+            classify_stalls: true,
+            ..SliceConfig::default()
+        },
+        ..RuntimeConfig::default()
+    })
+    .unwrap();
+    let pool = rt.pool().clone();
+
+    let check = StallCheck::start();
+    let p = pool.clone();
+    rt.block_on(async move {
+        p.spawn("test-spin", async { spin(Duration::from_millis(100)) })
+            .await
+            .unwrap();
+    });
+    assert_eq!(check.stalls(), 1);
+    assert_eq!(check.stalls_by(StallCause::OnCpu), 1);
+
+    let check = StallCheck::start();
+    rt.block_on(async move {
+        pool.spawn("test-sleep", async {
+            std::thread::sleep(Duration::from_millis(100));
+        })
+        .await
+        .unwrap();
+    });
+    assert_eq!(check.stalls(), 1);
+    let want = if cfg!(target_os = "linux") {
+        StallCause::Blocked
+    } else {
+        StallCause::OffCpu
+    };
+    assert_eq!(check.stalls_by(want), 1, "{want:?}");
+    assert_eq!(check.stalls_by(StallCause::OnCpu), 0);
+}

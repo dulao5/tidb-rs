@@ -350,7 +350,7 @@ struct Conn<S, H> {
     /// everything (tests).
     admission: Option<tidb_runtime::Admission>,
     /// The token of the command in progress (Go: taken in `dispatch`, put back in its defer).
-    token: Option<tidb_runtime::admission::Token>,
+    token: Option<crate::admission::HeldToken>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
@@ -384,11 +384,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             tidb_metrics::command_started(start.saturating_duration_since(self.last_active));
             // Go `dispatch`: `token := cc.server.getToken()` before running the command; it
             // waits, never rejects. `releaseToken` is in `command_metrics` (Go's defer).
-            let wait_start = Instant::now();
-            if let Some(a) = &self.admission {
-                self.token = Some(a.get().await);
-            }
-            tidb_metrics::token_acquired(wait_start.elapsed());
+            self.token = Some(crate::admission::HeldToken::acquire(self.admission.as_ref()).await);
             let cmd = data.first().copied();
             let result = match data.split_first() {
                 None => Err(ConnError::Sql(SqlError::malformed())),
@@ -432,8 +428,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
     fn command_metrics(&mut self, cmd: u8, start: Instant, error: Option<&str>) {
         let now = Instant::now();
         tidb_metrics::command_finished(cmd, self.handler.stmt_type(), now - start, error);
+        // Go's deferred releaseToken: the token and the gauge (HeldToken's Drop).
         self.token = None;
-        tidb_metrics::token_released();
         self.io.flush_counts();
         self.last_active = now;
     }

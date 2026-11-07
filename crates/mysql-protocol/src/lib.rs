@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admission;
 pub mod auth;
 pub mod codec;
 mod conn;
