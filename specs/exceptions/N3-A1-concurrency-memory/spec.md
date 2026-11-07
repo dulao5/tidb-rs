@@ -77,7 +77,7 @@ TiKV 的做法（`release-8.5` 分支）可以直接作为模板：
    - 多级队列仍是计划中的升级：若"大扫描并发时的点查 p99"基准不达标，换成 yatp，并按宪章登记为来自 TiKV 的 L3 和 ADR。`tikv-client` 依赖 tokio，所以第一步用 tokio。
 3. **每个 goroutine 对应一个 task**（`M-GO`）：`go worker.run()` → `pool.spawn(async move { worker.run().await })`。数量严格等于 Go 的数量（由同一个 `Concurrency` getter 决定），`tidb_executor_concurrency` 等变量含义不变；物理并行度由池大小决定，这与 goroutine 和 GOMAXPROCS 的关系相同。
 4. **channel 映射**（`M-CH`、`M-WG`）：有缓冲 channel → 容量相同的异步有界 channel；无缓冲 → 容量为 0 的 rendezvous（无法直接表达时用容量 1 加确认，在 plan 模板里固定一种写法）；`close(ch)` → drop 发送端；`select` → `select!`；`sync.WaitGroup` → 保存 `JoinHandle`，关闭时逐个 await。只能使用**取消安全**的 channel 原语（在 `select!` 中被放弃的分支不会丢数据），选型在试点中确定并写进 plan 模板。
-5. **检查点：kill / 内存检查按 Go 的位置，让出按时间片**（`M-KILL`，2026-11-06 修订）：`ctx.checkpoint().await` 放在 Go 的 `HandleSQLKillerSignal` 同一位置（`exec::next` 前后等），以及任何不经过 `Next` 就连续处理数据的循环（hash build、sort、merge、聚合 final 合并的内循环）。每次调用都做 kill 检查和内存检查（第二部分 3.3，都是一次原子读）；**是否让出 CPU 按时间片决定**：本次 poll 运行超过 quantum（默认 1ms）才让出。Go 的检查点是 chunk 级的（`internal/exec/executor.go:448`、`:462`，每次 `exec.Next` 前后各一次，一次 `Next` 可能要几百微秒），所以 `ctx.checkpoint()` **每次调用都看时钟**（约 30ns）；2026-11-07 按 PR #8 评审修订，原稿"每 N 次看一次"会让 400µs 一次的 `Next` 每次 poll 跑到约 12.8ms。真正逐行调用的内层循环（hash build、sort 等）用显式的 `CheckpointStride::new(n)`，每 n 次看一次时钟，这才是 TiKV `RescheduleChecker` 的模式（`components/tidb_query_common/src/storage/scanner.rs`：每 32 个 key 看一次时钟，超过 1ms `reschedule().await`）。Rust 没有 Go sysmon 的抢占，这个原语加 3.6 的停顿检测就是抢占的替代品。checkpoint 同时记录本片 CPU 时间，归到语句和 resource group；按组的调度份额以后加，钩子现在留（`ExecCtx` 字段，见 foundation-interfaces）。调用接口不变。
+5. **检查点：kill / 内存检查按 Go 的位置，让出按时间片**（`M-KILL`，2026-11-06 修订）：`ctx.checkpoint().await` 放在 Go 的 `HandleSQLKillerSignal` 同一位置（`exec::next` 前后等），以及任何不经过 `Next` 就连续处理数据的循环（hash build、sort、merge、聚合 final 合并的内循环）。每次调用都做 kill 检查和内存检查（第二部分 3.3，都是一次原子读）；**是否让出 CPU 按时间片决定**：本次 poll 运行超过 quantum（默认 1ms）才让出。Go 的检查点是 chunk 级的（`internal/exec/executor.go:448`、`:462`，每次 `exec.Next` 前后各一次，一次 `Next` 可能要几百微秒），所以 `ctx.checkpoint()` **每次调用都看时钟**（约 30ns）；2026-11-07 按 PR #8 评审修订，原稿"每 N 次看一次"会让 400µs 一次的 `Next` 每次 poll 跑到约 12.8ms。真正逐行调用的内层循环（hash build、sort 等）用显式的 `CheckpointStride::new(n)`，每 n 次看一次时钟，这才是 TiKV `RescheduleChecker` 的模式（`components/tidb_query_common/src/storage/scanner.rs`：每 32 个 key 看一次时钟，超过 1ms `reschedule().await`）。Rust 没有 Go sysmon 的抢占，这个原语加 3.6 的停顿检测就是抢占的替代品。checkpoint 同时记录本片 CPU 时间，归到语句和 resource group（注意：当前按 poll 的墙钟时间累计，CPU 超额订阅时会把被抢占的时间也算进去；接 Top SQL、资源管控之前要改成线程 CPU 时间或做校正，PR #9 评审）；按组的调度份额以后加，钩子现在留（`ExecCtx` 字段，见 foundation-interfaces）。调用接口不变。
 6. **KV 访问没有同步/异步边界**：coprocessor 迭代器的 worker（数量 = `tidb_distsql_scan_concurrency`，`sendRate` 按 L1 映射为同容量的信号量，它限制的是已收到、未被消费的响应，管的是内存）就是同一个运行时上的 task，直接 await `tikv-client` 的请求。另有服务器级的在途窗口 Q2（3.6），限制的是发往每个 store 的在途 RPC。需要确认 client-rust 的请求 future 被 drop 时会取消请求（待试点验证）。每个 cop 请求都带上 TiKV 调度依赖的字段：priority、resource group name、override priority、task_id（语句级，Go `request_builder.go` 的 `TaskID`）、busy_threshold（与 Go 相同的取值）、deadline（`max_execution_time`）。
 7. **禁止阻塞**（`M-BLOCK`、`M-LOCK`）：执行器代码中不得阻塞线程。落盘 I/O 走 `spawn_blocking` 或单独的阻塞池；await 期间不得持有锁；执行器 crate 中不得 `std::thread::spawn` 或 `block_on`。这些用 clippy 强制（见 [mappings.md](../../../docs/porting/mappings.md)）。
 8. **准入**：见 3.6 的 Q1。Go 已有 `token-limit`（默认 1000，满了排队等待，不拒绝），按 L1 移植；按 resource group 分份额、过载时拒绝是功能例外，默认关闭。
@@ -137,6 +137,12 @@ Q2 的规则：
 
 **poll 停顿检测**：单次 poll 超过阈值（默认 10ms）计数并打日志，覆盖语句和后台 task。它是 3.1 第 5 条时间片让出的兜底，用来发现漏放 checkpoint 的循环。
 
+**盲区**（PR #10 评审）：只有经过 `ExecPool` 启动的 task 被插桩。tikv-client 自己 `tokio::spawn` 的 task（tonic / h2 的连接 task 等）也跑在我们的 worker 线程上，但不经过插桩，它们的停顿完全看不到。Lucky 用 bpftrace 抓到的 2 次 blocked 栈正是这类 task：在 `h2::proto::streams::Streams::poll_pending_open` 里等 h2 连接共享的 `std::sync::Mutex`（5.4ms、23.7ms），持锁线程被抢占后其他线程排队。补救办法二选一：用 tokio 的 `on_before_task_poll` / `on_after_task_poll` hook 覆盖所有 task（需要 `tokio_unstable`），或者在 nightly 用 bpftrace 做全量检查。
+
+**后续**：
+1. 在 Linux 上用 bpftrace 抓一次**我们的 connection task** 上 blocked 停顿的栈，确认是否也是 h2 的锁（目前只是推测）；
+2. 在独立的客户端机器上重测过载，确认收尾时的 preempted 停顿是否只是 sysbench 收尾时的 CPU 突发。
+
 #### 3.7 后台任务（2026-11-06 新增）
 
 schema reload 的 diff、统计加载、plan cache 淘汰等后台任务，在 Go 里靠运行时抢占兜底；在单运行时的 Rust 里，它们和语句共用线程，会卡住语句。规则：后台任务和执行器一样遵守 `M-BLOCK`，长循环按 3.1 第 5 条放时间片让出点，否则放到 Q3。停顿检测覆盖后台任务。
@@ -190,7 +196,7 @@ for w in workers {
 | 并发度语义 | 对每个并发度变量，构造查询断言实际 worker 数与 Go 相同（读 runtime stats 中的 concurrency 字段，与 Go 的 EXPLAIN ANALYZE 对比） |
 | 性能 | sysbench oltp_point_select / read_only QPS 不低于当前 PoC 基线（去掉交接后路径与 PoC 一样长）；TPC-H 22 条查询总耗时不高于 Go |
 | 两种拓扑 | Steal 拓扑每个 PR 跑全部测试；NoSteal 拓扑 nightly 跑同一套测试。可抓出两类只在一种拓扑下暴露的 bug：`current_thread` 下 task 同步等待自己 spawn 的 task 会死锁；依赖线程局部状态的代码只在工作窃取下出错 |
-| 停顿检测 | 测试和基准中 poll 停顿（> 10ms）计数为 0，后台任务包括在内 |
+| 停顿检测 | 测试和基准中打开停顿分类（`SliceConfig::classify_stalls` 或 `TIDB_RS_STALL_CLASSIFY=1`），在每次基准运行的**稳态窗口**内（去掉开头和结尾各 1 秒，`scripts/n3-bench.sh` 的 `STEADY_SKIP_START` / `STEADY_SKIP_END`），`on_cpu` 和 `blocked` 两类停顿（> 10ms）计数为 0，后台任务包括在内。`preempted`（被 OS 抢占）和 `off_cpu`（平台给不出切换次数时无法细分，如 macOS）只记录、不判定；窗口外（预热、所有客户端同时结束并断开时）的停顿单独报告。2026-11-07 按 PR #9、#10 评审修订：poll 按墙钟计时，CPU 超额订阅时被抢占也会算成停顿；Linux 上 320 线程过载的停顿集中在 sysbench 收尾的约 50ms 内（见 docs/bench/n3-runtime.md §4.1、§4.2）。确定的只有时间点，以及 bpftrace 抓到的 2 次 blocked 在 tonic 连接 task 的 h2 锁上；"收尾停顿来自连接关闭和 h2 锁排队、而非语句执行"仍是推测，待下面的 bpftrace 后续任务确认。macOS 上 CPU 超额订阅时，被抢占的停顿分布在整个稳态，不集中在收尾 |
 | 队列指标 | Q1 / Q2 / Q3 的深度与等待时间指标存在且在基准中有读数 |
 | cop 请求字段 | 用 mock TiKV 断言每个 cop 请求都带 priority、resource group name、override priority、task_id、busy_threshold、deadline，取值与 Go 对同一语句的请求相同 |
 | 过载 | 负载升到饱和点的 2 倍、5 倍时，吞吐不低于峰值的 90%，已接纳语句的 p99 有上界且不高于 Go（默认配置，即 Go 行为；AIMD 打开时另测） |

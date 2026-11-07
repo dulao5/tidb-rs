@@ -26,6 +26,7 @@ pub mod local;
 pub mod metrics;
 pub mod pool;
 pub mod slice;
+pub mod stall;
 pub mod store_window;
 
 pub use admission::Admission;

@@ -7,10 +7,10 @@
 | 问题 | 结论 |
 |---|---|
 | 接入运行时是否让 PoC 变慢 | **没有**。点查、read_only、扫描并发下的点查、过载各项，接入后与接入前都在噪声范围内（中位数相差 −1.7%～+1.5%，3 次运行的波动区间互相重叠） |
-| 停顿检测（必须为 0） | 点查、read_only、扫描并发下的点查：**0**。过载扫描到 256、320 个并发语句时出现停顿（每次 15 秒 17～37 次，多为 10～16ms）。Q1 把并发限制在 64 时几乎为 0。见 §4，原因尚未确定，**这一项没有达标** |
+| 停顿检测 | 点查、read_only、扫描并发下的点查：**0**。过载到 256、320 个并发语句时出现停顿（每次 15 秒 17～44 次，多为 10～16ms）。分类后本机全部是 off_cpu，`on_cpu` 为 0，分散在整个运行中；Linux 上集中在所有客户端同时断开的收尾时刻（§4.2）。N3 §5 改为只在稳态窗口内判定 `on_cpu`、`blocked` 为 0：本机 `on_cpu` 达标，`blocked` 只能在 Linux 上判定 |
 | Q1 | 默认 1000 不会触发排队，平均等待约 144ns（`queue_wait_seconds` 的 sum / count）。`--token-limit 64` 时 320 个线程下 Q1 排队，p99 从 16.3ms 降到 9.5ms，吞吐降到 45k（峰值的 84%） |
 | Q2、Q3 | PoC 中 **没有读数**：Q2 未接入（见 §5），PoC 没有阻塞型工作，Q3 没有使用 |
-| 换 yatp 多级队列 | **现在不换**。一个全表扫描会话并发时，点查 p99 接入前后相同（1.31ms），且与 Go 的差距来自 PoC 的访问路径（见 §3），不是调度。等真实执行器移植后，用 N3 §5 的"64 个 TPC-H 会话 + 点查"场景再决定 |
+| 换 yatp 多级队列 | **现在不换**。一个全表扫描会话并发时，点查 p99 接入前后相同（1.31ms），且与 Go 的差距来自 PoC 的访问路径（见 §3），不是调度。等真实执行器移植后，用 N3 §5 的"64 个 TPC-H 会话 + 点查"场景再决定。那时的基准**必须包含没有下推的大排序和 hash join**（Lucky）：根节点上长时间运行的算子才是多级队列真正起作用的地方，本次的扫描测试把部分聚合下推了，测不到 |
 | 时间片 | **保持 1ms**。没有证据要求调整：PoC 的检查点只在 chunk 级，各项测试中时间片没有引起可测的开销；停顿只出现在 CPU 超额订阅时 |
 
 ## 1. 环境
@@ -110,7 +110,7 @@ Go 快约 6 倍的原因不在运行时：Go 的计划是 `IndexReader(HashAgg c
 | 点查、read_only 的 QPS 不低于 PoC 基线 | **通过**：wired / base 在 ps 为 1.03 / 1.00 / 1.00，ro 为 0.99 / 1.01 / 1.02（分别对应 8 / 32 / 64 线程） |
 | 大扫描并发下点查的 p99 | 接入前后相同（1.31ms），Go 为 0.75ms，差距见上 |
 | 过载 2×、5× | 饱和点取 64 个线程：之后 QPS 的增长不到线程数增长的 1/10，延迟随线程数线性增加。2×（128）和 5×（320）时，吞吐为 64 线程时的 107%、121%，没有崩塌；p99 有上界（5.3ms、16.3ms），与 base 相同。但 **比 Go 高**（Go 为 4.6ms、11.4ms）：base 同样如此，属于 PoC 执行路径。打开 `--token-limit 64` 后 p99 降到 9.5ms，低于 Go，但吞吐只有峰值的 84%，低于 90% 的目标 |
-| 停顿为 0 | **未通过**：只在过载时出现，见 §4 |
+| 停顿（修订后：稳态窗口内 `on_cpu`、`blocked` 为 0） | 稳态 `on_cpu` 为 0（macOS、Linux）；稳态 `blocked`：macOS 无法判定；Linux 待用修正后的窗口重测（PR #10 第二轮评审发现，旧脚本的窗口从 sysbench 进程启动起算，在 Lucky 的机器上几乎全落在建连阶段，那次的"稳态为 0"不成立）。Linux 收尾时有 blocked 和 preempted，单独报告。见 §4.2 |
 | 队列指标有读数 | Q1 有；Q2、Q3 没有，见 §5 |
 
 ## 4. 停顿
@@ -146,8 +146,66 @@ Go 快约 6 倍的原因不在运行时：Go 的计划是 `IndexReader(HashAgg c
 
 功能正常，0 次停顿。扫描并发时点查低 20%：扫描语句占着它所在的线程，同一线程上的点查连接只能在它让出时运行。这与 N3 把 NoSteal 定为可选项的判断一致。
 
+### 4.1 停顿分类（2026-11-07 补测，PR #9 评审之后）
+
+`tidb-runtime` 加入了停顿分类（`crates/runtime/src/stall.rs`）。每次 poll 前读一次线程 CPU 时间（Linux 上再加 `getrusage(RUSAGE_THREAD)`），停顿时再读一次，并按下面的规则归类：
+- CPU 时间 ≥ 墙钟时间的一半：`on_cpu`（缺检查点或重的同步计算）；
+- 有自愿切换：`blocked`（阻塞的系统调用、锁上睡眠，仅 Linux）；
+- 只有非自愿切换：`preempted`（仅 Linux）；
+- macOS 没有按线程的切换次数：`off_cpu`。
+
+生产环境默认关闭，测试和基准用 `TIDB_RS_STALL_CLASSIFY=1` 打开。
+
+在本机、自己的 playground 上，过载 320 个线程跑 3 次（`TIDB_RS_STALL_CLASSIFY=1 TESTS=overload OVERLOAD=320 scripts/n3-bench.sh …`）：
+
+| 运行 | QPS | p99 ms | on_cpu | off_cpu |
+|---|--:|--:|--:|--:|
+| 1 | 51,940 | 17.33 | 0 | 39 |
+| 2 | 52,774 | 18.03 | 0 | 44 |
+| 3 | 52,965 | 16.98 | 0 | 43 |
+
+全部来自 `connection` task（语句 task）。`on_cpu` 为 0，所以没有需要追查的代码路径。同时跑了 64 线程点查和扫描并发下的点查：0 次停顿。打开分类后点查 QPS 为 44,694，与关闭时的 44,733 在噪声之内。数据见 `n3-runtime-data/stall-classify/`。
+
+macOS 上 off_cpu 分不出被抢占还是阻塞。
+
+### 4.2 稳态窗口与收尾（PR #10 评审之后）
+
+**采样顺序已修正**：现在线程 CPU 和切换次数的两次采样包住 poll 的 `[start, end]`，after 样本只在停顿时读取。之前 `start` 在 before 样本之前，`start` 和 before 之间发生的切换看不到，Lucky 在 Linux 上实测有 3 次 preempted 因此被误判成 off_cpu。
+
+**按时间窗口统计**：`scripts/n3-bench.sh` 在每次运行的开始前、sysbench 输出 "Threads started!"（`--time` 从这里开始计）之后 1 秒、结束前 1 秒、结束后各抓一次 `/metrics`。sysbench 从启动到 "Threads started!" 可能要十几秒（Lucky 的 Linux 机器上 320 线程约 11.8 秒，对 Go TiDB 也一样），所以窗口不能按进程启动时刻计算；最早的版本就是这样算的，在那台机器上窗口几乎全落在建连阶段。中间一段为稳态，前后两段（预热和收尾）单独报告，边距可用 `STEADY_SKIP_START` / `STEADY_SKIP_END` 配置。
+
+本机（macOS）重测，320 线程过载 3 次，打开分类：
+
+| 运行 | QPS | p99 ms | 稳态 on_cpu / blocked / off_cpu | 开头 1 秒 | 结尾 1 秒 + 收尾 |
+|---|--:|--:|--:|--:|--:|
+| 1 | 52,273 | 17.68 | 0 / 0 / 37 | 0 | off_cpu 4 |
+| 2 | 51,103 | 16.65 | 0 / 0 / 29 | 0 | off_cpu 2 |
+| 3 | 51,996 | 17.33 | 0 / 0 / 43 | 0 | off_cpu 1 |
+
+64 线程点查和扫描并发下的点查：所有窗口均为 0。
+
+**macOS 的时间分布与 Linux 不同**：server 日志中每次停顿都有时间戳（runtime 现在通过 `tracing` 打日志，见下）。停顿分散在整个 15 秒内，每秒 1～8 次，并**没有**集中在收尾（`n3-runtime-data/stall-window/win320-r*-stall-log.txt`）。所以本机的 off_cpu 停顿是稳态下的现象：机器负载约 15～18，CPU 一直处于超额订阅。macOS 没有按线程的切换次数，无法判定其中是否有 blocked。按修订后的 N3 §5，本机 `on_cpu` 为 0，达标；`blocked` 在 macOS 上无法判定，以 Linux 为准。
+
+**Linux（Lucky 复现，10 核）**：
+
+已确认：
+- 6 次运行的 24 次停顿，全部发生在 sysbench 结束前 28～51ms 之内，即 320 个客户端同时结束、断开的时刻；15 秒稳态中为 0。
+- 用 bpftrace 抓到的 2 次 blocked 栈，在 tonic 的 h2 连接 task 中（不是我们的 connection task），等待 h2 连接共享的 `std::sync::Mutex`（`Streams::poll_pending_open` → futex，5.4ms、23.7ms）。这类 task 由 tikv-client 自己 spawn，**不经过插桩**，是停顿检测的盲区（N3 3.6 已注明）。
+- 把 tidb-rs 绑在独占的 4 个核上后，320、640 个并发语句都是 0 次停顿。
+- 另有一次运行在我们的 connection task 上出现 5 次 blocked（各 1 次自愿切换、13～20ms），与同一次运行的抢占停顿挤在约 5ms 的窗口内，也在收尾时刻。
+
+推测（待 bpftrace 后续确认，N3 3.6 已列为后续）：
+- 我们 connection task 上的 blocked 与 tonic 连接 task 同因，即 h2 的锁；
+- 收尾时的 preempted 只是 sysbench 收尾时的 CPU 突发。
+
+结论（部分是推测，见上文）：本机过载下的停顿是持续的 CPU 超额订阅，`on_cpu` 为 0；Linux 上看到的停顿集中在所有客户端同时断开的收尾时刻，原因推测为连接关闭和 h2 锁排队，待 bpftrace 后续任务确认，稳态窗口内的计数待用修正后的脚本重测。N3 §5 改为只在稳态窗口内判定 `on_cpu`、`blocked` 为 0。
+
+**日志**：runtime 之前用 `log` 宏，tidb-server 的 tracing subscriber 没有 log 桥接，停顿警告和 `spawn_with_recover` 的 panic 日志都丢了。现在 runtime 改用 `tracing`：tidb-server 本来就用 tracing，改宏比安装全局的 `LogTracer` 更直接。`crates/runtime/tests/logs.rs` 测试停顿和 panic 两条日志都能被 tracing subscriber 收到。本次重测中，server 日志里能看到全部 116 条停顿警告。
+
 ## 7. 行为不变（integrationtest）
 
 `scripts/integrationtest.sh -- select subquery topn_push_down topn_pushdown window_function collation_agg_func collation_misc collation_pointget common_collation null_rejected clustered_index tpch agg_predicate_pushdown`（13 个文件，681 条语句，378 条读），base 和 wired 各跑一次：两边逐条语句的结果分类（match / mismatch / unsupported / 错误）**完全相同**（`statements.tsv` 的前 6 列逐行 diff 为空），汇总都是 match 29、mismatch 9、unsupported 193、b_error 3。原始汇总见 `n3-runtime-data/integrationtest/`。
+
+**覆盖范围要说清楚**：681 条语句中，写入 291 条只在 Go TiDB 上执行；读 378 条中 193 条 tidb-rs 报"不支持"，其余大多是 Go 侧本身报错（汇总中 a_error 155，含非读语句）或被跳过。真正比对到结果的只有 match 29 + mismatch 9 + b_error 3，**共 41 条**。"逐条相同"指这 41 条结果相同，另外 unsupported 和报错的分类也相同。接入不改变语义，这个覆盖足以说明没有回退，但不能当作 681 条语句的正确性证明。
 
 全部 263 个文件跑一遍约 2 小时，base、wired 两遍要 4 小时，所以只选了偏读取的这一组；wired 的完整运行跑到第 66 个文件时中止，没有发现崩溃或连接异常。

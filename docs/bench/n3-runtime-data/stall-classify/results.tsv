@@ -1,0 +1,6 @@
+label	test	threads	qps	p95_ms	p99_ms	errors	extra
+cls320-r1	overload	320	51940.08	12.09	17.33	0	
+cls320-r2	overload	320	52774.24	12.58	18.03	0	
+cls320-r3	overload	320	52964.94	11.85	16.98	0	
+cls-ps64	ps	64	44694.06	2.00	2.54	0	
+cls-ps64	scan	16	33492.04	0.81	1.21	0	

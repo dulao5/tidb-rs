@@ -260,5 +260,5 @@ fn release_store_token(st: &StoreState) {
         st.token_count.fetch_sub(1, Ordering::SeqCst);
         return;
     }
-    log::warn!("release store token failed, count equals to 0");
+    tracing::warn!("release store token failed, count equals to 0");
 }

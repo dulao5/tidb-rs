@@ -47,6 +47,10 @@ pub struct SliceConfig {
     pub check_every: u32,
     /// A poll longer than this is a stall. N3 3.6: 10 ms.
     pub stall_threshold: Duration,
+    /// Classify stalls by thread CPU time and context switches ([`crate::stall`]): ~400 ns
+    /// per poll, so off by default; on in tests and benchmarks (or with
+    /// `TIDB_RS_STALL_CLASSIFY=1`).
+    pub classify_stalls: bool,
 }
 
 impl Default for SliceConfig {
@@ -56,12 +60,17 @@ impl Default for SliceConfig {
             quantum: Duration::from_millis(1),
             check_every: 1,
             stall_threshold: Duration::from_millis(10),
+            classify_stalls: crate::stall::enabled_by_env(),
         }
     }
 }
 
 /// CPU time accumulated by the tasks it is attached to (a statement; later a resource group,
 /// N3 3.1 第 5 条). Cheap to clone; an atomic add per poll.
+///
+/// It sums the polls' **wall** time: on an oversubscribed machine that includes time the
+/// thread was preempted. Fine for the PoC; Top SQL / resource control will need thread CPU
+/// time (see [`crate::stall`]) or a correction.
 #[derive(Debug, Clone, Default)]
 pub struct CpuRecorder(Arc<AtomicU64>);
 
@@ -108,12 +117,46 @@ pub fn stall_count() -> u64 {
 /// Test helper: no task may stall between [`StallCheck::start`] and [`StallCheck::assert_none`]
 /// (N3 §5 "停顿检测": zero stalls). Process-wide, so tests that use it must not run tasks that
 /// stall on purpose in parallel.
-pub struct StallCheck(u64);
+pub struct StallCheck(u64, [u64; 5]);
 
 impl StallCheck {
     // glue: test helper
     pub fn start() -> StallCheck {
-        StallCheck(stall_count())
+        StallCheck(
+            stall_count(),
+            crate::stall::StallCause::ALL.map(crate::stall::stall_count_by),
+        )
+    }
+
+    /// Stalls of cause `c` since [`StallCheck::start`].
+    // glue: test helper
+    pub fn stalls_by(&self, c: crate::stall::StallCause) -> u64 {
+        let i = crate::stall::StallCause::ALL
+            .iter()
+            .position(|x| *x == c)
+            .unwrap_or(0);
+        crate::stall::stall_count_by(c) - self.1[i]
+    }
+
+    /// N3 §5: no stall that is the code's fault (`on_cpu`, `blocked`); `preempted` and
+    /// `off_cpu` ones (machine load) are allowed. Needs `classify_stalls` on: unclassified
+    /// stalls count as the code's fault.
+    // glue: test helper
+    #[track_caller]
+    pub fn assert_no_code_stalls(&self) {
+        use crate::stall::StallCause;
+        let bad: u64 = [
+            StallCause::OnCpu,
+            StallCause::Blocked,
+            StallCause::Unclassified,
+        ]
+        .into_iter()
+        .map(|c| self.stalls_by(c))
+        .sum();
+        assert_eq!(
+            bad, 0,
+            "{bad} on-CPU / blocked / unclassified poll stall(s)"
+        );
     }
 
     // glue: test helper
@@ -151,15 +194,27 @@ impl<F: Future> Future for Instrumented<F> {
 
     // glue: N3 3.1 第 5 条 / 3.6 poll instrumentation
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        let cfg = TASK.with(|t| t.cfg);
+        // The CPU / switch samples bracket [start, end] (PR #10 review): a switch between the
+        // two clock reads must fall inside the sampled interval, and nothing after `end` may.
+        let before = if cfg.classify_stalls {
+            crate::stall::sample()
+        } else {
+            None
+        };
         let start = Instant::now();
-        let cfg = TASK.with(|t| {
+        TASK.with(|t| {
             t.poll_start.set(start);
             t.calls.set(0);
-            t.cfg
         });
         let out = self.inner.as_mut().poll(cx);
         let end = Instant::now();
         let d = end.saturating_duration_since(start);
+        let after = if before.is_some() && d > cfg.stall_threshold {
+            crate::stall::sample()
+        } else {
+            None
+        };
         TASK.with(|t| {
             t.cpu.set(t.cpu.get() + d);
             if let Some(r) = t.recorder.borrow().as_ref() {
@@ -168,13 +223,19 @@ impl<F: Future> Future for Instrumented<F> {
         });
         metrics::cpu_slice(d, end);
         if d > cfg.stall_threshold {
+            let cause = match (before, after) {
+                (Some(b), Some(a)) => crate::stall::classify(d, &b, &a),
+                _ => crate::stall::StallCause::Unclassified,
+            };
             STALLS.fetch_add(1, Ordering::Relaxed);
-            self.metrics.stall(d);
-            log::warn!(
-                "poll stall: task {} ran {:?} without yielding (threshold {:?})",
-                self.metrics.name,
-                d,
-                cfg.stall_threshold
+            crate::stall::count(cause);
+            self.metrics.stall(d, cause);
+            tracing::warn!(
+                cause = cause.as_str(),
+                task = self.metrics.name,
+                elapsed = ?d,
+                threshold = ?cfg.stall_threshold,
+                "poll stall: a task ran without yielding"
             );
         }
         out

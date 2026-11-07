@@ -376,7 +376,7 @@ impl ExecPool {
                     // after recoverFn.
                     let msg = e.to_string();
                     guard.fire(TaskExit::Panicked(e));
-                    log::error!("panic in the recoverable goroutine: task {name}: {msg}");
+                    tracing::error!(task = name, r = %msg, "panic in the recoverable goroutine");
                     None
                 }
             }
