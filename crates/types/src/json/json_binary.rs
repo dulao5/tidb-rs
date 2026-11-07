@@ -167,12 +167,12 @@ impl<'a> BinaryJSON<'a> {
             JSONTypeCodeLiteral => Ok(json_marshal_literal_to(buf, self.value[0])),
             JSONTypeCodeInt64 => {
                 let mut buf = buf;
-                buf.extend_from_slice(self.get_int64().to_string().as_bytes());
+                append_int(&mut buf, self.get_int64());
                 Ok(buf)
             }
             JSONTypeCodeUint64 => {
                 let mut buf = buf;
-                buf.extend_from_slice(self.get_uint64().to_string().as_bytes());
+                append_uint(&mut buf, self.get_uint64());
                 Ok(buf)
             }
             JSONTypeCodeFloat64 => self.marshal_float64_to(buf),
@@ -1111,4 +1111,27 @@ fn base64_std_encode(src: &[u8]) -> String {
         });
     }
     out
+}
+
+// go-std: strconv.AppendInt L1 (base 10)
+fn append_int(buf: &mut Vec<u8>, v: i64) {
+    if v < 0 {
+        buf.push(b'-');
+    }
+    append_uint(buf, v.unsigned_abs());
+}
+
+// go-std: strconv.AppendUint L1 (base 10)
+fn append_uint(buf: &mut Vec<u8>, mut v: u64) {
+    let mut tmp = [0u8; 20];
+    let mut i = tmp.len();
+    loop {
+        i -= 1;
+        tmp[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    buf.extend_from_slice(&tmp[i..]);
 }

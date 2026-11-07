@@ -20,7 +20,7 @@ use super::json_binary::{
 };
 use super::json_constants::*;
 use super::json_path_expr::{
-    ArraySelection, JSONPathExpression, PathExpressionFlagExt, is_ecmascript_identifier,
+    ArraySelection, JSONPathExpression, PathLeg, PathExpressionFlagExt, is_ecmascript_identifier,
     json_path_array_index_from_start, jsonPathLegArraySelection, jsonPathLegDoubleAsterisk,
     jsonPathLegKey,
 };
@@ -81,13 +81,13 @@ impl BinaryJSON<'_> {
     ///    ret: target JSON matched any path expressions. maybe autowrapped as an array.
     ///    found: true if any path expressions matched.
     // go: BinaryJSON.Extract L1
-    pub fn extract(&self, path_expr_list: &[JSONPathExpression]) -> (BinaryJSON<'static>, bool) {
+    pub fn extract(&self, path_expr_list: &[JSONPathExpression]) -> (BinaryJSON<'_>, bool) {
         let mut buf: Vec<BinaryJSON<'_>> = Vec::with_capacity(1);
         for path_expr in path_expr_list {
             let mut dup = HashSet::new();
             buf = self
                 .as_ref()
-                .extract_to(buf, path_expr, Some(&mut dup), false);
+                .extract_to(buf, &path_expr.legs, Some(&mut dup), false);
         }
 
         if buf.is_empty() {
@@ -99,7 +99,7 @@ impl BinaryJSON<'_> {
             if path_expr_list[0].could_match_multiple_values() {
                 return (build_binary_json_array(&buf), true);
             }
-            (buf[0].copy(), true)
+            (buf.remove(0), true)
         } else {
             (build_binary_json_array(&buf), true)
         }
@@ -108,7 +108,7 @@ impl BinaryJSON<'_> {
     // go: BinaryJSON.extractOne L1
     pub(crate) fn extract_one(&self, path_expr: &JSONPathExpression) -> Vec<BinaryJSON<'_>> {
         let result = Vec::with_capacity(1);
-        self.as_ref().extract_to(result, path_expr, None, true)
+        self.as_ref().extract_to(result, &path_expr.legs, None, true)
     }
 
     // go: BinaryJSON.objectSearchKey L1
@@ -360,11 +360,11 @@ impl<'a> BinaryJSON<'a> {
     fn extract_to(
         self,
         mut buf: Vec<BinaryJSON<'a>>,
-        path_expr: &JSONPathExpression,
+        legs: &[PathLeg],
         mut dup: Option<&mut HashSet<usize>>,
         one: bool,
     ) -> Vec<BinaryJSON<'a>> {
-        if path_expr.legs.is_empty() {
+        if legs.is_empty() {
             if let Some(dup) = dup {
                 if dup.contains(&self.ptr()) {
                     return buf;
@@ -374,7 +374,8 @@ impl<'a> BinaryJSON<'a> {
             buf.push(self);
             return buf;
         }
-        let (current_leg, sub_path_expr) = path_expr.pop_one_leg();
+        // Go's popOneLeg: the first leg and the rest (its flags are not used here).
+        let (current_leg, sub_path_expr) = (&legs[0], &legs[1..]);
         if current_leg.typ == jsonPathLegArraySelection {
             if self.type_code != JSONTypeCodeArray {
                 // If the current object is not an array, still append them if the selection includes
@@ -382,16 +383,16 @@ impl<'a> BinaryJSON<'a> {
                 //
                 // don't call `getIndexRange` or `getIndexFromStart`, they will panic if the argument
                 // is not array.
-                match current_leg.array_selection {
+                match &current_leg.array_selection {
                     Some(ArraySelection::Index(index)) => {
                         if index.0 == 0 {
-                            buf = self.extract_to(buf, &sub_path_expr, dup, one);
+                            buf = self.extract_to(buf, sub_path_expr, dup, one);
                         }
                     }
                     Some(ArraySelection::Range(start, end)) => {
                         // for [0 to Non-negative Number] and [0 to last], it extracts itself
                         if start.0 == 0 && end.0 >= -1 {
-                            buf = self.extract_to(buf, &sub_path_expr, dup, one);
+                            buf = self.extract_to(buf, sub_path_expr, dup, one);
                         }
                     }
                     _ => {}
@@ -407,7 +408,7 @@ impl<'a> BinaryJSON<'a> {
             if start >= 0 && start <= end {
                 for i in start..=end {
                     let elem = borrow_elem(&self, |b| b.array_get_elem(i as usize));
-                    buf = elem.extract_to(buf, &sub_path_expr, dup.as_deref_mut(), one);
+                    buf = elem.extract_to(buf, sub_path_expr, dup.as_deref_mut(), one);
                 }
             }
         } else if current_leg.typ == jsonPathLegKey && self.type_code == JSONTypeCodeObject {
@@ -416,25 +417,25 @@ impl<'a> BinaryJSON<'a> {
                 let mut i = 0;
                 while i < elem_count && !json_finished(&buf, one) {
                     let elem = borrow_elem(&self, |b| b.object_get_val(i));
-                    buf = elem.extract_to(buf, &sub_path_expr, dup.as_deref_mut(), one);
+                    buf = elem.extract_to(buf, sub_path_expr, dup.as_deref_mut(), one);
                     i += 1;
                 }
             } else {
                 let child = borrow_opt(&self, |b| b.object_search_key(&current_leg.dot_key));
                 if let Some(child) = child {
-                    buf = child.extract_to(buf, &sub_path_expr, dup, one);
+                    buf = child.extract_to(buf, sub_path_expr, dup, one);
                 }
             }
         } else if current_leg.typ == jsonPathLegDoubleAsterisk {
             buf = self
                 .clone()
-                .extract_to(buf, &sub_path_expr, dup.as_deref_mut(), one);
+                .extract_to(buf, sub_path_expr, dup.as_deref_mut(), one);
             if self.type_code == JSONTypeCodeArray {
                 let elem_count = self.get_elem_count();
                 let mut i = 0;
                 while i < elem_count && !json_finished(&buf, one) {
                     let elem = borrow_elem(&self, |b| b.array_get_elem(i));
-                    buf = elem.extract_to(buf, path_expr, dup.as_deref_mut(), one);
+                    buf = elem.extract_to(buf, legs, dup.as_deref_mut(), one);
                     i += 1;
                 }
             } else if self.type_code == JSONTypeCodeObject {
@@ -442,7 +443,7 @@ impl<'a> BinaryJSON<'a> {
                 let mut i = 0;
                 while i < elem_count && !json_finished(&buf, one) {
                     let elem = borrow_elem(&self, |b| b.object_get_val(i));
-                    buf = elem.extract_to(buf, path_expr, dup.as_deref_mut(), one);
+                    buf = elem.extract_to(buf, legs, dup.as_deref_mut(), one);
                     i += 1;
                 }
             }

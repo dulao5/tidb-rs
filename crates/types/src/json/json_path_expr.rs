@@ -27,7 +27,7 @@
 use tidb_base::Error;
 use tidb_base::gofmt::Arg;
 
-use super::json_binary::{BinaryJSON, json_valid};
+use super::json_binary::BinaryJSON;
 use super::json_binary_functions::{quote_json_string, unquote_json_string};
 use super::json_constants::ErrInvalidJSONPath;
 use crate::gostd::atoi;
@@ -619,7 +619,7 @@ fn parse_json_path_member(s: &mut PathStream<'_>, p: &mut JSONPathExpression) ->
         quoted.extend_from_slice(dot_key);
         quoted.push(b'"');
 
-        if !json_valid(&quoted) {
+        if !valid_json_string(&quoted) {
             return false;
         }
         let dot_key = match unquote_json_string(&quoted[1..quoted.len() - 1]) {
@@ -659,4 +659,33 @@ pub(crate) fn is_ecmascript_identifier(s: &[u8]) -> bool {
         return false;
     }
     true
+}
+
+/// `json.Valid(b)` where `b` starts with `"`: one string literal, then only whitespace
+/// (the scanner's string states, without building the value).
+// go-std: encoding/json.Valid L2 (the scanner's string states only; the input starts with a quote)
+fn valid_json_string(b: &[u8]) -> bool {
+    let mut i = 1;
+    loop {
+        let Some(&c) = b.get(i) else {
+            return false;
+        };
+        i += 1;
+        match c {
+            b'"' => break,
+            b'\\' => match b.get(i) {
+                Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') => i += 1,
+                Some(b'u') => {
+                    if b.len() < i + 5 || !b[i + 1..i + 5].iter().all(u8::is_ascii_hexdigit) {
+                        return false;
+                    }
+                    i += 5;
+                }
+                _ => return false,
+            },
+            c if c < 0x20 => return false,
+            _ => {}
+        }
+    }
+    b[i..].iter().all(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
 }
