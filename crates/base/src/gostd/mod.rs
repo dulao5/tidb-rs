@@ -336,6 +336,7 @@ pub fn equal_fold(s: &str, t: &str) -> bool {
 
 pub mod conv;
 pub mod json;
+pub mod math;
 pub mod path;
 pub mod strconv;
 pub mod time;

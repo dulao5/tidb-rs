@@ -1,4 +1,4 @@
-//! `strconv` parsing used by the TOML decoder.
+//! `strconv` parsing used by the TOML decoder, and `FormatFloat` (Go's float formatting, `gofmt`).
 
 /// `strconv.ParseInt(s, 0, 64)` for the integer literals the TOML lexer produces (optional
 /// sign, `0x` / `0o` / `0b` prefixes, `_` separators already validated by the caller).
@@ -68,4 +68,11 @@ pub fn parse_float(s: &str) -> Result<f64, bool> {
         return Err(true);
     }
     Ok(v)
+}
+
+/// `strconv.FormatFloat(f, fmt, prec, bitSize)` (and `AppendFloat`, which appends the same
+/// bytes): fmt `b e E f g G x X`, bitSize 32 or 64.
+// go-std: strconv.FormatFloat L1
+pub fn format_float(f: f64, fmt: u8, prec: isize, bit_size: u8) -> String {
+    crate::gofmt::append_float(f, fmt, prec, bit_size)
 }
