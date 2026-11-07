@@ -44,7 +44,7 @@ planned = true
 blocks = ["D01.7", "D01.10"]
 
 [crate.tidb-kv]
-rank = 3
+rank = 5
 planned = true
 blocks = ["D07.0"]
 
@@ -56,95 +56,95 @@ blocks = ["D14.0"]
 [crate.tidb-codec]
 rank = 4
 planned = true
-blocks = ["D01.8"]
+blocks = ["D01.8"]   # util/codec
+
+[crate.tidb-tablecodec]
+rank = 6
+planned = true
+blocks = ["D01.11"]  # tablecodec、rowcodec（依赖 kv）
 
 [crate.tidb-sessionctx]
-rank = 5
+rank = 7
 planned = true
 blocks = ["D00.1", "D05.1", "D05.2"]
 
 [crate.tidb-expression]
-rank = 6
+rank = 8
 planned = true
-blocks = ["D08.1", "D08.2", "D08.12", "D08.11"]
+blocks = ["D08.1", "D08.2", "D08.8", "D08.12", "D08.11"]   # D08.8 CAST：框架的隐式转换机制（N0 评审）
 
 [crate.tidb-privilege]
-rank = 6
+rank = 8
 planned = true
 blocks = ["D04.1"]
 
 [crate.tidb-expr-compare]
-rank = 7
+rank = 9
 planned = true
 blocks = ["D08.4"]
 
 [crate.tidb-expr-arith]
-rank = 7
+rank = 9
 planned = true
 blocks = ["D08.5"]
 
 [crate.tidb-expr-string]
-rank = 7
+rank = 9
 planned = true
 blocks = ["D08.6"]
 
 [crate.tidb-expr-time]
-rank = 7
+rank = 9
 planned = true
 blocks = ["D08.7"]
 
-[crate.tidb-expr-cast]
-rank = 7
-planned = true
-blocks = ["D08.8"]
-
 [crate.tidb-expr-misc]
-rank = 7
+rank = 9
 planned = true
 blocks = ["D08.9"]
 
 [crate.tidb-expr-json]
-rank = 7
+rank = 9
 planned = true
 blocks = ["D08.10"]
 
 [crate.tidb-infoschema]
-rank = 7
+rank = 9
 planned = true
 blocks = ["D06.2", "D06.3", "D06.4", "D06.6"]
 
 [crate.tidb-observe]
-rank = 8
+rank = 10
 planned = true
 blocks = ["D14.2", "D15.2"]
 
 [crate.tidb-statistics]
-rank = 8
+rank = 10
 planned = true
 blocks = ["D11.1", "D11.2"]
 
 [crate.tidb-store]
-rank = 9
+rank = 11
 planned = true
 blocks = ["D07.1", "D07.2", "D07.3", "D07.4"]
 
 [crate.tidb-sessiontxn]
-rank = 9
+rank = 11
 planned = true
 blocks = ["D05.4"]
 
 [crate.tidb-expr-pushdown]
-rank = 10
+rank = 12
 planned = true
 blocks = ["D08.3"]
 
 [crate.tidb-domain]
-rank = 10
+rank = 12
 planned = true
 blocks = ["D06.5"]
 
 [crate.tidb-planner]
-rank = 11
+rank = 13
 planned = true
 blocks = [
   "D09.0", "D09.1", "D09.2", "D09.3", "D09.4", "D09.5", "D09.6", "D09.7", "D09.8", "D09.9",
@@ -154,7 +154,7 @@ blocks = [
 ]
 
 [crate.tidb-executor]
-rank = 12
+rank = 14
 planned = true
 blocks = [
   "D12.0", "D12.1", "D12.2", "D12.3", "D12.4", "D12.5", "D12.6", "D12.7", "D12.8", "D12.9",
@@ -162,14 +162,23 @@ blocks = [
 ]
 
 [crate.tidb-session]
-rank = 13
+rank = 15
 planned = true
 blocks = ["D05.3"]
 
 [crate.tidb-server]
-rank = 14
+rank = 16
 planned = true
 blocks = ["D03.1", "D03.2"]
+
+# ---------------------------------------------------------------- 不建 crate 的块
+# --blocks 检查时，P1–P5 与 EXC 的块必须在上面登记，或列在这里并写明原因。
+[unassigned]
+blocks = [
+  "EXC.B",   # 例外 B：cascades、代价模型 v1、静态分区，不移植
+  "D00.3",   # util/*：按需整文件移植，每个文件放进用到它的最底层 crate（N0 §3）
+]
+phases = ["P1", "P2", "P3", "P4", "P5", "EXC", "DONE"]
 
 # ---------------------------------------------------------------- legacy（PoC）
 # 被移植代码逐步替换；新代码不得依赖。下列包名与规划中的 crate 同名的，

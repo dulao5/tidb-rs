@@ -8,7 +8,8 @@ Reads layers.toml and `cargo metadata`, and fails if a workspace dependency edge
   * a layered crate depends on a legacy (PoC) crate;
   * a layered crate depends on a third_party/ crate not allowed in [third_party.users];
   * a workspace member is not registered, or a crate marked `planned` already exists;
-  * a block is assigned to two crates (with --blocks, also: unknown block IDs).
+  * a block is assigned to two crates; with --blocks, also unknown block IDs and blocks of
+    the listed phases that are in no crate and not in [unassigned].
 
 Legacy crates may depend on anything (they adopt ported code while being replaced).
 third_party/ crates are recognised by path.
@@ -63,9 +64,18 @@ def main():
             owner[b] = name
     if args.blocks:
         with open(args.blocks, newline="") as f:
-            known = {row["block"] for row in csv.DictReader(f, delimiter="\t")}
-        for b in sorted(set(owner) - known):
+            phase = {row["block"]: row["phase"] for row in csv.DictReader(f, delimiter="\t")}
+        for b in sorted(set(owner) - set(phase)):
             errors.append(f"layers.toml: block {b} ({owner[b]}) is not in {args.blocks}")
+        un = cfg.get("unassigned", {})
+        excluded = set(un.get("blocks", []))
+        for b in sorted(excluded & set(owner)):
+            errors.append(f"layers.toml: block {b} is both in [unassigned] and in crate {owner[b]}")
+        for b in sorted(excluded - set(phase)):
+            errors.append(f"layers.toml: [unassigned] block {b} is not in {args.blocks}")
+        wanted = set(un.get("phases", []))
+        for b in sorted(b for b, p in phase.items() if p in wanted and b not in owner and b not in excluded):
+            errors.append(f"layers.toml: block {b} (phase {phase[b]}) is in no crate and not in [unassigned]")
 
     if args.block_edges:
         return report_block_edges(args.block_edges, crates, owner)
@@ -74,6 +84,7 @@ def main():
     root = Path(meta["workspace_root"])
     members = set(meta["workspace_members"])
     pkgs = {p["name"]: p for p in meta["packages"] if p["id"] in members}
+    by_dir = {Path(p["manifest_path"]).parent.resolve(): n for n, p in pkgs.items()}
 
     def kind(name):
         p = pkgs[name]
@@ -101,9 +112,11 @@ def main():
             continue
         rank = crates[name]["rank"]
         for d in pkgs[name]["dependencies"]:
-            dep = d["name"]
-            if dep not in pkgs:
-                continue  # crates.io
+            # Workspace dependencies are path dependencies onto a workspace member. Match by
+            # path, not by name: a crates.io or out-of-tree crate may share a member's name.
+            dep = by_dir.get(Path(d["path"]).resolve()) if d.get("path") else None
+            if dep is None:
+                continue  # crates.io, git, or a path outside the workspace
             dk = kind(dep)
             label = f"{name} -> {dep}" + (f" ({d['kind']})" if d["kind"] else "")
             edges.append(label)

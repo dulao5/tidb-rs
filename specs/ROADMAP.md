@@ -1,6 +1,6 @@
 # ROADMAP：tidb-rs 只读阶段的功能块计划（v8.5.8）
 
-状态：P0 草案，团队评审中；2026-11-04 按 PR #1 评审意见修订。规则见 [CONSTITUTION.md](../CONSTITUTION.md)，方法见 [docs/porting/methodology.md](../docs/porting/methodology.md)，例外见 [exceptions/](exceptions/README.md)。
+状态：P0 草案，团队评审中；2026-11-04 按 PR #1 评审意见修订；2026-11-07 按 N0 评审拆分 D01.8（其余函数归属的微调未重新生成本文表格，以 tracker 为准）。规则见 [CONSTITUTION.md](../CONSTITUTION.md)，方法见 [docs/porting/methodology.md](../docs/porting/methodology.md)，例外见 [exceptions/](exceptions/README.md)。
 
 ## 1. 数据来源与口径
 
@@ -15,7 +15,7 @@
 
 | 阶段 | 块数 | Go 函数体行数 | Go 单测行数¹ | 内容 |
 |---|--:|--:|--:|---|
-| P1 地基 | 20 | 53.5k | 44.0k | 常量、类型、编码、chunk、元数据模型、上下文接口、系统变量与 SessionVars、表达式框架与核心函数 |
+| P1 地基 | 21 | 53.5k | 44.0k | 常量、类型、编码、chunk、元数据模型、上下文接口、系统变量与 SessionVars、表达式框架与核心函数 |
 | P2 读取链路 | 11 | 39.9k | 37.0k | meta/InfoSchema/table、schema 同步、kv driver、coprocessor、distsql、下推判定、协议层、执行统计结构 |
 | P3 优化器 | 29 | 77.7k | 32.6k | planbuilder、表达式改写、逻辑规则、物理优化、ranger、代价、基数估算、统计信息加载、hint |
 | P4 执行器 | 14 | 47.3k | 23.4k | 执行器框架与各算子、落盘容器、会话主流程 |
@@ -43,7 +43,7 @@
 | D09.0 planbuilder → D14.2 慢日志/语句摘要（P5） | 50 | 桩：不记录 |
 | D05.3 会话 → D04.1 权限（P5） | 46 | 权限检查接口先行，P5 之前沿用 PoC 的认证 |
 | D06.5 domain → D11.2 统计信息加载（P3） | 45 | 桩：domain 暂不启动统计信息后台任务 |
-| D07.3 distsql → D10.4 ranger（P3） | 23 | 只依赖 `ranger.Range` 类型，随 D07.3 一起移植该类型定义 |
+| D07.3 distsql → D10.4 ranger（P3） | 23 | 只依赖 `ranger.Range` 类型；按 N0 评审，类型定义（`types.go`、`ranger/context`、`Full*Range`）归 D00.1，P1 移植 |
 
 4. **例外要按依赖时间定稿**：P1 的 CAST、类型转换、Datum 大量引用 JSON 类型（D01.5，例外 A4），chunk 引用内存统计（D15.1，例外 A1）。所以 **A4 和 A1 的正式 spec 必须在 P1 开工前确认**，与 N1–N3 一起。
 
@@ -51,7 +51,7 @@
 
 "层"是阶段内部的依赖层次（按引用数 ≥ 10 的依赖计算）：L1 先做，同一层可以并行。P1 内部耦合最紧（类型、表达式、上下文互相引用），层次只作为参考，实际按"类型与接口先行、实现随后"分两三波推进。
 
-### P1（20 块，Go 函数体 53.5k 行）
+### P1（21 块，Go 函数体 53.5k 行）
 
 | 层 | 块 | 内容 | Go 行数 | 文件数 | 需要边界桩 / 接口的依赖（引用数 ≥ 10） |
 |---|---|---|--:|--:|---|
@@ -68,7 +68,8 @@
 | L3 | D01.3 | 时间与 Duration | 3,400 | 3 | — |
 | L3 | D08.2 | 函数注册、类型推导、常量折叠与传播、collation 推导 | 2,385 | 9 | — |
 | L4 | D01.4 | 类型转换（convert）与溢出、截断 | 883 | 3 | D01.5(63) |
-| L4 | D01.8 | 编码：codec、tablecodec、rowcodec（Q3：复用 TiKV，L3） | 4,649 | 11 | D01.5(12) |
+| L4 | D01.8 | 编码：util/codec（Q3：复用 TiKV，L3） | 1,913 | 5 | — |
+| L4 | D01.11 | 表与行编码：tablecodec、rowcodec（N0 评审从 D01.8 拆出，位于 kv 之上） | 2,736 | 6 | — |
 | L4 | D05.1 | 系统变量定义与校验（N8） | 1,027 | 8 | — |
 | L4 | D08.12 | 表达式工具（util.go 等，按引用归属后再拆） | 2,384 | 4 | — |
 | L4 | D08.5 | 算术、数学与逻辑运算 | 6,228 | 6 | — |
