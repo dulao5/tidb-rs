@@ -196,7 +196,7 @@ for w in workers {
 | 并发度语义 | 对每个并发度变量，构造查询断言实际 worker 数与 Go 相同（读 runtime stats 中的 concurrency 字段，与 Go 的 EXPLAIN ANALYZE 对比） |
 | 性能 | sysbench oltp_point_select / read_only QPS 不低于当前 PoC 基线（去掉交接后路径与 PoC 一样长）；TPC-H 22 条查询总耗时不高于 Go |
 | 两种拓扑 | Steal 拓扑每个 PR 跑全部测试；NoSteal 拓扑 nightly 跑同一套测试。可抓出两类只在一种拓扑下暴露的 bug：`current_thread` 下 task 同步等待自己 spawn 的 task 会死锁；依赖线程局部状态的代码只在工作窃取下出错 |
-| 停顿检测 | 测试和基准中打开停顿分类（`SliceConfig::classify_stalls` 或 `TIDB_RS_STALL_CLASSIFY=1`），在每次基准运行的**稳态窗口**内（去掉开头和结尾各 1 秒，`scripts/n3-bench.sh` 的 `STEADY_SKIP_START` / `STEADY_SKIP_END`），`on_cpu` 和 `blocked` 两类停顿（> 10ms）计数为 0，后台任务包括在内。`preempted`（被 OS 抢占）和 `off_cpu`（平台给不出切换次数时无法细分，如 macOS）只记录、不判定；窗口外（预热、所有客户端同时结束并断开时）的停顿单独报告。2026-11-07 按 PR #9、#10 评审修订：poll 按墙钟计时，CPU 超额订阅时被抢占也会算成停顿；Linux 上 320 线程过载的停顿集中在 sysbench 收尾的约 50ms 内（见 docs/bench/n3-runtime.md §4.1），那是连接关闭，不是语句执行 |
+| 停顿检测 | 测试和基准中打开停顿分类（`SliceConfig::classify_stalls` 或 `TIDB_RS_STALL_CLASSIFY=1`），在每次基准运行的**稳态窗口**内（去掉开头和结尾各 1 秒，`scripts/n3-bench.sh` 的 `STEADY_SKIP_START` / `STEADY_SKIP_END`），`on_cpu` 和 `blocked` 两类停顿（> 10ms）计数为 0，后台任务包括在内。`preempted`（被 OS 抢占）和 `off_cpu`（平台给不出切换次数时无法细分，如 macOS）只记录、不判定；窗口外（预热、所有客户端同时结束并断开时）的停顿单独报告。2026-11-07 按 PR #9、#10 评审修订：poll 按墙钟计时，CPU 超额订阅时被抢占也会算成停顿；Linux 上 320 线程过载的停顿集中在 sysbench 收尾的约 50ms 内（见 docs/bench/n3-runtime.md §4.1、§4.2）。确定的只有时间点，以及 bpftrace 抓到的 2 次 blocked 在 tonic 连接 task 的 h2 锁上；"收尾停顿来自连接关闭和 h2 锁排队、而非语句执行"仍是推测，待下面的 bpftrace 后续任务确认。macOS 上 CPU 超额订阅时，被抢占的停顿分布在整个稳态，不集中在收尾 |
 | 队列指标 | Q1 / Q2 / Q3 的深度与等待时间指标存在且在基准中有读数 |
 | cop 请求字段 | 用 mock TiKV 断言每个 cop 请求都带 priority、resource group name、override priority、task_id、busy_threshold、deadline，取值与 Go 对同一语句的请求相同 |
 | 过载 | 负载升到饱和点的 2 倍、5 倍时，吞吐不低于峰值的 90%，已接纳语句的 p99 有上界且不高于 Go（默认配置，即 Go 行为；AIMD 打开时另测） |
