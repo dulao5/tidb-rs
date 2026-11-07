@@ -25,8 +25,18 @@
 mod actions_rt;
 #[allow(missing_docs)]
 pub mod ast;
+/// Faithful ports of `pkg/parser/ast` pieces used by meta/model (block D02.3).
+pub mod ast_ddl;
+/// `pkg/parser/auth`: user and role identities (block D02.3).
+pub mod auth;
 #[allow(missing_docs)]
 mod charset;
+/// `pkg/parser/duration`: TTL job interval durations (block D02.3).
+pub mod duration;
+/// `pkg/parser/model`: `CIStr` and the schema enums (block D02.3).
+pub mod model;
+/// `pkg/parser/types`: `FieldType` and `EvalType` (block D02.3).
+pub mod types;
 #[rustfmt::skip]
 mod charset_gen;
 mod ctx;

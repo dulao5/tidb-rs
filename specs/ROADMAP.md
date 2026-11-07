@@ -15,7 +15,7 @@
 
 | 阶段 | 块数 | Go 函数体行数 | Go 单测行数¹ | 内容 |
 |---|--:|--:|--:|---|
-| P1 地基 | 21 | 53.5k | 44.0k | 常量、类型、编码、chunk、元数据模型、上下文接口、系统变量与 SessionVars、表达式框架与核心函数 |
+| P1 地基 | 22 | 53.5k | 44.0k | 常量、类型、编码、chunk、元数据模型、上下文接口、系统变量与 SessionVars、表达式框架与核心函数 |
 | P2 读取链路 | 11 | 39.9k | 37.0k | meta/InfoSchema/table、schema 同步、kv driver、coprocessor、distsql、下推判定、协议层、执行统计结构 |
 | P3 优化器 | 29 | 77.7k | 32.6k | planbuilder、表达式改写、逻辑规则、物理优化、ranger、代价、基数估算、统计信息加载、hint |
 | P4 执行器 | 14 | 47.3k | 23.4k | 执行器框架与各算子、落盘容器、会话主流程 |
@@ -51,7 +51,7 @@
 
 "层"是阶段内部的依赖层次（按引用数 ≥ 10 的依赖计算）：L1 先做，同一层可以并行。P1 内部耦合最紧（类型、表达式、上下文互相引用），层次只作为参考，实际按"类型与接口先行、实现随后"分两三波推进。
 
-### P1（21 块，Go 函数体 53.5k 行）
+### P1（22 块，Go 函数体 53.5k 行）
 
 | 层 | 块 | 内容 | Go 行数 | 文件数 | 需要边界桩 / 接口的依赖（引用数 ≥ 10） |
 |---|---|---|--:|--:|---|
@@ -62,7 +62,8 @@
 | L1 | D07.0 | kv 接口与 key 类型（pkg/kv） | 1,348 | 15 | — |
 | L1 | D08.1 | 表达式框架（Expression、Column、Constant、ScalarFunction、Schema、求值与向量化接口；按 N4） | 4,208 | 13 | EXC.B(33) |
 | L2 | D01.1 | Datum、FieldType 与类型辅助 | 3,906 | 13 | D01.5(21) |
-| L2 | D06.1 | 元数据模型（meta/model） | 3,176 | 10 | — |
+| L1 | D02.3 | parser 的 model、types、auth、duration 的忠实移植（D02.2 中只有 PoC 替身；D06.1 的前置，[spec](D02.3-parser-model-types/spec.md)） | 960 | 7 | — |
+| L2 | D06.1 | 元数据模型（meta/model；2026-11-07 DDL job 的写路径函数改归 X，371 → 152 个函数） | 1,475 | 10 | — |
 | L3 | D00.1 | 上下文接口骨架（sessionctx、planctx、exprctx、stmtctx、errctx、base 接口） | 2,773 | 29 | — |
 | L3 | D01.2 | Decimal（MyDecimal；流程试点） | 2,004 | 1 | — |
 | L3 | [D01.3](D01.3-time/spec.md) | 时间与 Duration | 3,400 | 3 | — |
