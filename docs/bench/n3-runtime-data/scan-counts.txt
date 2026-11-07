@@ -1,3 +1,4 @@
+# order per round: base, wired, go (3 rounds). Round-1 base shows 0: its scan query used AVG, which the PoC rejects; that run was redone with COUNT/SUM (121 scans, results.tsv).
   (0 full scans completed during the run)
   (122 full scans completed during the run)
   (715 full scans completed during the run)
