@@ -1,7 +1,7 @@
 [package]
 name = "tidb-types"
 version = "0.0.0"
-description = "Port of Go TiDB v8.5.8 pkg/types (blocks D01.2 MyDecimal, D01.3 time, D01.6 vector)"
+description = "Port of Go TiDB v8.5.8 pkg/types (blocks D01.2 MyDecimal, D01.3 time, D01.6 vector, D01.9 collation)"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,8 @@ publish.workspace = true
 log = "0.4"
 # Errors (M-ERR), Go fmt and the Go time package (time.Location, time.Time).
 tidb-base = { workspace = true }
+# pkg/parser/charset (block D02.2): collation registry and the GBK encoder of gbk_bin.
+tidb-parser = { workspace = true }
 # strconv.FormatFloat shortest digits: the same Ryū algorithm as Go's ftoaryu.go.
 ryu = "1.0"
 # MyDecimal.UnmarshalJSON: Go encoding/json semantics on top of serde_json (see gostd.rs).
@@ -22,6 +24,8 @@ serde_json = { workspace = true }
 criterion = "0.5"
 # The govec vectors are committed as .jsonl.gz.
 flate2 = "1.0"
+# govec collate: the key digests over all code points (SHA-256, as the Go generator).
+sha2 = "0.10"
 # Benchmarks run on the server's allocator.
 tikv-jemallocator = { workspace = true }
 

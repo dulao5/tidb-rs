@@ -3710,6 +3710,7 @@ version = "0.0.0"
 dependencies = [
  "cfgrammar",
  "flate2",
+ "log",
  "lrtable",
  "serde_json",
  "tidb-base",
@@ -3799,7 +3800,9 @@ dependencies = [
  "ryu",
  "serde",
  "serde_json",
+ "sha2",
  "tidb-base",
+ "tidb-parser",
  "tikv-jemallocator",
 ]
 

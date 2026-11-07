@@ -68,6 +68,7 @@
 | D41 | N0 §4 | 反向引用与全局注册表 | 只允许下沉、接口反转、边界桩三种处理；不合并 crate、不用 `dyn Any` 绕过；Go 的包级注册表由 `tidb-server` 启动时显式注册，不用 `inventory`/`linkme`/`ctor` | 建议 |
 | D43 | N3 3.6 Q3（PR #8 评审，取代 D20） | 阻塞池与 SLEEP / GET_LOCK | SLEEP 用 async 定时器实现，按 Go 的 sleep 循环语义（每 10ms 检查 KILL）移植，D08.9 落地时定具体写法，不占 Q3 的名额；GET_LOCK 本来就是 async；Q3 只放真正阻塞的工作（落盘 I/O 等），按类别分别限额（落盘、其他），一类占满不会饿死另一类。理由：用户发起大量 `SLEEP` 就能占满共用的阻塞池，饿死落盘 I/O，内存降不下来 | 采纳（协调人 2026-11-07） |
 | D42 | N0 §5 | PoC crate | 列为 legacy，新代码不得依赖；与正式 crate 同名的 5 个在 D07.0 前改名为 `poc-*`、移到 `crates/poc/`（只做机械改名的 PR） | 建议 |
+| D44 | 宪章第一条 2（PR #18 评审） | 已移植的上游修复登记 | 移植上游修复（v8.5.8 之后 master 修复、未回移到 release-8.5 的安全或数据正确性问题）时：代码标 `// go-fix: pingcap/tidb@<commit> #<PR>`；块 spec §3 写明与 v8.5.8 的差异；govec 链接打过修复的 TiDB 副本（tracker `govec/fixes`、`scripts/govec-fixes.sh`），文件头 `fixes` 列出已应用的修复；每个修复登记在本条末尾。不需要开 block issue。已移植：pingcap/tidb#67149（commit dfda1fd3e8，utf8mb4_0900_ai_ci 在 U+2CEA1 上越界 panic，D01.9） | 采纳（协调人 2026-11-07，Lucky 评审） |
 
 ## 三、确认之后
 
