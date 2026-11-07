@@ -92,6 +92,6 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: cargo test --locked -p tidb-types -p tidb-base -p tidb-memory -p tidb-parser
+        run: cargo test --locked -p tidb-types -p tidb-base -p tidb-memory -p tidb-parser -p tidb-model
       - name: test (release-checked)
         run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory

@@ -63,7 +63,7 @@
 | L1 | D08.1 | 表达式框架（Expression、Column、Constant、ScalarFunction、Schema、求值与向量化接口；按 N4） | 4,208 | 13 | EXC.B(33) |
 | L2 | D01.1 | Datum、FieldType 与类型辅助 | 3,906 | 13 | D01.5(21) |
 | L1 | D02.3 | parser 的 model、types、auth、duration 的忠实移植（D02.2 中只有 PoC 替身；D06.1 的前置，[spec](D02.3-parser-model-types/spec.md)） | 960 | 7 | — |
-| L2 | D06.1 | 元数据模型（meta/model；2026-11-07 DDL job 的写路径函数改归 X，371 → 152 个函数） | 1,475 | 10 | — |
+| L2 | [D06.1](D06.1-model/spec.md) | 元数据模型（meta/model；2026-11-07 DDL job 的写路径函数改归 X，371 → 153 个函数。Part 1：Go-JSON 层、schema 结构体与 139 个函数；Part 2：`job.go`、`reorg.go` 的 13 个函数与 `ColumnNeedRestoredData`） | 1,475 | 10 | — |
 | L3 | D00.1 | 上下文接口骨架（sessionctx、planctx、exprctx、stmtctx、errctx、base 接口） | 2,773 | 29 | — |
 | L3 | D01.2 | Decimal（MyDecimal；流程试点） | 2,004 | 1 | — |
 | L3 | [D01.3](D01.3-time/spec.md) | 时间与 Duration | 3,400 | 3 | — |
@@ -152,7 +152,7 @@
 | 层 | 块 | 内容 | Go 行数 | 文件数 | 需要边界桩 / 接口的依赖（引用数 ≥ 10） |
 |---|---|---|--:|--:|---|
 | L1 | D03.2 | HTTP status 接口与 handler | 3,445 | 12 | X(46) |
-| L1 | D04.1 | 权限检查与认证 | 3,557 | 8 | D01.5(20) |
+| L1 | D04.1 | 权限检查与认证。注：`crates/mysql-protocol` 中 PoC 手写的 scramble（`auth.rs`）要换成 `parser/auth` 认证插件（`mysql_native_password.go`、`caching_sha2.go`、`tidb_sm3.go`）的忠实移植（D02.3 spec §2） | 3,557 | 8 | D01.5(20) |
 | L1 | D06.6 | infoschema 内存表定义与 cluster 表 | 1,336 | 7 | — |
 | L1 | D08.6 | 字符串函数（含 like、regexp、字符集转换） | 8,001 | 9 | — |
 | L1 | D08.7 | 时间函数 | 8,231 | 2 | — |

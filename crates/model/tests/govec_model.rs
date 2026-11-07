@@ -328,6 +328,17 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<String>) {
     match op {
         "roundtrip" => roundtrip(s(&a[0]), None, &gs_bytes(&a[1])),
         "into" => roundtrip(s(&a[0]), Some(&gs_bytes(&a[1])), &gs_bytes(&a[2])),
+        "marshal_time" => {
+            let loc = tidb_base::gostd::time::fixed_zone("", i(&a[2]) as i32);
+            let so = StatsOptions {
+                stats_window_settings: Some(Box::new(StatsWindowSettings {
+                    window_start: tidb_base::gostd::time::unix(i(&a[0]), i(&a[1])).in_loc(&loc),
+                    ..StatsWindowSettings::default()
+                })),
+                ..StatsOptions::default()
+            };
+            (mo(so.marshal_json()), None)
+        }
         "marshal_nan" => {
             let mut t = table(&a[0]);
             let f = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][i(&a[1]) as usize];

@@ -90,7 +90,7 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
 ## 4. 已知差异
 
 1. `[]*T` 中的 `null` 元素：Go 得到 nil 指针，重新编码为 `null`；Rust 按值持有元素，得到零值。Go 写出的 meta 中不会有 `null` 元素（`TableInfo.Columns` 等由 DDL 代码填写）。生成器的随机值不产生 `null` 元素。
-2. `time.Time` 的 `UnmarshalJSON` 错误消息按 Go 的 `parseStrictRFC3339` 生成，`time.ParseError` 的个别措辞与 Go 不完全相同时，以向量为准（当前向量全部一致）。
+2. `time.Time.UnmarshalJSON`：Go 解析引号之间的**原始字节**，不处理 JSON 转义（go.dev/issue/47353，Go 自己的 TODO）；Rust 用解码后的字符串。只有时间串里写了 JSON 转义（如 `\u0032024-…`）时结果不同，Go 写出的 JSON 不会这样。其余与 Go 相同：Go 1.25 的 `parseStrictRFC3339` 在快速路径失败时就是 `time.Parse(RFC3339)`（严格复查被禁用，所以一位数的小时、逗号小数点、`+24:00` 都被接受），这条回退连同 `ParseError` 的消息一起移植了（`tidb_base::gostd::time`）。数字时区用固定时区而不是 `Local`，`MarshalJSON` 的输出相同。
 3. `Clone` / `Copy`：Go 浅拷贝共享指针，Rust 复制（3.5）。`DBInfo.Copy` 复制表信息而不是共享，标为 L2。
 4. `TableInfo.GetNonTempColumns` 的结果顺序：Go 遍历 map，顺序随机；Rust 按列名排序（M-MAPORDER）。向量排序后比较。
 5. JSON 语法错误的消息文本不移植（D02.3 3.1）。
@@ -98,9 +98,11 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
 ## 5. 验收
 
 - converge：`matched 139/153`，缺的 14 个是第 2 节列出的 Part 2 函数，tracker 的 `model` 领域把它们登记为豁免并写明理由。
-- govec `model` 领域 8,990 条记录，arm64 和 amd64 都回放通过：
-  - roundtrip 3,866 条：从 v8.5.8 集群导出的 866 份 meta（857 张表、9 个库；DDL 见 tracker `govec/domains/testdata/model_cluster_ddl.sql`，覆盖全部列类型、分区、placement、TTL、视图、序列、外键、check 约束、资源组），每个结构体的随机值 1,500 份，二者的变异 1,500 份（删键、重复键、改大小写、未知键、错误类型、超范围数字、`null`）；
+- govec `model` 领域 9,053 条记录，arm64 和 amd64 都回放通过：
+  - roundtrip 3,918 条：从 v8.5.8 集群导出的 866 份 meta（857 张表、9 个库；DDL 见 tracker `govec/domains/testdata/model_cluster_ddl.sql`，覆盖全部列类型、分区、placement、TTL、视图、序列、外键、check 约束、资源组），每个结构体的随机值 1,500 份，二者的变异 1,500 份（删键、重复键、改大小写、未知键、错误类型、超范围数字、`null`）；
+  - 时间 68 条：`Time.UnmarshalJSON` 的各种合法与非法串（含 Go 宽松接受的形式）、`Time.MarshalJSON` 的年份与时区范围错误；
   - into 300 条：解码到已有值；
-  - 方法 3,800 余条：表、列、索引、分区、placement、资源组、外键和其他函数；
-  - 其中 603 条 Go 返回错误。
+  - 方法 3,800 余条：表、列、索引、分区、placement、资源组、外键和其他函数，以及 Go 测试 `TestDefaultValue`、`TestPlacementSettingsString` 的用例；
+  - NaN / ±Inf 默认值的 `Marshal` 错误；
+  - 其中 640 条 Go 返回错误。
 - clippy `-D warnings`、fmt、`check_layers --blocks`、`cargo test --workspace`。

@@ -43,7 +43,7 @@ L2：`DBInfo.Copy`（复制而不是共享表）、`IndexInfo.ConditionExpr`（P
 
 ### 进行中 / 剩余（按顺序）
 
-1. 新加的 `sys/time`（57 条 roundtrip）和 `marshal_time` op：tracker 端已生成向量；Rust 端要在 `govec_model.rs` 加 `marshal_time`（`unix(sec, nsec).in_loc(&fixed_zone("", off))` 放进 `StatsOptions.stats_window_settings.window_start`），复制新向量，跑通。
+1. ~~`sys/time` 与 `marshal_time`~~：完成，arm64 9,053 条全部通过。
 2. tracker：`go test ./...`（`TestDomains` 确定性、`TestStorage`），提交向量；开 tracker PR，取 CI 的 amd64 artifact，复制到 tidb-rs，写 `crates/model/tests/vectors/v8.5.8/README.md`（tracker commit + sha256）。
 3. tidb-rs：CI arm64 job 加 `-p tidb-model`；`docs/porting/mappings.md` 加 M-BYTES（JSON 来的值用 `String`，可能是用户原始字节的用 `Vec<u8>`）；ROADMAP D06.1 行更新（153 个函数，Part 1 状态）；D04.1 行加注：mysql-protocol 中 PoC 手写的 scramble 要换成 `parser/auth` 认证插件的忠实移植；`tasks.md`。
 4. fmt / clippy（`tools/first-party.sh`）、`cargo test --workspace`、`check_layers --blocks`；删除 `target/`；开 tidb-rs PR（中文）。
