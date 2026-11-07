@@ -1,13 +1,17 @@
 [package]
 name = "tidb-types"
 version = "0.0.0"
-description = "Port of Go TiDB v8.5.8 pkg/types (block D01.2: MyDecimal)"
+description = "Port of Go TiDB v8.5.8 pkg/types (blocks D01.2 MyDecimal, D01.3 time)"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Logging of terror.Log / logutil (Go: zap).
+log = "0.4"
+# Errors (M-ERR), Go fmt and the Go time package (time.Location, time.Time).
+tidb-base = { workspace = true }
 # strconv.FormatFloat shortest digits: the same Ryū algorithm as Go's ftoaryu.go.
 ryu = "1.0"
 # MyDecimal.UnmarshalJSON: Go encoding/json semantics on top of serde_json (see gostd.rs).

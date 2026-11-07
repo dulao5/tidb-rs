@@ -30,3 +30,20 @@ input first; chained ops pass the first step's object, not a re-parsed string; `
 ops write into the object `from_string(args[0])` left behind, without resetting it).
 Replayed by `crates/types/tests/govec_decimal.rs`. To update, copy both `.gz` files from a
 newer tracker commit and update the commit and sha256 above.
+
+## time (block D01.3)
+
+`<target>/time.jsonl.gz` are copied unmodified from tidb-rs-tracker
+`vectors/v8.5.8/<target>/time.jsonl.gz` (branch `govec/time-D01.3`): 101,814 records of
+`pkg/types` time.go, core_time.go and fsp.go plus the Go `time` package behaviour they
+use. The TZif files of the zones used are inside the file (`zone` records), so the replay
+does not depend on the machine's tz database. The two targets differ only where
+`ParseTimeFromFloat64` converts NaN / ±Inf / out-of-range floats (mapping rule `M-F2I`).
+Replayed by `tests/govec_time.rs`.
+
+| | |
+|---|---|
+| tracker commit | `c70bca6` (branch `govec/time-D01.3`) |
+| `amd64/time.jsonl.gz` sha256 | `19abff457405d74cf7747d857dee0c1cd67693900ef817e59f70aa7af211f098` (CI linux/amd64, GOAMD64=v1) |
+| `arm64/time.jsonl.gz` sha256 | `7047d0331fdd6921111327b494d97205ee253241a6532bef1204d17dc8ed6887` |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261107); the targets differ in 3 records (`parse_time_float64` of NaN, +Inf, 1e19) |

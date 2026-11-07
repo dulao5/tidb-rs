@@ -65,7 +65,7 @@
 | L2 | D06.1 | 元数据模型（meta/model） | 3,176 | 10 | — |
 | L3 | D00.1 | 上下文接口骨架（sessionctx、planctx、exprctx、stmtctx、errctx、base 接口） | 2,773 | 29 | — |
 | L3 | D01.2 | Decimal（MyDecimal；流程试点） | 2,004 | 1 | — |
-| L3 | D01.3 | 时间与 Duration | 3,400 | 3 | — |
+| L3 | [D01.3](D01.3-time/spec.md) | 时间与 Duration | 3,400 | 3 | — |
 | L3 | D08.2 | 函数注册、类型推导、常量折叠与传播、collation 推导 | 2,385 | 9 | — |
 | L4 | D01.4 | 类型转换（convert）与溢出、截断 | 883 | 3 | D01.5(63) |
 | L4 | D01.8 | 编码：util/codec（Q3：复用 TiKV，L3） | 1,913 | 5 | — |

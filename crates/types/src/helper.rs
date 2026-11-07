@@ -16,6 +16,18 @@ pub(crate) fn is_digit(c: u8) -> bool {
     c.is_ascii_digit()
 }
 
+/// Returns true if the given byte is an ASCII punctuation character (printable and non-alphanumeric).
+// go: isPunctuation L1
+pub(crate) fn is_punctuation(c: u8) -> bool {
+    (0x21..=0x2F).contains(&c)
+        || (0x3A..=0x40).contains(&c)
+        || (0x5B..=0x60).contains(&c)
+        || (0x7B..=0x7E).contains(&c)
+}
+
+/// A byte predicate (Go `func(byte) bool`).
+pub(crate) type Pattern = fn(u8) -> bool;
+
 const MAX_UINT: u64 = u64::MAX;
 const UINT_CUT_OFF: u64 = MAX_UINT / 10 + 1;
 const INT_CUT_OFF: u64 = i64::MAX as u64 + 1;

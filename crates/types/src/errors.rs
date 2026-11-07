@@ -146,3 +146,78 @@ pub const ERR_TRUNCATED_WRONG_VAL: Error =
 pub(crate) fn terror_log(err: Result<(), Error>) {
     let _ = err;
 }
+
+// ---------------------------------------------------------------------------------------
+// The errors of `pkg/types/errors.go` as `tidb_base::Error` (D00.2, mapping rule M-ERR),
+// with Go's identifiers (M-GONAME). The time code (D01.3) returns these; MyDecimal still
+// returns the stub `Error` above until D01.1 ports `errors.go` whole (moving MyDecimal's
+// hot error paths to the boxed `tidb_base::Error` needs its own benchmark review).
+
+#[allow(non_upper_case_globals)]
+mod go_errors {
+    use std::sync::LazyLock;
+
+    use tidb_base::dbterror::{ClassExecutor, ClassTypes};
+    use tidb_base::{Error, errno, mysql};
+
+    /// The type names used in error messages.
+    pub const DateTimeStr: &str = "datetime";
+    /// The type names used in error messages.
+    pub const DateStr: &str = "date";
+    /// The type names used in error messages.
+    pub const TimeStr: &str = "time";
+    /// The type names used in error messages.
+    pub const TimestampStr: &str = "timestamp";
+
+    /// ErrTruncated is returned when data has been truncated during conversion.
+    pub static ErrTruncated: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::WarnDataTruncated));
+    /// ErrOverflow is returned when data is out of range for a field type.
+    pub static ErrOverflow: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrDataOutOfRange));
+    /// ErrWarnDataOutOfRange is returned when the value in a numeric column that is outside the permissible range of the column data type.
+    /// See https://dev.mysql.com/doc/refman/5.5/en/out-of-range-and-overflow.html for details
+    pub static ErrWarnDataOutOfRange: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrWarnDataOutOfRange));
+    /// ErrDatetimeFunctionOverflow is returned when the calculation in datetime function cause overflow.
+    pub static ErrDatetimeFunctionOverflow: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrDatetimeFunctionOverflow));
+    /// ErrInvalidYearFormat is returned when the input is not a valid year format.
+    pub static ErrInvalidYearFormat: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrInvalidYearFormat));
+    /// ErrTruncatedWrongVal is returned when data has been truncated during conversion.
+    pub static ErrTruncatedWrongVal: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTruncatedWrongValue));
+    /// ErrWrongValue is returned when the input value is in wrong format.
+    pub static ErrWrongValue: LazyLock<Error> = LazyLock::new(|| {
+        ClassTypes.new_std_err(
+            mysql::ErrTruncatedWrongValue,
+            mysql::MySQLErrName
+                .get(&mysql::ErrWrongValue)
+                .expect("ErrWrongValue has a message"),
+        )
+    });
+    /// ErrIncorrectDatetimeValue is returned when the input is not valid date time value.
+    pub static ErrIncorrectDatetimeValue: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrIncorrectDatetimeValue));
+    /// ErrTimestampInDSTTransition is returned if the timestamp is in a Daylight Saving Time transition
+    pub static ErrTimestampInDSTTransition: LazyLock<Error> =
+        LazyLock::new(|| ClassExecutor.new_std(errno::ErrTimeStampInDSTTransition));
+}
+
+pub use go_errors::*;
+
+impl From<Error> for tidb_base::Error {
+    /// A MyDecimal (stub) error as the `tidb_base::Error` of the same class and code: what
+    /// Go's time code returns when it passes a MyDecimal error through (`ParseTimeFromDecimal`).
+    // glue: stub error -> tidb_base::Error, until D01.1 replaces the stub
+    fn from(e: Error) -> tidb_base::Error {
+        match e.code() {
+            1265 => ErrTruncated.clone(),
+            1690 => ErrOverflow.clone(),
+            1365 => tidb_base::dbterror::ClassTypes.new_std(tidb_base::mysql::ErrDivisionByZero),
+            8029 => tidb_base::dbterror::ClassTypes.new_std(tidb_base::errno::ErrBadNumber),
+            _ => tidb_base::Error::plain(e.to_string()),
+        }
+    }
+}
