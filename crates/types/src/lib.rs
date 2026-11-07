@@ -14,6 +14,7 @@ pub mod etc;
 pub mod fsp;
 pub mod gostd;
 mod helper;
+pub mod json;
 mod jsoniter;
 pub mod mydecimal;
 #[cfg(test)]

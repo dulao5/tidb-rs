@@ -368,6 +368,10 @@ impl JsonParser<'_> {
     // go-std: encoding/json.getu4 L1
     fn hex4(&mut self) -> Option<u32> {
         let h = self.b.get(self.i..self.i + 4)?;
+        // Four hex digits exactly (`from_str_radix` alone would accept a leading `+`).
+        if !h.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
         let s = std::str::from_utf8(h).ok()?;
         let v = u32::from_str_radix(s, 16).ok()?;
         self.i += 4;

@@ -201,6 +201,12 @@ mod go_errors {
     /// ErrIncorrectDatetimeValue is returned when the input is not valid date time value.
     pub static ErrIncorrectDatetimeValue: LazyLock<Error> =
         LazyLock::new(|| ClassTypes.new_std(errno::ErrIncorrectDatetimeValue));
+    /// ErrJSONBadOneOrAllArg is returned when the one_or_all argument isn't 'one' or 'all'.
+    pub static ErrJSONBadOneOrAllArg: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrJSONBadOneOrAllArg));
+    /// ErrJSONVacuousPath is returned when path is empty
+    pub static ErrJSONVacuousPath: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrJSONVacuousPath));
     /// ErrTimestampInDSTTransition is returned if the timestamp is in a Daylight Saving Time transition
     pub static ErrTimestampInDSTTransition: LazyLock<Error> =
         LazyLock::new(|| ClassExecutor.new_std(errno::ErrTimeStampInDSTTransition));
