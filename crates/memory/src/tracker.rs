@@ -132,6 +132,9 @@ pub struct Tracker {
     /// Go `IsRootTrackerOfSess`.
     pub is_root_tracker_of_sess: AtomicBool,
     is_global: AtomicBool,
+    /// A1: consumption recorded with [`Tracker::record`] grew since the last
+    /// [`Tracker::checkpoint`] of this tracker (Go's `bs > 0`).
+    grew: AtomicBool,
 }
 
 impl std::fmt::Debug for Tracker {
@@ -163,6 +166,7 @@ impl Default for Tracker {
             session_id: AtomicU64::new(0),
             is_root_tracker_of_sess: AtomicBool::new(false),
             is_global: AtomicBool::new(false),
+            grew: AtomicBool::new(false),
         }
     }
 }
@@ -185,6 +189,7 @@ pub fn init_tracker(t: &Tracker, label: isize, bytes_limit: i64, action: Option<
     }
     t.max_consumed.store(0, SeqCst);
     t.is_global.store(false, SeqCst);
+    t.grew.store(false, SeqCst);
 }
 
 /// Go `NewTracker`: a memory tracker. `bytes_limit <= 0` means no limit.
@@ -470,31 +475,49 @@ impl Tracker {
         if bs == 0 {
             return Ok(());
         }
-        let walk = self.walk(bs);
+        let walk = self.walk(bs, Grown::Keep);
         if bs > 0 { walk.act() } else { Ok(()) }
     }
 
     /// The accounting half of `Consume` (A1 3.3 item 2): adds `bs` along the parent chain and
     /// updates `MaxConsumed`, without running any action. Never fails; called by
     /// [`crate::TrackedAlloc`]. The actions run at the next [`Tracker::checkpoint`].
+    ///
+    /// When `bs > 0`, marks every tracker on the path as grown, so that a checkpoint on any
+    /// of them runs the actions once (Go runs them on `Consume` with `bs > 0`).
+    ///
+    /// Takes each ancestor's parent lock in turn and sets `tidb_server_memory_usage` for the
+    /// labels of `MetricsTypes`: code on the allocation path must not hold a tracker lock.
     // glue: A1 3.3 hot path (the loop of Go Consume, without the actions)
     pub fn record(self: &Arc<Self>, bs: i64) {
         if bs != 0 {
-            let _ = self.walk(bs);
+            let _ = self.walk(bs, if bs > 0 { Grown::Mark } else { Grown::Keep });
         }
     }
 
-    /// The action half of `Consume` (A1 3.3 item 3), at the place where Go calls `Consume`
-    /// with a positive delta: updates the Top1 session, returns the kill error, then runs the
-    /// hard-limit and the soft-limit action of the topmost exceeding trackers, judged on the
-    /// current consumption (`TrackedAlloc` has already recorded it).
+    /// The action half of `Consume` (A1 3.3 item 3): if consumption recorded through this
+    /// tracker or a descendant grew since its last checkpoint (Go's `bs > 0`), updates the
+    /// Top1 session, returns the kill error, then runs the hard-limit and the soft-limit
+    /// action of the topmost exceeding trackers, judged on the current consumption. Without
+    /// growth it does nothing: an over-limit operator that only releases memory does not
+    /// re-run the chain (which would escalate through the fallbacks after a spill); Go
+    /// escalates only on the next growth too. Peaks between two checkpoints are not seen
+    /// (A1 3.3, deviation).
     // glue: A1 3.3 checkpoint (the tail of Go Consume for bs > 0)
     pub fn checkpoint(self: &Arc<Self>) -> Result<(), Error> {
-        self.walk(0).act()
+        if !self.grew.swap(false, SeqCst) {
+            return Ok(());
+        }
+        // One growth runs the chain once (Go: one Consume(+) calls tryAction once). The
+        // ancestors' flags were set by the same growth, so clear them on the way up; a later
+        // ancestor checkpoint then does nothing. The reverse order (ancestor first) cannot
+        // clear the descendants' flags, so the memory checkpoint is called on the operator
+        // tracker that TrackedAlloc records into (Go calls Consume on the leaf; A1 3.3).
+        self.walk(0, Grown::Clear).act()
     }
 
     // go-part: Tracker.Consume (the loop up the parent chain; bs == 0 only evaluates)
-    fn walk(self: &Arc<Self>, bs: i64) -> Walk {
+    fn walk(self: &Arc<Self>, bs: i64, grown: Grown) -> Walk {
         let mut w = Walk::default();
         let mut next = Some(self.clone());
         while let Some(tracker) = next {
@@ -522,6 +545,11 @@ impl Tracker {
                 w.root_exceed_for_soft_limit = Some(tracker.clone());
             }
 
+            match grown {
+                Grown::Mark if !tracker.grew.load(SeqCst) => tracker.grew.store(true, SeqCst),
+                Grown::Clear => tracker.grew.store(false, SeqCst),
+                _ => {}
+            }
             if bs != 0 {
                 loop {
                     let max_now = tracker.max_consumed.load(SeqCst);
@@ -1053,4 +1081,15 @@ pub fn MetricsTypes(label: isize) -> Option<[&'static str; 3]> {
         LabelForGlobalAnalyzeMemory => Some(["analyze", "inuse", "released"]),
         _ => None,
     }
+}
+
+/// What a walk up the parent chain does with the A1 "grew since the last checkpoint" flags.
+#[derive(Clone, Copy)]
+enum Grown {
+    /// Leave them (evaluation only).
+    Keep,
+    /// `record` of a growth: set them.
+    Mark,
+    /// A checkpoint that runs the chain: clear the ancestors' (its own is already taken).
+    Clear,
 }

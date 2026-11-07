@@ -262,6 +262,9 @@ v8.5.8 中的事实：
 1. **`TrackedAlloc`**（`M-MEM`）：所有大块内存通过一个实现 `allocator_api2::Allocator` 的 `TrackedAlloc` 分配，它把字节数记到 tracker 后转发给 jemalloc，自己不管理内存（`Vec<u8, TrackedAlloc>`、`hashbrown::HashMap<_, _, _, TrackedAlloc>`、bump arena 都能用）。`TrackedAlloc` 持有一个 tracker 叶子节点的句柄，分配/释放时把**实际字节数**记进去。
 2. **热路径只做原子加**：分配路径中不执行动作、不打日志、不加锁。每个线程按句柄批量累计，满 64KiB（或释放）时才沿父链传播；越过硬/软限额时只在对应节点上置"已超限"标志。批量误差上界 = 64KiB × 该语句线程数，在验收中计入。
 3. **检查点执行动作链**：`mem.checkpoint() -> Result<()>` 检查标志，按 Go `Consume` 的顺序执行：先 `HandleSignal`（kill），再硬限额动作链，再软限额动作链。动作若是 `PanicOnExceed` 就发 `QueryMemoryExceeded` 信号并返回 8175；若是 spill 就置落盘标志；若是 LOG 就打 8001 文本的日志。检查点放在 Go 中正向 `Consume` 的同一位置，再加上 `exec::next` 前后——所以"在哪一步报错"与 Go 相同，只是报错依据的是实际字节数。
+   - **实现与偏离**（2026-11-07，D15.1 及其评审）：不设"已超限"标志，检查点按当时的消耗重新沿父链判断；另设"自上次检查点后有增长"标志（`record` 在 `bs > 0` 时沿路径置位，`checkpoint` 读出并清零），没有增长就不执行动作链，对应 Go 只在 `Consume` 的 `bs > 0` 时执行。否则一个超限但正在释放内存的算子（如刚落盘完）会在每个 chunk 的检查点都执行动作链，直接沿 fallback 升级到取消查询，而 Go 要等下一次增长才升级。
+   - **同一次增长只执行一次**（PR #13 评审）：`checkpoint` 决定执行时，沿父链把祖先的"有增长"标志一并清零，所以叶子先、祖先后的两次检查点只执行一次动作链（Go 一次 `Consume(+)` 只调用一次 `tryAction`）。反过来的顺序（祖先先）清不到后代的标志，因此**规则：内存检查点只在 `TrackedAlloc` 记账的那个算子 tracker 上调用**（对应 Go 在叶子上调 `Consume`），D00.1 接线 `ExecCtx::checkpoint()` 时照此实现。
+   - **偏离：两次检查点之间的瞬时峰值看不到。** 分配后在下一个检查点之前又释放的内存，Go 的 `Consume` 会在峰值时执行动作，这里看不到。只涉及 `TrackedAlloc` 记账的部分（Go 本来就不记这部分，按估算记），作为 A1 的偏离接受。
 4. **归属**：缓冲区记在分配它的 tracker 上；`Chunk::swap_columns`、把 chunk 交给父算子等"所有权转移"时改挂到接收方 tracker（一次原子减一次原子加），对应 Go 在 `SwapColumns` 后 `Consume(delta)` 的惯例，使 EXPLAIN ANALYZE 的按算子数值归属与 Go 一致。
 5. **磁盘**：`DiskTracker` 同一棵树，落盘文件写入/删除时记账；文件句柄由 RAII 持有，Drop 删除。
 
