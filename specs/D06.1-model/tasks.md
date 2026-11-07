@@ -10,6 +10,6 @@
 | T4 | govec `model` 领域 | `go test ./...` 通过；9,053 条记录 | 完成 |
 | T5 | `tidb-model` 手写方法 139 个 | converge `matched 139/153`，缺的 14 个是 Part 2 | 完成 |
 | T6 | Rust 回放 `tests/govec_model.rs` | arm64 全部通过 | 完成 |
-| T7 | amd64 向量：取 tracker PR #13 的 CI artifact | x86_64 CI 通过 | 进行中 |
+| T7 | amd64 向量：取 tracker PR #13 的 CI artifact | x86_64 CI 通过 | 完成。两个目标的记录相同 |
 | T8 | mappings.md M-BYTES；ROADMAP（D06.1 行、D04.1 的 scramble 注记）；CI arm64 job 加 `tidb-model` | — | 完成 |
 | T9 | Part 2：`job.go`、`reorg.go` 的 13 个函数（`errors.Error` 的 JSON、`json.RawMessage`），`ColumnNeedRestoredData`（等 D01.9 的 collate） | converge `matched 153/153` | 未开始 |
