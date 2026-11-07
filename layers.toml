@@ -25,7 +25,6 @@ blocks = ["D02.1", "D02.2"]
 
 [crate.tidb-memory]
 rank = 1
-planned = true
 blocks = ["D15.1"]   # A1
 
 # N3 runtime: ExecPool and topologies, checkpoint time slice, poll-stall detection, Q1

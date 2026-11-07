@@ -180,7 +180,7 @@
 | D12.14 | X | 写路径执行器、DDL、ANALYZE、IMPORT、BRIE、admin（由 Go TiDB 承担或后续阶段） | 15,221 |
 | D13.1 | EXC | Plan Cache（A3） | 2,369 |
 | D14.1 | DONE | metrics | 2,357 |
-| D15.1 | EXC | 内存统计与配额（A1） | 819 |
+| [D15.1](D15.1-memory/spec.md) | EXC | 内存统计与配额（A1） | 819 |
 | DEF.MPP | DEFER | TiFlash / MPP 计划与执行 | 5,296 |
 | EXC.B | EXC | 废弃或非默认路径：cascades（旧/新）、代价模型 v1、静态分区 | 5,158 |
 | X | X | DDL、lightning、BR、disttask、TTL、import、mock store、测试工具等 | 141,776 |
