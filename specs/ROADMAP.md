@@ -192,6 +192,7 @@
 4. **工具**：govec（Go 测试用例表 → 输入输出向量；已完成第一版，tracker PR #1）、来源标注抽取与 lint（D01.2 试点的 `scripts/converge.py` 迁入 tracker，并输出 `rs_provenance.tsv`）、并排对照生成、`go_renames.tsv`。
 5. **tracker 支持块**：`blocks.tsv`（块定义与阶段）、`func_blocks.tsv`（函数 → 块）、块依赖表（已完成）；按块统计移植覆盖率、测试行数和测试归属的报表；`stubs.tsv` 记录桩的三类。
 6. **PoC 代码定性**：逐文件标注 `glue: poc`，列出各自将被哪个块替换。
+7. **crate 分层**（[N0](exceptions/N0-crate-layering/spec.md)）：每个块所在的 crate 和 crate 之间的依赖方向以仓库根目录的 `layers.toml` 为准，CI 检查。
 
 ## 6. 维护
 

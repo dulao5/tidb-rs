@@ -64,6 +64,9 @@
 | D37 | N3 3.7 | 后台任务 | 与执行器同一纪律：不阻塞、长循环按时间片让出，否则进阻塞池；停顿检测覆盖 | 建议 |
 | D38 | PR #4 试点发现 2 | D00.2（terror / errno）排为 P1 第一个块，作为所有块的前置 | 采纳（ROADMAP 已按此排） | 建议 |
 | D39 | PR #4 评审 | govec 向量文件格式 | `.jsonl.gz` 入库，测试用 `flate2` 读 | 建议 |
+| D40 | N0 §3 | crate 分层表 | `layers.toml` 作为 P1–P5 的初始分层（31 个正式 crate，按块级引用排 rank，99.48% 的跨 crate 引用向下）；依赖只能指向 rank 更小的 crate，CI 检查 | 建议 |
+| D41 | N0 §4 | 反向引用与全局注册表 | 只允许下沉、接口反转、边界桩三种处理；不合并 crate、不用 `dyn Any` 绕过；Go 的包级注册表由 `tidb-server` 启动时显式注册，不用 `inventory`/`linkme`/`ctor` | 建议 |
+| D42 | N0 §5 | PoC crate | 列为 legacy，新代码不得依赖；与正式 crate 同名的 5 个在 D07.0 前改名为 `poc-*`、移到 `crates/poc/`（只做机械改名的 PR） | 建议 |
 
 ## 三、确认之后
 

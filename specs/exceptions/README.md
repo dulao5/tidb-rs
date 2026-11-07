@@ -21,6 +21,7 @@
 
 | ID | 名称 | 类型 | 状态 | 计划定稿时间 |
 |---|---|---|---|---|
+| [N0](N0-crate-layering/spec.md) | crate 分层与依赖方向（`layers.toml` + CI 检查） | 实现（基础设计） | spec 待确认 | D00.2 开工前 |
 | [N1](N1-plan-representation/spec.md) | 计划树、表达式树的表示与所有权（语句级 arena） | 实现（基础设计） | spec 待确认 | P1 之前 |
 | [N2](N2-session-context/spec.md) | 会话、语句上下文的共享状态拆分 | 实现（基础设计） | spec 待确认 | P1 之前 |
 | [N3](N3-A1-concurrency-memory/spec.md) | 并发、取消与错误边界（含 A2） | 实现（基础设计） | spec 待确认 | P1 之前 |
