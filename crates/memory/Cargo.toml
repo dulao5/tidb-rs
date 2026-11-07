@@ -1,0 +1,42 @@
+[package]
+name = "tidb-memory"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 memory accounting and quota (block D15.1, exception A1: pkg/util/memory, util/sqlkiller) and the TrackedAlloc allocator"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (8001 / 8175 / 8176 / 1317 ...), Go fmt and float conversion (M-F2I).
+tidb-base = { workspace = true }
+# tidb_server_memory_usage (Go metrics.MemoryUsage).
+tidb-metrics = { workspace = true }
+# Go atomic.Pointer (bytesLimit, MemUsageTop1Tracker, SQLKiller fields; M-SNAP).
+arc-swap = "1"
+# Go sync.Mutex / RWMutex (mapping rule M-LOCK: no poisoning).
+parking_lot = "0.12"
+# TrackedAlloc implements allocator_api2::Allocator (A1 3.3, M-MEM).
+allocator-api2 = "0.2"
+# "memory exceeds quota", "kill initiated", ... (Go: logutil.BgLogger(), i.e. zap).
+tracing = "0.1"
+# Heap statistics in place of Go runtime.ReadMemStats (A1 3.2: jemalloc stats; the server's
+# global allocator is jemalloc).
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
+# Page size for the vm_stat parsing on macOS (gopsutil unix.Getpagesize).
+nix = { version = "0.29", default-features = false, features = ["feature"] }
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+criterion = "0.5"
+tikv-jemallocator = { workspace = true }
+
+[[bench]]
+name = "tracker"
+harness = false
+
+[lints]
+workspace = true

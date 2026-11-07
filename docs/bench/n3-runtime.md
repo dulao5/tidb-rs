@@ -193,6 +193,7 @@ macOS 上 off_cpu 分不出被抢占还是阻塞。
 - 用 bpftrace 抓到的 2 次 blocked 栈，在 tonic 的 h2 连接 task 中（不是我们的 connection task），等待 h2 连接共享的 `std::sync::Mutex`（`Streams::poll_pending_open` → futex，5.4ms、23.7ms）。这类 task 由 tikv-client 自己 spawn，**不经过插桩**，是停顿检测的盲区（N3 3.6 已注明）。
 - 把 tidb-rs 绑在独占的 4 个核上后，320、640 个并发语句都是 0 次停顿。
 - 另有一次运行在我们的 connection task 上出现 5 次 blocked（各 1 次自愿切换、13～20ms），与同一次运行的抢占停顿挤在约 5ms 的窗口内，也在收尾时刻。
+- 修正窗口后的 5 次重测（PR #10 第三轮复核）：稳态窗口内 `on_cpu`、`blocked` 全部为 0；停顿都落在两端。收尾段每次 0～8 次，其中一次含 1 次 blocked；**建连阶段偶尔也有**：5 次中有 1 次在开头段出现 1 次 blocked。
 
 推测（待 bpftrace 后续确认，N3 3.6 已列为后续）：
 - 我们 connection task 上的 blocked 与 tonic 连接 task 同因，即 h2 的锁；

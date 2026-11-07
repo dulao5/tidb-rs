@@ -33,6 +33,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2415,6 +2421,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
 name = "peeking_take_while"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3635,6 +3647,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-memory"
+version = "0.0.0"
+dependencies = [
+ "allocator-api2",
+ "arc-swap 1.9.3",
+ "criterion 0.5.1",
+ "flate2",
+ "nix",
+ "parking_lot 0.12.5",
+ "serde",
+ "serde_json",
+ "tidb-base",
+ "tidb-metrics",
+ "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
+ "tracing",
+]
+
+[[package]]
 name = "tidb-meta"
 version = "0.0.0"
 dependencies = [
@@ -3925,6 +3956,17 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tonic",
+]
+
+[[package]]
+name = "tikv-jemalloc-ctl"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "661f1f6a57b3a36dc9174a2c10f19513b4866816e13425d3e418b11cc37bc24c"
+dependencies = [
+ "libc",
+ "paste",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

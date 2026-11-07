@@ -287,6 +287,18 @@ static PLAN_CACHE_MISS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
 static PLAN_CACHE_MISS_PREPARED: LazyLock<IntCounter> =
     LazyLock::new(|| PLAN_CACHE_MISS_TOTAL.with_label_values(&["prepared"]));
 
+static MEMORY_USAGE: LazyLock<prometheus::GaugeVec> = LazyLock::new(|| {
+    register(
+        prometheus::GaugeVec::new(
+            Opts::new("memory_usage", "Memory Usage")
+                .namespace("tidb")
+                .subsystem("server"),
+            &["module", "type"],
+        )
+        .expect("valid metric"),
+    )
+});
+
 static GET_TOKEN_DURATION: LazyLock<Histogram> = LazyLock::new(|| {
     histogram(
         ("tidb", "server", "get_token_duration_seconds"),
@@ -605,6 +617,12 @@ pub fn command_started(idle: Duration) {
 pub fn token_acquired(wait: Duration) {
     TOKENS.inc();
     GET_TOKEN_DURATION.observe((wait.as_nanos() / 1000) as f64);
+}
+
+/// `tidb_server_memory_usage{module, type}` (Go `metrics.MemoryUsage`), set by the memory
+/// tracker for the labels of `memory.MetricsTypes`.
+pub fn memory_usage_set(module: &str, typ: &str, v: f64) {
+    MEMORY_USAGE.with_label_values(&[module, typ]).set(v);
 }
 
 /// The token was put back (Go `server.releaseToken`): `tokens` - 1.

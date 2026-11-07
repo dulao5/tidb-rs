@@ -76,7 +76,7 @@ jobs:
       - name: test (release-checked, Go-ported crates)
         env:
           TIDB_TYPES_FUZZ_ITERS: "500000000"
-        run: cargo test --profile release-checked --locked -p tidb-types
+        run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory
 
   # The Go vectors depend on the target (mapping rule M-FMA: gc fuses some float
   # multiply-adds into FMA on arm64 and not on amd64 GOAMD64=v1). The check job
@@ -92,6 +92,6 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: cargo test --locked -p tidb-types -p tidb-base
+        run: cargo test --locked -p tidb-types -p tidb-base -p tidb-memory
       - name: test (release-checked)
-        run: cargo test --profile release-checked --locked -p tidb-types
+        run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory
