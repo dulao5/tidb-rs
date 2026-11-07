@@ -11,6 +11,10 @@
 //! | 100, 101, 102 | CosineDistance | not fused | `FMADDS` |
 //! | 152 | L2Norm (float64) | not fused | `FMADDD` |
 //!
+//! On x86_64 the sums and products also follow gc's operand order when both operands are
+//! NaN ([`add32`], [`mul32`]): SSE returns the destination's NaN, and LLVM may swap the
+//! operands of these commutative operations (tidb-rs PR #16, x86_64 CI).
+//!
 //! [`madd32`] / [`madd64`] follow Go per target: `mul_add` (one `fmadd` instruction) where
 //! gc fuses, a separate multiply and add elsewhere (Rust never contracts by itself).
 
@@ -40,7 +44,7 @@ fn madd32(z: f32, x: f32, y: f32) -> f32 {
         target_arch = "loongarch64"
     )))]
     {
-        z + x * y
+        add32(z, mul32(x, y))
     }
 }
 
@@ -64,8 +68,47 @@ fn madd64(z: f64, x: f64, y: f64) -> f64 {
         target_arch = "loongarch64"
     )))]
     {
-        z + x * y
+        add64(z, x * y)
     }
+}
+
+/// `a + b` where Go accumulates `a += b`: gc emits `ADDSS b, a` on amd64 (the accumulator
+/// is the destination), and when both operands are NaN SSE returns the destination's NaN
+/// (quieted). LLVM treats `fadd` as commutative and may put `b` in the destination
+/// register, which would return `b`'s NaN, so on x86_64 the two-NaN case is decided here.
+/// One NaN operand, or none, is the hardware's result in either order.
+// glue: NaN propagation of gc's operand order (x86_64)
+#[inline(always)]
+fn add32(a: f32, b: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if a.is_nan() && b.is_nan() {
+        return f32::from_bits(a.to_bits() | 0x0040_0000);
+    }
+    a + b
+}
+
+/// `x * y` as gc emits it on amd64 (`MULSS y, x`: `x` is the destination); see [`add32`].
+// glue: NaN propagation of gc's operand order (x86_64)
+#[inline(always)]
+#[allow(dead_code)]
+fn mul32(x: f32, y: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if x.is_nan() && y.is_nan() {
+        return f32::from_bits(x.to_bits() | 0x0040_0000);
+    }
+    x * y
+}
+
+/// [`add32`] for float64 (`ADDSD`).
+// glue: NaN propagation of gc's operand order (x86_64)
+#[inline(always)]
+#[allow(dead_code)]
+fn add64(a: f64, b: f64) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    if a.is_nan() && b.is_nan() {
+        return f64::from_bits(a.to_bits() | 0x0008_0000_0000_0000);
+    }
+    a + b
 }
 
 impl VectorFloat32<'_> {
@@ -179,7 +222,7 @@ impl VectorFloat32<'_> {
             if diff < 0.0 {
                 diff = -diff;
             }
-            distance += diff;
+            distance = add32(distance, diff);
         }
 
         Ok(distance as f64)
