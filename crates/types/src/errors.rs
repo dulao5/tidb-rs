@@ -1,8 +1,9 @@
 //! go-file: pkg/types/errors.go
 //!
-//! Temporary boundary stub (blocked-by D01.1, D00.2): only the five `types` errors that
+//! Temporary boundary stub (blocked-by D01.1): only the five `types` errors that
 //! `mydecimal.go` returns, with Go's error codes and message templates, plus `terror.Log`.
-//! D00.2 (terror / errno) and D01.1 (the rest of `pkg/types`) replace this file.
+//! D00.2 (terror / errno) is done; D01.1 (the rest of `pkg/types`) replaces this file, and
+//! MyDecimal moves to `tidb_base::Error`, no later than D01.4 (see specs/D01.3-time/tasks.md).
 
 use std::borrow::Cow;
 use std::fmt;

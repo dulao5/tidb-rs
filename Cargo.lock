@@ -3577,6 +3577,7 @@ name = "tidb-base"
 version = "0.0.0"
 dependencies = [
  "arc-swap 1.9.3",
+ "criterion 0.5.1",
  "flate2",
  "log",
  "parking_lot 0.12.5",

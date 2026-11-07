@@ -195,10 +195,16 @@ impl Time {
     }
 
     // glue: the zone lookup Location of t (UTC for None)
-    fn lookup(&self) -> super::ZoneInfo {
+    fn lookup(&self) -> super::ZoneInfo<'_> {
         match &self.loc {
             Some(l) => l.lookup(self.unix_sec()),
-            None => utc().lookup(self.unix_sec()),
+            None => super::ZoneInfo {
+                name: "UTC",
+                offset: 0,
+                start: i64::MIN,
+                end: i64::MAX,
+                is_dst: false,
+            },
         }
     }
 
@@ -206,7 +212,7 @@ impl Time {
     /// It is called when computing a presentation property like Month or Hour.
     /// We'd rather call it abs, but there are linknames to abs that make that problematic.
     /// See timeAbs below.
-    // go-std: time.Time.absSec L1 (without the lookup cache)
+    // go-std: time.Time.absSec L1 (the cache check is inside Location::lookup)
     fn abs_sec(&self) -> u64 {
         let mut sec = self.unix_sec();
         if let Some(l) = &self.loc {
@@ -217,8 +223,8 @@ impl Time {
 
     /// locabs is a combination of the Zone and abs methods,
     /// extracting both return values from a single zone lookup.
-    // go-std: time.Time.locabs L1 (without the lookup cache)
-    fn locabs(&self) -> (String, i32, u64) {
+    // go-std: time.Time.locabs L1 (the cache check is inside Location::lookup)
+    fn locabs(&self) -> (&str, i32, u64) {
         let mut sec = self.unix_sec();
         let (name, offset) = match &self.loc {
             Some(l) => {
@@ -226,7 +232,7 @@ impl Time {
                 sec = sec.wrapping_add(i64::from(z.offset));
                 (z.name, z.offset)
             }
-            None => ("UTC".to_owned(), 0),
+            None => ("UTC", 0),
         };
         (
             name,

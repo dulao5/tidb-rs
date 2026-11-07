@@ -157,7 +157,8 @@ impl Replay {
             "zone_lookup" => {
                 let tm = gotime::unix(a[1].as_i64().unwrap(), 0)
                     .in_loc(&self.zone(a[0].as_str().unwrap()));
-                let z = tm.location().lookup(tm.unix());
+                let tl = tm.location();
+                let z = tl.lookup(tm.unix());
                 let (start, end) = tm.zone_bounds();
                 let bound = |b: &gotime::Time| {
                     if b.equal(&gotime::Time::zero()) {
@@ -630,6 +631,33 @@ fn check(rep: &mut Replay, rec: &Value) -> Option<String> {
         return Some(format!("warnings: got {got_w:?}, want {want_w:?}"));
     }
     None
+}
+
+/// The lookup cache of every TZif zone in the vectors answers like the search, for each
+/// hour from two years before now to two years after (the cache holds the zone of "now").
+#[test]
+fn lookup_cache_matches_search() {
+    let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(vectors()).expect("vectors"));
+    let mut text = String::new();
+    gz.read_to_string(&mut text).unwrap();
+    let now = gotime::now().unix();
+    let mut zones = 0;
+    for line in text.lines().skip(1) {
+        let rec: Value = serde_json::from_str(line).unwrap();
+        if rec["op"] != "zone" {
+            break;
+        }
+        zones += 1;
+        let id = rec["args"][0].as_str().unwrap();
+        let name = id.split_once(':').unwrap().1.replace('_', "/");
+        let l = gotime::load_location_from_tzdata(&name, &ungs(&rec["out"]["data"])).unwrap();
+        let mut sec = now - 2 * 366 * 86400;
+        while sec < now + 2 * 366 * 86400 {
+            assert_eq!(l.lookup(sec), l.lookup_uncached(sec), "{id} at {sec}");
+            sec += 3600;
+        }
+    }
+    assert_eq!(zones, 18);
 }
 
 #[test]
