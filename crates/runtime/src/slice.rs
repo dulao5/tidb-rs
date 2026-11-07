@@ -4,10 +4,14 @@
 //! Rust has no Go sysmon preemption. Two things replace it:
 //!
 //! - **Time-sliced yielding.** [`checkpoint`] sits where Go checks `HandleSQLKillerSignal`
-//!   (mapping rule M-KILL). Every call runs the caller's kill / memory hook; only every
-//!   `check_every` calls does it look at the clock, and it yields when the current poll has
-//!   run longer than `quantum` (default 1 ms). This is TiKV's `RescheduleChecker`
-//!   (`components/tidb_query_common/src/storage/scanner.rs`: every 32 keys, 1 ms).
+//!   (mapping rule M-KILL). Every call runs the caller's kill / memory hook and reads the
+//!   clock (~30 ns), and it yields when the current poll has run longer than `quantum`
+//!   (default 1 ms). Go's KILL checkpoints are per chunk (`exec.Next`, internal/exec/
+//!   executor.go:448/462; one `Next` can take hundreds of µs), so the clock is read on every
+//!   call by default. Per-row inner loops (hash build, sort; M-KILL) use a
+//!   [`CheckpointStride`] that reads the clock every `n` calls, like TiKV's
+//!   `RescheduleChecker` (`components/tidb_query_common/src/storage/scanner.rs`: every 32
+//!   keys, 1 ms).
 //! - **Stall detection.** Every task started through the [`ExecPool`](crate::ExecPool) is
 //!   wrapped so that each `poll` is timed. A poll longer than `stall_threshold` (default
 //!   10 ms) is a stall: a loop that is missing a checkpoint, or blocking code (M-BLOCK). It is
@@ -30,17 +34,16 @@ use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 
-use prometheus::IntCounter;
-use prometheus::IntGauge;
-
 use crate::metrics;
+use crate::metrics::TaskMetrics;
 
 /// Time-slice and stall parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliceConfig {
     /// Yield at a checkpoint once the current poll has run this long. TiKV: 1 ms.
     pub quantum: Duration,
-    /// Look at the clock every this many checkpoints. TiKV: 32.
+    /// Read the clock every this many [`checkpoint`] calls. Default 1 (Go's checkpoints are
+    /// per chunk); per-row loops use [`CheckpointStride`] instead of raising this.
     pub check_every: u32,
     /// A poll longer than this is a stall. N3 3.6: 10 ms.
     pub stall_threshold: Duration,
@@ -51,7 +54,7 @@ impl Default for SliceConfig {
     fn default() -> SliceConfig {
         SliceConfig {
             quantum: Duration::from_millis(1),
-            check_every: 32,
+            check_every: 1,
             stall_threshold: Duration::from_millis(10),
         }
     }
@@ -133,15 +136,13 @@ impl StallCheck {
 /// time slice. Created by [`instrument`].
 pub(crate) struct Instrumented<F> {
     inner: Pin<Box<F>>,
-    name: &'static str,
-    stalls: IntCounter,
-    live: IntGauge,
+    metrics: &'static TaskMetrics,
 }
 
 impl<F> Drop for Instrumented<F> {
     // glue: live-task gauge (N3 §5 "task 不泄漏")
     fn drop(&mut self) {
-        self.live.dec();
+        self.metrics.live.dec();
     }
 }
 
@@ -157,21 +158,21 @@ impl<F: Future> Future for Instrumented<F> {
             t.cfg
         });
         let out = self.inner.as_mut().poll(cx);
-        let d = start.elapsed();
+        let end = Instant::now();
+        let d = end.saturating_duration_since(start);
         TASK.with(|t| {
             t.cpu.set(t.cpu.get() + d);
             if let Some(r) = t.recorder.borrow().as_ref() {
                 r.add(d);
             }
         });
-        metrics::cpu_slice(d);
+        metrics::cpu_slice(d, end);
         if d > cfg.stall_threshold {
             STALLS.fetch_add(1, Ordering::Relaxed);
-            self.stalls.inc();
-            metrics::poll_stall(d);
+            self.metrics.stall(d);
             log::warn!(
                 "poll stall: task {} ran {:?} without yielding (threshold {:?})",
-                self.name,
+                self.metrics.name,
                 d,
                 cfg.stall_threshold
             );
@@ -203,15 +204,13 @@ where
         cpu: Cell::new(Duration::ZERO),
         recorder: RefCell::new(recorder),
     };
-    let live = metrics::tasks(name);
-    live.inc();
+    let m = metrics::task(name);
+    m.live.inc();
     TASK.scope(
         state,
         Instrumented {
             inner: Box::pin(fut),
-            name,
-            stalls: metrics::poll_stalls(name),
-            live,
+            metrics: m,
         },
     )
 }
@@ -247,6 +246,50 @@ pub async fn checkpoint<H: CheckpointHook + ?Sized>(hook: &H) -> Result<(), H::E
         tokio::task::yield_now().await;
     }
     Ok(())
+}
+
+/// A checkpoint for per-row inner loops (hash build, sort, merge; mapping rule M-KILL): the
+/// hook still runs on every call, the clock is read every `n` calls. Owned by the loop.
+///
+/// ```ignore
+/// let mut cp = CheckpointStride::new(64);
+/// for row in rows { cp.checkpoint(&ctx).await?; build(row); }
+/// ```
+pub struct CheckpointStride {
+    every: u32,
+    calls: u32,
+}
+
+impl CheckpointStride {
+    // glue: N3 3.1 第 5 条 (per-row loops)
+    pub fn new(every: u32) -> CheckpointStride {
+        CheckpointStride {
+            every: every.max(1),
+            calls: 0,
+        }
+    }
+
+    // glue: N3 3.1 第 5 条 (per-row loops)
+    pub async fn checkpoint<H: CheckpointHook + ?Sized>(
+        &mut self,
+        hook: &H,
+    ) -> Result<(), H::Error> {
+        hook.check()?;
+        self.calls += 1;
+        if self.calls >= self.every {
+            self.calls = 0;
+            if poll_ran_longer_than_quantum() {
+                tokio::task::yield_now().await;
+            }
+        }
+        Ok(())
+    }
+}
+
+// glue: N3 3.1 第 5 条
+fn poll_ran_longer_than_quantum() -> bool {
+    TASK.try_with(|t| t.poll_start.get().elapsed() >= t.cfg.quantum)
+        .unwrap_or(false)
 }
 
 // glue: N3 3.1 第 5 条

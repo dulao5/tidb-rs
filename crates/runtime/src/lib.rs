@@ -22,6 +22,7 @@
 
 pub mod admission;
 pub mod blocking;
+pub mod local;
 pub mod metrics;
 pub mod pool;
 pub mod slice;
@@ -30,13 +31,17 @@ pub mod store_window;
 pub use admission::Admission;
 pub use admission::AdmissionConfig;
 pub use admission::TokenLimiter;
+pub use blocking::BlockingConfig;
+pub use blocking::BlockingKind;
 pub use blocking::BlockingPool;
 pub use pool::ExecPool;
 pub use pool::PanicError;
 pub use pool::Runtime;
 pub use pool::RuntimeConfig;
+pub use pool::TaskExit;
 pub use pool::Topology;
 pub use slice::CheckpointHook;
+pub use slice::CheckpointStride;
 pub use slice::SliceConfig;
 pub use slice::checkpoint;
 pub use store_window::InflightPermit;

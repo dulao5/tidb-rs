@@ -85,6 +85,9 @@ impl PanicError {
             (*s).to_owned()
         } else if let Some(s) = p.downcast_ref::<String>() {
             s.clone()
+        } else if let Some(e) = p.downcast_ref::<tidb_base::Error>() {
+            // Go `panic(err)` recovered and formatted with %v: the error text.
+            e.to_string()
         } else {
             "<non-string panic payload>".to_owned()
         };
@@ -100,6 +103,39 @@ impl std::fmt::Display for PanicError {
 }
 
 impl std::error::Error for PanicError {}
+
+/// How a [`ExecPool::spawn_with_recover`] task ended (Go `recoverFn(r)`: `r == nil` is
+/// `Completed`, a panic value is `Panicked`). `Cancelled` has no Go counterpart: a goroutine
+/// cannot be stopped from outside, a task can (`abort`, runtime shutdown, the future dropped).
+/// `on_exit` still runs then, so callers that `Done()` a wait group or close a channel in it
+/// never leave a waiter hanging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskExit {
+    Completed,
+    Panicked(PanicError),
+    Cancelled,
+}
+
+/// Calls `on_exit` exactly once: with the outcome, or with `Cancelled` when dropped first.
+struct ExitGuard<E: FnOnce(TaskExit)>(Option<E>);
+
+impl<E: FnOnce(TaskExit)> ExitGuard<E> {
+    // glue: N3 3.2 exit hook
+    fn fire(mut self, e: TaskExit) {
+        if let Some(f) = self.0.take() {
+            f(e);
+        }
+    }
+}
+
+impl<E: FnOnce(TaskExit)> Drop for ExitGuard<E> {
+    // glue: N3 3.2 exit hook on cancellation
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f(TaskExit::Cancelled);
+        }
+    }
+}
 
 /// Pool ids, to recognise a NoSteal worker thread of a given pool.
 static NEXT_POOL_ID: AtomicUsize = AtomicUsize::new(1);
@@ -205,7 +241,9 @@ impl Drop for Runtime {
     // glue: shutdown
     fn drop(&mut self) {
         if let Some(rt) = self.steal.take() {
-            rt.shutdown_background();
+            // Waits for the worker threads, which drop the remaining tasks (so their
+            // `spawn_with_recover` exit hooks run); blocking tasks get a bounded wait.
+            rt.shutdown_timeout(std::time::Duration::from_secs(5));
         }
         for (tx, t) in self.no_steal.drain(..) {
             let _ = tx.send(());
@@ -292,35 +330,40 @@ impl ExecPool {
     }
 
     /// Go `util.WithRecovery(exec, recoverFn)` as a task (N3 3.2, mapping rule M-PANIC):
-    /// `on_exit` is called when the task ends, with the panic if it panicked; a panic is logged
-    /// and does not propagate. The handle yields `None` if the task panicked.
+    /// `on_exit` is called exactly once when the task ends, however it ends: completed,
+    /// panicked (the panic is logged and does not propagate) or cancelled (`abort`, runtime
+    /// shutdown, also before it first ran). The handle yields `None` if the task panicked.
     ///
-    /// Unlike tokio's own `JoinError`, `on_exit` runs inside the task, before anyone awaiting
-    /// the handle wakes up, which is the order Go's deferred `recoverFn` gives (results sent on
-    /// a channel by `recoverFn` are visible before the waiter returns).
-    // glue: N3 3.2 (Go util.WithRecovery mapped by M-PANIC; misc.go is ported with D00.3)
+    /// `on_exit` runs inside the task, before anyone awaiting the handle wakes up, which is
+    /// the order Go's deferred `recoverFn` gives.
+    // go: pkg/util/misc.go WithRecovery L2 (a task: the hook also runs on cancellation, which goroutines do not have; panics are caught per poll)
     pub fn spawn_with_recover<F, R>(
         &self,
         name: &'static str,
         fut: F,
-        on_exit: impl FnOnce(Option<PanicError>) + Send + 'static,
+        on_exit: impl FnOnce(TaskExit) + Send + 'static,
     ) -> JoinHandle<Option<R>>
     where
         F: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
+        // Created before the task first runs, so dropping the unstarted task still fires it.
+        let guard = ExitGuard(Some(on_exit));
         let task = async move {
+            let guard = guard;
             match CatchUnwind(Box::pin(fut)).await {
                 Ok(v) => {
-                    on_exit(None);
+                    guard.fire(TaskExit::Completed);
                     Some(v)
                 }
                 Err(payload) => {
                     let e = PanicError::from_payload(payload.as_ref());
                     metrics::panic();
-                    on_exit(Some(e.clone()));
-                    // Go: logutil.BgLogger().Error("panic in the recoverable goroutine", ...).
-                    log::error!("panic in the recoverable goroutine: task {name}: {e}");
+                    // Go: logutil.BgLogger().Error("panic in the recoverable goroutine", ...),
+                    // after recoverFn.
+                    let msg = e.to_string();
+                    guard.fire(TaskExit::Panicked(e));
+                    log::error!("panic in the recoverable goroutine: task {name}: {msg}");
                     None
                 }
             }

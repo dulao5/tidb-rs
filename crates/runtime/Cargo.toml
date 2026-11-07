@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# A recovered panic whose payload is a tidb error (Go `panic(err)`) keeps its text.
+tidb-base = { workspace = true }
 # The one runtime of the process (N3 3.1); tikv-client is on tokio too.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 # Go sync.Mutex / RWMutex (mapping rule M-LOCK).
@@ -18,7 +20,12 @@ prometheus = { version = "0.13", default-features = false }
 log = "0.4"
 
 [dev-dependencies]
+criterion = "0.5"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
+
+[[bench]]
+name = "overhead"
+harness = false
 
 [lints]
 workspace = true

@@ -11,12 +11,15 @@ use std::time::Instant;
 
 use tidb_runtime::Admission;
 use tidb_runtime::AdmissionConfig;
+use tidb_runtime::BlockingConfig;
+use tidb_runtime::BlockingKind;
 use tidb_runtime::BlockingPool;
 use tidb_runtime::NotSupported;
 use tidb_runtime::Runtime;
 use tidb_runtime::RuntimeConfig;
 use tidb_runtime::StoreWindows;
 use tidb_runtime::StoreWindowsConfig;
+use tidb_runtime::TaskExit;
 use tidb_runtime::TokenLimiter;
 use tidb_runtime::Topology;
 use tidb_runtime::checkpoint;
@@ -319,7 +322,7 @@ fn spawn_with_recover_like_go_with_recovery() {
         rt.block_on(async move {
             // Panic: on_exit gets the panic, before the waiter sees the result; nothing
             // propagates.
-            let seen = Arc::new(Mutex::new(None));
+            let seen = Arc::new(Mutex::new(Vec::new()));
             let s2 = seen.clone();
             let h = pool.spawn_with_recover(
                 "test-panic",
@@ -330,20 +333,94 @@ fn spawn_with_recover_like_go_with_recovery() {
                     }
                     1
                 },
-                move |p| *s2.lock().unwrap() = Some(p),
+                move |e| s2.lock().unwrap().push(e),
             );
             assert_eq!(h.await.unwrap(), None);
-            let p = seen.lock().unwrap().take().unwrap();
-            assert_eq!(p.unwrap().message, "boom");
+            let got = std::mem::take(&mut *seen.lock().unwrap());
+            assert_eq!(got.len(), 1);
+            match &got[0] {
+                TaskExit::Panicked(p) => assert_eq!(p.message, "boom"),
+                other => panic!("{other:?}"),
+            }
 
-            // No panic: on_exit(None), result passed through.
+            // No panic: on_exit(Completed) once, result passed through.
             let s3 = seen.clone();
-            let h = pool.spawn_with_recover("test-ok", async { 7 }, move |p| {
-                *s3.lock().unwrap() = Some(p)
-            });
+            let h = pool
+                .spawn_with_recover("test-ok", async { 7 }, move |e| s3.lock().unwrap().push(e));
             assert_eq!(h.await.unwrap(), Some(7));
-            assert_eq!(seen.lock().unwrap().take(), Some(None));
+            assert_eq!(*seen.lock().unwrap(), vec![TaskExit::Completed]);
         });
+    }
+}
+
+/// Go's recoverFn always runs; a task can be cancelled, and on_exit must still run (once).
+#[test]
+fn spawn_with_recover_on_abort() {
+    for rt in runtimes(2) {
+        let topo = rt.pool().topology();
+        let pool = rt.pool().clone();
+        let exits = rt.block_on(async move {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            // Aborted while running (sleeping).
+            let s1 = seen.clone();
+            let h = pool.spawn_with_recover(
+                "test-abort",
+                tokio::time::sleep(Duration::from_secs(3600)),
+                move |e| s1.lock().unwrap().push(e),
+            );
+            tokio::task::yield_now().await;
+            h.abort();
+            assert!(h.await.unwrap_err().is_cancelled());
+            // Aborted right after spawning, without yielding: on NoSteal the task (same
+            // thread) cannot have run yet, so this is the "cancelled before the first poll"
+            // case; on Steal another worker may have completed it first.
+            let s2 = seen.clone();
+            let h = pool.spawn_with_recover("test-abort-early", async { 1 }, move |e| {
+                s2.lock().unwrap().push(e)
+            });
+            h.abort();
+            let _ = h.await;
+            std::mem::take(&mut *seen.lock().unwrap())
+        });
+        assert_eq!(exits.len(), 2, "{exits:?}");
+        assert_eq!(exits[0], TaskExit::Cancelled);
+        if topo == Topology::NoSteal {
+            assert_eq!(exits[1], TaskExit::Cancelled);
+        } else {
+            assert!(matches!(
+                exits[1],
+                TaskExit::Cancelled | TaskExit::Completed
+            ));
+        }
+    }
+}
+
+/// Dropping the runtime cancels its tasks; their on_exit runs.
+#[test]
+fn spawn_with_recover_on_runtime_drop() {
+    for rt in runtimes(2) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pool = rt.pool().clone();
+        let started = rt.block_on(async move {
+            let (stx, srx) = tokio::sync::oneshot::channel();
+            let _h = pool.spawn_with_recover(
+                "test-shutdown",
+                async move {
+                    let _ = stx.send(());
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                },
+                move |e| {
+                    let _ = tx.send(e);
+                },
+            );
+            srx.await.is_ok()
+        });
+        assert!(started);
+        drop(rt);
+        let e = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("on_exit ran at shutdown");
+        assert_eq!(e, TaskExit::Cancelled);
     }
 }
 
@@ -353,7 +430,7 @@ fn spawn_with_recover_like_go_with_recovery() {
 fn blocking_pool_is_bounded() {
     for rt in runtimes(2) {
         rt.block_on(async {
-            let pool = BlockingPool::new(2);
+            let pool = BlockingPool::new(BlockingConfig { spill: 2, other: 1 });
             let now = Arc::new(AtomicUsize::new(0));
             let max = Arc::new(AtomicUsize::new(0));
             let mut hs = Vec::new();
@@ -362,7 +439,7 @@ fn blocking_pool_is_bounded() {
                 let now = now.clone();
                 let max = max.clone();
                 hs.push(tokio::spawn(async move {
-                    pool.spawn_blocking(move || {
+                    pool.spawn_blocking(BlockingKind::Spill, move || {
                         let n = now.fetch_add(1, Ordering::SeqCst) + 1;
                         max.fetch_max(n, Ordering::SeqCst);
                         std::thread::sleep(Duration::from_millis(5));
@@ -376,17 +453,42 @@ fn blocking_pool_is_bounded() {
                 h.await.unwrap();
             }
             assert!(max.load(Ordering::SeqCst) <= 2);
-            assert_eq!(pool.available(), 2);
+            assert_eq!(pool.available(BlockingKind::Spill), 2);
             // A panic in the closure comes back as an error and frees the slot.
             let e = pool
-                .spawn_blocking(|| {
+                .spawn_blocking(BlockingKind::Spill, || {
                     if std::hint::black_box(true) {
                         panic!("blocking boom");
                     }
                 })
                 .await;
             assert!(e.is_err());
-            assert_eq!(pool.available(), 2);
+            assert_eq!(pool.available(BlockingKind::Spill), 2);
+
+            // Categories do not starve each other: with `Other` fully taken by a long call,
+            // a spill still runs.
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let p2 = pool.clone();
+            let hog = tokio::spawn(async move {
+                p2.spawn_blocking(BlockingKind::Other, move || {
+                    let _ = rx.recv_timeout(Duration::from_secs(10));
+                })
+                .await
+                .unwrap();
+            });
+            while pool.available(BlockingKind::Other) != 0 {
+                tokio::task::yield_now().await;
+            }
+            let r = tokio::time::timeout(
+                Duration::from_secs(5),
+                pool.spawn_blocking(BlockingKind::Spill, || 42),
+            )
+            .await
+            .expect("spill not starved")
+            .unwrap();
+            assert_eq!(r, 42);
+            tx.send(()).unwrap();
+            hog.await.unwrap();
         });
     }
 }
@@ -406,6 +508,8 @@ fn live_task_gauge_returns_to_zero() {
                 h.await.unwrap();
             }
         });
+        assert_eq!(tidb_runtime::metrics::live_tasks("test-gauge"), 0);
+        // Exported through the custom collector.
         let fams = prometheus::gather();
         let tasks = fams
             .iter()

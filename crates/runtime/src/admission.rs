@@ -20,11 +20,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use prometheus::IntGauge;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 
 use crate::NotSupported;
+use crate::local::ShardedGauge;
 use crate::metrics::Queue;
 use crate::metrics::QueueMetrics;
 
@@ -32,13 +32,13 @@ use crate::metrics::QueueMetrics;
 #[derive(Debug)]
 pub struct Token {
     _permit: OwnedSemaphorePermit,
-    running: Option<IntGauge>,
+    running: Option<&'static ShardedGauge>,
 }
 
 impl Drop for Token {
     // glue: runtime queue metric
     fn drop(&mut self) {
-        if let Some(g) = &self.running {
+        if let Some(g) = self.running {
             g.dec();
         }
     }
@@ -143,12 +143,11 @@ impl Admission {
     // glue: N3 3.6 Q1 (TokenLimiter.Get + runtime queue metrics)
     pub async fn get(&self) -> Token {
         let start = Instant::now();
-        let waiting = Waiting::new(&self.metrics.waiting);
+        let waiting = Waiting::new(self.metrics.waiting);
         let mut tk = self.limiter.get().await;
         drop(waiting);
-        self.metrics.wait.observe(start.elapsed().as_secs_f64());
-        self.metrics.running.inc();
-        tk.running = Some(self.metrics.running.clone());
+        self.metrics.acquired(start);
+        tk.running = Some(self.metrics.running);
         tk
     }
 
@@ -166,11 +165,11 @@ impl Admission {
 
 /// Counts a waiter in a queue's `waiting` gauge for as long as it lives (also when the
 /// waiting future is dropped).
-pub(crate) struct Waiting<'a>(&'a IntGauge);
+pub(crate) struct Waiting<'a>(&'a ShardedGauge);
 
 impl<'a> Waiting<'a> {
     // glue: queue metric guard
-    pub(crate) fn new(g: &'a IntGauge) -> Waiting<'a> {
+    pub(crate) fn new(g: &'a ShardedGauge) -> Waiting<'a> {
         g.inc();
         Waiting(g)
     }

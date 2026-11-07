@@ -28,13 +28,13 @@ use std::time::Duration;
 use std::time::Instant;
 
 use parking_lot::RwLock;
-use prometheus::Histogram;
-use prometheus::IntGauge;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 
 use crate::NotSupported;
 use crate::admission::Waiting;
+use crate::local::FastHistogram;
+use crate::local::ShardedGauge;
 use crate::metrics;
 use crate::metrics::Queue;
 use crate::metrics::QueueMetrics;
@@ -76,8 +76,8 @@ struct StoreState {
     store_id: u64,
     token_count: AtomicI64,
     window: Option<Arc<Semaphore>>,
-    inflight: IntGauge,
-    schedule_wait: Histogram,
+    inflight: &'static ShardedGauge,
+    schedule_wait: FastHistogram,
 }
 
 /// Q2: the server's per-store in-flight windows.
@@ -94,6 +94,7 @@ pub struct InflightPermit {
     state: Arc<StoreState>,
     store_token: bool,
     _window: Option<OwnedSemaphorePermit>,
+    window_running: Option<&'static ShardedGauge>,
 }
 
 impl Drop for InflightPermit {
@@ -103,6 +104,9 @@ impl Drop for InflightPermit {
             release_store_token(&self.state);
         }
         self.state.inflight.dec();
+        if let Some(g) = self.window_running {
+            g.dec();
+        }
     }
 }
 
@@ -164,7 +168,11 @@ impl StoreWindows {
     /// Take a permit for one request to `store_id` (`addr` labels the client-go metric):
     /// first the window (waits; unlimited by default), then Go's store limit (fails with
     /// [`StoreTokenLimitError`] when used up, as client-go does before sending).
-    /// Cancel-safe.
+    ///
+    /// Cancel-safe, but it does not watch the statement's KILL by itself: the caller must
+    /// await it in the same `select!` as the `ExecCtx` cancellation token (mapping rule M-CH,
+    /// i.e. through `ExecCtx`'s helpers), otherwise a killed statement keeps its place in the
+    /// queue until the window opens. With the default unlimited window it never waits.
     // glue: N3 3.6 Q2 (client-go sendReqState.send's store-limit block + the Rust-only window)
     pub async fn acquire(
         &self,
@@ -172,25 +180,32 @@ impl StoreWindows {
         addr: &str,
     ) -> Result<InflightPermit, StoreTokenLimitError> {
         let state = self.state(store_id);
+        let mut window_running = None;
         let window = match &state.window {
             None => None,
             Some(sem) => {
                 let start = Instant::now();
-                let waiting = Waiting::new(&self.metrics.waiting);
+                let waiting = Waiting::new(self.metrics.waiting);
                 let p = sem
                     .clone()
                     .acquire_owned()
                     .await
                     .expect("the window semaphore is never closed");
                 drop(waiting);
-                self.metrics.wait.observe(start.elapsed().as_secs_f64());
+                self.metrics.acquired(start);
+                window_running = Some(self.metrics.running);
                 Some(p)
             }
         };
         let mut store_token = false;
         let limit = self.store_limit();
         if limit > 0 {
-            get_store_token(&state, addr, limit)?;
+            if let Err(e) = get_store_token(&state, addr, limit) {
+                if let Some(g) = window_running {
+                    g.dec();
+                }
+                return Err(e);
+            }
             store_token = true;
         }
         state.inflight.inc();
@@ -198,6 +213,7 @@ impl StoreWindows {
             state,
             store_token,
             _window: window,
+            window_running,
         })
     }
 
@@ -217,7 +233,7 @@ impl StoreWindows {
     pub fn observe_schedule_wait(&self, store_id: u64, wait: Duration) {
         self.state(store_id)
             .schedule_wait
-            .observe(wait.as_secs_f64());
+            .observe_at(wait.as_secs_f64(), Instant::now());
     }
 }
 
