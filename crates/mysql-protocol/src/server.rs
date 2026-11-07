@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::task::JoinSet;
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::constants::{
@@ -56,11 +56,15 @@ impl Default for ServerConfig {
 }
 
 /// A MySQL-protocol server serving sessions created by `F`.
-#[derive(Debug)]
 pub struct Server<F> {
     config: Arc<ServerConfig>,
     factory: Arc<F>,
     next_connection_id: AtomicU64,
+    /// N3 runtime: connections are tasks of this pool (connection task = statement task).
+    /// `None`: `tokio::spawn` on the current runtime (tests).
+    pool: Option<tidb_runtime::ExecPool>,
+    /// N3 Q1: statement admission shared by every connection.
+    admission: Option<tidb_runtime::Admission>,
 }
 
 impl<F: SessionFactory> Server<F> {
@@ -69,7 +73,20 @@ impl<F: SessionFactory> Server<F> {
             config: Arc::new(config),
             factory: Arc::new(factory),
             next_connection_id: AtomicU64::new(1),
+            pool: None,
+            admission: None,
         }
+    }
+
+    /// Run connections on `pool` and admit commands through `admission` (N3 3.1, Q1).
+    pub fn with_runtime(
+        mut self,
+        pool: tidb_runtime::ExecPool,
+        admission: tidb_runtime::Admission,
+    ) -> Self {
+        self.pool = Some(pool);
+        self.admission = Some(admission);
+        self
     }
 
     /// Accepts connections until `shutdown` completes, then aborts the remaining connections.
@@ -79,12 +96,12 @@ impl<F: SessionFactory> Server<F> {
         shutdown: impl Future<Output = ()>,
     ) -> io::Result<()> {
         info!(addr = %listener.local_addr()?, "MySQL protocol server listening");
-        let mut conns = JoinSet::new();
+        let mut conns: Vec<JoinHandle<()>> = Vec::new();
         let started = std::time::Instant::now();
         tokio::pin!(shutdown);
         loop {
             // Reap finished connection tasks.
-            while conns.try_join_next().is_some() {}
+            conns.retain(|h| !h.is_finished());
             tokio::select! {
                 () = &mut shutdown => break,
                 accepted = listener.accept() => {
@@ -103,14 +120,24 @@ impl<F: SessionFactory> Server<F> {
                     let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
                     let config = Arc::clone(&self.config);
                     let factory = Arc::clone(&self.factory);
-                    conns.spawn(async move {
-                        crate::conn::run(stream, peer.to_string(), id, started, &config, &*factory).await;
+                    let admission = self.admission.clone();
+                    let fut = async move {
+                        crate::conn::run(stream, peer.to_string(), id, started, &config, &*factory, admission).await;
+                    };
+                    conns.push(match &self.pool {
+                        Some(pool) => pool.spawn_connection("connection", fut),
+                        None => tokio::spawn(fut),
                     });
                 }
             }
         }
         info!(connections = conns.len(), "shutting down");
-        conns.shutdown().await;
+        for h in &conns {
+            h.abort();
+        }
+        for h in conns {
+            let _ = h.await;
+        }
         Ok(())
     }
 }

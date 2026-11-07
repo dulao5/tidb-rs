@@ -1,0 +1,9 @@
+key	value
+tidb_rs_commit	de1fa1c9d4d972ecb034f4f36d6153b39349eaf9
+tidb_rs_dirty	no
+tidb_version	v8.5.8
+tests_commit	4cee7f20849923b9ee1ca71b01e6811d0537cadd
+date	2026-11-07T08:38:37Z
+runner	Darwin arm64 Apple M4 Pro
+seconds	214
+tidb_rs_alive_at_end	yes

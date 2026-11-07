@@ -146,5 +146,8 @@ pub async fn execute(
     cx: &ExecContext,
 ) -> Result<Vec<Vec<Value>>, SqlError> {
     let rows = read_source(plan, snapshot, cx).await?;
+    // N3 checkpoint between reading and the root operators (aggregation, sort), which run
+    // without yielding in the PoC.
+    let Ok(()) = tidb_runtime::checkpoint(&()).await;
     finish(plan, rows, cx.dag.new_collation_enabled)
 }

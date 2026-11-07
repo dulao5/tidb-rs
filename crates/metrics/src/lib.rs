@@ -592,19 +592,16 @@ fn query_duration_child(t: StmtType) -> &'static Histogram {
 }
 
 /// Start of a command (Go `clientConn.dispatch`): the idle time since the previous command
-/// ended, and the token: there is no token limiter, so the wait is 0 µs (Go observes
-/// microseconds, truncated, in this "seconds" histogram) and `tokens` counts commands in
-/// progress.
+/// ended. The statement-admission token is recorded separately ([`token_acquired`] /
+/// [`token_released`]), as Go's `getToken` / `releaseToken` do.
 pub fn command_started(idle: Duration) {
     CONN_IDLE_NOT_IN_TXN.observe(idle.as_secs_f64());
-    TOKENS.inc();
-    GET_TOKEN_DURATION.observe(0.0);
 }
 
 /// A statement-admission token was obtained after waiting `wait` (Go `server.getToken`):
 /// `tokens` + 1, and the wait in **microseconds**, truncated, in this "seconds" histogram (Go
 /// observes `time.Since(start).Nanoseconds() / 1e3`). For the token limiter of
-/// `tidb-runtime` (N3 Q1); the PoC switches from [`command_started`]'s zero wait to this.
+/// `tidb-runtime` (N3 Q1).
 pub fn token_acquired(wait: Duration) {
     TOKENS.inc();
     GET_TOKEN_DURATION.observe((wait.as_nanos() / 1000) as f64);
@@ -615,10 +612,9 @@ pub fn token_released() {
     TOKENS.dec();
 }
 
-/// End of a command (Go `clientConn.addMetrics` + `releaseToken`): `query_total` by command
-/// and result, the handling time by the type of the last statement, and an execute error.
+/// End of a command (Go `clientConn.addMetrics`): `query_total` by command and result, the
+/// handling time by the type of the last statement, and an execute error.
 pub fn command_finished(cmd: u8, stmt_type: StmtType, elapsed: Duration, error: Option<&str>) {
-    TOKENS.dec();
     query_total_child(cmd, error.is_none()).inc();
     query_duration_child(stmt_type).observe(elapsed.as_secs_f64());
     if let Some(label) = error {

@@ -173,6 +173,8 @@ impl Runtime {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(n)
                     .thread_name(cfg.thread_name.clone())
+                    // An idle worker's buffered metric observations show up in scrapes.
+                    .on_thread_park(crate::local::flush_thread)
                     .enable_all()
                     .build()?;
                 let id = NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed);
@@ -189,6 +191,7 @@ impl Runtime {
                 let mut threads = Vec::with_capacity(n);
                 for i in 0..n {
                     let rt = tokio::runtime::Builder::new_current_thread()
+                        .on_thread_park(crate::local::flush_thread)
                         .enable_all()
                         .build()?;
                     handles.push(rt.handle().clone());
@@ -240,14 +243,24 @@ impl Runtime {
 impl Drop for Runtime {
     // glue: shutdown
     fn drop(&mut self) {
+        // Inside an async context (dropped from a task, or from another runtime's
+        // block_on) blocking here would panic (tokio refuses to block a runtime thread) or,
+        // on NoSteal, deadlock if this is one of our own threads: shut down without waiting.
+        let in_async = Handle::try_current().is_ok();
         if let Some(rt) = self.steal.take() {
-            // Waits for the worker threads, which drop the remaining tasks (so their
-            // `spawn_with_recover` exit hooks run); blocking tasks get a bounded wait.
-            rt.shutdown_timeout(std::time::Duration::from_secs(5));
+            if in_async {
+                rt.shutdown_background();
+            } else {
+                // Waits for the worker threads, which drop the remaining tasks (so their
+                // `spawn_with_recover` exit hooks run); blocking tasks get a bounded wait.
+                rt.shutdown_timeout(std::time::Duration::from_secs(5));
+            }
         }
         for (tx, t) in self.no_steal.drain(..) {
             let _ = tx.send(());
-            let _ = t.join();
+            if !in_async {
+                let _ = t.join();
+            }
         }
     }
 }

@@ -523,3 +523,64 @@ fn live_task_gauge_returns_to_zero() {
         assert_eq!(g.get_gauge().get_value(), 0.0);
     }
 }
+
+/// Dropping a `Runtime` from inside an async context must not panic (tokio refuses to block
+/// a runtime thread) nor deadlock: it falls back to a background shutdown.
+#[test]
+fn runtime_drop_inside_async_context() {
+    let outer = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for topology in [Topology::Steal, Topology::NoSteal] {
+        let rt = Runtime::new(RuntimeConfig {
+            topology,
+            worker_threads: 2,
+            ..RuntimeConfig::default()
+        })
+        .unwrap();
+        let pool = rt.pool().clone();
+        let _h = pool.spawn("test-drop-async", async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        outer.block_on(async move {
+            drop(rt);
+        });
+    }
+}
+
+/// A worker that goes idle flushes its thread-local histograms (on_thread_park), so a scrape
+/// sees observations made by a thread that has nothing more to do.
+#[test]
+fn idle_worker_flushes_metrics() {
+    fn cpu_slice_count() -> u64 {
+        prometheus::gather()
+            .iter()
+            .find(|f| f.get_name() == "tidb_rs_runtime_cpu_slice_seconds")
+            .map(|f| f.get_metric()[0].get_histogram().get_sample_count())
+            .unwrap_or(0)
+    }
+    tidb_runtime::metrics::init();
+    for rt in runtimes(1) {
+        let before = cpu_slice_count();
+        let pool = rt.pool().clone();
+        rt.block_on(async move {
+            pool.spawn("test-flush", async {
+                tokio::task::yield_now().await;
+            })
+            .await
+            .unwrap();
+        });
+        // The worker parks once it has nothing to run; its buffer (well within the 1 s flush
+        // interval) must reach the shared histogram.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cpu_slice_count() < before + 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            cpu_slice_count() >= before + 2,
+            "{before} -> {}",
+            cpu_slice_count()
+        );
+    }
+}

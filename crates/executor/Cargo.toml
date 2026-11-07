@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# N3 checkpoint.
+tidb-runtime = { workspace = true }
 tidb-distsql = { workspace = true }
 tidb-kv = { workspace = true }
 tidb-meta = { workspace = true }
