@@ -904,11 +904,29 @@ impl Decoder {
 
     /// An `interface{}` destination: replaced by the generic value (`objectInterface`,
     /// `arrayInterface`, `literalInterface`): numbers become `float64` (no `UseNumber`),
-    /// objects `map[string]any`. A number out of the float64 range saves a type error and
-    /// leaves `nil`.
+    /// objects `map[string]any`. A top-level number out of the float64 range saves a type
+    /// error and leaves the destination unchanged (see [`Decoder::any_opt`]).
     // go-std: encoding/json.decodeState.valueInterface L2 (from the Raw tree)
     pub fn any(&mut self, v: &Raw, dst: &mut Value) {
-        *dst = self.any_value(v);
+        if let Some(x) = self.any_opt(v) {
+            *dst = x;
+        }
+    }
+
+    /// The value an `interface{}` destination is set to, or `None` when Go leaves the
+    /// destination unchanged: a top-level number out of the float64 range
+    /// (`literalStore`: `convertNumber` fails, `d.saveError(err); break` before `v.Set`).
+    /// Nested out-of-range numbers become `nil` elements (`literalInterface` returns the
+    /// nil `n` after saving the error).
+    // go-std: encoding/json.decodeState.literalStore L1 (reflect.Interface destinations)
+    pub fn any_opt(&mut self, v: &Raw) -> Option<Value> {
+        if let Raw::Number(s) = v
+            && !matches!(s.parse::<f64>(), Ok(f) if f.is_finite())
+        {
+            self.save_type_error(&format!("number {s}"), "float64");
+            return None;
+        }
+        Some(self.any_value(v))
     }
 
     // go-std: encoding/json.decodeState.valueInterface L2 (from the Raw tree)
@@ -986,8 +1004,13 @@ impl Decoder {
             if self.failed() {
                 return;
             }
+            // The value is decoded before the key is converted: an error in the value
+            // is saved first; an UnmarshalJSON error returns before the key is stored.
             let mut e = V::default();
             elem(self, val, &mut e);
+            if self.failed() {
+                return;
+            }
             if let Some(k) = key(self, k) {
                 m.insert(k, e);
             }
@@ -999,7 +1022,8 @@ impl Decoder {
     // go-std: encoding/json.decodeState.object L2 (integer map keys)
     pub fn int_key(&mut self, key: &str, min: i64, max: i64, ty: &str) -> Option<i64> {
         match key.parse::<i64>() {
-            Ok(n) if n >= min && n <= max && !key.starts_with('+') => Some(n),
+            // strconv.ParseInt(s, 10, 64) accepts a leading '+'; then OverflowInt.
+            Ok(n) if n >= min && n <= max => Some(n),
             _ => {
                 self.save_type_error(&format!("number {key}"), ty);
                 None

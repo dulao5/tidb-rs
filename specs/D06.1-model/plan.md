@@ -37,7 +37,7 @@ L2：`DBInfo.Copy`（复制而不是共享表）、`IndexInfo.ConditionExpr`（P
 ### 已完成（PR (a)）
 
 1. tidb-model crate：生成层 + 139 个函数，converge `matched 139/153`（缺的 14 个见 spec §2，属 Part 2）。clippy `-D warnings` 干净，生成文件没有模块级 `allow`。
-2. tracker PR #13：`rsgen -model` 生成器；govec `model` 领域 9,053 条记录（集群语料、随机、变异、into、时间、方法），`go test ./...` 通过。集群语料由自建 v8.5.8 playground 导出，playground 已销毁。
+2. tracker PR #13：`rsgen -model` 生成器；govec `model` 领域 63,366 条记录（集群语料、随机、两种变异、into、出错路径、时间、方法），`go test ./...` 通过。集群语料由自建 v8.5.8 playground 导出，playground 已销毁。
 3. `time.Parse(RFC3339)` 回退与 `ParseError` 消息（Go 1.25 的 `parseStrictRFC3339`）。
 4. arm64 与 amd64（tracker CI artifact）的向量回放全部通过，两个目标的记录相同。
 5. mappings.md M-BYTES；ROADMAP 的 D06.1 行和 D04.1 的 scramble 注记；CI arm64 job 加 `tidb-model`。

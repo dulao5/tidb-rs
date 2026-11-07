@@ -42,12 +42,13 @@ impl AnyValue {
         }
     }
 
-    /// `json.Unmarshal` into an `interface{}` field: replaced by the generic value.
+    /// `json.Unmarshal` into an `interface{}` field: replaced by the generic value, except for
+    /// a number out of the float64 range, which saves an error and keeps the old value.
     // go-std: encoding/json.decodeState.valueInterface L2 (into an empty interface field)
     pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
-        let mut x = Value::Null;
-        d.any(v, &mut x);
-        *self = AnyValue::Value(x);
+        if let Some(x) = d.any_opt(v) {
+            *self = AnyValue::Value(x);
+        }
     }
 
     /// The Go `string` the interface holds, if it holds one (`value.(string)`).

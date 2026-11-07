@@ -667,6 +667,13 @@ fn diff(path: &str, want: &Value, got: &Value) -> String {
     }
 }
 
+/// Documented deviations (spec D06.1 §4), by the id govec writes in `out.known_deviation`.
+/// Such a record must differ from Go in `out`, and is counted apart from real mismatches.
+const KNOWN_DEVIATIONS: &[(&str, &str)] = &[(
+    "nil-ptr-elem",
+    "a null element of a []*T decodes as the zero value: the port holds the elements by value (spec D06.1 §4.1)",
+)];
+
 /// Go's JSON syntax error texts (`*json.SyntaxError`), not ported.
 fn is_syntax_error(msg: &str) -> bool {
     msg.starts_with("invalid character") || msg.starts_with("unexpected end of JSON input")
@@ -687,6 +694,7 @@ fn govec_model() {
     assert_eq!(header["domain"], "model");
     std::panic::set_hook(Box::new(|_| {}));
     let (mut n, mut nbad, mut bad) = (0, 0, Vec::new());
+    let (mut nknown, mut stale) = (0, 0);
     for line in lines {
         n += 1;
         let r: Value = serde_json::from_str(line).unwrap();
@@ -717,7 +725,29 @@ fn govec_model() {
                     (Some(w), Some(g)) => w == g || is_syntax_error(w),
                     _ => false,
                 };
-                let out_ok = (r["out"].is_null() && e.is_some()) || r["out"] == out;
+                // A record marked as a known deviation must differ in `out` (and only
+                // there); a marked record that matches means the entry is stale.
+                let mut want_out = r["out"].clone();
+                let known = want_out
+                    .as_object_mut()
+                    .and_then(|m| m.remove("known_deviation"))
+                    .map(|k| s(&k).to_owned());
+                let same = (want_out.is_null() && e.is_some()) || want_out == out;
+                let out_ok = match &known {
+                    None => same,
+                    Some(k) => {
+                        assert!(
+                            KNOWN_DEVIATIONS.iter().any(|(id, _)| id == k),
+                            "unknown known_deviation {k}"
+                        );
+                        if same {
+                            stale += 1;
+                        } else {
+                            nknown += 1;
+                        }
+                        !same
+                    }
+                };
                 if !(err_ok && out_ok)
                     && (bad.len() < 10 || std::env::var_os("GOVEC_ALL").is_some())
                 {
@@ -736,6 +766,13 @@ fn govec_model() {
         }
     }
     let _ = std::panic::take_hook();
+    eprintln!(
+        "govec_model: {n} records, {nknown} known deviations (KNOWN_DEVIATIONS), {nbad} mismatches"
+    );
+    assert!(
+        stale == 0,
+        "{stale} records marked as a known deviation no longer differ"
+    );
     assert!(
         nbad == 0,
         "{nbad} of {n} records differ, e.g.:\n{}",

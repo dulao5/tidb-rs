@@ -61,6 +61,28 @@ tracker 的 `govec/cmd/rsgen -model` 从 Go 反射读出 36 个结构体（`refl
 - `interface{}`：数字一律成为 `float64`（不保留原始字面量），重新编码时按 3.2 的规则。超过 2^53 的整数会丢精度，与 Go 相同。原始字面量只用于 `json.RawMessage`（Part 2 的 `Job`）。
 - 错误：类型错误记录第一个，其余字段继续解码；错误的上下文是最内层结构体名加字段路径，提升字段的路径中带上经过的嵌入字段的 Go 名（`PolicyInfo.PlacementSettings.followers`）。`UnmarshalJSON` 方法返回的错误（`CIStr`、`FieldType`、`time.Time`）终止解码，并且覆盖之前记录的错误。
 - 字段匹配：先精确，再按 `foldName`（D02.3）。
+
+**出错路径逐处对照**（Go 1.25 decode.go；每处在 govec 中有一条 `site/...` 记录，基值的每个字段都有值）：
+
+| Go 位置 | Go 的行为 | Rust |
+|---|---|---|
+| `literalStore` null | interface / 指针 / map / 切片置零；基本类型和 string 不变；有 UnmarshalJSON 的值类型调用 `UnmarshalJSON("null")`（`FieldType` 因此变成零值，`CIStr`、`time.Time` 不变） | 同 |
+| `literalStore` bool / string / number 进错误的类型 | `saveError`，不写，继续 | 同 |
+| `[]byte` 的 base64 错误 | `saveError`，不写；`\r`、`\n` 被跳过；`""` 得到空切片 | 同 |
+| number 进 interface，超出 float64 | `saveError; break`，**不写**（保留原值）；嵌套在数组 / 对象里的则成为 `nil` 元素 | 同（`Decoder::any_opt`）。评审修正 |
+| 整数 / 浮点超范围、非整数字面量 | `saveError`，不写 | 同 |
+| `array` 进非切片 | `saveError` 并跳过 | 同 |
+| 数组元素出错（`saveError`） | 元素保持原值，继续 | 同 |
+| 数组元素的 `UnmarshalJSON` 出错 | 立即返回：已解码的元素保留，**不截断**，之后的字段不再解码 | 同 |
+| 数组更短 / 为空 | 截断；`[]` 得到非 nil 的空切片 | 同 |
+| `object` 进非 map 非结构体 | `saveError` 并跳过 | 同 |
+| map | 先分配；每个值解码进新的零值；先解码值、再转换键，键的 `ParseInt` 失败时 `saveError`、不存这一项；值的 `UnmarshalJSON` 出错时立即返回、不存这一项 | 同。评审时修正了两处：值出错后不再存这一项；`ParseInt` 接受前导 `+` |
+| 结构体字段 | 未知键跳过；重复键依次生效；提升字段先分配经过的嵌入指针（即使值是 `null` 或类型错误） | 同 |
+| `*T` 字段遇到错误类型 | `indirect` 先分配，再 `saveError` | 同 |
+| `UnmarshalJSON` 返回错误 | 解码终止，返回该错误（类型错误加上下文），覆盖之前存下的错误 | 同 |
+| `time.Time.UnmarshalJSON` | 非字符串：返回错误，不写；解析失败：`*t, err = parseStrictRFC3339(data)` **先赋值**，字段成为零时间 | 同。评审修正 |
+| `CIStr.UnmarshalJSON` | 先按结构体解码进接收者（部分写入保留），失败后再按字符串解码 | 同 |
+| `FieldType.UnmarshalJSON` | 解码进临时值，失败时不变 | 同 |
 - 整数：字面量按 `ParseInt`/`ParseUint` 加位宽检查；`1e2`、`1.5`、`-0`（无符号）、超范围都是类型错误。map 的整数键按 `ParseInt` 解析，失败是类型错误。
 
 ### 3.4 Go 类型到 Rust 类型
@@ -89,7 +111,8 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
 
 ## 4. 已知差异
 
-1. `[]*T` 中的 `null` 元素：Go 得到 nil 指针，重新编码为 `null`；Rust 按值持有元素，得到零值。Go 写出的 meta 中不会有 `null` 元素（`TableInfo.Columns` 等由 DDL 代码填写）。生成器的随机值不产生 `null` 元素。
+1. `[]*T` 中的 `null` 元素：Go 得到 nil 指针，重新编码为 `null`；Rust 按值持有元素，得到零值。这个偏离成立的**前提**是 Go 写出的 meta 中不会有 `null` 元素：`TableInfo.Columns`、`Indices` 等由 DDL 代码填写，从不放 nil。如果真有，Go 的读路径在遍历时就会对 nil 解引用而 panic（例如 `TableInfo.Cols()`、`FindColumnByID`），而 Rust 得到一个零值的列继续运行，所以两边本来就不可能一致。govec 在这类记录的 `out` 上标记 `"known_deviation": "nil-ptr-elem"`；回放把它们单独计数（当前 5 条，都来自变异），不当作不一致，但如果某条标记的记录不再不同，测试就失败（偏离被修好，或者标记过期了）。
+   - 同类的另一处（D02.3 §4 第 3 条）：同一个切片字段在一个对象中出现三次以上、中间一次更短时，Go 在底层数组的容量内"复活"旧元素，Rust 截断后重新填充。当前向量中没有命中。
 2. `time.Time.UnmarshalJSON`：Go 解析引号之间的**原始字节**，不处理 JSON 转义（go.dev/issue/47353，Go 自己的 TODO）；Rust 用解码后的字符串。只有时间串里写了 JSON 转义（如 `\u0032024-…`）时结果不同，Go 写出的 JSON 不会这样。其余与 Go 相同：Go 1.25 的 `parseStrictRFC3339` 在快速路径失败时就是 `time.Parse(RFC3339)`（严格复查被禁用，所以一位数的小时、逗号小数点、`+24:00` 都被接受），这条回退连同 `ParseError` 的消息一起移植了（`tidb_base::gostd::time`）。数字时区用固定时区而不是 `Local`，`MarshalJSON` 的输出相同。
 3. `Clone` / `Copy`：Go 浅拷贝共享指针，Rust 复制（3.5）。`DBInfo.Copy` 复制表信息而不是共享，标为 L2。
 4. `TableInfo.GetNonTempColumns` 的结果顺序：Go 遍历 map，顺序随机；Rust 按列名排序（M-MAPORDER）。向量排序后比较。
@@ -98,11 +121,11 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
 ## 5. 验收
 
 - converge：`matched 139/153`，缺的 14 个是第 2 节列出的 Part 2 函数，tracker 的 `model` 领域把它们登记为豁免并写明理由。
-- govec `model` 领域 9,053 条记录，arm64 和 amd64 都回放通过：
-  - roundtrip 3,918 条：从 v8.5.8 集群导出的 866 份 meta（857 张表、9 个库；DDL 见 tracker `govec/domains/testdata/model_cluster_ddl.sql`，覆盖全部列类型、分区、placement、TTL、视图、序列、外键、check 约束、资源组），每个结构体的随机值 1,500 份，二者的变异 1,500 份（删键、重复键、改大小写、未知键、错误类型、超范围数字、`null`）；
+- govec `model` 领域 63,366 条记录（种子 1618，按 Lucky 的评审放大），arm64 和 amd64 都回放通过（5 条已知偏离，见第 4 节第 1 条）：
+  - roundtrip：从 v8.5.8 集群导出的 866 份 meta（857 张表、9 个库；DDL 见 tracker `govec/domains/testdata/model_cluster_ddl.sql`，覆盖全部列类型、分区、placement、TTL、视图、序列、外键、check 约束、资源组），每个结构体的随机值共 15,000 份，对象层的变异 15,000 份（删键、重复键、改大小写、未知键、错误类型、超范围数字、`null`），Lucky 的 `luckyMutate` 20,000 份（任意节点包括数组元素的边界字面量、interface{} 字段、折叠键、重复键）；
   - 时间 68 条：`Time.UnmarshalJSON` 的各种合法与非法串（含 Go 宽松接受的形式）、`Time.MarshalJSON` 的年份与时区范围错误；
-  - into 300 条：解码到已有值；
+  - into 3,000 条：解码到已有值；另有 61 条出错路径记录（§3.3 的表）；
   - 方法 3,800 余条：表、列、索引、分区、placement、资源组、外键和其他函数，以及 Go 测试 `TestDefaultValue`、`TestPlacementSettingsString` 的用例；
   - NaN / ±Inf 默认值的 `Marshal` 错误；
-  - 其中 640 条 Go 返回错误。
+  - 其中 8,537 条 Go 返回错误。
 - clippy `-D warnings`、fmt、`check_layers --blocks`、`cargo test --workspace`。

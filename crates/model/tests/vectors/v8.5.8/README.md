@@ -5,13 +5,17 @@
 | | |
 |---|---|
 | source | `tidb-rs-tracker`, `vectors/v8.5.8/<target>/model.jsonl.gz` (branch `govec/model-D06.1`, PR #13) |
-| tracker commit | `8d2f5b8` |
-| `arm64/model.jsonl.gz` sha256 | `2873394b1396206b2acd3161b49bf30813763e32daf62b97ba26757112a58e05` (GOARCH=arm64, generated locally) |
-| `amd64/model.jsonl.gz` sha256 | `99d5079e3277ed889d53d169976a0a244475f16245d0dfdc9561722e6bd0693a` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact) |
-| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261125), 9,053 records: 3,918 `roundtrip` (866 meta exported from a v8.5.8 cluster, 1,500 random values, 1,500 mutations, 68 time values), 300 `into`, 3,800+ method calls, 640 Go errors |
+| tracker commit | `3647aea` |
+| `arm64/model.jsonl.gz` sha256 | `1293a884cf89c80371e5ac61c8d0c7021e5cec9b8711c266b224f13ba4c0fa00` (GOARCH=arm64, generated locally) |
+| `amd64/model.jsonl.gz` sha256 | `2cbb637ed66c93a86862f0c26b7ad9827ebec77a46c36f0b6525beccb457b663` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 1618), 63,366 records: 50,918 `roundtrip` (866 meta exported from a v8.5.8 cluster, 15,000 random values, 15,000 object-level mutations, 20,000 `luckyMutate` mutations, 68 time values), 3,061 `into` (61 of them one per error / early-return site of encoding/json decode.go), 9,387 method calls; 8,537 Go errors; 5 records marked `known_deviation` |
 
 Both targets have the same records (the CI artifact differs from the local arm64 file only in
 the header); the per-target layout only follows the tracker's.
+
+Records marked `"known_deviation": "nil-ptr-elem"` (a null element of a `[]*T`, spec D06.1
+§4.1) must differ from Go and are counted apart; the test fails on any other mismatch and on a
+marked record that no longer differs.
 
 Record format and replay rules: tracker `govec/README.md` ("model") and the header of
 `govec/domains/model.go`. Replayed by `crates/model/tests/govec_model.rs`. To update, copy the

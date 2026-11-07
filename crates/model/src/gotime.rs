@@ -31,8 +31,18 @@ pub(crate) fn decode_time(t: &mut Time, v: &Raw) -> Result<(), DecodeError> {
     match v {
         Raw::Null => Ok(()),
         Raw::String(s) => {
-            *t = Time::parse_strict_rfc3339(s).map_err(DecodeError::Other)?;
-            Ok(())
+            // `*t, err = parseStrictRFC3339(data)`: assigned before the error is returned,
+            // so a parse failure leaves the zero time.
+            match Time::parse_strict_rfc3339(s) {
+                Ok(x) => {
+                    *t = x;
+                    Ok(())
+                }
+                Err(e) => {
+                    *t = Time::default();
+                    Err(DecodeError::Other(e))
+                }
+            }
         }
         _ => Err(DecodeError::Other(
             "Time.UnmarshalJSON: input is not a JSON string".to_owned(),
