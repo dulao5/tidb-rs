@@ -66,7 +66,6 @@ collate 的 `newCollationEnabled` 是 `AtomicI32`。`newCollatorMap` / `newColla
 
 ### 2.5 照搬的 Go 行为
 
-- **0900 表的越界**：0900 的 `int(r) > len(MapTable4)` 差一，U+2CEA1 会越界 panic。Rust 同样 panic，govec 中有这类记录。
 - **比较的回绕**：`sign(int(an) - int(bn))` 按回绕计算。
 - **pinyin**：`utf8mb4_zh_pinyin_tidb_as_cs` 的所有方法都 panic（`implement me`）。
 - **charset 的 init**：不调用 `switchDefaultCollation`，所以 gbk 的默认排序规则是 `gbk_bin`。
@@ -77,6 +76,8 @@ collate 的 `newCollationEnabled` 是 `AtomicI32`。`newCollatorMap` / `newColla
 
 ## 3. 偏离与未完成
 
+0. **移植了上游修复 pingcap/tidb#67149**（宪章第一条 2）：v8.5.8 的 `convertRuneUnicodeCI0900` 判断 `int(r) > len(MapTable4)` 差一，U+2CEA1（正好等于 len）会越界读表并 panic，用户输入就能触发（比较、排序或 LIKE 任何含 U+2CEA1 的字符串）。master 在 commit dfda1fd3e8（2026-10-19）改为 `>=`，没有回移到 release-8.5。tidb-rs 按修复后的行为实现：U+2CEA1 得到隐式权重（与表外的其他码点一样），不再 panic。函数标注 `// go-fix: pingcap/tidb@dfda1fd3e8 #67149`。**与 v8.5.8 的差异仅限于此**：v8.5.8 在这里 panic（连接报错），tidb-rs 返回结果。
+   - govec 链接的是打过这个修复的 TiDB 副本（tracker `govec/fixes`、`scripts/govec-fixes.sh`），向量文件头有 `"fixes":["pingcap/tidb#67149"]`。重新生成后共有 31 条记录变化：原先 panic 的 30 条（`key` 14、`compare` 11、`pattern` 5），以及 1 条 `key_digest`（含 U+2CEA1 的区间，原先记 0xFF）。两条专门的 sys 记录的 `src` 为 `fix pingcap/tidb#67149`。
 1. **`StringerStr`**：持有 Rust `String`，用于日志的 `Display`，不能像 Go 的 `StringerStr`（Go string）那样承载无效 UTF-8。govec 中输入是无效 UTF-8 的 64 条 `string_misc` 记录，不比对 `stringer` 这一项。目前没有调用方需要传字节；如果以后有，改成字节串。
 2. **`encoding_gbk.go` 只移植了编码器**：`customGBK.NewEncoder` 等 4 个函数。另外 10 个（`encodingGBK` 的 `Name`、`Tp`、`Peek`、`MbLen`、`ToUpper`、`ToLower`、解码器 `NewDecoder` / `Transform` / `Reset`、`init`）属于 parser 的 `Encoding` 接口，随 D02.2 的 Encoding 部分一起移植。所以这个文件按 D02.2 跑 converge 会报这 10 个缺失；charset.go 的 16 个函数全部匹配。
 3. **`MemoizeStr`、`StringerFunc.String`**：参数是函数值，govec 豁免，由 Rust 单元测试覆盖（移植了 Go 的 `TestMemoizeStr`）。

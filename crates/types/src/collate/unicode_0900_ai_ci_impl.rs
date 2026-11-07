@@ -34,13 +34,19 @@ impl UcaImpl for Unicode0900Impl {
     }
 }
 
-/// The weights of a rune. Like Go, a rune equal to `len(MapTable4)` (U+2CEA1) indexes past
-/// the table and panics (Go checks `int(r) > len(...)`).
+/// The weights of a rune. Runes past the table get the implicit weight.
+///
+/// v8.5.8 checks `int(r) > len(MapTable4)`, so U+2CEA1 (exactly `len`) indexes past the
+/// table and panics on user input. Upstream fixed it to `>=` (pingcap/tidb#67149, commit
+/// dfda1fd3e8, not backported to release-8.5); ported per the constitution, article 1
+/// item 2 (D01.9 spec §3).
 // go: convertRuneUnicodeCI0900 L1
+// go-fix: pingcap/tidb@dfda1fd3e8 #67149
 #[inline]
 fn convert_rune_unicode_ci0900(r: char) -> (u64, u64) {
     let r = r as u32;
-    if r as usize > DUCET0900Table.map_table4.len() {
+    // go-fix pingcap/tidb#67149: `>` -> `>=` (v8.5.8 panics on U+2CEA1).
+    if r as usize >= DUCET0900Table.map_table4.len() {
         return (
             (r >> 15) as u64 + 0xFBC0 + ((((r & 0x7FFF) | 0x8000) as u64) << 16),
             0,

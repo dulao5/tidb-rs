@@ -13,4 +13,6 @@
 | T7 | amd64 向量：取 tracker PR 的 CI artifact | x86_64 CI 通过 | 完成。两个目标相同，只有文件头不同 |
 | T8 | 单元测试：`MemoizeStr`、`StringerFunc` | 通过 | 完成 |
 | T9 | spec、plan、tasks，ROADMAP 链接 | — | 完成 |
-| T10 | 合并 tidb-parser 的 PoC `charset.rs` 与 `gocharset`；移植 `encoding_gbk.go` 的其余部分 | — | 留给 D02.2 的后续工作 |
+| T10 | 合并 tidb-parser 的 PoC `charset.rs` 与 `gocharset`；移植 `encoding_gbk.go` 的其余部分 | 只剩一份 charset 实现 | 留给 D02.2 的后续工作（PR #18 评审同意）。合并之前，语义判断只走 `gocharset`，PoC 的 `charset.rs` 只供词法分析器使用 |
+| T11 | 移植上游修复 pingcap/tidb#67149（0900 表越界） | U+2CEA1 不再 panic；govec 用修复后的行为生成 | 完成（PR #18 评审） |
+| T12 | 把 `gocharset` 拆成独立的 rank 1 叶子 crate（Go 的 `parser/charset` 本身就是叶子包） | tidb-types 不再依赖整个 tidb-parser，冷编译省约 14 秒 | 后续工作（PR #18 评审建议），可以和 T10 一起做 |
