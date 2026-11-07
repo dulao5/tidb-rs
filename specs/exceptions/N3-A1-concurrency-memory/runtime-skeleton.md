@@ -45,14 +45,16 @@ N3 中位于所有执行器、会话、store crate 之下的部分，集中在 c
 4. `checkpoint` 是自由函数 `checkpoint(&hook)`，`ExecCtx::checkpoint()` 在上层委托给它。
 5. Q3 按类别分别限额（D43，取代 D20）：SLEEP、GET_LOCK 不进 Q3。
 
-## 4. PR B：接入 PoC 并测基准（未做）
+## 4. PR B：接入 PoC 并测基准
+
+> 2026-11-07 状态：第 1、2、3、5 条已接入；第 4 条（Q2）**没有接入**，原因见下。基准结果见 [docs/bench/n3-runtime.md](../../../docs/bench/n3-runtime.md)。
 
 接入：
 
 1. `crates/server` 的 `main` 用 `tidb_runtime::Runtime` 代替 `#[tokio::main]`，每个连接 `spawn_connection`；拓扑由配置项选择（默认 Steal）。
 2. 语句入口（PoC 会话处理一条命令的地方）：`Admission::get().await` 加 `tidb_metrics::token_acquired(wait)`，结束时 `token_released()`；`command_started` 不再记录 token。
 3. PoC 执行器的行循环（`crates/executor`、`crates/distsql` 的解码循环）在 Go 检查点的对应位置调用 `checkpoint(&())`（KILL 钩子随 D05 接入）。
-4. PoC 发往 TiKV 的 coprocessor 请求外面包 `StoreWindows::acquire`，响应到达即释放；响应的 `ScanDetailV2.read_pool_schedule_wait_nanos` 送进 `observe_schedule_wait`。
+4. PoC 发往 TiKV 的 coprocessor 请求外面包 `StoreWindows::acquire`，响应到达即释放；响应的 `ScanDetailV2.read_pool_schedule_wait_nanos` 送进 `observe_schedule_wait`。**未接入**：PoC 的 coprocessor 请求由 tikv-client（fork `dulao5/client-rust`）内部按 region 拆分、在它自己的 worker task 中逐个发出，PoC 看不到每个 RPC 的 store，`CopResponse` 也不带 store id 和执行详情。要按 RPC 取许可，需要在 fork 中加一个按 RPC 调用的钩子（带 store id、addr，响应时回调 schedule wait），这是 fork 仓库的改动，另提。默认窗口不限、`tidb_store_limit` 为 0（PoC 也没有这个系统变量），所以不接入时行为与 Go 默认相同。
 5. 打开停顿检测，基准期间记录 `tidb_rs_runtime_poll_stalls_total`。
 
 基准（N3 §5），在 `scripts/playground.sh` 起的 v8.5.8 playground 上，用 `scripts/playground-join.sh` 接入 tidb-rs：
