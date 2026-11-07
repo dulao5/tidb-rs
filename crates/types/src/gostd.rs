@@ -1158,3 +1158,194 @@ mod tests {
         );
     }
 }
+
+/// `*strconv.NumError` from `ParseInt` / `Atoi` on a Go string (bytes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntNumError {
+    /// The failing function (`"ParseInt"`, `"ParseUint"`, `"Atoi"`).
+    pub func: &'static str,
+    /// The input.
+    pub bytes: Vec<u8>,
+    /// Why it failed.
+    pub err: NumErrKind,
+}
+
+impl IntNumError {
+    /// The error Go returns for it (`errors.Trace(err)` of the `*strconv.NumError`): Go's
+    /// message `strconv.<Func>: parsing <strconv.Quote(num)>: <why>`.
+    // go-std: strconv.NumError.Error L1
+    pub fn into_base(self) -> tidb_base::Error {
+        let why = match self.err {
+            NumErrKind::Syntax => "invalid syntax",
+            NumErrKind::Range => "value out of range",
+        };
+        let quoted =
+            tidb_base::gofmt::sprintf("%q", &[tidb_base::gofmt::Arg::go_string(self.bytes)]);
+        let mut msg = format!("strconv.{}: parsing ", self.func).into_bytes();
+        msg.extend_from_slice(&quoted);
+        msg.extend_from_slice(b": ");
+        msg.extend_from_slice(why.as_bytes());
+        tidb_base::Error::plain(msg)
+    }
+}
+
+// go-std: strconv.syntaxError L1 (with strconv.rangeError: the kind is an argument)
+fn int_error(func: &'static str, s: &[u8], err: NumErrKind) -> IntNumError {
+    IntNumError {
+        func,
+        bytes: s.to_vec(),
+        err,
+    }
+}
+
+/// `strconv.ParseUint(s, 10, bitSize)`. Go-shaped (`M-ERRVAL`): on a range error the value
+/// is the maximum of the type.
+// go-std: strconv.ParseUint L2 (base 10 only, so no prefixes or underscores)
+pub fn parse_uint(s: &[u8], bit_size: u32) -> (u64, Result<(), IntNumError>) {
+    const FN: &str = "ParseUint";
+    if s.is_empty() {
+        return (0, Err(int_error(FN, s, NumErrKind::Syntax)));
+    }
+    // Cutoff is the smallest number such that cutoff*base > maxUint64.
+    let cutoff: u64 = u64::MAX / 10 + 1;
+    let max_val: u64 = if bit_size == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bit_size) - 1
+    };
+    let mut n: u64 = 0;
+    for &c in s {
+        let d = if c.is_ascii_digit() {
+            c - b'0'
+        } else {
+            return (0, Err(int_error(FN, s, NumErrKind::Syntax)));
+        };
+        if n >= cutoff {
+            // n*base overflows
+            return (max_val, Err(int_error(FN, s, NumErrKind::Range)));
+        }
+        n *= 10;
+        let n1 = n.wrapping_add(u64::from(d));
+        if n1 < n || n1 > max_val {
+            // n+d overflows
+            return (max_val, Err(int_error(FN, s, NumErrKind::Range)));
+        }
+        n = n1;
+    }
+    (n, Ok(()))
+}
+
+/// `strconv.ParseInt(s, 10, bitSize)`. Go-shaped (`M-ERRVAL`): on a range error the value
+/// is the nearest bound.
+// go-std: strconv.ParseInt L2 (base 10 only)
+pub fn parse_int(s: &[u8], bit_size: u32) -> (i64, Result<(), IntNumError>) {
+    const FN: &str = "ParseInt";
+    if s.is_empty() {
+        return (0, Err(int_error(FN, s, NumErrKind::Syntax)));
+    }
+
+    // Pick off leading sign.
+    let s0 = s;
+    let mut s = s;
+    let mut neg = false;
+    if s[0] == b'+' {
+        s = &s[1..];
+    } else if s[0] == b'-' {
+        neg = true;
+        s = &s[1..];
+    }
+
+    // Convert unsigned and check range.
+    let (un, err) = parse_uint(s, bit_size);
+    if let Err(e) = err
+        && e.err != NumErrKind::Range
+    {
+        return (0, Err(int_error(FN, s0, e.err)));
+    }
+
+    let cutoff: u64 = 1u64 << (bit_size - 1);
+    if !neg && un >= cutoff {
+        return (
+            (cutoff - 1) as i64,
+            Err(int_error(FN, s0, NumErrKind::Range)),
+        );
+    }
+    if neg && un > cutoff {
+        return (
+            (cutoff as i64).wrapping_neg(),
+            Err(int_error(FN, s0, NumErrKind::Range)),
+        );
+    }
+    let mut n = un as i64;
+    if neg {
+        n = n.wrapping_neg();
+    }
+    (n, Ok(()))
+}
+
+/// `strconv.Atoi` is equivalent to ParseInt(s, 10, 0), converted to type int.
+// go-std: strconv.Atoi L1
+pub fn atoi(s: &[u8]) -> (isize, Result<(), IntNumError>) {
+    const FN: &str = "Atoi";
+    let s_len = s.len();
+    if 0 < s_len && s_len < 19 {
+        // Fast path for small integers that fit int type.
+        let s0 = s;
+        let mut s = s;
+        if s[0] == b'-' || s[0] == b'+' {
+            s = &s[1..];
+            if s.is_empty() {
+                return (0, Err(int_error(FN, s0, NumErrKind::Syntax)));
+            }
+        }
+
+        let mut n: isize = 0;
+        for &ch in s {
+            let ch = ch.wrapping_sub(b'0');
+            if ch > 9 {
+                return (0, Err(int_error(FN, s0, NumErrKind::Syntax)));
+            }
+            n = n * 10 + ch as isize;
+        }
+        if s0[0] == b'-' {
+            n = -n;
+        }
+        return (n, Ok(()));
+    }
+
+    // Slow path for invalid, big, or underscored integers.
+    let (i64v, err) = parse_int(s, 64);
+    (
+        i64v as isize,
+        err.map_err(|mut e| {
+            e.func = FN;
+            e
+        }),
+    )
+}
+
+/// `json.Unmarshal(data, &v)` with `v types.CoreTime` (a `uint64`; Go `Time.UnmarshalJSON`
+/// decodes into the embedded `CoreTime`). `null` leaves `v` unchanged; a number must be a
+/// `uint64` literal; any other value is an `*json.UnmarshalTypeError`. The error is Go's
+/// message (syntax error texts are serde_json's, as for MyDecimal).
+// go-std: encoding/json.Unmarshal L2 (into a uint64; syntax error messages differ)
+pub(crate) fn json_unmarshal_uint64(data: &[u8], v: u64) -> Result<u64, String> {
+    let value: Value = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+    let type_err =
+        |what: &str| format!("json: cannot unmarshal {what} into Go value of type types.CoreTime");
+    match value {
+        Value::Null => Ok(v),
+        Value::Number(_) => {
+            let item = trim_space(data);
+            let (n, err) = parse_uint(item, 64);
+            if err.is_err() {
+                return Err(type_err(&format!(
+                    "number {}",
+                    String::from_utf8_lossy(item)
+                )));
+            }
+            Ok(n)
+        }
+        other => Err(type_err(kind(&other))),
+    }
+}

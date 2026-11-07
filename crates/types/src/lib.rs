@@ -1,16 +1,22 @@
-//! Port of Go TiDB v8.5.8 `pkg/types` (so far block D01.2: `MyDecimal`).
+//! Port of Go TiDB v8.5.8 `pkg/types` (so far blocks D01.2 `MyDecimal` and D01.3 time and
+//! Duration, with `types.Context`).
 //!
 //! The Go code is the specification: every function maps to one Go function (see the
 //! `// go:` annotations and `specs/D01.2-mydecimal/`).
 
 #![forbid(unsafe_code)]
 
+pub mod context;
+pub mod core_time;
 pub mod errors;
+pub mod fsp;
 pub mod gostd;
 mod helper;
 pub mod mydecimal;
 #[cfg(test)]
 mod mydecimal_test;
+pub mod time;
+mod util_parser;
 
 pub use errors::Error;
 pub use mydecimal::{

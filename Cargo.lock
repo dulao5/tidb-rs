@@ -3761,9 +3761,11 @@ version = "0.0.0"
 dependencies = [
  "criterion 0.5.1",
  "flate2",
+ "log",
  "ryu",
  "serde",
  "serde_json",
+ "tidb-base",
  "tikv-jemallocator",
 ]
 

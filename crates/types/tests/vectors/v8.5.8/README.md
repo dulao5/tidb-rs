@@ -30,3 +30,13 @@ input first; chained ops pass the first step's object, not a re-parsed string; `
 ops write into the object `from_string(args[0])` left behind, without resetting it).
 Replayed by `crates/types/tests/govec_decimal.rs`. To update, copy both `.gz` files from a
 newer tracker commit and update the commit and sha256 above.
+
+## time (block D01.3)
+
+`<target>/time.jsonl.gz` are copied unmodified from tidb-rs-tracker
+`vectors/v8.5.8/<target>/time.jsonl.gz` (branch `govec/time-D01.3`): 101,814 records of
+`pkg/types` time.go, core_time.go and fsp.go plus the Go `time` package behaviour they
+use. The TZif files of the zones used are inside the file (`zone` records), so the replay
+does not depend on the machine's tz database. The two targets differ only where
+`ParseTimeFromFloat64` converts NaN / ±Inf / out-of-range floats (mapping rule `M-F2I`).
+Replayed by `tests/govec_time.rs`.
