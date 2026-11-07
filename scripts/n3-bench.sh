@@ -15,7 +15,15 @@
 #   OVERLOAD   thread counts for the overload sweep     [16 32 64 128 256 320]
 #   OUT        output directory                        [target/n3bench]
 #   TESTS      which tests                             [ps ro scan overload]
+#   STEADY_SKIP_START / STEADY_SKIP_END
+#              seconds excluded at the start / end of each run from the steady-state
+#              stall window                            [1 / 1]
 #
+# Stall windows (tidb-rs only; N3 §5): /metrics is scraped before the run, STEADY_SKIP_START s
+# into it, STEADY_SKIP_END s before its end, and after sysbench exits. Stalls by cause in the
+# middle interval are the steady state (on_cpu and blocked must be 0); the rest (warm-up, and
+# the teardown when all clients finish and disconnect at once) are reported separately in the
+# `extra` column as `steady[...] edges[...]`.
 # Appends one line per run to $OUT/results.tsv:
 #   label test threads qps p95_ms p99_ms errors extra
 # where latency is per sysbench event (point_select: one query; read_only: 10 point selects +
@@ -71,17 +79,52 @@ pct() {
         }'
 }
 
+# stalls -> "on_cpu blocked preempted off_cpu unclassified" summed over tasks, from /metrics
+stalls() {
+    curl -s "http://127.0.0.1:$status/metrics" 2>/dev/null | awk '
+        /^tidb_rs_runtime_poll_stalls_total\{/ {
+            match($0, /cause="[a-z_]+"/); c = substr($0, RSTART + 7, RLENGTH - 8); n[c] += $NF }
+        END { printf "%d %d %d %d %d\n", n["on_cpu"], n["blocked"], n["preempted"], n["off_cpu"], n["unclassified"] }'
+}
+
+# diff <a> <b> -> "on_cpu=x blocked=y preempted=z off_cpu=w unclassified=v" (b - a)
+stall_diff() {
+    awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, " "); split(b, y, " ");
+        split("on_cpu blocked preempted off_cpu unclassified", k, " ");
+        for (i = 1; i <= 5; i++) printf "%s%s=%d", (i > 1 ? " " : ""), k[i], y[i] - x[i] }'
+}
+
+skip_start=${STEADY_SKIP_START:-1}
+skip_end=${STEADY_SKIP_END:-1}
+
 # run <test> <threads> <sysbench args> [extra-note]
 run() {
     local test=$1 t=$2 args=$3 note=${4:-}
     local file=$out/$label-$test-t$t-$(date +%H%M%S).txt lat
     lat=$file.lat
     rm -rf "$lat" && mkdir -p "$lat"
+    local s0 s1 s2 s3
+    [ -n "$server_pid" ] && s0=$(stalls)
     # shellcheck disable=SC2086
     { sysbench "$script_dir/oltp_read_only_lat.lua" --lat_dir="$lat" \
         --mysql-host="$host" --mysql-port="$p" --mysql-user=root --mysql-db=sbtest \
         --tables=1 --table-size=1000000 --skip_trx=on --db-ps-mode=auto \
-        --threads="$t" --time="$dur" $args run >"$file" 2>&1; } 2>/dev/null || true
+        --threads="$t" --time="$dur" $args run >"$file" 2>&1; } 2>/dev/null &
+    local sb=$!
+    if [ -n "$server_pid" ]; then
+        sleep "$skip_start"
+        s1=$(stalls)
+        sleep "$(awk -v d="$dur" -v a="$skip_start" -v b="$skip_end" 'BEGIN { v = d - a - b; print (v > 0 ? v : 0) }')"
+        s2=$(stalls)
+    fi
+    wait $sb || true
+    if [ -n "$server_pid" ]; then
+        s3=$(stalls)
+        local warm tail
+        warm=$(stall_diff "$s0" "$s1")
+        tail=$(stall_diff "$s2" "$s3")
+        note="${note:+$note }steady[$(stall_diff "$s1" "$s2")] edges[start: $warm; end: $tail]"
+    fi
     local qps err
     qps=$(awk '/queries:/ && /per sec/ { gsub(/[(]/, "", $3); print $3 }' "$file")
     err=$(awk '/ignored errors:/ { e += $3 } /reconnects:/ { e += $2 } END { print e + 0 }' "$file")

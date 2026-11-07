@@ -194,20 +194,27 @@ impl<F: Future> Future for Instrumented<F> {
 
     // glue: N3 3.1 第 5 条 / 3.6 poll instrumentation
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
-        let start = Instant::now();
-        let cfg = TASK.with(|t| {
-            t.poll_start.set(start);
-            t.calls.set(0);
-            t.cfg
-        });
+        let cfg = TASK.with(|t| t.cfg);
+        // The CPU / switch samples bracket [start, end] (PR #10 review): a switch between the
+        // two clock reads must fall inside the sampled interval, and nothing after `end` may.
         let before = if cfg.classify_stalls {
             crate::stall::sample()
         } else {
             None
         };
+        let start = Instant::now();
+        TASK.with(|t| {
+            t.poll_start.set(start);
+            t.calls.set(0);
+        });
         let out = self.inner.as_mut().poll(cx);
         let end = Instant::now();
         let d = end.saturating_duration_since(start);
+        let after = if before.is_some() && d > cfg.stall_threshold {
+            crate::stall::sample()
+        } else {
+            None
+        };
         TASK.with(|t| {
             t.cpu.set(t.cpu.get() + d);
             if let Some(r) = t.recorder.borrow().as_ref() {
@@ -216,19 +223,19 @@ impl<F: Future> Future for Instrumented<F> {
         });
         metrics::cpu_slice(d, end);
         if d > cfg.stall_threshold {
-            let cause = match (before, crate::stall::sample()) {
+            let cause = match (before, after) {
                 (Some(b), Some(a)) => crate::stall::classify(d, &b, &a),
                 _ => crate::stall::StallCause::Unclassified,
             };
             STALLS.fetch_add(1, Ordering::Relaxed);
             crate::stall::count(cause);
             self.metrics.stall(d, cause);
-            log::warn!(
-                "poll stall ({}): task {} ran {:?} without yielding (threshold {:?})",
-                cause.as_str(),
-                self.metrics.name,
-                d,
-                cfg.stall_threshold
+            tracing::warn!(
+                cause = cause.as_str(),
+                task = self.metrics.name,
+                elapsed = ?d,
+                threshold = ?cfg.stall_threshold,
+                "poll stall: a task ran without yielding"
             );
         }
         out

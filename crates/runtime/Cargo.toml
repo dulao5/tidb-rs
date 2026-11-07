@@ -16,13 +16,16 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"]
 parking_lot = "0.12"
 # Same version as tidb-metrics, tidb_query_common and tikv-client: one default registry.
 prometheus = { version = "0.13", default-features = false }
-# Panic and store-token warnings (Go: logutil.BgLogger(), i.e. zap).
-log = "0.4"
+# Panic, stall and store-token warnings (Go: logutil.BgLogger(), i.e. zap). `tracing`, like
+# tidb-server's subscriber, so they reach the server log without a log -> tracing bridge.
+tracing = "0.1"
 # Thread CPU time and per-thread rusage for stall classification (safe wrappers; the crate
 # forbids unsafe). Same version as tidb-metrics.
 nix = { version = "0.29", default-features = false, features = ["time", "resource"] }
 
 [dev-dependencies]
+# Captures the runtime's tracing events in tests (tests/logs.rs).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 criterion = "0.5"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
 

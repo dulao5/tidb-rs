@@ -1,0 +1,6 @@
+label	test	threads	qps	p95_ms	p99_ms	errors	extra
+win320-r1	overload	320	52272.81	12.09	17.68	0	steady[on_cpu=0 blocked=0 preempted=0 off_cpu=37 unclassified=0] edges[start: on_cpu=0 blocked=0 preempted=0 off_cpu=0 unclassified=0; end: on_cpu=0 blocked=0 preempted=0 off_cpu=4 unclassified=0]
+win320-r2	overload	320	51102.70	11.61	16.65	0	steady[on_cpu=0 blocked=0 preempted=0 off_cpu=29 unclassified=0] edges[start: on_cpu=0 blocked=0 preempted=0 off_cpu=0 unclassified=0; end: on_cpu=0 blocked=0 preempted=0 off_cpu=2 unclassified=0]
+win320-r3	overload	320	51996.44	12.09	17.33	0	steady[on_cpu=0 blocked=0 preempted=0 off_cpu=43 unclassified=0] edges[start: on_cpu=0 blocked=0 preempted=0 off_cpu=0 unclassified=0; end: on_cpu=0 blocked=0 preempted=0 off_cpu=1 unclassified=0]
+win-ps64	ps	64	44618.46	2.04	2.70	0	steady[on_cpu=0 blocked=0 preempted=0 off_cpu=0 unclassified=0] edges[start: on_cpu=0 blocked=0 preempted=0 off_cpu=0 unclassified=0; end: on_cpu=0 blocked=0 preempted=0 off_cpu=0 unclassified=0]
+win-ps64	scan	16	34294.83	0.78	1.16	0	steady[on_cpu=0 blocked=0 preempted=0 off_cpu=0 unclassified=0] edges[start: on_cpu=0 blocked=0 preempted=0 off_cpu=0 unclassified=0; end: on_cpu=0 blocked=0 preempted=0 off_cpu=0 unclassified=0]

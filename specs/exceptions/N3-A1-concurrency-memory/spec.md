@@ -137,6 +137,12 @@ Q2 的规则：
 
 **poll 停顿检测**：单次 poll 超过阈值（默认 10ms）计数并打日志，覆盖语句和后台 task。它是 3.1 第 5 条时间片让出的兜底，用来发现漏放 checkpoint 的循环。
 
+**盲区**（PR #10 评审）：只有经过 `ExecPool` 启动的 task 被插桩。tikv-client 自己 `tokio::spawn` 的 task（tonic / h2 的连接 task 等）也跑在我们的 worker 线程上，但不经过插桩，它们的停顿完全看不到。Lucky 用 bpftrace 抓到的 2 次 blocked 栈正是这类 task：在 `h2::proto::streams::Streams::poll_pending_open` 里等 h2 连接共享的 `std::sync::Mutex`（5.4ms、23.7ms），持锁线程被抢占后其他线程排队。补救办法二选一：用 tokio 的 `on_before_task_poll` / `on_after_task_poll` hook 覆盖所有 task（需要 `tokio_unstable`），或者在 nightly 用 bpftrace 做全量检查。
+
+**后续**：
+1. 在 Linux 上用 bpftrace 抓一次**我们的 connection task** 上 blocked 停顿的栈，确认是否也是 h2 的锁（目前只是推测）；
+2. 在独立的客户端机器上重测过载，确认收尾时的 preempted 停顿是否只是 sysbench 收尾时的 CPU 突发。
+
 #### 3.7 后台任务（2026-11-06 新增）
 
 schema reload 的 diff、统计加载、plan cache 淘汰等后台任务，在 Go 里靠运行时抢占兜底；在单运行时的 Rust 里，它们和语句共用线程，会卡住语句。规则：后台任务和执行器一样遵守 `M-BLOCK`，长循环按 3.1 第 5 条放时间片让出点，否则放到 Q3。停顿检测覆盖后台任务。
@@ -190,7 +196,7 @@ for w in workers {
 | 并发度语义 | 对每个并发度变量，构造查询断言实际 worker 数与 Go 相同（读 runtime stats 中的 concurrency 字段，与 Go 的 EXPLAIN ANALYZE 对比） |
 | 性能 | sysbench oltp_point_select / read_only QPS 不低于当前 PoC 基线（去掉交接后路径与 PoC 一样长）；TPC-H 22 条查询总耗时不高于 Go |
 | 两种拓扑 | Steal 拓扑每个 PR 跑全部测试；NoSteal 拓扑 nightly 跑同一套测试。可抓出两类只在一种拓扑下暴露的 bug：`current_thread` 下 task 同步等待自己 spawn 的 task 会死锁；依赖线程局部状态的代码只在工作窃取下出错 |
-| 停顿检测 | 测试和基准中，打开停顿分类（`SliceConfig::classify_stalls` 或 `TIDB_RS_STALL_CLASSIFY=1`）后，`on_cpu` 和 `blocked` 两类停顿（> 10ms）计数为 0，后台任务包括在内；`preempted`（被 OS 抢占）和 `off_cpu`（平台给不出切换次数时无法细分，如 macOS）只记录、不判定。2026-11-07 按 PR #9 评审修订：poll 按墙钟计时，CPU 超额订阅时被抢占也会算成停顿，原来的"停顿为 0"测的是机器负载 |
+| 停顿检测 | 测试和基准中打开停顿分类（`SliceConfig::classify_stalls` 或 `TIDB_RS_STALL_CLASSIFY=1`），在每次基准运行的**稳态窗口**内（去掉开头和结尾各 1 秒，`scripts/n3-bench.sh` 的 `STEADY_SKIP_START` / `STEADY_SKIP_END`），`on_cpu` 和 `blocked` 两类停顿（> 10ms）计数为 0，后台任务包括在内。`preempted`（被 OS 抢占）和 `off_cpu`（平台给不出切换次数时无法细分，如 macOS）只记录、不判定；窗口外（预热、所有客户端同时结束并断开时）的停顿单独报告。2026-11-07 按 PR #9、#10 评审修订：poll 按墙钟计时，CPU 超额订阅时被抢占也会算成停顿；Linux 上 320 线程过载的停顿集中在 sysbench 收尾的约 50ms 内（见 docs/bench/n3-runtime.md §4.1），那是连接关闭，不是语句执行 |
 | 队列指标 | Q1 / Q2 / Q3 的深度与等待时间指标存在且在基准中有读数 |
 | cop 请求字段 | 用 mock TiKV 断言每个 cop 请求都带 priority、resource group name、override priority、task_id、busy_threshold、deadline，取值与 Go 对同一语句的请求相同 |
 | 过载 | 负载升到饱和点的 2 倍、5 倍时，吞吐不低于峰值的 90%，已接纳语句的 p99 有上界且不高于 Go（默认配置，即 Go 行为；AIMD 打开时另测） |

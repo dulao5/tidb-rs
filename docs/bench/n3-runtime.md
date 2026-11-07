@@ -7,7 +7,7 @@
 | 问题 | 结论 |
 |---|---|
 | 接入运行时是否让 PoC 变慢 | **没有**。点查、read_only、扫描并发下的点查、过载各项，接入后与接入前都在噪声范围内（中位数相差 −1.7%～+1.5%，3 次运行的波动区间互相重叠） |
-| 停顿检测 | 点查、read_only、扫描并发下的点查：**0**。过载到 256、320 个并发语句时出现停顿（每次 15 秒 17～44 次，多为 10～16ms）。**分类后全部是 off_cpu，`on_cpu` 为 0**：线程在停顿的 poll 中几乎没有占用 CPU，是 OS 调度造成的；Lucky 在 Linux 上用切换次数确认属于抢占（§4.1）。按修订后的 N3 §5（`on_cpu`、`blocked` 为 0），在 Linux 上**达标**；macOS 分不出 blocked 与 preempted |
+| 停顿检测 | 点查、read_only、扫描并发下的点查：**0**。过载到 256、320 个并发语句时出现停顿（每次 15 秒 17～44 次，多为 10～16ms）。分类后本机全部是 off_cpu，`on_cpu` 为 0，分散在整个运行中；Linux 上集中在所有客户端同时断开的收尾时刻（§4.2）。N3 §5 改为只在稳态窗口内判定 `on_cpu`、`blocked` 为 0：本机 `on_cpu` 达标，`blocked` 只能在 Linux 上判定 |
 | Q1 | 默认 1000 不会触发排队，平均等待约 144ns（`queue_wait_seconds` 的 sum / count）。`--token-limit 64` 时 320 个线程下 Q1 排队，p99 从 16.3ms 降到 9.5ms，吞吐降到 45k（峰值的 84%） |
 | Q2、Q3 | PoC 中 **没有读数**：Q2 未接入（见 §5），PoC 没有阻塞型工作，Q3 没有使用 |
 | 换 yatp 多级队列 | **现在不换**。一个全表扫描会话并发时，点查 p99 接入前后相同（1.31ms），且与 Go 的差距来自 PoC 的访问路径（见 §3），不是调度。等真实执行器移植后，用 N3 §5 的"64 个 TPC-H 会话 + 点查"场景再决定。那时的基准**必须包含没有下推的大排序和 hash join**（Lucky）：根节点上长时间运行的算子才是多级队列真正起作用的地方，本次的扫描测试把部分聚合下推了，测不到 |
@@ -110,7 +110,7 @@ Go 快约 6 倍的原因不在运行时：Go 的计划是 `IndexReader(HashAgg c
 | 点查、read_only 的 QPS 不低于 PoC 基线 | **通过**：wired / base 在 ps 为 1.03 / 1.00 / 1.00，ro 为 0.99 / 1.01 / 1.02（分别对应 8 / 32 / 64 线程） |
 | 大扫描并发下点查的 p99 | 接入前后相同（1.31ms），Go 为 0.75ms，差距见上 |
 | 过载 2×、5× | 饱和点取 64 个线程：之后 QPS 的增长不到线程数增长的 1/10，延迟随线程数线性增加。2×（128）和 5×（320）时，吞吐为 64 线程时的 107%、121%，没有崩塌；p99 有上界（5.3ms、16.3ms），与 base 相同。但 **比 Go 高**（Go 为 4.6ms、11.4ms）：base 同样如此，属于 PoC 执行路径。打开 `--token-limit 64` 后 p99 降到 9.5ms，低于 Go，但吞吐只有峰值的 84%，低于 90% 的目标 |
-| 停顿（修订后：`on_cpu`、`blocked` 为 0） | `on_cpu` 为 0（macOS、Linux）；`blocked` 在 Linux 上为 0（Lucky 复现，§4.1）。见 §4 |
+| 停顿（修订后：稳态窗口内 `on_cpu`、`blocked` 为 0） | 稳态 `on_cpu` 为 0（macOS、Linux）；稳态 `blocked`：Linux 为 0（Lucky 复现），macOS 无法判定。Linux 收尾时有 blocked 和 preempted，单独报告。见 §4.2 |
 | 队列指标有读数 | Q1 有；Q2、Q3 没有，见 §5 |
 
 ## 4. 停顿
@@ -166,13 +166,41 @@ Go 快约 6 倍的原因不在运行时：Go 的计划是 `IndexReader(HashAgg c
 
 全部来自 `connection` task（语句 task）。`on_cpu` 为 0，所以没有需要追查的代码路径。同时跑了 64 线程点查和扫描并发下的点查：0 次停顿。打开分类后点查 QPS 为 44,694，与关闭时的 44,733 在噪声之内。数据见 `n3-runtime-data/stall-classify/`。
 
-macOS 上 off_cpu 分不出被抢占还是阻塞。Lucky 在 Linux（10 核）上用切换次数做了同样的探测：
-- 过载 320 共 41 次停顿，34 次是只有非自愿切换的抢占；
-- 6 次 on_cpu 出现在同一次运行中，之后 9 次运行都没有复现，原因未定；
-- 2 次带有一次自愿切换；
-- 把 tidb-rs 绑在独占的 4 个核上后，320、640 个并发语句都是 0 次停顿。
+macOS 上 off_cpu 分不出被抢占还是阻塞。
 
-结论：过载下的停顿是 CPU 超额订阅造成的，不是缺检查点或阻塞。N3 §5 已改为 `on_cpu`、`blocked` 为 0，`preempted`、`off_cpu` 只记录。
+### 4.2 稳态窗口与收尾（PR #10 评审之后）
+
+**采样顺序已修正**：现在线程 CPU 和切换次数的两次采样包住 poll 的 `[start, end]`，after 样本只在停顿时读取。之前 `start` 在 before 样本之前，`start` 和 before 之间发生的切换看不到，Lucky 在 Linux 上实测有 3 次 preempted 因此被误判成 off_cpu。
+
+**按时间窗口统计**：`scripts/n3-bench.sh` 在每次运行的开始前、开始后 1 秒、结束前 1 秒、结束后各抓一次 `/metrics`。中间一段为稳态，前后两段（预热和收尾）单独报告，边距可用 `STEADY_SKIP_START` / `STEADY_SKIP_END` 配置。
+
+本机（macOS）重测，320 线程过载 3 次，打开分类：
+
+| 运行 | QPS | p99 ms | 稳态 on_cpu / blocked / off_cpu | 开头 1 秒 | 结尾 1 秒 + 收尾 |
+|---|--:|--:|--:|--:|--:|
+| 1 | 52,273 | 17.68 | 0 / 0 / 37 | 0 | off_cpu 4 |
+| 2 | 51,103 | 16.65 | 0 / 0 / 29 | 0 | off_cpu 2 |
+| 3 | 51,996 | 17.33 | 0 / 0 / 43 | 0 | off_cpu 1 |
+
+64 线程点查和扫描并发下的点查：所有窗口均为 0。
+
+**macOS 的时间分布与 Linux 不同**：server 日志中每次停顿都有时间戳（runtime 现在通过 `tracing` 打日志，见下）。停顿分散在整个 15 秒内，每秒 1～8 次，并**没有**集中在收尾（`n3-runtime-data/stall-window/win320-r*-stall-log.txt`）。所以本机的 off_cpu 停顿是稳态下的现象：机器负载约 15～18，CPU 一直处于超额订阅。macOS 没有按线程的切换次数，无法判定其中是否有 blocked。按修订后的 N3 §5，本机 `on_cpu` 为 0，达标；`blocked` 在 macOS 上无法判定，以 Linux 为准。
+
+**Linux（Lucky 复现，10 核）**：
+
+已确认：
+- 6 次运行的 24 次停顿，全部发生在 sysbench 结束前 28～51ms 之内，即 320 个客户端同时结束、断开的时刻；15 秒稳态中为 0。
+- 用 bpftrace 抓到的 2 次 blocked 栈，在 tonic 的 h2 连接 task 中（不是我们的 connection task），等待 h2 连接共享的 `std::sync::Mutex`（`Streams::poll_pending_open` → futex，5.4ms、23.7ms）。这类 task 由 tikv-client 自己 spawn，**不经过插桩**，是停顿检测的盲区（N3 3.6 已注明）。
+- 把 tidb-rs 绑在独占的 4 个核上后，320、640 个并发语句都是 0 次停顿。
+- 另有一次运行在我们的 connection task 上出现 5 次 blocked（各 1 次自愿切换、13～20ms），与同一次运行的抢占停顿挤在约 5ms 的窗口内，也在收尾时刻。
+
+推测（待 bpftrace 后续确认，N3 3.6 已列为后续）：
+- 我们 connection task 上的 blocked 与 tonic 连接 task 同因，即 h2 的锁；
+- 收尾时的 preempted 只是 sysbench 收尾时的 CPU 突发。
+
+结论：过载下的停顿与语句执行无关。Linux 上集中在所有客户端同时断开的收尾时刻（连接关闭、h2 锁排队），macOS 上是持续的 CPU 超额订阅。N3 §5 改为只在稳态窗口内判定 `on_cpu`、`blocked` 为 0。
+
+**日志**：runtime 之前用 `log` 宏，tidb-server 的 tracing subscriber 没有 log 桥接，停顿警告和 `spawn_with_recover` 的 panic 日志都丢了。现在 runtime 改用 `tracing`：tidb-server 本来就用 tracing，改宏比安装全局的 `LogTracer` 更直接。`crates/runtime/tests/logs.rs` 测试停顿和 panic 两条日志都能被 tracing subscriber 收到。本次重测中，server 日志里能看到全部 116 条停顿警告。
 
 ## 7. 行为不变（integrationtest）
 
