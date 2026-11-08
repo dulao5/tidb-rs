@@ -22,7 +22,7 @@ fn bench(c: &mut Criterion) {
     let bin = collate::get_collator("utf8mb4_bin");
     let ci = collate::get_collator("utf8mb4_general_ci");
 
-    let a = new_int_datum(12345);
+    let mut a = new_int_datum(12345);
     let b = new_int_datum(12346);
     c.bench_function("compare_int", |bn| {
         bn.iter(|| black_box(black_box(&a).compare(ctx, black_box(&b), bin).0))
@@ -42,21 +42,21 @@ fn bench(c: &mut Criterion) {
         .set_collate("utf8mb4_bin")
         .build_p();
     c.bench_function("convert_int_to_varchar", |bn| {
-        bn.iter(|| black_box(black_box(&a).convert_to(ctx, &varchar).0))
+        bn.iter(|| black_box(black_box(&mut a).convert_to(ctx, &varchar).0))
     });
     let bigint = new_field_type(mysql::TypeLonglong);
-    let ns = new_string_datum(b"123456789".to_vec());
+    let mut ns = new_string_datum(b"123456789".to_vec());
     c.bench_function("convert_string_to_bigint", |bn| {
-        bn.iter(|| black_box(black_box(&ns).convert_to(ctx, &bigint).0))
+        bn.iter(|| black_box(black_box(&mut ns).convert_to(ctx, &bigint).0))
     });
     let dec = new_field_type_builder()
         .set_type(mysql::TypeNewDecimal)
         .set_flen(10)
         .set_decimal(2)
         .build_p();
-    let f = new_float64_datum(12345.678);
+    let mut f = new_float64_datum(12345.678);
     c.bench_function("convert_float_to_decimal", |bn| {
-        bn.iter(|| black_box(black_box(&f).convert_to(ctx, &dec).0))
+        bn.iter(|| black_box(black_box(&mut f).convert_to(ctx, &dec).0))
     });
     let mut d = MyDecimal::default();
     d.from_string(b"12345.678").unwrap();

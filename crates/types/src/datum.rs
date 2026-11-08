@@ -49,9 +49,7 @@ use crate::json::{
     BinaryJSON, ErrInvalidJSONCharset, JSONValue, compare_binary_json, create_binary_json,
     parse_binary_json_from_string,
 };
-use crate::mydecimal::{
-    MODE_HALF_UP, MY_DECIMAL_STRUCT_SIZE, MyDecimal, decimal_add, new_max_or_min_dec,
-};
+use crate::mydecimal::{MODE_HALF_UP, MY_DECIMAL_STRUCT_SIZE, MyDecimal, new_max_or_min_dec};
 use crate::set_type::{Set, parse_set, parse_set_value};
 use crate::time::{
     Duration, MaxDatetime, MaxDuration, MaxTime, MaxTimestamp, MinDatetime, MinTime, MinTimestamp,
@@ -331,6 +329,25 @@ fn first_err(err: Result<(), Error>, err1: Result<(), Error>) -> Result<(), Erro
 }
 
 impl Datum {
+    /// The only writer of the byte payload `b` (Go's `d.b`). Every constructor and setter
+    /// goes through here or [`Datum::set_b_string`], so a later change of `b` to a shared or
+    /// borrowed buffer (`Cow<[u8]>` / `Bytes`, e.g. fed zero-copy from chunk rows; D01.1
+    /// review) only touches these two functions.
+    // glue: single writer of Datum.b
+    #[inline]
+    fn set_b(&mut self, b: Option<Vec<u8>>) {
+        self.b = b;
+    }
+
+    /// `d.b = hack.Slice(s)`: the bytes of a Go string (the empty string gives a nil slice).
+    // glue: single writer of Datum.b from a Go string
+    #[inline]
+    fn set_b_string(&mut self, s: Vec<u8>) {
+        self.set_b(hack_slice(s));
+    }
+}
+
+impl Datum {
     /// Clone create a deep copy of the Datum.
     // go: Datum.Clone L1
     pub fn clone_datum(&self) -> Datum {
@@ -524,7 +541,7 @@ impl Datum {
     // go: Datum.SetString L1
     pub fn set_string(&mut self, s: impl Into<Vec<u8>>, collation: impl Into<Cow<'static, str>>) {
         self.k = KindString;
-        self.b = hack_slice(s.into());
+        self.set_b_string(s.into());
         self.collation = collation.into();
     }
 
@@ -546,7 +563,7 @@ impl Datum {
     // go: Datum.SetBytes L1
     pub fn set_bytes(&mut self, b: impl Into<Option<Vec<u8>>>) {
         self.k = KindBytes;
-        self.b = b.into();
+        self.set_b(b.into());
         self.collation = Cow::Borrowed(CollationBin);
     }
 
@@ -559,7 +576,7 @@ impl Datum {
         length: u32,
     ) {
         self.k = KindString;
-        self.b = b.into();
+        self.set_b(b.into());
         self.length = length;
         self.collation = collation.into();
     }
@@ -645,7 +662,7 @@ impl Datum {
     // go: Datum.SetBinaryLiteral L1
     pub fn set_binary_literal(&mut self, b: BinaryLiteral) {
         self.k = KindBinaryLiteral;
-        self.b = Some(b.0);
+        self.set_b(Some(b.0));
         self.collation = Cow::Borrowed(CollationBin);
     }
 
@@ -653,7 +670,7 @@ impl Datum {
     // go: Datum.SetMysqlBit L1
     pub fn set_mysql_bit(&mut self, b: BinaryLiteral) {
         self.k = KindMysqlBit;
-        self.b = Some(b.0);
+        self.set_b(Some(b.0));
     }
 
     /// GetMysqlDecimal gets decimal value
@@ -717,7 +734,7 @@ impl Datum {
         self.k = KindMysqlEnum;
         self.i = b.value as i64;
         self.collation = collation.into();
-        self.b = hack_slice(b.name);
+        self.set_b_string(b.name);
     }
 
     /// GetMysqlSet gets Set value
@@ -735,7 +752,7 @@ impl Datum {
         self.k = KindMysqlSet;
         self.i = b.value as i64;
         self.collation = collation.into();
-        self.b = hack_slice(b.name);
+        self.set_b_string(b.name);
     }
 
     /// GetMysqlJSON gets json.BinaryJSON value
@@ -749,14 +766,14 @@ impl Datum {
     pub fn set_mysql_json(&mut self, b: BinaryJSON<'_>) {
         self.k = KindMysqlJSON;
         self.i = i64::from(b.type_code);
-        self.b = Some(b.value.into_owned());
+        self.set_b(Some(b.value.into_owned()));
     }
 
     /// SetVectorFloat32 sets VectorFloat32 value
     // go: Datum.SetVectorFloat32 L1
     pub fn set_vector_float32(&mut self, vec: VectorFloat32<'_>) {
         self.k = KindVectorFloat32;
-        self.b = Some(vec.zero_copy_serialize().to_vec());
+        self.set_b(Some(vec.zero_copy_serialize().to_vec()));
     }
 
     /// GetVectorFloat32 gets VectorFloat32 value
@@ -790,7 +807,7 @@ impl Datum {
     // go: Datum.SetRaw L1
     pub fn set_raw(&mut self, b: impl Into<Option<Vec<u8>>>) {
         self.k = KindRaw;
-        self.b = b.into();
+        self.set_b(b.into());
     }
 
     /// GetRaw gets raw value.
@@ -1143,7 +1160,9 @@ impl Datum {
                 (d_dec.compare(dec), err)
             }
             _ => {
-                let (d_val, err) = self.convert_to(ctx, &new_field_type(mysql::TypeNewDecimal));
+                // The target is DECIMAL: Go's d.ConvertTo does not write to d here.
+                let (d_val, err) =
+                    self.convert_to_non_bit(ctx, &new_field_type(mysql::TypeNewDecimal));
                 if err.is_err() {
                     return (0, err);
                 }
@@ -1283,8 +1302,24 @@ impl Datum {
     /// change this method need sync modification to type2Kind in rowcodec/types.go
     ///
     /// Panics on a target type Go does not convert to ("should never happen").
+    ///
+    /// Takes `&mut self` like Go's pointer receiver: converting a `KindInt64` datum to BIT
+    /// changes its kind to `KindUint64` (`convertToMysqlBit`), and callers see that
+    /// (upstream-pitfall tidb-rs#34: an index join probing a BIT key with `-1` reports
+    /// `ErrDataTooLong`, not the `ErrOverflow` it would skip).
     // go: Datum.ConvertTo L1
-    pub fn convert_to(&self, ctx: &Context, target: &FieldType) -> (Datum, Result<(), Error>) {
+    pub fn convert_to(&mut self, ctx: &Context, target: &FieldType) -> (Datum, Result<(), Error>) {
+        if target.get_type() == mysql::TypeBit && self.k != KindNull {
+            return self.convert_to_mysql_bit(ctx, target);
+        }
+        self.convert_to_non_bit(ctx, target)
+    }
+
+    /// `ConvertTo` for every target but BIT: no other conversion writes to the receiver, so
+    /// it reads `self` only. Callers that hold `&self` and convert to a fixed non-BIT type
+    /// (`compareMysqlDecimal`) use it directly.
+    // glue: the shared-receiver part of Datum.ConvertTo
+    fn convert_to_non_bit(&self, ctx: &Context, target: &FieldType) -> (Datum, Result<(), Error>) {
         if self.k == KindNull {
             return (Datum::default(), Ok(()));
         }
@@ -1314,7 +1349,7 @@ impl Datum {
             mysql::TypeNewDecimal => self.convert_to_mysql_decimal(ctx, target),
             mysql::TypeYear => self.convert_to_mysql_year(ctx, target),
             mysql::TypeEnum => self.convert_to_mysql_enum(ctx, target),
-            mysql::TypeBit => self.convert_to_mysql_bit(ctx, target),
+            mysql::TypeBit => unreachable!("convert_to handles BIT before"),
             mysql::TypeSet => self.convert_to_mysql_set(ctx, target),
             mysql::TypeJSON => self.convert_to_mysql_json(target),
             mysql::TypeTiDBVectorFloat32 => self.convert_to_vector_float32(ctx, target),
@@ -1829,9 +1864,9 @@ impl Datum {
         (ret, err)
     }
 
-    // go: Datum.convertToMysqlBit L2 (Go sets d.k = KindUint64 on its receiver for a KindInt64 input; the conversion uses a copy)
+    // go: Datum.convertToMysqlBit L1
     fn convert_to_mysql_bit(
-        &self,
+        &mut self,
         ctx: &Context,
         target: &FieldType,
     ) -> (Datum, Result<(), Error>) {
@@ -1840,9 +1875,8 @@ impl Datum {
             KindString | KindBytes => BinaryLiteral(self.get_bytes().to_vec()).to_int(ctx),
             KindInt64 => {
                 // if input kind is int64 (signed), when trans to bit, we need to treat it as unsigned
-                let mut d = self.clone();
-                d.k = KindUint64;
-                let (uint_datum, err1) = d.convert_to_uint(ctx, target);
+                self.k = KindUint64;
+                let (uint_datum, err1) = self.convert_to_uint(ctx, target);
                 (uint_datum.get_uint64(), err1)
             }
             _ => {
@@ -2430,7 +2464,7 @@ impl Datum {
         self.length = length as u32;
         self.i = i;
         self.collation = Cow::Owned(collation);
-        self.b = b;
+        self.set_b(b);
 
         match self.k {
             KindMysqlTime => self.set_mysql_time(time),
@@ -3240,146 +3274,6 @@ pub fn get_min_value(ft: &FieldType) -> Datum {
         _ => {}
     }
     min_val
-}
-
-/// RoundingType is used to indicate the rounding type for reversing evaluation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RoundingType(pub u8);
-
-/// Ceiling means rounding up.
-pub const Ceiling: RoundingType = RoundingType(0);
-/// Floor means rounding down.
-pub const Floor: RoundingType = RoundingType(1);
-
-// go: getDatumBound L1
-fn get_datum_bound(ret_type: &FieldType, r_type: RoundingType) -> Datum {
-    if r_type == Ceiling {
-        return get_max_value(ret_type);
-    }
-    get_min_value(ret_type)
-}
-
-/// ChangeReverseResultByUpperLowerBound is for expression's reverse evaluation.
-/// Here is an example for what's effort for the function: CastRealAsInt(t.a),
-///
-/// ```text
-///         if the type of column `t.a` is mysql.TypeDouble, and there is a row that t.a == MaxFloat64
-///         then the cast function will arrive a result MaxInt64. But when we do the reverse evaluation,
-///      if the result is MaxInt64, and the rounding type is ceiling. Then we should get the MaxFloat64
-///      instead of float64(MaxInt64).
-/// ```
-///
-/// Another example: cast(1.1 as signed) = 1,
-///
-/// ```text
-/// when we get the answer 1, we can only reversely evaluate 1.0 as the column value. So in this
-/// case, we should judge whether the rounding type are ceiling. If it is, then we should plus one for
-/// 1.0 and get the reverse result 2.0.
-/// ```
-// go: ChangeReverseResultByUpperLowerBound L1
-#[allow(clippy::collapsible_match)] // Go's switch with an inner if
-pub fn change_reverse_result_by_upper_lower_bound(
-    ctx: &Context,
-    ret_type: &FieldType,
-    res: Datum,
-    r_type: RoundingType,
-) -> (Datum, Result<(), Error>) {
-    let (mut d, err) = res.convert_to(ctx, ret_type);
-    if let Err(e) = &err {
-        if ErrOverflow.equal(e) {
-            return (d, Ok(()));
-        }
-        return (d, err);
-    }
-    let mut res_ret_type = FieldType::default();
-    match res.kind() {
-        KindInt64 => res_ret_type.set_type(mysql::TypeLonglong),
-        KindUint64 => {
-            res_ret_type.set_type(mysql::TypeLonglong);
-            res_ret_type.add_flag(mysql::UnsignedFlag);
-        }
-        KindFloat32 => res_ret_type.set_type(mysql::TypeFloat),
-        KindFloat64 => res_ret_type.set_type(mysql::TypeDouble),
-        KindMysqlDecimal => {
-            res_ret_type.set_type(mysql::TypeNewDecimal);
-            res_ret_type.set_flen_under_limit(
-                (res.get_mysql_decimal().get_digits_frac() as isize)
-                    + (res.get_mysql_decimal().get_digits_int() as isize),
-            );
-            res_ret_type.set_decimal_under_limit(res.get_mysql_decimal().get_digits_int() as isize);
-        }
-        _ => {}
-    }
-    let bound = get_datum_bound(&res_ret_type, r_type);
-    let (cmp, err) = d.compare(
-        ctx,
-        &bound,
-        collate::get_collator(res_ret_type.get_collate()),
-    );
-    if err.is_err() {
-        return (d, err);
-    }
-    if cmp == 0 {
-        d = get_datum_bound(ret_type, r_type);
-    } else if r_type == Ceiling {
-        match ret_type.get_type() {
-            mysql::TypeShort => {
-                if mysql::has_unsigned_flag(ret_type.get_flag()) {
-                    if d.get_uint64() != u64::from(u16::MAX) {
-                        d.set_uint64(d.get_uint64().wrapping_add(1));
-                    }
-                } else if d.get_int64() != i64::from(i16::MAX) {
-                    d.set_int64(d.get_int64().wrapping_add(1));
-                }
-            }
-            mysql::TypeLong => {
-                if mysql::has_unsigned_flag(ret_type.get_flag()) {
-                    if d.get_uint64() != u64::from(u32::MAX) {
-                        d.set_uint64(d.get_uint64().wrapping_add(1));
-                    }
-                } else if d.get_int64() != i64::from(i32::MAX) {
-                    d.set_int64(d.get_int64().wrapping_add(1));
-                }
-            }
-            mysql::TypeLonglong => {
-                if mysql::has_unsigned_flag(ret_type.get_flag()) {
-                    if d.get_uint64() != u64::MAX {
-                        d.set_uint64(d.get_uint64().wrapping_add(1));
-                    }
-                } else if d.get_int64() != i64::MAX {
-                    d.set_int64(d.get_int64().wrapping_add(1));
-                }
-            }
-            mysql::TypeFloat => {
-                if d.get_float32() != f32::MAX {
-                    d.set_float32(d.get_float32() + 1.0);
-                }
-            }
-            mysql::TypeDouble => {
-                if d.get_float64() != f64::MAX {
-                    d.set_float64(d.get_float64() + 1.0);
-                }
-            }
-            mysql::TypeNewDecimal => {
-                if d.get_mysql_decimal().compare(&new_max_or_min_dec(
-                    false,
-                    ret_type.get_flen(),
-                    ret_type.get_decimal(),
-                )) != 0
-                {
-                    let mut decimal_one = MyDecimal::default();
-                    let mut new_d = MyDecimal::default();
-                    let one = *decimal_one.from_int(1);
-                    if let Err(e) = decimal_add(d.get_mysql_decimal(), &one, &mut new_d) {
-                        return (d, Err(e));
-                    }
-                    d = new_decimal_datum(new_d);
-                }
-            }
-            _ => {}
-        }
-    }
-    (d, Ok(()))
 }
 
 /// Go `unsafe.Sizeof(Datum{})`.

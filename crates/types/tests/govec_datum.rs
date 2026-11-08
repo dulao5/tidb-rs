@@ -705,7 +705,7 @@ mod part2 {
     use std::borrow::Cow;
     use tidb_parser::model::CIStr;
     use tidb_types::core_time::CoreTime;
-    use tidb_types::datum::{self as dm, Datum, GoValue, RoundingType};
+    use tidb_types::datum::{self as dm, Datum, GoValue};
     use tidb_types::datum_eval::compute_plus;
     use tidb_types::enum_type::Enum;
     use tidb_types::field_name::{EmptyName, FieldName, shallow};
@@ -894,10 +894,21 @@ mod part2 {
         Some(match op {
             "d_convert" => {
                 let (c, w) = ctx(a, 0);
-                let d = datum_in(&a[1]);
+                let mut d = datum_in(&a[1]);
                 let ft = ft_in(&a[2]);
                 let (ret, err) = d.convert_to(&c, &ft);
                 ww(datum_out(&ret), opt_err(err), w)
+            }
+            "d_convert_recv" => {
+                let (c, w) = ctx(a, 0);
+                let mut d = datum_in(&a[1]);
+                let ft = ft_in(&a[2]);
+                let (ret, err) = d.convert_to(&c, &ft);
+                ww(
+                    json!({"ret": datum_out(&ret), "recv": datum_out(&d)}),
+                    opt_err(err),
+                    w,
+                )
             }
             "d_compare" => {
                 let (c, w) = ctx(a, 0);
@@ -1041,18 +1052,6 @@ mod part2 {
                     None,
                     vec![],
                 )
-            }
-            "d_reverse" => {
-                let (c, w) = ctx(a, 0);
-                let ft = ft_in(&a[1]);
-                let d = datum_in(&a[2]);
-                let (ret, err) = dm::change_reverse_result_by_upper_lower_bound(
-                    &c,
-                    &ft,
-                    d,
-                    RoundingType(u(&a[3]) as u8),
-                );
-                ww(datum_out(&ret), err.err(), w)
             }
             "d_plus" => {
                 let x = datum_in(&a[0]);
