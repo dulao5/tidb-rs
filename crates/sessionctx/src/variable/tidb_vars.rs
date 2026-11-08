@@ -52,7 +52,8 @@ pub const DefRuntimeFilterMode: &str = "OFF";
 /// RunAutoAnalyze indicates whether auto analyze should run.
 pub static RunAutoAnalyze: AtomicBool = AtomicBool::new(DefTiDBEnableAutoAnalyze);
 /// EnableAutoAnalyzePriorityQueue indicates whether to enable the priority queue for auto analyze.
-pub static EnableAutoAnalyzePriorityQueue: AtomicBool = AtomicBool::new(DefTiDBEnableAutoAnalyzePriorityQueue);
+pub static EnableAutoAnalyzePriorityQueue: AtomicBool =
+    AtomicBool::new(DefTiDBEnableAutoAnalyzePriorityQueue);
 /// GOGCTunerThreshold is the threshold for GOGC tuner (an `atomic.Float64`: the f64 bits).
 pub static GOGCTunerThreshold: AtomicF64 = AtomicF64::new(DefTiDBGOGCTunerThreshold);
 /// PasswordValidationLength is the minimum number of characters a password must have.
@@ -109,4 +110,31 @@ pub static memoryLimitTunerPercentage: AtomicF64 = AtomicF64::new(0.0);
 // glue: call into tidb-memory (D15.3)
 pub(crate) fn mem_total_ignore_err() -> u64 {
     tidb_memory::meminfo::get_mem_total_ignore_err()
+}
+
+// go: serverMemoryLimitDefaultValue L1
+pub(crate) fn server_memory_limit_default_value() -> &'static str {
+    match tidb_memory::meminfo::mem_total() {
+        Ok(total) if total != 0 => "80%",
+        _ => "0",
+    }
+}
+
+/// `mustParseDuration`: a duration literal of the defaults; panics on a bad literal.
+// go: mustParseDuration L1
+pub(crate) fn must_parse_duration(s: &str) -> i64 {
+    match tidb_base::gostd::time::parse_duration(s) {
+        Ok(d) => d,
+        Err(_) => panic!("{s} is not a duration"),
+    }
+}
+
+/// Test access to the unexported default helpers (govec op `defaults`).
+// glue: test entry point
+#[doc(hidden)]
+pub fn defaults_for_test(dur: &str) -> (&'static str, i64) {
+    (
+        server_memory_limit_default_value(),
+        must_parse_duration(dur),
+    )
 }

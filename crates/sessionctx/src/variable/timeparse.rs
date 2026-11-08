@@ -50,7 +50,13 @@ fn quote(s: &str) -> String {
 
 /// `ParseError.Error`.
 // go-std: time.ParseError.Error L1
-fn parse_error(layout: &str, value: &str, layout_elem: &str, value_elem: &str, message: &str) -> String {
+fn parse_error(
+    layout: &str,
+    value: &str,
+    layout_elem: &str,
+    value_elem: &str,
+    message: &str,
+) -> String {
     if message.is_empty() {
         return format!(
             "parsing time {} as {}: cannot parse {} as {}",
@@ -63,6 +69,7 @@ fn parse_error(layout: &str, value: &str, layout_elem: &str, value_elem: &str, m
     format!("parsing time {}{}", quote(value), message)
 }
 
+// go-std: time.isDigit L1
 fn is_digit(s: &[u8], i: usize) -> bool {
     s.len() > i && s[i].is_ascii_digit()
 }
@@ -83,6 +90,7 @@ fn getnum(s: &str, fixed: bool) -> Result<(i64, &str), ()> {
     Ok((((b[0] - b'0') as i64) * 10 + (b[1] - b'0') as i64, &s[2..]))
 }
 
+// go-std: time.cutspace L1
 fn cutspace(s: &str) -> &str {
     s.trim_start_matches(' ')
 }
@@ -117,13 +125,21 @@ enum Std {
 
 /// `time.ParseInLocation(layout, value, loc)` for `"15:04"` / `"15:04 -0700"`.
 // go-std: time.ParseInLocation L2 (only the layout elements of the two checkTimeSystemVar layouts)
-pub(crate) fn parse_day_time(layout: &str, value: &str, loc: &Arc<Location>) -> Result<DayTime, String> {
+pub(crate) fn parse_day_time(
+    layout: &str,
+    value: &str,
+    loc: &Arc<Location>,
+) -> Result<DayTime, String> {
     // The layouts, split by nextStdChunk: (prefix, std, std string).
     let chunks: &[(&str, Std, &str)] = if layout == "15:04" {
         &[("", Std::Hour, "15"), (":", Std::ZeroMinute, "04")]
     } else {
         debug_assert_eq!(layout, "15:04 -0700");
-        &[("", Std::Hour, "15"), (":", Std::ZeroMinute, "04"), (" ", Std::NumTZ, "-0700")]
+        &[
+            ("", Std::Hour, "15"),
+            (":", Std::ZeroMinute, "04"),
+            (" ", Std::NumTZ, "-0700"),
+        ]
     };
     let alayout = layout;
     let avalue = value;
@@ -213,7 +229,13 @@ pub(crate) fn parse_day_time(layout: &str, value: &str, loc: &Arc<Location>) -> 
         }
     }
     if !value.is_empty() {
-        return Err(parse_error(alayout, avalue, "", value, &format!(": extra text: {}", quote(value))));
+        return Err(parse_error(
+            alayout,
+            avalue,
+            "",
+            value,
+            &format!(": extra text: {}", quote(value)),
+        ));
     }
     match zone_offset {
         Some(off) => {
@@ -224,12 +246,24 @@ pub(crate) fn parse_day_time(layout: &str, value: &str, loc: &Arc<Location>) -> 
             // If that zone was in effect at the given time, use it.
             let local_off = loc.lookup(sec).offset as i64;
             if local_off == off {
-                return Ok(DayTime { hour, min, loc: loc.clone() });
+                return Ok(DayTime {
+                    hour,
+                    min,
+                    loc: loc.clone(),
+                });
             }
             // Otherwise create fake zone to record offset.
-            Ok(DayTime { hour, min, loc: time::fixed_zone("", off as i32) })
+            Ok(DayTime {
+                hour,
+                min,
+                loc: time::fixed_zone("", off as i32),
+            })
         }
-        None => Ok(DayTime { hour, min, loc: loc.clone() }),
+        None => Ok(DayTime {
+            hour,
+            min,
+            loc: loc.clone(),
+        }),
     }
 }
 
@@ -238,7 +272,16 @@ pub(crate) fn parse_day_time(layout: &str, value: &str, loc: &Arc<Location>) -> 
 // go-std: time.Time.Format L2 ("15:04 -0700" only)
 pub(crate) fn format_full_day_time_today(t: &DayTime) -> String {
     let now: Time = time::now();
-    let d = time::date(now.year(), now.month(), now.day(), t.hour, t.min, 0, 0, &t.loc);
+    let d = time::date(
+        now.year(),
+        now.month(),
+        now.day(),
+        t.hour,
+        t.min,
+        0,
+        0,
+        &t.loc,
+    );
     let (h, m, _) = d.clock();
     let offset = d.location().lookup(d.unix()).offset as i64;
     let zone = offset / 60; // convert to minutes

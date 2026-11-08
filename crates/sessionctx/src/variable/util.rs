@@ -35,7 +35,9 @@ pub(crate) fn parse_time_zone(s: &str) -> Result<Arc<Location>, Error> {
             const MINUTE: i64 = 60_000_000_000;
             if s.as_bytes()[0] == b'-' {
                 if d.duration > 12 * HOUR + 59 * MINUTE {
-                    return Err(ErrUnknownTimeZone.gen_with_stack_by_args(vec![s.to_owned().into()]));
+                    return Err(
+                        ErrUnknownTimeZone.gen_with_stack_by_args(vec![s.to_owned().into()])
+                    );
                 }
             } else if d.duration > 14 * HOUR {
                 return Err(ErrUnknownTimeZone.gen_with_stack_by_args(vec![s.to_owned().into()]));
@@ -68,7 +70,9 @@ pub(crate) fn is_in_correct_identifier_name(name: &str) -> bool {
 // glue: port of pkg/util/servicescope.CheckServiceScope (not yet ported)
 pub(crate) fn check_service_scope(scope: &str) -> Result<(), Error> {
     let valid = scope.len() <= 64
-        && scope.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        && scope
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
     if !valid {
         return Err(tidb_base::errors::new(format!(
             "the tidb-service-scope value '{scope}' is invalid. It must be 64 characters or fewer and consist only of letters (a-z, A-Z), numbers (0-9), hyphens (-), and underscores (_)"

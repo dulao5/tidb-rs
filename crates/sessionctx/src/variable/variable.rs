@@ -334,7 +334,9 @@ impl SysVar {
     // go: SysVar.validateScope L1
     fn validate_scope(&self, scope: ScopeFlag) -> Result<(), Error> {
         if self.read_only || self.scope == ScopeNone {
-            return Err(ErrIncorrectScope.fast_gen_by_args(vec![self.name.into(), "read only".into()]));
+            return Err(
+                ErrIncorrectScope.fast_gen_by_args(vec![self.name.into(), "read only".into()])
+            );
         }
         if scope == ScopeGlobal && !(self.has_global_scope() || self.has_instance_scope()) {
             return Err(errLocalVariable.fast_gen_by_args(vec![self.name.into()]));
@@ -402,13 +404,15 @@ impl SysVar {
         // Check for min/max violations
         if d < self.min_value {
             vars.stmt_ctx.append_warning(
-                ErrTruncatedWrongValue.fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
+                ErrTruncatedWrongValue
+                    .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (gostd::time::duration_string(self.min_value), Ok(()));
         }
         if (d as u64) > self.max_value {
             vars.stmt_ctx.append_warning(
-                ErrTruncatedWrongValue.fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
+                ErrTruncatedWrongValue
+                    .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             // [M-INT] time.Duration(sv.MaxValue): uint64 -> int64 wraps.
             return (gostd::time::duration_string(self.max_value as i64), Ok(()));
@@ -437,7 +441,8 @@ impl SysVar {
                 );
             }
             vars.stmt_ctx.append_warning(
-                ErrTruncatedWrongValue.fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
+                ErrTruncatedWrongValue
+                    .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (self.min_value.to_string(), Ok(()));
         }
@@ -451,13 +456,15 @@ impl SysVar {
         // [M-INT] uint64(sv.MinValue)
         if val < self.min_value as u64 {
             vars.stmt_ctx.append_warning(
-                ErrTruncatedWrongValue.fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
+                ErrTruncatedWrongValue
+                    .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (self.min_value.to_string(), Ok(()));
         }
         if val > self.max_value {
             vars.stmt_ctx.append_warning(
-                ErrTruncatedWrongValue.fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
+                ErrTruncatedWrongValue
+                    .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (self.max_value.to_string(), Ok(()));
         }
@@ -478,14 +485,16 @@ impl SysVar {
         }
         if val < self.min_value {
             vars.stmt_ctx.append_warning(
-                ErrTruncatedWrongValue.fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
+                ErrTruncatedWrongValue
+                    .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (self.min_value.to_string(), Ok(()));
         }
         // [M-INT] int64(sv.MaxValue) wraps for values above MaxInt64.
         if val > self.max_value as i64 {
             vars.stmt_ctx.append_warning(
-                ErrTruncatedWrongValue.fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
+                ErrTruncatedWrongValue
+                    .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (self.max_value.to_string(), Ok(()));
         }
@@ -504,7 +513,8 @@ impl SysVar {
         }
         (
             value.to_owned(),
-            Err(ErrWrongValueForVar.gen_with_stack_by_args(vec![self.name.into(), Arg::from(value.to_owned())])),
+            Err(ErrWrongValueForVar
+                .gen_with_stack_by_args(vec![self.name.into(), Arg::from(value.to_owned())])),
         )
     }
 
@@ -527,13 +537,15 @@ impl SysVar {
         };
         if val < self.min_value as f64 {
             vars.stmt_ctx.append_warning(
-                ErrTruncatedWrongValue.fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
+                ErrTruncatedWrongValue
+                    .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (self.min_value.to_string(), Ok(()));
         }
         if val > self.max_value as f64 {
             vars.stmt_ctx.append_warning(
-                ErrTruncatedWrongValue.fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
+                ErrTruncatedWrongValue
+                    .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (self.max_value.to_string(), Ok(()));
         }
@@ -566,7 +578,8 @@ impl SysVar {
         }
         (
             value.to_owned(),
-            Err(ErrWrongValueForVar.gen_with_stack_by_args(vec![self.name.into(), Arg::from(value.to_owned())])),
+            Err(ErrWrongValueForVar
+                .gen_with_stack_by_args(vec![self.name.into(), Arg::from(value.to_owned())])),
         )
     }
 
@@ -588,9 +601,17 @@ impl SysVar {
                 if super::varsutil::tidb_opt_on(val) {
                     opt_val = 1;
                 }
-                (tidb_types::datum::new_int_datum(opt_val), mysql::TypeLonglong, mysql::BinaryFlag)
+                (
+                    tidb_types::datum::new_int_datum(opt_val),
+                    mysql::TypeLonglong,
+                    mysql::BinaryFlag,
+                )
             }
-            _ => (tidb_types::datum::new_string_datum(val), mysql::TypeVarString, 0),
+            _ => (
+                tidb_types::datum::new_string_datum(val),
+                mysql::TypeVarString,
+                0,
+            ),
         }
     }
 
@@ -638,12 +659,13 @@ struct Registry {
     index: HashMap<&'static str, usize>,
 }
 
+// go: pkg/sessionctx/variable/variable.go init L2 (the static table instead of RegisterSysVar into a map; IsNoop and setHintUpdatable are generated flags, checked below)
 static REGISTRY: LazyLock<Registry> = LazyLock::new(|| {
     let mut vars = Vec::with_capacity(SYSVAR_DATA.len());
     let mut index = HashMap::with_capacity(SYSVAR_DATA.len());
     for d in SYSVAR_DATA {
         let sv = sysvar_of(d);
-        // go: variable.go init -> RegisterSysVar (name lower-cased; the names are lower case).
+        // variable.go init -> RegisterSysVar (name lower-cased; the names are lower case).
         debug_assert_eq!(sv.name, sv.name.to_lowercase());
         index.insert(sv.name, vars.len());
         vars.push(sv);
@@ -686,7 +708,7 @@ pub fn go_goarch() -> &'static str {
 // glue: SysVarData (generated static fields) + hooks -> SysVar
 fn sysvar_of(d: &'static SysVarData) -> SysVar {
     let validation = hooks::validation(d.name);
-    // go: variable.go init -> setHintUpdatable(defaultSysVars): every listed default entry is
+    // variable.go init -> setHintUpdatable(defaultSysVars): every listed default entry is
     // verified (an entry may also set IsHintUpdatableVerified in its literal).
     if d.go_file == "sysvar.go" && super::setvar_affect::set_hint_updatable(d.name) {
         assert!(
@@ -775,7 +797,10 @@ pub fn set_sys_var(name: &str, value: &str) {
 /// immutable here, so this iterates it).
 // go: GetSysVars L2 (an iterator over the registry instead of a copied map)
 pub fn get_sys_vars() -> impl Iterator<Item = SysVarRef> {
-    REGISTRY.vars.iter().map(|sv| get_sys_var(sv.name).expect("registered"))
+    REGISTRY
+        .vars
+        .iter()
+        .map(|sv| get_sys_var(sv.name).expect("registered"))
 }
 
 /// OrderByDependency orders the vars by dependency. The depended sys vars are in the front.

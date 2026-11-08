@@ -40,7 +40,10 @@ impl StatementContext {
     /// AppendWarning appends a warning with level 'Warning'.
     // glue: D05.2 stub of StatementContext.AppendWarning
     pub fn append_warning(&mut self, err: Error) {
-        self.warnings.push(SQLWarn { level: WarnLevelWarning, err });
+        self.warnings.push(SQLWarn {
+            level: WarnLevelWarning,
+            err,
+        });
     }
 
     /// GetWarnings gets warnings.
@@ -57,12 +60,14 @@ impl StatementContext {
 }
 
 /// GlobalVarAccessor is the interface for accessing global scope system and status variables.
-// go: GlobalVarAccessor L2 (read-path methods only; synchronous, like Go)
+// go-part: GlobalVarAccessor (variable.go interface) L2 (read-path methods only; synchronous, like Go)
 pub trait GlobalVarAccessor: Send {
     /// GetGlobalSysVar gets the global system variable value for name.
+    // go-part: GlobalVarAccessor.GetGlobalSysVar (interface method)
     fn get_global_sys_var(&self, name: &str) -> Result<String, Error>;
     /// SetGlobalSysVarOnly sets the global system variable without calling the validation
     /// function or updating aliases.
+    // go-part: GlobalVarAccessor.SetGlobalSysVarOnly (interface method)
     fn set_global_sys_var_only(
         &mut self,
         name: &str,
@@ -70,6 +75,7 @@ pub trait GlobalVarAccessor: Send {
         update_local: bool,
     ) -> Result<(), Error>;
     /// GetTiDBTableValue gets a value from mysql.tidb for the key 'name'
+    // go-part: GlobalVarAccessor.GetTiDBTableValue (interface method)
     fn get_tidb_table_value(&self, name: &str) -> Result<String, Error>;
 }
 

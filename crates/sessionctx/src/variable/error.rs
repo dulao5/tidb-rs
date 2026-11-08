@@ -79,7 +79,9 @@ pub static ErrWarnDeprecatedSyntaxNoReplacement: LazyLock<Error> = LazyLock::new
 
 /// ErrWarnDeprecatedSyntaxSimpleMsg.
 pub static ErrWarnDeprecatedSyntaxSimpleMsg: LazyLock<Error> = LazyLock::new(|| {
-    static M: mysql::ErrMessage =
-        mysql::message("%s is deprecated and will be removed in a future release.", &[]);
+    static M: mysql::ErrMessage = mysql::message(
+        "%s is deprecated and will be removed in a future release.",
+        &[],
+    );
     ClassVariable.new_std_err(errno::ErrWarnDeprecatedSyntaxNoReplacement, &M)
 });

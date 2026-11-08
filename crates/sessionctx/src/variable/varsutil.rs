@@ -25,7 +25,8 @@ const _: i64 = secondsPerYear;
 
 /// `ddlReorgWorkerCounter` and friends: process-wide DDL settings (tidb_vars.go).
 static ddlReorgWorkerCounter: AtomicI32 = AtomicI32::new(tidb_vars::DefTiDBDDLReorgWorkerCount);
-static ddlFlashbackConcurrency: AtomicI32 = AtomicI32::new(tidb_vars::DefTiDBDDLFlashbackConcurrency);
+static ddlFlashbackConcurrency: AtomicI32 =
+    AtomicI32::new(tidb_vars::DefTiDBDDLFlashbackConcurrency);
 static ddlReorgBatchSize: AtomicI32 = AtomicI32::new(tidb_vars::DefTiDBDDLReorgBatchSize);
 static ddlErrorCountLimit: AtomicI64 = AtomicI64::new(tidb_vars::DefTiDBDDLErrorCountLimit);
 static ddlReorgRowFormat: AtomicI64 = AtomicI64::new(tidb_vars::DefTiDBRowFormatV2);
@@ -142,7 +143,8 @@ pub(crate) fn check_default_collation_for_utf8mb4(
     if !tidb_types::collate::is_default_collation_for_utf8mb4(&coll.name) {
         return (
             String::new(),
-            Err(ErrInvalidDefaultUTF8MB4Collation.gen_with_stack_by_args(vec![coll.name.clone().into()])),
+            Err(ErrInvalidDefaultUTF8MB4Collation
+                .gen_with_stack_by_args(vec![coll.name.clone().into()])),
         );
     }
     (coll.name.clone(), Ok(()))
@@ -153,7 +155,8 @@ pub(crate) fn check_character_set(normalized_value: &str, arg_name: &str) -> Val
     if normalized_value.is_empty() {
         return (
             normalized_value.to_owned(),
-            Err(ErrWrongValueForVar.fast_gen_by_args(vec![arg_name.to_owned().into(), "NULL".into()])),
+            Err(ErrWrongValueForVar
+                .fast_gen_by_args(vec![arg_name.to_owned().into(), "NULL".into()])),
         );
     }
     let (cs, err) = tidb_parser::gocharset::get_charset_info(normalized_value);
@@ -184,12 +187,16 @@ pub(crate) fn check_read_only(
             vars.stmt_ctx.append_warning(err_msg.clone());
         }
         if scope == ScopeGlobal {
-            let val = match vars.global_vars_accessor.get_global_sys_var(TiDBEnableNoopFuncs) {
+            let val = match vars
+                .global_vars_accessor
+                .get_global_sys_var(TiDBEnableNoopFuncs)
+            {
                 Ok(v) => v,
                 Err(_) => {
                     return (
                         original_value.to_owned(),
-                        Err(errUnknownSystemVariable.gen_with_stack_by_args(vec![TiDBEnableNoopFuncs.into()])),
+                        Err(errUnknownSystemVariable
+                            .gen_with_stack_by_args(vec![TiDBEnableNoopFuncs.into()])),
                     );
                 }
             };
@@ -212,12 +219,18 @@ pub(crate) fn check_isolation_level(
     _scope: ScopeFlag,
 ) -> ValResult {
     if normalized_value == "SERIALIZABLE" || normalized_value == "READ-UNCOMMITTED" {
-        let return_err = ErrUnsupportedIsolationLevel.fast_gen_by_args(vec![normalized_value.to_owned().into()]);
-        let skip = vars.systems.get(TiDBSkipIsolationLevelCheck).map(String::as_str).unwrap_or("");
+        let return_err =
+            ErrUnsupportedIsolationLevel.fast_gen_by_args(vec![normalized_value.to_owned().into()]);
+        let skip = vars
+            .systems
+            .get(TiDBSkipIsolationLevelCheck)
+            .map(String::as_str)
+            .unwrap_or("");
         if !tidb_opt_on(skip) {
             return (
                 normalized_value.to_owned(),
-                Err(ErrUnsupportedIsolationLevel.gen_with_stack_by_args(vec![normalized_value.to_owned().into()])),
+                Err(ErrUnsupportedIsolationLevel
+                    .gen_with_stack_by_args(vec![normalized_value.to_owned().into()])),
             );
         }
         vars.stmt_ctx.append_warning(return_err);
@@ -255,7 +268,10 @@ pub const maxChunkSizeLowerBound: i64 = 32;
 
 // go: appendDeprecationWarning L1
 pub(crate) fn append_deprecation_warning(s: &mut SessionVars, name: &str, replacement: &str) {
-    s.stmt_ctx.append_warning(errWarnDeprecatedSyntax.fast_gen_by_args(vec![name.to_owned().into(), replacement.to_owned().into()]));
+    s.stmt_ctx.append_warning(
+        errWarnDeprecatedSyntax
+            .fast_gen_by_args(vec![name.to_owned().into(), replacement.to_owned().into()]),
+    );
 }
 
 /// TiDBOptOn could be used for all tidb session variable options, we use "ON"/1 to turn on those options.
@@ -390,14 +406,19 @@ pub(crate) fn parse_memory_limit(
         (
             0,
             String::new(),
-            Err(ErrTruncatedWrongValue.gen_with_stack_by_args(vec![TiDBServerMemoryLimit.into(), original_value.to_owned().into()])),
+            Err(ErrTruncatedWrongValue.gen_with_stack_by_args(vec![
+                TiDBServerMemoryLimit.into(),
+                original_value.to_owned().into(),
+            ])),
         )
     })();
     // defer
     if err.is_ok() && byte_size > 0 && byte_size < (512 << 20) {
-        s.stmt_ctx.append_warning(
-            ErrTruncatedWrongValue.fast_gen_by_args(vec![TiDBServerMemoryLimit.into(), original_value.to_owned().into()]),
-        );
+        s.stmt_ctx
+            .append_warning(ErrTruncatedWrongValue.fast_gen_by_args(vec![
+                TiDBServerMemoryLimit.into(),
+                original_value.to_owned().into(),
+            ]));
         byte_size = 512 << 20;
         normalized_str = "512MB".to_owned();
     }
@@ -410,15 +431,19 @@ pub(crate) fn parse_memory_limit(
 // go-std: fmt.Sscanf L2 (the "%d<lit>%s" formats of parseByteSize / parsePercentage)
 fn sscanf_num_unit(s: &str, unit: &str) -> Option<u64> {
     // fmt's isSpace table (fmt/scan.go `space`).
+    // go-std: fmt.isSpace L1
     fn is_space(r: char) -> bool {
         matches!(r as u32, 0x09..=0x0d | 0x20 | 0x85 | 0xa0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000)
     }
     // ss.SkipSpace with nlIsSpace = false (Sscanf): a newline is an error.
+    // go-std: fmt.ss.SkipSpace L1 (nlIsSpace false)
     fn skip_space(s: &str) -> Option<&str> {
         let mut rest = s;
         loop {
             let mut it = rest.chars();
-            let Some(r) = it.next() else { return Some(rest) };
+            let Some(r) = it.next() else {
+                return Some(rest);
+            };
             if r == '\r' && it.as_str().starts_with('\n') {
                 rest = it.as_str();
                 continue;
@@ -495,7 +520,16 @@ pub fn parse_byte_size(s: &str) -> (u64, String) {
     if let Some(b) = sscanf_num_unit(s, "") {
         return (b, format!("{b}"));
     }
-    for (unit, shift) in [("KB", 10), ("KiB", 10), ("MB", 20), ("MiB", 20), ("GB", 30), ("GiB", 30), ("TB", 40), ("TiB", 40)] {
+    for (unit, shift) in [
+        ("KB", 10),
+        ("KiB", 10),
+        ("MB", 20),
+        ("MiB", 20),
+        ("GB", 30),
+        ("GiB", 30),
+        ("TB", 40),
+        ("TiB", 40),
+    ] {
         if let Some(b) = sscanf_num_unit(s, unit) {
             // [M-INT] byteSize << n wraps like Go's uint64 shift.
             return (b.wrapping_shl(shift), format!("{b}{unit}"));
@@ -506,12 +540,37 @@ pub fn parse_byte_size(s: &str) -> (u64, String) {
 
 /// GAFunction4ExpressionIndex stores functions GA for expression index.
 pub static GAFunction4ExpressionIndex: &[&str] = &[
-    "lower", "upper", "md5", "reverse", "vitess_hash", "tidb_shard",
+    "lower",
+    "upper",
+    "md5",
+    "reverse",
+    "vitess_hash",
+    "tidb_shard",
     // JSON functions.
-    "json_type", "json_extract", "json_unquote", "json_array", "json_object", "json_set", "json_insert",
-    "json_replace", "json_remove", "json_contains", "json_contains_path", "json_valid", "json_array_append",
-    "json_array_insert", "json_merge_patch", "json_merge_preserve", "json_pretty", "json_quote",
-    "json_schema_valid", "json_search", "json_storage_size", "json_depth", "json_keys", "json_length",
+    "json_type",
+    "json_extract",
+    "json_unquote",
+    "json_array",
+    "json_object",
+    "json_set",
+    "json_insert",
+    "json_replace",
+    "json_remove",
+    "json_contains",
+    "json_contains_path",
+    "json_valid",
+    "json_array_append",
+    "json_array_insert",
+    "json_merge_patch",
+    "json_merge_preserve",
+    "json_pretty",
+    "json_quote",
+    "json_schema_valid",
+    "json_search",
+    "json_storage_size",
+    "json_depth",
+    "json_keys",
+    "json_length",
 ];
 
 // go: collectAllowFuncName4ExpressionIndex L1
@@ -522,13 +581,28 @@ pub fn collect_allow_func_name4_expression_index() -> String {
 }
 
 // go: updatePasswordValidationLength L1
-pub(crate) fn update_password_validation_length(s: &mut SessionVars, length: i32) -> Result<(), Error> {
-    s.global_vars_accessor.set_global_sys_var_only(ValidatePasswordLength, &(length as i64).to_string(), false)?;
+pub(crate) fn update_password_validation_length(
+    s: &mut SessionVars,
+    length: i32,
+) -> Result<(), Error> {
+    s.global_vars_accessor.set_global_sys_var_only(
+        ValidatePasswordLength,
+        &(length as i64).to_string(),
+        false,
+    )?;
     PasswordValidationLength.store(length, SeqCst);
     Ok(())
 }
 
-static analyzeSkipAllowedTypes: &[&str] = &["json", "text", "mediumtext", "longtext", "blob", "mediumblob", "longblob"];
+static analyzeSkipAllowedTypes: &[&str] = &[
+    "json",
+    "text",
+    "mediumtext",
+    "longtext",
+    "blob",
+    "mediumblob",
+    "longblob",
+];
 
 /// ValidAnalyzeSkipColumnTypes makes validation for tidb_analyze_skip_column_types.
 // go: ValidAnalyzeSkipColumnTypes L1
@@ -543,7 +617,10 @@ pub fn valid_analyze_skip_column_types(val: &str) -> ValResult {
         if !analyzeSkipAllowedTypes.contains(&column_type) {
             return (
                 val.to_owned(),
-                Err(ErrWrongValueForVar.gen_with_stack_by_args(vec![TiDBAnalyzeSkipColumnTypes.into(), val.to_owned().into()])),
+                Err(ErrWrongValueForVar.gen_with_stack_by_args(vec![
+                    TiDBAnalyzeSkipColumnTypes.into(),
+                    val.to_owned().into(),
+                ])),
             );
         }
         column_types.push(column_type);
@@ -589,22 +666,29 @@ pub(crate) fn parse_schema_cache_size(
             (
                 0,
                 String::new(),
-                Err(ErrTruncatedWrongValue.gen_with_stack_by_args(vec![TiDBSchemaCacheSize.into(), original_value.to_owned().into()])),
+                Err(ErrTruncatedWrongValue.gen_with_stack_by_args(vec![
+                    TiDBSchemaCacheSize.into(),
+                    original_value.to_owned().into(),
+                ])),
             )
         }
     };
     // defer
     if err.is_ok() && byte_size > 0 && byte_size < SchemaCacheSizeLowerBound {
-        s.stmt_ctx.append_warning(
-            ErrTruncatedWrongValue.fast_gen_by_args(vec![TiDBSchemaCacheSize.into(), original_value.to_owned().into()]),
-        );
+        s.stmt_ctx
+            .append_warning(ErrTruncatedWrongValue.fast_gen_by_args(vec![
+                TiDBSchemaCacheSize.into(),
+                original_value.to_owned().into(),
+            ]));
         byte_size = SchemaCacheSizeLowerBound;
         normalized_str = SchemaCacheSizeLowerBoundStr.to_owned();
     }
     if err.is_ok() && byte_size > i64::MAX as u64 {
-        s.stmt_ctx.append_warning(
-            ErrTruncatedWrongValue.fast_gen_by_args(vec![TiDBSchemaCacheSize.into(), original_value.to_owned().into()]),
-        );
+        s.stmt_ctx
+            .append_warning(ErrTruncatedWrongValue.fast_gen_by_args(vec![
+                TiDBSchemaCacheSize.into(),
+                original_value.to_owned().into(),
+            ]));
         byte_size = i64::MAX as u64;
         normalized_str = i64::MAX.to_string();
     }

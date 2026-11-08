@@ -70,7 +70,8 @@ pub const TiDBAutoAnalyzeConcurrency: &str = "tidb_auto_analyze_concurrency";
 /// Go constant `TiDBEnableHistoricalStats`.
 pub const TiDBEnableHistoricalStats: &str = "tidb_enable_historical_stats";
 /// Go constant `TiDBEnablePlanReplayerContinuousCapture`.
-pub const TiDBEnablePlanReplayerContinuousCapture: &str = "tidb_enable_plan_replayer_continuous_capture";
+pub const TiDBEnablePlanReplayerContinuousCapture: &str =
+    "tidb_enable_plan_replayer_continuous_capture";
 /// Go constant `DefaultCollationForUTF8MB4`.
 pub const DefaultCollationForUTF8MB4: &str = "default_collation_for_utf8mb4";
 /// Go constant `ForeignKeyChecks`.

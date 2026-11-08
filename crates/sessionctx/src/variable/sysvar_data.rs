@@ -13,1892 +13,1892 @@ pub const DEFAULT_SYSVAR_COUNT: usize = 499;
 
 #[rustfmt::skip]
 pub static SYSVAR_DATA: &[SysVarData] = &[
-    // go: sysvar.go:L76 SystemTimeZone
+    // Go sysvar.go:L76 SystemTimeZone
     SysVarData { go_file: "sysvar.go", go_line: 76, scope: ScopeNone, name: "system_time_zone", value: "CST", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L77 Hostname
+    // Go sysvar.go:L77 Hostname
     SysVarData { go_file: "sysvar.go", go_line: 77, scope: ScopeNone, name: "hostname", value: "localhost", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L78 Port
+    // Go sysvar.go:L78 Port
     SysVarData { go_file: "sysvar.go", go_line: 78, scope: ScopeNone, name: "port", value: "4000", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 65535, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L79 VersionComment
+    // Go sysvar.go:L79 VersionComment
     SysVarData { go_file: "sysvar.go", go_line: 79, scope: ScopeNone, name: "version_comment", value: "TiDB Server (Apache License 2.0) Community Edition, MySQL 8.0 compatible", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L80 Version
+    // Go sysvar.go:L80 Version
     SysVarData { go_file: "sysvar.go", go_line: 80, scope: ScopeNone, name: "version", value: "8.0.11-TiDB-v8.4.0-this-is-a-placeholder", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L81 DataDir
+    // Go sysvar.go:L81 DataDir
     SysVarData { go_file: "sysvar.go", go_line: 81, scope: ScopeNone, name: "datadir", value: "/usr/local/mysql/data/", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L82 Socket
+    // Go sysvar.go:L82 Socket
     SysVarData { go_file: "sysvar.go", go_line: 82, scope: ScopeNone, name: "socket", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L83 "license"
+    // Go sysvar.go:L83 "license"
     SysVarData { go_file: "sysvar.go", go_line: 83, scope: ScopeNone, name: "license", value: "Apache License 2.0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L84 "have_ssl"
+    // Go sysvar.go:L84 "have_ssl"
     SysVarData { go_file: "sysvar.go", go_line: 84, scope: ScopeNone, name: "have_ssl", value: "DISABLED", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L85 "have_openssl"
+    // Go sysvar.go:L85 "have_openssl"
     SysVarData { go_file: "sysvar.go", go_line: 85, scope: ScopeNone, name: "have_openssl", value: "DISABLED", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L86 "ssl_ca"
+    // Go sysvar.go:L86 "ssl_ca"
     SysVarData { go_file: "sysvar.go", go_line: 86, scope: ScopeNone, name: "ssl_ca", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L87 "ssl_cert"
+    // Go sysvar.go:L87 "ssl_cert"
     SysVarData { go_file: "sysvar.go", go_line: 87, scope: ScopeNone, name: "ssl_cert", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L88 "ssl_key"
+    // Go sysvar.go:L88 "ssl_key"
     SysVarData { go_file: "sysvar.go", go_line: 88, scope: ScopeNone, name: "ssl_key", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L89 "version_compile_os"
+    // Go sysvar.go:L89 "version_compile_os"
     SysVarData { go_file: "sysvar.go", go_line: 89, scope: ScopeNone, name: "version_compile_os", value: "darwin", computed: Some("runtime.GOOS"), typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L90 "version_compile_machine"
+    // Go sysvar.go:L90 "version_compile_machine"
     SysVarData { go_file: "sysvar.go", go_line: 90, scope: ScopeNone, name: "version_compile_machine", value: "arm64", computed: Some("runtime.GOARCH"), typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L92 TiDBEnableEnhancedSecurity
+    // Go sysvar.go:L92 TiDBEnableEnhancedSecurity
     SysVarData { go_file: "sysvar.go", go_line: 92, scope: ScopeNone, name: "tidb_enable_enhanced_security", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L93 TiDBAllowFunctionForExpressionIndex
+    // Go sysvar.go:L93 TiDBAllowFunctionForExpressionIndex
     SysVarData { go_file: "sysvar.go", go_line: 93, scope: ScopeNone, name: "tidb_allow_function_for_expression_index", value: "json_array, json_array_append, json_array_insert, json_contains, json_contains_path, json_depth, json_extract, json_insert, json_keys, json_length, json_merge_patch, json_merge_preserve, json_object, json_pretty, json_quote, json_remove, json_replace, json_schema_valid, json_search, json_set, json_storage_size, json_type, json_unquote, json_valid, lower, md5, reverse, tidb_shard, upper, vitess_hash", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: 0 },
-    // go: sysvar.go:L96 Timestamp
+    // Go sysvar.go:L96 Timestamp
     SysVarData { go_file: "sysvar.go", go_line: 96, scope: ScopeSession, name: "timestamp", value: "0", computed: None, typ: TypeFloat, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_GET_SESSION | HOOK_GET_STATE_VALUE },
-    // go: sysvar.go:L112 WarningCount
+    // Go sysvar.go:L112 WarningCount
     SysVarData { go_file: "sysvar.go", go_line: 112, scope: ScopeSession, name: "warning_count", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L115 ErrorCount
+    // Go sysvar.go:L115 ErrorCount
     SysVarData { go_file: "sysvar.go", go_line: 115, scope: ScopeSession, name: "error_count", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L118 LastInsertID
+    // Go sysvar.go:L118 LastInsertID
     SysVarData { go_file: "sysvar.go", go_line: 118, scope: ScopeSession, name: "last_insert_id", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_GET_SESSION | HOOK_GET_STATE_VALUE },
-    // go: sysvar.go:L123 Identity
+    // Go sysvar.go:L123 Identity
     SysVarData { go_file: "sysvar.go", go_line: 123, scope: ScopeSession, name: "identity", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_GET_SESSION | HOOK_GET_STATE_VALUE },
-    // go: sysvar.go:L130 TiDBTxnScope
+    // Go sysvar.go:L130 TiDBTxnScope
     SysVarData { go_file: "sysvar.go", go_line: 130, scope: ScopeSession, name: "txn_scope", value: "global", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HIDDEN | FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L150 TiDBTxnReadTS
+    // Go sysvar.go:L150 TiDBTxnReadTS
     SysVarData { go_file: "sysvar.go", go_line: 150, scope: ScopeSession, name: "tx_read_ts", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HIDDEN, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L155 TiDBReadStaleness
+    // Go sysvar.go:L155 TiDBReadStaleness
     SysVarData { go_file: "sysvar.go", go_line: 155, scope: ScopeSession, name: "tidb_read_staleness", value: "0", computed: None, typ: TypeInt, min_value: -2147483648, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L158 TiDBEnforceMPPExecution
+    // Go sysvar.go:L158 TiDBEnforceMPPExecution
     SysVarData { go_file: "sysvar.go", go_line: 158, scope: ScopeSession, name: "tidb_enforce_mpp", value: "OFF", computed: Some("BoolToOnOff(config.GetGlobalConfig().Performance.EnforceMPP)"), typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L167 TiDBMaxTiFlashThreads
+    // Go sysvar.go:L167 TiDBMaxTiFlashThreads
     SysVarData { go_file: "sysvar.go", go_line: 167, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_max_tiflash_threads", value: "-1", computed: None, typ: TypeInt, min_value: -1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L171 TiDBMaxBytesBeforeTiFlashExternalJoin
+    // Go sysvar.go:L171 TiDBMaxBytesBeforeTiFlashExternalJoin
     SysVarData { go_file: "sysvar.go", go_line: 171, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_max_bytes_before_tiflash_external_join", value: "-1", computed: None, typ: TypeInt, min_value: -1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L175 TiDBMaxBytesBeforeTiFlashExternalGroupBy
+    // Go sysvar.go:L175 TiDBMaxBytesBeforeTiFlashExternalGroupBy
     SysVarData { go_file: "sysvar.go", go_line: 175, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_max_bytes_before_tiflash_external_group_by", value: "-1", computed: None, typ: TypeInt, min_value: -1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L179 TiDBMaxBytesBeforeTiFlashExternalSort
+    // Go sysvar.go:L179 TiDBMaxBytesBeforeTiFlashExternalSort
     SysVarData { go_file: "sysvar.go", go_line: 179, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_max_bytes_before_tiflash_external_sort", value: "-1", computed: None, typ: TypeInt, min_value: -1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L183 TiFlashMemQuotaQueryPerNode
+    // Go sysvar.go:L183 TiFlashMemQuotaQueryPerNode
     SysVarData { go_file: "sysvar.go", go_line: 183, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tiflash_mem_quota_query_per_node", value: "0", computed: None, typ: TypeInt, min_value: -1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L187 TiFlashQuerySpillRatio
+    // Go sysvar.go:L187 TiFlashQuerySpillRatio
     SysVarData { go_file: "sysvar.go", go_line: 187, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tiflash_query_spill_ratio", value: "0.7", computed: None, typ: TypeFloat, min_value: 0, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L200 TiDBEnableTiFlashPipelineMode
+    // Go sysvar.go:L200 TiDBEnableTiFlashPipelineMode
     SysVarData { go_file: "sysvar.go", go_line: 200, scope: ScopeGlobal, name: "tidb_enable_tiflash_pipeline_model", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L209 TiDBSnapshot
+    // Go sysvar.go:L209 TiDBSnapshot
     SysVarData { go_file: "sysvar.go", go_line: 209, scope: ScopeSession, name: "tidb_snapshot", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L216 TiDBOptProjectionPushDown
+    // Go sysvar.go:L216 TiDBOptProjectionPushDown
     SysVarData { go_file: "sysvar.go", go_line: 216, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_projection_push_down", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L220 TiDBOptDeriveTopN
+    // Go sysvar.go:L220 TiDBOptDeriveTopN
     SysVarData { go_file: "sysvar.go", go_line: 220, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_derive_topn", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L224 TiDBOptAggPushDown
+    // Go sysvar.go:L224 TiDBOptAggPushDown
     SysVarData { go_file: "sysvar.go", go_line: 224, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_agg_push_down", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L228 TiDBOptDistinctAggPushDown
+    // Go sysvar.go:L228 TiDBOptDistinctAggPushDown
     SysVarData { go_file: "sysvar.go", go_line: 228, scope: ScopeSession, name: "tidb_opt_distinct_agg_push_down", value: "OFF", computed: Some("BoolToOnOff(config.GetGlobalConfig().Performance.DistinctAggPushDown)"), typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L232 TiDBOptSkewDistinctAgg
+    // Go sysvar.go:L232 TiDBOptSkewDistinctAgg
     SysVarData { go_file: "sysvar.go", go_line: 232, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_skew_distinct_agg", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L236 TiDBOpt3StageDistinctAgg
+    // Go sysvar.go:L236 TiDBOpt3StageDistinctAgg
     SysVarData { go_file: "sysvar.go", go_line: 236, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_three_stage_distinct_agg", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L240 TiDBOptEnable3StageMultiDistinctAgg
+    // Go sysvar.go:L240 TiDBOptEnable3StageMultiDistinctAgg
     SysVarData { go_file: "sysvar.go", go_line: 240, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_three_stage_multi_distinct_agg", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L244 TiDBOptExplainNoEvaledSubQuery
+    // Go sysvar.go:L244 TiDBOptExplainNoEvaledSubQuery
     SysVarData { go_file: "sysvar.go", go_line: 244, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_non_eval_scalar_subquery", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L248 TiDBOptWriteRowID
+    // Go sysvar.go:L248 TiDBOptWriteRowID
     SysVarData { go_file: "sysvar.go", go_line: 248, scope: ScopeSession, name: "tidb_opt_write_row_id", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L252 TiDBChecksumTableConcurrency
+    // Go sysvar.go:L252 TiDBChecksumTableConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 252, scope: ScopeSession, name: "tidb_checksum_table_concurrency", value: "4", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L253 TiDBBatchInsert
+    // Go sysvar.go:L253 TiDBBatchInsert
     SysVarData { go_file: "sysvar.go", go_line: 253, scope: ScopeSession, name: "tidb_batch_insert", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L257 TiDBBatchDelete
+    // Go sysvar.go:L257 TiDBBatchDelete
     SysVarData { go_file: "sysvar.go", go_line: 257, scope: ScopeSession, name: "tidb_batch_delete", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L261 TiDBBatchCommit
+    // Go sysvar.go:L261 TiDBBatchCommit
     SysVarData { go_file: "sysvar.go", go_line: 261, scope: ScopeSession, name: "tidb_batch_commit", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L265 TiDBCurrentTS
+    // Go sysvar.go:L265 TiDBCurrentTS
     SysVarData { go_file: "sysvar.go", go_line: 265, scope: ScopeSession, name: "tidb_current_ts", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY | FLAG_ALLOW_EMPTY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L268 TiDBLastTxnInfo
+    // Go sysvar.go:L268 TiDBLastTxnInfo
     SysVarData { go_file: "sysvar.go", go_line: 268, scope: ScopeSession, name: "tidb_last_txn_info", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L271 TiDBLastQueryInfo
+    // Go sysvar.go:L271 TiDBLastQueryInfo
     SysVarData { go_file: "sysvar.go", go_line: 271, scope: ScopeSession, name: "tidb_last_query_info", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L278 TiDBEnableChunkRPC
+    // Go sysvar.go:L278 TiDBEnableChunkRPC
     SysVarData { go_file: "sysvar.go", go_line: 278, scope: ScopeSession, name: "tidb_enable_chunk_rpc", value: "ON", computed: Some("BoolToOnOff(config.GetGlobalConfig().TiKVClient.EnableChunkRPC)"), typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L282 TxnIsolationOneShot
+    // Go sysvar.go:L282 TxnIsolationOneShot
     SysVarData { go_file: "sysvar.go", go_line: 282, scope: ScopeSession, name: "tx_isolation_one_shot", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_VALIDATION | HOOK_SET_SESSION | HOOK_GET_STATE_VALUE },
-    // go: sysvar.go:L294 TiDBOptimizerSelectivityLevel
+    // Go sysvar.go:L294 TiDBOptimizerSelectivityLevel
     SysVarData { go_file: "sysvar.go", go_line: 294, scope: ScopeSession, name: "tidb_optimizer_selectivity_level", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L298 TiDBOptIndexPruneThreshold
+    // Go sysvar.go:L298 TiDBOptIndexPruneThreshold
     SysVarData { go_file: "sysvar.go", go_line: 298, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_index_prune_threshold", value: "20", computed: None, typ: TypeInt, min_value: -1, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L302 TiDBOptimizerEnableOuterJoinReorder
+    // Go sysvar.go:L302 TiDBOptimizerEnableOuterJoinReorder
     SysVarData { go_file: "sysvar.go", go_line: 302, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_outer_join_reorder", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L306 TiDBOptimizerEnableNAAJ
+    // Go sysvar.go:L306 TiDBOptimizerEnableNAAJ
     SysVarData { go_file: "sysvar.go", go_line: 306, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_null_aware_anti_join", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L310 TiDBOptEnableSemiJoinRewrite
+    // Go sysvar.go:L310 TiDBOptEnableSemiJoinRewrite
     SysVarData { go_file: "sysvar.go", go_line: 310, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_semi_join_rewrite", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L314 TiDBDDLReorgPriority
+    // Go sysvar.go:L314 TiDBDDLReorgPriority
     SysVarData { go_file: "sysvar.go", go_line: 314, scope: ScopeSession, name: "tidb_ddl_reorg_priority", value: "PRIORITY_LOW", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["PRIORITY_LOW", "PRIORITY_NORMAL", "PRIORITY_HIGH"], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L318 TiDBSlowQueryFile
+    // Go sysvar.go:L318 TiDBSlowQueryFile
     SysVarData { go_file: "sysvar.go", go_line: 318, scope: ScopeSession, name: "tidb_slow_query_file", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L322 TiDBWaitSplitRegionFinish
+    // Go sysvar.go:L322 TiDBWaitSplitRegionFinish
     SysVarData { go_file: "sysvar.go", go_line: 322, scope: ScopeSession, name: "tidb_wait_split_region_finish", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L326 TiDBWaitSplitRegionTimeout
+    // Go sysvar.go:L326 TiDBWaitSplitRegionTimeout
     SysVarData { go_file: "sysvar.go", go_line: 326, scope: ScopeSession, name: "tidb_wait_split_region_timeout", value: "300", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L330 TiDBLowResolutionTSO
+    // Go sysvar.go:L330 TiDBLowResolutionTSO
     SysVarData { go_file: "sysvar.go", go_line: 330, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_low_resolution_tso", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L334 TiDBAllowRemoveAutoInc
+    // Go sysvar.go:L334 TiDBAllowRemoveAutoInc
     SysVarData { go_file: "sysvar.go", go_line: 334, scope: ScopeSession, name: "tidb_allow_remove_auto_inc", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L338 TiDBIsolationReadEngines
+    // Go sysvar.go:L338 TiDBIsolationReadEngines
     SysVarData { go_file: "sysvar.go", go_line: 338, scope: ScopeSession, name: "tidb_isolation_read_engines", value: "tikv,tiflash,tidb", computed: Some("strings.Join(config.GetGlobalConfig().IsolationRead.Engines, \",\")"), typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L375 TiDBMetricSchemaStep
+    // Go sysvar.go:L375 TiDBMetricSchemaStep
     SysVarData { go_file: "sysvar.go", go_line: 375, scope: ScopeSession, name: "tidb_metric_query_step", value: "60", computed: None, typ: TypeUnsigned, min_value: 10, max_value: 216000, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L379 TiDBCDCWriteSource
+    // Go sysvar.go:L379 TiDBCDCWriteSource
     SysVarData { go_file: "sysvar.go", go_line: 379, scope: ScopeSession, name: "tidb_cdc_write_source", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 15, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L383 TiDBMetricSchemaRangeDuration
+    // Go sysvar.go:L383 TiDBMetricSchemaRangeDuration
     SysVarData { go_file: "sysvar.go", go_line: 383, scope: ScopeSession, name: "tidb_metric_query_range_duration", value: "60", computed: None, typ: TypeUnsigned, min_value: 10, max_value: 216000, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L387 TiDBFoundInPlanCache
+    // Go sysvar.go:L387 TiDBFoundInPlanCache
     SysVarData { go_file: "sysvar.go", go_line: 387, scope: ScopeSession, name: "last_plan_from_cache", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L390 TiDBFoundInBinding
+    // Go sysvar.go:L390 TiDBFoundInBinding
     SysVarData { go_file: "sysvar.go", go_line: 390, scope: ScopeSession, name: "last_plan_from_binding", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L393 RandSeed1
+    // Go sysvar.go:L393 RandSeed1
     SysVarData { go_file: "sysvar.go", go_line: 393, scope: ScopeSession, name: "rand_seed1", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION | HOOK_GET_SESSION | HOOK_GET_STATE_VALUE },
-    // go: sysvar.go:L401 RandSeed2
+    // Go sysvar.go:L401 RandSeed2
     SysVarData { go_file: "sysvar.go", go_line: 401, scope: ScopeSession, name: "rand_seed2", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION | HOOK_GET_SESSION | HOOK_GET_STATE_VALUE },
-    // go: sysvar.go:L409 TiDBReadConsistency
+    // Go sysvar.go:L409 TiDBReadConsistency
     SysVarData { go_file: "sysvar.go", go_line: 409, scope: ScopeSession, name: "tidb_read_consistency", value: "strict", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_HIDDEN, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L418 TiDBLastDDLInfo
+    // Go sysvar.go:L418 TiDBLastDDLInfo
     SysVarData { go_file: "sysvar.go", go_line: 418, scope: ScopeSession, name: "tidb_last_ddl_info", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L425 TiDBLastPlanReplayerToken
+    // Go sysvar.go:L425 TiDBLastPlanReplayerToken
     SysVarData { go_file: "sysvar.go", go_line: 425, scope: ScopeSession, name: "tidb_last_plan_replayer_token", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L430 TiDBUseAlloc
+    // Go sysvar.go:L430 TiDBUseAlloc
     SysVarData { go_file: "sysvar.go", go_line: 430, scope: ScopeSession, name: "last_sql_use_alloc", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_SESSION },
-    // go: sysvar.go:L433 TiDBExplicitRequestSourceType
+    // Go sysvar.go:L433 TiDBExplicitRequestSourceType
     SysVarData { go_file: "sysvar.go", go_line: 433, scope: ScopeSession, name: "tidb_request_source_type", value: "", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["", "lightning", "br", "dumpling", "background", "ddl", "stats", "import"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L440 TiDBLogFileMaxDays
+    // Go sysvar.go:L440 TiDBLogFileMaxDays
     SysVarData { go_file: "sysvar.go", go_line: 440, scope: ScopeInstance, name: "tidb_log_file_max_days", value: "0", computed: Some("strconv.Itoa(config.GetGlobalConfig().Log.File.MaxDays)"), typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L457 TiDBConfig
+    // Go sysvar.go:L457 TiDBConfig
     SysVarData { go_file: "sysvar.go", go_line: 457, scope: ScopeInstance, name: "tidb_config", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L460 TiDBGeneralLog
+    // Go sysvar.go:L460 TiDBGeneralLog
     SysVarData { go_file: "sysvar.go", go_line: 460, scope: ScopeInstance, name: "tidb_general_log", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L466 TiDBSlowTxnLogThreshold
+    // Go sysvar.go:L466 TiDBSlowTxnLogThreshold
     SysVarData { go_file: "sysvar.go", go_line: 466, scope: ScopeSession, name: "tidb_slow_txn_log_threshold", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L472 TiDBSlowLogThreshold
+    // Go sysvar.go:L472 TiDBSlowLogThreshold
     SysVarData { go_file: "sysvar.go", go_line: 472, scope: ScopeInstance, name: "tidb_slow_log_threshold", value: "300", computed: None, typ: TypeInt, min_value: -1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L478 TiDBRecordPlanInSlowLog
+    // Go sysvar.go:L478 TiDBRecordPlanInSlowLog
     SysVarData { go_file: "sysvar.go", go_line: 478, scope: ScopeInstance, name: "tidb_record_plan_in_slow_log", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L485 TiDBEnableSlowLog
+    // Go sysvar.go:L485 TiDBEnableSlowLog
     SysVarData { go_file: "sysvar.go", go_line: 485, scope: ScopeInstance, name: "tidb_enable_slow_log", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L491 TiDBCheckMb4ValueInUTF8
+    // Go sysvar.go:L491 TiDBCheckMb4ValueInUTF8
     SysVarData { go_file: "sysvar.go", go_line: 491, scope: ScopeInstance, name: "tidb_check_mb4_value_in_utf8", value: "ON", computed: Some("BoolToOnOff(config.GetGlobalConfig().Instance.CheckMb4ValueInUTF8.Load())"), typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L497 TiDBPProfSQLCPU
+    // Go sysvar.go:L497 TiDBPProfSQLCPU
     SysVarData { go_file: "sysvar.go", go_line: 497, scope: ScopeInstance, name: "tidb_pprof_sql_cpu", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L507 TiDBDDLSlowOprThreshold
+    // Go sysvar.go:L507 TiDBDDLSlowOprThreshold
     SysVarData { go_file: "sysvar.go", go_line: 507, scope: ScopeInstance, name: "ddl_slow_threshold", value: "300", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L513 TiDBForcePriority
+    // Go sysvar.go:L513 TiDBForcePriority
     SysVarData { go_file: "sysvar.go", go_line: 513, scope: ScopeInstance, name: "tidb_force_priority", value: "NO_PRIORITY", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["NO_PRIORITY", "LOW_PRIORITY", "HIGH_PRIORITY", "DELAYED"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L519 TiDBExpensiveQueryTimeThreshold
+    // Go sysvar.go:L519 TiDBExpensiveQueryTimeThreshold
     SysVarData { go_file: "sysvar.go", go_line: 519, scope: ScopeInstance, name: "tidb_expensive_query_time_threshold", value: "60", computed: None, typ: TypeUnsigned, min_value: 10, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L525 TiDBExpensiveTxnTimeThreshold
+    // Go sysvar.go:L525 TiDBExpensiveTxnTimeThreshold
     SysVarData { go_file: "sysvar.go", go_line: 525, scope: ScopeInstance, name: "tidb_expensive_txn_time_threshold", value: "600", computed: None, typ: TypeUnsigned, min_value: 60, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L531 TiDBEnableCollectExecutionInfo
+    // Go sysvar.go:L531 TiDBEnableCollectExecutionInfo
     SysVarData { go_file: "sysvar.go", go_line: 531, scope: ScopeInstance, name: "tidb_enable_collect_execution_info", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L543 PluginLoad
+    // Go sysvar.go:L543 PluginLoad
     SysVarData { go_file: "sysvar.go", go_line: 543, scope: ScopeInstance, name: "plugin_load", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L546 PluginDir
+    // Go sysvar.go:L546 PluginDir
     SysVarData { go_file: "sysvar.go", go_line: 546, scope: ScopeInstance, name: "plugin_dir", value: "/data/deploy/plugin", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L549 PluginAuditLogBufferSize
+    // Go sysvar.go:L549 PluginAuditLogBufferSize
     SysVarData { go_file: "sysvar.go", go_line: 549, scope: ScopeInstance, name: "plugin_audit_log_buffer_size", value: "30", computed: Some("strconv.Itoa(config.GetGlobalConfig().Instance.PluginAuditLogFlushInterval)"), typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L552 PluginAuditLogFlushInterval
+    // Go sysvar.go:L552 PluginAuditLogFlushInterval
     SysVarData { go_file: "sysvar.go", go_line: 552, scope: ScopeInstance, name: "plugin_audit_log_flush_interval", value: "30", computed: Some("strconv.Itoa(config.GetGlobalConfig().Instance.PluginAuditLogFlushInterval)"), typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L555 MaxConnections
+    // Go sysvar.go:L555 MaxConnections
     SysVarData { go_file: "sysvar.go", go_line: 555, scope: ScopeInstance, name: "max_connections", value: "0", computed: Some("strconv.FormatUint(uint64(config.GetGlobalConfig().Instance.MaxConnections), 10)"), typ: TypeUnsigned, min_value: 0, max_value: 100000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L561 TiDBEnableDDL
+    // Go sysvar.go:L561 TiDBEnableDDL
     SysVarData { go_file: "sysvar.go", go_line: 561, scope: ScopeInstance, name: "tidb_enable_ddl", value: "ON", computed: Some("BoolToOnOff(config.GetGlobalConfig().Instance.TiDBEnableDDL.Load())"), typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L577 TiDBEnableStatsOwner
+    // Go sysvar.go:L577 TiDBEnableStatsOwner
     SysVarData { go_file: "sysvar.go", go_line: 577, scope: ScopeInstance, name: "tidb_enable_stats_owner", value: "ON", computed: Some("BoolToOnOff(config.GetGlobalConfig().Instance.TiDBEnableStatsOwner.Load())"), typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L593 TiDBRCReadCheckTS
+    // Go sysvar.go:L593 TiDBRCReadCheckTS
     SysVarData { go_file: "sysvar.go", go_line: 593, scope: ScopeInstance, name: "tidb_rc_read_check_ts", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L599 TiDBStmtSummaryEnablePersistent
+    // Go sysvar.go:L599 TiDBStmtSummaryEnablePersistent
     SysVarData { go_file: "sysvar.go", go_line: 599, scope: ScopeInstance, name: "tidb_stmt_summary_enable_persistent", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L602 TiDBStmtSummaryFilename
+    // Go sysvar.go:L602 TiDBStmtSummaryFilename
     SysVarData { go_file: "sysvar.go", go_line: 602, scope: ScopeInstance, name: "tidb_stmt_summary_filename", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L605 TiDBStmtSummaryFileMaxDays
+    // Go sysvar.go:L605 TiDBStmtSummaryFileMaxDays
     SysVarData { go_file: "sysvar.go", go_line: 605, scope: ScopeInstance, name: "tidb_stmt_summary_file_max_days", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L608 TiDBStmtSummaryFileMaxSize
+    // Go sysvar.go:L608 TiDBStmtSummaryFileMaxSize
     SysVarData { go_file: "sysvar.go", go_line: 608, scope: ScopeInstance, name: "tidb_stmt_summary_file_max_size", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L611 TiDBStmtSummaryFileMaxBackups
+    // Go sysvar.go:L611 TiDBStmtSummaryFileMaxBackups
     SysVarData { go_file: "sysvar.go", go_line: 611, scope: ScopeInstance, name: "tidb_stmt_summary_file_max_backups", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L616 PerformanceSchemaSessionConnectAttrsSize
+    // Go sysvar.go:L616 PerformanceSchemaSessionConnectAttrsSize
     SysVarData { go_file: "sysvar.go", go_line: 616, scope: ScopeGlobal, name: "performance_schema_session_connect_attrs_size", value: "4096", computed: None, typ: TypeInt, min_value: -1, max_value: 65536, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L626 MaxPreparedStmtCount
+    // Go sysvar.go:L626 MaxPreparedStmtCount
     SysVarData { go_file: "sysvar.go", go_line: 626, scope: ScopeGlobal, name: "max_prepared_stmt_count", value: "-1", computed: None, typ: TypeInt, min_value: -1, max_value: 1048576, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L635 InitConnect
+    // Go sysvar.go:L635 InitConnect
     SysVarData { go_file: "sysvar.go", go_line: 635, scope: ScopeGlobal, name: "init_connect", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L645 ValidatePasswordEnable
+    // Go sysvar.go:L645 ValidatePasswordEnable
     SysVarData { go_file: "sysvar.go", go_line: 645, scope: ScopeGlobal, name: "validate_password.enable", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L646 ValidatePasswordPolicy
+    // Go sysvar.go:L646 ValidatePasswordPolicy
     SysVarData { go_file: "sysvar.go", go_line: 646, scope: ScopeGlobal, name: "validate_password.policy", value: "MEDIUM", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["LOW", "MEDIUM", "STRONG"], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L647 ValidatePasswordCheckUserName
+    // Go sysvar.go:L647 ValidatePasswordCheckUserName
     SysVarData { go_file: "sysvar.go", go_line: 647, scope: ScopeGlobal, name: "validate_password.check_user_name", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L648 ValidatePasswordLength
+    // Go sysvar.go:L648 ValidatePasswordLength
     SysVarData { go_file: "sysvar.go", go_line: 648, scope: ScopeGlobal, name: "validate_password.length", value: "8", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L667 ValidatePasswordMixedCaseCount
+    // Go sysvar.go:L667 ValidatePasswordMixedCaseCount
     SysVarData { go_file: "sysvar.go", go_line: 667, scope: ScopeGlobal, name: "validate_password.mixed_case_count", value: "1", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L689 ValidatePasswordNumberCount
+    // Go sysvar.go:L689 ValidatePasswordNumberCount
     SysVarData { go_file: "sysvar.go", go_line: 689, scope: ScopeGlobal, name: "validate_password.number_count", value: "1", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L711 ValidatePasswordSpecialCharCount
+    // Go sysvar.go:L711 ValidatePasswordSpecialCharCount
     SysVarData { go_file: "sysvar.go", go_line: 711, scope: ScopeGlobal, name: "validate_password.special_char_count", value: "1", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L733 ValidatePasswordDictionary
+    // Go sysvar.go:L733 ValidatePasswordDictionary
     SysVarData { go_file: "sysvar.go", go_line: 733, scope: ScopeGlobal, name: "validate_password.dictionary", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L734 DefaultPasswordLifetime
+    // Go sysvar.go:L734 DefaultPasswordLifetime
     SysVarData { go_file: "sysvar.go", go_line: 734, scope: ScopeGlobal, name: "default_password_lifetime", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 65535, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L735 DisconnectOnExpiredPassword
+    // Go sysvar.go:L735 DisconnectOnExpiredPassword
     SysVarData { go_file: "sysvar.go", go_line: 735, scope: ScopeGlobal, name: "disconnect_on_expired_password", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY, hooks: HOOK_GET_GLOBAL },
-    // go: sysvar.go:L740 TiDBTSOClientBatchMaxWaitTime
+    // Go sysvar.go:L740 TiDBTSOClientBatchMaxWaitTime
     SysVarData { go_file: "sysvar.go", go_line: 740, scope: ScopeGlobal, name: "tidb_tso_client_batch_max_wait_time", value: "0", computed: None, typ: TypeFloat, min_value: 0, max_value: 10, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L747 TiDBEnableTSOFollowerProxy
+    // Go sysvar.go:L747 TiDBEnableTSOFollowerProxy
     SysVarData { go_file: "sysvar.go", go_line: 747, scope: ScopeGlobal, name: "tidb_enable_tso_follower_proxy", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L752 PDEnableFollowerHandleRegion
+    // Go sysvar.go:L752 PDEnableFollowerHandleRegion
     SysVarData { go_file: "sysvar.go", go_line: 752, scope: ScopeGlobal, name: "pd_enable_follower_handle_region", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L757 TiDBEnableBatchQueryRegion
+    // Go sysvar.go:L757 TiDBEnableBatchQueryRegion
     SysVarData { go_file: "sysvar.go", go_line: 757, scope: ScopeGlobal, name: "tidb_enable_batch_query_region", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L762 TiDBEnableLocalTxn
+    // Go sysvar.go:L762 TiDBEnableLocalTxn
     SysVarData { go_file: "sysvar.go", go_line: 762, scope: ScopeGlobal, name: "tidb_enable_local_txn", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HIDDEN | FLAG_DEPENDED, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L775 TiDBAutoAnalyzeRatio
+    // Go sysvar.go:L775 TiDBAutoAnalyzeRatio
     SysVarData { go_file: "sysvar.go", go_line: 775, scope: ScopeGlobal, name: "tidb_auto_analyze_ratio", value: "0.5", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L796 TiDBAutoAnalyzeStartTime
+    // Go sysvar.go:L796 TiDBAutoAnalyzeStartTime
     SysVarData { go_file: "sysvar.go", go_line: 796, scope: ScopeGlobal, name: "tidb_auto_analyze_start_time", value: "00:00 +0000", computed: None, typ: TypeTime, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L797 TiDBAutoAnalyzeEndTime
+    // Go sysvar.go:L797 TiDBAutoAnalyzeEndTime
     SysVarData { go_file: "sysvar.go", go_line: 797, scope: ScopeGlobal, name: "tidb_auto_analyze_end_time", value: "23:59 +0000", computed: None, typ: TypeTime, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L798 TiDBMemQuotaBindingCache
+    // Go sysvar.go:L798 TiDBMemQuotaBindingCache
     SysVarData { go_file: "sysvar.go", go_line: 798, scope: ScopeGlobal, name: "tidb_mem_quota_binding_cache", value: "67108864", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L804 TiDBDDLFlashbackConcurrency
+    // Go sysvar.go:L804 TiDBDDLFlashbackConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 804, scope: ScopeGlobal, name: "tidb_ddl_flashback_concurrency", value: "64", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L808 TiDBDDLReorgWorkerCount
+    // Go sysvar.go:L808 TiDBDDLReorgWorkerCount
     SysVarData { go_file: "sysvar.go", go_line: 808, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_ddl_reorg_worker_cnt", value: "4", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L812 TiDBDDLReorgBatchSize
+    // Go sysvar.go:L812 TiDBDDLReorgBatchSize
     SysVarData { go_file: "sysvar.go", go_line: 812, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_ddl_reorg_batch_size", value: "256", computed: None, typ: TypeUnsigned, min_value: 32, max_value: 10240, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L816 TiDBDDLReorgMaxWriteSpeed
+    // Go sysvar.go:L816 TiDBDDLReorgMaxWriteSpeed
     SysVarData { go_file: "sysvar.go", go_line: 816, scope: ScopeGlobal, name: "tidb_ddl_reorg_max_write_speed", value: "0", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L833 TiDBDDLErrorCountLimit
+    // Go sysvar.go:L833 TiDBDDLErrorCountLimit
     SysVarData { go_file: "sysvar.go", go_line: 833, scope: ScopeGlobal, name: "tidb_ddl_error_count_limit", value: "512", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L837 TiDBMaxDeltaSchemaCount
+    // Go sysvar.go:L837 TiDBMaxDeltaSchemaCount
     SysVarData { go_file: "sysvar.go", go_line: 837, scope: ScopeGlobal, name: "tidb_max_delta_schema_count", value: "1024", computed: None, typ: TypeUnsigned, min_value: 100, max_value: 16384, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L842 TiDBScatterRegion
+    // Go sysvar.go:L842 TiDBScatterRegion
     SysVarData { go_file: "sysvar.go", go_line: 842, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_scatter_region", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &["", "table", "global"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L858 TiDBEnableStmtSummary
+    // Go sysvar.go:L858 TiDBEnableStmtSummary
     SysVarData { go_file: "sysvar.go", go_line: 858, scope: ScopeGlobal, name: "tidb_enable_stmt_summary", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L862 TiDBStmtSummaryInternalQuery
+    // Go sysvar.go:L862 TiDBStmtSummaryInternalQuery
     SysVarData { go_file: "sysvar.go", go_line: 862, scope: ScopeGlobal, name: "tidb_stmt_summary_internal_query", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L866 TiDBStmtSummaryRefreshInterval
+    // Go sysvar.go:L866 TiDBStmtSummaryRefreshInterval
     SysVarData { go_file: "sysvar.go", go_line: 866, scope: ScopeGlobal, name: "tidb_stmt_summary_refresh_interval", value: "1800", computed: None, typ: TypeInt, min_value: 1, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L871 TiDBStmtSummaryHistorySize
+    // Go sysvar.go:L871 TiDBStmtSummaryHistorySize
     SysVarData { go_file: "sysvar.go", go_line: 871, scope: ScopeGlobal, name: "tidb_stmt_summary_history_size", value: "24", computed: None, typ: TypeInt, min_value: 0, max_value: 255, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L875 TiDBStmtSummaryMaxStmtCount
+    // Go sysvar.go:L875 TiDBStmtSummaryMaxStmtCount
     SysVarData { go_file: "sysvar.go", go_line: 875, scope: ScopeGlobal, name: "tidb_stmt_summary_max_stmt_count", value: "3000", computed: None, typ: TypeInt, min_value: 1, max_value: 32767, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L879 TiDBStmtSummaryMaxSQLLength
+    // Go sysvar.go:L879 TiDBStmtSummaryMaxSQLLength
     SysVarData { go_file: "sysvar.go", go_line: 879, scope: ScopeGlobal, name: "tidb_stmt_summary_max_sql_length", value: "4096", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L883 TiDBCapturePlanBaseline
+    // Go sysvar.go:L883 TiDBCapturePlanBaseline
     SysVarData { go_file: "sysvar.go", go_line: 883, scope: ScopeGlobal, name: "tidb_capture_plan_baselines", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY_ALL, hooks: 0 },
-    // go: sysvar.go:L884 TiDBEvolvePlanTaskMaxTime
+    // Go sysvar.go:L884 TiDBEvolvePlanTaskMaxTime
     SysVarData { go_file: "sysvar.go", go_line: 884, scope: ScopeGlobal, name: "tidb_evolve_plan_task_max_time", value: "600", computed: None, typ: TypeInt, min_value: -1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L885 TiDBEvolvePlanTaskStartTime
+    // Go sysvar.go:L885 TiDBEvolvePlanTaskStartTime
     SysVarData { go_file: "sysvar.go", go_line: 885, scope: ScopeGlobal, name: "tidb_evolve_plan_task_start_time", value: "00:00 +0000", computed: None, typ: TypeTime, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L886 TiDBEvolvePlanTaskEndTime
+    // Go sysvar.go:L886 TiDBEvolvePlanTaskEndTime
     SysVarData { go_file: "sysvar.go", go_line: 886, scope: ScopeGlobal, name: "tidb_evolve_plan_task_end_time", value: "23:59 +0000", computed: None, typ: TypeTime, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L887 TiDBStoreLimit
+    // Go sysvar.go:L887 TiDBStoreLimit
     SysVarData { go_file: "sysvar.go", go_line: 887, scope: ScopeGlobal, name: "tidb_store_limit", value: "0", computed: Some("strconv.FormatInt(atomic.LoadInt64(&config.GetGlobalConfig().TiKVClient.StoreLimit), 10)"), typ: TypeInt, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L893 TiDBTxnCommitBatchSize
+    // Go sysvar.go:L893 TiDBTxnCommitBatchSize
     SysVarData { go_file: "sysvar.go", go_line: 893, scope: ScopeGlobal, name: "tidb_txn_commit_batch_size", value: "16384", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 1073741824, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L901 TiDBRestrictedReadOnly
+    // Go sysvar.go:L901 TiDBRestrictedReadOnly
     SysVarData { go_file: "sysvar.go", go_line: 901, scope: ScopeGlobal, name: "tidb_restricted_read_only", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L917 TiDBSuperReadOnly
+    // Go sysvar.go:L917 TiDBSuperReadOnly
     SysVarData { go_file: "sysvar.go", go_line: 917, scope: ScopeGlobal, name: "tidb_super_read_only", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL },
-    // go: sysvar.go:L933 TiDBEnableGOGCTuner
+    // Go sysvar.go:L933 TiDBEnableGOGCTuner
     SysVarData { go_file: "sysvar.go", go_line: 933, scope: ScopeGlobal, name: "tidb_enable_gogc_tuner", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L942 TiDBGOGCTunerMaxValue
+    // Go sysvar.go:L942 TiDBGOGCTunerMaxValue
     SysVarData { go_file: "sysvar.go", go_line: 942, scope: ScopeGlobal, name: "tidb_gogc_tuner_max_value", value: "500", computed: None, typ: TypeInt, min_value: 10, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L959 TiDBGOGCTunerMinValue
+    // Go sysvar.go:L959 TiDBGOGCTunerMinValue
     SysVarData { go_file: "sysvar.go", go_line: 959, scope: ScopeGlobal, name: "tidb_gogc_tuner_min_value", value: "100", computed: None, typ: TypeInt, min_value: 10, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L976 TiDBEnableTelemetry
+    // Go sysvar.go:L976 TiDBEnableTelemetry
     SysVarData { go_file: "sysvar.go", go_line: 976, scope: ScopeGlobal, name: "tidb_enable_telemetry", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L977 TiDBEnableHistoricalStats
+    // Go sysvar.go:L977 TiDBEnableHistoricalStats
     SysVarData { go_file: "sysvar.go", go_line: 977, scope: ScopeGlobal, name: "tidb_enable_historical_stats", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_DEPENDED, hooks: 0 },
-    // go: sysvar.go:L979 TiDBGCEnable
+    // Go sysvar.go:L979 TiDBGCEnable
     SysVarData { go_file: "sysvar.go", go_line: 979, scope: ScopeGlobal, name: "tidb_gc_enable", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L984 TiDBGCRunInterval
+    // Go sysvar.go:L984 TiDBGCRunInterval
     SysVarData { go_file: "sysvar.go", go_line: 984, scope: ScopeGlobal, name: "tidb_gc_run_interval", value: "10m0s", computed: None, typ: TypeDuration, min_value: 600000000000, max_value: 31536000000000000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L989 TiDBGCLifetime
+    // Go sysvar.go:L989 TiDBGCLifetime
     SysVarData { go_file: "sysvar.go", go_line: 989, scope: ScopeGlobal, name: "tidb_gc_life_time", value: "10m0s", computed: None, typ: TypeDuration, min_value: 600000000000, max_value: 31536000000000000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L994 TiDBGCConcurrency
+    // Go sysvar.go:L994 TiDBGCConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 994, scope: ScopeGlobal, name: "tidb_gc_concurrency", value: "-1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1011 TiDBGCScanLockMode
+    // Go sysvar.go:L1011 TiDBGCScanLockMode
     SysVarData { go_file: "sysvar.go", go_line: 1011, scope: ScopeGlobal, name: "tidb_gc_scan_lock_mode", value: "LEGACY", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["PHYSICAL", "LEGACY"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1016 TiDBGCMaxWaitTime
+    // Go sysvar.go:L1016 TiDBGCMaxWaitTime
     SysVarData { go_file: "sysvar.go", go_line: 1016, scope: ScopeGlobal, name: "tidb_gc_max_wait_time", value: "86400", computed: None, typ: TypeInt, min_value: 600, max_value: 31536000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L1020 TiDBTableCacheLease
+    // Go sysvar.go:L1020 TiDBTableCacheLease
     SysVarData { go_file: "sysvar.go", go_line: 1020, scope: ScopeGlobal, name: "tidb_table_cache_lease", value: "3", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 10, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L1029 TiDBAutoAnalyzePartitionBatchSize
+    // Go sysvar.go:L1029 TiDBAutoAnalyzePartitionBatchSize
     SysVarData { go_file: "sysvar.go", go_line: 1029, scope: ScopeGlobal, name: "tidb_auto_analyze_partition_batch_size", value: "8192", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 8192, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL },
-    // go: sysvar.go:L1045 MaxUserConnections
+    // Go sysvar.go:L1045 MaxUserConnections
     SysVarData { go_file: "sysvar.go", go_line: 1045, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_user_connections", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 100000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1056 TiDBEnableTopSQL
+    // Go sysvar.go:L1056 TiDBEnableTopSQL
     SysVarData { go_file: "sysvar.go", go_line: 1056, scope: ScopeGlobal, name: "tidb_enable_top_sql", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "enable_resource_metering", flags: FLAG_ALLOW_EMPTY, hooks: 0 },
-    // go: sysvar.go:L1057 TiDBSourceID
+    // Go sysvar.go:L1057 TiDBSourceID
     SysVarData { go_file: "sysvar.go", go_line: 1057, scope: ScopeGlobal, name: "tidb_source_id", value: "1", computed: None, typ: TypeInt, min_value: 1, max_value: 15, possible_values: &[], aliases: &[], global_config_name: "source_id", flags: 0, hooks: 0 },
-    // go: sysvar.go:L1058 TiDBTopSQLMaxTimeSeriesCount
+    // Go sysvar.go:L1058 TiDBTopSQLMaxTimeSeriesCount
     SysVarData { go_file: "sysvar.go", go_line: 1058, scope: ScopeGlobal, name: "tidb_top_sql_max_time_series_count", value: "100", computed: None, typ: TypeInt, min_value: 1, max_value: 5000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1068 TiDBTopSQLMaxMetaCount
+    // Go sysvar.go:L1068 TiDBTopSQLMaxMetaCount
     SysVarData { go_file: "sysvar.go", go_line: 1068, scope: ScopeGlobal, name: "tidb_top_sql_max_meta_count", value: "5000", computed: None, typ: TypeInt, min_value: 1, max_value: 10000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1078 SkipNameResolve
+    // Go sysvar.go:L1078 SkipNameResolve
     SysVarData { go_file: "sysvar.go", go_line: 1078, scope: ScopeGlobal, name: "skip_name_resolve", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L1079 DefaultAuthPlugin
+    // Go sysvar.go:L1079 DefaultAuthPlugin
     SysVarData { go_file: "sysvar.go", go_line: 1079, scope: ScopeGlobal, name: "default_authentication_plugin", value: "mysql_native_password", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["mysql_native_password", "caching_sha2_password", "tidb_sm3_password", "authentication_ldap_sasl", "authentication_ldap_simple"], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L1080 TiDBPersistAnalyzeOptions
+    // Go sysvar.go:L1080 TiDBPersistAnalyzeOptions
     SysVarData { go_file: "sysvar.go", go_line: 1080, scope: ScopeGlobal, name: "tidb_persist_analyze_options", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1094 TiDBEnableAutoAnalyze
+    // Go sysvar.go:L1094 TiDBEnableAutoAnalyze
     SysVarData { go_file: "sysvar.go", go_line: 1094, scope: ScopeGlobal, name: "tidb_enable_auto_analyze", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1104 TiDBAnalyzeColumnOptions
+    // Go sysvar.go:L1104 TiDBAnalyzeColumnOptions
     SysVarData { go_file: "sysvar.go", go_line: 1104, scope: ScopeGlobal, name: "tidb_analyze_column_options", value: "ALL", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1129 TiDBEnableAutoAnalyzePriorityQueue
+    // Go sysvar.go:L1129 TiDBEnableAutoAnalyzePriorityQueue
     SysVarData { go_file: "sysvar.go", go_line: 1129, scope: ScopeGlobal, name: "tidb_enable_auto_analyze_priority_queue", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1143 TiDBGOGCTunerThreshold
+    // Go sysvar.go:L1143 TiDBGOGCTunerThreshold
     SysVarData { go_file: "sysvar.go", go_line: 1143, scope: ScopeGlobal, name: "tidb_gogc_tuner_threshold", value: "0.6", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1176 TiDBServerMemoryLimit
+    // Go sysvar.go:L1176 TiDBServerMemoryLimit
     SysVarData { go_file: "sysvar.go", go_line: 1176, scope: ScopeGlobal, name: "tidb_server_memory_limit", value: "80%", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1200 TiDBServerMemoryLimitSessMinSize
+    // Go sysvar.go:L1200 TiDBServerMemoryLimitSessMinSize
     SysVarData { go_file: "sysvar.go", go_line: 1200, scope: ScopeGlobal, name: "tidb_server_memory_limit_sess_min_size", value: "134217728", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1228 TiDBServerMemoryLimitGCTrigger
+    // Go sysvar.go:L1228 TiDBServerMemoryLimitGCTrigger
     SysVarData { go_file: "sysvar.go", go_line: 1228, scope: ScopeGlobal, name: "tidb_server_memory_limit_gc_trigger", value: "0.7", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1262 TiDBEnableColumnTracking
+    // Go sysvar.go:L1262 TiDBEnableColumnTracking
     SysVarData { go_file: "sysvar.go", go_line: 1262, scope: ScopeGlobal, name: "tidb_enable_column_tracking", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1277 RequireSecureTransport
+    // Go sysvar.go:L1277 RequireSecureTransport
     SysVarData { go_file: "sysvar.go", go_line: 1277, scope: ScopeGlobal, name: "require_secure_transport", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1303 TiDBStatsLoadPseudoTimeout
+    // Go sysvar.go:L1303 TiDBStatsLoadPseudoTimeout
     SysVarData { go_file: "sysvar.go", go_line: 1303, scope: ScopeGlobal, name: "tidb_stats_load_pseudo_timeout", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1312 TiDBEnableBatchDML
+    // Go sysvar.go:L1312 TiDBEnableBatchDML
     SysVarData { go_file: "sysvar.go", go_line: 1312, scope: ScopeGlobal, name: "tidb_enable_batch_dml", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1318 TiDBStatsCacheMemQuota
+    // Go sysvar.go:L1318 TiDBStatsCacheMemQuota
     SysVarData { go_file: "sysvar.go", go_line: 1318, scope: ScopeGlobal, name: "tidb_stats_cache_mem_quota", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 1099511627776, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1333 TiDBQueryLogMaxLen
+    // Go sysvar.go:L1333 TiDBQueryLogMaxLen
     SysVarData { go_file: "sysvar.go", go_line: 1333, scope: ScopeGlobal, name: "tidb_query_log_max_len", value: "4096", computed: None, typ: TypeInt, min_value: 0, max_value: 1073741824, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1339 TiDBCommitterConcurrency
+    // Go sysvar.go:L1339 TiDBCommitterConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 1339, scope: ScopeGlobal, name: "tidb_committer_concurrency", value: "128", computed: None, typ: TypeInt, min_value: 1, max_value: 10000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1347 TiDBMemQuotaAnalyze
+    // Go sysvar.go:L1347 TiDBMemQuotaAnalyze
     SysVarData { go_file: "sysvar.go", go_line: 1347, scope: ScopeGlobal, name: "tidb_mem_quota_analyze", value: "-1", computed: None, typ: TypeInt, min_value: -1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1356 TiDBEnablePrepPlanCache
+    // Go sysvar.go:L1356 TiDBEnablePrepPlanCache
     SysVarData { go_file: "sysvar.go", go_line: 1356, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_prepared_plan_cache", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1360 TiDBPrepPlanCacheSize
+    // Go sysvar.go:L1360 TiDBPrepPlanCacheSize
     SysVarData { go_file: "sysvar.go", go_line: 1360, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_prepared_plan_cache_size", value: "100", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 100000, possible_values: &[], aliases: &["tidb_session_plan_cache_size"], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1370 TiDBEnablePrepPlanCacheMemoryMonitor
+    // Go sysvar.go:L1370 TiDBEnablePrepPlanCacheMemoryMonitor
     SysVarData { go_file: "sysvar.go", go_line: 1370, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_prepared_plan_cache_memory_monitor", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1374 TiDBPrepPlanCacheMemoryGuardRatio
+    // Go sysvar.go:L1374 TiDBPrepPlanCacheMemoryGuardRatio
     SysVarData { go_file: "sysvar.go", go_line: 1374, scope: ScopeGlobal, name: "tidb_prepared_plan_cache_memory_guard_ratio", value: "0.1", computed: None, typ: TypeFloat, min_value: 0, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1383 TiDBEnableNonPreparedPlanCache
+    // Go sysvar.go:L1383 TiDBEnableNonPreparedPlanCache
     SysVarData { go_file: "sysvar.go", go_line: 1383, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_non_prepared_plan_cache", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1387 TiDBEnableNonPreparedPlanCacheForDML
+    // Go sysvar.go:L1387 TiDBEnableNonPreparedPlanCacheForDML
     SysVarData { go_file: "sysvar.go", go_line: 1387, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_non_prepared_plan_cache_for_dml", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1391 TiDBOptEnableFuzzyBinding
+    // Go sysvar.go:L1391 TiDBOptEnableFuzzyBinding
     SysVarData { go_file: "sysvar.go", go_line: 1391, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_fuzzy_binding", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1401 TiDBNonPreparedPlanCacheSize
+    // Go sysvar.go:L1401 TiDBNonPreparedPlanCacheSize
     SysVarData { go_file: "sysvar.go", go_line: 1401, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_non_prepared_plan_cache_size", value: "100", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 100000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1411 TiDBPlanCacheMaxPlanSize
+    // Go sysvar.go:L1411 TiDBPlanCacheMaxPlanSize
     SysVarData { go_file: "sysvar.go", go_line: 1411, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_plan_cache_max_plan_size", value: "2097152", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1418 TiDBSessionPlanCacheSize
+    // Go sysvar.go:L1418 TiDBSessionPlanCacheSize
     SysVarData { go_file: "sysvar.go", go_line: 1418, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_session_plan_cache_size", value: "100", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 100000, possible_values: &[], aliases: &["tidb_prepared_plan_cache_size"], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1425 TiDBEnableInstancePlanCache
+    // Go sysvar.go:L1425 TiDBEnableInstancePlanCache
     SysVarData { go_file: "sysvar.go", go_line: 1425, scope: ScopeGlobal, name: "tidb_enable_instance_plan_cache", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1433 TiDBInstancePlanCacheReservedPercentage
+    // Go sysvar.go:L1433 TiDBInstancePlanCacheReservedPercentage
     SysVarData { go_file: "sysvar.go", go_line: 1433, scope: ScopeGlobal, name: "tidb_instance_plan_cache_reserved_percentage", value: "0.1", computed: None, typ: TypeFloat, min_value: 0, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1447 TiDBInstancePlanCacheMaxMemSize
+    // Go sysvar.go:L1447 TiDBInstancePlanCacheMaxMemSize
     SysVarData { go_file: "sysvar.go", go_line: 1447, scope: ScopeGlobal, name: "tidb_instance_plan_cache_max_size", value: "104857600", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1459 TiDBMemOOMAction
+    // Go sysvar.go:L1459 TiDBMemOOMAction
     SysVarData { go_file: "sysvar.go", go_line: 1459, scope: ScopeGlobal, name: "tidb_mem_oom_action", value: "CANCEL", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["CANCEL", "LOG"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1467 TiDBMaxAutoAnalyzeTime
+    // Go sysvar.go:L1467 TiDBMaxAutoAnalyzeTime
     SysVarData { go_file: "sysvar.go", go_line: 1467, scope: ScopeGlobal, name: "tidb_max_auto_analyze_time", value: "43200", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1479 TiDBAutoAnalyzeConcurrency
+    // Go sysvar.go:L1479 TiDBAutoAnalyzeConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 1479, scope: ScopeGlobal, name: "tidb_auto_analyze_concurrency", value: "3", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1512 TiDBEnableMDL
+    // Go sysvar.go:L1512 TiDBEnableMDL
     SysVarData { go_file: "sysvar.go", go_line: 1512, scope: ScopeGlobal, name: "tidb_enable_metadata_lock", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1523 TiDBEnableDistTask
+    // Go sysvar.go:L1523 TiDBEnableDistTask
     SysVarData { go_file: "sysvar.go", go_line: 1523, scope: ScopeGlobal, name: "tidb_enable_dist_task", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1531 TiDBEnableFastCreateTable
+    // Go sysvar.go:L1531 TiDBEnableFastCreateTable
     SysVarData { go_file: "sysvar.go", go_line: 1531, scope: ScopeGlobal, name: "tidb_enable_fast_create_table", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1539 TiDBEnableNoopVariables
+    // Go sysvar.go:L1539 TiDBEnableNoopVariables
     SysVarData { go_file: "sysvar.go", go_line: 1539, scope: ScopeGlobal, name: "tidb_enable_noop_variables", value: "ON", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1545 TiDBEnableGCAwareMemoryTrack
+    // Go sysvar.go:L1545 TiDBEnableGCAwareMemoryTrack
     SysVarData { go_file: "sysvar.go", go_line: 1545, scope: ScopeGlobal, name: "tidb_enable_gc_aware_memory_track", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1551 TiDBEnableTmpStorageOnOOM
+    // Go sysvar.go:L1551 TiDBEnableTmpStorageOnOOM
     SysVarData { go_file: "sysvar.go", go_line: 1551, scope: ScopeGlobal, name: "tidb_enable_tmp_storage_on_oom", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1557 TiDBAutoBuildStatsConcurrency
+    // Go sysvar.go:L1557 TiDBAutoBuildStatsConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 1557, scope: ScopeGlobal, name: "tidb_auto_build_stats_concurrency", value: "2", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L1558 TiDBSysProcScanConcurrency
+    // Go sysvar.go:L1558 TiDBSysProcScanConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 1558, scope: ScopeGlobal, name: "tidb_sysproc_scan_concurrency", value: "4", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L1559 TiDBMemoryUsageAlarmRatio
+    // Go sysvar.go:L1559 TiDBMemoryUsageAlarmRatio
     SysVarData { go_file: "sysvar.go", go_line: 1559, scope: ScopeGlobal, name: "tidb_memory_usage_alarm_ratio", value: "0.7", computed: None, typ: TypeFloat, min_value: 0, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1565 TiDBMemoryUsageAlarmKeepRecordNum
+    // Go sysvar.go:L1565 TiDBMemoryUsageAlarmKeepRecordNum
     SysVarData { go_file: "sysvar.go", go_line: 1565, scope: ScopeGlobal, name: "tidb_memory_usage_alarm_keep_record_num", value: "5", computed: None, typ: TypeInt, min_value: 1, max_value: 10000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1571 PasswordReuseHistory
+    // Go sysvar.go:L1571 PasswordReuseHistory
     SysVarData { go_file: "sysvar.go", go_line: 1571, scope: ScopeGlobal, name: "password_history", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 4294967295, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1577 PasswordReuseTime
+    // Go sysvar.go:L1577 PasswordReuseTime
     SysVarData { go_file: "sysvar.go", go_line: 1577, scope: ScopeGlobal, name: "password_reuse_interval", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 4294967295, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1583 TiDBEnableHistoricalStatsForCapture
+    // Go sysvar.go:L1583 TiDBEnableHistoricalStatsForCapture
     SysVarData { go_file: "sysvar.go", go_line: 1583, scope: ScopeGlobal, name: "tidb_enable_historical_stats_for_capture", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1592 TiDBHistoricalStatsDuration
+    // Go sysvar.go:L1592 TiDBHistoricalStatsDuration
     SysVarData { go_file: "sysvar.go", go_line: 1592, scope: ScopeGlobal, name: "tidb_historical_stats_duration", value: "168h0m0s", computed: None, typ: TypeDuration, min_value: 1000000000, max_value: 31536000000000000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1603 TiDBLowResolutionTSOUpdateInterval
+    // Go sysvar.go:L1603 TiDBLowResolutionTSOUpdateInterval
     SysVarData { go_file: "sysvar.go", go_line: 1603, scope: ScopeGlobal, name: "tidb_low_resolution_tso_update_interval", value: "2000", computed: None, typ: TypeInt, min_value: 10, max_value: 60000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L1615 TiDBEnablePlanReplayerContinuousCapture
+    // Go sysvar.go:L1615 TiDBEnablePlanReplayerContinuousCapture
     SysVarData { go_file: "sysvar.go", go_line: 1615, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_plan_replayer_continuous_capture", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L1641 TiDBEnablePlanReplayerCapture
+    // Go sysvar.go:L1641 TiDBEnablePlanReplayerCapture
     SysVarData { go_file: "sysvar.go", go_line: 1641, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_plan_replayer_capture", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L1650 TiDBRowFormatVersion
+    // Go sysvar.go:L1650 TiDBRowFormatVersion
     SysVarData { go_file: "sysvar.go", go_line: 1650, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_row_format_version", value: "1", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 2, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION | HOOK_SET_GLOBAL },
-    // go: sysvar.go:L1662 TiDBEnableRowLevelChecksum
+    // Go sysvar.go:L1662 TiDBEnableRowLevelChecksum
     SysVarData { go_file: "sysvar.go", go_line: 1662, scope: ScopeGlobal, name: "tidb_enable_row_level_checksum", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1671 SQLSelectLimit
+    // Go sysvar.go:L1671 SQLSelectLimit
     SysVarData { go_file: "sysvar.go", go_line: 1671, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_select_limit", value: "18446744073709551615", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1679 DefaultWeekFormat
+    // Go sysvar.go:L1679 DefaultWeekFormat
     SysVarData { go_file: "sysvar.go", go_line: 1679, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "default_week_format", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 7, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L1680 SQLModeVar
+    // Go sysvar.go:L1680 SQLModeVar
     SysVarData { go_file: "sysvar.go", go_line: 1680, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_mode", value: "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1705 TiDBLoadBindingTimeout
+    // Go sysvar.go:L1705 TiDBLoadBindingTimeout
     SysVarData { go_file: "sysvar.go", go_line: 1705, scope: ScopeGlobal, name: "tidb_load_binding_timeout", value: "200", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L1718 MaxExecutionTime
+    // Go sysvar.go:L1718 MaxExecutionTime
     SysVarData { go_file: "sysvar.go", go_line: 1718, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_execution_time", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1731 TiKVClientReadTimeout
+    // Go sysvar.go:L1731 TiKVClientReadTimeout
     SysVarData { go_file: "sysvar.go", go_line: 1731, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tikv_client_read_timeout", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1744 CollationServer
+    // Go sysvar.go:L1744 CollationServer
     SysVarData { go_file: "sysvar.go", go_line: 1744, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "collation_server", value: "utf8mb4_bin", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1752 DefaultCollationForUTF8MB4
+    // Go sysvar.go:L1752 DefaultCollationForUTF8MB4
     SysVarData { go_file: "sysvar.go", go_line: 1752, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "default_collation_for_utf8mb4", value: "utf8mb4_bin", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1762 TimeZone
+    // Go sysvar.go:L1762 TimeZone
     SysVarData { go_file: "sysvar.go", go_line: 1762, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "time_zone", value: "SYSTEM", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1784 ForeignKeyChecks
+    // Go sysvar.go:L1784 ForeignKeyChecks
     SysVarData { go_file: "sysvar.go", go_line: 1784, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "foreign_key_checks", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L1794 TiDBForeignKeyCheckInSharedLock
+    // Go sysvar.go:L1794 TiDBForeignKeyCheckInSharedLock
     SysVarData { go_file: "sysvar.go", go_line: 1794, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_foreign_key_check_in_shared_lock", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1798 TiDBEnableForeignKey
+    // Go sysvar.go:L1798 TiDBEnableForeignKey
     SysVarData { go_file: "sysvar.go", go_line: 1798, scope: ScopeGlobal, name: "tidb_enable_foreign_key", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L1804 CollationDatabase
+    // Go sysvar.go:L1804 CollationDatabase
     SysVarData { go_file: "sysvar.go", go_line: 1804, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "collation_database", value: "utf8mb4_bin", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1812 AutoIncrementIncrement
+    // Go sysvar.go:L1812 AutoIncrementIncrement
     SysVarData { go_file: "sysvar.go", go_line: 1812, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "auto_increment_increment", value: "1", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 65535, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1817 AutoIncrementOffset
+    // Go sysvar.go:L1817 AutoIncrementOffset
     SysVarData { go_file: "sysvar.go", go_line: 1817, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "auto_increment_offset", value: "1", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 65535, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1822 CharacterSetClient
+    // Go sysvar.go:L1822 CharacterSetClient
     SysVarData { go_file: "sysvar.go", go_line: 1822, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "character_set_client", value: "utf8mb4", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L1825 CharacterSetResults
+    // Go sysvar.go:L1825 CharacterSetResults
     SysVarData { go_file: "sysvar.go", go_line: 1825, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "character_set_results", value: "utf8mb4", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L1831 TxnIsolation
+    // Go sysvar.go:L1831 TxnIsolation
     SysVarData { go_file: "sysvar.go", go_line: 1831, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tx_isolation", value: "REPEATABLE-READ", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["READ-UNCOMMITTED", "READ-COMMITTED", "REPEATABLE-READ", "SERIALIZABLE"], aliases: &["transaction_isolation"], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L1837 TransactionIsolation
+    // Go sysvar.go:L1837 TransactionIsolation
     SysVarData { go_file: "sysvar.go", go_line: 1837, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "transaction_isolation", value: "REPEATABLE-READ", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["READ-UNCOMMITTED", "READ-COMMITTED", "REPEATABLE-READ", "SERIALIZABLE"], aliases: &["tx_isolation"], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L1840 CollationConnection
+    // Go sysvar.go:L1840 CollationConnection
     SysVarData { go_file: "sysvar.go", go_line: 1840, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "collation_connection", value: "utf8mb4_bin", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1848 AutoCommit
+    // Go sysvar.go:L1848 AutoCommit
     SysVarData { go_file: "sysvar.go", go_line: 1848, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "autocommit", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1857 CharsetDatabase
+    // Go sysvar.go:L1857 CharsetDatabase
     SysVarData { go_file: "sysvar.go", go_line: 1857, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "character_set_database", value: "utf8mb4", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1865 WaitTimeout
+    // Go sysvar.go:L1865 WaitTimeout
     SysVarData { go_file: "sysvar.go", go_line: 1865, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "wait_timeout", value: "28800", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 31536000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L1866 InteractiveTimeout
+    // Go sysvar.go:L1866 InteractiveTimeout
     SysVarData { go_file: "sysvar.go", go_line: 1866, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "interactive_timeout", value: "28800", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 31536000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L1867 InnodbLockWaitTimeout
+    // Go sysvar.go:L1867 InnodbLockWaitTimeout
     SysVarData { go_file: "sysvar.go", go_line: 1867, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "innodb_lock_wait_timeout", value: "50", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 3600, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1872 GroupConcatMaxLen
+    // Go sysvar.go:L1872 GroupConcatMaxLen
     SysVarData { go_file: "sysvar.go", go_line: 1872, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "group_concat_max_len", value: "1024", computed: None, typ: TypeUnsigned, min_value: 4, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L1908 CharacterSetConnection
+    // Go sysvar.go:L1908 CharacterSetConnection
     SysVarData { go_file: "sysvar.go", go_line: 1908, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "character_set_connection", value: "utf8mb4", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1916 CharacterSetServer
+    // Go sysvar.go:L1916 CharacterSetServer
     SysVarData { go_file: "sysvar.go", go_line: 1916, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "character_set_server", value: "utf8mb4", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_SKIP_INIT, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1924 MaxAllowedPacket
+    // Go sysvar.go:L1924 MaxAllowedPacket
     SysVarData { go_file: "sysvar.go", go_line: 1924, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_allowed_packet", value: "67108864", computed: None, typ: TypeUnsigned, min_value: 1024, max_value: 1073741824, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L1954 WindowingUseHighPrecision
+    // Go sysvar.go:L1954 WindowingUseHighPrecision
     SysVarData { go_file: "sysvar.go", go_line: 1954, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "windowing_use_high_precision", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1964 BlockEncryptionMode
+    // Go sysvar.go:L1964 BlockEncryptionMode
     SysVarData { go_file: "sysvar.go", go_line: 1964, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "block_encryption_mode", value: "aes-128-ecb", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["aes-128-ecb", "aes-192-ecb", "aes-256-ecb", "aes-128-cbc", "aes-192-cbc", "aes-256-cbc", "aes-128-ofb", "aes-192-ofb", "aes-256-ofb", "aes-128-cfb", "aes-192-cfb", "aes-256-cfb"], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L1966 TiDBAllowMPPExecution
+    // Go sysvar.go:L1966 TiDBAllowMPPExecution
     SysVarData { go_file: "sysvar.go", go_line: 1966, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_allow_mpp", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_DEPENDED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1970 TiDBAllowTiFlashCop
+    // Go sysvar.go:L1970 TiDBAllowTiFlashCop
     SysVarData { go_file: "sysvar.go", go_line: 1970, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_allow_tiflash_cop", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1974 TiFlashFastScan
+    // Go sysvar.go:L1974 TiFlashFastScan
     SysVarData { go_file: "sysvar.go", go_line: 1974, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tiflash_fastscan", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1978 TiDBMPPStoreFailTTL
+    // Go sysvar.go:L1978 TiDBMPPStoreFailTTL
     SysVarData { go_file: "sysvar.go", go_line: 1978, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_mpp_store_fail_ttl", value: "0s", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L1985 TiDBHashExchangeWithNewCollation
+    // Go sysvar.go:L1985 TiDBHashExchangeWithNewCollation
     SysVarData { go_file: "sysvar.go", go_line: 1985, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_hash_exchange_with_new_collation", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1989 TiDBBCJThresholdCount
+    // Go sysvar.go:L1989 TiDBBCJThresholdCount
     SysVarData { go_file: "sysvar.go", go_line: 1989, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_broadcast_join_threshold_count", value: "10240", computed: None, typ: TypeInt, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1993 TiDBBCJThresholdSize
+    // Go sysvar.go:L1993 TiDBBCJThresholdSize
     SysVarData { go_file: "sysvar.go", go_line: 1993, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_broadcast_join_threshold_size", value: "104857600", computed: None, typ: TypeInt, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L1997 TiDBPreferBCJByExchangeDataSize
+    // Go sysvar.go:L1997 TiDBPreferBCJByExchangeDataSize
     SysVarData { go_file: "sysvar.go", go_line: 1997, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_prefer_broadcast_join_by_exchange_data_size", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2001 TiDBBuildStatsConcurrency
+    // Go sysvar.go:L2001 TiDBBuildStatsConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2001, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_build_stats_concurrency", value: "2", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L2002 TiDBBuildSamplingStatsConcurrency
+    // Go sysvar.go:L2002 TiDBBuildSamplingStatsConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2002, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_build_sampling_stats_concurrency", value: "2", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L2003 TiDBOptCartesianBCJ
+    // Go sysvar.go:L2003 TiDBOptCartesianBCJ
     SysVarData { go_file: "sysvar.go", go_line: 2003, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_broadcast_cartesian_join", value: "1", computed: None, typ: TypeInt, min_value: 0, max_value: 2, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2007 TiDBOptMPPOuterJoinFixedBuildSide
+    // Go sysvar.go:L2007 TiDBOptMPPOuterJoinFixedBuildSide
     SysVarData { go_file: "sysvar.go", go_line: 2007, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_mpp_outer_join_fixed_build_side", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2011 TiDBExecutorConcurrency
+    // Go sysvar.go:L2011 TiDBExecutorConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2011, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_executor_concurrency", value: "5", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2015 TiDBDistSQLScanConcurrency
+    // Go sysvar.go:L2015 TiDBDistSQLScanConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2015, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_distsql_scan_concurrency", value: "15", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2019 TiDBAnalyzeDistSQLScanConcurrency
+    // Go sysvar.go:L2019 TiDBAnalyzeDistSQLScanConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2019, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_analyze_distsql_scan_concurrency", value: "4", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2023 TiDBOptInSubqToJoinAndAgg
+    // Go sysvar.go:L2023 TiDBOptInSubqToJoinAndAgg
     SysVarData { go_file: "sysvar.go", go_line: 2023, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_insubq_to_join_and_agg", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2027 TiDBOptPreferRangeScan
+    // Go sysvar.go:L2027 TiDBOptPreferRangeScan
     SysVarData { go_file: "sysvar.go", go_line: 2027, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_prefer_range_scan", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2037 TiDBOptLimitPushDownThreshold
+    // Go sysvar.go:L2037 TiDBOptLimitPushDownThreshold
     SysVarData { go_file: "sysvar.go", go_line: 2037, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_limit_push_down_threshold", value: "100", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2041 TiDBOptCorrelationThreshold
+    // Go sysvar.go:L2041 TiDBOptCorrelationThreshold
     SysVarData { go_file: "sysvar.go", go_line: 2041, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_correlation_threshold", value: "0.9", computed: None, typ: TypeFloat, min_value: 0, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2045 TiDBOptEnableCorrelationAdjustment
+    // Go sysvar.go:L2045 TiDBOptEnableCorrelationAdjustment
     SysVarData { go_file: "sysvar.go", go_line: 2045, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_correlation_adjustment", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2049 TiDBOptCorrelationExpFactor
+    // Go sysvar.go:L2049 TiDBOptCorrelationExpFactor
     SysVarData { go_file: "sysvar.go", go_line: 2049, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_correlation_exp_factor", value: "1", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2053 TiDBOptCPUFactor
+    // Go sysvar.go:L2053 TiDBOptCPUFactor
     SysVarData { go_file: "sysvar.go", go_line: 2053, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_cpu_factor", value: "3", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2057 TiDBOptTiFlashConcurrencyFactor
+    // Go sysvar.go:L2057 TiDBOptTiFlashConcurrencyFactor
     SysVarData { go_file: "sysvar.go", go_line: 2057, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_tiflash_concurrency_factor", value: "24", computed: None, typ: TypeFloat, min_value: 1, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2061 TiDBOptCopCPUFactor
+    // Go sysvar.go:L2061 TiDBOptCopCPUFactor
     SysVarData { go_file: "sysvar.go", go_line: 2061, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_copcpu_factor", value: "3", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2065 TiDBOptNetworkFactor
+    // Go sysvar.go:L2065 TiDBOptNetworkFactor
     SysVarData { go_file: "sysvar.go", go_line: 2065, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_network_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2069 TiDBOptScanFactor
+    // Go sysvar.go:L2069 TiDBOptScanFactor
     SysVarData { go_file: "sysvar.go", go_line: 2069, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_scan_factor", value: "1.5", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2073 TiDBOptDescScanFactor
+    // Go sysvar.go:L2073 TiDBOptDescScanFactor
     SysVarData { go_file: "sysvar.go", go_line: 2073, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_desc_factor", value: "3", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2077 TiDBOptSeekFactor
+    // Go sysvar.go:L2077 TiDBOptSeekFactor
     SysVarData { go_file: "sysvar.go", go_line: 2077, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_seek_factor", value: "20", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_SKIP_INIT, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2081 TiDBOptMemoryFactor
+    // Go sysvar.go:L2081 TiDBOptMemoryFactor
     SysVarData { go_file: "sysvar.go", go_line: 2081, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_memory_factor", value: "0.001", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2085 TiDBOptDiskFactor
+    // Go sysvar.go:L2085 TiDBOptDiskFactor
     SysVarData { go_file: "sysvar.go", go_line: 2085, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_disk_factor", value: "1.5", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2089 TiDBOptIndexScanCostFactor
+    // Go sysvar.go:L2089 TiDBOptIndexScanCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2089, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_index_scan_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2093 TiDBOptIndexReaderCostFactor
+    // Go sysvar.go:L2093 TiDBOptIndexReaderCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2093, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_index_reader_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2097 TiDBOptTableReaderCostFactor
+    // Go sysvar.go:L2097 TiDBOptTableReaderCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2097, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_table_reader_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2101 TiDBOptTableFullScanCostFactor
+    // Go sysvar.go:L2101 TiDBOptTableFullScanCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2101, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_table_full_scan_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2105 TiDBOptTableRangeScanCostFactor
+    // Go sysvar.go:L2105 TiDBOptTableRangeScanCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2105, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_table_range_scan_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2109 TiDBOptTableRowIDScanCostFactor
+    // Go sysvar.go:L2109 TiDBOptTableRowIDScanCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2109, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_table_rowid_scan_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2113 TiDBOptTableTiFlashScanCostFactor
+    // Go sysvar.go:L2113 TiDBOptTableTiFlashScanCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2113, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_table_tiflash_scan_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2117 TiDBOptIndexLookupCostFactor
+    // Go sysvar.go:L2117 TiDBOptIndexLookupCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2117, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_index_lookup_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2121 TiDBOptIndexMergeCostFactor
+    // Go sysvar.go:L2121 TiDBOptIndexMergeCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2121, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_index_merge_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2125 TiDBOptSortCostFactor
+    // Go sysvar.go:L2125 TiDBOptSortCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2125, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_sort_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2129 TiDBOptTopNCostFactor
+    // Go sysvar.go:L2129 TiDBOptTopNCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2129, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_topn_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2133 TiDBOptLimitCostFactor
+    // Go sysvar.go:L2133 TiDBOptLimitCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2133, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_limit_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2137 TiDBOptStreamAggCostFactor
+    // Go sysvar.go:L2137 TiDBOptStreamAggCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2137, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_stream_agg_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2141 TiDBOptHashAggCostFactor
+    // Go sysvar.go:L2141 TiDBOptHashAggCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2141, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_hash_agg_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2145 TiDBOptMergeJoinCostFactor
+    // Go sysvar.go:L2145 TiDBOptMergeJoinCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2145, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_merge_join_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2149 TiDBOptHashJoinCostFactor
+    // Go sysvar.go:L2149 TiDBOptHashJoinCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2149, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_hash_join_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2153 TiDBOptIndexJoinCostFactor
+    // Go sysvar.go:L2153 TiDBOptIndexJoinCostFactor
     SysVarData { go_file: "sysvar.go", go_line: 2153, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_index_join_cost_factor", value: "1", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2157 TiDBOptIndexJoinMaxScanRowsRatio
+    // Go sysvar.go:L2157 TiDBOptIndexJoinMaxScanRowsRatio
     SysVarData { go_file: "sysvar.go", go_line: 2157, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_index_join_max_scan_rows_ratio", value: "0", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2161 TiDBOptimizerEnableNewOnlyFullGroupByCheck
+    // Go sysvar.go:L2161 TiDBOptimizerEnableNewOnlyFullGroupByCheck
     SysVarData { go_file: "sysvar.go", go_line: 2161, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_new_only_full_group_by_check", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2165 TiDBOptConcurrencyFactor
+    // Go sysvar.go:L2165 TiDBOptConcurrencyFactor
     SysVarData { go_file: "sysvar.go", go_line: 2165, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_concurrency_factor", value: "3", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2169 TiDBOptForceInlineCTE
+    // Go sysvar.go:L2169 TiDBOptForceInlineCTE
     SysVarData { go_file: "sysvar.go", go_line: 2169, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_force_inline_cte", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2173 TiDBIndexJoinBatchSize
+    // Go sysvar.go:L2173 TiDBIndexJoinBatchSize
     SysVarData { go_file: "sysvar.go", go_line: 2173, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_index_join_batch_size", value: "25000", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2177 TiDBIndexLookupSize
+    // Go sysvar.go:L2177 TiDBIndexLookupSize
     SysVarData { go_file: "sysvar.go", go_line: 2177, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_index_lookup_size", value: "20000", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2181 TiDBIndexLookupConcurrency
+    // Go sysvar.go:L2181 TiDBIndexLookupConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2181, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_index_lookup_concurrency", value: "-1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2188 TiDBIndexLookupJoinConcurrency
+    // Go sysvar.go:L2188 TiDBIndexLookupJoinConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2188, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_index_lookup_join_concurrency", value: "-1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2195 TiDBIndexSerialScanConcurrency
+    // Go sysvar.go:L2195 TiDBIndexSerialScanConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2195, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_index_serial_scan_concurrency", value: "1", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2199 TiDBSkipUTF8Check
+    // Go sysvar.go:L2199 TiDBSkipUTF8Check
     SysVarData { go_file: "sysvar.go", go_line: 2199, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_skip_utf8_check", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2203 TiDBSkipASCIICheck
+    // Go sysvar.go:L2203 TiDBSkipASCIICheck
     SysVarData { go_file: "sysvar.go", go_line: 2203, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_skip_ascii_check", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2207 TiDBDMLBatchSize
+    // Go sysvar.go:L2207 TiDBDMLBatchSize
     SysVarData { go_file: "sysvar.go", go_line: 2207, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_dml_batch_size", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2211 TiDBMaxChunkSize
+    // Go sysvar.go:L2211 TiDBMaxChunkSize
     SysVarData { go_file: "sysvar.go", go_line: 2211, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_max_chunk_size", value: "1024", computed: None, typ: TypeUnsigned, min_value: 32, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2215 TiDBAllowBatchCop
+    // Go sysvar.go:L2215 TiDBAllowBatchCop
     SysVarData { go_file: "sysvar.go", go_line: 2215, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_allow_batch_cop", value: "1", computed: None, typ: TypeInt, min_value: 0, max_value: 2, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2219 TiDBShardRowIDBits
+    // Go sysvar.go:L2219 TiDBShardRowIDBits
     SysVarData { go_file: "sysvar.go", go_line: 2219, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_shard_row_id_bits", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 15, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2223 TiDBPreSplitRegions
+    // Go sysvar.go:L2223 TiDBPreSplitRegions
     SysVarData { go_file: "sysvar.go", go_line: 2223, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_pre_split_regions", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 15, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2227 TiDBInitChunkSize
+    // Go sysvar.go:L2227 TiDBInitChunkSize
     SysVarData { go_file: "sysvar.go", go_line: 2227, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_init_chunk_size", value: "32", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 32, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2231 TiDBEnableCascadesPlanner
+    // Go sysvar.go:L2231 TiDBEnableCascadesPlanner
     SysVarData { go_file: "sysvar.go", go_line: 2231, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_cascades_planner", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2235 TiDBEnableIndexMerge
+    // Go sysvar.go:L2235 TiDBEnableIndexMerge
     SysVarData { go_file: "sysvar.go", go_line: 2235, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_index_merge", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2239 TiDBEnableTablePartition
+    // Go sysvar.go:L2239 TiDBEnableTablePartition
     SysVarData { go_file: "sysvar.go", go_line: 2239, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_table_partition", value: "ON", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "AUTO"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L2246 TiDBEnableListTablePartition
+    // Go sysvar.go:L2246 TiDBEnableListTablePartition
     SysVarData { go_file: "sysvar.go", go_line: 2246, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_list_partition", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L2253 TiDBHashJoinConcurrency
+    // Go sysvar.go:L2253 TiDBHashJoinConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2253, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_hash_join_concurrency", value: "-1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2260 TiDBProjectionConcurrency
+    // Go sysvar.go:L2260 TiDBProjectionConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2260, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_projection_concurrency", value: "-1", computed: None, typ: TypeInt, min_value: -1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2267 TiDBHashAggPartialConcurrency
+    // Go sysvar.go:L2267 TiDBHashAggPartialConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2267, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_hashagg_partial_concurrency", value: "-1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2274 TiDBHashAggFinalConcurrency
+    // Go sysvar.go:L2274 TiDBHashAggFinalConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2274, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_hashagg_final_concurrency", value: "-1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2281 TiDBWindowConcurrency
+    // Go sysvar.go:L2281 TiDBWindowConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2281, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_window_concurrency", value: "-1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2288 TiDBMergeJoinConcurrency
+    // Go sysvar.go:L2288 TiDBMergeJoinConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2288, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_merge_join_concurrency", value: "1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE | FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2295 TiDBStreamAggConcurrency
+    // Go sysvar.go:L2295 TiDBStreamAggConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2295, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_streamagg_concurrency", value: "1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2302 TiDBIndexMergeIntersectionConcurrency
+    // Go sysvar.go:L2302 TiDBIndexMergeIntersectionConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2302, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_index_merge_intersection_concurrency", value: "-1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE | FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2309 TiDBEnableParallelApply
+    // Go sysvar.go:L2309 TiDBEnableParallelApply
     SysVarData { go_file: "sysvar.go", go_line: 2309, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_parallel_apply", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2313 TiDBMemQuotaApplyCache
+    // Go sysvar.go:L2313 TiDBMemQuotaApplyCache
     SysVarData { go_file: "sysvar.go", go_line: 2313, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_mem_quota_apply_cache", value: "33554432", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2317 TiDBBackoffLockFast
+    // Go sysvar.go:L2317 TiDBBackoffLockFast
     SysVarData { go_file: "sysvar.go", go_line: 2317, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_backoff_lock_fast", value: "10", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2321 TiDBBackOffWeight
+    // Go sysvar.go:L2321 TiDBBackOffWeight
     SysVarData { go_file: "sysvar.go", go_line: 2321, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_backoff_weight", value: "2", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2325 TiDBTxnEntrySizeLimit
+    // Go sysvar.go:L2325 TiDBTxnEntrySizeLimit
     SysVarData { go_file: "sysvar.go", go_line: 2325, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_txn_entry_size_limit", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 125829120, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION | HOOK_SET_GLOBAL },
-    // go: sysvar.go:L2332 TiDBRetryLimit
+    // Go sysvar.go:L2332 TiDBRetryLimit
     SysVarData { go_file: "sysvar.go", go_line: 2332, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_retry_limit", value: "10", computed: None, typ: TypeInt, min_value: -1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2336 TiDBDisableTxnAutoRetry
+    // Go sysvar.go:L2336 TiDBDisableTxnAutoRetry
     SysVarData { go_file: "sysvar.go", go_line: 2336, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_disable_txn_auto_retry", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2347 TiDBConstraintCheckInPlace
+    // Go sysvar.go:L2347 TiDBConstraintCheckInPlace
     SysVarData { go_file: "sysvar.go", go_line: 2347, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_constraint_check_in_place", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2351 TiDBTxnMode
+    // Go sysvar.go:L2351 TiDBTxnMode
     SysVarData { go_file: "sysvar.go", go_line: 2351, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_txn_mode", value: "pessimistic", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["pessimistic", "optimistic"], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY_ALL, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2355 TiDBEnableWindowFunction
+    // Go sysvar.go:L2355 TiDBEnableWindowFunction
     SysVarData { go_file: "sysvar.go", go_line: 2355, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_window_function", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2359 TiDBEnablePipelinedWindowFunction
+    // Go sysvar.go:L2359 TiDBEnablePipelinedWindowFunction
     SysVarData { go_file: "sysvar.go", go_line: 2359, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_pipelined_window_function", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2363 TiDBOptEnableNoDecorrelateInSelect
+    // Go sysvar.go:L2363 TiDBOptEnableNoDecorrelateInSelect
     SysVarData { go_file: "sysvar.go", go_line: 2363, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_no_decorrelate_in_select", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2367 TiDBOptEnableAlternativeLogicalPlans
+    // Go sysvar.go:L2367 TiDBOptEnableAlternativeLogicalPlans
     SysVarData { go_file: "sysvar.go", go_line: 2367, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_alternative_logical_plans", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2371 TiDBEnableStrictDoubleTypeCheck
+    // Go sysvar.go:L2371 TiDBEnableStrictDoubleTypeCheck
     SysVarData { go_file: "sysvar.go", go_line: 2371, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_strict_double_type_check", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2375 TiDBEnableStrictNotNullCheck
+    // Go sysvar.go:L2375 TiDBEnableStrictNotNullCheck
     SysVarData { go_file: "sysvar.go", go_line: 2375, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_strict_not_null_check", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2379 TiDBEnableVectorizedExpression
+    // Go sysvar.go:L2379 TiDBEnableVectorizedExpression
     SysVarData { go_file: "sysvar.go", go_line: 2379, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_vectorized_expression", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2383 TiDBEnableFastAnalyze
+    // Go sysvar.go:L2383 TiDBEnableFastAnalyze
     SysVarData { go_file: "sysvar.go", go_line: 2383, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_fast_analyze", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2394 TiDBSkipIsolationLevelCheck
+    // Go sysvar.go:L2394 TiDBSkipIsolationLevelCheck
     SysVarData { go_file: "sysvar.go", go_line: 2394, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_skip_isolation_level_check", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: 0 },
-    // go: sysvar.go:L2395 TiDBEnableRateLimitAction
+    // Go sysvar.go:L2395 TiDBEnableRateLimitAction
     SysVarData { go_file: "sysvar.go", go_line: 2395, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_rate_limit_action", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2399 TiDBAllowFallbackToTiKV
+    // Go sysvar.go:L2399 TiDBAllowFallbackToTiKV
     SysVarData { go_file: "sysvar.go", go_line: 2399, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_allow_fallback_to_tikv", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2431 TiDBEnableAutoIncrementInGenerated
+    // Go sysvar.go:L2431 TiDBEnableAutoIncrementInGenerated
     SysVarData { go_file: "sysvar.go", go_line: 2431, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_auto_increment_in_generated", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2435 TiDBPlacementMode
+    // Go sysvar.go:L2435 TiDBPlacementMode
     SysVarData { go_file: "sysvar.go", go_line: 2435, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_placement_mode", value: "STRICT", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["STRICT", "IGNORE"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2439 TiDBOptJoinReorderThreshold
+    // Go sysvar.go:L2439 TiDBOptJoinReorderThreshold
     SysVarData { go_file: "sysvar.go", go_line: 2439, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_join_reorder_threshold", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 63, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2443 TiDBOptEnableAdvancedJoinReorder
+    // Go sysvar.go:L2443 TiDBOptEnableAdvancedJoinReorder
     SysVarData { go_file: "sysvar.go", go_line: 2443, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_advanced_join_reorder", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2447 TiDBOptJoinReorderThroughProj
+    // Go sysvar.go:L2447 TiDBOptJoinReorderThroughProj
     SysVarData { go_file: "sysvar.go", go_line: 2447, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_join_reorder_through_proj", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2451 TiDBOptJoinReorderThroughSel
+    // Go sysvar.go:L2451 TiDBOptJoinReorderThroughSel
     SysVarData { go_file: "sysvar.go", go_line: 2451, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_join_reorder_through_sel", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2455 TiDBEnableNoopFuncs
+    // Go sysvar.go:L2455 TiDBEnableNoopFuncs
     SysVarData { go_file: "sysvar.go", go_line: 2455, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_noop_functions", value: "OFF", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "WARN"], aliases: &[], global_config_name: "", flags: FLAG_DEPENDED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2479 TiDBReplicaRead
+    // Go sysvar.go:L2479 TiDBReplicaRead
     SysVarData { go_file: "sysvar.go", go_line: 2479, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_replica_read", value: "leader", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["leader", "prefer-leader", "follower", "leader-and-follower", "closest-replicas", "closest-adaptive", "learner"], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2497 TiDBAdaptiveClosestReadThreshold
+    // Go sysvar.go:L2497 TiDBAdaptiveClosestReadThreshold
     SysVarData { go_file: "sysvar.go", go_line: 2497, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_adaptive_closest_read_threshold", value: "4096", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2501 TiDBUsePlanBaselines
+    // Go sysvar.go:L2501 TiDBUsePlanBaselines
     SysVarData { go_file: "sysvar.go", go_line: 2501, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_use_plan_baselines", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2505 TiDBEvolvePlanBaselines
+    // Go sysvar.go:L2505 TiDBEvolvePlanBaselines
     SysVarData { go_file: "sysvar.go", go_line: 2505, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_evolve_plan_baselines", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2514 TiDBEnableExtendedStats
+    // Go sysvar.go:L2514 TiDBEnableExtendedStats
     SysVarData { go_file: "sysvar.go", go_line: 2514, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_extended_stats", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_HIDDEN, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2518 CTEMaxRecursionDepth
+    // Go sysvar.go:L2518 CTEMaxRecursionDepth
     SysVarData { go_file: "sysvar.go", go_line: 2518, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "cte_max_recursion_depth", value: "1000", computed: None, typ: TypeInt, min_value: 0, max_value: 4294967295, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2522 TiDBAllowAutoRandExplicitInsert
+    // Go sysvar.go:L2522 TiDBAllowAutoRandExplicitInsert
     SysVarData { go_file: "sysvar.go", go_line: 2522, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "allow_auto_random_explicit_insert", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2526 TiDBEnableClusteredIndex
+    // Go sysvar.go:L2526 TiDBEnableClusteredIndex
     SysVarData { go_file: "sysvar.go", go_line: 2526, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_clustered_index", value: "ON", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "INT_ONLY"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2536 TiDBEnableGlobalIndex
+    // Go sysvar.go:L2536 TiDBEnableGlobalIndex
     SysVarData { go_file: "sysvar.go", go_line: 2536, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_global_index", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L2542 TiDBPartitionPruneMode
+    // Go sysvar.go:L2542 TiDBPartitionPruneMode
     SysVarData { go_file: "sysvar.go", go_line: 2542, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_partition_prune_mode", value: "dynamic", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["static", "dynamic", "static-only", "dynamic-only"], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION | HOOK_SET_GLOBAL | HOOK_GET_SESSION },
-    // go: sysvar.go:L2571 TiDBRedactLog
+    // Go sysvar.go:L2571 TiDBRedactLog
     SysVarData { go_file: "sysvar.go", go_line: 2571, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_redact_log", value: "OFF", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "MARKER"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2576 TiDBShardAllocateStep
+    // Go sysvar.go:L2576 TiDBShardAllocateStep
     SysVarData { go_file: "sysvar.go", go_line: 2576, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_shard_allocate_step", value: "9223372036854775807", computed: None, typ: TypeInt, min_value: 1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2580 TiDBEnableAsyncCommit
+    // Go sysvar.go:L2580 TiDBEnableAsyncCommit
     SysVarData { go_file: "sysvar.go", go_line: 2580, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_async_commit", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2584 TiDBEnable1PC
+    // Go sysvar.go:L2584 TiDBEnable1PC
     SysVarData { go_file: "sysvar.go", go_line: 2584, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_1pc", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2588 TiDBGuaranteeLinearizability
+    // Go sysvar.go:L2588 TiDBGuaranteeLinearizability
     SysVarData { go_file: "sysvar.go", go_line: 2588, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_guarantee_linearizability", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2592 TiDBAnalyzeVersion
+    // Go sysvar.go:L2592 TiDBAnalyzeVersion
     SysVarData { go_file: "sysvar.go", go_line: 2592, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_analyze_version", value: "2", computed: None, typ: TypeInt, min_value: 1, max_value: 2, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2603 TiDBHashJoinVersion
+    // Go sysvar.go:L2603 TiDBHashJoinVersion
     SysVarData { go_file: "sysvar.go", go_line: 2603, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_hash_join_version", value: "legacy", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2617 TiDBOptEnableHashJoin
+    // Go sysvar.go:L2617 TiDBOptEnableHashJoin
     SysVarData { go_file: "sysvar.go", go_line: 2617, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_hash_join", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2621 TiDBEnableIndexMergeJoin
+    // Go sysvar.go:L2621 TiDBEnableIndexMergeJoin
     SysVarData { go_file: "sysvar.go", go_line: 2621, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_index_merge_join", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_HIDDEN, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2625 TiDBTrackAggregateMemoryUsage
+    // Go sysvar.go:L2625 TiDBTrackAggregateMemoryUsage
     SysVarData { go_file: "sysvar.go", go_line: 2625, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_track_aggregate_memory_usage", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2629 TiDBMultiStatementMode
+    // Go sysvar.go:L2629 TiDBMultiStatementMode
     SysVarData { go_file: "sysvar.go", go_line: 2629, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_multi_statement_mode", value: "OFF", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "WARN"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2633 TiDBEnableExchangePartition
+    // Go sysvar.go:L2633 TiDBEnableExchangePartition
     SysVarData { go_file: "sysvar.go", go_line: 2633, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_exchange_partition", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2645 TiDBTmpTableMaxSize
+    // Go sysvar.go:L2645 TiDBTmpTableMaxSize
     SysVarData { go_file: "sysvar.go", go_line: 2645, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_tmp_table_max_size", value: "67108864", computed: None, typ: TypeUnsigned, min_value: 1048576, max_value: 137438953472, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2649 TiDBEnableOrderedResultMode
+    // Go sysvar.go:L2649 TiDBEnableOrderedResultMode
     SysVarData { go_file: "sysvar.go", go_line: 2649, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_ordered_result_mode", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2653 TiDBEnablePseudoForOutdatedStats
+    // Go sysvar.go:L2653 TiDBEnablePseudoForOutdatedStats
     SysVarData { go_file: "sysvar.go", go_line: 2653, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_pseudo_for_outdated_stats", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2657 TiDBRegardNULLAsPoint
+    // Go sysvar.go:L2657 TiDBRegardNULLAsPoint
     SysVarData { go_file: "sysvar.go", go_line: 2657, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_regard_null_as_point", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2661 TiDBEnablePaging
+    // Go sysvar.go:L2661 TiDBEnablePaging
     SysVarData { go_file: "sysvar.go", go_line: 2661, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_paging", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_HIDDEN, hooks: HOOK_SET_SESSION | HOOK_SET_GLOBAL },
-    // go: sysvar.go:L2668 TiDBEnableLegacyInstanceScope
+    // Go sysvar.go:L2668 TiDBEnableLegacyInstanceScope
     SysVarData { go_file: "sysvar.go", go_line: 2668, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_legacy_instance_scope", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2672 TiDBStatsLoadSyncWait
+    // Go sysvar.go:L2672 TiDBStatsLoadSyncWait
     SysVarData { go_file: "sysvar.go", go_line: 2672, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_stats_load_sync_wait", value: "100", computed: None, typ: TypeInt, min_value: 0, max_value: 2147483647, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L2685 TiDBSysdateIsNow
+    // Go sysvar.go:L2685 TiDBSysdateIsNow
     SysVarData { go_file: "sysvar.go", go_line: 2685, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_sysdate_is_now", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2691 TiDBEnableParallelHashaggSpill
+    // Go sysvar.go:L2691 TiDBEnableParallelHashaggSpill
     SysVarData { go_file: "sysvar.go", go_line: 2691, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_parallel_hashagg_spill", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2700 TiDBEnableMutationChecker
+    // Go sysvar.go:L2700 TiDBEnableMutationChecker
     SysVarData { go_file: "sysvar.go", go_line: 2700, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_mutation_checker", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HIDDEN, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2707 TiDBTxnAssertionLevel
+    // Go sysvar.go:L2707 TiDBTxnAssertionLevel
     SysVarData { go_file: "sysvar.go", go_line: 2707, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_txn_assertion_level", value: "OFF", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "FAST", "STRICT"], aliases: &[], global_config_name: "", flags: FLAG_HIDDEN, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2711 TiDBBatchPendingTiFlashCount
+    // Go sysvar.go:L2711 TiDBBatchPendingTiFlashCount
     SysVarData { go_file: "sysvar.go", go_line: 2711, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_batch_pending_tiflash_count", value: "4000", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 4294967295, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2719 TiDBIgnorePreparedCacheCloseStmt
+    // Go sysvar.go:L2719 TiDBIgnorePreparedCacheCloseStmt
     SysVarData { go_file: "sysvar.go", go_line: 2719, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_ignore_prepared_cache_close_stmt", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2725 TiDBEnableNewCostInterface
+    // Go sysvar.go:L2725 TiDBEnableNewCostInterface
     SysVarData { go_file: "sysvar.go", go_line: 2725, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_new_cost_interface", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2737 TiDBCostModelVersion
+    // Go sysvar.go:L2737 TiDBCostModelVersion
     SysVarData { go_file: "sysvar.go", go_line: 2737, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_cost_model_version", value: "2", computed: None, typ: TypeInt, min_value: 1, max_value: 2, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2743 TiDBIndexJoinDoubleReadPenaltyCostRate
+    // Go sysvar.go:L2743 TiDBIndexJoinDoubleReadPenaltyCostRate
     SysVarData { go_file: "sysvar.go", go_line: 2743, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_index_join_double_read_penalty_cost_rate", value: "0", computed: None, typ: TypeFloat, min_value: 0, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2749 TiDBRCWriteCheckTs
+    // Go sysvar.go:L2749 TiDBRCWriteCheckTs
     SysVarData { go_file: "sysvar.go", go_line: 2749, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_rc_write_check_ts", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2753 TiDBRemoveOrderbyInSubquery
+    // Go sysvar.go:L2753 TiDBRemoveOrderbyInSubquery
     SysVarData { go_file: "sysvar.go", go_line: 2753, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_remove_orderby_in_subquery", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2757 TiDBMemQuotaQuery
+    // Go sysvar.go:L2757 TiDBMemQuotaQuery
     SysVarData { go_file: "sysvar.go", go_line: 2757, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_mem_quota_query", value: "1073741824", computed: None, typ: TypeInt, min_value: -1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2769 TiDBNonTransactionalIgnoreError
+    // Go sysvar.go:L2769 TiDBNonTransactionalIgnoreError
     SysVarData { go_file: "sysvar.go", go_line: 2769, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_nontransactional_ignore_error", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2775 TiFlashFineGrainedShuffleStreamCount
+    // Go sysvar.go:L2775 TiFlashFineGrainedShuffleStreamCount
     SysVarData { go_file: "sysvar.go", go_line: 2775, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tiflash_fine_grained_shuffle_stream_count", value: "0", computed: None, typ: TypeInt, min_value: -1, max_value: 1024, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2780 TiFlashFineGrainedShuffleBatchSize
+    // Go sysvar.go:L2780 TiFlashFineGrainedShuffleBatchSize
     SysVarData { go_file: "sysvar.go", go_line: 2780, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tiflash_fine_grained_shuffle_batch_size", value: "8192", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2785 TiDBSimplifiedMetrics
+    // Go sysvar.go:L2785 TiDBSimplifiedMetrics
     SysVarData { go_file: "sysvar.go", go_line: 2785, scope: ScopeGlobal, name: "tidb_simplified_metrics", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L2790 TiDBMinPagingSize
+    // Go sysvar.go:L2790 TiDBMinPagingSize
     SysVarData { go_file: "sysvar.go", go_line: 2790, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_min_paging_size", value: "128", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2794 TiDBMaxPagingSize
+    // Go sysvar.go:L2794 TiDBMaxPagingSize
     SysVarData { go_file: "sysvar.go", go_line: 2794, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_max_paging_size", value: "50000", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2798 TiDBMemoryDebugModeMinHeapInUse
+    // Go sysvar.go:L2798 TiDBMemoryDebugModeMinHeapInUse
     SysVarData { go_file: "sysvar.go", go_line: 2798, scope: ScopeSession, name: "tidb_memory_debug_mode_min_heap_inuse", value: "0", computed: None, typ: TypeInt, min_value: -9223372036854775808, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2802 TiDBMemoryDebugModeAlarmRatio
+    // Go sysvar.go:L2802 TiDBMemoryDebugModeAlarmRatio
     SysVarData { go_file: "sysvar.go", go_line: 2802, scope: ScopeSession, name: "tidb_memory_debug_mode_alarm_ratio", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2806 SQLRequirePrimaryKey
+    // Go sysvar.go:L2806 SQLRequirePrimaryKey
     SysVarData { go_file: "sysvar.go", go_line: 2806, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_require_primary_key", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2810 TiDBEnableAnalyzeSnapshot
+    // Go sysvar.go:L2810 TiDBEnableAnalyzeSnapshot
     SysVarData { go_file: "sysvar.go", go_line: 2810, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_analyze_snapshot", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2814 TiDBGenerateBinaryPlan
+    // Go sysvar.go:L2814 TiDBGenerateBinaryPlan
     SysVarData { go_file: "sysvar.go", go_line: 2814, scope: ScopeGlobal, name: "tidb_generate_binary_plan", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L2818 TiDBEnableStatsUpdateDuringDDL
+    // Go sysvar.go:L2818 TiDBEnableStatsUpdateDuringDDL
     SysVarData { go_file: "sysvar.go", go_line: 2818, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_stats_update_during_ddl", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2826 TiDBDefaultStrMatchSelectivity
+    // Go sysvar.go:L2826 TiDBDefaultStrMatchSelectivity
     SysVarData { go_file: "sysvar.go", go_line: 2826, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_default_string_match_selectivity", value: "0.8", computed: None, typ: TypeFloat, min_value: 0, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2831 TiDBDDLEnableFastReorg
+    // Go sysvar.go:L2831 TiDBDDLEnableFastReorg
     SysVarData { go_file: "sysvar.go", go_line: 2831, scope: ScopeGlobal, name: "tidb_ddl_enable_fast_reorg", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L2838 TiDBDDLDiskQuota
+    // Go sysvar.go:L2838 TiDBDDLDiskQuota
     SysVarData { go_file: "sysvar.go", go_line: 2838, scope: ScopeGlobal, name: "tidb_ddl_disk_quota", value: "107374182400", computed: None, typ: TypeInt, min_value: 107374182400, max_value: 1125899906842624, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L2845 TiDBCloudStorageURI
+    // Go sysvar.go:L2845 TiDBCloudStorageURI
     SysVarData { go_file: "sysvar.go", go_line: 2845, scope: ScopeGlobal, name: "tidb_cloud_storage_uri", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L2865 TiDBConstraintCheckInPlacePessimistic
+    // Go sysvar.go:L2865 TiDBConstraintCheckInPlacePessimistic
     SysVarData { go_file: "sysvar.go", go_line: 2865, scope: ScopeSession, name: "tidb_constraint_check_in_place_pessimistic", value: "ON", computed: Some("BoolToOnOff(config.GetGlobalConfig().PessimisticTxn.ConstraintCheckInPlacePessimistic)"), typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2873 TiDBEnableTiFlashReadForWriteStmt
+    // Go sysvar.go:L2873 TiDBEnableTiFlashReadForWriteStmt
     SysVarData { go_file: "sysvar.go", go_line: 2873, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_tiflash_read_for_write_stmt", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2884 TiDBEnableUnsafeSubstitute
+    // Go sysvar.go:L2884 TiDBEnableUnsafeSubstitute
     SysVarData { go_file: "sysvar.go", go_line: 2884, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_unsafe_substitute", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2888 TiDBOptRangeMaxSize
+    // Go sysvar.go:L2888 TiDBOptRangeMaxSize
     SysVarData { go_file: "sysvar.go", go_line: 2888, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_range_max_size", value: "67108864", computed: None, typ: TypeInt, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2892 TiDBOptAdvancedJoinHint
+    // Go sysvar.go:L2892 TiDBOptAdvancedJoinHint
     SysVarData { go_file: "sysvar.go", go_line: 2892, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_advanced_join_hint", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2896 TiDBOptUseInvisibleIndexes
+    // Go sysvar.go:L2896 TiDBOptUseInvisibleIndexes
     SysVarData { go_file: "sysvar.go", go_line: 2896, scope: ScopeSession, name: "tidb_opt_use_invisible_indexes", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2900 TiDBAnalyzePartitionConcurrency
+    // Go sysvar.go:L2900 TiDBAnalyzePartitionConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2900, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_analyze_partition_concurrency", value: "2", computed: None, typ: TypeInt, min_value: 1, max_value: 128, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2911 TiDBMergePartitionStatsConcurrency
+    // Go sysvar.go:L2911 TiDBMergePartitionStatsConcurrency
     SysVarData { go_file: "sysvar.go", go_line: 2911, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_merge_partition_stats_concurrency", value: "1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2918 TiDBEnableAsyncMergeGlobalStats
+    // Go sysvar.go:L2918 TiDBEnableAsyncMergeGlobalStats
     SysVarData { go_file: "sysvar.go", go_line: 2918, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_async_merge_global_stats", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2925 TiDBOptPrefixIndexSingleScan
+    // Go sysvar.go:L2925 TiDBOptPrefixIndexSingleScan
     SysVarData { go_file: "sysvar.go", go_line: 2925, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_prefix_index_single_scan", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2929 TiDBOptPartialOrderedIndexForTopN
+    // Go sysvar.go:L2929 TiDBOptPartialOrderedIndexForTopN
     SysVarData { go_file: "sysvar.go", go_line: 2929, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_partial_ordered_index_for_topn", value: "DISABLE", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["DISABLE", "COST"], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L2940 TiDBExternalTS
+    // Go sysvar.go:L2940 TiDBExternalTS
     SysVarData { go_file: "sysvar.go", go_line: 2940, scope: ScopeGlobal, name: "tidb_external_ts", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L2953 TiDBEnableExternalTSRead
+    // Go sysvar.go:L2953 TiDBEnableExternalTSRead
     SysVarData { go_file: "sysvar.go", go_line: 2953, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_external_ts_read", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2957 TiDBEnableReusechunk
+    // Go sysvar.go:L2957 TiDBEnableReusechunk
     SysVarData { go_file: "sysvar.go", go_line: 2957, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_reuse_chunk", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L2962 TiDBIgnoreInlistPlanDigest
+    // Go sysvar.go:L2962 TiDBIgnoreInlistPlanDigest
     SysVarData { go_file: "sysvar.go", go_line: 2962, scope: ScopeGlobal, name: "tidb_ignore_inlist_plan_digest", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L2968 TiDBTTLJobEnable
+    // Go sysvar.go:L2968 TiDBTTLJobEnable
     SysVarData { go_file: "sysvar.go", go_line: 2968, scope: ScopeGlobal, name: "tidb_ttl_job_enable", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L2974 TiDBTTLScanBatchSize
+    // Go sysvar.go:L2974 TiDBTTLScanBatchSize
     SysVarData { go_file: "sysvar.go", go_line: 2974, scope: ScopeGlobal, name: "tidb_ttl_scan_batch_size", value: "500", computed: None, typ: TypeInt, min_value: 1, max_value: 10240, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L2985 TiDBTTLDeleteBatchSize
+    // Go sysvar.go:L2985 TiDBTTLDeleteBatchSize
     SysVarData { go_file: "sysvar.go", go_line: 2985, scope: ScopeGlobal, name: "tidb_ttl_delete_batch_size", value: "100", computed: None, typ: TypeInt, min_value: 1, max_value: 10240, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L2996 TiDBTTLDeleteRateLimit
+    // Go sysvar.go:L2996 TiDBTTLDeleteRateLimit
     SysVarData { go_file: "sysvar.go", go_line: 2996, scope: ScopeGlobal, name: "tidb_ttl_delete_rate_limit", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3007 TiDBStoreBatchSize
+    // Go sysvar.go:L3007 TiDBStoreBatchSize
     SysVarData { go_file: "sysvar.go", go_line: 3007, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_store_batch_size", value: "4", computed: None, typ: TypeInt, min_value: 0, max_value: 25000, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3014 MppExchangeCompressionMode
+    // Go sysvar.go:L3014 MppExchangeCompressionMode
     SysVarData { go_file: "sysvar.go", go_line: 3014, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "mpp_exchange_compression_mode", value: "UNSPECIFIED", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L3042 MppVersion
+    // Go sysvar.go:L3042 MppVersion
     SysVarData { go_file: "sysvar.go", go_line: 3042, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "mpp_version", value: "UNSPECIFIED", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L3062 TiDBTTLJobScheduleWindowStartTime
+    // Go sysvar.go:L3062 TiDBTTLJobScheduleWindowStartTime
     SysVarData { go_file: "sysvar.go", go_line: 3062, scope: ScopeGlobal, name: "tidb_ttl_job_schedule_window_start_time", value: "00:00 +0000", computed: None, typ: TypeTime, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3075 TiDBTTLJobScheduleWindowEndTime
+    // Go sysvar.go:L3075 TiDBTTLJobScheduleWindowEndTime
     SysVarData { go_file: "sysvar.go", go_line: 3075, scope: ScopeGlobal, name: "tidb_ttl_job_schedule_window_end_time", value: "23:59 +0000", computed: None, typ: TypeTime, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3088 TiDBTTLScanWorkerCount
+    // Go sysvar.go:L3088 TiDBTTLScanWorkerCount
     SysVarData { go_file: "sysvar.go", go_line: 3088, scope: ScopeGlobal, name: "tidb_ttl_scan_worker_count", value: "4", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3100 TiDBTTLDeleteWorkerCount
+    // Go sysvar.go:L3100 TiDBTTLDeleteWorkerCount
     SysVarData { go_file: "sysvar.go", go_line: 3100, scope: ScopeGlobal, name: "tidb_ttl_delete_worker_count", value: "4", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3112 TiDBEnableResourceControl
+    // Go sysvar.go:L3112 TiDBEnableResourceControl
     SysVarData { go_file: "sysvar.go", go_line: 3112, scope: ScopeGlobal, name: "tidb_enable_resource_control", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3122 TiDBResourceControlStrictMode
+    // Go sysvar.go:L3122 TiDBResourceControlStrictMode
     SysVarData { go_file: "sysvar.go", go_line: 3122, scope: ScopeGlobal, name: "tidb_resource_control_strict_mode", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3132 TiDBPessimisticTransactionFairLocking
+    // Go sysvar.go:L3132 TiDBPessimisticTransactionFairLocking
     SysVarData { go_file: "sysvar.go", go_line: 3132, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_pessimistic_txn_fair_locking", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3136 TiDBEnablePlanCacheForParamLimit
+    // Go sysvar.go:L3136 TiDBEnablePlanCacheForParamLimit
     SysVarData { go_file: "sysvar.go", go_line: 3136, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_plan_cache_for_param_limit", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3140 TiDBEnableINLJoinInnerMultiPattern
+    // Go sysvar.go:L3140 TiDBEnableINLJoinInnerMultiPattern
     SysVarData { go_file: "sysvar.go", go_line: 3140, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_inl_join_inner_multi_pattern", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L3149 TiFlashComputeDispatchPolicy
+    // Go sysvar.go:L3149 TiFlashComputeDispatchPolicy
     SysVarData { go_file: "sysvar.go", go_line: 3149, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tiflash_compute_dispatch_policy", value: "consistent_hash", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION | HOOK_SET_GLOBAL },
-    // go: sysvar.go:L3154 TiDBEnablePlanCacheForSubquery
+    // Go sysvar.go:L3154 TiDBEnablePlanCacheForSubquery
     SysVarData { go_file: "sysvar.go", go_line: 3154, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_plan_cache_for_subquery", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3158 TiDBOptEnableLateMaterialization
+    // Go sysvar.go:L3158 TiDBOptEnableLateMaterialization
     SysVarData { go_file: "sysvar.go", go_line: 3158, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_late_materialization", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3162 TiDBLoadBasedReplicaReadThreshold
+    // Go sysvar.go:L3162 TiDBLoadBasedReplicaReadThreshold
     SysVarData { go_file: "sysvar.go", go_line: 3162, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_load_based_replica_read_threshold", value: "1s", computed: None, typ: TypeDuration, min_value: 0, max_value: 3600000000000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3170 TiDBTTLRunningTasks
+    // Go sysvar.go:L3170 TiDBTTLRunningTasks
     SysVarData { go_file: "sysvar.go", go_line: 3170, scope: ScopeGlobal, name: "tidb_ttl_running_tasks", value: "-1", computed: None, typ: TypeInt, min_value: 1, max_value: 256, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_AUTO_VALUE, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3180 TiDBOptOrderingIdxSelThresh
+    // Go sysvar.go:L3180 TiDBOptOrderingIdxSelThresh
     SysVarData { go_file: "sysvar.go", go_line: 3180, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_ordering_index_selectivity_threshold", value: "0", computed: None, typ: TypeFloat, min_value: 0, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3185 TiDBOptOrderingIdxSelRatio
+    // Go sysvar.go:L3185 TiDBOptOrderingIdxSelRatio
     SysVarData { go_file: "sysvar.go", go_line: 3185, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_ordering_index_selectivity_ratio", value: "-1", computed: None, typ: TypeFloat, min_value: -1, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3190 TiDBOptEnableMPPSharedCTEExecution
+    // Go sysvar.go:L3190 TiDBOptEnableMPPSharedCTEExecution
     SysVarData { go_file: "sysvar.go", go_line: 3190, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_enable_mpp_shared_cte_execution", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3194 TiDBOptFixControl
+    // Go sysvar.go:L3194 TiDBOptFixControl
     SysVarData { go_file: "sysvar.go", go_line: 3194, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_fix_control", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION | HOOK_SET_GLOBAL },
-    // go: sysvar.go:L3223 TiDBAnalyzeSkipColumnTypes
+    // Go sysvar.go:L3223 TiDBAnalyzeSkipColumnTypes
     SysVarData { go_file: "sysvar.go", go_line: 3223, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_analyze_skip_column_types", value: "json,blob,mediumblob,longblob,mediumtext,longtext", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L3231 TiDBPlanCacheInvalidationOnFreshStats
+    // Go sysvar.go:L3231 TiDBPlanCacheInvalidationOnFreshStats
     SysVarData { go_file: "sysvar.go", go_line: 3231, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_plan_cache_invalidation_on_fresh_stats", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3235 TiFlashReplicaRead
+    // Go sysvar.go:L3235 TiFlashReplicaRead
     SysVarData { go_file: "sysvar.go", go_line: 3235, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tiflash_replica_read", value: "all_replicas", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["all_replicas", "closest_adaptive", "closest_replicas"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L3244 TiDBFastCheckTable
+    // Go sysvar.go:L3244 TiDBFastCheckTable
     SysVarData { go_file: "sysvar.go", go_line: 3244, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_fast_table_check", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3248 TiDBSkipMissingPartitionStats
+    // Go sysvar.go:L3248 TiDBSkipMissingPartitionStats
     SysVarData { go_file: "sysvar.go", go_line: 3248, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_skip_missing_partition_stats", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3252 AuthenticationLDAPSASLAuthMethodName
+    // Go sysvar.go:L3252 AuthenticationLDAPSASLAuthMethodName
     SysVarData { go_file: "sysvar.go", go_line: 3252, scope: ScopeGlobal, name: "authentication_ldap_sasl_auth_method_name", value: "SCRAM-SHA-1", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["SCRAM-SHA-1", "SCRAM-SHA-256", "GSSAPI"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3258 AuthenticationLDAPSASLServerHost
+    // Go sysvar.go:L3258 AuthenticationLDAPSASLServerHost
     SysVarData { go_file: "sysvar.go", go_line: 3258, scope: ScopeGlobal, name: "authentication_ldap_sasl_server_host", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3265 AuthenticationLDAPSASLServerPort
+    // Go sysvar.go:L3265 AuthenticationLDAPSASLServerPort
     SysVarData { go_file: "sysvar.go", go_line: 3265, scope: ScopeGlobal, name: "authentication_ldap_sasl_server_port", value: "389", computed: None, typ: TypeInt, min_value: 1, max_value: 65535, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3275 AuthenticationLDAPSASLTLS
+    // Go sysvar.go:L3275 AuthenticationLDAPSASLTLS
     SysVarData { go_file: "sysvar.go", go_line: 3275, scope: ScopeGlobal, name: "authentication_ldap_sasl_tls", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3281 AuthenticationLDAPSASLCAPath
+    // Go sysvar.go:L3281 AuthenticationLDAPSASLCAPath
     SysVarData { go_file: "sysvar.go", go_line: 3281, scope: ScopeGlobal, name: "authentication_ldap_sasl_ca_path", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3286 AuthenticationLDAPSASLUserSearchAttr
+    // Go sysvar.go:L3286 AuthenticationLDAPSASLUserSearchAttr
     SysVarData { go_file: "sysvar.go", go_line: 3286, scope: ScopeGlobal, name: "authentication_ldap_sasl_user_search_attr", value: "uid", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3293 AuthenticationLDAPSASLBindBaseDN
+    // Go sysvar.go:L3293 AuthenticationLDAPSASLBindBaseDN
     SysVarData { go_file: "sysvar.go", go_line: 3293, scope: ScopeGlobal, name: "authentication_ldap_sasl_bind_base_dn", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3299 AuthenticationLDAPSASLBindRootDN
+    // Go sysvar.go:L3299 AuthenticationLDAPSASLBindRootDN
     SysVarData { go_file: "sysvar.go", go_line: 3299, scope: ScopeGlobal, name: "authentication_ldap_sasl_bind_root_dn", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3305 AuthenticationLDAPSASLBindRootPWD
+    // Go sysvar.go:L3305 AuthenticationLDAPSASLBindRootPWD
     SysVarData { go_file: "sysvar.go", go_line: 3305, scope: ScopeGlobal, name: "authentication_ldap_sasl_bind_root_pwd", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3315 AuthenticationLDAPSASLInitPoolSize
+    // Go sysvar.go:L3315 AuthenticationLDAPSASLInitPoolSize
     SysVarData { go_file: "sysvar.go", go_line: 3315, scope: ScopeGlobal, name: "authentication_ldap_sasl_init_pool_size", value: "10", computed: None, typ: TypeInt, min_value: 1, max_value: 32767, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3325 AuthenticationLDAPSASLMaxPoolSize
+    // Go sysvar.go:L3325 AuthenticationLDAPSASLMaxPoolSize
     SysVarData { go_file: "sysvar.go", go_line: 3325, scope: ScopeGlobal, name: "authentication_ldap_sasl_max_pool_size", value: "1000", computed: None, typ: TypeInt, min_value: 1, max_value: 32767, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3335 AuthenticationLDAPSimpleAuthMethodName
+    // Go sysvar.go:L3335 AuthenticationLDAPSimpleAuthMethodName
     SysVarData { go_file: "sysvar.go", go_line: 3335, scope: ScopeGlobal, name: "authentication_ldap_simple_auth_method_name", value: "SIMPLE", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L3343 AuthenticationLDAPSimpleServerHost
+    // Go sysvar.go:L3343 AuthenticationLDAPSimpleServerHost
     SysVarData { go_file: "sysvar.go", go_line: 3343, scope: ScopeGlobal, name: "authentication_ldap_simple_server_host", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3350 AuthenticationLDAPSimpleServerPort
+    // Go sysvar.go:L3350 AuthenticationLDAPSimpleServerPort
     SysVarData { go_file: "sysvar.go", go_line: 3350, scope: ScopeGlobal, name: "authentication_ldap_simple_server_port", value: "389", computed: None, typ: TypeInt, min_value: 1, max_value: 65535, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3360 AuthenticationLDAPSimpleTLS
+    // Go sysvar.go:L3360 AuthenticationLDAPSimpleTLS
     SysVarData { go_file: "sysvar.go", go_line: 3360, scope: ScopeGlobal, name: "authentication_ldap_simple_tls", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3366 AuthenticationLDAPSimpleCAPath
+    // Go sysvar.go:L3366 AuthenticationLDAPSimpleCAPath
     SysVarData { go_file: "sysvar.go", go_line: 3366, scope: ScopeGlobal, name: "authentication_ldap_simple_ca_path", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3371 AuthenticationLDAPSimpleUserSearchAttr
+    // Go sysvar.go:L3371 AuthenticationLDAPSimpleUserSearchAttr
     SysVarData { go_file: "sysvar.go", go_line: 3371, scope: ScopeGlobal, name: "authentication_ldap_simple_user_search_attr", value: "uid", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3378 AuthenticationLDAPSimpleBindBaseDN
+    // Go sysvar.go:L3378 AuthenticationLDAPSimpleBindBaseDN
     SysVarData { go_file: "sysvar.go", go_line: 3378, scope: ScopeGlobal, name: "authentication_ldap_simple_bind_base_dn", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3384 AuthenticationLDAPSimpleBindRootDN
+    // Go sysvar.go:L3384 AuthenticationLDAPSimpleBindRootDN
     SysVarData { go_file: "sysvar.go", go_line: 3384, scope: ScopeGlobal, name: "authentication_ldap_simple_bind_root_dn", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3390 AuthenticationLDAPSimpleBindRootPWD
+    // Go sysvar.go:L3390 AuthenticationLDAPSimpleBindRootPWD
     SysVarData { go_file: "sysvar.go", go_line: 3390, scope: ScopeGlobal, name: "authentication_ldap_simple_bind_root_pwd", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3400 AuthenticationLDAPSimpleInitPoolSize
+    // Go sysvar.go:L3400 AuthenticationLDAPSimpleInitPoolSize
     SysVarData { go_file: "sysvar.go", go_line: 3400, scope: ScopeGlobal, name: "authentication_ldap_simple_init_pool_size", value: "10", computed: None, typ: TypeInt, min_value: 1, max_value: 32767, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3410 AuthenticationLDAPSimpleMaxPoolSize
+    // Go sysvar.go:L3410 AuthenticationLDAPSimpleMaxPoolSize
     SysVarData { go_file: "sysvar.go", go_line: 3410, scope: ScopeGlobal, name: "authentication_ldap_simple_max_pool_size", value: "1000", computed: None, typ: TypeInt, min_value: 1, max_value: 32767, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3421 TiDBRuntimeFilterTypeName
+    // Go sysvar.go:L3421 TiDBRuntimeFilterTypeName
     SysVarData { go_file: "sysvar.go", go_line: 3421, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_runtime_filter_type", value: "IN", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L3436 TiDBRuntimeFilterModeName
+    // Go sysvar.go:L3436 TiDBRuntimeFilterModeName
     SysVarData { go_file: "sysvar.go", go_line: 3436, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_runtime_filter_mode", value: "OFF", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L3451 TiDBLockUnchangedKeys
+    // Go sysvar.go:L3451 TiDBLockUnchangedKeys
     SysVarData { go_file: "sysvar.go", go_line: 3451, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_lock_unchanged_keys", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3461 TiDBEnableCheckConstraint
+    // Go sysvar.go:L3461 TiDBEnableCheckConstraint
     SysVarData { go_file: "sysvar.go", go_line: 3461, scope: ScopeGlobal, name: "tidb_enable_check_constraint", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3467 TiDBSchemaCacheSize
+    // Go sysvar.go:L3467 TiDBSchemaCacheSize
     SysVarData { go_file: "sysvar.go", go_line: 3467, scope: ScopeGlobal, name: "tidb_schema_cache_size", value: "536870912", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3493 TiDBSessionAlias
+    // Go sysvar.go:L3493 TiDBSessionAlias
     SysVarData { go_file: "sysvar.go", go_line: 3493, scope: ScopeSession, name: "tidb_session_alias", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION | HOOK_GET_SESSION },
-    // go: sysvar.go:L3522 TiDBOptObjective
+    // Go sysvar.go:L3522 TiDBOptObjective
     SysVarData { go_file: "sysvar.go", go_line: 3522, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_opt_objective", value: "moderate", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["moderate", "determinate"], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3533 TiDBServiceScope
+    // Go sysvar.go:L3533 TiDBServiceScope
     SysVarData { go_file: "sysvar.go", go_line: 3533, scope: ScopeInstance, name: "tidb_service_scope", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3550 TiDBSchemaVersionCacheLimit
+    // Go sysvar.go:L3550 TiDBSchemaVersionCacheLimit
     SysVarData { go_file: "sysvar.go", go_line: 3550, scope: ScopeGlobal, name: "tidb_schema_version_cache_limit", value: "16", computed: None, typ: TypeInt, min_value: 2, max_value: 255, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_ALLOW_EMPTY, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L3555 TiDBIdleTransactionTimeout
+    // Go sysvar.go:L3555 TiDBIdleTransactionTimeout
     SysVarData { go_file: "sysvar.go", go_line: 3555, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_idle_transaction_timeout", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 31536000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3560 DivPrecisionIncrement
+    // Go sysvar.go:L3560 DivPrecisionIncrement
     SysVarData { go_file: "sysvar.go", go_line: 3560, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "div_precision_increment", value: "4", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 30, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3565 TiDBDMLType
+    // Go sysvar.go:L3565 TiDBDMLType
     SysVarData { go_file: "sysvar.go", go_line: 3565, scope: ScopeSession, name: "tidb_dml_type", value: "STANDARD", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3580 TiFlashHashAggPreAggMode
+    // Go sysvar.go:L3580 TiFlashHashAggPreAggMode
     SysVarData { go_file: "sysvar.go", go_line: 3580, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tiflash_hashagg_preaggregation_mode", value: "force_preagg", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION | HOOK_SET_SESSION },
-    // go: sysvar.go:L3594 TiDBEnableLazyCursorFetch
+    // Go sysvar.go:L3594 TiDBEnableLazyCursorFetch
     SysVarData { go_file: "sysvar.go", go_line: 3594, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_lazy_cursor_fetch", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3598 TiDBEnableSharedLockPromotion
+    // Go sysvar.go:L3598 TiDBEnableSharedLockPromotion
     SysVarData { go_file: "sysvar.go", go_line: 3598, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_shared_lock_promotion", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3605 TiDBMaxDistTaskNodes
+    // Go sysvar.go:L3605 TiDBMaxDistTaskNodes
     SysVarData { go_file: "sysvar.go", go_line: 3605, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_max_dist_task_nodes", value: "-1", computed: None, typ: TypeInt, min_value: -1, max_value: 128, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_VALIDATION },
-    // go: sysvar.go:L3614 TiDBTSOClientRPCMode
+    // Go sysvar.go:L3614 TiDBTSOClientRPCMode
     SysVarData { go_file: "sysvar.go", go_line: 3614, scope: ScopeGlobal, name: "tidb_tso_client_rpc_mode", value: "DEFAULT", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["DEFAULT", "PARALLEL", "PARALLEL-FAST"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L3619 TiDBAccelerateUserCreationUpdate
+    // Go sysvar.go:L3619 TiDBAccelerateUserCreationUpdate
     SysVarData { go_file: "sysvar.go", go_line: 3619, scope: ScopeGlobal, name: "tidb_accelerate_user_creation_update", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
-    // go: sysvar.go:L3625 TiDBAdvancerCheckPointLagLimit
+    // Go sysvar.go:L3625 TiDBAdvancerCheckPointLagLimit
     SysVarData { go_file: "sysvar.go", go_line: 3625, scope: ScopeGlobal, name: "tidb_advancer_check_point_lag_limit", value: "48h0m0s", computed: None, typ: TypeDuration, min_value: 1000000000, max_value: 31536000000000000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3643 TiDBIndexLookUpPushDownPolicy
+    // Go sysvar.go:L3643 TiDBIndexLookUpPushDownPolicy
     SysVarData { go_file: "sysvar.go", go_line: 3643, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_index_lookup_pushdown_policy", value: "hint-only", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["hint-only", "affinity-force", "force"], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: sysvar.go:L3659 TiDBCircuitBreakerPDMetadataErrorRateThresholdRatio
+    // Go sysvar.go:L3659 TiDBCircuitBreakerPDMetadataErrorRateThresholdRatio
     SysVarData { go_file: "sysvar.go", go_line: 3659, scope: ScopeGlobal, name: "tidb_cb_pd_metadata_error_rate_threshold_ratio", value: "0", computed: None, typ: TypeFloat, min_value: 0, max_value: 1, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3676 TiDBSlowLogRules
+    // Go sysvar.go:L3676 TiDBSlowLogRules
     SysVarData { go_file: "sysvar.go", go_line: 3676, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_slow_log_rules", value: "", computed: None, typ: TypeStr, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION | HOOK_SET_GLOBAL | HOOK_GET_SESSION | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3704 TiDBSlowLogMaxPerSec
+    // Go sysvar.go:L3704 TiDBSlowLogMaxPerSec
     SysVarData { go_file: "sysvar.go", go_line: 3704, scope: ScopeGlobal, name: "tidb_slow_log_max_per_sec", value: "0", computed: None, typ: TypeInt, min_value: 0, max_value: 1000000, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL | HOOK_GET_GLOBAL },
-    // go: sysvar.go:L3728 TiDBEnableCachePrepareStmt
+    // Go sysvar.go:L3728 TiDBEnableCachePrepareStmt
     SysVarData { go_file: "sysvar.go", go_line: 3728, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_enable_cache_prepare_stmt", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_SET_SESSION },
-    // go: noop.go:L32 TxReadOnly
+    // Go noop.go:L32 TxReadOnly
     SysVarData { go_file: "noop.go", go_line: 32, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tx_read_only", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &["transaction_read_only"], global_config_name: "", flags: FLAG_IS_NOOP, hooks: HOOK_VALIDATION },
-    // go: noop.go:L35 TransactionReadOnly
+    // Go noop.go:L35 TransactionReadOnly
     SysVarData { go_file: "noop.go", go_line: 35, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "transaction_read_only", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &["tx_read_only"], global_config_name: "", flags: FLAG_IS_NOOP, hooks: HOOK_VALIDATION },
-    // go: noop.go:L38 OfflineMode
+    // Go noop.go:L38 OfflineMode
     SysVarData { go_file: "noop.go", go_line: 38, scope: ScopeGlobal, name: "offline_mode", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: HOOK_VALIDATION },
-    // go: noop.go:L41 SuperReadOnly
+    // Go noop.go:L41 SuperReadOnly
     SysVarData { go_file: "noop.go", go_line: 41, scope: ScopeGlobal, name: "super_read_only", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: HOOK_VALIDATION },
-    // go: noop.go:L44 ReadOnly
+    // Go noop.go:L44 ReadOnly
     SysVarData { go_file: "noop.go", go_line: 44, scope: ScopeGlobal, name: "read_only", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: HOOK_VALIDATION },
-    // go: noop.go:L47 ConnectTimeout
+    // Go noop.go:L47 ConnectTimeout
     SysVarData { go_file: "noop.go", go_line: 47, scope: ScopeGlobal, name: "connect_timeout", value: "10", computed: None, typ: TypeUnsigned, min_value: 2, max_value: 31536000, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L48 QueryCacheWlockInvalidate
+    // Go noop.go:L48 QueryCacheWlockInvalidate
     SysVarData { go_file: "noop.go", go_line: 48, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "query_cache_wlock_invalidate", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L49 "sql_buffer_result"
+    // Go noop.go:L49 "sql_buffer_result"
     SysVarData { go_file: "noop.go", go_line: 49, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_buffer_result", value: "OFF", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L55 MyISAMUseMmap
+    // Go noop.go:L55 MyISAMUseMmap
     SysVarData { go_file: "noop.go", go_line: 55, scope: ScopeGlobal, name: "myisam_use_mmap", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L56 "gtid_mode"
+    // Go noop.go:L56 "gtid_mode"
     SysVarData { go_file: "noop.go", go_line: 56, scope: ScopeGlobal, name: "gtid_mode", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L57 FlushTime
+    // Go noop.go:L57 FlushTime
     SysVarData { go_file: "noop.go", go_line: 57, scope: ScopeGlobal, name: "flush_time", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 31536000, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L58 "performance_schema_max_mutex_classes"
+    // Go noop.go:L58 "performance_schema_max_mutex_classes"
     SysVarData { go_file: "noop.go", go_line: 58, scope: ScopeNone, name: "performance_schema_max_mutex_classes", value: "200", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L59 LowPriorityUpdates
+    // Go noop.go:L59 LowPriorityUpdates
     SysVarData { go_file: "noop.go", go_line: 59, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "low_priority_updates", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L60 SessionTrackGtids
+    // Go noop.go:L60 SessionTrackGtids
     SysVarData { go_file: "noop.go", go_line: 60, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "session_track_gtids", value: "OFF", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "OWN_GTID", "ALL_GTIDS"], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L61 "ndbinfo_max_rows"
+    // Go noop.go:L61 "ndbinfo_max_rows"
     SysVarData { go_file: "noop.go", go_line: 61, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "ndbinfo_max_rows", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L62 "ndb_index_stat_option"
+    // Go noop.go:L62 "ndb_index_stat_option"
     SysVarData { go_file: "noop.go", go_line: 62, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "ndb_index_stat_option", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L63 OldPasswords
+    // Go noop.go:L63 OldPasswords
     SysVarData { go_file: "noop.go", go_line: 63, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "old_passwords", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L64 "innodb_version"
+    // Go noop.go:L64 "innodb_version"
     SysVarData { go_file: "noop.go", go_line: 64, scope: ScopeNone, name: "innodb_version", value: "5.6.25", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L65 BigTables
+    // Go noop.go:L65 BigTables
     SysVarData { go_file: "noop.go", go_line: 65, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "big_tables", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L66 "skip_external_locking"
+    // Go noop.go:L66 "skip_external_locking"
     SysVarData { go_file: "noop.go", go_line: 66, scope: ScopeNone, name: "skip_external_locking", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L67 "innodb_sync_array_size"
+    // Go noop.go:L67 "innodb_sync_array_size"
     SysVarData { go_file: "noop.go", go_line: 67, scope: ScopeNone, name: "innodb_sync_array_size", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L68 "gtid_next"
+    // Go noop.go:L68 "gtid_next"
     SysVarData { go_file: "noop.go", go_line: 68, scope: ScopeSession, name: "gtid_next", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L69 "ndb_show_foreign_key_mock_tables"
+    // Go noop.go:L69 "ndb_show_foreign_key_mock_tables"
     SysVarData { go_file: "noop.go", go_line: 69, scope: ScopeGlobal, name: "ndb_show_foreign_key_mock_tables", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L70 "multi_range_count"
+    // Go noop.go:L70 "multi_range_count"
     SysVarData { go_file: "noop.go", go_line: 70, scope: ScopeNone, name: "multi_range_count", value: "256", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L71 "binlog_error_action"
+    // Go noop.go:L71 "binlog_error_action"
     SysVarData { go_file: "noop.go", go_line: 71, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "binlog_error_action", value: "IGNORE_ERROR", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L72 "default_storage_engine"
+    // Go noop.go:L72 "default_storage_engine"
     SysVarData { go_file: "noop.go", go_line: 72, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "default_storage_engine", value: "InnoDB", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L73 "ft_query_expansion_limit"
+    // Go noop.go:L73 "ft_query_expansion_limit"
     SysVarData { go_file: "noop.go", go_line: 73, scope: ScopeNone, name: "ft_query_expansion_limit", value: "20", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L74 MaxConnectErrors
+    // Go noop.go:L74 MaxConnectErrors
     SysVarData { go_file: "noop.go", go_line: 74, scope: ScopeGlobal, name: "max_connect_errors", value: "100", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L75 SyncBinlog
+    // Go noop.go:L75 SyncBinlog
     SysVarData { go_file: "noop.go", go_line: 75, scope: ScopeGlobal, name: "sync_binlog", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 4294967295, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L76 "max_digest_length"
+    // Go noop.go:L76 "max_digest_length"
     SysVarData { go_file: "noop.go", go_line: 76, scope: ScopeNone, name: "max_digest_length", value: "1024", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L77 "innodb_force_load_corrupted"
+    // Go noop.go:L77 "innodb_force_load_corrupted"
     SysVarData { go_file: "noop.go", go_line: 77, scope: ScopeNone, name: "innodb_force_load_corrupted", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L78 "performance_schema_max_table_handles"
+    // Go noop.go:L78 "performance_schema_max_table_handles"
     SysVarData { go_file: "noop.go", go_line: 78, scope: ScopeNone, name: "performance_schema_max_table_handles", value: "4000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L79 InnodbFastShutdown
+    // Go noop.go:L79 InnodbFastShutdown
     SysVarData { go_file: "noop.go", go_line: 79, scope: ScopeGlobal, name: "innodb_fast_shutdown", value: "1", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 2, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L80 "ft_max_word_len"
+    // Go noop.go:L80 "ft_max_word_len"
     SysVarData { go_file: "noop.go", go_line: 80, scope: ScopeNone, name: "ft_max_word_len", value: "84", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L81 "log_backward_compatible_user_definitions"
+    // Go noop.go:L81 "log_backward_compatible_user_definitions"
     SysVarData { go_file: "noop.go", go_line: 81, scope: ScopeGlobal, name: "log_backward_compatible_user_definitions", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L82 "lc_messages_dir"
+    // Go noop.go:L82 "lc_messages_dir"
     SysVarData { go_file: "noop.go", go_line: 82, scope: ScopeNone, name: "lc_messages_dir", value: "/usr/local/mysql-5.6.25-osx10.8-x86_64/share/", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L83 "ft_boolean_syntax"
+    // Go noop.go:L83 "ft_boolean_syntax"
     SysVarData { go_file: "noop.go", go_line: 83, scope: ScopeGlobal, name: "ft_boolean_syntax", value: "+ -><()~*:\"\"&|", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L84 TableDefinitionCache
+    // Go noop.go:L84 TableDefinitionCache
     SysVarData { go_file: "noop.go", go_line: 84, scope: ScopeGlobal, name: "table_definition_cache", value: "2000", computed: None, typ: TypeUnsigned, min_value: 400, max_value: 524288, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L85 "performance_schema_max_file_handles"
+    // Go noop.go:L85 "performance_schema_max_file_handles"
     SysVarData { go_file: "noop.go", go_line: 85, scope: ScopeNone, name: "performance_schema_max_file_handles", value: "32768", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L86 "transaction_allow_batching"
+    // Go noop.go:L86 "transaction_allow_batching"
     SysVarData { go_file: "noop.go", go_line: 86, scope: ScopeSession, name: "transaction_allow_batching", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L87 "performance_schema_max_statement_classes"
+    // Go noop.go:L87 "performance_schema_max_statement_classes"
     SysVarData { go_file: "noop.go", go_line: 87, scope: ScopeNone, name: "performance_schema_max_statement_classes", value: "168", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L88 "server_id"
+    // Go noop.go:L88 "server_id"
     SysVarData { go_file: "noop.go", go_line: 88, scope: ScopeGlobal, name: "server_id", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L89 "innodb_flushing_avg_loops"
+    // Go noop.go:L89 "innodb_flushing_avg_loops"
     SysVarData { go_file: "noop.go", go_line: 89, scope: ScopeGlobal, name: "innodb_flushing_avg_loops", value: "30", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L90 "innodb_max_purge_lag"
+    // Go noop.go:L90 "innodb_max_purge_lag"
     SysVarData { go_file: "noop.go", go_line: 90, scope: ScopeGlobal, name: "innodb_max_purge_lag", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L91 "preload_buffer_size"
+    // Go noop.go:L91 "preload_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 91, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "preload_buffer_size", value: "32768", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L92 CheckProxyUsers
+    // Go noop.go:L92 CheckProxyUsers
     SysVarData { go_file: "noop.go", go_line: 92, scope: ScopeGlobal, name: "check_proxy_users", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L93 "have_query_cache"
+    // Go noop.go:L93 "have_query_cache"
     SysVarData { go_file: "noop.go", go_line: 93, scope: ScopeNone, name: "have_query_cache", value: "YES", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L94 "innodb_flush_log_at_timeout"
+    // Go noop.go:L94 "innodb_flush_log_at_timeout"
     SysVarData { go_file: "noop.go", go_line: 94, scope: ScopeGlobal, name: "innodb_flush_log_at_timeout", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L95 "innodb_max_undo_log_size"
+    // Go noop.go:L95 "innodb_max_undo_log_size"
     SysVarData { go_file: "noop.go", go_line: 95, scope: ScopeGlobal, name: "innodb_max_undo_log_size", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L96 "range_alloc_block_size"
+    // Go noop.go:L96 "range_alloc_block_size"
     SysVarData { go_file: "noop.go", go_line: 96, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "range_alloc_block_size", value: "4096", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L102 "have_rtree_keys"
+    // Go noop.go:L102 "have_rtree_keys"
     SysVarData { go_file: "noop.go", go_line: 102, scope: ScopeNone, name: "have_rtree_keys", value: "YES", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L103 "innodb_old_blocks_pct"
+    // Go noop.go:L103 "innodb_old_blocks_pct"
     SysVarData { go_file: "noop.go", go_line: 103, scope: ScopeGlobal, name: "innodb_old_blocks_pct", value: "37", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L104 "innodb_file_format"
+    // Go noop.go:L104 "innodb_file_format"
     SysVarData { go_file: "noop.go", go_line: 104, scope: ScopeGlobal, name: "innodb_file_format", value: "Barracuda", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["Antelope", "Barracuda"], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L105 "innodb_default_row_format"
+    // Go noop.go:L105 "innodb_default_row_format"
     SysVarData { go_file: "noop.go", go_line: 105, scope: ScopeGlobal, name: "innodb_default_row_format", value: "dynamic", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["redundant", "compact", "dynamic"], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L106 "innodb_compression_failure_threshold_pct"
+    // Go noop.go:L106 "innodb_compression_failure_threshold_pct"
     SysVarData { go_file: "noop.go", go_line: 106, scope: ScopeGlobal, name: "innodb_compression_failure_threshold_pct", value: "5", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L107 "performance_schema_events_waits_history_long_size"
+    // Go noop.go:L107 "performance_schema_events_waits_history_long_size"
     SysVarData { go_file: "noop.go", go_line: 107, scope: ScopeNone, name: "performance_schema_events_waits_history_long_size", value: "10000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L108 "innodb_checksum_algorithm"
+    // Go noop.go:L108 "innodb_checksum_algorithm"
     SysVarData { go_file: "noop.go", go_line: 108, scope: ScopeGlobal, name: "innodb_checksum_algorithm", value: "innodb", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L109 "innodb_ft_sort_pll_degree"
+    // Go noop.go:L109 "innodb_ft_sort_pll_degree"
     SysVarData { go_file: "noop.go", go_line: 109, scope: ScopeNone, name: "innodb_ft_sort_pll_degree", value: "2", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L110 "thread_stack"
+    // Go noop.go:L110 "thread_stack"
     SysVarData { go_file: "noop.go", go_line: 110, scope: ScopeNone, name: "thread_stack", value: "262144", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L111 "relay_log_info_repository"
+    // Go noop.go:L111 "relay_log_info_repository"
     SysVarData { go_file: "noop.go", go_line: 111, scope: ScopeGlobal, name: "relay_log_info_repository", value: "FILE", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L112 "max_delayed_threads"
+    // Go noop.go:L112 "max_delayed_threads"
     SysVarData { go_file: "noop.go", go_line: 112, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_delayed_threads", value: "20", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L113 "protocol_version"
+    // Go noop.go:L113 "protocol_version"
     SysVarData { go_file: "noop.go", go_line: 113, scope: ScopeNone, name: "protocol_version", value: "10", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L114 "new"
+    // Go noop.go:L114 "new"
     SysVarData { go_file: "noop.go", go_line: 114, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "new", value: "OFF", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L115 "myisam_sort_buffer_size"
+    // Go noop.go:L115 "myisam_sort_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 115, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "myisam_sort_buffer_size", value: "8388608", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L116 "optimizer_trace_offset"
+    // Go noop.go:L116 "optimizer_trace_offset"
     SysVarData { go_file: "noop.go", go_line: 116, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "optimizer_trace_offset", value: "-1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L117 InnodbBufferPoolDumpAtShutdown
+    // Go noop.go:L117 InnodbBufferPoolDumpAtShutdown
     SysVarData { go_file: "noop.go", go_line: 117, scope: ScopeGlobal, name: "innodb_buffer_pool_dump_at_shutdown", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L118 SQLNotes
+    // Go noop.go:L118 SQLNotes
     SysVarData { go_file: "noop.go", go_line: 118, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_notes", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L119 InnodbCmpPerIndexEnabled
+    // Go noop.go:L119 InnodbCmpPerIndexEnabled
     SysVarData { go_file: "noop.go", go_line: 119, scope: ScopeGlobal, name: "innodb_cmp_per_index_enabled", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L120 "innodb_ft_server_stopword_table"
+    // Go noop.go:L120 "innodb_ft_server_stopword_table"
     SysVarData { go_file: "noop.go", go_line: 120, scope: ScopeGlobal, name: "innodb_ft_server_stopword_table", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L121 "performance_schema_max_file_instances"
+    // Go noop.go:L121 "performance_schema_max_file_instances"
     SysVarData { go_file: "noop.go", go_line: 121, scope: ScopeNone, name: "performance_schema_max_file_instances", value: "7693", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L122 "log_output"
+    // Go noop.go:L122 "log_output"
     SysVarData { go_file: "noop.go", go_line: 122, scope: ScopeNone, name: "log_output", value: "FILE", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L123 "binlog_group_commit_sync_delay"
+    // Go noop.go:L123 "binlog_group_commit_sync_delay"
     SysVarData { go_file: "noop.go", go_line: 123, scope: ScopeGlobal, name: "binlog_group_commit_sync_delay", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L124 "binlog_group_commit_sync_no_delay_count"
+    // Go noop.go:L124 "binlog_group_commit_sync_no_delay_count"
     SysVarData { go_file: "noop.go", go_line: 124, scope: ScopeGlobal, name: "binlog_group_commit_sync_no_delay_count", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L125 "have_crypt"
+    // Go noop.go:L125 "have_crypt"
     SysVarData { go_file: "noop.go", go_line: 125, scope: ScopeNone, name: "have_crypt", value: "YES", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L126 "innodb_log_write_ahead_size"
+    // Go noop.go:L126 "innodb_log_write_ahead_size"
     SysVarData { go_file: "noop.go", go_line: 126, scope: ScopeGlobal, name: "innodb_log_write_ahead_size", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L127 "innodb_log_group_home_dir"
+    // Go noop.go:L127 "innodb_log_group_home_dir"
     SysVarData { go_file: "noop.go", go_line: 127, scope: ScopeNone, name: "innodb_log_group_home_dir", value: "./", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L128 "performance_schema_events_statements_history_size"
+    // Go noop.go:L128 "performance_schema_events_statements_history_size"
     SysVarData { go_file: "noop.go", go_line: 128, scope: ScopeNone, name: "performance_schema_events_statements_history_size", value: "10", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L129 GeneralLog
+    // Go noop.go:L129 GeneralLog
     SysVarData { go_file: "noop.go", go_line: 129, scope: ScopeGlobal, name: "general_log", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L130 BinlogOrderCommits
+    // Go noop.go:L130 BinlogOrderCommits
     SysVarData { go_file: "noop.go", go_line: 130, scope: ScopeGlobal, name: "binlog_order_commits", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L131 "key_cache_division_limit"
+    // Go noop.go:L131 "key_cache_division_limit"
     SysVarData { go_file: "noop.go", go_line: 131, scope: ScopeGlobal, name: "key_cache_division_limit", value: "100", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L132 "max_insert_delayed_threads"
+    // Go noop.go:L132 "max_insert_delayed_threads"
     SysVarData { go_file: "noop.go", go_line: 132, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_insert_delayed_threads", value: "20", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L133 "innodb_max_dirty_pages_pct"
+    // Go noop.go:L133 "innodb_max_dirty_pages_pct"
     SysVarData { go_file: "noop.go", go_line: 133, scope: ScopeGlobal, name: "innodb_max_dirty_pages_pct", value: "75", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L134 InnodbFilePerTable
+    // Go noop.go:L134 InnodbFilePerTable
     SysVarData { go_file: "noop.go", go_line: 134, scope: ScopeGlobal, name: "innodb_file_per_table", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L135 InnodbLogCompressedPages
+    // Go noop.go:L135 InnodbLogCompressedPages
     SysVarData { go_file: "noop.go", go_line: 135, scope: ScopeGlobal, name: "innodb_log_compressed_pages", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L136 "skip_networking"
+    // Go noop.go:L136 "skip_networking"
     SysVarData { go_file: "noop.go", go_line: 136, scope: ScopeNone, name: "skip_networking", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L137 "innodb_monitor_reset"
+    // Go noop.go:L137 "innodb_monitor_reset"
     SysVarData { go_file: "noop.go", go_line: 137, scope: ScopeGlobal, name: "innodb_monitor_reset", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L138 "ssl_cipher"
+    // Go noop.go:L138 "ssl_cipher"
     SysVarData { go_file: "noop.go", go_line: 138, scope: ScopeNone, name: "ssl_cipher", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L139 "tls_version"
+    // Go noop.go:L139 "tls_version"
     SysVarData { go_file: "noop.go", go_line: 139, scope: ScopeNone, name: "tls_version", value: "TLSv1,TLSv1.1,TLSv1.2", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L140 InnodbPrintAllDeadlocks
+    // Go noop.go:L140 InnodbPrintAllDeadlocks
     SysVarData { go_file: "noop.go", go_line: 140, scope: ScopeGlobal, name: "innodb_print_all_deadlocks", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L141 "innodb_autoinc_lock_mode"
+    // Go noop.go:L141 "innodb_autoinc_lock_mode"
     SysVarData { go_file: "noop.go", go_line: 141, scope: ScopeNone, name: "innodb_autoinc_lock_mode", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L142 "key_buffer_size"
+    // Go noop.go:L142 "key_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 142, scope: ScopeGlobal, name: "key_buffer_size", value: "8388608", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L143 "host_cache_size"
+    // Go noop.go:L143 "host_cache_size"
     SysVarData { go_file: "noop.go", go_line: 143, scope: ScopeGlobal, name: "host_cache_size", value: "279", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L144 DelayKeyWrite
+    // Go noop.go:L144 DelayKeyWrite
     SysVarData { go_file: "noop.go", go_line: 144, scope: ScopeGlobal, name: "delay_key_write", value: "ON", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "ALL"], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L145 "metadata_locks_cache_size"
+    // Go noop.go:L145 "metadata_locks_cache_size"
     SysVarData { go_file: "noop.go", go_line: 145, scope: ScopeNone, name: "metadata_locks_cache_size", value: "1024", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L146 "innodb_force_recovery"
+    // Go noop.go:L146 "innodb_force_recovery"
     SysVarData { go_file: "noop.go", go_line: 146, scope: ScopeNone, name: "innodb_force_recovery", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L147 "innodb_file_format_max"
+    // Go noop.go:L147 "innodb_file_format_max"
     SysVarData { go_file: "noop.go", go_line: 147, scope: ScopeGlobal, name: "innodb_file_format_max", value: "Antelope", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L148 "debug"
+    // Go noop.go:L148 "debug"
     SysVarData { go_file: "noop.go", go_line: 148, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "debug", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L149 "log_warnings"
+    // Go noop.go:L149 "log_warnings"
     SysVarData { go_file: "noop.go", go_line: 149, scope: ScopeGlobal, name: "log_warnings", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L150 InnodbStrictMode
+    // Go noop.go:L150 InnodbStrictMode
     SysVarData { go_file: "noop.go", go_line: 150, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "innodb_strict_mode", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L151 "innodb_rollback_segments"
+    // Go noop.go:L151 "innodb_rollback_segments"
     SysVarData { go_file: "noop.go", go_line: 151, scope: ScopeGlobal, name: "innodb_rollback_segments", value: "128", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L152 "join_buffer_size"
+    // Go noop.go:L152 "join_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 152, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "join_buffer_size", value: "262144", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L158 "innodb_mirrored_log_groups"
+    // Go noop.go:L158 "innodb_mirrored_log_groups"
     SysVarData { go_file: "noop.go", go_line: 158, scope: ScopeNone, name: "innodb_mirrored_log_groups", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L159 "max_binlog_size"
+    // Go noop.go:L159 "max_binlog_size"
     SysVarData { go_file: "noop.go", go_line: 159, scope: ScopeGlobal, name: "max_binlog_size", value: "1073741824", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L160 "concurrent_insert"
+    // Go noop.go:L160 "concurrent_insert"
     SysVarData { go_file: "noop.go", go_line: 160, scope: ScopeGlobal, name: "concurrent_insert", value: "AUTO", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L161 InnodbAdaptiveHashIndex
+    // Go noop.go:L161 InnodbAdaptiveHashIndex
     SysVarData { go_file: "noop.go", go_line: 161, scope: ScopeGlobal, name: "innodb_adaptive_hash_index", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L162 InnodbFtEnableStopword
+    // Go noop.go:L162 InnodbFtEnableStopword
     SysVarData { go_file: "noop.go", go_line: 162, scope: ScopeGlobal, name: "innodb_ft_enable_stopword", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L163 "general_log_file"
+    // Go noop.go:L163 "general_log_file"
     SysVarData { go_file: "noop.go", go_line: 163, scope: ScopeGlobal, name: "general_log_file", value: "/usr/local/mysql/data/localhost.log", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L164 InnodbSupportXA
+    // Go noop.go:L164 InnodbSupportXA
     SysVarData { go_file: "noop.go", go_line: 164, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "innodb_support_xa", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L165 "innodb_compression_level"
+    // Go noop.go:L165 "innodb_compression_level"
     SysVarData { go_file: "noop.go", go_line: 165, scope: ScopeGlobal, name: "innodb_compression_level", value: "6", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L166 "innodb_file_format_check"
+    // Go noop.go:L166 "innodb_file_format_check"
     SysVarData { go_file: "noop.go", go_line: 166, scope: ScopeNone, name: "innodb_file_format_check", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L167 "myisam_mmap_size"
+    // Go noop.go:L167 "myisam_mmap_size"
     SysVarData { go_file: "noop.go", go_line: 167, scope: ScopeNone, name: "myisam_mmap_size", value: "18446744073709551615", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L168 "innodb_buffer_pool_instances"
+    // Go noop.go:L168 "innodb_buffer_pool_instances"
     SysVarData { go_file: "noop.go", go_line: 168, scope: ScopeNone, name: "innodb_buffer_pool_instances", value: "8", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L169 "max_length_for_sort_data"
+    // Go noop.go:L169 "max_length_for_sort_data"
     SysVarData { go_file: "noop.go", go_line: 169, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_length_for_sort_data", value: "1024", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L175 CharacterSetSystem
+    // Go noop.go:L175 CharacterSetSystem
     SysVarData { go_file: "noop.go", go_line: 175, scope: ScopeNone, name: "character_set_system", value: "utf8", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L176 CharacterSetFilesystem
+    // Go noop.go:L176 CharacterSetFilesystem
     SysVarData { go_file: "noop.go", go_line: 176, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "character_set_filesystem", value: "binary", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: HOOK_VALIDATION },
-    // go: noop.go:L179 InnodbOptimizeFullTextOnly
+    // Go noop.go:L179 InnodbOptimizeFullTextOnly
     SysVarData { go_file: "noop.go", go_line: 179, scope: ScopeGlobal, name: "innodb_optimize_fulltext_only", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L180 "character_sets_dir"
+    // Go noop.go:L180 "character_sets_dir"
     SysVarData { go_file: "noop.go", go_line: 180, scope: ScopeNone, name: "character_sets_dir", value: "/usr/local/mysql-5.6.25-osx10.8-x86_64/share/charsets/", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L181 QueryCacheType
+    // Go noop.go:L181 QueryCacheType
     SysVarData { go_file: "noop.go", go_line: 181, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "query_cache_type", value: "OFF", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "DEMAND"], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L182 "innodb_rollback_on_timeout"
+    // Go noop.go:L182 "innodb_rollback_on_timeout"
     SysVarData { go_file: "noop.go", go_line: 182, scope: ScopeNone, name: "innodb_rollback_on_timeout", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L183 "query_alloc_block_size"
+    // Go noop.go:L183 "query_alloc_block_size"
     SysVarData { go_file: "noop.go", go_line: 183, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "query_alloc_block_size", value: "8192", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L184 "have_compress"
+    // Go noop.go:L184 "have_compress"
     SysVarData { go_file: "noop.go", go_line: 184, scope: ScopeNone, name: "have_compress", value: "YES", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L185 "thread_concurrency"
+    // Go noop.go:L185 "thread_concurrency"
     SysVarData { go_file: "noop.go", go_line: 185, scope: ScopeNone, name: "thread_concurrency", value: "10", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L186 "query_prealloc_size"
+    // Go noop.go:L186 "query_prealloc_size"
     SysVarData { go_file: "noop.go", go_line: 186, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "query_prealloc_size", value: "8192", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L187 "relay_log_space_limit"
+    // Go noop.go:L187 "relay_log_space_limit"
     SysVarData { go_file: "noop.go", go_line: 187, scope: ScopeNone, name: "relay_log_space_limit", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L188 "performance_schema_max_thread_classes"
+    // Go noop.go:L188 "performance_schema_max_thread_classes"
     SysVarData { go_file: "noop.go", go_line: 188, scope: ScopeNone, name: "performance_schema_max_thread_classes", value: "50", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L189 "innodb_api_trx_level"
+    // Go noop.go:L189 "innodb_api_trx_level"
     SysVarData { go_file: "noop.go", go_line: 189, scope: ScopeGlobal, name: "innodb_api_trx_level", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L190 "performance_schema_max_file_classes"
+    // Go noop.go:L190 "performance_schema_max_file_classes"
     SysVarData { go_file: "noop.go", go_line: 190, scope: ScopeNone, name: "performance_schema_max_file_classes", value: "50", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L191 "expire_logs_days"
+    // Go noop.go:L191 "expire_logs_days"
     SysVarData { go_file: "noop.go", go_line: 191, scope: ScopeGlobal, name: "expire_logs_days", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L192 BinlogRowQueryLogEvents
+    // Go noop.go:L192 BinlogRowQueryLogEvents
     SysVarData { go_file: "noop.go", go_line: 192, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "binlog_rows_query_log_events", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L193 "pid_file"
+    // Go noop.go:L193 "pid_file"
     SysVarData { go_file: "noop.go", go_line: 193, scope: ScopeNone, name: "pid_file", value: "/usr/local/mysql/data/localhost.pid", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L194 "innodb_undo_tablespaces"
+    // Go noop.go:L194 "innodb_undo_tablespaces"
     SysVarData { go_file: "noop.go", go_line: 194, scope: ScopeNone, name: "innodb_undo_tablespaces", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L195 InnodbStatusOutputLocks
+    // Go noop.go:L195 InnodbStatusOutputLocks
     SysVarData { go_file: "noop.go", go_line: 195, scope: ScopeGlobal, name: "innodb_status_output_locks", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L196 "performance_schema_accounts_size"
+    // Go noop.go:L196 "performance_schema_accounts_size"
     SysVarData { go_file: "noop.go", go_line: 196, scope: ScopeNone, name: "performance_schema_accounts_size", value: "100", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L197 "max_error_count"
+    // Go noop.go:L197 "max_error_count"
     SysVarData { go_file: "noop.go", go_line: 197, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_error_count", value: "64", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L203 "max_write_lock_count"
+    // Go noop.go:L203 "max_write_lock_count"
     SysVarData { go_file: "noop.go", go_line: 203, scope: ScopeGlobal, name: "max_write_lock_count", value: "18446744073709551615", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L204 "performance_schema_max_socket_instances"
+    // Go noop.go:L204 "performance_schema_max_socket_instances"
     SysVarData { go_file: "noop.go", go_line: 204, scope: ScopeNone, name: "performance_schema_max_socket_instances", value: "322", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L205 "performance_schema_max_table_instances"
+    // Go noop.go:L205 "performance_schema_max_table_instances"
     SysVarData { go_file: "noop.go", go_line: 205, scope: ScopeNone, name: "performance_schema_max_table_instances", value: "12500", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L206 "innodb_stats_persistent_sample_pages"
+    // Go noop.go:L206 "innodb_stats_persistent_sample_pages"
     SysVarData { go_file: "noop.go", go_line: 206, scope: ScopeGlobal, name: "innodb_stats_persistent_sample_pages", value: "20", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L207 "show_compatibility_56"
+    // Go noop.go:L207 "show_compatibility_56"
     SysVarData { go_file: "noop.go", go_line: 207, scope: ScopeGlobal, name: "show_compatibility_56", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L208 "innodb_open_files"
+    // Go noop.go:L208 "innodb_open_files"
     SysVarData { go_file: "noop.go", go_line: 208, scope: ScopeNone, name: "innodb_open_files", value: "2000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L209 "innodb_spin_wait_delay"
+    // Go noop.go:L209 "innodb_spin_wait_delay"
     SysVarData { go_file: "noop.go", go_line: 209, scope: ScopeGlobal, name: "innodb_spin_wait_delay", value: "6", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L210 "thread_cache_size"
+    // Go noop.go:L210 "thread_cache_size"
     SysVarData { go_file: "noop.go", go_line: 210, scope: ScopeGlobal, name: "thread_cache_size", value: "9", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L211 LogSlowAdminStatements
+    // Go noop.go:L211 LogSlowAdminStatements
     SysVarData { go_file: "noop.go", go_line: 211, scope: ScopeGlobal, name: "log_slow_admin_statements", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L212 "innodb_checksums"
+    // Go noop.go:L212 "innodb_checksums"
     SysVarData { go_file: "noop.go", go_line: 212, scope: ScopeNone, name: "innodb_checksums", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L213 "ft_stopword_file"
+    // Go noop.go:L213 "ft_stopword_file"
     SysVarData { go_file: "noop.go", go_line: 213, scope: ScopeNone, name: "ft_stopword_file", value: "(built-in)", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L214 "innodb_max_dirty_pages_pct_lwm"
+    // Go noop.go:L214 "innodb_max_dirty_pages_pct_lwm"
     SysVarData { go_file: "noop.go", go_line: 214, scope: ScopeGlobal, name: "innodb_max_dirty_pages_pct_lwm", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L215 LogQueriesNotUsingIndexes
+    // Go noop.go:L215 LogQueriesNotUsingIndexes
     SysVarData { go_file: "noop.go", go_line: 215, scope: ScopeGlobal, name: "log_queries_not_using_indexes", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L216 "max_heap_table_size"
+    // Go noop.go:L216 "max_heap_table_size"
     SysVarData { go_file: "noop.go", go_line: 216, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_heap_table_size", value: "16777216", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L222 "tmp_table_size"
+    // Go noop.go:L222 "tmp_table_size"
     SysVarData { go_file: "noop.go", go_line: 222, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tmp_table_size", value: "16777216", computed: None, typ: TypeUnsigned, min_value: 1024, max_value: 18446744073709551615, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L231 "innodb_lru_scan_depth"
+    // Go noop.go:L231 "innodb_lru_scan_depth"
     SysVarData { go_file: "noop.go", go_line: 231, scope: ScopeGlobal, name: "innodb_lru_scan_depth", value: "1024", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L232 "innodb_purge_rseg_truncate_frequency"
+    // Go noop.go:L232 "innodb_purge_rseg_truncate_frequency"
     SysVarData { go_file: "noop.go", go_line: 232, scope: ScopeGlobal, name: "innodb_purge_rseg_truncate_frequency", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L233 SQLAutoIsNull
+    // Go noop.go:L233 SQLAutoIsNull
     SysVarData { go_file: "noop.go", go_line: 233, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_auto_is_null", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: HOOK_VALIDATION },
-    // go: noop.go:L267 "innodb_api_enable_binlog"
+    // Go noop.go:L267 "innodb_api_enable_binlog"
     SysVarData { go_file: "noop.go", go_line: 267, scope: ScopeNone, name: "innodb_api_enable_binlog", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L268 "innodb_ft_user_stopword_table"
+    // Go noop.go:L268 "innodb_ft_user_stopword_table"
     SysVarData { go_file: "noop.go", go_line: 268, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "innodb_ft_user_stopword_table", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L269 "server_id_bits"
+    // Go noop.go:L269 "server_id_bits"
     SysVarData { go_file: "noop.go", go_line: 269, scope: ScopeNone, name: "server_id_bits", value: "32", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L270 "innodb_log_checksum_algorithm"
+    // Go noop.go:L270 "innodb_log_checksum_algorithm"
     SysVarData { go_file: "noop.go", go_line: 270, scope: ScopeGlobal, name: "innodb_log_checksum_algorithm", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L271 "innodb_buffer_pool_load_at_startup"
+    // Go noop.go:L271 "innodb_buffer_pool_load_at_startup"
     SysVarData { go_file: "noop.go", go_line: 271, scope: ScopeNone, name: "innodb_buffer_pool_load_at_startup", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L272 "sort_buffer_size"
+    // Go noop.go:L272 "sort_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 272, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sort_buffer_size", value: "262144", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L278 "innodb_flush_neighbors"
+    // Go noop.go:L278 "innodb_flush_neighbors"
     SysVarData { go_file: "noop.go", go_line: 278, scope: ScopeGlobal, name: "innodb_flush_neighbors", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L279 "innodb_use_sys_malloc"
+    // Go noop.go:L279 "innodb_use_sys_malloc"
     SysVarData { go_file: "noop.go", go_line: 279, scope: ScopeNone, name: "innodb_use_sys_malloc", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L280 "performance_schema_max_socket_classes"
+    // Go noop.go:L280 "performance_schema_max_socket_classes"
     SysVarData { go_file: "noop.go", go_line: 280, scope: ScopeNone, name: "performance_schema_max_socket_classes", value: "10", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L281 "performance_schema_max_stage_classes"
+    // Go noop.go:L281 "performance_schema_max_stage_classes"
     SysVarData { go_file: "noop.go", go_line: 281, scope: ScopeNone, name: "performance_schema_max_stage_classes", value: "150", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L282 "innodb_purge_batch_size"
+    // Go noop.go:L282 "innodb_purge_batch_size"
     SysVarData { go_file: "noop.go", go_line: 282, scope: ScopeGlobal, name: "innodb_purge_batch_size", value: "300", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L283 "have_profiling"
+    // Go noop.go:L283 "have_profiling"
     SysVarData { go_file: "noop.go", go_line: 283, scope: ScopeNone, name: "have_profiling", value: "NO", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L284 InnodbBufferPoolDumpNow
+    // Go noop.go:L284 InnodbBufferPoolDumpNow
     SysVarData { go_file: "noop.go", go_line: 284, scope: ScopeGlobal, name: "innodb_buffer_pool_dump_now", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L285 RelayLogPurge
+    // Go noop.go:L285 RelayLogPurge
     SysVarData { go_file: "noop.go", go_line: 285, scope: ScopeGlobal, name: "relay_log_purge", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L286 "ndb_distribution"
+    // Go noop.go:L286 "ndb_distribution"
     SysVarData { go_file: "noop.go", go_line: 286, scope: ScopeGlobal, name: "ndb_distribution", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L287 "myisam_data_pointer_size"
+    // Go noop.go:L287 "myisam_data_pointer_size"
     SysVarData { go_file: "noop.go", go_line: 287, scope: ScopeGlobal, name: "myisam_data_pointer_size", value: "6", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L288 "ndb_optimization_delay"
+    // Go noop.go:L288 "ndb_optimization_delay"
     SysVarData { go_file: "noop.go", go_line: 288, scope: ScopeGlobal, name: "ndb_optimization_delay", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L289 "innodb_ft_num_word_optimize"
+    // Go noop.go:L289 "innodb_ft_num_word_optimize"
     SysVarData { go_file: "noop.go", go_line: 289, scope: ScopeGlobal, name: "innodb_ft_num_word_optimize", value: "2000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L290 "max_join_size"
+    // Go noop.go:L290 "max_join_size"
     SysVarData { go_file: "noop.go", go_line: 290, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_join_size", value: "18446744073709551615", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L296 CoreFile
+    // Go noop.go:L296 CoreFile
     SysVarData { go_file: "noop.go", go_line: 296, scope: ScopeNone, name: "core_file", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L297 "max_seeks_for_key"
+    // Go noop.go:L297 "max_seeks_for_key"
     SysVarData { go_file: "noop.go", go_line: 297, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_seeks_for_key", value: "18446744073709551615", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L303 "innodb_log_buffer_size"
+    // Go noop.go:L303 "innodb_log_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 303, scope: ScopeNone, name: "innodb_log_buffer_size", value: "8388608", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L304 "delayed_insert_timeout"
+    // Go noop.go:L304 "delayed_insert_timeout"
     SysVarData { go_file: "noop.go", go_line: 304, scope: ScopeGlobal, name: "delayed_insert_timeout", value: "300", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L305 "max_relay_log_size"
+    // Go noop.go:L305 "max_relay_log_size"
     SysVarData { go_file: "noop.go", go_line: 305, scope: ScopeGlobal, name: "max_relay_log_size", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L306 MaxSortLength
+    // Go noop.go:L306 MaxSortLength
     SysVarData { go_file: "noop.go", go_line: 306, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_sort_length", value: "1024", computed: None, typ: TypeUnsigned, min_value: 4, max_value: 8388608, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L315 "metadata_locks_hash_instances"
+    // Go noop.go:L315 "metadata_locks_hash_instances"
     SysVarData { go_file: "noop.go", go_line: 315, scope: ScopeNone, name: "metadata_locks_hash_instances", value: "8", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L316 "ndb_eventbuffer_free_percent"
+    // Go noop.go:L316 "ndb_eventbuffer_free_percent"
     SysVarData { go_file: "noop.go", go_line: 316, scope: ScopeGlobal, name: "ndb_eventbuffer_free_percent", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L317 "large_files_support"
+    // Go noop.go:L317 "large_files_support"
     SysVarData { go_file: "noop.go", go_line: 317, scope: ScopeNone, name: "large_files_support", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L318 "binlog_max_flush_queue_time"
+    // Go noop.go:L318 "binlog_max_flush_queue_time"
     SysVarData { go_file: "noop.go", go_line: 318, scope: ScopeGlobal, name: "binlog_max_flush_queue_time", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L319 "innodb_fill_factor"
+    // Go noop.go:L319 "innodb_fill_factor"
     SysVarData { go_file: "noop.go", go_line: 319, scope: ScopeGlobal, name: "innodb_fill_factor", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L320 "log_syslog_facility"
+    // Go noop.go:L320 "log_syslog_facility"
     SysVarData { go_file: "noop.go", go_line: 320, scope: ScopeGlobal, name: "log_syslog_facility", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L321 "innodb_ft_min_token_size"
+    // Go noop.go:L321 "innodb_ft_min_token_size"
     SysVarData { go_file: "noop.go", go_line: 321, scope: ScopeNone, name: "innodb_ft_min_token_size", value: "3", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L322 "transaction_write_set_extraction"
+    // Go noop.go:L322 "transaction_write_set_extraction"
     SysVarData { go_file: "noop.go", go_line: 322, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "transaction_write_set_extraction", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L323 "ndb_blob_write_batch_bytes"
+    // Go noop.go:L323 "ndb_blob_write_batch_bytes"
     SysVarData { go_file: "noop.go", go_line: 323, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "ndb_blob_write_batch_bytes", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L324 "automatic_sp_privileges"
+    // Go noop.go:L324 "automatic_sp_privileges"
     SysVarData { go_file: "noop.go", go_line: 324, scope: ScopeGlobal, name: "automatic_sp_privileges", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L325 "innodb_flush_sync"
+    // Go noop.go:L325 "innodb_flush_sync"
     SysVarData { go_file: "noop.go", go_line: 325, scope: ScopeGlobal, name: "innodb_flush_sync", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L326 "performance_schema_events_statements_history_long_size"
+    // Go noop.go:L326 "performance_schema_events_statements_history_long_size"
     SysVarData { go_file: "noop.go", go_line: 326, scope: ScopeNone, name: "performance_schema_events_statements_history_long_size", value: "10000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L327 "innodb_monitor_disable"
+    // Go noop.go:L327 "innodb_monitor_disable"
     SysVarData { go_file: "noop.go", go_line: 327, scope: ScopeGlobal, name: "innodb_monitor_disable", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L328 "innodb_doublewrite"
+    // Go noop.go:L328 "innodb_doublewrite"
     SysVarData { go_file: "noop.go", go_line: 328, scope: ScopeNone, name: "innodb_doublewrite", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L329 "log_bin_use_v1_row_events"
+    // Go noop.go:L329 "log_bin_use_v1_row_events"
     SysVarData { go_file: "noop.go", go_line: 329, scope: ScopeNone, name: "log_bin_use_v1_row_events", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L330 "innodb_optimize_point_storage"
+    // Go noop.go:L330 "innodb_optimize_point_storage"
     SysVarData { go_file: "noop.go", go_line: 330, scope: ScopeSession, name: "innodb_optimize_point_storage", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L331 "innodb_api_disable_rowlock"
+    // Go noop.go:L331 "innodb_api_disable_rowlock"
     SysVarData { go_file: "noop.go", go_line: 331, scope: ScopeNone, name: "innodb_api_disable_rowlock", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L332 "innodb_adaptive_flushing_lwm"
+    // Go noop.go:L332 "innodb_adaptive_flushing_lwm"
     SysVarData { go_file: "noop.go", go_line: 332, scope: ScopeGlobal, name: "innodb_adaptive_flushing_lwm", value: "10", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L333 "innodb_log_files_in_group"
+    // Go noop.go:L333 "innodb_log_files_in_group"
     SysVarData { go_file: "noop.go", go_line: 333, scope: ScopeNone, name: "innodb_log_files_in_group", value: "2", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L334 InnodbBufferPoolLoadNow
+    // Go noop.go:L334 InnodbBufferPoolLoadNow
     SysVarData { go_file: "noop.go", go_line: 334, scope: ScopeGlobal, name: "innodb_buffer_pool_load_now", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L335 "performance_schema_max_rwlock_classes"
+    // Go noop.go:L335 "performance_schema_max_rwlock_classes"
     SysVarData { go_file: "noop.go", go_line: 335, scope: ScopeNone, name: "performance_schema_max_rwlock_classes", value: "40", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L336 "binlog_gtid_simple_recovery"
+    // Go noop.go:L336 "binlog_gtid_simple_recovery"
     SysVarData { go_file: "noop.go", go_line: 336, scope: ScopeNone, name: "binlog_gtid_simple_recovery", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L337 "performance_schema_digests_size"
+    // Go noop.go:L337 "performance_schema_digests_size"
     SysVarData { go_file: "noop.go", go_line: 337, scope: ScopeNone, name: "performance_schema_digests_size", value: "10000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L338 Profiling
+    // Go noop.go:L338 Profiling
     SysVarData { go_file: "noop.go", go_line: 338, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "profiling", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L339 "sha256_password_proxy_users"
+    // Go noop.go:L339 "sha256_password_proxy_users"
     SysVarData { go_file: "noop.go", go_line: 339, scope: ScopeGlobal, name: "sha256_password_proxy_users", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L340 SQLQuoteShowCreate
+    // Go noop.go:L340 SQLQuoteShowCreate
     SysVarData { go_file: "noop.go", go_line: 340, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_quote_show_create", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L341 "binlogging_impossible_mode"
+    // Go noop.go:L341 "binlogging_impossible_mode"
     SysVarData { go_file: "noop.go", go_line: 341, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "binlogging_impossible_mode", value: "IGNORE_ERROR", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L342 QueryCacheSize
+    // Go noop.go:L342 QueryCacheSize
     SysVarData { go_file: "noop.go", go_line: 342, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "query_cache_size", value: "1048576", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L343 "innodb_stats_transient_sample_pages"
+    // Go noop.go:L343 "innodb_stats_transient_sample_pages"
     SysVarData { go_file: "noop.go", go_line: 343, scope: ScopeGlobal, name: "innodb_stats_transient_sample_pages", value: "8", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L344 InnodbStatsOnMetadata
+    // Go noop.go:L344 InnodbStatsOnMetadata
     SysVarData { go_file: "noop.go", go_line: 344, scope: ScopeGlobal, name: "innodb_stats_on_metadata", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L345 "server_uuid"
+    // Go noop.go:L345 "server_uuid"
     SysVarData { go_file: "noop.go", go_line: 345, scope: ScopeNone, name: "server_uuid", value: "00000000-0000-0000-0000-000000000000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L346 "open_files_limit"
+    // Go noop.go:L346 "open_files_limit"
     SysVarData { go_file: "noop.go", go_line: 346, scope: ScopeNone, name: "open_files_limit", value: "5000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L347 "ndb_force_send"
+    // Go noop.go:L347 "ndb_force_send"
     SysVarData { go_file: "noop.go", go_line: 347, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "ndb_force_send", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L348 "skip_show_database"
+    // Go noop.go:L348 "skip_show_database"
     SysVarData { go_file: "noop.go", go_line: 348, scope: ScopeNone, name: "skip_show_database", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L349 "log_timestamps"
+    // Go noop.go:L349 "log_timestamps"
     SysVarData { go_file: "noop.go", go_line: 349, scope: ScopeGlobal, name: "log_timestamps", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L350 "event_scheduler"
+    // Go noop.go:L350 "event_scheduler"
     SysVarData { go_file: "noop.go", go_line: 350, scope: ScopeGlobal, name: "event_scheduler", value: "OFF", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L351 "ndb_deferred_constraints"
+    // Go noop.go:L351 "ndb_deferred_constraints"
     SysVarData { go_file: "noop.go", go_line: 351, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "ndb_deferred_constraints", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L352 "log_syslog_include_pid"
+    // Go noop.go:L352 "log_syslog_include_pid"
     SysVarData { go_file: "noop.go", go_line: 352, scope: ScopeGlobal, name: "log_syslog_include_pid", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L353 "innodb_ft_cache_size"
+    // Go noop.go:L353 "innodb_ft_cache_size"
     SysVarData { go_file: "noop.go", go_line: 353, scope: ScopeNone, name: "innodb_ft_cache_size", value: "8000000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L354 InnodbDisableSortFileCache
+    // Go noop.go:L354 InnodbDisableSortFileCache
     SysVarData { go_file: "noop.go", go_line: 354, scope: ScopeGlobal, name: "innodb_disable_sort_file_cache", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L355 "log_error_verbosity"
+    // Go noop.go:L355 "log_error_verbosity"
     SysVarData { go_file: "noop.go", go_line: 355, scope: ScopeGlobal, name: "log_error_verbosity", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L356 "performance_schema_hosts_size"
+    // Go noop.go:L356 "performance_schema_hosts_size"
     SysVarData { go_file: "noop.go", go_line: 356, scope: ScopeNone, name: "performance_schema_hosts_size", value: "100", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L357 "innodb_replication_delay"
+    // Go noop.go:L357 "innodb_replication_delay"
     SysVarData { go_file: "noop.go", go_line: 357, scope: ScopeGlobal, name: "innodb_replication_delay", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L358 SlowQueryLog
+    // Go noop.go:L358 SlowQueryLog
     SysVarData { go_file: "noop.go", go_line: 358, scope: ScopeGlobal, name: "slow_query_log", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L359 "debug_sync"
+    // Go noop.go:L359 "debug_sync"
     SysVarData { go_file: "noop.go", go_line: 359, scope: ScopeSession, name: "debug_sync", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L360 InnodbStatsAutoRecalc
+    // Go noop.go:L360 InnodbStatsAutoRecalc
     SysVarData { go_file: "noop.go", go_line: 360, scope: ScopeGlobal, name: "innodb_stats_auto_recalc", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L362 "lc_messages"
+    // Go noop.go:L362 "lc_messages"
     SysVarData { go_file: "noop.go", go_line: 362, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "lc_messages", value: "en_US", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L363 "bulk_insert_buffer_size"
+    // Go noop.go:L363 "bulk_insert_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 363, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "bulk_insert_buffer_size", value: "8388608", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L369 BinlogDirectNonTransactionalUpdates
+    // Go noop.go:L369 BinlogDirectNonTransactionalUpdates
     SysVarData { go_file: "noop.go", go_line: 369, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "binlog_direct_non_transactional_updates", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L370 "innodb_change_buffering"
+    // Go noop.go:L370 "innodb_change_buffering"
     SysVarData { go_file: "noop.go", go_line: 370, scope: ScopeGlobal, name: "innodb_change_buffering", value: "all", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L371 SQLBigSelects
+    // Go noop.go:L371 SQLBigSelects
     SysVarData { go_file: "noop.go", go_line: 371, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_big_selects", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L378 "innodb_max_purge_lag_delay"
+    // Go noop.go:L378 "innodb_max_purge_lag_delay"
     SysVarData { go_file: "noop.go", go_line: 378, scope: ScopeGlobal, name: "innodb_max_purge_lag_delay", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L379 "session_track_schema"
+    // Go noop.go:L379 "session_track_schema"
     SysVarData { go_file: "noop.go", go_line: 379, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "session_track_schema", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L380 "innodb_io_capacity_max"
+    // Go noop.go:L380 "innodb_io_capacity_max"
     SysVarData { go_file: "noop.go", go_line: 380, scope: ScopeGlobal, name: "innodb_io_capacity_max", value: "2000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L381 "innodb_autoextend_increment"
+    // Go noop.go:L381 "innodb_autoextend_increment"
     SysVarData { go_file: "noop.go", go_line: 381, scope: ScopeGlobal, name: "innodb_autoextend_increment", value: "64", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L382 "binlog_format"
+    // Go noop.go:L382 "binlog_format"
     SysVarData { go_file: "noop.go", go_line: 382, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "binlog_format", value: "STATEMENT", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L383 "optimizer_trace"
+    // Go noop.go:L383 "optimizer_trace"
     SysVarData { go_file: "noop.go", go_line: 383, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "optimizer_trace", value: "enabled=off,one_line=off", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L384 "read_rnd_buffer_size"
+    // Go noop.go:L384 "read_rnd_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 384, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "read_rnd_buffer_size", value: "262144", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L390 NetWriteTimeout
+    // Go noop.go:L390 NetWriteTimeout
     SysVarData { go_file: "noop.go", go_line: 390, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "net_write_timeout", value: "60", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L391 InnodbBufferPoolLoadAbort
+    // Go noop.go:L391 InnodbBufferPoolLoadAbort
     SysVarData { go_file: "noop.go", go_line: 391, scope: ScopeGlobal, name: "innodb_buffer_pool_load_abort", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L392 "transaction_prealloc_size"
+    // Go noop.go:L392 "transaction_prealloc_size"
     SysVarData { go_file: "noop.go", go_line: 392, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "transaction_prealloc_size", value: "4096", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L393 "performance_schema_setup_objects_size"
+    // Go noop.go:L393 "performance_schema_setup_objects_size"
     SysVarData { go_file: "noop.go", go_line: 393, scope: ScopeNone, name: "performance_schema_setup_objects_size", value: "100", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L394 "sync_relay_log"
+    // Go noop.go:L394 "sync_relay_log"
     SysVarData { go_file: "noop.go", go_line: 394, scope: ScopeGlobal, name: "sync_relay_log", value: "10000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L395 "innodb_ft_result_cache_limit"
+    // Go noop.go:L395 "innodb_ft_result_cache_limit"
     SysVarData { go_file: "noop.go", go_line: 395, scope: ScopeGlobal, name: "innodb_ft_result_cache_limit", value: "2000000000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L396 "innodb_sort_buffer_size"
+    // Go noop.go:L396 "innodb_sort_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 396, scope: ScopeNone, name: "innodb_sort_buffer_size", value: "1048576", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L397 "innodb_ft_enable_diag_print"
+    // Go noop.go:L397 "innodb_ft_enable_diag_print"
     SysVarData { go_file: "noop.go", go_line: 397, scope: ScopeGlobal, name: "innodb_ft_enable_diag_print", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L398 "thread_handling"
+    // Go noop.go:L398 "thread_handling"
     SysVarData { go_file: "noop.go", go_line: 398, scope: ScopeNone, name: "thread_handling", value: "one-thread-per-connection", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L399 "stored_program_cache"
+    // Go noop.go:L399 "stored_program_cache"
     SysVarData { go_file: "noop.go", go_line: 399, scope: ScopeGlobal, name: "stored_program_cache", value: "256", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L400 "performance_schema_max_mutex_instances"
+    // Go noop.go:L400 "performance_schema_max_mutex_instances"
     SysVarData { go_file: "noop.go", go_line: 400, scope: ScopeNone, name: "performance_schema_max_mutex_instances", value: "15906", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L401 "innodb_adaptive_max_sleep_delay"
+    // Go noop.go:L401 "innodb_adaptive_max_sleep_delay"
     SysVarData { go_file: "noop.go", go_line: 401, scope: ScopeGlobal, name: "innodb_adaptive_max_sleep_delay", value: "150000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L402 "large_pages"
+    // Go noop.go:L402 "large_pages"
     SysVarData { go_file: "noop.go", go_line: 402, scope: ScopeNone, name: "large_pages", value: "OFF", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L403 "session_track_system_variables"
+    // Go noop.go:L403 "session_track_system_variables"
     SysVarData { go_file: "noop.go", go_line: 403, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "session_track_system_variables", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L404 "innodb_change_buffer_max_size"
+    // Go noop.go:L404 "innodb_change_buffer_max_size"
     SysVarData { go_file: "noop.go", go_line: 404, scope: ScopeGlobal, name: "innodb_change_buffer_max_size", value: "25", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L405 LogBinTrustFunctionCreators
+    // Go noop.go:L405 LogBinTrustFunctionCreators
     SysVarData { go_file: "noop.go", go_line: 405, scope: ScopeGlobal, name: "log_bin_trust_function_creators", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L406 "innodb_write_io_threads"
+    // Go noop.go:L406 "innodb_write_io_threads"
     SysVarData { go_file: "noop.go", go_line: 406, scope: ScopeNone, name: "innodb_write_io_threads", value: "4", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L407 "mysql_native_password_proxy_users"
+    // Go noop.go:L407 "mysql_native_password_proxy_users"
     SysVarData { go_file: "noop.go", go_line: 407, scope: ScopeGlobal, name: "mysql_native_password_proxy_users", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L408 "large_page_size"
+    // Go noop.go:L408 "large_page_size"
     SysVarData { go_file: "noop.go", go_line: 408, scope: ScopeNone, name: "large_page_size", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L409 "table_open_cache_instances"
+    // Go noop.go:L409 "table_open_cache_instances"
     SysVarData { go_file: "noop.go", go_line: 409, scope: ScopeNone, name: "table_open_cache_instances", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L410 InnodbStatsPersistent
+    // Go noop.go:L410 InnodbStatsPersistent
     SysVarData { go_file: "noop.go", go_line: 410, scope: ScopeGlobal, name: "innodb_stats_persistent", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L411 "session_track_state_change"
+    // Go noop.go:L411 "session_track_state_change"
     SysVarData { go_file: "noop.go", go_line: 411, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "session_track_state_change", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L412 OptimizerSwitch
+    // Go noop.go:L412 OptimizerSwitch
     SysVarData { go_file: "noop.go", go_line: 412, scope: ScopeNone, name: "optimizer_switch", value: "index_merge=on,index_merge_union=on,index_merge_sort_union=on,index_merge_intersection=on,engine_condition_pushdown=on,index_condition_pushdown=on,mrr=on,mrr_cost_based=on,block_nested_loop=on,batched_key_access=off,materialization=on,semijoin=on,loosescan=on,firstmatch=on,subquery_materialization_cost_based=on,use_index_extensions=on", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L418 "delayed_queue_size"
+    // Go noop.go:L418 "delayed_queue_size"
     SysVarData { go_file: "noop.go", go_line: 418, scope: ScopeGlobal, name: "delayed_queue_size", value: "1000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L419 "innodb_read_only"
+    // Go noop.go:L419 "innodb_read_only"
     SysVarData { go_file: "noop.go", go_line: 419, scope: ScopeNone, name: "innodb_read_only", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L420 "datetime_format"
+    // Go noop.go:L420 "datetime_format"
     SysVarData { go_file: "noop.go", go_line: 420, scope: ScopeNone, name: "datetime_format", value: "%Y-%m-%d %H:%i:%s", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L421 "log_syslog"
+    // Go noop.go:L421 "log_syslog"
     SysVarData { go_file: "noop.go", go_line: 421, scope: ScopeGlobal, name: "log_syslog", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L422 "transaction_alloc_block_size"
+    // Go noop.go:L422 "transaction_alloc_block_size"
     SysVarData { go_file: "noop.go", go_line: 422, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "transaction_alloc_block_size", value: "8192", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L423 "innodb_large_prefix"
+    // Go noop.go:L423 "innodb_large_prefix"
     SysVarData { go_file: "noop.go", go_line: 423, scope: ScopeGlobal, name: "innodb_large_prefix", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L424 "performance_schema_max_cond_classes"
+    // Go noop.go:L424 "performance_schema_max_cond_classes"
     SysVarData { go_file: "noop.go", go_line: 424, scope: ScopeNone, name: "performance_schema_max_cond_classes", value: "80", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L425 "innodb_io_capacity"
+    // Go noop.go:L425 "innodb_io_capacity"
     SysVarData { go_file: "noop.go", go_line: 425, scope: ScopeGlobal, name: "innodb_io_capacity", value: "200", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L426 "max_binlog_cache_size"
+    // Go noop.go:L426 "max_binlog_cache_size"
     SysVarData { go_file: "noop.go", go_line: 426, scope: ScopeGlobal, name: "max_binlog_cache_size", value: "18446744073709547520", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L427 "ndb_index_stat_enable"
+    // Go noop.go:L427 "ndb_index_stat_enable"
     SysVarData { go_file: "noop.go", go_line: 427, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "ndb_index_stat_enable", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L428 "executed_gtids_compression_period"
+    // Go noop.go:L428 "executed_gtids_compression_period"
     SysVarData { go_file: "noop.go", go_line: 428, scope: ScopeGlobal, name: "executed_gtids_compression_period", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L429 "time_format"
+    // Go noop.go:L429 "time_format"
     SysVarData { go_file: "noop.go", go_line: 429, scope: ScopeNone, name: "time_format", value: "%H:%i:%s", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L430 OldAlterTable
+    // Go noop.go:L430 OldAlterTable
     SysVarData { go_file: "noop.go", go_line: 430, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "old_alter_table", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L431 "long_query_time"
+    // Go noop.go:L431 "long_query_time"
     SysVarData { go_file: "noop.go", go_line: 431, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "long_query_time", value: "10.000000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L432 "innodb_use_native_aio"
+    // Go noop.go:L432 "innodb_use_native_aio"
     SysVarData { go_file: "noop.go", go_line: 432, scope: ScopeNone, name: "innodb_use_native_aio", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L433 "log_throttle_queries_not_using_indexes"
+    // Go noop.go:L433 "log_throttle_queries_not_using_indexes"
     SysVarData { go_file: "noop.go", go_line: 433, scope: ScopeGlobal, name: "log_throttle_queries_not_using_indexes", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L434 "locked_in_memory"
+    // Go noop.go:L434 "locked_in_memory"
     SysVarData { go_file: "noop.go", go_line: 434, scope: ScopeNone, name: "locked_in_memory", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L435 "innodb_api_enable_mdl"
+    // Go noop.go:L435 "innodb_api_enable_mdl"
     SysVarData { go_file: "noop.go", go_line: 435, scope: ScopeNone, name: "innodb_api_enable_mdl", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L436 "binlog_cache_size"
+    // Go noop.go:L436 "binlog_cache_size"
     SysVarData { go_file: "noop.go", go_line: 436, scope: ScopeGlobal, name: "binlog_cache_size", value: "32768", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L437 "innodb_compression_pad_pct_max"
+    // Go noop.go:L437 "innodb_compression_pad_pct_max"
     SysVarData { go_file: "noop.go", go_line: 437, scope: ScopeGlobal, name: "innodb_compression_pad_pct_max", value: "50", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L438 InnodbCommitConcurrency
+    // Go noop.go:L438 InnodbCommitConcurrency
     SysVarData { go_file: "noop.go", go_line: 438, scope: ScopeGlobal, name: "innodb_commit_concurrency", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 1000, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L439 "ft_min_word_len"
+    // Go noop.go:L439 "ft_min_word_len"
     SysVarData { go_file: "noop.go", go_line: 439, scope: ScopeNone, name: "ft_min_word_len", value: "4", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L440 EnforceGtidConsistency
+    // Go noop.go:L440 EnforceGtidConsistency
     SysVarData { go_file: "noop.go", go_line: 440, scope: ScopeGlobal, name: "enforce_gtid_consistency", value: "OFF", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "WARN"], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L441 SecureAuth
+    // Go noop.go:L441 SecureAuth
     SysVarData { go_file: "noop.go", go_line: 441, scope: ScopeGlobal, name: "secure_auth", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: HOOK_VALIDATION },
-    // go: noop.go:L447 "max_tmp_tables"
+    // Go noop.go:L447 "max_tmp_tables"
     SysVarData { go_file: "noop.go", go_line: 447, scope: ScopeNone, name: "max_tmp_tables", value: "32", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L448 InnodbRandomReadAhead
+    // Go noop.go:L448 InnodbRandomReadAhead
     SysVarData { go_file: "noop.go", go_line: 448, scope: ScopeGlobal, name: "innodb_random_read_ahead", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L449 UniqueChecks
+    // Go noop.go:L449 UniqueChecks
     SysVarData { go_file: "noop.go", go_line: 449, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "unique_checks", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L456 "internal_tmp_disk_storage_engine"
+    // Go noop.go:L456 "internal_tmp_disk_storage_engine"
     SysVarData { go_file: "noop.go", go_line: 456, scope: ScopeGlobal, name: "internal_tmp_disk_storage_engine", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L457 "myisam_repair_threads"
+    // Go noop.go:L457 "myisam_repair_threads"
     SysVarData { go_file: "noop.go", go_line: 457, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "myisam_repair_threads", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L458 "ndb_eventbuffer_max_alloc"
+    // Go noop.go:L458 "ndb_eventbuffer_max_alloc"
     SysVarData { go_file: "noop.go", go_line: 458, scope: ScopeGlobal, name: "ndb_eventbuffer_max_alloc", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L459 "innodb_read_ahead_threshold"
+    // Go noop.go:L459 "innodb_read_ahead_threshold"
     SysVarData { go_file: "noop.go", go_line: 459, scope: ScopeGlobal, name: "innodb_read_ahead_threshold", value: "56", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L460 "key_cache_block_size"
+    // Go noop.go:L460 "key_cache_block_size"
     SysVarData { go_file: "noop.go", go_line: 460, scope: ScopeGlobal, name: "key_cache_block_size", value: "1024", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L461 "ndb_recv_thread_cpu_mask"
+    // Go noop.go:L461 "ndb_recv_thread_cpu_mask"
     SysVarData { go_file: "noop.go", go_line: 461, scope: ScopeNone, name: "ndb_recv_thread_cpu_mask", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L462 "gtid_purged"
+    // Go noop.go:L462 "gtid_purged"
     SysVarData { go_file: "noop.go", go_line: 462, scope: ScopeGlobal, name: "gtid_purged", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L463 "max_binlog_stmt_cache_size"
+    // Go noop.go:L463 "max_binlog_stmt_cache_size"
     SysVarData { go_file: "noop.go", go_line: 463, scope: ScopeGlobal, name: "max_binlog_stmt_cache_size", value: "18446744073709547520", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L464 "lock_wait_timeout"
+    // Go noop.go:L464 "lock_wait_timeout"
     SysVarData { go_file: "noop.go", go_line: 464, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "lock_wait_timeout", value: "31536000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L465 "read_buffer_size"
+    // Go noop.go:L465 "read_buffer_size"
     SysVarData { go_file: "noop.go", go_line: 465, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "read_buffer_size", value: "131072", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L471 "innodb_read_io_threads"
+    // Go noop.go:L471 "innodb_read_io_threads"
     SysVarData { go_file: "noop.go", go_line: 471, scope: ScopeNone, name: "innodb_read_io_threads", value: "4", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L472 MaxSpRecursionDepth
+    // Go noop.go:L472 MaxSpRecursionDepth
     SysVarData { go_file: "noop.go", go_line: 472, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_sp_recursion_depth", value: "0", computed: None, typ: TypeUnsigned, min_value: 0, max_value: 255, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L473 "ignore_builtin_innodb"
+    // Go noop.go:L473 "ignore_builtin_innodb"
     SysVarData { go_file: "noop.go", go_line: 473, scope: ScopeNone, name: "ignore_builtin_innodb", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L474 "slow_query_log_file"
+    // Go noop.go:L474 "slow_query_log_file"
     SysVarData { go_file: "noop.go", go_line: 474, scope: ScopeGlobal, name: "slow_query_log_file", value: "/usr/local/mysql/data/localhost-slow.log", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L475 "innodb_thread_sleep_delay"
+    // Go noop.go:L475 "innodb_thread_sleep_delay"
     SysVarData { go_file: "noop.go", go_line: 475, scope: ScopeGlobal, name: "innodb_thread_sleep_delay", value: "10000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L476 "innodb_ft_aux_table"
+    // Go noop.go:L476 "innodb_ft_aux_table"
     SysVarData { go_file: "noop.go", go_line: 476, scope: ScopeGlobal, name: "innodb_ft_aux_table", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L477 SQLWarnings
+    // Go noop.go:L477 SQLWarnings
     SysVarData { go_file: "noop.go", go_line: 477, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_warnings", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L478 KeepFilesOnCreate
+    // Go noop.go:L478 KeepFilesOnCreate
     SysVarData { go_file: "noop.go", go_line: 478, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "keep_files_on_create", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L479 "innodb_data_file_path"
+    // Go noop.go:L479 "innodb_data_file_path"
     SysVarData { go_file: "noop.go", go_line: 479, scope: ScopeNone, name: "innodb_data_file_path", value: "ibdata1:12M:autoextend", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L480 "performance_schema_setup_actors_size"
+    // Go noop.go:L480 "performance_schema_setup_actors_size"
     SysVarData { go_file: "noop.go", go_line: 480, scope: ScopeNone, name: "performance_schema_setup_actors_size", value: "100", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L481 "innodb_additional_mem_pool_size"
+    // Go noop.go:L481 "innodb_additional_mem_pool_size"
     SysVarData { go_file: "noop.go", go_line: 481, scope: ScopeNone, name: "innodb_additional_mem_pool_size", value: "8388608", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L482 "log_error"
+    // Go noop.go:L482 "log_error"
     SysVarData { go_file: "noop.go", go_line: 482, scope: ScopeNone, name: "log_error", value: "/usr/local/mysql/data/localhost.err", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L483 "binlog_stmt_cache_size"
+    // Go noop.go:L483 "binlog_stmt_cache_size"
     SysVarData { go_file: "noop.go", go_line: 483, scope: ScopeGlobal, name: "binlog_stmt_cache_size", value: "32768", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L484 "relay_log_info_file"
+    // Go noop.go:L484 "relay_log_info_file"
     SysVarData { go_file: "noop.go", go_line: 484, scope: ScopeNone, name: "relay_log_info_file", value: "relay-log.info", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L485 "innodb_ft_total_cache_size"
+    // Go noop.go:L485 "innodb_ft_total_cache_size"
     SysVarData { go_file: "noop.go", go_line: 485, scope: ScopeNone, name: "innodb_ft_total_cache_size", value: "640000000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L486 "performance_schema_max_rwlock_instances"
+    // Go noop.go:L486 "performance_schema_max_rwlock_instances"
     SysVarData { go_file: "noop.go", go_line: 486, scope: ScopeNone, name: "performance_schema_max_rwlock_instances", value: "9102", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L487 "table_open_cache"
+    // Go noop.go:L487 "table_open_cache"
     SysVarData { go_file: "noop.go", go_line: 487, scope: ScopeGlobal, name: "table_open_cache", value: "2000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L488 "performance_schema_events_stages_history_long_size"
+    // Go noop.go:L488 "performance_schema_events_stages_history_long_size"
     SysVarData { go_file: "noop.go", go_line: 488, scope: ScopeNone, name: "performance_schema_events_stages_history_long_size", value: "10000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L489 "insert_id"
+    // Go noop.go:L489 "insert_id"
     SysVarData { go_file: "noop.go", go_line: 489, scope: ScopeSession, name: "insert_id", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L490 "default_tmp_storage_engine"
+    // Go noop.go:L490 "default_tmp_storage_engine"
     SysVarData { go_file: "noop.go", go_line: 490, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "default_tmp_storage_engine", value: "InnoDB", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L496 "optimizer_search_depth"
+    // Go noop.go:L496 "optimizer_search_depth"
     SysVarData { go_file: "noop.go", go_line: 496, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "optimizer_search_depth", value: "62", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L502 "max_points_in_geometry"
+    // Go noop.go:L502 "max_points_in_geometry"
     SysVarData { go_file: "noop.go", go_line: 502, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_points_in_geometry", value: "65536", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L508 "innodb_stats_sample_pages"
+    // Go noop.go:L508 "innodb_stats_sample_pages"
     SysVarData { go_file: "noop.go", go_line: 508, scope: ScopeGlobal, name: "innodb_stats_sample_pages", value: "8", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L509 "profiling_history_size"
+    // Go noop.go:L509 "profiling_history_size"
     SysVarData { go_file: "noop.go", go_line: 509, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "profiling_history_size", value: "15", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L510 "have_symlink"
+    // Go noop.go:L510 "have_symlink"
     SysVarData { go_file: "noop.go", go_line: 510, scope: ScopeNone, name: "have_symlink", value: "YES", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L511 "storage_engine"
+    // Go noop.go:L511 "storage_engine"
     SysVarData { go_file: "noop.go", go_line: 511, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "storage_engine", value: "InnoDB", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L512 "sql_log_off"
+    // Go noop.go:L512 "sql_log_off"
     SysVarData { go_file: "noop.go", go_line: 512, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_log_off", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L516 "explicit_defaults_for_timestamp"
+    // Go noop.go:L516 "explicit_defaults_for_timestamp"
     SysVarData { go_file: "noop.go", go_line: 516, scope: ScopeNone, name: "explicit_defaults_for_timestamp", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L517 "performance_schema_events_waits_history_size"
+    // Go noop.go:L517 "performance_schema_events_waits_history_size"
     SysVarData { go_file: "noop.go", go_line: 517, scope: ScopeNone, name: "performance_schema_events_waits_history_size", value: "10", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L518 "log_syslog_tag"
+    // Go noop.go:L518 "log_syslog_tag"
     SysVarData { go_file: "noop.go", go_line: 518, scope: ScopeGlobal, name: "log_syslog_tag", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L519 "innodb_undo_log_truncate"
+    // Go noop.go:L519 "innodb_undo_log_truncate"
     SysVarData { go_file: "noop.go", go_line: 519, scope: ScopeGlobal, name: "innodb_undo_log_truncate", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L520 "innodb_create_intrinsic"
+    // Go noop.go:L520 "innodb_create_intrinsic"
     SysVarData { go_file: "noop.go", go_line: 520, scope: ScopeSession, name: "innodb_create_intrinsic", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L521 "gtid_executed_compression_period"
+    // Go noop.go:L521 "gtid_executed_compression_period"
     SysVarData { go_file: "noop.go", go_line: 521, scope: ScopeGlobal, name: "gtid_executed_compression_period", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L522 "ndb_log_empty_epochs"
+    // Go noop.go:L522 "ndb_log_empty_epochs"
     SysVarData { go_file: "noop.go", go_line: 522, scope: ScopeGlobal, name: "ndb_log_empty_epochs", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L523 "have_geometry"
+    // Go noop.go:L523 "have_geometry"
     SysVarData { go_file: "noop.go", go_line: 523, scope: ScopeNone, name: "have_geometry", value: "YES", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L524 "optimizer_trace_max_mem_size"
+    // Go noop.go:L524 "optimizer_trace_max_mem_size"
     SysVarData { go_file: "noop.go", go_line: 524, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "optimizer_trace_max_mem_size", value: "16384", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L525 "net_retry_count"
+    // Go noop.go:L525 "net_retry_count"
     SysVarData { go_file: "noop.go", go_line: 525, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "net_retry_count", value: "10", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L526 "ndb_table_no_logging"
+    // Go noop.go:L526 "ndb_table_no_logging"
     SysVarData { go_file: "noop.go", go_line: 526, scope: ScopeSession, name: "ndb_table_no_logging", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L527 "optimizer_trace_features"
+    // Go noop.go:L527 "optimizer_trace_features"
     SysVarData { go_file: "noop.go", go_line: 527, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "optimizer_trace_features", value: "greedy_search=on,range_optimizer=on,dynamic_range=on,repeated_subselect=on", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L528 "innodb_flush_log_at_trx_commit"
+    // Go noop.go:L528 "innodb_flush_log_at_trx_commit"
     SysVarData { go_file: "noop.go", go_line: 528, scope: ScopeGlobal, name: "innodb_flush_log_at_trx_commit", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L529 "rewriter_enabled"
+    // Go noop.go:L529 "rewriter_enabled"
     SysVarData { go_file: "noop.go", go_line: 529, scope: ScopeGlobal, name: "rewriter_enabled", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L530 "query_cache_min_res_unit"
+    // Go noop.go:L530 "query_cache_min_res_unit"
     SysVarData { go_file: "noop.go", go_line: 530, scope: ScopeGlobal, name: "query_cache_min_res_unit", value: "4096", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L531 "updatable_views_with_limit"
+    // Go noop.go:L531 "updatable_views_with_limit"
     SysVarData { go_file: "noop.go", go_line: 531, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "updatable_views_with_limit", value: "YES", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L537 "optimizer_prune_level"
+    // Go noop.go:L537 "optimizer_prune_level"
     SysVarData { go_file: "noop.go", go_line: 537, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "optimizer_prune_level", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L543 "completion_type"
+    // Go noop.go:L543 "completion_type"
     SysVarData { go_file: "noop.go", go_line: 543, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "completion_type", value: "NO_CHAIN", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L544 "binlog_checksum"
+    // Go noop.go:L544 "binlog_checksum"
     SysVarData { go_file: "noop.go", go_line: 544, scope: ScopeGlobal, name: "binlog_checksum", value: "CRC32", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L545 "report_port"
+    // Go noop.go:L545 "report_port"
     SysVarData { go_file: "noop.go", go_line: 545, scope: ScopeNone, name: "report_port", value: "3306", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L546 ShowOldTemporals
+    // Go noop.go:L546 ShowOldTemporals
     SysVarData { go_file: "noop.go", go_line: 546, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "show_old_temporals", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L547 "query_cache_limit"
+    // Go noop.go:L547 "query_cache_limit"
     SysVarData { go_file: "noop.go", go_line: 547, scope: ScopeGlobal, name: "query_cache_limit", value: "1048576", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L548 "innodb_buffer_pool_size"
+    // Go noop.go:L548 "innodb_buffer_pool_size"
     SysVarData { go_file: "noop.go", go_line: 548, scope: ScopeGlobal, name: "innodb_buffer_pool_size", value: "134217728", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L549 InnodbAdaptiveFlushing
+    // Go noop.go:L549 InnodbAdaptiveFlushing
     SysVarData { go_file: "noop.go", go_line: 549, scope: ScopeGlobal, name: "innodb_adaptive_flushing", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L550 "innodb_monitor_enable"
+    // Go noop.go:L550 "innodb_monitor_enable"
     SysVarData { go_file: "noop.go", go_line: 550, scope: ScopeGlobal, name: "innodb_monitor_enable", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L551 "date_format"
+    // Go noop.go:L551 "date_format"
     SysVarData { go_file: "noop.go", go_line: 551, scope: ScopeNone, name: "date_format", value: "%Y-%m-%d", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L552 "innodb_buffer_pool_filename"
+    // Go noop.go:L552 "innodb_buffer_pool_filename"
     SysVarData { go_file: "noop.go", go_line: 552, scope: ScopeGlobal, name: "innodb_buffer_pool_filename", value: "ib_buffer_pool", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L553 "slow_launch_time"
+    // Go noop.go:L553 "slow_launch_time"
     SysVarData { go_file: "noop.go", go_line: 553, scope: ScopeGlobal, name: "slow_launch_time", value: "2", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L554 "ndb_use_transactions"
+    // Go noop.go:L554 "ndb_use_transactions"
     SysVarData { go_file: "noop.go", go_line: 554, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "ndb_use_transactions", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L555 "innodb_purge_threads"
+    // Go noop.go:L555 "innodb_purge_threads"
     SysVarData { go_file: "noop.go", go_line: 555, scope: ScopeNone, name: "innodb_purge_threads", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L556 "innodb_concurrency_tickets"
+    // Go noop.go:L556 "innodb_concurrency_tickets"
     SysVarData { go_file: "noop.go", go_line: 556, scope: ScopeGlobal, name: "innodb_concurrency_tickets", value: "5000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L557 "innodb_monitor_reset_all"
+    // Go noop.go:L557 "innodb_monitor_reset_all"
     SysVarData { go_file: "noop.go", go_line: 557, scope: ScopeGlobal, name: "innodb_monitor_reset_all", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L558 "performance_schema_users_size"
+    // Go noop.go:L558 "performance_schema_users_size"
     SysVarData { go_file: "noop.go", go_line: 558, scope: ScopeNone, name: "performance_schema_users_size", value: "100", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L559 "ndb_log_updated_only"
+    // Go noop.go:L559 "ndb_log_updated_only"
     SysVarData { go_file: "noop.go", go_line: 559, scope: ScopeGlobal, name: "ndb_log_updated_only", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L560 "basedir"
+    // Go noop.go:L560 "basedir"
     SysVarData { go_file: "noop.go", go_line: 560, scope: ScopeNone, name: "basedir", value: "/usr/local/mysql", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L561 "innodb_old_blocks_time"
+    // Go noop.go:L561 "innodb_old_blocks_time"
     SysVarData { go_file: "noop.go", go_line: 561, scope: ScopeGlobal, name: "innodb_old_blocks_time", value: "1000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L562 "innodb_stats_method"
+    // Go noop.go:L562 "innodb_stats_method"
     SysVarData { go_file: "noop.go", go_line: 562, scope: ScopeGlobal, name: "innodb_stats_method", value: "nulls_equal", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L563 LocalInFile
+    // Go noop.go:L563 LocalInFile
     SysVarData { go_file: "noop.go", go_line: 563, scope: ScopeGlobal, name: "local_infile", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L564 "myisam_stats_method"
+    // Go noop.go:L564 "myisam_stats_method"
     SysVarData { go_file: "noop.go", go_line: 564, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "myisam_stats_method", value: "nulls_unequal", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L565 "relay_log_recovery"
+    // Go noop.go:L565 "relay_log_recovery"
     SysVarData { go_file: "noop.go", go_line: 565, scope: ScopeNone, name: "relay_log_recovery", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L566 "old"
+    // Go noop.go:L566 "old"
     SysVarData { go_file: "noop.go", go_line: 566, scope: ScopeNone, name: "old", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L567 InnodbTableLocks
+    // Go noop.go:L567 InnodbTableLocks
     SysVarData { go_file: "noop.go", go_line: 567, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "innodb_table_locks", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L568 PerformanceSchema
+    // Go noop.go:L568 PerformanceSchema
     SysVarData { go_file: "noop.go", go_line: 568, scope: ScopeNone, name: "performance_schema", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L569 "myisam_recover_options"
+    // Go noop.go:L569 "myisam_recover_options"
     SysVarData { go_file: "noop.go", go_line: 569, scope: ScopeNone, name: "myisam_recover_options", value: "OFF", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L570 NetBufferLength
+    // Go noop.go:L570 NetBufferLength
     SysVarData { go_file: "noop.go", go_line: 570, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "net_buffer_length", value: "16384", computed: None, typ: TypeUnsigned, min_value: 1024, max_value: 1048576, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L571 "binlog_row_image"
+    // Go noop.go:L571 "binlog_row_image"
     SysVarData { go_file: "noop.go", go_line: 571, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "binlog_row_image", value: "FULL", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L572 "innodb_locks_unsafe_for_binlog"
+    // Go noop.go:L572 "innodb_locks_unsafe_for_binlog"
     SysVarData { go_file: "noop.go", go_line: 572, scope: ScopeNone, name: "innodb_locks_unsafe_for_binlog", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L573 "rbr_exec_mode"
+    // Go noop.go:L573 "rbr_exec_mode"
     SysVarData { go_file: "noop.go", go_line: 573, scope: ScopeSession, name: "rbr_exec_mode", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L574 "myisam_max_sort_file_size"
+    // Go noop.go:L574 "myisam_max_sort_file_size"
     SysVarData { go_file: "noop.go", go_line: 574, scope: ScopeGlobal, name: "myisam_max_sort_file_size", value: "9223372036853727232", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L575 "back_log"
+    // Go noop.go:L575 "back_log"
     SysVarData { go_file: "noop.go", go_line: 575, scope: ScopeNone, name: "back_log", value: "80", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L576 "pseudo_thread_id"
+    // Go noop.go:L576 "pseudo_thread_id"
     SysVarData { go_file: "noop.go", go_line: 576, scope: ScopeSession, name: "pseudo_thread_id", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L577 "have_dynamic_loading"
+    // Go noop.go:L577 "have_dynamic_loading"
     SysVarData { go_file: "noop.go", go_line: 577, scope: ScopeNone, name: "have_dynamic_loading", value: "YES", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L578 "rewriter_verbose"
+    // Go noop.go:L578 "rewriter_verbose"
     SysVarData { go_file: "noop.go", go_line: 578, scope: ScopeGlobal, name: "rewriter_verbose", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L579 "innodb_undo_logs"
+    // Go noop.go:L579 "innodb_undo_logs"
     SysVarData { go_file: "noop.go", go_line: 579, scope: ScopeGlobal, name: "innodb_undo_logs", value: "128", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L580 "performance_schema_max_cond_instances"
+    // Go noop.go:L580 "performance_schema_max_cond_instances"
     SysVarData { go_file: "noop.go", go_line: 580, scope: ScopeNone, name: "performance_schema_max_cond_instances", value: "3504", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L581 "delayed_insert_limit"
+    // Go noop.go:L581 "delayed_insert_limit"
     SysVarData { go_file: "noop.go", go_line: 581, scope: ScopeGlobal, name: "delayed_insert_limit", value: "100", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L582 Flush
+    // Go noop.go:L582 Flush
     SysVarData { go_file: "noop.go", go_line: 582, scope: ScopeGlobal, name: "flush", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L583 "eq_range_index_dive_limit"
+    // Go noop.go:L583 "eq_range_index_dive_limit"
     SysVarData { go_file: "noop.go", go_line: 583, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "eq_range_index_dive_limit", value: "200", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L589 "performance_schema_events_stages_history_size"
+    // Go noop.go:L589 "performance_schema_events_stages_history_size"
     SysVarData { go_file: "noop.go", go_line: 589, scope: ScopeNone, name: "performance_schema_events_stages_history_size", value: "10", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L590 "ndb_join_pushdown"
+    // Go noop.go:L590 "ndb_join_pushdown"
     SysVarData { go_file: "noop.go", go_line: 590, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "ndb_join_pushdown", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L591 "performance_schema_max_thread_instances"
+    // Go noop.go:L591 "performance_schema_max_thread_instances"
     SysVarData { go_file: "noop.go", go_line: 591, scope: ScopeNone, name: "performance_schema_max_thread_instances", value: "402", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L592 "ndbinfo_show_hidden"
+    // Go noop.go:L592 "ndbinfo_show_hidden"
     SysVarData { go_file: "noop.go", go_line: 592, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "ndbinfo_show_hidden", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L593 "net_read_timeout"
+    // Go noop.go:L593 "net_read_timeout"
     SysVarData { go_file: "noop.go", go_line: 593, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "net_read_timeout", value: "30", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L594 "innodb_page_size"
+    // Go noop.go:L594 "innodb_page_size"
     SysVarData { go_file: "noop.go", go_line: 594, scope: ScopeNone, name: "innodb_page_size", value: "16384", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L595 "innodb_log_file_size"
+    // Go noop.go:L595 "innodb_log_file_size"
     SysVarData { go_file: "noop.go", go_line: 595, scope: ScopeNone, name: "innodb_log_file_size", value: "50331648", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L596 "sync_relay_log_info"
+    // Go noop.go:L596 "sync_relay_log_info"
     SysVarData { go_file: "noop.go", go_line: 596, scope: ScopeGlobal, name: "sync_relay_log_info", value: "10000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L597 "optimizer_trace_limit"
+    // Go noop.go:L597 "optimizer_trace_limit"
     SysVarData { go_file: "noop.go", go_line: 597, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "optimizer_trace_limit", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L598 "innodb_ft_max_token_size"
+    // Go noop.go:L598 "innodb_ft_max_token_size"
     SysVarData { go_file: "noop.go", go_line: 598, scope: ScopeNone, name: "innodb_ft_max_token_size", value: "84", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L599 "ndb_log_binlog_index"
+    // Go noop.go:L599 "ndb_log_binlog_index"
     SysVarData { go_file: "noop.go", go_line: 599, scope: ScopeGlobal, name: "ndb_log_binlog_index", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L600 "innodb_api_bk_commit_interval"
+    // Go noop.go:L600 "innodb_api_bk_commit_interval"
     SysVarData { go_file: "noop.go", go_line: 600, scope: ScopeGlobal, name: "innodb_api_bk_commit_interval", value: "5", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L601 "innodb_undo_directory"
+    // Go noop.go:L601 "innodb_undo_directory"
     SysVarData { go_file: "noop.go", go_line: 601, scope: ScopeNone, name: "innodb_undo_directory", value: ".", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L602 "bind_address"
+    // Go noop.go:L602 "bind_address"
     SysVarData { go_file: "noop.go", go_line: 602, scope: ScopeNone, name: "bind_address", value: "*", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L603 "innodb_sync_spin_loops"
+    // Go noop.go:L603 "innodb_sync_spin_loops"
     SysVarData { go_file: "noop.go", go_line: 603, scope: ScopeGlobal, name: "innodb_sync_spin_loops", value: "30", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L604 SQLSafeUpdates
+    // Go noop.go:L604 SQLSafeUpdates
     SysVarData { go_file: "noop.go", go_line: 604, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "sql_safe_updates", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L611 "tmpdir"
+    // Go noop.go:L611 "tmpdir"
     SysVarData { go_file: "noop.go", go_line: 611, scope: ScopeNone, name: "tmpdir", value: "/var/tmp/", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L612 "innodb_thread_concurrency"
+    // Go noop.go:L612 "innodb_thread_concurrency"
     SysVarData { go_file: "noop.go", go_line: 612, scope: ScopeGlobal, name: "innodb_thread_concurrency", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L613 "innodb_buffer_pool_dump_pct"
+    // Go noop.go:L613 "innodb_buffer_pool_dump_pct"
     SysVarData { go_file: "noop.go", go_line: 613, scope: ScopeGlobal, name: "innodb_buffer_pool_dump_pct", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L614 "lc_time_names"
+    // Go noop.go:L614 "lc_time_names"
     SysVarData { go_file: "noop.go", go_line: 614, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "lc_time_names", value: "en_US", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_READ_ONLY | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L615 "max_statement_time"
+    // Go noop.go:L615 "max_statement_time"
     SysVarData { go_file: "noop.go", go_line: 615, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "max_statement_time", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L616 EndMarkersInJSON
+    // Go noop.go:L616 EndMarkersInJSON
     SysVarData { go_file: "noop.go", go_line: 616, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "end_markers_in_json", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L623 AvoidTemporalUpgrade
+    // Go noop.go:L623 AvoidTemporalUpgrade
     SysVarData { go_file: "noop.go", go_line: 623, scope: ScopeGlobal, name: "avoid_temporal_upgrade", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L624 "key_cache_age_threshold"
+    // Go noop.go:L624 "key_cache_age_threshold"
     SysVarData { go_file: "noop.go", go_line: 624, scope: ScopeGlobal, name: "key_cache_age_threshold", value: "300", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L625 InnodbStatusOutput
+    // Go noop.go:L625 InnodbStatusOutput
     SysVarData { go_file: "noop.go", go_line: 625, scope: ScopeGlobal, name: "innodb_status_output", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_AUTO_CONVERT_NEGATIVE_BOOL | FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L626 "min_examined_row_limit"
+    // Go noop.go:L626 "min_examined_row_limit"
     SysVarData { go_file: "noop.go", go_line: 626, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "min_examined_row_limit", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L627 "sync_frm"
+    // Go noop.go:L627 "sync_frm"
     SysVarData { go_file: "noop.go", go_line: 627, scope: ScopeGlobal, name: "sync_frm", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L628 "innodb_online_alter_log_max_size"
+    // Go noop.go:L628 "innodb_online_alter_log_max_size"
     SysVarData { go_file: "noop.go", go_line: 628, scope: ScopeGlobal, name: "innodb_online_alter_log_max_size", value: "134217728", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L629 "information_schema_stats_expiry"
+    // Go noop.go:L629 "information_schema_stats_expiry"
     SysVarData { go_file: "noop.go", go_line: 629, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "information_schema_stats_expiry", value: "86400", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L630 ThreadPoolSize
+    // Go noop.go:L630 ThreadPoolSize
     SysVarData { go_file: "noop.go", go_line: 630, scope: ScopeGlobal, name: "thread_pool_size", value: "16", computed: None, typ: TypeUnsigned, min_value: 1, max_value: 64, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L631 "lower_case_file_system"
+    // Go noop.go:L631 "lower_case_file_system"
     SysVarData { go_file: "noop.go", go_line: 631, scope: ScopeNone, name: "lower_case_file_system", value: "1", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L632 LowerCaseTableNames
+    // Go noop.go:L632 LowerCaseTableNames
     SysVarData { go_file: "noop.go", go_line: 632, scope: ScopeNone, name: "lower_case_table_names", value: "2", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L637 PseudoSlaveMode
+    // Go noop.go:L637 PseudoSlaveMode
     SysVarData { go_file: "noop.go", go_line: 637, scope: ScopeSession, name: "pseudo_slave_mode", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L638 "slave_pending_jobs_size_max"
+    // Go noop.go:L638 "slave_pending_jobs_size_max"
     SysVarData { go_file: "noop.go", go_line: 638, scope: ScopeGlobal, name: "slave_pending_jobs_size_max", value: "16777216", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L639 "slave_transaction_retries"
+    // Go noop.go:L639 "slave_transaction_retries"
     SysVarData { go_file: "noop.go", go_line: 639, scope: ScopeGlobal, name: "slave_transaction_retries", value: "10", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L640 "slave_checkpoint_period"
+    // Go noop.go:L640 "slave_checkpoint_period"
     SysVarData { go_file: "noop.go", go_line: 640, scope: ScopeGlobal, name: "slave_checkpoint_period", value: "300", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L641 MasterVerifyChecksum
+    // Go noop.go:L641 MasterVerifyChecksum
     SysVarData { go_file: "noop.go", go_line: 641, scope: ScopeGlobal, name: "master_verify_checksum", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L642 "rpl_semi_sync_master_trace_level"
+    // Go noop.go:L642 "rpl_semi_sync_master_trace_level"
     SysVarData { go_file: "noop.go", go_line: 642, scope: ScopeGlobal, name: "rpl_semi_sync_master_trace_level", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L643 "master_info_repository"
+    // Go noop.go:L643 "master_info_repository"
     SysVarData { go_file: "noop.go", go_line: 643, scope: ScopeGlobal, name: "master_info_repository", value: "FILE", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L644 "rpl_stop_slave_timeout"
+    // Go noop.go:L644 "rpl_stop_slave_timeout"
     SysVarData { go_file: "noop.go", go_line: 644, scope: ScopeGlobal, name: "rpl_stop_slave_timeout", value: "31536000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L645 "slave_net_timeout"
+    // Go noop.go:L645 "slave_net_timeout"
     SysVarData { go_file: "noop.go", go_line: 645, scope: ScopeGlobal, name: "slave_net_timeout", value: "3600", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L646 "sync_master_info"
+    // Go noop.go:L646 "sync_master_info"
     SysVarData { go_file: "noop.go", go_line: 646, scope: ScopeGlobal, name: "sync_master_info", value: "10000", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L647 "init_slave"
+    // Go noop.go:L647 "init_slave"
     SysVarData { go_file: "noop.go", go_line: 647, scope: ScopeGlobal, name: "init_slave", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L648 SlaveCompressedProtocol
+    // Go noop.go:L648 SlaveCompressedProtocol
     SysVarData { go_file: "noop.go", go_line: 648, scope: ScopeGlobal, name: "slave_compressed_protocol", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L649 "rpl_semi_sync_slave_trace_level"
+    // Go noop.go:L649 "rpl_semi_sync_slave_trace_level"
     SysVarData { go_file: "noop.go", go_line: 649, scope: ScopeGlobal, name: "rpl_semi_sync_slave_trace_level", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L650 LogSlowSlaveStatements
+    // Go noop.go:L650 LogSlowSlaveStatements
     SysVarData { go_file: "noop.go", go_line: 650, scope: ScopeGlobal, name: "log_slow_slave_statements", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L651 "slave_checkpoint_group"
+    // Go noop.go:L651 "slave_checkpoint_group"
     SysVarData { go_file: "noop.go", go_line: 651, scope: ScopeGlobal, name: "slave_checkpoint_group", value: "512", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L652 "slave_load_tmpdir"
+    // Go noop.go:L652 "slave_load_tmpdir"
     SysVarData { go_file: "noop.go", go_line: 652, scope: ScopeNone, name: "slave_load_tmpdir", value: "/var/tmp/", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L653 "slave_parallel_type"
+    // Go noop.go:L653 "slave_parallel_type"
     SysVarData { go_file: "noop.go", go_line: 653, scope: ScopeGlobal, name: "slave_parallel_type", value: "", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L654 "slave_parallel_workers"
+    // Go noop.go:L654 "slave_parallel_workers"
     SysVarData { go_file: "noop.go", go_line: 654, scope: ScopeGlobal, name: "slave_parallel_workers", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L655 "rpl_semi_sync_master_timeout"
+    // Go noop.go:L655 "rpl_semi_sync_master_timeout"
     SysVarData { go_file: "noop.go", go_line: 655, scope: ScopeGlobal, name: "rpl_semi_sync_master_timeout", value: "10000", computed: None, typ: TypeInt, min_value: 0, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L656 "slave_skip_errors"
+    // Go noop.go:L656 "slave_skip_errors"
     SysVarData { go_file: "noop.go", go_line: 656, scope: ScopeNone, name: "slave_skip_errors", value: "OFF", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L657 "sql_slave_skip_counter"
+    // Go noop.go:L657 "sql_slave_skip_counter"
     SysVarData { go_file: "noop.go", go_line: 657, scope: ScopeGlobal, name: "sql_slave_skip_counter", value: "0", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L658 "rpl_semi_sync_slave_enabled"
+    // Go noop.go:L658 "rpl_semi_sync_slave_enabled"
     SysVarData { go_file: "noop.go", go_line: 658, scope: ScopeGlobal, name: "rpl_semi_sync_slave_enabled", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L659 "rpl_semi_sync_master_enabled"
+    // Go noop.go:L659 "rpl_semi_sync_master_enabled"
     SysVarData { go_file: "noop.go", go_line: 659, scope: ScopeGlobal, name: "rpl_semi_sync_master_enabled", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L660 "slave_preserve_commit_order"
+    // Go noop.go:L660 "slave_preserve_commit_order"
     SysVarData { go_file: "noop.go", go_line: 660, scope: ScopeGlobal, name: "slave_preserve_commit_order", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L661 "slave_exec_mode"
+    // Go noop.go:L661 "slave_exec_mode"
     SysVarData { go_file: "noop.go", go_line: 661, scope: ScopeGlobal, name: "slave_exec_mode", value: "STRICT", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L662 "log_slave_updates"
+    // Go noop.go:L662 "log_slave_updates"
     SysVarData { go_file: "noop.go", go_line: 662, scope: ScopeNone, name: "log_slave_updates", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L663 "rpl_semi_sync_master_wait_point"
+    // Go noop.go:L663 "rpl_semi_sync_master_wait_point"
     SysVarData { go_file: "noop.go", go_line: 663, scope: ScopeGlobal, name: "rpl_semi_sync_master_wait_point", value: "AFTER_SYNC", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["AFTER_SYNC", "AFTER_COMMIT"], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L664 "slave_sql_verify_checksum"
+    // Go noop.go:L664 "slave_sql_verify_checksum"
     SysVarData { go_file: "noop.go", go_line: 664, scope: ScopeGlobal, name: "slave_sql_verify_checksum", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L665 "slave_max_allowed_packet"
+    // Go noop.go:L665 "slave_max_allowed_packet"
     SysVarData { go_file: "noop.go", go_line: 665, scope: ScopeGlobal, name: "slave_max_allowed_packet", value: "1073741824", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L666 "rpl_semi_sync_master_wait_for_slave_count"
+    // Go noop.go:L666 "rpl_semi_sync_master_wait_for_slave_count"
     SysVarData { go_file: "noop.go", go_line: 666, scope: ScopeGlobal, name: "rpl_semi_sync_master_wait_for_slave_count", value: "1", computed: None, typ: TypeInt, min_value: 1, max_value: 65535, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L667 "rpl_semi_sync_master_wait_no_slave"
+    // Go noop.go:L667 "rpl_semi_sync_master_wait_no_slave"
     SysVarData { go_file: "noop.go", go_line: 667, scope: ScopeGlobal, name: "rpl_semi_sync_master_wait_no_slave", value: "ON", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L668 "slave_rows_search_algorithms"
+    // Go noop.go:L668 "slave_rows_search_algorithms"
     SysVarData { go_file: "noop.go", go_line: 668, scope: ScopeGlobal, name: "slave_rows_search_algorithms", value: "TABLE_SCAN,INDEX_SCAN", computed: None, typ: TypeFlag(0), min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
-    // go: noop.go:L669 SlaveAllowBatching
+    // Go noop.go:L669 SlaveAllowBatching
     SysVarData { go_file: "noop.go", go_line: 669, scope: ScopeGlobal, name: "slave_allow_batching", value: "OFF", computed: None, typ: TypeBool, min_value: 0, max_value: 0, possible_values: &[], aliases: &[], global_config_name: "", flags: FLAG_IS_NOOP, hooks: 0 },
 ];

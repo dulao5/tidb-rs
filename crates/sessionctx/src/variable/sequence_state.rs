@@ -16,7 +16,9 @@ impl SequenceState {
     /// NewSequenceState creates a SequenceState.
     // go: NewSequenceState L1
     pub fn new() -> SequenceState {
-        SequenceState { latest_value_map: Mutex::new(HashMap::new()) }
+        SequenceState {
+            latest_value_map: Mutex::new(HashMap::new()),
+        }
     }
 
     /// UpdateState will update the last value of specified sequenceID in a session.
@@ -30,10 +32,10 @@ impl SequenceState {
     // go: SequenceState.GetLastValue L1
     pub fn get_last_value(&self, sequence_id: i64) -> (i64, bool, Result<(), tidb_base::Error>) {
         let m = self.latest_value_map.lock();
-        if !m.is_empty() {
-            if let Some(&last) = m.get(&sequence_id) {
-                return (last, false, Ok(()));
-            }
+        if !m.is_empty()
+            && let Some(&last) = m.get(&sequence_id)
+        {
+            return (last, false, Ok(()));
         }
         (0, true, Ok(()))
     }
