@@ -4,7 +4,11 @@
 
 - [x] 范围划分：276 → 237（tracker `rules.py`，分支 `govec/sessionvars-D05.2`）。
 - [x] spec（本目录 `spec.md`）。
-- [ ] 实现：尚未开始。`crates/sessionctx/src/variable/session.rs` 仍是 D05.1 的替身。
+- [x] T2（标量部分）：`rsgen -sessionvars` 从 Go 的 `NewSessionVars(nil)` 反射生成 `variable/session_fields.rs`：282 个标量字段（bool、整数、浮点、字符串、`time.Duration` 及以它们为底层类型的命名类型；嵌入的 `Concurrency`、`MemQuota`、`BatchSize` 等展开），带 Go 的注释和默认值。写路径的 11 个标量字段不生成（与 `rules.py` 的 X 一致，列表在生成器里）。`SessionVars` 替身通过 `Deref` 暴露这些字段，原来替身里重复的 5 个字段已删掉。
+  - govec `sessionvars` 领域，op `fresh`：Go 侧反射导出 282 个字段（浮点记 IEEE-754 位），Rust 侧 `scalar_strings()` 对比，0 条不一致。反证：把 `foreign_key_checks` 的默认值改成 false，回放报 1 条不一致。
+  - 其余 67 个非标量字段（map、指针、atomic、StmtCtx、TxnCtx、UserVars……）列在 `session_fields.rs` 末尾，待 T3/T6 手写。
+  - tracker 中 D05.2 尚未覆盖的 234 个函数登记为 pending 豁免（`govec/domains/sessionvars_pending.go`），随 T3–T7 逐步删减。
+- [ ] T3 起尚未开始。`session.rs` 仍是替身（加上了生成的标量字段）。
 
 分支：tidb-rs `block/D05.2-sessionvars`、tracker `govec/sessionvars-D05.2`，都叠在 D05.1 评审后续（#55 / tracker #26）上；它们合并后 rebase 到 main。
 
@@ -19,6 +23,13 @@
 7. govec `sessionvars` 领域、minelits、多种子、amd64 向量、反证；钩子清单的单元测试。
 8. 编译期断言（`Send` / `!Sync`）。
 
+## 下一步（交接）
+
+1. **T3**：在 `session.rs` 中加入 `globals: Arc<GlobalVarsSnapshot>`（桩：注册表默认值 + `SetSysVar` 的实例覆盖）和 `delta`，移植 `GetSystemVar`、`GetSessionOrGlobalSystemVar`、`SetSystemVar*`、`*FromHook`、`SetSystemVarWithOldValAsRet`；`systems` map 换成 delta + 快照。SET GLOBAL：校验后报"不支持"（owner issue #58，按 (a) 推进）。
+2. **T4**：按 `data/sysvar_hooks.tsv` 移植 SetSession / GetSession 钩子到 `session_hooks.rs`，tsv 加处置列。govec 加 op `set`：SET 后导出 `fresh` 同样的标量字段，加上 `GetSystemVar`、warning。
+3. **T9 注意**：替身里的 `global_vars_accessor: Box<dyn GlobalVarAccessor>` 不是 `Send`，加 `SessionVars: Send` 断言前要改成 `Box<dyn GlobalVarAccessor + Send>` 或换成 N8 的快照。
+4. 每完成一组函数，从 `sessionvars_pending.go` 删掉对应名字。
+
 ## 需要决定的事
 
-- **N8 §6 待定 1（SET GLOBAL）**：负责人尚未决定。spec 按建议 (a) 写。
+- **N8 §6 待定 1（SET GLOBAL）**：已开 owner issue tidb-rs #58，按建议 (a) 推进，不等决定。

@@ -2,7 +2,7 @@
 
 - [x] T0 范围划分（tracker rules.py：39 个写路径函数归 X）
 - [x] T1 spec / plan
-- [ ] T2 SessionVars 结构与 NewSessionVars（rsgen 生成字段）
+- [~] T2 SessionVars 结构与 NewSessionVars：标量 282 个已生成并用 govec `fresh` 验证；非标量 67 个待手写
 - [ ] T3 系统变量存取（globals 快照桩、delta、Get/Set、FromHook、OldValAsRet）；替换 session.rs 替身
 - [ ] T4 SetSession / GetSession 钩子（300 个），sysvar_hooks.tsv 加处置列
 - [ ] T5 SetGlobal / GetGlobal / GetStateValue 钩子（295 个）
