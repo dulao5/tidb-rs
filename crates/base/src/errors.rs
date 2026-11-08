@@ -2,6 +2,7 @@
 //! parts of `pingcap/errors` that TiDB relies on (mapping rule `M-ERR`).
 //!
 //! go-file: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee/normalize.go
+//! go-file: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee/compatible_shim.go
 //! go-file: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee/errors.go
 //!
 //! Go TiDB returns the `error` interface everywhere; almost all values are `*errors.Error`
@@ -31,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::gofmt::{self, Arg};
+use crate::gostd::json::{self, DecodeError, Decoder, Raw};
 
 /// `ErrCode` represents a specific error type in a error class.
 /// Same error code can be used in different error classes.
@@ -575,5 +577,117 @@ impl PartialEq for Error {
     // glue: Rust equality = errors.ErrorEqual
     fn eq(&self, other: &Self) -> bool {
         error_equal(Some(self), Some(other))
+    }
+}
+
+impl Default for Error {
+    /// Go's zero value `errors.Error{}`: what `json.Unmarshal` allocates for a nil
+    /// `*terror.Error` field before calling `UnmarshalJSON`.
+    // glue: Go zero value of errors.Error
+    fn default() -> Error {
+        Error::empty(Kind::Normalized, Cow::Borrowed(b""))
+    }
+}
+
+/// `class2RFCCode`: the error classes of old TiDB versions (the deprecated `class` field of
+/// the JSON form) and their RFC component names.
+static class2RFCCode: &[(isize, &str)] = &[
+    (1, "autoid"),
+    (2, "ddl"),
+    (3, "domain"),
+    (4, "evaluator"),
+    (5, "executor"),
+    (6, "expression"),
+    (7, "admin"),
+    (8, "kv"),
+    (9, "meta"),
+    (10, "planner"),
+    (11, "parser"),
+    (12, "perfschema"),
+    (13, "privilege"),
+    (14, "schema"),
+    (15, "server"),
+    (16, "struct"),
+    (17, "variable"),
+    (18, "xeval"),
+    (19, "table"),
+    (20, "types"),
+    (21, "global"),
+    (22, "mocktikv"),
+    (23, "json"),
+    (24, "tikv"),
+    (25, "session"),
+    (26, "plugin"),
+    (27, "util"),
+];
+
+/// The field names of `jsonError` (`class`, `code`, `message`, `rfccode`).
+const JSON_ERROR_FIELDS: &[&str] = &["class", "code", "message", "rfccode"];
+
+impl Error {
+    /// `MarshalJSON`: `json.Marshal(&jsonError{Class, Code, Msg: GetMsg(), RFCCode})`, where
+    /// `Class` is `rfcCode2class` of the RFC code's component (0 when unknown). The
+    /// "registered" state is not kept, as in Go.
+    // go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Error.MarshalJSON L1
+    pub fn marshal_json(&self) -> String {
+        let ec = self.code_text.split(':').next().unwrap_or_default();
+        let class = class2RFCCode
+            .iter()
+            .find(|(_, v)| *v == ec)
+            .map_or(0, |(k, _)| *k);
+        let mut out = format!("{{\"class\":{class},\"code\":{},\"message\":", self.code);
+        json::append_go_string(&mut out, &self.get_msg());
+        out.push_str(",\"rfccode\":");
+        json::append_string(&mut out, &self.code_text);
+        out.push('}');
+        out
+    }
+
+    /// `UnmarshalJSON` of the JSON value `v`: decodes a fresh `jsonError` (a type error in it
+    /// is returned through `errors.Trace`, so an enclosing decoder adds no error context),
+    /// then sets the code text (built from the deprecated class when `rfccode` is empty), the
+    /// code and the message; the other fields are left as they are.
+    ///
+    /// `null` panics: Go decodes it into `&tErr`, which makes `tErr` nil before `tErr.RFCCode`
+    /// is read. `encoding/json` never calls it with `null` for a `*terror.Error` (it sets the
+    /// pointer to nil instead).
+    // go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Error.UnmarshalJSON L1 [M-PANIC]
+    pub fn unmarshal_json_raw(&mut self, v: &Raw) -> Result<(), DecodeError> {
+        if let Raw::Null = v {
+            panic!("runtime error: invalid memory address or nil pointer dereference");
+        }
+        let (mut class, mut code) = (0i64, 0i64);
+        let (mut msg, mut rfc) = (String::new(), String::new());
+        let mut d = Decoder::new();
+        let (lo, hi) = (isize::MIN as i64, isize::MAX as i64);
+        d.object(
+            v,
+            "jsonError",
+            "errors.jsonError",
+            JSON_ERROR_FIELDS,
+            |d, i, v| match i {
+                0 => d.int(v, &mut class, lo, hi, "int"),
+                1 => d.int(v, &mut code, lo, hi, "int"),
+                2 => d.string(v, &mut msg),
+                3 => d.string(v, &mut rfc),
+                _ => {}
+            },
+        );
+        if let Err(e) = d.finish() {
+            return Err(DecodeError::Other(e.to_string()));
+        }
+        let mut code_text = rfc;
+        if code_text.is_empty() && class > 0 {
+            let c = class2RFCCode
+                .iter()
+                .find(|(k, _)| *k as i64 == class)
+                .map_or("", |(_, v)| v);
+            code_text = format!("{c}:{code}");
+        }
+        self.kind = Kind::Normalized;
+        self.code_text = Cow::Owned(code_text);
+        self.code = code as ErrCode;
+        self.message = Cow::Owned(msg.into_bytes());
+        Ok(())
     }
 }

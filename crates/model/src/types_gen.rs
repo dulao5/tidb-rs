@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use tidb_base::Error;
 use tidb_base::gostd::json::{self, Decoder, Raw};
 use tidb_base::gostd::time::Time;
+use tidb_base::mysql::SQLMode;
 use tidb_parser::auth::UserIdentity;
 use tidb_parser::model::{
     CIStr, ColumnChoice, IndexType, PartitionType, RunawayActionType, RunawayWatchType,
@@ -8427,6 +8428,2417 @@ impl StatsLoadItem {
     }
 }
 
+/// Go `model.Job`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Job {
+    /// json: `id`
+    pub id: i64,
+    /// json: `type`
+    pub type_: ActionType,
+    /// json: `schema_id`
+    pub schema_id: i64,
+    /// json: `table_id`
+    pub table_id: i64,
+    /// json: `schema_name`
+    pub schema_name: String,
+    /// json: `table_name`
+    pub table_name: String,
+    /// json: `state`
+    pub state: JobState,
+    /// json: `warning`
+    pub warning: Option<Error>,
+    /// json: `err`
+    pub error: Option<Error>,
+    /// json: `err_count`
+    pub error_count: i64,
+    /// json: `row_count`
+    pub row_count: i64,
+    /// json: `-`
+    pub need_reorg: bool,
+    /// json: `raw_args`
+    pub raw_args: Option<Vec<u8>>,
+    /// json: `schema_state`
+    pub schema_state: SchemaState,
+    /// json: `snapshot_ver`
+    pub snapshot_ver: u64,
+    /// json: `real_start_ts`
+    pub real_start_ts: u64,
+    /// json: `start_ts`
+    pub start_ts: u64,
+    /// json: `dependency_id`
+    pub dependency_id: i64,
+    /// json: `query`
+    pub query: String,
+    /// json: `binlog`
+    pub binlog_info: Option<Box<HistoryInfo>>,
+    /// json: `version`
+    pub version: JobVersion,
+    /// json: `reorg_meta`
+    pub reorg_meta: Option<Box<DDLReorgMeta>>,
+    /// json: `multi_schema_info`
+    pub multi_schema_info: Option<Box<MultiSchemaInfo>>,
+    /// json: `priority`
+    pub priority: isize,
+    /// json: `seq_num`
+    pub seq_num: u64,
+    /// json: `charset`
+    pub charset: String,
+    /// json: `collate`
+    pub collate: String,
+    /// json: `involving_schema_info,omitempty`
+    pub involving_schema_info: Option<Vec<InvolvingSchemaInfo>>,
+    /// json: `admin_operator`
+    pub admin_operator: AdminCommandOperator,
+    /// json: `trace_info`
+    pub trace_info: Option<Box<TraceInfo>>,
+    /// json: `bdr_role`
+    pub bdr_role: String,
+    /// json: `cdc_write_source`
+    pub cdc_write_source: u64,
+    /// json: `local_mode`
+    pub local_mode: bool,
+    /// json: `sql_mode`
+    pub sql_mode: SQLMode,
+    /// json: `session_vars,omitempty`
+    pub session_vars: Option<BTreeMap<String, String>>,
+}
+
+impl GoCopy for Job {
+    // glue: Go struct copy of model.Job (generated)
+    fn go_copy(&self) -> Self {
+        Self {
+            id: self.id.go_copy(),
+            type_: self.type_.go_copy(),
+            schema_id: self.schema_id.go_copy(),
+            table_id: self.table_id.go_copy(),
+            schema_name: self.schema_name.go_copy(),
+            table_name: self.table_name.go_copy(),
+            state: self.state.go_copy(),
+            warning: self.warning.go_copy(),
+            error: self.error.go_copy(),
+            error_count: self.error_count.go_copy(),
+            row_count: self.row_count.go_copy(),
+            need_reorg: self.need_reorg.go_copy(),
+            raw_args: self.raw_args.go_copy(),
+            schema_state: self.schema_state.go_copy(),
+            snapshot_ver: self.snapshot_ver.go_copy(),
+            real_start_ts: self.real_start_ts.go_copy(),
+            start_ts: self.start_ts.go_copy(),
+            dependency_id: self.dependency_id.go_copy(),
+            query: self.query.go_copy(),
+            binlog_info: self.binlog_info.go_copy(),
+            version: self.version.go_copy(),
+            reorg_meta: self.reorg_meta.go_copy(),
+            multi_schema_info: self.multi_schema_info.go_copy(),
+            priority: self.priority.go_copy(),
+            seq_num: self.seq_num.go_copy(),
+            charset: self.charset.go_copy(),
+            collate: self.collate.go_copy(),
+            involving_schema_info: self.involving_schema_info.go_copy(),
+            admin_operator: self.admin_operator.go_copy(),
+            trace_info: self.trace_info.go_copy(),
+            bdr_role: self.bdr_role.go_copy(),
+            cdc_write_source: self.cdc_write_source.go_copy(),
+            local_mode: self.local_mode.go_copy(),
+            sql_mode: self.sql_mode.go_copy(),
+            session_vars: self.session_vars.go_copy(),
+        }
+    }
+}
+
+impl Job {
+    /// The encoding/json field names (`cachedTypeFields`), in encoding order.
+    pub const JSON_FIELDS: &'static [&'static str] = &[
+        "id",
+        "type",
+        "schema_id",
+        "table_id",
+        "schema_name",
+        "table_name",
+        "state",
+        "warning",
+        "err",
+        "err_count",
+        "row_count",
+        "raw_args",
+        "schema_state",
+        "snapshot_ver",
+        "real_start_ts",
+        "start_ts",
+        "dependency_id",
+        "query",
+        "binlog",
+        "version",
+        "reorg_meta",
+        "multi_schema_info",
+        "priority",
+        "seq_num",
+        "charset",
+        "collate",
+        "involving_schema_info",
+        "admin_operator",
+        "trace_info",
+        "bdr_role",
+        "cdc_write_source",
+        "local_mode",
+        "sql_mode",
+        "session_vars",
+    ];
+
+    /// `json.Marshal` of the struct (encoding/json's struct encoder).
+    // glue: encoding/json structEncoder of model.Job (generated)
+    pub fn encode_json(&self, out: &mut String) -> Result<(), Error> {
+        let mut first = true;
+        out.push('{');
+        {
+            let v472 = &self.id;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"id\":");
+                out.push_str(&(*v472).to_string());
+            }
+        }
+        {
+            let v473 = &self.type_;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"type\":");
+                out.push_str(&(v473.0).to_string());
+            }
+        }
+        {
+            let v474 = &self.schema_id;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"schema_id\":");
+                out.push_str(&(*v474).to_string());
+            }
+        }
+        {
+            let v475 = &self.table_id;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"table_id\":");
+                out.push_str(&(*v475).to_string());
+            }
+        }
+        {
+            let v476 = &self.schema_name;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"schema_name\":");
+                json::append_string(out, v476);
+            }
+        }
+        {
+            let v477 = &self.table_name;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"table_name\":");
+                json::append_string(out, v477);
+            }
+        }
+        {
+            let v478 = &self.state;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"state\":");
+                out.push_str(&(v478.0).to_string());
+            }
+        }
+        {
+            let v479 = &self.warning;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"warning\":");
+                match v479 {
+                    None => out.push_str("null"),
+                    Some(p480) => out.push_str(&p480.marshal_json()),
+                }
+            }
+        }
+        {
+            let v481 = &self.error;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"err\":");
+                match v481 {
+                    None => out.push_str("null"),
+                    Some(p482) => out.push_str(&p482.marshal_json()),
+                }
+            }
+        }
+        {
+            let v483 = &self.error_count;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"err_count\":");
+                out.push_str(&(*v483).to_string());
+            }
+        }
+        {
+            let v484 = &self.row_count;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"row_count\":");
+                out.push_str(&(*v484).to_string());
+            }
+        }
+        {
+            let v485 = &self.raw_args;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"raw_args\":");
+                json::append_raw_message(out, v485).map_err(Error::plain)?;
+            }
+        }
+        {
+            let v486 = &self.schema_state;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"schema_state\":");
+                out.push_str(&(v486.0).to_string());
+            }
+        }
+        {
+            let v487 = &self.snapshot_ver;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"snapshot_ver\":");
+                out.push_str(&(*v487).to_string());
+            }
+        }
+        {
+            let v488 = &self.real_start_ts;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"real_start_ts\":");
+                out.push_str(&(*v488).to_string());
+            }
+        }
+        {
+            let v489 = &self.start_ts;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"start_ts\":");
+                out.push_str(&(*v489).to_string());
+            }
+        }
+        {
+            let v490 = &self.dependency_id;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"dependency_id\":");
+                out.push_str(&(*v490).to_string());
+            }
+        }
+        {
+            let v491 = &self.query;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"query\":");
+                json::append_string(out, v491);
+            }
+        }
+        {
+            let v492 = &self.binlog_info;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"binlog\":");
+                match v492 {
+                    None => out.push_str("null"),
+                    Some(p493) => {
+                        let p493: &HistoryInfo = p493;
+                        p493.encode_json(out)?;
+                    }
+                }
+            }
+        }
+        {
+            let v494 = &self.version;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"version\":");
+                out.push_str(&(v494.0).to_string());
+            }
+        }
+        {
+            let v495 = &self.reorg_meta;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"reorg_meta\":");
+                match v495 {
+                    None => out.push_str("null"),
+                    Some(p496) => {
+                        let p496: &DDLReorgMeta = p496;
+                        p496.encode_json(out)?;
+                    }
+                }
+            }
+        }
+        {
+            let v497 = &self.multi_schema_info;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"multi_schema_info\":");
+                match v497 {
+                    None => out.push_str("null"),
+                    Some(p498) => {
+                        let p498: &MultiSchemaInfo = p498;
+                        p498.encode_json(out)?;
+                    }
+                }
+            }
+        }
+        {
+            let v499 = &self.priority;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"priority\":");
+                out.push_str(&(*v499).to_string());
+            }
+        }
+        {
+            let v500 = &self.seq_num;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"seq_num\":");
+                out.push_str(&(*v500).to_string());
+            }
+        }
+        {
+            let v501 = &self.charset;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"charset\":");
+                json::append_string(out, v501);
+            }
+        }
+        {
+            let v502 = &self.collate;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"collate\":");
+                json::append_string(out, v502);
+            }
+        }
+        {
+            let v503 = &self.involving_schema_info;
+            if !(v503.as_ref().is_none_or(|x| x.is_empty())) {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"involving_schema_info\":");
+                match v503 {
+                    None => out.push_str("null"),
+                    Some(a504) => {
+                        out.push('[');
+                        for (i505, x506) in a504.iter().enumerate() {
+                            if i505 > 0 {
+                                out.push(',');
+                            }
+                            x506.encode_json(out)?;
+                        }
+                        out.push(']');
+                    }
+                }
+            }
+        }
+        {
+            let v507 = &self.admin_operator;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"admin_operator\":");
+                out.push_str(&(v507.0).to_string());
+            }
+        }
+        {
+            let v508 = &self.trace_info;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"trace_info\":");
+                match v508 {
+                    None => out.push_str("null"),
+                    Some(p509) => {
+                        let p509: &TraceInfo = p509;
+                        p509.encode_json(out)?;
+                    }
+                }
+            }
+        }
+        {
+            let v510 = &self.bdr_role;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"bdr_role\":");
+                json::append_string(out, v510);
+            }
+        }
+        {
+            let v511 = &self.cdc_write_source;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"cdc_write_source\":");
+                out.push_str(&(*v511).to_string());
+            }
+        }
+        {
+            let v512 = &self.local_mode;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"local_mode\":");
+                out.push_str(if *v512 { "true" } else { "false" });
+            }
+        }
+        {
+            let v513 = &self.sql_mode;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"sql_mode\":");
+                out.push_str(&(v513.0).to_string());
+            }
+        }
+        {
+            let v514 = &self.session_vars;
+            if !(v514.as_ref().is_none_or(|x| x.is_empty())) {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"session_vars\":");
+                match v514 {
+                    None => out.push_str("null"),
+                    Some(m515) => {
+                        let mut kv516: Vec<(String, &String)> = m515
+                            .iter()
+                            .map(|(k518, x519)| (k518.clone(), x519))
+                            .collect();
+                        kv516.sort_by(|a, b| a.0.cmp(&b.0));
+                        out.push('{');
+                        for (i517, (k518, x519)) in kv516.iter().enumerate() {
+                            if i517 > 0 {
+                                out.push(',');
+                            }
+                            json::append_string(out, k518);
+                            out.push(':');
+                            let x519: &String = x519;
+                            json::append_string(out, x519);
+                        }
+                        out.push('}');
+                    }
+                }
+            }
+        }
+        let _ = first;
+        out.push('}');
+        Ok(())
+    }
+
+    /// `json.Unmarshal` into the struct (encoding/json's object decoder): decodes into the
+    /// existing value, missing members leave fields unchanged.
+    // glue: encoding/json decodeState.object for model.Job (generated)
+    pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
+        d.object(
+            v,
+            "Job",
+            "model.Job",
+            Self::JSON_FIELDS,
+            |d, i, v| match i {
+                0 => {
+                    d.int(v, &mut self.id, i64::MIN, i64::MAX, "int64");
+                }
+                1 => {
+                    let mut n = self.type_.0 as u64;
+                    d.uint(v, &mut n, u8::MAX as u64, "model.ActionType");
+                    self.type_.0 = n as _;
+                }
+                2 => {
+                    d.int(v, &mut self.schema_id, i64::MIN, i64::MAX, "int64");
+                }
+                3 => {
+                    d.int(v, &mut self.table_id, i64::MIN, i64::MAX, "int64");
+                }
+                4 => {
+                    d.string(v, &mut self.schema_name);
+                }
+                5 => {
+                    d.string(v, &mut self.table_name);
+                }
+                6 => {
+                    let mut n = self.state.0 as i64;
+                    d.int(
+                        v,
+                        &mut n,
+                        i32::MIN as i64,
+                        i32::MAX as i64,
+                        "model.JobState",
+                    );
+                    self.state.0 = n as _;
+                }
+                7 => match v {
+                    Raw::Null => self.warning = None,
+                    _ => {
+                        let p520 = self.warning.get_or_insert_with(Default::default);
+                        if let Err(e) = p520.unmarshal_json_raw(v) {
+                            d.fail(e);
+                        }
+                    }
+                },
+                8 => match v {
+                    Raw::Null => self.error = None,
+                    _ => {
+                        let p521 = self.error.get_or_insert_with(Default::default);
+                        if let Err(e) = p521.unmarshal_json_raw(v) {
+                            d.fail(e);
+                        }
+                    }
+                },
+                9 => {
+                    d.int(v, &mut self.error_count, i64::MIN, i64::MAX, "int64");
+                }
+                10 => {
+                    d.int(v, &mut self.row_count, i64::MIN, i64::MAX, "int64");
+                }
+                11 => {
+                    d.raw_message(v, &mut self.raw_args);
+                }
+                12 => {
+                    let mut n = self.schema_state.0 as u64;
+                    d.uint(v, &mut n, u8::MAX as u64, "model.SchemaState");
+                    self.schema_state.0 = n as _;
+                }
+                13 => {
+                    d.uint(v, &mut self.snapshot_ver, u64::MAX, "uint64");
+                }
+                14 => {
+                    d.uint(v, &mut self.real_start_ts, u64::MAX, "uint64");
+                }
+                15 => {
+                    d.uint(v, &mut self.start_ts, u64::MAX, "uint64");
+                }
+                16 => {
+                    d.int(v, &mut self.dependency_id, i64::MIN, i64::MAX, "int64");
+                }
+                17 => {
+                    d.string(v, &mut self.query);
+                }
+                18 => match v {
+                    Raw::Null => self.binlog_info = None,
+                    _ => {
+                        let p522 = self.binlog_info.get_or_insert_with(Default::default);
+                        p522.decode_json(d, v);
+                    }
+                },
+                19 => {
+                    d.int(
+                        v,
+                        &mut self.version.0,
+                        i64::MIN,
+                        i64::MAX,
+                        "model.JobVersion",
+                    );
+                }
+                20 => match v {
+                    Raw::Null => self.reorg_meta = None,
+                    _ => {
+                        let p523 = self.reorg_meta.get_or_insert_with(Default::default);
+                        p523.decode_json(d, v);
+                    }
+                },
+                21 => match v {
+                    Raw::Null => self.multi_schema_info = None,
+                    _ => {
+                        let p524 = self.multi_schema_info.get_or_insert_with(Default::default);
+                        p524.decode_json(d, v);
+                    }
+                },
+                22 => {
+                    let mut n = self.priority as i64;
+                    d.int(v, &mut n, isize::MIN as i64, isize::MAX as i64, "int");
+                    self.priority = n as _;
+                }
+                23 => {
+                    d.uint(v, &mut self.seq_num, u64::MAX, "uint64");
+                }
+                24 => {
+                    d.string(v, &mut self.charset);
+                }
+                25 => {
+                    d.string(v, &mut self.collate);
+                }
+                26 => {
+                    d.slice(
+                        v,
+                        &mut self.involving_schema_info,
+                        "[]model.InvolvingSchemaInfo",
+                        |d, v, x: &mut InvolvingSchemaInfo| {
+                            (*x).decode_json(d, v);
+                        },
+                    );
+                }
+                27 => {
+                    let mut n = self.admin_operator.0 as i64;
+                    d.int(
+                        v,
+                        &mut n,
+                        isize::MIN as i64,
+                        isize::MAX as i64,
+                        "model.AdminCommandOperator",
+                    );
+                    self.admin_operator.0 = n as _;
+                }
+                28 => match v {
+                    Raw::Null => self.trace_info = None,
+                    _ => {
+                        let p525 = self.trace_info.get_or_insert_with(Default::default);
+                        p525.decode_json(d, v);
+                    }
+                },
+                29 => {
+                    d.string(v, &mut self.bdr_role);
+                }
+                30 => {
+                    d.uint(v, &mut self.cdc_write_source, u64::MAX, "uint64");
+                }
+                31 => {
+                    d.bool(v, &mut self.local_mode);
+                }
+                32 => {
+                    d.int(v, &mut self.sql_mode.0, i64::MIN, i64::MAX, "mysql.SQLMode");
+                }
+                33 => {
+                    d.map(
+                        v,
+                        &mut self.session_vars,
+                        "map[string]string",
+                        |_, k| Some(k.to_owned()),
+                        |d, v, x: &mut String| {
+                            d.string(v, &mut (*x));
+                        },
+                    );
+                }
+                _ => {}
+            },
+        );
+    }
+
+    /// `json.Marshal(x)`.
+    // glue: json.Marshal of model.Job (generated)
+    pub fn marshal_json(&self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.encode_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// `json.Unmarshal(data, x)`: a syntax error changes nothing; otherwise the first error.
+    // glue: json.Unmarshal into model.Job (generated)
+    pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        let mut d = Decoder::with_source(data);
+        self.decode_json(&mut d, &v);
+        d.finish().map_err(|e| Error::plain(e.to_string()))
+    }
+}
+
+/// Go `model.HistoryInfo`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HistoryInfo {
+    pub schema_version: i64,
+    pub db_info: Option<Box<DBInfo>>,
+    pub table_info: Option<Box<TableInfo>>,
+    pub finished_ts: u64,
+    pub multiple_table_infos: Option<Vec<TableInfo>>,
+}
+
+impl GoCopy for HistoryInfo {
+    // glue: Go struct copy of model.HistoryInfo (generated)
+    fn go_copy(&self) -> Self {
+        Self {
+            schema_version: self.schema_version.go_copy(),
+            db_info: self.db_info.go_copy(),
+            table_info: self.table_info.go_copy(),
+            finished_ts: self.finished_ts.go_copy(),
+            multiple_table_infos: self.multiple_table_infos.go_copy(),
+        }
+    }
+}
+
+impl HistoryInfo {
+    /// The encoding/json field names (`cachedTypeFields`), in encoding order.
+    pub const JSON_FIELDS: &'static [&'static str] = &[
+        "SchemaVersion",
+        "DBInfo",
+        "TableInfo",
+        "FinishedTS",
+        "MultipleTableInfos",
+    ];
+
+    /// `json.Marshal` of the struct (encoding/json's struct encoder).
+    // glue: encoding/json structEncoder of model.HistoryInfo (generated)
+    pub fn encode_json(&self, out: &mut String) -> Result<(), Error> {
+        let mut first = true;
+        out.push('{');
+        {
+            let v526 = &self.schema_version;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"SchemaVersion\":");
+                out.push_str(&(*v526).to_string());
+            }
+        }
+        {
+            let v527 = &self.db_info;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"DBInfo\":");
+                match v527 {
+                    None => out.push_str("null"),
+                    Some(p528) => {
+                        let p528: &DBInfo = p528;
+                        p528.encode_json(out)?;
+                    }
+                }
+            }
+        }
+        {
+            let v529 = &self.table_info;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"TableInfo\":");
+                match v529 {
+                    None => out.push_str("null"),
+                    Some(p530) => {
+                        let p530: &TableInfo = p530;
+                        p530.encode_json(out)?;
+                    }
+                }
+            }
+        }
+        {
+            let v531 = &self.finished_ts;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"FinishedTS\":");
+                out.push_str(&(*v531).to_string());
+            }
+        }
+        {
+            let v532 = &self.multiple_table_infos;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"MultipleTableInfos\":");
+                match v532 {
+                    None => out.push_str("null"),
+                    Some(a533) => {
+                        out.push('[');
+                        for (i534, x535) in a533.iter().enumerate() {
+                            if i534 > 0 {
+                                out.push(',');
+                            }
+                            x535.encode_json(out)?;
+                        }
+                        out.push(']');
+                    }
+                }
+            }
+        }
+        let _ = first;
+        out.push('}');
+        Ok(())
+    }
+
+    /// `json.Unmarshal` into the struct (encoding/json's object decoder): decodes into the
+    /// existing value, missing members leave fields unchanged.
+    // glue: encoding/json decodeState.object for model.HistoryInfo (generated)
+    pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
+        d.object(
+            v,
+            "HistoryInfo",
+            "model.HistoryInfo",
+            Self::JSON_FIELDS,
+            |d, i, v| match i {
+                0 => {
+                    d.int(v, &mut self.schema_version, i64::MIN, i64::MAX, "int64");
+                }
+                1 => match v {
+                    Raw::Null => self.db_info = None,
+                    _ => {
+                        let p536 = self.db_info.get_or_insert_with(Default::default);
+                        p536.decode_json(d, v);
+                    }
+                },
+                2 => match v {
+                    Raw::Null => self.table_info = None,
+                    _ => {
+                        let p537 = self.table_info.get_or_insert_with(Default::default);
+                        p537.decode_json(d, v);
+                    }
+                },
+                3 => {
+                    d.uint(v, &mut self.finished_ts, u64::MAX, "uint64");
+                }
+                4 => {
+                    d.slice(
+                        v,
+                        &mut self.multiple_table_infos,
+                        "[]*model.TableInfo",
+                        |d, v, x: &mut TableInfo| {
+                            if let Raw::Null = v {
+                                *x = Default::default();
+                                return;
+                            }
+                            (*x).decode_json(d, v);
+                        },
+                    );
+                }
+                _ => {}
+            },
+        );
+    }
+
+    /// `json.Marshal(x)`.
+    // glue: json.Marshal of model.HistoryInfo (generated)
+    pub fn marshal_json(&self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.encode_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// `json.Unmarshal(data, x)`: a syntax error changes nothing; otherwise the first error.
+    // glue: json.Unmarshal into model.HistoryInfo (generated)
+    pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        let mut d = Decoder::new();
+        self.decode_json(&mut d, &v);
+        d.finish().map_err(|e| Error::plain(e.to_string()))
+    }
+}
+
+/// Go `model.DDLReorgMeta`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DDLReorgMeta {
+    /// json: `sql_mode`
+    pub sql_mode: SQLMode,
+    /// json: `warnings`
+    pub warnings: Option<BTreeMap<String, Option<Error>>>,
+    /// json: `warnings_count`
+    pub warnings_count: Option<BTreeMap<String, i64>>,
+    /// json: `location`
+    pub location: Option<Box<TimeZoneLocation>>,
+    /// json: `reorg_tp`
+    pub reorg_tp: ReorgType,
+    /// json: `is_fast_reorg`
+    pub is_fast_reorg: bool,
+    /// json: `is_dist_reorg`
+    pub is_dist_reorg: bool,
+    /// json: `use_cloud_storage`
+    pub use_cloud_storage: bool,
+    /// json: `resource_group_name`
+    pub resource_group_name: String,
+    /// json: `version`
+    pub version: i64,
+    /// json: `target_scope`
+    pub target_scope: String,
+    /// json: `analyze_state`
+    pub analyze_state: i8,
+    /// json: `stage`
+    pub stage: ReorgStage,
+    /// json: `max_node_count`
+    pub max_node_count: isize,
+    /// json: `concurrency`
+    pub concurrency: i64,
+    /// json: `batch_size`
+    pub batch_size: i64,
+    /// json: `max_write_speed`
+    pub max_write_speed: i64,
+}
+
+impl GoCopy for DDLReorgMeta {
+    // glue: Go struct copy of model.DDLReorgMeta (generated)
+    fn go_copy(&self) -> Self {
+        Self {
+            sql_mode: self.sql_mode.go_copy(),
+            warnings: self.warnings.go_copy(),
+            warnings_count: self.warnings_count.go_copy(),
+            location: self.location.go_copy(),
+            reorg_tp: self.reorg_tp.go_copy(),
+            is_fast_reorg: self.is_fast_reorg.go_copy(),
+            is_dist_reorg: self.is_dist_reorg.go_copy(),
+            use_cloud_storage: self.use_cloud_storage.go_copy(),
+            resource_group_name: self.resource_group_name.go_copy(),
+            version: self.version.go_copy(),
+            target_scope: self.target_scope.go_copy(),
+            analyze_state: self.analyze_state.go_copy(),
+            stage: self.stage.go_copy(),
+            max_node_count: self.max_node_count.go_copy(),
+            concurrency: self.concurrency.go_copy(),
+            batch_size: self.batch_size.go_copy(),
+            max_write_speed: self.max_write_speed.go_copy(),
+        }
+    }
+}
+
+impl DDLReorgMeta {
+    /// The encoding/json field names (`cachedTypeFields`), in encoding order.
+    pub const JSON_FIELDS: &'static [&'static str] = &[
+        "sql_mode",
+        "warnings",
+        "warnings_count",
+        "location",
+        "reorg_tp",
+        "is_fast_reorg",
+        "is_dist_reorg",
+        "use_cloud_storage",
+        "resource_group_name",
+        "version",
+        "target_scope",
+        "analyze_state",
+        "stage",
+        "max_node_count",
+        "concurrency",
+        "batch_size",
+        "max_write_speed",
+    ];
+
+    /// `json.Marshal` of the struct (encoding/json's struct encoder).
+    // glue: encoding/json structEncoder of model.DDLReorgMeta (generated)
+    pub fn encode_json(&self, out: &mut String) -> Result<(), Error> {
+        let mut first = true;
+        out.push('{');
+        {
+            let v538 = &self.sql_mode;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"sql_mode\":");
+                out.push_str(&(v538.0).to_string());
+            }
+        }
+        {
+            let v539 = &self.warnings;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"warnings\":");
+                match v539 {
+                    None => out.push_str("null"),
+                    Some(m540) => {
+                        let mut kv541: Vec<(String, &Option<Error>)> = m540
+                            .iter()
+                            .map(|(k543, x544)| (k543.clone(), x544))
+                            .collect();
+                        kv541.sort_by(|a, b| a.0.cmp(&b.0));
+                        out.push('{');
+                        for (i542, (k543, x544)) in kv541.iter().enumerate() {
+                            if i542 > 0 {
+                                out.push(',');
+                            }
+                            json::append_string(out, k543);
+                            out.push(':');
+                            let x544: &Option<Error> = x544;
+                            match x544 {
+                                None => out.push_str("null"),
+                                Some(p545) => out.push_str(&p545.marshal_json()),
+                            }
+                        }
+                        out.push('}');
+                    }
+                }
+            }
+        }
+        {
+            let v546 = &self.warnings_count;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"warnings_count\":");
+                match v546 {
+                    None => out.push_str("null"),
+                    Some(m547) => {
+                        let mut kv548: Vec<(String, &i64)> = m547
+                            .iter()
+                            .map(|(k550, x551)| (k550.clone(), x551))
+                            .collect();
+                        kv548.sort_by(|a, b| a.0.cmp(&b.0));
+                        out.push('{');
+                        for (i549, (k550, x551)) in kv548.iter().enumerate() {
+                            if i549 > 0 {
+                                out.push(',');
+                            }
+                            json::append_string(out, k550);
+                            out.push(':');
+                            let x551: &i64 = x551;
+                            out.push_str(&(*x551).to_string());
+                        }
+                        out.push('}');
+                    }
+                }
+            }
+        }
+        {
+            let v552 = &self.location;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"location\":");
+                match v552 {
+                    None => out.push_str("null"),
+                    Some(p553) => {
+                        let p553: &TimeZoneLocation = p553;
+                        p553.encode_json(out)?;
+                    }
+                }
+            }
+        }
+        {
+            let v554 = &self.reorg_tp;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"reorg_tp\":");
+                out.push_str(&(v554.0).to_string());
+            }
+        }
+        {
+            let v555 = &self.is_fast_reorg;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"is_fast_reorg\":");
+                out.push_str(if *v555 { "true" } else { "false" });
+            }
+        }
+        {
+            let v556 = &self.is_dist_reorg;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"is_dist_reorg\":");
+                out.push_str(if *v556 { "true" } else { "false" });
+            }
+        }
+        {
+            let v557 = &self.use_cloud_storage;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"use_cloud_storage\":");
+                out.push_str(if *v557 { "true" } else { "false" });
+            }
+        }
+        {
+            let v558 = &self.resource_group_name;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"resource_group_name\":");
+                json::append_string(out, v558);
+            }
+        }
+        {
+            let v559 = &self.version;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"version\":");
+                out.push_str(&(*v559).to_string());
+            }
+        }
+        {
+            let v560 = &self.target_scope;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"target_scope\":");
+                json::append_string(out, v560);
+            }
+        }
+        {
+            let v561 = &self.analyze_state;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"analyze_state\":");
+                out.push_str(&(*v561).to_string());
+            }
+        }
+        {
+            let v562 = &self.stage;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"stage\":");
+                out.push_str(&(v562.0).to_string());
+            }
+        }
+        {
+            let v563 = &self.max_node_count;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"max_node_count\":");
+                out.push_str(&(*v563).to_string());
+            }
+        }
+        {
+            let v564 = &self.concurrency;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"concurrency\":");
+                out.push_str(&(*v564).to_string());
+            }
+        }
+        {
+            let v565 = &self.batch_size;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"batch_size\":");
+                out.push_str(&(*v565).to_string());
+            }
+        }
+        {
+            let v566 = &self.max_write_speed;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"max_write_speed\":");
+                out.push_str(&(*v566).to_string());
+            }
+        }
+        let _ = first;
+        out.push('}');
+        Ok(())
+    }
+
+    /// `json.Unmarshal` into the struct (encoding/json's object decoder): decodes into the
+    /// existing value, missing members leave fields unchanged.
+    // glue: encoding/json decodeState.object for model.DDLReorgMeta (generated)
+    pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
+        d.object(
+            v,
+            "DDLReorgMeta",
+            "model.DDLReorgMeta",
+            Self::JSON_FIELDS,
+            |d, i, v| match i {
+                0 => {
+                    d.int(v, &mut self.sql_mode.0, i64::MIN, i64::MAX, "mysql.SQLMode");
+                }
+                1 => {
+                    d.map(
+                        v,
+                        &mut self.warnings,
+                        "map[errors.ErrorID]*errors.Error",
+                        |_, k| Some(k.to_owned()),
+                        |d, v, x: &mut Option<Error>| match v {
+                            Raw::Null => (*x) = None,
+                            _ => {
+                                let p567 = (*x).get_or_insert_with(Default::default);
+                                if let Err(e) = p567.unmarshal_json_raw(v) {
+                                    d.fail(e);
+                                }
+                            }
+                        },
+                    );
+                }
+                2 => {
+                    d.map(
+                        v,
+                        &mut self.warnings_count,
+                        "map[errors.ErrorID]int64",
+                        |_, k| Some(k.to_owned()),
+                        |d, v, x: &mut i64| {
+                            d.int(v, &mut (*x), i64::MIN, i64::MAX, "int64");
+                        },
+                    );
+                }
+                3 => match v {
+                    Raw::Null => self.location = None,
+                    _ => {
+                        let p568 = self.location.get_or_insert_with(Default::default);
+                        p568.decode_json(d, v);
+                    }
+                },
+                4 => {
+                    let mut n = self.reorg_tp.0 as i64;
+                    d.int(v, &mut n, i8::MIN as i64, i8::MAX as i64, "model.ReorgType");
+                    self.reorg_tp.0 = n as _;
+                }
+                5 => {
+                    d.bool(v, &mut self.is_fast_reorg);
+                }
+                6 => {
+                    d.bool(v, &mut self.is_dist_reorg);
+                }
+                7 => {
+                    d.bool(v, &mut self.use_cloud_storage);
+                }
+                8 => {
+                    d.string(v, &mut self.resource_group_name);
+                }
+                9 => {
+                    d.int(v, &mut self.version, i64::MIN, i64::MAX, "int64");
+                }
+                10 => {
+                    d.string(v, &mut self.target_scope);
+                }
+                11 => {
+                    let mut n = self.analyze_state as i64;
+                    d.int(v, &mut n, i8::MIN as i64, i8::MAX as i64, "int8");
+                    self.analyze_state = n as _;
+                }
+                12 => {
+                    let mut n = self.stage.0 as u64;
+                    d.uint(v, &mut n, u8::MAX as u64, "model.ReorgStage");
+                    self.stage.0 = n as _;
+                }
+                13 => {
+                    let mut n = self.max_node_count as i64;
+                    d.int(v, &mut n, isize::MIN as i64, isize::MAX as i64, "int");
+                    self.max_node_count = n as _;
+                }
+                14 => {
+                    let mut n = 0i64;
+                    let mut d2 = Decoder::new();
+                    d2.int(v, &mut n, i64::MIN, i64::MAX, "int64");
+                    match d2.finish() {
+                        Ok(()) => self.concurrency = n,
+                        Err(e) => d.fail(e),
+                    }
+                }
+                15 => {
+                    let mut n = 0i64;
+                    let mut d2 = Decoder::new();
+                    d2.int(v, &mut n, i64::MIN, i64::MAX, "int64");
+                    match d2.finish() {
+                        Ok(()) => self.batch_size = n,
+                        Err(e) => d.fail(e),
+                    }
+                }
+                16 => {
+                    let mut n = 0i64;
+                    let mut d2 = Decoder::new();
+                    d2.int(v, &mut n, i64::MIN, i64::MAX, "int64");
+                    match d2.finish() {
+                        Ok(()) => self.max_write_speed = n,
+                        Err(e) => d.fail(e),
+                    }
+                }
+                _ => {}
+            },
+        );
+    }
+
+    /// `json.Marshal(x)`.
+    // glue: json.Marshal of model.DDLReorgMeta (generated)
+    pub fn marshal_json(&self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.encode_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// `json.Unmarshal(data, x)`: a syntax error changes nothing; otherwise the first error.
+    // glue: json.Unmarshal into model.DDLReorgMeta (generated)
+    pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        let mut d = Decoder::new();
+        self.decode_json(&mut d, &v);
+        d.finish().map_err(|e| Error::plain(e.to_string()))
+    }
+}
+
+/// Go `model.TimeZoneLocation`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TimeZoneLocation {
+    /// json: `name`
+    pub name: String,
+    /// json: `offset`
+    pub offset: isize,
+}
+
+impl GoCopy for TimeZoneLocation {
+    // glue: Go struct copy of model.TimeZoneLocation (generated)
+    fn go_copy(&self) -> Self {
+        Self {
+            name: self.name.go_copy(),
+            offset: self.offset.go_copy(),
+        }
+    }
+}
+
+impl TimeZoneLocation {
+    /// The encoding/json field names (`cachedTypeFields`), in encoding order.
+    pub const JSON_FIELDS: &'static [&'static str] = &["name", "offset"];
+
+    /// `json.Marshal` of the struct (encoding/json's struct encoder).
+    // glue: encoding/json structEncoder of model.TimeZoneLocation (generated)
+    pub fn encode_json(&self, out: &mut String) -> Result<(), Error> {
+        let mut first = true;
+        out.push('{');
+        {
+            let v569 = &self.name;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"name\":");
+                json::append_string(out, v569);
+            }
+        }
+        {
+            let v570 = &self.offset;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"offset\":");
+                out.push_str(&(*v570).to_string());
+            }
+        }
+        let _ = first;
+        out.push('}');
+        Ok(())
+    }
+
+    /// `json.Unmarshal` into the struct (encoding/json's object decoder): decodes into the
+    /// existing value, missing members leave fields unchanged.
+    // glue: encoding/json decodeState.object for model.TimeZoneLocation (generated)
+    pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
+        d.object(
+            v,
+            "TimeZoneLocation",
+            "model.TimeZoneLocation",
+            Self::JSON_FIELDS,
+            |d, i, v| match i {
+                0 => {
+                    d.string(v, &mut self.name);
+                }
+                1 => {
+                    let mut n = self.offset as i64;
+                    d.int(v, &mut n, isize::MIN as i64, isize::MAX as i64, "int");
+                    self.offset = n as _;
+                }
+                _ => {}
+            },
+        );
+    }
+
+    /// `json.Marshal(x)`.
+    // glue: json.Marshal of model.TimeZoneLocation (generated)
+    pub fn marshal_json(&self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.encode_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// `json.Unmarshal(data, x)`: a syntax error changes nothing; otherwise the first error.
+    // glue: json.Unmarshal into model.TimeZoneLocation (generated)
+    pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        let mut d = Decoder::new();
+        self.decode_json(&mut d, &v);
+        d.finish().map_err(|e| Error::plain(e.to_string()))
+    }
+}
+
+/// Go `model.MultiSchemaInfo`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MultiSchemaInfo {
+    /// json: `sub_jobs`
+    pub sub_jobs: Option<Vec<SubJob>>,
+    /// json: `revertible`
+    pub revertible: bool,
+    /// json: `seq`
+    pub seq: i32,
+    /// json: `-`
+    pub skip_version: bool,
+    /// json: `-`
+    pub add_columns: Option<Vec<CIStr>>,
+    /// json: `-`
+    pub drop_columns: Option<Vec<CIStr>>,
+    /// json: `-`
+    pub modify_columns: Option<Vec<CIStr>>,
+    /// json: `-`
+    pub add_indexes: Option<Vec<CIStr>>,
+    /// json: `-`
+    pub drop_indexes: Option<Vec<CIStr>>,
+    /// json: `-`
+    pub alter_indexes: Option<Vec<CIStr>>,
+    /// json: `-`
+    pub add_foreign_keys: Option<Vec<AddForeignKeyInfo>>,
+    /// json: `-`
+    pub relative_columns: Option<Vec<CIStr>>,
+    /// json: `-`
+    pub position_columns: Option<Vec<CIStr>>,
+}
+
+impl GoCopy for MultiSchemaInfo {
+    // glue: Go struct copy of model.MultiSchemaInfo (generated)
+    fn go_copy(&self) -> Self {
+        Self {
+            sub_jobs: self.sub_jobs.go_copy(),
+            revertible: self.revertible.go_copy(),
+            seq: self.seq.go_copy(),
+            skip_version: self.skip_version.go_copy(),
+            add_columns: self.add_columns.go_copy(),
+            drop_columns: self.drop_columns.go_copy(),
+            modify_columns: self.modify_columns.go_copy(),
+            add_indexes: self.add_indexes.go_copy(),
+            drop_indexes: self.drop_indexes.go_copy(),
+            alter_indexes: self.alter_indexes.go_copy(),
+            add_foreign_keys: self.add_foreign_keys.go_copy(),
+            relative_columns: self.relative_columns.go_copy(),
+            position_columns: self.position_columns.go_copy(),
+        }
+    }
+}
+
+impl MultiSchemaInfo {
+    /// The encoding/json field names (`cachedTypeFields`), in encoding order.
+    pub const JSON_FIELDS: &'static [&'static str] = &["sub_jobs", "revertible", "seq"];
+
+    /// `json.Marshal` of the struct (encoding/json's struct encoder).
+    // glue: encoding/json structEncoder of model.MultiSchemaInfo (generated)
+    pub fn encode_json(&self, out: &mut String) -> Result<(), Error> {
+        let mut first = true;
+        out.push('{');
+        {
+            let v571 = &self.sub_jobs;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"sub_jobs\":");
+                match v571 {
+                    None => out.push_str("null"),
+                    Some(a572) => {
+                        out.push('[');
+                        for (i573, x574) in a572.iter().enumerate() {
+                            if i573 > 0 {
+                                out.push(',');
+                            }
+                            x574.encode_json(out)?;
+                        }
+                        out.push(']');
+                    }
+                }
+            }
+        }
+        {
+            let v575 = &self.revertible;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"revertible\":");
+                out.push_str(if *v575 { "true" } else { "false" });
+            }
+        }
+        {
+            let v576 = &self.seq;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"seq\":");
+                out.push_str(&(*v576).to_string());
+            }
+        }
+        let _ = first;
+        out.push('}');
+        Ok(())
+    }
+
+    /// `json.Unmarshal` into the struct (encoding/json's object decoder): decodes into the
+    /// existing value, missing members leave fields unchanged.
+    // glue: encoding/json decodeState.object for model.MultiSchemaInfo (generated)
+    pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
+        d.object(
+            v,
+            "MultiSchemaInfo",
+            "model.MultiSchemaInfo",
+            Self::JSON_FIELDS,
+            |d, i, v| match i {
+                0 => {
+                    d.slice(
+                        v,
+                        &mut self.sub_jobs,
+                        "[]*model.SubJob",
+                        |d, v, x: &mut SubJob| {
+                            if let Raw::Null = v {
+                                *x = Default::default();
+                                return;
+                            }
+                            (*x).decode_json(d, v);
+                        },
+                    );
+                }
+                1 => {
+                    d.bool(v, &mut self.revertible);
+                }
+                2 => {
+                    let mut n = self.seq as i64;
+                    d.int(v, &mut n, i32::MIN as i64, i32::MAX as i64, "int32");
+                    self.seq = n as _;
+                }
+                _ => {}
+            },
+        );
+    }
+
+    /// `json.Marshal(x)`.
+    // glue: json.Marshal of model.MultiSchemaInfo (generated)
+    pub fn marshal_json(&self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.encode_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// `json.Unmarshal(data, x)`: a syntax error changes nothing; otherwise the first error.
+    // glue: json.Unmarshal into model.MultiSchemaInfo (generated)
+    pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        let mut d = Decoder::with_source(data);
+        self.decode_json(&mut d, &v);
+        d.finish().map_err(|e| Error::plain(e.to_string()))
+    }
+}
+
+/// Go `model.SubJob`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubJob {
+    /// json: `type`
+    pub type_: ActionType,
+    /// json: `raw_args`
+    pub raw_args: Option<Vec<u8>>,
+    /// json: `schema_state`
+    pub schema_state: SchemaState,
+    /// json: `snapshot_ver`
+    pub snapshot_ver: u64,
+    /// json: `real_start_ts`
+    pub real_start_ts: u64,
+    /// json: `revertible`
+    pub revertible: bool,
+    /// json: `state`
+    pub state: JobState,
+    /// json: `row_count`
+    pub row_count: i64,
+    /// json: `warning`
+    pub warning: Option<Error>,
+    /// json: `-`
+    pub need_reorg: bool,
+    /// json: `schema_version`
+    pub schema_ver: i64,
+    /// json: `reorg_tp`
+    pub reorg_tp: ReorgType,
+    /// json: `reorg_stage`
+    pub reorg_stage: ReorgStage,
+    /// json: `analyze_state`
+    pub analyze_state: i8,
+}
+
+impl GoCopy for SubJob {
+    // glue: Go struct copy of model.SubJob (generated)
+    fn go_copy(&self) -> Self {
+        Self {
+            type_: self.type_.go_copy(),
+            raw_args: self.raw_args.go_copy(),
+            schema_state: self.schema_state.go_copy(),
+            snapshot_ver: self.snapshot_ver.go_copy(),
+            real_start_ts: self.real_start_ts.go_copy(),
+            revertible: self.revertible.go_copy(),
+            state: self.state.go_copy(),
+            row_count: self.row_count.go_copy(),
+            warning: self.warning.go_copy(),
+            need_reorg: self.need_reorg.go_copy(),
+            schema_ver: self.schema_ver.go_copy(),
+            reorg_tp: self.reorg_tp.go_copy(),
+            reorg_stage: self.reorg_stage.go_copy(),
+            analyze_state: self.analyze_state.go_copy(),
+        }
+    }
+}
+
+impl SubJob {
+    /// The encoding/json field names (`cachedTypeFields`), in encoding order.
+    pub const JSON_FIELDS: &'static [&'static str] = &[
+        "type",
+        "raw_args",
+        "schema_state",
+        "snapshot_ver",
+        "real_start_ts",
+        "revertible",
+        "state",
+        "row_count",
+        "warning",
+        "schema_version",
+        "reorg_tp",
+        "reorg_stage",
+        "analyze_state",
+    ];
+
+    /// `json.Marshal` of the struct (encoding/json's struct encoder).
+    // glue: encoding/json structEncoder of model.SubJob (generated)
+    pub fn encode_json(&self, out: &mut String) -> Result<(), Error> {
+        let mut first = true;
+        out.push('{');
+        {
+            let v577 = &self.type_;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"type\":");
+                out.push_str(&(v577.0).to_string());
+            }
+        }
+        {
+            let v578 = &self.raw_args;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"raw_args\":");
+                json::append_raw_message(out, v578).map_err(Error::plain)?;
+            }
+        }
+        {
+            let v579 = &self.schema_state;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"schema_state\":");
+                out.push_str(&(v579.0).to_string());
+            }
+        }
+        {
+            let v580 = &self.snapshot_ver;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"snapshot_ver\":");
+                out.push_str(&(*v580).to_string());
+            }
+        }
+        {
+            let v581 = &self.real_start_ts;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"real_start_ts\":");
+                out.push_str(&(*v581).to_string());
+            }
+        }
+        {
+            let v582 = &self.revertible;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"revertible\":");
+                out.push_str(if *v582 { "true" } else { "false" });
+            }
+        }
+        {
+            let v583 = &self.state;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"state\":");
+                out.push_str(&(v583.0).to_string());
+            }
+        }
+        {
+            let v584 = &self.row_count;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"row_count\":");
+                out.push_str(&(*v584).to_string());
+            }
+        }
+        {
+            let v585 = &self.warning;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"warning\":");
+                match v585 {
+                    None => out.push_str("null"),
+                    Some(p586) => out.push_str(&p586.marshal_json()),
+                }
+            }
+        }
+        {
+            let v587 = &self.schema_ver;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"schema_version\":");
+                out.push_str(&(*v587).to_string());
+            }
+        }
+        {
+            let v588 = &self.reorg_tp;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"reorg_tp\":");
+                out.push_str(&(v588.0).to_string());
+            }
+        }
+        {
+            let v589 = &self.reorg_stage;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"reorg_stage\":");
+                out.push_str(&(v589.0).to_string());
+            }
+        }
+        {
+            let v590 = &self.analyze_state;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"analyze_state\":");
+                out.push_str(&(*v590).to_string());
+            }
+        }
+        let _ = first;
+        out.push('}');
+        Ok(())
+    }
+
+    /// `json.Unmarshal` into the struct (encoding/json's object decoder): decodes into the
+    /// existing value, missing members leave fields unchanged.
+    // glue: encoding/json decodeState.object for model.SubJob (generated)
+    pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
+        d.object(
+            v,
+            "SubJob",
+            "model.SubJob",
+            Self::JSON_FIELDS,
+            |d, i, v| match i {
+                0 => {
+                    let mut n = self.type_.0 as u64;
+                    d.uint(v, &mut n, u8::MAX as u64, "model.ActionType");
+                    self.type_.0 = n as _;
+                }
+                1 => {
+                    d.raw_message(v, &mut self.raw_args);
+                }
+                2 => {
+                    let mut n = self.schema_state.0 as u64;
+                    d.uint(v, &mut n, u8::MAX as u64, "model.SchemaState");
+                    self.schema_state.0 = n as _;
+                }
+                3 => {
+                    d.uint(v, &mut self.snapshot_ver, u64::MAX, "uint64");
+                }
+                4 => {
+                    d.uint(v, &mut self.real_start_ts, u64::MAX, "uint64");
+                }
+                5 => {
+                    d.bool(v, &mut self.revertible);
+                }
+                6 => {
+                    let mut n = self.state.0 as i64;
+                    d.int(
+                        v,
+                        &mut n,
+                        i32::MIN as i64,
+                        i32::MAX as i64,
+                        "model.JobState",
+                    );
+                    self.state.0 = n as _;
+                }
+                7 => {
+                    d.int(v, &mut self.row_count, i64::MIN, i64::MAX, "int64");
+                }
+                8 => match v {
+                    Raw::Null => self.warning = None,
+                    _ => {
+                        let p591 = self.warning.get_or_insert_with(Default::default);
+                        if let Err(e) = p591.unmarshal_json_raw(v) {
+                            d.fail(e);
+                        }
+                    }
+                },
+                9 => {
+                    d.int(v, &mut self.schema_ver, i64::MIN, i64::MAX, "int64");
+                }
+                10 => {
+                    let mut n = self.reorg_tp.0 as i64;
+                    d.int(v, &mut n, i8::MIN as i64, i8::MAX as i64, "model.ReorgType");
+                    self.reorg_tp.0 = n as _;
+                }
+                11 => {
+                    let mut n = self.reorg_stage.0 as u64;
+                    d.uint(v, &mut n, u8::MAX as u64, "model.ReorgStage");
+                    self.reorg_stage.0 = n as _;
+                }
+                12 => {
+                    let mut n = self.analyze_state as i64;
+                    d.int(v, &mut n, i8::MIN as i64, i8::MAX as i64, "int8");
+                    self.analyze_state = n as _;
+                }
+                _ => {}
+            },
+        );
+    }
+
+    /// `json.Marshal(x)`.
+    // glue: json.Marshal of model.SubJob (generated)
+    pub fn marshal_json(&self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.encode_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// `json.Unmarshal(data, x)`: a syntax error changes nothing; otherwise the first error.
+    // glue: json.Unmarshal into model.SubJob (generated)
+    pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        let mut d = Decoder::with_source(data);
+        self.decode_json(&mut d, &v);
+        d.finish().map_err(|e| Error::plain(e.to_string()))
+    }
+}
+
+/// Go `model.AddForeignKeyInfo`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AddForeignKeyInfo {
+    pub name: CIStr,
+    pub cols: Option<Vec<CIStr>>,
+}
+
+impl GoCopy for AddForeignKeyInfo {
+    // glue: Go struct copy of model.AddForeignKeyInfo (generated)
+    fn go_copy(&self) -> Self {
+        Self {
+            name: self.name.go_copy(),
+            cols: self.cols.go_copy(),
+        }
+    }
+}
+
+impl AddForeignKeyInfo {
+    /// The encoding/json field names (`cachedTypeFields`), in encoding order.
+    pub const JSON_FIELDS: &'static [&'static str] = &["Name", "Cols"];
+
+    /// `json.Marshal` of the struct (encoding/json's struct encoder).
+    // glue: encoding/json structEncoder of model.AddForeignKeyInfo (generated)
+    pub fn encode_json(&self, out: &mut String) -> Result<(), Error> {
+        let mut first = true;
+        out.push('{');
+        {
+            let v592 = &self.name;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"Name\":");
+                out.push_str(&v592.marshal_json());
+            }
+        }
+        {
+            let v593 = &self.cols;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"Cols\":");
+                match v593 {
+                    None => out.push_str("null"),
+                    Some(a594) => {
+                        out.push('[');
+                        for (i595, x596) in a594.iter().enumerate() {
+                            if i595 > 0 {
+                                out.push(',');
+                            }
+                            out.push_str(&x596.marshal_json());
+                        }
+                        out.push(']');
+                    }
+                }
+            }
+        }
+        let _ = first;
+        out.push('}');
+        Ok(())
+    }
+
+    /// `json.Unmarshal` into the struct (encoding/json's object decoder): decodes into the
+    /// existing value, missing members leave fields unchanged.
+    // glue: encoding/json decodeState.object for model.AddForeignKeyInfo (generated)
+    pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
+        d.object(
+            v,
+            "AddForeignKeyInfo",
+            "model.AddForeignKeyInfo",
+            Self::JSON_FIELDS,
+            |d, i, v| match i {
+                0 => {
+                    if let Err(e) = self.name.decode_json(v) {
+                        d.fail(e);
+                    }
+                }
+                1 => {
+                    d.slice(v, &mut self.cols, "[]model.CIStr", |d, v, x: &mut CIStr| {
+                        if let Err(e) = (*x).decode_json(v) {
+                            d.fail(e);
+                        }
+                    });
+                }
+                _ => {}
+            },
+        );
+    }
+
+    /// `json.Marshal(x)`.
+    // glue: json.Marshal of model.AddForeignKeyInfo (generated)
+    pub fn marshal_json(&self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.encode_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// `json.Unmarshal(data, x)`: a syntax error changes nothing; otherwise the first error.
+    // glue: json.Unmarshal into model.AddForeignKeyInfo (generated)
+    pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        let mut d = Decoder::new();
+        self.decode_json(&mut d, &v);
+        d.finish().map_err(|e| Error::plain(e.to_string()))
+    }
+}
+
+/// Go `model.InvolvingSchemaInfo`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InvolvingSchemaInfo {
+    /// json: `database,omitempty`
+    pub database: String,
+    /// json: `table,omitempty`
+    pub table: String,
+    /// json: `policy,omitempty`
+    pub policy: String,
+    /// json: `resource_group,omitempty`
+    pub resource_group: String,
+    /// json: `mode,omitempty`
+    pub mode: InvolvingSchemaInfoMode,
+}
+
+impl GoCopy for InvolvingSchemaInfo {
+    // glue: Go struct copy of model.InvolvingSchemaInfo (generated)
+    fn go_copy(&self) -> Self {
+        Self {
+            database: self.database.go_copy(),
+            table: self.table.go_copy(),
+            policy: self.policy.go_copy(),
+            resource_group: self.resource_group.go_copy(),
+            mode: self.mode.go_copy(),
+        }
+    }
+}
+
+impl InvolvingSchemaInfo {
+    /// The encoding/json field names (`cachedTypeFields`), in encoding order.
+    pub const JSON_FIELDS: &'static [&'static str] =
+        &["database", "table", "policy", "resource_group", "mode"];
+
+    /// `json.Marshal` of the struct (encoding/json's struct encoder).
+    // glue: encoding/json structEncoder of model.InvolvingSchemaInfo (generated)
+    pub fn encode_json(&self, out: &mut String) -> Result<(), Error> {
+        let mut first = true;
+        out.push('{');
+        {
+            let v597 = &self.database;
+            if !(v597.is_empty()) {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"database\":");
+                json::append_string(out, v597);
+            }
+        }
+        {
+            let v598 = &self.table;
+            if !(v598.is_empty()) {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"table\":");
+                json::append_string(out, v598);
+            }
+        }
+        {
+            let v599 = &self.policy;
+            if !(v599.is_empty()) {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"policy\":");
+                json::append_string(out, v599);
+            }
+        }
+        {
+            let v600 = &self.resource_group;
+            if !(v600.is_empty()) {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"resource_group\":");
+                json::append_string(out, v600);
+            }
+        }
+        {
+            let v601 = &self.mode;
+            if !(v601.0 == 0) {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"mode\":");
+                out.push_str(&(v601.0).to_string());
+            }
+        }
+        let _ = first;
+        out.push('}');
+        Ok(())
+    }
+
+    /// `json.Unmarshal` into the struct (encoding/json's object decoder): decodes into the
+    /// existing value, missing members leave fields unchanged.
+    // glue: encoding/json decodeState.object for model.InvolvingSchemaInfo (generated)
+    pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
+        d.object(
+            v,
+            "InvolvingSchemaInfo",
+            "model.InvolvingSchemaInfo",
+            Self::JSON_FIELDS,
+            |d, i, v| match i {
+                0 => {
+                    d.string(v, &mut self.database);
+                }
+                1 => {
+                    d.string(v, &mut self.table);
+                }
+                2 => {
+                    d.string(v, &mut self.policy);
+                }
+                3 => {
+                    d.string(v, &mut self.resource_group);
+                }
+                4 => {
+                    let mut n = self.mode.0 as i64;
+                    d.int(
+                        v,
+                        &mut n,
+                        isize::MIN as i64,
+                        isize::MAX as i64,
+                        "model.InvolvingSchemaInfoMode",
+                    );
+                    self.mode.0 = n as _;
+                }
+                _ => {}
+            },
+        );
+    }
+
+    /// `json.Marshal(x)`.
+    // glue: json.Marshal of model.InvolvingSchemaInfo (generated)
+    pub fn marshal_json(&self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.encode_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// `json.Unmarshal(data, x)`: a syntax error changes nothing; otherwise the first error.
+    // glue: json.Unmarshal into model.InvolvingSchemaInfo (generated)
+    pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        let mut d = Decoder::new();
+        self.decode_json(&mut d, &v);
+        d.finish().map_err(|e| Error::plain(e.to_string()))
+    }
+}
+
+/// Go `model.TraceInfo`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TraceInfo {
+    /// json: `connection_id`
+    pub connection_id: u64,
+    /// json: `session_alias`
+    pub session_alias: String,
+}
+
+impl GoCopy for TraceInfo {
+    // glue: Go struct copy of model.TraceInfo (generated)
+    fn go_copy(&self) -> Self {
+        Self {
+            connection_id: self.connection_id.go_copy(),
+            session_alias: self.session_alias.go_copy(),
+        }
+    }
+}
+
+impl TraceInfo {
+    /// The encoding/json field names (`cachedTypeFields`), in encoding order.
+    pub const JSON_FIELDS: &'static [&'static str] = &["connection_id", "session_alias"];
+
+    /// `json.Marshal` of the struct (encoding/json's struct encoder).
+    // glue: encoding/json structEncoder of model.TraceInfo (generated)
+    pub fn encode_json(&self, out: &mut String) -> Result<(), Error> {
+        let mut first = true;
+        out.push('{');
+        {
+            let v602 = &self.connection_id;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"connection_id\":");
+                out.push_str(&(*v602).to_string());
+            }
+        }
+        {
+            let v603 = &self.session_alias;
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str("\"session_alias\":");
+                json::append_string(out, v603);
+            }
+        }
+        let _ = first;
+        out.push('}');
+        Ok(())
+    }
+
+    /// `json.Unmarshal` into the struct (encoding/json's object decoder): decodes into the
+    /// existing value, missing members leave fields unchanged.
+    // glue: encoding/json decodeState.object for model.TraceInfo (generated)
+    pub fn decode_json(&mut self, d: &mut Decoder, v: &Raw) {
+        d.object(
+            v,
+            "TraceInfo",
+            "model.TraceInfo",
+            Self::JSON_FIELDS,
+            |d, i, v| match i {
+                0 => {
+                    d.uint(v, &mut self.connection_id, u64::MAX, "uint64");
+                }
+                1 => {
+                    d.string(v, &mut self.session_alias);
+                }
+                _ => {}
+            },
+        );
+    }
+
+    /// `json.Marshal(x)`.
+    // glue: json.Marshal of model.TraceInfo (generated)
+    pub fn marshal_json(&self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.encode_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// `json.Unmarshal(data, x)`: a syntax error changes nothing; otherwise the first error.
+    // glue: json.Unmarshal into model.TraceInfo (generated)
+    pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        let mut d = Decoder::new();
+        self.decode_json(&mut d, &v);
+        d.finish().map_err(|e| Error::plain(e.to_string()))
+    }
+}
+
 /// The encoding/json field names of Go `auth.UserIdentity`.
 const USER_IDENTITY_FIELDS: &[&str] = &[
     "Username",
@@ -8508,16 +10920,24 @@ pub(crate) fn decode_user_identity(d: &mut Decoder, v: &Raw, u: &mut UserIdentit
 
 go_copy_leaf!(
     ActionType,
+    AdminCommandOperator,
     AnyValue,
     BackfillState,
     CIStr,
     ColumnChoice,
     DistanceMetric,
+    Error,
     FieldType,
     IndexType,
+    InvolvingSchemaInfoMode,
+    JobState,
+    JobVersion,
     PartitionType,
+    ReorgStage,
+    ReorgType,
     RunawayActionType,
     RunawayWatchType,
+    SQLMode,
     SchemaState,
     TableCacheStatusType,
     TableLockState,

@@ -2,7 +2,7 @@
 
 ## 1. Rust 模块布局
 
-新 crate `crates/model`（`tidb-model`，N0 rank 3），依赖 `tidb-base`（rank 0）和 `tidb-parser`（rank 1）。
+新 crate `crates/model`（`tidb-model`，N0 rank 3），依赖 `tidb-base`（rank 0）、`tidb-parser`（rank 1）和 `tidb-types`（rank 2，Part 2 起：`NeedRestoredData` 与 collate）。
 
 | 模块 | 内容 |
 |---|---|
@@ -11,8 +11,12 @@
 | `any.rs` | `AnyValue`（Go `interface{}`） |
 | `gotime.rs` | `time.Time` 的 `MarshalJSON`/`UnmarshalJSON` |
 | `table.rs`、`column.rs`、`index.rs`、`placement.rs`、`resource_group.rs`、`db.rs`、`bdr.rs` | 手写的方法，按 Go 文件分 |
+| `job.rs`、`reorg.rs` | Part 2：`job.go`、`reorg.go` 中读路径保留的函数（`ActionMap` 是 Go 的 map 字面量，移植为按键查找的表） |
+| `types_etc.rs` | Part 2：`pkg/types/etc.go` 的 `ColumnNeedRestoredData` |
 
 `tidb-base` 的改动：`gostd::json`（`DecodeError`、`Decoder::object_promoted`、`bytes` 带 Go 类型名、`any`/`map`/`int_key`/`float64`、base64、`encode_value`/`encode_float`），`gostd::time`（`Time` 的 `Default`/`PartialEq`、`append_strict_rfc3339`、`parse_strict_rfc3339` 及其 `time.Parse(RFC3339)` 回退）。`tidb-parser`：`FieldType`/`CIStr` 的 `decode_json`。
+
+Part 2 的 `tidb-base` 改动：`gostd::json` 的 `Raw` 字符串、数组、对象带输入范围（`Span`），`Decoder::with_source`、`raw_message`、`append_raw_message`（`json.RawMessage`）；`errors` 加 `Default`（Go 零值）和 `marshal_json` / `unmarshal_json_raw`（`compatible_shim.go`）。`tidb-types`：`etc.rs`（`NeedRestoredData` 等 5 个 D01.1 函数）。
 
 ## 2. 写法映射
 
@@ -32,7 +36,7 @@ L2：`DBInfo.Copy`（复制而不是共享表）、`IndexInfo.ConditionExpr`（P
 - `crates/model/tests/govec_model.rs` 回放 govec `model`（op 说明见 tracker `govec/domains/model.go`）。比对：`out` 逐字段相等（JSON 文本逐字节）；错误消息逐字相等，JSON 语法错误只要求报错；Go panic 的记录 Rust 也必须 panic。`GOVEC_ALL=1` 打印全部不一致的记录（调试用）。
 - 向量放在 `crates/model/tests/vectors/v8.5.8/<目标>/model.jsonl.gz`，amd64 取 tracker PR 的 CI artifact。
 
-## 4. 交接（2026-11-07）
+## 4. 交接（Part 1：2026-11-07；Part 2：2026-11-08）
 
 ### 已完成（PR (a)）
 
@@ -42,7 +46,11 @@ L2：`DBInfo.Copy`（复制而不是共享表）、`IndexInfo.ConditionExpr`（P
 4. arm64 与 amd64（tracker CI artifact）的向量回放全部通过，两个目标的记录相同。
 5. mappings.md M-BYTES；ROADMAP 的 D06.1 行和 D04.1 的 scramble 注记；CI arm64 job 加 `tidb-model`。
 
-### 剩余（PR (b)，Part 2）
+### Part 2（PR (b)，tidb-rs `block/D06.1-model-b`，tracker PR #16 `govec/model-D06.1-b`）
+
+已完成：上面"剩余"的 1～4 全部，converge `matched 153/153`；Part 1 评审的三条不阻塞建议（map 解码器单元测试、已知偏离带 `ported` 严格比较、向量体积写进 README）。设计见 spec 3.7，偏离见 spec §4 第 6～9 条。
+
+### 剩余（写于 Part 1 交接时，已在 Part 2 完成）
 
 1. `job.go`：`ActionType.String`、`JobState.String`、`SchemaState.String`、`JobVersion.String`、`Job.Decode`（`json.RawMessage` 保留原始字面量、`errors.Error` 的 JSON、`atomic.Int64` 等并发字段）、`Job.String`、`Job.GetRowCount`、`Job.GetWarnings`、`Job.MayNeedReorg`。生成器要扩展到 `Job`、`SubJob`、`DDLReorgMeta` 等类型。
 2. `reorg.go`：`DDLReorgMeta.Get*OrDefault`（读 `vardef` 的全局变量）、`ReorgType.String`。
