@@ -148,7 +148,15 @@ fn roundtrip(name: &str, base: Option<&[u8]>, text: &[u8]) -> (Value, Option<Str
             SequenceInfo,
             TiFlashReplicaInfo,
             TableLockInfo,
-            StatsLoadItem
+            StatsLoadItem,
+            Job,
+            SubJob,
+            MultiSchemaInfo,
+            DDLReorgMeta,
+            HistoryInfo,
+            TimeZoneLocation,
+            TraceInfo,
+            InvolvingSchemaInfo
         ]
     )
 }
@@ -537,8 +545,73 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<String>) {
             )
         }
         "misc" => misc(a),
+        "job" => job_out(&gs_bytes(&a[0])),
+        "job_strings" => {
+            let n = i(&a[1]);
+            let out = match s(&a[0]) {
+                "action" => ActionType(n as u8).to_string().to_owned(),
+                "schema_state" => SchemaState(n as u8).to_string().to_owned(),
+                "job_state" => JobState(n as i32).to_string().to_owned(),
+                "job_version" => JobVersion(n).to_string(),
+                "reorg_type" => ReorgType(n as i8).to_string().to_owned(),
+                k => panic!("job_strings {k}"),
+            };
+            (json!(out), None)
+        }
+        "reorg" => {
+            let mut rm = DDLReorgMeta::default();
+            rm.unmarshal_json(&gs_bytes(&a[0])).unwrap();
+            let d = i(&a[1]) as isize;
+            let out = json!({
+                "concurrency": rm.get_concurrency_or_default(d),
+                "batch_size": rm.get_batch_size_or_default(d),
+                "max_write_speed": rm.get_max_write_speed_or_default(),
+            });
+            (out, None)
+        }
+        "need_restored" => {
+            let t = table(&a[0]);
+            let old = tidb_types::collate::new_collation_enabled();
+            tidb_types::collate::set_new_collation_enabled_for_test(a[3].as_bool().unwrap());
+            let out = rec(|| {
+                let ic = &sl(&sl(&t.indices)[i(&a[1]) as usize].columns)[i(&a[2]) as usize];
+                json!(column_need_restored_data(ic, sl(&t.columns)))
+            });
+            tidb_types::collate::set_new_collation_enabled_for_test(old);
+            (out, None)
+        }
         _ => panic!("unknown op {op}"),
     }
+}
+
+/// `jobOut`: Job.Decode, then the job methods; the local start time in Job.String is
+/// replaced by "<T>" and given in UTC.
+fn job_out(text: &[u8]) -> (Value, Option<String>) {
+    let mut job = Job::default();
+    if let Err(e) = job.decode(text) {
+        return (Value::Null, Some(emsg(&e)));
+    }
+    let mut out = mo(job.marshal_json());
+    let ts = ts_convert2_time(job.start_ts);
+    out["string"] = json!(job.to_string().replacen(
+        &format!("start time: {},", ts.string()),
+        "start time: <T>,",
+        1
+    ));
+    out["start_utc"] = json!(ts.in_loc(&tidb_base::gostd::time::utc()).string());
+    out["row_count"] = json!(job.get_row_count());
+    out["warnings"] = rec(|| {
+        // The two maps, written through a DDLReorgMeta that holds only them.
+        let (w, wc) = job.get_warnings();
+        let probe = DDLReorgMeta {
+            warnings: w.clone(),
+            warnings_count: wc.clone(),
+            ..DDLReorgMeta::default()
+        };
+        mo(probe.marshal_json())
+    });
+    out["may_need_reorg"] = rec(|| json!(job.may_need_reorg()));
+    (out, None)
 }
 
 fn misc(a: &[Value]) -> (Value, Option<String>) {
@@ -725,13 +798,18 @@ fn govec_model() {
                     (Some(w), Some(g)) => w == g || is_syntax_error(w),
                     _ => false,
                 };
-                // A record marked as a known deviation must differ in `out` (and only
-                // there); a marked record that matches means the entry is stale.
+                // A record marked as a known deviation must differ from Go's `out` and be
+                // exactly what the port is specified to write ("ported", the output after the
+                // nil []*T elements become zero values); a marked record that matches Go's
+                // `out` means the entry is stale.
                 let mut want_out = r["out"].clone();
-                let known = want_out
-                    .as_object_mut()
-                    .and_then(|m| m.remove("known_deviation"))
-                    .map(|k| s(&k).to_owned());
+                let (known, ported) = match want_out.as_object_mut() {
+                    Some(m) => (
+                        m.remove("known_deviation").map(|k| s(&k).to_owned()),
+                        m.remove("ported"),
+                    ),
+                    None => (None, None),
+                };
                 let same = (want_out.is_null() && e.is_some()) || want_out == out;
                 let out_ok = match &known {
                     None => same,
@@ -740,12 +818,13 @@ fn govec_model() {
                             KNOWN_DEVIATIONS.iter().any(|(id, _)| id == k),
                             "unknown known_deviation {k}"
                         );
+                        let ported = ported.expect("known_deviation without ported");
                         if same {
                             stale += 1;
                         } else {
                             nknown += 1;
                         }
-                        !same
+                        !same && ported == out
                     }
                 };
                 if !(err_ok && out_ok)
