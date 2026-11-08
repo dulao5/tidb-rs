@@ -48,6 +48,7 @@ use tidb_codec::{
 use tidb_kv::key::new_partition_handle;
 use tidb_kv::key::{CommonHandle, Handle, IntHandle, Key, KeyRange, new_common_handle};
 use tidb_kv::kv::KeyRanges;
+use tidb_kv::kv::UnCommitIndexKVFlag;
 use tidb_model::{ColumnInfo, GlobalIndexVersionV1, IndexColumn, IndexInfo, TableInfo};
 use tidb_parser::gocharset::{CharsetASCII, CharsetBin};
 use tidb_parser::types::{FieldType, UnspecifiedLength};
@@ -57,7 +58,7 @@ use tidb_types::context::StrictContext;
 use tidb_types::core_time::ZeroCoreTime;
 use tidb_types::datum::{
     Datum, KindBinaryLiteral, KindBytes, KindInt64, KindMysqlBit, KindMysqlDuration, KindMysqlEnum,
-    KindMysqlSet, KindMysqlTime, KindString, new_int_datum,
+    KindMysqlSet, KindMysqlTime, KindString, new_int_datum, new_uint_datum,
 };
 use tidb_types::enum_type::parse_enum_value;
 use tidb_types::etc::need_restored_data;
@@ -1651,4 +1652,275 @@ mod tests {
             assert_eq!(err.code() as u16, code);
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Index value encoders. Brought back from X for block D06.7 (the `SET GLOBAL` system-table
+// writer, D05.2 spec §6): Go's `REPLACE INTO mysql.global_variables` writes the value of the
+// non-clustered unique primary index with `GenIndexValuePortal`.
+
+/// GenIndexValuePortal is the portal for generating index value.
+/// Value layout: see the Go comment of `genIndexValueVersion0` / `GenIndexValueForClusteredIndexVersion1`.
+// go: GenIndexValuePortal L1
+#[allow(clippy::too_many_arguments)] // Go's signature
+pub fn gen_index_value_portal(
+    loc: Option<&Arc<Location>>,
+    tbl_info: &TableInfo,
+    idx_info: &IndexInfo,
+    need_restored_data: bool,
+    distinct: bool,
+    untouched: bool,
+    indexed_values: &[Datum],
+    h: &Handle,
+    partition_id: i64,
+    restored_data: &[Datum],
+    buf: Option<Vec<u8>>,
+) -> Result<Vec<u8>, Error> {
+    if tbl_info.is_common_handle && tbl_info.common_handle_version == 1 {
+        return gen_index_value_for_clustered_index_version1(
+            loc,
+            tbl_info,
+            idx_info,
+            need_restored_data,
+            distinct,
+            untouched,
+            indexed_values,
+            h,
+            partition_id,
+            restored_data,
+            buf,
+        );
+    }
+    gen_index_value_version0(
+        loc,
+        tbl_info,
+        idx_info,
+        need_restored_data,
+        distinct,
+        untouched,
+        indexed_values,
+        h,
+        partition_id,
+        buf,
+    )
+}
+
+/// TryGetCommonPkColumnRestoredIds get the IDs of primary key columns which need restored data if the table has common handle.
+/// Caller need to make sure the table has common handle.
+// go: TryGetCommonPkColumnRestoredIds L1
+pub fn try_get_common_pk_column_restored_ids(tbl: &TableInfo) -> Vec<i64> {
+    let mut pk_col_ids = Vec::new();
+    let Some(pk_idx) = tbl
+        .indices
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|idx| idx.primary)
+    else {
+        return pk_col_ids;
+    };
+    let cols = tbl.columns.as_deref().unwrap_or(&[]);
+    for idx_col in pk_idx.columns.as_deref().unwrap_or(&[]) {
+        let col = &cols[idx_col.offset as usize];
+        if need_restored_data(&col.field_type) {
+            pk_col_ids.push(col.id);
+        }
+    }
+    pk_col_ids
+}
+
+/// GenIndexValueForClusteredIndexVersion1 generates the index value for the clustered index with version 1(New in v5.0.0).
+// go: GenIndexValueForClusteredIndexVersion1 L1
+#[allow(clippy::too_many_arguments)] // Go's signature
+pub fn gen_index_value_for_clustered_index_version1(
+    loc: Option<&Arc<Location>>,
+    tbl_info: &TableInfo,
+    idx_info: &IndexInfo,
+    idx_val_need_restored_data: bool,
+    distinct: bool,
+    untouched: bool,
+    indexed_values: &[Datum],
+    h: &Handle,
+    partition_id: i64,
+    handle_restored_data: &[Datum],
+    buf: Option<Vec<u8>>,
+) -> Result<Vec<u8>, Error> {
+    let mut idx_val = match buf {
+        Some(mut b) => {
+            b.clear();
+            b
+        }
+        None => Vec::new(),
+    };
+    idx_val.push(0);
+    let mut tail_len = 0u8;
+    // Version info.
+    idx_val.push(IndexVersionFlag);
+    idx_val.push(1);
+
+    if distinct {
+        encode_common_handle(&mut idx_val, h);
+    }
+    if idx_info.global {
+        encode_partition_id(&mut idx_val, partition_id);
+    }
+    if idx_val_need_restored_data || !handle_restored_data.is_empty() {
+        let idx_cols = idx_info.columns.as_deref().unwrap_or(&[]);
+        let tbl_cols = tbl_info.columns.as_deref().unwrap_or(&[]);
+        let mut col_ids = Vec::with_capacity(idx_cols.len());
+        let mut all_restored_data = Vec::with_capacity(handle_restored_data.len() + idx_cols.len());
+        for (i, idx_col) in idx_cols.iter().enumerate() {
+            let col = &tbl_cols[idx_col.offset as usize];
+            // If the column is the primary key's column,
+            // the restored data will be written later. Skip writing it here to avoid redundancy.
+            if mysql::has_pri_key_flag(col.field_type.get_flag()) {
+                continue;
+            }
+            if tidb_model::column_need_restored_data(idx_col, tbl_cols) {
+                col_ids.push(col.id);
+                if is_bin_collation(
+                    tidb_model::get_idx_changing_field_type(idx_col, col).get_collate(),
+                ) {
+                    all_restored_data.push(new_uint_datum(
+                        tidb_types::stringutil::get_tail_space_count(
+                            indexed_values[i].get_string(),
+                        ) as u64,
+                    ));
+                } else {
+                    all_restored_data.push(indexed_values[i].clone());
+                }
+            }
+        }
+
+        if !handle_restored_data.is_empty() {
+            let pk_col_ids = try_get_common_pk_column_restored_ids(tbl_info);
+            col_ids.extend(pk_col_ids);
+            all_restored_data.extend_from_slice(handle_restored_data);
+        }
+
+        let mut rd = rowcodec::encoder::Encoder::with_enable(true);
+        idx_val = rd.encode(loc, &col_ids, &all_restored_data, None, idx_val)?;
+    }
+
+    if untouched {
+        tail_len = 1;
+        idx_val.push(UnCommitIndexKVFlag);
+    }
+    idx_val[0] = tail_len;
+
+    Ok(idx_val)
+}
+
+/// genIndexValueVersion0 create index value for both local and global index.
+// go: genIndexValueVersion0 L1
+#[allow(clippy::too_many_arguments)] // Go's signature
+fn gen_index_value_version0(
+    loc: Option<&Arc<Location>>,
+    tbl_info: &TableInfo,
+    idx_info: &IndexInfo,
+    idx_val_need_restored_data: bool,
+    distinct: bool,
+    untouched: bool,
+    indexed_values: &[Datum],
+    h: &Handle,
+    partition_id: i64,
+    buf: Option<Vec<u8>>,
+) -> Result<Vec<u8>, Error> {
+    let mut idx_val = match buf {
+        Some(mut b) => {
+            b.clear();
+            b
+        }
+        None => Vec::new(),
+    };
+    idx_val.push(0);
+    let mut new_encode = false;
+    let mut tail_len = 0usize;
+    if !h.is_int() && distinct {
+        encode_common_handle(&mut idx_val, h);
+        new_encode = true;
+    }
+    if idx_info.global {
+        encode_partition_id(&mut idx_val, partition_id);
+        new_encode = true;
+    }
+    if idx_val_need_restored_data {
+        let tbl_cols = tbl_info.columns.as_deref().unwrap_or(&[]);
+        let col_ids: Vec<i64> = idx_info
+            .columns
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|col| tbl_cols[col.offset as usize].id)
+            .collect();
+        let mut rd = rowcodec::encoder::Encoder::with_enable(true);
+        // Encode row restored value.
+        idx_val = rd.encode(loc, &col_ids, indexed_values, None, idx_val)?;
+        new_encode = true;
+    }
+
+    if new_encode {
+        if h.is_int() && distinct {
+            // The len of the idxVal is always >= 10 since len (restoredValue) > 0.
+            tail_len += 8;
+            idx_val.extend_from_slice(&encode_handle_in_unique_index_value(h, false));
+        } else if idx_val.len() < 10 {
+            // Padding the len to 10
+            let padding_len = 10 - idx_val.len();
+            tail_len += padding_len;
+            idx_val.resize(idx_val.len() + padding_len, 0);
+        }
+        if untouched {
+            // If index is untouched and fetch here means the key is exists in TiKV, but not in txn mem-buffer,
+            // then should also write the untouched index key/value to mem-buffer to make sure the data
+            // is consistent with the index in txn mem-buffer.
+            tail_len += 1;
+            idx_val.push(UnCommitIndexKVFlag);
+        }
+        idx_val[0] = tail_len as u8;
+    } else {
+        // Old index value encoding.
+        idx_val.clear();
+        if distinct {
+            idx_val = encode_handle_in_unique_index_value(h, untouched);
+        }
+        if untouched {
+            // If index is untouched and fetch here means the key is exists in TiKV, but not in txn mem-buffer,
+            // then should also write the untouched index key/value to mem-buffer to make sure the data
+            // is consistent with the index in txn mem-buffer.
+            idx_val.push(UnCommitIndexKVFlag);
+        }
+        if idx_val.is_empty() {
+            idx_val.push(b'0');
+        }
+    }
+    Ok(idx_val)
+}
+
+/// EncodeHandleInUniqueIndexValue encodes handle in data.
+// go: EncodeHandleInUniqueIndexValue L1
+pub fn encode_handle_in_unique_index_value(h: &Handle, is_untouched: bool) -> Vec<u8> {
+    if h.is_int() {
+        return (h.int_value() as u64).to_be_bytes().to_vec();
+    }
+    let untouched_flag = u8::from(is_untouched);
+    let mut out = vec![untouched_flag];
+    encode_common_handle(&mut out, h);
+    out
+}
+
+// go: encodeCommonHandle L1
+fn encode_common_handle(idx_val: &mut Vec<u8>, h: &Handle) {
+    idx_val.push(CommonHandleFlag);
+    let enc = h.encoded();
+    let h_len = enc.len() as u16;
+    idx_val.push((h_len >> 8) as u8);
+    idx_val.push(h_len as u8);
+    idx_val.extend_from_slice(&enc);
+}
+
+// go: encodePartitionID L1
+fn encode_partition_id(idx_val: &mut Vec<u8>, partition_id: i64) {
+    idx_val.push(PartitionIDFlag);
+    encode_int(idx_val, partition_id);
 }
