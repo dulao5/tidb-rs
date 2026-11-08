@@ -297,6 +297,75 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "tidb_opt_enable_hash_join" => ss_tidb_opt_enable_hash_join,
         "tidb_txn_assertion_level" => ss_tidb_txn_assertion_level,
         "tidb_batch_pending_tiflash_count" => ss_tidb_batch_pending_tiflash_count,
+        "txn_scope" => super::session_hooks_state::ss_txn_scope,
+        "tx_read_ts" => super::session_hooks_state::ss_tx_read_ts,
+        "tidb_read_staleness" => super::session_hooks_state::ss_tidb_read_staleness,
+        "tidb_snapshot" => super::session_hooks_state::ss_tidb_snapshot,
+        "tx_isolation_one_shot" => super::session_hooks_state::ss_tx_isolation_one_shot,
+        "tidb_isolation_read_engines" => super::session_hooks_state::ss_tidb_isolation_read_engines,
+        "rand_seed1" => super::session_hooks_state::ss_rand_seed1,
+        "rand_seed2" => super::session_hooks_state::ss_rand_seed2,
+        "tidb_scatter_region" => super::session_hooks_state::ss_tidb_scatter_region,
+        "tidb_row_format_version" => super::session_hooks_state::ss_tidb_row_format_version,
+        "sql_mode" => super::session_hooks_state::ss_sql_mode,
+        "time_zone" => super::session_hooks_state::ss_time_zone,
+        "autocommit" => super::session_hooks_state::ss_autocommit,
+        "group_concat_max_len" => super::session_hooks_state::ss_group_concat_max_len,
+        "tidb_backoff_lock_fast" => super::session_hooks_state::ss_tidb_backoff_lock_fast,
+        "tidb_backoff_weight" => super::session_hooks_state::ss_tidb_backoff_weight,
+        "tidb_allow_fallback_to_tikv" => super::session_hooks_state::ss_tidb_allow_fallback_to_tikv,
+        "tidb_replica_read" => super::session_hooks_state::ss_tidb_replica_read,
+        "tidb_partition_prune_mode" => super::session_hooks_state::ss_tidb_partition_prune_mode,
+        "tidb_redact_log" => super::session_hooks_state::ss_tidb_redact_log,
+        "tidb_stats_load_sync_wait" => super::session_hooks_state::ss_tidb_stats_load_sync_wait,
+        "tidb_sysdate_is_now" => super::session_hooks_state::ss_tidb_sysdate_is_now,
+        "tidb_enable_parallel_hashagg_spill" => {
+            super::session_hooks_state::ss_tidb_enable_parallel_hashagg_spill
+        }
+        "tidb_ignore_prepared_cache_close_stmt" => {
+            super::session_hooks_state::ss_tidb_ignore_prepared_cache_close_stmt
+        }
+        "tidb_enable_new_cost_interface" => {
+            super::session_hooks_state::ss_tidb_enable_new_cost_interface
+        }
+        "tidb_cost_model_version" => super::session_hooks_state::ss_tidb_cost_model_version,
+        "tidb_index_join_double_read_penalty_cost_rate" => {
+            super::session_hooks_state::ss_tidb_index_join_double_read_penalty_cost_rate
+        }
+        "tidb_mem_quota_query" => super::session_hooks_state::ss_tidb_mem_quota_query,
+        "tidb_stats_update_during_ddl" => {
+            super::session_hooks_state::ss_tidb_stats_update_during_ddl
+        }
+        "tidb_constraint_check_in_place_pessimistic" => {
+            super::session_hooks_state::ss_tidb_constraint_check_in_place_pessimistic
+        }
+        "mpp_exchange_compression_mode" => {
+            super::session_hooks_state::ss_mpp_exchange_compression_mode
+        }
+        "mpp_version" => super::session_hooks_state::ss_mpp_version,
+        "tiflash_compute_dispatch_policy" => {
+            super::session_hooks_state::ss_tiflash_compute_dispatch_policy
+        }
+        "tidb_load_based_replica_read_threshold" => {
+            super::session_hooks_state::ss_tidb_load_based_replica_read_threshold
+        }
+        "tidb_opt_fix_control" => super::session_hooks_state::ss_tidb_opt_fix_control,
+        "tidb_analyze_skip_column_types" => {
+            super::session_hooks_state::ss_tidb_analyze_skip_column_types
+        }
+        "tiflash_replica_read" => super::session_hooks_state::ss_tiflash_replica_read,
+        "tidb_runtime_filter_type" => super::session_hooks_state::ss_tidb_runtime_filter_type,
+        "tidb_runtime_filter_mode" => super::session_hooks_state::ss_tidb_runtime_filter_mode,
+        "tidb_lock_unchanged_keys" => super::session_hooks_state::ss_tidb_lock_unchanged_keys,
+        "tidb_session_alias" => super::session_hooks_state::ss_tidb_session_alias,
+        "tidb_opt_objective" => super::session_hooks_state::ss_tidb_opt_objective,
+        "tidb_dml_type" => super::session_hooks_state::ss_tidb_dml_type,
+        "tidb_enable_shared_lock_promotion" => {
+            super::session_hooks_state::ss_tidb_enable_shared_lock_promotion
+        }
+        "tidb_index_lookup_pushdown_policy" => {
+            super::session_hooks_state::ss_tidb_index_lookup_pushdown_policy
+        }
         _ => return None,
     })
 }
@@ -316,6 +385,25 @@ fn get_session(name: &str) -> Option<GetSessionFn> {
         "tidb_request_source_type" => gs_tidb_request_source_type,
         "max_allowed_packet" => gs_max_allowed_packet,
         "tidb_enable_inl_join_inner_multi_pattern" => gs_tidb_enable_inl_join_inner_multi_pattern,
+        "timestamp" => super::session_hooks_state::gs_timestamp,
+        "last_insert_id" => super::session_hooks_state::gs_last_insert_id,
+        "identity" => super::session_hooks_state::gs_identity,
+        "txn_scope" => super::session_hooks_state::gs_txn_scope,
+        "tidb_current_ts" => super::session_hooks_state::gs_tidb_current_ts,
+        "tidb_last_query_info" => super::session_hooks_state::gs_tidb_last_query_info,
+        "tidb_last_ddl_info" => super::session_hooks_state::gs_tidb_last_ddl_info,
+        "tidb_scatter_region" => super::session_hooks_state::gs_tidb_scatter_region,
+        "tidb_enable_plan_replayer_continuous_capture" => {
+            super::session_hooks_state::gs_tidb_enable_plan_replayer_continuous_capture
+        }
+        "tidb_enable_plan_replayer_capture" => {
+            super::session_hooks_state::gs_tidb_enable_plan_replayer_capture
+        }
+        "group_concat_max_len" => super::session_hooks_state::gs_group_concat_max_len,
+        "tidb_partition_prune_mode" => super::session_hooks_state::gs_tidb_partition_prune_mode,
+        "tiflash_replica_read" => super::session_hooks_state::gs_tiflash_replica_read,
+        "tidb_session_alias" => super::session_hooks_state::gs_tidb_session_alias,
+        "tidb_slow_log_rules" => super::session_hooks_state::gs_tidb_slow_log_rules,
         _ => return None,
     })
 }
@@ -326,6 +414,9 @@ fn get_state_value(name: &str) -> Option<GetStateValueFn> {
         "timestamp" => gv_timestamp,
         "last_insert_id" => gv_last_insert_id,
         "identity" => gv_identity,
+        "tx_isolation_one_shot" => super::session_hooks_state::gv_tx_isolation_one_shot,
+        "rand_seed1" => super::session_hooks_state::gv_rand_seed1,
+        "rand_seed2" => super::session_hooks_state::gv_rand_seed2,
         _ => return None,
     })
 }
@@ -349,54 +440,7 @@ pub(crate) fn is_pending(name: &str, kind: &str) -> bool {
 }
 
 /// Variables whose Go entry has a `SetSession` hook that is not ported yet.
-const PENDING_SET_SESSION: &[&str] = &[
-    "autocommit",
-    "group_concat_max_len",
-    "mpp_exchange_compression_mode",
-    "mpp_version",
-    "rand_seed1",
-    "rand_seed2",
-    "sql_mode",
-    "tidb_allow_fallback_to_tikv",
-    "tidb_analyze_skip_column_types",
-    "tidb_backoff_lock_fast",
-    "tidb_backoff_weight",
-    "tidb_constraint_check_in_place_pessimistic",
-    "tidb_cost_model_version",
-    "tidb_dml_type",
-    "tidb_enable_new_cost_interface",
-    "tidb_enable_parallel_hashagg_spill",
-    "tidb_enable_shared_lock_promotion",
-    "tidb_ignore_prepared_cache_close_stmt",
-    "tidb_index_join_double_read_penalty_cost_rate",
-    "tidb_index_lookup_pushdown_policy",
-    "tidb_isolation_read_engines",
-    "tidb_load_based_replica_read_threshold",
-    "tidb_lock_unchanged_keys",
-    "tidb_mem_quota_query",
-    "tidb_opt_fix_control",
-    "tidb_opt_objective",
-    "tidb_partition_prune_mode",
-    "tidb_read_staleness",
-    "tidb_redact_log",
-    "tidb_replica_read",
-    "tidb_row_format_version",
-    "tidb_runtime_filter_mode",
-    "tidb_runtime_filter_type",
-    "tidb_scatter_region",
-    "tidb_session_alias",
-    "tidb_slow_log_rules",
-    "tidb_snapshot",
-    "tidb_stats_load_sync_wait",
-    "tidb_stats_update_during_ddl",
-    "tidb_sysdate_is_now",
-    "tiflash_compute_dispatch_policy",
-    "tiflash_replica_read",
-    "time_zone",
-    "tx_isolation_one_shot",
-    "tx_read_ts",
-    "txn_scope",
-];
+const PENDING_SET_SESSION: &[&str] = &["tidb_slow_log_rules"];
 
 /// Variables whose Go entry has a `SetGlobal` hook that is not ported yet.
 const PENDING_SET_GLOBAL: &[&str] = &[
@@ -558,23 +602,7 @@ const PENDING_SET_GLOBAL: &[&str] = &[
 ];
 
 /// Variables whose Go entry has a `GetSession` hook that is not ported yet.
-const PENDING_GET_SESSION: &[&str] = &[
-    "group_concat_max_len",
-    "identity",
-    "last_insert_id",
-    "tidb_current_ts",
-    "tidb_enable_plan_replayer_capture",
-    "tidb_enable_plan_replayer_continuous_capture",
-    "tidb_last_ddl_info",
-    "tidb_last_query_info",
-    "tidb_partition_prune_mode",
-    "tidb_scatter_region",
-    "tidb_session_alias",
-    "tidb_slow_log_rules",
-    "tiflash_replica_read",
-    "timestamp",
-    "txn_scope",
-];
+const PENDING_GET_SESSION: &[&str] = &[];
 
 /// Variables whose Go entry has a `GetGlobal` hook that is not ported yet.
 const PENDING_GET_GLOBAL: &[&str] = &[
@@ -715,7 +743,7 @@ const PENDING_GET_GLOBAL: &[&str] = &[
 ];
 
 /// Variables whose Go entry has a `GetStateValue` hook that is not ported yet.
-const PENDING_GET_STATE_VALUE: &[&str] = &["rand_seed1", "rand_seed2", "tx_isolation_one_shot"];
+const PENDING_GET_STATE_VALUE: &[&str] = &[];
 
 // go-part: defaultSysVars (sysvar.go:L163 tidb_enforce_mpp SetSession closure) L1
 fn ss_tidb_enforce_mpp(s: &mut SessionVars, val: &str) -> Result<(), Error> {
@@ -2006,7 +2034,7 @@ fn ss_tidb_ddl_reorg_priority(_s: &mut SessionVars, _val: &str) -> Result<(), Er
 
 /// `strconv.ParseUint(s, 10, 64)` with Go's `*strconv.NumError` text.
 // go-std: strconv.ParseUint L2 (base 10, bitSize 64 only)
-fn go_parse_uint(s: &str) -> Result<u64, Error> {
+pub(crate) fn go_parse_uint(s: &str) -> Result<u64, Error> {
     let fail = |reason: &str| {
         let quoted = tidb_base::gofmt::sprintf(
             "%q",

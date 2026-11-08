@@ -236,30 +236,18 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 "set" => vars.set_system_var(name, val),
                 "relaxed" => vars.set_system_var_with_relaxed_validation(name, val),
                 "noval" => vars.set_system_var_without_validation(name, val),
-                _ => match vars.set_system_var_with_old_val_as_ret(name, val) {
-                    Ok(old) => {
-                        let old = if volatile(name) {
-                            "<volatile>".to_owned()
-                        } else if global_hook_read(name) {
-                            "<global-hook>".to_owned()
-                        } else {
-                            old
-                        };
-                        res.insert("old".into(), json!(old));
-                        Ok(())
-                    }
-                    Err(e) => {
-                        let old = if volatile(name) {
-                            "<volatile>"
-                        } else if global_hook_read(name) {
-                            "<global-hook>"
-                        } else {
-                            ""
-                        };
-                        res.insert("old".into(), json!(old));
-                        Err(e)
-                    }
-                },
+                _ => {
+                    let (old, err) = vars.set_system_var_with_old_val_as_ret(name, val);
+                    let old = if volatile(name) {
+                        "<volatile>".to_owned()
+                    } else if global_hook_read(name) {
+                        "<global-hook>".to_owned()
+                    } else {
+                        old
+                    };
+                    res.insert("old".into(), json!(old));
+                    err
+                }
             };
             res.insert("fields".into(), diff(&f0, &fields(&vars)));
             res.insert("sys".into(), diff(&s0, &systems(&vars)));
