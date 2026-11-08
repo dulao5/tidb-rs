@@ -3,8 +3,6 @@
 // Go identifiers for the constants (M-GONAME).
 #![allow(non_upper_case_globals)]
 
-use tipb::ExprType;
-
 use crate::kv::ReqSubTypeBasic;
 use crate::kv::ReqSubTypeDesc;
 use crate::kv::ReqSubTypeGroupBy;
@@ -42,45 +40,47 @@ impl RequestTypeSupportedChecker {
     /// currently, we do aggregation push-down check in `CheckAggCanPushCop`.
     ///
     /// Go's `tipb.ExprType` is an int32 that may hold any value (the request sub-types are
-    /// compared too), so the port matches on the integer.
+    /// compared too), so the port matches on the integer. The values are tipb's
+    /// (`proto/expression.proto` at the revision TiDB v8.5.8 uses); the crate does not
+    /// depend on `tipb` (its Rust crate builds gRPC's C++ core).
     // go: RequestTypeSupportedChecker.supportExpr L1
     fn support_expr(self, expr_type: i32) -> bool {
-        const NULL: i32 = ExprType::Null as i32;
-        const INT64: i32 = ExprType::Int64 as i32;
-        const UINT64: i32 = ExprType::Uint64 as i32;
-        const STRING: i32 = ExprType::String as i32;
-        const BYTES: i32 = ExprType::Bytes as i32;
-        const MYSQL_DURATION: i32 = ExprType::MysqlDuration as i32;
-        const MYSQL_TIME: i32 = ExprType::MysqlTime as i32;
-        const MYSQL_DECIMAL: i32 = ExprType::MysqlDecimal as i32;
-        const FLOAT32: i32 = ExprType::Float32 as i32;
-        const FLOAT64: i32 = ExprType::Float64 as i32;
-        const COLUMN_REF: i32 = ExprType::ColumnRef as i32;
-        const MYSQL_ENUM: i32 = ExprType::MysqlEnum as i32;
-        const MYSQL_BIT: i32 = ExprType::MysqlBit as i32;
-        const TIDB_VECTOR_FLOAT32: i32 = ExprType::TiDbVectorFloat32 as i32;
-        const COUNT: i32 = ExprType::Count as i32;
-        const FIRST: i32 = ExprType::First as i32;
-        const MAX: i32 = ExprType::Max as i32;
-        const MIN: i32 = ExprType::Min as i32;
-        const SUM: i32 = ExprType::Sum as i32;
-        const AVG: i32 = ExprType::Avg as i32;
-        const AGG_BIT_XOR: i32 = ExprType::AggBitXor as i32;
-        const AGG_BIT_AND: i32 = ExprType::AggBitAnd as i32;
-        const AGG_BIT_OR: i32 = ExprType::AggBitOr as i32;
-        const APPROX_COUNT_DISTINCT: i32 = ExprType::ApproxCountDistinct as i32;
-        const GROUP_CONCAT: i32 = ExprType::GroupConcat as i32;
-        const ROW_NUMBER: i32 = ExprType::RowNumber as i32;
-        const RANK: i32 = ExprType::Rank as i32;
-        const DENSE_RANK: i32 = ExprType::DenseRank as i32;
-        const CUME_DIST: i32 = ExprType::CumeDist as i32;
-        const PERCENT_RANK: i32 = ExprType::PercentRank as i32;
-        const NTILE: i32 = ExprType::Ntile as i32;
-        const LEAD: i32 = ExprType::Lead as i32;
-        const LAG: i32 = ExprType::Lag as i32;
-        const FIRST_VALUE: i32 = ExprType::FirstValue as i32;
-        const LAST_VALUE: i32 = ExprType::LastValue as i32;
-        const NTH_VALUE: i32 = ExprType::NthValue as i32;
+        const NULL: i32 = 0;
+        const INT64: i32 = 1;
+        const UINT64: i32 = 2;
+        const STRING: i32 = 5;
+        const BYTES: i32 = 6;
+        const MYSQL_DURATION: i32 = 103;
+        const MYSQL_TIME: i32 = 107;
+        const MYSQL_DECIMAL: i32 = 102;
+        const FLOAT32: i32 = 3;
+        const FLOAT64: i32 = 4;
+        const COLUMN_REF: i32 = 201;
+        const MYSQL_ENUM: i32 = 104;
+        const MYSQL_BIT: i32 = 101;
+        const TIDB_VECTOR_FLOAT32: i32 = 121;
+        const COUNT: i32 = 3001;
+        const FIRST: i32 = 3006;
+        const MAX: i32 = 3005;
+        const MIN: i32 = 3004;
+        const SUM: i32 = 3002;
+        const AVG: i32 = 3003;
+        const AGG_BIT_XOR: i32 = 3010;
+        const AGG_BIT_AND: i32 = 3008;
+        const AGG_BIT_OR: i32 = 3009;
+        const APPROX_COUNT_DISTINCT: i32 = 3020;
+        const GROUP_CONCAT: i32 = 3007;
+        const ROW_NUMBER: i32 = 4001;
+        const RANK: i32 = 4002;
+        const DENSE_RANK: i32 = 4003;
+        const CUME_DIST: i32 = 4004;
+        const PERCENT_RANK: i32 = 4005;
+        const NTILE: i32 = 4006;
+        const LEAD: i32 = 4007;
+        const LAG: i32 = 4008;
+        const FIRST_VALUE: i32 = 4009;
+        const LAST_VALUE: i32 = 4010;
+        const NTH_VALUE: i32 = 4011;
         const DESC: i32 = ReqSubTypeDesc as i32;
         const SIGNATURE: i32 = ReqSubTypeSignature as i32;
         match expr_type {

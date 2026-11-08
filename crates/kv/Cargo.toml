@@ -14,8 +14,6 @@ tidb-base = { workspace = true }
 tidb-types = { workspace = true }
 # memory.Tracker (Request.MemTracker, ClientSendOption.SessionMemTracker).
 tidb-memory = { workspace = true }
-# tipb.ExprType (RequestTypeSupportedChecker).
-tipb = { workspace = true }
 # Boxed futures for the object-safe async storage interfaces (N3 3.1: KV access is async).
 futures = { workspace = true }
 # BackOff sleeps without blocking the runtime thread (M-BLOCK).
