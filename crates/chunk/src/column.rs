@@ -144,6 +144,13 @@ impl Column {
         self.finish_append_var();
     }
 
+    /// The column form of `AppendEnum` / `AppendSet` until block D01.1 ports `types.Enum`
+    /// and `types.Set`.
+    // glue: Go Column.AppendEnum / AppendSet body, types.Enum/Set wait for D01.1
+    pub fn append_name_value_for_test(&mut self, name: &[u8], val: u64) {
+        self.append_name_value(name, val);
+    }
+
     /// AppendJSON appends a BinaryJSON value into this Column.
     // go: Column.AppendJSON L1
     pub fn append_json(&mut self, j: &BinaryJSON<'_>) {
@@ -174,6 +181,22 @@ pub struct Column {
     pub(crate) elem_buf: Option<ElemBuf>,
     /// The allocator of buffers this column allocates (N5a 3.7).
     pub(crate) alloc: ColAlloc,
+}
+
+/// See [`Column::govec_state`].
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ColumnState<'a> {
+    /// `length`.
+    pub length: usize,
+    /// `nullBitmap` and its capacity.
+    pub null_bitmap: (&'a [u8], usize),
+    /// `offsets` (little-endian bytes) and its capacity in elements.
+    pub offsets: (&'a [u8], usize),
+    /// `data` and its capacity.
+    pub data: (&'a [u8], usize),
+    /// `elemBuf` and its capacity, `None` when nil.
+    pub elem_buf: Option<(&'a [u8], usize)>,
 }
 
 /// ColumnAllocator defines an allocator for Column.
@@ -420,12 +443,12 @@ impl Column {
             let elem_len = src.elem_len();
             let offset = pos * elem_len;
             for _ in 0..times {
-                self.data.append(&src.data.bytes()[offset..offset + elem_len]);
+                self.data.append(&src.data.capb()[offset..offset + elem_len]);
             }
         } else {
             let (start, end) = (src.offsets.i64_at(pos), src.offsets.i64_at(pos + 1));
             for _ in 0..times {
-                self.data.append(&src.data.bytes()[start as usize..end as usize]);
+                self.data.append(&src.data.capb()[start as usize..end as usize]);
                 self.offsets.push_i64(self.data.len() as i64);
             }
         }
@@ -770,13 +793,13 @@ impl Column {
     /// pointer, sets the length to `c.length`).
     // go: Column.castSliceHeader L2 (N5a 3.3: 1-byte aligned views instead of a slice header cast)
     fn cast_slice_header(&self, type_size: usize) -> &[u8] {
-        &self.data.bytes()[..self.length * type_size]
+        &self.data.capb()[..self.length * type_size]
     }
 
     // glue: mutable counterpart of castSliceHeader (N5a 3.5: result columns)
     fn cast_slice_header_mut(&mut self, type_size: usize) -> &mut [u8] {
         let n = self.length * type_size;
-        &mut self.data.bytes_mut()[..n]
+        &mut self.data.capb_mut()[..n]
     }
 
     /// Int64s returns an int64 slice stored in this Column.
@@ -864,10 +887,19 @@ impl Column {
         <[U64]>::mut_from_bytes(self.cast_slice_header_mut(sizeTime)).unwrap()
     }
 
+    /// `*(*[N]byte)(unsafe.Pointer(&c.data[off]))`: Go checks `off < len(c.data)` (the
+    /// index expression) and reads `N` bytes from there.
+    // glue: Go unsafe read of an element at &c.data[off]
+    #[inline]
+    fn elem<const N: usize>(&self, off: usize) -> [u8; N] {
+        assert!(off < self.data.len(), "index out of range [{off}] with length {}", self.data.len());
+        self.data.capb()[off..off + N].try_into().unwrap()
+    }
+
     // glue: Go *(*[8]byte)(unsafe.Pointer(&c.data[off]))
     #[inline]
     fn word8(&self, off: usize) -> [u8; 8] {
-        self.data.bytes()[off..off + 8].try_into().unwrap()
+        self.elem::<8>(off)
     }
 
     /// GetInt64 returns the int64 in the specific row.
@@ -888,8 +920,7 @@ impl Column {
     // go: Column.GetFloat32 L1
     #[inline]
     pub fn get_float32(&self, row_id: usize) -> f32 {
-        let o = row_id * 4;
-        f32::from_le_bytes(self.data.bytes()[o..o + 4].try_into().unwrap())
+        f32::from_le_bytes(self.elem::<4>(row_id * 4))
     }
 
     /// GetFloat64 returns the float64 in the specific row.
@@ -905,11 +936,8 @@ impl Column {
     /// [`Column::decimals_mut`]). An image whose `negative` byte is not 0 or 1 panics.
     // go: Column.GetDecimal L2 (returns the value, not a pointer into the column)
     pub fn get_decimal(&self, row_id: usize) -> MyDecimal {
-        let o = row_id * MY_DECIMAL_STRUCT_SIZE;
-        let b: &MyDecimalBytes = self.data.bytes()[o..o + MY_DECIMAL_STRUCT_SIZE]
-            .try_into()
-            .unwrap();
-        MyDecimal::from_wire(b).expect("invalid MyDecimal image in chunk column")
+        let b: MyDecimalBytes = self.elem::<MY_DECIMAL_STRUCT_SIZE>(row_id * MY_DECIMAL_STRUCT_SIZE);
+        MyDecimal::from_wire(&b).expect("invalid MyDecimal image in chunk column")
     }
 
     /// GetString returns the string in the specific row.
@@ -924,10 +952,10 @@ impl Column {
     pub fn get_json(&self, row_id: usize) -> BinaryJSON<'_> {
         let start = self.offsets.i64_at(row_id) as usize;
         let end = self.offsets.i64_at(row_id + 1) as usize;
-        let d = self.data.bytes();
+        let type_code = self.data.at(start);
         BinaryJSON {
-            type_code: d[start],
-            value: Cow::Borrowed(&d[start + 1..end]),
+            type_code,
+            value: Cow::Borrowed(&self.data.capb()[start + 1..end]),
         }
     }
 
@@ -947,7 +975,7 @@ impl Column {
     pub fn get_bytes(&self, row_id: usize) -> &[u8] {
         let start = self.offsets.i64_at(row_id) as usize;
         let end = self.offsets.i64_at(row_id + 1) as usize;
-        &self.data.bytes()[start..end]
+        &self.data.capb()[start..end]
     }
 
     /// GetTime returns the Time in the specific row.
@@ -980,7 +1008,7 @@ impl Column {
         let mut v = [0u8; 8];
         let n = (d.len() - start).min(8);
         v[..n].copy_from_slice(&d[start..start + n]);
-        (&d[start + 8..end], u64::from_le_bytes(v))
+        (&self.data.capb()[start + 8..end], u64::from_le_bytes(v))
     }
 
     /// GetRaw returns the underlying raw bytes in the specific row.
@@ -988,7 +1016,7 @@ impl Column {
     pub fn get_raw(&self, row_id: usize) -> &[u8] {
         if self.is_fixed() {
             let elem_len = self.elem_len();
-            &self.data.bytes()[row_id * elem_len..row_id * elem_len + elem_len]
+            &self.data.capb()[row_id * elem_len..row_id * elem_len + elem_len]
         } else {
             self.get_bytes(row_id)
         }
@@ -1002,7 +1030,7 @@ impl Column {
     pub fn set_raw(&mut self, row_id: usize, bs: &[u8]) {
         let start = self.offsets.i64_at(row_id) as usize;
         let end = self.offsets.i64_at(row_id + 1) as usize;
-        let dst = &mut self.data.bytes_mut()[start..end];
+        let dst = &mut self.data.capb_mut()[start..end];
         let n = dst.len().min(bs.len());
         dst[..n].copy_from_slice(&bs[..n]);
     }
@@ -1021,7 +1049,7 @@ impl Column {
                 if self.is_null(src) {
                     *self.null_bitmap.at_mut(idx) &= !(1u8 << pos);
                 } else {
-                    self.data.bytes_mut().copy_within(
+                    self.data.capb_mut().copy_within(
                         src * elem_len..src * elem_len + elem_len,
                         dst * elem_len,
                     );
@@ -1042,7 +1070,7 @@ impl Column {
                         self.offsets.i64_at(src) as usize,
                         self.offsets.i64_at(src + 1) as usize,
                     );
-                    self.data.bytes_mut().copy_within(start..end, tail);
+                    self.data.capb_mut().copy_within(start..end, tail);
                     tail += end - start;
                     self.offsets.set_i64(dst + 1, tail as i64);
                     *self.null_bitmap.at_mut(idx) |= 1u8 << pos;
@@ -1092,7 +1120,7 @@ impl Column {
             dst.elem_buf = Some(ElemBuf::make(elem_len));
             for &i in sel {
                 dst.append_null_bitmap_inner(!self.is_null(i));
-                dst.data.append(&self.data.bytes()[i * elem_len..i * elem_len + elem_len]);
+                dst.data.append(&self.data.capb()[i * elem_len..i * elem_len + elem_len]);
                 dst.length += 1;
             }
         } else {
@@ -1103,7 +1131,7 @@ impl Column {
             for &i in sel {
                 dst.append_null_bitmap_inner(!self.is_null(i));
                 let (start, end) = (self.offsets.i64_at(i), self.offsets.i64_at(i + 1));
-                dst.data.append(&self.data.bytes()[start as usize..end as usize]);
+                dst.data.append(&self.data.capb()[start as usize..end as usize]);
                 dst.offsets.push_i64(dst.data.len() as i64);
                 dst.length += 1;
             }
@@ -1168,6 +1196,21 @@ impl Column {
     // glue: N5a 3.4
     pub fn is_shared(&self) -> bool {
         self.data.is_shared() || self.offsets.is_shared() || self.null_bitmap.is_shared()
+    }
+
+    /// The column's fields as Go sees them, for the govec replay: the length, then each of
+    /// `nullBitmap`, `offsets` (little-endian bytes), `data` with its capacity, and `elemBuf`
+    /// (`None` when nil) with its capacity.
+    // glue: govec replay access to the unexported fields
+    #[doc(hidden)]
+    pub fn govec_state(&self) -> ColumnState<'_> {
+        ColumnState {
+            length: self.length,
+            null_bitmap: (self.null_bitmap.bytes(), self.null_bitmap.cap()),
+            offsets: (self.offsets.bytes(), self.offsets.cap()),
+            data: (self.data.bytes(), self.data.cap()),
+            elem_buf: self.elem_buf.as_ref().map(|e| (e.bytes(), e.cap())),
+        }
     }
 
     /// Go's `cap()` of the three buffers and of `elemBuf`, as `MemoryUsage` sums them.

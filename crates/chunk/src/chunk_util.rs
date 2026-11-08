@@ -45,7 +45,7 @@ pub fn copy_selected_join_rows_direct(src: &Chunk, selected: &[bool], dst: &mut 
 
                 let elem_len = src_col.elem_len();
                 let offset = i * elem_len;
-                dst_col.data.append(&src_col.data.bytes()[offset..offset + elem_len]);
+                dst_col.data.append(&src_col.data.capb()[offset..offset + elem_len]);
             }
         } else {
             for (i, &sel) in selected.iter().enumerate() {
@@ -56,7 +56,7 @@ pub fn copy_selected_join_rows_direct(src: &Chunk, selected: &[bool], dst: &mut 
                 dst_col.length += 1;
 
                 let (start, end) = (src_col.offsets.i64_at(i), src_col.offsets.i64_at(i + 1));
-                dst_col.data.append(&src_col.data.bytes()[start as usize..end as usize]);
+                dst_col.data.append(&src_col.data.capb()[start as usize..end as usize]);
                 dst_col.offsets.push_i64(dst_col.data.len() as i64);
             }
         }
@@ -122,7 +122,7 @@ pub fn copy_selected_rows_with_row_id_func(
 
             let elem_len = src_col.elem_len();
             let offset = row_id * elem_len;
-            dst_col.data.append(&src_col.data.bytes()[offset..offset + elem_len]);
+            dst_col.data.append(&src_col.data.capb()[offset..offset + elem_len]);
         }
     } else {
         for i in start..end {
@@ -134,7 +134,7 @@ pub fn copy_selected_rows_with_row_id_func(
             dst_col.length += 1;
 
             let (start, end) = (src_col.offsets.i64_at(row_id), src_col.offsets.i64_at(row_id + 1));
-            dst_col.data.append(&src_col.data.bytes()[start as usize..end as usize]);
+            dst_col.data.append(&src_col.data.capb()[start as usize..end as usize]);
             dst_col.offsets.push_i64(dst_col.data.len() as i64);
         }
     }
@@ -174,10 +174,10 @@ fn copy_same_outer_rows(outer_col_offset: usize, outer_col_len: usize, src: &Chu
             let elem_len = src_col.elem_len();
             let start = row.idx() * elem_len;
             let end = start + num_rows * elem_len;
-            dst_col.data.append(&src_col.data.bytes()[start..end]);
+            dst_col.data.append(&src_col.data.capb()[start..end]);
         } else {
             let (start, end) = (src_col.offsets.i64_at(row.idx()), src_col.offsets.i64_at(row.idx() + num_rows));
-            dst_col.data.append(&src_col.data.bytes()[start as usize..end as usize]);
+            dst_col.data.append(&src_col.data.capb()[start as usize..end as usize]);
             let elem_len = src_col.offsets.i64_at(row.idx() + 1) - src_col.offsets.i64_at(row.idx());
             for _ in 0..num_rows {
                 let last = dst_col.offsets.last_i64();

@@ -547,10 +547,10 @@ impl Chunk {
                 let dst = self.column_mut(col_id);
                 if src.is_fixed() {
                     let elem_len = src.elem_len();
-                    dst.data.append(&src.data.bytes()[begin * elem_len..end * elem_len]);
+                    dst.data.append(&src.data.capb()[begin * elem_len..end * elem_len]);
                 } else {
                     let (begin_offset, end_offset) = (src.offsets.i64_at(begin), src.offsets.i64_at(end));
-                    dst.data.append(&src.data.bytes()[begin_offset as usize..end_offset as usize]);
+                    dst.data.append(&src.data.capb()[begin_offset as usize..end_offset as usize]);
                     let mut last_offset = dst.offsets.last_i64();
                     for i in begin..end {
                         last_offset += src.offsets.i64_at(i + 1) - src.offsets.i64_at(i);
@@ -799,10 +799,10 @@ pub(crate) fn append_cell_by_cell(dst: &mut Column, src: &Column, row_idx: usize
     if src.is_fixed() {
         let elem_len = src.elem_len();
         let offset = row_idx * elem_len;
-        dst.data.append(&src.data.bytes()[offset..offset + elem_len]);
+        dst.data.append(&src.data.capb()[offset..offset + elem_len]);
     } else {
         let (start, end) = (src.offsets.i64_at(row_idx), src.offsets.i64_at(row_idx + 1));
-        dst.data.append(&src.data.bytes()[start as usize..end as usize]);
+        dst.data.append(&src.data.capb()[start as usize..end as usize]);
         dst.offsets.push_i64(dst.data.len() as i64);
     }
     dst.length += 1;

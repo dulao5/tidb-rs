@@ -11,9 +11,14 @@
 //!
 //! [`GoSlice`] therefore keeps Go's length and capacity, computes the capacity of every
 //! growth with [`growslice_cap`], and backs a capacity of `n` elements with an allocation of
-//! exactly `n * E` bytes (so the bytes accounted by `TrackedAlloc` are Go's capacity). Bytes
-//! written and then cut off by a reslice stay in the buffer and reappear on a reslice up,
-//! as in Go; bytes never written read as zero, as Go's allocator zeroes memory.
+//! exactly `n * E` bytes, initialised to zero as Go's allocator does (so the bytes accounted
+//! by `TrackedAlloc` are Go's capacity). Bytes written and then cut off by a reslice stay in
+//! the buffer and reappear on a reslice up, as in Go.
+//!
+//! Go's slice expressions `s[a:b]` may reach past the length up to the capacity; the chunk
+//! code relies on it (e.g. `Int64s` returns `c.length` elements whatever `len(c.data)` is).
+//! [`GoSlice::capb`] gives the whole capacity for those reads; index expressions `s[i]` check
+//! the length ([`GoSlice::bytes`]).
 //!
 //! A buffer is either owned or a zero-copy slice of a shared response buffer (Go: a
 //! sub-slice of the gRPC message, `SharedBytes`). Go writes into such a slice in place; here
@@ -176,8 +181,7 @@ pub(crate) fn growslice_cap(new_len: usize, old_cap: usize, elem: usize) -> usiz
 
 #[derive(Clone)]
 enum Store {
-    /// `v.len()` is the high-water mark of initialised bytes, at least `start + len * E`;
-    /// the allocation holds `start + cap * E` bytes.
+    /// `v.len()` is `start + cap * E`: the whole capacity, initialised.
     Owned(AVec<u8, ColAlloc>),
     /// `cap * E` bytes of a shared buffer, starting at element 0.
     Shared(Bytes),
@@ -223,7 +227,7 @@ impl<const E: usize> GoSlice<E> {
     pub(crate) fn make(len: usize, cap: usize, alloc: ColAlloc) -> Self {
         debug_assert!(len <= cap);
         let mut v = AVec::with_capacity_in(cap * E, alloc);
-        v.resize(len * E, 0);
+        v.resize(cap * E, 0);
         GoSlice {
             store: Store::Owned(v),
             start: 0,
@@ -293,16 +297,30 @@ impl<const E: usize> GoSlice<E> {
         &mut self.owned()[start..start + n]
     }
 
-    /// Byte range `[from, to)` of the whole capacity, made accessible (zero beyond the
-    /// high-water mark) and writable.
+    /// Byte range `[from, to)` of the capacity, writable.
     // glue: Go in-place write within the capacity
+    #[inline]
     fn owned_range(&mut self, from: usize, to: usize) -> &mut [u8] {
         let start = self.start;
-        let v = self.owned();
-        if v.len() < start + to {
-            v.resize(start + to, 0);
+        &mut self.owned()[start + from..start + to]
+    }
+
+    /// The whole capacity as mutable bytes (copies a shared buffer first).
+    // glue: Go slice expression s[a:b] with b <= cap(s), written
+    #[inline]
+    pub(crate) fn capb_mut(&mut self) -> &mut [u8] {
+        let n = self.cap * E;
+        self.owned_range(0, n)
+    }
+
+    /// The whole capacity as bytes (Go's slice expressions may reach up to the capacity).
+    // glue: Go slice expression s[a:b] with b <= cap(s)
+    #[inline]
+    pub(crate) fn capb(&self) -> &[u8] {
+        match &self.store {
+            Store::Owned(v) => &v[self.start..self.start + self.cap * E],
+            Store::Shared(b) => &b[..self.cap * E],
         }
-        &mut v[start + from..start + to]
     }
 
     /// The owned vector, copying a shared buffer (its whole capacity) first.
@@ -325,12 +343,6 @@ impl<const E: usize> GoSlice<E> {
     #[inline]
     pub(crate) fn reslice(&mut self, n: usize) {
         assert!(n <= self.cap, "slice bounds out of range [:{n}] with capacity {}", self.cap);
-        if let Store::Owned(v) = &mut self.store {
-            let end = self.start + n * E;
-            if v.len() < end {
-                v.resize(end, 0);
-            }
-        }
         self.len = n;
     }
 
@@ -355,6 +367,7 @@ impl<const E: usize> GoSlice<E> {
         let alloc = self.alloc();
         let mut v = AVec::with_capacity_in(newcap * E, alloc);
         v.extend_from_slice(self.bytes());
+        v.resize(newcap * E, 0);
         self.store = Store::Owned(v);
         self.start = 0;
         self.cap = newcap;

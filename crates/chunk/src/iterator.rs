@@ -383,6 +383,8 @@ struct MultiIterator<'a> {
     num_iter: usize,
     length: usize,
     cur_ptr: usize,
+    /// Go's `curIter` (nil until `Begin`).
+    cur_iter: Option<usize>,
     err: Option<Error>,
 }
 
@@ -394,6 +396,7 @@ pub fn new_multi_iterator<'a>(iters: Vec<Box<dyn Iterator<'a> + 'a>>) -> Box<dyn
         num_iter: 0,
         length: 0,
         cur_ptr: 0,
+        cur_iter: None,
         err: None,
     };
     for it in iters {
@@ -418,6 +421,7 @@ impl<'a> Iterator<'a> for MultiIterator<'a> {
     fn begin(&mut self) -> Row<'a> {
         self.cur_ptr = 0;
         if self.num_iter > 0 {
+            self.cur_iter = Some(0);
             self.iters[0].begin();
         }
         self.current_inner()
@@ -429,7 +433,7 @@ impl<'a> Iterator<'a> for MultiIterator<'a> {
         if self.cur_ptr == self.num_iter {
             return self.end();
         }
-        let cur = &mut self.iters[self.cur_ptr];
+        let cur = &mut self.iters[self.cur_iter.expect("invalid memory address or nil pointer dereference")];
         let mut next = cur.next();
         if next == cur.end() {
             self.err = cur.error().cloned();
@@ -441,6 +445,7 @@ impl<'a> Iterator<'a> for MultiIterator<'a> {
             if self.cur_ptr == self.num_iter {
                 return self.end();
             }
+            self.cur_iter = Some(self.cur_ptr);
             next = self.iters[self.cur_ptr].begin();
         }
         next
@@ -455,7 +460,7 @@ impl<'a> Iterator<'a> for MultiIterator<'a> {
         if self.cur_ptr == self.num_iter {
             return self.end();
         }
-        self.iters[self.cur_ptr].current()
+        self.iters[self.cur_iter.expect("invalid memory address or nil pointer dereference")].current()
     }
 
     /// End implements the Iterator interface.
@@ -484,7 +489,7 @@ impl<'a> MultiIterator<'a> {
         if self.cur_ptr == self.num_iter {
             return self.end();
         }
-        let cur = &self.iters[self.cur_ptr];
+        let cur = &self.iters[self.cur_iter.expect("invalid memory address or nil pointer dereference")];
         let row = cur.current();
         if row == cur.end() {
             self.err = cur.error().cloned();

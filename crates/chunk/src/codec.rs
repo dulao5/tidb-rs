@@ -62,7 +62,7 @@ impl Codec {
         // encode nullBitmap.
         if col.null_count() > 0 {
             let num_null_bitmap_bytes = col.length.div_ceil(8);
-            buffer.extend_from_slice(&col.null_bitmap.bytes()[..num_null_bitmap_bytes]);
+            buffer.extend_from_slice(&col.null_bitmap.capb()[..num_null_bitmap_bytes]);
         }
 
         // encode offsets.
@@ -350,7 +350,7 @@ impl Decoder {
             let delta_offset = dest_col.offsets.i64_at(dest_col.length) - src_col.offsets.i64_at(0);
             dest_col
                 .offsets
-                .append(&src_col.offsets.bytes()[8..(required_rows + 1) * 8]);
+                .append(&src_col.offsets.capb()[8..(required_rows + 1) * 8]);
             for i in dest_col.length + 1..=dest_col.length + required_rows {
                 let v = dest_col.offsets.i64_at(i);
                 dest_col.offsets.set_i64(i, v + delta_offset);
@@ -362,7 +362,7 @@ impl Decoder {
         if dest_col.length % 8 == 0 {
             dest_col
                 .null_bitmap
-                .append(&src_col.null_bitmap.bytes()[..num_null_bitmap_bytes]);
+                .append(&src_col.null_bitmap.capb()[..num_null_bitmap_bytes]);
         } else {
             dest_col.append_multi_same_null_bitmap(false, required_rows);
             let bit_map_len = dest_col.null_bitmap.len();
@@ -389,7 +389,7 @@ impl Decoder {
         dest_col.length += required_rows;
 
         let n = num_data_bytes as usize;
-        dest_col.data.append(&src_col.data.bytes()[..n]);
+        dest_col.data.append(&src_col.data.capb()[..n]);
         src_col.data.advance(n);
     }
 }
