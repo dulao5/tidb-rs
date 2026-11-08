@@ -234,8 +234,8 @@ impl GoValue {
             GoValue::BinaryLiteral(b) => {
                 Arg::Stringer(b.string().into_bytes(), "types.BinaryLiteral")
             }
-            GoValue::BitLiteral(b) => Arg::Stringer(b.to_string(), "types.BitLiteral"),
-            GoValue::HexLiteral(b) => Arg::Stringer(b.to_string(), "types.HexLiteral"),
+            GoValue::BitLiteral(b) => Arg::Stringer(fmt_byte_list(&b.0), "types.BitLiteral"),
+            GoValue::HexLiteral(b) => Arg::Stringer(fmt_byte_list(&b.0), "types.HexLiteral"),
             GoValue::Set(s) => Arg::Stringer(s.string(), "types.Set"),
             GoValue::BinaryJSON(j) => Arg::Stringer(j.string(), "types.BinaryJSON"),
             GoValue::Time(t) => Arg::Stringer(t.string(), "types.Time"),
@@ -269,6 +269,28 @@ impl GoValue {
             GoValue::Other(_) => Arg::Stringer(b"<other>".to_vec(), "interface {}"),
         }
     }
+}
+
+/// `hack.Slice(s)`: the bytes of a Go string as a slice. The empty string gives a nil
+/// slice (`unsafe.Slice(unsafe.StringData(""), 0)`), which `GetRaw` and `Copy` observe.
+// go-std: pkg/util/hack.Slice L2 (an owned copy; nil for the empty string)
+fn hack_slice(s: Vec<u8>) -> Option<Vec<u8>> {
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// `%v` of a Go byte-slice type without a `String` method (`BitLiteral`, `HexLiteral`):
+/// the elements in decimal, `[1 2 3]`.
+// go-std: fmt %v of a []byte-kind named type L1
+fn fmt_byte_list(b: &[u8]) -> Vec<u8> {
+    let mut out = b"[".to_vec();
+    for (i, x) in b.iter().enumerate() {
+        if i > 0 {
+            out.push(b' ');
+        }
+        out.extend_from_slice(x.to_string().as_bytes());
+    }
+    out.push(b']');
+    out
 }
 
 /// `cmp.Compare` for floats: NaN is less than any other value and equal to NaN.
@@ -501,7 +523,7 @@ impl Datum {
     // go: Datum.SetString L1
     pub fn set_string(&mut self, s: impl Into<Vec<u8>>, collation: impl Into<Cow<'static, str>>) {
         self.k = KindString;
-        self.b = Some(s.into());
+        self.b = hack_slice(s.into());
         self.collation = collation.into();
     }
 
@@ -692,7 +714,7 @@ impl Datum {
         self.k = KindMysqlEnum;
         self.i = b.value as i64;
         self.collation = collation.into();
-        self.b = Some(b.name);
+        self.b = hack_slice(b.name);
     }
 
     /// GetMysqlSet gets Set value
@@ -710,7 +732,7 @@ impl Datum {
         self.k = KindMysqlSet;
         self.i = b.value as i64;
         self.collation = collation.into();
-        self.b = Some(b.name);
+        self.b = hack_slice(b.name);
     }
 
     /// GetMysqlJSON gets json.BinaryJSON value
@@ -2292,6 +2314,7 @@ impl Datum {
         };
         let mydecimal = match self.k {
             KindMysqlDecimal => Some(self.get_mysql_decimal()),
+            KindMysqlTime => None,
             _ => {
                 if !matches!(self.x, DatumX::Nil) {
                     return Err(errorf(
@@ -2361,7 +2384,6 @@ impl Datum {
         let mut b: Option<Vec<u8>> = None;
         let mut time = Time::default();
         let mut mydecimal: Option<MyDecimal> = None;
-        let mut fatal: Option<Error> = None;
         let mut d = gojson::Decoder::with_source(data);
         d.object(
             &raw,
@@ -2380,8 +2402,7 @@ impl Datum {
                     let mut bytes = None;
                     d.raw_message(v, &mut bytes);
                     if let Err(err) = time.unmarshal_json(bytes.as_deref().unwrap_or(b"null")) {
-                        d.fail(gojson::DecodeError::Other(err.to_string()));
-                        fatal.get_or_insert(err);
+                        d.fail(nested_json_error(&err));
                     }
                 }
                 7 => {
@@ -2393,16 +2414,12 @@ impl Datum {
                     d.raw_message(v, &mut bytes);
                     let dec = mydecimal.get_or_insert_with(MyDecimal::default);
                     if let Err(err) = dec.unmarshal_json(bytes.as_deref().unwrap_or(b"null")) {
-                        d.fail(gojson::DecodeError::Other(err.to_string()));
-                        fatal.get_or_insert(err);
+                        d.fail(nested_json_error(&err));
                     }
                 }
                 _ => {}
             },
         );
-        if let Some(err) = fatal {
-            return Err(err);
-        }
         d.finish()
             .map_err(|e| tidb_base::errors::new(e.to_string()))?;
         self.k = k as u8;
@@ -2441,6 +2458,36 @@ impl Datum {
         }
         bytes_consumed as i64
     }
+}
+
+/// The error of a nested `UnmarshalJSON` (Time, MyDecimal) as the decoding error Go's
+/// `addErrorContext` rewrites: an `*UnmarshalTypeError` gets the enclosing struct and the
+/// field path prepended; any other error is returned as is.
+// go-std: encoding/json.decodeState.addErrorContext L2 (the type error parsed back from its message)
+fn nested_json_error(err: &Error) -> gojson::DecodeError {
+    let msg = String::from_utf8_lossy(&err.error()).into_owned();
+    let parse = || -> Option<gojson::DecodeError> {
+        let rest = msg.strip_prefix("json: cannot unmarshal ")?;
+        let (value, rest) = rest.split_once(" into Go ")?;
+        if let Some(t) = rest.strip_prefix("value of type ") {
+            return Some(gojson::DecodeError::Type {
+                value: value.to_owned(),
+                ty: t.to_owned(),
+                struct_name: String::new(),
+                field: String::new(),
+            });
+        }
+        let rest = rest.strip_prefix("struct field ")?;
+        let (path, t) = rest.split_once(" of type ")?;
+        let (_st, field) = path.split_once('.')?;
+        Some(gojson::DecodeError::Type {
+            value: value.to_owned(),
+            ty: t.to_owned(),
+            struct_name: String::new(),
+            field: field.to_owned(),
+        })
+    };
+    parse().unwrap_or(gojson::DecodeError::Other(msg))
 }
 
 /// `(T, error)` of a `Result<T, Error>` whose error result carries Go's zero T.

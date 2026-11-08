@@ -153,6 +153,9 @@ fn bj(v: &Value) -> BinaryJSON<'static> {
 
 fn exec(op: &str, a: &[Value]) -> Got {
     collate::set_new_collation_enabled_for_test(true);
+    if let Some(g) = part2::exec(op, a) {
+        return g;
+    }
     let nw = |(v, e): (Value, Option<Error>)| (v, e, vec![]);
     let ww = |(v, e): (Value, Option<Error>), w: Arc<Warns>| (v, e, w.0.lock().unwrap().clone());
     match op {
@@ -678,7 +681,11 @@ fn govec_datum() {
         }
     }
     std::panic::set_hook(prev);
-    let shown: Vec<_> = fails.iter().take(30).collect();
+    let show = std::env::var("GOVEC_SHOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let shown: Vec<_> = fails.iter().take(show).collect();
     assert!(
         fails.is_empty(),
         "{} of {n} records differ:\n{}",
@@ -690,4 +697,611 @@ fn govec_datum() {
             .join("\n")
     );
     assert_eq!(n as u64, header["records"].as_u64().unwrap());
+}
+
+/// Part 2 of block D01.1: datum.go, field_type*.go, field_name.go, datum_eval.go.
+mod part2 {
+    use super::*;
+    use std::borrow::Cow;
+    use tidb_parser::model::CIStr;
+    use tidb_types::core_time::CoreTime;
+    use tidb_types::datum::{self as dm, Datum, GoValue, RoundingType};
+    use tidb_types::datum_eval::compute_plus;
+    use tidb_types::enum_type::Enum;
+    use tidb_types::field_name::{EmptyName, FieldName, shallow};
+    use tidb_types::field_type as ftm;
+    use tidb_types::field_type_builder::new_field_type_builder;
+    use tidb_types::json::{JSONValue, create_binary_json};
+    use tidb_types::set_type::Set;
+    use tidb_types::vector::parse_vector_float32;
+
+    fn hex_opt(v: &Value) -> Option<Vec<u8>> {
+        if v.is_null() {
+            None
+        } else {
+            Some(unhex(v.as_str().unwrap()))
+        }
+    }
+
+    fn st(v: &Value) -> String {
+        v.as_str().unwrap().to_owned()
+    }
+
+    fn time_of_raw(raw: u64) -> Time {
+        Time::from_raw(CoreTime(raw))
+    }
+
+    pub fn datum_in(v: &Value) -> Datum {
+        let p = v.as_array().unwrap();
+        let k = p[0].as_u64().unwrap() as u8;
+        let mut d = Datum::default();
+        match k {
+            dm::KindNull => d.set_null(),
+            dm::KindMinNotNull => d.set_min_not_null(),
+            dm::KindMaxValue => d = dm::max_value_datum(),
+            dm::KindInt64 => d.set_int64(i(&p[1])),
+            dm::KindUint64 => d.set_uint64(u(&p[1])),
+            dm::KindFloat32 => d.set_float32(f(&p[1]) as f32),
+            dm::KindFloat64 => d.set_float64(f(&p[1])),
+            dm::KindString => d.set_string(s(&p[1]), st(&p[2])),
+            dm::KindBytes => d.set_bytes(hex_opt(&p[1])),
+            dm::KindBinaryLiteral => {
+                d.set_binary_literal(BinaryLiteral(hex_opt(&p[1]).unwrap_or_default()))
+            }
+            dm::KindMysqlBit => d.set_mysql_bit(BinaryLiteral(hex_opt(&p[1]).unwrap_or_default())),
+            dm::KindMysqlDecimal => {
+                let mut dec = MyDecimal::default();
+                let _ = dec.from_string(p[1].as_str().unwrap().as_bytes());
+                d.set_mysql_decimal(dec);
+            }
+            dm::KindMysqlDuration => d.set_mysql_duration(Duration {
+                duration: i(&p[1]),
+                fsp: i(&p[2]) as isize,
+            }),
+            dm::KindMysqlEnum => d.set_mysql_enum(
+                Enum {
+                    value: u(&p[1]),
+                    name: s(&p[2]),
+                },
+                st(&p[3]),
+            ),
+            dm::KindMysqlSet => d.set_mysql_set(
+                Set {
+                    value: u(&p[1]),
+                    name: s(&p[2]),
+                },
+                st(&p[3]),
+            ),
+            dm::KindMysqlTime => d.set_mysql_time(time_of_raw(u(&p[1]))),
+            dm::KindRaw => d.set_raw(hex_opt(&p[1])),
+            dm::KindMysqlJSON => d.set_mysql_json(BinaryJSON::owned(
+                u(&p[1]) as u8,
+                hex_opt(&p[2]).unwrap_or_default(),
+            )),
+            dm::KindVectorFloat32 => d.set_vector_float32(
+                parse_vector_float32(p[1].as_str().unwrap().as_bytes()).unwrap(),
+            ),
+            _ => panic!("datum_in: kind {k}"),
+        }
+        d
+    }
+
+    pub fn datum_out(d: &Datum) -> Value {
+        let mut m = serde_json::Map::new();
+        m.insert("k".into(), json!(d.kind()));
+        m.insert("frac".into(), json!(d.frac()));
+        m.insert("len".into(), json!(d.length()));
+        m.insert("i".into(), json!(d.get_int64()));
+        m.insert("coll".into(), gs(d.collation().as_bytes()));
+        m.insert("b".into(), json!(hex(d.get_bytes())));
+        if d.kind() == dm::KindRaw && d.raw_b().is_none() {
+            m.insert("raw_nil".into(), json!(true));
+        }
+        match d.kind() {
+            dm::KindMysqlDecimal => {
+                m.insert("dec".into(), dec_out(d.get_mysql_decimal()));
+            }
+            dm::KindMysqlTime => {
+                m.insert("time".into(), time_out(&d.get_mysql_time()));
+            }
+            _ => {}
+        }
+        Value::Object(m)
+    }
+
+    fn datum_outs(ds: &[Datum]) -> Value {
+        Value::Array(ds.iter().map(datum_out).collect())
+    }
+
+    fn ft_in(v: &Value) -> FieldType {
+        let p = v.as_array().unwrap();
+        let mut ft = new_field_type_builder()
+            .set_type(u(&p[0]) as u8)
+            .set_flag(u(&p[1]) as usize)
+            .set_flen(i(&p[2]) as isize)
+            .set_decimal(i(&p[3]) as isize)
+            .set_charset(p[4].as_str().unwrap())
+            .set_collate(p[5].as_str().unwrap())
+            .build_p();
+        if !p[6].is_null() {
+            ft.set_elems(Some(elems(&p[6])));
+        }
+        ft
+    }
+
+    fn ft_out(ft: &FieldType) -> Value {
+        json!({
+            "tp": ft.get_type(), "flag": ft.get_flag(), "flen": ft.get_flen(), "dec": ft.get_decimal(),
+            "cs": ft.get_charset(), "co": ft.get_collate(),
+            "elems": ft.get_elems().map_or(Value::Null, |e| Value::Array(e.iter().map(|x| gs(x)).collect())),
+        })
+    }
+
+    fn go_value_in(v: &Value) -> GoValue {
+        let p = v.as_array().unwrap();
+        match p[0].as_str().unwrap() {
+            "nil" => GoValue::Nil,
+            "bool" => GoValue::Bool(p[1].as_bool().unwrap()),
+            "int" => GoValue::Int(i(&p[1])),
+            "int64" => GoValue::Int64(i(&p[1])),
+            "uint64" => GoValue::Uint64(u(&p[1])),
+            "float32" => GoValue::Float32(f(&p[1]) as f32),
+            "float64" => GoValue::Float64(f(&p[1])),
+            "string" => GoValue::String(s(&p[1])),
+            "bytes" => GoValue::Bytes(hex_opt(&p[1])),
+            "decimal" => {
+                let mut dec = MyDecimal::default();
+                let _ = dec.from_string(p[1].as_str().unwrap().as_bytes());
+                GoValue::Decimal(Box::new(dec))
+            }
+            "duration" => GoValue::Duration(Duration {
+                duration: i(&p[1]),
+                fsp: i(&p[2]) as isize,
+            }),
+            "enum" => GoValue::Enum(Enum {
+                value: u(&p[1]),
+                name: s(&p[2]),
+            }),
+            "set" => GoValue::Set(Set {
+                value: u(&p[1]),
+                name: s(&p[2]),
+            }),
+            "binlit" => GoValue::BinaryLiteral(BinaryLiteral(unhex(p[1].as_str().unwrap()))),
+            "bitlit" => GoValue::BitLiteral(bl::BitLiteral(unhex(p[1].as_str().unwrap()))),
+            "hexlit" => GoValue::HexLiteral(bl::HexLiteral(unhex(p[1].as_str().unwrap()))),
+            "json" => GoValue::BinaryJSON(BinaryJSON::owned(
+                u(&p[1]) as u8,
+                unhex(p[2].as_str().unwrap()),
+            )),
+            "time" => GoValue::Time(time_of_raw(u(&p[1]))),
+            "vector" => GoValue::VectorFloat32(
+                parse_vector_float32(p[1].as_str().unwrap().as_bytes()).unwrap(),
+            ),
+            "slice" => GoValue::Slice(p[1].as_array().unwrap().iter().map(go_value_in).collect()),
+            t => panic!("go_value_in {t}"),
+        }
+    }
+
+    fn opt_err(r: Result<(), Error>) -> Option<Error> {
+        r.err()
+    }
+
+    pub fn exec(op: &str, a: &[Value]) -> Option<Got> {
+        let ww = |v: Value, e: Option<Error>, w: Arc<Warns>| -> Got {
+            let ws = w.0.lock().unwrap().clone();
+            (v, e, ws)
+        };
+        Some(match op {
+            "d_convert" => {
+                let (c, w) = ctx(a, 0);
+                let d = datum_in(&a[1]);
+                let ft = ft_in(&a[2]);
+                let (ret, err) = d.convert_to(&c, &ft);
+                ww(datum_out(&ret), opt_err(err), w)
+            }
+            "d_compare" => {
+                let (c, w) = ctx(a, 0);
+                let x = datum_in(&a[1]);
+                let y = datum_in(&a[2]);
+                let (cmp, err) = x.compare(&c, &y, collate::get_collator(a[3].as_str().unwrap()));
+                let eq = x.equals(Some(&y));
+                ww(json!({"cmp": cmp, "eq": eq}), opt_err(err), w)
+            }
+            "d_to" => {
+                let (c, w) = ctx(a, 0);
+                let d = datum_in(&a[1]);
+                let (v, e): (Value, Option<Error>) = match a[2].as_str().unwrap() {
+                    "bool" => {
+                        let (v, e) = d.to_bool(&c);
+                        (json!(v), e.err())
+                    }
+                    "decimal" => {
+                        let (v, e) = d.to_decimal(&c);
+                        // Go: a nil *MyDecimal (ConvertJSONToDecimal error) records out = null.
+                        if e.is_err() && d.kind() == dm::KindMysqlJSON {
+                            (Value::Null, e.err())
+                        } else {
+                            (dec_out(&v), e.err())
+                        }
+                    }
+                    "int64" => {
+                        let (v, e) = d.to_int64(&c);
+                        (json!(v), e.err())
+                    }
+                    "float64" => {
+                        let (v, e) = d.to_float64(&c);
+                        (json!(v.to_bits()), e.err())
+                    }
+                    "string" => match d.to_string() {
+                        Ok(v) => (gs(&v), None),
+                        Err(e) => (json!(""), Some(e)),
+                    },
+                    "bytes" => match d.to_bytes() {
+                        Ok(v) => (json!(hex(&v)), None),
+                        Err(e) => (json!(""), Some(e)),
+                    },
+                    "hash_key" => match d.to_hash_key() {
+                        Ok(v) => (json!(hex(&v)), None),
+                        Err(e) => (json!(""), Some(e)),
+                    },
+                    "json" => match d.to_mysql_json() {
+                        Ok(j) => (json!([j.type_code, hex(&j.value)]), None),
+                        Err(e) => (json!([0, ""]), Some(e)),
+                    },
+                    "str" => (gs(&d.string()), None),
+                    "trunc" => (gs(&d.truncated_stringify()), None),
+                    "value_str" => match convert::to_string(&d.get_value()) {
+                        Ok(v) => (gs(&v), None),
+                        Err(e) => (json!(""), Some(e)),
+                    },
+                    "mem" => {
+                        let raw = d.raw_b();
+                        let cap = raw.map_or(0, |_| {
+                            d.mem_usage() - dm::EmptyDatumSize - d.collation().len() as i64
+                        });
+                        let len = raw.map_or(0, |b| b.len()) as i64;
+                        (
+                            json!({"mem": d.mem_usage() - cap + len, "est": d.estimated_mem_usage()}),
+                            None,
+                        )
+                    }
+                    "marshal" => match d.marshal_json() {
+                        Ok(v) => (gs(&v), None),
+                        Err(e) => (json!(""), Some(e)),
+                    },
+                    "lit4cmp" => (json!(hex(&d.get_binary_literal4_cmp().0)), None),
+                    "encoded" => (gs(&d.get_binary_string_encoded()), None),
+                    "decoded" => {
+                        let (v, e) = d.get_binary_string_decoded(c.flags(), a[3].as_str().unwrap());
+                        (gs(&v), e.err())
+                    }
+                    "checked" => {
+                        let (v, e) = d.get_string_with_check(c.flags(), a[3].as_str().unwrap());
+                        (gs(&v), e.err())
+                    }
+                    "clone" => {
+                        let cl = d.clone_datum();
+                        (
+                            json!({"d": datum_out(&cl), "eq": cl.equals(Some(&d))}),
+                            None,
+                        )
+                    }
+                    other => panic!("d_to {other}"),
+                };
+                ww(v, e, w)
+            }
+            "d_unmarshal" => {
+                let mut d = Datum::default();
+                match d.unmarshal_json(&s(&a[0])) {
+                    Ok(()) => (datum_out(&d), None, vec![]),
+                    Err(e) => (Value::Null, Some(e), vec![]),
+                }
+            }
+            "d_list" => {
+                let (c, w) = ctx(a, 1);
+                let mut ds: Vec<Datum> = a[2]
+                    .as_array()
+                    .map_or(vec![], |l| l.iter().map(datum_in).collect());
+                match a[0].as_str().unwrap() {
+                    "to_string" => match dm::datums_to_string(&ds, a[3].as_bool().unwrap()) {
+                        Ok(v) => (gs(&v), None, vec![]),
+                        Err(e) => (json!(""), Some(e), vec![]),
+                    },
+                    "to_string_smart" => {
+                        match dm::datums_to_string_smart(&ds, a[3].as_bool().unwrap()) {
+                            Ok(v) => (gs(&v), None, vec![]),
+                            Err(e) => (json!(""), Some(e), vec![]),
+                        }
+                    }
+                    "no_err" => (
+                        json!({"s": gs(&dm::datums_to_str_no_err(&ds)), "smart": gs(&dm::datums_to_str_no_err_smart(&ds))}),
+                        None,
+                        vec![],
+                    ),
+                    "sort" => {
+                        let err = dm::sort_datums(&c, &mut ds);
+                        ww(datum_outs(&ds), err.err(), w)
+                    }
+                    "misc" => {
+                        let cl = dm::clone_row(&ds);
+                        (
+                            json!({"clone": datum_outs(&cl), "null": dm::datums_contain_null(&ds),
+                                   "est": dm::estimated_mem_usage(&ds, i(&a[3]) as isize)}),
+                            None,
+                            vec![],
+                        )
+                    }
+                    other => panic!("d_list {other}"),
+                }
+            }
+            "d_bound" => {
+                let ft = ft_in(&a[0]);
+                (
+                    json!({"max": datum_out(&dm::get_max_value(&ft)), "min": datum_out(&dm::get_min_value(&ft))}),
+                    None,
+                    vec![],
+                )
+            }
+            "d_reverse" => {
+                let (c, w) = ctx(a, 0);
+                let ft = ft_in(&a[1]);
+                let d = datum_in(&a[2]);
+                let (ret, err) = dm::change_reverse_result_by_upper_lower_bound(
+                    &c,
+                    &ft,
+                    d,
+                    RoundingType(u(&a[3]) as u8),
+                );
+                ww(datum_out(&ret), err.err(), w)
+            }
+            "d_plus" => {
+                let x = datum_in(&a[0]);
+                let y = datum_in(&a[1]);
+                let (ret, err) = compute_plus(&x, &y);
+                (datum_out(&ret), err.err(), vec![])
+            }
+            "d_new" => {
+                let v = go_value_in(&a[0]);
+                let d = dm::new_datum(v.clone());
+                let mut d2 = Datum::default();
+                let ft = ft_in(&a[1]);
+                d2.set_value(v.clone(), &ft);
+                let mut tp = FieldType::default();
+                ftm::infer_param_type_from_datum(&d, &mut tp);
+                let mut tp2 = FieldType::default();
+                ftm::default_type_for_value(&v, &mut tp2, "utf8mb4", "utf8mb4_bin");
+                let (vs, verr) = match convert::to_string(&v) {
+                    Ok(x) => (x, Value::Null),
+                    Err(e) => (Vec::new(), gs(&e.error())),
+                };
+                (
+                    json!({"d": datum_out(&d), "d2": datum_out(&d2), "infer": ft_out(&tp), "def": ft_out(&tp2),
+                           "str": gs(&d.string()), "to_string": gs(&vs), "to_string_err": verr}),
+                    None,
+                    vec![],
+                )
+            }
+            "d_ctor" => {
+                let n = i(&a[0]);
+                let sv = s(&a[1]);
+                let coll: Cow<'static, str> = Cow::Owned(st(&a[2]));
+                let fl = f(&a[3]);
+                let mut m = serde_json::Map::new();
+                m.insert("uint".into(), datum_out(&dm::new_uint_datum(n as u64)));
+                m.insert("bytes".into(), datum_out(&dm::new_bytes_datum(sv.clone())));
+                m.insert(
+                    "string".into(),
+                    datum_out(&dm::new_string_datum(sv.clone())),
+                );
+                m.insert(
+                    "cstring".into(),
+                    datum_out(&dm::new_collation_string_datum(sv.clone(), coll.clone())),
+                );
+                m.insert("f64".into(), datum_out(&dm::new_float64_datum(fl)));
+                m.insert("f32".into(), datum_out(&dm::new_float32_datum(fl as f32)));
+                m.insert(
+                    "dur".into(),
+                    datum_out(&dm::new_duration_datum(Duration {
+                        duration: n,
+                        fsp: (n & 7) as isize,
+                    })),
+                );
+                m.insert(
+                    "time".into(),
+                    datum_out(&dm::new_time_datum(time_of_raw(n as u64))),
+                );
+                let mut dec = MyDecimal::default();
+                dec.from_int(n);
+                m.insert("dec".into(), datum_out(&dm::new_decimal_datum(dec)));
+                m.insert(
+                    "json".into(),
+                    datum_out(&dm::new_json_datum(create_binary_json(JSONValue::String(
+                        sv.clone(),
+                    )))),
+                );
+                m.insert(
+                    "binlit".into(),
+                    datum_out(&dm::new_binary_literal_datum(BinaryLiteral(sv.clone()))),
+                );
+                m.insert(
+                    "bit".into(),
+                    datum_out(&dm::new_mysql_bit_datum(BinaryLiteral(sv.clone()))),
+                );
+                m.insert(
+                    "enum".into(),
+                    datum_out(&dm::new_mysql_enum_datum(Enum {
+                        name: sv.clone(),
+                        value: n as u64,
+                    })),
+                );
+                m.insert(
+                    "cenum".into(),
+                    datum_out(&dm::new_collate_mysql_enum_datum(
+                        Enum {
+                            name: sv.clone(),
+                            value: n as u64,
+                        },
+                        coll.clone(),
+                    )),
+                );
+                m.insert(
+                    "set".into(),
+                    datum_out(&dm::new_mysql_set_datum(
+                        Set {
+                            name: sv.clone(),
+                            value: n as u64,
+                        },
+                        coll.clone(),
+                    )),
+                );
+                m.insert("minnn".into(), datum_out(&dm::min_not_null_datum()));
+                m.insert("max".into(), datum_out(&dm::max_value_datum()));
+                let mut d = Datum::default();
+                d.set_auto_id(n, u(&a[4]) as usize);
+                m.insert("autoid".into(), datum_out(&d));
+                d.set_float32_from_f64(fl);
+                m.insert("f32f64".into(), datum_out(&d));
+                d.set_bytes_as_string(sv.clone(), coll.clone(), n as u32);
+                m.insert("bas".into(), datum_out(&d));
+                d.set_raw(sv.clone());
+                m.insert("raw".into(), datum_out(&d));
+                d.set_collation(coll.clone());
+                d.set_frac(n as isize);
+                d.set_length(n as isize);
+                m.insert("setters".into(), datum_out(&d));
+                d.set_min_not_null();
+                m.insert("setminnn".into(), datum_out(&d));
+                d.set_null();
+                m.insert("setnull".into(), datum_out(&d));
+                (Value::Object(m), None, vec![])
+            }
+            "ft" => match a[0].as_str().unwrap() {
+                "agg" => {
+                    let fts: Vec<FieldType> = a[1].as_array().unwrap().iter().map(ft_in).collect();
+                    let refs: Vec<&FieldType> = fts.iter().collect();
+                    let mut flag = u(&a[2]) as usize;
+                    let et = ftm::aggregate_eval_type(&refs, &mut flag);
+                    let agg = ftm::agg_field_type(&refs);
+                    let mut fixed = agg.deep_copy();
+                    ftm::try_to_fix_flen_of_datetime(&mut fixed);
+                    (
+                        json!({"agg": ft_out(&agg), "fixed": ft_out(&fixed), "et": et.0, "flag": flag}),
+                        None,
+                        vec![],
+                    )
+                }
+                "new" => {
+                    let tp = u(&a[1]) as u8;
+                    let (cs, co) = ftm::default_charset_for_type(tp);
+                    (
+                        json!({"ft": ft_out(&ftm::new_field_type(tp)), "cs": cs, "co": co}),
+                        None,
+                        vec![],
+                    )
+                }
+                "new_coll" => (
+                    ft_out(&ftm::new_field_type_with_collation(
+                        u(&a[1]) as u8,
+                        a[2].as_str().unwrap(),
+                        i(&a[3]) as isize,
+                    )),
+                    None,
+                    vec![],
+                ),
+                "modify" => {
+                    let (can, err) =
+                        ftm::check_modify_type_compatible(&ft_in(&a[1]), &ft_in(&a[2]));
+                    (json!(can), err.err(), vec![])
+                }
+                "char_varchar" => (
+                    json!(ftm::convert_between_char_and_varchar(
+                        u(&a[1]) as u8,
+                        u(&a[2]) as u8
+                    )),
+                    None,
+                    vec![],
+                ),
+                "varchar_big" => (
+                    Value::Null,
+                    ftm::is_varchar_too_big_field_length(
+                        i(&a[1]) as isize,
+                        &s(&a[2]),
+                        a[3].as_str().unwrap(),
+                    )
+                    .err(),
+                    vec![],
+                ),
+                "set_flag" => {
+                    let mut flag = u(&a[1]) as usize;
+                    ftm::set_type_flag(&mut flag, u(&a[2]) as usize, a[3].as_bool().unwrap());
+                    (json!(flag), None, vec![])
+                }
+                other => panic!("ft {other}"),
+            },
+            "ft_builder" => {
+                let b = new_field_type_builder()
+                    .set_type(u(&a[0]) as u8)
+                    .set_flag(u(&a[1]) as usize)
+                    .add_flag(u(&a[2]) as usize)
+                    .del_flag(u(&a[3]) as usize)
+                    .set_flen(i(&a[4]) as isize)
+                    .set_decimal(i(&a[5]) as isize)
+                    .set_charset(a[6].as_str().unwrap())
+                    .set_collate(a[7].as_str().unwrap());
+                let v = json!({"tp": b.get_type(), "flag": b.get_flag(), "flen": b.get_flen(),
+                    "dec": b.get_decimal(), "cs": b.get_charset(), "co": b.get_collate()});
+                let mut v = v;
+                v["ft"] = ft_out(&b.build_p());
+                (v, None, vec![])
+            }
+            "context" => {
+                let fl = Flags(u(&a[0]) as u16);
+                let on = a[1].as_bool().unwrap();
+                let w = Arc::new(Warns::default());
+                let c = new_context(fl, utc(), w.clone());
+                let loc = tidb_base::gostd::time::load_location(a[2].as_str().unwrap()).unwrap();
+                let c1 = c.with_flags(fl.with_truncate_as_warning(on));
+                let c2 = c1.with_location(loc);
+                c2.append_warning(tidb_types::errors::ErrTruncated.clone());
+                let get = json!({"anu": fl.allow_negative_to_unsigned(), "cty": fl.cast_time_to_year_through_concat(),
+                    "iid": fl.ignore_invalid_date_err(), "ite": fl.ignore_truncate_err(), "izd": fl.ignore_zero_date_err(),
+                    "izi": fl.ignore_zero_in_date(), "sa": fl.skip_ascii_check(), "su": fl.skip_utf8_check(),
+                    "su4": fl.skip_utf8mb4_check(), "taw": fl.truncate_as_warning()});
+                let with = json!({"anu": fl.with_allow_negative_to_unsigned(on).0,
+                    "cty": fl.with_cast_time_to_year_through_concat(on).0, "iid": fl.with_ignore_invalid_date_err(on).0,
+                    "ite": fl.with_ignore_truncate_err(on).0, "izd": fl.with_ignore_zero_date_err(on).0,
+                    "izi": fl.with_ignore_zero_in_date(on).0, "sa": fl.with_skip_sacii_check(on).0,
+                    "su": fl.with_skip_utf8_check(on).0, "su4": fl.with_skip_utf8mb4_check(on).0,
+                    "taw": fl.with_truncate_as_warning(on).0});
+                let n = w.0.lock().unwrap().len();
+                (
+                    json!({"get": get, "with": with, "flags": c2.flags().0, "orig": c.flags().0,
+                        "loc": c2.location().string(), "loc0": c.location().string(), "warns": n}),
+                    None,
+                    vec![],
+                )
+            }
+            "field_name" => {
+                let ci = |k: usize| CIStr::new(a[k].as_str().unwrap());
+                let n = FieldName {
+                    orig_tbl_name: ci(0),
+                    orig_col_name: ci(1),
+                    db_name: ci(2),
+                    tbl_name: ci(3),
+                    col_name: ci(4),
+                    hidden: a[5].as_bool().unwrap(),
+                    ..FieldName::default()
+                };
+                let c = n.clone_name();
+                let sl = shallow(&[Arc::new(n.clone()), EmptyName.clone()]);
+                (
+                    json!({"s": n.string(), "mem": n.memory_usage(), "clone_s": c.string(),
+                        "empty": sl[1].string(), "len": sl.len()}),
+                    None,
+                    vec![],
+                )
+            }
+            _ => return None,
+        })
+    }
 }
