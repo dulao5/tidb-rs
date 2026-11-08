@@ -898,6 +898,12 @@ fn decode_restored_values_v5<'a>(
             let mut s = no_padding_str.to_vec();
             // strings.Repeat panics on a negative count.
             assert!(padding_count >= 0, "strings: negative Repeat count");
+            // A corrupted padding count asks for up to 2^63 spaces: Go dies with "fatal error:
+            // out of memory" (not recoverable); Rust would abort. The port panics instead
+            // when the allocation fails (L2, spec §4; upstream-pitfall candidate spec §5).
+            if s.try_reserve_exact(padding_count as usize).is_err() {
+                panic!("runtime: out of memory: cannot allocate {padding_count} bytes");
+            }
             s.extend(std::iter::repeat_n(b' ', padding_count as usize));
             let collation = new_datum.collation().to_owned();
             new_datum.set_string(s, collation);
