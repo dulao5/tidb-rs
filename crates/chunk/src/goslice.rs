@@ -529,6 +529,24 @@ impl<const E: usize> GoSlice<E> {
         self.capb()[i]
     }
 
+    /// `s[i] |= bit` (`E = 1`), Go's index check included.
+    // glue: Go index (read-modify-write)
+    #[inline(always)]
+    pub(crate) fn or_at(&mut self, i: usize, bit: u8) {
+        assert!(
+            i < self.len,
+            "index out of range [{i}] with length {}",
+            self.len
+        );
+        self.make_owned();
+        // SAFETY: `i < len <= cap`, so the byte lies within the `cap * E` initialised bytes
+        // of the owned vector behind `ptr` (struct invariant), borrowed by `&mut self`.
+        #[allow(unsafe_code)]
+        unsafe {
+            *self.ptr.as_ptr().add(i) |= bit;
+        }
+    }
+
     /// `&mut s[i]` (`E = 1`).
     // glue: Go index (write)
     #[inline(always)]

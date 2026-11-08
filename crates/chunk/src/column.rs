@@ -431,7 +431,7 @@ impl Column {
         }
         if not_null {
             let pos = self.length & 7;
-            *self.null_bitmap.at_mut(idx) |= 1 << pos;
+            self.null_bitmap.or_at(idx, 1 << pos);
         }
     }
 
