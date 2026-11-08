@@ -138,3 +138,21 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
 1. 把 B2 第一轮的 SetGlobal 钩子（hook_state 的各单元、gctuner、TTL 窗口、stmt summary 等）加入 `set_global_hook`，并把它们写的状态加入两侧的重置列表（目前只有这两个变量和 B1 的 60 个）。
 2. 非标量字段的导出（T6 的效果目前只经 GetSession / GetGlobal 读回间接比较）；minelits；Lucky 的两步记录（LDAP pool 容量、ca_path）。
 3. PR C：tidb_gc_*（T10）后跳过上限降到 0。
+
+## PR C 交接（2026-11-09，第一轮）
+
+分支 `block/D05.2-sessionvars-c`（tracker `govec/sessionvars-D05.2-c`，尚无提交）。基于 B2 的分支开出；**B2 已合并（#66 @ff51f72），B3（#69、tracker #33）要在 PR C 之前合并**，所以下一轮先 `git rebase --onto origin/main <B2 tip 1f5a7eb>`，B3 合并后再 rebase 一次。
+
+**已完成（提交 a4ff3da，仅编译通过，未测）**
+- `tidb-tablecodec`：`rowcodec/encoder.rs`（`Encoder`、`Checksum::{No, Raw}`、`encode_value_datum`、encodeInt/Uint、排序），`tablecodec.rs` 末尾的 `gen_index_value_portal`、`gen_index_value_for_clustered_index_version1`、`gen_index_value_version0`、`encode_handle_in_unique_index_value`、`encode_common_handle`、`encode_partition_id`、`try_get_common_pk_column_restored_ids`。tracker 的 `rules.py` 尚未把这些从 X 改回 D01.11（理由："D06.7 的系统表写入需要"）。
+
+**设计要点（§6 + 本轮核对的 Go 源码）**
+- REPLACE 的流程（executor/replace.go、insert_common.go `removeRow`）：唯一索引 key（无 handle，`distinct`）→ `FetchDuplicatedHandle` 得旧 handle → 读旧行 → 与新行按 binary collation 比较，**相同则只 lock record key（Op_Lock），不写**；不同则 `RemoveRecord`（删 record key 与旧行的索引 key），循环直到没有重复；再 `AddRecord`：分配 `_tidb_rowid`、写 record、写索引（值由 `GenIndexValuePortal`，`needRestoredData = NeedRestoredData(...)`：utf8mb4_bin 的 VARCHAR 为 true，restored data 是整列值）。
+- 索引 key 的字符串按 datum 的 collation 编码（`codec.EncodeKey`）：datum 要带上列的 collation（utf8mb4_bin，PAD SPACE），`new_collation_enabled` 要从 `mysql.tidb` 读并核对。
+- autoid：meta hash `DB:<dbID>` 的字段 `TID:<tableID>`，值是十进制字符串；`HInc` = 读、加 step、写（值不变时不写）。分配器 `alloc4Signed`：`newEnd = min(maxInt64, max(currentEnd, base) + step)`，默认步长 30000，在独立的 meta 事务中。
+- 读：`tidb-meta`（legacy）可读 TableInfo 的原始 JSON（`hash_data_key(db_key(1), table_key(id))`），用 `tidb-model` 解码后交给 tablecodec；扫描 record 范围解码两列。
+- I/O 放在 legacy crate（`poc-domain` 已有 `etcd-client` 0.14 与 tikv-client；client-rust 2fc142f 有 `begin_optimistic`、`get`、`put`、`delete`、`lock_keys`、`commit`）；纯逻辑（REPLACE 的变更计划、autoid 计算、rebuild）放新块 D06.7 的 layered crate（建议 `tidb-systable`，rank 8，依赖 tablecodec 与 sessionctx）。
+- govec 的 oracle：Go 侧用 mockstore + `session.BootstrapSession` 真正执行 `REPLACE INTO mysql.global_variables`，dump 表的 record + index 范围前后的 KV；Rust 用同样的旧状态和 Go 分到的 handle 执行变更计划，比较最终 KV（逐字节）。
+- tidb_gc_* 的 5 个变量：Go 的钩子读写 `mysql.tidb`（`getTiDBTableValue` / `setTiDBTableValue` 执行 `REPLACE INTO mysql.tidb`），同一个 writer 可泛化为"VARCHAR 主键（NONCLUSTERED）+ 字符串列"的系统表。
+
+**下一步**：rebase → tracker reclassification（D01.11 的编码器回到 D01.11；新块 D06.7）→ `tidb-systable` 纯逻辑 + govec oracle → poc-domain 的 I/O 与 etcd watch → 自己的 v8.5.8 playground 上做混合集群测试（§6.6）→ 跳过上限降到 0。
