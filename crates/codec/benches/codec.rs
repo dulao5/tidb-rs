@@ -57,7 +57,10 @@ fn tuple() -> Vec<Datum> {
     let mut t = new_time(tidb_types::core_time::CoreTime(0), mysql::TypeDatetime, 6);
     t.from_packed_uint(1_840_814_726_643_507_776).unwrap();
     let mut s = Datum::default();
-    s.set_string("Hello, World — ÄÖÜ".as_bytes().to_vec(), "utf8mb4_general_ci");
+    s.set_string(
+        "Hello, World — ÄÖÜ".as_bytes().to_vec(),
+        "utf8mb4_general_ci",
+    );
     vec![
         dm::new_int_datum(-123456789),
         s,

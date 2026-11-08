@@ -79,7 +79,12 @@ fn floats() -> Vec<f64> {
         1e300,
         -1e-300,
     ];
-    v.extend(ints().iter().map(|&i| f64::from_bits(i as u64)).filter(|f| !f.is_nan()));
+    v.extend(
+        ints()
+            .iter()
+            .map(|&i| f64::from_bits(i as u64))
+            .filter(|f| !f.is_nan()),
+    );
     v
 }
 
@@ -103,7 +108,11 @@ fn primitives_both_directions() {
         if t != k {
             diffs.push(format!("EncodeInt({v})"));
         }
-        assert_eq!(tc::decode_int(&k).unwrap().1, v, "DecodeInt(TiKV EncodeInt({v}))");
+        assert_eq!(
+            tc::decode_int(&k).unwrap().1,
+            v,
+            "DecodeInt(TiKV EncodeInt({v}))"
+        );
 
         let mut t = Vec::new();
         tc::encode_int_desc(&mut t, v);
@@ -216,7 +225,10 @@ fn primitives_both_directions() {
     let (known, other): (Vec<String>, Vec<String>) =
         diffs.into_iter().partition(|d| d.ends_with("(-0e0)"));
     assert!(other.is_empty(), "tidb-rs and TiKV differ: {other:#?}");
-    assert!(!known.is_empty(), "the known -0.0 difference is gone: update NEG_ZERO");
+    assert!(
+        !known.is_empty(),
+        "the known -0.0 difference is gone: update NEG_ZERO"
+    );
 }
 
 /// The upstream difference this oracle found: Go TiDB encodes the float -0.0 like +0.0
@@ -249,7 +261,11 @@ fn pairs() -> Vec<Pair> {
         );
     }
     for f in floats().into_iter().take(40) {
-        add(format!("float {f:e}"), dm::new_float64_datum(f), KDatum::F64(f));
+        add(
+            format!("float {f:e}"),
+            dm::new_float64_datum(f),
+            KDatum::F64(f),
+        );
     }
     for b in byte_strings() {
         add(
@@ -297,7 +313,12 @@ fn pairs() -> Vec<Pair> {
             KDatum::Dur(KDuration::from_nanos(n, fsp).unwrap()),
         );
     }
-    for packed in [0u64, 1_840_814_726_643_384_320, 1_840_814_737_113_382_911, 1_829_018_087_510_785_536] {
+    for packed in [
+        0u64,
+        1_840_814_726_643_384_320,
+        1_840_814_737_113_382_911,
+        1_829_018_087_510_785_536,
+    ] {
         let mut t = tidb_types::time::new_time(CoreTime(0), tidb_base::mysql::TypeDatetime, 6);
         t.from_packed_uint(packed).unwrap();
         let k = KTime::from_packed_u64(&mut ctx, packed, TimeType::DateTime, 6).unwrap();
@@ -326,7 +347,11 @@ fn pairs() -> Vec<Pair> {
             KDatum::Json(KJson::from_str(js).unwrap()),
         );
     }
-    for (s, f) in [("[]", vec![]), ("[1]", vec![1.0f32]), ("[1.5,-2,0]", vec![1.5, -2.0, 0.0])] {
+    for (s, f) in [
+        ("[]", vec![]),
+        ("[1]", vec![1.0f32]),
+        ("[1.5,-2,0]", vec![1.5, -2.0, 0.0]),
+    ] {
         add(
             format!("vector {s}"),
             dm::new_vector_float32_datum(parse_vector_float32(s.as_bytes()).unwrap()),
@@ -404,7 +429,10 @@ fn datums_both_directions() {
         }
     }
     assert!(diffs.is_empty(), "encodings differ: {diffs:#?}");
-    assert!(decode_diffs.is_empty(), "decodings differ: {decode_diffs:#?}");
+    assert!(
+        decode_diffs.is_empty(),
+        "decodings differ: {decode_diffs:#?}"
+    );
 }
 
 /// The value a decoded datum must have: decoding loses the kind of strings (Bytes), the
@@ -478,7 +506,11 @@ fn tikv_decimals_decode() {
         let mut want = MyDecimal::default();
         want.from_string(s.as_bytes()).unwrap();
         assert_eq!(d.get_mysql_decimal().compare(&want), 0, "{s}");
-        assert_eq!((d.length(), d.frac()), (isize::from(prec), isize::from(fr)), "{s}");
+        assert_eq!(
+            (d.length(), d.frac()),
+            (isize::from(prec), isize::from(fr)),
+            "{s}"
+        );
         // And tidb-rs re-encodes the decoded datum (Length/Frac set) to TiKV's bytes.
         let mut t = Vec::new();
         tc::encode_value(&utc(), &mut t, std::slice::from_ref(&d)).unwrap();
@@ -500,7 +532,12 @@ fn times_match() {
         x ^= x << 17;
         // A valid datetime: year 1000..9999, month 1..12, day 1..28, h/m/s, micro.
         let (y, mo, d) = (1000 + x % 9000, 1 + (x >> 14) % 12, 1 + (x >> 18) % 28);
-        let (h, mi, s, us) = ((x >> 23) % 24, (x >> 28) % 60, (x >> 34) % 60, (x >> 40) % 1_000_000);
+        let (h, mi, s, us) = (
+            (x >> 23) % 24,
+            (x >> 28) % 60,
+            (x >> 34) % 60,
+            (x >> 40) % 1_000_000,
+        );
         let ymd = ((y * 13 + mo) << 5) | d;
         let hms = (h << 12) | (mi << 6) | s;
         let packed = (((ymd << 17) | hms) << 24) | us;

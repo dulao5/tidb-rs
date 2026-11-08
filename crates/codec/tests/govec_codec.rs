@@ -378,7 +378,10 @@ fn dec(fn_: &str, b: &[u8]) -> Got {
             codec::decode_float_desc(b).map(|(r, f)| (r, f.to_bits())),
             json!(u64::MAX),
         ),
-        "bytes" => rem_out(codec::decode_bytes(b, None).map(|(r, v)| (r, hex(&v))), json!("")),
+        "bytes" => rem_out(
+            codec::decode_bytes(b, None).map(|(r, v)| (r, hex(&v))),
+            json!(""),
+        ),
         "bytes_desc" => rem_out(
             codec::decode_bytes_desc(b, None).map(|(r, v)| (r, hex(&v))),
             json!(""),
@@ -457,7 +460,10 @@ fn exec(op: &str, a: &[Value]) -> Got {
         "dec" => dec(a[0].as_str().unwrap(), &hexv(&a[1])),
         "enc_decimal" => {
             let d = dec_of(a[0].as_str().unwrap());
-            let (prec, frac) = (a[1].as_i64().unwrap() as isize, a[2].as_i64().unwrap() as isize);
+            let (prec, frac) = (
+                a[1].as_i64().unwrap() as isize,
+                a[2].as_i64().unwrap() as isize,
+            );
             let mut b = Vec::new();
             let err = codec::encode_decimal(&mut b, &d, prec, frac);
             let mut dd = Datum::default();
@@ -468,7 +474,10 @@ fn exec(op: &str, a: &[Value]) -> Got {
                 Ok(s) => (s, Value::Null),
                 Err(e) => (0, gs(&e.error())),
             };
-            with(json!({ "b": hex(&b), "size": size, "size_err": size_err }), err)
+            with(
+                json!({ "b": hex(&b), "size": size, "size_err": size_err }),
+                err,
+            )
         }
         "encode" => {
             collate::set_new_collation_enabled_for_test(a[0].as_bool().unwrap());
@@ -617,7 +626,15 @@ fn exec(op: &str, a: &[Value]) -> Got {
             let mut is_null = vec![false; n];
             let mut buf = [0u8; 1];
             let err = if sel.is_none() && !ignore_null {
-                codec::hash_chunk_columns(ctx, &mut hs, &chk, &fts[col], col, &mut buf, &mut is_null)
+                codec::hash_chunk_columns(
+                    ctx,
+                    &mut hs,
+                    &chk,
+                    &fts[col],
+                    col,
+                    &mut buf,
+                    &mut is_null,
+                )
             } else {
                 codec::hash_chunk_selected(
                     ctx,
@@ -748,7 +765,9 @@ fn check(rec: &Value) -> Option<String> {
     let want_err_cmp = if want_err.is_null() {
         None
     } else {
-        Some(json!({ "code": want_err.get("code").cloned().unwrap_or(json!(0)), "msg": want_err["msg"] }))
+        Some(
+            json!({ "code": want_err.get("code").cloned().unwrap_or(json!(0)), "msg": want_err["msg"] }),
+        )
     };
     if got_err != want_err_cmp {
         return Some(format!("err: got {got_err:?}, want {want_err_cmp:?}"));

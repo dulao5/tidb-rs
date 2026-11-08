@@ -76,7 +76,12 @@ fn datums() -> Vec<Datum> {
         }),
         dm::new_binary_literal_datum(BinaryLiteral(vec![1, 2, 3])),
     ];
-    for s in ["0", "-123.456", "99999999999999999999.999999999", "0.000001"] {
+    for s in [
+        "0",
+        "-123.456",
+        "99999999999999999999.999999999",
+        "0.000001",
+    ] {
         let mut d = MyDecimal::default();
         d.from_string(s.as_bytes()).unwrap();
         v.push(dm::new_decimal_datum(d));
@@ -174,7 +179,9 @@ fn decode_everything(b: &[u8], fts: &[FieldType]) {
         tc::decode_comparable_varint(b).map(|x| x.1 as u64).ok(),
         tc::decode_comparable_uvarint(b).map(|x| x.1).ok(),
         tc::decode_bytes(b, None).map(|x| x.1.len() as u64).ok(),
-        tc::decode_bytes_desc(b, None).map(|x| x.1.len() as u64).ok(),
+        tc::decode_bytes_desc(b, None)
+            .map(|x| x.1.len() as u64)
+            .ok(),
         tc::decode_compact_bytes(b).map(|x| x.1.len() as u64).ok(),
     ] {
         std::hint::black_box(prim);
@@ -224,7 +231,11 @@ fn malformed_input_never_aborts() {
     for _ in 0..20_000 {
         let base = &bases[rng.below(bases.len())];
         let m = mutate(&mut rng, base);
-        let m = if rng.below(3) == 0 { mutate(&mut rng, &m) } else { m };
+        let m = if rng.below(3) == 0 {
+            mutate(&mut rng, &m)
+        } else {
+            m
+        };
         match catch_unwind(AssertUnwindSafe(|| decode_everything(&m, &fts))) {
             Ok(()) => ok += 1,
             Err(_) => panics += 1,
@@ -242,5 +253,7 @@ fn malformed_input_never_aborts() {
         max < 16 << 20,
         "a single allocation of {max} bytes while decoding malformed input"
     );
-    eprintln!("malformed inputs: {ok} decoded or errored, {panics} caught panics, max alloc {max} B, {elapsed:?}");
+    eprintln!(
+        "malformed inputs: {ok} decoded or errored, {panics} caught panics, max alloc {max} B, {elapsed:?}"
+    );
 }
