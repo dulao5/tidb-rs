@@ -176,6 +176,9 @@ fn reset_atomics() {
     tidb_vars::RunAutoAnalyze.store(tidb_vars::DefTiDBEnableAutoAnalyze, SeqCst);
     tidb_vars::EnableAutoAnalyzePriorityQueue
         .store(tidb_vars::DefTiDBEnableAutoAnalyzePriorityQueue, SeqCst);
+    // D05.2 B2: tidb_cloud_storage_uri / tidb_slow_log_rules SetGlobal hooks.
+    tidb_vars::CloudStorageURI.store(String::new());
+    *tidb_sessionctx::variable::slow_log_rules::GlobalSlowLogRules.write() = Default::default();
     restore_process_globals();
 }
 
@@ -196,6 +199,18 @@ fn register_callbacks() {
         *hs::GetExternalTimestamp.write() = Some(Arc::new(|| Ok(EXTERNAL_TS.load(SeqCst))));
         *hs::SetExternalTimestamp.write() = Some(Arc::new(|ts| {
             EXTERNAL_TS.store(ts, SeqCst);
+            Ok(())
+        }));
+        // The generator's ValidateCloudStorageURI stub: a plain error for err://, a
+        // *terror.Error for terr:// (the hook converts it to a plain error).
+        *hs::ValidateCloudStorageURI.write() = Some(Arc::new(|uri: &str| {
+            if uri.starts_with("err://") {
+                return Err(tidb_base::errors::new(format!("unsupported storage: {uri}")));
+            }
+            if uri.starts_with("terr://") {
+                return Err(error::ErrWrongValueForVar
+                    .gen_with_stack_by_args(vec!["tidb_cloud_storage_uri".into(), uri.to_owned().into()]));
+            }
             Ok(())
         }));
     });
@@ -520,10 +535,47 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
     }
 }
 
+/// The generator's canonical form of a tidb_slow_log_rules value: conditions of every rule
+/// sorted, then the rules (Go's RawRules follows map order; slow_log_rules.rs M-MAPORDER).
+fn canon_slow_log_rules(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let mut rules: Vec<String> = s
+        .split(';')
+        .map(|r| {
+            let mut conds: Vec<&str> = r.split(',').collect();
+            conds.sort_unstable();
+            conds.join(",")
+        })
+        .collect();
+    rules.sort_unstable();
+    rules.join(";")
+}
+
+/// Applies [`canon_slow_log_rules`] to the read-backs of a tidb_slow_log_rules record, as the
+/// generator does.
+fn canon_slow_log_rules_out(op: &str, args: &[Value], out: &mut Value) {
+    let name = match op {
+        "set" => args[1].as_str(),
+        "get" | "set_global" | "set_global_hook" => args[0].as_str(),
+        _ => None,
+    };
+    if name != Some("tidb_slow_log_rules") {
+        return;
+    }
+    for k in ["get", "sess", "glob", "state", "old", "after"] {
+        if let Some(Value::String(v)) = out.get_mut(k) {
+            *v = canon_slow_log_rules(v);
+        }
+    }
+}
+
 fn check(rec: &Value) -> Option<String> {
     let op = rec["op"].as_str().unwrap();
     let args = rec["args"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
-    let (out, err, warns) = exec(op, args);
+    let (mut out, err, warns) = exec(op, args);
+    canon_slow_log_rules_out(op, args, &mut out);
     if op == "fresh" && SessionVarsFields::default().scalar_strings().len() != SCALAR_FIELDS.len() {
         return Some("duplicate field names".to_owned());
     }
@@ -596,10 +648,10 @@ fn replay(path: &str) -> (usize, usize) {
     (n, skipped)
 }
 
-/// The cap on the committed vectors' skipped records (see `govec_sessionvars`): the exact
-/// count at PR B1 (SetGlobal 77/155, GetGlobal 112/134 still pending in part). Lower it in
-/// every PR that ports hooks; it must reach 0 at the end of PR B2.
-const MAX_SKIPPED: usize = 554;
+/// The cap on the committed vectors' skipped records (see `govec_sessionvars`): after PR B2
+/// only the 232 records of the five tidb_gc_* variables are skipped (their SetGlobal /
+/// GetGlobal hooks read and write mysql.tidb, which comes with PR C / T10). PR C lowers it to 0.
+const MAX_SKIPPED: usize = 232;
 
 #[test]
 fn govec_sessionvars() {
