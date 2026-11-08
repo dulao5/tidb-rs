@@ -1,14 +1,31 @@
 //! Replay of the govec domain "sessionvars" (block D05.2): Go TiDB v8.5.8 vectors.
 //!
-//! T2: op `fresh`, the scalar fields of a fresh `NewSessionVars(nil)` against
-//! `SessionVarsFields::default()`. The set / get / hook ops come with T3-T5.
+//! - `fresh`: the scalar fields of a fresh `NewSessionVars(nil)` against
+//!   `SessionVarsFields::default()` (T2).
+//! - `set`, `get`, `set_global`, `init`: the system variable access of `SessionVars` and the
+//!   session hooks (T3/T4, T11, T12) on a fresh session with the test accessor holding every
+//!   default, TimeZone UTC, the process-wide state reset and MemTotal 64 GiB — as the Go
+//!   generator does. Outputs, errors and warnings must match by message.
+//!
+//! A record that exercises a hook still listed as pending (`session_hook_pending`) is
+//! skipped and counted; records start to count as hooks land.
+//!
+//! Extra files can be replayed with `GOVEC_SESSIONVARS_FILES=a.jsonl.gz,b.jsonl.gz`.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::io::Read;
+use std::sync::atomic::Ordering::SeqCst;
 
 use serde_json::Value;
+use serde_json::json;
+use tidb_base::Error;
+use tidb_sessionctx::variable::session::GlobalVarAccessor;
+use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sessionctx::variable::session_fields::SCALAR_FIELDS;
 use tidb_sessionctx::variable::session_fields::SessionVarsFields;
+use tidb_sessionctx::variable::tidb_vars;
+use tidb_sessionctx::variable::*;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -18,54 +35,342 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "unsupported"
 };
 
-fn replay(path: &str) -> usize {
+/// `variable.NewMockGlobalAccessor4Tests()`: every variable at its default.
+struct MockGlobalAccessor {
+    vals: HashMap<String, String>,
+}
+
+impl GlobalVarAccessor for MockGlobalAccessor {
+    fn get_global_sys_var(&self, name: &str) -> Result<String, Error> {
+        if let Some(v) = self.vals.get(name) {
+            return Ok(v.clone());
+        }
+        // Go's map is keyed by the (lower-case) names: an exact lookup.
+        match get_sys_var(name).filter(|sv| sv.name == name) {
+            Some(sv) => Ok(sv.value.clone()),
+            None => {
+                Err(error::ErrUnknownSystemVar.gen_with_stack_by_args(vec![name.to_owned().into()]))
+            }
+        }
+    }
+    fn set_global_sys_var_only(
+        &mut self,
+        name: &str,
+        value: &str,
+        _update_local: bool,
+    ) -> Result<(), Error> {
+        if get_sys_var(name).is_none() {
+            return Err(
+                error::ErrUnknownSystemVar.gen_with_stack_by_args(vec![name.to_owned().into()])
+            );
+        }
+        self.vals.insert(name.to_owned(), value.to_owned());
+        Ok(())
+    }
+    fn get_tidb_table_value(&self, _name: &str) -> Result<String, Error> {
+        panic!("not supported")
+    }
+}
+
+fn reset_atomics() {
+    tidb_vars::PasswordValidationLength.store(8, SeqCst);
+    tidb_vars::PasswordValidationMixedCaseCount.store(1, SeqCst);
+    tidb_vars::PasswordValidtaionNumberCount.store(1, SeqCst);
+    tidb_vars::PasswordValidationSpecialCharCount.store(1, SeqCst);
+    tidb_vars::GOGCTunerThreshold.store(tidb_vars::DefTiDBGOGCTunerThreshold);
+    tidb_vars::RunAutoAnalyze.store(tidb_vars::DefTiDBEnableAutoAnalyze, SeqCst);
+    tidb_vars::EnableAutoAnalyzePriorityQueue
+        .store(tidb_vars::DefTiDBEnableAutoAnalyzePriorityQueue, SeqCst);
+}
+
+fn fresh_vars() -> SessionVars {
+    reset_atomics();
+    let mut vars = SessionVars::new(Box::new(MockGlobalAccessor {
+        vals: HashMap::new(),
+    }));
+    vars.time_zone = Some(tidb_base::gostd::time::utc());
+    vars
+}
+
+fn msg(e: &Error) -> Value {
+    Value::String(String::from_utf8_lossy(&e.error()).into_owned())
+}
+
+fn err_or_null(r: &Result<(), Error>) -> Value {
+    match r {
+        Ok(()) => Value::Null,
+        Err(e) => msg(e),
+    }
+}
+
+fn fields(vars: &SessionVars) -> BTreeMap<String, String> {
+    vars.scalar_strings()
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect()
+}
+
+fn systems(vars: &SessionVars) -> BTreeMap<String, String> {
+    vars.systems()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+fn diff(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> Value {
+    let mut out = serde_json::Map::new();
+    for (k, v) in after {
+        if before.get(k) != Some(v) {
+            out.insert(k.clone(), json!(v));
+        }
+    }
+    for k in before.keys() {
+        if !after.contains_key(k) {
+            out.insert(k.clone(), json!("<deleted>"));
+        }
+    }
+    Value::Object(out)
+}
+
+/// The names a SetSession reaches: the variable and its aliases.
+fn with_aliases(name: &str) -> Vec<String> {
+    match get_sys_var(name) {
+        Some(sv) => std::iter::once(sv.name.to_owned())
+            .chain(sv.aliases.iter().map(|a| (*a).to_owned()))
+            .collect(),
+        None => vec![],
+    }
+}
+
+/// Whether the record exercises a pending hook.
+fn pending(op: &str, args: &[Value]) -> bool {
+    let p = |n: &str, k: &str| session_hook_pending(n, k);
+    match op {
+        "set" => {
+            let name = args[1].as_str().unwrap();
+            // The read-back goes through GetSession or, for a variable without session
+            // scope, GetGlobal.
+            with_aliases(name).iter().any(|n| p(n, "SetSession"))
+                || p(&gostd_lower(name), "GetSession")
+                || p(&gostd_lower(name), "GetGlobal")
+        }
+        "get" => {
+            let name = args[0].as_str().unwrap();
+            ["GetSession", "GetGlobal", "GetStateValue"]
+                .iter()
+                .any(|k| p(&gostd_lower(name), k))
+        }
+        "set_global" => p(&gostd_lower(args[0].as_str().unwrap()), "SetGlobal"),
+        "init" => args[0].as_array().unwrap().iter().any(|pair| {
+            with_aliases(pair[0].as_str().unwrap())
+                .iter()
+                .any(|n| p(n, "SetSession"))
+        }),
+        _ => false,
+    }
+}
+
+fn gostd_lower(s: &str) -> String {
+    tidb_base::gostd::to_lower(s)
+}
+
+/// Returns (out, err, warnings) like the Go exec.
+fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
+    match op {
+        "fresh" => {
+            let m: serde_json::Map<String, Value> = SessionVarsFields::default()
+                .scalar_strings()
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), json!(v)))
+                .collect();
+            (Value::Object(m), None, vec![])
+        }
+        "set" => {
+            let mut vars = fresh_vars();
+            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            let (kind, name, val) = (
+                args[0].as_str().unwrap(),
+                args[1].as_str().unwrap(),
+                args[2].as_str().unwrap(),
+            );
+            let (f0, s0) = (fields(&vars), systems(&vars));
+            let mut res = serde_json::Map::new();
+            let r = match kind {
+                "set" => vars.set_system_var(name, val),
+                "relaxed" => vars.set_system_var_with_relaxed_validation(name, val),
+                "noval" => vars.set_system_var_without_validation(name, val),
+                _ => match vars.set_system_var_with_old_val_as_ret(name, val) {
+                    Ok(old) => {
+                        res.insert("old".into(), json!(old));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        res.insert("old".into(), json!(""));
+                        Err(e)
+                    }
+                },
+            };
+            res.insert("fields".into(), diff(&f0, &fields(&vars)));
+            res.insert("sys".into(), diff(&s0, &systems(&vars)));
+            if r.is_ok() {
+                match vars.get_session_or_global_system_var(name) {
+                    Ok(v) => {
+                        res.insert("get".into(), json!(v));
+                        res.insert("get_err".into(), Value::Null);
+                    }
+                    Err(e) => {
+                        res.insert("get".into(), json!(""));
+                        res.insert("get_err".into(), msg(&e));
+                    }
+                }
+            }
+            let warns = vars
+                .stmt_ctx
+                .get_warnings()
+                .into_iter()
+                .map(|w| w.err)
+                .collect();
+            (Value::Object(res), r.err(), warns)
+        }
+        "get" => {
+            let mut vars = fresh_vars();
+            let name = args[0].as_str().unwrap();
+            let split = |r: Result<String, Error>| match r {
+                Ok(v) => (json!(v), Value::Null),
+                Err(e) => (json!(""), msg(&e)),
+            };
+            let (sess, sess_err) = split(vars.get_session_or_global_system_var(name));
+            let (glob, glob_err) = split(vars.get_global_system_var(name));
+            let (state, keep, state_err) = match vars.get_session_states_system_var(name) {
+                Ok((v, k)) => (json!(v), json!(k), Value::Null),
+                Err(e) => (json!(""), json!(false), msg(&e)),
+            };
+            let out = json!({"sess": sess, "sess_err": sess_err, "glob": glob, "glob_err": glob_err,
+                "state": state, "keep": keep, "state_err": state_err});
+            let warns = vars
+                .stmt_ctx
+                .get_warnings()
+                .into_iter()
+                .map(|w| w.err)
+                .collect();
+            (out, None, warns)
+        }
+        "set_global" => {
+            let mut vars = fresh_vars();
+            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            let (name, val) = (args[0].as_str().unwrap(), args[1].as_str().unwrap());
+            let (f0, s0) = (fields(&vars), systems(&vars));
+            let mut res = serde_json::Map::new();
+            let r = vars.set_global_sys_var(name, val);
+            let err = match r {
+                // The read-only phase's "not supported" (owner issue #58), not another 1235.
+                Err(e) if String::from_utf8_lossy(&e.error()).contains("SET GLOBAL on tidb-rs") => {
+                    res.insert("persist".into(), json!(true));
+                    None
+                }
+                Err(e) => Some(e),
+                Ok(()) => None,
+            };
+            res.insert("fields".into(), diff(&f0, &fields(&vars)));
+            res.insert("sys".into(), diff(&s0, &systems(&vars)));
+            let warns = vars
+                .stmt_ctx
+                .get_warnings()
+                .into_iter()
+                .map(|w| w.err)
+                .collect();
+            (Value::Object(res), err, warns)
+        }
+        "init" => {
+            let mut vars = fresh_vars();
+            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            let errs: Vec<Value> = args[0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    err_or_null(
+                        &vars.set_system_var(p[0].as_str().unwrap(), p[1].as_str().unwrap()),
+                    )
+                })
+                .collect();
+            let out = json!({"errs": if errs.is_empty() { Value::Null } else { json!(errs) },
+                "fields": fields(&vars), "sys": systems(&vars)});
+            let warns = vars
+                .stmt_ctx
+                .get_warnings()
+                .into_iter()
+                .map(|w| w.err)
+                .collect();
+            (out, None, warns)
+        }
+        _ => panic!("unknown op {op}"),
+    }
+}
+
+fn check(rec: &Value) -> Option<String> {
+    let op = rec["op"].as_str().unwrap();
+    let args = rec["args"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    let (out, err, warns) = exec(op, args);
+    if op == "fresh" && SessionVarsFields::default().scalar_strings().len() != SCALAR_FIELDS.len() {
+        return Some("duplicate field names".to_owned());
+    }
+    if out != rec["out"] {
+        return Some(format!("out: got {out}, want {}", rec["out"]));
+    }
+    let got_err = err.as_ref().map(msg);
+    let want_err = &rec["err"];
+    let want = if want_err.is_null() {
+        None
+    } else {
+        Some(want_err["msg"].clone())
+    };
+    if got_err != want {
+        return Some(format!("err: got {got_err:?}, want {want:?}"));
+    }
+    let got_w: Vec<Value> = warns.iter().map(msg).collect();
+    let want_w: Vec<Value> = rec["warnings"]
+        .as_array()
+        .map(|a| a.iter().map(|w| w["msg"].clone()).collect())
+        .unwrap_or_default();
+    if got_w != want_w {
+        return Some(format!("warnings: got {got_w:?}, want {want_w:?}"));
+    }
+    None
+}
+
+/// Replays one file: (records checked, records skipped as pending).
+fn replay(path: &str) -> (usize, usize) {
     let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(path).expect("vectors"));
     let mut text = String::new();
     gz.read_to_string(&mut text).unwrap();
     let mut lines = text.lines();
     let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(header["domain"], "sessionvars");
+    // memory.MemTotal = 64 GiB (the generator's value; tidb_server_memory_limit percentages).
+    tidb_memory::meminfo::set_mem_hooks(|| Ok(64 << 30), || Ok(0));
     let mut fails = vec![];
-    let mut n = 0;
+    let (mut n, mut skipped) = (0, 0);
     for line in lines {
-        n += 1;
         let rec: Value = serde_json::from_str(line).unwrap();
-        match rec["op"].as_str().unwrap() {
-            "fresh" => {
-                let want: BTreeMap<String, String> = rec["out"]
-                    .as_object()
-                    .unwrap()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
-                    .collect();
-                let got: BTreeMap<String, String> = SessionVarsFields::default()
-                    .scalar_strings()
-                    .into_iter()
-                    .map(|(k, v)| (k.to_owned(), v))
-                    .collect();
-                if got.len() != SCALAR_FIELDS.len() {
-                    fails.push(format!("duplicate field names: {}", got.len()));
-                }
-                for (k, w) in &want {
-                    match got.get(k) {
-                        Some(g) if g == w => {}
-                        g => fails.push(format!("fresh {k}: got {g:?}, want {w:?}")),
-                    }
-                }
-                for k in got.keys().filter(|k| !want.contains_key(*k)) {
-                    fails.push(format!("fresh {k}: not a scalar field in Go"));
-                }
-            }
-            op => fails.push(format!("unknown op {op}")),
+        let op = rec["op"].as_str().unwrap();
+        let args = rec["args"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+        if pending(op, args) {
+            skipped += 1;
+            continue;
+        }
+        n += 1;
+        if let Some(f) = check(&rec) {
+            fails.push(format!("{op} {}: {f}", rec["args"]));
         }
     }
     assert!(
         fails.is_empty(),
-        "{} mismatches:\n{}",
+        "{} mismatches of {n}:\n{}",
         fails.len(),
-        fails.join("\n")
+        fails[..fails.len().min(60)].join("\n")
     );
-    n
+    (n, skipped)
 }
 
 #[test]
@@ -75,5 +380,13 @@ fn govec_sessionvars() {
     if !std::path::Path::new(&path).exists() {
         panic!("no vectors for {GO_TARGET}: {path}");
     }
-    assert!(replay(&path) >= 1);
+    let (n, skipped) = replay(&path);
+    eprintln!("sessionvars: {n} records checked, {skipped} skipped (pending hooks)");
+    assert!(n >= 1);
+    if let Ok(files) = std::env::var("GOVEC_SESSIONVARS_FILES") {
+        for f in files.split(',').filter(|f| !f.is_empty()) {
+            let (n, skipped) = replay(f);
+            eprintln!("{f}: {n} checked, {skipped} skipped");
+        }
+    }
 }

@@ -24,6 +24,9 @@ std_err!(/// ErrSnapshotTooOld.
     pub ErrSnapshotTooOld = ClassVariable, ErrSnapshotTooOld);
 std_err!(/// ErrUnsupportedValueForVar.
     pub ErrUnsupportedValueForVar = ClassVariable, ErrUnsupportedValueForVar);
+std_err!(/// ErrNotSupportedYet (dbterror.ErrNotSupportedYet; returned by `SET GLOBAL` in the
+    /// read-only phase, owner issue #58).
+    pub ErrNotSupportedYet = ClassVariable, ErrNotSupportedYet);
 std_err!(/// ErrUnknownSystemVar.
     pub ErrUnknownSystemVar = ClassVariable, ErrUnknownSystemVariable);
 std_err!(/// ErrIncorrectScope.
