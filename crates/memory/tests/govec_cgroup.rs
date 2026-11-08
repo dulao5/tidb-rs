@@ -139,22 +139,26 @@ fn exec(op: &str, a: &[Value]) -> (Value, Value) {
         Err(e) => (json!(0), Some(e)),
     };
     match op {
-        "mem_limit" => with(&|fx| match cgroup::get_cgroup_mem_limit_at(&fx.root()) {
-            Ok((limit, ver)) => (json!({ "limit": limit, "version": ver as i32 }), None),
-            Err(e) => (json!(0), Some(e)),
+        "mem_limit" => with(
+            &|fx| match cgroup::internal::get_cgroup_mem_limit_at(&fx.root()) {
+                Ok((limit, ver)) => (json!({ "limit": limit, "version": ver as i32 }), None),
+                Err(e) => (json!(0), Some(e)),
+            },
+        ),
+        "mem_usage" => with(&|fx| num(cgroup::internal::get_cgroup_mem_usage_at(&fx.root()))),
+        "mem_inactive" => with(&|fx| {
+            num(cgroup::internal::get_cgroup_mem_inactive_file_usage_at(
+                &fx.root(),
+            ))
         }),
-        "mem_usage" => with(&|fx| num(cgroup::get_cgroup_mem_usage_at(&fx.root()))),
-        "mem_inactive" => {
-            with(&|fx| num(cgroup::get_cgroup_mem_inactive_file_usage_at(&fx.root())))
-        }
-        "control_path" => with(&|fx| match cgroup::detect_control_path(
+        "control_path" => with(&|fx| match cgroup::internal::detect_control_path(
             &fx.join("/proc/self/cgroup"),
             s(1),
         ) {
             Ok(p) => (go_string(&p), None),
             Err(e) => (json!(""), Some(e)),
         }),
-        "details" => with(&|fx| match cgroup::get_cgroup_details(
+        "details" => with(&|fx| match cgroup::internal::get_cgroup_details(
             &fx.join("/proc/self/mountinfo"),
             s(1).as_bytes(),
             s(2),
@@ -168,29 +172,32 @@ fn exec(op: &str, a: &[Value]) -> (Value, Value) {
         "cgroup_version" => {
             let line = unhex(s(0));
             let f = fields(&line);
-            let (ver, found) = match cgroup::detect_cgroup_version(&f, s(1).as_bytes()) {
+            let (ver, found) = match cgroup::internal::detect_cgroup_version(&f, s(1).as_bytes()) {
                 Some(v) => (v, true),
                 None => (0, false),
             };
             (json!({ "ver": ver, "found": found }), Value::Null)
         }
         "controller_match" => (
-            json!(cgroup::controller_match(s(0).as_bytes(), s(1).as_bytes())),
+            json!(cgroup::internal::controller_match(
+                s(0).as_bytes(),
+                s(1).as_bytes()
+            )),
             Value::Null,
         ),
         "read_file" => with(&|fx| {
-            let (data, err) = cgroup::read_file(&fx.join(s(1)));
+            let (data, err) = cgroup::internal::read_file(&fx.join(s(1)));
             (json!(hex(&data)), err)
         }),
         "read_int64" => with(&|fx| {
-            num(cgroup::read_int64_value(
+            num(cgroup::internal::read_int64_value(
                 &fx.join(s(1)),
                 s(2),
                 a[3].as_i64().unwrap() as i32,
             ))
         }),
         "mem_stat" => with(&|fx| {
-            num(cgroup::detect_mem_stat_value(
+            num(cgroup::internal::detect_mem_stat_value(
                 &fx.join(s(1)),
                 s(2),
                 s(3),
@@ -254,9 +261,9 @@ fn govec_cgroup() {
 /// `inContainer`'s checks (govec cannot fixture the fixed /proc paths it compares with).
 #[test]
 fn in_container_checks() {
-    use cgroup::PROC_PATH_CGROUP as CG;
-    use cgroup::PROC_PATH_MOUNT_INFO as MI;
-    use cgroup::in_container_content as f;
+    use cgroup::internal::PROC_PATH_CGROUP as CG;
+    use cgroup::internal::PROC_PATH_MOUNT_INFO as MI;
+    use cgroup::internal::in_container_content as f;
     assert!(f(CG, b"12:memory:/kubepods/besteffort/pod1"));
     assert!(f(CG, b"1:name=systemd:/docker/abc"));
     assert!(f(CG, b"0::/system.slice/containerd.service"));

@@ -138,7 +138,7 @@ fn unknown_version(ver: &[i32]) -> Error {
 
 /// root is always "/" in the production. It will be changed for testing.
 // go: getCgroupMemInactiveFileUsage L1
-pub fn get_cgroup_mem_inactive_file_usage_at(root: &[u8]) -> Result<u64, Error> {
+pub(crate) fn get_cgroup_mem_inactive_file_usage_at(root: &[u8]) -> Result<u64, Error> {
     let Some((path, mount, ver)) = memory_details(root)? else {
         return Ok(0);
     };
@@ -157,7 +157,7 @@ pub fn get_cgroup_mem_inactive_file_usage_at(root: &[u8]) -> Result<u64, Error> 
 
 /// getCgroupMemUsage reads the memory cgroup's current memory usage (in bytes).
 // go: getCgroupMemUsage L1
-pub fn get_cgroup_mem_usage_at(root: &[u8]) -> Result<u64, Error> {
+pub(crate) fn get_cgroup_mem_usage_at(root: &[u8]) -> Result<u64, Error> {
     let Some((path, mount, ver)) = memory_details(root)? else {
         return Ok(0);
     };
@@ -179,7 +179,7 @@ pub fn get_cgroup_mem_usage_at(root: &[u8]) -> Result<u64, Error> {
 
 /// root is always "/" in the production. It will be changed for testing.
 // go: getCgroupMemLimit L1
-pub fn get_cgroup_mem_limit_at(root: &[u8]) -> Result<(u64, Version), Error> {
+pub(crate) fn get_cgroup_mem_limit_at(root: &[u8]) -> Result<(u64, Version), Error> {
     // Go returns the version reached so far together with an error; callers only read it
     // when err == nil, so the Rust error carries no version.
     let Some((path, mount, ver)) = memory_details(root)? else {
@@ -244,7 +244,7 @@ fn detect_mem_inactive_file_usage_in_v2(root: &[u8]) -> Result<u64, Error> {
 }
 
 // go: detectMemStatValue L1
-pub fn detect_mem_stat_value(
+pub(crate) fn detect_mem_stat_value(
     c_root: &[u8],
     filename: &str,
     key: &str,
@@ -292,7 +292,7 @@ fn detect_mem_usage_in_v2(c_root: &[u8]) -> Result<u64, Error> {
 /// `os.Open` + `io.ReadAll`: the contents, and the read error if one ended them. Go's
 /// `errors.Join(err, f.Close())` keeps the read error's text.
 // go: readFile L1
-pub fn read_file(filepath: &[u8]) -> (Vec<u8>, Option<Error>) {
+pub(crate) fn read_file(filepath: &[u8]) -> (Vec<u8>, Option<Error>) {
     match open_read_all_err(filepath) {
         Err(open) => (Vec::new(), Some(errors::new(open))),
         Ok((data, read_err)) => (data, read_err.map(errors::new)),
@@ -302,7 +302,7 @@ pub fn read_file(filepath: &[u8]) -> (Vec<u8>, Option<Error>) {
 /// The field in /proc/self/cgroup and /proc/self/mountinfo may appear as "cpuacct,cpu" or "rw,cpuacct,cpu"
 /// while the input controller is "cpu,cpuacct"
 // go: controllerMatch L1
-pub fn controller_match(field: &[u8], controller: &[u8]) -> bool {
+pub(crate) fn controller_match(field: &[u8], controller: &[u8]) -> bool {
     if field == controller {
         return true;
     }
@@ -320,7 +320,10 @@ pub fn controller_match(field: &[u8], controller: &[u8]) -> bool {
 /// The controller is defined via either type `memory` for cgroup v1 or via empty type for cgroup v2,
 /// where the type is the second field in /proc/[pid]/cgroup file
 // go: detectControlPath L1
-pub fn detect_control_path(cgroup_file_path: &[u8], controller: &str) -> Result<Vec<u8>, Error> {
+pub(crate) fn detect_control_path(
+    cgroup_file_path: &[u8],
+    controller: &str,
+) -> Result<Vec<u8>, Error> {
     let cgroup = open_read_all(cgroup_file_path).map_err(|e| {
         wrap(
             cat(&[
@@ -352,7 +355,7 @@ pub fn detect_control_path(cgroup_file_path: &[u8], controller: &str) -> Result<
 
 /// See http://man7.org/linux/man-pages/man5/proc.5.html for `mountinfo` format.
 // go: getCgroupDetails L1
-pub fn get_cgroup_details(
+pub(crate) fn get_cgroup_details(
     mount_info_path: &[u8],
     c_root: &[u8],
     controller: &str,
@@ -407,7 +410,7 @@ pub fn get_cgroup_details(
 
 /// Return version of cgroup mount for memory controller if found
 // go: detectCgroupVersion L1
-pub fn detect_cgroup_version(f: &[&[u8]], controller: &[u8]) -> Option<i32> {
+pub(crate) fn detect_cgroup_version(f: &[&[u8]], controller: &[u8]) -> Option<i32> {
     if f.len() < 10 {
         return None;
     }
@@ -436,7 +439,7 @@ pub fn detect_cgroup_version(f: &[&[u8]], controller: &[u8]) -> Option<i32> {
 }
 
 // go: readInt64Value L1
-pub fn read_int64_value(root: &[u8], filename: &str, cg_version: i32) -> Result<u64, Error> {
+pub(crate) fn read_int64_value(root: &[u8], filename: &str, cg_version: i32) -> Result<u64, Error> {
     let file_path = join_bytes(&[root, filename.as_bytes()]);
     let file = open_read_all(&file_path).map_err(|e| {
         wrap(
@@ -490,7 +493,7 @@ fn in_container_at(path: &str) -> bool {
 /// `inContainer` after `os.ReadFile(path)` succeeded with contents `v` (the checks depend
 /// on which of the two `/proc` paths was read).
 // glue: the body of Go inContainer, split from its os.ReadFile for tests
-pub fn in_container_content(path: &str, v: &[u8]) -> bool {
+pub(crate) fn in_container_content(path: &str, v: &[u8]) -> bool {
     // For cgroup V1, check /proc/self/cgroup
     if path == procPathCGroup {
         let has = |s: &[u8]| v.windows(s.len()).any(|w| w == s);
@@ -514,7 +517,84 @@ pub fn in_container_content(path: &str, v: &[u8]) -> bool {
     false
 }
 
-/// The path constants, for tests of [`in_container_content`].
-pub const PROC_PATH_CGROUP: &str = procPathCGroup;
-/// See [`PROC_PATH_CGROUP`].
-pub const PROC_PATH_MOUNT_INFO: &str = procPathMountInfo;
+/// Entry points for the govec replay (`tests/govec_cgroup.rs`) into functions that are
+/// unexported in Go. Not part of the tidb-memory API: hidden from the docs, and the
+/// functions themselves stay `pub(crate)`.
+#[doc(hidden)]
+pub mod internal {
+    use tidb_base::Error;
+
+    pub use super::Version;
+
+    /// The path constants, for tests of [`in_container_content`].
+    pub const PROC_PATH_CGROUP: &str = super::procPathCGroup;
+    /// See [`PROC_PATH_CGROUP`].
+    pub const PROC_PATH_MOUNT_INFO: &str = super::procPathMountInfo;
+
+    // glue: replay entry point
+    pub fn get_cgroup_mem_inactive_file_usage_at(root: &[u8]) -> Result<u64, Error> {
+        super::get_cgroup_mem_inactive_file_usage_at(root)
+    }
+
+    // glue: replay entry point
+    pub fn get_cgroup_mem_usage_at(root: &[u8]) -> Result<u64, Error> {
+        super::get_cgroup_mem_usage_at(root)
+    }
+
+    // glue: replay entry point
+    pub fn get_cgroup_mem_limit_at(root: &[u8]) -> Result<(u64, Version), Error> {
+        super::get_cgroup_mem_limit_at(root)
+    }
+
+    // glue: replay entry point
+    pub fn detect_mem_stat_value(
+        c_root: &[u8],
+        filename: &str,
+        key: &str,
+        cg_version: i32,
+    ) -> Result<u64, Error> {
+        super::detect_mem_stat_value(c_root, filename, key, cg_version)
+    }
+
+    // glue: replay entry point
+    pub fn read_file(filepath: &[u8]) -> (Vec<u8>, Option<Error>) {
+        super::read_file(filepath)
+    }
+
+    // glue: replay entry point
+    pub fn controller_match(field: &[u8], controller: &[u8]) -> bool {
+        super::controller_match(field, controller)
+    }
+
+    // glue: replay entry point
+    pub fn detect_control_path(
+        cgroup_file_path: &[u8],
+        controller: &str,
+    ) -> Result<Vec<u8>, Error> {
+        super::detect_control_path(cgroup_file_path, controller)
+    }
+
+    // glue: replay entry point
+    pub fn get_cgroup_details(
+        mount_info_path: &[u8],
+        c_root: &[u8],
+        controller: &str,
+    ) -> Result<(Vec<Vec<u8>>, Vec<i32>), Error> {
+        super::get_cgroup_details(mount_info_path, c_root, controller)
+    }
+
+    // glue: replay entry point
+    pub fn detect_cgroup_version(f: &[&[u8]], controller: &[u8]) -> Option<i32> {
+        super::detect_cgroup_version(f, controller)
+    }
+
+    // glue: replay entry point
+    pub fn read_int64_value(root: &[u8], filename: &str, cg_version: i32) -> Result<u64, Error> {
+        super::read_int64_value(root, filename, cg_version)
+    }
+
+    // glue: replay entry point
+    pub fn in_container_content(path: &str, v: &[u8]) -> bool {
+        super::in_container_content(path, v)
+    }
+}
