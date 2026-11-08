@@ -22,6 +22,6 @@ its own target.
 | | |
 |---|---|
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-b`, PR B) |
-| generator | `govec` (seed 5052), 41,448 records: `fresh` 1, `set` 30,939, `get` 945, `set_global` 9,482, `init` 80; both targets hold the same records |
-| `arm64/sessionvars.jsonl.gz` sha256 | `fff7b8eae588d9a3220e1a1a5591ac9991b792ecfe22b7ca3057f33175c8ebb2` (generated locally) |
-| `amd64/sessionvars.jsonl.gz` sha256 | `331a44d4ce59248d36c83f9b4b3b4ea0a74d5db21cff9ff1278406f0081a18da` (tracker CI artifact) |
+| generator | `govec` (seed 5052), 43,486 records: `fresh` 1, `set` 30,939, `get` 945, `set_global` 9,482, `set_global_hook` 2,039, `init` 80; both targets hold the same records |
+| `arm64/sessionvars.jsonl.gz` sha256 | `a43541c0939d95b5b830114d9735f8cc6ff1ea62c2db8e30b78f6fd7068ad13b` (generated locally) |
+| `amd64/sessionvars.jsonl.gz` sha256 | `23fb5f9ee91126764b61fd5990b659be8e90d570a5b283573e4a796eaaee9874` (tracker CI artifact) |

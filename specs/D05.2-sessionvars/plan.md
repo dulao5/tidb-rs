@@ -66,3 +66,36 @@ PR A 已完成（见 tasks.md）。接手 PR B 时：
 **发现**
 - `fixcontrol.ParseToMap("1:")`：冒号后为空时 Go 越界 panic（`s[0]`），Rust 照样 panic（tidb_opt_fix_control 没有 Validation）。是否可由 SQL 触发（`SET tidb_opt_fix_control='1:'`）待验证，候选 upstream-pitfall。
 - `ToRuntimeFilterType` 按 Go map 的随机顺序生成列表；Rust 排序（M-MAPORDER）。
+
+## PR B 交接（第二轮，2026-11-08）
+
+PR A 已合并（#57 @a2307d0、tracker #27 @bd6450e）；PR B 的分支已 rebase 到 main（tidb-rs #63、tracker #29，base = main，仍为 draft）。
+
+**本轮完成**
+- **生成器与回放的进程级状态重置**：在 PR A 的 `RedactLogEnabled` 之外，每条记录前恢复 SetGlobal 钩子写的 variable 包 atomic（交接清单中的 38 个，加上 HistoricalStatsDuration、AdvancerCheckPointLagLimit、EnablePProfSQLCPU、ForcePriority）、memory 包的 EnableGCAwareMemoryTrack / ServerMemoryLimitSessMinSize / ServerMemoryLimit / ServerMemoryLimitOriginText、全局 config（INSTANCE 钩子会写），以及两个 LDAP impl 的设置。Go 侧在 init 时取快照（`processGlobalsRestore`），Rust 侧在第一条记录前取快照（`restore_process_globals`）。
+- **钩子**：SetGlobal 77/155（PR B 第一轮 39），GetGlobal 112/134（第一轮 64）。新文件：
+  - `ldap_state.rs`：`ldap.LDAPSASLAuthImpl` / `LDAPSimpleAuthImpl` 的设置与 getter/setter（认证本身与连接池归 D04.1；`initializePool` 为 runtime-only）。
+  - `session_hooks_ext.rs`：instance config（max_connections、check_mb4、collect_execution_info、enable_ddl / stats_owner（switchDDL / switchStats 无回调，tidb-rs 不跑 DDL 与 stats owner）、slow log、record_plan、service_scope、plugin_*、stmt_summary 文件参数）、LDAP 的 43 个钩子、pprof_sql_cpu、force_priority、disconnect_on_expired_password、column_tracking、memory_usage_alarm_ratio、historical_stats_duration、advancer_check_point_lag_limit、gc_aware_memory_track、server_memory_limit(_sess_min_size)。
+  - 写 config 中非原子字段的钩子（Go 原地写）在 Rust 中克隆后 store（M-SNAP，L2）。
+- **生成器**：
+  - `get` / `set` / `old` 记录不再写 `<global-hook>`，记 GetGlobal 的真实值（tidb_slow_log_max_per_sec 记为 `<volatile>`：int(rate.Inf) 随平台不同，#27）。
+  - 新 op `set_global_hook`：对"写入状态可被重置"的 GLOBAL 变量（`sessionvarsGlobalHookVars`，60 个），执行 Validate → SetGlobal 钩子 → GetGlobal 读回，之后重置。之前 GLOBAL 变量的 SetGlobal 钩子从未被向量覆盖。
+  - 向量 43,486 条（新增 set_global_hook 2,039 条），amd64 取自 tracker CI，与 arm64 记录相同。
+- **回放**：41,167 条比对，0 条不一致；2,319 条因 pending 钩子跳过。跳过数比第一轮（2,168）多，是因为分母变了：`get` 记录现在比对 GetGlobal，GetGlobal 仍 pending 的变量（tidb_gc_* 等）的记录改为跳过。上限设为 2,319。
+- **反证**：LDAP 的 bind_root_pwd 掩码改成 `****` → 67 条不一致；`ServerMemoryLimitSessMinSize` 存 +1 → 17 条。
+
+**余下**
+1. SetGlobal 78 / GetGlobal 22 个仍 pending：
+   - `getTiDBTableValue` / `setTiDBTableValue`（tidb_gc_*，5 个变量）：随 T10 / §6（需要 GlobalVarAccessor 读写 mysql.tidb）。
+   - client-go 的状态单元：`tikvstore.StoreLimit`（初值 0）、`TxnCommitBatchSize`（init 时 16 KiB）、`tikvutil.CommitterConcurrency`（加 `tikvcfg.StoreGlobalConfig` 的 runtime 副作用）；`tls.RequireSecureTransport`；`topsqlstate.GlobalState.MaxCollect / MaxStatementCount`（5000 / 100）：照 `ldap_state.rs` 的做法建状态单元，并加入两侧的重置与 `sessionvarsGlobalHookVars`。
+   - gctuner（max/min GC percent、GlobalMemoryLimitTuner 的百分比、Tuning、EnableGOGCTuner）、`tidb_server_memory_limit` 的 SetGlobal（parseMemoryLimit + gctuner）。
+   - TTL 调度窗口（`TTLJobScheduleWindowStartTime/EndTime`，`FullDayTimeFormat` 的时间解析与格式化）、`GetMemQuotaAnalyze / SetMemQuotaAnalyze`：Rust 的 tidb_vars 还没有这些状态。
+   - 只影响 tidb-rs 不运行的子系统的 SetGlobal（DDL reorg / flashback / disk quota、dist task、TTL worker、GC worker、PD 客户端动态选项、stmtsummary v2、logutil.ReplaceLogger、resource control）：按 spec §2.3 的处置归 runtime-only 或 X，原因写进 `sysvar_hooks.tsv` 的处置列（tidb-rs 持久化值后，Go 实例在重载时自己执行这些钩子，§6）。
+   - tidb_config（config JSON）、tidb_external_ts（读外部时间戳）、tidb_cloud_storage_uri（`ast.RedactURL` + `ValidateCloudStorageURI`）、tidb_opt_fix_control 的 SetGlobal、tidb_slow_log_rules / max_per_sec（T7）。
+2. T7：slow log 规则的解析（tidb_slow_log_rules 的 SetSession 与全局钩子）。
+3. 生成器：导出非标量字段（让 T6 的效果可比对）；minelits（session_test.go、varsutil_test.go）；多种子。
+4. converge 中第一轮留下的 4 个 ERROR：`session_hooks_global.rs` 的 crate 级 `#![allow(clippy::unnecessary_cast)]` 不在允许表；`session_state.rs:186` 与 `session.rs:459` 的级别写法；`session.rs:531` 的 `assert_send` 没有来源标注。
+
+**发现（upstream-pitfall 候选，未开 issue）**
+- `ldapAuthImpl.initializeCAPool`：`errors.Wrapf(err, "read ca certificate at %s", caCert)` 格式化的是读失败后为 nil 的 `caCert`，不是路径，消息是 `read ca certificate at : open <path>: …`；而且 `caPath` 在报错前已经被改掉，之后 GetGlobal 返回的是读不了的路径。Rust 照样复现。
+- `fixcontrol.ParseToMap("1:")`：tidb_opt_fix_control 没有 Validation，SetSession / SetGlobal 钩子直接调用 ParseToMap；冒号后去空白为空时 `s[0]` 越界 panic。静态可达：`SET tidb_opt_fix_control='1:'`、`SET GLOBAL …`、`SET_VAR(tidb_opt_fix_control='1:')`。会话层的 recover 会把 panic 转成返回给客户端的错误（未在 v8.5.8 server 上用 SQL 验证）。
