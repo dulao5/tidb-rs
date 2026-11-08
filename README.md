@@ -163,7 +163,9 @@ tools/protocol-smoke  protocol smoke/perf clients: libmysqlclient (ps_smoke.c) a
 ```
 
 Building needs a C++ compiler, CMake, protoc (>= 3.1) and OpenSSL (grpcio-sys and openssl-sys are
-pulled in by the vendored crates via tipb).
+pulled in by the vendored crates via tipb). With GCC 13 or newer, grpcio-sys's bundled abseil
+fails to compile because a header no longer includes `<cstdint>`; build with
+`CXXFLAGS="-include cstdint"`.
 
 Checks (first-party crates only for fmt/clippy; vendored code keeps TiKV's style):
 
