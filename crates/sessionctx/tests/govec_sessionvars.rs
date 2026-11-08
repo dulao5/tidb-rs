@@ -132,6 +132,12 @@ fn diff(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> 
     Value::Object(out)
 }
 
+/// The variables whose read-back depends on the wall clock or the session's random
+/// generator: the generator records their read-back values as "<volatile>".
+fn volatile(name: &str) -> bool {
+    matches!(name, "timestamp" | "rand_seed1" | "rand_seed2")
+}
+
 /// The names a SetSession reaches: the variable and its aliases.
 fn with_aliases(name: &str) -> Vec<String> {
     match get_sys_var(name) {
@@ -201,6 +207,11 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 "noval" => vars.set_system_var_without_validation(name, val),
                 _ => match vars.set_system_var_with_old_val_as_ret(name, val) {
                     Ok(old) => {
+                        let old = if volatile(name) {
+                            "<volatile>".to_owned()
+                        } else {
+                            old
+                        };
                         res.insert("old".into(), json!(old));
                         Ok(())
                     }
@@ -215,6 +226,11 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             if r.is_ok() {
                 match vars.get_session_or_global_system_var(name) {
                     Ok(v) => {
+                        let v = if volatile(name) {
+                            "<volatile>".to_owned()
+                        } else {
+                            v
+                        };
                         res.insert("get".into(), json!(v));
                         res.insert("get_err".into(), Value::Null);
                     }
@@ -244,6 +260,15 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             let (state, keep, state_err) = match vars.get_session_states_system_var(name) {
                 Ok((v, k)) => (json!(v), json!(k), Value::Null),
                 Err(e) => (json!(""), json!(false), msg(&e)),
+            };
+            let (sess, glob, state) = if volatile(name) {
+                (
+                    json!("<volatile>"),
+                    json!("<volatile>"),
+                    json!("<volatile>"),
+                )
+            } else {
+                (sess, glob, state)
             };
             let out = json!({"sess": sess, "sess_err": sess_err, "glob": glob, "glob_err": glob_err,
                 "state": state, "keep": keep, "state_err": state_err});
