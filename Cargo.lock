@@ -3696,6 +3696,7 @@ dependencies = [
  "serde_json",
  "tidb-base",
  "tidb-parser",
+ "tidb-types",
 ]
 
 [[package]]

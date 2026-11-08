@@ -12,6 +12,8 @@ publish.workspace = true
 tidb-base = { workspace = true }
 # CIStr, FieldType, UserIdentity, ParseDuration (block D02.3).
 tidb-parser = { workspace = true }
+# types.NeedRestoredData (ColumnNeedRestoredData) and the collate package (block D01.9).
+tidb-types = { workspace = true }
 
 [dev-dependencies]
 # The govec vectors are committed as .jsonl.gz.
