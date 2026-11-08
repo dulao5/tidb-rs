@@ -66,7 +66,6 @@ blocks = ["D01.11"]  # tablecodec、rowcodec（依赖 kv）
 
 [crate.tidb-sessionctx]
 rank = 7
-planned = true
 blocks = ["D00.1", "D05.1", "D05.2"]
 
 [crate.tidb-expression]

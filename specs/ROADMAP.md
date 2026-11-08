@@ -71,7 +71,7 @@
 | L4 | D01.4 | 类型转换（convert）与溢出、截断 | 883 | 3 | D01.5(63) |
 | L4 | D01.8 | 编码：util/codec（Q3：从 Go 移植 L1，TiKV 作为双向逐字节 oracle，#39） | 1,913 | 5 | — |
 | L4 | D01.11 | 表与行编码：tablecodec、rowcodec（N0 评审从 D01.8 拆出，位于 kv 之上） | 2,736 | 6 | — |
-| L4 | D05.1 | 系统变量定义与校验（N8） | 1,027 | 8 | — |
+| L4 | [D05.1](D05.1-sysvar/spec.md) | 系统变量定义与校验（N8；2026-11-08 划分：写路径 / extension / TTL 辅助 7 个归 X，需要会话状态的 10 个归 D05.2，96 → 79 个函数；crate `tidb-sessionctx`，converge 79/79） | 1,027 | 8 | — |
 | L4 | D08.12 | 表达式工具（util.go 等，按引用归属后再拆） | 2,384 | 4 | — |
 | L4 | D08.5 | 算术、数学与逻辑运算 | 6,228 | 6 | — |
 | L5 | D05.2 | SessionVars 与 StatementContext（N2） | 2,181 | 2 | — |
