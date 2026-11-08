@@ -951,3 +951,38 @@ fn get_valid_float_prefix(
     }
     (valid, err)
 }
+
+/// ToString converts an interface to a string.
+// go: ToString L1
+pub fn to_string(value: &crate::datum::GoValue) -> Result<Vec<u8>, Error> {
+    use crate::datum::GoValue;
+    use tidb_base::gostd::strconv::format_float;
+    match value {
+        GoValue::Bool(v) => {
+            if *v {
+                return Ok(b"1".to_vec());
+            }
+            Ok(b"0".to_vec())
+        }
+        GoValue::Int(v) | GoValue::Int64(v) => Ok(v.to_string().into_bytes()),
+        GoValue::Uint64(v) => Ok(v.to_string().into_bytes()),
+        GoValue::Float32(v) => Ok(format_float(f64::from(*v), b'f', -1, 32).into_bytes()),
+        GoValue::Float64(v) => Ok(format_float(*v, b'f', -1, 64).into_bytes()),
+        GoValue::String(v) => Ok(v.clone()),
+        GoValue::Bytes(v) => Ok(v.clone().unwrap_or_default()),
+        GoValue::Time(v) => Ok(v.string()),
+        GoValue::Duration(v) => Ok(v.string()),
+        GoValue::Decimal(v) => Ok(v.string().into_bytes()),
+        GoValue::BinaryLiteral(v) => Ok(v.to_string()),
+        GoValue::Enum(v) => Ok(v.string()),
+        GoValue::Set(v) => Ok(v.string()),
+        GoValue::BinaryJSON(v) => Ok(v.string()),
+        _ => {
+            let a = value.arg();
+            Err(tidb_base::errors::errorf(
+                "cannot convert %v(type %T) to string",
+                &[a.clone(), a],
+            ))
+        }
+    }
+}

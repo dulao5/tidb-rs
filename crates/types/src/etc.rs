@@ -200,3 +200,53 @@ pub fn is_type_temporal(tp: u8) -> bool {
             | mysql::TypeNewDate
     )
 }
+
+/// `opcode.Op.String()` (the `name` of Go's `ops` table) for the operators the parser has.
+// glue: opcode.Op.String (pkg/parser/opcode)
+fn op_name(o: tidb_parser::ast::Op) -> &'static str {
+    use tidb_parser::ast::Op::*;
+    match o {
+        LogicAnd => "and",
+        LogicOr => "or",
+        LogicXor => "xor",
+        LeftShift => "leftshift",
+        RightShift => "rightshift",
+        GE => "ge",
+        LE => "le",
+        EQ => "eq",
+        NE => "ne",
+        LT => "lt",
+        GT => "gt",
+        Plus => "plus",
+        Minus => "minus",
+        And => "bitand",
+        Or => "bitor",
+        Mod => "mod",
+        Xor => "bitxor",
+        Div => "div",
+        Mul => "mul",
+        Not => "not",
+        Not2 => "!",
+        BitNeg => "bitneg",
+        IntDiv => "intdiv",
+        NullEQ => "nulleq",
+    }
+}
+
+/// InvOp2 returns an invalid operation error.
+///
+/// Go returns `(nil, err)`: the result is always nil, so only the error is returned.
+// go: InvOp2 L2 (the nil any result is dropped)
+pub fn inv_op2(x: &GoValue, y: &GoValue, o: tidb_parser::ast::Op) -> Error {
+    let (xa, ya) = (x.arg(), y.arg());
+    tidb_base::errors::errorf(
+        "Invalid operation: %v %v %v (mismatched types %T and %T)",
+        &[
+            xa.clone(),
+            Arg::Stringer(op_name(o).as_bytes().to_vec(), "opcode.Op"),
+            ya.clone(),
+            xa,
+            ya,
+        ],
+    )
+}

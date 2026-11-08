@@ -417,7 +417,7 @@ impl MyDecimal {
     }
 
     // go: MyDecimal.removeLeadingZeros L1
-    fn remove_leading_zeros(&self) -> (isize, isize) {
+    pub(crate) fn remove_leading_zeros(&self) -> (isize, isize) {
         let mut word_idx: isize = 0;
         let mut digits_int = self.digits_int as isize;
         let mut i = ((digits_int - 1) % DIGITS_PER_WORD) + 1;
