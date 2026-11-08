@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tidb_base::gostd::time::{self, Location, Time};
 
 /// A parsed time of day: the clock and its location.
+#[derive(Clone)]
 pub(crate) struct DayTime {
     hour: i64,
     min: i64,
@@ -287,4 +288,22 @@ pub(crate) fn format_full_day_time_today(t: &DayTime) -> String {
     let zone = offset / 60; // convert to minutes
     let (sign, absz) = if zone < 0 { ('-', -zone) } else { ('+', zone) };
     format!("{h:02}:{m:02} {sign}{:02}{:02}", absz / 60, absz % 60)
+}
+
+/// `t.Format(FullDayTimeFormat)` of the time Go's `time.ParseInLocation` returned (year 0,
+/// January 1, the parsed clock in the parsed location): `"15:04 -0700"`.
+// go-std: time.Time.Format L2 ("15:04 -0700" only)
+pub(crate) fn format_full_day_time(t: &DayTime) -> String {
+    let d = time::date(0, 1, 1, t.hour, t.min, 0, 0, &t.loc);
+    let (h, m, _) = d.clock();
+    let offset = d.location().lookup(d.unix()).offset as i64;
+    let zone = offset / 60; // convert to minutes
+    let (sign, absz) = if zone < 0 { ('-', -zone) } else { ('+', zone) };
+    format!("{h:02}:{m:02} {sign}{:02}{:02}", absz / 60, absz % 60)
+}
+
+/// `mustParseTime(FullDayTimeFormat, s)` for the TTL window defaults (valid layout values).
+// go-std: time.ParseInLocation L2
+pub(crate) fn must_parse_full_day_time(s: &str) -> DayTime {
+    parse_day_time("15:04 -0700", s, &time::utc()).expect("valid default")
 }

@@ -432,15 +432,10 @@ impl LastDDLInfo {
     }
 }
 
-/// `slowlogrule.SlowLogRules` (the raw text; the parsed rules come with T7).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SlowLogRules {
-    /// RawRules is the raw rule string before parsing.
-    pub raw_rules: String,
-}
+pub use super::slow_log_rules::SlowLogRules;
 
 /// `slowlogrule.SessionSlowLogRules`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SessionSlowLogRules {
     /// The session rules (`*SlowLogRules`, nil until tidb_slow_log_rules is set).
     pub slow_log_rules: Option<SlowLogRules>,
