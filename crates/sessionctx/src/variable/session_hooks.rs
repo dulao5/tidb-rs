@@ -455,6 +455,96 @@ fn set_global(name: &str) -> Option<SetGlobalFn> {
         "validate_password.special_char_count" => {
             super::session_hooks_global::sg_validate_password_special_char_count
         }
+        "max_connections" => super::session_hooks_ext::sg_max_connections,
+        "tidb_check_mb4_value_in_utf8" => super::session_hooks_ext::sg_tidb_check_mb4_value_in_utf8,
+        "tidb_enable_collect_execution_info" => {
+            super::session_hooks_ext::sg_tidb_enable_collect_execution_info
+        }
+        "tidb_enable_ddl" => super::session_hooks_ext::sg_tidb_enable_ddl,
+        "tidb_enable_stats_owner" => super::session_hooks_ext::sg_tidb_enable_stats_owner,
+        "tidb_enable_slow_log" => super::session_hooks_ext::sg_tidb_enable_slow_log,
+        "tidb_record_plan_in_slow_log" => super::session_hooks_ext::sg_tidb_record_plan_in_slow_log,
+        "tidb_slow_log_threshold" => super::session_hooks_ext::sg_tidb_slow_log_threshold,
+        "tidb_service_scope" => super::session_hooks_ext::sg_tidb_service_scope,
+        "tidb_pprof_sql_cpu" => super::session_hooks_ext::sg_tidb_pprof_sql_cpu,
+        "tidb_force_priority" => super::session_hooks_ext::sg_tidb_force_priority,
+        "tidb_enable_column_tracking" => super::session_hooks_ext::sg_tidb_enable_column_tracking,
+        "tidb_historical_stats_duration" => {
+            super::session_hooks_ext::sg_tidb_historical_stats_duration
+        }
+        "tidb_advancer_check_point_lag_limit" => {
+            super::session_hooks_ext::sg_tidb_advancer_check_point_lag_limit
+        }
+        "tidb_enable_gc_aware_memory_track" => {
+            super::session_hooks_ext::sg_tidb_enable_gc_aware_memory_track
+        }
+        "tidb_server_memory_limit_sess_min_size" => {
+            super::session_hooks_ext::sg_tidb_server_memory_limit_sess_min_size
+        }
+        "authentication_ldap_sasl_auth_method_name" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_auth_method_name
+        }
+        "authentication_ldap_sasl_server_host" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_server_host
+        }
+        "authentication_ldap_sasl_server_port" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_server_port
+        }
+        "authentication_ldap_sasl_tls" => super::session_hooks_ext::sg_authentication_ldap_sasl_tls,
+        "authentication_ldap_sasl_ca_path" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_ca_path
+        }
+        "authentication_ldap_sasl_user_search_attr" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_user_search_attr
+        }
+        "authentication_ldap_sasl_bind_base_dn" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_bind_base_dn
+        }
+        "authentication_ldap_sasl_bind_root_dn" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_bind_root_dn
+        }
+        "authentication_ldap_sasl_bind_root_pwd" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_bind_root_pwd
+        }
+        "authentication_ldap_sasl_init_pool_size" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_init_pool_size
+        }
+        "authentication_ldap_sasl_max_pool_size" => {
+            super::session_hooks_ext::sg_authentication_ldap_sasl_max_pool_size
+        }
+        "authentication_ldap_simple_server_host" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_server_host
+        }
+        "authentication_ldap_simple_server_port" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_server_port
+        }
+        "authentication_ldap_simple_tls" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_tls
+        }
+        "authentication_ldap_simple_ca_path" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_ca_path
+        }
+        "authentication_ldap_simple_user_search_attr" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_user_search_attr
+        }
+        "authentication_ldap_simple_bind_base_dn" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_bind_base_dn
+        }
+        "authentication_ldap_simple_bind_root_dn" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_bind_root_dn
+        }
+        "authentication_ldap_simple_bind_root_pwd" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_bind_root_pwd
+        }
+        "authentication_ldap_simple_init_pool_size" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_init_pool_size
+        }
+        "authentication_ldap_simple_max_pool_size" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_max_pool_size
+        }
+        "authentication_ldap_simple_auth_method_name" => {
+            super::session_hooks_ext::sg_authentication_ldap_simple_auth_method_name
+        }
         _ => return None,
     })
 }
@@ -592,6 +682,118 @@ fn get_global(name: &str) -> Option<GetGlobalFn> {
         "validate_password.special_char_count" => {
             super::session_hooks_global::gg_validate_password_special_char_count
         }
+        "max_connections" => super::session_hooks_ext::gg_max_connections,
+        "tidb_check_mb4_value_in_utf8" => super::session_hooks_ext::gg_tidb_check_mb4_value_in_utf8,
+        "tidb_enable_collect_execution_info" => {
+            super::session_hooks_ext::gg_tidb_enable_collect_execution_info
+        }
+        "tidb_enable_ddl" => super::session_hooks_ext::gg_tidb_enable_ddl,
+        "tidb_enable_stats_owner" => super::session_hooks_ext::gg_tidb_enable_stats_owner,
+        "tidb_enable_slow_log" => super::session_hooks_ext::gg_tidb_enable_slow_log,
+        "tidb_record_plan_in_slow_log" => super::session_hooks_ext::gg_tidb_record_plan_in_slow_log,
+        "tidb_slow_log_threshold" => super::session_hooks_ext::gg_tidb_slow_log_threshold,
+        "plugin_dir" => super::session_hooks_ext::gg_plugin_dir,
+        "plugin_load" => super::session_hooks_ext::gg_plugin_load,
+        "plugin_audit_log_buffer_size" => super::session_hooks_ext::gg_plugin_audit_log_buffer_size,
+        "plugin_audit_log_flush_interval" => {
+            super::session_hooks_ext::gg_plugin_audit_log_flush_interval
+        }
+        "tidb_stmt_summary_enable_persistent" => {
+            super::session_hooks_ext::gg_tidb_stmt_summary_enable_persistent
+        }
+        "tidb_stmt_summary_filename" => super::session_hooks_ext::gg_tidb_stmt_summary_filename,
+        "tidb_stmt_summary_file_max_days" => {
+            super::session_hooks_ext::gg_tidb_stmt_summary_file_max_days
+        }
+        "tidb_stmt_summary_file_max_size" => {
+            super::session_hooks_ext::gg_tidb_stmt_summary_file_max_size
+        }
+        "tidb_stmt_summary_file_max_backups" => {
+            super::session_hooks_ext::gg_tidb_stmt_summary_file_max_backups
+        }
+        "tidb_pprof_sql_cpu" => super::session_hooks_ext::gg_tidb_pprof_sql_cpu,
+        "tidb_force_priority" => super::session_hooks_ext::gg_tidb_force_priority,
+        "disconnect_on_expired_password" => {
+            super::session_hooks_ext::gg_disconnect_on_expired_password
+        }
+        "tidb_enable_column_tracking" => super::session_hooks_ext::gg_tidb_enable_column_tracking,
+        "tidb_memory_usage_alarm_ratio" => {
+            super::session_hooks_ext::gg_tidb_memory_usage_alarm_ratio
+        }
+        "tidb_historical_stats_duration" => {
+            super::session_hooks_ext::gg_tidb_historical_stats_duration
+        }
+        "tidb_advancer_check_point_lag_limit" => {
+            super::session_hooks_ext::gg_tidb_advancer_check_point_lag_limit
+        }
+        "tidb_enable_gc_aware_memory_track" => {
+            super::session_hooks_ext::gg_tidb_enable_gc_aware_memory_track
+        }
+        "tidb_server_memory_limit_sess_min_size" => {
+            super::session_hooks_ext::gg_tidb_server_memory_limit_sess_min_size
+        }
+        "tidb_server_memory_limit" => super::session_hooks_ext::gg_tidb_server_memory_limit,
+        "authentication_ldap_sasl_auth_method_name" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_auth_method_name
+        }
+        "authentication_ldap_sasl_server_host" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_server_host
+        }
+        "authentication_ldap_sasl_server_port" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_server_port
+        }
+        "authentication_ldap_sasl_tls" => super::session_hooks_ext::gg_authentication_ldap_sasl_tls,
+        "authentication_ldap_sasl_ca_path" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_ca_path
+        }
+        "authentication_ldap_sasl_user_search_attr" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_user_search_attr
+        }
+        "authentication_ldap_sasl_bind_base_dn" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_bind_base_dn
+        }
+        "authentication_ldap_sasl_bind_root_dn" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_bind_root_dn
+        }
+        "authentication_ldap_sasl_bind_root_pwd" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_bind_root_pwd
+        }
+        "authentication_ldap_sasl_init_pool_size" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_init_pool_size
+        }
+        "authentication_ldap_sasl_max_pool_size" => {
+            super::session_hooks_ext::gg_authentication_ldap_sasl_max_pool_size
+        }
+        "authentication_ldap_simple_server_host" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_server_host
+        }
+        "authentication_ldap_simple_server_port" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_server_port
+        }
+        "authentication_ldap_simple_tls" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_tls
+        }
+        "authentication_ldap_simple_ca_path" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_ca_path
+        }
+        "authentication_ldap_simple_user_search_attr" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_user_search_attr
+        }
+        "authentication_ldap_simple_bind_base_dn" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_bind_base_dn
+        }
+        "authentication_ldap_simple_bind_root_dn" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_bind_root_dn
+        }
+        "authentication_ldap_simple_bind_root_pwd" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_bind_root_pwd
+        }
+        "authentication_ldap_simple_init_pool_size" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_init_pool_size
+        }
+        "authentication_ldap_simple_max_pool_size" => {
+            super::session_hooks_ext::gg_authentication_ldap_simple_max_pool_size
+        }
         _ => return None,
     })
 }
@@ -670,38 +872,13 @@ const PENDING_SET_SESSION: &[&str] = &["tidb_slow_log_rules"];
 
 /// Variables whose Go entry has a `SetGlobal` hook that is not ported yet.
 const PENDING_SET_GLOBAL: &[&str] = &[
-    "authentication_ldap_sasl_auth_method_name",
-    "authentication_ldap_sasl_bind_base_dn",
-    "authentication_ldap_sasl_bind_root_dn",
-    "authentication_ldap_sasl_bind_root_pwd",
-    "authentication_ldap_sasl_ca_path",
-    "authentication_ldap_sasl_init_pool_size",
-    "authentication_ldap_sasl_max_pool_size",
-    "authentication_ldap_sasl_server_host",
-    "authentication_ldap_sasl_server_port",
-    "authentication_ldap_sasl_tls",
-    "authentication_ldap_sasl_user_search_attr",
-    "authentication_ldap_simple_auth_method_name",
-    "authentication_ldap_simple_bind_base_dn",
-    "authentication_ldap_simple_bind_root_dn",
-    "authentication_ldap_simple_bind_root_pwd",
-    "authentication_ldap_simple_ca_path",
-    "authentication_ldap_simple_init_pool_size",
-    "authentication_ldap_simple_max_pool_size",
-    "authentication_ldap_simple_server_host",
-    "authentication_ldap_simple_server_port",
-    "authentication_ldap_simple_tls",
-    "authentication_ldap_simple_user_search_attr",
-    "max_connections",
     "max_prepared_stmt_count",
     "pd_enable_follower_handle_region",
     "require_secure_transport",
-    "tidb_advancer_check_point_lag_limit",
     "tidb_analyze_column_options",
     "tidb_auto_analyze_concurrency",
     "tidb_auto_analyze_partition_batch_size",
     "tidb_cb_pd_metadata_error_rate_threshold_ratio",
-    "tidb_check_mb4_value_in_utf8",
     "tidb_cloud_storage_uri",
     "tidb_committer_concurrency",
     "tidb_ddl_disk_quota",
@@ -711,23 +888,16 @@ const PENDING_SET_GLOBAL: &[&str] = &[
     "tidb_ddl_reorg_max_write_speed",
     "tidb_ddl_reorg_worker_cnt",
     "tidb_enable_batch_query_region",
-    "tidb_enable_collect_execution_info",
-    "tidb_enable_column_tracking",
-    "tidb_enable_ddl",
     "tidb_enable_dist_task",
     "tidb_enable_fast_create_table",
-    "tidb_enable_gc_aware_memory_track",
     "tidb_enable_gogc_tuner",
     "tidb_enable_local_txn",
     "tidb_enable_metadata_lock",
     "tidb_enable_paging",
     "tidb_enable_resource_control",
-    "tidb_enable_slow_log",
-    "tidb_enable_stats_owner",
     "tidb_enable_stmt_summary",
     "tidb_enable_tso_follower_proxy",
     "tidb_external_ts",
-    "tidb_force_priority",
     "tidb_gc_concurrency",
     "tidb_gc_enable",
     "tidb_gc_life_time",
@@ -737,7 +907,6 @@ const PENDING_SET_GLOBAL: &[&str] = &[
     "tidb_gogc_tuner_max_value",
     "tidb_gogc_tuner_min_value",
     "tidb_gogc_tuner_threshold",
-    "tidb_historical_stats_duration",
     "tidb_instance_plan_cache_max_size",
     "tidb_instance_plan_cache_reserved_percentage",
     "tidb_load_binding_timeout",
@@ -749,21 +918,16 @@ const PENDING_SET_GLOBAL: &[&str] = &[
     "tidb_opt_fix_control",
     "tidb_partition_prune_mode",
     "tidb_persist_analyze_options",
-    "tidb_pprof_sql_cpu",
     "tidb_prepared_plan_cache_memory_guard_ratio",
-    "tidb_record_plan_in_slow_log",
     "tidb_resource_control_strict_mode",
     "tidb_restricted_read_only",
     "tidb_row_format_version",
     "tidb_schema_cache_size",
     "tidb_server_memory_limit",
     "tidb_server_memory_limit_gc_trigger",
-    "tidb_server_memory_limit_sess_min_size",
-    "tidb_service_scope",
     "tidb_simplified_metrics",
     "tidb_slow_log_max_per_sec",
     "tidb_slow_log_rules",
-    "tidb_slow_log_threshold",
     "tidb_stats_cache_mem_quota",
     "tidb_stmt_summary_history_size",
     "tidb_stmt_summary_internal_query",
@@ -793,47 +957,11 @@ const PENDING_GET_SESSION: &[&str] = &[];
 
 /// Variables whose Go entry has a `GetGlobal` hook that is not ported yet.
 const PENDING_GET_GLOBAL: &[&str] = &[
-    "authentication_ldap_sasl_auth_method_name",
-    "authentication_ldap_sasl_bind_base_dn",
-    "authentication_ldap_sasl_bind_root_dn",
-    "authentication_ldap_sasl_bind_root_pwd",
-    "authentication_ldap_sasl_ca_path",
-    "authentication_ldap_sasl_init_pool_size",
-    "authentication_ldap_sasl_max_pool_size",
-    "authentication_ldap_sasl_server_host",
-    "authentication_ldap_sasl_server_port",
-    "authentication_ldap_sasl_tls",
-    "authentication_ldap_sasl_user_search_attr",
-    "authentication_ldap_simple_bind_base_dn",
-    "authentication_ldap_simple_bind_root_dn",
-    "authentication_ldap_simple_bind_root_pwd",
-    "authentication_ldap_simple_ca_path",
-    "authentication_ldap_simple_init_pool_size",
-    "authentication_ldap_simple_max_pool_size",
-    "authentication_ldap_simple_server_host",
-    "authentication_ldap_simple_server_port",
-    "authentication_ldap_simple_tls",
-    "authentication_ldap_simple_user_search_attr",
-    "disconnect_on_expired_password",
-    "max_connections",
-    "plugin_audit_log_buffer_size",
-    "plugin_audit_log_flush_interval",
-    "plugin_dir",
-    "plugin_load",
     "require_secure_transport",
-    "tidb_advancer_check_point_lag_limit",
-    "tidb_check_mb4_value_in_utf8",
     "tidb_cloud_storage_uri",
     "tidb_committer_concurrency",
     "tidb_config",
-    "tidb_enable_collect_execution_info",
-    "tidb_enable_column_tracking",
-    "tidb_enable_ddl",
-    "tidb_enable_gc_aware_memory_track",
-    "tidb_enable_slow_log",
-    "tidb_enable_stats_owner",
     "tidb_external_ts",
-    "tidb_force_priority",
     "tidb_gc_concurrency",
     "tidb_gc_enable",
     "tidb_gc_life_time",
@@ -841,22 +969,10 @@ const PENDING_GET_GLOBAL: &[&str] = &[
     "tidb_gc_scan_lock_mode",
     "tidb_gogc_tuner_max_value",
     "tidb_gogc_tuner_min_value",
-    "tidb_historical_stats_duration",
     "tidb_mem_quota_analyze",
-    "tidb_memory_usage_alarm_ratio",
-    "tidb_pprof_sql_cpu",
-    "tidb_record_plan_in_slow_log",
-    "tidb_server_memory_limit",
     "tidb_server_memory_limit_gc_trigger",
-    "tidb_server_memory_limit_sess_min_size",
     "tidb_slow_log_max_per_sec",
     "tidb_slow_log_rules",
-    "tidb_slow_log_threshold",
-    "tidb_stmt_summary_enable_persistent",
-    "tidb_stmt_summary_file_max_backups",
-    "tidb_stmt_summary_file_max_days",
-    "tidb_stmt_summary_file_max_size",
-    "tidb_stmt_summary_filename",
     "tidb_store_limit",
     "tidb_top_sql_max_meta_count",
     "tidb_top_sql_max_time_series_count",
