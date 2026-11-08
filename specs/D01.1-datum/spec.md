@@ -55,10 +55,10 @@
 
 ## 6. 范围
 
-- datum.go 146/146、field_type.go 22/22、field_type_builder.go 20/20、field_name.go 4/5、datum_eval.go 1/1、etc.go `InvOp2`；D01.4 的 convert.go `ToString`（D01.4 达到 44/44）。
-- converge：D01.1 **282/299**。缺的 17 个登记为豁免，原因相同：依赖尚未忠实移植的 parser AST（blocked by D02.2）：
-  - `parser_driver/value_expr.go` 全部 16 个（`ValueExpr`、`ParamMarkerExpr` 是 `ast.Node`，用到 `format.RestoreCtx`）；
-  - `NameSlice.FindAstColName`（参数是 `*ast.ColumnName`，PoC AST 只是替身）。
+- datum.go 144/144、field_type.go 22/22、field_type_builder.go 20/20、field_name.go 4/4、datum_eval.go 1/1、etc.go `InvOp2`；D01.4 的 convert.go `ToString`（D01.4 达到 44/44）。
+- converge：D01.1 **280/280**（第 2 部分评审后调整了块归属，tracker `rules.py`）：
+  - `parser_driver/value_expr.go` 全部 16 个和 `NameSlice.FindAstColName` 移到 D02.2：它们实现的是 parser AST 节点（`ast.Node`、`format.RestoreCtx`、`*ast.ColumnName`），留在 D01.1 只会让本块永远完成不了。
+  - `ChangeReverseResultByUpperLowerBound` 及其辅助函数 `getDatumBound` 改为 X：v8.5.8 中没有非测试的调用方。Rust 端删除，govec 的 `d_reverse` op 也删除。
 - `types.EOFAsNil` 改为 X（v8.5.8 中没有调用方，第 1 部分评审）；tracker `rules.py` 中记录了原因。
 - 新增 `tidb_base::gostd::sort`：Go `sort.Sort`（pdqsort，不稳定）的逐行移植。`SortDatums` 的 `Less` 有副作用（记录第一个比较错误），排序规则也不是全序（`utf8mb4_general_ci` 下的等值），所以必须和 Go 的比较序列一致。
 - 第 1 部分评审的两项后续：`tidb-base` 中 `size_of::<Result<i64, Error>>() == 16` 的编译期断言；govec `str_to_time` 覆盖零日期相关的 flag 位。
@@ -72,32 +72,34 @@
 - `hack.Slice` 对空字符串返回 nil 切片：`SetString`、`SetMysqlEnum`、`SetMysqlSet` 遇到空串时 `b = None`，与常见情况一致。Go 中 `b` 是否为 nil 还取决于字符串的数据指针（`s[:0]` 不为 nil），这只能通过 `GetRaw` 观察到；govec 只对 KindRaw 比较 nil。
 - `GetValue() any` / `SetValue(any)` 等使用 `GoValue` 枚举；`%v` / `%T` 由 `GoValue::arg` 生成（`BitLiteral`、`HexLiteral` 没有 `String` 方法，`%v` 是 `[1 2 3]`）。
 - `Hash64ForDatum` 是 codec 包设置的函数变量：`OnceLock<fn(&mut dyn IHasher, &Datum)>`；未设置时 `Hash64` panic（Go 是 nil 函数调用）。
-- `convertToMysqlBit` 在 Go 中会把接收者的 `k` 从 KindInt64 改成 KindUint64；Rust 改在副本上进行（`&self`），只影响 Go 调用之后接收者的状态。
+- `ConvertTo` 是 Go 的指针接收者方法，`convertToMysqlBit` 会把接收者的 `k` 从 KindInt64 改成 KindUint64，调用方之后看到的是改过的接收者。Rust 的 `convert_to` 因此取 `&mut self`，忠实复刻（L1）。这个副作用在 SQL 层可见：index join 用 BIT 列的索引探测外表的 `-1` 时报 ERROR 1406 Data Too Long，hash join / merge join 正常返回（upstream-pitfall tidb-rs#34）。其余目标类型都不写接收者，`convert_to_non_bit(&self)` 供只持有 `&self`、目标固定为非 BIT 的调用方使用（`compareMysqlDecimal`）。
+- `b` 的构造集中在 `set_b` / `set_b_string` 两个私有函数里（所有 setter 和构造函数都经过它们）。是否把 `b` 改成 `Cow<[u8]>` / `Bytes` 等实测数据再定（决定性的场景是 chunk 中 varchar 列的 `get_datum`），届时只需改这两个函数。
 - `MarshalJSON` / `UnmarshalJSON`：按 jsonDatum 的字段顺序手写，解码用 `gostd::json` 的 Go 规则；嵌套的 Time / MyDecimal `UnmarshalJSON` 错误按 Go 的 `addErrorContext` 补上结构名和字段路径。
 
 ## 8. 偏离
 
-5. `errors.Wrap(ErrTruncated, "convert to MySQL enum/set failed: "+err)`（`convertToMysqlEnum`、`convertToMysqlSet`，以及经过它们的 `ChangeReverseResultByUpperLowerBound`）返回 cause（M-ERR）；govec 记录 `errors.Cause(err)`。**注意**：Go 中这条消息带前缀，若经 `HandleTruncate` 成为 warning，用户在 SHOW WARNINGS 中看到的文字会不同。请评审判断是否要在 tidb-base 中支持 `errors.Wrap` 的消息前缀。
+5. `errors.Wrap(ErrTruncated, "convert to MySQL enum/set failed: "+err)`（`convertToMysqlEnum`、`convertToMysqlSet`）返回 cause（M-ERR）；govec 记录 `errors.Cause(err)`。评审在 v8.5.8 上验证过：INSERT、UPDATE、INSERT…SELECT 写入非法 enum/set 时，SHOW WARNINGS 和严格模式的报错都只显示 cause 的文字，前缀不会到达客户端，所以只影响日志文字。
+   - **必须原样保留**：UPDATE 和 INSERT…SELECT 产生的 warning 是**未格式化**的 `Data truncated for column '%s' at row %d`（不带参数的 `ErrTruncated`）。tidb-rs 要逐字节保持这段文字，不能"修好"占位符。
 6. `InvOp2` 只返回错误（Go 的 `any` 结果恒为 nil）。
 7. `FieldTypeBuilder` 的方法按值传递构建器（Go 返回 `*FieldTypeBuilder` 链式调用）。
 8. `NewFieldTypeWithCollation` 遇到未知排序规则时 panic，与 Go 解引用 nil `*Collation` 相同。
 
 ## 9. 上游问题（upstream pitfall 候选）
 
-5. `Datum.convertToMysqlBit` 修改接收者（`d.k = KindUint64`）：同一个 Datum 再次使用时种类已变（Go 的数据竞争隐患）。Rust 不复刻对接收者的修改。
-6. `ChangeReverseResultByUpperLowerBound` 的 Ceiling 分支对 `TypeTiny`、`TypeInt24`、`TypeYear` 不加 1（只处理 Short/Long/Longlong）。是否为有意行为未知，照 Go 移植。
+5. `Datum.convertToMysqlBit` 修改接收者（`d.k = KindUint64`），SQL 层可见：已开 upstream-pitfall tidb-rs#34（评审用 v8.5.8 复现，上游 master 未修）。Rust 照 Go 复刻（见第 7 节）。
+6. `ChangeReverseResultByUpperLowerBound` 的 Ceiling 分支对 `TypeTiny`、`TypeInt24`、`TypeYear` 不加 1：函数在 v8.5.8 中没有非测试的调用方，改为 X，不开 issue。
 
 ## 10. 验证
 
-- govec `datum` 领域共 **141,968** 条（第 1 部分 74,274 条 + 第 2 部分 + 零日期 flag），arm64 本地生成，amd64 取自 tracker CI。回放在 debug 和 release-checked 下都是 0 条不一致。
-- 第 2 部分的 op：d_convert 20,820、d_to 13,160、d_compare 7,470、d_reverse 7,140、ft 5,616、d_list 2,000、d_plus 1,530、d_new 916、d_unmarshal 496、context 147、d_bound 75、d_ctor 60、ft_builder 60、field_name 56。
+- govec `datum` 领域共 **170,188** 条（第 1 部分 74,274 条 + 第 2 部分 + 零日期 flag + 评审后的 d_convert_recv，去掉 d_reverse），arm64 本地生成，amd64 取自 tracker CI。回放在 debug 和 release-checked 下都是 0 条不一致。评审用的种子 11、12、13（arm64 本地生成）回放也都通过。
+- 第 2 部分的 op：d_convert_recv 35,360（评审后新增：ConvertTo 的结果和之后的接收者，pool 中每个 datum × 每个字段类型，加上有符号整数到 BIT(1/8/32/63/64)）、d_convert 20,820、d_to 13,160、d_compare 7,470、ft 5,616、d_list 2,000、d_plus 1,530、d_new 916、d_unmarshal 496、context 147、d_bound 75、d_ctor 60、ft_builder 60、field_name 56。
 - datum_test.go、field_type_test.go 的字面量（minelits，284 条，`testdata/datum2_literals.tsv`）登记进 `minedGoTests`，作为 d_convert / d_new 的输入。这两个测试文件中没有 govec 表达不了的断言（Hash64 依赖 codec，属于 D01.8），因此没有移植成 Rust 单测。
 - **反证**：
   - SortDatums 改用 Rust 标准库排序 → 318 条不一致；
   - 浮点比较中 NaN 改为相等 → 56 条；
   - convertToMysqlBit 去掉 Int64 按 Uint64 处理 → 11 条；
   - ProduceStrWithSpecifiedTp 去掉 binary 判断 → 3 条；
-  - ChangeReverse 的 Long Ceiling 不加 1 → 199 条；
+  - `convert_to` 改回在副本上转换（不修改接收者）→ 300 条（全部是 d_convert_recv）；
   - ConvertToMysqlYear 去掉长度 4 的条件 → 4 条。
 - **性能**（arm64，Go `go test -bench`、Rust criterion，同样的输入）：
 

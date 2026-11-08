@@ -1,6 +1,6 @@
 # D01.1 Datum：交接说明（WIP）
 
-> 2026-11-08 再更新：第 2 部分已完成并提 PR（见 spec.md 第 6–10 节）；D01.1 converge 282/299，余下 17 个登记豁免（blocked by D02.2）。下面是第 1 部分时的交接记录。
+> 2026-11-08 再更新：第 2 部分已完成并提 PR（见 spec.md 第 6–10 节）；评审后 value_expr.go 和 FindAstColName 移到 D02.2、ChangeReverseResultByUpperLowerBound 改为 X，D01.1 converge 280/280。下面是第 1 部分时的交接记录。
 >
 > 2026-11-08 更新：第 1 部分（D01.4 + 叶子文件 + MyDecimal 错误迁移 + Encoding）已完成，见 spec.md。分支已 rebase 到 main（D01.5 合并后），不再叠在 D01.5 上。下面"范围"表中 helper、etc（除 EOFAsNil/InvOp2）、binary_literal、enum、set、compare 已完成；第 2 部分从 datum.go 开始。
 
