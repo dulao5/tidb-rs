@@ -445,6 +445,149 @@ impl JsonParser<'_> {
     }
 }
 
+/// One step of [`scan`]: the values of a JSON text in source order, without building a tree.
+#[derive(Debug, PartialEq)]
+pub enum ScanEvent<'a> {
+    BeginArray,
+    BeginObject,
+    /// An object member's key (unquoted as [`unmarshal_raw`] does); its value follows.
+    Key(String),
+    /// The end of the innermost open array or object.
+    End,
+    Null,
+    Bool(bool),
+    String,
+    /// A number literal as written.
+    Number(&'a str),
+}
+
+/// `json.Valid` / `checkValid` without recursion: accepts exactly the texts [`unmarshal_raw`]
+/// accepts and reports their values to `f` in source order, keeping an explicit stack of
+/// open containers instead of the call stack (Go's scanner is iterative too). Used for
+/// texts too deeply nested for the recursive parser.
+// go-std: encoding/json.checkValid L2 (iterative scanner emitting value events; syntax error messages differ)
+pub fn scan(data: &[u8], mut f: impl FnMut(ScanEvent<'_>)) -> Result<(), String> {
+    let mut p = JsonParser { b: data, i: 0 };
+    // b'[' or b'{' for every open container.
+    let mut stack: Vec<u8> = Vec::new();
+    p.ws();
+    'value: loop {
+        // One value at p.i, nested in `stack.len()` containers (`raw(depth)`).
+        if stack.len() > 10000 {
+            return Err("exceeded max depth".to_owned());
+        }
+        match p.b.get(p.i) {
+            None => return p.err(),
+            Some(b'n') => {
+                p.lit(b"null", Value::Null)?;
+                f(ScanEvent::Null);
+            }
+            Some(b't') => {
+                p.lit(b"true", Value::Null)?;
+                f(ScanEvent::Bool(true));
+            }
+            Some(b'f') => {
+                p.lit(b"false", Value::Null)?;
+                f(ScanEvent::Bool(false));
+            }
+            Some(b'"') => {
+                p.string()?;
+                f(ScanEvent::String);
+            }
+            Some(b'[') => {
+                p.i += 1;
+                f(ScanEvent::BeginArray);
+                p.ws();
+                if p.b.get(p.i) == Some(&b']') {
+                    p.i += 1;
+                    f(ScanEvent::End);
+                } else {
+                    stack.push(b'[');
+                    p.ws();
+                    continue 'value;
+                }
+            }
+            Some(b'{') => {
+                p.i += 1;
+                f(ScanEvent::BeginObject);
+                p.ws();
+                if p.b.get(p.i) == Some(&b'}') {
+                    p.i += 1;
+                    f(ScanEvent::End);
+                } else {
+                    stack.push(b'{');
+                    let k = p.member_key()?;
+                    f(ScanEvent::Key(k));
+                    continue 'value;
+                }
+            }
+            Some(c) if *c == b'-' || c.is_ascii_digit() => {
+                let s = p.number_literal()?;
+                f(ScanEvent::Number(&s));
+            }
+            Some(_) => return p.err(),
+        }
+        // A value is complete: a separator continues its container, a closer ends it.
+        loop {
+            p.ws();
+            match stack.last() {
+                None => break 'value,
+                Some(b'[') => match p.b.get(p.i) {
+                    Some(b',') => {
+                        p.i += 1;
+                        p.ws();
+                        continue 'value;
+                    }
+                    Some(b']') => {
+                        p.i += 1;
+                        stack.pop();
+                        f(ScanEvent::End);
+                    }
+                    _ => return p.err(),
+                },
+                Some(_) => match p.b.get(p.i) {
+                    Some(b',') => {
+                        p.i += 1;
+                        let k = p.member_key()?;
+                        f(ScanEvent::Key(k));
+                        continue 'value;
+                    }
+                    Some(b'}') => {
+                        p.i += 1;
+                        stack.pop();
+                        f(ScanEvent::End);
+                    }
+                    _ => return p.err(),
+                },
+            }
+        }
+    }
+    p.ws();
+    if p.i != p.b.len() {
+        return Err("invalid character after top-level value".to_owned());
+    }
+    Ok(())
+}
+
+impl JsonParser<'_> {
+    /// `"key"` and `:` of an object member, with the white space around them.
+    // glue: member key of the iterative scanner (the object loop of `raw`)
+    fn member_key(&mut self) -> Result<String, String> {
+        self.ws();
+        if self.b.get(self.i) != Some(&b'"') {
+            return self.err();
+        }
+        let k = self.string()?;
+        self.ws();
+        if self.b.get(self.i) != Some(&b':') {
+            return self.err();
+        }
+        self.i += 1;
+        self.ws();
+        Ok(k)
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Decoding into typed Go values (D02.3): `json.Unmarshal(data, &v)` where `v` is a struct, with
 // the reflect-driven rules of `decodeState.object`, `array` and `literalStore`. A typed port

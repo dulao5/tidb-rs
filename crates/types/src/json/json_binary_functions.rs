@@ -81,14 +81,18 @@ impl BinaryJSON<'_> {
     ///    ret: target JSON matched any path expressions. maybe autowrapped as an array.
     ///    found: true if any path expressions matched.
     ///
-    /// Go passes a fresh `dup` set for every path. A path without wildcards, ranges or `**`
-    /// reaches at most one value, so it cannot produce a duplicate and gets no set here (saves
-    /// the allocation and hashing on the common constant-path case; same result).
-    // go: BinaryJSON.Extract L2 (no dup set for a path that cannot match multiple values)
+    /// Go passes a fresh `dup` set for every path. A path whose legs have no `*`, `[*]`, range
+    /// or `**` reaches at most one value, so it cannot produce a duplicate and gets no set here
+    /// (saves the allocation and hashing on the common constant-path case; same result).
+    /// The decision is made from the legs, not from `flags`: parent paths built by
+    /// `pop_one_last_leg` carry `flags == 0` (as in Go) while their legs may still contain
+    /// `**` or ranges (`ArrayInsert`). Whether the result is wrapped in an array is still
+    /// decided from `flags`, as Go does.
+    // go: BinaryJSON.Extract L2 (no dup set for a path whose legs cannot match multiple values)
     pub fn extract(&self, path_expr_list: &[JSONPathExpression]) -> (BinaryJSON<'_>, bool) {
         let mut buf: Vec<BinaryJSON<'_>> = Vec::with_capacity(1);
         for path_expr in path_expr_list {
-            if path_expr.could_match_multiple_values() {
+            if legs_could_match_multiple_values(&path_expr.legs) {
                 let mut dup = HashSet::new();
                 buf = self
                     .as_ref()
@@ -1691,4 +1695,17 @@ pub fn overlaps_binary_json(obj: BinaryJSON<'_>, target: BinaryJSON<'_>) -> bool
         }
         _ => compare_binary_json(obj, target) == 0,
     }
+}
+
+/// Whether `legs` can reach more than one value: any `*` key, `[*]`, range or `**` leg.
+/// Unlike `JSONPathExpression::could_match_multiple_values`, this does not trust `flags`
+/// (see `BinaryJSON::extract`).
+// glue: dup-set decision for the L2 change in BinaryJSON.Extract
+fn legs_could_match_multiple_values(legs: &[PathLeg]) -> bool {
+    legs.iter().any(|leg| match leg.typ {
+        jsonPathLegDoubleAsterisk => true,
+        jsonPathLegKey => leg.dot_key == b"*",
+        jsonPathLegArraySelection => !matches!(leg.array_selection, Some(ArraySelection::Index(_))),
+        _ => false,
+    })
 }

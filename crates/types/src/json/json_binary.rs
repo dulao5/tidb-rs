@@ -431,6 +431,10 @@ impl<'a> BinaryJSON<'a> {
     /// callers pass text that `json.Valid` accepted. Here the whole input must be one value.
     // go: BinaryJSON.UnmarshalJSON L2 (A4: decodes with the gostd ordered decoder instead of json.Decoder; trailing data after the first value is an error)
     pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        if max_nesting(data) > DEEP_TEXT {
+            // Never converts; checked without recursion (see `deep_text_error`).
+            return Err(deep_text_error(data).map_err(Error::plain)?);
+        }
         let raw = tidb_base::gostd::json::unmarshal_raw(data).map_err(Error::plain)?;
         let input = raw_to_value(raw);
         let new_bj = create_binary_json_with_check(&input)?;
@@ -649,9 +653,10 @@ fn json_marshal_duration_to(mut buf: Vec<u8>, mut duration: Duration) -> Vec<u8>
 /// the nesting limit, checked first), so a decoding error is Go's `json.Valid` failure and a
 /// decoded value goes on to `UnmarshalJSON`'s conversion (same results, one pass fewer).
 ///
-/// Documents nested deeper than [`DEEP_NESTING`] are converted on a thread with a large
-/// stack: Go's goroutine stacks grow, the recursion here does not (the result is the same).
-// go: ParseBinaryJSONFromString L2 (json.Valid and UnmarshalJSON share one decoding pass)
+/// Texts nested deeper than [`DEEP_TEXT`] never convert (see [`deep_text_error`]); they are
+/// checked without recursion, so any nesting up to `json.Valid`'s limit is safe on a normal
+/// stack.
+// go: ParseBinaryJSONFromString L2 (json.Valid and UnmarshalJSON share one decoding pass; deep texts checked iteratively)
 pub fn parse_binary_json_from_string(s: &[u8]) -> Result<BinaryJSON<'static>, Error> {
     if s.is_empty() {
         return Err(
@@ -667,60 +672,125 @@ pub fn parse_binary_json_from_string(s: &[u8]) -> Result<BinaryJSON<'static>, Er
     if nesting > 10000 {
         return Err(invalid());
     }
-    let run = move |data: &[u8]| -> Result<BinaryJSON<'static>, Error> {
-        let Ok(raw) = tidb_base::gostd::json::unmarshal_raw(data) else {
+    let converted = if nesting > DEEP_TEXT {
+        match deep_text_error(s) {
+            Ok(err) => Err(err),
+            Err(_) => return Err(invalid()),
+        }
+    } else {
+        let Ok(raw) = tidb_base::gostd::json::unmarshal_raw(s) else {
             return Err(invalid());
         };
-        // UnmarshalJSON's conversion and the error mapping of ParseBinaryJSONFromString.
-        match create_binary_json_with_check(&raw_to_value(raw)) {
-            Ok(bj) => Ok(bj),
-            Err(err)
-                if !ErrJSONObjectKeyTooLong.equal(&err) && !ErrJSONDocumentTooDeep.equal(&err) =>
-            {
-                Err(ErrInvalidJSONText.gen_with_stack_by_args(vec![Arg::from(err)]))
-            }
-            Err(err) => Err(err),
-        }
+        create_binary_json_with_check(&raw_to_value(raw))
     };
-    if nesting <= DEEP_NESTING {
-        return run(s);
+    // UnmarshalJSON's conversion and the error mapping of ParseBinaryJSONFromString.
+    match converted {
+        Ok(bj) => Ok(bj),
+        Err(err) if !ErrJSONObjectKeyTooLong.equal(&err) && !ErrJSONDocumentTooDeep.equal(&err) => {
+            Err(ErrInvalidJSONText.gen_with_stack_by_args(vec![Arg::from(err)]))
+        }
+        Err(err) => Err(err),
     }
-    let data = s.to_vec();
-    std::thread::Builder::new()
-        .name("json-deep".to_owned())
-        .stack_size(512 << 20)
-        .spawn(move || run(&data))
-        .expect("spawn the deep JSON thread")
-        .join()
-        .unwrap_or_else(|p| std::panic::resume_unwind(p))
 }
 
-/// Nesting beyond which parsing runs on a large-stack thread.
-pub(crate) const DEEP_NESTING: usize = 256;
+/// Text nesting beyond which a valid document is always deeper than `maxJSONDepth`: a text
+/// nested `n` levels gives `GetElemDepth() >= n` (`n + 1` unless the innermost container is
+/// empty), and `CreateBinaryJSONWithCheck` rejects `GetElemDepth() - 1 > maxJSONDepth`.
+pub(crate) const DEEP_TEXT: usize = maxJSONDepth as usize + 1;
+
+/// The error `UnmarshalJSON` returns for a valid text nested deeper than [`DEEP_TEXT`], or
+/// the syntax error if the text is not valid.
+///
+/// Such a text never converts: `CreateBinaryJSONWithCheck` rejects any document deeper than
+/// `maxJSONDepth` after `appendBinaryJSON`. The result is the first error `appendBinaryJSON`
+/// meets in its traversal order (a key longer than 65535 bytes, a number that does not
+/// convert), else `ErrJSONDocumentTooDeep`. This runs those checks in the same order on a
+/// flat copy of the decoded tree (duplicate keys: the last one wins, members in key order),
+/// with explicit stacks instead of recursion.
+// glue: deep texts of UnmarshalJSON / CreateBinaryJSONWithCheck without recursion
+fn deep_text_error(data: &[u8]) -> Result<Error, String> {
+    use tidb_base::gostd::json::ScanEvent;
+
+    enum Node {
+        Leaf,
+        Number(String),
+        Array(Vec<u32>),
+        Object(BTreeMap<Vec<u8>, u32>),
+    }
+    let mut nodes: Vec<Node> = Vec::new();
+    // Open containers and, for objects, the key of the member being read.
+    let mut open: Vec<(u32, Vec<u8>)> = Vec::new();
+    tidb_base::gostd::json::scan(data, |ev| {
+        let node = match ev {
+            ScanEvent::Key(k) => {
+                if let Some(top) = open.last_mut() {
+                    top.1 = k.into_bytes();
+                }
+                return;
+            }
+            ScanEvent::End => {
+                open.pop();
+                return;
+            }
+            ScanEvent::BeginArray => Node::Array(Vec::new()),
+            ScanEvent::BeginObject => Node::Object(BTreeMap::new()),
+            ScanEvent::Number(n) => Node::Number(n.to_owned()),
+            ScanEvent::Null | ScanEvent::Bool(_) | ScanEvent::String => Node::Leaf,
+        };
+        let idx = nodes.len() as u32;
+        let container = matches!(node, Node::Array(_) | Node::Object(_));
+        nodes.push(node);
+        if let Some((parent, key)) = open.last_mut() {
+            match &mut nodes[*parent as usize] {
+                Node::Array(a) => a.push(idx),
+                Node::Object(m) => {
+                    m.insert(std::mem::take(key), idx);
+                }
+                _ => unreachable!("only containers are open"),
+            }
+        }
+        if container {
+            open.push((idx, Vec::new()));
+        }
+    })?;
+
+    // appendBinaryJSON's order: array elements in order; for an object, all keys (sorted)
+    // before the values (sorted by key).
+    let mut scratch = Vec::new();
+    let mut todo: Vec<u32> = vec![0];
+    while let Some(n) = todo.pop() {
+        match &nodes[n as usize] {
+            Node::Leaf => {}
+            Node::Number(x) => {
+                if let Err(err) = append_binary_number(&mut scratch, x) {
+                    return Ok(err);
+                }
+                scratch.clear();
+            }
+            Node::Array(a) => todo.extend(a.iter().rev()),
+            Node::Object(m) => {
+                if m.keys().any(|k| k.len() > u16::MAX as usize) {
+                    return Ok(ErrJSONObjectKeyTooLong.clone());
+                }
+                todo.extend(m.values().rev());
+            }
+        }
+    }
+    Ok(ErrJSONDocumentTooDeep.clone())
+}
 
 /// `json.Valid`: one JSON value, nested at most 10000 levels deep (encoding/json's
 /// `maxNestingDepth`).
-// go-std: encoding/json.Valid L2 (the gostd decoder plus the scanner's nesting limit)
+// go-std: encoding/json.Valid L2 (the gostd iterative scanner plus the nesting limit)
 pub fn json_valid(data: &[u8]) -> bool {
-    let nesting = max_nesting(data);
-    if nesting > 10000 {
+    if max_nesting(data) > 10000 {
         return false;
     }
-    if nesting <= DEEP_NESTING {
-        return tidb_base::gostd::json::unmarshal_raw(data).is_ok();
-    }
-    let data = data.to_vec();
-    std::thread::Builder::new()
-        .name("json-deep".to_owned())
-        .stack_size(512 << 20)
-        .spawn(move || tidb_base::gostd::json::unmarshal_raw(&data).is_ok())
-        .expect("spawn the deep JSON thread")
-        .join()
-        .unwrap_or_else(|p| std::panic::resume_unwind(p))
+    tidb_base::gostd::json::scan(data, |_| {}).is_ok()
 }
 
 /// The deepest nesting of `[`/`{` outside strings (no syntax check).
-// glue: nesting depth for the scanner limit and the stack choice
+// glue: nesting depth for the scanner limit and the deep-text path
 pub(crate) fn max_nesting(data: &[u8]) -> usize {
     let (mut depth, mut max, mut in_str, mut esc) = (0usize, 0usize, false, false);
     for &b in data {
