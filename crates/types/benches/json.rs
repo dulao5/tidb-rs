@@ -14,7 +14,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// The documents (same text in the Go benchmark): ~100 B and ~4 KB.
 fn small() -> String {
-    r#"{"id": 12345, "name": "tidb-rs", "tags": ["a", "b", "c"], "score": 3.5, "ok": true}"#.to_owned()
+    r#"{"id": 12345, "name": "tidb-rs", "tags": ["a", "b", "c"], "score": 3.5, "ok": true}"#
+        .to_owned()
 }
 
 fn medium() -> String {
@@ -52,7 +53,9 @@ fn bench(c: &mut Criterion) {
     c.bench_function("compare_medium", |b| {
         b.iter(|| j::compare_binary_json(black_box(bj_md.as_ref()), black_box(bj_md.as_ref())))
     });
-    c.bench_function("hash_small", |b| b.iter(|| black_box(&bj_sm).hash_value(Vec::new())));
+    c.bench_function("hash_small", |b| {
+        b.iter(|| black_box(&bj_sm).hash_value(Vec::new()))
+    });
 }
 
 criterion_group!(benches, bench);

@@ -20,7 +20,7 @@ use super::json_binary::{
 };
 use super::json_constants::*;
 use super::json_path_expr::{
-    ArraySelection, JSONPathExpression, PathLeg, PathExpressionFlagExt, is_ecmascript_identifier,
+    ArraySelection, JSONPathExpression, PathExpressionFlagExt, PathLeg, is_ecmascript_identifier,
     json_path_array_index_from_start, jsonPathLegArraySelection, jsonPathLegDoubleAsterisk,
     jsonPathLegKey,
 };
@@ -80,14 +80,22 @@ impl BinaryJSON<'_> {
     ///
     ///    ret: target JSON matched any path expressions. maybe autowrapped as an array.
     ///    found: true if any path expressions matched.
-    // go: BinaryJSON.Extract L1
+    ///
+    /// Go passes a fresh `dup` set for every path. A path without wildcards, ranges or `**`
+    /// reaches at most one value, so it cannot produce a duplicate and gets no set here (saves
+    /// the allocation and hashing on the common constant-path case; same result).
+    // go: BinaryJSON.Extract L2 (no dup set for a path that cannot match multiple values)
     pub fn extract(&self, path_expr_list: &[JSONPathExpression]) -> (BinaryJSON<'_>, bool) {
         let mut buf: Vec<BinaryJSON<'_>> = Vec::with_capacity(1);
         for path_expr in path_expr_list {
-            let mut dup = HashSet::new();
-            buf = self
-                .as_ref()
-                .extract_to(buf, &path_expr.legs, Some(&mut dup), false);
+            if path_expr.could_match_multiple_values() {
+                let mut dup = HashSet::new();
+                buf = self
+                    .as_ref()
+                    .extract_to(buf, &path_expr.legs, Some(&mut dup), false);
+            } else {
+                buf = self.as_ref().extract_to(buf, &path_expr.legs, None, false);
+            }
         }
 
         if buf.is_empty() {
@@ -108,7 +116,8 @@ impl BinaryJSON<'_> {
     // go: BinaryJSON.extractOne L1
     pub(crate) fn extract_one(&self, path_expr: &JSONPathExpression) -> Vec<BinaryJSON<'_>> {
         let result = Vec::with_capacity(1);
-        self.as_ref().extract_to(result, &path_expr.legs, None, true)
+        self.as_ref()
+            .extract_to(result, &path_expr.legs, None, true)
     }
 
     // go: BinaryJSON.objectSearchKey L1

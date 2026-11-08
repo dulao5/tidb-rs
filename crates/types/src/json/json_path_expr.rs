@@ -687,5 +687,7 @@ fn valid_json_string(b: &[u8]) -> bool {
             _ => {}
         }
     }
-    b[i..].iter().all(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
+    b[i..]
+        .iter()
+        .all(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
 }

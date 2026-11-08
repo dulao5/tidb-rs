@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use tidb_base::gofmt::{Arg, sprintf};
-use tidb_base::gostd::strconv::format_float;
+use tidb_base::gostd::strconv::{append_float, format_float};
 use tidb_base::{Error, mysql, terror};
 
 use super::json_binary_functions::{build_binary_json_array, quote_json_string};
@@ -383,7 +383,7 @@ impl<'a> BinaryJSON<'a> {
         if abs != 0.0 && (abs < 1e-6 || abs >= 1e21) {
             ffmt = b'e';
         }
-        buf.extend_from_slice(format_float(f, ffmt, -1, 64).as_bytes());
+        append_float(&mut buf, f, ffmt, -1, 64);
         if ffmt == b'e' {
             // clean up e-09 to e-9
             let n = buf.len();
