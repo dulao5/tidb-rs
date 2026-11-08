@@ -1,4 +1,6 @@
-//! go-file: pkg/types/json_binary_test.go, json_binary_functions_test.go, json_path_expr_test.go
+//! Ports of Go unit tests of `pkg/types/json_binary_test.go`, `json_binary_functions_test.go`
+//! and `json_path_expr_test.go` (test files are not in the tracker's func_blocks.tsv, so the
+//! tests carry `glue:` annotations naming the Go test).
 //!
 //! The Go unit tests whose assertions the govec `json` domain cannot express (they call
 //! unexported functions or inspect internal state); every other test of the three files is
@@ -17,7 +19,7 @@ use super::json_path_expr::{
     ArraySelection, PathExpressionFlagExt, json_path_array_index_from_start, parse_json_path_expr,
 };
 
-// go-test: TestContainsAnyAsterisk
+// glue: port of the Go unit test TestContainsAnyAsterisk
 #[test]
 fn contains_any_asterisk() {
     for (expression, contains) in [
@@ -31,7 +33,7 @@ fn contains_any_asterisk() {
     }
 }
 
-// go-test: TestPushBackOneIndexLeg
+// glue: port of the Go unit test TestPushBackOneIndexLeg
 #[test]
 fn push_back_one_index_leg() {
     for (expression, index, expected, multi) in [
@@ -53,7 +55,7 @@ fn push_back_one_index_leg() {
     }
 }
 
-// go-test: TestPushBackOneKeyLeg
+// glue: port of the Go unit test TestPushBackOneKeyLeg
 #[test]
 fn push_back_one_key_leg() {
     for (expression, key, expected, multi) in [
@@ -71,7 +73,7 @@ fn push_back_one_key_leg() {
     }
 }
 
-// go-test: TestDecodeEscapedUnicode
+// glue: port of the Go unit test TestDecodeEscapedUnicode
 #[test]
 fn decode_escaped_unicode_test() {
     let (r, size) = decode_escaped_unicode(b"597d").unwrap();
@@ -79,7 +81,7 @@ fn decode_escaped_unicode_test() {
     assert_eq!(size, 3);
 }
 
-// go-test: TestFunctions
+// glue: port of the Go unit test TestFunctions
 #[test]
 fn functions() {
     let test_byte = b"\\bfnrtuz0";
@@ -90,7 +92,7 @@ fn functions() {
     assert_eq!(err.to_string(), "Cant peek from empty bytes");
 }
 
-// go-test: TestBinaryJSONOpaque
+// glue: port of the Go unit test TestBinaryJSONOpaque
 #[test]
 fn binary_json_opaque() {
     let mut long = vec![233, 0x80, 0x01];
@@ -118,7 +120,7 @@ fn binary_json_opaque() {
     }
 }
 
-// go-test: TestHashValue
+// glue: port of the Go unit test TestHashValue
 #[test]
 fn hash_value_distinct() {
     let arr = |v: Vec<JSONValue<'static>>| JSONValue::Array(v);
