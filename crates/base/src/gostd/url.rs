@@ -91,20 +91,11 @@ fn should_escape(c: u8, mode: Encoding) -> bool {
 /// `url.EscapeError` / `url.InvalidHostError` and the other parse errors, as Go's text.
 pub type Error = String;
 
-// go-std: strconv.Quote L2 (ASCII printable bytes as-is, others as \xNN; enough for the
-// 1–3 byte snippets of EscapeError / InvalidHostError)
+/// Go `strconv.Quote(string(s))` (Lucky's review of tidb-rs #66: control bytes as `\x1b`,
+/// valid UTF-8 as-is, invalid bytes as `\xNN`).
+// glue: strconv.Quote (tidb_base::gofmt::strconv_quote)
 fn quote(s: &[u8]) -> String {
-    let mut out = String::from("\"");
-    for &b in s {
-        match b {
-            b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            0x20..=0x7e => out.push(b as char),
-            _ => out.push_str(&format!("\\x{b:02x}")),
-        }
-    }
-    out.push('"');
-    out
+    crate::gofmt::strconv_quote(s)
 }
 
 // go-std: net/url.EscapeError.Error L1
@@ -309,9 +300,9 @@ pub fn parse(raw: &str) -> Result<Url, Error> {
     Ok(url)
 }
 
-// go-std: strconv.Quote L2 (the URL of url.Error; inputs here are UTF-8 sysvar values)
+// glue: strconv.Quote (the URL of url.Error, Go `%q`)
 fn quote_url(s: &[u8]) -> String {
-    format!("{:?}", String::from_utf8_lossy(s))
+    crate::gofmt::strconv_quote(s)
 }
 
 // go-std: net/url.stringContainsCTLByte L1

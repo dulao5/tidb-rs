@@ -499,7 +499,8 @@ pub(super) fn sg_tidb_instance_plan_cache_reserved_percentage(
     val: &str,
 ) -> Result<(), Error> {
     let v = tidb_opt_float64(val, DefTiDBInstancePlanCacheReservedPercentage);
-    if !(0.0..=1.0).contains(&v) {
+    // Go `v < 0 || v > 1`: NaN passes.
+    if v < 0.0 || v > 1.0 {
         return Err(errors::errorf(
             "invalid tidb_instance_plan_cache_reserved_percentage value %s",
             &[Arg::from(val.to_owned())],
@@ -816,7 +817,8 @@ pub(super) fn sg_tidb_cb_pd_metadata_error_rate_threshold_ratio(
     val: &str,
 ) -> Result<(), Error> {
     let v = tidb_opt_float64(val, DefTiDBCircuitBreakerPDMetaErrorRateRatio);
-    if !(0.0..=1.0).contains(&v) {
+    // Go `v < 0 || v > 1`: NaN passes.
+    if v < 0.0 || v > 1.0 {
         return Err(errors::errorf(
             "invalid tidb_cb_pd_metadata_error_rate_threshold_ratio value %s",
             &[Arg::from(val.to_owned())],

@@ -168,3 +168,34 @@ pub mod stmt_summary {
     /// `optMaxSQLLength`.
     pub static MaxSQLLength: AtomicI32 = AtomicI32::new(0);
 }
+
+/// The callbacks above that no component has registered yet. Calling one panics like Go's
+/// nil function call; Go's session recovers that panic into a client error, tidb-rs must not
+/// reach it in production. A server start-up test asserts this list is empty once the
+/// registering components exist (D05.2 acceptance item; Lucky's review of tidb-rs #66).
+// glue: start-up check for the nil-callback panic path
+pub fn unregistered_callbacks() -> Vec<&'static str> {
+    let mut out = Vec::new();
+    macro_rules! check {
+        ($($c:ident),* $(,)?) => {$(
+            if $c.read().is_none() {
+                out.push(stringify!($c));
+            }
+        )*};
+    }
+    check!(
+        SetMemQuotaAnalyze,
+        GetMemQuotaAnalyze,
+        SetStatsCacheCapacity,
+        SetPDClientDynamicOption,
+        SwitchMDL,
+        SetExternalTimestamp,
+        GetExternalTimestamp,
+        ValidateCloudStorageURI,
+        SetGlobalResourceControl,
+        SetLowResolutionTSOUpdateInterval,
+        ChangeSchemaCacheSize,
+        ChangePDMetadataCircuitBreakerErrorRateThresholdRatio,
+    );
+    out
+}
