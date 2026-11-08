@@ -138,3 +138,14 @@ pub fn defaults_for_test(dur: &str) -> (&'static str, i64) {
         must_parse_duration(dur),
     )
 }
+
+/// ConcurrencyUnset means the value the of the concurrency related variable is unset.
+pub const ConcurrencyUnset: i64 = -1;
+/// Go: `DefMinPagingSize = int(paging.MinPagingSize)` (pkg/util/paging: 128).
+pub const DefMinPagingSize: i64 = 128;
+/// Go: `DefMaxPagingSize = int(paging.MaxPagingSize)` (pkg/util/paging: 50000).
+pub const DefMaxPagingSize: i64 = 50000;
+/// Go: `DefTiDBOptRangeMaxSize = 64 * int64(size.MB)` (64 MB).
+pub const DefTiDBOptRangeMaxSize: i64 = 64 << 20;
+/// Go: `logutil.DefaultSlowTxnThreshold` (pkg/util/logutil: 0).
+pub const DefaultSlowTxnThreshold: u64 = 0;

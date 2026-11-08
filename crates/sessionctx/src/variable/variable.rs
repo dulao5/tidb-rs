@@ -131,6 +131,22 @@ pub type ValResult = (String, Result<(), Error>);
 /// the Set function (`(vars, normalizedValue, originalValue, scope)`).
 pub type ValidationFn = fn(&mut SessionVars, &str, &str, ScopeFlag) -> ValResult;
 
+/// `SysVar.SetSession`: called after validation but before updating systems[]
+/// (`func(*SessionVars, string) error`).
+pub type SetSessionFn = fn(&mut SessionVars, &str) -> Result<(), Error>;
+/// `SysVar.SetGlobal`: called after validation (`func(context.Context, *SessionVars, string)
+/// error`; the context is not used by the read-path hooks).
+pub type SetGlobalFn = fn(&mut SessionVars, &str) -> Result<(), Error>;
+/// `SysVar.GetSession`: returns the session value instead of systems[] (`func(*SessionVars)
+/// (string, error)`).
+pub type GetSessionFn = fn(&mut SessionVars) -> Result<String, Error>;
+/// `SysVar.GetGlobal`: returns the global value instead of the accessor's (`func(context.Context,
+/// *SessionVars) (string, error)`).
+pub type GetGlobalFn = fn(&mut SessionVars) -> Result<String, Error>;
+/// `SysVar.GetStateValue`: the value kept in the session states (`func(*SessionVars) (string,
+/// bool, error)`).
+pub type GetStateValueFn = fn(&mut SessionVars) -> Result<(String, bool), Error>;
+
 // ---------------------------------------------------------------- generated table
 
 /// `SysVarData.flags`: the boolean fields of `SysVar`.
@@ -247,7 +263,18 @@ pub struct SysVar {
     pub is_noop: bool,
     /// GlobalConfigName is the global config name of this global variable.
     pub global_config_name: &'static str,
-    /// The `HOOK_*` hooks Go's entry has (the session hooks are block D05.2).
+    /// SetSession is called after validation but before updating systems[]. It also doesn't
+    /// return an error, it modifies the session variables.
+    pub set_session: Option<SetSessionFn>,
+    /// SetGlobal is called after validation
+    pub set_global: Option<SetGlobalFn>,
+    /// GetSession is a getter for the session value (instead of systems[]).
+    pub get_session: Option<GetSessionFn>,
+    /// GetGlobal is a getter for the global value (instead of the accessor).
+    pub get_global: Option<GetGlobalFn>,
+    /// GetStateValue gets the value for session states, which is used for migrating sessions.
+    pub get_state_value: Option<GetStateValueFn>,
+    /// The `HOOK_*` hooks Go's entry has.
     pub go_hooks: u8,
     /// Go source position of the entry (`file:line`), for diagnostics.
     pub go_pos: (&'static str, u32),
@@ -343,6 +370,90 @@ impl SysVar {
         }
         if scope == ScopeSession && !self.has_session_scope() {
             return Err(errGlobalVariable.fast_gen_by_args(vec![self.name.into()]));
+        }
+        Ok(())
+    }
+
+    /// GetGlobalFromHook calls the GetSession func if it exists.
+    // go: SysVar.GetGlobalFromHook L2 (no context argument: the read-path getters do not use it)
+    pub fn get_global_from_hook(&self, s: &mut SessionVars) -> Result<String, Error> {
+        // Call the Getter if there is one defined.
+        if let Some(get_global) = self.get_global {
+            let val = get_global(s)?;
+            // Ensure that the results from the getter are validated
+            // Since some are read directly from tables.
+            return Ok(self.validate_with_relaxed_validation(s, &val, ScopeGlobal));
+        }
+        if self.has_none_scope() {
+            return Ok(self.value.clone());
+        }
+        s.global_vars_accessor.get_global_sys_var(self.name)
+    }
+
+    /// GetSessionFromHook calls the GetSession func if it exists.
+    // go: SysVar.GetSessionFromHook L1
+    pub fn get_session_from_hook(&self, s: &mut SessionVars) -> Result<String, Error> {
+        if self.has_none_scope() {
+            return Ok(self.value.clone());
+        }
+        // Call the Getter if there is one defined.
+        if let Some(get_session) = self.get_session {
+            let val = get_session(s)?;
+            // Ensure that the results from the getter are validated
+            // Since some are read directly from tables.
+            return Ok(self.validate_with_relaxed_validation(s, &val, ScopeSession));
+        }
+        match s.systems.get(self.name) {
+            Some(val) => Ok(val.clone()),
+            None => Err(tidb_base::errors::new("sysvar has not yet loaded")),
+        }
+    }
+
+    /// SetSessionFromHook calls the SetSession func if it exists.
+    // go: SysVar.SetSessionFromHook L1
+    pub fn set_session_from_hook(&self, s: &mut SessionVars, val: &str) -> Result<(), Error> {
+        if let Some(set_session) = self.set_session {
+            set_session(s, val)?;
+        }
+        s.systems.insert(self.name.to_owned(), val.to_owned());
+
+        // Call the Set function on all the aliases for this sysVar
+        // Skipping the validation function, and not calling aliases of
+        // aliases. By skipping the validation function it means that things
+        // like duplicate warnings should not appear.
+
+        for alias_name in self.aliases {
+            let alias_sv = get_sys_var(alias_name).expect("alias of a registered sysvar");
+            if let Some(set_session) = alias_sv.set_session {
+                set_session(s, val)?;
+            }
+            s.systems.insert(alias_sv.name.to_owned(), val.to_owned());
+        }
+        Ok(())
+    }
+
+    /// SetGlobalFromHook calls the SetGlobal func if it exists.
+    // go: SysVar.SetGlobalFromHook L2 (no context argument)
+    pub fn set_global_from_hook(
+        &self,
+        s: &mut SessionVars,
+        val: &str,
+        skip_aliases: bool,
+    ) -> Result<(), Error> {
+        if let Some(set_global) = self.set_global {
+            return set_global(s, val);
+        }
+
+        // Call the SetGlobalSysVarOnly function on all the aliases for this sysVar
+        // which skips the validation function and when SetGlobalFromHook is called again
+        // it will be with skipAliases=true. This helps break recursion because
+        // most aliases are reciprocal.
+
+        if !skip_aliases {
+            for alias_name in self.aliases {
+                s.global_vars_accessor
+                    .set_global_sys_var_only(alias_name, val, true)?;
+            }
         }
         Ok(())
     }
@@ -705,6 +816,14 @@ pub fn go_goarch() -> &'static str {
     }
 }
 
+/// Whether Go's `kind` hook (`"SetSession"`, `"SetGlobal"`, `"GetSession"`, `"GetGlobal"`,
+/// `"GetStateValue"`) of the variable `name` is not ported yet (D05.2 checklist). The govec
+/// replay skips the records that exercise a pending hook.
+// glue: progress of the D05.2 hook checklist
+pub fn session_hook_pending(name: &str, kind: &str) -> bool {
+    super::session_hooks::is_pending(name, kind)
+}
+
 /// The ways an entry of the generated table disagrees with the hand-written parts: a
 /// `Validation` hook present on one side only (Go's entry has one iff `HOOK_VALIDATION` is
 /// set), or `setHintUpdatable` listing an entry the generator did not mark as verified.
@@ -720,6 +839,38 @@ pub(crate) fn registry_mismatches(d: &SysVarData) -> Vec<String> {
             "sysvar {}: Validation hook rust={has_rust} go={has_go}",
             d.name
         ));
+    }
+    // The session hooks (D05.2): a Rust hook only where Go's entry has one; a Go hook that
+    // has no Rust function yet must be listed as pending (session_hooks.rs).
+    let sh = super::session_hooks::hooks_of(d.name);
+    for (bit, kind, has_rust) in [
+        (HOOK_SET_SESSION, "SetSession", sh.set_session.is_some()),
+        (HOOK_SET_GLOBAL, "SetGlobal", sh.set_global.is_some()),
+        (HOOK_GET_SESSION, "GetSession", sh.get_session.is_some()),
+        (HOOK_GET_GLOBAL, "GetGlobal", sh.get_global.is_some()),
+        (
+            HOOK_GET_STATE_VALUE,
+            "GetStateValue",
+            sh.get_state_value.is_some(),
+        ),
+    ] {
+        let has_go = d.hooks & bit != 0;
+        let pending = super::session_hooks::is_pending(d.name, kind);
+        if has_rust && !has_go {
+            out.push(format!("sysvar {}: {kind} hook rust=true go=false", d.name));
+        }
+        if has_go && has_rust == pending {
+            out.push(format!(
+                "sysvar {}: {kind} hook rust={has_rust} pending={pending} go=true",
+                d.name
+            ));
+        }
+        if !has_go && pending {
+            out.push(format!(
+                "sysvar {}: {kind} listed as pending but go=false",
+                d.name
+            ));
+        }
     }
     // variable.go init -> setHintUpdatable(defaultSysVars): every listed default entry is
     // verified (an entry may also set IsHintUpdatableVerified in its literal).
@@ -738,6 +889,7 @@ pub(crate) fn registry_mismatches(d: &SysVarData) -> Vec<String> {
 // glue: SysVarData (generated static fields) + hooks -> SysVar
 fn sysvar_of(d: &'static SysVarData) -> SysVar {
     let validation = hooks::validation(d.name);
+    let sh = super::session_hooks::hooks_of(d.name);
     let mismatches = registry_mismatches(d);
     assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
     SysVar {
@@ -761,6 +913,11 @@ fn sysvar_of(d: &'static SysVarData) -> SysVar {
         skip_init: d.flags & FLAG_SKIP_INIT != 0,
         is_noop: d.flags & FLAG_IS_NOOP != 0,
         global_config_name: d.global_config_name,
+        set_session: sh.set_session,
+        set_global: sh.set_global,
+        get_session: sh.get_session,
+        get_global: sh.get_global,
+        get_state_value: sh.get_state_value,
         go_hooks: d.hooks,
         go_pos: (d.go_file, d.go_line),
     }

@@ -16,3 +16,12 @@ There is no floating-point arithmetic that gc fuses here: both targets hold the 
 `err.name == "panic"` must panic in Rust. `version_compile_os` / `version_compile_machine`
 are recorded as `<GOOS>` / `<GOARCH>`: the replay checks the Rust registry's values against
 its own target.
+
+## Domain "sessionvars" (block D05.2)
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2`) |
+| generator | `govec` (seed 5052), 41,448 records: `fresh` 1, `set` 30,939, `get` 945, `set_global` 9,482, `init` 80; both targets hold the same records |
+| `arm64/sessionvars.jsonl.gz` sha256 | `c0d8fa1dec6879edf4ad65cea6d13cdf21b2cd54543b14f033061d682f883444` (generated locally) |
+| `amd64/sessionvars.jsonl.gz` sha256 | `3ef37a58afa28f1042b02d9fd7fd4fb327133d9eaa0d6dcddaee390a03335925` (tracker CI artifact) |
