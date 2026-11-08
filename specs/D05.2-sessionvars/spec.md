@@ -59,6 +59,7 @@ Session（Send，同一时刻只有一个任务持有，&mut）
  └── 当前语句 Arc<StmtCtx>                           D00.1
 ```
 
+- **PR A 的实现（L1）**：`systems` map 与 Go 相同（会话的值），全局值经 `GlobalVarAccessor` 读取，与 Go 的 `GlobalVarsAccessor` 相同；"delta + 共享快照"的形式随 T10（读集群的全局值）一起做，届时只换 accessor 的实现，`SessionVars` 的存取函数不变。
 - **`GetSystemVar` / `GetSessionOrGlobalSystemVar`**：先查 `delta`，再查 `globals`；有 GetSession 钩子的 27 个变量由钩子从强类型字段现算（N8 §3.2）。快照缺项时取 domain 当前值并写入 `delta`，与 Go 的懒加载兜底相同（L1）。
 - **`SetSystemVar*`**：校验（D05.1）→ 写 `delta` → 调 SetSession 钩子更新强类型字段，顺序与 Go 相同。`SetSystemVarWithOldValAsRet` 返回旧值，供 `SET_VAR` hint 在下一条语句开始时恢复（N2 §3.2，L1）。
 - **会话初始化**：Go 在第一次 `Parse` / `ExecuteStmt` / `PrepareStmt` 时对每个 `!SkipInit()` 变量调用 SetSession。Go 按 map 的随机顺序调用；`Depended` 的 4 个变量要求在其依赖之后执行。Rust 按注册表顺序，并把 `Depended` 变量放到最后（D05.1 的 `OrderByDependency`，M-MAPORDER）。
@@ -95,9 +96,26 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 - **初始化顺序无关**（Lucky 的评审）：回放时取一组变量，按两种不同的顺序执行 SetSession 初始化，要求得到相同的强类型字段和 `GetSystemVar` 结果，用来发现依赖顺序的钩子（Go 按 map 随机顺序调用）。
 - 反证：故意弄坏若干钩子和 delta 逻辑，回放必须报错。
 
-## 4. 偏离（预计）
+## 4. 偏离
 
 1. `cachedStmtCtx` 轮换复用不移植（N2 §3.4，L2）。
 2. 会话初始化时 SetSession 的调用顺序：注册表顺序 + `Depended` 最后（Go 是 map 随机顺序，M-MAPORDER）。
 3. 全局值快照在 P1–P2 是"默认值 + 实例覆盖"的桩（§2.2）。
-4. SET GLOBAL 按 N8 待定 1 的建议 (a) 报"不支持"（§2.2），等负责人决定。
+4. SET GLOBAL 按 N8 待定 1 的建议 (a) 报"不支持"（§2.2），等负责人决定。实现为 `SessionVars::set_global_sys_var`（Go 的对应物是 session 包的 `SetGlobalSysVar`，块 D05.3），错误是 `ErrNotSupportedYet`（1235），参数为 `SET GLOBAL on tidb-rs; run it on Go TiDB`。
+5. 写路径字段（X）的 10 个 SetSession 钩子（`tidb_batch_insert` 等）只更新 `systems[]`，不设字段（字段在 D05.2 的划分中归 X）。
+
+## 5. 验证结果（PR A）
+
+- **govec `sessionvars`**：41,447 条（`fresh` 1、`set` 30,939、`get` 945、`set_global` 9,482、`init` 80）。回放跳过仍有 pending 钩子的记录：29,152 条比对、0 条不一致，12,295 条跳过；钩子落地后自动开始比对，不需要重新生成。
+- **生成的确定性**：INSTANCE 变量的 SET GLOBAL 会改进程级配置，生成器在每条记录后用 SetGlobal 钩子恢复原值；`timestamp`（未设置时取当前时间）和 `rand_seed1/2`（会话随机数）的读回值记为 `<volatile>`。
+- **T11**：40 组随机设置，每组按正反两种顺序各生成一条；Go 的 40 组结果都与顺序无关，Rust 每条都与 Go 相同。
+- **反证**：
+
+| 弄坏的地方 | 不一致 |
+|---|--:|
+| SetSessionFromHook 不写别名的 systems[] | 72 |
+| GetSessionOrGlobalSystemVar 不把全局值懒加载进 systems[] | 1,004 |
+| 一个翻译出的钩子取反（`!tidb_opt_on`） | 22 |
+| SetSystemVarWithRelaxedValidation 不做 relaxed 校验 | 571 |
+
+- **钩子清单**：`registry_matches_hand_written_hooks` 检查每个变量的五类钩子与 Go 的标志一致（已移植或 pending，Rust 没有 Go 没有的钩子）。当前：SetSession 227/273、GetSession 12/27、GetStateValue 3/6、SetGlobal 0/155、GetGlobal 0/134。

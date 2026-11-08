@@ -8,7 +8,7 @@
   - govec `sessionvars` 领域，op `fresh`：Go 侧反射导出 282 个字段（浮点记 IEEE-754 位），Rust 侧 `scalar_strings()` 对比，0 条不一致。反证：把 `foreign_key_checks` 的默认值改成 false，回放报 1 条不一致。
   - 其余 67 个非标量字段（map、指针、atomic、StmtCtx、TxnCtx、UserVars……）列在 `session_fields.rs` 末尾，待 T3/T6 手写。
   - tracker 中 D05.2 尚未覆盖的 234 个函数登记为 pending 豁免（`govec/domains/sessionvars_pending.go`），随 T3–T7 逐步删减。
-- [ ] T3 起尚未开始。`session.rs` 仍是替身（加上了生成的标量字段）。
+- [x] T3、T11、T12 与 T4 的一部分（PR A），见 tasks.md。
 
 分支：tidb-rs `block/D05.2-sessionvars`、tracker `govec/sessionvars-D05.2`，都叠在 D05.1 评审后续（#55 / tracker #26）上；它们合并后 rebase 到 main。
 
@@ -25,11 +25,13 @@
 
 ## 下一步（交接）
 
-1. **T3**：在 `session.rs` 中加入 `globals: Arc<GlobalVarsSnapshot>`（桩：注册表默认值 + `SetSysVar` 的实例覆盖）和 `delta`，移植 `GetSystemVar`、`GetSessionOrGlobalSystemVar`、`SetSystemVar*`、`*FromHook`、`SetSystemVarWithOldValAsRet`；`systems` map 换成 delta + 快照。SET GLOBAL：校验后报"不支持"（owner issue #58，按 (a) 推进）。
-2. **T4**：按 `data/sysvar_hooks.tsv` 移植 SetSession / GetSession 钩子到 `session_hooks.rs`，tsv 加处置列。govec 加 op `set`：SET 后导出 `fresh` 同样的标量字段，加上 `GetSystemVar`、warning。
-3. **T9 注意**：替身里的 `global_vars_accessor: Box<dyn GlobalVarAccessor>` 不是 `Send`，加 `SessionVars: Send` 断言前要改成 `Box<dyn GlobalVarAccessor + Send>` 或换成 N8 的快照。
-4. 每完成一组函数，从 `sessionvars_pending.go` 删掉对应名字。
-5. **Lucky 对 #57 的三点**（已写入 spec §2.2、§3 和 tasks T10–T12）：INSTANCE 作用域的 SET GLOBAL 照 Go 只改本实例；读 `mysql.global_variables` 提前到 P1，作为同系列中单独的 PR（等 D01.11 合并）；回放中按两种顺序初始化变量，结果必须相同。
+PR A 已完成（见 tasks.md）。接手 PR B 时：
+
+1. **钩子文件**：`session_hooks.rs` 的首版由一次性脚本翻译生成（"赋值给标量字段"形状的 SetSession 闭包），之后按手写代码维护：新钩子直接加函数、加进对应的 `match`，并从 `PENDING_*` 删掉名字。注册表构建时和单元测试 `registry_matches_hand_written_hooks` 会检查：Go 有的钩子要么已移植、要么在 pending 中，Rust 不能有 Go 没有的钩子。
+2. **T5 的前提**：SetGlobal / GetGlobal 大多读写进程级 atomic（`variable.EnableXxx.Load()` 之类）。先按 Go 的名字在 `tidb_vars.rs` 中加这些全局量，再移植钩子；govec `set_global` 记录在生成时会把 INSTANCE 全局量恢复原值，避免影响后续记录。
+3. **T6**：非标量字段（TxnScope、Rng、IsolationReadEngines、StmtCtx 的 PrevLastInsertID、MemTracker、PartitionPruneMode、KVVars……）按 Go 的名字加到 `SessionVars`，然后移植依赖它们的 46 个 SetSession / 15 个 GetSession。
+4. **回放**：`tests/govec_sessionvars.rs` 会自动开始检查钩子落地后的记录（按 pending 跳过），不需要重新生成向量。
+5. **D05.1 的 govec_sysvar 回放**仍用 `set_system_var_for_test`（只写 systems[]），Go 用 `SetSystemVarWithoutValidation`（会执行 SetSession）。钩子齐全后可以改成后者。
 
 ## 需要决定的事
 
