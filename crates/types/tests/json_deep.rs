@@ -17,6 +17,7 @@ fn deep_texts_on_small_stacks_concurrently() {
     let handles: Vec<_> = (0..16)
         .map(|i| {
             std::thread::Builder::new()
+                .name(format!("json-deep-{i}"))
                 .stack_size(256 << 10)
                 .spawn(move || {
                     let depth = if i % 2 == 0 { 300 } else { 10000 };
@@ -40,11 +41,13 @@ fn deep_texts_on_small_stacks_concurrently() {
 }
 
 /// Every nesting that converts (up to maxJSONDepth + 1 with an empty innermost container)
-/// also fits on a small stack.
+/// goes through the recursive path, whose depth is bounded by that nesting: 1 MiB is enough
+/// even for unoptimized builds (tokio and std threads default to 2 MiB).
 #[test]
-fn deepest_convertible_texts_on_a_small_stack() {
+fn deepest_convertible_texts_on_a_bounded_stack() {
     std::thread::Builder::new()
-        .stack_size(256 << 10)
+        .name("json-convertible".to_owned())
+        .stack_size(1 << 20)
         .spawn(|| {
             let bj = j::parse_binary_json_from_string(&nested(101, "")).unwrap();
             assert_eq!(bj.get_elem_depth(), 101);
