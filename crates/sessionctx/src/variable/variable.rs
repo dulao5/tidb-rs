@@ -705,18 +705,41 @@ pub fn go_goarch() -> &'static str {
     }
 }
 
+/// The ways an entry of the generated table disagrees with the hand-written parts: a
+/// `Validation` hook present on one side only (Go's entry has one iff `HOOK_VALIDATION` is
+/// set), or `setHintUpdatable` listing an entry the generator did not mark as verified.
+/// Empty when they agree; checked when the registry is built and by a unit test, so a
+/// mismatch fails CI rather than only panicking at start-up.
+// glue: consistency of the generated table with hooks.rs and setvar_affect.rs
+pub(crate) fn registry_mismatches(d: &SysVarData) -> Vec<String> {
+    let mut out = Vec::new();
+    let has_rust = hooks::validation(d.name).is_some();
+    let has_go = d.hooks & HOOK_VALIDATION != 0;
+    if has_rust != has_go {
+        out.push(format!(
+            "sysvar {}: Validation hook rust={has_rust} go={has_go}",
+            d.name
+        ));
+    }
+    // variable.go init -> setHintUpdatable(defaultSysVars): every listed default entry is
+    // verified (an entry may also set IsHintUpdatableVerified in its literal).
+    if d.go_file == "sysvar.go"
+        && super::setvar_affect::set_hint_updatable(d.name)
+        && d.flags & FLAG_HINT_UPDATABLE_VERIFIED == 0
+    {
+        out.push(format!(
+            "sysvar {}: IsHintUpdatableVerified mismatch with Go",
+            d.name
+        ));
+    }
+    out
+}
+
 // glue: SysVarData (generated static fields) + hooks -> SysVar
 fn sysvar_of(d: &'static SysVarData) -> SysVar {
     let validation = hooks::validation(d.name);
-    // variable.go init -> setHintUpdatable(defaultSysVars): every listed default entry is
-    // verified (an entry may also set IsHintUpdatableVerified in its literal).
-    if d.go_file == "sysvar.go" && super::setvar_affect::set_hint_updatable(d.name) {
-        assert!(
-            d.flags & FLAG_HINT_UPDATABLE_VERIFIED != 0,
-            "sysvar {}: IsHintUpdatableVerified mismatch with Go",
-            d.name
-        );
-    }
+    let mismatches = registry_mismatches(d);
+    assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
     SysVar {
         scope: d.scope,
         name: d.name,
@@ -823,4 +846,26 @@ pub fn order_by_dependency<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<
     }
     depended.extend(not_depended);
     depended
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // glue: unit test of the registry consistency check
+    #[test]
+    fn registry_matches_hand_written_hooks() {
+        let all: Vec<String> = SYSVAR_DATA.iter().flat_map(registry_mismatches).collect();
+        assert!(all.is_empty(), "{}", all.join("\n"));
+        // Every hand-written Validation hook belongs to an entry of the table.
+        let with_go_hook = SYSVAR_DATA
+            .iter()
+            .filter(|d| d.hooks & HOOK_VALIDATION != 0)
+            .count();
+        let with_rust_hook = SYSVAR_DATA
+            .iter()
+            .filter(|d| hooks::validation(d.name).is_some())
+            .count();
+        assert_eq!(with_go_hook, with_rust_hook);
+    }
 }
