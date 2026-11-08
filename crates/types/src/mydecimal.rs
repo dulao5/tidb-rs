@@ -27,11 +27,12 @@
 )]
 
 use crate::errors::{
-    ERR_BAD_NUMBER, ERR_DIV_BY_ZERO, ERR_OVERFLOW, ERR_TRUNCATED, ERR_TRUNCATED_WRONG_VAL, Error,
+    ErrBadNumber, ErrDivByZero, ErrOverflow, ErrTruncated, ErrTruncatedWrongVal, Error, is_err,
     terror_log,
 };
 use crate::gostd;
 use crate::helper::{is_digit, is_space, str_to_int};
+use tidb_base::gofmt::Arg;
 
 /// `mysql.MaxDecimalScale` (pkg/parser/mysql/const.go).
 // glue: stub blocked-by D00.2 (pkg/parser/mysql constants)
@@ -241,9 +242,13 @@ fn sub2(a: i32, b: i32, carry: i32) -> (i32, i32) {
 fn fix_word_cnt_error(words_int: isize, words_frac: isize) -> (isize, isize, Result<(), Error>) {
     if words_int + words_frac > WORD_BUF_LEN {
         if words_int > WORD_BUF_LEN {
-            return (WORD_BUF_LEN, 0, Err(ERR_OVERFLOW));
+            return (WORD_BUF_LEN, 0, Err(ErrOverflow.share()));
         }
-        return (words_int, WORD_BUF_LEN - words_int, Err(ERR_TRUNCATED));
+        return (
+            words_int,
+            WORD_BUF_LEN - words_int,
+            Err(ErrTruncated.share()),
+        );
     }
     (words_int, words_frac, Ok(()))
 }
@@ -339,7 +344,7 @@ impl MyDecimal {
         let negative = match b[3] {
             0 => false,
             1 => true,
-            _ => return Err(ERR_BAD_NUMBER),
+            _ => return Err(ErrBadNumber.share()),
         };
         let mut word_buf = [0i32; MAX_WORD_BUF_LEN];
         for (i, w) in word_buf.iter_mut().enumerate() {
@@ -571,7 +576,8 @@ impl MyDecimal {
         }
         if str.is_empty() {
             *self = ZERO_MY_DECIMAL;
-            return Err(ERR_TRUNCATED_WRONG_VAL.gen_with_stack_by_args(&[b"DECIMAL", str]));
+            return Err(ErrTruncatedWrongVal
+                .gen_with_stack_by_args(vec![Arg::from("DECIMAL"), Arg::go_string(str.to_vec())]));
         }
         match str[0] {
             b'-' => {
@@ -604,14 +610,15 @@ impl MyDecimal {
         }
         if digits_int + digits_frac == 0 {
             *self = ZERO_MY_DECIMAL;
-            return Err(ERR_TRUNCATED_WRONG_VAL.gen_with_stack_by_args(&[b"DECIMAL", str]));
+            return Err(ErrTruncatedWrongVal
+                .gen_with_stack_by_args(vec![Arg::from("DECIMAL"), Arg::go_string(str.to_vec())]));
         }
         let words_int = digits_to_words(digits_int);
         let words_frac = digits_to_words(digits_frac);
         let (words_int, words_frac, mut err) = fix_word_cnt_error(words_int, words_frac);
         if err.is_err() {
             digits_frac = words_frac * DIGITS_PER_WORD;
-            if err == Err(ERR_OVERFLOW) {
+            if is_err(&err, &ErrOverflow) {
                 digits_int = words_int * DIGITS_PER_WORD;
             }
         }
@@ -664,7 +671,7 @@ impl MyDecimal {
                 let (exponent, err1) = str_to_int(&str[(end_idx + 1) as usize..]);
                 if let Err(e1) = err1 {
                     err = Err(e1); // errors.Cause(err1)
-                    if err != Err(ERR_TRUNCATED) {
+                    if !is_err(&err, &ErrTruncated) {
                         *self = ZERO_MY_DECIMAL;
                     }
                 }
@@ -672,16 +679,16 @@ impl MyDecimal {
                     let negative = self.negative;
                     max_decimal(WORD_BUF_LEN * DIGITS_PER_WORD, 0, self);
                     self.negative = negative;
-                    err = Err(ERR_OVERFLOW);
+                    err = Err(ErrOverflow.share());
                 }
-                if exponent < i64::from(i32::MIN / 2) && err != Err(ERR_OVERFLOW) {
+                if exponent < i64::from(i32::MIN / 2) && !is_err(&err, &ErrOverflow) {
                     *self = ZERO_MY_DECIMAL;
-                    err = Err(ERR_TRUNCATED);
+                    err = Err(ErrTruncated.share());
                 }
-                if err != Err(ERR_OVERFLOW) {
+                if !is_err(&err, &ErrOverflow) {
                     let shift_err = self.shift(exponent as isize);
                     if let Err(shift_err) = shift_err {
-                        if shift_err == ERR_OVERFLOW {
+                        if ErrOverflow.equal(&shift_err) {
                             let negative = self.negative;
                             max_decimal(WORD_BUF_LEN * DIGITS_PER_WORD, 0, self);
                             self.negative = negative;
@@ -692,7 +699,7 @@ impl MyDecimal {
             } else {
                 let trimstr = gostd::trim_space(&str[end_idx as usize..]);
                 if !trimstr.is_empty() {
-                    err = Err(ERR_TRUNCATED);
+                    err = Err(ErrTruncated.share());
                 }
             }
         }
@@ -751,10 +758,10 @@ impl MyDecimal {
         if new_len > WORD_BUF_LEN {
             let lack = new_len - WORD_BUF_LEN;
             if words_frac < lack {
-                return Err(ERR_OVERFLOW);
+                return Err(ErrOverflow.share());
             }
             /* cut off fraction part to allow new number to fit in our buffer */
-            err = Err(ERR_TRUNCATED);
+            err = Err(ErrTruncated.share());
             words_frac -= lack;
             let diff = digits_frac - words_frac * DIGITS_PER_WORD;
             self.round_in_place(digit_end - point - diff, MODE_HALF_UP)?;
@@ -766,7 +773,7 @@ impl MyDecimal {
                    just return 0.
                 */
                 *self = ZERO_MY_DECIMAL;
-                return Err(ERR_TRUNCATED);
+                return Err(ErrTruncated.share());
             }
         }
 
@@ -1032,7 +1039,7 @@ fn round(
     if words_int + words_frac_to > WORD_BUF_LEN {
         words_frac_to = WORD_BUF_LEN - words_int;
         frac = words_frac_to * DIGITS_PER_WORD;
-        err = Err(ERR_TRUNCATED);
+        err = Err(ErrTruncated.share());
     }
     if d.digits_int as isize + frac < 0 {
         *to = ZERO_MY_DECIMAL;
@@ -1145,14 +1152,14 @@ fn round(
             if words_int + words_frac_to >= WORD_BUF_LEN {
                 words_frac_to -= 1;
                 frac = words_frac_to * DIGITS_PER_WORD;
-                err = Err(ERR_TRUNCATED);
+                err = Err(ErrTruncated.share());
             }
             to_idx = words_int + words_frac_to.max(0);
             while to_idx > 0 {
                 if to_idx < WORD_BUF_LEN {
                     to.word_buf[to_idx as usize] = to.word_buf[(to_idx - 1) as usize];
                 } else {
-                    err = Err(ERR_OVERFLOW);
+                    err = Err(ErrOverflow.share());
                 }
                 to_idx -= 1;
             }
@@ -1161,7 +1168,7 @@ fn round(
             if (to.digits_int as isize) < DIGITS_PER_WORD * WORD_BUF_LEN {
                 to.digits_int += 1;
             } else {
-                err = Err(ERR_OVERFLOW);
+                err = Err(ErrOverflow.share());
             }
         }
     } else {
@@ -1285,15 +1292,15 @@ impl MyDecimal {
                    return border integer depending on the sign
                 */
                 if self.negative {
-                    return (i64::MIN, Err(ERR_OVERFLOW));
+                    return (i64::MIN, Err(ErrOverflow.share()));
                 }
-                return (i64::MAX, Err(ERR_OVERFLOW));
+                return (i64::MAX, Err(ErrOverflow.share()));
             }
             i -= DIGITS_PER_WORD as i8;
         }
         /* boundary case: 9223372036854775808 */
         if !self.negative && x == i64::MIN {
-            return (i64::MAX, Err(ERR_OVERFLOW));
+            return (i64::MAX, Err(ErrOverflow.share()));
         }
         if !self.negative {
             x = -x;
@@ -1301,7 +1308,7 @@ impl MyDecimal {
         let mut i = self.digits_frac;
         while i > 0 {
             if self.word_buf[word_idx] != 0 {
-                return (x, Err(ERR_TRUNCATED));
+                return (x, Err(ErrTruncated.share()));
             }
             word_idx += 1;
             i -= DIGITS_PER_WORD as i8;
@@ -1313,7 +1320,7 @@ impl MyDecimal {
     // go: MyDecimal.ToUint L1 [M-INT, M-ERRVAL]
     pub fn to_uint(&self) -> (u64, Result<(), Error>) {
         if self.negative {
-            return (0, Err(ERR_OVERFLOW));
+            return (0, Err(ErrOverflow.share()));
         }
         let wb = WORD_BASE as u64;
         let mut x: u64 = 0;
@@ -1326,14 +1333,14 @@ impl MyDecimal {
                 .wrapping_add(self.word_buf[word_idx] as u64);
             word_idx += 1;
             if y > u64::MAX / wb || x < y {
-                return (u64::MAX, Err(ERR_OVERFLOW));
+                return (u64::MAX, Err(ErrOverflow.share()));
             }
             i -= DIGITS_PER_WORD as i8;
         }
         let mut i = self.digits_frac;
         while i > 0 {
             if self.word_buf[word_idx] != 0 {
-                return (x, Err(ERR_TRUNCATED));
+                return (x, Err(ErrTruncated.share()));
             }
             word_idx += 1;
             i -= DIGITS_PER_WORD as i8;
@@ -1375,7 +1382,7 @@ impl MyDecimal {
             let parse_err;
             (f, parse_err) = gostd::parse_float(&self.string());
             if parse_err.is_err() {
-                err = Err(ERR_OVERFLOW);
+                err = Err(ErrOverflow.share());
             }
             return (f, err);
         }
@@ -1444,7 +1451,7 @@ impl MyDecimal {
             || frac > mysql::MAX_DECIMAL_SCALE as isize
             || frac < 0
         {
-            return (buf, Err(ERR_BAD_NUMBER));
+            return (buf, Err(ErrBadNumber.share()));
         }
         let mut err = Ok(());
         let mut mask: i32 = 0;
@@ -1489,7 +1496,7 @@ impl MyDecimal {
             }
             words_int_from = words_int;
             leading_digits_from = leading_digits;
-            err = Err(ERR_OVERFLOW);
+            err = Err(ErrOverflow.share());
         } else if int_size > i_size_from {
             while int_size > i_size_from {
                 int_size -= 1;
@@ -1506,7 +1513,7 @@ impl MyDecimal {
                 || (frac_size == frac_size_from && trailing_digits < trailing_digits_from)
                 || (frac_size == frac_size_from && words_frac < words_frac_from)
             {
-                err = Err(ERR_TRUNCATED);
+                err = Err(ErrTruncated.share());
             }
             words_frac_from = words_frac;
             trailing_digits_from = trailing_digits;
@@ -1580,7 +1587,7 @@ impl MyDecimal {
             prec = 1;
         }
         let (mut buf, mut err) = self.to_bin(prec, digits_frac);
-        if err == Err(ERR_TRUNCATED) {
+        if is_err(&err, &ErrTruncated) {
             // This err is caused by shorter digitsFrac;
             // After removing the trailing zeros from a Decimal,
             // so digitsFrac may be less than the real digitsFrac of the Decimal,
@@ -1631,7 +1638,7 @@ impl MyDecimal {
     ) -> (isize, Result<(), Error>) {
         if bin.is_empty() {
             *self = ZERO_MY_DECIMAL;
-            return (0, Err(ERR_BAD_NUMBER));
+            return (0, Err(ErrBadNumber.share()));
         }
         let digits_int = precision - frac;
         let words_int = digits_int / DIGITS_PER_WORD;
@@ -1657,7 +1664,7 @@ impl MyDecimal {
             Err(e) => return (0, Err(e)),
         };
         if !(0..=40).contains(&bin_size) {
-            return (0, Err(ERR_BAD_NUMBER));
+            return (0, Err(ErrBadNumber.share()));
         }
         let mut d_copy_buf = [0u8; 40];
         let d_copy = &mut d_copy_buf[..bin_size as usize];
@@ -1691,7 +1698,7 @@ impl MyDecimal {
                 >= (POWERS10[(leading_digits + 1) as usize] as u64)
             {
                 *self = ZERO_MY_DECIMAL;
-                return (bin_size, Err(ERR_BAD_NUMBER));
+                return (bin_size, Err(ErrBadNumber.share()));
             }
             if word_idx > 0 || self.word_buf[word_idx as usize] != 0 {
                 word_idx += 1;
@@ -1704,7 +1711,7 @@ impl MyDecimal {
             self.word_buf[word_idx as usize] = read_word(&bin[bin_idx as usize..], 4) ^ mask;
             if (self.word_buf[word_idx as usize] as u32) > WORD_MAX as u32 {
                 *self = ZERO_MY_DECIMAL;
-                return (bin_size, Err(ERR_BAD_NUMBER));
+                return (bin_size, Err(ErrBadNumber.share()));
             }
             if word_idx > 0 || self.word_buf[word_idx as usize] != 0 {
                 word_idx += 1;
@@ -1719,7 +1726,7 @@ impl MyDecimal {
             self.word_buf[word_idx as usize] = read_word(&bin[bin_idx as usize..], 4) ^ mask;
             if (self.word_buf[word_idx as usize] as u32) > WORD_MAX as u32 {
                 *self = ZERO_MY_DECIMAL;
-                return (bin_size, Err(ERR_BAD_NUMBER));
+                return (bin_size, Err(ErrBadNumber.share()));
             }
             word_idx += 1;
             bin_idx += WORD_SIZE;
@@ -1732,7 +1739,7 @@ impl MyDecimal {
                 (x ^ mask).wrapping_mul(POWERS10[(DIGITS_PER_WORD - trailing_digits) as usize]);
             if (self.word_buf[word_idx as usize] as u32) > WORD_MAX as u32 {
                 *self = ZERO_MY_DECIMAL;
-                return (bin_size, Err(ERR_BAD_NUMBER));
+                return (bin_size, Err(ErrBadNumber.share()));
             }
         }
 
@@ -1757,7 +1764,7 @@ pub fn decimal_bin_size(precision: isize, frac: isize) -> Result<isize, Error> {
         || x_frac < 0
         || x_frac >= DIG2BYTES.len() as isize
     {
-        return Err(ERR_BAD_NUMBER);
+        return Err(ErrBadNumber.share());
     }
     Ok(words_int * WORD_SIZE
         + DIG2BYTES[x_int as usize]
@@ -1871,7 +1878,7 @@ impl MyDecimal {
                 self.word_buf = r.word_buf;
                 Ok(())
             }
-            Err(msg) => Err(Error::other(msg)),
+            Err(msg) => Err(Error::plain(msg)),
         }
     }
 }
@@ -2134,7 +2141,7 @@ fn do_add(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> Result<()
 
     let err;
     (words_int_to, words_frac_to, err) = fix_word_cnt_error(words_int_to, words_frac_to);
-    if err == Err(ERR_OVERFLOW) {
+    if is_err(&err, &ErrOverflow) {
         max_decimal(WORD_BUF_LEN * DIGITS_PER_WORD, 0, to);
         return err;
     }
@@ -2299,7 +2306,7 @@ pub fn decimal_mul(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> 
         to.digits_frac = NOT_FIXED_DEC;
     }
     to.digits_int = (words_int_to * DIGITS_PER_WORD) as i8;
-    if err == Err(ERR_OVERFLOW) {
+    if is_err(&err, &ErrOverflow) {
         return err;
     }
     if err.is_err() {
@@ -2352,14 +2359,14 @@ pub fn decimal_mul(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> 
         }
         if carry > 0 {
             if idx_to < 0 {
-                return Err(ERR_OVERFLOW);
+                return Err(ErrOverflow.share());
             }
             (to.word_buf[idx_to as usize], carry) = add2(to.word_buf[idx_to as usize], 0, carry);
         }
         idx_to -= 1;
         while carry > 0 {
             if idx_to < 0 {
-                return Err(ERR_OVERFLOW);
+                return Err(ErrOverflow.share());
             }
             (to.word_buf[idx_to as usize], carry) = add(to.word_buf[idx_to as usize], 0, carry);
             idx_to -= 1;
@@ -2488,7 +2495,7 @@ fn do_div_mod(
     }
     if prec2 <= 0 {
         /* short-circuit everything: from2 == 0 */
-        return Err(ERR_DIV_BY_ZERO);
+        return Err(ErrDivByZero.share());
     }
 
     prec2 -= count_leading_zeroes((prec2 - 1) % DIGITS_PER_WORD, from2.word_buf[idx2 as usize]);
@@ -2720,7 +2727,7 @@ fn do_div_mod(
         if words_int_to <= 0 {
             if -words_int_to >= WORD_BUF_LEN {
                 *to = ZERO_MY_DECIMAL;
-                return Err(ERR_TRUNCATED);
+                return Err(ErrTruncated.share());
             }
             stop1 = start1 + words_int_to + words_frac_to;
             words_frac_to += words_int_to;
@@ -2734,7 +2741,7 @@ fn do_div_mod(
             if words_int_to > WORD_BUF_LEN {
                 to.digits_int = (DIGITS_PER_WORD * WORD_BUF_LEN) as i8;
                 to.digits_frac = 0;
-                return Err(ERR_OVERFLOW);
+                return Err(ErrOverflow.share());
             }
             stop1 = start1 + words_int_to + words_frac_to;
             to.digits_int = (words_int_to * DIGITS_PER_WORD).min(from2.digits_int as isize) as i8;
@@ -2743,7 +2750,7 @@ fn do_div_mod(
             stop1 -= words_int_to + words_frac_to - WORD_BUF_LEN;
             words_frac_to = WORD_BUF_LEN - words_int_to;
             to.digits_frac = (words_frac_to * DIGITS_PER_WORD) as i8;
-            err = Err(ERR_TRUNCATED);
+            err = Err(ErrTruncated.share());
         }
         while start1 < stop1 {
             to.word_buf[idx_to as usize] = tmp1[start1 as usize];
@@ -2767,7 +2774,7 @@ fn do_div_mod(
 // go: DecimalPeak L1 [M-ERRVAL]
 pub fn decimal_peak(b: &[u8]) -> Result<isize, Error> {
     if b.len() < 3 {
-        return Err(ERR_BAD_NUMBER);
+        return Err(ErrBadNumber.share());
     }
     let precision = b[0] as isize;
     let frac = b[1] as isize;

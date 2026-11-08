@@ -161,6 +161,7 @@ fn err_short_src() -> Error {
 /// `utf8.FullRune`: whether `p` begins with a full UTF-8 encoding of a rune (an invalid
 /// encoding counts as a full rune: it decodes as a width-1 error).
 // go-std: unicode/utf8.FullRune L1
+#[allow(clippy::if_same_then_else)] // Go's branch structure
 fn full_rune(p: &[u8]) -> bool {
     let n = p.len();
     if n == 0 {

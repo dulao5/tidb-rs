@@ -19,8 +19,8 @@ use crate::core_time::{
 };
 use crate::errors::{
     DateStr, DateTimeStr, ErrDatetimeFunctionOverflow, ErrIncorrectDatetimeValue,
-    ErrInvalidYearFormat, ErrOverflow, ErrTimestampInDSTTransition, ErrTruncatedWrongVal,
-    ErrWarnDataOutOfRange, ErrWrongValue, TimeStr, TimestampStr,
+    ErrInvalidYearFormat, ErrOverflow, ErrTimestampInDSTTransition, ErrTruncated,
+    ErrTruncatedWrongVal, ErrWarnDataOutOfRange, ErrWrongValue, TimeStr, TimestampStr,
 };
 use crate::fsp::{DefaultFsp, MaxFsp, MinFsp, UnspecifiedFsp, align_frac, check_fsp, parse_frac};
 use crate::gostd::{atoi, decode_rune, parse_int};
@@ -592,7 +592,7 @@ impl Time {
         }
         // We skip checking error here because time formatted string can be parsed certainly.
         let err = dec.from_string(&s);
-        terror::log(err.err().map(tidb_base::Error::from).as_ref());
+        terror::log(err.err().as_ref());
     }
 
     /// Convert converts t with type tp.
@@ -2220,7 +2220,7 @@ impl Duration {
         // We skip checking error here because time formatted string can be parsed certainly.
         let mut dec = MyDecimal::default();
         let err = dec.from_string(&s);
-        terror::log(err.err().map(tidb_base::Error::from).as_ref());
+        terror::log(err.err().as_ref());
         dec
     }
 
@@ -3723,9 +3723,9 @@ pub fn parse_time_from_decimal(ctx: &Context, dec: &MyDecimal) -> (Time, Result<
         || ErrIncorrectDatetimeValue.gen_with_stack_by_args(vec![go_str(dec.to_string())]);
     let (int_part, err) = dec.to_int();
     if let Err(e) = err
-        && e != crate::errors::ERR_TRUNCATED
+        && !ErrTruncated.equal(&e)
     {
-        return (ZeroTime, Err(Error::from(e)));
+        return (ZeroTime, Err(e));
     }
     let fsp = (MaxFsp).min(isize::from(dec.get_digits_frac()));
     let (mut t, err) = parse_date_time_from_num(ctx, int_part);
@@ -3747,13 +3747,13 @@ pub fn parse_time_from_decimal(ctx: &Context, dec: &MyDecimal) -> (Time, Result<
     let mut ms_part_dec = MyDecimal::default();
     let err = decimal_mul(&frac_part_dec, &million, &mut ms_part_dec);
     if let Err(e) = err
-        && e != crate::errors::ERR_TRUNCATED
+        && !ErrTruncated.equal(&e)
     {
         return (ZeroTime, Err(incorrect()));
     }
     let (ms_part, err) = ms_part_dec.to_int();
     if let Err(e) = err
-        && e != crate::errors::ERR_TRUNCATED
+        && !ErrTruncated.equal(&e)
     {
         return (ZeroTime, Err(incorrect()));
     }

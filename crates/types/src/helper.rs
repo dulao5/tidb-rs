@@ -3,7 +3,7 @@
 //! Only the leaf functions `mydecimal.go` uses (block D01.1 counts them as done; see
 //! specs/D01.2-mydecimal/spec.md §3).
 
-use crate::errors::{ERR_BAD_NUMBER, ERR_TRUNCATED, Error};
+use crate::errors::{ErrBadNumber, ErrTruncated, Error};
 use crate::gostd::trim_space;
 
 // go: isSpace L1
@@ -38,7 +38,7 @@ const INT_CUT_OFF: u64 = i64::MAX as u64 + 1;
 pub(crate) fn str_to_int(str: &[u8]) -> (i64, Result<(), Error>) {
     let str = trim_space(str);
     if str.is_empty() {
-        return (0, Err(ERR_TRUNCATED));
+        return (0, Err(ErrTruncated.share()));
     }
     let mut negative = false;
     let mut i = 0;
@@ -56,13 +56,13 @@ pub(crate) fn str_to_int(str: &[u8]) -> (i64, Result<(), Error>) {
         // Go: unicode.IsDigit(rune(str[i])). A single byte is a rune <= MaxLatin1, for which
         // unicode.IsDigit is exactly '0' <= r <= '9'.
         if !str[i].is_ascii_digit() {
-            err = Err(ERR_TRUNCATED);
+            err = Err(ErrTruncated.share());
             break;
         }
         has_num = true;
         if r >= UINT_CUT_OFF {
             r = 0;
-            err = Err(ERR_BAD_NUMBER);
+            err = Err(ErrBadNumber.share());
             break;
         }
         r *= 10;
@@ -72,22 +72,22 @@ pub(crate) fn str_to_int(str: &[u8]) -> (i64, Result<(), Error>) {
         #[allow(clippy::absurd_extreme_comparisons)]
         if r1 < r || r1 > MAX_UINT {
             r = 0;
-            err = Err(ERR_BAD_NUMBER);
+            err = Err(ErrBadNumber.share());
             break;
         }
         r = r1;
         i += 1;
     }
     if !has_num {
-        err = Err(ERR_TRUNCATED);
+        err = Err(ErrTruncated.share());
     }
 
     if !negative && r >= INT_CUT_OFF {
-        return (i64::MAX, Err(ERR_BAD_NUMBER));
+        return (i64::MAX, Err(ErrBadNumber.share()));
     }
 
     if negative && r > INT_CUT_OFF {
-        return (i64::MIN, Err(ERR_BAD_NUMBER));
+        return (i64::MIN, Err(ErrBadNumber.share()));
     }
 
     if negative {
