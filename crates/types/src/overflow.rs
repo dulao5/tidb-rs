@@ -55,7 +55,7 @@ pub fn sub_duration(a: i64, b: i64) -> Result<i64, Error> {
     {
         return Err(overflow_err("BIGINT", a, b));
     }
-    Ok(a - b)
+    Ok(a.wrapping_sub(b))
 }
 
 /// AddInteger adds uint64 a and int64 b and returns uint64 if no overflow error.
@@ -76,7 +76,7 @@ pub fn sub_uint64(a: u64, b: u64) -> Result<u64, Error> {
     if a < b {
         return Err(overflow_err("BIGINT UNSIGNED", a, b));
     }
-    Ok(a - b)
+    Ok(a.wrapping_sub(b))
 }
 
 /// SubInt64 subtracts int64 a with b and returns int64 if no overflow error.
@@ -88,7 +88,7 @@ pub fn sub_int64(a: i64, b: i64) -> Result<i64, Error> {
     {
         return Err(overflow_err("BIGINT", a, b));
     }
-    Ok(a - b)
+    Ok(a.wrapping_sub(b))
 }
 
 /// SubUintWithInt subtracts uint64 a with int64 b and returns uint64 if no overflow error.

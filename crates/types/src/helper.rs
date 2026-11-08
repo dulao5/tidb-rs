@@ -129,7 +129,7 @@ const INT_CUT_OFF: u64 = i64::MAX as u64 + 1;
 /// strToInt converts a string to an integer in best effort.
 /// Go returns `(int64, error)`; the value is meaningful together with the error.
 // go: strToInt L1 [M-INT, M-ERRVAL]
-pub(crate) fn str_to_int(str: &[u8]) -> (i64, Result<(), Error>) {
+pub fn str_to_int(str: &[u8]) -> (i64, Result<(), Error>) {
     let str = trim_space(str);
     if str.is_empty() {
         return (0, Err(ErrTruncated.share()));
