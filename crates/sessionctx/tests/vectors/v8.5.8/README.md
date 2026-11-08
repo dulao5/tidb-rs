@@ -4,11 +4,11 @@
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker`, `vectors/v8.5.8/<target>/sysvar.jsonl.gz` (branch `govec/sysvar-D05.1`) |
-| tracker commit | `63da069` |
-| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 5051), 65811 records |
-| `arm64/sysvar.jsonl.gz` sha256 | `0363b82242ab5a3e1edd7a46c381430e3ac32875762256cd8a07babcc7163c1c` (GOARCH=arm64, generated locally) |
-| `amd64/sysvar.jsonl.gz` sha256 | `cd2f3d5d330e17f049dad355b10e7f428af03fffc19a32d778495591e806eb18` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact) |
+| source | `tidb-rs-tracker`, `vectors/v8.5.8/<target>/sysvar.jsonl.gz` (main after tracker #26) |
+| tracker commit | `0e3dd47` (tracker #26) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 5051), 67521 records (incl. 1,710 `sys/whitespace`) |
+| `arm64/sysvar.jsonl.gz` sha256 | `fe4876b3098b4e4c09eff75ba0544c47390631da5857cf11b3e92d74601265eb` (GOARCH=arm64, generated locally) |
+| `amd64/sysvar.jsonl.gz` sha256 | `99e554a1f051765f6f4516331faf7a34c2db144bd450c47cad10f3deffe9e61a` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact) |
 
 There is no floating-point arithmetic that gc fuses here: both targets hold the same records
 (the amd64 file comes from the tracker CI artifact). The inputs never depend on the host
