@@ -7,8 +7,8 @@
 | source | `tidb-rs-tracker`, `vectors/v8.5.8/<target>/sysvar.jsonl.gz` (main after tracker #26) |
 | tracker commit | `0e3dd47` (tracker #26) |
 | generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 5051), 67521 records (incl. 1,710 `sys/whitespace`) |
-| `arm64/sysvar.jsonl.gz` sha256 | `bf01de69b35dd96f31b0c9bb243ed9d05375cb7e184a86c6ea3e58a2f17a1eb0` (GOARCH=arm64, generated locally, B3) |
-| `amd64/sysvar.jsonl.gz` sha256 | `a1ce4806581dd43ff6b57f93ea089db99c655356afe68513d1946f8061317e7e` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact, B3) |
+| `arm64/sysvar.jsonl.gz` sha256 | `11787d0ca5eb7520efee06474015fa4278ececd4dba4cf6406a48670f9f1d3ca` (GOARCH=arm64, generated locally, PR C: special float inputs / encoder ops) |
+| `amd64/sysvar.jsonl.gz` sha256 | `pending` (tracker CI artifact, PR C) |
 
 There is no floating-point arithmetic that gc fuses here: both targets hold the same records
 (the amd64 file comes from the tracker CI artifact). The inputs never depend on the host
@@ -23,8 +23,8 @@ its own target.
 |---|---|
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-b3`, tracker #33) |
 | generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view), 43,623 records: `fresh` 1, `set` 31,017 (12 `src: "fix pingcap/tidb#65884"`, 68 `sys/slow_log_rules`), `get` 945, `set_global` 9,482, `set_global_hook` 2,098 (26 `sys/cloud_storage_uri`, 34 `sys/slow_log_rules`), `init` 80; both targets hold the same records |
-| `arm64/sessionvars.jsonl.gz` sha256 | `5bac1150e3eaad2618b460d892c85921d3c338ba19d7b34f4b5f325b1bdd611b` (generated locally, B3) |
-| `amd64/sessionvars.jsonl.gz` sha256 | `27523fcad476dd6aa49658f0064abfc6c84535dc707af35db77f61d17c598874` (tracker CI artifact, B3) |
+| `arm64/sessionvars.jsonl.gz` sha256 | `a918e42393fe4501567b5b2125b3a59c768e5bfa7fabe78ca80a68d222091b0b` (GOARCH=arm64, generated locally, PR C: special float inputs / encoder ops) |
+| `amd64/sessionvars.jsonl.gz` sha256 | `pending` (tracker CI artifact, PR C) |
 
 ## Domain "stmtctx" (block D00.1 part 1)
 

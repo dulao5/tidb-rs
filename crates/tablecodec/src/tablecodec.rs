@@ -1782,9 +1782,8 @@ pub fn gen_index_value_for_clustered_index_version1(
                     tidb_model::get_idx_changing_field_type(idx_col, col).get_collate(),
                 ) {
                     all_restored_data.push(new_uint_datum(
-                        tidb_types::stringutil::get_tail_space_count(
-                            indexed_values[i].get_string(),
-                        ) as u64,
+                        tidb_types::stringutil::get_tail_space_count(indexed_values[i].get_string())
+                            as u64,
                     ));
                 } else {
                     all_restored_data.push(indexed_values[i].clone());

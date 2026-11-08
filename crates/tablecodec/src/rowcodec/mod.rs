@@ -9,3 +9,4 @@ pub mod row;
 
 pub use common::*;
 pub use decoder::*;
+pub use encoder::{Checksum, Encoder, encode_value_datum};

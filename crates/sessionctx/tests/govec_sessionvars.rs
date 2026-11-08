@@ -812,9 +812,9 @@ fn replay(path: &str) -> (usize, usize) {
 }
 
 /// The cap on the committed vectors' skipped records (see `govec_sessionvars`): after PR B2
-/// only the 232 records of the five tidb_gc_* variables are skipped (their SetGlobal /
+/// only the 332 records of the five tidb_gc_* variables (232 before the special float inputs of PR C) are skipped (their SetGlobal /
 /// GetGlobal hooks read and write mysql.tidb, which comes with PR C / T10). PR C lowers it to 0.
-const MAX_SKIPPED: usize = 232;
+const MAX_SKIPPED: usize = 332;
 
 #[test]
 fn govec_sessionvars() {

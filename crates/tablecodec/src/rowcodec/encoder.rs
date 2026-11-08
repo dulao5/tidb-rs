@@ -29,7 +29,7 @@ use super::common::crc32_update;
 use super::row::{checksumFlagExtra, checksumMaskVersion, rowFlagChecksum, rowFlagLarge};
 
 /// Encoder is used to encode a row.
-// go: Encoder L1
+// Go: rowcodec.Encoder (embeds row).
 #[derive(Debug, Default)]
 pub struct Encoder {
     // row
@@ -52,7 +52,7 @@ pub struct Encoder {
 }
 
 /// Checksum is used to calculate and append checksum data into the raw bytes.
-// go: Checksum L1 (interface → enum: NoChecksum, RawChecksum)
+// Go: interface Checksum → enum (NoChecksum, RawChecksum).
 #[derive(Debug, Clone)]
 pub enum Checksum {
     /// NoChecksum indicates no checksum is encoded into the returned raw bytes.
@@ -77,7 +77,7 @@ impl Encoder {
         }
     }
 
-    // go: Encoder.large (row.large) L1
+    // glue: Go's Encoder embeds row; row.large is ported in row.rs
     fn large(&self) -> bool {
         self.flags & rowFlagLarge > 0
     }
@@ -140,7 +140,7 @@ impl Encoder {
         self.values.push(d.clone());
     }
 
-    // go: Encoder.reformatCols L1 (sorters of common.go: sort over unique column IDs)
+    // go: Encoder.reformatCols L1
     fn reformat_cols(&mut self) -> (usize, usize) {
         let num_cols = self.temp_col_ids.len();
         let mut null_idx = num_cols - self.num_null_cols as usize;
@@ -173,7 +173,13 @@ impl Encoder {
         }
         let nn = self.num_not_null_cols as usize;
         if self.large() {
-            // largeNotNullSorter / largeNullSorter
+            // sort.Sort over unique column IDs: the stable sort_by_key gives the same order.
+            // go: pkg/util/rowcodec/common.go largeNotNullSorter.Len L2 (sort.Sort → sort_by_key over unique IDs)
+            // go: pkg/util/rowcodec/common.go largeNotNullSorter.Less L2 (sort.Sort → sort_by_key over unique IDs)
+            // go: pkg/util/rowcodec/common.go largeNotNullSorter.Swap L2 (sort.Sort → sort_by_key over unique IDs)
+            // go: pkg/util/rowcodec/common.go largeNullSorter.Len L2 (sort.Sort → sort_unstable over unique IDs)
+            // go: pkg/util/rowcodec/common.go largeNullSorter.Less L2 (sort.Sort → sort_unstable over unique IDs)
+            // go: pkg/util/rowcodec/common.go largeNullSorter.Swap L2 (sort.Sort → sort_unstable over unique IDs)
             let mut pairs: Vec<(u32, Datum)> = (0..nn)
                 .map(|i| (self.col_ids32[i], self.values[i].clone()))
                 .collect();
@@ -186,7 +192,12 @@ impl Encoder {
                 self.col_ids32[nn..num_cols].sort_unstable();
             }
         } else {
-            // smallNotNullSorter / smallNullSorter
+            // go: pkg/util/rowcodec/common.go smallNotNullSorter.Len L2 (sort.Sort → sort_by_key over unique IDs)
+            // go: pkg/util/rowcodec/common.go smallNotNullSorter.Less L2 (sort.Sort → sort_by_key over unique IDs)
+            // go: pkg/util/rowcodec/common.go smallNotNullSorter.Swap L2 (sort.Sort → sort_by_key over unique IDs)
+            // go: pkg/util/rowcodec/common.go smallNullSorter.Len L2 (sort.Sort → sort_unstable over unique IDs)
+            // go: pkg/util/rowcodec/common.go smallNullSorter.Less L2 (sort.Sort → sort_unstable over unique IDs)
+            // go: pkg/util/rowcodec/common.go smallNullSorter.Swap L2 (sort.Sort → sort_unstable over unique IDs)
             let mut pairs: Vec<(u8, Datum)> = (0..nn)
                 .map(|i| (self.col_ids[i], self.values[i].clone()))
                 .collect();
@@ -202,7 +213,8 @@ impl Encoder {
         (num_cols, not_null_idx)
     }
 
-    // go: Encoder.encodeRowCols L1 [M-ERR: the multierr group is the first error]
+    // The multierr group of Go is its first error (mapping rule M-ERR).
+    // go: Encoder.encodeRowCols L1 [M-ERR]
     fn encode_row_cols(
         &mut self,
         loc: Option<&Arc<Location>>,
@@ -244,29 +256,29 @@ impl Encoder {
         }
     }
 
-    // go: row.initColIDs L1
+    // go: pkg/util/rowcodec/row.go row.initColIDs L1
     fn init_col_ids(&mut self) {
         let num_cols = (self.num_not_null_cols + self.num_null_cols) as usize;
         self.col_ids.resize(num_cols, 0);
     }
 
-    // go: row.initColIDs32 L1
+    // go: pkg/util/rowcodec/row.go row.initColIDs32 L1
     fn init_col_ids32(&mut self) {
         let num_cols = (self.num_not_null_cols + self.num_null_cols) as usize;
         self.col_ids32.resize(num_cols, 0);
     }
 
-    // go: row.initOffsets L1
+    // go: pkg/util/rowcodec/row.go row.initOffsets L1
     fn init_offsets(&mut self) {
         self.offsets.resize(self.num_not_null_cols as usize, 0);
     }
 
-    // go: row.initOffsets32 L1
+    // go: pkg/util/rowcodec/row.go row.initOffsets32 L1
     fn init_offsets32(&mut self) {
         self.offsets32.resize(self.num_not_null_cols as usize, 0);
     }
 
-    // go: row.toBytes L1
+    // go: pkg/util/rowcodec/row.go row.toBytes L1
     fn to_bytes(&self, mut buf: Vec<u8>) -> Vec<u8> {
         buf.push(CodecVer);
         buf.push(self.flags);
@@ -370,7 +382,7 @@ pub fn encode_value_datum(
     (buffer, err)
 }
 
-// go: encodeInt L1
+// go: pkg/util/rowcodec/common.go encodeInt L1
 fn encode_int(buf: &mut Vec<u8>, i_val: i64) {
     if i64::from(i_val as i8) == i_val {
         buf.push(i_val as u8);
@@ -383,7 +395,7 @@ fn encode_int(buf: &mut Vec<u8>, i_val: i64) {
     }
 }
 
-// go: encodeUint L1
+// go: pkg/util/rowcodec/common.go encodeUint L1
 fn encode_uint(buf: &mut Vec<u8>, u_val: u64) {
     if u64::from(u_val as u8) == u_val {
         buf.push(u_val as u8);
@@ -397,12 +409,12 @@ fn encode_uint(buf: &mut Vec<u8>, u_val: u64) {
 }
 
 /// Go reinterprets the slice memory: native byte order, little-endian on both targets.
-// go: u16SliceToBytes L2 (byte copy instead of a reinterpreted slice header)
+// go: pkg/util/rowcodec/common.go u16SliceToBytes L2 (byte copy instead of a reinterpreted slice header)
 fn u16_slice_to_bytes(u16s: &[u16]) -> Vec<u8> {
     u16s.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
-// go: u32SliceToBytes L2 (byte copy instead of a reinterpreted slice header)
+// go: pkg/util/rowcodec/common.go u32SliceToBytes L2 (byte copy instead of a reinterpreted slice header)
 fn u32_slice_to_bytes(u32s: &[u32]) -> Vec<u8> {
     u32s.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
