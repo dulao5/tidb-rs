@@ -68,7 +68,11 @@ Session（Send，同一时刻只有一个任务持有，&mut）
 
 N8 §8：§3.3（domain 的全局缓存、etcd 通知、30 秒兜底重读）属于 D06.5（P2）。P1–P2 之间，`GlobalVarsSnapshot` = **注册表默认值 + 实例覆盖（`SetSysVar`）**，作为桩登记在 tracker（`glue: stand-in: D06.5`）。接口按 D06.5 的需要定：domain 发布新快照（`ArcSwap`），会话取 `Arc`。
 
-**SET GLOBAL**：N8 §6 待定 1 尚未由负责人决定（建议 (a)：P1–P4 一律报"不支持"，P5 随 D12.12 实现窄写路径）。本块按建议 (a) 实现：校验照常执行（错误与 Go 相同），校验通过后返回"不支持"错误，不写任何地方。这一点在 PR 中单独列出，若负责人选择 (b)，只影响 `SetGlobalSysVar` 一个入口。
+**SET GLOBAL**（owner issue #58，按建议 (a) 推进）：
+- **INSTANCE 作用域的 27 个变量**：与 Go 完全相同。Go 的 `SET GLOBAL` 对它们只改本实例，在写表之前就返回（`session/session.go:1347`），从不持久化。tidb-rs 照此执行：校验 → SetGlobal 钩子 → 本实例生效（Lucky 的评审）。
+- **持久化的全局变量**：校验照常执行（错误与 Go 相同），校验通过后返回"不支持"，不写任何地方。若负责人选择 (b)，只影响这一个入口。
+
+**全局值的读取提前**（Lucky 的评审）：D06.5 的**读**的一半提前到 P1。启动时和每 30 秒用 tidb-kv / tablecodec / codec 读一次 `mysql.global_variables`（不接 etcd），生成新的 `GlobalVarsSnapshot`，按 N8 §3.3 第 1 点对有 SetGlobal 钩子的变量执行钩子（GC 的 6 个除外）。这样新会话的默认值与集群一致：`sql_mode`、`time_zone`、`div_precision_increment` 等直接影响查询结果。etcd 通知（1 秒内生效）仍留给 D06.5。**做成同一系列中单独的一个 PR**（T10），理由：它依赖 D01.11（tablecodec，评审中）和 tidb-kv 的快照读，与本块的 SessionVars 移植没有代码交叉；拆开后本块可以先合并，T10 等 D01.11 合并后基于 main 开发，评审也更聚焦。
 
 ### 2.3 钩子的处置（N8 §3.4）
 
@@ -88,6 +92,7 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 - **govec `sessionvars` 领域**（tracker）：对每个变量执行 SET（session / global）、`GetSessionOrGlobalSystemVar`、`GetSystemVar`，记录 delta、钩子执行后受影响的强类型字段（通过反射导出的字段快照）、warning 和错误；用户变量、prepared 语句、`TxnReadTS`、savepoint、游标、slow log 规则解析的脚本；minelits 抽取 `session_test.go`、`varsutil_test.go`、`slow_log_test.go` 的字面量；多个种子。
 - **钩子清单的机器核对**：Rust 侧每个 SetSession / GetSession / SetGlobal / GetGlobal / GetStateValue 钩子都对应清单中的一行，清单中每一行要么有 Rust 钩子，要么有处置列的原因；单元测试检查两者一致（与 D05.1 的 `registry_matches_hand_written_hooks` 同样的做法）。
 - **编译期断言**：`SessionVars: Send`，`SessionVars: !Sync`（N2 §5 第 1 条）。
+- **初始化顺序无关**（Lucky 的评审）：回放时取一组变量，按两种不同的顺序执行 SetSession 初始化，要求得到相同的强类型字段和 `GetSystemVar` 结果，用来发现依赖顺序的钩子（Go 按 map 随机顺序调用）。
 - 反证：故意弄坏若干钩子和 delta 逻辑，回放必须报错。
 
 ## 4. 偏离（预计）

@@ -10,3 +10,6 @@
 - [ ] T7 slow_log.go
 - [ ] T8 govec sessionvars 领域、minelits、多种子、amd64 向量、反证；钩子清单单元测试
 - [ ] T9 编译期断言 SessionVars: Send + !Sync
+- [ ] T10（同系列单独 PR，依赖 D01.11）启动时和每 30 秒读 `mysql.global_variables`，生成 GlobalVarsSnapshot 并执行 SetGlobal 钩子（D06.5 的读的一半提前）
+- [ ] T11 回放：一组变量按两种顺序初始化，结果必须相同
+- [ ] T12 INSTANCE 作用域的 SET GLOBAL 与 Go 相同（只改本实例、不持久化）；持久化的全局变量校验后报"不支持"（#58）

@@ -29,6 +29,7 @@
 2. **T4**：按 `data/sysvar_hooks.tsv` 移植 SetSession / GetSession 钩子到 `session_hooks.rs`，tsv 加处置列。govec 加 op `set`：SET 后导出 `fresh` 同样的标量字段，加上 `GetSystemVar`、warning。
 3. **T9 注意**：替身里的 `global_vars_accessor: Box<dyn GlobalVarAccessor>` 不是 `Send`，加 `SessionVars: Send` 断言前要改成 `Box<dyn GlobalVarAccessor + Send>` 或换成 N8 的快照。
 4. 每完成一组函数，从 `sessionvars_pending.go` 删掉对应名字。
+5. **Lucky 对 #57 的三点**（已写入 spec §2.2、§3 和 tasks T10–T12）：INSTANCE 作用域的 SET GLOBAL 照 Go 只改本实例；读 `mysql.global_variables` 提前到 P1，作为同系列中单独的 PR（等 D01.11 合并）；回放中按两种顺序初始化变量，结果必须相同。
 
 ## 需要决定的事
 
