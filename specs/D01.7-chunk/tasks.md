@@ -8,7 +8,7 @@
 - [x] T6 回放测试（debug、release-checked），反证 6 项。
 - [x] T7 单元测试（分配器、记账、写时复制、别名断言）；CI 加入 `tidb-chunk`。
 - [ ] T8 D01.1 合并后：`AppendEnum`、`AppendSet`、`GetEnum`、`GetSet`（Column、Chunk、Row）、`AppendDatum`、`GetDatum*`、`DatumWithBuffer`、`ToString`（Chunk、Row）、`Compare`、`LowerBound`、`UpperBound`、`mutrow.go` 全部；`binary_literal_compare` 换成 D01.1 的 `BinaryLiteral::compare`。govec 去掉对应豁免。
-- [ ] T9 性能：AppendRow、Access、DecodeToChunk、ListGetRow、ChunkMemoryUsage 追平 Go（plan §3）。
+- [ ] T9 性能：AppendRow、Access、ListGetRow、CopySelected 已追平或快于 Go；DecodeToChunk 系列与 ChunkMemoryUsage 未追平，原因和数据见 plan §3（DecodeToChunk 需要不经 `Bytes` 的借用表示，待评审决定）。
 - [ ] T10 chunk 在算子之间移交时改挂记账账户（N5a 3.7 第 2 条），随 D00.1 / D12 接线。
 - [ ] T11 D01.10：`diskFileReaderWriter`、`iterator4RowContainer`。
 - [ ] T12 用 TiKV 实际返回的 chunk 响应做向量（N5a §5"线上格式"中的真实数据部分），随 D07.3 的 distsql 解码一起做。
