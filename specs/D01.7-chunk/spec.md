@@ -87,7 +87,9 @@ A1 删除复用池：`NewAllocator`、`NewSyncAllocator`、`NewReuseHookAllocato
 1. `Column.GetDecimal` / `Row.GetMyDecimal` 返回值而不是指向列内的指针；要写回用 `decimals_mut()`。`negative` 字节按 `!= 0` 读（与 gc 一致，Go 不检查；随机字节由 `set_raw` 覆盖，见评审）。
 2. `Row.CopyConstruct` 返回新的一行 chunk（其第 0 行就是 Go 的结果）。
 3. `ColumnSwapHelper` 的合并结果用 `OnceLock` 保存，对应 Go 的 `atomic.Pointer` 加 `CompareAndSwap(nil, …)`（第一个写入者生效）。
-4. Go 读到切片容量之外的地方（未定义行为），Rust panic。
+4. Go 读到切片容量之外的地方（未定义行为），Rust panic。govec 的 `view` 步骤在 length × 宽度超过 `cap(data)` 时记为 `past_cap`（不读 Go 当时读到的内存），回放要求 Rust panic。
+
+**给 D07.3 的说明**（Lucky 评审）：本块的 `Codec` 按 TiDB 的编码器验证。TiKV 的编码器（`tidb_query_datatype` 的 chunk codec）可能有合法的不同：没有 NULL 时是否写位图（TiDB 的编码器在 null count 为 0 时不写，解码走 `setAllNotNull`），以及 NULL 单元下面填什么字节。D07.3 用 TiKV 实际响应做向量时（tasks T12）要核对这两点，解码必须接受 TiKV 的合法写法；`decode_mutation` 测试覆盖畸形输入（只会 panic，不会 abort 或挂起）。
 
 ## 5. 验收
 
@@ -96,5 +98,7 @@ A1 删除复用池：`NewAllocator`、`NewSyncAllocator`、`NewReuseHookAllocato
 | 收敛检查 | 276/330，其余 54 个（32 个加 `mutrow.go` 的 22 个）已登记（§1） |
 | govec `chunk` 领域 | 1,671 条（1,600 个随机脚本，平均约 100 步；20 个 Go 测试场景；51 条 `type_width`），debug 与 release-checked 下回放全部一致 |
 | 反证 | 去掉 size class 取整 1,313 条不一致；NULL 写零而不是 `elemBuf` 1,226 条；`appendMultiSameNullBitmap` 不清多余位 335 条；`Sizeof(Column)` 改为 120 共 1,615 条；`resize(n, true)` 清零 16 条；`mergeInputIdxToOutputIdxes` 不合并别名 16 条 |
+| 其他种子 | 生成器修正后，种子 1–24 各 1,671 条，回放全部一致（`GOVEC_CHUNK_FILES`，tracker CI 生成种子 1–8 作为产物） |
+| 畸形输入 | `tests/decode_mutation.rs`：5,000 份截断、翻转字节、改写长度/null count 的编码，解码、读出每个单元、重新编码，只出现可捕获的 panic |
 | 单元测试 | `tests/unit.rs`：分配器、`TrackedAlloc` 记账（释放后归零）、共享缓冲写时复制、`ReuseIntermChk` 不改输入、别名写入在 debug 下 panic、`Reset` 保持别名 |
 | 性能 | 见 plan.md §3（与 Go 基准同负载对比） |

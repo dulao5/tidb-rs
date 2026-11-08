@@ -12,3 +12,4 @@
 - [ ] T10 chunk 在算子之间移交时改挂记账账户（N5a 3.7 第 2 条），随 D00.1 / D12 接线。
 - [ ] T11 D01.10：`diskFileReaderWriter`、`iterator4RowContainer`。
 - [ ] T12 用 TiKV 实际返回的 chunk 响应做向量（N5a §5"线上格式"中的真实数据部分），随 D07.3 的 distsql 解码一起做。
+- [ ] T13 D01.1 合并后改名：临时的 Enum/Set 接口 `Chunk::append_name_value`、`Row::get_name_value_pub`、`Column::append_name_value_for_test` 换成 `append_enum`/`append_set`/`get_enum`/`get_set`（`types.Enum`/`Set`）。这三个是 `glue:` 标注，converge 不把它们算作已匹配的 Go 函数；对应的 Go 函数仍在豁免表中（"waits D01.1"）。

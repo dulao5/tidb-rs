@@ -14,7 +14,7 @@
 // Go names for package-level constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
-use triomphe::Arc;
+use crate::ColArc as Arc;
 
 use tidb_base::Error;
 use tidb_base::errors;

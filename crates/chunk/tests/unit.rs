@@ -173,7 +173,7 @@ fn reset_keeps_slot_aliases() {
     c.append_int64(1, 2);
     c.make_ref(0, 1);
     c.reset();
-    assert!(triomphe::Arc::ptr_eq(c.column_arc(0), c.column_arc(1)));
+    assert!(tidb_chunk::ColArc::ptr_eq(c.column_arc(0), c.column_arc(1)));
     assert_eq!(c.num_rows(), 0);
 }
 

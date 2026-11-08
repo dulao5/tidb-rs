@@ -9,7 +9,7 @@
 // Go names for package-level constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
-use triomphe::Arc;
+use crate::ColArc as Arc;
 
 use bytes::Bytes;
 use tidb_base::mysql;
