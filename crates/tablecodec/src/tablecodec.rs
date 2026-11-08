@@ -1008,8 +1008,10 @@ pub fn decode_index_kv_ex<'a>(
 
 /// DecodeIndexKV uses to decode index key values.
 ///
-///     `colsLen` is expected to be index columns count.
-///     `columns` is expected to be index columns + handle columns(if hdStatus is not HandleNotNeeded).
+/// ```text
+/// `colsLen` is expected to be index columns count.
+/// `columns` is expected to be index columns + handle columns(if hdStatus is not HandleNotNeeded).
+/// ```
 // go: DecodeIndexKV L1
 pub fn decode_index_kv<'a>(
     key: &'a [u8],

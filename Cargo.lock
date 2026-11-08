@@ -3860,6 +3860,7 @@ name = "tidb-tablecodec"
 version = "0.0.0"
 dependencies = [
  "codec",
+ "collections",
  "criterion 0.5.1",
  "flate2",
  "serde_json",
@@ -3872,6 +3873,7 @@ dependencies = [
  "tidb-types",
  "tidb_query_datatype",
  "tikv-jemallocator",
+ "tipb",
 ]
 
 [[package]]

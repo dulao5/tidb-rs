@@ -32,6 +32,10 @@ tikv-jemallocator = { workspace = true }
 # The TiKV oracle (tests/tikv_oracle.rs): vendored TiKV row and key codecs, compared byte for byte.
 codec = { workspace = true }
 tidb_query_datatype = { workspace = true }
+# tipb.ColumnInfo / FieldType for TiKV's cut_row and the v2-to-v1 datum conversion.
+tipb = { workspace = true }
+# TiKV's FxHash collections (cut_row's column-id set).
+collections = { workspace = true }
 
 [[bench]]
 name = "tablecodec"

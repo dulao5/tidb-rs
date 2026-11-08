@@ -139,7 +139,7 @@ impl<'a> Row<'a> {
     }
 
     // go: row.getData L1
-    pub(crate) fn get_data(&self, i: usize) -> &'a [u8] {
+    pub fn get_data(&self, i: usize) -> &'a [u8] {
         let (start, end) = self.get_offsets(i);
         let (start, end) = (start as usize, end as usize);
         assert!(
@@ -217,7 +217,7 @@ impl<'a> Row<'a> {
 
     /// Returns `(idx, isNil, notFound)`.
     // go: row.findColID L1
-    pub(crate) fn find_col_id(&self, col_id: i64) -> (usize, bool, bool) {
+    pub fn find_col_id(&self, col_id: i64) -> (usize, bool, bool) {
         // Search the column in not-null columns array.
         let (mut i, mut j) = (0usize, self.num_not_null_cols as usize);
         while i < j {
@@ -260,6 +260,13 @@ impl<'a> Row<'a> {
             }
         }
         (0, false, true)
+    }
+
+    /// The number of column IDs of the row (not-null and null), Go's
+    /// `int(r.numNotNullCols + r.numNullCols)`.
+    // glue: column count of the row header
+    pub fn num_cols(&self) -> usize {
+        self.num_not_null_cols.wrapping_add(self.num_null_cols) as usize
     }
 
     /// ChecksumVersion returns the version of checksum. Note that it's valid only if checksum has been encoded in the row
