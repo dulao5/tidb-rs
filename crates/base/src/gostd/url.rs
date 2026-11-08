@@ -19,7 +19,6 @@ use std::net::Ipv6Addr;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Encoding {
     Path,
-    PathSegment,
     Host,
     Zone,
     UserPassword,
@@ -47,8 +46,8 @@ fn should_escape(c: u8, mode: Encoding) -> bool {
     if c.is_ascii_alphanumeric() {
         return false;
     }
-    if mode == Encoding::Host || mode == Encoding::Zone {
-        if matches!(
+    if (mode == Encoding::Host || mode == Encoding::Zone)
+        && matches!(
             c,
             b'!' | b'$'
                 | b'&'
@@ -66,15 +65,14 @@ fn should_escape(c: u8, mode: Encoding) -> bool {
                 | b'<'
                 | b'>'
                 | b'"'
-        ) {
-            return false;
-        }
+        )
+    {
+        return false;
     }
     match c {
         b'-' | b'_' | b'.' | b'~' => return false,
         b'$' | b'&' | b'+' | b',' | b'/' | b':' | b';' | b'=' | b'?' | b'@' => match mode {
             Encoding::Path => return c == b'?',
-            Encoding::PathSegment => return c == b'/' || c == b';' || c == b',' || c == b'?',
             Encoding::UserPassword => {
                 return c == b'@' || c == b'/' || c == b'?' || c == b':';
             }
@@ -501,12 +499,11 @@ impl Url {
 
     // go-std: net/url.URL.EscapedPath L1
     fn escaped_path(&self) -> Vec<u8> {
-        if !self.raw_path.is_empty() && valid_encoded(&self.raw_path, Encoding::Path) {
-            if let Ok(p) = unescape(&self.raw_path, Encoding::Path) {
-                if p == self.path {
-                    return self.raw_path.clone();
-                }
-            }
+        if !self.raw_path.is_empty()
+            && valid_encoded(&self.raw_path, Encoding::Path)
+            && unescape(&self.raw_path, Encoding::Path).is_ok_and(|p| p == self.path)
+        {
+            return self.raw_path.clone();
         }
         if self.path == b"*" {
             return b"*".to_vec();
@@ -528,13 +525,11 @@ impl Url {
 
     // go-std: net/url.URL.EscapedFragment L1
     fn escaped_fragment(&self) -> Vec<u8> {
-        if !self.raw_fragment.is_empty() && valid_encoded(&self.raw_fragment, Encoding::Fragment)
+        if !self.raw_fragment.is_empty()
+            && valid_encoded(&self.raw_fragment, Encoding::Fragment)
+            && unescape(&self.raw_fragment, Encoding::Fragment).is_ok_and(|f| f == self.fragment)
         {
-            if let Ok(f) = unescape(&self.raw_fragment, Encoding::Fragment) {
-                if f == self.fragment {
-                    return self.raw_fragment.clone();
-                }
-            }
+            return self.raw_fragment.clone();
         }
         escape(&self.fragment, Encoding::Fragment)
     }

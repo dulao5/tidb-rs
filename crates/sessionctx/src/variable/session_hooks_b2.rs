@@ -938,3 +938,29 @@ pub(super) fn sg_tidb_stmt_summary_max_sql_length(
     }
     Ok(())
 }
+
+// go-part: defaultSysVars (sysvar.go:L2845 tidb_cloud_storage_uri GetGlobal closure) L1
+pub(super) fn gg_tidb_cloud_storage_uri(_s: &mut SessionVars) -> Result<String, Error> {
+    let mut cloud_storage_uri = CloudStorageURI.load();
+    if !cloud_storage_uri.is_empty() {
+        cloud_storage_uri = tidb_parser::ast_misc::redact_url(&cloud_storage_uri);
+    }
+    Ok(cloud_storage_uri)
+}
+
+// go-part: defaultSysVars (sysvar.go:L2851 tidb_cloud_storage_uri SetGlobal closure) L1
+pub(super) fn sg_tidb_cloud_storage_uri(_s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    if !val.is_empty()
+        && val != CloudStorageURI.load().as_str()
+        && let Err(err) = registered(&ValidateCloudStorageURI)(val)
+    {
+        // convert annotations (second-level message) to message so clientConn.writeError
+        // will print friendly error.
+        if err.is_normalized() {
+            return Err(errors::new(err.error()));
+        }
+        return Err(err);
+    }
+    CloudStorageURI.store(val.to_owned());
+    Ok(())
+}

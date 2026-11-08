@@ -17,6 +17,7 @@ mod session_hooks_ext;
 mod session_hooks_global;
 mod session_hooks_state;
 pub mod session_state;
+pub mod slow_log_rules;
 pub(crate) mod setvar_affect;
 pub mod statusvar;
 pub mod sysvar_data;

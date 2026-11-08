@@ -125,6 +125,11 @@ pub static SetExternalTimestamp: Callback<dyn Fn(u64) -> Result<(), Error> + Sen
 // go-dep: github.com/pingcap/tidb/pkg/sessionctx/variable.GetExternalTimestamp L1
 pub static GetExternalTimestamp: Callback<dyn Fn() -> Result<u64, Error> + Send + Sync> =
     RwLock::new(None);
+/// Go `ValidateCloudStorageURI` (registered by lightning / BR).
+// go-dep: github.com/pingcap/tidb/pkg/sessionctx/variable.ValidateCloudStorageURI L1
+pub static ValidateCloudStorageURI: Callback<ValidateURIFn> = RwLock::new(None);
+/// `func(ctx context.Context, uri string) error`.
+pub type ValidateURIFn = dyn Fn(&str) -> Result<(), Error> + Send + Sync;
 /// Go `SetGlobalResourceControl` (registered by the domain).
 // go-dep: github.com/pingcap/tidb/pkg/sessionctx/variable.SetGlobalResourceControl L1
 pub static SetGlobalResourceControl: Callback<dyn Fn(bool) + Send + Sync> = RwLock::new(None);

@@ -359,6 +359,7 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "tidb_runtime_filter_mode" => super::session_hooks_state::ss_tidb_runtime_filter_mode,
         "tidb_lock_unchanged_keys" => super::session_hooks_state::ss_tidb_lock_unchanged_keys,
         "tidb_session_alias" => super::session_hooks_state::ss_tidb_session_alias,
+        "tidb_slow_log_rules" => super::session_hooks_state::ss_tidb_slow_log_rules,
         "tidb_opt_objective" => super::session_hooks_state::ss_tidb_opt_objective,
         "tidb_dml_type" => super::session_hooks_state::ss_tidb_dml_type,
         "tidb_enable_shared_lock_promotion" => {
@@ -626,6 +627,8 @@ fn set_global(name: &str) -> Option<SetGlobalFn> {
         "tidb_generate_binary_plan" => super::session_hooks_b2::sg_tidb_generate_binary_plan,
         "tidb_ddl_disk_quota" => super::session_hooks_b2::sg_tidb_ddl_disk_quota,
         "tidb_external_ts" => super::session_hooks_b2::sg_tidb_external_ts,
+        "tidb_slow_log_rules" => super::session_hooks_state::sg_tidb_slow_log_rules,
+        "tidb_cloud_storage_uri" => super::session_hooks_b2::sg_tidb_cloud_storage_uri,
         "tidb_ttl_scan_batch_size" => super::session_hooks_b2::sg_tidb_ttl_scan_batch_size,
         "tidb_ttl_delete_batch_size" => super::session_hooks_b2::sg_tidb_ttl_delete_batch_size,
         "tidb_ttl_delete_rate_limit" => super::session_hooks_b2::sg_tidb_ttl_delete_rate_limit,
@@ -929,6 +932,8 @@ fn get_global(name: &str) -> Option<GetGlobalFn> {
         "tidb_committer_concurrency" => super::session_hooks_b2::gg_tidb_committer_concurrency,
         "tidb_mem_quota_analyze" => super::session_hooks_b2::gg_tidb_mem_quota_analyze,
         "tidb_external_ts" => super::session_hooks_b2::gg_tidb_external_ts,
+        "tidb_slow_log_rules" => super::session_hooks_state::gg_tidb_slow_log_rules,
+        "tidb_cloud_storage_uri" => super::session_hooks_b2::gg_tidb_cloud_storage_uri,
         "tidb_ttl_job_schedule_window_start_time" => {
             super::session_hooks_b2::gg_tidb_ttl_job_schedule_window_start_time
         }
@@ -1010,17 +1015,15 @@ pub(crate) fn is_pending(name: &str, kind: &str) -> bool {
 }
 
 /// Variables whose Go entry has a `SetSession` hook that is not ported yet.
-const PENDING_SET_SESSION: &[&str] = &["tidb_slow_log_rules"];
+const PENDING_SET_SESSION: &[&str] = &[];
 
 /// Variables whose Go entry has a `SetGlobal` hook that is not ported yet.
 const PENDING_SET_GLOBAL: &[&str] = &[
-    "tidb_cloud_storage_uri",
     "tidb_gc_concurrency",
     "tidb_gc_enable",
     "tidb_gc_life_time",
     "tidb_gc_run_interval",
     "tidb_gc_scan_lock_mode",
-    "tidb_slow_log_rules",
 ];
 
 /// Variables whose Go entry has a `GetSession` hook that is not ported yet.
@@ -1028,13 +1031,11 @@ const PENDING_GET_SESSION: &[&str] = &[];
 
 /// Variables whose Go entry has a `GetGlobal` hook that is not ported yet.
 const PENDING_GET_GLOBAL: &[&str] = &[
-    "tidb_cloud_storage_uri",
     "tidb_gc_concurrency",
     "tidb_gc_enable",
     "tidb_gc_life_time",
     "tidb_gc_run_interval",
     "tidb_gc_scan_lock_mode",
-    "tidb_slow_log_rules",
 ];
 
 /// Variables whose Go entry has a `GetStateValue` hook that is not ported yet.
