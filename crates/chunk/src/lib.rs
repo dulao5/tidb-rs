@@ -17,6 +17,7 @@ pub mod compare;
 mod goslice;
 pub mod iterator;
 pub mod list;
+pub mod mutrow;
 pub mod row;
 
 pub use chunk::Chunk;
@@ -24,6 +25,7 @@ pub use column::Column;
 pub use goslice::ColAlloc;
 pub use list::List;
 pub use list::RowPtr;
+pub use mutrow::MutRow;
 pub use row::Row;
 
 /// The shared handle of a chunk column (N5a 3.2: `MakeRef` / `SwapColumns` share a column).

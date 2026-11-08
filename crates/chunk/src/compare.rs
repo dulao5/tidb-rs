@@ -1,18 +1,28 @@
 //! go-file: pkg/util/chunk/compare.go
 //!
-//! Row value comparison (N5a 3.1: L1). `Compare`, `Chunk.LowerBound` and `Chunk.UpperBound`
-//! compare with a `types.Datum` (block D01.1) and wait for it. `types.CompareString` (D01.1)
-//! is the one-line `collate.GetCollator(collation).Compare(x, y)`, called directly;
-//! `types.BinaryLiteral.Compare` (D01.1) is reproduced in [`binary_literal_compare`] until
-//! D01.1 lands.
+//! Row value comparison (N5a 3.1: L1). `types.BinaryLiteral.Compare` is reproduced on
+//! borrowed bytes in [`binary_literal_compare`] (the ported method takes an owned
+//! `BinaryLiteral`; a comparator must not allocate per call).
+
+// Datum kinds keep their Go names (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
 
 use std::cmp::Ordering;
 
 use tidb_base::mysql;
 use tidb_parser::types::FieldType;
 use tidb_types::collate;
+use tidb_types::compare::compare_string;
+use tidb_types::datum::Datum;
+use tidb_types::datum::{
+    KindBinaryLiteral, KindBytes, KindFloat32, KindFloat64, KindInt64, KindMaxValue,
+    KindMinNotNull, KindMysqlBit, KindMysqlDecimal, KindMysqlDuration, KindMysqlEnum,
+    KindMysqlJSON, KindMysqlSet, KindMysqlTime, KindNull, KindString, KindUint64,
+    KindVectorFloat32,
+};
 use tidb_types::json::compare_binary_json;
 
+use crate::chunk::Chunk;
 use crate::row::Row;
 
 /// CompareFunc is a function to compare the two values in Row, the two columns must have the same type.
@@ -202,7 +212,7 @@ fn cmp_bit(l: Row<'_>, l_col: usize, r: Row<'_>, r_col: usize) -> isize {
 
 /// `types.BinaryLiteral(b).Compare(types.BinaryLiteral(b2))`: compares after trimming
 /// leading zero bytes, the longer value is larger.
-// glue: types.BinaryLiteral.Compare and trimLeadingZeroBytes (block D01.1), until D01.1 lands
+// glue: types.BinaryLiteral.Compare and trimLeadingZeroBytes on borrowed bytes (no allocation per comparison)
 fn binary_literal_compare(b: &[u8], b2: &[u8]) -> isize {
     let trim = |x: &[u8]| -> usize {
         // trimLeadingZeroBytes keeps at least one byte.
@@ -253,4 +263,124 @@ fn cmp_vector_float32(l: Row<'_>, l_col: usize, r: Row<'_>, r_col: usize) -> isi
     }
     let (lv, rv) = (l.get_vector_float32(l_col), r.get_vector_float32(r_col));
     lv.compare(&rv)
+}
+
+/// Compare compares the value with ad.
+/// We assume that the collation information of the column is the same with the datum.
+// go: Compare L1
+pub fn compare(row: Row<'_>, col_idx: usize, ad: &Datum) -> isize {
+    match ad.kind() {
+        KindNull => {
+            if row.is_null(col_idx) {
+                return 0;
+            }
+            1
+        }
+        KindMinNotNull => {
+            if row.is_null(col_idx) {
+                return -1;
+            }
+            1
+        }
+        KindMaxValue => -1,
+        KindInt64 => go_cmp(row.get_int64(col_idx), ad.get_int64()),
+        KindUint64 => go_cmp(row.get_uint64(col_idx), ad.get_uint64()),
+        KindFloat32 => go_cmp(row.get_float32(col_idx) as f64, ad.get_float32() as f64),
+        KindFloat64 => go_cmp(row.get_float64(col_idx), ad.get_float64()),
+        KindString => compare_string(row.get_string(col_idx), ad.get_string(), ad.collation()),
+        KindBytes | KindBinaryLiteral | KindMysqlBit => {
+            match row.get_bytes(col_idx).cmp(ad.get_bytes()) {
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+                Ordering::Greater => 1,
+            }
+        }
+        KindMysqlDecimal => {
+            let (l, r) = (row.get_my_decimal(col_idx), ad.get_mysql_decimal());
+            l.compare(r)
+        }
+        KindMysqlDuration => {
+            let (l, r) = (
+                row.get_duration(col_idx, 0).duration,
+                ad.get_mysql_duration().duration,
+            );
+            go_cmp(l, r)
+        }
+        KindMysqlEnum => {
+            let (l, r) = (row.get_enum(col_idx).value, ad.get_mysql_enum().value);
+            go_cmp(l, r)
+        }
+        KindMysqlSet => {
+            let (l, r) = (row.get_set(col_idx).value, ad.get_mysql_set().value);
+            go_cmp(l, r)
+        }
+        KindMysqlJSON => {
+            let (l, r) = (row.get_json(col_idx), ad.get_mysql_json());
+            compare_binary_json(l, r)
+        }
+        KindVectorFloat32 => {
+            let (l, r) = (row.get_vector_float32(col_idx), ad.get_vector_float32());
+            l.compare(&r)
+        }
+        KindMysqlTime => {
+            let (l, r) = (row.get_time(col_idx), ad.get_mysql_time());
+            l.compare(&r)
+        }
+        _ => 0,
+    }
+}
+
+/// Go's `sort.Search(n, f)`: the smallest index in `[0, n)` at which `f` is true, assuming
+/// `f` is false then true; the calls are made in Go's order (`LowerBound`'s `f` has a side
+/// effect).
+// go-std: sort.Search L1
+fn sort_search(n: usize, mut f: impl FnMut(usize) -> bool) -> usize {
+    // Define f(-1) == false and f(n) == true.
+    // Invariant: f(i-1) == false, f(j) == true.
+    let (mut i, mut j) = (0usize, n);
+    while i < j {
+        let h = (i + j) >> 1; // avoid overflow when computing h
+        // i ≤ h < j
+        if !f(h) {
+            i = h + 1; // preserves f(i-1) == false
+        } else {
+            j = h; // preserves f(j) == true
+        }
+    }
+    // i == j, f(i-1) == false, and f(j) (= f(i)) == true  =>  answer is i.
+    i
+}
+
+impl Chunk {
+    /// LowerBound searches on the non-decreasing Column colIdx,
+    /// returns the smallest index i such that the value at row i is not less than `d`.
+    // go: Chunk.LowerBound L1
+    pub fn lower_bound(&self, col_idx: usize, d: &Datum) -> (usize, bool) {
+        // Go: c.GetRow(c.NumRows()-1) indexes row -1 of an empty chunk and panics.
+        let last = self
+            .num_rows()
+            .checked_sub(1)
+            .expect("index out of range [-1]");
+        if compare(self.get_row(last), col_idx, d) < 0 {
+            return (self.num_rows(), false);
+        }
+        let mut is_match = false;
+        let index = sort_search(self.num_rows(), |i| {
+            let cmp = compare(self.get_row(i), col_idx, d);
+            if cmp == 0 {
+                is_match = true;
+            }
+            cmp >= 0
+        });
+        (index, is_match)
+    }
+
+    /// UpperBound searches on the non-decreasing Column colIdx,
+    /// returns the smallest index i such that the value at row i is larger than `d`.
+    // go: Chunk.UpperBound L1
+    pub fn upper_bound(&self, col_idx: usize, d: &Datum) -> usize {
+        sort_search(self.num_rows(), |i| {
+            compare(self.get_row(i), col_idx, d) > 0
+        })
+    }
 }

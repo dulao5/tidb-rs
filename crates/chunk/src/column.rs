@@ -11,9 +11,6 @@
 //!   (`zerocopy` little-endian types, decision D24): the data of a decoded column is
 //!   generally not aligned.
 //! - `avoidReusing` only exists for the column pool, which A1 removes (`M-POOL`).
-//! - Go's `types.Enum` / `types.Set` are block D01.1: `AppendEnum`, `AppendSet`, `GetEnum`
-//!   and `GetSet` wait for it (registered in the govec exemptions); `appendNameValue` /
-//!   `getNameValue` are ported.
 
 // Go names for package-level constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -29,7 +26,9 @@ use tidb_parser::types::{
 use tidb_types::MY_DECIMAL_STRUCT_SIZE;
 use tidb_types::MyDecimal;
 use tidb_types::core_time::CoreTime;
+use tidb_types::enum_type::Enum;
 use tidb_types::json::BinaryJSON;
+use tidb_types::set_type::Set;
 use tidb_types::time::Duration;
 use tidb_types::time::Time;
 use tidb_types::vector::VectorFloat32;
@@ -90,6 +89,14 @@ impl ElemBuf {
     pub(crate) fn new_zeroed(n: usize) -> ElemBuf {
         ElemBuf::make(n)
     }
+
+    /// Writes `src` at the start of the buffer (a MutRow column's `elemBuf` is the same
+    /// array as its `data`, see `mutrow.rs`).
+    // glue: Go write through the aliased elemBuf/data array of newMutRowFixedLenColumn
+    pub(crate) fn write(&mut self, src: &[u8]) {
+        let n = src.len().min(self.len);
+        self.b[..n].copy_from_slice(&src[..n]);
+    }
 }
 
 /// `dst = append(dst[:0], src...)` for an `elemBuf` (`CopyConstruct`).
@@ -144,11 +151,16 @@ impl Column {
         self.finish_append_var();
     }
 
-    /// The column form of `AppendEnum` / `AppendSet` until block D01.1 ports `types.Enum`
-    /// and `types.Set`.
-    // glue: Go Column.AppendEnum / AppendSet body, types.Enum/Set wait for D01.1
-    pub fn append_name_value_for_test(&mut self, name: &[u8], val: u64) {
-        self.append_name_value(name, val);
+    /// AppendSet appends a Set value into this Column.
+    // go: Column.AppendSet L1
+    pub fn append_set(&mut self, set: &Set) {
+        self.append_name_value(&set.name, set.value);
+    }
+
+    /// AppendEnum appends a Enum value into this Column.
+    // go: Column.AppendEnum L1
+    pub fn append_enum(&mut self, enum_: &Enum) {
+        self.append_name_value(&enum_.name, enum_.value);
     }
 
     /// AppendJSON appends a BinaryJSON value into this Column.
@@ -1007,6 +1019,26 @@ impl Column {
         Duration {
             duration: dur,
             fsp: fill_fsp,
+        }
+    }
+
+    /// GetEnum returns the Enum in the specific row.
+    // go: Column.GetEnum L1
+    pub fn get_enum(&self, row_id: usize) -> Enum {
+        let (name, val) = self.get_name_value(row_id);
+        Enum {
+            name: name.to_vec(),
+            value: val,
+        }
+    }
+
+    /// GetSet returns the Set in the specific row.
+    // go: Column.GetSet L1
+    pub fn get_set(&self, row_id: usize) -> Set {
+        let (name, val) = self.get_name_value(row_id);
+        Set {
+            name: name.to_vec(),
+            value: val,
         }
     }
 
