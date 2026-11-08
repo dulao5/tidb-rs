@@ -41,6 +41,8 @@ pub(crate) struct SessionHooks {
 pub(crate) fn hooks_of(name: &str) -> SessionHooks {
     SessionHooks {
         set_session: set_session(name),
+        get_session: get_session(name),
+        get_state_value: get_state_value(name),
         ..SessionHooks::default()
     }
 }
@@ -299,6 +301,35 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
     })
 }
 
+// glue: the GetSession fields of the Go table literals, keyed by variable name
+fn get_session(name: &str) -> Option<GetSessionFn> {
+    Some(match name {
+        "warning_count" => gs_warning_count,
+        "error_count" => gs_error_count,
+        "tidb_last_txn_info" => gs_tidb_last_txn_info,
+        "last_plan_from_cache" => gs_last_plan_from_cache,
+        "last_plan_from_binding" => gs_last_plan_from_binding,
+        "rand_seed1" => gs_rand_seed1,
+        "rand_seed2" => gs_rand_seed2,
+        "tidb_last_plan_replayer_token" => gs_tidb_last_plan_replayer_token,
+        "last_sql_use_alloc" => gs_last_sql_use_alloc,
+        "tidb_request_source_type" => gs_tidb_request_source_type,
+        "max_allowed_packet" => gs_max_allowed_packet,
+        "tidb_enable_inl_join_inner_multi_pattern" => gs_tidb_enable_inl_join_inner_multi_pattern,
+        _ => return None,
+    })
+}
+
+// glue: the GetStateValue fields of the Go table literals, keyed by variable name
+fn get_state_value(name: &str) -> Option<GetStateValueFn> {
+    Some(match name {
+        "timestamp" => gv_timestamp,
+        "last_insert_id" => gv_last_insert_id,
+        "identity" => gv_identity,
+        _ => return None,
+    })
+}
+
 /// Whether Go's `kind` hook of `name` is not ported yet.
 // glue: the pending part of the D05.2 hook checklist
 pub(crate) fn is_pending(name: &str, kind: &str) -> bool {
@@ -528,33 +559,21 @@ const PENDING_SET_GLOBAL: &[&str] = &[
 
 /// Variables whose Go entry has a `GetSession` hook that is not ported yet.
 const PENDING_GET_SESSION: &[&str] = &[
-    "error_count",
     "group_concat_max_len",
     "identity",
     "last_insert_id",
-    "last_plan_from_binding",
-    "last_plan_from_cache",
-    "last_sql_use_alloc",
-    "max_allowed_packet",
-    "rand_seed1",
-    "rand_seed2",
     "tidb_current_ts",
-    "tidb_enable_inl_join_inner_multi_pattern",
     "tidb_enable_plan_replayer_capture",
     "tidb_enable_plan_replayer_continuous_capture",
     "tidb_last_ddl_info",
-    "tidb_last_plan_replayer_token",
     "tidb_last_query_info",
-    "tidb_last_txn_info",
     "tidb_partition_prune_mode",
-    "tidb_request_source_type",
     "tidb_scatter_region",
     "tidb_session_alias",
     "tidb_slow_log_rules",
     "tiflash_replica_read",
     "timestamp",
     "txn_scope",
-    "warning_count",
 ];
 
 /// Variables whose Go entry has a `GetGlobal` hook that is not ported yet.
@@ -696,14 +715,7 @@ const PENDING_GET_GLOBAL: &[&str] = &[
 ];
 
 /// Variables whose Go entry has a `GetStateValue` hook that is not ported yet.
-const PENDING_GET_STATE_VALUE: &[&str] = &[
-    "identity",
-    "last_insert_id",
-    "rand_seed1",
-    "rand_seed2",
-    "timestamp",
-    "tx_isolation_one_shot",
-];
+const PENDING_GET_STATE_VALUE: &[&str] = &["rand_seed1", "rand_seed2", "tx_isolation_one_shot"];
 
 // go-part: defaultSysVars (sysvar.go:L163 tidb_enforce_mpp SetSession closure) L1
 fn ss_tidb_enforce_mpp(s: &mut SessionVars, val: &str) -> Result<(), Error> {
@@ -2233,4 +2245,84 @@ fn ss_tidb_batch_pending_tiflash_count(s: &mut SessionVars, val: &str) -> Result
         .unwrap_or(DefTiDBBatchPendingTiFlashCount);
     s.batch_pending_tiflash_count = b;
     Ok(())
+}
+
+// ---------------------------------------------------------------- hand-ported GetSession / GetStateValue hooks
+
+// go-part: defaultSysVars (sysvar.go:L112 warning_count GetSession closure) L1
+fn gs_warning_count(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(s.sys_warning_count.to_string())
+}
+
+// go-part: defaultSysVars (sysvar.go:L115 error_count GetSession closure) L1
+fn gs_error_count(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(s.sys_error_count.to_string())
+}
+
+// go-part: defaultSysVars (sysvar.go:L268 tidb_last_txn_info GetSession closure) L1
+fn gs_tidb_last_txn_info(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(s.last_txn_info.clone())
+}
+
+// go-part: defaultSysVars (sysvar.go:L387 last_plan_from_cache GetSession closure) L1
+fn gs_last_plan_from_cache(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(bool_to_on_off(s.prev_found_in_plan_cache).to_owned())
+}
+
+// go-part: defaultSysVars (sysvar.go:L390 last_plan_from_binding GetSession closure) L1
+fn gs_last_plan_from_binding(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(bool_to_on_off(s.prev_found_in_binding).to_owned())
+}
+
+// go-part: defaultSysVars (sysvar.go:L396 rand_seed1 GetSession closure) L1
+fn gs_rand_seed1(_s: &mut SessionVars) -> Result<String, Error> {
+    Ok("0".to_owned())
+}
+
+// go-part: defaultSysVars (sysvar.go:L404 rand_seed2 GetSession closure) L1
+fn gs_rand_seed2(_s: &mut SessionVars) -> Result<String, Error> {
+    Ok("0".to_owned())
+}
+
+// go-part: defaultSysVars (sysvar.go:L426 tidb_last_plan_replayer_token GetSession closure) L1
+fn gs_tidb_last_plan_replayer_token(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(s.last_plan_replayer_token.clone())
+}
+
+// go-part: defaultSysVars (sysvar.go:L430 last_sql_use_alloc GetSession closure) L1
+fn gs_last_sql_use_alloc(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(bool_to_on_off(s.pre_use_chunk_alloc).to_owned())
+}
+
+// go-part: defaultSysVars (sysvar.go:L433 tidb_request_source_type GetSession closure) L1
+fn gs_tidb_request_source_type(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(s.explicit_request_source_type.clone())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1943 max_allowed_packet GetSession closure) L1
+fn gs_max_allowed_packet(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(s.max_allowed_packet.to_string())
+}
+
+// go-part: defaultSysVars (sysvar.go:L3145 tidb_enable_inl_join_inner_multi_pattern GetSession closure) L1
+fn gs_tidb_enable_inl_join_inner_multi_pattern(s: &mut SessionVars) -> Result<String, Error> {
+    Ok(bool_to_on_off(s.enable_inl_join_inner_multi_pattern).to_owned())
+}
+
+// go-part: defaultSysVars (sysvar.go:L102 timestamp GetStateValue closure) L1
+fn gv_timestamp(s: &mut SessionVars) -> Result<(String, bool), Error> {
+    match s.systems.get(super::names::Timestamp) {
+        Some(timestamp) => Ok((timestamp.clone(), timestamp != DefTimestamp)),
+        None => Ok((String::new(), false)),
+    }
+}
+
+// go-part: defaultSysVars (sysvar.go:L120 last_insert_id GetStateValue closure) L1
+fn gv_last_insert_id(_s: &mut SessionVars) -> Result<(String, bool), Error> {
+    Ok((String::new(), false))
+}
+
+// go-part: defaultSysVars (sysvar.go:L125 identity GetStateValue closure) L1
+fn gv_identity(_s: &mut SessionVars) -> Result<(String, bool), Error> {
+    Ok((String::new(), false))
 }
