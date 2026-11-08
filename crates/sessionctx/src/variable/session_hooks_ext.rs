@@ -42,7 +42,7 @@ fn update_global_config(f: impl FnOnce(&mut config::Config)) {
 
 /// `strconv.ParseInt(s, 10, 64)` with Go's error.
 // go-std: strconv.ParseInt(s, 10, 64) L1
-fn parse_int64(s: &str) -> Result<i64, Error> {
+pub(super) fn parse_int64(s: &str) -> Result<i64, Error> {
     let (v, err) = tidb_types::gostd::parse_int(s.as_bytes(), 64);
     match err {
         Ok(()) => Ok(v),

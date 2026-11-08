@@ -179,7 +179,30 @@ fn reset_atomics() {
     restore_process_globals();
 }
 
+/// The callbacks other components register into the variable package, as the generator
+/// has them: the executor's `GlobalAnalyzeMemoryTracker` limit (`-1` at start) behind
+/// Get/SetMemQuotaAnalyze, and the generator's stub external timestamp (a process-wide
+/// value, 0 at start). The others stay unregistered, as in the generator.
+fn register_callbacks() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, AtomicU64};
+    use tidb_sessionctx::variable::hook_state as hs;
+    static ANALYZE_LIMIT: AtomicI64 = AtomicI64::new(-1);
+    static EXTERNAL_TS: AtomicU64 = AtomicU64::new(0);
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        *hs::GetMemQuotaAnalyze.write() = Some(Arc::new(|| ANALYZE_LIMIT.load(SeqCst)));
+        *hs::SetMemQuotaAnalyze.write() = Some(Arc::new(|v| ANALYZE_LIMIT.store(v, SeqCst)));
+        *hs::GetExternalTimestamp.write() = Some(Arc::new(|| Ok(EXTERNAL_TS.load(SeqCst))));
+        *hs::SetExternalTimestamp.write() = Some(Arc::new(|ts| {
+            EXTERNAL_TS.store(ts, SeqCst);
+            Ok(())
+        }));
+    });
+}
+
 fn fresh_vars() -> SessionVars {
+    register_callbacks();
     reset_atomics();
     let mut vars = SessionVars::new(Box::new(MockGlobalAccessor {
         vals: HashMap::new(),
@@ -576,7 +599,7 @@ fn replay(path: &str) -> (usize, usize) {
 /// The cap on the committed vectors' skipped records (see `govec_sessionvars`): the exact
 /// count at PR B1 (SetGlobal 77/155, GetGlobal 112/134 still pending in part). Lower it in
 /// every PR that ports hooks; it must reach 0 at the end of PR B2.
-const MAX_SKIPPED: usize = 2319;
+const MAX_SKIPPED: usize = 554;
 
 #[test]
 fn govec_sessionvars() {
