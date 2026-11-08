@@ -326,7 +326,30 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             let (name, val) = (args[0].as_str().unwrap(), args[1].as_str().unwrap());
             let (f0, s0) = (fields(&vars), systems(&vars));
             let mut res = serde_json::Map::new();
+            // INSTANCE scope: the previous process-wide value, put back afterwards (as the
+            // generator does) so that later records start from the same state.
+            let sv = tidb_sessionctx::variable::variable::get_sys_var(name);
+            let prev = sv
+                .as_ref()
+                .filter(|sv| sv.has_instance_scope())
+                .and_then(|sv| sv.get_global_from_hook(&mut vars).ok());
             let r = vars.set_global_sys_var(name, val);
+            if r.is_ok()
+                && let Some(sv) = sv.as_ref()
+                && sv.has_instance_scope()
+                && sv.get_global.is_some()
+                && !volatile(name)
+            {
+                let after = sv.get_global_from_hook(&mut vars);
+                res.insert(
+                    "after".into(),
+                    json!(after.as_ref().map(|v| v.clone()).unwrap_or_default()),
+                );
+                res.insert("after_err".into(), err_or_null(&after.map(|_| ())));
+            }
+            if let (Some(sv), Some(prev)) = (sv.as_ref(), prev) {
+                let _ = sv.set_global_from_hook(&mut fresh_vars(), &prev, false);
+            }
             let err = match r {
                 // The read-only phase's "not supported" (owner issue #58), not another 1235.
                 Err(e) if String::from_utf8_lossy(&e.error()).contains("SET GLOBAL on tidb-rs") => {
@@ -425,7 +448,11 @@ fn replay(path: &str) -> (usize, usize) {
                 .iter()
                 .filter_map(|a| a.as_str())
                 .any(|n| session_hook_pending(&gostd_lower(n), "GetGlobal"));
-        if pending(op, args) || go_panicked_in_get_global {
+        // A SET GLOBAL record that reads the stored value back through a pending GetGlobal.
+        let after_through_pending_get_global = op == "set_global"
+            && rec["out"].get("after").is_some()
+            && session_hook_pending(&gostd_lower(args[0].as_str().unwrap()), "GetGlobal");
+        if pending(op, args) || go_panicked_in_get_global || after_through_pending_get_global {
             skipped += 1;
             continue;
         }
