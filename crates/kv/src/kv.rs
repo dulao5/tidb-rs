@@ -808,9 +808,6 @@ pub trait Storage: Send + Sync {
     // glue: Go interface method Storage.Describe
     /// Describe returns of brief introduction of the storage
     fn describe(&self) -> String;
-    // glue: Go interface method Storage.GetMemCache
-    /// GetMemCache return memory manager of the storage.
-    fn get_mem_cache(&self) -> Arc<dyn crate::cachedb::MemManager>;
     // glue: Go interface method Storage.GetMinSafeTS
     /// GetMinSafeTS return the minimal SafeTS of the storage with given txnScope.
     fn get_min_safe_ts(&self, txn_scope: &str) -> u64;

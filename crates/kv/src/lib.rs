@@ -8,7 +8,6 @@
 
 #![deny(unsafe_code)]
 
-pub mod cachedb;
 pub mod checker;
 pub mod context;
 pub mod error;

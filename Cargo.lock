@@ -3710,6 +3710,7 @@ dependencies = [
 name = "tidb-kv"
 version = "0.0.0"
 dependencies = [
+ "criterion 0.5.1",
  "flate2",
  "futures",
  "log",

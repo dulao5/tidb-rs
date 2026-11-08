@@ -4,7 +4,7 @@
 //! Every record's `out` must be equal as JSON, errors must match by message, and
 //! `err.name == "panic"` records must panic in Rust too. The mocks (storage, transaction,
 //! snapshot, iterator) are the Go generator's (`govec/domains/kv.go`), written again here.
-//! Extra files can be replayed with `GOVEC_KV_FILES=a.jsonl.gz:b.jsonl.gz` (other seeds).
+//! Extra files can be replayed with `GOVEC_KV_FILES=a.jsonl.gz,b.jsonl.gz` (comma separated, as `GOVEC_CHUNK_FILES`; other seeds).
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -21,7 +21,6 @@ use serde_json::Value;
 use serde_json::json;
 use tidb_base::Error;
 use tidb_kv::Context;
-use tidb_kv::cachedb::new_cache_db;
 use tidb_kv::checker::RequestTypeSupportedChecker;
 use tidb_kv::context::RequestSource;
 use tidb_kv::context::with_internal_source_type;
@@ -405,9 +404,6 @@ impl Storage for MockStore {
     }
     fn describe(&self) -> String {
         String::new()
-    }
-    fn get_mem_cache(&self) -> Arc<dyn tidb_kv::cachedb::MemManager> {
-        unimplemented!()
     }
     fn get_min_safe_ts(&self, _: &str) -> u64 {
         0
@@ -860,47 +856,6 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>) {
                 None,
             )
         }
-        "cache_db" => {
-            let mm = new_cache_db();
-            let mut outs = vec![];
-            for st in args[0].as_array().unwrap() {
-                let tid = st["tid"].as_i64().unwrap_or(0);
-                if st["op"] == "delete" {
-                    mm.delete(tid);
-                    outs.push(json!("deleted"));
-                    continue;
-                }
-                let k = key_of(st["k"].as_str().unwrap_or(""));
-                let mut vals = HashMap::new();
-                match st["snap"].as_str().unwrap() {
-                    "missing" => {}
-                    "big" => {
-                        vals.insert(k.0.clone(), vec![0u8; st["n"].as_u64().unwrap() as usize]);
-                    }
-                    v => {
-                        vals.insert(k.0.clone(), unhex(v));
-                    }
-                }
-                let snap = MockSnap {
-                    vals,
-                    fail_batch: false,
-                    calls: Mutex::new(0),
-                };
-                let r = rt().block_on(mm.union_get(&Context::background(), tid, &snap, &k));
-                let (v, e) = match r {
-                    Ok(v) => (v, String::new()),
-                    Err(e) => (vec![], String::from_utf8_lossy(&e.error()).into_owned()),
-                };
-                let calls = *snap.calls.lock().unwrap();
-                outs.push(json!([
-                    v.len(),
-                    hex(&v[..v.len().min(8)]),
-                    calls,
-                    gs(e.as_bytes())
-                ]));
-            }
-            (json!(outs), None)
-        }
         "empty" => {
             let mut it = EmptyIterator;
             let nerr = rt().block_on(KvIterator::next(&mut it)).unwrap_err();
@@ -1075,7 +1030,7 @@ fn govec_kv() {
         env!("CARGO_MANIFEST_DIR")
     ));
     if let Ok(extra) = std::env::var("GOVEC_KV_FILES") {
-        for f in extra.split(':').filter(|f| !f.is_empty()) {
+        for f in extra.split(',').filter(|f| !f.is_empty()) {
             replay(f);
         }
     }

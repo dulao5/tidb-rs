@@ -148,6 +148,13 @@ impl<K: Eq + Hash + GoLayout, V: GoLayout> MemAwareMap<K, V> {
             v.is_empty(),
             "MemAwareMap.Init: only empty maps are supported"
         );
+        // A size hint changes Go's initial layout (more groups or a directory), which the
+        // formula above does not model; every production caller passes `make(map)`.
+        debug_assert_eq!(
+            v.capacity(),
+            0,
+            "MemAwareMap.Init: only maps created without a size hint are supported"
+        );
         self.m = v;
         let used = self.m.len() as u64;
 

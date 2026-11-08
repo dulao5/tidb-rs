@@ -10,10 +10,10 @@
 1. PoC crate 改名（#36，N0 §5），腾出 `crates/kv` 和包名 `tidb-kv`。
 2. tracker：读路径划分（`rules.py`，§1 of spec），重新生成 `func_blocks.tsv`、`block_edges.tsv`。
 3. `gostd::runtime`：`growslice`/`roundupsize` 从 `tidb-chunk` 移到 `tidb-base`。
-4. `tidb-kv`：key / hack / kv / option / error / txn / txn_scope_var / checker / cachedb / iter / version / mpp / context。
+4. `tidb-kv`：key / hack / kv / option / error / txn / txn_scope_var / checker / iter / version / mpp / context。
 5. govec `kv` 领域与 Rust 回放（mock 的 Storage、Transaction、Snapshot、Iterator 两边各写一份）。
 
-## 3. 反证（故意改坏，回放报不一致的条数，共 3,188 条）
+## 3. 反证（故意改坏，回放报不一致的条数；在 cacheDB 归 X 前的 3,188 条上测得。去掉 cache_db 之后共 3,128 条，重测"稳定排序"为 49 条、"保留分区 ID"为 129 条）
 
 | 改动 | 不一致 |
 |---|--:|
@@ -34,7 +34,7 @@
 # Rust（tidb-rs）
 cargo test -p tidb-kv
 cargo test --profile release-checked -p tidb-kv
-GOVEC_KV_FILES=a.jsonl.gz:b.jsonl.gz cargo test -p tidb-kv --test govec_kv   # 其他种子
+GOVEC_KV_FILES=a.jsonl.gz,b.jsonl.gz cargo test -p tidb-kv --test govec_kv   # 其他种子
 python3 scripts/converge.py --block D07.0 --func-blocks ../tidb-rs-tracker/data/func_blocks.tsv crates/kv/src/*.rs
 # Go 侧（tracker govec 模块下）
 GOFLAGS=$(../scripts/govec-fixes.sh) go test -run 'TestDomains/kv|TestBlockCoverage|TestTargetsDiffer' .

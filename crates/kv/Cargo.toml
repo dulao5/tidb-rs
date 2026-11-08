@@ -29,6 +29,12 @@ log = "0.4"
 # The govec vectors are committed as .jsonl.gz.
 flate2 = "1.0"
 serde_json = { workspace = true }
+# Per-row cost of the async Iterator::next (tasks T9).
+criterion = "0.5"
+
+[[bench]]
+name = "iter"
+harness = false
 
 [lints]
 workspace = true

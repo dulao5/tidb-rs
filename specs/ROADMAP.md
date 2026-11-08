@@ -59,7 +59,7 @@
 | L1 | [D01.6](D01.6-vector/spec.md) | Vector 类型 | 409 | 2 | — |
 | L1 | [D01.7](D01.7-chunk/spec.md) | Chunk 与列存（列格式按 N5a，内存部分按 A1；2026-11-08 复用池内部按 M-POOL 归 X，349 → 330 个函数；crate `tidb-chunk`，converge 276/330，其余等 D01.1 / D01.10） | 3,082 | 11 | D01.5(11), D15.1(10) |
 | L1 | [D01.9](D01.9-collation/spec.md) | Collation 与字符集 | 637 | 10 | — |
-| L1 | [D07.0](D07.0-kv/spec.md) | kv 接口与 key 类型（pkg/kv；2026-11-08 按只读读路径划分：35 个归 X、7 个归 DEF.MPP，158 → 116 个函数；crate `tidb-kv`，converge 107/116，其余等 D01.8 / D02.2 / D07.1） | 1,348 | 15 | — |
+| L1 | [D07.0](D07.0-kv/spec.md) | kv 接口与 key 类型（pkg/kv；2026-11-08 按只读读路径划分：40 个归 X、7 个归 DEF.MPP，158 → 111 个函数；crate `tidb-kv`，converge 102/111，其余等 D01.8 / D02.2 / D07.1） | 1,348 | 15 | — |
 | L1 | D08.1 | 表达式框架（Expression、Column、Constant、ScalarFunction、Schema、求值与向量化接口；按 N4） | 4,208 | 13 | EXC.B(33) |
 | L2 | D01.1 | Datum、FieldType 与类型辅助 | 3,906 | 13 | D01.5(21) |
 | L1 | D02.3 | parser 的 model、types、auth、duration 的忠实移植（D02.2 中只有 PoC 替身；D06.1 的前置，[spec](D02.3-parser-model-types/spec.md)） | 960 | 7 | — |

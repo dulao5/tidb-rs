@@ -9,13 +9,12 @@ tidb-rs 是只读计算节点，写路径由 Go TiDB 承担。按 D06.1 处理 D
 
 | 归属 | 函数数 | 内容 |
 |---|--:|---|
-| D07.0 | 116 | key.go、kv.go、txn.go、option.go、error.go、checker.go、cachedb.go、iter.go、txn_scope_var.go、version.go 的读路径部分，mpp.go 的 `GetNewestMppVersion` |
-| X | 35 | 写路径：keyflags.go 全部（memdb 的 key 标志）、`FindKeysInStage`（语句缓冲暂存）、`WithReturnCommitTS`（提交选项）、`GenKeyExistsErr`（唯一键冲突）、TiCDC / lossy DDL 的写入来源位、utils.go（`IncInt64`、`WalkMemBuffer`）；测试辅助：fault_injection.go；读路径上没有调用方：`KeyRange.IsPoint`（只有 mockstore）、`KeyRanges.ForEachPartition`/`TotalRangeNum`（只有 lightning）、`GetInt64`、`NewVariables`、`Version.Cmp` |
+| D07.0 | 111 | key.go、kv.go、txn.go、option.go、error.go、checker.go、iter.go、txn_scope_var.go、version.go 的读路径部分，mpp.go 的 `GetNewestMppVersion` |
+| X | 40 | 写路径：keyflags.go 全部（memdb 的 key 标志）、`FindKeysInStage`（语句缓冲暂存）、`WithReturnCommitTS`（提交选项）、`GenKeyExistsErr`（唯一键冲突）、TiCDC / lossy DDL 的写入来源位、utils.go（`IncInt64`、`WalkMemBuffer`）；测试辅助：fault_injection.go；读路径上没有调用方：`KeyRange.IsPoint`（只有 mockstore）、`KeyRanges.ForEachPartition`/`TotalRangeNum`（只有 lightning）、`GetInt64`、`NewVariables`、`Version.Cmp`；cachedb.go 全部（5 个）：v8.5.8 中没有调用方，缓存表实际经 `tables/cache.go` 的 MemBuffer 读取，`GetMemCache` 只被 schema_validator 用来 Delete（Lucky 在 v8.5.8 上验证：200 KB 的行缓存后全表扫描和点查都正常） |
 | DEF.MPP | 7 | mpp.go 其余部分 |
 
-D07.0 由 158 个函数变为 116 个。几处判断：
+D07.0 由 158 个函数变为 111 个。几处判断：
 - `RunInNewTxn` 保留：`SHOW BDR ROLE`、`ADMIN` 检查等只读路径用它读 meta；它登记的内部事务 start ts 由 `GetMinInnerTxnStartTS` 上报给 GC safe point，tidb-rs 同样需要。
-- `cacheDB` 保留：cached table 的读取（`PointGetExecutor`、`cacheBatchGetter`）。
 - `BatchGetValue` 保留：`ADMIN CHECK` 的读取。
 - 接口中只声明读路径的方法（§3.2）。
 
@@ -25,11 +24,11 @@ D07.0 由 158 个函数变为 116 个。几处判断：
 |---|---|---|
 | key.go | `key.rs` | 52/55；`NewCommonHandle`、`CommonHandle.Data` 等 D01.8（§4.1） |
 | kv.go | `kv.rs` | 23/30；`ResourceGroupTagBuilder` 7 个待定（§4.2） |
-| txn.go、option.go、error.go、checker.go、cachedb.go、iter.go、txn_scope_var.go、version.go、mpp.go | 同名 `.rs` | 全部 |
+| txn.go、option.go、error.go、checker.go、iter.go、txn_scope_var.go、version.go、mpp.go | 同名 `.rs` | 全部 |
 | `pkg/util/hack/map_abi.go`（D00.3）中 `MemAwareMap` 的一部分 | `hack.rs` | `MemAwareHandleMap` 用到的部分（§3.4） |
 | client-go `util.RequestSource` / `WithInternalSourceType` | `context.rs` | `M-GOCTX`（§3.3） |
 
-收敛检查：107/116。缺的 9 个即 §4.1、§4.2 的豁免，govec `kv` 领域的 `Exempt` 中逐个写了原因。
+收敛检查：102/111。缺的 9 个即 §4.1、§4.2 的豁免，govec `kv` 领域的 `Exempt` 中逐个写了原因。
 
 ## 3. 设计决定
 
@@ -39,10 +38,11 @@ Go 的 `Handle` 是接口，v8.5.8 中只有 `IntHandle`、`*CommonHandle`、`Pa
 
 ### 3.2 接口
 
-Go 接口移植为 object-safe 的 trait（`dyn Snapshot`、`dyn Storage`……）。store driver（D07.1）、cached table 与临时表的拦截器、测试 mock 实现它们，调用方像 Go 持有接口值一样持有 trait 对象。
+Go 接口移植为 object-safe 的 trait（`dyn Snapshot`、`dyn Storage`……）。store driver（D07.1）、临时表的拦截器、测试 mock 实现它们，调用方像 Go 持有接口值一样持有 trait 对象。
 
 - 可能做 I/O 的方法是异步的（N3 3.1 第 6 条），返回装箱 future（`KvFuture`），这是异步方法的 object-safe 写法。`Iterator::next` 也是异步的，因为扫描器会去取下一批。
 - 只声明读路径的方法。`Transaction` 的写方法（`Set`、`Delete`、`LockKeys`、fair locking、assertion、memdb checkpoint、pipelined flush），以及 `Mutator`、`MemBuffer`、`RetrieverMutator`、`AssertionProto`、`FairLockingController`、`SplittableStore`、`EtcdBackend` 都不声明。
+- `Storage.GetMemCache` 不声明：它返回的 `cacheDB` 归 X（第 1 节）。
 - `Storage` 中 `GetMPPClient`（MPP）、`GetOracle`、`GetLockWaits`、`GetCodec`、`ShowStatus`、`SupportDeleteRange` 随 D07.1 和调用它们的块补上。
 - `SetOption(opt int, val any)` 的值是 `Box<dyn Any + Send + Sync>`。
 - `map[string]ValueEntry` 的结果是 `HashMap<Vec<u8>, ValueEntry>`（`M-BYTES`）。
@@ -62,11 +62,7 @@ Go 接口移植为 object-safe 的 trait（`dyn Snapshot`、`dyn Storage`……�
 
 按 L1 移植，`defer` 用 drop guard（`M-DEFER`）。`BackOff` 用异步定时器睡眠，不阻塞运行时线程（`M-BLOCK`，L2）。failpoint（`mockCommitErrorInNewTxn`、`TxnResourceGroupChecker`）只用于测试，不移植。日志通过 `log` 门面输出（项目约定，由二进制桥接到 tracing）。
 
-### 3.6 `cacheDB`
-
-Go 给每张表一个 100 MiB 的 `freecache.Cache`。`FreeCache` 复现 `cacheDB` 能观察到的行为：key 超过 65535 字节、条目超过一个 segment 的四分之一（256 个 segment）时 `Set` 报错，消息与 freecache 相同；`Get` 未命中；总量不超过容量。淘汰顺序见 §4.3。
-
-### 3.7 `RequestTypeSupportedChecker`
+### 3.6 `RequestTypeSupportedChecker`
 
 Go 把 `subType` 转成 `tipb.ExprType`（int32，截断），与 ExprType 和请求子类型一起比较；移植对截断后的整数做 match。ExprType 的取值抄自 tipb 的 `expression.proto`（TiDB v8.5.8 使用的版本），本 crate 不依赖 `tipb`（其 Rust crate 要编译 gRPC 的 C++ 核心）。
 
@@ -74,13 +70,12 @@ Go 把 `subType` 转成 `tipb.ExprType`（int32，截断），与 ExprType 和�
 
 1. **等 D01.8（`util/codec`）**：`NewCommonHandle` 用 `codec.CutOne` 切分列，`CommonHandle.Data` 用 `codec.DecodeOne` 解码。在此之前：`CommonHandle::new_with_offsets`（`glue:`）由调用方给出 Go 算出的列结束偏移，偏移切片的容量按 Go 逐个 append 的结果设置；`CommonHandle.Data` 返回错误，`CommonHandle.String` 已按 Go 移植，会照 Go 的方式输出这个错误。`IntHandle.Encoded` 需要的 `codec.EncodeInt` 只有一行，暂作 `glue:`，D01.8 时替换。
 2. **`ResourceGroupTagBuilder`（7 个函数）**：需要 `parser.Digest`（D02.2 的 digester，Rust 中还没有）、`resourcegrouptag.GetResourceGroupLabelByKey`（需要 D01.11 的 rowindexcodec）、`tikvrpc.Request`（D07.1）。`Request.ResourceGroupTagger` 字段也随之后补。属于 Top SQL 的标签，不影响读取结果。
-3. **`cacheDB` 的淘汰顺序**：按插入顺序淘汰；freecache 按各 segment 环形缓冲区淘汰，近似于最旧优先。未命中时从 snapshot 读，所以淘汰顺序只影响读 snapshot 的次数，不影响结果。
-4. **`Request` 中尚未移植类型的字段**：`CoprRequestRateLimit`（client-go `util.RateLimit`，D07.2）、`MatchStoreLabels`（kvproto `metapb.StoreLabel`，D07.1）、`ResourceGroupTagger`（第 2 条）、`RunawayChecker`（`resourcegroup`）。`ClientSendOption` 的 `EventCb`、`TiFlashReplicaRead` 同样。
-5. **map 的遍历顺序**：`HandleMap.Range` 等按 `HashMap` 的顺序遍历（`M-MAPORDER`）。Go 是随机顺序，中途停止时两边看到的都是不确定的子集。
+3. **`Request` 中尚未移植类型的字段**：`CoprRequestRateLimit`（client-go `util.RateLimit`，D07.2）、`MatchStoreLabels`（kvproto `metapb.StoreLabel`，D07.1）、`ResourceGroupTagger`（第 2 条）、`RunawayChecker`（`resourcegroup`）。`ClientSendOption` 的 `EventCb`、`TiFlashReplicaRead` 同样。
+4. **map 的遍历顺序**：`HandleMap.Range` 等按 `HashMap` 的顺序遍历（`M-MAPORDER`）。Go 是随机顺序，中途停止时两边看到的都是不确定的子集。
 
 ## 5. 验收
 
-- converge：`matched 107/116`，缺的 9 个即第 4 节第 1、2 条，govec `kv` 领域的 `Exempt` 中有登记。
+- converge：`matched 102/111`，缺的 9 个即第 4 节第 1、2 条，govec `kv` 领域的 `Exempt` 中有登记。
 - govec `kv` 领域：arm64 本地生成、amd64 取自 tracker CI，两个平台回放都通过（debug 和 release-checked）。另用种子 1 到 8 本地生成并回放，全部通过。
 - Go 测试：key_test.go、checker_test.go、error_test.go、txn_test.go、version_test.go、option_test.go 的字面量由 `cmd/minelits` 抽取（`testdata/kv_literals.tsv`），只保留已移植函数的测试（`minedGoTests["kv"]`）。govec 表达不了的断言（`TestError`：每个 KV 错误转成 SQL 错误后码不变）移植为 `tests/unit.rs`。
 - 反证：见 plan §3。
