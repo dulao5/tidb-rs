@@ -25,6 +25,7 @@ use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sessionctx::variable::session_fields::SCALAR_FIELDS;
 use tidb_sessionctx::variable::session_fields::SessionVarsFields;
 use tidb_sessionctx::variable::tidb_vars;
+use tidb_sessionctx::variable::variable::ScopeGlobal;
 use tidb_sessionctx::variable::*;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
@@ -72,6 +73,95 @@ impl GlobalVarAccessor for MockGlobalAccessor {
     }
 }
 
+/// The variable-package atomics written by SetGlobal hooks (D05.2 PR B), restored to their
+/// values before the first record (the generator's processGlobalsRestore).
+fn restore_process_globals() {
+    type Restore = Box<dyn Fn() + Send + Sync>;
+    static SNAPSHOT: std::sync::LazyLock<Vec<Restore>> = std::sync::LazyLock::new(|| {
+        let mut v: Vec<Restore> = Vec::new();
+        macro_rules! keep {
+            ($($a:ident),* $(,)?) => {$(
+                let x = tidb_vars::$a.load(SeqCst);
+                v.push(Box::new(move || tidb_vars::$a.store(x, SeqCst)));
+            )*};
+        }
+        keep!(
+            AccelerateUserCreationUpdate,
+            ConnectAttrsSize,
+            EnableBatchDML,
+            EnableCheckConstraint,
+            EnableFastReorg,
+            EnableForeignKey,
+            EnableHistoricalStatsForCapture,
+            EnableInstancePlanCache,
+            EnableNoopVariables,
+            EnableRCReadCheckTS,
+            EnableRowLevelChecksum,
+            EnableTTLJob,
+            EnableTmpStorageOnOOM,
+            ExpensiveQueryTimeThreshold,
+            ExpensiveTxnTimeThreshold,
+            GCMaxWaitTime,
+            IgnoreInlistPlanDigest,
+            MaxUserConnectionsValue,
+            MemQuotaBindingCache,
+            MemoryUsageAlarmKeepRecordNum,
+            PasswordHistory,
+            PasswordReuseInterval,
+            ProcessGeneralLog,
+            QueryLogMaxLen,
+            SchemaVersionCacheLimit,
+            StatsLoadPseudoTimeout,
+            StatsLoadSyncWait,
+            TiFlashEnablePipelineMode,
+            VarTiDBSuperReadOnly
+        );
+        let x = tidb_vars::DDLSlowOprThreshold.load(SeqCst);
+        v.push(Box::new(move || {
+            tidb_vars::DDLSlowOprThreshold.store(x, SeqCst)
+        }));
+        let x = tidb_vars::MemoryUsageAlarmRatio.load();
+        v.push(Box::new(move || tidb_vars::MemoryUsageAlarmRatio.store(x)));
+        let x = tidb_vars::OOMAction.load();
+        v.push(Box::new(move || tidb_vars::OOMAction.store(x.clone())));
+        keep!(
+            HistoricalStatsDuration,
+            AdvancerCheckPointLagLimit,
+            EnablePProfSQLCPU,
+            ForcePriority
+        );
+        let x = tidb_memory::tracker::EnableGCAwareMemoryTrack.load(SeqCst);
+        v.push(Box::new(move || {
+            tidb_memory::tracker::EnableGCAwareMemoryTrack.store(x, SeqCst)
+        }));
+        let x = tidb_memory::tracker::ServerMemoryLimitSessMinSize.load(SeqCst);
+        v.push(Box::new(move || {
+            tidb_memory::tracker::ServerMemoryLimitSessMinSize.store(x, SeqCst)
+        }));
+        let x = tidb_memory::tracker::ServerMemoryLimit.load(SeqCst);
+        v.push(Box::new(move || {
+            tidb_memory::tracker::ServerMemoryLimit.store(x, SeqCst)
+        }));
+        let x = tidb_memory::tracker::ServerMemoryLimitOriginText.load_full();
+        v.push(Box::new(move || {
+            tidb_memory::tracker::ServerMemoryLimitOriginText.store(x.clone())
+        }));
+        // The global config: INSTANCE hooks write it.
+        let c = tidb_base::config::get_global_config_arc();
+        v.push(Box::new(move || {
+            tidb_base::config::store_global_config(c.clone())
+        }));
+        v.push(Box::new(|| {
+            tidb_sessionctx::variable::ldap_state::LDAPSASLAuthImpl.reset();
+            tidb_sessionctx::variable::ldap_state::LDAPSimpleAuthImpl.reset();
+        }));
+        v
+    });
+    for r in SNAPSHOT.iter() {
+        r();
+    }
+}
+
 /// Puts back the process-wide state the hooks write (the list is in the generator's
 /// resetSysvarAtomics), so that no record depends on an earlier one.
 fn reset_atomics() {
@@ -86,6 +176,7 @@ fn reset_atomics() {
     tidb_vars::RunAutoAnalyze.store(tidb_vars::DefTiDBEnableAutoAnalyze, SeqCst);
     tidb_vars::EnableAutoAnalyzePriorityQueue
         .store(tidb_vars::DefTiDBEnableAutoAnalyzePriorityQueue, SeqCst);
+    restore_process_globals();
 }
 
 fn fresh_vars() -> SessionVars {
@@ -149,11 +240,13 @@ fn volatile(name: &str) -> bool {
             | "version_compile_os"
             | "version_compile_machine"
             | "tidb_config"
+            // GetGlobal converts int(rate.Inf): platform-dependent (M-F2I, tidb-rs #27).
+            | "tidb_slow_log_max_per_sec"
     )
 }
 
 /// Whether reading `name` back goes through a GetGlobal hook (Go's entry has one and the
-/// variable has no session scope): the generator records such values as "<global-hook>".
+/// variable has no session scope).
 fn global_hook_read(name: &str) -> bool {
     get_sys_var(name)
         .is_some_and(|sv| sv.go_hooks & HOOK_GET_GLOBAL != 0 && !sv.has_session_scope())
@@ -180,13 +273,17 @@ fn pending(op: &str, args: &[Value]) -> bool {
             // not matter).
             with_aliases(name).iter().any(|n| p(n, "SetSession"))
                 || p(&gostd_lower(name), "GetSession")
+                || (global_hook_read(name) && p(&gostd_lower(name), "GetGlobal"))
         }
         "get" => {
             let name = args[0].as_str().unwrap();
-            // GetGlobal read-backs are recorded as "<global-hook>".
-            ["GetSession", "GetStateValue"]
+            ["GetSession", "GetStateValue", "GetGlobal"]
                 .iter()
                 .any(|k| p(&gostd_lower(name), k))
+        }
+        "set_global_hook" => {
+            let name = gostd_lower(args[0].as_str().unwrap());
+            p(&name, "SetGlobal") || p(&name, "GetGlobal")
         }
         "set_global" => p(&gostd_lower(args[0].as_str().unwrap()), "SetGlobal"),
         "init" => init_pairs(args).iter().any(|pair| {
@@ -236,30 +333,16 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 "set" => vars.set_system_var(name, val),
                 "relaxed" => vars.set_system_var_with_relaxed_validation(name, val),
                 "noval" => vars.set_system_var_without_validation(name, val),
-                _ => match vars.set_system_var_with_old_val_as_ret(name, val) {
-                    Ok(old) => {
-                        let old = if volatile(name) {
-                            "<volatile>".to_owned()
-                        } else if global_hook_read(name) {
-                            "<global-hook>".to_owned()
-                        } else {
-                            old
-                        };
-                        res.insert("old".into(), json!(old));
-                        Ok(())
-                    }
-                    Err(e) => {
-                        let old = if volatile(name) {
-                            "<volatile>"
-                        } else if global_hook_read(name) {
-                            "<global-hook>"
-                        } else {
-                            ""
-                        };
-                        res.insert("old".into(), json!(old));
-                        Err(e)
-                    }
-                },
+                _ => {
+                    let (old, err) = vars.set_system_var_with_old_val_as_ret(name, val);
+                    let old = if volatile(name) {
+                        "<volatile>".to_owned()
+                    } else {
+                        old
+                    };
+                    res.insert("old".into(), json!(old));
+                    err
+                }
             };
             res.insert("fields".into(), diff(&f0, &fields(&vars)));
             res.insert("sys".into(), diff(&s0, &systems(&vars)));
@@ -268,8 +351,6 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                     Ok(v) => {
                         let v = if volatile(name) {
                             "<volatile>".to_owned()
-                        } else if global_hook_read(name) {
-                            "<global-hook>".to_owned()
                         } else {
                             v
                         };
@@ -310,17 +391,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                     json!("<volatile>"),
                 )
             } else {
-                match get_sys_var(name) {
-                    Some(sv) if sv.go_hooks & HOOK_GET_GLOBAL != 0 => {
-                        let sess = if sv.has_session_scope() {
-                            sess
-                        } else {
-                            json!("<global-hook>")
-                        };
-                        (sess, json!("<global-hook>"), state)
-                    }
-                    _ => (sess, glob, state),
-                }
+                (sess, glob, state)
             };
             let out = json!({"sess": sess, "sess_err": sess_err, "glob": glob, "glob_err": glob_err,
                 "state": state, "keep": keep, "state_err": state_err});
@@ -338,7 +409,27 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             let (name, val) = (args[0].as_str().unwrap(), args[1].as_str().unwrap());
             let (f0, s0) = (fields(&vars), systems(&vars));
             let mut res = serde_json::Map::new();
+            // INSTANCE scope: the previous process-wide value, put back afterwards (as the
+            // generator does) so that later records start from the same state.
+            let sv = tidb_sessionctx::variable::variable::get_sys_var(name);
+            let prev = sv
+                .as_ref()
+                .filter(|sv| sv.has_instance_scope())
+                .and_then(|sv| sv.get_global_from_hook(&mut vars).ok());
             let r = vars.set_global_sys_var(name, val);
+            if r.is_ok()
+                && let Some(sv) = sv.as_ref()
+                && sv.has_instance_scope()
+                && sv.get_global.is_some()
+                && !volatile(name)
+            {
+                let after = sv.get_global_from_hook(&mut vars);
+                res.insert("after".into(), json!(after.clone().unwrap_or_default()));
+                res.insert("after_err".into(), err_or_null(&after.map(|_| ())));
+            }
+            if let (Some(sv), Some(prev)) = (sv.as_ref(), prev) {
+                let _ = sv.set_global_from_hook(&mut fresh_vars(), &prev, false);
+            }
             let err = match r {
                 // The read-only phase's "not supported" (owner issue #58), not another 1235.
                 Err(e) if String::from_utf8_lossy(&e.error()).contains("SET GLOBAL on tidb-rs") => {
@@ -357,6 +448,29 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 .map(|w| w.err)
                 .collect();
             (Value::Object(res), err, warns)
+        }
+        "set_global_hook" => {
+            let mut vars = fresh_vars();
+            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            let (name, val) = (args[0].as_str().unwrap(), args[1].as_str().unwrap());
+            let sv = get_sys_var(name).unwrap();
+            let mut res = serde_json::Map::new();
+            let (v, r) = sv.validate(&mut vars, val, ScopeGlobal);
+            let r = r.and_then(|()| sv.set_global_from_hook(&mut vars, &v, false));
+            if r.is_ok() && sv.get_global.is_some() {
+                let after = sv.get_global_from_hook(&mut vars);
+                res.insert("after".into(), json!(after.clone().unwrap_or_default()));
+                res.insert("after_err".into(), err_or_null(&after.map(|_| ())));
+            }
+            let warns = vars
+                .stmt_ctx
+                .get_warnings()
+                .into_iter()
+                .map(|w| w.err)
+                .collect();
+            // The hook changed process-wide state: put it back (the generator defers the reset).
+            reset_atomics();
+            (Value::Object(res), r.err(), warns)
         }
         "init" => {
             let mut vars = fresh_vars();
@@ -437,7 +551,11 @@ fn replay(path: &str) -> (usize, usize) {
                 .iter()
                 .filter_map(|a| a.as_str())
                 .any(|n| session_hook_pending(&gostd_lower(n), "GetGlobal"));
-        if pending(op, args) || go_panicked_in_get_global {
+        // A SET GLOBAL record that reads the stored value back through a pending GetGlobal.
+        let after_through_pending_get_global = op == "set_global"
+            && rec["out"].get("after").is_some()
+            && session_hook_pending(&gostd_lower(args[0].as_str().unwrap()), "GetGlobal");
+        if pending(op, args) || go_panicked_in_get_global || after_through_pending_get_global {
             skipped += 1;
             continue;
         }
@@ -455,8 +573,10 @@ fn replay(path: &str) -> (usize, usize) {
     (n, skipped)
 }
 
-/// The cap on the committed vectors' skipped records (see `govec_sessionvars`).
-const MAX_SKIPPED: usize = 5401;
+/// The cap on the committed vectors' skipped records (see `govec_sessionvars`): the exact
+/// count at PR B1 (SetGlobal 77/155, GetGlobal 112/134 still pending in part). Lower it in
+/// every PR that ports hooks; it must reach 0 at the end of PR B2.
+const MAX_SKIPPED: usize = 2319;
 
 #[test]
 fn govec_sessionvars() {
