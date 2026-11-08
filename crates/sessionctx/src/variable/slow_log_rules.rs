@@ -114,9 +114,19 @@ enum ParseKind {
 fn accessor(field: &str) -> Option<ParseKind> {
     use ParseKind::*;
     Some(match field {
-        "backoff_time" | "commit_time" | "compile_time" | "cop_mvcc_read_amplification"
-        | "kv_total" | "optimize_time" | "parse_time" | "pd_total" | "prewrite_time"
-        | "process_time" | "query_time" | "rewrite_time" | "wait_ts"
+        "backoff_time"
+        | "commit_time"
+        | "compile_time"
+        | "cop_mvcc_read_amplification"
+        | "kv_total"
+        | "optimize_time"
+        | "parse_time"
+        | "pd_total"
+        | "prewrite_time"
+        | "process_time"
+        | "query_time"
+        | "rewrite_time"
+        | "wait_ts"
         | "write_sql_response_total" => Float64,
         "conn_id" | "exec_retry_count" | "prewrite_region" | "process_keys" | "total_keys"
         | "write_keys" | "write_size" => Uint64,
@@ -425,7 +435,11 @@ pub fn crc64_ecma(data: &[u8]) -> u64 {
         for (i, slot) in t.iter_mut().enumerate() {
             let mut crc = i as u64;
             for _ in 0..8 {
-                crc = if crc & 1 == 1 { (crc >> 1) ^ ECMA } else { crc >> 1 };
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ ECMA
+                } else {
+                    crc >> 1
+                };
             }
             *slot = crc;
         }

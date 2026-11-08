@@ -173,7 +173,11 @@ fn unescape(s: &[u8], mode: Encoding) -> Result<Vec<u8>, Error> {
                 t.push((unhex(s[i + 1]) << 4) | unhex(s[i + 2]));
                 i += 2;
             }
-            b'+' => t.push(if mode == Encoding::QueryComponent { b' ' } else { b'+' }),
+            b'+' => t.push(if mode == Encoding::QueryComponent {
+                b' '
+            } else {
+                b'+'
+            }),
             c => t.push(c),
         }
         i += 1;
@@ -205,7 +209,10 @@ fn escape(s: &[u8], mode: Encoding) -> Vec<u8> {
         return s.to_vec();
     }
     if hex_count == 0 {
-        return s.iter().map(|&c| if c == b' ' { b'+' } else { c }).collect();
+        return s
+            .iter()
+            .map(|&c| if c == b' ' { b'+' } else { c })
+            .collect();
     }
     let mut t = Vec::with_capacity(s.len() + 2 * hex_count);
     for &c in s {
@@ -293,8 +300,7 @@ fn cut(s: &[u8], sep: u8) -> (&[u8], &[u8], bool) {
 pub fn parse(raw: &str) -> Result<Url, Error> {
     let raw = raw.as_bytes();
     let (u, frag, _) = cut(raw, b'#');
-    let mut url = parse_inner(u, false)
-        .map_err(|e| format!("parse {}: {e}", quote_url(u)))?;
+    let mut url = parse_inner(u, false).map_err(|e| format!("parse {}: {e}", quote_url(u)))?;
     if frag.is_empty() {
         return Ok(url);
     }
@@ -405,7 +411,9 @@ fn last_index(s: &[u8], sep: &[u8]) -> Option<usize> {
     if sep.len() > s.len() {
         return None;
     }
-    (0..=s.len() - sep.len()).rev().find(|&i| &s[i..i + sep.len()] == sep)
+    (0..=s.len() - sep.len())
+        .rev()
+        .find(|&i| &s[i..i + sep.len()] == sep)
 }
 
 // glue: strings.Index on bytes
@@ -426,10 +434,7 @@ fn parse_host(host: &[u8]) -> Result<Vec<u8>, Error> {
             };
             let colon_port = &host[close + 1..];
             if !valid_optional_port(colon_port) {
-                return Err(format!(
-                    "invalid port {} after host",
-                    quote_url(colon_port)
-                ));
+                return Err(format!("invalid port {} after host", quote_url(colon_port)));
             }
             let unescaped_colon_port = unescape(colon_port, Encoding::Host)?;
             let hostname = &host[1..close];
@@ -456,10 +461,7 @@ fn parse_host(host: &[u8]) -> Result<Vec<u8>, Error> {
             if let Some(i) = last_index(host, b":") {
                 let colon_port = &host[i..];
                 if !valid_optional_port(colon_port) {
-                    return Err(format!(
-                        "invalid port {} after host",
-                        quote_url(colon_port)
-                    ));
+                    return Err(format!("invalid port {} after host", quote_url(colon_port)));
                 }
             }
         }

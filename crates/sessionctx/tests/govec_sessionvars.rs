@@ -205,11 +205,15 @@ fn register_callbacks() {
         // *terror.Error for terr:// (the hook converts it to a plain error).
         *hs::ValidateCloudStorageURI.write() = Some(Arc::new(|uri: &str| {
             if uri.starts_with("err://") {
-                return Err(tidb_base::errors::new(format!("unsupported storage: {uri}")));
+                return Err(tidb_base::errors::new(format!(
+                    "unsupported storage: {uri}"
+                )));
             }
             if uri.starts_with("terr://") {
-                return Err(error::ErrWrongValueForVar
-                    .gen_with_stack_by_args(vec!["tidb_cloud_storage_uri".into(), uri.to_owned().into()]));
+                return Err(error::ErrWrongValueForVar.gen_with_stack_by_args(vec![
+                    "tidb_cloud_storage_uri".into(),
+                    uri.to_owned().into(),
+                ]));
             }
             Ok(())
         }));

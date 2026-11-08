@@ -739,5 +739,8 @@ pub(super) fn sg_tidb_slow_log_rules(_vars: &mut SessionVars, s: &str) -> Result
 
 // go-part: defaultSysVars (sysvar.go:L3700 tidb_slow_log_rules GetGlobal closure) L1
 pub(super) fn gg_tidb_slow_log_rules(_vars: &mut SessionVars) -> Result<String, Error> {
-    Ok(super::slow_log_rules::GlobalSlowLogRules.read().raw_rules.clone())
+    Ok(super::slow_log_rules::GlobalSlowLogRules
+        .read()
+        .raw_rules
+        .clone())
 }
