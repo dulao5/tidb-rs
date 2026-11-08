@@ -742,7 +742,7 @@ impl Time {
     }
 
     /// UnmarshalJSON implements Unmarshaler.UnmarshalJSON interface.
-    // go: Time.UnmarshalJSON L2 (encoding/json into a uint64: see crate::gostd::json_unmarshal_uint64)
+    // go: Time.UnmarshalJSON L1
     pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
         match crate::gostd::json_unmarshal_uint64(data, self.core.0) {
             Ok(v) => {

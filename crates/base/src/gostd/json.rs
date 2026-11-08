@@ -200,18 +200,39 @@ fn write(out: &mut String, v: &Value, indent: Option<&str>, depth: usize) {
     }
 }
 
-/// `json.Unmarshal(data, &v)` with `v any`: numbers become `float64`. The error text is not
-/// Go's (`*json.SyntaxError` messages are not ported).
-// go-std: encoding/json.Unmarshal L2 (into any; syntax error messages differ)
+/// `json.Unmarshal(data, &v)` with `v any`: numbers become `float64`. A syntax error is Go's
+/// `*json.SyntaxError` message.
+// go-std: encoding/json.Unmarshal L2 (into any)
 pub fn unmarshal(data: &[u8]) -> Result<Value, String> {
     let mut p = JsonParser { b: data, i: 0 };
     p.ws();
     let v = p.value(0)?;
     p.ws();
     if p.i != p.b.len() {
-        return Err("invalid character after top-level value".to_owned());
+        return p.err_at("after top-level value", true);
     }
     Ok(v)
+}
+
+/// `quoteChar` formats c as a quoted character literal.
+// go-std: encoding/json.quoteChar L1
+fn quote_char(c: u8) -> String {
+    // special cases - different from quoted strings
+    if c == b'\'' {
+        return r"'\''".to_owned();
+    }
+    if c == b'"' {
+        return r#"'"'"#.to_owned();
+    }
+    // use quoted string with different quotation marks
+    let mut b = [0u8; 4];
+    let ch = char::from(c).encode_utf8(&mut b);
+    let s = crate::gofmt::sprintf(
+        "%q",
+        &[crate::gofmt::Arg::go_string(ch.as_bytes().to_vec())],
+    );
+    let s = String::from_utf8_lossy(&s);
+    format!("'{}'", &s[1..s.len() - 1])
 }
 
 struct JsonParser<'a> {
@@ -227,35 +248,57 @@ impl JsonParser<'_> {
         }
     }
 
-    // glue: syntax error of the JSON decoder (message not Go's)
-    fn err<T>(&self) -> Result<T, String> {
-        if self.i >= self.b.len() {
-            return Err("unexpected end of JSON input".to_owned());
+    /// The `*json.SyntaxError` message of the scanner state that rejects the byte at
+    /// `self.i`: `invalid character <c> <context>`. At the end of the input Go's
+    /// `scanner.eof` feeds the state a space: a state that accepts spaces (`space_ok`) then
+    /// reports `unexpected end of JSON input`, the others reject the space.
+    // go-std: encoding/json.scanner.error L1
+    // go-std: encoding/json.scanner.eof L1
+    fn err_at<T>(&self, context: &str, space_ok: bool) -> Result<T, String> {
+        match self.b.get(self.i) {
+            None if space_ok => Err("unexpected end of JSON input".to_owned()),
+            None => Err(format!("invalid character ' ' {context}")),
+            Some(&c) => Err(format!("invalid character {} {context}", quote_char(c))),
         }
-        Err(format!("invalid character at offset {}", self.i))
     }
 
-    // go-std: encoding/json.decodeState.literalInterface L2 (null/true/false)
-    fn lit(&mut self, s: &[u8], v: Value) -> Result<Value, String> {
-        if self.b[self.i..].starts_with(s) {
-            self.i += s.len();
-            return Ok(v);
+    /// `pushParseState`: more than `maxNestingDepth` (10000) open arrays and objects.
+    // go-std: encoding/json.scanner.pushParseState L1
+    fn max_depth(&self, depth: usize) -> Result<(), String> {
+        if depth + 1 > 10000 {
+            return self.err_at("exceeded max depth", false);
         }
-        self.err()
+        Ok(())
+    }
+
+    /// `null`, `true`, `false`: the scanner states `stateN`, `stateNu`, ... reject a byte
+    /// with `in literal <name> (expecting <next>)`.
+    // go-std: encoding/json.stateT L1 (and stateTr, stateTru, stateF.., stateN..)
+    fn lit(&mut self, s: &[u8], v: Value) -> Result<Value, String> {
+        self.i += 1;
+        for &want in &s[1..] {
+            if self.b.get(self.i) != Some(&want) {
+                let name = std::str::from_utf8(s).unwrap_or_default();
+                return self.err_at(
+                    &format!("in literal {name} (expecting {})", quote_char(want)),
+                    false,
+                );
+            }
+            self.i += 1;
+        }
+        Ok(v)
     }
 
     // go-std: encoding/json.decodeState.valueInterface L2 (scanner merged into a recursive descent parser)
     fn value(&mut self, depth: usize) -> Result<Value, String> {
-        if depth > 10000 {
-            return Err("exceeded max depth".to_owned());
-        }
         match self.b.get(self.i) {
-            None => self.err(),
+            None => self.err_at("looking for beginning of value", true),
             Some(b'n') => self.lit(b"null", Value::Null),
             Some(b't') => self.lit(b"true", Value::Bool(true)),
             Some(b'f') => self.lit(b"false", Value::Bool(false)),
             Some(b'"') => Ok(Value::String(self.string()?)),
             Some(b'[') => {
+                self.max_depth(depth)?;
                 self.i += 1;
                 let mut a = Vec::new();
                 self.ws();
@@ -273,11 +316,12 @@ impl JsonParser<'_> {
                             self.i += 1;
                             return Ok(Value::Array(a));
                         }
-                        _ => return self.err(),
+                        _ => return self.err_at("after array element", true),
                     }
                 }
             }
             Some(b'{') => {
+                self.max_depth(depth)?;
                 self.i += 1;
                 let mut m = BTreeMap::new();
                 self.ws();
@@ -288,12 +332,12 @@ impl JsonParser<'_> {
                 loop {
                     self.ws();
                     if self.b.get(self.i) != Some(&b'"') {
-                        return self.err();
+                        return self.err_at("looking for beginning of object key string", true);
                     }
                     let k = self.string()?;
                     self.ws();
                     if self.b.get(self.i) != Some(&b':') {
-                        return self.err();
+                        return self.err_at("after object key", true);
                     }
                     self.i += 1;
                     self.ws();
@@ -306,7 +350,7 @@ impl JsonParser<'_> {
                             self.i += 1;
                             return Ok(Value::Object(m));
                         }
-                        _ => return self.err(),
+                        _ => return self.err_at("after object key:value pair", true),
                     }
                 }
             }
@@ -320,7 +364,7 @@ impl JsonParser<'_> {
                 }
                 Ok(Value::Number(f))
             }
-            Some(_) => self.err(),
+            Some(_) => self.err_at("looking for beginning of value", true),
         }
     }
 
@@ -337,12 +381,12 @@ impl JsonParser<'_> {
                     self.i += 1;
                 }
             }
-            _ => return self.err(),
+            _ => return self.err_at("in numeric literal", false),
         }
         if self.b.get(self.i) == Some(&b'.') {
             self.i += 1;
             if !self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
-                return self.err();
+                return self.err_at("after decimal point in numeric literal", false);
             }
             while self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
                 self.i += 1;
@@ -354,7 +398,7 @@ impl JsonParser<'_> {
                 self.i += 1;
             }
             if !self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
-                return self.err();
+                return self.err_at("in exponent of numeric literal", false);
             }
             while self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
                 self.i += 1;
@@ -367,7 +411,15 @@ impl JsonParser<'_> {
 
     // go-std: encoding/json.getu4 L1
     fn hex4(&mut self) -> Option<u32> {
-        let h = self.b.get(self.i..self.i + 4)?;
+        // Four hex digits exactly (`from_str_radix` alone would accept a leading `+`). On
+        // failure `self.i` is left at the first byte that is not one (stateInStringEscU*).
+        for k in 0..4 {
+            if !self.b.get(self.i + k).is_some_and(u8::is_ascii_hexdigit) {
+                self.i += k;
+                return None;
+            }
+        }
+        let h = &self.b[self.i..self.i + 4];
         let s = std::str::from_utf8(h).ok()?;
         let v = u32::from_str_radix(s, 16).ok()?;
         self.i += 4;
@@ -380,7 +432,7 @@ impl JsonParser<'_> {
         let mut out: Vec<u8> = Vec::new();
         loop {
             let Some(&c) = self.b.get(self.i) else {
-                return self.err();
+                return self.err_at("in string literal", true);
             };
             match c {
                 b'"' => {
@@ -392,7 +444,7 @@ impl JsonParser<'_> {
                 b'\\' => {
                     self.i += 1;
                     let Some(&e) = self.b.get(self.i) else {
-                        return self.err();
+                        return self.err_at("in string escape code", false);
                     };
                     self.i += 1;
                     let ch = match e {
@@ -406,7 +458,7 @@ impl JsonParser<'_> {
                         b't' => '\t',
                         b'u' => {
                             let Some(r) = self.hex4() else {
-                                return self.err();
+                                return self.err_at("in \\u hexadecimal character escape", false);
                             };
                             if (0xD800..0xDC00).contains(&r) && self.b[self.i..].starts_with(b"\\u")
                             {
@@ -426,12 +478,15 @@ impl JsonParser<'_> {
                                 char::from_u32(r).unwrap_or('\u{FFFD}')
                             }
                         }
-                        _ => return self.err(),
+                        _ => {
+                            self.i -= 1;
+                            return self.err_at("in string escape code", false);
+                        }
                     };
                     let mut buf = [0u8; 4];
                     out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
                 }
-                c if c < 0x20 => return self.err(),
+                c if c < 0x20 => return self.err_at("in string literal", true),
                 c => {
                     out.push(c);
                     self.i += 1;
@@ -461,6 +516,21 @@ pub enum Raw {
     Object(Vec<(String, Raw)>),
 }
 
+/// Drops a value tree without recursion. A valid document may nest 10000 levels (Go's GC
+/// frees it without a stack); the derived drop of [`Raw`] recurses once per level, so callers
+/// that may hold such a tree end its life here.
+// glue: iterative drop of the value tree
+pub fn drop_raw(v: Raw) {
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Raw::Array(a) => stack.extend(a),
+            Raw::Object(m) => stack.extend(m.into_iter().map(|(_, v)| v)),
+            _ => {}
+        }
+    }
+}
+
 impl Raw {
     /// The `Value` of a `*json.UnmarshalTypeError` for this JSON value kind, without the
     /// number literal (`literalStore` adds it only for numeric destinations).
@@ -478,90 +548,154 @@ impl Raw {
 }
 
 /// `checkValid` plus the value tree `decodeState` walks. A syntax error returns `Err` before
-/// anything is decoded, as in Go. The error text is not Go's (`*json.SyntaxError` messages
-/// are not ported, as for [`unmarshal`]).
-// go-std: encoding/json.checkValid L2 (the scanner merged into a recursive descent parser; syntax error messages differ)
+/// anything is decoded, as in Go, with the message of Go's `*json.SyntaxError`.
+// go-std: encoding/json.checkValid L2 (the scanner merged into a recursive descent parser)
 pub fn unmarshal_raw(data: &[u8]) -> Result<Raw, String> {
     let mut p = JsonParser { b: data, i: 0 };
     p.ws();
     let v = p.raw(0)?;
     p.ws();
     if p.i != p.b.len() {
-        return Err("invalid character after top-level value".to_owned());
+        return p.err_at("after top-level value", true);
     }
     Ok(v)
 }
 
 impl JsonParser<'_> {
-    // go-std: encoding/json.decodeState.value L2 (into the ordered tree; scanner merged)
-    fn raw(&mut self, depth: usize) -> Result<Raw, String> {
-        if depth > 10000 {
-            return Err("exceeded max depth".to_owned());
+    /// The value at `self.i`, decoded without recursion: Go's scanner keeps its parse state
+    /// in a slice (`parseState`), so nesting is bounded by `maxNestingDepth` (10000), not by
+    /// the stack; here the open arrays and objects are an explicit stack as well.
+    // go-std: encoding/json.decodeState.value L2 (into the ordered tree; scanner merged, explicit parse stack)
+    fn raw(&mut self, _depth: usize) -> Result<Raw, String> {
+        enum Open {
+            Array(Vec<Raw>),
+            Object(Vec<(String, Raw)>, String),
         }
-        match self.b.get(self.i) {
-            None => self.err(),
-            Some(b'n') => self.lit(b"null", Value::Null).map(|_| Raw::Null),
-            Some(b't') => self.lit(b"true", Value::Null).map(|_| Raw::Bool(true)),
-            Some(b'f') => self.lit(b"false", Value::Null).map(|_| Raw::Bool(false)),
-            Some(b'"') => Ok(Raw::String(self.string()?)),
-            Some(b'[') => {
-                self.i += 1;
-                let mut a = Vec::new();
-                self.ws();
-                if self.b.get(self.i) == Some(&b']') {
-                    self.i += 1;
-                    return Ok(Raw::Array(a));
-                }
-                loop {
-                    self.ws();
-                    a.push(self.raw(depth + 1)?);
-                    self.ws();
-                    match self.b.get(self.i) {
-                        Some(b',') => self.i += 1,
-                        Some(b']') => {
-                            self.i += 1;
-                            return Ok(Raw::Array(a));
-                        }
-                        _ => return self.err(),
+        /// The open containers; on a syntax error their finished children are dropped
+        /// without recursion ([`drop_raw`]).
+        struct Stack(Vec<Open>);
+        impl Drop for Stack {
+            // glue: iterative drop of the partial value tree
+            fn drop(&mut self) {
+                for o in self.0.drain(..) {
+                    match o {
+                        Open::Array(a) => drop_raw(Raw::Array(a)),
+                        Open::Object(m, _) => drop_raw(Raw::Object(m)),
                     }
                 }
             }
-            Some(b'{') => {
-                self.i += 1;
-                let mut m = Vec::new();
-                self.ws();
-                if self.b.get(self.i) == Some(&b'}') {
+        }
+        impl std::ops::Deref for Stack {
+            type Target = Vec<Open>;
+            // glue: access to the stack
+            fn deref(&self) -> &Vec<Open> {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for Stack {
+            // glue: access to the stack
+            fn deref_mut(&mut self) -> &mut Vec<Open> {
+                &mut self.0
+            }
+        }
+        let mut stack = Stack(Vec::new());
+        loop {
+            // A value starts here (stateBeginValue / stateBeginValueOrEmpty).
+            self.ws();
+            let mut v = match self.b.get(self.i) {
+                None => return self.err_at("looking for beginning of value", true),
+                Some(b'n') => self.lit(b"null", Value::Null).map(|_| Raw::Null)?,
+                Some(b't') => self.lit(b"true", Value::Null).map(|_| Raw::Bool(true))?,
+                Some(b'f') => self.lit(b"false", Value::Null).map(|_| Raw::Bool(false))?,
+                Some(b'"') => Raw::String(self.string()?),
+                Some(b'[') => {
+                    self.max_depth(stack.len())?;
                     self.i += 1;
-                    return Ok(Raw::Object(m));
+                    self.ws();
+                    if self.b.get(self.i) == Some(&b']') {
+                        self.i += 1;
+                        Raw::Array(Vec::new())
+                    } else {
+                        stack.push(Open::Array(Vec::new()));
+                        continue;
+                    }
                 }
-                loop {
-                    self.ws();
-                    if self.b.get(self.i) != Some(&b'"') {
-                        return self.err();
-                    }
-                    let k = self.string()?;
-                    self.ws();
-                    if self.b.get(self.i) != Some(&b':') {
-                        return self.err();
-                    }
+                Some(b'{') => {
+                    self.max_depth(stack.len())?;
                     self.i += 1;
                     self.ws();
-                    let v = self.raw(depth + 1)?;
-                    m.push((k, v));
-                    self.ws();
-                    match self.b.get(self.i) {
-                        Some(b',') => self.i += 1,
-                        Some(b'}') => {
-                            self.i += 1;
-                            return Ok(Raw::Object(m));
+                    if self.b.get(self.i) == Some(&b'}') {
+                        self.i += 1;
+                        Raw::Object(Vec::new())
+                    } else {
+                        let k = self.object_key()?;
+                        stack.push(Open::Object(Vec::new(), k));
+                        continue;
+                    }
+                }
+                Some(c) if *c == b'-' || c.is_ascii_digit() => Raw::Number(self.number_literal()?),
+                Some(_) => return self.err_at("looking for beginning of value", true),
+            };
+            // A value ended (stateEndValue): hand it to the innermost open container.
+            loop {
+                match stack.last_mut() {
+                    None => return Ok(v),
+                    Some(Open::Array(a)) => {
+                        a.push(v);
+                        self.ws();
+                        match self.b.get(self.i) {
+                            Some(b',') => {
+                                self.i += 1;
+                                break;
+                            }
+                            Some(b']') => {
+                                self.i += 1;
+                                let Some(Open::Array(a)) = stack.pop() else {
+                                    unreachable!()
+                                };
+                                v = Raw::Array(a);
+                            }
+                            _ => return self.err_at("after array element", true),
                         }
-                        _ => return self.err(),
+                    }
+                    Some(Open::Object(m, k)) => {
+                        m.push((std::mem::take(k), v));
+                        self.ws();
+                        match self.b.get(self.i) {
+                            Some(b',') => {
+                                self.i += 1;
+                                self.ws();
+                                *k = self.object_key()?;
+                                break;
+                            }
+                            Some(b'}') => {
+                                self.i += 1;
+                                let Some(Open::Object(m, _)) = stack.pop() else {
+                                    unreachable!()
+                                };
+                                v = Raw::Object(m);
+                            }
+                            _ => return self.err_at("after object key:value pair", true),
+                        }
                     }
                 }
             }
-            Some(c) if *c == b'-' || c.is_ascii_digit() => Ok(Raw::Number(self.number_literal()?)),
-            Some(_) => self.err(),
         }
+    }
+
+    /// An object key and its colon (stateBeginString, then stateEndValue in parseObjectKey).
+    // go-std: encoding/json.stateBeginString L1
+    fn object_key(&mut self) -> Result<String, String> {
+        if self.b.get(self.i) != Some(&b'"') {
+            return self.err_at("looking for beginning of object key string", true);
+        }
+        let k = self.string()?;
+        self.ws();
+        if self.b.get(self.i) != Some(&b':') {
+            return self.err_at("after object key", true);
+        }
+        self.i += 1;
+        Ok(k)
     }
 }
 
