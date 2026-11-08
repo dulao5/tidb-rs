@@ -9,26 +9,26 @@
 
 | Go 文件 | 函数数 | Rust 文件 | 状态 |
 |---|--:|---|---|
-| `column.go` | 84 | `column.rs` | 80 个已移植；`AppendEnum`、`AppendSet`、`GetEnum`、`GetSet` 等 D01.1 |
-| `chunk.go` | 64 | `chunk.rs` | 60 个已移植；`AppendEnum`、`AppendSet`、`AppendDatum`、`ToString` 等 D01.1 |
-| `row.go` | 26 | `row.rs` | 19 个已移植；`GetEnum`、`GetSet`、`GetDatumRow`、`GetDatumRowWithBuffer`、`GetDatum`、`DatumWithBuffer`、`ToString` 等 D01.1 |
+| `column.go` | 84 | `column.rs` | 全部 |
+| `chunk.go` | 64 | `chunk.rs` | 全部 |
+| `row.go` | 26 | `row.rs` | 全部 |
 | `codec.go` | 20 | `codec.rs` | 全部 |
 | `chunk_util.go` | 14 | `chunk_util.rs` | 9 个已移植；`diskFileReaderWriter` 的 5 个方法等 D01.10（落盘文件、checksum 与加密层） |
 | `iterator.go` | 52 | `iterator.rs` | 43 个已移植；`iterator4RowContainer` 的 9 个等 D01.10 |
 | `list.go` | 15 | `list.rs` | 全部 |
-| `compare.go` | 19 | `compare.rs` | 16 个已移植；`Compare`、`Chunk.LowerBound`、`Chunk.UpperBound` 等 D01.1 |
+| `compare.go` | 19 | `compare.rs` | 全部 |
 | `alloc.go` | 14 | `alloc.rs` | 全部（不复用，见 3.6） |
-| `mutrow.go` | 22 | — | 全部等 D01.1：建立在 `any` / `types.Datum` 值上 |
+| `mutrow.go` | 22 | `mutrow.rs` | 全部（D01.1 合并后的后续 PR） |
 
-收敛检查：`matched 276/330`，`missing 32` 是上表中"等 D01.1 / D01.10"的函数，另有未建文件的 `mutrow.go`（22 个）。govec 的 `chunkExempt` 逐个登记了原因。
+收敛检查：`matched 316/330`，`missing 14` 是上表中"等 D01.10"的函数。govec 的 `chunkExempt` 逐个登记了原因。
 
 **块外依赖**
 
 | 来源 | 内容 | Rust | 标注 |
 |---|---|---|---|
 | Go runtime `growslice` / `roundupsize` | 切片增长的容量与 size class 取整（Go 1.25 的 68 个 class） | `goslice.rs` | `go-std:` |
-| `types.CompareString`（D01.1） | `collate.GetCollator(c).Compare(x, y)` 一行 | `compare.rs` 中直接调用 D01.9 的 collator | 注释说明 |
-| `types.BinaryLiteral.Compare`（D01.1） | 去掉前导零字节后比较 | `compare.rs` 的 `binary_literal_compare` | `glue:`，D01.1 合并后替换 |
+| `types.CompareString`（D01.1） | `collate.GetCollator(c).Compare(x, y)` 一行 | `cmpStringWithCollationInfo` 直接调用 D01.9 的 collator；`Compare` 调用 D01.1 的 `compare_string` | 注释说明 |
+| `types.BinaryLiteral.Compare`（D01.1） | 去掉前导零字节后比较 | `compare.rs` 的 `binary_literal_compare`（借用字节；D01.1 的方法要一个拥有所有权的 `BinaryLiteral`，比较函数不能每次分配） | `glue:` |
 | `disjointset.Set`（D00.3） | `mergeInputIdxToOutputIdxes` 中的别名分组 | 直接计算"同一别名组中最小的下标" | L2 |
 | `cmp.Compare` | NaN 小于一切数、NaN 等于 NaN | `compare.rs` 的 `go_cmp` | `go-std:` |
 
@@ -87,7 +87,13 @@ A1 删除复用池：`NewAllocator`、`NewSyncAllocator`、`NewReuseHookAllocato
 1. `Column.GetDecimal` / `Row.GetMyDecimal` 返回值而不是指向列内的指针；要写回用 `decimals_mut()`。`negative` 字节按 `!= 0` 读（与 gc 一致，Go 不检查；随机字节由 `set_raw` 覆盖，见评审）。
 2. `Row.CopyConstruct` 返回新的一行 chunk（其第 0 行就是 Go 的结果）。
 3. `ColumnSwapHelper` 的合并结果用 `OnceLock` 保存，对应 Go 的 `atomic.Pointer` 加 `CompareAndSwap(nil, …)`（第一个写入者生效）。
-4. Go 读到切片容量之外的地方（未定义行为），Rust panic。govec 的 `view` 步骤在 length × 宽度超过 `cap(data)` 时记为 `past_cap`（不读 Go 当时读到的内存），回放要求 Rust panic。
+4. Go 读到切片容量之外的地方（未定义行为），Rust panic。govec 的 `view` 步骤在 length × 宽度超过 `cap(data)` 时记为 `past_cap`（不读 Go 当时读到的内存），回放要求 Rust panic。同样的情况还有：`Row.ToString` 用 `GetInt64` 读 BIT（变长列，EvalType 是 ETInt）的单元，`GetTime` 等读一个被 `SetDatum` 改成 FLOAT（4 字节）的 MutRow 单元——typed getter 只检查第一个字节的下标。govec 的 `to_string`、`row_string`、`mr_string`、`mr_get` 在会读出容量时记 `past_cap`、不调用（`chunkReadSize`）。
+5. Go 写到容量之外（内存破坏）的调用不进入向量：`AppendDatum` 写一个比列宽的定长 kind（例如 Duration 写进 FLOAT 列，8 字节写进 4 字节的 `elemBuf`；实测会改坏相邻的 null 位图），`MutRow.SetValue` 把 Duration / `*MyDecimal` / Time 写进比它短的单元（`*(*T)(unsafe.Pointer(&col.data[0]))` 只检查下标 0）。Rust 在容量内写、超出容量时 panic。生成器不产生前一种；后一种由 `mr_set_value(s)` 先检查，记 `past_cap` 并跳过这一步（两边都不执行）。
+6. `MutRow.ShallowCopyPartialRow`：Go 让 MutRow 的单元成为源列缓冲的子切片，之后两边的写入互相可见（`TestMutRowShallowCopyPartialRow` 后半段检查了这一点：源 chunk `Reset` 再追加后，MutRow 读到新值）。Rust 把单元复制到同样长度、同样容量（到源的容量为止，内容也复制）的新缓冲，之后的写入互不影响（L2）。Go 的调用方（join 的 `ShallowCopyPartialRow` 后紧接 `ToRow` 读）不依赖这种别名；govec 的生成器在浅复制之后不再写源 chunk，也不再通过这个 MutRow 写。复制的代价（每个单元一次分配，大小到源缓冲的容量为止）留给执行器接线时评估（tasks T14）。
+7. `makeMutRowColumn` 对不认识的类型（`bool`、`HexLiteral`、`BitLiteral` 等）返回 nil `*Column` 并放进 chunk，第一次访问时 panic；Rust 的列不能为 nil，`MutRowFromValues` / `MutRowFromDatums` / `MutRowFromTypes` / `SetDatum` 当场 panic（L2，同样的输入 panic，只是更早）。
+8. MutRow 的列在 Go 中共用数组：定长列的 `elemBuf` 与 `data` 是同一个数组，变长列的 `nullBitmap` 是 `data` 底层数组的最后一个字节。`MutRow` 为每列记一个标志，在数组被替换之前把写入同步过去（`sync_elem`、`set_null_bit`），因此 dump 中的 `elemBuf` 和 `GetInt64` 读到的末字节都与 Go 一致。
+9. `Row.GetDatum` 等：Go 的 datum 引用 chunk 的字节（`hack.String`、指向列内的 `*MyDecimal`），只在 chunk 不变时有效；Rust 的 datum 拥有一份拷贝（L2，值相同）。
+10. `MutRow` 拥有它的 chunk（Go 的 `MutRow` 是按值复制、共享 `*Chunk` 的 `Row`）；setter 取 `&mut self`。`SetRow` 不能传入自己的 `to_row()`（借用检查）；Go 中这样做会先清掉自己的单元再复制，没有调用方这样用。
 
 **给 D07.3 的说明**（Lucky 评审）：本块的 `Codec` 按 TiDB 的编码器验证。TiKV 的编码器（`tidb_query_datatype` 的 chunk codec）可能有合法的不同：没有 NULL 时是否写位图（TiDB 的编码器在 null count 为 0 时不写，解码走 `setAllNotNull`），以及 NULL 单元下面填什么字节。D07.3 用 TiKV 实际响应做向量时（tasks T12）要核对这两点，解码必须接受 TiKV 的合法写法；`decode_mutation` 测试覆盖畸形输入（只会 panic，不会 abort 或挂起）。
 
@@ -95,10 +101,10 @@ A1 删除复用池：`NewAllocator`、`NewSyncAllocator`、`NewReuseHookAllocato
 
 | 项目 | 结果 |
 |---|---|
-| 收敛检查 | 276/330，其余 54 个（32 个加 `mutrow.go` 的 22 个）已登记（§1） |
-| govec `chunk` 领域 | 1,671 条（1,600 个随机脚本，平均约 100 步；20 个 Go 测试场景；51 条 `type_width`），debug 与 release-checked 下回放全部一致 |
-| 反证 | 去掉 size class 取整 1,313 条不一致；NULL 写零而不是 `elemBuf` 1,226 条；`appendMultiSameNullBitmap` 不清多余位 335 条；`Sizeof(Column)` 改为 120 共 1,615 条；`resize(n, true)` 清零 16 条；`mergeInputIdxToOutputIdxes` 不合并别名 16 条 |
-| 其他种子 | 生成器修正后，种子 1–24 各 1,671 条，回放全部一致（`GOVEC_CHUNK_FILES`，tracker CI 生成种子 1–8 作为产物） |
+| 收敛检查 | 316/330，其余 14 个等 D01.10，已登记（§1）；D01.1 后续 PR 之前是 276/330 |
+| govec `chunk` 领域 | 2,276 条：1,671 条（1,600 个随机脚本，平均约 100 步；20 个 Go 测试场景；51 条 `type_width`），加上 D01.1 后续 PR 的 605 条（600 个 Datum/MutRow 随机脚本，5 个 Go 测试场景：`TestMutRow`、`TestIssue29947`、`TestMutRowShallowCopyPartialRow` 前半段、`TestGetDecimalDatum`、`TestToString`）。新脚本加在原有脚本之后，原有 1,671 条逐字节不变。debug 与 release-checked 下回放全部一致 |
+| 反证 | D01.1 后续：`DatumWithBuffer` 的 decimal frac 不用 digitsFrac 39 条；`ToString` 的 float32 用 bitSize 64 共 20 条；`Compare` 的 MinNotNull 遇 NULL 返回 0 共 17 条；浅复制不复制长度之后的字节 2 条；不同步 MutRow 的 null 位 1 条；不同步 `elemBuf` 213 条。原有：去掉 size class 取整 1,313 条不一致；NULL 写零而不是 `elemBuf` 1,226 条；`appendMultiSameNullBitmap` 不清多余位 335 条；`Sizeof(Column)` 改为 120 共 1,615 条；`resize(n, true)` 清零 16 条；`mergeInputIdxToOutputIdxes` 不合并别名 16 条 |
+| 其他种子 | 种子 1–24 各 2,276 条，回放全部一致（`GOVEC_CHUNK_FILES`，tracker CI 生成种子 1–8 作为产物） |
 | 畸形输入 | `tests/decode_mutation.rs`：5,000 份截断、翻转字节、改写长度/null count 的编码，解码、读出每个单元、重新编码，只出现可捕获的 panic |
 | 单元测试 | `tests/unit.rs`：分配器、`TrackedAlloc` 记账（释放后归零）、共享缓冲写时复制、`ReuseIntermChk` 不改输入、别名写入在 debug 下 panic、`Reset` 保持别名 |
 | 性能 | 见 plan.md §3（与 Go 基准同负载对比） |

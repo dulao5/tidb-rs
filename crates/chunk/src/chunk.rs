@@ -8,8 +8,6 @@
 //! - Go distinguishes a nil `columns` / `sel` from an empty one (`renewEmpty`, `Reset`,
 //!   `NumRows`): both are `Option<Vec<_>>`.
 //! - No reuse pool (`M-POOL`): `NewChunkFromPoolWithCapacity` allocates, `Destroy` drops.
-//! - `AppendEnum`, `AppendSet`, `AppendDatum` and `ToString` need block D01.1 (`types.Enum`,
-//!   `types.Set`, `types.Datum`) and wait for it.
 
 // Go names for package-level constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -20,7 +18,15 @@ use tidb_base::Error;
 use tidb_base::errors;
 use tidb_parser::types::FieldType;
 use tidb_types::MyDecimal;
+use tidb_types::datum::Datum;
+use tidb_types::datum::{
+    KindBinaryLiteral, KindBytes, KindFloat32, KindFloat64, KindInt64, KindMysqlBit,
+    KindMysqlDecimal, KindMysqlDuration, KindMysqlEnum, KindMysqlJSON, KindMysqlSet, KindMysqlTime,
+    KindNull, KindRaw, KindString, KindUint64, KindVectorFloat32,
+};
+use tidb_types::enum_type::Enum;
 use tidb_types::json::BinaryJSON;
+use tidb_types::set_type::Set;
 use tidb_types::time::Duration;
 use tidb_types::time::Time;
 use tidb_types::vector::VectorFloat32;
@@ -728,12 +734,20 @@ impl Chunk {
         self.column_mut(col_idx).append_my_decimal(dec);
     }
 
-    /// The chunk form of `AppendEnum` / `AppendSet` until block D01.1 ports `types.Enum` and
-    /// `types.Set`: appends `(name, value)`.
-    // glue: Go AppendEnum / AppendSet body (c.columns[colIdx].appendNameValue), types.Enum/Set wait for D01.1
-    pub fn append_name_value(&mut self, col_idx: usize, name: &[u8], value: u64) {
+    /// AppendEnum appends an Enum value to the chunk.
+    // go: Chunk.AppendEnum L1
+    pub fn append_enum(&mut self, col_idx: usize, enum_: &Enum) {
         self.append_sel(col_idx);
-        self.column_mut(col_idx).append_name_value(name, value);
+        self.column_mut(col_idx)
+            .append_name_value(&enum_.name, enum_.value);
+    }
+
+    /// AppendSet appends a Set value to the chunk.
+    // go: Chunk.AppendSet L1
+    pub fn append_set(&mut self, col_idx: usize, set: &Set) {
+        self.append_sel(col_idx);
+        self.column_mut(col_idx)
+            .append_name_value(&set.name, set.value);
     }
 
     /// AppendJSON appends a JSON value to the chunk.
@@ -748,6 +762,29 @@ impl Chunk {
     pub fn append_vector_float32(&mut self, col_idx: usize, v: &VectorFloat32<'_>) {
         self.append_sel(col_idx);
         self.column_mut(col_idx).append_vector_float32(v);
+    }
+
+    /// AppendDatum appends a datum into the chunk.
+    // go: Chunk.AppendDatum L1
+    pub fn append_datum(&mut self, col_idx: usize, d: &Datum) {
+        match d.kind() {
+            KindNull => self.append_null(col_idx),
+            KindInt64 => self.append_int64(col_idx, d.get_int64()),
+            KindUint64 => self.append_uint64(col_idx, d.get_uint64()),
+            KindFloat32 => self.append_float32(col_idx, d.get_float32()),
+            KindFloat64 => self.append_float64(col_idx, d.get_float64()),
+            KindString | KindBytes | KindBinaryLiteral | KindRaw | KindMysqlBit => {
+                self.append_bytes(col_idx, d.get_bytes())
+            }
+            KindMysqlDecimal => self.append_my_decimal(col_idx, d.get_mysql_decimal()),
+            KindMysqlDuration => self.append_duration(col_idx, d.get_mysql_duration()),
+            KindMysqlEnum => self.append_enum(col_idx, &d.get_mysql_enum()),
+            KindMysqlSet => self.append_set(col_idx, &d.get_mysql_set()),
+            KindMysqlTime => self.append_time(col_idx, d.get_mysql_time()),
+            KindMysqlJSON => self.append_json(col_idx, &d.get_mysql_json()),
+            KindVectorFloat32 => self.append_vector_float32(col_idx, &d.get_vector_float32()),
+            _ => {}
+        }
     }
 
     // go: Chunk.appendSel L1
@@ -806,6 +843,18 @@ impl Chunk {
             col_mut(col).reconstruct(Some(&sel));
         }
         self.num_virtual_rows = sel.len();
+    }
+
+    /// ToString returns all the values in a chunk.
+    // go: Chunk.ToString L1
+    pub fn to_string(&self, ft: &[FieldType]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.num_rows() * 2);
+        for row_idx in 0..self.num_rows() {
+            let row = self.get_row(row_idx);
+            buf.extend_from_slice(&row.to_string(ft));
+            buf.push(b'\n');
+        }
+        buf
     }
 
     /// AppendRows appends multiple rows to the chunk.

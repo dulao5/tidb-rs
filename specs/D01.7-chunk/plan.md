@@ -4,7 +4,8 @@
 
 - 分支：tidb-rs `block/D01.7-chunk`（worktree `projects/tidb-rs-d017`），tracker `govec/chunk-D01.7`（`projects/tracker-d017`，PR #19）。
 - 完成：`crates/chunk`（`tidb-chunk`）全部可移植函数（276/330），govec `chunk` 领域与回放，单元测试，基准，CI 加入 `tidb-chunk`。
-- 待做：等 D01.1 合并后补上 Enum/Set/Datum 相关的 32 个函数和 `mutrow.go`（见 tasks.md T8）；D01.10 补落盘文件与 `RowContainer` 迭代器。
+- D01.1 后续（分支 `block/D01.7-chunk-datum`，tracker `govec/chunk-D01.7-datum`）：Enum/Set/Datum 相关的 32 个函数和 `mutrow.go`（tasks.md T8、T13），converge 316/330。
+- 待做：D01.10 补落盘文件与 `RowContainer` 迭代器。
 
 ## 2. 实现顺序（已完成）
 

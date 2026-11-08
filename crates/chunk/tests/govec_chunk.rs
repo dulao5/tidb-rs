@@ -20,6 +20,7 @@ use tidb_base::mysql;
 use tidb_chunk::Chunk;
 use tidb_chunk::Column;
 use tidb_chunk::List;
+use tidb_chunk::MutRow;
 use tidb_chunk::Row;
 use tidb_chunk::RowPtr;
 use tidb_chunk::chunk;
@@ -29,16 +30,25 @@ use tidb_chunk::codec::Decoder;
 use tidb_chunk::compare;
 use tidb_chunk::iterator;
 use tidb_chunk::list;
+use tidb_chunk::mutrow;
 use tidb_memory::Tracker;
 use tidb_memory::tracker::LabelForChunkList;
 use tidb_memory::tracker::new_tracker;
 use tidb_parser::types::EvalType;
 use tidb_parser::types::FieldType;
 use tidb_types::MyDecimal;
+use tidb_types::binary_literal::BinaryLiteral;
 use tidb_types::core_time::CoreTime;
+use tidb_types::datum::{self as dm, Datum, GoValue};
+use tidb_types::enum_type::Enum;
+use tidb_types::field_type_builder::new_field_type_builder;
+use tidb_types::json::BinaryJSON;
 use tidb_types::json::parse_binary_json_from_string;
+use tidb_types::set_type::Set;
 use tidb_types::time::Duration;
+use tidb_types::time::Time;
 use tidb_types::time::new_time;
+use tidb_types::vector::parse_vector_float32;
 use tidb_types::vector::zero_copy_deserialize_vector_float32;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
@@ -213,10 +223,12 @@ fn append(c: &mut Chunk, ft: &FieldType, col: usize, v: &Value, col_level: bool)
             let a = v.as_array().unwrap();
             let name = unhex(a[0].as_str().unwrap());
             let val = a[1].as_u64().unwrap();
-            if col_level {
-                c.column_mut(col).append_name_value_for_test(&name, val);
+            if ft.get_type() == mysql::TypeEnum {
+                let e = Enum { name, value: val };
+                app!(append_enum, append_enum, &e)
             } else {
-                c.append_name_value(col, &name, val);
+                let st = Set { name, value: val };
+                app!(append_set, append_set, &st)
             }
         }
         _ => {
@@ -259,8 +271,14 @@ fn get(r: Row<'_>, ft: &FieldType, col: usize) -> Value {
         }
         "vec" => json!(r.get_vector_float32(col).string()),
         "nv" => {
-            let (name, val) = r.get_name_value_pub(col);
-            json!([hex(name), val.to_string()])
+            let (name, val) = if ft.get_type() == mysql::TypeEnum {
+                let e = r.get_enum(col);
+                (e.name, e.value)
+            } else {
+                let st = r.get_set(col);
+                (st.name, st.value)
+            };
+            json!([hex(&name), val.to_string()])
         }
         "null" => Value::Null,
         _ => json!(hex(if ft.get_type() == mysql::TypeVarchar {
@@ -387,6 +405,7 @@ struct State {
     fts: HashMap<usize, Vec<FieldType>>,
     lists: HashMap<usize, (List, Arc<Tracker>)>,
     decs: HashMap<usize, (Decoder, Vec<FieldType>)>,
+    mrs: HashMap<usize, MutRow>,
 }
 
 impl State {
@@ -929,9 +948,388 @@ fn step(st: &mut State, a: &[Value]) -> Value {
                 )
             });
         }
+        // ---- types.Datum / Enum / Set (after block D01.1) ----
+        "app_datum" => {
+            let d = datum_in(&a[3]);
+            st.chks.get_mut(&ci(1)).unwrap().append_datum(ci(2), &d);
+        }
+        "get_datum" => {
+            let ft = if a[4].is_null() {
+                st.fts[&ci(1)][ci(3)].clone()
+            } else {
+                ft_in(&a[4])
+            };
+            return datum_out(&st.chks[&ci(1)].get_row(ci(2)).get_datum(ci(3), &ft));
+        }
+        "datum_row" => {
+            let ds = st.chks[&ci(1)]
+                .get_row(ci(2))
+                .get_datum_row(&st.fts[&ci(1)]);
+            return datum_outs(&ds);
+        }
+        "datum_row_buf" => {
+            let mut buf: Vec<Datum> = a[3].as_array().unwrap().iter().map(datum_in).collect();
+            let ds = st.chks[&ci(1)]
+                .get_row(ci(2))
+                .get_datum_row_with_buffer(&st.fts[&ci(1)], &mut buf);
+            return datum_outs(ds);
+        }
+        "to_string" => {
+            let c = &st.chks[&ci(1)];
+            let rows: Vec<usize> = (0..c.num_rows()).map(|i| c.get_row(i).idx()).collect();
+            let all: Vec<usize> = (0..c.num_cols()).collect();
+            if str_past_cap(c, &opt_fts(&st.fts[&ci(1)]), &rows, &all, true) {
+                return json!({ "past_cap": true });
+            }
+            return go_string(&c.to_string(&st.fts[&ci(1)]));
+        }
+        "row_string" => {
+            let r = st.chks[&ci(1)].get_row(ci(2));
+            let all: Vec<usize> = (0..st.chks[&ci(1)].num_cols()).collect();
+            if str_past_cap(
+                &st.chks[&ci(1)],
+                &opt_fts(&st.fts[&ci(1)]),
+                &[r.idx()],
+                &all,
+                true,
+            ) {
+                return json!({ "past_cap": true });
+            }
+            return go_string(&r.to_string(&st.fts[&ci(1)]));
+        }
+        "cmp_datum" => {
+            let d = datum_in(&a[4]);
+            return json!(compare::compare(st.chks[&ci(1)].get_row(ci(2)), ci(3), &d));
+        }
+        "lower_bound" => {
+            let d = datum_in(&a[3]);
+            let (i, m) = st.chks[&ci(1)].lower_bound(ci(2), &d);
+            return json!([i, m]);
+        }
+        "upper_bound" => {
+            let d = datum_in(&a[3]);
+            return json!(st.chks[&ci(1)].upper_bound(ci(2), &d));
+        }
+        // ---- MutRow ----
+        "mr_values" => {
+            let vals: Vec<GoValue> = a[2].as_array().unwrap().iter().map(go_value_in).collect();
+            st.mrs.insert(ci(1), mutrow::mut_row_from_values(&vals));
+        }
+        "mr_datums" => {
+            let ds: Vec<Datum> = a[2].as_array().unwrap().iter().map(datum_in).collect();
+            st.mrs.insert(ci(1), mutrow::mut_row_from_datums(&ds));
+        }
+        "mr_types" => {
+            st.mrs
+                .insert(ci(1), mutrow::mut_row_from_types(&fts_of(&a[2])));
+        }
+        "mr_set_row" => {
+            let row = st.chks[&ci(2)].get_row(ci(3));
+            st.mrs.get_mut(&ci(1)).unwrap().set_row(row);
+        }
+        "mr_set_values" => {
+            let vals: Vec<GoValue> = a[2].as_array().unwrap().iter().map(go_value_in).collect();
+            for (i, v) in vals.iter().enumerate() {
+                if set_value_past_cap(&st.mrs[&ci(1)], i, v) {
+                    return json!({ "past_cap": true });
+                }
+            }
+            st.mrs.get_mut(&ci(1)).unwrap().set_values(&vals);
+        }
+        "mr_set_value" => {
+            let v = go_value_in(&a[3]);
+            if set_value_past_cap(&st.mrs[&ci(1)], ci(2), &v) {
+                return json!({ "past_cap": true });
+            }
+            st.mrs.get_mut(&ci(1)).unwrap().set_value(ci(2), &v);
+        }
+        "mr_set_datums" => {
+            let ds: Vec<Datum> = a[2].as_array().unwrap().iter().map(datum_in).collect();
+            st.mrs.get_mut(&ci(1)).unwrap().set_datums(&ds);
+        }
+        "mr_set_datum" => {
+            let d = datum_in(&a[3]);
+            st.mrs.get_mut(&ci(1)).unwrap().set_datum(ci(2), &d);
+        }
+        "mr_shallow" => {
+            let row = st.chks[&ci(3)].get_row(ci(4));
+            st.mrs
+                .get_mut(&ci(1))
+                .unwrap()
+                .shallow_copy_partial_row(ci(2), row);
+        }
+        "mr_clone" => {
+            let m = st.mrs[&ci(2)].clone_row();
+            st.mrs.insert(ci(1), m);
+        }
+        "mr_dump" => {
+            let mr = &st.mrs[&ci(1)];
+            let len = mr.len();
+            return json!([len, dump(mr.to_row().chunk())]);
+        }
+        "mr_get" => {
+            let r = st.mrs[&ci(1)].to_row();
+            let fts = fts_of(&a[3]);
+            let mut full: Vec<Option<FieldType>> = vec![None; r.len()];
+            full[ci(2)] = Some(fts[0].clone());
+            if str_past_cap(r.chunk(), &full, &[r.idx()], &[ci(2)], false) {
+                return json!({ "past_cap": true });
+            }
+            return json!([
+                datum_out(&r.get_datum(ci(2), &fts[0])),
+                hex(r.get_raw(ci(2))),
+                r.is_null(ci(2))
+            ]);
+        }
+        "mr_string" => {
+            let r = st.mrs[&ci(1)].to_row();
+            let fts = fts_of(&a[2]);
+            let all: Vec<usize> = (0..r.chunk().num_cols()).collect();
+            if str_past_cap(r.chunk(), &opt_fts(&fts), &[r.idx()], &all, true) {
+                return json!({ "past_cap": true });
+            }
+            return go_string(&r.to_string(&fts));
+        }
         _ => panic!("unknown step {op}"),
     }
     Value::Null
+}
+
+/// govec's chunkReadSize.
+fn read_size(ft: &FieldType, str: bool) -> usize {
+    match ft.get_type() {
+        mysql::TypeFloat => 4,
+        mysql::TypeNewDecimal => 40,
+        mysql::TypeTiny
+        | mysql::TypeShort
+        | mysql::TypeInt24
+        | mysql::TypeLong
+        | mysql::TypeLonglong
+        | mysql::TypeYear
+        | mysql::TypeDouble
+        | mysql::TypeDate
+        | mysql::TypeDatetime
+        | mysql::TypeTimestamp
+        | mysql::TypeDuration => 8,
+        mysql::TypeBit if str => 8,
+        _ => 0,
+    }
+}
+
+/// govec's chunkStrPastCap: a typed read past the data's capacity (Go: undefined).
+fn str_past_cap(
+    c: &Chunk,
+    fts: &[Option<FieldType>],
+    rows: &[usize],
+    cols: &[usize],
+    str: bool,
+) -> bool {
+    for &idx in rows {
+        for &col in cols {
+            let cc = c.column(col);
+            let size = fts[col].as_ref().map_or(0, |ft| read_size(ft, str));
+            if cc.is_null(idx) || size == 0 {
+                continue;
+            }
+            let s = cc.govec_state();
+            let off = idx * size;
+            if off >= s.data.0.len() {
+                return false;
+            }
+            if off + size > s.data.1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// govec's chunkSetValuePastCap.
+fn set_value_past_cap(mr: &MutRow, col: usize, v: &GoValue) -> bool {
+    let size = match v {
+        GoValue::Duration(_) | GoValue::Time(_) => 8,
+        GoValue::Decimal(_) => tidb_types::MY_DECIMAL_STRUCT_SIZE,
+        _ => return false,
+    };
+    let r = mr.to_row();
+    let s = r.chunk().column(col).govec_state();
+    !s.data.0.is_empty() && s.data.1 < size
+}
+
+fn opt_fts(fts: &[FieldType]) -> Vec<Option<FieldType>> {
+    fts.iter().cloned().map(Some).collect()
+}
+
+// ---- datum2 / goValueIn forms of the tracker (as in tidb-types' govec_datum.rs) ----
+
+fn bits_f(v: &Value) -> f64 {
+    f64::from_bits(v.as_u64().unwrap())
+}
+
+fn ungs(v: &Value) -> Vec<u8> {
+    match v {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Object(m) => unhex(m["hex"].as_str().unwrap()),
+        _ => panic!("not a GoString: {v}"),
+    }
+}
+
+fn hex_opt(v: &Value) -> Option<Vec<u8>> {
+    if v.is_null() {
+        None
+    } else {
+        Some(unhex(v.as_str().unwrap()))
+    }
+}
+
+fn datum_in(v: &Value) -> Datum {
+    let p = v.as_array().unwrap();
+    let k = p[0].as_u64().unwrap() as u8;
+    let u = |i: usize| p[i].as_u64().unwrap();
+    let i = |i: usize| p[i].as_i64().unwrap();
+    let st = |i: usize| p[i].as_str().unwrap().to_owned();
+    let mut d = Datum::default();
+    match k {
+        dm::KindNull => d.set_null(),
+        dm::KindMinNotNull => d.set_min_not_null(),
+        dm::KindMaxValue => d = dm::max_value_datum(),
+        dm::KindInt64 => d.set_int64(i(1)),
+        dm::KindUint64 => d.set_uint64(u(1)),
+        dm::KindFloat32 => d.set_float32(bits_f(&p[1]) as f32),
+        dm::KindFloat64 => d.set_float64(bits_f(&p[1])),
+        dm::KindString => d.set_string(ungs(&p[1]), st(2)),
+        dm::KindBytes => d.set_bytes(hex_opt(&p[1])),
+        dm::KindBinaryLiteral => {
+            d.set_binary_literal(BinaryLiteral(hex_opt(&p[1]).unwrap_or_default()))
+        }
+        dm::KindMysqlBit => d.set_mysql_bit(BinaryLiteral(hex_opt(&p[1]).unwrap_or_default())),
+        dm::KindMysqlDecimal => d.set_mysql_decimal(dec_of(p[1].as_str().unwrap())),
+        dm::KindMysqlDuration => d.set_mysql_duration(Duration {
+            duration: i(1),
+            fsp: i(2) as isize,
+        }),
+        dm::KindMysqlEnum => d.set_mysql_enum(
+            Enum {
+                value: u(1),
+                name: ungs(&p[2]),
+            },
+            st(3),
+        ),
+        dm::KindMysqlSet => d.set_mysql_set(
+            Set {
+                value: u(1),
+                name: ungs(&p[2]),
+            },
+            st(3),
+        ),
+        dm::KindMysqlTime => d.set_mysql_time(Time::from_raw(CoreTime(u(1)))),
+        dm::KindRaw => d.set_raw(hex_opt(&p[1])),
+        dm::KindMysqlJSON => d.set_mysql_json(BinaryJSON::owned(
+            u(1) as u8,
+            hex_opt(&p[2]).unwrap_or_default(),
+        )),
+        dm::KindVectorFloat32 => {
+            d.set_vector_float32(parse_vector_float32(p[1].as_str().unwrap().as_bytes()).unwrap())
+        }
+        _ => panic!("datum_in: kind {k}"),
+    }
+    d
+}
+
+fn dec_out(d: &MyDecimal) -> Value {
+    let j: Value = serde_json::from_slice(&d.marshal_json().unwrap()).unwrap();
+    let mut st = vec![
+        j["DigitsInt"].clone(),
+        j["DigitsFrac"].clone(),
+        j["ResultFrac"].clone(),
+        json!(i64::from(j["Negative"].as_bool().unwrap())),
+    ];
+    st.extend(j["WordBuf"].as_array().unwrap().iter().cloned());
+    json!({ "s": String::from_utf8(d.to_string()).unwrap(), "str": d.string(), "st": st })
+}
+
+fn datum_out(d: &Datum) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("k".into(), json!(d.kind()));
+    m.insert("frac".into(), json!(d.frac()));
+    m.insert("len".into(), json!(d.length()));
+    m.insert("i".into(), json!(d.get_int64()));
+    m.insert("coll".into(), go_string(d.collation().as_bytes()));
+    m.insert("b".into(), json!(hex(d.get_bytes())));
+    if d.kind() == dm::KindRaw && d.raw_b().is_none() {
+        m.insert("raw_nil".into(), json!(true));
+    }
+    match d.kind() {
+        dm::KindMysqlDecimal => {
+            m.insert("dec".into(), dec_out(d.get_mysql_decimal()));
+        }
+        dm::KindMysqlTime => {
+            let t = d.get_mysql_time();
+            m.insert(
+                "time".into(),
+                json!({ "raw": t.raw().0, "s": go_string(&t.string()) }),
+            );
+        }
+        _ => {}
+    }
+    Value::Object(m)
+}
+
+fn datum_outs(ds: &[Datum]) -> Value {
+    Value::Array(ds.iter().map(datum_out).collect())
+}
+
+fn ft_in(v: &Value) -> FieldType {
+    let p = v.as_array().unwrap();
+    let mut ft = new_field_type_builder()
+        .set_type(p[0].as_u64().unwrap() as u8)
+        .set_flag(p[1].as_u64().unwrap() as usize)
+        .set_flen(p[2].as_i64().unwrap() as isize)
+        .set_decimal(p[3].as_i64().unwrap() as isize)
+        .set_charset(p[4].as_str().unwrap())
+        .set_collate(p[5].as_str().unwrap())
+        .build_p();
+    if !p[6].is_null() {
+        ft.set_elems(Some(p[6].as_array().unwrap().iter().map(ungs).collect()));
+    }
+    ft
+}
+
+fn go_value_in(v: &Value) -> GoValue {
+    let p = v.as_array().unwrap();
+    let u = |i: usize| p[i].as_u64().unwrap();
+    let i = |i: usize| p[i].as_i64().unwrap();
+    match p[0].as_str().unwrap() {
+        "nil" => GoValue::Nil,
+        "bool" => GoValue::Bool(p[1].as_bool().unwrap()),
+        "int" => GoValue::Int(i(1)),
+        "int64" => GoValue::Int64(i(1)),
+        "uint64" => GoValue::Uint64(u(1)),
+        "float32" => GoValue::Float32(bits_f(&p[1]) as f32),
+        "float64" => GoValue::Float64(bits_f(&p[1])),
+        "string" => GoValue::String(ungs(&p[1])),
+        "bytes" => GoValue::Bytes(hex_opt(&p[1])),
+        "decimal" => GoValue::Decimal(Box::new(dec_of(p[1].as_str().unwrap()))),
+        "duration" => GoValue::Duration(Duration {
+            duration: i(1),
+            fsp: i(2) as isize,
+        }),
+        "enum" => GoValue::Enum(Enum {
+            value: u(1),
+            name: ungs(&p[2]),
+        }),
+        "set" => GoValue::Set(Set {
+            value: u(1),
+            name: ungs(&p[2]),
+        }),
+        "binlit" => GoValue::BinaryLiteral(BinaryLiteral(unhex(p[1].as_str().unwrap()))),
+        "json" => GoValue::BinaryJSON(BinaryJSON::owned(u(1) as u8, unhex(p[2].as_str().unwrap()))),
+        "time" => GoValue::Time(Time::from_raw(CoreTime(u(1)))),
+        "vector" => {
+            GoValue::VectorFloat32(parse_vector_float32(p[1].as_str().unwrap().as_bytes()).unwrap())
+        }
+        t => panic!("go_value_in {t}"),
+    }
 }
 
 fn run_script(steps: &[Value]) -> Vec<Value> {
