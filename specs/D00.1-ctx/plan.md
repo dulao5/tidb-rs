@@ -30,3 +30,9 @@
   3. 在 tracker/spec 中记下：HandleError 的 ErrorGroup 分支在 INSERT 写路径上可以走到（rowcodec 的 multierr → WriteMemBufferEncoded → HandleError 按错误分别取级别；静态分析），供以后的写入工作参考。
   4. spec §4：`Reset` 总是返回 true；当执行器共享 statement context 时，Go 返回 false 的情况对应调用方的 `Arc::get_mut` 失败，此时新建一个。
 - **其余**：T6、T7（exprstatic、expropt、sessionexpr、planctx 等）、T8、T9（等 D05.2 B2 合并后再替换 `variable/session.rs` 的替身）。
+
+## 第 2a 部分完成（2026-11-09）
+
+- 已 rebase 到 main（#65 合并之后）。
+- 完成：exprctx（context/optional/param.go）、expropt/optional.go、exprstatic（evalctx/exprctx.go）、ranger 类型；govec `exprctx`、`ranger` 领域与回放；#65 评审的四条后续（D00.1a、单元测试、ErrorGroup 可达、Reset 与 `Arc::get_mut`）。
+- 下一步（第 2b 部分，叠在 2a 上）：expropt 的具体 provider（current_user、sessionvars、infoschema、kvstore、sqlexec、sequence、advisory_lock、ddlowner、priv）、sessionexpr、planctx、core/base、debugtrace、sessionctx/context.go、distsql/context；T8；T9 等 D05.2 B2 合并。

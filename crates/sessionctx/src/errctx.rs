@@ -10,7 +10,10 @@
 //! - Go `error` is [`Error`] (M-ERR): `HandleError(nil)` returns nil in Go; the Rust
 //!   methods take an error and return `Result<(), Error>`.
 //! - `errors.ErrorGroup` (an error wrapping several errors) has no counterpart in M-ERR's
-//!   single error type, so the group branch of `HandleError` is not reachable (L2).
+//!   single error type, so the group branch of `HandleError` is not ported (L2). Go reaches it
+//!   on the INSERT write path (rowcodec joins the column errors with multierr →
+//!   `WriteMemBufferEncoded` → `HandleError` per error level); the read-only tidb-rs does
+//!   not, and porting table writes needs an error-group form of M-ERR (D00.1 spec §4).
 
 // Constants keep their Go names (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
