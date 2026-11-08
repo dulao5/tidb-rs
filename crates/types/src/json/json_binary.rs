@@ -644,25 +644,36 @@ fn json_marshal_duration_to(mut buf: Vec<u8>, mut duration: Duration) -> Vec<u8>
 
 /// ParseBinaryJSONFromString parses a json from string.
 ///
+/// Go checks the text with `json.Valid` and then decodes it again with `UnmarshalJSON`. Here
+/// the text is decoded once: the decoder accepts exactly what `json.Valid` accepts (up to
+/// the nesting limit, checked first), so a decoding error is Go's `json.Valid` failure and a
+/// decoded value goes on to `UnmarshalJSON`'s conversion (same results, one pass fewer).
+///
 /// Documents nested deeper than [`DEEP_NESTING`] are converted on a thread with a large
 /// stack: Go's goroutine stacks grow, the recursion here does not (the result is the same).
-// go: ParseBinaryJSONFromString L1 [M-ERR]
+// go: ParseBinaryJSONFromString L2 (json.Valid and UnmarshalJSON share one decoding pass)
 pub fn parse_binary_json_from_string(s: &[u8]) -> Result<BinaryJSON<'static>, Error> {
     if s.is_empty() {
         return Err(
             ErrInvalidJSONText.gen_with_stack_by_args(vec![Arg::from("The document is empty")])
         );
     }
-    let data = s;
-    if !json_valid(data) {
-        return Err(ErrInvalidJSONText.gen_with_stack_by_args(vec![Arg::from(
+    let invalid = || {
+        ErrInvalidJSONText.gen_with_stack_by_args(vec![Arg::from(
             "The document root must not be followed by other values.",
-        )]));
+        )])
+    };
+    let nesting = max_nesting(s);
+    if nesting > 10000 {
+        return Err(invalid());
     }
-    let run = move |data: Vec<u8>| -> Result<BinaryJSON<'static>, Error> {
-        let mut bj = BinaryJSON::default();
-        match bj.unmarshal_json(&data) {
-            Ok(()) => Ok(bj.into_owned()),
+    let run = move |data: &[u8]| -> Result<BinaryJSON<'static>, Error> {
+        let Ok(raw) = tidb_base::gostd::json::unmarshal_raw(data) else {
+            return Err(invalid());
+        };
+        // UnmarshalJSON's conversion and the error mapping of ParseBinaryJSONFromString.
+        match create_binary_json_with_check(&raw_to_value(raw)) {
+            Ok(bj) => Ok(bj),
             Err(err)
                 if !ErrJSONObjectKeyTooLong.equal(&err) && !ErrJSONDocumentTooDeep.equal(&err) =>
             {
@@ -671,14 +682,14 @@ pub fn parse_binary_json_from_string(s: &[u8]) -> Result<BinaryJSON<'static>, Er
             Err(err) => Err(err),
         }
     };
-    if max_nesting(data) <= DEEP_NESTING {
-        return run(data.to_vec());
+    if nesting <= DEEP_NESTING {
+        return run(s);
     }
-    let data = data.to_vec();
+    let data = s.to_vec();
     std::thread::Builder::new()
         .name("json-deep".to_owned())
         .stack_size(512 << 20)
-        .spawn(move || run(data))
+        .spawn(move || run(&data))
         .expect("spawn the deep JSON thread")
         .join()
         .unwrap_or_else(|p| std::panic::resume_unwind(p))
@@ -691,10 +702,11 @@ pub(crate) const DEEP_NESTING: usize = 256;
 /// `maxNestingDepth`).
 // go-std: encoding/json.Valid L2 (the gostd decoder plus the scanner's nesting limit)
 pub fn json_valid(data: &[u8]) -> bool {
-    if max_nesting(data) > 10000 {
+    let nesting = max_nesting(data);
+    if nesting > 10000 {
         return false;
     }
-    if max_nesting(data) <= DEEP_NESTING {
+    if nesting <= DEEP_NESTING {
         return tidb_base::gostd::json::unmarshal_raw(data).is_ok();
     }
     let data = data.to_vec();
