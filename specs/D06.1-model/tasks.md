@@ -1,6 +1,6 @@
 # D06.1 元数据模型：tasks
 
-状态截至 2026-11-07。Part 1 = PR (a)；Part 2 = PR (b)。
+状态截至 2026-11-08。Part 1 = PR (a)；Part 2 = PR (b)。
 
 | # | 任务 | 完成条件 | 状态 |
 |---|---|---|---|
@@ -12,4 +12,6 @@
 | T6 | Rust 回放 `tests/govec_model.rs` | arm64 全部通过 | 完成 |
 | T7 | amd64 向量：取 tracker PR #13 的 CI artifact | x86_64 CI 通过 | 完成。两个目标的记录相同 |
 | T8 | mappings.md M-BYTES；ROADMAP（D06.1 行、D04.1 的 scramble 注记）；CI arm64 job 加 `tidb-model` | — | 完成 |
-| T9 | Part 2：`job.go`、`reorg.go` 的 13 个函数（`errors.Error` 的 JSON、`json.RawMessage`），`ColumnNeedRestoredData`（等 D01.9 的 collate） | converge `matched 153/153` | 未开始 |
+| T9 | Part 2：`job.go`、`reorg.go` 的 13 个函数（`errors.Error` 的 JSON、`json.RawMessage`、`atomic.Int64`），`ColumnNeedRestoredData`（`tidb-types` 的 `etc.rs` 先移植 `NeedRestoredData` 等 5 个 D01.1 函数） | converge `matched 153/153` | 完成（PR (b)） |
+| T10 | Part 1 评审的不阻塞建议：通用 map 解码器的单元测试；已知偏离的记录带 `ported`，回放严格比较；向量体积的说明 | 测试通过；README 记录体积 | 完成（PR (b)） |
+| T11 | amd64 向量：取 tracker PR #16 的 CI artifact | x86_64 CI 通过 | 见 PR |

@@ -1,6 +1,6 @@
 # D06.1 元数据模型（meta/model）：块 spec
 
-状态：待评审（2026-11-07）。阶段 P1。Part 0（parser 的 model、types、auth、duration，块 D02.3）已合并（PR #17）。本文是 Part 1：Go-JSON 层、schema 结构体和它们的方法。Part 2 是 `job.go`、`reorg.go` 中保留的函数。
+状态：Part 1 已合并（PR #20，2026-11-07）；Part 2 待评审（2026-11-08）。阶段 P1。Part 0（parser 的 model、types、auth、duration，块 D02.3）已合并（PR #17）。Part 1：Go-JSON 层、schema 结构体和它们的方法（139 个函数）。Part 2：`job.go`、`reorg.go` 中读路径保留的 13 个函数、`ColumnNeedRestoredData`，以及 job 相关结构体的 JSON（3.7 节）。
 
 ## 1. 为什么重要
 
@@ -13,20 +13,20 @@
 
 ## 2. Go 范围（153 个函数）
 
-| Go 文件 | 函数 | Rust | 本 PR |
+| Go 文件 | 函数 | Rust | PR |
 |---|--:|---|---|
-| `pkg/meta/model/table.go` | 79 | `table.rs` | 全部 |
-| `pkg/meta/model/column.go` | 35 | `column.rs` | 全部 |
-| `pkg/meta/model/index.go` | 24 | `index.rs` | 全部 |
-| `pkg/meta/model/placement.go` | 7 | `placement.rs` | 全部 |
-| `pkg/meta/model/resource_group.go` | 5 | `resource_group.rs` | 全部 |
-| `pkg/meta/model/db.go` | 3 | `db.rs` | 全部 |
-| `pkg/meta/model/bdr.go` | 1 | `bdr.rs` | 全部 |
-| `pkg/meta/model/job.go` | 9 | — | Part 2 |
-| `pkg/meta/model/reorg.go` | 4 | — | Part 2 |
-| `pkg/types/etc.go`（`ColumnNeedRestoredData`） | 1 | — | Part 2 |
+| `pkg/meta/model/table.go` | 79 | `table.rs` | Part 1 |
+| `pkg/meta/model/column.go` | 35 | `column.rs` | Part 1 |
+| `pkg/meta/model/index.go` | 24 | `index.rs` | Part 1 |
+| `pkg/meta/model/placement.go` | 7 | `placement.rs` | Part 1 |
+| `pkg/meta/model/resource_group.go` | 5 | `resource_group.rs` | Part 1 |
+| `pkg/meta/model/db.go` | 3 | `db.rs` | Part 1 |
+| `pkg/meta/model/bdr.go` | 1 | `bdr.rs` | Part 1 |
+| `pkg/meta/model/job.go` | 9 | `job.rs` | Part 2 |
+| `pkg/meta/model/reorg.go` | 4 | `reorg.rs` | Part 2 |
+| `pkg/types/etc.go`（`ColumnNeedRestoredData`） | 1 | `types_etc.rs` | Part 2 |
 
-本 PR 移植 139 个，余下 14 个在 Part 2：`job.go` 和 `reorg.go` 的函数（`Job.Decode`、`Job.String`、`ActionType.String` 等）要先有 `errors.Error` 的 JSON、`json.RawMessage` 和 `Job` 的并发字段；`ColumnNeedRestoredData` 要用 `types.NeedRestoredData` 和 collate 包，与正在进行的 D01.9 重叠。
+Part 1 移植 139 个，Part 2 移植余下 14 个：`job.go` 和 `reorg.go` 的函数（`Job.Decode`、`Job.String`、`ActionType.String` 等）要先有 `errors.Error` 的 JSON、`json.RawMessage` 和 `Job` 的并发字段（3.7 节）；`ColumnNeedRestoredData` 用 `types.NeedRestoredData` 和 collate 包（D01.9）。`types.NeedRestoredData` 及其辅助函数（`IsNonBinaryStr`、`IsString`、`IsTypeVarchar`、`IsTypeUnspecified`，块 D01.1）先移植到 `tidb-types` 的 `etc.rs`；`ColumnNeedRestoredData` 接收 model 的结构体，所以放在 tidb-model（Go 的 `pkg/types` 依赖 `pkg/meta/model`，Rust 的分层方向相反）。
 
 `flags.go` 没有函数，只有常量，随结构体一起生成。
 
@@ -105,6 +105,18 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
 
 所以结构体赋值用单独的 `GoCopy`（生成），手写的 `Clone` 实现 Go 的 `Clone` 方法，二者不混用。Rust 没有共享指针，"共享"一律是复制；Go 代码不依赖修改副本会影响原对象（见第 4 节第 3 条）。
 
+### 3.7 Part 2：job 相关结构体
+
+生成器的根类型加上 `Job`，由它带出 `SubJob`、`MultiSchemaInfo`、`DDLReorgMeta`、`HistoryInfo`、`TimeZoneLocation`、`TraceInfo`、`InvolvingSchemaInfo`、`AddForeignKeyInfo`，共 45 个结构体。三种 Go 类型有自己的 JSON 方法：
+
+| Go | Rust | JSON |
+|---|---|---|
+| `*terror.Error`（= `errors.Error`） | `Option<tidb_base::Error>` | `MarshalJSON` / `UnmarshalJSON` 移植到 `tidb_base::errors`（go-dep `compatible_shim.go`）。编码：`{"class","code","message","rfccode"}`，`class` 由 RFC 码的组件名反查（未知为 0）。解码：先解码一个新的 `jsonError`；类型错误经 `errors.Trace` 返回，外层不加错误上下文（`addErrorContext` 只认 `*UnmarshalTypeError`）；`rfccode` 为空且 `class > 0` 时由旧的 class 拼出 `组件:code`。`null` 置 nil；其他值先分配（`indirect`），所以解码失败时字段是零值的 `errors.Error`。`errors.Error` 加了 `Default`（Go 的零值） |
+| `go.uber.org/atomic.Int64`（`DDLReorgMeta` 的 `Concurrency`、`BatchSize`、`MaxWriteSpeed`） | `i64` | 编码 `json.Marshal(i.Load())`。解码 `json.Unmarshal(b, &v)` 到新的 int64 再 `Store`：`null` 存 0（不同于普通 int64 字段的"不变"）；错误由 `UnmarshalJSON` 返回，终止解码，类型错误带字段上下文 |
+| `json.RawMessage`（`Job.RawArgs`、`SubJob.RawArgs`） | `Option<Vec<u8>>` | 解码保留输入中该值的原始字节（空白、转义原样；`null` 得到字节 `null` 而不是 nil）：`Raw` 的字符串、数组、对象带上输入中的范围（`Span`），生成的 `unmarshal_json` 对含 RawMessage 的类型用 `Decoder::with_source`。编码：`appendCompact(escapeHTML)`，去掉字符串外的空白，转义 `<`、`>`、`&`、U+2028、U+2029，其余原样 |
+
+不进 JSON、在 Rust 中没有对应字段的：`Job.Mu`（`sync.Mutex`）、`SubJob.JobArgs`（非空接口，`json:"-"`）、`Job.args` / `SubJob.args`（未导出，只由 X 的 `FillArgs` / `decodeArgs` 填写）。`Job.Clone`、`SubJob.Clone` 属于 X，两者派生 `Clone`。
+
 ### 3.6 `IndexInfo.ConditionExpr`
 
 调用 parser 解析部分索引的条件。tidb-rs 的 parser 是 PoC 移植（D02.2），返回 PoC 的 AST；标为 L2。
@@ -112,20 +124,31 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
 ## 4. 已知差异
 
 1. `[]*T` 中的 `null` 元素：Go 得到 nil 指针，重新编码为 `null`；Rust 按值持有元素，得到零值。这个偏离成立的**前提**是 Go 写出的 meta 中不会有 `null` 元素：`TableInfo.Columns`、`Indices` 等由 DDL 代码填写，从不放 nil。如果真有，Go 的读路径在遍历时就会对 nil 解引用而 panic（例如 `TableInfo.Cols()`、`FindColumnByID`），而 Rust 得到一个零值的列继续运行，所以两边本来就不可能一致。govec 在这类记录的 `out` 上标记 `"known_deviation": "nil-ptr-elem"`；回放把它们单独计数（当前 5 条，都来自变异），不当作不一致，但如果某条标记的记录不再不同，测试就失败（偏离被修好，或者标记过期了）。
+   - 这类记录同时带有 `"ported"`：把 nil 元素换成 `new(T)` 后 Go 的 `Marshal` 输出，即移植版应有的输出；回放要求 Rust 的输出与它严格相等（Part 1 评审建议），所以同一条记录中的其他差异不会被掩盖。
    - 同类的另一处（D02.3 §4 第 3 条）：同一个切片字段在一个对象中出现三次以上、中间一次更短时，Go 在底层数组的容量内"复活"旧元素，Rust 截断后重新填充。当前向量中没有命中。
 2. `time.Time.UnmarshalJSON`：Go 解析引号之间的**原始字节**，不处理 JSON 转义（go.dev/issue/47353，Go 自己的 TODO）；Rust 用解码后的字符串。只有时间串里写了 JSON 转义（如 `\u0032024-…`）时结果不同，Go 写出的 JSON 不会这样。其余与 Go 相同：Go 1.25 的 `parseStrictRFC3339` 在快速路径失败时就是 `time.Parse(RFC3339)`（严格复查被禁用，所以一位数的小时、逗号小数点、`+24:00` 都被接受），这条回退连同 `ParseError` 的消息一起移植了（`tidb_base::gostd::time`）。数字时区用固定时区而不是 `Local`，`MarshalJSON` 的输出相同。
 3. `Clone` / `Copy`：Go 浅拷贝共享指针，Rust 复制（3.5）。`DBInfo.Copy` 复制表信息而不是共享，标为 L2。
 4. `TableInfo.GetNonTempColumns` 的结果顺序：Go 遍历 map，顺序随机；Rust 按列名排序（M-MAPORDER）。向量排序后比较。
 5. JSON 语法错误的消息文本不移植（D02.3 3.1）。
+6. `Job.Mu`：Go 用它保护 `RowCount` 和 reorg 警告，防止 DDL worker 并发修改；Rust 不持有这个锁，`GetRowCount`、`GetWarnings` 借用 `&self`（L2）。tidb-rs 只读取自己解码的 job。
+7. `Job.String` 的 `ArgLen` 恒为 0：Rust 不持有 `Job.args`（L2）。读路径上 Go 解码出的 job 也不填 `args`，所以输出相同。
+8. `atomic.Int64` 在 Rust 中是普通 `i64`（L2，见 3.7）：`ADMIN ALTER DDL JOBS` 的并发修改发生在 Go TiDB 中；JSON 形式与 Go 相同。
+9. `json.RawMessage` 的字符串里有无效 UTF-8 时，Go 的 `Marshal` 原样写出这些字节，Rust 的输出是 `String`，写成 U+FFFD。Go 自己写出的 job 不会有无效 UTF-8（`Marshal` 已替换）。
 
 ## 5. 验收
 
-- converge：`matched 139/153`，缺的 14 个是第 2 节列出的 Part 2 函数，tracker 的 `model` 领域把它们登记为豁免并写明理由。
-- govec `model` 领域 63,366 条记录（种子 1618，按 Lucky 的评审放大），arm64 和 amd64 都回放通过（5 条已知偏离，见第 4 节第 1 条）：
+- converge：`matched 153/153`（Part 1 为 139/153，Part 2 去掉了 14 个豁免）。
+- govec `model` 领域：Part 1 合并时 63,366 条；Part 2 加入 job 相关的 8 个结构体后为 62,826 条（随机值按类型轮转，表的方法记录相应减少），arm64 和 amd64 都回放通过（9 条已知偏离，见第 4 节第 1 条）。Part 1 的组成：
   - roundtrip：从 v8.5.8 集群导出的 866 份 meta（857 张表、9 个库；DDL 见 tracker `govec/domains/testdata/model_cluster_ddl.sql`，覆盖全部列类型、分区、placement、TTL、视图、序列、外键、check 约束、资源组），每个结构体的随机值共 15,000 份，对象层的变异 15,000 份（删键、重复键、改大小写、未知键、错误类型、超范围数字、`null`），Lucky 的 `luckyMutate` 20,000 份（任意节点包括数组元素的边界字面量、interface{} 字段、折叠键、重复键）；
   - 时间 68 条：`Time.UnmarshalJSON` 的各种合法与非法串（含 Go 宽松接受的形式）、`Time.MarshalJSON` 的年份与时区范围错误；
   - into 3,000 条：解码到已有值；另有 61 条出错路径记录（§3.3 的表）；
   - 方法 3,800 余条：表、列、索引、分区、placement、资源组、外键和其他函数，以及 Go 测试 `TestDefaultValue`、`TestPlacementSettingsString` 的用例；
   - NaN / ±Inf 默认值的 `Marshal` 错误；
   - 其中 8,537 条 Go 返回错误。
+- Part 2 新增：
+  - 结构体 `Job`、`SubJob`、`MultiSchemaInfo`、`DDLReorgMeta`、`HistoryInfo`、`TimeZoneLocation`、`TraceInfo`、`InvolvingSchemaInfo` 参与 roundtrip、变异与 into（随机值中有 `errors.Normalize` 生成的 terror、各种 atomic 值与 RawMessage）；
+  - `job` 400 条（`Job.Decode` 与各方法；`Job.String` 中本地时区的开始时间换成 `<T>`，另给 UTC 形式）、`job_strings` 136 条、`reorg` 80 条、`need_restored` 249 条（新 collation 关与开）；
+  - 32 条出错路径记录：`map[ErrorID]*terror.Error` 的值 `UnmarshalJSON` 出错（之前的项保留、该项与之后的成员丢弃）、`null` 值、旧 class、解码进已有的值；`atomic.Int64` 的 `null`、类型错误、范围；`terror.Error` 的各种非对象值、折叠键、重复键；`RawMessage` 的空白与转义、`null`、标量、子 job、重复键；`HistoryInfo` 的无 tag 键；`[]*SubJob` 的 null 元素。
+  - 反证：分别让 RawMessage 忽略原始字节、terror 的错误带上外层上下文、map 在值出错后仍存入、atomic 的 `null` 保持原值，回放分别报 3、149、65、1 条不一致。
+- `tidb-base` 单元测试 `tests/json_map_unmarshaler.rs`：通用 map 解码器在值的 `UnmarshalJSON` 致命出错时的状态，期望值取自 Go。
 - clippy `-D warnings`、fmt、`check_layers --blocks`、`cargo test --workspace`。

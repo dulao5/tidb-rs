@@ -14,8 +14,15 @@ Both targets have the same records (the CI artifact differs from the local arm64
 the header); the per-target layout only follows the tracker's.
 
 Records marked `"known_deviation": "nil-ptr-elem"` (a null element of a `[]*T`, spec D06.1
-§4.1) must differ from Go and are counted apart; the test fails on any other mismatch and on a
-marked record that no longer differs.
+§4.1) must differ from Go, are counted apart, and must equal their `"ported"` output exactly
+(Go's `Marshal` after the nil elements are replaced by `new(T)`); the test fails on any other
+mismatch and on a marked record that no longer differs.
+
+Size: about 13 MB per target (Part 1: 11 MB; before the review amplification: 1.6 MB), so each
+regeneration adds about 26 MB to the history of both repositories. Acceptable for now. If other
+domains grow the same way, the option is a small fixed set committed here and the amplified set
+only generated and replayed in CI (that needs Go and the TiDB module in the tidb-rs CI, so it is
+not done yet).
 
 Record format and replay rules: tracker `govec/README.md` ("model") and the header of
 `govec/domains/model.go`. Replayed by `crates/model/tests/govec_model.rs`. To update, copy the
