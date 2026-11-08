@@ -5,8 +5,8 @@
 //! TiDB-like retry budgets. Errors are mapped into [`Error`].
 //!
 //! ```no_run
-//! # async fn demo() -> tidb_kv::Result<()> {
-//! let client = tidb_kv::KvClient::connect(vec!["127.0.0.1:2379".to_owned()]).await?;
+//! # async fn demo() -> poc_kv::Result<()> {
+//! let client = poc_kv::KvClient::connect(vec!["127.0.0.1:2379".to_owned()]).await?;
 //! let ts = client.current_ts().await?;
 //! let mut snapshot = client.snapshot(ts);
 //! let value = snapshot.get(b"some key".to_vec()).await?;

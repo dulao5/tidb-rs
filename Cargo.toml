@@ -1,17 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/server",
+  "crates/poc/server",
   "crates/mysql-protocol",
   "crates/parser",
   "crates/query-smoke",
-  "crates/kv",
+  "crates/poc/kv",
   "crates/meta",
   "crates/distsql",
   "crates/sql",
-  "crates/executor",
-  "crates/session",
-  "crates/domain",
+  "crates/poc/executor",
+  "crates/poc/session",
+  "crates/poc/domain",
   "crates/metrics",
   "crates/types",
   "crates/base",
@@ -95,15 +95,15 @@ tikv_util = { path = "third_party/tikv-shims/tikv_util" }
 tracker = { path = "third_party/tikv-shims/tracker" }
 # First-party crates.
 tidb-distsql = { path = "crates/distsql" }
-tidb-domain = { path = "crates/domain" }
-tidb-kv = { path = "crates/kv" }
+poc-domain = { path = "crates/poc/domain" }
+poc-kv = { path = "crates/poc/kv" }
 tidb-meta = { path = "crates/meta" }
 tidb-metrics = { path = "crates/metrics" }
 tidb-mysql-protocol = { path = "crates/mysql-protocol" }
 tidb-parser = { path = "crates/parser" }
 tidb-sql = { path = "crates/sql" }
-tidb-executor = { path = "crates/executor" }
-tidb-session = { path = "crates/session" }
+poc-executor = { path = "crates/poc/executor" }
+poc-session = { path = "crates/poc/session" }
 tidb-types = { path = "crates/types" }
 tidb-base = { path = "crates/base" }
 tidb-runtime = { path = "crates/runtime" }

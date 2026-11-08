@@ -8,7 +8,7 @@
 //!
 //! ```sh
 //! TIDB_RS_PD=127.0.0.1:27379 TIDB_RS_TIDB_PORT=29000 TIDB_RS_SLOW=1 \
-//!     cargo test -p tidb-server --test schema_sync_process -- --nocapture --test-threads 1
+//!     cargo test -p poc-server --test schema_sync_process -- --nocapture --test-threads 1
 //! ```
 
 use std::process::Child;

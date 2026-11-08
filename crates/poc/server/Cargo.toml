@@ -1,10 +1,15 @@
 [package]
-name = "tidb-server"
+name = "poc-server"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+
+# N0 §5: the package is poc-server, the binary keeps its name.
+[[bin]]
+name = "tidb-server"
+path = "src/main.rs"
 
 [dependencies]
 bytes = { workspace = true }
@@ -14,12 +19,12 @@ hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "http2", "server-auto", "tokio"] }
 serde_json = { workspace = true }
 tidb-distsql = { workspace = true }
-tidb-domain = { workspace = true }
-tidb-kv = { workspace = true }
+poc-domain = { workspace = true }
+poc-kv = { workspace = true }
 tidb-meta = { workspace = true }
 tidb-metrics = { workspace = true }
-tidb-mysql-protocol = { path = "../mysql-protocol" }
-tidb-session = { workspace = true }
+tidb-mysql-protocol = { path = "../../mysql-protocol" }
+poc-session = { workspace = true }
 # N3 runtime: ExecPool, statement admission, stall detection.
 tidb-runtime = { workspace = true }
 tikv-jemallocator = { workspace = true }

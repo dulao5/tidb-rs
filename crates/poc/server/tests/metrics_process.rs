@@ -10,7 +10,7 @@
 //!
 //! ```sh
 //! TIDB_RS_PD=127.0.0.1:28379 TIDB_RS_TIDB_PORT=30000 \
-//!     cargo test -p tidb-server --test metrics_process -- --nocapture --test-threads 1
+//!     cargo test -p poc-server --test metrics_process -- --nocapture --test-threads 1
 //! ```
 
 use std::io::Read;

@@ -1,5 +1,5 @@
 [package]
-name = "tidb-kv"
+name = "poc-kv"
 version = "0.0.0"
 description = "Thin snapshot-read wrapper over tikv-client: TSO, point gets, scans and coprocessor requests"
 edition.workspace = true

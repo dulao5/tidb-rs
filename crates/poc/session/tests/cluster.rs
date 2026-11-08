@@ -11,8 +11,10 @@
 
 use std::process::Command;
 
+use poc_kv::KvClient;
+use poc_session::Factory;
+use poc_session::Shared;
 use tidb_distsql::DagContext;
-use tidb_kv::KvClient;
 use tidb_meta::SchemaCache;
 use tidb_mysql_protocol::ConnectionInfo;
 use tidb_mysql_protocol::Credential;
@@ -20,8 +22,6 @@ use tidb_mysql_protocol::Response;
 use tidb_mysql_protocol::SessionFactory;
 use tidb_mysql_protocol::SessionHandler;
 use tidb_mysql_protocol::Value;
-use tidb_session::Factory;
-use tidb_session::Shared;
 
 const DB: &str = "tidb_rs_session_it";
 
@@ -74,7 +74,7 @@ async fn first_statement_after_ddl_takes_the_checked_path() {
     );
     let kv = KvClient::connect(vec![pd]).await.unwrap();
     let schema = SchemaCache::new(kv.clone());
-    let new_collation = tidb_session::detect_new_collation(&kv, &schema)
+    let new_collation = poc_session::detect_new_collation(&kv, &schema)
         .await
         .unwrap();
     let factory = Factory::new(Shared {

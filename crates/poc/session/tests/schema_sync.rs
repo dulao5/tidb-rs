@@ -18,11 +18,14 @@ use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
 
+use poc_domain::SchemaSync;
+use poc_domain::ServerInfo;
+use poc_domain::SyncConfig;
+use poc_kv::KvClient;
+use poc_session::Factory;
+use poc_session::Session;
+use poc_session::Shared;
 use tidb_distsql::DagContext;
-use tidb_domain::SchemaSync;
-use tidb_domain::ServerInfo;
-use tidb_domain::SyncConfig;
-use tidb_kv::KvClient;
 use tidb_meta::SchemaCache;
 use tidb_mysql_protocol::ConnectionInfo;
 use tidb_mysql_protocol::Credential;
@@ -30,9 +33,6 @@ use tidb_mysql_protocol::Response;
 use tidb_mysql_protocol::SessionFactory;
 use tidb_mysql_protocol::SessionHandler;
 use tidb_mysql_protocol::Value;
-use tidb_session::Factory;
-use tidb_session::Session;
-use tidb_session::Shared;
 
 const DB: &str = "tidb_rs_sync_it";
 
@@ -189,7 +189,7 @@ async fn setup(listening_port: u32) -> Option<Env> {
     );
     let kv = KvClient::connect(vec![pd.clone()]).await.unwrap();
     let schema = SchemaCache::new(kv.clone());
-    let new_collation = tidb_session::detect_new_collation(&kv, &schema)
+    let new_collation = poc_session::detect_new_collation(&kv, &schema)
         .await
         .unwrap();
     let dag = DagContext {

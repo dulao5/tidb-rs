@@ -13,17 +13,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
+use poc_domain::SchemaSync;
+use poc_domain::ServerInfo;
+use poc_domain::SyncConfig;
+use poc_kv::KvClient;
+use poc_session::Factory;
+use poc_session::Shared;
 use tidb_distsql::DagContext;
-use tidb_domain::SchemaSync;
-use tidb_domain::ServerInfo;
-use tidb_domain::SyncConfig;
-use tidb_kv::KvClient;
 use tidb_meta::SchemaCache;
 use tidb_mysql_protocol::constants::auth_plugin;
 use tidb_mysql_protocol::tls::{self, TlsConfig};
 use tidb_mysql_protocol::{Credential, Server, ServerConfig};
-use tidb_session::Factory;
-use tidb_session::Shared;
 use tracing::{error, info, warn};
 
 // Process-wide allocator: jemalloc (A1 / P0 decision D7), the same one the benchmarks use.
@@ -149,11 +149,11 @@ fn main() {
         ..ServerConfig::default()
     };
     tidb_metrics::init(&tidb_metrics::ServerFacts {
-        version: tidb_domain::serverinfo::version_string()
+        version: poc_domain::serverinfo::version_string()
             .split_once("-TiDB-")
             .map(|(_, v)| v.to_owned())
             .unwrap_or_default(),
-        git_hash: tidb_domain::serverinfo::GIT_HASH.to_owned(),
+        git_hash: poc_domain::serverinfo::GIT_HASH.to_owned(),
         maxprocs: worker_threads(),
     });
     let runtime = match tidb_runtime::Runtime::new(tidb_runtime::RuntimeConfig {
@@ -189,7 +189,7 @@ fn main() {
         }
     };
     let pool = runtime.pool().clone();
-    tidb_kv::register_client_metrics();
+    poc_kv::register_client_metrics();
     let result = runtime.block_on(async move {
         // Bind the status port first: its real port is what the server info advertises.
         let status_listener = if args.status_port == 0 {
@@ -215,7 +215,7 @@ fn main() {
             .await
             .map_err(|e| std::io::Error::other(format!("connect to PD {:?}: {e}", args.pd)))?;
         let schema = SchemaCache::new(kv.clone());
-        let new_collation = tidb_session::detect_new_collation(&kv, &schema)
+        let new_collation = poc_session::detect_new_collation(&kv, &schema)
             .await
             .map_err(|e| std::io::Error::other(format!("read mysql.tidb: {e}")))?;
         info!(pd = ?args.pd, new_collation, "connected to the cluster");
@@ -252,14 +252,14 @@ fn main() {
             tls_enabled: config.tls.is_some(),
         });
         if args.stmt_timing > 0 {
-            tidb_session::timing::set_enabled(true);
+            poc_session::timing::set_enabled(true);
             let every = std::time::Duration::from_secs(args.stmt_timing);
             pool.spawn("stmt-timing", async move {
                 let mut tick = tokio::time::interval(every);
                 tick.tick().await;
                 loop {
                     tick.tick().await;
-                    info!("statement timing\n{}", tidb_session::timing::report());
+                    info!("statement timing\n{}", poc_session::timing::report());
                 }
             });
         }
@@ -268,7 +268,7 @@ fn main() {
         if let Some(status_listener) = status_listener {
             let info = status::StatusInfo {
                 version: config.server_version.clone(),
-                git_hash: tidb_domain::serverinfo::GIT_HASH.to_owned(),
+                git_hash: poc_domain::serverinfo::GIT_HASH.to_owned(),
             };
             pool.spawn(
                 "status-server",

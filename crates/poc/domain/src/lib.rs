@@ -37,7 +37,7 @@ pub enum Error {
     #[error("etcd request timed out")]
     Timeout,
     #[error(transparent)]
-    Kv(#[from] tidb_kv::Error),
+    Kv(#[from] poc_kv::Error),
     #[error(transparent)]
     Meta(#[from] tidb_meta::Error),
     #[error("{0}")]

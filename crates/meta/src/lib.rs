@@ -23,7 +23,7 @@ pub use crate::reader::MetaReader;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Kv(#[from] tidb_kv::Error),
+    Kv(#[from] poc_kv::Error),
     /// A meta value could not be decoded.
     #[error("corrupt meta: {0}")]
     Corrupt(String),

@@ -2,7 +2,7 @@
 
 use std::ops::Bound;
 
-use tidb_kv::KeyRange;
+use poc_kv::KeyRange;
 use tidb_query_datatype::codec::table;
 
 /// A range of integer handles. `Unbounded` on either side means `i64::MIN` / `i64::MAX`.
