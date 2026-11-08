@@ -207,6 +207,84 @@ mod go_errors {
     /// ErrJSONVacuousPath is returned when path is empty
     pub static ErrJSONVacuousPath: LazyLock<Error> =
         LazyLock::new(|| ClassTypes.new_std(errno::ErrJSONVacuousPath));
+    /// ErrDataTooLong is returned when converts a string value that is longer than field type length.
+    pub static ErrDataTooLong: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrDataTooLong));
+    /// ErrIllegalValueForType is returned when value of type is illegal.
+    pub static ErrIllegalValueForType: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrIllegalValueForType));
+    /// ErrDivByZero is return when do division by 0.
+    pub static ErrDivByZero: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrDivisionByZero));
+    /// ErrTooBigDisplayWidth is return when display width out of range for column.
+    pub static ErrTooBigDisplayWidth: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigDisplaywidth));
+    /// ErrTooBigFieldLength is return when column length too big for column.
+    pub static ErrTooBigFieldLength: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigFieldlength));
+    /// ErrTooBigSet is returned when too many strings for column.
+    pub static ErrTooBigSet: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigSet));
+    /// ErrTooBigScale is returned when type DECIMAL/NUMERIC scale is bigger than mysql.MaxDecimalScale.
+    pub static ErrTooBigScale: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigScale));
+    /// ErrTooBigPrecision is returned when type DECIMAL/NUMERIC or DATETIME precision is bigger than mysql.MaxDecimalWidth or types.MaxFsp
+    pub static ErrTooBigPrecision: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigPrecision));
+    /// ErrBadNumber is return when parsing an invalid binary decimal number.
+    pub static ErrBadNumber: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrBadNumber));
+    /// ErrInvalidFieldSize is returned when the precision of a column is out of range.
+    pub static ErrInvalidFieldSize: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrInvalidFieldSize));
+    /// ErrMBiggerThanD is returned when precision less than the scale.
+    pub static ErrMBiggerThanD: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrMBiggerThanD));
+    /// ErrDuplicatedValueInType is returned when enum column has duplicated value.
+    pub static ErrDuplicatedValueInType: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrDuplicatedValueInType));
+    /// ErrCastAsSignedOverflow is returned when positive out-of-range integer, and convert to it's negative complement.
+    pub static ErrCastAsSignedOverflow: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrCastAsSignedOverflow));
+    /// ErrCastNegIntAsUnsigned is returned when a negative integer be casted to an unsigned int.
+    pub static ErrCastNegIntAsUnsigned: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrCastNegIntAsUnsigned));
+    /// ErrInvalidYear is returned when the input value is not a valid year.
+    pub static ErrInvalidYear: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrInvalidYear));
+    /// ErrInvalidWeekModeFormat is returned when the week mode is wrong.
+    pub static ErrInvalidWeekModeFormat: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrInvalidWeekModeFormat));
+    /// ErrWrongFieldSpec is returned when the column specifier incorrect.
+    pub static ErrWrongFieldSpec: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrWrongFieldSpec));
+    /// ErrPartitionStatsMissing is returned when the partition-level stats is missing and the build global-level stats fails.
+    pub static ErrPartitionStatsMissing: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrPartitionStatsMissing));
+    /// ErrPartitionColumnStatsMissing is returned when the partition-level column stats is missing and the build global-level stats fails.
+    pub static ErrPartitionColumnStatsMissing: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrPartitionColumnStatsMissing));
+    /// ErrSyntax (`ClassTypes.NewStdErr(mysql.ErrParse, mysql.MySQLErrName[mysql.ErrSyntax])`).
+    pub static ErrSyntax: LazyLock<Error> = LazyLock::new(|| {
+        ClassTypes.new_std_err(
+            mysql::ErrParse,
+            mysql::MySQLErrName.get(&mysql::ErrSyntax).expect("ErrSyntax has a message"),
+        )
+    });
+    /// ErrWrongValue2 (`ClassTypes.NewStdErr(mysql.ErrWrongValue, mysql.MySQLErrName[mysql.ErrWrongValue])`).
+    pub static ErrWrongValue2: LazyLock<Error> = LazyLock::new(|| {
+        ClassTypes.new_std_err(
+            mysql::ErrWrongValue,
+            mysql::MySQLErrName.get(&mysql::ErrWrongValue).expect("ErrWrongValue has a message"),
+        )
+    });
+    /// ErrWrongValueForType (`ClassTypes.NewStdErr(mysql.ErrWrongValueForType, mysql.MySQLErrName[mysql.ErrWrongValueForType])`).
+    pub static ErrWrongValueForType: LazyLock<Error> = LazyLock::new(|| {
+        ClassTypes.new_std_err(
+            mysql::ErrWrongValueForType,
+            mysql::MySQLErrName.get(&mysql::ErrWrongValueForType).expect("ErrWrongValueForType has a message"),
+        )
+    });
     /// ErrTimestampInDSTTransition is returned if the timestamp is in a Daylight Saving Time transition
     pub static ErrTimestampInDSTTransition: LazyLock<Error> =
         LazyLock::new(|| ClassExecutor.new_std(errno::ErrTimeStampInDSTTransition));
