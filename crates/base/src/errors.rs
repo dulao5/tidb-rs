@@ -114,6 +114,10 @@ enum Repr {
     Shared(&'static Inner),
 }
 
+// `Result<i64, Error>` is two words: the error is a tagged pointer (owned or shared). A
+// change that grows it shows up on every fallible hot path (D01.1 review).
+const _: () = assert!(std::mem::size_of::<Result<i64, Error>>() == 16);
+
 /// The fields of [`Error`] (boxed: `Result<T, Error>` stays small). Not part of the API:
 /// the fields are private, use the methods of [`Error`].
 #[doc(hidden)]
