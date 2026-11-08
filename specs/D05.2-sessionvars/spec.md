@@ -103,6 +103,9 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 3. 全局值快照在 P1–P2 是"默认值 + 实例覆盖"的桩（§2.2）。
 4. SET GLOBAL 的持久化：负责人已决定 (c)（#58，设计见 §6）；在 §6 的写路径合并之前，PR A 对需要持久化的变量暂时报"不支持"（过渡行为），INSTANCE 作用域的变量与 Go 相同。实现为 `SessionVars::set_global_sys_var`（Go 的对应物是 session 包的 `SetGlobalSysVar`，块 D05.3），错误是 `ErrNotSupportedYet`（1235），参数为 `SET GLOBAL on tidb-rs; run it on Go TiDB`。
 5. 写路径字段（X）的 10 个 SetSession 钩子（`tidb_batch_insert` 等）只更新 `systems[]`，不设字段（字段在 D05.2 的划分中归 X）。
+6. 写全局 config 中非原子字段的 INSTANCE 钩子（Go 原地写字段）：Rust 的 config 是不可变快照（M-SNAP），钩子克隆 → 修改 → store；并发的写者由 `config::update_global_config` 的写锁串行化（`config::update_global` 也走这把锁），不同字段的修改不会丢失（B1 评审第 1 条；测试 `crates/base/tests/config_update.rs`）。
+7. 上游修复的移植（宪章 R1）：`fixcontrol.ParseToMap` 在冒号后为空时（`'123:'`），v8.5.8 取 `s[0]` 越界 panic；master 已修（pingcap/tidb#65884，`811a10e115`，未回移到 release-8.5）：值为 `""`，无错误、无 warning。Rust 移植修复（`// go-fix`），govec 用 tracker `govec/fixes` 的修复版生成这些记录（`src: "fix pingcap/tidb#65884"`）。
+8. 错误的客户端视图（M-ERR）：Go 的 server 向客户端写 `errors.Cause(err)`，`Wrap` / `Wrapf` / `Annotate` 的前缀只进 Go 的日志。Rust 不移植这些包装，返回客户端看到的错误；govec `sessionvars` 记录 `errors.Cause(err)`。目前涉及的只有 LDAP `ca_path` 钩子（`initializeCAPool`，#64）。已移植代码中其他 Wrap / Annotate 的位置（B1 评审第 3 条的核查）：`types` 的 enum / set 转换（D01.1，已按 cause 处理）；`util/cgroup` 的 `Wrapf`（D15.3，按拼接移植，但只在启动检测内存限制时出现在日志里，不到达客户端）；`rowcodec` checksum 编码的 `Annotatef`（D01.11，不到达客户端）。
 
 ## 5. 验证结果（PR A）
 

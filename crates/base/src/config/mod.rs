@@ -1140,8 +1140,22 @@ impl TikvTiKVClient {
 /// to restore to the original.
 // go: UpdateGlobal L1
 pub fn update_global(f: impl FnOnce(&mut Config)) {
-    let g = get_global_config();
-    let mut new_conf = Config::clone(&g);
+    update_global_config(f);
+}
+
+/// Serializes the read-modify-write updates of the global config ([`update_global_config`]).
+/// Go mutates fields of the shared `*Config` in place, so writers of different fields never
+/// lose each other's update; the Rust config is an immutable snapshot (M-SNAP), so a clone →
+/// modify → store must not interleave with another one.
+// glue: writer lock of the M-SNAP global config
+static ConfigWriteLock: Mutex<()> = Mutex::new(());
+
+/// Clones the global config, applies `f` and stores the copy, with concurrent writers
+/// serialized by [`ConfigWriteLock`] (no lost update; readers see either snapshot).
+// glue: in-place write of fields of the global *Config (M-SNAP)
+pub fn update_global_config(f: impl FnOnce(&mut Config)) {
+    let _guard = ConfigWriteLock.lock();
+    let mut new_conf = Config::clone(&get_global_config());
     f(&mut new_conf);
     store_global_config(Arc::new(new_conf));
 }

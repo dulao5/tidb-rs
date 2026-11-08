@@ -6,7 +6,10 @@
 
 #![allow(non_upper_case_globals)]
 
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering::SeqCst};
+
+use super::tidb_defs::*;
 
 /// Default TiDB system variable values.
 pub const DefTiDBEnableNoopFuncs: &str = super::variable::Off;
@@ -149,3 +152,271 @@ pub const DefMaxPagingSize: i64 = 50000;
 pub const DefTiDBOptRangeMaxSize: i64 = 64 << 20;
 /// Go: `logutil.DefaultSlowTxnThreshold` (pkg/util/logutil: 0).
 pub const DefaultSlowTxnThreshold: u64 = 0;
+
+/// Go: `DefTiDBForcePriority` (tidb_vars.go).
+pub const DefTiDBForcePriority: tidb_base::mysql::PriorityEnum = tidb_base::mysql::NoPriority;
+/// Go: `DefTiDBAutoAnalyzePartitionBatchSize` (tidb_vars.go).
+pub const DefTiDBAutoAnalyzePartitionBatchSize: i64 = tidb_base::mysql::PartitionCountLimit as i64;
+/// Go: `DefTiDBInstancePlanCacheMaxMemSize` (tidb_vars.go).
+pub const DefTiDBInstancePlanCacheMaxMemSize: i64 = 100 << 20;
+
+// ---------------------------------------------------------------- process-wide state of the SetGlobal / GetGlobal hooks (D05.2 T5)
+
+/// `go.uber.org/atomic.String`: a string read and replaced atomically.
+// glue: atomic.String (a lazily initialised RwLock<String>)
+pub struct GoAtomicString {
+    init: fn() -> String,
+    cell: std::sync::OnceLock<parking_lot::RwLock<String>>,
+}
+
+impl GoAtomicString {
+    /// A string initialised on first use with `init` (Go: `atomic.NewString(init)` at package init).
+    // glue: atomic.NewString
+    pub const fn new_lazy(init: fn() -> String) -> Self {
+        GoAtomicString {
+            init,
+            cell: std::sync::OnceLock::new(),
+        }
+    }
+
+    // glue: the lazily created cell
+    fn cell(&self) -> &parking_lot::RwLock<String> {
+        self.cell
+            .get_or_init(|| parking_lot::RwLock::new((self.init)()))
+    }
+
+    /// Load atomically loads the wrapped string.
+    // glue: atomic.String.Load
+    pub fn load(&self) -> String {
+        self.cell().read().clone()
+    }
+
+    /// Store atomically stores the passed string.
+    // glue: atomic.String.Store
+    pub fn store(&self, v: String) {
+        *self.cell().write() = v;
+    }
+}
+
+/// Process global variables.
+pub static ProcessGeneralLog: AtomicBool = AtomicBool::new(false);
+/// AnalyzeColumnOptions is a global variable that indicates the default column choice for ANALYZE.
+/// The value of this variable is a string that can be one of the following values:
+/// "PREDICATE", "ALL".
+/// The behavior of the analyze operation depends on the value of `tidb_persist_analyze_options`:
+/// 1. If `tidb_persist_analyze_options` is enabled and the column choice from the analyze options record is set to `default`,
+///    the value of `tidb_analyze_column_options` determines the behavior of the analyze operation.
+/// 2. If `tidb_persist_analyze_options` is disabled, `tidb_analyze_column_options` is used directly to decide
+///    whether to analyze all columns or just the predicate columns.
+pub static AnalyzeColumnOptions: GoAtomicString =
+    GoAtomicString::new_lazy(|| DefTiDBAnalyzeColumnOptions.to_owned());
+/// GlobalLogMaxDays.
+pub static GlobalLogMaxDays: LazyLock<AtomicI32> = LazyLock::new(|| {
+    AtomicI32::new(
+        tidb_base::config::get_global_config()
+            .log
+            .file
+            .file_log_config
+            .max_days as i32,
+    )
+});
+/// QueryLogMaxLen.
+pub static QueryLogMaxLen: AtomicI32 = AtomicI32::new(DefTiDBQueryLogMaxLen as _);
+/// EnablePProfSQLCPU.
+pub static EnablePProfSQLCPU: AtomicBool = AtomicBool::new(false);
+/// EnableBatchDML.
+pub static EnableBatchDML: AtomicBool = AtomicBool::new(false);
+/// EnableTmpStorageOnOOM.
+pub static EnableTmpStorageOnOOM: AtomicBool = AtomicBool::new(DefTiDBEnableTmpStorageOnOOM);
+/// ddlReorgWorkerCounter.
+/// (read and written with sync/atomic in Go)
+pub static ddlReorgWorkerCounter: AtomicI32 = AtomicI32::new(DefTiDBDDLReorgWorkerCount as _);
+/// ddlReorgBatchSize.
+/// (read and written with sync/atomic in Go)
+pub static ddlReorgBatchSize: AtomicI32 = AtomicI32::new(DefTiDBDDLReorgBatchSize as _);
+/// ddlFlashbackConcurrency.
+/// (read and written with sync/atomic in Go)
+pub static ddlFlashbackConcurrency: AtomicI32 = AtomicI32::new(DefTiDBDDLFlashbackConcurrency as _);
+/// ddlErrorCountLimit.
+/// (read and written with sync/atomic in Go)
+pub static ddlErrorCountLimit: AtomicI64 = AtomicI64::new(DefTiDBDDLErrorCountLimit as _);
+/// ddlReorgRowFormat.
+/// (read and written with sync/atomic in Go)
+pub static ddlReorgRowFormat: AtomicI64 = AtomicI64::new(DefTiDBRowFormatV2 as _);
+/// DDLReorgMaxWriteSpeed.
+pub static DDLReorgMaxWriteSpeed: AtomicI64 = AtomicI64::new(DefTiDBDDLReorgMaxWriteSpeed as _);
+/// maxDeltaSchemaCount.
+/// (read and written with sync/atomic in Go)
+pub static maxDeltaSchemaCount: AtomicI64 = AtomicI64::new(DefTiDBMaxDeltaSchemaCount as _);
+/// DDLSlowOprThreshold is the threshold for ddl slow operations, uint is millisecond.
+/// (a `uint32` read and written with sync/atomic)
+pub static DDLSlowOprThreshold: LazyLock<AtomicU32> = LazyLock::new(|| {
+    AtomicU32::new(
+        tidb_base::config::get_global_config()
+            .instance
+            .ddl_slow_opr_threshold,
+    )
+});
+/// ForcePriority.
+/// (an `int32` read and written with sync/atomic)
+pub static ForcePriority: AtomicI32 = AtomicI32::new(DefTiDBForcePriority.0 as i32);
+/// MaxOfMaxAllowedPacket.
+/// (read and written with sync/atomic in Go)
+pub static MaxOfMaxAllowedPacket: AtomicU64 = AtomicU64::new(1073741824 as _);
+/// ExpensiveQueryTimeThreshold.
+/// (read and written with sync/atomic in Go)
+pub static ExpensiveQueryTimeThreshold: AtomicU64 =
+    AtomicU64::new(DefTiDBExpensiveQueryTimeThreshold as _);
+/// ExpensiveTxnTimeThreshold.
+/// (read and written with sync/atomic in Go)
+pub static ExpensiveTxnTimeThreshold: AtomicU64 =
+    AtomicU64::new(DefTiDBExpensiveTxnTimeThreshold as _);
+/// MemoryUsageAlarmRatio.
+pub static MemoryUsageAlarmRatio: AtomicF64 = AtomicF64::new(DefMemoryUsageAlarmRatio);
+/// MemoryUsageAlarmKeepRecordNum.
+pub static MemoryUsageAlarmKeepRecordNum: AtomicI64 =
+    AtomicI64::new(DefMemoryUsageAlarmKeepRecordNum as _);
+/// EnableLocalTxn.
+pub static EnableLocalTxn: AtomicBool = AtomicBool::new(DefTiDBEnableLocalTxn);
+/// MaxTSOBatchWaitInterval.
+pub static MaxTSOBatchWaitInterval: AtomicF64 = AtomicF64::new(DefTiDBTSOClientBatchMaxWaitTime);
+/// EnableTSOFollowerProxy.
+pub static EnableTSOFollowerProxy: AtomicBool = AtomicBool::new(DefTiDBEnableTSOFollowerProxy);
+/// EnablePDFollowerHandleRegion.
+pub static EnablePDFollowerHandleRegion: AtomicBool =
+    AtomicBool::new(DefPDEnableFollowerHandleRegion);
+/// EnableBatchQueryRegion.
+pub static EnableBatchQueryRegion: AtomicBool = AtomicBool::new(DefTiDBEnableBatchQueryRegion);
+/// RestrictedReadOnly.
+pub static RestrictedReadOnly: AtomicBool = AtomicBool::new(DefTiDBRestrictedReadOnly);
+/// VarTiDBSuperReadOnly.
+pub static VarTiDBSuperReadOnly: AtomicBool = AtomicBool::new(DefTiDBSuperReadOnly);
+/// PersistAnalyzeOptions.
+pub static PersistAnalyzeOptions: AtomicBool = AtomicBool::new(DefTiDBPersistAnalyzeOptions);
+/// TableCacheLease.
+pub static TableCacheLease: AtomicI64 = AtomicI64::new(DefTiDBTableCacheLease as _);
+/// StatsLoadSyncWait.
+pub static StatsLoadSyncWait: AtomicI64 = AtomicI64::new(DefTiDBStatsLoadSyncWait as _);
+/// StatsLoadPseudoTimeout.
+pub static StatsLoadPseudoTimeout: AtomicBool = AtomicBool::new(DefTiDBStatsLoadPseudoTimeout);
+/// MemQuotaBindingCache.
+pub static MemQuotaBindingCache: AtomicI64 = AtomicI64::new(DefTiDBMemQuotaBindingCache as _);
+/// GCMaxWaitTime.
+pub static GCMaxWaitTime: AtomicI64 = AtomicI64::new(DefTiDBGCMaxWaitTime as _);
+/// StatsCacheMemQuota.
+pub static StatsCacheMemQuota: AtomicI64 = AtomicI64::new(DefTiDBStatsCacheMemQuota as _);
+/// OOMAction.
+pub static OOMAction: GoAtomicString = GoAtomicString::new_lazy(|| DefTiDBMemOOMAction.to_owned());
+/// MaxAutoAnalyzeTime.
+pub static MaxAutoAnalyzeTime: AtomicI64 = AtomicI64::new(DefTiDBMaxAutoAnalyzeTime as _);
+/// variables for plan cache
+pub static PreparedPlanCacheMemoryGuardRatio: AtomicF64 =
+    AtomicF64::new(DefTiDBPrepPlanCacheMemoryGuardRatio);
+/// EnableInstancePlanCache.
+pub static EnableInstancePlanCache: AtomicBool = AtomicBool::new(false);
+/// InstancePlanCacheReservedPercentage.
+pub static InstancePlanCacheReservedPercentage: AtomicF64 = AtomicF64::new(0.1);
+/// InstancePlanCacheMaxMemSize.
+pub static InstancePlanCacheMaxMemSize: AtomicI64 =
+    AtomicI64::new(DefTiDBInstancePlanCacheMaxMemSize as _);
+/// EnableDistTask.
+pub static EnableDistTask: AtomicBool = AtomicBool::new(DefTiDBEnableDistTask);
+/// EnableFastCreateTable.
+pub static EnableFastCreateTable: AtomicBool = AtomicBool::new(DefTiDBEnableFastCreateTable);
+/// DDLForce2Queue.
+pub static DDLForce2Queue: AtomicBool = AtomicBool::new(false);
+/// EnableNoopVariables.
+pub static EnableNoopVariables: AtomicBool = AtomicBool::new(DefTiDBEnableNoopVariables);
+/// EnableMDL.
+pub static EnableMDL: AtomicBool = AtomicBool::new(false);
+/// AutoAnalyzePartitionBatchSize.
+pub static AutoAnalyzePartitionBatchSize: AtomicI64 =
+    AtomicI64::new(DefTiDBAutoAnalyzePartitionBatchSize as _);
+/// AutoAnalyzeConcurrency.
+pub static AutoAnalyzeConcurrency: AtomicI32 = AtomicI32::new(DefTiDBAutoAnalyzeConcurrency as _);
+/// EnableFastReorg indicates whether to use lightning to enhance DDL reorg performance.
+pub static EnableFastReorg: AtomicBool = AtomicBool::new(DefTiDBEnableFastReorg);
+/// DDLDiskQuota is the temporary variable for set disk quota for lightning
+pub static DDLDiskQuota: AtomicU64 = AtomicU64::new(DefTiDBDDLDiskQuota as _);
+/// EnableForeignKey indicates whether to enable foreign key feature.
+pub static EnableForeignKey: AtomicBool = AtomicBool::new(true);
+/// EnableRCReadCheckTS.
+pub static EnableRCReadCheckTS: AtomicBool = AtomicBool::new(false);
+/// EnableRowLevelChecksum indicates whether to append checksum to row values.
+pub static EnableRowLevelChecksum: AtomicBool = AtomicBool::new(DefTiDBEnableRowLevelChecksum);
+/// LowResolutionTSOUpdateInterval.
+pub static LowResolutionTSOUpdateInterval: AtomicU32 =
+    AtomicU32::new(DefTiDBLowResolutionTSOUpdateInterval as _);
+/// EnableTTLJob.
+pub static EnableTTLJob: AtomicBool = AtomicBool::new(DefTiDBTTLJobEnable);
+/// TTLScanBatchSize.
+pub static TTLScanBatchSize: AtomicI64 = AtomicI64::new(DefTiDBTTLScanBatchSize as _);
+/// TTLDeleteBatchSize.
+pub static TTLDeleteBatchSize: AtomicI64 = AtomicI64::new(DefTiDBTTLDeleteBatchSize as _);
+/// TTLDeleteRateLimit.
+pub static TTLDeleteRateLimit: AtomicI64 = AtomicI64::new(DefTiDBTTLDeleteRateLimit as _);
+/// TTLScanWorkerCount.
+pub static TTLScanWorkerCount: AtomicI32 = AtomicI32::new(DefTiDBTTLScanWorkerCount as _);
+/// TTLDeleteWorkerCount.
+pub static TTLDeleteWorkerCount: AtomicI32 = AtomicI32::new(DefTiDBTTLDeleteWorkerCount as _);
+/// PasswordHistory.
+pub static PasswordHistory: AtomicI64 = AtomicI64::new(DefPasswordReuseHistory as _);
+/// PasswordReuseInterval.
+pub static PasswordReuseInterval: AtomicI64 = AtomicI64::new(DefPasswordReuseTime as _);
+/// IsSandBoxModeEnabled.
+pub static IsSandBoxModeEnabled: AtomicBool = AtomicBool::new(false);
+/// MaxUserConnectionsValue.
+pub static MaxUserConnectionsValue: AtomicU32 = AtomicU32::new(DefMaxUserConnections as _);
+/// MaxPreparedStmtCountValue.
+pub static MaxPreparedStmtCountValue: AtomicI64 = AtomicI64::new(DefMaxPreparedStmtCount as _);
+/// HistoricalStatsDuration.
+pub static HistoricalStatsDuration: AtomicI64 = AtomicI64::new(DefTiDBHistoricalStatsDuration); // time.Duration (ns)
+/// EnableHistoricalStatsForCapture.
+pub static EnableHistoricalStatsForCapture: AtomicBool =
+    AtomicBool::new(DefTiDBEnableHistoricalStatsForCapture);
+/// TTLRunningTasks.
+pub static TTLRunningTasks: AtomicI32 = AtomicI32::new(DefTiDBTTLRunningTasks as _);
+/// always set the default value to false because the resource control in kv-client is not inited
+/// It will be initialized to the right value after the first call of `rebuildSysVarCache`
+pub static EnableResourceControl: AtomicBool = AtomicBool::new(false);
+/// EnableResourceControlStrictMode.
+pub static EnableResourceControlStrictMode: AtomicBool = AtomicBool::new(true);
+/// EnableCheckConstraint.
+pub static EnableCheckConstraint: AtomicBool = AtomicBool::new(DefTiDBEnableCheckConstraint);
+/// SkipMissingPartitionStats.
+pub static SkipMissingPartitionStats: AtomicBool =
+    AtomicBool::new(DefTiDBSkipMissingPartitionStats);
+/// TiFlashEnablePipelineMode.
+pub static TiFlashEnablePipelineMode: AtomicBool =
+    AtomicBool::new(DefTiDBEnableTiFlashPipelineMode);
+/// ServiceScope.
+pub static ServiceScope: GoAtomicString = GoAtomicString::new_lazy(|| "".to_owned());
+/// SchemaVersionCacheLimit.
+pub static SchemaVersionCacheLimit: AtomicI64 = AtomicI64::new(DefTiDBSchemaVersionCacheLimit as _);
+/// CloudStorageURI.
+pub static CloudStorageURI: GoAtomicString = GoAtomicString::new_lazy(|| "".to_owned());
+/// IgnoreInlistPlanDigest.
+pub static IgnoreInlistPlanDigest: AtomicBool = AtomicBool::new(DefTiDBIgnoreInlistPlanDigest);
+/// TxnEntrySizeLimit.
+pub static TxnEntrySizeLimit: AtomicU64 = AtomicU64::new(DefTiDBTxnEntrySizeLimit as _);
+/// SchemaCacheSize.
+pub static SchemaCacheSize: AtomicU64 = AtomicU64::new(DefTiDBSchemaCacheSize as _);
+/// SchemaCacheSizeOriginText.
+pub static SchemaCacheSizeOriginText: GoAtomicString =
+    GoAtomicString::new_lazy(|| DefTiDBSchemaCacheSize.to_string());
+/// AccelerateUserCreationUpdate.
+pub static AccelerateUserCreationUpdate: AtomicBool =
+    AtomicBool::new(DefTiDBAccelerateUserCreationUpdate);
+/// AdvancerCheckPointLagLimit.
+pub static AdvancerCheckPointLagLimit: AtomicI64 =
+    AtomicI64::new(DefTiDBAdvancerCheckPointLagLimit); // time.Duration (ns)
+/// CircuitBreakerPDMetadataErrorRateThresholdRatio.
+pub static CircuitBreakerPDMetadataErrorRateThresholdRatio: AtomicF64 = AtomicF64::new(0.0);
+/// ConnectAttrsSize is the max aggregate byte size of connection attributes allowed per connection.
+/// Corresponds to performance_schema_session_connect_attrs_size. Default 4096.
+pub static ConnectAttrsSize: AtomicI64 = AtomicI64::new(DefConnectAttrsSize as _);
+
+/// `errors.RedactLogEnabled` (github.com/pingcap/errors): whether user data is redacted in
+/// error messages ("OFF", "ON", "MARKER"); written by the tidb_redact_log SetSession hook.
+// go-dep: github.com/pingcap/errors.RedactLogEnabled L1
+pub static RedactLogEnabled: GoAtomicString = GoAtomicString::new_lazy(|| "OFF".to_owned());

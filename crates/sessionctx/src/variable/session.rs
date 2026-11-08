@@ -41,6 +41,11 @@ pub struct StatementContext {
     /// StmtType is the statement type (`"Set"` for SET statements).
     pub stmt_type: String,
     warnings: Vec<SQLWarn>,
+    /// PrevLastInsertID is the last insert ID of a previous statement.
+    pub prev_last_insert_id: u64,
+    /// TiFlashEngineRemovedDueToStrictSQLMode indicates whether the TiFlash engine is
+    /// removed due to strict sql mode.
+    pub tiflash_engine_removed_due_to_strict_sql_mode: bool,
 }
 
 impl StatementContext {
@@ -102,6 +107,107 @@ pub struct SessionVars {
     pub time_zone: Option<Arc<Location>>,
     /// TLSConnectionState is the TLS state of the connection (only its presence is read here).
     pub tls_connection_state: Option<()>,
+    /// The non-scalar fields of Go's `SessionVars` that the session hooks use (D05.2 T6).
+    pub state: SessionState,
+}
+
+/// The non-scalar fields of Go's `SessionVars` the session hooks read or write (D05.2 T6).
+/// Go's map-typed sets (`map[kv.StoreType]struct{}`, `map[string]struct{}`) are ordered sets
+/// here (M-MAPORDER: only membership is observable).
+// glue: the non-scalar part of SessionVars (field names as in Go)
+#[derive(Clone, Debug)]
+pub struct SessionState {
+    /// status stands for the session status. e.g. in transaction or not, auto commit is on or off, and so on.
+    pub status: u32,
+    /// TxnCtx Should be reset on transaction finished.
+    pub txn_ctx: super::session_state::TransactionContext,
+    /// KVVars is the variables for KV storage.
+    pub kv_vars: super::session_state::KVVars,
+    /// txnIsolationLevelOneShot is used to implements "set transaction isolation level ..."
+    pub txn_isolation_level_one_shot: super::session_state::TxnIsolationLevelOneShot,
+    /// TxnReadTS is used for staleness transaction, it provides next staleness transaction startTS.
+    pub txn_read_ts: super::session_state::TxnReadTS,
+    /// IsolationReadEngines is used to isolation read, tidb only read from the stores whose engine type is in the engines.
+    pub isolation_read_engines: std::collections::BTreeSet<tidb_base::kv::StoreType>,
+    /// AllowFallbackToTiKV indicates the engine types whose unavailability triggers fallback to TiKV.
+    pub allow_fallback_to_tikv: std::collections::BTreeSet<tidb_base::kv::StoreType>,
+    /// PartitionPruneMode indicates how and when to prune partitions.
+    pub partition_prune_mode: String,
+    /// TxnScope indicates the scope of the transactions.
+    pub txn_scope: tidb_kv::txn_scope_var::TxnScopeVar,
+    /// Rng stores the rand_seed1 and rand_seed2 for Rand() function
+    pub rng: super::session_state::MysqlRng,
+    /// StatsLoadSyncWait indicates how long to wait for stats load before timeout.
+    pub stats_load_sync_wait: i64,
+    /// The bytes limit of MemTracker (`MemTracker.SetBytesLimit`).
+    pub mem_tracker_bytes_limit: i64,
+    /// OptimizerFixControl control some details of the optimizer behavior through the tidb_opt_fix_control variable.
+    pub optimizer_fix_control: HashMap<u64, String>,
+    /// runtimeFilterTypes the types of runtime filter.
+    pub runtime_filter_types: Vec<super::session_state::RuntimeFilterType>,
+    /// AnalyzeSkipColumnTypes indicates the column types whose statistics would not be collected when executing the ANALYZE command.
+    pub analyze_skip_column_types: std::collections::BTreeSet<String>,
+    /// SlowLogRules holds the slow log rules of the session.
+    pub slow_log_rules: super::session_state::SessionSlowLogRules,
+    /// RowEncoder is reused in session for encode row data (`RowEncoder.Enable`).
+    pub row_encoder_enable: bool,
+    /// LastQueryInfo keeps track the info of last query.
+    pub last_query_info: super::session_state::QueryInfo,
+    /// LastDDLInfo keeps track the info of last DDL.
+    pub last_ddl_info: super::session_state::LastDDLInfo,
+    /// SnapshotInfoschema is used with SnapshotTS (only whether it is set is kept).
+    pub snapshot_infoschema: bool,
+}
+
+impl Default for SessionState {
+    // go-part: NewSessionVars L2 (the non-scalar fields; the store engines come from config.IsolationRead.Engines)
+    fn default() -> Self {
+        use tidb_base::kv::{TiDB, TiFlash, TiKV};
+        let mut isolation_read_engines = std::collections::BTreeSet::new();
+        for engine in tidb_base::config::get_global_config()
+            .isolation_read
+            .engines
+            .iter()
+            .flatten()
+        {
+            if engine == TiFlash.name() {
+                isolation_read_engines.insert(TiFlash);
+            } else if engine == TiKV.name() {
+                isolation_read_engines.insert(TiKV);
+            } else if engine == TiDB.name() {
+                isolation_read_engines.insert(TiDB);
+            }
+        }
+        let txn_scope =
+            if !super::tidb_vars::EnableLocalTxn.load(std::sync::atomic::Ordering::SeqCst) {
+                tidb_kv::txn_scope_var::new_global_txn_scope_var()
+            } else {
+                tidb_kv::txn_scope_var::new_default_txn_scope_var()
+            };
+        SessionState {
+            status: u32::from(tidb_base::mysql::ServerStatusAutocommit),
+            txn_ctx: Default::default(),
+            kv_vars: Default::default(),
+            txn_isolation_level_one_shot: Default::default(),
+            txn_read_ts: Default::default(),
+            isolation_read_engines,
+            allow_fallback_to_tikv: Default::default(),
+            partition_prune_mode: super::tidb_defs::DefTiDBPartitionPruneMode.to_owned(),
+            txn_scope,
+            rng: super::session_state::MysqlRng::new_with_time(),
+            stats_load_sync_wait: super::tidb_vars::StatsLoadSyncWait
+                .load(std::sync::atomic::Ordering::SeqCst),
+            mem_tracker_bytes_limit: super::tidb_vars::DefTiDBMemQuotaQuery,
+            optimizer_fix_control: HashMap::new(),
+            runtime_filter_types: Vec::new(),
+            analyze_skip_column_types: Default::default(),
+            slow_log_rules: Default::default(),
+            row_encoder_enable: false,
+            last_query_info: Default::default(),
+            last_ddl_info: Default::default(),
+            snapshot_infoschema: false,
+        }
+    }
 }
 
 impl std::ops::Deref for SessionVars {
@@ -134,6 +240,7 @@ impl SessionVars {
             fields: super::session_fields::SessionVarsFields::default(),
             time_zone: None,
             tls_connection_state: None,
+            state: SessionState::default(),
         }
     }
 
@@ -229,19 +336,25 @@ impl SessionVars {
         &mut self,
         name: &str,
         val: &str,
-    ) -> Result<String, Error> {
+    ) -> (String, Result<(), Error>) {
         let Some(sv) = get_sys_var(name) else {
-            return Err(
-                ErrUnknownSystemVar.gen_with_stack_by_args(vec![Arg::from(name.to_owned())])
+            return (
+                String::new(),
+                Err(ErrUnknownSystemVar.gen_with_stack_by_args(vec![Arg::from(name.to_owned())])),
             );
         };
         let (val, err) = sv.validate(self, val, ScopeSession);
-        err?;
+        if let Err(e) = err {
+            return (String::new(), Err(e));
+        }
         // The map s.systems[sv.Name] is lazy initialized. If we directly read it, we might read empty result.
         // Since this code path is not a hot path, we directly call GetSessionOrGlobalSystemVar to get the value safely.
-        let old_v = self.get_session_or_global_system_var(sv.name)?;
-        sv.set_session_from_hook(self, &val)?;
-        Ok(old_v)
+        let old_v = match self.get_session_or_global_system_var(sv.name) {
+            Ok(v) => v,
+            Err(e) => return (String::new(), Err(e)),
+        };
+        let err = sv.set_session_from_hook(self, &val);
+        (old_v, err)
     }
 
     /// SetSystemVarWithoutValidation sets the value of a system variable for session scope.
@@ -340,6 +453,68 @@ impl SessionVars {
         self.allow_mpp_execution = on;
     }
 
+    /// SetStatusFlag sets the session server status variable.
+    /// If on is true sets the flag in session status,
+    /// otherwise removes the flag.
+    // The session owns its status, so no CAS loop is needed.
+    // go: SessionVars.SetStatusFlag L1
+    pub fn set_status_flag(&mut self, flag: u16, on: bool) {
+        if on {
+            self.state.status |= u32::from(flag);
+        } else {
+            self.state.status &= !u32::from(flag);
+        }
+    }
+
+    /// HasStatusFlag gets the session server status variable, returns true if it is on.
+    // go: SessionVars.HasStatusFlag L1
+    pub fn has_status_flag(&self, flag: u16) -> bool {
+        self.state.status & u32::from(flag) > 0
+    }
+
+    /// Status returns the server status.
+    // go: SessionVars.Status L1
+    pub fn status(&self) -> u16 {
+        self.state.status as u16
+    }
+
+    /// SetInTxn sets whether the session is in transaction.
+    /// It also updates the IsExplicit flag in TxnCtx if val is true.
+    // go: SessionVars.SetInTxn L1
+    pub fn set_in_txn(&mut self, val: bool) {
+        self.set_status_flag(tidb_base::mysql::ServerStatusInTrans, val);
+        if val {
+            self.state.txn_ctx.is_explicit = val;
+        }
+    }
+
+    /// InTxn returns if the session is in transaction.
+    // go: SessionVars.InTxn L1
+    pub fn in_txn(&self) -> bool {
+        self.has_status_flag(tidb_base::mysql::ServerStatusInTrans)
+    }
+
+    /// IsAutocommit returns if the session is set to autocommit.
+    // go: SessionVars.IsAutocommit L1
+    pub fn is_autocommit(&self) -> bool {
+        self.has_status_flag(tidb_base::mysql::ServerStatusAutocommit)
+    }
+
+    /// SetReplicaRead set SessionVars.replicaRead.
+    // go: SessionVars.SetReplicaRead L1
+    pub fn set_replica_read(&mut self, val: tidb_kv::option::ReplicaReadType) {
+        self.replica_read = val.0;
+    }
+
+    /// ChooseMppVersion indicates the mpp-version used to build mpp plan, if mpp-version is unspecified, use the latest version.
+    // go: SessionVars.ChooseMppVersion L1
+    pub fn choose_mpp_version(&self) -> i64 {
+        if self.mpp_version == tidb_kv::mpp::MppVersionUnspecified.0 {
+            return tidb_kv::mpp::get_newest_mpp_version().0;
+        }
+        self.mpp_version
+    }
+
     /// Location gets the time zone of the session.
     // glue: stand-in: D05.2, SessionVars.Location (timeutil.SystemLocation when unset)
     pub fn location(&self) -> Arc<Location> {
@@ -349,3 +524,28 @@ impl SessionVars {
         }
     }
 }
+
+// SessionVars: Send + !Sync (N2 §5 item 1, D05.2 T9): a session moves between runtime
+// threads but is used by one task at a time.
+// glue: compile-time assertions
+const _: () = {
+    // glue: compile-time assertion
+    const fn assert_send<T: Send>() {}
+    assert_send::<SessionVars>();
+};
+
+/// `SessionVars` is `!Sync`: this impl would be ambiguous with the blanket one if it were
+/// `Sync` (the usual compile-time negative assertion).
+// glue: compile-time assertion that SessionVars is not Sync
+#[allow(dead_code)]
+trait AmbiguousIfSync<A> {
+    // glue: assertion helper
+    fn some_item() {}
+}
+impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+#[allow(dead_code)]
+struct Invalid;
+impl<T: ?Sized + Sync> AmbiguousIfSync<Invalid> for T {}
+const _: fn() = || {
+    let _ = <SessionVars as AmbiguousIfSync<_>>::some_item;
+};
