@@ -43,7 +43,7 @@ use crate::codec::VarElemLen;
 use crate::codec::get_fixed_len;
 use crate::goslice::ColAlloc;
 use crate::goslice::GoSlice;
-use crate::goslice::growslice_cap;
+use tidb_base::gostd::runtime::growslice_cap;
 
 /// For varLenColumn (e.g. varchar), the accurate length of an element is unknown.
 /// Therefore, in the first executor.Next we use an experience value -- 8 (so it may make runtime.growslice)

@@ -338,6 +338,7 @@ pub mod conv;
 pub mod json;
 pub mod math;
 pub mod path;
+pub mod runtime;
 pub mod sort;
 pub mod strconv;
 pub mod time;

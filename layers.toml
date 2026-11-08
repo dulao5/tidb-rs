@@ -48,7 +48,6 @@ blocks = ["D01.7", "D01.10"]
 
 [crate.tidb-kv]
 rank = 5
-planned = true
 blocks = ["D07.0"]
 
 [crate.tidb-execdetails]
