@@ -69,7 +69,7 @@ Session（Send，同一时刻只有一个任务持有，&mut）
 
 N8 §8：§3.3（domain 的全局缓存、etcd 通知、30 秒兜底重读）属于 D06.5（P2）。P1–P2 之间，`GlobalVarsSnapshot` = **注册表默认值 + 实例覆盖（`SetSysVar`）**，作为桩登记在 tracker（`glue: stand-in: D06.5`）。接口按 D06.5 的需要定：domain 发布新快照（`ArcSwap`），会话取 `Arc`。
 
-**SET GLOBAL**（owner issue #58，按建议 (a) 推进）：
+**SET GLOBAL**（owner issue #58；负责人已决定方案 (c)，设计见 §6。下面是 PR A 的过渡行为）：
 - **INSTANCE 作用域的 27 个变量**：与 Go 完全相同。Go 的 `SET GLOBAL` 对它们只改本实例，在写表之前就返回（`session/session.go:1347`），从不持久化。tidb-rs 照此执行：校验 → SetGlobal 钩子 → 本实例生效（Lucky 的评审）。
 - **持久化的全局变量**：校验照常执行（错误与 Go 相同），校验通过后返回"不支持"，不写任何地方。若负责人选择 (b)，只影响这一个入口。
 
@@ -106,17 +106,19 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 
 ## 5. 验证结果（PR A）
 
-- **govec `sessionvars`**：41,447 条（`fresh` 1、`set` 30,939、`get` 945、`set_global` 9,482、`init` 80）。回放跳过仍有 pending 钩子的记录：29,152 条比对、0 条不一致，12,295 条跳过；钩子落地后自动开始比对，不需要重新生成。
-- **生成的确定性**：INSTANCE 变量的 SET GLOBAL 会改进程级配置，生成器在每条记录后用 SetGlobal 钩子恢复原值；`timestamp`（未设置时取当前时间）和 `rand_seed1/2`（会话随机数）的读回值记为 `<volatile>`。
+- **govec `sessionvars`**：41,447 条（`fresh` 1、`set` 30,939、`get` 945、`set_global` 9,482、`init` 80）。回放跳过仍有 pending 钩子的记录：36,046 条比对、0 条不一致，5,401 条跳过；钩子落地后自动开始比对，不需要重新生成。
+- **生成的确定性**：INSTANCE 变量的 SET GLOBAL 会改进程级配置，生成器在每条记录后用 SetGlobal 钩子恢复原值；`timestamp`（未设置时取当前时间）、`rand_seed1/2`（会话随机数）和依赖宿主机的 `version_compile_os` / `version_compile_machine` / `tidb_config` 的读回值记为 `<volatile>`；经 GetGlobal 钩子读回的值（读进程级状态，同一进程中前面的领域会改它）记为 `<global-hook>`，等 GetGlobal 移植时再配合状态重置生成。
 - **T11**：40 组随机设置，每组按正反两种顺序各生成一条；Go 的 40 组结果都与顺序无关，Rust 每条都与 Go 相同。
 - **反证**：
 
 | 弄坏的地方 | 不一致 |
 |---|--:|
-| SetSessionFromHook 不写别名的 systems[] | 72 |
-| GetSessionOrGlobalSystemVar 不把全局值懒加载进 systems[] | 1,004 |
+| SetSessionFromHook 不写别名的 systems[] | 112 |
+| GetSessionOrGlobalSystemVar 不把全局值懒加载进 systems[] | 1,070 |
 | 一个翻译出的钩子取反（`!tidb_opt_on`） | 22 |
-| SetSystemVarWithRelaxedValidation 不做 relaxed 校验 | 571 |
+| SetSystemVarWithRelaxedValidation 不做 relaxed 校验 | 837 |
+
+  去掉 INSTANCE 变量 SET GLOBAL 时的 SetGlobal 调用，回放**没有**发现：这些记录都因 SetGlobal 钩子 pending 被跳过，T5 之后才有覆盖。
 
 - **钩子清单**：`registry_matches_hand_written_hooks` 检查每个变量的五类钩子与 Go 的标志一致（已移植或 pending，Rust 没有 Go 没有的钩子）。当前：SetSession 227/273、GetSession 12/27、GetStateValue 3/6、SetGlobal 0/155、GetGlobal 0/134。
 
