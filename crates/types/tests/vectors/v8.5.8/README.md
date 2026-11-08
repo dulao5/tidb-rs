@@ -79,3 +79,21 @@ collations. The two targets have the same records. Replayed by `tests/govec_coll
 | `amd64/collate.jsonl.gz` sha256 | `abe9f09d0ad86e9138b193659733d3211032e708ecc43120d51b9362a3d12194` (CI linux/amd64, GOAMD64=v1) |
 | `arm64/collate.jsonl.gz` sha256 | `7f708d29d166268e0f74695f3fe2eb10614588ad68c5de3d1060f70f0a1aa22d` |
 | generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261109) |
+
+## json (block D01.5, exception A4)
+
+`<target>/json.jsonl.gz` are copied unmodified from tidb-rs-tracker
+`vectors/v8.5.8/<target>/json.jsonl.gz` (branch `govec/json-D01.5`): 94,691 records of
+`pkg/types` json_binary.go, json_binary_functions.go and json_path_expr.go: the literals of
+the three Go test files (`cmd/minelits`, src = test function), edge cases (`sys/deep`: texts
+nested 100–10001 deep with error precedence; `sys/dup`: parent paths with `**` or ranges),
+random texts and mutations, and big objects (`lucky/big`). No float fusion sites: the two
+files have identical records (the header differs).
+
+| | |
+|---|---|
+| tracker commit | `5901bcf` |
+| `amd64/json.jsonl.gz` sha256 | `861e31f80a5ed6f354a1f88afe4a044765d6e5405914f7fee7a3c94ca0f56cdc` (CI linux/amd64, GOAMD64=v1) |
+| `arm64/json.jsonl.gz` sha256 | `9dda7d728235c65cd8ae25647e7d013ffcde7d3029d4b5e5a233e37d4d663a33` |
+
+Replayed by `crates/types/tests/govec_json.rs`.
