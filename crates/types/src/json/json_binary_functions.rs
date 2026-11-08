@@ -122,9 +122,17 @@ impl BinaryJSON<'_> {
 
     // go: BinaryJSON.objectSearchKey L1
     pub(crate) fn object_search_key(&self, key: &[u8]) -> Option<BinaryJSON<'_>> {
-        let elem_count = self.get_elem_count();
-        let idx = sort_search(elem_count, |i| self.object_get_key(i) >= key);
-        if idx < elem_count && self.object_get_key(idx) == key {
+        // objectGetKey on the value bytes, dereferenced once for the whole search.
+        let v: &[u8] = &self.value;
+        let object_get_key = |i: usize| {
+            let e = headerSize + i * keyEntrySize;
+            let key_off = le_u32(&v[e..]) as usize;
+            let key_len = le_u16(&v[e + keyLenOff..]) as usize;
+            &v[key_off..key_off + key_len]
+        };
+        let elem_count = le_u32(v) as usize;
+        let idx = sort_search(elem_count, |i| compare_key(object_get_key(i), key).is_ge());
+        if idx < elem_count && compare_key(object_get_key(idx), key).is_eq() {
             return Some(self.object_get_val(idx));
         }
         None
@@ -842,6 +850,24 @@ pub(crate) fn quote_json_string(s: &[u8]) -> Vec<u8> {
 // go: jsonFinished L1
 fn json_finished(buf: &[BinaryJSON<'_>], one: bool) -> bool {
     one && !buf.is_empty()
+}
+
+/// Byte-wise comparison of object keys (Go's `string` comparison, `bytes.Compare`). Keys
+/// are mostly short, where a plain loop beats a call to `memcmp` (most of the time of a
+/// constant-path `Extract` went to it).
+// go-std: bytes.Compare L1
+#[inline]
+fn compare_key(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let n = a.len().min(b.len());
+    if n > 32 {
+        return a.cmp(b);
+    }
+    for i in 0..n {
+        if a[i] != b[i] {
+            return a[i].cmp(&b[i]);
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 /// `sort.Search(n, f)`: the smallest index in [0, n) at which f is true, or n.

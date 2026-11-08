@@ -32,6 +32,12 @@ fn medium() -> String {
     s
 }
 
+/// ~256 KB: an array of 64 medium documents.
+fn large() -> String {
+    let md = medium();
+    format!("[{}]", vec![md; 64].join(", "))
+}
+
 fn bench(c: &mut Criterion) {
     let (sm, md) = (small(), medium());
     let bj_md: BinaryJSON<'static> = j::parse_binary_json_from_string(md.as_bytes()).unwrap();
@@ -43,10 +49,18 @@ fn bench(c: &mut Criterion) {
     c.bench_function("parse_medium", |b| {
         b.iter(|| j::parse_binary_json_from_string(black_box(md.as_bytes())).unwrap())
     });
+    let lg = large();
+    let mut g = c.benchmark_group("large");
+    g.throughput(criterion::Throughput::Bytes(lg.len() as u64));
+    g.bench_function("parse_large", |b| {
+        b.iter(|| j::parse_binary_json_from_string(black_box(lg.as_bytes())).unwrap())
+    });
+    g.finish();
     c.bench_function("string_medium", |b| b.iter(|| black_box(&bj_md).string()));
     c.bench_function("extract_const_path", |b| {
         b.iter(|| black_box(&bj_md).extract(std::slice::from_ref(&path)))
     });
+    // tidb-rs has no process-wide path cache: compare with Go's parse_path_uncached.
     c.bench_function("parse_path", |b| {
         b.iter(|| j::parse_json_path_expr(black_box(b"$.key20.nested.a")).unwrap())
     });
