@@ -16,8 +16,8 @@
 //!    offsets are left out: they can make the accessors recurse without end, in Go too.
 //!
 //! Short by default; longer runs:
-//!   TIDB_TYPES_FUZZ_ITERS=2000000 cargo test -p tidb-types --test fuzz_json
-//! `TIDB_TYPES_FUZZ_SEED` picks the seed (printed on failure).
+//!   TIDB_TYPES_FUZZ_JSON_ITERS=2000000 cargo test -p tidb-types --test fuzz_json
+//! `TIDB_TYPES_FUZZ_JSON_SEED` picks the seed (printed on failure).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use tidb_types::json::{
@@ -158,8 +158,8 @@ fn is_overflow_panic(p: &(dyn std::any::Any + Send)) -> Option<String> {
 
 #[test]
 fn fuzz_json() {
-    let seed = env_u64("TIDB_TYPES_FUZZ_SEED", 0x6a73_6f6e);
-    let iters = env_u64("TIDB_TYPES_FUZZ_ITERS", 20_000);
+    let seed = env_u64("TIDB_TYPES_FUZZ_JSON_SEED", 0x6a73_6f6e);
+    let iters = env_u64("TIDB_TYPES_FUZZ_JSON_ITERS", 20_000);
     let mut rng = Rng(seed);
     let paths: Vec<JSONPathExpression> = ["$", "$[0]", "$.a", "$**[0]", "$[*]", "$.*", "$[last]"]
         .iter()

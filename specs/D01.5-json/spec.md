@@ -52,7 +52,7 @@ A4 允许"按 Rust 重新设计实现"。本块**没有**做 A4 §5 的整体重
   - amd64 与 arm64 的记录完全相同（没有 FMA 位置）。
 - 回放：`tests/govec_json.rs`，debug 和 release-checked 都通过；输出按 JSON 相等，错误按消息比对，Go panic 的记录要求 Rust 也 panic。
 - **govec 表达不了的 Go 断言**（调用未导出函数或检查内部状态）移植为 `src/json/json_test.rs` 的单元测试：`TestContainsAnyAsterisk`、`TestPushBackOneIndexLeg`、`TestPushBackOneKeyLeg`、`TestDecodeEscapedUnicode`、`TestFunctions`、`TestBinaryJSONOpaque`、`TestHashValue`。其余测试函数的断言都被对应的 govec 记录覆盖（期望值来自 Go 本身，比测试中的断言更全）；Benchmark 函数对应 `benches/json.rs`。
-- **fuzz**（A4 §6.3）：`tests/fuzz_json.rs`，没有 Go oracle 的随机检查：解析器字节（不 panic；`json_valid` 拒绝的文本报 ErrInvalidJSONText）、深路径对照递归路径（把文本包进 120 层数组，深路径报的错误必须等于递归路径对原文本报的错误，原文本能转换时为 TooDeep）、往返（打印再解析后比较相等，第二轮起打印是不动点）、二进制访问器（随机和截断的二进制可以出现 Go 式的越界 panic，不能出现整数溢出 panic）。默认 2 万次，`TIDB_TYPES_FUZZ_ITERS` 可加大；release-checked 下跑过 30 万次。
+- **fuzz**（A4 §6.3）：`tests/fuzz_json.rs`，没有 Go oracle 的随机检查：解析器字节（不 panic；`json_valid` 拒绝的文本报 ErrInvalidJSONText）、深路径对照递归路径（把文本包进 120 层数组，深路径报的错误必须等于递归路径对原文本报的错误，原文本能转换时为 TooDeep）、往返（打印再解析后比较相等，第二轮起打印是不动点）、二进制访问器（随机和截断的二进制可以出现 Go 式的越界 panic，不能出现整数溢出 panic）。默认 2 万次，`TIDB_TYPES_FUZZ_JSON_ITERS` 可加大；CI 的 release-checked 步骤跑 30 万次。
 - 收敛检查：`converge.py --block D01.5` 128/128。
 - **反证**：分别把 `Extract` 的 dup 判断改回按 `flags`、去掉深路径的 key 长度检查、把数组元素的遍历顺序反过来、重复 key 改为前者生效、把深路径的阈值改为 100，回放分别报 26、91、36、36、5 条不一致。
 
