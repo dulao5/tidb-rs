@@ -2,9 +2,8 @@
 //! govec `json` domain):
 //!
 //! 1. **Parser bytes.** Random and mutated texts: `parse_binary_json_from_string`,
-//!    `json_valid` and `unmarshal_json` never panic; the iterative scanner (`json_valid`)
-//!    and the recursive decoder (`gostd::json::unmarshal_raw`) accept the same texts; a text
-//!    `json_valid` rejects fails with ErrInvalidJSONText.
+//!    `json_valid` and `unmarshal_json` never panic; a text `json_valid` rejects fails with
+//!    ErrInvalidJSONText, and `unmarshal_json` succeeds exactly when parsing does.
 //! 2. **Deep path vs recursive path.** Wrapping a text in enough `[` to exceed
 //!    maxJSONDepth sends it down the iterative deep path, which must report the error the
 //!    recursive path reports for the bare text (the first appendBinaryJSON error), or
@@ -178,12 +177,6 @@ fn fuzz_json() {
 
         // 1. Parser bytes.
         let valid = j::json_valid(&t);
-        assert_eq!(
-            valid,
-            tidb_base::gostd::json::unmarshal_raw(&t).is_ok(),
-            "{ctx}: scanners disagree on {:?}",
-            String::from_utf8_lossy(&t)
-        );
         let parsed = j::parse_binary_json_from_string(&t);
         if !valid {
             let err = parsed.as_ref().unwrap_err();

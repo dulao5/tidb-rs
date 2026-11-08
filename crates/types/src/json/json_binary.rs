@@ -431,11 +431,11 @@ impl<'a> BinaryJSON<'a> {
     /// callers pass text that `json.Valid` accepted. Here the whole input must be one value.
     // go: BinaryJSON.UnmarshalJSON L2 (A4: decodes with the gostd ordered decoder instead of json.Decoder; trailing data after the first value is an error)
     pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
+        let raw = tidb_base::gostd::json::unmarshal_raw(data).map_err(Error::plain)?;
         if max_nesting(data) > DEEP_TEXT {
             // Never converts; checked without recursion (see `deep_text_error`).
-            return Err(deep_text_error(data).map_err(Error::plain)?);
+            return Err(deep_text_error(&raw));
         }
-        let raw = tidb_base::gostd::json::unmarshal_raw(data).map_err(Error::plain)?;
         let input = raw_to_value(raw);
         let new_bj = create_binary_json_with_check(&input)?;
         self.type_code = new_bj.type_code;
@@ -654,8 +654,8 @@ fn json_marshal_duration_to(mut buf: Vec<u8>, mut duration: Duration) -> Vec<u8>
 /// decoded value goes on to `UnmarshalJSON`'s conversion (same results, one pass fewer).
 ///
 /// Texts nested deeper than [`DEEP_TEXT`] never convert (see [`deep_text_error`]); they are
-/// checked without recursion, so any nesting up to `json.Valid`'s limit is safe on a normal
-/// stack.
+/// decoded (`unmarshal_raw` is iterative) and checked without recursion, so any nesting up to
+/// `json.Valid`'s limit is safe on a normal stack.
 // go: ParseBinaryJSONFromString L2 (json.Valid and UnmarshalJSON share one decoding pass; deep texts checked iteratively)
 pub fn parse_binary_json_from_string(s: &[u8]) -> Result<BinaryJSON<'static>, Error> {
     if s.is_empty() {
@@ -668,19 +668,12 @@ pub fn parse_binary_json_from_string(s: &[u8]) -> Result<BinaryJSON<'static>, Er
             "The document root must not be followed by other values.",
         )])
     };
-    let nesting = max_nesting(s);
-    if nesting > 10000 {
+    let Ok(raw) = tidb_base::gostd::json::unmarshal_raw(s) else {
         return Err(invalid());
-    }
-    let converted = if nesting > DEEP_TEXT {
-        match deep_text_error(s) {
-            Ok(err) => Err(err),
-            Err(_) => return Err(invalid()),
-        }
+    };
+    let converted = if max_nesting(s) > DEEP_TEXT {
+        Err(deep_text_error(&raw))
     } else {
-        let Ok(raw) = tidb_base::gostd::json::unmarshal_raw(s) else {
-            return Err(invalid());
-        };
         create_binary_json_with_check(&raw_to_value(raw))
     };
     // UnmarshalJSON's conversion and the error mapping of ParseBinaryJSONFromString.
@@ -698,95 +691,50 @@ pub fn parse_binary_json_from_string(s: &[u8]) -> Result<BinaryJSON<'static>, Er
 /// empty), and `CreateBinaryJSONWithCheck` rejects `GetElemDepth() - 1 > maxJSONDepth`.
 pub(crate) const DEEP_TEXT: usize = maxJSONDepth as usize + 1;
 
-/// The error `UnmarshalJSON` returns for a valid text nested deeper than [`DEEP_TEXT`], or
-/// the syntax error if the text is not valid.
+/// The error `UnmarshalJSON` returns for a valid text nested deeper than [`DEEP_TEXT`].
 ///
 /// Such a text never converts: `CreateBinaryJSONWithCheck` rejects any document deeper than
 /// `maxJSONDepth` after `appendBinaryJSON`. The result is the first error `appendBinaryJSON`
 /// meets in its traversal order (a key longer than 65535 bytes, a number that does not
-/// convert), else `ErrJSONDocumentTooDeep`. This runs those checks in the same order on a
-/// flat copy of the decoded tree (duplicate keys: the last one wins, members in key order),
-/// with explicit stacks instead of recursion.
+/// convert), else `ErrJSONDocumentTooDeep`. This runs those checks in the same order on the
+/// decoded tree (duplicate keys: the last one wins, members in key order) with an explicit
+/// stack instead of recursion, without building the `JSONValue` tree or the binary.
 // glue: deep texts of UnmarshalJSON / CreateBinaryJSONWithCheck without recursion
-fn deep_text_error(data: &[u8]) -> Result<Error, String> {
-    use tidb_base::gostd::json::ScanEvent;
-
-    enum Node {
-        Leaf,
-        Number(String),
-        Array(Vec<u32>),
-        Object(BTreeMap<Vec<u8>, u32>),
-    }
-    let mut nodes: Vec<Node> = Vec::new();
-    // Open containers and, for objects, the key of the member being read.
-    let mut open: Vec<(u32, Vec<u8>)> = Vec::new();
-    tidb_base::gostd::json::scan(data, |ev| {
-        let node = match ev {
-            ScanEvent::Key(k) => {
-                if let Some(top) = open.last_mut() {
-                    top.1 = k.into_bytes();
-                }
-                return;
-            }
-            ScanEvent::End => {
-                open.pop();
-                return;
-            }
-            ScanEvent::BeginArray => Node::Array(Vec::new()),
-            ScanEvent::BeginObject => Node::Object(BTreeMap::new()),
-            ScanEvent::Number(n) => Node::Number(n.to_owned()),
-            ScanEvent::Null | ScanEvent::Bool(_) | ScanEvent::String => Node::Leaf,
-        };
-        let idx = nodes.len() as u32;
-        let container = matches!(node, Node::Array(_) | Node::Object(_));
-        nodes.push(node);
-        if let Some((parent, key)) = open.last_mut() {
-            match &mut nodes[*parent as usize] {
-                Node::Array(a) => a.push(idx),
-                Node::Object(m) => {
-                    m.insert(std::mem::take(key), idx);
-                }
-                _ => unreachable!("only containers are open"),
-            }
-        }
-        if container {
-            open.push((idx, Vec::new()));
-        }
-    })?;
-
-    // appendBinaryJSON's order: array elements in order; for an object, all keys (sorted)
-    // before the values (sorted by key).
+fn deep_text_error(raw: &tidb_base::gostd::json::Raw) -> Error {
+    use tidb_base::gostd::json::Raw;
     let mut scratch = Vec::new();
-    let mut todo: Vec<u32> = vec![0];
-    while let Some(n) = todo.pop() {
-        match &nodes[n as usize] {
-            Node::Leaf => {}
-            Node::Number(x) => {
+    let mut todo: Vec<&Raw> = vec![raw];
+    while let Some(v) = todo.pop() {
+        match v {
+            Raw::Null | Raw::Bool(_) | Raw::String(..) => {}
+            Raw::Number(x) => {
                 if let Err(err) = append_binary_number(&mut scratch, x) {
-                    return Ok(err);
+                    return err;
                 }
                 scratch.clear();
             }
-            Node::Array(a) => todo.extend(a.iter().rev()),
-            Node::Object(m) => {
+            Raw::Array(a, _) => todo.extend(a.iter().rev()),
+            Raw::Object(members, _) => {
+                // The map Go decodes into: the last duplicate wins, keys in byte order.
+                let mut m: BTreeMap<&[u8], &Raw> = BTreeMap::new();
+                for (k, v) in members {
+                    m.insert(k.as_bytes(), v);
+                }
                 if m.keys().any(|k| k.len() > u16::MAX as usize) {
-                    return Ok(ErrJSONObjectKeyTooLong.clone());
+                    return ErrJSONObjectKeyTooLong.clone();
                 }
                 todo.extend(m.values().rev());
             }
         }
     }
-    Ok(ErrJSONDocumentTooDeep.clone())
+    ErrJSONDocumentTooDeep.clone()
 }
 
 /// `json.Valid`: one JSON value, nested at most 10000 levels deep (encoding/json's
 /// `maxNestingDepth`).
-// go-std: encoding/json.Valid L2 (the gostd iterative scanner plus the nesting limit)
+// go-std: encoding/json.Valid L2 (the gostd decoder, iterative, with the scanner's nesting limit)
 pub fn json_valid(data: &[u8]) -> bool {
-    if max_nesting(data) > 10000 {
-        return false;
-    }
-    tidb_base::gostd::json::scan(data, |_| {}).is_ok()
+    tidb_base::gostd::json::unmarshal_raw(data).is_ok()
 }
 
 /// The deepest nesting of `[`/`{` outside strings (no syntax check).
@@ -819,17 +767,19 @@ pub(crate) fn max_nesting(data: &[u8]) -> usize {
 
 /// The `any` value `json.Decoder.Decode` (with `UseNumber`) produces for `raw`.
 // glue: gostd ordered tree -> the any value of encoding/json (map: last key wins)
-fn raw_to_value(raw: tidb_base::gostd::json::Raw) -> JSONValue<'static> {
+fn raw_to_value(mut raw: tidb_base::gostd::json::Raw) -> JSONValue<'static> {
+    use std::mem::take;
     use tidb_base::gostd::json::Raw;
-    match raw {
+    // `Raw` has a non-recursive `Drop`, so its contents are taken out, not moved.
+    match &mut raw {
         Raw::Null => JSONValue::Nil,
-        Raw::Bool(b) => JSONValue::Bool(b),
-        Raw::Number(n) => JSONValue::Number(n),
-        Raw::String(s, _) => JSONValue::String(s.into_bytes()),
-        Raw::Array(a, _) => JSONValue::Array(a.into_iter().map(raw_to_value).collect()),
+        Raw::Bool(b) => JSONValue::Bool(*b),
+        Raw::Number(n) => JSONValue::Number(take(n)),
+        Raw::String(s, _) => JSONValue::String(take(s).into_bytes()),
+        Raw::Array(a, _) => JSONValue::Array(take(a).into_iter().map(raw_to_value).collect()),
         Raw::Object(m, _) => {
             let mut map = BTreeMap::new();
-            for (k, v) in m {
+            for (k, v) in take(m) {
                 map.insert(k.into_bytes(), raw_to_value(v));
             }
             JSONValue::Object(map)

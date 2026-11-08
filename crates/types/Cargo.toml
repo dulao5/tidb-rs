@@ -16,11 +16,11 @@ tidb-base = { workspace = true }
 tidb-parser = { workspace = true }
 # strconv.FormatFloat shortest digits: the same Ryū algorithm as Go's ftoaryu.go.
 ryu = "1.0"
-# MyDecimal.UnmarshalJSON: Go encoding/json semantics on top of serde_json (see gostd.rs).
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 [dev-dependencies]
+# The govec replay tests read the JSON records (test code only; the crate's own JSON decoding
+# is tidb-base's port of Go encoding/json).
+serde_json = { workspace = true }
 criterion = "0.5"
 # The govec vectors are committed as .jsonl.gz.
 flate2 = "1.0"

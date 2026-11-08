@@ -3809,7 +3809,6 @@ dependencies = [
  "flate2",
  "log",
  "ryu",
- "serde",
  "serde_json",
  "sha2",
  "tidb-base",
