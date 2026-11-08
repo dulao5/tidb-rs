@@ -25,3 +25,12 @@ its own target.
 | generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view), 43,498 records: `fresh` 1, `set` 30,951 (12 `src: "fix pingcap/tidb#65884"`), `get` 945, `set_global` 9,482, `set_global_hook` 2,039, `init` 80; both targets hold the same records |
 | `arm64/sessionvars.jsonl.gz` sha256 | `271ef23bd2e142b91a820e581c96c678dc7b255ffb1dbac242840f747dc806c9` (generated locally) |
 | `amd64/sessionvars.jsonl.gz` sha256 | `f4d990791c0dadc49776858238124bd961a2aeb6e2cee34e0c23e5a33d5db4f8` (tracker CI artifact) |
+
+## Domain "stmtctx" (block D00.1 part 1)
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/stmtctx.jsonl.gz` (branch `govec/stmtctx-D00.1`, tracker #30) |
+| generator | `govec` (seed 20261109), 1,142 records: `script` 612, `sqlwarn_marshal` 144, `sqlwarn_unmarshal` 125, `push_down` 257, `resolve` 4; both targets hold the same records (no floating point) |
+| `arm64/stmtctx.jsonl.gz` sha256 | `ac631f28a2f43fa941e3ba197cd7925eb5fa4063b0220855263bc9bbb3fce0c2` (generated locally) |
+| `amd64/stmtctx.jsonl.gz` sha256 | `6c5a0d081ea867faf8490f7ff35936dbc048de0e1a6eff0d62e7c38f379944a7` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact) |
