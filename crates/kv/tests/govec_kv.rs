@@ -31,12 +31,12 @@ use tidb_kv::error::ErrWriteConflict;
 use tidb_kv::error::ErrWriteConflictInTiDB;
 use tidb_kv::error::is_err_not_found;
 use tidb_kv::error::is_txn_retryable_error;
-use tidb_kv::key::CommonHandle;
 use tidb_kv::key::Handle;
 use tidb_kv::key::IntHandle;
 use tidb_kv::key::Key;
 use tidb_kv::key::KeyRange;
 use tidb_kv::key::key_range_slice_mem_usage;
+use tidb_kv::key::new_common_handle;
 use tidb_kv::key::new_handle_map;
 use tidb_kv::key::new_mem_aware_handle_map;
 use tidb_kv::key::new_partition_handle;
@@ -170,7 +170,20 @@ fn handle_of(v: &Value) -> Handle {
                 .as_array()
                 .map(|a| a.iter().map(|x| x.as_u64().unwrap() as u16).collect())
                 .unwrap_or_default();
-            Handle::from(CommonHandle::new_with_offsets(enc, offs))
+            // NewCommonHandle (codec.CutOne) must find the offsets Go computed.
+            let ch = new_common_handle(enc).expect("NewCommonHandle");
+            let got: Vec<u16> = (0..ch.num_cols())
+                .map(|i| {
+                    let start = if i == 0 {
+                        0
+                    } else {
+                        offs[i as usize - 1] as usize
+                    };
+                    (start + ch.encoded_col(i).len()) as u16
+                })
+                .collect();
+            assert_eq!(got, offs, "NewCommonHandle offsets");
+            Handle::from(ch)
         }
         "part" => Handle::Partition(new_partition_handle(
             v["pid"].as_i64().unwrap_or(0),
@@ -205,11 +218,23 @@ fn handle_out(h: &Handle) -> Value {
         let cols: Vec<String> = (0..h.num_cols()).map(|i| hex(&h.encoded_col(i))).collect();
         m.insert("cols".into(), json!(cols));
     }
-    if !has_common(h) {
+    // Go's String is valid UTF-8 iff every datum's ToString is (an error text is valid).
+    let d = h.data().unwrap();
+    let valid = d.iter().all(|x| match x.to_string() {
+        Ok(s) => std::str::from_utf8(&s).is_ok(),
+        Err(_) => true,
+    });
+    if valid {
         m.insert("str".into(), json!(h.string()));
-        let d = h.data().unwrap();
+    } else {
+        m.insert("str_bad".into(), json!(true));
+    }
+    if !has_common(h) {
         let ds: Vec<i64> = d.iter().map(|x| x.get_int64()).collect();
         m.insert("data".into(), json!(ds));
+    } else {
+        let ks: Vec<u8> = d.iter().map(|x| x.kind()).collect();
+        m.insert("data_kinds".into(), json!(ks));
     }
     out
 }

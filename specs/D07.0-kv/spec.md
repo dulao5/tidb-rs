@@ -68,14 +68,14 @@ Go 把 `subType` 转成 `tipb.ExprType`（int32，截断），与 ExprType 和�
 
 ## 4. 已知差异与豁免
 
-1. **等 D01.8（`util/codec`）**：`NewCommonHandle` 用 `codec.CutOne` 切分列，`CommonHandle.Data` 用 `codec.DecodeOne` 解码。在此之前：`CommonHandle::new_with_offsets`（`glue:`）由调用方给出 Go 算出的列结束偏移，偏移切片的容量按 Go 逐个 append 的结果设置；`CommonHandle.Data` 返回错误，`CommonHandle.String` 已按 Go 移植，会照 Go 的方式输出这个错误。`IntHandle.Encoded` 需要的 `codec.EncodeInt` 只有一行，暂作 `glue:`，D01.8 时替换。
+1. **（已由 D01.11 完成，`glue:` 已去掉）等 D01.8（`util/codec`）**：`NewCommonHandle` 用 `codec.CutOne` 切分列，`CommonHandle.Data` 用 `codec.DecodeOne` 解码。在此之前：`CommonHandle::new_with_offsets`（`glue:`）由调用方给出 Go 算出的列结束偏移，偏移切片的容量按 Go 逐个 append 的结果设置；`CommonHandle.Data` 返回错误，`CommonHandle.String` 已按 Go 移植，会照 Go 的方式输出这个错误。`IntHandle.Encoded` 需要的 `codec.EncodeInt` 只有一行，暂作 `glue:`，D01.8 时替换。
 2. **`ResourceGroupTagBuilder`（7 个函数）**：需要 `parser.Digest`（D02.2 的 digester，Rust 中还没有）、`resourcegrouptag.GetResourceGroupLabelByKey`（需要 D01.11 的 rowindexcodec）、`tikvrpc.Request`（D07.1）。`Request.ResourceGroupTagger` 字段也随之后补。属于 Top SQL 的标签，不影响读取结果。
 3. **`Request` 中尚未移植类型的字段**：`CoprRequestRateLimit`（client-go `util.RateLimit`，D07.2）、`MatchStoreLabels`（kvproto `metapb.StoreLabel`，D07.1）、`ResourceGroupTagger`（第 2 条）、`RunawayChecker`（`resourcegroup`）。`ClientSendOption` 的 `EventCb`、`TiFlashReplicaRead` 同样。
 4. **map 的遍历顺序**：`HandleMap.Range` 等按 `HashMap` 的顺序遍历（`M-MAPORDER`）。Go 是随机顺序，中途停止时两边看到的都是不确定的子集。
 
 ## 5. 验收
 
-- converge：`matched 102/111`，缺的 9 个即第 4 节第 1、2 条，govec `kv` 领域的 `Exempt` 中有登记。
+- converge：`matched 104/111`（D01.11 之后），缺的 7 个即第 4 节第 2 条，govec `kv` 领域的 `Exempt` 中有登记。
 - govec `kv` 领域：arm64 本地生成、amd64 取自 tracker CI，两个平台回放都通过（debug 和 release-checked）。另用种子 1 到 8 本地生成并回放，全部通过。
 - Go 测试：key_test.go、checker_test.go、error_test.go、txn_test.go、version_test.go、option_test.go 的字面量由 `cmd/minelits` 抽取（`testdata/kv_literals.tsv`），只保留已移植函数的测试（`minedGoTests["kv"]`）。govec 表达不了的断言（`TestError`：每个 KV 错误转成 SQL 错误后码不变）移植为 `tests/unit.rs`。
 - 反证：见 plan §3。

@@ -3735,6 +3735,7 @@ dependencies = [
  "rand 0.8.8",
  "serde_json",
  "tidb-base",
+ "tidb-codec",
  "tidb-memory",
  "tidb-types",
  "tokio",
@@ -3866,6 +3867,27 @@ dependencies = [
  "tidb-meta",
  "tidb-mysql-protocol",
  "tidb-parser",
+]
+
+[[package]]
+name = "tidb-tablecodec"
+version = "0.0.0"
+dependencies = [
+ "codec",
+ "collections",
+ "criterion 0.5.1",
+ "flate2",
+ "serde_json",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
+ "tidb-kv",
+ "tidb-model",
+ "tidb-parser",
+ "tidb-types",
+ "tidb_query_datatype",
+ "tikv-jemallocator",
+ "tipb",
 ]
 
 [[package]]

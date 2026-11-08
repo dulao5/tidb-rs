@@ -61,7 +61,6 @@ blocks = ["D01.8"]   # util/codec
 
 [crate.tidb-tablecodec]
 rank = 6
-planned = true
 blocks = ["D01.11"]  # tablecodec、rowcodec（依赖 kv）
 
 [crate.tidb-sessionctx]
@@ -196,3 +195,6 @@ crates = [
 # codec / tidb_query_datatype: dev-dependencies only, the byte-for-byte TiKV oracle of
 # crates/codec/tests/tikv_oracle.rs (D01.8 spec §2: L1 port, TiKV as a test oracle).
 tidb-codec = ["codec", "tidb_query_datatype"]
+# tablecodec / rowcodec: dev-dependencies only, the TiKV oracle of crates/tablecodec/tests/tikv_oracle.rs
+# (D01.11 spec §2). collections: TiKV's FxHashSet in cut_row's signature.
+tidb-tablecodec = ["codec", "tidb_query_datatype", "collections"]
