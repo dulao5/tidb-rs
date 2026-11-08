@@ -121,3 +121,20 @@ PR B 太大，拆成 B1 与 B2，范围见 tasks.md 开头。B1 = 当前的 #63 
 3. T7：`ParseSessionSlowLogRules` / `ParseGlobalSlowLogRules`（slow_log.go L918–L1095：`SlowLogRuleFieldAccessors` 字段表、正则、crc64）。
 4. 生成器：把本轮的钩子加入 `set_global_hook`（`sessionvarsGlobalHookVars`）并把它们写的状态加入两侧的重置列表（hook_state 的各单元、gctuner 的百分比和 min/max、TTL 窗口、stmt summary 选项……）；非标量字段导出；minelits；多种子；Lucky 的两步记录（LDAP pool 容量、ca_path）。
 5. 跳过上限降到只剩 tidb_gc_* 的记录。
+
+## PR B2 交接（2026-11-09，第二轮）
+
+B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 的 base 改为 main。
+
+**本轮完成**
+- **B1 评审的不阻塞建议**：`crates/base/tests/config_update.rs` 的每个闭包检查本线程上一次写入仍在（Lucky 的写法，去掉锁 6/6 失败）。
+- **`tidb_cloud_storage_uri`**：`tidb_base::gostd::url`（`net/url` 的 Parse / String / Query / Values.Encode 与转义）与 `tidb_parser::ast_misc::redact_url`（`ast.RedactURL`，D02.1）；SetGlobal 调用 `ValidateCloudStorageURI` 回调（lightning / BR 注册，未注册时 nil func），`*errors.Error` 转为同文字的普通错误；GetGlobal 返回打码后的 URI。
+- **T7**：`slow_log_rules.rs`，见 spec §4 第 9 条与 tasks T7。
+- **pending 只剩 tidb_gc_* 五个**（SetGlobal / GetGlobal，随 PR C / T10）；SetSession、GetSession、GetStateValue 均为 0。
+- **生成器**（tracker #31）：`ValidateCloudStorageURI` 的桩（`err://` 普通错误、`terr://` `ErrWrongValueForVar`），Rust 回放注册同样的桩；两侧重置 `CloudStorageURI` 与 `GlobalSlowLogRules`；tidb_slow_log_rules 的读回值两侧规范化；末尾追加 26 个 cloud URI（`set_global_hook`）和 34 个慢日志规则（`set` / `old` / `set_global_hook`）。
+- **回放**：43,623 条，43,391 条比对，0 条不一致；跳过 232 条，全部是 tidb_gc_* 的记录，上限从 554 降到 232。种子 1–4 本地生成后回放 0 条不一致。反证：规则数上限改为 11 报 3 条、打码文字改为 `xxxxx` 报 13 条、规范化时条件倒序报 24 条。
+
+**余下（下一轮或 PR C）**
+1. 把 B2 第一轮的 SetGlobal 钩子（hook_state 的各单元、gctuner、TTL 窗口、stmt summary 等）加入 `set_global_hook`，并把它们写的状态加入两侧的重置列表（目前只有这两个变量和 B1 的 60 个）。
+2. 非标量字段的导出（T6 的效果目前只经 GetSession / GetGlobal 读回间接比较）；minelits；Lucky 的两步记录（LDAP pool 容量、ca_path）。
+3. PR C：tidb_gc_*（T10）后跳过上限降到 0。
