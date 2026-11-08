@@ -1,0 +1,41 @@
+[package]
+name = "tidb-tablecodec"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/tablecodec and pkg/util/rowcodec (block D01.11: table, record and index key layouts, row format v1/v2 decoding, index value decoding)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), errno, dbterror classes, terror.Log, mysql constants, gostd time zones.
+tidb-base = { workspace = true }
+# FieldType (pkg/parser/types, block D02.3).
+tidb-parser = { workspace = true }
+# Datum, Time, Duration, MyDecimal, BinaryJSON, VectorFloat32, Enum/Set, collations, stringutil.
+tidb-types = { workspace = true }
+# model.TableInfo / IndexInfo / ColumnInfo, Extra*ID (block D06.1).
+tidb-model = { workspace = true }
+# Chunk (rowcodec.ChunkDecoder, block D01.7).
+tidb-chunk = { workspace = true }
+# util/codec (block D01.8).
+tidb-codec = { workspace = true }
+# kv.Key, kv.Handle, kv.KeyRanges (block D07.0).
+tidb-kv = { workspace = true }
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+criterion = "0.5"
+tikv-jemallocator = { workspace = true }
+# The TiKV oracle (tests/tikv_oracle.rs): vendored TiKV row and key codecs, compared byte for byte.
+codec = { workspace = true }
+tidb_query_datatype = { workspace = true }
+
+[[bench]]
+name = "tablecodec"
+harness = false
+
+[lints]
+workspace = true

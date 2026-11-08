@@ -21,6 +21,7 @@ members = [
   "crates/chunk",
   "crates/kv",
   "crates/codec",
+  "crates/tablecodec",
   "tools/ab",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
   # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
@@ -114,6 +115,7 @@ tidb-model = { path = "crates/model" }
 tidb-chunk = { path = "crates/chunk" }
 tidb-kv = { path = "crates/kv" }
 tidb-codec = { path = "crates/codec" }
+tidb-tablecodec = { path = "crates/tablecodec" }
 # TiKV Rust client: our fork with `Snapshot::coprocessor` and several connections per store
 # (branch tidb-rs/perf, on top of tidb-rs/coprocessor).
 # TEMPORARY: local clone, branch tidb-rs/metrics (client-go/PD metrics, feature

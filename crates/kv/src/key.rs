@@ -201,13 +201,6 @@ pub struct Entry {
     pub value: Vec<u8>,
 }
 
-/// `codec.EncodeInt(nil, v)` (block D01.8): the memcomparable encoding of an int64.
-// glue: codec.EncodeInt until D01.8 (util/codec) is ported
-fn encode_int(v: i64) -> Vec<u8> {
-    const SIGN_MASK: u64 = 0x8000000000000000;
-    ((v as u64) ^ SIGN_MASK).to_be_bytes().to_vec()
-}
-
 /// Handle is the ID of a row.
 ///
 /// Go: an interface implemented by `IntHandle`, `*CommonHandle` and `PartitionHandle`.
@@ -322,7 +315,9 @@ impl IntHandle {
     /// Encoded implements the Handle interface.
     // go: IntHandle.Encoded L1
     pub fn encoded(self) -> Vec<u8> {
-        encode_int(self.0)
+        let mut b = Vec::new();
+        tidb_codec::encode_int(&mut b, self.0);
+        b
     }
 
     /// Len implements the Handle interface.
@@ -368,32 +363,42 @@ impl IntHandle {
     }
 }
 
-#[allow(clippy::len_without_is_empty)] // Go has Len and no IsEmpty
-impl CommonHandle {
-    /// A `CommonHandle` from its encoded bytes and column end offsets, the state
-    /// `NewCommonHandle` computes. `NewCommonHandle` itself splits the bytes with
-    /// `codec.CutOne` (block D01.8) and is ported with it; until then the caller supplies the
-    /// offsets (tests and govec replay).
-    // glue: NewCommonHandle's result until codec.CutOne (D01.8) is ported
-    pub fn new_with_offsets(mut encoded: Vec<u8>, col_end_offsets: Vec<u16>) -> CommonHandle {
-        if encoded.len() < 9 {
-            encoded = make_copy(&encoded, 9);
-        }
-        // Go appends the offsets one by one: the capacity is runtime.growslice's.
-        let mut cap = 0usize;
-        for len in 0..col_end_offsets.len() {
-            if len == cap {
-                cap = growslice_cap(len + 1, cap, 2);
+/// NewCommonHandle creates a CommonHandle from a encoded bytes which is encoded by code.EncodeKey.
+// go: NewCommonHandle L1
+pub fn new_common_handle(encoded: Vec<u8>) -> Result<CommonHandle, Error> {
+    let mut col_end_offsets: Vec<u16> = Vec::new();
+    {
+        let mut remain: &[u8] = &encoded;
+        let mut end_off = 0u16;
+        while !remain.is_empty() {
+            if remain[0] == 0 {
+                // padded data
+                break;
             }
-        }
-        let mut offsets = Vec::with_capacity(cap);
-        offsets.extend_from_slice(&col_end_offsets);
-        CommonHandle {
-            encoded,
-            col_end_offsets: Arc::new(offsets),
+            let (col, rest) = tidb_codec::cut_one(remain)?;
+            remain = rest;
+            end_off = end_off.wrapping_add(col.len() as u16);
+            // Go `append`: runtime.growslice's capacity (CommonHandle.ExtraMemSize reads it).
+            if col_end_offsets.len() == col_end_offsets.capacity() {
+                let cap = growslice_cap(col_end_offsets.len() + 1, col_end_offsets.capacity(), 2);
+                col_end_offsets.reserve_exact(cap - col_end_offsets.len());
+            }
+            col_end_offsets.push(end_off);
         }
     }
+    let encoded = if encoded.len() < 9 {
+        make_copy(&encoded, 9)
+    } else {
+        encoded
+    };
+    Ok(CommonHandle {
+        encoded,
+        col_end_offsets: Arc::new(col_end_offsets),
+    })
+}
 
+#[allow(clippy::len_without_is_empty)] // Go has Len and no IsEmpty
+impl CommonHandle {
     /// Copy implements the Handle interface.
     // go: CommonHandle.Copy L1
     pub fn copy(&self) -> Handle {
@@ -472,14 +477,16 @@ impl CommonHandle {
     }
 
     /// Data implements the Handle interface.
-    ///
-    /// Go decodes each column with `codec.DecodeOne` (block D01.8, not ported yet); until
-    /// then this returns an error, which `String` reports as Go reports a decoding error.
-    // glue: CommonHandle.Data until codec.DecodeOne (D01.8) is ported
+    // go: CommonHandle.Data L1
     pub fn data(&self) -> Result<Vec<Datum>, Error> {
-        Err(tidb_base::errors::new(
-            "CommonHandle.Data needs codec.DecodeOne (block D01.8)",
-        ))
+        let mut data = Vec::with_capacity(self.num_cols() as usize);
+        for i in 0..self.num_cols() {
+            let encoded_col = self.encoded_col(i);
+            let (_, d, err) = tidb_codec::decode_one(encoded_col);
+            err?;
+            data.push(d);
+        }
+        Ok(data)
     }
 
     /// String implements the Handle interface.

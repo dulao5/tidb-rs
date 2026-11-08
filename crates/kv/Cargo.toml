@@ -12,6 +12,8 @@ publish.workspace = true
 tidb-base = { workspace = true }
 # Datum (Handle.Data).
 tidb-types = { workspace = true }
+# util/codec (block D01.8): IntHandle.Encoded, NewCommonHandle (CutOne), CommonHandle.Data (DecodeOne).
+tidb-codec = { workspace = true }
 # memory.Tracker (Request.MemTracker, ClientSendOption.SessionMemTracker).
 tidb-memory = { workspace = true }
 # Boxed futures for the object-safe async storage interfaces (N3 3.1: KV access is async).
