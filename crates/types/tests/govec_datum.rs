@@ -1305,3 +1305,13 @@ mod part2 {
         })
     }
 }
+
+#[test]
+fn datum_size() {
+    // Go: unsafe.Sizeof(Datum{}) == 72.
+    println!(
+        "size_of::<Datum>() = {}",
+        std::mem::size_of::<tidb_types::datum::Datum>()
+    );
+    assert!(std::mem::size_of::<tidb_types::datum::Datum>() <= 80);
+}

@@ -94,8 +94,9 @@ pub enum DatumX {
     Decimal(Box<MyDecimal>),
     /// `Time`.
     Time(Time),
-    /// Any other Go value stored with `SetInterface`.
-    Interface(Arc<dyn Any + Send + Sync>),
+    /// Any other Go value stored with `SetInterface` (boxed: a thin pointer keeps the
+    /// Datum at 80 bytes).
+    Interface(Box<Arc<dyn Any + Send + Sync>>),
 }
 
 /// Datum is a data box holds different kind of data.
@@ -573,8 +574,10 @@ impl Datum {
             DatumX::Interface(v) => {
                 if let Some(ds) = v.downcast_ref::<Vec<Datum>>() {
                     GoValue::Datums(ds.clone())
+                } else if let Some(g) = v.downcast_ref::<GoValue>() {
+                    g.clone()
                 } else {
-                    GoValue::Other(v.clone())
+                    GoValue::Other(Arc::clone(v))
                 }
             }
         }
@@ -588,9 +591,9 @@ impl Datum {
             GoValue::Nil => DatumX::Nil,
             GoValue::Decimal(d) => DatumX::Decimal(d),
             GoValue::Time(t) => DatumX::Time(t),
-            GoValue::Datums(ds) => DatumX::Interface(Arc::new(ds)),
-            GoValue::Other(v) => DatumX::Interface(v),
-            other => DatumX::Interface(Arc::new(other)),
+            GoValue::Datums(ds) => DatumX::Interface(Box::new(Arc::new(ds))),
+            GoValue::Other(v) => DatumX::Interface(Box::new(v)),
+            other => DatumX::Interface(Box::new(Arc::new(other))),
         };
     }
 
@@ -2987,6 +2990,8 @@ pub fn max_value_datum() -> Datum {
 /// comparison error and reports `true`. The same algorithm is used so that the order of
 /// equal elements and the comparisons made (and so the error seen) match Go.
 // go: SortDatums L2 (sort.Sort via gostd::sort::sort with datumsSorter's Less)
+// go: datumsSorter.Len L2 (the slice length gostd::sort::sort reads)
+// go: datumsSorter.Swap L2 (the slice swap inside gostd::sort::sort)
 pub fn sort_datums(ctx: &Context, datums: &mut [Datum]) -> Result<(), Error> {
     let mut err: Option<Error> = None;
     tidb_base::gostd::sort::sort(datums, |a: &Datum, b: &Datum| {
