@@ -101,13 +101,22 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 1. `cachedStmtCtx` 轮换复用不移植（N2 §3.4，L2）。
 2. 会话初始化时 SetSession 的调用顺序：注册表顺序 + `Depended` 最后（Go 是 map 随机顺序，M-MAPORDER）。
 3. 全局值快照在 P1–P2 是"默认值 + 实例覆盖"的桩（§2.2）。
-4. SET GLOBAL 按 N8 待定 1 的建议 (a) 报"不支持"（§2.2），等负责人决定。实现为 `SessionVars::set_global_sys_var`（Go 的对应物是 session 包的 `SetGlobalSysVar`，块 D05.3），错误是 `ErrNotSupportedYet`（1235），参数为 `SET GLOBAL on tidb-rs; run it on Go TiDB`。
+4. SET GLOBAL 的持久化：负责人已决定 (c)（#58，设计见 §6）；在 §6 的写路径合并之前，PR A 对需要持久化的变量暂时报"不支持"（过渡行为），INSTANCE 作用域的变量与 Go 相同。实现为 `SessionVars::set_global_sys_var`（Go 的对应物是 session 包的 `SetGlobalSysVar`，块 D05.3），错误是 `ErrNotSupportedYet`（1235），参数为 `SET GLOBAL on tidb-rs; run it on Go TiDB`。
 5. 写路径字段（X）的 10 个 SetSession 钩子（`tidb_batch_insert` 等）只更新 `systems[]`，不设字段（字段在 D05.2 的划分中归 X）。
 
 ## 5. 验证结果（PR A）
 
 - **govec `sessionvars`**：41,447 条（`fresh` 1、`set` 30,939、`get` 945、`set_global` 9,482、`init` 80）。回放跳过仍有 pending 钩子的记录：36,046 条比对、0 条不一致，5,401 条跳过；钩子落地后自动开始比对，不需要重新生成。
 - **生成的确定性**：INSTANCE 变量的 SET GLOBAL 会改进程级配置，生成器在每条记录后用 SetGlobal 钩子恢复原值；`timestamp`（未设置时取当前时间）、`rand_seed1/2`（会话随机数）和依赖宿主机的 `version_compile_os` / `version_compile_machine` / `tidb_config` 的读回值记为 `<volatile>`；经 GetGlobal 钩子读回的值（读进程级状态，同一进程中前面的领域会改它）记为 `<global-hook>`，等 GetGlobal 移植时再配合状态重置生成。
+- **进程级状态在记录之间的泄漏**（Lucky 评审 #57）：Go 的 `tidb_redact_log` 的 SetSession 钩子写的是进程级的 `errors.RedactLogEnabled`（上游问题 #62：它会让所有会话的 warning 被打码），生成器中一条记录设为 ON 后，后面所有记录的 warning 都变成 `'?'`。现在每条记录之前都重置进程级状态（tracker `resetSysvarAtomics`，Rust 回放的 `reset_atomics` 同样处理）。按 v8.5.8 源码逐个检查，钩子写到的进程级状态只有：
+  - Validation 钩子：密码校验的 4 个 atomic、`GOGCTunerThreshold`、`RunAutoAnalyze`、`EnableAutoAnalyzePriorityQueue`（每条记录前重置）；
+  - SetSession 钩子：`tidb_redact_log` → `errors.RedactLogEnabled`（每条记录前重置）；`tidb_constraint_check_in_place_pessimistic` → 一个 metrics 计数器（任何记录都观察不到）；
+  - SetGlobal 钩子：27 个 INSTANCE 作用域变量（日志、慢日志、插件、内存与 expensive query 阈值、`max_connections`、DDL / stats owner、statement summary 文件、service scope 等），`set_global` 在调用后立即写回原值。
+  其余 SetSession 钩子只写会话。**是否在 tidb-rs 中照搬 #62 的进程级行为**属于负责人决定（已列入 #56）；在决定之前保持与 Go 相同。
+  - 验证：去掉 `RedactLogEnabled` 的重置后，种子 84 和 2 的生成结果中出现 720、724 处 `'?'`，Rust 回放种子 84 报 425 条不一致；加上重置后种子 1–4、81–84 本地生成并回放全部一致（比对约 36,030 条，跳过约 5,410 条）。提交的种子的向量逐字节不变。
+- **随机设置组为空**（Lucky 评审 #57）：8 个随机变量都没有 SESSION 作用域时，组为空，Go 写出 `"args":[null]`，Rust 回放会 panic。生成器现在跳过空组；回放把 `null` 当作空列表处理。
+- **跳过数量的上限**：回放要求提交的向量中因 pending 钩子跳过的记录不超过上限（当前 5,401），系列中每个 PR 下调，PR B 之后为 0，避免 pending 项长期留着。
+- **一次性翻译脚本**：183 个 SetSession 钩子由 `tools/d05.2-hook-translation/` 中的脚本翻译（只为留档，不参与构建，README 写明了做法和输入）。
 - **T11**：40 组随机设置，每组按正反两种顺序各生成一条；Go 的 40 组结果都与顺序无关，Rust 每条都与 Go 相同。
 - **反证**：
 
@@ -122,7 +131,7 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 
 - **钩子清单**：`registry_matches_hand_written_hooks` 检查每个变量的五类钩子与 Go 的标志一致（已移植或 pending，Rust 没有 Go 没有的钩子）。当前：SetSession 227/273、GetSession 12/27、GetStateValue 3/6、SetGlobal 0/155、GetGlobal 0/134。
 
-## 6. SET GLOBAL 的持久化与全局值同步（负责人决定 #58 → 方案 (c)，设计稿，待评审）
+## 6. SET GLOBAL 的持久化与全局值同步（负责人决定 #58 → 方案 (c)；设计已经 Lucky 评审同意，按 #57 评审的 7 点补充修订）
 
 负责人决定：tidb-rs 的 `SET GLOBAL` 与 Go 完全一致：持久化到 `mysql.global_variables` 并通知其他实例；INSTANCE 作用域仍不持久化（与 Go 相同）。本节是设计，**写路径尚未实现**；在它合并前，PR A 中 `set_global_sys_var` 对持久化变量仍返回 "not supported"（§4 第 4 条，过渡行为）。T10（读集群全局值）并入本设计。
 
@@ -151,12 +160,15 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 **读（T10，先做）**：`GlobalVarsCache`（domain 级，`ArcSwap<Arc<Snapshot>>`）按 §6.1 的 rebuild 逻辑实现，快照 = session map + global map；`GlobalVarAccessor` 的实现读它（替换 PR A 中由调用方提供的 accessor）。读表用 tidb-kv 快照读 + tablecodec 解码：通过 D06.2（meta 读取）拿到 `mysql.global_variables` 的 TableInfo，扫描 record 范围。驱动：启动时一次 + etcd watch + 30 秒定时，与 Go 相同。rebuild 时执行 SetGlobal 钩子（T5 移植完成后生效）。
 
 **写**：只做 `mysql.global_variables` 这一张表的 REPLACE，不引入通用 DML 执行器：
+0. **前置检查（版本与表结构，弥补没有 schema validator 和 MDL）**：Go 的 DML 由 schema validator（schema 变化是可重试的提交错误）和 MDL（DDL 等待进行中的 DML）保护，专用 writer 两者都没有；滚动升级时 bootstrap 会对 `mysql.*` 执行 DDL。规则：只有当 `mysql.tidb` 中的 `tidb_server_version` 等于本 writer 所针对的 bootstrap 版本，**并且**事务开始时读到的 `mysql.global_variables` 的 TableInfo（列、索引、`UpdateTS` / revision）在提交前没有变化时才写入；否则返回明确的错误（"cluster bootstrap version / table schema changed, SET GLOBAL refused"），不猜测。
 1. 开一个**乐观**事务（client-rust `TransactionClient::begin_optimistic`），request source 标为 `internal_sysvar`（与 Go 的 `InternalTxnSysVar` 一致，便于资源管控和监控对比）。
 2. 读唯一索引 key（`tablecodec.EncodeIndexSeekKey` + `codec.EncodeKey(collation key of name)`）→ 得到旧 handle。
 3. 有旧行：`delete(record key)`、`delete(index key)`。
-4. 分配 `_tidb_rowid`：按 Go 的 autoid 协议（meta 中该表的 autoid 计数器，`GenAutoTableID` 的 key 和批量步长），与 Go 实例共享同一个计数器。handle 不必与 Go 相同，只要不冲突；行内容逐字节相同。
-5. `put(record key, rowcodec v2 编码的两列)`、`put(index key, 唯一索引值：带 handle 的 version 0/1 格式，与 Go 相同)`。Go 在 `tidb_txn_assertion_level = FAST` 时给变更加断言（NotExist / Exist），一并照做。
-6. 提交（2PC）。遇到可重试错误按 Go 重试：从第 2 步重做，最多 `tidb_retry_limit` 次。
+4. 分配 `_tidb_rowid`：NONCLUSTERED 表用**行 ID 分配器**，即 meta 中该表的 `TID:<id>` auto-ID key，按 Go 的默认批量步长、在 meta 写冲突时按 Go 的方式重试，与 Go 实例共享同一个计数器。分配在**单独的 meta 事务**中进行（与 Go 相同），不在第 1 步的事务里。表的 `SHARD_ROW_ID_BITS = 0`，没有 shard 位；但要检查表上的 `AUTO_ID_CACHE`（旧集群可能设置过），不是预期值时按第 0 步拒绝写入。handle 不必与 Go 相同，只要不冲突；行内容逐字节相同。
+5. `put(record key, 两列的行编码)`、`put(index key, 唯一索引值：带 handle 的 version 0/1 格式，与 Go 相同)`。
+   - **编码设置跟随集群**：Go 的内部会话使用 `tidb_row_format_version` 的全局值（从旧版本升级上来的集群是 v1）和 `tidb_enable_row_level_checksum`（row v2 中的 checksum）。从全局值缓存（§6.2 的读）读取这两个值：row v1、v2 都支持，或者在格式为 v1 时拒绝写入（实现时二选一，在 PR 中写明）。
+   - **断言：要么与 Go 完全一致，要么不加**。`tidb_txn_assertion_level = FAST` 时，错误的断言会让 TiKV 拒绝提交，而不加断言总是被接受。先**不加断言**；只有混合集群测试确认 flag 与 Go 相同（删除的行和索引 key 为 Exist，新的为 NotExist）后再加。
+6. 提交（2PC）。遇到可重试错误按 Go 重试：**每次重试都开新的事务（新的 start ts）**，从第 1 步重新执行整条 REPLACE（包括第 0 步的检查），而不是在原事务中从第 2 步重做，否则会读到旧的快照；最多 `tidb_retry_limit` 次。
 7. `PUT /tidb/sysvars` 到 etcd（失败只 warning），然后本地 rebuild。
 8. 有 `GlobalConfigName` 的变量：写 PD GlobalConfig（client-rust 的 PD 客户端需要补 GlobalConfig 的 `StoreGlobalConfig` 调用；若 client-rust 暂不支持，作为同系列中的一个小 PR）。
 
@@ -165,6 +177,8 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 - kv：事务写接口（`Set`/`Delete`、断言 flag 的最小子集），对应 D07.0 中归 X 的 keyflags 的一部分。
 - autoid：`meta.GenAutoTableID` 的 key 布局与增量写（D06.2 的写的一小部分）、分配器的批量与本地缓存。
 - 其余（通用 REPLACE / INSERT 执行器、DML 计划构建）仍为 X。
+
+**etcd watch 的重建**：watch 遇到 compaction（`ErrCompacted`）时，和通道关闭一样处理：从当前 revision 重新 watch，并立即 rebuild 一次（错过的事件由这次 rebuild 覆盖）。
 
 **etcd 客户端**：选 `etcd-client` crate（tonic，tokio 原生，支持 TLS、watch、lease，维护活跃）。地址与 Go 相同，来自 PD（`path = "pd1:2379,…"`，Go 的 `etcdClient` 就是连 PD 内嵌的 etcd），TLS 证书沿用集群安全配置。备选 `etcd-rs` 维护较少，不选。
 
@@ -183,7 +197,10 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 | 写表成功，etcd PUT 失败 | warning；其他实例最多 30 秒后看到 | 相同 |
 | 重试耗尽（持续写冲突） | 返回写冲突错误 | 相同 |
 | etcd 不可用 | 只能靠 30 秒定时 | 相同 |
-| 表结构不是预期的（例如旧版本升级上来的集群） | Go 用当前 TableInfo | 用 D06.2 读到的 TableInfo；列 / 索引与预期不符时拒绝写入并报错（不猜测） |
+| 表结构不是预期的（例如旧版本升级上来的集群） | Go 用当前 TableInfo | 用 D06.2 读到的 TableInfo；列 / 索引 / `AUTO_ID_CACHE` 与预期不符时拒绝写入并报错（不猜测） |
+| 滚动升级中，`tidb_server_version` 与本 writer 的 bootstrap 版本不同 | DDL 与 DML 由 MDL 协调 | 拒绝写入（§6.2 第 0 步），升级完成后恢复 |
+| 事务开始后表的 TableInfo 变化（并发 DDL） | schema validator 报可重试错误，重试 | 提交前再次检查 TableInfo，变化则放弃本次事务，按第 6 步开新事务重试 |
+| tidb-rs 在 prewrite 之后、commit 之前被杀 | 锁由后续读者 resolve | 相同：锁由 Go 和 tidb-rs 的读者按 Percolator 协议 resolve |
 
 ### 6.5 其他副作用（待在集群上确认）
 
@@ -202,4 +219,6 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
    - 有 GlobalConfigName 的变量：PD GlobalConfig 中的值与 Go 写入时相同。
    - INSTANCE 作用域：不写表、不通知。
    - 统计信息增量和 TiCDC：按 §6.5 观察并记录。
+   - **在 prewrite 和 commit 之间杀掉 tidb-rs**（failpoint 或 SIGKILL）：Go 读者 resolve 掉残留的锁，`SHOW GLOBAL VARIABLES` 与 `ADMIN CHECK TABLE` 正常。
+   - **滚动升级**：bootstrap 版本不同期间，tidb-rs 的持久化写入被拒绝（明确的错误），升级完成后恢复。
 3. **反证**：故意用错 row format、漏写索引、不发 etcd 通知，上述检查必须失败。

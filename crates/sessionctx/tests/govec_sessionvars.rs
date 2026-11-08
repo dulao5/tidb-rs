@@ -72,7 +72,12 @@ impl GlobalVarAccessor for MockGlobalAccessor {
     }
 }
 
+/// Puts back the process-wide state the hooks write (the list is in the generator's
+/// resetSysvarAtomics), so that no record depends on an earlier one.
 fn reset_atomics() {
+    // tidb_redact_log's SetSession hook stores the process-wide flag (Go
+    // errors.RedactLogEnabled; upstream bug tidb-rs #62); its value after init is "".
+    tidb_base::errors::redact_log_enabled_store("");
     tidb_vars::PasswordValidationLength.store(8, SeqCst);
     tidb_vars::PasswordValidationMixedCaseCount.store(1, SeqCst);
     tidb_vars::PasswordValidtaionNumberCount.store(1, SeqCst);
@@ -184,13 +189,22 @@ fn pending(op: &str, args: &[Value]) -> bool {
                 .any(|k| p(&gostd_lower(name), k))
         }
         "set_global" => p(&gostd_lower(args[0].as_str().unwrap()), "SetGlobal"),
-        "init" => args[0].as_array().unwrap().iter().any(|pair| {
+        "init" => init_pairs(args).iter().any(|pair| {
             with_aliases(pair[0].as_str().unwrap())
                 .iter()
                 .any(|n| p(n, "SetSession"))
         }),
         _ => false,
     }
+}
+
+/// The (name, value) list of an `init` record. An empty list is `[]`, or `null` as Go
+/// writes a nil slice (`"args":[null]`, before the generator skipped empty groups).
+fn init_pairs(args: &[Value]) -> &[Value] {
+    args.first()
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 fn gostd_lower(s: &str) -> String {
@@ -347,9 +361,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
         "init" => {
             let mut vars = fresh_vars();
             vars.stmt_ctx.stmt_type = "Set".to_owned();
-            let errs: Vec<Value> = args[0]
-                .as_array()
-                .unwrap()
+            let errs: Vec<Value> = init_pairs(args)
                 .iter()
                 .map(|p| {
                     err_or_null(
@@ -443,6 +455,9 @@ fn replay(path: &str) -> (usize, usize) {
     (n, skipped)
 }
 
+/// The cap on the committed vectors' skipped records (see `govec_sessionvars`).
+const MAX_SKIPPED: usize = 5401;
+
 #[test]
 fn govec_sessionvars() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/v8.5.8");
@@ -453,6 +468,13 @@ fn govec_sessionvars() {
     let (n, skipped) = replay(&path);
     eprintln!("sessionvars: {n} records checked, {skipped} skipped (pending hooks)");
     assert!(n >= 1);
+    // Ratchet on the records skipped because they exercise a pending hook: lowered by
+    // each PR of the D05.2 series as hooks land, 0 after PR B (Lucky's review of #57), so
+    // that a pending entry cannot stay forever.
+    assert!(
+        skipped <= MAX_SKIPPED,
+        "{skipped} records skipped as pending, more than the cap {MAX_SKIPPED}"
+    );
     if let Ok(files) = std::env::var("GOVEC_SESSIONVARS_FILES") {
         for f in files.split(',').filter(|f| !f.is_empty()) {
             let (n, skipped) = replay(f);
