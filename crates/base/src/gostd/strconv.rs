@@ -155,7 +155,11 @@ fn append_shortest64(dst: &mut Vec<u8>, v: f64, fmt: u8) {
             dst.push(b'.');
             for i in 1..=prec {
                 let j = dp + i - 1;
-                dst.push(if 0 <= j && j < nd { d[j as usize] } else { b'0' });
+                dst.push(if 0 <= j && j < nd {
+                    d[j as usize]
+                } else {
+                    b'0'
+                });
             }
         }
     }
