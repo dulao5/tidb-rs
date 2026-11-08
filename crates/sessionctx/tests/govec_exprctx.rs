@@ -347,6 +347,15 @@ fn rng_dump(ctx: &Arc<ExprContext>, seeded: bool) -> Value {
 }
 
 fn exec(op: &str, p: &[Value]) -> Value {
+    // As the generator: new collations enabled, errors.RedactLogEnabled restored (#62).
+    tidb_types::collate::set_new_collation_enabled_for_test(true);
+    let redact = tidb_base::errors::redact_log_enabled_load();
+    let out = exec_op(op, p);
+    tidb_base::errors::redact_log_enabled_store(redact);
+    out
+}
+
+fn exec_op(op: &str, p: &[Value]) -> Value {
     match op {
         "keyset" => {
             let (set, key) = (

@@ -216,6 +216,8 @@ fn ranger_ctx(tc: &TypeContext, null_as_point: bool) -> RangerContext {
 }
 
 fn exec(op: &str, p: &[Value]) -> Value {
+    // As the generator: every record runs with new collations enabled.
+    collate::set_new_collation_enabled_for_test(true);
     let tc = DefaultStmtNoWarningContext.clone();
     match op {
         "range" => {
