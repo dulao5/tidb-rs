@@ -30,7 +30,7 @@ pub(crate) fn encode_time(out: &mut String, t: &Time) -> Result<(), Error> {
 pub(crate) fn decode_time(t: &mut Time, v: &Raw) -> Result<(), DecodeError> {
     match v {
         Raw::Null => Ok(()),
-        Raw::String(s) => {
+        Raw::String(s, _) => {
             // `*t, err = parseStrictRFC3339(data)`: assigned before the error is returned,
             // so a parse failure leaves the zero time.
             match Time::parse_strict_rfc3339(s) {
