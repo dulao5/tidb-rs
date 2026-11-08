@@ -18,7 +18,10 @@ use tidb_memory::tracker::new_tracker;
 use tidb_parser::types::FieldType;
 
 fn fts() -> Vec<FieldType> {
-    vec![FieldType::new(mysql::TypeLonglong), FieldType::new(mysql::TypeVarchar)]
+    vec![
+        FieldType::new(mysql::TypeLonglong),
+        FieldType::new(mysql::TypeVarchar),
+    ]
 }
 
 fn fill(c: &mut Chunk, n: i64) {
@@ -35,7 +38,11 @@ fn fill(c: &mut Chunk, n: i64) {
 #[test]
 fn allocators_never_reuse() {
     alloc::init_chunk_alloc_size(1, 1);
-    for mut a in [alloc::new_allocator(), alloc::new_empty_allocator(), alloc::new_sync_allocator(alloc::new_allocator())] {
+    for mut a in [
+        alloc::new_allocator(),
+        alloc::new_empty_allocator(),
+        alloc::new_sync_allocator(alloc::new_allocator()),
+    ] {
         assert!(!a.check_reuse_alloc_size());
         let c = a.alloc(&fts(), 8, 32);
         let want = chunk::new(&fts(), 8, 32);
@@ -140,14 +147,28 @@ fn reuse_interm_chk_does_not_write_the_input() {
 #[cfg(debug_assertions)]
 #[should_panic(expected = "N5a 3.2")]
 fn writing_an_aliased_column_panics_in_debug_builds() {
-    let mut c = chunk::new(&[FieldType::new(mysql::TypeLonglong), FieldType::new(mysql::TypeLonglong)], 4, 4);
+    let mut c = chunk::new(
+        &[
+            FieldType::new(mysql::TypeLonglong),
+            FieldType::new(mysql::TypeLonglong),
+        ],
+        4,
+        4,
+    );
     c.make_ref(0, 1);
     c.append_int64(0, 1);
 }
 
 #[test]
 fn reset_keeps_slot_aliases() {
-    let mut c = chunk::new(&[FieldType::new(mysql::TypeLonglong), FieldType::new(mysql::TypeLonglong)], 4, 4);
+    let mut c = chunk::new(
+        &[
+            FieldType::new(mysql::TypeLonglong),
+            FieldType::new(mysql::TypeLonglong),
+        ],
+        4,
+        4,
+    );
     c.append_int64(0, 1);
     c.append_int64(1, 2);
     c.make_ref(0, 1);
