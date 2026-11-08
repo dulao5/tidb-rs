@@ -101,7 +101,7 @@ Replayed by `crates/types/tests/govec_json.rs`.
 ## datum
 
 `<target>/datum.jsonl.gz` (domain `datum`: block D01.1 parts 1 and 2 with D01.4, and the
-charset Encodings), copied from tidb-rs-tracker branch `govec/datum-D01.1-2` at `31f113a`:
+charset Encodings), copied from tidb-rs-tracker branch `govec/datum-D01.1-2` at `20b65bc`:
 141,968 records, seed 20261108. amd64 sha256
 `afb895032ef01cb60ad84f20584f5fd1627aa681a2ec7dadc0c0fbe3e9abfac5` (from the tracker CI
 artifact), arm64 sha256 `be807fee43e74b7bd8617874bb5a266e47b071571b0504204cec450a1cdb7263`.
