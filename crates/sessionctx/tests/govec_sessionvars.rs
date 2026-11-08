@@ -341,10 +341,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 && !volatile(name)
             {
                 let after = sv.get_global_from_hook(&mut vars);
-                res.insert(
-                    "after".into(),
-                    json!(after.as_ref().map(|v| v.clone()).unwrap_or_default()),
-                );
+                res.insert("after".into(), json!(after.clone().unwrap_or_default()));
                 res.insert("after_err".into(), err_or_null(&after.map(|_| ())));
             }
             if let (Some(sv), Some(prev)) = (sv.as_ref(), prev) {

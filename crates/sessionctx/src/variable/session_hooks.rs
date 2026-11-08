@@ -374,45 +374,87 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
 // glue: the SetGlobal fields of the Go table literals, keyed by variable name
 fn set_global(name: &str) -> Option<SetGlobalFn> {
     Some(match name {
-        "tiflash_compute_dispatch_policy" => super::session_hooks_state::ss_tiflash_compute_dispatch_policy,
+        "tiflash_compute_dispatch_policy" => {
+            super::session_hooks_state::ss_tiflash_compute_dispatch_policy
+        }
         "ddl_slow_threshold" => super::session_hooks_global::sg_ddl_slow_threshold,
         "max_user_connections" => super::session_hooks_global::sg_max_user_connections,
         "password_history" => super::session_hooks_global::sg_password_history,
         "password_reuse_interval" => super::session_hooks_global::sg_password_reuse_interval,
-        "performance_schema_session_connect_attrs_size" => super::session_hooks_global::sg_performance_schema_session_connect_attrs_size,
-        "tidb_accelerate_user_creation_update" => super::session_hooks_global::sg_tidb_accelerate_user_creation_update,
+        "performance_schema_session_connect_attrs_size" => {
+            super::session_hooks_global::sg_performance_schema_session_connect_attrs_size
+        }
+        "tidb_accelerate_user_creation_update" => {
+            super::session_hooks_global::sg_tidb_accelerate_user_creation_update
+        }
         "tidb_ddl_enable_fast_reorg" => super::session_hooks_global::sg_tidb_ddl_enable_fast_reorg,
         "tidb_enable_auto_analyze" => super::session_hooks_global::sg_tidb_enable_auto_analyze,
-        "tidb_enable_auto_analyze_priority_queue" => super::session_hooks_global::sg_tidb_enable_auto_analyze_priority_queue,
+        "tidb_enable_auto_analyze_priority_queue" => {
+            super::session_hooks_global::sg_tidb_enable_auto_analyze_priority_queue
+        }
         "tidb_enable_batch_dml" => super::session_hooks_global::sg_tidb_enable_batch_dml,
-        "tidb_enable_check_constraint" => super::session_hooks_global::sg_tidb_enable_check_constraint,
+        "tidb_enable_check_constraint" => {
+            super::session_hooks_global::sg_tidb_enable_check_constraint
+        }
         "tidb_enable_foreign_key" => super::session_hooks_global::sg_tidb_enable_foreign_key,
-        "tidb_enable_historical_stats_for_capture" => super::session_hooks_global::sg_tidb_enable_historical_stats_for_capture,
-        "tidb_enable_instance_plan_cache" => super::session_hooks_global::sg_tidb_enable_instance_plan_cache,
+        "tidb_enable_historical_stats_for_capture" => {
+            super::session_hooks_global::sg_tidb_enable_historical_stats_for_capture
+        }
+        "tidb_enable_instance_plan_cache" => {
+            super::session_hooks_global::sg_tidb_enable_instance_plan_cache
+        }
         "tidb_enable_noop_variables" => super::session_hooks_global::sg_tidb_enable_noop_variables,
-        "tidb_enable_row_level_checksum" => super::session_hooks_global::sg_tidb_enable_row_level_checksum,
-        "tidb_enable_tiflash_pipeline_model" => super::session_hooks_global::sg_tidb_enable_tiflash_pipeline_model,
-        "tidb_enable_tmp_storage_on_oom" => super::session_hooks_global::sg_tidb_enable_tmp_storage_on_oom,
-        "tidb_expensive_query_time_threshold" => super::session_hooks_global::sg_tidb_expensive_query_time_threshold,
-        "tidb_expensive_txn_time_threshold" => super::session_hooks_global::sg_tidb_expensive_txn_time_threshold,
+        "tidb_enable_row_level_checksum" => {
+            super::session_hooks_global::sg_tidb_enable_row_level_checksum
+        }
+        "tidb_enable_tiflash_pipeline_model" => {
+            super::session_hooks_global::sg_tidb_enable_tiflash_pipeline_model
+        }
+        "tidb_enable_tmp_storage_on_oom" => {
+            super::session_hooks_global::sg_tidb_enable_tmp_storage_on_oom
+        }
+        "tidb_expensive_query_time_threshold" => {
+            super::session_hooks_global::sg_tidb_expensive_query_time_threshold
+        }
+        "tidb_expensive_txn_time_threshold" => {
+            super::session_hooks_global::sg_tidb_expensive_txn_time_threshold
+        }
         "tidb_gc_max_wait_time" => super::session_hooks_global::sg_tidb_gc_max_wait_time,
         "tidb_general_log" => super::session_hooks_global::sg_tidb_general_log,
-        "tidb_ignore_inlist_plan_digest" => super::session_hooks_global::sg_tidb_ignore_inlist_plan_digest,
+        "tidb_ignore_inlist_plan_digest" => {
+            super::session_hooks_global::sg_tidb_ignore_inlist_plan_digest
+        }
         "tidb_mem_oom_action" => super::session_hooks_global::sg_tidb_mem_oom_action,
-        "tidb_mem_quota_binding_cache" => super::session_hooks_global::sg_tidb_mem_quota_binding_cache,
-        "tidb_memory_usage_alarm_keep_record_num" => super::session_hooks_global::sg_tidb_memory_usage_alarm_keep_record_num,
-        "tidb_memory_usage_alarm_ratio" => super::session_hooks_global::sg_tidb_memory_usage_alarm_ratio,
+        "tidb_mem_quota_binding_cache" => {
+            super::session_hooks_global::sg_tidb_mem_quota_binding_cache
+        }
+        "tidb_memory_usage_alarm_keep_record_num" => {
+            super::session_hooks_global::sg_tidb_memory_usage_alarm_keep_record_num
+        }
+        "tidb_memory_usage_alarm_ratio" => {
+            super::session_hooks_global::sg_tidb_memory_usage_alarm_ratio
+        }
         "tidb_query_log_max_len" => super::session_hooks_global::sg_tidb_query_log_max_len,
         "tidb_rc_read_check_ts" => super::session_hooks_global::sg_tidb_rc_read_check_ts,
-        "tidb_schema_version_cache_limit" => super::session_hooks_global::sg_tidb_schema_version_cache_limit,
-        "tidb_stats_load_pseudo_timeout" => super::session_hooks_global::sg_tidb_stats_load_pseudo_timeout,
+        "tidb_schema_version_cache_limit" => {
+            super::session_hooks_global::sg_tidb_schema_version_cache_limit
+        }
+        "tidb_stats_load_pseudo_timeout" => {
+            super::session_hooks_global::sg_tidb_stats_load_pseudo_timeout
+        }
         "tidb_stats_load_sync_wait" => super::session_hooks_global::sg_tidb_stats_load_sync_wait,
         "tidb_super_read_only" => super::session_hooks_global::sg_tidb_super_read_only,
         "tidb_ttl_job_enable" => super::session_hooks_global::sg_tidb_ttl_job_enable,
         "validate_password.length" => super::session_hooks_global::sg_validate_password_length,
-        "validate_password.mixed_case_count" => super::session_hooks_global::sg_validate_password_mixed_case_count,
-        "validate_password.number_count" => super::session_hooks_global::sg_validate_password_number_count,
-        "validate_password.special_char_count" => super::session_hooks_global::sg_validate_password_special_char_count,
+        "validate_password.mixed_case_count" => {
+            super::session_hooks_global::sg_validate_password_mixed_case_count
+        }
+        "validate_password.number_count" => {
+            super::session_hooks_global::sg_validate_password_number_count
+        }
+        "validate_password.special_char_count" => {
+            super::session_hooks_global::sg_validate_password_special_char_count
+        }
         _ => return None,
     })
 }
@@ -424,66 +466,132 @@ fn get_global(name: &str) -> Option<GetGlobalFn> {
         "max_user_connections" => super::session_hooks_global::gg_max_user_connections,
         "password_history" => super::session_hooks_global::gg_password_history,
         "password_reuse_interval" => super::session_hooks_global::gg_password_reuse_interval,
-        "pd_enable_follower_handle_region" => super::session_hooks_global::gg_pd_enable_follower_handle_region,
-        "performance_schema_session_connect_attrs_size" => super::session_hooks_global::gg_performance_schema_session_connect_attrs_size,
-        "tidb_analyze_column_options" => super::session_hooks_global::gg_tidb_analyze_column_options,
-        "tidb_auto_analyze_concurrency" => super::session_hooks_global::gg_tidb_auto_analyze_concurrency,
-        "tidb_cb_pd_metadata_error_rate_threshold_ratio" => super::session_hooks_global::gg_tidb_cb_pd_metadata_error_rate_threshold_ratio,
+        "pd_enable_follower_handle_region" => {
+            super::session_hooks_global::gg_pd_enable_follower_handle_region
+        }
+        "performance_schema_session_connect_attrs_size" => {
+            super::session_hooks_global::gg_performance_schema_session_connect_attrs_size
+        }
+        "tidb_analyze_column_options" => {
+            super::session_hooks_global::gg_tidb_analyze_column_options
+        }
+        "tidb_auto_analyze_concurrency" => {
+            super::session_hooks_global::gg_tidb_auto_analyze_concurrency
+        }
+        "tidb_cb_pd_metadata_error_rate_threshold_ratio" => {
+            super::session_hooks_global::gg_tidb_cb_pd_metadata_error_rate_threshold_ratio
+        }
         "tidb_ddl_disk_quota" => super::session_hooks_global::gg_tidb_ddl_disk_quota,
         "tidb_ddl_enable_fast_reorg" => super::session_hooks_global::gg_tidb_ddl_enable_fast_reorg,
-        "tidb_ddl_reorg_max_write_speed" => super::session_hooks_global::gg_tidb_ddl_reorg_max_write_speed,
+        "tidb_ddl_reorg_max_write_speed" => {
+            super::session_hooks_global::gg_tidb_ddl_reorg_max_write_speed
+        }
         "tidb_enable_auto_analyze" => super::session_hooks_global::gg_tidb_enable_auto_analyze,
-        "tidb_enable_auto_analyze_priority_queue" => super::session_hooks_global::gg_tidb_enable_auto_analyze_priority_queue,
+        "tidb_enable_auto_analyze_priority_queue" => {
+            super::session_hooks_global::gg_tidb_enable_auto_analyze_priority_queue
+        }
         "tidb_enable_batch_dml" => super::session_hooks_global::gg_tidb_enable_batch_dml,
-        "tidb_enable_batch_query_region" => super::session_hooks_global::gg_tidb_enable_batch_query_region,
-        "tidb_enable_check_constraint" => super::session_hooks_global::gg_tidb_enable_check_constraint,
+        "tidb_enable_batch_query_region" => {
+            super::session_hooks_global::gg_tidb_enable_batch_query_region
+        }
+        "tidb_enable_check_constraint" => {
+            super::session_hooks_global::gg_tidb_enable_check_constraint
+        }
         "tidb_enable_dist_task" => super::session_hooks_global::gg_tidb_enable_dist_task,
-        "tidb_enable_fast_create_table" => super::session_hooks_global::gg_tidb_enable_fast_create_table,
+        "tidb_enable_fast_create_table" => {
+            super::session_hooks_global::gg_tidb_enable_fast_create_table
+        }
         "tidb_enable_foreign_key" => super::session_hooks_global::gg_tidb_enable_foreign_key,
-        "tidb_enable_historical_stats_for_capture" => super::session_hooks_global::gg_tidb_enable_historical_stats_for_capture,
-        "tidb_enable_instance_plan_cache" => super::session_hooks_global::gg_tidb_enable_instance_plan_cache,
+        "tidb_enable_historical_stats_for_capture" => {
+            super::session_hooks_global::gg_tidb_enable_historical_stats_for_capture
+        }
+        "tidb_enable_instance_plan_cache" => {
+            super::session_hooks_global::gg_tidb_enable_instance_plan_cache
+        }
         "tidb_enable_local_txn" => super::session_hooks_global::gg_tidb_enable_local_txn,
         "tidb_enable_metadata_lock" => super::session_hooks_global::gg_tidb_enable_metadata_lock,
         "tidb_enable_noop_variables" => super::session_hooks_global::gg_tidb_enable_noop_variables,
-        "tidb_enable_resource_control" => super::session_hooks_global::gg_tidb_enable_resource_control,
-        "tidb_enable_row_level_checksum" => super::session_hooks_global::gg_tidb_enable_row_level_checksum,
-        "tidb_enable_tiflash_pipeline_model" => super::session_hooks_global::gg_tidb_enable_tiflash_pipeline_model,
-        "tidb_enable_tmp_storage_on_oom" => super::session_hooks_global::gg_tidb_enable_tmp_storage_on_oom,
-        "tidb_enable_tso_follower_proxy" => super::session_hooks_global::gg_tidb_enable_tso_follower_proxy,
-        "tidb_expensive_query_time_threshold" => super::session_hooks_global::gg_tidb_expensive_query_time_threshold,
-        "tidb_expensive_txn_time_threshold" => super::session_hooks_global::gg_tidb_expensive_txn_time_threshold,
+        "tidb_enable_resource_control" => {
+            super::session_hooks_global::gg_tidb_enable_resource_control
+        }
+        "tidb_enable_row_level_checksum" => {
+            super::session_hooks_global::gg_tidb_enable_row_level_checksum
+        }
+        "tidb_enable_tiflash_pipeline_model" => {
+            super::session_hooks_global::gg_tidb_enable_tiflash_pipeline_model
+        }
+        "tidb_enable_tmp_storage_on_oom" => {
+            super::session_hooks_global::gg_tidb_enable_tmp_storage_on_oom
+        }
+        "tidb_enable_tso_follower_proxy" => {
+            super::session_hooks_global::gg_tidb_enable_tso_follower_proxy
+        }
+        "tidb_expensive_query_time_threshold" => {
+            super::session_hooks_global::gg_tidb_expensive_query_time_threshold
+        }
+        "tidb_expensive_txn_time_threshold" => {
+            super::session_hooks_global::gg_tidb_expensive_txn_time_threshold
+        }
         "tidb_general_log" => super::session_hooks_global::gg_tidb_general_log,
         "tidb_gogc_tuner_threshold" => super::session_hooks_global::gg_tidb_gogc_tuner_threshold,
-        "tidb_ignore_inlist_plan_digest" => super::session_hooks_global::gg_tidb_ignore_inlist_plan_digest,
-        "tidb_instance_plan_cache_max_size" => super::session_hooks_global::gg_tidb_instance_plan_cache_max_size,
-        "tidb_instance_plan_cache_reserved_percentage" => super::session_hooks_global::gg_tidb_instance_plan_cache_reserved_percentage,
+        "tidb_ignore_inlist_plan_digest" => {
+            super::session_hooks_global::gg_tidb_ignore_inlist_plan_digest
+        }
+        "tidb_instance_plan_cache_max_size" => {
+            super::session_hooks_global::gg_tidb_instance_plan_cache_max_size
+        }
+        "tidb_instance_plan_cache_reserved_percentage" => {
+            super::session_hooks_global::gg_tidb_instance_plan_cache_reserved_percentage
+        }
         "tidb_log_file_max_days" => super::session_hooks_global::gg_tidb_log_file_max_days,
         "tidb_max_auto_analyze_time" => super::session_hooks_global::gg_tidb_max_auto_analyze_time,
         "tidb_mem_oom_action" => super::session_hooks_global::gg_tidb_mem_oom_action,
-        "tidb_mem_quota_binding_cache" => super::session_hooks_global::gg_tidb_mem_quota_binding_cache,
-        "tidb_memory_usage_alarm_keep_record_num" => super::session_hooks_global::gg_tidb_memory_usage_alarm_keep_record_num,
-        "tidb_persist_analyze_options" => super::session_hooks_global::gg_tidb_persist_analyze_options,
-        "tidb_prepared_plan_cache_memory_guard_ratio" => super::session_hooks_global::gg_tidb_prepared_plan_cache_memory_guard_ratio,
+        "tidb_mem_quota_binding_cache" => {
+            super::session_hooks_global::gg_tidb_mem_quota_binding_cache
+        }
+        "tidb_memory_usage_alarm_keep_record_num" => {
+            super::session_hooks_global::gg_tidb_memory_usage_alarm_keep_record_num
+        }
+        "tidb_persist_analyze_options" => {
+            super::session_hooks_global::gg_tidb_persist_analyze_options
+        }
+        "tidb_prepared_plan_cache_memory_guard_ratio" => {
+            super::session_hooks_global::gg_tidb_prepared_plan_cache_memory_guard_ratio
+        }
         "tidb_query_log_max_len" => super::session_hooks_global::gg_tidb_query_log_max_len,
         "tidb_rc_read_check_ts" => super::session_hooks_global::gg_tidb_rc_read_check_ts,
-        "tidb_resource_control_strict_mode" => super::session_hooks_global::gg_tidb_resource_control_strict_mode,
+        "tidb_resource_control_strict_mode" => {
+            super::session_hooks_global::gg_tidb_resource_control_strict_mode
+        }
         "tidb_schema_cache_size" => super::session_hooks_global::gg_tidb_schema_cache_size,
         "tidb_service_scope" => super::session_hooks_global::gg_tidb_service_scope,
         "tidb_stats_cache_mem_quota" => super::session_hooks_global::gg_tidb_stats_cache_mem_quota,
-        "tidb_stats_load_pseudo_timeout" => super::session_hooks_global::gg_tidb_stats_load_pseudo_timeout,
+        "tidb_stats_load_pseudo_timeout" => {
+            super::session_hooks_global::gg_tidb_stats_load_pseudo_timeout
+        }
         "tidb_stats_load_sync_wait" => super::session_hooks_global::gg_tidb_stats_load_sync_wait,
-        "tidb_tso_client_batch_max_wait_time" => super::session_hooks_global::gg_tidb_tso_client_batch_max_wait_time,
+        "tidb_tso_client_batch_max_wait_time" => {
+            super::session_hooks_global::gg_tidb_tso_client_batch_max_wait_time
+        }
         "tidb_ttl_delete_batch_size" => super::session_hooks_global::gg_tidb_ttl_delete_batch_size,
         "tidb_ttl_delete_rate_limit" => super::session_hooks_global::gg_tidb_ttl_delete_rate_limit,
-        "tidb_ttl_delete_worker_count" => super::session_hooks_global::gg_tidb_ttl_delete_worker_count,
+        "tidb_ttl_delete_worker_count" => {
+            super::session_hooks_global::gg_tidb_ttl_delete_worker_count
+        }
         "tidb_ttl_job_enable" => super::session_hooks_global::gg_tidb_ttl_job_enable,
         "tidb_ttl_running_tasks" => super::session_hooks_global::gg_tidb_ttl_running_tasks,
         "tidb_ttl_scan_batch_size" => super::session_hooks_global::gg_tidb_ttl_scan_batch_size,
         "tidb_ttl_scan_worker_count" => super::session_hooks_global::gg_tidb_ttl_scan_worker_count,
         "validate_password.length" => super::session_hooks_global::gg_validate_password_length,
-        "validate_password.mixed_case_count" => super::session_hooks_global::gg_validate_password_mixed_case_count,
-        "validate_password.number_count" => super::session_hooks_global::gg_validate_password_number_count,
-        "validate_password.special_char_count" => super::session_hooks_global::gg_validate_password_special_char_count,
+        "validate_password.mixed_case_count" => {
+            super::session_hooks_global::gg_validate_password_mixed_case_count
+        }
+        "validate_password.number_count" => {
+            super::session_hooks_global::gg_validate_password_number_count
+        }
+        "validate_password.special_char_count" => {
+            super::session_hooks_global::gg_validate_password_special_char_count
+        }
         _ => return None,
     })
 }

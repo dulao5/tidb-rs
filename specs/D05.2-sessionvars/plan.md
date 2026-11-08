@@ -36,3 +36,33 @@ PR A 已完成（见 tasks.md）。接手 PR B 时：
 ## 需要决定的事
 
 - **N8 §6 待定 1（SET GLOBAL）**：已开 owner issue tidb-rs #58，按建议 (a) 推进，不等决定。
+
+
+## PR B 交接（2026-11-08）
+
+分支：tidb-rs `block/D05.2-sessionvars-b`（draft，叠在 PR A #57 上），tracker `govec/sessionvars-D05.2-b`（draft #29，叠在 tracker #27 上）。PR A 合并（以及 PR A 的评审修改落地）后 rebase 到 main / PR A 新的末端。
+
+**已完成**
+- T6 的钩子所需部分、T4 全部（除 tidb_slow_log_rules 的 SetSession）、T9。
+- T5：tidb_vars.go 的进程级 atomic 全部移植；39 个 SetGlobal、64 个 GetGlobal（只读写这些 atomic 的单句闭包，模式翻译，之后手工维护）。
+- `SetSystemVarWithOldValAsRet` 在钩子出错时仍返回旧值（Go 如此；原实现返回空串，PR A 时这些记录被跳过而没有发现）。
+- govec：INSTANCE 变量的 `set_global` 记录在 SetGlobal 之后经 GetGlobal 读回（`after`），回放比对并恢复原值。反证：去掉 INSTANCE 变量的 SetGlobal 调用，回放报 22 条不一致。
+- 回放：39,279 条比对，2,168 条因 pending 钩子跳过（PR A 时 36,046 / 5,401）。converge D05.2 33/237。
+
+**生成器重置清单（与 PR A 评审修改的进程级状态重置对齐）**：PR B 的钩子会写以下进程级状态，每条记录前要重置为默认值——
+- SetSession 写的：`errors.RedactLogEnabled`（tidb_redact_log）。
+- SetGlobal 写的 variable 包 atomic（INSTANCE 变量的记录本身会恢复，GLOBAL 变量的 SetGlobal 在读阶段只由缓存重建调用）：AccelerateUserCreationUpdate、ConnectAttrsSize、DDLSlowOprThreshold、EnableAutoAnalyzePriorityQueue、EnableBatchDML、EnableCheckConstraint、EnableFastReorg、EnableForeignKey、EnableHistoricalStatsForCapture、EnableInstancePlanCache、EnableNoopVariables、EnableRCReadCheckTS、EnableRowLevelChecksum、EnableTTLJob、EnableTmpStorageOnOOM、ExpensiveQueryTimeThreshold、ExpensiveTxnTimeThreshold、GCMaxWaitTime、IgnoreInlistPlanDigest、MaxUserConnectionsValue、MemQuotaBindingCache、MemoryUsageAlarmKeepRecordNum、MemoryUsageAlarmRatio、OOMAction、PasswordHistory、PasswordReuseInterval、PasswordValidation*（4 个）、ProcessGeneralLog、QueryLogMaxLen、RunAutoAnalyze、SchemaVersionCacheLimit、StatsLoadPseudoTimeout、StatsLoadSyncWait、TiFlashEnablePipelineMode、VarTiDBSuperReadOnly。
+- 回放侧的跳过上限（PR A 评审）在 PR B 完成时要降到 0；当前仍有 2,168 条。
+
+**余下（按建议的顺序）**
+1. **T5 余下的 116 SetGlobal / 70 GetGlobal**：落点在其他包。建议按 spec §2.3 的处置逐个归类：
+   - `config.GetGlobalConfig().Instance.*`（slow log、check_mb4、collect_execution_info、max_connections、plugin_*、stmt_summary_*、enable_ddl / stats_owner）：tidb-base 已有 `Instance`（atomic 字段直接 store，普通字段按 M-SNAP 克隆后 `store_global_config`），可以 L1/L2 移植。
+   - ldap（LDAPSASLAuthImpl / LDAPSimpleAuthImpl 的 getter/setter）、tikvstore（StoreLimit、TxnCommitBatchSize、CommitterConcurrency）、topsqlstate、tls.RequireSecureTransport、memory（ServerMemoryLimit*、EnableGCAwareMemoryTrack）、gctuner：按 D05.1 已有的 `go-dep` 静态量做法（`minGCPercent` 等）移植状态单元；纯副作用（logutil.ReplaceLogger、stmtsummaryv2.Set*、PD 客户端动态选项、switchDDL / switchStats）归 runtime-only 或 X，原因写进 `sysvar_hooks.tsv` 的处置列。
+   - `getTiDBTableValue`（tikv_gc_*）：需要 GlobalVarAccessor.GetTiDBTableValue，随 T10。
+2. **T7**：`ParseSessionSlowLogRules` / `ParseGlobalSlowLogRules`（slow_log.go 的规则解析与字段解析表）→ tidb_slow_log_rules 的 SetSession、tidb_slow_log_rules / tidb_slow_log_max_per_sec 的全局钩子。
+3. **生成器**：GetGlobal 已移植的变量，`get` / `set` 记录不再记为 `<global-hook>`，改记真实值（Rust 侧按 pending 跳过）；非标量字段的导出（IsolationReadEngines、TxnScope、KVVars……），使 T6 的效果可比对；minelits（session_test.go、varsutil_test.go）与多种子。
+4. amd64 向量：tracker #29 的 CI 产物（arm64 已更新）。
+
+**发现**
+- `fixcontrol.ParseToMap("1:")`：冒号后为空时 Go 越界 panic（`s[0]`），Rust 照样 panic（tidb_opt_fix_control 没有 Validation）。是否可由 SQL 触发（`SET tidb_opt_fix_control='1:'`）待验证，候选 upstream-pitfall。
+- `ToRuntimeFilterType` 按 Go map 的随机顺序生成列表；Rust 排序（M-MAPORDER）。

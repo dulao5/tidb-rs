@@ -1480,10 +1480,10 @@ fn v_tidb_runtime_filter_type(
     fail(normalized_value, errors::new(err_msg))
 }
 
-/// RuntimeFilterModeStringToMode (session.go, block D05.2), validity only.
-// go: pkg/sessionctx/variable/session.go RuntimeFilterModeStringToMode L2 (validity only)
+/// The validity part of RuntimeFilterModeStringToMode (ported in session_state.rs).
+// glue: RuntimeFilterModeStringToMode(name).1
 pub(crate) fn runtime_filter_mode_ok(name: &str) -> bool {
-    matches!(name, "OFF" | "LOCAL")
+    super::session_state::runtime_filter_mode_string_to_mode(name).1
 }
 
 // go-part: defaultSysVars (sysvar.go:L3437 TiDBRuntimeFilterModeName.Validation closure) L1
