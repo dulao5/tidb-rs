@@ -36,3 +36,6 @@
 - 已 rebase 到 main（#65 合并之后）。
 - 完成：exprctx（context/optional/param.go）、expropt/optional.go、exprstatic（evalctx/exprctx.go）、ranger 类型；govec `exprctx`、`ranger` 领域与回放；#65 评审的四条后续（D00.1a、单元测试、ErrorGroup 可达、Reset 与 `Arc::get_mut`）。
 - 下一步（第 2b 部分，叠在 2a 上）：expropt 的具体 provider（current_user、sessionvars、infoschema、kvstore、sqlexec、sequence、advisory_lock、ddlowner、priv）、sessionexpr、planctx、core/base、debugtrace、sessionctx/context.go、distsql/context；T8；T9 等 D05.2 B2 合并。
+- PR：tidb-rs #68（ready，CI 两个平台通过）、tracker #32（CI 通过）。合并顺序：先 tracker #32，再 #68。
+- 生成器注意：exprctx 的 `load` 会触发 `tidb_redact_log` 的 SetSession hook（进程级状态，#62），每条记录后恢复；exprctx、ranger 每条记录前打开 new collation。回放侧同样处理。
+- 2b 尚未开始（没有分支）。
