@@ -21,10 +21,10 @@ its own target.
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-b`, PR B) |
-| generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view), 43,498 records: `fresh` 1, `set` 30,951 (12 `src: "fix pingcap/tidb#65884"`), `get` 945, `set_global` 9,482, `set_global_hook` 2,039, `init` 80; both targets hold the same records |
-| `arm64/sessionvars.jsonl.gz` sha256 | `271ef23bd2e142b91a820e581c96c678dc7b255ffb1dbac242840f747dc806c9` (generated locally) |
-| `amd64/sessionvars.jsonl.gz` sha256 | `f4d990791c0dadc49776858238124bd961a2aeb6e2cee34e0c23e5a33d5db4f8` (tracker CI artifact) |
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-b2`, PR B2) |
+| generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view), 43,623 records: `fresh` 1, `set` 31,017 (12 `src: "fix pingcap/tidb#65884"`, 68 `sys/slow_log_rules`), `get` 945, `set_global` 9,482, `set_global_hook` 2,098 (26 `sys/cloud_storage_uri`, 34 `sys/slow_log_rules`), `init` 80; both targets hold the same records |
+| `arm64/sessionvars.jsonl.gz` sha256 | `42a22a01103cb5d515ca70f72dce0d47fa60cf044cee51adcead6c797b8d3a05` (generated locally) |
+| `amd64/sessionvars.jsonl.gz` sha256 | `a0e45c87d98a810f1e3f635581c3ce08428961178854d668e627f6a2374cf6cc` (tracker CI artifact) |
 
 ## Domain "stmtctx" (block D00.1 part 1)
 
