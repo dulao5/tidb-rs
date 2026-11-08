@@ -17,10 +17,13 @@
 
 #![allow(non_upper_case_globals)]
 
+pub mod encoding;
 pub mod encoding_gbk;
 
 #[rustfmt::skip]
 mod charset_data;
+#[rustfmt::skip]
+mod gbk_decode_data;
 #[rustfmt::skip]
 mod gbk_encode_data;
 

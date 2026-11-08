@@ -97,3 +97,12 @@ files have identical records (the header differs).
 | `arm64/json.jsonl.gz` sha256 | `9dda7d728235c65cd8ae25647e7d013ffcde7d3029d4b5e5a233e37d4d663a33` |
 
 Replayed by `crates/types/tests/govec_json.rs`.
+
+## datum
+
+`<target>/datum.jsonl.gz` (domain `datum`: D01.1 part 1 with D01.4, and the charset
+Encodings), copied from tidb-rs-tracker branch `govec/datum-D01.1` at `f20716e`: 74,274 records,
+seed 20261108. amd64 sha256 `82c4cb6f9ede8aba723476b62b1ac7a441ab8a75c19c490e8995dfed10f719cd` (from the tracker CI artifact), arm64 sha256 `eedc6daafcb23e66dc49720f9254c3bf01b828b38842de9dd4819cc3357011d2`.
+The targets differ in 18 records: 8 `float_helper` (the hardware default NaN of `0*Inf` in
+`Truncate`: negative on x86) and 10 `convert_num` `FloatToInt` with NaN (M-F2I:
+`int64(NaN)` is MinInt64 on amd64, 0 on arm64).

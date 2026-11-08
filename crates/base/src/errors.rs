@@ -104,7 +104,15 @@ enum Kind {
 /// initialised by `Normalize` / `ErrClass.NewStd`); `gen_with_stack_by_args` & co. return a
 /// copy with arguments and creation site.
 #[derive(Clone)]
-pub struct Error(Box<Inner>);
+pub struct Error(Repr);
+
+/// Where the fields live: a heap copy, or a prototype shared by reference
+/// ([`Error::share`]). A shared prototype is copied on the first mutation (`DerefMut`).
+#[derive(Clone)]
+enum Repr {
+    Owned(Box<Inner>),
+    Shared(&'static Inner),
+}
 
 /// The fields of [`Error`] (boxed: `Result<T, Error>` stays small). Not part of the API:
 /// the fields are private, use the methods of [`Error`].
@@ -134,14 +142,23 @@ impl std::ops::Deref for Error {
     type Target = Inner;
     // glue: field access through the box
     fn deref(&self) -> &Inner {
-        &self.0
+        match &self.0 {
+            Repr::Owned(b) => b,
+            Repr::Shared(r) => r,
+        }
     }
 }
 
 impl std::ops::DerefMut for Error {
     // glue: field access through the box
     fn deref_mut(&mut self) -> &mut Inner {
-        &mut self.0
+        if let Repr::Shared(r) = self.0 {
+            self.0 = Repr::Owned(Box::new(r.clone()));
+        }
+        match &mut self.0 {
+            Repr::Owned(b) => b,
+            Repr::Shared(_) => unreachable!("copied above"),
+        }
     }
 }
 
@@ -320,7 +337,7 @@ pub fn error_not_equal(err1: Option<&Error>, err2: Option<&Error>) -> bool {
 impl Error {
     // glue: field initialisation shared by the constructors
     fn empty(kind: Kind, message: Cow<'static, [u8]>) -> Error {
-        Error(Box::new(Inner {
+        Error(Repr::Owned(Box::new(Inner {
             kind,
             code: 0,
             code_text: Cow::Borrowed(""),
@@ -331,7 +348,19 @@ impl Error {
             file: "",
             line: 0,
             stack: None,
-        }))
+        })))
+    }
+
+    /// The prototype itself, without copying it: Go returns its sentinel error values
+    /// (`return ErrTruncated`) by pointer, at no cost; `clone` copies the fields to the heap.
+    /// The result is equal to the prototype in every field (`Equal`, `Error()`, location),
+    /// and is copied on the first mutation. For hot paths that return a prototype as is.
+    // glue: Go returns a package-level error value (no allocation)
+    pub fn share(&'static self) -> Error {
+        match &self.0 {
+            Repr::Owned(b) => Error(Repr::Shared(b)),
+            Repr::Shared(r) => Error(Repr::Shared(r)),
+        }
     }
 
     /// A plain Go `error` (not a `*errors.Error`): `Error()` is `message`.
@@ -507,6 +536,10 @@ impl Error {
     /// `Equal` checks if err is equal to e.
     // go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Error.Equal L1
     pub fn equal(&self, err: &Error) -> bool {
+        // A shared prototype ([`Error::share`]) is the same instance (Go: pointer equality).
+        if std::ptr::eq::<Inner>(&**self, &**err) {
+            return true;
+        }
         let origin_err = cause(err);
         if self.same_instance(origin_err) {
             return true;

@@ -424,14 +424,12 @@ fn check(rec: &Value) -> Option<String> {
         (Err(e), w) if w["name"] == "other" => {
             if e.code() != 0 {
                 diffs.push(format!("err: got {e}, want a non-terror error {w}"));
-            } else if op.starts_with("unmarshal_json")
-                && e.to_string().as_bytes() != ungs(&w["msg"])
-            {
+            } else if op.starts_with("unmarshal_json") && e.error() != ungs(&w["msg"]) {
                 diffs.push(format!("err: got {e}, want {w}"));
             }
         }
         (Err(e), w) => {
-            if u64::from(e.code()) != w["code"].as_u64().unwrap() || e.to_string() != w["msg"] {
+            if e.code() as u64 != w["code"].as_u64().unwrap() || e.error() != ungs(&w["msg"]) {
                 diffs.push(format!("err: got [{}] {e}, want {w}", e.code()));
             }
         }
