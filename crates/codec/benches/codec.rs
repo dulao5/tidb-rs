@@ -129,7 +129,7 @@ fn benches(c: &mut Criterion) {
         let mut d = tc::new_decoder(&mut chk, loc.clone());
         let mut i = 0usize;
         b.iter(|| {
-            if i % 1024 == 0 {
+            if i.is_multiple_of(1024) {
                 d.chunk().reset();
             }
             i += 1;
