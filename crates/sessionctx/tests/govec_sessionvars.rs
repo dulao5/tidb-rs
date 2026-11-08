@@ -147,6 +147,13 @@ fn volatile(name: &str) -> bool {
     )
 }
 
+/// Whether reading `name` back goes through a GetGlobal hook (Go's entry has one and the
+/// variable has no session scope): the generator records such values as "<global-hook>".
+fn global_hook_read(name: &str) -> bool {
+    get_sys_var(name)
+        .is_some_and(|sv| sv.go_hooks & HOOK_GET_GLOBAL != 0 && !sv.has_session_scope())
+}
+
 /// The names a SetSession reaches: the variable and its aliases.
 fn with_aliases(name: &str) -> Vec<String> {
     match get_sys_var(name) {
@@ -164,14 +171,15 @@ fn pending(op: &str, args: &[Value]) -> bool {
         "set" => {
             let name = args[1].as_str().unwrap();
             // The read-back goes through GetSession or, for a variable without session
-            // scope, GetGlobal.
+            // scope, GetGlobal (recorded as "<global-hook>", so a pending GetGlobal does
+            // not matter).
             with_aliases(name).iter().any(|n| p(n, "SetSession"))
                 || p(&gostd_lower(name), "GetSession")
-                || p(&gostd_lower(name), "GetGlobal")
         }
         "get" => {
             let name = args[0].as_str().unwrap();
-            ["GetSession", "GetGlobal", "GetStateValue"]
+            // GetGlobal read-backs are recorded as "<global-hook>".
+            ["GetSession", "GetStateValue"]
                 .iter()
                 .any(|k| p(&gostd_lower(name), k))
         }
@@ -218,6 +226,8 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                     Ok(old) => {
                         let old = if volatile(name) {
                             "<volatile>".to_owned()
+                        } else if global_hook_read(name) {
+                            "<global-hook>".to_owned()
                         } else {
                             old
                         };
@@ -225,7 +235,13 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                         Ok(())
                     }
                     Err(e) => {
-                        let old = if volatile(name) { "<volatile>" } else { "" };
+                        let old = if volatile(name) {
+                            "<volatile>"
+                        } else if global_hook_read(name) {
+                            "<global-hook>"
+                        } else {
+                            ""
+                        };
                         res.insert("old".into(), json!(old));
                         Err(e)
                     }
@@ -238,6 +254,8 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                     Ok(v) => {
                         let v = if volatile(name) {
                             "<volatile>".to_owned()
+                        } else if global_hook_read(name) {
+                            "<global-hook>".to_owned()
                         } else {
                             v
                         };
@@ -278,7 +296,17 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                     json!("<volatile>"),
                 )
             } else {
-                (sess, glob, state)
+                match get_sys_var(name) {
+                    Some(sv) if sv.go_hooks & HOOK_GET_GLOBAL != 0 => {
+                        let sess = if sv.has_session_scope() {
+                            sess
+                        } else {
+                            json!("<global-hook>")
+                        };
+                        (sess, json!("<global-hook>"), state)
+                    }
+                    _ => (sess, glob, state),
+                }
             };
             let out = json!({"sess": sess, "sess_err": sess_err, "glob": glob, "glob_err": glob_err,
                 "state": state, "keep": keep, "state_err": state_err});
@@ -390,7 +418,14 @@ fn replay(path: &str) -> (usize, usize) {
         let rec: Value = serde_json::from_str(line).unwrap();
         let op = rec["op"].as_str().unwrap();
         let args = rec["args"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
-        if pending(op, args) {
+        // Go panicked inside a GetGlobal hook (the test accessor panics on
+        // GetTiDBTableValue): counted with the pending hooks while GetGlobal is pending.
+        let go_panicked_in_get_global = rec["err"]["name"] == "panic"
+            && args
+                .iter()
+                .filter_map(|a| a.as_str())
+                .any(|n| session_hook_pending(&gostd_lower(n), "GetGlobal"));
+        if pending(op, args) || go_panicked_in_get_global {
             skipped += 1;
             continue;
         }
