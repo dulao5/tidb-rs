@@ -183,11 +183,12 @@ pub fn runtime_filter_type_string_to_type(name: &str) -> (RuntimeFilterType, boo
 ///
 /// Go builds the list by ranging over a map (random order); the list here is sorted
 /// (M-MAPORDER).
-// go: ToRuntimeFilterType L2 [M-MAPORDER]
+// go: ToRuntimeFilterType L2 (M-MAPORDER: sorted; Go ranges over a map)
 pub fn to_runtime_filter_type(session_var_value: &str) -> (Vec<RuntimeFilterType>, bool) {
     let mut rf_type_map = BTreeSet::new();
     for type_name in session_var_value.split(',') {
-        let (rf_type, ok) = runtime_filter_type_string_to_type(&type_name.to_uppercase());
+        let (rf_type, ok) =
+            runtime_filter_type_string_to_type(&tidb_base::gostd::to_upper(type_name));
         if !ok {
             return (Vec::new(), ok);
         }

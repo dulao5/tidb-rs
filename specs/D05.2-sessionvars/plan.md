@@ -99,3 +99,7 @@ PR A 已合并（#57 @a2307d0、tracker #27 @bd6450e）；PR B 的分支已 reba
 **发现（upstream-pitfall 候选，未开 issue）**
 - `ldapAuthImpl.initializeCAPool`：`errors.Wrapf(err, "read ca certificate at %s", caCert)` 格式化的是读失败后为 nil 的 `caCert`，不是路径，消息是 `read ca certificate at : open <path>: …`；而且 `caPath` 在报错前已经被改掉，之后 GetGlobal 返回的是读不了的路径。Rust 照样复现。
 - `fixcontrol.ParseToMap("1:")`：tidb_opt_fix_control 没有 Validation，SetSession / SetGlobal 钩子直接调用 ParseToMap；冒号后去空白为空时 `s[0]` 越界 panic。静态可达：`SET tidb_opt_fix_control='1:'`、`SET GLOBAL …`、`SET_VAR(tidb_opt_fix_control='1:')`。会话层的 recover 会把 panic 转成返回给客户端的错误（未在 v8.5.8 server 上用 SQL 验证）。
+
+## PR B 拆分（2026-11-09）
+
+PR B 太大，拆成 B1 与 B2，范围见 tasks.md 开头。B1 = 当前的 #63 / tracker #29，修好了第二轮交接第 4 条中 converge 的 4 个 ERROR（`unnecessary_cast` 改为去掉多余的类型转换；两处级别写法；`assert_send` 加 glue 标注），并把 `to_runtime_filter_type_ok` 改为调用 `session_state::to_runtime_filter_type`（去掉重复标注；大写转换统一用 `gostd::to_upper`，即 Go 的 `strings.ToUpper`）。converge：D05.2 34/237，0 个 ERROR。B2 在分支 `block/D05.2-sessionvars-b2` / `govec/sessionvars-D05.2-b2` 上继续第二轮交接的余下第 1–3 条。

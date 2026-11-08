@@ -1455,13 +1455,11 @@ fn v_tidb_analyze_skip_column_types(
     valid_analyze_skip_column_types(normalized_value)
 }
 
-/// ToRuntimeFilterType (session.go, block D05.2): validity of a comma-separated list of
-/// runtime filter type names ("IN", "MIN_MAX").
-// go: pkg/sessionctx/variable/session.go ToRuntimeFilterType L2 (validity only; the type list is built with D05.2)
+/// The validity half of [`super::session_state::to_runtime_filter_type`] (Go's Validation
+/// closure calls `ToRuntimeFilterType` and checks `ok`).
+// glue: the Validation closure's use of ToRuntimeFilterType
 pub(crate) fn to_runtime_filter_type_ok(session_var_value: &str) -> bool {
-    session_var_value
-        .split(',')
-        .all(|t| matches!(gostd::to_upper(t).as_str(), "IN" | "MIN_MAX"))
+    super::session_state::to_runtime_filter_type(session_var_value).1
 }
 
 // go-part: defaultSysVars (sysvar.go:L3422 TiDBRuntimeFilterTypeName.Validation closure) L1

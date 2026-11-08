@@ -456,7 +456,8 @@ impl SessionVars {
     /// SetStatusFlag sets the session server status variable.
     /// If on is true sets the flag in session status,
     /// otherwise removes the flag.
-    // go: SessionVars.SetStatusFlag L1 (the session owns its status: no CAS loop)
+    // The session owns its status, so no CAS loop is needed.
+    // go: SessionVars.SetStatusFlag L1
     pub fn set_status_flag(&mut self, flag: u16, on: bool) {
         if on {
             self.state.status |= u32::from(flag);
@@ -528,6 +529,7 @@ impl SessionVars {
 // threads but is used by one task at a time.
 // glue: compile-time assertions
 const _: () = {
+    // glue: compile-time assertion
     const fn assert_send<T: Send>() {}
     assert_send::<SessionVars>();
 };

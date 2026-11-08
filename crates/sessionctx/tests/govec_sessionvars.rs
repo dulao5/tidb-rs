@@ -573,7 +573,9 @@ fn replay(path: &str) -> (usize, usize) {
     (n, skipped)
 }
 
-/// The cap on the committed vectors' skipped records (see `govec_sessionvars`).
+/// The cap on the committed vectors' skipped records (see `govec_sessionvars`): the exact
+/// count at PR B1 (SetGlobal 77/155, GetGlobal 112/134 still pending in part). Lower it in
+/// every PR that ports hooks; it must reach 0 at the end of PR B2.
 const MAX_SKIPPED: usize = 2319;
 
 #[test]

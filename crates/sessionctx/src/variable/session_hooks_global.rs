@@ -7,7 +7,6 @@
 
 #![allow(non_upper_case_globals)]
 // The defaults of Go are untyped constants: the translated stores cast them to the field type.
-#![allow(clippy::unnecessary_cast)]
 
 use std::sync::atomic::Ordering::SeqCst;
 
@@ -394,28 +393,19 @@ pub(super) fn sg_ddl_slow_threshold(_s: &mut SessionVars, val: &str) -> Result<(
 
 // go-part: defaultSysVars (sysvar.go:L1046 max_user_connections SetGlobal closure) L1
 pub(super) fn sg_max_user_connections(_s: &mut SessionVars, val: &str) -> Result<(), Error> {
-    MaxUserConnectionsValue.store(
-        tidb_opt_int64(val, DefMaxUserConnections as i64) as _,
-        SeqCst,
-    );
+    MaxUserConnectionsValue.store(tidb_opt_int64(val, DefMaxUserConnections) as _, SeqCst);
     Ok(())
 }
 
 // go-part: defaultSysVars (sysvar.go:L1573 password_history SetGlobal closure) L1
 pub(super) fn sg_password_history(_s: &mut SessionVars, val: &str) -> Result<(), Error> {
-    PasswordHistory.store(
-        tidb_opt_int64(val, DefPasswordReuseHistory as i64) as _,
-        SeqCst,
-    );
+    PasswordHistory.store(tidb_opt_int64(val, DefPasswordReuseHistory) as _, SeqCst);
     Ok(())
 }
 
 // go-part: defaultSysVars (sysvar.go:L1579 password_reuse_interval SetGlobal closure) L1
 pub(super) fn sg_password_reuse_interval(_s: &mut SessionVars, val: &str) -> Result<(), Error> {
-    PasswordReuseInterval.store(
-        tidb_opt_int64(val, DefPasswordReuseTime as i64) as _,
-        SeqCst,
-    );
+    PasswordReuseInterval.store(tidb_opt_int64(val, DefPasswordReuseTime) as _, SeqCst);
     Ok(())
 }
 
@@ -424,7 +414,7 @@ pub(super) fn sg_performance_schema_session_connect_attrs_size(
     _s: &mut SessionVars,
     val: &str,
 ) -> Result<(), Error> {
-    ConnectAttrsSize.store(tidb_opt_int64(val, DefConnectAttrsSize as i64) as _, SeqCst);
+    ConnectAttrsSize.store(tidb_opt_int64(val, DefConnectAttrsSize) as _, SeqCst);
     Ok(())
 }
 
@@ -556,10 +546,7 @@ pub(super) fn sg_tidb_expensive_txn_time_threshold(
 
 // go-part: defaultSysVars (sysvar.go:L1016 tidb_gc_max_wait_time SetGlobal closure) L1
 pub(super) fn sg_tidb_gc_max_wait_time(_s: &mut SessionVars, val: &str) -> Result<(), Error> {
-    GCMaxWaitTime.store(
-        tidb_opt_int64(val, DefTiDBGCMaxWaitTime as i64) as _,
-        SeqCst,
-    );
+    GCMaxWaitTime.store(tidb_opt_int64(val, DefTiDBGCMaxWaitTime) as _, SeqCst);
     Ok(())
 }
 
@@ -590,7 +577,7 @@ pub(super) fn sg_tidb_mem_quota_binding_cache(
     val: &str,
 ) -> Result<(), Error> {
     MemQuotaBindingCache.store(
-        tidb_opt_int64(val, DefTiDBMemQuotaBindingCache as i64) as _,
+        tidb_opt_int64(val, DefTiDBMemQuotaBindingCache) as _,
         SeqCst,
     );
     Ok(())
@@ -602,7 +589,7 @@ pub(super) fn sg_tidb_memory_usage_alarm_keep_record_num(
     val: &str,
 ) -> Result<(), Error> {
     MemoryUsageAlarmKeepRecordNum.store(
-        tidb_opt_int64(val, DefMemoryUsageAlarmKeepRecordNum as i64) as _,
+        tidb_opt_int64(val, DefMemoryUsageAlarmKeepRecordNum) as _,
         SeqCst,
     );
     Ok(())
@@ -613,16 +600,13 @@ pub(super) fn sg_tidb_memory_usage_alarm_ratio(
     _s: &mut SessionVars,
     val: &str,
 ) -> Result<(), Error> {
-    MemoryUsageAlarmRatio.store(tidb_opt_float64(val, DefMemoryUsageAlarmRatio as f64));
+    MemoryUsageAlarmRatio.store(tidb_opt_float64(val, DefMemoryUsageAlarmRatio));
     Ok(())
 }
 
 // go-part: defaultSysVars (sysvar.go:L1333 tidb_query_log_max_len SetGlobal closure) L1
 pub(super) fn sg_tidb_query_log_max_len(_s: &mut SessionVars, val: &str) -> Result<(), Error> {
-    QueryLogMaxLen.store(
-        tidb_opt_int64(val, DefTiDBQueryLogMaxLen as i64) as _,
-        SeqCst,
-    );
+    QueryLogMaxLen.store(tidb_opt_int64(val, DefTiDBQueryLogMaxLen) as _, SeqCst);
     Ok(())
 }
 
@@ -638,7 +622,7 @@ pub(super) fn sg_tidb_schema_version_cache_limit(
     val: &str,
 ) -> Result<(), Error> {
     SchemaVersionCacheLimit.store(
-        tidb_opt_int64(val, DefTiDBSchemaVersionCacheLimit as i64) as _,
+        tidb_opt_int64(val, DefTiDBSchemaVersionCacheLimit) as _,
         SeqCst,
     );
     Ok(())
@@ -655,10 +639,7 @@ pub(super) fn sg_tidb_stats_load_pseudo_timeout(
 
 // go-part: defaultSysVars (sysvar.go:L2680 tidb_stats_load_sync_wait SetGlobal closure) L1
 pub(super) fn sg_tidb_stats_load_sync_wait(_s: &mut SessionVars, val: &str) -> Result<(), Error> {
-    StatsLoadSyncWait.store(
-        tidb_opt_int64(val, DefTiDBStatsLoadSyncWait as i64) as _,
-        SeqCst,
-    );
+    StatsLoadSyncWait.store(tidb_opt_int64(val, DefTiDBStatsLoadSyncWait) as _, SeqCst);
     Ok(())
 }
 
@@ -676,7 +657,7 @@ pub(super) fn sg_tidb_ttl_job_enable(_vars: &mut SessionVars, s: &str) -> Result
 
 // go-part: defaultSysVars (sysvar.go:L660 validate_password.length SetGlobal closure) L1
 pub(super) fn sg_validate_password_length(_s: &mut SessionVars, val: &str) -> Result<(), Error> {
-    PasswordValidationLength.store(tidb_opt_int64(val, 8 as i64) as _, SeqCst);
+    PasswordValidationLength.store(tidb_opt_int64(val, 8_i64) as _, SeqCst);
     Ok(())
 }
 
@@ -685,7 +666,7 @@ pub(super) fn sg_validate_password_mixed_case_count(
     _s: &mut SessionVars,
     val: &str,
 ) -> Result<(), Error> {
-    PasswordValidationMixedCaseCount.store(tidb_opt_int64(val, 1 as i64) as _, SeqCst);
+    PasswordValidationMixedCaseCount.store(tidb_opt_int64(val, 1_i64) as _, SeqCst);
     Ok(())
 }
 
@@ -694,7 +675,7 @@ pub(super) fn sg_validate_password_number_count(
     _s: &mut SessionVars,
     val: &str,
 ) -> Result<(), Error> {
-    PasswordValidtaionNumberCount.store(tidb_opt_int64(val, 1 as i64) as _, SeqCst);
+    PasswordValidtaionNumberCount.store(tidb_opt_int64(val, 1_i64) as _, SeqCst);
     Ok(())
 }
 
@@ -703,6 +684,6 @@ pub(super) fn sg_validate_password_special_char_count(
     _s: &mut SessionVars,
     val: &str,
 ) -> Result<(), Error> {
-    PasswordValidationSpecialCharCount.store(tidb_opt_int64(val, 1 as i64) as _, SeqCst);
+    PasswordValidationSpecialCharCount.store(tidb_opt_int64(val, 1_i64) as _, SeqCst);
     Ok(())
 }

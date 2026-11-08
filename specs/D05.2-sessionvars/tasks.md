@@ -2,7 +2,9 @@
 
 PR 系列（每个可以单独合并，base main）：
 - **PR A**（tidb-rs #57、tracker #27）：T0–T3、T4 的一部分、T11、T12，以及钩子框架与清单检查。
-- **PR B**：T4 余下部分、T5、T6、T7、T9。
+- **PR B** 拆成两部分（2026-11-09）：
+  - **B1**（#63、tracker #29）：T4 的余下部分（SetSession 272/273、GetSession 27/27、GetStateValue 6/6），T5 的一部分（SetGlobal 77/155、GetGlobal 112/134），T6 的一部分，T9；生成器重置进程级状态，新增 op `set_global_hook`。跳过上限 2,319。
+  - **B2**（叠在 B1 上）：T5 的余下部分（client-go、tls、topsql 的状态单元，gctuner，TTL 窗口，MemQuotaAnalyze，tidb_config、tidb_external_ts、tidb_cloud_storage_uri、fix_control 的 SetGlobal；只影响 tidb-rs 不运行的子系统的钩子按 runtime-only / X 处置），T7，T6 的余下部分，T8 的余下部分（非标量字段导出、minelits、多种子）。目标：pending 为 0（tidb_gc_* 的 5 个变量随 PR C / T10），跳过上限为 0。
 - **PR C**：T10 + T13（§6 的设计评审通过后）。
 
 - [x] T0 范围划分（tracker rules.py：39 个写路径函数归 X）
