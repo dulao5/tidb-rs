@@ -1,0 +1,31 @@
+[package]
+name = "tidb-sessionctx"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/sessionctx (blocks D00.1, D05.1, D05.2): the system variable registry and validation (D05.1, N8), session variables and statement context"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), errno, dbterror classes, mysql constants and SQL modes, config, Go std ports
+# (strconv, time durations, unicode folding).
+tidb-base = { workspace = true }
+# Datum (GetNativeValType), collations (checkCollation), Go strconv parse_int / parse_uint.
+tidb-types = { workspace = true }
+# kv.GetNewestMppVersion (mpp_version validation).
+tidb-kv = { workspace = true }
+# MemTotal (parseMemoryLimit).
+tidb-memory = { workspace = true }
+# parser/charset (checkCharacterSet).
+tidb-parser = { workspace = true }
+# Go sync.Mutex (SequenceState), RWMutex (instance overlay).
+parking_lot = "0.12"
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
