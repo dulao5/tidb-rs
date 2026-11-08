@@ -1,0 +1,37 @@
+[package]
+name = "tidb-codec"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/util/codec (block D01.8: memcomparable and value encodings, Datum codec, chunk-row hashing)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), terror.Log, mysql constants, gostd time zones.
+tidb-base = { workspace = true }
+# FieldType, EvalType, IHasher (pkg/parser/types, block D02.3).
+tidb-parser = { workspace = true }
+# Datum, MyDecimal, Time, Duration, BinaryJSON, VectorFloat32, collations, Enum/Set.
+tidb-types = { workspace = true }
+# Chunk, Column, Row (block D01.7).
+tidb-chunk = { workspace = true }
+# logutil.BgLogger().Warn in HashCode (the binary bridges `log`, see tidb-server).
+log = "0.4"
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+criterion = "0.5"
+tikv-jemallocator = { workspace = true }
+# The TiKV oracle (tests/tikv_oracle.rs): vendored TiKV encoders, compared byte for byte.
+codec = { workspace = true }
+tidb_query_datatype = { workspace = true }
+
+[[bench]]
+name = "codec"
+harness = false
+
+[lints]
+workspace = true

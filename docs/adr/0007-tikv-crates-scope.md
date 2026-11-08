@@ -21,6 +21,17 @@ ADR 0001 §4 is therefore superseded. This ADR records which parts of the vendor
 
 ## Decision
 
+**Amendment (2026-11-08, owner decision in tidb-rs#39):** Q3 now ports the encoding formats
+from Go as L1. `pkg/util/codec` (block D01.8, crate `tidb-codec`), the chunk format (D01.7) and
+the collation tables (D01.9) are Go ports; the vendored `codec` and
+`tidb_query_datatype::codec` are used only as a **test oracle**, compared byte for byte in both
+directions (`crates/codec/tests/tikv_oracle.rs`: tidb-rs and TiKV encode the same value to the
+same bytes, and each decodes the other's bytes to the same value). Differences the oracle finds
+are upstream TiDB/TiKV inconsistencies (label `upstream-pitfall`), not porting errors: the
+first is the float `-0.0` (Go encodes it like `+0.0`, TiKV keeps the sign). Point 1 below is
+narrowed accordingly; the PoC call sites of point 5 keep their L3 use until D01.11 / D07.3
+replace them.
+
 1. **Kept as L3: byte formats only.** These parts may be used anywhere, because their contract
    is a byte format that Go TiDB, TiKV and the stored data already share:
    - `codec`: byte and number codecs;

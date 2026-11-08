@@ -126,18 +126,26 @@ impl BinaryLiteral {
     }
 
     /// Compare compares BinaryLiteral to another one
-    // go: BinaryLiteral.Compare L1
+    // glue: method form of compare_bytes (BinaryLiteral.Compare)
     pub fn compare(&self, b2: &BinaryLiteral) -> isize {
-        let buf_b = trim_leading_zero_bytes(&self.0);
-        let buf_b2 = trim_leading_zero_bytes(&b2.0);
-        if buf_b.len() > buf_b2.len() {
-            return 1;
-        }
-        if buf_b.len() < buf_b2.len() {
-            return -1;
-        }
-        buf_b.cmp(buf_b2) as isize
+        compare_bytes(&self.0, &b2.0)
     }
+}
+
+/// `BinaryLiteral(b).Compare(BinaryLiteral(b2))` on borrowed bytes: compares after trimming
+/// leading zero bytes, the longer value is larger. Comparators over chunk cells call it
+/// without building an owned `BinaryLiteral` per comparison.
+// go: BinaryLiteral.Compare L1 (receiver and argument as borrowed bytes)
+pub fn compare_bytes(b: &[u8], b2: &[u8]) -> isize {
+    let buf_b = trim_leading_zero_bytes(b);
+    let buf_b2 = trim_leading_zero_bytes(b2);
+    if buf_b.len() > buf_b2.len() {
+        return 1;
+    }
+    if buf_b.len() < buf_b2.len() {
+        return -1;
+    }
+    buf_b.cmp(buf_b2) as isize
 }
 
 /// `strconv.ParseUint(s, 2, 8)` for the 8-character groups of ParseBitStr: Go's

@@ -3689,6 +3689,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-codec"
+version = "0.0.0"
+dependencies = [
+ "codec",
+ "criterion 0.5.1",
+ "flate2",
+ "log",
+ "serde_json",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-parser",
+ "tidb-types",
+ "tidb_query_datatype",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "tidb-distsql"
 version = "0.0.0"
 dependencies = [
