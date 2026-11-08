@@ -17,9 +17,11 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use tidb_base::Error;
+use tidb_base::gostd;
 
 use super::session::SessionVars;
 use super::tidb_defs::*;
+use super::tidb_vars::*;
 use super::variable::{GetGlobalFn, GetSessionFn, GetStateValueFn, SetGlobalFn, SetSessionFn};
 use super::varsutil::*;
 
@@ -84,6 +86,7 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "tidb_cdc_write_source" => ss_tidb_cdc_write_source,
         "tidb_metric_query_range_duration" => ss_tidb_metric_query_range_duration,
         "tidb_request_source_type" => ss_tidb_request_source_type,
+        "tidb_slow_txn_log_threshold" => ss_tidb_slow_txn_log_threshold,
         "tidb_enable_prepared_plan_cache" => ss_tidb_enable_prepared_plan_cache,
         "tidb_enable_prepared_plan_cache_memory_monitor" => {
             ss_tidb_enable_prepared_plan_cache_memory_monitor
@@ -94,8 +97,12 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         }
         "tidb_opt_enable_fuzzy_binding" => ss_tidb_opt_enable_fuzzy_binding,
         "tidb_enable_plan_replayer_capture" => ss_tidb_enable_plan_replayer_capture,
+        "max_execution_time" => ss_max_execution_time,
+        "tikv_client_read_timeout" => ss_tikv_client_read_timeout,
         "default_collation_for_utf8mb4" => ss_default_collation_for_utf8mb4,
         "tidb_foreign_key_check_in_shared_lock" => ss_tidb_foreign_key_check_in_shared_lock,
+        "auto_increment_increment" => ss_auto_increment_increment,
+        "auto_increment_offset" => ss_auto_increment_offset,
         "windowing_use_high_precision" => ss_windowing_use_high_precision,
         "tidb_allow_mpp" => ss_tidb_allow_mpp,
         "tidb_allow_tiflash_cop" => ss_tidb_allow_tiflash_cop,
@@ -148,6 +155,8 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "tidb_opt_force_inline_cte" => ss_tidb_opt_force_inline_cte,
         "tidb_index_join_batch_size" => ss_tidb_index_join_batch_size,
         "tidb_index_lookup_size" => ss_tidb_index_lookup_size,
+        "tidb_index_lookup_concurrency" => ss_tidb_index_lookup_concurrency,
+        "tidb_index_lookup_join_concurrency" => ss_tidb_index_lookup_join_concurrency,
         "tidb_index_serial_scan_concurrency" => ss_tidb_index_serial_scan_concurrency,
         "tidb_skip_utf8_check" => ss_tidb_skip_utf8_check,
         "tidb_skip_ascii_check" => ss_tidb_skip_ascii_check,
@@ -156,10 +165,19 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "tidb_shard_row_id_bits" => ss_tidb_shard_row_id_bits,
         "tidb_pre_split_regions" => ss_tidb_pre_split_regions,
         "tidb_init_chunk_size" => ss_tidb_init_chunk_size,
+        "tidb_hash_join_concurrency" => ss_tidb_hash_join_concurrency,
+        "tidb_projection_concurrency" => ss_tidb_projection_concurrency,
+        "tidb_hashagg_partial_concurrency" => ss_tidb_hashagg_partial_concurrency,
+        "tidb_hashagg_final_concurrency" => ss_tidb_hashagg_final_concurrency,
+        "tidb_window_concurrency" => ss_tidb_window_concurrency,
+        "tidb_merge_join_concurrency" => ss_tidb_merge_join_concurrency,
+        "tidb_streamagg_concurrency" => ss_tidb_streamagg_concurrency,
+        "tidb_index_merge_intersection_concurrency" => ss_tidb_index_merge_intersection_concurrency,
         "tidb_enable_parallel_apply" => ss_tidb_enable_parallel_apply,
         "tidb_mem_quota_apply_cache" => ss_tidb_mem_quota_apply_cache,
         "tidb_txn_entry_size_limit" => ss_tidb_txn_entry_size_limit,
         "tidb_constraint_check_in_place" => ss_tidb_constraint_check_in_place,
+        "tidb_txn_mode" => ss_tidb_txn_mode,
         "tidb_enable_window_function" => ss_tidb_enable_window_function,
         "tidb_enable_pipelined_window_function" => ss_tidb_enable_pipelined_window_function,
         "tidb_opt_enable_no_decorrelate_in_select" => ss_tidb_opt_enable_no_decorrelate_in_select,
@@ -201,6 +219,8 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "tidb_nontransactional_ignore_error" => ss_tidb_nontransactional_ignore_error,
         "tiflash_fine_grained_shuffle_stream_count" => ss_tiflash_fine_grained_shuffle_stream_count,
         "tiflash_fine_grained_shuffle_batch_size" => ss_tiflash_fine_grained_shuffle_batch_size,
+        "tidb_min_paging_size" => ss_tidb_min_paging_size,
+        "tidb_max_paging_size" => ss_tidb_max_paging_size,
         "tidb_memory_debug_mode_min_heap_inuse" => ss_tidb_memory_debug_mode_min_heap_inuse,
         "tidb_memory_debug_mode_alarm_ratio" => ss_tidb_memory_debug_mode_alarm_ratio,
         "sql_require_primary_key" => ss_sql_require_primary_key,
@@ -208,12 +228,14 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "tidb_default_string_match_selectivity" => ss_tidb_default_string_match_selectivity,
         "tidb_enable_tiflash_read_for_write_stmt" => ss_tidb_enable_tiflash_read_for_write_stmt,
         "tidb_enable_unsafe_substitute" => ss_tidb_enable_unsafe_substitute,
+        "tidb_opt_range_max_size" => ss_tidb_opt_range_max_size,
         "tidb_opt_advanced_join_hint" => ss_tidb_opt_advanced_join_hint,
         "tidb_opt_use_invisible_indexes" => ss_tidb_opt_use_invisible_indexes,
         "tidb_analyze_partition_concurrency" => ss_tidb_analyze_partition_concurrency,
         "tidb_merge_partition_stats_concurrency" => ss_tidb_merge_partition_stats_concurrency,
         "tidb_enable_async_merge_global_stats" => ss_tidb_enable_async_merge_global_stats,
         "tidb_opt_prefix_index_single_scan" => ss_tidb_opt_prefix_index_single_scan,
+        "tidb_opt_partial_ordered_index_for_topn" => ss_tidb_opt_partial_ordered_index_for_topn,
         "tidb_enable_external_ts_read" => ss_tidb_enable_external_ts_read,
         "tidb_enable_reuse_chunk" => ss_tidb_enable_reuse_chunk,
         "tidb_store_batch_size" => ss_tidb_store_batch_size,
@@ -247,6 +269,32 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "allow_auto_random_explicit_insert" => ss_allow_auto_random_explicit_insert,
         "tidb_shard_allocate_step" => ss_tidb_shard_allocate_step,
         "tidb_ddl_reorg_priority" => ss_tidb_ddl_reorg_priority,
+        "tidb_read_consistency" => ss_tidb_read_consistency,
+        "tidb_prepared_plan_cache_size" => ss_tidb_prepared_plan_cache_size,
+        "tidb_non_prepared_plan_cache_size" => ss_tidb_non_prepared_plan_cache_size,
+        "tidb_plan_cache_max_plan_size" => ss_tidb_plan_cache_max_plan_size,
+        "tidb_session_plan_cache_size" => ss_tidb_session_plan_cache_size,
+        "tidb_enable_plan_replayer_continuous_capture" => {
+            ss_tidb_enable_plan_replayer_continuous_capture
+        }
+        "sql_select_limit" => ss_sql_select_limit,
+        "collation_server" => ss_collation_server,
+        "collation_database" => ss_collation_database,
+        "collation_connection" => ss_collation_connection,
+        "character_set_database" => ss_character_set_database,
+        "innodb_lock_wait_timeout" => ss_innodb_lock_wait_timeout,
+        "character_set_connection" => ss_character_set_connection,
+        "character_set_server" => ss_character_set_server,
+        "max_allowed_packet" => ss_max_allowed_packet,
+        "tidb_opt_insubq_to_join_and_agg" => ss_tidb_opt_insubq_to_join_and_agg,
+        "tidb_opt_prefer_range_scan" => ss_tidb_opt_prefer_range_scan,
+        "tidb_enable_cascades_planner" => ss_tidb_enable_cascades_planner,
+        "tidb_enable_index_merge" => ss_tidb_enable_index_merge,
+        "tidb_enable_clustered_index" => ss_tidb_enable_clustered_index,
+        "tidb_hash_join_version" => ss_tidb_hash_join_version,
+        "tidb_opt_enable_hash_join" => ss_tidb_opt_enable_hash_join,
+        "tidb_txn_assertion_level" => ss_tidb_txn_assertion_level,
+        "tidb_batch_pending_tiflash_count" => ss_tidb_batch_pending_tiflash_count,
         _ => return None,
     })
 }
@@ -271,70 +319,33 @@ pub(crate) fn is_pending(name: &str, kind: &str) -> bool {
 
 /// Variables whose Go entry has a `SetSession` hook that is not ported yet.
 const PENDING_SET_SESSION: &[&str] = &[
-    "auto_increment_increment",
-    "auto_increment_offset",
     "autocommit",
-    "character_set_connection",
-    "character_set_database",
-    "character_set_server",
-    "collation_connection",
-    "collation_database",
-    "collation_server",
     "group_concat_max_len",
-    "innodb_lock_wait_timeout",
-    "max_allowed_packet",
-    "max_execution_time",
     "mpp_exchange_compression_mode",
     "mpp_version",
     "rand_seed1",
     "rand_seed2",
     "sql_mode",
-    "sql_select_limit",
     "tidb_allow_fallback_to_tikv",
     "tidb_analyze_skip_column_types",
     "tidb_backoff_lock_fast",
     "tidb_backoff_weight",
-    "tidb_batch_pending_tiflash_count",
     "tidb_constraint_check_in_place_pessimistic",
     "tidb_cost_model_version",
     "tidb_dml_type",
-    "tidb_enable_cascades_planner",
-    "tidb_enable_clustered_index",
-    "tidb_enable_index_merge",
     "tidb_enable_new_cost_interface",
     "tidb_enable_parallel_hashagg_spill",
-    "tidb_enable_plan_replayer_continuous_capture",
     "tidb_enable_shared_lock_promotion",
-    "tidb_hash_join_concurrency",
-    "tidb_hash_join_version",
-    "tidb_hashagg_final_concurrency",
-    "tidb_hashagg_partial_concurrency",
     "tidb_ignore_prepared_cache_close_stmt",
     "tidb_index_join_double_read_penalty_cost_rate",
-    "tidb_index_lookup_concurrency",
-    "tidb_index_lookup_join_concurrency",
     "tidb_index_lookup_pushdown_policy",
-    "tidb_index_merge_intersection_concurrency",
     "tidb_isolation_read_engines",
     "tidb_load_based_replica_read_threshold",
     "tidb_lock_unchanged_keys",
-    "tidb_max_paging_size",
     "tidb_mem_quota_query",
-    "tidb_merge_join_concurrency",
-    "tidb_min_paging_size",
-    "tidb_non_prepared_plan_cache_size",
-    "tidb_opt_enable_hash_join",
     "tidb_opt_fix_control",
-    "tidb_opt_insubq_to_join_and_agg",
     "tidb_opt_objective",
-    "tidb_opt_partial_ordered_index_for_topn",
-    "tidb_opt_prefer_range_scan",
-    "tidb_opt_range_max_size",
     "tidb_partition_prune_mode",
-    "tidb_plan_cache_max_plan_size",
-    "tidb_prepared_plan_cache_size",
-    "tidb_projection_concurrency",
-    "tidb_read_consistency",
     "tidb_read_staleness",
     "tidb_redact_log",
     "tidb_replica_read",
@@ -343,20 +354,13 @@ const PENDING_SET_SESSION: &[&str] = &[
     "tidb_runtime_filter_type",
     "tidb_scatter_region",
     "tidb_session_alias",
-    "tidb_session_plan_cache_size",
     "tidb_slow_log_rules",
-    "tidb_slow_txn_log_threshold",
     "tidb_snapshot",
     "tidb_stats_load_sync_wait",
     "tidb_stats_update_during_ddl",
-    "tidb_streamagg_concurrency",
     "tidb_sysdate_is_now",
-    "tidb_txn_assertion_level",
-    "tidb_txn_mode",
-    "tidb_window_concurrency",
     "tiflash_compute_dispatch_policy",
     "tiflash_replica_read",
-    "tikv_client_read_timeout",
     "time_zone",
     "tx_isolation_one_shot",
     "tx_read_ts",
@@ -901,6 +905,12 @@ fn ss_tidb_request_source_type(s: &mut SessionVars, val: &str) -> Result<(), Err
     Ok(())
 }
 
+// go-part: defaultSysVars (sysvar.go:L467 tidb_slow_txn_log_threshold SetSession closure) L1
+fn ss_tidb_slow_txn_log_threshold(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.slow_txn_threshold = tidb_opt_uint64(val, DefaultSlowTxnThreshold);
+    Ok(())
+}
+
 // go-part: defaultSysVars (sysvar.go:L1356 tidb_enable_prepared_plan_cache SetSession closure) L1
 fn ss_tidb_enable_prepared_plan_cache(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.enable_prepared_plan_cache = tidb_opt_on(val);
@@ -943,6 +953,18 @@ fn ss_tidb_enable_plan_replayer_capture(s: &mut SessionVars, val: &str) -> Resul
     Ok(())
 }
 
+// go-part: defaultSysVars (sysvar.go:L1726 max_execution_time SetSession closure) L1
+fn ss_max_execution_time(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.max_execution_time = (tidb_opt_positive_int32(val, 0)) as u64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1739 tikv_client_read_timeout SetSession closure) L1
+fn ss_tikv_client_read_timeout(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.tikv_client_read_timeout = (tidb_opt_positive_int32(val, 0)) as u64;
+    Ok(())
+}
+
 // go-part: defaultSysVars (sysvar.go:L1758 default_collation_for_utf8mb4 SetSession closure) L1
 fn ss_default_collation_for_utf8mb4(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.default_collation_for_utf8mb4 = val.to_owned();
@@ -952,6 +974,19 @@ fn ss_default_collation_for_utf8mb4(s: &mut SessionVars, val: &str) -> Result<()
 // go-part: defaultSysVars (sysvar.go:L1794 tidb_foreign_key_check_in_shared_lock SetSession closure) L1
 fn ss_tidb_foreign_key_check_in_shared_lock(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.foreign_key_check_in_shared_lock = tidb_opt_on(val);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1812 auto_increment_increment SetSession closure) L1
+fn ss_auto_increment_increment(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.auto_increment_increment =
+        tidb_opt_positive_int32(val, DefAutoIncrementIncrement as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1817 auto_increment_offset SetSession closure) L1
+fn ss_auto_increment_offset(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.auto_increment_offset = tidb_opt_positive_int32(val, DefAutoIncrementOffset as isize) as i64;
     Ok(())
 }
 
@@ -1266,6 +1301,19 @@ fn ss_tidb_index_lookup_size(s: &mut SessionVars, val: &str) -> Result<(), Error
     Ok(())
 }
 
+// go-part: defaultSysVars (sysvar.go:L2181 tidb_index_lookup_concurrency SetSession closure) L1
+fn ss_tidb_index_lookup_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.index_lookup_concurrency = tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2188 tidb_index_lookup_join_concurrency SetSession closure) L1
+fn ss_tidb_index_lookup_join_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.index_lookup_join_concurrency =
+        tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
 // go-part: defaultSysVars (sysvar.go:L2195 tidb_index_serial_scan_concurrency SetSession closure) L1
 fn ss_tidb_index_serial_scan_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.index_serial_scan_concurrency =
@@ -1315,6 +1363,58 @@ fn ss_tidb_init_chunk_size(s: &mut SessionVars, val: &str) -> Result<(), Error> 
     Ok(())
 }
 
+// go-part: defaultSysVars (sysvar.go:L2253 tidb_hash_join_concurrency SetSession closure) L1
+fn ss_tidb_hash_join_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.hash_join_concurrency = tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2260 tidb_projection_concurrency SetSession closure) L1
+fn ss_tidb_projection_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.projection_concurrency = tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2267 tidb_hashagg_partial_concurrency SetSession closure) L1
+fn ss_tidb_hashagg_partial_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.hash_agg_partial_concurrency = tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2274 tidb_hashagg_final_concurrency SetSession closure) L1
+fn ss_tidb_hashagg_final_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.hash_agg_final_concurrency = tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2281 tidb_window_concurrency SetSession closure) L1
+fn ss_tidb_window_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.window_concurrency = tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2288 tidb_merge_join_concurrency SetSession closure) L1
+fn ss_tidb_merge_join_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.merge_join_concurrency = tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2295 tidb_streamagg_concurrency SetSession closure) L1
+fn ss_tidb_streamagg_concurrency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.stream_agg_concurrency = tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2302 tidb_index_merge_intersection_concurrency SetSession closure) L1
+fn ss_tidb_index_merge_intersection_concurrency(
+    s: &mut SessionVars,
+    val: &str,
+) -> Result<(), Error> {
+    s.index_merge_intersection_concurrency =
+        tidb_opt_positive_int32(val, ConcurrencyUnset as isize) as i64;
+    Ok(())
+}
+
 // go-part: defaultSysVars (sysvar.go:L2309 tidb_enable_parallel_apply SetSession closure) L1
 fn ss_tidb_enable_parallel_apply(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.enable_parallel_apply = tidb_opt_on(val);
@@ -1336,6 +1436,12 @@ fn ss_tidb_txn_entry_size_limit(s: &mut SessionVars, val: &str) -> Result<(), Er
 // go-part: defaultSysVars (sysvar.go:L2347 tidb_constraint_check_in_place SetSession closure) L1
 fn ss_tidb_constraint_check_in_place(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.constraint_check_in_place = tidb_opt_on(val);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2351 tidb_txn_mode SetSession closure) L1
+fn ss_tidb_txn_mode(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.txn_mode = gostd::to_upper(val);
     Ok(())
 }
 
@@ -1597,6 +1703,18 @@ fn ss_tiflash_fine_grained_shuffle_batch_size(s: &mut SessionVars, val: &str) ->
     Ok(())
 }
 
+// go-part: defaultSysVars (sysvar.go:L2790 tidb_min_paging_size SetSession closure) L1
+fn ss_tidb_min_paging_size(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.min_paging_size = tidb_opt_positive_int32(val, DefMinPagingSize as isize) as i64;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2794 tidb_max_paging_size SetSession closure) L1
+fn ss_tidb_max_paging_size(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.max_paging_size = tidb_opt_positive_int32(val, DefMaxPagingSize as isize) as i64;
+    Ok(())
+}
+
 // go-part: defaultSysVars (sysvar.go:L2798 tidb_memory_debug_mode_min_heap_inuse SetSession closure) L1
 fn ss_tidb_memory_debug_mode_min_heap_inuse(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.memory_debug_mode_min_heap_in_use = tidb_opt_int64(val, 0);
@@ -1642,6 +1760,12 @@ fn ss_tidb_enable_unsafe_substitute(s: &mut SessionVars, val: &str) -> Result<()
     Ok(())
 }
 
+// go-part: defaultSysVars (sysvar.go:L2888 tidb_opt_range_max_size SetSession closure) L1
+fn ss_tidb_opt_range_max_size(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.range_max_size = tidb_opt_int64(val, DefTiDBOptRangeMaxSize);
+    Ok(())
+}
+
 // go-part: defaultSysVars (sysvar.go:L2892 tidb_opt_advanced_join_hint SetSession closure) L1
 fn ss_tidb_opt_advanced_join_hint(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.enable_advanced_join_hint = tidb_opt_on(val);
@@ -1676,6 +1800,12 @@ fn ss_tidb_enable_async_merge_global_stats(s: &mut SessionVars, val: &str) -> Re
 // go-part: defaultSysVars (sysvar.go:L2925 tidb_opt_prefix_index_single_scan SetSession closure) L1
 fn ss_tidb_opt_prefix_index_single_scan(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.opt_prefix_index_single_scan = tidb_opt_on(val);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2936 tidb_opt_partial_ordered_index_for_topn SetSession closure) L1
+fn ss_tidb_opt_partial_ordered_index_for_topn(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.opt_partial_ordered_index_for_top_n = gostd::to_upper(val);
     Ok(())
 }
 
@@ -1857,5 +1987,250 @@ fn ss_tidb_shard_allocate_step(_s: &mut SessionVars, _val: &str) -> Result<(), E
 
 // go-part: defaultSysVars (sysvar.go:L314 tidb_ddl_reorg_priority SetSession closure) L2 (writes `SessionVars.DDLReorgPriority`, a write-path field: X in the D05.2 scoping, so only systems[] changes)
 fn ss_tidb_ddl_reorg_priority(_s: &mut SessionVars, _val: &str) -> Result<(), Error> {
+    Ok(())
+}
+
+// ---------------------------------------------------------------- hand-ported SetSession hooks
+
+/// `strconv.ParseUint(s, 10, 64)` with Go's `*strconv.NumError` text.
+// go-std: strconv.ParseUint L2 (base 10, bitSize 64 only)
+fn go_parse_uint(s: &str) -> Result<u64, Error> {
+    let fail = |reason: &str| {
+        let quoted = tidb_base::gofmt::sprintf(
+            "%q",
+            &[tidb_base::gofmt::Arg::go_string(s.as_bytes().to_vec())],
+        );
+        let mut m = b"strconv.ParseUint: parsing ".to_vec();
+        m.extend_from_slice(&quoted);
+        m.extend_from_slice(b": ");
+        m.extend_from_slice(reason.as_bytes());
+        tidb_base::errors::new(m)
+    };
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(fail("invalid syntax"));
+    }
+    s.parse::<u64>().map_err(|_| fail("value out of range"))
+}
+
+// go-part: defaultSysVars (sysvar.go:L413 tidb_read_consistency SetSession closure) L1
+fn ss_tidb_read_consistency(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.read_consistency = val.to_owned();
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1360 tidb_prepared_plan_cache_size SetSession closure) L1
+fn ss_tidb_prepared_plan_cache_size(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    let u_val = go_parse_uint(val);
+    if let Ok(u) = u_val {
+        s.prepared_plan_cache_size = u;
+    }
+    u_val.map(|_| ())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1401 tidb_non_prepared_plan_cache_size SetSession closure) L1
+fn ss_tidb_non_prepared_plan_cache_size(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    let u_val = go_parse_uint(val);
+    if let Ok(u) = u_val {
+        s.non_prepared_plan_cache_size = u;
+    }
+    u_val.map(|_| ())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1411 tidb_plan_cache_max_plan_size SetSession closure) L1
+fn ss_tidb_plan_cache_max_plan_size(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    let u_val = go_parse_uint(val);
+    if let Ok(u) = u_val {
+        s.plan_cache_max_plan_size = u;
+    }
+    u_val.map(|_| ())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1418 tidb_session_plan_cache_size SetSession closure) L1
+fn ss_tidb_session_plan_cache_size(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    let u_val = go_parse_uint(val);
+    if let Ok(u) = u_val {
+        s.session_plan_cache_size = u;
+    }
+    u_val.map(|_| ())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1616 tidb_enable_plan_replayer_continuous_capture SetSession closure) L1
+fn ss_tidb_enable_plan_replayer_continuous_capture(
+    s: &mut SessionVars,
+    val: &str,
+) -> Result<(), Error> {
+    let historical_stats_enabled = s
+        .global_vars_accessor
+        .get_global_sys_var(super::names::TiDBEnableHistoricalStats)?;
+    if !tidb_opt_on(&historical_stats_enabled) && tidb_opt_on(val) {
+        return Err(tidb_base::errors::new(format!(
+            "{} should be enabled before enabling {}",
+            super::names::TiDBEnableHistoricalStats,
+            super::names::TiDBEnablePlanReplayerContinuousCapture
+        )));
+    }
+    s.enable_plan_replayed_continues_capture = tidb_opt_on(val);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1671 sql_select_limit SetSession closure) L1
+fn ss_sql_select_limit(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.select_limit = go_parse_uint(val)?;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1746 collation_server SetSession closure) L1
+fn ss_collation_server(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    if let Ok(coll) = tidb_types::collate::get_collation_by_name(val) {
+        s.systems.insert(
+            super::names::CharacterSetServer.to_owned(),
+            coll.charset_name.clone(),
+        );
+    }
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1806 collation_database SetSession closure) L1
+fn ss_collation_database(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    if let Ok(coll) = tidb_types::collate::get_collation_by_name(val) {
+        s.systems.insert(
+            super::names::CharsetDatabase.to_owned(),
+            coll.charset_name.clone(),
+        );
+    }
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1842 collation_connection SetSession closure) L1
+fn ss_collation_connection(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    if let Ok(coll) = tidb_types::collate::get_collation_by_name(val) {
+        s.systems.insert(
+            super::names::CharacterSetConnection.to_owned(),
+            coll.charset_name.clone(),
+        );
+    }
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1859 character_set_database SetSession closure) L1
+fn ss_character_set_database(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    if let (Some(cs), Ok(())) = tidb_parser::gocharset::get_charset_info(val) {
+        s.systems.insert(
+            super::names::CollationDatabase.to_owned(),
+            cs.default_collation(),
+        );
+    }
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1867 innodb_lock_wait_timeout SetSession closure) L1
+fn ss_innodb_lock_wait_timeout(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    let lock_wait_sec = tidb_opt_int64(val, DefInnodbLockWaitTimeout);
+    s.lock_wait_timeout = lock_wait_sec.wrapping_mul(1000);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1910 character_set_connection SetSession closure) L1
+fn ss_character_set_connection(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    if let (Some(cs), Ok(())) = tidb_parser::gocharset::get_charset_info(val) {
+        s.systems.insert(
+            super::names::CollationConnection.to_owned(),
+            cs.default_collation(),
+        );
+    }
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1918 character_set_server SetSession closure) L1
+fn ss_character_set_server(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    if let (Some(cs), Ok(())) = tidb_parser::gocharset::get_charset_info(val) {
+        s.systems.insert(
+            super::names::CollationServer.to_owned(),
+            cs.default_collation(),
+        );
+    }
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L1946 max_allowed_packet SetSession closure) L1
+fn ss_max_allowed_packet(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    // Go assigns the result of ParseUint (0 on a syntax error, the max on overflow)
+    // before checking the error.
+    match go_parse_uint(val) {
+        Ok(u) => {
+            s.max_allowed_packet = u;
+            Ok(())
+        }
+        Err(e) => {
+            s.max_allowed_packet = if val.bytes().all(|b| b.is_ascii_digit()) && !val.is_empty() {
+                u64::MAX
+            } else {
+                0
+            };
+            Err(e)
+        }
+    }
+}
+
+// go-part: defaultSysVars (sysvar.go:L2023 tidb_opt_insubq_to_join_and_agg SetSession closure) L1
+fn ss_tidb_opt_insubq_to_join_and_agg(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    // SetAllowInSubqToJoinAndAgg
+    s.allow_in_subq_to_join_and_agg = tidb_opt_on(val);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2033 tidb_opt_prefer_range_scan SetSession closure) L1
+fn ss_tidb_opt_prefer_range_scan(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    // SetAllowPreferRangeScan
+    s.prefer_range_scan = tidb_opt_on(val);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2231 tidb_enable_cascades_planner SetSession closure) L1
+fn ss_tidb_enable_cascades_planner(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    // SetEnableCascadesPlanner
+    s.enable_cascades_planner = tidb_opt_on(val);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2235 tidb_enable_index_merge SetSession closure) L1
+fn ss_tidb_enable_index_merge(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    // SetEnableIndexMerge
+    s.enable_index_merge = tidb_opt_on(val);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2531 tidb_enable_clustered_index SetSession closure) L1
+fn ss_tidb_enable_clustered_index(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.enable_clustered_index = tidb_opt_enable_clustered(val).0;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2612 tidb_hash_join_version SetSession closure) L1
+fn ss_tidb_hash_join_version(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    // joinversion.IsOptimizedVersion: strings.ToLower(v) == HashJoinVersionOptimized
+    s.use_hash_join_v2 = gostd::to_lower(val) == "optimized";
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2617 tidb_opt_enable_hash_join SetSession closure) L1
+fn ss_tidb_opt_enable_hash_join(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.disable_hash_join = !tidb_opt_on(val);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2707 tidb_txn_assertion_level SetSession closure) L1
+fn ss_tidb_txn_assertion_level(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    s.assertion_level = tidb_opt_assertion_level(val).0;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L2711 tidb_batch_pending_tiflash_count SetSession closure) L1
+fn ss_tidb_batch_pending_tiflash_count(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    // strconv.Atoi: optional sign, decimal digits, fits int.
+    let b = val
+        .parse::<i64>()
+        .unwrap_or(DefTiDBBatchPendingTiFlashCount);
+    s.batch_pending_tiflash_count = b;
     Ok(())
 }
