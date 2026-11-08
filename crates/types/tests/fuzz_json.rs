@@ -11,9 +11,10 @@
 //!    ErrJSONDocumentTooDeep when the bare text converts.
 //! 3. **Round trip.** A converted document prints to a text that parses back to a document
 //!    that compares equal; printing is a fixed point from the second round on.
-//! 4. **Binary accessors.** Random and truncated binary values (as `PeekBytesAsJSON` and
-//!    the accessors see them from storage) may hit Go's own index panics but never a Rust
-//!    integer-overflow panic (M-INT).
+//! 4. **Binary accessors.** Random bytes through `PeekBytesAsJSON`, and truncated values
+//!    (plus changed bytes in scalar values) through the accessors, may hit Go's own index
+//!    panics but never a Rust integer-overflow panic (M-INT). Containers with changed
+//!    offsets are left out: they can make the accessors recurse without end, in Go too.
 //!
 //! Short by default; longer runs:
 //!   TIDB_TYPES_FUZZ_ITERS=2000000 cargo test -p tidb-types --test fuzz_json
@@ -22,6 +23,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use tidb_types::json::{
     self as j, BinaryJSON, ErrInvalidJSONText, ErrJSONDocumentTooDeep, JSONPathExpression,
+    JSONTypeCodeArray, JSONTypeCodeObject,
 };
 
 /// splitmix64.
@@ -214,28 +216,37 @@ fn fuzz_json() {
             assert_eq!(back.string(), again.string(), "{ctx}");
         }
 
-        // 4. Binary accessors on random / truncated bytes.
-        let mut b: Vec<u8> = match &parsed {
+        // 4. Binary accessors. Random bytes only go to `PeekBytesAsJSON`: a changed offset
+        // inside a container can point back at the container itself, and the accessors then
+        // recurse without end, as Go does (a stack overflow aborts the process, so it cannot
+        // be caught; A4 §8.5 leaves corrupted containers out). Container values are only
+        // truncated (offsets keep pointing forward); scalar values may also get a byte changed.
+        let (b, walk): (Vec<u8>, bool) = match &parsed {
             Ok(bj) if rng.chance(70) => {
                 let mut v = vec![bj.type_code];
                 v.extend_from_slice(&bj.value);
-                v
+                let container =
+                    bj.type_code == JSONTypeCodeArray || bj.type_code == JSONTypeCodeObject;
+                if v.len() > 1 && rng.chance(50) {
+                    let i = 1 + rng.below(v.len() as u64 - 1) as usize;
+                    if container || rng.chance(50) {
+                        v.truncate(i);
+                    } else {
+                        v[i] = rng.next() as u8;
+                    }
+                }
+                (v, true)
             }
-            _ => (0..rng.below(24)).map(|_| rng.next() as u8).collect(),
+            _ => (
+                (0..rng.below(24)).map(|_| rng.next() as u8).collect(),
+                false,
+            ),
         };
-        if !b.is_empty() && rng.chance(50) {
-            let i = rng.below(b.len() as u64) as usize;
-            if rng.chance(50) {
-                b.truncate(i.max(1));
-            } else {
-                b[i] = rng.next() as u8;
-            }
-        }
         // Silence the expected Go-style index panics; restore the hook for the asserts.
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let r = catch_unwind(AssertUnwindSafe(|| {
-            if j::peek_bytes_as_json(&b).is_err() || b.is_empty() {
+            if j::peek_bytes_as_json(&b).is_err() || !walk {
                 return;
             }
             let bj = BinaryJSON::borrowed(b[0], &b[1..]);

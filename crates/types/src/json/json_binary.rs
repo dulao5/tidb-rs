@@ -825,9 +825,9 @@ fn raw_to_value(raw: tidb_base::gostd::json::Raw) -> JSONValue<'static> {
         Raw::Null => JSONValue::Nil,
         Raw::Bool(b) => JSONValue::Bool(b),
         Raw::Number(n) => JSONValue::Number(n),
-        Raw::String(s) => JSONValue::String(s.into_bytes()),
-        Raw::Array(a) => JSONValue::Array(a.into_iter().map(raw_to_value).collect()),
-        Raw::Object(m) => {
+        Raw::String(s, _) => JSONValue::String(s.into_bytes()),
+        Raw::Array(a, _) => JSONValue::Array(a.into_iter().map(raw_to_value).collect()),
+        Raw::Object(m, _) => {
             let mut map = BTreeMap::new();
             for (k, v) in m {
                 map.insert(k.into_bytes(), raw_to_value(v));
