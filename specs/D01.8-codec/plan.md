@@ -7,7 +7,7 @@
 
 ## 2. 复现
 
-- 回放：`cargo test -p tidb-codec`（另：`GOVEC_CODEC_FILES=a.jsonl.gz:b.jsonl.gz` 回放 tracker CI 产物中的其他种子）。
+- 回放：`cargo test -p tidb-codec`（另：`GOVEC_CODEC_FILES=a.jsonl.gz,b.jsonl.gz` 回放 tracker CI 产物中的其他种子）。
 - 生成：tracker `govec/` 下 `go run . codec -o ...`（需 `CC=/usr/bin/clang GOFLAGS=$(scripts/govec-fixes.sh)`），`-seed N` 换种子。
 - 基准：`cargo bench -p tidb-codec`；Go 侧 `go test ./domains -run '^$' -bench Codec`。
 

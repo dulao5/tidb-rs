@@ -5,7 +5,7 @@
 //! `err.name == "panic"` records, and `{"panic": true}` sub-results, must panic in Rust too.
 //!
 //! Extra vector files (other seeds, e.g. tracker CI's `govec codec -seed N`) are replayed
-//! too when `GOVEC_CODEC_FILES` lists them (`:`-separated paths).
+//! too when `GOVEC_CODEC_FILES` lists them (`,`-separated paths, like `GOVEC_KV_FILES` and `GOVEC_CHUNK_FILES`).
 
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -813,7 +813,7 @@ fn replay(path: &str) {
 fn govec_codec() {
     replay(&vectors());
     if let Ok(files) = std::env::var("GOVEC_CODEC_FILES") {
-        for f in files.split(':').filter(|f| !f.is_empty()) {
+        for f in files.split(',').filter(|f| !f.is_empty()) {
             replay(f);
         }
     }
