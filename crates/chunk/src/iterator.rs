@@ -33,6 +33,11 @@ pub trait Iterator<'a> {
     /// Len returns the length.
     // glue: Go interface method
     fn len(&self) -> usize;
+    /// Whether the iterator has no rows.
+    // glue: Rust is_empty convention
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     /// Current returns the current Row.
     // glue: Go interface method
     fn current(&self) -> Row<'a>;
@@ -283,7 +288,8 @@ impl<'a> Iterator<'a> for Iterator4List<'a> {
     /// Current implements the Iterator interface.
     // go: iterator4List.Current L1
     fn current(&self) -> Row<'a> {
-        if (self.chk_cursor == 0 && self.row_cursor == 0) || self.chk_cursor > self.li.num_chunks() {
+        if (self.chk_cursor == 0 && self.row_cursor == 0) || self.chk_cursor > self.li.num_chunks()
+        {
             return self.end();
         }
         if self.row_cursor == 0 {
@@ -310,7 +316,11 @@ impl<'a> Iterator<'a> for Iterator4List<'a> {
 /// NewIterator4RowPtr returns a Iterator for RowPtrs.
 // go: NewIterator4RowPtr L1
 pub fn new_iterator4_row_ptr<'a>(li: &'a List, ptrs: &'a [RowPtr]) -> Box<dyn Iterator<'a> + 'a> {
-    Box::new(Iterator4RowPtr { li, ptrs, cursor: 0 })
+    Box::new(Iterator4RowPtr {
+        li,
+        ptrs,
+        cursor: 0,
+    })
 }
 
 struct Iterator4RowPtr<'a> {
@@ -390,7 +400,9 @@ struct MultiIterator<'a> {
 
 /// NewMultiIterator creates a new multiIterator
 // go: NewMultiIterator L1
-pub fn new_multi_iterator<'a>(iters: Vec<Box<dyn Iterator<'a> + 'a>>) -> Box<dyn Iterator<'a> + 'a> {
+pub fn new_multi_iterator<'a>(
+    iters: Vec<Box<dyn Iterator<'a> + 'a>>,
+) -> Box<dyn Iterator<'a> + 'a> {
     let mut iter = MultiIterator {
         iters: Vec::new(),
         num_iter: 0,
@@ -400,7 +412,7 @@ pub fn new_multi_iterator<'a>(iters: Vec<Box<dyn Iterator<'a> + 'a>>) -> Box<dyn
         err: None,
     };
     for it in iters {
-        if it.len() > 0 {
+        if !it.is_empty() {
             iter.length += it.len();
             iter.iters.push(it);
         }
@@ -433,7 +445,9 @@ impl<'a> Iterator<'a> for MultiIterator<'a> {
         if self.cur_ptr == self.num_iter {
             return self.end();
         }
-        let cur = &mut self.iters[self.cur_iter.expect("invalid memory address or nil pointer dereference")];
+        let cur = &mut self.iters[self
+            .cur_iter
+            .expect("invalid memory address or nil pointer dereference")];
         let mut next = cur.next();
         if next == cur.end() {
             self.err = cur.error().cloned();
@@ -460,7 +474,10 @@ impl<'a> Iterator<'a> for MultiIterator<'a> {
         if self.cur_ptr == self.num_iter {
             return self.end();
         }
-        self.iters[self.cur_iter.expect("invalid memory address or nil pointer dereference")].current()
+        self.iters[self
+            .cur_iter
+            .expect("invalid memory address or nil pointer dereference")]
+        .current()
     }
 
     /// End implements the Iterator interface.
@@ -489,7 +506,9 @@ impl<'a> MultiIterator<'a> {
         if self.cur_ptr == self.num_iter {
             return self.end();
         }
-        let cur = &self.iters[self.cur_iter.expect("invalid memory address or nil pointer dereference")];
+        let cur = &self.iters[self
+            .cur_iter
+            .expect("invalid memory address or nil pointer dereference")];
         let row = cur.current();
         if row == cur.end() {
             self.err = cur.error().cloned();

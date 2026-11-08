@@ -16,6 +16,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use serde_json::Value;
 use serde_json::json;
+use tidb_base::mysql;
 use tidb_chunk::Chunk;
 use tidb_chunk::Column;
 use tidb_chunk::List;
@@ -33,7 +34,6 @@ use tidb_memory::tracker::LabelForChunkList;
 use tidb_memory::tracker::new_tracker;
 use tidb_parser::types::EvalType;
 use tidb_parser::types::FieldType;
-use tidb_base::mysql;
 use tidb_types::MyDecimal;
 use tidb_types::core_time::CoreTime;
 use tidb_types::json::parse_binary_json_from_string;
@@ -54,7 +54,10 @@ fn hex(b: &[u8]) -> String {
 }
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 /// vec.GoString's JSON form.
@@ -85,7 +88,12 @@ fn fts_of(v: &Value) -> Vec<FieldType> {
 
 fn kind(ft: &FieldType) -> &'static str {
     match ft.get_type() {
-        mysql::TypeTiny | mysql::TypeShort | mysql::TypeInt24 | mysql::TypeLong | mysql::TypeLonglong | mysql::TypeYear => {
+        mysql::TypeTiny
+        | mysql::TypeShort
+        | mysql::TypeInt24
+        | mysql::TypeLong
+        | mysql::TypeLonglong
+        | mysql::TypeYear => {
             if mysql::has_unsigned_flag(ft.get_flag()) {
                 "u64"
             } else {
@@ -122,7 +130,11 @@ fn ints(v: &Value) -> Option<Vec<usize>> {
 }
 
 fn bools(v: &Value) -> Vec<bool> {
-    v.as_array().unwrap().iter().map(|b| b.as_bool().unwrap()).collect()
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b.as_bool().unwrap())
+        .collect()
 }
 
 fn dec_of(s: &str) -> MyDecimal {
@@ -161,7 +173,11 @@ fn append(c: &mut Chunk, ft: &FieldType, col: usize, v: &Value, col_level: bool)
     match kind(ft) {
         "i64" => app!(append_int64, append_int64, s_i64(v)),
         "u64" => app!(append_uint64, append_uint64, s_u64(v)),
-        "f32" => app!(append_float32, append_float32, f32::from_bits(s_u64(v) as u32)),
+        "f32" => app!(
+            append_float32,
+            append_float32,
+            f32::from_bits(s_u64(v) as u32)
+        ),
         "f64" => app!(append_float64, append_float64, f64::from_bits(s_u64(v))),
         "dec" => {
             let d = dec_of(v.as_str().unwrap());
@@ -169,7 +185,11 @@ fn append(c: &mut Chunk, ft: &FieldType, col: usize, v: &Value, col_level: bool)
         }
         "time" => {
             let a = v.as_array().unwrap();
-            let t = new_time(CoreTime(s_u64(&a[0])), a[1].as_u64().unwrap() as u8, a[2].as_i64().unwrap() as isize);
+            let t = new_time(
+                CoreTime(s_u64(&a[0])),
+                a[1].as_u64().unwrap() as u8,
+                a[2].as_i64().unwrap() as isize,
+            );
             app!(append_time, append_time, t)
         }
         "dur" => {
@@ -227,7 +247,11 @@ fn get(r: Row<'_>, ft: &FieldType, col: usize) -> Value {
         "time" => json!(String::from_utf8(r.get_time(col).string()).unwrap()),
         "dur" => {
             let d = r.get_duration(col, ft.get_decimal());
-            json!([d.duration.to_string(), d.fsp, String::from_utf8(d.string()).unwrap()])
+            json!([
+                d.duration.to_string(),
+                d.fsp,
+                String::from_utf8(d.string()).unwrap()
+            ])
         }
         "json" => {
             let j = r.get_json(col);
@@ -239,7 +263,11 @@ fn get(r: Row<'_>, ft: &FieldType, col: usize) -> Value {
             json!([hex(name), val.to_string()])
         }
         "null" => Value::Null,
-        _ => json!(hex(if ft.get_type() == mysql::TypeVarchar { r.get_string(col) } else { r.get_bytes(col) })),
+        _ => json!(hex(if ft.get_type() == mysql::TypeVarchar {
+            r.get_string(col)
+        } else {
+            r.get_bytes(col)
+        })),
     };
     if kind(ft) != "null" {
         out.insert("v".into(), v);
@@ -370,30 +398,66 @@ fn step(st: &mut State, a: &[Value]) -> Value {
         }
         "app" | "capp" => {
             let ft = st.fts[&ci(1)][ci(2)].clone();
-            append(st.chks.get_mut(&ci(1)).unwrap(), &ft, ci(2), &a[3], op == "capp");
+            append(
+                st.chks.get_mut(&ci(1)).unwrap(),
+                &ft,
+                ci(2),
+                &a[3],
+                op == "capp",
+            );
         }
-        "app_nn" => st.chks.get_mut(&ci(1)).unwrap().column_mut(ci(2)).append_n_nulls(ci(3)),
-        "app_nb" => st.chks.get_mut(&ci(1)).unwrap().column_mut(ci(2)).append_null_bitmap(a[3].as_bool().unwrap()),
+        "app_nn" => st
+            .chks
+            .get_mut(&ci(1))
+            .unwrap()
+            .column_mut(ci(2))
+            .append_n_nulls(ci(3)),
+        "app_nb" => st
+            .chks
+            .get_mut(&ci(1))
+            .unwrap()
+            .column_mut(ci(2))
+            .append_null_bitmap(a[3].as_bool().unwrap()),
         "app_cell" => st.with(ci(1), |d, st| {
-            d.column_mut(ci(2)).append_cell_n_times(st.chks[&ci(3)].column(ci(4)), ci(5), ci(6))
+            d.column_mut(ci(2))
+                .append_cell_n_times(st.chks[&ci(3)].column(ci(4)), ci(5), ci(6))
         }),
         "app_row" => st.with(ci(1), |d, st| d.append_row(st.chks[&ci(2)].get_row(ci(3)))),
-        "app_prow" => st.with(ci(1), |d, st| d.append_partial_row(ci(2), st.chks[&ci(3)].get_row(ci(4)))),
+        "app_prow" => st.with(ci(1), |d, st| {
+            d.append_partial_row(ci(2), st.chks[&ci(3)].get_row(ci(4)))
+        }),
         "app_row_idx" => {
             return st.with(ci(1), |d, st| {
-                json!(d.append_row_by_col_idxs(st.chks[&ci(2)].get_row(ci(3)), ints(&a[4]).as_deref()))
+                json!(
+                    d.append_row_by_col_idxs(
+                        st.chks[&ci(2)].get_row(ci(3)),
+                        ints(&a[4]).as_deref()
+                    )
+                )
             });
         }
         "app_prow_idx" => {
             return st.with(ci(1), |d, st| {
-                json!(d.append_partial_row_by_col_idxs(ci(2), st.chks[&ci(3)].get_row(ci(4)), ints(&a[5]).as_deref()))
+                json!(d.append_partial_row_by_col_idxs(
+                    ci(2),
+                    st.chks[&ci(3)].get_row(ci(4)),
+                    ints(&a[5]).as_deref()
+                ))
             });
         }
         "app_rows" | "app_prows" => {
-            let (s, off, ri) = if op == "app_prows" { (ci(3), ci(2), 4) } else { (ci(2), 0, 3) };
+            let (s, off, ri) = if op == "app_prows" {
+                (ci(3), ci(2), 4)
+            } else {
+                (ci(2), 0, 3)
+            };
             st.with(ci(1), |d, st| {
                 let src = &st.chks[&s];
-                let rows: Vec<Row<'_>> = ints(&a[ri]).unwrap().into_iter().map(|r| src.get_row(r)).collect();
+                let rows: Vec<Row<'_>> = ints(&a[ri])
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| src.get_row(r))
+                    .collect();
                 if op == "app_rows" {
                     d.append_rows(&rows);
                 } else {
@@ -406,7 +470,11 @@ fn step(st: &mut State, a: &[Value]) -> Value {
             let mut b = unhex(a[3].as_str().unwrap());
             b.extend_from_slice(&[0; 16]);
             let c = st.chks.get_mut(&ci(1)).unwrap();
-            return json!(chunk::append_cell_from_raw_data(c.column_mut(ci(2)), &b, ci(4)));
+            return json!(chunk::append_cell_from_raw_data(
+                c.column_mut(ci(2)),
+                &b,
+                ci(4)
+            ));
         }
         "truncate" => st.chks.get_mut(&ci(1)).unwrap().truncate_to(ci(2)),
         "reset" => st.chks.get_mut(&ci(1)).unwrap().reset(),
@@ -414,17 +482,31 @@ fn step(st: &mut State, a: &[Value]) -> Value {
         "reconstruct" => st.chks.get_mut(&ci(1)).unwrap().reconstruct(),
         "set_sel" => st.chks.get_mut(&ci(1)).unwrap().set_sel(ints(&a[2])),
         "set_req" => {
-            st.chks.get_mut(&ci(1)).unwrap().set_required_rows(a[2].as_i64().unwrap() as isize, ci(3));
+            st.chks
+                .get_mut(&ci(1))
+                .unwrap()
+                .set_required_rows(a[2].as_i64().unwrap() as isize, ci(3));
         }
         "set_virt" => st.chks.get_mut(&ci(1)).unwrap().set_num_virtual_rows(ci(2)),
-        "set_inc" => st.chks.get_mut(&ci(1)).unwrap().set_in_complete_chunk(a[2].as_bool().unwrap()),
+        "set_inc" => st
+            .chks
+            .get_mut(&ci(1))
+            .unwrap()
+            .set_in_complete_chunk(a[2].as_bool().unwrap()),
         "make_ref" => st.chks.get_mut(&ci(1)).unwrap().make_ref(ci(2), ci(3)),
-        "make_ref_to" => return st.with(ci(1), |d, st| err_json(d.make_ref_to(ci(2), &st.chks[&ci(3)], ci(4)))),
+        "make_ref_to" => {
+            return st.with(ci(1), |d, st| {
+                err_json(d.make_ref_to(ci(2), &st.chks[&ci(3)], ci(4)))
+            });
+        }
         "swap_cols" => {
             let mut b = st.chks.remove(&ci(2)).unwrap();
             st.chks.get_mut(&ci(1)).unwrap().swap_columns(&mut b);
             st.chks.insert(ci(2), b);
-            let (f1, f2) = (st.fts.remove(&ci(1)).unwrap(), st.fts.remove(&ci(2)).unwrap());
+            let (f1, f2) = (
+                st.fts.remove(&ci(1)).unwrap(),
+                st.fts.remove(&ci(2)).unwrap(),
+            );
             st.fts.insert(ci(1), f2);
             st.fts.insert(ci(2), f1);
         }
@@ -469,12 +551,30 @@ fn step(st: &mut State, a: &[Value]) -> Value {
                 k => panic!("reserve {k}"),
             }
         }
-        "col_reset" => st.chks.get_mut(&ci(1)).unwrap().column_mut(ci(2)).reset_for(EvalType(ci(3) as u8)),
-        "set_null" => st.chks.get_mut(&ci(1)).unwrap().column_mut(ci(2)).set_null(ci(3), a[4].as_bool().unwrap()),
-        "set_nulls" => {
-            st.chks.get_mut(&ci(1)).unwrap().column_mut(ci(2)).set_nulls(ci(3), ci(4), a[5].as_bool().unwrap())
-        }
-        "set_raw" => st.chks.get_mut(&ci(1)).unwrap().column_mut(ci(2)).set_raw(ci(3), &unhex(a[4].as_str().unwrap())),
+        "col_reset" => st
+            .chks
+            .get_mut(&ci(1))
+            .unwrap()
+            .column_mut(ci(2))
+            .reset_for(EvalType(ci(3) as u8)),
+        "set_null" => st
+            .chks
+            .get_mut(&ci(1))
+            .unwrap()
+            .column_mut(ci(2))
+            .set_null(ci(3), a[4].as_bool().unwrap()),
+        "set_nulls" => st
+            .chks
+            .get_mut(&ci(1))
+            .unwrap()
+            .column_mut(ci(2))
+            .set_nulls(ci(3), ci(4), a[5].as_bool().unwrap()),
+        "set_raw" => st
+            .chks
+            .get_mut(&ci(1))
+            .unwrap()
+            .column_mut(ci(2))
+            .set_raw(ci(3), &unhex(a[4].as_str().unwrap())),
         "merge_nulls" => {
             let others: Vec<Column> = a[3]
                 .as_array()
@@ -484,7 +584,11 @@ fn step(st: &mut State, a: &[Value]) -> Value {
                 .map(|p| st.chks[&idx(&p[0])].column(idx(&p[1])).clone())
                 .collect();
             let refs: Vec<&Column> = others.iter().collect();
-            st.chks.get_mut(&ci(1)).unwrap().column_mut(ci(2)).merge_nulls(&refs);
+            st.chks
+                .get_mut(&ci(1))
+                .unwrap()
+                .column_mut(ci(2))
+                .merge_nulls(&refs);
         }
         "col_copy" | "col_copy_recon" => {
             let recon = op == "col_copy_recon";
@@ -494,10 +598,18 @@ fn step(st: &mut State, a: &[Value]) -> Value {
                 let src = st.chks[&ci(3)].column(ci(4));
                 if into {
                     let dst = d.column(ci(2)).clone();
-                    let r = if recon { src.copy_reconstruct(sel.as_deref(), Some(dst)) } else { src.copy_construct(Some(dst)) };
+                    let r = if recon {
+                        src.copy_reconstruct(sel.as_deref(), Some(dst))
+                    } else {
+                        src.copy_construct(Some(dst))
+                    };
                     *d.column_mut(ci(2)) = r;
                 } else {
-                    let r = if recon { src.copy_reconstruct(sel.as_deref(), None) } else { src.copy_construct(None) };
+                    let r = if recon {
+                        src.copy_reconstruct(sel.as_deref(), None)
+                    } else {
+                        src.copy_construct(None)
+                    };
                     d.set_col(ci(2), triomphe::Arc::new(r));
                 }
             });
@@ -511,7 +623,11 @@ fn step(st: &mut State, a: &[Value]) -> Value {
                 "f32" => c.float32s_mut()[r].set(f32::from_bits(s_u64(&a[5]) as u32)),
                 "f64" => c.float64s_mut()[r].set(f64::from_bits(s_u64(&a[5]))),
                 "dur" => c.go_durations_mut()[r].set(s_i64(&a[5])),
-                "time" => c.times_mut()[r].set(new_time(CoreTime(s_u64(&a[5])), mysql::TypeDatetime, 0).raw().0),
+                "time" => c.times_mut()[r].set(
+                    new_time(CoreTime(s_u64(&a[5])), mysql::TypeDatetime, 0)
+                        .raw()
+                        .0,
+                ),
                 "dec" => c.decimals_mut()[r] = dec_of(a[5].as_str().unwrap()).as_wire(),
                 k => panic!("view_set {k}"),
             }
@@ -525,25 +641,55 @@ fn step(st: &mut State, a: &[Value]) -> Value {
             let out: Vec<String> = match a[3].as_str().unwrap() {
                 "i64" => c.int64s().iter().map(|x| x.get().to_string()).collect(),
                 "u64" => c.uint64s().iter().map(|x| x.get().to_string()).collect(),
-                "f32" => c.float32s().iter().map(|x| x.get().to_bits().to_string()).collect(),
-                "f64" => c.float64s().iter().map(|x| x.get().to_bits().to_string()).collect(),
-                "dur" => c.go_durations().iter().map(|x| x.get().to_string()).collect(),
+                "f32" => c
+                    .float32s()
+                    .iter()
+                    .map(|x| x.get().to_bits().to_string())
+                    .collect(),
+                "f64" => c
+                    .float64s()
+                    .iter()
+                    .map(|x| x.get().to_bits().to_string())
+                    .collect(),
+                "dur" => c
+                    .go_durations()
+                    .iter()
+                    .map(|x| x.get().to_string())
+                    .collect(),
                 "time" => c
                     .times()
                     .iter()
-                    .map(|x| String::from_utf8(tidb_types::time::Time::from_raw(CoreTime(x.get())).string()).unwrap())
+                    .map(|x| {
+                        String::from_utf8(
+                            tidb_types::time::Time::from_raw(CoreTime(x.get())).string(),
+                        )
+                        .unwrap()
+                    })
                     .collect(),
-                "dec" => c.decimals().iter().map(|x| MyDecimal::from_wire(x).unwrap().string()).collect(),
+                "dec" => c
+                    .decimals()
+                    .iter()
+                    .map(|x| MyDecimal::from_wire(x).unwrap().string())
+                    .collect(),
                 k => panic!("view {k}"),
             };
-            let out = if out.is_empty() { Value::Null } else { json!(out) };
+            let out = if out.is_empty() {
+                Value::Null
+            } else {
+                json!(out)
+            };
             return json!([out, c.rows()]);
         }
         "cmp" => {
             let Some(f) = compare::get_compare_func(&st.fts[&ci(1)][ci(3)]) else {
                 return json!("nil");
             };
-            return json!(f(st.chks[&ci(1)].get_row(ci(2)), ci(3), st.chks[&ci(4)].get_row(ci(5)), ci(6)));
+            return json!(f(
+                st.chks[&ci(1)].get_row(ci(2)),
+                ci(3),
+                st.chks[&ci(4)].get_row(ci(5)),
+                ci(6)
+            ));
         }
         "iter" => {
             let c = &st.chks[&ci(1)];
@@ -554,7 +700,11 @@ fn step(st: &mut State, a: &[Value]) -> Value {
         }
         "iter_slice" => {
             let c = &st.chks[&ci(1)];
-            let rows: Vec<Row<'_>> = ints(&a[2]).unwrap().into_iter().map(|r| c.get_row(r)).collect();
+            let rows: Vec<Row<'_>> = ints(&a[2])
+                .unwrap()
+                .into_iter()
+                .map(|r| c.get_row(r))
+                .collect();
             let half = rows[..rows.len() / 2].to_vec();
             let mut it = iterator::new_iterator4_slice(rows);
             let r = iter_dump(&mut it, true);
@@ -565,20 +715,35 @@ fn step(st: &mut State, a: &[Value]) -> Value {
             let c = &st.chks[&ci(1)];
             let r = c.get_row(ci(2));
             let cp = r.copy_construct();
-            return json!([r.idx(), r.len(), r.is_empty(), std::ptr::eq(r.chunk(), c), 0, dump(&cp)]);
+            return json!([
+                r.idx(),
+                r.len(),
+                r.is_empty(),
+                std::ptr::eq(r.chunk(), c),
+                0,
+                dump(&cp)
+            ]);
         }
         "dump" => return dump(&st.chks[&ci(1)]),
-        "encode" => return json!(hex(&codec::new_codec(st.fts[&ci(1)].clone()).encode(&st.chks[&ci(1)]))),
+        "encode" => {
+            return json!(hex(
+                &codec::new_codec(st.fts[&ci(1)].clone()).encode(&st.chks[&ci(1)])
+            ));
+        }
         "decode" => {
             let fts = fts_of(&a[2]);
-            let (c, rest) = codec::new_codec(fts.clone()).decode(Bytes::from(unhex(a[3].as_str().unwrap())));
+            let (c, rest) =
+                codec::new_codec(fts.clone()).decode(Bytes::from(unhex(a[3].as_str().unwrap())));
             st.chks.insert(ci(1), c);
             st.fts.insert(ci(1), fts);
             return json!(rest.len());
         }
         "decode_into" => {
             let fts = st.fts[&ci(1)].clone();
-            let rest = codec::new_codec(fts).decode_to_chunk(Bytes::from(unhex(a[2].as_str().unwrap())), st.chks.get_mut(&ci(1)).unwrap());
+            let rest = codec::new_codec(fts).decode_to_chunk(
+                Bytes::from(unhex(a[2].as_str().unwrap())),
+                st.chks.get_mut(&ci(1)).unwrap(),
+            );
             return json!(rest.len());
         }
         "dec_new" => {
@@ -637,8 +802,17 @@ fn step(st: &mut State, a: &[Value]) -> Value {
                 chk_idx: ci(2) as u32,
                 row_idx: ci(3) as u32,
             });
-            let out: Vec<Value> = l.field_types().iter().enumerate().map(|(col, ft)| get(r, ft, col)).collect();
-            let out = if out.is_empty() { Value::Null } else { json!(out) };
+            let out: Vec<Value> = l
+                .field_types()
+                .iter()
+                .enumerate()
+                .map(|(col, ft)| get(r, ft, col))
+                .collect();
+            let out = if out.is_empty() {
+                Value::Null
+            } else {
+                json!(out)
+            };
             return json!([out, dump(l.get_chunk(ci(2)))]);
         }
         "list_walk" => {
@@ -648,7 +822,11 @@ fn step(st: &mut State, a: &[Value]) -> Value {
                 out.push(json!([row.idx(), row.len()]));
                 Ok(())
             });
-            let out = if out.is_empty() { Value::Null } else { json!(out) };
+            let out = if out.is_empty() {
+                Value::Null
+            } else {
+                json!(out)
+            };
             return json!([out, r.is_ok()]);
         }
         "list_iter" => {
@@ -677,7 +855,9 @@ fn step(st: &mut State, a: &[Value]) -> Value {
                     1 => its.push(iterator::new_iterator4_list(&st.lists[&s[1]].0)),
                     _ => {
                         let c = &st.chks[&s[1]];
-                        its.push(Box::new(iterator::new_iterator4_slice(s[2..].iter().map(|&r| c.get_row(r)).collect())));
+                        its.push(Box::new(iterator::new_iterator4_slice(
+                            s[2..].iter().map(|&r| c.get_row(r)).collect(),
+                        )));
                     }
                 }
             }
@@ -685,7 +865,8 @@ fn step(st: &mut State, a: &[Value]) -> Value {
         }
         "copy_join_direct" => {
             return st.with(ci(3), |d, st| {
-                let r = chunk_util::copy_selected_join_rows_direct(&st.chks[&ci(1)], &bools(&a[2]), d);
+                let r =
+                    chunk_util::copy_selected_join_rows_direct(&st.chks[&ci(1)], &bools(&a[2]), d);
                 match r {
                     Ok(ok) => json!([ok, null]),
                     Err(e) => json!([false, { "err": String::from_utf8_lossy(&e.error()) }]),
@@ -710,7 +891,11 @@ fn step(st: &mut State, a: &[Value]) -> Value {
             });
         }
         "copy_sel_rows" => st.with(ci(1), |d, st| {
-            chunk_util::copy_selected_rows(d.column_mut(ci(2)), st.chks[&ci(3)].column(ci(4)), &bools(&a[5]))
+            chunk_util::copy_selected_rows(
+                d.column_mut(ci(2)),
+                st.chks[&ci(3)].column(ci(4)),
+                &bools(&a[5]),
+            )
         }),
         "copy_sel_rows_fn" => {
             let sel = bools(&a[5]);
@@ -739,14 +924,18 @@ fn run_script(steps: &[Value]) -> Vec<Value> {
             Ok(v) => out.push(v),
             Err(e) => {
                 if std::env::var("CHUNK_DEBUG").is_ok() {
-                    let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()));
+                    let msg = e
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()));
                     eprintln!("panic at {s}: {msg:?}");
                     if let Some(id) = s.get(1).and_then(|v| v.as_u64())
                         && let Some(c) = st.chks.get(&(id as usize))
                     {
                         eprintln!("  chunk {id}: {}", dump(c));
                     }
-                    let prev: Vec<&Value> = steps.iter().take_while(|x| !std::ptr::eq(*x, s)).collect();
+                    let prev: Vec<&Value> =
+                        steps.iter().take_while(|x| !std::ptr::eq(*x, s)).collect();
                     eprintln!("  steps: {}", serde_json::to_string(&prev).unwrap());
                 }
                 out.push(json!({ "panic": "" }));
@@ -774,7 +963,10 @@ fn normalize(mut v: Value) -> Value {
 
 #[test]
 fn govec_chunk() {
-    let path = format!("{}/tests/vectors/v8.5.8/{GO_TARGET}/chunk.jsonl.gz", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/vectors/v8.5.8/{GO_TARGET}/chunk.jsonl.gz",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let mut s = String::new();
     flate2::read::GzDecoder::new(std::fs::File::open(&path).unwrap())
         .read_to_string(&mut s)
@@ -806,7 +998,10 @@ fn govec_chunk() {
                 let mut at = String::new();
                 if let (Some(g), Some(w)) = (g, w) {
                     for i in 0..g.len().max(w.len()) {
-                        let (gi, wi) = (g.get(i).cloned().map(normalize_one), w.get(i).cloned().map(normalize_one));
+                        let (gi, wi) = (
+                            g.get(i).cloned().map(normalize_one),
+                            w.get(i).cloned().map(normalize_one),
+                        );
                         if gi != wi {
                             at = format!(
                                 "step {i} {}\n got  {}\n want {}",

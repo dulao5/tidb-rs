@@ -51,7 +51,12 @@ pub struct RowPtr {
 
 /// NewListWithMemTracker creates a new List with field types, init chunk size, max chunk size and memory tracker.
 // go: NewListWithMemTracker L1
-pub fn new_list_with_mem_tracker(field_types: Vec<FieldType>, init_chunk_size: usize, max_chunk_size: usize, tracker: Arc<Tracker>) -> List {
+pub fn new_list_with_mem_tracker(
+    field_types: Vec<FieldType>,
+    init_chunk_size: usize,
+    max_chunk_size: usize,
+    tracker: Arc<Tracker>,
+) -> List {
     List {
         field_types,
         init_chunk_size,
@@ -66,8 +71,17 @@ pub fn new_list_with_mem_tracker(field_types: Vec<FieldType>, init_chunk_size: u
 
 /// NewList creates a new List with field types, init chunk size and max chunk size.
 // go: NewList L1
-pub fn new_list(field_types: Vec<FieldType>, init_chunk_size: usize, max_chunk_size: usize) -> List {
-    new_list_with_mem_tracker(field_types, init_chunk_size, max_chunk_size, new_tracker(LabelForChunkList, -1))
+pub fn new_list(
+    field_types: Vec<FieldType>,
+    init_chunk_size: usize,
+    max_chunk_size: usize,
+) -> List {
+    new_list_with_mem_tracker(
+        field_types,
+        init_chunk_size,
+        max_chunk_size,
+        new_tracker(LabelForChunkList, -1),
+    )
 }
 
 impl List {
@@ -124,7 +138,8 @@ impl List {
             let new_chk = self.alloc_chunk()?;
             self.chunks.push(new_chk);
             if chk_idx != self.consumed_idx {
-                self.mem_tracker.consume(self.chunks[chk_idx as usize].memory_usage())?;
+                self.mem_tracker
+                    .consume(self.chunks[chk_idx as usize].memory_usage())?;
                 self.consumed_idx = chk_idx;
             }
             chk_idx += 1;
@@ -150,7 +165,8 @@ impl List {
         }
         let chk_idx = self.chunks.len() as isize - 1;
         if self.consumed_idx != chk_idx {
-            self.mem_tracker.consume(self.chunks[chk_idx as usize].memory_usage())?;
+            self.mem_tracker
+                .consume(self.chunks[chk_idx as usize].memory_usage())?;
             self.consumed_idx = chk_idx;
         }
         self.mem_tracker.consume(chk.memory_usage())?;
@@ -171,7 +187,11 @@ impl List {
         if let Some(last) = self.chunks.last() {
             return Ok(renew(last, self.max_chunk_size));
         }
-        Ok(new(&self.field_types, self.init_chunk_size, self.max_chunk_size))
+        Ok(new(
+            &self.field_types,
+            self.init_chunk_size,
+            self.max_chunk_size,
+        ))
     }
 
     /// GetRow gets a Row from the list by RowPtr.
@@ -187,7 +207,8 @@ impl List {
     pub fn reset(&mut self) -> Result<(), Error> {
         let last_idx = self.chunks.len() as isize - 1;
         if last_idx != self.consumed_idx {
-            self.mem_tracker.consume(self.chunks[last_idx as usize].memory_usage())?;
+            self.mem_tracker
+                .consume(self.chunks[last_idx as usize].memory_usage())?;
         }
         self.freelist.append(&mut self.chunks);
         self.length = 0;
@@ -198,7 +219,8 @@ impl List {
     /// Clear triggers GC for all the allocated chunks and reset the list
     // go: List.Clear L1
     pub fn clear(&mut self) -> Result<(), Error> {
-        self.mem_tracker.consume(-self.mem_tracker.bytes_consumed())?;
+        self.mem_tracker
+            .consume(-self.mem_tracker.bytes_consumed())?;
         self.freelist = Vec::new();
         self.chunks = Vec::new();
         self.length = 0;
@@ -208,7 +230,10 @@ impl List {
 
     /// Walk iterate the list and call walkFunc for each row.
     // go: List.Walk L1
-    pub fn walk(&self, mut walk_func: impl FnMut(Row<'_>) -> Result<(), Error>) -> Result<(), Error> {
+    pub fn walk(
+        &self,
+        mut walk_func: impl FnMut(Row<'_>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         for chk in &self.chunks {
             for j in 0..chk.num_rows() {
                 walk_func(chk.get_row(j))?;

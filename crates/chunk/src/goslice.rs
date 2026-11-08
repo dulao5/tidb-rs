@@ -124,9 +124,9 @@ unsafe impl Allocator for ColAlloc {
 const SIZE_CLASSES: [usize; 68] = [
     0, 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320,
     352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 896, 1024, 1152, 1280, 1408, 1536, 1792,
-    2048, 2304, 2688, 3072, 3200, 3456, 4096, 4864, 5376, 6144, 6528, 6784, 6912, 8192, 9472,
-    9728, 10240, 10880, 12288, 13568, 14336, 16384, 18432, 19072, 20480, 21760, 24576, 27264,
-    28672, 32768,
+    2048, 2304, 2688, 3072, 3200, 3456, 4096, 4864, 5376, 6144, 6528, 6784, 6912, 8192, 9472, 9728,
+    10240, 10880, 12288, 13568, 14336, 16384, 18432, 19072, 20480, 21760, 24576, 27264, 28672,
+    32768,
 ];
 
 /// `roundupsize(size, noscan=true)`: the size of the block `mallocgc` returns for a request
@@ -352,14 +352,22 @@ impl<const E: usize> GoSlice<E> {
     // glue: Go reslice
     #[inline]
     pub(crate) fn reslice(&mut self, n: usize) {
-        assert!(n <= self.cap, "slice bounds out of range [:{n}] with capacity {}", self.cap);
+        assert!(
+            n <= self.cap,
+            "slice bounds out of range [:{n}] with capacity {}",
+            self.cap
+        );
         self.len = n;
     }
 
     /// `s = s[k:]`.
     // glue: Go reslice from the front
     pub(crate) fn advance(&mut self, k: usize) {
-        assert!(k <= self.len, "slice bounds out of range [{k}:{}]", self.len);
+        assert!(
+            k <= self.len,
+            "slice bounds out of range [{k}:{}]",
+            self.len
+        );
         match &mut self.store {
             Store::Owned(_) => self.start += k * E,
             Store::Shared(b) => *b = b.slice(k * E..),
@@ -433,7 +441,11 @@ impl<const E: usize> GoSlice<E> {
     // glue: Go index
     #[inline(always)]
     pub(crate) fn at(&self, i: usize) -> u8 {
-        assert!(i < self.len, "index out of range [{i}] with length {}", self.len);
+        assert!(
+            i < self.len,
+            "index out of range [{i}] with length {}",
+            self.len
+        );
         match &self.store {
             Store::Owned(v) => v[self.start + i],
             Store::Shared(b) => b[i],
@@ -444,7 +456,11 @@ impl<const E: usize> GoSlice<E> {
     // glue: Go index (write)
     #[inline(always)]
     pub(crate) fn at_mut(&mut self, i: usize) -> &mut u8 {
-        assert!(i < self.len, "index out of range [{i}] with length {}", self.len);
+        assert!(
+            i < self.len,
+            "index out of range [{i}] with length {}",
+            self.len
+        );
         let start = self.start;
         &mut self.owned()[start + i]
     }
@@ -455,7 +471,11 @@ impl GoSlice<8> {
     // glue: Go index of []int64 (little-endian storage)
     #[inline]
     pub(crate) fn i64_at(&self, i: usize) -> i64 {
-        assert!(i < self.len, "index out of range [{i}] with length {}", self.len);
+        assert!(
+            i < self.len,
+            "index out of range [{i}] with length {}",
+            self.len
+        );
         let b = self.capb();
         i64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap())
     }

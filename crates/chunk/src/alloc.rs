@@ -79,8 +79,15 @@ struct ReuseHookAllocator {
 
 /// NewReuseHookAllocator creates an allocator, which will call the function `f` when the first reused chunk is allocated.
 // go: NewReuseHookAllocator L1
-pub fn new_reuse_hook_allocator(alloc: Box<dyn Allocator>, f: Box<dyn FnMut() + Send>) -> Box<dyn Allocator> {
-    Box::new(ReuseHookAllocator { once: false, f, alloc })
+pub fn new_reuse_hook_allocator(
+    alloc: Box<dyn Allocator>,
+    f: Box<dyn FnMut() + Send>,
+) -> Box<dyn Allocator> {
+    Box::new(ReuseHookAllocator {
+        once: false,
+        f,
+        alloc,
+    })
 }
 
 impl Allocator for ReuseHookAllocator {

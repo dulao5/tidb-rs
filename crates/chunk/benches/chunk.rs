@@ -8,11 +8,11 @@ use criterion::Criterion;
 use criterion::criterion_group;
 use criterion::criterion_main;
 use tidb_base::mysql;
+use tidb_chunk::RowPtr;
 use tidb_chunk::chunk;
 use tidb_chunk::chunk_util;
 use tidb_chunk::codec;
 use tidb_chunk::list;
-use tidb_chunk::RowPtr;
 use tidb_parser::types::FieldType;
 use tidb_types::json::BinaryJSON;
 use tidb_types::new_dec_from_string_for_test;
@@ -53,7 +53,12 @@ fn bench(c: &mut Criterion) {
     }
     // BenchmarkAppendRow: rows of (null int, 1, "abcd", "abcd").
     {
-        let fts = [ft(mysql::TypeLonglong), ft(mysql::TypeLonglong), ft(mysql::TypeVarchar), ft(mysql::TypeBlob)];
+        let fts = [
+            ft(mysql::TypeLonglong),
+            ft(mysql::TypeLonglong),
+            ft(mysql::TypeVarchar),
+            ft(mysql::TypeBlob),
+        ];
         let mut row_chk = chunk::new(&fts, 0, 1024);
         row_chk.append_null(0);
         row_chk.append_int64(1, 1);
@@ -98,7 +103,9 @@ fn bench(c: &mut Criterion) {
         let chk = chunk::new_chunk_with_capacity(&fts, 1024);
         let codec = codec::new_codec(fts);
         let buffer = Bytes::from(codec.encode(&chk));
-        c.bench_function("Decode", |b| b.iter(|| black_box(codec.decode(buffer.clone()))));
+        c.bench_function("Decode", |b| {
+            b.iter(|| black_box(codec.decode(buffer.clone())))
+        });
     }
     // BenchmarkDecodeToChunk: 4 BIGINT columns of 1024 rows.
     {
@@ -111,7 +118,9 @@ fn bench(c: &mut Criterion) {
         }
         let codec = codec::new_codec(fts);
         let buffer = Bytes::from(codec.encode(&chk));
-        c.bench_function("DecodeToChunk", |b| b.iter(|| black_box(codec.decode_to_chunk(buffer.clone(), &mut chk))));
+        c.bench_function("DecodeToChunk", |b| {
+            b.iter(|| black_box(codec.decode_to_chunk(buffer.clone(), &mut chk)))
+        });
     }
     // BenchmarkDecodeToChunkWithVariableType.
     {
@@ -147,10 +156,13 @@ fn bench(c: &mut Criterion) {
                 }
             }
             v.extend_from_slice(s.as_bytes());
-            chk.append_json(4 + 1, &BinaryJSON {
-                type_code: tidb_types::json::JSONTypeCodeString,
-                value: v.into(),
-            });
+            chk.append_json(
+                4 + 1,
+                &BinaryJSON {
+                    type_code: tidb_types::json::JSONTypeCodeString,
+                    value: v.into(),
+                },
+            );
         }
         let codec = codec::new_codec(fts);
         let buffer = Bytes::from(codec.encode(&chk));
@@ -171,7 +183,7 @@ fn bench(c: &mut Criterion) {
         ];
         let mut src = chunk::new_chunk_with_capacity(&fts, 1024);
         let mut selected = vec![false; 1024];
-        for j in 0..1024usize {
+        for (j, sel) in selected.iter_mut().enumerate() {
             if j % 7 == 0 {
                 src.append_string(0, b"abc");
                 src.append_string(1, b"abcdefg");
@@ -182,7 +194,7 @@ fn bench(c: &mut Criterion) {
                 src.append_string(1, b"ab234fg");
                 src.append_int64(2, j as i64);
                 src.append_int64(3, 123);
-                selected[j] = true;
+                *sel = true;
             }
             src.append_time(4, Time::default());
             src.append_string(5, b"abcdefg");
@@ -197,7 +209,13 @@ fn bench(c: &mut Criterion) {
     }
     // BenchmarkListGetRow: 10000 chunks of 2 rows.
     {
-        let fts = vec![ft(mysql::TypeVarString), ft(mysql::TypeLonglong), ft(mysql::TypeVarchar), ft(mysql::TypeLonglong), ft(mysql::TypeJSON)];
+        let fts = vec![
+            ft(mysql::TypeVarString),
+            ft(mysql::TypeLonglong),
+            ft(mysql::TypeVarchar),
+            ft(mysql::TypeLonglong),
+            ft(mysql::TypeJSON),
+        ];
         let mut l = list::new_list(fts.clone(), 2, 2);
         for i in 0..10000 {
             let mut chk = chunk::new_chunk_with_capacity(&fts, 2);
@@ -232,18 +250,28 @@ fn bench(c: &mut Criterion) {
     }
     // BenchmarkChunkMemoryUsage.
     {
-        let fts = [ft(mysql::TypeFloat), ft(mysql::TypeVarchar), ft(mysql::TypeDatetime), ft(mysql::TypeDuration)];
+        let fts = [
+            ft(mysql::TypeFloat),
+            ft(mysql::TypeVarchar),
+            ft(mysql::TypeDatetime),
+            ft(mysql::TypeDuration),
+        ];
         let mut chk = chunk::new_chunk_with_capacity(&fts, 10);
         for _ in 0..10 {
             chk.append_float64(0, 123.123);
             chk.append_string(1, b"123");
             chk.append_time(2, Time::default());
-            chk.append_duration(3, Duration {
-                duration: i64::MAX,
-                fsp: 0,
-            });
+            chk.append_duration(
+                3,
+                Duration {
+                    duration: i64::MAX,
+                    fsp: 0,
+                },
+            );
         }
-        c.bench_function("ChunkMemoryUsage", |b| b.iter(|| black_box(chk.memory_usage())));
+        c.bench_function("ChunkMemoryUsage", |b| {
+            b.iter(|| black_box(chk.memory_usage()))
+        });
     }
 }
 

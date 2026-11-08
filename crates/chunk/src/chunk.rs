@@ -118,7 +118,12 @@ pub fn new(fields: &[FieldType], capacity: usize, max_chunk_size: usize) -> Chun
 
 /// [`new`] with the columns allocating through `alloc` (A1 3.3, N5a 3.7).
 // glue: N5a 3.7 New with a TrackedAlloc
-pub fn new_in(fields: &[FieldType], capacity: usize, max_chunk_size: usize, alloc: ColAlloc) -> Chunk {
+pub fn new_in(
+    fields: &[FieldType],
+    capacity: usize,
+    max_chunk_size: usize,
+    alloc: ColAlloc,
+) -> Chunk {
     let capacity = capacity.min(max_chunk_size);
     let mut columns = Vec::with_capacity(fields.len());
     for f in fields {
@@ -178,7 +183,11 @@ pub fn renew(chk: &Chunk, max_chunk_size: usize) -> Chunk {
 fn renew_columns(old_col: &[Arc<Column>], capacity: usize) -> Vec<Arc<Column>> {
     let mut columns = Vec::with_capacity(old_col.len());
     for col in old_col {
-        columns.push(Arc::new(new_column(col.type_size(), capacity, col.alloc.clone())));
+        columns.push(Arc::new(new_column(
+            col.type_size(),
+            capacity,
+            col.alloc.clone(),
+        )));
     }
     columns
 }
@@ -290,7 +299,12 @@ impl Chunk {
     // go: Chunk.Prune L1
     pub fn prune(&self, used_col_idxs: &[usize]) -> Chunk {
         let mut chk = renew_empty(self);
-        chk.columns = Some(used_col_idxs.iter().map(|&idx| self.cols()[idx].clone()).collect());
+        chk.columns = Some(
+            used_col_idxs
+                .iter()
+                .map(|&idx| self.cols()[idx].clone())
+                .collect(),
+        );
         chk
     }
 
@@ -303,7 +317,12 @@ impl Chunk {
 
     /// MakeRefTo copies columns `src.columns[srcColIdx]` to `c.columns[dstColIdx]`.
     // go: Chunk.MakeRefTo L1
-    pub fn make_ref_to(&mut self, dst_col_idx: usize, src: &Chunk, src_col_idx: usize) -> Result<(), Error> {
+    pub fn make_ref_to(
+        &mut self,
+        dst_col_idx: usize,
+        src: &Chunk,
+        src_col_idx: usize,
+    ) -> Result<(), Error> {
         if self.sel.is_some() || src.sel.is_some() {
             return Err(errors::new(msgErrSelNotNil));
         }
@@ -317,7 +336,12 @@ impl Chunk {
     /// this function should not be used directly, if you wants to swap columns between two chunks,
     /// use ColumnSwapHelper.SwapColumns instead.
     // go: Chunk.swapColumn L1
-    pub(crate) fn swap_column(&mut self, mut col_idx: usize, other: &mut Chunk, mut other_idx: usize) -> Result<(), Error> {
+    pub(crate) fn swap_column(
+        &mut self,
+        mut col_idx: usize,
+        other: &mut Chunk,
+        mut other_idx: usize,
+    ) -> Result<(), Error> {
         if self.sel.is_some() || other.sel.is_some() {
             return Err(errors::new(msgErrSelNotNil));
         }
@@ -325,13 +349,16 @@ impl Chunk {
         // be swapped.
         {
             let cols = self.cols();
-            for i in 0..col_idx {
+            // Go's `range colIdx` is evaluated once, before the loop body changes colIdx.
+            let n = col_idx;
+            for i in 0..n {
                 if Arc::ptr_eq(&cols[i], &cols[col_idx]) {
                     col_idx = i;
                 }
             }
             let ocols = other.cols();
-            for i in 0..other_idx {
+            let n = other_idx;
+            for i in 0..n {
                 if Arc::ptr_eq(&ocols[i], &ocols[other_idx]) {
                     other_idx = i;
                 }
@@ -349,7 +376,10 @@ impl Chunk {
             .collect();
 
         // Swap columns from two chunks.
-        std::mem::swap(&mut self.cols_mut()[col_idx], &mut other.cols_mut()[other_idx]);
+        std::mem::swap(
+            &mut self.cols_mut()[col_idx],
+            &mut other.cols_mut()[other_idx],
+        );
 
         // Rebuild the reference.
         for i in ref_cols_idx {
@@ -393,7 +423,9 @@ impl Chunk {
                 continue;
             }
             // Detach the aliases so this slot owns the column, reset it, re-attach.
-            let aliases: Vec<usize> = (i + 1..n).filter(|&j| Arc::ptr_eq(&cols[j], &cols[i])).collect();
+            let aliases: Vec<usize> = (i + 1..n)
+                .filter(|&j| Arc::ptr_eq(&cols[j], &cols[i]))
+                .collect();
             for &j in &aliases {
                 cols[j] = Arc::new(Column::zero(ColAlloc::Global));
             }
@@ -409,7 +441,12 @@ impl Chunk {
     // go: Chunk.CopyConstruct L1
     pub fn copy_construct(&self) -> Chunk {
         let mut new_chk = renew_empty(self);
-        new_chk.columns = Some(self.cols().iter().map(|c| Arc::new(c.copy_construct(None))).collect());
+        new_chk.columns = Some(
+            self.cols()
+                .iter()
+                .map(|c| Arc::new(c.copy_construct(None)))
+                .collect(),
+        );
         new_chk
     }
 
@@ -525,7 +562,12 @@ impl Chunk {
     /// 1. every columns are used if colIdxs is nil.
     /// 2. no columns are used if colIdxs is not nil but the size of colIdxs is 0.
     // go: Chunk.AppendPartialRowByColIdxs L1
-    pub fn append_partial_row_by_col_idxs(&mut self, col_off: usize, row: Row<'_>, col_idxs: Option<&[usize]>) -> usize {
+    pub fn append_partial_row_by_col_idxs(
+        &mut self,
+        col_off: usize,
+        row: Row<'_>,
+        col_idxs: Option<&[usize]>,
+    ) -> usize {
         let Some(col_idxs) = col_idxs else {
             self.append_partial_row(col_off, row);
             return row.len();
@@ -548,10 +590,13 @@ impl Chunk {
                 let dst = self.column_mut(col_id);
                 if src.is_fixed() {
                     let elem_len = src.elem_len();
-                    dst.data.append(&src.data.capb()[begin * elem_len..end * elem_len]);
+                    dst.data
+                        .append(&src.data.capb()[begin * elem_len..end * elem_len]);
                 } else {
-                    let (begin_offset, end_offset) = (src.offsets.i64_at(begin), src.offsets.i64_at(end));
-                    dst.data.append(&src.data.capb()[begin_offset as usize..end_offset as usize]);
+                    let (begin_offset, end_offset) =
+                        (src.offsets.i64_at(begin), src.offsets.i64_at(end));
+                    dst.data
+                        .append(&src.data.capb()[begin_offset as usize..end_offset as usize]);
                     let mut last_offset = dst.offsets.last_i64();
                     for i in begin..end {
                         last_offset += src.offsets.i64_at(i + 1) - src.offsets.i64_at(i);
@@ -586,7 +631,7 @@ impl Chunk {
             col.length = num_rows;
             let bitmap_len = col.length.div_ceil(8);
             col.null_bitmap.reslice(bitmap_len);
-            if col.length % 8 != 0 {
+            if !col.length.is_multiple_of(8) {
                 // When we append null, we simply increment the nullCount,
                 // so we need to clear the unused bits in the last bitmap byte.
                 let mut last_byte = col.null_bitmap.at(bitmap_len - 1);
@@ -803,7 +848,8 @@ pub(crate) fn append_cell_by_cell(dst: &mut Column, src: &Column, row_idx: usize
         dst.data.append(&src.data.capb()[offset..offset + elem_len]);
     } else {
         let (start, end) = (src.offsets.i64_at(row_idx), src.offsets.i64_at(row_idx + 1));
-        dst.data.append(&src.data.capb()[start as usize..end as usize]);
+        dst.data
+            .append(&src.data.capb()[start as usize..end as usize]);
         dst.offsets.push_i64(dst.data.len() as i64);
     }
     dst.length += 1;
@@ -815,15 +861,25 @@ pub(crate) fn append_cell_by_cell(dst: &mut Column, src: &Column, row_idx: usize
 /// the position of the cell: fixed-length cells are `len(dst.elemBuf)` bytes, variable-length
 /// cells a native-endian `uint64` length and the bytes.
 // go: AppendCellFromRawData L2 (a byte slice instead of an unsafe.Pointer)
-pub fn append_cell_from_raw_data(dst: &mut Column, row_data: &[u8], mut current_offset: usize) -> usize {
+pub fn append_cell_from_raw_data(
+    dst: &mut Column,
+    row_data: &[u8],
+    mut current_offset: usize,
+) -> usize {
     if dst.is_fixed() {
         let elem_len = dst.elem_len();
-        dst.data.append(&row_data[current_offset..current_offset + elem_len]);
+        dst.data
+            .append(&row_data[current_offset..current_offset + elem_len]);
         current_offset += elem_len;
     } else {
-        let elem_len = u64::from_ne_bytes(row_data[current_offset..current_offset + 8].try_into().unwrap()) as usize;
+        let elem_len = u64::from_ne_bytes(
+            row_data[current_offset..current_offset + 8]
+                .try_into()
+                .unwrap(),
+        ) as usize;
         if elem_len > 0 {
-            dst.data.append(&row_data[current_offset + 8..current_offset + 8 + elem_len]);
+            dst.data
+                .append(&row_data[current_offset + 8..current_offset + 8 + elem_len]);
         }
         dst.offsets.push_i64(dst.data.len() as i64);
         current_offset += elem_len + 8;

@@ -107,7 +107,13 @@ impl Codec {
     /// The input is `buffer[pos..]`; the result is the position of the remaining bytes (Go
     /// returns the remaining slice).
     // go: Codec.decodeColumn L2 (M-POOL: no avoidReusing; the buffers are shared slices, N5a 3.4)
-    fn decode_column(&self, buffer: &Bytes, mut pos: usize, col: &mut Column, ordinal: usize) -> usize {
+    fn decode_column(
+        &self,
+        buffer: &Bytes,
+        mut pos: usize,
+        col: &mut Column,
+        ordinal: usize,
+    ) -> usize {
         // Todo(Shenghui Wu): Optimize all data is null.
         // decode length.
         col.length = u32::from_le_bytes(buffer[pos..pos + 4].try_into().unwrap()) as usize;
@@ -153,7 +159,8 @@ impl Codec {
         let mut i = 0;
         while i < num_null_bitmap_bytes {
             let num_append_bytes = (num_null_bitmap_bytes - i).min(allNotNullBitmap.len());
-            col.null_bitmap.append(&allNotNullBitmap[..num_append_bytes]);
+            col.null_bitmap
+                .append(&allNotNullBitmap[..num_append_bytes]);
             i += num_append_bytes;
         }
     }
@@ -351,7 +358,8 @@ impl Decoder {
 
         if elem_len == VarElemLen {
             // For var-length types, we need to adjust the offsets after appending to destCol.
-            num_data_bytes = (src_col.offsets.i64_at(required_rows) - src_col.offsets.i64_at(0)) as isize;
+            num_data_bytes =
+                (src_col.offsets.i64_at(required_rows) - src_col.offsets.i64_at(0)) as isize;
             let delta_offset = dest_col.offsets.i64_at(dest_col.length) - src_col.offsets.i64_at(0);
             dest_col
                 .offsets
@@ -364,7 +372,7 @@ impl Decoder {
         }
 
         let num_null_bitmap_bytes = (required_rows + 7) >> 3;
-        if dest_col.length % 8 == 0 {
+        if dest_col.length.is_multiple_of(8) {
             dest_col
                 .null_bitmap
                 .append(&src_col.null_bitmap.capb()[..num_null_bitmap_bytes]);
@@ -385,7 +393,8 @@ impl Decoder {
             }
         }
         // Set all the redundant bits in the last slot of destCol.nullBitmap to 0.
-        let num_redundant_bits = (dest_col.null_bitmap.len() * 8 - dest_col.length - required_rows) as u32;
+        let num_redundant_bits =
+            (dest_col.null_bitmap.len() * 8 - dest_col.length - required_rows) as u32;
         let bit_mask = ((1u32 << (8 - num_redundant_bits)) as u8).wrapping_sub(1);
         let last = dest_col.null_bitmap.len() - 1;
         *dest_col.null_bitmap.at_mut(last) &= bit_mask;

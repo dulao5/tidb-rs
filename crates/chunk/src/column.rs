@@ -265,7 +265,11 @@ pub(crate) fn new_var_len_column(capacity: usize, alloc: ColAlloc) -> Column {
     Column {
         length: 0,
         offsets: GoSlice::make(1, get_offsets_cap(capacity), alloc.clone()),
-        data: GoSlice::make(0, get_data_mem_cap(estimatedElemLen, capacity), alloc.clone()),
+        data: GoSlice::make(
+            0,
+            get_data_mem_cap(estimatedElemLen, capacity),
+            alloc.clone(),
+        ),
         null_bitmap: GoSlice::make(0, get_null_bitmap_cap(capacity), alloc.clone()),
         elem_buf: None,
         alloc,
@@ -444,12 +448,14 @@ impl Column {
             let elem_len = src.elem_len();
             let offset = pos * elem_len;
             for _ in 0..times {
-                self.data.append(&src.data.capb()[offset..offset + elem_len]);
+                self.data
+                    .append(&src.data.capb()[offset..offset + elem_len]);
             }
         } else {
             let (start, end) = (src.offsets.i64_at(pos), src.offsets.i64_at(pos + 1));
             for _ in 0..times {
-                self.data.append(&src.data.capb()[start as usize..end as usize]);
+                self.data
+                    .append(&src.data.capb()[start as usize..end as usize]);
                 self.offsets.push_i64(self.data.len() as i64);
             }
         }
@@ -461,7 +467,8 @@ impl Column {
     /// num means the number of bits that should be appended.
     // go: Column.appendMultiSameNullBitmap L1
     pub(crate) fn append_multi_same_null_bitmap(&mut self, not_null: bool, num: usize) {
-        let num_new_bytes = ((self.length + num + 7) >> 3) as isize - self.null_bitmap.len() as isize;
+        let num_new_bytes =
+            ((self.length + num + 7) >> 3) as isize - self.null_bitmap.len() as isize;
         let b = if not_null { 0xff } else { 0 };
         if num_new_bytes > 0 {
             self.null_bitmap.append_fill(num_new_bytes as usize, b);
@@ -893,7 +900,11 @@ impl Column {
     // glue: Go unsafe read of an element at &c.data[off]
     #[inline]
     fn elem<const N: usize>(&self, off: usize) -> [u8; N] {
-        assert!(off < self.data.len(), "index out of range [{off}] with length {}", self.data.len());
+        assert!(
+            off < self.data.len(),
+            "index out of range [{off}] with length {}",
+            self.data.len()
+        );
         self.data.capb()[off..off + N].try_into().unwrap()
     }
 
@@ -937,7 +948,8 @@ impl Column {
     /// [`Column::decimals_mut`]). An image whose `negative` byte is not 0 or 1 panics.
     // go: Column.GetDecimal L2 (returns the value, not a pointer into the column)
     pub fn get_decimal(&self, row_id: usize) -> MyDecimal {
-        let b: MyDecimalBytes = self.elem::<MY_DECIMAL_STRUCT_SIZE>(row_id * MY_DECIMAL_STRUCT_SIZE);
+        let b: MyDecimalBytes =
+            self.elem::<MY_DECIMAL_STRUCT_SIZE>(row_id * MY_DECIMAL_STRUCT_SIZE);
         MyDecimal::from_wire(&b).expect("invalid MyDecimal image in chunk column")
     }
 
@@ -1050,10 +1062,9 @@ impl Column {
                 if self.is_null(src) {
                     *self.null_bitmap.at_mut(idx) &= !(1u8 << pos);
                 } else {
-                    self.data.capb_mut().copy_within(
-                        src * elem_len..src * elem_len + elem_len,
-                        dst * elem_len,
-                    );
+                    self.data
+                        .capb_mut()
+                        .copy_within(src * elem_len..src * elem_len + elem_len, dst * elem_len);
                     *self.null_bitmap.at_mut(idx) |= 1u8 << pos;
                 }
             }
@@ -1121,7 +1132,8 @@ impl Column {
             dst.elem_buf = Some(ElemBuf::make(elem_len));
             for &i in sel {
                 dst.append_null_bitmap_inner(!self.is_null(i));
-                dst.data.append(&self.data.capb()[i * elem_len..i * elem_len + elem_len]);
+                dst.data
+                    .append(&self.data.capb()[i * elem_len..i * elem_len + elem_len]);
                 dst.length += 1;
             }
         } else {
@@ -1132,7 +1144,8 @@ impl Column {
             for &i in sel {
                 dst.append_null_bitmap_inner(!self.is_null(i));
                 let (start, end) = (self.offsets.i64_at(i), self.offsets.i64_at(i + 1));
-                dst.data.append(&self.data.capb()[start as usize..end as usize]);
+                dst.data
+                    .append(&self.data.capb()[start as usize..end as usize]);
                 dst.offsets.push_i64(dst.data.len() as i64);
                 dst.length += 1;
             }

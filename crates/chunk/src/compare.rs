@@ -22,7 +22,12 @@ pub type CompareFunc = Box<dyn Fn(Row<'_>, usize, Row<'_>, usize) -> isize + Sen
 // go: GetCompareFunc L1
 pub fn get_compare_func(tp: &FieldType) -> Option<CompareFunc> {
     let f: CompareFunc = match tp.get_type() {
-        mysql::TypeTiny | mysql::TypeShort | mysql::TypeInt24 | mysql::TypeLong | mysql::TypeLonglong | mysql::TypeYear => {
+        mysql::TypeTiny
+        | mysql::TypeShort
+        | mysql::TypeInt24
+        | mysql::TypeLong
+        | mysql::TypeLonglong
+        | mysql::TypeYear => {
             if mysql::has_unsigned_flag(tp.get_flag()) {
                 Box::new(cmp_uint64)
             } else {
@@ -103,11 +108,19 @@ fn cmp_uint64(l: Row<'_>, l_col: usize, r: Row<'_>, r_col: usize) -> isize {
 
 // go: genCmpStringFunc L1
 fn gen_cmp_string_func(collation: String) -> CompareFunc {
-    Box::new(move |l, l_col, r, r_col| cmp_string_with_collation_info(l, l_col, r, r_col, &collation))
+    Box::new(move |l, l_col, r, r_col| {
+        cmp_string_with_collation_info(l, l_col, r, r_col, &collation)
+    })
 }
 
 // go: cmpStringWithCollationInfo L1
-fn cmp_string_with_collation_info(l: Row<'_>, l_col: usize, r: Row<'_>, r_col: usize, collation: &str) -> isize {
+fn cmp_string_with_collation_info(
+    l: Row<'_>,
+    l_col: usize,
+    r: Row<'_>,
+    r_col: usize,
+    collation: &str,
+) -> isize {
     let (l_null, r_null) = (l.is_null(l_col), r.is_null(r_col));
     if l_null || r_null {
         return cmp_null(l_null, r_null);
@@ -160,7 +173,10 @@ fn cmp_duration(l: Row<'_>, l_col: usize, r: Row<'_>, r_col: usize) -> isize {
     if l_null || r_null {
         return cmp_null(l_null, r_null);
     }
-    let (l_dur, r_dur) = (l.get_duration(l_col, 0).duration, r.get_duration(r_col, 0).duration);
+    let (l_dur, r_dur) = (
+        l.get_duration(l_col, 0).duration,
+        r.get_duration(r_col, 0).duration,
+    );
     go_cmp(l_dur, r_dur)
 }
 

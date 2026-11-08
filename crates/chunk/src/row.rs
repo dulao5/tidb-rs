@@ -59,7 +59,8 @@ impl<'a> Row<'a> {
     // go: Row.Chunk L1
     #[inline]
     pub fn chunk(&self) -> &'a Chunk {
-        self.c.expect("invalid memory address or nil pointer dereference")
+        self.c
+            .expect("invalid memory address or nil pointer dereference")
     }
 
     /// IsEmpty returns true if the Row is empty.
@@ -134,7 +135,9 @@ impl<'a> Row<'a> {
     // go: Row.GetDuration L1
     #[inline]
     pub fn get_duration(&self, col_idx: usize, fill_fsp: isize) -> Duration {
-        self.chunk().column(col_idx).get_duration(self.idx, fill_fsp)
+        self.chunk()
+            .column(col_idx)
+            .get_duration(self.idx, fill_fsp)
     }
 
     // go: Row.getNameValue L1
