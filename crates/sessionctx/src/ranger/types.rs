@@ -112,7 +112,10 @@ impl std::fmt::Debug for Range {
 /// Go interface equality of two collators: same dynamic type and same pointer.
 // glue: Go interface value comparison of collate.Collator
 pub fn same_collator(a: &'static dyn Collator, b: &'static dyn Collator) -> bool {
-    let (ta, tb) = ((a as &dyn std::any::Any).type_id(), (b as &dyn std::any::Any).type_id());
+    let (ta, tb) = (
+        (a as &dyn std::any::Any).type_id(),
+        (b as &dyn std::any::Any).type_id(),
+    );
     ta == tb && std::ptr::addr_eq(a as *const dyn Collator, b as *const dyn Collator)
 }
 
@@ -313,8 +316,7 @@ impl Range {
         if self.low_exclude != other.low_exclude || self.high_exclude != other.high_exclude {
             return false;
         }
-        if self.low_val.len() != other.low_val.len()
-            || self.high_val.len() != other.high_val.len()
+        if self.low_val.len() != other.low_val.len() || self.high_val.len() != other.high_val.len()
         {
             return false;
         }
@@ -378,21 +380,27 @@ impl Range {
         }
 
         // Either otherRange is closed or both ranges have the same open/close setting.
-        let low_exclude_ok = !other_range.low_exclude || self.low_exclude == other_range.low_exclude;
+        let low_exclude_ok =
+            !other_range.low_exclude || self.low_exclude == other_range.low_exclude;
         let high_exclude_ok =
             !other_range.high_exclude || self.high_exclude == other_range.high_exclude;
         if !low_exclude_ok || !high_exclude_ok {
             return false;
         }
 
-        prefix(tc, &other_range.low_val, &self.low_val, other_range.low_val.len(), &self.collators)
-            && prefix(
-                tc,
-                &other_range.high_val,
-                &self.high_val,
-                other_range.low_val.len(),
-                &self.collators,
-            )
+        prefix(
+            tc,
+            &other_range.low_val,
+            &self.low_val,
+            other_range.low_val.len(),
+            &self.collators,
+        ) && prefix(
+            tc,
+            &other_range.high_val,
+            &self.high_val,
+            other_range.low_val.len(),
+            &self.collators,
+        )
     }
 
     /// IntersectRange computes intersection between two ranges. err is set of something went
@@ -400,7 +408,11 @@ impl Range {
     ///
     /// Go returns `(&Range{}, err)` on an error; the error alone is returned here.
     // go: Range.IntersectRange L1
-    pub fn intersect_range(&self, tc: &TypeContext, other_range: &Range) -> Result<Option<Range>, Error> {
+    pub fn intersect_range(
+        &self,
+        tc: &TypeContext,
+        other_range: &Range,
+    ) -> Result<Option<Range>, Error> {
         let intersect_length = self.low_val.len().max(other_range.low_val.len());
         let mut result = Range {
             low_val: Vec::with_capacity(intersect_length),
@@ -527,8 +539,8 @@ pub const EmptyRangeSize: i64 = 80;
 fn is_boundary_value(d: &Datum, unsigned_int_handle: bool, is_left_side: bool) -> bool {
     let is_right_side = !is_left_side;
     match d.kind() {
-        KindMinNotNull => is_left_side,  // -inf
-        KindMaxValue => is_right_side,   // +inf
+        KindMinNotNull => is_left_side, // -inf
+        KindMaxValue => is_right_side,  // +inf
         KindInt64 => {
             let v = d.get_int64();
             (v == i64::MIN && is_left_side) // -inf
@@ -553,16 +565,8 @@ fn format_datum(d: &Datum, is_left_side: bool) -> Vec<u8> {
         KindInt64 => {
             let v = d.get_int64();
             match v {
-                i64::MIN => {
-                    if is_left_side {
-                        return b"-inf".to_vec();
-                    }
-                }
-                i64::MAX => {
-                    if !is_left_side {
-                        return b"+inf".to_vec();
-                    }
-                }
+                i64::MIN if is_left_side => return b"-inf".to_vec(),
+                i64::MAX if !is_left_side => return b"+inf".to_vec(),
                 _ => {}
             }
             return v.to_string().into_bytes();
@@ -598,7 +602,13 @@ fn format_datum(d: &Datum, is_left_side: bool) -> Vec<u8> {
 /// This padding is essential in multi-column indexes when only a prefix of the columns
 /// is constrained. The remaining columns are filled with ±∞ to form complete range bounds.
 // go: extendBound L1
-fn extend_bound(bound: &mut Vec<Datum>, low_index: usize, high_index: usize, low: bool, open: bool) {
+fn extend_bound(
+    bound: &mut Vec<Datum>,
+    low_index: usize,
+    high_index: usize,
+    low: bool,
+    open: bool,
+) {
     for _ in low_index..high_index {
         if low {
             if open {
@@ -757,7 +767,11 @@ fn check_collators(ran1: &Range, ran2: &Range, length: usize) -> bool {
 /// Go returns `nil` on a collator mismatch or an error and a non-nil (possibly empty)
 /// slice otherwise; `None` is Go's nil.
 // go: Ranges.IntersectRanges L1
-pub fn ranges_intersect_ranges(rs: &[Range], tc: &TypeContext, other_ranges: &[Range]) -> Option<Ranges> {
+pub fn ranges_intersect_ranges(
+    rs: &[Range],
+    tc: &TypeContext,
+    other_ranges: &[Range],
+) -> Option<Ranges> {
     let mut result: Ranges = Vec::new();
     for rs_range in rs {
         for other_range in other_ranges {

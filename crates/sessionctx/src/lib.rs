@@ -2,12 +2,16 @@
 //!
 //! So far: block D05.1, the system variable registry and validation (`variable`, N8 §3.1);
 //! block D00.1 part 1: `errctx` and `stmtctx` (warnings, error levels, type flags);
-//! part 2a: the ranger types (`ranger`) and the `exprctx` / `planctx` trait skeletons.
+//! part 2a: the expression context interfaces (`exprctx`), the optional property providers
+//! (`expropt`), the static expression contexts (`exprstatic`), the ranger types (`ranger`) and
+//! the `planctx` trait skeleton.
 
 #![deny(unsafe_code)]
 
 pub mod errctx;
 pub mod exprctx;
+pub mod expropt;
+pub mod exprstatic;
 pub mod planctx;
 pub mod ranger;
 pub mod stmtctx;
