@@ -3,7 +3,7 @@
 //! Only `TestReset`: the other tests of the Go file are table tests whose tables govec
 //! replays (`tests/govec_decimal.rs`, see the tracker's govec README).
 
-use crate::errors::ERR_BAD_NUMBER;
+use crate::errors::ErrBadNumber;
 use crate::mydecimal::{MyDecimal, decimal_add};
 
 // go: TestReset L1
@@ -50,7 +50,7 @@ fn wire_round_trip_and_invalid_bool() {
         bad[3] = b;
         assert_eq!(
             MyDecimal::from_wire(&bad),
-            Err(ERR_BAD_NUMBER),
+            Err(ErrBadNumber.clone()),
             "negative byte {b}"
         );
     }
@@ -66,19 +66,19 @@ fn wire_round_trip_and_invalid_bool() {
 // values from Go v8.5.8.
 #[test]
 fn to_float64_error_value() {
-    use crate::errors::ERR_OVERFLOW;
+    use crate::errors::ErrOverflow;
     for (json, s, bits, err) in [
         (
             r#"{"DigitsInt":13,"DigitsFrac":9,"ResultFrac":9,"Negative":false,"WordBuf":[12,345678901,-1,0,0,0,0,0,0]}"#,
             "12345678901.00000000/",
             0u64,
-            Err(ERR_OVERFLOW),
+            Err(ErrOverflow.clone()),
         ),
         (
             r#"{"DigitsInt":18,"DigitsFrac":0,"ResultFrac":0,"Negative":false,"WordBuf":[5,-1999999999,0,0,0,0,0,0,0]}"#,
             "5'''''''''",
             0,
-            Err(ERR_OVERFLOW),
+            Err(ErrOverflow.clone()),
         ),
         (
             r#"{"DigitsInt":18,"DigitsFrac":0,"ResultFrac":0,"Negative":true,"WordBuf":[1000000000,999999999,0,0,0,0,0,0,0]}"#,

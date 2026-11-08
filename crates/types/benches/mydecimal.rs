@@ -190,8 +190,24 @@ fn benchmark_my_decimal_to_hash_key(c: &mut Criterion) {
     });
 }
 
+/// Not in Go: the error path. Most generated values have a fraction, so `to_int` returns
+/// `ErrTruncated` for them; measures the cost of the returned error value (D01.1 moved
+/// MyDecimal from a static stub error to the boxed `tidb_base::Error`).
+fn benchmark_err_path_to_int(c: &mut Criterion) {
+    let decs = gen_test_decimals();
+    c.bench_function("ErrPathToIntTruncated", |b| {
+        b.iter(|| {
+            for dec in &decs {
+                let (v, err) = black_box(dec).to_int();
+                black_box((v, err.is_err()));
+            }
+        })
+    });
+}
+
 criterion_group!(
     benches,
+    benchmark_err_path_to_int,
     benchmark_round,
     benchmark_to_float64,
     benchmark_from_float64,

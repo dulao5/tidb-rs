@@ -1212,3 +1212,59 @@ pub(crate) fn json_unmarshal_uint64(data: &[u8], v: u64) -> Result<u64, String> 
     d.finish().map_err(|e| e.to_string())?;
     Ok(out)
 }
+
+/// `strconv.ParseUint(s, 0, 64)`: `Some(v)` when Go returns a nil error. Base prefixes
+/// `0x`/`0X`, `0b`/`0B`, `0o`/`0O`, and a leading `0` for octal; `_` separators only with a
+/// base prefix and only between digits (`underscoreOK`); no sign.
+// go-std: strconv.ParseUint L2 (base 0, bitSize 64; only whether err == nil)
+pub fn parse_uint_base0(s: &[u8]) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    let s0 = s;
+    let (base, mut s) = if s[0] == b'0' {
+        match s.get(1) {
+            Some(b'x' | b'X') if s.len() >= 3 => (16u64, &s[2..]),
+            Some(b'b' | b'B') if s.len() >= 3 => (2, &s[2..]),
+            Some(b'o' | b'O') if s.len() >= 3 => (8, &s[2..]),
+            _ => (8, &s[1..]),
+        }
+    } else {
+        (10, s)
+    };
+    if base == 8 && s0.len() == 1 {
+        // "0": base 8 with an empty remainder parses as 0.
+        s = b"";
+    }
+    let mut underscores = false;
+    let mut n: u64 = 0;
+    let cutoff = u64::MAX / base + 1;
+    for &c in s {
+        let d = match c {
+            b'_' => {
+                underscores = true;
+                continue;
+            }
+            b'0'..=b'9' => u64::from(c - b'0'),
+            b'a'..=b'z' => u64::from(c - b'a') + 10,
+            b'A'..=b'Z' => u64::from(c - b'A') + 10,
+            _ => return None,
+        };
+        if d >= base {
+            return None;
+        }
+        if n >= cutoff {
+            return None; // ErrRange
+        }
+        n *= base;
+        let n1 = n.wrapping_add(d);
+        if n1 < n {
+            return None; // ErrRange
+        }
+        n = n1;
+    }
+    if underscores && !underscore_ok(s0) {
+        return None;
+    }
+    Some(n)
+}

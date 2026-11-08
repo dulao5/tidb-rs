@@ -1,158 +1,25 @@
 //! go-file: pkg/types/errors.go
 //!
-//! Temporary boundary stub (blocked-by D01.1): only the five `types` errors that
-//! `mydecimal.go` returns, with Go's error codes and message templates, plus `terror.Log`.
-//! D00.2 (terror / errno) is done; D01.1 (the rest of `pkg/types`) replaces this file, and
-//! MyDecimal moves to `tidb_base::Error`, no later than D01.4 (see specs/D01.3-time/tasks.md).
+//! The errors of `pkg/types/errors.go` as `tidb_base::Error` (D00.2, mapping rule M-ERR),
+//! with Go's identifiers (M-GONAME). Go's sentinel comparisons `err == ErrTruncated` are
+//! [`is_err`] / `ErrTruncated.equal(&e)` (`terror.Error.Equal`: same class and code).
 
-use std::borrow::Cow;
-use std::fmt;
+pub use tidb_base::Error;
 
-/// glue: stub blocked-by D00.2 — the subset of `terror.Error` that MyDecimal needs.
-///
-/// Equality is by class and code, like `terror.Error.Equal`; Go compares `err == ErrOverflow`
-/// against sentinels, which is the same test for these errors. An empty class marks an
-/// error that is not a `terror.Error` (Go's `encoding/json` errors from `UnmarshalJSON`).
-#[derive(Clone, Debug)]
-pub struct Error {
-    class: &'static str,
-    code: u16,
-    message: Cow<'static, str>,
+/// `err == proto` for a Go `error` held as `Result<(), Error>`: Go compares MyDecimal's
+/// sentinel errors by identity; the sentinels are prototypes, so equality by class and code
+/// (`terror.Error.Equal`) gives the same answer.
+// glue: Go sentinel comparison `err == ErrX`
+#[inline]
+pub(crate) fn is_err(r: &Result<(), Error>, proto: &Error) -> bool {
+    matches!(r, Err(e) if proto.equal(e))
 }
-
-impl PartialEq for Error {
-    // glue: stub blocked-by D00.2 (terror.Error.Equal)
-    fn eq(&self, other: &Self) -> bool {
-        self.class == other.class && self.code == other.code
-    }
-}
-
-impl Eq for Error {}
-
-impl fmt::Display for Error {
-    // glue: stub blocked-by D00.2 (terror.Error.Error: "[class:code]message")
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.class.is_empty() {
-            f.write_str(&self.message)
-        } else {
-            write!(f, "[{}:{}]{}", self.class, self.code, self.message)
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl Error {
-    // glue: stub blocked-by D00.2 (dbterror.ClassTypes.NewStd)
-    const fn types(code: u16, message: &'static str) -> Error {
-        Error {
-            class: "types",
-            code,
-            message: Cow::Borrowed(message),
-        }
-    }
-
-    /// MySQL error code (`terror.Error.Code`); 0 for non-terror errors.
-    // glue: stub blocked-by D00.2 (terror.Error.Code)
-    pub fn code(&self) -> u16 {
-        self.code
-    }
-
-    /// An error that Go returns from the standard library (no class or code).
-    // glue: stub blocked-by D00.2 (non-terror Go errors, e.g. from encoding/json)
-    pub(crate) fn other(message: String) -> Error {
-        Error {
-            class: "",
-            code: 0,
-            message: Cow::Owned(message),
-        }
-    }
-
-    /// `terror.Error.GenWithStackByArgs`: the message template formatted with `args`
-    /// (Go `fmt.Sprintf`; only the `%s` verb with an optional `-` flag and `.N` precision
-    /// occurs in the templates used here). Arguments are raw bytes like Go's `[]byte`/string.
-    // glue: stub blocked-by D00.2 (terror.Error.GenWithStackByArgs)
-    pub(crate) fn gen_with_stack_by_args(&self, args: &[&[u8]]) -> Error {
-        let tmpl = self.message.as_bytes();
-        let mut out: Vec<u8> = Vec::with_capacity(tmpl.len() + 16);
-        let mut args = args.iter();
-        let mut i = 0;
-        while i < tmpl.len() {
-            if tmpl[i] != b'%' {
-                out.push(tmpl[i]);
-                i += 1;
-                continue;
-            }
-            i += 1;
-            while i < tmpl.len() && tmpl[i] == b'-' {
-                i += 1;
-            }
-            let mut prec: Option<usize> = None;
-            if i < tmpl.len() && tmpl[i] == b'.' {
-                i += 1;
-                let mut p = 0usize;
-                while i < tmpl.len() && tmpl[i].is_ascii_digit() {
-                    p = p * 10 + usize::from(tmpl[i] - b'0');
-                    i += 1;
-                }
-                prec = Some(p);
-            }
-            // The verb: only %s is used by the templates of these errors.
-            i += 1;
-            let arg = args.next().copied().unwrap_or(b"%!s(MISSING)");
-            out.extend_from_slice(truncate_runes(arg, prec));
-        }
-        Error {
-            class: self.class,
-            code: self.code,
-            // Go keeps the raw bytes; they reach users through UTF-8 encoders that replace
-            // invalid sequences, as from_utf8_lossy does.
-            message: Cow::Owned(String::from_utf8_lossy(&out).into_owned()),
-        }
-    }
-}
-
-/// Go fmt's precision for `%s`: keep at most `prec` runes, counting each invalid UTF-8 byte
-/// as one rune (`utf8.DecodeRune` returns width 1 for it).
-// glue: stub blocked-by D00.2 (Go fmt.(*fmt).truncate)
-fn truncate_runes(s: &[u8], prec: Option<usize>) -> &[u8] {
-    let Some(prec) = prec else { return s };
-    let mut idx = 0;
-    let mut n = 0;
-    while idx < s.len() {
-        if n == prec {
-            return &s[..idx];
-        }
-        idx += crate::gostd::decode_rune(&s[idx..]).1;
-        n += 1;
-    }
-    s
-}
-
-/// ErrTruncated is returned when data has been truncated during conversion.
-pub const ERR_TRUNCATED: Error = Error::types(1265, "Data truncated for column '%s' at row %d");
-/// ErrOverflow is returned when data is out of range for a field type.
-pub const ERR_OVERFLOW: Error = Error::types(1690, "%s value is out of range in '%s'");
-/// ErrDivByZero is return when do division by 0.
-pub const ERR_DIV_BY_ZERO: Error = Error::types(1365, "Division by 0");
-/// ErrBadNumber is return when parsing an invalid binary decimal number.
-pub const ERR_BAD_NUMBER: Error = Error::types(8029, "Bad Number");
-/// ErrTruncatedWrongVal is returned when data has been truncated during conversion.
-pub const ERR_TRUNCATED_WRONG_VAL: Error =
-    Error::types(1292, "Truncated incorrect %-.64s value: '%-.128s'");
 
 /// `terror.Log(err)`: Go logs a non-nil error with its stack and continues.
-// glue: stub blocked-by D00.2 (terror.Log) — the error is dropped until the logging
-// infrastructure of D00.2 exists.
+// glue: terror.Log for a `Result<(), Error>`
 pub(crate) fn terror_log(err: Result<(), Error>) {
-    let _ = err;
+    tidb_base::terror::log(err.err().as_ref());
 }
-
-// ---------------------------------------------------------------------------------------
-// The errors of `pkg/types/errors.go` as `tidb_base::Error` (D00.2, mapping rule M-ERR),
-// with Go's identifiers (M-GONAME). The time code (D01.3) returns these; MyDecimal still
-// returns the stub `Error` above until D01.1 ports `errors.go` whole (moving MyDecimal's
-// hot error paths to the boxed `tidb_base::Error` needs its own benchmark review).
 
 #[allow(non_upper_case_globals)]
 mod go_errors {
@@ -207,24 +74,93 @@ mod go_errors {
     /// ErrJSONVacuousPath is returned when path is empty
     pub static ErrJSONVacuousPath: LazyLock<Error> =
         LazyLock::new(|| ClassTypes.new_std(errno::ErrJSONVacuousPath));
+    /// ErrDataTooLong is returned when converts a string value that is longer than field type length.
+    pub static ErrDataTooLong: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrDataTooLong));
+    /// ErrIllegalValueForType is returned when value of type is illegal.
+    pub static ErrIllegalValueForType: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrIllegalValueForType));
+    /// ErrDivByZero is return when do division by 0.
+    pub static ErrDivByZero: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrDivisionByZero));
+    /// ErrTooBigDisplayWidth is return when display width out of range for column.
+    pub static ErrTooBigDisplayWidth: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigDisplaywidth));
+    /// ErrTooBigFieldLength is return when column length too big for column.
+    pub static ErrTooBigFieldLength: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigFieldlength));
+    /// ErrTooBigSet is returned when too many strings for column.
+    pub static ErrTooBigSet: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigSet));
+    /// ErrTooBigScale is returned when type DECIMAL/NUMERIC scale is bigger than mysql.MaxDecimalScale.
+    pub static ErrTooBigScale: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigScale));
+    /// ErrTooBigPrecision is returned when type DECIMAL/NUMERIC or DATETIME precision is bigger than mysql.MaxDecimalWidth or types.MaxFsp
+    pub static ErrTooBigPrecision: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrTooBigPrecision));
+    /// ErrBadNumber is return when parsing an invalid binary decimal number.
+    pub static ErrBadNumber: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrBadNumber));
+    /// ErrInvalidFieldSize is returned when the precision of a column is out of range.
+    pub static ErrInvalidFieldSize: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrInvalidFieldSize));
+    /// ErrMBiggerThanD is returned when precision less than the scale.
+    pub static ErrMBiggerThanD: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrMBiggerThanD));
+    /// ErrDuplicatedValueInType is returned when enum column has duplicated value.
+    pub static ErrDuplicatedValueInType: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrDuplicatedValueInType));
+    /// ErrCastAsSignedOverflow is returned when positive out-of-range integer, and convert to it's negative complement.
+    pub static ErrCastAsSignedOverflow: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrCastAsSignedOverflow));
+    /// ErrCastNegIntAsUnsigned is returned when a negative integer be casted to an unsigned int.
+    pub static ErrCastNegIntAsUnsigned: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrCastNegIntAsUnsigned));
+    /// ErrInvalidYear is returned when the input value is not a valid year.
+    pub static ErrInvalidYear: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrInvalidYear));
+    /// ErrInvalidWeekModeFormat is returned when the week mode is wrong.
+    pub static ErrInvalidWeekModeFormat: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrInvalidWeekModeFormat));
+    /// ErrWrongFieldSpec is returned when the column specifier incorrect.
+    pub static ErrWrongFieldSpec: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(mysql::ErrWrongFieldSpec));
+    /// ErrPartitionStatsMissing is returned when the partition-level stats is missing and the build global-level stats fails.
+    pub static ErrPartitionStatsMissing: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrPartitionStatsMissing));
+    /// ErrPartitionColumnStatsMissing is returned when the partition-level column stats is missing and the build global-level stats fails.
+    pub static ErrPartitionColumnStatsMissing: LazyLock<Error> =
+        LazyLock::new(|| ClassTypes.new_std(errno::ErrPartitionColumnStatsMissing));
+    /// ErrSyntax (`ClassTypes.NewStdErr(mysql.ErrParse, mysql.MySQLErrName[mysql.ErrSyntax])`).
+    pub static ErrSyntax: LazyLock<Error> = LazyLock::new(|| {
+        ClassTypes.new_std_err(
+            mysql::ErrParse,
+            mysql::MySQLErrName
+                .get(&mysql::ErrSyntax)
+                .expect("ErrSyntax has a message"),
+        )
+    });
+    /// ErrWrongValue2 (`ClassTypes.NewStdErr(mysql.ErrWrongValue, mysql.MySQLErrName[mysql.ErrWrongValue])`).
+    pub static ErrWrongValue2: LazyLock<Error> = LazyLock::new(|| {
+        ClassTypes.new_std_err(
+            mysql::ErrWrongValue,
+            mysql::MySQLErrName
+                .get(&mysql::ErrWrongValue)
+                .expect("ErrWrongValue has a message"),
+        )
+    });
+    /// ErrWrongValueForType (`ClassTypes.NewStdErr(mysql.ErrWrongValueForType, mysql.MySQLErrName[mysql.ErrWrongValueForType])`).
+    pub static ErrWrongValueForType: LazyLock<Error> = LazyLock::new(|| {
+        ClassTypes.new_std_err(
+            mysql::ErrWrongValueForType,
+            mysql::MySQLErrName
+                .get(&mysql::ErrWrongValueForType)
+                .expect("ErrWrongValueForType has a message"),
+        )
+    });
     /// ErrTimestampInDSTTransition is returned if the timestamp is in a Daylight Saving Time transition
     pub static ErrTimestampInDSTTransition: LazyLock<Error> =
         LazyLock::new(|| ClassExecutor.new_std(errno::ErrTimeStampInDSTTransition));
 }
 
 pub use go_errors::*;
-
-impl From<Error> for tidb_base::Error {
-    /// A MyDecimal (stub) error as the `tidb_base::Error` of the same class and code: what
-    /// Go's time code returns when it passes a MyDecimal error through (`ParseTimeFromDecimal`).
-    // glue: stub error -> tidb_base::Error, until D01.1 replaces the stub
-    fn from(e: Error) -> tidb_base::Error {
-        match e.code() {
-            1265 => ErrTruncated.clone(),
-            1690 => ErrOverflow.clone(),
-            1365 => tidb_base::dbterror::ClassTypes.new_std(tidb_base::mysql::ErrDivisionByZero),
-            8029 => tidb_base::dbterror::ClassTypes.new_std(tidb_base::errno::ErrBadNumber),
-            _ => tidb_base::Error::plain(e.to_string()),
-        }
-    }
-}
