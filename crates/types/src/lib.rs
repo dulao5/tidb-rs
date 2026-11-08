@@ -6,21 +6,29 @@
 
 #![forbid(unsafe_code)]
 
+pub mod binary_literal;
 pub mod collate;
+pub mod compare;
 pub mod context;
+pub mod convert;
 pub mod core_time;
+pub mod datum;
+pub mod enum_type;
 pub mod errors;
 pub mod etc;
 pub mod fsp;
 pub mod gostd;
-mod helper;
+pub mod helper;
 pub mod json;
 mod jsoniter;
 pub mod mydecimal;
 #[cfg(test)]
 mod mydecimal_test;
+pub mod overflow;
+pub mod set_type;
 pub mod stringutil;
 pub mod time;
+mod truncate;
 mod util_parser;
 pub mod vector;
 mod vector_functions;

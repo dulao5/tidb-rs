@@ -2010,31 +2010,7 @@ pub fn max_mysql_duration(fsp: isize) -> Duration {
     new_duration(TimeMaxHour, TimeMaxMinute, TimeMaxSecond, 0, fsp)
 }
 
-/// AddInt64 adds int64 a and b if no overflow, otherwise returns error.
-// Block D01.4, ported ahead (constitution §4.5: no out-edges).
-// go: pkg/types/overflow.go AddInt64 L1
-pub fn add_int64(a: i64, b: i64) -> Result<i64, Error> {
-    if (a > 0 && b > 0 && i64::MAX - a < b) || (a < 0 && b < 0 && i64::MIN - a > b) {
-        return Err(ErrOverflow
-            .gen_with_stack_by_args(vec![Arg::from("BIGINT"), Arg::from(format!("({a}, {b})"))]));
-    }
-
-    Ok(a + b)
-}
-
-/// SubInt64 subtracts int64 a with b and returns int64 if no overflow error.
-// Block D01.4, ported ahead (constitution §4.5: no out-edges).
-// go: pkg/types/overflow.go SubInt64 L1
-pub fn sub_int64(a: i64, b: i64) -> Result<i64, Error> {
-    if (a > 0 && b < 0 && i64::MAX - a < b.wrapping_neg())
-        || (a < 0 && b > 0 && i64::MIN - a > -b)
-        || (a == 0 && b == i64::MIN)
-    {
-        return Err(ErrOverflow
-            .gen_with_stack_by_args(vec![Arg::from("BIGINT"), Arg::from(format!("({a}, {b})"))]));
-    }
-    Ok(a - b)
-}
+pub use crate::overflow::{add_int64, sub_int64};
 
 impl Duration {
     /// Neg negative d, returns a duration value.
