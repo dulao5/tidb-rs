@@ -334,19 +334,20 @@ pub const ReqSubTypeAnalyzeCol: i64 = 10005;
 
 /// KeyRanges wrap some kinds of ranges.
 ///
-/// Go keeps `rowCountHints` and `ranges` as nil-able slices; nil and empty behave the same
-/// in every method except that `rowCountHints` distinguishes "no hints" (`None`).
+/// Go's `rowCountHints` is a nil-able slice of nil-able slices: only its length is read,
+/// and a partition's hints may be nil (passed as nil to `ForEachPartitionWithErr`'s
+/// callback), so the port keeps `Vec<Option<Vec<isize>>>`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeyRanges {
     ranges: Vec<Vec<KeyRange>>,
-    row_count_hints: Option<Vec<Vec<isize>>>,
+    row_count_hints: Vec<Option<Vec<isize>>>,
     is_partitioned: bool,
 }
 
 /// NewPartitionedKeyRanges constructs a new RequestRange for partitioned table.
 // go: NewPartitionedKeyRanges L1
 pub fn new_partitioned_key_ranges(ranges: Vec<Vec<KeyRange>>) -> KeyRanges {
-    new_partitioned_key_ranges_with_hints(ranges, None)
+    new_partitioned_key_ranges_with_hints(ranges, Vec::new())
 }
 
 /// NewNonPartitionedKeyRanges constructs a new RequestRange for a non-partitioned table.
@@ -360,7 +361,7 @@ pub fn new_non_partitioned_key_ranges(ranges: Vec<KeyRange>) -> KeyRanges {
 // go: NewPartitionedKeyRangesWithHints L1
 pub fn new_partitioned_key_ranges_with_hints(
     ranges: Vec<Vec<KeyRange>>,
-    hints: Option<Vec<Vec<isize>>>,
+    hints: Vec<Option<Vec<isize>>>,
 ) -> KeyRanges {
     KeyRanges {
         ranges,
@@ -378,11 +379,11 @@ pub fn new_non_paritioned_key_ranges_with_hint(
 ) -> KeyRanges {
     let mut rr = KeyRanges {
         ranges: vec![ranges],
-        row_count_hints: None,
+        row_count_hints: Vec::new(),
         is_partitioned: false,
     };
     if let Some(hints) = hints {
-        rr.row_count_hints = Some(vec![hints]);
+        rr.row_count_hints = vec![Some(hints)];
     }
     rr
 }
@@ -468,10 +469,8 @@ impl KeyRanges {
     ) -> Result<(), Error> {
         for i in 0..self.ranges.len() {
             let mut hints: Option<&[isize]> = None;
-            if let Some(h) = &self.row_count_hints
-                && h.len() > i
-            {
-                hints = Some(&h[i]);
+            if self.row_count_hints.len() > i {
+                hints = self.row_count_hints[i].as_deref();
             }
             the_func(&self.ranges[i], hints)?;
         }

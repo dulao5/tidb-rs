@@ -379,9 +379,18 @@ impl CommonHandle {
         if encoded.len() < 9 {
             encoded = make_copy(&encoded, 9);
         }
+        // Go appends the offsets one by one: the capacity is runtime.growslice's.
+        let mut cap = 0usize;
+        for len in 0..col_end_offsets.len() {
+            if len == cap {
+                cap = growslice_cap(len + 1, cap, 2);
+            }
+        }
+        let mut offsets = Vec::with_capacity(cap);
+        offsets.extend_from_slice(&col_end_offsets);
         CommonHandle {
             encoded,
-            col_end_offsets: Arc::new(col_end_offsets),
+            col_end_offsets: Arc::new(offsets),
         }
     }
 
