@@ -6,4 +6,4 @@
 4. `tests/govec_cgroup.rs` 回放（debug 和 release-checked），`GOVEC_CGROUP_FILES` 回放额外种子；`in_container_checks` 单元测试；tidb-base `tests/gostd_path_bytes.rs`。
 5. `Grown::Clear` 从 parent 开始。
 
-状态：全部完成，等待 amd64 向量（tracker CI）。
+状态：全部完成。
