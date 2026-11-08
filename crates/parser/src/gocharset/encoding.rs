@@ -407,10 +407,8 @@ fn begin_with_replacement_char(dst: &[u8]) -> bool {
 // go: pkg/parser/charset/encoding_base.go generateEncodingErr L1
 fn generate_encoding_err(name: &str, invalid_bytes: &[u8]) -> Error {
     let arg = sprintf("%X", &[Arg::Bytes(invalid_bytes.to_vec())]);
-    ErrInvalidCharacterString.fast_gen_by_args(vec![
-        Arg::from(name.to_owned()),
-        Arg::go_string(arg),
-    ])
+    ErrInvalidCharacterString
+        .fast_gen_by_args(vec![Arg::from(name.to_owned()), Arg::go_string(arg)])
 }
 
 /// HackSlice converts string to slice without copy.

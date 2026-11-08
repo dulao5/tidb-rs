@@ -19,10 +19,10 @@ use std::sync::LazyLock;
 use tidb_base::gostd::decode_rune;
 use tidb_base::{Error, errors, mysql, terror};
 
+use super::CharsetGBK;
 use super::encoding::{EncodingTp, EncodingTpGBK, go_strings_map};
 use super::gbk_decode_data::gbkDecode;
 use super::gbk_encode_data::gbkEncode;
-use super::CharsetGBK;
 
 /// ErrInvalidCharacterString returns when the string is invalid in the specific charset.
 // glue: pkg/parser/charset/encoding_base.go ErrInvalidCharacterString (package variable)
@@ -325,7 +325,10 @@ pub(crate) fn gbk_mb_len(bs: &[u8]) -> isize {
     if bs.len() < 2 {
         return 0;
     }
-    if 0x81 <= bs[0] && bs[0] <= 0xfe && ((0x40 <= bs[1] && bs[1] <= 0x7e) || (0x80 <= bs[1] && bs[1] <= 0xfe)) {
+    if 0x81 <= bs[0]
+        && bs[0] <= 0xfe
+        && ((0x40 <= bs[1] && bs[1] <= 0x7e) || (0x80 <= bs[1] && bs[1] <= 0xfe))
+    {
         return 2;
     }
     0
@@ -334,13 +337,25 @@ pub(crate) fn gbk_mb_len(bs: &[u8]) -> isize {
 /// ToUpper implements Encoding interface.
 // go: pkg/parser/charset/encoding_gbk.go encodingGBK.ToUpper L1
 pub(crate) fn gbk_to_upper(d: &[u8]) -> Vec<u8> {
-    go_strings_map(d, |r| if in_gbk_case(r) { r } else { tidb_base::gostd::to_upper_rune(r) })
+    go_strings_map(d, |r| {
+        if in_gbk_case(r) {
+            r
+        } else {
+            tidb_base::gostd::to_upper_rune(r)
+        }
+    })
 }
 
 /// ToLower implements Encoding interface.
 // go: pkg/parser/charset/encoding_gbk.go encodingGBK.ToLower L1
 pub(crate) fn gbk_to_lower(d: &[u8]) -> Vec<u8> {
-    go_strings_map(d, |r| if in_gbk_case(r) { r } else { tidb_base::gostd::to_lower_rune(r) })
+    go_strings_map(d, |r| {
+        if in_gbk_case(r) {
+            r
+        } else {
+            tidb_base::gostd::to_lower_rune(r)
+        }
+    })
 }
 
 /// GBKCase follows https://dev.mysql.com/worklog/task/?id=4583.
