@@ -17,7 +17,7 @@ scripts/playground.sh start            # status | stop | clean; -t tag -o offset
 scripts/sysbench-prepare.sh -t 1 -s 100000 -r 8
 
 # 3. tidb-rs next to it (auto-TLS is on by default)
-cargo run --release -p tidb-server -- -P 27001 --pd 127.0.0.1:25379    # --pd: once the SQL layer lands
+cargo run --release -p poc-server -- -P 27001 --pd 127.0.0.1:25379    # --pd: once the SQL layer lands
 
 # 4. Result comparison (exit 1 on any mismatch)
 cargo run --release -p tidb-ab -- -a 127.0.0.1:27000 -b 127.0.0.1:27001 sysbench -n 200

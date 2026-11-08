@@ -128,12 +128,12 @@ structure. The rules are in [CONSTITUTION.md](CONSTITUTION.md) (Chinese); the me
 ## Layout
 
 ```
-crates/server       tidb-server binary: MySQL protocol on 127.0.0.1:4001 over the SQL sessions
-                    of crates/session, reading the cluster behind `--pd` (`tidb-server --help`)
+crates/poc/server   tidb-server binary: MySQL protocol on 127.0.0.1:4001 over the SQL sessions
+                    of crates/poc/session, reading the cluster behind `--pd` (`tidb-server --help`)
 crates/mysql-protocol  MySQL wire-protocol server layer (see crates/mysql-protocol/README.md)
 crates/parser       SQL parser ported from TiDB's parser.y (see crates/parser/README.md)
 crates/query-smoke  smoke tests for the vendored TiKV query crates
-crates/kv           snapshot reads over tikv-client (our fork with coprocessor support): TSO,
+crates/poc/kv       snapshot reads over tikv-client (our fork with coprocessor support): TSO,
                     get/batch_get/scan, coprocessor requests, TiDB-like retry budgets
 crates/meta         TiDB schema meta (DBInfo/TableInfo JSON) read at a snapshot; InfoSchema and
                     the per-statement schema cache (docs/adr/0003-schema-loading.md)
@@ -141,11 +141,11 @@ crates/distsql      record key ranges, tipb DAG building (scan/partial agg/limit
                     row decoding; cluster tests vs Go TiDB (TIDB_RS_PD, TIDB_RS_TIDB_PORT)
 crates/sql          statement IR, name resolution, handle ranges, physical plans and result
                     column metadata (docs/adr/0004-prototype-sql-layer.md)
-crates/executor     root executors: point get / table reader sources, final and complete hash
+crates/poc/executor  root executors: point get / table reader sources, final and complete hash
                     aggregation, collation-aware sort, limit, datum -> protocol value conversion
-crates/session      SessionFactory/SessionHandler: autocommit reads at a fresh TSO, prepared
+crates/poc/session  SessionFactory/SessionHandler: autocommit reads at a fresh TSO, prepared
                     statements, SET/USE/constant SELECTs
-crates/domain       schema sync: etcd server registration, background schema reload, MDL
+crates/poc/domain   schema sync: etcd server registration, background schema reload, MDL
                     (docs/adr/0005-schema-sync.md)
 crates/metrics      Prometheus metrics with Go TiDB's names (docs/adr/0006-metrics.md)
 third_party/tikv    TiKV's tidb_query_* crates, vendored unmodified (see PROVENANCE.md)

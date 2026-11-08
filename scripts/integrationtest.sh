@@ -60,7 +60,7 @@ commit=$(git -C "$repo" rev-parse HEAD)
 dirty=$(git -C "$repo" status --porcelain --untracked-files=no | grep -q . && echo yes || echo no)
 
 echo "== build"
-(cd "$repo" && cargo build --release -p tidb-server -p tidb-ab)
+(cd "$repo" && cargo build --release -p poc-server -p tidb-ab)
 
 echo "== playground $tag (offset $offset)"
 "$repo/scripts/playground.sh" start -t "$tag" -o "$offset" -v "$version" \

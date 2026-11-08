@@ -18,9 +18,9 @@ use etcd_client::PutOptions;
 use etcd_client::Txn;
 use etcd_client::TxnOp;
 use etcd_client::WatchOptions;
+use poc_executor::ExecContext;
+use poc_kv::KvClient;
 use tidb_distsql::DagContext;
-use tidb_executor::ExecContext;
-use tidb_kv::KvClient;
 use tidb_meta::InfoSchema;
 use tidb_meta::MetaReader;
 use tidb_mysql_protocol::Value;
@@ -393,7 +393,7 @@ impl Inner {
             dag: self.cfg.dag.clone(),
             schema_version: schema.version(),
         };
-        let rows = tidb_executor::execute(&plan, &mut snapshot, &cx).await?;
+        let rows = poc_executor::execute(&plan, &mut snapshot, &cx).await?;
         let loaded = schema.version();
         let mut jobs = Vec::new();
         for row in rows {

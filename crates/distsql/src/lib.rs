@@ -3,7 +3,7 @@
 //! - [`ranges`]: record key ranges `t{table_id}_r{handle}` from handle ranges.
 //! - [`dag`]: tipb `DAGRequest` (table scan, partial aggregation, limit) as Go TiDB builds it.
 //! - [`decode`]: `SelectResponse` rows and point-get row values into datums.
-//! - [`select`] / [`point_get`]: run them at a [`tidb_kv::KvSnapshot`].
+//! - [`select`] / [`point_get`]: run them at a [`poc_kv::KvSnapshot`].
 
 #![forbid(unsafe_code)]
 
@@ -11,9 +11,9 @@ pub mod dag;
 pub mod decode;
 pub mod ranges;
 
-use tidb_kv::CopRequest;
-use tidb_kv::KvSnapshot;
-use tidb_kv::REQ_TYPE_DAG;
+use poc_kv::CopRequest;
+use poc_kv::KvSnapshot;
+use poc_kv::REQ_TYPE_DAG;
 use tidb_meta::model::ColumnInfo;
 use tidb_meta::model::TableInfo;
 pub use tidb_query_datatype::codec::datum::Datum;
@@ -34,7 +34,7 @@ pub use crate::ranges::row_key;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Kv(#[from] tidb_kv::Error),
+    Kv(#[from] poc_kv::Error),
     /// The table, column or plan shape is not supported by this node.
     #[error("unsupported: {0}")]
     Unsupported(String),
@@ -67,7 +67,7 @@ pub struct SelectOptions {
 pub async fn select(
     snapshot: &mut KvSnapshot,
     plan: &DagPlan,
-    ranges: Vec<tidb_kv::KeyRange>,
+    ranges: Vec<poc_kv::KeyRange>,
     options: SelectOptions,
 ) -> Result<SelectRows> {
     let desc = plan

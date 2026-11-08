@@ -1,5 +1,5 @@
 [package]
-name = "tidb-domain"
+name = "poc-domain"
 version = "0.0.0"
 description = "Go-TiDB-style schema sync: etcd registration, background schema reloads, the MDL protocol and the in-flight statement registry"
 edition.workspace = true
@@ -16,8 +16,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tidb-distsql = { workspace = true }
-tidb-executor = { workspace = true }
-tidb-kv = { workspace = true }
+poc-executor = { workspace = true }
+poc-kv = { workspace = true }
 tidb-meta = { workspace = true }
 tidb-mysql-protocol = { workspace = true }
 tidb-sql = { workspace = true }

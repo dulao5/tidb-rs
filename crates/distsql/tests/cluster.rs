@@ -12,6 +12,7 @@
 
 use std::process::Command;
 
+use poc_kv::KvClient;
 use tidb_distsql::AggFunc;
 use tidb_distsql::DagContext;
 use tidb_distsql::DagSpec;
@@ -21,7 +22,6 @@ use tidb_distsql::SelectOptions;
 use tidb_distsql::build_dag;
 use tidb_distsql::record_range;
 use tidb_distsql::record_ranges;
-use tidb_kv::KvClient;
 use tidb_meta::InfoSchema;
 use tidb_meta::MetaReader;
 use tidb_meta::SchemaCache;

@@ -14,7 +14,7 @@ collections = { workspace = true }
 protobuf = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tidb-kv = { workspace = true }
+poc-kv = { workspace = true }
 tidb-meta = { workspace = true }
 tidb-metrics = { workspace = true }
 tidb_query_datatype = { workspace = true }

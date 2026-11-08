@@ -10,12 +10,12 @@ pub mod convert;
 
 use std::cmp::Ordering;
 
+use poc_kv::KvSnapshot;
 use tidb_distsql::DagContext;
 use tidb_distsql::DagSpec;
 use tidb_distsql::Datum;
 use tidb_distsql::HandleRange;
 use tidb_distsql::SelectOptions;
-use tidb_kv::KvSnapshot;
 use tidb_mysql_protocol::SqlError;
 use tidb_mysql_protocol::Value;
 use tidb_sql::Plan;

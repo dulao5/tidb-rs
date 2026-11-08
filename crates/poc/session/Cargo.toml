@@ -1,5 +1,5 @@
 [package]
-name = "tidb-session"
+name = "poc-session"
 version = "0.0.0"
 description = "SQL sessions of the read-only node: SessionFactory/SessionHandler over the planner and executors"
 edition.workspace = true
@@ -10,9 +10,9 @@ publish.workspace = true
 [dependencies]
 futures = { workspace = true }
 tidb-distsql = { workspace = true }
-tidb-domain = { workspace = true }
-tidb-executor = { workspace = true }
-tidb-kv = { workspace = true }
+poc-domain = { workspace = true }
+poc-executor = { workspace = true }
+poc-kv = { workspace = true }
 tidb-meta = { workspace = true }
 tidb-metrics = { workspace = true }
 tidb-mysql-protocol = { workspace = true }

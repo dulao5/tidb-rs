@@ -11,8 +11,8 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::future::Shared;
 
-use tidb_kv::KvClient;
-use tidb_kv::KvSnapshot;
+use poc_kv::KvClient;
+use poc_kv::KvSnapshot;
 
 use crate::Result;
 use crate::model::DbInfo;

@@ -1,5 +1,5 @@
 [package]
-name = "tidb-executor"
+name = "poc-executor"
 version = "0.0.0"
 description = "Root executors of the read-only node: point get / table reader sources, final and complete hash aggregation, sort, limit and result conversion"
 edition.workspace = true
@@ -11,7 +11,7 @@ publish.workspace = true
 # N3 checkpoint.
 tidb-runtime = { workspace = true }
 tidb-distsql = { workspace = true }
-tidb-kv = { workspace = true }
+poc-kv = { workspace = true }
 tidb-meta = { workspace = true }
 tidb-mysql-protocol = { workspace = true }
 tidb-sql = { workspace = true }

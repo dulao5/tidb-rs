@@ -1,7 +1,7 @@
 //! Reads TiDB's meta structures at one snapshot (Go: `meta.Mutator` over a snapshot).
 
-use tidb_kv::KeyRange;
-use tidb_kv::KvSnapshot;
+use poc_kv::KeyRange;
+use poc_kv::KvSnapshot;
 
 use crate::Error;
 use crate::Result;

@@ -2,7 +2,7 @@
 //! [`SessionHandler`] on top of the planner (`tidb-sql`) and executors (`tidb-executor`).
 //!
 //! **Synced mode** (`--schema-sync`, ADR 0005): while the node is registered and in sync with
-//! the cluster (`tidb_domain::Registry::admit`), a SELECT uses the newest schema loaded in the
+//! the cluster (`poc_domain::Registry::admit`), a SELECT uses the newest schema loaded in the
 //! background and holds a metadata-lock entry until its response is written. Autocommit point
 //! gets by handle read at MaxTS without a TSO; other reads take a TSO but no schema check. If
 //! the node left sync before the read finished, the result is discarded and the statement
@@ -29,12 +29,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use poc_domain::Admission;
+use poc_domain::SchemaSync;
+use poc_domain::StmtGuard;
+use poc_executor::ExecContext;
+use poc_kv::KvClient;
 use tidb_distsql::DagContext;
-use tidb_domain::Admission;
-use tidb_domain::SchemaSync;
-use tidb_domain::StmtGuard;
-use tidb_executor::ExecContext;
-use tidb_kv::KvClient;
 use tidb_meta::InfoSchema;
 use tidb_meta::SchemaCache;
 use tidb_meta::SchemaCheck;
@@ -254,7 +254,7 @@ fn kv_error(e: impl std::fmt::Display) -> SqlError {
 
 /// A start timestamp requested from PD ahead of the point where it is needed (Go's
 /// `txnFuture`): the request is sent when this is created.
-struct TsFuture(tidb_kv::TsFuture);
+struct TsFuture(poc_kv::TsFuture);
 
 impl TsFuture {
     fn request(kv: &KvClient) -> TsFuture {
@@ -450,7 +450,7 @@ impl Session {
             }
         };
         count_expensive(&plan);
-        let rows = tidb_executor::finish(&plan, rows, self.shared.dag.new_collation_enabled)?;
+        let rows = poc_executor::finish(&plan, rows, self.shared.dag.new_collation_enabled)?;
         self.timer.mark(Phase::Finish);
         let mut columns = plan.columns;
         for c in &mut columns {
@@ -512,7 +512,7 @@ impl Session {
             dag: self.shared.dag.clone(),
             schema_version: schema.version(),
         };
-        let rows = tidb_executor::read_source(&plan, &mut snapshot, &cx).await;
+        let rows = poc_executor::read_source(&plan, &mut snapshot, &cx).await;
         self.timer.mark(Phase::KvRead);
         if !guard.results_valid() {
             return Ok(None);
@@ -555,7 +555,7 @@ impl Session {
         };
         let (check, rows) = futures::join!(
             self.shared.schema.check_at(&is, start_ts),
-            tidb_executor::read_source(&plan, &mut snapshot, &cx)
+            poc_executor::read_source(&plan, &mut snapshot, &cx)
         );
         self.timer.mark(Phase::KvRead);
         match check.map_err(kv_error)? {
@@ -588,7 +588,7 @@ impl Session {
             dag: self.shared.dag.clone(),
             schema_version: is.version(),
         };
-        let rows = tidb_executor::read_source(&plan, &mut snapshot, &cx).await?;
+        let rows = poc_executor::read_source(&plan, &mut snapshot, &cx).await?;
         self.timer.mark(Phase::KvRead);
         Ok((plan, rows))
     }
@@ -883,7 +883,7 @@ pub async fn detect_new_collation(kv: &KvClient, schema: &SchemaCache) -> Result
         dag: DagContext::select_utc(),
         schema_version: is.version(),
     };
-    let rows = tidb_executor::execute(&plan, &mut snapshot, &cx).await?;
+    let rows = poc_executor::execute(&plan, &mut snapshot, &cx).await?;
     Ok(rows.iter().any(|r| {
         r.first() == Some(&Value::from("new_collation_enabled"))
             && matches!(r.get(1), Some(Value::Bytes(b)) if b.eq_ignore_ascii_case(b"true"))

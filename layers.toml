@@ -184,12 +184,12 @@ blocks = [
 phases = ["P1", "P2", "P3", "P4", "P5", "EXC", "DONE"]
 
 # ---------------------------------------------------------------- legacy（PoC）
-# 被移植代码逐步替换；新代码不得依赖。下列包名与规划中的 crate 同名的，
-# 在建立同名新 crate 之前先改名为 poc-*（N0 §5）。
+# 被移植代码逐步替换；新代码不得依赖。与规划中的 crate 同名的 5 个已改名为 poc-*，
+# 移到 crates/poc/ 下（N0 §5）。
 [legacy]
 crates = [
-  "tidb-server", "tidb-mysql-protocol", "tidb-kv", "tidb-meta", "tidb-distsql", "tidb-sql",
-  "tidb-executor", "tidb-session", "tidb-domain", "tidb-query-smoke", "tidb-ab",
+  "poc-server", "tidb-mysql-protocol", "poc-kv", "tidb-meta", "tidb-distsql", "tidb-sql",
+  "poc-executor", "poc-session", "poc-domain", "tidb-query-smoke", "tidb-ab",
 ]
 
 # ---------------------------------------------------------------- third_party（ADR 0007）

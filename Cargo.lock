@@ -2519,6 +2519,89 @@ dependencies = [
 ]
 
 [[package]]
+name = "poc-domain"
+version = "0.0.0"
+dependencies = [
+ "etcd-client",
+ "futures",
+ "poc-executor",
+ "poc-kv",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tidb-distsql",
+ "tidb-meta",
+ "tidb-mysql-protocol",
+ "tidb-sql",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "poc-executor"
+version = "0.0.0"
+dependencies = [
+ "poc-kv",
+ "tidb-distsql",
+ "tidb-meta",
+ "tidb-mysql-protocol",
+ "tidb-runtime",
+ "tidb-sql",
+ "tidb_query_datatype",
+]
+
+[[package]]
+name = "poc-kv"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "thiserror 1.0.69",
+ "tikv-client",
+ "tokio",
+]
+
+[[package]]
+name = "poc-server"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "clap 4.6.7",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "poc-domain",
+ "poc-kv",
+ "poc-session",
+ "serde_json",
+ "tidb-distsql",
+ "tidb-meta",
+ "tidb-metrics",
+ "tidb-mysql-protocol",
+ "tidb-runtime",
+ "tikv-jemallocator",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "poc-session"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "poc-domain",
+ "poc-executor",
+ "poc-kv",
+ "tidb-distsql",
+ "tidb-meta",
+ "tidb-metrics",
+ "tidb-mysql-protocol",
+ "tidb-sql",
+ "tokio",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3610,59 +3693,16 @@ name = "tidb-distsql"
 version = "0.0.0"
 dependencies = [
  "collections",
+ "poc-kv",
  "protobuf",
  "serde_json",
  "thiserror 1.0.69",
- "tidb-kv",
  "tidb-meta",
  "tidb-metrics",
  "tidb-runtime",
  "tidb_query_datatype",
  "tipb",
  "tipb_helper",
- "tokio",
-]
-
-[[package]]
-name = "tidb-domain"
-version = "0.0.0"
-dependencies = [
- "etcd-client",
- "futures",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tidb-distsql",
- "tidb-executor",
- "tidb-kv",
- "tidb-meta",
- "tidb-mysql-protocol",
- "tidb-sql",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "tidb-executor"
-version = "0.0.0"
-dependencies = [
- "tidb-distsql",
- "tidb-kv",
- "tidb-meta",
- "tidb-mysql-protocol",
- "tidb-runtime",
- "tidb-sql",
- "tidb_query_datatype",
-]
-
-[[package]]
-name = "tidb-kv"
-version = "0.0.0"
-dependencies = [
- "futures",
- "thiserror 1.0.69",
- "tikv-client",
  "tokio",
 ]
 
@@ -3691,10 +3731,10 @@ version = "0.0.0"
 dependencies = [
  "codec",
  "futures",
+ "poc-kv",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "tidb-kv",
  "tokio",
 ]
 
@@ -3768,46 +3808,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "tidb-server"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "clap 4.6.7",
- "http-body-util",
- "hyper",
- "hyper-util",
- "serde_json",
- "tidb-distsql",
- "tidb-domain",
- "tidb-kv",
- "tidb-meta",
- "tidb-metrics",
- "tidb-mysql-protocol",
- "tidb-runtime",
- "tidb-session",
- "tikv-jemallocator",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tidb-session"
-version = "0.0.0"
-dependencies = [
- "futures",
- "tidb-distsql",
- "tidb-domain",
- "tidb-executor",
- "tidb-kv",
- "tidb-meta",
- "tidb-metrics",
- "tidb-mysql-protocol",
- "tidb-sql",
- "tokio",
 ]
 
 [[package]]
