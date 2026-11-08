@@ -3707,6 +3707,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-kv"
+version = "0.0.0"
+dependencies = [
+ "criterion 0.5.1",
+ "flate2",
+ "futures",
+ "log",
+ "parking_lot 0.12.5",
+ "rand 0.8.8",
+ "serde_json",
+ "tidb-base",
+ "tidb-memory",
+ "tidb-types",
+ "tokio",
+]
+
+[[package]]
 name = "tidb-memory"
 version = "0.0.0"
 dependencies = [

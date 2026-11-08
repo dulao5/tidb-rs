@@ -1,0 +1,40 @@
+[package]
+name = "tidb-kv"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/kv (block D07.0): key and handle types, key ranges, the storage interfaces of the read path, RunInNewTxn"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), errno, dbterror classes, config (txn scope), gostd runtime (slice growth).
+tidb-base = { workspace = true }
+# Datum (Handle.Data).
+tidb-types = { workspace = true }
+# memory.Tracker (Request.MemTracker, ClientSendOption.SessionMemTracker).
+tidb-memory = { workspace = true }
+# Boxed futures for the object-safe async storage interfaces (N3 3.1: KV access is async).
+futures = { workspace = true }
+# BackOff sleeps without blocking the runtime thread (M-BLOCK).
+tokio = { workspace = true }
+# math/rand in BackOff.
+rand = "0.8"
+# Go sync.Mutex / RWMutex (M-LOCK).
+parking_lot = "0.12"
+# logutil (ported crates log through the `log` facade; the binary bridges it to tracing).
+log = "0.4"
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+# Per-row cost of the async Iterator::next (tasks T9).
+criterion = "0.5"
+
+[[bench]]
+name = "iter"
+harness = false
+
+[lints]
+workspace = true
