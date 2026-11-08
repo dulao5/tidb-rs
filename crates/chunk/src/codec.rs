@@ -126,7 +126,8 @@ impl Codec {
         // decode nullBitmap.
         if null_count > 0 {
             let num_null_bitmap_bytes = col.length.div_ceil(8);
-            col.null_bitmap = GoSlice::shared(buffer.slice(pos..pos + num_null_bitmap_bytes));
+            col.null_bitmap
+                .set_shared(buffer, pos, pos + num_null_bitmap_bytes);
             pos += num_null_bitmap_bytes;
         } else {
             self.set_all_not_null(col);
@@ -146,7 +147,7 @@ impl Codec {
 
         // decode data.
         let n = num_data_bytes as usize;
-        col.data = GoSlice::shared(buffer.slice(pos..pos + n));
+        col.data.set_shared(buffer, pos, pos + n);
         // The column reference the data of the grpc response, the memory of the grpc message
         // cannot be GCed if we reuse this column (Go sets avoidReusing; no pool here, M-POOL).
         pos + n
@@ -156,6 +157,11 @@ impl Codec {
     fn set_all_not_null(&self, col: &mut Column) {
         let num_null_bitmap_bytes = col.length.div_ceil(8);
         col.null_bitmap.reslice(0);
+        if num_null_bitmap_bytes <= col.null_bitmap.cap() {
+            // Within the capacity Go's piecewise appends never grow: same bytes, one fill.
+            col.null_bitmap.append_fill(num_null_bitmap_bytes, 0xFF);
+            return;
+        }
         let mut i = 0;
         while i < num_null_bitmap_bytes {
             let num_append_bytes = (num_null_bitmap_bytes - i).min(allNotNullBitmap.len());

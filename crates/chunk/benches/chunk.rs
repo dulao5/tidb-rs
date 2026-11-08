@@ -107,13 +107,15 @@ fn bench(c: &mut Criterion) {
             b.iter(|| black_box(codec.decode(buffer.clone())))
         });
     }
-    // BenchmarkDecodeToChunk: 4 BIGINT columns of 1024 rows.
+    // BenchmarkDecodeToChunk: 4 BIGINT columns of 1024 rows. Go builds the columns with a
+    // zeroed null bitmap and zeroed data, i.e. 1024 NULLs per column (nullCount > 0, so the
+    // decoder slices the bitmap from the buffer); 1024 AppendNull give the same encoding.
     {
         let fts = vec![ft(mysql::TypeLonglong); 4];
         let mut chk = chunk::new_chunk_with_capacity(&fts, 1024);
-        for i in 0..1024 {
+        for _ in 0..1024 {
             for col in 0..4 {
-                chk.append_int64(col, i);
+                chk.append_null(col);
             }
         }
         let codec = codec::new_codec(fts);
@@ -240,11 +242,13 @@ fn bench(c: &mut Criterion) {
                 }
             })
             .collect();
-        let mut i = 0;
-        c.bench_function("ListGetRow", |b| {
+        // Go walks `ptrs` sequentially (the 10000 pointers repeated) and reports the time per
+        // GetRow. One criterion iteration walks all 10000; divide the time by 10000.
+        c.bench_function("ListGetRow (x10000)", |b| {
             b.iter(|| {
-                i = (i + 1) % ptrs.len();
-                black_box(l.get_row(ptrs[i]))
+                for &p in &ptrs {
+                    black_box(l.get_row(p));
+                }
             })
         });
     }

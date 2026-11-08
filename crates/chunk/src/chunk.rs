@@ -79,7 +79,19 @@ pub(crate) fn col_mut(a: &mut Arc<Column>) -> &mut Column {
         "write to a chunk column shared by {} owners (N5a 3.2)",
         Arc::count(a)
     );
-    Arc::make_mut(a)
+    // Fast path inline (one atomic load); the copy of a shared column stays out of line.
+    if !Arc::is_unique(a) {
+        unshare_col(a);
+    }
+    Arc::get_mut(a).expect("unique after unshare_col")
+}
+
+/// Copy on write of a column shared with another chunk (release builds; N5a 3.2).
+// glue: N5a 3.2 Arc::make_mut slow path
+#[cold]
+#[inline(never)]
+fn unshare_col(a: &mut Arc<Column>) {
+    Arc::make_mut(a);
 }
 
 /// NewEmptyChunk creates an empty chunk

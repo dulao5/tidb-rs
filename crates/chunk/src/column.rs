@@ -1234,7 +1234,7 @@ impl Column {
             self.null_bitmap.cap(),
             self.offsets.cap(),
             self.data.cap(),
-            self.elem_buf.map_or(0, |e| e.cap),
+            self.elem_buf.as_ref().map_or(0, |e| e.cap),
         )
     }
 }

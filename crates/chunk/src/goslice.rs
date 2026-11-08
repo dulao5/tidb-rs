@@ -189,14 +189,38 @@ enum Store {
 
 /// A Go slice of `E`-byte elements (`[]byte` for `E = 1`, `[]int64` stored little-endian
 /// for `E = 8`).
-#[derive(Clone)]
+/// A Go slice of `E`-byte elements (`[]byte` for `E = 1`, `[]int64` stored little-endian
+/// for `E = 8`).
+///
+/// `ptr` caches the address of element 0 (`store` plus `start`), so reads and writes within
+/// the capacity do not match on `store` (N5a §5: the accessors are on the per-cell path).
+/// Invariant: `ptr` is valid for `cap * E` initialised bytes; it is recomputed by
+/// [`GoSlice::sync`] whenever `store` or `start` changes. The bytes of an owned buffer are
+/// only reached through `ptr` (never by indexing the vector), so the pointer stays valid
+/// under the aliasing rules until the vector is replaced.
 pub(crate) struct GoSlice<const E: usize> {
     store: Store,
+    ptr: NonNull<u8>,
     /// Byte offset of element 0 in an owned buffer (Go: a slice that does not start at the
     /// beginning of its array, after `s = s[k:]`).
     start: usize,
     len: usize,
     cap: usize,
+}
+
+// SAFETY: `ptr` only points into `store` (an owned vector or a `Bytes`, both Send + Sync),
+// and it is written or read only through `&mut self` / `&self` like the store itself.
+#[allow(unsafe_code)]
+unsafe impl<const E: usize> Send for GoSlice<E> {}
+// SAFETY: see `Send`: `&GoSlice` only reads through `ptr`.
+#[allow(unsafe_code)]
+unsafe impl<const E: usize> Sync for GoSlice<E> {}
+
+impl<const E: usize> Clone for GoSlice<E> {
+    // glue: Clone (the cached pointer must point into the clone's own buffer)
+    fn clone(&self) -> Self {
+        GoSlice::from_store(self.store.clone(), self.start, self.len, self.cap)
+    }
 }
 
 impl<const E: usize> fmt::Debug for GoSlice<E> {
@@ -211,15 +235,46 @@ impl<const E: usize> fmt::Debug for GoSlice<E> {
 }
 
 impl<const E: usize> GoSlice<E> {
+    /// A slice over `store` with element 0 at byte `start` (`ptr` computed).
+    // glue: constructor maintaining the cached pointer
+    #[inline]
+    fn from_store(mut store: Store, start: usize, len: usize, cap: usize) -> Self {
+        let ptr = Self::elem0(&mut store, start);
+        GoSlice {
+            store,
+            ptr,
+            start,
+            len,
+            cap,
+        }
+    }
+
+    /// Recomputes `ptr` after `store` or `start` changed.
+    // glue: cached element pointer
+    #[inline]
+    fn sync(&mut self) {
+        self.ptr = Self::elem0(&mut self.store, self.start);
+    }
+
+    /// The address of element 0 of `store` with element 0 at byte `start`.
+    // glue: cached element pointer
+    #[inline]
+    fn elem0(store: &mut Store, start: usize) -> NonNull<u8> {
+        match store {
+            // `as_mut_ptr` does not materialise a reference to the elements, and
+            // `start <= v.len()`, so the pointer is in bounds (or one past the end when the
+            // capacity is 0). A vector's pointer is never null.
+            Store::Owned(v) => {
+                NonNull::new(v.as_mut_ptr().wrapping_add(start)).unwrap_or(NonNull::dangling())
+            }
+            Store::Shared(b) => NonNull::from(b.as_ref()).cast::<u8>(),
+        }
+    }
+
     /// A nil slice.
     // glue: Go nil slice
     pub(crate) fn nil(alloc: ColAlloc) -> Self {
-        GoSlice {
-            store: Store::Owned(AVec::new_in(alloc)),
-            start: 0,
-            len: 0,
-            cap: 0,
-        }
+        Self::from_store(Store::Owned(AVec::new_in(alloc)), 0, 0, 0)
     }
 
     /// `make([]T, len, cap)`: zeroed, capacity exactly `cap`.
@@ -228,12 +283,7 @@ impl<const E: usize> GoSlice<E> {
         debug_assert!(len <= cap);
         let mut v = AVec::with_capacity_in(cap * E, alloc);
         v.resize(cap * E, 0);
-        GoSlice {
-            store: Store::Owned(v),
-            start: 0,
-            len,
-            cap,
-        }
+        Self::from_store(Store::Owned(v), 0, len, cap)
     }
 
     /// A slice of a shared buffer, with capacity equal to its length (Go's three-index
@@ -241,12 +291,29 @@ impl<const E: usize> GoSlice<E> {
     // glue: Go three-index slice of a shared buffer (SharedBytes, N5a 3.4)
     pub(crate) fn shared(b: Bytes) -> Self {
         let n = b.len() / E;
+        // Computed before the struct is built (no store-then-reload of the new slice).
+        let ptr = NonNull::from(b.as_ref()).cast::<u8>();
         GoSlice {
             store: Store::Shared(b),
+            ptr,
             start: 0,
             len: n,
             cap: n,
         }
+    }
+
+    /// `s = buf[from:to:to]` in place: the same as `*self = GoSlice::shared(buf.slice(..))`,
+    /// written field by field (the decode path; no temporary slice moved into place).
+    // glue: Go three-index slice of a shared buffer (SharedBytes, N5a 3.4)
+    #[inline]
+    pub(crate) fn set_shared(&mut self, buf: &Bytes, from: usize, to: usize) {
+        let b = buf.slice(from..to);
+        let n = b.len() / E;
+        self.ptr = NonNull::from(b.as_ref()).cast::<u8>();
+        self.start = 0;
+        self.len = n;
+        self.cap = n;
+        self.store = Store::Shared(b);
     }
 
     /// `len(s)`.
@@ -271,7 +338,7 @@ impl<const E: usize> GoSlice<E> {
     }
 
     /// The allocator of an owned buffer (`Global` for a shared one).
-    // glue: N5a 3.7
+    // glue: N5a 3.2
     pub(crate) fn alloc(&self) -> ColAlloc {
         match &self.store {
             Store::Owned(v) => v.allocator().clone(),
@@ -283,56 +350,55 @@ impl<const E: usize> GoSlice<E> {
     // glue: Go slice read access
     #[inline]
     pub(crate) fn bytes(&self) -> &[u8] {
-        match &self.store {
-            Store::Owned(v) => &v[self.start..self.start + self.len * E],
-            Store::Shared(b) => &b[..self.len * E],
-        }
+        &self.capb()[..self.len * E]
     }
 
     /// The elements as mutable bytes (copies a shared buffer first).
     // glue: Go slice write access (copy on write of a shared buffer, N5a 3.2)
     #[inline]
     pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
-        let (start, n) = (self.start, self.len * E);
-        &mut self.owned()[start..start + n]
+        let n = self.len * E;
+        &mut self.capb_mut()[..n]
     }
 
     /// Byte range `[from, to)` of the capacity, writable.
     // glue: Go in-place write within the capacity
     #[inline]
     fn owned_range(&mut self, from: usize, to: usize) -> &mut [u8] {
-        let start = self.start;
-        &mut self.owned()[start + from..start + to]
+        &mut self.capb_mut()[from..to]
     }
 
     /// The whole capacity as mutable bytes (copies a shared buffer first).
     // glue: Go slice expression s[a:b] with b <= cap(s), written
     #[inline]
     pub(crate) fn capb_mut(&mut self) -> &mut [u8] {
-        let n = self.cap * E;
-        self.owned_range(0, n)
+        self.make_owned();
+        // SAFETY: `ptr` is valid for `cap * E` initialised bytes of the owned vector (struct
+        // invariant), which `&mut self` borrows exclusively.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.cap * E)
+        }
     }
 
     /// The whole capacity as bytes (Go's slice expressions may reach up to the capacity).
     // glue: Go slice expression s[a:b] with b <= cap(s)
     #[inline]
     pub(crate) fn capb(&self) -> &[u8] {
-        match &self.store {
-            Store::Owned(v) => &v[self.start..self.start + self.cap * E],
-            Store::Shared(b) => &b[..self.cap * E],
+        // SAFETY: `ptr` is valid for `cap * E` initialised bytes (struct invariant), borrowed
+        // with `&self`.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::slice::from_raw_parts(self.ptr.as_ptr(), self.cap * E)
         }
     }
 
-    /// The owned vector, copying a shared buffer (its whole capacity) first.
+    /// Makes the buffer owned, copying a shared buffer (its whole capacity) first.
     // glue: copy on write of a shared buffer (N5a 3.2)
     #[inline(always)]
-    fn owned(&mut self) -> &mut AVec<u8, ColAlloc> {
+    fn make_owned(&mut self) {
         if !matches!(self.store, Store::Owned(_)) {
             self.unshare();
-        }
-        match &mut self.store {
-            Store::Owned(v) => v,
-            Store::Shared(_) => unreachable!(),
         }
     }
 
@@ -345,6 +411,7 @@ impl<const E: usize> GoSlice<E> {
             v.extend_from_slice(&b[..self.cap * E]);
             self.store = Store::Owned(v);
             self.start = 0;
+            self.sync();
         }
     }
 
@@ -374,6 +441,7 @@ impl<const E: usize> GoSlice<E> {
         }
         self.len -= k;
         self.cap -= k;
+        self.sync();
     }
 
     /// Reallocates for at least `new_len` elements with Go's growth rule, keeping the
@@ -389,25 +457,37 @@ impl<const E: usize> GoSlice<E> {
         self.store = Store::Owned(v);
         self.start = 0;
         self.cap = newcap;
+        self.sync();
     }
 
     /// `s = append(s, src...)` (`src.len()` a multiple of `E`).
     // glue: Go append
     #[inline(always)]
     pub(crate) fn append(&mut self, src: &[u8]) {
-        let new_len = self.len + src.len() / E;
-        if new_len <= self.cap
-            && let Store::Owned(v) = &mut self.store
-        {
-            let at = self.start + self.len * E;
-            // Small fixed sizes (one element of a fixed-length column) without a memcpy call.
-            match src.len() {
-                8 => v[at..at + 8].copy_from_slice(&<[u8; 8]>::try_from(src).unwrap()),
-                4 => v[at..at + 4].copy_from_slice(&<[u8; 4]>::try_from(src).unwrap()),
-                1 => v[at] = src[0],
-                n => v[at..at + n].copy_from_slice(src),
+        let n = src.len() / E;
+        if n <= self.cap - self.len && matches!(self.store, Store::Owned(_)) {
+            let at = self.len * E;
+            // SAFETY: `len + n <= cap`, so `[at, at + src.len())` lies within the `cap * E`
+            // initialised bytes of the owned vector behind `ptr` (struct invariant), which
+            // `&mut self` borrows exclusively; `src` cannot overlap it (it is a shared borrow
+            // that is live at the same time as `&mut self`).
+            #[allow(unsafe_code)]
+            unsafe {
+                let dst = self.ptr.as_ptr().add(at);
+                // Small fixed sizes (one element of a fixed-length column) without a memcpy
+                // call.
+                match src.len() {
+                    8 => dst
+                        .cast::<[u8; 8]>()
+                        .write_unaligned(*src.as_ptr().cast::<[u8; 8]>()),
+                    4 => dst
+                        .cast::<[u8; 4]>()
+                        .write_unaligned(*src.as_ptr().cast::<[u8; 4]>()),
+                    1 => *dst = src[0],
+                    n => std::ptr::copy_nonoverlapping(src.as_ptr(), dst, n),
+                }
             }
-            self.len = new_len;
+            self.len += n;
             return;
         }
         self.append_slow(src);
@@ -446,10 +526,7 @@ impl<const E: usize> GoSlice<E> {
             "index out of range [{i}] with length {}",
             self.len
         );
-        match &self.store {
-            Store::Owned(v) => v[self.start + i],
-            Store::Shared(b) => b[i],
-        }
+        self.capb()[i]
     }
 
     /// `&mut s[i]` (`E = 1`).
@@ -461,8 +538,7 @@ impl<const E: usize> GoSlice<E> {
             "index out of range [{i}] with length {}",
             self.len
         );
-        let start = self.start;
-        &mut self.owned()[start + i]
+        &mut self.capb_mut()[i]
     }
 }
 
