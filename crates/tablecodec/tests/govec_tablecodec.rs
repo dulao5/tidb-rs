@@ -26,8 +26,8 @@ use tidb_kv::kv::{new_non_partitioned_key_ranges, new_partitioned_key_ranges};
 use tidb_model::{ColumnInfo, IndexColumn, TableInfo};
 use tidb_parser::types::FieldType;
 use tidb_tablecodec as tc;
-use tidb_tablecodec::rowcodec::{self, ColInfo, ColData, RowData};
 use tidb_tablecodec::rowcodec::row::Row;
+use tidb_tablecodec::rowcodec::{self, ColData, ColInfo, RowData};
 use tidb_tablecodec::rowindexcodec::get_key_kind;
 use tidb_types::MyDecimal;
 use tidb_types::binary_literal::BinaryLiteral;
@@ -245,53 +245,6 @@ fn datums_arg(v: &Value) -> Vec<Datum> {
     v.as_array().unwrap().iter().map(datum_in).collect()
 }
 
-fn fts_arg(v: &Value) -> Vec<FieldType> {
-    v.as_array().unwrap().iter().map(ft_in).collect()
-}
-
-fn chunk_arg(a: &[Value], i: usize) -> (Vec<FieldType>, tidb_chunk::Chunk) {
-    let fts = fts_arg(&a[i]);
-    let rows = a[i + 1].as_array().unwrap();
-    let mut chk = new_chunk_with_capacity(&fts, rows.len());
-    for r in rows {
-        for (c, q) in r.as_array().unwrap().iter().enumerate() {
-            chk.append_datum(c, &datum_in(q));
-        }
-    }
-    (fts, chk)
-}
-
-fn bools_opt(v: &Value) -> Option<Vec<bool>> {
-    if v.is_null() {
-        None
-    } else {
-        Some(
-            v.as_array()
-                .unwrap()
-                .iter()
-                .map(|x| x.as_bool().unwrap())
-                .collect(),
-        )
-    }
-}
-
-fn usizes(v: &Value) -> Vec<usize> {
-    v.as_array()
-        .unwrap()
-        .iter()
-        .map(|x| x.as_u64().unwrap() as usize)
-        .collect()
-}
-
-/// Go `var s []T` marshals as `null` when nothing was appended.
-fn list_or_null(v: Vec<Value>) -> Value {
-    if v.is_empty() {
-        Value::Null
-    } else {
-        Value::Array(v)
-    }
-}
-
 /// `codecTry`: a panic is `{"panic": true}`.
 fn try_(f: impl FnOnce() -> Value) -> Value {
     match catch_unwind(AssertUnwindSafe(f)) {
@@ -299,7 +252,6 @@ fn try_(f: impl FnOnce() -> Value) -> Value {
         Err(_) => json!({ "panic": true }),
     }
 }
-
 
 // ---------------------------------------------------------------- domain values
 
@@ -357,7 +309,11 @@ fn handle_of(v: &Value) -> Handle {
 }
 
 fn handle_opt(v: &Value) -> Option<Handle> {
-    if v.is_null() { None } else { Some(handle_of(v)) }
+    if v.is_null() {
+        None
+    } else {
+        Some(handle_of(v))
+    }
 }
 
 fn col_infos(v: &Value) -> Vec<ColInfo> {
@@ -385,7 +341,11 @@ fn cols_map(v: &Value) -> HashMap<i64, Arc<FieldType>> {
 fn map_out(m: &HashMap<i64, Datum>) -> Value {
     let mut ids: Vec<&i64> = m.keys().collect();
     ids.sort();
-    Value::Array(ids.into_iter().map(|id| json!([id, datum_out(&m[id])])).collect())
+    Value::Array(
+        ids.into_iter()
+            .map(|id| json!([id, datum_out(&m[id])]))
+            .collect(),
+    )
 }
 
 fn bytes_out(bs: &[impl AsRef<[u8]>]) -> Value {
@@ -393,7 +353,11 @@ fn bytes_out(bs: &[impl AsRef<[u8]>]) -> Value {
         bs.iter()
             .map(|b| {
                 let b = b.as_ref();
-                if b.is_empty() { Value::Null } else { json!(hex(b)) }
+                if b.is_empty() {
+                    Value::Null
+                } else {
+                    json!(hex(b))
+                }
             })
             .collect(),
     )
@@ -401,7 +365,11 @@ fn bytes_out(bs: &[impl AsRef<[u8]>]) -> Value {
 
 /// Go `[][]byte(nil)` marshals as null.
 fn bytes_out_or_null(bs: &[impl AsRef<[u8]>]) -> Value {
-    if bs.is_empty() { Value::Null } else { bytes_out(bs) }
+    if bs.is_empty() {
+        Value::Null
+    } else {
+        bytes_out(bs)
+    }
 }
 
 fn strs_out(ss: &[Vec<u8>]) -> Value {
@@ -461,7 +429,11 @@ fn exec(op: &str, a: &[Value]) -> Got {
             });
             if let Some(h) = &h {
                 o["rowh"] = json!(hex(&tc::encode_row_key_with_handle(tid, h).0));
-                o["rec"] = json!(hex(&tc::encode_record_key(&tc::gen_table_record_prefix(tid).0, h).0));
+                o["rec"] = json!(hex(&tc::encode_record_key(
+                    &tc::gen_table_record_prefix(tid).0,
+                    h
+                )
+                .0));
             }
             ok(o)
         }
@@ -469,40 +441,72 @@ fn exec(op: &str, a: &[Value]) -> Got {
             let k = hexv(&a[0]);
             let k = &k[..];
             let mut o = serde_json::Map::new();
-            o.insert("rec".into(), try_(|| match tc::decode_record_key(k) {
-                Ok((tid, h)) => json!({ "tid": tid, "h": handle_out(&h), "err": null }),
-                Err(e) => json!({ "tid": 0, "h": null, "err": gs(&e.error()) }),
-            }));
-            o.insert("row".into(), try_(|| match tc::decode_row_key(k) {
-                Ok(h) => json!({ "h": handle_out(&h) }),
-                Err(e) => json!({ "err": gs(&e.error()) }),
-            }));
-            o.insert("head".into(), try_(|| {
-                let (tid, iid, rec, err) = tc::decode_key_head(k);
-                json!({ "tid": tid, "iid": iid, "rec": rec, "err": err_msg(&err) })
-            }));
-            o.insert("idx".into(), try_(|| match tc::decode_index_key(k) {
-                Ok((tid, iid, vals)) => json!({ "tid": tid, "iid": iid, "vals": strs_out(&vals), "err": null }),
-                Err(e) => json!({ "tid": 0, "iid": 0, "vals": null, "err": gs(&e.error()) }),
-            }));
-            o.insert("vals".into(), try_(|| match tc::decode_values_bytes_to_strings(k) {
-                Ok(vals) => json!({ "vals": strs_out(&vals), "err": null }),
-                Err(e) => json!({ "vals": null, "err": gs(&e.error()) }),
-            }));
+            o.insert(
+                "rec".into(),
+                try_(|| match tc::decode_record_key(k) {
+                    Ok((tid, h)) => json!({ "tid": tid, "h": handle_out(&h), "err": null }),
+                    Err(e) => json!({ "tid": 0, "h": null, "err": gs(&e.error()) }),
+                }),
+            );
+            o.insert(
+                "row".into(),
+                try_(|| match tc::decode_row_key(k) {
+                    Ok(h) => json!({ "h": handle_out(&h) }),
+                    Err(e) => json!({ "err": gs(&e.error()) }),
+                }),
+            );
+            o.insert(
+                "head".into(),
+                try_(|| {
+                    let (tid, iid, rec, err) = tc::decode_key_head(k);
+                    json!({ "tid": tid, "iid": iid, "rec": rec, "err": err_msg(&err) })
+                }),
+            );
+            o.insert(
+                "idx".into(),
+                try_(|| match tc::decode_index_key(k) {
+                    Ok((tid, iid, vals)) => {
+                        json!({ "tid": tid, "iid": iid, "vals": strs_out(&vals), "err": null })
+                    }
+                    Err(e) => json!({ "tid": 0, "iid": 0, "vals": null, "err": gs(&e.error()) }),
+                }),
+            );
+            o.insert(
+                "vals".into(),
+                try_(|| match tc::decode_values_bytes_to_strings(k) {
+                    Ok(vals) => json!({ "vals": strs_out(&vals), "err": null }),
+                    Err(e) => json!({ "vals": null, "err": gs(&e.error()) }),
+                }),
+            );
             o.insert("tid".into(), try_(|| json!(tc::decode_table_id(k))));
             o.insert("tid_func".into(), try_(|| json!((tc::init())(k))));
-            o.insert("meta".into(), try_(|| match tc::decode_meta_key(k) {
-                Ok((key, field)) => json!({ "key": hex(&key), "field": hex(&field) }),
-                Err(e) => json!({ "err": gs(&e.error()) }),
-            }));
-            o.insert("is".into(), try_(|| json!([tc::is_record_key(k), tc::is_index_key(k), tc::is_table_key(k)])));
+            o.insert(
+                "meta".into(),
+                try_(|| match tc::decode_meta_key(k) {
+                    Ok((key, field)) => json!({ "key": hex(&key), "field": hex(&field) }),
+                    Err(e) => json!({ "err": gs(&e.error()) }),
+                }),
+            );
+            o.insert(
+                "is".into(),
+                try_(|| {
+                    json!([
+                        tc::is_record_key(k),
+                        tc::is_index_key(k),
+                        tc::is_table_key(k)
+                    ])
+                }),
+            );
             o.insert("kind".into(), json!(get_key_kind(k) as u8));
             o.insert("temp".into(), try_(|| json!(tc::is_temp_index_key(k))));
-            o.insert("to_temp".into(), try_(|| {
-                let mut c = k.to_vec();
-                tc::index_key2_temp_index_key(&mut c);
-                json!(hex(&c))
-            }));
+            o.insert(
+                "to_temp".into(),
+                try_(|| {
+                    let mut c = k.to_vec();
+                    tc::index_key2_temp_index_key(&mut c);
+                    json!(hex(&c))
+                }),
+            );
             ok(Value::Object(o))
         }
         "encode_value" => {
@@ -549,7 +553,10 @@ fn exec(op: &str, a: &[Value]) -> Got {
             let mut rd = RowData::default();
             let mut encs = vec![];
             for i in 0..infos.len() {
-                let cd = ColData { column_info: &infos[i], datum: &ds[i] };
+                let cd = ColData {
+                    column_info: &infos[i],
+                    datum: &ds[i],
+                };
                 rd.cols.push(cd);
                 encs.push(try_(|| match cd.encode(loc.as_ref(), Vec::new()) {
                     Ok(b) => json!({ "b": hex(&b), "err": null }),
@@ -574,11 +581,20 @@ fn exec(op: &str, a: &[Value]) -> Got {
         "index_raw" => {
             let k = hexv(&a[0]);
             let v = hexv(&a[1]);
-            ok(index_decode(&k, &v, a[2].as_u64().unwrap() as usize, &col_infos(&a[3]), a[4].as_bool().unwrap()))
+            ok(index_decode(
+                &k,
+                &v,
+                a[2].as_u64().unwrap() as usize,
+                &col_infos(&a[3]),
+                a[4].as_bool().unwrap(),
+            ))
         }
         "truncate" => {
             let mut d = datum_in(&a[0]);
-            let idx_col = IndexColumn { length: a[1].as_i64().unwrap() as isize, ..IndexColumn::default() };
+            let idx_col = IndexColumn {
+                length: a[1].as_i64().unwrap() as isize,
+                ..IndexColumn::default()
+            };
             let mut col = ColumnInfo::default();
             col.field_type.set_charset(a[2].as_str().unwrap());
             col.field_type.set_collate(a[3].as_str().unwrap());
@@ -609,7 +625,11 @@ fn exec(op: &str, a: &[Value]) -> Got {
                 new_non_partitioned_key_ranges(parts.into_iter().flatten().collect())
             };
             let (tids, err) = tc::verify_table_id_for_ranges(&krs);
-            let tids = if tids.is_empty() { Value::Array(vec![]) } else { json!(tids) };
+            let tids = if tids.is_empty() {
+                Value::Array(vec![])
+            } else {
+                json!(tids)
+            };
             (json!({ "tids": tids }), err.err())
         }
         _ => panic!("unknown op {op}"),
@@ -621,89 +641,138 @@ fn row(a: &[Value]) -> Value {
     let cols = cols_map(&a[1]);
     let loc = loc_opt(&a[2]);
     let h = handle_opt(&a[3]);
-    let hids: Vec<i64> = a[4].as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect();
+    let hids: Vec<i64> = a[4]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_i64().unwrap())
+        .collect();
     let infos = col_infos(&a[5]);
     let commit_ts = a[6].as_u64().unwrap();
     let mut o = serde_json::Map::new();
-    o.insert("map".into(), map_fail(try_(|| match tc::decode_row_to_datum_map(&b, &cols, loc.as_ref()) {
-        Ok(m) => json!({ "m": map_out(&m), "err": null }),
-        Err(e) => json!({ "m": null, "err": gs(&e.error()) }),
-    })));
-    o.insert("hmap".into(), try_(|| {
-        let (m, err) = tc::decode_handle_to_datum_map(h.as_ref(), &hids, &cols, loc.as_ref(), None);
-        // Go returns a nil map when there is no handle.
-        let mo = if h.is_none() || hids.is_empty() { Value::Null } else { map_out(&m) };
-        json!({ "m": mo, "err": err_msg(&err) })
-    }));
+    o.insert(
+        "map".into(),
+        map_fail(try_(|| {
+            match tc::decode_row_to_datum_map(&b, &cols, loc.as_ref()) {
+                Ok(m) => json!({ "m": map_out(&m), "err": null }),
+                Err(e) => json!({ "m": null, "err": gs(&e.error()) }),
+            }
+        })),
+    );
+    o.insert(
+        "hmap".into(),
+        try_(|| {
+            let (m, err) =
+                tc::decode_handle_to_datum_map(h.as_ref(), &hids, &cols, loc.as_ref(), None);
+            // Go returns a nil map when there is no handle.
+            let mo = if h.is_none() || hids.is_empty() {
+                Value::Null
+            } else {
+                map_out(&m)
+            };
+            json!({ "m": mo, "err": err_msg(&err) })
+        }),
+    );
     let new_fmt = !b.is_empty() && rowcodec::is_new_format(&b);
     if !new_fmt {
-        o.insert("v1".into(), try_(|| match tc::decode_row_with_map(&b, &cols, loc.as_ref(), None) {
-            Ok(m) => json!({ "m": map_out(&m), "err": null }),
-            Err(e) => json!({ "m": null, "err": gs(&e.error()) }),
-        }));
+        o.insert(
+            "v1".into(),
+            try_(
+                || match tc::decode_row_with_map(&b, &cols, loc.as_ref(), None) {
+                    Ok(m) => json!({ "m": map_out(&m), "err": null }),
+                    Err(e) => json!({ "m": null, "err": gs(&e.error()) }),
+                },
+            ),
+        );
         let mut col_ids = HashMap::new();
         for (i, ci) in infos.iter().enumerate() {
             col_ids.insert(ci.id, i);
         }
         // Go returns a nil slice for the one-byte NilFlag row only.
         let nil_row = b.len() == 1 && b[0] == 0;
-        o.insert("cut".into(), try_(|| match tc::cut_row_new(&b, &col_ids) {
-            Ok(r) => json!({ "r": if nil_row { Value::Null } else { bytes_out(&r) }, "err": null }),
-            Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
-        }));
+        o.insert(
+            "cut".into(),
+            try_(|| match tc::cut_row_new(&b, &col_ids) {
+                Ok(r) => {
+                    json!({ "r": if nil_row { Value::Null } else { bytes_out(&r) }, "err": null })
+                }
+                Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
+            }),
+        );
         return Value::Object(o);
     }
-    o.insert("v2".into(), map_fail(try_(|| match tc::decode_row_with_map_new(&b, &cols, loc.as_ref(), None) {
-        Ok(m) => json!({ "m": map_out(&m), "err": null }),
-        Err(e) => json!({ "m": null, "err": gs(&e.error()) }),
-    })));
-    o.insert("dm".into(), try_(|| {
-        let dec = rowcodec::new_datum_map_decoder(infos.clone(), loc.clone());
-        let res = dec.decode_to_datum_map(&b, None);
-        // Go's decoder keeps the row it parsed (its embedded row), also after an error.
-        let mut r = Row::default();
-        let _ = r.from_bytes(&b);
-        let (c1, ok1) = r.get_checksum();
-        let (c2, ok2) = r.get_extra_checksum();
-        let cs = json!([c1, ok1, c2, ok2, r.checksum_version()]);
-        match res {
-            Ok(m) => json!({ "m": map_out(&m), "err": null, "cs": cs }),
-            Err(e) => json!({ "m": null, "err": gs(&e.error()), "cs": cs }),
-        }
-    }));
-    let defs: Option<Vec<Value>> = if a[7].is_null() { None } else { Some(a[7].as_array().unwrap().clone()) };
+    o.insert(
+        "v2".into(),
+        map_fail(try_(|| {
+            match tc::decode_row_with_map_new(&b, &cols, loc.as_ref(), None) {
+                Ok(m) => json!({ "m": map_out(&m), "err": null }),
+                Err(e) => json!({ "m": null, "err": gs(&e.error()) }),
+            }
+        })),
+    );
+    o.insert(
+        "dm".into(),
+        try_(|| {
+            let dec = rowcodec::new_datum_map_decoder(infos.clone(), loc.clone());
+            let res = dec.decode_to_datum_map(&b, None);
+            // Go's decoder keeps the row it parsed (its embedded row), also after an error.
+            let mut r = Row::default();
+            let _ = r.from_bytes(&b);
+            let (c1, ok1) = r.get_checksum();
+            let (c2, ok2) = r.get_extra_checksum();
+            let cs = json!([c1, ok1, c2, ok2, r.checksum_version()]);
+            match res {
+                Ok(m) => json!({ "m": map_out(&m), "err": null, "cs": cs }),
+                Err(e) => json!({ "m": null, "err": gs(&e.error()), "cs": cs }),
+            }
+        }),
+    );
+    let defs: Option<Vec<Value>> = if a[7].is_null() {
+        None
+    } else {
+        Some(a[7].as_array().unwrap().clone())
+    };
     let fts: Vec<FieldType> = infos.iter().map(|c| (*c.ft).clone()).collect();
-    o.insert("chk".into(), try_(|| {
-        let def: Option<rowcodec::DefDatumFn> = defs.clone().map(|defs| {
-            Box::new(move |i: usize, chk: &mut tidb_chunk::Chunk| -> Result<(), Error> {
-                if defs[i].is_null() {
-                    chk.append_null(i);
-                } else {
-                    chk.append_datum(i, &datum_in(&defs[i]));
-                }
-                Ok(())
-            }) as rowcodec::DefDatumFn
-        });
-        let mut chk = new_chunk_with_capacity(&fts, 1);
-        let dec = rowcodec::new_chunk_decoder(infos.clone(), hids.clone(), def, loc.clone());
-        if let Err(e) = dec.decode_to_chunk(&b, commit_ts, h.as_ref(), &mut chk) {
-            return json!({ "err": gs(&e.error()) });
-        }
-        let mut cells = vec![];
-        for (c, ft) in fts.iter().enumerate() {
-            cells.push(try_(|| {
-                if chk.num_rows() == 0 || chk.column(c).rows() == 0 {
-                    return json!("none");
-                }
-                if chk.column(c).is_null(0) {
-                    return Value::Null;
-                }
-                datum_out(&chk.get_row(0).get_datum(c, ft))
-            }));
-        }
-        json!({ "cells": if cells.is_empty() { Value::Null } else { Value::Array(cells) } })
-    }));
-    let def_bytes: Option<Vec<Value>> = if a[8].is_null() { None } else { Some(a[8].as_array().unwrap().clone()) };
+    o.insert(
+        "chk".into(),
+        try_(|| {
+            let def: Option<rowcodec::DefDatumFn> = defs.clone().map(|defs| {
+                Box::new(
+                    move |i: usize, chk: &mut tidb_chunk::Chunk| -> Result<(), Error> {
+                        if defs[i].is_null() {
+                            chk.append_null(i);
+                        } else {
+                            chk.append_datum(i, &datum_in(&defs[i]));
+                        }
+                        Ok(())
+                    },
+                ) as rowcodec::DefDatumFn
+            });
+            let mut chk = new_chunk_with_capacity(&fts, 1);
+            let dec = rowcodec::new_chunk_decoder(infos.clone(), hids.clone(), def, loc.clone());
+            if let Err(e) = dec.decode_to_chunk(&b, commit_ts, h.as_ref(), &mut chk) {
+                return json!({ "err": gs(&e.error()) });
+            }
+            let mut cells = vec![];
+            for (c, ft) in fts.iter().enumerate() {
+                cells.push(try_(|| {
+                    if chk.num_rows() == 0 || chk.column(c).rows() == 0 {
+                        return json!("none");
+                    }
+                    if chk.column(c).is_null(0) {
+                        return Value::Null;
+                    }
+                    datum_out(&chk.get_row(0).get_datum(c, ft))
+                }));
+            }
+            json!({ "cells": if cells.is_empty() { Value::Null } else { Value::Array(cells) } })
+        }),
+    );
+    let def_bytes: Option<Vec<Value>> = if a[8].is_null() {
+        None
+    } else {
+        Some(a[8].as_array().unwrap().clone())
+    };
     let cache = hexv(&a[9]);
     let mut offs = HashMap::new();
     for (i, ci) in infos.iter().enumerate() {
@@ -717,20 +786,29 @@ fn row(a: &[Value]) -> Value {
         });
         rowcodec::new_byte_decoder(infos.clone(), hids.clone(), def, loc.clone())
     };
-    o.insert("bytes".into(), try_(|| match mk().decode_to_bytes(&offs, h.as_ref(), &b, &cache) {
-        Ok(r) => json!({ "r": bytes_out(&r), "err": null }),
-        Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
-    }));
-    o.insert("bytes_nh".into(), try_(|| match mk().decode_to_bytes_no_handle(&offs, &b) {
-        Ok(r) => json!({ "r": bytes_out(&r), "err": null }),
-        Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
-    }));
+    o.insert(
+        "bytes".into(),
+        try_(
+            || match mk().decode_to_bytes(&offs, h.as_ref(), &b, &cache) {
+                Ok(r) => json!({ "r": bytes_out(&r), "err": null }),
+                Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
+            },
+        ),
+    );
+    o.insert(
+        "bytes_nh".into(),
+        try_(|| match mk().decode_to_bytes_no_handle(&offs, &b) {
+            Ok(r) => json!({ "r": bytes_out(&r), "err": null }),
+            Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
+        }),
+    );
     Value::Object(o)
 }
 
 fn index(a: &[Value]) -> Value {
     let mut tbl = TableInfo::default();
-    tbl.unmarshal_json(a[0].as_str().unwrap().as_bytes()).unwrap();
+    tbl.unmarshal_json(a[0].as_str().unwrap().as_bytes())
+        .unwrap();
     let idx_off = a[1].as_u64().unwrap() as usize;
     let phy = a[2].as_i64().unwrap();
     let ds = datums_arg(&a[3]);
@@ -749,54 +827,106 @@ fn index(a: &[Value]) -> Value {
                 key = Some(k);
                 o
             }
-            Err(e) => json!({ "k": "", "nil": true, "distinct": false, "err": gs(&e.error()), "vals": datum_outs(&vals) }),
+            Err(e) => {
+                json!({ "k": "", "nil": true, "distinct": false, "err": gs(&e.error()), "vals": datum_outs(&vals) })
+            }
         }
     });
     let mut o = serde_json::Map::new();
     o.insert("gen".into(), gen_out);
     if let Some(k) = key {
-        o.insert("dec".into(), index_decode(&k, &value, cols_len, &cols, idx.unique));
+        o.insert(
+            "dec".into(),
+            index_decode(&k, &value, cols_len, &cols, idx.unique),
+        );
     }
     Value::Object(o)
 }
 
-fn index_decode(key: &[u8], value: &[u8], cols_len: usize, cols: &[ColInfo], unique: bool) -> Value {
+fn index_decode(
+    key: &[u8],
+    value: &[u8],
+    cols_len: usize,
+    cols: &[ColInfo],
+    unique: bool,
+) -> Value {
     let mut o = serde_json::Map::new();
-    for (i, hs) in [tc::HandleStatus::HandleDefault, tc::HandleStatus::HandleIsUnsigned, tc::HandleStatus::HandleNotNeeded]
-        .into_iter()
-        .enumerate()
+    for (i, hs) in [
+        tc::HandleStatus::HandleDefault,
+        tc::HandleStatus::HandleIsUnsigned,
+        tc::HandleStatus::HandleNotNeeded,
+    ]
+    .into_iter()
+    .enumerate()
     {
-        let c = if hs == tc::HandleStatus::HandleNotNeeded && cols.len() > cols_len { &cols[..cols_len] } else { cols };
-        o.insert(format!("kv{i}"), try_(|| match tc::decode_index_kv(key, value, cols_len, hs, c) {
-            Ok(r) => json!({ "r": bytes_out(&r), "err": null }),
-            Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
-        }));
+        let c = if hs == tc::HandleStatus::HandleNotNeeded && cols.len() > cols_len {
+            &cols[..cols_len]
+        } else {
+            cols
+        };
+        o.insert(
+            format!("kv{i}"),
+            try_(|| match tc::decode_index_kv(key, value, cols_len, hs, c) {
+                Ok(r) => json!({ "r": bytes_out(&r), "err": null }),
+                Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
+            }),
+        );
     }
-    o.insert("kvex".into(), try_(|| {
-        let pre = vec![Cow::Borrowed(&[][..]); cols_len];
-        match tc::decode_index_kv_ex(key, value, cols_len, tc::HandleStatus::HandleDefault, cols, &[0xaa], pre) {
-            Ok(r) => json!({ "r": bytes_out(&r), "err": null }),
-            Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
-        }
-    }));
-    o.insert("h".into(), try_(|| match tc::decode_index_handle(key, value, cols_len) {
-        Ok(h) => json!({ "h": h.as_ref().map(handle_out).unwrap_or(Value::Null), "err": null }),
-        Err(e) => json!({ "h": null, "err": gs(&e.error()) }),
-    }));
-    if unique {
-        o.insert("hv".into(), try_(|| match tc::decode_handle_in_index_value(value) {
+    o.insert(
+        "kvex".into(),
+        try_(|| {
+            let pre = vec![Cow::Borrowed(&[][..]); cols_len];
+            match tc::decode_index_kv_ex(
+                key,
+                value,
+                cols_len,
+                tc::HandleStatus::HandleDefault,
+                cols,
+                &[0xaa],
+                pre,
+            ) {
+                Ok(r) => json!({ "r": bytes_out(&r), "err": null }),
+                Err(e) => json!({ "r": null, "err": gs(&e.error()) }),
+            }
+        }),
+    );
+    o.insert(
+        "h".into(),
+        try_(|| match tc::decode_index_handle(key, value, cols_len) {
             Ok(h) => json!({ "h": h.as_ref().map(handle_out).unwrap_or(Value::Null), "err": null }),
             Err(e) => json!({ "h": null, "err": gs(&e.error()) }),
-        }));
+        }),
+    );
+    if unique {
+        o.insert(
+            "hv".into(),
+            try_(|| match tc::decode_handle_in_index_value(value) {
+                Ok(h) => {
+                    json!({ "h": h.as_ref().map(handle_out).unwrap_or(Value::Null), "err": null })
+                }
+                Err(e) => json!({ "h": null, "err": gs(&e.error()) }),
+            }),
+        );
     }
-    o.insert("seg".into(), try_(|| {
-        let s = tc::split_index_value(value);
-        json!([nil_hex(s.common_handle), nil_hex(s.partition_id), nil_hex(s.restored_values), nil_hex(s.int_handle)])
-    }));
-    o.insert("cut".into(), try_(|| {
-        let (vs, rest, err) = tc::cut_index_key_new(key, cols_len);
-        json!({ "vs": bytes_out_or_null(&vs), "rest": hex(rest), "err": err_msg(&err) })
-    }));
+    o.insert(
+        "seg".into(),
+        try_(|| {
+            let s = tc::split_index_value(value);
+            json!([
+                nil_hex(s.common_handle),
+                nil_hex(s.partition_id),
+                nil_hex(s.restored_values),
+                nil_hex(s.int_handle)
+            ])
+        }),
+    );
+    o.insert(
+        "cut".into(),
+        try_(|| {
+            let (vs, rest, err) = tc::cut_index_key_new(key, cols_len);
+            json!({ "vs": bytes_out_or_null(&vs), "rest": hex(rest), "err": err_msg(&err) })
+        }),
+    );
     Value::Object(o)
 }
 
@@ -831,11 +961,15 @@ fn check(rec: &Value) -> Option<String> {
     if out != *want_out {
         return Some(format!("out: got {out}\n    want {want_out}"));
     }
-    let got_err = err.as_ref().map(|e| json!({ "code": e.code(), "msg": gs(&e.error()) }));
+    let got_err = err
+        .as_ref()
+        .map(|e| json!({ "code": e.code(), "msg": gs(&e.error()) }));
     let want_err_cmp = if want_err.is_null() {
         None
     } else {
-        Some(json!({ "code": want_err.get("code").cloned().unwrap_or(json!(0)), "msg": want_err["msg"] }))
+        Some(
+            json!({ "code": want_err.get("code").cloned().unwrap_or(json!(0)), "msg": want_err["msg"] }),
+        )
     };
     if got_err != want_err_cmp {
         return Some(format!("err: got {got_err:?}, want {want_err_cmp:?}"));
@@ -859,14 +993,26 @@ fn replay(path: &str) {
         n += 1;
         let rec: Value = serde_json::from_str(line).unwrap();
         if let Some(why) = check(&rec) {
-            let cut = line.char_indices().nth(600).map(|(i, _)| i).unwrap_or(line.len());
+            let cut = line
+                .char_indices()
+                .nth(600)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
             fails.push(format!("{}\n    {why}", &line[..cut]));
         }
     }
     std::panic::set_hook(prev);
-    let show = std::env::var("GOVEC_SHOW").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let show = std::env::var("GOVEC_SHOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
     let shown: Vec<_> = fails.iter().take(show).map(|s| s.as_str()).collect();
-    assert!(fails.is_empty(), "{path}: {} of {n} records differ:\n{}", fails.len(), shown.join("\n"));
+    assert!(
+        fails.is_empty(),
+        "{path}: {} of {n} records differ:\n{}",
+        fails.len(),
+        shown.join("\n")
+    );
     assert_eq!(n as u64, header["records"].as_u64().unwrap());
 }
 

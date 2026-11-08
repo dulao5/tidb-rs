@@ -17,10 +17,17 @@ use serde_json::Value;
 use tidb_tablecodec as tc;
 use tidb_tablecodec::rowcodec::{self, ColInfo};
 
-const GO_TARGET: &str = if cfg!(target_arch = "x86_64") { "amd64" } else { "arm64" };
+const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
+    "amd64"
+} else {
+    "arm64"
+};
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 struct Rng(u64);
@@ -80,17 +87,28 @@ fn col_infos(v: &Value) -> Vec<ColInfo> {
         .map(|a| a.as_slice())
         .unwrap_or(&[])
         .iter()
-        .map(|q| ColInfo { id: q[0].as_i64().unwrap(), ft: Arc::new(ft_in(&q[3])), ..ColInfo::default() })
+        .map(|q| ColInfo {
+            id: q[0].as_i64().unwrap(),
+            ft: Arc::new(ft_in(&q[3])),
+            ..ColInfo::default()
+        })
         .collect()
 }
 
 #[test]
 fn decode_mutation() {
-    let path = format!("{}/tests/vectors/v8.5.8/{GO_TARGET}/tablecodec.jsonl.gz", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/vectors/v8.5.8/{GO_TARGET}/tablecodec.jsonl.gz",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap());
     let mut text = String::new();
     gz.read_to_string(&mut text).unwrap();
-    let recs: Vec<Value> = text.lines().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
+    let recs: Vec<Value> = text
+        .lines()
+        .skip(1)
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
     let rows: Vec<&Value> = recs.iter().filter(|r| r["op"] == "row").collect();
     let idx: Vec<&Value> = recs.iter().filter(|r| r["op"] == "index_raw").collect();
     let keys: Vec<&Value> = recs.iter().filter(|r| r["op"] == "key_decode").collect();
@@ -119,8 +137,12 @@ fn decode_mutation() {
             offs.entry(c.id).or_insert(n);
         }
         let l = Some(&loc);
-        tally(catch_unwind(AssertUnwindSafe(|| tc::decode_row_to_datum_map(&b, &cols, l).is_ok())));
-        tally(catch_unwind(AssertUnwindSafe(|| tc::cut_row_new(&b, &offs).is_ok())));
+        tally(catch_unwind(AssertUnwindSafe(|| {
+            tc::decode_row_to_datum_map(&b, &cols, l).is_ok()
+        })));
+        tally(catch_unwind(AssertUnwindSafe(|| {
+            tc::cut_row_new(&b, &offs).is_ok()
+        })));
         let fts: Vec<_> = infos.iter().map(|c| (*c.ft).clone()).collect();
         tally(catch_unwind(AssertUnwindSafe(|| {
             let mut chk = tidb_chunk::chunk::new_chunk_with_capacity(&fts, 1);
@@ -129,14 +151,17 @@ fn decode_mutation() {
                 .is_ok()
         })));
         tally(catch_unwind(AssertUnwindSafe(|| {
-            rowcodec::new_byte_decoder(infos.clone(), vec![], None, None).decode_to_bytes_no_handle(&offs, &b).is_ok()
+            rowcodec::new_byte_decoder(infos.clone(), vec![], None, None)
+                .decode_to_bytes_no_handle(&offs, &b)
+                .is_ok()
         })));
 
         let x = idx[rng.n(idx.len())];
         let a = x["args"].as_array().unwrap();
         let mut k = unhex(a[0].as_str().unwrap());
         let mut v = unhex(a[1].as_str().unwrap());
-        let restored = catch_unwind(|| tc::split_index_value(&v).restored_values.is_some()).unwrap_or(true);
+        let restored =
+            catch_unwind(|| tc::split_index_value(&v).restored_values.is_some()).unwrap_or(true);
         if rng.n(2) == 0 && !restored {
             v = mutate(&mut rng, &v);
         } else {
@@ -147,15 +172,27 @@ fn decode_mutation() {
         tally(catch_unwind(AssertUnwindSafe(|| {
             tc::decode_index_kv(&k, &v, n, tc::HandleStatus::HandleDefault, &ci).is_ok()
         })));
-        tally(catch_unwind(AssertUnwindSafe(|| tc::decode_index_handle(&k, &v, n).is_ok())));
-        tally(catch_unwind(AssertUnwindSafe(|| tc::decode_handle_in_index_value(&v).is_ok())));
+        tally(catch_unwind(AssertUnwindSafe(|| {
+            tc::decode_index_handle(&k, &v, n).is_ok()
+        })));
+        tally(catch_unwind(AssertUnwindSafe(|| {
+            tc::decode_handle_in_index_value(&v).is_ok()
+        })));
 
         let ki = rng.n(keys.len());
         let key = mutate(&mut rng, &unhex(keys[ki]["args"][0].as_str().unwrap()));
-        tally(catch_unwind(AssertUnwindSafe(|| tc::decode_record_key(&key).is_ok())));
-        tally(catch_unwind(AssertUnwindSafe(|| tc::decode_index_key(&key).is_ok())));
-        tally(catch_unwind(AssertUnwindSafe(|| tc::decode_meta_key(&key).is_ok())));
-        tally(catch_unwind(AssertUnwindSafe(|| tc::decode_table_id(&key) != 0)));
+        tally(catch_unwind(AssertUnwindSafe(|| {
+            tc::decode_record_key(&key).is_ok()
+        })));
+        tally(catch_unwind(AssertUnwindSafe(|| {
+            tc::decode_index_key(&key).is_ok()
+        })));
+        tally(catch_unwind(AssertUnwindSafe(|| {
+            tc::decode_meta_key(&key).is_ok()
+        })));
+        tally(catch_unwind(AssertUnwindSafe(|| {
+            tc::decode_table_id(&key) != 0
+        })));
     }
     std::panic::set_hook(prev);
     eprintln!("decode_mutation: {ok} ok, {err} errors, {panics} catchable panics");

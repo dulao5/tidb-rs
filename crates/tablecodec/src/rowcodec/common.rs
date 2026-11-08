@@ -73,7 +73,11 @@ impl U32Slice<'_> {
     /// `s[i]` (panics out of range, as Go).
     // glue: element of the reinterpreted slice (machine byte order)
     pub fn get(&self, i: usize) -> u32 {
-        assert!(i < self.len(), "index out of range [{i}] with length {}", self.len());
+        assert!(
+            i < self.len(),
+            "index out of range [{i}] with length {}",
+            self.len()
+        );
         let b = &self.0[i * 4..i * 4 + 4];
         u32::from_ne_bytes([b[0], b[1], b[2], b[3]])
     }
@@ -99,7 +103,11 @@ impl U16Slice<'_> {
     /// `s[i]` (panics out of range, as Go).
     // glue: element of the reinterpreted slice (machine byte order)
     pub fn get(&self, i: usize) -> u16 {
-        assert!(i < self.len(), "index out of range [{i}] with length {}", self.len());
+        assert!(
+            i < self.len(),
+            "index out of range [{i}] with length {}",
+            self.len()
+        );
         let b = &self.0[i * 2..i * 2 + 2];
         u16::from_ne_bytes([b[0], b[1]])
     }
@@ -236,7 +244,11 @@ pub(crate) fn crc32_update(crc: u32, p: &[u8]) -> u32 {
         for (i, e) in t.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 == 1 { (c >> 1) ^ 0xedb88320 } else { c >> 1 };
+                c = if c & 1 == 1 {
+                    (c >> 1) ^ 0xedb88320
+                } else {
+                    c >> 1
+                };
             }
             *e = c;
         }
@@ -343,7 +355,9 @@ fn append_datum_for_checksum_inner(
         }
         mysql::TypeBit => {
             // ticdc transforms a bit value as the following way, no need to handle truncate error here.
-            let (v, _) = dat.get_binary_literal().to_int(&DefaultStmtNoWarningContext);
+            let (v, _) = dat
+                .get_binary_literal()
+                .to_int(&DefaultStmtNoWarningContext);
             buf.extend_from_slice(&v.to_le_bytes());
         }
         mysql::TypeJSON => {

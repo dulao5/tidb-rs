@@ -131,7 +131,7 @@ fn bench(c: &mut Criterion) {
         let mut chk = new_chunk_with_capacity(&fts, 1024);
         let mut i = 0usize;
         b.iter(|| {
-            if i % 1024 == 0 {
+            if i.is_multiple_of(1024) {
                 chk.reset();
             }
             i += 1;

@@ -36,8 +36,8 @@ use tidb_kv::key::IntHandle;
 use tidb_kv::key::Key;
 use tidb_kv::key::KeyRange;
 use tidb_kv::key::key_range_slice_mem_usage;
-use tidb_kv::key::new_handle_map;
 use tidb_kv::key::new_common_handle;
+use tidb_kv::key::new_handle_map;
 use tidb_kv::key::new_mem_aware_handle_map;
 use tidb_kv::key::new_partition_handle;
 use tidb_kv::kv::BatchGetOption;
@@ -174,7 +174,11 @@ fn handle_of(v: &Value) -> Handle {
             let ch = new_common_handle(enc).expect("NewCommonHandle");
             let got: Vec<u16> = (0..ch.num_cols())
                 .map(|i| {
-                    let start = if i == 0 { 0 } else { offs[i as usize - 1] as usize };
+                    let start = if i == 0 {
+                        0
+                    } else {
+                        offs[i as usize - 1] as usize
+                    };
                     (start + ch.encoded_col(i).len()) as u16
                 })
                 .collect();

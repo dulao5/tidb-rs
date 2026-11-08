@@ -2,7 +2,7 @@
 
 Branches (both rebased on main after D01.8 merged): tidb-rs `block/D01.11-tablecodec`
 (worktree projects/tidb-rs-d0111), tracker `govec/tablecodec-D01.11` (worktree
-projects/tracker-d0111, draft PR tracker #25). No tidb-rs PR opened yet.
+projects/tracker-d0111, draft PR tracker #25). 
 
 ## Done
 
@@ -34,22 +34,11 @@ projects/tracker-d0111, draft PR tracker #25). No tidb-rs PR opened yet.
 - Go benchmark side: tracker `govec/domains/tablecodec_bench_test.go` (inputs printed by
   `GOVEC_PRINT_BENCH=1 go test -run TestTablecodecBenchInputs -v ./domains/`).
 
-## Remaining (next steps, in order)
+## Remaining
 
-1. `benches/tablecodec.rs` (currently a stub `fn main`): criterion with the same inputs (hex
-   printed by the Go test above), jemalloc like crates/codec/benches; run Go
-   (`go test -run x -bench BenchmarkTC -count 5 ./domains/`) and Rust; table in spec §7.
-2. amd64 vectors: download the tracker CI artifact (govec-vectors-ubuntu-latest) for
-   tablecodec + kv, commit to tracker, empty targetsPending, copy into tidb-rs
-   (crates/tablecodec/tests/vectors/v8.5.8/amd64/, crates/kv/tests/vectors/v8.5.8/amd64/),
-   update the vectors README sha256s (kv README exists; add one for tablecodec).
-3. CI: add `-p tidb-tablecodec` to the three test lines of `.github/workflows/ci.yml`.
-4. Port Go unit-test assertions govec cannot express (if any) as Rust unit tests; list in spec §5.
-5. specs/D01.11-tablecodec/{spec,tasks}.md (scope §1, relevance §2, design §3, deviations §4,
-   upstream §5, acceptance §6, perf §7); ROADMAP D01.11 line; D07.0 spec note (glue removed).
-6. Run CI command set (fmt on touched crates, clippy first-party, tests, release-checked,
-   check_layers, converge D01.11 + D07.0), open tidb-rs PR (base main), fill tracker #25 body,
-   mark both ready.
+All six handoff steps are done (2026-11-08): benches (spec §7), amd64 vectors for tablecodec and
+kv (tracker b2feaba, targetsPending emptied), CI runs tidb-tablecodec, `TestError` ported as a
+unit test, spec/tasks/ROADMAP written, PRs opened. Open follow-ups are tasks T8–T10.
 
 ## Deviations so far (for spec §4)
 

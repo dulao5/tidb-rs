@@ -205,17 +205,22 @@ impl DatumMapDecoder {
             }
             mysql::TypeEnum => {
                 // ignore error deliberately, to read empty enum value.
-                let enum_ = parse_enum_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))
-                    .unwrap_or_default();
+                let enum_ =
+                    parse_enum_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))
+                        .unwrap_or_default();
                 d.set_mysql_enum(enum_, col.ft.get_collate().to_owned());
             }
             mysql::TypeSet => {
-                let set = parse_set_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))?;
+                let set =
+                    parse_set_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))?;
                 d.set_mysql_set(set, col.ft.get_collate().to_owned());
             }
             mysql::TypeBit => {
                 let byte_size = (col.ft.get_flen() + 7) >> 3;
-                d.set_mysql_bit(new_binary_literal_from_uint(decode_uint(col_data), byte_size));
+                d.set_mysql_bit(new_binary_literal_from_uint(
+                    decode_uint(col_data),
+                    byte_size,
+                ));
             }
             mysql::TypeJSON => {
                 let j = BinaryJSON::borrowed(col_data[0], &col_data[1..]);
@@ -424,12 +429,14 @@ impl ChunkDecoder {
             }
             mysql::TypeEnum => {
                 // ignore error deliberately, to read empty enum value.
-                let enum_ = parse_enum_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))
-                    .unwrap_or_default();
+                let enum_ =
+                    parse_enum_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))
+                        .unwrap_or_default();
                 chk.append_enum(col_idx, &enum_);
             }
             mysql::TypeSet => {
-                let set = parse_set_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))?;
+                let set =
+                    parse_set_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))?;
                 chk.append_set(col_idx, &set);
             }
             mysql::TypeBit => {
