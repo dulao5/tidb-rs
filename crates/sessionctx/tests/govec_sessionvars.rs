@@ -133,9 +133,18 @@ fn diff(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> 
 }
 
 /// The variables whose read-back depends on the wall clock or the session's random
-/// generator: the generator records their read-back values as "<volatile>".
+/// generator, or on the host (build target, config paths): the generator records their
+/// read-back values as "<volatile>".
 fn volatile(name: &str) -> bool {
-    matches!(name, "timestamp" | "rand_seed1" | "rand_seed2")
+    matches!(
+        name,
+        "timestamp"
+            | "rand_seed1"
+            | "rand_seed2"
+            | "version_compile_os"
+            | "version_compile_machine"
+            | "tidb_config"
+    )
 }
 
 /// The names a SetSession reaches: the variable and its aliases.
@@ -216,7 +225,8 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                         Ok(())
                     }
                     Err(e) => {
-                        res.insert("old".into(), json!(""));
+                        let old = if volatile(name) { "<volatile>" } else { "" };
+                        res.insert("old".into(), json!(old));
                         Err(e)
                     }
                 },
