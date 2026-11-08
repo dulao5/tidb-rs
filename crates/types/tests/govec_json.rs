@@ -133,6 +133,11 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>) {
     match op {
         "parse" => res(j::parse_binary_json_from_string(&ungs(&args[0]))
             .map(|bj| json!({"j": jout(&bj), "type": bj.r#type(), "depth": bj.get_elem_depth()}))),
+        "valid" => (json!(j::json_valid(&ungs(&args[0]))), None),
+        "unmarshal" => {
+            let mut bj = BinaryJSON::default();
+            res(bj.unmarshal_json(&ungs(&args[0])).map(|()| jout(&bj)))
+        }
         "create" => res(
             j::create_binary_json_with_check(&value_of_spec(&args[0])).map(|bj| {
                 let c = bj.copy();

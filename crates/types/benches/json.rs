@@ -70,6 +70,13 @@ fn bench(c: &mut Criterion) {
     c.bench_function("hash_small", |b| {
         b.iter(|| black_box(&bj_sm).hash_value(Vec::new()))
     });
+    // Texts nested deeper than maxJSONDepth (they always fail; Lucky's review of #21).
+    for d in [256usize, 257, 1000, 10000] {
+        let text = format!("{}1{}", "[".repeat(d), "]".repeat(d));
+        c.bench_function(&format!("parse_deep_{d}"), |b| {
+            b.iter(|| j::parse_binary_json_from_string(black_box(text.as_bytes())).unwrap_err())
+        });
+    }
 }
 
 criterion_group!(benches, bench);
