@@ -150,18 +150,17 @@ impl<'a> Row<'a> {
         &self.data_cap[start..end]
     }
 
-    /// `var r row; r.fromBytes(rowData)`.
-    // go: row.fromBytes L1
-    pub fn from_bytes(row_data: &'a [u8]) -> Result<Row<'a>, Error> {
+    /// `r.fromBytes(rowData)`: like Go, the fields parsed before an error stay set (the
+    /// decoders' `GetChecksum` reads them after a failed decode).
+    // go: row.fromBytes L1 [M-ERRVAL]
+    pub fn from_bytes(&mut self, row_data: &'a [u8]) -> Result<(), Error> {
+        let r = self;
         if row_data[0] != CodecVer {
             return Err(errInvalidCodecVer.clone());
         }
-        let mut r = Row {
-            flags: row_data[1],
-            num_not_null_cols: le_u16(&row_data[2..]),
-            num_null_cols: le_u16(&row_data[4..]),
-            ..Row::default()
-        };
+        r.flags = row_data[1];
+        r.num_not_null_cols = le_u16(&row_data[2..]);
+        r.num_null_cols = le_u16(&row_data[4..]);
         let mut cursor = 6usize;
         let mut last_offset = 0usize;
         if r.large() {
@@ -213,7 +212,7 @@ impl<'a> Row<'a> {
             r.checksum1 = 0;
             r.checksum2 = 0;
         }
-        Ok(r)
+        Ok(())
     }
 
     /// Returns `(idx, isNil, notFound)`.

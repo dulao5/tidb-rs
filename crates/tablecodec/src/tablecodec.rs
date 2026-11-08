@@ -12,9 +12,9 @@
 //! - Index decoding returns `[][]byte` whose entries alias the key in Go: here
 //!   `Cow<[u8]>`, borrowed from the key where Go aliases it, owned where Go computes bytes.
 //!   An empty entry is Go's nil (the decoders never produce an empty non-nil entry).
-//! - `[]byte` arguments Go distinguishes as nil vs empty (`DecodeRowWithMap*`'s `b`): an
-//!   empty slice is treated as nil (L2, spec §4: Go would index an empty non-nil slice and
-//!   panic; every Go caller passes a KV value, never empty).
+//! - `[]byte` arguments Go distinguishes as nil vs empty (`DecodeRowWithMap*`'s and
+//!   `CutRowNew`'s row): an empty slice is Go's non-nil empty slice (every Go caller passes
+//!   a KV value, never nil).
 //! - `map[int64]*types.FieldType` is `HashMap<i64, Arc<FieldType>>` (Go shares the field
 //!   types by pointer); `map[int64]types.Datum` is `HashMap<i64, Datum>`.
 //! - Not ported (tracker block X, spec §2): the row and index value encoders (`EncodeRow`,
@@ -105,8 +105,9 @@ pub const RestoreDataFlag: u8 = rowcodec::CodecVer;
 /// TableSplitKeyLen is the length of key 't{table_id}' which is used for table split.
 pub const TableSplitKeyLen: usize = 1 + idLen;
 
-/// `structure.HashData` (pkg/structure, block D06.2): the type flag of hash data keys.
-const structureHashData: u64 = b'h' as u64;
+/// `structure.HashData` (pkg/structure, block D06.2): the type flag of hash data keys
+/// (`structure.TypeFlag` is a byte).
+const structureHashData: u8 = b'h';
 
 /// A `kv.Key` argument of a format: Go's `%q` calls `Key.String` (hex).
 // glue: kv.Key as a fmt.Stringer argument
@@ -265,7 +266,8 @@ pub fn decode_meta_key(ek: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
     let ek = &ek[metaPrefixLength..];
     let (ek, key) = decode_bytes(ek, None)?;
     let (ek, tp) = decode_uint(ek)?;
-    if tp != structureHashData {
+    // Go compares structure.TypeFlag(tp): the uint64 truncated to a byte.
+    if tp as u8 != structureHashData {
         return Err(errors::errorf(
             "invalid encoded hash data key flag %c",
             &[Arg::from(tp as u8)],
@@ -485,9 +487,6 @@ pub fn decode_row_with_map_new(
     row: Option<HashMap<i64, Datum>>,
 ) -> Result<HashMap<i64, Datum>, Error> {
     let row = row.unwrap_or_else(|| HashMap::with_capacity(cols.len()));
-    if b.is_empty() {
-        return Ok(row);
-    }
     if b.len() == 1 && b[0] == NilFlag {
         return Ok(row);
     }
@@ -514,9 +513,6 @@ pub fn decode_row_with_map(
     row: Option<HashMap<i64, Datum>>,
 ) -> Result<HashMap<i64, Datum>, Error> {
     let mut row = row.unwrap_or_else(|| HashMap::with_capacity(cols.len()));
-    if b.is_empty() {
-        return Ok(row);
-    }
     if b.len() == 1 && b[0] == NilFlag {
         return Ok(row);
     }
@@ -625,9 +621,6 @@ pub fn cut_row_new<'a>(
     mut data: &'a [u8],
     col_ids: &HashMap<i64, usize>,
 ) -> Result<Vec<&'a [u8]>, Error> {
-    if data.is_empty() {
-        return Ok(Vec::new());
-    }
     if data.len() == 1 && data[0] == NilFlag {
         return Ok(Vec::new());
     }
@@ -694,13 +687,11 @@ pub fn unflatten(
             if let Err(err) = t.from_packed_uint(datum.get_uint64()) {
                 return (datum, Err(err));
             }
-            if ft.get_type() == mysql::TypeTimestamp && !t.is_zero() {
-                let Some(loc) = loc else {
-                    panic!("time: missing Location in call to Time.In");
-                };
-                if let Err(err) = t.convert_time_zone(&utc(), loc) {
-                    return (datum, Err(err));
-                }
+            if ft.get_type() == mysql::TypeTimestamp
+                && !t.is_zero()
+                && let Err(err) = crate::rowcodec::decoder::convert_from_utc(&mut t, loc)
+            {
+                return (datum, Err(err));
             }
             datum.set_uint64(0);
             datum.set_mysql_time(t);
@@ -764,17 +755,21 @@ pub fn cut_index_key_to<'a>(key: &'a [u8], values: &mut [Cow<'a, [u8]>]) -> Resu
     Ok(b)
 }
 
-/// The index column values and the rest of an index key.
-pub type CutIndexKeyResult<'a> = (Vec<Cow<'a, [u8]>>, &'a [u8]);
+/// The index column values, the rest of an index key, and the error (M-ERRVAL).
+pub type CutIndexKeyResult<'a> = (Vec<Cow<'a, [u8]>>, &'a [u8], Result<(), Error>);
 
 /// CutIndexKeyNew cuts encoded index key into colIDs to bytes slices.
 /// The returned value b is the remaining bytes of the key which would be empty if it is unique index or handle data
 /// if it is non-unique index.
-// go: CutIndexKeyNew L1
-pub fn cut_index_key_new(key: &[u8], length: usize) -> Result<CutIndexKeyResult<'_>, Error> {
+///
+/// Like Go, on error the values cut so far are returned with it (and an empty rest).
+// go: CutIndexKeyNew L1 [M-ERRVAL]
+pub fn cut_index_key_new(key: &[u8], length: usize) -> CutIndexKeyResult<'_> {
     let mut values = vec![Cow::Borrowed(&[][..]); length];
-    let b = cut_index_key_to(key, &mut values)?;
-    Ok((values, b))
+    match cut_index_key_to(key, &mut values) {
+        Ok(b) => (values, b, Ok(())),
+        Err(err) => (values, &[], Err(err)),
+    }
 }
 
 /// HandleStatus is the handle status in index.
@@ -1035,8 +1030,10 @@ pub fn decode_index_kv<'a>(
 }
 
 /// DecodeIndexHandle uses to decode the handle from index key/value.
+///
+/// `None` is Go's nil handle (from [`decode_handle_in_index_value`]).
 // go: DecodeIndexHandle L1
-pub fn decode_index_handle(key: &[u8], value: &[u8], cols_len: usize) -> Result<Handle, Error> {
+pub fn decode_index_handle(key: &[u8], value: &[u8], cols_len: usize) -> Result<Option<Handle>, Error> {
     let mut b = &key[prefixLen + idLen..];
     for _ in 0..cols_len {
         let (_, rest) = cut_one(b)?;
@@ -1048,8 +1045,8 @@ pub fn decode_index_handle(key: &[u8], value: &[u8], cols_len: usize) -> Result<
         // We should decode it and return a partition handle.
         if value.len() >= 9 {
             let seg = split_index_value(value);
-            if !seg.partition_id.is_empty() {
-                let (_, pid) = decode_int(seg.partition_id)?;
+            if let Some(partition_id) = seg.partition_id.filter(|p| !p.is_empty()) {
+                let (_, pid) = decode_int(partition_id)?;
                 // For GlobalIndexVersionV1+, the handle from the key may already be a
                 // PartitionHandle (partition ID encoded in key). To avoid creating a
                 // nested PartitionHandle, extract the inner handle first.
@@ -1061,7 +1058,7 @@ pub fn decode_index_handle(key: &[u8], value: &[u8], cols_len: usize) -> Result<
                 handle = Handle::Partition(new_partition_handle(pid, handle));
             }
         }
-        return Ok(handle);
+        return Ok(Some(handle));
     } else if value.len() >= 8 {
         return decode_handle_in_index_value(value);
     }
@@ -1094,32 +1091,28 @@ fn decode_handle_in_index_key(key_suffix: &[u8]) -> Result<Handle, Error> {
 
 /// DecodeHandleInIndexValue decodes handle in unqiue index value.
 ///
-/// Go can return a `PartitionHandle` around a nil handle (a value with a partition ID and
-/// no handle), which panics on first use; the port panics here (L2, spec §4).
+/// Go returns a nil handle for a value without one (a unique index entry with NULLs keeps
+/// its handle in the key): `None`. With a partition ID and no handle Go returns
+/// `PartitionHandle{nil}`, whose every method panics; the port returns `None` too (L2,
+/// spec §4).
 // go: DecodeHandleInIndexValue L1
-pub fn decode_handle_in_index_value(value: &[u8]) -> Result<Handle, Error> {
+pub fn decode_handle_in_index_value(value: &[u8]) -> Result<Option<Handle>, Error> {
     if value.len() <= MaxOldEncodeValueLen {
-        return Ok(decode_int_handle_in_index_value(value));
+        return Ok(Some(decode_int_handle_in_index_value(value)));
     }
     let seg = split_index_value(value);
     let mut handle: Option<Handle> = None;
-    if !seg.int_handle.is_empty() {
-        handle = Some(decode_int_handle_in_index_value(seg.int_handle));
+    if let Some(int_handle) = seg.int_handle.filter(|b| !b.is_empty()) {
+        handle = Some(decode_int_handle_in_index_value(int_handle));
     }
-    if !seg.common_handle.is_empty() {
-        handle = Some(Handle::Common(Arc::new(new_common_handle(seg.common_handle.to_vec())?)));
+    if let Some(common_handle) = seg.common_handle.filter(|b| !b.is_empty()) {
+        handle = Some(Handle::Common(Arc::new(new_common_handle(common_handle.to_vec())?)));
     }
-    if !seg.partition_id.is_empty() {
-        let (_, pid) = decode_int(seg.partition_id)?;
-        let Some(inner) = handle else {
-            panic!("PartitionHandle wraps a nil handle");
-        };
-        handle = Some(Handle::Partition(new_partition_handle(pid, inner)));
+    if let Some(partition_id) = seg.partition_id.filter(|b| !b.is_empty()) {
+        let (_, pid) = decode_int(partition_id)?;
+        handle = handle.map(|inner| Handle::Partition(new_partition_handle(pid, inner)));
     }
-    match handle {
-        Some(h) => Ok(h),
-        None => panic!("nil handle in index value"),
-    }
+    Ok(handle)
 }
 
 /// DecodeIntHandleInIndexValue uses to decode index value as int handle id.
@@ -1376,24 +1369,24 @@ pub fn truncate_index_value(v: &mut Datum, idx_col: &IndexColumn, tbl_col: &Colu
 }
 
 /// IndexValueSegments use to store result of SplitIndexValue.
+///
+/// `None` is Go's nil slice (Go tests some segments with `!= nil` and others with `len`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IndexValueSegments<'a> {
-    pub common_handle: &'a [u8],
-    pub partition_id: &'a [u8],
-    pub restored_values: &'a [u8],
-    pub int_handle: &'a [u8],
+    pub common_handle: Option<&'a [u8]>,
+    pub partition_id: Option<&'a [u8]>,
+    pub restored_values: Option<&'a [u8]>,
+    pub int_handle: Option<&'a [u8]>,
 }
 
 /// SplitIndexValue decodes segments in index value for both non-clustered and clustered table.
-///
-/// An empty segment is Go's nil (a present segment is never empty).
 // go: SplitIndexValue L1
 pub fn split_index_value(value: &[u8]) -> IndexValueSegments<'_> {
     if get_index_version(value) == 0 {
         // For Old Encoding (IntHandle without any others options)
         if value.len() <= MaxOldEncodeValueLen {
             return IndexValueSegments {
-                int_handle: value,
+                int_handle: Some(value),
                 ..IndexValueSegments::default()
             };
         }
@@ -1424,20 +1417,20 @@ fn split_index_value_for_index_value_version0(value: &[u8]) -> IndexValueSegment
     let tail = go_slice(value, value.len().wrapping_sub(tail_len), value.len());
     let mut value = go_slice(value, 1, value.len().wrapping_sub(tail_len));
     if tail.len() >= 8 {
-        segs.int_handle = &tail[..8];
+        segs.int_handle = Some(&tail[..8]);
     }
     if !value.is_empty() && value[0] == CommonHandleFlag {
         let handle_len = ((value[1] as u16) << 8) + value[2] as u16;
         let handle_end_off = 3 + handle_len as usize;
-        segs.common_handle = go_slice(value, 3, handle_end_off);
+        segs.common_handle = Some(go_slice(value, 3, handle_end_off));
         value = &value[handle_end_off..];
     }
     if !value.is_empty() && value[0] == PartitionIDFlag {
-        segs.partition_id = go_slice(value, 1, 9);
+        segs.partition_id = Some(go_slice(value, 1, 9));
         value = &value[9..];
     }
     if !value.is_empty() && value[0] == RestoreDataFlag {
-        segs.restored_values = value;
+        segs.restored_values = Some(value);
     }
     segs
 }
@@ -1452,15 +1445,15 @@ fn split_index_value_for_clustered_index_version1(value: &[u8]) -> IndexValueSeg
     if !value.is_empty() && value[0] == CommonHandleFlag {
         let handle_len = ((value[1] as u16) << 8) + value[2] as u16;
         let handle_end_off = 3 + handle_len as usize;
-        segs.common_handle = go_slice(value, 3, handle_end_off);
+        segs.common_handle = Some(go_slice(value, 3, handle_end_off));
         value = &value[handle_end_off..];
     }
     if !value.is_empty() && value[0] == PartitionIDFlag {
-        segs.partition_id = go_slice(value, 1, 9);
+        segs.partition_id = Some(go_slice(value, 1, 9));
         value = &value[9..];
     }
     if !value.is_empty() && value[0] == RestoreDataFlag {
-        segs.restored_values = value;
+        segs.restored_values = Some(value);
     }
     segs
 }
@@ -1484,26 +1477,30 @@ fn decode_index_kv_for_clustered_index_version1<'a>(
     columns: &[ColInfo],
 ) -> Result<Vec<Cow<'a, [u8]>>, Error> {
     let segs = split_index_value_for_clustered_index_version1(value);
-    let (mut result_values, key_suffix) = cut_index_key_new(key, cols_len)?;
-    if !segs.restored_values.is_empty() {
-        result_values = decode_restored_values_v5(&columns[..cols_len], result_values, segs.restored_values)?;
+    let (mut result_values, key_suffix, err) = cut_index_key_new(key, cols_len);
+    err?;
+    if let Some(restored_values) = segs.restored_values {
+        result_values = decode_restored_values_v5(&columns[..cols_len], result_values, restored_values)?;
     }
     if hd_status == HandleStatus::HandleNotNeeded {
         return Ok(result_values);
     }
-    let handle: CommonHandle = if !segs.common_handle.is_empty() {
+    let handle: CommonHandle = if let Some(common_handle) = segs.common_handle {
         // In unique common handle index.
-        new_common_handle(segs.common_handle.to_vec())?
+        new_common_handle(common_handle.to_vec())?
     } else {
         // In non-unique index, decode handle in keySuffix.
         new_common_handle(key_suffix.to_vec())?
     };
     let handle = Handle::Common(Arc::new(handle));
-    let handle_bytes =
-        re_encode_handle_consider_new_collation(&handle, &columns[cols_len..], segs.restored_values)?;
+    let handle_bytes = re_encode_handle_consider_new_collation(
+        &handle,
+        &columns[cols_len..],
+        segs.restored_values.unwrap_or(&[]),
+    )?;
     result_values.extend(handle_bytes);
-    if !segs.partition_id.is_empty() {
-        result_values.push(Cow::Owned(partition_id_bytes(segs.partition_id)?));
+    if let Some(partition_id) = segs.partition_id {
+        result_values.push(Cow::Owned(partition_id_bytes(partition_id)?));
     }
     Ok(result_values)
 }
@@ -1518,29 +1515,30 @@ fn decode_index_kv_general<'a>(
     columns: &[ColInfo],
 ) -> Result<Vec<Cow<'a, [u8]>>, Error> {
     let segs = split_index_value_for_index_value_version0(value);
-    let (mut result_values, key_suffix) = cut_index_key_new(key, cols_len)?;
-    if !segs.restored_values.is_empty() {
+    let (mut result_values, key_suffix, err) = cut_index_key_new(key, cols_len);
+    err?;
+    if let Some(restored_values) = segs.restored_values {
         // new collation
-        result_values = decode_restored_values(&columns[..cols_len], segs.restored_values)?;
+        result_values = decode_restored_values(&columns[..cols_len], restored_values)?;
     }
     if hd_status == HandleStatus::HandleNotNeeded {
         return Ok(result_values);
     }
 
-    let handle = if !segs.int_handle.is_empty() {
+    let handle = if let Some(int_handle) = segs.int_handle {
         // In unique int handle index.
-        decode_int_handle_in_index_value(segs.int_handle)
-    } else if !segs.common_handle.is_empty() {
+        decode_int_handle_in_index_value(int_handle)
+    } else if let Some(common_handle) = segs.common_handle {
         // In unique common handle index.
-        decode_handle_in_index_key(segs.common_handle)?
+        decode_handle_in_index_key(common_handle)?
     } else {
         // In non-unique index, decode handle in keySuffix
         decode_handle_in_index_key(key_suffix)?
     };
     let handle_bytes = re_encode_handle(&handle, hd_status == HandleStatus::HandleIsUnsigned)?;
     result_values.extend(handle_bytes);
-    if !segs.partition_id.is_empty() {
-        result_values.push(Cow::Owned(partition_id_bytes(segs.partition_id)?));
+    if let Some(partition_id) = segs.partition_id {
+        result_values.push(Cow::Owned(partition_id_bytes(partition_id)?));
     }
     Ok(result_values)
 }

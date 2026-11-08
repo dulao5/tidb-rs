@@ -48,12 +48,21 @@ use super::common::{
 };
 use super::row::Row;
 
-/// `t.ConvertTimeZone(time.UTC, loc)` with Go's nil-location panic.
+/// `t.ConvertTimeZone(time.UTC, loc)` with a Go `*time.Location` that may be nil: Go first
+/// builds the `time.Time` (which fails for an invalid date) and then panics in `Time.In(nil)`.
 // glue: Go *time.Location that may be nil
-fn convert_from_utc(t: &mut Time, loc: Option<&Arc<Location>>) -> Result<(), Error> {
+pub(crate) fn convert_from_utc(t: &mut Time, loc: Option<&Arc<Location>>) -> Result<(), Error> {
     match loc {
         Some(loc) => t.convert_time_zone(&utc(), loc),
-        None => panic!("time: missing Location in call to Time.In"),
+        None => {
+            if t.is_zero() {
+                return Ok(());
+            }
+            // UTC to UTC runs GoTime only: its error is Go's.
+            let mut probe = *t;
+            probe.convert_time_zone(&utc(), &utc())?;
+            panic!("time: missing Location in call to Time.In")
+        }
     }
 }
 
@@ -116,7 +125,8 @@ impl DatumMapDecoder {
         row: Option<HashMap<i64, Datum>>,
     ) -> Result<HashMap<i64, Datum>, Error> {
         let mut row = row.unwrap_or_else(|| HashMap::with_capacity(self.decoder.columns.len()));
-        let r = Row::from_bytes(row_data)?;
+        let mut r = Row::default();
+        r.from_bytes(row_data)?;
         for col in &self.decoder.columns {
             let (idx, is_nil, not_found) = r.find_col_id(col.id);
             if !not_found && !is_nil {
@@ -260,7 +270,8 @@ impl ChunkDecoder {
         handle: Option<&Handle>,
         chk: &mut Chunk,
     ) -> Result<(), Error> {
-        let r = Row::from_bytes(row_data)?;
+        let mut r = Row::default();
+        r.from_bytes(row_data)?;
 
         for (col_idx, col) in self.decoder.columns.iter().enumerate() {
             if col.id == ExtraCommitTSID as i64 {
@@ -489,7 +500,8 @@ impl BytesDecoder {
         value: &[u8],
         cache_bytes: &[u8],
     ) -> Result<Vec<Vec<u8>>, Error> {
-        let r = Row::from_bytes(value)?;
+        let mut r = Row::default();
+        r.from_bytes(value)?;
         let mut values: Vec<Vec<u8>> = vec![Vec::new(); output_offset.len()];
         for (i, col) in self.decoder.columns.iter().enumerate() {
             let tp = field_type2_flag(
