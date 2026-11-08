@@ -72,6 +72,64 @@ impl GlobalVarAccessor for MockGlobalAccessor {
     }
 }
 
+/// The variable-package atomics written by SetGlobal hooks (D05.2 PR B), restored to their
+/// values before the first record (the generator's processGlobalsRestore).
+fn restore_process_globals() {
+    type Restore = Box<dyn Fn() + Send + Sync>;
+    static SNAPSHOT: std::sync::LazyLock<Vec<Restore>> = std::sync::LazyLock::new(|| {
+        let mut v: Vec<Restore> = Vec::new();
+        macro_rules! keep {
+            ($($a:ident),* $(,)?) => {$(
+                let x = tidb_vars::$a.load(SeqCst);
+                v.push(Box::new(move || tidb_vars::$a.store(x, SeqCst)));
+            )*};
+        }
+        keep!(
+            AccelerateUserCreationUpdate,
+            ConnectAttrsSize,
+            EnableBatchDML,
+            EnableCheckConstraint,
+            EnableFastReorg,
+            EnableForeignKey,
+            EnableHistoricalStatsForCapture,
+            EnableInstancePlanCache,
+            EnableNoopVariables,
+            EnableRCReadCheckTS,
+            EnableRowLevelChecksum,
+            EnableTTLJob,
+            EnableTmpStorageOnOOM,
+            ExpensiveQueryTimeThreshold,
+            ExpensiveTxnTimeThreshold,
+            GCMaxWaitTime,
+            IgnoreInlistPlanDigest,
+            MaxUserConnectionsValue,
+            MemQuotaBindingCache,
+            MemoryUsageAlarmKeepRecordNum,
+            PasswordHistory,
+            PasswordReuseInterval,
+            ProcessGeneralLog,
+            QueryLogMaxLen,
+            SchemaVersionCacheLimit,
+            StatsLoadPseudoTimeout,
+            StatsLoadSyncWait,
+            TiFlashEnablePipelineMode,
+            VarTiDBSuperReadOnly
+        );
+        let x = tidb_vars::DDLSlowOprThreshold.load(SeqCst);
+        v.push(Box::new(move || {
+            tidb_vars::DDLSlowOprThreshold.store(x, SeqCst)
+        }));
+        let x = tidb_vars::MemoryUsageAlarmRatio.load();
+        v.push(Box::new(move || tidb_vars::MemoryUsageAlarmRatio.store(x)));
+        let x = tidb_vars::OOMAction.load();
+        v.push(Box::new(move || tidb_vars::OOMAction.store(x.clone())));
+        v
+    });
+    for r in SNAPSHOT.iter() {
+        r();
+    }
+}
+
 /// Puts back the process-wide state the hooks write (the list is in the generator's
 /// resetSysvarAtomics), so that no record depends on an earlier one.
 fn reset_atomics() {
@@ -86,6 +144,7 @@ fn reset_atomics() {
     tidb_vars::RunAutoAnalyze.store(tidb_vars::DefTiDBEnableAutoAnalyze, SeqCst);
     tidb_vars::EnableAutoAnalyzePriorityQueue
         .store(tidb_vars::DefTiDBEnableAutoAnalyzePriorityQueue, SeqCst);
+    restore_process_globals();
 }
 
 fn fresh_vars() -> SessionVars {
@@ -468,7 +527,7 @@ fn replay(path: &str) -> (usize, usize) {
 }
 
 /// The cap on the committed vectors' skipped records (see `govec_sessionvars`).
-const MAX_SKIPPED: usize = 5401;
+const MAX_SKIPPED: usize = 2168;
 
 #[test]
 fn govec_sessionvars() {
