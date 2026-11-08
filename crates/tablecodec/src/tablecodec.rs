@@ -45,8 +45,8 @@ use tidb_codec::{
     decode_int, decode_one, decode_uint, encode_bytes, encode_int, encode_int_to_cmp_uint,
     encode_key, encode_value,
 };
-use tidb_kv::key::{CommonHandle, Handle, IntHandle, Key, KeyRange, new_common_handle};
 use tidb_kv::key::new_partition_handle;
+use tidb_kv::key::{CommonHandle, Handle, IntHandle, Key, KeyRange, new_common_handle};
 use tidb_kv::kv::KeyRanges;
 use tidb_model::{ColumnInfo, GlobalIndexVersionV1, IndexColumn, IndexInfo, TableInfo};
 use tidb_parser::gocharset::{CharsetASCII, CharsetBin};
@@ -56,8 +56,8 @@ use tidb_types::collate::is_bin_collation;
 use tidb_types::context::StrictContext;
 use tidb_types::core_time::ZeroCoreTime;
 use tidb_types::datum::{
-    Datum, KindBinaryLiteral, KindBytes, KindInt64, KindMysqlBit, KindMysqlDuration,
-    KindMysqlEnum, KindMysqlSet, KindMysqlTime, KindString, new_int_datum,
+    Datum, KindBinaryLiteral, KindBytes, KindInt64, KindMysqlBit, KindMysqlDuration, KindMysqlEnum,
+    KindMysqlSet, KindMysqlTime, KindString, new_int_datum,
 };
 use tidb_types::enum_type::parse_enum_value;
 use tidb_types::etc::need_restored_data;
@@ -67,8 +67,7 @@ use tidb_types::time::{Duration, new_time};
 
 use crate::rowcodec::{self, ColInfo};
 
-static errInvalidKey: LazyLock<Error> =
-    LazyLock::new(|| ClassXEval.new_std(errno::ErrInvalidKey));
+static errInvalidKey: LazyLock<Error> = LazyLock::new(|| ClassXEval.new_std(errno::ErrInvalidKey));
 static errInvalidRecordKey: LazyLock<Error> =
     LazyLock::new(|| ClassXEval.new_std(errno::ErrInvalidRecordKey));
 static errInvalidIndexKey: LazyLock<Error> =
@@ -184,7 +183,9 @@ fn has_record_prefix_sep(key: &[u8]) -> bool {
 // go: DecodeRecordKey L1
 pub fn decode_record_key(key: &[u8]) -> Result<(i64, Handle), Error> {
     if key.len() <= prefixLen {
-        return Err(errInvalidRecordKey.gen_with_stack("invalid record key - %q", vec![key_arg(key)]));
+        return Err(
+            errInvalidRecordKey.gen_with_stack("invalid record key - %q", vec![key_arg(key)])
+        );
     }
 
     let k = key;
@@ -378,7 +379,9 @@ pub fn decode_row_key(key: &[u8]) -> Result<Handle, Error> {
         let u = u64::from_be_bytes(key[prefixLen..prefixLen + 8].try_into().unwrap());
         return Ok(Handle::Int(IntHandle(decode_cmp_uint_to_int(u))));
     }
-    Ok(Handle::Common(Arc::new(new_common_handle(key[prefixLen..].to_vec())?)))
+    Ok(Handle::Common(Arc::new(new_common_handle(
+        key[prefixLen..].to_vec(),
+    )?)))
 }
 
 /// EncodeValue encodes a go value to bytes.
@@ -598,7 +601,11 @@ pub fn decode_handle_to_datum_map(
 
 /// decodeHandleToDatum decodes a handle to a specific column datum.
 // go: decodeHandleToDatum L1 [M-ERRVAL]
-fn decode_handle_to_datum(handle: &Handle, ft: &FieldType, idx: usize) -> (Datum, Result<(), Error>) {
+fn decode_handle_to_datum(
+    handle: &Handle,
+    ft: &FieldType,
+    idx: usize,
+) -> (Datum, Result<(), Error>) {
     if handle.is_int() {
         let d = if mysql::has_unsigned_flag(ft.get_flag()) {
             tidb_types::datum::new_uint_datum(handle.int_value() as u64)
@@ -745,7 +752,10 @@ pub fn encode_index_seek_key(table_id: i64, idx_id: i64, encoded_value: &[u8]) -
 /// CutIndexKeyTo cuts encoded index key into colIDs to bytes slices.
 /// The caller should prepare the memory of the result values.
 // go: CutIndexKeyTo L1
-pub fn cut_index_key_to<'a>(key: &'a [u8], values: &mut [Cow<'a, [u8]>]) -> Result<&'a [u8], Error> {
+pub fn cut_index_key_to<'a>(
+    key: &'a [u8],
+    values: &mut [Cow<'a, [u8]>],
+) -> Result<&'a [u8], Error> {
     let mut b = &key[prefixLen + idLen..];
     for v in values.iter_mut() {
         let (val, rest) = cut_one(b)?;
@@ -817,7 +827,11 @@ fn re_encode_handle_to<'a>(
         handle_datum.set_uint64(u);
     }
     let mut int_handle_bytes = buf.to_vec();
-    let err = encode_value(&utc(), &mut int_handle_bytes, std::slice::from_ref(&handle_datum));
+    let err = encode_value(
+        &utc(),
+        &mut int_handle_bytes,
+        std::slice::from_ref(&handle_datum),
+    );
     result.push(Cow::Owned(int_handle_bytes));
     err.map(|_| result)
 }
@@ -887,8 +901,10 @@ fn decode_restored_values_v5<'a>(
             let no_padding_datum = decode_column_value(&results[i], &columns[i].ft, None)?;
             let padding_count_datum =
                 decode_column_value(&new_result, &new_field_type(mysql::TypeLonglong), None)?;
-            let (no_padding_str, padding_count) =
-                (no_padding_datum.get_string(), padding_count_datum.get_int64() as isize);
+            let (no_padding_str, padding_count) = (
+                no_padding_datum.get_string(),
+                padding_count_datum.get_int64() as isize,
+            );
             // Skip if padding count is 0.
             if padding_count == 0 {
                 out.push(results[i].clone());
@@ -969,13 +985,21 @@ fn decode_index_kv_old_collation<'a>(
     if !b.is_empty() {
         // non-unique index
         handle = decode_handle_in_index_key(b)?;
-        result_values =
-            re_encode_handle_to(&handle, hd_status == HandleStatus::HandleIsUnsigned, buf, result_values)?;
+        result_values = re_encode_handle_to(
+            &handle,
+            hd_status == HandleStatus::HandleIsUnsigned,
+            buf,
+            result_values,
+        )?;
     } else {
         // In unique int handle index.
         handle = decode_int_handle_in_index_value(value);
-        result_values =
-            re_encode_handle_to(&handle, hd_status == HandleStatus::HandleIsUnsigned, buf, result_values)?;
+        result_values = re_encode_handle_to(
+            &handle,
+            hd_status == HandleStatus::HandleIsUnsigned,
+            buf,
+            result_values,
+        )?;
     }
     Ok(result_values)
 }
@@ -1007,7 +1031,9 @@ pub fn decode_index_kv_ex<'a>(
         return decode_index_kv_old_collation(key, value, hd_status, buf, pre_alloc);
     }
     if get_index_version(value) == 1 {
-        return decode_index_kv_for_clustered_index_version1(key, value, cols_len, hd_status, columns);
+        return decode_index_kv_for_clustered_index_version1(
+            key, value, cols_len, hd_status, columns,
+        );
     }
     decode_index_kv_general(key, value, cols_len, hd_status, columns)
 }
@@ -1032,7 +1058,9 @@ pub fn decode_index_kv<'a>(
         return decode_index_kv_old_collation(key, value, hd_status, &[], pre_alloc);
     }
     if get_index_version(value) == 1 {
-        return decode_index_kv_for_clustered_index_version1(key, value, cols_len, hd_status, columns);
+        return decode_index_kv_for_clustered_index_version1(
+            key, value, cols_len, hd_status, columns,
+        );
     }
     decode_index_kv_general(key, value, cols_len, hd_status, columns)
 }
@@ -1041,7 +1069,11 @@ pub fn decode_index_kv<'a>(
 ///
 /// `None` is Go's nil handle (from [`decode_handle_in_index_value`]).
 // go: DecodeIndexHandle L1
-pub fn decode_index_handle(key: &[u8], value: &[u8], cols_len: usize) -> Result<Option<Handle>, Error> {
+pub fn decode_index_handle(
+    key: &[u8],
+    value: &[u8],
+    cols_len: usize,
+) -> Result<Option<Handle>, Error> {
     let mut b = &key[prefixLen + idLen..];
     for _ in 0..cols_len {
         let (_, rest) = cut_one(b)?;
@@ -1086,7 +1118,10 @@ fn decode_handle_in_index_key(key_suffix: &[u8]) -> Result<Handle, Error> {
         let (remain, part_id) = decode_int(key_suffix)?;
         // Decode the inner handle
         let inner_handle = decode_handle_in_index_key(remain)?;
-        return Ok(Handle::Partition(new_partition_handle(part_id, inner_handle)));
+        return Ok(Handle::Partition(new_partition_handle(
+            part_id,
+            inner_handle,
+        )));
     }
 
     let (remain, d, err) = decode_one(key_suffix);
@@ -1094,7 +1129,9 @@ fn decode_handle_in_index_key(key_suffix: &[u8]) -> Result<Handle, Error> {
     if remain.is_empty() && d.kind() == KindInt64 {
         return Ok(Handle::Int(IntHandle(d.get_int64())));
     }
-    Ok(Handle::Common(Arc::new(new_common_handle(key_suffix.to_vec())?)))
+    Ok(Handle::Common(Arc::new(new_common_handle(
+        key_suffix.to_vec(),
+    )?)))
 }
 
 /// DecodeHandleInIndexValue decodes handle in unqiue index value.
@@ -1114,7 +1151,9 @@ pub fn decode_handle_in_index_value(value: &[u8]) -> Result<Option<Handle>, Erro
         handle = Some(decode_int_handle_in_index_value(int_handle));
     }
     if let Some(common_handle) = seg.common_handle.filter(|b| !b.is_empty()) {
-        handle = Some(Handle::Common(Arc::new(new_common_handle(common_handle.to_vec())?)));
+        handle = Some(Handle::Common(Arc::new(new_common_handle(
+            common_handle.to_vec(),
+        )?)));
     }
     if let Some(partition_id) = seg.partition_id.filter(|b| !b.is_empty()) {
         let (_, pid) = decode_int(partition_id)?;
@@ -1278,10 +1317,14 @@ pub fn gen_index_key(
         // Only use the new format for version >= V1. Legacy indexes (version 0) use the old format.
         if idx_info.global_index_version >= GlobalIndexVersionV1 {
             if tbl_info.has_clustered_index() {
-                return Err(errors::new("clustered index is not supported in GlobalIndexVersionV1+"));
+                return Err(errors::new(
+                    "clustered index is not supported in GlobalIndexVersionV1+",
+                ));
             }
             let Handle::Partition(ph) = h else {
-                return Err(errors::new("handle is not a PartitionHandle in GlobalIndexVersionV1+"));
+                return Err(errors::new(
+                    "handle is not a PartitionHandle in GlobalIndexVersionV1+",
+                ));
             };
             // Encode as: PartitionIDFlag + partition_id (8 bytes) + inner_handle_encoded
             key.push(PartitionIDFlag);
@@ -1327,7 +1370,11 @@ pub fn is_temp_index_key(index_key: &[u8]) -> bool {
 
 /// TruncateIndexValues truncates the index values created using only the leading part of column values.
 // go: TruncateIndexValues L1
-pub fn truncate_index_values(tbl_info: &TableInfo, idx_info: &IndexInfo, indexed_values: &mut [Datum]) {
+pub fn truncate_index_values(
+    tbl_info: &TableInfo,
+    idx_info: &IndexInfo,
+    indexed_values: &mut [Datum],
+) {
     let idx_cols = idx_info.columns.as_deref().unwrap_or(&[]);
     let tbl_cols = tbl_info.columns.as_deref().unwrap_or(&[]);
     for i in 0..indexed_values.len() {
@@ -1488,7 +1535,8 @@ fn decode_index_kv_for_clustered_index_version1<'a>(
     let (mut result_values, key_suffix, err) = cut_index_key_new(key, cols_len);
     err?;
     if let Some(restored_values) = segs.restored_values {
-        result_values = decode_restored_values_v5(&columns[..cols_len], result_values, restored_values)?;
+        result_values =
+            decode_restored_values_v5(&columns[..cols_len], result_values, restored_values)?;
     }
     if hd_status == HandleStatus::HandleNotNeeded {
         return Ok(result_values);
@@ -1572,11 +1620,35 @@ pub fn verify_table_id_for_ranges(key_ranges: &KeyRanges) -> (Vec<i64>, Result<(
                 return Err(errors::new("Incorrect keyRange is constrcuted"));
             }
             if tid != tmp_tid {
-                return Err(errors::errorf("Using multi partition's ranges as single table's", &[]));
+                return Err(errors::errorf(
+                    "Using multi partition's ranges as single table's",
+                    &[],
+                ));
             }
         }
         Ok(())
     };
     let err = key_ranges.for_each_partition_with_err(collect_func);
     (tids, err)
+}
+
+// glue: the assertion of Go TestError (tablecodec_test.go) on the package's private errors,
+// which the govec records cannot reach.
+#[cfg(test)]
+mod tests {
+    use tidb_base::mysql;
+    use tidb_base::terror::to_sql_error;
+
+    use super::*;
+
+    /// Go `TestError`: every key error converts to its own SQL error code.
+    // glue: test
+    #[test]
+    fn error_codes() {
+        for err in [&*errInvalidKey, &*errInvalidRecordKey, &*errInvalidIndexKey] {
+            let code = to_sql_error(err).code;
+            assert_ne!(code, mysql::ErrUnknown);
+            assert_eq!(err.code() as u16, code);
+        }
+    }
 }
