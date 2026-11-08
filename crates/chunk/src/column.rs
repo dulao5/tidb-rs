@@ -945,7 +945,8 @@ impl Column {
     /// GetDecimal returns the decimal in the specific row.
     ///
     /// Go returns a pointer into the column; this returns a copy (write back with
-    /// [`Column::decimals_mut`]). An image whose `negative` byte is not 0 or 1 panics.
+    /// [`Column::decimals_mut`]). A `negative` byte other than 0 or 1 reads as true, as in
+    /// gc.
     // go: Column.GetDecimal L2 (returns the value, not a pointer into the column)
     pub fn get_decimal(&self, row_id: usize) -> MyDecimal {
         let b: MyDecimalBytes =

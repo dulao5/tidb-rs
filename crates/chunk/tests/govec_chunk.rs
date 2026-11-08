@@ -275,6 +275,43 @@ fn get(r: Row<'_>, ft: &FieldType, col: usize) -> Value {
     Value::Object(out)
 }
 
+/// The strings of a typed column view (`view` step).
+fn view_strings(c: &Column, kind: &str) -> Vec<String> {
+    match kind {
+        "i64" => c.int64s().iter().map(|x| x.get().to_string()).collect(),
+        "u64" => c.uint64s().iter().map(|x| x.get().to_string()).collect(),
+        "f32" => c
+            .float32s()
+            .iter()
+            .map(|x| x.get().to_bits().to_string())
+            .collect(),
+        "f64" => c
+            .float64s()
+            .iter()
+            .map(|x| x.get().to_bits().to_string())
+            .collect(),
+        "dur" => c
+            .go_durations()
+            .iter()
+            .map(|x| x.get().to_string())
+            .collect(),
+        "time" => c
+            .times()
+            .iter()
+            .map(|x| {
+                String::from_utf8(tidb_types::time::Time::from_raw(CoreTime(x.get())).string())
+                    .unwrap()
+            })
+            .collect(),
+        "dec" => c
+            .decimals()
+            .iter()
+            .map(|x| MyDecimal::from_wire(x).unwrap().string())
+            .collect(),
+        k => panic!("view {k}"),
+    }
+}
+
 fn col_dump(col: &Column) -> Value {
     let s = col.govec_state();
     let (eb, ebc) = match s.elem_buf {
@@ -638,41 +675,22 @@ fn step(st: &mut State, a: &[Value]) -> Value {
         }
         "view" => {
             let c = st.chks[&ci(1)].column(ci(2));
-            let out: Vec<String> = match a[3].as_str().unwrap() {
-                "i64" => c.int64s().iter().map(|x| x.get().to_string()).collect(),
-                "u64" => c.uint64s().iter().map(|x| x.get().to_string()).collect(),
-                "f32" => c
-                    .float32s()
-                    .iter()
-                    .map(|x| x.get().to_bits().to_string())
-                    .collect(),
-                "f64" => c
-                    .float64s()
-                    .iter()
-                    .map(|x| x.get().to_bits().to_string())
-                    .collect(),
-                "dur" => c
-                    .go_durations()
-                    .iter()
-                    .map(|x| x.get().to_string())
-                    .collect(),
-                "time" => c
-                    .times()
-                    .iter()
-                    .map(|x| {
-                        String::from_utf8(
-                            tidb_types::time::Time::from_raw(CoreTime(x.get())).string(),
-                        )
-                        .unwrap()
-                    })
-                    .collect(),
-                "dec" => c
-                    .decimals()
-                    .iter()
-                    .map(|x| MyDecimal::from_wire(x).unwrap().string())
-                    .collect(),
-                k => panic!("view {k}"),
+            let kind = a[3].as_str().unwrap();
+            // Go's typed views read past the data's capacity when length * size exceeds it
+            // (spec §4 item 4); the generator records that case instead of the bytes read,
+            // and the port must panic there.
+            let size = match kind {
+                "f32" => 4,
+                "dec" => 40,
+                _ => 8,
             };
+            let dc = c.govec_state().data.1;
+            if c.rows() * size > dc {
+                let r = catch_unwind(AssertUnwindSafe(|| view_strings(c, kind).len()));
+                assert!(r.is_err(), "a view past the capacity must panic");
+                return json!({ "past_cap": [c.rows(), dc] });
+            }
+            let out = view_strings(c, kind);
             let out = if out.is_empty() {
                 Value::Null
             } else {
@@ -961,14 +979,27 @@ fn normalize(mut v: Value) -> Value {
     v
 }
 
+/// The committed vectors, or the files named in `GOVEC_CHUNK_FILES` (comma separated): extra
+/// seeds generated with `govec chunk -seed N -o f.jsonl.gz` (tracker CI does this for a few
+/// seeds; such files are never committed).
 #[test]
 fn govec_chunk() {
-    let path = format!(
-        "{}/tests/vectors/v8.5.8/{GO_TARGET}/chunk.jsonl.gz",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    match std::env::var("GOVEC_CHUNK_FILES") {
+        Ok(files) => {
+            for f in files.split(',').filter(|f| !f.is_empty()) {
+                replay_file(f);
+            }
+        }
+        Err(_) => replay_file(&format!(
+            "{}/tests/vectors/v8.5.8/{GO_TARGET}/chunk.jsonl.gz",
+            env!("CARGO_MANIFEST_DIR")
+        )),
+    }
+}
+
+fn replay_file(path: &str) {
     let mut s = String::new();
-    flate2::read::GzDecoder::new(std::fs::File::open(&path).unwrap())
+    flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
         .read_to_string(&mut s)
         .unwrap();
     let mut lines = s.lines();
@@ -1019,7 +1050,7 @@ fn govec_chunk() {
     }
     std::panic::set_hook(hook);
     assert_eq!(n, header["records"].as_i64().unwrap());
-    assert_eq!(bad, 0, "{bad} of {n} records differ");
+    assert_eq!(bad, 0, "{path}: {bad} of {n} records differ");
 }
 
 fn normalize_one(v: Value) -> Value {

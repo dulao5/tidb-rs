@@ -194,7 +194,7 @@ Rust debug 构建溢出会 panic，所以凡是 Go 可能回绕的地方都写�
 
 ### 2. 线上格式入口
 
-`MyDecimal::from_wire(&[u8; 40]) -> Result<MyDecimal, Error>` 与 `as_wire(&self) -> [u8; 40]`：字节 0–2 为三个 int8，字节 3 为 `negative`，其后 9 个小端 int32（N5a §3.3）。`from_wire` 只检查字节 3 ∈ {0, 1}，否则返回 `ErrBadNumber`（Go 不检查；Rust `bool` 的其他位型是 UB）；其余字段照 Go 不检查。没有 unsafe，没有引入 zerocopy。向量回放对每个十进制结果（22,747 个对象）检查 `as_wire` 等于由 Go 的 `st` 拼出的 40 字节，且 `from_wire` 还原出同一对象；单测覆盖布局和非法 bool。标注是 `glue:`（Go 中对应的是 `util/chunk/column.go` 的 `unsafe.Pointer` 转换，不是 `mydecimal.go` 的函数）。
+`MyDecimal::from_wire(&[u8; 40]) -> Result<MyDecimal, Error>` 与 `as_wire(&self) -> [u8; 40]`：字节 0–2 为三个 int8，字节 3 为 `negative`，其后 9 个小端 int32（N5a §3.3）。`from_wire` 把字节 3 读作 `!= 0`（Rust `bool` 只能是 0 或 1；gc 对从内存读出的 bool 按整字节测试，`0x95` 在 Go 中按负数打印，D01.7 评审中用随机字节验证；最初的实现对 0/1 以外返回 `ErrBadNumber`）；其余字段照 Go 不检查。没有 unsafe，没有引入 zerocopy。向量回放对每个十进制结果（22,747 个对象）检查 `as_wire` 等于由 Go 的 `st` 拼出的 40 字节，且 `from_wire` 还原出同一对象；单测覆盖布局和非法 bool。标注是 `glue:`（Go 中对应的是 `util/chunk/column.go` 的 `unsafe.Pointer` 转换，不是 `mydecimal.go` 的函数）。
 
 ### 3. 回绕点
 

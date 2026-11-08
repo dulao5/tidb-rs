@@ -84,7 +84,7 @@ A1 删除复用池：`NewAllocator`、`NewSyncAllocator`、`NewReuseHookAllocato
 
 ## 4. 已知差异
 
-1. `Column.GetDecimal` / `Row.GetMyDecimal` 返回值而不是指向列内的指针；要写回用 `decimals_mut()`。`negative` 字节不是 0 或 1 时 panic（Go 不检查）。
+1. `Column.GetDecimal` / `Row.GetMyDecimal` 返回值而不是指向列内的指针；要写回用 `decimals_mut()`。`negative` 字节按 `!= 0` 读（与 gc 一致，Go 不检查；随机字节由 `set_raw` 覆盖，见评审）。
 2. `Row.CopyConstruct` 返回新的一行 chunk（其第 0 行就是 Go 的结果）。
 3. `ColumnSwapHelper` 的合并结果用 `OnceLock` 保存，对应 Go 的 `atomic.Pointer` 加 `CompareAndSwap(nil, …)`（第一个写入者生效）。
 4. Go 读到切片容量之外的地方（未定义行为），Rust panic。
