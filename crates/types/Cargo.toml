@@ -39,3 +39,7 @@ workspace = true
 [[bench]]
 name = "json"
 harness = false
+
+[[bench]]
+name = "datum"
+harness = false
