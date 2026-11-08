@@ -680,7 +680,8 @@ fn v_tidb_server_memory_limit_gc_trigger(
         }
     };
     let gogc_tuner_threshold = GOGCTunerThreshold.load();
-    if !(0.51..=1.0).contains(&float_value) {
+    // Go `floatValue < 0.51 || floatValue > 1`: NaN passes.
+    if float_value < 0.51 || float_value > 1.0 {
         // 51% ~ 100%
         return fail(
             "",
