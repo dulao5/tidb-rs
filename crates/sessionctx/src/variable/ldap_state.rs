@@ -71,11 +71,12 @@ impl LdapAuthImpl {
         let ca_cert = match tidb_base::gostd::os::open_read_all(s.ca_path.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
-                // Go formats `caCert` (nil after the failed read) instead of the path:
-                // "read ca certificate at : open <path>: <errno>".
-                return Err(errors::new(
-                    [b"read ca certificate at : ".as_slice(), &e].concat(),
-                ));
+                // Go returns `errors.Wrapf(err, "read ca certificate at %s", caCert)` (formatting
+                // the nil `caCert`, not the path; tidb-rs #64). The server writes
+                // `errors.Cause(err)` to the client, so the client sees only the os error
+                // "open <path>: <errno>"; the Wrapf text reaches Go's log only. M-ERR ports
+                // the wrapper away: the client-visible error is returned.
+                return Err(errors::new(e));
             }
         };
         // x509.CertPool.AppendCertsFromPEM: true when at least one PEM "CERTIFICATE" block

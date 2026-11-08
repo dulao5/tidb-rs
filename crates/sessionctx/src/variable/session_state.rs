@@ -298,9 +298,13 @@ pub fn to_exchange_compression_mode(name: &str) -> (i64, bool) {
 
 /// ParseToMap parses the user input to an optimizer fix control map.
 ///
-/// Go indexes `s[0]` after the value's colon without a length check: `"1:"` panics (index
-/// out of range). The panic is kept (records with `{"name":"panic"}` in govec).
+/// v8.5.8 indexes `s[0]` after the value's colon without a length check, so `"1:"` panics
+/// (index out of range). Upstream fixed it on master (pingcap/tidb#65884, not backported to
+/// release-8.5): an empty value after the colon is the value `""`, no error, no warning. The
+/// fix is ported (constitution R1, as #67149); govec generates these records with the fix
+/// applied (tracker `scripts/govec-fixes.sh`).
 // go-dep: github.com/pingcap/tidb/pkg/planner/util/fixcontrol.ParseToMap L1
+// go-fix: pingcap/tidb@811a10e115 #65884
 pub fn parse_to_map(s: &str) -> Result<(HashMap<u64, String>, Vec<String>), Error> {
     let mut m: HashMap<u64, String> = HashMap::new();
     let mut warn_msgs = Vec::new();
@@ -319,8 +323,10 @@ pub fn parse_to_map(s: &str) -> Result<(HashMap<u64, String>, Vec<String>), Erro
         s = s[colon_idx + 1..].trim();
         let mut value = "";
         // if it starts with quote, we need to find the closing quote, and the content between is the value for this fix
-        let first = s.as_bytes()[0];
-        if first == b'\'' || first == b'"' {
+        // NOTE: s can be empty here for inputs like "123:", so guard the index access.
+        // (go-fix pingcap/tidb#65884: v8.5.8 indexes s[0] unguarded and panics.)
+        let first = s.as_bytes().first().copied();
+        if let Some(first @ (b'\'' | b'"')) = first {
             let quote = first as char;
             let Some(end_idx) = s[1..].find(quote) else {
                 return Err(tidb_base::errors::new(

@@ -13,7 +13,6 @@
 
 #![allow(non_upper_case_globals)]
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 
 use tidb_base::Error;
@@ -38,9 +37,7 @@ const DefaultSlowThreshold: i64 = 300;
 /// Clones the global config, applies `f` and stores the copy (see the module docs).
 // glue: in-place write of a plain field of the global *Config (M-SNAP)
 fn update_global_config(f: impl FnOnce(&mut config::Config)) {
-    let mut c = (**config::get_global_config()).clone();
-    f(&mut c);
-    config::store_global_config(Arc::new(c));
+    config::update_global_config(f);
 }
 
 /// `strconv.ParseInt(s, 10, 64)` with Go's error.
