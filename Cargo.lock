@@ -3828,6 +3828,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-sessionctx"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "parking_lot 0.12.5",
+ "serde_json",
+ "tidb-base",
+ "tidb-memory",
+ "tidb-parser",
+ "tidb-types",
+]
+
+[[package]]
 name = "tidb-sql"
 version = "0.0.0"
 dependencies = [
