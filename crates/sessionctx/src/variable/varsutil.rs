@@ -281,16 +281,16 @@ pub fn tidb_opt_on(opt: &str) -> bool {
 }
 
 /// OffInt is used by TiDBOptOnOffWarn
-pub const OffInt: i32 = 0;
+pub const OffInt: i64 = 0;
 /// OnInt is used TiDBOptOnOffWarn
-pub const OnInt: i32 = 1;
+pub const OnInt: i64 = 1;
 /// WarnInt is used by TiDBOptOnOffWarn
-pub const WarnInt: i32 = 2;
+pub const WarnInt: i64 = 2;
 
 /// TiDBOptOnOffWarn converts On/Off/Warn to an int.
 /// It is used for MultiStmtMode and NoopFunctionsMode
 // go: TiDBOptOnOffWarn L1
-pub fn tidb_opt_on_off_warn(opt: &str) -> i32 {
+pub fn tidb_opt_on_off_warn(opt: &str) -> i64 {
     match opt {
         Warn => WarnInt,
         On => OnInt,

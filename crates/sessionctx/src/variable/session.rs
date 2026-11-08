@@ -89,20 +89,28 @@ pub struct SessionVars {
     pub global_vars_accessor: Box<dyn GlobalVarAccessor>,
     /// systems variables, don't modify it directly, use GetSystemVar/SetSystemVar method.
     pub(crate) systems: HashMap<String, String>,
-    /// SysWarningCount is the system variable "warning_count".
-    pub sys_warning_count: usize,
-    /// SysErrorCount is the system variable "error_count".
-    pub sys_error_count: u16,
-    /// NoopFuncsMode allows OFF/ON/WARN values as 0/1/2.
-    pub noop_funcs_mode: i32,
-    /// allowMPPExecution means if we should use mpp way to execute query.
-    pub(crate) allow_mpp_execution: bool,
-    /// ForeignKeyChecks indicates whether to enable foreign key constraint check.
-    pub foreign_key_checks: bool,
+    /// The scalar fields of Go's `SessionVars` (generated, D05.2 T2), reached through
+    /// `Deref` as Go code reads them on the struct itself.
+    pub fields: super::session_fields::SessionVarsFields,
     /// TimeZone is the time zone of the session (`nil`: the system location).
     pub time_zone: Option<Arc<Location>>,
     /// TLSConnectionState is the TLS state of the connection (only its presence is read here).
     pub tls_connection_state: Option<()>,
+}
+
+impl std::ops::Deref for SessionVars {
+    type Target = super::session_fields::SessionVarsFields;
+    // glue: Go reads the scalar fields on SessionVars itself
+    fn deref(&self) -> &Self::Target {
+        &self.fields
+    }
+}
+
+impl std::ops::DerefMut for SessionVars {
+    // glue: Go writes the scalar fields on SessionVars itself
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.fields
+    }
 }
 
 impl SessionVars {
@@ -113,13 +121,7 @@ impl SessionVars {
             stmt_ctx: StatementContext::default(),
             global_vars_accessor,
             systems: HashMap::new(),
-            sys_warning_count: 0,
-            sys_error_count: 0,
-            noop_funcs_mode: super::varsutil::tidb_opt_on_off_warn(
-                super::tidb_vars::DefTiDBEnableNoopFuncs,
-            ),
-            allow_mpp_execution: super::tidb_vars::DefTiDBAllowMPPExecution,
-            foreign_key_checks: super::tidb_vars::DefTiDBForeignKeyChecks,
+            fields: super::session_fields::SessionVarsFields::default(),
             time_zone: None,
             tls_connection_state: None,
         }

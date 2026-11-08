@@ -8,6 +8,7 @@ pub mod names;
 pub mod removed;
 pub mod sequence_state;
 pub mod session;
+pub mod session_fields;
 pub(crate) mod setvar_affect;
 pub mod statusvar;
 pub mod sysvar_data;
