@@ -57,7 +57,6 @@ blocks = ["D14.0"]
 
 [crate.tidb-codec]
 rank = 4
-planned = true
 blocks = ["D01.8"]   # util/codec
 
 [crate.tidb-tablecodec]
@@ -194,4 +193,6 @@ crates = [
 # third_party/ 下的包（vendored TiKV crate 及其 shim）按路径识别，不在此登记。
 # 它们只复用字节格式；layered crate 要使用，必须在这里列出，并在 PR 中说明理由。
 [third_party.users]
-tidb-codec = ["codec"]
+# codec / tidb_query_datatype: dev-dependencies only, the byte-for-byte TiKV oracle of
+# crates/codec/tests/tikv_oracle.rs (D01.8 spec §2: L1 port, TiKV as a test oracle).
+tidb-codec = ["codec", "tidb_query_datatype"]

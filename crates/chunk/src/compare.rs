@@ -1,8 +1,8 @@
 //! go-file: pkg/util/chunk/compare.go
 //!
-//! Row value comparison (N5a 3.1: L1). `types.BinaryLiteral.Compare` is reproduced on
-//! borrowed bytes in [`binary_literal_compare`] (the ported method takes an owned
-//! `BinaryLiteral`; a comparator must not allocate per call).
+//! Row value comparison (N5a 3.1: L1). `cmpBit` calls `types.BinaryLiteral.Compare` through
+//! its borrowed-bytes form [`binary_literal::compare_bytes`] (a comparator must not allocate
+//! per call).
 
 // Datum kinds keep their Go names (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -11,6 +11,7 @@ use std::cmp::Ordering;
 
 use tidb_base::mysql;
 use tidb_parser::types::FieldType;
+use tidb_types::binary_literal;
 use tidb_types::collate;
 use tidb_types::compare::compare_string;
 use tidb_types::datum::Datum;
@@ -207,37 +208,7 @@ fn cmp_bit(l: Row<'_>, l_col: usize, r: Row<'_>, r_col: usize) -> isize {
     if l_null || r_null {
         return cmp_null(l_null, r_null);
     }
-    binary_literal_compare(l.get_bytes(l_col), r.get_bytes(r_col))
-}
-
-/// `types.BinaryLiteral(b).Compare(types.BinaryLiteral(b2))`: compares after trimming
-/// leading zero bytes, the longer value is larger.
-// glue: types.BinaryLiteral.Compare and trimLeadingZeroBytes on borrowed bytes (no allocation per comparison)
-fn binary_literal_compare(b: &[u8], b2: &[u8]) -> isize {
-    let trim = |x: &[u8]| -> usize {
-        // trimLeadingZeroBytes keeps at least one byte.
-        if x.is_empty() {
-            return 0;
-        }
-        let mut pos = 0;
-        let end = x.len() - 1;
-        while pos < end && x[pos] == 0 {
-            pos += 1;
-        }
-        pos
-    };
-    let (buf_b, buf_b2) = (&b[trim(b)..], &b2[trim(b2)..]);
-    if buf_b.len() > buf_b2.len() {
-        return 1;
-    }
-    if buf_b.len() < buf_b2.len() {
-        return -1;
-    }
-    match buf_b.cmp(buf_b2) {
-        Ordering::Less => -1,
-        Ordering::Equal => 0,
-        Ordering::Greater => 1,
-    }
+    binary_literal::compare_bytes(l.get_bytes(l_col), r.get_bytes(r_col))
 }
 
 // go: cmpJSON L1
