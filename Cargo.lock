@@ -3855,6 +3855,7 @@ dependencies = [
  "tidb-base",
  "tidb-kv",
  "tidb-memory",
+ "tidb-model",
  "tidb-parser",
  "tidb-types",
 ]
