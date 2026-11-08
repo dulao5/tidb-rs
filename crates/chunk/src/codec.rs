@@ -9,7 +9,7 @@
 // Go names for package-level constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
-use std::sync::Arc;
+use triomphe::Arc;
 
 use bytes::Bytes;
 use tidb_base::mysql;
@@ -78,45 +78,50 @@ impl Codec {
 
     /// Decode decodes a Chunk from a byte slice, return the remained unused bytes.
     // go: Codec.Decode L1
-    pub fn decode(&self, mut buffer: Bytes) -> (Chunk, Bytes) {
+    pub fn decode(&self, buffer: Bytes) -> (Chunk, Bytes) {
         let mut chk = Chunk::default();
+        let mut pos = 0;
         let mut ordinal = 0;
-        while !buffer.is_empty() {
+        while pos < buffer.len() {
             let mut col = Column::zero(ColAlloc::Global);
-            buffer = self.decode_column(buffer, &mut col, ordinal);
+            pos = self.decode_column(&buffer, pos, &mut col, ordinal);
             chk.columns.get_or_insert_with(Vec::new).push(Arc::new(col));
             ordinal += 1;
         }
-        (chk, buffer)
+        (chk, buffer.slice(pos..))
     }
 
     /// DecodeToChunk decodes a Chunk from a byte slice, return the remained unused bytes.
     // go: Codec.DecodeToChunk L1
-    pub fn decode_to_chunk(&self, mut buffer: Bytes, chk: &mut Chunk) -> Bytes {
+    pub fn decode_to_chunk(&self, buffer: Bytes, chk: &mut Chunk) -> Bytes {
+        let mut pos = 0;
         for i in 0..chk.num_cols() {
             let col = col_mut(&mut chk.cols_mut()[i]);
-            buffer = self.decode_column(buffer, col, i);
+            pos = self.decode_column(&buffer, pos, col, i);
         }
-        buffer
+        buffer.slice(pos..)
     }
 
     /// decodeColumn decodes a Column from a byte slice, return the remained unused bytes.
+    ///
+    /// The input is `buffer[pos..]`; the result is the position of the remaining bytes (Go
+    /// returns the remaining slice).
     // go: Codec.decodeColumn L2 (M-POOL: no avoidReusing; the buffers are shared slices, N5a 3.4)
-    fn decode_column(&self, mut buffer: Bytes, col: &mut Column, ordinal: usize) -> Bytes {
+    fn decode_column(&self, buffer: &Bytes, mut pos: usize, col: &mut Column, ordinal: usize) -> usize {
         // Todo(Shenghui Wu): Optimize all data is null.
         // decode length.
-        col.length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
-        buffer = buffer.slice(4..);
+        col.length = u32::from_le_bytes(buffer[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
 
         // decode nullCount.
-        let null_count = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
-        buffer = buffer.slice(4..);
+        let null_count = u32::from_le_bytes(buffer[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
 
         // decode nullBitmap.
         if null_count > 0 {
             let num_null_bitmap_bytes = col.length.div_ceil(8);
-            col.null_bitmap = GoSlice::shared(buffer.slice(..num_null_bitmap_bytes));
-            buffer = buffer.slice(num_null_bitmap_bytes..);
+            col.null_bitmap = GoSlice::shared(buffer.slice(pos..pos + num_null_bitmap_bytes));
+            pos += num_null_bitmap_bytes;
         } else {
             self.set_all_not_null(col);
         }
@@ -126,8 +131,8 @@ impl Codec {
         let mut num_data_bytes = num_fixed_bytes * col.length as isize;
         if num_fixed_bytes == -1 {
             let num_offset_bytes = (col.length + 1) * 8;
-            col.offsets = bytes_to_i64_slice(buffer.slice(..num_offset_bytes));
-            buffer = buffer.slice(num_offset_bytes..);
+            col.offsets = bytes_to_i64_slice(buffer.slice(pos..pos + num_offset_bytes));
+            pos += num_offset_bytes;
             num_data_bytes = col.offsets.i64_at(col.length) as isize;
         } else if col.elem_buf.map_or(0, |e| e_cap(&e)) < num_fixed_bytes as usize {
             col.elem_buf = Some(make_elem_buf(num_fixed_bytes as usize));
@@ -135,10 +140,10 @@ impl Codec {
 
         // decode data.
         let n = num_data_bytes as usize;
-        col.data = GoSlice::shared(buffer.slice(..n));
+        col.data = GoSlice::shared(buffer.slice(pos..pos + n));
         // The column reference the data of the grpc response, the memory of the grpc message
         // cannot be GCed if we reuse this column (Go sets avoidReusing; no pool here, M-POOL).
-        buffer.slice(n..)
+        pos + n
     }
 
     // go: Codec.setAllNotNull L1

@@ -325,16 +325,26 @@ impl<const E: usize> GoSlice<E> {
 
     /// The owned vector, copying a shared buffer (its whole capacity) first.
     // glue: copy on write of a shared buffer (N5a 3.2)
+    #[inline(always)]
     fn owned(&mut self) -> &mut AVec<u8, ColAlloc> {
+        if !matches!(self.store, Store::Owned(_)) {
+            self.unshare();
+        }
+        match &mut self.store {
+            Store::Owned(v) => v,
+            Store::Shared(_) => unreachable!(),
+        }
+    }
+
+    // glue: copy on write of a shared buffer (N5a 3.2)
+    #[cold]
+    #[inline(never)]
+    fn unshare(&mut self) {
         if let Store::Shared(b) = &self.store {
             let mut v = AVec::with_capacity_in(self.cap * E, ColAlloc::Global);
             v.extend_from_slice(&b[..self.cap * E]);
             self.store = Store::Owned(v);
             self.start = 0;
-        }
-        match &mut self.store {
-            Store::Owned(v) => v,
-            Store::Shared(_) => unreachable!(),
         }
     }
 
@@ -375,8 +385,30 @@ impl<const E: usize> GoSlice<E> {
 
     /// `s = append(s, src...)` (`src.len()` a multiple of `E`).
     // glue: Go append
-    #[inline]
+    #[inline(always)]
     pub(crate) fn append(&mut self, src: &[u8]) {
+        let new_len = self.len + src.len() / E;
+        if new_len <= self.cap
+            && let Store::Owned(v) = &mut self.store
+        {
+            let at = self.start + self.len * E;
+            // Small fixed sizes (one element of a fixed-length column) without a memcpy call.
+            match src.len() {
+                8 => v[at..at + 8].copy_from_slice(&<[u8; 8]>::try_from(src).unwrap()),
+                4 => v[at..at + 4].copy_from_slice(&<[u8; 4]>::try_from(src).unwrap()),
+                1 => v[at] = src[0],
+                n => v[at..at + n].copy_from_slice(src),
+            }
+            self.len = new_len;
+            return;
+        }
+        self.append_slow(src);
+    }
+
+    // glue: Go append (growth or copy on write)
+    #[cold]
+    #[inline(never)]
+    fn append_slow(&mut self, src: &[u8]) {
         let n = src.len() / E;
         if self.len + n > self.cap {
             self.grow(self.len + n);
@@ -399,16 +431,22 @@ impl<const E: usize> GoSlice<E> {
 
     /// Byte `i` (`E = 1`).
     // glue: Go index
-    #[inline]
+    #[inline(always)]
     pub(crate) fn at(&self, i: usize) -> u8 {
-        self.bytes()[i]
+        assert!(i < self.len, "index out of range [{i}] with length {}", self.len);
+        match &self.store {
+            Store::Owned(v) => v[self.start + i],
+            Store::Shared(b) => b[i],
+        }
     }
 
     /// `&mut s[i]` (`E = 1`).
     // glue: Go index (write)
-    #[inline]
+    #[inline(always)]
     pub(crate) fn at_mut(&mut self, i: usize) -> &mut u8 {
-        &mut self.bytes_mut()[i]
+        assert!(i < self.len, "index out of range [{i}] with length {}", self.len);
+        let start = self.start;
+        &mut self.owned()[start + i]
     }
 }
 
@@ -417,7 +455,8 @@ impl GoSlice<8> {
     // glue: Go index of []int64 (little-endian storage)
     #[inline]
     pub(crate) fn i64_at(&self, i: usize) -> i64 {
-        let b = self.bytes();
+        assert!(i < self.len, "index out of range [{i}] with length {}", self.len);
+        let b = self.capb();
         i64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap())
     }
 

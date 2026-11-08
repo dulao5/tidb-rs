@@ -14,7 +14,7 @@
 // Go names for package-level constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
-use std::sync::Arc;
+use triomphe::Arc;
 
 use tidb_base::Error;
 use tidb_base::errors;
@@ -75,9 +75,9 @@ pub const ZeroCapacity: usize = 0;
 #[inline]
 pub(crate) fn col_mut(a: &mut Arc<Column>) -> &mut Column {
     debug_assert!(
-        Arc::strong_count(a) == 1,
+        Arc::count(a) == 1,
         "write to a chunk column shared by {} owners (N5a 3.2)",
-        Arc::strong_count(a)
+        Arc::count(a)
     );
     Arc::make_mut(a)
 }
@@ -503,9 +503,10 @@ impl Chunk {
     // go: Chunk.AppendPartialRow L1
     pub fn append_partial_row(&mut self, col_off: usize, row: Row<'_>) {
         self.append_sel(col_off);
-        for (i, row_col) in row.chunk().cols().iter().enumerate() {
-            let chk_col = self.column_mut(col_off + i);
-            append_cell_by_cell(chk_col, row_col, row.idx());
+        let src = row.chunk().cols();
+        let dst = &mut self.cols_mut()[col_off..col_off + src.len()];
+        for (chk_col, row_col) in dst.iter_mut().zip(src) {
+            append_cell_by_cell(col_mut(chk_col), row_col, row.idx());
         }
     }
 

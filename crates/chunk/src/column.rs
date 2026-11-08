@@ -312,6 +312,7 @@ impl Column {
 
     /// `&mut c.elemBuf[0]` as a byte slice (Go indexes it, so a nil or empty buffer panics).
     // glue: Go unsafe.Pointer(&c.elemBuf[0])
+    #[inline(always)]
     fn elem_buf_mut(&mut self) -> &mut [u8] {
         let eb = self
             .elem_buf
@@ -418,7 +419,7 @@ impl Column {
     }
 
     // go: Column.appendNullBitmap L1
-    #[inline]
+    #[inline(always)]
     pub(crate) fn append_null_bitmap_inner(&mut self, not_null: bool) {
         let idx = self.length >> 3;
         if idx >= self.null_bitmap.len() {
@@ -516,7 +517,7 @@ impl Column {
     #[inline]
     pub(crate) fn finish_append_fixed(&mut self) {
         let eb = self.elem_buf.as_ref().unwrap();
-        self.data.append(eb.bytes());
+        self.data.append(&eb.b[..eb.len]);
         self.append_null_bitmap_inner(true);
         self.length += 1;
     }

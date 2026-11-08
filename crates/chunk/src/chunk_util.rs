@@ -234,7 +234,7 @@ impl ColumnSwapHelper {
             if i >= cols.len() {
                 return i;
             }
-            (0..i).find(|&j| std::sync::Arc::ptr_eq(&cols[j], &cols[i])).unwrap_or(i)
+            (0..i).find(|&j| triomphe::Arc::ptr_eq(&cols[j], &cols[i])).unwrap_or(i)
         };
         let mut keys: Vec<usize> = input_idx_to_output_idxes.keys().copied().collect();
         keys.sort_unstable();

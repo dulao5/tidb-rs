@@ -266,7 +266,7 @@ fn dump(c: &Chunk) -> Value {
     for i in 0..n {
         let mut a = i;
         for j in 0..i {
-            if Arc::ptr_eq(c.column_arc(j), c.column_arc(i)) {
+            if triomphe::Arc::ptr_eq(c.column_arc(j), c.column_arc(i)) {
                 a = j;
                 break;
             }
@@ -498,7 +498,7 @@ fn step(st: &mut State, a: &[Value]) -> Value {
                     *d.column_mut(ci(2)) = r;
                 } else {
                     let r = if recon { src.copy_reconstruct(sel.as_deref(), None) } else { src.copy_construct(None) };
-                    d.set_col(ci(2), Arc::new(r));
+                    d.set_col(ci(2), triomphe::Arc::new(r));
                 }
             });
         }
