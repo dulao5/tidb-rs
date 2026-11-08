@@ -3587,6 +3587,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-chunk"
+version = "0.0.0"
+dependencies = [
+ "allocator-api2",
+ "bytes",
+ "criterion 0.5.1",
+ "flate2",
+ "parking_lot 0.12.5",
+ "serde_json",
+ "tidb-base",
+ "tidb-memory",
+ "tidb-parser",
+ "tidb-types",
+ "tikv-jemallocator",
+ "triomphe",
+ "zerocopy",
+]
+
+[[package]]
 name = "tidb-distsql"
 version = "0.0.0"
 dependencies = [
@@ -4348,6 +4367,16 @@ dependencies = [
 [[package]]
 name = "tracker"
 version = "0.1.0"
+
+[[package]]
+name = "triomphe"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc"
+dependencies = [
+ "serde",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "try-lock"

@@ -3,7 +3,6 @@
 //! Only `TestReset`: the other tests of the Go file are table tests whose tables govec
 //! replays (`tests/govec_decimal.rs`, see the tracker's govec README).
 
-use crate::errors::ErrBadNumber;
 use crate::mydecimal::{MyDecimal, decimal_add};
 
 // go: TestReset L1
@@ -33,7 +32,7 @@ fn test_reset() {
 
 // glue: from_wire/as_wire have no Go counterpart (Go casts the chunk bytes with unsafe).
 #[test]
-fn wire_round_trip_and_invalid_bool() {
+fn wire_round_trip_and_non_bool_negative_byte() {
     let mut d = MyDecimal::default();
     assert!(d.from_string(b"-123456789012.000000000345").is_ok());
     let w = d.as_wire();
@@ -45,15 +44,16 @@ fn wire_round_trip_and_invalid_bool() {
     assert_eq!(&w[16..20], &345_000_000i32.to_le_bytes());
     assert_eq!(MyDecimal::from_wire(&w), Ok(d));
 
-    for b in [2u8, 0x80, 0xff] {
+    // A negative byte other than 0/1 reads as true, as gc tests the whole byte (D01.7
+    // review: Go prints such a corrupted image as negative).
+    for b in [2u8, 0x80, 0x95, 0xff] {
         let mut bad = w;
         bad[3] = b;
-        assert_eq!(
-            MyDecimal::from_wire(&bad),
-            Err(ErrBadNumber.clone()),
-            "negative byte {b}"
-        );
+        assert_eq!(MyDecimal::from_wire(&bad), Ok(d), "negative byte {b}");
     }
+    let mut pos = w;
+    pos[3] = 0;
+    assert!(!MyDecimal::from_wire(&pos).unwrap().is_negative());
     // Other fields are not checked (as Go): a negative digitsInt is taken as is.
     let mut odd = w;
     odd[0] = 0xf7;

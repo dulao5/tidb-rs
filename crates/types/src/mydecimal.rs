@@ -336,16 +336,14 @@ impl MyDecimal {
     /// this assumes a little-endian target (asserted at compile time).
     ///
     /// Go reinterprets the bytes with `*(*MyDecimal)(unsafe.Pointer(&b[0]))` and checks
-    /// nothing. Here byte 3 must be 0 or 1, the only valid bit patterns of a Rust `bool`;
-    /// anything else is `ErrBadNumber`. The other fields are not checked, as in Go: invalid
-    /// values behave (or panic) later exactly as they do in Go.
+    /// nothing. A Rust `bool` must be 0 or 1, so byte 3 is read as `byte != 0`: gc tests a
+    /// `bool` loaded from memory as a whole byte (`if d.negative`), so a corrupted image
+    /// with e.g. `0x95` prints as negative in Go too (D01.7 review; replayed over random
+    /// images). The other fields are not checked, as in Go: invalid values behave (or
+    /// panic) later exactly as they do in Go. Never fails; the `Result` is kept for callers.
     // glue: Go's unsafe.Pointer cast of a chunk column element (util/chunk/column.go), N5a
     pub fn from_wire(b: &[u8; MY_DECIMAL_STRUCT_SIZE]) -> Result<MyDecimal, Error> {
-        let negative = match b[3] {
-            0 => false,
-            1 => true,
-            _ => return Err(ErrBadNumber.share()),
-        };
+        let negative = b[3] != 0;
         let mut word_buf = [0i32; MAX_WORD_BUF_LEN];
         for (i, w) in word_buf.iter_mut().enumerate() {
             let at = 4 + 4 * i;

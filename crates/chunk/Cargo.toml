@@ -1,0 +1,43 @@
+[package]
+name = "tidb-chunk"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/util/chunk (block D01.7: Chunk, Column, Row, Codec, List; column format per N5a, memory per A1)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR).
+tidb-base = { workspace = true }
+# FieldType, EvalType (pkg/parser/types, block D02.3).
+tidb-parser = { workspace = true }
+# MyDecimal, Time, Duration, BinaryJSON, VectorFloat32, collations.
+tidb-types = { workspace = true }
+# memory.Tracker (List) and the A1 allocator TrackedAlloc (N5a 3.7, M-MEM).
+tidb-memory = { workspace = true }
+# Owned column buffers are allocator_api2 vectors (TrackedAlloc implements its Allocator).
+allocator-api2 = "0.2"
+# Shared column buffers: zero-copy slices of a coprocessor response (N5a 3.2, 3.4).
+bytes = "1"
+# Unaligned little-endian views of fixed-length columns (N5a 3.3, D24).
+zerocopy = "0.8"
+# Arc<Column> without weak references: uniqueness checks are a load, not a compare-exchange
+# (std Arc::get_mut / make_mut CAS the weak count on every column write; N5a 3.2).
+triomphe = "0.1"
+# Go sync.Mutex of syncAllocator (mapping rule M-LOCK).
+parking_lot = "0.12"
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+criterion = "0.5"
+tikv-jemallocator = { workspace = true }
+
+[[bench]]
+name = "chunk"
+harness = false
+
+[lints]
+workspace = true
