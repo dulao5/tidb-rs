@@ -3587,6 +3587,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-chunk"
+version = "0.0.0"
+dependencies = [
+ "allocator-api2",
+ "bytes",
+ "criterion 0.5.1",
+ "flate2",
+ "parking_lot 0.12.5",
+ "serde_json",
+ "tidb-base",
+ "tidb-memory",
+ "tidb-parser",
+ "tidb-types",
+ "tikv-jemallocator",
+ "zerocopy",
+]
+
+[[package]]
 name = "tidb-distsql"
 version = "0.0.0"
 dependencies = [

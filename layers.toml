@@ -44,7 +44,6 @@ blocks = ["D06.1"]
 
 [crate.tidb-chunk]
 rank = 3
-planned = true
 blocks = ["D01.7", "D01.10"]
 
 [crate.tidb-kv]
