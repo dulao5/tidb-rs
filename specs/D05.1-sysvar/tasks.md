@@ -5,6 +5,6 @@
 - [x] T3 93 个 Validation 钩子
 - [x] T4 varsutil.go、tidb_vars.go（校验用到的部分）、statusvar.go、removed.go、sequence_state.go、setvar_affect.go
 - [x] T5 govec sysvar 领域与回放；minelits；多种子；反证
-- [ ] T6 amd64 向量（tracker CI 产物）
+- [x] T6 amd64 向量（tracker CI 产物，与 arm64 记录相同）
 - [ ] T7（D05.2）`session.rs` 桩替换为真实 `SessionVars`；会话钩子；FromHook 方法
 - [ ] T8（D02.2）`init_connect` 校验改用忠实的解析驱动
