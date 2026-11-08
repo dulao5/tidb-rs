@@ -57,7 +57,7 @@
 |---|---|---|--:|--:|---|
 | L1 | [D00.2](D00.2-base/spec.md) | 常量、错误码与配置（parser/mysql、terror、errno、dbterror、config）。**P1 第一个块**：几乎所有块都引用错误码；`parser/mysql` 的常量放进一个不依赖语法表生成的小 crate | 1,281 | 13 | — |
 | L1 | [D01.6](D01.6-vector/spec.md) | Vector 类型 | 409 | 2 | — |
-| L1 | D01.7 | Chunk 与列存（列格式按 N5a，内存部分按 A1） | 3,082 | 11 | D01.5(11), D15.1(10) |
+| L1 | [D01.7](D01.7-chunk/spec.md) | Chunk 与列存（列格式按 N5a，内存部分按 A1；2026-11-08 复用池内部按 M-POOL 归 X，349 → 330 个函数；crate `tidb-chunk`，converge 276/330，其余等 D01.1 / D01.10） | 3,082 | 11 | D01.5(11), D15.1(10) |
 | L1 | [D01.9](D01.9-collation/spec.md) | Collation 与字符集 | 637 | 10 | — |
 | L1 | D07.0 | kv 接口与 key 类型（pkg/kv） | 1,348 | 15 | — |
 | L1 | D08.1 | 表达式框架（Expression、Column、Constant、ScalarFunction、Schema、求值与向量化接口；按 N4） | 4,208 | 13 | EXC.B(33) |
