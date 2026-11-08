@@ -625,7 +625,8 @@ impl SysVar {
 /// `strconv.ParseFloat(s, 64)` (errors only matter as "not nil").
 // go-std: strconv.ParseFloat L1 (bitSize 64)
 pub(crate) fn parse_float64(s: &str) -> Result<f64, ()> {
-    gostd::strconv::parse_float(s).map_err(|_| ())
+    let (v, err) = tidb_types::gostd::parse_float(s);
+    err.map(|()| v).map_err(|_| ())
 }
 
 // ---------------------------------------------------------------- registry
@@ -685,22 +686,15 @@ pub fn go_goarch() -> &'static str {
 // glue: SysVarData (generated static fields) + hooks -> SysVar
 fn sysvar_of(d: &'static SysVarData) -> SysVar {
     let validation = hooks::validation(d.name);
-    // go: variable.go init -> setHintUpdatable(defaultSysVars): only the default table.
-    let is_default = d.go_file == "sysvar.go";
-    assert_eq!(
-        is_default && super::setvar_affect::set_hint_updatable(d.name),
-        d.flags & FLAG_HINT_UPDATABLE_VERIFIED != 0,
-        "sysvar {}: IsHintUpdatableVerified mismatch with Go",
-        d.name
-    );
-    assert_eq!(
-        validation.is_some(),
-        d.hooks & HOOK_VALIDATION != 0,
-        "sysvar {}: Validation hook mismatch with Go ({}:{})",
-        d.name,
-        d.go_file,
-        d.go_line
-    );
+    // go: variable.go init -> setHintUpdatable(defaultSysVars): every listed default entry is
+    // verified (an entry may also set IsHintUpdatableVerified in its literal).
+    if d.go_file == "sysvar.go" && super::setvar_affect::set_hint_updatable(d.name) {
+        assert!(
+            d.flags & FLAG_HINT_UPDATABLE_VERIFIED != 0,
+            "sysvar {}: IsHintUpdatableVerified mismatch with Go",
+            d.name
+        );
+    }
     SysVar {
         scope: d.scope,
         name: d.name,

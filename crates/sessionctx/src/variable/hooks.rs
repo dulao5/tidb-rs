@@ -168,12 +168,11 @@ fn v_tiflash_query_spill_ratio(_vars: &mut SessionVars, normalized_value: &str, 
 }
 
 /// The `*strconv.NumError` of a failed `strconv.ParseFloat(s, 64)`.
-// go-std: strconv.ParseFloat L1 (error value)
+// go-std: strconv.NumError.Error L1
 fn parse_float_error(s: &str) -> Error {
-    match gostd::strconv::parse_float(s) {
-        // out of range: ParseFloat returns ±Inf with ErrRange
-        Err(true) => errors::new(format!("strconv.ParseFloat: parsing {}: value out of range", go_quote(s))),
-        _ => errors::new(format!("strconv.ParseFloat: parsing {}: invalid syntax", go_quote(s))),
+    match tidb_types::gostd::parse_float(s).1 {
+        Err(e) => errors::new(e.to_string()),
+        Ok(()) => unreachable!("parse_float_error of a valid float"),
     }
 }
 
@@ -970,8 +969,6 @@ fn v_mpp_exchange_compression_mode(_vars: &mut SessionVars, normalized_value: &s
 
 /// `kv.MppVersionUnspecified` .. `kv.GetNewestMppVersion()` (pkg/kv/mpp.go).
 const MppVersionUnspecified: i64 = -1;
-/// newestMppVersion: MppVersionV3 (`mppVersionMax - 1`).
-const NewestMppVersion: i64 = 3;
 
 /// `kv.ToMppVersion` (ok only).
 // glue: port of pkg/kv.ToMppVersion (block DEF.MPP), validity only
@@ -981,7 +978,7 @@ fn to_mpp_version_ok(name: &str) -> bool {
         return true;
     }
     let (v, err) = tidb_types::gostd::parse_int(name.as_bytes(), 64);
-    err.is_ok() && (MppVersionUnspecified..=NewestMppVersion).contains(&v)
+    err.is_ok() && (MppVersionUnspecified..=tidb_kv::mpp::get_newest_mpp_version().0).contains(&v)
 }
 
 // go: sysvar.go:L3043 MppVersion.Validation L1
@@ -990,7 +987,7 @@ fn v_mpp_version(_vars: &mut SessionVars, normalized_value: &str, original_value
         return ok(normalized_value);
     }
     let mut err_msg = format!("incorrect value: {original_value}. {MppVersion} options: {MppVersionUnspecified} (unspecified)");
-    for i in 0..=NewestMppVersion {
+    for i in 0..=tidb_kv::mpp::get_newest_mpp_version().0 {
         err_msg = format!("{err_msg}, {i}");
     }
     fail(normalized_value, errors::new(err_msg))

@@ -1,6 +1,8 @@
 //! Helpers from other Go packages that the validation hooks call and that no block has
 //! ported yet (pkg/util/timeutil, pkg/util, pkg/util/servicescope; files of D00.3).
 
+#![allow(non_upper_case_globals)]
+
 use std::sync::Arc;
 
 use tidb_base::Error;

@@ -4,6 +4,8 @@
 //! flag `is_hint_updatable_verified` is generated from Go's table after init; the registry
 //! checks it against [`set_hint_updatable`].
 
+#![allow(non_upper_case_globals)]
+
 /// isHintUpdatableVerified (Go map; the set of names).
 pub(crate) static isHintUpdatableVerified: &[&str] = &[
     "tidb_opt_agg_push_down",

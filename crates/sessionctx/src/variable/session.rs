@@ -5,6 +5,8 @@
 //! N8 §3.2); the fields here keep Go's names and meaning so the validation hooks do not
 //! change when it does. Only what the validation hooks touch is here.
 
+#![allow(non_upper_case_globals)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -134,7 +136,13 @@ impl SessionVars {
     /// `SetSystemVarWithoutValidation` also runs the SetSession hook, block D05.2).
     // glue: D05.2 stub (systems map only)
     pub fn set_system_var_for_test(&mut self, name: &str, value: &str) {
+        // SetSessionFromHook writes systems[name] and systems[alias] for every alias.
         self.systems.insert(name.to_owned(), value.to_owned());
+        if let Some(sv) = super::variable::get_sys_var(name) {
+            for alias in sv.aliases {
+                self.systems.insert((*alias).to_owned(), value.to_owned());
+            }
+        }
     }
 
     /// Sets allowMPPExecution (Go: the SetSession hook of tidb_allow_mpp).

@@ -13,6 +13,8 @@ publish.workspace = true
 tidb-base = { workspace = true }
 # Datum (GetNativeValType), collations (checkCollation), Go strconv parse_int / parse_uint.
 tidb-types = { workspace = true }
+# kv.GetNewestMppVersion (mpp_version validation).
+tidb-kv = { workspace = true }
 # MemTotal (parseMemoryLimit).
 tidb-memory = { workspace = true }
 # parser/charset (checkCharacterSet).

@@ -446,12 +446,29 @@ fn sscanf_num_unit(s: &str, unit: &str) -> Option<u64> {
         return None;
     }
     let mut rest = &rest[ndig..];
-    // The literal text of the format (rune by rune; EOF -> io.ErrUnexpectedEOF).
-    for fc in unit.chars() {
-        let mut it = rest.chars();
-        match it.next() {
-            Some(c) if c == fc => rest = it.as_str(),
-            _ => return None,
+    if unit == "%" {
+        // "%%" in the format: ss.advance matches it as a literal '%'; when the input has
+        // something else, doScanf falls through to the verb path, which skips space and
+        // then needs '%' (scanPercent) or ends with io.EOF (accepted: n == 1).
+        if let Some(r) = rest.strip_prefix('%') {
+            rest = r;
+        } else if rest.is_empty() {
+            return None; // advance: mustReadRune -> io.ErrUnexpectedEOF
+        } else {
+            let r = skip_space(rest)?;
+            if r.is_empty() {
+                return Some(val); // scanPercent: notEOF -> io.EOF
+            }
+            rest = r.strip_prefix('%')?; // "missing literal %"
+        }
+    } else {
+        // The literal text of the format (rune by rune; EOF -> io.ErrUnexpectedEOF).
+        for fc in unit.chars() {
+            let mut it = rest.chars();
+            match it.next() {
+                Some(c) if c == fc => rest = it.as_str(),
+                _ => return None,
+            }
         }
     }
     // %s: SkipSpace, then EOF gives io.EOF with n == 1.
