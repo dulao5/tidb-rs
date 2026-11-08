@@ -859,7 +859,8 @@ fn replay(path: &str) {
         n += 1;
         let rec: Value = serde_json::from_str(line).unwrap();
         if let Some(why) = check(&rec) {
-            fails.push(format!("{}\n    {why}", &line[..line.len().min(600)]));
+            let cut = line.char_indices().nth(600).map(|(i, _)| i).unwrap_or(line.len());
+            fails.push(format!("{}\n    {why}", &line[..cut]));
         }
     }
     std::panic::set_hook(prev);
