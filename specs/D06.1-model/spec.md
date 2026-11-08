@@ -133,7 +133,7 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
 6. `Job.Mu`：Go 用它保护 `RowCount` 和 reorg 警告，防止 DDL worker 并发修改；Rust 不持有这个锁，`GetRowCount`、`GetWarnings` 借用 `&self`（L2）。tidb-rs 只读取自己解码的 job。
 7. `Job.String` 的 `ArgLen` 恒为 0：Rust 不持有 `Job.args`（L2）。读路径上 Go 解码出的 job 也不填 `args`，所以输出相同。
 8. `atomic.Int64` 在 Rust 中是普通 `i64`（L2，见 3.7）：`ADMIN ALTER DDL JOBS` 的并发修改发生在 Go TiDB 中；JSON 形式与 Go 相同。
-9. `json.RawMessage` 的字符串里有无效 UTF-8 时，Go 的 `Marshal` 原样写出这些字节，Rust 的输出是 `String`，写成 U+FFFD。Go 自己写出的 job 不会有无效 UTF-8（`Marshal` 已替换）。
+9. `json.RawMessage` 的字符串里有无效 UTF-8 时，Go 的 `Marshal` 原样写出这些字节，Rust 的输出是 `String`，写成 U+FFFD。成立的前提有两个：(1) job 的 meta 都由 Go 的 `json.Marshal` 写出，字符串中的无效 UTF-8 已被替换成 U+FFFD，原始的无效字节只可能来自损坏或手工写入的数据；(2) tidb-rs 只读，不写 job，也不回传 `raw_args`。任一前提不再成立时（例如 tidb-rs 开始写 job 或回传 `raw_args`），`RawMessage` 改为按字节保存。
 
 ## 5. 验收
 
