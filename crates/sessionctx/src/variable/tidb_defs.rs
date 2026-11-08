@@ -7,7 +7,6 @@
 //! hand are in `tidb_vars.rs`.
 
 #![allow(non_upper_case_globals)]
-#![allow(clippy::excessive_precision)]
 
 /// Go: `DefAdaptiveClosestReadThreshold` (tidb_vars.go).
 pub const DefAdaptiveClosestReadThreshold: i64 = 4096;

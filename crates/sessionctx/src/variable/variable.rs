@@ -375,7 +375,7 @@ impl SysVar {
     }
 
     /// GetGlobalFromHook calls the GetSession func if it exists.
-    // go: SysVar.GetGlobalFromHook L1 (no context: the read-path getters do not use it)
+    // go: SysVar.GetGlobalFromHook L2 (no context argument: the read-path getters do not use it)
     pub fn get_global_from_hook(&self, s: &mut SessionVars) -> Result<String, Error> {
         // Call the Getter if there is one defined.
         if let Some(get_global) = self.get_global {
@@ -433,7 +433,7 @@ impl SysVar {
     }
 
     /// SetGlobalFromHook calls the SetGlobal func if it exists.
-    // go: SysVar.SetGlobalFromHook L1 (no context)
+    // go: SysVar.SetGlobalFromHook L2 (no context argument)
     pub fn set_global_from_hook(
         &self,
         s: &mut SessionVars,

@@ -1,3 +1,5 @@
+//! go-file: pkg/sessionctx/variable/session.go
+//!
 //! The part of `SessionVars` (pkg/sessionctx/variable/session.go, block D05.2) and of
 //! `stmtctx.StatementContext` (D05.2) that the D05.1 validation code reads or writes.
 //!
@@ -138,7 +140,7 @@ impl SessionVars {
     /// GetSessionOrGlobalSystemVar gets a system variable.
     /// If it is a session only variable, use the default value defined in code.
     /// Returns error if there is no such variable.
-    // go: SessionVars.GetSessionOrGlobalSystemVar L1 (no context)
+    // go: SessionVars.GetSessionOrGlobalSystemVar L2 (no context argument)
     pub fn get_session_or_global_system_var(&mut self, name: &str) -> Result<String, Error> {
         let Some(sv) = get_sys_var(name) else {
             return Err(
@@ -195,7 +197,7 @@ impl SessionVars {
     }
 
     /// GetGlobalSystemVar gets a global system variable.
-    // go: SessionVars.GetGlobalSystemVar L1 (no context)
+    // go: SessionVars.GetGlobalSystemVar L2 (no context argument)
     pub fn get_global_system_var(&mut self, name: &str) -> Result<String, Error> {
         let Some(sv) = get_sys_var(name) else {
             return Err(

@@ -140,7 +140,6 @@ pub fn defaults_for_test(dur: &str) -> (&'static str, i64) {
 }
 
 /// ConcurrencyUnset means the value the of the concurrency related variable is unset.
-// go: session.go ConcurrencyUnset L1
 pub const ConcurrencyUnset: i64 = -1;
 /// Go: `DefMinPagingSize = int(paging.MinPagingSize)` (pkg/util/paging: 128).
 pub const DefMinPagingSize: i64 = 128;
