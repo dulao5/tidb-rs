@@ -4,11 +4,11 @@
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker`, `vectors/v8.5.8/<target>/model.jsonl.gz` (branch `govec/model-D06.1`, PR #13) |
-| tracker commit | `3647aea` |
-| `arm64/model.jsonl.gz` sha256 | `1293a884cf89c80371e5ac61c8d0c7021e5cec9b8711c266b224f13ba4c0fa00` (GOARCH=arm64, generated locally) |
-| `amd64/model.jsonl.gz` sha256 | `2cbb637ed66c93a86862f0c26b7ad9827ebec77a46c36f0b6525beccb457b663` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact) |
-| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 1618), 63,366 records: 50,918 `roundtrip` (866 meta exported from a v8.5.8 cluster, 15,000 random values, 15,000 object-level mutations, 20,000 `luckyMutate` mutations, 68 time values), 3,061 `into` (61 of them one per error / early-return site of encoding/json decode.go), 9,387 method calls; 8,537 Go errors; 5 records marked `known_deviation` |
+| source | `tidb-rs-tracker`, `vectors/v8.5.8/<target>/model.jsonl.gz` (branch `govec/model-D06.1-b`, PR #16) |
+| tracker commit | `a50d2b5` |
+| `arm64/model.jsonl.gz` sha256 | `d2b701780e3a579f1176f14f1e5dd6198d4761fcb4721181ff7dea3a99ab38ed` (GOARCH=arm64, generated locally) |
+| `amd64/model.jsonl.gz` sha256 | `6d1bb591701232d922385c2f25eff091c17ed89fff4f39b6dc23a916bf72b96b` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 1618), 62,826 records: 50,918 `roundtrip` (866 meta exported from a v8.5.8 cluster, 15,000 random values of 36 types, 15,000 object-level mutations, 20,000 `luckyMutate` mutations, 68 time values), 3,093 `into` (93 of them one per error / early-return site of encoding/json decode.go and of the JSON methods of terror.Error, atomic.Int64, json.RawMessage), 8,815 method calls (865 of them for job.go / reorg.go / ColumnNeedRestoredData); 8,474 Go errors; 9 records marked `known_deviation` |
 
 Both targets have the same records (the CI artifact differs from the local arm64 file only in
 the header); the per-target layout only follows the tracker's.
