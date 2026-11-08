@@ -27,6 +27,8 @@ mod actions_rt;
 pub mod ast;
 /// Faithful ports of `pkg/parser/ast` pieces used by meta/model (block D02.3).
 pub mod ast_ddl;
+// ast/misc.go (RedactURL).
+pub mod ast_misc;
 /// `pkg/parser/auth`: user and role identities (block D02.3).
 pub mod auth;
 #[allow(missing_docs)]
