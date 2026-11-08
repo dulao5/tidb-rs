@@ -5,6 +5,8 @@ mod json_binary;
 mod json_binary_functions;
 mod json_constants;
 mod json_path_expr;
+#[cfg(test)]
+mod json_test;
 
 pub use json_binary::{
     BinaryJSON, JSONValue, Opaque, create_binary_json, create_binary_json_with_check, json_valid,

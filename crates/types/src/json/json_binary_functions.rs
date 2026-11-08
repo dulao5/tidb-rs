@@ -735,7 +735,7 @@ pub(crate) fn unquote_json_string(s: &[u8]) -> Result<Vec<u8>, Error> {
 /// A surrogate code point (`\ud800`–`\udfff`) has no UTF-8 encoding: Go's `utf8.RuneLen`
 /// returns -1 and the slice `char[0:-1]` panics; so does this function.
 // go: decodeEscapedUnicode L1 [M-ERR]
-fn decode_escaped_unicode(s: &[u8]) -> Result<([u8; 4], usize), Error> {
+pub(super) fn decode_escaped_unicode(s: &[u8]) -> Result<([u8; 4], usize), Error> {
     let mut char = [0u8; 4];
     // hex.Decode(char[0:2], s)
     let mut j = 1;
