@@ -1220,6 +1220,799 @@ impl Default for SessionVarsFields {
     }
 }
 
+impl SessionVarsFields {
+    /// The fields as the govec `fresh` op dumps them: Go names, bools and integers in
+    /// decimal, floats as their IEEE-754 bits, strings as is.
+    // glue: test dump of the scalar fields
+    pub fn scalar_strings(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "indexLookupConcurrency",
+                self.index_lookup_concurrency.to_string(),
+            ),
+            (
+                "indexLookupJoinConcurrency",
+                self.index_lookup_join_concurrency.to_string(),
+            ),
+            (
+                "distSQLScanConcurrency",
+                self.dist_sql_scan_concurrency.to_string(),
+            ),
+            (
+                "analyzeDistSQLScanConcurrency",
+                self.analyze_dist_sql_scan_concurrency.to_string(),
+            ),
+            (
+                "hashJoinConcurrency",
+                self.hash_join_concurrency.to_string(),
+            ),
+            (
+                "projectionConcurrency",
+                self.projection_concurrency.to_string(),
+            ),
+            (
+                "hashAggPartialConcurrency",
+                self.hash_agg_partial_concurrency.to_string(),
+            ),
+            (
+                "hashAggFinalConcurrency",
+                self.hash_agg_final_concurrency.to_string(),
+            ),
+            ("windowConcurrency", self.window_concurrency.to_string()),
+            (
+                "mergeJoinConcurrency",
+                self.merge_join_concurrency.to_string(),
+            ),
+            (
+                "streamAggConcurrency",
+                self.stream_agg_concurrency.to_string(),
+            ),
+            (
+                "indexMergeIntersectionConcurrency",
+                self.index_merge_intersection_concurrency.to_string(),
+            ),
+            (
+                "indexSerialScanConcurrency",
+                self.index_serial_scan_concurrency.to_string(),
+            ),
+            ("ExecutorConcurrency", self.executor_concurrency.to_string()),
+            (
+                "IdleTransactionTimeout",
+                self.idle_transaction_timeout.to_string(),
+            ),
+            ("MemQuotaQuery", self.mem_quota_query.to_string()),
+            ("MemQuotaApplyCache", self.mem_quota_apply_cache.to_string()),
+            ("IndexJoinBatchSize", self.index_join_batch_size.to_string()),
+            ("IndexLookupSize", self.index_lookup_size.to_string()),
+            ("InitChunkSize", self.init_chunk_size.to_string()),
+            ("MaxChunkSize", self.max_chunk_size.to_string()),
+            ("MinPagingSize", self.min_paging_size.to_string()),
+            ("MaxPagingSize", self.max_paging_size.to_string()),
+            ("SysWarningCount", self.sys_warning_count.to_string()),
+            ("SysErrorCount", self.sys_error_count.to_string()),
+            ("preparedStmtID", self.prepared_stmt_id.to_string()),
+            ("ShardRowIDBits", self.shard_row_id_bits.to_string()),
+            ("PreSplitRegions", self.pre_split_regions.to_string()),
+            ("ClientCapability", self.client_capability.to_string()),
+            ("ConnectionID", self.connection_id.to_string()),
+            ("Port", self.port.clone()),
+            ("CurrentDB", self.current_db.clone()),
+            ("CurrentDBChanged", self.current_db_changed.to_string()),
+            ("CommonGlobalLoaded", self.common_global_loaded.to_string()),
+            ("InRestrictedSQL", self.in_restricted_sql.to_string()),
+            ("SnapshotTS", self.snapshot_ts.to_string()),
+            ("LastFoundRows", self.last_found_rows.to_string()),
+            ("RefCountOfStmtCtx", self.ref_count_of_stmt_ctx.to_string()),
+            ("AllowAggPushDown", self.allow_agg_push_down.to_string()),
+            ("AllowDeriveTopN", self.allow_derive_top_n.to_string()),
+            ("AllowCartesianBCJ", self.allow_cartesian_bcj.to_string()),
+            (
+                "MPPOuterJoinFixedBuildSide",
+                self.mpp_outer_join_fixed_build_side.to_string(),
+            ),
+            (
+                "AllowDistinctAggPushDown",
+                self.allow_distinct_agg_push_down.to_string(),
+            ),
+            (
+                "EnableSkewDistinctAgg",
+                self.enable_skew_distinct_agg.to_string(),
+            ),
+            (
+                "Enable3StageDistinctAgg",
+                self.enable_3stage_distinct_agg.to_string(),
+            ),
+            (
+                "Enable3StageMultiDistinctAgg",
+                self.enable_3stage_multi_distinct_agg.to_string(),
+            ),
+            (
+                "ExplainNonEvaledSubQuery",
+                self.explain_non_evaled_sub_query.to_string(),
+            ),
+            ("MultiStatementMode", self.multi_statement_mode.to_string()),
+            ("InMultiStmts", self.in_multi_stmts.to_string()),
+            ("AllowWriteRowID", self.allow_write_row_id.to_string()),
+            ("AllowBatchCop", self.allow_batch_cop.to_string()),
+            ("allowMPPExecution", self.allow_mpp_execution.to_string()),
+            ("allowTiFlashCop", self.allow_tiflash_cop.to_string()),
+            (
+                "HashExchangeWithNewCollation",
+                self.hash_exchange_with_new_collation.to_string(),
+            ),
+            (
+                "enforceMPPExecution",
+                self.enforce_mpp_execution.to_string(),
+            ),
+            ("TiFlashMaxThreads", self.tiflash_max_threads.to_string()),
+            (
+                "TiFlashMaxBytesBeforeExternalJoin",
+                self.tiflash_max_bytes_before_external_join.to_string(),
+            ),
+            (
+                "TiFlashMaxBytesBeforeExternalGroupBy",
+                self.tiflash_max_bytes_before_external_group_by.to_string(),
+            ),
+            (
+                "TiFlashMaxBytesBeforeExternalSort",
+                self.tiflash_max_bytes_before_external_sort.to_string(),
+            ),
+            (
+                "TiFlashMaxQueryMemoryPerNode",
+                self.tiflash_max_query_memory_per_node.to_string(),
+            ),
+            (
+                "TiFlashQuerySpillRatio",
+                self.tiflash_query_spill_ratio.to_bits().to_string(),
+            ),
+            (
+                "BroadcastJoinThresholdSize",
+                self.broadcast_join_threshold_size.to_string(),
+            ),
+            (
+                "BroadcastJoinThresholdCount",
+                self.broadcast_join_threshold_count.to_string(),
+            ),
+            (
+                "PreferBCJByExchangeDataSize",
+                self.prefer_bcj_by_exchange_data_size.to_string(),
+            ),
+            (
+                "LimitPushDownThreshold",
+                self.limit_push_down_threshold.to_string(),
+            ),
+            (
+                "CorrelationThreshold",
+                self.correlation_threshold.to_bits().to_string(),
+            ),
+            (
+                "EnableCorrelationAdjustment",
+                self.enable_correlation_adjustment.to_string(),
+            ),
+            (
+                "CorrelationExpFactor",
+                self.correlation_exp_factor.to_string(),
+            ),
+            ("cpuFactor", self.cpu_factor.to_bits().to_string()),
+            ("copCPUFactor", self.cop_cpu_factor.to_bits().to_string()),
+            ("networkFactor", self.network_factor.to_bits().to_string()),
+            ("scanFactor", self.scan_factor.to_bits().to_string()),
+            (
+                "descScanFactor",
+                self.desc_scan_factor.to_bits().to_string(),
+            ),
+            ("seekFactor", self.seek_factor.to_bits().to_string()),
+            ("memoryFactor", self.memory_factor.to_bits().to_string()),
+            ("diskFactor", self.disk_factor.to_bits().to_string()),
+            (
+                "concurrencyFactor",
+                self.concurrency_factor.to_bits().to_string(),
+            ),
+            (
+                "IndexScanCostFactor",
+                self.index_scan_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "IndexReaderCostFactor",
+                self.index_reader_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "TableReaderCostFactor",
+                self.table_reader_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "TableFullScanCostFactor",
+                self.table_full_scan_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "TableRangeScanCostFactor",
+                self.table_range_scan_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "TableRowIDScanCostFactor",
+                self.table_row_id_scan_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "TableTiFlashScanCostFactor",
+                self.table_tiflash_scan_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "IndexLookupCostFactor",
+                self.index_lookup_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "IndexMergeCostFactor",
+                self.index_merge_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "SortCostFactor",
+                self.sort_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "TopNCostFactor",
+                self.topn_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "LimitCostFactor",
+                self.limit_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "StreamAggCostFactor",
+                self.stream_agg_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "HashAggCostFactor",
+                self.hash_agg_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "MergeJoinCostFactor",
+                self.merge_join_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "HashJoinCostFactor",
+                self.hash_join_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "IndexJoinCostFactor",
+                self.index_join_cost_factor.to_bits().to_string(),
+            ),
+            (
+                "IndexJoinMaxScanRowsRatio",
+                self.index_join_max_scan_rows_ratio.to_bits().to_string(),
+            ),
+            (
+                "enableForceInlineCTE",
+                self.enable_force_inline_cte.to_string(),
+            ),
+            (
+                "CopTiFlashConcurrencyFactor",
+                self.cop_tiflash_concurrency_factor.to_bits().to_string(),
+            ),
+            ("SQLMode", self.sql_mode.to_string()),
+            (
+                "AutoIncrementIncrement",
+                self.auto_increment_increment.to_string(),
+            ),
+            (
+                "AutoIncrementOffset",
+                self.auto_increment_offset.to_string(),
+            ),
+            ("SkipASCIICheck", self.skip_ascii_check.to_string()),
+            ("SkipUTF8Check", self.skip_utf8_check.to_string()),
+            (
+                "DefaultCollationForUTF8MB4",
+                self.default_collation_for_utf8mb4.clone(),
+            ),
+            (
+                "OptimizerSelectivityLevel",
+                self.optimizer_selectivity_level.to_string(),
+            ),
+            (
+                "OptIndexPruneThreshold",
+                self.opt_index_prune_threshold.to_string(),
+            ),
+            (
+                "OptimizerEnableNewOnlyFullGroupByCheck",
+                self.optimizer_enable_new_only_full_group_by_check
+                    .to_string(),
+            ),
+            (
+                "EnableOuterJoinReorder",
+                self.enable_outer_join_reorder.to_string(),
+            ),
+            (
+                "OptimizerEnableNAAJ",
+                self.optimizer_enable_naaj.to_string(),
+            ),
+            (
+                "EnableCascadesPlanner",
+                self.enable_cascades_planner.to_string(),
+            ),
+            (
+                "EnableWindowFunction",
+                self.enable_window_function.to_string(),
+            ),
+            (
+                "EnablePipelinedWindowExec",
+                self.enable_pipelined_window_exec.to_string(),
+            ),
+            (
+                "EnableNoDecorrelateInSelect",
+                self.enable_no_decorrelate_in_select.to_string(),
+            ),
+            (
+                "EnableAlternativeLogicalPlans",
+                self.enable_alternative_logical_plans.to_string(),
+            ),
+            (
+                "EnableSemiJoinRewrite",
+                self.enable_semi_join_rewrite.to_string(),
+            ),
+            (
+                "EnableCorrelateSubquery",
+                self.enable_correlate_subquery.to_string(),
+            ),
+            (
+                "AllowProjectionPushDown",
+                self.allow_projection_push_down.to_string(),
+            ),
+            (
+                "EnableStrictNotNullCheck",
+                self.enable_strict_not_null_check.to_string(),
+            ),
+            (
+                "EnableStrictDoubleTypeCheck",
+                self.enable_strict_double_type_check.to_string(),
+            ),
+            (
+                "EnableVectorizedExpression",
+                self.enable_vectorized_expression.to_string(),
+            ),
+            (
+                "EnableAutoIncrementInGenerated",
+                self.enable_auto_increment_in_generated.to_string(),
+            ),
+            (
+                "EnablePointGetCache",
+                self.enable_point_get_cache.to_string(),
+            ),
+            ("PlacementMode", self.placement_mode.clone()),
+            (
+                "WaitSplitRegionFinish",
+                self.wait_split_region_finish.to_string(),
+            ),
+            (
+                "WaitSplitRegionTimeout",
+                self.wait_split_region_timeout.to_string(),
+            ),
+            ("EnableChunkRPC", self.enable_chunk_rpc.to_string()),
+            (
+                "ConstraintCheckInPlace",
+                self.constraint_check_in_place.to_string(),
+            ),
+            ("CommandValue", self.command_value.to_string()),
+            (
+                "TiDBOptJoinReorderThreshold",
+                self.tidb_opt_join_reorder_threshold.to_string(),
+            ),
+            (
+                "TiDBOptEnableAdvancedJoinReorder",
+                self.tidb_opt_enable_advanced_join_reorder.to_string(),
+            ),
+            (
+                "TiDBOptJoinReorderThroughProj",
+                self.tidb_opt_join_reorder_through_proj.to_string(),
+            ),
+            (
+                "TiDBOptJoinReorderThroughSel",
+                self.tidb_opt_join_reorder_through_sel.to_string(),
+            ),
+            ("SlowQueryFile", self.slow_query_file.clone()),
+            ("EnableFastAnalyze", self.enable_fast_analyze.to_string()),
+            ("TxnMode", self.txn_mode.clone()),
+            ("lowResolutionTSO", self.low_resolution_tso.to_string()),
+            ("MaxExecutionTime", self.max_execution_time.to_string()),
+            ("LoadBindingTimeout", self.load_binding_timeout.to_string()),
+            (
+                "TiKVClientReadTimeout",
+                self.tikv_client_read_timeout.to_string(),
+            ),
+            ("ConnectionStatus", self.connection_status.to_string()),
+            ("NoopFuncsMode", self.noop_funcs_mode.to_string()),
+            ("DurationParse", self.duration_parse.to_string()),
+            ("DurationCompile", self.duration_compile.to_string()),
+            ("DurationRewrite", self.duration_rewrite.to_string()),
+            (
+                "DurationPreprocessSubQuery",
+                self.duration_preprocess_sub_query.to_string(),
+            ),
+            (
+                "PreprocessSubQueries",
+                self.preprocess_sub_queries.to_string(),
+            ),
+            (
+                "DurationOptimization",
+                self.duration_optimization.to_string(),
+            ),
+            ("DurationWaitTS", self.duration_wait_ts.to_string()),
+            ("prevStmtDigest", self.prev_stmt_digest.clone()),
+            ("UsePlanBaselines", self.use_plan_baselines.to_string()),
+            (
+                "EvolvePlanBaselines",
+                self.evolve_plan_baselines.to_string(),
+            ),
+            (
+                "EnableExtendedStats",
+                self.enable_extended_stats.to_string(),
+            ),
+            (
+                "allowInSubqToJoinAndAgg",
+                self.allow_in_subq_to_join_and_agg.to_string(),
+            ),
+            ("preferRangeScan", self.prefer_range_scan.to_string()),
+            ("enableIndexMerge", self.enable_index_merge.to_string()),
+            ("replicaRead", self.replica_read.to_string()),
+            (
+                "ReplicaClosestReadThreshold",
+                self.replica_closest_read_threshold.to_string(),
+            ),
+            ("mppVersion", self.mpp_version.to_string()),
+            (
+                "mppExchangeCompressionMode",
+                self.mpp_exchange_compression_mode.to_string(),
+            ),
+            ("LockWaitTimeout", self.lock_wait_timeout.to_string()),
+            ("MetricSchemaStep", self.metric_schema_step.to_string()),
+            ("CDCWriteSource", self.cdc_write_source.to_string()),
+            (
+                "MetricSchemaRangeDuration",
+                self.metric_schema_range_duration.to_string(),
+            ),
+            (
+                "WindowingUseHighPrecision",
+                self.windowing_use_high_precision.to_string(),
+            ),
+            ("FoundInPlanCache", self.found_in_plan_cache.to_string()),
+            (
+                "PrevFoundInPlanCache",
+                self.prev_found_in_plan_cache.to_string(),
+            ),
+            ("FoundInBinding", self.found_in_binding.to_string()),
+            ("PrevFoundInBinding", self.prev_found_in_binding.to_string()),
+            (
+                "OptimizerUseInvisibleIndexes",
+                self.optimizer_use_invisible_indexes.to_string(),
+            ),
+            ("SelectLimit", self.select_limit.to_string()),
+            (
+                "EnableClusteredIndex",
+                self.enable_clustered_index.to_string(),
+            ),
+            (
+                "EnableParallelApply",
+                self.enable_parallel_apply.to_string(),
+            ),
+            ("EnableRedactLog", self.enable_redact_log.clone()),
+            ("LastTxnInfo", self.last_txn_info.clone()),
+            (
+                "EnabledRateLimitAction",
+                self.enabled_rate_limit_action.to_string(),
+            ),
+            ("EnableAsyncCommit", self.enable_async_commit.to_string()),
+            ("Enable1PC", self.enable_1pc.to_string()),
+            (
+                "GuaranteeLinearizability",
+                self.guarantee_linearizability.to_string(),
+            ),
+            ("AnalyzeVersion", self.analyze_version.to_string()),
+            ("DisableHashJoin", self.disable_hash_join.to_string()),
+            ("UseHashJoinV2", self.use_hash_join_v2.to_string()),
+            (
+                "EnableHistoricalStats",
+                self.enable_historical_stats.to_string(),
+            ),
+            (
+                "EnableIndexMergeJoin",
+                self.enable_index_merge_join.to_string(),
+            ),
+            (
+                "TrackAggregateMemoryUsage",
+                self.track_aggregate_memory_usage.to_string(),
+            ),
+            (
+                "TiDBEnableExchangePartition",
+                self.tidb_enable_exchange_partition.to_string(),
+            ),
+            (
+                "CTEMaxRecursionDepth",
+                self.cte_max_recursion_depth.to_string(),
+            ),
+            ("TMPTableSize", self.tmp_table_size.to_string()),
+            (
+                "EnableStableResultMode",
+                self.enable_stable_result_mode.to_string(),
+            ),
+            (
+                "EnablePseudoForOutdatedStats",
+                self.enable_pseudo_for_outdated_stats.to_string(),
+            ),
+            ("RegardNULLAsPoint", self.regard_null_as_point.to_string()),
+            ("MPPStoreFailTTL", self.mpp_store_fail_ttl.clone()),
+            ("ReadStaleness", self.read_staleness.to_string()),
+            ("EnablePaging", self.enable_paging.to_string()),
+            (
+                "EnableLegacyInstanceScope",
+                self.enable_legacy_instance_scope.to_string(),
+            ),
+            ("ReadConsistency", self.read_consistency.clone()),
+            (
+                "EnableParallelHashaggSpill",
+                self.enable_parallel_hashagg_spill.to_string(),
+            ),
+            ("SysdateIsNow", self.sysdate_is_now.to_string()),
+            (
+                "EnableMutationChecker",
+                self.enable_mutation_checker.to_string(),
+            ),
+            ("AssertionLevel", self.assertion_level.to_string()),
+            (
+                "IgnorePreparedCacheCloseStmt",
+                self.ignore_prepared_cache_close_stmt.to_string(),
+            ),
+            (
+                "EnableNewCostInterface",
+                self.enable_new_cost_interface.to_string(),
+            ),
+            ("CostModelVersion", self.cost_model_version.to_string()),
+            (
+                "IndexJoinDoubleReadPenaltyCostRate",
+                self.index_join_double_read_penalty_cost_rate
+                    .to_bits()
+                    .to_string(),
+            ),
+            (
+                "BatchPendingTiFlashCount",
+                self.batch_pending_tiflash_count.to_string(),
+            ),
+            ("RcWriteCheckTS", self.rc_write_check_ts.to_string()),
+            (
+                "RemoveOrderbyInSubquery",
+                self.remove_orderby_in_subquery.to_string(),
+            ),
+            (
+                "NonTransactionalIgnoreError",
+                self.non_transactional_ignore_error.to_string(),
+            ),
+            ("MaxAllowedPacket", self.max_allowed_packet.to_string()),
+            (
+                "TiFlashFineGrainedShuffleStreamCount",
+                self.tiflash_fine_grained_shuffle_stream_count.to_string(),
+            ),
+            (
+                "TiFlashFineGrainedShuffleBatchSize",
+                self.tiflash_fine_grained_shuffle_batch_size.to_string(),
+            ),
+            ("RequestSourceType", self.request_source_type.clone()),
+            (
+                "ExplicitRequestSourceType",
+                self.explicit_request_source_type.clone(),
+            ),
+            (
+                "MemoryDebugModeMinHeapInUse",
+                self.memory_debug_mode_min_heap_in_use.to_string(),
+            ),
+            (
+                "MemoryDebugModeAlarmRatio",
+                self.memory_debug_mode_alarm_ratio.to_string(),
+            ),
+            (
+                "EnableAnalyzeSnapshot",
+                self.enable_analyze_snapshot.to_string(),
+            ),
+            ("EnableDDLAnalyze", self.enable_ddl_analyze.to_string()),
+            (
+                "EnableDDLAnalyzeExecOpt",
+                self.enable_ddl_analyze_exec_opt.to_string(),
+            ),
+            (
+                "DefaultStrMatchSelectivity",
+                self.default_str_match_selectivity.to_bits().to_string(),
+            ),
+            ("TiFlashFastScan", self.tiflash_fast_scan.to_string()),
+            ("PrimaryKeyRequired", self.primary_key_required.to_string()),
+            (
+                "EnablePreparedPlanCache",
+                self.enable_prepared_plan_cache.to_string(),
+            ),
+            (
+                "PreparedPlanCacheSize",
+                self.prepared_plan_cache_size.to_string(),
+            ),
+            (
+                "EnablePreparedPlanCacheMemoryMonitor",
+                self.enable_prepared_plan_cache_memory_monitor.to_string(),
+            ),
+            (
+                "EnablePlanCacheForParamLimit",
+                self.enable_plan_cache_for_param_limit.to_string(),
+            ),
+            (
+                "EnablePlanCacheForSubquery",
+                self.enable_plan_cache_for_subquery.to_string(),
+            ),
+            (
+                "EnableNonPreparedPlanCache",
+                self.enable_non_prepared_plan_cache.to_string(),
+            ),
+            (
+                "EnableNonPreparedPlanCacheForDML",
+                self.enable_non_prepared_plan_cache_for_dml.to_string(),
+            ),
+            ("EnableFuzzyBinding", self.enable_fuzzy_binding.to_string()),
+            (
+                "PlanCacheInvalidationOnFreshStats",
+                self.plan_cache_invalidation_on_fresh_stats.to_string(),
+            ),
+            (
+                "NonPreparedPlanCacheSize",
+                self.non_prepared_plan_cache_size.to_string(),
+            ),
+            (
+                "PlanCacheMaxPlanSize",
+                self.plan_cache_max_plan_size.to_string(),
+            ),
+            (
+                "SessionPlanCacheSize",
+                self.session_plan_cache_size.to_string(),
+            ),
+            (
+                "ConstraintCheckInPlacePessimistic",
+                self.constraint_check_in_place_pessimistic.to_string(),
+            ),
+            (
+                "EnableTiFlashReadForWriteStmt",
+                self.enable_tiflash_read_for_write_stmt.to_string(),
+            ),
+            (
+                "EnableUnsafeSubstitute",
+                self.enable_unsafe_substitute.to_string(),
+            ),
+            ("ForeignKeyChecks", self.foreign_key_checks.to_string()),
+            (
+                "ForeignKeyCheckInSharedLock",
+                self.foreign_key_check_in_shared_lock.to_string(),
+            ),
+            ("RangeMaxSize", self.range_max_size.to_string()),
+            (
+                "LastPlanReplayerToken",
+                self.last_plan_replayer_token.clone(),
+            ),
+            ("InPlanReplayer", self.in_plan_replayer.to_string()),
+            (
+                "AnalyzePartitionConcurrency",
+                self.analyze_partition_concurrency.to_string(),
+            ),
+            (
+                "AnalyzePartitionMergeConcurrency",
+                self.analyze_partition_merge_concurrency.to_string(),
+            ),
+            (
+                "EnableAsyncMergeGlobalStats",
+                self.enable_async_merge_global_stats.to_string(),
+            ),
+            (
+                "EnableExternalTSRead",
+                self.enable_external_ts_read.to_string(),
+            ),
+            (
+                "OptPrefixIndexSingleScan",
+                self.opt_prefix_index_single_scan.to_string(),
+            ),
+            (
+                "OptPartialOrderedIndexForTopN",
+                self.opt_partial_ordered_index_for_top_n.clone(),
+            ),
+            ("EnableReuseChunk", self.enable_reuse_chunk.to_string()),
+            (
+                "EnableAdvancedJoinHint",
+                self.enable_advanced_join_hint.to_string(),
+            ),
+            ("preUseChunkAlloc", self.pre_use_chunk_alloc.to_string()),
+            (
+                "EnablePlanReplayerCapture",
+                self.enable_plan_replayer_capture.to_string(),
+            ),
+            (
+                "EnablePlanReplayedContinuesCapture",
+                self.enable_plan_replayed_continues_capture.to_string(),
+            ),
+            ("StoreBatchSize", self.store_batch_size.to_string()),
+            ("ResourceGroupName", self.resource_group_name.clone()),
+            (
+                "PessimisticTransactionFairLocking",
+                self.pessimistic_transaction_fair_locking.to_string(),
+            ),
+            (
+                "EnableINLJoinInnerMultiPattern",
+                self.enable_inl_join_inner_multi_pattern.to_string(),
+            ),
+            (
+                "EnableLateMaterialization",
+                self.enable_late_materialization.to_string(),
+            ),
+            (
+                "EnableRowLevelChecksum",
+                self.enable_row_level_checksum.to_string(),
+            ),
+            (
+                "TiFlashComputeDispatchPolicy",
+                self.tiflash_compute_dispatch_policy.to_string(),
+            ),
+            ("SlowTxnThreshold", self.slow_txn_threshold.to_string()),
+            (
+                "LoadBasedReplicaReadThreshold",
+                self.load_based_replica_read_threshold.to_string(),
+            ),
+            (
+                "OptOrderingIdxSelThresh",
+                self.opt_ordering_idx_sel_thresh.to_bits().to_string(),
+            ),
+            (
+                "OptOrderingIdxSelRatio",
+                self.opt_ordering_idx_sel_ratio.to_bits().to_string(),
+            ),
+            (
+                "EnableMPPSharedCTEExecution",
+                self.enable_mpp_shared_cte_execution.to_string(),
+            ),
+            ("FastCheckTable", self.fast_check_table.to_string()),
+            ("TiFlashReplicaRead", self.tiflash_replica_read.to_string()),
+            ("runtimeFilterMode", self.runtime_filter_mode.to_string()),
+            ("LockUnchangedKeys", self.lock_unchanged_keys.to_string()),
+            (
+                "SkipMissingPartitionStats",
+                self.skip_missing_partition_stats.to_string(),
+            ),
+            ("SessionAlias", self.session_alias.clone()),
+            ("OptObjective", self.opt_objective.clone()),
+            (
+                "CompressionAlgorithm",
+                self.compression_algorithm.to_string(),
+            ),
+            ("CompressionLevel", self.compression_level.to_string()),
+            ("TxnEntrySizeLimit", self.txn_entry_size_limit.to_string()),
+            (
+                "DivPrecisionIncrement",
+                self.div_precision_increment.to_string(),
+            ),
+            ("DiskFullOpt", self.disk_full_opt.to_string()),
+            ("GroupConcatMaxLen", self.group_concat_max_len.to_string()),
+            ("TiFlashPreAggMode", self.tiflash_pre_agg_mode.clone()),
+            (
+                "EnableLazyCursorFetch",
+                self.enable_lazy_cursor_fetch.to_string(),
+            ),
+            (
+                "SharedLockPromotion",
+                self.shared_lock_promotion.to_string(),
+            ),
+            ("ScatterRegion", self.scatter_region.clone()),
+            (
+                "InternalSQLScanUserTable",
+                self.internal_sql_scan_user_table.to_string(),
+            ),
+            (
+                "IndexLookUpPushDownPolicy",
+                self.index_look_up_push_down_policy.clone(),
+            ),
+            (
+                "EnableCachePrepareStmt",
+                self.enable_cache_prepare_stmt.to_string(),
+            ),
+        ]
+    }
+}
+
 /// Names of the scalar fields, in declaration order (the govec `fresh` op dumps these).
 pub const SCALAR_FIELDS: &[&str] = &[
     "indexLookupConcurrency",
