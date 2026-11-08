@@ -214,11 +214,23 @@ fn handle_out(h: &Handle) -> Value {
         let cols: Vec<String> = (0..h.num_cols()).map(|i| hex(&h.encoded_col(i))).collect();
         m.insert("cols".into(), json!(cols));
     }
-    if !has_common(h) {
+    // Go's String is valid UTF-8 iff every datum's ToString is (an error text is valid).
+    let d = h.data().unwrap();
+    let valid = d.iter().all(|x| match x.to_string() {
+        Ok(s) => std::str::from_utf8(&s).is_ok(),
+        Err(_) => true,
+    });
+    if valid {
         m.insert("str".into(), json!(h.string()));
-        let d = h.data().unwrap();
+    } else {
+        m.insert("str_bad".into(), json!(true));
+    }
+    if !has_common(h) {
         let ds: Vec<i64> = d.iter().map(|x| x.get_int64()).collect();
         m.insert("data".into(), json!(ds));
+    } else {
+        let ks: Vec<u8> = d.iter().map(|x| x.kind()).collect();
+        m.insert("data_kinds".into(), json!(ks));
     }
     out
 }
