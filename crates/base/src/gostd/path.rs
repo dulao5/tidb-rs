@@ -3,28 +3,34 @@
 /// `filepath.Clean` (Unix separators).
 // go-std: path/filepath.Clean L1 (Unix)
 pub fn clean(path: &str) -> String {
+    String::from_utf8(clean_bytes(path.as_bytes())).expect("clean keeps UTF-8")
+}
+
+/// `filepath.Clean` (Unix separators) on a Go string's bytes.
+// go-std: path/filepath.Clean L1 (Unix)
+pub fn clean_bytes(path: &[u8]) -> Vec<u8> {
     if path.is_empty() {
-        return ".".to_owned();
+        return b".".to_vec();
     }
-    let rooted = path.starts_with('/');
-    let mut out: Vec<&str> = Vec::new();
-    for part in path.split('/') {
+    let rooted = path[0] == b'/';
+    let mut out: Vec<&[u8]> = Vec::new();
+    for part in path.split(|&b| b == b'/') {
         match part {
-            "" | "." => {}
-            ".." => {
-                if matches!(out.last(), Some(p) if *p != "..") {
+            b"" | b"." => {}
+            b".." => {
+                if matches!(out.last(), Some(p) if *p != b"..") {
                     out.pop();
                 } else if !rooted {
-                    out.push("..");
+                    out.push(b"..");
                 }
             }
             p => out.push(p),
         }
     }
-    let joined = out.join("/");
+    let joined = out.join(&b'/');
     match (rooted, joined.is_empty()) {
-        (true, _) => format!("/{joined}"),
-        (false, true) => ".".to_owned(),
+        (true, _) => [b"/".as_slice(), &joined].concat(),
+        (false, true) => b".".to_vec(),
         (false, false) => joined,
     }
 }
@@ -32,11 +38,85 @@ pub fn clean(path: &str) -> String {
 /// `filepath.Join` (Unix): joins the non-empty elements with `/` and cleans the result.
 // go-std: path/filepath.Join L1 (Unix)
 pub fn join(elem: &[&str]) -> String {
-    let parts: Vec<&str> = elem.iter().copied().filter(|e| !e.is_empty()).collect();
+    let b: Vec<&[u8]> = elem.iter().map(|e| e.as_bytes()).collect();
+    String::from_utf8(join_bytes(&b)).expect("join keeps UTF-8")
+}
+
+/// `filepath.Join` (Unix) on Go strings' bytes.
+// go-std: path/filepath.Join L1 (Unix)
+pub fn join_bytes(elem: &[&[u8]]) -> Vec<u8> {
+    let parts: Vec<&[u8]> = elem.iter().copied().filter(|e| !e.is_empty()).collect();
     if parts.is_empty() {
-        return String::new();
+        return Vec::new();
     }
-    clean(&parts.join("/"))
+    clean_bytes(&parts.join(&b'/'))
+}
+
+/// `filepath.Rel(basepath, targpath)` (Unix): a path that is lexically equivalent to
+/// `targpath` when joined to `basepath`, or Go's error text.
+// go-std: path/filepath.Rel L1 (Unix: no volume names, sameWord is ==)
+pub fn rel_bytes(basepath: &[u8], targpath: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+    let err = || {
+        [
+            b"Rel: can't make ".as_slice(),
+            targpath,
+            b" relative to ",
+            basepath,
+        ]
+        .concat()
+    };
+    let mut base = clean_bytes(basepath);
+    let targ = clean_bytes(targpath);
+    if targ == base {
+        return Ok(b".".to_vec());
+    }
+    if base == b"." {
+        base.clear();
+    }
+    let base_slashed = base.first() == Some(&b'/');
+    let targ_slashed = targ.first() == Some(&b'/');
+    if base_slashed != targ_slashed {
+        return Err(err());
+    }
+    // Position base[b0:bi] and targ[t0:ti] at the first differing elements.
+    let (bl, tl) = (base.len(), targ.len());
+    let (mut b0, mut bi, mut t0, mut ti) = (0, 0, 0, 0);
+    loop {
+        while bi < bl && base[bi] != b'/' {
+            bi += 1;
+        }
+        while ti < tl && targ[ti] != b'/' {
+            ti += 1;
+        }
+        if targ[t0..ti] != base[b0..bi] {
+            break;
+        }
+        if bi < bl {
+            bi += 1;
+        }
+        if ti < tl {
+            ti += 1;
+        }
+        b0 = bi;
+        t0 = ti;
+    }
+    if &base[b0..bi] == b".." {
+        return Err(err());
+    }
+    if b0 != bl {
+        // Base elements left. Must go up before going down.
+        let seps = base[b0..bl].iter().filter(|&&b| b == b'/').count();
+        let mut buf = b"..".to_vec();
+        for _ in 0..seps {
+            buf.extend_from_slice(b"/..");
+        }
+        if t0 != tl {
+            buf.push(b'/');
+            buf.extend_from_slice(&targ[t0..]);
+        }
+        return Ok(buf);
+    }
+    Ok(targ[t0..].to_vec())
 }
 
 /// `base64.URLEncoding.EncodeToString` (padded, URL alphabet).

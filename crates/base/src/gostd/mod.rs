@@ -334,9 +334,12 @@ pub fn equal_fold(s: &str, t: &str) -> bool {
     tc.next().is_none()
 }
 
+pub mod bufio;
+pub mod bytes;
 pub mod conv;
 pub mod json;
 pub mod math;
+pub mod os;
 pub mod path;
 pub mod runtime;
 pub mod sort;

@@ -520,6 +520,7 @@ impl Tracker {
     fn walk(self: &Arc<Self>, bs: i64, grown: Grown) -> Walk {
         let mut w = Walk::default();
         let mut next = Some(self.clone());
+        let mut is_self = true;
         while let Some(tracker) = next {
             if tracker.is_root_tracker_of_sess.load(SeqCst) {
                 w.session_root_tracker = Some(tracker.clone());
@@ -547,7 +548,10 @@ impl Tracker {
 
             match grown {
                 Grown::Mark if !tracker.grew.load(SeqCst) => tracker.grew.store(true, SeqCst),
-                Grown::Clear => tracker.grew.store(false, SeqCst),
+                // The checkpoint took its own flag with swap(false); storing false here
+                // again could erase a growth recorded concurrently since then (D15.1
+                // review), so only the ancestors are cleared.
+                Grown::Clear if !is_self => tracker.grew.store(false, SeqCst),
                 _ => {}
             }
             if bs != 0 {
@@ -567,6 +571,7 @@ impl Tracker {
                 }
             }
             next = tracker.get_parent();
+            is_self = false;
         }
         w
     }
@@ -1090,6 +1095,7 @@ enum Grown {
     Keep,
     /// `record` of a growth: set them.
     Mark,
-    /// A checkpoint that runs the chain: clear the ancestors' (its own is already taken).
+    /// A checkpoint that runs the chain: clear the ancestors' flags; the tracker's own flag
+    /// was already taken by the checkpoint and is left alone.
     Clear,
 }

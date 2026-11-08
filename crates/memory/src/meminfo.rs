@@ -9,8 +9,8 @@
 //! systems tidb-rs runs on: Linux reads `/proc/meminfo`
 //! (`Used = Total - Free - Buffers - Cached - SReclaimable`), macOS runs `sysctl -n
 //! hw.memsize` and `vm_stat` (`Used = Total - Free - Inactive`) — gopsutil's no-cgo path, so
-//! the crate needs no `unsafe`. The cgroup numbers come from [`crate::cgroup`] (a reduced
-//! version of Go's `pkg/util/cgroup`, block X). The `GetMemTotalError` failpoint and
+//! the crate needs no `unsafe`. The cgroup numbers come from [`crate::cgroup`] (the memory part
+//! of Go's `pkg/util/cgroup`, block D15.3). The `GetMemTotalError` failpoint and
 //! `sysutil.RegisterGetMemoryCapacity` (the `INFORMATION_SCHEMA` cluster hardware tables,
 //! block X) are not ported.
 

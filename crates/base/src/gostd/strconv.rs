@@ -164,3 +164,38 @@ fn append_shortest64(dst: &mut Vec<u8>, v: f64, fmt: u8) {
         }
     }
 }
+
+/// `strconv.ParseUint(s, 10, 64)`: the value, or the `*strconv.NumError` text
+/// (`strconv.ParseUint: parsing "<Quote(s)>": invalid syntax | value out of range`).
+// go-std: strconv.ParseUint L1 (base 10, bitSize 64)
+// go-std: strconv.NumError.Error L1 (strconv.Quote via gofmt %q)
+pub fn parse_uint10(s: &[u8]) -> Result<u64, Vec<u8>> {
+    let num_err = |why: &str| {
+        let mut m = b"strconv.ParseUint: parsing ".to_vec();
+        m.extend_from_slice(&crate::gofmt::sprintf(
+            "%q",
+            &[crate::gofmt::Arg::go_string(s.to_vec())],
+        ));
+        m.extend_from_slice(b": ");
+        m.extend_from_slice(why.as_bytes());
+        m
+    };
+    if s.is_empty() {
+        return Err(num_err("invalid syntax"));
+    }
+    let mut n: u64 = 0;
+    for &c in s {
+        if !c.is_ascii_digit() {
+            return Err(num_err("invalid syntax"));
+        }
+        // Go returns ErrRange at the first overflowing digit, before later syntax errors.
+        match n
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u64::from(c - b'0')))
+        {
+            Some(v) => n = v,
+            None => return Err(num_err("value out of range")),
+        }
+    }
+    Ok(n)
+}
