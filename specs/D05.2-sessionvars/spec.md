@@ -119,3 +119,85 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 | SetSystemVarWithRelaxedValidation 不做 relaxed 校验 | 571 |
 
 - **钩子清单**：`registry_matches_hand_written_hooks` 检查每个变量的五类钩子与 Go 的标志一致（已移植或 pending，Rust 没有 Go 没有的钩子）。当前：SetSession 227/273、GetSession 12/27、GetStateValue 3/6、SetGlobal 0/155、GetGlobal 0/134。
+
+## 6. SET GLOBAL 的持久化与全局值同步（负责人决定 #58 → 方案 (c)，设计稿，待评审）
+
+负责人决定：tidb-rs 的 `SET GLOBAL` 与 Go 完全一致：持久化到 `mysql.global_variables` 并通知其他实例；INSTANCE 作用域仍不持久化（与 Go 相同）。本节是设计，**写路径尚未实现**；在它合并前，PR A 中 `set_global_sys_var` 对持久化变量仍返回 "not supported"（§4 第 4 条，过渡行为）。T10（读集群全局值）并入本设计。
+
+### 6.1 Go v8.5.8 的实际行为（已核对源码；Lucky 复核）
+
+**写**（`session.SetGlobalSysVar`，session.go:1336）：
+1. `sv.Validate(ScopeGlobal)` → `sv.SetGlobalFromHook`（**先**在本实例执行 SetGlobal 钩子）。
+2. INSTANCE 作用域在这里返回（session.go:1347），不写表、不通知。
+3. 有 `GlobalConfigName` 的变量：`domain.NotifyGlobalConfigChange` → PD 的 GlobalConfig（`globalconfigsync`，`pd.GlobalConfigItem{Name, Value: OnOffToTrueFalse(v), PUT}`）。
+4. `replaceGlobalVariablesTableValue`（session.go:1285）：内部 SQL `REPLACE INTO mysql.global_variables (variable_name, variable_value) VALUES (?, ?)`，`InternalTxnSysVar` 作为 request source，经 `sysSessionPool` 的内部会话执行。
+5. `domain.NotifyUpdateSysVarCache(updateLocal=true)`（domain.go:3065）：etcd `Put("/tidb/sysvars", "")`，失败只记 warning；然后本地 `rebuildSysVarCache`。
+
+**表**：`CREATE TABLE mysql.GLOBAL_VARIABLES(VARIABLE_NAME VARCHAR(64) NOT NULL PRIMARY KEY, VARIABLE_VALUE VARCHAR(16383) DEFAULT NULL)`（bootstrap.go:195）。bootstrap 时 `tidb_enable_clustered_index = INT_ONLY`，VARCHAR 主键因此是 **NONCLUSTERED**：行键是 `_tidb_rowid`，主键是唯一索引（Lucky 在 v8.5.8 上确认）。
+
+**REPLACE 的 KV 效果**：按唯一索引查到旧行 → 删除旧行的 record key 和索引 key → 用表的 autoid 分配器取新的 `_tidb_rowid` → 写新行（row format 由内部会话的 `tidb_row_format_version` 决定，默认 v2）和唯一索引（值里带 handle）。
+
+**事务**：自动提交的语句在 `PessimisticAutoCommit = false`（默认）时是**乐观事务**（session.go:4197）。自动提交的乐观事务"总是可以重试"（`isOptimisticTxnRetryable`，optimistic.go:89），提交遇到可重试错误（写冲突、schema 变化）时，最多重试 `tidb_retry_limit`（默认 10）次，每次重新执行整条 REPLACE（session.go:812–818）。所以两个实例并发 `SET GLOBAL` 同一变量时，结果是**后提交者生效**，不会报错给用户（除非重试耗尽）。
+
+**读与同步**（`domain.LoadSysVarCacheLoop`，domain.go:2034；`rebuildSysVarCache`，sysvar_cache.go:104）：
+- 启动时先 rebuild 一次；之后 `select` 三路：etcd `Watch("/tidb/sysvars")` 事件、30 秒定时、退出。watch 通道关闭时重建 watch（超过 10 次后退避）。
+- rebuild：`SELECT variable_name, variable_value FROM mysql.global_variables`；对每个注册变量取表值或默认值；`!SkipInit()` 的进 session cache，有 GLOBAL 作用域的进 global cache；有 SetGlobal 钩子且 `!SkipSysvarCache()` 的，先 `ValidateWithRelaxedValidation` 再调用 SetGlobal（所以其他实例也执行钩子）。重建串行（`rebuildLock`）。
+- 新会话的 `systems` 拷贝自 session cache；`GetGlobalSysVar` 读 global cache，缺项时回表读，再 `ValidateFromType`，失败用默认值。
+
+### 6.2 tidb-rs 的设计
+
+**读（T10，先做）**：`GlobalVarsCache`（domain 级，`ArcSwap<Arc<Snapshot>>`）按 §6.1 的 rebuild 逻辑实现，快照 = session map + global map；`GlobalVarAccessor` 的实现读它（替换 PR A 中由调用方提供的 accessor）。读表用 tidb-kv 快照读 + tablecodec 解码：通过 D06.2（meta 读取）拿到 `mysql.global_variables` 的 TableInfo，扫描 record 范围。驱动：启动时一次 + etcd watch + 30 秒定时，与 Go 相同。rebuild 时执行 SetGlobal 钩子（T5 移植完成后生效）。
+
+**写**：只做 `mysql.global_variables` 这一张表的 REPLACE，不引入通用 DML 执行器：
+1. 开一个**乐观**事务（client-rust `TransactionClient::begin_optimistic`），request source 标为 `internal_sysvar`（与 Go 的 `InternalTxnSysVar` 一致，便于资源管控和监控对比）。
+2. 读唯一索引 key（`tablecodec.EncodeIndexSeekKey` + `codec.EncodeKey(collation key of name)`）→ 得到旧 handle。
+3. 有旧行：`delete(record key)`、`delete(index key)`。
+4. 分配 `_tidb_rowid`：按 Go 的 autoid 协议（meta 中该表的 autoid 计数器，`GenAutoTableID` 的 key 和批量步长），与 Go 实例共享同一个计数器。handle 不必与 Go 相同，只要不冲突；行内容逐字节相同。
+5. `put(record key, rowcodec v2 编码的两列)`、`put(index key, 唯一索引值：带 handle 的 version 0/1 格式，与 Go 相同)`。Go 在 `tidb_txn_assertion_level = FAST` 时给变更加断言（NotExist / Exist），一并照做。
+6. 提交（2PC）。遇到可重试错误按 Go 重试：从第 2 步重做，最多 `tidb_retry_limit` 次。
+7. `PUT /tidb/sysvars` 到 etcd（失败只 warning），然后本地 rebuild。
+8. 有 `GlobalConfigName` 的变量：写 PD GlobalConfig（client-rust 的 PD 客户端需要补 GlobalConfig 的 `StoreGlobalConfig` 调用；若 client-rust 暂不支持，作为同系列中的一个小 PR）。
+
+**需要从 X 拿回的函数**（D01.11、D07.0 中按"写路径"归入 X 的部分），建议放进一个新块 **D06.7 "系统表写入：mysql.global_variables REPLACE"**，在 tracker `rules.py` 中重新归属并写明理由：
+- tablecodec / rowcodec：行的 v2 编码器（`rowcodec.Encoder` 及其排序）、`EncodeRow`、唯一索引值的编码（`GenIndexValuePortal` / `GenIndexValueForClusteredIndexVersion1` 中非聚簇唯一索引的路径）、`GenIndexKey`。
+- kv：事务写接口（`Set`/`Delete`、断言 flag 的最小子集），对应 D07.0 中归 X 的 keyflags 的一部分。
+- autoid：`meta.GenAutoTableID` 的 key 布局与增量写（D06.2 的写的一小部分）、分配器的批量与本地缓存。
+- 其余（通用 REPLACE / INSERT 执行器、DML 计划构建）仍为 X。
+
+**etcd 客户端**：选 `etcd-client` crate（tonic，tokio 原生，支持 TLS、watch、lease，维护活跃）。地址与 Go 相同，来自 PD（`path = "pd1:2379,…"`，Go 的 `etcdClient` 就是连 PD 内嵌的 etcd），TLS 证书沿用集群安全配置。备选 `etcd-rs` 维护较少，不选。
+
+### 6.3 与并发的 Go 实例互操作
+
+- 行和索引的格式与 Go 相同，Go 实例的 `rebuildSysVarCache` 和 `ADMIN CHECK TABLE mysql.global_variables` 都能处理 tidb-rs 写的行。
+- 并发写同一变量：都是乐观事务 + 自动重试，最终"后提交者生效"，与 Go 实例之间的行为相同。
+- autoid：共享 meta 计数器，批量分配互不重叠；tidb-rs 进程重启会丢弃本地未用完的区间（Go 也一样）。
+- 通知：任一实例写 etcd key，所有实例（Go 和 tidb-rs）收到 watch 事件后重读表；watch 丢失时 30 秒兜底。
+
+### 6.4 失败模式
+
+| 情况 | Go 的行为 | tidb-rs |
+|---|---|---|
+| SetGlobal 钩子已在本实例执行，写表失败 | 本实例已生效，表未变，返回错误；30 秒后本实例 rebuild 会把值改回表中的值 | 相同 |
+| 写表成功，etcd PUT 失败 | warning；其他实例最多 30 秒后看到 | 相同 |
+| 重试耗尽（持续写冲突） | 返回写冲突错误 | 相同 |
+| etcd 不可用 | 只能靠 30 秒定时 | 相同 |
+| 表结构不是预期的（例如旧版本升级上来的集群） | Go 用当前 TableInfo | 用 D06.2 读到的 TableInfo；列 / 索引与预期不符时拒绝写入并报错（不猜测） |
+
+### 6.5 其他副作用（待在集群上确认）
+
+- **统计信息增量**：Go 的事务提交会把表的 modify count / row count 增量交给 stats handle（`TableDelta`），系统表也不例外。tidb-rs 不维护统计信息的写入（ANALYZE 等归 X），这一项不更新会导致 `mysql.stats_meta` 中该表的 modify_count 与"全由 Go 写入"时不同。需要在 playground 上确认 Go 是否真的为 mysql 库的表记 delta；若记，评估是否需要照做（影响很小：只影响 auto-analyze 对这张小表的判断）。
+- **TiCDC**：changefeed 的默认 filter 排除 `mysql` 等系统库，tidb-rs 写入与 Go 写入在 TiKV 层完全一样，TiCDC 看到的变化相同。binlog 已废弃，不考虑。
+
+### 6.6 测试计划
+
+1. **单元级**：用 govec 生成 Go 对 `mysql.global_variables` 一行的 record 值和唯一索引 key / value（同一 TableInfo、同一 handle），Rust 编码逐字节相同。
+2. **混合集群**（tiup playground 起 Go TiDB，`scripts/playground-join.sh` 加入 tidb-rs，使用各自独立的 playground，不碰别人的）：
+   - Go 上 `SET GLOBAL`，tidb-rs 在 1 秒内（etcd）和 30 秒内（断开 etcd 时）看到；反之亦然。双方 `SHOW GLOBAL VARIABLES` 逐行相同。
+   - 两边交替、并发对同一变量 `SET GLOBAL`，最终值与只用两个 Go 实例时的行为相同；无错误返回（重试吸收冲突）。
+   - tidb-rs 写入后在 Go 上执行 `ADMIN CHECK TABLE mysql.global_variables`，通过。
+   - 原始 KV 对比：同一变量分别由 Go 和 tidb-rs 写入，行值与索引值逐字节相同（handle 除外）。
+   - autoid：tidb-rs 连续写入多次后，Go 写入不冲突。
+   - 有 GlobalConfigName 的变量：PD GlobalConfig 中的值与 Go 写入时相同。
+   - INSTANCE 作用域：不写表、不通知。
+   - 统计信息增量和 TiCDC：按 §6.5 观察并记录。
+3. **反证**：故意用错 row format、漏写索引、不发 etcd 通知，上述检查必须失败。
