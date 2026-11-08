@@ -214,10 +214,10 @@ JSON 是通用向量工具 **govec** 的第一个用户（方法论 §5；Decima
 
 | 阶段 | 需要的 JSON 能力 | 使用方 |
 |---|---|---|
-| **P1（最小子集）** | 常量、错误变量；`JsonRef/Json`；访问器；`CreateBinaryJSON` 的标量/字符串/nil/bool/Time/Duration/Opaque 分支；`ParseBinaryJSONFromString`；`json_valid` scanner；文本输出（`String/MarshalJSON`）；`Type`、`Unquote/UnquoteString`；`CompareBinaryJSON`、`IsZero`；`HashValue`、`PeekBytesAsJSON`；`GetElemDepth`；`JsonWriter`（数组/对象） | D01.1 Datum、D01.4 convert、D01.7 chunk、D01.8 codec、D08.4 比较、D08.8 CAST（含 `castJSONAsArray`） |
-| P1 规模 | `json_binary.go` 全部 + `json_binary_functions.go` 中约 1/4 + `json_constants.go`，约 1,000 行 Go 函数体 | |
+| **P1（D01.5，实际范围）** | `json_binary.go`、`json_binary_functions.go`、`json_path_expr.go` 三个文件全部（128 个函数）与 `json_constants.go`：二进制格式、访问器、构造、文本解析与输出、比较、哈希、路径表达式，以及 Extract/Modify/ArrayInsert/Remove/Merge/MergePatch/Contains/Overlaps/Search/Walk 这些 `BinaryJSON` 方法 | D01.1 Datum、D01.4 convert、D01.7 chunk、D01.8 codec、D08.4 比较、D08.8 CAST（含 `castJSONAsArray`） |
+| P1 规模 | 原计划只移植"最小子集"（约 1,000 行），实际三个文件一起按 L1 移植完了：路径和修改函数与核心代码交织，拆开反而要写桩（2026-11-08 更正，D01.5 spec §1） | |
 | P4 | `JsonWriter` 的"从多个子文档构造"接口 | D12.4 `JSON_ARRAYAGG/OBJECTAGG` |
-| 函数阶段（建议与 D08.6/D08.7/D08.9 一起放在 P5） | 路径表达式；Extract/Modify/ArrayInsert/Remove/Merge/MergePatch/Contains/Overlaps/Search/Walk；D08.10 全部函数 | 用户 SQL |
+| 函数阶段（建议与 D08.6/D08.7/D08.9 一起放在 P5） | D08.10 的 SQL 层 JSON 函数（`builtin_json.go` 等），它们调用上面的 `BinaryJSON` 方法 | 用户 SQL |
 
 在函数阶段之前，所有 JSON 函数按宪章第五条返回统一的"不支持"错误，并在 tracker 中登记边界桩。下推判定（D08.3，P2）只需要函数签名枚举，不依赖函数实现。
 
