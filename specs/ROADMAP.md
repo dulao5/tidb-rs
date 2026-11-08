@@ -64,7 +64,7 @@
 | L2 | D01.1 | Datum、FieldType 与类型辅助 | 3,906 | 13 | D01.5(21) |
 | L1 | D02.3 | parser 的 model、types、auth、duration 的忠实移植（D02.2 中只有 PoC 替身；D06.1 的前置，[spec](D02.3-parser-model-types/spec.md)） | 960 | 7 | — |
 | L2 | [D06.1](D06.1-model/spec.md) | 元数据模型（meta/model；2026-11-07 DDL job 的写路径函数改归 X，371 → 153 个函数。Part 1（PR #20，已合并）：Go-JSON 层、schema 结构体与 139 个函数；Part 2（PR (b)）：`job.go`、`reorg.go` 的 13 个函数与 `ColumnNeedRestoredData`，converge 153/153） | 1,475 | 10 | — |
-| L3 | D00.1 | 上下文接口骨架（sessionctx、planctx、exprctx、stmtctx、errctx、base 接口） | 2,773 | 29 | — |
+| L3 | [D00.1](D00.1-ctx/spec.md) | 上下文接口骨架（sessionctx、planctx、exprctx、stmtctx、errctx、base 接口；2026-11-09 第 1 部分：errctx、util/context、stmtctx 核心，converge 150/433，其余第 2 部分） | 2,773 | 29 | — |
 | L3 | D01.2 | Decimal（MyDecimal；流程试点） | 2,004 | 1 | — |
 | L3 | [D01.3](D01.3-time/spec.md) | 时间与 Duration | 3,400 | 3 | — |
 | L3 | D08.2 | 函数注册、类型推导、常量折叠与传播、collation 推导 | 2,385 | 9 | — |

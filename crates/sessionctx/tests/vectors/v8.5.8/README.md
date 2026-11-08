@@ -25,3 +25,11 @@ its own target.
 | generator | `govec` (seed 5052), 41,448 records: `fresh` 1, `set` 30,939, `get` 945, `set_global` 9,482, `init` 80; both targets hold the same records |
 | `arm64/sessionvars.jsonl.gz` sha256 | `c0d8fa1dec6879edf4ad65cea6d13cdf21b2cd54543b14f033061d682f883444` (generated locally) |
 | `amd64/sessionvars.jsonl.gz` sha256 | `3ef37a58afa28f1042b02d9fd7fd4fb327133d9eaa0d6dcddaee390a03335925` (tracker CI artifact) |
+
+## Domain "stmtctx" (block D00.1 part 1)
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/stmtctx.jsonl.gz` (branch `govec/stmtctx-D00.1`, tracker #30) |
+| generator | `govec` (seed 20261109), 1,142 records: `script` 613, `sqlwarn_marshal` 144, `sqlwarn_unmarshal` 125, `push_down` 256, `resolve` 4; both targets hold the same records (no floating point) |
+| `arm64/stmtctx.jsonl.gz` sha256 | `ac631f28a2f43fa941e3ba197cd7925eb5fa4063b0220855263bc9bbb3fce0c2` (generated locally) |
