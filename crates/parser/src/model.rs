@@ -281,11 +281,32 @@ impl CIStr {
         }
         // Unmarshal CIStr from a single string.
         let v = json::unmarshal_raw(b).map_err(Error::plain)?;
+        self.decode_string(&v)
+            .map_err(|e| Error::plain(e.to_string()))
+    }
+
+    /// The single-string fallback of `UnmarshalJSON`.
+    // go-part: CIStr.UnmarshalJSON
+    fn decode_string(&mut self, v: &Raw) -> Result<(), json::DecodeError> {
         let mut d = Decoder::new();
-        d.string(&v, &mut self.o);
-        d.finish().map_err(Error::plain)?;
+        d.string(v, &mut self.o);
+        d.finish()?;
         self.l = tidb_base::gostd::to_lower(&self.o);
         Ok(())
+    }
+
+    /// `UnmarshalJSON` on an already valid JSON value, as `encoding/json` calls it for a
+    /// `CIStr` field. Go returns the fallback's error through `errors.Trace`, which is not a
+    /// `*json.UnmarshalTypeError`, so the caller's error context does not apply (`Other`).
+    // go-part: CIStr.UnmarshalJSON
+    pub fn decode_json(&mut self, v: &Raw) -> Result<(), json::DecodeError> {
+        let mut d = Decoder::new();
+        Self::decode_struct(self, &mut d, v);
+        if d.finish().is_ok() {
+            return Ok(());
+        }
+        self.decode_string(v)
+            .map_err(|e| json::DecodeError::Other(e.to_string()))
     }
 
     /// `json.Marshal(cis)`: the default struct encoding `{"O":…,"L":…}`.

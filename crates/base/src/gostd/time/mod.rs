@@ -291,7 +291,7 @@ fn days_before(m: i32) -> i32 {
 }
 
 // go-std: time.daysIn L1
-fn days_in(m: i32, year: i64) -> i32 {
+pub(crate) fn days_in(m: i32, year: i64) -> i32 {
     if m == 2 {
         if is_leap(year) {
             return 29;

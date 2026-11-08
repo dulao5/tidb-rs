@@ -851,11 +851,20 @@ impl FieldType {
     // go: FieldType.UnmarshalJSON L1 [M-ERR]
     pub fn unmarshal_json(&mut self, data: &[u8]) -> Result<(), Error> {
         let v = json::unmarshal_raw(data).map_err(Error::plain)?;
+        self.decode_json(&v)
+            .map_err(|e| Error::plain(e.to_string()))
+    }
+
+    /// `UnmarshalJSON` on an already valid JSON value, as `encoding/json` calls it for a
+    /// `FieldType` field: the error is Go's `*json.UnmarshalTypeError` (the caller applies
+    /// its error context).
+    // go-part: FieldType.UnmarshalJSON
+    pub fn decode_json(&mut self, v: &json::Raw) -> Result<(), json::DecodeError> {
         let mut r = FieldType::default();
         let mut d = Decoder::new();
         let (mut tp, mut flag, mut flen, mut decimal) = (0u64, 0u64, 0i64, 0i64);
         d.object(
-            &v,
+            v,
             "jsonFieldType",
             "types.jsonFieldType",
             &Self::JSON_NAMES,
@@ -877,7 +886,7 @@ impl FieldType {
                 _ => d.bool(v, &mut r.array),
             },
         );
-        d.finish().map_err(Error::plain)?;
+        d.finish()?;
         r.tp = tp as u8;
         r.flag = flag as usize;
         r.flen = flen as isize;

@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 
 /// A decoded JSON value (Go `any` from `json.Unmarshal`: `map[string]any`, `[]any`,
 /// `float64`, `string`, `bool`, `nil`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Value {
+    #[default]
     Null,
     Bool(bool),
     Number(f64),
@@ -603,12 +604,57 @@ pub fn find_field(names: &[&str], key: &str) -> Option<usize> {
     names.iter().position(|n| fold_name(n) == k)
 }
 
+/// An error saved while decoding: a `*json.UnmarshalTypeError` (its fields, so that an outer
+/// decoder can apply its error context to an error returned by an `UnmarshalJSON` method, as
+/// Go's `addErrorContext` does) or another error (base64, an `UnmarshalJSON` method's own).
+// go-std: encoding/json.UnmarshalTypeError L2 (Value, Type, Struct, Field; no Offset)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecodeError {
+    Type {
+        value: String,
+        ty: String,
+        struct_name: String,
+        field: String,
+    },
+    Other(String),
+}
+
+impl std::fmt::Display for DecodeError {
+    // go-std: encoding/json.UnmarshalTypeError.Error L1
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Type {
+                value,
+                ty,
+                struct_name,
+                field,
+            } => {
+                if !struct_name.is_empty() || !field.is_empty() {
+                    write!(
+                        f,
+                        "json: cannot unmarshal {value} into Go struct field {struct_name}.{field} of type {ty}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "json: cannot unmarshal {value} into Go value of type {ty}"
+                    )
+                }
+            }
+            DecodeError::Other(s) => f.write_str(s),
+        }
+    }
+}
+
 /// The decoding state of one `json.Unmarshal` call: the first saved error (later fields are
 /// still decoded, as in Go) and the error context (innermost struct, field path).
 // go-std: encoding/json.decodeState L2 (savedError and errorContext only; the value tree comes from unmarshal_raw)
 #[derive(Debug, Default)]
 pub struct Decoder {
-    saved: Option<String>,
+    saved: Option<DecodeError>,
+    /// An error returned (not saved) by Go: from an `UnmarshalJSON` method. It ends the
+    /// decoding and is the result of `Unmarshal` even if an error was saved before.
+    fatal: Option<DecodeError>,
     struct_name: &'static str,
     fields: Vec<&'static str>,
 }
@@ -619,35 +665,68 @@ impl Decoder {
         Decoder::default()
     }
 
-    /// The first error saved during decoding (`d.savedError`), formatted like
-    /// `*json.UnmarshalTypeError.Error()`.
+    /// The first error saved during decoding (`d.savedError`).
     // go-std: encoding/json.decodeState.unmarshal L2 (returns savedError)
-    pub fn finish(self) -> Result<(), String> {
-        match self.saved {
+    pub fn finish(self) -> Result<(), DecodeError> {
+        match self.fatal.or(self.saved) {
             None => Ok(()),
             Some(e) => Err(e),
         }
     }
 
-    /// `d.saveError(&UnmarshalTypeError{Value: value, Type: ty})` with the current error
-    /// context applied (`addErrorContext`).
+    /// Whether an `UnmarshalJSON` method failed: Go returns from every enclosing
+    /// `object`/`array` at once, so nothing more is decoded.
+    // glue: the early return of decodeState.value
+    pub fn failed(&self) -> bool {
+        self.fatal.is_some()
+    }
+
+    /// The error of an `UnmarshalJSON` method (`return u.UnmarshalJSON(...)`): decoding
+    /// stops, and `d.unmarshal` applies the error context of the failure point to it.
+    // go-std: encoding/json.decodeState.unmarshal L2 (err := d.value(rv); return d.addErrorContext(err))
+    pub fn fail(&mut self, err: DecodeError) {
+        if self.fatal.is_some() {
+            return;
+        }
+        let saved = self.saved.take();
+        self.save_error(err);
+        self.fatal = self.saved.take();
+        self.saved = saved;
+    }
+
+    /// `d.saveError(err)`: keeps the first error, with the current error context applied to
+    /// a type error (`addErrorContext`: the innermost struct, and the field path prepended to
+    /// the error's own field).
     // go-std: encoding/json.decodeState.saveError L1
     // go-std: encoding/json.decodeState.addErrorContext L1
-    // go-std: encoding/json.UnmarshalTypeError.Error L1
-    pub fn save_type_error(&mut self, value: &str, ty: &str) {
+    pub fn save_error(&mut self, mut err: DecodeError) {
         if self.saved.is_some() {
             return;
         }
-        let msg = if !self.struct_name.is_empty() || !self.fields.is_empty() {
-            format!(
-                "json: cannot unmarshal {value} into Go struct field {}.{} of type {ty}",
-                self.struct_name,
-                self.fields.join(".")
-            )
-        } else {
-            format!("json: cannot unmarshal {value} into Go value of type {ty}")
-        };
-        self.saved = Some(msg);
+        if let DecodeError::Type {
+            struct_name, field, ..
+        } = &mut err
+            && (!self.struct_name.is_empty() || !self.fields.is_empty())
+        {
+            *struct_name = self.struct_name.to_owned();
+            let mut stack: Vec<&str> = self.fields.clone();
+            if !field.is_empty() {
+                stack.push(field);
+            }
+            *field = stack.join(".");
+        }
+        self.saved = Some(err);
+    }
+
+    /// `d.saveError(&UnmarshalTypeError{Value: value, Type: ty})`.
+    // go-std: encoding/json.decodeState.saveError L1 (UnmarshalTypeError)
+    pub fn save_type_error(&mut self, value: &str, ty: &str) {
+        self.save_error(DecodeError::Type {
+            value: value.to_owned(),
+            ty: ty.to_owned(),
+            struct_name: String::new(),
+            field: String::new(),
+        });
     }
 
     /// Decodes the members of a JSON object into a struct: `field(d, index, value)` is called
@@ -661,6 +740,23 @@ impl Decoder {
         struct_name: &'static str,
         ty: &str,
         names: &[&'static str],
+        field: impl FnMut(&mut Decoder, usize, &Raw),
+    ) {
+        self.object_promoted(v, struct_name, ty, names, &[], field);
+    }
+
+    /// [`Decoder::object`] for a struct with fields promoted from embedded structs:
+    /// `paths[i]` are the Go names of the embedded fields leading to field `i` (empty for a
+    /// field of the struct itself), which Go puts in the error context before the field's
+    /// JSON name (`Struct.Embedded.json_name`). An empty `paths` means no promoted fields.
+    // go-std: encoding/json.decodeState.object L2 (errorContext.FieldStack for f.index)
+    pub fn object_promoted(
+        &mut self,
+        v: &Raw,
+        struct_name: &'static str,
+        ty: &str,
+        names: &[&'static str],
+        paths: &[&[&'static str]],
         mut field: impl FnMut(&mut Decoder, usize, &Raw),
     ) {
         let members = match v {
@@ -672,11 +768,17 @@ impl Decoder {
             }
         };
         for (k, val) in members {
+            if self.failed() {
+                return;
+            }
             let Some(i) = find_field(names, k) else {
                 continue;
             };
             let orig_struct = self.struct_name;
             let orig_len = self.fields.len();
+            if let Some(path) = paths.get(i) {
+                self.fields.extend_from_slice(path);
+            }
             self.fields.push(names[i]);
             self.struct_name = struct_name;
             field(self, i, val);
@@ -722,6 +824,26 @@ impl Decoder {
         }
     }
 
+    /// A destination of a named string type `ty` (the type in the error message).
+    // go-std: encoding/json.decodeState.literalStore L2 (reflect.String destinations of a named type)
+    pub fn string_typed(&mut self, v: &Raw, dst: &mut String, ty: &str) {
+        match v {
+            Raw::Null => {}
+            Raw::String(s) => s.clone_into(dst),
+            other => self.save_type_error(other.kind(), ty),
+        }
+    }
+
+    /// A destination of a named bool type `ty`.
+    // go-std: encoding/json.decodeState.literalStore L2 (reflect.Bool destinations of a named type)
+    pub fn bool_typed(&mut self, v: &Raw, dst: &mut bool, ty: &str) {
+        match v {
+            Raw::Null => {}
+            Raw::Bool(b) => *dst = *b,
+            other => self.save_type_error(other.kind(), ty),
+        }
+    }
+
     /// A `string` destination (the unquoted text; invalid UTF-8 was already replaced).
     // go-std: encoding/json.decodeState.literalStore L2 (reflect.String destinations)
     pub fn string(&mut self, v: &Raw, dst: &mut String) {
@@ -756,11 +878,331 @@ impl Decoder {
         };
         let vec = dst.get_or_insert_with(Vec::new);
         for (i, item) in items.iter().enumerate() {
+            if self.failed() {
+                return;
+            }
             if i >= vec.len() {
                 vec.push(T::default());
             }
             elem(self, item, &mut vec[i]);
         }
         vec.truncate(items.len());
+    }
+
+    /// A `float64` destination: `strconv.ParseFloat(s, 64)`; out of range is a type error.
+    // go-std: encoding/json.decodeState.literalStore L2 (reflect.Float64 destinations)
+    pub fn float64(&mut self, v: &Raw, dst: &mut f64) {
+        match v {
+            Raw::Null => {}
+            Raw::Number(s) => match s.parse::<f64>() {
+                Ok(f) if f.is_finite() => *dst = f,
+                _ => self.save_type_error(&format!("number {s}"), "float64"),
+            },
+            other => self.save_type_error(other.kind(), "float64"),
+        }
+    }
+
+    /// An `interface{}` destination: replaced by the generic value (`objectInterface`,
+    /// `arrayInterface`, `literalInterface`): numbers become `float64` (no `UseNumber`),
+    /// objects `map[string]any`. A top-level number out of the float64 range saves a type
+    /// error and leaves the destination unchanged (see [`Decoder::any_opt`]).
+    // go-std: encoding/json.decodeState.valueInterface L2 (from the Raw tree)
+    pub fn any(&mut self, v: &Raw, dst: &mut Value) {
+        if let Some(x) = self.any_opt(v) {
+            *dst = x;
+        }
+    }
+
+    /// The value an `interface{}` destination is set to, or `None` when Go leaves the
+    /// destination unchanged: a top-level number out of the float64 range
+    /// (`literalStore`: `convertNumber` fails, `d.saveError(err); break` before `v.Set`).
+    /// Nested out-of-range numbers become `nil` elements (`literalInterface` returns the
+    /// nil `n` after saving the error).
+    // go-std: encoding/json.decodeState.literalStore L1 (reflect.Interface destinations)
+    pub fn any_opt(&mut self, v: &Raw) -> Option<Value> {
+        if let Raw::Number(s) = v
+            && !matches!(s.parse::<f64>(), Ok(f) if f.is_finite())
+        {
+            self.save_type_error(&format!("number {s}"), "float64");
+            return None;
+        }
+        Some(self.any_value(v))
+    }
+
+    // go-std: encoding/json.decodeState.valueInterface L2 (from the Raw tree)
+    fn any_value(&mut self, v: &Raw) -> Value {
+        match v {
+            Raw::Null => Value::Null,
+            Raw::Bool(b) => Value::Bool(*b),
+            Raw::String(s) => Value::String(s.clone()),
+            Raw::Number(s) => match s.parse::<f64>() {
+                Ok(f) if f.is_finite() => Value::Number(f),
+                _ => {
+                    self.save_type_error(&format!("number {s}"), "float64");
+                    Value::Null
+                }
+            },
+            Raw::Array(a) => Value::Array(a.iter().map(|x| self.any_value(x)).collect()),
+            Raw::Object(m) => {
+                let mut out = BTreeMap::new();
+                for (k, x) in m {
+                    let x = self.any_value(x);
+                    out.insert(k.clone(), x);
+                }
+                Value::Object(out)
+            }
+        }
+    }
+
+    /// A `[]byte` destination (`None` is nil): a JSON string is standard base64 (a decoding
+    /// error is saved and leaves the slice unchanged), `null` makes it nil, and an array of
+    /// numbers fills the bytes like any slice.
+    // go-std: encoding/json.decodeState.literalStore L2 ([]byte destinations)
+    ///
+    /// `ty` is the Go slice type (`[]uint8`, or `[]model.ActionType` for a named byte type)
+    /// and `elem_ty` its element type, for the type errors.
+    pub fn bytes(&mut self, v: &Raw, dst: &mut Option<Vec<u8>>, ty: &str, elem_ty: &str) {
+        match v {
+            Raw::String(s) => match base64_std_decode(s.as_bytes()) {
+                Ok(b) => *dst = Some(b),
+                Err(pos) => self.save_error(DecodeError::Other(format!(
+                    "illegal base64 data at input byte {pos}"
+                ))),
+            },
+            _ => self.slice(v, dst, ty, |d, v, b: &mut u8| {
+                let mut n = u64::from(*b);
+                d.uint(v, &mut n, u64::from(u8::MAX), elem_ty);
+                *b = n as u8;
+            }),
+        }
+    }
+
+    /// A map destination (`None` is nil) with keys parsed by `key`: `null` makes it nil, an
+    /// object is merged into the existing map (each value decoded into a fresh zero value).
+    // go-std: encoding/json.decodeState.object L2 (map destinations)
+    pub fn map<K: Ord, V: Default>(
+        &mut self,
+        v: &Raw,
+        dst: &mut Option<BTreeMap<K, V>>,
+        ty: &str,
+        mut key: impl FnMut(&mut Decoder, &str) -> Option<K>,
+        mut elem: impl FnMut(&mut Decoder, &Raw, &mut V),
+    ) {
+        let members = match v {
+            Raw::Null => {
+                *dst = None;
+                return;
+            }
+            Raw::Object(m) => m,
+            other => {
+                self.save_type_error(other.kind(), ty);
+                return;
+            }
+        };
+        let m = dst.get_or_insert_with(BTreeMap::new);
+        for (k, val) in members {
+            if self.failed() {
+                return;
+            }
+            // The value is decoded before the key is converted: an error in the value
+            // is saved first; an UnmarshalJSON error returns before the key is stored.
+            let mut e = V::default();
+            elem(self, val, &mut e);
+            if self.failed() {
+                return;
+            }
+            if let Some(k) = key(self, k) {
+                m.insert(k, e);
+            }
+        }
+    }
+
+    /// A map key of an integer kind: `strconv.ParseInt(key, 10, 64)` with the range check;
+    /// a bad key saves `UnmarshalTypeError{Value: "number " + key}` and drops the member.
+    // go-std: encoding/json.decodeState.object L2 (integer map keys)
+    pub fn int_key(&mut self, key: &str, min: i64, max: i64, ty: &str) -> Option<i64> {
+        match key.parse::<i64>() {
+            // strconv.ParseInt(s, 10, 64) accepts a leading '+'; then OverflowInt.
+            Ok(n) if n >= min && n <= max => Some(n),
+            _ => {
+                self.save_type_error(&format!("number {key}"), ty);
+                None
+            }
+        }
+    }
+}
+
+/// `base64.StdEncoding.DecodeString` (padding required; `\r` and `\n` are skipped). `Err` is
+/// the input offset of the first illegal byte (`base64.CorruptInputError`).
+// go-std: encoding/base64.Encoding.Decode L2 (StdEncoding; CorruptInputError offset as in decodeQuantum)
+pub fn base64_std_decode(src: &[u8]) -> Result<Vec<u8>, usize> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(src.len() / 4 * 3);
+    let mut si = 0;
+    loop {
+        // decodeQuantum: up to 4 symbols, skipping newlines.
+        let mut dbuf = [0u8; 4];
+        let mut dlen = 4;
+        let mut j = 0;
+        while j < 4 {
+            if si == src.len() {
+                if j == 0 {
+                    return Ok(out);
+                }
+                if j == 1 {
+                    return Err(si - j);
+                }
+                // StdEncoding has padding: a short final quantum is corrupt.
+                return Err(si - j);
+            }
+            let c = src[si];
+            si += 1;
+            if c == b'\n' || c == b'\r' {
+                continue;
+            }
+            if let Some(x) = val(c) {
+                dbuf[j] = x;
+                j += 1;
+                continue;
+            }
+            if c != b'=' {
+                return Err(si - 1);
+            }
+            // Padding.
+            match j {
+                0 | 1 => return Err(si - 1),
+                2 => {
+                    // "==" is expected, possibly with newlines.
+                    while si < src.len() && (src[si] == b'\n' || src[si] == b'\r') {
+                        si += 1;
+                    }
+                    if si == src.len() {
+                        return Err(src.len());
+                    }
+                    if src[si] != b'=' {
+                        return Err(si - 1);
+                    }
+                    si += 1;
+                }
+                _ => {}
+            }
+            while si < src.len() && (src[si] == b'\n' || src[si] == b'\r') {
+                si += 1;
+            }
+            if si < src.len() {
+                return Err(si);
+            }
+            dlen = j;
+            break;
+        }
+        let v = (u32::from(dbuf[0]) << 18)
+            | (u32::from(dbuf[1]) << 12)
+            | (u32::from(dbuf[2]) << 6)
+            | u32::from(dbuf[3]);
+        let b = [(v >> 16) as u8, (v >> 8) as u8, v as u8];
+        match dlen {
+            4 => out.extend_from_slice(&b),
+            3 => {
+                if b[2] != 0 {
+                    // Strict mode is off in StdEncoding: trailing bits are ignored.
+                }
+                out.extend_from_slice(&b[..2]);
+            }
+            2 => out.push(b[0]),
+            _ => {}
+        }
+        if dlen < 4 {
+            return Ok(out);
+        }
+    }
+}
+
+/// `base64.StdEncoding.EncodeToString` (how `json.Marshal` writes a `[]byte`).
+// go-std: encoding/base64.Encoding.Encode L1 (StdEncoding)
+pub fn base64_std_encode(src: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(src.len().div_ceil(3) * 4);
+    for c in src.chunks(3) {
+        let v = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        out.push(char::from(T[(v >> 18) as usize & 63]));
+        out.push(char::from(T[(v >> 12) as usize & 63]));
+        out.push(if c.len() > 1 {
+            char::from(T[(v >> 6) as usize & 63])
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            char::from(T[v as usize & 63])
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// `floatEncoder.encode` with its error: `json.Marshal` fails on NaN and ±Inf
+/// (`*json.UnsupportedValueError`, message `json: unsupported value: NaN`).
+// go-std: encoding/json.floatEncoder.encode L1 (bits 64, with the unsupported-value error)
+pub fn encode_float(out: &mut String, f: f64) -> Result<(), String> {
+    if f.is_nan() || f.is_infinite() {
+        return Err(format!(
+            "json: unsupported value: {}",
+            if f.is_nan() {
+                "NaN"
+            } else if f > 0.0 {
+                "+Inf"
+            } else {
+                "-Inf"
+            }
+        ));
+    }
+    out.push_str(&format_float(f));
+    Ok(())
+}
+
+/// `json.Marshal` of an `interface{}` value (compact), failing on NaN / ±Inf like Go.
+// go-std: encoding/json.encodeState.reflectValue L2 (generic values)
+pub fn encode_value(out: &mut String, v: &Value) -> Result<(), String> {
+    match v {
+        Value::Number(f) => encode_float(out, *f),
+        Value::Array(a) => {
+            out.push('[');
+            for (i, e) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                encode_value(out, e)?;
+            }
+            out.push(']');
+            Ok(())
+        }
+        Value::Object(m) => {
+            out.push('{');
+            for (i, (k, e)) in m.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                append_string(out, k);
+                out.push(':');
+                encode_value(out, e)?;
+            }
+            out.push('}');
+            Ok(())
+        }
+        other => {
+            out.push_str(&marshal(other));
+            Ok(())
+        }
     }
 }
