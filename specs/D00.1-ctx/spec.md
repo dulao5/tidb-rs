@@ -9,7 +9,7 @@ tracker 中 D00.1 共 433 个函数，分布在 29 个 Go 文件中。分两部�
 | 部分 | Go 文件 | 函数数 | 位置 |
 |---|---|--:|---|
 | 1 | `pkg/errctx/context.go` | 13 | `tidb-sessionctx::errctx` |
-| 1 | `pkg/util/context/{warn,plancache,context}.go` | 39 | `tidb-base::contextutil`（已有 `WarnAppender`，见 §3.1）；tracker 中改归新块 **D00.1a**（tidb-base 所有，#65 评审） |
+| 1 | `pkg/util/context/{warn,plancache,context}.go` | 39 | `tidb-base::contextutil`（已有 `WarnAppender`，见 §3.1）；tracker 中改归新块 **D00.4**（tidb-base 所有，#65 评审；#68 评审时由 D00.1a 改名，避免和"第 2a 部分"混淆） |
 | 1 | `pkg/sessionctx/stmtctx/stmtctx.go` | 125（移植 98） | `tidb-sessionctx::stmtctx` |
 | 2a | `pkg/expression/exprctx/{context,optional,param}.go` | 23 | `tidb-sessionctx::exprctx`（trait 与包装类型） |
 | 2a | `pkg/expression/expropt/optional.go` | 5 | `tidb-sessionctx::expropt` |
@@ -18,7 +18,7 @@ tracker 中 D00.1 共 433 个函数，分布在 29 个 Go 文件中。分两部�
 | 2 | `pkg/planner/{planctx,core/base,util/debugtrace}/*`、`pkg/sessionctx/context.go`、`pkg/distsql/context` | 约 24 | 依赖 D08.1、D07.x |
 | 2a | `pkg/util/ranger/{types,points}.go`、`ranger/context` | 35 | `tidb-sessionctx::ranger`（N0 评审归 D00.1） |
 
-收敛检查：第 1 部分后 150/433；第 2a 部分后 D00.1 为 294/433（2a 的 7 个 Go 文件全部移植，缺的 27 个仍是 stmtctx.go 中登记了豁免的函数，其余是 2b 的文件），D00.1a 为 39/39。
+收敛检查：第 1 部分后 150/433；第 2a 部分后 D00.1 为 294/433（2a 的 7 个 Go 文件全部移植，缺的 27 个仍是 stmtctx.go 中登记了豁免的函数，其余是 2b 的文件），D00.4 为 39/39。
 
 ## 2. 依赖
 

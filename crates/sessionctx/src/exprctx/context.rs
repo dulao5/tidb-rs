@@ -22,10 +22,10 @@ use tidb_types::datum::Datum;
 
 use super::optional::{OptionalEvalPropKey, OptionalEvalPropKeySet, OptionalEvalPropProviderRef};
 use super::param::ParamValues;
-use super::uservars::UserVarsReaderRef;
 use crate::errctx;
 use crate::variable::session::SessionVars;
 use crate::variable::session_state::MysqlRng;
+use crate::variable::uservars::UserVarsReaderRef;
 
 /// A shared `*mathutil.MysqlRng`.
 pub type MysqlRngRef = Arc<Mutex<MysqlRng>>;

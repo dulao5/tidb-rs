@@ -17,9 +17,9 @@
 #![allow(non_upper_case_globals)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use tidb_base::Error;
 use tidb_base::contextutil::{
     SQLWarn, WarnAppender, WarnAppenderRef, WarnHandler, gen_context_id, new_static_warn_handler,
@@ -216,19 +216,21 @@ static defaultSQLMode: LazyLock<SQLMode> = LazyLock::new(|| {
 /// context itself): forwards to the context's warn handler.
 #[derive(Default)]
 pub struct EvalWarnSink {
-    handler: RwLock<Option<WarnHandlerRef>>,
+    /// Set once, when the options have been applied: Go's `EvalContext` never swaps its
+    /// handler after construction.
+    handler: OnceLock<Option<WarnHandlerRef>>,
 }
 
 impl WarnAppender for EvalWarnSink {
     // glue: EvalContext.AppendWarning through the WarnAppender interface
     fn append_warning(&self, err: Error) {
-        if let Some(h) = &*self.handler.read() {
+        if let Some(Some(h)) = self.handler.get() {
             h.append_warning(err);
         }
     }
     // glue: EvalContext.AppendNote through the WarnAppender interface
     fn append_note(&self, err: Error) {
-        if let Some(h) = &*self.handler.read() {
+        if let Some(Some(h)) = self.handler.get() {
             h.append_note(err);
         }
     }
@@ -272,7 +274,7 @@ pub fn new_eval_context(opt: Vec<EvalCtxOption>) -> Arc<EvalContext> {
     if state.user_vars.is_none() {
         state.user_vars = Some(new_user_vars());
     }
-    *sink.handler.write() = state.warn_handler.clone();
+    let _ = sink.handler.set(state.warn_handler.clone());
     Arc::new(EvalContext {
         id: gen_context_id(),
         state,
@@ -474,7 +476,7 @@ impl EvalContext {
         for o in opt {
             o(&mut state);
         }
-        *sink.handler.write() = state.warn_handler.clone();
+        let _ = sink.handler.set(state.warn_handler.clone());
         Arc::new(EvalContext {
             id: gen_context_id(),
             state,

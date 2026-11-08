@@ -21,6 +21,7 @@ pub mod sysvar_data;
 pub mod tidb_defs;
 pub mod tidb_vars;
 pub(crate) mod timeparse;
+pub mod uservars;
 pub(crate) mod util;
 #[allow(clippy::module_inception)]
 pub mod variable;

@@ -1,7 +1,7 @@
 //! `variable.UserVarsReader` (Go `pkg/sessionctx/variable/session.go`, block D05.2): the user
-//! variables an expression reads. D05.2 has not ported user variables yet (its task T6), and
-//! `crates/sessionctx/src/variable/` is not touched by D00.1, so the interface and an empty
-//! `UserVars` live here as a stand-in.
+//! variables an expression reads. D05.2 has not ported user variables yet; the interface and
+//! an empty `UserVars` live here (where Go defines them) as a stand-in until D05.2 replaces
+//! them. `exprctx` re-exports them.
 
 use std::sync::Arc;
 

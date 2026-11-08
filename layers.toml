@@ -13,7 +13,7 @@
 # ---------------------------------------------------------------- layered
 [crate.tidb-base]
 rank = 0
-blocks = ["D00.2", "D00.1a"]   # parser/mysql 常量、errno、terror、dbterror、config；contextutil（D00.1a）
+blocks = ["D00.2", "D00.4"]   # parser/mysql 常量、errno、terror、dbterror、config；contextutil（D00.4）
 
 [crate.tidb-metrics]
 rank = 0
