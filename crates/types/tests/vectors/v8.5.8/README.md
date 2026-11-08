@@ -100,9 +100,11 @@ Replayed by `crates/types/tests/govec_json.rs`.
 
 ## datum
 
-`<target>/datum.jsonl.gz` (domain `datum`: D01.1 part 1 with D01.4, and the charset
-Encodings), copied from tidb-rs-tracker branch `govec/datum-D01.1` at `f20716e`: 74,274 records,
-seed 20261108. amd64 sha256 `82c4cb6f9ede8aba723476b62b1ac7a441ab8a75c19c490e8995dfed10f719cd` (from the tracker CI artifact), arm64 sha256 `eedc6daafcb23e66dc49720f9254c3bf01b828b38842de9dd4819cc3357011d2`.
-The targets differ in 18 records: 8 `float_helper` (the hardware default NaN of `0*Inf` in
-`Truncate`: negative on x86) and 10 `convert_num` `FloatToInt` with NaN (M-F2I:
-`int64(NaN)` is MinInt64 on amd64, 0 on arm64).
+`<target>/datum.jsonl.gz` (domain `datum`: block D01.1 parts 1 and 2 with D01.4, and the
+charset Encodings), copied from tidb-rs-tracker branch `govec/datum-D01.1-2` at `31f113a`:
+141,968 records, seed 20261108. amd64 sha256
+`afb895032ef01cb60ad84f20584f5fd1627aa681a2ec7dadc0c0fbe3e9abfac5` (from the tracker CI
+artifact), arm64 sha256 `be807fee43e74b7bd8617874bb5a266e47b071571b0504204cec450a1cdb7263`.
+The targets differ in 46 records: 8 `float_helper` (the hardware default NaN of `0*Inf` in
+`Truncate`: negative on x86) and 38 where a NaN float reaches `int64(NaN)` (M-F2I:
+MinInt64 on amd64, 0 on arm64): 10 `convert_num`, 16 `d_convert`, 2 `d_to`, 10 `d_reverse`.
