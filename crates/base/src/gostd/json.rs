@@ -19,6 +19,27 @@ pub enum Value {
     Object(BTreeMap<String, Value>),
 }
 
+impl Drop for Value {
+    /// Frees the tree without recursion: a valid document nests up to 10000 levels (Go's GC
+    /// frees it without a stack); the derived drop would recurse once per level.
+    // glue: iterative drop of the value tree
+    fn drop(&mut self) {
+        let mut stack = match self {
+            Value::Array(a) if !a.is_empty() => std::mem::take(a),
+            Value::Object(m) if !m.is_empty() => std::mem::take(m).into_values().collect(),
+            _ => return,
+        };
+        while let Some(mut v) = stack.pop() {
+            match &mut v {
+                Value::Array(a) => stack.append(a),
+                Value::Object(m) => stack.extend(std::mem::take(m).into_values()),
+                _ => {}
+            }
+            // `v` drops here without children.
+        }
+    }
+}
+
 /// `floatEncoder.encode` for float64.
 // go-std: encoding/json.floatEncoder.encode L1 (bits 64)
 pub fn format_float(f: f64) -> String {
@@ -130,7 +151,7 @@ pub fn append_go_string(out: &mut String, s: &[u8]) {
 // go-std: encoding/json.Marshal L2 (generic values; maps sorted by key)
 pub fn marshal(v: &Value) -> String {
     let mut out = String::new();
-    write(&mut out, v, None, 0);
+    write(&mut out, v, None);
     out
 }
 
@@ -138,7 +159,7 @@ pub fn marshal(v: &Value) -> String {
 // go-std: encoding/json.Indent L2 (applied to Marshal's compact output; empty {} and [] stay compact)
 pub fn marshal_indent(v: &Value, indent: &str) -> String {
     let mut out = String::new();
-    write(&mut out, v, Some(indent), 0);
+    write(&mut out, v, Some(indent));
     out
 }
 
@@ -152,66 +173,113 @@ fn newline(out: &mut String, indent: Option<&str>, depth: usize) {
     }
 }
 
-// go-std: encoding/json.encodeState.reflectValue L2 (generic values; Indent applied inline)
-fn write(out: &mut String, v: &Value, indent: Option<&str>, depth: usize) {
+// go-std: encoding/json.encodeState.reflectValue L2 (generic values: the scalars)
+fn write_leaf(out: &mut String, v: &Value) {
     match v {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Number(f) => out.push_str(&format_float(*f)),
         Value::Int(i) => out.push_str(&i.to_string()),
         Value::String(s) => append_string(out, s),
-        Value::Array(a) => {
-            out.push('[');
-            if a.is_empty() {
-                out.push(']');
-                return;
-            }
-            for (i, e) in a.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
+        Value::Array(_) => out.push_str("[]"),
+        Value::Object(_) => out.push_str("{}"),
+    }
+}
+
+/// An array or object being written: the remaining elements and whether one was written.
+enum WriteFrame<'a> {
+    Array(std::slice::Iter<'a, Value>, bool),
+    Object(std::collections::btree_map::Iter<'a, String, Value>, bool),
+}
+
+/// Writes `v` without recursion: the open arrays and objects are an explicit stack (a valid
+/// document nests up to 10000 levels). With `indent`, the output is Go's `json.Indent` of the
+/// compact text: empty `[]` and `{}` stay compact. `leaf` writes every value that is not a
+/// non-empty array or object (it may fail: NaN, ±Inf).
+// go-std: encoding/json.encodeState.reflectValue L2 (generic values; explicit stack; Indent applied inline)
+fn write_with<E>(
+    out: &mut String,
+    v: &Value,
+    indent: Option<&str>,
+    mut leaf: impl FnMut(&mut String, &Value) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut stack: Vec<WriteFrame<'_>> = Vec::new();
+    let mut next = Some(v);
+    loop {
+        if let Some(v) = next.take() {
+            match v {
+                Value::Array(a) if !a.is_empty() => {
+                    out.push('[');
+                    stack.push(WriteFrame::Array(a.iter(), false));
                 }
-                newline(out, indent, depth + 1);
-                write(out, e, indent, depth + 1);
+                Value::Object(m) if !m.is_empty() => {
+                    out.push('{');
+                    stack.push(WriteFrame::Object(m.iter(), false));
+                }
+                _ => leaf(out, v)?,
             }
-            newline(out, indent, depth);
-            out.push(']');
         }
-        Value::Object(m) => {
-            out.push('{');
-            if m.is_empty() {
-                out.push('}');
-                return;
-            }
-            for (i, (k, e)) in m.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
+        let depth = stack.len();
+        match stack.last_mut() {
+            None => return Ok(()),
+            Some(WriteFrame::Array(it, written)) => match it.next() {
+                Some(e) => {
+                    if *written {
+                        out.push(',');
+                    }
+                    *written = true;
+                    newline(out, indent, depth);
+                    next = Some(e);
                 }
-                newline(out, indent, depth + 1);
-                append_string(out, k);
-                out.push(':');
-                if indent.is_some() {
-                    out.push(' ');
+                None => {
+                    stack.pop();
+                    newline(out, indent, depth - 1);
+                    out.push(']');
                 }
-                write(out, e, indent, depth + 1);
-            }
-            newline(out, indent, depth);
-            out.push('}');
+            },
+            Some(WriteFrame::Object(it, written)) => match it.next() {
+                Some((k, e)) => {
+                    if *written {
+                        out.push(',');
+                    }
+                    *written = true;
+                    newline(out, indent, depth);
+                    append_string(out, k);
+                    out.push(':');
+                    if indent.is_some() {
+                        out.push(' ');
+                    }
+                    next = Some(e);
+                }
+                None => {
+                    stack.pop();
+                    newline(out, indent, depth - 1);
+                    out.push('}');
+                }
+            },
         }
     }
+}
+
+// go-std: encoding/json.encodeState.reflectValue L2 (generic values; Indent applied inline)
+fn write(out: &mut String, v: &Value, indent: Option<&str>) {
+    let r: Result<(), std::convert::Infallible> = write_with(out, v, indent, |out, v| {
+        write_leaf(out, v);
+        Ok(())
+    });
+    let Ok(()) = r;
 }
 
 /// `json.Unmarshal(data, &v)` with `v any`: numbers become `float64`. A syntax error is Go's
 /// `*json.SyntaxError` message.
 // go-std: encoding/json.Unmarshal L2 (into any)
 pub fn unmarshal(data: &[u8]) -> Result<Value, String> {
-    let mut p = JsonParser { b: data, i: 0 };
-    p.ws();
-    let v = p.value(0)?;
-    p.ws();
-    if p.i != p.b.len() {
-        return p.err_at("after top-level value", true);
-    }
-    Ok(v)
+    // checkValid first: a syntax error wins over type errors (1e400), as in Go.
+    let raw = unmarshal_raw(data)?;
+    let mut d = Decoder::new();
+    let v = d.any_opt(&raw);
+    d.finish().map_err(|e| e.to_string())?;
+    Ok(v.unwrap_or_default())
 }
 
 /// `quoteChar` formats c as a quoted character literal.
@@ -287,85 +355,6 @@ impl JsonParser<'_> {
             self.i += 1;
         }
         Ok(v)
-    }
-
-    // go-std: encoding/json.decodeState.valueInterface L2 (scanner merged into a recursive descent parser)
-    fn value(&mut self, depth: usize) -> Result<Value, String> {
-        match self.b.get(self.i) {
-            None => self.err_at("looking for beginning of value", true),
-            Some(b'n') => self.lit(b"null", Value::Null),
-            Some(b't') => self.lit(b"true", Value::Bool(true)),
-            Some(b'f') => self.lit(b"false", Value::Bool(false)),
-            Some(b'"') => Ok(Value::String(self.string()?)),
-            Some(b'[') => {
-                self.max_depth(depth)?;
-                self.i += 1;
-                let mut a = Vec::new();
-                self.ws();
-                if self.b.get(self.i) == Some(&b']') {
-                    self.i += 1;
-                    return Ok(Value::Array(a));
-                }
-                loop {
-                    self.ws();
-                    a.push(self.value(depth + 1)?);
-                    self.ws();
-                    match self.b.get(self.i) {
-                        Some(b',') => self.i += 1,
-                        Some(b']') => {
-                            self.i += 1;
-                            return Ok(Value::Array(a));
-                        }
-                        _ => return self.err_at("after array element", true),
-                    }
-                }
-            }
-            Some(b'{') => {
-                self.max_depth(depth)?;
-                self.i += 1;
-                let mut m = BTreeMap::new();
-                self.ws();
-                if self.b.get(self.i) == Some(&b'}') {
-                    self.i += 1;
-                    return Ok(Value::Object(m));
-                }
-                loop {
-                    self.ws();
-                    if self.b.get(self.i) != Some(&b'"') {
-                        return self.err_at("looking for beginning of object key string", true);
-                    }
-                    let k = self.string()?;
-                    self.ws();
-                    if self.b.get(self.i) != Some(&b':') {
-                        return self.err_at("after object key", true);
-                    }
-                    self.i += 1;
-                    self.ws();
-                    let v = self.value(depth + 1)?;
-                    m.insert(k, v);
-                    self.ws();
-                    match self.b.get(self.i) {
-                        Some(b',') => self.i += 1,
-                        Some(b'}') => {
-                            self.i += 1;
-                            return Ok(Value::Object(m));
-                        }
-                        _ => return self.err_at("after object key:value pair", true),
-                    }
-                }
-            }
-            Some(c) if *c == b'-' || c.is_ascii_digit() => {
-                let s = self.number_literal()?;
-                let f: f64 = s.parse().map_err(|_| "number".to_owned())?;
-                if f.is_infinite() {
-                    return Err(format!(
-                        "json: cannot unmarshal number {s} into Go value of type float64"
-                    ));
-                }
-                Ok(Value::Number(f))
-            }
-            Some(_) => self.err_at("looking for beginning of value", true),
-        }
     }
 
     // go-std: encoding/json.stateBeginValue L2 (number literal of the scanner)
@@ -516,17 +505,25 @@ pub enum Raw {
     Object(Vec<(String, Raw)>, Span),
 }
 
-/// Drops a value tree without recursion. A valid document may nest 10000 levels (Go's GC
-/// frees it without a stack); the derived drop of [`Raw`] recurses once per level, so callers
-/// that may hold such a tree end its life here.
-// glue: iterative drop of the value tree
-pub fn drop_raw(v: Raw) {
-    let mut stack = vec![v];
-    while let Some(v) = stack.pop() {
-        match v {
-            Raw::Array(a, _) => stack.extend(a),
-            Raw::Object(m, _) => stack.extend(m.into_iter().map(|(_, v)| v)),
-            _ => {}
+impl Drop for Raw {
+    /// Frees the tree without recursion: a valid document nests up to 10000 levels (Go's GC
+    /// frees it without a stack); the derived drop would recurse once per level. Leaves and
+    /// empty containers return at once. To move contents out of a `Raw`, take them
+    /// (`std::mem::take`) instead of destructuring by value.
+    // glue: iterative drop of the value tree
+    fn drop(&mut self) {
+        let mut stack = match self {
+            Raw::Array(a, _) if !a.is_empty() => std::mem::take(a),
+            Raw::Object(m, _) if !m.is_empty() => m.drain(..).map(|(_, v)| v).collect(),
+            _ => return,
+        };
+        while let Some(mut v) = stack.pop() {
+            match &mut v {
+                Raw::Array(a, _) => stack.append(a),
+                Raw::Object(m, _) => stack.extend(m.drain(..).map(|(_, v)| v)),
+                _ => {}
+            }
+            // `v` drops here without children.
         }
     }
 }
@@ -576,34 +573,8 @@ impl JsonParser<'_> {
             Array(Vec<Raw>, usize),
             Object(Vec<(String, Raw)>, String, usize),
         }
-        /// The open containers; on a syntax error their finished children are dropped
-        /// without recursion ([`drop_raw`]).
-        struct Stack(Vec<Open>);
-        impl Drop for Stack {
-            // glue: iterative drop of the partial value tree
-            fn drop(&mut self) {
-                for o in self.0.drain(..) {
-                    match o {
-                        Open::Array(a, s) => drop_raw(Raw::Array(a, (s, s))),
-                        Open::Object(m, _, s) => drop_raw(Raw::Object(m, (s, s))),
-                    }
-                }
-            }
-        }
-        impl std::ops::Deref for Stack {
-            type Target = Vec<Open>;
-            // glue: access to the stack
-            fn deref(&self) -> &Vec<Open> {
-                &self.0
-            }
-        }
-        impl std::ops::DerefMut for Stack {
-            // glue: access to the stack
-            fn deref_mut(&mut self) -> &mut Vec<Open> {
-                &mut self.0
-            }
-        }
-        let mut stack = Stack(Vec::new());
+        // On a syntax error the finished children drop without recursion (`Drop for Raw`).
+        let mut stack: Vec<Open> = Vec::new();
         loop {
             // A value starts here (stateBeginValue / stateBeginValueOrEmpty).
             self.ws();
@@ -1107,9 +1078,10 @@ impl Decoder {
         Some(self.any_value(v))
     }
 
-    // go-std: encoding/json.decodeState.valueInterface L2 (from the Raw tree)
-    fn any_value(&mut self, v: &Raw) -> Value {
-        match v {
+    /// A scalar of `valueInterface` (`literalInterface`); `None` for arrays and objects.
+    // go-std: encoding/json.decodeState.literalInterface L2 (from the Raw tree)
+    fn any_scalar(&mut self, v: &Raw) -> Option<Value> {
+        Some(match v {
             Raw::Null => Value::Null,
             Raw::Bool(b) => Value::Bool(*b),
             Raw::String(s, _) => Value::String(s.clone()),
@@ -1120,14 +1092,76 @@ impl Decoder {
                     Value::Null
                 }
             },
-            Raw::Array(a, _) => Value::Array(a.iter().map(|x| self.any_value(x)).collect()),
-            Raw::Object(m, _) => {
-                let mut out = BTreeMap::new();
-                for (k, x) in m {
-                    let x = self.any_value(x);
-                    out.insert(k.clone(), x);
+            Raw::Array(..) | Raw::Object(..) => return None,
+        })
+    }
+
+    /// `valueInterface` without recursion: the open arrays and objects are an explicit
+    /// stack, visited in document order (so the first saved error is Go's).
+    // go-std: encoding/json.decodeState.valueInterface L2 (from the Raw tree; explicit stack)
+    fn any_value(&mut self, v: &Raw) -> Value {
+        enum Frame<'a> {
+            Array(std::slice::Iter<'a, Raw>, Vec<Value>),
+            Object(
+                std::slice::Iter<'a, (String, Raw)>,
+                BTreeMap<String, Value>,
+                String,
+            ),
+        }
+        let mut stack: Vec<Frame<'_>> = Vec::new();
+        let mut next = Some(v);
+        loop {
+            let mut done = None;
+            if let Some(v) = next.take() {
+                match v {
+                    Raw::Array(a, _) => {
+                        stack.push(Frame::Array(a.iter(), Vec::with_capacity(a.len())));
+                    }
+                    Raw::Object(m, _) => {
+                        stack.push(Frame::Object(m.iter(), BTreeMap::new(), String::new()));
+                    }
+                    _ => done = self.any_scalar(v),
                 }
-                Value::Object(out)
+            }
+            loop {
+                if let Some(x) = done.take() {
+                    match stack.last_mut() {
+                        None => return x,
+                        Some(Frame::Array(_, out)) => out.push(x),
+                        // A later duplicate key replaces the earlier value (map assignment).
+                        Some(Frame::Object(_, out, k)) => {
+                            out.insert(std::mem::take(k), x);
+                        }
+                    }
+                }
+                match stack.last_mut() {
+                    None => unreachable!("a container is open"),
+                    Some(Frame::Array(it, _)) => match it.next() {
+                        Some(x) => {
+                            next = Some(x);
+                            break;
+                        }
+                        None => {
+                            let Some(Frame::Array(_, out)) = stack.pop() else {
+                                unreachable!()
+                            };
+                            done = Some(Value::Array(out));
+                        }
+                    },
+                    Some(Frame::Object(it, _, k)) => match it.next() {
+                        Some((key, x)) => {
+                            key.clone_into(k);
+                            next = Some(x);
+                            break;
+                        }
+                        None => {
+                            let Some(Frame::Object(_, out, _)) = stack.pop() else {
+                                unreachable!()
+                            };
+                            done = Some(Value::Object(out));
+                        }
+                    },
+                }
             }
         }
     }
@@ -1214,39 +1248,62 @@ impl Decoder {
 /// fallback of [`Decoder::raw_message`] without the input).
 // glue: rebuilds a RawMessage from the decoded tree
 fn raw_compact(v: &Raw) -> String {
-    fn go(out: &mut String, v: &Raw) {
-        match v {
-            Raw::Null => out.push_str("null"),
-            Raw::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-            Raw::Number(n) => out.push_str(n),
-            Raw::String(s, _) => append_string(out, s),
-            Raw::Array(a, _) => {
-                out.push('[');
-                for (i, x) in a.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    go(out, x);
-                }
-                out.push(']');
-            }
-            Raw::Object(m, _) => {
-                out.push('{');
-                for (i, (k, x)) in m.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    append_string(out, k);
-                    out.push(':');
-                    go(out, x);
-                }
-                out.push('}');
-            }
-        }
+    enum Frame<'a> {
+        Array(std::slice::Iter<'a, Raw>, bool),
+        Object(std::slice::Iter<'a, (String, Raw)>, bool),
     }
     let mut out = String::new();
-    go(&mut out, v);
-    out
+    let mut stack: Vec<Frame<'_>> = Vec::new();
+    let mut next = Some(v);
+    loop {
+        if let Some(v) = next.take() {
+            match v {
+                Raw::Null => out.push_str("null"),
+                Raw::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+                Raw::Number(n) => out.push_str(n),
+                Raw::String(s, _) => append_string(&mut out, s),
+                Raw::Array(a, _) => {
+                    out.push('[');
+                    stack.push(Frame::Array(a.iter(), false));
+                }
+                Raw::Object(m, _) => {
+                    out.push('{');
+                    stack.push(Frame::Object(m.iter(), false));
+                }
+            }
+        }
+        match stack.last_mut() {
+            None => return out,
+            Some(Frame::Array(it, written)) => match it.next() {
+                Some(x) => {
+                    if *written {
+                        out.push(',');
+                    }
+                    *written = true;
+                    next = Some(x);
+                }
+                None => {
+                    stack.pop();
+                    out.push(']');
+                }
+            },
+            Some(Frame::Object(it, written)) => match it.next() {
+                Some((k, x)) => {
+                    if *written {
+                        out.push(',');
+                    }
+                    *written = true;
+                    append_string(&mut out, k);
+                    out.push(':');
+                    next = Some(x);
+                }
+                None => {
+                    stack.pop();
+                    out.push('}');
+                }
+            },
+        }
+    }
 }
 
 /// `json.Marshal` of a `json.RawMessage` (`None` is nil): `MarshalJSON` returns the bytes
@@ -1451,37 +1508,13 @@ pub fn encode_float(out: &mut String, f: f64) -> Result<(), String> {
 }
 
 /// `json.Marshal` of an `interface{}` value (compact), failing on NaN / ±Inf like Go.
-// go-std: encoding/json.encodeState.reflectValue L2 (generic values)
+// go-std: encoding/json.encodeState.reflectValue L2 (generic values; explicit stack)
 pub fn encode_value(out: &mut String, v: &Value) -> Result<(), String> {
-    match v {
+    write_with(out, v, None, |out, v| match v {
         Value::Number(f) => encode_float(out, *f),
-        Value::Array(a) => {
-            out.push('[');
-            for (i, e) in a.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                encode_value(out, e)?;
-            }
-            out.push(']');
-            Ok(())
-        }
-        Value::Object(m) => {
-            out.push('{');
-            for (i, (k, e)) in m.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                append_string(out, k);
-                out.push(':');
-                encode_value(out, e)?;
-            }
-            out.push('}');
-            Ok(())
-        }
         other => {
-            out.push_str(&marshal(other));
+            write_leaf(out, other);
             Ok(())
         }
-    }
+    })
 }

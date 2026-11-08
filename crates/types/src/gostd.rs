@@ -911,7 +911,6 @@ pub(crate) fn json_unmarshal_my_decimal(data: &[u8]) -> Result<JsonMyDecimal, St
             }
         },
     );
-    json::drop_raw(raw);
     d.finish().map_err(|e| e.to_string())?;
     Ok(r)
 }
@@ -1210,7 +1209,6 @@ pub(crate) fn json_unmarshal_uint64(data: &[u8], v: u64) -> Result<u64, String> 
     let mut out = v;
     let mut d = json::Decoder::new();
     d.uint(&raw, &mut out, u64::MAX, "types.CoreTime");
-    json::drop_raw(raw);
     d.finish().map_err(|e| e.to_string())?;
     Ok(out)
 }

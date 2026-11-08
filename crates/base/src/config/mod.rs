@@ -1295,8 +1295,8 @@ pub fn get_json_config() -> Result<String, Error> {
 // glue: GetJSONConfig with the global config passed in (vectors)
 pub fn json_config_of(conf: &Config) -> Result<String, Error> {
     // json.Marshal + json.Unmarshal into map[string]any: numbers become float64.
-    let mut json_value = match reflect::to_json(conf, true)? {
-        json::Value::Object(m) => m,
+    let mut json_value = match &mut reflect::to_json(conf, true)? {
+        json::Value::Object(m) => std::mem::take(m),
         _ => unreachable!("a struct encodes as an object"),
     };
 
