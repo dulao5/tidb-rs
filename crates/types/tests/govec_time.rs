@@ -596,17 +596,6 @@ fn check(rep: &mut Replay, rec: &Value) -> Option<String> {
         return Some(format!("out: got {out}, want {want_out}"));
     }
     let got_err = err.as_ref().map(err_json);
-    // Go's encoding/json syntax error texts are not ported (as for MyDecimal.UnmarshalJSON):
-    // a syntax error must be a code-less error, whatever its text.
-    let json_syntax = op == "unmarshal_json"
-        && want_err["name"] == "other"
-        && !ungs(&want_err["msg"]).starts_with(b"json: cannot unmarshal");
-    if json_syntax {
-        return match &err {
-            Some(e) if e.code() == 0 => None,
-            _ => Some(format!("err: got {got_err:?}, want a JSON syntax error")),
-        };
-    }
     let want_err_cmp = if want_err.is_null() {
         None
     } else {

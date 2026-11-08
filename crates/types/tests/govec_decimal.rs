@@ -9,7 +9,9 @@
 //! Rules (tracker `govec/README.md`): outputs (`s`, `str`, internal state `st`, ints, hex,
 //! float strings) must be equal; errors must match by code (the message is compared too);
 //! `err.name == "panic"` records must panic in Rust as well (checked with `catch_unwind`);
-//! `err.name == "other"` (Go encoding/json errors) must be an error without a MySQL code.
+//! `err.name == "other"` (Go encoding/json errors) must be an error without a MySQL code
+//! and, for the `unmarshal_json*` ops, with Go's message (tidb-base ports `encoding/json`'s
+//! syntax and type error texts).
 //!
 //! `*_alias` ops are Go calls whose `to` is one of the inputs (`f(x, y, x)`, `f(x, y, y)`,
 //! `f(x, x, x)`); per mapping rule `M-ALIAS` the Rust caller copies the aliased input first
@@ -379,6 +381,11 @@ fn exec_op(op: &str, a: &Args<'_>) -> (Value, Result<(), Error>) {
             let err = d.unmarshal_json(a.str(0).as_bytes());
             (dec_out(&d), err)
         }
+        "unmarshal_json_gs" => {
+            let mut d = a.to();
+            let err = d.unmarshal_json(&ungs(&a.v[0]));
+            (dec_out(&d), err)
+        }
         _ => panic!("unknown op {op}"),
     }
 }
@@ -417,6 +424,10 @@ fn check(rec: &Value) -> Option<String> {
         (Err(e), w) if w["name"] == "other" => {
             if e.code() != 0 {
                 diffs.push(format!("err: got {e}, want a non-terror error {w}"));
+            } else if op.starts_with("unmarshal_json")
+                && e.to_string().as_bytes() != ungs(&w["msg"])
+            {
+                diffs.push(format!("err: got {e}, want {w}"));
             }
         }
         (Err(e), w) => {
@@ -429,6 +440,20 @@ fn check(rec: &Value) -> Option<String> {
         None
     } else {
         Some(diffs.join("; "))
+    }
+}
+
+/// A `vec.GoString`: a JSON string, or `{"hex": ...}` for bytes that are not UTF-8.
+fn ungs(v: &Value) -> Vec<u8> {
+    match v {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Object(m) => {
+            let h = m["hex"].as_str().unwrap().as_bytes();
+            h.chunks(2)
+                .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+                .collect()
+        }
+        _ => panic!("not a GoString: {v}"),
     }
 }
 

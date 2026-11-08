@@ -105,11 +105,11 @@ ToBin/ToHashKey 比 Go 慢 7–8%，原因是分配：Go 每次调用 1 次分�
 |---|---|---|
 | `round`（`MyDecimal.Round`） | L1 [M-ALIAS]（原为 L2，`M-ALIAS` 合入 main 后改） | Go 允许 `to == d`，并用 `to != d` 决定是否复制 `wordBuf` 并重设 `digitsInt`（这正是 round 与 round_inplace 内部状态不同的原因）。Rust 中核心函数接收 `d` 的快照和 `to_is_d` 标志；已逐行核对：Go 中对 `d` 的所有读取都发生在对 `to` 的第一次"之后不返回"的写入之前，所以读快照等价于读别名指针。对外是 `round(&self, to)` 与 `round_in_place(&mut self)` 两个入口（标 `go-part`） |
 | `validate_args`（`validateArgs`） | L1 [M-ALIAS]（原为 L2） | `f1 == to`、`f2 == to` 的复制由调用方完成（`M-ALIAS`，`MyDecimal: Copy`）。`to == nil` 分支没有对应：`&mut` 不能为空，v8.5.8 中没有调用方传 nil，而且 Go 的 DecimalAdd 等在 validateArgs 之后马上写 `to.resultFrac`，传 nil 本来就会 panic |
-| `gostd.rs` 中的标准库移植 | `go-std:` L1/L2 | `FormatFloat` 的最短位数取自 `ryu` crate（与 Go `ftoaryu.go` 同一算法），移植 Go 的 `formatDigits/fmtE/fmtF`；`ParseFloat` 移植 Go 的语法、`atof64exact`、`eiselLemire64`、`atofHex`，只有慢路径的十进制转换用 Rust `parse::<f64>()`（同样正确舍入）；`DecodeRune` 的校验用 `from_utf8`；`json.Unmarshal` 用 serde_json 做语法、Go 的结构体解码规则自己写 |
+| `gostd.rs` 中的标准库移植 | `go-std:` L1/L2 | `FormatFloat` 的最短位数取自 `ryu` crate（与 Go `ftoaryu.go` 同一算法），移植 Go 的 `formatDigits/fmtE/fmtF`；`ParseFloat` 移植 Go 的语法、`atof64exact`、`eiselLemire64`、`atofHex`，只有慢路径的十进制转换用 Rust `parse::<f64>()`（同样正确舍入）；`DecodeRune` 的校验用 `from_utf8`；`json.Unmarshal` 用 tidb-base 的 `gostd::json`（Go `encoding/json` 的移植，D01.1 起；原为 serde_json） |
 
 现在 58 个函数全部是 L1（规则 ID 的使用：`M-ALIAS` 9、`M-INT` 25、`M-ERRVAL` 25、`M-NAME` 1、`M-FMA` 2，见第二轮评审跟进）。
 
-`encoding/json` 未覆盖的 Go 行为（向量里没有，记录在案）：键的 Unicode 大小写折叠（只做了 ASCII 不区分大小写）；字面量 `-0` 写入整数字段（serde_json 把它当作浮点，Rust 报类型错误、Go 接受）；字符串中的非法 UTF-8；错误文案。`WriteBin` 在 Go 中可以在已有容量内重切片，未写到的字节保留旧内容；Rust 的 `resize` 填 0。按代码路径看所有字节都会被写到，所以没有可见差异，但没有向量能证明这一点。
+`encoding/json` 的差异（键的 Unicode 大小写折叠、字面量 `-0`、字符串中的非法 UTF-8、语法错误文案）在 D01.1 中消除：`MyDecimal.UnmarshalJSON` 改用 `tidb_base::gostd::json`，govec `decimal` 领域的 `unmarshal_json_gs` 记录（`sys/json_edge`）覆盖这些情况，回放逐字比较错误消息。`WriteBin` 在 Go 中可以在已有容量内重切片，未写到的字节保留旧内容；Rust 的 `resize` 填 0。按代码路径看所有字节都会被写到，所以没有可见差异，但没有向量能证明这一点。
 
 ### 回绕与截断（Go 定宽运算在 Rust 中的显式写法）
 

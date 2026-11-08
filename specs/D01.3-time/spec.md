@@ -93,7 +93,7 @@ Go 的 `Time` 内嵌 `coreTime`（一个 `uint64`，低 4 位是 fsp 和类型�
 
 | # | 内容 | 理由 |
 |---|---|---|
-| 1 | `Time.UnmarshalJSON` 的 JSON 语法错误文本是 serde_json 的 | 与 MyDecimal 相同（D01.2）。类型错误的文本（`json: cannot unmarshal number 1.5 into Go value of type types.CoreTime`）与 Go 一致 |
+| 1 | ~~`Time.UnmarshalJSON` 的 JSON 语法错误文本是 serde_json 的~~（D01.1 消除） | 改用 `tidb_base::gostd::json`，语法错误与类型错误的文本都与 Go 一致；govec `time` 领域的 `sys/json_edge` 记录逐字比较 |
 | 2 | `Duration.RoundFrac`、`DateTimeIsOverflow` 不再有 `loc == nil` 时退回 `time.Local` 的分支 | Rust 的 `Context` 总是持有一个 Location，`nil` 不可能出现 |
 | 3 | 没有移植 `time/tzdata`（内嵌）和 `$GOROOT/lib/time/zoneinfo.zip` 这两个回退 | TiDB 两者都不链接。`$ZONEINFO` 指向 zip 文件的情况已支持（D01.3 后续 PR）；`Location` 的查找缓存也已按 L1 移植 |
 | 4 | `gotime::now()` 不带单调时钟读数 | 移植代码中没有对两个 `Now()` 相减的地方 |

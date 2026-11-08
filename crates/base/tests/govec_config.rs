@@ -300,8 +300,8 @@ fn exec(op: &str, a: &[Value]) -> Value {
             json!({"accepted": acc, "rejected": rej, "conf": dump(&x, "Config")})
         }
         "flatten" => {
-            let m = match gojson::unmarshal(&s(0)).unwrap() {
-                gojson::Value::Object(m) => m,
+            let m = match &mut gojson::unmarshal(&s(0)).unwrap() {
+                gojson::Value::Object(m) => std::mem::take(m),
                 v => panic!("not an object: {v:?}"),
             };
             let flat: BTreeMap<String, gojson::Value> = config::flatten_config_items(&m);

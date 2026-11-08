@@ -9,14 +9,14 @@
 //! go-file: $GOROOT/src/encoding/json/decode.go
 //!
 //! Only the logic is ported; the shortest round-trip digits of a float come from the ryu
-//! crate (the same Ryū algorithm as Go's `ftoaryu.go`), and JSON syntax comes from
-//! serde_json.
+//! crate (the same Ryū algorithm as Go's `ftoaryu.go`); JSON decoding is tidb-base's port of
+//! Go's `encoding/json` (`tidb_base::gostd::json`).
 
 mod eisel_lemire;
 
-use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
-use serde_json::Value;
 use std::fmt;
+
+use tidb_base::gostd::json;
 
 /// `utf8.DecodeRune`: the rune at the start of `s` and its width. An empty or invalid
 /// sequence is `(None, 1)` (Go: `RuneError, 1`; `RuneError, 0` for empty input).
@@ -872,199 +872,74 @@ pub(crate) struct JsonMyDecimal {
     pub(crate) word_buf: [i32; 9],
 }
 
-/// `json.Unmarshal(data, &r)` with `r` a zero `jsonMyDecimal`.
-///
-/// Go semantics kept: a syntax error wins over type errors; `null` leaves a value unchanged;
-/// keys match field names exactly or case-insensitively, last one wins, unknown keys are
-/// ignored; integers must be integer literals that fit the field type; a short `WordBuf`
-/// array zeroes the remaining elements and extra elements are ignored; a type mismatch is
-/// remembered and reported after the whole input is decoded.
-/// Not kept (documented in pilot-notes): Unicode case folding of keys beyond ASCII, the
-/// literal `-0` (serde_json reports it as a float), invalid UTF-8 inside strings, and the
-/// wording of Go's error messages.
-// go-std: encoding/json.Unmarshal L2 (serde_json for syntax, Go's struct decoding rules for jsonMyDecimal)
+/// `json.Unmarshal(data, &r)` with `r` a zero `jsonMyDecimal`, on the Go `encoding/json`
+/// port of tidb-base ([`tidb_base::gostd::json`]): a syntax error (Go's message) wins over type
+/// errors; `null` leaves a value unchanged; keys select fields exactly, then by Go's case
+/// folding (`ſ` matches `s`), the last one wins, unknown keys are ignored; an integer field
+/// takes an integer literal of its range (`-0` included); the `[9]int32` array takes the
+/// elements it has room for and zeroes the rest; the first type error is reported after the
+/// whole input is decoded.
+// go-std: encoding/json.Unmarshal L1 (into jsonMyDecimal: decodeState.object, array, literalStore)
 pub(crate) fn json_unmarshal_my_decimal(data: &[u8]) -> Result<JsonMyDecimal, String> {
-    let mut de = serde_json::Deserializer::from_slice(data);
-    let decoded = TopLevel
-        .deserialize(&mut de)
-        .and_then(|r| de.end().map(|()| r))
-        .map_err(|e| e.to_string())?;
-    match decoded {
-        Decoded::Ok(r) => Ok(r),
-        Decoded::TypeError(msg) => Err(msg),
-    }
-}
-
-enum Decoded {
-    Ok(JsonMyDecimal),
-    TypeError(String),
-}
-
-struct TopLevel;
-
-impl TopLevel {
-    // go-part: encoding/json.Unmarshal
-    fn deserialize<'de, D: Deserializer<'de>>(self, d: D) -> Result<Decoded, D::Error> {
-        d.deserialize_any(self)
-    }
-}
-
-const TYPE_NAME: &str = "types.jsonMyDecimal";
-
-impl<'de> Visitor<'de> for TopLevel {
-    type Value = Decoded;
-
-    // glue: required by serde's Visitor; never reached for valid JSON
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("any JSON value")
-    }
-
-    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: null into a struct is a no-op)
-    fn visit_unit<E: de::Error>(self) -> Result<Decoded, E> {
-        Ok(Decoded::Ok(JsonMyDecimal::default()))
-    }
-    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a bool literal into a struct is an UnmarshalTypeError)
-    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Decoded, E> {
-        Ok(type_error("bool"))
-    }
-    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a i64 literal into a struct is an UnmarshalTypeError)
-    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Decoded, E> {
-        Ok(type_error("number"))
-    }
-    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a u64 literal into a struct is an UnmarshalTypeError)
-    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Decoded, E> {
-        Ok(type_error("number"))
-    }
-    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a f64 literal into a struct is an UnmarshalTypeError)
-    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Decoded, E> {
-        Ok(type_error("number"))
-    }
-    // go-std: encoding/json.decodeState.literalStore L2 (serde visitor: a str literal into a struct is an UnmarshalTypeError)
-    fn visit_str<E: de::Error>(self, _: &str) -> Result<Decoded, E> {
-        Ok(type_error("string"))
-    }
-    // go-std: encoding/json.decodeState.array L2 (serde visitor: an array into a struct is an UnmarshalTypeError)
-    fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Decoded, A::Error> {
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(type_error("array"))
-    }
-    // go-std: encoding/json.decodeState.object L2 (serde visitor over the fields of jsonMyDecimal; key match exact, then ASCII case-insensitive)
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Decoded, A::Error> {
-        let mut r = JsonMyDecimal::default();
-        let mut first_err: Option<String> = None;
-        while let Some(key) = map.next_key::<String>()? {
-            let v: Value = map.next_value()?;
-            let field = [
-                "DigitsInt",
-                "DigitsFrac",
-                "ResultFrac",
-                "Negative",
-                "WordBuf",
-            ]
-            .iter()
-            .position(|f| *f == key)
-            .or_else(|| {
-                [
-                    "DigitsInt",
-                    "DigitsFrac",
-                    "ResultFrac",
-                    "Negative",
-                    "WordBuf",
-                ]
-                .iter()
-                .position(|f| f.eq_ignore_ascii_case(&key))
-            });
-            let res = match field {
-                Some(0) => store_int8(&v, &mut r.digits_int),
-                Some(1) => store_int8(&v, &mut r.digits_frac),
-                Some(2) => store_int8(&v, &mut r.result_frac),
-                Some(3) => match v {
-                    Value::Null => Ok(()),
-                    Value::Bool(b) => {
-                        r.negative = b;
-                        Ok(())
-                    }
-                    other => Err(kind(&other)),
-                },
-                Some(4) => match v {
-                    Value::Null => Ok(()),
-                    Value::Array(items) => {
-                        let mut res = Ok(());
-                        for (i, item) in items.iter().enumerate().take(9) {
-                            if let Err(k) = store_int32(item, &mut r.word_buf[i]) {
-                                res = res.and(Err(k));
-                            }
-                        }
-                        for w in r.word_buf.iter_mut().skip(items.len()) {
-                            *w = 0;
-                        }
-                        res
-                    }
-                    other => Err(kind(&other)),
-                },
-                _ => Ok(()),
+    const NAMES: [&str; 5] = [
+        "DigitsInt",
+        "DigitsFrac",
+        "ResultFrac",
+        "Negative",
+        "WordBuf",
+    ];
+    let raw = json::unmarshal_raw(data)?;
+    let mut r = JsonMyDecimal::default();
+    let mut d = json::Decoder::new();
+    d.object(
+        &raw,
+        "jsonMyDecimal",
+        "types.jsonMyDecimal",
+        &NAMES,
+        |d, i, v| {
+            let int8 = |d: &mut json::Decoder, v: &json::Raw, dst: &mut i8| {
+                let mut x = i64::from(*dst);
+                d.int(v, &mut x, i64::from(i8::MIN), i64::from(i8::MAX), "int8");
+                *dst = x as i8;
             };
-            if let Err(k) = res
-                && first_err.is_none()
-            {
-                first_err = Some(format!(
-                    "json: cannot unmarshal {k} into Go struct field {TYPE_NAME}.{key}"
-                ));
+            match i {
+                0 => int8(d, v, &mut r.digits_int),
+                1 => int8(d, v, &mut r.digits_frac),
+                2 => int8(d, v, &mut r.result_frac),
+                3 => d.bool(v, &mut r.negative),
+                _ => json_array_int32(d, v, &mut r.word_buf),
             }
+        },
+    );
+    d.finish().map_err(|e| e.to_string())?;
+    Ok(r)
+}
+
+/// A Go array destination `[N]int32`: `null` leaves it unchanged (arrays are not among the
+/// kinds `literalStore` zeroes), elements past `N` are skipped, missing ones are zeroed.
+// go-std: encoding/json.decodeState.array L1 (reflect.Array destinations)
+fn json_array_int32<const N: usize>(d: &mut json::Decoder, v: &json::Raw, dst: &mut [i32; N]) {
+    let items = match v {
+        json::Raw::Null => return,
+        json::Raw::Array(a, _) => a,
+        other => {
+            d.save_type_error(other.kind(), &format!("[{N}]int32"));
+            return;
         }
-        Ok(match first_err {
-            Some(msg) => Decoded::TypeError(msg),
-            None => Decoded::Ok(r),
-        })
+    };
+    for (i, item) in items.iter().enumerate().take(N) {
+        let mut x = i64::from(dst[i]);
+        d.int(
+            item,
+            &mut x,
+            i64::from(i32::MIN),
+            i64::from(i32::MAX),
+            "int32",
+        );
+        dst[i] = x as i32;
     }
-}
-
-// go-std: encoding/json.UnmarshalTypeError.Error L2 (message of a top-level type mismatch, built directly)
-fn type_error(kind: &str) -> Decoded {
-    Decoded::TypeError(format!(
-        "json: cannot unmarshal {kind} into Go value of type {TYPE_NAME}"
-    ))
-}
-
-// go-std: encoding/json.decodeState.literalStore L2 (JSON kind name used in UnmarshalTypeError.Value)
-fn kind(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
-// go-std: encoding/json.decodeState.literalStore L2 (number into an int8 field; reflect.Value.OverflowInt rejects out-of-range values)
-fn store_int8(v: &Value, dst: &mut i8) -> Result<(), &'static str> {
-    match v {
-        Value::Null => Ok(()),
-        Value::Number(n) => match n.as_i64().and_then(|x| i8::try_from(x).ok()) {
-            Some(x) => {
-                *dst = x;
-                Ok(())
-            }
-            None => Err("number"),
-        },
-        other => Err(kind(other)),
-    }
-}
-
-// go-std: encoding/json.decodeState.literalStore L2 (number into an int32 field; reflect.Value.OverflowInt rejects out-of-range values)
-fn store_int32(v: &Value, dst: &mut i32) -> Result<(), &'static str> {
-    match v {
-        Value::Null => Ok(()),
-        Value::Number(n) => match n.as_i64().and_then(|x| i32::try_from(x).ok()) {
-            Some(x) => {
-                *dst = x;
-                Ok(())
-            }
-            None => Err("number"),
-        },
-        other => Err(kind(other)),
+    for w in dst.iter_mut().skip(items.len()) {
+        *w = 0;
     }
 }
 
@@ -1325,27 +1200,15 @@ pub fn atoi(s: &[u8]) -> (isize, Result<(), IntNumError>) {
 }
 
 /// `json.Unmarshal(data, &v)` with `v types.CoreTime` (a `uint64`; Go `Time.UnmarshalJSON`
-/// decodes into the embedded `CoreTime`). `null` leaves `v` unchanged; a number must be a
-/// `uint64` literal; any other value is an `*json.UnmarshalTypeError`. The error is Go's
-/// message (syntax error texts are serde_json's, as for MyDecimal).
-// go-std: encoding/json.Unmarshal L2 (into a uint64; syntax error messages differ)
+/// decodes into the embedded `CoreTime`), on the Go `encoding/json` port of tidb-base:
+/// `null` leaves `v` unchanged; a number must be a `uint64` literal; any other value is an
+/// `*json.UnmarshalTypeError`; a syntax error is Go's `*json.SyntaxError` message.
+// go-std: encoding/json.Unmarshal L1 (into a uint64)
 pub(crate) fn json_unmarshal_uint64(data: &[u8], v: u64) -> Result<u64, String> {
-    let value: Value = serde_json::from_slice(data).map_err(|e| e.to_string())?;
-    let type_err =
-        |what: &str| format!("json: cannot unmarshal {what} into Go value of type types.CoreTime");
-    match value {
-        Value::Null => Ok(v),
-        Value::Number(_) => {
-            let item = trim_space(data);
-            let (n, err) = parse_uint(item, 64);
-            if err.is_err() {
-                return Err(type_err(&format!(
-                    "number {}",
-                    String::from_utf8_lossy(item)
-                )));
-            }
-            Ok(n)
-        }
-        other => Err(type_err(kind(&other))),
-    }
+    let raw = json::unmarshal_raw(data)?;
+    let mut out = v;
+    let mut d = json::Decoder::new();
+    d.uint(&raw, &mut out, u64::MAX, "types.CoreTime");
+    d.finish().map_err(|e| e.to_string())?;
+    Ok(out)
 }
