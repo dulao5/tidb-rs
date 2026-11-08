@@ -15,9 +15,12 @@ mod db;
 mod gocopy;
 mod gotime;
 mod index;
+mod job;
 mod placement;
+mod reorg;
 mod resource_group;
 mod table;
+mod types_etc;
 mod types_gen;
 
 pub use any::AnyValue;
@@ -29,6 +32,8 @@ pub use column::{
 pub use consts_gen::*;
 pub use db::*;
 pub use index::*;
+pub use job::*;
 pub use resource_group::*;
 pub use table::*;
+pub use types_etc::*;
 pub use types_gen::*;

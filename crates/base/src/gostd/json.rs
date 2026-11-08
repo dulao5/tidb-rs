@@ -510,10 +510,10 @@ pub enum Raw {
     /// The number literal as written (`1`, `-0`, `1e2`, ...).
     Number(String),
     /// The unquoted string (invalid UTF-8 and lone surrogates are U+FFFD, as in Go).
-    String(String),
-    Array(Vec<Raw>),
+    String(String, Span),
+    Array(Vec<Raw>, Span),
     /// Members in source order; duplicate keys are kept (Go applies them one after another).
-    Object(Vec<(String, Raw)>),
+    Object(Vec<(String, Raw)>, Span),
 }
 
 /// Drops a value tree without recursion. A valid document may nest 10000 levels (Go's GC
@@ -524,12 +524,16 @@ pub fn drop_raw(v: Raw) {
     let mut stack = vec![v];
     while let Some(v) = stack.pop() {
         match v {
-            Raw::Array(a) => stack.extend(a),
-            Raw::Object(m) => stack.extend(m.into_iter().map(|(_, v)| v)),
+            Raw::Array(a, _) => stack.extend(a),
+            Raw::Object(m, _) => stack.extend(m.into_iter().map(|(_, v)| v)),
             _ => {}
         }
     }
 }
+
+/// The bytes `[start, end)` of a value in the input of [`unmarshal_raw`]: what Go passes to
+/// an `UnmarshalJSON` method (`d.data[start:d.readIndex()]`), needed by `json.RawMessage`.
+pub type Span = (usize, usize);
 
 impl Raw {
     /// The `Value` of a `*json.UnmarshalTypeError` for this JSON value kind, without the
@@ -540,9 +544,9 @@ impl Raw {
             Raw::Null => "null",
             Raw::Bool(_) => "bool",
             Raw::Number(_) => "number",
-            Raw::String(_) => "string",
-            Raw::Array(_) => "array",
-            Raw::Object(_) => "object",
+            Raw::String(..) => "string",
+            Raw::Array(..) => "array",
+            Raw::Object(..) => "object",
         }
     }
 }
@@ -567,9 +571,10 @@ impl JsonParser<'_> {
     /// the stack; here the open arrays and objects are an explicit stack as well.
     // go-std: encoding/json.decodeState.value L2 (into the ordered tree; scanner merged, explicit parse stack)
     fn raw(&mut self, _depth: usize) -> Result<Raw, String> {
+        // Each open container keeps the offset of its `[` / `{` for its span.
         enum Open {
-            Array(Vec<Raw>),
-            Object(Vec<(String, Raw)>, String),
+            Array(Vec<Raw>, usize),
+            Object(Vec<(String, Raw)>, String, usize),
         }
         /// The open containers; on a syntax error their finished children are dropped
         /// without recursion ([`drop_raw`]).
@@ -579,8 +584,8 @@ impl JsonParser<'_> {
             fn drop(&mut self) {
                 for o in self.0.drain(..) {
                     match o {
-                        Open::Array(a) => drop_raw(Raw::Array(a)),
-                        Open::Object(m, _) => drop_raw(Raw::Object(m)),
+                        Open::Array(a, s) => drop_raw(Raw::Array(a, (s, s))),
+                        Open::Object(m, _, s) => drop_raw(Raw::Object(m, (s, s))),
                     }
                 }
             }
@@ -602,21 +607,25 @@ impl JsonParser<'_> {
         loop {
             // A value starts here (stateBeginValue / stateBeginValueOrEmpty).
             self.ws();
+            let start = self.i;
             let mut v = match self.b.get(self.i) {
                 None => return self.err_at("looking for beginning of value", true),
                 Some(b'n') => self.lit(b"null", Value::Null).map(|_| Raw::Null)?,
                 Some(b't') => self.lit(b"true", Value::Null).map(|_| Raw::Bool(true))?,
                 Some(b'f') => self.lit(b"false", Value::Null).map(|_| Raw::Bool(false))?,
-                Some(b'"') => Raw::String(self.string()?),
+                Some(b'"') => {
+                    let s = self.string()?;
+                    Raw::String(s, (start, self.i))
+                }
                 Some(b'[') => {
                     self.max_depth(stack.len())?;
                     self.i += 1;
                     self.ws();
                     if self.b.get(self.i) == Some(&b']') {
                         self.i += 1;
-                        Raw::Array(Vec::new())
+                        Raw::Array(Vec::new(), (start, self.i))
                     } else {
-                        stack.push(Open::Array(Vec::new()));
+                        stack.push(Open::Array(Vec::new(), start));
                         continue;
                     }
                 }
@@ -626,10 +635,10 @@ impl JsonParser<'_> {
                     self.ws();
                     if self.b.get(self.i) == Some(&b'}') {
                         self.i += 1;
-                        Raw::Object(Vec::new())
+                        Raw::Object(Vec::new(), (start, self.i))
                     } else {
                         let k = self.object_key()?;
-                        stack.push(Open::Object(Vec::new(), k));
+                        stack.push(Open::Object(Vec::new(), k, start));
                         continue;
                     }
                 }
@@ -640,7 +649,7 @@ impl JsonParser<'_> {
             loop {
                 match stack.last_mut() {
                     None => return Ok(v),
-                    Some(Open::Array(a)) => {
+                    Some(Open::Array(a, _)) => {
                         a.push(v);
                         self.ws();
                         match self.b.get(self.i) {
@@ -650,15 +659,15 @@ impl JsonParser<'_> {
                             }
                             Some(b']') => {
                                 self.i += 1;
-                                let Some(Open::Array(a)) = stack.pop() else {
+                                let Some(Open::Array(a, s)) = stack.pop() else {
                                     unreachable!()
                                 };
-                                v = Raw::Array(a);
+                                v = Raw::Array(a, (s, self.i));
                             }
                             _ => return self.err_at("after array element", true),
                         }
                     }
-                    Some(Open::Object(m, k)) => {
+                    Some(Open::Object(m, k, _)) => {
                         m.push((std::mem::take(k), v));
                         self.ws();
                         match self.b.get(self.i) {
@@ -670,10 +679,10 @@ impl JsonParser<'_> {
                             }
                             Some(b'}') => {
                                 self.i += 1;
-                                let Some(Open::Object(m, _)) = stack.pop() else {
+                                let Some(Open::Object(m, _, s)) = stack.pop() else {
                                     unreachable!()
                                 };
-                                v = Raw::Object(m);
+                                v = Raw::Object(m, (s, self.i));
                             }
                             _ => return self.err_at("after object key:value pair", true),
                         }
@@ -791,12 +800,47 @@ pub struct Decoder {
     fatal: Option<DecodeError>,
     struct_name: &'static str,
     fields: Vec<&'static str>,
+    /// The input of `Unmarshal` (`d.data`), for the [`Span`]s of `json.RawMessage` values.
+    source: Option<Box<[u8]>>,
 }
 
 impl Decoder {
     // glue: a fresh decodeState
     pub fn new() -> Decoder {
         Decoder::default()
+    }
+
+    /// A decodeState over `data` (the input the [`Raw`] tree was parsed from): needed when
+    /// the destination holds a `json.RawMessage`, which keeps the value's bytes as written.
+    // glue: a fresh decodeState with d.data
+    pub fn with_source(data: &[u8]) -> Decoder {
+        Decoder {
+            source: Some(data.into()),
+            ..Decoder::default()
+        }
+    }
+
+    /// A `json.RawMessage` destination: `UnmarshalJSON` copies the value's bytes as they are
+    /// in the input (`d.data[start:d.readIndex()]`, whitespace and escapes included; `null`
+    /// gives the bytes `null`, not a nil slice). Never an error.
+    ///
+    /// Without the input (a decoder from [`Decoder::new`]) the bytes are rebuilt from the tree
+    /// in the compact form `json.Marshal` writes, which differs from Go's only inside the
+    /// value (whitespace, escapes); the generated decoders always pass the input.
+    // go-std: encoding/json.RawMessage.UnmarshalJSON L1
+    pub fn raw_message(&mut self, v: &Raw, dst: &mut Option<Vec<u8>>) {
+        let span = match v {
+            Raw::Null => Some(b"null".to_vec()),
+            Raw::Bool(true) => Some(b"true".to_vec()),
+            Raw::Bool(false) => Some(b"false".to_vec()),
+            Raw::Number(n) => Some(n.as_bytes().to_vec()),
+            Raw::String(_, sp) | Raw::Array(_, sp) | Raw::Object(_, sp) => self
+                .source
+                .as_deref()
+                .and_then(|src| src.get(sp.0..sp.1))
+                .map(<[u8]>::to_vec),
+        };
+        *dst = Some(span.unwrap_or_else(|| raw_compact(v).into_bytes()));
     }
 
     /// The first error saved during decoding (`d.savedError`).
@@ -895,7 +939,7 @@ impl Decoder {
     ) {
         let members = match v {
             Raw::Null => return,
-            Raw::Object(m) => m,
+            Raw::Object(m, _) => m,
             other => {
                 self.save_type_error(other.kind(), ty);
                 return;
@@ -963,7 +1007,7 @@ impl Decoder {
     pub fn string_typed(&mut self, v: &Raw, dst: &mut String, ty: &str) {
         match v {
             Raw::Null => {}
-            Raw::String(s) => s.clone_into(dst),
+            Raw::String(s, _) => s.clone_into(dst),
             other => self.save_type_error(other.kind(), ty),
         }
     }
@@ -983,7 +1027,7 @@ impl Decoder {
     pub fn string(&mut self, v: &Raw, dst: &mut String) {
         match v {
             Raw::Null => {}
-            Raw::String(s) => s.clone_into(dst),
+            Raw::String(s, _) => s.clone_into(dst),
             other => self.save_type_error(other.kind(), "string"),
         }
     }
@@ -1004,7 +1048,7 @@ impl Decoder {
                 *dst = None;
                 return;
             }
-            Raw::Array(a) => a,
+            Raw::Array(a, _) => a,
             other => {
                 self.save_type_error(other.kind(), ty);
                 return;
@@ -1068,7 +1112,7 @@ impl Decoder {
         match v {
             Raw::Null => Value::Null,
             Raw::Bool(b) => Value::Bool(*b),
-            Raw::String(s) => Value::String(s.clone()),
+            Raw::String(s, _) => Value::String(s.clone()),
             Raw::Number(s) => match s.parse::<f64>() {
                 Ok(f) if f.is_finite() => Value::Number(f),
                 _ => {
@@ -1076,8 +1120,8 @@ impl Decoder {
                     Value::Null
                 }
             },
-            Raw::Array(a) => Value::Array(a.iter().map(|x| self.any_value(x)).collect()),
-            Raw::Object(m) => {
+            Raw::Array(a, _) => Value::Array(a.iter().map(|x| self.any_value(x)).collect()),
+            Raw::Object(m, _) => {
                 let mut out = BTreeMap::new();
                 for (k, x) in m {
                     let x = self.any_value(x);
@@ -1097,7 +1141,7 @@ impl Decoder {
     /// and `elem_ty` its element type, for the type errors.
     pub fn bytes(&mut self, v: &Raw, dst: &mut Option<Vec<u8>>, ty: &str, elem_ty: &str) {
         match v {
-            Raw::String(s) => match base64_std_decode(s.as_bytes()) {
+            Raw::String(s, _) => match base64_std_decode(s.as_bytes()) {
                 Ok(b) => *dst = Some(b),
                 Err(pos) => self.save_error(DecodeError::Other(format!(
                     "illegal base64 data at input byte {pos}"
@@ -1127,7 +1171,7 @@ impl Decoder {
                 *dst = None;
                 return;
             }
-            Raw::Object(m) => m,
+            Raw::Object(m, _) => m,
             other => {
                 self.save_type_error(other.kind(), ty);
                 return;
@@ -1164,6 +1208,107 @@ impl Decoder {
             }
         }
     }
+}
+
+/// The compact text of a [`Raw`] tree: strings re-escaped by [`append_string`] (only the
+/// fallback of [`Decoder::raw_message`] without the input).
+// glue: rebuilds a RawMessage from the decoded tree
+fn raw_compact(v: &Raw) -> String {
+    fn go(out: &mut String, v: &Raw) {
+        match v {
+            Raw::Null => out.push_str("null"),
+            Raw::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Raw::Number(n) => out.push_str(n),
+            Raw::String(s, _) => append_string(out, s),
+            Raw::Array(a, _) => {
+                out.push('[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    go(out, x);
+                }
+                out.push(']');
+            }
+            Raw::Object(m, _) => {
+                out.push('{');
+                for (i, (k, x)) in m.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    append_string(out, k);
+                    out.push(':');
+                    go(out, x);
+                }
+                out.push('}');
+            }
+        }
+    }
+    let mut out = String::new();
+    go(&mut out, v);
+    out
+}
+
+/// `json.Marshal` of a `json.RawMessage` (`None` is nil): `MarshalJSON` returns the bytes
+/// (`null` for nil) and the encoder appends them with `appendCompact(dst, b, escapeHTML)`:
+/// whitespace outside strings is dropped, `<`, `>`, `&`, U+2028 and U+2029 are escaped,
+/// everything else (escapes as written included) is copied. Bytes that are not one valid
+/// JSON value are Go's `*json.MarshalerError` (the syntax error text is not Go's, except for
+/// empty bytes).
+// go-std: encoding/json.marshalerEncoder L1 (json.RawMessage)
+// go-std: encoding/json.appendCompact L2 (escape = true; validity checked by unmarshal_raw)
+pub fn append_raw_message(out: &mut String, m: &Option<Vec<u8>>) -> Result<(), String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let Some(b) = m else {
+        out.push_str("null");
+        return Ok(());
+    };
+    if let Err(e) = unmarshal_raw(b) {
+        return Err(format!(
+            "json: error calling MarshalJSON for type json.RawMessage: {e}"
+        ));
+    }
+    let mut buf: Vec<u8> = Vec::with_capacity(b.len());
+    let (mut in_str, mut esc) = (false, false);
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        i += 1;
+        if !in_str && matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+            continue;
+        }
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else if c == b'"' {
+            in_str = true;
+        }
+        match c {
+            b'<' | b'>' | b'&' => {
+                buf.extend_from_slice(b"\\u00");
+                buf.push(HEX[usize::from(c >> 4)]);
+                buf.push(HEX[usize::from(c & 0xF)]);
+            }
+            0xE2 if b.get(i) == Some(&0x80) && matches!(b.get(i + 1), Some(0xA8 | 0xA9)) => {
+                buf.extend_from_slice(b"\\u202");
+                buf.push(HEX[usize::from(b[i + 1] & 0xF)]);
+                i += 2;
+            }
+            _ => buf.push(c),
+        }
+    }
+    // Invalid UTF-8 inside a string is copied by Go as it is; a Rust `String` cannot hold it
+    // (spec D06.1 §4: written as U+FFFD; Go itself never writes such bytes into meta).
+    match String::from_utf8(buf) {
+        Ok(s) => out.push_str(&s),
+        Err(e) => out.push_str(&go_lossy(e.as_bytes())),
+    }
+    Ok(())
 }
 
 /// `base64.StdEncoding.DecodeString` (padding required; `\r` and `\n` are skipped). `Err` is

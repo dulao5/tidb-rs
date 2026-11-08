@@ -922,7 +922,7 @@ pub(crate) fn json_unmarshal_my_decimal(data: &[u8]) -> Result<JsonMyDecimal, St
 fn json_array_int32<const N: usize>(d: &mut json::Decoder, v: &json::Raw, dst: &mut [i32; N]) {
     let items = match v {
         json::Raw::Null => return,
-        json::Raw::Array(a) => a,
+        json::Raw::Array(a, _) => a,
         other => {
             d.save_type_error(other.kind(), &format!("[{N}]int32"));
             return;
