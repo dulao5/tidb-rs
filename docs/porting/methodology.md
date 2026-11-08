@@ -127,7 +127,7 @@ R1 的 83 条不一致、12,108 条"不支持"，大部分源于这两层。如�
 |---|---|---|
 | Q1 | 移植基线 | **Go TiDB v8.5.8**（commit `8b857efa2`），与运行时对照版本一致；master 的差量按"上游同步"流程跟进 |
 | Q2 | 优化器移植范围 | 除例外清单中的项（B1–B5、D1）外完整按结构移植 |
-| Q3 | 类型与编码 | 拆分处理：编码格式（行格式、key 编码、chunk 格式）和 collation 数据表复用 TiKV 的 `tidb_query_datatype`（L3，需 ADR 和逐字节对照测试）；值的语义（Decimal 运算、时间、类型转换、比较、warning/sql_mode）从 Go 移植；JSON 作为例外 A4 |
+| Q3 | 类型与编码 | 编码格式（datum 与 memcomparable key 编码 `util/codec`、chunk 格式）和 collation 数据表**从 Go 移植（L1）**，TiKV 的 `tidb_query_datatype` / `codec` 只作为测试中的第二个 oracle，双向逐字节对照（tidb-rs 编码与 TiKV 编码相同；TiKV 写出的字节在 tidb-rs 中解码为同一个值，反之亦然）；发现的 TiDB/TiKV 差异登记为 `upstream-pitfall`。值的语义（Decimal 运算、时间、类型转换、比较、warning/sql_mode）从 Go 移植；JSON 作为例外 A4。（2026-11-08 负责人确认，tidb-rs#39；原为"编码格式复用 TiKV，L3"，D01.7、D01.9、D01.8 的实践改为 L1。行格式 v1/v2 和表/索引 key 在 D01.11 按同一原则处理。） |
 | Q4 | PoC 自创代码 | 逐步替换：现有链路作为回归基线，对应块移植完成后删除；期间冻结，只修崩溃和数据错误 |
 | Q5 | spec-kit | 先在一个块上试点（第 8 节） |
 | Q6 | 分层粒度 | 两层：领域 + 功能块（2k–10k 行 Go） |
