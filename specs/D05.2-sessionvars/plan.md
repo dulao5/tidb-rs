@@ -132,7 +132,7 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
 - **T7**：`slow_log_rules.rs`，见 spec §4 第 9 条与 tasks T7。
 - **pending 只剩 tidb_gc_* 五个**（SetGlobal / GetGlobal，随 PR C / T10）；SetSession、GetSession、GetStateValue 均为 0。
 - **生成器**（tracker #31）：`ValidateCloudStorageURI` 的桩（`err://` 普通错误、`terr://` `ErrWrongValueForVar`），Rust 回放注册同样的桩；两侧重置 `CloudStorageURI` 与 `GlobalSlowLogRules`；tidb_slow_log_rules 的读回值两侧规范化；末尾追加 26 个 cloud URI（`set_global_hook`）和 34 个慢日志规则（`set` / `old` / `set_global_hook`）。
-- **回放**：43,623 条，43,391 条比对，0 条不一致；跳过 232 条，全部是 tidb_gc_* 的记录，上限从 554 降到 232。种子 1–4 本地生成后回放 0 条不一致。反证：规则数上限改为 11 报 3 条、打码文字改为 `xxxxx` 报 13 条、规范化时条件倒序报 24 条。
+- **回放**：43,623 条，43,391 条比对，0 条不一致；跳过 232 条，全部是 tidb_gc_* 的记录，上限从 554 降到 232。种子 1–4 本地生成后回放 0 条不一致。反证：规则数上限改为 11 报 3 条；打码文字改为 `xxxxx` 报 13 条；三处（再加上回放规范化时条件倒序）一起改坏报 40 条。
 
 **余下（下一轮或 PR C）**
 1. 把 B2 第一轮的 SetGlobal 钩子（hook_state 的各单元、gctuner、TTL 窗口、stmt summary 等）加入 `set_global_hook`，并把它们写的状态加入两侧的重置列表（目前只有这两个变量和 B1 的 60 个）。
