@@ -101,10 +101,15 @@ Replayed by `crates/types/tests/govec_json.rs`.
 ## datum
 
 `<target>/datum.jsonl.gz` (domain `datum`: block D01.1 parts 1 and 2 with D01.4, and the
-charset Encodings), copied from tidb-rs-tracker branch `govec/datum-D01.1-2` at `d235bae`:
+charset Encodings), copied from tidb-rs-tracker branch `fix/govec-clock` at `87c27b9`:
 170,188 records, seed 20261108. amd64 sha256
-`e67207eb7b9d6fecf6a15115ea7411a1c7bcd6a3acd7a50a669bd1e107233b58` (from the tracker CI
-artifact), arm64 sha256 `6abaf4e3c12e61a1d40059043b8eb1b4a3a12c79899c21318ac3ff5624bfdc02`.
+`539db2451f22d97f6ed8fa419df4f04fccdfa23b3f0408520b63dc6bbab05d1c` (from the tracker CI
+artifact), arm64 sha256 `a80fc5847fcb7622b2320c122a84030af7c089ed905f0856e00bc0158126db36`.
+`d_convert` / `d_convert_recv` records of a Duration converted to TIMESTAMP / DATETIME / DATE /
+YEAR (131) read the wall clock in Go (`Duration.ConvertToTime` / `ConvertToYear`: today's date
+or year) and record the converted value as `"<clock>"`; the replay masks it the same way
+(`convert_reads_clock`) and still compares err and warnings. The dated paths are replayed
+with a given instant by the time domain (`dur_to_time`, `dur_to_year`).
 The targets differ in 56 records: 8 `float_helper` (the hardware default NaN of `0*Inf` in
 `Truncate`: negative on x86) and 48 where a NaN float reaches `int64(NaN)` (M-F2I:
 MinInt64 on amd64, 0 on arm64): 10 `convert_num`, 16 `d_convert`, 20 `d_convert_recv`, 2 `d_to`.

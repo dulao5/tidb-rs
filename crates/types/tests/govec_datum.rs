@@ -813,6 +813,21 @@ mod part2 {
         Value::Array(ds.iter().map(datum_out).collect())
     }
 
+    /// The govec generator's clockMark: a value that depends on the wall clock.
+    const CLOCK_MARK: &str = "<clock>";
+
+    /// Mirrors govec's convertReadsClock: a Duration converted to TIMESTAMP / DATETIME /
+    /// DATE takes today's date and to YEAR the current year (`Duration::convert_to_time` /
+    /// `convert_to_year` read `gotime::now()`), so both sides record the value as
+    /// CLOCK_MARK (err and warnings are still compared). The date paths with a given
+    /// instant are replayed by the time domain (dur_to_time / dur_to_year).
+    fn convert_reads_clock(d: &Datum, ft: &FieldType) -> bool {
+        use tidb_base::mysql::{TypeDate, TypeDatetime, TypeNewDate, TypeTimestamp, TypeYear};
+        d.kind() == dm::KindMysqlDuration
+            && [TypeTimestamp, TypeDatetime, TypeDate, TypeNewDate, TypeYear]
+                .contains(&ft.get_type())
+    }
+
     fn ft_in(v: &Value) -> FieldType {
         let p = v.as_array().unwrap();
         let mut ft = new_field_type_builder()
@@ -896,19 +911,27 @@ mod part2 {
                 let (c, w) = ctx(a, 0);
                 let mut d = datum_in(&a[1]);
                 let ft = ft_in(&a[2]);
+                let clock = convert_reads_clock(&d, &ft);
                 let (ret, err) = d.convert_to(&c, &ft);
-                ww(datum_out(&ret), opt_err(err), w)
+                let out = if clock {
+                    json!(CLOCK_MARK)
+                } else {
+                    datum_out(&ret)
+                };
+                ww(out, opt_err(err), w)
             }
             "d_convert_recv" => {
                 let (c, w) = ctx(a, 0);
                 let mut d = datum_in(&a[1]);
                 let ft = ft_in(&a[2]);
+                let clock = convert_reads_clock(&d, &ft);
                 let (ret, err) = d.convert_to(&c, &ft);
-                ww(
-                    json!({"ret": datum_out(&ret), "recv": datum_out(&d)}),
-                    opt_err(err),
-                    w,
-                )
+                let ret = if clock {
+                    json!(CLOCK_MARK)
+                } else {
+                    datum_out(&ret)
+                };
+                ww(json!({"ret": ret, "recv": datum_out(&d)}), opt_err(err), w)
             }
             "d_compare" => {
                 let (c, w) = ctx(a, 0);
