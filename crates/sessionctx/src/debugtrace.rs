@@ -18,10 +18,12 @@
 //!   D05.3). Their logic on the root is here as glue methods ([`OptimizerDebugTraceRoot::new`],
 //!   [`OptimizerDebugTraceRoot::enter_context`], ...); `EnterContextCommon`'s
 //!   `runtime.Caller(1)` function name is passed by the caller.
-//! - Go's encoding errors are `*json.UnsupportedValueError` (NaN / ±Inf) and
-//!   `*json.MarshalerError` (a nested context's `MarshalJSON` failed); [`EncodeError`] keeps that
-//!   shape, its message, and the JSON Go writes for it (`EncodeJSONCommon` encodes the error
-//!   value: `{"Value":{},"Str":"NaN"}`, `{"Type":{},"Err":...}`).
+//! - `EncodeJSONCommon` never returns an error in practice: when `Encode(input)` fails (NaN /
+//!   ±Inf, `*json.UnsupportedValueError`), it encodes the error value instead
+//!   (`{"Value":{},"Str":"NaN"}`) and returns the result of that second `Encode` — nil. So a
+//!   context holding NaN marshals as that error object, and its parent includes it like any
+//!   other `MarshalJSON` output (no `*json.MarshalerError` is ever raised). [`EncodeError`] is
+//!   the failed first encoding; the methods return only the bytes.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -41,27 +43,15 @@ pub enum TraceValue {
     Ctx(usize),
 }
 
-/// The error of Go's JSON encoding of a trace.
+/// The error of the first `Encode` in `EncodeJSONCommon`: `*json.UnsupportedValueError` for a
+/// float, `Str` being `strconv.FormatFloat(f, 'g', -1, 64)` (`NaN`, `+Inf`, `-Inf`).
 #[derive(Clone, Debug, PartialEq)]
-pub enum EncodeError {
-    /// `*json.UnsupportedValueError` for a float: `Str` is `strconv.FormatFloat(f, 'g', -1, 64)`.
-    Unsupported(String),
-    /// `*json.MarshalerError` for `*debugtrace.baseDebugTraceContext`, wrapping the error its
-    /// `MarshalJSON` returned.
-    Marshaler(Box<EncodeError>),
-}
+pub struct EncodeError(pub String);
 
 impl fmt::Display for EncodeError {
     // go-std: encoding/json.UnsupportedValueError.Error L1
-    // go-std: encoding/json.MarshalerError.Error L1 (sourceFunc "MarshalJSON")
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EncodeError::Unsupported(s) => write!(f, "json: unsupported value: {s}"),
-            EncodeError::Marshaler(e) => write!(
-                f,
-                "json: error calling MarshalJSON for type *debugtrace.baseDebugTraceContext: {e}"
-            ),
-        }
+        write!(f, "json: unsupported value: {}", self.0)
     }
 }
 
@@ -69,21 +59,12 @@ impl std::error::Error for EncodeError {}
 
 impl EncodeError {
     /// The JSON `json.Encoder.Encode(err)` writes for the error value (without the newline):
-    /// exported fields only, `reflect.Value` / `reflect.Type` have none (`{}`).
-    // glue: encoding/json of *UnsupportedValueError / *MarshalerError (EncodeJSONCommon's fallback)
+    /// exported fields only, `reflect.Value` has none (`{}`).
+    // glue: encoding/json of *UnsupportedValueError (EncodeJSONCommon's fallback)
     fn append_json(&self, out: &mut String) {
-        match self {
-            EncodeError::Unsupported(s) => {
-                out.push_str(r#"{"Value":{},"Str":"#);
-                append_string_opts(out, s, false);
-                out.push('}');
-            }
-            EncodeError::Marshaler(e) => {
-                out.push_str(r#"{"Type":{},"Err":"#);
-                e.append_json(out);
-                out.push('}');
-            }
-        }
+        out.push_str(r#"{"Value":{},"Str":"#);
+        append_string_opts(out, &self.0, false);
+        out.push('}');
     }
 }
 
@@ -130,7 +111,7 @@ impl OptimizerDebugTraceRoot {
 
     /// MarshalJSON overrides the default MarshalJSON behavior and marshals the unexported traceCtx.
     // go: OptimizerDebugTraceRoot.MarshalJSON L1
-    pub fn marshal_json(&self) -> (String, Option<EncodeError>) {
+    pub fn marshal_json(&self) -> String {
         let root = &self.ctxs[0];
         if root.steps.is_empty() {
             // A nil `[]any` encodes as null.
@@ -141,7 +122,7 @@ impl OptimizerDebugTraceRoot {
 
     /// `(*baseDebugTraceContext).MarshalJSON` of the context at `idx`.
     // go: baseDebugTraceContext.MarshalJSON L1
-    pub fn ctx_marshal_json(&self, idx: usize) -> (String, Option<EncodeError>) {
+    pub fn ctx_marshal_json(&self, idx: usize) -> String {
         self.encode_common_with(|this, out| this.append_ctx_content(out, idx))
     }
 
@@ -166,7 +147,7 @@ impl OptimizerDebugTraceRoot {
     ///
     /// Contexts in `input` are resolved in this root's arena.
     // go: EncodeJSONCommon L2 (contexts are arena indexes, resolved through the root)
-    pub fn encode_json_common(&self, input: &TraceValue) -> (String, Option<EncodeError>) {
+    pub fn encode_json_common(&self, input: &TraceValue) -> String {
         self.encode_common_with(|this, out| this.append_value(out, input))
     }
 
@@ -238,20 +219,17 @@ impl OptimizerDebugTraceRoot {
     fn encode_common_with(
         &self,
         f: impl FnOnce(&Self, &mut String) -> Result<(), EncodeError>,
-    ) -> (String, Option<EncodeError>) {
+    ) -> String {
         let mut out = String::new();
         match f(self, &mut out) {
-            Ok(()) => {
-                out.push('\n');
-                (out, None)
-            }
+            Ok(()) => out.push('\n'),
             Err(e) => {
-                let mut eo = String::new();
-                e.append_json(&mut eo);
-                eo.push('\n');
-                (eo, Some(e))
+                out.clear();
+                e.append_json(&mut out);
+                out.push('\n');
             }
         }
+        out
     }
 
     /// The content `baseDebugTraceContext.MarshalJSON` encodes: no steps → null, one step →
@@ -275,19 +253,14 @@ impl OptimizerDebugTraceRoot {
         Ok(())
     }
 
-    /// `marshalerEncoder` for a context: calls its `MarshalJSON`; an error becomes a
-    /// `*json.MarshalerError`, otherwise the output is compacted into the buffer (our output is
-    /// already compact apart from `Encode`'s newline).
+    /// `marshalerEncoder` for a context: its `MarshalJSON` output (`EncodeJSONCommon` of the
+    /// content, which never fails: a NaN inside yields the error object instead), compacted
+    /// into the buffer (our output is already compact apart from `Encode`'s newline).
     // go-std: encoding/json.marshalerEncoder L2 (compact = drop Encode's trailing newline)
     fn append_ctx(&self, out: &mut String, idx: usize) -> Result<(), EncodeError> {
-        let mut inner = String::new();
-        match self.append_ctx_content(&mut inner, idx) {
-            Ok(()) => {
-                out.push_str(&inner);
-                Ok(())
-            }
-            Err(e) => Err(EncodeError::Marshaler(Box::new(e))),
-        }
+        let inner = self.ctx_marshal_json(idx);
+        out.push_str(inner.strip_suffix('\n').unwrap_or(&inner));
+        Ok(())
     }
 
     // go-std: encoding/json.arrayEncoder L2 ([]any)
@@ -341,7 +314,7 @@ fn append_json_value(out: &mut String, v: &Value) -> Result<(), EncodeError> {
                 } else {
                     "-Inf"
                 };
-                return Err(EncodeError::Unsupported(s.to_owned()));
+                return Err(EncodeError(s.to_owned()));
             }
             out.push_str(&format_float(*f));
         }
