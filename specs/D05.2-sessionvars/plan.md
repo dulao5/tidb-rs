@@ -156,3 +156,45 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
 - tidb_gc_* 的 5 个变量：Go 的钩子读写 `mysql.tidb`（`getTiDBTableValue` / `setTiDBTableValue` 执行 `REPLACE INTO mysql.tidb`），同一个 writer 可泛化为"VARCHAR 主键（NONCLUSTERED）+ 字符串列"的系统表。
 
 **下一步**：rebase → tracker reclassification（D01.11 的编码器回到 D01.11；新块 D06.7）→ `tidb-systable` 纯逻辑 + govec oracle → poc-domain 的 I/O 与 etcd watch → 自己的 v8.5.8 playground 上做混合集群测试（§6.6）→ 跳过上限降到 0。
+
+## PR C 交接（2026-11-09，第二轮）
+
+分支：tidb-rs `block/D05.2-sessionvars-c`（已 rebase 到 main @807f753，B3 已合并），tracker `govec/sessionvars-D05.2-c`（draft tracker #34，基于 main @b156f1d）。
+
+**本轮完成**
+1. **tracker 的块划分**（6cb83d4）：rowcodec 的 Encoder、排序器、`row.toBytes`/`init*`，以及 `GenIndexValue*`、`EncodeHandleInUniqueIndexValue`、`encodeCommonHandle`、`encodePartitionID`、`TryGetCommonPkColumnRestoredIds`，从 X 回到 D01.11。`setTiDBTableValue` 归 D05.2，和 `getTiDBTableValue` 放在一起，在 `sessionvars_pending.go` 中登记为 pending。新块 **D06.7**（P1，11 个函数）：
+   - `session.{replaceGlobalVariablesTableValue, getTableValue, GetTiDBTableValue, SetTiDBTableValue}`
+   - `Domain.{LoadSysVarCacheLoop, NotifyUpdateSysVarCache, NotifyGlobalConfigChange, fetchTableValues, rebuildSysVarCache, rebuildSysVarCacheIfNeeded}`
+   - `meta/autoid allocator.alloc4Signed`
+2. **govec tablecodec 新增两个 op**：
+   - `encode_row`：964 条，Encoder.Encode，带或不带 RawChecksum。
+   - `index_value`：1,300 条，GenIndexKey + TruncateIndexValues + GenIndexValuePortal。`needRestored` 作为输入；带 handle restored data 的行不生成，所以不需要 D06.4 的 `TryGetHandleRestoredDataWrapper`。
+   - Rust 回放 0 条不一致。**反证**：把 `checksumVersionRawHandle` 改成 3，有 312 条不一致。
+   - D01.11 收敛检查 143/143 OK。encoder.rs 中 row.go、common.go 的函数用带路径的 `// go:` 注解；排序器为 L2：sort.Sort 作用于互不相同的列 ID，换成稳定排序后结果相同。
+3. **Lucky 的建议**：`sysvarValues` 对所有变量都加上特殊浮点输入 `NaN Inf -Inf infinity -0 1e-400 0x1p-2 1e400 -1e400`。sysvar 现在 93,462 条、sessionvars 65,071 条，回放 0 条不一致。`tidb_gc_*` 的记录变多，跳过上限从 232 改为 332。
+4. **amd64 向量**取自 tracker CI 的 artifact，记录和 arm64 相同，README 中的 sha256 已更新。
+
+**还没做（PR C 的主体）**，按顺序：
+1. **layered crate `tidb-systable`**（D06.7，rank 8，依赖 tablecodec、sessionctx、model、codec），只放纯逻辑：
+   - 给定旧行和新值，计算 REPLACE 的变更计划：唯一索引 key（distinct）→ 旧 handle → 旧行；按 binary collation 与新行比较，相同就只 lock record key，不同就删掉 record 和旧索引，再插入新行和新索引。
+   - `alloc4Signed` 的计算：`newEnd = min(maxInt64, max(currentEnd, base) + step)`，step 30000。meta hash 为 `DB:<dbID>` / `TID:<tableID>`，值是十进制字符串。
+   - 写入前的检查：bootstrap 版本、TableInfo 是否变化；row format、checksum 和 new collation 的开关按集群全局值。
+2. **govec `systable` 领域**：Go 侧在 mockstore 上用 `session.BootstrapSession` 后真实执行 `REPLACE INTO mysql.global_variables` 和 `mysql.tidb`，dump 前后 record 与 index 范围的 KV；Rust 用同样的旧状态和 Go 分到的 handle 执行变更计划，逐字节比较。用例包括：首次写入、值不变（只 lock）、值改变、大小写或尾部空格不同的变量名、超长值、多个变量。
+3. **poc-domain 的 I/O**：
+   - client-rust 的乐观事务；重试不超过 `tidb_retry_limit`，每次都开新事务（新的 start ts）。
+   - etcd 监听 `/tidb/sysvars`，遇到 compaction 时重建；启动时和每 30 秒重载，重载后重新执行 SetGlobal hook。
+   - `NotifyUpdateSysVarCache`；带 GlobalConfigName 的变量调用 `NotifyGlobalConfigChange` 写 PD。
+   - 用同一个 writer 写 `mysql.tidb`，接上 `tidb_gc_*` 的 hook，跳过上限降到 0。
+4. **混合集群测试**：在自己的 v8.5.8 playground 上用非默认端口，覆盖交替和并发的 SET GLOBAL、两边读取、在 prewrite 与 commit 之间杀进程、etcd compaction、重启。结果、TiCDC 和统计增量的发现写进 spec §6.6，测试结束后停掉 playground。
+
+## PR D 提议（D05.2 剩余，不在 PR C 中实现）
+
+截至 PR C 第二轮，D05.2 收敛检查为 44/237，缺 172 个，按类型：
+- **`SessionVars` 的方法 95 个**：读写会话状态的 getter/setter，例如 `GetSplitRegionTimeout`、`SetStatusFlag`、`InTxn`、`GetCharsetInfo`、`SetAllowInSubqToJoinAndAgg`、`UseDynamicPartitionPrune`、`StmtCtx` 相关。这些是 planner 和 executor 用到的，建议作为 PR D 的主体，按调用方分组：optimizer 用的、执行器用的、协议层用的。
+- **`Concurrency` 的 27 个 getter**：机械、短小，放进 PR D。
+- **`TransactionContext` 9 个、`TxnReadTS` 2 个**：只读路径需要的部分，例如 `GetCurrentSavepoint` 以外的、`TxnReadTS.UseTxnReadTS`；写路径的另行归 X。
+- **`UserVars` 6 个 + `NewUserVars`**：替换 D00.1 的 `variable/uservars.rs` 替身（D00.1 T9 的一部分）。
+- **`PlanCacheParamList` 6 个 + `NewPlanCacheParamList`**：参数用 `Arc<[Datum]>` 共享（D00.1 Part 2a 评审）。
+- **`slow_log.go` 12 个**（`writeSlowLogItem`、`SlowQueryLogItems` 的格式化等）：T7 中慢日志规则以外的部分，可以单独作为 PR E，依赖 D14.0 的 exec details。
+- **零散的**：`LazyStmtText`、`RuntimeFilterType`/`Mode`、`ReadConsistencyLevel`、`RewritePhaseInfo`、`PrepareDedupCacheKey`、`planCacheStmtKey`、`matchZero`/`matchGE`/`MatchEqual`、`makeKVExecDetailAccessor`、`uint64FromNonNegative`、`ToTiPBTiFlashPreAggMode`、`SetEnableAdaptiveReplicaRead`、`ParseString`。
+- **两个整文件**：`pkg/session/cursor/tracker.go`、`pkg/sessionctx/sessionstates/session_token.go`（会话迁移的 token）。cursor 归 PR D；session token 与权限（D04.1）相关，建议推迟到 D04.1。
