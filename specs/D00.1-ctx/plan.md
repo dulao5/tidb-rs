@@ -40,7 +40,7 @@
 - 生成器注意：exprctx 的 `load` 会触发 `tidb_redact_log` 的 SetSession hook（进程级状态，#62），每条记录后恢复；exprctx、ranger 每条记录前打开 new collation。回放侧同样处理。
 - 2b 尚未开始（没有分支）。
 
-## 第 2b 部分交接（2026-11-09，分支 block/D00.1-ctx-2b，叠在 2a `4597ddf` 上；未开 PR）
+## 第 2b 部分交接（2026-11-09，分支 block/D00.1-ctx-2b，叠在 2a 上；已完成，见下方"第 2b 部分完成"）
 
 - 已完成（WIP，编译、clippy、sessionctx 测试通过；converge D00.1 299/394）：
   - expropt 的 8 个 provider 文件（advisory_lock、current_user、ddlowner、infoschema、kvstore、priv（`priv_.rs`）、sequence、sqlexec）。未移植类型用替身：`MetaOnlyInfoSchema`（D06.3）、`SQLExecutor`（无方法，ExecRestrictedSQL 随 util/sqlexec）。
@@ -53,3 +53,9 @@
   2. tracker：`stmtctx_pending.go` 删掉已移植的 5 个；新增豁免：sessionexpr 全部 57 个（等 D05.3 Session 与 N2 三层结构、T9）、expropt/sessionvars.go 4 个（N2：EvalContext 要 Send+Sync，SessionVars 归会话任务，D05.3 决定）、distsql/context 2 个（DistSQLContext 字段类型属 D14.0/D07.2）、ValidateSnapshotReadTS（等 kv.Storage.GetOracle，D07.1）、debugtrace 4 个。
   3. govec 新领域（如 `ctx2b`）：PlanCounterTp 序列、basicCtxType.String、StatsLoadResult.ErrorMsg、expropt 各 reader 在有/无 provider 时的结果与错误文字（exprstatic EvalContext + WithOptionalProperty）、debugtrace 编码（随机 any 树、HTML 字符、U+2028、NaN、嵌套 context、空/单/多 step）、tracker init 的 label/limit；minelits；多种子；进程级状态每条记录重置（tidb_redact_log #62、new collation）。
   4. 单元测试、spec §2b/§4、tasks、ROADMAP；开 PR（base 依 2a 是否合并而定）。
+
+## 第 2b 部分完成（2026-11-09）
+
+- debugtrace（arena、`EncodeJSONCommon` 实际不返回错误，见 spec §3.5）、govec `ctx2b`（731 条）、`planctx_unit.rs`、豁免移到 tracker `ctx2b_pending.go`。
+- PR：tracker #36（draft，叠在 #32 上）、tidb-rs 对应 PR（draft，叠在 #68 上）。#32/#68 合并后 rebase 到 main、改 base、标为 ready。
+- 剩下：T8（stmtctx 依赖 D02.2/D14.0/D11/P3 的部分）、T9（等 D05.2 完成）、T12（随 D05.2 的 `PlanCacheParamList`）。
