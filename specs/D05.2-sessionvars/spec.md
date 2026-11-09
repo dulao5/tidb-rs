@@ -107,6 +107,9 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 7. 上游修复的移植（宪章 R1）：`fixcontrol.ParseToMap` 在冒号后为空时（`'123:'`），v8.5.8 取 `s[0]` 越界 panic；master 已修（pingcap/tidb#65884，`811a10e115`，未回移到 release-8.5）：值为 `""`，无错误、无 warning。Rust 移植修复（`// go-fix`），govec 用 tracker `govec/fixes` 的修复版生成这些记录（`src: "fix pingcap/tidb#65884"`）。
 8. 错误的客户端视图（M-ERR）：Go 的 server 向客户端写 `errors.Cause(err)`，`Wrap` / `Wrapf` / `Annotate` 的前缀只进 Go 的日志。Rust 不移植这些包装，返回客户端看到的错误；govec `sessionvars` 记录 `errors.Cause(err)`。目前涉及的只有 LDAP `ca_path` 钩子（`initializeCAPool`，#64）。已移植代码中其他 Wrap / Annotate 的位置（B1 评审第 3 条的核查）：`types` 的 enum / set 转换（D01.1，已按 cause 处理）；`util/cgroup` 的 `Wrapf`（D15.3，按拼接移植，但只在启动检测内存限制时出现在日志里，不到达客户端）；`rowcodec` checksum 编码的 `Annotatef`（D01.11，不到达客户端）。
 
+9. `tidb_slow_log_rules` 的 `RawRules`（M-MAPORDER，L2）：Go 用 map 构造一条规则的条件，`ParseGlobalSlowLogRules` 也按 map 顺序拼接各连接的规则集，所以一条规则有两个以上条件、或全局值有两个以上连接组时，`SHOW VARIABLES` 的值和 `RawRulesHash` 每次运行都可能不同。Rust 把条件按字段名排序、连接组按连接 ID 排序。govec 在 Go 与 Rust 两侧都把读回值规范化（每条规则的条件排序，再把规则排序）后比较（`slow_log_rules.rs`，T7）。只移植了 `SlowLogRuleFieldAccessors` 的 `Parse`；`Setter` / `Match` 在语句结束后匹配慢日志，属于 D14.2。
+10. `net/url` 的移植（`tidb_base::gostd::url`，`ast.RedactURL` 用到的部分）：IP 字面量的检查（`netip.ParseAddr` + `Is4`）用 Rust 的 IPv4 / IPv6 解析器加 Go 的 zone 规则（L2）；这一分支的错误文字与 Go 不同，`RedactURL` 丢弃解析错误，只看成败。`urlmaxqueryparams` GODEBUG 不读（用默认上限 10000）。
+
 ## 5. 验证结果（PR A）
 
 - **govec `sessionvars`**：41,447 条（`fresh` 1、`set` 30,939、`get` 945、`set_global` 9,482、`init` 80）。回放跳过仍有 pending 钩子的记录：36,046 条比对、0 条不一致，5,401 条跳过；钩子落地后自动开始比对，不需要重新生成。

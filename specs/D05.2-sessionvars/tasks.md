@@ -5,7 +5,14 @@ PR 系列（每个可以单独合并，base main）：
 - **PR B** 拆成两部分（2026-11-09）：
   - **B1**（#63、tracker #29）：T4 的余下部分（SetSession 272/273、GetSession 27/27、GetStateValue 6/6），T5 的一部分（SetGlobal 77/155、GetGlobal 112/134），T6 的一部分，T9；生成器重置进程级状态，新增 op `set_global_hook`。跳过上限 2,319。
   - **B2**（叠在 B1 上）：T5 的余下部分（client-go、tls、topsql 的状态单元，gctuner，TTL 窗口，MemQuotaAnalyze，tidb_config、tidb_external_ts、tidb_cloud_storage_uri、fix_control 的 SetGlobal；只影响 tidb-rs 不运行的子系统的钩子按 runtime-only / X 处置），T7，T6 的余下部分，T8 的余下部分（非标量字段导出、minelits、多种子）。目标：pending 为 0（tidb_gc_* 的 5 个变量随 PR C / T10），跳过上限为 0。
+  - **B3**（Lucky 对 #66 的评审，PR C 之前合并）：B2 第一轮的 SetGlobal 钩子加入 `set_global_hook` 并把它们写的状态加入两侧的重置列表（38 个变量）；非标量字段导出（`set` 记录的 `ns`）；minelits 的字面量（`sys/mined:*`，547 条）；两步记录（op `set_global_hook2`：LDAP 连接池容量、ca_path）；`url` 错误文字改用 Go 的 `strconv.Quote`；修正 3 处 `v < lo || v > hi` 被写成 `RangeInclusive::contains`（NaN 应通过）。
 - **PR C**：T10 + T13（§6 的设计评审通过后）。
+
+**D05.2 验收清单**（全部完成才把 D05.2 标为完成）：
+- [x] 钩子 pending 只剩 tidb_gc_* 的 5 个（PR C 后为 0）
+- [x] B3：set_global_hook 覆盖 B2 的钩子并重置其状态；非标量字段的比对；minelits；两步记录；多种子回放（本地种子 1、2、81、82）
+- [ ] PR C：T10 + T13，跳过上限降到 0
+- [ ] 服务端启动测试：`hook_state::unregistered_callbacks()` 为空（未注册的回调会 panic；Go 由 session 的 recover 转为客户端错误）。等注册这些回调的组件（domain、DDL、executor、BR/lightning）就绪后加入；在 #53 中跟踪
 
 - [x] T0 范围划分（tracker rules.py：39 个写路径函数归 X）
 - [x] T1 spec / plan
@@ -14,8 +21,8 @@ PR 系列（每个可以单独合并，base main）：
 - [x] T4 SetSession / GetSession / GetStateValue 钩子（PR B）：SetSession 272/273（余下 tidb_slow_log_rules，随 T7），GetSession 27/27，GetStateValue 6/6。PR A 时为 SetSession 227/273（173 个按"赋值给标量字段"的形状机械翻译，44 个手工，10 个写的是 X 字段，只改 systems[]），GetSession 12/27；余下 46 + 15 个在 `session_hooks.rs` 的 `PENDING_*` 中，大多写非标量状态（TxnScope、Rng、IsolationReadEngines、StmtCtx、MemTracker、PartitionPruneMode、KVVars 等），随 T6 一起做
 - [~] T5 SetGlobal / GetGlobal 钩子（PR B 部分完成）：SetGlobal 39/155、GetGlobal 64/134，只读写 variable 包 atomic 的按单句模式翻译（`session_hooks_global.rs`）；tidb_vars.go 的进程级 atomic 全部移植（`tidb_vars.rs`，`GoAtomicString`）。余下 116 + 70 个落点在其他包（config.Instance、ldap、gctuner、memory、tikvstore、topsqlstate、tls、stmtsummary、logutil、PD 客户端、DDL owner……），见 plan.md「PR B 交接」。原文：（155 + 134，全部 pending）：大多读写进程级的 atomic 或配置，需要先移植这些全局量；GetStateValue 3/6
 - [~] T6（PR B 部分完成）：钩子用到的非标量状态已移植（`session_state.rs` 与 `SessionState`：status、TxnCtx、KVVars、one-shot 隔离级别、TxnReadTS、IsolationReadEngines、AllowFallbackToTiKV、PartitionPruneMode、TxnScope、Rng、StatsLoadSyncWait、MemTracker 限额、OptimizerFixControl、runtimeFilterTypes、AnalyzeSkipColumnTypes、SlowLogRules、RowEncoder.Enable、LastQueryInfo、LastDDLInfo）。仍未做：UserVars、TransactionContext（保留部分）、TxnReadTS、Concurrency、prepared 语句、plan cache 参数、游标、session token
-- [ ] T7 slow_log.go
-- [~] T8 govec `sessionvars`：op `fresh`、`set`、`get`、`set_global`、`init`，41,447 条；回放跳过仍有 pending 钩子的记录（36,046 条已比对，5,401 条跳过）；反证见 spec §5。minelits 和多种子待 PR B
+- [x] T7 slow_log.go 的规则解析（PR B2）：`ParseSessionSlowLogRules`、`ParseGlobalSlowLogRules`、`parseSlowLogRuleSet`、`parseSlowLogRuleEntry`、`encodeRules`、`ParseSlowLogFieldValue` 与各 `parse*`，`slowLogFieldRe` 的匹配器、crc64 ECMA；`tidb_slow_log_rules` 的 SetSession / SetGlobal / GetGlobal（`slow_log_rules.rs`，偏离见 spec §4 第 9 条）
+- [x] T8 govec `sessionvars`：op `fresh`、`set`（含非标量字段 `ns`）、`get`、`set_global`、`set_global_hook`、`set_global_hook2`、`init`；minelits（B3）；多种子回放（B3：本地种子 1、2、81、82）。跳过只剩 tidb_gc_* 的记录（PR C）
 - [x] T9 编译期断言（PR B）：`SessionVars: Send` 与 `!Sync`（session.rs 末尾）。原文：编译期断言 SessionVars: Send + !Sync（`GlobalVarAccessor: Send`，`Box<dyn GlobalVarAccessor>` 已是 Send）
 - [ ] T10 读集群全局值（启动时 + etcd watch + 30 秒），并入 §6 的设计（#58 → 方案 (c)）
 - [ ] T13 SET GLOBAL 持久化写路径（§6.2，新块 D06.7 的提议，设计待 Lucky 评审）

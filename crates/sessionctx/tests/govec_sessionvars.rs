@@ -151,6 +151,63 @@ fn restore_process_globals() {
         v.push(Box::new(move || {
             tidb_base::config::store_global_config(c.clone())
         }));
+        // D05.2 B3: state written by the B2 SetGlobal hooks in set_global_hook records.
+        keep!(
+            MaxPreparedStmtCountValue,
+            ddlFlashbackConcurrency,
+            ddlReorgWorkerCounter,
+            ddlReorgBatchSize,
+            DDLReorgMaxWriteSpeed,
+            ddlErrorCountLimit,
+            maxDeltaSchemaCount,
+            ddlReorgRowFormat,
+            TableCacheLease,
+            AutoAnalyzePartitionBatchSize,
+            PersistAnalyzeOptions,
+            InstancePlanCacheMaxMemSize,
+            MaxAutoAnalyzeTime,
+            AutoAnalyzeConcurrency,
+            EnableDistTask,
+            EnableFastCreateTable,
+            TxnEntrySizeLimit,
+            DDLDiskQuota,
+            TTLScanBatchSize,
+            TTLDeleteBatchSize,
+            TTLDeleteRateLimit,
+            TTLScanWorkerCount,
+            TTLDeleteWorkerCount,
+            TTLRunningTasks
+        );
+        let x = tidb_vars::AnalyzeColumnOptions.load();
+        v.push(Box::new(move || {
+            tidb_vars::AnalyzeColumnOptions.store(x.clone())
+        }));
+        let x = tidb_vars::PreparedPlanCacheMemoryGuardRatio.load();
+        v.push(Box::new(move || {
+            tidb_vars::PreparedPlanCacheMemoryGuardRatio.store(x)
+        }));
+        let x = tidb_vars::InstancePlanCacheReservedPercentage.load();
+        v.push(Box::new(move || {
+            tidb_vars::InstancePlanCacheReservedPercentage.store(x)
+        }));
+        {
+            use tidb_sessionctx::variable::hook_state as hs;
+            macro_rules! keep_hs {
+                ($($a:ident),* $(,)?) => {$(
+                    let x = hs::$a.load(SeqCst);
+                    v.push(Box::new(move || hs::$a.store(x, SeqCst)));
+                )*};
+            }
+            keep_hs!(
+                StoreLimit,
+                TxnCommitBatchSize,
+                CommitterConcurrency,
+                RequireSecureTransport,
+                TopSQLMaxStatementCount,
+                TopSQLMaxCollect,
+                GenerateBinaryPlan
+            );
+        }
         v.push(Box::new(|| {
             tidb_sessionctx::variable::ldap_state::LDAPSASLAuthImpl.reset();
             tidb_sessionctx::variable::ldap_state::LDAPSimpleAuthImpl.reset();
@@ -176,10 +233,52 @@ fn reset_atomics() {
     tidb_vars::RunAutoAnalyze.store(tidb_vars::DefTiDBEnableAutoAnalyze, SeqCst);
     tidb_vars::EnableAutoAnalyzePriorityQueue
         .store(tidb_vars::DefTiDBEnableAutoAnalyzePriorityQueue, SeqCst);
+    // D05.2 B2: tidb_cloud_storage_uri / tidb_slow_log_rules SetGlobal hooks.
+    tidb_vars::CloudStorageURI.store(String::new());
+    *tidb_sessionctx::variable::slow_log_rules::GlobalSlowLogRules.write() = Default::default();
     restore_process_globals();
 }
 
+/// The callbacks other components register into the variable package, as the generator
+/// has them: the executor's `GlobalAnalyzeMemoryTracker` limit (`-1` at start) behind
+/// Get/SetMemQuotaAnalyze, and the generator's stub external timestamp (a process-wide
+/// value, 0 at start). The others stay unregistered, as in the generator.
+fn register_callbacks() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, AtomicU64};
+    use tidb_sessionctx::variable::hook_state as hs;
+    static ANALYZE_LIMIT: AtomicI64 = AtomicI64::new(-1);
+    static EXTERNAL_TS: AtomicU64 = AtomicU64::new(0);
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        *hs::GetMemQuotaAnalyze.write() = Some(Arc::new(|| ANALYZE_LIMIT.load(SeqCst)));
+        *hs::SetMemQuotaAnalyze.write() = Some(Arc::new(|v| ANALYZE_LIMIT.store(v, SeqCst)));
+        *hs::GetExternalTimestamp.write() = Some(Arc::new(|| Ok(EXTERNAL_TS.load(SeqCst))));
+        *hs::SetExternalTimestamp.write() = Some(Arc::new(|ts| {
+            EXTERNAL_TS.store(ts, SeqCst);
+            Ok(())
+        }));
+        // The generator's ValidateCloudStorageURI stub: a plain error for err://, a
+        // *terror.Error for terr:// (the hook converts it to a plain error).
+        *hs::ValidateCloudStorageURI.write() = Some(Arc::new(|uri: &str| {
+            if uri.starts_with("err://") {
+                return Err(tidb_base::errors::new(format!(
+                    "unsupported storage: {uri}"
+                )));
+            }
+            if uri.starts_with("terr://") {
+                return Err(error::ErrWrongValueForVar.gen_with_stack_by_args(vec![
+                    "tidb_cloud_storage_uri".into(),
+                    uri.to_owned().into(),
+                ]));
+            }
+            Ok(())
+        }));
+    });
+}
+
 fn fresh_vars() -> SessionVars {
+    register_callbacks();
     reset_atomics();
     let mut vars = SessionVars::new(Box::new(MockGlobalAccessor {
         vals: HashMap::new(),
@@ -211,6 +310,76 @@ fn systems(vars: &SessionVars) -> BTreeMap<String, String> {
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
+}
+
+/// The generator's nonScalarDump: non-scalar SessionVars fields SetSession hooks write
+/// (D05.2 T6, B3).
+fn non_scalar(vars: &SessionVars) -> BTreeMap<String, String> {
+    let keys = |m: &std::collections::BTreeSet<tidb_base::kv::StoreType>| {
+        let mut v: Vec<i64> = m.iter().map(|k| i64::from(k.0)).collect();
+        v.sort_unstable();
+        format!(
+            "[{}]",
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+    let mut fix: Vec<String> = vars
+        .state
+        .optimizer_fix_control
+        .iter()
+        .map(|(k, v)| format!("{k}:{v}"))
+        .collect();
+    fix.sort();
+    let skip: Vec<String> = vars
+        .state
+        .analyze_skip_column_types
+        .iter()
+        .cloned()
+        .collect();
+    let tz = vars
+        .time_zone
+        .as_ref()
+        .map_or("<nil>".to_owned(), |l| l.string().to_owned());
+    let mut m = BTreeMap::new();
+    m.insert(
+        "kv_vars.backoff_lock_fast".to_owned(),
+        vars.state.kv_vars.backoff_lock_fast.to_string(),
+    );
+    m.insert(
+        "kv_vars.back_off_weight".to_owned(),
+        vars.state.kv_vars.back_off_weight.to_string(),
+    );
+    m.insert(
+        "isolation_read_engines".to_owned(),
+        keys(&vars.state.isolation_read_engines),
+    );
+    m.insert(
+        "allow_fallback_to_tikv".to_owned(),
+        keys(&vars.state.allow_fallback_to_tikv),
+    );
+    m.insert(
+        "partition_prune_mode".to_owned(),
+        vars.state.partition_prune_mode.clone(),
+    );
+    m.insert(
+        "txn_scope".to_owned(),
+        format!(
+            "{}/{}",
+            vars.state.txn_scope.get_var_value(),
+            vars.state.txn_scope.get_txn_scope()
+        ),
+    );
+    m.insert(
+        "stats_load_sync_wait".to_owned(),
+        vars.state.stats_load_sync_wait.to_string(),
+    );
+    m.insert("optimizer_fix_control".to_owned(), fix.join(","));
+    m.insert("analyze_skip_column_types".to_owned(), skip.join(","));
+    m.insert("time_zone".to_owned(), tz);
+    m
 }
 
 fn diff(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> Value {
@@ -286,6 +455,10 @@ fn pending(op: &str, args: &[Value]) -> bool {
             p(&name, "SetGlobal") || p(&name, "GetGlobal")
         }
         "set_global" => p(&gostd_lower(args[0].as_str().unwrap()), "SetGlobal"),
+        "set_global_hook2" => {
+            let name = gostd_lower(args[0].as_str().unwrap());
+            p(&name, "SetGlobal") || p(&name, "GetGlobal")
+        }
         "init" => init_pairs(args).iter().any(|pair| {
             with_aliases(pair[0].as_str().unwrap())
                 .iter()
@@ -327,7 +500,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 args[1].as_str().unwrap(),
                 args[2].as_str().unwrap(),
             );
-            let (f0, s0) = (fields(&vars), systems(&vars));
+            let (f0, s0, n0) = (fields(&vars), systems(&vars), non_scalar(&vars));
             let mut res = serde_json::Map::new();
             let r = match kind {
                 "set" => vars.set_system_var(name, val),
@@ -346,6 +519,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             };
             res.insert("fields".into(), diff(&f0, &fields(&vars)));
             res.insert("sys".into(), diff(&s0, &systems(&vars)));
+            res.insert("ns".into(), diff(&n0, &non_scalar(&vars)));
             if r.is_ok() {
                 match vars.get_session_or_global_system_var(name) {
                     Ok(v) => {
@@ -449,6 +623,33 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 .collect();
             (Value::Object(res), err, warns)
         }
+        "set_global_hook2" => {
+            let mut vars = fresh_vars();
+            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            let name = args[0].as_str().unwrap();
+            let mut steps = Vec::new();
+            for val in args[1].as_array().unwrap() {
+                let val = val.as_str().unwrap();
+                let sv = get_sys_var(name).unwrap();
+                let mut res = serde_json::Map::new();
+                let (v, r) = sv.validate(&mut vars, val, ScopeGlobal);
+                let r = r.and_then(|()| sv.set_global_from_hook(&mut vars, &v, false));
+                if r.is_ok() && sv.get_global.is_some() {
+                    let after = sv.get_global_from_hook(&mut vars);
+                    res.insert("after".into(), json!(after.clone().unwrap_or_default()));
+                    res.insert("after_err".into(), err_or_null(&after.map(|_| ())));
+                }
+                res.insert("err".into(), err_or_null(&r));
+                steps.push(Value::Object(res));
+            }
+            let warns = vars
+                .stmt_ctx
+                .get_warnings()
+                .into_iter()
+                .map(|w| w.err)
+                .collect();
+            (Value::Array(steps), None, warns)
+        }
         "set_global_hook" => {
             let mut vars = fresh_vars();
             vars.stmt_ctx.stmt_type = "Set".to_owned();
@@ -497,10 +698,47 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
     }
 }
 
+/// The generator's canonical form of a tidb_slow_log_rules value: conditions of every rule
+/// sorted, then the rules (Go's RawRules follows map order; slow_log_rules.rs M-MAPORDER).
+fn canon_slow_log_rules(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let mut rules: Vec<String> = s
+        .split(';')
+        .map(|r| {
+            let mut conds: Vec<&str> = r.split(',').collect();
+            conds.sort_unstable();
+            conds.join(",")
+        })
+        .collect();
+    rules.sort_unstable();
+    rules.join(";")
+}
+
+/// Applies [`canon_slow_log_rules`] to the read-backs of a tidb_slow_log_rules record, as the
+/// generator does.
+fn canon_slow_log_rules_out(op: &str, args: &[Value], out: &mut Value) {
+    let name = match op {
+        "set" => args[1].as_str(),
+        "get" | "set_global" | "set_global_hook" => args[0].as_str(),
+        _ => None,
+    };
+    if name != Some("tidb_slow_log_rules") {
+        return;
+    }
+    for k in ["get", "sess", "glob", "state", "old", "after"] {
+        if let Some(Value::String(v)) = out.get_mut(k) {
+            *v = canon_slow_log_rules(v);
+        }
+    }
+}
+
 fn check(rec: &Value) -> Option<String> {
     let op = rec["op"].as_str().unwrap();
     let args = rec["args"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
-    let (out, err, warns) = exec(op, args);
+    let (mut out, err, warns) = exec(op, args);
+    canon_slow_log_rules_out(op, args, &mut out);
     if op == "fresh" && SessionVarsFields::default().scalar_strings().len() != SCALAR_FIELDS.len() {
         return Some("duplicate field names".to_owned());
     }
@@ -573,10 +811,10 @@ fn replay(path: &str) -> (usize, usize) {
     (n, skipped)
 }
 
-/// The cap on the committed vectors' skipped records (see `govec_sessionvars`): the exact
-/// count at PR B1 (SetGlobal 77/155, GetGlobal 112/134 still pending in part). Lower it in
-/// every PR that ports hooks; it must reach 0 at the end of PR B2.
-const MAX_SKIPPED: usize = 2319;
+/// The cap on the committed vectors' skipped records (see `govec_sessionvars`): after PR B2
+/// only the 232 records of the five tidb_gc_* variables are skipped (their SetGlobal /
+/// GetGlobal hooks read and write mysql.tidb, which comes with PR C / T10). PR C lowers it to 0.
+const MAX_SKIPPED: usize = 232;
 
 #[test]
 fn govec_sessionvars() {

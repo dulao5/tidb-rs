@@ -1248,6 +1248,13 @@ fn can_backquote(mut s: &[u8]) -> bool {
     true
 }
 
+/// Go `strconv.Quote(string(s))`.
+// go-std: strconv.Quote L1
+pub fn strconv_quote(s: &[u8]) -> String {
+    // quote escapes everything that is not printable UTF-8: the output is ASCII or valid UTF-8.
+    String::from_utf8(quote(s, false)).expect("strconv.Quote output is valid UTF-8")
+}
+
 /// `strconv.Quote` / `QuoteToASCII` (`ascii`).
 // go-std: strconv.appendQuotedWith L1
 fn quote(mut s: &[u8], ascii: bool) -> Vec<u8> {

@@ -721,3 +721,26 @@ pub(super) fn gv_rand_seed1(s: &mut SessionVars) -> Result<(String, bool), Error
 pub(super) fn gv_rand_seed2(s: &mut SessionVars) -> Result<(String, bool), Error> {
     Ok((s.state.rng.get_seed2().to_string(), true))
 }
+
+// go-part: defaultSysVars (sysvar.go:L3677 tidb_slow_log_rules SetSession closure) L1
+pub(super) fn ss_tidb_slow_log_rules(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+    let slow_log_rules = super::slow_log_rules::parse_session_slow_log_rules(val)?;
+    s.state.slow_log_rules.slow_log_rules = slow_log_rules;
+    s.state.slow_log_rules.need_update_effective_fields = true;
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L3692 tidb_slow_log_rules SetGlobal closure) L1
+pub(super) fn sg_tidb_slow_log_rules(_vars: &mut SessionVars, s: &str) -> Result<(), Error> {
+    let g_rules = super::slow_log_rules::parse_global_slow_log_rules(s)?;
+    *super::slow_log_rules::GlobalSlowLogRules.write() = std::sync::Arc::new(g_rules);
+    Ok(())
+}
+
+// go-part: defaultSysVars (sysvar.go:L3700 tidb_slow_log_rules GetGlobal closure) L1
+pub(super) fn gg_tidb_slow_log_rules(_vars: &mut SessionVars) -> Result<String, Error> {
+    Ok(super::slow_log_rules::GlobalSlowLogRules
+        .read()
+        .raw_rules
+        .clone())
+}
