@@ -11,6 +11,7 @@
 #![deny(unsafe_code)]
 
 pub mod context;
+pub mod debugtrace;
 pub mod errctx;
 pub mod exprctx;
 pub mod expropt;
