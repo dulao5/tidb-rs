@@ -2,16 +2,20 @@
 //!
 //! So far: block D05.1, the system variable registry and validation (`variable`, N8 §3.1);
 //! block D00.1 part 1: `errctx` and `stmtctx` (warnings, error levels, type flags);
-//! part 2a: the expression context interfaces (`exprctx`), the optional property providers
-//! (`expropt`), the static expression contexts (`exprstatic`), the ranger types (`ranger`) and
-//! the `planctx` trait skeleton.
+//! part 2a: the expression context interfaces (`exprctx`), the optional property provider set
+//! (`expropt`), the static expression contexts (`exprstatic`) and the ranger types (`ranger`);
+//! part 2b: the concrete optional property providers (`expropt`), the planner context
+//! (`planctx`), `PlanCounterTp` (`planbase`) and the
+//! session context keys (`context`).
 
 #![deny(unsafe_code)]
 
+pub mod context;
 pub mod errctx;
 pub mod exprctx;
 pub mod expropt;
 pub mod exprstatic;
+pub mod planbase;
 pub mod planctx;
 pub mod ranger;
 pub mod stmtctx;

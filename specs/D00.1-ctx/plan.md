@@ -39,3 +39,17 @@
 - PR：tidb-rs #68（ready，CI 两个平台通过）、tracker #32（CI 通过）。合并顺序：先 tracker #32，再 #68。
 - 生成器注意：exprctx 的 `load` 会触发 `tidb_redact_log` 的 SetSession hook（进程级状态，#62），每条记录后恢复；exprctx、ranger 每条记录前打开 new collation。回放侧同样处理。
 - 2b 尚未开始（没有分支）。
+
+## 第 2b 部分交接（2026-11-09，分支 block/D00.1-ctx-2b，叠在 2a `4597ddf` 上；未开 PR）
+
+- 已完成（WIP，编译、clippy、sessionctx 测试通过；converge D00.1 299/394）：
+  - expropt 的 8 个 provider 文件（advisory_lock、current_user、ddlowner、infoschema、kvstore、priv（`priv_.rs`）、sequence、sqlexec）。未移植类型用替身：`MetaOnlyInfoSchema`（D06.3）、`SQLExecutor`（无方法，ExecRestrictedSQL 随 util/sqlexec）。
+  - `planctx.rs`：`PlanContext` trait（只声明类型已移植的方法）、`EmptyPlanContextExtended`、`BuildPBContext`（GetExprCtx、GetClient、Detach）。
+  - `planbase.rs`：`PlanCounterTp`（Dec 用 wrapping_sub）。
+  - `context.rs`：`basicCtxType.String`（`BasicCtxType`）。
+  - stmtctx：`mem_tracker` / `disk_tracker` 字段，`InitMemTracker`、`InitDiskTracker`（L2：新建 tracker，不复用缓存，N2 §3.4）、`DetachMemDiskTracker`；`StatsLoadResult.HasError`、`ErrorMsg`。
+- 下一步：
+  1. debugtrace（`planner/util/debugtrace/base.go`）：root 用 arena（`Vec<ctx>` + 下标）表示树；step = JSON 值或子 context 下标；EncodeJSONCommon 关闭 HTML 转义、末尾换行，NaN/Inf 时按 Go 输出 `{"Value":{},"Str":"NaN"}` 并返回 `json: unsupported value: NaN`，嵌套 context 出错时为 MarshalerError（`{"Type":{},"Err":{...}}`）。四个取 `PlanContext` 的函数（GetOrInitDebugTraceRoot、Enter/LeaveContextCommon、RecordAnyValuesWithNames）等 N2 的 PlanCtx（D05.3）登记豁免，逻辑放在 root 的 glue 方法上。
+  2. tracker：`stmtctx_pending.go` 删掉已移植的 5 个；新增豁免：sessionexpr 全部 57 个（等 D05.3 Session 与 N2 三层结构、T9）、expropt/sessionvars.go 4 个（N2：EvalContext 要 Send+Sync，SessionVars 归会话任务，D05.3 决定）、distsql/context 2 个（DistSQLContext 字段类型属 D14.0/D07.2）、ValidateSnapshotReadTS（等 kv.Storage.GetOracle，D07.1）、debugtrace 4 个。
+  3. govec 新领域（如 `ctx2b`）：PlanCounterTp 序列、basicCtxType.String、StatsLoadResult.ErrorMsg、expropt 各 reader 在有/无 provider 时的结果与错误文字（exprstatic EvalContext + WithOptionalProperty）、debugtrace 编码（随机 any 树、HTML 字符、U+2028、NaN、嵌套 context、空/单/多 step）、tracker init 的 label/limit；minelits；多种子；进程级状态每条记录重置（tidb_redact_log #62、new collation）。
+  4. 单元测试、spec §2b/§4、tasks、ROADMAP；开 PR（base 依 2a 是否合并而定）。
