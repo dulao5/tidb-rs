@@ -51,6 +51,8 @@ enum Ret {
     String,
     Time,
     Duration,
+    Json,
+    Vector,
 }
 
 impl Ret {
@@ -63,6 +65,8 @@ impl Ret {
             Ret::String => quote!(::tidb_expression::eval::rt::ETString),
             Ret::Time => quote!(::tidb_expression::eval::rt::ETDatetime),
             Ret::Duration => quote!(::tidb_expression::eval::rt::ETDuration),
+            Ret::Json => quote!(::tidb_expression::eval::rt::ETJson),
+            Ret::Vector => quote!(::tidb_expression::eval::rt::ETVectorFloat32),
         }
     }
 }
@@ -108,6 +112,8 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
             "String" => a.ret = Some(Ret::String),
             "Time" => a.ret = Some(Ret::Time),
             "Duration" => a.ret = Some(Ret::Duration),
+            "Json" => a.ret = Some(Ret::Json),
+            "VectorFloat32" => a.ret = Some(Ret::Vector),
             "lazy" => a.lazy = true,
             "novec" => a.novec = true,
             "args" => {
@@ -153,7 +159,7 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
             }
             _ => {
                 return Err(meta.error(
-                    "eval_fn: options are Int, Real, Decimal, String, Time, Duration, lazy, eager, novec, args(..), checked(..)",
+                    "eval_fn: options are Int, Real, Decimal, String, Time, Duration, Json, VectorFloat32, lazy, eager, novec, args(..), checked(..)",
                 ));
             }
         }
@@ -175,7 +181,7 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
     if a.ret.is_none() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "eval_fn: the result type (Int, Real, Decimal, String, Time or Duration) is required",
+            "eval_fn: the result type (Int, Real, Decimal, String, Time, Duration, Json or VectorFloat32) is required",
         ));
     }
     Ok(a)
@@ -313,6 +319,14 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
             quote!(::std::option::Option<#rt::Duration>),
             quote!(Duration),
         ),
+        Ret::Json => (
+            quote!(::std::option::Option<#rt::BinaryJSON<'static>>),
+            quote!(Json),
+        ),
+        Ret::Vector => (
+            quote!(::std::option::Option<#rt::VectorFloat32<'static>>),
+            quote!(VectorFloat32),
+        ),
     };
     let err = quote!(#krate::eval::rt::Error);
 
@@ -365,6 +379,20 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
                 }
                 ::std::result::Result::Ok(())
             },
+            Ret::Json | Ret::Vector => {
+                let (reserve, append) = appended_out(ret);
+                quote! {
+                    result.#reserve(n);
+                    for i in 0..n {
+                        let mut args = #rt::VecArgs::new(f, cols, i);
+                        match #name(ctx, &s, &mut args)? {
+                            ::std::option::Option::Some(v) => result.#append(&v),
+                            ::std::option::Option::None => result.append_null(),
+                        }
+                    }
+                    ::std::result::Result::Ok(())
+                }
+            }
             Ret::Int | Ret::Real | Ret::Decimal | Ret::Time | Ret::Duration => {
                 let out = fixed_out(ret);
                 quote! {
@@ -428,6 +456,24 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
                 }
                 ::std::result::Result::Ok(())
             },
+            Ret::Json | Ret::Vector => {
+                let (reserve, append) = appended_out(ret);
+                quote! {
+                    #(#views)*
+                    result.#reserve(n);
+                    for i in 0..n {
+                        if false #(|| #null_checks)* {
+                            result.append_null();
+                            continue;
+                        }
+                        match #name(ctx, &s, #(#gets),*)? {
+                            ::std::option::Option::Some(v) => result.#append(&v),
+                            ::std::option::Option::None => result.append_null(),
+                        }
+                    }
+                    ::std::result::Result::Ok(())
+                }
+            }
             Ret::Int | Ret::Real | Ret::Decimal | Ret::Time | Ret::Duration => {
                 let out = fixed_out(ret);
                 quote! {
@@ -489,7 +535,22 @@ fn fixed_out(ret: Ret) -> TokenStream2 {
         Ret::Decimal => quote!(#rt::DecimalOut),
         Ret::Time => quote!(#rt::TimeOut),
         Ret::Duration => quote!(#rt::DurationOut),
-        Ret::String => unreachable!("String results are appended"),
+        Ret::String | Ret::Json | Ret::Vector => {
+            unreachable!("variable-length results are appended")
+        }
+    }
+}
+
+/// The `Reserve*` / `Append*` methods of a JSON or vector result column (Go's
+/// `result.ReserveJSON(n)` then `AppendJSON` / `AppendNull` per row).
+fn appended_out(ret: Ret) -> (TokenStream2, TokenStream2) {
+    match ret {
+        Ret::Json => (quote!(reserve_json), quote!(append_json)),
+        Ret::Vector => (
+            quote!(reserve_vector_float32),
+            quote!(append_vector_float32),
+        ),
+        _ => unreachable!("only JSON and vector results use appended_out"),
     }
 }
 

@@ -44,6 +44,12 @@
 3. govec `cast` 追加 4,000 条（原有 9,880 条不变）：`to` 3,000（INT/YEAR、REAL、DECIMAL、时间形态的字符串、DATE/DATETIME/TIMESTAMP、TIME、各种 type code 的 JSON（含 `CreateBinaryJSON` 的 DATE/DATETIME/TIMESTAMP/TIME 值）、VECTOR 列 → DATETIME/DATE/TIMESTAMP/TIME(fsp)，VECTOR 也到 INT/REAL/DECIMAL；随机 SQL mode（含 NO_ZERO_DATE）、四个固定的语句时间）、`to-const` 400（常量参数，构建时折叠）、`to-fsp` 300（`CAST(CAST(json AS TIME(n)) AS ..)`：内层值的 fsp 与声明不同，Lucky 评审 #88）、`wrap-time` 300（`WrapWithCastAsTime/Duration`）。castCtx 可选的第 5 个元素是语句时间；`sfDump` 输出 Time/Duration/JSON/Vector 常量。
 4. tracker `cast2b2.go` 开头的注释：设 concat 标志的是 DURATION（TIME 类型）列（Lucky 评审 #88）。
 
+## 第 2b-2b-ii 部分（完成）
+
+CAST 到 JSON、JSON ARRAY、VECTOR（spec §3.6），`WrapWithCastAsJSON/VectorFloat32`、`ConvertJSON2Tp`；`cast_not_ported` 与 `newBaseBuiltinFuncWithTp` 的桩分支已删除；Lucky 在 #91 的 3 条已处理（spec §3.5 的表、§4 第 3 条、`TimeAs*` 的说明）。converge：D08.8 265/266（只剩 `inCastContext.String`，规划器的会话键，D09）。
+
+**留给以后的覆盖**（Lucky 评审 #91）：值的 fsp 与声明的 fsp 不同的最常见来源是函数结果，例如 `TIME(varchar)`、`ADDTIME`、`SEC_TO_TIME`；移植这些函数（D08.7）时，在 govec 中加上以它们为参数的 CAST 记录（`DurationAsTime`、`DurationAsDuration`、`DurationAsString` 等两种模式各自跟随 Go）。
+
 ## 第 2b-2b-ii、2b-3 部分（交接）
 
 - **2b-2b-ii**：`#[eval_fn]` 支持 JSON/VectorFloat32 **结果**（`ReserveJSON`/`ReserveVectorFloat32`，NULL 合并）；`castAsJSON/Array/VectorFloat32FunctionClass` 与 CAST 到 JSON/VECTOR 的签名（`builtinCast*AsJSONSig`、`castJSONAsArray`、`StringAsVectorFloat32`、`VectorFloat32AsVectorFloat32`、`UnsupportedAsVectorFloat32`）；`WrapWithCastAsJSON/VectorFloat32`、`ConvertJSON2Tp`、`convertJSON2Tp`；之后去掉 `newBaseBuiltinFuncWithTp` 的临时桩分支和 `cast_not_ported`；`VectorFloat32AsUnsupported.evalJSON` 随之覆盖。

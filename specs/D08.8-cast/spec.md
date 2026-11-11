@@ -62,21 +62,31 @@ Go 的 `baseBuiltinCastFunc` = `baseBuiltinFunc` + `inUnion`。Rust 的 `Builtin
 - **读时钟**：`DurationAsTime` 与 JSON 中 TIME 值转 DATETIME 用 `getStmtTimestamp(ctx)`（`ctx.CurrentTime()`；Go 失败时退回 `gotime.Now()`）。govec 的 castCtx 第 5 个元素是固定的语句时间（Unix 纳秒，UTC，`WithCurrentTime`），回放用同一个值；向量里没有读真实时钟的记录。
 - **逐行版与向量版的差异**（D08.1 spec §3.4 (c)，每个驱动跟随各自的 Go 版本；govec 两种模式都比较，反证见 PR）：
 
-| 签名 | 逐行版 | 向量版 | 用户可见（按代码推断，未在集群上实测） |
+| 签名 | 逐行版 | 向量版 | 用户可见 |
 |---|---|---|---|
-| `StringAsTime` | `ParseTime` 返回的 `*strconv.NumError`（如 `"2024-1-99999999999999999999"`，Atoi 越界）不是时间错误，`handleInvalidTimeError` 原样返回，语句报错 `strconv.Atoi: parsing ...: value out of range` | 先换成 `ErrIncorrectDatetimeValue`，非严格模式下为 warning + NULL | 是：同一语句是报错还是 warning 取决于 `tidb_enable_vectorized_expression` |
-| `JSONAsDuration` 默认分支 | warning 写 `Truncated incorrect TIME value` | `types.TypeStr(tp)`，即 `time` | 是：warning 的文字不同 |
-| `DurationAsTime` | 参数值自带的 fsp | 结果的声明 fsp | 参数是函数、值的 fsp 与声明不同时（govec "to-fsp"） |
+| `StringAsTime` | `ParseTime` 返回的 `*strconv.NumError`（如 `"2024-1-99999999999999999999"`，Atoi 越界）不是时间错误，`handleInvalidTimeError` 原样返回，语句报错 `strconv.Atoi: parsing ...: value out of range` | 先换成 `ErrIncorrectDatetimeValue`，非严格模式下为 warning + NULL | 是，**已在 v8.5.8 上验证**（Lucky 评审 #91，#83）：非严格模式下 `CAST(s AS DATETIME)` 打开向量化时是 NULL + warning 8034，关闭时整条语句报 ERROR 1105 `strconv.Atoi: ...` |
+| `JSONAsDuration` 默认分支 | warning 写 `Truncated incorrect TIME value` | `types.TypeStr(tp)`，即 `time` | 是，**已在 v8.5.8 上验证**（Lucky 评审 #91，#83）：`CAST(j AS TIME)`（j 为数组或对象）的 warning 打开时是 `time`、关闭时是 `TIME` |
+| `DurationAsTime` | 参数值自带的 fsp | 结果的声明 fsp | 参数是函数、值的 fsp 与声明不同时（govec "to-fsp"；同类差异 `CAST(TIME(c) AS CHAR)` 已在 v8.5.8 上验证，#83） |
 | `DurationAsDuration` | 值的 fsp 等于目标 fsp 时 `RoundFrac` 原样返回 | 从 `UnspecifiedFsp` 取整 | 同上 |
-| `DecimalAsDuration`、`StringAsDuration` | `ErrTruncatedWrongVal` 交给 `ec.HandleError` | `tc.HandleTruncate` | 只在错误级别与 truncate 标志不一致时；SQL 中两者都来自 SQL mode，按推断看不到 |
+| `DecimalAsDuration`、`StringAsDuration` | `ErrTruncatedWrongVal` 交给 `ec.HandleError` | `tc.HandleTruncate` | 只在错误级别与 truncate 标志不一致时；SQL 中两者都来自 SQL mode，按代码推断看不到（未实测） |
+
+  `TimeAs*` 没有这类 fsp 差异：TIME/DATETIME 值在 chunk 中自带 fsp（`Time` 的打包值），两个驱动读到的是同一个 fsp（Lucky 评审 #91）。
 
   外层 CAST 读内层 `CAST(json AS TIME(n))` 的值时，内层返回 JSON 值自带的 fsp（`val.GetDuration()`），与声明的 n 不同：这就是 Lucky 在 #88 指出的"值的 fsp ≠ 声明的 fsp"，govec "to-fsp" 300 条覆盖，其中 92 条两种模式的结果不同。
+
+### 3.6 CAST 到 JSON、JSON ARRAY 与 VECTOR（第 2b-2b-ii 部分）
+
+- **函数类**：`castAsJSONFunctionClass`（7 个签名 `{Int,Real,Decimal,String,Time,Duration,JSON}AsJSON`；STRING 参数给结果类型加 `ParseToJSONFlag`；VECTOR 参数选 `builtinCastVectorFloat32AsUnsupportedSig`，其 `evalJSON` 现在可达）、`castAsArrayFunctionClass`（`verifyArgs` 要求 JSON 参数；YEAR/JSON/FLOAT/DECIMAL 元素、非 utf8mb4/binary 字符集、未指定长度的字符串返回 `ErrNotSupportedYet`；签名 `castJSONAsArrayFunctionSig`）、`castAsVectorFloat32FunctionClass`（`StringAsVectorFloat32`、`VectorFloat32AsVectorFloat32`、其余参数 `UnsupportedAsVectorFloat32`）。`BuildCastFunctionWithCheck` 对 `tp.IsArray()` 选数组的函数类；CAST 到 JSON 不折叠（与 Go 相同）。
+- **`#[eval_fn]` 的 JSON/VectorFloat32 结果**：与 STRING 一样逐行追加（`ReserveJSON`/`ReserveVectorFloat32` + `AppendJSON`/`AppendNull`，Go 向量版的写法）。7 个 `*AsJSON` 有向量版；`castJSONAsArray` 与 3 个 VECTOR 结果的签名在 Go 中没有向量版（`novec`），向量求值返回 base 的错误。`UnsupportedAsVectorFloat32` 不求值参数（`lazy`），任何行都报 `cannot cast from <TypeStr(arg)> to vector`。
+- **`fakeSctx`**：`cast as array` 与 `ConvertJSON2Tp` 忽略 SQL mode、返回所有错误；Rust 用 `types.StrictContext`（`StrictFlags`、UTC、丢弃 warning），错误上下文直接返回错误。
+- **`ConvertJSON2Tp`**：Go 返回 `any`（string/int64/uint64/float64/Time/Duration）；Rust 返回 `JSONValue`（这些值正是 `CreateBinaryJSON` 的输入）。
+- **逐行版与向量版**：govec 两种模式比较，这次没有发现新的差异（`*AsJSON` 的向量版与逐行版逐行相同）。
 
 ## 4. 偏离与豁免
 
 1. **`BuildCastFunction*`/`WrapWithCastAs*` 返回 `Result`**：Go 记日志并返回 `Function == nil` 的节点（之后使用会空指针 panic）；Rust 返回错误。
-2. **CAST 到 JSON/VECTOR**：返回 "not ported yet (D08.8 part 2b-2b-ii)" 错误（临时桩，宪章第四条 3）。`newBaseBuiltinFuncWithTp` 对这两种求值类型的参数同样返回这个错误。CAST 到 DATETIME/DATE/TIMESTAMP/TIME 已移植（2b-2b-i）。
-3. ~~TIME/DURATION/JSON/VECTOR 参数的 INT/REAL/DECIMAL/STRING 签名只有描述~~：第 2b-2a 部分已移植（13 个签名，`builtinCastVectorFloat32AsUnsupportedSig` 仍为临时桩，随 CAST 到 VECTOR 一起）。
+2. ~~CAST 到 JSON/VECTOR 的临时桩~~：第 2b-2b-ii 部分已移植（§3.6），`cast_not_ported` 与 `newBaseBuiltinFuncWithTp` 的桩分支已删除。
+3. ~~TIME/DURATION/JSON/VECTOR 参数的 INT/REAL/DECIMAL/STRING 签名只有描述~~：第 2b-2a 部分已移植。`builtinCastVectorFloat32AsUnsupportedSig` 在 Go 中定义了 `evalInt`…`evalJSON`，没有 `evalVectorFloat32`：`SigDrivers::Unsupported` 的 VectorFloat32 行驱动因此返回 base 的错误（不可达：CAST 到 VECTOR 选别的签名；Lucky 评审 #91）。
 4. **`TryPushCastIntoControlFunctionForHybridType`**：IF/CASE/ELT 未移植，tidb-rs 建不出这样的节点；遇到时 `unimplemented!`（临时桩，D08.9）。
 5. **`CastStringAs{Int,Real,Decimal}` 的前置分支**（hybrid、二进制字面量、`CanImplicitEval*`）：函数类不会对这样的参数选中这些签名（选 `IntAsInt` 等），不可达，未移植（L2）。
 6. **`PropagateType` 与类型的原地修改**：Go 直接修改参数节点（及共享它的所有持有者）的 `*FieldType`；Rust 在副本上修改（`with_type_mut`）。`ScalarFunction` 的 `RetType` 与签名的 `tp` 在 Go 中是同一个指针，两者一起改。**移植注意**（Lucky 评审 #82）：调用点 builtin_cast.go:220（`BuildCastFunction` 中对参数调用 `PropagateType`）在 Go 中原地修改的是**共享的** `ScalarFunction`/`Constant` 节点，计划中所有引用同一节点的地方都会看到新类型。按 Lucky 的分析，这一点从 SQL 观察不到；但规划器（P3）的 Go 代码可能依赖这种共享，移植规划器时遇到同一节点被多处引用、又在 CAST 之后读取其类型的地方，要确认是否需要显式地同步修改。
@@ -90,5 +100,8 @@ Go 的 `baseBuiltinCastFunc` = `baseBuiltinFunc` + `inUnion`。Rust 的 `Builtin
 14. **TIME/DURATION/JSON/VECTOR 类型的常量**：govec 的 `sfDump`/`d2DatumInOf` 已能输出这四种 Datum；"to-const" 400 条覆盖 CAST 到 DATETIME/DATE/TIMESTAMP/TIME 的常量参数（构建时折叠，比较折叠后的常量）。向量驱动的 `fill_constant` 只在未折叠时用到，CAST 的常量参数总会被折叠，所以这条路径等以后的函数族覆盖。
 15. **`WrapWithCastAsTime` 的 `tp`**：Go 修改调用方传入的 `*FieldType`（设置 decimal、flen 和 binary charset）；Rust 按值接收（L2）。`newBaseBuiltinFuncWithTp` 每次新建这个类型，观察不到差别。
 16. **`getStmtTimestamp`**（helper.go，D08.12）：这里是边界桩，只做 `ctx.CurrentTime()` 与失败时的 `gotime.Now()`；Go 中 `intest` 构建下的随机时区与 `injectNow` failpoint 只在测试中出现。
+
+17. **govec 测不出的两处**（第 2b-2b-ii 部分的反证）：`TimeAsJSON` 把 DATETIME/TIMESTAMP 的 fsp 设成 6——JSON 的二进制只存打包的时间值（不含 fsp），之后读出时用读取方给的 fsp，所以这一步从值上观察不到；`convertJSON2Tp` 对 DATE 目标截掉时分秒——只接受 `JSONTypeCodeDate` 的值，而 DATE 值本来就没有时分秒，结果相同。两处都照 Go 移植。
+18. **`ConvertJSON2Tp` 返回 `JSONValue`**（L2，见 §3.6）；`fakeSctx` 是 `types.StrictContext`（L2）。
 
 没有面向用户的行为差异（`docs/compatibility.md` 不变）。

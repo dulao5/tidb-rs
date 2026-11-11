@@ -258,6 +258,24 @@ impl std::fmt::Debug for BuiltinFunc {
 }
 
 macro_rules! row_dispatch {
+    ($name:ident, $variant:ident, $t:ty, $go:literal, no_unsupported) => {
+        #[doc = concat!("`", $go, "`: the row driver.")]
+        pub fn $name(
+            &self,
+            ctx: &dyn EvalContext,
+            st: &EvalState,
+            row: Row<'_>,
+        ) -> Result<Option<$t>, Error> {
+            match self.sig.drivers {
+                SigDrivers::$variant { row: f, .. } => f(self, ctx, st, row),
+                _ => Err(Error::plain(concat!(
+                    "baseBuiltinFunc.",
+                    $go,
+                    "() should never be called, please contact the TiDB team for help"
+                ))),
+            }
+        }
+    };
     ($name:ident, $variant:ident, $t:ty, $go:literal) => {
         #[doc = concat!("`", $go, "`: the row driver.")]
         pub fn $name(
@@ -463,11 +481,15 @@ impl BuiltinFunc {
     // go: baseBuiltinFunc.evalJSON L2 (dispatch: the error when the signature has no evalJSON driver)
     row_dispatch!(eval_json, Json, BinaryJSON<'static>, "evalJSON");
     // go: baseBuiltinFunc.evalVectorFloat32 L2 (dispatch: the error when the signature has no evalVectorFloat32 driver)
+    // Go's builtinCastVectorFloat32AsUnsupportedSig defines evalInt..evalJSON but no
+    // evalVectorFloat32, so a SigDrivers::Unsupported signature gets the base error here
+    // (unreachable: CAST to VECTOR picks another signature; Lucky, review of #91).
     row_dispatch!(
         eval_vector_float32,
         VectorFloat32,
         VectorFloat32<'static>,
-        "evalVectorFloat32"
+        "evalVectorFloat32",
+        no_unsupported
     );
 
     /// `vecEvalXxx` of the result type `et` on `n` rows of evaluated arguments.

@@ -47,16 +47,16 @@ descriptor-only signatures, applies the record's coercibility/repertoire overrid
 probe string). A `{"panic": true}` output (Go indexes `args` or `argTps` out of range) must
 panic in Rust too.
 
-# Domain "cast" (block D08.8 parts 1, 2a, 2b-1, 2b-2a and 2b-2b-i)
+# Domain "cast" (block D08.8 parts 1, 2a, 2b-1, 2b-2a, 2b-2b-i and 2b-2b-ii)
 
 `<target>/cast.jsonl.gz` are copied unmodified from the tidb-rs-tracker repository:
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-5`, commit `8a32e65`) |
-| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 13,880 records: `cast` 3,860 (60 of them UNSIGNED UNION negative strings; 800 `conv` records — part 2a — with FLOAT, BIT(n), ENUM and SET columns, which Go's `Column.VecEvalInt/Real/String` convert), `wrap` 700; part 2b-1 (appended, the 4,560 records above unchanged): `str` 1,600 (CAST to STRING), `dbl` 120 (FLOAT → DOUBLE, bit for bit), `binlit` 500 (`HandleBinaryLiteral`, to_binary/from_binary), `collcast` 300 (`BuildCastCollationFunction`), `wrapstr` 300 (`WrapWithCastAsString`); part 2b-2a (appended, the 7,380 records above unchanged): `from` 2,400 (DATE/DATETIME/TIMESTAMP, TIME, JSON and VECTOR columns to INT/REAL/DECIMAL/STRING/YEAR), `from-fsp` 100 (TIME columns with an unspecified fsp); part 2b-2b-i (appended, the 9,880 records above unchanged): `to` 3,000 (every argument type to DATETIME/DATE/TIMESTAMP/TIME, VECTOR also to INT/REAL/DECIMAL), `to-const` 400 (constant arguments, folded), `to-fsp` 300 (an inner `CAST(json AS TIME(n))` whose values keep the JSON value's fsp), `wrap-time` 300 (`WrapWithCastAsTime/Duration`) |
-| `arm64/cast.jsonl.gz` sha256 | `476270af63d1176fea623eb0bc25b1da5ad75b2e9cd4df0ea1f1cd61ff7dadc3` (GOARCH=arm64, generated locally) |
-| `amd64/cast.jsonl.gz` sha256 | `655c4a34a3a9fbe2c31de5d25b2db8b69321ddf64f7c7b974234760c3df2a3a9` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-6`, commit `2f966de`) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 17,380 records: `cast` 3,860 (60 of them UNSIGNED UNION negative strings; 800 `conv` records — part 2a — with FLOAT, BIT(n), ENUM and SET columns, which Go's `Column.VecEvalInt/Real/String` convert), `wrap` 700; part 2b-1 (appended, the 4,560 records above unchanged): `str` 1,600 (CAST to STRING), `dbl` 120 (FLOAT → DOUBLE, bit for bit), `binlit` 500 (`HandleBinaryLiteral`, to_binary/from_binary), `collcast` 300 (`BuildCastCollationFunction`), `wrapstr` 300 (`WrapWithCastAsString`); part 2b-2a (appended, the 7,380 records above unchanged): `from` 2,400 (DATE/DATETIME/TIMESTAMP, TIME, JSON and VECTOR columns to INT/REAL/DECIMAL/STRING/YEAR), `from-fsp` 100 (TIME columns with an unspecified fsp); part 2b-2b-i (appended, the 9,880 records above unchanged): `to` 3,000 (every argument type to DATETIME/DATE/TIMESTAMP/TIME, VECTOR also to INT/REAL/DECIMAL), `to-const` 400 (constant arguments, folded), `to-fsp` 300 (an inner `CAST(json AS TIME(n))` whose values keep the JSON value's fsp), `wrap-time` 300 (`WrapWithCastAsTime/Duration`); part 2b-2b-ii (appended, the 13,880 records above unchanged): `to-json` 1,500 (every argument type to JSON, including BOOLEAN, UNSIGNED, YEAR, binary strings and JSON texts), `to-json-const` 200, `to-array` 600 (`CAST(json AS type ARRAY)`, a seventh `cast` argument `isArray`), `to-vec` 600 (CAST to VECTOR(n)), `wrap-json` 300 (`WrapWithCastAsJSON/VectorFloat32`), `json2tp` 300 (`ConvertJSON2Tp`) |
+| `arm64/cast.jsonl.gz` sha256 | `e852784b6b4603c80376b25cb7d0139259c36ca089649941bb89c645f6d8b29b` (GOARCH=arm64, generated locally) |
+| `amd64/cast.jsonl.gz` sha256 | `5fc2a2b77145eb399d3699ea7f2b37474968fad26c37b6b21dd521ffbe8b5b99` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
 
 A `cast` record builds `CAST(arg AS tp)` with `BuildCastFunctionWithCheck` (the argument is a
 column of the record's rows or a constant, which is folded) under random type flags and error

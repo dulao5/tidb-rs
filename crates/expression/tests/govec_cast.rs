@@ -1,7 +1,8 @@
 //! Replays the govec `cast` vectors (tidb-rs-tracker `govec/domains/cast.go`): block D08.8 —
 //! CAST to INT/REAL/DECIMAL/STRING/DATETIME/DATE/TIMESTAMP/TIME built with `BuildCastFunctionWithCheck` (folded on a
 //! constant argument) and evaluated row by row and over a chunk (the vector driver),
-//! `WrapWithCastAsInt/Real/Decimal/String/Time/Duration`, `HandleBinaryLiteral` (to_binary/from_binary)
+//! CAST to JSON, JSON ARRAY and VECTOR, `WrapWithCastAsInt/Real/Decimal/String/Time/Duration/JSON/VectorFloat32`,
+//! `ConvertJSON2Tp`, `HandleBinaryLiteral` (to_binary/from_binary)
 //! and `BuildCastCollationFunction` — against Go TiDB v8.5.8.
 //!
 //! `GOVEC_CAST_FILES` (comma-separated paths) replays extra-seed artifacts as well.
@@ -16,15 +17,17 @@ use tidb_base::contextutil::{SQLWarn, WarnHandler, new_static_warn_handler};
 use tidb_base::mysql::SQLMode;
 use tidb_chunk::chunk::new_chunk_with_capacity;
 use tidb_expression::builtin_cast::{
-    build_cast_collation_function, build_cast_function_with_check, wrap_with_cast_as_decimal,
-    wrap_with_cast_as_duration, wrap_with_cast_as_int, wrap_with_cast_as_real,
-    wrap_with_cast_as_string, wrap_with_cast_as_time,
+    build_cast_collation_function, build_cast_function_with_check, convert_json2_tp,
+    wrap_with_cast_as_decimal, wrap_with_cast_as_duration, wrap_with_cast_as_int,
+    wrap_with_cast_as_json, wrap_with_cast_as_real, wrap_with_cast_as_string,
+    wrap_with_cast_as_time, wrap_with_cast_as_vector_float32,
 };
 use tidb_expression::builtin_convert_charset::handle_binary_literal;
 use tidb_expression::eval::{RpnProgram, RpnState, rt};
 use tidb_expression::*;
 use tidb_parser::types::{
-    ETDatetime, ETDecimal, ETDuration, ETInt, ETReal, ETString, ETTimestamp, FieldType,
+    ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
+    ETVectorFloat32, FieldType,
 };
 use tidb_sessionctx::errctx::{Level, LevelMap};
 use tidb_sessionctx::exprstatic as es;
@@ -34,6 +37,7 @@ use tidb_types::context::Flags;
 use tidb_types::datum::{self as dm, Datum};
 use tidb_types::enum_type::Enum;
 use tidb_types::field_type_builder::new_field_type_builder;
+use tidb_types::json::{BinaryJSON, create_binary_json};
 use tidb_types::set_type::Set;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
@@ -313,6 +317,11 @@ fn arg_of(v: &Value, rows: Option<&Value>) -> (ExprRef, Option<tidb_chunk::Chunk
     }
 }
 
+/// castJSONOut: a JSON value as [TypeCode, hex(Value)].
+fn json_out(j: &BinaryJSON<'_>) -> Value {
+    json!([j.type_code, hex(&j.value)])
+}
+
 fn row_val(ctx: &dyn EvalContext, e: &Expr, row: tidb_chunk::Row<'_>) -> Value {
     let st = EvalState::new();
     let et = e.get_type(ctx).eval_type();
@@ -331,6 +340,12 @@ fn row_val(ctx: &dyn EvalContext, e: &Expr, row: tidb_chunk::Row<'_>) -> Value {
     } else if et == ETDuration {
         ex_val(e.eval_duration(ctx, &st, row), |v| {
             json!([v.duration, v.fsp])
+        })
+    } else if et == ETJson {
+        ex_val(e.eval_json(ctx, &st, row), |v| json_out(&v))
+    } else if et == ETVectorFloat32 {
+        ex_val(e.eval_vector_float32(ctx, &st, row), |v| {
+            json!(hex(v.zero_copy_serialize()))
         })
     } else {
         panic!("row_val")
@@ -367,6 +382,10 @@ fn vec_val(ctx: &es::EvalContext, e: &ExprRef, chk: &tidb_chunk::Chunk) -> Value
             } else if et == ETDuration {
                 // The column keeps the nanoseconds only.
                 json!(col.get_duration(i, 0).duration)
+            } else if et == ETJson {
+                json_out(&col.get_json(i))
+            } else if et == ETVectorFloat32 {
+                json!(hex(col.get_vector_float32(i).zero_copy_serialize()))
             } else {
                 dec_out(&col.get_decimal(i))
             }
@@ -407,7 +426,10 @@ fn exec(op: &str, p: &[Value]) -> Value {
             } else {
                 arg_of(&p[0], p.get(4))
             };
-            let tp = ft_in(&p[1]);
+            let mut tp = ft_in(&p[1]);
+            if p.get(6).is_some_and(|v| v.as_bool().unwrap()) {
+                tp.set_array(true); // CAST(.. AS type ARRAY)
+            }
             let mut res: Option<ExprRef> = None;
             let build = ex_try(|| {
                 let explicit = p.get(5).is_some_and(|v| v.as_bool().unwrap());
@@ -476,6 +498,16 @@ fn exec(op: &str, p: &[Value]) -> Value {
             }
             Value::Object(m)
         }
+        "json2tp" => {
+            let d = datum_in(&p[0]);
+            let j = d.get_mysql_json();
+            let ft = ft_in(&p[1]);
+            let res = ex_try(|| match convert_json2_tp(&j, &ft) {
+                Ok(v) => json_out(&create_binary_json(v)),
+                Err(e) => ex_err(&e),
+            });
+            json!({ "res": res })
+        }
         "collcast" => {
             let (ctx, ev) = ctx_of(&p[4]);
             let (arg, _) = arg_of(&p[0], None);
@@ -503,6 +535,8 @@ fn exec(op: &str, p: &[Value]) -> Value {
                     "string" => wrap_with_cast_as_string(&*ctx, arg),
                     "time" => wrap_with_cast_as_time(&*ctx, arg, ft_in(&p[3])),
                     "duration" => wrap_with_cast_as_duration(&*ctx, arg),
+                    "json" => wrap_with_cast_as_json(&*ctx, arg),
+                    "vector" => wrap_with_cast_as_vector_float32(&*ctx, arg),
                     _ => wrap_with_cast_as_decimal(&*ctx, arg),
                 };
                 match r {

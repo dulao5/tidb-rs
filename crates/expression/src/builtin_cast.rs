@@ -7,10 +7,9 @@
 //! §1).
 //!
 //! The signatures from TIME, DURATION, JSON and VECTOR arguments to INT, REAL, DECIMAL and
-//! STRING are ported (part 2b-2a), and CAST to DATETIME/DATE/TIMESTAMP and TIME (duration)
-//! with `builtinCastVectorFloat32AsUnsupportedSig` (part 2b-2b-i). CAST to JSON and VECTOR
-//! returns a "not ported yet" error from `build_cast_function*` (temporary stub, constitution
-//! art. 4.3; part 2b-2b-ii).
+//! STRING are ported (part 2b-2a), CAST to DATETIME/DATE/TIMESTAMP and TIME (duration) with
+//! `builtinCastVectorFloat32AsUnsupportedSig` (part 2b-2b-i), and CAST to JSON, JSON ARRAY
+//! and VECTOR with `WrapWithCastAsJSON`/`VectorFloat32` and `ConvertJSON2Tp` (part 2b-2b-ii).
 
 #![allow(non_upper_case_globals)]
 
@@ -31,17 +30,23 @@ use tidb_base::mysql::{
     TypeTinyBlob, TypeVarString, TypeVarchar, TypeYear, UnsignedFlag, has_not_null_flag,
     has_unsigned_flag,
 };
-use tidb_parser::gocharset::{CharsetBin, CollationBin};
+use tidb_base::mysql::{
+    DefaultCharset, DefaultCollationName, ParseToJSONFlag, TypeJSON, TypeTiDBVectorFloat32,
+    has_is_boolean_flag, has_parse_to_json_flag,
+};
+use tidb_parser::gocharset::{CharsetBin, CharsetUTF8MB4, CollationBin};
 use tidb_parser::types::type_str;
 use tidb_parser::types::{
     ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
     ETVectorFloat32, EvalType, UnspecifiedLength,
 };
+use tidb_types::context::{Context as TypeContext, StrictContext};
 use tidb_types::convert::number_to_duration;
 use tidb_types::convert::{
     convert_float_to_int, convert_float_to_uint, convert_json_to_decimal, convert_json_to_float,
-    convert_json_to_int64, integer_signed_lower_bound, integer_signed_upper_bound,
-    integer_unsigned_upper_bound, str_to_float, str_to_int, str_to_uint,
+    convert_json_to_int, convert_json_to_int64, integer_signed_lower_bound,
+    integer_signed_upper_bound, integer_unsigned_upper_bound, str_to_float, str_to_int,
+    str_to_uint,
 };
 use tidb_types::datum::{
     produce_dec_with_specified_tp, produce_float_with_specified_tp, produce_str_with_specified_tp,
@@ -54,15 +59,17 @@ use tidb_types::etc::{FieldType, is_binary_str};
 use tidb_types::field_type::{new_field_type, set_bin_chs_cln_flag};
 use tidb_types::fsp::{DefaultFsp, MaxFsp, MinFsp, UnspecifiedFsp, check_fsp};
 use tidb_types::json::{
-    BinaryJSON, JSONTypeCodeDate, JSONTypeCodeDatetime, JSONTypeCodeDuration, JSONTypeCodeString,
-    JSONTypeCodeTimestamp,
+    BinaryJSON, JSONTypeCodeArray, JSONTypeCodeDate, JSONTypeCodeDatetime, JSONTypeCodeDuration,
+    JSONTypeCodeFloat64, JSONTypeCodeInt64, JSONTypeCodeObject, JSONTypeCodeString,
+    JSONTypeCodeTimestamp, JSONTypeCodeUint64, JSONValue, Opaque, create_binary_json,
+    parse_binary_json_from_string,
 };
 use tidb_types::mydecimal::{MODE_HALF_UP, MyDecimal, new_dec_from_int, new_dec_from_uint};
 use tidb_types::time::{
     Duration, Time, ZeroTime, from_date, parse_duration, parse_time, parse_time_from_float_string,
     parse_time_from_num, parse_time_from_year,
 };
-use tidb_types::vector::VectorFloat32;
+use tidb_types::vector::{VectorFloat32, parse_vector_float32};
 
 use crate::ast_funcs as ast;
 use crate::builtin::{
@@ -73,8 +80,9 @@ use crate::builtin_convert_charset::handle_binary_literal;
 use crate::collation::{CoercibilityExplicit, ExprCollation};
 use crate::constant_fold::fold_constant;
 use crate::context::{BuildContext, EvalContext, err_ctx, location, sql_mode, type_ctx};
+use crate::errors::{ErrInvalidJSONForFuncIndex, ErrInvalidTypeForJSON, ErrNotSupportedYet};
 use crate::errors::{handle_allowed_packet_overflowed, handle_invalid_time_error};
-use crate::eval::{BuiltinFunc, SigDesc, SigDrivers, SigView};
+use crate::eval::{Args, BuiltinFunc, SigDesc, SigDrivers, SigView};
 use crate::expression::{ConstStrict, EvalState, Expr, ExprRef, is_binary_literal};
 use crate::scalar_function::ScalarFunction;
 use tidb_expression_macros::eval_fn;
@@ -125,6 +133,14 @@ const CastDurationAsTime: i32 = 54;
 const CastDurationAsDuration: i32 = 55;
 const CastJsonAsTime: i32 = 64;
 const CastJsonAsDuration: i32 = 65;
+const CastIntAsJson: i32 = 7;
+const CastRealAsJson: i32 = 16;
+const CastDecimalAsJson: i32 = 26;
+const CastStringAsJson: i32 = 36;
+const CastTimeAsJson: i32 = 46;
+const CastDurationAsJson: i32 = 56;
+const CastJsonAsJson: i32 = 66;
+const CastVectorFloat32AsVectorFloat32: i32 = 5188;
 
 // ---------------------------------------------------------------- signatures
 
@@ -318,6 +334,69 @@ sig!(
     SigDrivers::Unsupported {
         err: cast_vector_float32_as_unsupported
     }
+);
+sig!(
+    builtinCastIntAsJSONSig,
+    CastIntAsJson,
+    true,
+    CAST_INT_AS_JSON
+);
+sig!(
+    builtinCastRealAsJSONSig,
+    CastRealAsJson,
+    true,
+    CAST_REAL_AS_JSON
+);
+sig!(
+    builtinCastDecimalAsJSONSig,
+    CastDecimalAsJson,
+    true,
+    CAST_DECIMAL_AS_JSON
+);
+sig!(
+    builtinCastStringAsJSONSig,
+    CastStringAsJson,
+    true,
+    CAST_STRING_AS_JSON
+);
+sig!(
+    builtinCastTimeAsJSONSig,
+    CastTimeAsJson,
+    true,
+    CAST_TIME_AS_JSON
+);
+sig!(
+    builtinCastDurationAsJSONSig,
+    CastDurationAsJson,
+    true,
+    CAST_DURATION_AS_JSON
+);
+sig!(
+    builtinCastJSONAsJSONSig,
+    CastJsonAsJson,
+    true,
+    CAST_JSON_AS_JSON
+);
+// Go does not call setPbCode for it.
+sig!(castJSONAsArrayFunctionSig, 0, false, CAST_JSON_AS_ARRAY);
+// Go does not call setPbCode for these two (the code is commented out).
+sig!(
+    builtinCastUnsupportedAsVectorFloat32Sig,
+    0,
+    false,
+    CAST_UNSUPPORTED_AS_VECTOR_FLOAT32
+);
+sig!(
+    builtinCastStringAsVectorFloat32Sig,
+    0,
+    false,
+    CAST_STRING_AS_VECTOR_FLOAT32
+);
+sig!(
+    builtinCastVectorFloat32AsVectorFloat32Sig,
+    CastVectorFloat32AsVectorFloat32,
+    false,
+    CAST_VECTOR_FLOAT32_AS_VECTOR_FLOAT32
 );
 sig!(
     builtinCastIntAsTimeSig,
@@ -1592,6 +1671,284 @@ pub fn cast_json_as_duration(
     }
 }
 
+// go: builtinCastIntAsJSONSig.evalJSON L1
+// go: builtinCastIntAsJSONSig.vecEvalJSON L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastIntAsJSONSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastIntAsJSONSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Json)]
+pub fn cast_int_as_json(
+    _ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: i64,
+) -> Result<Option<BinaryJSON<'static>>, Error> {
+    let arg_tp = f.arg_type(0);
+    let res = if has_is_boolean_flag(arg_tp.get_flag()) {
+        create_binary_json(JSONValue::Bool(val != 0))
+    } else if has_unsigned_flag(arg_tp.get_flag()) || arg_tp.get_type() == TypeYear {
+        create_binary_json(JSONValue::Uint64(val as u64))
+    } else {
+        create_binary_json(JSONValue::Int64(val))
+    };
+    Ok(Some(res))
+}
+
+// go: builtinCastRealAsJSONSig.evalJSON L1
+// go: builtinCastRealAsJSONSig.vecEvalJSON L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsJSONSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastRealAsJSONSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Json)]
+pub fn cast_real_as_json(
+    _ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    val: f64,
+) -> Result<Option<BinaryJSON<'static>>, Error> {
+    // FIXME: `select json_type(cast(1111.11 as json))` should return `DECIMAL`, we return `DOUBLE` now.
+    Ok(Some(create_binary_json(JSONValue::Float64(val))))
+}
+
+// go: builtinCastDecimalAsJSONSig.evalJSON L1
+// go: builtinCastDecimalAsJSONSig.vecEvalJSON L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastDecimalAsJSONSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDecimalAsJSONSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Json)]
+pub fn cast_decimal_as_json(
+    _ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    val: &MyDecimal,
+) -> Result<Option<BinaryJSON<'static>>, Error> {
+    // FIXME: `select json_type(cast(1111.11 as json))` should return `DECIMAL`, we return `DOUBLE` now.
+    let (f64v, err) = val.to_float64();
+    err?;
+    Ok(Some(create_binary_json(JSONValue::Float64(f64v))))
+}
+
+// go: builtinCastStringAsJSONSig.evalJSON L1
+// go: builtinCastStringAsJSONSig.vecEvalJSON L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastStringAsJSONSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastStringAsJSONSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Json)]
+pub fn cast_string_as_json(
+    _ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &[u8],
+) -> Result<Option<BinaryJSON<'static>>, Error> {
+    let typ = f.arg_type(0);
+    if is_binary_str(&typ) {
+        let mut buf = val.to_vec();
+        if typ.get_type() == TypeString && typ.get_flen() > 0 {
+            // the tailing zero should also be in the opaque json
+            let flen = typ.get_flen() as usize;
+            buf = vec![0; flen];
+            let m = flen.min(val.len());
+            buf[..m].copy_from_slice(&val[..m]);
+        }
+        return Ok(Some(create_binary_json(JSONValue::Opaque(Opaque {
+            type_code: typ.get_type(),
+            buf: buf.into(),
+        }))));
+    }
+    if has_parse_to_json_flag(f.tp.get_flag()) {
+        return parse_binary_json_from_string(val).map(Some);
+    }
+    Ok(Some(create_binary_json(JSONValue::String(val.to_vec()))))
+}
+
+// go: builtinCastDurationAsJSONSig.evalJSON L1
+// go: builtinCastDurationAsJSONSig.vecEvalJSON L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastDurationAsJSONSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDurationAsJSONSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Json)]
+pub fn cast_duration_as_json(
+    _ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    mut val: Duration,
+) -> Result<Option<BinaryJSON<'static>>, Error> {
+    val.fsp = MaxFsp;
+    Ok(Some(create_binary_json(JSONValue::Duration(val))))
+}
+
+// go: builtinCastTimeAsJSONSig.evalJSON L1
+// go: builtinCastTimeAsJSONSig.vecEvalJSON L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastTimeAsJSONSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastTimeAsJSONSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Json)]
+pub fn cast_time_as_json(
+    _ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    mut val: Time,
+) -> Result<Option<BinaryJSON<'static>>, Error> {
+    if val.tp() == TypeDatetime || val.tp() == TypeTimestamp {
+        val.set_fsp(MaxFsp);
+    }
+    Ok(Some(create_binary_json(JSONValue::Time(val))))
+}
+
+// go: builtinCastJSONAsJSONSig.evalJSON L1
+// go: builtinCastJSONAsJSONSig.vecEvalJSON L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastJSONAsJSONSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastJSONAsJSONSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Json)]
+pub fn cast_json_as_json(
+    _ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    val: &BinaryJSON<'_>,
+) -> Result<Option<BinaryJSON<'static>>, Error> {
+    Ok(Some(val.clone().into_owned()))
+}
+
+/// `fakeSctx`: `cast as array` and `ConvertJSON2Tp` ignore the SQL mode and return every
+/// error (`stmtctx.NewStmtCtx()` with `types.StrictFlags`, UTC, its own warnings).
+// go: newFakeSctx L2 (the package variable fakeSctx is its TypeCtx, types.StrictContext; its error context returns every error)
+fn fake_sctx() -> &'static TypeContext {
+    &StrictContext
+}
+
+// go: castJSONAsArrayFunctionSig.evalJSON L1
+// go: castJSONAsArrayFunctionSig.Clone L2 (BuiltinFunc::clone_from_base)
+#[eval_fn(Json, novec)]
+pub fn cast_json_as_array(
+    _ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &BinaryJSON<'_>,
+) -> Result<Option<BinaryJSON<'static>>, Error> {
+    if val.type_code == JSONTypeCodeObject {
+        return Err(ErrNotSupportedYet
+            .gen_with_stack_by_args(vec![Arg::from("CAST-ing JSON OBJECT type to array")]));
+    }
+    let ft = f.tp.array_type();
+    let Some(conv) = convert_json2_tp_fn(ft.eval_type()) else {
+        return Err(
+            ErrNotSupportedYet.gen_with_stack_by_args(vec![Arg::from(format!(
+                "CAS-ing data to array of {}",
+                ft.to_string()
+            ))]),
+        );
+    };
+    let mut array_vals = Vec::with_capacity(8);
+    if val.type_code != JSONTypeCodeArray {
+        array_vals.push(conv(fake_sctx(), val, &ft)?);
+    } else {
+        for i in 0..val.get_elem_count() {
+            array_vals.push(conv(fake_sctx(), &val.array_get_elem(i), &ft)?);
+        }
+    }
+    Ok(Some(create_binary_json(JSONValue::Array(array_vals))))
+}
+
+/// The converter `convertJSON2Tp` returns for an evaluation type.
+type ConvertJSON2TpFn =
+    fn(&TypeContext, &BinaryJSON<'_>, &FieldType) -> Result<JSONValue<'static>, Error>;
+
+/// ConvertJSON2Tp converts JSON to the specified type.
+// go: ConvertJSON2Tp L1
+pub fn convert_json2_tp(
+    v: &BinaryJSON<'_>,
+    target_type: &FieldType,
+) -> Result<JSONValue<'static>, Error> {
+    let Some(convert_func) = convert_json2_tp_fn(target_type.eval_type()) else {
+        return Err(ErrInvalidJSONForFuncIndex.clone());
+    };
+    convert_func(fake_sctx(), v, target_type)
+}
+
+// go: convertJSON2Tp L2 (the function values are fn items; the StatementContext is its TypeCtx, whose error context returns every error)
+fn convert_json2_tp_fn(eval_type: EvalType) -> Option<ConvertJSON2TpFn> {
+    let f: ConvertJSON2TpFn = match eval_type {
+        ETString => |tc, item, tp| {
+            if item.type_code != JSONTypeCodeString {
+                return Err(ErrInvalidJSONForFuncIndex.clone());
+            }
+            let (s, err) = produce_str_with_specified_tp(item.get_string().to_vec(), tp, tc, false);
+            err?;
+            Ok(JSONValue::String(s))
+        },
+        ETInt => |tc, item, tp| {
+            if item.type_code != JSONTypeCodeInt64 && item.type_code != JSONTypeCodeUint64 {
+                return Err(ErrInvalidJSONForFuncIndex.clone());
+            }
+            let unsigned = has_unsigned_flag(tp.get_flag());
+            let (json_to_int, err) = convert_json_to_int(tc, item, unsigned, tp.get_type());
+            err?;
+            if unsigned {
+                return Ok(JSONValue::Uint64(json_to_int as u64));
+            }
+            Ok(JSONValue::Int64(json_to_int))
+        },
+        ETReal => |tc, item, _tp| {
+            if item.type_code != JSONTypeCodeFloat64
+                && item.type_code != JSONTypeCodeInt64
+                && item.type_code != JSONTypeCodeUint64
+            {
+                return Err(ErrInvalidJSONForFuncIndex.clone());
+            }
+            let (f, err) = convert_json_to_float(tc, item);
+            err?;
+            Ok(JSONValue::Float64(f))
+        },
+        ETDatetime => |_tc, item, tp| {
+            if (tp.get_type() == TypeDatetime && item.type_code != JSONTypeCodeDatetime)
+                || (tp.get_type() == TypeDate && item.type_code != JSONTypeCodeDate)
+            {
+                return Err(ErrInvalidJSONForFuncIndex.clone());
+            }
+            let mut res = item.get_time_with_fsp(tp.get_decimal());
+            res.set_type(tp.get_type());
+            if tp.get_type() == TypeDate {
+                // Truncate hh:mm:ss part if the type is Date.
+                res.set_core_time(from_date(res.year(), res.month(), res.day(), 0, 0, 0, 0));
+            }
+            Ok(JSONValue::Time(res))
+        },
+        ETDuration => |_tc, item, _tp| {
+            if item.type_code != JSONTypeCodeDuration {
+                return Err(ErrInvalidJSONForFuncIndex.clone());
+            }
+            Ok(JSONValue::Duration(item.get_duration()))
+        },
+        _ => return None,
+    };
+    Some(f)
+}
+
+// go: builtinCastUnsupportedAsVectorFloat32Sig.evalVectorFloat32 L1
+// go: builtinCastUnsupportedAsVectorFloat32Sig.Clone L2 (BuiltinFunc::clone_from_base)
+#[eval_fn(VectorFloat32, lazy, novec)]
+pub fn cast_unsupported_as_vector_float32(
+    _ctx: &dyn EvalContext,
+    f: &impl SigView,
+    _args: &mut impl Args,
+) -> Result<Option<VectorFloat32<'static>>, Error> {
+    Err(Error::plain(format!(
+        "cannot cast from {} to vector",
+        type_str(f.arg_type(0).get_type())
+    )))
+}
+
+// go: builtinCastStringAsVectorFloat32Sig.evalVectorFloat32 L1
+// go: builtinCastStringAsVectorFloat32Sig.Clone L2 (BuiltinFunc::clone_from_base)
+#[eval_fn(VectorFloat32, novec)]
+pub fn cast_string_as_vector_float32(
+    _ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &[u8],
+) -> Result<Option<VectorFloat32<'static>>, Error> {
+    let vec = parse_vector_float32(val)?;
+    vec.check_dims_fit_column(f.tp.get_flen())?;
+    Ok(Some(vec))
+}
+
+// go: builtinCastVectorFloat32AsVectorFloat32Sig.evalVectorFloat32 L1
+// go: builtinCastVectorFloat32AsVectorFloat32Sig.Clone L2 (BuiltinFunc::clone_from_base)
+#[eval_fn(VectorFloat32, novec)]
+pub fn cast_vector_float32_as_vector_float32(
+    _ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &VectorFloat32<'_>,
+) -> Result<Option<VectorFloat32<'static>>, Error> {
+    val.check_dims_fit_column(f.tp.get_flen())?;
+    Ok(Some(val.clone()))
+}
+
 // go: builtinCastVectorFloat32AsUnsupportedSig.evalInt L1
 // go: builtinCastVectorFloat32AsUnsupportedSig.evalReal L1
 // go: builtinCastVectorFloat32AsUnsupportedSig.evalDecimal L1
@@ -1704,6 +2061,130 @@ impl CastAsDurationFunctionClass {
             ETString => bf.with_sig(&builtinCastStringAsDurationSig),
             ETVectorFloat32 => bf.with_sig(&builtinCastVectorFloat32AsUnsupportedSig),
             _ => return Err(cannot_cast(arg_tp, "Time")),
+        })
+    }
+}
+
+/// `castAsArrayFunctionClass`.
+#[derive(Clone, Debug)]
+pub struct CastAsArrayFunctionClass {
+    /// The embedded `baseFunctionClass`.
+    pub base: BaseFunctionClass,
+    /// `tp`.
+    pub tp: FieldType,
+}
+
+impl CastAsArrayFunctionClass {
+    // go: castAsArrayFunctionClass.verifyArgs L1
+    fn verify_args(&self, ctx: &dyn EvalContext, args: &[ExprRef]) -> Result<(), Error> {
+        self.base.verify_args(args)?;
+        if args[0].get_type(ctx).eval_type() != ETJson {
+            return Err(ErrInvalidTypeForJSON
+                .gen_with_stack_by_args(vec![Arg::from(1isize), Arg::from("cast_as_array")]));
+        }
+        Ok(())
+    }
+
+    // go: castAsArrayFunctionClass.getFunction L1
+    pub fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.verify_args(&*ctx.get_eval_ctx(), &args)?;
+        let array_type = self.tp.array_type();
+        if matches!(
+            array_type.get_type(),
+            TypeYear | TypeJSON | TypeFloat | TypeNewDecimal
+        ) {
+            return Err(
+                ErrNotSupportedYet.gen_with_stack_by_args(vec![Arg::from(format!(
+                    "CAST-ing data to array of {}",
+                    array_type.to_string()
+                ))]),
+            );
+        }
+        if array_type.eval_type() == ETString
+            && array_type.get_charset() != CharsetUTF8MB4
+            && array_type.get_charset() != CharsetBin
+        {
+            return Err(ErrNotSupportedYet.gen_with_stack_by_args(vec![Arg::from(
+                "specifying charset for multi-valued index",
+            )]));
+        }
+        if array_type.eval_type() == ETString && array_type.get_flen() == UnspecifiedLength {
+            return Err(ErrNotSupportedYet.gen_with_stack_by_args(vec![Arg::from(
+                "CAST-ing data to array of char/binary BLOBs with unspecified length",
+            )]));
+        }
+        let bf = new_base_builtin_func(ctx, self.base.func_name, args, self.tp.clone())?;
+        Ok(bf.with_sig(&castJSONAsArrayFunctionSig))
+    }
+}
+
+/// `castAsJSONFunctionClass`.
+#[derive(Clone, Debug)]
+pub struct CastAsJSONFunctionClass {
+    /// The embedded `baseFunctionClass`.
+    pub base: BaseFunctionClass,
+    /// `tp`.
+    pub tp: FieldType,
+}
+
+impl CastAsJSONFunctionClass {
+    // go: castAsJSONFunctionClass.getFunction L1
+    pub fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+        let bf = new_base_builtin_func(ctx, self.base.func_name, args, self.tp.clone())?;
+        let arg_tp = bf.args[0].get_type(&*ctx.get_eval_ctx()).eval_type();
+        Ok(match arg_tp {
+            ETInt => bf.with_sig(&builtinCastIntAsJSONSig),
+            ETReal => bf.with_sig(&builtinCastRealAsJSONSig),
+            ETDecimal => bf.with_sig(&builtinCastDecimalAsJSONSig),
+            ETDatetime | ETTimestamp => bf.with_sig(&builtinCastTimeAsJSONSig),
+            ETDuration => bf.with_sig(&builtinCastDurationAsJSONSig),
+            ETJson => bf.with_sig(&builtinCastJSONAsJSONSig),
+            ETString => {
+                let mut sig = bf.with_sig(&builtinCastStringAsJSONSig);
+                sig.tp.add_flag(ParseToJSONFlag);
+                sig
+            }
+            ETVectorFloat32 => bf.with_sig(&builtinCastVectorFloat32AsUnsupportedSig),
+            _ => return Err(cannot_cast(arg_tp, "Json")),
+        })
+    }
+}
+
+/// `castAsVectorFloat32FunctionClass`.
+#[derive(Clone, Debug)]
+pub struct CastAsVectorFloat32FunctionClass {
+    /// The embedded `baseFunctionClass`.
+    pub base: BaseFunctionClass,
+    /// `tp`.
+    pub tp: FieldType,
+}
+
+impl CastAsVectorFloat32FunctionClass {
+    // go: castAsVectorFloat32FunctionClass.getFunction L1
+    pub fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+        let bf = new_base_builtin_func(ctx, self.base.func_name, args, self.tp.clone())?;
+        let arg_tp = bf.args[0].get_type(&*ctx.get_eval_ctx()).eval_type();
+        Ok(match arg_tp {
+            ETInt | ETReal | ETDecimal | ETDatetime | ETTimestamp | ETDuration | ETJson => {
+                bf.with_sig(&builtinCastUnsupportedAsVectorFloat32Sig)
+            }
+            ETVectorFloat32 => bf.with_sig(&builtinCastVectorFloat32AsVectorFloat32Sig),
+            ETString => bf.with_sig(&builtinCastStringAsVectorFloat32Sig),
+            _ => return Err(cannot_cast(arg_tp, "VectorFloat32")),
         })
     }
 }
@@ -2190,20 +2671,10 @@ pub fn build_cast_function(
     build_cast_function_with_check(ctx, expr, tp, false, false)
 }
 
-/// The CAST targets of D08.8 part 2b-2b-ii (JSON, ARRAY, VECTOR): a temporary stub
-/// (constitution art. 4.3).
-// glue: temporary stub of the castAsXxxFunctionClass not ported yet (D08.8 part 2b-2b-ii)
-fn cast_not_ported(et: EvalType) -> Error {
-    Error::plain(format!(
-        "tidb-rs: CAST to {} is not ported yet (D08.8 part 2b-2b-ii)",
-        et.to_string()
-    ))
-}
-
 /// BuildCastFunctionWithCheck builds a CAST ScalarFunction from the Expression and return
 /// error if any. Go returns the node with a nil signature together with an error; this
 /// returns only the error.
-// go: BuildCastFunctionWithCheck L2 (the error comes without the node; CAST to JSON/VECTOR is a temporary stub)
+// go: BuildCastFunctionWithCheck L2 (the error comes without the node)
 pub fn build_cast_function_with_check(
     ctx: &dyn BuildContext,
     expr: ExprRef,
@@ -2250,8 +2721,17 @@ pub fn build_cast_function_with_check(
             drop(ectx);
             CastAsDurationFunctionClass { base, tp }.get_function(ctx, vec![expr])?
         }
-        ETJson | ETVectorFloat32 => {
-            return Err(cast_not_ported(et));
+        ETJson => {
+            drop(ectx);
+            if tp.is_array() {
+                CastAsArrayFunctionClass { base, tp }.get_function(ctx, vec![expr])?
+            } else {
+                CastAsJSONFunctionClass { base, tp }.get_function(ctx, vec![expr])?
+            }
+        }
+        ETVectorFloat32 => {
+            drop(ectx);
+            CastAsVectorFloat32FunctionClass { base, tp }.get_function(ctx, vec![expr])?
         }
         _ => return Err(Error::plain(format!("cannot cast from {}", et.to_string()))),
     };
@@ -2557,6 +3037,39 @@ pub fn wrap_with_cast_as_duration(ctx: &dyn BuildContext, expr: ExprRef) -> Resu
         tp.set_flen(tp.get_flen() + 1 + tp.get_decimal());
     }
     build_cast_function(ctx, expr, tp)
+}
+
+/// WrapWithCastAsJSON wraps `expr` with `cast` if the return type of expr is not type json,
+/// otherwise, returns `expr` directly.
+// go: WrapWithCastAsJSON L2 (returns the error BuildCastFunction logs)
+pub fn wrap_with_cast_as_json(ctx: &dyn BuildContext, expr: ExprRef) -> Result<ExprRef, Error> {
+    let ectx = ctx.get_eval_ctx();
+    let x = expr.get_type(&*ectx).into_owned();
+    drop(ectx);
+    if x.get_type() == TypeJSON && !has_parse_to_json_flag(x.get_flag()) {
+        return Ok(expr);
+    }
+    // types.NewFieldTypeBuilder() starts from the zero FieldType (decimal 0).
+    let mut tp = new_field_type(TypeJSON);
+    tp.set_decimal(0);
+    tp.set_flag(BinaryFlag);
+    tp.set_flen(12582912);
+    tp.set_charset(DefaultCharset);
+    tp.set_collate(DefaultCollationName);
+    build_cast_function(ctx, expr, tp)
+}
+
+/// WrapWithCastAsVectorFloat32 wraps `expr` with `cast` if the return type of expr is not
+/// type VectorFloat32, otherwise, returns `expr` directly.
+// go: WrapWithCastAsVectorFloat32 L2 (returns the error BuildCastFunction logs)
+pub fn wrap_with_cast_as_vector_float32(
+    ctx: &dyn BuildContext,
+    expr: ExprRef,
+) -> Result<ExprRef, Error> {
+    if expr.get_type(&*ctx.get_eval_ctx()).get_type() == TypeTiDBVectorFloat32 {
+        return Ok(expr);
+    }
+    build_cast_function(ctx, expr, new_field_type(TypeTiDBVectorFloat32))
 }
 
 #[cfg(test)]
