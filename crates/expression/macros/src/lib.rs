@@ -95,9 +95,9 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
                 a.checked = Some(Checked { nflags, flags, err });
             }
             _ => {
-                return Err(
-                    meta.error("eval_fn: options are Int, Real, Decimal, String, lazy, eager, checked(..)")
-                );
+                return Err(meta.error(
+                    "eval_fn: options are Int, Real, Decimal, String, lazy, eager, checked(..)",
+                ));
             }
         }
         Ok(())
@@ -195,7 +195,10 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
     let (row_ret, drivers_variant) = match ret {
         Ret::Int => (quote!(::std::option::Option<i64>), quote!(Int)),
         Ret::Real => (quote!(::std::option::Option<f64>), quote!(Real)),
-        Ret::Decimal => (quote!(::std::option::Option<#rt::MyDecimal>), quote!(Decimal)),
+        Ret::Decimal => (
+            quote!(::std::option::Option<#rt::MyDecimal>),
+            quote!(Decimal),
+        ),
         Ret::String => (
             quote!(::std::option::Option<::std::vec::Vec<u8>>),
             quote!(String),

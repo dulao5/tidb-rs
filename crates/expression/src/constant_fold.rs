@@ -79,7 +79,8 @@ fn is_null_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
     let arg0 = &sf.get_args()[0];
     let ectx = ctx.get_eval_ctx();
     if let Some(const_arg) = arg0.as_constant() {
-        let is_deferred_const = const_arg.deferred_expr.is_some() || const_arg.param_marker.is_some();
+        let is_deferred_const =
+            const_arg.deferred_expr.is_some() || const_arg.param_marker.is_some();
         let value = match sf.eval(&*ectx, &EvalState::new(), Row::default()) {
             Ok(v) => v,
             // Failed to fold this expr to a constant: return the original expression to let
@@ -87,7 +88,10 @@ fn is_null_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
             Err(_) => return (expr.clone(), is_deferred_const),
         };
         if is_deferred_const {
-            return (new_const(value, sf.ret_type.clone(), Some(expr.clone())), true);
+            return (
+                new_const(value, sf.ret_type.clone(), Some(expr.clone())),
+                true,
+            );
         }
         return (new_const(value, sf.ret_type.clone(), None), false);
     }
@@ -142,7 +146,11 @@ fn if_null_fold_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, boo
 // go: caseWhenHandler L2 (the folded conditions go into a copy of the node)
 fn case_when_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
     let mut expr = expr.clone();
-    let l = expr.as_scalar_function().expect("scalar function").get_args().len();
+    let l = expr
+        .as_scalar_function()
+        .expect("scalar function")
+        .get_args()
+        .len();
     let ectx = ctx.get_eval_ctx();
     let mut is_deferred_const = false;
     let mut i = 0;

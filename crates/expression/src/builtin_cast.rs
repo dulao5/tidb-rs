@@ -92,30 +92,135 @@ macro_rules! sig {
 }
 
 sig!(builtinCastIntAsIntSig, CastIntAsInt, true, CAST_INT_AS_INT);
-sig!(builtinCastIntAsRealSig, CastIntAsReal, true, CAST_INT_AS_REAL);
-sig!(builtinCastIntAsDecimalSig, CastIntAsDecimal, true, CAST_INT_AS_DECIMAL);
-sig!(builtinCastRealAsIntSig, CastRealAsInt, true, CAST_REAL_AS_INT);
-sig!(builtinCastRealAsRealSig, CastRealAsReal, true, CAST_REAL_AS_REAL);
-sig!(builtinCastRealAsDecimalSig, CastRealAsDecimal, true, CAST_REAL_AS_DECIMAL);
-sig!(builtinCastDecimalAsIntSig, CastDecimalAsInt, true, CAST_DECIMAL_AS_INT);
-sig!(builtinCastDecimalAsRealSig, CastDecimalAsReal, true, CAST_DECIMAL_AS_REAL);
-sig!(builtinCastDecimalAsDecimalSig, CastDecimalAsDecimal, true, CAST_DECIMAL_AS_DECIMAL);
-sig!(builtinCastStringAsIntSig, CastStringAsInt, true, CAST_STRING_AS_INT);
-sig!(builtinCastStringAsRealSig, CastStringAsReal, true, CAST_STRING_AS_REAL);
-sig!(builtinCastStringAsDecimalSig, CastStringAsDecimal, true, CAST_STRING_AS_DECIMAL);
+sig!(
+    builtinCastIntAsRealSig,
+    CastIntAsReal,
+    true,
+    CAST_INT_AS_REAL
+);
+sig!(
+    builtinCastIntAsDecimalSig,
+    CastIntAsDecimal,
+    true,
+    CAST_INT_AS_DECIMAL
+);
+sig!(
+    builtinCastRealAsIntSig,
+    CastRealAsInt,
+    true,
+    CAST_REAL_AS_INT
+);
+sig!(
+    builtinCastRealAsRealSig,
+    CastRealAsReal,
+    true,
+    CAST_REAL_AS_REAL
+);
+sig!(
+    builtinCastRealAsDecimalSig,
+    CastRealAsDecimal,
+    true,
+    CAST_REAL_AS_DECIMAL
+);
+sig!(
+    builtinCastDecimalAsIntSig,
+    CastDecimalAsInt,
+    true,
+    CAST_DECIMAL_AS_INT
+);
+sig!(
+    builtinCastDecimalAsRealSig,
+    CastDecimalAsReal,
+    true,
+    CAST_DECIMAL_AS_REAL
+);
+sig!(
+    builtinCastDecimalAsDecimalSig,
+    CastDecimalAsDecimal,
+    true,
+    CAST_DECIMAL_AS_DECIMAL
+);
+sig!(
+    builtinCastStringAsIntSig,
+    CastStringAsInt,
+    true,
+    CAST_STRING_AS_INT
+);
+sig!(
+    builtinCastStringAsRealSig,
+    CastStringAsReal,
+    true,
+    CAST_STRING_AS_REAL
+);
+sig!(
+    builtinCastStringAsDecimalSig,
+    CastStringAsDecimal,
+    true,
+    CAST_STRING_AS_DECIMAL
+);
 
 // Temporary stubs (D08.8 part 2): selected by the function classes, not evaluated yet.
-sig!(builtinCastTimeAsIntSig, CastTimeAsInt, true, SigDrivers::None);
-sig!(builtinCastTimeAsRealSig, CastTimeAsReal, true, SigDrivers::None);
-sig!(builtinCastTimeAsDecimalSig, CastTimeAsDecimal, true, SigDrivers::None);
-sig!(builtinCastDurationAsIntSig, CastDurationAsInt, true, SigDrivers::None);
-sig!(builtinCastDurationAsRealSig, CastDurationAsReal, true, SigDrivers::None);
-sig!(builtinCastDurationAsDecimalSig, CastDurationAsDecimal, true, SigDrivers::None);
-sig!(builtinCastJSONAsIntSig, CastJsonAsInt, true, SigDrivers::None);
-sig!(builtinCastJSONAsRealSig, CastJsonAsReal, true, SigDrivers::None);
-sig!(builtinCastJSONAsDecimalSig, CastJsonAsDecimal, true, SigDrivers::None);
+sig!(
+    builtinCastTimeAsIntSig,
+    CastTimeAsInt,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastTimeAsRealSig,
+    CastTimeAsReal,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastTimeAsDecimalSig,
+    CastTimeAsDecimal,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastDurationAsIntSig,
+    CastDurationAsInt,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastDurationAsRealSig,
+    CastDurationAsReal,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastDurationAsDecimalSig,
+    CastDurationAsDecimal,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastJSONAsIntSig,
+    CastJsonAsInt,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastJSONAsRealSig,
+    CastJsonAsReal,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastJSONAsDecimalSig,
+    CastJsonAsDecimal,
+    true,
+    SigDrivers::None
+);
 // Go does not call setPbCode for it (the code is commented out).
-sig!(builtinCastVectorFloat32AsUnsupportedSig, 0, false, SigDrivers::None);
+sig!(
+    builtinCastVectorFloat32AsUnsupportedSig,
+    0,
+    false,
+    SigDrivers::None
+);
 
 /// `b.inUnion` of a `baseBuiltinCastFunc`.
 #[inline(always)]
@@ -137,7 +242,9 @@ fn produce_dec(
     if let Err(e) = err {
         err_ctx(ctx).handle_error(e)?;
     }
-    Ok(Some(res.expect("nil *MyDecimal from ProduceDecWithSpecifiedTp")))
+    Ok(Some(
+        res.expect("nil *MyDecimal from ProduceDecWithSpecifiedTp"),
+    ))
 }
 
 /// `builtinCastIntAsIntSig.evalInt`.
@@ -411,7 +518,11 @@ fn handle_overflow(
         return (orig_res, Ok(()));
     };
     if ErrOverflow.equal(&e) {
-        let res = if is_negative { i64::MIN } else { u64::MAX as i64 };
+        let res = if is_negative {
+            i64::MIN
+        } else {
+            u64::MAX as i64
+        };
         let warn_err = ErrTruncatedWrongVal.gen_with_stack_by_args(vec![
             Arg::from("INTEGER"),
             Arg::Str(orig_str.to_vec().into()),
@@ -509,7 +620,9 @@ pub fn cast_string_as_decimal(
             if let Err(e) = err {
                 err_ctx(ctx).handle_error(e)?;
             }
-            return Ok(Some(dec.expect("nil *MyDecimal from ProduceDecWithSpecifiedTp")));
+            return Ok(Some(
+                dec.expect("nil *MyDecimal from ProduceDecWithSpecifiedTp"),
+            ));
         }
         return Ok(Some(dec));
     }
@@ -603,8 +716,7 @@ impl CastAsIntFunctionClass {
             ETString => bf.with_sig(&builtinCastStringAsIntSig),
             ETVectorFloat32 => {
                 // &builtinCastVectorFloat32AsUnsupportedSig{bf.baseBuiltinFunc}
-                base_of(bf)
-                    .with_sig(&builtinCastVectorFloat32AsUnsupportedSig)
+                base_of(bf).with_sig(&builtinCastVectorFloat32AsUnsupportedSig)
             }
             _ => return Err(cannot_cast(arg_tp, "Int")),
         })
@@ -642,8 +754,7 @@ impl CastAsRealFunctionClass {
             ETDuration => bf.with_sig(&builtinCastDurationAsRealSig),
             ETJson => bf.with_sig(&builtinCastJSONAsRealSig),
             ETString => bf.with_sig(&builtinCastStringAsRealSig),
-            ETVectorFloat32 => base_of(bf)
-                .with_sig(&builtinCastVectorFloat32AsUnsupportedSig),
+            ETVectorFloat32 => base_of(bf).with_sig(&builtinCastVectorFloat32AsUnsupportedSig),
             _ => return Err(cannot_cast(arg_tp, "Real")),
         })
     }
@@ -677,8 +788,7 @@ impl CastAsDecimalFunctionClass {
             ETDuration => bf.with_sig(&builtinCastDurationAsDecimalSig),
             ETJson => bf.with_sig(&builtinCastJSONAsDecimalSig),
             ETString => bf.with_sig(&builtinCastStringAsDecimalSig),
-            ETVectorFloat32 => base_of(bf)
-                .with_sig(&builtinCastVectorFloat32AsUnsupportedSig),
+            ETVectorFloat32 => base_of(bf).with_sig(&builtinCastVectorFloat32AsUnsupportedSig),
             _ => return Err(cannot_cast(arg_tp, "Decimal")),
         })
     }
@@ -847,24 +957,11 @@ pub fn build_cast_function_with_check(
     };
     let et = tp.eval_type();
     let f = match et {
-        ETInt => CastAsIntFunctionClass {
-            base,
-            tp,
-            in_union,
+        ETInt => CastAsIntFunctionClass { base, tp, in_union }.get_function(ctx, vec![expr])?,
+        ETDecimal => {
+            CastAsDecimalFunctionClass { base, tp, in_union }.get_function(ctx, vec![expr])?
         }
-        .get_function(ctx, vec![expr])?,
-        ETDecimal => CastAsDecimalFunctionClass {
-            base,
-            tp,
-            in_union,
-        }
-        .get_function(ctx, vec![expr])?,
-        ETReal => CastAsRealFunctionClass {
-            base,
-            tp,
-            in_union,
-        }
-        .get_function(ctx, vec![expr])?,
+        ETReal => CastAsRealFunctionClass { base, tp, in_union }.get_function(ctx, vec![expr])?,
         ETDatetime | ETTimestamp | ETDuration | ETJson | ETVectorFloat32 | ETString => {
             return Err(cast_not_ported(et));
         }
@@ -982,10 +1079,7 @@ fn minimal_decimal_len_for_holding_integer(tp: u8) -> isize {
 /// decimal, otherwise, returns `expr` directly.
 // go: WrapWithCastAsDecimal L2 (returns the error BuildCastFunction logs)
 #[allow(clippy::collapsible_if)]
-pub fn wrap_with_cast_as_decimal(
-    ctx: &dyn BuildContext,
-    expr: ExprRef,
-) -> Result<ExprRef, Error> {
+pub fn wrap_with_cast_as_decimal(ctx: &dyn BuildContext, expr: ExprRef) -> Result<ExprRef, Error> {
     let ectx = ctx.get_eval_ctx();
     let et = expr.get_type(&*ectx).into_owned();
     if et.eval_type() == ETDecimal {
@@ -1026,7 +1120,10 @@ mod tests {
 
     #[test]
     fn float_length_matches_go() {
-        assert_eq!(set_data_type_double(2), (23 + 2 - 8 + NotFixedDec, NotFixedDec));
+        assert_eq!(
+            set_data_type_double(2),
+            (23 + 2 - 8 + NotFixedDec, NotFixedDec)
+        );
         assert_eq!(float_length(NotFixedDec, 0), 23);
     }
 }

@@ -253,7 +253,9 @@ fn row_val(ctx: &dyn EvalContext, e: &Expr, row: tidb_chunk::Row<'_>) -> Value {
     if et == ETInt {
         ex_val(e.eval_int(ctx, &st, row), |v| json!(v.to_string()))
     } else if et == ETReal {
-        ex_val(e.eval_real(ctx, &st, row), |v| json!(v.to_bits().to_string()))
+        ex_val(e.eval_real(ctx, &st, row), |v| {
+            json!(v.to_bits().to_string())
+        })
     } else if et == ETDecimal {
         ex_val(e.eval_decimal(ctx, &st, row), |v| dec_out(&v))
     } else {
@@ -265,7 +267,13 @@ fn vec_val(ctx: &es::EvalContext, e: &ExprRef, chk: &tidb_chunk::Chunk) -> Value
     let et = e.get_type(ctx).eval_type();
     let prog = RpnProgram::compile(e);
     let mut col = rt::empty_column();
-    let r = prog.eval(ctx, &EvalState::new(), &mut RpnState::default(), chk, &mut col);
+    let r = prog.eval(
+        ctx,
+        &EvalState::new(),
+        &mut RpnState::default(),
+        chk,
+        &mut col,
+    );
     let ws = warns(&ctx.truncate_warnings(0));
     if let Err(e) = r {
         return json!({ "err": gs(&e.error()), "warns": ws });
