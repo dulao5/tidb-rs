@@ -36,6 +36,10 @@ impl GlobalVarAccessor for Acc {
 
 /// The callbacks the domain registers (Go's nil func otherwise): no-ops. A rebuild runs every
 /// SetGlobal hook, so all of them are reached.
+/// A rebuild runs every SetGlobal hook, which write process-wide state: the rebuild tests
+/// run one at a time.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn register_callbacks() {
     use std::sync::Arc;
     use tidb_sessionctx::variable::hook_state as hs;
@@ -59,6 +63,7 @@ fn register_callbacks() {
 
 #[test]
 fn rebuild_takes_table_values_and_runs_set_global_hooks() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     register_callbacks();
     let cache = SysVarCache::new();
     assert!(cache.needs_rebuild());
@@ -97,6 +102,7 @@ fn rebuild_takes_table_values_and_runs_set_global_hooks() {
 
 #[test]
 fn rebuild_keeps_the_old_cache_when_the_fetch_fails() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     register_callbacks();
     let cache = SysVarCache::new();
     let mut vars = SessionVars::new(Box::new(Acc));
