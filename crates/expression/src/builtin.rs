@@ -46,6 +46,22 @@ pub static baseBuiltinFuncSig: SigDesc = SigDesc {
     drivers: SigDrivers::None,
 };
 
+/// `tipb.InUnionMetadata`: the metadata of a CAST signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InUnionMetadata {
+    /// `InUnion`.
+    pub in_union: bool,
+}
+
+/// `newBaseBuiltinCastFunc`: a `baseBuiltinCastFunc` over `builtin_func` (the base of the CAST
+/// signatures that read `inUnion`).
+// go: newBaseBuiltinCastFunc L1
+pub fn new_base_builtin_cast_func(builtin_func: BuiltinFunc, in_union: bool) -> BuiltinFunc {
+    let mut bf = builtin_func;
+    bf.in_union = Some(in_union);
+    bf
+}
+
 /// baseFunctionClass will be contained in every struct that implement functionClass interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BaseFunctionClass {
@@ -243,11 +259,13 @@ impl BuiltinFunc {
     }
 
     /// metadata returns the metadata of a function: the inner fields that are not in
-    /// `tipb.Expr.children` but must be pushed down. Only the CAST signatures have some
-    /// (`baseBuiltinCastFunc.metadata`, D08.8); `None` is Go's nil `proto.Message`.
+    /// `tipb.Expr.children` but must be pushed down. Only the CAST signatures that embed
+    /// `baseBuiltinCastFunc` have some (`in_union` is `Some`); `None` is Go's nil
+    /// `proto.Message`.
     // go: baseBuiltinFunc.metadata L1
-    pub fn metadata(&self) -> Option<()> {
-        None
+    // go: baseBuiltinCastFunc.metadata L1
+    pub fn metadata(&self) -> Option<InUnionMetadata> {
+        self.in_union.map(|in_union| InUnionMetadata { in_union })
     }
 
     // go: baseBuiltinFunc.setPbCode L1

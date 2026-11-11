@@ -155,6 +155,9 @@ pub struct BuiltinFunc {
     ctor: Option<&'static dyn Collator>,
     /// The embedded `collationInfo`.
     pub collation_info: CollationInfo,
+    /// `baseBuiltinCastFunc.inUnion` for the CAST signatures that embed `baseBuiltinCastFunc`
+    /// (D08.8); `None` for every other signature (Go's `baseBuiltinFunc` has no such field).
+    pub in_union: Option<bool>,
 }
 
 impl std::fmt::Debug for BuiltinFunc {
@@ -203,6 +206,7 @@ impl BuiltinFunc {
             pb_code: 0,
             ctor: None,
             collation_info: CollationInfo::default(),
+            in_union: None,
         }
     }
 
@@ -234,6 +238,7 @@ impl BuiltinFunc {
             pb_code: sig.pb_code,
             ctor: Some(collate::get_collator(collation)),
             collation_info,
+            in_union: None,
         }
     }
 
@@ -317,6 +322,7 @@ impl BuiltinFunc {
     /// deep copy Go makes.
     // go: baseBuiltinFunc.Clone L2 (a signature's Clone is BuiltinFunc's; Go's base method only panics and is never reached)
     // go: baseBuiltinFunc.cloneFrom L2 (args shared, M-EXPR; ctor.Clone() of the stateless collators is the same collator)
+    // go: baseBuiltinCastFunc.cloneFrom L1 (inUnion is a field of the BuiltinFunc)
     pub fn clone_from_base(&self) -> BuiltinFunc {
         self.clone()
     }
@@ -562,6 +568,9 @@ pub trait Args {
     /// `b.args[i].EvalString(ctx, row)`.
     // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
     fn string(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Cow<'_, [u8]>>, Error>;
+    /// `b.args[i].EvalDecimal(ctx, row)`.
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn decimal(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<MyDecimal>, Error>;
 }
 
 /// One node of an [`RpnProgram`] (post-order).

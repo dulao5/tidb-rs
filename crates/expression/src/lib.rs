@@ -17,11 +17,13 @@ extern crate self as tidb_expression;
 /// (the parser uses them too); re-exported here so callers keep `ast_funcs`.
 pub use tidb_parser::ast::funcs as ast_funcs;
 pub mod builtin;
+pub mod builtin_cast;
 pub mod builtin_registry;
 mod builtin_registry_gen;
 pub mod collation;
 pub mod column;
 pub mod constant;
+pub mod constant_fold;
 pub mod context;
 pub mod errors;
 pub mod eval;

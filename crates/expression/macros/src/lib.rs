@@ -21,9 +21,11 @@
 //!     -> Result<Option<()>, Error> { .. }
 //! ```
 //!
-//! Result types: `Int` → `Option<i64>`, `Real` → `Option<f64>`, `String` → `Option<()>` with
-//! the bytes appended to `out` (the vector driver reuses one buffer for the whole chunk).
-//! Strict argument types: `i64` (EvalInt), `f64` (EvalReal), `&[u8]` (EvalString).
+//! Result types: `Int` → `Option<i64>`, `Real` → `Option<f64>`, `Decimal` →
+//! `Option<MyDecimal>`, `String` → `Option<()>` with the bytes appended to `out` (the vector
+//! driver reuses one buffer for the whole chunk).
+//! Strict argument types: `i64` (EvalInt), `f64` (EvalReal), `&MyDecimal` (EvalDecimal),
+//! `&[u8]` (EvalString).
 //!
 //! [`Args`]: ../tidb_expression/eval/trait.Args.html
 
@@ -36,6 +38,7 @@ use syn::{FnArg, ItemFn, Pat, Type};
 enum Ret {
     Int,
     Real,
+    Decimal,
     String,
 }
 
@@ -67,6 +70,7 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
         match id.as_str() {
             "Int" => a.ret = Some(Ret::Int),
             "Real" => a.ret = Some(Ret::Real),
+            "Decimal" => a.ret = Some(Ret::Decimal),
             "String" => a.ret = Some(Ret::String),
             "lazy" => a.lazy = true,
             "eager" => a.eager = true,
@@ -92,7 +96,7 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
             }
             _ => {
                 return Err(
-                    meta.error("eval_fn: options are Int, Real, String, lazy, eager, checked(..)")
+                    meta.error("eval_fn: options are Int, Real, Decimal, String, lazy, eager, checked(..)")
                 );
             }
         }
@@ -102,7 +106,7 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
     if a.ret.is_none() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "eval_fn: the result type (Int, Real or String) is required",
+            "eval_fn: the result type (Int, Real, Decimal or String) is required",
         ));
     }
     Ok(a)
@@ -112,6 +116,7 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
 enum ArgKind {
     Int,
     Real,
+    Decimal,
     Bytes,
 }
 
@@ -121,6 +126,7 @@ fn arg_kind(ty: &Type) -> Option<ArgKind> {
         "i64" => Some(ArgKind::Int),
         "f64" => Some(ArgKind::Real),
         "&[u8]" => Some(ArgKind::Bytes),
+        _ if s.starts_with('&') && s.ends_with("MyDecimal") => Some(ArgKind::Decimal),
         _ => None,
     }
 }
@@ -176,7 +182,7 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
             let Some(k) = arg_kind(&pt.ty) else {
                 return Err(syn::Error::new_spanned(
                     &pt.ty,
-                    "eval_fn: strict argument types are i64, f64 and &[u8]",
+                    "eval_fn: strict argument types are i64, f64, &MyDecimal and &[u8]",
                 ));
             };
             kinds.push(k);
@@ -189,6 +195,7 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
     let (row_ret, drivers_variant) = match ret {
         Ret::Int => (quote!(::std::option::Option<i64>), quote!(Int)),
         Ret::Real => (quote!(::std::option::Option<f64>), quote!(Real)),
+        Ret::Decimal => (quote!(::std::option::Option<#rt::MyDecimal>), quote!(Decimal)),
         Ret::String => (
             quote!(::std::option::Option<::std::vec::Vec<u8>>),
             quote!(String),
@@ -216,7 +223,7 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
         let mut call_args = Vec::new();
         for (i, k) in kinds.iter().enumerate() {
             let v = format_ident!("a{}", i);
-            call_args.push(if *k == ArgKind::Bytes {
+            call_args.push(if matches!(k, ArgKind::Bytes | ArgKind::Decimal) {
                 quote!(&#v)
             } else {
                 quote!(#v)
@@ -249,11 +256,11 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
                 }
                 ::std::result::Result::Ok(())
             },
-            Ret::Int | Ret::Real => {
-                let out = if ret == Ret::Int {
-                    quote!(#rt::IntOut)
-                } else {
-                    quote!(#rt::RealOut)
+            Ret::Int | Ret::Real | Ret::Decimal => {
+                let out = match ret {
+                    Ret::Int => quote!(#rt::IntOut),
+                    Ret::Real => quote!(#rt::RealOut),
+                    _ => quote!(#rt::DecimalOut),
                 };
                 quote! {
                     let mut res = #out::new(result, n, &[]);
@@ -277,10 +284,15 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
             let view = match k {
                 ArgKind::Int => quote!(#rt::IntView),
                 ArgKind::Real => quote!(#rt::RealView),
+                ArgKind::Decimal => quote!(#rt::DecimalView),
                 ArgKind::Bytes => quote!(#rt::BytesView),
             };
             views.push(quote!(let #v = #view::new(cols[#i], n);));
-            gets.push(quote!(#v.get(i)));
+            gets.push(if *k == ArgKind::Decimal {
+                quote!(&#v.get(i))
+            } else {
+                quote!(#v.get(i))
+            });
             null_checks.push(quote!(cols[#i].is_null(i)));
         }
         match ret {
@@ -301,11 +313,11 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
                 }
                 ::std::result::Result::Ok(())
             },
-            Ret::Int | Ret::Real => {
-                let out = if ret == Ret::Int {
-                    quote!(#rt::IntOut)
-                } else {
-                    quote!(#rt::RealOut)
+            Ret::Int | Ret::Real | Ret::Decimal => {
+                let out = match ret {
+                    Ret::Int => quote!(#rt::IntOut),
+                    Ret::Real => quote!(#rt::RealOut),
+                    _ => quote!(#rt::DecimalOut),
                 };
                 quote! {
                     #(#views)*
@@ -355,6 +367,7 @@ fn row_prologue(kinds: &[ArgKind], eager: bool) -> Vec<TokenStream2> {
     let method = |k: &ArgKind| match k {
         ArgKind::Int => quote!(eval_int),
         ArgKind::Real => quote!(eval_real),
+        ArgKind::Decimal => quote!(eval_decimal),
         ArgKind::Bytes => quote!(eval_string),
     };
     if eager {
@@ -403,7 +416,7 @@ fn row_prologue(kinds: &[ArgKind], eager: bool) -> Vec<TokenStream2> {
 fn expand_checked(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
     let ret = attr.ret.expect("checked in parse_attr");
     let ck = attr.checked.as_ref().expect("checked");
-    if attr.lazy || ret == Ret::String {
+    if attr.lazy || matches!(ret, Ret::String | Ret::Decimal) {
         return Err(syn::Error::new_spanned(
             &func.sig,
             "eval_fn: checked is for strict Int/Real bodies",
