@@ -9,10 +9,12 @@ use smallvec::SmallVec;
 use zerocopy::FromBytes;
 use zerocopy::little_endian::{F64, I64};
 
+pub use tidb_types::mydecimal::MyDecimal;
+
 pub use tidb_base::Error;
 use tidb_chunk::column::new_empty_column;
 pub use tidb_chunk::{Column, Row};
-use tidb_parser::types::{ETInt, ETReal, ETString, EvalType};
+use tidb_parser::types::{ETDecimal, ETInt, ETReal, ETString, EvalType};
 use tidb_types::etc::FieldType;
 
 use super::{Args, BuiltinFunc};
@@ -86,6 +88,78 @@ impl<'a> BytesView<'a> {
     // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn get(&self, i: usize) -> &'a [u8] {
         self.0.get_bytes(i)
+    }
+}
+
+/// The decimals of an argument column.
+pub struct DecimalView<'a>(&'a Column);
+
+impl<'a> DecimalView<'a> {
+    /// The view of `col`.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn new(col: &'a Column, _n: usize) -> Self {
+        DecimalView(col)
+    }
+    /// Row `i` (a copy; Go reads `&col.Decimals()[i]`).
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn get(&self, i: usize) -> MyDecimal {
+        self.0.get_decimal(i)
+    }
+}
+
+/// Writer of a decimal result column (`ResizeDecimal(n, false)`, `MergeNulls(args...)`).
+pub struct DecimalOut<'a> {
+    col: &'a mut Column,
+}
+
+impl<'a> DecimalOut<'a> {
+    /// Resizes `result` to `n` rows, NULL where any of `args` is NULL.
+    #[inline]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn new(result: &'a mut Column, n: usize, args: &[&Column]) -> Self {
+        result.resize_decimal(n, false);
+        if !args.is_empty() {
+            result.merge_nulls(args);
+        }
+        DecimalOut { col: result }
+    }
+    /// Whether row `i` is NULL.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn is_null(&self, i: usize) -> bool {
+        self.col.is_null(i)
+    }
+    /// Sets row `i` to `v`.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn set(&mut self, i: usize, v: MyDecimal) {
+        self.col.decimals_mut()[i] = v.as_wire();
+    }
+    /// Sets row `i` to NULL.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn set_null(&mut self, i: usize) {
+        self.col.set_null(i, true);
+    }
+    /// Calls `f` for every row of `0..n` that is not NULL and stores its result.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn run<F>(&mut self, n: usize, mut f: F) -> Result<(), Error>
+    where
+        F: FnMut(usize) -> Result<Option<MyDecimal>, Error>,
+    {
+        for i in 0..n {
+            if self.col.is_null(i) {
+                continue;
+            }
+            match f(i)? {
+                Some(v) => self.set(i, v),
+                None => self.set_null(i),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -245,6 +319,11 @@ impl Args for RowArgs<'_> {
             .eval_string(ctx, self.st, self.row)?
             .map(Cow::Owned))
     }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn decimal(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<MyDecimal>, Error> {
+        self.f.args[i].eval_decimal(ctx, self.st, self.row)
+    }
 }
 
 /// [`Args`] of the vector driver: reads row `i` of the evaluated argument columns.
@@ -298,6 +377,16 @@ impl Args for VecArgs<'_> {
             Some(Cow::Borrowed(c.get_bytes(self.i)))
         })
     }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn decimal(&mut self, _ctx: &dyn EvalContext, i: usize) -> Result<Option<MyDecimal>, Error> {
+        let c = self.cols[i];
+        Ok(if c.is_null(self.i) {
+            None
+        } else {
+            Some(c.get_decimal(self.i))
+        })
+    }
 }
 
 /// Go `genVecFromConstExpr`: evaluates the constant once and fills `n` rows.
@@ -327,6 +416,16 @@ pub fn fill_constant(
             if let Some(v) = v {
                 for x in col.float64s_mut() {
                     *x = F64::new(v);
+                }
+            }
+        }
+        ETDecimal => {
+            let v = expr.eval_decimal(ctx, st, row)?;
+            col.resize_decimal(n, v.is_none());
+            if let Some(v) = v {
+                let w = v.as_wire();
+                for x in col.decimals_mut() {
+                    *x = w;
                 }
             }
         }

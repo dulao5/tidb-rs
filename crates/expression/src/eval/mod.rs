@@ -155,6 +155,9 @@ pub struct BuiltinFunc {
     ctor: Option<&'static dyn Collator>,
     /// The embedded `collationInfo`.
     pub collation_info: CollationInfo,
+    /// `baseBuiltinCastFunc.inUnion` for the CAST signatures that embed `baseBuiltinCastFunc`
+    /// (D08.8); `None` for every other signature (Go's `baseBuiltinFunc` has no such field).
+    pub in_union: Option<bool>,
 }
 
 impl std::fmt::Debug for BuiltinFunc {
@@ -203,6 +206,7 @@ impl BuiltinFunc {
             pb_code: 0,
             ctor: None,
             collation_info: CollationInfo::default(),
+            in_union: None,
         }
     }
 
@@ -234,6 +238,7 @@ impl BuiltinFunc {
             pb_code: sig.pb_code,
             ctor: Some(collate::get_collator(collation)),
             collation_info,
+            in_union: None,
         }
     }
 
@@ -317,6 +322,7 @@ impl BuiltinFunc {
     /// deep copy Go makes.
     // go: baseBuiltinFunc.Clone L2 (a signature's Clone is BuiltinFunc's; Go's base method only panics and is never reached)
     // go: baseBuiltinFunc.cloneFrom L2 (args shared, M-EXPR; ctor.Clone() of the stateless collators is the same collator)
+    // go: baseBuiltinCastFunc.cloneFrom L2 (inUnion is a field of the BuiltinFunc)
     pub fn clone_from_base(&self) -> BuiltinFunc {
         self.clone()
     }
@@ -423,6 +429,12 @@ pub trait SigView: std::ops::Deref<Target = BuiltinFunc> {
     /// versions once per row. The body must not depend on what a previous row left in it.
     // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
     fn scratch<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T>;
+
+    /// Whether this is the vector driver. Only for the places where Go's vector version
+    /// differs from its row version in what the user sees (spec D08.1 §3.4 (c), e.g. the
+    /// warning text of `builtinCastDecimalAsIntSig`): each driver follows its own Go version.
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn vector(&self) -> bool;
 }
 
 /// Storage of [`SigView::scratch`].
@@ -486,6 +498,12 @@ impl SigView for RowSig<'_> {
     fn scratch<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T> {
         self.scratch.get(init)
     }
+
+    #[inline(always)]
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn vector(&self) -> bool {
+        false
+    }
 }
 
 /// The argument types of one vector-driver call, read once per chunk.
@@ -541,6 +559,12 @@ impl SigView for VecSig<'_, '_> {
     fn scratch<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T> {
         self.scratch.get(init)
     }
+
+    #[inline(always)]
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn vector(&self) -> bool {
+        true
+    }
 }
 
 /// The arguments of a `lazy` body: evaluated when the body asks, as Go's row versions do.
@@ -562,6 +586,9 @@ pub trait Args {
     /// `b.args[i].EvalString(ctx, row)`.
     // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
     fn string(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Cow<'_, [u8]>>, Error>;
+    /// `b.args[i].EvalDecimal(ctx, row)`.
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn decimal(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<MyDecimal>, Error>;
 }
 
 /// One node of an [`RpnProgram`] (post-order).

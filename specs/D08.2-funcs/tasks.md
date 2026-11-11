@@ -6,7 +6,9 @@
 - [x] T4 `collation.rs`：`deriveCollation` 及其辅助函数
 - [x] T5 `function_traits.rs`
 - [x] T6 govec `funcs` 领域与回放、单元测试；反证
-- [ ] T7 第 2 部分：`newBaseBuiltinFuncWithTp`/`WithFieldTypes`、`baseBuiltinCastFunc`、`get_function`、`NewFunction*`（随 D08.8 第一批签名与 D08.1 2b）
-- [ ] T8 第 2 部分：常量折叠与传播（随 D08.4/D08.5）
+- [x] T7a `baseBuiltinCastFunc`（`newBaseBuiltinCastFunc`、`metadata`、`cloneFrom`；随 D08.8 第 1 部分）
+- [ ] T7b `newBaseBuiltinFuncWithTp`/`WithFieldTypes`（要 CAST 到 STRING/TIME 等，D08.8 第 2 部分；`derive` 记录经它们回放）、`get_function`、`NewFunction*`
+- [x] T8a 常量折叠 `constant_fold.go`（随 D08.8 第 1 部分；IF/IFNULL/CASE/ISNULL 的处理已移植，随这些函数在 govec 中覆盖；null-reject 分支等 `NewFunctionBase`）
+- [ ] T8b 常量传播（随 D08.4/D08.5）
 - [ ] T9 第 2 部分：`builtin_func_param.go`（随 REGEXP/ILIKE）
 - [ ] T10 第 3 部分：grouping sets（随 D08.3、D08.9）

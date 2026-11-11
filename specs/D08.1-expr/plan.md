@@ -83,3 +83,8 @@ D08.2 第 1 部分（`specs/D08.2-funcs`）移植了函数注册表 `funcs`（�
 2. `NewFunction*`/`newFunctionImpl`/`typeInferForNull`（D08.1），注册表条目加上 `get_function`；未移植的函数族返回明确的"未实现"错误（临时桩，宪章第四条 3），并在 govec 中跳过。
 3. `EvaluatorSuite`、`chunk_executor`、`VecEvalBool`/`toBool`/`EvalExpr`（D08.1）：govec 用 CAST 签名在 chunk 上逐行和向量求值，对照 Go。
 4. 常量折叠与传播（D08.2 `constant_fold.go`、`constant_propagation.go`）：需要比较函数（D08.4）。
+
+## D08.8 第 1 部分之后（2b 的前提，进展）
+
+- 第 1 步部分完成：CAST 到 INT/REAL/DECIMAL 的签名与 `BuildCastFunction*`、`WrapWithCastAs{Int,Real,Decimal}`、`FoldConstant`（`specs/D08.8-cast`）。框架的变化：`#[eval_fn]` 支持 `Decimal` 结果与 `&MyDecimal` 参数；`SigView::vector()` 让函数体在 Go 的向量版与行版对用户可见地不同时各自跟随（§3.4 (c)，govec 在 CAST 中找到 4 处）；`PropagateType` 已移植。
+- 仍待：CAST 到 STRING/TIME/DURATION/JSON（`newBaseBuiltinFuncWithTp` 要包这些 CAST）、RPN 列引用按签名的求值类型转换（FLOAT/hybrid 列，D08.8 plan 第 2 部分第 1 条），然后 `NewFunction*`、EvaluatorSuite、chunk_executor。
