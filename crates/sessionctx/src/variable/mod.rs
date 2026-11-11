@@ -26,6 +26,9 @@ pub mod tidb_defs;
 pub mod tidb_vars;
 pub(crate) mod timeparse;
 pub mod uservars;
+pub mod plan_cache_params;
+mod concurrency;
+pub mod session_methods;
 pub(crate) mod util;
 #[allow(clippy::module_inception)]
 pub mod variable;

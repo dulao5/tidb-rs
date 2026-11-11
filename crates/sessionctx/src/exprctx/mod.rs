@@ -4,9 +4,8 @@
 //! - Go interfaces are object-safe traits (`Send + Sync`) shared as `Arc<dyn …>`.
 //! - Go's struct embedding of an interface (`NullRejectCheckExprContext{ExprContext}`) is a
 //!   wrapper struct holding the inner `Arc` and forwarding every method.
-//! - `variable.UserVarsReader` belongs to D05.2 (user variables, not ported yet); the trait and
-//!   an empty `UserVars` stand-in live in `variable::uservars` (where Go defines them) and are
-//!   re-exported here.
+//! - `variable.UserVarsReader` and `variable.UserVars` (D05.2) live in `variable::uservars`
+//!   (where Go defines them) and are re-exported here.
 
 pub mod context;
 pub mod optional;

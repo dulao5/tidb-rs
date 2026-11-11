@@ -118,6 +118,16 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
     - **超长值**：按严格模式返回 `ErrDataTooLong`；Go 的内部会话 SQL mode 是否严格未核对（SET GLOBAL 的值不会超过 16383 字符的情况下不可达）。
 
 12. **`tidb_redact_log` 只有 GLOBAL 作用域（go-fix pingcap/tidb#62892）**：v8.5.8 中它有 SESSION 作用域，SetSession 钩子写进程级的 `errors.RedactLogEnabled`，一个会话的 `SET SESSION tidb_redact_log=ON` 会让同一实例上所有会话的错误和 warning 被打码（#62，上游 pingcap/tidb#62890）。上游 master 改为只有 GLOBAL 作用域、由 SetGlobal 钩子写这个开关（commit `bc0d97a44d`，未 backport 到 release-8.5），tidb-rs 按宪章 R1 移植（与 #65884 相同）：`SET SESSION` 返回 1229，`SET GLOBAL` 写进程级开关（`tidb_base::errors`，原先 `tidb_vars` 中另有一份不相连的替身，已删除）。govec 用打了补丁的 Go 生成 sessionvars、sysvar、exprctx 三个领域（header 的 `fixes` 中列出），`set_global_hook` 记录读回开关的值（`redact`）。上游后来（#63709）又加回 SESSION 作用域并标为 `InternalSessionVariable`，用户 SET SESSION 报 unknown variable；那是新功能，不移植。
+13. **PR D 的会话方法**：
+    - **`TxnReadTS`**：Go 是 `*TxnReadTS`，新会话中为 nil，只有 `tx_read_ts` / `tidb_snapshot` 的钩子和 `CleanupTxnReadTSIfUsed` 会赋值；nil 接收者的 `UseTxnReadTS` 返回 0、`SetTxnReadTS` 什么也不做。Rust 用 `Option<TxnReadTS>`，两个方法接收 `Option<&mut TxnReadTS>`（L1）。
+    - **`UserVars`**：Go 用 `sync.RWMutex` 保护两个 map，按指针共享；Rust 是 `Arc<UserVars>` 加 `parking_lot::RwLock`。`GetUserVarType` 返回存储的 `FieldType` 的副本（Go 返回指针，TiDB 的调用方只读，L2）。
+    - **`PreparedStmts` / `MapScalarSubQ`**：Go 的 `map[uint32]any` / `[]any` 存 planner 的 `PlanCacheStmt`、子查询；Rust 存 `Arc<dyn Any + Send + Sync>`，由 planner 向下转型（M-IFACE）。`metrics.PreparedStmtGauge`、`metrics.ConnGauge` 是 runtime-only。
+    - **`PlanID` / `PlanColumnID`**：Go 的 `atomic.Int32` / `atomic.Int64`，Rust 同样用原子量，`AllocNewPlanID` 经 `&SessionVars` 调用；`SessionState` 克隆时复制当前值。
+    - **`relatedTableForMDL`**：Go 的 `*sync.Map`（表 ID → schema 版本）由 `tdmLock` 保护；Rust 是 `Option<RelatedTableForMDL>`（`Arc<Mutex<HashMap<i64, i64>>>`），`&mut self` 代替 `tdmLock`。
+    - **`AddPlanReplayerFinishedTaskKey`**：Go 在 map 从未初始化时直接写 nil map（panic）；调用方总是先调用 `CheckPlanReplayerFinishedTaskKey`（它会初始化），Rust 在这种情况下先建 map。govec 的记录按 Go 调用方的顺序先 Check 再 Add。
+    - **`TransactionContext.Cleanup`**：只清理读路径的字段（`relatedTableForMDL`、`IsStaleness`、`EnableMDL`）；`Binlog`、`History`、`TableDeltaMap`、悲观锁缓存、`Savepoints` 属于写路径（X）或 PR E（L2）。
+    - **`ChooseMppExchangeCompressionMode`** 返回 `i64`（`kv.ExchangeCompressionMode` 属于 DEF.MPP，常量就地定义）；`GetSplitRegionTimeout` 返回纳秒（`time.Duration`）。
+    - **`PlanCacheParamList.String`、`PrepareDedupCacheKey`** 返回 Go string 的字节（`Vec<u8>`，M-BYTES）；`GetParamValue` 越界时 panic 的文字与 Go 的 runtime 错误相同（负数下标没有 `with length`）。
 
 ## 5. 验证结果（PR A）
 

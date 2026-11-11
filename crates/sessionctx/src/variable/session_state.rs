@@ -59,13 +59,77 @@ pub struct TxnIsolationLevelOneShot {
     pub value: String,
 }
 
-/// `TransactionContext` (the fields the session hooks read).
+/// `TransactionContext` (the fields of the read path: the session hooks, isolation level,
+/// for-update ts, the tables of the metadata lock). The write-path state (table deltas,
+/// pessimistic lock cache, savepoints, binlog) is block X.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TransactionContext {
     /// StartTS is the start timestamp of the transaction.
     pub start_ts: u64,
     /// IsExplicit indicates whether the txn is an interactive txn.
     pub is_explicit: bool,
+    /// Isolation is the isolation level of the transaction ("" until it is decided).
+    pub isolation: String,
+    /// IsPessimistic indicates whether the transaction is pessimistic.
+    pub is_pessimistic: bool,
+    /// IsStaleness indicates whether the transaction is a staleness read transaction.
+    pub is_staleness: bool,
+    /// EnableMDL indicates whether the transaction uses the metadata lock.
+    pub enable_mdl: bool,
+    /// forUpdateTS is used for pessimistic transaction.
+    for_update_ts: u64,
+    /// relatedTableForMDL records the `table ID -> schema version` of the tables the
+    /// transaction uses (Go: `*sync.Map`, guarded by `tdmLock`).
+    pub(crate) related_table_for_mdl: Option<RelatedTableForMDL>,
+}
+
+/// The `relatedTableForMDL` map of `TransactionContext` (Go `*sync.Map` of table ID to
+/// schema version): shared by `Arc`, equal when it is the same map.
+// glue: Go *sync.Map shared by pointer
+#[derive(Clone, Debug, Default)]
+pub struct RelatedTableForMDL(pub std::sync::Arc<parking_lot::Mutex<HashMap<i64, i64>>>);
+
+impl PartialEq for RelatedTableForMDL {
+    // glue: pointer equality of Go's *sync.Map
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for RelatedTableForMDL {}
+
+impl TransactionContext {
+    /// GetForUpdateTS returns the ts for update.
+    // go: TransactionContext.GetForUpdateTS L1
+    pub fn get_for_update_ts(&self) -> u64 {
+        if self.for_update_ts > self.start_ts {
+            return self.for_update_ts;
+        }
+        self.start_ts
+    }
+
+    /// The `relatedTableForMDL` map, if allocated (Go code in the package reads the field).
+    // glue: read access to TransactionContext.relatedTableForMDL
+    pub fn related_table_for_mdl(&self) -> Option<&RelatedTableForMDL> {
+        self.related_table_for_mdl.as_ref()
+    }
+
+    /// SetForUpdateTS sets the ts for update.
+    // go: TransactionContext.SetForUpdateTS L1
+    pub fn set_for_update_ts(&mut self, for_update_ts: u64) {
+        if for_update_ts > self.for_update_ts {
+            self.for_update_ts = for_update_ts;
+        }
+    }
+
+    /// Cleanup clears up transaction info that no longer use.
+    // go: TransactionContext.Cleanup L2 (the fields above; Binlog, History, TableDeltaMap, the pessimistic lock caches and Savepoints are write path, X)
+    pub fn cleanup(&mut self) {
+        // tc.InfoSchema = nil; we cannot do it now, because some operation like handleFieldList depend on this.
+        self.related_table_for_mdl = None;
+        self.is_staleness = false;
+        self.enable_mdl = false;
+    }
 }
 
 /// TxnReadTS is the staleness transaction read ts.
@@ -89,6 +153,35 @@ impl TxnReadTS {
     // go: TxnReadTS.PeakTxnReadTS L1
     pub fn peak_txn_read_ts(&self) -> u64 {
         self.read_ts
+    }
+
+    /// UseTxnReadTS returns readTS, and mark used as true
+    /// (Go's nil receiver is `None`: 0.)
+    // go: TxnReadTS.UseTxnReadTS L1
+    pub fn use_txn_read_ts(t: Option<&mut TxnReadTS>) -> u64 {
+        let Some(t) = t else {
+            return 0;
+        };
+        t.used = true;
+        t.read_ts
+    }
+
+    /// SetTxnReadTS update readTS, and refresh used
+    /// (Go's nil receiver is `None`: nothing.)
+    // go: TxnReadTS.SetTxnReadTS L1
+    pub fn set_txn_read_ts(t: Option<&mut TxnReadTS>, ts: u64) {
+        let Some(t) = t else {
+            return;
+        };
+        t.used = false;
+        t.read_ts = ts;
+    }
+
+    /// Whether the read ts has been used (`used`, read inside the package by
+    /// `CleanupTxnReadTSIfUsed`).
+    // glue: read access to TxnReadTS.used
+    pub fn used(&self) -> bool {
+        self.used
     }
 }
 
@@ -459,4 +552,42 @@ pub fn store_type_names(set: &BTreeSet<StoreType>) -> String {
     let mut v: Vec<&str> = set.iter().map(|t| t.name()).collect();
     v.sort_unstable();
     v.join(",")
+}
+
+/// A Go `atomic.Int32` field of `SessionVars` (`PlanID`): updated through `&SessionVars`;
+/// cloning a `SessionState` copies the current value.
+// glue: Go atomic.Int32 field
+#[derive(Debug, Default)]
+pub struct AtomicI32Field(pub std::sync::atomic::AtomicI32);
+
+impl Clone for AtomicI32Field {
+    // glue: copy of the current value
+    fn clone(&self) -> Self {
+        AtomicI32Field(std::sync::atomic::AtomicI32::new(
+            self.0.load(std::sync::atomic::Ordering::SeqCst),
+        ))
+    }
+}
+
+/// A Go `atomic.Int64` field of `SessionVars` (`PlanColumnID`), as [`AtomicI32Field`].
+// glue: Go atomic.Int64 field
+#[derive(Debug, Default)]
+pub struct AtomicI64Field(pub std::sync::atomic::AtomicI64);
+
+impl Clone for AtomicI64Field {
+    // glue: copy of the current value
+    fn clone(&self) -> Self {
+        AtomicI64Field(std::sync::atomic::AtomicI64::new(
+            self.0.load(std::sync::atomic::Ordering::SeqCst),
+        ))
+    }
+}
+
+/// `replayer.PlanReplayerTaskKey` (pkg/util/replayer): the key of a plan replayer capture task.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PlanReplayerTaskKey {
+    /// SQLDigest is the digest of the SQL.
+    pub sql_digest: String,
+    /// PlanDigest is the digest of the plan.
+    pub plan_digest: String,
 }

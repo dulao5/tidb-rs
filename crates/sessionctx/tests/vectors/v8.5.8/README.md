@@ -21,9 +21,9 @@ its own target.
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-c`, tracker #34) |
-| generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view; the accessor holds an in-memory mysql.tidb), 66,478 records, the last 1,208 `tidb_table` (`sys/tidb_table`, PR C: the tidb_gc_* hooks); both targets hold the same records |
-| `arm64/sessionvars.jsonl.gz` sha256 | `2eb464ab38d486f5f1c7b0561c430f53b607f74cbbbadd2e94c875e7568a1fda` (GOARCH=arm64, generated locally, go-fix pingcap/tidb#62892, tracker #38) |
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-d`, tracker #43) |
+| generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view; the accessor holds an in-memory mysql.tidb), 67,583 records: after the 1,208 `tidb_table` (`sys/tidb_table`, PR C: the tidb_gc_* hooks), the 1,095 PR D records (`methods`, `uservars`, `paramlist`, `svmisc`); both targets hold the same records |
+| `arm64/sessionvars.jsonl.gz` sha256 | `d8d16f2ce7e948cb33b46cea9f7955a777e5b6fad9f2090599414fe184ed668a` (GOARCH=arm64, generated locally, D05.2 PR D, tracker #43) |
 | `amd64/sessionvars.jsonl.gz` sha256 | `5e713ac2112b9eb5784679edec82ffc81bfed1b4474bdad0bc001168dd0621e9` (tracker CI artifact, run 42956793646, go-fix pingcap/tidb#62892) |
 
 ## Domain "stmtctx" (block D00.1 part 1)
