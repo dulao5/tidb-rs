@@ -1,4 +1,5 @@
 //! go-file: pkg/expression/builtin_cast.go
+//! go-file: pkg/expression/builtin_cast_vec.go
 //!
 //! CAST (block D08.8), first batch: the function classes of CAST to INT, REAL and DECIMAL,
 //! their signatures from INT, REAL, DECIMAL and STRING arguments, `BuildCastFunction*` and
@@ -10,7 +11,7 @@
 //! `baseBuiltinFunc` error. CAST to STRING/TIME/DURATION/JSON/VECTOR returns a "not ported
 //! yet" error from `build_cast_function*` (D08.8 part 2).
 
-#![allow(non_upper_case_globals, non_snake_case)]
+#![allow(non_upper_case_globals)]
 
 use std::sync::Arc;
 
@@ -142,8 +143,8 @@ fn produce_dec(
 /// `builtinCastIntAsIntSig.evalInt`.
 // go: builtinCastIntAsIntSig.evalInt L1
 // go: builtinCastIntAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastIntAsIntSig.vecEvalInt L1 (the vector driver of this body, M-EVAL)
-// go: builtinCastIntAsIntSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastIntAsIntSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastIntAsIntSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Int)]
 pub fn cast_int_as_int(
     _ctx: &dyn EvalContext,
@@ -159,8 +160,8 @@ pub fn cast_int_as_int(
 
 // go: builtinCastIntAsRealSig.evalReal L1
 // go: builtinCastIntAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastIntAsRealSig.vecEvalReal L1 (the vector driver of this body, M-EVAL)
-// go: builtinCastIntAsRealSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastIntAsRealSig.vecEvalReal L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastIntAsRealSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Real)]
 pub fn cast_int_as_real(
     _ctx: &dyn EvalContext,
@@ -182,9 +183,9 @@ pub fn cast_int_as_real(
 }
 
 // go: builtinCastIntAsDecimalSig.evalDecimal L1
-// go: builtinCastIntAsDecimalSig.vecEvalDecimal L1
+// go: builtinCastIntAsDecimalSig.vecEvalDecimal L2 (the vector driver of this body, M-EVAL)
 // go: builtinCastIntAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastIntAsDecimalSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastIntAsDecimalSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Decimal)]
 pub fn cast_int_as_decimal(
     ctx: &dyn EvalContext,
@@ -209,8 +210,8 @@ pub fn cast_int_as_decimal(
 
 // go: builtinCastRealAsRealSig.evalReal L1
 // go: builtinCastRealAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastRealAsRealSig.vecEvalReal L1 (the vector driver of this body, M-EVAL)
-// go: builtinCastRealAsRealSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastRealAsRealSig.vecEvalReal L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsRealSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Real)]
 pub fn cast_real_as_real(
     _ctx: &dyn EvalContext,
@@ -226,8 +227,8 @@ pub fn cast_real_as_real(
 
 // go: builtinCastRealAsIntSig.evalInt L1
 // go: builtinCastRealAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastRealAsIntSig.vecEvalInt L1 (the vector driver of this body, M-EVAL)
-// go: builtinCastRealAsIntSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastRealAsIntSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsIntSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Int)]
 pub fn cast_real_as_int(
     ctx: &dyn EvalContext,
@@ -262,8 +263,8 @@ pub fn cast_real_as_int(
 
 // go: builtinCastRealAsDecimalSig.evalDecimal L1
 // go: builtinCastRealAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastRealAsDecimalSig.vecEvalDecimal L1 (the vector driver of this body, M-EVAL)
-// go: builtinCastRealAsDecimalSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastRealAsDecimalSig.vecEvalDecimal L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsDecimalSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Decimal)]
 pub fn cast_real_as_decimal(
     ctx: &dyn EvalContext,
@@ -292,8 +293,8 @@ pub fn cast_real_as_decimal(
 
 // go: builtinCastDecimalAsDecimalSig.evalDecimal L1
 // go: builtinCastDecimalAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastDecimalAsDecimalSig.vecEvalDecimal L1 (the vector driver of this body, M-EVAL)
-// go: builtinCastDecimalAsDecimalSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastDecimalAsDecimalSig.vecEvalDecimal L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastDecimalAsDecimalSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Decimal)]
 pub fn cast_decimal_as_decimal(
     ctx: &dyn EvalContext,
@@ -310,7 +311,7 @@ pub fn cast_decimal_as_decimal(
 // go: builtinCastDecimalAsIntSig.evalInt L1
 // go: builtinCastDecimalAsIntSig.vecEvalInt L2 (the vector driver of this body; its warning text differs from the row version's, as in Go)
 // go: builtinCastDecimalAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastDecimalAsIntSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastDecimalAsIntSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Int)]
 pub fn cast_decimal_as_int(
     ctx: &dyn EvalContext,
@@ -349,9 +350,9 @@ pub fn cast_decimal_as_int(
 }
 
 // go: builtinCastDecimalAsRealSig.evalReal L1
-// go: builtinCastDecimalAsRealSig.vecEvalReal L1
+// go: builtinCastDecimalAsRealSig.vecEvalReal L2 (the vector driver of this body, M-EVAL)
 // go: builtinCastDecimalAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastDecimalAsRealSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastDecimalAsRealSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Real)]
 pub fn cast_decimal_as_real(
     ctx: &dyn EvalContext,
@@ -427,8 +428,8 @@ fn handle_overflow(
 /// body starts at the string path (spec §4).
 // go: builtinCastStringAsIntSig.evalInt L2 (the hybrid/binary-literal/implicit-int prologue is unreachable from castAsIntFunctionClass)
 // go: builtinCastStringAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastStringAsIntSig.vecEvalInt L1 (the vector driver of this body, M-EVAL)
-// go: builtinCastStringAsIntSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastStringAsIntSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastStringAsIntSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Int)]
 pub fn cast_string_as_int(
     ctx: &dyn EvalContext,
@@ -464,8 +465,8 @@ pub fn cast_string_as_int(
 
 // go: builtinCastStringAsRealSig.evalReal L2 (the binary-literal/implicit-real prologue is unreachable from castAsRealFunctionClass)
 // go: builtinCastStringAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastStringAsRealSig.vecEvalReal L1 (the vector driver of this body, M-EVAL)
-// go: builtinCastStringAsRealSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastStringAsRealSig.vecEvalReal L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastStringAsRealSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Real)]
 pub fn cast_string_as_real(
     ctx: &dyn EvalContext,
@@ -490,7 +491,7 @@ pub fn cast_string_as_real(
 // go: builtinCastStringAsDecimalSig.evalDecimal L2 (the binary-literal prologue is unreachable from castAsDecimalFunctionClass)
 // go: builtinCastStringAsDecimalSig.vecEvalDecimal L2 (an UNSIGNED UNION negative row is the zero decimal, i.e. a new column's bytes)
 // go: builtinCastStringAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastStringAsDecimalSig.vectorized L1 (SigDesc.vectorized)
+// go: builtinCastStringAsDecimalSig.vectorized L2 (SigDesc.vectorized)
 #[eval_fn(Decimal)]
 pub fn cast_string_as_decimal(
     ctx: &dyn EvalContext,
@@ -729,7 +730,7 @@ pub(crate) fn with_type_mut(e: &mut ExprRef, f: impl FnOnce(&mut FieldType)) {
 
 /// PropagateType change the type of the argument according to the evaluation type of the
 /// function (only ETReal changes a DECIMAL argument's flen and decimal).
-// go: PropagateType L2 (a shared argument node is copied before its type changes, spec §4)
+// go: pkg/expression/expression.go PropagateType L2 (a shared argument node is copied before its type changes, spec §4)
 pub fn propagate_type(ctx: &dyn EvalContext, eval_type: EvalType, args: &mut [ExprRef]) {
     if eval_type != ETReal {
         return;

@@ -46,3 +46,21 @@ descriptor-only signatures, applies the record's coercibility/repertoire overrid
 `deriveCollation` / `newBaseBuiltinFunc*` (result type, collation info, the collator's key of a
 probe string). A `{"panic": true}` output (Go indexes `args` or `argTps` out of range) must
 panic in Rust too.
+
+# Domain "cast" (block D08.8 part 1)
+
+`<target>/cast.jsonl.gz` are copied unmodified from the tidb-rs-tracker repository:
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-1`) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 3,760 records: `cast` 3,060 (60 of them UNSIGNED UNION negative strings), `wrap` 700 |
+| `arm64/cast.jsonl.gz` sha256 | `fc5392599ff29f7ddbc50a9efdc3bdbb48db03d35682b758694b8586b080316e` (GOARCH=arm64, generated locally) |
+| `amd64/cast.jsonl.gz` sha256 | pending (tracker CI artifact) |
+
+A `cast` record builds `CAST(arg AS tp)` with `BuildCastFunctionWithCheck` (the argument is a
+column of the record's rows or a constant, which is folded) under random type flags and error
+levels, and compares the built node (`sfDump`), the warnings of building, the `inUnion` metadata,
+and the evaluation in both of Go's modes: row by row (value/error and warnings per row) and over
+the chunk (the vector driver: values, or the first error, and warnings). Go's row and vector
+versions differ in four places (spec D08.8 §3.2); each Rust driver follows its own Go version.

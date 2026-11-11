@@ -322,7 +322,7 @@ impl BuiltinFunc {
     /// deep copy Go makes.
     // go: baseBuiltinFunc.Clone L2 (a signature's Clone is BuiltinFunc's; Go's base method only panics and is never reached)
     // go: baseBuiltinFunc.cloneFrom L2 (args shared, M-EXPR; ctor.Clone() of the stateless collators is the same collator)
-    // go: baseBuiltinCastFunc.cloneFrom L1 (inUnion is a field of the BuiltinFunc)
+    // go: baseBuiltinCastFunc.cloneFrom L2 (inUnion is a field of the BuiltinFunc)
     pub fn clone_from_base(&self) -> BuiltinFunc {
         self.clone()
     }

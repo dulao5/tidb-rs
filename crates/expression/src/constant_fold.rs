@@ -210,7 +210,7 @@ fn special_fold_handler(name: &str) -> Option<FoldHandler> {
 
 /// MaybeOverOptimized4PlanCache check if this expression is optimized while it may be used
 /// by the plan cache (it contains a parameter marker or a deferred constant).
-// go: MaybeOverOptimized4PlanCache L1
+// go: pkg/expression/util.go MaybeOverOptimized4PlanCache L1
 pub fn maybe_over_optimized4_plan_cache(ctx: &dyn BuildContext, exprs: &[ExprRef]) -> bool {
     // If we do not enable plan cache, all the optimization can work correctly.
     if !ctx.is_use_cache() {
@@ -219,7 +219,7 @@ pub fn maybe_over_optimized4_plan_cache(ctx: &dyn BuildContext, exprs: &[ExprRef
     contain_mutable_const(&*ctx.get_eval_ctx(), exprs)
 }
 
-// go: containMutableConst L1
+// go: pkg/expression/util.go containMutableConst L1
 #[allow(clippy::only_used_in_recursion, clippy::collapsible_match)]
 fn contain_mutable_const(ctx: &dyn EvalContext, exprs: &[ExprRef]) -> bool {
     for expr in exprs {
