@@ -70,6 +70,8 @@ pub type ExprRef = Arc<Expr>;
 ## 4. 偏离与豁免
 
 1. **向量化方法不移植**（N4 §3.3 M-EVAL）：`Column`/`CorrelatedColumn`/`Constant` 的 `VecEval*` 由向量驱动（RPN）取代。tracker 豁免（`expr_pending.go`）。例外：`Column.VecEvalInt/Real/String` 中会转换的分支（hybrid 列读成 int/string、FLOAT 列读成 real）已移植（D08.8 第 2 部分），RPN 按父签名读取的求值类型（`SigDrivers::arg_eval_type`）选择：转换（`RpnNode::ColumnConv`）、照搬，或者在编译时 panic——列的存储与读取类型不符、Go 也不转换的组合（例如 FLOAT 列读成 int），Go 的函数类不会构造这种调用，RPN 拒绝而不是让签名误读字节（Lucky 评审 #82）。
+   - **读取类型从哪里来**（Lucky 评审 #84）：strict 函数体的参数类型由宏生成（`i64`/`f64`/`&MyDecimal`/`&[u8]`），不会与函数体不一致。`lazy` 函数体默认按每个参数**自己的**求值类型读取（`arg_eval_type` 返回 `None`），目前都是对的；如果 Go 的向量版不经 CAST 就把某个参数按别的类型读（例如把 STRING 参数按 INT 读），要在属性中显式声明 `#[eval_fn(.., lazy, args(Int, String))]`。**变参签名**（CONCAT、COALESCE 等）超出声明列表的参数重复最后一个类型，不回退到参数自己的类型（`SigDrivers::arg_eval_type`，`eval_drivers.rs` 覆盖）。
+   - **编译时 panic 的性质**：存储与读取类型不符的组合是不变量被破坏，即 planner 或函数类的 bug，不是用户错误；M-PANIC 在任务边界 `catch_unwind`，只影响这一条语句（Go 在同样情况下会把复制来的存储读错）。
 2. **cascades 的 `Hash64`/`Equals`**：`base.HashEquals` 只被 cascades 规划器使用，`pkg/planner/cascades/base` 是 EXC.B（非默认路径，不移植）。`Column`、`CorrelatedColumn`、`Constant`、`collationInfo` 的 8 个方法豁免。
 3. **`MemoryUsage`**：Go 用 `unsafe.Sizeof` 估算，Rust 结构体大小不同。移植公式，固定部分取 Go 在 64 位目标上的值（`Column` 168、`Constant` 192、`Schema` 72，govec 生成器实测），govec 比较数值。`hashcode` 的容量在 Go 中由 `append` 的扩容决定，Rust 的 `Vec` 不同：只在算过 `HashCode` 之后才可能差几个字节（`Column` 固定为 9，与 Go 相同）；`Schema.MemoryUsage` 的切片容量同理，govec 不比较。
    - **关联列**：值不在节点中（§3.2），`CorrelatedColumn.MemoryUsage` 计入零值 Datum，Go 计入当前值。govec 的 `corr` 记录带 `dmem`，回放比较"Rust 的值 − 零值 + dmem"。`memory_usage` 不带 `EvalState` 参数：Go 在规划期估算时读到的 `Data` 本来就是过期的值（Apply 还没写或上一行的值），带上 state 也不会更准（Lucky 评审 #73）。

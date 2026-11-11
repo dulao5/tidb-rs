@@ -127,7 +127,9 @@ impl SigDrivers {
         })
     }
 
-    /// The type argument `i` is read as (`None`: its own evaluation type).
+    /// The type argument `i` is read as (`None`: its own evaluation type, a `lazy` body
+    /// without `args(..)`). The last listed type repeats for the extra arguments of a
+    /// variadic signature (Lucky, review of #84; D08.1 spec §4.1).
     // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
     pub fn arg_eval_type(&self, i: usize) -> Option<EvalType> {
         match *self {
@@ -138,7 +140,9 @@ impl SigDrivers {
             | SigDrivers::Time { args, .. }
             | SigDrivers::Duration { args, .. }
             | SigDrivers::Json { args, .. }
-            | SigDrivers::VectorFloat32 { args, .. } => args.get(i).copied(),
+            | SigDrivers::VectorFloat32 { args, .. } => {
+                args.get(i).or_else(|| args.last()).copied()
+            }
             SigDrivers::None => None,
         }
     }
@@ -205,6 +209,9 @@ pub struct BuiltinFunc {
     /// `baseBuiltinCastFunc.inUnion` for the CAST signatures that embed `baseBuiltinCastFunc`
     /// (D08.8); `None` for every other signature (Go's `baseBuiltinFunc` has no such field).
     pub in_union: Option<bool>,
+    /// `builtinInternalFromBinarySig.cannotConvertStringAsWarning` (D08.8, copied by Go's
+    /// `Clone` as by this one); `false` for every other signature.
+    pub cannot_convert_string_as_warning: bool,
 }
 
 impl std::fmt::Debug for BuiltinFunc {
@@ -254,6 +261,7 @@ impl BuiltinFunc {
             ctor: None,
             collation_info: CollationInfo::default(),
             in_union: None,
+            cannot_convert_string_as_warning: false,
         }
     }
 
@@ -286,6 +294,7 @@ impl BuiltinFunc {
             ctor: Some(collate::get_collator(collation)),
             collation_info,
             in_union: None,
+            cannot_convert_string_as_warning: false,
         }
     }
 
