@@ -694,7 +694,10 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             }
             if r.is_ok() && name == "tidb_redact_log" {
                 // go-fix pingcap/tidb#62892: SetGlobal stores the process-wide flag.
-                res.insert("redact".into(), json!(tidb_base::errors::redact_log_enabled_load()));
+                res.insert(
+                    "redact".into(),
+                    json!(tidb_base::errors::redact_log_enabled_load()),
+                );
             }
             let warns = vars
                 .stmt_ctx
