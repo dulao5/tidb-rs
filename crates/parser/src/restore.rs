@@ -550,7 +550,10 @@ impl FuncCallExpr {
                 out.push_str(" USING ");
                 arg(1)?.restore(out)?;
             }
-            "adddate" | "subdate" | "date_add" | "date_sub" => {
+            crate::ast::funcs::AddDate
+            | crate::ast::funcs::SubDate
+            | crate::ast::funcs::DateAdd
+            | crate::ast::funcs::DateSub => {
                 arg(0)?.restore(out)?;
                 out.push_str(", INTERVAL ");
                 arg(1)?.restore(out)?;

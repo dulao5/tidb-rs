@@ -1,10 +1,11 @@
 //! Port of Go TiDB v8.5.8 `pkg/expression` (blocks D08.1, D08.2, D08.8, D08.12, D08.11).
 //! N0 rank 8.
 //!
-//! So far: block D08.1 part 1 — the plan-side nodes `Column`, `CorrelatedColumn`,
-//! `Constant` and `Schema`, their row evaluation, and the error and context helpers
-//! (spec `specs/D08.1-expr`, design N4). `ScalarFunction` is a transitional shell until
-//! part 2 (spec §3.3).
+//! So far: block D08.1 parts 1 and 2a — the nodes `Column`, `CorrelatedColumn`,
+//! `Constant`, `ScalarFunction` and `Schema`, the evaluation framework (spec
+//! `specs/D08.1-expr`, design N4) — and block D08.2 part 1: the `funcs` registry, building a
+//! signature's base (type, collation, NOT NULL flag) and the collation derivation of
+//! functions (spec `specs/D08.2-funcs`).
 
 #![deny(unsafe_code)]
 
@@ -12,6 +13,12 @@
 #[allow(unused_extern_crates)]
 extern crate self as tidb_expression;
 
+/// The function-name constants of `pkg/parser/ast/functions.go`, generated into tidb-parser
+/// (the parser uses them too); re-exported here so callers keep `ast_funcs`.
+pub use tidb_parser::ast::funcs as ast_funcs;
+pub mod builtin;
+pub mod builtin_registry;
+mod builtin_registry_gen;
 pub mod collation;
 pub mod column;
 pub mod constant;
@@ -19,6 +26,7 @@ pub mod context;
 pub mod errors;
 pub mod eval;
 pub mod expression;
+pub mod function_traits;
 pub mod scalar_function;
 pub mod schema;
 pub mod size;

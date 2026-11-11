@@ -1,5 +1,8 @@
 //! Hand-written Rust AST for the ported subset (SELECT core and expressions); mirrors the
 //! node and field names of tidb/pkg/parser/ast. `Restore()` lives in `src/restore.rs`.
+
+pub mod funcs;
+
 use std::rc::Rc;
 
 use crate::span::Span;
