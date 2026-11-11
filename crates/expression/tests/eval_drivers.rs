@@ -203,14 +203,17 @@ fn checked_drivers_agree() {
             for null_rows in [vec![], vec![0], bad_rows.first().copied().into_iter().collect::<Vec<_>>()] {
                 let mut chk = new_chunk_with_capacity(&[int.clone(), int.clone()], n);
                 for i in 0..n {
-                    if null_rows.contains(&i) {
-                        chk.append_null(0);
-                    } else if bad_rows.contains(&i) {
+                    // A NULL row keeps an overflowing value under its NULL bit (as an
+                    // intermediate column of the vector driver can).
+                    if bad_rows.contains(&i) {
                         chk.append_int64(0, i64::MAX - i as i64);
                     } else {
                         chk.append_int64(0, i as i64);
                     }
                     chk.append_int64(1, 1000);
+                }
+                for &i in &null_rows {
+                    chk.column_mut(0).set_null(i, true);
                 }
                 let mut res = new_empty_column(&int);
                 let vec_r = prog.eval(ctx, &st, &mut rpn, &chk, &mut res);
