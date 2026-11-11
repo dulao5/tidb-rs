@@ -9,8 +9,8 @@ Following the constitution (article 1, item 2), tidb-rs ports security and data-
 | Upstream fix | v8.5.8 behavior | tidb-rs behavior | Compatibility impact |
 |---|---|---|---|
 | [pingcap/tidb#62892](https://github.com/pingcap/tidb/pull/62892) (labelled `compatibility-breaker` upstream; not in any 8.5 release) | `SET [SESSION] tidb_redact_log = …` succeeds, but actually switches redaction for **every session on the instance**, and is not persisted ([tidb-rs #62](https://github.com/dulao5/tidb-rs/issues/62)). | `tidb_redact_log` has **GLOBAL scope only**. `SET tidb_redact_log = ON` without a scope (= SESSION) and `SET SESSION …` fail with error 1229; use `SET GLOBAL tidb_redact_log = …`, which is cluster-wide and persisted. Same as TiDB master for user sessions. | **Breaking.** Scripts that set it without `GLOBAL` get an error. In a mixed Go/tidb-rs cluster both sides store the value in `mysql.global_variables` in the same format and read each other's `SET GLOBAL`. |
-| [pingcap/tidb#65884](https://github.com/pingcap/tidb/pull/65884) | `SET tidb_opt_fix_control = '123:'` (colon with no value) panics (index out of range). | The value after the colon is empty; no error. | None (a crash becomes a success). |
-| [pingcap/tidb#67149](https://github.com/pingcap/tidb/pull/67149) | Comparing or sorting a string containing U+2CEA1 under `utf8mb4_0900_ai_ci` panics (out-of-bounds read). | Works. | None (a crash becomes a success). |
+| [pingcap/tidb#65884](https://github.com/pingcap/tidb/pull/65884) | `SET tidb_opt_fix_control = '123:'` (colon with no value) fails with `ERROR 1105 runtime error: index out of range …` (an internal panic, recovered per statement); nothing is set. | The value after the colon is empty; no error. | None (an error becomes a success). |
+| [pingcap/tidb#67149](https://github.com/pingcap/tidb/pull/67149) | Comparing or sorting a string containing U+2CEA1 under `utf8mb4_0900_ai_ci` fails with `ERROR 1105 runtime error: index out of range …` (an internal panic, recovered per statement). | Works. | None (an error becomes a success). |
 
 ## Transitional gaps (until the session layer is ported)
 
