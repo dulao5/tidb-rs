@@ -835,12 +835,13 @@ pub fn type_infer_for_null(ctx: &dyn EvalContext, args: &mut [ExprRef]) {
             && !(argflags.equals(Some(&ret_field_tp))
                 && mysql::has_not_null_flag(ret_field_tp.get_flag()))
         {
-            let mut newarg = (**arg).clone();
-            if let Expr::Constant(c) = &mut newarg {
-                c.ret_type = ret_field_tp.clone();
-                c.ret_type.del_flag(mysql::NotNullFlag); // Remove NotNullFlag of NullConst
-            }
-            *arg = newarg.into_ref();
+            // Go writes through `GetType(ctx)`; a parameter marker's `GetType` returns a new
+            // object each time, so the change is lost and its RetType stays TypeNull
+            // (`with_type_mut` skips parameter markers; review #95).
+            crate::builtin_cast::with_type_mut(arg, |tp| {
+                *tp = ret_field_tp.clone();
+                tp.del_flag(mysql::NotNullFlag); // Remove NotNullFlag of NullConst
+            });
         }
     }
 }

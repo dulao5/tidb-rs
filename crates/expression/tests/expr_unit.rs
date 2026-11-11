@@ -145,3 +145,49 @@ fn disable_parse_json_flag_reaches_the_signature() {
         "the signature no longer parses the string"
     );
 }
+
+/// `typeInferForNull` changes a NULL constant's type to the other operand's, but not a
+/// parameter marker bound to NULL: Go writes through `GetType(ctx)`, which for a parameter
+/// marker is a new object each time, so the change is lost (review #95).
+#[test]
+fn type_infer_for_null_skips_parameter_markers() {
+    use tidb_expression::constant::{ParamMarker, new_null_with_field_type};
+    use tidb_expression::expression::Expr;
+    use tidb_expression::scalar_function::type_infer_for_null;
+    use tidb_types::field_type::new_field_type;
+
+    let ev = es::new_eval_context(vec![es::with_param_list(&[
+        tidb_types::datum::Datum::default(),
+    ])]);
+    let int_col = Expr::Column(tidb_expression::column::Column {
+        unique_id: 1,
+        index: 0,
+        ret_type: new_field_type(tidb_base::mysql::TypeLonglong),
+        ..Default::default()
+    })
+    .into_ref();
+    // `isNull` in typeInferForNull: a constant of type NULL with a NULL value.
+    let new_null = || new_null_with_field_type(new_field_type(tidb_base::mysql::TypeNull));
+    let mut marker = new_null();
+    marker.param_marker = Some(ParamMarker { order: 0 });
+    let mut args = vec![
+        Expr::Constant(marker).into_ref(),
+        Expr::Constant(new_null()).into_ref(),
+        int_col,
+    ];
+    type_infer_for_null(&*ev, &mut args);
+    let tp = |e: &Expr| match e {
+        Expr::Constant(c) => c.ret_type.get_type(),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        tp(&args[0]),
+        tidb_base::mysql::TypeNull,
+        "parameter marker unchanged"
+    );
+    assert_eq!(
+        tp(&args[1]),
+        tidb_base::mysql::TypeLonglong,
+        "NULL constant inferred"
+    );
+}

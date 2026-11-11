@@ -114,4 +114,6 @@ v8.5.8 的 `pkg/expression` 中有 **98 个**签名结构体在 `baseBuiltinFunc
     - `funcs` 中的函数类由 `builtin_registry::function_class` 分派：函数族（D08.3–D08.9）移植之前返回 "not ported yet" 的错误；`getvar`（`BuildGetVarFunction`，D08.9）同样。
     - 签名类型为 `TypeUnspecified` 时 Go 让 `RetType` 与签名的 `tp` 不同（见 §3.2）；没有这样的签名，Rust 把调用方的类型放进签名。
     - `grouping` 的元数据检查（`defaultScalarFunctionCheck`）等 D08.9 的 `BuiltinGroupingImplSig`。
+    - `typeInferForNull` 不改参数标记的类型：Go 通过 `GetType(ctx)` 写，参数标记的 `GetType` 每次返回新对象，修改会丢掉，`RetType` 仍是 `TypeNull`（预处理语句中绑定为 NULL 的 `?` 不会变成另一个操作数的类型）。Rust 用 `with_type_mut`（跳过参数标记），单元测试 `type_infer_for_null_skips_parameter_markers`（Lucky 评审 #95）。
+    - `ret_type_mut` 清掉 hash 缓存，Go 不清；只影响 `MemoryUsage`（Lucky 评审 #95）。
     - **测不到的部分**：`fold`（0/1/-1）和 `TryFold` 截断 warning 只作用于 `funcs` 中的函数类；目前能构建的 `cast`、`to_binary`、`from_binary` 在 `newFunctionImpl` 之前就返回（它们自己折叠），所以 govec 的 `newfunc` 记录覆盖不到这两段，反证也测不出（D08.8 plan.md 2b-3 交接：第一个函数族移植时补记录）。
