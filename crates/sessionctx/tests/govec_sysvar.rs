@@ -9,6 +9,7 @@
 //! Extra files can be replayed with `GOVEC_SYSVAR_FILES=a.jsonl.gz,b.jsonl.gz` (other seeds).
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::Read;
 use std::panic::AssertUnwindSafe;
@@ -37,14 +38,22 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
 
 /// `variable.NewMockGlobalAccessor4Tests()`: every variable at its default (the registry's
 /// value unless overridden; Go copies all defaults into its map).
+///
+/// Plus the generator's in-memory mysql.tidb (`tidbTableAccessor`: name -> (value, comment));
+/// a missing row is session.getTableValue's "Result is empty" error.
 struct MockGlobalAccessor {
     vals: HashMap<String, String>,
+    tidb: TidbTable,
 }
+
+/// mysql.tidb of [`MockGlobalAccessor`], shared with the replay that dumps it.
+type TidbTable = std::sync::Arc<std::sync::Mutex<BTreeMap<String, (String, String)>>>;
 
 impl MockGlobalAccessor {
     fn new() -> MockGlobalAccessor {
         MockGlobalAccessor {
             vals: HashMap::new(),
+            tidb: TidbTable::default(),
         }
     }
 }
@@ -76,8 +85,18 @@ impl GlobalVarAccessor for MockGlobalAccessor {
         self.vals.insert(name.to_owned(), value.to_owned());
         Ok(())
     }
-    fn get_tidb_table_value(&self, _name: &str) -> Result<String, Error> {
-        panic!("not supported")
+    fn get_tidb_table_value(&self, name: &str) -> Result<String, Error> {
+        match self.tidb.lock().unwrap().get(name) {
+            Some((v, _)) => Ok(v.clone()),
+            None => Err(tidb_base::dbterror::exeerrors::ErrResultIsEmpty.clone()),
+        }
+    }
+    fn set_tidb_table_value(&mut self, name: &str, value: &str, comment: &str) -> Result<(), Error> {
+        self.tidb
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), (value.to_owned(), comment.to_owned()));
+        Ok(())
     }
 }
 

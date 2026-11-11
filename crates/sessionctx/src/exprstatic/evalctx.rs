@@ -575,6 +575,10 @@ impl GlobalVarAccessor for NilGlobalVarAccessor {
     fn get_tidb_table_value(&self, _name: &str) -> Result<String, Error> {
         panic!("runtime error: invalid memory address or nil pointer dereference")
     }
+    // glue: method call on a nil GlobalVarAccessor interface (Go panics)
+    fn set_tidb_table_value(&mut self, _name: &str, _value: &str, _comment: &str) -> Result<(), Error> {
+        panic!("runtime error: invalid memory address or nil pointer dereference")
+    }
 }
 
 // go: newSessionVarsWithSystemVariables L1 [M-MAPORDER]

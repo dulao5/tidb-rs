@@ -3,8 +3,8 @@
 //! Helpers of the variable package: value conversions (`TiDBOptOn`, `TidbOptInt64`, ...),
 //! the checks shared by validation hooks, and the byte-size / percentage parsers.
 //! The SetSession / SetGlobal helpers (`setSnapshotTS`, `setTxnReadTS`, `setReadStaleness`,
-//! `getTiDBTableValue`, `setTiDBTableValue`, `switchDDL`, `switchStats`) belong with the
-//! session hooks of block D05.2.
+//! `switchDDL`, `switchStats`) belong with the session hooks of block D05.2;
+//! `getTiDBTableValue` / `setTiDBTableValue` are here (D05.2 PR C).
 
 #![allow(non_upper_case_globals)]
 
@@ -238,6 +238,40 @@ pub(crate) fn check_isolation_level(
     (normalized_value.to_owned(), Ok(()))
 }
 
+/// Deprecated: Get the value from the mysql.tidb table.
+/// This supports the use case that a TiDB server *older* than 5.0 is a member of the cluster.
+/// i.e. system variables such as tidb_gc_concurrency, tidb_gc_enable, tidb_gc_life_time
+/// do not exist.
+// go: getTiDBTableValue L1
+pub(crate) fn get_tidb_table_value(
+    vars: &SessionVars,
+    name: &str,
+    default_val: &str,
+) -> Result<String, Error> {
+    match vars.global_vars_accessor.get_tidb_table_value(name) {
+        // handle empty result or other errors
+        Err(_) => Ok(default_val.to_owned()),
+        Ok(val) => Ok(true_false_to_on_off(&val)),
+    }
+}
+
+/// Deprecated: Set the value from the mysql.tidb table.
+/// This supports the use case that a TiDB server *older* than 5.0 is a member of the cluster.
+/// i.e. system variables such as tidb_gc_concurrency, tidb_gc_enable, tidb_gc_life_time
+/// do not exist.
+// go: setTiDBTableValue L1
+pub(crate) fn set_tidb_table_value(
+    vars: &mut SessionVars,
+    name: &str,
+    value: &str,
+    comment: &str,
+) -> Result<(), Error> {
+    let value = on_off_to_true_false(value);
+    vars.global_vars_accessor.set_tidb_table_value(name, &value, comment)
+}
+
+/// In mysql.tidb the convention has been to store the string value "true"/"false",
+/// but sysvars use the convention ON/OFF.
 // go: trueFalseToOnOff L1
 pub fn true_false_to_on_off(s: &str) -> String {
     if gostd::equal_fold("true", s) {
