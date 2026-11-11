@@ -2576,12 +2576,7 @@ pub(crate) fn with_type_mut(e: &mut ExprRef, f: impl FnOnce(&mut FieldType)) {
                 f(&mut c.ret_type);
             }
         }
-        Expr::ScalarFunction(sf) => {
-            f(&mut sf.ret_type);
-            sf.function.tp = sf.ret_type.clone();
-            sf.hashcode = Default::default();
-            sf.canonicalhashcode = Default::default();
-        }
+        Expr::ScalarFunction(sf) => f(sf.ret_type_mut()),
     }
 }
 

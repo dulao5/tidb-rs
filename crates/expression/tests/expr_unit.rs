@@ -99,3 +99,95 @@ fn correlated_slot_is_shared_by_clone_and_remap() {
     });
     assert!(st.correlated(&fresh).is_null());
 }
+
+/// One result type per function node (D08.1 spec §3.2, Lucky review #94): clearing
+/// `ParseToJSONFlag` on `CAST(c AS JSON)` changes how the signature evaluates, as in Go
+/// (v8.5.8: `CAST('[1]' AS JSON) = '[1]'` is 0 because the string is then not parsed).
+#[test]
+fn disable_parse_json_flag_reaches_the_signature() {
+    use tidb_chunk::chunk::new_chunk_with_capacity;
+    use tidb_expression::builtin_cast::build_cast_function;
+    use tidb_expression::util::disable_parse_json_flag4_expr;
+    use tidb_sessionctx::exprstatic as es;
+    use tidb_types::datum::new_string_datum;
+    use tidb_types::field_type::new_field_type;
+
+    let ev = es::new_eval_context(vec![]);
+    let ctx = es::new_expr_context(vec![es::with_eval_ctx(std::sync::Arc::clone(&ev))]);
+    let ft = new_field_type(tidb_base::mysql::TypeVarchar);
+    let mut chk = new_chunk_with_capacity(std::slice::from_ref(&ft), 1);
+    chk.append_datum(0, &new_string_datum("[1]"));
+    let col = tidb_expression::column::Column {
+        unique_id: 1,
+        index: 0,
+        ret_type: ft,
+        orig_name: "c".into(),
+        ..Default::default()
+    };
+    let col = tidb_expression::expression::Expr::Column(col).into_ref();
+    let mut cast =
+        build_cast_function(&*ctx, col, new_field_type(tidb_base::mysql::TypeJSON)).unwrap();
+    let st = tidb_expression::expression::EvalState::new();
+    let parsed = cast.eval_json(&*ev, &st, chk.get_row(0)).unwrap().unwrap();
+    assert_eq!(parsed.to_string(), "[1]", "the string is parsed as JSON");
+
+    disable_parse_json_flag4_expr(&*ev, &mut cast);
+    let sf = cast.as_scalar_function().unwrap();
+    assert_eq!(
+        sf.ret_type().get_flag() & tidb_base::mysql::ParseToJSONFlag,
+        0,
+        "RetType changed"
+    );
+    let kept = cast.eval_json(&*ev, &st, chk.get_row(0)).unwrap().unwrap();
+    assert_eq!(
+        kept.to_string(),
+        "\"[1]\"",
+        "the signature no longer parses the string"
+    );
+}
+
+/// `typeInferForNull` changes a NULL constant's type to the other operand's, but not a
+/// parameter marker bound to NULL: Go writes through `GetType(ctx)`, which for a parameter
+/// marker is a new object each time, so the change is lost (review #95).
+#[test]
+fn type_infer_for_null_skips_parameter_markers() {
+    use tidb_expression::constant::{ParamMarker, new_null_with_field_type};
+    use tidb_expression::expression::Expr;
+    use tidb_expression::scalar_function::type_infer_for_null;
+    use tidb_types::field_type::new_field_type;
+
+    let ev = es::new_eval_context(vec![es::with_param_list(&[
+        tidb_types::datum::Datum::default(),
+    ])]);
+    let int_col = Expr::Column(tidb_expression::column::Column {
+        unique_id: 1,
+        index: 0,
+        ret_type: new_field_type(tidb_base::mysql::TypeLonglong),
+        ..Default::default()
+    })
+    .into_ref();
+    // `isNull` in typeInferForNull: a constant of type NULL with a NULL value.
+    let new_null = || new_null_with_field_type(new_field_type(tidb_base::mysql::TypeNull));
+    let mut marker = new_null();
+    marker.param_marker = Some(ParamMarker { order: 0 });
+    let mut args = vec![
+        Expr::Constant(marker).into_ref(),
+        Expr::Constant(new_null()).into_ref(),
+        int_col,
+    ];
+    type_infer_for_null(&*ev, &mut args);
+    let tp = |e: &Expr| match e {
+        Expr::Constant(c) => c.ret_type.get_type(),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        tp(&args[0]),
+        tidb_base::mysql::TypeNull,
+        "parameter marker unchanged"
+    );
+    assert_eq!(
+        tp(&args[1]),
+        tidb_base::mysql::TypeLonglong,
+        "NULL constant inferred"
+    );
+}

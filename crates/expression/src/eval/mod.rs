@@ -976,7 +976,7 @@ fn static_eval_type(e: &Expr) -> EvalType {
         Expr::Column(c) => c.ret_type.eval_type(),
         Expr::CorrelatedColumn(c) => c.column.ret_type.eval_type(),
         Expr::Constant(c) => c.ret_type.eval_type(),
-        Expr::ScalarFunction(f) => f.ret_type.eval_type(),
+        Expr::ScalarFunction(f) => f.ret_type().eval_type(),
     }
 }
 
