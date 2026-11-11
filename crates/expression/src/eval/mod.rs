@@ -47,31 +47,62 @@ pub type RowFn<T> =
 pub type VecFn =
     fn(&BuiltinFunc, &dyn EvalContext, usize, &[&Column], &mut Column) -> Result<(), Error>;
 
+/// The evaluation types a signature's vector driver reads its arguments as (Go: which
+/// `args[i].VecEvalXxx` its `vecEvalXxx` calls); empty for `lazy` bodies, which read each
+/// argument as its own evaluation type.
+pub type ArgEvalTypes = &'static [EvalType];
+
 /// The drivers `#[eval_fn]` generates for one signature: one variant per evaluation type
 /// (a Go signature implements the `evalXxx`/`vecEvalXxx` pair of its result type).
 #[derive(Clone, Copy)]
 pub enum SigDrivers {
     /// `evalInt`.
-    Int { row: RowFn<i64>, vec: VecFn },
+    Int {
+        row: RowFn<i64>,
+        vec: VecFn,
+        args: ArgEvalTypes,
+    },
     /// `evalReal`.
-    Real { row: RowFn<f64>, vec: VecFn },
+    Real {
+        row: RowFn<f64>,
+        vec: VecFn,
+        args: ArgEvalTypes,
+    },
     /// `evalDecimal`.
-    Decimal { row: RowFn<MyDecimal>, vec: VecFn },
+    Decimal {
+        row: RowFn<MyDecimal>,
+        vec: VecFn,
+        args: ArgEvalTypes,
+    },
     /// `evalString`.
-    String { row: RowFn<Vec<u8>>, vec: VecFn },
+    String {
+        row: RowFn<Vec<u8>>,
+        vec: VecFn,
+        args: ArgEvalTypes,
+    },
     /// `evalTime`.
-    Time { row: RowFn<Time>, vec: VecFn },
+    Time {
+        row: RowFn<Time>,
+        vec: VecFn,
+        args: ArgEvalTypes,
+    },
     /// `evalDuration`.
-    Duration { row: RowFn<Duration>, vec: VecFn },
+    Duration {
+        row: RowFn<Duration>,
+        vec: VecFn,
+        args: ArgEvalTypes,
+    },
     /// `evalJSON`.
     Json {
         row: RowFn<BinaryJSON<'static>>,
         vec: VecFn,
+        args: ArgEvalTypes,
     },
     /// `evalVectorFloat32`.
     VectorFloat32 {
         row: RowFn<VectorFloat32<'static>>,
         vec: VecFn,
+        args: ArgEvalTypes,
     },
     /// No evaluation: a signature that is only built and inspected (planner-only signatures,
     /// and the descriptor-only signatures of tests). Every `evalXxx` returns Go's
@@ -94,6 +125,22 @@ impl SigDrivers {
             SigDrivers::VectorFloat32 { .. } => ETVectorFloat32,
             SigDrivers::None => return None,
         })
+    }
+
+    /// The type argument `i` is read as (`None`: its own evaluation type).
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    pub fn arg_eval_type(&self, i: usize) -> Option<EvalType> {
+        match *self {
+            SigDrivers::Int { args, .. }
+            | SigDrivers::Real { args, .. }
+            | SigDrivers::Decimal { args, .. }
+            | SigDrivers::String { args, .. }
+            | SigDrivers::Time { args, .. }
+            | SigDrivers::Duration { args, .. }
+            | SigDrivers::Json { args, .. }
+            | SigDrivers::VectorFloat32 { args, .. } => args.get(i).copied(),
+            SigDrivers::None => None,
+        }
     }
 
     // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
