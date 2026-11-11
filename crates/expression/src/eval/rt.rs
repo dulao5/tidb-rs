@@ -258,7 +258,7 @@ impl<'a> DecimalOut<'a> {
 }
 
 macro_rules! fixed_out {
-    ($name:ident, $t:ty, $le:ty, $resize:ident) => {
+    ($name:ident, $t:ty, $le:ty, $resize:ident, $wire:path) => {
         /// Writer of a fixed-length result column: `ResizeXxx(n, false)` and `MergeNulls(args...)`
         /// (Go's vector versions), then values and NULL flags row by row.
         pub struct $name<'a> {
@@ -289,7 +289,7 @@ macro_rules! fixed_out {
             #[inline(always)]
             // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
             pub fn set(&mut self, i: usize, v: $t) {
-                self.data[i] = <$le>::new(v);
+                self.data[i] = $wire(v);
             }
             /// Sets row `i` to NULL.
             #[inline(always)]
@@ -319,14 +319,14 @@ macro_rules! fixed_out {
                     let base = blk * 8;
                     for j in 0..8 {
                         let (v, b) = f(base + j);
-                        out8[j] = <$le>::new(v);
+                        out8[j] = $wire(v);
                         bad |= b & ((byte >> j) & 1 == 1);
                     }
                 }
                 for (j, o) in tail.iter_mut().enumerate() {
                     let i = full * 8 + j;
                     let (v, b) = f(i);
-                    *o = <$le>::new(v);
+                    *o = $wire(v);
                     bad |= b & (self.nulls[i >> 3] & (1 << (i & 7)) != 0);
                 }
                 bad
@@ -350,7 +350,7 @@ macro_rules! fixed_out {
                     if byte == 0xFF {
                         for i in base..end {
                             match f(i)? {
-                                Some(v) => data[i] = <$le>::new(v),
+                                Some(v) => data[i] = $wire(v),
                                 None => *nb &= !(1 << (i - base)),
                             }
                         }
@@ -358,7 +358,7 @@ macro_rules! fixed_out {
                         for i in base..end {
                             if byte & (1 << (i - base)) != 0 {
                                 match f(i)? {
-                                    Some(v) => data[i] = <$le>::new(v),
+                                    Some(v) => data[i] = $wire(v),
                                     None => *nb &= !(1 << (i - base)),
                                 }
                             }
@@ -371,8 +371,31 @@ macro_rules! fixed_out {
     };
 }
 
-fixed_out!(IntOut, i64, I64, resize_int64);
-fixed_out!(RealOut, f64, F64, resize_float64);
+fixed_out!(IntOut, i64, I64, resize_int64, I64::new);
+fixed_out!(RealOut, f64, F64, resize_float64, F64::new);
+fixed_out!(TimeOut, Time, U64, resize_time, time_wire);
+fixed_out!(
+    DurationOut,
+    Duration,
+    I64,
+    resize_go_duration,
+    duration_wire
+);
+
+/// The column word of a time value (`types.Time`, the packed `CoreTime`).
+#[inline(always)]
+// glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+fn time_wire(t: Time) -> U64 {
+    U64::new(t.raw().0)
+}
+
+/// The column word of a duration value: the nanoseconds only (Go's `GoDurations()`; the
+/// fsp is the column's declared one when it is read back).
+#[inline(always)]
+// glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+fn duration_wire(d: Duration) -> I64 {
+    I64::new(d.duration)
+}
 
 /// [`Args`] of the row driver: evaluates `f.args[i]` on the row when asked.
 pub struct RowArgs<'a> {

@@ -1,7 +1,7 @@
 //! Replays the govec `cast` vectors (tidb-rs-tracker `govec/domains/cast.go`): block D08.8 —
-//! CAST to INT/REAL/DECIMAL/STRING built with `BuildCastFunctionWithCheck` (folded on a
+//! CAST to INT/REAL/DECIMAL/STRING/DATETIME/DATE/TIMESTAMP/TIME built with `BuildCastFunctionWithCheck` (folded on a
 //! constant argument) and evaluated row by row and over a chunk (the vector driver),
-//! `WrapWithCastAsInt/Real/Decimal/String`, `HandleBinaryLiteral` (to_binary/from_binary)
+//! `WrapWithCastAsInt/Real/Decimal/String/Time/Duration`, `HandleBinaryLiteral` (to_binary/from_binary)
 //! and `BuildCastCollationFunction` — against Go TiDB v8.5.8.
 //!
 //! `GOVEC_CAST_FILES` (comma-separated paths) replays extra-seed artifacts as well.
@@ -17,12 +17,15 @@ use tidb_base::mysql::SQLMode;
 use tidb_chunk::chunk::new_chunk_with_capacity;
 use tidb_expression::builtin_cast::{
     build_cast_collation_function, build_cast_function_with_check, wrap_with_cast_as_decimal,
-    wrap_with_cast_as_int, wrap_with_cast_as_real, wrap_with_cast_as_string,
+    wrap_with_cast_as_duration, wrap_with_cast_as_int, wrap_with_cast_as_real,
+    wrap_with_cast_as_string, wrap_with_cast_as_time,
 };
 use tidb_expression::builtin_convert_charset::handle_binary_literal;
 use tidb_expression::eval::{RpnProgram, RpnState, rt};
 use tidb_expression::*;
-use tidb_parser::types::{ETDecimal, ETInt, ETReal, ETString, FieldType};
+use tidb_parser::types::{
+    ETDatetime, ETDecimal, ETDuration, ETInt, ETReal, ETString, ETTimestamp, FieldType,
+};
 use tidb_sessionctx::errctx::{Level, LevelMap};
 use tidb_sessionctx::exprstatic as es;
 use tidb_types::MyDecimal;
@@ -137,6 +140,16 @@ fn datum_out(d: &Datum) -> Value {
         dm::KindString => json!([d.kind(), gs(d.get_string()), d.collation()]),
         dm::KindMysqlDecimal => json!([d.kind(), d.get_mysql_decimal().string()]),
         dm::KindBytes => json!([d.kind(), hex(d.get_bytes())]),
+        dm::KindMysqlTime => json!([d.kind(), d.get_mysql_time().raw().0]),
+        dm::KindMysqlDuration => {
+            let x = d.get_mysql_duration();
+            json!([d.kind(), x.duration, x.fsp])
+        }
+        dm::KindMysqlJSON => {
+            let j = d.get_mysql_json();
+            json!([d.kind(), j.type_code, hex(&j.value)])
+        }
+        dm::KindVectorFloat32 => json!([d.kind(), d.get_vector_float32().string()]),
         k => panic!("datum_out: kind {k}"),
     }
 }
@@ -213,6 +226,11 @@ fn dec_out(d: &MyDecimal) -> Value {
     json!({ "s": String::from_utf8(d.to_string()).unwrap(), "str": d.string(), "st": st })
 }
 
+/// castTimeOut: [raw (the packed CoreTime), String()].
+fn time_out(t: &tidb_types::time::Time) -> Value {
+    json!([t.raw().0.to_string(), gs(&t.string())])
+}
+
 fn warns(ws: &[SQLWarn]) -> Value {
     Value::Array(
         ws.iter()
@@ -254,6 +272,13 @@ fn ctx_of(v: &Value) -> Ctxs {
     if a.len() > 2 {
         opts.push(es::with_max_allowed_packet(a[2].as_u64().unwrap()));
         opts.push(es::with_sql_mode(SQLMode(a[3].as_u64().unwrap() as i64)));
+    }
+    if a.len() > 4 {
+        // The statement time (unix nanoseconds, UTC).
+        let ns = a[4].as_i64().unwrap();
+        opts.push(es::with_current_time(Arc::new(move || {
+            Ok(tidb_base::gostd::time::unix(0, ns))
+        })));
     }
     let ev = es::new_eval_context(opts);
     let ctx = es::new_expr_context(vec![es::with_eval_ctx(Arc::clone(&ev))]);
@@ -301,6 +326,12 @@ fn row_val(ctx: &dyn EvalContext, e: &Expr, row: tidb_chunk::Row<'_>) -> Value {
         ex_val(e.eval_decimal(ctx, &st, row), |v| dec_out(&v))
     } else if et == ETString {
         ex_val(e.eval_string(ctx, &st, row), |v| gs(&v))
+    } else if et == ETDatetime || et == ETTimestamp {
+        ex_val(e.eval_time(ctx, &st, row), |v| time_out(&v))
+    } else if et == ETDuration {
+        ex_val(e.eval_duration(ctx, &st, row), |v| {
+            json!([v.duration, v.fsp])
+        })
     } else {
         panic!("row_val")
     }
@@ -331,6 +362,11 @@ fn vec_val(ctx: &es::EvalContext, e: &ExprRef, chk: &tidb_chunk::Chunk) -> Value
                 json!(col.get_float64(i).to_bits().to_string())
             } else if et == ETString {
                 gs(col.get_bytes(i))
+            } else if et == ETDatetime || et == ETTimestamp {
+                time_out(&col.get_time(i))
+            } else if et == ETDuration {
+                // The column keeps the nanoseconds only.
+                json!(col.get_duration(i, 0).duration)
             } else {
                 dec_out(&col.get_decimal(i))
             }
@@ -360,7 +396,17 @@ fn exec(op: &str, p: &[Value]) -> Value {
     match op {
         "cast" => {
             let (ctx, ev) = ctx_of(&p[3]);
-            let (arg, chk) = arg_of(&p[0], p.get(4));
+            let a0 = p[0].as_array().unwrap();
+            let (arg, chk) = if a0[0].as_str() == Some("cast") {
+                // ["cast", tpIn, colArg]: the argument is CAST(column AS tp).
+                let (inner, chk) = arg_of(&a0[2], p.get(4));
+                let e = build_cast_function_with_check(&*ctx, inner, ft_in(&a0[1]), false, false)
+                    .unwrap();
+                ev.truncate_warnings(0);
+                (e, chk)
+            } else {
+                arg_of(&p[0], p.get(4))
+            };
             let tp = ft_in(&p[1]);
             let mut res: Option<ExprRef> = None;
             let build = ex_try(|| {
@@ -455,6 +501,8 @@ fn exec(op: &str, p: &[Value]) -> Value {
                     "int" => wrap_with_cast_as_int(&*ctx, arg),
                     "real" => wrap_with_cast_as_real(&*ctx, arg),
                     "string" => wrap_with_cast_as_string(&*ctx, arg),
+                    "time" => wrap_with_cast_as_time(&*ctx, arg, ft_in(&p[3])),
+                    "duration" => wrap_with_cast_as_duration(&*ctx, arg),
                     _ => wrap_with_cast_as_decimal(&*ctx, arg),
                 };
                 match r {

@@ -22,8 +22,15 @@
 //! ```
 //!
 //! Result types: `Int` → `Option<i64>`, `Real` → `Option<f64>`, `Decimal` →
-//! `Option<MyDecimal>`, `String` → `Option<()>` with the bytes appended to `out` (the vector
-//! driver reuses one buffer for the whole chunk).
+//! `Option<MyDecimal>`, `Time` → `Option<Time>`, `Duration` → `Option<Duration>` (the
+//! column keeps the nanoseconds; the declared fsp of the result applies when it is read
+//! back), `String` → `Option<()>` with the bytes appended to `out` (the vector driver reuses
+//! one buffer for the whole chunk).
+//!
+//! `novec`: the signature has no vector version of its own (Go defines no `vecEvalXxx`
+//! for it): the vector driver returns the `baseBuiltinFunc.vecEvalXxx` error. Whether the
+//! executor may take the vector path at all is `SigDesc::vectorized`, a separate property
+//! (D08.1 spec §3.5).
 //! Strict argument types: `i64` (EvalInt), `f64` (EvalReal), `&MyDecimal` (EvalDecimal),
 //! `&[u8]` (EvalString), `Time` (EvalTime), `Duration` (EvalDuration; the vector driver reads
 //! it with the argument's declared fsp, as Go's vector versions do), `&BinaryJSON` (EvalJSON),
@@ -42,6 +49,22 @@ enum Ret {
     Real,
     Decimal,
     String,
+    Time,
+    Duration,
+}
+
+impl Ret {
+    /// The `EvalType` constant of the result.
+    fn eval_type(self) -> TokenStream2 {
+        match self {
+            Ret::Int => quote!(::tidb_expression::eval::rt::ETInt),
+            Ret::Real => quote!(::tidb_expression::eval::rt::ETReal),
+            Ret::Decimal => quote!(::tidb_expression::eval::rt::ETDecimal),
+            Ret::String => quote!(::tidb_expression::eval::rt::ETString),
+            Ret::Time => quote!(::tidb_expression::eval::rt::ETDatetime),
+            Ret::Duration => quote!(::tidb_expression::eval::rt::ETDuration),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -57,6 +80,10 @@ struct Attr {
     /// own without a CAST (D08.1 spec §4.1). The last type repeats for the extra arguments of a
     /// variadic signature. Without it a `lazy` body reads each argument as its own type.
     args: Option<Vec<ArgKind>>,
+    /// `novec`: the signature has no vector version of its own (Go defines no `vecEvalXxx`
+    /// for it, whatever its `vectorized()` says): the vector driver returns the
+    /// `baseBuiltinFunc.vecEvalXxx` error (D08.1 spec §3.5).
+    novec: bool,
 }
 
 /// `checked(nflags = N, flags = path, err = path)`: see [`expand_checked`].
@@ -79,7 +106,10 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
             "Real" => a.ret = Some(Ret::Real),
             "Decimal" => a.ret = Some(Ret::Decimal),
             "String" => a.ret = Some(Ret::String),
+            "Time" => a.ret = Some(Ret::Time),
+            "Duration" => a.ret = Some(Ret::Duration),
             "lazy" => a.lazy = true,
+            "novec" => a.novec = true,
             "args" => {
                 let mut v = Vec::new();
                 meta.parse_nested_meta(|m| {
@@ -123,13 +153,19 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
             }
             _ => {
                 return Err(meta.error(
-                    "eval_fn: options are Int, Real, Decimal, String, lazy, eager, args(..), checked(..)",
+                    "eval_fn: options are Int, Real, Decimal, String, Time, Duration, lazy, eager, novec, args(..), checked(..)",
                 ));
             }
         }
         Ok(())
     });
     syn::parse::Parser::parse(parser, attr)?;
+    if a.novec && a.checked.is_some() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "eval_fn: novec and checked do not go together",
+        ));
+    }
     if a.args.is_some() && !a.lazy {
         return Err(syn::Error::new(
             Span::call_site(),
@@ -139,7 +175,7 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
     if a.ret.is_none() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "eval_fn: the result type (Int, Real, Decimal or String) is required",
+            "eval_fn: the result type (Int, Real, Decimal, String, Time or Duration) is required",
         ));
     }
     Ok(a)
@@ -272,6 +308,11 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
             quote!(::std::option::Option<::std::vec::Vec<u8>>),
             quote!(String),
         ),
+        Ret::Time => (quote!(::std::option::Option<#rt::Time>), quote!(Time)),
+        Ret::Duration => (
+            quote!(::std::option::Option<#rt::Duration>),
+            quote!(Duration),
+        ),
     };
     let err = quote!(#krate::eval::rt::Error);
 
@@ -324,12 +365,8 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
                 }
                 ::std::result::Result::Ok(())
             },
-            Ret::Int | Ret::Real | Ret::Decimal => {
-                let out = match ret {
-                    Ret::Int => quote!(#rt::IntOut),
-                    Ret::Real => quote!(#rt::RealOut),
-                    _ => quote!(#rt::DecimalOut),
-                };
+            Ret::Int | Ret::Real | Ret::Decimal | Ret::Time | Ret::Duration => {
+                let out = fixed_out(ret);
                 quote! {
                     let mut res = #out::new(result, n, &[]);
                     for i in 0..n {
@@ -391,12 +428,8 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
                 }
                 ::std::result::Result::Ok(())
             },
-            Ret::Int | Ret::Real | Ret::Decimal => {
-                let out = match ret {
-                    Ret::Int => quote!(#rt::IntOut),
-                    Ret::Real => quote!(#rt::RealOut),
-                    _ => quote!(#rt::DecimalOut),
-                };
+            Ret::Int | Ret::Real | Ret::Decimal | Ret::Time | Ret::Duration => {
+                let out = fixed_out(ret);
                 quote! {
                     #(#views)*
                     let mut res = #out::new(result, n, cols);
@@ -406,6 +439,16 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
         }
     };
 
+    let vec_body = if attr.novec {
+        let et = ret.eval_type();
+        quote!(::std::result::Result::Err(#krate::eval::base_vec_eval_error(#et)))
+    } else {
+        quote! {
+            let types = #krate::eval::ArgTypes::new(f, ctx);
+            let s = #krate::eval::VecSig::new(f, &types);
+            #vec_body
+        }
+    };
     let args_ts = arg_types(attr.args.as_deref().unwrap_or(&kinds));
     Ok(quote! {
         #func
@@ -428,8 +471,6 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
             cols: &[&#rt::Column],
             result: &mut #rt::Column,
         ) -> ::std::result::Result<(), #err> {
-            let types = #krate::eval::ArgTypes::new(f, ctx);
-            let s = #krate::eval::VecSig::new(f, &types);
             #vec_body
         }
 
@@ -437,6 +478,19 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
         #vis const #const_name: #krate::eval::SigDrivers =
             #krate::eval::SigDrivers::#drivers_variant { row: #row_name, vec: #vec_name, args: #args_ts };
     })
+}
+
+/// The writer of a fixed-length result column.
+fn fixed_out(ret: Ret) -> TokenStream2 {
+    let rt = quote!(::tidb_expression::eval::rt);
+    match ret {
+        Ret::Int => quote!(#rt::IntOut),
+        Ret::Real => quote!(#rt::RealOut),
+        Ret::Decimal => quote!(#rt::DecimalOut),
+        Ret::Time => quote!(#rt::TimeOut),
+        Ret::Duration => quote!(#rt::DurationOut),
+        Ret::String => unreachable!("String results are appended"),
+    }
 }
 
 /// The row driver's argument evaluation for strict bodies: left to right with a NULL
@@ -499,7 +553,7 @@ fn row_prologue(kinds: &[ArgKind], eager: bool) -> Vec<TokenStream2> {
 fn expand_checked(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
     let ret = attr.ret.expect("checked in parse_attr");
     let ck = attr.checked.as_ref().expect("checked");
-    if attr.lazy || matches!(ret, Ret::String | Ret::Decimal) {
+    if attr.lazy || !matches!(ret, Ret::Int | Ret::Real) {
         return Err(syn::Error::new_spanned(
             &func.sig,
             "eval_fn: checked is for strict Int/Real bodies",
