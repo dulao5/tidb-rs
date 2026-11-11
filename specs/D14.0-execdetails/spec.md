@@ -36,6 +36,7 @@ crate `tidb-execdetails`：N0 rank 4（`layers.toml` 去掉 `planned`），依�
 - **M-FMA**：tracker `scripts/go_fma_sites.py` 扫描 `pkg/util/execdetails`、`pkg/util/tracing`：所有目标都没有融合的位置。依赖代码不在登记表的扫描范围内，融合位置读自 go1.25.12 linux/arm64 二进制的 `go tool objdump`（每条 `FMADDD` / `FMSUBD` / `FNMSUBD` 对应到表达式），amd64（GOAMD64=v1）不融合：
   - tdigest：`tdigest.go:154、173、181、182、186、187、260`。gc 把 `x/2.0` 写成 `x*0.5`、`2.0*x` 写成 `x+x`（都精确），并在每个融合表达式里重新计算 `index = q*processedWeight`，所以 Rust 的融合式按指令实际的操作数写出。
   - `math`：`sin.go:227、236、238`，`asin.go:40`，`atan.go:69、70`。
+  - 其中 `tdigest.go:154、186、187` 的乘法是 `w*0.5`（精确），融合与否结果相同，反证测不出来；其余位置在两个目标上确实给出不同的结果：两个目标的向量有 152 条不同（tracker `targetDiffs`），也就是说 Go TiDB 在 amd64 与 arm64 上，超过 1000 个 cop task 时 `EXPLAIN ANALYZE`、慢日志和语句摘要中的 P80/P90/P95 末位不同。
 - **M-F2I**：`time.Duration(f)`、`uint64(x*(4/Pi))` 等用 `gostd::conv`。
 
 ### 3.2 同步与所有权
