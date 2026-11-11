@@ -28,7 +28,7 @@ Go 的 `baseBuiltinCastFunc` = `baseBuiltinFunc` + `inUnion`。Rust 的 `Builtin
 
 这些签名都有逐行的副作用（`AppendWarning`、`HandleError` 产生 warning），按 D08.1 spec §3.4 不用 `checked` 写法，用默认的单遍驱动：遇到第一个出错的行即返回，这正是 Go 向量版停下的行。
 
-**行版本与向量版本的差异**（D08.1 spec §3.4 (c)）：govec 同时比较两种模式，找到 Go 中 4 处向量版与行版对用户可见的不同；向量驱动按 Go 的向量版本，函数体通过 `SigView::vector()` 区分：
+**行版本与向量版本的差异**（D08.1 spec §3.4 (c)）：govec 同时比较两种模式，找到 Go 中 4 处向量版与行版对用户可见的不同（`StringAsDecimal` 和 `DecimalAsInt` 两处登记为 upstream-pitfall #83：错误码随 `tidb_enable_vectorized_expression` 在 1265/1292 之间变化，warning 文字不同）；向量驱动按 Go 的向量版本，函数体通过 `SigView::vector()` 区分：
 
 | 签名 | 行版本 | 向量版本 |
 |---|---|---|
@@ -48,7 +48,7 @@ Go 的 `baseBuiltinCastFunc` = `baseBuiltinFunc` + `inUnion`。Rust 的 `Builtin
 3. **TIME/DURATION/JSON/VECTOR 参数的 INT/REAL/DECIMAL 签名**：只有描述，没有驱动（临时桩）。
 4. **`TryPushCastIntoControlFunctionForHybridType`**：IF/CASE/ELT 未移植，tidb-rs 建不出这样的节点；遇到时 `unimplemented!`（临时桩，D08.9）。
 5. **`CastStringAs{Int,Real,Decimal}` 的前置分支**（hybrid、二进制字面量、`CanImplicitEval*`）：函数类不会对这样的参数选中这些签名（选 `IntAsInt` 等），不可达，未移植（L2）。
-6. **`PropagateType` 与类型的原地修改**：Go 直接修改参数节点（及共享它的所有持有者）的 `*FieldType`；Rust 在副本上修改（`with_type_mut`）。`ScalarFunction` 的 `RetType` 与签名的 `tp` 在 Go 中是同一个指针，两者一起改。
+6. **`PropagateType` 与类型的原地修改**：Go 直接修改参数节点（及共享它的所有持有者）的 `*FieldType`；Rust 在副本上修改（`with_type_mut`）。`ScalarFunction` 的 `RetType` 与签名的 `tp` 在 Go 中是同一个指针，两者一起改。**移植注意**（Lucky 评审 #82）：调用点 builtin_cast.go:220（`BuildCastFunction` 中对参数调用 `PropagateType`）在 Go 中原地修改的是**共享的** `ScalarFunction`/`Constant` 节点，计划中所有引用同一节点的地方都会看到新类型。按 Lucky 的分析，这一点从 SQL 观察不到；但规划器（P3）的 Go 代码可能依赖这种共享，移植规划器时遇到同一节点被多处引用、又在 CAST 之后读取其类型的地方，要确认是否需要显式地同步修改。
 7. **`foldConstant` 的 null-reject 分支**需要 `NewFunctionBase`（D08.1 2b），之前保留原表达式（与 Go 中 `NewFunctionBase` 失败时相同，临时桩）；`ifNullFoldHandler` 修改被丢弃的 IFNULL 节点的 charset/collation，Rust 不做（L2）。
 8. **向量版保留 `ResizeDecimal` 内容的情况**（`StringAsDecimal` 的 UNSIGNED UNION 负数）：Rust 写零（新列的内容）；复用的旧列在 Go 中会留下旧值。
 9. **FLOAT 与 hybrid（BIT/ENUM/SET）参数在向量驱动中**：RPN 把列原样交给签名（FLOAT 列是 float32、BIT/ENUM/SET 不是 int64），Go 的 `Column.VecEvalReal/Int` 会转换。govec 不生成这类参数；修正放在第 2 部分（RPN 的列引用要按签名读取的求值类型转换）。

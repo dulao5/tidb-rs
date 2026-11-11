@@ -59,6 +59,8 @@ pub type ExprRef = Arc<Expr>;
 2. **出错之前没有逐行的副作用**：`HandleTruncate`、`AppendWarning`、改写状态等。因此非严格模式下的大部分 CAST 和字符串函数不适用，仍用默认的单遍形式。
 3. **Go 的逐行版与向量版报同样的错误**。如果两者不同（Go 的 bug），两个驱动各自跟随对应的 Go 版本（逐行驱动跟 `evalXxx`，向量驱动跟 `vecEvalXxx`），govec 两种模式都比较，并登记在 §4。
 
+   - **`SigView::vector()` 分支只用于小差别**（Lucky 评审 #82）：两个 Go 版本只差几行（打印的参数类型、一个判断条件、错误交给哪个 handler）时，用同一个函数体加 `if f.vector()`；如果控制流或错误路径在结构上不同，就写两个函数体（行驱动和向量驱动各自生成），不要在一个函数体里交织两套逻辑。每个用到 `vector()` 的签名，govec 必须有记录在两种模式下都走到两边的分支（govec 每条记录都在两种模式下求值，所以只需输入能走到差异所在的分支；在签名旁注明是哪类记录）。
+
 每个采用 `checked` 的函数族，govec 必须包含两类记录：**出错的值藏在 NULL 位下面**；**第一个出错行不在第 0 行**（同一批中后面还有出错行）。
 
 ### 3.5 带状态的签名的 `Clone`（Lucky 评审 #75）
@@ -67,7 +69,7 @@ pub type ExprRef = Arc<Expr>;
 
 ## 4. 偏离与豁免
 
-1. **向量化方法不移植**（N4 §3.3 M-EVAL）：`Column`/`CorrelatedColumn`/`Constant` 的 24 个 `VecEval*` 由第 2 部分的向量驱动取代。tracker 豁免（`expr_pending.go`）。
+1. **向量化方法不移植**（N4 §3.3 M-EVAL）：`Column`/`CorrelatedColumn`/`Constant` 的 `VecEval*` 由向量驱动（RPN）取代。tracker 豁免（`expr_pending.go`）。例外：`Column.VecEvalInt/Real/String` 中会转换的分支（hybrid 列读成 int/string、FLOAT 列读成 real）已移植（D08.8 第 2 部分），RPN 按父签名读取的求值类型（`SigDrivers::arg_eval_type`）选择：转换（`RpnNode::ColumnConv`）、照搬，或者在编译时 panic——列的存储与读取类型不符、Go 也不转换的组合（例如 FLOAT 列读成 int），Go 的函数类不会构造这种调用，RPN 拒绝而不是让签名误读字节（Lucky 评审 #82）。
 2. **cascades 的 `Hash64`/`Equals`**：`base.HashEquals` 只被 cascades 规划器使用，`pkg/planner/cascades/base` 是 EXC.B（非默认路径，不移植）。`Column`、`CorrelatedColumn`、`Constant`、`collationInfo` 的 8 个方法豁免。
 3. **`MemoryUsage`**：Go 用 `unsafe.Sizeof` 估算，Rust 结构体大小不同。移植公式，固定部分取 Go 在 64 位目标上的值（`Column` 168、`Constant` 192、`Schema` 72，govec 生成器实测），govec 比较数值。`hashcode` 的容量在 Go 中由 `append` 的扩容决定，Rust 的 `Vec` 不同：只在算过 `HashCode` 之后才可能差几个字节（`Column` 固定为 9，与 Go 相同）；`Schema.MemoryUsage` 的切片容量同理，govec 不比较。
    - **关联列**：值不在节点中（§3.2），`CorrelatedColumn.MemoryUsage` 计入零值 Datum，Go 计入当前值。govec 的 `corr` 记录带 `dmem`，回放比较"Rust 的值 − 零值 + dmem"。`memory_usage` 不带 `EvalState` 参数：Go 在规划期估算时读到的 `Data` 本来就是过期的值（Apply 还没写或上一行的值），带上 state 也不会更准（Lucky 评审 #73）。

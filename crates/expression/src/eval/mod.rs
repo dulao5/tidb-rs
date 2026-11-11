@@ -641,10 +641,18 @@ pub trait Args {
 /// One node of an [`RpnProgram`] (post-order).
 #[derive(Debug)]
 pub enum RpnNode {
-    /// A column of the input chunk.
+    /// A column of the input chunk, copied (or borrowed) as is.
     ColumnRef {
         /// `Column.Index`.
         index: usize,
+    },
+    /// A column of the input chunk that Go's `Column.VecEvalXxx` converts: a hybrid
+    /// (ENUM/SET/BIT) column read as int or string, or a FLOAT column read as real.
+    ColumnConv {
+        /// The column.
+        expr: ExprRef,
+        /// The evaluation type the parent reads (`ETInt`, `ETString` or `ETReal`).
+        as_type: EvalType,
     },
     /// A constant: evaluated once per chunk and filled into a column (Go `genVecFromConstExpr`).
     Constant {
@@ -763,6 +771,16 @@ impl RpnProgram {
                         }
                     }
                 }
+                RpnNode::ColumnConv { expr, as_type } => {
+                    let c = expr.as_column().expect("ColumnConv holds a Column");
+                    if pos == last {
+                        return column_conv(ctx, c, *as_type, input, result);
+                    }
+                    let mut col = rpn.pool.pop().unwrap_or_else(rt::empty_column);
+                    let r = column_conv(ctx, c, *as_type, input, &mut col);
+                    stack.push(Slot::Temp(col));
+                    r?;
+                }
                 RpnNode::Constant { expr, as_type } => {
                     if pos == last {
                         return rt::fill_constant(ctx, st, expr, *as_type, n, result);
@@ -823,16 +841,26 @@ impl RpnProgram {
 // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
 fn compile_into(e: &ExprRef, as_type: EvalType, nodes: &mut Vec<RpnNode>) {
     match &**e {
-        Expr::Column(c) => nodes.push(RpnNode::ColumnRef {
-            index: c.index as usize,
+        Expr::Column(c) => nodes.push(match column_read(c, as_type) {
+            ColumnRead::Copy => RpnNode::ColumnRef {
+                index: c.index as usize,
+            },
+            ColumnRead::Convert => RpnNode::ColumnConv {
+                expr: e.clone(),
+                as_type,
+            },
         }),
         Expr::Constant(_) | Expr::CorrelatedColumn(_) => nodes.push(RpnNode::Constant {
             expr: e.clone(),
             as_type,
         }),
         Expr::ScalarFunction(sf) => {
-            for a in &sf.function.args {
-                compile_into(a, static_eval_type(a), nodes);
+            let drivers = &sf.function.sig.drivers;
+            for (i, a) in sf.function.args.iter().enumerate() {
+                let read = drivers
+                    .arg_eval_type(i)
+                    .unwrap_or_else(|| static_eval_type(a));
+                compile_into(a, read, nodes);
             }
             nodes.push(RpnNode::Call {
                 func: e.clone(),
@@ -851,5 +879,61 @@ fn static_eval_type(e: &Expr) -> EvalType {
         Expr::CorrelatedColumn(c) => c.column.ret_type.eval_type(),
         Expr::Constant(c) => c.ret_type.eval_type(),
         Expr::ScalarFunction(f) => f.ret_type.eval_type(),
+    }
+}
+
+/// How the vector driver reads a column argument.
+enum ColumnRead {
+    /// Go's `Column.VecEvalXxx` copies the column (`CopyReconstruct`).
+    Copy,
+    /// Go's `Column.VecEvalXxx` converts it row by row (hybrid, FLOAT).
+    Convert,
+}
+
+/// Which `Column.VecEvalXxx` branch Go takes when the parent reads `c` as `as_type`.
+///
+/// Go converts only a hybrid column read as int or string and a FLOAT column read as real;
+/// any other read copies the column's storage. A copy whose storage does not hold
+/// `as_type` values (a hybrid or FLOAT column read as another type, or a column whose
+/// evaluation type differs from `as_type`) would make the signature misread the bytes —
+/// Go's function classes never build such a call, so the RPN refuses it here instead of
+/// reading float32 as float64 or an ENUM as an int64 (Lucky #82).
+// glue: dispatch of Go `Column.VecEvalInt/Real/String` (M-EVAL)
+fn column_read(c: &crate::column::Column, as_type: EvalType) -> ColumnRead {
+    let tp = c.ret_type.get_type();
+    if c.ret_type.hybrid() {
+        if as_type == ETInt || as_type == ETString {
+            return ColumnRead::Convert;
+        }
+    } else if tp == tidb_base::mysql::TypeFloat {
+        if as_type == ETReal {
+            return ColumnRead::Convert;
+        }
+    } else if c.ret_type.eval_type() == as_type {
+        return ColumnRead::Copy;
+    }
+    panic!(
+        "RPN: column {} of type {} (evaluation type {:?}) read as {:?}: Go's Column.VecEval \
+         would copy storage that does not hold such values",
+        c.index,
+        tp,
+        c.ret_type.eval_type(),
+        as_type
+    );
+}
+
+/// Go's converting `Column.VecEvalInt/Real/String` (see [`column_read`]).
+// glue: dispatch of Go `Column.VecEvalInt/Real/String` (M-EVAL)
+fn column_conv(
+    ctx: &dyn EvalContext,
+    c: &crate::column::Column,
+    as_type: EvalType,
+    input: &Chunk,
+    result: &mut Column,
+) -> Result<(), Error> {
+    match as_type {
+        ETInt => c.vec_eval_int(ctx, input, result),
+        ETReal => c.vec_eval_real(ctx, input, result),
+        _ => c.vec_eval_string(ctx, input, result),
     }
 }

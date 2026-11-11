@@ -253,3 +253,27 @@ fn checked_drivers_agree() {
         }
     }
 }
+
+/// A FLOAT, ENUM or DOUBLE column fed to a body that reads int64 values: Go's
+/// `Column.VecEvalInt` would copy storage that does not hold int64s, so the RPN refuses to
+/// compile it instead of letting the signature misread the bytes (Lucky #82).
+#[test]
+fn rpn_refuses_misread_columns() {
+    let int = new_field_type(mysql::TypeLonglong);
+    for tp in [mysql::TypeFloat, mysql::TypeDouble, mysql::TypeNewDecimal] {
+        let ft = new_field_type(tp);
+        let e = func(&ADD_SIG, vec![col(0, &ft), col(0, &ft)], int.clone());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| RpnProgram::compile(&e)));
+        let msg = r.expect_err("compile must refuse");
+        let msg = msg
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(msg.contains("read as"), "{tp}: {msg}");
+    }
+    // A BIT column read as int converts (hybrid), it is accepted.
+    let mut bit = new_field_type(mysql::TypeBit);
+    bit.set_flen(8);
+    let e = func(&ADD_SIG, vec![col(0, &bit), col(0, &bit)], int.clone());
+    let _ = RpnProgram::compile(&e);
+}

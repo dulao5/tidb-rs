@@ -23,6 +23,9 @@ use tidb_parser::types::{ETDecimal, ETInt, ETReal, FieldType};
 use tidb_sessionctx::errctx::{Level, LevelMap};
 use tidb_sessionctx::exprstatic as es;
 use tidb_types::MyDecimal;
+use tidb_types::binary_literal::BinaryLiteral;
+use tidb_types::enum_type::Enum;
+use tidb_types::set_type::Set;
 use tidb_types::context::Flags;
 use tidb_types::datum::{self as dm, Datum};
 use tidb_types::field_type_builder::new_field_type_builder;
@@ -86,6 +89,22 @@ fn datum_in(v: &Value) -> Datum {
             d.set_mysql_decimal(x)
         }
         dm::KindBytes => d.set_bytes(Some(unhex(p[1].as_str().unwrap()))),
+        dm::KindFloat32 => d.set_float32(f64::from_bits(p[1].as_u64().unwrap()) as f32),
+        dm::KindMysqlBit => d.set_mysql_bit(BinaryLiteral(unhex(p[1].as_str().unwrap()))),
+        dm::KindMysqlEnum => d.set_mysql_enum(
+            Enum {
+                value: p[1].as_u64().unwrap(),
+                name: ungs(&p[2]),
+            },
+            p[3].as_str().unwrap().to_owned(),
+        ),
+        dm::KindMysqlSet => d.set_mysql_set(
+            Set {
+                value: p[1].as_u64().unwrap(),
+                name: ungs(&p[2]),
+            },
+            p[3].as_str().unwrap().to_owned(),
+        ),
         _ => panic!("datum_in: kind {k}"),
     }
     d

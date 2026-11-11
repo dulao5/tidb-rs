@@ -47,16 +47,16 @@ descriptor-only signatures, applies the record's coercibility/repertoire overrid
 probe string). A `{"panic": true}` output (Go indexes `args` or `argTps` out of range) must
 panic in Rust too.
 
-# Domain "cast" (block D08.8 part 1)
+# Domain "cast" (block D08.8 parts 1 and 2a)
 
 `<target>/cast.jsonl.gz` are copied unmodified from the tidb-rs-tracker repository:
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-1`) |
-| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 3,760 records: `cast` 3,060 (60 of them UNSIGNED UNION negative strings), `wrap` 700 |
-| `arm64/cast.jsonl.gz` sha256 | `fc5392599ff29f7ddbc50a9efdc3bdbb48db03d35682b758694b8586b080316e` (GOARCH=arm64, generated locally) |
-| `amd64/cast.jsonl.gz` sha256 | `77690813e4cf177eba5e92fb571a982403df7c1e00336f01bc739341807ab0db` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-2`, commit `3408336`) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 4,560 records: `cast` 3,860 (60 of them UNSIGNED UNION negative strings; 800 `conv` records — part 2a — with FLOAT, BIT(n), ENUM and SET columns, which Go's `Column.VecEvalInt/Real/String` convert), `wrap` 700 |
+| `arm64/cast.jsonl.gz` sha256 | `9d8dbc480611857ff2d18bfd5ae7e9580dcb58c4b97993d71d9ad4178275b9d6` (GOARCH=arm64, generated locally) |
+| `amd64/cast.jsonl.gz` sha256 | `0d8cdb86c1b40751d790227da140705ac6c586104ccb6174c80bc48009bd8593` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
 
 A `cast` record builds `CAST(arg AS tp)` with `BuildCastFunctionWithCheck` (the argument is a
 column of the record's rows or a constant, which is folded) under random type flags and error
