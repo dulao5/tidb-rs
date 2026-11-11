@@ -10,7 +10,10 @@
 //! A record that exercises a hook still listed as pending (`session_hook_pending`) is
 //! skipped and counted; records start to count as hooks land.
 //!
-//! Extra files can be replayed with `GOVEC_SESSIONVARS_FILES=a.jsonl.gz,b.jsonl.gz`.
+//! Extra files can be replayed with `GOVEC_SESSIONVARS_FILES=a.jsonl.gz,b.jsonl.gz` (only those
+//! with `GOVEC_SESSIONVARS_FILES_ONLY=1`).
+
+#![recursion_limit = "512"]
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -27,6 +30,9 @@ use tidb_sessionctx::variable::session_fields::SessionVarsFields;
 use tidb_sessionctx::variable::tidb_vars;
 use tidb_sessionctx::variable::variable::ScopeGlobal;
 use tidb_sessionctx::variable::*;
+
+#[path = "sessionvars_d/mod.rs"]
+mod sessionvars_d;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -512,6 +518,9 @@ fn gostd_lower(s: &str) -> String {
 
 /// Returns (out, err, warnings) like the Go exec.
 fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
+    if let Some((out, err)) = sessionvars_d::exec_d(op, args) {
+        return (out, err, vec![]);
+    }
     match op {
         "fresh" => {
             let m: serde_json::Map<String, Value> = SessionVarsFields::default()
@@ -819,7 +828,7 @@ fn check(rec: &Value) -> Option<String> {
         return Some("duplicate field names".to_owned());
     }
     if out != rec["out"] {
-        return Some(format!("out: got {out}, want {}", rec["out"]));
+        return Some(format!("out: {}", value_diff(&out, &rec["out"])));
     }
     let got_err = err.as_ref().map(msg);
     let want_err = &rec["err"];
@@ -840,6 +849,31 @@ fn check(rec: &Value) -> Option<String> {
         return Some(format!("warnings: got {got_w:?}, want {want_w:?}"));
     }
     None
+}
+
+/// The differing members of two JSON values (whole values when not both objects).
+fn value_diff(got: &Value, want: &Value) -> String {
+    match (got, want) {
+        (Value::Object(g), Value::Object(w)) => {
+            let mut keys: Vec<&String> = g.keys().chain(w.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            keys.iter()
+                .filter(|k| g.get(**k) != w.get(**k))
+                .map(|k| {
+                    format!(
+                        "{k}: {}",
+                        value_diff(
+                            g.get(*k).unwrap_or(&Value::Null),
+                            w.get(*k).unwrap_or(&Value::Null)
+                        )
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+        _ => format!("got {got}, want {want}"),
+    }
 }
 
 /// Replays one file: (records checked, records skipped as pending).
@@ -894,6 +928,14 @@ const MAX_SKIPPED: usize = 0;
 
 #[test]
 fn govec_sessionvars() {
+    if std::env::var("GOVEC_SESSIONVARS_FILES_ONLY").is_ok() {
+        // Replay only GOVEC_SESSIONVARS_FILES (counter-checks on a subset).
+        for f in std::env::var("GOVEC_SESSIONVARS_FILES").unwrap().split(',') {
+            let (n, skipped) = replay(f);
+            eprintln!("{f}: {n} checked, {skipped} skipped");
+        }
+        return;
+    }
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/v8.5.8");
     let path = format!("{dir}/{GO_TARGET}/sessionvars.jsonl.gz");
     if !std::path::Path::new(&path).exists() {

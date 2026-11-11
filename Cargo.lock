@@ -3924,6 +3924,7 @@ dependencies = [
  "tidb-model",
  "tidb-parser",
  "tidb-types",
+ "tipb",
 ]
 
 [[package]]

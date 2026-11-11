@@ -130,7 +130,7 @@ pub struct SessionState {
     /// txnIsolationLevelOneShot is used to implements "set transaction isolation level ..."
     pub txn_isolation_level_one_shot: super::session_state::TxnIsolationLevelOneShot,
     /// TxnReadTS is used for staleness transaction, it provides next staleness transaction startTS.
-    pub txn_read_ts: super::session_state::TxnReadTS,
+    pub txn_read_ts: Option<super::session_state::TxnReadTS>,
     /// IsolationReadEngines is used to isolation read, tidb only read from the stores whose engine type is in the engines.
     pub isolation_read_engines: std::collections::BTreeSet<tidb_base::kv::StoreType>,
     /// AllowFallbackToTiKV indicates the engine types whose unavailability triggers fallback to TiKV.
@@ -161,6 +161,25 @@ pub struct SessionState {
     pub last_ddl_info: super::session_state::LastDDLInfo,
     /// SnapshotInfoschema is used with SnapshotTS (only whether it is set is kept).
     pub snapshot_infoschema: bool,
+    /// UserVars is used to provide user variable operations.
+    pub user_vars: Arc<super::uservars::UserVars>,
+    /// PlanCacheParams is used to provide parameters for plan cache.
+    pub plan_cache_params: super::plan_cache_params::PlanCacheParamList,
+    /// PreparedStmts stores prepared statement (Go `map[uint32]any`; the planner's
+    /// `PlanCacheStmt`).
+    pub prepared_stmts: HashMap<u32, Arc<dyn std::any::Any + Send + Sync>>,
+    /// PreparedStmtNameToID maps a prepared statement name to its ID.
+    pub prepared_stmt_name_to_id: HashMap<String, u32>,
+    /// PlanID is the unique id of logical and physical plan.
+    pub plan_id: super::session_state::AtomicI32Field,
+    /// PlanColumnID is the unique id for column when building plan.
+    pub plan_column_id: super::session_state::AtomicI64Field,
+    /// MapScalarSubQ maps the scalar sub queries from its ID to its struct.
+    pub map_scalar_sub_q: Vec<Arc<dyn std::any::Any + Send + Sync>>,
+    /// PlanReplayerFinishedTaskKey used to record the finished plan replayer task key in order not to record the
+    /// duplicate task in plan replayer continues capture
+    pub plan_replayer_finished_task_key:
+        Option<std::collections::HashSet<super::session_state::PlanReplayerTaskKey>>,
 }
 
 impl Default for SessionState {
@@ -193,7 +212,7 @@ impl Default for SessionState {
             txn_ctx: Default::default(),
             kv_vars: Default::default(),
             txn_isolation_level_one_shot: Default::default(),
-            txn_read_ts: Default::default(),
+            txn_read_ts: None,
             isolation_read_engines,
             allow_fallback_to_tikv: Default::default(),
             partition_prune_mode: super::tidb_defs::DefTiDBPartitionPruneMode.to_owned(),
@@ -210,6 +229,14 @@ impl Default for SessionState {
             last_query_info: Default::default(),
             last_ddl_info: Default::default(),
             snapshot_infoschema: false,
+            user_vars: super::uservars::new_user_vars(),
+            plan_cache_params: super::plan_cache_params::new_plan_cache_param_list(),
+            prepared_stmts: HashMap::new(),
+            prepared_stmt_name_to_id: HashMap::new(),
+            plan_id: Default::default(),
+            plan_column_id: Default::default(),
+            map_scalar_sub_q: Vec::new(),
+            plan_replayer_finished_task_key: None,
         }
     }
 }
@@ -418,7 +445,7 @@ impl SessionVars {
     }
 
     /// GetSystemVar gets the string value of a system variable.
-    // glue: stand-in: D05.2, SessionVars.GetSystemVar (same body)
+    // go: SessionVars.GetSystemVar L1
     pub fn get_system_var(&self, name: &str) -> (String, bool) {
         if name == WarningCount {
             return (self.sys_warning_count.to_string(), true);
@@ -520,7 +547,7 @@ impl SessionVars {
     }
 
     /// Location gets the time zone of the session.
-    // glue: stand-in: D05.2, SessionVars.Location (timeutil.SystemLocation when unset)
+    // go: SessionVars.Location L2 (timeutil.SystemLocation: the process local zone, gostd time::local)
     pub fn location(&self) -> Arc<Location> {
         match &self.time_zone {
             Some(l) => l.clone(),

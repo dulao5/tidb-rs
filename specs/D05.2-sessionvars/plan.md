@@ -221,3 +221,40 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
 - **`slow_log.go` 12 个**（`writeSlowLogItem`、`SlowQueryLogItems` 的格式化等）：T7 中慢日志规则以外的部分，可以单独作为 PR E，依赖 D14.0 的 exec details。
 - **零散的**：`LazyStmtText`、`RuntimeFilterType`/`Mode`、`ReadConsistencyLevel`、`RewritePhaseInfo`、`PrepareDedupCacheKey`、`planCacheStmtKey`、`matchZero`/`matchGE`/`MatchEqual`、`makeKVExecDetailAccessor`、`uint64FromNonNegative`、`ToTiPBTiFlashPreAggMode`、`SetEnableAdaptiveReplicaRead`、`ParseString`。
 - **两个整文件**：`pkg/session/cursor/tracker.go`、`pkg/sessionctx/sessionstates/session_token.go`（会话迁移的 token）。cursor 归 PR D；session token 与权限（D04.1）相关，建议推迟到 D04.1。
+
+## PR D（2026-11-11）
+
+分支：tidb-rs `block/D05.2-sessionvars-d`，tracker `govec/sessionvars-D05.2-d`，base 都是 main。
+
+**范围划分**（PR D 提议中 172 个缺失函数的去向）：
+- **PR D（本 PR，126 个）**：`Concurrency` 的 27 个方法（`concurrency.rs`）；`UserVars` 6 个 + `NewUserVars`，替换 D00.1 的替身（`uservars.rs`）；`PlanCacheParamList` 6 个 + `NewPlanCacheParamList`（`plan_cache_params.rs`）；`SessionVars` 中不读语句 hint、chunk 分配器、`kvcache` 缓存、session states 和慢日志的方法，以及小类型：`ConnectionInfo.IsSecureTransport`、`RuntimeFilterType/Mode.String`、`ToTiPBTiFlashPreAggMode`、`PrepareDedupCacheKey`、`planCacheStmtKey.Hash`、`ReadConsistencyLevel.IsWeak`、`RewritePhaseInfo.Reset`、`Set/IsAdaptiveReplicaRead`、`TxnReadTS` 2 个、`TransactionContext` 的 `Get/SetForUpdateTS`、`Cleanup`（`session_methods.rs`、`session_state.rs`）。`GetSystemVar`、`Location` 从替身改为正式标注。
+- **PR E（下一步，D05.2 剩余 45 个 + 2 个文件）**：
+  1. **语句上下文相关（T9：把 `session.rs` 中的 `StatementContext` 替身换成 D00.1 的 `stmtctx::StatementContext`）**：`GetAllowInSubqToJoinAndAgg`、`GetEnableCascadesPlanner`、`GetReplicaRead`、`GetMaxExecutionTime`（读 `StmtHints`，要先移植 `pkg/util/hint` 的 `StmtHints` 字段，或在 stmtctx 中先加这些字段）、`RaiseWarningWhenMPPEnforced`、`SetLastInsertID`、`InitStatementContext`、chunk 分配器 6 个（`SetAlloc`、`ClearAlloc`、`GetChunkAllocator`、`IsAllocValid`、`GetUseChunkAlloc`、`ExchangeChunkStatus`；M-POOL 下按"接受并忽略"处理还是移植 `chunk.Allocator`，需评审）。Lucky 在 #71 评审中要求的"表达式访问 SessionVars 的窄 trait"也放在这里定义（`SetLastInsertID`、`SetUserVarVal` 等）。
+  2. **`LazyStmtText` 3 个、`GetTotalCostDuration` / `GetExecuteDuration`、`slow_log.go` 12 个**：依赖 `redact.String`（D00.3）、`StartTime`、D14.0 的 exec details（已合并）。
+  3. **`EncodeSessionStates` / `DecodeSessionStates`**：需要 `sessionstates.SessionStates`；`session_token.go` 与权限相关，建议随 D04.1。
+  4. **`AddNonPreparedPlanCacheStmt` / `GetNonPreparedPlanCacheStmt` / `Get/SetPrepareStmtDedupCache`**：需要 `kvcache.SimpleLRUCache`（util，按需移植）。
+  5. **`BuildParserConfig` / `GetParseParams`**：需要 parser 的 `ParserConfig` / `ParseParam`（D02.x 未移植的部分）。
+  6. **Savepoint 6 个**（`AddSavepoint` 等）：需要 client 事务的 memdb checkpoint（D07.1）；`CleanBuffers` 调用写路径的 `WriteStmtBufs`（X），建议在 tracker 中归 X。
+  7. **`pkg/session/cursor/tracker.go`**：随 D05.3 的游标执行。
+
+**govec**（tracker `govec/domains/sessionvars_d.go`，追加在最后，原有 66,488 条不变）：
+- `methods` 551 条：在新会话上先 SET 一组变量，再调用一串方法（setter、ID 分配、预处理语句与 `max_prepared_stmt_count`、隔离级别与 one-shot、`TxnReadTS`、plan replayer key（超过 128 个时重建）、MDL 表），记录每次调用的结果和全部 getter。
+- `uservars` 300 条：对一个 `UserVars` 的 set / unset / settype / get / gettype / clone 脚本，克隆后原对象的写入不能影响克隆。
+- `paramlist` 203 条：append / reset / nonprep / get / all / string；越界 get 的 panic 文字。
+- `svmisc` 41 条：自由函数与小类型。
+
+**反证**（只回放 PR D 的 1,095 条）：
+
+| 故意弄坏 | 不一致 |
+|---|--:|
+| `HashJoinConcurrency` 不回退到 `ExecutorConcurrency` | 514 |
+| `PlanCacheParamList.String` 不隐藏 non-prep 参数 | 26 |
+| `GetNegateStrMatchDefaultSelectivity` 去掉 0.8 的特例 | 5 |
+| `IsolationLevelForNewTxn` 在事务中用 `OneShotUse` 代替 `OneShotSet` | 7 |
+| `UserVars.Clone` 不复制类型 | 6 |
+| `AddPreparedStmt` 上限判断用 `>=` | 3 |
+| `UnsetUserVar` 不转小写 | 2 |
+| plan replayer key 达到 128 个时不重建（`>`） | 1 |
+| `CleanupTxnReadTSIfUsed` 不检查 `readTS > 0` | 1 |
+
+最后一项起初是 0 条：新会话的 `TxnReadTS` 是 nil，所有 `TxnReadTS` 调用都是空操作。补了先 `SET tx_read_ts` 的记录后才发现，并因此把 Rust 的 `TxnReadTS` 改为 `Option`（spec §4 第 13 条）。

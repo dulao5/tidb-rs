@@ -2,11 +2,13 @@
 //! definitions and validation, N8 §3.1). The session variables (session.go, slow_log.go)
 //! are block D05.2; `session` here is the stub of the part D05.1 uses.
 
+mod concurrency;
 pub mod error;
 pub mod hook_state;
 pub(crate) mod hooks;
 pub mod ldap_state;
 pub mod names;
+pub mod plan_cache_params;
 pub mod removed;
 pub mod sequence_state;
 pub mod session;
@@ -17,6 +19,7 @@ mod session_hooks_ext;
 mod session_hooks_gc;
 mod session_hooks_global;
 mod session_hooks_state;
+pub mod session_methods;
 pub mod session_state;
 pub(crate) mod setvar_affect;
 pub mod slow_log_rules;
