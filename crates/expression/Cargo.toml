@@ -23,11 +23,23 @@ tidb-parser = { workspace = true }
 # exprctx (EvalContext, BuildContext, ParamValues), errctx (D00.1).
 tidb-sessionctx = { workspace = true }
 parking_lot = "0.12"
+# #[eval_fn] (N4 §3.2).
+tidb-expression-macros = { workspace = true }
+smallvec = "1.16"
+zerocopy = "0.8"
 
 [dev-dependencies]
+# N4 §5 gate benchmark.
+criterion = "0.5"
+tikv-jemallocator = { workspace = true }
+zerocopy = "0.8"
 # The govec vectors are committed as .jsonl.gz.
 flate2 = "1.0"
 serde_json = { workspace = true }
+
+[[bench]]
+name = "eval_gate"
+harness = false
 
 [lints]
 workspace = true

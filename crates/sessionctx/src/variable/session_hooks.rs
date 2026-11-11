@@ -317,7 +317,6 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "tidb_allow_fallback_to_tikv" => super::session_hooks_state::ss_tidb_allow_fallback_to_tikv,
         "tidb_replica_read" => super::session_hooks_state::ss_tidb_replica_read,
         "tidb_partition_prune_mode" => super::session_hooks_state::ss_tidb_partition_prune_mode,
-        "tidb_redact_log" => super::session_hooks_state::ss_tidb_redact_log,
         "tidb_stats_load_sync_wait" => super::session_hooks_state::ss_tidb_stats_load_sync_wait,
         "tidb_sysdate_is_now" => super::session_hooks_state::ss_tidb_sysdate_is_now,
         "tidb_enable_parallel_hashagg_spill" => {
@@ -547,6 +546,11 @@ fn set_global(name: &str) -> Option<SetGlobalFn> {
             super::session_hooks_ext::sg_authentication_ldap_simple_auth_method_name
         }
         "tidb_log_file_max_days" => super::session_hooks_b2::sg_tidb_log_file_max_days,
+        "tidb_gc_enable" => super::session_hooks_gc::sg_tidb_gc_enable,
+        "tidb_gc_run_interval" => super::session_hooks_gc::sg_tidb_gc_run_interval,
+        "tidb_gc_life_time" => super::session_hooks_gc::sg_tidb_gc_life_time,
+        "tidb_gc_concurrency" => super::session_hooks_gc::sg_tidb_gc_concurrency,
+        "tidb_gc_scan_lock_mode" => super::session_hooks_gc::sg_tidb_gc_scan_lock_mode,
         "max_prepared_stmt_count" => super::session_hooks_b2::sg_max_prepared_stmt_count,
         "tidb_tso_client_batch_max_wait_time" => {
             super::session_hooks_b2::sg_tidb_tso_client_batch_max_wait_time
@@ -629,6 +633,7 @@ fn set_global(name: &str) -> Option<SetGlobalFn> {
         "tidb_external_ts" => super::session_hooks_b2::sg_tidb_external_ts,
         "tidb_slow_log_rules" => super::session_hooks_state::sg_tidb_slow_log_rules,
         "tidb_cloud_storage_uri" => super::session_hooks_b2::sg_tidb_cloud_storage_uri,
+        "tidb_redact_log" => super::session_hooks_state::sg_tidb_redact_log,
         "tidb_ttl_scan_batch_size" => super::session_hooks_b2::sg_tidb_ttl_scan_batch_size,
         "tidb_ttl_delete_batch_size" => super::session_hooks_b2::sg_tidb_ttl_delete_batch_size,
         "tidb_ttl_delete_rate_limit" => super::session_hooks_b2::sg_tidb_ttl_delete_rate_limit,
@@ -756,6 +761,11 @@ fn get_global(name: &str) -> Option<GetGlobalFn> {
             super::session_hooks_global::gg_tidb_instance_plan_cache_reserved_percentage
         }
         "tidb_log_file_max_days" => super::session_hooks_global::gg_tidb_log_file_max_days,
+        "tidb_gc_enable" => super::session_hooks_gc::gg_tidb_gc_enable,
+        "tidb_gc_run_interval" => super::session_hooks_gc::gg_tidb_gc_run_interval,
+        "tidb_gc_life_time" => super::session_hooks_gc::gg_tidb_gc_life_time,
+        "tidb_gc_concurrency" => super::session_hooks_gc::gg_tidb_gc_concurrency,
+        "tidb_gc_scan_lock_mode" => super::session_hooks_gc::gg_tidb_gc_scan_lock_mode,
         "tidb_max_auto_analyze_time" => super::session_hooks_global::gg_tidb_max_auto_analyze_time,
         "tidb_mem_oom_action" => super::session_hooks_global::gg_tidb_mem_oom_action,
         "tidb_mem_quota_binding_cache" => {
@@ -1018,25 +1028,13 @@ pub(crate) fn is_pending(name: &str, kind: &str) -> bool {
 const PENDING_SET_SESSION: &[&str] = &[];
 
 /// Variables whose Go entry has a `SetGlobal` hook that is not ported yet.
-const PENDING_SET_GLOBAL: &[&str] = &[
-    "tidb_gc_concurrency",
-    "tidb_gc_enable",
-    "tidb_gc_life_time",
-    "tidb_gc_run_interval",
-    "tidb_gc_scan_lock_mode",
-];
+const PENDING_SET_GLOBAL: &[&str] = &[];
 
 /// Variables whose Go entry has a `GetSession` hook that is not ported yet.
 const PENDING_GET_SESSION: &[&str] = &[];
 
 /// Variables whose Go entry has a `GetGlobal` hook that is not ported yet.
-const PENDING_GET_GLOBAL: &[&str] = &[
-    "tidb_gc_concurrency",
-    "tidb_gc_enable",
-    "tidb_gc_life_time",
-    "tidb_gc_run_interval",
-    "tidb_gc_scan_lock_mode",
-];
+const PENDING_GET_GLOBAL: &[&str] = &[];
 
 /// Variables whose Go entry has a `GetStateValue` hook that is not ported yet.
 const PENDING_GET_STATE_VALUE: &[&str] = &[];

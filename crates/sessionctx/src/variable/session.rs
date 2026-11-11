@@ -89,6 +89,10 @@ pub trait GlobalVarAccessor: Send {
     /// GetTiDBTableValue gets a value from mysql.tidb for the key 'name'
     // go-part: GlobalVarAccessor.GetTiDBTableValue (interface method)
     fn get_tidb_table_value(&self, name: &str) -> Result<String, Error>;
+    /// SetTiDBTableValue sets a value+comment for the mysql.tidb key 'name'
+    // go-part: GlobalVarAccessor.SetTiDBTableValue (interface method)
+    fn set_tidb_table_value(&mut self, name: &str, value: &str, comment: &str)
+    -> Result<(), Error>;
 }
 
 /// The fields of `SessionVars` the D05.1 validation hooks use.

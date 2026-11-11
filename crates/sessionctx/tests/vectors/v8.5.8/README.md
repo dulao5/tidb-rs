@@ -7,8 +7,8 @@
 | source | `tidb-rs-tracker`, `vectors/v8.5.8/<target>/sysvar.jsonl.gz` (main after tracker #26) |
 | tracker commit | `0e3dd47` (tracker #26) |
 | generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 5051), 67521 records (incl. 1,710 `sys/whitespace`) |
-| `arm64/sysvar.jsonl.gz` sha256 | `bf01de69b35dd96f31b0c9bb243ed9d05375cb7e184a86c6ea3e58a2f17a1eb0` (GOARCH=arm64, generated locally, B3) |
-| `amd64/sysvar.jsonl.gz` sha256 | `a1ce4806581dd43ff6b57f93ea089db99c655356afe68513d1946f8061317e7e` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact, B3) |
+| `arm64/sysvar.jsonl.gz` sha256 | `a94a24fdce53b35fc4bbfc064d680fc24d831b560f6e393e56b03deedf2f71e7` (GOARCH=arm64, generated locally, go-fix pingcap/tidb#62892, tracker #38) |
+| `amd64/sysvar.jsonl.gz` sha256 | `06fa9a4c1d925b2fea4222f4597c37e6aaf4be1c80f112dbfd28b539fe2a1f77` (tracker CI artifact, run 42956793646, go-fix pingcap/tidb#62892) |
 
 There is no floating-point arithmetic that gc fuses here: both targets hold the same records
 (the amd64 file comes from the tracker CI artifact). The inputs never depend on the host
@@ -21,10 +21,10 @@ its own target.
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-b3`, tracker #33) |
-| generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view), 43,623 records: `fresh` 1, `set` 31,017 (12 `src: "fix pingcap/tidb#65884"`, 68 `sys/slow_log_rules`), `get` 945, `set_global` 9,482, `set_global_hook` 2,098 (26 `sys/cloud_storage_uri`, 34 `sys/slow_log_rules`), `init` 80; both targets hold the same records |
-| `arm64/sessionvars.jsonl.gz` sha256 | `5bac1150e3eaad2618b460d892c85921d3c338ba19d7b34f4b5f325b1bdd611b` (generated locally, B3) |
-| `amd64/sessionvars.jsonl.gz` sha256 | `27523fcad476dd6aa49658f0064abfc6c84535dc707af35db77f61d17c598874` (tracker CI artifact, B3) |
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-c`, tracker #34) |
+| generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view; the accessor holds an in-memory mysql.tidb), 66,478 records, the last 1,208 `tidb_table` (`sys/tidb_table`, PR C: the tidb_gc_* hooks); both targets hold the same records |
+| `arm64/sessionvars.jsonl.gz` sha256 | `2eb464ab38d486f5f1c7b0561c430f53b607f74cbbbadd2e94c875e7568a1fda` (GOARCH=arm64, generated locally, go-fix pingcap/tidb#62892, tracker #38) |
+| `amd64/sessionvars.jsonl.gz` sha256 | `5e713ac2112b9eb5784679edec82ffc81bfed1b4474bdad0bc001168dd0621e9` (tracker CI artifact, run 42956793646, go-fix pingcap/tidb#62892) |
 
 ## Domain "stmtctx" (block D00.1 part 1)
 
@@ -43,8 +43,8 @@ its own target.
 | generator | `govec` ranger (seed 20261110): 3,839 records; exprctx (seed 20261111): 2,242 records. Every record runs with new collations enabled; exprctx `load` restores `errors.RedactLogEnabled` (#62). Both targets hold the same records |
 | `arm64/ranger.jsonl.gz` sha256 | `9ddec0b9ba9e1681f52bc8ba899113050176cc8bc70748202af310a1deccc7d8` (generated locally) |
 | `amd64/ranger.jsonl.gz` sha256 | `591a0af500291e203cd334031361dc9e25c5706d0bb3dc355820e157be9a39e6` (tracker CI artifact) |
-| `arm64/exprctx.jsonl.gz` sha256 | `beaff05204db2cda88b8fc55f0042528121f8c535a9d479e01a9678d77fa72bc` (generated locally) |
-| `amd64/exprctx.jsonl.gz` sha256 | `3c595d4f11593d73cdbc113c75fd31b6b67c3ea606d7c08743527cd5f96cd482` (tracker CI artifact) |
+| `arm64/exprctx.jsonl.gz` sha256 | `9614dfa62107e9fec7a0eae6b716287dd013c54f6d3f3a31a018e83d6cb40453` (GOARCH=arm64, generated locally, go-fix pingcap/tidb#62892, tracker #38) |
+| `amd64/exprctx.jsonl.gz` sha256 | `0fcf31e5022fd90a03ece81f0e2579ab9ab7caf86907fd092279ae7a8fd6142e` (tracker CI artifact, run 42956793646, go-fix pingcap/tidb#62892) |
 
 Extra seeds (tracker CI artifact `govec-extra-seeds-*`): replay with `GOVEC_RANGER_FILES` / `GOVEC_EXPRCTX_FILES` (comma-separated).
 

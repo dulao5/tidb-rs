@@ -146,7 +146,13 @@ impl WildcardPattern for DerivedBinPattern {
     /// Compile implements WildcardPattern interface.
     // go: derivedBinPattern.Compile L1
     fn compile(&mut self, pattern_str: &[u8], escape: u8) {
-        (self.pat_chars, self.pat_types) = stringutil::compile_pattern(pattern_str, escape);
+        // CompilePattern = CompilePatternInner; the buffers are reused (allocation only).
+        stringutil::compile_pattern_inner_into(
+            pattern_str,
+            escape,
+            &mut self.pat_chars,
+            &mut self.pat_types,
+        );
     }
 
     /// DoMatch implements WildcardPattern interface.

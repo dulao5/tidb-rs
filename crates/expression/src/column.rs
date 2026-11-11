@@ -3,14 +3,14 @@
 //! `Column` and `CorrelatedColumn` (spec §3.1–3.2).
 //!
 //! - The cached `hashcode` is a `OnceLock` (N4 §3.5); `Clone` copies it.
-//! - `CorrelatedColumn.Data *types.Datum` is a slot number: the value lives in the
-//!   [`EvalState`]; clones and `RemapColumn` keep the slot, as Go keeps the pointer.
+//! - `CorrelatedColumn.Data *types.Datum` is a slot keyed by the outer column's `UniqueID`
+//!   at creation: the value lives in the [`EvalState`]; clones and `RemapColumn` keep the
+//!   slot, as Go keeps the pointer (spec §3.2).
 //! - Not ported (spec §4): the `VecEval*` methods (replaced by the vector driver of part 2,
 //!   M-EVAL) and the cascades-only `Hash64`/`Equals` (EXC.B). `EqualByExprAndID` and
 //!   `resolveIndicesByVirtualExpr` need `ScalarFunction.Equal` and come with part 2.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use tidb_base::errors::RedactLogDisable;
@@ -37,19 +37,14 @@ use crate::scalar_function::ast_func;
 use crate::schema::Schema;
 use crate::size;
 
-/// The slot of a correlated column's value (Go's `Data *types.Datum`, spec §3.2).
+/// The slot of a correlated column's value (Go's `Data *types.Datum`, spec §3.2): the
+/// `UniqueID` of the outer column the correlated column was created for.
+///
+/// Go's `ExtractCorColumnsBySchema` points the `Data` of every correlated column of the
+/// same outer column at one Datum, which Apply writes once per outer row; keying the
+/// state by that `UniqueID` gives the same sharing without a pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CorrSlot(pub u64);
-
-static NEXT_CORR_SLOT: AtomicU64 = AtomicU64::new(1);
-
-impl CorrSlot {
-    /// A fresh slot: `Data: new(types.Datum)`.
-    // glue: allocation of CorrelatedColumn.Data
-    pub fn alloc() -> CorrSlot {
-        CorrSlot(NEXT_CORR_SLOT.fetch_add(1, Ordering::Relaxed))
-    }
-}
+pub struct CorrSlot(pub i64);
 
 /// CorrelatedColumn stands for a column in a correlated sub query.
 #[derive(Debug)]
@@ -76,8 +71,8 @@ impl CorrelatedColumn {
     // glue: Go composite literal with a fresh Data pointer
     pub fn new(column: Column) -> CorrelatedColumn {
         CorrelatedColumn {
+            slot: CorrSlot(column.unique_id),
             column,
-            slot: CorrSlot::alloc(),
         }
     }
 
@@ -446,12 +441,14 @@ impl Column {
 
     /// GetType implements Expression interface.
     // go: Column.GetType L1
+    #[inline]
     pub fn get_type(&self) -> &FieldType {
         self.get_static_type()
     }
 
     /// GetStaticType returns the type without considering the context.
     // go: Column.GetStaticType L1
+    #[inline]
     pub fn get_static_type(&self) -> &FieldType {
         &self.ret_type
     }
@@ -646,6 +643,61 @@ impl Column {
             )));
         }
         Ok(())
+    }
+
+    /// ResolveIndicesByVirtualExpr implements Expression interface.
+    // go: Column.ResolveIndicesByVirtualExpr L1
+    pub fn resolve_indices_by_virtual_expr(
+        &self,
+        ctx: &dyn EvalContext,
+        schema: &Schema,
+    ) -> (Column, bool) {
+        let mut new_col = self.clone();
+        let is_ok = new_col.resolve_indices_by_virtual_expr_in_place(ctx, schema);
+        (new_col, is_ok)
+    }
+
+    // go: Column.resolveIndicesByVirtualExpr L1
+    pub(crate) fn resolve_indices_by_virtual_expr_in_place(
+        &mut self,
+        ctx: &dyn EvalContext,
+        schema: &Schema,
+    ) -> bool {
+        let mut fallback_idx: isize = -1;
+        for (i, c) in schema.columns.iter().enumerate() {
+            if c.unique_id == self.unique_id {
+                self.index = i as isize;
+                return true;
+            }
+            // Different expression indexes may create hidden generated columns with the same
+            // virtual expression. Prefer the exact column ID when it exists; only fall back
+            // to expression equality when the selected schema has no exact column match.
+            if fallback_idx == -1 && c.equal_by_expr_and_id(ctx, self) {
+                fallback_idx = i as isize;
+            }
+        }
+        if fallback_idx != -1 {
+            self.index = fallback_idx;
+            return true;
+        }
+        false
+    }
+
+    /// EqualByExprAndID extends Equal by comparing virtual expression.
+    // go: Column.EqualByExprAndID L1
+    pub fn equal_by_expr_and_id(&self, ctx: &dyn EvalContext, new_col: &Column) -> bool {
+        let is_vir_expr_matched = match (&self.virtual_expr, &new_col.virtual_expr) {
+            (Some(e), other) if matches!(&**e, Expr::ScalarFunction(_)) => {
+                let Expr::ScalarFunction(expr) = &**e else {
+                    unreachable!()
+                };
+                // expr.Equal(ctx, nil) is false for a nil VirtualExpr.
+                other.as_ref().is_some_and(|o| expr.equal(ctx, o))
+                    && self.ret_type.equal(&new_col.ret_type)
+            }
+            _ => false,
+        };
+        new_col.unique_id == self.unique_id || is_vir_expr_matched
     }
 
     /// RemapColumn remaps columns with provided mapping and returns new expression

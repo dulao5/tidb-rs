@@ -2,14 +2,13 @@
 //!
 //! `Schema` and `KeyInfo`. Columns are `Arc<Column>` (spec §3.1): Go shares `*Column`
 //! between schemas and plans and clones before changing one.
-//! `GetUsedList` compares virtual expressions with `ScalarFunction.Equal` and comes with
-//! part 2.
 
 use std::sync::Arc;
 
 use tidb_model::ExtraHandleID;
 
 use crate::column::Column;
+use crate::context::EvalContext;
 use crate::expression::Expr;
 use crate::size;
 
@@ -334,4 +333,40 @@ pub fn new_schema(cols: Vec<Arc<Column>>) -> Schema {
         keys: Vec::new(),
         unique_keys: Vec::new(),
     }
+}
+
+/// GetUsedList shows whether each column in schema is contained in usedCols.
+// go: GetUsedList L1
+pub fn get_used_list(
+    ctx: &dyn EvalContext,
+    used_cols: &[Arc<Column>],
+    schema: &Schema,
+) -> Vec<bool> {
+    let tmp_schema = new_schema(used_cols.to_vec());
+    let mut used = vec![false; schema.len()];
+    for (i, col) in schema.columns.iter().enumerate() {
+        if !used[i] {
+            used[i] = tmp_schema.contains(col);
+
+            // When cols are a generated expression col, compare them in terms of virtual expr.
+            if let Some(ve) = &col.virtual_expr
+                && let Expr::ScalarFunction(expr) = &**ve
+                && used[i]
+            {
+                for (j, col_to_compare) in schema.columns.iter().enumerate() {
+                    if !used[j]
+                        && j != i
+                        && col_to_compare
+                            .virtual_expr
+                            .as_ref()
+                            .is_some_and(|v| expr.equal(ctx, v))
+                        && col.ret_type.equal(&col_to_compare.ret_type)
+                    {
+                        used[j] = true;
+                    }
+                }
+            }
+        }
+    }
+    used
 }

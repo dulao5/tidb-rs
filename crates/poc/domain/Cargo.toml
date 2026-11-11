@@ -22,8 +22,19 @@ tidb-meta = { workspace = true }
 tidb-mysql-protocol = { workspace = true }
 tidb-sql = { workspace = true }
 tokio = { workspace = true }
+# D05.2 PR C: the SET GLOBAL writer (layered) and its I/O here.
+tidb-systable = { workspace = true }
+tidb-base = { workspace = true }
+tidb-model = { workspace = true }
+tikv-client = { workspace = true }
+parking_lot = "0.12"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# examples/systable_cli.rs (raw).
+tidb-tablecodec = { workspace = true }
+tidb-types = { workspace = true }
 
 [lints]
 workspace = true

@@ -19,10 +19,16 @@ use tidb_base::{Error, errors};
 /// ErrSyntax indicates that a value does not have the right syntax for the target type.
 pub static ErrSyntax: LazyLock<Error> = LazyLock::new(|| errors::new("invalid syntax"));
 
-/// `[]rune(s)`.
+/// `[]rune(s)`: like Go, one allocation of the exact rune count (an ASCII fast path
+/// counts nothing).
 // glue: Go []rune(string) conversion
 fn to_runes(s: &[u8]) -> Vec<char> {
-    runes(s).collect()
+    if s.is_ascii() {
+        return s.iter().map(|&b| char::from(b)).collect();
+    }
+    let mut v = Vec::with_capacity(rune_count(s));
+    v.extend(runes(s));
+    v
 }
 
 /// UnquoteChar decodes the first character or byte in the escaped string
@@ -141,11 +147,27 @@ pub fn compile_pattern(pattern: &[u8], escape: u8) -> (Vec<char>, Vec<u8>) {
 /// Note: if anything changes in this method, please double-check CompilePatternInnerBytes
 // go: CompilePatternInner L1
 pub fn compile_pattern_inner(pattern: &[u8], escape: u8) -> (Vec<char>, Vec<u8>) {
+    let (mut pat_weights, mut pat_types) = (Vec::new(), Vec::new());
+    compile_pattern_inner_into(pattern, escape, &mut pat_weights, &mut pat_types);
+    (pat_weights, pat_types)
+}
+
+/// [`compile_pattern_inner`] into existing buffers (a pattern compiled again for each row
+/// reuses its allocation; Go allocates new slices each time).
+// glue: buffer-reusing form of CompilePatternInner (L2, allocation only)
+pub fn compile_pattern_inner_into(
+    pattern: &[u8],
+    escape: u8,
+    pat_weights: &mut Vec<char>,
+    pat_types: &mut Vec<u8>,
+) {
     let runes = to_runes(pattern);
     let escape_rune = char::from(escape);
     let len_runes = runes.len();
-    let mut pat_weights = vec!['\0'; len_runes];
-    let mut pat_types = vec![0u8; len_runes];
+    pat_weights.clear();
+    pat_weights.resize(len_runes, '\0');
+    pat_types.clear();
+    pat_types.resize(len_runes, 0u8);
     let mut pat_len = 0;
     let mut i = 0;
     while i < len_runes {
@@ -184,7 +206,6 @@ pub fn compile_pattern_inner(pattern: &[u8], escape: u8) -> (Vec<char>, Vec<u8>)
     }
     pat_weights.truncate(pat_len);
     pat_types.truncate(pat_len);
-    (pat_weights, pat_types)
 }
 
 /// CompilePatternInnerBinary handles escapes and wild cards convert pattern characters and

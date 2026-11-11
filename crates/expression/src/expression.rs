@@ -85,7 +85,7 @@ pub enum Expr {
 /// columns, by slot (spec §3.2); Go keeps them behind `CorrelatedColumn.Data`.
 #[derive(Debug, Default)]
 pub struct EvalState {
-    corr: HashMap<u64, Datum>,
+    corr: HashMap<i64, Datum>,
 }
 
 /// The zero Datum (`new(types.Datum)`) a correlated column reads before Apply writes it.
@@ -320,6 +320,7 @@ impl Expr {
 
     /// GetType gets the type that the expression returns.
     // glue: dispatch of Expression.GetType
+    #[inline]
     pub fn get_type(&self, ctx: &dyn EvalContext) -> Cow<'_, FieldType> {
         match self {
             Expr::Column(c) => Cow::Borrowed(c.get_type()),
@@ -333,6 +334,7 @@ impl Expr {
 
     /// GetStaticType returns the type without considering the context.
     // glue: dispatch of Expression.GetStaticType
+    #[inline]
     pub fn get_static_type(&self) -> &FieldType {
         match self {
             Expr::Column(c) => c.get_static_type(),
@@ -407,6 +409,25 @@ impl Expr {
             Expr::CorrelatedColumn(c) => c.resolve_indices(self, schema),
             Expr::Constant(c) => c.resolve_indices(self, schema),
             Expr::ScalarFunction(f) => f.resolve_indices(self, schema),
+        }
+    }
+
+    /// ResolveIndicesByVirtualExpr resolves indices by the given schema in terms of virtual
+    /// expression.
+    // glue: dispatch of Expression.ResolveIndicesByVirtualExpr
+    pub fn resolve_indices_by_virtual_expr(
+        self: &Arc<Self>,
+        ctx: &dyn EvalContext,
+        schema: &Schema,
+    ) -> (ExprRef, bool) {
+        match &**self {
+            Expr::Column(c) => {
+                let (c, ok) = c.resolve_indices_by_virtual_expr(ctx, schema);
+                (Expr::Column(c).into_ref(), ok)
+            }
+            Expr::CorrelatedColumn(c) => c.resolve_indices_by_virtual_expr(self, ctx, schema),
+            Expr::Constant(c) => c.resolve_indices_by_virtual_expr(self, ctx, schema),
+            Expr::ScalarFunction(f) => f.resolve_indices_by_virtual_expr(self, ctx, schema),
         }
     }
 

@@ -15,6 +15,10 @@
 rank = 0
 blocks = ["D00.2", "D00.4"]   # parser/mysql 常量、errno、terror、dbterror、config；contextutil（D00.4）
 
+[crate.tidb-expression-macros]
+rank = 0
+blocks = []   # #[eval_fn] proc macro of tidb-expression (N4 §3.2); no runtime dependencies
+
 [crate.tidb-metrics]
 rank = 0
 blocks = ["D14.1"]
@@ -65,6 +69,13 @@ blocks = ["D01.11"]  # tablecodec、rowcodec（依赖 kv）
 [crate.tidb-sessionctx]
 rank = 7
 blocks = ["D00.1", "D05.1", "D05.2"]
+
+# D06.7: the system-table writes behind SET GLOBAL (REPLACE INTO mysql.global_variables /
+# mysql.tidb, the row-ID allocator, the sysvar cache rebuild): the pure logic. The I/O (TiKV
+# transactions, etcd, PD) is in the legacy poc-domain until D06.5 / D07.1 (D05.2 spec §6.2).
+[crate.tidb-systable]
+rank = 8
+blocks = ["D06.7"]
 
 [crate.tidb-expression]
 rank = 8

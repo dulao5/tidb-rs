@@ -36,7 +36,7 @@ crate `tidb-execdetails`：N0 rank 4（`layers.toml` 去掉 `planned`），依�
 - **M-FMA**：tracker `scripts/go_fma_sites.py` 扫描 `pkg/util/execdetails`、`pkg/util/tracing`：所有目标都没有融合的位置。依赖代码不在登记表的扫描范围内，融合位置读自 go1.25.12 linux/arm64 二进制的 `go tool objdump`（每条 `FMADDD` / `FMSUBD` / `FNMSUBD` 对应到表达式），amd64（GOAMD64=v1）不融合：
   - tdigest：`tdigest.go:154、173、181、182、186、187、260`。gc 把 `x/2.0` 写成 `x*0.5`、`2.0*x` 写成 `x+x`（都精确），并在每个融合表达式里重新计算 `index = q*processedWeight`，所以 Rust 的融合式按指令实际的操作数写出。
   - `math`：`sin.go:227、236、238`，`asin.go:40`，`atan.go:69、70`。
-  - 其中 `tdigest.go:154、186、187` 的乘法是 `w*0.5`（精确），融合与否结果相同，反证测不出来；其余位置在两个目标上确实给出不同的结果：两个目标的向量有 152 条不同（tracker `targetDiffs`），也就是说 Go TiDB 在 amd64 与 arm64 上，超过 1000 个 cop task 时 `EXPLAIN ANALYZE`、慢日志和语句摘要中的 P80/P90/P95 末位不同。
+  - 其中 `tdigest.go:154、186、187` 的乘法是 `w*0.5`（精确），融合与否结果相同，反证测不出来；其余位置在两个目标上确实给出不同的结果：两个目标的向量有 152 条不同（tracker `targetDiffs`），也就是说 Go TiDB 在 amd64 与 arm64 上，超过 1000 个 cop task 时 `EXPLAIN ANALYZE`、慢日志和语句摘要中的 P80/P90/P95 末位不同。在 amd64 和 arm64 混合的集群中，同一个 digest 的 statement summary 会因为语句在哪个实例上执行而在最后几位不同。这和 M-F2I、M-FMA 属于同一类平台差异，不单独开 upstream-pitfall（Lucky 评审 #78）。
 - **M-F2I**：`time.Duration(f)`、`uint64(x*(4/Pi))` 等用 `gostd::conv`。
 
 ### 3.2 同步与所有权
@@ -56,7 +56,7 @@ crate `tidb-execdetails`：N0 rank 4（`layers.toml` 去掉 `planned`），依�
 
 1. **`tracing/util.go`（11 个函数）豁免**：opentracing span、`runtime/trace` region、`TRACE` 语句的 span 记录器。承载方式随 ExecCtx / M-GOCTX（D05.3）与 `TRACE` 执行器一起决定。
 2. **`MergeTiFlashRUConsumption` 豁免**（以及 client-go `RUDetails.Update`）：TiFlash 的 RU 消耗（DEF.MPP），要解码 kvproto `resource_manager.Consumption`，而 Rust 的 kvproto crate 依赖 grpcio。随 MPP / TiFlash 客户端一起做。
-3. **按值保存，不保存调用方的指针**（L2）：`SyncExecDetails.MergeExecDetails` / `MergeLockKeysExecDetails` / `MergeSharedLockKeysExecDetails`、`RuntimeStatsWithCommit.MergeCommitDetails` 第一次收到的 detail，Go 保存调用方的指针，之后的 `Merge` 写回调用方的对象；`RuntimeStatsColl.RegisterStats` 同样保存并在之后合并进调用方注册的 stats。Rust 保存副本 / 取走所有权，之后的合并不影响调用方。TiDB 的调用方在传入之后不再读这些对象。
+3. **按值保存，不保存调用方的指针**（L2）：`SyncExecDetails.MergeExecDetails` / `MergeLockKeysExecDetails` / `MergeSharedLockKeysExecDetails`、`RuntimeStatsWithCommit.MergeCommitDetails` 第一次收到的 detail，Go 保存调用方的指针，之后的 `Merge` 写回调用方的对象；`RuntimeStatsColl.RegisterStats` 同样保存并在之后合并进调用方注册的 stats。Rust 保存副本 / 取走所有权，之后的合并不影响调用方。TiDB 的调用方在传入之后不再读这些对象。但有一处例外（Lucky 评审 #78）：Go 第一次 `MergeExecDetails(nil, commitDetail)` 保存的是 client-go 提交器自己的 `*CommitDetails`（txn.go:822）。async commit 时，client-go 在后台 goroutine 中提交 secondary（2pc.go:2001），`CommitTxn` 返回后还会继续写这个对象，所以 Go 之后的慢日志、statement summary 可能包含一部分 secondary 提交的时间，多少取决于时机。tidb-rs 不和 client-rust 共享对象，记录的是合并时的快照；Go 的结果本身不确定，所以接受这一偏离。
 4. **`Percentile` 的 `Clone` 是深拷贝**：Go 的结构体复制共享 `values` 的底层数组和 t-digest 指针（例如 `basicCopRuntimeStats.Clone`），之后在副本上 `Merge` 会改动原对象的 t-digest。Rust 不共享。govec 的 `bcop` 记录因此放在每条记录的最后（之后不再读集合）。`basicCopRuntimeStats` 的 `String` 只读 `sumVal`，不受影响。
 5. **`*util.CommitDetails` 等的 `nil`**：`Option`；Go 解引用 nil 的地方（`MergeLockKeysExecDetails(nil)` 合并进已有 detail、`RURuntimeStats` 的 nil `RUDetails`、`mergeExecSummary` 缺必填字段、无当前规则时 `AppendRuleTracerStepToCurrent`、nil map 的 `AppendCandidate`）Rust 同样 panic，govec 记录这些 panic。
 6. **依赖中的上游问题照搬**：tdigest `AddCentroidList` 内层循环结束后外层 `i++` 会跳过一个 centroid（`room == 0` 时跳过当前的）；`ExecDetails.ToZapFields` 的 `Slowest_prewrite_rpc_detail` 少一个 `{`。

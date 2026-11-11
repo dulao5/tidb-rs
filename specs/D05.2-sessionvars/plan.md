@@ -138,3 +138,86 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
 1. 把 B2 第一轮的 SetGlobal 钩子（hook_state 的各单元、gctuner、TTL 窗口、stmt summary 等）加入 `set_global_hook`，并把它们写的状态加入两侧的重置列表（目前只有这两个变量和 B1 的 60 个）。
 2. 非标量字段的导出（T6 的效果目前只经 GetSession / GetGlobal 读回间接比较）；minelits；Lucky 的两步记录（LDAP pool 容量、ca_path）。
 3. PR C：tidb_gc_*（T10）后跳过上限降到 0。
+
+## PR C 交接（2026-11-09，第一轮）
+
+分支 `block/D05.2-sessionvars-c`（tracker `govec/sessionvars-D05.2-c`，尚无提交）。基于 B2 的分支开出；**B2 已合并（#66 @ff51f72），B3（#69、tracker #33）要在 PR C 之前合并**，所以下一轮先 `git rebase --onto origin/main <B2 tip 1f5a7eb>`，B3 合并后再 rebase 一次。
+
+**已完成（提交 a4ff3da，仅编译通过，未测）**
+- `tidb-tablecodec`：`rowcodec/encoder.rs`（`Encoder`、`Checksum::{No, Raw}`、`encode_value_datum`、encodeInt/Uint、排序），`tablecodec.rs` 末尾的 `gen_index_value_portal`、`gen_index_value_for_clustered_index_version1`、`gen_index_value_version0`、`encode_handle_in_unique_index_value`、`encode_common_handle`、`encode_partition_id`、`try_get_common_pk_column_restored_ids`。tracker 的 `rules.py` 尚未把这些从 X 改回 D01.11（理由："D06.7 的系统表写入需要"）。
+
+**设计要点（§6 + 本轮核对的 Go 源码）**
+- REPLACE 的流程（executor/replace.go、insert_common.go `removeRow`）：唯一索引 key（无 handle，`distinct`）→ `FetchDuplicatedHandle` 得旧 handle → 读旧行 → 与新行按 binary collation 比较，**相同则只 lock record key（Op_Lock），不写**；不同则 `RemoveRecord`（删 record key 与旧行的索引 key），循环直到没有重复；再 `AddRecord`：分配 `_tidb_rowid`、写 record、写索引（值由 `GenIndexValuePortal`，`needRestoredData = NeedRestoredData(...)`：utf8mb4_bin 的 VARCHAR 为 true，restored data 是整列值）。
+- 索引 key 的字符串按 datum 的 collation 编码（`codec.EncodeKey`）：datum 要带上列的 collation（utf8mb4_bin，PAD SPACE），`new_collation_enabled` 要从 `mysql.tidb` 读并核对。
+- autoid：meta hash `DB:<dbID>` 的字段 `TID:<tableID>`，值是十进制字符串；`HInc` = 读、加 step、写（值不变时不写）。分配器 `alloc4Signed`：`newEnd = min(maxInt64, max(currentEnd, base) + step)`，默认步长 30000，在独立的 meta 事务中。
+- 读：`tidb-meta`（legacy）可读 TableInfo 的原始 JSON（`hash_data_key(db_key(1), table_key(id))`），用 `tidb-model` 解码后交给 tablecodec；扫描 record 范围解码两列。
+- I/O 放在 legacy crate（`poc-domain` 已有 `etcd-client` 0.14 与 tikv-client；client-rust 2fc142f 有 `begin_optimistic`、`get`、`put`、`delete`、`lock_keys`、`commit`）；纯逻辑（REPLACE 的变更计划、autoid 计算、rebuild）放新块 D06.7 的 layered crate（建议 `tidb-systable`，rank 8，依赖 tablecodec 与 sessionctx）。
+- govec 的 oracle：Go 侧用 mockstore + `session.BootstrapSession` 真正执行 `REPLACE INTO mysql.global_variables`，dump 表的 record + index 范围前后的 KV；Rust 用同样的旧状态和 Go 分到的 handle 执行变更计划，比较最终 KV（逐字节）。
+- tidb_gc_* 的 5 个变量：Go 的钩子读写 `mysql.tidb`（`getTiDBTableValue` / `setTiDBTableValue` 执行 `REPLACE INTO mysql.tidb`），同一个 writer 可泛化为"VARCHAR 主键（NONCLUSTERED）+ 字符串列"的系统表。
+
+**下一步**：rebase → tracker reclassification（D01.11 的编码器回到 D01.11；新块 D06.7）→ `tidb-systable` 纯逻辑 + govec oracle → poc-domain 的 I/O 与 etcd watch → 自己的 v8.5.8 playground 上做混合集群测试（§6.6）→ 跳过上限降到 0。
+
+## PR C 交接（2026-11-09，第二轮）
+
+分支：tidb-rs `block/D05.2-sessionvars-c`（已 rebase 到 main @807f753，B3 已合并），tracker `govec/sessionvars-D05.2-c`（draft tracker #34，基于 main @b156f1d）。
+
+**本轮完成**
+1. **tracker 的块划分**（6cb83d4）：rowcodec 的 Encoder、排序器、`row.toBytes`/`init*`，以及 `GenIndexValue*`、`EncodeHandleInUniqueIndexValue`、`encodeCommonHandle`、`encodePartitionID`、`TryGetCommonPkColumnRestoredIds`，从 X 回到 D01.11。`setTiDBTableValue` 归 D05.2，和 `getTiDBTableValue` 放在一起，在 `sessionvars_pending.go` 中登记为 pending。新块 **D06.7**（P1，11 个函数）：
+   - `session.{replaceGlobalVariablesTableValue, getTableValue, GetTiDBTableValue, SetTiDBTableValue}`
+   - `Domain.{LoadSysVarCacheLoop, NotifyUpdateSysVarCache, NotifyGlobalConfigChange, fetchTableValues, rebuildSysVarCache, rebuildSysVarCacheIfNeeded}`
+   - `meta/autoid allocator.alloc4Signed`
+2. **govec tablecodec 新增两个 op**：
+   - `encode_row`：964 条，Encoder.Encode，带或不带 RawChecksum。
+   - `index_value`：1,300 条，GenIndexKey + TruncateIndexValues + GenIndexValuePortal。`needRestored` 作为输入；带 handle restored data 的行不生成，所以不需要 D06.4 的 `TryGetHandleRestoredDataWrapper`。
+   - Rust 回放 0 条不一致。**反证**：把 `checksumVersionRawHandle` 改成 3，有 312 条不一致。
+   - D01.11 收敛检查 143/143 OK。encoder.rs 中 row.go、common.go 的函数用带路径的 `// go:` 注解；排序器为 L2：sort.Sort 作用于互不相同的列 ID，换成稳定排序后结果相同。
+3. **Lucky 的建议**：`sysvarValues` 对所有变量都加上特殊浮点输入 `NaN Inf -Inf infinity -0 1e-400 0x1p-2 1e400 -1e400`。sysvar 现在 93,462 条、sessionvars 65,071 条，回放 0 条不一致。`tidb_gc_*` 的记录变多，跳过上限从 232 改为 332。
+4. **amd64 向量**取自 tracker CI 的 artifact，记录和 arm64 相同，README 中的 sha256 已更新。
+
+**还没做（PR C 的主体）**，按顺序：
+1. **layered crate `tidb-systable`**（D06.7，rank 8，依赖 tablecodec、sessionctx、model、codec），只放纯逻辑：
+   - 给定旧行和新值，计算 REPLACE 的变更计划：唯一索引 key（distinct）→ 旧 handle → 旧行；按 binary collation 与新行比较，相同就只 lock record key，不同就删掉 record 和旧索引，再插入新行和新索引。
+   - `alloc4Signed` 的计算：`newEnd = min(maxInt64, max(currentEnd, base) + step)`，step 30000。meta hash 为 `DB:<dbID>` / `TID:<tableID>`，值是十进制字符串。
+   - 写入前的检查：bootstrap 版本、TableInfo 是否变化；row format、checksum 和 new collation 的开关按集群全局值。
+2. **govec `systable` 领域**：Go 侧在 mockstore 上用 `session.BootstrapSession` 后真实执行 `REPLACE INTO mysql.global_variables` 和 `mysql.tidb`，dump 前后 record 与 index 范围的 KV；Rust 用同样的旧状态和 Go 分到的 handle 执行变更计划，逐字节比较。用例包括：首次写入、值不变（只 lock）、值改变、大小写或尾部空格不同的变量名、超长值、多个变量。
+3. **poc-domain 的 I/O**：
+   - client-rust 的乐观事务；重试不超过 `tidb_retry_limit`，每次都开新事务（新的 start ts）。
+   - etcd 监听 `/tidb/sysvars`，遇到 compaction 时重建；启动时和每 30 秒重载，重载后重新执行 SetGlobal hook。
+   - `NotifyUpdateSysVarCache`；带 GlobalConfigName 的变量调用 `NotifyGlobalConfigChange` 写 PD。
+   - 用同一个 writer 写 `mysql.tidb`，接上 `tidb_gc_*` 的 hook，跳过上限降到 0。
+4. **混合集群测试**：在自己的 v8.5.8 playground 上用非默认端口，覆盖交替和并发的 SET GLOBAL、两边读取、在 prewrite 与 commit 之间杀进程、etcd compaction、重启。结果、TiCDC 和统计增量的发现写进 spec §6.6，测试结束后停掉 playground。
+
+## PR C 交接（2026-11-11，第三轮）
+
+分支：tidb-rs `block/D05.2-sessionvars-c`（#70，已合入 main @962fe93 之后的 main），tracker `govec/sessionvars-D05.2-c`（#34，已合入 main）。
+
+**本轮完成**
+1. **T10 `tidb_gc_*`**：`GlobalVarAccessor` 增加 `set_tidb_table_value`；`getTiDBTableValue` / `setTiDBTableValue` 移植到 `varsutil.rs`；5 个变量的 GetGlobal / SetGlobal 钩子在 `session_hooks_gc.rs`，pending 清单清空。govec 生成器的 accessor 加了内存中的 mysql.tidb（`tidbTableAccessor`），新 op `tidb_table`（1,208 条，追加在最后）；原有记录中只有 64 条 tidb_gc_* 记录变化（Go 不再 panic）。**跳过上限 332 → 0**，66,478 条全部比对，0 条不一致。
+2. **新块 D06.7 的 crate `tidb-systable`**（rank 8，layers.toml 已登记）：
+   - `replace.rs`：系统表的专用 REPLACE（唯一键查重 → 相同则不写 → 删旧行和旧索引 → 分配 `_tidb_rowid` → 写行（row format v2）和索引），产出带 key flags 的 memdb；row format v1、超长值、非预期表结构都拒绝。
+   - `autoid.rs`：`Alloc` / `alloc4Signed` / `CalcNeededBatchSize` / `SeekToFirstAutoID*` / `NextStep`（tracker 把这几个 D06.2 函数移到 D06.7）。
+   - `sysvar_cache.rs`：`rebuildSysVarCache`（执行 SetGlobal 钩子）、`fetchTableValues` 的解码。
+   - `session_io.rs`：`replaceGlobalVariablesTableValue`、`SetTiDBTableValue`、`getTableValue`、`GetTiDBTableValue`、`NotifyUpdateSysVarCache`、`NotifyGlobalConfigChange`、`LoadSysVarCacheLoop`，I/O 通过 trait（`SysTableStore`、`SysTableTxn`、`Notifier`）由调用方提供；乐观事务冲突时整条重试（新 start ts，最多 `tidb_retry_limit`）；bootstrap 版本必须是 232；提交前比对 TableInfo。
+   - converge D06.7 17/17 OK；D05.2 46/238。
+3. **govec `systable` 领域**（tracker）：oracle 是 Go 在 bootstrap 过的 mockstore 上真实执行的 REPLACE（BEGIN OPTIMISTIC 内），记录事务 memdb（key、value、flags）；每条记录前把行 ID 分配器 rebase 到固定值，bootstrap 行改写后停放在高位，记录互不依赖。164 条：replace 93、alloc 29、next_step 42、tableinfo 2。Rust 回放 0 条不一致；反证：去掉索引删除的 need_locked 报 25 条，assertion 改为后者覆盖报 25 条，行比较忽略大小写报 1 条，去掉 `MaxInt64 - newBase` 上限报 3 条。
+4. **poc-domain `systable_io.rs`**（WIP，仅编译通过）：`TikvStore`（tikv-client 乐观事务；presume-not-exists 的 key 用 insert；写冲突重试）、元数据行 ID 计数器的事务、`EtcdNotifier`。poc-kv 增加 `begin_optimistic`、`is_write_conflict`。
+
+5. **row format 1**（同轮后半）：playground 上发现 Go 的 SET GLOBAL 写 row format 1（内部会话不加载全局 row format），tidb-rs 改为相同（`tablecodec.encode_row` / `encode_old_row`，从 X 移回 D01.11，converge 145/145）；oracle 改为经 `sysSessionPool` 会话执行。govec 领域改名 `write_systable`，排在所有领域之后：它在进程内 bootstrap 的 domain 会改动其他领域读取的进程级状态（sysvar 的 `tidb_gogc_tuner_threshold` 校验）。
+6. **混合集群测试**：`scripts/systable-mixed.sh` + `crates/poc/domain/examples/systable_cli.rs`，5 项全部通过，结果见 spec §6.7。
+
+**还没做**
+1. PoC 会话的 `SET GLOBAL` 仍返回 not supported：PoC 会话没有使用 sessionctx 的 `SessionVars`，接入属于 D05.3 / T9。读取侧（`SysVarCache` + `load_sys_var_cache_loop`）也还没有接到 PoC 的 domain 上。
+   - **过渡期缺口**：go-fix pingcap/tidb#62892（#76）之后 `tidb_redact_log` 只有 GLOBAL 作用域，`SET SESSION` 报 1229。所以在接上 `SET GLOBAL` 和 sysvar cache 重读之前，PoC 里没有办法打开打码（Lucky 评审 #76）。
+2. prewrite 与 commit 之间杀进程的测试（需要 failpoint）；PD GlobalConfig 写入（client-rust 分支没有 API）；assertion 和 request source（同上）。
+
+## PR D 提议（D05.2 剩余，不在 PR C 中实现）
+
+截至 PR C 第二轮，D05.2 收敛检查为 44/237，缺 172 个，按类型：
+- **`SessionVars` 的方法 95 个**：读写会话状态的 getter/setter，例如 `GetSplitRegionTimeout`、`SetStatusFlag`、`InTxn`、`GetCharsetInfo`、`SetAllowInSubqToJoinAndAgg`、`UseDynamicPartitionPrune`、`StmtCtx` 相关。这些是 planner 和 executor 用到的，建议作为 PR D 的主体，按调用方分组：optimizer 用的、执行器用的、协议层用的。
+- **`Concurrency` 的 27 个 getter**：机械、短小，放进 PR D。
+- **`TransactionContext` 9 个、`TxnReadTS` 2 个**：只读路径需要的部分，例如 `GetCurrentSavepoint` 以外的、`TxnReadTS.UseTxnReadTS`；写路径的另行归 X。
+- **`UserVars` 6 个 + `NewUserVars`**：替换 D00.1 的 `variable/uservars.rs` 替身（D00.1 T9 的一部分）。
+- **`PlanCacheParamList` 6 个 + `NewPlanCacheParamList`**：参数用 `Arc<[Datum]>` 共享（D00.1 Part 2a 评审）。
+- **`slow_log.go` 12 个**（`writeSlowLogItem`、`SlowQueryLogItems` 的格式化等）：T7 中慢日志规则以外的部分，可以单独作为 PR E，依赖 D14.0 的 exec details。
+- **零散的**：`LazyStmtText`、`RuntimeFilterType`/`Mode`、`ReadConsistencyLevel`、`RewritePhaseInfo`、`PrepareDedupCacheKey`、`planCacheStmtKey`、`matchZero`/`matchGE`/`MatchEqual`、`makeKVExecDetailAccessor`、`uint64FromNonNegative`、`ToTiPBTiFlashPreAggMode`、`SetEnableAdaptiveReplicaRead`、`ParseString`。
+- **两个整文件**：`pkg/session/cursor/tracker.go`、`pkg/sessionctx/sessionstates/session_token.go`（会话迁移的 token）。cursor 归 PR D；session token 与权限（D04.1）相关，建议推迟到 D04.1。

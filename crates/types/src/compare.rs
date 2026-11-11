@@ -88,6 +88,7 @@ pub fn compare_string(x: &[u8], y: &[u8], collation: &str) -> isize {
 
 /// CompareInt return an integer comparing the integer x to y with signed or unsigned.
 // go: CompareInt L1
+#[inline]
 pub fn compare_int(arg0: i64, is_unsigned0: bool, arg1: i64, is_unsigned1: bool) -> isize {
     match (is_unsigned0, is_unsigned1) {
         (true, true) => cmp_compare(arg0 as u64, arg1 as u64),

@@ -23,7 +23,9 @@ members = [
   "crates/codec",
   "crates/tablecodec",
   "crates/sessionctx",
+  "crates/systable",
   "crates/expression",
+  "crates/expression/macros",
   "crates/execdetails",
   "tools/ab",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
@@ -121,7 +123,9 @@ tidb-codec = { path = "crates/codec" }
 tidb-tablecodec = { path = "crates/tablecodec" }
 tidb-execdetails = { path = "crates/execdetails" }
 tidb-sessionctx = { path = "crates/sessionctx" }
+tidb-systable = { path = "crates/systable" }
 tidb-expression = { path = "crates/expression" }
+tidb-expression-macros = { path = "crates/expression/macros" }
 # TiKV Rust client: our fork with `Snapshot::coprocessor` and several connections per store
 # (branch tidb-rs/perf, on top of tidb-rs/coprocessor).
 # TEMPORARY: local clone, branch tidb-rs/metrics (client-go/PD metrics, feature
