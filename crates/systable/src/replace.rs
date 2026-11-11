@@ -27,21 +27,24 @@ use tidb_types::datum::new_collation_string_datum;
 
 use crate::memdb::{Assertion, MemBuffer, Snapshot};
 
-/// How the cluster encodes rows: the global values of `tidb_row_format_version` and
-/// `tidb_enable_row_level_checksum` (Go's internal session uses them, spec §6.2 step 5).
+/// How the writing session encodes rows. Go's SET GLOBAL writes through an internal session
+/// of `sysSessionPool`, which never loads the global `tidb_row_format_version`
+/// (`RowEncoder.Enable` stays false: row format 1) and has row checksums off
+/// (`IsRowLevelChecksumEnabled` is false under `InRestrictedSQL`): the default is that, so the
+/// rows tidb-rs writes are byte-identical to Go's (checked on a cluster, spec §6.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowEncodingConfig {
-    /// `tidb_row_format_version`: 1 or 2.
+    /// 1 (`tablecodec.EncodeOldRow`) or 2 (`rowcodec.Encoder`).
     pub row_format_version: i64,
-    /// `tidb_enable_row_level_checksum`.
+    /// Row checksum (format 2 only).
     pub row_level_checksum: bool,
 }
 
 impl Default for RowEncodingConfig {
-    // glue: defaults of the two global variables
+    // glue: the settings of Go's internal session (sysSessionPool)
     fn default() -> RowEncodingConfig {
         RowEncodingConfig {
-            row_format_version: 2,
+            row_format_version: 1,
             row_level_checksum: false,
         }
     }
@@ -263,17 +266,16 @@ fn add_record(
             )));
         }
     };
-    // go-part: EncodeRowBuffer.WriteMemBufferEncoded (tblctx/buffers.go): row format v2
-    let checksum = cfg
-        .row_level_checksum
-        .then(|| Checksum::Raw { handle: h.clone() });
-    let value = Encoder::with_enable(true).encode(
-        Some(&utc()),
-        &ids,
-        &vals,
-        checksum.as_ref(),
-        Vec::new(),
-    )?;
+    // go-part: EncodeRowBuffer.WriteMemBufferEncoded (tblctx/buffers.go) + tablecodec.EncodeRow
+    let value = if cfg.row_format_version == 2 {
+        let checksum = cfg
+            .row_level_checksum
+            .then(|| Checksum::Raw { handle: h.clone() });
+        let mut enc = Encoder::with_enable(true);
+        tc::encode_row(Some(&utc()), &vals, &ids, checksum.as_ref(), Some(&mut enc))?
+    } else {
+        tc::encode_row(Some(&utc()), &vals, &ids, None, None)?
+    };
     mb.set_with_flags(&key, value, presume);
     mb.set_assertion(
         &key,
@@ -355,10 +357,9 @@ pub fn replace_row(
     cfg: &RowEncodingConfig,
 ) -> Result<Option<i64>, Error> {
     check_table_shape(tbl)?;
-    if cfg.row_format_version != 2 {
-        // Row format v1 (clusters upgraded from before v4.0 that kept it): EncodeOldRow is X.
+    if cfg.row_format_version != 1 && cfg.row_format_version != 2 {
         return Err(errors::new(format!(
-            "SET GLOBAL refused: tidb_row_format_version = {} (tidb-rs writes row format 2 only)",
+            "unknown row format version {}",
             cfg.row_format_version
         )));
     }

@@ -406,6 +406,65 @@ pub fn encode_value_datum(
     (b, err)
 }
 
+/// EncodeRow encode row data and column ids into a slice of byte.
+/// valBuf and values pass by caller, for reducing EncodeRow allocates temporary bufs. If you pass valBuf and values as nil,
+/// EncodeRow will allocate it.
+///
+/// The row-format-2 branch is the caller's `rowcodec::Encoder` (`e.Enable`): pass `None`
+/// for the old format (D05.2 PR C: Go's internal sessions write system tables in format 1).
+// go: EncodeRow L2 (the encoder is an Option: None is e.Enable == false; valBuf / values are not reused)
+pub fn encode_row(
+    loc: Option<&Arc<Location>>,
+    row: &[Datum],
+    col_ids: &[i64],
+    checksum: Option<&crate::rowcodec::Checksum>,
+    e: Option<&mut crate::rowcodec::Encoder>,
+) -> Result<Vec<u8>, Error> {
+    if row.len() != col_ids.len() {
+        return Err(tidb_base::errors::new(format!(
+            "EncodeRow error: data and columnID count not match {} vs {}",
+            row.len(),
+            col_ids.len()
+        )));
+    }
+    if let Some(e) = e {
+        return e.encode(loc, col_ids, row, checksum, Vec::new());
+    }
+    encode_old_row(loc, row, col_ids)
+}
+
+/// EncodeOldRow encode row data and column ids into a slice of byte.
+/// Row layout: colID1, value1, colID2, value2, .....
+// go: EncodeOldRow L2 (valBuf / values are not reused)
+pub fn encode_old_row(
+    loc: Option<&Arc<Location>>,
+    row: &[Datum],
+    col_ids: &[i64],
+) -> Result<Vec<u8>, Error> {
+    if row.len() != col_ids.len() {
+        return Err(tidb_base::errors::new(format!(
+            "EncodeRow error: data and columnID count not match {} vs {}",
+            row.len(),
+            col_ids.len()
+        )));
+    }
+    let mut values = Vec::with_capacity(row.len() * 2);
+    for (i, c) in row.iter().enumerate() {
+        let mut id = Datum::default();
+        id.set_int64(col_ids[i]);
+        values.push(id);
+        values.push(flatten(loc, c)?);
+    }
+    if values.is_empty() {
+        // We could not set nil value into kv.
+        return Ok(vec![tidb_codec::codec::NilFlag]);
+    }
+    let loc = loc.cloned().unwrap_or_else(utc);
+    let mut b = Vec::new();
+    encode_value(&loc, &mut b, &values)?;
+    Ok(b)
+}
+
 // go: flatten L1
 fn flatten(loc: Option<&Arc<Location>>, data: &Datum) -> Result<Datum, Error> {
     let mut ret = Datum::default();

@@ -117,7 +117,7 @@ fn rebuild_keeps_the_old_cache_when_the_fetch_fails() {
 #[test]
 fn decode_reads_back_written_rows() {
     let path = format!(
-        "{}/tests/vectors/v8.5.8/arm64/systable.jsonl.gz",
+        "{}/tests/vectors/v8.5.8/arm64/write_systable.jsonl.gz",
         env!("CARGO_MANIFEST_DIR")
     );
     let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap());
@@ -160,23 +160,8 @@ fn decode_reads_back_written_rows() {
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .collect();
     assert_eq!(got, want);
-    // Row format v1 and over-long values are refused.
+    // Over-long values are refused.
     let mut mb = MemBuffer::new();
-    let v1 = RowEncodingConfig {
-        row_format_version: 1,
-        row_level_checksum: false,
-    };
-    assert!(
-        replace_row(
-            &tbl,
-            &[Some("x"), Some("1")],
-            &snap,
-            &mut mb,
-            &mut || Ok(1),
-            &v1
-        )
-        .is_err()
-    );
     let long = "x".repeat(16384);
     let err = replace_row(
         &tbl,

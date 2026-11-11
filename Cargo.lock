@@ -2537,6 +2537,8 @@ dependencies = [
  "tidb-mysql-protocol",
  "tidb-sql",
  "tidb-systable",
+ "tidb-tablecodec",
+ "tidb-types",
  "tikv-client",
  "tokio",
  "tracing",

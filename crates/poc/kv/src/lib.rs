@@ -297,6 +297,36 @@ impl Stream for CopStream {
     }
 }
 
+/// Read-write transactions (D05.2 PR C: the SET GLOBAL writer of tidb-systable, spec §6.2;
+/// tidb-rs is otherwise read-only). The tikv-client transaction is returned as is: the
+/// writer classifies its commit errors with [`is_write_conflict`].
+impl KvClient {
+    /// An optimistic transaction with a start ts from the TSO.
+    /// A statement that finds nothing to write drops it without commit (a read-only
+    /// optimistic transaction holds no locks), so the drop check is off.
+    #[allow(clippy::result_large_err)] // tikv_client::Error, the client's own Result
+    pub async fn begin_optimistic(&self) -> tikv_client::Result<tikv_client::Transaction> {
+        let options = TransactionOptions::new_optimistic()
+            .retry_options(self.retry.clone())
+            .drop_check(tikv_client::CheckLevel::None);
+        self.inner.begin_with_options(options).await
+    }
+}
+
+/// Whether a commit failed on a write conflict, which Go's autocommit retry handles by
+/// re-running the statement in a new transaction (`kv.ErrWriteConflict`). A key that already
+/// exists (an inserted key another transaction committed first) is not retryable in Go
+/// either: the client gets the duplicate-entry error.
+pub fn is_write_conflict(e: &tikv_client::Error) -> bool {
+    use tikv_client::Error as E;
+    match e {
+        E::KeyError(k) => k.conflict.is_some(),
+        E::MultipleKeyErrors(v) => v.iter().any(is_write_conflict),
+        E::PessimisticLockError { inner, .. } => is_write_conflict(inner),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,29 +356,5 @@ mod tests {
             total += d;
         }
         assert!((15..=25).contains(&total.as_secs()), "{total:?}");
-    }
-}
-
-/// Read-write transactions (D05.2 PR C: the SET GLOBAL writer of tidb-systable, spec §6.2;
-/// tidb-rs is otherwise read-only). The tikv-client transaction is returned as is: the
-/// writer classifies its commit errors with [`is_write_conflict`].
-impl KvClient {
-    /// An optimistic transaction with a start ts from the TSO.
-    pub async fn begin_optimistic(&self) -> tikv_client::Result<tikv_client::Transaction> {
-        self.inner.begin_optimistic().await
-    }
-}
-
-/// Whether a commit failed on a write conflict, which Go's autocommit retry handles by
-/// re-running the statement in a new transaction (`kv.ErrWriteConflict`). A key that already
-/// exists (an inserted key another transaction committed first) is not retryable in Go
-/// either: the client gets the duplicate-entry error.
-pub fn is_write_conflict(e: &tikv_client::Error) -> bool {
-    use tikv_client::Error as E;
-    match e {
-        E::KeyError(k) => k.conflict.is_some(),
-        E::MultipleKeyErrors(v) => v.iter().any(is_write_conflict),
-        E::PessimisticLockError { inner, .. } => is_write_conflict(inner),
-        _ => false,
     }
 }

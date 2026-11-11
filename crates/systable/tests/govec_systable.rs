@@ -1,4 +1,4 @@
-//! Replays the Go-generated vectors `tests/vectors/v8.5.8/<target>/systable.jsonl.gz`
+//! Replays the Go-generated vectors `tests/vectors/v8.5.8/<target>/write_systable.jsonl.gz`
 //! (tidb-rs-tracker govec, domain `systable`, block D06.7).
 //!
 //! The oracle is Go's real REPLACE on a bootstrapped mockstore: each `replace` record holds
@@ -30,7 +30,7 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
 
 fn vectors() -> String {
     format!(
-        "{}/tests/vectors/v8.5.8/{GO_TARGET}/systable.jsonl.gz",
+        "{}/tests/vectors/v8.5.8/{GO_TARGET}/write_systable.jsonl.gz",
         env!("CARGO_MANIFEST_DIR")
     )
 }
@@ -63,6 +63,12 @@ impl IdAccessor for Counter<'_> {
     }
 }
 
+/// The row format of a replace record (`args[3].rf`, default 2: records before the generator
+/// wrote through Go's internal session).
+fn rec_row_format(rec: &Value) -> i64 {
+    rec["args"][3]["rf"].as_i64().unwrap_or(2)
+}
+
 /// Replays one file: the number of records checked.
 fn replay(path: &str) -> usize {
     let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(path).expect("vectors"));
@@ -70,7 +76,7 @@ fn replay(path: &str) -> usize {
     gz.read_to_string(&mut text).unwrap();
     let mut lines = text.lines();
     let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
-    assert_eq!(header["domain"], "systable");
+    assert_eq!(header["domain"], "write_systable");
     let mut tables: HashMap<String, TableInfo> = HashMap::new();
     let mut fails = vec![];
     let mut n = 0;
@@ -118,7 +124,10 @@ fn replay(path: &str) -> usize {
                     &snap,
                     &mut mb,
                     &mut alloc,
-                    &RowEncodingConfig::default(),
+                    &RowEncodingConfig {
+                        row_format_version: rec_row_format(&rec),
+                        row_level_checksum: false,
+                    },
                 );
                 let muts: Vec<Value> = mb
                     .entries()

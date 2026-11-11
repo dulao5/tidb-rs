@@ -31,5 +31,10 @@ parking_lot = "0.12"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
+[dev-dependencies]
+# examples/systable_cli.rs (raw).
+tidb-tablecodec = { workspace = true }
+tidb-types = { workspace = true }
+
 [lints]
 workspace = true

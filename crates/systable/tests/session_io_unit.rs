@@ -19,7 +19,7 @@ use tidb_systable::session_io::*;
 
 fn tables() -> HashMap<String, Arc<TableInfo>> {
     let path = format!(
-        "{}/tests/vectors/v8.5.8/arm64/systable.jsonl.gz",
+        "{}/tests/vectors/v8.5.8/arm64/write_systable.jsonl.gz",
         env!("CARGO_MANIFEST_DIR")
     );
     let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap());
