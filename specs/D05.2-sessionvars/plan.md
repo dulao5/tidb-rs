@@ -202,11 +202,12 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
 3. **govec `systable` 领域**（tracker）：oracle 是 Go 在 bootstrap 过的 mockstore 上真实执行的 REPLACE（BEGIN OPTIMISTIC 内），记录事务 memdb（key、value、flags）；每条记录前把行 ID 分配器 rebase 到固定值，bootstrap 行改写后停放在高位，记录互不依赖。164 条：replace 93、alloc 29、next_step 42、tableinfo 2。Rust 回放 0 条不一致；反证：去掉索引删除的 need_locked 报 25 条，assertion 改为后者覆盖报 25 条，行比较忽略大小写报 1 条，去掉 `MaxInt64 - newBase` 上限报 3 条。
 4. **poc-domain `systable_io.rs`**（WIP，仅编译通过）：`TikvStore`（tikv-client 乐观事务；presume-not-exists 的 key 用 insert；写冲突重试）、元数据行 ID 计数器的事务、`EtcdNotifier`。poc-kv 增加 `begin_optimistic`、`is_write_conflict`。
 
+5. **row format 1**（同轮后半）：playground 上发现 Go 的 SET GLOBAL 写 row format 1（内部会话不加载全局 row format），tidb-rs 改为相同（`tablecodec.encode_row` / `encode_old_row`，从 X 移回 D01.11，converge 145/145）；oracle 改为经 `sysSessionPool` 会话执行。govec 领域改名 `write_systable`，排在所有领域之后：它在进程内 bootstrap 的 domain 会改动其他领域读取的进程级状态（sysvar 的 `tidb_gogc_tuner_threshold` 校验）。
+6. **混合集群测试**：`scripts/systable-mixed.sh` + `crates/poc/domain/examples/systable_cli.rs`，5 项全部通过，结果见 spec §6.7。
+
 **还没做**
-1. amd64 向量（sessionvars、systable）取 tracker CI artifact，去掉 `targetsPending["systable"]`，更新两个 vectors README 的 sha256。
-2. 混合集群测试（§6.6）：自己的 playground（tag maya-pc3，offset 27000）。
-3. PoC 会话的 `SET GLOBAL` 仍返回 not supported：PoC 会话没有使用 sessionctx 的 `SessionVars`，接入属于 D05.3 / T9。
-4. 本地 `go test ./...` 全量运行时 `TestDomains/sysvar` 报 stale（单独运行或与相邻领域一起运行都通过），待 CI（linux）确认是否 darwin 特有。
+1. PoC 会话的 `SET GLOBAL` 仍返回 not supported：PoC 会话没有使用 sessionctx 的 `SessionVars`，接入属于 D05.3 / T9。读取侧（`SysVarCache` + `load_sys_var_cache_loop`）也还没有接到 PoC 的 domain 上。
+2. prewrite 与 commit 之间杀进程的测试（需要 failpoint）；PD GlobalConfig 写入（client-rust 分支没有 API）；assertion 和 request source（同上）。
 
 ## PR D 提议（D05.2 剩余，不在 PR C 中实现）
 
