@@ -47,20 +47,22 @@ descriptor-only signatures, applies the record's coercibility/repertoire overrid
 probe string). A `{"panic": true}` output (Go indexes `args` or `argTps` out of range) must
 panic in Rust too.
 
-# Domain "cast" (block D08.8 parts 1 and 2a)
+# Domain "cast" (block D08.8 parts 1, 2a and 2b-1)
 
 `<target>/cast.jsonl.gz` are copied unmodified from the tidb-rs-tracker repository:
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-2`, commit `3408336`) |
-| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 4,560 records: `cast` 3,860 (60 of them UNSIGNED UNION negative strings; 800 `conv` records — part 2a — with FLOAT, BIT(n), ENUM and SET columns, which Go's `Column.VecEvalInt/Real/String` convert), `wrap` 700 |
-| `arm64/cast.jsonl.gz` sha256 | `9d8dbc480611857ff2d18bfd5ae7e9580dcb58c4b97993d71d9ad4178275b9d6` (GOARCH=arm64, generated locally) |
-| `amd64/cast.jsonl.gz` sha256 | `0d8cdb86c1b40751d790227da140705ac6c586104ccb6174c80bc48009bd8593` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-3`, commit `165478a`) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 7,380 records: `cast` 3,860 (60 of them UNSIGNED UNION negative strings; 800 `conv` records — part 2a — with FLOAT, BIT(n), ENUM and SET columns, which Go's `Column.VecEvalInt/Real/String` convert), `wrap` 700; part 2b-1 (appended, the 4,560 records above unchanged): `str` 1,600 (CAST to STRING), `dbl` 120 (FLOAT → DOUBLE, bit for bit), `binlit` 500 (`HandleBinaryLiteral`, to_binary/from_binary), `collcast` 300 (`BuildCastCollationFunction`), `wrapstr` 300 (`WrapWithCastAsString`) |
+| `arm64/cast.jsonl.gz` sha256 | `7c290f8f730a031ce958b08482291336fefa14f8d5e0b05337ea668528aae117` (GOARCH=arm64, generated locally) |
+| `amd64/cast.jsonl.gz` sha256 | `4ad8fbab525b6509b24ab109d3ab6f17a6e064a7939d0b89a513008e1087f071` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
 
 A `cast` record builds `CAST(arg AS tp)` with `BuildCastFunctionWithCheck` (the argument is a
 column of the record's rows or a constant, which is folded) under random type flags and error
 levels, and compares the built node (`sfDump`), the warnings of building, the `inUnion` metadata,
 and the evaluation in both of Go's modes: row by row (value/error and warnings per row) and over
 the chunk (the vector driver: values, or the first error, and warnings). Go's row and vector
-versions differ in four places (spec D08.8 §3.2); each Rust driver follows its own Go version.
+versions differ in four places (spec D08.8 §3.2) and in `from_binary` (§3.4); each Rust driver
+follows its own Go version. Part 2b-1 records may carry a sixth `cast` argument
+(`isExplicitCharset`) and `castCtx` entries 3–4 (`max_allowed_packet`, SQL mode).

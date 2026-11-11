@@ -20,3 +20,16 @@
 2. CAST 到 STRING（`newBaseBuiltinCastFunc4String`、`adjustRetFtForCastString`、`HandleBinaryLiteral`/from_binary、`padZeroForBinaryType`）、TIME、DURATION、JSON（含 ARRAY）、VECTOR；其余 `WrapWithCastAs*`、`BuildCastCollationFunction`。
 3. 从 TIME/DURATION/JSON/VECTOR 出发的签名（去掉临时桩）；`VectorFloat32AsUnsupported` 需要一个签名有多个求值类型的驱动。
 4. 然后 D08.2 第 2 部分其余：`newBaseBuiltinFuncWithTp`/`WithFieldTypes`（用 `derive` 记录经它们回放，Lucky 评审 #80）、注册表的 `get_function`、`NewFunction*`（D08.1 2b），以及 D08.1 2b 的 `EvaluatorSuite`、`chunk_executor`、`VecEvalBool`。
+
+## 第 2b-1 部分（本 PR）
+
+1. `builtin_cast.rs`：`castAsStringFunctionClass`、4 个 CAST 到 STRING 的签名（另 4 个为临时桩）、`adjustRetFtForCastString`、`decimalPrecisionToLength`、`padZeroForBinaryType`、`WrapWithCastAsString`、`BuildCastCollationFunction`；`BuildCastFunctionWithCheck` 的 STRING 分支（BIT 参数的 flen、`isExplicitCharset`）。
+2. `builtin_convert_charset.rs`（新文件，块 D08.6 → D08.8）：`to_binary`/`from_binary` 的函数类与签名、`BuildTo/FromBinaryFunction`、`HandleBinaryLiteral`、`convertActionMap`。`BuiltinFunc::cannot_convert_string_as_warning`。
+3. `builtin.rs`（D08.2）：`newBaseBuiltinFuncWithTp`（TIME/DURATION/JSON/VECTOR 参数为临时桩）、`newBaseBuiltinCastFunc4String`。`Expr::charset_and_collation`。
+4. `#[eval_fn]`：`args(Int, String, ..)` 选项（lazy 函数体声明向量驱动读取参数的类型），`SigDrivers::arg_eval_type` 对变参签名重复最后一个类型（Lucky 评审 #84；D08.1 spec §4.1）。
+5. govec `cast` 领域追加 2,820 条（原有 4,560 条不变）：`str` 1,600（INT/REAL/DECIMAL/YEAR/字符串/FLOAT/hybrid 参数 → CHAR/BINARY/VARCHAR，7 种字符集，随机的显式字符集、`max_allowed_packet`、严格模式）、`dbl` 120（FLOAT → DOUBLE，0.1f、16777217f、次正规数、float32 最大值，逐位比较）、`binlit` 500（`HandleBinaryLiteral` 与 to_binary/from_binary 的求值）、`collcast` 300、`wrapstr` 300。castCtx 可选地带 `max_allowed_packet` 与 SQL mode。
+
+## 第 2b-2、2b-3 部分（交接）
+
+- 2b-2：`#[eval_fn]` 支持 Time/Duration/JSON/VectorFloat32 的参数与结果（`ArgKind`、视图、输出列）；CAST 到 TIME/DATETIME/DATE/DURATION/JSON（含 ARRAY）/VECTOR 与从这些类型出发的签名（去掉临时桩，包括 `*AsString`）；`WrapWithCastAsTime/Duration/JSON/VectorFloat32`；`VectorFloat32AsUnsupported` 需要一个签名有多个求值类型的驱动。之后 `newBaseBuiltinFuncWithTp` 的临时桩分支去掉。
+- 2b-3：`newBaseBuiltinFuncWithFieldTypes`；注册表的 `get_function`、`NewFunction*`（`derive` 记录经包 CAST 的构造函数再跑一遍，Lucky 评审 #80）；常量传播；D08.1 2b 的 `EvaluatorSuite`、`chunk_executor`、`VecEvalBool`、`toBool`、`EvalExpr`。

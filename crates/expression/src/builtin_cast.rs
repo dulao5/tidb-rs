@@ -1,15 +1,16 @@
 //! go-file: pkg/expression/builtin_cast.go
 //! go-file: pkg/expression/builtin_cast_vec.go
 //!
-//! CAST (block D08.8), first batch: the function classes of CAST to INT, REAL and DECIMAL,
-//! their signatures from INT, REAL, DECIMAL and STRING arguments, `BuildCastFunction*` and
-//! `WrapWithCastAsInt`/`Real`/`Decimal` (spec D08.8 §1).
+//! CAST (block D08.8): the function classes of CAST to INT, REAL, DECIMAL and STRING, their
+//! signatures from INT, REAL, DECIMAL and STRING (and hybrid) arguments, `BuildCastFunction*`,
+//! `BuildCastCollationFunction` and `WrapWithCastAsInt`/`Real`/`Decimal`/`String` (spec D08.8
+//! §1).
 //!
 //! The signatures from TIME, DURATION, JSON and VECTOR arguments are selected by the function
 //! classes (so the planner sees Go's signature, result type and `tipb` code) but have no
 //! drivers yet: temporary stubs (constitution art. 4.3), evaluating them returns Go's
-//! `baseBuiltinFunc` error. CAST to STRING/TIME/DURATION/JSON/VECTOR returns a "not ported
-//! yet" error from `build_cast_function*` (D08.8 part 2).
+//! `baseBuiltinFunc` error. CAST to TIME/DURATION/JSON/VECTOR returns a "not ported yet"
+//! error from `build_cast_function*` (D08.8 part 2b-2).
 
 #![allow(non_upper_case_globals)]
 
@@ -19,12 +20,16 @@ use tidb_base::Error;
 use tidb_base::errors::RedactLogDisable;
 use tidb_base::gofmt::Arg;
 use tidb_base::gostd::bytes::trim_space;
+use tidb_base::gostd::strconv::format_float;
 use tidb_base::mysql::{
-    self, EnumSetAsIntFlag, MaxDecimalScale, MaxDecimalWidth, MaxIntWidth, MaxRealWidth,
-    NotFixedDec, NotNullFlag, TypeDouble, TypeEnum, TypeInt24, TypeLong, TypeLonglong,
-    TypeNewDecimal, TypeShort, TypeTiny, TypeYear, UnsignedFlag, has_not_null_flag,
-    has_unsigned_flag,
+    self, BinaryFlag, EnumSetAsIntFlag, MaxDateWidth, MaxDatetimeWidthNoFsp, MaxDecimalScale,
+    MaxDecimalWidth, MaxDurationWidthNoFsp, MaxIntWidth, MaxLongBlobWidth, MaxRealWidth,
+    NotFixedDec, NotNullFlag, TypeBit, TypeBlob, TypeDate, TypeDouble, TypeEnum, TypeFloat,
+    TypeInt24, TypeLong, TypeLongBlob, TypeLonglong, TypeMediumBlob, TypeNewDecimal, TypeNull,
+    TypeSet, TypeShort, TypeString, TypeTiny, TypeTinyBlob, TypeVarString, TypeVarchar, TypeYear,
+    UnsignedFlag, has_not_null_flag, has_unsigned_flag,
 };
+use tidb_parser::gocharset::{CharsetBin, CollationBin};
 use tidb_parser::types::{
     ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
     ETVectorFloat32, EvalType, UnspecifiedLength,
@@ -34,19 +39,27 @@ use tidb_types::convert::{
     integer_signed_upper_bound, integer_unsigned_upper_bound, str_to_float, str_to_int,
     str_to_uint,
 };
-use tidb_types::datum::{produce_dec_with_specified_tp, produce_float_with_specified_tp};
+use tidb_types::datum::{
+    produce_dec_with_specified_tp, produce_float_with_specified_tp, produce_str_with_specified_tp,
+};
 use tidb_types::errors::{
     ErrCastAsSignedOverflow, ErrCastNegIntAsUnsigned, ErrOverflow, ErrTruncated,
     ErrTruncatedWrongVal,
 };
-use tidb_types::etc::FieldType;
+use tidb_types::etc::{FieldType, is_binary_str};
 use tidb_types::field_type::{new_field_type, set_bin_chs_cln_flag};
 use tidb_types::mydecimal::{MODE_HALF_UP, MyDecimal, new_dec_from_int, new_dec_from_uint};
 
 use crate::ast_funcs as ast;
-use crate::builtin::{BaseFunctionClass, new_base_builtin_cast_func, new_base_builtin_func};
+use crate::builtin::{
+    BaseFunctionClass, new_base_builtin_cast_func, new_base_builtin_cast_func4_string,
+    new_base_builtin_func,
+};
+use crate::builtin_convert_charset::handle_binary_literal;
+use crate::collation::{CoercibilityExplicit, ExprCollation};
 use crate::constant_fold::fold_constant;
 use crate::context::{BuildContext, EvalContext, err_ctx, type_ctx};
+use crate::errors::handle_allowed_packet_overflowed;
 use crate::eval::{BuiltinFunc, SigDesc, SigDrivers, SigView};
 use crate::expression::{ConstStrict, EvalState, Expr, ExprRef, is_binary_literal};
 use crate::scalar_function::ScalarFunction;
@@ -76,6 +89,14 @@ const CastDurationAsDecimal: i32 = 53;
 const CastJsonAsInt: i32 = 60;
 const CastJsonAsReal: i32 = 61;
 const CastJsonAsDecimal: i32 = 63;
+const CastIntAsString: i32 = 3;
+const CastRealAsString: i32 = 12;
+const CastDecimalAsString: i32 = 22;
+const CastStringAsString: i32 = 32;
+const CastTimeAsString: i32 = 42;
+const CastDurationAsString: i32 = 52;
+const CastJsonAsString: i32 = 62;
+const CastVectorFloat32AsString: i32 = 5183;
 
 // ---------------------------------------------------------------- signatures
 
@@ -212,6 +233,55 @@ sig!(
     builtinCastJSONAsDecimalSig,
     CastJsonAsDecimal,
     true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastIntAsStringSig,
+    CastIntAsString,
+    true,
+    CAST_INT_AS_STRING
+);
+sig!(
+    builtinCastRealAsStringSig,
+    CastRealAsString,
+    true,
+    CAST_REAL_AS_STRING
+);
+sig!(
+    builtinCastDecimalAsStringSig,
+    CastDecimalAsString,
+    true,
+    CAST_DECIMAL_AS_STRING
+);
+sig!(
+    builtinCastStringAsStringSig,
+    CastStringAsString,
+    true,
+    CAST_STRING_AS_STRING
+);
+// Temporary stubs (D08.8 part 2b-2).
+sig!(
+    builtinCastTimeAsStringSig,
+    CastTimeAsString,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastDurationAsStringSig,
+    CastDurationAsString,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastJSONAsStringSig,
+    CastJsonAsString,
+    true,
+    SigDrivers::None
+);
+sig!(
+    builtinCastVectorFloat32AsStringSig,
+    CastVectorFloat32AsString,
+    false,
     SigDrivers::None
 );
 // Go does not call setPbCode for it (the code is commented out).
@@ -642,6 +712,118 @@ pub fn cast_string_as_decimal(
     produce_dec(ctx, f, res)
 }
 
+// ---------------------------------------------------------------- CAST to STRING
+
+/// padZeroForBinaryType pads `s` with `\0` up to the length of a `BINARY(n)` result. When the
+/// length exceeds `max_allowed_packet`, the result is NULL with a warning (or an error,
+/// `handleAllowedPacketOverflowed`).
+// go: padZeroForBinaryType L1
+fn pad_zero_for_binary_type(
+    ctx: &dyn EvalContext,
+    mut s: Vec<u8>,
+    tp: &FieldType,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    let flen = tp.get_flen();
+    if tp.get_type() == TypeString && is_binary_str(tp) && (s.len() as isize) < flen {
+        let max_allowed_packet = ctx.get_max_allowed_packet();
+        if flen as u64 > max_allowed_packet {
+            handle_allowed_packet_overflowed(ctx, "cast_as_binary", max_allowed_packet)?;
+            return Ok(None);
+        }
+        s.resize(flen as usize, 0);
+    }
+    out.extend_from_slice(&s);
+    Ok(Some(()))
+}
+
+/// The shared tail of the CAST-to-STRING signatures: `ProduceStrWithSpecifiedTp` (its error
+/// is returned) then `padZeroForBinaryType`.
+// glue: the shared tail `res, err = ProduceStrWithSpecifiedTp(..); if err != nil {..}; return padZeroForBinaryType(..)` of the CAST-to-STRING signatures
+fn produce_str(
+    ctx: &dyn EvalContext,
+    f: &BuiltinFunc,
+    res: Vec<u8>,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    let (res, err) = produce_str_with_specified_tp(res, &f.tp, &type_ctx(ctx), false);
+    err?;
+    pad_zero_for_binary_type(ctx, res, &f.tp, out)
+}
+
+// go: builtinCastIntAsStringSig.evalString L1
+// go: builtinCastIntAsStringSig.vecEvalString L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastIntAsStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastIntAsStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String)]
+pub fn cast_int_as_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: i64,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    let tp = f.arg_type(0);
+    let mut res = if !has_unsigned_flag(tp.get_flag()) {
+        val.to_string()
+    } else {
+        (val as u64).to_string()
+    }
+    .into_bytes();
+    if tp.get_type() == TypeYear && res == b"0" {
+        res = b"0000".to_vec();
+    }
+    produce_str(ctx, f, res, out)
+}
+
+// go: builtinCastRealAsStringSig.evalString L1
+// go: builtinCastRealAsStringSig.vecEvalString L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastRealAsStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String)]
+pub fn cast_real_as_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: f64,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    let mut bits = 64;
+    if f.arg_type(0).get_type() == TypeFloat {
+        // b.args[0].EvalReal() casts the value from float32 to float64, for example:
+        // float32(208.867) is cast to float64(208.86700439)
+        // If we strconv.FormatFloat the value with 64bits, the result is incorrect!
+        bits = 32;
+    }
+    produce_str(ctx, f, format_float(val, b'f', -1, bits).into_bytes(), out)
+}
+
+// go: builtinCastDecimalAsStringSig.evalString L1
+// go: builtinCastDecimalAsStringSig.vecEvalString L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastDecimalAsStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDecimalAsStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String)]
+pub fn cast_decimal_as_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &MyDecimal,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    produce_str(ctx, f, val.to_string(), out)
+}
+
+// go: builtinCastStringAsStringSig.evalString L1
+// go: builtinCastStringAsStringSig.vecEvalString L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastStringAsStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastStringAsStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String)]
+pub fn cast_string_as_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    produce_str(ctx, f, val.to_vec(), out)
+}
+
 // ---------------------------------------------------------------- function classes
 
 /// `castAsIntFunctionClass`.
@@ -794,6 +976,241 @@ impl CastAsDecimalFunctionClass {
     }
 }
 
+/// `castAsStringFunctionClass`.
+#[derive(Clone, Debug)]
+pub struct CastAsStringFunctionClass {
+    /// The embedded `baseFunctionClass`.
+    pub base: BaseFunctionClass,
+    /// `tp`.
+    pub tp: FieldType,
+    /// `isExplicitCharset`.
+    pub is_explicit_charset: bool,
+}
+
+impl CastAsStringFunctionClass {
+    /// Go changes the class's `tp` in place (`adjustRetFtForCastString(bf.tp, ..)` on the
+    /// pointer the caller made the node's `RetType`); the result type is the signature's `tp`
+    /// here, which the caller uses as the node's `RetType`.
+    // go: castAsStringFunctionClass.getFunction L1
+    pub fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+        let mut bf = new_base_builtin_cast_func4_string(
+            ctx,
+            self.base.func_name,
+            args,
+            self.tp.clone(),
+            self.is_explicit_charset,
+        )?;
+        let ft = bf.args[0].get_type(&*ctx.get_eval_ctx()).into_owned();
+        if ft.hybrid() {
+            let cast_bit_as_un_binary =
+                ft.get_type() == TypeBit && self.tp.get_charset() != CharsetBin;
+            if !cast_bit_as_un_binary {
+                return Ok(bf.with_sig(&builtinCastStringAsStringSig));
+            }
+            // for type BIT, it maybe an invalid value for the specified charset, we need to
+            // convert it to binary first, and then convert it to the specified charset with
+            // `HandleBinaryLiteral` in the following code.
+            let mut tp = tidb_types::field_type::new_field_type(TypeString);
+            tp.set_charset(CharsetBin);
+            tp.set_collate(CollationBin);
+            tp.add_flag(BinaryFlag);
+            let a = ExprRef::clone(&bf.args[0]);
+            bf.args[0] = build_cast_function(ctx, a, tp)?;
+        }
+        let arg_ft = bf.args[0].get_type(&*ctx.get_eval_ctx()).into_owned();
+        adjust_ret_ft_for_cast_string(&mut bf.tp, &arg_ft);
+
+        let arg_tp = arg_ft.eval_type();
+        Ok(match arg_tp {
+            ETInt => bf.with_sig(&builtinCastIntAsStringSig),
+            ETReal => bf.with_sig(&builtinCastRealAsStringSig),
+            ETDecimal => bf.with_sig(&builtinCastDecimalAsStringSig),
+            ETDatetime | ETTimestamp => bf.with_sig(&builtinCastTimeAsStringSig),
+            ETDuration => bf.with_sig(&builtinCastDurationAsStringSig),
+            ETJson => bf.with_sig(&builtinCastJSONAsStringSig),
+            ETVectorFloat32 => bf.with_sig(&builtinCastVectorFloat32AsStringSig),
+            ETString => {
+                // When cast from binary to some other charsets, we should check if the binary
+                // is valid or not. so we build a from_binary function to do this check.
+                let ec = ExprCollation {
+                    coer: CoercibilityExplicit,
+                    repe: Default::default(),
+                    charset: self.tp.get_charset().to_string(),
+                    collation: self.tp.get_collate().to_string(),
+                };
+                let a = ExprRef::clone(&bf.args[0]);
+                bf.args[0] = handle_binary_literal(ctx, a, &ec, self.base.func_name, true);
+                bf.with_sig(&builtinCastStringAsStringSig)
+            }
+            _ => return Err(cannot_cast(arg_tp, "String")),
+        })
+    }
+}
+
+const maxTinyBlobSize: isize = 255;
+const maxBlobSize: isize = 65535;
+const maxMediumBlobSize: isize = 16777215;
+const maxLongBlobSize: isize = 4294967295;
+// These two are used to estimate the length of the result of CAST(.. AS CHAR) of a BLOB
+// (4 bytes per character at most).
+const castBlobFlen: isize = maxBlobSize * 4;
+const castMediumBlobFlen: isize = maxMediumBlobSize * 4;
+
+/// The flen of a CAST to a variable-length string type without a length, estimated from the
+/// argument. Go's `intest.Assert` branches (ENUM/SET with `EnumSetAsIntFlag`, unknown types)
+/// return as Go's production build does (D08.1 spec §4 item 6).
+// go: adjustRetFtForCastString L1
+#[allow(clippy::collapsible_match)] // keeps the shape of the Go switch
+pub(crate) fn adjust_ret_ft_for_cast_string(ret_ft: &mut FieldType, arg_ft: &FieldType) {
+    let original_flen = ret_ft.get_flen();
+
+    // Only estimate the length for variable length string types, because different length
+    // for fixed length string types will have different behaviors and may cause
+    // compatibility issues.
+    if ret_ft.get_type() == TypeString {
+        return;
+    }
+
+    if arg_ft.get_type() == TypeNull {
+        return;
+    }
+
+    let arg_tp = arg_ft.eval_type();
+    let unsigned = has_unsigned_flag(arg_ft.get_flag());
+    match arg_tp {
+        ETInt => {
+            if original_flen == UnspecifiedLength {
+                // check https://github.com/pingcap/tidb/issues/44786
+                // set flen from integers may truncate integers, e.g. char(1) can not display
+                // -1[int(1)]
+                match arg_ft.get_type() {
+                    TypeTiny => ret_ft.set_flen(if unsigned { 3 } else { 4 }),
+                    mysql::TypeShort => ret_ft.set_flen(if unsigned { 5 } else { 6 }),
+                    TypeInt24 => ret_ft.set_flen(if unsigned { 8 } else { 9 }),
+                    TypeLong => ret_ft.set_flen(if unsigned { 10 } else { 11 }),
+                    // the length of BIGINT is always 20 without considering the unsigned flag,
+                    // because the bigint range from -9223372036854775808 to
+                    // 9223372036854775807, and unsigned bigint range from 0 to
+                    // 18446744073709551615, they are all 20 characters long.
+                    TypeLonglong => ret_ft.set_flen(20),
+                    TypeYear => ret_ft.set_flen(4),
+                    TypeBit => ret_ft.set_flen(arg_ft.get_flen()),
+                    // intest.Assert(false, ..): cast Enum/Set to String should not set
+                    // mysql.EnumSetAsIntFlag; unknown type for INT.
+                    TypeEnum | TypeSet => {}
+                    _ => {}
+                }
+            }
+        }
+        ETReal => {
+            // MySQL used 12/22 for float/double, it's because MySQL turns float/double into
+            // scientific notation in some situations. TiDB choose to use 'f' format for all
+            // the cases, so TiDB needs much longer length for float/double.
+            //
+            // The largest float/double value is around `3.40e38`/`1.79e308`, and the smallest
+            // positive float/double value is around `1.40e-45`/`4.94e-324`. Therefore, we need
+            // at least `1 (sign) + 1 (integer) + 1 (dot) + (45 + 39) (decimal) = 87` for float
+            // and `1 (sign) + 1 (integer) + 1 (dot) + (324 + 43) (decimal) = 370` for double.
+            if original_flen == UnspecifiedLength {
+                if arg_ft.get_type() == TypeFloat {
+                    ret_ft.set_flen(87);
+                } else if arg_ft.get_type() == TypeDouble {
+                    ret_ft.set_flen(370);
+                }
+            }
+        }
+        ETDecimal => {
+            if original_flen == UnspecifiedLength {
+                ret_ft.set_flen(decimal_precision_to_length(arg_ft));
+            }
+        }
+        ETDatetime | ETTimestamp => {
+            if original_flen == UnspecifiedLength {
+                if arg_ft.get_type() == TypeDate {
+                    ret_ft.set_flen(MaxDateWidth);
+                } else {
+                    ret_ft.set_flen(MaxDatetimeWidthNoFsp);
+                }
+
+                // Theoretically, the decimal of `DATE` will never be greater than 0.
+                let decimal = arg_ft.get_decimal();
+                if decimal > 0 {
+                    // If the type is datetime or timestamp with fractional seconds, we need to
+                    // set the length to accommodate the fractional seconds part.
+                    ret_ft.set_flen(ret_ft.get_flen() + 1 + decimal);
+                }
+            }
+        }
+        ETDuration => {
+            if original_flen == UnspecifiedLength {
+                ret_ft.set_flen(MaxDurationWidthNoFsp);
+                let decimal = arg_ft.get_decimal();
+                if decimal > 0 {
+                    // If the type is time with fractional seconds, we need to set the length
+                    // to accommodate the fractional seconds part.
+                    ret_ft.set_flen(ret_ft.get_flen() + 1 + decimal);
+                }
+            }
+        }
+        ETJson => {
+            if original_flen == UnspecifiedLength {
+                ret_ft.set_flen(MaxLongBlobWidth);
+                ret_ft.set_type(TypeLongBlob);
+            }
+        }
+        ETVectorFloat32 => {}
+        ETString => {
+            if original_flen == UnspecifiedLength {
+                match arg_ft.get_type() {
+                    TypeString | TypeVarchar | TypeVarString => {
+                        if arg_ft.get_flen() > 0 {
+                            ret_ft.set_flen(arg_ft.get_flen());
+                        }
+                    }
+                    TypeTinyBlob => ret_ft.set_flen(maxTinyBlobSize),
+                    TypeBlob => ret_ft.set_flen(castBlobFlen),
+                    TypeMediumBlob => ret_ft.set_flen(castMediumBlobFlen),
+                    TypeLongBlob => ret_ft.set_flen(maxLongBlobSize),
+                    // intest.Assert(false, "unknown type %d for String")
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The display length of a DECIMAL(precision, scale): digits, the point, the sign.
+// go: decimalPrecisionToLength L1
+fn decimal_precision_to_length(ft: &FieldType) -> isize {
+    let precision = ft.get_flen();
+    let scale = ft.get_decimal();
+    let unsigned = has_unsigned_flag(ft.get_flag());
+
+    if precision == UnspecifiedLength || scale == UnspecifiedLength {
+        return UnspecifiedLength;
+    }
+
+    let mut ret = precision;
+    if scale > 0 {
+        ret += 1;
+    }
+
+    if !unsigned && precision > 0 {
+        ret += 1; // for negative sign
+    }
+
+    if ret == 0 {
+        return 1;
+    }
+    ret
+}
+
 // ---------------------------------------------------------------- type helpers
 
 /// setDataTypeDouble: the flen and decimal of a DOUBLE converted from a value with
@@ -924,11 +1341,11 @@ pub fn build_cast_function(
     build_cast_function_with_check(ctx, expr, tp, false, false)
 }
 
-/// The CAST targets of D08.8 part 2: a temporary stub (constitution art. 4.3).
-// glue: temporary stub of the castAsXxxFunctionClass not ported yet (D08.8 part 2)
+/// The CAST targets of D08.8 part 2b-2: a temporary stub (constitution art. 4.3).
+// glue: temporary stub of the castAsXxxFunctionClass not ported yet (D08.8 part 2b-2)
 fn cast_not_ported(et: EvalType) -> Error {
     Error::plain(format!(
-        "tidb-rs: CAST to {} is not ported yet (D08.8 part 2)",
+        "tidb-rs: CAST to {} is not ported yet (D08.8 part 2b-2)",
         et.to_string()
     ))
 }
@@ -936,13 +1353,13 @@ fn cast_not_ported(et: EvalType) -> Error {
 /// BuildCastFunctionWithCheck builds a CAST ScalarFunction from the Expression and return
 /// error if any. Go returns the node with a nil signature together with an error; this
 /// returns only the error.
-// go: BuildCastFunctionWithCheck L2 (the error comes without the node; CAST to STRING/TIME/DURATION/JSON/VECTOR is a temporary stub)
+// go: BuildCastFunctionWithCheck L2 (the error comes without the node; CAST to TIME/DURATION/JSON/VECTOR is a temporary stub)
 pub fn build_cast_function_with_check(
     ctx: &dyn BuildContext,
     expr: ExprRef,
     mut tp: FieldType,
     in_union: bool,
-    _is_explicit_charset: bool,
+    is_explicit_charset: bool,
 ) -> Result<ExprRef, Error> {
     let ectx = ctx.get_eval_ctx();
     // If source argument's nullable, then target type should be nullable
@@ -962,7 +1379,20 @@ pub fn build_cast_function_with_check(
             CastAsDecimalFunctionClass { base, tp, in_union }.get_function(ctx, vec![expr])?
         }
         ETReal => CastAsRealFunctionClass { base, tp, in_union }.get_function(ctx, vec![expr])?,
-        ETDatetime | ETTimestamp | ETDuration | ETJson | ETVectorFloat32 | ETString => {
+        ETString => {
+            let arg_tp = expr.get_type(&*ectx).into_owned();
+            if arg_tp.get_type() == TypeBit {
+                tp.set_flen((arg_tp.get_flen() + 7) / 8);
+            }
+            drop(ectx);
+            CastAsStringFunctionClass {
+                base,
+                tp,
+                is_explicit_charset,
+            }
+            .get_function(ctx, vec![expr])?
+        }
+        ETDatetime | ETTimestamp | ETDuration | ETJson | ETVectorFloat32 => {
             return Err(cast_not_ported(et));
         }
         _ => return Err(Error::plain(format!("cannot cast from {}", et.to_string()))),
@@ -1059,6 +1489,97 @@ pub fn wrap_with_cast_as_real(ctx: &dyn BuildContext, expr: ExprRef) -> Result<E
     tp.set_decimal(UnspecifiedLength);
     set_bin_chs_cln_flag(&mut tp);
     tp.add_flag(et.get_flag() & (UnsignedFlag | NotNullFlag));
+    build_cast_function(ctx, expr, tp)
+}
+
+/// BuildCastCollationFunction builds a ScalarFunction which casts the collation. Go logs
+/// the error of `BuildCastFunction`; this returns it.
+// go: BuildCastCollationFunction L2 (returns the error BuildCastFunction logs)
+pub fn build_cast_collation_function(
+    ctx: &dyn BuildContext,
+    expr: ExprRef,
+    ec: &ExprCollation,
+    enum_or_set_real_type_is_str: bool,
+) -> Result<ExprRef, Error> {
+    let ectx = ctx.get_eval_ctx();
+    let et = expr.get_type(&*ectx).into_owned();
+    if et.eval_type() != ETString {
+        return Ok(expr);
+    }
+    if et.get_collate() == ec.collation {
+        return Ok(expr);
+    }
+    let mut tp = et.clone();
+    if et.hybrid() {
+        if !enum_or_set_real_type_is_str {
+            return Ok(expr);
+        }
+        tp = tidb_types::field_type::new_field_type(TypeVarString);
+    } else if ec.charset == CharsetBin {
+        // When cast character string to binary string, if we still use fixed length
+        // representation, then 0 padding will be used, which can affect later execution.
+        // e.g. https://github.com/pingcap/tidb/issues/34823.
+        // On the other hand, we can not directly return origin expr back, since we need
+        // binary collation to do string comparison later.
+        // e.g. https://github.com/pingcap/tidb/pull/35053#discussion_r894155052
+        // Here we use VarString type of cast, i.e `cast(a as binary)`, to avoid this problem.
+        tp.set_type(TypeVarString);
+    }
+    tp.set_charset(&ec.charset);
+    tp.set_collate(&ec.collation);
+    drop(ectx);
+    build_cast_function(ctx, expr, tp)
+}
+
+/// WrapWithCastAsString wraps `expr` with `cast` if the return type of expr is not type
+/// string, otherwise, returns `expr` directly.
+// go: WrapWithCastAsString L2 (returns the error BuildCastFunction logs)
+pub fn wrap_with_cast_as_string(ctx: &dyn BuildContext, expr: ExprRef) -> Result<ExprRef, Error> {
+    let ectx = ctx.get_eval_ctx();
+    let expr_tp = expr.get_type(&*ectx).into_owned();
+    if expr_tp.eval_type() == ETString {
+        return Ok(expr);
+    }
+    let mut arg_len = expr_tp.get_flen();
+    // If expr is decimal, we should take the decimal point ,negative sign and the leading
+    // zero(0.xxx) into consideration, so we set `expr.GetType(ctx.GetEvalCtx()).GetFlen() + 3`
+    // as the `argLen`. Since the length of float and double is not accurate, we do not handle
+    // them.
+    if expr_tp.get_type() == TypeNewDecimal && arg_len != tidb_types::fsp::UnspecifiedFsp {
+        arg_len += 3;
+    }
+
+    if expr_tp.eval_type() == ETInt {
+        arg_len = MaxIntWidth;
+        // For TypeBit, castAsString will make length as int(( bit_len + 7 ) / 8) bytes due to
+        // TiKV needs the bit's real len during calculating, eg: ascii(bit).
+        if expr_tp.get_type() == TypeBit {
+            arg_len = (expr_tp.get_flen() + 7) / 8;
+        }
+    }
+
+    // Because we can't control the length of cast(float as char) for now, we can't
+    // determine the argLen.
+    if expr_tp.get_type() == TypeFloat || expr_tp.get_type() == TypeDouble {
+        arg_len = -1;
+    }
+    let mut tp = tidb_types::field_type::new_field_type(TypeVarString);
+    if expr.coercibility() == CoercibilityExplicit {
+        let (charset, collate) = expr.charset_and_collation();
+        tp.set_charset(charset);
+        tp.set_collate(collate);
+    } else if expr_tp.get_type() == TypeBit {
+        // Implicitly casting BIT to string will make it a binary
+        tp.set_charset(CharsetBin);
+        tp.set_collate(CollationBin);
+    } else {
+        let (charset, collate) = ctx.get_charset_info();
+        tp.set_charset(&charset);
+        tp.set_collate(&collate);
+    }
+    tp.set_flen(arg_len);
+    tp.set_decimal(UnspecifiedLength);
+    drop(ectx);
     build_cast_function(ctx, expr, tp)
 }
 
