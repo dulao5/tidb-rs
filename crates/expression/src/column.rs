@@ -911,11 +911,10 @@ pub fn gc_column_expr_is_tidb_shard(virtual_expr: Option<&Expr>) -> bool {
     true
 }
 
-/// The rows of `input` in order, through its selection vector (Go `NewIterator4Chunk`).
+/// The logical row indexes of `input` in order (Go `NewIterator4Chunk`): `GetRow` maps them
+/// through the selection vector (mapping them here as well read the wrong rows, or past the
+/// end, when the chunk had a `Sel()`; found by the D08.1 2b govec records).
 // glue: Go chunk.Iterator4Chunk over the selected rows
-fn chunk_rows(input: &tidb_chunk::Chunk) -> Box<dyn Iterator<Item = usize> + '_> {
-    match input.sel() {
-        Some(sel) => Box::new(sel.iter().copied()),
-        None => Box::new(0..input.num_rows()),
-    }
+fn chunk_rows(input: &tidb_chunk::Chunk) -> std::ops::Range<usize> {
+    0..input.num_rows()
 }

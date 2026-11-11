@@ -1,6 +1,6 @@
 # D08.1 表达式框架：spec
 
-状态：第 1 部分已合并（#73）；第 2 部分 2a（`#[eval_fn]` 与两种驱动、RPN、ScalarFunction 规划侧方法）见 plan.md；2b（EvaluatorSuite、chunk_executor、VecEvalBool、NewFunction*）随 D08.2/D08.8 的第一批签名。
+状态：第 1 部分已合并（#73）；第 2 部分 2a（`#[eval_fn]` 与两种驱动、RPN、ScalarFunction 规划侧方法）已合并（#75）；`NewFunction*` 随 D08.8 2b-3a（#95）；2b 的求值入口（EvaluatorSuite、chunk_executor、VecEvalBool/EvalExpr）见 plan.md "第 2 部分 2b（完成）"。
 
 收敛检查（第 1 部分）：D08.1 matched 141/348（6 个 Go 文件中缺 68 个，其余 7 个文件属于第 2、3 部分）；D08.2 的 `collation.go` 11 个。govec `expr` 领域 5,766 条，豁免 220 个（`expr_pending.go`）。
 
@@ -117,3 +117,11 @@ v8.5.8 的 `pkg/expression` 中有 **98 个**签名结构体在 `baseBuiltinFunc
     - `typeInferForNull` 不改参数标记的类型：Go 通过 `GetType(ctx)` 写，参数标记的 `GetType` 每次返回新对象，修改会丢掉，`RetType` 仍是 `TypeNull`（预处理语句中绑定为 NULL 的 `?` 不会变成另一个操作数的类型）。Rust 用 `with_type_mut`（跳过参数标记），单元测试 `type_infer_for_null_skips_parameter_markers`（Lucky 评审 #95）。
     - `ret_type_mut` 清掉 hash 缓存，Go 不清；只影响 `MemoryUsage`（Lucky 评审 #95）。
     - **测不到的部分**：`fold`（0/1/-1）和 `TryFold` 截断 warning 只作用于 `funcs` 中的函数类；目前能构建的 `cast`、`to_binary`、`from_binary` 在 `newFunctionImpl` 之前就返回（它们自己折叠），所以 govec 的 `newfunc` 记录覆盖不到这两段，反证也测不出（D08.8 plan.md 2b-3 交接：第一个函数族移植时补记录）。
+15. **求值入口（2b：`evaluator.go`、`chunk_executor.go`、`VecEvalBool`/`toBool`/`EvalExpr`/`implicitEvalReal`）**：
+    - Go 传 `chunk.Iterator4Chunk`，只用来取它的 chunk 和遍历行；Rust 直接接收 chunk（过滤器要像 Go 那样暂时清掉再恢复 `Sel()`，所以是 `&mut Chunk`）。
+    - `selected`/`isNull`/`nulls` 按值传入、返回（M-POOL：Go 复用调用方的切片和池中的 `sel`/`isZero`/列）；Go 的 nil 切片用 `Option`（`VectorizedFilterConsiderNull` 的 `isNull`：行路径保持 nil；向量路径没有行时也保持 nil，与 Go `nulls[:0]` 后不追加一致）。
+    - 每个函数多接收 [`EvalState`]（关联列的值）和向量路径的 [`RpnState`]（N4 §3.4）。`EvaluatorSuite` 在构建时把每个表达式编译成 `RpnProgram`；`EvalExpr`/`implicitEvalReal` 的向量路径每次调用编译一次（`RpnProgram::compile_as`：根节点按调用方选的求值类型读，对应 Go `expr.VecEvalXxx`；在许多 chunk 上求同一个表达式的执行器应保留编译结果）。
+    - `evalOneVec` 中 ENUM/SET 名字解析失败：Go 记一条 debug 日志并追加返回的零值，Rust 不记日志，追加同样的零值。
+    - **全局列池不移植（M-POOL），因此不复现 Go 的一个 bug**：`toBool` 用 `Column.GetString`（`hack.String`，与池中列共享字节）做 `StrToFloat`，"Truncated incorrect DOUBLE value: '%s'" 保存这个字符串、在 `Error()` 时才格式化；列放回全局池并被重用后，warning 显示的是别的字节（可能是别的语句、别的会话的数据）。tidb-rs 复制字符串，显示原值。用户可见（`SHOW WARNINGS`），见 `docs/compatibility.md`；govec 在经过 `VecEvalBool` 的路径上把这条 warning 的参数记为 `'<pooled>'`。
+    - `HasAssignSetVarFunc`、`checkSequenceFunction` 的分支、`implicitEvalReal` 要等 SETVAR/GETVAR、序列函数（D08.9）和 DAYNAME（D08.7）才有调用方：单元测试 `vectorizable_by_function_names` 用改名的 CAST 节点覆盖按函数名判断的部分；`implicitEvalReal` 登记豁免。
+    - 移植中发现并修好的问题：`Column.VecEvalInt/VecEvalString`（hybrid 列，2a）在 chunk 有 `Sel()` 时把行号经选择向量映射了两次（读错行或越界 panic）；改为逻辑行号，govec `evsuite` 记录覆盖。

@@ -124,6 +124,13 @@ pub trait FunctionClass: Sync {
 /// builds them directly.
 // glue: dispatch of funcs[name].getFunction over the ported classes
 pub fn function_class(name: &str) -> Option<&'static dyn FunctionClass> {
-    let _ = name;
-    None
+    PORTED_FUNCTION_CLASSES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| *c)
 }
+
+/// The ported classes of `funcs`, by function name. Every `impl FunctionClass for` in this
+/// crate must have an entry (test `function_class_registry`; Lucky, review of #95).
+// glue: the ported part of Go's funcs map
+pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = &[];

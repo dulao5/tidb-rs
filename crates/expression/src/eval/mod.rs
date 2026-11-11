@@ -768,6 +768,9 @@ pub enum RpnNode {
 pub struct RpnProgram {
     nodes: Vec<RpnNode>,
     ret: EvalType,
+    /// The `VecEvalXxx` the caller asked for at the root ([`RpnProgram::compile_as`]):
+    /// Go's `EvalExpr` lets the caller pick it (a hybrid expression read as int or string).
+    root_as: Option<EvalType>,
 }
 
 /// Per-worker state of vector evaluation: reusable intermediate columns and stack.
@@ -800,7 +803,26 @@ impl RpnProgram {
         let mut nodes = Vec::new();
         let ret = static_eval_type(e);
         compile_into(e, ret, &mut nodes);
-        RpnProgram { nodes, ret }
+        RpnProgram {
+            nodes,
+            ret,
+            root_as: None,
+        }
+    }
+
+    /// Compiles `e` to be read as `et` at the root (Go `expr.VecEvalXxx` for the `Xxx` of
+    /// `et`, chosen by the caller as in `EvalExpr`): a column or constant root is read as
+    /// `et`, a function root calls the signature's `vecEvalXxx` of `et` (the base error when
+    /// the signature has no such vector driver).
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    pub fn compile_as(e: &ExprRef, et: EvalType) -> RpnProgram {
+        let mut nodes = Vec::new();
+        compile_into(e, et, &mut nodes);
+        RpnProgram {
+            nodes,
+            ret: et,
+            root_as: Some(et),
+        }
     }
 
     /// The evaluation type of the result.
@@ -908,12 +930,16 @@ impl RpnProgram {
                         };
                         f.vec_eval(
                             ctx,
-                            // A signature without drivers of one type: Go calls
-                            // VecEvalXxx of the function's result type.
-                            f.sig
-                                .drivers
-                                .eval_type()
-                                .unwrap_or_else(|| f.tp.eval_type()),
+                            match self.root_as {
+                                Some(et) if pos == last => et,
+                                // A signature without drivers of one type: Go calls
+                                // VecEvalXxx of the function's result type.
+                                _ => f
+                                    .sig
+                                    .drivers
+                                    .eval_type()
+                                    .unwrap_or_else(|| f.tp.eval_type()),
+                            },
                             n,
                             &cols,
                             dst,
