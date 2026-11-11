@@ -50,6 +50,8 @@ jobs:
             v=29.3
             curl -fsSL --retry 5 -o /tmp/protoc.zip \
               "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-linux-x86_64.zip"
+            # sha256 of protoc-29.3-linux-x86_64.zip; a replaced or tampered asset fails CI.
+            echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  /tmp/protoc.zip" | sha256sum -c -
             sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
           fi
           protoc --version
