@@ -187,6 +187,27 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
    - 用同一个 writer 写 `mysql.tidb`，接上 `tidb_gc_*` 的 hook，跳过上限降到 0。
 4. **混合集群测试**：在自己的 v8.5.8 playground 上用非默认端口，覆盖交替和并发的 SET GLOBAL、两边读取、在 prewrite 与 commit 之间杀进程、etcd compaction、重启。结果、TiCDC 和统计增量的发现写进 spec §6.6，测试结束后停掉 playground。
 
+## PR C 交接（2026-11-11，第三轮）
+
+分支：tidb-rs `block/D05.2-sessionvars-c`（#70，已合入 main @962fe93 之后的 main），tracker `govec/sessionvars-D05.2-c`（#34，已合入 main）。
+
+**本轮完成**
+1. **T10 `tidb_gc_*`**：`GlobalVarAccessor` 增加 `set_tidb_table_value`；`getTiDBTableValue` / `setTiDBTableValue` 移植到 `varsutil.rs`；5 个变量的 GetGlobal / SetGlobal 钩子在 `session_hooks_gc.rs`，pending 清单清空。govec 生成器的 accessor 加了内存中的 mysql.tidb（`tidbTableAccessor`），新 op `tidb_table`（1,208 条，追加在最后）；原有记录中只有 64 条 tidb_gc_* 记录变化（Go 不再 panic）。**跳过上限 332 → 0**，66,478 条全部比对，0 条不一致。
+2. **新块 D06.7 的 crate `tidb-systable`**（rank 8，layers.toml 已登记）：
+   - `replace.rs`：系统表的专用 REPLACE（唯一键查重 → 相同则不写 → 删旧行和旧索引 → 分配 `_tidb_rowid` → 写行（row format v2）和索引），产出带 key flags 的 memdb；row format v1、超长值、非预期表结构都拒绝。
+   - `autoid.rs`：`Alloc` / `alloc4Signed` / `CalcNeededBatchSize` / `SeekToFirstAutoID*` / `NextStep`（tracker 把这几个 D06.2 函数移到 D06.7）。
+   - `sysvar_cache.rs`：`rebuildSysVarCache`（执行 SetGlobal 钩子）、`fetchTableValues` 的解码。
+   - `session_io.rs`：`replaceGlobalVariablesTableValue`、`SetTiDBTableValue`、`getTableValue`、`GetTiDBTableValue`、`NotifyUpdateSysVarCache`、`NotifyGlobalConfigChange`、`LoadSysVarCacheLoop`，I/O 通过 trait（`SysTableStore`、`SysTableTxn`、`Notifier`）由调用方提供；乐观事务冲突时整条重试（新 start ts，最多 `tidb_retry_limit`）；bootstrap 版本必须是 232；提交前比对 TableInfo。
+   - converge D06.7 17/17 OK；D05.2 46/238。
+3. **govec `systable` 领域**（tracker）：oracle 是 Go 在 bootstrap 过的 mockstore 上真实执行的 REPLACE（BEGIN OPTIMISTIC 内），记录事务 memdb（key、value、flags）；每条记录前把行 ID 分配器 rebase 到固定值，bootstrap 行改写后停放在高位，记录互不依赖。164 条：replace 93、alloc 29、next_step 42、tableinfo 2。Rust 回放 0 条不一致；反证：去掉索引删除的 need_locked 报 25 条，assertion 改为后者覆盖报 25 条，行比较忽略大小写报 1 条，去掉 `MaxInt64 - newBase` 上限报 3 条。
+4. **poc-domain `systable_io.rs`**（WIP，仅编译通过）：`TikvStore`（tikv-client 乐观事务；presume-not-exists 的 key 用 insert；写冲突重试）、元数据行 ID 计数器的事务、`EtcdNotifier`。poc-kv 增加 `begin_optimistic`、`is_write_conflict`。
+
+**还没做**
+1. amd64 向量（sessionvars、systable）取 tracker CI artifact，去掉 `targetsPending["systable"]`，更新两个 vectors README 的 sha256。
+2. 混合集群测试（§6.6）：自己的 playground（tag maya-pc3，offset 27000）。
+3. PoC 会话的 `SET GLOBAL` 仍返回 not supported：PoC 会话没有使用 sessionctx 的 `SessionVars`，接入属于 D05.3 / T9。
+4. 本地 `go test ./...` 全量运行时 `TestDomains/sysvar` 报 stale（单独运行或与相邻领域一起运行都通过），待 CI（linux）确认是否 darwin 特有。
+
 ## PR D 提议（D05.2 剩余，不在 PR C 中实现）
 
 截至 PR C 第二轮，D05.2 收敛检查为 44/237，缺 172 个，按类型：
