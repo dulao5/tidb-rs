@@ -35,7 +35,7 @@ use tidb_parser::types::{
     ETVectorFloat32, EvalType, UnspecifiedLength,
 };
 use tidb_types::convert::{
-    convert_float_to_int, convert_float_to_uint, integer_signed_lower_bound,
+    convert_float_to_int, convert_json_to_decimal, convert_json_to_float, convert_json_to_int64, convert_float_to_uint, integer_signed_lower_bound,
     integer_signed_upper_bound, integer_unsigned_upper_bound, str_to_float, str_to_int,
     str_to_uint,
 };
@@ -48,7 +48,11 @@ use tidb_types::errors::{
 };
 use tidb_types::etc::{FieldType, is_binary_str};
 use tidb_types::field_type::{new_field_type, set_bin_chs_cln_flag};
+use tidb_types::fsp::{DefaultFsp, check_fsp};
+use tidb_types::json::BinaryJSON;
 use tidb_types::mydecimal::{MODE_HALF_UP, MyDecimal, new_dec_from_int, new_dec_from_uint};
+use tidb_types::time::{Duration, Time};
+use tidb_types::vector::VectorFloat32;
 
 use crate::ast_funcs as ast;
 use crate::builtin::{
@@ -58,7 +62,7 @@ use crate::builtin::{
 use crate::builtin_convert_charset::handle_binary_literal;
 use crate::collation::{CoercibilityExplicit, ExprCollation};
 use crate::constant_fold::fold_constant;
-use crate::context::{BuildContext, EvalContext, err_ctx, type_ctx};
+use crate::context::{BuildContext, EvalContext, err_ctx, location, type_ctx};
 use crate::errors::handle_allowed_packet_overflowed;
 use crate::eval::{BuiltinFunc, SigDesc, SigDrivers, SigView};
 use crate::expression::{ConstStrict, EvalState, Expr, ExprRef, is_binary_literal};
@@ -180,60 +184,59 @@ sig!(
     CAST_STRING_AS_DECIMAL
 );
 
-// Temporary stubs (D08.8 part 2): selected by the function classes, not evaluated yet.
 sig!(
     builtinCastTimeAsIntSig,
     CastTimeAsInt,
     true,
-    SigDrivers::None
+    CAST_TIME_AS_INT
 );
 sig!(
     builtinCastTimeAsRealSig,
     CastTimeAsReal,
     true,
-    SigDrivers::None
+    CAST_TIME_AS_REAL
 );
 sig!(
     builtinCastTimeAsDecimalSig,
     CastTimeAsDecimal,
     true,
-    SigDrivers::None
+    CAST_TIME_AS_DECIMAL
 );
 sig!(
     builtinCastDurationAsIntSig,
     CastDurationAsInt,
     true,
-    SigDrivers::None
+    CAST_DURATION_AS_INT
 );
 sig!(
     builtinCastDurationAsRealSig,
     CastDurationAsReal,
     true,
-    SigDrivers::None
+    CAST_DURATION_AS_REAL
 );
 sig!(
     builtinCastDurationAsDecimalSig,
     CastDurationAsDecimal,
     true,
-    SigDrivers::None
+    CAST_DURATION_AS_DECIMAL
 );
 sig!(
     builtinCastJSONAsIntSig,
     CastJsonAsInt,
     true,
-    SigDrivers::None
+    CAST_JSON_AS_INT
 );
 sig!(
     builtinCastJSONAsRealSig,
     CastJsonAsReal,
     true,
-    SigDrivers::None
+    CAST_JSON_AS_REAL
 );
 sig!(
     builtinCastJSONAsDecimalSig,
     CastJsonAsDecimal,
     true,
-    SigDrivers::None
+    CAST_JSON_AS_DECIMAL
 );
 sig!(
     builtinCastIntAsStringSig,
@@ -259,30 +262,29 @@ sig!(
     true,
     CAST_STRING_AS_STRING
 );
-// Temporary stubs (D08.8 part 2b-2).
 sig!(
     builtinCastTimeAsStringSig,
     CastTimeAsString,
     true,
-    SigDrivers::None
+    CAST_TIME_AS_STRING
 );
 sig!(
     builtinCastDurationAsStringSig,
     CastDurationAsString,
     true,
-    SigDrivers::None
+    CAST_DURATION_AS_STRING
 );
 sig!(
     builtinCastJSONAsStringSig,
     CastJsonAsString,
     true,
-    SigDrivers::None
+    CAST_JSON_AS_STRING
 );
 sig!(
     builtinCastVectorFloat32AsStringSig,
     CastVectorFloat32AsString,
     false,
-    SigDrivers::None
+    CAST_VECTOR_FLOAT32_AS_STRING
 );
 // Go does not call setPbCode for it (the code is commented out).
 sig!(
@@ -822,6 +824,229 @@ pub fn cast_string_as_string(
     out: &mut Vec<u8>,
 ) -> Result<Option<()>, Error> {
     produce_str(ctx, f, val.to_vec(), out)
+}
+
+// ---------------------------------------------------------------- from TIME, DURATION, JSON, VECTOR
+
+/// A `fsp` argument of `Duration.ToNumber` checked by `types.CheckFsp`.
+// glue: the shared `val.Fsp, err = types.CheckFsp(val.Fsp)` of the duration signatures
+fn checked_fsp(mut d: Duration) -> Result<Duration, Error> {
+    let (fsp, err) = check_fsp(d.fsp);
+    d.fsp = fsp;
+    err?;
+    Ok(d)
+}
+
+// go: builtinCastTimeAsIntSig.evalInt L1
+// go: builtinCastTimeAsIntSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastTimeAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastTimeAsIntSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int)]
+pub fn cast_time_as_int(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    val: Time,
+) -> Result<Option<i64>, Error> {
+    let (t, err) = val.round_frac(&type_ctx(ctx), DefaultFsp);
+    err?;
+    let (res, err) = t.to_number().to_int();
+    err?;
+    Ok(Some(res))
+}
+
+// go: builtinCastTimeAsRealSig.evalReal L1
+// go: builtinCastTimeAsRealSig.vecEvalReal L2 (the vector driver of this body; only it hands ErrOverflow to ec.HandleError and sets the row NULL, as in Go)
+// go: builtinCastTimeAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastTimeAsRealSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Real)]
+pub fn cast_time_as_real(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: Time,
+) -> Result<Option<f64>, Error> {
+    let (res, err) = val.to_number().to_float64();
+    match err {
+        Err(e) if f.vector() && ErrOverflow.equal(&e) => {
+            err_ctx(ctx).handle_error(e)?;
+            Ok(None)
+        }
+        other => {
+            other?;
+            Ok(Some(res))
+        }
+    }
+}
+
+// go: builtinCastTimeAsDecimalSig.evalDecimal L1
+// go: builtinCastTimeAsDecimalSig.vecEvalDecimal L2 (the vector driver of this body; FillNumber = ToNumber, M-EVAL)
+// go: builtinCastTimeAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastTimeAsDecimalSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Decimal)]
+pub fn cast_time_as_decimal(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: Time,
+) -> Result<Option<MyDecimal>, Error> {
+    produce_dec(ctx, f, val.to_number())
+}
+
+// go: builtinCastTimeAsStringSig.evalString L1
+// go: builtinCastTimeAsStringSig.vecEvalString L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastTimeAsStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastTimeAsStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String)]
+pub fn cast_time_as_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: Time,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    produce_str(ctx, f, val.string(), out)
+}
+
+// go: builtinCastDurationAsIntSig.evalInt L1
+// go: builtinCastDurationAsIntSig.vecEvalInt L2 (the vector driver of this body; it reads the durations with the argument's declared fsp, M-EVAL)
+// go: builtinCastDurationAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDurationAsIntSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int)]
+pub fn cast_duration_as_int(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: Duration,
+) -> Result<Option<i64>, Error> {
+    let (res, err) = if f.tp.get_type() == TypeYear {
+        val.convert_to_year(&type_ctx(ctx))
+    } else {
+        let (dur, err) = val.round_frac(DefaultFsp, &location(ctx));
+        err?;
+        dur.to_number().to_int()
+    };
+    err?;
+    Ok(Some(res))
+}
+
+// go: builtinCastDurationAsRealSig.evalReal L1
+// go: builtinCastDurationAsRealSig.vecEvalReal L2 (the vector driver of this body; Go checks the argument's declared fsp once before the loop, here on the first row that is not NULL — spec §4)
+// go: builtinCastDurationAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDurationAsRealSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Real)]
+pub fn cast_duration_as_real(
+    _ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    val: Duration,
+) -> Result<Option<f64>, Error> {
+    let val = checked_fsp(val)?;
+    let (res, err) = val.to_number().to_float64();
+    err?;
+    Ok(Some(res))
+}
+
+// go: builtinCastDurationAsDecimalSig.evalDecimal L1
+// go: builtinCastDurationAsDecimalSig.vecEvalDecimal L2 (the vector driver of this body; fsp check as for builtinCastDurationAsRealSig, spec §4)
+// go: builtinCastDurationAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDurationAsDecimalSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Decimal)]
+pub fn cast_duration_as_decimal(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: Duration,
+) -> Result<Option<MyDecimal>, Error> {
+    let val = checked_fsp(val)?;
+    produce_dec(ctx, f, val.to_number())
+}
+
+// go: builtinCastDurationAsStringSig.evalString L1
+// go: builtinCastDurationAsStringSig.vecEvalString L2 (the vector driver of this body; durations read with the argument's declared fsp, M-EVAL)
+// go: builtinCastDurationAsStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDurationAsStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String)]
+pub fn cast_duration_as_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: Duration,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    produce_str(ctx, f, val.string(), out)
+}
+
+// go: builtinCastJSONAsIntSig.evalInt L1
+// go: builtinCastJSONAsIntSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastJSONAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastJSONAsIntSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int)]
+pub fn cast_json_as_int(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &BinaryJSON<'_>,
+) -> Result<Option<i64>, Error> {
+    let (res, err) = convert_json_to_int64(&type_ctx(ctx), val, has_unsigned_flag(f.tp.get_flag()));
+    if let Err(e) = err {
+        err_ctx(ctx).handle_error(e)?;
+    }
+    Ok(Some(res))
+}
+
+// go: builtinCastJSONAsRealSig.evalReal L1
+// go: builtinCastJSONAsRealSig.vecEvalReal L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastJSONAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastJSONAsRealSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Real)]
+pub fn cast_json_as_real(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    val: &BinaryJSON<'_>,
+) -> Result<Option<f64>, Error> {
+    let (res, err) = convert_json_to_float(&type_ctx(ctx), val);
+    err?;
+    Ok(Some(res))
+}
+
+// go: builtinCastJSONAsDecimalSig.evalDecimal L1
+// go: builtinCastJSONAsDecimalSig.vecEvalDecimal L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastJSONAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastJSONAsDecimalSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Decimal)]
+pub fn cast_json_as_decimal(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &BinaryJSON<'_>,
+) -> Result<Option<MyDecimal>, Error> {
+    let (res, err) = convert_json_to_decimal(&type_ctx(ctx), val);
+    err?;
+    produce_dec(ctx, f, res)
+}
+
+// go: builtinCastJSONAsStringSig.evalString L1
+// go: builtinCastJSONAsStringSig.vecEvalString L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastJSONAsStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastJSONAsStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String)]
+pub fn cast_json_as_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &BinaryJSON<'_>,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    let (s, err) = produce_str_with_specified_tp(val.string(), &f.tp, &type_ctx(ctx), false);
+    err?;
+    out.extend_from_slice(&s);
+    Ok(Some(()))
+}
+
+// go: builtinCastVectorFloat32AsStringSig.evalString L1
+// go: builtinCastVectorFloat32AsStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+#[eval_fn(String)]
+pub fn cast_vector_float32_as_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &VectorFloat32<'_>,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    let (s, err) =
+        produce_str_with_specified_tp(val.string().into_bytes(), &f.tp, &type_ctx(ctx), false);
+    err?;
+    out.extend_from_slice(&s);
+    Ok(Some(()))
 }
 
 // ---------------------------------------------------------------- function classes

@@ -918,7 +918,9 @@ fn column_read(c: &crate::column::Column, as_type: EvalType) -> ColumnRead {
         if as_type == ETReal {
             return ColumnRead::Convert;
         }
-    } else if c.ret_type.eval_type() == as_type {
+    } else if normalize_et(c.ret_type.eval_type()) == normalize_et(as_type) {
+        // DATE/DATETIME/TIMESTAMP columns all hold Time values (ETTimestamp is read as
+        // ETDatetime by Go's VecEvalTime).
         return ColumnRead::Copy;
     }
     panic!(
