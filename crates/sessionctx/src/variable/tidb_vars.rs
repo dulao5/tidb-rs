@@ -415,4 +415,3 @@ pub static CircuitBreakerPDMetadataErrorRateThresholdRatio: AtomicF64 = AtomicF6
 /// ConnectAttrsSize is the max aggregate byte size of connection attributes allowed per connection.
 /// Corresponds to performance_schema_session_connect_attrs_size. Default 4096.
 pub static ConnectAttrsSize: AtomicI64 = AtomicI64::new(DefConnectAttrsSize as _);
-
