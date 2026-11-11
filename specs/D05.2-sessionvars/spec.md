@@ -117,6 +117,8 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
     - **`rebase4Signed`**：只在 offset > 1 时用到，`AllocHandle` 总是传 1，没有移植，遇到时返回错误。
     - **超长值**：按严格模式返回 `ErrDataTooLong`；Go 的内部会话 SQL mode 是否严格未核对（SET GLOBAL 的值不会超过 16383 字符的情况下不可达）。
 
+12. **`tidb_redact_log` 只有 GLOBAL 作用域（go-fix pingcap/tidb#62892）**：v8.5.8 中它有 SESSION 作用域，SetSession 钩子写进程级的 `errors.RedactLogEnabled`，一个会话的 `SET SESSION tidb_redact_log=ON` 会让同一实例上所有会话的错误和 warning 被打码（#62，上游 pingcap/tidb#62890）。上游 master 改为只有 GLOBAL 作用域、由 SetGlobal 钩子写这个开关（commit `bc0d97a44d`，未 backport 到 release-8.5），tidb-rs 按宪章 R1 移植（与 #65884 相同）：`SET SESSION` 返回 1229，`SET GLOBAL` 写进程级开关（`tidb_base::errors`，原先 `tidb_vars` 中另有一份不相连的替身，已删除）。govec 用打了补丁的 Go 生成 sessionvars、sysvar、exprctx 三个领域（header 的 `fixes` 中列出），`set_global_hook` 记录读回开关的值（`redact`）。上游后来（#63709）又加回 SESSION 作用域并标为 `InternalSessionVariable`，用户 SET SESSION 报 unknown variable；那是新功能，不移植。
+
 ## 5. 验证结果（PR A）
 
 - **govec `sessionvars`**：41,447 条（`fresh` 1、`set` 30,939、`get` 945、`set_global` 9,482、`init` 80）。回放跳过仍有 pending 钩子的记录：36,046 条比对、0 条不一致，5,401 条跳过；钩子落地后自动开始比对，不需要重新生成。
@@ -125,7 +127,7 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
   - Validation 钩子：密码校验的 4 个 atomic、`GOGCTunerThreshold`、`RunAutoAnalyze`、`EnableAutoAnalyzePriorityQueue`（每条记录前重置）；
   - SetSession 钩子：`tidb_redact_log` → `errors.RedactLogEnabled`（每条记录前重置）；`tidb_constraint_check_in_place_pessimistic` → 一个 metrics 计数器（任何记录都观察不到）；
   - SetGlobal 钩子：27 个 INSTANCE 作用域变量（日志、慢日志、插件、内存与 expensive query 阈值、`max_connections`、DDL / stats owner、statement summary 文件、service scope 等），`set_global` 在调用后立即写回原值。
-  其余 SetSession 钩子只写会话。**是否在 tidb-rs 中照搬 #62 的进程级行为**属于负责人决定（已列入 #56）；在决定之前保持与 Go 相同。
+  其余 SetSession 钩子只写会话。**#62 的进程级行为**：负责人决定移植上游修复 pingcap/tidb#62892（§4 第 12 条），记录之间不再因 SET SESSION 泄漏。
   - 验证：去掉 `RedactLogEnabled` 的重置后，种子 84 和 2 的生成结果中出现 720、724 处 `'?'`，Rust 回放种子 84 报 425 条不一致；加上重置后种子 1–4、81–84 本地生成并回放全部一致（比对约 36,030 条，跳过约 5,410 条）。提交的种子的向量逐字节不变。
 - **随机设置组为空**（Lucky 评审 #57）：8 个随机变量都没有 SESSION 作用域时，组为空，Go 写出 `"args":[null]`，Rust 回放会 panic。生成器现在跳过空组；回放把 `null` 当作空列表处理。
 - **跳过数量的上限**：回放要求提交的向量中因 pending 钩子跳过的记录不超过上限（当前 5,401），系列中每个 PR 下调，PR B 之后为 0，避免 pending 项长期留着。

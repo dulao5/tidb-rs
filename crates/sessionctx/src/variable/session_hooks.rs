@@ -317,7 +317,6 @@ fn set_session(name: &str) -> Option<SetSessionFn> {
         "tidb_allow_fallback_to_tikv" => super::session_hooks_state::ss_tidb_allow_fallback_to_tikv,
         "tidb_replica_read" => super::session_hooks_state::ss_tidb_replica_read,
         "tidb_partition_prune_mode" => super::session_hooks_state::ss_tidb_partition_prune_mode,
-        "tidb_redact_log" => super::session_hooks_state::ss_tidb_redact_log,
         "tidb_stats_load_sync_wait" => super::session_hooks_state::ss_tidb_stats_load_sync_wait,
         "tidb_sysdate_is_now" => super::session_hooks_state::ss_tidb_sysdate_is_now,
         "tidb_enable_parallel_hashagg_spill" => {
@@ -634,6 +633,7 @@ fn set_global(name: &str) -> Option<SetGlobalFn> {
         "tidb_external_ts" => super::session_hooks_b2::sg_tidb_external_ts,
         "tidb_slow_log_rules" => super::session_hooks_state::sg_tidb_slow_log_rules,
         "tidb_cloud_storage_uri" => super::session_hooks_b2::sg_tidb_cloud_storage_uri,
+        "tidb_redact_log" => super::session_hooks_state::sg_tidb_redact_log,
         "tidb_ttl_scan_batch_size" => super::session_hooks_b2::sg_tidb_ttl_scan_batch_size,
         "tidb_ttl_delete_batch_size" => super::session_hooks_b2::sg_tidb_ttl_delete_batch_size,
         "tidb_ttl_delete_rate_limit" => super::session_hooks_b2::sg_tidb_ttl_delete_rate_limit,
