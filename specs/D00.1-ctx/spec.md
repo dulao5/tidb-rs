@@ -76,7 +76,8 @@ Go 中 `sc` 本身就是它的 `types.Context`、`errctx.Context`、`PlanCacheTr
 | `errctx.Context.HandleError` 的 `errors.ErrorGroup` 分支 | L2 | M-ERR 的单一 Error 类型没有 error group；Go 测试 `TestContext` 中 multierr 的部分不回放。**注意**：这个分支在 INSERT 的写路径上可以走到（rowcodec 用 multierr 合并各列的错误 → `WriteMemBufferEncoded` → `HandleError` 按每个错误各自的级别处理；静态分析，#65 评审）。tidb-rs 只读阶段走不到；以后移植表的写入时，M-ERR 需要能表示 error group |
 | `StaticWarnHandler.GetWarnings` | L2 | 返回副本 |
 | `StatementContext.Reset` | L2 | `TryLock` 总是成功（§3.3）。以后执行器之间共享 statement context 时（`Arc`），Go 返回 false 的情况对应调用方 `Arc::get_mut` 失败：此时新建一个 statement context，而不是重置（#65 评审） |
-| `StatementContext.ResetForRetry` | L2 | 没有 DistSQL 上下文缓存（`distSQLCtxCache`，等 D07.2）。`SyncExecDetails.Reset` 在 D14.0 之后补上 |
+| `StatementContext.ResetForRetry` | L2 | 没有 DistSQL 上下文缓存（`distSQLCtxCache`，等 D07.2）。exec details 的重置已在 #79 补上 |
+| `StatementContext.RuntimeStatsColl` 的复用（移植注意） | L1 | 必须和 Go 一样复用：`ResetContextOfStmt`（select.go:1229）除 `EXPLAIN FOR` 外每条语句都把上一条的对象传给 `NewRuntimeStatsColl` 原地清空；`EXPLAIN ANALYZE`（builder.go:1349）只在为 nil 时新建。这个对象和 `ProcessInfo` 共享，`EXPLAIN FOR CONNECTION` 读的就是它，所以其他连接能看到它被下一条语句清空或重新填写；每次新建会让其他连接看到旧统计（#79 评审） |
 | `StaticWarnHandler.TruncateWarnings` 负数参数 | L1 [M-PANIC] | 与 Go 一样 panic，消息相同 |
 | `StatementContext.GetLockWaitStartTime` | L1 | 返回 Unix 纳秒（Go 返回 `time.Unix(0, ns)`） |
 | `exprstatic.WithParamList` | L2 | Go 取 `*variable.PlanCacheParamList`（D05.2 未移植），这里直接取参数值 |

@@ -370,10 +370,16 @@ pub struct StatementContext {
     plan: Option<Arc<dyn Any + Send + Sync>>,
 
     /// `execdetails.SyncExecDetails`, embedded in Go (its methods are promoted to the
-    /// statement context; here they are called through this field).
+    /// statement context; here they are called through this field). Read the details through
+    /// [`StatementContext::get_exec_details`], not `sync_exec_details.get_exec_details()`: in Go
+    /// the outer `GetExecDetails` shadows the promoted method and also fills `LockKeysDuration`.
     pub sync_exec_details: SyncExecDetails,
     /// RuntimeStatsColl collects the executors' runtime stats (`EXPLAIN ANALYZE`); `nil` in Go
-    /// until the executor builder sets it.
+    /// until the executor builder sets it. Go REUSES the object (spec §4): `ResetContextOfStmt`
+    /// (select.go:1229) passes the previous statement's collector to `NewRuntimeStatsColl` for
+    /// every statement except `EXPLAIN FOR`, and `EXPLAIN ANALYZE` (builder.go:1349) creates one
+    /// only when this is nil. The object is shared with `ProcessInfo`, so `EXPLAIN FOR CONNECTION`
+    /// observes it being cleared in place; do not "simplify" to a new object per statement.
     pub runtime_stats_coll: Option<Arc<RuntimeStatsColl>>,
 
     pub tables: Vec<TableEntry>,
