@@ -272,7 +272,7 @@ pub fn new_eval_context(opt: Vec<EvalCtxOption>) -> Arc<EvalContext> {
         state.warn_handler = Some(Arc::new(new_static_warn_handler(0)));
     }
     if state.user_vars.is_none() {
-        state.user_vars = Some(new_user_vars());
+        state.user_vars = Some(new_user_vars() as UserVarsReaderRef);
     }
     let _ = sink.handler.set(state.warn_handler.clone());
     Arc::new(EvalContext {

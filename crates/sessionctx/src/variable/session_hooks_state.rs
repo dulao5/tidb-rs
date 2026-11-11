@@ -97,7 +97,7 @@ pub(crate) fn set_snapshot_ts(s: &mut SessionVars, s_val: &str) -> Result<(), Er
     };
     s.snapshot_ts = tso;
     // tx_read_ts should be mutual exclusive with tidb_snapshot
-    s.state.txn_read_ts = TxnReadTS::new(0);
+    s.state.txn_read_ts = Some(TxnReadTS::new(0));
     err
 }
 
@@ -114,11 +114,11 @@ pub(crate) fn parse_ts_from_number_or_time(s: &mut SessionVars, s_val: &str) -> 
 // go: setTxnReadTS L1
 pub(crate) fn set_txn_read_ts(s: &mut SessionVars, s_val: &str) -> Result<(), Error> {
     if s_val.is_empty() {
-        s.state.txn_read_ts = TxnReadTS::new(0);
+        s.state.txn_read_ts = Some(TxnReadTS::new(0));
         return Ok(());
     }
     let ts = parse_timestamp_to_ts(s, s_val)?;
-    s.state.txn_read_ts = TxnReadTS::new(ts);
+    s.state.txn_read_ts = Some(TxnReadTS::new(ts));
     // tx_read_ts should be mutual exclusive with tidb_snapshot
     s.snapshot_ts = 0;
     s.state.snapshot_infoschema = false;

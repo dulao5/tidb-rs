@@ -1565,11 +1565,11 @@ fn v_tidb_service_scope(
 }
 
 /// ForcePreAggStr means 1st hashagg will be pre aggregated (session.go, block D05.2).
-const ForcePreAggStr: &str = "force_preagg";
+pub(crate) const ForcePreAggStr: &str = "force_preagg";
 /// AutoStr means TiFlash will decide which policy for 1st hashagg.
-const AutoStr: &str = "auto";
+pub(crate) const AutoStr: &str = "auto";
 /// ForceStreamingStr means 1st hashagg will for pass through all blocks.
-const ForceStreamingStr: &str = "force_streaming";
+pub(crate) const ForceStreamingStr: &str = "force_streaming";
 
 /// ValidTiFlashPreAggMode returns all valid modes.
 // go: pkg/sessionctx/variable/session.go ValidTiFlashPreAggMode L1
