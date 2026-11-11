@@ -429,6 +429,12 @@ pub trait SigView: std::ops::Deref<Target = BuiltinFunc> {
     /// versions once per row. The body must not depend on what a previous row left in it.
     // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
     fn scratch<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T>;
+
+    /// Whether this is the vector driver. Only for the places where Go's vector version
+    /// differs from its row version in what the user sees (spec D08.1 §3.4 (c), e.g. the
+    /// warning text of `builtinCastDecimalAsIntSig`): each driver follows its own Go version.
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn vector(&self) -> bool;
 }
 
 /// Storage of [`SigView::scratch`].
@@ -492,6 +498,12 @@ impl SigView for RowSig<'_> {
     fn scratch<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T> {
         self.scratch.get(init)
     }
+
+    #[inline(always)]
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn vector(&self) -> bool {
+        false
+    }
 }
 
 /// The argument types of one vector-driver call, read once per chunk.
@@ -546,6 +558,12 @@ impl SigView for VecSig<'_, '_> {
     // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
     fn scratch<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T> {
         self.scratch.get(init)
+    }
+
+    #[inline(always)]
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn vector(&self) -> bool {
+        true
     }
 }
 

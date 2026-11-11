@@ -1,0 +1,399 @@
+//! Replays the govec `cast` vectors (tidb-rs-tracker `govec/domains/cast.go`): block D08.8
+//! part 1 — CAST to INT/REAL/DECIMAL built with `BuildCastFunctionWithCheck` (folded on a
+//! constant argument) and evaluated row by row and over a chunk (the vector driver), and
+//! `WrapWithCastAsInt/Real/Decimal` — against Go TiDB v8.5.8.
+//!
+//! `GOVEC_CAST_FILES` (comma-separated paths) replays extra-seed artifacts as well.
+
+use std::io::Read;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+use tidb_base::Error;
+use tidb_base::contextutil::{SQLWarn, WarnHandler, new_static_warn_handler};
+use tidb_chunk::chunk::new_chunk_with_capacity;
+use tidb_expression::builtin_cast::{
+    build_cast_function_with_check, wrap_with_cast_as_decimal, wrap_with_cast_as_int,
+    wrap_with_cast_as_real,
+};
+use tidb_expression::eval::{RpnProgram, RpnState, rt};
+use tidb_expression::*;
+use tidb_parser::types::{ETDecimal, ETInt, ETReal, FieldType};
+use tidb_sessionctx::errctx::{Level, LevelMap};
+use tidb_sessionctx::exprstatic as es;
+use tidb_types::MyDecimal;
+use tidb_types::context::Flags;
+use tidb_types::datum::{self as dm, Datum};
+use tidb_types::field_type_builder::new_field_type_builder;
+
+const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
+    "amd64"
+} else if cfg!(target_arch = "aarch64") {
+    "arm64"
+} else {
+    "unsupported"
+};
+
+fn vectors() -> String {
+    format!(
+        "{}/tests/vectors/v8.5.8/{GO_TARGET}/cast.jsonl.gz",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// vec.GoString's JSON form.
+fn gs(b: &[u8]) -> Value {
+    match std::str::from_utf8(b) {
+        Ok(s) => json!(s),
+        Err(_) => json!({ "hex": hex(b) }),
+    }
+}
+
+fn ungs(v: &Value) -> Vec<u8> {
+    match v {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Object(m) => unhex(m["hex"].as_str().unwrap()),
+        _ => panic!("not a GoString: {v}"),
+    }
+}
+
+/// d2DatumIn (the kinds the records use).
+fn datum_in(v: &Value) -> Datum {
+    let p = v.as_array().unwrap();
+    let k = p[0].as_u64().unwrap() as u8;
+    let mut d = Datum::default();
+    match k {
+        dm::KindNull => d.set_null(),
+        dm::KindInt64 => d.set_int64(p[1].as_i64().unwrap()),
+        dm::KindUint64 => d.set_uint64(p[1].as_u64().unwrap()),
+        dm::KindFloat64 => d.set_float64(f64::from_bits(p[1].as_u64().unwrap())),
+        dm::KindString => d.set_string(ungs(&p[1]), p[2].as_str().unwrap().to_owned()),
+        dm::KindMysqlDecimal => {
+            let mut x = MyDecimal::default();
+            let _ = x.from_string(p[1].as_str().unwrap().as_bytes());
+            d.set_mysql_decimal(x)
+        }
+        dm::KindBytes => d.set_bytes(Some(unhex(p[1].as_str().unwrap()))),
+        _ => panic!("datum_in: kind {k}"),
+    }
+    d
+}
+
+/// d2DatumInOf.
+fn datum_out(d: &Datum) -> Value {
+    match d.kind() {
+        dm::KindNull => json!([d.kind()]),
+        dm::KindInt64 => json!([d.kind(), d.get_int64()]),
+        dm::KindUint64 => json!([d.kind(), d.get_uint64()]),
+        dm::KindFloat64 => json!([d.kind(), d.get_float64().to_bits()]),
+        dm::KindString => json!([d.kind(), gs(d.get_string()), d.collation()]),
+        dm::KindMysqlDecimal => json!([d.kind(), d.get_mysql_decimal().string()]),
+        dm::KindBytes => json!([d.kind(), hex(d.get_bytes())]),
+        k => panic!("datum_out: kind {k}"),
+    }
+}
+
+/// d2FtIn: [tp, flag, flen, decimal, charset, collate, elems|null].
+fn ft_in(v: &Value) -> FieldType {
+    let p = v.as_array().unwrap();
+    let mut ft = new_field_type_builder()
+        .set_type(p[0].as_u64().unwrap() as u8)
+        .set_flag(p[1].as_u64().unwrap() as usize)
+        .set_flen(p[2].as_i64().unwrap() as isize)
+        .set_decimal(p[3].as_i64().unwrap() as isize)
+        .set_charset(p[4].as_str().unwrap())
+        .set_collate(p[5].as_str().unwrap())
+        .build_p();
+    if !p[6].is_null() {
+        ft.set_elems(Some(p[6].as_array().unwrap().iter().map(ungs).collect()));
+    }
+    ft
+}
+
+/// sfFtIn.
+fn ft_out(ft: &FieldType) -> Value {
+    let elems = ft
+        .get_elems()
+        .map(|es| Value::Array(es.iter().map(|e| gs(e)).collect()))
+        .unwrap_or(Value::Null);
+    json!([
+        ft.get_type(),
+        ft.get_flag(),
+        ft.get_flen(),
+        ft.get_decimal(),
+        ft.get_charset(),
+        ft.get_collate(),
+        elems
+    ])
+}
+
+/// sfDump.
+fn dump(e: &Expr) -> Value {
+    match e {
+        Expr::Column(c) => {
+            let ve = c.virtual_expr.as_ref().map_or(Value::Null, |v| dump(v));
+            json!({ "col": [c.unique_id, c.index, ft_out(&c.ret_type), gs(c.orig_name.as_bytes()), ve] })
+        }
+        Expr::CorrelatedColumn(c) => {
+            json!({ "corr": [c.column.unique_id, ft_out(&c.column.ret_type)] })
+        }
+        Expr::Constant(c) => json!({ "const": [datum_out(&c.value), ft_out(&c.ret_type)] }),
+        Expr::ScalarFunction(x) => {
+            let args: Vec<Value> = x.get_args().iter().map(|a| dump(a)).collect();
+            let all_vec = x.get_args().iter().all(|a| a.vectorized());
+            let sig_vec = if all_vec { x.vectorized() } else { true };
+            let (chs, coll) = x.charset_and_collation();
+            let ci = &x.function.collation_info;
+            json!({ "f": [
+                x.func_name.l, x.func_name.o, x.function.sig.name, ft_out(&x.ret_type), args,
+                sig_vec, chs, coll, x.function.pb_code(), ci.has_coercibility(),
+                x.coercibility().0, x.repertoire().0, ci.is_explicit_charset()
+            ] })
+        }
+    }
+}
+
+fn dec_out(d: &MyDecimal) -> Value {
+    let j: Value = serde_json::from_slice(&d.marshal_json().unwrap()).unwrap();
+    let mut st = vec![
+        j["DigitsInt"].clone(),
+        j["DigitsFrac"].clone(),
+        j["ResultFrac"].clone(),
+        json!(i64::from(j["Negative"].as_bool().unwrap())),
+    ];
+    st.extend(j["WordBuf"].as_array().unwrap().iter().cloned());
+    json!({ "s": String::from_utf8(d.to_string()).unwrap(), "str": d.string(), "st": st })
+}
+
+fn warns(ws: &[SQLWarn]) -> Value {
+    Value::Array(
+        ws.iter()
+            .map(|w| json!([&*w.level, gs(&w.err.error())]))
+            .collect(),
+    )
+}
+
+fn ex_try(f: impl FnOnce() -> Value) -> Value {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| json!({ "panic": true }))
+}
+
+fn ex_err(e: &Error) -> Value {
+    json!({ "err": gs(&e.error()) })
+}
+
+fn ex_val<T>(r: Result<Option<T>, Error>, f: impl FnOnce(T) -> Value) -> Value {
+    match r {
+        Err(e) => ex_err(&e),
+        Ok(None) => json!({ "null": true }),
+        Ok(Some(v)) => json!({ "v": f(v) }),
+    }
+}
+
+type Ctxs = (Arc<es::ExprContext>, Arc<es::EvalContext>);
+
+/// castCtx: [typeFlags, [7]errLevels].
+fn ctx_of(v: &Value) -> Ctxs {
+    let a = v.as_array().unwrap();
+    let mut lm: LevelMap = Default::default();
+    for (i, l) in a[1].as_array().unwrap().iter().enumerate() {
+        lm[i] = Level(l.as_u64().unwrap() as _);
+    }
+    let ev = es::new_eval_context(vec![
+        es::with_type_flags(Flags(a[0].as_u64().unwrap() as u16)),
+        es::with_err_level_map(lm),
+        es::with_warn_handler(Some(Arc::new(new_static_warn_handler(0)))),
+    ]);
+    let ctx = es::new_expr_context(vec![es::with_eval_ctx(Arc::clone(&ev))]);
+    (ctx, ev)
+}
+
+/// castArg: the node and, for a column, the chunk of the rows.
+fn arg_of(v: &Value, rows: Option<&Value>) -> (ExprRef, Option<tidb_chunk::Chunk>) {
+    let a = v.as_array().unwrap();
+    match a[0].as_str().unwrap() {
+        "col" => {
+            let ft = ft_in(&a[1]);
+            let rows = rows.and_then(|r| r.as_array()).cloned().unwrap_or_default();
+            let mut chk = new_chunk_with_capacity(std::slice::from_ref(&ft), rows.len());
+            for r in &rows {
+                chk.append_datum(0, &datum_in(r));
+            }
+            let col = Column {
+                unique_id: 1,
+                index: 0,
+                ret_type: ft,
+                orig_name: "c".into(),
+                ..Column::default()
+            };
+            (Expr::Column(col).into_ref(), Some(chk))
+        }
+        "const" => (
+            Expr::Constant(Constant::new(datum_in(&a[1]), ft_in(&a[2]))).into_ref(),
+            None,
+        ),
+        k => panic!("arg_of: {k}"),
+    }
+}
+
+fn row_val(ctx: &dyn EvalContext, e: &Expr, row: tidb_chunk::Row<'_>) -> Value {
+    let st = EvalState::new();
+    let et = e.get_type(ctx).eval_type();
+    if et == ETInt {
+        ex_val(e.eval_int(ctx, &st, row), |v| json!(v.to_string()))
+    } else if et == ETReal {
+        ex_val(e.eval_real(ctx, &st, row), |v| json!(v.to_bits().to_string()))
+    } else if et == ETDecimal {
+        ex_val(e.eval_decimal(ctx, &st, row), |v| dec_out(&v))
+    } else {
+        panic!("row_val")
+    }
+}
+
+fn vec_val(ctx: &es::EvalContext, e: &ExprRef, chk: &tidb_chunk::Chunk) -> Value {
+    let et = e.get_type(ctx).eval_type();
+    let prog = RpnProgram::compile(e);
+    let mut col = rt::empty_column();
+    let r = prog.eval(ctx, &EvalState::new(), &mut RpnState::default(), chk, &mut col);
+    let ws = warns(&ctx.truncate_warnings(0));
+    if let Err(e) = r {
+        return json!({ "err": gs(&e.error()), "warns": ws });
+    }
+    let vals: Vec<Value> = (0..chk.num_rows())
+        .map(|i| {
+            if col.is_null(i) {
+                Value::Null
+            } else if et == ETInt {
+                json!(col.get_int64(i).to_string())
+            } else if et == ETReal {
+                json!(col.get_float64(i).to_bits().to_string())
+            } else {
+                dec_out(&col.get_decimal(i))
+            }
+        })
+        .collect();
+    json!({ "v": vals, "warns": ws })
+}
+
+fn exec(op: &str, p: &[Value]) -> Value {
+    match op {
+        "cast" => {
+            let (ctx, ev) = ctx_of(&p[3]);
+            let (arg, chk) = arg_of(&p[0], p.get(4));
+            let tp = ft_in(&p[1]);
+            let mut res: Option<ExprRef> = None;
+            let build = ex_try(|| {
+                match build_cast_function_with_check(&*ctx, arg, tp, p[2].as_bool().unwrap(), false)
+                {
+                    Err(e) => ex_err(&e),
+                    Ok(r) => {
+                        let d = dump(&r);
+                        res = Some(r);
+                        d
+                    }
+                }
+            });
+            let mut m = serde_json::Map::new();
+            m.insert("build".into(), build);
+            m.insert("bwarns".into(), warns(&ev.truncate_warnings(0)));
+            let Some(res) = res else {
+                return Value::Object(m);
+            };
+            let meta = match &*res {
+                Expr::ScalarFunction(sf) => sf.function.in_union.map_or(Value::Null, |b| json!(b)),
+                _ => Value::Null,
+            };
+            m.insert("meta".into(), meta);
+            if let (Some(chk), Expr::ScalarFunction(_)) = (&chk, &*res) {
+                let mut rows = Vec::new();
+                for i in 0..chk.num_rows() {
+                    let v = ex_try(|| row_val(&*ev, &res, chk.get_row(i)));
+                    rows.push(json!([v, warns(&ev.truncate_warnings(0))]));
+                }
+                m.insert("rows".into(), Value::Array(rows));
+                m.insert("vec".into(), ex_try(|| vec_val(&ev, &res, chk)));
+                ev.truncate_warnings(0);
+            }
+            Value::Object(m)
+        }
+        "wrap" => {
+            let (ctx, ev) = ctx_of(&p[2]);
+            let (arg, _) = arg_of(&p[1], None);
+            let res = ex_try(|| {
+                let r = match p[0].as_str().unwrap() {
+                    "int" => wrap_with_cast_as_int(&*ctx, arg),
+                    "real" => wrap_with_cast_as_real(&*ctx, arg),
+                    _ => wrap_with_cast_as_decimal(&*ctx, arg),
+                };
+                match r {
+                    Ok(r) => dump(&r),
+                    Err(e) => ex_err(&e),
+                }
+            });
+            json!({ "res": res, "bwarns": warns(&ev.truncate_warnings(0)) })
+        }
+        _ => panic!("cast: op {op}"),
+    }
+}
+
+fn replay(path: &str) {
+    let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(path).expect("vectors"));
+    let mut text = String::new();
+    gz.read_to_string(&mut text).unwrap();
+    let mut lines = text.lines();
+    let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert_eq!(header["domain"], "cast");
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut fails = vec![];
+    let mut n = 0;
+    for line in lines {
+        n += 1;
+        let rec: Value = serde_json::from_str(line).unwrap();
+        let args = rec["args"].as_array().cloned().unwrap_or_default();
+        let got = exec(rec["op"].as_str().unwrap(), &args);
+        let got: Value = serde_json::from_str(&got.to_string()).unwrap();
+        if got != rec["out"] {
+            fails.push(format!("{line}\n    got {got}"));
+        }
+    }
+    std::panic::set_hook(prev);
+    let shown: Vec<_> = fails
+        .iter()
+        .take(
+            std::env::var("GOVEC_SHOW")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(12),
+        )
+        .map(|s| s.as_str())
+        .collect();
+    assert!(
+        fails.is_empty(),
+        "{path}: {} of {n} records differ:\n{}",
+        fails.len(),
+        shown.join("\n")
+    );
+    assert_eq!(n as u64, header["records"].as_u64().unwrap());
+}
+
+#[test]
+fn govec_cast() {
+    replay(&vectors());
+    if let Ok(files) = std::env::var("GOVEC_CAST_FILES") {
+        for f in files.split(',').filter(|f| !f.is_empty()) {
+            replay(f);
+        }
+    }
+}

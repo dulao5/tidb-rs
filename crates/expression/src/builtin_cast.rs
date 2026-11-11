@@ -142,6 +142,8 @@ fn produce_dec(
 /// `builtinCastIntAsIntSig.evalInt`.
 // go: builtinCastIntAsIntSig.evalInt L1
 // go: builtinCastIntAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastIntAsIntSig.vecEvalInt L1 (the vector driver of this body, M-EVAL)
+// go: builtinCastIntAsIntSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Int)]
 pub fn cast_int_as_int(
     _ctx: &dyn EvalContext,
@@ -157,6 +159,8 @@ pub fn cast_int_as_int(
 
 // go: builtinCastIntAsRealSig.evalReal L1
 // go: builtinCastIntAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastIntAsRealSig.vecEvalReal L1 (the vector driver of this body, M-EVAL)
+// go: builtinCastIntAsRealSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Real)]
 pub fn cast_int_as_real(
     _ctx: &dyn EvalContext,
@@ -178,7 +182,9 @@ pub fn cast_int_as_real(
 }
 
 // go: builtinCastIntAsDecimalSig.evalDecimal L1
+// go: builtinCastIntAsDecimalSig.vecEvalDecimal L1
 // go: builtinCastIntAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastIntAsDecimalSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Decimal)]
 pub fn cast_int_as_decimal(
     ctx: &dyn EvalContext,
@@ -189,7 +195,12 @@ pub fn cast_int_as_decimal(
     let res = if !has_unsigned_flag(f.tp.get_flag()) && !unsigned_args0 {
         new_dec_from_int(val)
     } else if in_union(f) && !unsigned_args0 && val < 0 {
-        MyDecimal::default()
+        // The vector version writes dec.FromUint(0), the row version &types.MyDecimal{}.
+        if f.vector() {
+            new_dec_from_uint(0)
+        } else {
+            MyDecimal::default()
+        }
     } else {
         new_dec_from_uint(val as u64)
     };
@@ -198,6 +209,8 @@ pub fn cast_int_as_decimal(
 
 // go: builtinCastRealAsRealSig.evalReal L1
 // go: builtinCastRealAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastRealAsRealSig.vecEvalReal L1 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsRealSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Real)]
 pub fn cast_real_as_real(
     _ctx: &dyn EvalContext,
@@ -213,6 +226,8 @@ pub fn cast_real_as_real(
 
 // go: builtinCastRealAsIntSig.evalInt L1
 // go: builtinCastRealAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastRealAsIntSig.vecEvalInt L1 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsIntSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Int)]
 pub fn cast_real_as_int(
     ctx: &dyn EvalContext,
@@ -247,6 +262,8 @@ pub fn cast_real_as_int(
 
 // go: builtinCastRealAsDecimalSig.evalDecimal L1
 // go: builtinCastRealAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastRealAsDecimalSig.vecEvalDecimal L1 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsDecimalSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Decimal)]
 pub fn cast_real_as_decimal(
     ctx: &dyn EvalContext,
@@ -275,6 +292,8 @@ pub fn cast_real_as_decimal(
 
 // go: builtinCastDecimalAsDecimalSig.evalDecimal L1
 // go: builtinCastDecimalAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDecimalAsDecimalSig.vecEvalDecimal L1 (the vector driver of this body, M-EVAL)
+// go: builtinCastDecimalAsDecimalSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Decimal)]
 pub fn cast_decimal_as_decimal(
     ctx: &dyn EvalContext,
@@ -289,7 +308,9 @@ pub fn cast_decimal_as_decimal(
 }
 
 // go: builtinCastDecimalAsIntSig.evalInt L1
+// go: builtinCastDecimalAsIntSig.vecEvalInt L2 (the vector driver of this body; its warning text differs from the row version's, as in Go)
 // go: builtinCastDecimalAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDecimalAsIntSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Int)]
 pub fn cast_decimal_as_int(
     ctx: &dyn EvalContext,
@@ -310,10 +331,16 @@ pub fn cast_decimal_as_int(
     };
     match err {
         Err(e) if ErrOverflow.equal(&e) => {
-            let warn_err = ErrTruncatedWrongVal.gen_with_stack_by_args(vec![
-                Arg::from("DECIMAL"),
-                Arg::Stringer(val.to_string(), "*types.MyDecimal"),
-            ]);
+            // The row version passes the *MyDecimal (printed by its String method); the
+            // vector version passes the types.MyDecimal value, which fmt prints field by
+            // field (`{%!s(int8=..) ..}`): each driver keeps its Go text (spec §4).
+            let shown = if f.vector() {
+                decimal_value_arg(val)
+            } else {
+                Arg::Stringer(val.string().into_bytes(), "*types.MyDecimal")
+            };
+            let warn_err =
+                ErrTruncatedWrongVal.gen_with_stack_by_args(vec![Arg::from("DECIMAL"), shown]);
             err_ctx(ctx).handle_error_with_alias(e.clone(), e, warn_err)?;
         }
         other => other?,
@@ -322,10 +349,12 @@ pub fn cast_decimal_as_int(
 }
 
 // go: builtinCastDecimalAsRealSig.evalReal L1
+// go: builtinCastDecimalAsRealSig.vecEvalReal L1
 // go: builtinCastDecimalAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDecimalAsRealSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Real)]
 pub fn cast_decimal_as_real(
-    _ctx: &dyn EvalContext,
+    ctx: &dyn EvalContext,
     f: &impl SigView,
     val: &MyDecimal,
 ) -> Result<Option<f64>, Error> {
@@ -333,8 +362,38 @@ pub fn cast_decimal_as_real(
         return Ok(Some(0.0));
     }
     let (res, err) = val.to_float64();
-    err?;
+    match err {
+        // Only the vector version hands an overflow to ec.HandleError.
+        Err(e) if f.vector() && ErrOverflow.equal(&e) => err_ctx(ctx).handle_error(e)?,
+        other => other?,
+    }
     Ok(Some(res))
+}
+
+/// A `types.MyDecimal` value as a `fmt` argument: printed by reflection (its `String` method
+/// has a pointer receiver), fields `digitsInt digitsFrac resultFrac negative wordBuf`.
+// glue: Go passes a types.MyDecimal value to GenWithStackByArgs (builtinCastDecimalAsIntSig.vecEvalInt)
+fn decimal_value_arg(d: &MyDecimal) -> Arg {
+    let w = d.as_wire();
+    let words = (0..9)
+        .map(|i| {
+            let at = 4 + 4 * i;
+            Arg::Int(
+                i32::from_le_bytes([w[at], w[at + 1], w[at + 2], w[at + 3]]) as i64,
+                "int32",
+            )
+        })
+        .collect();
+    Arg::Struct(
+        vec![
+            Arg::Int(w[0] as i8 as i64, "int8"),
+            Arg::Int(w[1] as i8 as i64, "int8"),
+            Arg::Int(w[2] as i8 as i64, "int8"),
+            Arg::Bool(w[3] != 0),
+            Arg::Array(words, "[9]int32"),
+        ],
+        "types.MyDecimal",
+    )
 }
 
 /// handleOverflow handles the overflow caused by cast string as int: the endpoint of the
@@ -368,6 +427,8 @@ fn handle_overflow(
 /// body starts at the string path (spec §4).
 // go: builtinCastStringAsIntSig.evalInt L2 (the hybrid/binary-literal/implicit-int prologue is unreachable from castAsIntFunctionClass)
 // go: builtinCastStringAsIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastStringAsIntSig.vecEvalInt L1 (the vector driver of this body, M-EVAL)
+// go: builtinCastStringAsIntSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Int)]
 pub fn cast_string_as_int(
     ctx: &dyn EvalContext,
@@ -403,6 +464,8 @@ pub fn cast_string_as_int(
 
 // go: builtinCastStringAsRealSig.evalReal L2 (the binary-literal/implicit-real prologue is unreachable from castAsRealFunctionClass)
 // go: builtinCastStringAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastStringAsRealSig.vecEvalReal L1 (the vector driver of this body, M-EVAL)
+// go: builtinCastStringAsRealSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Real)]
 pub fn cast_string_as_real(
     ctx: &dyn EvalContext,
@@ -419,8 +482,15 @@ pub fn cast_string_as_real(
     Ok(Some(res))
 }
 
+/// Go's vector version differs from the row version in what the user sees: `-` alone counts
+/// as negative, the `FromString` error goes to `tc.HandleTruncate` as is (no
+/// `ErrTruncatedWrongVal` text, type flags instead of error levels), and a negative value in
+/// UNSIGNED UNION leaves the row as `ResizeDecimal` left it (zero in a new column). The vector
+/// driver follows it (spec §4; D08.1 spec §3.4 (c)).
 // go: builtinCastStringAsDecimalSig.evalDecimal L2 (the binary-literal prologue is unreachable from castAsDecimalFunctionClass)
+// go: builtinCastStringAsDecimalSig.vecEvalDecimal L2 (an UNSIGNED UNION negative row is the zero decimal, i.e. a new column's bytes)
 // go: builtinCastStringAsDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastStringAsDecimalSig.vectorized L1 (SigDesc.vectorized)
 #[eval_fn(Decimal)]
 pub fn cast_string_as_decimal(
     ctx: &dyn EvalContext,
@@ -428,6 +498,20 @@ pub fn cast_string_as_decimal(
     val: &[u8],
 ) -> Result<Option<MyDecimal>, Error> {
     let val = trim_space(val);
+    if f.vector() {
+        let is_negative = !val.is_empty() && val[0] == b'-';
+        let mut dec = MyDecimal::default();
+        if !(in_union(f) && has_unsigned_flag(f.tp.get_flag()) && is_negative) {
+            let tc = type_ctx(ctx);
+            tc.handle_truncate(dec.from_string(val))?;
+            let (dec, err) = produce_dec_with_specified_tp(&tc, dec, &f.tp);
+            if let Err(e) = err {
+                err_ctx(ctx).handle_error(e)?;
+            }
+            return Ok(Some(dec.expect("nil *MyDecimal from ProduceDecWithSpecifiedTp")));
+        }
+        return Ok(Some(dec));
+    }
     let is_negative = val.len() > 1 && val[0] == b'-';
     let mut res = MyDecimal::default();
     let ec = err_ctx(ctx);

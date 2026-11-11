@@ -55,6 +55,13 @@ pub enum Arg {
     /// `errors.redactFormatter` (pingcap/errors, `RedactLogMarker`): formats the wrapped value
     /// with the same verb and flags, then encloses it in `‹›`, doubling `‹` and `›` inside.
     Redact(Box<Arg>),
+    /// A struct value without methods that apply (e.g. a `types.MyDecimal` value, whose
+    /// `String` has a pointer receiver), printed by reflection: its fields in order with the
+    /// same verb and flags, `{a b c}`. The fields are unexported (no methods are called on
+    /// them); `.1` is the Go type name.
+    Struct(Vec<Arg>, &'static str),
+    /// An array (not of bytes) printed by reflection, `[a b c]`; `.1` is the Go type name.
+    Array(Vec<Arg>, &'static str),
 }
 
 impl Arg {
@@ -71,6 +78,7 @@ impl Arg {
             Arg::Float(..) => Cow::Borrowed("float64"),
             Arg::Bool(_) => Cow::Borrowed("bool"),
             Arg::Redact(_) => Cow::Borrowed("*errors.redactFormatter"),
+            Arg::Struct(_, t) | Arg::Array(_, t) => Cow::Borrowed(t),
         }
     }
 
@@ -498,8 +506,28 @@ impl Pp {
                     self.bad_verb(arg, verb);
                 }
             }
+            Arg::Struct(..) | Arg::Array(..) => self.print_value(arg, verb),
             Arg::Nil => unreachable!(),
         }
+    }
+
+    /// The struct and array cases of `printValue` for values of basic types (no field names:
+    /// neither `%+v` nor `%#v` is used on such values by the ported callers).
+    // go-std: fmt.pp.printValue L2 (struct and array of basic values; no %+v/%#v field names)
+    fn print_value(&mut self, arg: &Arg, verb: char) {
+        let (open, close, items) = match arg {
+            Arg::Struct(f, _) => ('{', '}', f),
+            Arg::Array(e, _) => ('[', ']', e),
+            _ => unreachable!(),
+        };
+        self.buf.push(open);
+        for (i, it) in items.iter().enumerate() {
+            if i > 0 {
+                self.buf.push(' ');
+            }
+            self.print_arg(it, verb);
+        }
+        self.buf.push(close);
     }
 
     // go-std: fmt.pp.handleMethods L1 (Formatter: only errors.redactFormatter; error/Stringer)
