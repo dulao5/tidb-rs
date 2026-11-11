@@ -109,6 +109,13 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 
 9. `tidb_slow_log_rules` 的 `RawRules`（M-MAPORDER，L2）：Go 用 map 构造一条规则的条件，`ParseGlobalSlowLogRules` 也按 map 顺序拼接各连接的规则集，所以一条规则有两个以上条件、或全局值有两个以上连接组时，`SHOW VARIABLES` 的值和 `RawRulesHash` 每次运行都可能不同。Rust 把条件按字段名排序、连接组按连接 ID 排序。govec 在 Go 与 Rust 两侧都把读回值规范化（每条规则的条件排序，再把规则排序）后比较（`slow_log_rules.rs`，T7）。只移植了 `SlowLogRuleFieldAccessors` 的 `Parse`；`Setter` / `Match` 在语句结束后匹配慢日志，属于 D14.2。
 10. `net/url` 的移植（`tidb_base::gostd::url`，`ast.RedactURL` 用到的部分）：IP 字面量的检查（`netip.ParseAddr` + `Is4`）用 Rust 的 IPv4 / IPv6 解析器加 Go 的 zone 规则（L2）；这一分支的错误文字与 Go 不同，`RedactURL` 丢弃解析错误，只看成败。`urlmaxqueryparams` GODEBUG 不读（用默认上限 10000）。
+11. SET GLOBAL 的写入（PR C，块 D06.7）：
+    - **row format 1**：Go 的 `replaceGlobalVariablesTableValue` / `SetTiDBTableValue` 经 `sysSessionPool` 的内部会话执行，它不加载全局的 `tidb_row_format_version`（`RowEncoder.Enable` 为 false），row checksum 也关闭（`InRestrictedSQL`），所以总是写 row format 1。原因是内部会话由 `createSessionWithDomainFunc`（session.go:1214）创建时直接设置 `CommonGlobalLoaded = true`，**所有**全局变量都不加载，与启动时序无关；`tidb_retry_limit` 同理取默认值 10。unistore 会在 prewrite 时把 format 1 的行转成 format 2 存储（`unistore/tikv/mvcc.go:1194` `encodeFromOldRow`），在 unistore 上看不出来，需在 TiKV 上验证（Lucky 评审 #70，记录在 #74）。tidb-rs 照此写入（`tablecodec.EncodeOldRow` 从 X 移回 D01.11），playground 上与 Go 写入的行逐字节相同。§6.2 第 5 步原先"按集群全局值"的设计因此作废。
+    - **assertion 和 request source**：tidb-systable 产出与 Go 相同的 key flags（govec 逐条比对），但 client-rust 分支不支持 assertion 和 request source，提交时丢弃（TiKV 在任何 `tidb_txn_assertion_level` 下都接受不带 assertion 的 mutation）。另外，内部会话的 `tidb_txn_assertion_level` 也是默认值 OFF（同样不加载全局变量，#74），所以 Go 在 TiKV 上同样不检查 assertion，丢弃 assertion 与 Go 比较时观察不到差别（据代码推断，未实测）；presume-not-exists 的 key 以 `Op_Insert` 提交，与 client-go 相同。
+    - **PD GlobalConfig**：client-rust 分支没有 GlobalConfig API，`NotifyGlobalConfigChange` 只记 warning（Go 写 PD 失败时也只记日志）。
+    - **watch 关闭或 compaction**：Go 只重建 watch、不立即重读；tidb-rs 重建 watch 后立即重读一次（§6.2）。
+    - **`rebase4Signed`**：只在 offset > 1 时用到，`AllocHandle` 总是传 1，没有移植，遇到时返回错误。
+    - **超长值**：按严格模式返回 `ErrDataTooLong`；Go 的内部会话 SQL mode 是否严格未核对（SET GLOBAL 的值不会超过 16383 字符的情况下不可达）。
 
 ## 5. 验证结果（PR A）
 
@@ -228,3 +235,16 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
    - **在 prewrite 和 commit 之间杀掉 tidb-rs**（failpoint 或 SIGKILL）：Go 读者 resolve 掉残留的锁，`SHOW GLOBAL VARIABLES` 与 `ADMIN CHECK TABLE` 正常。
    - **滚动升级**：bootstrap 版本不同期间，tidb-rs 的持久化写入被拒绝（明确的错误），升级完成后恢复。
 3. **反证**：故意用错 row format、漏写索引、不发 etcd 通知，上述检查必须失败。
+
+### 6.7 验证结果（PR C 第三轮，2026-11-11）
+
+- **govec `write_systable`**（tracker `govec/domains/systable.go`）：oracle 是 Go 在 bootstrap 过的 mockstore 上经 `sysSessionPool` 会话真实执行的 REPLACE（`BEGIN OPTIMISTIC` 内，取事务 memdb 的 key、value、flags 后回滚），168 条：replace 97（rf 1 93、rf 2 4）、alloc 29、next_step 42、tableinfo 2；Rust 回放 0 条不一致，种子 1–4 都通过。反证：索引删除去掉 need_locked 报 25 条；assertion 改为后者覆盖报 25 条；行比较忽略大小写报 1 条；去掉 `MaxInt64 - newBase` 上限报 3 条；`EncodeOldRow` 的列 ID 加 1 报 81 条。
+- **混合集群**（`scripts/systable-mixed.sh`，自己的 v8.5.8 playground）全部通过：
+  1. tidb-rs 写入，Go 在 1.5 秒内读到（etcd 通知），`ADMIN CHECK TABLE mysql.global_variables` 通过；
+  2. Go 写入，tidb-rs 读到；
+  3. 同一行分别由 Go 和 tidb-rs 写入，record 和 index value 逐字节相同（handle 除外），mysql.tidb 同样，`ADMIN CHECK TABLE mysql.tidb` 通过；
+  4. 不发 etcd 通知时，Go 在 30 秒的定时重读后看到（实测 30 秒）；
+  5. Go 和 tidb-rs 各 40 次并发 SET GLOBAL 同一变量：两边都没有错误，只有一行，`ADMIN CHECK TABLE` 通过。
+- **§6.5**：Go 和 tidb-rs 写入后 `mysql.stats_meta` 中都没有这两张表的行，Go 不为它们记统计增量。
+- **未测**：prewrite 与 commit 之间杀进程（需要 failpoint）、滚动升级（只有单元测试：bootstrap 版本不是 232 时拒绝）。
+

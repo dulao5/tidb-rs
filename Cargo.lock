@@ -2524,15 +2524,22 @@ version = "0.0.0"
 dependencies = [
  "etcd-client",
  "futures",
+ "parking_lot 0.12.5",
  "poc-executor",
  "poc-kv",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tidb-base",
  "tidb-distsql",
  "tidb-meta",
+ "tidb-model",
  "tidb-mysql-protocol",
  "tidb-sql",
+ "tidb-systable",
+ "tidb-tablecodec",
+ "tidb-types",
+ "tikv-client",
  "tokio",
  "tracing",
  "uuid",
@@ -3885,6 +3892,22 @@ dependencies = [
  "tidb-meta",
  "tidb-mysql-protocol",
  "tidb-parser",
+]
+
+[[package]]
+name = "tidb-systable"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "parking_lot 0.12.5",
+ "serde_json",
+ "tidb-base",
+ "tidb-kv",
+ "tidb-model",
+ "tidb-parser",
+ "tidb-sessionctx",
+ "tidb-tablecodec",
+ "tidb-types",
 ]
 
 [[package]]

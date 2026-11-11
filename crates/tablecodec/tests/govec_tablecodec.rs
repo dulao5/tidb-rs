@@ -578,6 +578,28 @@ fn exec(op: &str, a: &[Value]) -> Got {
             ok(json!({ "encs": encs, "sum": sum }))
         }
         "index" => ok(index(a)),
+        "encode_row" => {
+            // [ids, datums, loc, checksum handle spec or null]
+            let ids: Vec<i64> = a[0]
+                .as_array()
+                .map(|v| v.iter().map(|v| v.as_i64().unwrap()).collect())
+                .unwrap_or_default();
+            let ds = if a[1].is_null() {
+                Vec::new()
+            } else {
+                datums_arg(&a[1])
+            };
+            let loc = loc_opt(&a[2]);
+            let cs = handle_opt(&a[3]).map(|handle| rowcodec::Checksum::Raw { handle });
+            ok(try_(|| {
+                let mut enc = rowcodec::Encoder::with_enable(true);
+                match enc.encode(loc.as_ref(), &ids, &ds, cs.as_ref(), Vec::new()) {
+                    Ok(b) => json!({ "b": hex(&b), "err": null }),
+                    Err(e) => json!({ "b": "", "err": gs(&e.error()) }),
+                }
+            }))
+        }
+        "index_value" => ok(index_value(a)),
         "index_raw" => {
             let k = hexv(&a[0]);
             let v = hexv(&a[1]);
@@ -841,6 +863,57 @@ fn index(a: &[Value]) -> Value {
         );
     }
     Value::Object(o)
+}
+
+/// `index_value`: [table JSON, index offset, physical ID, row datums, handle spec, untouched,
+/// loc, needRestored] → GenIndexKey + TruncateIndexValues + GenIndexValuePortal (no handle
+/// restored data: the generator only emits rows where it is empty).
+fn index_value(a: &[Value]) -> Value {
+    let mut tbl = TableInfo::default();
+    tbl.unmarshal_json(a[0].as_str().unwrap().as_bytes())
+        .unwrap();
+    let idx_off = a[1].as_u64().unwrap() as usize;
+    let phy = a[2].as_i64().unwrap();
+    let row = datums_arg(&a[3]);
+    let h = handle_opt(&a[4]);
+    let untouched = a[5].as_bool().unwrap();
+    let loc = loc_arg(&a[6]);
+    let need_restored = a[7].as_bool().unwrap();
+    let idx = &tbl.indices.as_ref().unwrap()[idx_off];
+    try_(|| {
+        let mut vals: Vec<Datum> = idx
+            .columns
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|ic| row[ic.offset as usize].clone())
+            .collect();
+        let mut key_vals = vals.clone();
+        let (k, distinct) =
+            match tc::gen_index_key(&loc, &tbl, idx, phy, &mut key_vals, h.as_ref(), None) {
+                Ok(r) => r,
+                Err(e) => return json!({ "err": gs(&e.error()) }),
+            };
+        tc::truncate_index_values(&tbl, idx, &mut vals);
+        let pid = if idx.global { phy } else { 0 };
+        let hh = h.clone().expect("index_value: handle");
+        match tc::gen_index_value_portal(
+            Some(&loc),
+            &tbl,
+            idx,
+            need_restored,
+            distinct,
+            untouched,
+            &vals,
+            &hh,
+            pid,
+            &[],
+            None,
+        ) {
+            Ok(v) => json!({ "k": hex(&k), "distinct": distinct, "v": hex(&v), "err": null }),
+            Err(e) => json!({ "k": hex(&k), "distinct": distinct, "v": "", "err": gs(&e.error()) }),
+        }
+    })
 }
 
 fn index_decode(

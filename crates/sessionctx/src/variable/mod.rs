@@ -14,6 +14,7 @@ pub mod session_fields;
 pub(crate) mod session_hooks;
 mod session_hooks_b2;
 mod session_hooks_ext;
+mod session_hooks_gc;
 mod session_hooks_global;
 mod session_hooks_state;
 pub mod session_state;

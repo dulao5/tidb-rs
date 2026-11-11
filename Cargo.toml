@@ -23,6 +23,7 @@ members = [
   "crates/codec",
   "crates/tablecodec",
   "crates/sessionctx",
+  "crates/systable",
   "crates/expression",
   "tools/ab",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
@@ -119,6 +120,7 @@ tidb-kv = { path = "crates/kv" }
 tidb-codec = { path = "crates/codec" }
 tidb-tablecodec = { path = "crates/tablecodec" }
 tidb-sessionctx = { path = "crates/sessionctx" }
+tidb-systable = { path = "crates/systable" }
 tidb-expression = { path = "crates/expression" }
 # TiKV Rust client: our fork with `Snapshot::coprocessor` and several connections per store
 # (branch tidb-rs/perf, on top of tidb-rs/coprocessor).

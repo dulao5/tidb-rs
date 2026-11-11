@@ -67,6 +67,13 @@ blocks = ["D01.11"]  # tablecodec、rowcodec（依赖 kv）
 rank = 7
 blocks = ["D00.1", "D05.1", "D05.2"]
 
+# D06.7: the system-table writes behind SET GLOBAL (REPLACE INTO mysql.global_variables /
+# mysql.tidb, the row-ID allocator, the sysvar cache rebuild): the pure logic. The I/O (TiKV
+# transactions, etcd, PD) is in the legacy poc-domain until D06.5 / D07.1 (D05.2 spec §6.2).
+[crate.tidb-systable]
+rank = 8
+blocks = ["D06.7"]
+
 [crate.tidb-expression]
 rank = 8
 blocks = ["D08.1", "D08.2", "D08.8", "D08.12", "D08.11"]   # D08.8 CAST：框架的隐式转换机制（N0 评审）

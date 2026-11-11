@@ -37,9 +37,16 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
 };
 
 /// `variable.NewMockGlobalAccessor4Tests()`: every variable at its default.
+///
+/// Plus the generator's in-memory mysql.tidb (`tidbTableAccessor`: name -> (value, comment));
+/// a missing row is session.getTableValue's "Result is empty" error.
 struct MockGlobalAccessor {
     vals: HashMap<String, String>,
+    tidb: TidbTable,
 }
+
+/// mysql.tidb of [`MockGlobalAccessor`], shared with the replay that dumps it.
+type TidbTable = std::sync::Arc<std::sync::Mutex<BTreeMap<String, (String, String)>>>;
 
 impl GlobalVarAccessor for MockGlobalAccessor {
     fn get_global_sys_var(&self, name: &str) -> Result<String, Error> {
@@ -68,8 +75,23 @@ impl GlobalVarAccessor for MockGlobalAccessor {
         self.vals.insert(name.to_owned(), value.to_owned());
         Ok(())
     }
-    fn get_tidb_table_value(&self, _name: &str) -> Result<String, Error> {
-        panic!("not supported")
+    fn get_tidb_table_value(&self, name: &str) -> Result<String, Error> {
+        match self.tidb.lock().unwrap().get(name) {
+            Some((v, _)) => Ok(v.clone()),
+            None => Err(tidb_base::dbterror::exeerrors::ErrResultIsEmpty.clone()),
+        }
+    }
+    fn set_tidb_table_value(
+        &mut self,
+        name: &str,
+        value: &str,
+        comment: &str,
+    ) -> Result<(), Error> {
+        self.tidb
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), (value.to_owned(), comment.to_owned()));
+        Ok(())
     }
 }
 
@@ -278,10 +300,16 @@ fn register_callbacks() {
 }
 
 fn fresh_vars() -> SessionVars {
+    fresh_vars_with_tidb(TidbTable::default())
+}
+
+/// [`fresh_vars`] whose accessor holds the given mysql.tidb rows (comment "").
+fn fresh_vars_with_tidb(tidb: TidbTable) -> SessionVars {
     register_callbacks();
     reset_atomics();
     let mut vars = SessionVars::new(Box::new(MockGlobalAccessor {
         vals: HashMap::new(),
+        tidb,
     }));
     vars.time_zone = Some(tidb_base::gostd::time::utc());
     vars
@@ -673,6 +701,46 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             reset_atomics();
             (Value::Object(res), r.err(), warns)
         }
+        "tidb_table" => {
+            // D05.2 PR C (T10): the tidb_gc_* hooks against mysql.tidb.
+            let (name, val) = (args[0].as_str().unwrap(), args[1].as_str().unwrap());
+            let tidb = TidbTable::default();
+            for (k, v) in args[2].as_object().into_iter().flatten() {
+                let row = (v.as_str().unwrap().to_owned(), String::new());
+                tidb.lock().unwrap().insert(k.clone(), row);
+            }
+            let mut vars = fresh_vars_with_tidb(tidb.clone());
+            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            let sv = get_sys_var(name).unwrap();
+            let mut res = serde_json::Map::new();
+            let before = sv.get_global_from_hook(&mut vars);
+            res.insert("before".into(), json!(before.clone().unwrap_or_default()));
+            res.insert("before_err".into(), err_or_null(&before.map(|_| ())));
+            let mut r = Ok(());
+            if !val.is_empty() {
+                let (v, vr) = sv.validate(&mut vars, val, ScopeGlobal);
+                r = vr.and_then(|()| sv.set_global_from_hook(&mut vars, &v, false));
+                if r.is_ok() {
+                    let after = sv.get_global_from_hook(&mut vars);
+                    res.insert("after".into(), json!(after.clone().unwrap_or_default()));
+                    res.insert("after_err".into(), err_or_null(&after.map(|_| ())));
+                }
+            }
+            let tbl: serde_json::Map<String, Value> = tidb
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, (v, c))| (k.clone(), json!([v, c])))
+                .collect();
+            res.insert("tidb".into(), Value::Object(tbl));
+            let warns = vars
+                .stmt_ctx
+                .get_warnings()
+                .into_iter()
+                .map(|w| w.err)
+                .collect();
+            (Value::Object(res), r.err(), warns)
+        }
         "init" => {
             let mut vars = fresh_vars();
             vars.stmt_ctx.stmt_type = "Set".to_owned();
@@ -811,10 +879,10 @@ fn replay(path: &str) -> (usize, usize) {
     (n, skipped)
 }
 
-/// The cap on the committed vectors' skipped records (see `govec_sessionvars`): after PR B2
-/// only the 232 records of the five tidb_gc_* variables are skipped (their SetGlobal /
-/// GetGlobal hooks read and write mysql.tidb, which comes with PR C / T10). PR C lowers it to 0.
-const MAX_SKIPPED: usize = 232;
+/// The cap on the committed vectors' skipped records (see `govec_sessionvars`): 0 since PR C
+/// (T10) ported the hooks of the five tidb_gc_* variables, the last pending ones (332 records
+/// were skipped after PR B3).
+const MAX_SKIPPED: usize = 0;
 
 #[test]
 fn govec_sessionvars() {
@@ -830,7 +898,7 @@ fn govec_sessionvars() {
     // each PR of the D05.2 series as hooks land, 0 after PR B (Lucky's review of #57), so
     // that a pending entry cannot stay forever.
     assert!(
-        skipped <= MAX_SKIPPED,
+        skipped == MAX_SKIPPED,
         "{skipped} records skipped as pending, more than the cap {MAX_SKIPPED}"
     );
     if let Ok(files) = std::env::var("GOVEC_SESSIONVARS_FILES") {
