@@ -3772,6 +3772,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-infoschema"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "futures",
+ "regex",
+ "serde_json",
+ "tidb-base",
+ "tidb-codec",
+ "tidb-kv",
+ "tidb-model",
+ "tidb-parser",
+ "tidb-types",
+]
+
+[[package]]
 name = "tidb-kv"
 version = "0.0.0"
 dependencies = [

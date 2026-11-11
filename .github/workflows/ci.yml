@@ -78,7 +78,7 @@ jobs:
           TIDB_TYPES_FUZZ_ITERS: "500000000"
           # fuzz_json (A4 §6.3): about 5 s per 300,000 iterations.
           TIDB_TYPES_FUZZ_JSON_ITERS: "300000"
-        run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-execdetails
+        run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-execdetails -p tidb-infoschema
 
   # The Go vectors depend on the target (mapping rule M-FMA: gc fuses some float
   # multiply-adds into FMA on arm64 and not on amd64 GOAMD64=v1). The check job
@@ -94,6 +94,6 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: cargo test --locked -p tidb-types -p tidb-base -p tidb-memory -p tidb-parser -p tidb-model -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-execdetails
+        run: cargo test --locked -p tidb-types -p tidb-base -p tidb-memory -p tidb-parser -p tidb-model -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-execdetails -p tidb-infoschema
       - name: test (release-checked)
-        run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-execdetails
+        run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-execdetails -p tidb-infoschema

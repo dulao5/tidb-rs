@@ -82,7 +82,7 @@
 
 | 层 | 块 | 内容 | Go 行数 | 文件数 | 需要边界桩 / 接口的依赖（引用数 ≥ 10） |
 |---|---|---|--:|--:|---|
-| L1 | D06.2 | meta 读取（meta、structure、autoid 读取） | 3,808 | 13 | — |
+| L1 | [D06.2](D06.2-meta/spec.md) | meta 读取（meta、structure、autoid 读取；2026-11-11 按只读读路径划分：写入 76 个归 X，316 → 240 个函数；crate `tidb-infoschema`，第 1 部分 converge 130/240） | 3,808 | 13 | — |
 | L1 | D07.1 | store driver（snapshot 读） | 2,473 | 16 | — |
 | L1 | D08.3 | 下推判定与 protobuf 转换（infer_pushdown、expr_to_pb、distsql_builtin） | 2,073 | 3 | D08.7(97), D08.6(77), D08.9(71), D08.10(26) |
 | L1 | D14.0 | 执行统计数据结构（execdetails、runtime stats） | 1,747 | 3 | — |

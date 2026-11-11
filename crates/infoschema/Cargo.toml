@@ -1,0 +1,33 @@
+[package]
+name = "tidb-infoschema"
+version = "0.0.0"
+description = "Blocks D06.2-D06.4, D06.6 of the Go TiDB v8.5.8 port: meta / structure reads (D06.2), later the InfoSchema, tables and memory tables"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), errno, dbterror classes, gofmt, gostd strconv.
+tidb-base = { workspace = true }
+# model.CIStr, parser/mysql constants.
+tidb-parser = { workspace = true }
+# strconv.ParseFloat (gostd, Go's syntax and NaN).
+tidb-types = { workspace = true }
+# DBInfo / TableInfo / Job / SchemaDiff / PolicyInfo / ResourceGroupInfo and their Go JSON (D06.1).
+tidb-model = { workspace = true }
+# kv.Retriever / Snapshot / Key / ErrNotExist (D07.0).
+tidb-kv = { workspace = true }
+# util/codec EncodeBytes / EncodeUint / EncodeInt (D01.8).
+tidb-codec = { workspace = true }
+# The regexps of GetAllNameToIDAndTheMustLoadedTableInfo (Go regexp, RE2 semantics).
+regex = "1"
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+futures = { workspace = true }
+
+[lints]
+workspace = true
