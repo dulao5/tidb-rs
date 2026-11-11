@@ -24,7 +24,7 @@ tracker 中 D08.2 共 151 个函数，分布在 9 个 Go 文件中：
 ## 2. 依赖
 
 - D08.1（`Expr`、`BuiltinFunc`、`SigDesc`）；`tidb-sessionctx::exprctx::{BuildContext, EvalContext}`（D00.1）；`tidb-types::collate`（D01.9）、`FieldType` 与构造器（D01.1）；`tidb-parser::gocharset`。
-- 函数名常量（`pkg/parser/ast/functions.go`）与 `funcs` 的条目由 `tools/expr-gen/gen_registry.py` 从 Go 源码生成（`ast_funcs.rs`、`builtin_registry_gen.rs`），不手写。
+- 函数名常量（`pkg/parser/ast/functions.go`）与 `funcs` 的条目由 `tools/expr-gen/gen_registry.py` 从 Go 源码生成（函数名常量在 tidb-parser 的 `ast/funcs.rs`，Go 中它们也属于 `pkg/parser/ast`，parser 的 restore 已改用这些常量；`funcs` 条目在 tidb-expression 的 `builtin_registry_gen.rs`），不手写。生成后用 rustfmt 格式化这两个文件。
 
 ## 3. 设计
 

@@ -2,7 +2,7 @@
 
 ## 第 1 部分（本 PR）
 
-1. `tools/expr-gen/gen_registry.py`：从 Go 源码生成 `crates/expression/src/ast_funcs.rs`（`pkg/parser/ast/functions.go` 的 345 个函数名常量）和 `builtin_registry_gen.rs`（`funcs` 的 308 个条目）。D08.1 中手写的 `ast_func` 模块改为这里的再导出。
+1. `tools/expr-gen/gen_registry.py`：从 Go 源码生成 `crates/parser/src/ast/funcs.rs`（`tidb_parser::ast::funcs`，`pkg/parser/ast/functions.go` 的 345 个函数名常量；parser 自己也用，所以放在 tidb-parser，tidb-expression 以 `ast_funcs` 再导出，#80 评审）和 `builtin_registry_gen.rs`（`funcs` 的 308 个条目）。D08.1 中手写的 `ast_func` 模块改为这里的再导出。
 2. `builtin.rs`：`BaseFunctionClass`、`newBaseBuiltinFunc`、`newBaseBuiltinFuncWithFieldType`、`newReturnFieldTypeForBaseBuiltinFunc`、`adjustNullFlagForReturnType`、`setDecimalAndFlenFor*`、`BuiltinFuncCache`；`BuiltinFunc::base`/`with_sig`（`eval/mod.rs`）。
 3. `builtin_registry.rs`：注册表查询。
 4. `collation.rs`：函数的 collation 推导。

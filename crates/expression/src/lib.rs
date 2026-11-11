@@ -13,7 +13,9 @@
 #[allow(unused_extern_crates)]
 extern crate self as tidb_expression;
 
-pub mod ast_funcs;
+/// The function-name constants of `pkg/parser/ast/functions.go`, generated into tidb-parser
+/// (the parser uses them too); re-exported here so callers keep `ast_funcs`.
+pub use tidb_parser::ast::funcs as ast_funcs;
 pub mod builtin;
 pub mod builtin_registry;
 mod builtin_registry_gen;
