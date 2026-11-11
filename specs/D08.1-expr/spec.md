@@ -51,6 +51,20 @@ pub type ExprRef = Arc<Expr>;
 
 第 1 部分只定义 `ScalarFunction { func_name, ret_type, args }`，用于 `match` 和读取参数（`ExprReferenceSchema`、`IsEQCondFromIn`、`GcColumnExprIsTidbShard`）。求值、`Equal`、`String`、`HashCode` 等是**临时桩**（宪章第四条 3），调用时 panic 并指向第 2 部分。依赖 `ScalarFunction.Equal` 的 `Column.EqualByExprAndID`、`resolveIndicesByVirtualExpr`、`GetUsedList` 留到第 2 部分。
 
+### 3.4 `#[eval_fn]` 的 `checked` 写法：使用条件（Lucky 评审 #75）
+
+`checked` 的向量驱动第一遍不提前退出，第二遍只在出错标志置位时找第一个出错行（plan.md "第 2 部分"）。它与 Go 一致的前提是 Go 的向量版正好在"第一个非 NULL 的出错行"停下、此前没有可见的副作用。所以一个签名**只有同时满足下面三条**才能用 `checked`，移植每个函数族时逐个函数核对，并在该签名旁注明依据：
+
+1. **Go 的向量版在会出错的检查之前跳过 NULL 行**。有些 Go 向量版会对 NULL 位下面的无效值做检查（例如先整列计算、再统一处理 NULL），这样的签名不能用 `checked`。
+2. **出错之前没有逐行的副作用**：`HandleTruncate`、`AppendWarning`、改写状态等。因此非严格模式下的大部分 CAST 和字符串函数不适用，仍用默认的单遍形式。
+3. **Go 的逐行版与向量版报同样的错误**。如果两者不同（Go 的 bug），两个驱动各自跟随对应的 Go 版本（逐行驱动跟 `evalXxx`，向量驱动跟 `vecEvalXxx`），govec 两种模式都比较，并登记在 §4。
+
+每个采用 `checked` 的函数族，govec 必须包含两类记录：**出错的值藏在 NULL 位下面**；**第一个出错行不在第 0 行**（同一批中后面还有出错行）。
+
+### 3.5 带状态的签名的 `Clone`（Lucky 评审 #75）
+
+`SigDesc` 是无状态的描述；有状态的签名（LIKE/ILIKE/REGEXP 的 pattern 缓存、JSON_SCHEMA_VALID 的 schema 缓存、`rand` 的种子、`nonDeterministic` 标记等）在 `BuiltinFunc` 中带自己的状态。Go 每个签名的 `Clone` 对这些状态的处理各不相同（共享、复制或重置）：第一个带状态的签名进来时逐个对照 Go 的 `Clone`，在签名旁注明是哪一种，并在 govec 中加一个"克隆后分别求值再比较"的操作。已核对：`builtinFuncCache`（LIKE、ILIKE、REGEXP、JSON_SCHEMA_VALID）在 Go 的 `Clone` 中是新建的结构体，只复制 `baseBuiltinFunc`，所以克隆后缓存为空——Rust `BuiltinFuncCache::clone` 返回空缓存（D08.2，`builtin_unit.rs` 覆盖）。
+
 ## 4. 偏离与豁免
 
 1. **向量化方法不移植**（N4 §3.3 M-EVAL）：`Column`/`CorrelatedColumn`/`Constant` 的 24 个 `VecEval*` 由第 2 部分的向量驱动取代。tracker 豁免（`expr_pending.go`）。

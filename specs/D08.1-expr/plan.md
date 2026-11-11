@@ -67,8 +67,19 @@
 - `Clone` 与 Go 一样复制 hash 缓存；`Decorrelate`/`RemapColumn` 返回新节点并清空缓存（Go 原地修改后清空）。
 - `emptyScalarFunctionSize` 104、`emptyBaseBuiltinFunc` 152、`onceSize` 12：govec `sizes` 记录 Go 的实测值，回放时核对。
 
+**性能门禁的测量规则**（Lucky 评审 #75）：同一台机器上 Go 与 Rust 交替运行，每个签名在**多个独立进程**中各跑若干次、取最小值（虚拟机或混合大小核的机器上，单个进程偶尔会被调度到能效核，慢 3–4 倍）；每次改动驱动或宏之后，在 amd64 CI（`ubuntu-latest`）上再确认一次。
+
 **第 2 部分 2b（下一个 PR）**：
 1. `evaluator.go`（`EvaluatorSuite`、`defaultEvaluator`、`GetOptionalEvalPropsForExpr`）、`chunk_executor.go`（`VectorizedExecute`、`VectorizedFilter(ConsiderNull)`、`evalOneVec/Column/Cell`、`executeToXxx`、`Vectorizable`、`HasGetSetVarFunc` 等）、`expression.go` 的 `VecEvalBool`/`toBool`/`EvalExpr`/`implicitEvalReal`、`vectorized.go` 的 `genVecFromConstExpr`（现在在 `rt::fill_constant`）、`builtin_vectorized.go` 的 `vecEvalIntByRows`/`vecEvalStringByRows`。这些要用真实的签名才能和 Go 对照：和 D08.2（函数注册、`newBaseBuiltinFunc`）、D08.8 CAST 的第一批签名一起做，govec 用真实表达式在 chunk 上求值。
 2. `NewFunction*`/`newFunctionImpl`/`typeInferForNull`：需要 D08.2 的 `funcs` 表。
 3. 宏：Decimal/Time/Duration/JSON/VectorFloat32 的结果类型；逐行驱动 Concat/Like 慢于 Go 的两项（见门禁表）。
 4. 第 3 部分：VECTOR 函数（随 D08.2）。
+
+## 2b 的前提（D08.2 第 1 部分之后）
+
+D08.2 第 1 部分（`specs/D08.2-funcs`）移植了函数注册表 `funcs`（类名、参数个数、显示名）、`newBaseBuiltinFunc`/`newBaseBuiltinFuncWithFieldType`、`newReturnFieldTypeForBaseBuiltinFunc` 和函数的 collation 推导。2b 与 D08.2 第 2 部分一起做，顺序：
+
+1. D08.8 CAST 的第一批签名（`WrapWithCastAs*` 用到的 `castAsXxxFunctionClass.getFunction` 与签名体），以及 `newBaseBuiltinFuncWithTp`/`WithFieldTypes`、`baseBuiltinCastFunc`（D08.2）。
+2. `NewFunction*`/`newFunctionImpl`/`typeInferForNull`（D08.1），注册表条目加上 `get_function`；未移植的函数族返回明确的"未实现"错误（临时桩，宪章第四条 3），并在 govec 中跳过。
+3. `EvaluatorSuite`、`chunk_executor`、`VecEvalBool`/`toBool`/`EvalExpr`（D08.1）：govec 用 CAST 签名在 chunk 上逐行和向量求值，对照 Go。
+4. 常量折叠与传播（D08.2 `constant_fold.go`、`constant_propagation.go`）：需要比较函数（D08.4）。

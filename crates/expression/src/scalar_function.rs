@@ -10,7 +10,7 @@
 //! - The `VecEvalXxx` methods are [`ScalarFunction::vec_eval`] over evaluated argument
 //!   columns ([`crate::eval::RpnProgram`], N4 §3.4).
 //! - Not ported here: `NewFunction*`/`newFunctionImpl`/`typeInferForNull` need the function
-//!   class table (`funcs`) of block D08.2; `Hash64`/`Equals` are cascades-only (EXC.B);
+//!   classes' `getFunction` (the families of D08.4–D08.9, starting with CAST in D08.8); `Hash64`/`Equals` are cascades-only (EXC.B);
 //!   `ReHashCode`'s branch for `grouping` needs `BuiltinGroupingImplSig` (D08.9) and panics
 //!   until then; `wrapEvalAssert` is intest-only (spec §4).
 
@@ -37,7 +37,7 @@ use tidb_types::mydecimal::MyDecimal;
 use tidb_types::time::{Duration, Time};
 use tidb_types::vector::VectorFloat32;
 
-use crate::collation::{Coercibility, Repertoire};
+use crate::collation::{Coercibility, Repertoire, derive_coercibility_for_scalar_func};
 use crate::column::Column;
 use crate::context::{EvalContext, ParamValues, type_ctx};
 use crate::eval::BuiltinFunc;
@@ -48,94 +48,8 @@ use crate::expression::{
 use crate::schema::Schema;
 
 /// Function names of `pkg/parser/ast/functions.go`.
-#[allow(non_upper_case_globals)]
-pub mod ast_func {
-    /// `ast.LogicAnd`.
-    pub const LogicAnd: &str = "and";
-    /// `ast.Cast`.
-    pub const Cast: &str = "cast";
-    /// `ast.LogicOr`.
-    pub const LogicOr: &str = "or";
-    /// `ast.GE`.
-    pub const GE: &str = "ge";
-    /// `ast.LE`.
-    pub const LE: &str = "le";
-    /// `ast.EQ`.
-    pub const EQ: &str = "eq";
-    /// `ast.LT`.
-    pub const LT: &str = "lt";
-    /// `ast.GT`.
-    pub const GT: &str = "gt";
-    /// `ast.Plus`.
-    pub const Plus: &str = "plus";
-    /// `ast.Minus`.
-    pub const Minus: &str = "minus";
-    /// `ast.Mul`.
-    pub const Mul: &str = "mul";
-    /// `ast.UnaryNot`.
-    pub const UnaryNot: &str = "not";
-    /// `ast.UnaryMinus`.
-    pub const UnaryMinus: &str = "unaryminus";
-    /// `ast.In`.
-    pub const In: &str = "in";
-    /// `ast.RowFunc`.
-    pub const RowFunc: &str = "row";
-    /// `ast.SetVar`.
-    pub const SetVar: &str = "setvar";
-    /// `ast.GetVar`.
-    pub const GetVar: &str = "getvar";
-    /// `ast.Values`.
-    pub const Values: &str = "values";
-    /// `ast.GetParam`.
-    pub const GetParam: &str = "getparam";
-    /// `ast.Rand`.
-    pub const Rand: &str = "rand";
-    /// `ast.DayName`.
-    pub const DayName: &str = "dayname";
-    /// `ast.Sysdate`.
-    pub const Sysdate: &str = "sysdate";
-    /// `ast.Benchmark`.
-    pub const Benchmark: &str = "benchmark";
-    /// `ast.FoundRows`.
-    pub const FoundRows: &str = "found_rows";
-    /// `ast.AnyValue`.
-    pub const AnyValue: &str = "any_value";
-    /// `ast.Sleep`.
-    pub const Sleep: &str = "sleep";
-    /// `ast.UUID`.
-    pub const UUID: &str = "uuid";
-    /// `ast.Grouping`.
-    pub const Grouping: &str = "grouping";
-    /// `ast.NextVal`.
-    pub const NextVal: &str = "nextval";
-    /// `ast.LastVal`.
-    pub const LastVal: &str = "lastval";
-    /// `ast.SetVal`.
-    pub const SetVal: &str = "setval";
-    /// `ast.TiDBShard`.
-    pub const TiDBShard: &str = "tidb_shard";
-}
-
-/// unFoldableFunctions stores functions which can not be folded duration constant folding stage.
-// go: unFoldableFunctions (function_traits.go var)
-pub(crate) const unFoldableFunctions: &[&str] = &[
-    ast_func::Sysdate,
-    ast_func::FoundRows,
-    ast_func::Rand,
-    ast_func::UUID,
-    ast_func::Sleep,
-    ast_func::RowFunc,
-    ast_func::Values,
-    ast_func::SetVar,
-    ast_func::GetVar,
-    ast_func::GetParam,
-    ast_func::Benchmark,
-    ast_func::DayName,
-    ast_func::NextVal,
-    ast_func::LastVal,
-    ast_func::SetVal,
-    ast_func::AnyValue,
-];
+pub use crate::ast_funcs as ast_func;
+pub(crate) use crate::function_traits::unFoldableFunctions;
 
 /// `unsafe.Sizeof(ScalarFunction{})` on 64-bit targets (spec §4).
 pub(crate) const emptyScalarFunctionSize: i64 = 104;
@@ -176,6 +90,7 @@ impl Clone for ScalarFunction {
 
 impl ScalarFunction {
     /// A function node over `function` (the struct literal Go's `newFunctionImpl` builds).
+    // glue: constructor of the node (Go builds ScalarFunction literals in newFunctionImpl)
     pub fn new(func_name: &str, ret_type: FieldType, function: BuiltinFunc) -> ScalarFunction {
         ScalarFunction {
             func_name: CIStr::new(func_name),
@@ -690,17 +605,12 @@ impl ScalarFunction {
 
     /// The node with other arguments and the same everything else (caches included, as a
     /// Go clone whose arguments are then replaced).
+    // glue: Go clone whose arguments are then replaced
     pub(crate) fn with_args(&self, args: Vec<ExprRef>) -> ScalarFunction {
         let mut sf = self.clone();
         sf.function.args = args;
         sf
     }
-}
-
-/// deriveCoercibilityForScalarFunc: never called in Go.
-// go: deriveCoercibilityForScalarFunc L1
-pub(crate) fn derive_coercibility_for_scalar_func(_sf: &ScalarFunction) -> Coercibility {
-    panic!("this function should never be called")
 }
 
 /// ScalarFuncs2Exprs converts []*ScalarFunction to []Expression.

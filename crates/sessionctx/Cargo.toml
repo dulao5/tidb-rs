@@ -25,6 +25,8 @@ tidb-memory = { workspace = true }
 tidb-parser = { workspace = true }
 # tipb.TiFlashPreAggMode (ToTiPBTiFlashPreAggMode).
 tipb = { workspace = true }
+# execdetails.SyncExecDetails / RuntimeStatsColl / ExecDetails (StatementContext, D14.0).
+tidb-execdetails = { workspace = true }
 # Go sync.Mutex (SequenceState), RWMutex (instance overlay).
 parking_lot = "0.12"
 

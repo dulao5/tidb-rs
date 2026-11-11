@@ -23,12 +23,14 @@ use crate::expression::{EvalState, Expr};
 pub type ArgCols<'a> = SmallVec<[&'a Column; 4]>;
 
 /// A column with no type yet; the driver resets it for its result type.
+// glue: N4 §3 runtime support of the generated drivers (M-EVAL)
 pub fn empty_column() -> Column {
     new_empty_column(&FieldType::default())
 }
 
 /// Prepares a string result column for `n` rows.
 #[inline]
+// glue: N4 §3 runtime support of the generated drivers (M-EVAL)
 pub fn reset_string(result: &mut Column, n: usize) {
     result.reserve_string(n);
 }
@@ -39,11 +41,13 @@ pub struct IntView<'a>(&'a [I64]);
 impl<'a> IntView<'a> {
     /// The view of `col`.
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn new(col: &'a Column, n: usize) -> Self {
         IntView(&col.int64s()[..n])
     }
     /// Row `i`.
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn get(&self, i: usize) -> i64 {
         self.0[i].get()
     }
@@ -55,11 +59,13 @@ pub struct RealView<'a>(&'a [F64]);
 impl<'a> RealView<'a> {
     /// The view of `col`.
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn new(col: &'a Column, n: usize) -> Self {
         RealView(&col.float64s()[..n])
     }
     /// Row `i`.
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn get(&self, i: usize) -> f64 {
         self.0[i].get()
     }
@@ -71,11 +77,13 @@ pub struct BytesView<'a>(&'a Column);
 impl<'a> BytesView<'a> {
     /// The view of `col`.
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn new(col: &'a Column, _n: usize) -> Self {
         BytesView(col)
     }
     /// Row `i`.
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn get(&self, i: usize) -> &'a [u8] {
         self.0.get_bytes(i)
     }
@@ -93,6 +101,7 @@ macro_rules! fixed_out {
         impl<'a> $name<'a> {
             /// Resizes `result` to `n` rows, NULL where any of `args` is NULL.
             #[inline]
+            // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
             pub fn new(result: &'a mut Column, n: usize, args: &[&Column]) -> Self {
                 result.$resize(n, false);
                 if !args.is_empty() {
@@ -104,16 +113,19 @@ macro_rules! fixed_out {
             }
             /// Whether row `i` is NULL.
             #[inline(always)]
+            // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
             pub fn is_null(&self, i: usize) -> bool {
                 self.nulls[i >> 3] & (1 << (i & 7)) == 0
             }
             /// Sets row `i` to `v`.
             #[inline(always)]
+            // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
             pub fn set(&mut self, i: usize, v: $t) {
                 self.data[i] = <$le>::new(v);
             }
             /// Sets row `i` to NULL.
             #[inline(always)]
+            // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
             pub fn set_null(&mut self, i: usize) {
                 self.nulls[i >> 3] &= !(1 << (i & 7));
             }
@@ -123,6 +135,7 @@ macro_rules! fixed_out {
             /// returns whether any row that is not NULL is flagged. No early exit, so the
             /// compiler can vectorize the loop; 8 rows (one bitmap byte) at a time.
             #[inline(always)]
+            // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
             pub fn run_checked<F>(&mut self, n: usize, f: F) -> bool
             where
                 F: Fn(usize) -> ($t, bool),
@@ -155,6 +168,7 @@ macro_rules! fixed_out {
             /// Goes through the null bitmap a byte (8 rows) at a time; a byte without NULL
             /// runs the 8 rows without testing bits.
             #[inline(always)]
+            // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
             pub fn run<F>(&mut self, n: usize, mut f: F) -> Result<(), Error>
             where
                 F: FnMut(usize) -> Result<Option<$t>, Error>,
@@ -202,6 +216,7 @@ pub struct RowArgs<'a> {
 impl<'a> RowArgs<'a> {
     /// The accessor for `row`.
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn new(f: &'a BuiltinFunc, st: &'a EvalState, row: Row<'a>) -> Self {
         RowArgs { f, st, row }
     }
@@ -209,18 +224,22 @@ impl<'a> RowArgs<'a> {
 
 impl Args for RowArgs<'_> {
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     fn len(&self) -> usize {
         self.f.args.len()
     }
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     fn int(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<i64>, Error> {
         self.f.args[i].eval_int(ctx, self.st, self.row)
     }
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     fn real(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<f64>, Error> {
         self.f.args[i].eval_real(ctx, self.st, self.row)
     }
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     fn string(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Cow<'_, [u8]>>, Error> {
         Ok(self.f.args[i]
             .eval_string(ctx, self.st, self.row)?
@@ -237,6 +256,7 @@ pub struct VecArgs<'a> {
 impl<'a> VecArgs<'a> {
     /// The accessor for row `i`.
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn new(_f: &'a BuiltinFunc, cols: &'a [&'a Column], i: usize) -> Self {
         VecArgs { cols, i }
     }
@@ -244,10 +264,12 @@ impl<'a> VecArgs<'a> {
 
 impl Args for VecArgs<'_> {
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     fn len(&self) -> usize {
         self.cols.len()
     }
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     fn int(&mut self, _ctx: &dyn EvalContext, i: usize) -> Result<Option<i64>, Error> {
         let c = self.cols[i];
         Ok(if c.is_null(self.i) {
@@ -257,6 +279,7 @@ impl Args for VecArgs<'_> {
         })
     }
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     fn real(&mut self, _ctx: &dyn EvalContext, i: usize) -> Result<Option<f64>, Error> {
         let c = self.cols[i];
         Ok(if c.is_null(self.i) {
@@ -266,6 +289,7 @@ impl Args for VecArgs<'_> {
         })
     }
     #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     fn string(&mut self, _ctx: &dyn EvalContext, i: usize) -> Result<Option<Cow<'_, [u8]>>, Error> {
         let c = self.cols[i];
         Ok(if c.is_null(self.i) {
@@ -277,6 +301,7 @@ impl Args for VecArgs<'_> {
 }
 
 /// Go `genVecFromConstExpr`: evaluates the constant once and fills `n` rows.
+// glue: N4 §3 runtime support of the generated drivers (M-EVAL)
 pub fn fill_constant(
     ctx: &dyn EvalContext,
     st: &EvalState,

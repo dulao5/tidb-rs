@@ -28,3 +28,21 @@ where observable), which the replay rebuilds with descriptor-only signatures
 `Decorrelate`, `Equal`, `ExpressionsSemanticEqual`, `GetUsedList`, `EqualByExprAndID`).
 39 recipes Go cannot build (a function rejects the argument types) carry `{"build": err}` and
 are skipped.
+
+# Domain "funcs" (block D08.2 part 1)
+
+`<target>/funcs.jsonl.gz` are copied unmodified from the tidb-rs-tracker repository:
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/funcs.jsonl.gz` (branch `govec/funcs-D08.2`) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261113), 7,448 records: `derive` 4,000, `newbase` 1,300, `retft` 828, `deferred` 618, `verify` 400, `setflen` 300, `registry` 1, `baseerr` 1 |
+| `arm64/funcs.jsonl.gz` sha256 | `9a52d47d3f7832b46c9c16bdce46ccb0aca3198feef719497746f50cf98b205d` (GOARCH=arm64, generated locally) |
+| `amd64/funcs.jsonl.gz` sha256 | `c212a2059ab8c3bdd970f9a982e8ab282ded11995c850ae8995975b6d9c8927c` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
+
+`derive` and `newbase` records carry the arguments Go built (columns, constants, small function
+trees built with `NewFunctionBase`) as dumps in the output; the replay rebuilds them with
+descriptor-only signatures, applies the record's coercibility/repertoire overrides, and compares
+`deriveCollation` / `newBaseBuiltinFunc*` (result type, collation info, the collator's key of a
+probe string). A `{"panic": true}` output (Go indexes `args` or `argTps` out of range) must
+panic in Rust too.
