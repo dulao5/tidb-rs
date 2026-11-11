@@ -1107,13 +1107,22 @@ fn sf_tree(v: &Value) -> ExprRef {
     let args: Vec<ExprRef> = a[4].as_array().unwrap().iter().map(sf_tree).collect();
     let ret = ft_in(&a[3]);
     let sig = sig_of(a[2].as_str().unwrap(), a[5].as_bool().unwrap());
-    let mut f = eval::BuiltinFunc::new(sig, args, ret.clone(), a[6].as_str().unwrap(), a[7].as_str().unwrap());
+    let mut f = eval::BuiltinFunc::new(
+        sig,
+        args,
+        ret.clone(),
+        a[6].as_str().unwrap(),
+        a[7].as_str().unwrap(),
+    );
     f.pb_code = a[8].as_i64().unwrap() as i32;
     if a[9].as_bool().unwrap() {
-        f.collation_info.set_coercibility(Coercibility(a[10].as_i64().unwrap() as _));
+        f.collation_info
+            .set_coercibility(Coercibility(a[10].as_i64().unwrap() as _));
     }
-    f.collation_info.set_repertoire(Repertoire(a[11].as_i64().unwrap() as _));
-    f.collation_info.set_explicit_charset(a[12].as_bool().unwrap());
+    f.collation_info
+        .set_repertoire(Repertoire(a[11].as_i64().unwrap() as _));
+    f.collation_info
+        .set_explicit_charset(a[12].as_bool().unwrap());
     let mut sf = ScalarFunction::new(a[1].as_str().unwrap(), ret, f);
     sf.func_name = CIStr::new(a[1].as_str().unwrap());
     Expr::ScalarFunction(sf).into_ref()
@@ -1165,7 +1174,16 @@ fn exec_sf(op: &str, p: &[Value], want: &Value) -> Value {
                 .collect();
             m.insert("single".into(), json!(single));
             let sch = new_schema(
-                p[1].as_array().unwrap().iter().map(|u| Arc::new(Column { unique_id: u.as_i64().unwrap(), ..Column::default() })).collect(),
+                p[1].as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|u| {
+                        Arc::new(Column {
+                            unique_id: u.as_i64().unwrap(),
+                            ..Column::default()
+                        })
+                    })
+                    .collect(),
             );
             m.insert(
                 "resolve".into(),
@@ -1189,7 +1207,11 @@ fn exec_sf(op: &str, p: &[Value], want: &Value) -> Value {
                     let pr = pr.as_array().unwrap();
                     (
                         pr[0].as_i64().unwrap(),
-                        Arc::new(Column { unique_id: pr[1].as_i64().unwrap(), ret_type: new_field_type(mysql::TypeLonglong), ..Column::default() }),
+                        Arc::new(Column {
+                            unique_id: pr[1].as_i64().unwrap(),
+                            ret_type: new_field_type(mysql::TypeLonglong),
+                            ..Column::default()
+                        }),
                     )
                 })
                 .collect();
@@ -1201,7 +1223,10 @@ fn exec_sf(op: &str, p: &[Value], want: &Value) -> Value {
                 }),
             );
             let cl = Expr::ScalarFunction(sf.clone()).into_ref();
-            m.insert("clone".into(), json!([e.equal(ec, &cl), sf_str(&cl), hex(cl.hash_code())]));
+            m.insert(
+                "clone".into(),
+                json!([e.equal(ec, &cl), sf_str(&cl), hex(cl.hash_code())]),
+            );
             m.insert(
                 "decor".into(),
                 ex_try(|| {
@@ -1236,9 +1261,17 @@ fn exec_sf(op: &str, p: &[Value], want: &Value) -> Value {
                 .map(|c| Arc::new(sf_tree(c).as_column().unwrap().clone()))
                 .collect();
             let sch = new_schema(cols.clone());
-            let used: Vec<Arc<Column>> = p[1].as_array().unwrap().iter().map(|u| Arc::clone(&cols[u.as_u64().unwrap() as usize])).collect();
+            let used: Vec<Arc<Column>> = p[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|u| Arc::clone(&cols[u.as_u64().unwrap() as usize]))
+                .collect();
             let probe = sf_tree(&want["probe"]).as_column().unwrap().clone();
-            let eqid: Vec<bool> = cols.iter().map(|c| probe.equal_by_expr_and_id(ec, c)).collect();
+            let eqid: Vec<bool> = cols
+                .iter()
+                .map(|c| probe.equal_by_expr_and_id(ec, c))
+                .collect();
             let (r, ok) = probe.resolve_indices_by_virtual_expr(ec, &sch);
             json!({ "cols": want["cols"], "probe": want["probe"], "used": get_used_list(ec, &used, &sch), "eqid": eqid, "vres": [r.index, ok] })
         }

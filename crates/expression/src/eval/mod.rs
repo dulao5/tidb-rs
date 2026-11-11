@@ -10,7 +10,7 @@
 //! - [`RpnProgram`] is the post-order form of an expression for the vector driver; it borrows
 //!   the input chunk's columns instead of copying them (N4 §3.4).
 
-#![allow(non_upper_case_globals)]
+#![allow(non_upper_case_globals, clippy::needless_range_loop)]
 
 pub mod rt;
 
@@ -20,19 +20,19 @@ use std::borrow::Cow;
 use std::cell::{RefCell, RefMut};
 
 use tidb_base::Error;
-use tidb_chunk::{Chunk, Column, Row};
 use tidb_base::mysql;
+use tidb_chunk::{Chunk, Column, Row};
 use tidb_parser::gocharset;
 use tidb_parser::types::{
-    ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp, ETVectorFloat32,
-    EvalType,
+    ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
+    ETVectorFloat32, EvalType,
 };
+use tidb_types::collate::{self, Collator};
+use tidb_types::etc::FieldType;
 use tidb_types::json::BinaryJSON;
 use tidb_types::mydecimal::MyDecimal;
 use tidb_types::time::{Duration, Time};
 use tidb_types::vector::VectorFloat32;
-use tidb_types::collate::{self, Collator};
-use tidb_types::etc::FieldType;
 
 use crate::collation::CollationInfo;
 use crate::context::EvalContext;
@@ -62,9 +62,15 @@ pub enum SigDrivers {
     /// `evalDuration`.
     Duration { row: RowFn<Duration>, vec: VecFn },
     /// `evalJSON`.
-    Json { row: RowFn<BinaryJSON<'static>>, vec: VecFn },
+    Json {
+        row: RowFn<BinaryJSON<'static>>,
+        vec: VecFn,
+    },
     /// `evalVectorFloat32`.
-    VectorFloat32 { row: RowFn<VectorFloat32<'static>>, vec: VecFn },
+    VectorFloat32 {
+        row: RowFn<VectorFloat32<'static>>,
+        vec: VecFn,
+    },
     /// No evaluation: a signature that is only built and inspected (planner-only signatures,
     /// and the descriptor-only signatures of tests). Every `evalXxx` returns Go's
     /// `baseBuiltinFunc` error.
@@ -161,7 +167,12 @@ impl std::fmt::Debug for BuiltinFunc {
 macro_rules! row_dispatch {
     ($name:ident, $variant:ident, $t:ty, $go:literal) => {
         #[doc = concat!("`", $go, "`: the row driver.")]
-        pub fn $name(&self, ctx: &dyn EvalContext, st: &EvalState, row: Row<'_>) -> Result<Option<$t>, Error> {
+        pub fn $name(
+            &self,
+            ctx: &dyn EvalContext,
+            st: &EvalState,
+            row: Row<'_>,
+        ) -> Result<Option<$t>, Error> {
             match self.sig.drivers {
                 SigDrivers::$variant { row: f, .. } => f(self, ctx, st, row),
                 _ => Err(Error::plain(concat!(
@@ -299,7 +310,12 @@ impl BuiltinFunc {
     row_dispatch!(eval_time, Time, Time, "evalTime");
     row_dispatch!(eval_duration, Duration, Duration, "evalDuration");
     row_dispatch!(eval_json, Json, BinaryJSON<'static>, "evalJSON");
-    row_dispatch!(eval_vector_float32, VectorFloat32, VectorFloat32<'static>, "evalVectorFloat32");
+    row_dispatch!(
+        eval_vector_float32,
+        VectorFloat32,
+        VectorFloat32<'static>,
+        "evalVectorFloat32"
+    );
 
     /// `vecEvalXxx` of the result type `et` on `n` rows of evaluated arguments.
     pub fn vec_eval(
@@ -311,7 +327,9 @@ impl BuiltinFunc {
         result: &mut Column,
     ) -> Result<(), Error> {
         match self.sig.drivers.vec() {
-            Some(f) if self.sig.drivers.eval_type() == Some(normalize_et(et)) => f(self, ctx, n, cols, result),
+            Some(f) if self.sig.drivers.eval_type() == Some(normalize_et(et)) => {
+                f(self, ctx, n, cols, result)
+            }
             _ => Err(Error::plain(format!(
                 "baseBuiltinFunc.vecEval{}() should never be called, please contact the TiDB team for help",
                 vec_eval_name(et)
@@ -367,7 +385,11 @@ impl Scratch {
         if !slot.as_ref().is_some_and(|b| b.is::<T>()) {
             *slot = Some(Box::new(init()));
         }
-        RefMut::map(slot, |b| b.as_mut().and_then(|b| b.downcast_mut::<T>()).expect("scratch type"))
+        RefMut::map(slot, |b| {
+            b.as_mut()
+                .and_then(|b| b.downcast_mut::<T>())
+                .expect("scratch type")
+        })
     }
 }
 
@@ -382,7 +404,11 @@ impl<'a> RowSig<'a> {
     /// The view of `f`.
     #[inline(always)]
     pub fn new(f: &'a BuiltinFunc, ctx: &'a dyn EvalContext) -> Self {
-        RowSig { f, ctx, scratch: Scratch::default() }
+        RowSig {
+            f,
+            ctx,
+            scratch: Scratch::default(),
+        }
     }
 }
 
@@ -428,7 +454,11 @@ impl<'a, 't> VecSig<'a, 't> {
     /// The view of `f` with the types of this chunk.
     #[inline(always)]
     pub fn new(f: &'a BuiltinFunc, types: &'a ArgTypes<'t>) -> Self {
-        VecSig { f, types: &types.0, scratch: Scratch::default() }
+        VecSig {
+            f,
+            types: &types.0,
+            scratch: Scratch::default(),
+        }
     }
 }
 
@@ -620,7 +650,13 @@ impl RpnProgram {
                             Some(c) => c,
                             None => &mut *result,
                         };
-                        f.vec_eval(ctx, f.sig.drivers.eval_type().unwrap_or(ETInt), n, &cols, dst)
+                        f.vec_eval(
+                            ctx,
+                            f.sig.drivers.eval_type().unwrap_or(ETInt),
+                            n,
+                            &cols,
+                            dst,
+                        )
                     };
                     for s in stack.drain(base..) {
                         if let Slot::Temp(c) = s {

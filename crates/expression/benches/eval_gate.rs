@@ -84,7 +84,11 @@ fn plus_int<const FL: u8>(a: i64, b: i64) -> (i64, bool) {
 
 #[cold]
 fn plus_int_err(ctx: &dyn EvalContext, f: &impl SigView, _a: i64, _b: i64) -> Error {
-    let tp = if unsigned(f, 0) || unsigned(f, 1) { "BIGINT UNSIGNED" } else { "BIGINT" };
+    let tp = if unsigned(f, 0) || unsigned(f, 1) {
+        "BIGINT UNSIGNED"
+    } else {
+        "BIGINT"
+    };
     overflow(ctx, f, tp)
 }
 
@@ -111,7 +115,11 @@ fn cast_flags(f: &impl SigView) -> u8 {
 #[eval_fn(Real, checked(nflags = 2, flags = cast_flags, err = no_err1))]
 fn cast_int_as_real<const FL: u8>(val: i64) -> (f64, bool) {
     let (unsigned_args0, unsigned_ret) = (FL & 1 != 0, FL & 2 != 0);
-    let res = if !unsigned_ret && !unsigned_args0 { val as f64 } else { val as u64 as f64 };
+    let res = if !unsigned_ret && !unsigned_args0 {
+        val as f64
+    } else {
+        val as u64 as f64
+    };
     (res, false)
 }
 
@@ -301,7 +309,9 @@ fn case(
         .collect();
     let ret_eval_int = sig.drivers.eval_type() == Some(tidb_parser::types::ETInt);
     let function = BuiltinFunc::new(sig, args, ret.clone(), "utf8mb4", "utf8mb4_bin");
-    let expr = Arc::new(Expr::ScalarFunction(ScalarFunction::new(name, ret, function)));
+    let expr = Arc::new(Expr::ScalarFunction(ScalarFunction::new(
+        name, ret, function,
+    )));
     Case {
         name: name.into(),
         expr,

@@ -647,14 +647,22 @@ impl Column {
 
     /// ResolveIndicesByVirtualExpr implements Expression interface.
     // go: Column.ResolveIndicesByVirtualExpr L1
-    pub fn resolve_indices_by_virtual_expr(&self, ctx: &dyn EvalContext, schema: &Schema) -> (Column, bool) {
+    pub fn resolve_indices_by_virtual_expr(
+        &self,
+        ctx: &dyn EvalContext,
+        schema: &Schema,
+    ) -> (Column, bool) {
         let mut new_col = self.clone();
         let is_ok = new_col.resolve_indices_by_virtual_expr_in_place(ctx, schema);
         (new_col, is_ok)
     }
 
     // go: Column.resolveIndicesByVirtualExpr L1
-    pub(crate) fn resolve_indices_by_virtual_expr_in_place(&mut self, ctx: &dyn EvalContext, schema: &Schema) -> bool {
+    pub(crate) fn resolve_indices_by_virtual_expr_in_place(
+        &mut self,
+        ctx: &dyn EvalContext,
+        schema: &Schema,
+    ) -> bool {
         let mut fallback_idx: isize = -1;
         for (i, c) in schema.columns.iter().enumerate() {
             if c.unique_id == self.unique_id {
@@ -680,9 +688,12 @@ impl Column {
     pub fn equal_by_expr_and_id(&self, ctx: &dyn EvalContext, new_col: &Column) -> bool {
         let is_vir_expr_matched = match (&self.virtual_expr, &new_col.virtual_expr) {
             (Some(e), other) if matches!(&**e, Expr::ScalarFunction(_)) => {
-                let Expr::ScalarFunction(expr) = &**e else { unreachable!() };
+                let Expr::ScalarFunction(expr) = &**e else {
+                    unreachable!()
+                };
                 // expr.Equal(ctx, nil) is false for a nil VirtualExpr.
-                other.as_ref().is_some_and(|o| expr.equal(ctx, o)) && self.ret_type.equal(&new_col.ret_type)
+                other.as_ref().is_some_and(|o| expr.equal(ctx, o))
+                    && self.ret_type.equal(&new_col.ret_type)
             }
             _ => false,
         };

@@ -130,7 +130,11 @@ macro_rules! fixed_out {
                 let full = n / 8;
                 let (head, tail) = self.data[..n].split_at_mut(full * 8);
                 let mut bad = false;
-                for ((blk, out8), byte) in head.chunks_exact_mut(8).enumerate().zip(&self.nulls[..full]) {
+                for ((blk, out8), byte) in head
+                    .chunks_exact_mut(8)
+                    .enumerate()
+                    .zip(&self.nulls[..full])
+                {
                     let base = blk * 8;
                     for j in 0..8 {
                         let (v, b) = f(base + j);

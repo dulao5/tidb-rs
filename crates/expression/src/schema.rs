@@ -337,7 +337,11 @@ pub fn new_schema(cols: Vec<Arc<Column>>) -> Schema {
 
 /// GetUsedList shows whether each column in schema is contained in usedCols.
 // go: GetUsedList L1
-pub fn get_used_list(ctx: &dyn EvalContext, used_cols: &[Arc<Column>], schema: &Schema) -> Vec<bool> {
+pub fn get_used_list(
+    ctx: &dyn EvalContext,
+    used_cols: &[Arc<Column>],
+    schema: &Schema,
+) -> Vec<bool> {
     let tmp_schema = new_schema(used_cols.to_vec());
     let mut used = vec![false; schema.len()];
     for (i, col) in schema.columns.iter().enumerate() {
@@ -352,7 +356,10 @@ pub fn get_used_list(ctx: &dyn EvalContext, used_cols: &[Arc<Column>], schema: &
                 for (j, col_to_compare) in schema.columns.iter().enumerate() {
                     if !used[j]
                         && j != i
-                        && col_to_compare.virtual_expr.as_ref().is_some_and(|v| expr.equal(ctx, v))
+                        && col_to_compare
+                            .virtual_expr
+                            .as_ref()
+                            .is_some_and(|v| expr.equal(ctx, v))
                         && col.ret_type.equal(&col_to_compare.ret_type)
                     {
                         used[j] = true;

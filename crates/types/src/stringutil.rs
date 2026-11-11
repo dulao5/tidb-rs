@@ -155,7 +155,12 @@ pub fn compile_pattern_inner(pattern: &[u8], escape: u8) -> (Vec<char>, Vec<u8>)
 /// [`compile_pattern_inner`] into existing buffers (a pattern compiled again for each row
 /// reuses its allocation; Go allocates new slices each time).
 // glue: buffer-reusing form of CompilePatternInner (L2, allocation only)
-pub fn compile_pattern_inner_into(pattern: &[u8], escape: u8, pat_weights: &mut Vec<char>, pat_types: &mut Vec<u8>) {
+pub fn compile_pattern_inner_into(
+    pattern: &[u8],
+    escape: u8,
+    pat_weights: &mut Vec<char>,
+    pat_types: &mut Vec<u8>,
+) {
     let runes = to_runes(pattern);
     let escape_rune = char::from(escape);
     let len_runes = runes.len();

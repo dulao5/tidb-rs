@@ -69,7 +69,9 @@ fn col(i: isize, ft: &FieldType) -> ExprRef {
 
 fn func(sig: &'static SigDesc, args: Vec<ExprRef>, ret: FieldType) -> ExprRef {
     let function = BuiltinFunc::new(sig, args, ret.clone(), "utf8mb4", "utf8mb4_bin");
-    Arc::new(Expr::ScalarFunction(ScalarFunction::new(sig.name, ret, function)))
+    Arc::new(Expr::ScalarFunction(ScalarFunction::new(
+        sig.name, ret, function,
+    )))
 }
 
 #[test]
@@ -195,12 +197,20 @@ fn checked_drivers_agree() {
     let ctx = new_eval_context(vec![]);
     let ctx: &dyn EvalContext = &*ctx;
     let st = EvalState::new();
-    let e = func(&CHECKED_ADD_SIG, vec![col(0, &int), col(1, &int)], int.clone());
+    let e = func(
+        &CHECKED_ADD_SIG,
+        vec![col(0, &int), col(1, &int)],
+        int.clone(),
+    );
     let prog = RpnProgram::compile(&e);
     let mut rpn = RpnState::default();
     for n in [1usize, 7, 8, 9, 17, 64, 100] {
         for bad_rows in [vec![], vec![n - 1], vec![0, n / 2], vec![n / 3, n - 1]] {
-            for null_rows in [vec![], vec![0], bad_rows.first().copied().into_iter().collect::<Vec<_>>()] {
+            for null_rows in [
+                vec![],
+                vec![0],
+                bad_rows.first().copied().into_iter().collect::<Vec<_>>(),
+            ] {
                 let mut chk = new_chunk_with_capacity(&[int.clone(), int.clone()], n);
                 for i in 0..n {
                     // A NULL row keeps an overflowing value under its NULL bit (as an
@@ -234,7 +244,11 @@ fn checked_drivers_agree() {
                         }
                     }
                 }
-                assert_eq!(vec_r.err().map(|e| e.to_string()), row_err, "n {n} bad {bad_rows:?} null {null_rows:?}");
+                assert_eq!(
+                    vec_r.err().map(|e| e.to_string()),
+                    row_err,
+                    "n {n} bad {bad_rows:?} null {null_rows:?}"
+                );
             }
         }
     }

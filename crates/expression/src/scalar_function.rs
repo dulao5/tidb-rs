@@ -228,7 +228,10 @@ impl ScalarFunction {
     /// String implements fmt.Stringer interface.
     // go: ScalarFunction.String L1
     pub fn to_string(&self) -> Vec<u8> {
-        self.string_with_ctx(&**tidb_sessionctx::exprctx::EmptyParamValues, RedactLogDisable)
+        self.string_with_ctx(
+            &**tidb_sessionctx::exprctx::EmptyParamValues,
+            RedactLogDisable,
+        )
     }
 
     /// GetType implements Expression interface.
@@ -290,7 +293,12 @@ impl ScalarFunction {
     /// and clears its hash codes; here the result is a new node with the same caches cleared.
     // go: ScalarFunction.Decorrelate L2 (new node instead of in place, M-EXPR)
     pub fn decorrelate(&self, _this: &ExprRef, schema: &Schema) -> ExprRef {
-        let mut sf = self.with_args(self.get_args().iter().map(|arg| arg.decorrelate(schema)).collect());
+        let mut sf = self.with_args(
+            self.get_args()
+                .iter()
+                .map(|arg| arg.decorrelate(schema))
+                .collect(),
+        );
         sf.clean_hash_code();
         Expr::ScalarFunction(sf).into_ref()
     }
@@ -303,7 +311,12 @@ impl ScalarFunction {
 
     /// Eval implements Expression interface.
     // go: ScalarFunction.Eval L1
-    pub fn eval(&self, ctx: &dyn EvalContext, st: &EvalState, row: Row<'_>) -> Result<Datum, Error> {
+    pub fn eval(
+        &self,
+        ctx: &dyn EvalContext,
+        st: &EvalState,
+        row: Row<'_>,
+    ) -> Result<Datum, Error> {
         let tp = self.get_type();
         let res: Option<GoValue> = match tp.eval_type() {
             ETInt => self.eval_int(ctx, st, row)?.map(|v| {
@@ -314,11 +327,15 @@ impl ScalarFunction {
                 }
             }),
             ETReal => self.eval_real(ctx, st, row)?.map(GoValue::Float64),
-            ETDecimal => self.eval_decimal(ctx, st, row)?.map(|d| GoValue::Decimal(Box::new(d))),
+            ETDecimal => self
+                .eval_decimal(ctx, st, row)?
+                .map(|d| GoValue::Decimal(Box::new(d))),
             ETDatetime | ETTimestamp => self.eval_time(ctx, st, row)?.map(GoValue::Time),
             ETDuration => self.eval_duration(ctx, st, row)?.map(GoValue::Duration),
             ETJson => self.eval_json(ctx, st, row)?.map(GoValue::BinaryJSON),
-            ETVectorFloat32 => self.eval_vector_float32(ctx, st, row)?.map(GoValue::VectorFloat32),
+            ETVectorFloat32 => self
+                .eval_vector_float32(ctx, st, row)?
+                .map(GoValue::VectorFloat32),
             ETString => match self.eval_string(ctx, st, row)? {
                 Some(s) if tp.get_type() == mysql::TypeEnum => {
                     let elems = tp.get_elems().unwrap_or(&[]);
@@ -346,13 +363,23 @@ impl ScalarFunction {
 
     /// EvalInt implements Expression interface.
     // go: ScalarFunction.EvalInt L1
-    pub fn eval_int(&self, ctx: &dyn EvalContext, st: &EvalState, row: Row<'_>) -> Result<Option<i64>, Error> {
+    pub fn eval_int(
+        &self,
+        ctx: &dyn EvalContext,
+        st: &EvalState,
+        row: Row<'_>,
+    ) -> Result<Option<i64>, Error> {
         self.function.eval_int(ctx, st, row)
     }
 
     /// EvalReal implements Expression interface.
     // go: ScalarFunction.EvalReal L1
-    pub fn eval_real(&self, ctx: &dyn EvalContext, st: &EvalState, row: Row<'_>) -> Result<Option<f64>, Error> {
+    pub fn eval_real(
+        &self,
+        ctx: &dyn EvalContext,
+        st: &EvalState,
+        row: Row<'_>,
+    ) -> Result<Option<f64>, Error> {
         self.function.eval_real(ctx, st, row)
     }
 
@@ -380,7 +407,12 @@ impl ScalarFunction {
 
     /// EvalTime implements Expression interface.
     // go: ScalarFunction.EvalTime L1
-    pub fn eval_time(&self, ctx: &dyn EvalContext, st: &EvalState, row: Row<'_>) -> Result<Option<Time>, Error> {
+    pub fn eval_time(
+        &self,
+        ctx: &dyn EvalContext,
+        st: &EvalState,
+        row: Row<'_>,
+    ) -> Result<Option<Time>, Error> {
         self.function.eval_time(ctx, st, row)
     }
 
@@ -447,7 +479,8 @@ impl ScalarFunction {
     /// CanonicalHashCode implements Expression interface.
     // go: ScalarFunction.CanonicalHashCode L1
     pub fn canonical_hash_code(&self) -> &[u8] {
-        self.canonicalhashcode.get_or_init(|| simple_canonicalized_hash_code(self))
+        self.canonicalhashcode
+            .get_or_init(|| simple_canonicalized_hash_code(self))
     }
 
     /// CleanHashCode will clean the hashcode you may be cached before. It's used especially in
@@ -513,7 +546,11 @@ impl ScalarFunction {
 
     /// RemapColumn remaps columns with provided mapping and returns new expression
     // go: ScalarFunction.RemapColumn L1
-    pub fn remap_column(&self, _this: &ExprRef, m: &HashMap<i64, Arc<Column>>) -> Result<ExprRef, Error> {
+    pub fn remap_column(
+        &self,
+        _this: &ExprRef,
+        m: &HashMap<i64, Arc<Column>>,
+    ) -> Result<ExprRef, Error> {
         let mut new_args = Vec::with_capacity(self.get_args().len());
         for arg in self.get_args() {
             new_args.push(arg.remap_column(m)?);
@@ -610,7 +647,9 @@ impl ScalarFunction {
     /// SetCharsetAndCollation sets charset and collation.
     // go: ScalarFunction.SetCharsetAndCollation L1
     pub fn set_charset_and_collation(&mut self, chs: &str, coll: &str) {
-        self.function.collation_info.set_charset_and_collation(chs, coll);
+        self.function
+            .collation_info
+            .set_charset_and_collation(chs, coll);
     }
 
     /// Repertoire returns the repertoire value which is used to check collations.
@@ -687,10 +726,19 @@ pub fn expressions_semantic_equal(expr1: &Expr, expr2: &Expr) -> bool {
 // go: simpleCanonicalizedHashCode L1
 fn simple_canonicalized_hash_code(sf: &ScalarFunction) -> Vec<u8> {
     let mut code = vec![scalarFunctionFlag];
-    let mut args_hash_code: Vec<&[u8]> = sf.get_args().iter().map(|arg| arg.canonical_hash_code()).collect();
+    let mut args_hash_code: Vec<&[u8]> = sf
+        .get_args()
+        .iter()
+        .map(|arg| arg.canonical_hash_code())
+        .collect();
     let name = sf.func_name.l.as_str();
     match name {
-        ast_func::Plus | ast_func::Mul | ast_func::EQ | ast_func::In | ast_func::LogicOr | ast_func::LogicAnd => {
+        ast_func::Plus
+        | ast_func::Mul
+        | ast_func::EQ
+        | ast_func::In
+        | ast_func::LogicOr
+        | ast_func::LogicAnd => {
             encode_compact_bytes(&mut code, name.as_bytes());
             args_hash_code.sort();
             for arg_code in args_hash_code {
@@ -724,8 +772,11 @@ fn simple_canonicalized_hash_code(sf: &ScalarFunction) -> Vec<u8> {
         }
         ast_func::UnaryNot => match &*sf.get_args()[0] {
             Expr::ScalarFunction(child) => {
-                let child_args_hash_code: Vec<&[u8]> =
-                    child.get_args().iter().map(|arg| arg.canonical_hash_code()).collect();
+                let child_args_hash_code: Vec<&[u8]> = child
+                    .get_args()
+                    .iter()
+                    .map(|arg| arg.canonical_hash_code())
+                    .collect();
                 match child.func_name.l.as_str() {
                     // not GT  ==> LE  ==> use GE and switch args
                     ast_func::GT => {

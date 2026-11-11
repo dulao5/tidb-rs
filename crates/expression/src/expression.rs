@@ -415,7 +415,11 @@ impl Expr {
     /// ResolveIndicesByVirtualExpr resolves indices by the given schema in terms of virtual
     /// expression.
     // glue: dispatch of Expression.ResolveIndicesByVirtualExpr
-    pub fn resolve_indices_by_virtual_expr(self: &Arc<Self>, ctx: &dyn EvalContext, schema: &Schema) -> (ExprRef, bool) {
+    pub fn resolve_indices_by_virtual_expr(
+        self: &Arc<Self>,
+        ctx: &dyn EvalContext,
+        schema: &Schema,
+    ) -> (ExprRef, bool) {
         match &**self {
             Expr::Column(c) => {
                 let (c, ok) = c.resolve_indices_by_virtual_expr(ctx, schema);

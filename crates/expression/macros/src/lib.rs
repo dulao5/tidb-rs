@@ -59,7 +59,11 @@ struct Checked {
 fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
     let mut a = Attr::default();
     let parser = syn::meta::parser(|meta| {
-        let id = meta.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+        let id = meta
+            .path
+            .get_ident()
+            .map(|i| i.to_string())
+            .unwrap_or_default();
         match id.as_str() {
             "Int" => a.ret = Some(Ret::Int),
             "Real" => a.ret = Some(Ret::Real),
@@ -87,9 +91,9 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
                 a.checked = Some(Checked { nflags, flags, err });
             }
             _ => {
-                return Err(meta.error(
-                    "eval_fn: options are Int, Real, String, lazy, eager, checked(..)",
-                ));
+                return Err(
+                    meta.error("eval_fn: options are Int, Real, String, lazy, eager, checked(..)")
+                );
             }
         }
         Ok(())

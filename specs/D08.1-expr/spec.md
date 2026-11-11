@@ -1,6 +1,6 @@
 # D08.1 表达式框架：spec
 
-状态：第 1 部分（规划侧节点：Column、CorrelatedColumn、Constant、Schema，逐行求值，错误与上下文辅助函数）PR 评审中；第 2 部分（ScalarFunction 与求值驱动，N4 §3.2–3.4）待做。
+状态：第 1 部分已合并（#73）；第 2 部分 2a（`#[eval_fn]` 与两种驱动、RPN、ScalarFunction 规划侧方法）见 plan.md；2b（EvaluatorSuite、chunk_executor、VecEvalBool、NewFunction*）随 D08.2/D08.8 的第一批签名。
 
 收敛检查（第 1 部分）：D08.1 matched 141/348（6 个 Go 文件中缺 68 个，其余 7 个文件属于第 2、3 部分）；D08.2 的 `collation.go` 11 个。govec `expr` 领域 5,766 条，豁免 220 个（`expr_pending.go`）。
 
@@ -63,3 +63,6 @@ pub type ExprRef = Arc<Expr>;
 7. **`Constant.GetType` 返回 `Option`**：参数读不到时 Go 记日志并返回 nil `*FieldType`，Rust 返回 `None`；Go 解引用它的调用方在 Rust 中 `expect`（同样 panic）。
 8. **`ColumnInfos2ColumnsAndNames`**：`BuildSimpleExpr` 是注册的回调（§2），参数是列信息而不是 ast 节点（解析生成列表达式也由 planner 一侧完成）。
 9. **关联列在 `ExtractCorColumnsBySchema` 之前的状态**：Go 中新建的关联列各有自己的 Datum，统一之前同一外层列的两个关联列互不影响；Rust 按外层列的 `UniqueID` 取槽，从创建起就共享。规划期在统一之前不会写 `Data`，所以不可观察。
+10. **`ScalarFunction.MemoryUsage`**：hash 码按长度计（Go 按 `cap`）；`baseBuiltinFunc.MemoryUsage` 不计 `bufAllocator`（M-POOL，没有每签名的列池）；`isChildrenVectorized` 每次计算（Go 用 `sync.Once` 缓存）。
+11. **`ReHashCode` 的 `grouping` 分支**：等 `BuiltinGroupingImplSig`（D08.9），之前 panic（登记的豁免）。
+12. **`Decorrelate`/`RemapColumn`/`resolveIndices*`**：Go 原地修改克隆出来的节点；Rust 返回参数替换后的新节点，hash 缓存的处理与 Go 相同（`Decorrelate`、`RemapColumn` 清空，`resolveIndices` 保留）。
