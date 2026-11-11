@@ -120,6 +120,20 @@ enum ArgKind {
     Bytes,
 }
 
+/// The evaluation types the vector driver reads its arguments as (`SigDrivers::args`).
+fn arg_types(kinds: &[ArgKind]) -> TokenStream2 {
+    let ts: Vec<TokenStream2> = kinds
+        .iter()
+        .map(|k| match k {
+            ArgKind::Int => quote!(::tidb_expression::eval::rt::ETInt),
+            ArgKind::Real => quote!(::tidb_expression::eval::rt::ETReal),
+            ArgKind::Decimal => quote!(::tidb_expression::eval::rt::ETDecimal),
+            ArgKind::Bytes => quote!(::tidb_expression::eval::rt::ETString),
+        })
+        .collect();
+    quote!(&[#(#ts),*])
+}
+
 fn arg_kind(ty: &Type) -> Option<ArgKind> {
     let s = quote!(#ty).to_string().replace(' ', "");
     match s.as_str() {
@@ -331,6 +345,7 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
         }
     };
 
+    let args_ts = arg_types(&kinds);
     Ok(quote! {
         #func
 
@@ -359,7 +374,7 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
 
         /// The row and vector drivers of this signature (`#[eval_fn]`).
         #vis const #const_name: #krate::eval::SigDrivers =
-            #krate::eval::SigDrivers::#drivers_variant { row: #row_name, vec: #vec_name };
+            #krate::eval::SigDrivers::#drivers_variant { row: #row_name, vec: #vec_name, args: #args_ts };
     })
 }
 
@@ -490,6 +505,7 @@ fn expand_checked(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
         .iter()
         .map(|fl| quote!(#fl => run::<#fl>(&mut res, n, #(&#vnames),*),))
         .collect();
+    let args_ts = arg_types(&kinds);
     Ok(quote! {
         #func
 
@@ -549,6 +565,6 @@ fn expand_checked(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
 
         /// The row and vector drivers of this signature (`#[eval_fn]`).
         #vis const #const_name: #krate::eval::SigDrivers =
-            #krate::eval::SigDrivers::#drivers_variant { row: #row_name, vec: #vec_name };
+            #krate::eval::SigDrivers::#drivers_variant { row: #row_name, vec: #vec_name, args: #args_ts };
     })
 }

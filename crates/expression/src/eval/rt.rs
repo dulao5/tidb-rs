@@ -14,7 +14,8 @@ pub use tidb_types::mydecimal::MyDecimal;
 pub use tidb_base::Error;
 use tidb_chunk::column::new_empty_column;
 pub use tidb_chunk::{Column, Row};
-use tidb_parser::types::{ETDecimal, ETInt, ETReal, ETString, EvalType};
+use tidb_parser::types::EvalType;
+pub use tidb_parser::types::{ETDecimal, ETInt, ETReal, ETString};
 use tidb_types::etc::FieldType;
 
 use super::{Args, BuiltinFunc};

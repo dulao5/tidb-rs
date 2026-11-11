@@ -86,6 +86,10 @@ fn arg(v: &Value) -> Arg {
         "nil" => Arg::Nil,
         "bytes" => Arg::Bytes(unhex(x.as_str().unwrap())),
         "error" => Arg::Error(s()),
+        // reflect.ArrayOf / StructOf values (the type name is not printed by the records'
+        // verbs: no %T on them).
+        "array" => Arg::Array(args(x), "[N]T"),
+        "struct" => Arg::Struct(args(x), "struct {..}"),
         _ => panic!("unknown typed arg {t}"),
     }
 }

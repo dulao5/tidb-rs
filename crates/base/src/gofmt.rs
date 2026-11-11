@@ -61,6 +61,12 @@ pub enum Arg {
     /// them); `.1` is the Go type name.
     Struct(Vec<Arg>, &'static str),
     /// An array (not of bytes) printed by reflection, `[a b c]`; `.1` is the Go type name.
+    ///
+    /// `Struct` and `Array` cover fields and elements of the other variants and nested
+    /// arrays/structs, with any verb, width and precision (differential fuzz: govec `base`,
+    /// `rand/sprintf_composite`). Not supported: field names (`%+v`, `%#v`), pointers
+    /// (`&{..}`, nested `0xc000..`), maps, and fields whose types have methods (`String`,
+    /// `Error`, `Format`), which Go would call.
     Array(Vec<Arg>, &'static str),
 }
 

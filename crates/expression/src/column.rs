@@ -6,8 +6,10 @@
 //! - `CorrelatedColumn.Data *types.Datum` is a slot keyed by the outer column's `UniqueID`
 //!   at creation: the value lives in the [`EvalState`]; clones and `RemapColumn` keep the
 //!   slot, as Go keeps the pointer (spec §3.2).
-//! - Not ported (spec §4): the `VecEval*` methods (replaced by the vector driver of part 2,
-//!   M-EVAL) and the cascades-only `Hash64`/`Equals` (EXC.B). `EqualByExprAndID` and
+//! - `VecEvalInt`/`VecEvalReal`/`VecEvalString` are ported for the cases that convert
+//!   (hybrid columns, FLOAT columns); the RPN copies the other columns itself (D08.8 part 2).
+//!   The other `VecEval*` methods only copy and are the RPN's column copy (M-EVAL). Not
+//!   ported (spec §4): the cascades-only `Hash64`/`Equals` (EXC.B). `EqualByExprAndID` and
 //!   `resolveIndicesByVirtualExpr` need `ScalarFunction.Equal` and come with part 2.
 
 use std::collections::HashMap;
@@ -465,6 +467,79 @@ impl Column {
         Ok(row.get_datum(self.index as usize, &self.ret_type))
     }
 
+    /// VecEvalInt of a hybrid (ENUM/SET/BIT) column: each row through `EvalInt`. The RPN calls
+    /// it only for hybrid columns; Go's other branch is a plain copy, which the RPN does.
+    // go: Column.VecEvalInt L1
+    pub fn vec_eval_int(
+        &self,
+        ctx: &dyn EvalContext,
+        input: &tidb_chunk::Chunk,
+        result: &mut tidb_chunk::Column,
+    ) -> Result<(), Error> {
+        debug_assert!(self.ret_type.hybrid());
+        result.resize_int64(0, false);
+        for idx in chunk_rows(input) {
+            match self.eval_int(ctx, input.get_row(idx))? {
+                None => result.append_null(),
+                Some(v) => result.append_int64(v),
+            }
+        }
+        Ok(())
+    }
+
+    /// VecEvalReal of a FLOAT column: float32 widened to float64. The RPN calls it only for
+    /// FLOAT columns; Go's other branch is a plain copy, which the RPN does.
+    // go: Column.VecEvalReal L1
+    pub fn vec_eval_real(
+        &self,
+        _ctx: &dyn EvalContext,
+        input: &tidb_chunk::Chunk,
+        result: &mut tidb_chunk::Column,
+    ) -> Result<(), Error> {
+        debug_assert_eq!(self.get_type().get_type(), mysql::TypeFloat);
+        let n = input.num_rows();
+        let src = input.column(self.index as usize);
+        result.resize_float64(n, false);
+        if let Some(sel) = input.sel() {
+            for (i, &j) in sel.iter().enumerate() {
+                if src.is_null(j) {
+                    result.set_null(i, true);
+                } else {
+                    result.float64s_mut()[i].set(f64::from(src.get_float32(j)));
+                }
+            }
+            return Ok(());
+        }
+        result.merge_nulls(&[src]);
+        for i in 0..n {
+            if result.is_null(i) {
+                continue;
+            }
+            result.float64s_mut()[i].set(f64::from(src.get_float32(i)));
+        }
+        Ok(())
+    }
+
+    /// VecEvalString of a hybrid (ENUM/SET/BIT) column: each row through `EvalString`. The
+    /// RPN calls it only for hybrid columns; Go's other branch is a plain copy.
+    // go: Column.VecEvalString L1
+    pub fn vec_eval_string(
+        &self,
+        ctx: &dyn EvalContext,
+        input: &tidb_chunk::Chunk,
+        result: &mut tidb_chunk::Column,
+    ) -> Result<(), Error> {
+        debug_assert!(self.ret_type.hybrid());
+        result.reserve_string(input.num_rows());
+        for idx in chunk_rows(input) {
+            match self.eval_string(ctx, input.get_row(idx))? {
+                None => result.append_null(),
+                Some(v) => result.append_bytes(&v),
+            }
+        }
+        Ok(())
+    }
+
     /// EvalInt returns int representation of Column.
     // go: Column.EvalInt L1
     pub fn eval_int(&self, ctx: &dyn EvalContext, row: Row<'_>) -> Result<Option<i64>, Error> {
@@ -834,4 +909,13 @@ pub fn gc_column_expr_is_tidb_shard(virtual_expr: Option<&Expr>) -> bool {
         return false;
     }
     true
+}
+
+/// The rows of `input` in order, through its selection vector (Go `NewIterator4Chunk`).
+// glue: Go chunk.Iterator4Chunk over the selected rows
+fn chunk_rows(input: &tidb_chunk::Chunk) -> Box<dyn Iterator<Item = usize> + '_> {
+    match input.sel() {
+        Some(sel) => Box::new(sel.iter().copied()),
+        None => Box::new(0..input.num_rows()),
+    }
 }
