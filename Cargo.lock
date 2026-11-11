@@ -2532,6 +2532,8 @@ dependencies = [
  "thiserror 1.0.69",
  "tidb-base",
  "tidb-distsql",
+ "tidb-infoschema",
+ "tidb-kv",
  "tidb-meta",
  "tidb-model",
  "tidb-mysql-protocol",
@@ -3769,6 +3771,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "tidb-infoschema"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "futures",
+ "regex",
+ "serde_json",
+ "tidb-base",
+ "tidb-codec",
+ "tidb-kv",
+ "tidb-model",
+ "tidb-parser",
+ "tidb-types",
 ]
 
 [[package]]

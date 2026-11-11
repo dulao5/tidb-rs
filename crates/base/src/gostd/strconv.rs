@@ -207,3 +207,98 @@ pub fn parse_uint10(s: &[u8]) -> Result<u64, Vec<u8>> {
     }
     Ok(n)
 }
+
+/// `*strconv.NumError.Error()`: `strconv.<func>: parsing <Quote(num)>: <why>`.
+// go-std: strconv.NumError.Error L1 (strconv.Quote via gofmt %q)
+fn num_error_text(func: &str, num: &[u8], why: &str) -> Vec<u8> {
+    let mut m = format!("strconv.{func}: parsing ").into_bytes();
+    m.extend_from_slice(&crate::gofmt::sprintf(
+        "%q",
+        &[crate::gofmt::Arg::go_string(num.to_vec())],
+    ));
+    m.extend_from_slice(b": ");
+    m.extend_from_slice(why.as_bytes());
+    m
+}
+
+/// `strconv.ParseUint(s, 10, 64)`, Go-shaped (`M-ERRVAL`): on `ErrRange` the value is
+/// `math.MaxUint64`, on `ErrSyntax` 0; the error is the `*strconv.NumError` text with
+/// `func` (`"ParseUint"`, or the caller's name when Go rewrites `NumError.Func`).
+// go-std: strconv.ParseUint L1 (base 10, bitSize 64)
+pub fn parse_uint(s: &[u8], func: &str) -> (u64, Result<(), Vec<u8>>) {
+    if s.is_empty() {
+        return (0, Err(num_error_text(func, s, "invalid syntax")));
+    }
+    let mut n: u64 = 0;
+    for &c in s {
+        if !c.is_ascii_digit() {
+            return (0, Err(num_error_text(func, s, "invalid syntax")));
+        }
+        // Go returns ErrRange at the first overflowing digit, before later syntax errors.
+        match n
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u64::from(c - b'0')))
+        {
+            Some(v) => n = v,
+            None => return (u64::MAX, Err(num_error_text(func, s, "value out of range"))),
+        }
+    }
+    (n, Ok(()))
+}
+
+/// `strconv.ParseInt(s, 10, 64)`, Go-shaped (`M-ERRVAL`): on `ErrRange` the value is
+/// `math.MaxInt64` / `math.MinInt64`, on `ErrSyntax` 0. `func` is `"ParseInt"` (or `"Atoi"`
+/// from [`atoi`]).
+// go-std: strconv.ParseInt L1 (base 10, bitSize 64)
+pub fn parse_int(s: &[u8], func: &str) -> (i64, Result<(), Vec<u8>>) {
+    if s.is_empty() {
+        return (0, Err(num_error_text(func, s, "invalid syntax")));
+    }
+    let (neg, body) = match s[0] {
+        b'+' => (false, &s[1..]),
+        b'-' => (true, &s[1..]),
+        _ => (false, s),
+    };
+    let (un, err) = parse_uint(body, func);
+    if err.is_err() && un != u64::MAX {
+        // A syntax error: Go reports the input with its sign.
+        return (0, Err(num_error_text(func, s, "invalid syntax")));
+    }
+    let cutoff = 1u64 << 63;
+    if !neg && un >= cutoff {
+        return (i64::MAX, Err(num_error_text(func, s, "value out of range")));
+    }
+    if neg && un > cutoff {
+        return (i64::MIN, Err(num_error_text(func, s, "value out of range")));
+    }
+    let n = un as i64;
+    (if neg { n.wrapping_neg() } else { n }, Ok(()))
+}
+
+/// `strconv.Atoi(s)` on a 64-bit platform: the fast path for 1..18 bytes, else `ParseInt`
+/// with `NumError.Func` rewritten to `"Atoi"`.
+// go-std: strconv.Atoi L1 (intSize 64)
+pub fn atoi(s: &[u8]) -> (i64, Result<(), Vec<u8>>) {
+    if !s.is_empty() && s.len() < 19 {
+        let mut body = s;
+        if s[0] == b'-' || s[0] == b'+' {
+            body = &s[1..];
+            if body.is_empty() {
+                return (0, Err(num_error_text("Atoi", s, "invalid syntax")));
+            }
+        }
+        let mut n: i64 = 0;
+        for &ch in body {
+            let d = ch.wrapping_sub(b'0');
+            if d > 9 {
+                return (0, Err(num_error_text("Atoi", s, "invalid syntax")));
+            }
+            n = n * 10 + i64::from(d);
+        }
+        if s[0] == b'-' {
+            n = -n;
+        }
+        return (n, Ok(()));
+    }
+    parse_int(s, "Atoi")
+}

@@ -118,7 +118,6 @@ blocks = ["D08.10"]
 
 [crate.tidb-infoschema]
 rank = 9
-planned = true
 blocks = ["D06.2", "D06.3", "D06.4", "D06.6"]
 
 [crate.tidb-observe]
