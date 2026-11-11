@@ -812,6 +812,7 @@ impl Column {
     /// The data bytes of the first `c.length` elements (Go's slice header cast keeps the
     /// pointer, sets the length to `c.length`).
     // go: Column.castSliceHeader L2 (N5a 3.3: 1-byte aligned views instead of a slice header cast)
+    #[inline]
     fn cast_slice_header(&self, type_size: usize) -> &[u8] {
         &self.data.capb()[..self.length * type_size]
     }
@@ -822,8 +823,24 @@ impl Column {
         &mut self.data.capb_mut()[..n]
     }
 
+    /// The null bitmap and the data of a fixed-length column, both writable: the vector
+    /// driver of an expression writes values and NULL flags of the result row by row
+    /// (N4 §3.2, N5a 3.5). Panics on a variable-length column.
+    // glue: N5a 3.5 result column view
+    pub fn fixed_parts_mut(&mut self) -> (&mut [u8], &mut [u8]) {
+        assert!(
+            self.is_fixed(),
+            "fixed_parts_mut on a variable-length column"
+        );
+        let n = self.length * self.elem_len();
+        let nulls = self.null_bitmap.bytes_mut();
+        let data = &mut self.data.capb_mut()[..n];
+        (nulls, data)
+    }
+
     /// Int64s returns an int64 slice stored in this Column.
     // go: Column.Int64s L2 (N5a 3.3: little-endian 1-byte aligned view)
+    #[inline]
     pub fn int64s(&self) -> &[I64] {
         <[I64]>::ref_from_bytes(self.cast_slice_header(sizeInt64)).unwrap()
     }
@@ -860,6 +877,7 @@ impl Column {
 
     /// Float64s returns a float64 slice stored in this Column.
     // go: Column.Float64s L2 (N5a 3.3: little-endian 1-byte aligned view)
+    #[inline]
     pub fn float64s(&self) -> &[F64] {
         <[F64]>::ref_from_bytes(self.cast_slice_header(sizeFloat64)).unwrap()
     }

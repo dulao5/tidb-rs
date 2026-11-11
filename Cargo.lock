@@ -3727,16 +3727,30 @@ dependencies = [
 name = "tidb-expression"
 version = "0.0.0"
 dependencies = [
+ "criterion 0.5.1",
  "flate2",
  "parking_lot 0.12.5",
  "serde_json",
+ "smallvec",
  "tidb-base",
  "tidb-chunk",
  "tidb-codec",
+ "tidb-expression-macros",
  "tidb-model",
  "tidb-parser",
  "tidb-sessionctx",
  "tidb-types",
+ "tikv-jemallocator",
+ "zerocopy",
+]
+
+[[package]]
+name = "tidb-expression-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

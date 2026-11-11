@@ -441,12 +441,14 @@ impl Column {
 
     /// GetType implements Expression interface.
     // go: Column.GetType L1
+    #[inline]
     pub fn get_type(&self) -> &FieldType {
         self.get_static_type()
     }
 
     /// GetStaticType returns the type without considering the context.
     // go: Column.GetStaticType L1
+    #[inline]
     pub fn get_static_type(&self) -> &FieldType {
         &self.ret_type
     }

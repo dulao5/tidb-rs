@@ -30,6 +30,7 @@ pub fn has_auto_increment_flag(flag: usize) -> bool {
 
 /// HasUnsignedFlag checks if UnsignedFlag is set.
 // go: HasUnsignedFlag L1 [M-INT]
+#[inline]
 pub fn has_unsigned_flag(flag: usize) -> bool {
     (flag & UnsignedFlag) > 0
 }

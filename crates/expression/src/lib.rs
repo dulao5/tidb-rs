@@ -8,11 +8,16 @@
 
 #![deny(unsafe_code)]
 
+// `#[eval_fn]` refers to this crate as `::tidb_expression`, also from inside it.
+#[allow(unused_extern_crates)]
+extern crate self as tidb_expression;
+
 pub mod collation;
 pub mod column;
 pub mod constant;
 pub mod context;
 pub mod errors;
+pub mod eval;
 pub mod expression;
 pub mod scalar_function;
 pub mod schema;
@@ -26,3 +31,4 @@ pub use errors::*;
 pub use expression::*;
 pub use scalar_function::ScalarFunction;
 pub use schema::*;
+pub use tidb_expression_macros::eval_fn;

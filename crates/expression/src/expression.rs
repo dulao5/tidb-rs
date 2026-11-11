@@ -320,6 +320,7 @@ impl Expr {
 
     /// GetType gets the type that the expression returns.
     // glue: dispatch of Expression.GetType
+    #[inline]
     pub fn get_type(&self, ctx: &dyn EvalContext) -> Cow<'_, FieldType> {
         match self {
             Expr::Column(c) => Cow::Borrowed(c.get_type()),
@@ -333,6 +334,7 @@ impl Expr {
 
     /// GetStaticType returns the type without considering the context.
     // glue: dispatch of Expression.GetStaticType
+    #[inline]
     pub fn get_static_type(&self) -> &FieldType {
         match self {
             Expr::Column(c) => c.get_static_type(),

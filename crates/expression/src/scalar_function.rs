@@ -25,6 +25,7 @@ use tidb_types::vector::VectorFloat32;
 use crate::collation::{Coercibility, Repertoire};
 use crate::column::Column;
 use crate::context::{EvalContext, ParamValues};
+use crate::eval::BuiltinFunc;
 use crate::expression::{ConstLevel, EvalState, Expr, ExprRef, TraverseAction};
 use crate::schema::Schema;
 
@@ -44,8 +45,8 @@ pub struct ScalarFunction {
     pub func_name: CIStr,
     /// RetType is the type that ScalarFunction returns.
     pub ret_type: FieldType,
-    /// The arguments (`Function.getArgs()` in Go).
-    pub args: Vec<ExprRef>,
+    /// Function: the signature and the `baseBuiltinFunc` fields (N4 §3.1).
+    pub function: BuiltinFunc,
 }
 
 macro_rules! part2_stub {
@@ -62,7 +63,7 @@ impl ScalarFunction {
     /// GetArgs gets arguments of function.
     // glue: transitional ScalarFunction (spec §3.3); ScalarFunction.GetArgs is ported with part 2
     pub fn get_args(&self) -> &[ExprRef] {
-        &self.args
+        &self.function.args
     }
 
     /// The function's return type.
@@ -89,31 +90,31 @@ impl ScalarFunction {
     // glue: temporary stub until D08.1 part 2
     pub(crate) fn eval_int(
         &self,
-        _ctx: &dyn EvalContext,
-        _st: &EvalState,
-        _row: Row<'_>,
+        ctx: &dyn EvalContext,
+        st: &EvalState,
+        row: Row<'_>,
     ) -> Result<Option<i64>, Error> {
-        part2_stub!("EvalInt")
+        self.function.eval_int(ctx, st, row)
     }
 
     // glue: temporary stub until D08.1 part 2
     pub(crate) fn eval_real(
         &self,
-        _ctx: &dyn EvalContext,
-        _st: &EvalState,
-        _row: Row<'_>,
+        ctx: &dyn EvalContext,
+        st: &EvalState,
+        row: Row<'_>,
     ) -> Result<Option<f64>, Error> {
-        part2_stub!("EvalReal")
+        self.function.eval_real(ctx, st, row)
     }
 
     // glue: temporary stub until D08.1 part 2
     pub(crate) fn eval_string(
         &self,
-        _ctx: &dyn EvalContext,
-        _st: &EvalState,
-        _row: Row<'_>,
+        ctx: &dyn EvalContext,
+        st: &EvalState,
+        row: Row<'_>,
     ) -> Result<Option<Vec<u8>>, Error> {
-        part2_stub!("EvalString")
+        self.function.eval_string(ctx, st, row)
     }
 
     // glue: temporary stub until D08.1 part 2

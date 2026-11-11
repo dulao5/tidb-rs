@@ -15,6 +15,10 @@
 rank = 0
 blocks = ["D00.2", "D00.4"]   # parser/mysql 常量、errno、terror、dbterror、config；contextutil（D00.4）
 
+[crate.tidb-expression-macros]
+rank = 0
+blocks = []   # #[eval_fn] proc macro of tidb-expression (N4 §3.2); no runtime dependencies
+
 [crate.tidb-metrics]
 rank = 0
 blocks = ["D14.1"]

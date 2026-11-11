@@ -1,0 +1,19 @@
+[package]
+name = "tidb-expression-macros"
+version = "0.0.0"
+description = "The #[eval_fn] attribute of tidb-expression (N4 §3.2): one function body, a row driver and a vector driver"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+
+[lints]
+workspace = true

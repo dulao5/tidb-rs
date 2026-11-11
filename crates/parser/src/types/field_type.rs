@@ -240,6 +240,7 @@ impl FieldType {
 
     /// GetFlag returns the flag of the FieldType.
     // go: FieldType.GetFlag L1
+    #[inline]
     pub fn get_flag(&self) -> usize {
         self.flag
     }
