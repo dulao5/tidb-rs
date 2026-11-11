@@ -20,7 +20,10 @@ jobs:
       matrix:
         # macOS runners bill at 10x Linux minutes; macOS is checked locally
         # before merge instead. Add macos-latest back here to re-enable it.
-        os: [ubuntu-latest]
+        # Pinned: ubuntu-latest moved to a new image whose apt mirrors fail to resolve
+        # (2026-11-11, "Temporary failure resolving archive.ubuntu.com"); the arm job
+        # already uses ubuntu-24.04-arm.
+        os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
