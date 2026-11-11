@@ -67,7 +67,7 @@
 | L3 | [D00.1](D00.1-ctx/spec.md) | 上下文接口骨架（sessionctx、planctx、exprctx、stmtctx、errctx、base 接口；2026-11-09 第 1 部分：errctx、util/context、stmtctx 核心；第 2a 部分：exprctx、expropt 的 provider 集合、exprstatic、ranger 类型，converge 294/433；第 2b 部分：expropt 的 provider、planctx、PlanCounterTp、debugtrace、stmtctx 的 tracker，converge 304/394；util/context 的 39 个函数改归 D00.4（tidb-base）） | 2,773 | 29 | — |
 | L3 | D01.2 | Decimal（MyDecimal；流程试点） | 2,004 | 1 | — |
 | L3 | [D01.3](D01.3-time/spec.md) | 时间与 Duration | 3,400 | 3 | — |
-| L3 | D08.2 | 函数注册、类型推导、常量折叠与传播、collation 推导 | 2,385 | 9 | — |
+| L3 | [D08.2](D08.2-funcs/spec.md) | 函数注册、类型推导、常量折叠与传播、collation 推导（第 1 部分：注册表、baseBuiltinFunc 构造、collation 推导） | 2,385 | 9 | — |
 | L4 | D01.4 | 类型转换（convert）与溢出、截断 | 883 | 3 | D01.5(63) |
 | L4 | D01.8 | 编码：util/codec（Q3：从 Go 移植 L1，TiKV 作为双向逐字节 oracle，#39） | 1,913 | 5 | — |
 | L4 | [D01.11](D01.11-tablecodec/spec.md) | 表与行编码：tablecodec、rowcodec（N0 评审从 D01.8 拆出，位于 kv 之上；2026-11-08 按只读读路径划分：63 个归 X，169 → 106 个函数；crate `tidb-tablecodec`，converge 106/106，TiKV 双向对照） | 2,736 | 6 | — |
