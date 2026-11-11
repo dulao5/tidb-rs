@@ -45,7 +45,8 @@ static maxFreeChunks: AtomicI64 = AtomicI64::new(64);
 static maxFreeColumnsPerType: AtomicI64 = AtomicI64::new(256);
 
 /// InitChunkAllocSize init the maximum cache size
-// go: InitChunkAllocSize L1 (M-POOL: no pool; the sizes still decide CheckReuseAllocSize)
+// M-POOL: there is no pool, but the sizes still decide CheckReuseAllocSize.
+// go: InitChunkAllocSize L1
 pub fn init_chunk_alloc_size(set_max_free_chunks: u32, set_max_free_columns: u32) {
     let set_max_free_chunks = set_max_free_chunks.min(i32::MAX as u32);
     let set_max_free_columns = set_max_free_columns.min(i32::MAX as u32);
@@ -54,8 +55,8 @@ pub fn init_chunk_alloc_size(set_max_free_chunks: u32, set_max_free_columns: u32
 }
 
 /// NewAllocator creates an Allocator.
-// go: NewAllocator L2 (M-POOL: allocates new chunks like emptyAllocator, but keeps the pool
-// sizes so CheckReuseAllocSize answers like Go's pool)
+// It keeps the pool sizes, so CheckReuseAllocSize answers like Go's pool.
+// go: NewAllocator L2 (M-POOL: allocates new chunks like emptyAllocator)
 pub fn new_allocator() -> Box<dyn Allocator> {
     Box::new(PoolSizeAllocator {
         free_chunk: maxFreeChunks.load(Relaxed),

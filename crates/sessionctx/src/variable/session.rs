@@ -270,10 +270,11 @@ impl SessionVars {
     }
 
     // glue: field access for session_methods.rs
-    pub(super) fn stmt_ctx_slot(&self) -> Arc<parking_lot::Mutex<Arc<std::sync::atomic::AtomicBool>>> {
+    pub(super) fn stmt_ctx_slot(
+        &self,
+    ) -> Arc<parking_lot::Mutex<Arc<std::sync::atomic::AtomicBool>>> {
         Arc::clone(&self.stmt_ctx_slot)
     }
-
 }
 
 impl SessionVars {

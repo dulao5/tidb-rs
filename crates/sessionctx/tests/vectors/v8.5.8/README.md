@@ -21,9 +21,9 @@ its own target.
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-d`, tracker #43) |
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-e`, tracker #48) |
 | generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view; the accessor holds an in-memory mysql.tidb), 67,583 records: after the 1,208 `tidb_table` (`sys/tidb_table`, PR C: the tidb_gc_* hooks), the 1,095 PR D records (`methods`, `uservars`, `paramlist`, `svmisc`); both targets hold the same records |
-| `arm64/sessionvars.jsonl.gz` sha256 | `d8d16f2ce7e948cb33b46cea9f7955a777e5b6fad9f2090599414fe184ed668a` (GOARCH=arm64, generated locally, D05.2 PR D, tracker #43) |
+| `arm64/sessionvars.jsonl.gz` sha256 | `f6087b718a9e839a8ddad4e72a63223c72e28b664663fc786b861adc71d821e1` (GOARCH=arm64, generated locally, D05.2 PR E, tracker #48) |
 | `amd64/sessionvars.jsonl.gz` sha256 | `4597f686997d4259a7994d0f4a950c4d4a511d167aba20e319439f7043a4736c` (tracker CI artifact, run 42981268960, D05.2 PR D) |
 
 ## Domain "stmtctx" (block D00.1 part 1)

@@ -258,3 +258,24 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
 | `CleanupTxnReadTSIfUsed` 不检查 `readTS > 0` | 1 |
 
 最后一项起初是 0 条：新会话的 `TxnReadTS` 是 nil，所有 `TxnReadTS` 调用都是空操作。补了先 `SET tx_read_ts` 的记录后才发现，并因此把 Rust 的 `TxnReadTS` 改为 `Option`（spec §4 第 13 条）。
+
+## PR E（2026-11-11）
+
+分支：tidb-rs `block/D05.2-sessionvars-e`，tracker `govec/sessionvars-D05.2-e`，base 都是 main。Lucky 在 #81 评审中的决定都已采纳（spec §4 第 14 条）。
+
+**本 PR**：
+- T9：`SessionVars` 中的 `StatementContext` 替身换成 D00.1 的 stmtctx（`Arc`），`stmt_ctx()` / `set_stmt_ctx()` / `stmt_ctx_mut()`；`LastInsertID`、`useChunkAlloc` 改为原子量。
+- `StmtHints`（新块 D13.0，`tidb_sessionctx::hint`），stmtctx 内嵌；4 个 hint getter（`GetAllowInSubqToJoinAndAgg`、`GetEnableCascadesPlanner`、`GetReplicaRead`、`GetMaxExecutionTime`）。
+- chunk 分配器的 6 个方法与 `@@last_sql_use_alloc`；D01.7 的 `allocator.CheckReuseAllocSize`。
+- `InitStatementContext`、`RaiseWarningWhenMPPEnforced`、`SetLastInsertID`；`ExprSessionVars` 窄接口。
+- tracker：`CleanBuffers` 归 X，`StmtHints.Clone/TaskMapNeedBackUp` 归 D13.0，`allocator.CheckReuseAllocSize` 归 D01.7。
+
+**govec**（tracker `govec/domains/sessionvars_e.go`，追加在最后）：`stmtvars` 460 条（每个设置配 hint getter；连接上的语句周期：SetAlloc → InitStatementContext → 执行器分配 → ExchangeChunkStatus → ClearAlloc → 下一条语句读 `@@last_sql_use_alloc`，覆盖 `tidb_enable_reuse_chunk` 与池大小 0；GetReplicaRead 的只读、RCCheckTS、RcWriteCheckTS、hint 与 warning 去重；400 个随机脚本），`stmthints` 103 条（Clone 之后改原对象，克隆不受影响；`HintedHypoIndexes` 不复制）。
+
+**PR F（剩余，converge 185/237 中缺的 31 个 + 2 个文件）**：
+1. `LazyStmtText` 3 个、`GetTotalCostDuration` / `GetExecuteDuration`、`slow_log.go` 12 个（`SlowLogFormat`、`writeSlowLogItem`、`CollectWarningsForSlowLog` 等；依赖 D00.3 的 `redact.String` 与 D14.0）。
+2. `EncodeSessionStates` / `DecodeSessionStates`（`sessionstates.SessionStates`）；`session_token.go` 建议归 D04.1。
+3. kvcache：`Add/GetNonPreparedPlanCacheStmt`、`Get/SetPrepareStmtDedupCache`（`kvcache.SimpleLRUCache`，util 按需移植）。
+4. `BuildParserConfig` / `GetParseParams`（parser 的 `ParserConfig` / `ParseParam`）。
+5. Savepoint 6 个：需要 D07.1 的 memdb checkpoint。
+6. `pkg/session/cursor/tracker.go`：随 D05.3。

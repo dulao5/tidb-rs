@@ -16,7 +16,11 @@ use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sessionctx::variable::session_methods as sm;
 
 fn list_or_null(v: Vec<Value>) -> Value {
-    if v.is_empty() { Value::Null } else { Value::Array(v) }
+    if v.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(v)
+    }
 }
 
 fn err_str(r: Result<(), Error>) -> Value {
@@ -59,7 +63,10 @@ impl Allocator for Shared {
         capacity: usize,
         max_chunk_size: usize,
     ) -> tidb_chunk::chunk::Chunk {
-        self.0.lock().unwrap().alloc(fields, capacity, max_chunk_size)
+        self.0
+            .lock()
+            .unwrap()
+            .alloc(fields, capacity, max_chunk_size)
     }
     fn check_reuse_alloc_size(&self) -> bool {
         self.0.lock().unwrap().check_reuse_alloc_size()
@@ -174,14 +181,21 @@ fn hints_in(m: &serde_json::Map<String, Value>) -> StmtHints {
     let mut h = StmtHints::default();
     let bo = |k: &str| m.get(k).and_then(Value::as_bool).unwrap_or(false);
     h.mem_quota_query = m.get("MemQuotaQuery").and_then(Value::as_i64).unwrap_or(0);
-    h.max_execution_time = m.get("MaxExecutionTime").and_then(Value::as_u64).unwrap_or(0);
+    h.max_execution_time = m
+        .get("MaxExecutionTime")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     h.replica_read = m.get("ReplicaRead").and_then(Value::as_u64).unwrap_or(0) as u8;
     h.allow_in_subq_to_join_and_agg = bo("AllowInSubqToJoinAndAgg");
     h.no_index_merge_hint = bo("NoIndexMergeHint");
     h.straight_join_order = bo("StraightJoinOrder");
     h.enable_cascades_planner = bo("EnableCascadesPlanner");
     h.force_nth_plan = m.get("ForceNthPlan").and_then(Value::as_i64).unwrap_or(0);
-    h.resource_group = m.get("ResourceGroup").and_then(Value::as_str).unwrap_or("").to_owned();
+    h.resource_group = m
+        .get("ResourceGroup")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     h.write_slow_log = bo("WriteSlowLog");
     h.has_allow_in_subq_to_join_and_agg_hint = bo("HasAllowInSubqToJoinAndAggHint");
     h.has_mem_quota_hint = bo("HasMemQuotaHint");
@@ -190,7 +204,10 @@ fn hints_in(m: &serde_json::Map<String, Value>) -> StmtHints {
     h.has_enable_cascades_planner_hint = bo("HasEnableCascadesPlannerHint");
     h.has_resource_group = bo("HasResourceGroup");
     if let Some(Value::Object(sv)) = m.get("SetVars") {
-        h.set_vars = sv.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned())).collect();
+        h.set_vars = sv
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
+            .collect();
     }
     if bo("Hypo") {
         h.hinted_hypo_indexes = Some(Arc::new(()) as Arc<dyn Any + Send + Sync>);
@@ -203,8 +220,11 @@ fn hints_dump(h: &StmtHints, set_vars_nil: bool) -> Value {
     let set_vars = if set_vars_nil {
         Value::Null
     } else {
-        let m: serde_json::Map<String, Value> =
-            h.set_vars.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        let m: serde_json::Map<String, Value> = h
+            .set_vars
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(v)))
+            .collect();
         Value::Object(m)
     };
     json!({

@@ -40,7 +40,12 @@ fn allocators_never_reuse() {
     // Go: allocator.CheckReuseAllocSize is freeChunk > 0 || freeColumnsPerType > 0, the
     // configured pool sizes; emptyAllocator always answers false. Nothing is ever reused
     // (M-POOL), but the answer is kept because the reuse hook depends on it.
-    for (sizes, want_pool) in [((1, 1), true), ((0, 1), true), ((1, 0), true), ((0, 0), false)] {
+    for (sizes, want_pool) in [
+        ((1, 1), true),
+        ((0, 1), true),
+        ((1, 0), true),
+        ((0, 0), false),
+    ] {
         alloc::init_chunk_alloc_size(sizes.0, sizes.1);
         for (mut a, want) in [
             (alloc::new_allocator(), want_pool),
@@ -60,7 +65,11 @@ fn allocators_never_reuse() {
     for (inner_pool, want_calls) in [(false, 0), (true, 1)] {
         let calls = Arc::new(AtomicUsize::new(0));
         let k = calls.clone();
-        let inner = if inner_pool { alloc::new_allocator() } else { alloc::new_empty_allocator() };
+        let inner = if inner_pool {
+            alloc::new_allocator()
+        } else {
+            alloc::new_empty_allocator()
+        };
         let mut a = alloc::new_reuse_hook_allocator(
             alloc::new_sync_allocator(inner),
             Box::new(move || {

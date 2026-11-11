@@ -962,7 +962,8 @@ impl SessionVars {
             return;
         }
         if self.stmt_ctx().in_explain_stmt {
-            self.stmt_ctx().append_warning(tidb_base::errors::new(warning.to_owned()));
+            self.stmt_ctx()
+                .append_warning(tidb_base::errors::new(warning.to_owned()));
         } else {
             self.stmt_ctx()
                 .append_extra_warning(tidb_base::errors::new(warning.to_owned()));
@@ -990,7 +991,8 @@ impl SessionVars {
     }
 
     /// GetReplicaRead get ReplicaRead from sql hints and SessionVars.replicaRead with adjusted.
-    // go: SessionVars.GetReplicaRead L1 (the GetReplicaReadUnadjusted failpoint is not ported)
+    // The GetReplicaReadUnadjusted failpoint (tests only) is not ported.
+    // go: SessionVars.GetReplicaRead L1
     pub fn get_replica_read(&self) -> ReplicaReadType {
         let sc = self.stmt_ctx();
         // Replica read only works for read-only statements.

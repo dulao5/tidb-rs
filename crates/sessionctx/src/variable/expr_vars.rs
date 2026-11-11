@@ -26,14 +26,19 @@ use super::uservars::UserVars;
 // glue: N2 narrow interface over SessionVars (no Go counterpart)
 pub trait ExprSessionVars {
     /// `vars.StmtCtx.PrevLastInsertID` (`LAST_INSERT_ID()`).
+    // glue: N2 narrow interface method
     fn prev_last_insert_id(&self) -> u64;
     /// `vars.StmtCtx.PrevAffectedRows` (`ROW_COUNT()`).
+    // glue: N2 narrow interface method
     fn prev_affected_rows(&self) -> i64;
     /// `vars.SetLastInsertID` (`LAST_INSERT_ID(expr)`).
+    // glue: N2 narrow interface method
     fn set_last_insert_id(&self, insert_id: u64);
     /// `vars.GetUserVarVal` / `SetUserVarVal` / `GetUserVarType` go through the shared table.
+    // glue: N2 narrow interface method
     fn user_vars(&self) -> Arc<UserVars>;
     /// `vars.GetSystemVar` (`@@name` of session-only variables read at evaluation time).
+    // glue: N2 narrow interface method
     fn get_system_var(&self, name: &str) -> (String, bool);
 }
 
