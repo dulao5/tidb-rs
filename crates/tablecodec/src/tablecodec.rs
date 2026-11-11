@@ -1694,25 +1694,6 @@ pub fn verify_table_id_for_ranges(key_ranges: &KeyRanges) -> (Vec<i64>, Result<(
 
 // glue: the assertion of Go TestError (tablecodec_test.go) on the package's private errors,
 // which the govec records cannot reach.
-#[cfg(test)]
-mod tests {
-    use tidb_base::mysql;
-    use tidb_base::terror::to_sql_error;
-
-    use super::*;
-
-    /// Go `TestError`: every key error converts to its own SQL error code.
-    // glue: test
-    #[test]
-    fn error_codes() {
-        for err in [&*errInvalidKey, &*errInvalidRecordKey, &*errInvalidIndexKey] {
-            let code = to_sql_error(err).code;
-            assert_ne!(code, mysql::ErrUnknown);
-            assert_eq!(err.code() as u16, code);
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Index value encoders. Brought back from X for block D06.7 (the `SET GLOBAL` system-table
 // writer, D05.2 spec §6): Go's `REPLACE INTO mysql.global_variables` writes the value of the
@@ -1981,4 +1962,23 @@ fn encode_common_handle(idx_val: &mut Vec<u8>, h: &Handle) {
 fn encode_partition_id(idx_val: &mut Vec<u8>, partition_id: i64) {
     idx_val.push(PartitionIDFlag);
     encode_int(idx_val, partition_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use tidb_base::mysql;
+    use tidb_base::terror::to_sql_error;
+
+    use super::*;
+
+    /// Go `TestError`: every key error converts to its own SQL error code.
+    // glue: test
+    #[test]
+    fn error_codes() {
+        for err in [&*errInvalidKey, &*errInvalidRecordKey, &*errInvalidIndexKey] {
+            let code = to_sql_error(err).code;
+            assert_ne!(code, mysql::ErrUnknown);
+            assert_eq!(err.code() as u16, code);
+        }
+    }
 }
