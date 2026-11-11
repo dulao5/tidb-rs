@@ -5,7 +5,9 @@
 //! `Constant`, `ScalarFunction` and `Schema`, the evaluation framework (spec
 //! `specs/D08.1-expr`, design N4) — and block D08.2 part 1: the `funcs` registry, building a
 //! signature's base (type, collation, NOT NULL flag) and the collation derivation of
-//! functions (spec `specs/D08.2-funcs`).
+//! functions (spec `specs/D08.2-funcs`) — and block D08.8 (CAST) parts 1, 2a and 2b-1: CAST to
+//! INT/REAL/DECIMAL/STRING, the internal to_binary/from_binary functions and constant folding
+//! (spec `specs/D08.8-cast`).
 
 #![deny(unsafe_code)]
 
@@ -18,6 +20,7 @@ extern crate self as tidb_expression;
 pub use tidb_parser::ast::funcs as ast_funcs;
 pub mod builtin;
 pub mod builtin_cast;
+pub mod builtin_convert_charset;
 pub mod builtin_registry;
 mod builtin_registry_gen;
 pub mod collation;

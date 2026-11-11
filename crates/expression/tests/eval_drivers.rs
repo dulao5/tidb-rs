@@ -274,3 +274,29 @@ fn rpn_refuses_misread_columns() {
     let e = func(&ADD_SIG, vec![col(0, &bit), col(0, &bit)], int.clone());
     let _ = RpnProgram::compile(&e);
 }
+
+// A variadic lazy body whose vector version reads the first argument as INT and the rest as
+// STRING (`args(..)`, D08.1 spec §4.1).
+#[eval_fn(String, lazy, args(Int, String))]
+fn int_then_strs(
+    _ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    _args: &mut impl Args,
+    _out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    Ok(Some(()))
+}
+
+#[test]
+fn arg_eval_types_of_lazy_bodies() {
+    use tidb_parser::types::{ETInt, ETString};
+    // Without args(..): every argument is read as its own type.
+    assert_eq!(CAT.arg_eval_type(0), None);
+    assert_eq!(CAT.arg_eval_type(3), None);
+    // args(Int, String): the last type repeats for the extra arguments.
+    assert_eq!(INT_THEN_STRS.arg_eval_type(0), Some(ETInt));
+    assert_eq!(INT_THEN_STRS.arg_eval_type(1), Some(ETString));
+    assert_eq!(INT_THEN_STRS.arg_eval_type(5), Some(ETString));
+    // A strict body: its parameters.
+    assert_eq!(ADD_OR_NULL.arg_eval_type(1), Some(ETInt));
+}

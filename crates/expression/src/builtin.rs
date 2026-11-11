@@ -5,11 +5,12 @@
 //! signature. The `baseBuiltinFunc` fields and methods a built node uses are in
 //! [`crate::eval::BuiltinFunc`]; the `funcs` table is in [`crate::builtin_registry`].
 //!
+//! `newBaseBuiltinFuncWithTp` wraps the arguments in CAST (`WrapWithCastAs*`, block D08.8):
+//! the CAST targets INT, REAL, DECIMAL and STRING are ported; an argument of another
+//! evaluation type returns the "not ported yet" error of the CAST class (D08.8 part 2b-2).
+//!
 //! Not here yet (spec `specs/D08.2-funcs` §4):
-//! - `newBaseBuiltinFuncWithTp`/`newBaseBuiltinFuncWithFieldTypes` wrap the arguments in
-//!   CAST (`WrapWithCastAs*`, block D08.8) and come with the first CAST signatures;
-//! - `baseBuiltinCastFunc` (`newBaseBuiltinCastFunc`, `newBaseBuiltinCastFunc4String`,
-//!   `metadata`, `cloneFrom`) belongs to the CAST signatures (D08.8);
+//! - `newBaseBuiltinFuncWithFieldTypes` (with the CAST targets of D08.8 part 2b-2);
 //! - `baseBuiltinFunc.vecEvalXxx` are replaced by the vector drivers (M-EVAL).
 
 #![allow(non_upper_case_globals)]
@@ -29,7 +30,12 @@ use tidb_types::field_type_builder::new_field_type_builder;
 use tidb_types::fsp::MaxFsp;
 
 use crate::ast_funcs as ast;
-use crate::collation::{ExprCollation, derive_collation};
+use crate::builtin_cast::{
+    wrap_with_cast_as_decimal, wrap_with_cast_as_int, wrap_with_cast_as_real,
+    wrap_with_cast_as_string,
+};
+use crate::builtin_convert_charset::handle_binary_literal;
+use crate::collation::{ASCII, CoercibilityExplicit, ExprCollation, UNICODE, derive_collation};
 use crate::context::{BuildContext, EvalContext, OptionalEvalPropKeySet};
 use crate::errors::ErrIncorrectParameterCount;
 use crate::eval::{BuiltinFunc, SigDesc, SigDrivers};
@@ -160,6 +166,88 @@ pub fn new_base_builtin_func(
     set_collation(&mut bf, &ec);
     adjust_null_flag_for_return_type(&*ctx.get_eval_ctx(), func_name, &bf.args, &mut bf.tp);
     Ok(bf)
+}
+
+/// newBaseBuiltinFuncWithTp creates a built-in function signature with specified types of
+/// arguments and the return type of the function. `arg_tps` indicates the types of the args,
+/// `ret_type` indicates the return type of the built-in function. Every built-in function
+/// needs to be determined argTps and retType when we create it.
+///
+/// Go returns an error for a nil context, which a reference cannot be, and panics when the
+/// lengths differ (so does this). The CAST wrappers of TIME, DURATION, JSON and VECTOR return
+/// the error of their (not yet ported) CAST class, which Go's `WrapWithCastAs*` would log
+/// (D08.8 part 2b-2).
+// go: newBaseBuiltinFuncWithTp L2 (no nil context; the wrappers of TIME/DURATION/JSON/VECTOR are temporary stubs)
+pub fn new_base_builtin_func_with_tp(
+    ctx: &dyn BuildContext,
+    func_name: &str,
+    args: Vec<ExprRef>,
+    ret_type: EvalType,
+    arg_tps: &[EvalType],
+) -> Result<BuiltinFunc, Error> {
+    if args.len() != arg_tps.len() {
+        panic!("unexpected length of args and argTps");
+    }
+
+    // derive collation information for string function, and we must do it
+    // before doing implicit cast.
+    let ec = derive_collation(ctx, func_name, &args, ret_type, arg_tps)?;
+
+    let mut wrapped = Vec::with_capacity(args.len());
+    for (a, tp) in args.into_iter().zip(arg_tps) {
+        wrapped.push(match *tp {
+            ETInt => wrap_with_cast_as_int(ctx, a)?,
+            ETReal => wrap_with_cast_as_real(ctx, a)?,
+            ETDecimal => wrap_with_cast_as_decimal(ctx, a)?,
+            ETString => {
+                let a = wrap_with_cast_as_string(ctx, a)?;
+                handle_binary_literal(ctx, a, &ec, func_name, false)
+            }
+            ETDatetime | ETTimestamp | ETDuration | ETJson | ETVectorFloat32 => {
+                return Err(Error::plain(format!(
+                    "tidb-rs: CAST to {} is not ported yet (D08.8 part 2b-2)",
+                    tp.to_string()
+                )));
+            }
+            _ => return Err(Error::plain(format!("{} is not supported", tp.to_string()))),
+        });
+    }
+
+    let field_type = new_return_field_type_for_base_builtin_func(func_name, ret_type, &ec);
+    let mut bf = BuiltinFunc::base(wrapped, field_type);
+    set_collation(&mut bf, &ec);
+    // note this function must be called after wrap cast function to the args
+    adjust_null_flag_for_return_type(&*ctx.get_eval_ctx(), func_name, &bf.args, &mut bf.tp);
+    Ok(bf)
+}
+
+/// `newBaseBuiltinCastFunc4String`: the base of CAST to a string type. With an explicit
+/// charset (`CAST(.. AS CHAR CHARACTER SET ..)`) the collation comes from the target type and
+/// is explicit; otherwise as `newBaseBuiltinFunc`.
+// go: newBaseBuiltinCastFunc4String L1
+pub fn new_base_builtin_cast_func4_string(
+    ctx: &dyn BuildContext,
+    func_name: &str,
+    args: Vec<ExprRef>,
+    tp: FieldType,
+    is_explicit_charset: bool,
+) -> Result<BuiltinFunc, Error> {
+    if is_explicit_charset {
+        let (charset, collate) = (tp.get_charset().to_string(), tp.get_collate().to_string());
+        let mut bf = BuiltinFunc::base(args, tp);
+        bf.collation_info
+            .set_charset_and_collation(&charset, &collate);
+        bf.set_collator(collate::get_collator(&collate));
+        bf.collation_info.set_coercibility(CoercibilityExplicit);
+        bf.collation_info.set_explicit_charset(true);
+        if charset == tidb_parser::gocharset::CharsetASCII {
+            bf.collation_info.set_repertoire(ASCII);
+        } else {
+            bf.collation_info.set_repertoire(UNICODE);
+        }
+        return Ok(bf);
+    }
+    new_base_builtin_func(ctx, func_name, args, tp)
 }
 
 /// The result type a signature of evaluation type `ret_type` starts with.

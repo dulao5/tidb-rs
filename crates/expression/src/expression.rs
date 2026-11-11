@@ -488,6 +488,17 @@ impl Expr {
         }
     }
 
+    /// CharsetAndCollation gets charset and collation (of the embedded `collationInfo`).
+    // glue: dispatch of CollationInfo.CharsetAndCollation
+    pub fn charset_and_collation(&self) -> (&str, &str) {
+        match self {
+            Expr::Column(c) => c.collation_info.charset_and_collation(),
+            Expr::CorrelatedColumn(c) => c.column.collation_info.charset_and_collation(),
+            Expr::Constant(c) => c.collation_info.charset_and_collation(),
+            Expr::ScalarFunction(f) => f.charset_and_collation(),
+        }
+    }
+
     /// Repertoire returns the repertoire value which is used to check collations.
     // glue: dispatch of CollationInfo.Repertoire
     pub fn repertoire(&self) -> Repertoire {

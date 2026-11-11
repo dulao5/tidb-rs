@@ -50,6 +50,11 @@ struct Attr {
     /// versions such as `CompareInt` that evaluate both sides first).
     eager: bool,
     checked: Option<Checked>,
+    /// `args(Int, String, ..)`: the evaluation types the vector driver reads the arguments of
+    /// a `lazy` body as, where Go's vector version reads an argument as another type than its
+    /// own without a CAST (D08.1 spec §4.1). The last type repeats for the extra arguments of a
+    /// variadic signature. Without it a `lazy` body reads each argument as its own type.
+    args: Option<Vec<ArgKind>>,
 }
 
 /// `checked(nflags = N, flags = path, err = path)`: see [`expand_checked`].
@@ -73,6 +78,26 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
             "Decimal" => a.ret = Some(Ret::Decimal),
             "String" => a.ret = Some(Ret::String),
             "lazy" => a.lazy = true,
+            "args" => {
+                let mut v = Vec::new();
+                meta.parse_nested_meta(|m| {
+                    let k = match m.path.get_ident().map(|i| i.to_string()).as_deref() {
+                        Some("Int") => ArgKind::Int,
+                        Some("Real") => ArgKind::Real,
+                        Some("Decimal") => ArgKind::Decimal,
+                        Some("String") => ArgKind::Bytes,
+                        _ => {
+                            return Err(m.error("eval_fn: args(Int | Real | Decimal | String, ..)"));
+                        }
+                    };
+                    v.push(k);
+                    Ok(())
+                })?;
+                if v.is_empty() {
+                    return Err(meta.error("eval_fn: args(..) needs at least one type"));
+                }
+                a.args = Some(v);
+            }
             "eager" => a.eager = true,
             "checked" => {
                 let (mut nflags, mut flags, mut err) = (0u32, None, None);
@@ -96,13 +121,19 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
             }
             _ => {
                 return Err(meta.error(
-                    "eval_fn: options are Int, Real, Decimal, String, lazy, eager, checked(..)",
+                    "eval_fn: options are Int, Real, Decimal, String, lazy, eager, args(..), checked(..)",
                 ));
             }
         }
         Ok(())
     });
     syn::parse::Parser::parse(parser, attr)?;
+    if a.args.is_some() && !a.lazy {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "eval_fn: args(..) is for lazy bodies (a strict body's parameters give the types)",
+        ));
+    }
     if a.ret.is_none() {
         return Err(syn::Error::new(
             Span::call_site(),
@@ -345,7 +376,7 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
         }
     };
 
-    let args_ts = arg_types(&kinds);
+    let args_ts = arg_types(attr.args.as_deref().unwrap_or(&kinds));
     Ok(quote! {
         #func
 
@@ -505,7 +536,7 @@ fn expand_checked(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
         .iter()
         .map(|fl| quote!(#fl => run::<#fl>(&mut res, n, #(&#vnames),*),))
         .collect();
-    let args_ts = arg_types(&kinds);
+    let args_ts = arg_types(attr.args.as_deref().unwrap_or(&kinds));
     Ok(quote! {
         #func
 

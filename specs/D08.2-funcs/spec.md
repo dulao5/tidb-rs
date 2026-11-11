@@ -1,6 +1,6 @@
 # D08.2 函数注册、类型推导、常量折叠与传播、collation 推导：spec
 
-状态：第 1 部分（本 PR）——函数注册表、签名的 `baseBuiltinFunc` 构造、collation 推导。第 2 部分随 D08.8 CAST 的第一批签名和 D08.1 2b；第 3 部分为 grouping sets。
+状态：第 1 部分——函数注册表、签名的 `baseBuiltinFunc` 构造、collation 推导。`newBaseBuiltinFuncWithTp`、`newBaseBuiltinCastFunc4String` 随 D08.8 第 2b-1 部分移植（D08.2 matched 79/151；TIME/DURATION/JSON/VECTOR 参数的包装为临时桩，随 D08.8 第 2b-2 部分）。第 2 部分随 D08.8 CAST 的第一批签名和 D08.1 2b；第 3 部分为 grouping sets。
 
 收敛检查（第 1 部分）：D08.2 matched 68/151，missing 8（第 2 部分的 6 个 + cascades 的 2 个），另有 5 个 Go 文件（75 个函数）属于第 2、3 部分。govec `funcs` 领域 7,448 条，覆盖 57 个函数，豁免 94 个（`funcs_pending.go`）。
 

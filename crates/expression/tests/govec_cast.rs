@@ -1,7 +1,8 @@
-//! Replays the govec `cast` vectors (tidb-rs-tracker `govec/domains/cast.go`): block D08.8
-//! part 1 — CAST to INT/REAL/DECIMAL built with `BuildCastFunctionWithCheck` (folded on a
-//! constant argument) and evaluated row by row and over a chunk (the vector driver), and
-//! `WrapWithCastAsInt/Real/Decimal` — against Go TiDB v8.5.8.
+//! Replays the govec `cast` vectors (tidb-rs-tracker `govec/domains/cast.go`): block D08.8 —
+//! CAST to INT/REAL/DECIMAL/STRING built with `BuildCastFunctionWithCheck` (folded on a
+//! constant argument) and evaluated row by row and over a chunk (the vector driver),
+//! `WrapWithCastAsInt/Real/Decimal/String`, `HandleBinaryLiteral` (to_binary/from_binary)
+//! and `BuildCastCollationFunction` — against Go TiDB v8.5.8.
 //!
 //! `GOVEC_CAST_FILES` (comma-separated paths) replays extra-seed artifacts as well.
 
@@ -12,14 +13,16 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tidb_base::Error;
 use tidb_base::contextutil::{SQLWarn, WarnHandler, new_static_warn_handler};
+use tidb_base::mysql::SQLMode;
 use tidb_chunk::chunk::new_chunk_with_capacity;
 use tidb_expression::builtin_cast::{
-    build_cast_function_with_check, wrap_with_cast_as_decimal, wrap_with_cast_as_int,
-    wrap_with_cast_as_real,
+    build_cast_collation_function, build_cast_function_with_check, wrap_with_cast_as_decimal,
+    wrap_with_cast_as_int, wrap_with_cast_as_real, wrap_with_cast_as_string,
 };
+use tidb_expression::builtin_convert_charset::handle_binary_literal;
 use tidb_expression::eval::{RpnProgram, RpnState, rt};
 use tidb_expression::*;
-use tidb_parser::types::{ETDecimal, ETInt, ETReal, FieldType};
+use tidb_parser::types::{ETDecimal, ETInt, ETReal, ETString, FieldType};
 use tidb_sessionctx::errctx::{Level, LevelMap};
 use tidb_sessionctx::exprstatic as es;
 use tidb_types::MyDecimal;
@@ -222,18 +225,23 @@ fn ex_val<T>(r: Result<Option<T>, Error>, f: impl FnOnce(T) -> Value) -> Value {
 
 type Ctxs = (Arc<es::ExprContext>, Arc<es::EvalContext>);
 
-/// castCtx: [typeFlags, [7]errLevels].
+/// castCtx: [typeFlags, [7]errLevels, maxAllowedPacket?, sqlMode?].
 fn ctx_of(v: &Value) -> Ctxs {
     let a = v.as_array().unwrap();
     let mut lm: LevelMap = Default::default();
     for (i, l) in a[1].as_array().unwrap().iter().enumerate() {
         lm[i] = Level(l.as_u64().unwrap() as _);
     }
-    let ev = es::new_eval_context(vec![
+    let mut opts = vec![
         es::with_type_flags(Flags(a[0].as_u64().unwrap() as u16)),
         es::with_err_level_map(lm),
         es::with_warn_handler(Some(Arc::new(new_static_warn_handler(0)))),
-    ]);
+    ];
+    if a.len() > 2 {
+        opts.push(es::with_max_allowed_packet(a[2].as_u64().unwrap()));
+        opts.push(es::with_sql_mode(SQLMode(a[3].as_u64().unwrap() as i64)));
+    }
+    let ev = es::new_eval_context(opts);
     let ctx = es::new_expr_context(vec![es::with_eval_ctx(Arc::clone(&ev))]);
     (ctx, ev)
 }
@@ -277,6 +285,8 @@ fn row_val(ctx: &dyn EvalContext, e: &Expr, row: tidb_chunk::Row<'_>) -> Value {
         })
     } else if et == ETDecimal {
         ex_val(e.eval_decimal(ctx, &st, row), |v| dec_out(&v))
+    } else if et == ETString {
+        ex_val(e.eval_string(ctx, &st, row), |v| gs(&v))
     } else {
         panic!("row_val")
     }
@@ -305,12 +315,31 @@ fn vec_val(ctx: &es::EvalContext, e: &ExprRef, chk: &tidb_chunk::Chunk) -> Value
                 json!(col.get_int64(i).to_string())
             } else if et == ETReal {
                 json!(col.get_float64(i).to_bits().to_string())
+            } else if et == ETString {
+                gs(col.get_bytes(i))
             } else {
                 dec_out(&col.get_decimal(i))
             }
         })
         .collect();
     json!({ "v": vals, "warns": ws })
+}
+
+/// castEvalRows: the row-mode values and warnings per row, then the vector-mode values.
+fn eval_rows(
+    m: &mut serde_json::Map<String, Value>,
+    ev: &es::EvalContext,
+    res: &ExprRef,
+    chk: &tidb_chunk::Chunk,
+) {
+    let mut rows = Vec::new();
+    for i in 0..chk.num_rows() {
+        let v = ex_try(|| row_val(ev, res, chk.get_row(i)));
+        rows.push(json!([v, warns(&ev.truncate_warnings(0))]));
+    }
+    m.insert("rows".into(), Value::Array(rows));
+    m.insert("vec".into(), ex_try(|| vec_val(ev, res, chk)));
+    ev.truncate_warnings(0);
 }
 
 fn exec(op: &str, p: &[Value]) -> Value {
@@ -321,8 +350,14 @@ fn exec(op: &str, p: &[Value]) -> Value {
             let tp = ft_in(&p[1]);
             let mut res: Option<ExprRef> = None;
             let build = ex_try(|| {
-                match build_cast_function_with_check(&*ctx, arg, tp, p[2].as_bool().unwrap(), false)
-                {
+                let explicit = p.get(5).is_some_and(|v| v.as_bool().unwrap());
+                match build_cast_function_with_check(
+                    &*ctx,
+                    arg,
+                    tp,
+                    p[2].as_bool().unwrap(),
+                    explicit,
+                ) {
                     Err(e) => ex_err(&e),
                     Ok(r) => {
                         let d = dump(&r);
@@ -343,16 +378,58 @@ fn exec(op: &str, p: &[Value]) -> Value {
             };
             m.insert("meta".into(), meta);
             if let (Some(chk), Expr::ScalarFunction(_)) = (&chk, &*res) {
-                let mut rows = Vec::new();
-                for i in 0..chk.num_rows() {
-                    let v = ex_try(|| row_val(&*ev, &res, chk.get_row(i)));
-                    rows.push(json!([v, warns(&ev.truncate_warnings(0))]));
-                }
-                m.insert("rows".into(), Value::Array(rows));
-                m.insert("vec".into(), ex_try(|| vec_val(&ev, &res, chk)));
-                ev.truncate_warnings(0);
+                eval_rows(&mut m, &ev, &res, chk);
             }
             Value::Object(m)
+        }
+        "binlit" => {
+            let (ctx, ev) = ctx_of(&p[5]);
+            let (arg, chk) = arg_of(&p[0], p.get(6));
+            let mut res: Option<ExprRef> = None;
+            let build = ex_try(|| {
+                let ec = ExprCollation {
+                    coer: CoercibilityExplicit,
+                    repe: Default::default(),
+                    charset: p[1].as_str().unwrap().to_owned(),
+                    collation: p[2].as_str().unwrap().to_owned(),
+                };
+                let r = handle_binary_literal(
+                    &*ctx,
+                    arg,
+                    &ec,
+                    p[3].as_str().unwrap(),
+                    p[4].as_bool().unwrap(),
+                );
+                let d = dump(&r);
+                res = Some(r);
+                d
+            });
+            let mut m = serde_json::Map::new();
+            m.insert("build".into(), build);
+            m.insert("bwarns".into(), warns(&ev.truncate_warnings(0)));
+            if let (Some(res), Some(chk)) = (&res, &chk)
+                && let Expr::ScalarFunction(_) = &**res
+            {
+                eval_rows(&mut m, &ev, res, chk);
+            }
+            Value::Object(m)
+        }
+        "collcast" => {
+            let (ctx, ev) = ctx_of(&p[4]);
+            let (arg, _) = arg_of(&p[0], None);
+            let res = ex_try(|| {
+                let ec = ExprCollation {
+                    coer: CoercibilityExplicit,
+                    repe: Default::default(),
+                    charset: p[1].as_str().unwrap().to_owned(),
+                    collation: p[2].as_str().unwrap().to_owned(),
+                };
+                match build_cast_collation_function(&*ctx, arg, &ec, p[3].as_bool().unwrap()) {
+                    Ok(r) => dump(&r),
+                    Err(e) => ex_err(&e),
+                }
+            });
+            json!({ "res": res, "bwarns": warns(&ev.truncate_warnings(0)) })
         }
         "wrap" => {
             let (ctx, ev) = ctx_of(&p[2]);
@@ -361,6 +438,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
                 let r = match p[0].as_str().unwrap() {
                     "int" => wrap_with_cast_as_int(&*ctx, arg),
                     "real" => wrap_with_cast_as_real(&*ctx, arg),
+                    "string" => wrap_with_cast_as_string(&*ctx, arg),
                     _ => wrap_with_cast_as_decimal(&*ctx, arg),
                 };
                 match r {

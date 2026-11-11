@@ -76,7 +76,7 @@
 | L4 | D08.5 | 算术、数学与逻辑运算 | 6,228 | 6 | — |
 | L5 | D05.2 | SessionVars 与 StatementContext（N2） | 2,181 | 2 | — |
 | L5 | D08.4 | 比较函数 | 3,368 | 2 | D01.5(10) |
-| L5 | D08.8 | CAST | 4,181 | 2 | D01.5(81) |
+| L5 | [D08.8](D08.8-cast/spec.md) | CAST（2026-11-11：`builtin_convert_charset.go`——to_binary/from_binary、`HandleBinaryLiteral`——从 D08.6 移入，CAST 到 STRING 需要它） | 4,181 | 2 | D01.5(81) |
 
 ### P2（11 块，Go 函数体 39.9k 行）
 
@@ -154,7 +154,7 @@
 | L1 | D03.2 | HTTP status 接口与 handler | 3,445 | 12 | X(46) |
 | L1 | D04.1 | 权限检查与认证。注：`crates/mysql-protocol` 中 PoC 手写的 scramble（`auth.rs`）要换成 `parser/auth` 认证插件（`mysql_native_password.go`、`caching_sha2.go`、`tidb_sm3.go`）的忠实移植（D02.3 spec §2） | 3,557 | 8 | D01.5(20) |
 | L1 | D06.6 | infoschema 内存表定义与 cluster 表 | 1,336 | 7 | — |
-| L1 | D08.6 | 字符串函数（含 like、regexp、字符集转换） | 8,001 | 9 | — |
+| L1 | D08.6 | 字符串函数（含 like、regexp；字符集转换的 `builtin_convert_charset.go` 已移到 D08.8） | 8,001 | 9 | — |
 | L1 | D08.7 | 时间函数 | 8,231 | 2 | — |
 | L1 | D08.9 | 控制流、信息、杂项、加密、grouping 函数 | 7,958 | 10 | — |
 | L1 | D09.16 | SHOW / ADMIN / SET / SIMPLE / EXPLAIN 等语句的计划构建 | 1,269 | 1 | D09.17(12) |
