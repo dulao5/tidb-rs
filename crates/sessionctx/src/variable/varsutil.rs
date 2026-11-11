@@ -267,7 +267,8 @@ pub(crate) fn set_tidb_table_value(
     comment: &str,
 ) -> Result<(), Error> {
     let value = on_off_to_true_false(value);
-    vars.global_vars_accessor.set_tidb_table_value(name, &value, comment)
+    vars.global_vars_accessor
+        .set_tidb_table_value(name, &value, comment)
 }
 
 /// In mysql.tidb the convention has been to store the string value "true"/"false",

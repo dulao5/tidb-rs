@@ -81,7 +81,12 @@ impl GlobalVarAccessor for MockGlobalAccessor {
             None => Err(tidb_base::dbterror::exeerrors::ErrResultIsEmpty.clone()),
         }
     }
-    fn set_tidb_table_value(&mut self, name: &str, value: &str, comment: &str) -> Result<(), Error> {
+    fn set_tidb_table_value(
+        &mut self,
+        name: &str,
+        value: &str,
+        comment: &str,
+    ) -> Result<(), Error> {
         self.tidb
             .lock()
             .unwrap()
@@ -893,7 +898,7 @@ fn govec_sessionvars() {
     // each PR of the D05.2 series as hooks land, 0 after PR B (Lucky's review of #57), so
     // that a pending entry cannot stay forever.
     assert!(
-        skipped <= MAX_SKIPPED,
+        skipped == MAX_SKIPPED,
         "{skipped} records skipped as pending, more than the cap {MAX_SKIPPED}"
     );
     if let Ok(files) = std::env::var("GOVEC_SESSIONVARS_FILES") {

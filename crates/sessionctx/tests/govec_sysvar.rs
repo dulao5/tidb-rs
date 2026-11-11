@@ -91,7 +91,12 @@ impl GlobalVarAccessor for MockGlobalAccessor {
             None => Err(tidb_base::dbterror::exeerrors::ErrResultIsEmpty.clone()),
         }
     }
-    fn set_tidb_table_value(&mut self, name: &str, value: &str, comment: &str) -> Result<(), Error> {
+    fn set_tidb_table_value(
+        &mut self,
+        name: &str,
+        value: &str,
+        comment: &str,
+    ) -> Result<(), Error> {
         self.tidb
             .lock()
             .unwrap()

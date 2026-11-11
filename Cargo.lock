@@ -3872,6 +3872,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-systable"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "parking_lot 0.12.5",
+ "serde_json",
+ "tidb-base",
+ "tidb-kv",
+ "tidb-model",
+ "tidb-parser",
+ "tidb-sessionctx",
+ "tidb-tablecodec",
+ "tidb-types",
+]
+
+[[package]]
 name = "tidb-tablecodec"
 version = "0.0.0"
 dependencies = [
