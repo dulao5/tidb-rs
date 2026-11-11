@@ -20,7 +20,10 @@ jobs:
       matrix:
         # macOS runners bill at 10x Linux minutes; macOS is checked locally
         # before merge instead. Add macos-latest back here to re-enable it.
-        os: [ubuntu-latest]
+        # Pinned: ubuntu-latest moved to a new image whose apt mirrors fail to resolve
+        # (2026-11-11, "Temporary failure resolving archive.ubuntu.com"); the arm job
+        # already uses ubuntu-24.04-arm.
+        os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -33,10 +36,24 @@ jobs:
       # - tidb_query_expr -> openssl-sys (system OpenSSL), flate2 -> libz-sys.
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
+        # The Azure apt mirror has been failing to resolve on the amd64 runners
+        # (2026-11-11, both ubuntu-latest and ubuntu-24.04). The compilers, cmake,
+        # pkg-config and the OpenSSL / zlib headers are preinstalled on the GitHub
+        # images, so apt is best effort (with retries); protoc, the one package the
+        # images lack, falls back to the official release binary.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake pkg-config libssl-dev zlib1g-dev protobuf-compiler
+          sudo apt-get -o Acquire::Retries=5 update || echo "::warning::apt-get update failed"
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            build-essential cmake pkg-config libssl-dev zlib1g-dev protobuf-compiler \
+            || echo "::warning::apt-get install failed"
+          if ! command -v protoc >/dev/null; then
+            v=29.3
+            curl -fsSL --retry 5 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-linux-x86_64.zip"
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+          fi
+          protoc --version
+          pkg-config --modversion openssl zlib
       # CMake and Xcode's clang ship with the macOS runner image.
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
