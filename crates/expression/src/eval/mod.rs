@@ -122,7 +122,7 @@ impl std::fmt::Debug for SigDesc {
 
 /// `unsafe.Sizeof(baseBuiltinFunc{})` on 64-bit targets (spec §4, measured by the govec
 /// generator).
-pub(crate) const emptyBaseBuiltinFunc: i64 = 160;
+pub(crate) const emptyBaseBuiltinFunc: i64 = 152;
 /// `unsafe.Sizeof(sync.Once{})`.
 pub(crate) const onceSize: i64 = 12;
 

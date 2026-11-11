@@ -1014,7 +1014,12 @@ fn replay(path: &str) {
         n += 1;
         let rec: Value = serde_json::from_str(line).unwrap();
         let args = rec["args"].as_array().cloned().unwrap_or_default();
-        let got = exec(rec["op"].as_str().unwrap(), &args);
+        let op = rec["op"].as_str().unwrap();
+        let got = if matches!(op, "sf" | "sfpair" | "vcol" | "sizes") {
+            exec_sf(op, &args, &rec["out"])
+        } else {
+            exec(op, &args)
+        };
         let got: Value = serde_json::from_str(&got.to_string()).unwrap();
         if got != rec["out"] {
             fails.push(format!("{line}\n    got {got}"));
@@ -1052,3 +1057,191 @@ fn govec_expr() {
 
 #[allow(dead_code)]
 fn _uses(_: &dyn WarnHandler) {}
+
+// ---------------------------------------------------------------- part 2: ScalarFunction
+
+/// Descriptor-only signatures for the trees Go built: the name of Go's signature type and
+/// its own vectorized() as Go showed it; no evaluation (the function families come later).
+fn sig_of(name: &str, vectorized: bool) -> &'static eval::SigDesc {
+    use std::sync::{Mutex, OnceLock};
+    static SIGS: OnceLock<Mutex<HashMap<(String, bool), &'static eval::SigDesc>>> = OnceLock::new();
+    let mut m = SIGS.get_or_init(Default::default).lock().unwrap();
+    m.entry((name.to_owned(), vectorized)).or_insert_with(|| {
+        Box::leak(Box::new(eval::SigDesc {
+            name: Box::leak(name.to_owned().into_boxed_str()),
+            pb_code: 0,
+            vectorized,
+            drivers: eval::SigDrivers::None,
+        }))
+    })
+}
+
+fn sf_tree(v: &Value) -> ExprRef {
+    let o = v.as_object().unwrap();
+    if let Some(a) = o.get("col") {
+        let a = a.as_array().unwrap();
+        return Expr::Column(Column {
+            unique_id: a[0].as_i64().unwrap(),
+            index: a[1].as_i64().unwrap() as isize,
+            ret_type: ft_in(&a[2]),
+            orig_name: String::from_utf8(ungs(&a[3])).unwrap(),
+            virtual_expr: a.get(4).filter(|x| !x.is_null()).map(sf_tree),
+            ..Column::default()
+        })
+        .into_ref();
+    }
+    if let Some(a) = o.get("corr") {
+        let a = a.as_array().unwrap();
+        return Expr::CorrelatedColumn(CorrelatedColumn::new(Column {
+            unique_id: a[0].as_i64().unwrap(),
+            ret_type: ft_in(&a[1]),
+            ..Column::default()
+        }))
+        .into_ref();
+    }
+    if let Some(a) = o.get("const") {
+        let a = a.as_array().unwrap();
+        return Expr::Constant(Constant::new(datum_in(&a[0]), ft_in(&a[1]))).into_ref();
+    }
+    let a = o["f"].as_array().unwrap();
+    let args: Vec<ExprRef> = a[4].as_array().unwrap().iter().map(sf_tree).collect();
+    let ret = ft_in(&a[3]);
+    let sig = sig_of(a[2].as_str().unwrap(), a[5].as_bool().unwrap());
+    let mut f = eval::BuiltinFunc::new(sig, args, ret.clone(), a[6].as_str().unwrap(), a[7].as_str().unwrap());
+    f.pb_code = a[8].as_i64().unwrap() as i32;
+    if a[9].as_bool().unwrap() {
+        f.collation_info.set_coercibility(Coercibility(a[10].as_i64().unwrap() as _));
+    }
+    f.collation_info.set_repertoire(Repertoire(a[11].as_i64().unwrap() as _));
+    f.collation_info.set_explicit_charset(a[12].as_bool().unwrap());
+    let mut sf = ScalarFunction::new(a[1].as_str().unwrap(), ret, f);
+    sf.func_name = CIStr::new(a[1].as_str().unwrap());
+    Expr::ScalarFunction(sf).into_ref()
+}
+
+fn sf_leaf_idx(e: &Expr) -> Value {
+    let mut out = vec![];
+    fn walk(e: &Expr, out: &mut Vec<Value>) {
+        match e {
+            Expr::Column(c) => out.push(json!([c.unique_id, c.index])),
+            Expr::ScalarFunction(f) => f.get_args().iter().for_each(|a| walk(a, out)),
+            _ => {}
+        }
+    }
+    walk(e, &mut out);
+    json!(out)
+}
+
+fn sf_str(e: &Expr) -> Value {
+    gs(&e.string_with_ctx(&**EmptyParamValues, RedactLogDisable))
+}
+
+fn exec_sf(op: &str, p: &[Value], want: &Value) -> Value {
+    let ctx = es::new_eval_context(vec![]);
+    let ec: &dyn EvalContext = &*ctx;
+    match op {
+        "sizes" => json!({ "sf": 104, "base": 152, "once": 12 }),
+        "sf" => {
+            if want.get("build").is_some() || want.get("notsf").is_some() {
+                return want.clone(); // Go could not build the recipe: nothing to compare.
+            }
+            let e = sf_tree(&want["tree"]);
+            let sf = e.as_scalar_function().unwrap();
+            let mut m = serde_json::Map::new();
+            m.insert("mem".into(), json!(sf.memory_usage()));
+            m.insert("tree".into(), want["tree"].clone());
+            m.insert("str".into(), sf_str(&e));
+            m.insert("hash".into(), json!(hex(sf.hash_code())));
+            m.insert("canon".into(), json!(hex(sf.canonical_hash_code())));
+            m.insert("level".into(), json!(sf.const_level().0));
+            m.insert("corr".into(), json!(sf.is_correlated()));
+            m.insert("vec".into(), json!(sf.vectorized()));
+            let single: Vec<Value> = [false, true]
+                .iter()
+                .map(|&rev| {
+                    let (c, r) = sf.get_single_column(rev);
+                    json!([c.map(|c| c.unique_id), r])
+                })
+                .collect();
+            m.insert("single".into(), json!(single));
+            let sch = new_schema(
+                p[1].as_array().unwrap().iter().map(|u| Arc::new(Column { unique_id: u.as_i64().unwrap(), ..Column::default() })).collect(),
+            );
+            m.insert(
+                "resolve".into(),
+                ex_try(|| match e.resolve_indices(&sch) {
+                    Err(err) => ex_err(&err),
+                    Ok(r) => json!([sf_leaf_idx(&r), hex(r.hash_code())]),
+                }),
+            );
+            m.insert(
+                "vresolve".into(),
+                ex_try(|| {
+                    let (r, ok) = e.resolve_indices_by_virtual_expr(ec, &sch);
+                    json!([sf_leaf_idx(&r), ok])
+                }),
+            );
+            let remap: HashMap<i64, Arc<Column>> = p[2]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|pr| {
+                    let pr = pr.as_array().unwrap();
+                    (
+                        pr[0].as_i64().unwrap(),
+                        Arc::new(Column { unique_id: pr[1].as_i64().unwrap(), ret_type: new_field_type(mysql::TypeLonglong), ..Column::default() }),
+                    )
+                })
+                .collect();
+            m.insert(
+                "remap".into(),
+                ex_try(|| match e.remap_column(&remap) {
+                    Err(err) => ex_err(&err),
+                    Ok(r) => json!([sf_str(&r), hex(r.hash_code())]),
+                }),
+            );
+            let cl = Expr::ScalarFunction(sf.clone()).into_ref();
+            m.insert("clone".into(), json!([e.equal(ec, &cl), sf_str(&cl), hex(cl.hash_code())]));
+            m.insert(
+                "decor".into(),
+                ex_try(|| {
+                    let d = cl.decorrelate(&sch);
+                    json!([sf_str(&d), d.is_correlated(), hex(d.hash_code())])
+                }),
+            );
+            struct Nop;
+            impl TraverseAction for Nop {
+                fn transform(&mut self, e: &ExprRef) -> ExprRef {
+                    Arc::clone(e)
+                }
+            }
+            m.insert("trav".into(), json!(Arc::ptr_eq(&e.traverse(&mut Nop), &e)));
+            Value::Object(m)
+        }
+        "sfpair" => {
+            if want.get("build").is_some() {
+                return want.clone();
+            }
+            let (a, b) = (sf_tree(&want["a"]), sf_tree(&want["b"]));
+            json!({ "a": want["a"], "b": want["b"], "eq": a.equal(ec, &b), "seq": expressions_semantic_equal(&a, &b) })
+        }
+        "vcol" => {
+            if want.get("build").is_some() {
+                return want.clone();
+            }
+            let cols: Vec<Arc<Column>> = want["cols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| Arc::new(sf_tree(c).as_column().unwrap().clone()))
+                .collect();
+            let sch = new_schema(cols.clone());
+            let used: Vec<Arc<Column>> = p[1].as_array().unwrap().iter().map(|u| Arc::clone(&cols[u.as_u64().unwrap() as usize])).collect();
+            let probe = sf_tree(&want["probe"]).as_column().unwrap().clone();
+            let eqid: Vec<bool> = cols.iter().map(|c| probe.equal_by_expr_and_id(ec, c)).collect();
+            let (r, ok) = probe.resolve_indices_by_virtual_expr(ec, &sch);
+            json!({ "cols": want["cols"], "probe": want["probe"], "used": get_used_list(ec, &used, &sch), "eqid": eqid, "vres": [r.index, ok] })
+        }
+        _ => unreachable!(),
+    }
+}

@@ -29,6 +29,6 @@ pub use constant::*;
 pub use context::{BuildContext, EvalContext, ParamValues};
 pub use errors::*;
 pub use expression::*;
-pub use scalar_function::ScalarFunction;
+pub use scalar_function::{ScalarFunction, expressions_semantic_equal, re_hash_code, scalar_funcs_2_exprs};
 pub use schema::*;
 pub use tidb_expression_macros::eval_fn;
