@@ -61,6 +61,14 @@ Go 中 `sc` 本身就是它的 `types.Context`、`errctx.Context`、`PlanCacheTr
 - **`*mathutil.MysqlRng`** 是 `Arc<parking_lot::Mutex<MysqlRng>>`（Go 的 `MysqlRng` 内部有锁）。
 - **D05.2 未移植的部分**：`variable.UserVarsReader` 与空的 `UserVars` 作为替身放在 `exprctx::uservars`（D00.1 不改 `variable/*`），D05.2 移植用户变量后替换；`SessionVars.GetCharsetInfo` 用 `get_system_var` 读两个系统变量（go-dep）。
 
+### 3.5 第 2b 部分：expropt 的 provider、planctx、debugtrace
+
+- **expropt 的 provider**：Go 的函数类型 provider（`CurrentUserPropProvider`、`DDLOwnerInfoProvider`、`InfoSchemaPropProvider`、`KVStorePropProvider`、`PrivilegeCheckerProvider`、`SequenceOperatorProvider`、`SQLExecutorPropProvider`）是持有 `Arc<dyn Fn>` 的 newtype；`AdvisoryLockPropProvider` 持有 `Arc<dyn AdvisoryLockContext>`。未移植的类型用替身：`MetaOnlyInfoSchema`（D06.3）、`SQLExecutor`（没有方法，`ExecRestrictedSQL` 随 util/sqlexec）。
+- **planctx**：`PlanContext` 是 trait，只声明类型已移植的方法；`EmptyPlanContextExtended`、`BuildPBContext`（`GetExprCtx`、`GetClient`、`Detach`）。
+- **debugtrace**：Go 用指针连接 context（`steps []any` 中可以有 `*baseDebugTraceContext`，每个 context 指向父 context）。Rust 由 root 持有 arena（`Vec` + 下标），`TraceValue::Ctx` 是 context 的"指针"，下标 0 是 Go 的 `traceCtx`（父 context 是自己）。step 是 `TraceValue`：通用 JSON 值、`map[string]any`、`[]any` 或 context。编码按 Go 的 `encoding/json`：关闭 HTML 转义（U+2028/2029 仍然转义）、map 按 key 排序、末尾换行。取 `PlanContext` 的 4 个函数（`GetOrInitDebugTraceRoot`、`Enter/LeaveContextCommon`、`RecordAnyValuesWithNames`）等会话的 plan context（N2，D05.3），逻辑作为 root 的 glue 方法；`EnterContextCommon` 中 `runtime.Caller(1)` 的函数名由调用方传入。
+- **`EncodeJSONCommon` 的错误**：Go 在 `Encode(input)` 失败（NaN、±Inf，`*json.UnsupportedValueError`）时改为 `Encode(err)`，并返回第二次 `Encode` 的结果，也就是 nil。所以它实际上从不返回错误：带 NaN 的 context 序列化为 `{"Value":{},"Str":"NaN"}`，父 context 照常包含它，也不会出现 `*json.MarshalerError`。Rust 的这些方法只返回字节。这一点是 govec 发现的：最初按"返回错误"移植，回放有 19 条不一致。
+- **stmtctx**：`InitMemTracker`、`InitDiskTracker` 新建 tracker，而不是复用 statement 缓存中的那个（L2，N2 §3.4）；`DetachMemDiskTracker`；`StatsLoadResult.HasError`、`ErrorMsg`。
+
 ## 4. 偏离与豁免
 
 | 项 | 级别 | 说明 |
@@ -78,10 +86,14 @@ Go 中 `sc` 本身就是它的 `types.Context`、`errctx.Context`、`PlanCacheTr
 | `exprctx.OptionalEvalPropKey` 负数 | L1 | Go 的负数移位会 panic，Rust 照样 panic；`intest.Assert` 不移植，越界的 key 按生产构建的行为处理 |
 | `newSessionVarsWithSystemVariables` | L1 | `NewSessionVars(nil)`：nil 的 `GlobalVarAccessor` 被调用时 panic，Rust 的 `NilGlobalVarAccessor` 也 panic |
 
-豁免（govec `stmtctx_pending.go`，共 249 个）：
+| `StatementContext.InitMemTracker` / `InitDiskTracker` | L2 | 新建 tracker，不复用 statement 缓存中的（N2 §3.4）；label、limit、挂到父 tracker 后的记账与 Go 相同（govec `tracker`） |
+| debugtrace 的 4 个取 `PlanContext` 的函数 | 豁免 | 等会话的 plan context（D05.3），逻辑在 `OptimizerDebugTraceRoot` 的 glue 方法上，govec `debugtrace` 比对 |
+| debugtrace 的字符串 | L1 | Rust 的 `String` 是合法 UTF-8；Go 中带无效字节的字符串不会被已移植的调用方记录 |
+
+豁免（govec `stmtctx_pending.go` 与 `ctx2b_pending.go`）：
 - stmtctx.go：digest 相关（`parser.Digest`，D02.2）、`GetResourceGroupTagger`、内存/磁盘 tracker（D12.0/D01.10）、`GetExecDetails`（D14.0）、used-stats（D11）、`Save/RestoreLogicalPlanBuildState`（P3）、`WithStmtLabel`/`GetStmtLabel`（AST）、`GetOrInitDistSQLFromCache`（第 2 部分）。
 - 由单元测试覆盖、不进向量的：`CtxID`、`AllocateTaskID`、`GenContextID`（进程级计数器）、`GetPlan`/`SetPlan`/`GetFlatPlan`/`SetFlatPlan`、ranger/pb 上下文缓存（不透明的 `any`）、`GetLockWaitStartTime`（墙钟）。
-- 第 2 部分的文件：全部登记为"D00.1 part 2"；第 2a 部分合并后只剩 2b 的文件（106 个）。
+- 第 2b 部分的文件（`ctx2b_pending.go`，28 个）：sessionexpr 全部（等 D05.3 的会话与 T9）；expropt/sessionvars.go 4 个（N2 中 `EvalContext` 要 `Send + Sync`，而 `SessionVars` 属于会话任务，内置函数如何拿到它随 D05.3 决定）；distsql/context 2 个（字段类型属于 D14.0、D07.2）；`ValidateSnapshotReadTS`（需要 oracle，D07.1）；`EmptyPlanContextExtended`、`BuildPBContext`（空操作或接口值的访问器，单元测试 `planctx_unit.rs`）。
 - govec `exprctx` 豁免 `AssertLocationWithSessionVars`（只有 intest 断言）；`ranger` 豁免 `RangerContext.Detach`（复制接口值），由单元测试 `exprctx_unit.rs` 覆盖。
 
 ## 5. 验证
@@ -122,4 +134,17 @@ Go 中 `sc` 本身就是它的 `types.Context`、`errctx.Context`、`PlanCacheTr
 | exprstatic：不设置 `EvalWarnSink` 的 handler | 792 |
 | exprstatic：`Apply` 不沿用旧上下文的当前时间 | 362 |
 | exprstatic：`newSessionVarsWithSystemVariables` 先设 collation 再设 charset | 4 |
+
+### 第 2b 部分
+
+- govec `ctx2b`：731 条记录，op 为 `plancounter`、`basicctx`、`statsload`、`tracker`、`expropt`（8 个 provider 有无 provider 两种情况，`TestOptionalEvalPropProviders` 的场景）、`debugtrace`（400 个随机脚本加 13 个固定场景：HTML 字符、U+2028/2029、控制字符、NaN、±Inf、-0、大整数、奇数个参数的 record）。浮点参数以字符串传递（serde_json 默认的解析不保证正确舍入）。每条记录打开 new collation 并恢复 `errors.RedactLogEnabled`（#62）。arm64 本地生成，amd64 取 tracker CI 产物；种子 1–4 本地生成后回放都通过，tracker CI 生成种子 1–8。
+- 单元测试 `planctx_unit.rs`：`EmptyPlanContextExtended`、`BuildPBContext.Detach`、debugtrace 的 context 进出、奇数个参数的 record 与 Go 相同的 panic 消息。
+- converge：D00.1 304/394（第 2a 部分合并时 294）；未匹配的 90 个都是登记的豁免（第 2b 部分的 28 个、stmtctx.go 的 22 个、debugtrace 的 4 个等）。
+
+| 改坏 | 不一致 |
+|---|--:|
+| debugtrace 的字符串打开 HTML 转义 | 154 |
+| 多个 step 的 context 只输出最后一个 step | 84 |
+| `PlanCounterTp.Dec` 的下限改为 -100 | 5 |
+| `StatsLoadResult.ErrorMsg` 少一个空格 | 34 |
 
