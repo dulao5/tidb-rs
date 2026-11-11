@@ -244,8 +244,9 @@ fn restore_process_globals() {
 /// Puts back the process-wide state the hooks write (the list is in the generator's
 /// resetSysvarAtomics), so that no record depends on an earlier one.
 fn reset_atomics() {
-    // tidb_redact_log's SetSession hook stores the process-wide flag (Go
-    // errors.RedactLogEnabled; upstream bug tidb-rs #62); its value after init is "".
+    // tidb_redact_log's SetGlobal hook stores the process-wide flag (Go
+    // errors.RedactLogEnabled; go-fix pingcap/tidb#62892, tidb-rs #62); its value after init
+    // is "".
     tidb_base::errors::redact_log_enabled_store("");
     tidb_vars::PasswordValidationLength.store(8, SeqCst);
     tidb_vars::PasswordValidationMixedCaseCount.store(1, SeqCst);
@@ -690,6 +691,13 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 let after = sv.get_global_from_hook(&mut vars);
                 res.insert("after".into(), json!(after.clone().unwrap_or_default()));
                 res.insert("after_err".into(), err_or_null(&after.map(|_| ())));
+            }
+            if r.is_ok() && name == "tidb_redact_log" {
+                // go-fix pingcap/tidb#62892: SetGlobal stores the process-wide flag.
+                res.insert(
+                    "redact".into(),
+                    json!(tidb_base::errors::redact_log_enabled_load()),
+                );
             }
             let warns = vars
                 .stmt_ctx

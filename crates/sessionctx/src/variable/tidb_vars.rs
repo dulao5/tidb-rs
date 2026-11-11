@@ -415,8 +415,3 @@ pub static CircuitBreakerPDMetadataErrorRateThresholdRatio: AtomicF64 = AtomicF6
 /// ConnectAttrsSize is the max aggregate byte size of connection attributes allowed per connection.
 /// Corresponds to performance_schema_session_connect_attrs_size. Default 4096.
 pub static ConnectAttrsSize: AtomicI64 = AtomicI64::new(DefConnectAttrsSize as _);
-
-/// `errors.RedactLogEnabled` (github.com/pingcap/errors): whether user data is redacted in
-/// error messages ("OFF", "ON", "MARKER"); written by the tidb_redact_log SetSession hook.
-// go-dep: github.com/pingcap/errors.RedactLogEnabled L1
-pub static RedactLogEnabled: GoAtomicString = GoAtomicString::new_lazy(|| "OFF".to_owned());

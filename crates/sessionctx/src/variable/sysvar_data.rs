@@ -736,7 +736,7 @@ pub static SYSVAR_DATA: &[SysVarData] = &[
     // Go sysvar.go:L2542 TiDBPartitionPruneMode
     SysVarData { go_file: "sysvar.go", go_line: 2542, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_partition_prune_mode", value: "dynamic", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["static", "dynamic", "static-only", "dynamic-only"], aliases: &[], global_config_name: "", flags: FLAG_HINT_UPDATABLE_VERIFIED, hooks: HOOK_VALIDATION | HOOK_SET_SESSION | HOOK_SET_GLOBAL | HOOK_GET_SESSION },
     // Go sysvar.go:L2571 TiDBRedactLog
-    SysVarData { go_file: "sysvar.go", go_line: 2571, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_redact_log", value: "OFF", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "MARKER"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
+    SysVarData { go_file: "sysvar.go", go_line: 2571, scope: ScopeGlobal, name: "tidb_redact_log", value: "OFF", computed: None, typ: TypeEnum, min_value: 0, max_value: 0, possible_values: &["OFF", "ON", "MARKER"], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_GLOBAL },
     // Go sysvar.go:L2576 TiDBShardAllocateStep
     SysVarData { go_file: "sysvar.go", go_line: 2576, scope: ScopeFlag(ScopeGlobal.0 | ScopeSession.0), name: "tidb_shard_allocate_step", value: "9223372036854775807", computed: None, typ: TypeInt, min_value: 1, max_value: 9223372036854775807, possible_values: &[], aliases: &[], global_config_name: "", flags: 0, hooks: HOOK_SET_SESSION },
     // Go sysvar.go:L2580 TiDBEnableAsyncCommit

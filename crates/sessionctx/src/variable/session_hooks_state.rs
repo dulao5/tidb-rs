@@ -369,10 +369,20 @@ pub(super) fn ss_tidb_partition_prune_mode(s: &mut SessionVars, val: &str) -> Re
     Ok(())
 }
 
-// go-part: defaultSysVars (sysvar.go:L2571 tidb_redact_log SetSession closure) L1
-pub(super) fn ss_tidb_redact_log(s: &mut SessionVars, val: &str) -> Result<(), Error> {
+/// `tidb_redact_log` is GLOBAL only and its SetGlobal hook stores the process-wide flag.
+///
+/// v8.5.8 gives the variable SESSION scope and stores the flag in its SetSession hook, so one
+/// session's `SET SESSION tidb_redact_log = ON` redacts the errors and warnings of every
+/// session on the instance (tidb-rs #62). Upstream fixed it on master (pingcap/tidb#62890,
+/// fix pingcap/tidb#62892, not backported to release-8.5); the fix is ported (constitution R1,
+/// as #65884) and govec generates the records with it applied. `SET SESSION` now fails with
+/// 1229 from the scope check (the registry entry has GLOBAL scope only).
+// go-part: defaultSysVars (sysvar.go:L2571 tidb_redact_log SetGlobal closure) L1
+// go-fix: pingcap/tidb@bc0d97a44d #62892
+pub(super) fn sg_tidb_redact_log(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.enable_redact_log = val.to_owned();
-    RedactLogEnabled.store(val.to_owned());
+    // NOTE: switch of errors is a singleton, thus we can not set it for different sessions
+    tidb_base::errors::redact_log_enabled_store(val);
     Ok(())
 }
 
