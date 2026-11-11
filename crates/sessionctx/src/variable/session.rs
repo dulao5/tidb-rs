@@ -76,7 +76,21 @@ pub struct SessionVars {
     pub tls_connection_state: Option<()>,
     /// The non-scalar fields of Go's `SessionVars` that the session hooks use (D05.2 T6).
     pub state: SessionState,
+    /// StartTime is the start time of the last query.
+    pub start_time: tidb_base::gostd::time::Time,
+    /// nonPreparedPlanCacheStmts stores PlanCacheStmts for non-prepared plan cache
+    /// (lazily created by `AddNonPreparedPlanCacheStmt`; values are planner objects).
+    pub(crate) non_prepared_plan_cache_stmts: Option<StmtCache>,
+    /// prepareStmtDedupCache caches PrepareStmtCacheEntry by SQL+context key so repeated
+    /// COM_STMT_PREPARE calls for the same query can skip parse+preprocess.
+    pub(crate) prepare_stmt_dedup_cache: Option<StmtCache>,
 }
+
+/// The value type of the session's statement caches (Go `any`: planner objects).
+pub type StmtCacheValue = Arc<dyn std::any::Any + Send + Sync>;
+/// A session statement cache (`*kvcache.SimpleLRUCache`).
+pub type StmtCache =
+    crate::kvcache::SimpleLRUCache<super::session_methods::PlanCacheStmtKey, StmtCacheValue>;
 
 /// The non-scalar fields of Go's `SessionVars` the session hooks read or write (D05.2 T6).
 /// Go's map-typed sets (`map[kv.StoreType]struct{}`, `map[string]struct{}`) are ordered sets
@@ -296,6 +310,9 @@ impl SessionVars {
             time_zone: None,
             tls_connection_state: None,
             state: SessionState::default(),
+            start_time: tidb_base::gostd::time::Time::zero(),
+            non_prepared_plan_cache_stmts: None,
+            prepare_stmt_dedup_cache: None,
         }
     }
 

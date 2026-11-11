@@ -19,6 +19,7 @@ pub mod exprctx;
 pub mod expropt;
 pub mod exprstatic;
 pub mod hint;
+pub mod kvcache;
 pub mod planbase;
 pub mod planctx;
 pub mod ranger;

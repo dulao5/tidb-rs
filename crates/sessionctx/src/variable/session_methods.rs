@@ -196,15 +196,16 @@ pub fn to_tipb_tiflash_pre_agg_mode(mode: &str) -> (tipb::TiFlashPreAggMode, boo
     }
 }
 
-/// `planCacheStmtKey`: the key of the session's statement caches.
+/// `planCacheStmtKey`: the key of the session's statement caches (Go string bytes: the
+/// prepare dedup key holds the SQL mode as raw bytes).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PlanCacheStmtKey(pub String);
+pub struct PlanCacheStmtKey(pub Vec<u8>);
 
-impl PlanCacheStmtKey {
+impl crate::kvcache::Key for PlanCacheStmtKey {
     /// Hash returns the key bytes (`kvcache.Key`).
     // go: planCacheStmtKey.Hash L1
-    pub fn hash(&self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
+    fn hash(&self) -> Vec<u8> {
+        self.0.clone()
     }
 }
 

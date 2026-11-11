@@ -9,6 +9,7 @@ pub mod hook_state;
 pub(crate) mod hooks;
 pub mod ldap_state;
 pub mod names;
+pub mod lazy_text;
 pub mod plan_cache_params;
 pub mod removed;
 pub mod sequence_state;
