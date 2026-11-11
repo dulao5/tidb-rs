@@ -22,54 +22,8 @@ use super::error::{ErrNotSupportedYet, ErrUnknownSystemVar};
 use super::names::{CharacterSetConnection, CollationConnection, ErrorCount, WarningCount};
 use super::variable::{ScopeGlobal, ScopeSession, get_sys_var};
 
-/// `contextutil.SQLWarn` level names.
-pub const WarnLevelWarning: &str = "Warning";
-
-/// `contextutil.SQLWarn`: a warning appended to the statement context.
-#[derive(Clone, Debug)]
-pub struct SQLWarn {
-    /// Level of the warning.
-    pub level: &'static str,
-    /// The warning.
-    pub err: Error,
-}
-
-/// The warnings and the statement type of `stmtctx.StatementContext`.
-// glue: stand-in: D05.2, stmtctx.StatementContext
-#[derive(Clone, Debug, Default)]
-pub struct StatementContext {
-    /// StmtType is the statement type (`"Set"` for SET statements).
-    pub stmt_type: String,
-    warnings: Vec<SQLWarn>,
-    /// PrevLastInsertID is the last insert ID of a previous statement.
-    pub prev_last_insert_id: u64,
-    /// TiFlashEngineRemovedDueToStrictSQLMode indicates whether the TiFlash engine is
-    /// removed due to strict sql mode.
-    pub tiflash_engine_removed_due_to_strict_sql_mode: bool,
-}
-
-impl StatementContext {
-    /// AppendWarning appends a warning with level 'Warning'.
-    // glue: stand-in: D05.2, StatementContext.AppendWarning
-    pub fn append_warning(&mut self, err: Error) {
-        self.warnings.push(SQLWarn {
-            level: WarnLevelWarning,
-            err,
-        });
-    }
-
-    /// GetWarnings gets warnings.
-    // glue: stand-in: D05.2, StatementContext.GetWarnings
-    pub fn get_warnings(&self) -> Vec<SQLWarn> {
-        self.warnings.clone()
-    }
-
-    /// SetWarnings sets warnings.
-    // glue: stand-in: D05.2, StatementContext.SetWarnings
-    pub fn set_warnings(&mut self, warns: Vec<SQLWarn>) {
-        self.warnings = warns;
-    }
-}
+pub use crate::stmtctx::StatementContext;
+pub use tidb_base::contextutil::{SQLWarn, WarnLevelWarning};
 
 /// GlobalVarAccessor is the interface for accessing global scope system and status variables.
 // go-part: GlobalVarAccessor (variable.go interface) L2 (read-path methods only; synchronous, like Go)
@@ -98,8 +52,17 @@ pub trait GlobalVarAccessor: Send {
 /// The fields of `SessionVars` the D05.1 validation hooks use.
 // glue: stand-in: D05.2, SessionVars
 pub struct SessionVars {
-    /// StmtCtx holds variables for current executing statement.
-    pub stmt_ctx: StatementContext,
+    /// StmtCtx holds variables for current executing statement (Go `*StatementContext`;
+    /// shared, so other holders such as `ProcessInfo` keep it alive — N2). Read with
+    /// [`SessionVars::stmt_ctx`], replace with [`SessionVars::set_stmt_ctx`].
+    stmt_ctx: Arc<StatementContext>,
+    /// The `useChunkAlloc` cell of the current statement context, which the chunk
+    /// allocator's reuse hook sets: Go's hook reads `s.StmtCtx` when it fires, which may be
+    /// a context installed after `SetAlloc`. Holding the cell (not the context) keeps
+    /// `stmt_ctx_mut` working.
+    stmt_ctx_slot: Arc<parking_lot::Mutex<Arc<std::sync::atomic::AtomicBool>>>,
+    /// chunkPool Several chunks and columns are cached
+    chunk_pool: Option<Box<dyn tidb_chunk::alloc::Allocator>>,
     /// GlobalVarsAccessor is used to set and get global variables.
     pub global_vars_accessor: Box<dyn GlobalVarAccessor>,
     /// systems variables, don't modify it directly, use GetSystemVar/SetSystemVar method.
@@ -257,11 +220,72 @@ impl std::ops::DerefMut for SessionVars {
 }
 
 impl SessionVars {
+    /// StmtCtx holds variables for current executing statement.
+    // glue: accessor of the StmtCtx field (Go reads s.StmtCtx)
+    pub fn stmt_ctx(&self) -> &StatementContext {
+        &self.stmt_ctx
+    }
+
+    /// The shared handle of the current statement context (Go copies the pointer).
+    // glue: accessor of the StmtCtx field
+    pub fn stmt_ctx_arc(&self) -> Arc<StatementContext> {
+        Arc::clone(&self.stmt_ctx)
+    }
+
+    /// Installs the statement context (Go `vars.StmtCtx = sc`).
+    // glue: assignment of the StmtCtx field
+    pub fn set_stmt_ctx(&mut self, sc: Arc<StatementContext>) {
+        *self.stmt_ctx_slot.lock() = sc.use_chunk_alloc_cell();
+        self.stmt_ctx = sc;
+    }
+
+    /// Mutable access to the statement context's plain fields, for the session thread while
+    /// nothing else holds the context (Go writes the fields through the pointer).
+    ///
+    /// Panics if the context is shared: fields written while the statement runs are atomic
+    /// (`set_last_insert_id`, `set_use_chunk_alloc`, the warnings) and go through
+    /// [`SessionVars::stmt_ctx`].
+    // glue: field writes through s.StmtCtx (N2: the session owns the context until it shares it)
+    pub fn stmt_ctx_mut(&mut self) -> &mut StatementContext {
+        Arc::get_mut(&mut self.stmt_ctx)
+            .expect("statement context is shared; write atomic fields through stmt_ctx()")
+    }
+
+    // glue: field access for session_methods.rs (chunkPool, cachedStmtCtx)
+    pub(super) fn chunk_pool_mut(&mut self) -> Option<&mut dyn tidb_chunk::alloc::Allocator> {
+        match &mut self.chunk_pool {
+            Some(p) => Some(p.as_mut()),
+            None => None,
+        }
+    }
+
+    // glue: field access for session_methods.rs
+    pub(super) fn set_chunk_pool(&mut self, p: Option<Box<dyn tidb_chunk::alloc::Allocator>>) {
+        self.chunk_pool = p;
+    }
+
+    // glue: field access for session_methods.rs
+    pub(super) fn has_chunk_pool(&self) -> bool {
+        self.chunk_pool.is_some()
+    }
+
+    // glue: field access for session_methods.rs
+    pub(super) fn stmt_ctx_slot(
+        &self,
+    ) -> Arc<parking_lot::Mutex<Arc<std::sync::atomic::AtomicBool>>> {
+        Arc::clone(&self.stmt_ctx_slot)
+    }
+}
+
+impl SessionVars {
     /// A session with Go's `NewSessionVars` defaults for the fields above.
     // glue: stand-in: D05.2, NewSessionVars
     pub fn new(global_vars_accessor: Box<dyn GlobalVarAccessor>) -> SessionVars {
+        let stmt_ctx = Arc::new(crate::stmtctx::new_stmt_ctx());
         SessionVars {
-            stmt_ctx: StatementContext::default(),
+            stmt_ctx_slot: Arc::new(parking_lot::Mutex::new(stmt_ctx.use_chunk_alloc_cell())),
+            stmt_ctx,
+            chunk_pool: None,
             global_vars_accessor,
             systems: HashMap::from([
                 // charset.GetDefaultCharsetAndCollate()

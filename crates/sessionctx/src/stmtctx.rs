@@ -284,6 +284,10 @@ pub const DefaultStmtErrLevels: errctx::LevelMap = {
 /// StatementContext contains variables for a statement. It should be reset before executing
 /// a statement.
 pub struct StatementContext {
+    /// `hint.StmtHints`, embedded in Go (its fields are promoted to the statement context;
+    /// here they are reached through this field).
+    pub stmt_hints: crate::hint::StmtHints,
+
     ctx_id: u64,
     type_ctx: TypeContext,
     err_ctx: errctx::Context,
@@ -333,7 +337,10 @@ pub struct StatementContext {
     /// PrevLastInsertID is the last insert ID of previous statement.
     pub prev_last_insert_id: u64,
     /// LastInsertID is the auto-generated ID used in the current statement.
-    pub last_insert_id: u64,
+    ///
+    /// Atomic: `LAST_INSERT_ID(expr)` writes it while the statement runs
+    /// (`SessionVars.SetLastInsertID`); read with [`StatementContext::last_insert_id`].
+    last_insert_id: AtomicU64,
     /// InsertID is the given insert ID of an auto_increment column.
     pub insert_id: u64,
     /// ReservedRowIDAlloc is used to alloc auto ID from the reserved IDs.
@@ -454,7 +461,11 @@ pub struct StatementContext {
     /// TableStats stores the visited runtime table stats by table id during query
     pub table_stats: HashMap<i64, Arc<dyn Any + Send + Sync>>,
     /// useChunkAlloc indicates whether statement use chunk alloc
-    use_chunk_alloc: bool,
+    ///
+    /// Atomic and shared with the session's chunk allocator reuse hook, which sets it while
+    /// executors run (Go's hook writes the field of `s.StmtCtx` when it fires). `Reset`
+    /// keeps the cell and clears it, so the hook keeps marking the reset context.
+    use_chunk_alloc: Arc<AtomicBool>,
     /// TiFlashEngineRemovedDueToStrictSQLMode indicates whether tiflash engine is removed
     /// due to strict sql mode.
     pub tiflash_engine_removed_due_to_strict_sql_mode: bool,
@@ -508,6 +519,7 @@ pub fn new_stmt_ctx_with_time_zone(tz: Arc<Location>) -> StatementContext {
     let range_fallback_handler =
         new_range_fallback_handler(Arc::clone(&plan_cache_tracker), appender);
     StatementContext {
+        stmt_hints: crate::hint::StmtHints::default(),
         ctx_id: gen_context_id(),
         type_ctx,
         err_ctx,
@@ -538,7 +550,7 @@ pub fn new_stmt_ctx_with_time_zone(tz: Arc<Location>) -> StatementContext {
         extra_warn_handler: Arc::new(new_static_warn_handler(0)),
         prev_affected_rows: 0,
         prev_last_insert_id: 0,
-        last_insert_id: 0,
+        last_insert_id: AtomicU64::new(0),
         insert_id: 0,
         reserved_row_id_alloc: ReservedRowIDAlloc::default(),
         priority: PriorityEnum::default(),
@@ -600,7 +612,7 @@ pub fn new_stmt_ctx_with_time_zone(tz: Arc<Location>) -> StatementContext {
         mpp_allocated_task_id: AtomicI64::new(0),
         mpp_allocated_gather_id: AtomicU64::new(0),
         table_stats: HashMap::new(),
-        use_chunk_alloc: false,
+        use_chunk_alloc: Arc::new(AtomicBool::new(false)),
         tiflash_engine_removed_due_to_strict_sql_mode: false,
         stale_tso_provider: Mutex::new(StaleTSOProvider::default()),
         related_table_ids: HashSet::new(),
@@ -632,7 +644,10 @@ impl StatementContext {
                 .unwrap_or_else(|e| e.into_inner()),
         );
         let warn_sink = Arc::clone(&self.warn_sink);
+        let use_chunk_alloc = Arc::clone(&self.use_chunk_alloc);
+        use_chunk_alloc.store(false, Ordering::SeqCst);
         *self = new_stmt_ctx_with_time_zone(utc());
+        self.use_chunk_alloc = use_chunk_alloc;
         // Go: `*sc = StatementContext{...}` keeps these fields.
         self.warn_sink = warn_sink;
         self.warn_sink.set(Arc::clone(&warn_handler));
@@ -867,20 +882,38 @@ impl StatementContext {
 
     /// SetUseChunkAlloc set use chunk alloc status
     // go: StatementContext.SetUseChunkAlloc L1
-    pub fn set_use_chunk_alloc(&mut self) {
-        self.use_chunk_alloc = true;
+    pub fn set_use_chunk_alloc(&self) {
+        self.use_chunk_alloc.store(true, Ordering::SeqCst);
     }
 
     /// ClearUseChunkAlloc clear useChunkAlloc status
     // go: StatementContext.ClearUseChunkAlloc L1
-    pub fn clear_use_chunk_alloc(&mut self) {
-        self.use_chunk_alloc = false;
+    pub fn clear_use_chunk_alloc(&self) {
+        self.use_chunk_alloc.store(false, Ordering::SeqCst);
+    }
+
+    /// LastInsertID is the auto-generated ID in the current statement (Go reads the field).
+    // glue: accessor of the LastInsertID field (atomic, see the field)
+    pub fn last_insert_id(&self) -> u64 {
+        self.last_insert_id.load(Ordering::SeqCst)
+    }
+
+    /// Sets LastInsertID (Go assigns the field).
+    // glue: accessor of the LastInsertID field (atomic, see the field)
+    pub fn set_last_insert_id(&self, id: u64) {
+        self.last_insert_id.store(id, Ordering::SeqCst);
+    }
+
+    /// The shared cell behind `useChunkAlloc`, for the session's chunk allocator hook.
+    // glue: the hook's reference to useChunkAlloc (Go: the closure reads s.StmtCtx)
+    pub fn use_chunk_alloc_cell(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.use_chunk_alloc)
     }
 
     /// GetUseChunkAllocStatus returns useChunkAlloc status
     // go: StatementContext.GetUseChunkAllocStatus L1
     pub fn get_use_chunk_alloc_status(&self) -> bool {
-        self.use_chunk_alloc
+        self.use_chunk_alloc.load(Ordering::SeqCst)
     }
 
     /// GetEncodedPlan gets the encoded plan, it is used to avoid repeated encode.

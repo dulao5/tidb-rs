@@ -120,7 +120,7 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 12. **`tidb_redact_log` 只有 GLOBAL 作用域（go-fix pingcap/tidb#62892）**：v8.5.8 中它有 SESSION 作用域，SetSession 钩子写进程级的 `errors.RedactLogEnabled`，一个会话的 `SET SESSION tidb_redact_log=ON` 会让同一实例上所有会话的错误和 warning 被打码（#62，上游 pingcap/tidb#62890）。上游 master 改为只有 GLOBAL 作用域、由 SetGlobal 钩子写这个开关（commit `bc0d97a44d`，未 backport 到 release-8.5），tidb-rs 按宪章 R1 移植（与 #65884 相同）：`SET SESSION` 返回 1229，`SET GLOBAL` 写进程级开关（`tidb_base::errors`，原先 `tidb_vars` 中另有一份不相连的替身，已删除）。govec 用打了补丁的 Go 生成 sessionvars、sysvar、exprctx 三个领域（header 的 `fixes` 中列出），`set_global_hook` 记录读回开关的值（`redact`）。上游后来（#63709）又加回 SESSION 作用域并标为 `InternalSessionVariable`，用户 SET SESSION 报 unknown variable；那是新功能，不移植。
 13. **PR D 的会话方法**：
     - **`TxnReadTS`**：Go 是 `*TxnReadTS`，新会话中为 nil，只有 `tx_read_ts` / `tidb_snapshot` 的钩子和 `CleanupTxnReadTSIfUsed` 会赋值；nil 接收者的 `UseTxnReadTS` 返回 0、`SetTxnReadTS` 什么也不做。Rust 用 `Option<TxnReadTS>`，两个方法接收 `Option<&mut TxnReadTS>`（L1）。
-    - **`UserVars`**：Go 用 `sync.RWMutex` 保护两个 map，按指针共享；Rust 是 `Arc<UserVars>` 加 `parking_lot::RwLock`。`GetUserVarType` 返回存储的 `FieldType` 的副本（Go 返回指针，TiDB 的调用方只读，L2）。
+    - **`UserVars`**：Go 用 `sync.RWMutex` 保护两个 map，按指针共享；Rust 是 `Arc<UserVars>` 加 `parking_lot::RwLock`。`GetUserVarType` 返回存储的 `FieldType` 的副本（Go 返回指针，TiDB 的调用方只读，L2）。注意 Go 在 `expression_rewriter.go:1783`（`rewriteVariable`）直接把这个指针作为 `GetVar` 函数的 RetType，所以之后原地修改该函数类型的代码（如 `PropagateType`）会改到会话中存的变量类型；Lucky 在 v8.5.8 上没能用 SQL 观察到（#81 评审），接受副本。移植 planner 时要知道 Go 依赖这种共享。
     - **`PreparedStmts` / `MapScalarSubQ`**：Go 的 `map[uint32]any` / `[]any` 存 planner 的 `PlanCacheStmt`、子查询；Rust 存 `Arc<dyn Any + Send + Sync>`，由 planner 向下转型（M-IFACE）。`metrics.PreparedStmtGauge`、`metrics.ConnGauge` 是 runtime-only。
     - **`PlanID` / `PlanColumnID`**：Go 的 `atomic.Int32` / `atomic.Int64`，Rust 同样用原子量，`AllocNewPlanID` 经 `&SessionVars` 调用；`SessionState` 克隆时复制当前值。
     - **`relatedTableForMDL`**：Go 的 `*sync.Map`（表 ID → schema 版本）由 `tdmLock` 保护；Rust 是 `Option<RelatedTableForMDL>`（`Arc<Mutex<HashMap<i64, i64>>>`），`&mut self` 代替 `tdmLock`。
@@ -128,6 +128,14 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
     - **`TransactionContext.Cleanup`**：只清理读路径的字段（`relatedTableForMDL`、`IsStaleness`、`EnableMDL`）；`Binlog`、`History`、`TableDeltaMap`、悲观锁缓存、`Savepoints` 属于写路径（X）或 PR E（L2）。
     - **`ChooseMppExchangeCompressionMode`** 返回 `i64`（`kv.ExchangeCompressionMode` 属于 DEF.MPP，常量就地定义）；`GetSplitRegionTimeout` 返回纳秒（`time.Duration`）。
     - **`PlanCacheParamList.String`、`PrepareDedupCacheKey`** 返回 Go string 的字节（`Vec<u8>`，M-BYTES）；`GetParamValue` 越界时 panic 的文字与 Go 的 runtime 错误相同（负数下标没有 `with length`）。
+
+14. **PR E：语句上下文、hint、chunk 分配器**（Lucky 在 #81 评审中的决定）：
+    - **`StmtCtx` 换成 D00.1 的 `stmtctx::StatementContext`**（T9）：`SessionVars` 持有 `Arc<StatementContext>`（Go 的 `*StatementContext`，N2：`ProcessInfo` 等持有者让它活着），读用 `stmt_ctx()`，替换用 `set_stmt_ctx()`；会话线程在没有共享时用 `stmt_ctx_mut()` 写普通字段（共享时 panic）。语句执行中会被写的字段改为原子量：`LastInsertID`（`LAST_INSERT_ID(expr)`）、`useChunkAlloc`（分配器的 hook）。
+    - **`InitStatementContext`**：Go 在两个缓存的 context 之间轮换并 `Reset` 不在用的那个（或者其他会话持有时新建）。复用只为省分配：`Reset` 保留的 `CTEStorageMap`、`LockTableIDs`、`TableStats`、`RelatedTableIDs`、`TblInfo2UnionScan` 都会被唯一的调用方 `ResetContextOfStmt`（executor/select.go）清空或重建。所以 Rust 每次返回新的 context（N2 §2 去掉缓存，L2），`RefCountOfStmtCtx` 的冻结协议由 `Arc` 代替。
+    - **`StmtHints`（新块 D13.0）**：Go 的 `pkg/util/hint` 属于 D13.3（`tidb-planner`，rank 13），但 `StatementContext`（rank 7）内嵌 `StmtHints`，所以数据类型和两个只读数据的方法（`Clone`、`TaskMapNeedBackUp`）放在 `tidb_sessionctx::hint`，由 planner 以后再导出；`ParseStmtHints`、`addHypoIndex` 留在 D13.3。`HintedHypoIndexes`、`OriginalTableHints` 在 D13.3 之前不透明（`Arc<dyn Any>`）。Go 的 `Clone` 不复制 `HintedHypoIndexes`，Rust 的 `clone_hints` 相同（`StmtHints` 不实现 `Clone`，免得误用）。stmtctx 中通过 `stmt_hints` 字段访问（Go 是内嵌提升的字段）。
+    - **chunk 分配器**：复用本身按 M-POOL 不移植，`alloc()` 每次新建 chunk；但用户能通过 `@@last_sql_use_alloc` 看到"上一条语句是否用了分配器"，所以状态和 hook 按 L1 移植：`SetAlloc` 用 `reuseHookAllocator` 包装，第一次 `Alloc` 且 `CheckReuseAllocSize` 为真时把当前语句标为已使用（Go 的 hook 在触发时读 `s.StmtCtx`，可能是 `SetAlloc` 之后才装上的 context；Rust 的 hook 持有一个与会话共享的槽，`set_stmt_ctx` 时换成新 context 的 `useChunkAlloc`）。`allocator.CheckReuseAllocSize` 只读配置的池大小（`maxFreeChunks`、`maxFreeColumnsPerType`），从 X 移回 D01.7，`NewAllocator` 返回的无复用分配器照样回答。`GetChunkAllocator` 把分配器借给闭包（Go 返回接口值，L2）。**Go 中通过 `GetChunkAllocator().Alloc` 分配的执行器（executor/internal/exec/executor.go:92 的 `AllocPool`），Rust 也必须这样分配，`@@last_sql_use_alloc` 才会与 Go 一致。**
+    - **`CleanBuffers`** 与 `WriteStmtBufs` 一起归 X（只在 insert.go:69 调用，只清理复用的写缓冲区，只影响内存）。
+    - **`ExprSessionVars`**（`variable/expr_vars.rs`）：表达式求值需要的 SessionVars 窄接口（#71 评审）：只有 `&self`，写的字段内部同步。`SessionVars` 为会话线程实现它；执行器侧 `Send + Sync` 的实现随 D05.3。用户身份（D04.1）和 `CurrInsertValues`（写路径）的类型还没移植，暂不在接口中。
 
 ## 5. 验证结果（PR A）
 
