@@ -80,6 +80,8 @@ v8.5.8 的 `pkg/expression` 中有 **98 个**签名结构体在 `baseBuiltinFunc
 
 **(c) `expropt.*PropReader` 标记 → `SigDesc`**（签名类型的属性：求值需要哪些可选的会话属性，规划时由 `RequiredOptionalEvalProps` 收集；无运行时数据）。约 45 个：`SessionVarsPropReader`、`CurrentUserPropReader`、`InfoSchemaPropReader`、`KVStorePropReader`、`PrivilegeCheckerPropReader`、`SequenceOperatorPropReader`、`SQLExecutorPropReader`、`AdvisoryLockPropReader`、`DDLOwnerPropReader` 的各种组合（FOUND_ROWS、CURRENT_USER、LAST_INSERT_ID、NEXTVAL、GET_LOCK、SLEEP、SET 用户变量、VALUES、TIDB_* 等）。
 
+**有没有自己的向量版**（Lucky 评审 #88）是驱动的属性，与 `SigDesc.vectorized` 分开：Go 中 `ScalarFunction.VecEvalXxx` 调用签名的 `vecEvalXxx`，不看 `vectorized()`；`vectorized()` 只决定执行器能不能走向量路径。v8.5.8 有三类反例：10 个签名 `vectorized()` 为 false 却定义了自己的 `vecEvalXxx`（返回 "not implemented"，`Values*` 等，文字与 base 的不同）；`Conv`、`ExtractDatetimeFromString` 有真实的向量函数体；`Benchmark` 的 `vectorized()` 是动态的。所以：Go 没有定义 `vecEvalXxx` 的签名写 `#[eval_fn(.., novec)]`（向量驱动返回 `baseBuiltinFunc.vecEvalXxx` 的错误）；定义了的（包括只返回错误的）照常移植向量版；`SigDesc.vectorized` 照搬 Go 的 `vectorized()`，`BuiltinFunc::vec_eval` 不看它。移植 D08.3/D08.6 之前要遵守。
+
 新增带附加字段的签名时：先归类；(a) 在 `SigExtra` 加变体，并对照该签名 Go 的 `Clone` 是否复制（目前两者都复制）；(b) 放进 `EvalState`；(c) 放进 `SigDesc`。
 
 #### `Clone` 的处理

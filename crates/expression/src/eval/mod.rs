@@ -104,6 +104,13 @@ pub enum SigDrivers {
         vec: VecFn,
         args: ArgEvalTypes,
     },
+    /// A signature whose `evalXxx` methods (every result type) only return an error built
+    /// from the signature, without evaluating the arguments (Go's
+    /// `builtinCastVectorFloat32AsUnsupportedSig`). It has no vector version.
+    Unsupported {
+        /// The error of the row versions.
+        err: fn(&BuiltinFunc, &dyn EvalContext) -> Error,
+    },
     /// No evaluation: a signature that is only built and inspected (planner-only signatures,
     /// and the descriptor-only signatures of tests). Every `evalXxx` returns Go's
     /// `baseBuiltinFunc` error.
@@ -123,7 +130,7 @@ impl SigDrivers {
             SigDrivers::Duration { .. } => ETDuration,
             SigDrivers::Json { .. } => ETJson,
             SigDrivers::VectorFloat32 { .. } => ETVectorFloat32,
-            SigDrivers::None => return None,
+            SigDrivers::Unsupported { .. } | SigDrivers::None => return None,
         })
     }
 
@@ -143,7 +150,7 @@ impl SigDrivers {
             | SigDrivers::VectorFloat32 { args, .. } => {
                 args.get(i).or_else(|| args.last()).copied()
             }
-            SigDrivers::None => None,
+            SigDrivers::Unsupported { .. } | SigDrivers::None => None,
         }
     }
 
@@ -158,7 +165,7 @@ impl SigDrivers {
             | SigDrivers::Duration { vec, .. }
             | SigDrivers::Json { vec, .. }
             | SigDrivers::VectorFloat32 { vec, .. } => Some(vec),
-            SigDrivers::None => None,
+            SigDrivers::Unsupported { .. } | SigDrivers::None => None,
         }
     }
 }
@@ -261,6 +268,7 @@ macro_rules! row_dispatch {
         ) -> Result<Option<$t>, Error> {
             match self.sig.drivers {
                 SigDrivers::$variant { row: f, .. } => f(self, ctx, st, row),
+                SigDrivers::Unsupported { err } => Err(err(self, ctx)),
                 _ => Err(Error::plain(concat!(
                     "baseBuiltinFunc.",
                     $go,
@@ -479,22 +487,26 @@ impl BuiltinFunc {
         cols: &[&Column],
         result: &mut Column,
     ) -> Result<(), Error> {
+        // Whether the signature has a vector version of its own is the driver's business
+        // (`#[eval_fn(novec)]` makes it return the base error), not `SigDesc::vectorized`:
+        // Go's `ScalarFunction.VecEvalXxx` calls the signature's `vecEvalXxx` whatever its
+        // `vectorized()` says (D08.1 spec §3.5; Lucky, review of #88).
         match self.sig.drivers.vec() {
-            // A Go signature whose vectorized() is false has no vecEvalXxx of its own: the
-            // call reaches baseBuiltinFunc.vecEvalXxx (Go's executors evaluate such
-            // expressions row by row instead).
-            Some(f)
-                if self.sig.vectorized
-                    && self.sig.drivers.eval_type() == Some(normalize_et(et)) =>
-            {
+            Some(f) if self.sig.drivers.eval_type() == Some(normalize_et(et)) => {
                 f(self, ctx, n, cols, result)
             }
-            _ => Err(Error::plain(format!(
-                "baseBuiltinFunc.vecEval{}() should never be called, please contact the TiDB team for help",
-                vec_eval_name(et)
-            ))),
+            _ => Err(base_vec_eval_error(et)),
         }
     }
+}
+
+/// The error of `baseBuiltinFunc.vecEvalXxx` for the result type `et`.
+// glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+pub fn base_vec_eval_error(et: EvalType) -> Error {
+    Error::plain(format!(
+        "baseBuiltinFunc.vecEval{}() should never be called, please contact the TiDB team for help",
+        vec_eval_name(et)
+    ))
 }
 
 // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
@@ -874,7 +886,12 @@ impl RpnProgram {
                         };
                         f.vec_eval(
                             ctx,
-                            f.sig.drivers.eval_type().unwrap_or(ETInt),
+                            // A signature without drivers of one type: Go calls
+                            // VecEvalXxx of the function's result type.
+                            f.sig
+                                .drivers
+                                .eval_type()
+                                .unwrap_or_else(|| f.tp.eval_type()),
                             n,
                             &cols,
                             dst,

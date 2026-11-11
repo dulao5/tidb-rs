@@ -37,9 +37,17 @@
 4. `SigExtra`（Lucky 评审 #86）：`BuiltinFunc::extra` 取代 `in_union`、`cannot_convert_string_as_warning` 两个字段；D08.1 spec §3.5 对 98 个 Go 签名结构体的附加字段分类。
 5. govec `cast` 追加 2,500 条（原有 7,380 条不变）：`from` 2,400（DATE/DATETIME/TIMESTAMP(fsp)、TIME(fsp)、JSON、VECTOR 列 → INT/REAL/DECIMAL/STRING/YEAR，随机 type flags、SQL mode、`max_allowed_packet`；YEAR 目标总是带 `FlagCastTimeToYearThroughConcat`，避开读时钟的路径）、`from-fsp` 100（fsp 未指定的 TIME 列，覆盖 `CheckFsp`）。
 
-## 第 2b-2b、2b-3 部分（交接）
+## 第 2b-2b-i 部分（本 PR）
 
-- **2b-2b**：`#[eval_fn]` 支持 Time/Duration/JSON/VectorFloat32 **结果**（输出列：`ResizeTime`/`ResizeGoDuration`/`ReserveJSON`/`ReserveVectorFloat32`，NULL 合并）；`castAsTime/Duration/JSON/Array/VectorFloat32FunctionClass` 与 CAST 到这些类型的签名（`builtinCast*AsTime/Duration/JSON/VectorFloat32Sig`、`castJSONAsArray`、`VectorFloat32AsUnsupported`——需要一个签名有多个求值类型的驱动）；`WrapWithCastAsTime/Duration/JSON/VectorFloat32`、`ConvertJSON2Tp`；之后去掉 `newBaseBuiltinFuncWithTp` 的临时桩分支和 `cast_not_ported`。`DurationAsTime` 读当前时间（`getStmtTimestamp` 失败时 `gotime.Now()`）：govec 必须固定语句时间戳，或按 `<clock>` 规则屏蔽。govec 的 `sfDump`/`d2DatumInOf` 补上 Time/Duration/JSON/Vector 种类，然后加常量参数的记录（spec §4 第 14 条）。
+1. `#[eval_fn]`：结果类型增加 `Time`、`Duration`（`TimeOut`/`DurationOut`）；`novec` 选项（没有自己向量版的签名，D08.1 spec §3.5，Lucky 评审 #88）。`SigDrivers::Unsupported { err }`（`VectorFloat32AsUnsupported`：任何结果类型的行版本只返回错误）。`vec_eval` 不再看 `SigDesc.vectorized`；`VectorFloat32AsString` 改为 `novec`。
+2. `castAsTimeFunctionClass`、`castAsDurationFunctionClass` 与 14 个签名（spec §3.5，逐行版与向量版的 6 处差异见那里的表）；`WrapWithCastAsTime/Duration`；`newBaseBuiltinFuncWithTp` 对 DATETIME/TIMESTAMP/DURATION 参数包 CAST；`BuildCastFunctionWithCheck` 的 DATETIME/TIMESTAMP/DURATION 分支。
+3. govec `cast` 追加 4,000 条（原有 9,880 条不变）：`to` 3,000（INT/YEAR、REAL、DECIMAL、时间形态的字符串、DATE/DATETIME/TIMESTAMP、TIME、各种 type code 的 JSON（含 `CreateBinaryJSON` 的 DATE/DATETIME/TIMESTAMP/TIME 值）、VECTOR 列 → DATETIME/DATE/TIMESTAMP/TIME(fsp)，VECTOR 也到 INT/REAL/DECIMAL；随机 SQL mode（含 NO_ZERO_DATE）、四个固定的语句时间）、`to-const` 400（常量参数，构建时折叠）、`to-fsp` 300（`CAST(CAST(json AS TIME(n)) AS ..)`：内层值的 fsp 与声明不同，Lucky 评审 #88）、`wrap-time` 300（`WrapWithCastAsTime/Duration`）。castCtx 可选的第 5 个元素是语句时间；`sfDump` 输出 Time/Duration/JSON/Vector 常量。
+4. tracker `cast2b2.go` 开头的注释：设 concat 标志的是 DURATION（TIME 类型）列（Lucky 评审 #88）。
+
+## 第 2b-2b-ii、2b-3 部分（交接）
+
+- **2b-2b-ii**：`#[eval_fn]` 支持 JSON/VectorFloat32 **结果**（`ReserveJSON`/`ReserveVectorFloat32`，NULL 合并）；`castAsJSON/Array/VectorFloat32FunctionClass` 与 CAST 到 JSON/VECTOR 的签名（`builtinCast*AsJSONSig`、`castJSONAsArray`、`StringAsVectorFloat32`、`VectorFloat32AsVectorFloat32`、`UnsupportedAsVectorFloat32`）；`WrapWithCastAsJSON/VectorFloat32`、`ConvertJSON2Tp`、`convertJSON2Tp`；之后去掉 `newBaseBuiltinFuncWithTp` 的临时桩分支和 `cast_not_ported`；`VectorFloat32AsUnsupported.evalJSON` 随之覆盖。
+- **原 2b-2b 描述（已部分完成）**：`#[eval_fn]` 支持 Time/Duration/JSON/VectorFloat32 **结果**（输出列：`ResizeTime`/`ResizeGoDuration`/`ReserveJSON`/`ReserveVectorFloat32`，NULL 合并）；`castAsTime/Duration/JSON/Array/VectorFloat32FunctionClass` 与 CAST 到这些类型的签名（`builtinCast*AsTime/Duration/JSON/VectorFloat32Sig`、`castJSONAsArray`、`VectorFloat32AsUnsupported`——需要一个签名有多个求值类型的驱动）；`WrapWithCastAsTime/Duration/JSON/VectorFloat32`、`ConvertJSON2Tp`；之后去掉 `newBaseBuiltinFuncWithTp` 的临时桩分支和 `cast_not_ported`。`DurationAsTime` 读当前时间（`getStmtTimestamp` 失败时 `gotime.Now()`）：govec 必须固定语句时间戳，或按 `<clock>` 规则屏蔽。govec 的 `sfDump`/`d2DatumInOf` 补上 Time/Duration/JSON/Vector 种类，然后加常量参数的记录（spec §4 第 14 条）。
 - **2b-3**：同下（原交接）。
 
 ## 第 2b-3 部分（原交接，含 2b-2 的旧描述）

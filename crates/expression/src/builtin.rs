@@ -6,8 +6,9 @@
 //! [`crate::eval::BuiltinFunc`]; the `funcs` table is in [`crate::builtin_registry`].
 //!
 //! `newBaseBuiltinFuncWithTp` wraps the arguments in CAST (`WrapWithCastAs*`, block D08.8):
-//! the CAST targets INT, REAL, DECIMAL and STRING are ported; an argument of another
-//! evaluation type returns the "not ported yet" error of the CAST class (D08.8 part 2b-2).
+//! the CAST targets INT, REAL, DECIMAL, STRING, TIME and DURATION are ported; a JSON or
+//! VECTOR argument returns the "not ported yet" error of the CAST class (D08.8 part
+//! 2b-2b-ii).
 //!
 //! Not here yet (spec `specs/D08.2-funcs` §4):
 //! - `newBaseBuiltinFuncWithFieldTypes` (with the CAST targets of D08.8 part 2b-2);
@@ -26,13 +27,14 @@ use tidb_parser::types::{
 };
 use tidb_types::collate;
 use tidb_types::etc::FieldType;
+use tidb_types::field_type::new_field_type;
 use tidb_types::field_type_builder::new_field_type_builder;
 use tidb_types::fsp::MaxFsp;
 
 use crate::ast_funcs as ast;
 use crate::builtin_cast::{
-    wrap_with_cast_as_decimal, wrap_with_cast_as_int, wrap_with_cast_as_real,
-    wrap_with_cast_as_string,
+    wrap_with_cast_as_decimal, wrap_with_cast_as_duration, wrap_with_cast_as_int,
+    wrap_with_cast_as_real, wrap_with_cast_as_string, wrap_with_cast_as_time,
 };
 use crate::builtin_convert_charset::handle_binary_literal;
 use crate::collation::{ASCII, CoercibilityExplicit, ExprCollation, UNICODE, derive_collation};
@@ -174,10 +176,10 @@ pub fn new_base_builtin_func(
 /// needs to be determined argTps and retType when we create it.
 ///
 /// Go returns an error for a nil context, which a reference cannot be, and panics when the
-/// lengths differ (so does this). The CAST wrappers of TIME, DURATION, JSON and VECTOR return
-/// the error of their (not yet ported) CAST class, which Go's `WrapWithCastAs*` would log
-/// (D08.8 part 2b-2).
-// go: newBaseBuiltinFuncWithTp L2 (no nil context; the wrappers of TIME/DURATION/JSON/VECTOR are temporary stubs)
+/// lengths differ (so does this). The CAST wrappers of JSON and VECTOR return the error of
+/// their (not yet ported) CAST class, which Go's `WrapWithCastAs*` would log (D08.8 part
+/// 2b-2b-ii).
+// go: newBaseBuiltinFuncWithTp L2 (no nil context; the wrappers of JSON/VECTOR are temporary stubs)
 pub fn new_base_builtin_func_with_tp(
     ctx: &dyn BuildContext,
     func_name: &str,
@@ -203,9 +205,12 @@ pub fn new_base_builtin_func_with_tp(
                 let a = wrap_with_cast_as_string(ctx, a)?;
                 handle_binary_literal(ctx, a, &ec, func_name, false)
             }
-            ETDatetime | ETTimestamp | ETDuration | ETJson | ETVectorFloat32 => {
+            ETDatetime => wrap_with_cast_as_time(ctx, a, new_field_type(mysql::TypeDatetime))?,
+            ETTimestamp => wrap_with_cast_as_time(ctx, a, new_field_type(mysql::TypeTimestamp))?,
+            ETDuration => wrap_with_cast_as_duration(ctx, a)?,
+            ETJson | ETVectorFloat32 => {
                 return Err(Error::plain(format!(
-                    "tidb-rs: CAST to {} is not ported yet (D08.8 part 2b-2)",
+                    "tidb-rs: CAST to {} is not ported yet (D08.8 part 2b-2b-ii)",
                     tp.to_string()
                 )));
             }

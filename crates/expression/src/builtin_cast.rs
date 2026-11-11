@@ -7,9 +7,10 @@
 //! §1).
 //!
 //! The signatures from TIME, DURATION, JSON and VECTOR arguments to INT, REAL, DECIMAL and
-//! STRING are ported (part 2b-2a). CAST to TIME/DURATION/JSON/VECTOR returns a "not ported
-//! yet" error from `build_cast_function*` (temporary stub, constitution art. 4.3; part 2b-2b),
-//! and so does `VectorFloat32AsUnsupported`.
+//! STRING are ported (part 2b-2a), and CAST to DATETIME/DATE/TIMESTAMP and TIME (duration)
+//! with `builtinCastVectorFloat32AsUnsupportedSig` (part 2b-2b-i). CAST to JSON and VECTOR
+//! returns a "not ported yet" error from `build_cast_function*` (temporary stub, constitution
+//! art. 4.3; part 2b-2b-ii).
 
 #![allow(non_upper_case_globals)]
 
@@ -20,19 +21,23 @@ use tidb_base::errors::RedactLogDisable;
 use tidb_base::gofmt::Arg;
 use tidb_base::gostd::bytes::trim_space;
 use tidb_base::gostd::strconv::format_float;
+use tidb_base::gostd::time as gotime;
 use tidb_base::mysql::{
     self, BinaryFlag, EnumSetAsIntFlag, MaxDateWidth, MaxDatetimeWidthNoFsp, MaxDecimalScale,
     MaxDecimalWidth, MaxDurationWidthNoFsp, MaxIntWidth, MaxLongBlobWidth, MaxRealWidth,
-    NotFixedDec, NotNullFlag, TypeBit, TypeBlob, TypeDate, TypeDouble, TypeEnum, TypeFloat,
-    TypeInt24, TypeLong, TypeLongBlob, TypeLonglong, TypeMediumBlob, TypeNewDecimal, TypeNull,
-    TypeSet, TypeShort, TypeString, TypeTiny, TypeTinyBlob, TypeVarString, TypeVarchar, TypeYear,
-    UnsignedFlag, has_not_null_flag, has_unsigned_flag,
+    NotFixedDec, NotNullFlag, TypeBit, TypeBlob, TypeDate, TypeDatetime, TypeDouble, TypeDuration,
+    TypeEnum, TypeFloat, TypeInt24, TypeLong, TypeLongBlob, TypeLonglong, TypeMediumBlob,
+    TypeNewDecimal, TypeNull, TypeSet, TypeShort, TypeString, TypeTimestamp, TypeTiny,
+    TypeTinyBlob, TypeVarString, TypeVarchar, TypeYear, UnsignedFlag, has_not_null_flag,
+    has_unsigned_flag,
 };
 use tidb_parser::gocharset::{CharsetBin, CollationBin};
+use tidb_parser::types::type_str;
 use tidb_parser::types::{
     ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
     ETVectorFloat32, EvalType, UnspecifiedLength,
 };
+use tidb_types::convert::number_to_duration;
 use tidb_types::convert::{
     convert_float_to_int, convert_float_to_uint, convert_json_to_decimal, convert_json_to_float,
     convert_json_to_int64, integer_signed_lower_bound, integer_signed_upper_bound,
@@ -42,15 +47,21 @@ use tidb_types::datum::{
     produce_dec_with_specified_tp, produce_float_with_specified_tp, produce_str_with_specified_tp,
 };
 use tidb_types::errors::{
-    ErrCastAsSignedOverflow, ErrCastNegIntAsUnsigned, ErrOverflow, ErrTruncated,
-    ErrTruncatedWrongVal,
+    DateTimeStr, ErrCastAsSignedOverflow, ErrCastNegIntAsUnsigned, ErrIncorrectDatetimeValue,
+    ErrOverflow, ErrTruncated, ErrTruncatedWrongVal, ErrWrongValue,
 };
 use tidb_types::etc::{FieldType, is_binary_str};
 use tidb_types::field_type::{new_field_type, set_bin_chs_cln_flag};
-use tidb_types::fsp::{DefaultFsp, check_fsp};
-use tidb_types::json::BinaryJSON;
+use tidb_types::fsp::{DefaultFsp, MaxFsp, MinFsp, UnspecifiedFsp, check_fsp};
+use tidb_types::json::{
+    BinaryJSON, JSONTypeCodeDate, JSONTypeCodeDatetime, JSONTypeCodeDuration, JSONTypeCodeString,
+    JSONTypeCodeTimestamp,
+};
 use tidb_types::mydecimal::{MODE_HALF_UP, MyDecimal, new_dec_from_int, new_dec_from_uint};
-use tidb_types::time::{Duration, Time};
+use tidb_types::time::{
+    Duration, Time, ZeroTime, from_date, parse_duration, parse_time, parse_time_from_float_string,
+    parse_time_from_num, parse_time_from_year,
+};
 use tidb_types::vector::VectorFloat32;
 
 use crate::ast_funcs as ast;
@@ -61,8 +72,8 @@ use crate::builtin::{
 use crate::builtin_convert_charset::handle_binary_literal;
 use crate::collation::{CoercibilityExplicit, ExprCollation};
 use crate::constant_fold::fold_constant;
-use crate::context::{BuildContext, EvalContext, err_ctx, location, type_ctx};
-use crate::errors::handle_allowed_packet_overflowed;
+use crate::context::{BuildContext, EvalContext, err_ctx, location, sql_mode, type_ctx};
+use crate::errors::{handle_allowed_packet_overflowed, handle_invalid_time_error};
 use crate::eval::{BuiltinFunc, SigDesc, SigDrivers, SigView};
 use crate::expression::{ConstStrict, EvalState, Expr, ExprRef, is_binary_literal};
 use crate::scalar_function::ScalarFunction;
@@ -100,6 +111,20 @@ const CastTimeAsString: i32 = 42;
 const CastDurationAsString: i32 = 52;
 const CastJsonAsString: i32 = 62;
 const CastVectorFloat32AsString: i32 = 5183;
+const CastIntAsTime: i32 = 5;
+const CastIntAsDuration: i32 = 6;
+const CastRealAsTime: i32 = 14;
+const CastRealAsDuration: i32 = 15;
+const CastDecimalAsTime: i32 = 24;
+const CastDecimalAsDuration: i32 = 25;
+const CastStringAsTime: i32 = 34;
+const CastStringAsDuration: i32 = 35;
+const CastTimeAsTime: i32 = 44;
+const CastTimeAsDuration: i32 = 45;
+const CastDurationAsTime: i32 = 54;
+const CastDurationAsDuration: i32 = 55;
+const CastJsonAsTime: i32 = 64;
+const CastJsonAsDuration: i32 = 65;
 
 // ---------------------------------------------------------------- signatures
 
@@ -290,7 +315,93 @@ sig!(
     builtinCastVectorFloat32AsUnsupportedSig,
     0,
     false,
-    SigDrivers::None
+    SigDrivers::Unsupported {
+        err: cast_vector_float32_as_unsupported
+    }
+);
+sig!(
+    builtinCastIntAsTimeSig,
+    CastIntAsTime,
+    true,
+    CAST_INT_AS_TIME
+);
+sig!(
+    builtinCastRealAsTimeSig,
+    CastRealAsTime,
+    true,
+    CAST_REAL_AS_TIME
+);
+sig!(
+    builtinCastDecimalAsTimeSig,
+    CastDecimalAsTime,
+    true,
+    CAST_DECIMAL_AS_TIME
+);
+sig!(
+    builtinCastStringAsTimeSig,
+    CastStringAsTime,
+    true,
+    CAST_STRING_AS_TIME
+);
+sig!(
+    builtinCastTimeAsTimeSig,
+    CastTimeAsTime,
+    true,
+    CAST_TIME_AS_TIME
+);
+sig!(
+    builtinCastDurationAsTimeSig,
+    CastDurationAsTime,
+    true,
+    CAST_DURATION_AS_TIME
+);
+sig!(
+    builtinCastJSONAsTimeSig,
+    CastJsonAsTime,
+    true,
+    CAST_JSON_AS_TIME
+);
+sig!(
+    builtinCastIntAsDurationSig,
+    CastIntAsDuration,
+    true,
+    CAST_INT_AS_DURATION
+);
+sig!(
+    builtinCastRealAsDurationSig,
+    CastRealAsDuration,
+    true,
+    CAST_REAL_AS_DURATION
+);
+sig!(
+    builtinCastDecimalAsDurationSig,
+    CastDecimalAsDuration,
+    true,
+    CAST_DECIMAL_AS_DURATION
+);
+sig!(
+    builtinCastStringAsDurationSig,
+    CastStringAsDuration,
+    true,
+    CAST_STRING_AS_DURATION
+);
+sig!(
+    builtinCastTimeAsDurationSig,
+    CastTimeAsDuration,
+    true,
+    CAST_TIME_AS_DURATION
+);
+sig!(
+    builtinCastDurationAsDurationSig,
+    CastDurationAsDuration,
+    true,
+    CAST_DURATION_AS_DURATION
+);
+sig!(
+    builtinCastJSONAsDurationSig,
+    CastJsonAsDuration,
+    true,
+    CAST_JSON_AS_DURATION
 );
 
 /// `b.inUnion` of a `baseBuiltinCastFunc`.
@@ -1034,7 +1145,8 @@ pub fn cast_json_as_string(
 
 // go: builtinCastVectorFloat32AsStringSig.evalString L1
 // go: builtinCastVectorFloat32AsStringSig.Clone L2 (BuiltinFunc::clone_from_base)
-#[eval_fn(String)]
+// Go defines no vecEvalString for it (and vectorized() is false): `novec`.
+#[eval_fn(String, novec)]
 pub fn cast_vector_float32_as_string(
     ctx: &dyn EvalContext,
     f: &impl SigView,
@@ -1046,6 +1158,453 @@ pub fn cast_vector_float32_as_string(
     err?;
     out.extend_from_slice(&s);
     Ok(Some(()))
+}
+
+// ---------------------------------------------------------------- to TIME (DATE, DATETIME, TIMESTAMP), DURATION
+
+/// `types.ZeroTime, true, handleInvalidTimeError(ctx, err)`: NULL when the error is handled.
+// glue: the shared `return types.ZeroTime, true, handleInvalidTimeError(ctx, err)` of the time signatures
+fn invalid_time<T>(ctx: &dyn EvalContext, err: Error) -> Result<Option<T>, Error> {
+    handle_invalid_time_error(ctx, err)?;
+    Ok(None)
+}
+
+/// Truncates the hh:mm:ss part of `t` when the result type is DATE (Go's
+/// `res.SetCoreTime(types.FromDate(res.Year(), res.Month(), res.Day(), 0, 0, 0, 0))`).
+// glue: the shared DATE truncation of the CAST AS TIME signatures
+fn truncate_to_date(t: &mut Time, tp: u8) {
+    if tp == TypeDate {
+        t.set_core_time(from_date(t.year(), t.month(), t.day(), 0, 0, 0, 0));
+    }
+}
+
+/// `getStmtTimestamp(ctx)` (`ctx.CurrentTime()`; the `intest` random location and the
+/// `injectNow` failpoint are test-only), falling back to `gotime.Now()` on error as the CAST
+/// signatures do.
+// glue: boundary stub for getStmtTimestamp (helper.go, block D08.12) and the gotime.Now() fallback of the CAST signatures
+fn stmt_timestamp(ctx: &dyn EvalContext) -> gotime::Time {
+    ctx.current_time().unwrap_or_else(|_| gotime::now())
+}
+
+/// `errors.Is(err, strconv.ErrSyntax) || errors.Is(err, strconv.ErrRange)`: the
+/// `*strconv.NumError` of `types.ParseTime` (an error without a code whose text is
+/// `strconv.<Func>: parsing <q>: invalid syntax | value out of range`).
+// glue: errors.Is on the *strconv.NumError text (M-ERR)
+fn is_strconv_num_error(err: &Error) -> bool {
+    if err.is_normalized() {
+        return false;
+    }
+    let msg = err.error();
+    msg.starts_with(b"strconv.")
+        && (msg.ends_with(b": invalid syntax") || msg.ends_with(b": value out of range"))
+}
+
+// go: builtinCastIntAsTimeSig.evalTime L1
+// go: builtinCastIntAsTimeSig.vecEvalTime L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastIntAsTimeSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastIntAsTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time)]
+pub fn cast_int_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: i64,
+) -> Result<Option<Time>, Error> {
+    let r = if f.arg_type(0).get_type() == TypeYear {
+        parse_time_from_year(val)
+    } else {
+        let (t, err) =
+            parse_time_from_num(&type_ctx(ctx), val, f.tp.get_type(), f.tp.get_decimal());
+        err.map(|()| t)
+    };
+    let mut res = match r {
+        Ok(t) => t,
+        Err(e) => return invalid_time(ctx, e),
+    };
+    truncate_to_date(&mut res, f.tp.get_type());
+    Ok(Some(res))
+}
+
+// go: builtinCastRealAsTimeSig.evalTime L1
+// go: builtinCastRealAsTimeSig.vecEvalTime L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsTimeSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastRealAsTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time)]
+pub fn cast_real_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: f64,
+) -> Result<Option<Time>, Error> {
+    // MySQL compatibility: 0 should not be converted to null, see #11203
+    let fv = format_float(val, b'f', -1, 64);
+    if fv == "0" {
+        return Ok(Some(ZeroTime));
+    }
+    let (mut res, err) = parse_time_from_float_string(
+        &type_ctx(ctx),
+        fv.as_bytes(),
+        f.tp.get_type(),
+        f.tp.get_decimal(),
+    );
+    if let Err(e) = err {
+        return invalid_time(ctx, e);
+    }
+    truncate_to_date(&mut res, f.tp.get_type());
+    Ok(Some(res))
+}
+
+// go: builtinCastDecimalAsTimeSig.evalTime L1
+// go: builtinCastDecimalAsTimeSig.vecEvalTime L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastDecimalAsTimeSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDecimalAsTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time)]
+pub fn cast_decimal_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &MyDecimal,
+) -> Result<Option<Time>, Error> {
+    let (mut res, err) = parse_time_from_float_string(
+        &type_ctx(ctx),
+        &val.to_string(),
+        f.tp.get_type(),
+        f.tp.get_decimal(),
+    );
+    if let Err(e) = err {
+        return invalid_time(ctx, e);
+    }
+    truncate_to_date(&mut res, f.tp.get_type());
+    Ok(Some(res))
+}
+
+// go: builtinCastStringAsTimeSig.evalTime L1
+// go: builtinCastStringAsTimeSig.vecEvalTime L2 (the vector driver of this body; only it turns a *strconv.NumError of ParseTime into ErrIncorrectDatetimeValue, as in Go)
+// go: builtinCastStringAsTimeSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastStringAsTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time)]
+pub fn cast_string_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &[u8],
+) -> Result<Option<Time>, Error> {
+    let (mut res, err) = parse_time(&type_ctx(ctx), val, f.tp.get_type(), f.tp.get_decimal());
+    if let Err(mut e) = err {
+        if f.vector() && is_strconv_num_error(&e) {
+            e = ErrIncorrectDatetimeValue
+                .gen_with_stack_by_args(vec![Arg::go_string(val.to_vec())]);
+        }
+        return invalid_time(ctx, e);
+    }
+    if res.is_zero() && sql_mode(ctx).has_no_zero_date_mode() {
+        return invalid_time(
+            ctx,
+            ErrWrongValue
+                .gen_with_stack_by_args(vec![Arg::from(DateTimeStr), Arg::go_string(res.string())]),
+        );
+    }
+    truncate_to_date(&mut res, f.tp.get_type());
+    Ok(Some(res))
+}
+
+// go: builtinCastTimeAsTimeSig.evalTime L1
+// go: builtinCastTimeAsTimeSig.vecEvalTime L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastTimeAsTimeSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastTimeAsTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time)]
+pub fn cast_time_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: Time,
+) -> Result<Option<Time>, Error> {
+    let tc = type_ctx(ctx);
+    let (res, err) = val.convert(&tc, f.tp.get_type());
+    if let Err(e) = err {
+        return invalid_time(ctx, e);
+    }
+    let (mut res, err) = res.round_frac(&tc, f.tp.get_decimal());
+    if f.tp.get_type() == TypeDate {
+        truncate_to_date(&mut res, TypeDate);
+        res.set_type(f.tp.get_type());
+    }
+    err?;
+    Ok(Some(res))
+}
+
+// go: builtinCastDurationAsTimeSig.evalTime L1
+// go: builtinCastDurationAsTimeSig.vecEvalTime L2 (the vector driver of this body; it reads the durations with the result's fsp, the row version with the value's, as in Go)
+// go: builtinCastDurationAsTimeSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDurationAsTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time)]
+pub fn cast_duration_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    mut val: Duration,
+) -> Result<Option<Time>, Error> {
+    if f.vector() {
+        val.fsp = f.tp.get_decimal();
+    }
+    let tc = type_ctx(ctx);
+    let ts = stmt_timestamp(ctx);
+    let (res, err) = val.convert_to_time_with_timestamp(&tc, f.tp.get_type(), &ts);
+    if let Err(e) = err {
+        return invalid_time(ctx, e);
+    }
+    let (res, err) = res.round_frac(&tc, f.tp.get_decimal());
+    err?;
+    Ok(Some(res))
+}
+
+// go: builtinCastJSONAsTimeSig.evalTime L1
+// go: builtinCastJSONAsTimeSig.vecEvalTime L2 (the vector driver of this body; its default branch goes through handleInvalidTimeError, which handles ErrTruncatedWrongVal as ec.HandleError does)
+// go: builtinCastJSONAsTimeSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastJSONAsTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time)]
+pub fn cast_json_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &BinaryJSON<'_>,
+) -> Result<Option<Time>, Error> {
+    let (tp, fsp) = (f.tp.get_type(), f.tp.get_decimal());
+    match val.type_code {
+        JSONTypeCodeDate | JSONTypeCodeDatetime | JSONTypeCodeTimestamp => {
+            let mut res = val.get_time_with_fsp(fsp);
+            res.set_type(tp);
+            truncate_to_date(&mut res, tp);
+            Ok(Some(res))
+        }
+        JSONTypeCodeDuration => {
+            let duration = val.get_duration();
+            let tc = type_ctx(ctx);
+            let ts = stmt_timestamp(ctx);
+            let (res, err) = duration.convert_to_time_with_timestamp(&tc, tp, &ts);
+            if let Err(e) = err {
+                return invalid_time(ctx, e);
+            }
+            let (res, err) = res.round_frac(&tc, fsp);
+            err?;
+            Ok(Some(res))
+        }
+        JSONTypeCodeString => {
+            let s = val.unquote()?;
+            let (mut res, err) = parse_time(&type_ctx(ctx), &s, tp, fsp);
+            if let Err(e) = err {
+                return invalid_time(ctx, e);
+            }
+            truncate_to_date(&mut res, tp);
+            Ok(Some(res))
+        }
+        _ => {
+            let err = ErrTruncatedWrongVal.gen_with_stack_by_args(vec![
+                Arg::from(type_str(tp)),
+                Arg::go_string(val.string()),
+            ]);
+            if f.vector() {
+                return invalid_time(ctx, err);
+            }
+            err_ctx(ctx).handle_error(err)?;
+            Ok(None)
+        }
+    }
+}
+
+// go: builtinCastIntAsDurationSig.evalDuration L1
+// go: builtinCastIntAsDurationSig.vecEvalDuration L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastIntAsDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastIntAsDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration)]
+pub fn cast_int_as_duration(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: i64,
+) -> Result<Option<Duration>, Error> {
+    let (dur, err) = number_to_duration(val, f.tp.get_decimal());
+    match err {
+        Ok(()) => Ok(Some(dur)),
+        Err(e) => {
+            if ErrOverflow.equal(&e) || ErrTruncatedWrongVal.equal(&e) {
+                err_ctx(ctx).handle_error(e)?;
+                return Ok(None);
+            }
+            Err(e)
+        }
+    }
+}
+
+// go: builtinCastRealAsDurationSig.evalDuration L1
+// go: builtinCastRealAsDurationSig.vecEvalDuration L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastRealAsDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastRealAsDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration)]
+pub fn cast_real_as_duration(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: f64,
+) -> Result<Option<Duration>, Error> {
+    let tc = type_ctx(ctx);
+    let (res, _, err) = parse_duration(
+        &tc,
+        format_float(val, b'f', -1, 64).as_bytes(),
+        f.tp.get_decimal(),
+    );
+    match err {
+        Ok(()) => Ok(Some(res)),
+        Err(e) if ErrTruncatedWrongVal.equal(&e) => {
+            tc.handle_truncate(Err(e))?;
+            // ErrTruncatedWrongVal needs to be considered NULL.
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+// go: builtinCastDecimalAsDurationSig.evalDuration L1
+// go: builtinCastDecimalAsDurationSig.vecEvalDuration L2 (the vector driver of this body; it handles ErrTruncatedWrongVal with tc.HandleTruncate, the row version with ec.HandleError, as in Go)
+// go: builtinCastDecimalAsDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDecimalAsDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration)]
+pub fn cast_decimal_as_duration(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &MyDecimal,
+) -> Result<Option<Duration>, Error> {
+    let tc = type_ctx(ctx);
+    let (res, _, err) = parse_duration(&tc, &val.to_string(), f.tp.get_decimal());
+    match err {
+        Ok(()) => Ok(Some(res)),
+        Err(e) if ErrTruncatedWrongVal.equal(&e) => {
+            if f.vector() {
+                tc.handle_truncate(Err(e))?;
+            } else {
+                err_ctx(ctx).handle_error(e)?;
+            }
+            // ErrTruncatedWrongVal needs to be considered NULL.
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+// go: builtinCastStringAsDurationSig.evalDuration L1
+// go: builtinCastStringAsDurationSig.vecEvalDuration L2 (the vector driver of this body; it handles ErrTruncatedWrongVal with tc.HandleTruncate and looks at isNull only after an error, the row version uses ec.HandleError and returns isNull as it is, as in Go)
+// go: builtinCastStringAsDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastStringAsDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration)]
+pub fn cast_string_as_duration(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &[u8],
+) -> Result<Option<Duration>, Error> {
+    let tc = type_ctx(ctx);
+    let (res, is_null, err) = parse_duration(&tc, val, f.tp.get_decimal());
+    if f.vector() {
+        if let Err(e) = err {
+            if ErrTruncatedWrongVal.equal(&e) {
+                tc.handle_truncate(Err(e))?;
+            } else {
+                return Err(e);
+            }
+            if is_null {
+                return Ok(None);
+            }
+        }
+        return Ok(Some(res));
+    }
+    match err {
+        Err(e) if ErrTruncatedWrongVal.equal(&e) => err_ctx(ctx).handle_error(e)?,
+        other => other?,
+    }
+    Ok(if is_null { None } else { Some(res) })
+}
+
+// go: builtinCastTimeAsDurationSig.evalDuration L1
+// go: builtinCastTimeAsDurationSig.vecEvalDuration L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastTimeAsDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastTimeAsDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration)]
+pub fn cast_time_as_duration(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: Time,
+) -> Result<Option<Duration>, Error> {
+    let res = val.convert_to_duration()?;
+    let (res, err) = res.round_frac(f.tp.get_decimal(), &location(ctx));
+    err?;
+    Ok(Some(res))
+}
+
+// go: builtinCastDurationAsDurationSig.evalDuration L1
+// go: builtinCastDurationAsDurationSig.vecEvalDuration L2 (the vector driver of this body; it rounds from an unspecified fsp, the row version from the value's — RoundFrac returns the value unchanged when the fsp is already the target's — as in Go)
+// go: builtinCastDurationAsDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastDurationAsDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration)]
+pub fn cast_duration_as_duration(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    mut val: Duration,
+) -> Result<Option<Duration>, Error> {
+    if f.vector() {
+        val.fsp = UnspecifiedFsp;
+    }
+    let (res, err) = val.round_frac(f.tp.get_decimal(), &location(ctx));
+    err?;
+    Ok(Some(res))
+}
+
+// go: builtinCastJSONAsDurationSig.evalDuration L1
+// go: builtinCastJSONAsDurationSig.vecEvalDuration L2 (the vector driver of this body; its default branch's warning names the type with types.TypeStr ("time"), the row version's with "TIME", as in Go)
+// go: builtinCastJSONAsDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCastJSONAsDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration)]
+pub fn cast_json_as_duration(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    val: &BinaryJSON<'_>,
+) -> Result<Option<Duration>, Error> {
+    let tc = type_ctx(ctx);
+    let fsp = f.tp.get_decimal();
+    match val.type_code {
+        JSONTypeCodeDate | JSONTypeCodeDatetime | JSONTypeCodeTimestamp => {
+            let time = val.get_time_with_fsp(fsp);
+            let res = time.convert_to_duration()?;
+            let (res, err) = res.round_frac(fsp, &location(ctx));
+            err?;
+            Ok(Some(res))
+        }
+        JSONTypeCodeDuration => Ok(Some(val.get_duration())),
+        JSONTypeCodeString => {
+            let s = val.unquote()?;
+            let (res, _, err) = parse_duration(&tc, &s, fsp);
+            match err {
+                Err(e) if ErrTruncatedWrongVal.equal(&e) => tc.handle_truncate(Err(e))?,
+                other => other?,
+            }
+            Ok(Some(res))
+        }
+        _ => {
+            let name = if f.vector() {
+                type_str(f.tp.get_type())
+            } else {
+                "TIME"
+            };
+            let err = ErrTruncatedWrongVal
+                .gen_with_stack_by_args(vec![Arg::from(name), Arg::go_string(val.string())]);
+            tc.handle_truncate(Err(err))?;
+            Ok(None)
+        }
+    }
+}
+
+// go: builtinCastVectorFloat32AsUnsupportedSig.evalInt L1
+// go: builtinCastVectorFloat32AsUnsupportedSig.evalReal L1
+// go: builtinCastVectorFloat32AsUnsupportedSig.evalDecimal L1
+// go: builtinCastVectorFloat32AsUnsupportedSig.evalString L1
+// go: builtinCastVectorFloat32AsUnsupportedSig.evalTime L1
+// go: builtinCastVectorFloat32AsUnsupportedSig.evalDuration L1
+// go: builtinCastVectorFloat32AsUnsupportedSig.evalJSON L1
+// go: builtinCastVectorFloat32AsUnsupportedSig.Clone L2 (BuiltinFunc::clone_from_base)
+fn cast_vector_float32_as_unsupported(f: &BuiltinFunc, _ctx: &dyn EvalContext) -> Error {
+    Error::plain(format!(
+        "cannot cast from vector to {}",
+        type_str(f.tp.get_type())
+    ))
 }
 
 // ---------------------------------------------------------------- function classes
@@ -1081,6 +1640,72 @@ pub struct CastAsDecimalFunctionClass {
     pub tp: FieldType,
     /// `inUnion`.
     pub in_union: bool,
+}
+
+/// `castAsTimeFunctionClass`.
+#[derive(Clone, Debug)]
+pub struct CastAsTimeFunctionClass {
+    /// The embedded `baseFunctionClass`.
+    pub base: BaseFunctionClass,
+    /// `tp`.
+    pub tp: FieldType,
+}
+
+/// `castAsDurationFunctionClass`.
+#[derive(Clone, Debug)]
+pub struct CastAsDurationFunctionClass {
+    /// The embedded `baseFunctionClass`.
+    pub base: BaseFunctionClass,
+    /// `tp`.
+    pub tp: FieldType,
+}
+
+impl CastAsTimeFunctionClass {
+    // go: castAsTimeFunctionClass.getFunction L1
+    pub fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+        let bf = new_base_builtin_func(ctx, self.base.func_name, args, self.tp.clone())?;
+        let arg_tp = bf.args[0].get_type(&*ctx.get_eval_ctx()).eval_type();
+        Ok(match arg_tp {
+            ETInt => bf.with_sig(&builtinCastIntAsTimeSig),
+            ETReal => bf.with_sig(&builtinCastRealAsTimeSig),
+            ETDecimal => bf.with_sig(&builtinCastDecimalAsTimeSig),
+            ETDatetime | ETTimestamp => bf.with_sig(&builtinCastTimeAsTimeSig),
+            ETDuration => bf.with_sig(&builtinCastDurationAsTimeSig),
+            ETJson => bf.with_sig(&builtinCastJSONAsTimeSig),
+            ETString => bf.with_sig(&builtinCastStringAsTimeSig),
+            ETVectorFloat32 => bf.with_sig(&builtinCastVectorFloat32AsUnsupportedSig),
+            _ => return Err(cannot_cast(arg_tp, "Datetime")),
+        })
+    }
+}
+
+impl CastAsDurationFunctionClass {
+    // go: castAsDurationFunctionClass.getFunction L1
+    pub fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+        let bf = new_base_builtin_func(ctx, self.base.func_name, args, self.tp.clone())?;
+        let arg_tp = bf.args[0].get_type(&*ctx.get_eval_ctx()).eval_type();
+        Ok(match arg_tp {
+            ETInt => bf.with_sig(&builtinCastIntAsDurationSig),
+            ETReal => bf.with_sig(&builtinCastRealAsDurationSig),
+            ETDecimal => bf.with_sig(&builtinCastDecimalAsDurationSig),
+            ETDatetime | ETTimestamp => bf.with_sig(&builtinCastTimeAsDurationSig),
+            ETDuration => bf.with_sig(&builtinCastDurationAsDurationSig),
+            ETJson => bf.with_sig(&builtinCastJSONAsDurationSig),
+            ETString => bf.with_sig(&builtinCastStringAsDurationSig),
+            ETVectorFloat32 => bf.with_sig(&builtinCastVectorFloat32AsUnsupportedSig),
+            _ => return Err(cannot_cast(arg_tp, "Time")),
+        })
+    }
 }
 
 /// `bf.baseBuiltinFunc`: the base without the cast part.
@@ -1565,11 +2190,12 @@ pub fn build_cast_function(
     build_cast_function_with_check(ctx, expr, tp, false, false)
 }
 
-/// The CAST targets of D08.8 part 2b-2: a temporary stub (constitution art. 4.3).
-// glue: temporary stub of the castAsXxxFunctionClass not ported yet (D08.8 part 2b-2)
+/// The CAST targets of D08.8 part 2b-2b-ii (JSON, ARRAY, VECTOR): a temporary stub
+/// (constitution art. 4.3).
+// glue: temporary stub of the castAsXxxFunctionClass not ported yet (D08.8 part 2b-2b-ii)
 fn cast_not_ported(et: EvalType) -> Error {
     Error::plain(format!(
-        "tidb-rs: CAST to {} is not ported yet (D08.8 part 2b-2)",
+        "tidb-rs: CAST to {} is not ported yet (D08.8 part 2b-2b-ii)",
         et.to_string()
     ))
 }
@@ -1577,7 +2203,7 @@ fn cast_not_ported(et: EvalType) -> Error {
 /// BuildCastFunctionWithCheck builds a CAST ScalarFunction from the Expression and return
 /// error if any. Go returns the node with a nil signature together with an error; this
 /// returns only the error.
-// go: BuildCastFunctionWithCheck L2 (the error comes without the node; CAST to TIME/DURATION/JSON/VECTOR is a temporary stub)
+// go: BuildCastFunctionWithCheck L2 (the error comes without the node; CAST to JSON/VECTOR is a temporary stub)
 pub fn build_cast_function_with_check(
     ctx: &dyn BuildContext,
     expr: ExprRef,
@@ -1616,7 +2242,15 @@ pub fn build_cast_function_with_check(
             }
             .get_function(ctx, vec![expr])?
         }
-        ETDatetime | ETTimestamp | ETDuration | ETJson | ETVectorFloat32 => {
+        ETDatetime | ETTimestamp => {
+            drop(ectx);
+            CastAsTimeFunctionClass { base, tp }.get_function(ctx, vec![expr])?
+        }
+        ETDuration => {
+            drop(ectx);
+            CastAsDurationFunctionClass { base, tp }.get_function(ctx, vec![expr])?
+        }
+        ETJson | ETVectorFloat32 => {
             return Err(cast_not_ported(et));
         }
         _ => return Err(Error::plain(format!("cannot cast from {}", et.to_string()))),
@@ -1857,6 +2491,72 @@ pub fn wrap_with_cast_as_decimal(ctx: &dyn BuildContext, expr: ExprRef) -> Resul
         }
     }
     Ok(cast_expr)
+}
+
+/// WrapWithCastAsTime wraps `expr` with `cast` if the return type of expr is not same as
+/// type of the specified `tp` , otherwise, returns `expr` directly. Go changes the caller's
+/// `tp` in place; here `tp` is taken by value (spec §4).
+// go: WrapWithCastAsTime L2 (tp by value; returns the error BuildCastFunction logs)
+pub fn wrap_with_cast_as_time(
+    ctx: &dyn BuildContext,
+    expr: ExprRef,
+    mut tp: FieldType,
+) -> Result<ExprRef, Error> {
+    let ectx = ctx.get_eval_ctx();
+    let et = expr.get_type(&*ectx).into_owned();
+    drop(ectx);
+    let expr_tp = et.get_type();
+    if tp.get_type() == expr_tp
+        || ((expr_tp == TypeDate || expr_tp == TypeTimestamp) && tp.get_type() == TypeDatetime)
+    {
+        return Ok(expr);
+    }
+    match et.eval_type() {
+        ETInt => tp.set_decimal(MinFsp),
+        ETString | ETReal | ETJson => tp.set_decimal(MaxFsp),
+        ETDatetime | ETTimestamp | ETDuration => tp.set_decimal(et.get_decimal()),
+        ETDecimal => {
+            tp.set_decimal(et.get_decimal());
+            if tp.get_decimal() > MaxFsp {
+                tp.set_decimal(MaxFsp);
+            }
+        }
+        _ => {}
+    }
+    match tp.get_type() {
+        TypeDate => tp.set_flen(MaxDateWidth),
+        TypeDatetime | TypeTimestamp => {
+            tp.set_flen(MaxDatetimeWidthNoFsp);
+            if tp.get_decimal() > 0 {
+                tp.set_flen(tp.get_flen() + 1 + tp.get_decimal());
+            }
+        }
+        _ => {}
+    }
+    set_bin_chs_cln_flag(&mut tp);
+    build_cast_function(ctx, expr, tp)
+}
+
+/// WrapWithCastAsDuration wraps `expr` with `cast` if the return type of expr is not type
+/// duration, otherwise, returns `expr` directly.
+// go: WrapWithCastAsDuration L2 (returns the error BuildCastFunction logs)
+pub fn wrap_with_cast_as_duration(ctx: &dyn BuildContext, expr: ExprRef) -> Result<ExprRef, Error> {
+    let ectx = ctx.get_eval_ctx();
+    let x = expr.get_type(&*ectx).into_owned();
+    drop(ectx);
+    if x.get_type() == TypeDuration {
+        return Ok(expr);
+    }
+    let mut tp = new_field_type(TypeDuration);
+    match x.get_type() {
+        TypeDatetime | TypeTimestamp | TypeDate => tp.set_decimal(x.get_decimal()),
+        _ => tp.set_decimal(MaxFsp),
+    }
+    tp.set_flen(MaxDurationWidthNoFsp);
+    if tp.get_decimal() > 0 {
+        tp.set_flen(tp.get_flen() + 1 + tp.get_decimal());
+    }
+    build_cast_function(ctx, expr, tp)
 }
 
 #[cfg(test)]

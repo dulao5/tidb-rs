@@ -54,10 +54,28 @@ Go 的 `baseBuiltinCastFunc` = `baseBuiltinFunc` + `inUnion`。Rust 的 `Builtin
 - **签名**：都有逐行的副作用（`ProduceStrWithSpecifiedTp` 的截断 warning、`handleAllowedPacketOverflowed`、`from_binary` 的 `AppendWarning`），按 D08.1 spec §3.4 用默认的单遍驱动。
 - **行版本与向量版本的差异**（D08.1 spec §3.4 (c)，govec 两种模式都比较）：`builtinInternalFromBinarySig` 在 `cannotConvertStringAsWarning` 且非严格模式下转换失败时，行版本返回 `Transform` 已产生的部分，向量版本写入原始字节；函数体用 `f.vector()` 区分（"str" 和 "binlit" 记录都有走到这里的行，反证见 PR）。这是 Go 的行为差异，用户能看到（`tidb_enable_vectorized_expression` 切换时 `CAST(binary AS CHAR CHARSET ..)` 的结果不同）。 用户可见：打开向量化时 `CAST(b AS CHAR CHARSET gbk)` 返回非法的原始字节，外层的 `LENGTH`/`HEX` 报 ERROR 1300；已并入 upstream-pitfall #83（Lucky 的复现见该 issue）。
 
+### 3.5 CAST 到 DATETIME/DATE/TIMESTAMP 与 TIME（第 2b-2b-i 部分）
+
+- **函数类**：`castAsTimeFunctionClass`、`castAsDurationFunctionClass` 按参数的求值类型选 14 个签名（`{Int,Real,Decimal,String,Time,Duration,JSON}As{Time,Duration}`）；VECTOR 参数选 `builtinCastVectorFloat32AsUnsupportedSig`。
+- **`builtinCastVectorFloat32AsUnsupportedSig`**：Go 的每个 `evalXxx` 都只返回 `cannot cast from vector to <TypeStr(tp)>`，不求值参数（NULL 行也报错），没有向量版。Rust 用 `SigDrivers::Unsupported { err }`：任何结果类型的行驱动都返回这个错误，向量驱动返回 `baseBuiltinFunc.vecEvalXxx` 的错误；RPN 对没有单一结果类型的签名按函数的结果类型选 `VecEvalXxx`（Go 的 `ScalarFunction.VecEvalXxx` 就是这样）。
+- **`#[eval_fn]` 的 Time/Duration 结果**：`TimeOut`/`DurationOut`（`ResizeTime`/`ResizeGoDuration` + `MergeNulls`，与 Go 向量版相同）；DURATION 列只存纳秒，读回时用列的声明 fsp。
+- **读时钟**：`DurationAsTime` 与 JSON 中 TIME 值转 DATETIME 用 `getStmtTimestamp(ctx)`（`ctx.CurrentTime()`；Go 失败时退回 `gotime.Now()`）。govec 的 castCtx 第 5 个元素是固定的语句时间（Unix 纳秒，UTC，`WithCurrentTime`），回放用同一个值；向量里没有读真实时钟的记录。
+- **逐行版与向量版的差异**（D08.1 spec §3.4 (c)，每个驱动跟随各自的 Go 版本；govec 两种模式都比较，反证见 PR）：
+
+| 签名 | 逐行版 | 向量版 | 用户可见（按代码推断，未在集群上实测） |
+|---|---|---|---|
+| `StringAsTime` | `ParseTime` 返回的 `*strconv.NumError`（如 `"2024-1-99999999999999999999"`，Atoi 越界）不是时间错误，`handleInvalidTimeError` 原样返回，语句报错 `strconv.Atoi: parsing ...: value out of range` | 先换成 `ErrIncorrectDatetimeValue`，非严格模式下为 warning + NULL | 是：同一语句是报错还是 warning 取决于 `tidb_enable_vectorized_expression` |
+| `JSONAsDuration` 默认分支 | warning 写 `Truncated incorrect TIME value` | `types.TypeStr(tp)`，即 `time` | 是：warning 的文字不同 |
+| `DurationAsTime` | 参数值自带的 fsp | 结果的声明 fsp | 参数是函数、值的 fsp 与声明不同时（govec "to-fsp"） |
+| `DurationAsDuration` | 值的 fsp 等于目标 fsp 时 `RoundFrac` 原样返回 | 从 `UnspecifiedFsp` 取整 | 同上 |
+| `DecimalAsDuration`、`StringAsDuration` | `ErrTruncatedWrongVal` 交给 `ec.HandleError` | `tc.HandleTruncate` | 只在错误级别与 truncate 标志不一致时；SQL 中两者都来自 SQL mode，按推断看不到 |
+
+  外层 CAST 读内层 `CAST(json AS TIME(n))` 的值时，内层返回 JSON 值自带的 fsp（`val.GetDuration()`），与声明的 n 不同：这就是 Lucky 在 #88 指出的"值的 fsp ≠ 声明的 fsp"，govec "to-fsp" 300 条覆盖，其中 92 条两种模式的结果不同。
+
 ## 4. 偏离与豁免
 
 1. **`BuildCastFunction*`/`WrapWithCastAs*` 返回 `Result`**：Go 记日志并返回 `Function == nil` 的节点（之后使用会空指针 panic）；Rust 返回错误。
-2. **CAST 到 TIME/DURATION/JSON/VECTOR**：返回 "not ported yet (D08.8 part 2b-2)" 错误（临时桩，宪章第四条 3）。`newBaseBuiltinFuncWithTp` 对这些求值类型的参数同样返回这个错误。
+2. **CAST 到 JSON/VECTOR**：返回 "not ported yet (D08.8 part 2b-2b-ii)" 错误（临时桩，宪章第四条 3）。`newBaseBuiltinFuncWithTp` 对这两种求值类型的参数同样返回这个错误。CAST 到 DATETIME/DATE/TIMESTAMP/TIME 已移植（2b-2b-i）。
 3. ~~TIME/DURATION/JSON/VECTOR 参数的 INT/REAL/DECIMAL/STRING 签名只有描述~~：第 2b-2a 部分已移植（13 个签名，`builtinCastVectorFloat32AsUnsupportedSig` 仍为临时桩，随 CAST 到 VECTOR 一起）。
 4. **`TryPushCastIntoControlFunctionForHybridType`**：IF/CASE/ELT 未移植，tidb-rs 建不出这样的节点；遇到时 `unimplemented!`（临时桩，D08.9）。
 5. **`CastStringAs{Int,Real,Decimal}` 的前置分支**（hybrid、二进制字面量、`CanImplicitEval*`）：函数类不会对这样的参数选中这些签名（选 `IntAsInt` 等），不可达，未移植（L2）。
@@ -68,7 +86,9 @@ Go 的 `baseBuiltinCastFunc` = `baseBuiltinFunc` + `inUnion`。Rust 的 `Builtin
 10. **`adjustRetFtForCastString` 中 Go 的 `intest.Assert` 分支**（ENUM/SET 带 `EnumSetAsIntFlag`、未知类型）：按 Go 的生产构建直接返回（D08.1 spec §4 第 6 条）。
 11. **`newBaseBuiltinFuncWithTp` 不检查 nil 上下文**（引用不会为空）；参数个数与类型个数不同时与 Go 一样 panic。
 12. **向量驱动读 DURATION 参数的 fsp**（2b-2a）：Go 的向量版用参数的声明类型 `b.args[0].GetType(ctx).GetDecimal()` 读 `GoDurations`，逐行版用 `EvalDuration` 返回值自带的 fsp；`DurationView` 按 Go 的向量版取声明的 fsp，行驱动用返回值的 fsp（各自跟随，§3.4 (c)；列参数两者相同，govec 未见差异）。`builtinCastDurationAs{Real,Decimal}Sig` 的向量版在循环**之前**对声明的 fsp 做一次 `CheckFsp`，所以全 NULL 或 0 行时也会报错；Rust 在第一个非 NULL 行检查（只在声明的 fsp 非法时有差别，SQL 构造不出这样的类型）。
-13. **`vectorized() == false` 的签名的向量求值**（2b-2a）：Go 中这样的签名没有自己的 `vecEvalXxx`，`VecEvalXxx` 到达 `baseBuiltinFunc.vecEvalXxx` 并报错（执行器会改用逐行求值）。`BuiltinFunc::vec_eval` 现在对 `SigDesc.vectorized == false` 返回同样的错误（此前直接调用宏生成的向量驱动）；govec 中 `VectorFloat32AsString` 的 514 条记录覆盖。执行器按 `Vectorizable` 改用逐行求值属于 D08.1 2b（`VectorizedFilter`/`chunk_executor`）。
-14. **TIME/DURATION/JSON/VECTOR 类型的常量在向量驱动中**（`fill_constant`，Go `genVecFromConstExpr` 的对应分支）已移植，但 govec 的 `from` 记录只用列参数：常量参数会被 `FoldConstant` 折叠，`sfDump` 也还不能输出这些种类的 Datum。缺口记在 plan.md 2b-2b。
+13. **签名没有自己的向量版时的向量求值**：Go 中 `ScalarFunction.VecEvalXxx` 调用签名的 `vecEvalXxx`，不看 `vectorized()`；签名没有定义 `vecEvalXxx` 时到达 `baseBuiltinFunc.vecEvalXxx` 并报错（执行器按 `Vectorizable` 改用逐行求值，属于 D08.1 2b）。2b-2a 曾用 `SigDesc.vectorized == false` 判断；2b-2b-i 按 Lucky 在 #88 的意见改为由驱动决定：没有向量版的签名写 `#[eval_fn(.., novec)]`，向量驱动返回 base 的错误，`vec_eval` 不再看 `vectorized`（D08.1 spec §3.5）。`VectorFloat32AsString` 现在是 `novec`，govec 的记录不变。
+14. **TIME/DURATION/JSON/VECTOR 类型的常量**：govec 的 `sfDump`/`d2DatumInOf` 已能输出这四种 Datum；"to-const" 400 条覆盖 CAST 到 DATETIME/DATE/TIMESTAMP/TIME 的常量参数（构建时折叠，比较折叠后的常量）。向量驱动的 `fill_constant` 只在未折叠时用到，CAST 的常量参数总会被折叠，所以这条路径等以后的函数族覆盖。
+15. **`WrapWithCastAsTime` 的 `tp`**：Go 修改调用方传入的 `*FieldType`（设置 decimal、flen 和 binary charset）；Rust 按值接收（L2）。`newBaseBuiltinFuncWithTp` 每次新建这个类型，观察不到差别。
+16. **`getStmtTimestamp`**（helper.go，D08.12）：这里是边界桩，只做 `ctx.CurrentTime()` 与失败时的 `gotime.Now()`；Go 中 `intest` 构建下的随机时区与 `injectNow` failpoint 只在测试中出现。
 
 没有面向用户的行为差异（`docs/compatibility.md` 不变）。
