@@ -943,6 +943,13 @@ fn new_function_impl_inner(
         )));
     };
     let f = fc.get_function(ctx, func_args)?;
+    // §3.2: no v8.5.8 signature has a TypeUnspecified type, so the node's type and the
+    // signature's are one (Lucky, review of #95).
+    debug_assert_ne!(
+        f.tp.get_type(),
+        mysql::TypeUnspecified,
+        "{func_name}: signature type TypeUnspecified (D08.1 spec §3.2)"
+    );
     let builtin_ret_tp = f.tp.clone();
     if builtin_ret_tp.get_type() != mysql::TypeUnspecified
         || ret_type.get_type() == mysql::TypeUnspecified

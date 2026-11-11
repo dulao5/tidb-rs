@@ -762,3 +762,393 @@ pub fn table_info_to_schema_and_names(
     schema.set_keys(keys);
     Ok((schema, names))
 }
+
+// ------------------------------------------------------------------ vector evaluation (part 2b)
+
+/// The error of an evaluation type no evaluation path handles.
+// glue: Go errors.Errorf("unsupported type %s during evaluation", evalType)
+pub(crate) fn unsupported_eval_type(et: tidb_parser::types::EvalType) -> Error {
+    Error::plain(format!(
+        "unsupported type {} during evaluation",
+        et.to_string()
+    ))
+}
+
+/// VecEvalBool does the same thing as EvalBool but it works in a vectorized manner.
+///
+/// Go reuses the caller's `selected`/`nulls` slices and a pooled `sel`/`isZero`; here the
+/// vectors are taken and returned (mapping rule M-POOL). The input's `Sel()` is cleared for
+/// the evaluation and restored before returning, as Go's `defer`.
+// go: VecEvalBool L2 (selected/nulls by value; pools of sel/isZero/columns not ported, M-POOL)
+#[allow(clippy::too_many_arguments)]
+pub fn vec_eval_bool(
+    ctx: &dyn EvalContext,
+    st: &EvalState,
+    rpn: &mut crate::eval::RpnState,
+    vec_enabled: bool,
+    expr_list: &[ExprRef],
+    input: &mut tidb_chunk::Chunk,
+    selected: Vec<bool>,
+    nulls: Vec<bool>,
+) -> Result<(Vec<bool>, Vec<bool>), Error> {
+    // If input.Sel() != nil, we will call input.SetSel(nil) to clear the sel slice in input chunk.
+    // After the function finished, then we reset the input.Sel().
+    // The caller will handle the input.Sel() and selected slices.
+    let saved = input.sel().map(<[usize]>::to_vec);
+    input.set_sel(None);
+    let r = vec_eval_bool_inner(ctx, st, rpn, vec_enabled, expr_list, input, selected, nulls);
+    input.set_sel(saved);
+    r
+}
+
+// glue: body of VecEvalBool between Go's SetSel(nil) and the deferred SetSel
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_range_loop)] // index loops kept in Go's shape
+fn vec_eval_bool_inner(
+    ctx: &dyn EvalContext,
+    st: &EvalState,
+    rpn: &mut crate::eval::RpnState,
+    vec_enabled: bool,
+    expr_list: &[ExprRef],
+    input: &mut tidb_chunk::Chunk,
+    mut selected: Vec<bool>,
+    mut nulls: Vec<bool>,
+) -> Result<(Vec<bool>, Vec<bool>), Error> {
+    use tidb_parser::types::{ETInt, ETReal};
+    let n = input.num_rows();
+    selected.clear();
+    selected.resize(n, false);
+    nulls.clear();
+    nulls.resize(n, false);
+
+    let mut sel: Vec<usize> = (0..n).collect();
+    input.set_sel(Some(sel.clone()));
+
+    // In isZero slice, -1 means Null, 0 means zero, 1 means not zero
+    let mut is_zero = vec![0i8; n];
+    let tc = type_ctx(ctx);
+    for expr in expr_list {
+        let tp = expr.get_type(ctx).into_owned();
+        let mut e_type = tp.eval_type();
+        if crate::builtin_cast::can_implicit_eval_real(expr) {
+            e_type = ETReal;
+        }
+        let mut buf = crate::eval::rt::empty_column();
+
+        // Take the implicit evalReal path if possible.
+        if crate::builtin_cast::can_implicit_eval_real(expr) {
+            implicit_eval_real(ctx, st, rpn, vec_enabled, expr, input, &mut buf)?;
+        } else {
+            eval_expr(ctx, st, rpn, vec_enabled, expr, e_type, input, &mut buf)?;
+        }
+
+        to_bool(&tc, &tp, e_type, &buf, &sel, &mut is_zero)?;
+
+        let mut j = 0;
+        let is_eq_cond_from_in = is_eq_cond_from_in(expr);
+        for i in 0..sel.len() {
+            if is_zero[i] == -1 {
+                if e_type != ETInt && !is_eq_cond_from_in {
+                    continue;
+                }
+                // In this case, we set this row to null and let it pass this filter.
+                // The null flag may be set to false later by other expressions in some cases.
+                nulls[sel[i]] = true;
+                sel[j] = sel[i];
+                j += 1;
+                continue;
+            }
+
+            if is_zero[i] == 0 {
+                continue;
+            }
+            sel[j] = sel[i]; // this row passes this filter
+            j += 1;
+        }
+        sel.truncate(j);
+        input.set_sel(Some(sel.clone()));
+    }
+
+    for &i in &sel {
+        if !nulls[i] {
+            selected[i] = true;
+        }
+    }
+
+    Ok((selected, nulls))
+}
+
+/// toBool: `isZero[i]` of each of the first `len(sel)` rows of `buf` (-1 NULL, 0 zero, 1
+/// not zero).
+// go: toBool L1
+#[allow(clippy::needless_range_loop)] // index loops kept in Go's shape
+pub fn to_bool(
+    tc: &tidb_types::context::Context,
+    tp: &FieldType,
+    e_type: tidb_parser::types::EvalType,
+    buf: &tidb_chunk::Column,
+    sel: &[usize],
+    is_zero: &mut [i8],
+) -> Result<(), Error> {
+    use tidb_parser::types::{
+        ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
+        ETVectorFloat32,
+    };
+    let flag = |zero: bool| if zero { 0 } else { 1 };
+    match e_type {
+        ETInt => {
+            let i64s = buf.int64s();
+            for i in 0..sel.len() {
+                is_zero[i] = if buf.is_null(i) {
+                    -1
+                } else {
+                    flag(i64s[i].get() == 0)
+                };
+            }
+        }
+        ETReal => {
+            let f64s = buf.float64s();
+            for i in 0..sel.len() {
+                is_zero[i] = if buf.is_null(i) {
+                    -1
+                } else {
+                    flag(f64s[i].get() == 0.0)
+                };
+            }
+        }
+        ETDuration => {
+            let d64s = buf.go_durations();
+            for i in 0..sel.len() {
+                is_zero[i] = if buf.is_null(i) {
+                    -1
+                } else {
+                    flag(d64s[i].get() == 0)
+                };
+            }
+        }
+        ETDatetime | ETTimestamp => {
+            for i in 0..sel.len() {
+                is_zero[i] = if buf.is_null(i) {
+                    -1
+                } else {
+                    flag(buf.get_time(i).is_zero())
+                };
+            }
+        }
+        ETString => {
+            for i in 0..sel.len() {
+                if buf.is_null(i) {
+                    is_zero[i] = -1;
+                    continue;
+                }
+                let mut f_val = 0f64;
+                let s_val = buf.get_string(i);
+                if tp.hybrid() {
+                    match tp.get_type() {
+                        mysql::TypeSet | mysql::TypeEnum => {
+                            f_val = s_val.len() as f64;
+                            if f_val == 0.0 {
+                                // The elements listed in the column specification are assigned index numbers, beginning
+                                // with 1. The index value of the empty string error value (distinguish from a "normal"
+                                // empty string) is 0. Thus we need to check whether it's an empty string error value when
+                                // `fVal==0`.
+                                for (idx, elem) in
+                                    tp.get_elems().unwrap_or_default().iter().enumerate()
+                                {
+                                    if elem.as_slice() == s_val {
+                                        f_val = (idx + 1) as f64;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        mysql::TypeBit => {
+                            let bl = tidb_types::binary_literal::BinaryLiteral(
+                                buf.get_bytes(i).to_vec(),
+                            );
+                            let (i_val, r) = bl.to_int(tc);
+                            r?;
+                            f_val = i_val as f64;
+                        }
+                        _ => {}
+                    }
+                } else {
+                    let (v, r) = tidb_types::convert::str_to_float(tc, s_val, false);
+                    r?;
+                    f_val = v;
+                }
+                is_zero[i] = flag(f_val == 0.0);
+            }
+        }
+        ETDecimal => {
+            for i in 0..sel.len() {
+                is_zero[i] = if buf.is_null(i) {
+                    -1
+                } else {
+                    flag(buf.get_decimal(i).is_zero())
+                };
+            }
+        }
+        ETJson => {
+            for i in 0..sel.len() {
+                is_zero[i] = if buf.is_null(i) {
+                    -1
+                } else {
+                    flag(buf.get_json(i).is_zero())
+                };
+            }
+        }
+        ETVectorFloat32 => {
+            for i in 0..sel.len() {
+                is_zero[i] = if buf.is_null(i) {
+                    -1
+                } else {
+                    flag(buf.get_vector_float32(i).is_zero_value())
+                };
+            }
+        }
+        _ => return Err(unsupported_eval_type(e_type)),
+    }
+    Ok(())
+}
+
+/// implicitEvalReal: `EvalExpr` as ETReal for an expression `CanImplicitEvalReal` accepts.
+// go: implicitEvalReal L1
+pub fn implicit_eval_real(
+    ctx: &dyn EvalContext,
+    st: &EvalState,
+    rpn: &mut crate::eval::RpnState,
+    vec_enabled: bool,
+    expr: &ExprRef,
+    input: &tidb_chunk::Chunk,
+    result: &mut tidb_chunk::Column,
+) -> Result<(), Error> {
+    use tidb_parser::types::ETReal;
+    if expr.vectorized() && vec_enabled {
+        crate::eval::RpnProgram::compile_as(expr, ETReal).eval(ctx, st, rpn, input, result)
+    } else {
+        let n = input.num_rows();
+        let mut out = crate::eval::rt::RealOut::new(result, n, &[]);
+        for ind in 0..n {
+            match expr.eval_real(ctx, st, input.get_row(ind))? {
+                None => out.set_null(ind),
+                Some(v) => out.set(ind, v),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// EvalExpr evaluates this expr according to its type.
+/// And it selects the method for evaluating expression based on
+/// the environment variables and whether the expression can be vectorized.
+/// Note: the input argument `evalType` is needed because of that when `expr` is
+/// of the hybrid type(ENUM/SET/BIT), we need the invoker decide the actual EvalType.
+///
+/// The vector path runs `expr` compiled for the RPN driver with the root read as `evalType`
+/// (Go: `expr.VecEvalXxx`); it is compiled on each call (an executor that evaluates the same
+/// expression over many chunks keeps an [`crate::eval::RpnProgram`] instead).
+// go: EvalExpr L2 (vector path through RpnProgram::compile_as, N4 §3.4)
+#[allow(clippy::too_many_arguments)]
+pub fn eval_expr(
+    ctx: &dyn EvalContext,
+    st: &EvalState,
+    rpn: &mut crate::eval::RpnState,
+    vec_enabled: bool,
+    expr: &ExprRef,
+    eval_type: tidb_parser::types::EvalType,
+    input: &tidb_chunk::Chunk,
+    result: &mut tidb_chunk::Column,
+) -> Result<(), Error> {
+    use crate::eval::rt::{DecimalOut, DurationOut, IntOut, RealOut, TimeOut};
+    use tidb_parser::types::{
+        ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
+        ETVectorFloat32,
+    };
+    if expr.vectorized() && vec_enabled {
+        return match eval_type {
+            ETInt | ETReal | ETDuration | ETDatetime | ETTimestamp | ETString | ETJson
+            | ETVectorFloat32 | ETDecimal => crate::eval::RpnProgram::compile_as(expr, eval_type)
+                .eval(ctx, st, rpn, input, result),
+            _ => Err(unsupported_eval_type(eval_type)),
+        };
+    }
+    let n = input.num_rows();
+    let row = |ind: usize| input.get_row(ind);
+    match eval_type {
+        ETInt => {
+            let mut out = IntOut::new(result, n, &[]);
+            for ind in 0..n {
+                match expr.eval_int(ctx, st, row(ind))? {
+                    None => out.set_null(ind),
+                    Some(v) => out.set(ind, v),
+                }
+            }
+        }
+        ETReal => {
+            let mut out = RealOut::new(result, n, &[]);
+            for ind in 0..n {
+                match expr.eval_real(ctx, st, row(ind))? {
+                    None => out.set_null(ind),
+                    Some(v) => out.set(ind, v),
+                }
+            }
+        }
+        ETDuration => {
+            let mut out = DurationOut::new(result, n, &[]);
+            for ind in 0..n {
+                match expr.eval_duration(ctx, st, row(ind))? {
+                    None => out.set_null(ind),
+                    Some(v) => out.set(ind, v),
+                }
+            }
+        }
+        ETDatetime | ETTimestamp => {
+            let mut out = TimeOut::new(result, n, &[]);
+            for ind in 0..n {
+                match expr.eval_time(ctx, st, row(ind))? {
+                    None => out.set_null(ind),
+                    Some(v) => out.set(ind, v),
+                }
+            }
+        }
+        ETString => {
+            result.reserve_string(n);
+            for ind in 0..n {
+                match expr.eval_string(ctx, st, row(ind))? {
+                    None => result.append_null(),
+                    Some(v) => result.append_string(&v),
+                }
+            }
+        }
+        ETJson => {
+            result.reserve_json(n);
+            for ind in 0..n {
+                match expr.eval_json(ctx, st, row(ind))? {
+                    None => result.append_null(),
+                    Some(v) => result.append_json(&v),
+                }
+            }
+        }
+        ETVectorFloat32 => {
+            result.reserve_vector_float32(n);
+            for ind in 0..n {
+                match expr.eval_vector_float32(ctx, st, row(ind))? {
+                    None => result.append_null(),
+                    Some(v) => result.append_vector_float32(&v),
+                }
+            }
+        }
+        ETDecimal => {
+            let mut out = DecimalOut::new(result, n, &[]);
+            for ind in 0..n {
+                match expr.eval_decimal(ctx, st, row(ind))? {
+                    None => out.set_null(ind),
+                    Some(v) => out.set(ind, v),
+                }
+            }
+        }
+        _ => return Err(unsupported_eval_type(expr.get_type(ctx).eval_type())),
+    }
+    Ok(())
+}

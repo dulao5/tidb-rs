@@ -88,3 +88,13 @@ D08.2 第 1 部分（`specs/D08.2-funcs`）移植了函数注册表 `funcs`（�
 
 - 第 1 步部分完成：CAST 到 INT/REAL/DECIMAL 的签名与 `BuildCastFunction*`、`WrapWithCastAs{Int,Real,Decimal}`、`FoldConstant`（`specs/D08.8-cast`）。框架的变化：`#[eval_fn]` 支持 `Decimal` 结果与 `&MyDecimal` 参数；`SigView::vector()` 让函数体在 Go 的向量版与行版对用户可见地不同时各自跟随（§3.4 (c)，govec 在 CAST 中找到 4 处）；`PropagateType` 已移植。
 - 仍待：CAST 到 STRING/TIME/DURATION/JSON（`newBaseBuiltinFuncWithTp` 要包这些 CAST）、RPN 列引用按签名的求值类型转换（FLOAT/hybrid 列，D08.8 plan 第 2 部分第 1 条），然后 `NewFunction*`、EvaluatorSuite、chunk_executor。
+
+## 第 2 部分 2b（完成，D08.8 2b-3c）
+
+- `evaluator.rs`：`EvaluatorSuite`（列表达式用 `ColumnSwapHelper` 换入，其余在构建时编译为 `RpnProgram`）、`GetOptionalEvalPropsForExpr`。
+- `chunk_executor.rs`：`Vectorizable`/`checkSequenceFunction`/`HasGetSetVarFunc`/`HasAssignSetVarFunc`、`VectorizedExecute`、`evalOneVec`（BIT/FLOAT/ENUM/SET 结果的转换）/`evalOneColumn`/`evalOneCell`、`executeToXxx`、`VectorizedFilter[ConsiderNull]`/`rowBasedFilter`/`vectorizedFilter`。
+- `expression.rs`：`VecEvalBool`、`toBool`、`EvalExpr`、`implicitEvalReal`；`eval/mod.rs`：`RpnProgram::compile_as`。
+- govec `cast` 领域追加 `evsuite`/`evfilter`/`evbool`/`evexpr`/`evexec`（tracker `cast2b3c.go`）。
+- #95 后续：`function_class_registry` 测试（每个 `impl FunctionClass` 都登记在 `PORTED_FUNCTION_CLASSES`）；`newFunctionImpl` 中 `debug_assert` 签名类型不是 `TypeUnspecified`。
+- 仍在 2b 范围之外：`builtin_vectorized.go` 的 `vecEvalIntByRows`/`vecEvalStringByRows`、局部列池（随第一个用到它们的函数族；列池按 M-POOL 不移植）；`Column.EvalVirtualColumn`（随生成列）。
+

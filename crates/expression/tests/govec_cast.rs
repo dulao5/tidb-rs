@@ -7,6 +7,8 @@
 //!
 //! `GOVEC_CAST_FILES` (comma-separated paths) replays extra-seed artifacts as well.
 
+mod cast_eval;
+
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -657,7 +659,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
             });
             json!({ "res": res, "bwarns": warns(&ev.truncate_warnings(0)) })
         }
-        _ => panic!("cast: op {op}"),
+        _ => cast_eval::exec(op, p).unwrap_or_else(|| panic!("cast: op {op}")),
     }
 }
 
@@ -669,7 +671,9 @@ fn replay(path: &str) {
     let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(header["domain"], "cast");
     let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    if std::env::var("GOVEC_PANIC").is_err() {
+        std::panic::set_hook(Box::new(|_| {}));
+    }
     let mut fails = vec![];
     let mut n = 0;
     for line in lines {
@@ -704,7 +708,9 @@ fn replay(path: &str) {
 
 #[test]
 fn govec_cast() {
-    replay(&vectors());
+    if std::env::var("GOVEC_CAST_SKIP_MAIN").is_err() {
+        replay(&vectors());
+    }
     if let Ok(files) = std::env::var("GOVEC_CAST_FILES") {
         for f in files.split(',').filter(|f| !f.is_empty()) {
             replay(f);

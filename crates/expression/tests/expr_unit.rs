@@ -191,3 +191,57 @@ fn type_infer_for_null_skips_parameter_markers() {
         "NULL constant inferred"
     );
 }
+
+/// `Vectorizable`, `checkSequenceFunction`, `HasGetSetVarFunc` and `HasAssignSetVarFunc`
+/// look at function names only; the functions they name (sequences, user variables) are not
+/// ported yet, so the nodes here are CAST nodes renamed.
+#[test]
+fn vectorizable_by_function_names() {
+    use tidb_expression::builtin_cast::build_cast_function;
+    use tidb_expression::chunk_executor::{
+        has_assign_set_var_func, has_get_set_var_func, vectorizable,
+    };
+    use tidb_expression::expression::{Expr, ExprRef};
+    use tidb_parser::model::CIStr;
+    use tidb_types::field_type::new_field_type;
+
+    let ev = es::new_eval_context(vec![]);
+    let ctx = es::new_expr_context(vec![es::with_eval_ctx(std::sync::Arc::clone(&ev))]);
+    let col = Expr::Column(tidb_expression::column::Column {
+        unique_id: 1,
+        ret_type: new_field_type(tidb_base::mysql::TypeLonglong),
+        ..Default::default()
+    })
+    .into_ref();
+    let named = |name: &str, arg: ExprRef| -> ExprRef {
+        let e = build_cast_function(&*ctx, arg, new_field_type(tidb_base::mysql::TypeLonglong))
+            .unwrap();
+        let mut sf = e.as_scalar_function().unwrap().clone();
+        sf.func_name = CIStr::new(name);
+        Expr::ScalarFunction(sf).into_ref()
+    };
+    let plain = named("cast", col.clone());
+    assert!(vectorizable(std::slice::from_ref(&plain)));
+    // GetVar / SetVar anywhere in the tree.
+    let getvar = named("getvar", col.clone());
+    assert!(has_get_set_var_func(&named("cast", getvar.clone())));
+    assert!(!vectorizable(&[plain.clone(), named("cast", getvar)]));
+    assert!(has_get_set_var_func(&named("setvar", col.clone())));
+    // SetVar assigns only when an argument is a function.
+    assert!(!has_assign_set_var_func(&named("setvar", col.clone())));
+    assert!(has_assign_set_var_func(&named(
+        "cast",
+        named("setvar", plain.clone())
+    )));
+    // Sequences: nextval with another sequence function, or two nextval.
+    let (next, last, set) = (
+        named("nextval", col.clone()),
+        named("lastval", col.clone()),
+        named("setval", col.clone()),
+    );
+    assert!(vectorizable(&[next.clone(), plain.clone()]));
+    assert!(!vectorizable(&[next.clone(), last.clone()]));
+    assert!(!vectorizable(&[next.clone(), set.clone()]));
+    assert!(!vectorizable(&[next.clone(), next.clone()]));
+    assert!(vectorizable(&[last, set]));
+}

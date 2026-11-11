@@ -74,5 +74,5 @@ CAST 到 JSON、JSON ARRAY、VECTOR（spec §3.6），`WrapWithCastAsJSON/Vector
 - **#95 评审的后续**：(1) 加一个检查，保证已移植的函数类都登记到了 `builtin_registry::function_class`；(2) 移植 `DisableParseJSONFlag4Expr` 的第一个调用方（JSON 函数、JSON 比较、`MEMBER OF`）时补 govec 记录，包括 v8.5.8 上 `CAST('[1]' AS JSON) = '[1]'` 返回 0（D08.12 交接清单）；(3) 可选：`get_function` 之后 `debug_assert!` 签名类型不是 `TypeUnspecified`。
 
 - **2b-3b**：常量传播（`constant_propagation.go`，D08.2）与 `builtin_func_param.go`、`grouping_sets.go`、`simple_rewriter.go`（依赖允许的部分，否则登记豁免）。常量传播要构建比较函数（`NewFunction(ast.EQ, ..)`），而比较函数族（D08.4）还没有移植：先确认最小依赖，必要时与 D08.4 的第一批签名一起做。
-- **2b-3c**：D08.1 2b：`EvaluatorSuite`（evaluator.go）、`chunk_executor.go`（`VectorizedFilter`、`evalOne*`、`executeTo*`，含不可向量化表达式回退到逐行求值）、`VecEvalBool`、`toBool`、`EvalExpr`、`implicitEvalReal`。
+- **2b-3c**（完成）：D08.1 2b 的求值入口（EvaluatorSuite、chunk_executor、VecEvalBool/toBool/EvalExpr），govec `ev*` op；#95 后续 (1)(3) 已做（`function_class_registry` 测试、`TypeUnspecified` 的 `debug_assert`）。
 - **第一个 `funcs` 函数族移植时**：在 `builtin_registry::function_class` 中登记；给 govec `newfunc` 加上这些函数名的记录，覆盖 `fold` 0/1/-1 与 `TryFold` 截断 warning（目前测不到，D08.1 spec §4 第 14 条）。
