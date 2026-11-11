@@ -43,6 +43,9 @@ use tidb_types::context::{
 };
 
 use crate::errctx;
+use tidb_memory::action::LogOnExceed;
+use tidb_memory::tracker::{Tracker, init_tracker};
+use tidb_model::TableItemID;
 
 static TASK_ID_ALLOC: AtomicU64 = AtomicU64::new(0);
 
@@ -450,6 +453,10 @@ pub struct StatementContext {
     /// share` clause and the `for share` execution is enabled by
     /// `tidb_enable_noop_functions`, no locks should be acquired in this case.
     pub for_share_lock_enabled_by_noop: bool,
+    /// MemTracker is used to track and limit the memory usage of the statement.
+    pub mem_tracker: Option<Arc<Tracker>>,
+    /// DiskTracker is used to track the disk usage of the statement.
+    pub disk_tracker: Option<Arc<Tracker>>,
 }
 
 impl std::fmt::Debug for StatementContext {
@@ -583,6 +590,8 @@ pub fn new_stmt_ctx_with_time_zone(tz: Arc<Location>) -> StatementContext {
         stale_tso_provider: Mutex::new(StaleTSOProvider::default()),
         related_table_ids: HashSet::new(),
         for_share_lock_enabled_by_noop: false,
+        mem_tracker: None,
+        disk_tracker: None,
     }
 }
 
@@ -1290,10 +1299,85 @@ impl StatementContext {
         Arc::clone(self.build_pb_ctx_cache.get_or_init(create))
     }
 
+    /// InitDiskTracker initializes the sc.DiskTracker, use cache to avoid allocation.
+    ///
+    /// Go re-initializes a tracker kept in the statement's cache; here a new tracker is
+    /// created (N2 §3.4: no reuse of per-statement objects).
+    // go: StatementContext.InitDiskTracker L2 (new tracker instead of the cached one, N2 3.4)
+    pub fn init_disk_tracker(&mut self, label: isize, bytes_limit: i64) {
+        let t = Arc::new(Tracker::default());
+        init_tracker(&t, label, bytes_limit, Some(LogOnExceed::new(0)));
+        self.disk_tracker = Some(t);
+    }
+
+    /// InitMemTracker initializes the sc.MemTracker, use cache to avoid allocation.
+    ///
+    /// Go re-initializes a tracker kept in the statement's cache; here a new tracker is
+    /// created (N2 §3.4: no reuse of per-statement objects).
+    // go: StatementContext.InitMemTracker L2 (new tracker instead of the cached one, N2 3.4)
+    pub fn init_mem_tracker(&mut self, label: isize, bytes_limit: i64) {
+        let t = Arc::new(Tracker::default());
+        init_tracker(&t, label, bytes_limit, Some(LogOnExceed::new(0)));
+        self.mem_tracker = Some(t);
+    }
+
+    /// DetachMemDiskTracker detaches the memory and disk tracker from the sessionTracker.
+    ///
+    /// Go's nil receiver check is the caller holding no statement context.
+    // go: StatementContext.DetachMemDiskTracker L1
+    pub fn detach_mem_disk_tracker(&self) {
+        if let Some(t) = &self.mem_tracker {
+            // Go's Detach returns no error; the Rust `Consume` path's error is not reachable
+            // from a detach (no kill signal is checked when releasing).
+            let _ = t.detach();
+        }
+        if let Some(t) = &self.disk_tracker {
+            let _ = t.detach();
+        }
+    }
+
     /// The normalized plan of `SetPlanDigest` (the digest itself waits for `parser.Digest`).
     // glue: planNormalized of GetPlanDigest without the digest
     pub fn plan_normalized(&self) -> &str {
         &self.plan_normalized
+    }
+}
+
+/// StatsLoadResult indicates result for StatsLoad
+#[derive(Clone, Debug, Default)]
+pub struct StatsLoadResult {
+    /// Item is the stats item that was loaded.
+    pub item: TableItemID,
+    /// Error is the load error, if any.
+    pub error: Option<Error>,
+}
+
+impl StatsLoadResult {
+    /// HasError returns whether result has error
+    // go: StatsLoadResult.HasError L1
+    pub fn has_error(&self) -> bool {
+        self.error.is_some()
+    }
+
+    /// ErrorMsg returns StatsLoadResult err msg
+    // go: StatsLoadResult.ErrorMsg L1
+    pub fn error_msg(&self) -> Vec<u8> {
+        let Some(err) = &self.error else {
+            return Vec::new();
+        };
+        let mut b = b"tableID:".to_vec();
+        b.extend_from_slice(self.item.table_id.to_string().as_bytes());
+        b.extend_from_slice(b", id:");
+        b.extend_from_slice(self.item.id.to_string().as_bytes());
+        b.extend_from_slice(b", isIndex:");
+        b.extend_from_slice(if self.item.is_index {
+            b"true"
+        } else {
+            b"false"
+        });
+        b.extend_from_slice(b", err:");
+        b.extend_from_slice(&err.error());
+        b
     }
 }
 

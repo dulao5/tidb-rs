@@ -3731,6 +3731,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-expression"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "parking_lot 0.12.5",
+ "serde_json",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
+ "tidb-model",
+ "tidb-parser",
+ "tidb-sessionctx",
+ "tidb-types",
+]
+
+[[package]]
 name = "tidb-kv"
 version = "0.0.0"
 dependencies = [

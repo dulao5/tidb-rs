@@ -95,15 +95,19 @@ pub struct SysTables {
     store: Arc<dyn SysTableStore>,
     /// Row-ID allocators per table ID (the domain's, shared by all sessions).
     allocs: Mutex<Vec<RowIdAllocator>>,
-    /// `tidb_retry_limit` (the global value).
+    /// `tidb_retry_limit` as Go's internal session sees it: its default (10). The internal
+    /// session never loads global variables (`createSessionWithDomainFunc` sets
+    /// `CommonGlobalLoaded = true`, session.go:1214; tidb-rs #74).
     pub retry_limit: i64,
-    /// The cluster's row encoding (global `tidb_row_format_version` /
-    /// `tidb_enable_row_level_checksum`).
+    /// The row encoding of Go's internal session: its defaults (row format 1, no checksum),
+    /// not the cluster's global `tidb_row_format_version` / `tidb_enable_row_level_checksum`
+    /// (same reason; tidb-rs #74).
     pub encoding: RowEncodingConfig,
 }
 
 impl SysTables {
-    /// A writer over store, with Go's defaults (retry limit 10, row format 2, no checksum).
+    /// A writer over store, with the defaults of Go's internal session (retry limit 10, row
+    /// format 1, no checksum), which never loads global variables (tidb-rs #74).
     // glue: the domain-level state of the writer (allocators, settings)
     pub fn new(store: Arc<dyn SysTableStore>) -> SysTables {
         SysTables {

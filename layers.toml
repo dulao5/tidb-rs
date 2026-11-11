@@ -76,7 +76,6 @@ blocks = ["D06.7"]
 
 [crate.tidb-expression]
 rank = 8
-planned = true
 blocks = ["D08.1", "D08.2", "D08.8", "D08.12", "D08.11"]   # D08.8 CAST：框架的隐式转换机制（N0 评审）
 
 [crate.tidb-privilege]

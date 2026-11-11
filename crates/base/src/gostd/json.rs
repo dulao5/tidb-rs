@@ -63,6 +63,13 @@ pub fn format_float(f: f64) -> String {
 /// `appendString` with `escapeHTML` (`json.Marshal`).
 // go-std: encoding/json.appendString L1 (escapeHTML = true; input is valid UTF-8)
 pub fn append_string(out: &mut String, s: &str) {
+    append_string_opts(out, s, true);
+}
+
+/// `appendString` with the encoder's `escapeHTML` option (`Encoder.SetEscapeHTML`): with
+/// `false`, `<`, `>` and `&` are written as they are; U+2028 / U+2029 are escaped either way.
+// go-std: encoding/json.appendString L1 (input is valid UTF-8)
+pub fn append_string_opts(out: &mut String, s: &str, escape_html: bool) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     out.push('"');
     for c in s.chars() {
@@ -74,6 +81,7 @@ pub fn append_string(out: &mut String, s: &str) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '<' | '>' | '&' if !escape_html => out.push(c),
             '\u{0}'..='\u{1f}' | '<' | '>' | '&' => {
                 let b = c as u8;
                 out.push_str("\\u00");

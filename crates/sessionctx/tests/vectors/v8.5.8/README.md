@@ -47,3 +47,13 @@ its own target.
 | `amd64/exprctx.jsonl.gz` sha256 | `3c595d4f11593d73cdbc113c75fd31b6b67c3ea606d7c08743527cd5f96cd482` (tracker CI artifact) |
 
 Extra seeds (tracker CI artifact `govec-extra-seeds-*`): replay with `GOVEC_RANGER_FILES` / `GOVEC_EXPRCTX_FILES` (comma-separated).
+
+## Domain "ctx2b" (block D00.1 part 2b)
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/ctx2b.jsonl.gz` (branch `govec/ctx-D00.1-2b`, tracker #36) |
+| generator | `govec` ctx2b (seed 20261109): 731 records (`plancounter`, `basicctx`, `statsload`, `tracker`, `expropt`, `debugtrace`). Floats travel as strings; every record runs with new collations enabled and restores `errors.RedactLogEnabled` (#62). Both targets hold the same records |
+| `arm64/ctx2b.jsonl.gz` sha256 | `34206de17bc234f79d75a3aa5b4c30d356756a1b99de90a3112b2f2cc46277ed` (generated locally) |
+| `amd64/ctx2b.jsonl.gz` sha256 | `fd61b32cfa0999820fc8993e149ab427e4912abe26e2e86a12283d2732cc0c60` (tracker CI artifact) |
+| replay | `tests/govec_ctx2b.rs`; `GOVEC_CTX2B_FILES` replays the extra-seed artifacts |
