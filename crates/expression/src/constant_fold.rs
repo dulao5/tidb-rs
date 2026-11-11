@@ -89,11 +89,11 @@ fn is_null_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
         };
         if is_deferred_const {
             return (
-                new_const(value, sf.ret_type.clone(), Some(expr.clone())),
+                new_const(value, sf.ret_type().clone(), Some(expr.clone())),
                 true,
             );
         }
-        return (new_const(value, sf.ret_type.clone(), None), false);
+        return (new_const(value, sf.ret_type().clone(), None), false);
     }
     if mysql::has_not_null_flag(arg0.get_type(&*ectx).get_flag()) {
         return (Expr::Constant(new_zero()).into_ref(), false);
@@ -295,7 +295,7 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
             }
             let ectx = ctx.get_eval_ctx();
             let value = x.eval(&*ectx, &EvalState::new(), Row::default());
-            let mut ret_type = x.ret_type.clone();
+            let mut ret_type = x.ret_type().clone();
             let value = match value {
                 Ok(v) => v,
                 Err(_) => return (expr.clone(), is_deferred_const),

@@ -59,9 +59,10 @@ pub(crate) const emptyScalarFunctionSize: i64 = 104;
 pub struct ScalarFunction {
     /// FuncName.
     pub func_name: CIStr,
-    /// RetType is the type that ScalarFunction returns.
-    pub ret_type: FieldType,
-    /// Function: the signature and the `baseBuiltinFunc` fields (N4 §3.1).
+    /// Function: the signature and the `baseBuiltinFunc` fields (N4 §3.1). Go's `RetType`
+    /// is the same `*FieldType` as the signature's `tp` (`ScalarFunction.Clone` relies on
+    /// it), so the node has no type of its own: [`ScalarFunction::ret_type`] is
+    /// `function.tp` (one type, D08.1 spec §3.2; Lucky review #94).
     pub function: BuiltinFunc,
     /// The cached `HashCode`.
     pub hashcode: OnceLock<Vec<u8>>,
@@ -75,7 +76,6 @@ impl Clone for ScalarFunction {
     fn clone(&self) -> Self {
         let c = ScalarFunction {
             func_name: self.func_name.clone(),
-            ret_type: self.ret_type.clone(),
             function: self.function.clone_from_base(),
             hashcode: self.hashcode.clone(),
             canonicalhashcode: self.canonicalhashcode.clone(),
@@ -90,11 +90,13 @@ impl Clone for ScalarFunction {
 
 impl ScalarFunction {
     /// A function node over `function` (the struct literal Go's `newFunctionImpl` builds).
+    /// `ret_type` becomes the signature's `tp`: every Go literal passes `f.getRetTp()` or the
+    /// pointer the signature was built with, so the two are one type.
     // glue: constructor of the node (Go builds ScalarFunction literals in newFunctionImpl)
-    pub fn new(func_name: &str, ret_type: FieldType, function: BuiltinFunc) -> ScalarFunction {
+    pub fn new(func_name: &str, ret_type: FieldType, mut function: BuiltinFunc) -> ScalarFunction {
+        function.tp = ret_type;
         ScalarFunction {
             func_name: CIStr::new(func_name),
-            ret_type,
             function,
             hashcode: OnceLock::new(),
             canonicalhashcode: OnceLock::new(),
@@ -125,7 +127,7 @@ impl ScalarFunction {
             for arg in self.get_args() {
                 buffer.extend_from_slice(&arg.string_with_ctx(ctx, redact));
                 buffer.extend_from_slice(b", ");
-                buffer.extend_from_slice(self.ret_type.to_string().as_bytes());
+                buffer.extend_from_slice(self.ret_type().to_string().as_bytes());
             }
         } else {
             let args = self.get_args();
@@ -160,7 +162,25 @@ impl ScalarFunction {
     // go: ScalarFunction.GetStaticType L1
     #[inline]
     pub fn get_static_type(&self) -> &FieldType {
-        &self.ret_type
+        &self.function.tp
+    }
+
+    /// `RetType`: the signature's `tp` (one type, see [`ScalarFunction::function`]).
+    // glue: field access of ScalarFunction.RetType (one *FieldType with the signature's tp)
+    #[inline]
+    pub fn ret_type(&self) -> &FieldType {
+        &self.function.tp
+    }
+
+    /// `RetType` for an in-place change (Go's `sf.RetType.SetXxx(..)` / `GetType(..).SetXxx`):
+    /// changes the signature's `tp` too, as in Go. Clears the cached hash codes like Go's
+    /// callers that change the type do (the hash includes the type).
+    // glue: in-place change of the shared *FieldType
+    #[inline]
+    pub fn ret_type_mut(&mut self) -> &mut FieldType {
+        self.hashcode = OnceLock::new();
+        self.canonicalhashcode = OnceLock::new();
+        &mut self.function.tp
     }
 
     /// Equal implements Expression interface.
@@ -172,7 +192,7 @@ impl ScalarFunction {
         if self.func_name.l != fun.func_name.l {
             return false;
         }
-        if !self.ret_type.equal(&fun.ret_type) {
+        if !self.ret_type().equal(fun.ret_type()) {
             return false;
         }
         self.function.equal(ctx, &fun.function)
@@ -271,7 +291,7 @@ impl ScalarFunction {
         let mut d = Datum::default();
         match res {
             None => d.set_null(),
-            Some(v) => d.set_value(v, &self.ret_type),
+            Some(v) => d.set_value(v, self.ret_type()),
         }
         Ok(d)
     }
@@ -598,7 +618,9 @@ impl ScalarFunction {
         let mut sum = emptyScalarFunctionSize
             + (self.func_name.l.len() + self.func_name.o.len()) as i64
             + self.hashcode.get().map_or(0, |h| h.len() as i64);
-        sum += self.ret_type.memory_usage();
+        // Go adds RetType.MemoryUsage() and the signature's (which counts tp again): one
+        // *FieldType counted twice; kept for equal numbers.
+        sum += self.ret_type().memory_usage();
         sum += self.function.memory_usage();
         sum
     }
@@ -733,7 +755,7 @@ fn simple_canonicalized_hash_code(sf: &ScalarFunction) -> Vec<u8> {
                 code.extend_from_slice(arg_code);
             }
             if name == ast_func::Cast {
-                let eval_tp = sf.ret_type.eval_type();
+                let eval_tp = sf.ret_type().eval_type();
                 code.push(eval_tp.0);
             }
         }
@@ -752,7 +774,7 @@ pub fn re_hash_code(sf: &ScalarFunction) -> Vec<u8> {
         code.extend_from_slice(arg.hash_code());
     }
     if sf.func_name.l == ast_func::Cast {
-        let eval_tp = sf.ret_type.eval_type();
+        let eval_tp = sf.ret_type().eval_type();
         code.push(eval_tp.0);
     }
     if sf.func_name.l == ast_func::Grouping {

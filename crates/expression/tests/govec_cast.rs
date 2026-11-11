@@ -210,7 +210,7 @@ fn dump(e: &Expr) -> Value {
             let (chs, coll) = x.charset_and_collation();
             let ci = &x.function.collation_info;
             json!({ "f": [
-                x.func_name.l, x.func_name.o, x.function.sig.name, ft_out(&x.ret_type), args,
+                x.func_name.l, x.func_name.o, x.function.sig.name, ft_out(x.ret_type()), args,
                 sig_vec, chs, coll, x.function.pb_code(), ci.has_coercibility(),
                 x.coercibility().0, x.repertoire().0, ci.is_explicit_charset()
             ] })
