@@ -84,6 +84,16 @@ pub struct SessionVars {
     /// prepareStmtDedupCache caches PrepareStmtCacheEntry by SQL+context key so repeated
     /// COM_STMT_PREPARE calls for the same query can skip parse+preprocess.
     pub(crate) prepare_stmt_dedup_cache: Option<StmtCache>,
+    /// SequenceState cache all sequence's latest value accessed by lastval() builtins.
+    pub sequence_state: Arc<super::sequence_state::SequenceState>,
+    /// LastQueryInfo keeps track the info of last query.
+    pub last_query_info: crate::sessionstates::QueryInfo,
+    /// LastDDLInfo keeps track the info of last DDL.
+    pub last_ddl_info: crate::sessionstates::LastDDLInfo,
+    /// HypoIndexes are for the Index Advisor (`None`: Go's nil map).
+    pub hypo_indexes: Option<crate::sessionstates::HypoIndexes>,
+    /// HypoTiFlashReplicas are for the Index Advisor (`None`: Go's nil map).
+    pub hypo_tiflash_replicas: Option<crate::sessionstates::HypoTiFlashReplicas>,
 }
 
 /// The value type of the session's statement caches (Go `any`: planner objects).
@@ -313,6 +323,11 @@ impl SessionVars {
             start_time: tidb_base::gostd::time::Time::zero(),
             non_prepared_plan_cache_stmts: None,
             prepare_stmt_dedup_cache: None,
+            sequence_state: Arc::new(super::sequence_state::SequenceState::new()),
+            last_query_info: Default::default(),
+            last_ddl_info: Default::default(),
+            hypo_indexes: None,
+            hypo_tiflash_replicas: None,
         }
     }
 

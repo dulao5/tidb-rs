@@ -947,10 +947,20 @@ impl SessionVars {
     /// The caller installs the result with [`SessionVars::set_stmt_ctx`] (Go assigns
     /// `vars.StmtCtx`). Go alternates between two cached contexts and `Reset`s the one not in
     /// use (or creates a new one when another session holds it, `RefCountOfStmtCtx`); the
-    /// reuse only saves allocations: `Reset` keeps the maps `CTEStorageMap`, `LockTableIDs`,
-    /// `TableStats`, `RelatedTableIDs`, `TblInfo2UnionScan`, and its only caller
-    /// (executor/select.go `ResetContextOfStmt`) clears or recreates every one of them. So
-    /// this returns a new context (N2 §2: the cache is dropped, L2).
+    /// reuse only saves allocations. `Reset` (stmtctx.go:552–603) keeps 8 fields, and none
+    /// of them is observable after the reset (Lucky, #87 review):
+    /// - the 5 maps `CTEStorageMap`, `LockTableIDs`, `TableStats`, `RelatedTableIDs`,
+    ///   `TblInfo2UnionScan`: the only caller (executor/select.go `ResetContextOfStmt`)
+    ///   clears or recreates every one of them;
+    /// - `WarnHandler` / `ExtraWarnHandler`: reset inside `Reset`;
+    /// - `IndexUsageCollector`: `ResetContextOfStmt` resets it or sets it to nil on both
+    ///   branches (select.go:1231–1238);
+    /// - the 3 locks/caches `mu`, `stmtCache`, `StaleTSOProvider`: reset inside `Reset`.
+    ///
+    /// So this returns a new context (N2 §2: the cache is dropped, L2). Go's
+    /// `RefCountOfStmtCtx.TryFreeze` exists so that a concurrent `ProcessInfo` reader never
+    /// sees a context while it is being reset; a new `Arc` per statement already gives that
+    /// (the reader keeps a consistent old context), so `RefCountOfStmtCtx` is not ported.
     // go: SessionVars.InitStatementContext L2 (no cachedStmtCtx; always NewStmtCtx)
     pub fn init_statement_context(&mut self) -> Arc<StatementContext> {
         Arc::new(crate::stmtctx::new_stmt_ctx())

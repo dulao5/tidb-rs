@@ -15,6 +15,7 @@ use tidb_base::Error;
 /// Key is the interface that every key in LRU Cache should implement.
 pub trait Key {
     /// The bytes the cache indexes the key by.
+    // glue: kvcache.Key.Hash (interface method)
     fn hash(&self) -> Vec<u8>;
 }
 
@@ -49,6 +50,7 @@ pub struct SimpleLRUCache<K, V> {
 }
 
 impl<K: std::fmt::Debug, V> std::fmt::Debug for SimpleLRUCache<K, V> {
+    // glue: Debug
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SimpleLRUCache")
             .field("capacity", &self.capacity)
@@ -60,7 +62,11 @@ impl<K: std::fmt::Debug, V> std::fmt::Debug for SimpleLRUCache<K, V> {
 /// NewSimpleLRUCache creates a SimpleLRUCache object, whose capacity is "capacity".
 /// NOTE: "capacity" should be a positive value.
 // go: NewSimpleLRUCache L1
-pub fn new_simple_lru_cache<K: Key, V>(capacity: usize, guard: f64, quota: u64) -> SimpleLRUCache<K, V> {
+pub fn new_simple_lru_cache<K: Key, V>(
+    capacity: usize,
+    guard: f64,
+    quota: u64,
+) -> SimpleLRUCache<K, V> {
     if capacity < 1 {
         panic!("capacity of LRU Cache should be at least 1.");
     }
@@ -79,14 +85,17 @@ pub fn new_simple_lru_cache<K: Key, V>(capacity: usize, guard: f64, quota: u64) 
 }
 
 impl<K: Key, V> SimpleLRUCache<K, V> {
+    // glue: container/list element access
     fn entry(&self, i: usize) -> &CacheEntry<K, V> {
         self.slots[i].as_ref().expect("live list element")
     }
 
+    // glue: container/list element access
     fn entry_mut(&mut self, i: usize) -> &mut CacheEntry<K, V> {
         self.slots[i].as_mut().expect("live list element")
     }
 
+    // glue: container/list Remove (unlink)
     fn unlink(&mut self, i: usize) {
         let (prev, next) = {
             let e = self.entry(i);
@@ -104,6 +113,7 @@ impl<K: Key, V> SimpleLRUCache<K, V> {
         }
     }
 
+    // glue: container/list PushFront (link)
     fn link_front(&mut self, i: usize) {
         let old = self.front;
         {
@@ -119,6 +129,7 @@ impl<K: Key, V> SimpleLRUCache<K, V> {
         self.front = i;
     }
 
+    // glue: container/list MoveToFront
     fn move_to_front(&mut self, i: usize) {
         if self.front != i {
             self.unlink(i);
@@ -126,6 +137,7 @@ impl<K: Key, V> SimpleLRUCache<K, V> {
         }
     }
 
+    // glue: container/list Remove
     fn remove_elem(&mut self, i: usize) -> CacheEntry<K, V> {
         self.unlink(i);
         self.free.push(i);
@@ -274,7 +286,8 @@ impl<K: Key, V> SimpleLRUCache<K, V> {
     }
 
     /// SetCapacity sets capacity of the cache.
-    // go: SimpleLRUCache.SetCapacity L1 (evicts without calling onEvict, as Go does)
+    // Note: evicts without calling onEvict, as Go does.
+    // go: SimpleLRUCache.SetCapacity L1
     pub fn set_capacity(&mut self, capacity: usize) -> Result<(), Error> {
         if capacity < 1 {
             return Err(Error::plain("capacity of lru cache should be at least 1"));

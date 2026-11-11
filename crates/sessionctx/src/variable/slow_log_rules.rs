@@ -209,7 +209,7 @@ pub fn parse_slow_log_field_value(field_name: &str, value: &str) -> Result<Thres
         ParseKind::Int64 => parse_int64(value),
         ParseKind::Float64 => parse_float64(value),
         ParseKind::Bool => parse_bool(value),
-        ParseKind::String => Ok(Threshold::Str(value.to_owned())),
+        ParseKind::String => super::slow_log::parse_string(value),
     }
 }
 

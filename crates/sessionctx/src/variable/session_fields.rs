@@ -2303,6 +2303,8 @@ pub const SCALAR_FIELDS: &[&str] = &[
 // - SourceAddr net.TCPAddr
 // - UserVars *variable.UserVars
 // - systems map[string]string
+// - nonPreparedPlanCacheStmts *kvcache.SimpleLRUCache
+// - prepareStmtDedupCache *kvcache.SimpleLRUCache
 // - PreparedStmts map[uint32]interface {}
 // - PreparedStmtNameToID map[string]uint32
 // - PlanCacheParams *variable.PlanCacheParamList
@@ -2333,6 +2335,7 @@ pub const SCALAR_FIELDS: &[&str] = &[
 // - SlowLogRules *slowlogrule.SessionSlowLogRules
 // - SQLKiller sqlkiller.SQLKiller
 // - ConnectionInfo *variable.ConnectionInfo
+// - StartTime time.Time
 // - PrevStmt *variable.LazyStmtText
 // - IsolationReadEngines map[kv.StoreType]struct {}
 // - PlannerSelectBlockAsName atomic.Pointer[[]github.com/pingcap/tidb/pkg/parser/ast.HintTable]

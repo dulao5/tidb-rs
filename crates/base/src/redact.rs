@@ -63,7 +63,8 @@ pub fn stringer<T: Display>(mode: &str, input: T) -> RedactStringer<T> {
 
 /// DeRedactFile will deredact the input file, either removing marked contents, or remove
 /// the marker. It works line by line.
-// go: DeRedactFile L1 (errors are io errors; "-" writes to stdout)
+// Note: errors are io errors; "-" writes to stdout.
+// go: DeRedactFile L1
 pub fn de_redact_file(remove: bool, input: &str, output: &str) -> std::io::Result<()> {
     let ifile = std::io::BufReader::new(std::fs::File::open(input)?);
     if output == "-" {
@@ -79,10 +80,11 @@ pub fn de_redact_file(remove: bool, input: &str, output: &str) -> std::io::Resul
 }
 
 /// DeRedact is similar to DeRedactFile, but act on reader/writer, it works line by line.
-// go: DeRedact L2 (lines split like bufio.Scanner's ScanLines: "\n" with an optional
-// preceding "\r" removed; a line is decoded as Go ranges a string: invalid UTF-8 bytes
-// become U+FFFD). Go's bufio.Scanner stops silently at a line over 64 KiB (the error is
-// never checked); here such lines are processed.
+// Note: lines are split like bufio.Scanner's ScanLines ("\n", an optional preceding "\r"
+// removed); ReadRune turns each invalid UTF-8 byte into U+FFFD. Go's bufio.Scanner stops
+// silently at a line over 64 KiB (the error is never checked); here such lines are
+// processed.
+// go: DeRedact L2
 pub fn de_redact<R: BufRead, W: Write>(
     remove: bool,
     input: R,
@@ -95,8 +97,12 @@ pub fn de_redact<R: BufRead, W: Write>(
         if line.last() == Some(&b'\r') {
             line.pop();
         }
-        let text = String::from_utf8_lossy(&line);
-        let chars: Vec<char> = text.chars().collect();
+        // bufio.Reader.ReadRune: each byte of an invalid UTF-8 sequence is one U+FFFD.
+        let mut chars: Vec<char> = Vec::with_capacity(line.len());
+        for chunk in line.utf8_chunks() {
+            chars.extend(chunk.valid().chars());
+            chars.extend(std::iter::repeat_n('\u{FFFD}', chunk.invalid().len()));
+        }
         let mut buf = String::new();
         let mut start = false;
         let mut i = 0;
@@ -108,7 +114,10 @@ pub fn de_redact<R: BufRead, W: Write>(
                     // must be '<'
                     let Some(&pch) = chars.get(i) else {
                         // Go: ReadRune returns io.EOF, which DeRedact returns as an error
-                        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF"));
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "EOF",
+                        ));
                     };
                     i += 1;
                     if pch == ch {
@@ -170,19 +179,21 @@ pub fn init_redact(redact_log: bool) {
 }
 
 /// NeedRedact returns whether to redact log
-// go: NeedRedact L1 (the Rust switch stores "" as OFF, which Go also treats as "no")
+// Note: the Rust switch stores "" as OFF, which Go also treats as "no".
+// go: NeedRedact L1
 pub fn need_redact() -> bool {
     let mode = redact_log_enabled_load();
     mode != RedactLogDisable && !mode.is_empty()
 }
 
 /// Value receives string argument and return omitted information if redact log enabled
+/// (Go string bytes).
 // go: Value L1
-pub fn value(arg: &str) -> String {
+pub fn value(arg: &[u8]) -> Vec<u8> {
     if need_redact() {
-        return "?".to_owned();
+        return b"?".to_vec();
     }
-    arg.to_owned()
+    arg.to_vec()
 }
 
 /// Key receives a key return omitted information if redact log enabled
@@ -198,19 +209,19 @@ pub fn key(key: &[u8]) -> String {
     s
 }
 
-/// WriteRedact is to write string with redact into `strings.Builder`
+/// WriteRedact is to write string with redact into `strings.Builder` (Go string bytes).
 // go: WriteRedact L1
-pub fn write_redact(build: &mut String, v: &str, redact: &str) {
+pub fn write_redact(build: &mut Vec<u8>, v: &[u8], redact: &str) {
     if redact == RedactLogMarker {
-        build.push('‹');
-        build.push_str(v);
-        build.push('›');
+        build.extend_from_slice("‹".as_bytes());
+        build.extend_from_slice(v);
+        build.extend_from_slice("›".as_bytes());
         return;
     } else if redact == RedactLogEnable {
-        build.push('?');
+        build.push(b'?');
         return;
     }
-    build.push_str(v);
+    build.extend_from_slice(v);
 }
 
 /// [`string`] on Go string bytes (Go strings may hold any bytes): "OFF" returns the input

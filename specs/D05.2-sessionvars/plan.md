@@ -279,3 +279,10 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
 4. `BuildParserConfig` / `GetParseParams`（parser 的 `ParserConfig` / `ParseParam`）。
 5. Savepoint 6 个：需要 D07.1 的 memdb checkpoint。
 6. `pkg/session/cursor/tracker.go`：随 D05.3。
+
+## PR F（2026-11-11）
+
+完成 PR E 交接中的第 1–4 项（见 spec §4 第 18 条）：`LazyStmtText`、两个 duration、session states 的 Encode/Decode、kvcache 的两个缓存、parser 配置；slow_log 中留在 D05.2 的部分（`CollectWarningsForSlowLog`、`extractMsgFromSQLWarn`、`MatchEqual`、`matchGE`、`matchZero`、`uint64FromNonNegative`、`ParseString`）；D00.3 的 `redact.go` 与 `kvcache/simple_lru.go`。慢日志写入与 accessor 归 D14.2，`session_token.go` 归 D04.1。
+同时记下 Lucky 在 #87 评审中的后续：spec §4 第 15–17 条（`StmtShared` 拆分决定、D13.3 的位置、分配器句柄），`InitStatementContext` 的注释（`Reset` 保留的 8 个字段、不移植 `RefCountOfStmtCtx`）。
+
+D05.2 剩余：savepoint 6 个（D07.1）、cursor 8 个（D05.3）。

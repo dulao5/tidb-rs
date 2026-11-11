@@ -23,5 +23,6 @@ pub mod kvcache;
 pub mod planbase;
 pub mod planctx;
 pub mod ranger;
+pub mod sessionstates;
 pub mod stmtctx;
 pub mod variable;
