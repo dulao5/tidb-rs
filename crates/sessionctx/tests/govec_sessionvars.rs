@@ -35,6 +35,8 @@ use tidb_sessionctx::variable::*;
 mod sessionvars_d;
 #[path = "sessionvars_e/mod.rs"]
 mod sessionvars_e;
+#[path = "sessionvars_f/mod.rs"]
+mod sessionvars_f;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -526,6 +528,9 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
     if let Some((out, err)) = sessionvars_e::exec_e(op, args) {
         return (out, err, vec![]);
     }
+    if let Some((out, err)) = sessionvars_f::exec_f(op, args) {
+        return (out, err, vec![]);
+    }
     match op {
         "fresh" => {
             let m: serde_json::Map<String, Value> = SessionVarsFields::default()
@@ -962,4 +967,21 @@ fn govec_sessionvars() {
             eprintln!("{f}: {n} checked, {skipped} skipped");
         }
     }
+}
+
+/// GetTotalCostDuration / GetExecuteDuration read the clock in Go (`time.Since`), so they are
+/// not in the govec oracle; the Rust port takes `now` (`*_at`).
+#[test]
+fn durations_at_now() {
+    use tidb_base::gostd::time as gotime;
+    let mut vars = fresh_vars();
+    vars.start_time = gotime::unix(1_700_000_000, 0);
+    vars.duration_parse = 7;
+    vars.duration_compile = 5;
+    let now = gotime::unix(1_700_000_001, 500);
+    // time.Since(StartTime) = 1s + 500ns
+    assert_eq!(vars.get_total_cost_duration_at(&now), 1_000_000_500 + 7);
+    assert_eq!(vars.get_execute_duration_at(&now), 1_000_000_500 - 5);
+    // The clock-reading forms are at least the injected forms for a past start time.
+    assert!(vars.get_total_cost_duration() >= vars.get_total_cost_duration_at(&now));
 }

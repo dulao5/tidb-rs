@@ -137,6 +137,27 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
     - **`CleanBuffers`** 与 `WriteStmtBufs` 一起归 X（只在 insert.go:69 调用，只清理复用的写缓冲区，只影响内存）。
     - **`ExprSessionVars`**（`variable/expr_vars.rs`）：表达式求值需要的 SessionVars 窄接口（#71 评审）：只有 `&self`，写的字段内部同步。`SessionVars` 为会话线程实现它；执行器侧 `Send + Sync` 的实现随 D05.3。用户身份（D04.1）和 `CurrInsertValues`（写路径）的类型还没移植，暂不在接口中。
 
+15. **`Arc<StatementContext>` + `stmt_ctx_mut()` 的约定在移植 `ExecuteStmt` 时会失效**（Lucky 评审 #87）：v8.5.8 在大部分普通字段被写之前就共享了语句上下文——session.go:2082 `SetProcessInfo` 让 `ProcessInfo` 持有 `StmtCtx`（session.go:1448），之后 session.go:2112 才 `Compile`，session.go:2119 直接写 `StmtCtx.ResourceGroupName`；planner/executor/session 在语句执行中赋值约 50 个普通字段（`MemTracker` 33 处、`StmtHints`、`Tables`、`IndexNames`、`InsertID`、`RuntimeStatsColl`（builder.go:1349）、`DiskTracker`、`OptimizerCETrace`、`CTEStorageMap`…）。按现在的约定，`ProcessInfo` 持有 `Arc` 后这些写都会 panic。其他会话经 `ProcessInfo.StmtCtx` 真正读的只有：`Tables`、`IndexNames`、`StmtType`、`AffectedRows`、`WarningCount`、`IsTiKV`/`IsTiFlash`、`IsDDLJobInQueue`、`InRestrictedSQL`、`GetExecDetails`/`CopTasksDetails`、`GetPlan`，以及 `ProcessInfo` 也持有的 tracker 和 `RuntimeStatsColl`。
+
+    | | 做法 | 代价 |
+    |---|---|---|
+    | A | 编译之后才把 `Arc` 交给 `ProcessInfo` | 执行时的写（`InsertID`、`RuntimeStatsColl`、`MemTracker` 挂接等）仍会 panic；长时间编译期间 SHOW PROCESSLIST 看不到该语句的 tracker 数据 |
+    | **B（已决定）** | 拆分：会话拥有 `StatementContext`（`&mut`，普通字段同 Go）；只有 `StmtShared` 部分（上面列出的字段，内部可变）放在 `Arc` 后，由 `ProcessInfo` 和 worker 持有 | 需要逐个确认哪些字段跨线程；与 Go 的读者实际用的一致 |
+    | C | 每个被写的字段都改为内部可变 | 改动遍布各处，并且掩盖了哪些字段真正跨线程 |
+
+    决定 B，在移植 session 的 `ExecuteStmt` 和 executor builder **之前**实现，现在不做。PR E 加的原子量（`LastInsertID`、`useChunkAlloc`、warnings）原样进入 `StmtShared`。现在 `stmt_ctx_mut()` 的调用方都走不到 panic（还没有东西共享上下文）。记入 #53。
+16. **D13.3 的位置**（Lucky 评审 #87）：Go 的 `pkg/util/hint` 整个包只依赖 parser、`meta/model`、`types`、`dbterror`/`plannererrors` 和 `logutil`，不需要 planner。所以以后移植 D13.3 时，`ParseStmtHints`、QB handler 等可以和 D13.0 的 `StmtHints` 一样放在 stmtctx 之下（同一模块或一个小的 `tidb-hint` crate），不要把一个 Go 包拆到两个 crate 再用 re-export 拼起来；不要假定 D13.3 必须进 `tidb-planner`。
+17. **`get_chunk_allocator` 以闭包借出分配器**（Lucky 评审 #87，不阻塞）：对现在的调用方够用；以后跨 `Next` 保存分配器的执行器（Go 保存返回的接口）需要拥有所有权的句柄，例如在已有的 `syncAllocator` 后面用 `Arc<Mutex<..>>`。
+
+18. **PR F**：
+    - **D00.3 的两个文件按宪章 4.4 整文件移植**：`pkg/util/redact`（`tidb_base::redact`，`TaskInfoRedacted` 是 BR 的，归 X）、`pkg/util/kvcache` 的 `SimpleLRUCache`（`tidb_sessionctx::kvcache`，键值是泛型，Go 是 `Key` 接口和 `any`；`GlobalLRUMemUsageTracker` 在 v8.5.8 中没有使用者，不移植）。Go 字符串可以是任意字节，所以 `redact.Value`、`WriteRedact` 用字节，另有 `string_bytes`（MARKER 时每个非法 UTF-8 字节变成 U+FFFD，与 Go 的 range 一致）。`DeRedact`：Go 的 `bufio.Scanner` 遇到超过 64 KiB 的行会静默停止（错误没有检查），Rust 照常处理。**这是用户可见的、有意的偏离**（Lucky 评审 #89，upstream-pitfall #90）：`tidb-server --redact`（main.go:268）用它处理日志文件，Go 会丢掉这一行以及之后的所有行，并以成功退出；带大 INSERT 的慢日志很常见。跟着 Go 就是在恢复工具里静默丢数据，所以不照搬；见 `docs/compatibility.md`，单元测试 `crates/base/tests/redact_long_line.rs`。只有 ON/OFF/MARKER 会进开关（变量是 enum，`InitRedact` 只写 ON/OFF），Rust 的开关不保存其他字符串。
+    - **`GetTotalCostDuration` / `GetExecuteDuration`**：Go 用 `time.Since(StartTime)`；Rust 另有 `*_at(now)`，govec 不比较（读时钟），由单元测试覆盖。
+    - **`BuildParserConfig` / `GetParseParams`**：返回 `parser.ParserConfig` / `ParseParam` 的载体（glue）；Rust 的 parser 目前只接受 `ParseOptions`（窗口函数），字符集参数还没接到 parser 上（随 D03.1 / D05.3 接入）。
+    - **会话语句缓存**：`planCacheStmtKey` 改为字节（去重 key 里有 SQL mode 的原始字节）；值是 `Arc<dyn Any + Send + Sync>`（Go `any`，规划器的对象）。`SessionPlanCacheSize` 为 0 时和 Go 一样 panic。
+    - **会话状态**：`sessionstates.SessionStates` 的类型移到 `tidb_sessionctx::sessionstates`（nil map / 指针为 `None`）；它的 JSON 编码由显示状态的语句做（D12.12），这里不做。`EncodeSessionStates` 复制 `HypoIndexes`，Go 共享同一个 map（之后改其中一边另一边也会变）；调用方编码后立即序列化，观察不到。
+    - **块的调整**（tracker rules）：`SlowLogFormat`、`writeSlowLogItem`、`kvExecDetailFormat`、`makeExecDetailAccessor`、`makeKVExecDetailAccessor` 归 D14.2（慢日志写入，需要 D11 的 `UsedStatsInfo`、请求上下文中 client-go 的 `util.ExecDetails`、`ProcessInfo` 的用户和连接信息、RU/CPU）；`session_token.go` 归 D04.1（会话迁移的签名 token，属认证）。
+    - **剩余豁免**：savepoint 的 6 个函数等 D07.1（memdb checkpoint）；`pkg/session/cursor/tracker.go`（8 个）随 D05.3。D05.2 converge 205/219。
+
 ## 5. 验证结果（PR A）
 
 - **govec `sessionvars`**：41,447 条（`fresh` 1、`set` 30,939、`get` 945、`set_global` 9,482、`init` 80）。回放跳过仍有 pending 钩子的记录：36,046 条比对、0 条不一致，5,401 条跳过；钩子落地后自动开始比对，不需要重新生成。
