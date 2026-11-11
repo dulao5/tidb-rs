@@ -1,0 +1,33 @@
+[package]
+name = "tidb-expression"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/expression (blocks D08.1, D08.2, D08.8, D08.12, D08.11): the expression tree, its evaluation framework and the built-in function framework"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), errno, dbterror classes, mysql constants, Go std ports.
+tidb-base = { workspace = true }
+# Datum, FieldType, conversions and comparison (D01.1, D01.4).
+tidb-types = { workspace = true }
+# chunk.Row (D01.7).
+tidb-chunk = { workspace = true }
+# codec.EncodeInt / HashCode (expression hash codes, D01.8).
+tidb-codec = { workspace = true }
+# model.TableInfo / ColumnInfo (TableInfo2SchemaAndNames, D06.1).
+tidb-model = { workspace = true }
+# parser CIStr, ast function names, charset.
+tidb-parser = { workspace = true }
+# exprctx (EvalContext, BuildContext, ParamValues), errctx (D00.1).
+tidb-sessionctx = { workspace = true }
+parking_lot = "0.12"
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
