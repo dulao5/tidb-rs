@@ -207,6 +207,7 @@ B1（#63 / tracker #29）已合并；B2 分支已 rebase 到 main，#66 / #31 �
 
 **还没做**
 1. PoC 会话的 `SET GLOBAL` 仍返回 not supported：PoC 会话没有使用 sessionctx 的 `SessionVars`，接入属于 D05.3 / T9。读取侧（`SysVarCache` + `load_sys_var_cache_loop`）也还没有接到 PoC 的 domain 上。
+   - **过渡期缺口**：go-fix pingcap/tidb#62892（#76）之后 `tidb_redact_log` 只有 GLOBAL 作用域，`SET SESSION` 报 1229。所以在接上 `SET GLOBAL` 和 sysvar cache 重读之前，PoC 里没有办法打开打码（Lucky 评审 #76）。
 2. prewrite 与 commit 之间杀进程的测试（需要 failpoint）；PD GlobalConfig 写入（client-rust 分支没有 API）；assertion 和 request source（同上）。
 
 ## PR D 提议（D05.2 剩余，不在 PR C 中实现）

@@ -1,0 +1,19 @@
+# Differences from TiDB v8.5.8 visible to users
+
+tidb-rs is a function-by-function port of Go TiDB **v8.5.8** (`8b857efa2`). By default it behaves exactly like v8.5.8, including its bugs. This page lists the places where a user can see different behavior. Internal deviations that cannot be observed through SQL or the wire protocol are recorded in each block's `specs/<block>/spec.md` §4, not here.
+
+## Upstream fixes ported from TiDB master (go-fix)
+
+Following the constitution (article 1, item 2), tidb-rs ports security and data-correctness fixes that are on TiDB master but were not backported to `release-8.5`. The govec vectors for these cases are generated from a patched v8.5.8 (see `govec/fixes/README.md` in tidb-rs-tracker).
+
+| Upstream fix | v8.5.8 behavior | tidb-rs behavior | Compatibility impact |
+|---|---|---|---|
+| [pingcap/tidb#62892](https://github.com/pingcap/tidb/pull/62892) (labelled `compatibility-breaker` upstream; not in any 8.5 release) | `SET [SESSION] tidb_redact_log = …` succeeds, but actually switches redaction for **every session on the instance**, and is not persisted ([tidb-rs #62](https://github.com/dulao5/tidb-rs/issues/62)). | `tidb_redact_log` has **GLOBAL scope only**. `SET tidb_redact_log = ON` without a scope (= SESSION) and `SET SESSION …` fail with error 1229; use `SET GLOBAL tidb_redact_log = …`, which is cluster-wide and persisted. Same as TiDB master for user sessions. | **Breaking.** Scripts that set it without `GLOBAL` get an error. In a mixed Go/tidb-rs cluster both sides store the value in `mysql.global_variables` in the same format and read each other's `SET GLOBAL`. |
+| [pingcap/tidb#65884](https://github.com/pingcap/tidb/pull/65884) | `SET tidb_opt_fix_control = '123:'` (colon with no value) panics (index out of range). | The value after the colon is empty; no error. | None (a crash becomes a success). |
+| [pingcap/tidb#67149](https://github.com/pingcap/tidb/pull/67149) | Comparing or sorting a string containing U+2CEA1 under `utf8mb4_0900_ai_ci` panics (out-of-bounds read). | Works. | None (a crash becomes a success). |
+
+## Transitional gaps (until the session layer is ported)
+
+tidb-rs still uses its prototype session layer until block D05.3. Until then:
+
+- `SET GLOBAL` is not supported in the prototype session, so `tidb_redact_log` cannot be turned on in tidb-rs itself (`SET SESSION` is rejected by the fix above). Values set with `SET GLOBAL` on a Go TiDB in the same cluster are stored but not yet reloaded by the prototype.
