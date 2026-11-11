@@ -3731,6 +3731,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-execdetails"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "serde",
+ "serde_json",
+ "tidb-base",
+ "tipb",
+]
+
+[[package]]
 name = "tidb-expression"
 version = "0.0.0"
 dependencies = [

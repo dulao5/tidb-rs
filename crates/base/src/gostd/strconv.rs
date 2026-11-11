@@ -63,6 +63,14 @@ pub fn parse_float(s: &str) -> Result<f64, bool> {
     {
         return Err(false);
     }
+    if unsigned == "nan" {
+        // Go's `special` accepts a sign only before "inf" / "infinity"; "NaN" is `math.NaN()`
+        // (payload 1, not Rust's `f64::NAN`).
+        if unsigned.len() != lower.len() {
+            return Err(false);
+        }
+        return Ok(super::math::nan());
+    }
     let v: f64 = s.parse().map_err(|_| false)?;
     if v.is_infinite() && !special {
         return Err(true);

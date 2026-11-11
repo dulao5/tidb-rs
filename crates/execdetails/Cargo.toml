@@ -1,0 +1,23 @@
+[package]
+name = "tidb-execdetails"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/util/execdetails and pkg/util/tracing (block D14.0: execution details, runtime stats, optimizer trace)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), gostd (time.Duration.String, strconv, math.Sin / Asin, sort), kv.StoreType.
+tidb-base = { workspace = true }
+# tipb.ExecutorExecutionSummary (coprocessor / TiFlash execution summaries).
+tipb = { workspace = true }
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

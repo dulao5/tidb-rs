@@ -56,7 +56,6 @@ blocks = ["D07.0"]
 
 [crate.tidb-execdetails]
 rank = 4   # above tidb-model (execdetails -> model), with tidb-model at 3
-planned = true
 blocks = ["D14.0"]
 
 [crate.tidb-codec]
