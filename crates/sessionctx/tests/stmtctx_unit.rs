@@ -64,3 +64,33 @@ fn statement_context_is_send() {
     fn assert_send<T: Send>() {}
     assert_send::<stmtctx::StatementContext>();
 }
+
+/// D00.1 part 1 review (tidb-rs #65): copies of the type context, the error context and the
+/// warning appender taken before the handler is replaced and the context is reset still write
+/// to the new handler (Go hands out the statement context itself as the appender).
+#[test]
+fn old_copies_write_to_the_new_handler_after_reset() {
+    use tidb_base::contextutil::{WarnAppender, WarnHandlerExtRef, new_static_warn_handler};
+
+    let mut sc = stmtctx::new_stmt_ctx();
+    let (tc, ec, app) = (sc.type_ctx(), sc.err_ctx(), sc.warn_appender());
+    let old: WarnHandlerExtRef = sc.warn_handler();
+
+    let h2: WarnHandlerExtRef = Arc::new(new_static_warn_handler(0));
+    sc.set_warn_handler(Arc::clone(&h2));
+    assert!(sc.reset());
+
+    tc.append_warning(tidb_base::errors::new("via type ctx"));
+    ec.append_warning(tidb_base::errors::new("via err ctx"));
+    app.append_warning(tidb_base::errors::new("via appender"));
+
+    assert_eq!(h2.warning_count(), 3);
+    assert_eq!(sc.warning_count(), 3);
+    assert_eq!(old.warning_count(), 0);
+    let msgs: Vec<_> = h2
+        .copy_warnings(Vec::new())
+        .iter()
+        .map(|w| String::from_utf8(w.err.error()).unwrap())
+        .collect();
+    assert_eq!(msgs, ["via type ctx", "via err ctx", "via appender"]);
+}

@@ -3853,6 +3853,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "serde_json",
  "tidb-base",
+ "tidb-codec",
  "tidb-kv",
  "tidb-memory",
  "tidb-model",

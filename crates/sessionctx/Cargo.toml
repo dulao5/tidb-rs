@@ -15,8 +15,10 @@ tidb-base = { workspace = true }
 tidb-types = { workspace = true }
 # model.Flag* push-down flags (stmtctx).
 tidb-model = { workspace = true }
-# kv.GetNewestMppVersion (mpp_version validation).
+# kv.GetNewestMppVersion (mpp_version validation); kv.Key.PrefixNext (ranger Range.Encode).
 tidb-kv = { workspace = true }
+# codec.EncodeKey (ranger Range.Encode).
+tidb-codec = { workspace = true }
 # MemTotal (parseMemoryLimit).
 tidb-memory = { workspace = true }
 # parser/charset (checkCharacterSet).

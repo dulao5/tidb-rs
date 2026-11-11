@@ -34,3 +34,16 @@ its own target.
 | generator | `govec` (seed 20261109), 1,142 records: `script` 612, `sqlwarn_marshal` 144, `sqlwarn_unmarshal` 125, `push_down` 257, `resolve` 4; both targets hold the same records (no floating point) |
 | `arm64/stmtctx.jsonl.gz` sha256 | `ac631f28a2f43fa941e3ba197cd7925eb5fa4063b0220855263bc9bbb3fce0c2` (generated locally) |
 | `amd64/stmtctx.jsonl.gz` sha256 | `6c5a0d081ea867faf8490f7ff35936dbc048de0e1a6eff0d62e7c38f379944a7` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact) |
+
+## Domains "ranger" and "exprctx" (block D00.1 part 2a)
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/{ranger,exprctx}.jsonl.gz` (branch `govec/ctx-D00.1-2`, tracker #32, commit `92205cf`) |
+| generator | `govec` ranger (seed 20261110): 3,839 records; exprctx (seed 20261111): 2,242 records. Every record runs with new collations enabled; exprctx `load` restores `errors.RedactLogEnabled` (#62). Both targets hold the same records |
+| `arm64/ranger.jsonl.gz` sha256 | `9ddec0b9ba9e1681f52bc8ba899113050176cc8bc70748202af310a1deccc7d8` (generated locally) |
+| `amd64/ranger.jsonl.gz` sha256 | `591a0af500291e203cd334031361dc9e25c5706d0bb3dc355820e157be9a39e6` (tracker CI artifact) |
+| `arm64/exprctx.jsonl.gz` sha256 | `beaff05204db2cda88b8fc55f0042528121f8c535a9d479e01a9678d77fa72bc` (generated locally) |
+| `amd64/exprctx.jsonl.gz` sha256 | `3c595d4f11593d73cdbc113c75fd31b6b67c3ea606d7c08743527cd5f96cd482` (tracker CI artifact) |
+
+Extra seeds (tracker CI artifact `govec-extra-seeds-*`): replay with `GOVEC_RANGER_FILES` / `GOVEC_EXPRCTX_FILES` (comma-separated).
