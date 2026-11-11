@@ -52,74 +52,72 @@ fn overflow(ctx: &dyn EvalContext, f: &BuiltinFunc, tp: &'static str) -> Error {
     ])
 }
 
+/// The unsigned flags of the two arguments: bit 0 = lhs, bit 1 = rhs.
+#[inline]
+fn flags2(f: &impl SigView) -> u8 {
+    u8::from(unsigned(f, 0)) | (u8::from(unsigned(f, 1)) << 1)
+}
+
 // go: pkg/expression/builtin_arithmetic.go (*builtinArithmeticPlusIntSig).evalInt (prototype)
-#[eval_fn(Int)]
-fn plus_int(ctx: &dyn EvalContext, f: &impl SigView, a: i64, b: i64) -> Result<Option<i64>, Error> {
-    let is_lhs_unsigned = unsigned(f, 0);
-    let is_rhs_unsigned = unsigned(f, 1);
+// The `checked` form: (value, overflow) for the flag combination FL; the error is built by
+// plus_int_err for the first overflowing row.
+#[eval_fn(Int, checked(nflags = 2, flags = flags2, err = plus_int_err))]
+fn plus_int<const FL: u8>(a: i64, b: i64) -> (i64, bool) {
+    let (is_lhs_unsigned, is_rhs_unsigned) = (FL & 1 != 0, FL & 2 != 0);
     match (is_lhs_unsigned, is_rhs_unsigned) {
         (true, true) => {
-            if (a as u64) > u64::MAX - (b as u64) {
-                return Err(overflow(ctx, f, "BIGINT UNSIGNED"));
-            }
+            let (v, o) = (a as u64).overflowing_add(b as u64);
+            (v as i64, o)
         }
+        // uint64(a) + b must stay in [0, 2^64): a carry and a negative b cancel out.
         (true, false) => {
-            if b < 0 && (b.wrapping_neg() as u64) > a as u64 {
-                return Err(overflow(ctx, f, "BIGINT UNSIGNED"));
-            }
-            if b > 0 && (a as u64) > u64::MAX - (b as u64) {
-                return Err(overflow(ctx, f, "BIGINT UNSIGNED"));
-            }
+            let (v, o) = (a as u64).overflowing_add(b as u64);
+            (v as i64, o != (b < 0))
         }
         (false, true) => {
-            if a < 0 && (a.wrapping_neg() as u64) > b as u64 {
-                return Err(overflow(ctx, f, "BIGINT UNSIGNED"));
-            }
-            if a > 0 && (b as u64) > u64::MAX - (a as u64) {
-                return Err(overflow(ctx, f, "BIGINT UNSIGNED"));
-            }
+            let (v, o) = (b as u64).overflowing_add(a as u64);
+            (v as i64, o != (a < 0))
         }
-        (false, false) => {
-            if (a > 0 && b > i64::MAX - a) || (a < 0 && b < i64::MIN - a) {
-                return Err(overflow(ctx, f, "BIGINT"));
-            }
-        }
+        (false, false) => a.overflowing_add(b),
     }
-    Ok(Some(a.wrapping_add(b)))
+}
+
+#[cold]
+fn plus_int_err(ctx: &dyn EvalContext, f: &impl SigView, _a: i64, _b: i64) -> Error {
+    let tp = if unsigned(f, 0) || unsigned(f, 1) { "BIGINT UNSIGNED" } else { "BIGINT" };
+    overflow(ctx, f, tp)
 }
 
 // go: (*builtinLTIntSig).evalInt + CompareInt + resOfLT (prototype). CompareInt evaluates
-// both arguments before looking at NULL, so the body is lazy.
-#[eval_fn(Int, lazy)]
-fn lt_int(
-    ctx: &dyn EvalContext,
-    f: &impl SigView,
-    args: &mut impl Args,
-) -> Result<Option<i64>, Error> {
-    let arg0 = args.int(ctx, 0)?;
-    let arg1 = args.int(ctx, 1)?;
-    let (Some(arg0), Some(arg1)) = (arg0, arg1) else {
-        return Ok(None);
-    };
-    let (u0, u1) = (unsigned(f, 0), unsigned(f, 1));
-    let v = tidb_types::compare::compare_int(arg0, u0, arg1, u1);
-    Ok(Some(i64::from(v < 0)))
+// both arguments before looking at NULL: `eager`.
+#[eval_fn(Int, eager, checked(nflags = 2, flags = flags2, err = no_err))]
+fn lt_int<const FL: u8>(arg0: i64, arg1: i64) -> (i64, bool) {
+    let v = tidb_types::compare::compare_int(arg0, FL & 1 != 0, arg1, FL & 2 != 0);
+    (i64::from(v < 0), false)
 }
 
-// go: (*builtinCastIntAsRealSig).evalReal (prototype; inUnion = false)
-#[eval_fn(Real)]
-fn cast_int_as_real(
-    _ctx: &dyn EvalContext,
-    f: &impl SigView,
-    val: i64,
-) -> Result<Option<f64>, Error> {
-    let unsigned_args0 = unsigned(f, 0);
-    let res = if !mysql::has_unsigned_flag(f.tp.get_flag()) && !unsigned_args0 {
-        val as f64
-    } else {
-        val as u64 as f64
-    };
-    Ok(Some(res))
+#[cold]
+fn no_err(_ctx: &dyn EvalContext, _f: &impl SigView, _a: i64, _b: i64) -> Error {
+    unreachable!("LT has no error rows")
+}
+
+/// Bit 0: the argument is unsigned; bit 1: the result type is unsigned.
+#[inline]
+fn cast_flags(f: &impl SigView) -> u8 {
+    u8::from(unsigned(f, 0)) | (u8::from(mysql::has_unsigned_flag(f.tp.get_flag())) << 1)
+}
+
+// go: (*builtinCastIntAsRealSig).evalReal (prototype; inUnion = false). No error rows.
+#[eval_fn(Real, checked(nflags = 2, flags = cast_flags, err = no_err1))]
+fn cast_int_as_real<const FL: u8>(val: i64) -> (f64, bool) {
+    let (unsigned_args0, unsigned_ret) = (FL & 1 != 0, FL & 2 != 0);
+    let res = if !unsigned_ret && !unsigned_args0 { val as f64 } else { val as u64 as f64 };
+    (res, false)
+}
+
+#[cold]
+fn no_err1(_ctx: &dyn EvalContext, _f: &impl SigView, _a: i64) -> Error {
+    unreachable!("CAST(int AS REAL) has no error rows")
 }
 
 const MAX_ALLOWED_PACKET: u64 = 64 << 20;
@@ -153,7 +151,8 @@ fn like(
     pattern_str: &[u8],
     escape: i64,
 ) -> Result<Option<i64>, Error> {
-    let mut pattern = f.collator().pattern();
+    // Go: a new pattern per row (row version), one per call (vector version).
+    let mut pattern = f.scratch(|| f.collator().pattern());
     pattern.compile(pattern_str, escape as u8);
     Ok(Some(i64::from(pattern.do_match(val_str))))
 }
@@ -426,67 +425,5 @@ fn bench(c: &mut Criterion) {
     }
 }
 
-/// Hand-written loops shaped like Go's `plusSU` / `vecCompareInt` (flags hoisted, no
-/// per-row call), on the same inputs: what a second, vector-only body would reach.
-fn bench_handwritten(c: &mut Criterion) {
-    use tidb_chunk::column::new_column_for;
-    for case in cases() {
-        let name = case.name.clone();
-        if !(name.starts_with("PlusInt") || name == "LTInt") {
-            continue;
-        }
-        let f = &case.expr.as_scalar_function().unwrap().function;
-        let u0 = mysql::has_unsigned_flag(f.args[0].get_static_type().get_flag());
-        let u1 = mysql::has_unsigned_flag(f.args[1].get_static_type().get_flag());
-        let mut result = new_column_for(&longlong(false), N);
-        c.bench_function(&format!("{name}-Hand"), |b| {
-            b.iter(|| {
-                let input = black_box(&case.input);
-                let (c0, c1) = (input.column(0), input.column(1));
-                result.resize_int64(N, false);
-                result.merge_nulls(&[c0, c1]);
-                let l = c0.int64s();
-                let r = c1.int64s();
-                let out = result.int64s_mut();
-                for i in 0..N {
-                    let (a, b) = (l[i].get(), r[i].get());
-                    let v = if name == "LTInt" {
-                        i64::from(tidb_types::compare::compare_int(a, u0, b, u1) < 0)
-                    } else {
-                        match (u0, u1) {
-                            (true, true) => {
-                                if (a as u64) > u64::MAX - (b as u64) {
-                                    panic!()
-                                }
-                            }
-                            (false, true) => {
-                                if (a < 0 && (a.wrapping_neg() as u64) > b as u64)
-                                    || (a > 0 && (b as u64) > u64::MAX - (a as u64))
-                                {
-                                    panic!()
-                                }
-                            }
-                            (true, false) => {
-                                if (b < 0 && (b.wrapping_neg() as u64) > a as u64)
-                                    || (b > 0 && (a as u64) > u64::MAX - (b as u64))
-                                {
-                                    panic!()
-                                }
-                            }
-                            (false, false) => {
-                                if (a > 0 && b > i64::MAX - a) || (a < 0 && b < i64::MIN - a) {
-                                    panic!()
-                                }
-                            }
-                        }
-                        a.wrapping_add(b)
-                    };
-                    out[i] = zerocopy::little_endian::I64::new(v);
-                }
-            })
-        });
-    }
-}
-
-criterion_group!(benches, bench, bench_handwritten);
+criterion_group!(benches, bench);
 criterion_main!(benches);

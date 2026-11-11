@@ -165,3 +165,74 @@ fn lazy_string_drivers_agree() {
         }
     }
 }
+
+fn no_flags(_f: &impl SigView) -> u8 {
+    0
+}
+
+#[eval_fn(Int, checked(nflags = 0, flags = no_flags, err = add_err))]
+fn checked_add<const FL: u8>(a: i64, b: i64) -> (i64, bool) {
+    a.overflowing_add(b)
+}
+
+#[cold]
+fn add_err(_ctx: &dyn EvalContext, _f: &impl SigView, a: i64, b: i64) -> Error {
+    Error::plain(format!("overflow {a} + {b}"))
+}
+
+static CHECKED_ADD_SIG: SigDesc = SigDesc {
+    name: "checked_add",
+    pb_code: 0,
+    vectorized: true,
+    drivers: CHECKED_ADD,
+};
+
+/// The checked form: an overflow in a NULL row is not an error; the error is the one of
+/// the first non-NULL overflowing row, in both drivers.
+#[test]
+fn checked_drivers_agree() {
+    let int = new_field_type(mysql::TypeLonglong);
+    let ctx = new_eval_context(vec![]);
+    let ctx: &dyn EvalContext = &*ctx;
+    let st = EvalState::new();
+    let e = func(&CHECKED_ADD_SIG, vec![col(0, &int), col(1, &int)], int.clone());
+    let prog = RpnProgram::compile(&e);
+    let mut rpn = RpnState::default();
+    for n in [1usize, 7, 8, 9, 17, 64, 100] {
+        for bad_rows in [vec![], vec![n - 1], vec![0, n / 2], vec![n / 3, n - 1]] {
+            for null_rows in [vec![], vec![0], bad_rows.first().copied().into_iter().collect::<Vec<_>>()] {
+                let mut chk = new_chunk_with_capacity(&[int.clone(), int.clone()], n);
+                for i in 0..n {
+                    if null_rows.contains(&i) {
+                        chk.append_null(0);
+                    } else if bad_rows.contains(&i) {
+                        chk.append_int64(0, i64::MAX - i as i64);
+                    } else {
+                        chk.append_int64(0, i as i64);
+                    }
+                    chk.append_int64(1, 1000);
+                }
+                let mut res = new_empty_column(&int);
+                let vec_r = prog.eval(ctx, &st, &mut rpn, &chk, &mut res);
+                let mut row_err = None;
+                for i in 0..n {
+                    match e.eval_int(ctx, &st, chk.get_row(i)) {
+                        Err(err) => {
+                            row_err = Some(err.to_string());
+                            break;
+                        }
+                        Ok(v) => {
+                            if vec_r.is_ok() {
+                                assert_eq!(v.is_none(), res.is_null(i), "n {n} row {i}");
+                                if let Some(v) = v {
+                                    assert_eq!(res.get_int64(i), v, "n {n} row {i}");
+                                }
+                            }
+                        }
+                    }
+                }
+                assert_eq!(vec_r.err().map(|e| e.to_string()), row_err, "n {n} bad {bad_rows:?} null {null_rows:?}");
+            }
+        }
+    }
+}

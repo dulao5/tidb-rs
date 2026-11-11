@@ -15,7 +15,9 @@
 pub mod rt;
 
 use smallvec::SmallVec;
+use std::any::Any;
 use std::borrow::Cow;
+use std::cell::{RefCell, RefMut};
 
 use tidb_base::Error;
 use tidb_chunk::{Chunk, Column, Row};
@@ -346,20 +348,41 @@ fn vec_eval_name(et: EvalType) -> &'static str {
 pub trait SigView: std::ops::Deref<Target = BuiltinFunc> {
     /// `b.args[i].GetType(ctx)`.
     fn arg_type(&self, i: usize) -> Cow<'_, FieldType>;
+
+    /// A working object of the body that lives for this driver call: one per row in the row
+    /// driver, one per chunk in the vector driver — Go's vector versions create such objects
+    /// once per call (e.g. the `WildcardPattern` of `builtinLikeSig.vecEvalInt`) and its row
+    /// versions once per row. The body must not depend on what a previous row left in it.
+    fn scratch<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T>;
+}
+
+/// Storage of [`SigView::scratch`].
+#[derive(Default)]
+pub struct Scratch(RefCell<Option<Box<dyn Any>>>);
+
+impl Scratch {
+    #[inline]
+    fn get<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T> {
+        let mut slot = self.0.borrow_mut();
+        if !slot.as_ref().is_some_and(|b| b.is::<T>()) {
+            *slot = Some(Box::new(init()));
+        }
+        RefMut::map(slot, |b| b.as_mut().and_then(|b| b.downcast_mut::<T>()).expect("scratch type"))
+    }
 }
 
 /// The row driver's [`SigView`].
-#[derive(Clone, Copy)]
 pub struct RowSig<'a> {
     f: &'a BuiltinFunc,
     ctx: &'a dyn EvalContext,
+    scratch: Scratch,
 }
 
 impl<'a> RowSig<'a> {
     /// The view of `f`.
     #[inline(always)]
     pub fn new(f: &'a BuiltinFunc, ctx: &'a dyn EvalContext) -> Self {
-        RowSig { f, ctx }
+        RowSig { f, ctx, scratch: Scratch::default() }
     }
 }
 
@@ -376,6 +399,11 @@ impl SigView for RowSig<'_> {
     fn arg_type(&self, i: usize) -> Cow<'_, FieldType> {
         self.f.args[i].get_type(self.ctx)
     }
+
+    #[inline(always)]
+    fn scratch<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T> {
+        self.scratch.get(init)
+    }
 }
 
 /// The argument types of one vector-driver call, read once per chunk.
@@ -390,17 +418,17 @@ impl<'a> ArgTypes<'a> {
 }
 
 /// The vector driver's [`SigView`].
-#[derive(Clone, Copy)]
 pub struct VecSig<'a, 't> {
     f: &'a BuiltinFunc,
     types: &'a [Cow<'t, FieldType>],
+    scratch: Scratch,
 }
 
 impl<'a, 't> VecSig<'a, 't> {
     /// The view of `f` with the types of this chunk.
     #[inline(always)]
     pub fn new(f: &'a BuiltinFunc, types: &'a ArgTypes<'t>) -> Self {
-        VecSig { f, types: &types.0 }
+        VecSig { f, types: &types.0, scratch: Scratch::default() }
     }
 }
 
@@ -416,6 +444,11 @@ impl SigView for VecSig<'_, '_> {
     #[inline(always)]
     fn arg_type(&self, i: usize) -> Cow<'_, FieldType> {
         Cow::Borrowed(&*self.types[i])
+    }
+
+    #[inline(always)]
+    fn scratch<T: 'static>(&self, init: impl FnOnce() -> T) -> RefMut<'_, T> {
+        self.scratch.get(init)
     }
 }
 
