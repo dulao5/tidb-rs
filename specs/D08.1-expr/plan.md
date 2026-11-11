@@ -57,7 +57,7 @@
 - `BuiltinFunc` = `baseBuiltinFunc`（D08.2 的 `builtin.go`）：`args`、`tp`、`pbCode`、`ctor`、`collationInfo`；`equal`、`cloneFrom`、`MemoryUsage`、`getArgs`、`getRetTp`、`vectorized`、`isChildrenVectorized`、`collator`、`SetCollator`、`PbCode`；`evalXxx` 未实现时返回 Go 的 `baseBuiltinFunc.evalXxx() should never be called` 错误。`SigDrivers` 覆盖 8 种求值类型（宏目前生成 Int/Real/String，其余类型随第一个用到的函数族加上），另有 `SigDrivers::None`（只用于规划的签名和测试）。
 - `Column.EqualByExprAndID`、`Column.ResolveIndicesByVirtualExpr`、`GetUsedList`；`Expr::resolve_indices_by_virtual_expr` 分派。
 - 评审 #73 的后续：关联列的槽按外层列 `UniqueID`（spec §3.2、§4 第 9 条）。
-- govec：`expr` 领域新增 `sf` 2,000、`sfpair` 700、`vcol` 400、`sizes` 1 条（共 8,866 条）。Go 用 `NewFunctionBase` 按配方建树，Go 自己选签名；Rust 按 Go 输出的树（签名类型名、返回类型、collation 等）用只有描述的签名重建，比较规划侧方法的结果。39 个配方 Go 建不出来（参数类型不被函数接受），跳过。
+- govec：`expr` 领域新增 `sf` 2,000、`sfpair` 700、`vcol` 400、`sizes` 1 条（共 8,867 条）。Go 用 `NewFunctionBase` 按配方建树，Go 自己选签名；Rust 按 Go 输出的树（签名类型名、返回类型、collation 等）用只有描述的签名重建，比较规划侧方法的结果。39 个配方 Go 建不出来（参数类型不被函数接受），跳过。
 - 收敛检查：D08.1 matched 197/348（第 1 部分 141）。
 
 **偏离**（补进 spec §4）：
