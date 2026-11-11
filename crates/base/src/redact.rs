@@ -82,8 +82,9 @@ pub fn de_redact_file(remove: bool, input: &str, output: &str) -> std::io::Resul
 /// DeRedact is similar to DeRedactFile, but act on reader/writer, it works line by line.
 // Note: lines are split like bufio.Scanner's ScanLines ("\n", an optional preceding "\r"
 // removed); ReadRune turns each invalid UTF-8 byte into U+FFFD. Go's bufio.Scanner stops
-// silently at a line over 64 KiB (the error is never checked); here such lines are
-// processed.
+// silently at a line over 64 KiB (the error is never checked), dropping that line and
+// every later one while reporting success; here such lines are processed. A deliberate,
+// user-visible deviation (tidb-rs #90, docs/compatibility.md).
 // go: DeRedact L2
 pub fn de_redact<R: BufRead, W: Write>(
     remove: bool,
