@@ -144,7 +144,9 @@ impl TidbFromBinaryFunctionClass {
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETString, &[ETString])?;
         bf.tp = self.tp.clone();
-        bf.cannot_convert_string_as_warning = self.cannot_convert_string_as_warning;
+        bf.extra = crate::eval::SigExtra::FromBinary {
+            cannot_convert_string_as_warning: self.cannot_convert_string_as_warning,
+        };
         Ok(bf.with_sig(&builtinInternalFromBinarySig))
     }
 }
@@ -155,7 +157,7 @@ impl TidbFromBinaryFunctionClass {
 // go: builtinInternalFromBinarySig.evalString L1
 // go: builtinInternalFromBinarySig.vecEvalString L2 (the vector driver of this body; a non-strict conversion warning keeps the input bytes, as in Go)
 // go: builtinInternalFromBinarySig.vectorized L2 (SigDesc.vectorized)
-// go: builtinInternalFromBinarySig.Clone L2 (BuiltinFunc::clone_from_base copies cannot_convert_string_as_warning, as Go)
+// go: builtinInternalFromBinarySig.Clone L2 (BuiltinFunc::clone_from_base copies SigExtra::FromBinary, as Go)
 #[eval_fn(String)]
 pub fn internal_from_binary(
     ctx: &dyn EvalContext,
@@ -173,7 +175,7 @@ pub fn internal_from_binary(
             Arg::from(f.tp.get_charset().to_string()),
         ]);
 
-        if f.cannot_convert_string_as_warning {
+        if f.cannot_convert_string_as_warning() {
             let tc = type_ctx(ctx);
             tc.append_warning(err);
             if sql_mode(ctx).has_strict_mode() {

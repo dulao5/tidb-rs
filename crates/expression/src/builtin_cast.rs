@@ -298,7 +298,7 @@ sig!(
 #[inline(always)]
 // glue: read of the embedded baseBuiltinCastFunc.inUnion
 fn in_union(f: &BuiltinFunc) -> bool {
-    f.in_union == Some(true)
+    f.in_union() == Some(true)
 }
 
 /// The decimal result of a signature after `ProduceDecWithSpecifiedTp` and
@@ -1087,7 +1087,7 @@ pub struct CastAsDecimalFunctionClass {
 /// `bf.baseBuiltinFunc`: the base without the cast part.
 // glue: field access bf.baseBuiltinFunc of a baseBuiltinCastFunc
 fn base_of(mut bf: BuiltinFunc) -> BuiltinFunc {
-    bf.in_union = None;
+    bf.extra = crate::eval::SigExtra::None;
     bf
 }
 

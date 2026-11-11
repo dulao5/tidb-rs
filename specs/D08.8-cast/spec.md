@@ -49,9 +49,9 @@ Go 的 `baseBuiltinCastFunc` = `baseBuiltinFunc` + `inUnion`。Rust 的 `Builtin
 
 - **块的归属**：`builtin_convert_charset.go` 原属 D08.6（字符串函数，P5）。`castAsStringFunctionClass` 对二进制字符串参数调用 `HandleBinaryLiteral`（包一层 `from_binary`），`newBaseBuiltinFuncWithTp` 对每个字符串参数也调用它，所以这个文件随 CAST 进入 D08.8（tracker `rules.py`）。
 - **`newBaseBuiltinFuncWithTp`**（D08.2）：`to_binary`/`from_binary` 的函数类用它；参数按 `argTps` 包 CAST（INT/REAL/DECIMAL/STRING 已移植），之后才能接着做 `NewFunction*`（第 2b-3 部分）。
-- **`from_binary` 的状态**：`cannotConvertStringAsWarning` 放在 `BuiltinFunc` 上（与 `in_union` 相同的做法），Go 的 `Clone` 复制它，Rust 的 `Clone` 也复制（D08.1 spec §3.5）。
+- **`from_binary` 的状态**：`cannotConvertStringAsWarning` 是 `BuiltinFunc::extra` 的 `SigExtra::FromBinary`（`inUnion` 是 `SigExtra::Cast`；D08.1 spec §3.5 (a)，Lucky 评审 #86），Go 的 `Clone` 复制它，Rust 的 `Clone` 也复制。
 - **签名**：都有逐行的副作用（`ProduceStrWithSpecifiedTp` 的截断 warning、`handleAllowedPacketOverflowed`、`from_binary` 的 `AppendWarning`），按 D08.1 spec §3.4 用默认的单遍驱动。
-- **行版本与向量版本的差异**（D08.1 spec §3.4 (c)，govec 两种模式都比较）：`builtinInternalFromBinarySig` 在 `cannotConvertStringAsWarning` 且非严格模式下转换失败时，行版本返回 `Transform` 已产生的部分，向量版本写入原始字节；函数体用 `f.vector()` 区分（"str" 和 "binlit" 记录都有走到这里的行，反证见 PR）。这是 Go 的行为差异，用户能看到（`tidb_enable_vectorized_expression` 切换时 `CAST(binary AS CHAR CHARSET ..)` 的结果不同）。
+- **行版本与向量版本的差异**（D08.1 spec §3.4 (c)，govec 两种模式都比较）：`builtinInternalFromBinarySig` 在 `cannotConvertStringAsWarning` 且非严格模式下转换失败时，行版本返回 `Transform` 已产生的部分，向量版本写入原始字节；函数体用 `f.vector()` 区分（"str" 和 "binlit" 记录都有走到这里的行，反证见 PR）。这是 Go 的行为差异，用户能看到（`tidb_enable_vectorized_expression` 切换时 `CAST(binary AS CHAR CHARSET ..)` 的结果不同）。 用户可见：打开向量化时 `CAST(b AS CHAR CHARSET gbk)` 返回非法的原始字节，外层的 `LENGTH`/`HEX` 报 ERROR 1300；已并入 upstream-pitfall #83（Lucky 的复现见该 issue）。
 
 ## 4. 偏离与豁免
 

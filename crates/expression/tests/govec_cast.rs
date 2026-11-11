@@ -373,7 +373,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
                 return Value::Object(m);
             };
             let meta = match &*res {
-                Expr::ScalarFunction(sf) => sf.function.in_union.map_or(Value::Null, |b| json!(b)),
+                Expr::ScalarFunction(sf) => sf.function.in_union().map_or(Value::Null, |b| json!(b)),
                 _ => Value::Null,
             };
             m.insert("meta".into(), meta);
