@@ -70,6 +70,14 @@ impl UserVars {
         inner.types.remove(&var_name);
     }
 
+    /// Copies of the values and types maps, read under one lock (Go reads `values` and
+    /// `types` while holding `lock.RLock()`).
+    // glue: the RLock-guarded map reads of SessionVars.EncodeSessionStates
+    pub fn snapshot(&self) -> (HashMap<String, Datum>, HashMap<String, FieldType>) {
+        let inner = self.inner.read();
+        (inner.values.clone(), inner.types.clone())
+    }
+
     /// SetUserVarType set user defined variables' type
     // go: UserVars.SetUserVarType L1
     pub fn set_user_var_type(&self, name: &str, ft: FieldType) {

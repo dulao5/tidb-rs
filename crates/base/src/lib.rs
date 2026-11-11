@@ -20,6 +20,7 @@ pub mod gotoml;
 pub mod kv;
 pub mod metrics;
 pub mod mysql;
+pub mod redact;
 pub mod terror;
 mod terror_registry;
 pub mod tikvutil;

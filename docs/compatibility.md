@@ -12,6 +12,12 @@ Following the constitution (article 1, item 2), tidb-rs ports security and data-
 | [pingcap/tidb#65884](https://github.com/pingcap/tidb/pull/65884) | `SET tidb_opt_fix_control = '123:'` (colon with no value) fails with `ERROR 1105 runtime error: index out of range …` (an internal panic, recovered per statement); nothing is set. | The value after the colon is empty; no error. | None (an error becomes a success). |
 | [pingcap/tidb#67149](https://github.com/pingcap/tidb/pull/67149) | Comparing or sorting a string containing U+2CEA1 under `utf8mb4_0900_ai_ci` fails with `ERROR 1105 runtime error: index out of range …` (an internal panic, recovered per statement). | Works. | None (an error becomes a success). |
 
+## Deliberate deviations from v8.5.8
+
+| Area | v8.5.8 behavior | tidb-rs behavior | Reason |
+|---|---|---|---|
+| `tidb-server --redact` (log de-redaction, `DeRedact`) | A line longer than 64 KiB stops Go's `bufio.Scanner`; that line **and every line after it** are silently dropped and the command exits successfully ([tidb-rs #90](https://github.com/dulao5/tidb-rs/issues/90)). Not fixed on master. | All lines are processed. | Copying Go would silently lose data in a recovery tool; slow logs with large `INSERT` statements commonly exceed 64 KiB per line. |
+
 ## Transitional gaps (until the session layer is ported)
 
 tidb-rs still uses its prototype session layer until block D05.3. Until then:
