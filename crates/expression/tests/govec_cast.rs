@@ -24,11 +24,11 @@ use tidb_sessionctx::errctx::{Level, LevelMap};
 use tidb_sessionctx::exprstatic as es;
 use tidb_types::MyDecimal;
 use tidb_types::binary_literal::BinaryLiteral;
-use tidb_types::enum_type::Enum;
-use tidb_types::set_type::Set;
 use tidb_types::context::Flags;
 use tidb_types::datum::{self as dm, Datum};
+use tidb_types::enum_type::Enum;
 use tidb_types::field_type_builder::new_field_type_builder;
+use tidb_types::set_type::Set;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"

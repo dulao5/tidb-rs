@@ -265,10 +265,7 @@ fn rpn_refuses_misread_columns() {
         let e = func(&ADD_SIG, vec![col(0, &ft), col(0, &ft)], int.clone());
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| RpnProgram::compile(&e)));
         let msg = r.expect_err("compile must refuse");
-        let msg = msg
-            .downcast_ref::<String>()
-            .cloned()
-            .unwrap_or_default();
+        let msg = msg.downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(msg.contains("read as"), "{tp}: {msg}");
     }
     // A BIT column read as int converts (hybrid), it is accepted.
