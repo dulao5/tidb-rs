@@ -480,7 +480,12 @@ impl BuiltinFunc {
         result: &mut Column,
     ) -> Result<(), Error> {
         match self.sig.drivers.vec() {
-            Some(f) if self.sig.drivers.eval_type() == Some(normalize_et(et)) => {
+            // A Go signature whose vectorized() is false has no vecEvalXxx of its own: the
+            // call reaches baseBuiltinFunc.vecEvalXxx (Go's executors evaluate such
+            // expressions row by row instead).
+            Some(f)
+                if self.sig.vectorized && self.sig.drivers.eval_type() == Some(normalize_et(et)) =>
+            {
                 f(self, ctx, n, cols, result)
             }
             _ => Err(Error::plain(format!(
