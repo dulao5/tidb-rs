@@ -3902,6 +3902,7 @@ dependencies = [
  "serde_json",
  "tidb-base",
  "tidb-codec",
+ "tidb-execdetails",
  "tidb-kv",
  "tidb-memory",
  "tidb-model",

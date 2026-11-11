@@ -8,7 +8,7 @@
 - [x] T6a exprctx、expropt/optional.go、exprstatic（第 2a 部分）
 - [x] T6b expropt 的具体 provider（第 2b 部分）；sessionexpr 等 D05.3 的会话与 T9（豁免）
 - [x] T7 planctx、core/base（PlanCounterTp）、debugtrace、sessionctx/context.go 的 basicCtxType（第 2b 部分）；`ValidateSnapshotReadTS` 等 D07.1，distsql/context 等 D14.0/D07.2（豁免）
-- [ ] T8 stmtctx 剩余：digest（D02.2）、ExecDetails（D14.0）、used-stats（D11）、LogicalPlanBuildState（P3）
+- [ ] T8 stmtctx 剩余：digest（D02.2）、used-stats（D11）、LogicalPlanBuildState（P3）。ExecDetails（D14.0）已完成：`SyncExecDetails`、`RuntimeStatsColl`、`GetExecDetails`、`ResetForRetry` 重置 exec details
 - [ ] T9 D05.2 `session.rs` 的 StatementContext 替身换成 `stmtctx::StatementContext`
 - [x] T10 #65 评审的后续：`pkg/util/context` 改归 tidb-base 所有的块 D00.4；替换 handler 并 reset 后旧副本写 warning 的单元测试；spec 记下 ErrorGroup 分支在 INSERT 写路径上可达、`Reset` 与 `Arc::get_mut` 的对应
 - [x] T11 #68 评审：块 D00.1a 改名为 D00.4；`UserVarsReader` 与空的 `UserVars` 替身移到 `variable/uservars.rs`（Go 在 `pkg/sessionctx/variable` 定义），`exprctx` 再导出；`EvalWarnSink` 改用 `OnceLock`（Go 的 `EvalContext` 构造后不再换 handler）
