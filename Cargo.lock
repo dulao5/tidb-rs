@@ -2532,6 +2532,8 @@ dependencies = [
  "thiserror 1.0.69",
  "tidb-base",
  "tidb-distsql",
+ "tidb-infoschema",
+ "tidb-kv",
  "tidb-meta",
  "tidb-model",
  "tidb-mysql-protocol",

@@ -32,7 +32,7 @@ Go 中调用方会读"值 + error"的地方，Rust 返回 `(值, Result<(), Erro
 ### 3.3 strconv 与正则
 
 - `tidb-base::gostd::strconv` 新增 Go 形态的 `parse_int`、`parse_uint`、`atoi`（64 位；`Atoi` 1–18 字节的快速路径；`NumError` 的文字用 `%q`）。`ParseFloat` 用 `tidb-types::gostd::parse_float`。
-- `GetAllNameToIDAndTheMustLoadedTableInfo` 的两个正则用 `regex::bytes` 加 `(?-u)`：Go 的 `\d` 只匹配 ASCII，写成 `[0-9]`；Go 的 `regexp` 把非法 UTF-8 的每个字节读成一个 U+FFFD，按字节匹配得到的范围相同（`.` 和 `[^"\\]` 不会停在多字节字符中间）。正则没匹配上时，Go 下标越界 panic，Rust 以相同文字 panic。
+- `GetAllNameToIDAndTheMustLoadedTableInfo` 的两个正则用 `regex::bytes` 加 `(?-u)`：Go 的 `\d` 只匹配 ASCII，写成 `[0-9]`；Go 的 `regexp` 把非法 UTF-8 的每个字节读成一个 U+FFFD，按字节匹配得到的范围相同（`.` 和 `[^"\\]` 不会停在多字节字符中间）。正则没匹配上时，Go 下标越界 panic，Rust 以相同文字 panic。Go 的 `NameExtractRegexp` 取的是第一个 `"O"`，即表名的原始大小写（变量名 `nameLRegex` 容易误解），Rust 照搬。
 
 ## 4. 偏离与豁免
 

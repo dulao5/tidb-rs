@@ -32,6 +32,9 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+# examples/meta_cli.rs (D06.2 mixed-cluster check).
+tidb-infoschema = { workspace = true }
+tidb-kv = { workspace = true }
 # examples/systable_cli.rs (raw).
 tidb-tablecodec = { workspace = true }
 tidb-types = { workspace = true }
