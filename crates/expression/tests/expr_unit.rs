@@ -86,9 +86,15 @@ fn correlated_slot_is_shared_by_clone_and_remap() {
         st.correlated(r.as_correlated_column().unwrap()).get_int64(),
         42
     );
-    // A new correlated column has its own slot: the zero (NULL) Datum until Apply writes it.
-    let fresh = CorrelatedColumn::new(Column {
+    // A correlated column of the same outer column shares the slot (ExtractCorColumnsBySchema).
+    let same = CorrelatedColumn::new(Column {
         unique_id: 7,
+        ..Column::default()
+    });
+    assert_eq!(st.correlated(&same).get_int64(), 42);
+    // Another outer column has its own slot: the zero (NULL) Datum until Apply writes it.
+    let fresh = CorrelatedColumn::new(Column {
+        unique_id: 8,
         ..Column::default()
     });
     assert!(st.correlated(&fresh).is_null());
