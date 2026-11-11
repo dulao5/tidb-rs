@@ -56,7 +56,7 @@ panic in Rust too.
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-1`) |
 | generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 3,760 records: `cast` 3,060 (60 of them UNSIGNED UNION negative strings), `wrap` 700 |
 | `arm64/cast.jsonl.gz` sha256 | `fc5392599ff29f7ddbc50a9efdc3bdbb48db03d35682b758694b8586b080316e` (GOARCH=arm64, generated locally) |
-| `amd64/cast.jsonl.gz` sha256 | pending (tracker CI artifact) |
+| `amd64/cast.jsonl.gz` sha256 | `77690813e4cf177eba5e92fb571a982403df7c1e00336f01bc739341807ab0db` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
 
 A `cast` record builds `CAST(arg AS tp)` with `BuildCastFunctionWithCheck` (the argument is a
 column of the record's rows or a constant, which is folded) under random type flags and error
