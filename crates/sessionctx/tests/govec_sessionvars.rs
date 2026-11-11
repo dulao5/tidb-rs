@@ -532,7 +532,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
         }
         "set" => {
             let mut vars = fresh_vars();
-            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            vars.stmt_ctx_mut().stmt_type = "Set".to_owned();
             let (kind, name, val) = (
                 args[0].as_str().unwrap(),
                 args[1].as_str().unwrap(),
@@ -576,7 +576,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 }
             }
             let warns = vars
-                .stmt_ctx
+                .stmt_ctx()
                 .get_warnings()
                 .into_iter()
                 .map(|w| w.err)
@@ -608,7 +608,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             let out = json!({"sess": sess, "sess_err": sess_err, "glob": glob, "glob_err": glob_err,
                 "state": state, "keep": keep, "state_err": state_err});
             let warns = vars
-                .stmt_ctx
+                .stmt_ctx()
                 .get_warnings()
                 .into_iter()
                 .map(|w| w.err)
@@ -617,7 +617,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
         }
         "set_global" => {
             let mut vars = fresh_vars();
-            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            vars.stmt_ctx_mut().stmt_type = "Set".to_owned();
             let (name, val) = (args[0].as_str().unwrap(), args[1].as_str().unwrap());
             let (f0, s0) = (fields(&vars), systems(&vars));
             let mut res = serde_json::Map::new();
@@ -654,7 +654,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             res.insert("fields".into(), diff(&f0, &fields(&vars)));
             res.insert("sys".into(), diff(&s0, &systems(&vars)));
             let warns = vars
-                .stmt_ctx
+                .stmt_ctx()
                 .get_warnings()
                 .into_iter()
                 .map(|w| w.err)
@@ -663,7 +663,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
         }
         "set_global_hook2" => {
             let mut vars = fresh_vars();
-            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            vars.stmt_ctx_mut().stmt_type = "Set".to_owned();
             let name = args[0].as_str().unwrap();
             let mut steps = Vec::new();
             for val in args[1].as_array().unwrap() {
@@ -681,7 +681,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 steps.push(Value::Object(res));
             }
             let warns = vars
-                .stmt_ctx
+                .stmt_ctx()
                 .get_warnings()
                 .into_iter()
                 .map(|w| w.err)
@@ -690,7 +690,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
         }
         "set_global_hook" => {
             let mut vars = fresh_vars();
-            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            vars.stmt_ctx_mut().stmt_type = "Set".to_owned();
             let (name, val) = (args[0].as_str().unwrap(), args[1].as_str().unwrap());
             let sv = get_sys_var(name).unwrap();
             let mut res = serde_json::Map::new();
@@ -709,7 +709,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 );
             }
             let warns = vars
-                .stmt_ctx
+                .stmt_ctx()
                 .get_warnings()
                 .into_iter()
                 .map(|w| w.err)
@@ -727,7 +727,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 tidb.lock().unwrap().insert(k.clone(), row);
             }
             let mut vars = fresh_vars_with_tidb(tidb.clone());
-            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            vars.stmt_ctx_mut().stmt_type = "Set".to_owned();
             let sv = get_sys_var(name).unwrap();
             let mut res = serde_json::Map::new();
             let before = sv.get_global_from_hook(&mut vars);
@@ -751,7 +751,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 .collect();
             res.insert("tidb".into(), Value::Object(tbl));
             let warns = vars
-                .stmt_ctx
+                .stmt_ctx()
                 .get_warnings()
                 .into_iter()
                 .map(|w| w.err)
@@ -760,7 +760,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
         }
         "init" => {
             let mut vars = fresh_vars();
-            vars.stmt_ctx.stmt_type = "Set".to_owned();
+            vars.stmt_ctx_mut().stmt_type = "Set".to_owned();
             let errs: Vec<Value> = init_pairs(args)
                 .iter()
                 .map(|p| {
@@ -772,7 +772,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
             let out = json!({"errs": if errs.is_empty() { Value::Null } else { json!(errs) },
                 "fields": fields(&vars), "sys": systems(&vars)});
             let warns = vars
-                .stmt_ctx
+                .stmt_ctx()
                 .get_warnings()
                 .into_iter()
                 .map(|w| w.err)

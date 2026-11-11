@@ -1,10 +1,19 @@
 //! go-file: pkg/util/chunk/alloc.go
 //!
 //! Chunk allocators. A1 removes the reuse pool (mapping rule `M-POOL`): every allocator
-//! allocates new chunks (Go's `emptyAllocator`), and the pool internals (`allocator`,
-//! `poolColumnAllocator`, `columnList`, `checkColumnType`, `pool.go`) are not ported (tracker
-//! status X). The allocator types are kept so callers keep Go's shape; the session variable
-//! `tidb_enable_reuse_chunk` is accepted and warns when not default (N8, A1 open item 3).
+//! allocates new chunks (Go's `emptyAllocator`), and the pool internals (`allocator.Alloc`,
+//! `allocator.Reset`, `poolColumnAllocator`, `columnList`, `checkColumnType`, `pool.go`) are
+//! not ported (tracker status X). The allocator types are kept so callers keep Go's shape.
+//!
+//! `allocator.CheckReuseAllocSize` IS ported (D05.2 PR E): it only reads the configured pool
+//! sizes, and its answer is visible to users. `SessionVars.SetAlloc` wraps the allocator in
+//! a `reuseHookAllocator` whose hook marks the statement as having used the chunk allocator;
+//! the hook fires on the first `Alloc` when `CheckReuseAllocSize` is true, and the result
+//! is read by `SELECT @@last_sql_use_alloc`. So the no-reuse allocator returned by
+//! `NewAllocator` still answers like Go's pool.
+
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering::Relaxed;
 
 use parking_lot::Mutex;
 use tidb_parser::types::FieldType;
@@ -27,14 +36,59 @@ pub trait Allocator: Send {
     fn reset(&mut self);
 }
 
+#[allow(non_upper_case_globals)]
+/// maxFreeChunks is the maximum number of free chunks the pool keeps (Go `var maxFreeChunks = 64`).
+static maxFreeChunks: AtomicI64 = AtomicI64::new(64);
+#[allow(non_upper_case_globals)]
+/// maxFreeColumnsPerType is the maximum number of free columns per type the pool keeps
+/// (Go `var maxFreeColumnsPerType = 256`).
+static maxFreeColumnsPerType: AtomicI64 = AtomicI64::new(256);
+
 /// InitChunkAllocSize init the maximum cache size
-// go: InitChunkAllocSize L2 (M-POOL: no pool, the sizes are ignored)
-pub fn init_chunk_alloc_size(_set_max_free_chunks: u32, _set_max_free_columns: u32) {}
+// go: InitChunkAllocSize L1 (M-POOL: no pool; the sizes still decide CheckReuseAllocSize)
+pub fn init_chunk_alloc_size(set_max_free_chunks: u32, set_max_free_columns: u32) {
+    let set_max_free_chunks = set_max_free_chunks.min(i32::MAX as u32);
+    let set_max_free_columns = set_max_free_columns.min(i32::MAX as u32);
+    maxFreeChunks.store(i64::from(set_max_free_chunks), Relaxed);
+    maxFreeColumnsPerType.store(i64::from(set_max_free_columns), Relaxed);
+}
 
 /// NewAllocator creates an Allocator.
-// go: NewAllocator L2 (M-POOL: an allocator that does not reuse, Go's emptyAllocator)
+// go: NewAllocator L2 (M-POOL: allocates new chunks like emptyAllocator, but keeps the pool
+// sizes so CheckReuseAllocSize answers like Go's pool)
 pub fn new_allocator() -> Box<dyn Allocator> {
-    new_empty_allocator()
+    Box::new(PoolSizeAllocator {
+        free_chunk: maxFreeChunks.load(Relaxed),
+        // Go: columnAlloc.init() sets freeColumnsPerType = maxFreeColumnsPerType.
+        free_columns_per_type: maxFreeColumnsPerType.load(Relaxed),
+    })
+}
+
+/// allocator is Go's pooled allocator with the pool removed (M-POOL): only the two size
+/// limits are kept, for `CheckReuseAllocSize`.
+// glue: allocator (M-POOL; only freeChunk and columnAlloc.freeColumnsPerType kept)
+#[derive(Clone, Copy, Debug)]
+struct PoolSizeAllocator {
+    free_chunk: i64,
+    free_columns_per_type: i64,
+}
+
+impl Allocator for PoolSizeAllocator {
+    /// Alloc allocates a new chunk (M-POOL: never from a free list).
+    // glue: allocator.Alloc is X (M-POOL); allocates like emptyAllocator.Alloc
+    fn alloc(&mut self, fields: &[FieldType], capacity: usize, max_chunk_size: usize) -> Chunk {
+        new(fields, capacity, max_chunk_size)
+    }
+
+    /// CheckReuseAllocSize check whether the allocator can reuse memory
+    // go: allocator.CheckReuseAllocSize L1
+    fn check_reuse_alloc_size(&self) -> bool {
+        self.free_chunk > 0 || self.free_columns_per_type > 0
+    }
+
+    /// Reset recycles nothing (M-POOL).
+    // glue: allocator.Reset is X (M-POOL)
+    fn reset(&mut self) {}
 }
 
 /// syncAllocator makes an allocator safe for concurrent use.

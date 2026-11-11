@@ -184,7 +184,7 @@ pub(crate) fn check_read_only(
             if vars.noop_funcs_mode == OffInt {
                 return (Off.to_owned(), Err(err_msg));
             }
-            vars.stmt_ctx.append_warning(err_msg.clone());
+            vars.stmt_ctx().append_warning(err_msg.clone());
         }
         if scope == ScopeGlobal {
             let val = match vars
@@ -204,7 +204,7 @@ pub(crate) fn check_read_only(
                 return (Off.to_owned(), Err(err_msg));
             }
             if val == Warn {
-                vars.stmt_ctx.append_warning(err_msg);
+                vars.stmt_ctx().append_warning(err_msg);
             }
         }
     }
@@ -233,7 +233,7 @@ pub(crate) fn check_isolation_level(
                     .gen_with_stack_by_args(vec![normalized_value.to_owned().into()])),
             );
         }
-        vars.stmt_ctx.append_warning(return_err);
+        vars.stmt_ctx().append_warning(return_err);
     }
     (normalized_value.to_owned(), Ok(()))
 }
@@ -303,7 +303,7 @@ pub const maxChunkSizeLowerBound: i64 = 32;
 
 // go: appendDeprecationWarning L1
 pub(crate) fn append_deprecation_warning(s: &mut SessionVars, name: &str, replacement: &str) {
-    s.stmt_ctx.append_warning(
+    s.stmt_ctx().append_warning(
         errWarnDeprecatedSyntax
             .fast_gen_by_args(vec![name.to_owned().into(), replacement.to_owned().into()]),
     );
@@ -449,7 +449,7 @@ pub(crate) fn parse_memory_limit(
     })();
     // defer
     if err.is_ok() && byte_size > 0 && byte_size < (512 << 20) {
-        s.stmt_ctx
+        s.stmt_ctx()
             .append_warning(ErrTruncatedWrongValue.fast_gen_by_args(vec![
                 TiDBServerMemoryLimit.into(),
                 original_value.to_owned().into(),
@@ -710,7 +710,7 @@ pub(crate) fn parse_schema_cache_size(
     };
     // defer
     if err.is_ok() && byte_size > 0 && byte_size < SchemaCacheSizeLowerBound {
-        s.stmt_ctx
+        s.stmt_ctx()
             .append_warning(ErrTruncatedWrongValue.fast_gen_by_args(vec![
                 TiDBSchemaCacheSize.into(),
                 original_value.to_owned().into(),
@@ -719,7 +719,7 @@ pub(crate) fn parse_schema_cache_size(
         normalized_str = SchemaCacheSizeLowerBoundStr.to_owned();
     }
     if err.is_ok() && byte_size > i64::MAX as u64 {
-        s.stmt_ctx
+        s.stmt_ctx()
             .append_warning(ErrTruncatedWrongValue.fast_gen_by_args(vec![
                 TiDBSchemaCacheSize.into(),
                 original_value.to_owned().into(),

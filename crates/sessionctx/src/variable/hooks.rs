@@ -221,7 +221,7 @@ fn v_tidb_enable_tiflash_pipeline_model(
     _o: &str,
     _scope: ScopeFlag,
 ) -> ValResult {
-    vars.stmt_ctx.append_warning(
+    vars.stmt_ctx().append_warning(
         ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen_by_args(vec![a(TiDBEnableTiFlashPipelineMode)]),
     );
     ok(normalized_value)
@@ -485,7 +485,7 @@ fn v_tidb_super_read_only(
     _scope: ScopeFlag,
 ) -> ValResult {
     let on = tidb_opt_on(normalized_value);
-    if !on && s.stmt_ctx.stmt_type == "Set" {
+    if !on && s.stmt_ctx().stmt_type == "Set" {
         let result = match s
             .global_vars_accessor
             .get_global_sys_var(TiDBRestrictedReadOnly)
@@ -547,7 +547,7 @@ fn v_tidb_auto_analyze_partition_batch_size(
     _o: &str,
     _scope: ScopeFlag,
 ) -> ValResult {
-    vars.stmt_ctx.append_warning(
+    vars.stmt_ctx().append_warning(
         ErrWarnDeprecatedSyntaxNoReplacement
             .fast_gen_by_args(vec![a(TiDBAutoAnalyzePartitionBatchSize)]),
     );
@@ -586,7 +586,7 @@ fn v_tidb_enable_auto_analyze_priority_queue(
     _o: &str,
     _scope: ScopeFlag,
 ) -> ValResult {
-    s.stmt_ctx.append_warning(ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen(
+    s.stmt_ctx().append_warning(ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen(
         "tidb_enable_auto_analyze_priority_queue will be removed in the future and TiDB will always use priority queue to execute auto analyze.",
         vec![],
     ));
@@ -653,7 +653,7 @@ fn v_tidb_server_memory_limit_sess_min_size(
     }
     if int_val > 0 && int_val < 128 {
         // 128 Bytes
-        s.stmt_ctx.append_warning(
+        s.stmt_ctx().append_warning(
             ErrTruncatedWrongValue
                 .fast_gen_by_args(vec![a(TiDBServerMemoryLimitSessMinSize), a(original_value)]),
         );
@@ -711,7 +711,7 @@ fn v_tidb_enable_column_tracking(
     _scope: ScopeFlag,
 ) -> ValResult {
     // This variable is deprecated and will be removed in the future.
-    vars.stmt_ctx.append_warning(ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen(
+    vars.stmt_ctx().append_warning(ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen(
         "The 'tidb_enable_column_tracking' variable is deprecated and will be removed in future versions of TiDB. It is always set to 'ON' now.",
         vec![],
     ));
@@ -725,7 +725,7 @@ fn v_require_secure_transport(
     _o: &str,
     _scope: ScopeFlag,
 ) -> ValResult {
-    if vars.stmt_ctx.stmt_type == "Set" && tidb_opt_on(normalized_value) {
+    if vars.stmt_ctx().stmt_type == "Set" && tidb_opt_on(normalized_value) {
         // On tidbcloud dedicated cluster with the default configuration, if an user modify
         // @@global.require_secure_transport=on, he can not login the cluster anymore!
         // A workaround for this is making require_secure_transport read-only for that case.
@@ -857,7 +857,7 @@ fn v_default_collation_for_utf8mb4(
     let (coll, err) =
         check_default_collation_for_utf8mb4(vars, normalized_value, original_value, scope);
     if err.is_ok() {
-        vars.stmt_ctx.append_warning(
+        vars.stmt_ctx().append_warning(
             ErrWarnDeprecatedSyntaxNoReplacement
                 .fast_gen_by_args(vec![a(DefaultCollationForUTF8MB4)]),
         );
@@ -971,7 +971,7 @@ fn v_max_allowed_packet(
     _o: &str,
     scope: ScopeFlag,
 ) -> ValResult {
-    if vars.stmt_ctx.stmt_type == "Set" && scope == ScopeSession {
+    if vars.stmt_ctx().stmt_type == "Set" && scope == ScopeSession {
         let err = ErrReadOnly.gen_with_stack_by_args(vec![
             a("SESSION"),
             a(MaxAllowedPacket),
@@ -987,7 +987,7 @@ fn v_max_allowed_packet(
     }
     let remainder = u % 1024;
     if remainder != 0 {
-        vars.stmt_ctx.append_warning(
+        vars.stmt_ctx().append_warning(
             ErrTruncatedWrongValue.fast_gen_by_args(vec![a(MaxAllowedPacket), a(normalized_value)]),
         );
         u -= remainder;
@@ -1002,7 +1002,7 @@ fn v_tidb_mpp_store_fail_ttl(
     _o: &str,
     _scope: ScopeFlag,
 ) -> ValResult {
-    vars.stmt_ctx.append_warning(errors::new(
+    vars.stmt_ctx().append_warning(errors::new(
         "tidb_mpp_store_fail_ttl is always 0s. This variable has been deprecated and will be removed in the future releases",
     ));
     ok(DefTiDBMPPStoreFailTTL)
@@ -1046,7 +1046,7 @@ macro_rules! always_on_when_off {
         $(#[$m])*
         fn $f(vars: &mut SessionVars, s: &str, _o: &str, _flag: ScopeFlag) -> ValResult {
             if s == Off {
-                vars.stmt_ctx.append_warning(errors::new($msg));
+                vars.stmt_ctx().append_warning(errors::new($msg));
             }
             ok(On)
         }
@@ -1069,7 +1069,7 @@ fn v_tidb_enable_list_partition(
     _o: &str,
     _scope: ScopeFlag,
 ) -> ValResult {
-    vars.stmt_ctx.append_warning(
+    vars.stmt_ctx().append_warning(
         ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen_by_args(vec![a(TiDBEnableListTablePartition)]),
     );
     if !tidb_opt_on(normalized_value) {
@@ -1092,7 +1092,7 @@ fn v_tidb_disable_txn_auto_retry(
     _scope: ScopeFlag,
 ) -> ValResult {
     if normalized_value == Off {
-        vars.stmt_ctx
+        vars.stmt_ctx()
             .append_warning(errWarnDeprecatedSyntax.fast_gen_by_args(vec![a(Off), a(On)]));
     }
     ok(On)
@@ -1106,7 +1106,7 @@ fn v_tidb_enable_fast_analyze(
     _scope: ScopeFlag,
 ) -> ValResult {
     if tidb_opt_on(normalized_value) {
-        vars.stmt_ctx.append_warning(errors::new(
+        vars.stmt_ctx().append_warning(errors::new(
             "the fast analyze feature has already been removed in TiDB v7.5.0, so this will have no effect",
         ));
     }
@@ -1218,7 +1218,7 @@ fn v_tidb_enable_clustered_index(
     _scope: ScopeFlag,
 ) -> ValResult {
     if normalized_value == IntOnly {
-        vars.stmt_ctx.append_warning(
+        vars.stmt_ctx().append_warning(
             errWarnDeprecatedSyntax
                 .fast_gen_by_args(vec![a(normalized_value), a(&format!("'{On}' or '{Off}'"))]),
         );
@@ -1234,7 +1234,7 @@ fn v_tidb_enable_global_index(
     _scope: ScopeFlag,
 ) -> ValResult {
     if !tidb_opt_on(normalized_value) {
-        vars.stmt_ctx.append_warning(errors::new(
+        vars.stmt_ctx().append_warning(errors::new(
             "tidb_enable_global_index is always turned on. This variable has been deprecated and will be removed in the future releases",
         ));
     }
@@ -1296,7 +1296,7 @@ fn v_tidb_analyze_version(
     _scope: ScopeFlag,
 ) -> ValResult {
     if normalized_value == "1" {
-        vars.stmt_ctx
+        vars.stmt_ctx()
             .append_warning(errWarnDeprecatedSyntax.fast_gen_by_args(vec![
                 a("tidb_analyze_version=1"),
                 a("tidb_analyze_version=2"),
@@ -1341,7 +1341,7 @@ fn v_tidb_enable_new_cost_interface(
     _flag: ScopeFlag,
 ) -> ValResult {
     if s == Off {
-        vars.stmt_ctx
+        vars.stmt_ctx()
             .append_warning(errWarnDeprecatedSyntax.fast_gen_by_args(vec![a(Off), a(On)]));
     }
     ok(On)
@@ -1356,7 +1356,7 @@ fn v_tidb_mem_quota_query(
 ) -> ValResult {
     let int_val = tidb_opt_int64(normalized_value, DefTiDBMemQuotaQuery);
     if int_val > 0 && int_val < 128 {
-        vars.stmt_ctx.append_warning(
+        vars.stmt_ctx().append_warning(
             ErrTruncatedWrongValue.fast_gen_by_args(vec![a(TiDBMemQuotaQuery), a(original_value)]),
         );
         return ok("128");
@@ -1527,7 +1527,7 @@ fn v_tidb_session_alias(
     let mut normalized_value = normalized_value.to_owned();
     let mut warning_added = false;
     if chars.len() > 64 {
-        s.stmt_ctx.append_warning(
+        s.stmt_ctx().append_warning(
             ErrTruncatedWrongValue.fast_gen_by_args(vec![a(TiDBSessionAlias), a(original_value)]),
         );
         warning_added = true;
@@ -1539,7 +1539,7 @@ fn v_tidb_session_alias(
         && super::util::is_in_correct_identifier_name(&normalized_value)
     {
         if !warning_added {
-            s.stmt_ctx.append_warning(
+            s.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![a(TiDBSessionAlias), a(original_value)]),
             );
@@ -1659,7 +1659,7 @@ fn v_sql_auto_is_null(
             if vars.noop_funcs_mode == OffInt {
                 return fail(Off, err_msg);
             }
-            vars.stmt_ctx.append_warning(err_msg.clone());
+            vars.stmt_ctx().append_warning(err_msg.clone());
         }
         if scope == ScopeGlobal {
             let val = match vars
@@ -1679,7 +1679,7 @@ fn v_sql_auto_is_null(
                 return fail(Off, err_msg);
             }
             if val == "WARN" {
-                vars.stmt_ctx.append_warning(err_msg);
+                vars.stmt_ctx().append_warning(err_msg);
             }
         }
     }

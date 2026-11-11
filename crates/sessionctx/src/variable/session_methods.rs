@@ -18,7 +18,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use tidb_base::Error;
 use tidb_base::dbterror::plannererrors::ErrStmtNotFound;
 use tidb_base::gofmt::Arg;
-use tidb_kv::option::{ReplicaReadClosestAdaptive, ReplicaReadType};
+use tidb_kv::option::{ReplicaReadClosestAdaptive, ReplicaReadLeader, ReplicaReadType};
 use tidb_kv::txn_scope_var::{GlobalTxnScope, LocalTxnScope};
 use tidb_model::{TableInfo, TempTableNone};
 use tidb_types::datum::{Datum, new_collation_string_datum};
@@ -26,7 +26,7 @@ use tidb_types::datum::{Datum, new_collation_string_datum};
 use super::error::ErrMaxPreparedStmtCountReached;
 use super::hooks::{AutoStr, ForcePreAggStr, ForceStreamingStr};
 use super::names::{CharacterSetConnection, CollationConnection, TxnIsolation};
-use super::session::SessionVars;
+use super::session::{SessionVars, StatementContext};
 use super::session_state::{In, MinMax};
 use super::session_state::{
     OneShotState, PlanReplayerTaskKey, RFGlobal, RFLocal, RFOff, RuntimeFilterMode,
@@ -851,5 +851,204 @@ impl SessionVars {
     // go: SessionVars.UseLowResolutionTSO L1
     pub fn use_low_resolution_tso(&self) -> bool {
         !self.in_restricted_sql && self.low_resolution_tso && self.connection_id > 0
+    }
+}
+
+// ---- D05.2 PR E: methods that read the statement context's hints, the chunk allocator,
+// the statement context initialization and LAST_INSERT_ID (spec §3.8, T9). ----
+
+impl SessionVars {
+    /// GetChunkAllocator returns a valid chunk allocator.
+    ///
+    /// Go returns the session's allocator (an interface value shared with the caller). Rust
+    /// lends it for the call: `f` runs with the session's allocator, or with a new
+    /// `emptyAllocator` when there is none, as Go returns `chunk.NewEmptyAllocator()`.
+    /// Executors that allocate through `GetChunkAllocator().Alloc` in Go must allocate
+    /// through this in Rust too, or `@@last_sql_use_alloc` differs from Go (spec §3.8).
+    // go: SessionVars.GetChunkAllocator L2 (lends the allocator to a closure)
+    pub fn get_chunk_allocator<R>(
+        &mut self,
+        f: impl FnOnce(&mut dyn tidb_chunk::alloc::Allocator) -> R,
+    ) -> R {
+        match self.chunk_pool_mut() {
+            Some(pool) => f(pool),
+            None => f(tidb_chunk::alloc::new_empty_allocator().as_mut()),
+        }
+    }
+
+    /// ExchangeChunkStatus give the status to preUseChunkAlloc
+    // go: SessionVars.ExchangeChunkStatus L1
+    pub fn exchange_chunk_status(&mut self) {
+        self.pre_use_chunk_alloc = self.get_use_chunk_alloc();
+    }
+
+    /// GetUseChunkAlloc return useChunkAlloc status
+    // go: SessionVars.GetUseChunkAlloc L1
+    pub fn get_use_chunk_alloc(&self) -> bool {
+        self.stmt_ctx().get_use_chunk_alloc_status()
+    }
+
+    /// SetAlloc Attempt to set the buffer pool address
+    ///
+    /// `alloc` is Go's interface value: `None` is a nil allocator.
+    // go: SessionVars.SetAlloc L1
+    pub fn set_alloc(&mut self, alloc: Option<Box<dyn tidb_chunk::alloc::Allocator>>) {
+        if !self.enable_reuse_chunk {
+            self.set_chunk_pool(None);
+            return;
+        }
+        let Some(alloc) = alloc else {
+            self.set_chunk_pool(None);
+            return;
+        };
+        let slot = self.stmt_ctx_slot();
+        self.set_chunk_pool(Some(tidb_chunk::alloc::new_reuse_hook_allocator(
+            tidb_chunk::alloc::new_sync_allocator(alloc),
+            Box::new(move || {
+                // Go: s.StmtCtx.SetUseChunkAlloc(), on the statement context current when the
+                // hook fires.
+                slot.lock().store(true, SeqCst);
+            }),
+        )));
+    }
+
+    /// IsAllocValid check if chunk reuse is enable or chunkPool is inused.
+    // go: SessionVars.IsAllocValid L1
+    pub fn is_alloc_valid(&self) -> bool {
+        if !self.enable_reuse_chunk {
+            return false;
+        }
+        self.has_chunk_pool()
+    }
+
+    /// ClearAlloc indicates stop reuse chunk. If `hasErr` is true, it'll also recreate the `alloc` in parameter.
+    ///
+    /// `alloc` is Go's `*chunk.Allocator` (`None`: a nil pointer; Go dereferences it only
+    /// when `hasErr` is true).
+    // go: SessionVars.ClearAlloc L1
+    pub fn clear_alloc(
+        &mut self,
+        alloc: Option<&mut Box<dyn tidb_chunk::alloc::Allocator>>,
+        has_err: bool,
+    ) {
+        if !has_err {
+            self.set_chunk_pool(None);
+            return;
+        }
+        self.set_chunk_pool(None);
+        // Go: *alloc = chunk.NewAllocator() (a nil pointer panics).
+        let alloc = alloc.expect("invalid memory address or nil pointer dereference");
+        *alloc = tidb_chunk::alloc::new_allocator();
+    }
+
+    /// InitStatementContext initializes a StatementContext, the object is reused to reduce allocation.
+    ///
+    /// The caller installs the result with [`SessionVars::set_stmt_ctx`] (Go assigns
+    /// `vars.StmtCtx`). Go's `RefCountOfStmtCtx.TryFreeze` guards the reset against other
+    /// sessions reading the context through `ProcessInfo`; here those readers hold the `Arc`,
+    /// so `Arc::get_mut` failing is Go's failed freeze or failed `Reset`: a new context is
+    /// created instead (N2, D00.1 spec §4).
+    // go: SessionVars.InitStatementContext L2 (Arc::get_mut replaces TryFreeze / UnFreeze)
+    pub fn init_statement_context(&mut self) -> Arc<StatementContext> {
+        let current = self.stmt_ctx_arc();
+        let i = usize::from(Arc::ptr_eq(&self.cached_stmt_ctx_ref(0), &current));
+        drop(current);
+        let sc = self.cached_stmt_ctx_mut(i);
+        let reset = match Arc::get_mut(sc) {
+            Some(sc) => sc.reset(),
+            None => false,
+        };
+        if !reset {
+            *sc = Arc::new(crate::stmtctx::new_stmt_ctx());
+        }
+        Arc::clone(sc)
+    }
+
+    /// RaiseWarningWhenMPPEnforced will raise a warning when mpp mode is enforced and executing explain statement.
+    // go: SessionVars.RaiseWarningWhenMPPEnforced L1
+    pub fn raise_warning_when_mpp_enforced(&self, warning: &str) {
+        if !self.is_mpp_enforced() {
+            return;
+        }
+        if self.stmt_ctx().in_explain_stmt {
+            self.stmt_ctx().append_warning(tidb_base::errors::new(warning.to_owned()));
+        } else {
+            self.stmt_ctx()
+                .append_extra_warning(tidb_base::errors::new(warning.to_owned()));
+        }
+    }
+
+    /// GetAllowInSubqToJoinAndAgg get AllowInSubqToJoinAndAgg from sql hints and SessionVars.allowInSubqToJoinAndAgg.
+    // go: SessionVars.GetAllowInSubqToJoinAndAgg L1
+    pub fn get_allow_in_subq_to_join_and_agg(&self) -> bool {
+        let hints = &self.stmt_ctx().stmt_hints;
+        if hints.has_allow_in_subq_to_join_and_agg_hint {
+            return hints.allow_in_subq_to_join_and_agg;
+        }
+        self.allow_in_subq_to_join_and_agg
+    }
+
+    /// GetEnableCascadesPlanner get EnableCascadesPlanner from sql hints and SessionVars.EnableCascadesPlanner.
+    // go: SessionVars.GetEnableCascadesPlanner L1
+    pub fn get_enable_cascades_planner(&self) -> bool {
+        let hints = &self.stmt_ctx().stmt_hints;
+        if hints.has_enable_cascades_planner_hint {
+            return hints.enable_cascades_planner;
+        }
+        self.enable_cascades_planner
+    }
+
+    /// GetReplicaRead get ReplicaRead from sql hints and SessionVars.replicaRead with adjusted.
+    // go: SessionVars.GetReplicaRead L1 (the GetReplicaReadUnadjusted failpoint is not ported)
+    pub fn get_replica_read(&self) -> ReplicaReadType {
+        let sc = self.stmt_ctx();
+        // Replica read only works for read-only statements.
+        if !sc.is_read_only {
+            if sc.stmt_hints.has_replica_read_hint {
+                const warnMsg: &str = "Ignore replica read hint for non-read-only statement";
+                let exist_warnings = sc.get_warnings();
+                let mut has_warning = false;
+                for warn in &exist_warnings {
+                    if warn.err.error() == warnMsg.as_bytes() {
+                        has_warning = true;
+                        break;
+                    }
+                }
+                if !has_warning {
+                    sc.append_warning(tidb_base::errors::new(warnMsg));
+                }
+            }
+            return ReplicaReadLeader;
+        }
+        if sc.rc_check_ts || self.rc_write_check_ts {
+            return ReplicaReadLeader;
+        }
+        if sc.stmt_hints.has_replica_read_hint {
+            return ReplicaReadType(sc.stmt_hints.replica_read);
+        }
+        // if closest-adaptive is unavailable, fallback to leader read
+        if ReplicaReadType(self.replica_read) == ReplicaReadClosestAdaptive
+            && !is_adaptive_replica_read_enabled()
+        {
+            return ReplicaReadLeader;
+        }
+        ReplicaReadType(self.replica_read)
+    }
+
+    /// SetLastInsertID saves the last insert id to the session context.
+    /// TODO: we may store the result for last_insert_id sys var later.
+    // go: SessionVars.SetLastInsertID L1
+    pub fn set_last_insert_id(&self, insert_id: u64) {
+        self.stmt_ctx().set_last_insert_id(insert_id);
+    }
+
+    /// GetMaxExecutionTime get the max execution timeout value.
+    // go: SessionVars.GetMaxExecutionTime L1
+    pub fn get_max_execution_time(&self) -> u64 {
+        let hints = &self.stmt_ctx().stmt_hints;
+        if hints.has_max_execution_time {
+            return hints.max_execution_time;
+        }
+        self.max_execution_time
     }
 }

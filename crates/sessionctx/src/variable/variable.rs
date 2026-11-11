@@ -469,7 +469,7 @@ impl SysVar {
         value: &str,
         scope: ScopeFlag,
     ) -> String {
-        let warns = vars.stmt_ctx.get_warnings();
+        let warns = vars.stmt_ctx().get_warnings();
         let normalized_value = (|| {
             let (normalized_value, err) = self.validate_from_type(vars, value, scope);
             if err.is_err() {
@@ -481,7 +481,7 @@ impl SysVar {
             }
             normalized_value
         })();
-        vars.stmt_ctx.set_warnings(warns); // RelaxedValidation = trim warnings too.
+        vars.stmt_ctx().set_warnings(warns); // RelaxedValidation = trim warnings too.
         normalized_value
     }
 
@@ -514,14 +514,14 @@ impl SysVar {
         };
         // Check for min/max violations
         if d < self.min_value {
-            vars.stmt_ctx.append_warning(
+            vars.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (gostd::time::duration_string(self.min_value), Ok(()));
         }
         if (d as u64) > self.max_value {
-            vars.stmt_ctx.append_warning(
+            vars.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
@@ -551,7 +551,7 @@ impl SysVar {
                     Err(ErrWrongTypeForVar.gen_with_stack_by_args(vec![self.name.into()])),
                 );
             }
-            vars.stmt_ctx.append_warning(
+            vars.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
@@ -566,14 +566,14 @@ impl SysVar {
         }
         // [M-INT] uint64(sv.MinValue)
         if val < self.min_value as u64 {
-            vars.stmt_ctx.append_warning(
+            vars.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (self.min_value.to_string(), Ok(()));
         }
         if val > self.max_value {
-            vars.stmt_ctx.append_warning(
+            vars.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
@@ -595,7 +595,7 @@ impl SysVar {
             );
         }
         if val < self.min_value {
-            vars.stmt_ctx.append_warning(
+            vars.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
@@ -603,7 +603,7 @@ impl SysVar {
         }
         // [M-INT] int64(sv.MaxValue) wraps for values above MaxInt64.
         if val > self.max_value as i64 {
-            vars.stmt_ctx.append_warning(
+            vars.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
@@ -647,14 +647,14 @@ impl SysVar {
             }
         };
         if val < self.min_value as f64 {
-            vars.stmt_ctx.append_warning(
+            vars.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );
             return (self.min_value.to_string(), Ok(()));
         }
         if val > self.max_value as f64 {
-            vars.stmt_ctx.append_warning(
+            vars.stmt_ctx().append_warning(
                 ErrTruncatedWrongValue
                     .fast_gen_by_args(vec![self.name.into(), Arg::from(value.to_owned())]),
             );

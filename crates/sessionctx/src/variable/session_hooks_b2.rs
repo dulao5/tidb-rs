@@ -277,7 +277,7 @@ pub(super) fn sg_tidb_txn_commit_batch_size(_s: &mut SessionVars, val: &str) -> 
 pub(super) fn sg_tidb_restricted_read_only(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     let on = tidb_opt_on(val);
     // For user initiated SET GLOBAL, also change the value of TiDBSuperReadOnly
-    if on && s.stmt_ctx.stmt_type == "Set" {
+    if on && s.stmt_ctx().stmt_type == "Set" {
         s.global_vars_accessor
             .set_global_sys_var_only(TiDBSuperReadOnly, "ON", false)?;
         let sv = super::variable::get_sys_var(TiDBSuperReadOnly)
@@ -618,14 +618,14 @@ pub(super) fn sg_tidb_txn_entry_size_limit(_s: &mut SessionVars, val: &str) -> R
 pub(super) fn sg_tidb_partition_prune_mode(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     let new_mode = val.trim().to_lowercase();
     if new_mode == "static" {
-        s.stmt_ctx
+        s.stmt_ctx()
             .append_warning(super::error::ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen(
                 "static prune mode is deprecated and will be removed in the future release.",
                 vec![],
             ));
     }
     if new_mode == "dynamic" {
-        s.stmt_ctx.append_warning(errors::new(
+        s.stmt_ctx().append_warning(errors::new(
             "Please analyze all partition tables again for consistency between partition and global stats",
         ));
     }
@@ -790,7 +790,7 @@ pub(super) fn sg_tidb_opt_fix_control(vars: &mut SessionVars, val: &str) -> Resu
     // we don't put this in Validation to avoid repeating the checking logic for setting session.
     let (_, warnings) = super::session_state::parse_to_map(val)?;
     for warning in warnings {
-        vars.stmt_ctx.append_warning(errors::new(warning));
+        vars.stmt_ctx().append_warning(errors::new(warning));
     }
     Ok(())
 }

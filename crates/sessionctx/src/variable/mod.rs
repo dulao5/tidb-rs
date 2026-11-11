@@ -4,6 +4,7 @@
 
 mod concurrency;
 pub mod error;
+pub mod expr_vars;
 pub mod hook_state;
 pub(crate) mod hooks;
 pub mod ldap_state;

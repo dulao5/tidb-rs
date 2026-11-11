@@ -37,32 +37,42 @@ fn fill(c: &mut Chunk, n: i64) {
 
 #[test]
 fn allocators_never_reuse() {
-    alloc::init_chunk_alloc_size(1, 1);
-    for mut a in [
-        alloc::new_allocator(),
-        alloc::new_empty_allocator(),
-        alloc::new_sync_allocator(alloc::new_allocator()),
-    ] {
-        assert!(!a.check_reuse_alloc_size());
-        let c = a.alloc(&fts(), 8, 32);
-        let want = chunk::new(&fts(), 8, 32);
-        assert_eq!((c.capacity(), c.required_rows(), c.num_cols()), (8, 32, 2));
-        assert_eq!(c.memory_usage(), want.memory_usage());
-        a.reset();
+    // Go: allocator.CheckReuseAllocSize is freeChunk > 0 || freeColumnsPerType > 0, the
+    // configured pool sizes; emptyAllocator always answers false. Nothing is ever reused
+    // (M-POOL), but the answer is kept because the reuse hook depends on it.
+    for (sizes, want_pool) in [((1, 1), true), ((0, 1), true), ((1, 0), true), ((0, 0), false)] {
+        alloc::init_chunk_alloc_size(sizes.0, sizes.1);
+        for (mut a, want) in [
+            (alloc::new_allocator(), want_pool),
+            (alloc::new_empty_allocator(), false),
+            (alloc::new_sync_allocator(alloc::new_allocator()), want_pool),
+        ] {
+            assert_eq!(a.check_reuse_alloc_size(), want, "{sizes:?}");
+            let c = a.alloc(&fts(), 8, 32);
+            let want = chunk::new(&fts(), 8, 32);
+            assert_eq!((c.capacity(), c.required_rows(), c.num_cols()), (8, 32, 2));
+            assert_eq!(c.memory_usage(), want.memory_usage());
+            a.reset();
+        }
     }
-    let calls = Arc::new(AtomicUsize::new(0));
-    let k = calls.clone();
-    let mut a = alloc::new_reuse_hook_allocator(
-        alloc::new_empty_allocator(),
-        Box::new(move || {
-            k.fetch_add(1, SeqCst);
-        }),
-    );
-    let _ = a.alloc(&fts(), 4, 4);
-    assert!(!a.check_reuse_alloc_size());
-    a.reset();
-    // The hook runs on the first reused allocation; nothing is ever reused.
-    assert_eq!(calls.load(SeqCst), 0);
+    alloc::init_chunk_alloc_size(64, 256);
+    // The hook runs once, on the first allocation, when the inner allocator would reuse.
+    for (inner_pool, want_calls) in [(false, 0), (true, 1)] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let k = calls.clone();
+        let inner = if inner_pool { alloc::new_allocator() } else { alloc::new_empty_allocator() };
+        let mut a = alloc::new_reuse_hook_allocator(
+            alloc::new_sync_allocator(inner),
+            Box::new(move || {
+                k.fetch_add(1, SeqCst);
+            }),
+        );
+        let _ = a.alloc(&fts(), 4, 4);
+        let _ = a.alloc(&fts(), 4, 4);
+        assert_eq!(a.check_reuse_alloc_size(), inner_pool);
+        a.reset();
+        assert_eq!(calls.load(SeqCst), want_calls);
+    }
 }
 
 #[test]

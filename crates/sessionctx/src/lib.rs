@@ -7,6 +7,8 @@
 //! part 2b: the concrete optional property providers (`expropt`), the planner context
 //! (`planctx`), `PlanCounterTp` (`planbase`) and the
 //! session context keys (`context`).
+//! Block D13.0: the statement hint data `StmtHints` (`hint`), embedded in the statement
+//! context (the rest of `pkg/util/hint` is D13.3 in `tidb-planner`).
 
 #![deny(unsafe_code)]
 
@@ -16,6 +18,7 @@ pub mod errctx;
 pub mod exprctx;
 pub mod expropt;
 pub mod exprstatic;
+pub mod hint;
 pub mod planbase;
 pub mod planctx;
 pub mod ranger;

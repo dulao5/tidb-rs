@@ -59,7 +59,7 @@ fn parse_timestamp_to_ts(s: &mut SessionVars, s_val: &str) -> Result<u64, Error>
         tidb_types::fsp::MaxFsp,
     );
     for w in collector.0.lock().drain(..) {
-        s.stmt_ctx.append_warning(w);
+        s.stmt_ctx().append_warning(w);
     }
     err?;
     let (t1, err) = t.go_time(&s.location());
@@ -207,7 +207,7 @@ pub(super) fn ss_tidb_isolation_read_engines(s: &mut SessionVars, val: &str) -> 
             s.state.isolation_read_engines.insert(TiKV);
         } else if engine == TiFlash.name() {
             // If the tiflash is removed by the strict SQL mode. The hint should also not take effect.
-            if !s.stmt_ctx.tiflash_engine_removed_due_to_strict_sql_mode {
+            if !s.stmt_ctx().tiflash_engine_removed_due_to_strict_sql_mode {
                 s.state.isolation_read_engines.insert(TiFlash);
             }
         } else if engine == TiDB.name() {
@@ -351,17 +351,17 @@ pub(super) fn ss_tidb_replica_read(s: &mut SessionVars, val: &str) -> Result<(),
 pub(super) fn ss_tidb_partition_prune_mode(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     let new_mode = val.trim().to_lowercase();
     if new_mode == "static" {
-        s.stmt_ctx
+        s.stmt_ctx()
             .append_warning(ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen(
                 "static prune mode is deprecated and will be removed in the future release.",
                 vec![],
             ));
     }
     if s.state.partition_prune_mode == "static" && new_mode == "dynamic" {
-        s.stmt_ctx.append_warning(tidb_base::errors::new(
+        s.stmt_ctx().append_warning(tidb_base::errors::new(
             "Please analyze all partition tables again for consistency between partition and global stats",
         ));
-        s.stmt_ctx.append_warning(tidb_base::errors::new(
+        s.stmt_ctx().append_warning(tidb_base::errors::new(
             "Please avoid setting partition prune mode to dynamic at session level and set partition prune mode to dynamic at global level",
         ));
     }
@@ -405,7 +405,7 @@ pub(super) fn ss_tidb_enable_parallel_hashagg_spill(
 ) -> Result<(), Error> {
     vars.enable_parallel_hashagg_spill = tidb_opt_on(s);
     if !vars.enable_parallel_hashagg_spill {
-        vars.stmt_ctx.append_warning(ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen(
+        vars.stmt_ctx().append_warning(ErrWarnDeprecatedSyntaxSimpleMsg.fast_gen(
             "tidb_enable_parallel_hashagg_spill will be removed in the future and hash aggregate spill will be enabled by default.",
             vec![],
         ));
@@ -482,7 +482,7 @@ pub(super) fn ss_mpp_exchange_compression_mode(
     if s.choose_mpp_version() == tidb_kv::mpp::MppVersionV0.0
         && s.mpp_exchange_compression_mode != ExchangeCompressionModeUnspecified
     {
-        s.stmt_ctx.append_warning(tidb_base::errors::new(format!(
+        s.stmt_ctx().append_warning(tidb_base::errors::new(format!(
             "mpp exchange compression won't work under current mpp version {}",
             tidb_kv::mpp::MppVersionV0.0
         )));
@@ -531,7 +531,7 @@ pub(super) fn ss_tidb_load_based_replica_read_threshold(
 pub(super) fn ss_tidb_opt_fix_control(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     let (new_map, warnings) = parse_to_map(val)?;
     for warning in warnings {
-        s.stmt_ctx.append_warning(tidb_base::errors::new(warning));
+        s.stmt_ctx().append_warning(tidb_base::errors::new(warning));
     }
     s.state.optimizer_fix_control = new_map;
     Ok(())
@@ -637,12 +637,12 @@ pub(super) fn gs_timestamp(s: &mut SessionVars) -> Result<String, Error> {
 
 // go-part: defaultSysVars (sysvar.go:L118 last_insert_id GetSession closure) L1
 pub(super) fn gs_last_insert_id(s: &mut SessionVars) -> Result<String, Error> {
-    Ok(s.stmt_ctx.prev_last_insert_id.to_string())
+    Ok(s.stmt_ctx().prev_last_insert_id.to_string())
 }
 
 // go-part: defaultSysVars (sysvar.go:L123 identity GetSession closure) L1
 pub(super) fn gs_identity(s: &mut SessionVars) -> Result<String, Error> {
-    Ok(s.stmt_ctx.prev_last_insert_id.to_string())
+    Ok(s.stmt_ctx().prev_last_insert_id.to_string())
 }
 
 // go-part: defaultSysVars (sysvar.go:L147 txn_scope GetSession closure) L1

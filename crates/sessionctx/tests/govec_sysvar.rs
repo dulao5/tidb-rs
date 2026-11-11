@@ -126,7 +126,7 @@ fn fresh_vars(c: &Value) -> SessionVars {
     }
     let mut vars = SessionVars::new(Box::new(acc));
     vars.time_zone = Some(tidb_base::gostd::time::utc());
-    vars.stmt_ctx.stmt_type = c["stmt"].as_str().unwrap_or("").to_owned();
+    vars.stmt_ctx_mut().stmt_type = c["stmt"].as_str().unwrap_or("").to_owned();
     if let Some(n) = c["noop"].as_i64() {
         vars.noop_funcs_mode = n;
     }
@@ -219,7 +219,7 @@ fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
                 res["fkc"] = json!(vars.foreign_key_checks);
             }
             let warns = vars
-                .stmt_ctx
+                .stmt_ctx()
                 .get_warnings()
                 .into_iter()
                 .map(|w| w.err)
