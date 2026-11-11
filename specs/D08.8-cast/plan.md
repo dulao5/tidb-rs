@@ -21,7 +21,7 @@
 3. 从 TIME/DURATION/JSON/VECTOR 出发的签名（去掉临时桩）；`VectorFloat32AsUnsupported` 需要一个签名有多个求值类型的驱动。
 4. 然后 D08.2 第 2 部分其余：`newBaseBuiltinFuncWithTp`/`WithFieldTypes`（用 `derive` 记录经它们回放，Lucky 评审 #80）、注册表的 `get_function`、`NewFunction*`（D08.1 2b），以及 D08.1 2b 的 `EvaluatorSuite`、`chunk_executor`、`VecEvalBool`。
 
-## 第 2b-1 部分（本 PR）
+## 第 2b-1 部分（#86，已合并）
 
 1. `builtin_cast.rs`：`castAsStringFunctionClass`、4 个 CAST 到 STRING 的签名（另 4 个为临时桩）、`adjustRetFtForCastString`、`decimalPrecisionToLength`、`padZeroForBinaryType`、`WrapWithCastAsString`、`BuildCastCollationFunction`；`BuildCastFunctionWithCheck` 的 STRING 分支（BIT 参数的 flen、`isExplicitCharset`）。
 2. `builtin_convert_charset.rs`（新文件，块 D08.6 → D08.8）：`to_binary`/`from_binary` 的函数类与签名、`BuildTo/FromBinaryFunction`、`HandleBinaryLiteral`、`convertActionMap`。`BuiltinFunc::cannot_convert_string_as_warning`。
@@ -29,7 +29,20 @@
 4. `#[eval_fn]`：`args(Int, String, ..)` 选项（lazy 函数体声明向量驱动读取参数的类型），`SigDrivers::arg_eval_type` 对变参签名重复最后一个类型（Lucky 评审 #84；D08.1 spec §4.1）。
 5. govec `cast` 领域追加 2,820 条（原有 4,560 条不变）：`str` 1,600（INT/REAL/DECIMAL/YEAR/字符串/FLOAT/hybrid 参数 → CHAR/BINARY/VARCHAR，7 种字符集，随机的显式字符集、`max_allowed_packet`、严格模式）、`dbl` 120（FLOAT → DOUBLE，0.1f、16777217f、次正规数、float32 最大值，逐位比较）、`binlit` 500（`HandleBinaryLiteral` 与 to_binary/from_binary 的求值）、`collcast` 300、`wrapstr` 300。castCtx 可选地带 `max_allowed_packet` 与 SQL mode。
 
-## 第 2b-2、2b-3 部分（交接）
+## 第 2b-2a 部分（本 PR）
+
+1. `#[eval_fn]`：严格参数类型增加 `Time`、`Duration`、`&BinaryJSON`、`&VectorFloat32`（行驱动调 `eval_time/duration/json/vector_float32`；向量驱动用 `TimeView`、`DurationView`（按参数声明的 fsp，Go 向量版的读法）、`JsonView`、`VectorView`）；`SigDrivers::args` 对应 `ETDatetime/ETDuration/ETJson/ETVectorFloat32`。结果类型仍为 Int/Real/Decimal/String（Time/Duration/JSON/Vector 结果在 2b-2b）。
+2. RPN：`fill_constant` 支持 Time/Duration/JSON/Vector（Go `genVecFromConstExpr` 的对应分支）；`column_read` 把 `ETTimestamp` 与 `ETDatetime` 视为同一存储。`vec_eval` 对 `vectorized() == false` 的签名返回 `baseBuiltinFunc.vecEvalXxx` 的错误（spec §4 第 13 条）。
+3. 13 个签名：`builtinCast{Time,Duration,JSON}As{Int,Real,Decimal,String}Sig`、`builtinCastVectorFloat32AsStringSig`。逐行版与向量版的小差别用 `vector()`：`TimeAsReal` 只有向量版把 `ErrOverflow` 交给 `HandleError` 并置 NULL（`ToFloat64` 在时间数上走不到）。没有发现新的对用户可见的差异。
+4. `SigExtra`（Lucky 评审 #86）：`BuiltinFunc::extra` 取代 `in_union`、`cannot_convert_string_as_warning` 两个字段；D08.1 spec §3.5 对 98 个 Go 签名结构体的附加字段分类。
+5. govec `cast` 追加 2,500 条（原有 7,380 条不变）：`from` 2,400（DATE/DATETIME/TIMESTAMP(fsp)、TIME(fsp)、JSON、VECTOR 列 → INT/REAL/DECIMAL/STRING/YEAR，随机 type flags、SQL mode、`max_allowed_packet`；YEAR 目标总是带 `FlagCastTimeToYearThroughConcat`，避开读时钟的路径）、`from-fsp` 100（fsp 未指定的 TIME 列，覆盖 `CheckFsp`）。
+
+## 第 2b-2b、2b-3 部分（交接）
+
+- **2b-2b**：`#[eval_fn]` 支持 Time/Duration/JSON/VectorFloat32 **结果**（输出列：`ResizeTime`/`ResizeGoDuration`/`ReserveJSON`/`ReserveVectorFloat32`，NULL 合并）；`castAsTime/Duration/JSON/Array/VectorFloat32FunctionClass` 与 CAST 到这些类型的签名（`builtinCast*AsTime/Duration/JSON/VectorFloat32Sig`、`castJSONAsArray`、`VectorFloat32AsUnsupported`——需要一个签名有多个求值类型的驱动）；`WrapWithCastAsTime/Duration/JSON/VectorFloat32`、`ConvertJSON2Tp`；之后去掉 `newBaseBuiltinFuncWithTp` 的临时桩分支和 `cast_not_ported`。`DurationAsTime` 读当前时间（`getStmtTimestamp` 失败时 `gotime.Now()`）：govec 必须固定语句时间戳，或按 `<clock>` 规则屏蔽。govec 的 `sfDump`/`d2DatumInOf` 补上 Time/Duration/JSON/Vector 种类，然后加常量参数的记录（spec §4 第 14 条）。
+- **2b-3**：同下（原交接）。
+
+## 第 2b-3 部分（原交接，含 2b-2 的旧描述）
 
 - 2b-2：`#[eval_fn]` 支持 Time/Duration/JSON/VectorFloat32 的参数与结果（`ArgKind`、视图、输出列）；CAST 到 TIME/DATETIME/DATE/DURATION/JSON（含 ARRAY）/VECTOR 与从这些类型出发的签名（去掉临时桩，包括 `*AsString`）；`WrapWithCastAsTime/Duration/JSON/VectorFloat32`；`VectorFloat32AsUnsupported` 需要一个签名有多个求值类型的驱动。之后 `newBaseBuiltinFuncWithTp` 的临时桩分支去掉。
 - 2b-3：`newBaseBuiltinFuncWithFieldTypes`；注册表的 `get_function`、`NewFunction*`（`derive` 记录经包 CAST 的构造函数再跑一遍，Lucky 评审 #80）；常量传播；D08.1 2b 的 `EvaluatorSuite`、`chunk_executor`、`VecEvalBool`、`toBool`、`EvalExpr`。

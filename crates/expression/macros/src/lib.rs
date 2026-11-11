@@ -25,7 +25,9 @@
 //! `Option<MyDecimal>`, `String` → `Option<()>` with the bytes appended to `out` (the vector
 //! driver reuses one buffer for the whole chunk).
 //! Strict argument types: `i64` (EvalInt), `f64` (EvalReal), `&MyDecimal` (EvalDecimal),
-//! `&[u8]` (EvalString).
+//! `&[u8]` (EvalString), `Time` (EvalTime), `Duration` (EvalDuration; the vector driver reads
+//! it with the argument's declared fsp, as Go's vector versions do), `&BinaryJSON` (EvalJSON),
+//! `&VectorFloat32` (EvalVectorFloat32).
 //!
 //! [`Args`]: ../tidb_expression/eval/trait.Args.html
 
@@ -149,6 +151,20 @@ enum ArgKind {
     Real,
     Decimal,
     Bytes,
+    Time,
+    Duration,
+    Json,
+    Vector,
+}
+
+impl ArgKind {
+    /// Whether the body takes the argument by reference.
+    fn by_ref(self) -> bool {
+        matches!(
+            self,
+            ArgKind::Bytes | ArgKind::Decimal | ArgKind::Json | ArgKind::Vector
+        )
+    }
 }
 
 /// The evaluation types the vector driver reads its arguments as (`SigDrivers::args`).
@@ -160,6 +176,10 @@ fn arg_types(kinds: &[ArgKind]) -> TokenStream2 {
             ArgKind::Real => quote!(::tidb_expression::eval::rt::ETReal),
             ArgKind::Decimal => quote!(::tidb_expression::eval::rt::ETDecimal),
             ArgKind::Bytes => quote!(::tidb_expression::eval::rt::ETString),
+            ArgKind::Time => quote!(::tidb_expression::eval::rt::ETDatetime),
+            ArgKind::Duration => quote!(::tidb_expression::eval::rt::ETDuration),
+            ArgKind::Json => quote!(::tidb_expression::eval::rt::ETJson),
+            ArgKind::Vector => quote!(::tidb_expression::eval::rt::ETVectorFloat32),
         })
         .collect();
     quote!(&[#(#ts),*])
@@ -172,6 +192,10 @@ fn arg_kind(ty: &Type) -> Option<ArgKind> {
         "f64" => Some(ArgKind::Real),
         "&[u8]" => Some(ArgKind::Bytes),
         _ if s.starts_with('&') && s.ends_with("MyDecimal") => Some(ArgKind::Decimal),
+        _ if s == "Time" || s.ends_with("::Time") => Some(ArgKind::Time),
+        _ if s == "Duration" || s.ends_with("::Duration") => Some(ArgKind::Duration),
+        _ if s.starts_with('&') && s.contains("BinaryJSON") => Some(ArgKind::Json),
+        _ if s.starts_with('&') && s.contains("VectorFloat32") => Some(ArgKind::Vector),
         _ => None,
     }
 }
@@ -227,7 +251,7 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
             let Some(k) = arg_kind(&pt.ty) else {
                 return Err(syn::Error::new_spanned(
                     &pt.ty,
-                    "eval_fn: strict argument types are i64, f64, &MyDecimal and &[u8]",
+                    "eval_fn: strict argument types are i64, f64, &MyDecimal, &[u8], Time, Duration, &BinaryJSON and &VectorFloat32",
                 ));
             };
             kinds.push(k);
@@ -271,11 +295,7 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
         let mut call_args = Vec::new();
         for (i, k) in kinds.iter().enumerate() {
             let v = format_ident!("a{}", i);
-            call_args.push(if matches!(k, ArgKind::Bytes | ArgKind::Decimal) {
-                quote!(&#v)
-            } else {
-                quote!(#v)
-            });
+            call_args.push(if k.by_ref() { quote!(&#v) } else { quote!(#v) });
         }
         let call = if ret == Ret::String {
             quote! {
@@ -334,13 +354,23 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
                 ArgKind::Real => quote!(#rt::RealView),
                 ArgKind::Decimal => quote!(#rt::DecimalView),
                 ArgKind::Bytes => quote!(#rt::BytesView),
+                ArgKind::Time => quote!(#rt::TimeView),
+                ArgKind::Duration => quote!(#rt::DurationView),
+                ArgKind::Json => quote!(#rt::JsonView),
+                ArgKind::Vector => quote!(#rt::VectorView),
             };
-            views.push(quote!(let #v = #view::new(cols[#i], n);));
-            gets.push(if *k == ArgKind::Decimal {
-                quote!(&#v.get(i))
+            views.push(if *k == ArgKind::Duration {
+                quote!(let #v = #view::new(cols[#i], n, f, ctx, #i);)
             } else {
-                quote!(#v.get(i))
+                quote!(let #v = #view::new(cols[#i], n);)
             });
+            gets.push(
+                if matches!(k, ArgKind::Decimal | ArgKind::Json | ArgKind::Vector) {
+                    quote!(&#v.get(i))
+                } else {
+                    quote!(#v.get(i))
+                },
+            );
             null_checks.push(quote!(cols[#i].is_null(i)));
         }
         match ret {
@@ -418,6 +448,10 @@ fn row_prologue(kinds: &[ArgKind], eager: bool) -> Vec<TokenStream2> {
         ArgKind::Real => quote!(eval_real),
         ArgKind::Decimal => quote!(eval_decimal),
         ArgKind::Bytes => quote!(eval_string),
+        ArgKind::Time => quote!(eval_time),
+        ArgKind::Duration => quote!(eval_duration),
+        ArgKind::Json => quote!(eval_json),
+        ArgKind::Vector => quote!(eval_vector_float32),
     };
     if eager {
         let mut names = Vec::new();

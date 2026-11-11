@@ -108,6 +108,20 @@ fn datum_in(v: &Value) -> Datum {
             },
             p[3].as_str().unwrap().to_owned(),
         ),
+        dm::KindMysqlTime => d.set_mysql_time(tidb_types::time::Time::from_raw(
+            tidb_types::core_time::CoreTime(p[1].as_u64().unwrap()),
+        )),
+        dm::KindMysqlDuration => d.set_mysql_duration(tidb_types::time::Duration {
+            duration: p[1].as_i64().unwrap(),
+            fsp: p[2].as_i64().unwrap() as isize,
+        }),
+        dm::KindMysqlJSON => d.set_mysql_json(tidb_types::json::BinaryJSON {
+            type_code: p[1].as_u64().unwrap() as u8,
+            value: std::borrow::Cow::Owned(unhex(p[2].as_str().unwrap())),
+        }),
+        dm::KindVectorFloat32 => d.set_vector_float32(
+            tidb_types::vector::parse_vector_float32(p[1].as_str().unwrap().as_bytes()).unwrap(),
+        ),
         _ => panic!("datum_in: kind {k}"),
     }
     d
@@ -373,7 +387,9 @@ fn exec(op: &str, p: &[Value]) -> Value {
                 return Value::Object(m);
             };
             let meta = match &*res {
-                Expr::ScalarFunction(sf) => sf.function.in_union.map_or(Value::Null, |b| json!(b)),
+                Expr::ScalarFunction(sf) => {
+                    sf.function.in_union().map_or(Value::Null, |b| json!(b))
+                }
                 _ => Value::Null,
             };
             m.insert("meta".into(), meta);

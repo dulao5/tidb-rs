@@ -7,7 +7,7 @@ use std::borrow::Cow;
 
 use smallvec::SmallVec;
 use zerocopy::FromBytes;
-use zerocopy::little_endian::{F64, I64};
+use zerocopy::little_endian::{F64, I64, U64};
 
 pub use tidb_types::mydecimal::MyDecimal;
 
@@ -15,8 +15,14 @@ pub use tidb_base::Error;
 use tidb_chunk::column::new_empty_column;
 pub use tidb_chunk::{Column, Row};
 use tidb_parser::types::EvalType;
-pub use tidb_parser::types::{ETDecimal, ETInt, ETReal, ETString};
+pub use tidb_parser::types::{
+    ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
+    ETVectorFloat32,
+};
 use tidb_types::etc::FieldType;
+pub use tidb_types::json::BinaryJSON;
+pub use tidb_types::time::{Duration, Time};
+pub use tidb_types::vector::VectorFloat32;
 
 use super::{Args, BuiltinFunc};
 use crate::context::EvalContext;
@@ -107,6 +113,93 @@ impl<'a> DecimalView<'a> {
     // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn get(&self, i: usize) -> MyDecimal {
         self.0.get_decimal(i)
+    }
+}
+
+/// The times of an argument column (`buf.Times()`).
+pub struct TimeView<'a>(&'a Column);
+
+impl<'a> TimeView<'a> {
+    /// The view of `col`.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn new(col: &'a Column, _n: usize) -> Self {
+        TimeView(col)
+    }
+    /// Row `i`.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn get(&self, i: usize) -> Time {
+        self.0.get_time(i)
+    }
+}
+
+/// The durations of an argument column. A duration column holds nanoseconds only; Go's
+/// vector versions read them with the argument's declared fsp
+/// (`buf.GetDuration(i, b.args[k].GetType(ctx).GetDecimal())` or `GoDurations()` with that
+/// fsp), while the row versions get the fsp of the value `EvalDuration` returns.
+pub struct DurationView<'a> {
+    col: &'a Column,
+    fsp: isize,
+}
+
+impl<'a> DurationView<'a> {
+    /// The view of `col`, argument `k` of `f`.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn new(
+        col: &'a Column,
+        _n: usize,
+        f: &BuiltinFunc,
+        ctx: &dyn EvalContext,
+        k: usize,
+    ) -> Self {
+        DurationView {
+            col,
+            fsp: f.args[k].get_type(ctx).get_decimal(),
+        }
+    }
+    /// Row `i`.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn get(&self, i: usize) -> Duration {
+        self.col.get_duration(i, self.fsp)
+    }
+}
+
+/// The JSON values of an argument column.
+pub struct JsonView<'a>(&'a Column);
+
+impl<'a> JsonView<'a> {
+    /// The view of `col`.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn new(col: &'a Column, _n: usize) -> Self {
+        JsonView(col)
+    }
+    /// Row `i` (borrowed from the column).
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn get(&self, i: usize) -> BinaryJSON<'a> {
+        self.0.get_json(i)
+    }
+}
+
+/// The vectors of an argument column.
+pub struct VectorView<'a>(&'a Column);
+
+impl<'a> VectorView<'a> {
+    /// The view of `col`.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn new(col: &'a Column, _n: usize) -> Self {
+        VectorView(col)
+    }
+    /// Row `i` (borrowed from the column).
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn get(&self, i: usize) -> VectorFloat32<'a> {
+        self.0.get_vector_float32(i)
     }
 }
 
@@ -440,7 +533,45 @@ pub fn fill_constant(
                 }
             }
         }
-        // D08.1 part 2: the other evaluation types come with the signatures that read them.
+        ETDatetime | ETTimestamp => {
+            let v = expr.eval_time(ctx, st, row)?;
+            col.resize_time(n, v.is_none());
+            if let Some(v) = v {
+                let w = U64::new(v.raw().0);
+                for x in col.times_mut() {
+                    *x = w;
+                }
+            }
+        }
+        ETDuration => {
+            let v = expr.eval_duration(ctx, st, row)?;
+            col.resize_go_duration(n, v.is_none());
+            if let Some(v) = v {
+                for x in col.go_durations_mut() {
+                    *x = I64::new(v.duration);
+                }
+            }
+        }
+        ETJson => {
+            let v = expr.eval_json(ctx, st, row)?;
+            col.reserve_json(n);
+            for _ in 0..n {
+                match &v {
+                    Some(j) => col.append_json(j),
+                    None => col.append_null(),
+                }
+            }
+        }
+        ETVectorFloat32 => {
+            let v = expr.eval_vector_float32(ctx, st, row)?;
+            col.reserve_vector_float32(n);
+            for _ in 0..n {
+                match &v {
+                    Some(x) => col.append_vector_float32(x),
+                    None => col.append_null(),
+                }
+            }
+        }
         other => {
             return Err(Error::plain(format!(
                 "vector evaluation of a constant as {} is not ported yet",

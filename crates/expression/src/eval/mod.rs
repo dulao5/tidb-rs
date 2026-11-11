@@ -206,12 +206,35 @@ pub struct BuiltinFunc {
     ctor: Option<&'static dyn Collator>,
     /// The embedded `collationInfo`.
     pub collation_info: CollationInfo,
-    /// `baseBuiltinCastFunc.inUnion` for the CAST signatures that embed `baseBuiltinCastFunc`
-    /// (D08.8); `None` for every other signature (Go's `baseBuiltinFunc` has no such field).
-    pub in_union: Option<bool>,
-    /// `builtinInternalFromBinarySig.cannotConvertStringAsWarning` (D08.8, copied by Go's
-    /// `Clone` as by this one); `false` for every other signature.
-    pub cannot_convert_string_as_warning: bool,
+    /// The build-time configuration fields of the Go signature struct beyond
+    /// `baseBuiltinFunc` (D08.1 spec §3.5 (a)).
+    pub extra: SigExtra,
+}
+
+/// The build-time configuration a Go signature struct keeps next to its `baseBuiltinFunc`
+/// (D08.1 spec §3.5 (a)): set by the function class when the signature is built, read by
+/// the evaluation, never changed afterwards. One variant per Go struct shape; `Clone`
+/// copies it, as every Go `Clone` of these signatures copies the fields (checked per
+/// signature when a variant is added). Evaluation caches (LIKE/REGEXP patterns) are not
+/// configuration and live in `EvalState` (§3.5 (b)); `PropReader` markers are properties of
+/// the signature type, on [`SigDesc`] (§3.5 (c)).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SigExtra {
+    /// Only `baseBuiltinFunc` (Go's plain signatures).
+    #[default]
+    None,
+    /// `baseBuiltinCastFunc.inUnion` (the CAST signatures that embed `baseBuiltinCastFunc`,
+    /// D08.8); `baseBuiltinCastFunc.cloneFrom` copies it.
+    Cast {
+        /// `inUnion`.
+        in_union: bool,
+    },
+    /// `builtinInternalFromBinarySig.cannotConvertStringAsWarning` (D08.8); its `Clone`
+    /// copies it.
+    FromBinary {
+        /// `cannotConvertStringAsWarning`.
+        cannot_convert_string_as_warning: bool,
+    },
 }
 
 impl std::fmt::Debug for BuiltinFunc {
@@ -260,8 +283,7 @@ impl BuiltinFunc {
             pb_code: 0,
             ctor: None,
             collation_info: CollationInfo::default(),
-            in_union: None,
-            cannot_convert_string_as_warning: false,
+            extra: SigExtra::None,
         }
     }
 
@@ -293,9 +315,31 @@ impl BuiltinFunc {
             pb_code: sig.pb_code,
             ctor: Some(collate::get_collator(collation)),
             collation_info,
-            in_union: None,
-            cannot_convert_string_as_warning: false,
+            extra: SigExtra::None,
         }
+    }
+
+    /// `baseBuiltinCastFunc.inUnion`, or `None` for a signature without
+    /// `baseBuiltinCastFunc`.
+    // glue: field read of SigExtra::Cast (D08.1 spec §3.5 (a))
+    #[inline]
+    pub fn in_union(&self) -> Option<bool> {
+        match self.extra {
+            SigExtra::Cast { in_union } => Some(in_union),
+            _ => None,
+        }
+    }
+
+    /// `builtinInternalFromBinarySig.cannotConvertStringAsWarning` (`false` elsewhere).
+    // glue: field read of SigExtra::FromBinary (D08.1 spec §3.5 (a))
+    #[inline]
+    pub fn cannot_convert_string_as_warning(&self) -> bool {
+        matches!(
+            self.extra,
+            SigExtra::FromBinary {
+                cannot_convert_string_as_warning: true
+            }
+        )
     }
 
     /// PbCode returns PbCode of this signature.
@@ -378,7 +422,7 @@ impl BuiltinFunc {
     /// deep copy Go makes.
     // go: baseBuiltinFunc.Clone L2 (a signature's Clone is BuiltinFunc's; Go's base method only panics and is never reached)
     // go: baseBuiltinFunc.cloneFrom L2 (args shared, M-EXPR; ctor.Clone() of the stateless collators is the same collator)
-    // go: baseBuiltinCastFunc.cloneFrom L2 (inUnion is a field of the BuiltinFunc)
+    // go: baseBuiltinCastFunc.cloneFrom L2 (inUnion is SigExtra::Cast of the BuiltinFunc, copied)
     pub fn clone_from_base(&self) -> BuiltinFunc {
         self.clone()
     }
@@ -436,7 +480,13 @@ impl BuiltinFunc {
         result: &mut Column,
     ) -> Result<(), Error> {
         match self.sig.drivers.vec() {
-            Some(f) if self.sig.drivers.eval_type() == Some(normalize_et(et)) => {
+            // A Go signature whose vectorized() is false has no vecEvalXxx of its own: the
+            // call reaches baseBuiltinFunc.vecEvalXxx (Go's executors evaluate such
+            // expressions row by row instead).
+            Some(f)
+                if self.sig.vectorized
+                    && self.sig.drivers.eval_type() == Some(normalize_et(et)) =>
+            {
                 f(self, ctx, n, cols, result)
             }
             _ => Err(Error::plain(format!(
@@ -918,7 +968,9 @@ fn column_read(c: &crate::column::Column, as_type: EvalType) -> ColumnRead {
         if as_type == ETReal {
             return ColumnRead::Convert;
         }
-    } else if c.ret_type.eval_type() == as_type {
+    } else if normalize_et(c.ret_type.eval_type()) == normalize_et(as_type) {
+        // DATE/DATETIME/TIMESTAMP columns all hold Time values (ETTimestamp is read as
+        // ETDatetime by Go's VecEvalTime).
         return ColumnRead::Copy;
     }
     panic!(

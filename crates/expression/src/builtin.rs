@@ -64,7 +64,7 @@ pub struct InUnionMetadata {
 // go: newBaseBuiltinCastFunc L1
 pub fn new_base_builtin_cast_func(builtin_func: BuiltinFunc, in_union: bool) -> BuiltinFunc {
     let mut bf = builtin_func;
-    bf.in_union = Some(in_union);
+    bf.extra = crate::eval::SigExtra::Cast { in_union };
     bf
 }
 
@@ -353,7 +353,7 @@ impl BuiltinFunc {
     // go: baseBuiltinFunc.metadata L1
     // go: baseBuiltinCastFunc.metadata L1
     pub fn metadata(&self) -> Option<InUnionMetadata> {
-        self.in_union.map(|in_union| InUnionMetadata { in_union })
+        self.in_union().map(|in_union| InUnionMetadata { in_union })
     }
 
     // go: baseBuiltinFunc.setPbCode L1

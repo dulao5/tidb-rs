@@ -63,7 +63,26 @@ pub type ExprRef = Arc<Expr>;
 
 每个采用 `checked` 的函数族，govec 必须包含两类记录：**出错的值藏在 NULL 位下面**；**第一个出错行不在第 0 行**（同一批中后面还有出错行）。
 
-### 3.5 带状态的签名的 `Clone`（Lucky 评审 #75）
+### 3.5 带状态的签名的 `Clone`（Lucky 评审 #75）；签名的附加字段分三类（Lucky 评审 #86）
+
+v8.5.8 的 `pkg/expression` 中有 **98 个**签名结构体在 `baseBuiltinFunc`/`baseBuiltinCastFunc` 之外还有字段（脚本：扫描 `type builtin*Sig struct`，排除只内嵌 base 的）。按用途分三类，各放一处：
+
+**(a) 构建时的配置 → `BuiltinFunc::extra: SigExtra`**（枚举，每种 Go 结构体形态一个变体；函数类构建签名时设置，求值只读，之后不变）。约 50 个：
+- `baseBuiltinCastFunc.inUnion`（CAST，`SigExtra::Cast`，已实现）；`builtinInternalFromBinarySig.cannotConvertStringAsWarning`（`SigExtra::FromBinary`，已实现）
+- `keepNull`（IS TRUE/IS FALSE 8 个）、`cmpAsDate`（GREATEST/LEAST 4 个）、`hasNullable`（INTERVAL 2 个）、`constantArgOverflow`（UnaryMinusDecimal）、`constLoopCount`（BENCHMARK）、`isFloat`（TIMESTAMP 2 个）、`aesModeAttr`（AES 4 个）
+- `maxAllowedPacket`（CONCAT、CONCAT_WS、REPEAT、SPACE、LPAD/RPAD、FROM/TO_BASE64、INSERT 等 12 个）、WEIGHT_STRING 的 `padding`/`length`/`maxAllowedPacket`
+- `offset`（VALUES 8 个，另带 PropReader，见 (c)）
+- IN 的 `baseInSig` 与 `hashSet`（6 个；构建时由常量参数建好，求值只读）
+- 字面量：`builtinDateLiteralSig.literal`、`builtinTimeLiteralSig.duration`、`builtinTimestampLiteralSig.tm`
+- DATE_ADD/DATE_SUB 的 `baseDateArithmetical` 与函数指针 `getDate`/`getInterval`/`timeOp`/`durationOp`（3 个）；CONVERT_TZ 的 `timezoneRegex`（编译好的常量）
+
+**(b) 求值时的缓存与可变状态 → `EvalState`**（每个 worker 一份，表达式本身不可变；N4 §3.5）。LIKE/ILIKE 的 `patternCache`、JSON_SCHEMA_VALID 的 `schemaCache`、REGEXP 4 个的 `regexpBaseFuncSig`（memorized regexp）与 REGEXP_REPLACE 的 `instCache`、RAND 的 `mysqlRng`。Go 的 `Clone` 对缓存新建空结构体（上段已核对）；`mysqlRng` 的 `Clone` 处理在移植 RAND 时逐个核对。
+
+**(c) `expropt.*PropReader` 标记 → `SigDesc`**（签名类型的属性：求值需要哪些可选的会话属性，规划时由 `RequiredOptionalEvalProps` 收集；无运行时数据）。约 45 个：`SessionVarsPropReader`、`CurrentUserPropReader`、`InfoSchemaPropReader`、`KVStorePropReader`、`PrivilegeCheckerPropReader`、`SequenceOperatorPropReader`、`SQLExecutorPropReader`、`AdvisoryLockPropReader`、`DDLOwnerPropReader` 的各种组合（FOUND_ROWS、CURRENT_USER、LAST_INSERT_ID、NEXTVAL、GET_LOCK、SLEEP、SET 用户变量、VALUES、TIDB_* 等）。
+
+新增带附加字段的签名时：先归类；(a) 在 `SigExtra` 加变体，并对照该签名 Go 的 `Clone` 是否复制（目前两者都复制）；(b) 放进 `EvalState`；(c) 放进 `SigDesc`。
+
+#### `Clone` 的处理
 
 `SigDesc` 是无状态的描述；有状态的签名（LIKE/ILIKE/REGEXP 的 pattern 缓存、JSON_SCHEMA_VALID 的 schema 缓存、`rand` 的种子、`nonDeterministic` 标记等）在 `BuiltinFunc` 中带自己的状态。Go 每个签名的 `Clone` 对这些状态的处理各不相同（共享、复制或重置）：第一个带状态的签名进来时逐个对照 Go 的 `Clone`，在签名旁注明是哪一种，并在 govec 中加一个"克隆后分别求值再比较"的操作。已核对：`builtinFuncCache`（LIKE、ILIKE、REGEXP、JSON_SCHEMA_VALID）在 Go 的 `Clone` 中是新建的结构体，只复制 `baseBuiltinFunc`，所以克隆后缓存为空——Rust `BuiltinFuncCache::clone` 返回空缓存（D08.2，`builtin_unit.rs` 覆盖）。
 

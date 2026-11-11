@@ -47,16 +47,16 @@ descriptor-only signatures, applies the record's coercibility/repertoire overrid
 probe string). A `{"panic": true}` output (Go indexes `args` or `argTps` out of range) must
 panic in Rust too.
 
-# Domain "cast" (block D08.8 parts 1, 2a and 2b-1)
+# Domain "cast" (block D08.8 parts 1, 2a, 2b-1 and 2b-2a)
 
 `<target>/cast.jsonl.gz` are copied unmodified from the tidb-rs-tracker repository:
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-3`, commit `165478a`) |
-| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 7,380 records: `cast` 3,860 (60 of them UNSIGNED UNION negative strings; 800 `conv` records — part 2a — with FLOAT, BIT(n), ENUM and SET columns, which Go's `Column.VecEvalInt/Real/String` convert), `wrap` 700; part 2b-1 (appended, the 4,560 records above unchanged): `str` 1,600 (CAST to STRING), `dbl` 120 (FLOAT → DOUBLE, bit for bit), `binlit` 500 (`HandleBinaryLiteral`, to_binary/from_binary), `collcast` 300 (`BuildCastCollationFunction`), `wrapstr` 300 (`WrapWithCastAsString`) |
-| `arm64/cast.jsonl.gz` sha256 | `7c290f8f730a031ce958b08482291336fefa14f8d5e0b05337ea668528aae117` (GOARCH=arm64, generated locally) |
-| `amd64/cast.jsonl.gz` sha256 | `4ad8fbab525b6509b24ab109d3ab6f17a6e064a7939d0b89a513008e1087f071` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cast.jsonl.gz` (branch `govec/cast-D08.8-4`, commit `c3838d4`) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 9,880 records: `cast` 3,860 (60 of them UNSIGNED UNION negative strings; 800 `conv` records — part 2a — with FLOAT, BIT(n), ENUM and SET columns, which Go's `Column.VecEvalInt/Real/String` convert), `wrap` 700; part 2b-1 (appended, the 4,560 records above unchanged): `str` 1,600 (CAST to STRING), `dbl` 120 (FLOAT → DOUBLE, bit for bit), `binlit` 500 (`HandleBinaryLiteral`, to_binary/from_binary), `collcast` 300 (`BuildCastCollationFunction`), `wrapstr` 300 (`WrapWithCastAsString`); part 2b-2a (appended, the 7,380 records above unchanged): `from` 2,400 (DATE/DATETIME/TIMESTAMP, TIME, JSON and VECTOR columns to INT/REAL/DECIMAL/STRING/YEAR), `from-fsp` 100 (TIME columns with an unspecified fsp) |
+| `arm64/cast.jsonl.gz` sha256 | `8ad5eb95f33d071dc13a091d449897494e7bea2e6f754a05ce7f1e14c3bb8ef0` (GOARCH=arm64, generated locally) |
+| `amd64/cast.jsonl.gz` sha256 | `9c92d342766c461778323e91d90b07030710d269a8b3131e77d7f55edb492724` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact; same records as arm64) |
 
 A `cast` record builds `CAST(arg AS tp)` with `BuildCastFunctionWithCheck` (the argument is a
 column of the record's rows or a constant, which is folded) under random type flags and error
