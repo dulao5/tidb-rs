@@ -6,11 +6,10 @@
 //! `BuildCastCollationFunction` and `WrapWithCastAsInt`/`Real`/`Decimal`/`String` (spec D08.8
 //! §1).
 //!
-//! The signatures from TIME, DURATION, JSON and VECTOR arguments are selected by the function
-//! classes (so the planner sees Go's signature, result type and `tipb` code) but have no
-//! drivers yet: temporary stubs (constitution art. 4.3), evaluating them returns Go's
-//! `baseBuiltinFunc` error. CAST to TIME/DURATION/JSON/VECTOR returns a "not ported yet"
-//! error from `build_cast_function*` (D08.8 part 2b-2).
+//! The signatures from TIME, DURATION, JSON and VECTOR arguments to INT, REAL, DECIMAL and
+//! STRING are ported (part 2b-2a). CAST to TIME/DURATION/JSON/VECTOR returns a "not ported
+//! yet" error from `build_cast_function*` (temporary stub, constitution art. 4.3; part 2b-2b),
+//! and so does `VectorFloat32AsUnsupported`.
 
 #![allow(non_upper_case_globals)]
 
@@ -35,9 +34,9 @@ use tidb_parser::types::{
     ETVectorFloat32, EvalType, UnspecifiedLength,
 };
 use tidb_types::convert::{
-    convert_float_to_int, convert_json_to_decimal, convert_json_to_float, convert_json_to_int64, convert_float_to_uint, integer_signed_lower_bound,
-    integer_signed_upper_bound, integer_unsigned_upper_bound, str_to_float, str_to_int,
-    str_to_uint,
+    convert_float_to_int, convert_float_to_uint, convert_json_to_decimal, convert_json_to_float,
+    convert_json_to_int64, integer_signed_lower_bound, integer_signed_upper_bound,
+    integer_unsigned_upper_bound, str_to_float, str_to_int, str_to_uint,
 };
 use tidb_types::datum::{
     produce_dec_with_specified_tp, produce_float_with_specified_tp, produce_str_with_specified_tp,

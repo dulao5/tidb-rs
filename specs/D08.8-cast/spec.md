@@ -14,7 +14,8 @@
 | 1（临时桩） | 函数类会选中的 `builtinCast{Time,Duration,JSON}As{Int,Real,Decimal}Sig`、`builtinCastVectorFloat32AsUnsupportedSig`：只有描述（名字、`tipb` 码、`vectorized`），没有驱动；求值返回 Go 的 `baseBuiltinFunc` 错误 |
 | 2a | RPN 列参数按签名读取的求值类型转换（`Column.VecEvalInt/Real/String`） |
 | 2b-1 | `castAsStringFunctionClass`；签名 `builtinCast{Int,Real,Decimal,String}AsStringSig`（`builtinCast{Time,Duration,JSON,VectorFloat32}AsStringSig` 为临时桩）；`adjustRetFtForCastString`、`decimalPrecisionToLength`、`padZeroForBinaryType`；`newBaseBuiltinCastFunc4String`、`newBaseBuiltinFuncWithTp`（D08.2；TIME/DURATION/JSON/VECTOR 参数的包装为临时桩）；`WrapWithCastAsString`、`BuildCastCollationFunction`；`builtin_convert_charset.go` 全部 16 个函数（`tidbTo/FromBinaryFunctionClass`、`builtinInternalTo/FromBinarySig`、`BuildTo/FromBinaryFunction`、`HandleBinaryLiteral`、`init`/`convertActionMap`、`isLegacyCharset`、`formatInvalidChars`） |
-| 2b-2 | `castAsTime/Duration/JSON/Array/VectorFloat32FunctionClass` 与它们的签名、从 TIME/DURATION/JSON/VECTOR 出发的签名；`WrapWithCastAsTime/Duration/JSON/VectorFloat32`；`ConvertJSON2Tp` 等 |
+| 2b-2a | `#[eval_fn]` 支持 Time/Duration/JSON/VectorFloat32 参数；签名 `builtinCast{Time,Duration,JSON}As{Int,Real,Decimal,String}Sig`、`builtinCastVectorFloat32AsStringSig`；`SigExtra`（D08.1 §3.5 (a)） |
+| 2b-2b | `castAsTime/Duration/JSON/Array/VectorFloat32FunctionClass` 与它们的签名、从 TIME/DURATION/JSON/VECTOR 出发的签名；`WrapWithCastAsTime/Duration/JSON/VectorFloat32`；`ConvertJSON2Tp` 等 |
 
 ## 2. 依赖
 
@@ -57,7 +58,7 @@ Go 的 `baseBuiltinCastFunc` = `baseBuiltinFunc` + `inUnion`。Rust 的 `Builtin
 
 1. **`BuildCastFunction*`/`WrapWithCastAs*` 返回 `Result`**：Go 记日志并返回 `Function == nil` 的节点（之后使用会空指针 panic）；Rust 返回错误。
 2. **CAST 到 TIME/DURATION/JSON/VECTOR**：返回 "not ported yet (D08.8 part 2b-2)" 错误（临时桩，宪章第四条 3）。`newBaseBuiltinFuncWithTp` 对这些求值类型的参数同样返回这个错误。
-3. **TIME/DURATION/JSON/VECTOR 参数的 INT/REAL/DECIMAL/STRING 签名**：只有描述，没有驱动（临时桩）。
+3. ~~TIME/DURATION/JSON/VECTOR 参数的 INT/REAL/DECIMAL/STRING 签名只有描述~~：第 2b-2a 部分已移植（13 个签名，`builtinCastVectorFloat32AsUnsupportedSig` 仍为临时桩，随 CAST 到 VECTOR 一起）。
 4. **`TryPushCastIntoControlFunctionForHybridType`**：IF/CASE/ELT 未移植，tidb-rs 建不出这样的节点；遇到时 `unimplemented!`（临时桩，D08.9）。
 5. **`CastStringAs{Int,Real,Decimal}` 的前置分支**（hybrid、二进制字面量、`CanImplicitEval*`）：函数类不会对这样的参数选中这些签名（选 `IntAsInt` 等），不可达，未移植（L2）。
 6. **`PropagateType` 与类型的原地修改**：Go 直接修改参数节点（及共享它的所有持有者）的 `*FieldType`；Rust 在副本上修改（`with_type_mut`）。`ScalarFunction` 的 `RetType` 与签名的 `tp` 在 Go 中是同一个指针，两者一起改。**移植注意**（Lucky 评审 #82）：调用点 builtin_cast.go:220（`BuildCastFunction` 中对参数调用 `PropagateType`）在 Go 中原地修改的是**共享的** `ScalarFunction`/`Constant` 节点，计划中所有引用同一节点的地方都会看到新类型。按 Lucky 的分析，这一点从 SQL 观察不到；但规划器（P3）的 Go 代码可能依赖这种共享，移植规划器时遇到同一节点被多处引用、又在 CAST 之后读取其类型的地方，要确认是否需要显式地同步修改。
@@ -66,5 +67,8 @@ Go 的 `baseBuiltinCastFunc` = `baseBuiltinFunc` + `inUnion`。Rust 的 `Builtin
 9. ~~FLOAT 与 hybrid（BIT/ENUM/SET）参数在向量驱动中~~：第 2a 部分已修正（RPN 按签名读取的求值类型转换）。FLOAT 加宽成 DOUBLE 的逐位比较见 "dbl" 记录（Lucky 评审 #84）。
 10. **`adjustRetFtForCastString` 中 Go 的 `intest.Assert` 分支**（ENUM/SET 带 `EnumSetAsIntFlag`、未知类型）：按 Go 的生产构建直接返回（D08.1 spec §4 第 6 条）。
 11. **`newBaseBuiltinFuncWithTp` 不检查 nil 上下文**（引用不会为空）；参数个数与类型个数不同时与 Go 一样 panic。
+12. **向量驱动读 DURATION 参数的 fsp**（2b-2a）：Go 的向量版用参数的声明类型 `b.args[0].GetType(ctx).GetDecimal()` 读 `GoDurations`，逐行版用 `EvalDuration` 返回值自带的 fsp；`DurationView` 按 Go 的向量版取声明的 fsp，行驱动用返回值的 fsp（各自跟随，§3.4 (c)；列参数两者相同，govec 未见差异）。`builtinCastDurationAs{Real,Decimal}Sig` 的向量版在循环**之前**对声明的 fsp 做一次 `CheckFsp`，所以全 NULL 或 0 行时也会报错；Rust 在第一个非 NULL 行检查（只在声明的 fsp 非法时有差别，SQL 构造不出这样的类型）。
+13. **`vectorized() == false` 的签名的向量求值**（2b-2a）：Go 中这样的签名没有自己的 `vecEvalXxx`，`VecEvalXxx` 到达 `baseBuiltinFunc.vecEvalXxx` 并报错（执行器会改用逐行求值）。`BuiltinFunc::vec_eval` 现在对 `SigDesc.vectorized == false` 返回同样的错误（此前直接调用宏生成的向量驱动）；govec 中 `VectorFloat32AsString` 的 514 条记录覆盖。执行器按 `Vectorizable` 改用逐行求值属于 D08.1 2b（`VectorizedFilter`/`chunk_executor`）。
+14. **TIME/DURATION/JSON/VECTOR 类型的常量在向量驱动中**（`fill_constant`，Go `genVecFromConstExpr` 的对应分支）已移植，但 govec 的 `from` 记录只用列参数：常量参数会被 `FoldConstant` 折叠，`sfDump` 也还不能输出这些种类的 Datum。缺口记在 plan.md 2b-2b。
 
 没有面向用户的行为差异（`docs/compatibility.md` 不变）。

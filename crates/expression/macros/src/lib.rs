@@ -295,11 +295,7 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
         let mut call_args = Vec::new();
         for (i, k) in kinds.iter().enumerate() {
             let v = format_ident!("a{}", i);
-            call_args.push(if k.by_ref() {
-                quote!(&#v)
-            } else {
-                quote!(#v)
-            });
+            call_args.push(if k.by_ref() { quote!(&#v) } else { quote!(#v) });
         }
         let call = if ret == Ret::String {
             quote! {
@@ -368,11 +364,13 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
             } else {
                 quote!(let #v = #view::new(cols[#i], n);)
             });
-            gets.push(if matches!(k, ArgKind::Decimal | ArgKind::Json | ArgKind::Vector) {
-                quote!(&#v.get(i))
-            } else {
-                quote!(#v.get(i))
-            });
+            gets.push(
+                if matches!(k, ArgKind::Decimal | ArgKind::Json | ArgKind::Vector) {
+                    quote!(&#v.get(i))
+                } else {
+                    quote!(#v.get(i))
+                },
+            );
             null_checks.push(quote!(cols[#i].is_null(i)));
         }
         match ret {

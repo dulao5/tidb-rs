@@ -19,10 +19,10 @@ pub use tidb_parser::types::{
     ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
     ETVectorFloat32,
 };
+use tidb_types::etc::FieldType;
 pub use tidb_types::json::BinaryJSON;
 pub use tidb_types::time::{Duration, Time};
 pub use tidb_types::vector::VectorFloat32;
-use tidb_types::etc::FieldType;
 
 use super::{Args, BuiltinFunc};
 use crate::context::EvalContext;

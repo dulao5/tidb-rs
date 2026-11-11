@@ -484,7 +484,8 @@ impl BuiltinFunc {
             // call reaches baseBuiltinFunc.vecEvalXxx (Go's executors evaluate such
             // expressions row by row instead).
             Some(f)
-                if self.sig.vectorized && self.sig.drivers.eval_type() == Some(normalize_et(et)) =>
+                if self.sig.vectorized
+                    && self.sig.drivers.eval_type() == Some(normalize_et(et)) =>
             {
                 f(self, ctx, n, cols, result)
             }
