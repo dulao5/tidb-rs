@@ -36,7 +36,7 @@ Go 中调用方会读"值 + error"的地方，Rust 返回 `(值, Result<(), Erro
 
 ## 4. 偏离与豁免
 
-1. **`ReverseHashIterator` 每步重新定位**（L2）：tidb-kv 的 `Retriever::iter_reverse` 在迭代器的生命周期内借用 key 参数，迭代器不能比构造起点 key 的函数活得久。Rust 的迭代器保存当前条目，每次 `Next` 在同一个 snapshot 上重新 `IterReverse(key, nil)`：条目和顺序与 Go 相同，代价是每步一次 seek，而不是 Go 的批量扫描。Go 的第一个 `Key()`（`Next` 之前）是空的 field，照搬。
+1. **`ReverseHashIterator` 每步重新定位**（L2）：tidb-kv 的 `Retriever::iter_reverse` 在迭代器的生命周期内借用 key 参数，迭代器不能比构造起点 key 的函数活得久。Rust 的迭代器保存当前条目，每次 `Next` 在同一个 snapshot 上重新 `IterReverse(key, nil)`：条目和顺序与 Go 相同，代价是每步一次 seek，而不是 Go 的批量扫描。**接入 TiKV snapshot 之前必须替换**（Lucky 评审 #85）：在 TiKV 上每步重新 seek 就是每步新建 scanner、一次 RPC 并预取最多 256 条完整的 job JSON，而 Go 只用一个 scanner，N 个历史 job 约 N/256 次 RPC；用户是 `ADMIN SHOW DDL JOBS` 和 `information_schema.ddl_jobs`（show_ddl_jobs.go:179），长期运行的集群常有几万个历史 job。修法：tidb-kv 的迭代器 trait 把迭代器生命周期和 key 参数分开（实现中 clone 边界），与 D07.0 T11 放在同一个小 PR，D07.1 之前完成（#53）。Go 的第一个 `Key()`（`Next` 之前）是空的 field，照搬。
 2. **autoid accessor 不共享**（L2）：Go 的各个 picker（`RowID()`、`IncrementID()` 等）修改同一个 accessor 的 `idEncodeFn` 并返回同一个指针，先取到的 accessor 会跟着变成最后一次 pick 的 key。Rust 每次 pick 返回独立的 accessor。v8.5.8 的调用方都是取到后立刻使用，看不出差别；govec 也按这种方式调用。
 3. **`ListTables` 没有 context 参数**：tidb-kv 的 `Context` 没有取消，Go 中检查 `ctx.Err()` 的分支走不到。
 4. **meta 的 metrics 没有移植**：`GetHistoryDDLJob`、`GetSchemaDiff` 中观察 `MetaHistogram` 的部分。
