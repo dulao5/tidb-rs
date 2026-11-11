@@ -7,4 +7,4 @@
 - [x] T5 govec `execdetails` 领域与回放；反证
 - [ ] T6 `tracing/util.go`（随 D05.3 / TRACE）
 - [ ] T7 `MergeTiFlashRUConsumption`（随 MPP / TiFlash 客户端）
-- [ ] T8 D00.1 的后续：`StatementContext` 接入 `SyncExecDetails` / `RuntimeStatsColl`、`GetExecDetails`、`ResetForRetry` 重置 exec details；`DistSQLContext`（还要等 D07.2）
+- [x] T8 D00.1 的后续：`StatementContext` 接入 `SyncExecDetails` / `RuntimeStatsColl`、`GetExecDetails`、`ResetForRetry` 重置 exec details；`DistSQLContext`（还要等 D07.2）

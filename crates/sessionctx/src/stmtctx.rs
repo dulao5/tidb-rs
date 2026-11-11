@@ -7,8 +7,7 @@
 //!
 //! Not in part 1 (registered as govec exemptions with the block they wait for): the SQL
 //! and plan digests (`parser.Digest`), the resource group tagger, the memory / disk trackers
-//! of the statement, `SyncExecDetails` and the runtime stats (D14.0), the used-stats info
-//! (statistics, D11), the logical-plan build state (model.TableInfo keyed maps, intset),
+//! of the statement, the used-stats info (statistics, D11), the logical-plan build state (model.TableInfo keyed maps, intset),
 //! the DistSQL context cache and the statement label (ast).
 //!
 //! Mapping:
@@ -38,6 +37,7 @@ use tidb_base::dbterror::plannererrors;
 use tidb_base::gostd::time::{Location, utc};
 use tidb_base::mysql::PriorityEnum;
 use tidb_base::{Arg, Error};
+use tidb_execdetails::execdetails::{ExecDetails, RuntimeStatsColl, SyncExecDetails};
 use tidb_types::context::{
     Context as TypeContext, DefaultStmtFlags, DefaultStmtNoWarningContext, Flags,
 };
@@ -369,6 +369,13 @@ pub struct StatementContext {
     flat_plan: Option<Arc<dyn Any + Send + Sync>>,
     plan: Option<Arc<dyn Any + Send + Sync>>,
 
+    /// `execdetails.SyncExecDetails`, embedded in Go (its methods are promoted to the
+    /// statement context; here they are called through this field).
+    pub sync_exec_details: SyncExecDetails,
+    /// RuntimeStatsColl collects the executors' runtime stats (`EXPLAIN ANALYZE`); `nil` in Go
+    /// until the executor builder sets it.
+    pub runtime_stats_coll: Option<Arc<RuntimeStatsColl>>,
+
     pub tables: Vec<TableEntry>,
     /// LockWaitStartTime stores the pessimistic lock wait start time
     lock_wait_start_time: AtomicI64,
@@ -548,6 +555,8 @@ pub fn new_stmt_ctx_with_time_zone(tz: Arc<Location>) -> StatementContext {
         index_force: false,
         flat_plan: None,
         plan: None,
+        sync_exec_details: SyncExecDetails::default(),
+        runtime_stats_coll: None,
         tables: Vec::new(),
         lock_wait_start_time: AtomicI64::new(0),
         pessimistic_lock_waited: AtomicI32::new(0),
@@ -1161,16 +1170,26 @@ impl StatementContext {
 
     /// ResetForRetry resets the changed states during execution.
     ///
-    /// `SyncExecDetails.Reset` (D14.0) and the DistSQL context cache (part 2) are not here.
-    // go: StatementContext.ResetForRetry L2 (no SyncExecDetails / DistSQL context cache yet)
+    /// The DistSQL context cache (`distSQLCtxCache`, D07.2) is not here.
+    // go: StatementContext.ResetForRetry L2 (no DistSQL context cache yet)
     pub fn reset_for_retry(&mut self) {
         self.reset_mu_for_retry();
         self.reserved_row_id_alloc.reset(0, 0);
         self.table_ids.clear();
         self.index_names.clear();
         self.task_id = allocate_task_id();
+        self.sync_exec_details.reset();
         self.warn_handler().truncate_warnings(0);
         self.extra_warn_handler.truncate_warnings(0);
+    }
+
+    /// GetExecDetails gets the execution details for the statement.
+    // go: StatementContext.GetExecDetails L1
+    pub fn get_exec_details(&self) -> ExecDetails {
+        let _mu = lock(&self.mu);
+        let mut details = self.sync_exec_details.get_exec_details();
+        details.lock_keys_duration = self.lock_keys_duration.load(Ordering::SeqCst);
+        details
     }
 
     /// PushDownFlags converts StatementContext to tipb.SelectRequest.Flags.

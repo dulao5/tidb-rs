@@ -19,6 +19,8 @@ use tidb_base::contextutil::{
 use tidb_base::errno;
 use tidb_base::gostd::time::fixed_zone;
 use tidb_base::terror::ErrClass;
+use tidb_execdetails::clientgo::{CommitDetails, LockKeysDetails, TimeDetail};
+use tidb_execdetails::execdetails::{DetailsNeedP90, ExecDetails};
 use tidb_sessionctx::errctx::{self, ErrGroup, Level, LevelMap};
 use tidb_sessionctx::stmtctx::{
     self, ReferenceCount, ReservedRowIDAlloc, StatementContext, StmtCacheKey,
@@ -416,6 +418,93 @@ fn step(e: &mut Env, s: &[Value]) -> Value {
             };
         }
         "sc_retry" => e.sc.reset_for_retry(),
+        // Exec details (D14.0 follow-up); see govec/domains/stmtctx.go.
+        "sc_ed_merge" => {
+            let (idx, bo, ck) = (i(1), i(4), i(5));
+            let mut d = ExecDetails {
+                details_need_p90: DetailsNeedP90 {
+                    callee_address: idx.to_string(),
+                    time_detail: TimeDetail {
+                        process_time: i(2),
+                        wait_time: i(3),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                cop_time: i(2) + i(3),
+                ..Default::default()
+            };
+            if bo >= 0 {
+                d.backoff_time = bo * 1_000_000;
+                d.details_need_p90
+                    .backoff_sleep
+                    .insert("tikvRPC".to_owned(), bo * 1_000_000);
+                d.details_need_p90
+                    .backoff_times
+                    .insert("tikvRPC".to_owned(), 1 + bo % 3);
+            }
+            let cd = (ck >= 0).then(|| CommitDetails {
+                write_keys: ck,
+                write_size: ck * 10,
+                get_commit_ts_time: ck * 1_000,
+                ..Default::default()
+            });
+            e.sc.sync_exec_details
+                .merge_exec_details(Some(&d), cd.as_ref());
+        }
+        "sc_ed_nil" => e.sc.sync_exec_details.merge_exec_details(None, None),
+        "sc_ed_lock" => {
+            let ld = LockKeysDetails {
+                lock_keys: i(2) as i32,
+                total_time: i(3),
+                region_num: (1 + i(2) % 4) as i32,
+                ..Default::default()
+            };
+            if i(1) == 0 {
+                e.sc.sync_exec_details
+                    .merge_lock_keys_exec_details(Some(&ld));
+            } else {
+                e.sc.sync_exec_details
+                    .merge_shared_lock_keys_exec_details(Some(&ld));
+            }
+        }
+        "sc_lkd" => {
+            e.sc.lock_keys_duration.fetch_add(i(1), Ordering::SeqCst);
+        }
+        "sc_ed_get" => {
+            let d = e.sc.get_exec_details();
+            let ck = d.commit_detail.as_ref().map_or(-1, |c| c.write_keys);
+            let lk = |l: &Option<Box<LockKeysDetails>>| match l {
+                None => Value::Null,
+                Some(l) => json!([l.lock_keys, l.total_time, l.region_num]),
+            };
+            return json!([
+                d.string(),
+                d.request_count,
+                d.cop_time,
+                d.backoff_time,
+                d.lock_keys_duration,
+                ck,
+                lk(&d.lock_keys_detail),
+                lk(&d.shared_lock_keys_detail)
+            ]);
+        }
+        "sc_ed_cop" => {
+            return match e.sc.sync_exec_details.cop_tasks_details() {
+                None => Value::Null,
+                Some(c) => json!([
+                    c.num_cop_tasks,
+                    c.avg_process_time,
+                    c.p90_process_time,
+                    c.max_process_time,
+                    c.max_process_address,
+                    c.avg_wait_time,
+                    c.p90_wait_time,
+                    c.max_wait_time,
+                    c.max_wait_address
+                ]),
+            };
+        }
         "sc_pct" => {
             let pct = e.sc.plan_cache_tracker.clone();
             pct.enable_plan_cache();
