@@ -68,7 +68,9 @@ blocks = ["D01.11"]  # tablecodec、rowcodec（依赖 kv）
 
 [crate.tidb-sessionctx]
 rank = 7
-blocks = ["D00.1", "D05.1", "D05.2"]
+# D13.0: hint.StmtHints, embedded in stmtctx.StatementContext (the rest of pkg/util/hint is
+# D13.3 in tidb-planner, which re-exports it).
+blocks = ["D00.1", "D05.1", "D05.2", "D13.0"]
 
 # D06.7: the system-table writes behind SET GLOBAL (REPLACE INTO mysql.global_variables /
 # mysql.tidb, the row-ID allocator, the sysvar cache rebuild): the pure logic. The I/O (TiKV

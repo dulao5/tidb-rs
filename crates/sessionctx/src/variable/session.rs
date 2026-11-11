@@ -56,9 +56,6 @@ pub struct SessionVars {
     /// shared, so other holders such as `ProcessInfo` keep it alive — N2). Read with
     /// [`SessionVars::stmt_ctx`], replace with [`SessionVars::set_stmt_ctx`].
     stmt_ctx: Arc<StatementContext>,
-    /// cachedStmtCtx is used to reduce object allocation (the two contexts
-    /// `InitStatementContext` alternates between).
-    cached_stmt_ctx: [Arc<StatementContext>; 2],
     /// The `useChunkAlloc` cell of the current statement context, which the chunk
     /// allocator's reuse hook sets: Go's hook reads `s.StmtCtx` when it fires, which may be
     /// a context installed after `SetAlloc`. Holding the cell (not the context) keeps
@@ -277,15 +274,6 @@ impl SessionVars {
         Arc::clone(&self.stmt_ctx_slot)
     }
 
-    // glue: field access for session_methods.rs
-    pub(super) fn cached_stmt_ctx_ref(&self, i: usize) -> Arc<StatementContext> {
-        Arc::clone(&self.cached_stmt_ctx[i])
-    }
-
-    // glue: field access for session_methods.rs
-    pub(super) fn cached_stmt_ctx_mut(&mut self, i: usize) -> &mut Arc<StatementContext> {
-        &mut self.cached_stmt_ctx[i]
-    }
 }
 
 impl SessionVars {
@@ -296,10 +284,6 @@ impl SessionVars {
         SessionVars {
             stmt_ctx_slot: Arc::new(parking_lot::Mutex::new(stmt_ctx.use_chunk_alloc_cell())),
             stmt_ctx,
-            cached_stmt_ctx: [
-                Arc::new(crate::stmtctx::new_stmt_ctx()),
-                Arc::new(crate::stmtctx::new_stmt_ctx()),
-            ],
             chunk_pool: None,
             global_vars_accessor,
             systems: HashMap::from([

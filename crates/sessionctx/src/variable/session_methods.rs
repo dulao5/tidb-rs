@@ -944,24 +944,15 @@ impl SessionVars {
     /// InitStatementContext initializes a StatementContext, the object is reused to reduce allocation.
     ///
     /// The caller installs the result with [`SessionVars::set_stmt_ctx`] (Go assigns
-    /// `vars.StmtCtx`). Go's `RefCountOfStmtCtx.TryFreeze` guards the reset against other
-    /// sessions reading the context through `ProcessInfo`; here those readers hold the `Arc`,
-    /// so `Arc::get_mut` failing is Go's failed freeze or failed `Reset`: a new context is
-    /// created instead (N2, D00.1 spec §4).
-    // go: SessionVars.InitStatementContext L2 (Arc::get_mut replaces TryFreeze / UnFreeze)
+    /// `vars.StmtCtx`). Go alternates between two cached contexts and `Reset`s the one not in
+    /// use (or creates a new one when another session holds it, `RefCountOfStmtCtx`); the
+    /// reuse only saves allocations: `Reset` keeps the maps `CTEStorageMap`, `LockTableIDs`,
+    /// `TableStats`, `RelatedTableIDs`, `TblInfo2UnionScan`, and its only caller
+    /// (executor/select.go `ResetContextOfStmt`) clears or recreates every one of them. So
+    /// this returns a new context (N2 §2: the cache is dropped, L2).
+    // go: SessionVars.InitStatementContext L2 (no cachedStmtCtx; always NewStmtCtx)
     pub fn init_statement_context(&mut self) -> Arc<StatementContext> {
-        let current = self.stmt_ctx_arc();
-        let i = usize::from(Arc::ptr_eq(&self.cached_stmt_ctx_ref(0), &current));
-        drop(current);
-        let sc = self.cached_stmt_ctx_mut(i);
-        let reset = match Arc::get_mut(sc) {
-            Some(sc) => sc.reset(),
-            None => false,
-        };
-        if !reset {
-            *sc = Arc::new(crate::stmtctx::new_stmt_ctx());
-        }
-        Arc::clone(sc)
+        Arc::new(crate::stmtctx::new_stmt_ctx())
     }
 
     /// RaiseWarningWhenMPPEnforced will raise a warning when mpp mode is enforced and executing explain statement.

@@ -33,6 +33,8 @@ use tidb_sessionctx::variable::*;
 
 #[path = "sessionvars_d/mod.rs"]
 mod sessionvars_d;
+#[path = "sessionvars_e/mod.rs"]
+mod sessionvars_e;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -519,6 +521,9 @@ fn gostd_lower(s: &str) -> String {
 /// Returns (out, err, warnings) like the Go exec.
 fn exec(op: &str, args: &[Value]) -> (Value, Option<Error>, Vec<Error>) {
     if let Some((out, err)) = sessionvars_d::exec_d(op, args) {
+        return (out, err, vec![]);
+    }
+    if let Some((out, err)) = sessionvars_e::exec_e(op, args) {
         return (out, err, vec![]);
     }
     match op {
