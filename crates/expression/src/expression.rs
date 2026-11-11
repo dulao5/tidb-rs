@@ -85,7 +85,7 @@ pub enum Expr {
 /// columns, by slot (spec §3.2); Go keeps them behind `CorrelatedColumn.Data`.
 #[derive(Debug, Default)]
 pub struct EvalState {
-    corr: HashMap<u64, Datum>,
+    corr: HashMap<i64, Datum>,
 }
 
 /// The zero Datum (`new(types.Datum)`) a correlated column reads before Apply writes it.

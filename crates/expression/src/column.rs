@@ -3,14 +3,14 @@
 //! `Column` and `CorrelatedColumn` (spec §3.1–3.2).
 //!
 //! - The cached `hashcode` is a `OnceLock` (N4 §3.5); `Clone` copies it.
-//! - `CorrelatedColumn.Data *types.Datum` is a slot number: the value lives in the
-//!   [`EvalState`]; clones and `RemapColumn` keep the slot, as Go keeps the pointer.
+//! - `CorrelatedColumn.Data *types.Datum` is a slot keyed by the outer column's `UniqueID`
+//!   at creation: the value lives in the [`EvalState`]; clones and `RemapColumn` keep the
+//!   slot, as Go keeps the pointer (spec §3.2).
 //! - Not ported (spec §4): the `VecEval*` methods (replaced by the vector driver of part 2,
 //!   M-EVAL) and the cascades-only `Hash64`/`Equals` (EXC.B). `EqualByExprAndID` and
 //!   `resolveIndicesByVirtualExpr` need `ScalarFunction.Equal` and come with part 2.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use tidb_base::errors::RedactLogDisable;
@@ -37,19 +37,14 @@ use crate::scalar_function::ast_func;
 use crate::schema::Schema;
 use crate::size;
 
-/// The slot of a correlated column's value (Go's `Data *types.Datum`, spec §3.2).
+/// The slot of a correlated column's value (Go's `Data *types.Datum`, spec §3.2): the
+/// `UniqueID` of the outer column the correlated column was created for.
+///
+/// Go's `ExtractCorColumnsBySchema` points the `Data` of every correlated column of the
+/// same outer column at one Datum, which Apply writes once per outer row; keying the
+/// state by that `UniqueID` gives the same sharing without a pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CorrSlot(pub u64);
-
-static NEXT_CORR_SLOT: AtomicU64 = AtomicU64::new(1);
-
-impl CorrSlot {
-    /// A fresh slot: `Data: new(types.Datum)`.
-    // glue: allocation of CorrelatedColumn.Data
-    pub fn alloc() -> CorrSlot {
-        CorrSlot(NEXT_CORR_SLOT.fetch_add(1, Ordering::Relaxed))
-    }
-}
+pub struct CorrSlot(pub i64);
 
 /// CorrelatedColumn stands for a column in a correlated sub query.
 #[derive(Debug)]
@@ -76,8 +71,8 @@ impl CorrelatedColumn {
     // glue: Go composite literal with a fresh Data pointer
     pub fn new(column: Column) -> CorrelatedColumn {
         CorrelatedColumn {
+            slot: CorrSlot(column.unique_id),
             column,
-            slot: CorrSlot::alloc(),
         }
     }
 
