@@ -23,7 +23,6 @@ use tidb_chunk::chunk::new_chunk_with_capacity;
 use tidb_chunk::column::new_empty_column;
 use tidb_expression::eval::{Args, BuiltinFunc, RpnProgram, RpnState, SigDesc, SigView};
 use tidb_expression::{Column, EvalContext, EvalState, Expr, ExprRef, ScalarFunction, eval_fn};
-use tidb_parser::model::CIStr;
 use tidb_sessionctx::exprstatic::new_eval_context;
 use tidb_types::errors::ErrOverflow;
 use tidb_types::etc::FieldType;
@@ -301,13 +300,9 @@ fn case(
             }))
         })
         .collect();
-    let ret_eval_int = sig.drivers.eval_type() == tidb_parser::types::ETInt;
-    let function = BuiltinFunc::new(sig, args, ret.clone(), "utf8mb4_bin".into());
-    let expr = Arc::new(Expr::ScalarFunction(ScalarFunction {
-        func_name: CIStr::new(name),
-        ret_type: ret,
-        function,
-    }));
+    let ret_eval_int = sig.drivers.eval_type() == Some(tidb_parser::types::ETInt);
+    let function = BuiltinFunc::new(sig, args, ret.clone(), "utf8mb4", "utf8mb4_bin");
+    let expr = Arc::new(Expr::ScalarFunction(ScalarFunction::new(name, ret, function)));
     Case {
         name: name.into(),
         expr,
@@ -420,7 +415,7 @@ fn bench(c: &mut Criterion) {
                     let row = case.input.get_row(i);
                     if case.ret_eval_int {
                         black_box(f.eval_int(ctx, &st, row).unwrap());
-                    } else if f.sig.drivers.eval_type() == tidb_parser::types::ETReal {
+                    } else if f.sig.drivers.eval_type() == Some(tidb_parser::types::ETReal) {
                         black_box(f.eval_real(ctx, &st, row).unwrap());
                     } else {
                         black_box(f.eval_string(ctx, &st, row).unwrap());

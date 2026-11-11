@@ -8,7 +8,6 @@ use tidb_chunk::chunk::new_chunk_with_capacity;
 use tidb_chunk::column::new_empty_column;
 use tidb_expression::eval::{Args, BuiltinFunc, RpnProgram, RpnState, SigDesc, SigView};
 use tidb_expression::{Column, EvalContext, EvalState, Expr, ExprRef, ScalarFunction, eval_fn};
-use tidb_parser::model::CIStr;
 use tidb_sessionctx::exprstatic::new_eval_context;
 use tidb_types::etc::FieldType;
 use tidb_types::field_type::new_field_type;
@@ -69,12 +68,8 @@ fn col(i: isize, ft: &FieldType) -> ExprRef {
 }
 
 fn func(sig: &'static SigDesc, args: Vec<ExprRef>, ret: FieldType) -> ExprRef {
-    let function = BuiltinFunc::new(sig, args, ret.clone(), "utf8mb4_bin".into());
-    Arc::new(Expr::ScalarFunction(ScalarFunction {
-        func_name: CIStr::new(sig.name),
-        ret_type: ret,
-        function,
-    }))
+    let function = BuiltinFunc::new(sig, args, ret.clone(), "utf8mb4", "utf8mb4_bin");
+    Arc::new(Expr::ScalarFunction(ScalarFunction::new(sig.name, ret, function)))
 }
 
 #[test]

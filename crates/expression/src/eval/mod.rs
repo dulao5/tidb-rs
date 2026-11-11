@@ -10,6 +10,8 @@
 //! - [`RpnProgram`] is the post-order form of an expression for the vector driver; it borrows
 //!   the input chunk's columns instead of copying them (N4 §3.4).
 
+#![allow(non_upper_case_globals)]
+
 pub mod rt;
 
 use smallvec::SmallVec;
@@ -17,52 +19,83 @@ use std::borrow::Cow;
 
 use tidb_base::Error;
 use tidb_chunk::{Chunk, Column, Row};
-use tidb_parser::types::{ETInt, ETReal, ETString, EvalType};
+use tidb_base::mysql;
+use tidb_parser::gocharset;
+use tidb_parser::types::{
+    ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp, ETVectorFloat32,
+    EvalType,
+};
+use tidb_types::json::BinaryJSON;
+use tidb_types::mydecimal::MyDecimal;
+use tidb_types::time::{Duration, Time};
+use tidb_types::vector::VectorFloat32;
 use tidb_types::collate::{self, Collator};
 use tidb_types::etc::FieldType;
 
+use crate::collation::CollationInfo;
 use crate::context::EvalContext;
 use crate::expression::{EvalState, Expr, ExprRef};
 
-/// The row driver of a signature, by result type.
-pub type RowIntFn =
-    fn(&BuiltinFunc, &dyn EvalContext, &EvalState, Row<'_>) -> Result<Option<i64>, Error>;
-/// See [`RowIntFn`].
-pub type RowRealFn =
-    fn(&BuiltinFunc, &dyn EvalContext, &EvalState, Row<'_>) -> Result<Option<f64>, Error>;
-/// See [`RowIntFn`].
-pub type RowStringFn =
-    fn(&BuiltinFunc, &dyn EvalContext, &EvalState, Row<'_>) -> Result<Option<Vec<u8>>, Error>;
+/// The row driver of a signature returning `T` (`evalXxx`).
+pub type RowFn<T> =
+    fn(&BuiltinFunc, &dyn EvalContext, &EvalState, Row<'_>) -> Result<Option<T>, Error>;
 /// The vector driver of a signature: `n` rows, the evaluated argument columns, the result.
 pub type VecFn =
     fn(&BuiltinFunc, &dyn EvalContext, usize, &[&Column], &mut Column) -> Result<(), Error>;
 
-/// The drivers `#[eval_fn]` generates for one signature.
+/// The drivers `#[eval_fn]` generates for one signature: one variant per evaluation type
+/// (a Go signature implements the `evalXxx`/`vecEvalXxx` pair of its result type).
 #[derive(Clone, Copy)]
 pub enum SigDrivers {
     /// `evalInt`.
-    Int { row: RowIntFn, vec: VecFn },
+    Int { row: RowFn<i64>, vec: VecFn },
     /// `evalReal`.
-    Real { row: RowRealFn, vec: VecFn },
+    Real { row: RowFn<f64>, vec: VecFn },
+    /// `evalDecimal`.
+    Decimal { row: RowFn<MyDecimal>, vec: VecFn },
     /// `evalString`.
-    String { row: RowStringFn, vec: VecFn },
+    String { row: RowFn<Vec<u8>>, vec: VecFn },
+    /// `evalTime`.
+    Time { row: RowFn<Time>, vec: VecFn },
+    /// `evalDuration`.
+    Duration { row: RowFn<Duration>, vec: VecFn },
+    /// `evalJSON`.
+    Json { row: RowFn<BinaryJSON<'static>>, vec: VecFn },
+    /// `evalVectorFloat32`.
+    VectorFloat32 { row: RowFn<VectorFloat32<'static>>, vec: VecFn },
+    /// No evaluation: a signature that is only built and inspected (planner-only signatures,
+    /// and the descriptor-only signatures of tests). Every `evalXxx` returns Go's
+    /// `baseBuiltinFunc` error.
+    None,
 }
 
 impl SigDrivers {
-    /// The evaluation type of the result.
-    pub fn eval_type(&self) -> EvalType {
-        match self {
+    /// The evaluation type of the result (`None` for [`SigDrivers::None`]).
+    pub fn eval_type(&self) -> Option<EvalType> {
+        Some(match self {
             SigDrivers::Int { .. } => ETInt,
             SigDrivers::Real { .. } => ETReal,
+            SigDrivers::Decimal { .. } => ETDecimal,
             SigDrivers::String { .. } => ETString,
-        }
+            SigDrivers::Time { .. } => ETDatetime,
+            SigDrivers::Duration { .. } => ETDuration,
+            SigDrivers::Json { .. } => ETJson,
+            SigDrivers::VectorFloat32 { .. } => ETVectorFloat32,
+            SigDrivers::None => return None,
+        })
     }
 
-    fn vec(&self) -> VecFn {
+    fn vec(&self) -> Option<VecFn> {
         match *self {
             SigDrivers::Int { vec, .. }
             | SigDrivers::Real { vec, .. }
-            | SigDrivers::String { vec, .. } => vec,
+            | SigDrivers::Decimal { vec, .. }
+            | SigDrivers::String { vec, .. }
+            | SigDrivers::Time { vec, .. }
+            | SigDrivers::Duration { vec, .. }
+            | SigDrivers::Json { vec, .. }
+            | SigDrivers::VectorFloat32 { vec, .. } => Some(vec),
+            SigDrivers::None => None,
         }
     }
 }
@@ -73,7 +106,7 @@ pub struct SigDesc {
     pub name: &'static str,
     /// `tipb.ScalarFuncSig` code set by `setPbCode`.
     pub pb_code: i32,
-    /// Go's `vectorized()`.
+    /// Go's `vectorized()` (`baseBuiltinFunc.vectorized` returns false).
     pub vectorized: bool,
     /// The drivers.
     pub drivers: SigDrivers,
@@ -85,19 +118,30 @@ impl std::fmt::Debug for SigDesc {
     }
 }
 
+/// `unsafe.Sizeof(baseBuiltinFunc{})` on 64-bit targets (spec §4, measured by the govec
+/// generator).
+pub(crate) const emptyBaseBuiltinFunc: i64 = 160;
+/// `unsafe.Sizeof(sync.Once{})`.
+pub(crate) const onceSize: i64 = 12;
+
 /// A function node's signature with the `baseBuiltinFunc` fields (N4 §3.1).
+///
+/// Not kept from Go: `bufAllocator` and `childrenVectorizedOnce` (the vector driver pools
+/// its columns in [`RpnState`], M-POOL), so `isChildrenVectorized` is computed on each call.
 #[derive(Clone)]
 pub struct BuiltinFunc {
-    /// The signature.
+    /// The signature (Go's concrete type).
     pub sig: &'static SigDesc,
     /// `args`.
     pub args: Vec<ExprRef>,
     /// `tp`: the result type.
     pub tp: FieldType,
-    /// `collation` (collationInfo of the function).
-    pub collation: String,
-    /// `ctor`: the collator of `collation`, resolved when the signature is built.
-    ctor: &'static dyn Collator,
+    /// `pbCode`.
+    pub pb_code: i32,
+    /// `ctor`: the collator, `nil` until `SetCollator`.
+    ctor: Option<&'static dyn Collator>,
+    /// The embedded `collationInfo`.
+    pub collation_info: CollationInfo,
 }
 
 impl std::fmt::Debug for BuiltinFunc {
@@ -106,35 +150,68 @@ impl std::fmt::Debug for BuiltinFunc {
             .field("sig", &self.sig)
             .field("args", &self.args)
             .field("tp", &self.tp)
-            .field("collation", &self.collation)
+            .field("pb_code", &self.pb_code)
+            .field("collation_info", &self.collation_info)
             .finish()
     }
 }
 
+macro_rules! row_dispatch {
+    ($name:ident, $variant:ident, $t:ty, $go:literal) => {
+        #[doc = concat!("`", $go, "`: the row driver.")]
+        pub fn $name(&self, ctx: &dyn EvalContext, st: &EvalState, row: Row<'_>) -> Result<Option<$t>, Error> {
+            match self.sig.drivers {
+                SigDrivers::$variant { row: f, .. } => f(self, ctx, st, row),
+                _ => Err(Error::plain(concat!(
+                    "baseBuiltinFunc.",
+                    $go,
+                    "() should never be called, please contact the TiDB team for help"
+                ))),
+            }
+        }
+    };
+}
+
 impl BuiltinFunc {
-    /// A signature over `args` (the fields `newBaseBuiltinFunc` sets; part 2 ports that
-    /// function with its type and collation derivation).
+    /// A signature over `args` with the fields `newBaseBuiltinFunc` sets. The type and
+    /// collation derivation of `newBaseBuiltinFunc` itself is block D08.2; until then the
+    /// caller passes the derived values.
     pub fn new(
         sig: &'static SigDesc,
         args: Vec<ExprRef>,
         tp: FieldType,
-        collation: String,
+        charset: &str,
+        collation: &str,
     ) -> BuiltinFunc {
-        let ctor = collate::get_collator(&collation);
+        let mut collation_info = CollationInfo::default();
+        collation_info.set_charset_and_collation(charset, collation);
         BuiltinFunc {
             sig,
             args,
             tp,
-            collation,
-            ctor,
+            pb_code: sig.pb_code,
+            ctor: Some(collate::get_collator(collation)),
+            collation_info,
         }
     }
 
-    /// `b.collator()`.
+    /// PbCode returns PbCode of this signature.
+    // go: baseBuiltinFunc.PbCode L1
+    pub fn pb_code(&self) -> i32 {
+        self.pb_code
+    }
+
+    /// `b.collator()`. Panics where Go dereferences a nil collator.
     // go: baseBuiltinFunc.collator L1
     #[inline]
     pub fn collator(&self) -> &'static dyn Collator {
-        self.ctor
+        self.ctor.expect("nil collator")
+    }
+
+    /// `SetCollator`.
+    // go: baseBuiltinFunc.SetCollator L1
+    pub fn set_collator(&mut self, ctor: &'static dyn Collator) {
+        self.ctor = Some(ctor);
     }
 
     /// `b.args[i]`.
@@ -143,52 +220,118 @@ impl BuiltinFunc {
         &self.args[i]
     }
 
-    /// `evalInt`: the row driver.
-    pub fn eval_int(
+    // go: baseBuiltinFunc.getArgs L1
+    #[inline]
+    pub fn get_args(&self) -> &[ExprRef] {
+        &self.args
+    }
+
+    // go: baseBuiltinFunc.getRetTp L1
+    pub fn get_ret_tp(&mut self) -> &FieldType {
+        if self.tp.eval_type() == ETString {
+            if self.tp.get_flen() >= mysql::MaxBlobWidth {
+                self.tp.set_type(mysql::TypeLongBlob);
+            } else if self.tp.get_flen() >= 65536 {
+                self.tp.set_type(mysql::TypeMediumBlob);
+            }
+            if self.tp.get_charset().is_empty() {
+                let (charset, collate) = gocharset::get_default_charset_and_collate();
+                self.tp.set_charset(charset);
+                self.tp.set_collate(collate);
+            }
+        }
+        &self.tp
+    }
+
+    // go: baseBuiltinFunc.vectorized L2 (the signature's own vectorized() is SigDesc.vectorized)
+    pub fn vectorized(&self) -> bool {
+        self.sig.vectorized
+    }
+
+    /// Go caches the answer in `childrenVectorizedOnce`; the arguments of a built signature
+    /// do not change, so computing it again gives the same answer.
+    // go: baseBuiltinFunc.isChildrenVectorized L2 (no once/bufAllocator, M-POOL)
+    pub fn is_children_vectorized(&self) -> bool {
+        self.args.iter().all(|arg| arg.vectorized())
+    }
+
+    // go: baseBuiltinFunc.equal L1
+    pub fn equal(&self, ctx: &dyn EvalContext, fun: &BuiltinFunc) -> bool {
+        let fun_args = fun.get_args();
+        if fun_args.len() != self.args.len() {
+            return false;
+        }
+        for i in 0..self.args.len() {
+            if !self.args[i].equal(ctx, &fun_args[i]) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `Clone()` of a signature: `cloneFrom` the base, then copy the signature's own fields.
+    /// The argument nodes are immutable and shared (M-EXPR), so cloning the list is the
+    /// deep copy Go makes.
+    // go: baseBuiltinFunc.cloneFrom L2 (args shared, M-EXPR; ctor.Clone() of the stateless collators is the same collator)
+    pub fn clone_from_base(&self) -> BuiltinFunc {
+        self.clone()
+    }
+
+    /// MemoryUsage returns the memory usage of baseBuiltinFunc. Go adds `bufAllocator` once
+    /// `isChildrenVectorized` has created it; tidb-rs has no per-signature pool (spec §4).
+    // go: baseBuiltinFunc.MemoryUsage L2 (no bufAllocator, spec §4)
+    pub fn memory_usage(&self) -> i64 {
+        let mut sum = emptyBaseBuiltinFunc + self.collation_info.strings_len();
+        sum += self.tp.memory_usage();
+        sum += onceSize;
+        for e in &self.args {
+            sum += e.memory_usage();
+        }
+        sum
+    }
+
+    row_dispatch!(eval_int, Int, i64, "evalInt");
+    row_dispatch!(eval_real, Real, f64, "evalReal");
+    row_dispatch!(eval_decimal, Decimal, MyDecimal, "evalDecimal");
+    row_dispatch!(eval_string, String, Vec<u8>, "evalString");
+    row_dispatch!(eval_time, Time, Time, "evalTime");
+    row_dispatch!(eval_duration, Duration, Duration, "evalDuration");
+    row_dispatch!(eval_json, Json, BinaryJSON<'static>, "evalJSON");
+    row_dispatch!(eval_vector_float32, VectorFloat32, VectorFloat32<'static>, "evalVectorFloat32");
+
+    /// `vecEvalXxx` of the result type `et` on `n` rows of evaluated arguments.
+    pub fn vec_eval(
         &self,
         ctx: &dyn EvalContext,
-        st: &EvalState,
-        row: Row<'_>,
-    ) -> Result<Option<i64>, Error> {
-        match self.sig.drivers {
-            SigDrivers::Int { row: f, .. } => f(self, ctx, st, row),
+        et: EvalType,
+        n: usize,
+        cols: &[&Column],
+        result: &mut Column,
+    ) -> Result<(), Error> {
+        match self.sig.drivers.vec() {
+            Some(f) if self.sig.drivers.eval_type() == Some(normalize_et(et)) => f(self, ctx, n, cols, result),
             _ => Err(Error::plain(format!(
-                "{} does not implement evalInt",
-                self.sig.name
+                "baseBuiltinFunc.vecEval{}() should never be called, please contact the TiDB team for help",
+                vec_eval_name(et)
             ))),
         }
     }
+}
 
-    /// `evalReal`: the row driver.
-    pub fn eval_real(
-        &self,
-        ctx: &dyn EvalContext,
-        st: &EvalState,
-        row: Row<'_>,
-    ) -> Result<Option<f64>, Error> {
-        match self.sig.drivers {
-            SigDrivers::Real { row: f, .. } => f(self, ctx, st, row),
-            _ => Err(Error::plain(format!(
-                "{} does not implement evalReal",
-                self.sig.name
-            ))),
-        }
-    }
+fn normalize_et(et: EvalType) -> EvalType {
+    if et == ETTimestamp { ETDatetime } else { et }
+}
 
-    /// `evalString`: the row driver.
-    pub fn eval_string(
-        &self,
-        ctx: &dyn EvalContext,
-        st: &EvalState,
-        row: Row<'_>,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        match self.sig.drivers {
-            SigDrivers::String { row: f, .. } => f(self, ctx, st, row),
-            _ => Err(Error::plain(format!(
-                "{} does not implement evalString",
-                self.sig.name
-            ))),
-        }
+fn vec_eval_name(et: EvalType) -> &'static str {
+    match et {
+        ETInt => "Int",
+        ETReal => "Real",
+        ETDecimal => "Decimal",
+        ETString => "String",
+        ETDatetime | ETTimestamp => "Time",
+        ETDuration => "Duration",
+        ETJson => "JSON",
+        _ => "VectorFloat32",
     }
 }
 
@@ -444,7 +587,7 @@ impl RpnProgram {
                             Some(c) => c,
                             None => &mut *result,
                         };
-                        (f.sig.drivers.vec())(f, ctx, n, &cols, dst)
+                        f.vec_eval(ctx, f.sig.drivers.eval_type().unwrap_or(ETInt), n, &cols, dst)
                     };
                     for s in stack.drain(base..) {
                         if let Slot::Temp(c) = s {

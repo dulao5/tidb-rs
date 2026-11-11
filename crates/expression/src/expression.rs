@@ -412,6 +412,21 @@ impl Expr {
         }
     }
 
+    /// ResolveIndicesByVirtualExpr resolves indices by the given schema in terms of virtual
+    /// expression.
+    // glue: dispatch of Expression.ResolveIndicesByVirtualExpr
+    pub fn resolve_indices_by_virtual_expr(self: &Arc<Self>, ctx: &dyn EvalContext, schema: &Schema) -> (ExprRef, bool) {
+        match &**self {
+            Expr::Column(c) => {
+                let (c, ok) = c.resolve_indices_by_virtual_expr(ctx, schema);
+                (Expr::Column(c).into_ref(), ok)
+            }
+            Expr::CorrelatedColumn(c) => c.resolve_indices_by_virtual_expr(self, ctx, schema),
+            Expr::Constant(c) => c.resolve_indices_by_virtual_expr(self, ctx, schema),
+            Expr::ScalarFunction(f) => f.resolve_indices_by_virtual_expr(self, ctx, schema),
+        }
+    }
+
     /// RemapColumn remaps columns with provided mapping and returns new expression.
     // glue: dispatch of Expression.RemapColumn
     pub fn remap_column(self: &Arc<Self>, m: &HashMap<i64, Arc<Column>>) -> Result<ExprRef, Error> {
