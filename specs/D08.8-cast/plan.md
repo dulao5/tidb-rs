@@ -60,3 +60,17 @@ CAST 到 JSON、JSON ARRAY、VECTOR（spec §3.6），`WrapWithCastAsJSON/Vector
 
 - 2b-2：`#[eval_fn]` 支持 Time/Duration/JSON/VectorFloat32 的参数与结果（`ArgKind`、视图、输出列）；CAST 到 TIME/DATETIME/DATE/DURATION/JSON（含 ARRAY）/VECTOR 与从这些类型出发的签名（去掉临时桩，包括 `*AsString`）；`WrapWithCastAsTime/Duration/JSON/VectorFloat32`；`VectorFloat32AsUnsupported` 需要一个签名有多个求值类型的驱动。之后 `newBaseBuiltinFuncWithTp` 的临时桩分支去掉。
 - 2b-3：`newBaseBuiltinFuncWithFieldTypes`；注册表的 `get_function`、`NewFunction*`（`derive` 记录经包 CAST 的构造函数再跑一遍，Lucky 评审 #80）；常量传播；D08.1 2b 的 `EvaluatorSuite`、`chunk_executor`、`VecEvalBool`、`toBool`、`EvalExpr`。
+
+## 第 2b-3a 部分（本 PR）
+
+1. **结果类型只有一份**（Lucky 评审 #94）：`ScalarFunction` 去掉 `ret_type` 字段，`ret_type()` 返回签名的 `tp`，`ret_type_mut()` 原地修改；`with_type_mut` 改用它。D08.1 spec §3.2 写明规则。
+2. `DisableParseJSONFlag4Expr`（D08.12，`util.rs`）与单元测试 `disable_parse_json_flag_reaches_the_signature`。它的调用方（JSON 函数、比较）还没有移植，所以没有 govec 记录。
+3. `newBaseBuiltinFuncWithFieldTypes`（D08.2）。
+4. `NewFunction`、`NewFunctionBase`、`NewFunctionTryFold`、`NewFunctionWithInit`、`NewFunctionInternal`、`newFunctionImpl`、`typeInferForNull`、`defaultScalarFunctionCheck`（D08.1）；`builtin_registry::FunctionClass` 与 `function_class`（目前没有已移植的 `funcs` 函数类）。
+5. govec `cast` 追加 2,300 条（原有 17,380 条不变）：`withtps` 1,300（`newBaseBuiltinFuncWithTp`/`WithFieldTypes`，叶子参数覆盖各种类型与字符集，collation 推导经过包 CAST 的构造函数，Lucky 评审 #80）、`newfunc` 700（五个入口 × cast/to_binary/from_binary/未知函数名，有无当前库）、`nullinfer` 300。
+
+## 第 2b-3b、2b-3c 部分（交接）
+
+- **2b-3b**：常量传播（`constant_propagation.go`，D08.2）与 `builtin_func_param.go`、`grouping_sets.go`、`simple_rewriter.go`（依赖允许的部分，否则登记豁免）。常量传播要构建比较函数（`NewFunction(ast.EQ, ..)`），而比较函数族（D08.4）还没有移植：先确认最小依赖，必要时与 D08.4 的第一批签名一起做。
+- **2b-3c**：D08.1 2b：`EvaluatorSuite`（evaluator.go）、`chunk_executor.go`（`VectorizedFilter`、`evalOne*`、`executeTo*`，含不可向量化表达式回退到逐行求值）、`VecEvalBool`、`toBool`、`EvalExpr`、`implicitEvalReal`。
+- **第一个 `funcs` 函数族移植时**：在 `builtin_registry::function_class` 中登记；给 govec `newfunc` 加上这些函数名的记录，覆盖 `fold` 0/1/-1 与 `TryFold` 截断 warning（目前测不到，D08.1 spec §4 第 14 条）。

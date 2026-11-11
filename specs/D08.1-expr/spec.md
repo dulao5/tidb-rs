@@ -47,6 +47,8 @@ pub type ExprRef = Arc<Expr>;
 - **关联列**：N4 §3.1/§3.5 规定 `CorrelatedColumn` 不带 `Data` 指针。Go 中 `Data *Datum` 由 Apply 逐行写入；`Clone` 和 `RemapColumn` 共享同一个指针；规划结束时 `ExtractCorColumnsBySchema`（`planner/core`）把同一个外层列的所有关联列的 `Data` 指向同一个 Datum，所以 Apply 每行只写一次，所有引用它的节点都能读到；并行 Apply 的每个 worker 克隆后拿到新的 Datum（在 v8.5.8 上验证过，Lucky 评审 #73）。Rust 中 `CorrelatedColumn` 带槽号 `CorrSlot`，**取值是创建时外层列的 `UniqueID`**（不再用全局计数器），`Clone`/`RemapColumn` 保留槽号；值在 `EvalState` 中按槽号查找，每个 worker 一个 `EvalState`。这样得到的正是 `ExtractCorColumnsBySchema` 统一之后的共享关系，表达式本身不可变（L2）。
 - 求值上下文用 `&dyn EvalContext`（`exprctx` 的 trait）；`typeCtx(ctx)` 等辅助函数是一行转发。
 
+- **`ScalarFunction` 的结果类型只有一份**（Lucky 评审 #94）：Go 中 `ScalarFunction.RetType` 与签名的 `tp` 是**同一个** `*FieldType`（`newFunctionImpl`、`BuildCastFunction`、`BuildTo/FromBinaryFunction` 都把签名的类型指针放进 `RetType`，`ScalarFunction.Clone` 的注释依赖这一点）。之后原地修改表达式类型的代码会改变签名的行为：`DisableParseJSONFlag4Expr`（JSON 函数、`MEMBER OF`、JSON 比较等 12 处调用）在构建之后清掉 `ParseToJSONFlag`，`CAST(c AS JSON)` 就不再把字符串解析成 JSON（v8.5.8：`CAST('[1]' AS JSON) = '[1]'` 返回 0）。Rust 的 `ScalarFunction` 没有自己的类型字段：`ret_type()`/`get_static_type()` 返回 `function.tp`，原地修改用 `ret_type_mut()`（同时清掉 hash 缓存），`ScalarFunction::new` 把传入的类型放进签名。`expr_unit.rs` 的 `disable_parse_json_flag_reaches_the_signature` 覆盖（反证：只改副本时失败）。Go 中唯一的例外是 `newFunctionImpl` 在签名类型为 `TypeUnspecified` 时用调用方的 `retType`，两者不同；v8.5.8 没有这样的签名（§4 第 14 条）。
+
 ### 3.3 `ScalarFunction` 的过渡形态
 
 第 1 部分只定义 `ScalarFunction { func_name, ret_type, args }`，用于 `match` 和读取参数（`ExprReferenceSchema`、`IsEQCondFromIn`、`GcColumnExprIsTidbShard`）。求值、`Equal`、`String`、`HashCode` 等是**临时桩**（宪章第四条 3），调用时 panic 并指向第 2 部分。依赖 `ScalarFunction.Equal` 的 `Column.EqualByExprAndID`、`resolveIndicesByVirtualExpr`、`GetUsedList` 留到第 2 部分。
@@ -105,3 +107,11 @@ v8.5.8 的 `pkg/expression` 中有 **98 个**签名结构体在 `baseBuiltinFunc
 10. **`ScalarFunction.MemoryUsage`**：hash 码按长度计（Go 按 `cap`）；`baseBuiltinFunc.MemoryUsage` 不计 `bufAllocator`（M-POOL，没有每签名的列池）；`isChildrenVectorized` 每次计算（Go 用 `sync.Once` 缓存）。
 11. **`ReHashCode` 的 `grouping` 分支**：等 `BuiltinGroupingImplSig`（D08.9），之前 panic（登记的豁免）。
 12. **`Decorrelate`/`RemapColumn`/`resolveIndices*`**：Go 原地修改克隆出来的节点；Rust 返回参数替换后的新节点，hash 缓存的处理与 Go 相同（`Decorrelate`、`RemapColumn` 清空，`resolveIndices` 保留）。
+13. **`DisableParseJSONFlag4Expr`**（D08.12 的 util.go，提前移植到 `util.rs`）：共享的节点先复制再改（`with_type_mut`，与 `PropagateType` 相同，见 D08.8 §4）。
+14. **`newFunctionImpl` 系列**（`NewFunction`、`NewFunctionBase`、`NewFunctionTryFold`、`NewFunctionWithInit`、`NewFunctionInternal`、`typeInferForNull`、`defaultScalarFunctionCheck`）：
+    - `retType` 不能为 nil（Rust 按值传入），所以 Go 的 nil 检查没有对应；`BuildCastFunction` 的错误 Go 记日志后返回无签名的节点，这里返回错误；`NewFunctionInternal` 返回 `Option`（Go 的 nil `Expression`）。
+    - 不支持 `pkg/extension` 的扩展函数（同 D08.2 `GetBuiltinList`）。
+    - `funcs` 中的函数类由 `builtin_registry::function_class` 分派：函数族（D08.3–D08.9）移植之前返回 "not ported yet" 的错误；`getvar`（`BuildGetVarFunction`，D08.9）同样。
+    - 签名类型为 `TypeUnspecified` 时 Go 让 `RetType` 与签名的 `tp` 不同（见 §3.2）；没有这样的签名，Rust 把调用方的类型放进签名。
+    - `grouping` 的元数据检查（`defaultScalarFunctionCheck`）等 D08.9 的 `BuiltinGroupingImplSig`。
+    - **测不到的部分**：`fold`（0/1/-1）和 `TryFold` 截断 warning 只作用于 `funcs` 中的函数类；目前能构建的 `cast`、`to_binary`、`from_binary` 在 `newFunctionImpl` 之前就返回（它们自己折叠），所以 govec 的 `newfunc` 记录覆盖不到这两段，反证也测不出（D08.8 plan.md 2b-3 交接：第一个函数族移植时补记录）。

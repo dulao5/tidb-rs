@@ -9,8 +9,9 @@
 //!   changes clear them where Go calls `CleanHashCode`).
 //! - The `VecEvalXxx` methods are [`ScalarFunction::vec_eval`] over evaluated argument
 //!   columns ([`crate::eval::RpnProgram`], N4 §3.4).
-//! - Not ported here: `NewFunction*`/`newFunctionImpl`/`typeInferForNull` need the function
-//!   classes' `getFunction` (the families of D08.4–D08.9, starting with CAST in D08.8); `Hash64`/`Equals` are cascades-only (EXC.B);
+//! - `NewFunction*`/`newFunctionImpl`/`typeInferForNull` build CAST, `to_binary` and
+//!   `from_binary`; the classes of `funcs` follow their families (D08.3–D08.9, see
+//!   [`crate::builtin_registry::function_class`]). `Hash64`/`Equals` are cascades-only (EXC.B);
 //!   `ReHashCode`'s branch for `grouping` needs `BuiltinGroupingImplSig` (D08.9) and panics
 //!   until then; `wrapEvalAssert` is intest-only (spec §4).
 
@@ -37,14 +38,27 @@ use tidb_types::mydecimal::MyDecimal;
 use tidb_types::time::{Duration, Time};
 use tidb_types::vector::VectorFloat32;
 
+use tidb_base::dbterror::plannererrors::ErrNoDB;
+use tidb_sessionctx::variable::varsutil::{OffInt, OnInt};
+
+use crate::builtin_cast::build_cast_function;
+use crate::builtin_convert_charset::{
+    InternalFuncFromBinary, InternalFuncToBinary, build_from_binary_function,
+    build_to_binary_function,
+};
+use crate::builtin_registry::{function_class, lookup};
 use crate::collation::{Coercibility, Repertoire, derive_coercibility_for_scalar_func};
 use crate::column::Column;
+use crate::constant_fold::fold_constant;
+use crate::context::{BuildContext, truncate_warnings, warning_count};
 use crate::context::{EvalContext, ParamValues, type_ctx};
+use crate::errors::{ErrFunctionNotExists, ErrFunctionsNoopImpl};
 use crate::eval::BuiltinFunc;
 use crate::expression::{
     ConstLevel, ConstNone, ConstStrict, EvalState, Expr, ExprRef, TraverseAction,
     scalarFunctionFlag,
 };
+use crate::function_traits::noopFuncs;
 use crate::schema::Schema;
 
 /// Function names of `pkg/parser/ast/functions.go`.
@@ -782,4 +796,265 @@ pub fn re_hash_code(sf: &ScalarFunction) -> Vec<u8> {
         panic!("ReHashCode of grouping needs BuiltinGroupingImplSig (D08.9)");
     }
     code
+}
+
+/// typeInferForNull infers the NULL constants field type and set the field type of NULL
+/// constant same as other non-null operands.
+// go: typeInferForNull L1
+pub fn type_infer_for_null(ctx: &dyn EvalContext, args: &mut [ExprRef]) {
+    if args.len() < 2 {
+        return;
+    }
+    let is_null = |expr: &Expr| -> bool {
+        matches!(expr, Expr::Constant(cons)
+            if cons.ret_type.get_type() == mysql::TypeNull && cons.value.is_null())
+    };
+    // Infer the actual field type of the NULL constant.
+    let mut ret_field_tp: Option<FieldType> = None;
+    let mut has_null_arg = false;
+    for i in (0..args.len()).rev() {
+        let is_null_arg = is_null(&args[i]);
+        if !is_null_arg && ret_field_tp.is_none() {
+            ret_field_tp = Some(args[i].get_type(ctx).into_owned());
+        }
+        has_null_arg = has_null_arg || is_null_arg;
+        // Break if there are both NULL and non-NULL expression
+        if has_null_arg && ret_field_tp.is_some() {
+            break;
+        }
+    }
+    let Some(ret_field_tp) = ret_field_tp else {
+        return;
+    };
+    if !has_null_arg {
+        return;
+    }
+    for arg in args.iter_mut() {
+        let argflags = arg.get_type(ctx);
+        if is_null(arg)
+            && !(argflags.equals(Some(&ret_field_tp))
+                && mysql::has_not_null_flag(ret_field_tp.get_flag()))
+        {
+            let mut newarg = (**arg).clone();
+            if let Expr::Constant(c) = &mut newarg {
+                c.ret_type = ret_field_tp.clone();
+                c.ret_type.del_flag(mysql::NotNullFlag); // Remove NotNullFlag of NullConst
+            }
+            *arg = newarg.into_ref();
+        }
+    }
+}
+
+/// ScalarFunctionCallBack is the definition of callback of calling a newFunction.
+pub type ScalarFunctionCallBack = fn(ScalarFunction) -> Result<ExprRef, Error>;
+
+/// newFunctionImpl creates a new scalar function or constant.
+/// fold: 1 means folding constants, while 0 means not,
+/// -1 means try to fold constants if without errors/warnings, otherwise not.
+///
+/// Deviations (D08.1 spec §4): `ret_type` is not optional (Go's nil check is the caller's
+/// type), the error Go's `BuildCastFunction` logs is returned, extension functions
+/// (`pkg/extension`) are not supported, and a family whose function classes are not ported
+/// yet returns an error ([`crate::builtin_registry::function_class`]). Go keeps the
+/// caller's `retType` as `RetType` and the signature's own `tp` apart when the signature's
+/// type is `TypeUnspecified`; no v8.5.8 signature has such a type, and the node's one type
+/// becomes the caller's here.
+// go: newFunctionImpl L2 (see the doc comment)
+pub fn new_function_impl(
+    ctx: &dyn BuildContext,
+    fold: i32,
+    func_name: &str,
+    ret_type: FieldType,
+    check_or_init: Option<ScalarFunctionCallBack>,
+    args: Vec<ExprRef>,
+) -> Result<ExprRef, Error> {
+    let ret = new_function_impl_inner(ctx, fold, func_name, ret_type, args)?;
+    if let Some(check) = check_or_init
+        && let Expr::ScalarFunction(sf) = &*ret
+    {
+        return check(sf.clone());
+    }
+    Ok(ret)
+}
+
+// glue: body of newFunctionImpl without its deferred checkOrInit
+fn new_function_impl_inner(
+    ctx: &dyn BuildContext,
+    fold: i32,
+    func_name: &str,
+    mut ret_type: FieldType,
+    args: Vec<ExprRef>,
+) -> Result<ExprRef, Error> {
+    let mut func_name = func_name;
+    match func_name {
+        ast_func::Cast => {
+            return build_cast_function(ctx, args[0].clone(), ret_type);
+        }
+        ast_func::GetVar => {
+            // BuildGetVarFunction is D08.9.
+            return Err(Error::plain(format!(
+                "function {func_name} is not ported yet (D08.9)"
+            )));
+        }
+        InternalFuncFromBinary => {
+            return Ok(build_from_binary_function(
+                ctx,
+                args[0].clone(),
+                ret_type,
+                false,
+            ));
+        }
+        InternalFuncToBinary => return Ok(build_to_binary_function(ctx, args[0].clone())),
+        ast_func::Sysdate if ctx.get_sysdate_is_now() => func_name = ast_func::Now,
+        _ => {}
+    }
+    if lookup(func_name).is_none() {
+        let db = ctx.get_eval_ctx().current_db();
+        if db.is_empty() {
+            return Err(ErrNoDB.clone());
+        }
+        return Err(ErrFunctionNotExists
+            .gen_with_stack_by_args(vec!["FUNCTION".into(), format!("{db}.{func_name}").into()]));
+    }
+    let noop_funcs_mode = ctx.get_noop_funcs_mode();
+    if noop_funcs_mode != OnInt && noopFuncs.contains(&func_name) {
+        let err = ErrFunctionsNoopImpl.fast_gen_by_args(vec![func_name.to_string().into()]);
+        if noop_funcs_mode == OffInt {
+            return Err(err);
+        }
+        // NoopFuncsMode is Warn, append an error
+        ctx.get_eval_ctx().append_warning(err);
+    }
+    let mut func_args = args;
+    match func_name {
+        ast_func::If | ast_func::Ifnull | ast_func::Nullif => {
+            // Do nothing. Because it will call InferType4ControlFuncs.
+        }
+        ast_func::RowFunc => {
+            // Do nothing. Because it shouldn't use ROW's args to infer null type.
+        }
+        _ => type_infer_for_null(&*ctx.get_eval_ctx(), &mut func_args),
+    }
+
+    let Some(fc) = function_class(func_name) else {
+        return Err(Error::plain(format!(
+            "the function class of {func_name} is not ported yet"
+        )));
+    };
+    let f = fc.get_function(ctx, func_args)?;
+    let builtin_ret_tp = f.tp.clone();
+    if builtin_ret_tp.get_type() != mysql::TypeUnspecified
+        || ret_type.get_type() == mysql::TypeUnspecified
+    {
+        ret_type = builtin_ret_tp;
+    }
+    let sf = Expr::ScalarFunction(ScalarFunction::new(func_name, ret_type, f)).into_ref();
+    if fold == 1 {
+        return Ok(fold_constant(ctx, sf));
+    } else if fold == -1 {
+        // try to fold constants, and return the original function if errors/warnings occur
+        let eval_ctx = ctx.get_eval_ctx();
+        let before_warns = warning_count(&*eval_ctx);
+        let new_sf = fold_constant(ctx, sf.clone());
+        let after_warns = warning_count(&*eval_ctx);
+        if after_warns > before_warns {
+            truncate_warnings(&*eval_ctx, before_warns);
+            return Ok(sf);
+        }
+        return Ok(new_sf);
+    }
+    Ok(sf)
+}
+
+/// The check `NewFunction`, `NewFunctionBase` and `NewFunctionTryFold` run on the built
+/// node. Go returns an error for a `grouping` function whose meta data is not initialized;
+/// `BuiltinGroupingImplSig` is D08.9 and cannot be built yet, so no node reaches that check.
+// go: defaultScalarFunctionCheck L2 (the grouping branch waits for D08.9)
+pub fn default_scalar_function_check(function: ScalarFunction) -> Result<ExprRef, Error> {
+    // todo: more scalar function init actions can be added here, or setting up with customized init callback.
+    Ok(Expr::ScalarFunction(function).into_ref())
+}
+
+/// NewFunctionWithInit creates a new scalar function with callback init function.
+// go: NewFunctionWithInit L1
+pub fn new_function_with_init(
+    ctx: &dyn BuildContext,
+    func_name: &str,
+    ret_type: FieldType,
+    init: Option<ScalarFunctionCallBack>,
+    args: Vec<ExprRef>,
+) -> Result<ExprRef, Error> {
+    new_function_impl(ctx, 1, func_name, ret_type, init, args)
+}
+
+/// NewFunction creates a new scalar function or constant via a constant folding.
+// go: NewFunction L1
+pub fn new_function(
+    ctx: &dyn BuildContext,
+    func_name: &str,
+    ret_type: FieldType,
+    args: Vec<ExprRef>,
+) -> Result<ExprRef, Error> {
+    new_function_impl(
+        ctx,
+        1,
+        func_name,
+        ret_type,
+        Some(default_scalar_function_check),
+        args,
+    )
+}
+
+/// NewFunctionBase creates a new scalar function with no constant folding.
+// go: NewFunctionBase L1
+pub fn new_function_base(
+    ctx: &dyn BuildContext,
+    func_name: &str,
+    ret_type: FieldType,
+    args: Vec<ExprRef>,
+) -> Result<ExprRef, Error> {
+    new_function_impl(
+        ctx,
+        0,
+        func_name,
+        ret_type,
+        Some(default_scalar_function_check),
+        args,
+    )
+}
+
+/// NewFunctionTryFold creates a new scalar function with trying constant folding.
+// go: NewFunctionTryFold L1
+pub fn new_function_try_fold(
+    ctx: &dyn BuildContext,
+    func_name: &str,
+    ret_type: FieldType,
+    args: Vec<ExprRef>,
+) -> Result<ExprRef, Error> {
+    new_function_impl(
+        ctx,
+        -1,
+        func_name,
+        ret_type,
+        Some(default_scalar_function_check),
+        args,
+    )
+}
+
+/// NewFunctionInternal is similar to NewFunction, but do not return error, should only be
+/// used internally. Go logs the error and returns the nil expression; this returns `None`.
+// go: NewFunctionInternal L2 (None for Go's nil Expression; the error is logged)
+pub fn new_function_internal(
+    ctx: &dyn BuildContext,
+    func_name: &str,
+    ret_type: FieldType,
+    args: Vec<ExprRef>,
+) -> Option<ExprRef> {
+    match new_function(ctx, func_name, ret_type, args) {
+        Ok(e) => Some(e),
+        Err(err) => {
+            tidb_base::terror::log(Some(&err));
+            None
+        }
+    }
 }

@@ -25,6 +25,7 @@ use tidb_expression::builtin_cast::{
 use tidb_expression::builtin_convert_charset::handle_binary_literal;
 use tidb_expression::eval::{RpnProgram, RpnState, rt};
 use tidb_expression::*;
+use tidb_parser::types::EvalType;
 use tidb_parser::types::{
     ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
     ETVectorFloat32, FieldType,
@@ -263,6 +264,11 @@ type Ctxs = (Arc<es::ExprContext>, Arc<es::EvalContext>);
 
 /// castCtx: [typeFlags, [7]errLevels, maxAllowedPacket?, sqlMode?].
 fn ctx_of(v: &Value) -> Ctxs {
+    ctx_of_with(v, vec![], None)
+}
+
+/// castCtx with extra eval options and the connection charset (part 2b-3a).
+fn ctx_of_with(v: &Value, extra: Vec<es::EvalCtxOption>, cs: Option<(String, String)>) -> Ctxs {
     let a = v.as_array().unwrap();
     let mut lm: LevelMap = Default::default();
     for (i, l) in a[1].as_array().unwrap().iter().enumerate() {
@@ -284,8 +290,13 @@ fn ctx_of(v: &Value) -> Ctxs {
             Ok(tidb_base::gostd::time::unix(0, ns))
         })));
     }
+    opts.extend(extra);
     let ev = es::new_eval_context(opts);
-    let ctx = es::new_expr_context(vec![es::with_eval_ctx(Arc::clone(&ev))]);
+    let mut copts = vec![es::with_eval_ctx(Arc::clone(&ev))];
+    if let Some((cs, coll)) = cs {
+        copts.push(es::with_charset(cs, coll));
+    }
+    let ctx = es::new_expr_context(copts);
     (ctx, ev)
 }
 
@@ -507,6 +518,106 @@ fn exec(op: &str, p: &[Value]) -> Value {
                 Err(e) => ex_err(&e),
             });
             json!({ "res": res })
+        }
+        "withtps" => {
+            let cs = p[6].as_str().unwrap().to_owned();
+            let coll = p[7].as_str().unwrap().to_owned();
+            let (ctx, ev) = ctx_of_with(&p[5], vec![], Some((cs, coll)));
+            let args: Vec<ExprRef> = p[2]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| arg_of(a, None).0)
+                .collect();
+            let name = p[1].as_str().unwrap();
+            let ret = EvalType(p[3].as_i64().unwrap() as _);
+            let bf = ex_try(|| {
+                let r = if p[0].as_i64().unwrap() == 0 {
+                    let ets: Vec<EvalType> = p[4]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|x| EvalType(x.as_i64().unwrap() as _))
+                        .collect();
+                    tidb_expression::builtin::new_base_builtin_func_with_tp(
+                        &*ctx, name, args, ret, &ets,
+                    )
+                } else {
+                    let fts: Vec<FieldType> = p[4].as_array().unwrap().iter().map(ft_in).collect();
+                    let refs: Vec<&FieldType> = fts.iter().collect();
+                    tidb_expression::builtin::new_base_builtin_func_with_field_types(
+                        &*ctx, name, args, ret, &refs,
+                    )
+                };
+                match r {
+                    Err(e) => ex_err(&e),
+                    Ok(bf) => {
+                        let ci = &bf.collation_info;
+                        let (cs, coll) = ci.charset_and_collation();
+                        let key = hex(&bf.collator().key("aB é ß".as_bytes()));
+                        json!({
+                            "tp": ft_out(&bf.tp),
+                            "cs": cs,
+                            "coll": coll,
+                            "coerInit": ci.has_coercibility(),
+                            "coer": ci.coercibility().0,
+                            "repe": ci.repertoire().0,
+                            "explicit": ci.is_explicit_charset(),
+                            "key": key,
+                            "args": bf.args.iter().map(|a| dump(a)).collect::<Vec<_>>(),
+                        })
+                    }
+                }
+            });
+            json!({ "bf": bf, "bwarns": warns(&ev.truncate_warnings(0)) })
+        }
+        "newfunc" => {
+            let db = p[5].as_str().unwrap().to_owned();
+            let (ctx, ev) = ctx_of_with(&p[4], vec![es::with_current_db(db)], None);
+            let args: Vec<ExprRef> = p[3]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| arg_of(a, None).0)
+                .collect();
+            let name = p[1].as_str().unwrap();
+            let tp = ft_in(&p[2]);
+            let res = ex_try(|| {
+                let r = match p[0].as_i64().unwrap() {
+                    0 => tidb_expression::scalar_function::new_function(&*ctx, name, tp, args),
+                    1 => tidb_expression::scalar_function::new_function_base(&*ctx, name, tp, args),
+                    2 => tidb_expression::scalar_function::new_function_try_fold(
+                        &*ctx, name, tp, args,
+                    ),
+                    3 => tidb_expression::scalar_function::new_function_with_init(
+                        &*ctx, name, tp, None, args,
+                    ),
+                    _ => Ok(
+                        match tidb_expression::scalar_function::new_function_internal(
+                            &*ctx, name, tp, args,
+                        ) {
+                            Some(e) => e,
+                            None => return Value::Null,
+                        },
+                    ),
+                };
+                match r {
+                    Ok(e) => dump(&e),
+                    Err(e) => ex_err(&e),
+                }
+            });
+            json!({ "res": res, "warns": warns(&ev.truncate_warnings(0)) })
+        }
+        "nullinfer" => {
+            let (_, ev) = ctx_of(&p[1]);
+            let mut args: Vec<ExprRef> = p[0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| arg_of(a, None).0)
+                .collect();
+            tidb_expression::scalar_function::type_infer_for_null(&*ev, &mut args);
+            Value::Array(args.iter().map(|a| dump(a)).collect())
         }
         "collcast" => {
             let (ctx, ev) = ctx_of(&p[4]);

@@ -35,6 +35,7 @@ pub mod function_traits;
 pub mod scalar_function;
 pub mod schema;
 pub mod size;
+pub mod util;
 
 pub use collation::*;
 pub use column::*;

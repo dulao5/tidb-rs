@@ -407,7 +407,7 @@ fn bench(c: &mut Criterion) {
     for case in cases() {
         let prog = RpnProgram::compile(&case.expr);
         let mut rpn = RpnState::default();
-        let mut result = new_empty_column(&case.expr.as_scalar_function().unwrap().ret_type());
+        let mut result = new_empty_column(case.expr.as_scalar_function().unwrap().ret_type());
         // Errors would make the comparison meaningless: every case must evaluate cleanly.
         prog.eval(ctx, &st, &mut rpn, &case.input, &mut result)
             .expect("vector evaluation");

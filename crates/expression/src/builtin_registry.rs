@@ -104,3 +104,26 @@ pub fn get_builtin_list() -> Vec<&'static str> {
     res.sort_unstable();
     res
 }
+
+/// `functionClass.getFunction` of the classes in `funcs`: builds the signature for the
+/// arguments.
+// glue: Go interface functionClass (the getFunction method; verifyArgs is BaseFunctionClass)
+pub trait FunctionClass: Sync {
+    /// `getFunction`.
+    // glue: method of the functionClass interface (each class's getFunction is annotated where it is ported)
+    fn get_function(
+        &self,
+        ctx: &dyn crate::context::BuildContext,
+        args: Vec<crate::expression::ExprRef>,
+    ) -> Result<crate::eval::BuiltinFunc, Error>;
+}
+
+/// The ported `getFunction` of `funcs[name]`, `None` while the function family is not
+/// ported (D08.3–D08.9; the classes are added to this table as their families land).
+/// CAST, `from_binary`, `to_binary` and `getvar` are not in `funcs`: `newFunctionImpl`
+/// builds them directly.
+// glue: dispatch of funcs[name].getFunction over the ported classes
+pub fn function_class(name: &str) -> Option<&'static dyn FunctionClass> {
+    let _ = name;
+    None
+}

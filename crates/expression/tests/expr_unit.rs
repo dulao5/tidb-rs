@@ -99,3 +99,49 @@ fn correlated_slot_is_shared_by_clone_and_remap() {
     });
     assert!(st.correlated(&fresh).is_null());
 }
+
+/// One result type per function node (D08.1 spec §3.2, Lucky review #94): clearing
+/// `ParseToJSONFlag` on `CAST(c AS JSON)` changes how the signature evaluates, as in Go
+/// (v8.5.8: `CAST('[1]' AS JSON) = '[1]'` is 0 because the string is then not parsed).
+#[test]
+fn disable_parse_json_flag_reaches_the_signature() {
+    use tidb_chunk::chunk::new_chunk_with_capacity;
+    use tidb_expression::builtin_cast::build_cast_function;
+    use tidb_expression::util::disable_parse_json_flag4_expr;
+    use tidb_sessionctx::exprstatic as es;
+    use tidb_types::datum::new_string_datum;
+    use tidb_types::field_type::new_field_type;
+
+    let ev = es::new_eval_context(vec![]);
+    let ctx = es::new_expr_context(vec![es::with_eval_ctx(std::sync::Arc::clone(&ev))]);
+    let ft = new_field_type(tidb_base::mysql::TypeVarchar);
+    let mut chk = new_chunk_with_capacity(std::slice::from_ref(&ft), 1);
+    chk.append_datum(0, &new_string_datum("[1]"));
+    let col = tidb_expression::column::Column {
+        unique_id: 1,
+        index: 0,
+        ret_type: ft,
+        orig_name: "c".into(),
+        ..Default::default()
+    };
+    let col = tidb_expression::expression::Expr::Column(col).into_ref();
+    let mut cast =
+        build_cast_function(&*ctx, col, new_field_type(tidb_base::mysql::TypeJSON)).unwrap();
+    let st = tidb_expression::expression::EvalState::new();
+    let parsed = cast.eval_json(&*ev, &st, chk.get_row(0)).unwrap().unwrap();
+    assert_eq!(parsed.to_string(), "[1]", "the string is parsed as JSON");
+
+    disable_parse_json_flag4_expr(&*ev, &mut cast);
+    let sf = cast.as_scalar_function().unwrap();
+    assert_eq!(
+        sf.ret_type().get_flag() & tidb_base::mysql::ParseToJSONFlag,
+        0,
+        "RetType changed"
+    );
+    let kept = cast.eval_json(&*ev, &st, chk.get_row(0)).unwrap().unwrap();
+    assert_eq!(
+        kept.to_string(),
+        "\"[1]\"",
+        "the signature no longer parses the string"
+    );
+}

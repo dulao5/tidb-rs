@@ -30,9 +30,9 @@ use tidb_types::fsp::MaxFsp;
 
 use crate::ast_funcs as ast;
 use crate::builtin_cast::{
-    wrap_with_cast_as_decimal, wrap_with_cast_as_duration, wrap_with_cast_as_int,
-    wrap_with_cast_as_json, wrap_with_cast_as_real, wrap_with_cast_as_string,
-    wrap_with_cast_as_time, wrap_with_cast_as_vector_float32,
+    build_cast_function, wrap_with_cast_as_decimal, wrap_with_cast_as_duration,
+    wrap_with_cast_as_int, wrap_with_cast_as_json, wrap_with_cast_as_real,
+    wrap_with_cast_as_string, wrap_with_cast_as_time, wrap_with_cast_as_vector_float32,
 };
 use crate::builtin_convert_charset::handle_binary_literal;
 use crate::collation::{ASCII, CoercibilityExplicit, ExprCollation, UNICODE, derive_collation};
@@ -208,6 +208,65 @@ pub fn new_base_builtin_func_with_tp(
             ETJson => wrap_with_cast_as_json(ctx, a)?,
             ETVectorFloat32 => wrap_with_cast_as_vector_float32(ctx, a)?,
             _ => return Err(Error::plain(format!("{} is not supported", tp.to_string()))),
+        });
+    }
+
+    let field_type = new_return_field_type_for_base_builtin_func(func_name, ret_type, &ec);
+    let mut bf = BuiltinFunc::base(wrapped, field_type);
+    set_collation(&mut bf, &ec);
+    // note this function must be called after wrap cast function to the args
+    adjust_null_flag_for_return_type(&*ctx.get_eval_ctx(), func_name, &bf.args, &mut bf.tp);
+    Ok(bf)
+}
+
+/// newBaseBuiltinFuncWithFieldTypes is very similar to [`new_base_builtin_func_with_tp`],
+/// the only difference is that it takes field types instead of evaluation types of the
+/// arguments: a DECIMAL/DATETIME/TIMESTAMP/DURATION argument whose type differs from the
+/// given one is wrapped in a CAST to that exact type (pingcap/tidb#44196), so the decimal
+/// and fsp match the declared argument type.
+///
+/// Go returns an error for a nil context, which a reference cannot be, and panics when the
+/// lengths differ (so does this). A CAST wrapper's build error, which Go's `WrapWithCastAs*`
+/// and `BuildCastFunction` log, is returned. Go has no case for VECTOR arguments: they are
+/// passed through unchanged here too.
+// go: newBaseBuiltinFuncWithFieldTypes L2 (no nil context; returns the errors the wrappers log)
+pub fn new_base_builtin_func_with_field_types(
+    ctx: &dyn BuildContext,
+    func_name: &str,
+    args: Vec<ExprRef>,
+    ret_type: EvalType,
+    arg_tps: &[&FieldType],
+) -> Result<BuiltinFunc, Error> {
+    if args.len() != arg_tps.len() {
+        panic!("unexpected length of args and argTps");
+    }
+
+    // derive collation information for string function, and we must do it
+    // before doing implicit cast.
+    let arg_eval_tps: Vec<EvalType> = arg_tps.iter().map(|t| t.eval_type()).collect();
+    let ec = derive_collation(ctx, func_name, &args, ret_type, &arg_eval_tps)?;
+
+    let mut wrapped = Vec::with_capacity(args.len());
+    for (a, tp) in args.into_iter().zip(arg_tps) {
+        wrapped.push(match tp.eval_type() {
+            ETInt => wrap_with_cast_as_int(ctx, a)?,
+            ETReal => wrap_with_cast_as_real(ctx, a)?,
+            ETString => {
+                let a = wrap_with_cast_as_string(ctx, a)?;
+                handle_binary_literal(ctx, a, &ec, func_name, false)
+            }
+            ETJson => wrap_with_cast_as_json(ctx, a)?,
+            // https://github.com/pingcap/tidb/issues/44196
+            // For decimal/datetime/timestamp/duration types, it is necessary to ensure that
+            // decimal are consistent with the output type, so adding a cast function here.
+            ETDecimal | ETDatetime | ETTimestamp | ETDuration => {
+                if !a.get_type(&*ctx.get_eval_ctx()).equal(tp) {
+                    build_cast_function(ctx, a, (*tp).clone())?
+                } else {
+                    a
+                }
+            }
+            _ => a,
         });
     }
 
