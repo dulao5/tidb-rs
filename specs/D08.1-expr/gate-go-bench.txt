@@ -1,66 +1,66 @@
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc-12         	 1636041	      1479 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc-12         	 1636366	      1434 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc-12         	 1582974	      1607 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc-12      	  181134	     13019 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc-12      	  190196	     12838 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc-12      	  189954	     12780 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#01-12      	 3302762	       740.7 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#01-12      	 3305394	       724.9 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#01-12      	 3332842	       741.3 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#01-12   	  233972	     10290 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#01-12   	  232893	     10360 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#01-12   	  233888	     10264 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#02-12      	 2344894	       952.7 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#02-12      	 2525882	       951.9 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#02-12      	 2521298	       944.7 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#02-12   	  228828	     10590 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#02-12   	  227736	     10647 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#02-12   	  229304	     10647 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#03-12      	 2514054	       950.3 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#03-12      	 2529297	       947.3 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#03-12      	 2535146	       955.1 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#03-12   	  227328	     10546 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#03-12   	  229312	     10494 ns/op
-BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#03-12   	  232096	     10442 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc-12         	 1378820	      1707 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc-12         	 1356544	      1754 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc-12         	 1399345	      1710 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc-12      	  166881	     14005 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc-12      	  169993	     14166 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc-12      	  178669	     13923 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#01-12      	 1310856	      1823 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#01-12      	 1327668	      1816 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#01-12      	 1322970	      1765 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#01-12   	  179502	     13706 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#01-12   	  171969	     13673 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#01-12   	  185235	     13201 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#02-12      	 1417628	      1604 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#02-12      	 1478260	      1637 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#02-12      	 1447491	      1651 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#02-12   	  186891	     12361 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#02-12   	  203173	     12436 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#02-12   	  196172	     12903 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#03-12      	 1280716	      1855 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#03-12      	 1305714	      1849 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#03-12      	 1297119	      1840 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#03-12   	  162468	     12853 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#03-12   	  173662	     13244 ns/op
-BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#03-12   	  193968	     12553 ns/op
-BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-VecBuiltinFunc-12         	 2294269	      1043 ns/op
-BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-VecBuiltinFunc-12         	 2308640	      1040 ns/op
-BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-VecBuiltinFunc-12         	 2307990	      1044 ns/op
-BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-NonVecBuiltinFunc-12      	  276190	      8593 ns/op
-BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-NonVecBuiltinFunc-12      	  276630	      8723 ns/op
-BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-NonVecBuiltinFunc-12      	  280994	      8733 ns/op
-BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-VecBuiltinFunc-12         	   66570	     35680 ns/op
-BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-VecBuiltinFunc-12         	   67824	     35470 ns/op
-BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-VecBuiltinFunc-12         	   66902	     35487 ns/op
-BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-NonVecBuiltinFunc-12      	   50248	     47512 ns/op
-BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-NonVecBuiltinFunc-12      	   50888	     46833 ns/op
-BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-NonVecBuiltinFunc-12      	   50656	     46862 ns/op
-BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-VecBuiltinFunc-12         	   43843	     53946 ns/op
-BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-VecBuiltinFunc-12         	   44113	     53539 ns/op
-BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-VecBuiltinFunc-12         	   44403	     53657 ns/op
-BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-NonVecBuiltinFunc-12      	   33296	     72215 ns/op
-BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-NonVecBuiltinFunc-12      	   33105	     71980 ns/op
-BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-NonVecBuiltinFunc-12      	   33361	     72033 ns/op
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc-12 1456
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc-12 1450
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc-12 1437
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc-12 13069
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc-12 13086
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc-12 13048
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#01-12 760.1
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#01-12 796.7
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#01-12 759.1
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#01-12 10488
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#01-12 10503
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#01-12 10461
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#02-12 996.9
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#02-12 1002
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#02-12 1007
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#02-12 11503
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#02-12 10990
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#02-12 10810
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#03-12 1001
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#03-12 1004
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-VecBuiltinFunc#03-12 1005
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#03-12 10924
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#03-12 10904
+BenchmarkVectorizedBuiltinArithmeticFunc/builtinArithmeticPlusIntSig-NonVecBuiltinFunc#03-12 10761
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc-12 1929
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc-12 1888
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc-12 1937
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc-12 14038
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc-12 14159
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc-12 14113
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#01-12 1854
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#01-12 1972
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#01-12 1920
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#01-12 13843
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#01-12 13726
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#01-12 14133
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#02-12 1782
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#02-12 1846
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#02-12 1867
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#02-12 13615
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#02-12 13223
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#02-12 13342
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#03-12 2049
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#03-12 2063
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-VecBuiltinFunc#03-12 2094
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#03-12 12949
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#03-12 13614
+BenchmarkVectorizedBuiltinCompareFunc/builtinLTIntSig-NonVecBuiltinFunc#03-12 13943
+BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-VecBuiltinFunc-12 1093
+BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-VecBuiltinFunc-12 1104
+BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-VecBuiltinFunc-12 1085
+BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-NonVecBuiltinFunc-12 9005
+BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-NonVecBuiltinFunc-12 9003
+BenchmarkVectorizedBuiltinCastFunc/builtinCastIntAsRealSig-NonVecBuiltinFunc-12 8862
+BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-VecBuiltinFunc-12 37272
+BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-VecBuiltinFunc-12 38793
+BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-VecBuiltinFunc-12 36964
+BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-NonVecBuiltinFunc-12 49673
+BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-NonVecBuiltinFunc-12 49658
+BenchmarkVectorizedBuiltinStringFunc/builtinConcatSig-NonVecBuiltinFunc-12 49576
+BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-VecBuiltinFunc-12 58346
+BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-VecBuiltinFunc-12 58166
+BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-VecBuiltinFunc-12 61261
+BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-NonVecBuiltinFunc-12 79615
+BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-NonVecBuiltinFunc-12 77014
+BenchmarkVectorizedBuiltinLikeFunc/builtinLikeSig-NonVecBuiltinFunc-12 79489
