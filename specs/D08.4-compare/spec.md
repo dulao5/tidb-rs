@@ -24,7 +24,7 @@
 
 - pb code：CoalesceInt 4201 … CoalesceJson 4207（go-tipb）；VECTOR 签名没有 pb code（Go 注释掉了 `setPbCode`），`vectorized()` 为 false。
 - TIME 的结果用 `b.tp` 的 fsp（`res.SetFsp`），DURATION 的结果 `Fsp = b.tp.GetDecimal()`；向量版读 DURATION 列按 fsp 0（列中只存纳秒，结果列也只存纳秒）。
-- **逐行版和向量版的差异**：向量版求出全部参数，任何一个参数出错或产生 warning 都会改用逐行版并截断 warning，所以结果、错误和 warning 都和逐行版一致；govec `coal`/`coalfb` 的 2,100 条记录在 Go 中两种模式的结果都相同。按代码推断唯一的例外是参数有副作用时：向量版会对每一行求所有参数（例如 `COALESCE(c, RAND())` 会多推进 RAND 的序列），逐行版遇到第一个非 NULL 的参数就停。没有在集群上实测；RAND 的序列本来就不能跨实现比较，归 #83 的第二类。
+- **逐行版和向量版的差异**：向量版求出全部参数，任何一个参数出错或产生 warning 都会改用逐行版并截断 warning，所以结果、错误和 warning 都和逐行版一致；govec `coal`/`coalfb` 的 2,100 条记录在 Go 中两种模式的结果都相同。按代码推断唯一的例外是参数有副作用时：向量版会对每一行求所有参数（例如 `COALESCE(c, RAND())` 会多推进 RAND 的序列），逐行版遇到第一个非 NULL 的参数就停。**用户可见，已在 v8.5.8 上验证**（[#83](https://github.com/dulao5/tidb-rs/issues/83#issuecomment-6832072399)）：`RAND(seed)` 是确定的，`coalesce(a, rand(1))` 关闭向量化得到 0.4054, 5, 0.8716…，打开得到 0.4054, 5, 0.1418…；Lucky 补的 300 条这类记录 Rust 两种模式都和 Go 一致，下次重新生成 cast 向量时加入（T5c）。另外，Duration 结果的 fsp 只在 COALESCE 是最外层时看不到：`CAST(COALESCE(t0,t3) AS CHAR)` 的 2,000 条记录中，去掉 `v.fsp = fsp` 报 433 条不一致，也在 T5c 中加入。
 
 ## 2. 依赖
 

@@ -6,3 +6,4 @@
 - [x] T4 第 2 批：COALESCE（spec §1b），先完成 D08.1 T6d（`RowFallback` 泛化为 `ArgsFallback`）；govec `coal` 1,500、`coalfb` 600 条
 - [ ] T5 第 3 批：GREATEST/LEAST、INTERVAL、`ResolveType4Between`
 - [x] T6 D08.5（D08.5 第 1 批，#100）：ceil/floor 已移植，门禁已解除。D08.4 的原有记录**保留** `cmpReachesCeil` 过滤（保持逐字节不变），这类比较由 D08.5 的 `ceilcmp` 记录覆盖（YEAR 列对 DOUBLE、短 DECIMAL、长 DECIMAL、字符串常量；spec §4 第 2 条，#99）。Lucky 在 #100 评审中关掉过滤、把 D08.4 的循环放大 10 倍（种子 224，`cmpbuild` 45,084 条）回放 0 条不一致（#98 时同样的实验有 368 条）
+- [ ] T5c 下次重新生成 cast 向量时加入 Lucky 评审 #108 中的两类记录：`coalesce(a, rand(seed))` 300 条（两种模式结果不同，#83）、`CAST(COALESCE(t0,t3) AS CHAR)` 2,000 条（覆盖 Duration 结果的 fsp）

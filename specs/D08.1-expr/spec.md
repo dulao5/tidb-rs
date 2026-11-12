@@ -100,6 +100,8 @@ Go 中有些签名的向量版不使用父表达式求好的参数列，而是�
 | `SecondArg` | `builtinLogic{And,Or}Sig.vecEvalInt` | 先求 `args[0]`，出错直接返回；`args[1]` 出错或相对于它求值之前新增了 warning，就把 warning 截断到 `args[0]` 之前，改用逐行版 |
 | `EveryArg` | `builtinCoalesce*Sig.vecEvalXxx`（以后 CASE WHEN 也是） | 按顺序求每个参数（包括第一个），出错或相对于 `args[0]` 之前新增了 warning 就回退；只有新增了 warning 时才截断（截断到 `args[0]` 之前） |
 
+- **IF/IFNULL（D08.9）需要第三种规则**（Lucky 评审 #108）：Go 在求完 `args[0]` 之后才记 warning 数，所以回退时 `args[0]` 的 warning 会出现两次（v8.5.8：`ifnull(cast('1a' as signed), …)` 关闭向量化 1 条 warning，打开 2 条）。IFNULL 和 AND 一样是两个参数，但用 `SecondArg` 会丢掉这个重复；移植 D08.9 时新增一种 `ArgsFallback`（见 tasks T6e）。CASE WHEN 用 `EveryArg` 是对的。
+- 守护测试（建议，tasks T6e）：Go 中有 `fallbackEvalXxx` 的 30 个签名，已注册的都必须有 `args_fallback != None`。
 - 输出用签名自己的求值类型（`SigDrivers::eval_type`）；调用方要求别的类型时（Go 调用了另一个 `VecEvalXxx`）返回 base 的错误，在求任何参数之前。
 - 回退时的逐行求值 `eval_rows_into` 按结果的求值类型写列（定长类型 `ResizeXxx` 后逐行设置；字符串、JSON、VECTOR 逐行追加），第一个错误直接返回，和 Go 的 `fallbackEvalXxx` 一样。
 - AND/OR 的记录（`logic`、`logicfb`）在泛化后仍是 0 条不一致；反证："`SecondArg` 的基准改成 `args[0]` 之前"报 1 条不一致。
