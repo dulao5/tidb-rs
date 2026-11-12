@@ -61,9 +61,9 @@ LIKE、ILIKE、REGEXP、JSON_SCHEMA_VALID 按 `EvalContext.CtxID()` 缓存编译
 
 7. **常量传播**（`constant_propagation.rs`，第 2b 部分）：
    - **Go 原地修改被多个条件共享的节点，Rust 修改副本**（D08.1 spec §4、D08.4 spec §4 第 1 条的同一类问题）。传播时新条件和旧条件共享常量、CAST 等节点，Go 在构建新条件时会原地修改它们，所有持有者都看到修改：
-     - YEAR 列的 `RefineComparedConstant` 修改常量的值。例：`y1 = y2 AND y2 >= 0.5`：输入条件构建为 `y2 >= 1`（#99：`Ceil` 改写后不再按 YEAR 调整）；传播出 `y1 >= K` 时同一个常量被改成 2001，原条件也变成 `y2 >= 2001`。Rust 中原条件仍是 `y2 >= 1`。在 CNF 中两种结果等价（`y1 = y2`），**按推断用户看不到差别，未在集群上实测**；外连接的 join / filter 条件之间是否可见未分析。
+     - YEAR 列的 `RefineComparedConstant` 修改常量的值（`refineArgs` 把 `AdjustYear` 的结果写进共享的 `*Constant`，`builtin_compare.go:1802`；重建时已改写的整数再被调整一次，1 → 2001）。**用户可见，结果行不同**（v8.5.8 实测，Lucky，[upstream-pitfall #104](https://github.com/dulao5/tidb-rs/issues/104)）：`y2 < 1.0` 只返回 0000；加上 `y1 = y2` 后返回 0000、1990、2000（EXPLAIN 中原条件变成 `lt(y2, 2001)`）；`y1 = y2 AND y2 >= 0.5` 丢掉 (1990,1990)、(2000,2000)。tidb-rs 对前一对查询都只返回 0000（不随 `y1 = y2` 变化）；最后一条与 Go 相同（#99 的 `Ceil` 改写照原样移植）。**这是有意的偏离：不复制 Go 的原地修改**（上游 bug，给出错误的行；副本是我们的模型，D08.1 §4），记入 `docs/compatibility.md` "Deliberate deviations"。有了经过 `PropagateConstant` 的 SQL 路径后，用 SQL 测试固定 tidb-rs 的结果（`specs/D08.2-funcs/tasks.md` T8c）。外连接的 join / filter 条件之间同理。
      - `PropagateType`（ETReal）修改 DECIMAL 常量的 flen / decimal；`BuildCastFunction` 去掉共享类型的 NotNullFlag。只是类型元数据，值和签名相同。
-   - govec：生成器在求值前给输入条件的每个节点做快照，求值后有节点被修改的记录标 `"known_deviation": "in-place"`，回放跳过（上限 64，目前 45 条）；修改发生在传播过程中新建的常量上的（检测不到），回放容许**只有常量的 flen / decimal / flag 不同**（上限 32，主文件 0 条，种子 1–4 共 1 条）。`GOVEC_CPROP_STRICT=1` 关闭这两项容忍，用于排查。
+   - govec：生成器在求值前给输入条件的每个节点做快照，求值后有节点被修改的记录标 `"known_deviation": "in-place"`，回放照常执行每条记录：结果相同即通过（45 条中 27 条相同）；不同、有标记且没有 panic 的计为偏离（上限为 cprop 记录数的 2 %，目前 18 条；Lucky 在 10 倍记录、3 个种子上约 1.7 %）；修改发生在传播过程中新建的常量上的（检测不到），回放容许**只有常量的 flen / decimal / flag 不同**（上限 0.1 %，主文件 0 条，种子 1–4 共 1 条，Lucky 10 倍记录 1–3 条）。上限按比例，换种子或加记录不必改测试。`GOVEC_CPROP_STRICT=1` 关闭这两项容忍，用于排查。
    - `tryToReplaceCond`：`NewFunctionInternal` 失败时保留原条件（Go 返回 nil 并追加进条件列表，之后在 `RemoveDupExprs` 中 panic）；`ColumnSubstitute` 的 CAST 分支构建失败时返回原表达式（Go 记日志后用没有签名的节点继续）；`ComposeCNF/DNFCondition` 返回 `Option`，失败时保留原条目。生成器不产生这些情况。
    - `newPropConstSolver` 不带上下文，`PropagateConstant` 设置（与 Go 相同）；外连接的求解器构造时给出。
    - `ExtractColumns` 把列复制进新的 `Arc`（Go 保留表达式中的 `*Column`），字段相同。
