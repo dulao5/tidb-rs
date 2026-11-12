@@ -337,6 +337,7 @@ pub fn equal_fold(s: &str, t: &str) -> bool {
 pub mod bufio;
 pub mod bytes;
 pub mod conv;
+pub mod crc32;
 pub mod json;
 pub mod math;
 pub mod os;

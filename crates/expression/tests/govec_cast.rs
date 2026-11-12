@@ -109,6 +109,8 @@ fn datum_in(v: &Value) -> Datum {
         dm::KindBytes => d.set_bytes(Some(unhex(p[1].as_str().unwrap()))),
         dm::KindFloat32 => d.set_float32(f64::from_bits(p[1].as_u64().unwrap()) as f32),
         dm::KindMysqlBit => d.set_mysql_bit(BinaryLiteral(unhex(p[1].as_str().unwrap()))),
+        // binary literal constants (D08.5 batch 5, CONV)
+        dm::KindBinaryLiteral => d.set_binary_literal(BinaryLiteral(unhex(p[1].as_str().unwrap()))),
         dm::KindMysqlEnum => d.set_mysql_enum(
             Enum {
                 value: p[1].as_u64().unwrap(),

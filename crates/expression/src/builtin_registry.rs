@@ -174,6 +174,8 @@ pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = 
     (ast::Cot, &crate::builtin_math::COT_CLASS),
     (ast::Degrees, &crate::builtin_math::DEGREES_CLASS),
     (ast::Exp, &crate::builtin_math::EXP_CLASS),
+    (ast::Conv, &crate::builtin_math::CONV_CLASS),
+    (ast::CRC32, &crate::builtin_math::CRC32_CLASS),
     (ast::PI, &crate::builtin_math::PI_CLASS),
     (ast::Radians, &crate::builtin_math::RADIANS_CLASS),
     (ast::Sin, &crate::builtin_math::SIN_CLASS),

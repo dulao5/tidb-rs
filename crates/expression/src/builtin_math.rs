@@ -16,15 +16,18 @@ use std::sync::Arc;
 use tidb_base::Error;
 use tidb_base::errors::RedactLogDisable;
 use tidb_base::gofmt::Arg;
+use tidb_base::gostd::bytes::trim_space;
 use tidb_base::gostd::conv::{f64_to_i64, f64_to_u64};
+use tidb_base::gostd::crc32::checksum_ieee;
 use tidb_base::gostd::math as gomath;
 use tidb_base::gostd::strconv::format_float;
 use tidb_base::mysql::{
     self, MaxDecimalScale, MaxIntWidth, TypeDouble, TypeLong, TypeLonglong, TypeNewDecimal,
 };
 use tidb_chunk::Row;
-use tidb_parser::types::{ETDecimal, ETInt, ETReal, EvalType, UnspecifiedLength};
+use tidb_parser::types::{ETDecimal, ETInt, ETReal, ETString, EvalType, UnspecifiedLength};
 use tidb_sessionctx::variable::session_state::MysqlRng;
+use tidb_types::datum::{KindBinaryLiteral, new_string_datum};
 use tidb_types::errors::{ErrOverflow, ErrTruncated};
 use tidb_types::etc::FieldType;
 use tidb_types::helper;
@@ -38,8 +41,8 @@ use crate::builtin::{BaseFunctionClass, new_base_builtin_func_with_tp};
 use crate::builtin_registry::FunctionClass;
 use crate::context::{BuildContext, EvalContext, type_ctx};
 use crate::errors::ErrInvalidArgumentForLogarithm;
-use crate::eval::{Args, BuiltinFunc, SigDesc, SigExtra, SigView};
-use crate::expression::{EvalState, Expr, ExprRef};
+use crate::eval::{Args, BuiltinFunc, SigDesc, SigDrivers, SigExtra, SigView};
+use crate::expression::{EvalState, Expr, ExprRef, is_binary_literal};
 use tidb_expression_macros::eval_fn;
 
 /// getEvalTp4FloorAndCeil gets the types.EvalType of FLOOR and CEIL.
@@ -421,6 +424,8 @@ math_class!(COS_CLASS, ast::Cos, 1, 1, cos_get_function);
 math_class!(COT_CLASS, ast::Cot, 1, 1, cot_get_function);
 math_class!(DEGREES_CLASS, ast::Degrees, 1, 1, degrees_get_function);
 math_class!(EXP_CLASS, ast::Exp, 1, 1, exp_get_function);
+math_class!(CONV_CLASS, ast::Conv, 3, 3, conv_get_function);
+math_class!(CRC32_CLASS, ast::CRC32, 1, 1, crc32_get_function);
 math_class!(PI_CLASS, ast::PI, 0, 0, pi_get_function);
 math_class!(RADIANS_CLASS, ast::Radians, 1, 1, radians_get_function);
 math_class!(SIN_CLASS, ast::Sin, 1, 1, sin_get_function);
@@ -1383,6 +1388,241 @@ fn tan_get_function(
 pub fn tan(_ctx: &dyn EvalContext, _f: &impl SigView, val: f64) -> Result<Option<f64>, Error> {
     Ok(Some(gomath::tan(val)))
 }
+
+// ---------------------------------------------------------------- CONV
+
+// go: convFunctionClass.getFunction L1
+fn conv_get_function(
+    c: &BaseFunctionClass,
+    ctx: &dyn BuildContext,
+    args: Vec<ExprRef>,
+) -> Result<BuiltinFunc, Error> {
+    c.verify_args(&args)?;
+    let mut bf =
+        new_base_builtin_func_with_tp(ctx, c.func_name, args, ETString, &[ETString, ETInt, ETInt])?;
+    let (charset, collate) = ctx.get_charset_info();
+    bf.tp.set_charset(&charset);
+    bf.tp.set_collate(&collate);
+    bf.tp.set_flen(64);
+    Ok(bf.with_sig(&builtinConvSig))
+}
+
+/// The bit string `0b…` of a binary literal, `GetBinaryLiteral().ToBitLiteralString(true)`.
+// glue: shared by the two hybrid branches of builtinConvSig.evalString
+fn bit_literal_string(d: &tidb_types::datum::Datum) -> Vec<u8> {
+    d.get_binary_literal()
+        .to_bit_literal_string(true)
+        .into_bytes()
+}
+
+/// evalString evals CONV(N,from_base,to_base). A binary literal constant, or a CAST of a
+/// hybrid / binary literal argument, is first converted from its bit string (base 2); this
+/// looks at the argument expressions, so it is a hand-written row driver (the vector
+/// version, [`conv_vec`], does not do it, as in Go).
+// go: builtinConvSig.evalString L1
+// go: builtinConvSig.Clone L2 (BuiltinFunc::clone_from_base)
+fn conv_row(
+    f: &BuiltinFunc,
+    ctx: &dyn EvalContext,
+    st: &EvalState,
+    row: Row<'_>,
+) -> Result<Option<Vec<u8>>, Error> {
+    let mut s: Vec<u8> = Vec::new();
+    match &*f.args[0] {
+        Expr::Constant(x) if x.value.kind() == KindBinaryLiteral => {
+            let datum = x.eval(ctx, st, row)?;
+            s = bit_literal_string(&datum);
+        }
+        Expr::ScalarFunction(x) if x.func_name.l == ast::Cast => {
+            let arg0 = &x.get_args()[0];
+            if arg0.get_type(ctx).hybrid() || is_binary_literal(arg0) {
+                let Some(v) = arg0.eval_string(ctx, st, row)? else {
+                    return Ok(None);
+                };
+                s = bit_literal_string(&new_string_datum(v));
+            }
+        }
+        _ => {}
+    }
+    let Some(from_base) = f.args[1].eval_int(ctx, st, row)? else {
+        return Ok(None);
+    };
+    let Some(to_base) = f.args[2].eval_int(ctx, st, row)? else {
+        return Ok(None);
+    };
+    if s.is_empty() {
+        let Some(v) = f.args[0].eval_string(ctx, st, row)? else {
+            return Ok(None);
+        };
+        s = v;
+    } else {
+        // Go: an invalid from_base gives isNull without an error and goes on with "".
+        s = conv(&s[2..], 2, from_base)?.unwrap_or_default();
+    }
+    conv(&s, from_base, to_base)
+}
+
+/// The CONV body without the hybrid / binary literal handling of the row version, kept as
+/// the generated drivers' body; only its row driver is replaced (by [`conv_row`]).
+/// `novec`: Go's `vecEvalString` is unreachable in v8.5.8 — `vectorized()` is false, so
+/// `ScalarFunction.Vectorized()` never calls `isChildrenVectorized`, the buffer allocator
+/// stays nil and a direct `VecEvalString` nil-dereferences (D08.5 spec §3.2). The vector
+/// driver therefore returns the `baseBuiltinFunc.vecEvalString` error, so Rust has no
+/// vector path that no Go record checks.
+// go: builtinConvSig.vecEvalString L2 (unreachable in v8.5.8: novec, the base error)
+// go: builtinConvSig.vectorized L2 (SigDesc.vectorized = false)
+#[eval_fn(String, novec)]
+pub fn conv_vec(
+    _ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    s: &[u8],
+    from_base: i64,
+    to_base: i64,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    match conv(s, from_base, to_base)? {
+        None => Ok(None),
+        Some(v) => {
+            out.extend_from_slice(&v);
+            Ok(Some(()))
+        }
+    }
+}
+
+/// The drivers of `builtinConvSig`: the hand-written row version and the generated `novec`
+/// vector driver of [`conv_vec`].
+// glue: SigDrivers of builtinConvSig
+const CONV: SigDrivers = match CONV_VEC {
+    SigDrivers::String { vec, args, .. } => SigDrivers::String {
+        row: conv_row,
+        vec,
+        args,
+    },
+    _ => panic!("conv_vec is a String body"),
+};
+
+/// `strconv.ParseUint(s, base, 64)` on a prefix `getValidPrefix` accepted (digits of the
+/// base only, non-empty): only a range error is possible.
+// go-std: strconv.ParseUint L2 (validated digits only)
+fn parse_uint_base(s: &[u8], base: u64) -> Option<u64> {
+    let mut n: u64 = 0;
+    for &c in s {
+        let d = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'z' => c - b'a' + 10,
+            b'A'..=b'Z' => c - b'A' + 10,
+            _ => return None,
+        };
+        n = n.checked_mul(base)?.checked_add(u64::from(d))?;
+    }
+    Some(n)
+}
+
+/// `strconv.FormatUint(v, base)`: lower-case digits.
+// go-std: strconv.FormatUint L1
+fn format_uint(mut v: u64, base: u64) -> Vec<u8> {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if v == 0 {
+        return b"0".to_vec();
+    }
+    let mut buf = Vec::new();
+    while v > 0 {
+        buf.push(DIGITS[(v % base) as usize]);
+        v /= base;
+    }
+    buf.reverse();
+    buf
+}
+
+// go: builtinConvSig.conv L1
+fn conv(s: &[u8], mut from_base: i64, mut to_base: i64) -> Result<Option<Vec<u8>>, Error> {
+    let mut signed = false;
+    let mut ignore_sign = false;
+    if from_base < 0 {
+        from_base = from_base.wrapping_neg();
+        signed = true;
+    }
+    if to_base < 0 {
+        to_base = to_base.wrapping_neg();
+        ignore_sign = true;
+    }
+    if !(2..=36).contains(&from_base) || !(2..=36).contains(&to_base) {
+        return Ok(None);
+    }
+    let mut s = crate::util::get_valid_prefix(trim_space(s), from_base);
+    if s.is_empty() {
+        return Ok(Some(b"0".to_vec()));
+    }
+    let mut negative = false;
+    if s[0] == b'-' {
+        negative = true;
+        s = &s[1..];
+    }
+    let Some(mut val) = parse_uint_base(s, from_base as u64) else {
+        return Err(overflow(
+            "BIGINT UNSIGNED",
+            String::from_utf8_lossy(s).into_owned(),
+        ));
+    };
+    if signed {
+        const NEG_MIN_INT64: u64 = 1 << 63; // -math.MinInt64
+        if negative && val > NEG_MIN_INT64 {
+            val = NEG_MIN_INT64;
+        }
+        if !negative && val > i64::MAX as u64 {
+            val = i64::MAX as u64;
+        }
+    }
+    if negative {
+        val = val.wrapping_neg();
+    }
+    negative = (val as i64) < 0;
+    if ignore_sign && negative {
+        val = 0u64.wrapping_sub(val);
+    }
+    let mut out = format_uint(val, to_base as u64);
+    if negative && ignore_sign {
+        out.insert(0, b'-');
+    }
+    out.make_ascii_uppercase();
+    Ok(Some(out))
+}
+
+// ---------------------------------------------------------------- CRC32
+
+// go: crc32FunctionClass.getFunction L1
+fn crc32_get_function(
+    c: &BaseFunctionClass,
+    ctx: &dyn BuildContext,
+    args: Vec<ExprRef>,
+) -> Result<BuiltinFunc, Error> {
+    c.verify_args(&args)?;
+    let mut bf = new_base_builtin_func_with_tp(ctx, c.func_name, args, ETInt, &[ETString])?;
+    bf.tp.set_flen(10);
+    bf.tp.add_flag(mysql::UnsignedFlag);
+    Ok(bf.with_sig(&builtinCRC32Sig))
+}
+
+/// evalInt evals a CRC32(expr).
+// go: builtinCRC32Sig.evalInt L1
+// go: builtinCRC32Sig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCRC32Sig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+// go: builtinCRC32Sig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int)]
+pub fn crc32(_ctx: &dyn EvalContext, _f: &impl SigView, x: &[u8]) -> Result<Option<i64>, Error> {
+    Ok(Some(i64::from(checksum_ieee(x))))
+}
+
+/// `builtinConvSig`: Go's `vectorized()` is false (TODO in Go: the vector version lacks
+/// the hybrid handling of the row version).
+pub static builtinConvSig: SigDesc = SigDesc {
+    name: "builtinConvSig",
+    pb_code: 2138,
+    vectorized: false,
+    drivers: CONV,
+    args_fallback: crate::eval::ArgsFallback::None,
+};
+math_sig!(builtinCRC32Sig, 2139, CRC32);
 
 // tipb.ScalarFuncSig codes (go-tipb expression.pb.go).
 math_sig!(builtinAbsIntSig, 2101, ABS_INT);
