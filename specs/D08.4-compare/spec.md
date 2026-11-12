@@ -2,7 +2,7 @@
 
 状态：**第 1 批（本 PR）**——比较运算符 `<`、`<=`、`>`、`>=`、`=`、`!=`、`<=>`：`compareFunctionClass`（含参数改写 `refineArgs`）、8 种比较类型 × 7 个运算符共 56 个签名、`CompareXxx`、`GetAccurateCmpType`、`GetCmpFunction`。第 2 批及以后：COALESCE、GREATEST/LEAST、INTERVAL 及其辅助函数（`aggregateType`、`resolveType4Extremum` 等，120 个函数）。
 
-收敛检查（第 1 批）：D08.4 matched 248/368（`builtin_compare.go` 210 + `builtin_compare_vec.go` 53 + `builtin_compare_vec_generated.go` 105），缺的 120 个都是后续批次的函数；0 extra，0 duplicated。govec `cast` 领域 29,264 条（新增 4,884 条，追加在原有 24,380 条之后，原有记录不变）。
+收敛检查（第 1 批）：D08.4 matched 248/368（`builtin_compare.go` 210 + `builtin_compare_vec.go` 53 + `builtin_compare_vec_generated.go` 105），缺的 120 个都是后续批次的函数；0 extra，0 duplicated。govec `cast` 领域 29,864 条（新增 5,484 条，追加在原有 24,380 条之后，原有记录不变）。
 
 ## 1. 范围（第 1 批）
 
@@ -45,7 +45,10 @@ Go 的 `CompareFunc` 是函数值，`genCompareString` 闭包捕获 collation。
 ## 4. 偏离
 
 1. **原地修改的常量**：Go 的 `refineArgs` 把 YEAR 常量的值原地改成调整后的年份（调用方持有的同一个节点也变了），`RemoveMutableConst` 原地清掉 ParamMarker/DeferredExpr。Rust 改副本，调用方的节点不变（M-EXPR）。SQL 看不到：调用方只用返回的参数。
-2. **`RefineComparedConstant` 的 Ceil/Floor**：`int 非常量 <,<=,>,>= 非 int 常量` 时 Go 用 `NewFunctionInternal(ctx, ast.Ceil/Floor, ..)` 把常量取整。数学函数（D08.5）移植前 Rust 构建不出 `ceil`/`floor`，`new_function_internal` 返回 `None`，常量不改写（比较结果相同，只是没有取整；与 Go 不同的是参数形式，例如 `a < 1.5` 不变成 `a < 2`）。govec 不生成这类记录（`cmpCeilPath`）。**D08.5 移植 ceil/floor 后去掉这个过滤。**
+2. **`RefineComparedConstant` 的 Ceil/Floor：结果会不同**（Lucky 评审 #98）。`int 非常量 <,<=,>,>= 非 int 常量`，在常量能转换成 int 类型（不出错、不溢出）但与原值不相等时，Go 用 `NewFunctionInternal(ctx, ast.Ceil/Floor, ..)` 把常量取整后再转换。数学函数（D08.5）移植前 Rust 构建不出 `ceil`/`floor`，`new_function_internal` 返回 `None`，常量不改写，**比较结果可能与 Go 不同**：Lucky 去掉 govec 的过滤后有 368 条不一致，其中 62 条结果值不同、59 条在 YEAR 列上。例如 v8.5.8 中 `y < 2e0`（y=1977）返回 1，因为常量取整后按 YEAR 转换成 2002；Rust 不取整，返回 0。v8.5.8 本身也不一致：`y < 2.0` 按 2 比较，`y < 2`、`'2'`、`2e0` 按 2002 比较，见 upstream-pitfall [#99](https://github.com/dulao5/tidb-rs/issues/99)。
+   - govec 只跳过真正走到 Ceil/Floor 的记录（`cmpReachesCeil`：在 Go 中执行到 Ceil/Floor 之前的同样步骤来判断）；之前的分支（NULL 常量、转换出错、溢出改写为 0/1、`int_col < 2.0` 这类相等的情况）都生成了记录（来源 `refine` 600 条）。
+   - **在 D08.5 移植 ceil/floor 之前，任何 SQL 路径都不能构建这类比较**（tidb-rs 目前没有 SQL 路径用到 `compareFunctionClass`，接入规划器/执行器时要检查这一点）。
+   - D08.5 的任务（plan.md）：移植 ceil/floor，去掉 `cmpReachesCeil` 过滤，补 YEAR 列的记录（DOUBLE、短 DECIMAL、长 DECIMAL、字符串常量）。
 3. **`CompareFunc` 是枚举**（§3.2）。
-4. **NULL 安全等于的 Duration 向量读取用 fsp 0**：比较只看纳秒，与 Go 相同。
+4. **NULL 安全等于的 Duration 向量读取用 fsp 0**：比较只看纳秒，与 Go 相同（函数体中有注释）。
 5. 没有面向用户的差异，`docs/compatibility.md` 只补了 #97 的链接（D08.1 的条目）。

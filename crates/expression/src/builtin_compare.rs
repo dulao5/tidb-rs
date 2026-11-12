@@ -484,8 +484,9 @@ fn try_to_convert_constant_int(
 /// might be true/false (see tryToConvertConstantInt).
 ///
 /// The ceiling and floor are `NewFunctionInternal(ctx, ast.Ceil / ast.Floor, ..)`: until the
-/// math functions (D08.5) are ported, that returns no constant and the input is returned
-/// (spec §4).
+/// math functions (D08.5) are ported, that returns no constant and the input is returned,
+/// which can change the comparison's result (e.g. a YEAR column against `2e0`; spec §4 item 2,
+/// tidb-rs #99). No SQL path may build these comparisons before D08.5.
 // go: RefineComparedConstant L1
 pub fn refine_compared_constant(
     ctx: &dyn BuildContext,
@@ -1426,6 +1427,8 @@ macro_rules! null_eq {
             $f: &impl SigView,
             args: &mut impl Args,
         ) -> Result<Option<i64>, Error> {
+            // The vector driver reads a Duration column with fsp 0: a comparison only looks at
+            // the nanoseconds, so the result is the same as Go's (spec §4 item 4).
             let arg0 = args.$get(ctx, 0)?.map(own);
             let arg1 = args.$get(ctx, 1)?;
             Ok(Some(match (arg0, arg1) {
