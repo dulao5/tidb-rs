@@ -55,6 +55,18 @@ IS NULL 随常量传播移植（tasks T3b）。
 - `abs` 在包 CAST 之前读参数类型；`round` 在包 CAST 之后读 `args[0]`（§3.3）；`round_with_frac_dec` 的位数取 `min(frac, tp.decimal)`。
 - 两个平台的 `mathbuild` 228 条、`mathclone` 10 条、`gomath` 306 条不同（Exp / Log 的汇编，例如 amd64 的 `Log` 不规格化次正规数，`Log(5e-324)` 在 amd64 上是 -709.09、其他平台是 -744.44；arm64 的 FMA 融合；`Sqrt` / `Pow` 的硬件默认 NaN），登记在 tracker `targetDiffs`，各平台回放自己的文件。
 
+## 1e. 范围（第 5 批：CONV、CRC32，`builtin_math.rs`）
+
+| Go | Rust |
+|---|---|
+| `convFunctionClass.getFunction`、`builtinConvSig.{evalString,conv,Clone}` | `CONV_CLASS`；`conv_row`（手写的逐行驱动：要看参数表达式本身——二进制字面量常量，或参数是 hybrid / 二进制字面量的 CAST——先按二进制位串转换）、`conv`；`strconv.ParseUint/FormatUint` 任意进制 |
+| `builtinConvSig.{vecEvalString,vectorized}` | `conv_vec` 的向量驱动；`SigDesc.vectorized = false`（见 §3.2） |
+| `crc32FunctionClass.getFunction`、`builtinCRC32Sig.*` | `CRC32_CLASS`、`crc32`；`tidb_base::gostd::crc32::checksum_ieee`（表驱动，与 Go 的各平台实现结果相同） |
+| `getValidPrefix`（util.go，D08.12） | `util::get_valid_prefix` |
+
+- 字符串参数的字符集转换由 `newBaseBuiltinFuncWithTp` 包的 CAST 完成，CRC32 自己直接对字节求校验和，和 Go 一样。
+- D08.5 converge 458/458（D08.12 70/135）。
+
 ## 2. 依赖
 
 D08.1（`#[eval_fn]`、`RpnProgram`）、D08.2（`newBaseBuiltinFuncWithTp`）、D08.8（`WrapWithCastAs*`、`PropagateType`）、D01.2（`DecimalAdd/Sub/Mul/Div/Mod`、`Round`、`ToInt/ToUint`）、D01.x 的 `DivInt64` 等、D01.6 的 `VectorFloat32.Add/Sub/Mul`。
@@ -80,6 +92,9 @@ D08.1（`#[eval_fn]`、`RpnProgram`）、D08.2（`newBaseBuiltinFuncWithTp`）�
 | `Cot`（第 4 批） | `tan(x) != 0` 但 `1/tan(x)` 为 Inf 或 NaN 时（x 为次正规数，如 `1e-309`）：逐行版报 `DOUBLE value is out of range in 'cot(x)'`，向量版不报错，**返回参数本身**（Go `vecEvalReal` 只在 `tan == 0` 时报错，其余情况把 `x` 留在结果里） | **用户可见，已在 v8.5.8 上验证（开关 ON）**：c = 1e-309，`SELECT COT(c)` 返回 `1e-309`，`UPDATE ct SET d = COT(c)` 报 `ERROR 1690`；`SELECT COT(1e-309)` 折叠出错后不折叠，按向量求值，也返回 `1e-309`。各自跟随，反证：去掉向量分支后 35 条不一致 |
 | `TruncateUint`（第 4 批） | 第二个参数是无符号类型时，逐行版不求 `args[1]`，直接返回 `x`；向量版先求 `args[1]`，NULL 行结果为 NULL | **用户可见，已在 v8.5.8 上验证（开关 ON）**：a = 123、b 为 NULL（都是 `BIGINT UNSIGNED`），`SELECT TRUNCATE(a, b)` 返回 NULL，`UPDATE tu SET c = TRUNCATE(a, b)` 把 c 设为 123。反证：逐行版也求 `args[1]` 时 5 条不一致 |
 | `Sign`（第 4 批） | NaN：逐行版为 -1（既不 `> 0` 也不 `== 0`），向量版为 0（既不 `> 0` 也不 `< 0`） | 未验证，应该不可见：没有找到产生 NaN DOUBLE 的 SQL（DOUBLE 列存不进 NaN，`ACOS(2)`、`SQRT(-1)`、`LOG(-1)` 为 NULL，`POW`、`EXP`、`COT` 溢出时报错）。反证：去掉向量分支后 3 条不一致 |
+
+- **CONV（第 5 批）**：Go 的 `builtinConvSig.vectorized()` 为 false，执行器总走逐行版（含 hybrid / 二进制字面量的处理）。它的 `vecEvalString` 在 v8.5.8 中**走不到**：`ScalarFunction.Vectorized()` 先看 `vectorized()`，短路后不调用 `isChildrenVectorized`，`bufAllocator` 一直是 nil，直接调用 `VecEvalString` 会空指针（写 govec 时实测）。Rust 保留了向量体（`conv_vec`），tracker 中 `vecEvalString` 登记为豁免并写明原因。CRC32 两版逐行相同。
+- **CAST(二进制字面量) 这一支**（`evalString` 第二个分支中的 `IsBinaryLiteral(arg0)`）：CAST 的参数是常量时，构建阶段会被常量折叠成字符串常量，所以这一支在 govec 中走不到；故意去掉它报 0 条不一致。二进制字面量常量本身（第一个分支）和 hybrid 列的 CAST 都有记录覆盖。
 
 ### 3.3 Go 读到的是包 CAST 之后的参数
 

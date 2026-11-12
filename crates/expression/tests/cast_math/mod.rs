@@ -21,6 +21,8 @@ use super::{ctx_of, dump, ex_err, ex_try, warns};
 pub(super) fn exec(op: &str, p: &[Value]) -> Option<Value> {
     match op {
         "mathbuild" => super::cast_arith::exec("arbuild", p),
+        // D08.5 batch 5 (CONV, CRC32, `govec/domains/cast_d085e.go`): batch 1's "arbuild".
+        "convbuild" => super::cast_arith::exec("arbuild", p),
         "mathclone" => Some(clone(p)),
         "gomath" => Some(go_math(p)),
         _ => None,

@@ -1816,3 +1816,39 @@ pub fn expr_has_set_var_or_sleep(expr: &Expr) -> bool {
         .iter()
         .any(|arg| expr_has_set_var_or_sleep(arg))
 }
+
+/// getValidPrefix gets prefix of string which can be successfully parsed as int.
+///
+/// Go converts each byte to a rune (`rune(s[i])`): bytes 0x80..0xFF become U+0080..U+00FF,
+/// whose letters upper-case to runes ≥ U+00C0 (or stay ≥ U+00C0), which are never below the
+/// base's limit, and none of which are decimal digits; so every non-ASCII byte ends the
+/// prefix, as here.
+// go: getValidPrefix L1
+pub fn get_valid_prefix(s: &[u8], base: i64) -> &[u8] {
+    // Go: `rune('0' + base)` / `rune('A' + base - 10)`; any base <= 36 (even < 2) gets a
+    // limit, only base > 36 returns "".
+    let upper: i64 = match base {
+        2..=9 => i64::from(b'0') + base,
+        _ if base <= 36 => i64::from(b'A') + base - 10,
+        _ => return b"",
+    };
+    let mut valid_len = 0;
+    for (i, &c) in s.iter().enumerate() {
+        if c.is_ascii_alphanumeric() {
+            if i64::from(c.to_ascii_uppercase()) >= upper {
+                break;
+            }
+            valid_len = i + 1;
+        } else if c == b'+' || c == b'-' {
+            if i != 0 {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if valid_len > 1 && s[0] == b'+' {
+        return &s[1..valid_len];
+    }
+    &s[..valid_len]
+}
