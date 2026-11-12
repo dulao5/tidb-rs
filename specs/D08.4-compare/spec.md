@@ -53,7 +53,7 @@
 | Greatest/Least CmpStringAsTime | 向量版逐个参数：求第 `j` 个参数列，再逐行转换，然后才求第 `j+1` 个；逐行版逐行 | `ArgsFallback::OwnArgs`（D08.1 spec §3.6）：签名自己按 Go 的顺序求参数，warning 顺序和第一个错误与 Go 相同。改成"先求全部参数列"有 20 条不一致 | warning 顺序不同、第一个错误可能不同 |
 | Interval Int/Real | 向量版只把 `args[0]` 求成列，其余参数在每行的查找中逐行求 | `ArgsFallback::OwnArgs` | 与逐行版相同 |
 
-- **INTERVAL 的 upstream 问题（已在 v8.5.8 验证）**：`builtinIntervalIntSig.Clone` 不复制 `hasNullable`（`builtinIntervalRealSig.Clone` 复制）。规划器的 `ResolveIndices` 会 Clone 表达式，所以从 SQL 来的 INTERVAL(int) 实际总是二分查找：`a=10, b=NULL, x=1` 时 `interval(5, a, b, x)` 返回 **3**（打开、关闭向量化都是），常量折叠 `interval(5, 10, NULL, 1)` 返回 0，`interval(5.5, a, b, x)` 返回 0。Rust 照搬（`BuiltinFunc::clone_from_base` 对 `SigExtra::IntervalInt` 重置 `has_nullable`；govec `glclone` 记录覆盖，去掉重置有 13 条不一致）。建议登记为 upstream-pitfall。
+- **INTERVAL 的 upstream 问题（已在 v8.5.8 验证）**：`builtinIntervalIntSig.Clone` 不复制 `hasNullable`（`builtinIntervalRealSig.Clone` 复制）。规划器的 `ResolveIndices` 会 Clone 表达式，所以从 SQL 来的 INTERVAL(int) 实际总是二分查找：`a=10, b=NULL, x=1` 时 `interval(5, a, b, x)` 返回 **3**（打开、关闭向量化都是），常量折叠 `interval(5, 10, NULL, 1)` 返回 0，`interval(5.5, a, b, x)` 返回 0。Rust 照搬（`BuiltinFunc::clone_from_base` 对 `SigExtra::IntervalInt` 重置 `has_nullable`；govec `glclone` 记录覆盖，去掉重置有 13 条不一致）。upstream-pitfall [#111](https://github.com/dulao5/tidb-rs/issues/111)。
 
 ## 2. 依赖
 
