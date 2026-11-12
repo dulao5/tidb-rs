@@ -24,6 +24,7 @@ pub mod builtin_cast;
 pub mod builtin_compare;
 pub mod builtin_convert_charset;
 pub mod builtin_math;
+pub mod builtin_op;
 pub mod builtin_registry;
 mod builtin_registry_gen;
 pub mod chunk_executor;

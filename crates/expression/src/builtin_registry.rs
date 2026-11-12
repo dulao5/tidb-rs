@@ -150,4 +150,18 @@ pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = 
     (ast::Ceil, &crate::builtin_math::CEIL_CLASS),
     (ast::Ceiling, &crate::builtin_math::CEILING_CLASS),
     (ast::Floor, &crate::builtin_math::FLOOR_CLASS),
+    (ast::LogicAnd, &crate::builtin_op::LOGIC_AND_CLASS),
+    (ast::LogicOr, &crate::builtin_op::LOGIC_OR_CLASS),
+    (ast::LogicXor, &crate::builtin_op::LOGIC_XOR_CLASS),
+    (ast::UnaryNot, &crate::builtin_op::UNARY_NOT_CLASS),
+    (ast::UnaryMinus, &crate::builtin_op::UNARY_MINUS_CLASS),
+    (
+        ast::IsTruthWithoutNull,
+        &crate::builtin_op::IS_TRUTH_WITHOUT_NULL_CLASS,
+    ),
+    (
+        ast::IsTruthWithNull,
+        &crate::builtin_op::IS_TRUTH_WITH_NULL_CLASS,
+    ),
+    (ast::IsFalsity, &crate::builtin_op::IS_FALSITY_CLASS),
 ];

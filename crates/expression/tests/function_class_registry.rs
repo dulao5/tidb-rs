@@ -87,7 +87,10 @@ fn every_ported_function_class_is_registered() {
         .unwrap();
     for (path, name) in &instances {
         assert!(
-            table.contains(&format!("::{name})")) || table.contains(&format!(" {name})")),
+            table.contains(&format!("::{name})"))
+                || table.contains(&format!(" {name})"))
+                // rustfmt breaks a long entry, leaving a trailing comma
+                || table.contains(&format!("::{name},")),
             "{path}: {name} is not in PORTED_FUNCTION_CLASSES"
         );
     }

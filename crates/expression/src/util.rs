@@ -27,3 +27,28 @@ pub fn disable_parse_json_flag4_expr(_ctx: &dyn EvalContext, expr: &mut ExprRef)
     }
     with_type_mut(expr, |tp| tp.set_flag(tp.get_flag() & !ParseToJSONFlag));
 }
+
+/// `logicalOps`: the functions whose result is a boolean (`wrapWithIsTrue` does not wrap
+/// them when `wrapForInt`).
+// glue: Go's logicalOps map (util.go) as a match over its keys
+pub fn is_logical_op(name: &str) -> bool {
+    use crate::ast_funcs as ast;
+    matches!(
+        name,
+        ast::LT
+            | ast::GE
+            | ast::GT
+            | ast::LE
+            | ast::EQ
+            | ast::NE
+            | ast::UnaryNot
+            | ast::LogicAnd
+            | ast::LogicOr
+            | ast::LogicXor
+            | ast::In
+            | ast::IsNull
+            | ast::IsTruthWithoutNull
+            | ast::IsFalsity
+            | ast::Like
+    )
+}

@@ -242,6 +242,16 @@ pub enum SigExtra {
         /// `cannotConvertStringAsWarning`.
         cannot_convert_string_as_warning: bool,
     },
+    /// `keepNull` of the IS TRUE / IS FALSE signatures (D08.5); their `Clone` copies it.
+    IsTrueOrFalse {
+        /// `keepNull`.
+        keep_null: bool,
+    },
+    /// `builtinUnaryMinusDecimalSig.constantArgOverflow` (D08.5); its `Clone` copies it.
+    UnaryMinusDecimal {
+        /// `constantArgOverflow`.
+        constant_arg_overflow: bool,
+    },
 }
 
 impl std::fmt::Debug for BuiltinFunc {
@@ -366,6 +376,13 @@ impl BuiltinFunc {
                 cannot_convert_string_as_warning: true
             }
         )
+    }
+
+    /// `keepNull` of the IS TRUE / IS FALSE signatures (`false` elsewhere).
+    // glue: field read of SigExtra::IsTrueOrFalse (D08.1 spec §3.5 (a))
+    #[inline]
+    pub fn keep_null(&self) -> bool {
+        matches!(self.extra, SigExtra::IsTrueOrFalse { keep_null: true })
     }
 
     /// PbCode returns PbCode of this signature.
@@ -778,6 +795,15 @@ pub enum RpnNode {
         /// The number of arguments.
         nargs: usize,
     },
+    /// A function call whose Go vector version evaluates its arguments itself and falls back
+    /// to its row version when the second argument fails or warns (`builtinLogicAndSig` /
+    /// `builtinLogicOrSig.vecEvalInt`): the arguments are separate programs.
+    RowFallback {
+        /// The function node.
+        func: ExprRef,
+        /// The programs of `args[0]` and `args[1]` (read as int).
+        args: Box<[RpnProgram; 2]>,
+    },
 }
 
 /// An expression compiled for the vector driver (N4 §3.4). Immutable, `Send + Sync`.
@@ -922,6 +948,29 @@ impl RpnProgram {
                     stack.push(Slot::Temp(col));
                     r?;
                 }
+                RpnNode::RowFallback { func, args } => {
+                    let mut out = if pos == last {
+                        None
+                    } else {
+                        Some(rpn.pool.pop().unwrap_or_else(rt::empty_column))
+                    };
+                    let et = match self.root_as {
+                        Some(et) if pos == last => et,
+                        _ => ETInt,
+                    };
+                    let r = {
+                        let dst = match out.as_mut() {
+                            Some(c) => c,
+                            None => &mut *result,
+                        };
+                        row_fallback_call(ctx, st, rpn, func, args, et, input, dst)
+                    };
+                    match out {
+                        Some(c) => stack.push(Slot::Temp(c)),
+                        None => return r,
+                    }
+                    r?;
+                }
                 RpnNode::Call { func, nargs } => {
                     let f = &func
                         .as_scalar_function()
@@ -995,6 +1044,15 @@ fn compile_into(e: &ExprRef, as_type: EvalType, nodes: &mut Vec<RpnNode>) {
             expr: e.clone(),
             as_type,
         }),
+        Expr::ScalarFunction(sf) if crate::builtin_op::falls_back_to_rows(sf.function.sig) => {
+            nodes.push(RpnNode::RowFallback {
+                func: e.clone(),
+                args: Box::new([
+                    RpnProgram::compile_as(&sf.function.args[0], ETInt),
+                    RpnProgram::compile_as(&sf.function.args[1], ETInt),
+                ]),
+            });
+        }
         Expr::ScalarFunction(sf) => {
             let drivers = &sf.function.sig.drivers;
             for (i, a) in sf.function.args.iter().enumerate() {
@@ -1009,6 +1067,67 @@ fn compile_into(e: &ExprRef, as_type: EvalType, nodes: &mut Vec<RpnNode>) {
             });
         }
     }
+}
+
+/// The vector version of `builtinLogicAndSig` / `builtinLogicOrSig`: `args[0]` is evaluated
+/// (its error is returned), then `args[1]`; when that fails or adds warnings, the warnings
+/// since `args[0]` are truncated and the whole chunk is evaluated by the row version
+/// (`fallbackEvalInt`). Otherwise the signature's vector driver merges the two columns.
+// go: pkg/expression/builtin_op_vec.go builtinLogicAndSig.vecEvalInt L2 (the arguments are RPN sub-programs; the merge is the lazy body's vector driver)
+// go: pkg/expression/builtin_op_vec.go builtinLogicOrSig.vecEvalInt L2 (the arguments are RPN sub-programs; the merge is the lazy body's vector driver)
+// go: pkg/expression/builtin_op_vec.go builtinLogicAndSig.fallbackEvalInt L1
+// go: pkg/expression/builtin_op_vec.go builtinLogicOrSig.fallbackEvalInt L1
+#[allow(clippy::too_many_arguments)]
+fn row_fallback_call(
+    ctx: &dyn EvalContext,
+    st: &EvalState,
+    rpn: &mut RpnState,
+    func: &ExprRef,
+    args: &[RpnProgram; 2],
+    et: EvalType,
+    input: &Chunk,
+    result: &mut Column,
+) -> Result<(), Error> {
+    let f = &func
+        .as_scalar_function()
+        .expect("RowFallback node holds a ScalarFunction")
+        .function;
+    let n = input.num_rows();
+    if normalize_et(et) != ETInt {
+        // Go's VecEvalXxx of another type is the base error, before any argument.
+        return f.vec_eval(ctx, et, n, &[], result);
+    }
+    let before_arg0 = ctx.warning_count();
+    let mut c0 = rpn.pool.pop().unwrap_or_else(rt::empty_column);
+    if let Err(e) = args[0].eval(ctx, st, rpn, input, &mut c0) {
+        rpn.pool.push(c0);
+        return Err(e);
+    }
+    let mut c1 = rpn.pool.pop().unwrap_or_else(rt::empty_column);
+    let before_arg1 = ctx.warning_count();
+    let r1 = args[1].eval(ctx, st, rpn, input, &mut c1);
+    let after_arg1 = ctx.warning_count();
+    let r = if r1.is_err() || after_arg1 > before_arg1 {
+        ctx.truncate_warnings(before_arg0);
+        let mut out = rt::IntOut::new(result, n, &[]);
+        let mut r = Ok(());
+        for i in 0..n {
+            match func.eval_int(ctx, st, input.get_row(i)) {
+                Ok(Some(v)) => out.set(i, v),
+                Ok(None) => out.set_null(i),
+                Err(e) => {
+                    r = Err(e);
+                    break;
+                }
+            }
+        }
+        r
+    } else {
+        f.vec_eval(ctx, ETInt, n, &[&c0, &c1], result)
+    };
+    rpn.pool.push(c0);
+    rpn.pool.push(c1);
+    r
 }
 
 /// The evaluation type of `e`'s `RetType` known at build time (a parameter marker's type is

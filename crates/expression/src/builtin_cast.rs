@@ -2622,6 +2622,26 @@ pub fn propagate_type(ctx: &dyn EvalContext, eval_type: EvalType, args: &mut [Ex
     }
 }
 
+/// The type Go reads through a `*FieldType` taken before `newBaseBuiltinFuncWithTp(..,
+/// ETReal, ..)`: wrapping a DECIMAL argument in `CAST(.. AS REAL)` runs `PropagateType`, which
+/// changes the type of a constant or a function argument in place (a column is cloned
+/// first), so Go reads the changed type (D08.8 spec §4.6; specs/D08.5-arith §4). Kept next to
+/// `propagate_type` (Lucky, review of #100): only the function class that took the pointer
+/// sees the change, which this reproduces without sharing the node.
+// glue: Go's in-place PropagateType seen through a pointer taken earlier (arithmeticModFunctionClass.getFunction)
+pub(crate) fn type_after_real_wrap(ev: &dyn EvalContext, arg: &ExprRef) -> FieldType {
+    let tp = arg.get_type(ev).into_owned();
+    if matches!(**arg, Expr::Column(_) | Expr::CorrelatedColumn(_))
+        || tp.hybrid()
+        || tp.eval_type() != ETDecimal
+    {
+        return tp;
+    }
+    let mut a = [arg.clone()];
+    propagate_type(ev, ETReal, &mut a);
+    a[0].get_type(ev).into_owned()
+}
+
 // ---------------------------------------------------------------- building CAST
 
 /// CanImplicitEvalInt represents the builtin functions that have an implicit path to
