@@ -294,7 +294,7 @@ fn fmt_byte_list(b: &[u8]) -> Vec<u8> {
 
 /// `cmp.Compare` for floats: NaN is less than any other value and equal to NaN.
 // glue: cmp.Compare[float64]
-fn cmp_f64(x: f64, y: f64) -> isize {
+pub fn cmp_f64(x: f64, y: f64) -> isize {
     let xnan = x.is_nan();
     let ynan = y.is_nan();
     if xnan {

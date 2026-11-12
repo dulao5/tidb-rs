@@ -20,6 +20,7 @@ extern crate self as tidb_expression;
 pub use tidb_parser::ast::funcs as ast_funcs;
 pub mod builtin;
 pub mod builtin_cast;
+pub mod builtin_compare;
 pub mod builtin_convert_charset;
 pub mod builtin_registry;
 mod builtin_registry_gen;

@@ -133,4 +133,12 @@ pub fn function_class(name: &str) -> Option<&'static dyn FunctionClass> {
 /// The ported classes of `funcs`, by function name. Every `impl FunctionClass for` in this
 /// crate must have an entry (test `function_class_registry`; Lucky, review of #95).
 // glue: the ported part of Go's funcs map
-pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = &[];
+pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = &[
+    (ast::LT, &crate::builtin_compare::LT_CLASS),
+    (ast::LE, &crate::builtin_compare::LE_CLASS),
+    (ast::GT, &crate::builtin_compare::GT_CLASS),
+    (ast::GE, &crate::builtin_compare::GE_CLASS),
+    (ast::EQ, &crate::builtin_compare::EQ_CLASS),
+    (ast::NE, &crate::builtin_compare::NE_CLASS),
+    (ast::NullEQ, &crate::builtin_compare::NULL_EQ_CLASS),
+];
