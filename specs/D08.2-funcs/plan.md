@@ -17,7 +17,7 @@
 
 1. `newBaseBuiltinFuncWithTp`、`newBaseBuiltinFuncWithFieldTypes`（`WrapWithCastAs*`、`BuildCastFunction`）、`baseBuiltinCastFunc`（`metadata` 返回 `tipb.InUnionMetadata`，`BuiltinFunc` 需要加 `in_union`）。
 2. 注册表条目加 `get_function`；`NewFunction*`。
-3. 常量折叠 `constant_fold.go`（`FoldConstant` 与 IF/IFNULL/CASE/ISNULL 的特殊处理）、常量传播 `constant_propagation.go`：需要比较、逻辑函数（D08.4、D08.5）真实求值。
+3. 常量折叠 `constant_fold.go`（`FoldConstant` 与 IF/IFNULL/CASE/ISNULL 的特殊处理）。常量传播 `constant_propagation.go` **已完成**（第 2b 部分，spec §4 第 7 条）：govec `cast` 领域的 `cprop` op，`PropagateConstant` 与 `PropConstOverOuterJoin`。
 4. `builtin_func_param.go`：随 REGEXP/ILIKE。
 
 ## 第 3 部分

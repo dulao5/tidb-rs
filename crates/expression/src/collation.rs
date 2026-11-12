@@ -706,3 +706,40 @@ fn illegal_mix_collation_err(ctx: &dyn EvalContext, func_name: &str, args: &[Exp
         }
     }
 }
+
+/// CollationStrictnessGroup group collation by strictness (Go `var CollationStrictnessGroup`).
+// glue: Go package-level map (a `match` here)
+pub fn collation_strictness_group(coll: &str) -> Option<i32> {
+    use tidb_parser::gocharset::{
+        CollationASCII, CollationBin, CollationLatin1, CollationUTF8, CollationUTF8MB4,
+    };
+    Some(match coll {
+        "utf8_general_ci" | "utf8mb4_general_ci" => 1,
+        "utf8_unicode_ci" | "utf8mb4_unicode_ci" => 2,
+        c if c == CollationASCII
+            || c == CollationLatin1
+            || c == CollationUTF8
+            || c == CollationUTF8MB4 =>
+        {
+            3
+        }
+        c if c == CollationBin => 4,
+        _ => return None,
+    })
+}
+
+/// CollationStrictness indicates the strictness of comparison of the collation. The unequal
+/// order in a weak collation also holds in a strict collation. For example, if a != b in a
+/// weak collation(e.g. general_ci), then there must be a != b in a strict collation(e.g.
+/// _bin). collation group id in value is stricter than collation group id in key
+/// (Go `var CollationStrictness`; `None` for a key the map lacks).
+// glue: Go package-level map (a `match` here)
+pub fn collation_strictness(group: i32) -> Option<&'static [i32]> {
+    Some(match group {
+        1 => &[3, 4],
+        2 => &[3, 4],
+        3 => &[4],
+        4 => &[],
+        _ => return None,
+    })
+}

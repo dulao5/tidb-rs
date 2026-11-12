@@ -1193,3 +1193,81 @@ pub fn eval_expr(
     }
     Ok(())
 }
+
+/// composeConditionWithBinaryOp composes condition with binary operator into a balance deep
+/// tree, which benefits a lot for pb decoder/encoder. `None` is Go's nil Expression (no
+/// conditions, or `NewFunctionInternal` failed).
+// go: composeConditionWithBinaryOp L1
+fn compose_condition_with_binary_op(
+    ctx: &dyn crate::context::BuildContext,
+    conditions: &[ExprRef],
+    func_name: &str,
+) -> Option<ExprRef> {
+    let length = conditions.len();
+    if length == 0 {
+        return None;
+    }
+    if length == 1 {
+        return Some(Arc::clone(&conditions[0]));
+    }
+    let l = compose_condition_with_binary_op(ctx, &conditions[..length / 2], func_name);
+    let r = compose_condition_with_binary_op(ctx, &conditions[length / 2..], func_name);
+    // Go passes nil arguments on; a nil argument panics in newFunctionImpl. Both halves are
+    // non-empty here, so they are nil only when a nested NewFunctionInternal failed.
+    let (l, r) = (l?, r?);
+    crate::scalar_function::new_function_internal(
+        ctx,
+        func_name,
+        tidb_types::field_type::new_field_type(mysql::TypeTiny),
+        vec![l, r],
+    )
+}
+
+/// ComposeCNFCondition composes CNF items into a balance deep CNF tree, which benefits a
+/// lot for pb decoder/encoder.
+// go: ComposeCNFCondition L1
+pub fn compose_cnf_condition(
+    ctx: &dyn crate::context::BuildContext,
+    conditions: &[ExprRef],
+) -> Option<ExprRef> {
+    compose_condition_with_binary_op(ctx, conditions, ast_func::LogicAnd)
+}
+
+/// ComposeDNFCondition composes DNF items into a balance deep DNF tree.
+// go: ComposeDNFCondition L1
+pub fn compose_dnf_condition(
+    ctx: &dyn crate::context::BuildContext,
+    conditions: &[ExprRef],
+) -> Option<ExprRef> {
+    compose_condition_with_binary_op(ctx, conditions, ast_func::LogicOr)
+}
+
+/// splitNormalFormItems split CNF(conjunctive normal form) like "a and b and c", or
+/// DNF(disjunctive normal form) like "a or b or c"
+// go: splitNormalFormItems L1
+fn split_normal_form_items(on_expr: &ExprRef, func_name: &str) -> Vec<ExprRef> {
+    if let Expr::ScalarFunction(v) = &**on_expr
+        && v.func_name.l == func_name
+    {
+        let mut ret = Vec::new();
+        for arg in v.get_args() {
+            ret.extend(split_normal_form_items(arg, func_name));
+        }
+        return ret;
+    }
+    vec![Arc::clone(on_expr)]
+}
+
+/// SplitCNFItems splits CNF items.
+/// CNF means conjunctive normal form, e.g. "a and b and c".
+// go: SplitCNFItems L1
+pub fn split_cnf_items(on_expr: &ExprRef) -> Vec<ExprRef> {
+    split_normal_form_items(on_expr, ast_func::LogicAnd)
+}
+
+/// SplitDNFItems splits DNF items.
+/// DNF means disjunctive normal form, e.g. "a or b or c".
+// go: SplitDNFItems L1
+pub fn split_dnf_items(on_expr: &ExprRef) -> Vec<ExprRef> {
+    split_normal_form_items(on_expr, ast_func::LogicOr)
+}

@@ -154,6 +154,7 @@ pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = 
     (ast::LogicOr, &crate::builtin_op::LOGIC_OR_CLASS),
     (ast::LogicXor, &crate::builtin_op::LOGIC_XOR_CLASS),
     (ast::UnaryNot, &crate::builtin_op::UNARY_NOT_CLASS),
+    (ast::IsNull, &crate::builtin_op::IS_NULL_CLASS),
     (ast::UnaryMinus, &crate::builtin_op::UNARY_MINUS_CLASS),
     (
         ast::IsTruthWithoutNull,
