@@ -136,6 +136,9 @@ pub fn function_class(name: &str) -> Option<&'static dyn FunctionClass> {
 pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = &[
     (ast::LT, &crate::builtin_compare::LT_CLASS),
     (ast::Coalesce, &crate::builtin_compare::COALESCE_CLASS),
+    (ast::Greatest, &crate::builtin_compare::GREATEST_CLASS),
+    (ast::Least, &crate::builtin_compare::LEAST_CLASS),
+    (ast::Interval, &crate::builtin_compare::INTERVAL_CLASS),
     (ast::LE, &crate::builtin_compare::LE_CLASS),
     (ast::GT, &crate::builtin_compare::GT_CLASS),
     (ast::GE, &crate::builtin_compare::GE_CLASS),
