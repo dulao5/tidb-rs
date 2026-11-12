@@ -180,6 +180,26 @@ pub struct SigDesc {
     pub vectorized: bool,
     /// The drivers.
     pub drivers: SigDrivers,
+    /// Whether Go's vector version evaluates the arguments itself and falls back to the row
+    /// version (D08.1 spec §3.6): the RPN compiler then gives the arguments as separate
+    /// programs (`RpnNode::RowFallback`).
+    pub args_fallback: ArgsFallback,
+}
+
+/// How a signature's Go vector version evaluates its arguments (D08.1 spec §3.6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgsFallback {
+    /// The arguments are evaluated by the parent RPN program (`RpnNode::Call`).
+    None,
+    /// `builtinLogicAndSig` / `builtinLogicOrSig`: `args[0]` is evaluated (its error is
+    /// returned); when `args[1]` fails or adds warnings, the warnings since `args[0]` are
+    /// truncated and the chunk is evaluated by the row version.
+    SecondArg,
+    /// `builtinCoalesce*Sig` (and later CASE WHEN): the arguments are evaluated in order;
+    /// when any of them (the first one too) fails or adds warnings, the warnings it added
+    /// are truncated (only when there are new ones) and the chunk is evaluated by the row
+    /// version.
+    EveryArg,
 }
 
 impl std::fmt::Debug for SigDesc {
@@ -837,13 +857,14 @@ pub enum RpnNode {
         nargs: usize,
     },
     /// A function call whose Go vector version evaluates its arguments itself and falls back
-    /// to its row version when the second argument fails or warns (`builtinLogicAndSig` /
-    /// `builtinLogicOrSig.vecEvalInt`): the arguments are separate programs.
+    /// to its row version ([`SigDesc::args_fallback`]): the arguments are separate programs.
     RowFallback {
         /// The function node.
         func: ExprRef,
-        /// The programs of `args[0]` and `args[1]` (read as int).
-        args: Box<[RpnProgram; 2]>,
+        /// The programs of the arguments (read as the signature reads them).
+        args: Vec<RpnProgram>,
+        /// The fallback rule of the signature.
+        rule: ArgsFallback,
     },
 }
 
@@ -989,22 +1010,23 @@ impl RpnProgram {
                     stack.push(Slot::Temp(col));
                     r?;
                 }
-                RpnNode::RowFallback { func, args } => {
+                RpnNode::RowFallback { func, args, rule } => {
                     let mut out = if pos == last {
                         None
                     } else {
                         Some(rpn.pool.pop().unwrap_or_else(rt::empty_column))
                     };
+                    let own = sig_eval_type(func);
                     let et = match self.root_as {
                         Some(et) if pos == last => et,
-                        _ => ETInt,
+                        _ => own,
                     };
                     let r = {
                         let dst = match out.as_mut() {
                             Some(c) => c,
                             None => &mut *result,
                         };
-                        row_fallback_call(ctx, st, rpn, func, args, et, input, dst)
+                        row_fallback_call(ctx, st, rpn, func, args, *rule, et, input, dst)
                     };
                     match out {
                         Some(c) => stack.push(Slot::Temp(c)),
@@ -1085,13 +1107,23 @@ fn compile_into(e: &ExprRef, as_type: EvalType, nodes: &mut Vec<RpnNode>) {
             expr: e.clone(),
             as_type,
         }),
-        Expr::ScalarFunction(sf) if crate::builtin_op::falls_back_to_rows(sf.function.sig) => {
+        Expr::ScalarFunction(sf) if sf.function.sig.args_fallback != ArgsFallback::None => {
+            let drivers = &sf.function.sig.drivers;
             nodes.push(RpnNode::RowFallback {
                 func: e.clone(),
-                args: Box::new([
-                    RpnProgram::compile_as(&sf.function.args[0], ETInt),
-                    RpnProgram::compile_as(&sf.function.args[1], ETInt),
-                ]),
+                args: sf
+                    .function
+                    .args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let read = drivers
+                            .arg_eval_type(i)
+                            .unwrap_or_else(|| static_eval_type(a));
+                        RpnProgram::compile_as(a, read)
+                    })
+                    .collect(),
+                rule: sf.function.sig.args_fallback,
             });
         }
         Expr::ScalarFunction(sf) => {
@@ -1110,10 +1142,33 @@ fn compile_into(e: &ExprRef, as_type: EvalType, nodes: &mut Vec<RpnNode>) {
     }
 }
 
-/// The vector version of `builtinLogicAndSig` / `builtinLogicOrSig`: `args[0]` is evaluated
-/// (its error is returned), then `args[1]`; when that fails or adds warnings, the warnings
-/// since `args[0]` are truncated and the whole chunk is evaluated by the row version
-/// (`fallbackEvalInt`). Otherwise the signature's vector driver merges the two columns.
+/// The evaluation type a signature's vector driver produces (Go's `VecEvalXxx` of the
+/// function's result type when the signature has no single-type drivers).
+// glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+fn sig_eval_type(func: &ExprRef) -> EvalType {
+    let f = &func
+        .as_scalar_function()
+        .expect("RowFallback node holds a ScalarFunction")
+        .function;
+    f.sig
+        .drivers
+        .eval_type()
+        .unwrap_or_else(|| f.tp.eval_type())
+}
+
+/// The vector version of a signature that evaluates its arguments itself and falls back to
+/// its row version (D08.1 spec §3.6, [`ArgsFallback`]):
+///
+/// - `SecondArg` (`builtinLogicAndSig` / `builtinLogicOrSig.vecEvalInt`): `args[0]` is
+///   evaluated (its error is returned), then `args[1]`; when that fails or adds warnings,
+///   the warnings since `args[0]` are truncated and the chunk is evaluated by the row
+///   version (`fallbackEvalInt`).
+/// - `EveryArg` (`builtinCoalesce*Sig.vecEvalXxx`): every argument in order; when one of
+///   them fails or adds warnings (counted from before `args[0]`), the warnings are
+///   truncated to before `args[0]` if there are new ones and the chunk is evaluated by the
+///   row version (`fallbackEvalXxx`).
+///
+/// Otherwise the signature's (lazy) vector driver merges the argument columns.
 // go: pkg/expression/builtin_op_vec.go builtinLogicAndSig.vecEvalInt L2 (the arguments are RPN sub-programs; the merge is the lazy body's vector driver)
 // go: pkg/expression/builtin_op_vec.go builtinLogicOrSig.vecEvalInt L2 (the arguments are RPN sub-programs; the merge is the lazy body's vector driver)
 // go: pkg/expression/builtin_op_vec.go builtinLogicAndSig.fallbackEvalInt L1
@@ -1124,7 +1179,8 @@ fn row_fallback_call(
     st: &EvalState,
     rpn: &mut RpnState,
     func: &ExprRef,
-    args: &[RpnProgram; 2],
+    args: &[RpnProgram],
+    rule: ArgsFallback,
     et: EvalType,
     input: &Chunk,
     result: &mut Column,
@@ -1134,41 +1190,135 @@ fn row_fallback_call(
         .expect("RowFallback node holds a ScalarFunction")
         .function;
     let n = input.num_rows();
-    if normalize_et(et) != ETInt {
+    if normalize_et(et) != normalize_et(sig_eval_type(func)) {
         // Go's VecEvalXxx of another type is the base error, before any argument.
         return f.vec_eval(ctx, et, n, &[], result);
     }
-    let before_arg0 = ctx.warning_count();
-    let mut c0 = rpn.pool.pop().unwrap_or_else(rt::empty_column);
-    if let Err(e) = args[0].eval(ctx, st, rpn, input, &mut c0) {
-        rpn.pool.push(c0);
-        return Err(e);
-    }
-    let mut c1 = rpn.pool.pop().unwrap_or_else(rt::empty_column);
-    let before_arg1 = ctx.warning_count();
-    let r1 = args[1].eval(ctx, st, rpn, input, &mut c1);
-    let after_arg1 = ctx.warning_count();
-    let r = if r1.is_err() || after_arg1 > before_arg1 {
-        ctx.truncate_warnings(before_arg0);
-        let mut out = rt::IntOut::new(result, n, &[]);
-        let mut r = Ok(());
-        for i in 0..n {
-            match func.eval_int(ctx, st, input.get_row(i)) {
-                Ok(Some(v)) => out.set(i, v),
-                Ok(None) => out.set_null(i),
-                Err(e) => {
-                    r = Err(e);
+    let before = ctx.warning_count();
+    let mut cols: Vec<Column> = Vec::with_capacity(args.len());
+    let mut fallback = false;
+    let mut err = None;
+    for (i, a) in args.iter().enumerate() {
+        let mut c = rpn.pool.pop().unwrap_or_else(rt::empty_column);
+        let before_arg = ctx.warning_count();
+        let r = a.eval(ctx, st, rpn, input, &mut c);
+        cols.push(c);
+        let after = ctx.warning_count();
+        match rule {
+            ArgsFallback::SecondArg if i == 0 => {
+                if let Err(e) = r {
+                    err = Some(e);
                     break;
                 }
             }
+            ArgsFallback::SecondArg => {
+                if r.is_err() || after > before_arg {
+                    ctx.truncate_warnings(before);
+                    fallback = true;
+                    break;
+                }
+            }
+            ArgsFallback::EveryArg => {
+                if r.is_err() || after > before {
+                    if after > before {
+                        ctx.truncate_warnings(before);
+                    }
+                    fallback = true;
+                    break;
+                }
+            }
+            ArgsFallback::None => unreachable!("RowFallback node of a signature without fallback"),
         }
-        r
+    }
+    let r = if let Some(e) = err {
+        Err(e)
+    } else if fallback {
+        eval_rows_into(ctx, st, func, et, input, result)
     } else {
-        f.vec_eval(ctx, ETInt, n, &[&c0, &c1], result)
+        let refs: Vec<&Column> = cols.iter().collect();
+        f.vec_eval(ctx, et, n, &refs, result)
     };
-    rpn.pool.push(c0);
-    rpn.pool.push(c1);
+    rpn.pool.extend(cols);
     r
+}
+
+/// The `fallbackEvalXxx` of the signatures with [`ArgsFallback`]: the row version on every
+/// row of the chunk; the first error is returned.
+// go: pkg/expression/builtin_compare_vec_generated.go builtinCoalesceIntSig.fallbackEvalInt L1
+// go: pkg/expression/builtin_compare_vec_generated.go builtinCoalesceRealSig.fallbackEvalReal L1
+// go: pkg/expression/builtin_compare_vec_generated.go builtinCoalesceDecimalSig.fallbackEvalDecimal L1
+// go: pkg/expression/builtin_compare_vec_generated.go builtinCoalesceStringSig.fallbackEvalString L1
+// go: pkg/expression/builtin_compare_vec_generated.go builtinCoalesceTimeSig.fallbackEvalTime L1
+// go: pkg/expression/builtin_compare_vec_generated.go builtinCoalesceDurationSig.fallbackEvalDuration L1
+// go: pkg/expression/builtin_compare_vec_generated.go builtinCoalesceJSONSig.fallbackEvalJSON L1
+fn eval_rows_into(
+    ctx: &dyn EvalContext,
+    st: &EvalState,
+    func: &ExprRef,
+    et: EvalType,
+    input: &Chunk,
+    result: &mut Column,
+) -> Result<(), Error> {
+    let n = input.num_rows();
+    macro_rules! fixed {
+        ($out:ident, $eval:ident) => {{
+            let mut out = rt::$out::new(result, n, &[]);
+            for i in 0..n {
+                match func.$eval(ctx, st, input.get_row(i))? {
+                    Some(v) => out.set(i, v),
+                    None => out.set_null(i),
+                }
+            }
+            Ok(())
+        }};
+    }
+    match normalize_et(et) {
+        ETInt => fixed!(IntOut, eval_int),
+        ETReal => fixed!(RealOut, eval_real),
+        ETDecimal => {
+            let mut out = rt::DecimalOut::new(result, n, &[]);
+            for i in 0..n {
+                match func.eval_decimal(ctx, st, input.get_row(i))? {
+                    Some(v) => out.set(i, v),
+                    None => out.set_null(i),
+                }
+            }
+            Ok(())
+        }
+        ETDatetime => fixed!(TimeOut, eval_time),
+        ETDuration => fixed!(DurationOut, eval_duration),
+        ETString => {
+            rt::reset_string(result, n);
+            for i in 0..n {
+                match func.eval_string(ctx, st, input.get_row(i))? {
+                    Some(v) => result.append_bytes(&v),
+                    None => result.append_null(),
+                }
+            }
+            Ok(())
+        }
+        ETJson => {
+            result.reserve_json(n);
+            for i in 0..n {
+                match func.eval_json(ctx, st, input.get_row(i))? {
+                    Some(v) => result.append_json(&v),
+                    None => result.append_null(),
+                }
+            }
+            Ok(())
+        }
+        ETVectorFloat32 => {
+            result.reserve_vector_float32(n);
+            for i in 0..n {
+                match func.eval_vector_float32(ctx, st, input.get_row(i))? {
+                    Some(v) => result.append_vector_float32(&v),
+                    None => result.append_null(),
+                }
+            }
+            Ok(())
+        }
+        other => Err(base_vec_eval_error(other)),
+    }
 }
 
 /// The evaluation type of `e`'s `RetType` known at build time (a parameter marker's type is

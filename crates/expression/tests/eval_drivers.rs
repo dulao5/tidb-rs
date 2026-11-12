@@ -51,12 +51,14 @@ static ADD_SIG: SigDesc = SigDesc {
     pb_code: 0,
     vectorized: true,
     drivers: ADD_OR_NULL,
+    args_fallback: tidb_expression::eval::ArgsFallback::None,
 };
 static CAT_SIG: SigDesc = SigDesc {
     name: "cat",
     pb_code: 0,
     vectorized: true,
     drivers: CAT,
+    args_fallback: tidb_expression::eval::ArgsFallback::None,
 };
 
 fn col(i: isize, ft: &FieldType) -> ExprRef {
@@ -187,6 +189,7 @@ static CHECKED_ADD_SIG: SigDesc = SigDesc {
     pb_code: 0,
     vectorized: true,
     drivers: CHECKED_ADD,
+    args_fallback: tidb_expression::eval::ArgsFallback::None,
 };
 
 /// The checked form: an overflow in a NULL row is not an error; the error is the one of

@@ -54,6 +54,7 @@ pub static builtinInternalToBinarySig: SigDesc = SigDesc {
     pb_code: ToBinary,
     vectorized: true,
     drivers: INTERNAL_TO_BINARY,
+    args_fallback: crate::eval::ArgsFallback::None,
 };
 
 /// `builtinInternalFromBinarySig`.
@@ -62,6 +63,7 @@ pub static builtinInternalFromBinarySig: SigDesc = SigDesc {
     pb_code: FromBinary,
     vectorized: true,
     drivers: INTERNAL_FROM_BINARY,
+    args_fallback: crate::eval::ArgsFallback::None,
 };
 
 /// `fmt.Errorf("unexpected argTp: %d", argTp)`.

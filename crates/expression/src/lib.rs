@@ -22,6 +22,7 @@ pub mod builtin;
 pub mod builtin_arithmetic;
 pub mod builtin_cast;
 pub mod builtin_compare;
+pub mod builtin_control;
 pub mod builtin_convert_charset;
 pub mod builtin_math;
 pub mod builtin_op;

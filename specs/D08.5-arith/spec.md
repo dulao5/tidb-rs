@@ -91,7 +91,7 @@ D08.1（`#[eval_fn]`、`RpnProgram`）、D08.2（`newBaseBuiltinFuncWithTp`）�
 
 ### 3.5 AND / OR 的向量版：`RpnNode::RowFallback`（第 2 批）
 
-Go 的 `builtinLogic{And,Or}Sig.vecEvalInt` 自己求两个参数：先求 `args[0]`（出错直接返回），再求 `args[1]`；如果 `args[1]` 出错或增加了 warning，就把 warning 截断到 `args[0]` 之前，整个 chunk 改用逐行版（`fallbackEvalInt`，逐行版有短路）。RPN 是后序的，参数在调用之前就已求完，所以这两个签名编译成 `RpnNode::RowFallback`：两个参数各是一个子程序，节点按 Go 的顺序求、比较 warning 数、截断并逐行回退；否则由函数体（`lazy`）的向量驱动合并两列，与 Go 的合并循环等价。`builtin_op::falls_back_to_rows` 按签名判断。反证：回退不看 warning 17 条、不截断 warning 30 条不一致。
+Go 的 `builtinLogic{And,Or}Sig.vecEvalInt` 自己求两个参数：先求 `args[0]`（出错直接返回），再求 `args[1]`；如果 `args[1]` 出错或增加了 warning，就把 warning 截断到 `args[0]` 之前，整个 chunk 改用逐行版（`fallbackEvalInt`，逐行版有短路）。RPN 是后序的，参数在调用之前就已求完，所以这两个签名编译成 `RpnNode::RowFallback`：两个参数各是一个子程序，节点按 Go 的顺序求、比较 warning 数、截断并逐行回退；否则由函数体（`lazy`）的向量驱动合并两列，与 Go 的合并循环等价。回退规则现在写在 `SigDesc::args_fallback`（`ArgsFallback::SecondArg`）上，见 D08.1 spec §3.6（D08.4 第 2 批泛化，`builtin_op::falls_back_to_rows` 已删除）。反证：回退不看 warning 17 条、不截断 warning 30 条不一致。
 
 ## 4. 偏离
 

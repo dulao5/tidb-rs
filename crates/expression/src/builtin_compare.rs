@@ -1553,19 +1553,296 @@ pub fn null_eq_vector_float32(
     }))
 }
 
+// ---------------------------------------------------------------- COALESCE
+
+/// coalesceFunctionClass returns the first non-NULL value in the list,
+/// or NULL if there are no non-NULL values.
+#[derive(Debug)]
+pub struct CoalesceFunctionClass {
+    /// The embedded baseFunctionClass.
+    pub base: BaseFunctionClass,
+}
+
+/// The function class of `coalesce`.
+pub static COALESCE_CLASS: CoalesceFunctionClass = CoalesceFunctionClass {
+    base: BaseFunctionClass {
+        func_name: ast::Coalesce,
+        min_args: 1,
+        max_args: -1,
+    },
+};
+
+impl FunctionClass for CoalesceFunctionClass {
+    // go: coalesceFunctionClass.getFunction L1
+    fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+
+        let mut flag = 0;
+        {
+            let ectx = ctx.get_eval_ctx();
+            for arg in &args {
+                flag |= arg.get_type(&*ectx).get_flag() & tidb_base::mysql::NotNullFlag;
+            }
+        }
+
+        let mut result_field_type =
+            crate::builtin_control::infer_type4_control_funcs(ctx, self.base.func_name, &args)?;
+
+        result_field_type.add_flag(flag);
+
+        let ret_eval_tp = result_field_type.eval_type();
+        let field_eval_tps = vec![ret_eval_tp; args.len()];
+
+        let mut bf = new_base_builtin_func_with_tp(
+            ctx,
+            self.base.func_name,
+            args,
+            ret_eval_tp,
+            &field_eval_tps,
+        )?;
+
+        bf.tp = result_field_type;
+
+        let sig: &'static SigDesc = match ret_eval_tp {
+            ETInt => &builtinCoalesceIntSig,
+            ETReal => &builtinCoalesceRealSig,
+            ETDecimal => &builtinCoalesceDecimalSig,
+            ETString => &builtinCoalesceStringSig,
+            // bf.tp.SetDecimal(resultFieldType.GetDecimal()): bf.tp is resultFieldType.
+            ETDatetime | ETTimestamp => &builtinCoalesceTimeSig,
+            ETDuration => &builtinCoalesceDurationSig,
+            ETJson => &builtinCoalesceJSONSig,
+            ETVectorFloat32 => &builtinCoalesceVectorFloat32Sig,
+            other => {
+                return Err(Error::plain(format!(
+                    "{} is not supported for COALESCE()",
+                    other.to_string()
+                )));
+            }
+        };
+        Ok(bf.with_sig(sig))
+    }
+}
+
+// The bodies are the row versions (`evalXxx`: the first argument that is not NULL, or the
+// first error). The vector versions evaluate every argument column themselves and fall
+// back to the row version when one of them fails or warns (ArgsFallback::EveryArg); their
+// merge ("the first column that is not NULL on this row") is the lazy body over the
+// evaluated columns.
+
+/// COALESCE over int arguments.
+// go: builtinCoalesceIntSig.evalInt L1
+// go: builtinCoalesceIntSig.vecEvalInt L2 (RpnNode::RowFallback with ArgsFallback::EveryArg; the merge is this lazy body's vector driver)
+// go: builtinCoalesceIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCoalesceIntSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int, lazy, args(Int))]
+pub fn coalesce_int(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<i64>, Error> {
+    for i in 0..args.len() {
+        if let Some(v) = args.int(ctx, i)? {
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
+/// COALESCE over real arguments.
+// go: builtinCoalesceRealSig.evalReal L1
+// go: builtinCoalesceRealSig.vecEvalReal L2 (RpnNode::RowFallback with ArgsFallback::EveryArg; the merge is this lazy body's vector driver)
+// go: builtinCoalesceRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCoalesceRealSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Real, lazy, args(Real))]
+pub fn coalesce_real(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<f64>, Error> {
+    for i in 0..args.len() {
+        if let Some(v) = args.real(ctx, i)? {
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
+/// COALESCE over decimal arguments.
+// go: builtinCoalesceDecimalSig.evalDecimal L1
+// go: builtinCoalesceDecimalSig.vecEvalDecimal L2 (RpnNode::RowFallback with ArgsFallback::EveryArg; the merge is this lazy body's vector driver)
+// go: builtinCoalesceDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCoalesceDecimalSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Decimal, lazy, args(Decimal))]
+pub fn coalesce_decimal(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<MyDecimal>, Error> {
+    for i in 0..args.len() {
+        if let Some(v) = args.decimal(ctx, i)? {
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
+/// COALESCE over string arguments (Go's vector version evaluates every argument column
+/// first and then merges; same result as merging after each).
+// go: builtinCoalesceStringSig.evalString L1
+// go: builtinCoalesceStringSig.vecEvalString L2 (RpnNode::RowFallback with ArgsFallback::EveryArg; the merge is this lazy body's vector driver)
+// go: builtinCoalesceStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCoalesceStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String, lazy, args(String))]
+pub fn coalesce_string(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    for i in 0..args.len() {
+        if let Some(v) = args.string(ctx, i)? {
+            out.extend_from_slice(&v);
+            return Ok(Some(()));
+        }
+    }
+    Ok(None)
+}
+
+/// COALESCE over time arguments: the value gets the result's fsp (`res.SetFsp(fsp)`).
+// go: builtinCoalesceTimeSig.evalTime L1
+// go: builtinCoalesceTimeSig.vecEvalTime L2 (RpnNode::RowFallback with ArgsFallback::EveryArg; the merge is this lazy body's vector driver)
+// go: builtinCoalesceTimeSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCoalesceTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time, lazy, args(Time))]
+pub fn coalesce_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<Time>, Error> {
+    let fsp = f.tp.get_decimal();
+    for i in 0..args.len() {
+        if let Some(mut v) = args.time(ctx, i)? {
+            v.set_fsp(fsp);
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
+/// COALESCE over duration arguments: the value gets the result's fsp (`res.Fsp = ..`).
+// go: builtinCoalesceDurationSig.evalDuration L1
+// go: builtinCoalesceDurationSig.vecEvalDuration L2 (RpnNode::RowFallback with ArgsFallback::EveryArg; the merge is this lazy body's vector driver)
+// go: builtinCoalesceDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCoalesceDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration, lazy, args(Duration))]
+pub fn coalesce_duration(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<Duration>, Error> {
+    let fsp = f.tp.get_decimal();
+    for i in 0..args.len() {
+        if let Some(mut v) = args.duration(ctx, i)? {
+            v.fsp = fsp;
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
+/// COALESCE over JSON arguments (Go's vector version evaluates every argument column
+/// first and then merges, like the string one).
+// go: builtinCoalesceJSONSig.evalJSON L1
+// go: builtinCoalesceJSONSig.vecEvalJSON L2 (RpnNode::RowFallback with ArgsFallback::EveryArg; the merge is this lazy body's vector driver)
+// go: builtinCoalesceJSONSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinCoalesceJSONSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Json, lazy, args(Json))]
+pub fn coalesce_json(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<BinaryJSON<'static>>, Error> {
+    for i in 0..args.len() {
+        if let Some(v) = args.json(ctx, i)? {
+            return Ok(Some(v.into_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// COALESCE over vector arguments (no vector version in Go).
+// go: builtinCoalesceVectorFloat32Sig.evalVectorFloat32 L1
+// go: builtinCoalesceVectorFloat32Sig.Clone L2 (BuiltinFunc::clone_from_base)
+#[eval_fn(VectorFloat32, lazy, args(VectorFloat32), novec)]
+pub fn coalesce_vector_float32(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<VectorFloat32<'static>>, Error> {
+    for i in 0..args.len() {
+        if let Some(v) = args.vector_float32(ctx, i)? {
+            return Ok(Some(v.clone()));
+        }
+    }
+    Ok(None)
+}
+
 // ---------------------------------------------------------------- signature descriptors
 
 macro_rules! cmp_sig {
     ($name:ident, $pb:expr, $vec:expr, $drivers:ident) => {
+        cmp_sig!($name, $pb, $vec, $drivers, None);
+    };
+    ($name:ident, $pb:expr, $vec:expr, $drivers:ident, $fallback:ident) => {
         #[doc = concat!("`", stringify!($name), "`.")]
         pub static $name: SigDesc = SigDesc {
             name: stringify!($name),
             pb_code: $pb,
             vectorized: $vec,
             drivers: $drivers,
+            args_fallback: crate::eval::ArgsFallback::$fallback,
         };
     };
 }
+
+// COALESCE (go-tipb ScalarFuncSig_Coalesce*; the VECTOR signature has no code: Go comments
+// its setPbCode out and the VECTOR signature has no vector version).
+cmp_sig!(builtinCoalesceIntSig, 4201, true, COALESCE_INT, EveryArg);
+cmp_sig!(builtinCoalesceRealSig, 4202, true, COALESCE_REAL, EveryArg);
+cmp_sig!(
+    builtinCoalesceDecimalSig,
+    4203,
+    true,
+    COALESCE_DECIMAL,
+    EveryArg
+);
+cmp_sig!(
+    builtinCoalesceStringSig,
+    4204,
+    true,
+    COALESCE_STRING,
+    EveryArg
+);
+cmp_sig!(builtinCoalesceTimeSig, 4205, true, COALESCE_TIME, EveryArg);
+cmp_sig!(
+    builtinCoalesceDurationSig,
+    4206,
+    true,
+    COALESCE_DURATION,
+    EveryArg
+);
+cmp_sig!(builtinCoalesceJSONSig, 4207, true, COALESCE_JSON, EveryArg);
+cmp_sig!(
+    builtinCoalesceVectorFloat32Sig,
+    0,
+    false,
+    COALESCE_VECTOR_FLOAT32
+);
 
 // tipb.ScalarFuncSig codes (go-tipb expression.pb.go).
 cmp_sig!(builtinLTIntSig, 100, true, LT_INT);

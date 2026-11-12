@@ -152,6 +152,7 @@ macro_rules! sig {
             pb_code: $pb,
             vectorized: $vec,
             drivers: $drivers,
+            args_fallback: crate::eval::ArgsFallback::None,
         };
     };
 }

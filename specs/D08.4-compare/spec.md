@@ -1,8 +1,8 @@
 # D08.4 比较函数：spec
 
-状态：**第 1 批（本 PR）**——比较运算符 `<`、`<=`、`>`、`>=`、`=`、`!=`、`<=>`：`compareFunctionClass`（含参数改写 `refineArgs`）、8 种比较类型 × 7 个运算符共 56 个签名、`CompareXxx`、`GetAccurateCmpType`、`GetCmpFunction`。第 2 批及以后：COALESCE、GREATEST/LEAST、INTERVAL 及其辅助函数（`aggregateType`、`resolveType4Extremum` 等，120 个函数）。
+状态：**第 1 批**（#98）——比较运算符 `<`、`<=`、`>`、`>=`、`=`、`!=`、`<=>`：`compareFunctionClass`（含参数改写 `refineArgs`）、8 种比较类型 × 7 个运算符共 56 个签名、`CompareXxx`、`GetAccurateCmpType`、`GetCmpFunction`。第 2 批及以后：COALESCE、GREATEST/LEAST、INTERVAL 及其辅助函数（`aggregateType`、`resolveType4Extremum` 等，120 个函数）。
 
-收敛检查（第 1 批）：D08.4 matched 248/368（`builtin_compare.go` 210 + `builtin_compare_vec.go` 53 + `builtin_compare_vec_generated.go` 105），缺的 120 个都是后续批次的函数；0 extra，0 duplicated。govec `cast` 领域 29,864 条（新增 5,484 条，追加在原有 24,380 条之后，原有记录不变）。
+收敛检查（第 2 批之后）：D08.4 matched 286/368（+38：COALESCE 的函数类和签名），缺的 82 个是第 3 批（GREATEST/LEAST、INTERVAL 及辅助函数、`aggregateType`）；D08.9 7/678（builtin_control.go 的类型推导）。第 1 批：D08.4 matched 248/368（`builtin_compare.go` 210 + `builtin_compare_vec.go` 53 + `builtin_compare_vec_generated.go` 105），缺的 120 个都是后续批次的函数；0 extra，0 duplicated。govec `cast` 领域 29,864 条（新增 5,484 条，追加在原有 24,380 条之后，原有记录不变）。
 
 ## 1. 范围（第 1 批）
 
@@ -13,6 +13,18 @@
 | `CompareInt/Real/Decimal/StringWithCollationInfo/Time/Duration/JSON/VectorFloat32`、`compareNull`、`genCompareString`、`resOfXX`、`vecResOfXX`、`vecCompareInt` | `compare_*`、`CompareFunc`；`resOfXX`/`vecResOfXX`/`vecCompareInt` 并入函数体与 `checked` 向量驱动 |
 | `getBaseCmpType`、`GetAccurateCmpType`、`GetCmpFunction`、`isTemporalColumn`、`tryToConvertConstantInt`、`RefineComparedConstant`、`matchRefineRule3Pattern`、`allowCmpArgsRefining4PlanCache` | 同名 snake_case 函数 |
 | util.go（D08.12）：`RemoveMutableConst`、`symmetricOp` | `remove_mutable_const`、`symmetric_op`（被 refineArgs 用到，随本批移植） |
+
+## 1b. 范围（第 2 批：COALESCE）
+
+| Go | Rust |
+|---|---|
+| `coalesceFunctionClass.getFunction` | `CoalesceFunctionClass` / `COALESCE_CLASS`（`builtin_compare.rs`），登记为 `coalesce` |
+| `builtinCoalesce{Int,Real,Decimal,String,Time,Duration,JSON}Sig` 的 `evalXxx`、`vecEvalXxx`、`fallbackEvalXxx`、`vectorized`、`Clone`；`builtinCoalesceVectorFloat32Sig` 的 `evalVectorFloat32`、`Clone`（Go 没有向量版，`novec`） | lazy 函数体（逐行版：第一个不为 NULL 的参数或第一个错误）；向量版是 `RpnNode::RowFallback` 加 `ArgsFallback::EveryArg`（D08.1 spec §3.6），合并由函数体的向量驱动完成；`fallbackEvalXxx` 是 `eval::eval_rows_into` |
+| builtin_control.go（D08.9）：`InferType4ControlFuncs`、`setFlenFromArgs`、`setDecimalFromArgs`、`addCollateAndCharsetAndFlagFromArgs`（全部分支）、`maxlen`、`hasNonBinaryStr`、`hasBinaryStr` | 新文件 `builtin_control.rs`（COALESCE 用到，提前移植；IF/IFNULL/CASE 等随 D08.9） |
+
+- pb code：CoalesceInt 4201 … CoalesceJson 4207（go-tipb）；VECTOR 签名没有 pb code（Go 注释掉了 `setPbCode`），`vectorized()` 为 false。
+- TIME 的结果用 `b.tp` 的 fsp（`res.SetFsp`），DURATION 的结果 `Fsp = b.tp.GetDecimal()`；向量版读 DURATION 列按 fsp 0（列中只存纳秒，结果列也只存纳秒）。
+- **逐行版和向量版的差异**：向量版求出全部参数，任何一个参数出错或产生 warning 都会改用逐行版并截断 warning，所以结果、错误和 warning 都和逐行版一致；govec `coal`/`coalfb` 的 2,100 条记录在 Go 中两种模式的结果都相同。按代码推断唯一的例外是参数有副作用时：向量版会对每一行求所有参数（例如 `COALESCE(c, RAND())` 会多推进 RAND 的序列），逐行版遇到第一个非 NULL 的参数就停。没有在集群上实测；RAND 的序列本来就不能跨实现比较，归 #83 的第二类。
 
 ## 2. 依赖
 
