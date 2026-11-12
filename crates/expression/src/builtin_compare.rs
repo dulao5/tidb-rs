@@ -2476,6 +2476,15 @@ fn extremum_time(
     let mut res = Time::default();
     for i in 0..args.len() {
         let Some(v) = args.time(ctx, i)? else {
+            // Go's vector version still converts the value kept so far on a NULL row
+            // (vecEvalTime converts every row after the merge loop): an invalid date there
+            // is an error although the result is NULL. With `args[0]` NULL the slot holds
+            // the zero time, whose conversion never fails.
+            if f.vector() && i > 0 {
+                let tc = type_ctx(ctx);
+                res.convert(&tc, get_accurate_time_type_for_gl_ret(f.cmp_as_date()))
+                    .1?;
+            }
             return Ok(None);
         };
         if i == 0 || v.compare(&res) * sign > 0 {
