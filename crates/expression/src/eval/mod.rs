@@ -225,7 +225,7 @@ pub struct BuiltinFunc {
 /// signature when a variant is added). Evaluation caches (LIKE/REGEXP patterns) are not
 /// configuration and live in `EvalState` (§3.5 (b)); `PropReader` markers are properties of
 /// the signature type, on [`SigDesc`] (§3.5 (c)).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub enum SigExtra {
     /// Only `baseBuiltinFunc` (Go's plain signatures).
     #[default]
@@ -252,6 +252,47 @@ pub enum SigExtra {
         /// `constantArgOverflow`.
         constant_arg_overflow: bool,
     },
+    /// `builtinRandSig.mysqlRng` (D08.5): the generator chosen when the signature is built
+    /// (the session's `Rng()` for `RAND()`, a new one seeded with the constant for
+    /// `RAND(constant)`). Go's `Clone` shares the pointer, so does the clone of the `Arc`:
+    /// a state shared by every copy of the expression, not a per-worker cache (D08.1 spec
+    /// §3.5).
+    Rand {
+        /// `mysqlRng`.
+        rng: tidb_sessionctx::exprctx::MysqlRngRef,
+    },
+}
+
+impl PartialEq for SigExtra {
+    // glue: trait impl (a shared generator compares by identity)
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (SigExtra::None, SigExtra::None) => true,
+            (SigExtra::Cast { in_union: a }, SigExtra::Cast { in_union: b }) => a == b,
+            (
+                SigExtra::FromBinary {
+                    cannot_convert_string_as_warning: a,
+                },
+                SigExtra::FromBinary {
+                    cannot_convert_string_as_warning: b,
+                },
+            ) => a == b,
+            (
+                SigExtra::IsTrueOrFalse { keep_null: a },
+                SigExtra::IsTrueOrFalse { keep_null: b },
+            ) => a == b,
+            (
+                SigExtra::UnaryMinusDecimal {
+                    constant_arg_overflow: a,
+                },
+                SigExtra::UnaryMinusDecimal {
+                    constant_arg_overflow: b,
+                },
+            ) => a == b,
+            (SigExtra::Rand { rng: a }, SigExtra::Rand { rng: b }) => std::sync::Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Debug for BuiltinFunc {

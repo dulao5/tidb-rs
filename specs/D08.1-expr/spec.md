@@ -78,7 +78,7 @@ v8.5.8 的 `pkg/expression` 中有 **98 个**签名结构体在 `baseBuiltinFunc
 - 字面量：`builtinDateLiteralSig.literal`、`builtinTimeLiteralSig.duration`、`builtinTimestampLiteralSig.tm`
 - DATE_ADD/DATE_SUB 的 `baseDateArithmetical` 与函数指针 `getDate`/`getInterval`/`timeOp`/`durationOp`（3 个）；CONVERT_TZ 的 `timezoneRegex`（编译好的常量）
 
-**(b) 求值时的缓存与可变状态 → `EvalState`**（每个 worker 一份，表达式本身不可变；N4 §3.5）。LIKE/ILIKE 的 `patternCache`、JSON_SCHEMA_VALID 的 `schemaCache`、REGEXP 4 个的 `regexpBaseFuncSig`（memorized regexp）与 REGEXP_REPLACE 的 `instCache`、RAND 的 `mysqlRng`。Go 的 `Clone` 对缓存新建空结构体（上段已核对）；`mysqlRng` 的 `Clone` 处理在移植 RAND 时逐个核对。
+**(b) 求值时的缓存与可变状态 → `EvalState`**（每个 worker 一份，表达式本身不可变；N4 §3.5）。LIKE/ILIKE 的 `patternCache`、JSON_SCHEMA_VALID 的 `schemaCache`、REGEXP 4 个的 `regexpBaseFuncSig`（memorized regexp）与 REGEXP_REPLACE 的 `instCache`。Go 的 `Clone` 对缓存新建空结构体（上段已核对）。RAND 的 `mysqlRng` 不在这一类（D08.5 第 4 批核对 Go 的 `Clone`）：Go 的 `builtinRandSig.Clone` 共用同一个生成器，`RAND()` 用的是会话的 `ctx.Rng()`，所以它是共享的可变状态，放在 (a) 的 `SigExtra::Rand { rng: MysqlRngRef }`（`Arc<Mutex<MysqlRng>>`，克隆复制 `Arc`），见 D08.5 spec §4 第 7 条。
 
 **(c) `expropt.*PropReader` 标记 → `SigDesc`**（签名类型的属性：求值需要哪些可选的会话属性，规划时由 `RequiredOptionalEvalProps` 收集；无运行时数据）。约 45 个：`SessionVarsPropReader`、`CurrentUserPropReader`、`InfoSchemaPropReader`、`KVStorePropReader`、`PrivilegeCheckerPropReader`、`SequenceOperatorPropReader`、`SQLExecutorPropReader`、`AdvisoryLockPropReader`、`DDLOwnerPropReader` 的各种组合（FOUND_ROWS、CURRENT_USER、LAST_INSERT_ID、NEXTVAL、GET_LOCK、SLEEP、SET 用户变量、VALUES、TIDB_* 等）。
 

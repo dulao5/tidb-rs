@@ -11,6 +11,7 @@ mod cast_arith;
 mod cast_cmp;
 mod cast_cprop;
 mod cast_eval;
+mod cast_math;
 mod cast_util;
 
 use std::io::Read;
@@ -314,6 +315,14 @@ fn ctx_of_with(v: &Value, extra: Vec<es::EvalCtxOption>, cs: Option<(String, Str
     opts.extend(extra);
     let ev = es::new_eval_context(opts);
     let mut copts = vec![es::with_eval_ctx(Arc::clone(&ev))];
+    if a.len() > 6 {
+        // The seed of the MysqlRng RAND() reads (D08.5 batch 4).
+        copts.push(es::with_rng(Arc::new(parking_lot::Mutex::new(
+            tidb_sessionctx::variable::session_state::MysqlRng::new_with_seed(
+                a[6].as_i64().unwrap(),
+            ),
+        ))));
+    }
     if let Some((cs, coll)) = cs {
         copts.push(es::with_charset(cs, coll));
     }
@@ -682,6 +691,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
             .or_else(|| cast_cmp::exec(op, p))
             .or_else(|| cast_arith::exec(op, p))
             .or_else(|| cast_cprop::exec(op, p))
+            .or_else(|| cast_math::exec(op, p))
             .or_else(|| cast_util::exec(op, p))
             .unwrap_or_else(|| panic!("cast: op {op}")),
     }
