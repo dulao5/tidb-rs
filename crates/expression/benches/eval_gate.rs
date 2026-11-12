@@ -170,30 +170,35 @@ static PLUS_INT_SIG: SigDesc = SigDesc {
     pb_code: 0,
     vectorized: true,
     drivers: PLUS_INT,
+    args_fallback: tidb_expression::eval::ArgsFallback::None,
 };
 static LT_INT_SIG: SigDesc = SigDesc {
     name: "builtinLTIntSig",
     pb_code: 0,
     vectorized: true,
     drivers: LT_INT,
+    args_fallback: tidb_expression::eval::ArgsFallback::None,
 };
 static CAST_INT_AS_REAL_SIG: SigDesc = SigDesc {
     name: "builtinCastIntAsRealSig",
     pb_code: 0,
     vectorized: true,
     drivers: CAST_INT_AS_REAL,
+    args_fallback: tidb_expression::eval::ArgsFallback::None,
 };
 static CONCAT_SIG: SigDesc = SigDesc {
     name: "builtinConcatSig",
     pb_code: 0,
     vectorized: true,
     drivers: CONCAT,
+    args_fallback: tidb_expression::eval::ArgsFallback::None,
 };
 static LIKE_SIG: SigDesc = SigDesc {
     name: "builtinLikeSig",
     pb_code: 0,
     vectorized: true,
     drivers: LIKE,
+    args_fallback: tidb_expression::eval::ArgsFallback::None,
 };
 
 // ---------------------------------------------------------------- inputs

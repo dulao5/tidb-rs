@@ -124,8 +124,14 @@ fn parse_attr(attr: TokenStream) -> syn::Result<Attr> {
                         Some("Real") => ArgKind::Real,
                         Some("Decimal") => ArgKind::Decimal,
                         Some("String") => ArgKind::Bytes,
+                        Some("Time") => ArgKind::Time,
+                        Some("Duration") => ArgKind::Duration,
+                        Some("Json") => ArgKind::Json,
+                        Some("VectorFloat32") => ArgKind::Vector,
                         _ => {
-                            return Err(m.error("eval_fn: args(Int | Real | Decimal | String, ..)"));
+                            return Err(m.error(
+                                "eval_fn: args(Int | Real | Decimal | String | Time | Duration | Json | VectorFloat32, ..)",
+                            ));
                         }
                     };
                     v.push(k);

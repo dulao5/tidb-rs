@@ -29,14 +29,6 @@ use crate::eval::{Args, BuiltinFunc, SigDesc, SigExtra, SigView};
 use crate::expression::{Expr, ExprRef};
 use tidb_expression_macros::eval_fn;
 
-/// Whether the vector version of `sig` evaluates its arguments itself and falls back to its
-/// row version (`builtinLogicAndSig`, `builtinLogicOrSig`): the RPN compiler gives these
-/// two signatures their arguments as separate programs (`RpnNode::RowFallback`).
-// glue: N4 §3 evaluation framework: which signatures need RpnNode::RowFallback
-pub fn falls_back_to_rows(sig: &SigDesc) -> bool {
-    std::ptr::eq(sig, &builtinLogicAndSig) || std::ptr::eq(sig, &builtinLogicOrSig)
-}
-
 // ---------------------------------------------------------------- AND / OR / XOR
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -963,12 +955,16 @@ pub fn bit_neg(_ctx: &dyn EvalContext, _f: &impl SigView, arg: i64) -> Result<Op
 
 macro_rules! op_sig {
     ($name:ident, $pb:expr, $vectorized:expr, $drivers:ident) => {
+        op_sig!($name, $pb, $vectorized, $drivers, None);
+    };
+    ($name:ident, $pb:expr, $vectorized:expr, $drivers:ident, $fallback:ident) => {
         #[doc = concat!("`", stringify!($name), "`.")]
         pub static $name: SigDesc = SigDesc {
             name: stringify!($name),
             pb_code: $pb,
             vectorized: $vectorized,
             drivers: $drivers,
+            args_fallback: crate::eval::ArgsFallback::$fallback,
         };
     };
 }
@@ -976,8 +972,8 @@ macro_rules! op_sig {
 // tipb.ScalarFuncSig codes (go-tipb expression.pb.go); the IS TRUE / IS FALSE signatures
 // built with keepNull get the `...WithNull` code (+20, set in getFunction); the VECTOR
 // IS TRUE / IS FALSE signatures have no code (Go comments the setPbCode out).
-op_sig!(builtinLogicAndSig, 3101, true, LOGIC_AND);
-op_sig!(builtinLogicOrSig, 3102, true, LOGIC_OR);
+op_sig!(builtinLogicAndSig, 3101, true, LOGIC_AND, SecondArg);
+op_sig!(builtinLogicOrSig, 3102, true, LOGIC_OR, SecondArg);
 op_sig!(builtinLogicXorSig, 3103, true, LOGIC_XOR);
 op_sig!(builtinUnaryNotRealSig, 3106, true, UNARY_NOT_REAL);
 op_sig!(builtinUnaryNotDecimalSig, 3105, true, UNARY_NOT_DECIMAL);

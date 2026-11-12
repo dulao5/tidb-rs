@@ -135,6 +135,7 @@ pub fn function_class(name: &str) -> Option<&'static dyn FunctionClass> {
 // glue: the ported part of Go's funcs map
 pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = &[
     (ast::LT, &crate::builtin_compare::LT_CLASS),
+    (ast::Coalesce, &crate::builtin_compare::COALESCE_CLASS),
     (ast::LE, &crate::builtin_compare::LE_CLASS),
     (ast::GT, &crate::builtin_compare::GT_CLASS),
     (ast::GE, &crate::builtin_compare::GE_CLASS),

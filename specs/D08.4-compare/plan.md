@@ -16,7 +16,7 @@
 
 ## 后续批次（交接）
 
-1. **第 2 批**：COALESCE（`coalesceFunctionClass` 与 8 个签名，含 `fallbackEvalXxx`）、`aggregateType`。
+1. ~~第 2 批~~：COALESCE 已完成（spec §1b）。`aggregateType` 没有用到（只有 GREATEST/LEAST 用），留给第 3 批。
 2. **第 3 批**：GREATEST/LEAST（含 `CmpStringAsTime`、`resolveType4Extremum`、`fixFlenAndDecimalForGreatestAndLeast`、`getAccurateTimeTypeForGLRet`、`doTimeConversionForGL`、`unsupportedJSONComparison`）、INTERVAL（`binSearch`/`linearSearch`）、`ResolveType4Between`。
 3. **D08.5（必须做）**：移植 ceil/floor；去掉 govec 生成器的 `cmpReachesCeil` 过滤；补 YEAR 列的记录：DOUBLE、短 DECIMAL、长 DECIMAL、字符串常量（spec §4 第 2 条，upstream-pitfall #99）。在此之前任何 SQL 路径都不能构建这类比较。
 4. **常量传播（D08.2 第 2b 部分，`constant_propagation.go`）**：需要 `LogicAnd`/`LogicOr`/`IsNull` 等逻辑函数（D08.5）与比较函数；在 D08.5 第一批之后做。它的 govec 记录要包含上面的 YEAR 情况（常量传播会把常量代入 YEAR 列的比较，Lucky 评审 #98）。

@@ -1179,6 +1179,7 @@ macro_rules! arith_sig {
             pb_code: $pb,
             vectorized: true,
             drivers: $drivers,
+            args_fallback: crate::eval::ArgsFallback::None,
         };
     };
 }
@@ -1238,6 +1239,7 @@ macro_rules! vector_sig {
             pb_code: 0,
             vectorized: false,
             drivers: $drivers,
+            args_fallback: crate::eval::ArgsFallback::None,
         };
     };
 }

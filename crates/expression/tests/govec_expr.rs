@@ -1072,6 +1072,7 @@ fn sig_of(name: &str, vectorized: bool) -> &'static eval::SigDesc {
             pb_code: 0,
             vectorized,
             drivers: eval::SigDrivers::None,
+            args_fallback: eval::ArgsFallback::None,
         }))
     })
 }

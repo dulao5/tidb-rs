@@ -90,6 +90,22 @@ v8.5.8 的 `pkg/expression` 中有 **98 个**签名结构体在 `baseBuiltinFunc
 
 `SigDesc` 是无状态的描述；有状态的签名（LIKE/ILIKE/REGEXP 的 pattern 缓存、JSON_SCHEMA_VALID 的 schema 缓存、`rand` 的种子、`nonDeterministic` 标记等）在 `BuiltinFunc` 中带自己的状态。Go 每个签名的 `Clone` 对这些状态的处理各不相同（共享、复制或重置）：第一个带状态的签名进来时逐个对照 Go 的 `Clone`，在签名旁注明是哪一种，并在 govec 中加一个"克隆后分别求值再比较"的操作。已核对：`builtinFuncCache`（LIKE、ILIKE、REGEXP、JSON_SCHEMA_VALID）在 Go 的 `Clone` 中是新建的结构体，只复制 `baseBuiltinFunc`，所以克隆后缓存为空——Rust `BuiltinFuncCache::clone` 返回空缓存（D08.2，`builtin_unit.rs` 覆盖）。
 
+### 3.6 向量版自己求参数并回退到逐行版的签名（`ArgsFallback`，Lucky 评审 #102，D08.1 T6d）
+
+Go 中有些签名的向量版不使用父表达式求好的参数列，而是自己逐个求参数，出问题就改用逐行版（`fallbackEvalXxx`）。RPN 是后序求值，参数在调用前就已求完，所以这些签名编译成 `RpnNode::RowFallback`：每个参数是一个子程序（按签名读取参数的求值类型编译），节点按 Go 的顺序求值、比较 warning 数、截断并回退；不回退时由签名（lazy 函数体）的向量驱动合并参数列。回退规则写在 `SigDesc::args_fallback` 上，RPN 编译器只看这个字段：
+
+| `ArgsFallback` | Go | 规则 |
+|---|---|---|
+| `None` | 其余签名 | 参数由父程序求（`RpnNode::Call`） |
+| `SecondArg` | `builtinLogic{And,Or}Sig.vecEvalInt` | 先求 `args[0]`，出错直接返回；`args[1]` 出错或相对于它求值之前新增了 warning，就把 warning 截断到 `args[0]` 之前，改用逐行版 |
+| `EveryArg` | `builtinCoalesce*Sig.vecEvalXxx`（以后 CASE WHEN 也是） | 按顺序求每个参数（包括第一个），出错或相对于 `args[0]` 之前新增了 warning 就回退；只有新增了 warning 时才截断（截断到 `args[0]` 之前） |
+
+- **IF/IFNULL（D08.9）需要第三种规则**（Lucky 评审 #108）：Go 在求完 `args[0]` 之后才记 warning 数，所以回退时 `args[0]` 的 warning 会出现两次（v8.5.8：`ifnull(cast('1a' as signed), …)` 关闭向量化 1 条 warning，打开 2 条）。IFNULL 和 AND 一样是两个参数，但用 `SecondArg` 会丢掉这个重复；移植 D08.9 时新增一种 `ArgsFallback`（见 tasks T6e）。CASE WHEN 用 `EveryArg` 是对的。
+- 守护测试（建议，tasks T6e）：Go 中有 `fallbackEvalXxx` 的 30 个签名，已注册的都必须有 `args_fallback != None`。
+- 输出用签名自己的求值类型（`SigDrivers::eval_type`）；调用方要求别的类型时（Go 调用了另一个 `VecEvalXxx`）返回 base 的错误，在求任何参数之前。
+- 回退时的逐行求值 `eval_rows_into` 按结果的求值类型写列（定长类型 `ResizeXxx` 后逐行设置；字符串、JSON、VECTOR 逐行追加），第一个错误直接返回，和 Go 的 `fallbackEvalXxx` 一样。
+- AND/OR 的记录（`logic`、`logicfb`）在泛化后仍是 0 条不一致；反证："`SecondArg` 的基准改成 `args[0]` 之前"报 1 条不一致。
+
 ## 4. 偏离与豁免
 
 1. **向量化方法不移植**（N4 §3.3 M-EVAL）：`Column`/`CorrelatedColumn`/`Constant` 的 `VecEval*` 由向量驱动（RPN）取代。tracker 豁免（`expr_pending.go`）。例外：`Column.VecEvalInt/Real/String` 中会转换的分支（hybrid 列读成 int/string、FLOAT 列读成 real）已移植（D08.8 第 2 部分），RPN 按父签名读取的求值类型（`SigDrivers::arg_eval_type`）选择：转换（`RpnNode::ColumnConv`）、照搬，或者在编译时 panic——列的存储与读取类型不符、Go 也不转换的组合（例如 FLOAT 列读成 int），Go 的函数类不会构造这种调用，RPN 拒绝而不是让签名误读字节（Lucky 评审 #82）。

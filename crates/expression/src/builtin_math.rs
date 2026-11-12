@@ -323,6 +323,7 @@ macro_rules! math_sig {
             pb_code: $pb,
             vectorized: true,
             drivers: $drivers,
+            args_fallback: crate::eval::ArgsFallback::None,
         };
     };
 }

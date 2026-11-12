@@ -50,6 +50,7 @@ pub static baseBuiltinFuncSig: SigDesc = SigDesc {
     pb_code: 0,
     vectorized: false,
     drivers: SigDrivers::None,
+    args_fallback: crate::eval::ArgsFallback::None,
 };
 
 /// `tipb.InUnionMetadata`: the metadata of a CAST signature.
