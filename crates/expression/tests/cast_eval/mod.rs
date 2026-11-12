@@ -67,6 +67,32 @@ pub(super) fn expr_of(ctx: &Ctxs, v: &Value, fts: &[FieldType]) -> ExprRef {
             false,
         )
         .unwrap(),
+        // D08.12: ["corcol", i] -> a correlated column over column i (UniqueID 101+i).
+        "corcol" => {
+            let i = a[1].as_u64().unwrap() as usize;
+            Expr::CorrelatedColumn(CorrelatedColumn::new(Column {
+                unique_id: 101 + i as i64,
+                index: i as isize,
+                ret_type: fts[i].clone(),
+                orig_name: "c".into(),
+                ..Column::default()
+            }))
+            .into_ref()
+        }
+        // D08.12: ["vcol", i, recipe] -> a virtual (generated) column of column i's type
+        // (UniqueID 201+i).
+        "vcol" => {
+            let i = a[1].as_u64().unwrap() as usize;
+            Expr::Column(Column {
+                unique_id: 201 + i as i64,
+                index: i as isize,
+                ret_type: fts[i].clone(),
+                orig_name: "c".into(),
+                virtual_expr: Some(expr_of(ctx, &a[2], fts)),
+                ..Column::default()
+            })
+            .into_ref()
+        }
         // D08.4 batch 1: ["fn", name, [recipes]] -> NewFunctionBase (no folding).
         "fn" => tidb_expression::scalar_function::new_function_base(
             &*ctx.0,

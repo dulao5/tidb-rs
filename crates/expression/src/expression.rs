@@ -1242,6 +1242,35 @@ pub fn compose_dnf_condition(
     compose_condition_with_binary_op(ctx, conditions, ast_func::LogicOr)
 }
 
+// go: extractBinaryOpItems L1
+fn extract_binary_op_items(conditions: &ScalarFunction, func_name: &str) -> Vec<ExprRef> {
+    let mut ret = Vec::new();
+    for arg in conditions.get_args() {
+        if let Expr::ScalarFunction(sf) = &**arg
+            && sf.func_name.l == func_name
+        {
+            ret.extend(extract_binary_op_items(sf, func_name));
+        } else {
+            ret.push(Arc::clone(arg));
+        }
+    }
+    ret
+}
+
+/// FlattenDNFConditions extracts DNF expression's leaf item.
+/// e.g. or(or(a=1, a=2), or(a=3, a=4)), we'll get [a=1, a=2, a=3, a=4].
+// go: FlattenDNFConditions L1
+pub fn flatten_dnf_conditions(dnf_condition: &ScalarFunction) -> Vec<ExprRef> {
+    extract_binary_op_items(dnf_condition, ast_func::LogicOr)
+}
+
+/// FlattenCNFConditions extracts CNF expression's leaf item.
+/// e.g. and(and(a>1, a>2), and(a>3, a>4)), we'll get [a>1, a>2, a>3, a>4].
+// go: FlattenCNFConditions L1
+pub fn flatten_cnf_conditions(cnf_condition: &ScalarFunction) -> Vec<ExprRef> {
+    extract_binary_op_items(cnf_condition, ast_func::LogicAnd)
+}
+
 /// splitNormalFormItems split CNF(conjunctive normal form) like "a and b and c", or
 /// DNF(disjunctive normal form) like "a or b or c"
 // go: splitNormalFormItems L1
