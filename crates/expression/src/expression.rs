@@ -613,6 +613,47 @@ pub fn is_binary_literal(expr: &Expr) -> bool {
     matches!(expr.as_constant(), Some(con) if con.value.kind() == KindBinaryLiteral)
 }
 
+/// wrapWithIsTrue wraps `arg` with istrue function if the return type of expr is not
+/// type int, otherwise, returns `arg` directly.
+/// The `keepNull` controls what the istrue function will return when `arg` is null:
+/// 1. keepNull is true and arg is null, the istrue function returns null.
+/// 2. keepNull is false and arg is null, the istrue function returns 0.
+///
+/// The `wrapForInt` indicates whether we need to wrapIsTrue for non-logical Expression with int type.
+// go: wrapWithIsTrue L1
+pub fn wrap_with_is_true(
+    ctx: &dyn crate::context::BuildContext,
+    keep_null: bool,
+    arg: ExprRef,
+    wrap_for_int: bool,
+) -> Result<ExprRef, Error> {
+    if arg.get_type(&*ctx.get_eval_ctx()).eval_type() == tidb_parser::types::ETInt {
+        if !wrap_for_int {
+            return Ok(arg);
+        }
+        if let Some(child) = arg.as_scalar_function()
+            && crate::util::is_logical_op(&child.func_name.l)
+        {
+            return Ok(arg);
+        }
+    }
+    use crate::builtin_registry::FunctionClass as _;
+    let fc = if keep_null {
+        &crate::builtin_op::IS_TRUTH_WITH_NULL_CLASS
+    } else {
+        &crate::builtin_op::IS_TRUTH_WITHOUT_NULL_CLASS
+    };
+    let mut f = fc.get_function(ctx, vec![arg])?;
+    let name = if keep_null {
+        crate::ast_funcs::IsTruthWithNull
+    } else {
+        crate::ast_funcs::IsTruthWithoutNull
+    };
+    let ret_type = f.get_ret_tp().clone();
+    let sf = Expr::ScalarFunction(ScalarFunction::new(name, ret_type, f)).into_ref();
+    Ok(crate::constant_fold::fold_constant(ctx, sf))
+}
+
 /// ExprNotNull checks if an expression is possible to be null.
 // go: ExprNotNull L1
 pub fn expr_not_null(ctx: &dyn EvalContext, expr: &Expr) -> bool {

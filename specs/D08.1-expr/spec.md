@@ -125,3 +125,7 @@ v8.5.8 的 `pkg/expression` 中有 **98 个**签名结构体在 `baseBuiltinFunc
     - **全局列池不移植（M-POOL），因此不复现 Go 的一个 bug**：`toBool` 用 `Column.GetString`（`hack.String`，与池中列共享字节）做 `StrToFloat`，"Truncated incorrect DOUBLE value: '%s'" 保存这个字符串、在 `Error()` 时才格式化；列放回全局池并被重用后，warning 显示的是别的字节（可能是别的语句、别的会话的数据）。tidb-rs 复制字符串，显示原值。用户可见（`SHOW WARNINGS`），见 `docs/compatibility.md` 与 upstream-pitfall [#97](https://github.com/dulao5/tidb-rs/issues/97)（v8.5.8 上已证实：同一语句 2,000 行中 976 条显示别的行的值；`c + 0` 与向量化 CAST 同样触发，关掉向量化后没有；跨会话没有复现）；govec 在经过 `VecEvalBool` 的路径上把这条 warning 的参数记为 `'<pooled>'`。
     - `HasAssignSetVarFunc`、`checkSequenceFunction` 的分支、`implicitEvalReal` 要等 SETVAR/GETVAR、序列函数（D08.9）和 DAYNAME（D08.7）才有调用方：单元测试 `vectorizable_by_function_names` 用改名的 CAST 节点覆盖按函数名判断的部分；`implicitEvalReal` 登记豁免。
     - 移植中发现并修好的问题：`Column.VecEvalInt/VecEvalString`（hybrid 列，2a）在 chunk 有 `Sel()` 时把行号经选择向量映射了两次（读错行或越界 panic）；改为逻辑行号，govec `evsuite` 记录覆盖。
+
+## 移植检查表（Lucky 评审 #100）
+
+- 在包 CAST（`newBaseBuiltinFuncWithTp`）**之前**取了类型指针、包完之后才读的，Go 看到的是修改后的类型吗？`PropagateType` 会原地修改非列的 DECIMAL 参数（D08.8 spec §4.6）；需要复现时用 `builtin_cast::type_after_real_wrap`（D08.5 spec §3.4）。

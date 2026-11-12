@@ -26,7 +26,7 @@ use tidb_types::vector::VectorFloat32;
 
 use crate::ast_funcs as ast;
 use crate::builtin::{BaseFunctionClass, new_base_builtin_func_with_tp};
-use crate::builtin_cast::{decimal_value_arg, propagate_type};
+use crate::builtin_cast::{decimal_value_arg, type_after_real_wrap};
 use crate::builtin_registry::FunctionClass;
 use crate::context::{BuildContext, EvalContext, err_ctx, sql_mode, type_ctx};
 use crate::errors::{errTruncatedWrongValue, handle_division_by_zero_error};
@@ -191,24 +191,6 @@ fn set_type4_mod_real_or_decimal(
 #[inline]
 fn test_if_sum_overflows_ull(a: u64, b: u64) -> bool {
     u64::MAX - a < b
-}
-
-/// The type Go reads through a `*FieldType` taken before `newBaseBuiltinFuncWithTp(..,
-/// ETReal, ..)`: wrapping a DECIMAL argument in `CAST(.. AS REAL)` runs `PropagateType`, which
-/// changes the type of a constant or a function argument in place (a column is cloned
-/// first), so Go reads the changed type (D08.8 spec §4.6; specs/D08.5-arith §4).
-// glue: Go's in-place PropagateType seen through a pointer taken earlier (arithmeticModFunctionClass.getFunction)
-fn type_seen_after_real_wrap(ev: &dyn EvalContext, arg: &ExprRef) -> FieldType {
-    let tp = arg.get_type(ev).into_owned();
-    if matches!(**arg, Expr::Column(_) | Expr::CorrelatedColumn(_))
-        || tp.hybrid()
-        || tp.eval_type() != ETDecimal
-    {
-        return tp;
-    }
-    let mut a = [arg.clone()];
-    propagate_type(ev, ETReal, &mut a);
-    a[0].get_type(ev).into_owned()
 }
 
 // ---------------------------------------------------------------- function classes
@@ -503,8 +485,8 @@ impl ArithmeticFunctionClass {
         if lhs_eval_tp == ETReal || rhs_eval_tp == ETReal {
             // Go reads lhsTp/rhsTp (pointers taken before newBaseBuiltinFuncWithTp) after it.
             let (lhs_tp, rhs_tp) = (
-                type_seen_after_real_wrap(&*ev, &args[0]),
-                type_seen_after_real_wrap(&*ev, &args[1]),
+                type_after_real_wrap(&*ev, &args[0]),
+                type_after_real_wrap(&*ev, &args[1]),
             );
             let mut bf = new_base_builtin_func_with_tp(
                 ctx,
