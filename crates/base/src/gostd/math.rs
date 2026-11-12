@@ -120,6 +120,18 @@ pub fn max(x: f64, y: f64) -> f64 {
     if x > y { x } else { y }
 }
 
+/// `math.Mod(x, y)`: the floating-point remainder of x/y, with the sign of x. Go computes it
+/// exactly (repeated exact subtraction), so the value is IEEE `fmod`'s, which Rust's `%` is;
+/// the special cases (`Mod(±Inf, y)`, `Mod(NaN, y)`, `Mod(x, 0)`, `Mod(x, NaN)`) return Go's
+/// [`nan`] (payload 1), not the NaN `fmod` produces.
+// go-std: math.Mod L2 (math.mod: the exact remainder is fmod; the special cases return math.NaN())
+pub fn r#mod(x: f64, y: f64) -> f64 {
+    if y == 0.0 || x.is_infinite() || x.is_nan() || y.is_nan() {
+        return nan();
+    }
+    x % y
+}
+
 // sin coefficients
 // Go's literals, as their bit patterns (the hex in sin.go's comments).
 const SIN: [f64; 6] = [

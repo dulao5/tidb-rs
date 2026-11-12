@@ -742,7 +742,7 @@ pub fn cast_decimal_as_real(
 /// A `types.MyDecimal` value as a `fmt` argument: printed by reflection (its `String` method
 /// has a pointer receiver), fields `digitsInt digitsFrac resultFrac negative wordBuf`.
 // glue: Go passes a types.MyDecimal value to GenWithStackByArgs (builtinCastDecimalAsIntSig.vecEvalInt)
-fn decimal_value_arg(d: &MyDecimal) -> Arg {
+pub(crate) fn decimal_value_arg(d: &MyDecimal) -> Arg {
     let w = d.as_wire();
     let words = (0..9)
         .map(|i| {
