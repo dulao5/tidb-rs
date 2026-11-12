@@ -187,7 +187,7 @@ pub struct SigDesc {
 }
 
 /// How a signature's Go vector version evaluates its arguments (D08.1 spec §3.6).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum ArgsFallback {
     /// The arguments are evaluated by the parent RPN program (`RpnNode::Call`).
     None,
@@ -200,7 +200,38 @@ pub enum ArgsFallback {
     /// are truncated (only when there are new ones) and the chunk is evaluated by the row
     /// version.
     EveryArg,
+    /// The vector version evaluates its own arguments, interleaved with its per-row work:
+    /// the function gets an evaluator of argument `i` as a column of the chunk and writes the
+    /// result. `builtinIntervalIntSig` / `builtinIntervalRealSig.vecEvalInt` evaluate
+    /// `args[0]` as a column and the other arguments row by row in the search of each row
+    /// (`linearSearch` / `binSearch` on `input.GetRow(i)`); `builtinGreatest/Least
+    /// CmpStringAsTimeSig.vecEvalString` evaluate argument `j` and convert its rows before
+    /// argument `j + 1`.
+    OwnArgs(OwnArgsFn),
 }
+
+impl PartialEq for ArgsFallback {
+    // glue: trait impl (the rule, not the continuation's address, which is not unique)
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+impl Eq for ArgsFallback {}
+
+/// Evaluates argument `i` of the node as a column of the chunk (RPN sub-program `i`).
+pub type ArgColumnFn<'a> = dyn FnMut(usize, &mut Column) -> Result<(), Error> + 'a;
+
+/// The vector version of an [`ArgsFallback::OwnArgs`] signature: the signature, the
+/// argument evaluator, the input chunk and the result column.
+pub type OwnArgsFn = fn(
+    &BuiltinFunc,
+    &dyn EvalContext,
+    &EvalState,
+    &mut ArgColumnFn<'_>,
+    &Chunk,
+    &mut Column,
+) -> Result<(), Error>;
 
 impl std::fmt::Debug for SigDesc {
     // glue: trait impl
@@ -281,6 +312,24 @@ pub enum SigExtra {
         /// `mysqlRng`.
         rng: tidb_sessionctx::exprctx::MysqlRngRef,
     },
+    /// `cmpAsDate` of `builtinGreatest/LeastTimeSig` and `builtinGreatest/LeastCmpStringAsTimeSig`
+    /// (D08.4); their `Clone` copies it.
+    Extremum {
+        /// `cmpAsDate`.
+        cmp_as_date: bool,
+    },
+    /// `builtinIntervalIntSig.hasNullable` (D08.4). Go's `Clone` of this signature does not
+    /// copy it (the clone has `hasNullable = false` and binary-searches); `clone_from_base`
+    /// does the same (D08.4 spec §4).
+    IntervalInt {
+        /// `hasNullable`.
+        has_nullable: bool,
+    },
+    /// `builtinIntervalRealSig.hasNullable` (D08.4); its `Clone` copies it.
+    IntervalReal {
+        /// `hasNullable`.
+        has_nullable: bool,
+    },
 }
 
 impl PartialEq for SigExtra {
@@ -310,6 +359,17 @@ impl PartialEq for SigExtra {
                 },
             ) => a == b,
             (SigExtra::Rand { rng: a }, SigExtra::Rand { rng: b }) => std::sync::Arc::ptr_eq(a, b),
+            (SigExtra::Extremum { cmp_as_date: a }, SigExtra::Extremum { cmp_as_date: b }) => {
+                a == b
+            }
+            (
+                SigExtra::IntervalInt { has_nullable: a },
+                SigExtra::IntervalInt { has_nullable: b },
+            ) => a == b,
+            (
+                SigExtra::IntervalReal { has_nullable: a },
+                SigExtra::IntervalReal { has_nullable: b },
+            ) => a == b,
             _ => false,
         }
     }
@@ -446,6 +506,24 @@ impl BuiltinFunc {
         matches!(self.extra, SigExtra::IsTrueOrFalse { keep_null: true })
     }
 
+    /// `cmpAsDate` of the GREATEST / LEAST time signatures (`false` elsewhere).
+    // glue: field read of SigExtra::Extremum (D08.1 spec §3.5 (a))
+    #[inline]
+    pub fn cmp_as_date(&self) -> bool {
+        matches!(self.extra, SigExtra::Extremum { cmp_as_date: true })
+    }
+
+    /// `hasNullable` of the INTERVAL signatures (`false` elsewhere).
+    // glue: field read of SigExtra::IntervalInt / IntervalReal (D08.1 spec §3.5 (a))
+    #[inline]
+    pub fn has_nullable(&self) -> bool {
+        matches!(
+            self.extra,
+            SigExtra::IntervalInt { has_nullable: true }
+                | SigExtra::IntervalReal { has_nullable: true }
+        )
+    }
+
     /// PbCode returns PbCode of this signature.
     // go: baseBuiltinFunc.PbCode L1
     pub fn pb_code(&self) -> i32 {
@@ -528,7 +606,14 @@ impl BuiltinFunc {
     // go: baseBuiltinFunc.cloneFrom L2 (args shared, M-EXPR; ctor.Clone() of the stateless collators is the same collator)
     // go: baseBuiltinCastFunc.cloneFrom L2 (inUnion is SigExtra::Cast of the BuiltinFunc, copied)
     pub fn clone_from_base(&self) -> BuiltinFunc {
-        self.clone()
+        let mut c = self.clone();
+        // builtinIntervalIntSig.Clone copies baseBuiltinFunc only: hasNullable becomes false.
+        if let SigExtra::IntervalInt { .. } = c.extra {
+            c.extra = SigExtra::IntervalInt {
+                has_nullable: false,
+            };
+        }
+        c
     }
 
     /// MemoryUsage returns the memory usage of baseBuiltinFunc. Go adds `bufAllocator` once
@@ -1194,6 +1279,12 @@ fn row_fallback_call(
         // Go's VecEvalXxx of another type is the base error, before any argument.
         return f.vec_eval(ctx, et, n, &[], result);
     }
+    if let ArgsFallback::OwnArgs(vec_fn) = rule {
+        let mut eval_arg = |i: usize, c: &mut Column| -> Result<(), Error> {
+            args[i].eval(ctx, st, rpn, input, c)
+        };
+        return vec_fn(f, ctx, st, &mut eval_arg, input, result);
+    }
     let before = ctx.warning_count();
     let mut cols: Vec<Column> = Vec::with_capacity(args.len());
     let mut fallback = false;
@@ -1227,7 +1318,9 @@ fn row_fallback_call(
                     break;
                 }
             }
-            ArgsFallback::None => unreachable!("RowFallback node of a signature without fallback"),
+            ArgsFallback::None | ArgsFallback::OwnArgs(_) => {
+                unreachable!("RowFallback node of a signature without this fallback")
+            }
         }
     }
     let r = if let Some(e) = err {

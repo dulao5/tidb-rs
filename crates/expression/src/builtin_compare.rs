@@ -6,7 +6,8 @@
 //! `builtin_compare.go` (D08.4), first batch: the comparison operators `<`, `<=`, `>`, `>=`,
 //! `=`, `!=`, `<=>` (`compareFunctionClass` with its argument refining and the 56 signatures
 //! over the eight comparison types), the `CompareXxx` functions and the comparison-type
-//! helpers. COALESCE, GREATEST/LEAST and INTERVAL are later batches (specs/D08.4-compare).
+//! helpers. Batch 2: COALESCE. Batch 3: GREATEST / LEAST (with `ResolveType4Between` and
+//! the extremum type resolution) and INTERVAL (specs/D08.4-compare).
 #![allow(non_upper_case_globals)]
 
 use std::sync::Arc;
@@ -43,7 +44,7 @@ use crate::collation::check_and_derive_collation_from_exprs;
 use crate::constant::{Constant, new_one, new_zero};
 use crate::constant_fold::maybe_over_optimized4_plan_cache;
 use crate::context::{BuildContext, EvalContext, type_ctx};
-use crate::eval::{Args, BuiltinFunc, SigDesc, SigView};
+use crate::eval::{Args, BuiltinFunc, SigDesc, SigExtra, SigView};
 use crate::expression::{EvalState, Expr, ExprRef};
 use crate::scalar_function::new_function_internal;
 use crate::util::disable_parse_json_flag4_expr;
@@ -1792,6 +1793,1070 @@ pub fn coalesce_vector_float32(
     Ok(None)
 }
 
+// ---------------------------------------------------------------- GREATEST / LEAST / INTERVAL
+
+/// aggregateType: the aggregated field type of the arguments (`types.AggFieldType`).
+// go: aggregateType L1
+fn aggregate_type(ctx: &dyn EvalContext, args: &[ExprRef]) -> FieldType {
+    let field_types: Vec<_> = args.iter().map(|a| a.get_type(ctx)).collect();
+    let refs: Vec<&FieldType> = field_types.iter().map(|t| &**t).collect();
+    tidb_types::field_type::agg_field_type(&refs)
+}
+
+/// ResolveType4Between resolves eval type for between expression.
+// go: ResolveType4Between L1
+pub fn resolve_type4_between(ctx: &dyn EvalContext, args: [&Expr; 3]) -> EvalType {
+    let mut cmp_tp = args[0].get_type(ctx).eval_type();
+    for a in &args[1..] {
+        cmp_tp = get_base_cmp_type(cmp_tp, a.get_type(ctx).eval_type(), None, None);
+    }
+
+    let mut has_temporal = false;
+    if cmp_tp == ETString {
+        if args[0].get_type(ctx).get_type() == TypeDuration {
+            cmp_tp = ETDuration;
+        } else {
+            for a in &args {
+                if tidb_types::etc::is_type_temporal(a.get_type(ctx).get_type()) {
+                    has_temporal = true;
+                    break;
+                }
+            }
+            if has_temporal {
+                cmp_tp = ETDatetime;
+            }
+        }
+    }
+    let int_like =
+        |a: &Expr| a.get_type(ctx).eval_type() == ETInt || crate::expression::is_binary_literal(a);
+    if int_like(args[0]) && int_like(args[1]) && int_like(args[2]) {
+        return ETInt;
+    }
+
+    cmp_tp
+}
+
+/// GLCmpStringMode represents Greatest/Least integral string comparison mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GLCmpStringMode {
+    /// Greatest and Least function compares string directly.
+    GLCmpStringDirectly,
+    /// Greatest/Least function compares string as 'yyyy-mm-dd' format.
+    GLCmpStringAsDate,
+    /// Greatest/Least function compares string as 'yyyy-mm-dd hh:mm:ss' format.
+    GLCmpStringAsDatetime,
+}
+
+/// GLRetTimeType represents Greatest/Least return time type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GLRetTimeType {
+    /// Greatest/Least function returns non temporal time.
+    GLRetNoneTemporal,
+    /// Greatest/Least function returns date type, 'yyyy-mm-dd'.
+    GLRetDate,
+    /// Greatest/Least function returns datetime type, 'yyyy-mm-dd hh:mm:ss'.
+    GLRetDatetime,
+}
+
+/// resolveType4Extremum gets compare type for GREATEST and LEAST and BETWEEN (mainly for
+/// datetime).
+// go: resolveType4Extremum L1
+pub fn resolve_type4_extremum(
+    ctx: &dyn EvalContext,
+    args: &[ExprRef],
+) -> (FieldType, GLRetTimeType, GLCmpStringMode) {
+    let agg_type = aggregate_type(ctx, args);
+    let mut cmp_string_mode = GLCmpStringMode::GLCmpStringDirectly;
+    if agg_type.eval_type().is_string_kind() {
+        let mut temporal_item: Option<FieldType> = None;
+        for a in args {
+            let item = a.get_type(ctx);
+            // Find the temporal value in the arguments but prefer DateTime value.
+            if tidb_types::etc::is_type_temporal(item.get_type())
+                && (temporal_item.is_none() || item.get_type() == TypeDatetime)
+            {
+                temporal_item = Some(item.into_owned());
+            }
+        }
+
+        if !tidb_types::etc::is_type_temporal(agg_type.get_type())
+            && let Some(t) = &temporal_item
+            && is_temporal_with_date(t.get_type())
+        {
+            cmp_string_mode = if t.get_type() == mysql::TypeDate {
+                GLCmpStringMode::GLCmpStringAsDate
+            } else {
+                GLCmpStringMode::GLCmpStringAsDatetime
+            };
+        }
+        // TODO: String charset, collation checking are needed.
+    }
+    let time_type = if agg_type.get_type() == mysql::TypeDate {
+        GLRetTimeType::GLRetDate
+    } else if agg_type.get_type() == TypeDatetime || agg_type.get_type() == TypeTimestamp {
+        GLRetTimeType::GLRetDatetime
+    } else {
+        GLRetTimeType::GLRetNoneTemporal
+    };
+    (agg_type, time_type, cmp_string_mode)
+}
+
+/// unsupportedJSONComparison reports warnings while there is a JSON type in
+/// least/greatest function's arguments.
+// go: unsupportedJSONComparison L1
+fn unsupported_json_comparison(ctx: &dyn BuildContext, args: &[ExprRef]) {
+    let ectx = ctx.get_eval_ctx();
+    for a in args {
+        if a.get_type(&*ectx).get_type() == TypeJSON {
+            ectx.append_warning(crate::errors::errUnsupportedJSONComparison.clone());
+            break;
+        }
+    }
+}
+
+/// GREATEST or LEAST: one class over the two (`greatestFunctionClass`, `leastFunctionClass`).
+#[derive(Debug)]
+pub struct ExtremumFunctionClass {
+    /// The embedded baseFunctionClass.
+    pub base: BaseFunctionClass,
+    greatest: bool,
+}
+
+/// The function class of `greatest`.
+pub static GREATEST_CLASS: ExtremumFunctionClass = ExtremumFunctionClass {
+    base: BaseFunctionClass {
+        func_name: ast::Greatest,
+        min_args: 2,
+        max_args: -1,
+    },
+    greatest: true,
+};
+
+/// The function class of `least`.
+pub static LEAST_CLASS: ExtremumFunctionClass = ExtremumFunctionClass {
+    base: BaseFunctionClass {
+        func_name: ast::Least,
+        min_args: 2,
+        max_args: -1,
+    },
+    greatest: false,
+};
+
+impl FunctionClass for ExtremumFunctionClass {
+    // go: greatestFunctionClass.getFunction L1
+    // go: leastFunctionClass.getFunction L1
+    fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+        let (res_field_type, field_time_type, cmp_string_mode) =
+            resolve_type4_extremum(&*ctx.get_eval_ctx(), &args);
+        let mut res_tp = res_field_type.eval_type();
+        let mut arg_tp = res_tp;
+        if cmp_string_mode != GLCmpStringMode::GLCmpStringDirectly {
+            // Args are temporal and string mixed, we cast all args as string and parse it to
+            // temporal manually to compare.
+            arg_tp = ETString;
+        } else if res_tp == ETJson {
+            unsupported_json_comparison(ctx, &args);
+            arg_tp = ETString;
+            res_tp = ETString;
+        }
+        let arg_tps = vec![arg_tp; args.len()];
+        let mut bf =
+            new_base_builtin_func_with_tp(ctx, self.base.func_name, args, res_tp, &arg_tps)?;
+        let g = self.greatest;
+        let sig: &'static SigDesc = match arg_tp {
+            ETInt => {
+                bf.tp.add_flag(res_field_type.get_flag());
+                if g {
+                    &builtinGreatestIntSig
+                } else {
+                    &builtinLeastIntSig
+                }
+            }
+            ETReal => {
+                if g {
+                    &builtinGreatestRealSig
+                } else {
+                    &builtinLeastRealSig
+                }
+            }
+            ETDecimal => {
+                if g {
+                    &builtinGreatestDecimalSig
+                } else {
+                    &builtinLeastDecimalSig
+                }
+            }
+            ETString => match cmp_string_mode {
+                GLCmpStringMode::GLCmpStringAsDate => {
+                    bf.extra = SigExtra::Extremum { cmp_as_date: true };
+                    if g {
+                        &builtinGreatestCmpStringAsDateSig
+                    } else {
+                        &builtinLeastCmpStringAsDateSig
+                    }
+                }
+                GLCmpStringMode::GLCmpStringAsDatetime => {
+                    bf.extra = SigExtra::Extremum { cmp_as_date: false };
+                    if g {
+                        &builtinGreatestCmpStringAsTimeSig
+                    } else {
+                        &builtinLeastCmpStringAsTimeSig
+                    }
+                }
+                GLCmpStringMode::GLCmpStringDirectly => {
+                    if g {
+                        &builtinGreatestStringSig
+                    } else {
+                        &builtinLeastStringSig
+                    }
+                }
+            },
+            ETDuration => {
+                if g {
+                    &builtinGreatestDurationSig
+                } else {
+                    &builtinLeastDurationSig
+                }
+            }
+            ETDatetime | ETTimestamp => {
+                let as_date = field_time_type == GLRetTimeType::GLRetDate;
+                bf.extra = SigExtra::Extremum {
+                    cmp_as_date: as_date,
+                };
+                match (g, as_date) {
+                    (true, true) => &builtinGreatestDateSig,
+                    (true, false) => &builtinGreatestTimeSig,
+                    (false, true) => &builtinLeastDateSig,
+                    (false, false) => &builtinLeastTimeSig,
+                }
+            }
+            ETVectorFloat32 => {
+                if g {
+                    &builtinGreatestVectorFloat32Sig
+                } else {
+                    &builtinLeastVectorFloat32Sig
+                }
+            }
+            other => {
+                return Err(Error::plain(format!(
+                    "unsupported type {} during evaluation",
+                    other.to_string()
+                )));
+            }
+        };
+        // Go passes `args` to newBaseBuiltinFuncWithTp, which wraps the casts into that
+        // same slice: the flen / decimal are those of the wrapped arguments.
+        let (flen, decimal) = {
+            let ectx = ctx.get_eval_ctx();
+            fix_flen_and_decimal_for_greatest_and_least(&*ectx, &bf.args)
+        };
+        let mut f = bf.with_sig(sig);
+        // Go: sig.getRetTp().SetFlenUnderLimit(..) — getRetTp runs on the type of before.
+        f.get_ret_tp();
+        f.tp.set_flen_under_limit(flen);
+        f.get_ret_tp();
+        f.tp.set_decimal_under_limit(decimal);
+        Ok(f)
+    }
+}
+
+/// The largest flen and decimal of the arguments.
+// go: fixFlenAndDecimalForGreatestAndLeast L1
+fn fix_flen_and_decimal_for_greatest_and_least(
+    ctx: &dyn EvalContext,
+    args: &[ExprRef],
+) -> (isize, isize) {
+    let (mut flen, mut decimal) = (0, 0);
+    for a in args {
+        let t = a.get_type(ctx);
+        flen = flen.max(t.get_flen());
+        decimal = decimal.max(t.get_decimal());
+    }
+    (flen, decimal)
+}
+
+// The bodies are Go's row versions (`evalXxx`): they stop at the first NULL argument (and
+// at the first error), so later arguments are not evaluated. Go's vector versions evaluate
+// every argument column and merge (`MergeNulls`), which is what the lazy body's vector
+// driver does over the evaluated columns (spec §1c).
+
+/// `builtinGreatestIntSig`.
+// go: builtinGreatestIntSig.evalInt L1
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestIntSig.vecEvalInt L2 (the lazy body's vector driver over the evaluated columns)
+// go: builtinGreatestIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestIntSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int, lazy, args(Int))]
+pub fn greatest_int(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<i64>, Error> {
+    let Some(mut res) = args.int(ctx, 0)? else {
+        return Ok(None);
+    };
+    for i in 1..args.len() {
+        let Some(v) = args.int(ctx, i)? else {
+            return Ok(None);
+        };
+        if v > res {
+            res = v;
+        }
+    }
+    Ok(Some(res))
+}
+
+/// `builtinLeastIntSig`.
+// go: builtinLeastIntSig.evalInt L1
+// go: pkg/expression/builtin_compare_vec.go builtinLeastIntSig.vecEvalInt L2 (the lazy body's vector driver over the evaluated columns)
+// go: builtinLeastIntSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinLeastIntSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int, lazy, args(Int))]
+pub fn least_int(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<i64>, Error> {
+    let Some(mut res) = args.int(ctx, 0)? else {
+        return Ok(None);
+    };
+    for i in 1..args.len() {
+        let Some(v) = args.int(ctx, i)? else {
+            return Ok(None);
+        };
+        if v < res {
+            res = v;
+        }
+    }
+    Ok(Some(res))
+}
+
+/// `builtinGreatestRealSig`.
+// go: builtinGreatestRealSig.evalReal L1
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestRealSig.vecEvalReal L2 (the lazy body's vector driver over the evaluated columns)
+// go: builtinGreatestRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestRealSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Real, lazy, args(Real))]
+pub fn greatest_real(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<f64>, Error> {
+    let Some(mut res) = args.real(ctx, 0)? else {
+        return Ok(None);
+    };
+    for i in 1..args.len() {
+        let Some(v) = args.real(ctx, i)? else {
+            return Ok(None);
+        };
+        if v > res {
+            res = v;
+        }
+    }
+    Ok(Some(res))
+}
+
+/// `builtinLeastRealSig`.
+// go: builtinLeastRealSig.evalReal L1
+// go: pkg/expression/builtin_compare_vec.go builtinLeastRealSig.vecEvalReal L2 (the lazy body's vector driver over the evaluated columns)
+// go: builtinLeastRealSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinLeastRealSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Real, lazy, args(Real))]
+pub fn least_real(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<f64>, Error> {
+    let Some(mut res) = args.real(ctx, 0)? else {
+        return Ok(None);
+    };
+    for i in 1..args.len() {
+        let Some(v) = args.real(ctx, i)? else {
+            return Ok(None);
+        };
+        if v < res {
+            res = v;
+        }
+    }
+    Ok(Some(res))
+}
+
+/// `builtinGreatestDecimalSig`.
+// go: builtinGreatestDecimalSig.evalDecimal L1
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestDecimalSig.vecEvalDecimal L2 (the lazy body's vector driver over the evaluated columns)
+// go: builtinGreatestDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestDecimalSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Decimal, lazy, args(Decimal))]
+pub fn greatest_decimal(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<MyDecimal>, Error> {
+    let Some(mut res) = args.decimal(ctx, 0)? else {
+        return Ok(None);
+    };
+    for i in 1..args.len() {
+        let Some(v) = args.decimal(ctx, i)? else {
+            return Ok(None);
+        };
+        if v.compare(&res) > 0 {
+            res = v;
+        }
+    }
+    Ok(Some(res))
+}
+
+/// `builtinLeastDecimalSig`.
+// go: builtinLeastDecimalSig.evalDecimal L1
+// go: pkg/expression/builtin_compare_vec.go builtinLeastDecimalSig.vecEvalDecimal L2 (the lazy body's vector driver over the evaluated columns)
+// go: builtinLeastDecimalSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinLeastDecimalSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Decimal, lazy, args(Decimal))]
+pub fn least_decimal(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<MyDecimal>, Error> {
+    let Some(mut res) = args.decimal(ctx, 0)? else {
+        return Ok(None);
+    };
+    for i in 1..args.len() {
+        let Some(v) = args.decimal(ctx, i)? else {
+            return Ok(None);
+        };
+        if v.compare(&res) < 0 {
+            res = v;
+        }
+    }
+    Ok(Some(res))
+}
+
+/// `builtinGreatestStringSig`: the row version keeps the earlier argument on a tie under the
+/// collation (`CompareString(v, maxv) > 0`); the vector version keeps the later one
+/// (`CompareString(src, arg) > 0` keeps `src`, else `arg`). Each driver follows its Go
+/// version (D08.1 spec §3.4 (c); D08.4 spec §1c).
+// go: builtinGreatestStringSig.evalString L1
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestStringSig.vecEvalString L2 (the lazy body's vector driver; SigView::vector picks the vector version's tie rule)
+// go: builtinGreatestStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String, lazy, args(String))]
+pub fn greatest_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    extremum_string(ctx, f, args, out, 1)
+}
+
+/// `builtinLeastStringSig` (tie rule as in [`greatest_string`]).
+// go: builtinLeastStringSig.evalString L1
+// go: pkg/expression/builtin_compare_vec.go builtinLeastStringSig.vecEvalString L2 (the lazy body's vector driver; SigView::vector picks the vector version's tie rule)
+// go: builtinLeastStringSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinLeastStringSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String, lazy, args(String))]
+pub fn least_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    extremum_string(ctx, f, args, out, -1)
+}
+
+/// The string GREATEST (`sign` 1) / LEAST (`sign` -1) of the row and vector versions.
+// glue: shared body of builtinGreatestStringSig / builtinLeastStringSig
+fn extremum_string(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+    out: &mut Vec<u8>,
+    sign: isize,
+) -> Result<Option<()>, Error> {
+    let collation = f.collation_info.collation.clone();
+    let Some(first) = args.string(ctx, 0)? else {
+        return Ok(None);
+    };
+    let mut res = first.into_owned();
+    for i in 1..args.len() {
+        let Some(v) = args.string(ctx, i)? else {
+            return Ok(None);
+        };
+        let take = if f.vector() {
+            // dst = CompareString(src, arg) {>,<} 0 ? src : arg
+            tidb_types::compare::compare_string(&res, &v, &collation) * sign <= 0
+        } else {
+            tidb_types::compare::compare_string(&v, &res, &collation) * sign > 0
+        };
+        if take {
+            res = v.into_owned();
+        }
+    }
+    out.extend_from_slice(&res);
+    Ok(Some(()))
+}
+
+/// doTimeConversionForGL: the string as a DATE (`cmp_as_date`) or DATETIME string; an
+/// invalid value is handled by `handleInvalidTimeError` and kept as it is.
+// go: doTimeConversionForGL L1
+fn do_time_conversion_for_gl(
+    cmp_as_date: bool,
+    ctx: &dyn EvalContext,
+    str_val: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let tc = type_ctx(ctx);
+    let (t, r) = if cmp_as_date {
+        let (t, r) = tidb_types::time::parse_date(&tc, str_val);
+        match r {
+            Ok(()) => t.convert(&tc, mysql::TypeDate),
+            Err(e) => (t, Err(e)),
+        }
+    } else {
+        let (t, r) = tidb_types::time::parse_datetime_str(&tc, str_val);
+        match r {
+            Ok(()) => t.convert(&tc, TypeDatetime),
+            Err(e) => (t, Err(e)),
+        }
+    };
+    match r {
+        Err(e) => {
+            crate::errors::handle_invalid_time_error(ctx, e)?;
+            Ok(str_val.to_vec())
+        }
+        Ok(()) => Ok(t.string()),
+    }
+}
+
+/// The row version of the GREATEST (`sign` 1) / LEAST (`sign` -1) of strings compared as
+/// times (`builtinGreatest/LeastCmpStringAsTimeSig.evalString`).
+// glue: shared body of builtinGreatestCmpStringAsTimeSig / builtinLeastCmpStringAsTimeSig
+fn extremum_cmp_string_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+    out: &mut Vec<u8>,
+    sign: i32,
+) -> Result<Option<()>, Error> {
+    let mut res: Vec<u8> = Vec::new();
+    for i in 0..args.len() {
+        let Some(v) = args.string(ctx, i)? else {
+            return Ok(None);
+        };
+        let v = do_time_conversion_for_gl(f.cmp_as_date(), ctx, &v)?;
+        // In MySQL, if the compare result is zero, than we will try to use the string
+        // comparison result.
+        if i == 0 || (v.as_slice().cmp(res.as_slice()) as i32) * sign > 0 {
+            res = v;
+        }
+    }
+    out.extend_from_slice(&res);
+    Ok(Some(()))
+}
+
+/// The vector version of the strings compared as times (`ArgsFallback::OwnArgs`): argument
+/// `j` is evaluated as a column, then every row that is not NULL yet is converted and
+/// compared, before argument `j + 1` (Go `builtinGreatest/LeastCmpStringAsTimeSig
+/// .vecEvalString`): the warnings and the first error come in that order.
+// glue: shared vector version of builtinGreatestCmpStringAsTimeSig / builtinLeastCmpStringAsTimeSig
+fn extremum_cmp_string_as_time_vec(
+    f: &BuiltinFunc,
+    ctx: &dyn EvalContext,
+    eval_arg: &mut crate::eval::ArgColumnFn<'_>,
+    input: &tidb_chunk::Chunk,
+    result: &mut tidb_chunk::Column,
+    sign: i32,
+) -> Result<(), Error> {
+    let n = input.num_rows();
+    let mut dst_strings: Vec<Vec<u8>> = vec![Vec::new(); n];
+    let mut dst_null_map = vec![false; n];
+    for j in 0..f.args.len() {
+        eval_arg(j, result)?;
+        for i in 0..n {
+            dst_null_map[i] = dst_null_map[i] || result.is_null(i);
+            if dst_null_map[i] {
+                continue;
+            }
+            let arg_time_str =
+                do_time_conversion_for_gl(f.cmp_as_date(), ctx, result.get_bytes(i))?;
+            if j == 0 || (arg_time_str.as_slice().cmp(dst_strings[i].as_slice()) as i32) * sign > 0
+            {
+                dst_strings[i] = arg_time_str;
+            }
+        }
+    }
+    crate::eval::rt::reset_string(result, n);
+    for i in 0..n {
+        if dst_null_map[i] {
+            result.append_null();
+        } else {
+            result.append_bytes(&dst_strings[i]);
+        }
+    }
+    Ok(())
+}
+
+/// `builtinGreatestCmpStringAsTimeSig` (`cmpAsDate` in `SigExtra::Extremum`).
+// go: builtinGreatestCmpStringAsTimeSig.evalString L1
+// go: builtinGreatestCmpStringAsTimeSig.Clone L2 (BuiltinFunc::clone_from_base copies SigExtra::Extremum, as Go)
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestCmpStringAsTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String, lazy, args(String))]
+pub fn greatest_cmp_string_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    extremum_cmp_string_as_time(ctx, f, args, out, 1)
+}
+
+/// `builtinGreatestCmpStringAsTimeSig.vecEvalString`.
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestCmpStringAsTimeSig.vecEvalString L1
+fn greatest_cmp_string_as_time_vec(
+    f: &BuiltinFunc,
+    ctx: &dyn EvalContext,
+    _st: &EvalState,
+    eval_arg: &mut crate::eval::ArgColumnFn<'_>,
+    input: &tidb_chunk::Chunk,
+    result: &mut tidb_chunk::Column,
+) -> Result<(), Error> {
+    extremum_cmp_string_as_time_vec(f, ctx, eval_arg, input, result, 1)
+}
+
+/// `builtinLeastCmpStringAsTimeSig` (`cmpAsDate` in `SigExtra::Extremum`).
+// go: builtinLeastCmpStringAsTimeSig.evalString L1
+// go: builtinLeastCmpStringAsTimeSig.Clone L2 (BuiltinFunc::clone_from_base copies SigExtra::Extremum, as Go)
+// go: pkg/expression/builtin_compare_vec.go builtinLeastCmpStringAsTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(String, lazy, args(String))]
+pub fn least_cmp_string_as_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+    out: &mut Vec<u8>,
+) -> Result<Option<()>, Error> {
+    extremum_cmp_string_as_time(ctx, f, args, out, -1)
+}
+
+/// `builtinLeastCmpStringAsTimeSig.vecEvalString`.
+// go: pkg/expression/builtin_compare_vec.go builtinLeastCmpStringAsTimeSig.vecEvalString L1
+fn least_cmp_string_as_time_vec(
+    f: &BuiltinFunc,
+    ctx: &dyn EvalContext,
+    _st: &EvalState,
+    eval_arg: &mut crate::eval::ArgColumnFn<'_>,
+    input: &tidb_chunk::Chunk,
+    result: &mut tidb_chunk::Column,
+) -> Result<(), Error> {
+    extremum_cmp_string_as_time_vec(f, ctx, eval_arg, input, result, -1)
+}
+
+/// getAccurateTimeTypeForGLRet: DATE or DATETIME.
+// go: getAccurateTimeTypeForGLRet L1
+fn get_accurate_time_type_for_gl_ret(cmp_as_date: bool) -> u8 {
+    if cmp_as_date {
+        mysql::TypeDate
+    } else {
+        TypeDatetime
+    }
+}
+
+/// The GREATEST (`sign` 1) / LEAST (`sign` -1) of times, converted to DATE or DATETIME. The
+/// row version handles a conversion error with `handleInvalidTimeError` (NULL after a
+/// warning); the vector version returns it (Go `vecEvalTime`).
+// glue: shared body of builtinGreatestTimeSig / builtinLeastTimeSig
+fn extremum_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+    sign: isize,
+) -> Result<Option<Time>, Error> {
+    let mut res = Time::default();
+    for i in 0..args.len() {
+        let Some(v) = args.time(ctx, i)? else {
+            // Go's vector version still converts the value kept so far on a NULL row
+            // (vecEvalTime converts every row after the merge loop): an invalid date there
+            // is an error although the result is NULL. With `args[0]` NULL the slot holds
+            // the zero time, whose conversion never fails.
+            if f.vector() && i > 0 {
+                let tc = type_ctx(ctx);
+                res.convert(&tc, get_accurate_time_type_for_gl_ret(f.cmp_as_date()))
+                    .1?;
+            }
+            return Ok(None);
+        };
+        if i == 0 || v.compare(&res) * sign > 0 {
+            res = v;
+        }
+    }
+    // Convert ETType Time value to MySQL actual type, distinguish date and datetime.
+    let tc = type_ctx(ctx);
+    let res_time_tp = get_accurate_time_type_for_gl_ret(f.cmp_as_date());
+    let (res, r) = res.convert(&tc, res_time_tp);
+    if let Err(e) = r {
+        if f.vector() {
+            return Err(e);
+        }
+        crate::errors::handle_invalid_time_error(ctx, e)?;
+        return Ok(None);
+    }
+    Ok(Some(res))
+}
+
+/// `builtinGreatestTimeSig` (`cmpAsDate` in `SigExtra::Extremum`).
+// go: builtinGreatestTimeSig.evalTime L1
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestTimeSig.vecEvalTime L2 (the lazy body's vector driver; SigView::vector: a conversion error is returned, not handled)
+// go: builtinGreatestTimeSig.Clone L2 (BuiltinFunc::clone_from_base copies SigExtra::Extremum, as Go)
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time, lazy, args(Time))]
+pub fn greatest_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<Time>, Error> {
+    extremum_time(ctx, f, args, 1)
+}
+
+/// `builtinLeastTimeSig` (`cmpAsDate` in `SigExtra::Extremum`).
+// go: builtinLeastTimeSig.evalTime L1
+// go: pkg/expression/builtin_compare_vec.go builtinLeastTimeSig.vecEvalTime L2 (the lazy body's vector driver; SigView::vector: a conversion error is returned, not handled)
+// go: builtinLeastTimeSig.Clone L2 (BuiltinFunc::clone_from_base copies SigExtra::Extremum, as Go)
+// go: pkg/expression/builtin_compare_vec.go builtinLeastTimeSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Time, lazy, args(Time))]
+pub fn least_time(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<Time>, Error> {
+    extremum_time(ctx, f, args, -1)
+}
+
+/// `builtinGreatestDurationSig`.
+// go: builtinGreatestDurationSig.evalDuration L1
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestDurationSig.vecEvalDuration L2 (the lazy body's vector driver over the evaluated columns)
+// go: builtinGreatestDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinGreatestDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration, lazy, args(Duration))]
+pub fn greatest_duration(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<Duration>, Error> {
+    let mut res = Duration::default();
+    for i in 0..args.len() {
+        let Some(v) = args.duration(ctx, i)? else {
+            return Ok(None);
+        };
+        if i == 0 || v.compare(res) > 0 {
+            res = v;
+        }
+    }
+    Ok(Some(res))
+}
+
+/// `builtinLeastDurationSig`.
+// go: builtinLeastDurationSig.evalDuration L1
+// go: pkg/expression/builtin_compare_vec.go builtinLeastDurationSig.vecEvalDuration L2 (the lazy body's vector driver over the evaluated columns)
+// go: builtinLeastDurationSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: pkg/expression/builtin_compare_vec.go builtinLeastDurationSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Duration, lazy, args(Duration))]
+pub fn least_duration(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<Duration>, Error> {
+    let mut res = Duration::default();
+    for i in 0..args.len() {
+        let Some(v) = args.duration(ctx, i)? else {
+            return Ok(None);
+        };
+        if i == 0 || v.compare(res) < 0 {
+            res = v;
+        }
+    }
+    Ok(Some(res))
+}
+
+/// `builtinGreatestVectorFloat32Sig` (no vector version in Go).
+// go: builtinGreatestVectorFloat32Sig.evalVectorFloat32 L1
+// go: builtinGreatestVectorFloat32Sig.Clone L2 (BuiltinFunc::clone_from_base)
+#[eval_fn(VectorFloat32, lazy, args(VectorFloat32), novec)]
+pub fn greatest_vector_float32(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<VectorFloat32<'static>>, Error> {
+    let mut res: Option<VectorFloat32<'static>> = None;
+    for i in 0..args.len() {
+        let Some(v) = args.vector_float32(ctx, i)? else {
+            return Ok(None);
+        };
+        if i == 0 || res.as_ref().is_some_and(|r| v.compare(r) > 0) {
+            res = Some(v.clone());
+        }
+    }
+    Ok(res)
+}
+
+/// `builtinLeastVectorFloat32Sig` (no vector version in Go).
+// go: builtinLeastVectorFloat32Sig.evalVectorFloat32 L1
+// go: builtinLeastVectorFloat32Sig.Clone L2 (BuiltinFunc::clone_from_base)
+#[eval_fn(VectorFloat32, lazy, args(VectorFloat32), novec)]
+pub fn least_vector_float32(
+    ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<VectorFloat32<'static>>, Error> {
+    let mut res: Option<VectorFloat32<'static>> = None;
+    for i in 0..args.len() {
+        let Some(v) = args.vector_float32(ctx, i)? else {
+            return Ok(None);
+        };
+        if i == 0 || res.as_ref().is_some_and(|r| v.compare(r) < 0) {
+            res = Some(v.clone());
+        }
+    }
+    Ok(res)
+}
+
+/// INTERVAL(N, N1, N2, ...): the index of the last argument that is less than or equal
+/// to N.
+#[derive(Debug)]
+pub struct IntervalFunctionClass {
+    /// The embedded baseFunctionClass.
+    pub base: BaseFunctionClass,
+}
+
+/// The function class of `interval`.
+pub static INTERVAL_CLASS: IntervalFunctionClass = IntervalFunctionClass {
+    base: BaseFunctionClass {
+        func_name: ast::Interval,
+        min_args: 2,
+        max_args: -1,
+    },
+};
+
+impl FunctionClass for IntervalFunctionClass {
+    // go: intervalFunctionClass.getFunction L1
+    fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+
+        let mut all_int = true;
+        let mut has_nullable = false;
+        // if we have nullable columns in the argument list, we won't do a binary search,
+        // instead we will linearly scan the arguments (as MySQL does).
+        {
+            let ectx = ctx.get_eval_ctx();
+            for a in &args {
+                let tp = a.get_type(&*ectx);
+                if tp.eval_type() != ETInt {
+                    all_int = false;
+                }
+                if !has_not_null_flag(tp.get_flag()) {
+                    has_nullable = true;
+                }
+            }
+        }
+
+        let arg_tp = if all_int { ETInt } else { ETReal };
+        let arg_tps = vec![arg_tp; args.len()];
+        let mut bf =
+            new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &arg_tps)?;
+        let sig: &'static SigDesc = if all_int {
+            bf.extra = SigExtra::IntervalInt { has_nullable };
+            &builtinIntervalIntSig
+        } else {
+            bf.extra = SigExtra::IntervalReal { has_nullable };
+            &builtinIntervalRealSig
+        };
+        Ok(bf.with_sig(sig))
+    }
+}
+
+/// `builtinIntervalIntSig.evalInt`: -1 for a NULL `N`; otherwise the linear (nullable
+/// arguments) or binary search over `args[1:]`.
+// go: builtinIntervalIntSig.evalInt L1
+// go: builtinIntervalIntSig.Clone L2 (BuiltinFunc::clone_from_base: hasNullable is not copied, as Go)
+// go: pkg/expression/builtin_compare_vec.go builtinIntervalIntSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int, lazy, args(Int))]
+pub fn interval_int(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<i64>, Error> {
+    let Some(arg0) = args.int(ctx, 0)? else {
+        return Ok(Some(-1));
+    };
+    let is_uint1 = has_unsigned_flag(f.arg_type(0).get_flag());
+    let idx = if f.has_nullable() {
+        interval_int_linear_search(ctx, f, arg0, is_uint1, args)?
+    } else {
+        interval_int_bin_search(ctx, f, arg0, is_uint1, args)?
+    };
+    Ok(Some(idx as i64))
+}
+
+/// Whether `target` is less than `arg` with the signedness of both.
+// glue: the comparison of builtinIntervalIntSig.linearSearch / binSearch
+fn interval_int_less(target: i64, is_uint1: bool, arg: i64, is_uint2: bool) -> bool {
+    match (is_uint1, is_uint2) {
+        (false, false) => target < arg,
+        (true, true) => (target as u64) < (arg as u64),
+        (false, true) => target < 0 || (target as u64) < (arg as u64),
+        (true, false) => arg > 0 && (target as u64) < (arg as u64),
+    }
+}
+
+/// linearSearch linearly scans the argument least to find the position of the first value
+/// that is larger than the given target (the arguments are `args[1:]`).
+// go: builtinIntervalIntSig.linearSearch L1
+fn interval_int_linear_search(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    target: i64,
+    is_uint1: bool,
+    args: &mut impl Args,
+) -> Result<usize, Error> {
+    let n = args.len() - 1;
+    let mut i = 0;
+    while i < n {
+        let is_uint2 = has_unsigned_flag(f.arg_type(i + 1).get_flag());
+        let arg = args.int(ctx, i + 1)?;
+        let less = match arg {
+            Some(arg) => interval_int_less(target, is_uint1, arg, is_uint2),
+            None => false,
+        };
+        if less {
+            break;
+        }
+        i += 1;
+    }
+    Ok(i)
+}
+
+/// binSearch is a binary search method. All arguments are treated as integers. It is
+/// required that arg[0] < args[1] < args[2] < ... < args[n] for this function to work
+/// correctly.
+// go: builtinIntervalIntSig.binSearch L1
+fn interval_int_bin_search(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    target: i64,
+    is_uint1: bool,
+    args: &mut impl Args,
+) -> Result<usize, Error> {
+    let (mut i, mut j) = (0usize, args.len() - 1);
+    while i < j {
+        let mid = i + (j - i) / 2;
+        let v = args.int(ctx, mid + 1)?.unwrap_or(target);
+        let is_uint2 = has_unsigned_flag(f.arg_type(mid + 1).get_flag());
+        if !interval_int_less(target, is_uint1, v, is_uint2) {
+            i = mid + 1;
+        } else {
+            j = mid;
+        }
+    }
+    Ok(i)
+}
+
+/// `builtinIntervalRealSig.evalInt`.
+// go: builtinIntervalRealSig.evalInt L1
+// go: builtinIntervalRealSig.Clone L2 (BuiltinFunc::clone_from_base copies SigExtra::IntervalReal, as Go)
+// go: pkg/expression/builtin_compare_vec.go builtinIntervalRealSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int, lazy, args(Real))]
+pub fn interval_real(
+    ctx: &dyn EvalContext,
+    f: &impl SigView,
+    args: &mut impl Args,
+) -> Result<Option<i64>, Error> {
+    let Some(arg0) = args.real(ctx, 0)? else {
+        return Ok(Some(-1));
+    };
+    let idx = if f.has_nullable() {
+        interval_real_linear_search(ctx, arg0, args)?
+    } else {
+        interval_real_bin_search(ctx, arg0, args)?
+    };
+    Ok(Some(idx as i64))
+}
+
+// go: builtinIntervalRealSig.linearSearch L1
+fn interval_real_linear_search(
+    ctx: &dyn EvalContext,
+    target: f64,
+    args: &mut impl Args,
+) -> Result<usize, Error> {
+    let n = args.len() - 1;
+    let mut i = 0;
+    while i < n {
+        if let Some(arg) = args.real(ctx, i + 1)?
+            && target < arg
+        {
+            break;
+        }
+        i += 1;
+    }
+    Ok(i)
+}
+
+// go: builtinIntervalRealSig.binSearch L1
+fn interval_real_bin_search(
+    ctx: &dyn EvalContext,
+    target: f64,
+    args: &mut impl Args,
+) -> Result<usize, Error> {
+    let (mut i, mut j) = (0usize, args.len() - 1);
+    while i < j {
+        let mid = i + (j - i) / 2;
+        match args.real(ctx, mid + 1)? {
+            None => i = mid + 1,
+            // Go: `cmp := target < v; !cmp` (a NaN is not less: i = mid + 1)
+            Some(v) if target < v => j = mid,
+            Some(_) => i = mid + 1,
+        }
+    }
+    Ok(i)
+}
+
+/// The vector versions of INTERVAL (`ArgsFallback::OwnArgs`): `args[0]` is evaluated as a
+/// column, the search of each row evaluates `args[1:]` on the row. A NULL `N` is -1 (not
+/// NULL).
+// go: pkg/expression/builtin_compare_vec.go builtinIntervalIntSig.vecEvalInt L2 (args[0] is an RPN sub-program; the row search reads it from the column)
+// go: pkg/expression/builtin_compare_vec.go builtinIntervalRealSig.vecEvalInt L2 (args[0] is an RPN sub-program; the row search reads it from the column)
+fn interval_vec_eval_int(
+    f: &BuiltinFunc,
+    ctx: &dyn EvalContext,
+    st: &EvalState,
+    eval_arg: &mut crate::eval::ArgColumnFn<'_>,
+    input: &tidb_chunk::Chunk,
+    result: &mut tidb_chunk::Column,
+) -> Result<(), Error> {
+    let mut col0 = crate::eval::rt::empty_column();
+    eval_arg(0, &mut col0)?;
+    let n = input.num_rows();
+    let view = crate::eval::RowSig::new(f, ctx);
+    let mut out = crate::eval::rt::IntOut::new(result, n, &[]);
+    for i in 0..n {
+        let mut a = crate::eval::rt::FirstColArgs::new(f, st, input.get_row(i), &col0, i);
+        let v = if std::ptr::eq(f.sig, &builtinIntervalIntSig) {
+            interval_int(ctx, &view, &mut a)?
+        } else {
+            interval_real(ctx, &view, &mut a)?
+        };
+        match v {
+            Some(v) => out.set(i, v),
+            None => out.set_null(i),
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- signature descriptors
 
 macro_rules! cmp_sig {
@@ -1842,6 +2907,202 @@ cmp_sig!(
     0,
     false,
     COALESCE_VECTOR_FLOAT32
+);
+
+// GREATEST / LEAST / INTERVAL (go-tipb ScalarFuncSig_*; the VECTOR signatures have no code:
+// Go comments their setPbCode out). The time signatures with cmpAsDate have their own code
+// (GreatestDate, GreatestCmpStringAsDate, ...) under the same Go type.
+macro_rules! gl_sig {
+    ($static:ident, $go:literal, $pb:expr, $vec:expr, $drivers:expr) => {
+        gl_sig!($static, $go, $pb, $vec, $drivers, None);
+    };
+    ($static:ident, $go:literal, $pb:expr, $vec:expr, $drivers:expr, $fallback:expr) => {
+        #[doc = concat!("`", $go, "`.")]
+        pub static $static: SigDesc = SigDesc {
+            name: $go,
+            pb_code: $pb,
+            vectorized: $vec,
+            drivers: $drivers,
+            args_fallback: $fallback,
+        };
+    };
+}
+use crate::eval::ArgsFallback::None as NoFallback;
+gl_sig!(
+    builtinGreatestIntSig,
+    "builtinGreatestIntSig",
+    4215,
+    true,
+    GREATEST_INT,
+    NoFallback
+);
+gl_sig!(
+    builtinGreatestRealSig,
+    "builtinGreatestRealSig",
+    4216,
+    true,
+    GREATEST_REAL,
+    NoFallback
+);
+gl_sig!(
+    builtinGreatestDecimalSig,
+    "builtinGreatestDecimalSig",
+    4217,
+    true,
+    GREATEST_DECIMAL,
+    NoFallback
+);
+gl_sig!(
+    builtinGreatestStringSig,
+    "builtinGreatestStringSig",
+    4218,
+    true,
+    GREATEST_STRING,
+    NoFallback
+);
+gl_sig!(
+    builtinGreatestTimeSig,
+    "builtinGreatestTimeSig",
+    4219,
+    true,
+    GREATEST_TIME,
+    NoFallback
+);
+gl_sig!(
+    builtinGreatestDateSig,
+    "builtinGreatestTimeSig",
+    7075,
+    true,
+    GREATEST_TIME,
+    NoFallback
+);
+gl_sig!(
+    builtinGreatestDurationSig,
+    "builtinGreatestDurationSig",
+    7067,
+    true,
+    GREATEST_DURATION,
+    NoFallback
+);
+gl_sig!(
+    builtinGreatestCmpStringAsTimeSig,
+    "builtinGreatestCmpStringAsTimeSig",
+    7068,
+    true,
+    GREATEST_CMP_STRING_AS_TIME,
+    crate::eval::ArgsFallback::OwnArgs(greatest_cmp_string_as_time_vec)
+);
+gl_sig!(
+    builtinGreatestCmpStringAsDateSig,
+    "builtinGreatestCmpStringAsTimeSig",
+    7073,
+    true,
+    GREATEST_CMP_STRING_AS_TIME,
+    crate::eval::ArgsFallback::OwnArgs(greatest_cmp_string_as_time_vec)
+);
+gl_sig!(
+    builtinGreatestVectorFloat32Sig,
+    "builtinGreatestVectorFloat32Sig",
+    0,
+    false,
+    GREATEST_VECTOR_FLOAT32,
+    NoFallback
+);
+gl_sig!(
+    builtinLeastIntSig,
+    "builtinLeastIntSig",
+    4220,
+    true,
+    LEAST_INT,
+    NoFallback
+);
+gl_sig!(
+    builtinLeastRealSig,
+    "builtinLeastRealSig",
+    4221,
+    true,
+    LEAST_REAL,
+    NoFallback
+);
+gl_sig!(
+    builtinLeastDecimalSig,
+    "builtinLeastDecimalSig",
+    4222,
+    true,
+    LEAST_DECIMAL,
+    NoFallback
+);
+gl_sig!(
+    builtinLeastStringSig,
+    "builtinLeastStringSig",
+    4223,
+    true,
+    LEAST_STRING,
+    NoFallback
+);
+gl_sig!(
+    builtinLeastTimeSig,
+    "builtinLeastTimeSig",
+    4224,
+    true,
+    LEAST_TIME,
+    NoFallback
+);
+gl_sig!(
+    builtinLeastDateSig,
+    "builtinLeastTimeSig",
+    7076,
+    true,
+    LEAST_TIME,
+    NoFallback
+);
+gl_sig!(
+    builtinLeastDurationSig,
+    "builtinLeastDurationSig",
+    7069,
+    true,
+    LEAST_DURATION,
+    NoFallback
+);
+gl_sig!(
+    builtinLeastCmpStringAsTimeSig,
+    "builtinLeastCmpStringAsTimeSig",
+    7070,
+    true,
+    LEAST_CMP_STRING_AS_TIME,
+    crate::eval::ArgsFallback::OwnArgs(least_cmp_string_as_time_vec)
+);
+gl_sig!(
+    builtinLeastCmpStringAsDateSig,
+    "builtinLeastCmpStringAsTimeSig",
+    7074,
+    true,
+    LEAST_CMP_STRING_AS_TIME,
+    crate::eval::ArgsFallback::OwnArgs(least_cmp_string_as_time_vec)
+);
+gl_sig!(
+    builtinLeastVectorFloat32Sig,
+    "builtinLeastVectorFloat32Sig",
+    0,
+    false,
+    LEAST_VECTOR_FLOAT32,
+    NoFallback
+);
+gl_sig!(
+    builtinIntervalIntSig,
+    "builtinIntervalIntSig",
+    4225,
+    true,
+    INTERVAL_INT,
+    crate::eval::ArgsFallback::OwnArgs(interval_vec_eval_int)
+);
+gl_sig!(
+    builtinIntervalRealSig,
+    "builtinIntervalRealSig",
+    4226,
+    true,
+    INTERVAL_REAL,
+    crate::eval::ArgsFallback::OwnArgs(interval_vec_eval_int)
 );
 
 // tipb.ScalarFuncSig codes (go-tipb expression.pb.go).

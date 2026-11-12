@@ -467,6 +467,124 @@ impl Args for RowArgs<'_> {
     }
 }
 
+/// [`Args`] of [`ArgsFallback::OwnArgs`](super::ArgsFallback) (INTERVAL): `args[0]` is read
+/// from its evaluated column (row `i`), the other arguments are evaluated on the row when
+/// asked (Go's INTERVAL vector version: `args[0].VecEvalXxx`, then the row search).
+pub struct FirstColArgs<'a> {
+    f: &'a BuiltinFunc,
+    st: &'a EvalState,
+    row: Row<'a>,
+    col0: &'a Column,
+    i: usize,
+}
+
+impl<'a> FirstColArgs<'a> {
+    /// The accessor for row `i` of `input` with `args[0]` from `col0`.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn new(
+        f: &'a BuiltinFunc,
+        st: &'a EvalState,
+        row: Row<'a>,
+        col0: &'a Column,
+        i: usize,
+    ) -> Self {
+        FirstColArgs {
+            f,
+            st,
+            row,
+            col0,
+            i,
+        }
+    }
+}
+
+impl Args for FirstColArgs<'_> {
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn len(&self) -> usize {
+        self.f.args.len()
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn int(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<i64>, Error> {
+        if i == 0 {
+            let refs = [self.col0];
+            return VecArgs::new(self.f, &refs, self.i).int(ctx, 0);
+        }
+        self.f.args[i].eval_int(ctx, self.st, self.row)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn real(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<f64>, Error> {
+        if i == 0 {
+            let refs = [self.col0];
+            return VecArgs::new(self.f, &refs, self.i).real(ctx, 0);
+        }
+        self.f.args[i].eval_real(ctx, self.st, self.row)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn string(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Cow<'_, [u8]>>, Error> {
+        if i == 0 {
+            let c = self.col0;
+            return Ok((!c.is_null(self.i)).then(|| Cow::Borrowed(c.get_bytes(self.i))));
+        }
+        Ok(self.f.args[i]
+            .eval_string(ctx, self.st, self.row)?
+            .map(Cow::Owned))
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn decimal(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<MyDecimal>, Error> {
+        if i == 0 {
+            let refs = [self.col0];
+            return VecArgs::new(self.f, &refs, self.i).decimal(ctx, 0);
+        }
+        self.f.args[i].eval_decimal(ctx, self.st, self.row)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn time(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Time>, Error> {
+        if i == 0 {
+            let refs = [self.col0];
+            return VecArgs::new(self.f, &refs, self.i).time(ctx, 0);
+        }
+        self.f.args[i].eval_time(ctx, self.st, self.row)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn duration(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Duration>, Error> {
+        if i == 0 {
+            let refs = [self.col0];
+            return VecArgs::new(self.f, &refs, self.i).duration(ctx, 0);
+        }
+        self.f.args[i].eval_duration(ctx, self.st, self.row)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn json(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<BinaryJSON<'_>>, Error> {
+        if i == 0 {
+            let c = self.col0;
+            return Ok((!c.is_null(self.i)).then(|| c.get_json(self.i)));
+        }
+        self.f.args[i].eval_json(ctx, self.st, self.row)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32(
+        &mut self,
+        ctx: &dyn EvalContext,
+        i: usize,
+    ) -> Result<Option<VectorFloat32<'_>>, Error> {
+        if i == 0 {
+            let c = self.col0;
+            return Ok((!c.is_null(self.i)).then(|| c.get_vector_float32(self.i)));
+        }
+        self.f.args[i].eval_vector_float32(ctx, self.st, self.row)
+    }
+}
+
 /// [`Args`] of the vector driver: reads row `i` of the evaluated argument columns.
 pub struct VecArgs<'a> {
     cols: &'a [&'a Column],

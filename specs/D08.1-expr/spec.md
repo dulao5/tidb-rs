@@ -99,6 +99,7 @@ Go 中有些签名的向量版不使用父表达式求好的参数列，而是�
 | `None` | 其余签名 | 参数由父程序求（`RpnNode::Call`） |
 | `SecondArg` | `builtinLogic{And,Or}Sig.vecEvalInt` | 先求 `args[0]`，出错直接返回；`args[1]` 出错或相对于它求值之前新增了 warning，就把 warning 截断到 `args[0]` 之前，改用逐行版 |
 | `EveryArg` | `builtinCoalesce*Sig.vecEvalXxx`（以后 CASE WHEN 也是） | 按顺序求每个参数（包括第一个），出错或相对于 `args[0]` 之前新增了 warning 就回退；只有新增了 warning 时才截断（截断到 `args[0]` 之前） |
+| `OwnArgs(fn)` | `builtinInterval{Int,Real}Sig.vecEvalInt`、`builtin{Greatest,Least}CmpStringAsTimeSig.vecEvalString`（D08.4 第 3 批） | 不回退：节点把"求第 `i` 个参数列"的回调交给签名的函数，签名按 Go 的顺序求参数并写结果（INTERVAL 只把 `args[0]` 求成列，其余参数在每行查找时逐行求；CmpStringAsTime 求一个参数、转换它的各行，再求下一个） |
 
 - **IF/IFNULL（D08.9）需要第三种规则**（Lucky 评审 #108）：Go 在求完 `args[0]` 之后才记 warning 数，所以回退时 `args[0]` 的 warning 会出现两次（v8.5.8：`ifnull(cast('1a' as signed), …)` 关闭向量化 1 条 warning，打开 2 条）。IFNULL 和 AND 一样是两个参数，但用 `SecondArg` 会丢掉这个重复；移植 D08.9 时新增一种 `ArgsFallback`（见 tasks T6e）。CASE WHEN 用 `EveryArg` 是对的。
 - 守护测试（建议，tasks T6e）：Go 中有 `fallbackEvalXxx` 的 30 个签名，已注册的都必须有 `args_fallback != None`。

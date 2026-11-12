@@ -873,7 +873,15 @@ pub fn new_function_impl(
     if let Some(check) = check_or_init
         && let Expr::ScalarFunction(sf) = &*ret
     {
-        return check(sf.clone());
+        // Go passes the node itself, not a Clone: copy it field by field so that the
+        // signature keeps its state (`ScalarFunction::clone` is Go's Clone, which drops e.g.
+        // the `hasNullable` of builtinIntervalIntSig).
+        return check(ScalarFunction {
+            func_name: sf.func_name.clone(),
+            function: sf.function.clone(),
+            hashcode: sf.hashcode.clone(),
+            canonicalhashcode: sf.canonicalhashcode.clone(),
+        });
     }
     Ok(ret)
 }
@@ -942,7 +950,7 @@ fn new_function_impl_inner(
             "the function class of {func_name} is not ported yet"
         )));
     };
-    let f = fc.get_function(ctx, func_args)?;
+    let mut f = fc.get_function(ctx, func_args)?;
     // §3.2: no v8.5.8 signature has a TypeUnspecified type, so the node's type and the
     // signature's are one (Lucky, review of #95).
     debug_assert_ne!(
@@ -950,7 +958,8 @@ fn new_function_impl_inner(
         mysql::TypeUnspecified,
         "{func_name}: signature type TypeUnspecified (D08.1 spec §3.2)"
     );
-    let builtin_ret_tp = f.tp.clone();
+    // Go's f.getRetTp(): a string type of flen >= 65536 becomes MEDIUMBLOB / LONGBLOB here.
+    let builtin_ret_tp = f.get_ret_tp().clone();
     if builtin_ret_tp.get_type() != mysql::TypeUnspecified
         || ret_type.get_type() == mysql::TypeUnspecified
     {

@@ -6,7 +6,9 @@
 use serde_json::{Map, Value, json};
 use tidb_base::contextutil::WarnHandler;
 use tidb_chunk::Row;
-use tidb_expression::builtin_compare::{get_accurate_cmp_type, get_cmp_function};
+use tidb_expression::builtin_compare::{
+    get_accurate_cmp_type, get_cmp_function, resolve_type4_between,
+};
 use tidb_expression::eval::{RpnState, rt};
 use tidb_expression::expression::eval_expr;
 use tidb_expression::scalar_function::{new_function, new_function_base};
@@ -18,6 +20,9 @@ use super::cast_eval::{column, err_or_null, expr_of, input_of};
 use super::{ctx_of, dump, ex_err, ex_try, warns};
 
 pub(super) fn exec(op: &str, p: &[Value]) -> Option<Value> {
+    if op == "between" {
+        return Some(between(p));
+    }
     if op != "cmpbuild" {
         return None;
     }
@@ -119,4 +124,17 @@ pub(super) fn exec(op: &str, p: &[Value]) -> Option<Value> {
         }
     }
     Some(Value::Object(m))
+}
+
+/// "between" (D08.4 batch 3, `cast_zd084c.go`): `ResolveType4Between(a, b, c)`.
+fn between(p: &[Value]) -> Value {
+    let ctx = ctx_of(&p[0]);
+    let ev = &ctx.1;
+    let fts: Vec<_> = p[1].as_array().unwrap().iter().map(super::ft_in).collect();
+    json!({"et": ex_try(|| {
+        let es: Vec<ExprRef> =
+            p[2].as_array().unwrap().iter().map(|e| expr_of(&ctx, e, &fts)).collect();
+        ev.truncate_warnings(0);
+        json!(resolve_type4_between(&**ev, [&es[0], &es[1], &es[2]]).0)
+    })})
 }
