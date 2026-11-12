@@ -32,6 +32,7 @@ pub mod collation;
 pub mod column;
 pub mod constant;
 pub mod constant_fold;
+pub mod constant_propagation;
 pub mod context;
 pub mod errors;
 pub mod eval;

@@ -11,6 +11,7 @@
 pub mod config;
 pub mod contextutil;
 pub mod dbterror;
+pub mod disjointset;
 pub mod errno;
 pub mod errors;
 pub mod gofmt;

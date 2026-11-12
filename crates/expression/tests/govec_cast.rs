@@ -9,6 +9,7 @@
 
 mod cast_arith;
 mod cast_cmp;
+mod cast_cprop;
 mod cast_eval;
 
 use std::io::Read;
@@ -159,6 +160,17 @@ fn datum_out(d: &Datum) -> Value {
             json!([d.kind(), j.type_code, hex(&j.value)])
         }
         dm::KindVectorFloat32 => json!([d.kind(), d.get_vector_float32().string()]),
+        // constant propagation (D08.2) builds constants of these kinds
+        dm::KindFloat32 => json!([d.kind(), f64::from(d.get_float32()).to_bits()]),
+        dm::KindBinaryLiteral | dm::KindMysqlBit => json!([d.kind(), hex(d.get_bytes())]),
+        dm::KindMysqlEnum => {
+            let e = d.get_mysql_enum();
+            json!([d.kind(), e.value, gs(&e.name), d.collation()])
+        }
+        dm::KindMysqlSet => {
+            let st = d.get_mysql_set();
+            json!([d.kind(), st.value, gs(&st.name), d.collation()])
+        }
         k => panic!("datum_out: kind {k}"),
     }
 }
@@ -668,8 +680,34 @@ fn exec(op: &str, p: &[Value]) -> Value {
         _ => cast_eval::exec(op, p)
             .or_else(|| cast_cmp::exec(op, p))
             .or_else(|| cast_arith::exec(op, p))
+            .or_else(|| cast_cprop::exec(op, p))
             .unwrap_or_else(|| panic!("cast: op {op}")),
     }
+}
+
+/// A "cprop" result with the flen, decimal and flag of every constant's field type erased
+/// (see the in-place type changes in `replay`).
+fn cprop_erase_types(mut v: Value) -> Value {
+    fn walk(v: &mut Value) {
+        match v {
+            Value::Object(m) => {
+                if let Some(Value::Array(c)) = m.get_mut("const")
+                    && let Some(Value::Array(ft)) = c.get_mut(1)
+                {
+                    ft[1] = Value::Null;
+                    ft[2] = Value::Null;
+                    ft[3] = Value::Null;
+                }
+                for (_, x) in m.iter_mut() {
+                    walk(x);
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    walk(&mut v);
+    v
 }
 
 fn replay(path: &str) {
@@ -685,17 +723,65 @@ fn replay(path: &str) {
     }
     let mut fails = vec![];
     let mut n = 0;
+    let mut cprop = 0;
+    let mut in_place = 0;
+    let mut in_place_type = 0;
+    let lenient = std::env::var("GOVEC_CPROP_STRICT").is_err();
     for line in lines {
         n += 1;
-        let rec: Value = serde_json::from_str(line).unwrap();
+        let mut rec: Value = serde_json::from_str(line).unwrap();
+        let is_cprop = rec["op"] == "cprop";
+        cprop += usize::from(is_cprop);
+        // "cprop": the generator marks the records where Go changed a node of the input
+        // conditions in place (every holder sees it); tidb-rs changes copies (D08.2 spec §4
+        // item 7, a deliberate deviation, #104). Every record is executed; a marked record
+        // that differs (and does not panic) counts as a deviation, capped below.
+        let marked = rec["out"]
+            .as_object_mut()
+            .and_then(|m| m.remove("known_deviation"))
+            .is_some_and(|d| d == "in-place");
         let args = rec["args"].as_array().cloned().unwrap_or_default();
         let got = exec(rec["op"].as_str().unwrap(), &args);
         let got: Value = serde_json::from_str(&got.to_string()).unwrap();
-        if got != rec["out"] {
-            fails.push(format!("{line}\n    got {got}"));
+        if got == rec["out"] {
+            continue;
         }
+        if lenient && is_cprop && marked && !got.to_string().contains(r#""panic":true"#) {
+            in_place += 1;
+            continue;
+        }
+        if lenient
+            && is_cprop
+            && cprop_erase_types(got.clone()) == cprop_erase_types(rec["out"].clone())
+        {
+            // Go changed the flen / decimal / flags of a constant created during propagation
+            // in place (PropagateType on a DECIMAL constant); tidb-rs changes copies (D08.2
+            // spec §4). Values, signatures and function types are equal.
+            in_place_type += 1;
+            continue;
+        }
+        fails.push(format!("{line}\n    got {got}"));
     }
     std::panic::set_hook(prev);
+    // Caps relative to the cprop records, so that runs with other seeds or more records
+    // work unchanged: ≤ 2 % in-place deviations, ≤ 0.1 % constant-type-only differences.
+    assert!(
+        in_place * 50 <= cprop,
+        "{path}: {in_place} of {cprop} cprop records differ by Go's in-place changes (cap 2 %)"
+    );
+    assert!(
+        in_place_type * 1000 <= cprop.max(1000),
+        "{path}: {in_place_type} of {cprop} cprop records differ only in constant field types (cap 0.1 %)"
+    );
+    if lenient && cprop > 0 {
+        eprintln!(
+            "{path}: cprop {cprop}, in-place deviations {in_place}, constant-type-only {in_place_type}"
+        );
+    }
+    if let Ok(f) = std::env::var("GOVEC_FAILS_FILE") {
+        // every differing record in full (debugging aid)
+        std::fs::write(f, fails.join("\n")).unwrap();
+    }
     let shown: Vec<_> = fails
         .iter()
         .take(

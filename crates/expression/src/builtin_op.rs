@@ -464,6 +464,119 @@ pub fn unary_not_json(
     Ok(Some(i64::from(compare_binary_json(arg.clone(), zero) == 0)))
 }
 
+// ---------------------------------------------------------------- IS NULL
+
+/// The function class of IS NULL.
+#[derive(Debug)]
+pub struct IsNullFunctionClass {
+    /// The embedded baseFunctionClass.
+    pub base: BaseFunctionClass,
+}
+
+/// The function class of `isnull`.
+pub static IS_NULL_CLASS: IsNullFunctionClass = IsNullFunctionClass {
+    base: BaseFunctionClass {
+        func_name: ast::IsNull,
+        min_args: 1,
+        max_args: 1,
+    },
+};
+
+impl FunctionClass for IsNullFunctionClass {
+    // go: isNullFunctionClass.getFunction L1
+    fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+        let ev = ctx.get_eval_ctx();
+        let mut arg_tp = args[0].get_type(&*ev).eval_type();
+        if arg_tp == ETTimestamp {
+            arg_tp = ETDatetime;
+        } else if arg_tp == ETJson {
+            arg_tp = ETString;
+        }
+        let mut bf =
+            new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[arg_tp])?;
+        bf.tp.set_flen(1);
+        let sig: &'static SigDesc = match arg_tp {
+            ETInt => &builtinIntIsNullSig,
+            ETDecimal => &builtinDecimalIsNullSig,
+            ETReal => &builtinRealIsNullSig,
+            ETDatetime => &builtinTimeIsNullSig,
+            ETDuration => &builtinDurationIsNullSig,
+            ETString => &builtinStringIsNullSig,
+            ETVectorFloat32 => &builtinVectorFloat32IsNullSig,
+            _ => {
+                return Err(Error::plain(format!(
+                    "{} is not supported for ISNULL()",
+                    arg_tp.to_string()
+                )));
+            }
+        };
+        Ok(bf.with_sig(sig))
+    }
+}
+
+/// `evalIsNull`: 1 when the argument is NULL; an error of the argument is returned.
+// go: evalIsNull L1
+fn eval_is_null<T>(r: Result<Option<T>, Error>) -> Result<Option<i64>, Error> {
+    Ok(Some(i64::from(r?.is_none())))
+}
+
+/// IS NULL over each argument type (lazy bodies: the argument may be NULL).
+macro_rules! is_null_sig {
+    ($($(#[$m:meta])* $fname:ident, $get:ident, [$($opt:ident),*]);* $(;)?) => {$(
+        $(#[$m])*
+        #[eval_fn(Int, lazy $(, $opt)*)]
+        pub fn $fname(
+            ctx: &dyn EvalContext,
+            _f: &impl SigView,
+            args: &mut impl Args,
+        ) -> Result<Option<i64>, Error> {
+            eval_is_null(args.$get(ctx, 0))
+        }
+    )*};
+}
+
+is_null_sig!(
+    // go: builtinIntIsNullSig.evalInt L1
+    // go: builtinIntIsNullSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+    // go: builtinIntIsNullSig.vectorized L2 (SigDesc.vectorized)
+    // go: builtinIntIsNullSig.Clone L2 (BuiltinFunc::clone_from_base)
+    int_is_null, int, [];
+    // go: builtinDecimalIsNullSig.evalInt L1
+    // go: builtinDecimalIsNullSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+    // go: builtinDecimalIsNullSig.vectorized L2 (SigDesc.vectorized)
+    // go: builtinDecimalIsNullSig.Clone L2 (BuiltinFunc::clone_from_base)
+    decimal_is_null, decimal, [];
+    // go: builtinRealIsNullSig.evalInt L1
+    // go: builtinRealIsNullSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+    // go: builtinRealIsNullSig.vectorized L2 (SigDesc.vectorized)
+    // go: builtinRealIsNullSig.Clone L2 (BuiltinFunc::clone_from_base)
+    real_is_null, real, [];
+    // go: builtinTimeIsNullSig.evalInt L1
+    // go: builtinTimeIsNullSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+    // go: builtinTimeIsNullSig.vectorized L2 (SigDesc.vectorized)
+    // go: builtinTimeIsNullSig.Clone L2 (BuiltinFunc::clone_from_base)
+    time_is_null, time, [];
+    // go: builtinDurationIsNullSig.evalInt L1
+    // go: builtinDurationIsNullSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+    // go: builtinDurationIsNullSig.vectorized L2 (SigDesc.vectorized)
+    // go: builtinDurationIsNullSig.Clone L2 (BuiltinFunc::clone_from_base)
+    duration_is_null, duration, [];
+    // go: builtinStringIsNullSig.evalInt L1
+    // go: pkg/expression/builtin_string_vec.go builtinStringIsNullSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+    // go: pkg/expression/builtin_string_vec.go builtinStringIsNullSig.vectorized L2 (SigDesc.vectorized)
+    // go: builtinStringIsNullSig.Clone L2 (BuiltinFunc::clone_from_base)
+    string_is_null, string, [];
+    /// IS NULL over VECTOR (Go has no vector version).
+    // go: builtinVectorFloat32IsNullSig.evalInt L1
+    // go: builtinVectorFloat32IsNullSig.Clone L2 (BuiltinFunc::clone_from_base)
+    vector_float32_is_null, vector_float32, [novec];
+);
+
 // ---------------------------------------------------------------- unary minus
 
 /// The function class of the unary minus.
@@ -717,4 +830,16 @@ op_sig!(
     0,
     false,
     VECTOR_FLOAT32_IS_FALSE
+);
+op_sig!(builtinIntIsNullSig, 3116, true, INT_IS_NULL);
+op_sig!(builtinDecimalIsNullSig, 3111, true, DECIMAL_IS_NULL);
+op_sig!(builtinRealIsNullSig, 3113, true, REAL_IS_NULL);
+op_sig!(builtinTimeIsNullSig, 3115, true, TIME_IS_NULL);
+op_sig!(builtinDurationIsNullSig, 3112, true, DURATION_IS_NULL);
+op_sig!(builtinStringIsNullSig, 3114, true, STRING_IS_NULL);
+op_sig!(
+    builtinVectorFloat32IsNullSig,
+    5155,
+    false,
+    VECTOR_FLOAT32_IS_NULL
 );
