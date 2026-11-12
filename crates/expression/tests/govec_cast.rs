@@ -7,6 +7,7 @@
 //!
 //! `GOVEC_CAST_FILES` (comma-separated paths) replays extra-seed artifacts as well.
 
+mod cast_cmp;
 mod cast_eval;
 
 use std::io::Read;
@@ -659,7 +660,9 @@ fn exec(op: &str, p: &[Value]) -> Value {
             });
             json!({ "res": res, "bwarns": warns(&ev.truncate_warnings(0)) })
         }
-        _ => cast_eval::exec(op, p).unwrap_or_else(|| panic!("cast: op {op}")),
+        _ => cast_eval::exec(op, p)
+            .or_else(|| cast_cmp::exec(op, p))
+            .unwrap_or_else(|| panic!("cast: op {op}")),
     }
 }
 

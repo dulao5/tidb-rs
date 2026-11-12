@@ -729,6 +729,23 @@ pub trait Args {
     /// `b.args[i].EvalDecimal(ctx, row)`.
     // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
     fn decimal(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<MyDecimal>, Error>;
+    /// `b.args[i].EvalTime(ctx, row)`.
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn time(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Time>, Error>;
+    /// `b.args[i].EvalDuration(ctx, row)` (the vector driver reads the column with fsp 0:
+    /// the value keeps its nanoseconds, which is all a comparison looks at).
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn duration(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Duration>, Error>;
+    /// `b.args[i].EvalJSON(ctx, row)`.
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn json(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<BinaryJSON<'_>>, Error>;
+    /// `b.args[i].EvalVectorFloat32(ctx, row)`.
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn vector_float32(
+        &mut self,
+        ctx: &dyn EvalContext,
+        i: usize,
+    ) -> Result<Option<VectorFloat32<'_>>, Error>;
 }
 
 /// One node of an [`RpnProgram`] (post-order).

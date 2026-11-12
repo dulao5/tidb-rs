@@ -441,6 +441,30 @@ impl Args for RowArgs<'_> {
     fn decimal(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<MyDecimal>, Error> {
         self.f.args[i].eval_decimal(ctx, self.st, self.row)
     }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn time(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Time>, Error> {
+        self.f.args[i].eval_time(ctx, self.st, self.row)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn duration(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<Duration>, Error> {
+        self.f.args[i].eval_duration(ctx, self.st, self.row)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn json(&mut self, ctx: &dyn EvalContext, i: usize) -> Result<Option<BinaryJSON<'_>>, Error> {
+        self.f.args[i].eval_json(ctx, self.st, self.row)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32(
+        &mut self,
+        ctx: &dyn EvalContext,
+        i: usize,
+    ) -> Result<Option<VectorFloat32<'_>>, Error> {
+        self.f.args[i].eval_vector_float32(ctx, self.st, self.row)
+    }
 }
 
 /// [`Args`] of the vector driver: reads row `i` of the evaluated argument columns.
@@ -502,6 +526,50 @@ impl Args for VecArgs<'_> {
             None
         } else {
             Some(c.get_decimal(self.i))
+        })
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn time(&mut self, _ctx: &dyn EvalContext, i: usize) -> Result<Option<Time>, Error> {
+        let c = self.cols[i];
+        Ok(if c.is_null(self.i) {
+            None
+        } else {
+            Some(c.get_time(self.i))
+        })
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn duration(&mut self, _ctx: &dyn EvalContext, i: usize) -> Result<Option<Duration>, Error> {
+        let c = self.cols[i];
+        Ok(if c.is_null(self.i) {
+            None
+        } else {
+            Some(c.get_duration(self.i, 0))
+        })
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn json(&mut self, _ctx: &dyn EvalContext, i: usize) -> Result<Option<BinaryJSON<'_>>, Error> {
+        let c = self.cols[i];
+        Ok(if c.is_null(self.i) {
+            None
+        } else {
+            Some(c.get_json(self.i))
+        })
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32(
+        &mut self,
+        _ctx: &dyn EvalContext,
+        i: usize,
+    ) -> Result<Option<VectorFloat32<'_>>, Error> {
+        let c = self.cols[i];
+        Ok(if c.is_null(self.i) {
+            None
+        } else {
+            Some(c.get_vector_float32(self.i))
         })
     }
 }

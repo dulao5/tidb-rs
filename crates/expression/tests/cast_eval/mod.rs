@@ -26,7 +26,7 @@ use tidb_types::field_type::new_field_type;
 use super::{Ctxs, ctx_of, datum_in, dec_out, ex_try, ft_in, gs, hex, json_out, time_out, warns};
 
 /// evInput.
-fn input_of(cols: &Value, rows: &Value, sel: &Value) -> (Vec<FieldType>, Chunk) {
+pub(super) fn input_of(cols: &Value, rows: &Value, sel: &Value) -> (Vec<FieldType>, Chunk) {
     let fts: Vec<FieldType> = cols.as_array().unwrap().iter().map(ft_in).collect();
     let rows = rows.as_array().unwrap();
     let mut chk = new_chunk_with_capacity(&fts, rows.len());
@@ -44,7 +44,7 @@ fn input_of(cols: &Value, rows: &Value, sel: &Value) -> (Vec<FieldType>, Chunk) 
 }
 
 /// evExpr.
-fn expr_of(ctx: &Ctxs, v: &Value, fts: &[FieldType]) -> ExprRef {
+pub(super) fn expr_of(ctx: &Ctxs, v: &Value, fts: &[FieldType]) -> ExprRef {
     let a = v.as_array().unwrap();
     match a[0].as_str().unwrap() {
         "col" => {
@@ -65,6 +65,14 @@ fn expr_of(ctx: &Ctxs, v: &Value, fts: &[FieldType]) -> ExprRef {
             ft_in(&a[1]),
             false,
             false,
+        )
+        .unwrap(),
+        // D08.4 batch 1: ["fn", name, [recipes]] -> NewFunctionBase (no folding).
+        "fn" => tidb_expression::scalar_function::new_function_base(
+            &*ctx.0,
+            a[1].as_str().unwrap(),
+            new_field_type(mysql::TypeUnspecified),
+            exprs_of(ctx, &a[2], fts),
         )
         .unwrap(),
         k => panic!("expr_of: {k}"),
@@ -123,11 +131,11 @@ fn cell(col: &tidb_chunk::Column, ft: &FieldType, i: usize) -> Value {
     }
 }
 
-fn column(col: &tidb_chunk::Column, ft: &FieldType, n: usize) -> Value {
+pub(super) fn column(col: &tidb_chunk::Column, ft: &FieldType, n: usize) -> Value {
     Value::Array((0..n).map(|i| cell(col, ft, i)).collect())
 }
 
-fn err_or_null(r: &Result<(), Error>) -> Value {
+pub(super) fn err_or_null(r: &Result<(), Error>) -> Value {
     match r {
         Ok(()) => Value::Null,
         Err(e) => gs(&e.error()),
