@@ -24,7 +24,19 @@
 | `unaryMinusFunctionClass`（`handleIntOverflow`、`typeInfer`）、`builtinUnaryMinus{Int,Decimal,Real}Sig` | `UnaryMinusFunctionClass`（`unaryminus`）；`constantArgOverflow` 放在 `SigExtra::UnaryMinusDecimal` |
 | `wrapWithIsTrue`（D08.1，expression.go）、`logicalOps`（util.go） | `expression::wrap_with_is_true`、`util::is_logical_op` |
 
-位运算与 IS NULL 是第 3 批。
+IS NULL 随常量传播移植（tasks T3b）。
+
+## 1c. 范围（第 3 批：位运算，`builtin_op.rs`）
+
+| Go | Rust |
+|---|---|
+| `bit{And,Or,Xor}FunctionClass`、`{left,right}ShiftFunctionClass` 的 `getFunction`；`builtinBit{And,Or,Xor}Sig`、`builtin{Left,Right}ShiftSig` | `BitBinaryFunctionClass` 与 5 个实例（`bitand bitor bitxor leftshift rightshift`）；签名体是 lazy（`args(Int, Int)`）：逐行版在 `args[0]` 为 NULL 时不求 `args[1]`，向量驱动两列都求（§3.2） |
+| `bitNegFunctionClass`、`builtinBitNegSig` | `BitNegFunctionClass`（`bitneg`），普通签名体 |
+
+- 结果类型都加 `UnsignedFlag`（Go 在 `setPbCode` 之后改 `sig.tp`，与 `RetType` 是同一个对象，D08.1 §3.2）。
+- 移位：Go 的 `uint64(a) << uint64(b)` 在移位数 ≥ 64 时为 0，负的移位数转成很大的 uint64，也是 0；Rust 的 `<<` 会溢出，所以先判断移位数。`>>` 是逻辑右移（按 uint64）。
+- pb code：BitAnd 3118、BitOr 3119、BitXor 3120、BitNeg 3121、LeftShift 3129、RightShift 3130（go-tipb）。
+- 不用 `checked` 写法：这几个运算不会出错（§3.4 不适用）。
 
 ## 2. 依赖
 
@@ -46,6 +58,7 @@ D08.1（`#[eval_fn]`、`RpnProgram`）、D08.2（`newBaseBuiltinFuncWithTp`）�
 | `IntDivideDecimal` | 溢出错误：逐行版打印参数（`StringWithCtx`），向量版打印两个 decimal 值（`num[i].String()`） | **用户可见，已在 v8.5.8 上验证**（[#83](https://github.com/dulao5/tidb-rs/issues/83#issuecomment-6814585483)）：`c DIV 0.0001` 溢出时，向量版的错误信息里是行里的数据，逐行版只写列名 |
 | `DivideDecimal` | `ErrTruncated`：逐行版 `tc.HandleTruncate`，参数是 `*MyDecimal`（String）；向量版 `ec.HandleError`，参数是 `types.MyDecimal` 值（按字段打印） | **用户可见，已在 v8.5.8 上验证**（[#83](https://github.com/dulao5/tidb-rs/issues/83#issuecomment-6814585483)）：warning 文本随 `tidb_enable_vectorized_expression` 变化 |
 | `LogicXor`（第 2 批） | 逐行版在 `args[0]` 为 NULL 时不求 `args[1]`；向量版两列都求（`MergeNulls`）。`args[1]` 在这些行上的 warning 或错误只在向量化打开时出现 | **用户可见，已在 v8.5.8 上验证**（[#83](https://github.com/dulao5/tidb-rs/issues/83#issuecomment-6816966507)）：关闭向量化时 `SELECT a XOR (b DIV 0)` 只有 1 条 warning、严格模式的 `INSERT ... SELECT` 成功；打开后变成 3 条 warning，INSERT 报 `ERROR 1365 Division by 0`。govec `logicfb` 中 4 条记录两种模式不同 |
+| `Bit{And,Or,Xor}`、`{Left,Right}Shift`（第 3 批） | 同 `LogicXor`：逐行版在 `args[0]` 为 NULL 时不求 `args[1]`，向量版两列都求（`MergeNulls`） | 按负责人 2026-11-12 的决定（关闭向量化是历史负债），只分析开关为 ON 时逐行版能否走到：能走到的地方是不能向量化的表达式和按行求值的执行器（#83 的第二类）；常量折叠时参数都是常量，`args[1]` 的错误或 warning 在它自己折叠时就已产生，看不出差别（按代码推断）。未在集群上实测。govec `bitfb` 覆盖（反证：逐行版也求 `args[1]` 时报 28 条不一致） |
 
 ### 3.3 Go 读到的是包 CAST 之后的参数
 
