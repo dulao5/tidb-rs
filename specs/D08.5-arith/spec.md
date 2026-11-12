@@ -31,8 +31,8 @@ D08.1（`#[eval_fn]`、`RpnProgram`）、D08.2（`newBaseBuiltinFuncWithTp`）�
 
 | 签名 | 差异 | 用户可见 |
 |---|---|---|
-| `IntDivideDecimal` | 溢出错误：逐行版打印参数（`StringWithCtx`），向量版打印两个 decimal 值（`num[i].String()`） | 按代码推断可见（`c DIV 0.0001` 溢出时，错误文本随 `tidb_enable_vectorized_expression` 变化）；未在集群上实测 |
-| `DivideDecimal` | `ErrTruncated`：逐行版 `tc.HandleTruncate`，参数是 `*MyDecimal`（String）；向量版 `ec.HandleError`，参数是 `types.MyDecimal` 值（按字段打印） | 按代码推断 warning 文本可见（同 #83 的 `DecimalAsInt`）；未实测 |
+| `IntDivideDecimal` | 溢出错误：逐行版打印参数（`StringWithCtx`），向量版打印两个 decimal 值（`num[i].String()`） | **用户可见，已在 v8.5.8 上验证**（[#83](https://github.com/dulao5/tidb-rs/issues/83#issuecomment-6814585483)）：`c DIV 0.0001` 溢出时，向量版的错误信息里是行里的数据，逐行版只写列名 |
+| `DivideDecimal` | `ErrTruncated`：逐行版 `tc.HandleTruncate`，参数是 `*MyDecimal`（String）；向量版 `ec.HandleError`，参数是 `types.MyDecimal` 值（按字段打印） | **用户可见，已在 v8.5.8 上验证**（[#83](https://github.com/dulao5/tidb-rs/issues/83#issuecomment-6814585483)）：warning 文本随 `tidb_enable_vectorized_expression` 变化 |
 
 ### 3.3 Go 读到的是包 CAST 之后的参数
 
@@ -46,7 +46,7 @@ D08.1（`#[eval_fn]`、`RpnProgram`）、D08.2（`newBaseBuiltinFuncWithTp`）�
 
 1. 第 3.4 节：复现 Go 读到的修改后的类型，而不是共享节点的原地修改（M-EXPR）。
 2. `RpnProgram` 的常量填充（`fill_constant`，D08.1）在 0 行时不再求值常量，同 Go `genVecFromConstExpr`（之前会在 0 行输入上报常量的错误）；本批的 govec 记录发现。
-3. 两个平台的记录有 5 条 `arbuild` 不同：DOUBLE 的无效运算（Inf/Inf、Inf-Inf、0*Inf）产生硬件默认 NaN，x86 是负号的 `0xFFF8000000000000`，ARM 是 `0x7FF8000000000000`。Go 和 Rust 都用硬件运算，各平台回放自己的文件（tracker `targetDiffs`）。
+3. 两个平台的记录有 5 条 `arbuild` 不同：DOUBLE 的无效运算（Inf/Inf、Inf-Inf、0*Inf）产生硬件默认 NaN，x86 是负号的 `0xFFF8000000000000`，ARM 是 `0x7FF8000000000000`。Go 和 Rust 都用硬件运算，各平台回放自己的文件（tracker `targetDiffs`）。同类问题见 #27。
 4. 没有面向用户的差异，`docs/compatibility.md` 不变。
 
 ## 5. D08.4 第 1 批的后续（D08.4 T6，Lucky 评审 #98）
