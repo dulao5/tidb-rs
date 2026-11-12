@@ -11,6 +11,7 @@ mod cast_arith;
 mod cast_cmp;
 mod cast_cprop;
 mod cast_eval;
+mod cast_util;
 
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -681,6 +682,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
             .or_else(|| cast_cmp::exec(op, p))
             .or_else(|| cast_arith::exec(op, p))
             .or_else(|| cast_cprop::exec(op, p))
+            .or_else(|| cast_util::exec(op, p))
             .unwrap_or_else(|| panic!("cast: op {op}")),
     }
 }
@@ -730,7 +732,7 @@ fn replay(path: &str) {
     for line in lines {
         n += 1;
         let mut rec: Value = serde_json::from_str(line).unwrap();
-        let is_cprop = rec["op"] == "cprop";
+        let is_cprop = rec["op"] == "cprop" || rec["op"] == "util";
         cprop += usize::from(is_cprop);
         // "cprop": the generator marks the records where Go changed a node of the input
         // conditions in place (every holder sees it); tidb-rs changes copies (D08.2 spec §4
