@@ -33,8 +33,21 @@
 | `arbuild` `bitop` | 1,500 | 6 个名字，参数为列（有无符号 BIGINT 边界值、批 1 的算术叶子：DOUBLE、DECIMAL、字符串、FLOAT、hybrid、时间等）、常量、CAST；移位数含 63、64、65、2^40、负数、MinInt64、MaxInt64 |
 | `arbuild` `bitfb` | 400 | 二元位运算的第二个参数在部分行上出错或产生 warning，第一个参数在这些行上为 NULL |
 
+## 第 4 批
+
+见 spec §1d。govec `cast` 领域（tidb-rs-tracker `govec/domains/cast_d085d.go`，追加在第 3 批之后）：
+
+| op / 来源 | 条数 | 内容 |
+|---|--:|---|
+| `mathbuild` `math` | 3,000 | 24 个函数名，1–3 列（DOUBLE 边界值与随机值、小整数列、批 1 的算术列），参数为列、常量、CAST、嵌套数学函数或算术；偶尔参数个数错误；ctx 带 MysqlRng 种子 |
+| `mathbuild` `mathreal` | 2,000 | DOUBLE 列直接进实数函数：定义域边界、EXP / POW / COT 的溢出阈值、次正规数、π 的倍数、NaN/Inf |
+| `mathbuild` `mathround` | 1,000 | ROUND / TRUNCATE 对各种值，位数为列或常量（负数、超过 30、MinInt64 / MaxInt64） |
+| `mathclone` | 800 | 构建后 `Clone`，原表达式与克隆交替按逐行 / 向量求值；2/3 为 RAND |
+| `gomath` | 6,000 | Go `math` 的 15 个函数在边界输入上的位模式 |
+
 ## 后续批次（交接）
 
 1. **常量传播**（第 2 批之后）（`constant_propagation.go`，D08.2 第 2b 部分），它的记录要包含 YEAR 列与非整数常量的比较（Lucky 评审 #98）。
 2. ~~第 3 批：位运算~~（已完成，见上）。
-3. **第 4 批：其余数学函数**（ABS、ROUND、TRUNCATE、LOG*、POW、SQRT、EXP、三角函数、RAND（带状态：Clone 对照 Go 并加"克隆后分别求值"的 govec 操作，D08.1 T6c (b)）、CONV、CRC32、SIGN、PI、DEGREES/RADIANS）。
+3. ~~第 4 批：其余数学函数~~（已完成，见上），剩下：
+4. **CONV、CRC32**（`builtinConvSig` 含 `conv`、`evalString`、自己的向量版；`builtinCRC32Sig`；两个 getFunction，共 11 个函数，tracker `cast_pending_d085.go`）。CONV 需要 Go `strconv.ParseUint/FormatUint` 任意进制与 `getValidPrefix`（D01.x 的 util）；CRC32 需要 IEEE CRC32 与字符串参数按 collation 转码。govec 可用 `mathbuild` 加字符串列。
