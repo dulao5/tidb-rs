@@ -141,4 +141,13 @@ pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = 
     (ast::EQ, &crate::builtin_compare::EQ_CLASS),
     (ast::NE, &crate::builtin_compare::NE_CLASS),
     (ast::NullEQ, &crate::builtin_compare::NULL_EQ_CLASS),
+    (ast::Plus, &crate::builtin_arithmetic::PLUS_CLASS),
+    (ast::Minus, &crate::builtin_arithmetic::MINUS_CLASS),
+    (ast::Mul, &crate::builtin_arithmetic::MULTIPLY_CLASS),
+    (ast::Div, &crate::builtin_arithmetic::DIVIDE_CLASS),
+    (ast::IntDiv, &crate::builtin_arithmetic::INT_DIVIDE_CLASS),
+    (ast::Mod, &crate::builtin_arithmetic::MOD_CLASS),
+    (ast::Ceil, &crate::builtin_math::CEIL_CLASS),
+    (ast::Ceiling, &crate::builtin_math::CEILING_CLASS),
+    (ast::Floor, &crate::builtin_math::FLOOR_CLASS),
 ];

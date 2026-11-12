@@ -584,6 +584,22 @@ pub fn fill_constant(
     n: usize,
     col: &mut Column,
 ) -> Result<(), Error> {
+    if n == 0 {
+        // Go: genVecFromConstExpr returns before evaluating the constant (`result.Reset`), so
+        // an empty input never sees the constant's errors or warnings.
+        match as_type {
+            ETInt => col.resize_int64(0, false),
+            ETReal => col.resize_float64(0, false),
+            ETDecimal => col.resize_decimal(0, false),
+            ETString => col.reserve_string(0),
+            ETDatetime | ETTimestamp => col.resize_time(0, false),
+            ETDuration => col.resize_go_duration(0, false),
+            ETJson => col.reserve_json(0),
+            ETVectorFloat32 => col.reserve_vector_float32(0),
+            _ => {}
+        }
+        return Ok(());
+    }
     let row = Row::default();
     match as_type {
         ETInt => {

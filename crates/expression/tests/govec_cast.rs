@@ -7,6 +7,7 @@
 //!
 //! `GOVEC_CAST_FILES` (comma-separated paths) replays extra-seed artifacts as well.
 
+mod cast_arith;
 mod cast_cmp;
 mod cast_eval;
 
@@ -292,6 +293,10 @@ fn ctx_of_with(v: &Value, extra: Vec<es::EvalCtxOption>, cs: Option<(String, Str
         opts.push(es::with_current_time(Arc::new(move || {
             Ok(tidb_base::gostd::time::unix(0, ns))
         })));
+    }
+    if a.len() > 5 {
+        // div_precision_increment (D08.5).
+        opts.push(es::with_div_precision_increment(a[5].as_i64().unwrap()));
     }
     opts.extend(extra);
     let ev = es::new_eval_context(opts);
@@ -662,6 +667,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
         }
         _ => cast_eval::exec(op, p)
             .or_else(|| cast_cmp::exec(op, p))
+            .or_else(|| cast_arith::exec(op, p))
             .unwrap_or_else(|| panic!("cast: op {op}")),
     }
 }
