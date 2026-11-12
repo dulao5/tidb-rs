@@ -1221,6 +1221,13 @@ pub fn atan(x: f64) -> f64 {
     if x == 0.0 {
         return x;
     }
+    // A NaN goes through `-satan(-x)` in Go: the two negations flip the sign back and the
+    // hardware propagates the (quieted) NaN operand, so Go returns x, quieted, on amd64 and
+    // arm64. Rust does not specify the sign of a NaN produced by arithmetic (an optimized
+    // build returned it negated), so the result is written out.
+    if x.is_nan() {
+        return f64::from_bits(x.to_bits() | (1 << 51));
+    }
     if x > 0.0 {
         return satan(x);
     }

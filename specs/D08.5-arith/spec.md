@@ -104,7 +104,8 @@ Go 的 `builtinLogic{And,Or}Sig.vecEvalInt` 自己求两个参数：先求 `args
 7. （第 4 批）RAND 的 `mysqlRng` 放在 `SigExtra::Rand`（共享的 `Arc<Mutex<MysqlRng>>`），不是 D08.1 spec §3.5 原来计划的 `EvalState`。原因：Go 中这个生成器是共享的——`RAND()` 用的就是会话的 `ctx.Rng()`（同一会话的各个 `RAND()`、各条语句接着同一个序列往下取），`Clone` 也共用它。放进每个 worker 一份的 `EvalState` 会让克隆和原表达式各取各的序列，与 Go 不同。代价是表达式里有一处内部可变状态（互斥锁）；govec `mathclone` 覆盖克隆后交替求值（反证：克隆时复制一个新的生成器，199 条不一致）。D08.1 spec §3.5 已同步修改。
 8. （第 4 批）x86_64 上 Go 的 `Exp` 在运行时检查 CPU 是否有 AVX 和 FMA，选不同的路径，结果的最后一位可能不同。Rust 用 `is_x86_feature_detected!` 做同样的判断，所以结果与运行在同一台机器上的 Go 相同。amd64 向量由 CI（GitHub 的 x86 runner，有 AVX2/FMA）生成，所以只覆盖 FMA 路径；非 FMA 路径是逐条移植的，没有向量覆盖。
 9. （第 4 批）arm64 上 gc 融合的乘加有几处在数学上不可观察：`Exp` 中 `x - k*Ln2Hi`（`Ln2Hi` 的低 21 位为 0，`|k|` 不超过 1100，乘积是精确的）、`Pow` 的平方循环中 `x1*x1` 再加倍（加倍是精确的，两种写法总是相等），改回分开计算后向量没有不一致。arm64 `Exp` 的多项式（`exp_arm64.s` 的 FMADDD 链）改回分开计算后，6,000 条 `gomath` 加种子 1–4 也没有出现不一致（多项式项远小于结果，舍入差异被吸收），这一处只靠逐条对照汇编。这些位置仍按 objdump 写成融合形式；能观察到的位置都有反证：`Log` 的整段融合 7 条、`Tan` 76 条、`Exp` 的次正规数缩放 8 条。
-10. 没有面向用户的偏离：§3.2 中的逐行 / 向量差异是 Go v8.5.8 自己的行为，tidb-rs 各自跟随，`docs/compatibility.md` 不变。
+10. （第 4 批）`Atan(NaN)`：Go 经 `-satan(-x)` 两次取反，硬件传播 NaN 操作数，结果是参数本身（quiet）。Rust 不规定运算产生的 NaN 的符号，优化构建（`release-checked`）返回了取反的 NaN（arm64 CI 8 条不一致），所以显式返回 quiet 后的 x。
+11. 没有面向用户的偏离：§3.2 中的逐行 / 向量差异是 Go v8.5.8 自己的行为，tidb-rs 各自跟随，`docs/compatibility.md` 不变。
 
 ## 移植检查表（Lucky 评审 #100）
 
