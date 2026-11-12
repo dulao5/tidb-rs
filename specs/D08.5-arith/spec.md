@@ -45,7 +45,7 @@ D08.1（`#[eval_fn]`、`RpnProgram`）、D08.2（`newBaseBuiltinFuncWithTp`）�
 |---|---|---|
 | `IntDivideDecimal` | 溢出错误：逐行版打印参数（`StringWithCtx`），向量版打印两个 decimal 值（`num[i].String()`） | **用户可见，已在 v8.5.8 上验证**（[#83](https://github.com/dulao5/tidb-rs/issues/83#issuecomment-6814585483)）：`c DIV 0.0001` 溢出时，向量版的错误信息里是行里的数据，逐行版只写列名 |
 | `DivideDecimal` | `ErrTruncated`：逐行版 `tc.HandleTruncate`，参数是 `*MyDecimal`（String）；向量版 `ec.HandleError`，参数是 `types.MyDecimal` 值（按字段打印） | **用户可见，已在 v8.5.8 上验证**（[#83](https://github.com/dulao5/tidb-rs/issues/83#issuecomment-6814585483)）：warning 文本随 `tidb_enable_vectorized_expression` 变化 |
-| `LogicXor`（第 2 批） | 逐行版在 `args[0]` 为 NULL 时不求 `args[1]`；向量版两列都求（`MergeNulls`）。`args[1]` 在这些行上的 warning 或错误只在向量化打开时出现 | **按代码推断用户可见，未在集群上实测**：`a XOR (b DIV 0)`，`a` 为 NULL 的行上打开向量化多出 "Division by 0" 的 warning（严格模式的写入则是错误）；govec `logicfb` 中 4 条记录两种模式不同 |
+| `LogicXor`（第 2 批） | 逐行版在 `args[0]` 为 NULL 时不求 `args[1]`；向量版两列都求（`MergeNulls`）。`args[1]` 在这些行上的 warning 或错误只在向量化打开时出现 | **用户可见，已在 v8.5.8 上验证**（[#83](https://github.com/dulao5/tidb-rs/issues/83#issuecomment-6816966507)）：关闭向量化时 `SELECT a XOR (b DIV 0)` 只有 1 条 warning、严格模式的 `INSERT ... SELECT` 成功；打开后变成 3 条 warning，INSERT 报 `ERROR 1365 Division by 0`。govec `logicfb` 中 4 条记录两种模式不同 |
 
 ### 3.3 Go 读到的是包 CAST 之后的参数
 
