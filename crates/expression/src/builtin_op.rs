@@ -2,8 +2,9 @@
 //! go-file: pkg/expression/builtin_op_vec.go
 //!
 //! `builtin_op.go` (D08.5), second batch: the logical operators AND / OR / XOR, NOT,
-//! IS TRUE / IS FALSE (with and without keeping NULL) and the unary minus. The bit operators
-//! and IS NULL are later batches (specs/D08.5-arith).
+//! IS TRUE / IS FALSE (with and without keeping NULL) and the unary minus; IS NULL (with
+//! constant propagation); the third batch: the bit operators `& | ^ << >> ~`
+//! (specs/D08.5-arith).
 #![allow(non_upper_case_globals)]
 
 use tidb_base::Error;
@@ -786,6 +787,178 @@ pub fn unary_minus_real(
     Ok(Some(-val))
 }
 
+// ---------------------------------------------------------------- bit operators (batch 3)
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitKind {
+    And,
+    Or,
+    Xor,
+    LeftShift,
+    RightShift,
+}
+
+/// The function classes of `& | ^ << >>` (`bitAndFunctionClass`, `bitOrFunctionClass`,
+/// `bitXorFunctionClass`, `leftShiftFunctionClass`, `rightShiftFunctionClass`): they
+/// differ only by the signature.
+#[derive(Debug)]
+pub struct BitBinaryFunctionClass {
+    /// The embedded baseFunctionClass.
+    pub base: BaseFunctionClass,
+    kind: BitKind,
+}
+
+macro_rules! bit_class {
+    ($name:ident, $fname:expr, $kind:expr) => {
+        #[doc = concat!("The function class of `", stringify!($fname), "`.")]
+        pub static $name: BitBinaryFunctionClass = BitBinaryFunctionClass {
+            base: BaseFunctionClass {
+                func_name: $fname,
+                min_args: 2,
+                max_args: 2,
+            },
+            kind: $kind,
+        };
+    };
+}
+
+bit_class!(BIT_AND_CLASS, ast::And, BitKind::And);
+bit_class!(BIT_OR_CLASS, ast::Or, BitKind::Or);
+bit_class!(BIT_XOR_CLASS, ast::Xor, BitKind::Xor);
+bit_class!(LEFT_SHIFT_CLASS, ast::LeftShift, BitKind::LeftShift);
+bit_class!(RIGHT_SHIFT_CLASS, ast::RightShift, BitKind::RightShift);
+
+impl FunctionClass for BitBinaryFunctionClass {
+    // go: bitAndFunctionClass.getFunction L1
+    // go: bitOrFunctionClass.getFunction L1
+    // go: bitXorFunctionClass.getFunction L1
+    // go: leftShiftFunctionClass.getFunction L1
+    // go: rightShiftFunctionClass.getFunction L1
+    fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+        let mut bf =
+            new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[ETInt, ETInt])?;
+        let sig: &'static SigDesc = match self.kind {
+            BitKind::And => &builtinBitAndSig,
+            BitKind::Or => &builtinBitOrSig,
+            BitKind::Xor => &builtinBitXorSig,
+            BitKind::LeftShift => &builtinLeftShiftSig,
+            BitKind::RightShift => &builtinRightShiftSig,
+        };
+        // Go sets the flag on sig.tp after setPbCode; RetType and sig.tp are one object.
+        bf.tp.add_flag(mysql::UnsignedFlag);
+        Ok(bf.with_sig(sig))
+    }
+}
+
+// The row versions do not evaluate `args[1]` when `args[0]` is NULL; the vector versions
+// evaluate both columns and merge the NULLs (an error or a warning of `args[1]` on such a
+// row only shows with vectorization on; spec §3.2, like LogicXor). So the bodies are lazy:
+// the vector driver evaluates both columns and runs the body over them.
+macro_rules! bit_binary {
+    ($fn:ident, $go:literal, |$a:ident, $b:ident| $e:expr) => {
+        #[doc = concat!("`", $go, "`.")]
+        #[eval_fn(Int, lazy, args(Int, Int))]
+        pub fn $fn(
+            ctx: &dyn EvalContext,
+            _f: &impl SigView,
+            args: &mut impl Args,
+        ) -> Result<Option<i64>, Error> {
+            let Some($a) = args.int(ctx, 0)? else {
+                return Ok(None);
+            };
+            let Some($b) = args.int(ctx, 1)? else {
+                return Ok(None);
+            };
+            Ok(Some($e))
+        }
+    };
+}
+
+// go: builtinBitAndSig.evalInt L1
+// go: builtinBitAndSig.vecEvalInt L2 (the vector driver of this lazy body over both evaluated columns)
+// go: builtinBitAndSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinBitAndSig.vectorized L2 (SigDesc.vectorized)
+bit_binary!(bit_and, "builtinBitAndSig", |a, b| a & b);
+// go: builtinBitOrSig.evalInt L1
+// go: builtinBitOrSig.vecEvalInt L2 (the vector driver of this lazy body over both evaluated columns)
+// go: builtinBitOrSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinBitOrSig.vectorized L2 (SigDesc.vectorized)
+bit_binary!(bit_or, "builtinBitOrSig", |a, b| a | b);
+// go: builtinBitXorSig.evalInt L1
+// go: builtinBitXorSig.vecEvalInt L2 (the vector driver of this lazy body over both evaluated columns)
+// go: builtinBitXorSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinBitXorSig.vectorized L2 (SigDesc.vectorized)
+bit_binary!(bit_xor, "builtinBitXorSig", |a, b| a ^ b);
+// Go's `uint64(a) << uint64(b)` is 0 for a shift count >= 64 (a negative count is a huge
+// uint64); Rust's `<<` would overflow, so the count is checked.
+// go: builtinLeftShiftSig.evalInt L1
+// go: builtinLeftShiftSig.vecEvalInt L2 (the vector driver of this lazy body over both evaluated columns)
+// go: builtinLeftShiftSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinLeftShiftSig.vectorized L2 (SigDesc.vectorized)
+bit_binary!(left_shift, "builtinLeftShiftSig", |a, b| {
+    if (b as u64) < 64 {
+        ((a as u64) << b) as i64
+    } else {
+        0
+    }
+});
+// go: builtinRightShiftSig.evalInt L1
+// go: builtinRightShiftSig.vecEvalInt L2 (the vector driver of this lazy body over both evaluated columns)
+// go: builtinRightShiftSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinRightShiftSig.vectorized L2 (SigDesc.vectorized)
+bit_binary!(right_shift, "builtinRightShiftSig", |a, b| {
+    if (b as u64) < 64 {
+        ((a as u64) >> b) as i64
+    } else {
+        0
+    }
+});
+
+/// The function class of `~` (`bitNegFunctionClass`).
+#[derive(Debug)]
+pub struct BitNegFunctionClass {
+    /// The embedded baseFunctionClass.
+    pub base: BaseFunctionClass,
+}
+
+/// The function class of `bitneg`.
+pub static BIT_NEG_CLASS: BitNegFunctionClass = BitNegFunctionClass {
+    base: BaseFunctionClass {
+        func_name: ast::BitNeg,
+        min_args: 1,
+        max_args: 1,
+    },
+};
+
+impl FunctionClass for BitNegFunctionClass {
+    // go: bitNegFunctionClass.getFunction L1
+    fn get_function(
+        &self,
+        ctx: &dyn BuildContext,
+        args: Vec<ExprRef>,
+    ) -> Result<BuiltinFunc, Error> {
+        self.base.verify_args(&args)?;
+        let mut bf =
+            new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[ETInt])?;
+        bf.tp.add_flag(mysql::UnsignedFlag);
+        Ok(bf.with_sig(&builtinBitNegSig))
+    }
+}
+
+// go: builtinBitNegSig.evalInt L1
+// go: builtinBitNegSig.vecEvalInt L2 (the vector driver of this body, M-EVAL)
+// go: builtinBitNegSig.Clone L2 (BuiltinFunc::clone_from_base)
+// go: builtinBitNegSig.vectorized L2 (SigDesc.vectorized)
+#[eval_fn(Int)]
+pub fn bit_neg(_ctx: &dyn EvalContext, _f: &impl SigView, arg: i64) -> Result<Option<i64>, Error> {
+    Ok(Some(!arg))
+}
+
 // ---------------------------------------------------------------- signature descriptors
 
 macro_rules! op_sig {
@@ -843,3 +1016,9 @@ op_sig!(
     false,
     VECTOR_FLOAT32_IS_NULL
 );
+op_sig!(builtinBitAndSig, 3118, true, BIT_AND);
+op_sig!(builtinBitOrSig, 3119, true, BIT_OR);
+op_sig!(builtinBitXorSig, 3120, true, BIT_XOR);
+op_sig!(builtinBitNegSig, 3121, true, BIT_NEG);
+op_sig!(builtinLeftShiftSig, 3129, true, LEFT_SHIFT);
+op_sig!(builtinRightShiftSig, 3130, true, RIGHT_SHIFT);

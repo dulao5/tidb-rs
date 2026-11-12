@@ -165,4 +165,10 @@ pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = 
         &crate::builtin_op::IS_TRUTH_WITH_NULL_CLASS,
     ),
     (ast::IsFalsity, &crate::builtin_op::IS_FALSITY_CLASS),
+    (ast::And, &crate::builtin_op::BIT_AND_CLASS),
+    (ast::Or, &crate::builtin_op::BIT_OR_CLASS),
+    (ast::Xor, &crate::builtin_op::BIT_XOR_CLASS),
+    (ast::LeftShift, &crate::builtin_op::LEFT_SHIFT_CLASS),
+    (ast::RightShift, &crate::builtin_op::RIGHT_SHIFT_CLASS),
+    (ast::BitNeg, &crate::builtin_op::BIT_NEG_CLASS),
 ];

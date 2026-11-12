@@ -24,8 +24,17 @@
 | `arbuild` `logicfb` | 600 | AND/OR/XOR 的另一个参数在部分行上出错或产生 warning（除零、BIGINT 溢出、截断的字符串）；出错行不在第 0 行；含嵌套 AND/OR |
 | `arbuild` `uminus` | 500 | BIGINT 边界（有无符号列和常量：`-MinInt64`、无符号 2^63+1 溢出、无符号 2^63 为 MinInt64、溢出的常量使结果为 DECIMAL）、DECIMAL、DOUBLE、时间/duration（按 DECIMAL）、字符串 |
 
+## 第 3 批
+
+见 spec §1c。govec `cast` 领域（tidb-rs-tracker `govec/domains/cast_d085c.go`，追加在常量传播之后）：
+
+| op / 来源 | 条数 | 内容 |
+|---|--:|---|
+| `arbuild` `bitop` | 1,500 | 6 个名字，参数为列（有无符号 BIGINT 边界值、批 1 的算术叶子：DOUBLE、DECIMAL、字符串、FLOAT、hybrid、时间等）、常量、CAST；移位数含 63、64、65、2^40、负数、MinInt64、MaxInt64 |
+| `arbuild` `bitfb` | 400 | 二元位运算的第二个参数在部分行上出错或产生 warning，第一个参数在这些行上为 NULL |
+
 ## 后续批次（交接）
 
 1. **常量传播**（第 2 批之后）（`constant_propagation.go`，D08.2 第 2b 部分），它的记录要包含 YEAR 列与非整数常量的比较（Lucky 评审 #98）。
-2. **第 3 批：位运算**（`& | ^ << >> ~`）。
+2. ~~第 3 批：位运算~~（已完成，见上）。
 3. **第 4 批：其余数学函数**（ABS、ROUND、TRUNCATE、LOG*、POW、SQRT、EXP、三角函数、RAND（带状态：Clone 对照 Go 并加"克隆后分别求值"的 govec 操作，D08.1 T6c (b)）、CONV、CRC32、SIGN、PI、DEGREES/RADIANS）。
