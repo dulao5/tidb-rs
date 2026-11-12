@@ -37,6 +37,7 @@ IS NULL 随常量传播移植（tasks T3b）。
 - 移位：Go 的 `uint64(a) << uint64(b)` 在移位数 ≥ 64 时为 0，负的移位数转成很大的 uint64，也是 0；Rust 的 `<<` 会溢出，所以先判断移位数。`>>` 是逻辑右移（按 uint64）。
 - pb code：BitAnd 3118、BitOr 3119、BitXor 3120、BitNeg 3121、LeftShift 3129、RightShift 3130（go-tipb）。
 - 不用 `checked` 写法：这几个运算不会出错（§3.4 不适用）。
+- 两个平台有 8 条 `bitop` 记录不同：参数是 NaN 的 DOUBLE，经 `CAST(.. AS SIGNED)`（`builtinCastRealAsIntSig`）转成整数时随平台不同（M-F2I），登记在 tracker `targetDiffs`，各平台回放自己的文件。
 
 ## 2. 依赖
 
