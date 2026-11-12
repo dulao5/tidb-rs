@@ -1462,12 +1462,16 @@ fn conv_row(
     conv(&s, from_base, to_base)
 }
 
-/// The vector version of CONV: Go's `vecEvalString` reads `args[0]` as a string column
-/// (no hybrid handling) and returns the first conversion error. Go's `vectorized()` is
-/// false, so executors use the row version; `VecEvalString` still runs this body.
-// go: builtinConvSig.vecEvalString L2 (the vector driver of this body, M-EVAL)
+/// The CONV body without the hybrid / binary literal handling of the row version, kept as
+/// the generated drivers' body; only its row driver is replaced (by [`conv_row`]).
+/// `novec`: Go's `vecEvalString` is unreachable in v8.5.8 — `vectorized()` is false, so
+/// `ScalarFunction.Vectorized()` never calls `isChildrenVectorized`, the buffer allocator
+/// stays nil and a direct `VecEvalString` nil-dereferences (D08.5 spec §3.2). The vector
+/// driver therefore returns the `baseBuiltinFunc.vecEvalString` error, so Rust has no
+/// vector path that no Go record checks.
+// go: builtinConvSig.vecEvalString L2 (unreachable in v8.5.8: novec, the base error)
 // go: builtinConvSig.vectorized L2 (SigDesc.vectorized = false)
-#[eval_fn(String)]
+#[eval_fn(String, novec)]
 pub fn conv_vec(
     _ctx: &dyn EvalContext,
     _f: &impl SigView,
@@ -1485,8 +1489,8 @@ pub fn conv_vec(
     }
 }
 
-/// The drivers of `builtinConvSig`: the hand-written row version and the generated vector
-/// version of [`conv_vec`].
+/// The drivers of `builtinConvSig`: the hand-written row version and the generated `novec`
+/// vector driver of [`conv_vec`].
 // glue: SigDrivers of builtinConvSig
 const CONV: SigDrivers = match CONV_VEC {
     SigDrivers::String { vec, args, .. } => SigDrivers::String {

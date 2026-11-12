@@ -47,7 +47,7 @@
 
 ## 第 5 批
 
-CONV、CRC32（T5b）完成后 D08.5 收敛检查为 458/458，整个块完成。剩下的只有 T9（按行求值的执行器，等 SQL 路径）。
+CONV、CRC32（T5b）完成后 D08.5 收敛检查为 458/458，整个块完成。govec `cast` 领域（tidb-rs-tracker `govec/domains/cast_d085e.go`，追加在 D08.4 第 3 批之后：前 72,264 条不变）：`convbuild` 3,500 条（`conv` 2,000、`crc32` 800、`convhybrid` 400、`convlimit` 300），文件共 75,764 条。剩下的只有 T9（按行求值的执行器，等 SQL 路径）。
 
 ## 后续批次（交接）
 
