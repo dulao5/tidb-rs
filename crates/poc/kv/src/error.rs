@@ -27,6 +27,21 @@ impl From<tikv_client::Error> for Error {
     fn from(e: tikv_client::Error) -> Error {
         use tikv_client::Error as E;
         let kind: fn(Box<E>) -> Error = match &e {
+            // A read's retry budget ran out (client-rust#13): classified by the kind of error it
+            // slept on longest, as TiDB maps client-go's `longestSleepCfg` error (tikvRPC →
+            // 9002 ErrTiKVServerTimeout, regionMiss / regionScheduling → 9005
+            // ErrRegionUnavailable, staleCommand → 9010, txnLockFast / txnNotFound → 9004
+            // ErrResolveLockTimeout).
+            E::BackoffExhausted { kind, .. } => {
+                use tikv_client::metrics::BackoffType as B;
+                match kind {
+                    B::RegionMiss | B::RegionScheduling | B::StaleCommand => {
+                        Error::RegionUnavailable
+                    }
+                    B::TikvLockFast | B::TxnNotFound => Error::LockTimeout,
+                    B::TikvRpc | B::ServerBusy => Error::Unavailable,
+                }
+            }
             E::ResolveLockError(_) => Error::LockTimeout,
             E::RegionError(_)
             | E::MultipleRegionErrors(_)
@@ -47,6 +62,31 @@ impl From<tikv_client::Error> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhausted_budgets_are_classified_by_their_longest_sleep() {
+        use tikv_client::metrics::BackoffType as B;
+        let exhausted = |kind| tikv_client::Error::BackoffExhausted {
+            kind,
+            last: Box::new(tikv_client::Error::StringError("last".to_owned())),
+        };
+        for kind in [B::RegionMiss, B::RegionScheduling, B::StaleCommand] {
+            assert!(matches!(
+                Error::from(exhausted(kind)),
+                Error::RegionUnavailable(_)
+            ));
+        }
+        for kind in [B::TikvLockFast, B::TxnNotFound] {
+            assert!(matches!(
+                Error::from(exhausted(kind)),
+                Error::LockTimeout(_)
+            ));
+        }
+        assert!(matches!(
+            Error::from(exhausted(B::TikvRpc)),
+            Error::Unavailable(_)
+        ));
+    }
 
     #[test]
     fn client_errors_are_classified() {

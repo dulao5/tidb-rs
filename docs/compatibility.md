@@ -34,6 +34,7 @@ Gaps of the TiKV client against client-go, tracked in [`specs/D07.1-store/client
 | Area | v8.5.8 behavior | tidb-rs behavior | Plan |
 |---|---|---|---|
 | `tidb_replica_read` (`follower`, `leader-and-follower`, `closest-replicas`, …) | Reads go to followers / the closest replica as set. | **Accepted but ignored**: every read goes to the leader, silently. Results are the same; the read load and cross-AZ traffic are not. | Fix item in the parity table (§3, replica read). Until then, `SET` of a non-`leader` value should return a warning (also a fix item). |
+| `tikv_client_read_timeout` | The first attempt of a read gets this short timeout; if the leader does not answer in time, the read moves to a follower (replica read, still linearizable): "if the leader is slow, read from a follower". | **Not wired yet.** Once wired, without replica read it **only shortens the first attempt**: the retry goes back to the same leader with the default 30 s / 60 s timeout (client-rust#14, #15). | Parity table §3 (the row after replica read): done together with replica read. |
 
 ## Transitional gaps (until the session layer is ported)
 
