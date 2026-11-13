@@ -192,7 +192,7 @@ class Writer:
                 last_ok = now
             except Exception as e:  # noqa: BLE001 - outcome unknown; the floor stays where it was
                 now = time.monotonic()
-                self.stats.record("W", "write", False, False, classify(e), now - t0, now - last_ok)
+                self.stats.record("W", "write", False, False, classify(e), now - t0, now - last_ok, sample=message(e))
                 try:
                     conn.close()
                 except Exception:  # noqa: BLE001
@@ -228,7 +228,7 @@ def write_worker(side, endpoint, shape, writer, stats, stop):
             last_ok = now
         except Exception as e:  # noqa: BLE001
             now = time.monotonic()
-            stats.record(side, shape, False, False, classify(e), now - t0, now - last_ok)
+            stats.record(side, shape, False, False, classify(e), now - t0, now - last_ok, sample=message(e))
             try:
                 conn.close()
             except Exception:  # noqa: BLE001
@@ -256,15 +256,20 @@ class Stats:
             if len(self.wrong_samples) < 20:
                 self.wrong_samples.append(f"{side}/{shape}: {what}")
 
-    def record(self, side, shape, ok, wrong, err, latency, gap):
+    def record(self, side, shape, ok, wrong, err, latency, gap, sample=None):
         with self.lock:
-            d = self.data.setdefault((side, shape), {"ok": 0, "wrong": 0, "errors": {}, "lat": [], "max_stall": 0.0})
+            d = self.data.setdefault((side, shape), {"ok": 0, "wrong": 0, "errors": {}, "samples": {},
+                                                     "lat": [], "max_stall": 0.0})
             if ok:
                 d["ok"] += 1
             if wrong:
                 d["wrong"] += 1
             if err:
                 d["errors"][err] = d["errors"].get(err, 0) + 1
+                # The first full message of each kind: the kind is normalised and cut short
+                # (stable keys for expected.json), the sample keeps what is needed to diagnose.
+                if sample is not None:
+                    d["samples"].setdefault(err, sample)
             d["lat"].append(latency)
             d["max_stall"] = max(d["max_stall"], gap)
 
@@ -275,10 +280,17 @@ class Stats:
                 lat = sorted(d["lat"])
                 p99 = lat[int(len(lat) * 0.99) - 1] if lat else 0.0
                 out.setdefault(side, {})[shape] = {
-                    "ok": d["ok"], "wrong": d["wrong"], "errors": d["errors"],
+                    "ok": d["ok"], "wrong": d["wrong"], "errors": d["errors"], "error_samples": d["samples"],
                     "p99_ms": round(p99 * 1000, 1), "max_stall_ms": round(d["max_stall"] * 1000),
                 }
             return out
+
+
+def message(e):
+    """The whole error, as the client saw it (one sample per kind goes into the results)."""
+    code = e.args[0] if getattr(e, "args", None) else None
+    msg = str(e.args[1]) if len(getattr(e, "args", ())) > 1 else str(e)
+    return f"{code}: {msg}"
 
 
 def classify(e):
@@ -315,7 +327,7 @@ def worker(side, endpoint, shape, ids, expected, stats, stop):
             stats.record(side, shape, not wrong, wrong, None, now - t0, gap)
         except Exception as e:  # noqa: BLE001 - every error is a data point
             now = time.monotonic()
-            stats.record(side, shape, False, False, classify(e), now - t0, now - last_ok)
+            stats.record(side, shape, False, False, classify(e), now - t0, now - last_ok, sample=message(e))
             try:
                 conn.close()
             except Exception:  # noqa: BLE001
@@ -544,7 +556,7 @@ def sc_wide_rows(args, log):
                         wrong = len(rows) != 100
                     ARGS_STATS.record(side, shape, not wrong, wrong, None, time.monotonic() - t0, 0.0)
                 except Exception as e:  # noqa: BLE001
-                    ARGS_STATS.record(side, shape, False, False, classify(e), time.monotonic() - t0, 0.0)
+                    ARGS_STATS.record(side, shape, False, False, classify(e), time.monotonic() - t0, 0.0, sample=message(e))
     log("wide reads done")
 
 
@@ -586,7 +598,9 @@ def inconsistencies(name, summary, expected):
                 continue
             if any(re.search(k, f"{shape} {err}") for k in known):
                 continue
-            out.append(f"{name}/B/{shape}: {n} × {err} (not on A, not expected)")
+            sample = d.get("error_samples", {}).get(err)
+            out.append(f"{name}/B/{shape}: {n} × {err} (not on A, not expected)"
+                       + (f"; e.g. {sample}" if sample else ""))
     return out
 
 

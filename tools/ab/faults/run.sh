@@ -52,6 +52,14 @@ rs_pid=$!
 cleanup() {
     kill "$rs_pid" 2>/dev/null || true
     wait "$rs_pid" 2>/dev/null || true
+    # FAULTS_LOG_DIR: keep the cluster's own logs (PD, TiKV, Go TiDB) before they are cleaned.
+    if [ -n "${FAULTS_LOG_DIR:-}" ]; then
+        mkdir -p "$FAULTS_LOG_DIR"
+        for f in "$HOME/.tiup/data/$PLAYGROUND_TAG"/*/*.log; do
+            [ -f "$f" ] && cp "$f" "$FAULTS_LOG_DIR/$(basename "$(dirname "$f")")-$(basename "$f")"
+        done
+        cp "$out/$stamp-tidb-rs.log" "$FAULTS_LOG_DIR/tidb-rs.log" 2>/dev/null || true
+    fi
     if [ "$keep" = 0 ]; then "$root/scripts/playground.sh" clean || true; fi
 }
 trap cleanup EXIT

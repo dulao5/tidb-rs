@@ -80,8 +80,10 @@ jobs:
       - name: crate layering
         run: python3 scripts/check_layers.py
 
-      - name: weekly report verdicts
-        run: python3 tools/weekly/test_report.py
+      - name: weekly report verdicts, fault error classification
+        run: |
+          python3 tools/weekly/test_report.py
+          python3 tools/ab/faults/test_faults.py
 
       - name: rustfmt (first-party crates)
         run: cargo fmt --check $(tools/first-party.sh)
