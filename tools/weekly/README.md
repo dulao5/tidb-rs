@@ -27,11 +27,14 @@ The parts run in parallel jobs, each against its own cluster (`run.sh <part> <ou
 
 It compares with the last successful run of the same mode, whose results are kept as an artifact for 90 days.
 
-**Outcome:**
+**Verdict** (first line of the report, exit status of `report.py`):
 
-- **Red:** a wrong result, a mismatch, or a new inconsistency.
-- **Warning:** a part is incomplete (skipped, failed to set up, or missing). This is not a pass.
-- **Green:** otherwise.
+- **RED:** a wrong result, a mismatch or a new inconsistency. The run fails and no tag is pushed.
+- **INCOMPLETE:** a part did not run fully: skipped, failed to set up, missing, or with too few results (an empty `ab` workload, a sysbench workload × thread count without both sides, fewer than 18 lock cases). This is not a pass.
+- **REGRESSED:** compared with the last run, an operator is no longer executable on tidb-rs, `unsupported` statements increased, or a sysbench B/A ratio dropped by more than 15%.
+- **GREEN:** otherwise.
+
+INCOMPLETE and REGRESSED show as a warning (a failed `continue-on-error` step). The weekly tag gets a `-incomplete` / `-regressed` suffix.
 
 Locally:
 

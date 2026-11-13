@@ -76,9 +76,16 @@ ab)
             >"$out/ab-$n.log" 2>&1 || rc=$(( $? > rc ? $? : rc ))
         runs+=("$out/ab-$n/results.jsonl")
     done
+    # Every workload must have compared something: an empty run is incomplete, not ok.
+    empty=()
+    for r in "${runs[@]}"; do [ -s "$r" ] || empty+=("$(basename "$(dirname "$r")")"); done
+    if [ ${#empty[@]} -gt 0 ]; then
+        echo "no statements compared: ${empty[*]}" >&2
+        [ "$rc" = 0 ] && rc=2
+    fi
     python3 "$root/tools/weekly/classify.py" --a "$a" --results "${runs[@]}" --json "$out/ab-classified.json" \
         || rc=2
-    write_status "$(status_of $rc)" "{\"classified\": \"ab-classified.json\", \"exit\": $rc}"
+    write_status "$(status_of $rc)" "{\"classified\": \"ab-classified.json\", \"empty_workloads\": \"${empty[*]}\", \"exit\": $rc}"
     exit "$rc"
     ;;
 sysbench)
@@ -89,9 +96,9 @@ sysbench)
             -T "${SYSBENCH_THREADS:-1 8}" -d "${SYSBENCH_TIME:-20}" >"$out/sysbench-$w.log" 2>&1 || rc=2
     done
     # Rows: "A:host:port threads qps avg p95 errors status file" (scripts/sysbench-run.sh).
-    python3 - "$out" "$rc" <<'EOF' || rc=2
+    python3 - "$out" "$rc" "${SYSBENCH_THREADS:-1 8}" <<'EOF' || rc=$?
 import glob, json, sys
-out, rc = sys.argv[1], int(sys.argv[2])
+out, rc, threads = sys.argv[1], int(sys.argv[2]), sys.argv[3].replace(",", " ").split()
 res = {}
 for w in ("oltp_point_select", "oltp_read_only"):
     rows = {}
@@ -104,19 +111,19 @@ for w in ("oltp_point_select", "oltp_read_only"):
     res[w] = rows
 bad = any(s.get("status") != "ok" or s.get("errors") not in ("0", None)
           for rows in res.values() for t in rows.values() for s in t.values())
-status = "fail" if bad else ("incomplete" if rc else "ok")
-json.dump({"part": "sysbench", "status": status, "results": res}, open(f"{out}/sysbench.json", "w"), indent=1)
+# Every workload x thread count needs a result on both sides; anything less is incomplete.
+missing = [f"{w} t{t} {side}" for w in res for t in threads for side in "AB" if side not in res[w].get(t, {})]
+status = "fail" if bad else ("incomplete" if rc or missing else "ok")
+json.dump({"part": "sysbench", "status": status, "missing": missing, "results": res},
+          open(f"{out}/sysbench.json", "w"), indent=1)
 sys.exit({"ok": 0, "fail": 1, "incomplete": 2}[status])
 EOF
     exit "$rc"
     ;;
 faults)
     rc=0
-    (cd "$root" && tools/ab/faults/run.sh -b "$bin") >"$out/faults.log" 2>&1 || rc=$?
-    f=$(ls -t "$root"/target/faults/*.json 2>/dev/null | head -1)
-    if [ -n "$f" ]; then
-        cp "$f" "$out/faults-raw.json"
-    else
+    (cd "$root" && tools/ab/faults/run.sh -b "$bin" -j "$out/faults-raw.json") >"$out/faults.log" 2>&1 || rc=$?
+    if [ ! -f "$out/faults-raw.json" ]; then
         # No results at all: the cluster or tidb-rs did not come up. Incomplete, not a failure.
         rc=2
     fi
@@ -129,7 +136,15 @@ locks)
     python3 "$root/tools/ab/locks/mixed_locks.py" --lockgen "${LOCKGEN:?LOCKGEN}" --a "$a" --b "$b" \
         --a-status 127.0.0.1:33080 --b-status 127.0.0.1:10081 --pd "$pd" \
         --json "$out/locks-raw.json" >"$out/locks.log" 2>&1 || rc=$?
-    write_status "$(status_of $rc)" "{\"raw\": \"locks-raw.json\", \"exit\": $rc}"
+    # mixed_locks.py writes its JSON only after every case: none means its setup failed
+    # (incomplete, not wrong results); fewer cases than expected is incomplete too.
+    n=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$out/locks-raw.json" 2>/dev/null || echo 0)
+    if [ "$n" = 0 ]; then
+        rc=2
+    elif [ "$n" -lt "${LOCKS_EXPECTED:-18}" ] && [ "$rc" = 0 ]; then
+        rc=2
+    fi
+    write_status "$(status_of $rc)" "{\"raw\": \"locks-raw.json\", \"cases\": $n, \"exit\": $rc}"
     exit "$rc"
     ;;
 *)

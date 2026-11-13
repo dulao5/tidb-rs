@@ -17,6 +17,9 @@ on:
   schedule:
     - cron: "0 9 * * 5"
     - cron: "0 18 * * *"
+  # TEMPORARY (remove before merging): exercise the workflow from this branch.
+  push:
+    branches: [ci/weekly]
   workflow_dispatch:
     inputs:
       mode:
@@ -167,13 +170,23 @@ jobs:
           pattern: part-*
           path: results
       - name: Last run's results
+        # The newest `<mode>-results` artifact of an earlier run on this branch. Not "the last
+        # successful run": before Friday's weekly that is Thursday's nightly, which has no
+        # weekly results (#140 review).
         env:
           GH_TOKEN: ${{ github.token }}
+          NAME: ${{ needs.plan.outputs.mode }}-results
         run: |
-          prev=$(gh run list --workflow weekly.yml --branch "${{ github.ref_name }}" --status success \
-            --json databaseId,displayTitle,event --jq '.[] | .databaseId' -L 20 | grep -v "^${{ github.run_id }}$" | head -1 || true)
+          prev=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=$NAME&per_page=100" \
+            --jq '.artifacts[] | select(.expired | not)
+                  | select(.workflow_run.id != ${{ github.run_id }})
+                  | select(.workflow_run.head_branch == "${{ github.ref_name }}")
+                  | .workflow_run.id' | head -1)
           if [ -n "$prev" ]; then
-            gh run download "$prev" -n "${{ needs.plan.outputs.mode }}-results" -D previous || echo "no results in run $prev"
+            echo "comparing with run $prev"
+            gh run download "$prev" -n "$NAME" -D previous
+          else
+            echo "no earlier $NAME on ${{ github.ref_name }}"
           fi
       - name: Report
         id: report
@@ -186,7 +199,7 @@ jobs:
           python3 tools/weekly/report.py --in results $prev --parts "$parts" --title "$title" \
             --commit "${{ github.sha }}" --out report.md || rc=$?
           cat report.md >> "$GITHUB_STEP_SUMMARY"
-          { echo "rc=$rc"; echo "week=$week"; } >> "$GITHUB_OUTPUT"
+          { echo "rc=$rc"; echo "week=$week"; echo "verdict=$(cat verdict.txt)"; } >> "$GITHUB_OUTPUT"
       - name: Keep results for next time
         uses: actions/upload-artifact@v4
         with:
@@ -206,17 +219,26 @@ jobs:
             echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > comment.md
           gh issue comment 54 --body-file comment.md
+      # weekly-YYYY-Www only for a GREEN week; an INCOMPLETE or REGRESSED week gets a suffixed
+      # tag, a RED one none (#140 review).
       - name: Tag
-        if: needs.plan.outputs.publish == 'true'
+        if: needs.plan.outputs.publish == 'true' && steps.report.outputs.rc != '1'
         run: |
           tag=weekly-${{ steps.report.outputs.week }}
+          case "${{ steps.report.outputs.verdict }}" in
+            GREEN) ;;
+            INCOMPLETE) tag=$tag-incomplete ;;
+            REGRESSED) tag=$tag-regressed ;;
+          esac
           git tag -f "$tag" "${{ github.sha }}"
           git push -f origin "refs/tags/$tag"
-      - name: Incomplete parts (warning, not a pass)
+      # Yellow: the run shows a warning annotation and a failed (continue-on-error) step; the
+      # report's first line and the #54 comment say INCOMPLETE / REGRESSED.
+      - name: Incomplete or regressed (warning, not a pass)
         if: steps.report.outputs.rc == '2'
         continue-on-error: true
         run: |
-          echo "::warning::some parts are INCOMPLETE (skipped or failed to set up); see the report"
+          echo "::warning::${{ steps.report.outputs.verdict }}: see the report"
           exit 1
       - name: Verdict
         if: steps.report.outputs.rc == '1'

@@ -8,8 +8,12 @@ sysbench.json, faults.json, faults-raw.json, locks.json, locks-raw.json), possib
 sub-directories (one per CI job). --previous is the same for last week's run: the report then
 shows what changed (newly executable operators, agreement, QPS ratios).
 
-Exit status: 1 (red) if any part found a wrong result or a new inconsistency, else 2 (yellow)
-if any part is incomplete (skipped, failed to set up, or missing), else 0.
+Verdict (the report's first line, and the exit status):
+- RED (1): a part found a wrong result, a mismatch or a new inconsistency;
+- INCOMPLETE (2): a part did not run fully (skipped, failed to set up, missing);
+- REGRESSED (2): against the previous run, an operator tidb-rs executed is no longer executable,
+  `unsupported` statements increased, or a sysbench B/A ratio dropped by more than 15%;
+- GREEN (0): none of these.
 """
 
 import argparse
@@ -48,6 +52,29 @@ def executable(classified):
     return {op for op, c in classified["operators"].items() if agreement(c)[0] > 0}
 
 
+PERF_DROP = 0.15
+
+
+def regressions(cur_ab, prev_ab, cur_sb, prev_sb):
+    """What got worse against the previous run (each a short line)."""
+    out = []
+    if cur_ab and prev_ab:
+        lost = executable(prev_ab) - executable(cur_ab)
+        if lost:
+            out.append("operators no longer executable on tidb-rs: " + ", ".join(f"`{o}`" for o in sorted(lost)))
+        du = cur_ab["totals"]["unsupported"] - prev_ab["totals"]["unsupported"]
+        if du > 0:
+            out.append(f"`unsupported` statements up by {du} ({prev_ab['totals']['unsupported']} → "
+                       f"{cur_ab['totals']['unsupported']})")
+    if cur_sb and prev_sb and "results" in cur_sb and "results" in prev_sb:
+        for w, rows in cur_sb["results"].items():
+            for t in rows:
+                r, p = ratio(rows, t), ratio(prev_sb["results"].get(w, {}), t)
+                if r and p and r < p * (1 - PERF_DROP):
+                    out.append(f"{w} {t} threads: B/A {p:.2f} → {r:.2f} (more than {PERF_DROP:.0%} lower)")
+    return out
+
+
 def section_ab(cur, prev, lines):
     lines.append("## Result comparison (tools/ab)\n")
     if not cur:
@@ -61,10 +88,13 @@ def section_ab(cur, prev, lines):
         f"Agreement on what tidb-rs executed: **{pct(agree, ran)}**.\n"
     )
     new_ops = executable(cur) - executable(prev)
+    lost_ops = executable(prev) - executable(cur)
     if prev:
         lines.append(
-            "Newly executable operators this week: "
+            "Newly executable operators since the last run: "
             + (", ".join(f"`{o}`" for o in sorted(new_ops)) if new_ops else "none")
+            + ". No longer executable: "
+            + (", ".join(f"**`{o}`**" for o in sorted(lost_ops)) if lost_ops else "none")
             + ".\n"
         )
     lines.append("| operator (Go plan) | statements | agreement | mismatch | unsupported | change |")
@@ -161,7 +191,25 @@ def main():
         j = load(args.inp, f"{p}.json")
         status[p] = j["status"] if j else "missing"
 
-    lines = [f"# {args.title}\n"]
+    cur_ab, prev_ab = load(args.inp, "ab-classified.json"), load(args.previous, "ab-classified.json")
+    cur_sb, prev_sb = load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json")
+    regressed = regressions(cur_ab, prev_ab, cur_sb, prev_sb)
+    if any(s == "fail" for s in status.values()):
+        verdict, code = "RED", 1
+    elif any(s in ("incomplete", "missing") for s in status.values()):
+        verdict, code = "INCOMPLETE", 2
+    elif regressed:
+        verdict, code = "REGRESSED", 2
+    else:
+        verdict, code = "GREEN", 0
+    meaning = {
+        "RED": "wrong results, mismatches or new inconsistencies",
+        "INCOMPLETE": "some parts did not run fully; this is not a pass",
+        "REGRESSED": "worse than the last run",
+        "GREEN": "every part ran; no wrong results, no regressions",
+    }[verdict]
+
+    lines = [f"**{verdict}**: {meaning}.\n", f"# {args.title}\n"]
     if args.commit:
         lines.append(f"Commit `{args.commit}`.\n")
     lines.append("| part | status |")
@@ -170,11 +218,15 @@ def main():
     for p in expected:
         lines.append(f"| {p} | {icon.get(status[p], status[p])} |")
     lines.append("")
+    if regressed:
+        lines.append("Against the last run:")
+        lines += [f"- {r}" for r in regressed]
+        lines.append("")
 
     if "ab" in expected:
-        section_ab(load(args.inp, "ab-classified.json"), load(args.previous, "ab-classified.json"), lines)
+        section_ab(cur_ab, prev_ab, lines)
     if "sysbench" in expected:
-        section_sysbench(load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json"), lines)
+        section_sysbench(cur_sb, prev_sb, lines)
     if "faults" in expected:
         section_faults(load(args.inp, "faults-raw.json"), lines)
     if "locks" in expected:
@@ -185,10 +237,9 @@ def main():
     with open(args.out, "w") as f:
         f.write("\n".join(lines))
     print("\n".join(lines))
-    if any(s == "fail" for s in status.values()):
-        raise SystemExit(1)
-    if any(s in ("incomplete", "missing") for s in status.values()):
-        raise SystemExit(2)
+    with open(os.path.join(os.path.dirname(os.path.abspath(args.out)), "verdict.txt"), "w") as f:
+        f.write(verdict + "\n")
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":
