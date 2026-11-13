@@ -132,8 +132,8 @@ tidb-expression-macros = { path = "crates/expression/macros" }
 # several connections per store, client-go/PD metrics (feature client-go-metrics), and
 # client-go's lock resolution (#101 R1-R7, R12: lock hints, background cleanup,
 # TTL-capped lock backoff, shared lock wrappers in the coprocessor, lite resolve, shared
-# status cache, collapsed region resolves, low-resolution timestamp).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "fda01a53052523cd709bcffa1898f4a810818bd9", default-features = false, features = ["client-go-metrics"] }
+# status cache, collapsed region resolves, low-resolution timestamp, refresh-round guard).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "42d29627c637387684ccf704eccd901c627c83e4", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 bytes = "1.11"
 # Global allocator of the server and the benchmarks (A1 / P0 decision D7: jemalloc).
