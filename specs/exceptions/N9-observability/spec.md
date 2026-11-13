@@ -141,7 +141,7 @@
 
 - **CPU**：`pprof-rs`（TiKV 同版本系列；D2 已定 frame pointer，**待验证**：目标平台的预编译 `std` 是否带 frame pointer，否则经过 `std` 的栈会被截断，除非自己编译 std），`/debug/pprof/profile?seconds=N` 输出 pprof protobuf（与 Go 同格式，Dashboard 可直接用）；需要 frame pointer 或 DWARF 展开（TiKV 用 `pprof-fp` feature + `-C force-frame-pointers`），这是**构建配置**，要现在定（待定 D2）。
 - **heap**：jemalloc profiling（A1 已定 jemalloc）。需要编译时开 `profiling` feature、运行时 `prof:true,prof_active:false`，按 TiKV 的 `heap_activate/heap_deactivate/heap_list` 加上 Go 的 `/debug/pprof/heap`。**待验证（不阻塞）**：tidb-rs 节点注册为 TiDB 实例，Dashboard / ng-monitoring 取 `/debug/pprof/heap` 时期望 Go 的 pprof protobuf；jemalloc `prof.dump` 是 jeprof 格式（TiKV 的 heap 在 Dashboard 中走 TiKV 专用的路径）。需要先查 Dashboard 的抓取代码，可能要在进程内把 jemalloc 的 profile 转成 pprof protobuf。
-- **goroutine / mutex 的对应物**（待定 D1）：
+- **goroutine / mutex 的对应物**（D1，**负责人决定：返回 404 / not supported**，#115，2026-11-13）：`/debug/pprof/goroutine`、`/debug/pprof/mutex` 返回 404（not supported），写进 `docs/compatibility.md`。下面的任务转储和锁等待统计仍可作为 tidb-rs 自己的诊断手段（例如另设路径或 `/debug/zip` 中的文件），不占用 Go 的这两个路径：
   - goroutine → **任务转储**：tokio 的 `Handle::dump()`（需要 `tokio_unstable` + `taskdump`，只在 Linux x86_64/aarch64），或 N3 运行时自己维护"活跃任务表"（task id、所属连接、当前语句 digest、已运行 CPU、最近一次 poll 开始时间）。建议后者：开销可控、跨平台，且对 PROCESSLIST 也有用。`/debug/pprof/goroutine` 返回这个表的文本形式（不是 Go 格式，Dashboard 的 goroutine 视图不可用——需要负责人确认）。
   - **待验证**：ng-monitoring 持续性能分析对 goroutine/mutex 请求的是哪种 `debug=` 变体，决定 D1 (a) 是只影响一个视图，还是让这个节点的持续性能分析整体失败。
   - mutex/block → 锁等待：N3 已有停顿检测（`on_cpu`/`blocked`/`preempted` 分类）；`parking_lot` 锁等待时间可以用 `lock_api` 包装统计。`/debug/pprof/mutex` 无法给出 Go 格式。
@@ -266,7 +266,7 @@ Go 中 label 和 table id 是**每个请求**按它的第一个 key 算的（§1
 
 | # | 问题 | 建议 | 状态 |
 |---|---|---|---|
-| D1 | `/debug/pprof/goroutine`、`/debug/pprof/mutex` 没有 Go 格式的对应物：(a) 返回 tidb-rs 自己的任务转储/锁等待文本，Dashboard 对应视图不可用；(b) 返回 404；(c) 与 Dashboard 协调新格式 | (a)，并在 `docs/compatibility.md` 中列出；先确认 ng-monitoring 请求的 `debug=` 变体（§4） | 待负责人决定（#115） |
+| D1 | `/debug/pprof/goroutine`、`/debug/pprof/mutex` 没有 Go 格式的对应物 | 返回 404 / not supported，写进 `docs/compatibility.md`；ng-monitoring 请求 `debug=` 变体的影响仍需验证 | **负责人已决定（#115，2026-11-13）** |
 | D2 | CPU profile 的栈展开：frame pointer 还是 DWARF | frame pointer | 已同意（Lucky，技术决定） |
 | D3 | Top SQL 与语句级 CPU 用按窗口分摊的记账代替 Go 的采样归因；**另加动态开关和采样率**（§6.1a），`tidb_enable_top_sql` 作为负债兼容 | 前提是 §6.1 的基准满足 §9 | **负责人已决定（#116，2026-11-13）** |
 | D4 | `util/topsql` 的标签与 CPU 记账拆成 D14.3 提前到 P2，上报留在 P5 | 同意 | 已同意（Lucky，技术决定） |
