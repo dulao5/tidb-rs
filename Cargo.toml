@@ -137,8 +137,9 @@ tidb-expression-macros = { path = "crates/expression/macros" }
 # Backoffer: one 20 s time budget per read shared by its retries, lock resolution and lock
 # waits, per-error curves, ServerIsBusy excluded (P0-1a, P0-1b); the longest-slept error kind
 # when a budget runs out; client-go's per-request RPC timeouts and deadlines, and
-# `tikv_client_read_timeout` (P0-2).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "82fd76386e1d0d2e5a8c90d9f3e0d4a8f054871d", default-features = false, features = ["client-go-metrics"] }
+# `tikv_client_read_timeout` (P0-2); a broken TSO stream is reopened and its requests resent
+# (P0-4).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "36068d0b4514d3a5562ea1d3dc15ef4ef11c3543", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 bytes = "1.11"
 # Global allocator of the server and the benchmarks (A1 / P0 decision D7: jemalloc).
