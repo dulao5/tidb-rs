@@ -171,6 +171,18 @@
 
 **基准（D3 决定之前必须做）**：sysbench oltp_read_only 与 oltp_point_select，比较 (a) 关闭 CPU 记账、(b) 每次 poll 读 `Instant`、(c) (b) + 1ms / 10ms 窗口读线程 CPU 时钟；指标为 QPS、CPU 利用率，以及在 CPU 超额订阅（客户端线程数 > 核数）下按语句分摊的 CPU 与 `perf stat` 总 CPU 的误差。
 
+### 6.1a 动态开关与采样率（负责人决定，#116，2026-11-13）
+
+负责人决定采用 §6.1 的统一方案（前提仍是 §6.1 的基准满足 §9），并要求：**可以动态开启和关闭**，并支持用户设置**采样率**——1% 表示每 100 次语句执行采样 1 次，100% 表示全部采样，0 表示关闭。已有的 `tidb_enable_top_sql` 作为负债暂时兼容。这是**功能上的例外**（新增系统变量），按宪章登记在 `specs/exceptions/`，并写进 `docs/compatibility.md`。
+
+设计（细节由 Maya、Lucky 在 D14.3 spec 中定稿）：
+
+- **新系统变量**（名字待定，暂称 `tidb_top_sql_sample_rate`）：GLOBAL，可动态修改，取值 0–100（百分比，允许小数）或 0.0–1.0，在 D14.3 中定一种；Go 中没有这个变量。
+- **与 `tidb_enable_top_sql` 的关系**（暂定，D14.3 定稿）：新变量没有设置时，`tidb_enable_top_sql = OFF` 等同于 0（与 Go 的默认值一致），`ON` 等同于 100%；新变量设置后以它为准，`tidb_enable_top_sql` 只为兼容保留（读回的值反映"采样率是否大于 0"）。
+- **采样的粒度是一次语句执行**：在语句开始时（plan digest 附上之前）决定是否采样，决定结果记在 `ObsCtx` 中，派生的任务继承。没采中的执行完全跳过 CPU 窗口分摊、Top SQL 打标和累计（§3.6），开销和采样率成正比；`resource_group_tag` 仍按 Go 照常计算（它也用于资源管控，与采样无关，§6.4）。
+- **用户可见的影响**：`Tidb_cpu_time`、`Tikv_cpu_time`、PROCESSLIST 的 CPU 列只在采中的执行上出现；语句摘要的 `AVG_TIDB_CPU_TIME` 等按采中的执行求平均。Top SQL 上报的是采中执行的原始值还是按采样率外推，结合 ng-monitoring 的格式在 D14.3 中决定。
+- **动态修改**：修改采样率只影响之后开始的语句；正在执行的语句保持开始时的决定。
+
 ### 6.2 语句级 CPU 字段（`Tidb_cpu_time` 等）
 
 Go v8.5.8 的慢日志 `Tidb_cpu_time`/`Tikv_cpu_time`、`STATEMENTS_SUMMARY.AVG_TIDB_CPU_TIME`、PROCESSLIST 的 CPU 列（`util/ppcpuusage`）就是 `StmtExecRecord` 中的 CPU 数值。按 Go：
@@ -256,7 +268,7 @@ Go 中 label 和 table id 是**每个请求**按它的第一个 key 算的（§1
 |---|---|---|---|
 | D1 | `/debug/pprof/goroutine`、`/debug/pprof/mutex` 没有 Go 格式的对应物：(a) 返回 tidb-rs 自己的任务转储/锁等待文本，Dashboard 对应视图不可用；(b) 返回 404；(c) 与 Dashboard 协调新格式 | (a)，并在 `docs/compatibility.md` 中列出；先确认 ng-monitoring 请求的 `debug=` 变体（§4） | 待负责人决定（#115） |
 | D2 | CPU profile 的栈展开：frame pointer 还是 DWARF | frame pointer | 已同意（Lucky，技术决定） |
-| D3 | Top SQL 与语句级 CPU（`Tidb_cpu_time` 等）用 **poll 级记账**（每次 poll 读 `Instant`，线程 CPU 时钟按 1–10ms 窗口读并按墙钟分摊）代替 Go 的 CPU profile 采样归因。数值比 Go 准，和 Go 不完全一致；字段是否出现仍跟随 `tidb_enable_top_sql`（同 Go）。**先做 §6.1 的基准再决定**（#116） | 同意例外，前提是基准满足 §9 | 待基准 |
+| D3 | Top SQL 与语句级 CPU 用按窗口分摊的记账代替 Go 的采样归因；**另加动态开关和采样率**（§6.1a），`tidb_enable_top_sql` 作为负债兼容 | 前提是 §6.1 的基准满足 §9 | **负责人已决定（#116，2026-11-13）** |
 | D4 | `util/topsql` 的标签与 CPU 记账拆成 D14.3 提前到 P2，上报留在 P5 | 同意 | 已同意（Lucky，技术决定） |
 | D5 | 只读阶段先做慢日志文件 + 语句摘要 v1，v2 随 P5 | 同意 | 已同意（Lucky，技术决定） |
 | D6 | TRACE 的 span 名称、层次照 Go（含 client-go 的 24 处，在 client-rust fork 中加） | 照 Go | 已同意（Lucky，技术决定） |
