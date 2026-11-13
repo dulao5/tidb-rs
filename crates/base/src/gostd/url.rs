@@ -1,5 +1,5 @@
 //! `net/url` (Go 1.25.12): the part that `ast.RedactURL` uses — `Parse`, `URL.String`,
-//! `URL.Query`, `Values.Encode` and the escaping helpers they call.
+//! `URL.Query`, `ParseQuery`, `Values.Encode` and the escaping helpers they call.
 //!
 //! go-file: $GOROOT/src/net/url/url.go
 //!
@@ -654,6 +654,14 @@ pub type Values = BTreeMap<Vec<u8>, Vec<Vec<u8>>>;
 
 /// Go's `defaultMaxParams` (the `urlmaxqueryparams` GODEBUG is not consulted).
 const DEFAULT_MAX_PARAMS: usize = 10000;
+
+/// `url.ParseQuery`: the values parsed so far and the first error, as Go returns both.
+// go-std: net/url.ParseQuery L1
+pub fn parse_query_values(query: &[u8]) -> (Values, Result<(), Error>) {
+    let mut m = Values::new();
+    let err = parse_query(&mut m, query);
+    (m, err)
+}
 
 // go-std: net/url.parseQuery L1 (urlParamsWithinMax with the default GODEBUG)
 fn parse_query(m: &mut Values, query: &[u8]) -> Result<(), Error> {
