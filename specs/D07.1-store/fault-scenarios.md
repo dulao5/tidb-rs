@@ -210,6 +210,49 @@ client-rust#13–#15 之后（预算用完时报睡得最久的那种错误、Go
 - **复跑**：改动后跑了两轮 kill -9，两边都是 0 个错误、0 个错误结果，最长挂起 Go 15.3 s / 14.8 s，tidb-rs 15.4 s / 15.2 s。不过这两轮没有再出现超过 20 s 无 leader 的情况，所以"约 28 s 的停顿下不报错"由上面的预算计算保证，没有在实测中直接复现。
 - **限 CPU 那条（12.0 s 对 6.3 s）**：诊断版日志显示限 CPU 期间 tidb-rs 没有 region 错误或 tikvRPC 退避，只有 613 次锁等待（每次 ≤ 9 ms，合计 4.3 s）。挂起来自卡在被限 leader 上的长 RPC，归入对照表 replica read 那一行。
 
+## store 存活状态的日志证据（client-rust `370cff4`，#157）
+
+client-rust#19、#20 加上了 client-go 的 store 存活状态：请求在连接层失败后，用 gRPC health check（超时 1 s）检查该 store；不可达的 store 不再作为请求目标，后台每 1 s 探测一次，直到恢复。kill -9 下最长挂起没有变化（主要取决于 leader 选举），所以要用日志确认它确实生效。
+
+**做法**：同一台机器、同一套工具，`tools/ab/faults/run.sh -s kill_tikv`（`FAULTS_LOG_DIR` 保留日志），修改前（main `849e748`，client-rust `36068d0`）和修改后（`370cff4`）各跑 2 次。tidb-rs 用默认的 info 级日志：下面用到的几行都是 info 级，两个版本里格式相同。kill 时间取自 faults.py 输出（加了时间戳）；重启时间是 kill 后 20 s（`phase * 2`），TiKV 自己的 `TiKV is ready to serve` 晚约 1 s。
+
+- **发往被杀 store 的请求**：`connect to tikv endpoint: "<被杀 store 的地址>"`。
+  - 请求每次连接层失败后，store 缓存和它的 kv 连接都会失效（`invalidate_store_cache` → `invalidate_kv_client_cache`），所以之后每次再把请求发往这个 store，都要先新建连接，并打这一行。store 死着，连接建不成，不会再缓存。
+  - 因此这一行的次数就是"第一次失败之后，仍发往被杀 store 的请求数"。kill 那一刻已经在旧连接上发出的请求不打这一行（数量不超过并发的读线程数），两边都一样，不计入。
+- **探测**：`[health check] store N is Unreachable, start its health check loop`（标记为不可达、启动探测循环）、`[health check] connect to store <地址> failed` / `check store <地址> failed`（每次失败的探测）、`[health check] store N became reachable`（恢复）。这几行只有修改后才有。
+
+| | 修改前（2 次） | 修改后（2 次） |
+|---|---|---|
+| kill 后到重启前（20 s），发往被杀 store 的请求 | **336 / 370**（16.8 / 18.5 次/s） | **0 / 0** |
+| 其中 kill 后 2 s 起 | 237 / 267（13.2 / 14.8 次/s），持续到 kill 后约 15–16 s | 0 / 0 |
+| 探测（health check 失败的行） | 0 / 0（没有这个机制） | 21 / 22：kill 后 1 次，之后每 1 s 1 次 |
+| kill 到标记为不可达 | —（不标记，第一次重连在 kill 后 0.14 / 0.16 s） | 0.10 / 0.10 s |
+| 恢复标记（`became reachable`） | — | kill 后 21.1 / 22.1 s，TiKV ready 之后 0.13 / 0.94 s |
+| tidb-rs 最长挂起（各读法中最长） | 17.0 / 16.8 s | 13.8 / 16.8 s |
+
+修改前，第一次失败之后请求仍一次次发往被杀的 store：第 1 秒约 80 次，之后每秒十几到二十几次（个别秒 39 次），直到 kill 后约 15 s leader 选出、region 缓存换到新 leader 为止。每次都是连接被拒，然后退避重试。
+
+```
+14:27:03.004243Z  INFO connect to tikv endpoint: "127.0.0.1:44161"
+14:27:03.018202Z  INFO connect to tikv endpoint: "127.0.0.1:44161"
+14:27:03.019870Z  INFO connect to tikv endpoint: "127.0.0.1:44161"
+```
+
+修改后，kill 后 0.1 s 内 store 被标记为不可达；之后请求一次都没有再发往它，发往被杀 store 的只有每秒一次的探测；TiKV 起来后 1 s 内恢复：
+
+```
+14:30:13.568147Z  INFO [health check] store 5 is Unreachable, start its health check loop
+14:30:14.569839Z  INFO [health check] connect to store 127.0.0.1:44161 failed: ... tcp connect error ... ConnectionRefused ...
+14:30:34.590802Z  INFO [health check] store 5 became reachable
+```
+
+**结论**：store 存活状态在 kill -9 下确实生效。请求不再一次次去试被杀的 store（每次 kill 约 340–370 次降为 0 次），被杀 store 上只剩每秒一次的探测，TiKV 重启后 1 s 内恢复为可用。最长挂起仍由 leader 选举决定，所以没有变短。
+
+注意：
+
+- 预期是"修改后约每秒 1 个请求"，实测是 0 个：每秒一次的是独立连接上的 health check，请求本身完全不再发往该 store，直到它恢复。
+- 两次都杀的是 store 5（当时 leader 最多）。修改后请求的去向（follower 或新 leader）没有逐条统计。
+
 ## 对对照表的更新（client-go-parity.md §9）
 
 | P0 | 本次结果 | 写回对照表的内容 |
