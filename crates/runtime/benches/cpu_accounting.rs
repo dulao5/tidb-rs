@@ -24,8 +24,8 @@
 //!
 //! Part 3 (accuracy): half the tasks do 1 unit of work per poll, half 4 units. With windowed
 //! accounting the CPU attributed to the heavy tasks over the light ones should come out at
-//! the same ratio `perpoll` measures, and the attributed total should match the process CPU
-//! spent in polls. Run once on idle cores and once oversubscribed (as many extra spinning
+//! the work ratio (`perpoll` is only a reference: it includes its own clock reads), and the
+//! attributed total should match the CPU of the runtime's worker threads. Run once on idle cores and once oversubscribed (as many extra spinning
 //! threads as cores), where windowed accounting splits preempted time over the window's
 //! tasks instead of charging the running one. Note the two measure different things:
 //! `perpoll` counts CPU inside polls only; a window also splits the runtime's own CPU between
@@ -51,6 +51,36 @@ use std::time::Duration;
 use std::time::Instant;
 
 const TASKS_PER_CORE: usize = 8;
+
+/// Linux thread ids of the runtime's worker threads (registered at thread start), so the
+/// workers' own CPU can be read without the spinners of the oversubscribed runs.
+static WORKERS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+/// The summed CPU time of the registered worker threads, from
+/// `/proc/self/task/<tid>/schedstat` (ns); `None` where that is not available (macOS).
+// glue: benchmark
+fn workers_cpu() -> Option<Duration> {
+    let tids = WORKERS.lock().unwrap().clone();
+    if tids.is_empty() {
+        return None;
+    }
+    let mut ns = 0u64;
+    for tid in tids {
+        let s = std::fs::read_to_string(format!("/proc/self/task/{tid}/schedstat")).ok()?;
+        ns += s.split_whitespace().next()?.parse::<u64>().ok()?;
+    }
+    Some(Duration::from_nanos(ns))
+}
+
+#[cfg(target_os = "linux")]
+// glue: benchmark
+fn register_worker() {
+    WORKERS.lock().unwrap().push(nix::unistd::gettid().as_raw());
+}
+
+#[cfg(not(target_os = "linux"))]
+// glue: benchmark
+fn register_worker() {}
 
 // ---------------------------------------------------------------- clocks
 
@@ -290,6 +320,8 @@ fn sampled(id: u64, rate: f64) -> bool {
 struct RunResult {
     wall: Duration,
     cpu: Duration,
+    /// CPU of the runtime's worker threads (Linux), excluding the oversubscription spinners.
+    workers: Option<Duration>,
     /// CPU attributed to sampled light / heavy tasks, and their counts.
     light: (u64, usize),
     heavy: (u64, usize),
@@ -307,6 +339,7 @@ fn run(
     let tasks = cores * TASKS_PER_CORE;
     let accs: Vec<Arc<AtomicU64>> = (0..tasks).map(|_| Arc::new(AtomicU64::new(0))).collect();
     GEN.fetch_add(1, Ordering::Relaxed);
+    let w0 = workers_cpu();
     let c0 = process_cpu();
     let t0 = Instant::now();
     rt.block_on(async {
@@ -337,6 +370,7 @@ fn run(
     });
     let wall = t0.elapsed();
     let cpu = process_cpu() - c0;
+    let workers = workers_cpu().zip(w0).map(|(a, b)| a.saturating_sub(b));
     let mut light = (0, 0);
     let mut heavy = (0, 0);
     for (i, acc) in accs.iter().enumerate() {
@@ -351,6 +385,7 @@ fn run(
     RunResult {
         wall,
         cpu,
+        workers,
         light,
         heavy,
     }
@@ -386,32 +421,37 @@ fn main() {
         cores * TASKS_PER_CORE,
     );
 
-    println!("## 1. Clock read cost\n");
-    println!("| clock | ns / call |\n|---|---|");
-    let n = 2_000_000;
-    println!(
-        "| `Instant::now` | {:.1} |",
-        ns_per_call(n, || {
-            black_box(Instant::now());
-        })
-    );
-    println!(
-        "| `clock_gettime(CLOCK_MONOTONIC)` | {:.1} |",
-        ns_per_call(n, || {
-            black_box(monotonic());
-        })
-    );
-    println!(
-        "| `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` | {:.1} |",
-        ns_per_call(n / 4, || {
-            black_box(thread_cpu());
-        })
-    );
+    // `CPU_ACC_PARTS`: which parts to run, e.g. "3" (default "123").
+    let parts = std::env::var("CPU_ACC_PARTS").unwrap_or_else(|_| "123".into());
+    if parts.contains('1') {
+        println!("## 1. Clock read cost\n");
+        println!("| clock | ns / call |\n|---|---|");
+        let n = 2_000_000;
+        println!(
+            "| `Instant::now` | {:.1} |",
+            ns_per_call(n, || {
+                black_box(Instant::now());
+            })
+        );
+        println!(
+            "| `clock_gettime(CLOCK_MONOTONIC)` | {:.1} |",
+            ns_per_call(n, || {
+                black_box(monotonic());
+            })
+        );
+        println!(
+            "| `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` | {:.1} |",
+            ns_per_call(n / 4, || {
+                black_box(thread_cpu());
+            })
+        );
+    }
 
     let per_us = calibrate();
     let light_iters = (per_us * work_ns as f64 / 1000.0).max(1.0) as u64;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(cores)
+        .on_thread_start(register_worker)
         .build()
         .unwrap();
 
@@ -435,18 +475,23 @@ fn main() {
     let single = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    for (title, rt, workers) in [
-        (
-            "2a. Overhead, one worker thread (current_thread runtime)",
-            &single,
-            1,
-        ),
-        (
-            "2b. Overhead, one worker per core (multi_thread runtime)",
-            &rt,
-            cores,
-        ),
-    ] {
+    let part2: &[(&str, &tokio::runtime::Runtime, usize)] = if parts.contains('2') {
+        &[
+            (
+                "2a. Overhead, one worker thread (current_thread runtime)",
+                &single,
+                1,
+            ),
+            (
+                "2b. Overhead, one worker per core (multi_thread runtime)",
+                &rt,
+                cores,
+            ),
+        ]
+    } else {
+        &[]
+    };
+    for &(title, rt, workers) in part2 {
         let rounds = reps * 3;
         let mut cpu: Vec<Vec<f64>> = vec![Vec::new(); configs.len()];
         run(rt, workers, Mode::Off, 0.0, polls / 4, light_iters);
@@ -488,11 +533,18 @@ fn main() {
         }
     }
 
+    if !parts.contains('3') {
+        return;
+    }
+    let acc_reps = env("CPU_ACC_ACC_REPS", 15) as usize;
     println!("\n## 3. Accuracy (100% sampled)\n");
     println!(
-        "heavy/light: CPU attributed per heavy task over per light task (the work ratio is 4; `perpoll` measures the real ratio). attributed/process: CPU attributed to all tasks over process CPU.\n"
+        "heavy/light: CPU attributed per heavy task over per light task; the work ratio is 4. `perpoll` is a reference that includes its own overhead (two thread-CPU reads inside every poll count as work of both classes), so it reads below 4; it is not the ground truth. attributed/workers: CPU attributed to all tasks over the CPU of the runtime's worker threads (`/proc/self/task/<tid>/schedstat`; Linux only), which leaves out the spinners of the oversubscribed runs. attributed/process: over the whole process CPU (idle runs only).\n"
     );
-    println!("| load | mode | heavy/light | attributed/process |\n|---|---|---|---|");
+    println!(
+        "| load | mode | heavy/light median (min–max of {} runs) | attributed/workers | attributed/process |\n|---|---|---|---|---|",
+        acc_reps
+    );
     for oversub in [false, true] {
         let stop = Arc::new(AtomicBool::new(false));
         let spinners: Vec<_> = if oversub {
@@ -512,21 +564,34 @@ fn main() {
         for mode in &modes[1..] {
             let mut ratios = Vec::new();
             let mut shares = Vec::new();
-            for _ in 0..reps {
+            let mut wshares = Vec::new();
+            for _ in 0..acc_reps {
                 let r = run(&rt, cores, *mode, 1.0, polls, light_iters);
                 let light = r.light.0 as f64 / r.light.1 as f64;
                 let heavy = r.heavy.0 as f64 / r.heavy.1 as f64;
                 ratios.push(heavy / light);
-                // Under oversubscription the process CPU includes the spinners: compare
-                // against the polls' own share only when idle.
-                shares.push((r.light.0 + r.heavy.0) as f64 / r.cpu.as_nanos() as f64);
+                let attributed = (r.light.0 + r.heavy.0) as f64;
+                shares.push(attributed / r.cpu.as_nanos() as f64);
+                if let Some(w) = r.workers {
+                    wshares.push(attributed / w.as_nanos() as f64);
+                }
                 black_box(r.wall);
             }
+            let (lo, hi) = ratios
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(lo, hi), &r| (lo.min(r), hi.max(r)));
             println!(
-                "| {} | {} | {:.3} | {} |",
+                "| {} | {} | {:.3} ({:.3}–{:.3}) | {} | {} |",
                 if oversub { "oversubscribed" } else { "idle" },
                 mode.name(),
                 median(ratios),
+                lo,
+                hi,
+                if wshares.is_empty() {
+                    "n/a".to_string()
+                } else {
+                    format!("{:.3}", median(wshares))
+                },
                 if oversub {
                     "n/a (spinners)".to_string()
                 } else {

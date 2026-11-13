@@ -27,6 +27,8 @@ nix = { version = "0.29", default-features = false, features = ["time", "resourc
 # Captures the runtime's tracing events in tests (tests/logs.rs).
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 criterion = "0.5"
+# Bench cpu_accounting: worker thread ids (`gettid`) for their schedstat CPU.
+nix = { version = "0.29", default-features = false, features = ["time", "resource", "process"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
 
 [[bench]]
