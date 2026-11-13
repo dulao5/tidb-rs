@@ -114,7 +114,7 @@ version ahead of an in-flight statement.
   3 more seconds (`StmtGuard::results_valid`). Otherwise the result is discarded and the
   statement runs again on the ADR 0003 path. Then the schema lease is checked at the read TS
   (`StmtGuard::check_results`, see "Schema lease"); if it has expired there and no reload
-  renews it, the statement fails with error 8027 as in Go.
+  renews it, the statement also runs again on the ADR 0003 path.
 - **Name resolution.** `USE` and `COM_STMT_PREPARE` resolve names against the synced schema
   when it is admissible, and against the schema at a fresh TSO otherwise.
 
@@ -170,10 +170,19 @@ for one schema lease (`pkg/domain/schema_validator.go`, ported in
   or not the version changed (`Domain.Reload` → `SchemaValidator.Update`).
 - A synced statement's reads are accepted only if its read TS is at most one lease after that
   TSO (`SchemaValidator.Check`, measured in TSO, not on the local clock). Otherwise it waits
-  for a reload as Go's `SchemaChecker.CheckBySchemaVer` does (10 × 500 ms) and then fails with
-  `ErrInfoSchemaExpired` (8027). A point get at MaxTS has no TS; it and admission use the same
-  bound on the monotonic clock, counted from when the reload *requested* its TSO, which never
-  expires later than the TSO bound.
+  for a reload as Go's `SchemaChecker.CheckBySchemaVer` does (10 × 500 ms). A point get at
+  MaxTS has no TS; it and admission use the same bound on the monotonic clock, counted from
+  when the reload *requested* its TSO, which never expires later than the TSO bound.
+- The TS checked is always one fetched for this statement after its admission ("now"),
+  never a transaction's `start_ts`. Explicit transactions (D05.4) must not pass their
+  `start_ts`: the lease bounds the schema's age at the read, not at the transaction's start.
+- **Reads never return `ErrInfoSchemaExpired` (8027).** Past the lease, both cases fall back
+  to the ADR 0003 per-statement path: a new statement is not admitted, and an admitted
+  statement whose read TS crossed the expiry (and that no reload renewed while it waited) has
+  its result discarded and runs again there. Go returns 8027 only when a transaction commits;
+  its reads never fail with it. We chose the fallback over introducing an error Go does not
+  have. After a lease of failed reloads, the fallback waits for the meta region and TSO to
+  recover and then succeeds.
 - Deregistration stops the validator (Go: `Stop` when the etcd session is gone); registering
   restarts it and requires a new reload (Go: `Restart` after `mustReload`).
 - With MDL (always on here) a statement on a version older than the latest one passes, as in

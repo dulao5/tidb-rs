@@ -38,7 +38,7 @@ pub struct Limits {
     /// proven alive for at least this much longer.
     pub lease_margin: Duration,
     /// How long a synced statement whose read TS is past the schema lease waits for a reload
-    /// before failing with `ErrInfoSchemaExpired` (Go: `SchemaOutOfDateRetry*`).
+    /// before it falls back to the ADR 0003 path (Go: `SchemaOutOfDateRetry*`).
     pub schema_check_retry: SchemaCheckRetry,
 }
 
@@ -234,10 +234,13 @@ pub struct StmtGuard {
 pub enum ResultCheck {
     /// The result may be returned.
     Valid,
-    /// The node left sync (deregistered, or its etcd lease is not proven alive): discard the
-    /// result and run the statement on the fallback path.
+    /// Discard the result and run the statement on the fallback (ADR 0003) path: the node
+    /// left sync (deregistered, or its etcd lease is not proven alive), or the schema lease
+    /// had expired at the read TS and no reload renewed it while waiting. Reads never return
+    /// `ErrInfoSchemaExpired` (8027): Go's reads do not either.
     Fallback,
-    /// The schema lease check failed (Go: `SchemaChecker.CheckBySchemaVer`).
+    /// The schema lease check failed with a definite result (Go: `ResultFail` →
+    /// `ErrInfoSchemaChanged`, 8028).
     Err(SchemaCheckError),
 }
 
@@ -272,6 +275,9 @@ impl StmtGuard {
     /// The schema lease check of the statement's reads: at its read TS `txn_ts` (`None` for a
     /// point get at MaxTS, checked with the local clock instead). Call it after the reads have
     /// completed.
+    ///
+    /// `txn_ts` must be a TS fetched for this statement *after* its admission (i.e. "now");
+    /// never a transaction's `start_ts` (D05.4, explicit transactions, must not pass one).
     fn schema_check_at(&self, txn_ts: Option<u64>, now: Instant) -> CheckResult {
         let state = self.registry.lock();
         let v = &state.health.validator;
@@ -284,8 +290,16 @@ impl StmtGuard {
     /// Whether a result read at `txn_ts` with the admitted schema may be returned: first the
     /// fencing of [`StmtGuard::results_valid`] (failing it means [`ResultCheck::Fallback`]),
     /// then the schema lease at the read TS. While the lease has expired at that TS, wait for
-    /// a reload to renew it as Go does, then fail with `ErrInfoSchemaExpired`.
-    // go: SchemaChecker.CheckBySchemaVer L2 (async sleep; also re-checks the fencing on every try)
+    /// a reload to renew it as Go does; if none does, return [`ResultCheck::Fallback`] (not
+    /// Go's `ErrInfoSchemaExpired`: Go only returns it at commit, and its reads never fail
+    /// with it; the fallback path re-reads the schema at a fresh TSO and succeeds once the
+    /// meta region and TSO are available again).
+    ///
+    /// `txn_ts` only accepts a TS fetched for this statement after admission (i.e. "now");
+    /// never a transaction's `start_ts`. `None` means a MaxTS point get. D05.4 (explicit
+    /// transactions) must not pass a transaction's `start_ts` here: the lease bounds the
+    /// schema's age at the moment of the read, not at the transaction's start.
+    // go: SchemaChecker.CheckBySchemaVer L2 (async sleep; re-checks the fencing on every try; falls back instead of ErrInfoSchemaExpired)
     pub async fn check_results(&self, txn_ts: Option<u64>) -> ResultCheck {
         let retry = self.registry.limits.schema_check_retry;
         for _ in 0..retry.times {
@@ -298,7 +312,7 @@ impl StmtGuard {
                 CheckResult::Unknown => tokio::time::sleep(retry.interval).await,
             }
         }
-        ResultCheck::Err(SchemaCheckError::Expired)
+        ResultCheck::Fallback
     }
 }
 
@@ -896,10 +910,16 @@ mod tests {
             a.guard.check_results(Some(tso(4.9))).await,
             ResultCheck::Valid
         );
-        // Past it (Go: ResultUnknown, retried, then ErrInfoSchemaExpired 8027).
+        // Past it (Go: ResultUnknown, retried): no reload renews it, so the statement falls
+        // back to the ADR 0003 path instead of returning ErrInfoSchemaExpired (8027).
+        let invalidated = r.stats().invalidated;
         let got = a.guard.check_results(Some(tso(5.0))).await;
-        assert_eq!(got, ResultCheck::Err(SchemaCheckError::Expired));
-        assert_eq!(SchemaCheckError::Expired.code(), 8027);
+        assert_eq!(got, ResultCheck::Fallback);
+        assert_eq!(
+            r.stats().invalidated,
+            invalidated,
+            "the node is still in sync"
+        );
         // A MaxTS point get has no TS: the local clock decides (the lease is still fresh).
         assert_eq!(a.guard.check_results(None).await, ResultCheck::Valid);
         // A newer schema installed meanwhile: with MDL, the older statement passes.

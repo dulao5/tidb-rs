@@ -4,8 +4,10 @@
 //! stays usable for one schema lease (`--lease`, 45 s as in Go) after that TSO, so a slow or
 //! failing reload (for example while the meta region elects a new leader, #136) does not
 //! stop the node from serving statements on the cached schema. Like Go, the lease is measured
-//! in TSO: a statement whose read TS is more than one lease after the reload's TS fails with
-//! `ErrInfoSchemaExpired` (8027).
+//! in TSO: a statement whose read TS is more than one lease after the reload's TS may not use
+//! the cached schema. Go returns `ErrInfoSchemaExpired` (8027) only at commit; tidb-rs reads
+//! never return it and fall back to the ADR 0003 path instead
+//! ([`crate::StmtGuard::check_results`]).
 //!
 //! go-file: pkg/domain/schema_validator.go
 //! go-file: pkg/domain/schema_checker.go
@@ -168,6 +170,9 @@ impl SchemaValidator {
     }
 
     /// Whether a statement using `schema_ver` may use its reads at `txn_ts`.
+    ///
+    /// Only accepts a TS fetched for this statement after admission (i.e. "now"); never a
+    /// transaction's `start_ts`.
     // go: schemaValidator.Check L2 (MDL is always on: `relatedPhysicalTableIDs` and
     // `needCheckSchema` are not needed)
     pub(crate) fn check(&self, txn_ts: u64, schema_ver: i64) -> CheckResult {

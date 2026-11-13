@@ -100,7 +100,7 @@ struct Args {
     advertise_status_port: Option<u16>,
     /// Schema lease (Go's `--lease`, a Go duration such as `45s`): synced statements use the
     /// cached schema while the last successful reload is at most one lease old (measured in
-    /// TSO, Go's `SchemaValidator`); a read whose TS is later fails with error 8027.
+    /// TSO, Go's `SchemaValidator`); later reads fall back to the per-statement schema check.
     #[arg(long, value_name = "DURATION", default_value = "45s", value_parser = parse_go_duration)]
     lease: Duration,
     /// The node deregisters (DDL stops waiting for it) when it has completed no reload + MDL
