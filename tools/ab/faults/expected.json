@@ -1,0 +1,9 @@
+{
+  "_comment": "Known inconsistencies (tidb-rs errors that Go TiDB does not show), as regexes on '<shape> <error>'. Each entry cites its gap in specs/D07.1-store/client-go-parity.md; remove it when the gap is fixed.",
+  "kill_tikv": [
+    "^point-(maxts|tso) 1105: region unavailable: (Leader of region N is not found|Region error: Error \\{ message: \"peer is not leader)"
+  ],
+  "wide_rows": [
+    "^wide-6MiB 1105: TiKV/PD unavailable: gRPC api error: status: OutOfRange"
+  ]
+}

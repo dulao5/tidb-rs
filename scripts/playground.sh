@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Start/stop a tiup playground (1 PD, 1 TiKV, 1 Go TiDB, no TiFlash) for the tidb-rs A/B harness.
+# Start/stop a tiup playground (1 PD, 1 TiKV by default, 1 Go TiDB, no TiFlash) for the tidb-rs A/B harness.
 #
 #   scripts/playground.sh start  [-t tag] [-o port-offset] [-v version] [-c extra-tidb.toml]
 #   scripts/playground.sh status [-t tag] [-o port-offset]
 #   scripts/playground.sh stop   [-t tag]
 #   scripts/playground.sh clean  [-t tag]      # stop + `tiup clean <tag>`
 #
-# Defaults: tag maya-ab, offset 23000, version v8.5.8 (env: PLAYGROUND_TAG, PLAYGROUND_OFFSET,
-# PLAYGROUND_VERSION). Ports are default+offset: TiDB 4000+o, PD 2379+o, TiDB status 10080+o.
+# Defaults: tag maya-ab, offset 23000, version v8.5.8, 1 TiKV (env: PLAYGROUND_TAG,
+# PLAYGROUND_OFFSET, PLAYGROUND_VERSION, PLAYGROUND_KV; the fault scenarios of tools/ab/faults
+# use 3 TiKV). Ports are default+offset: TiDB 4000+o, PD 2379+o, TiDB status 10080+o.
 # Only processes of the given tag are ever touched: other playgrounds on this machine (other
 # tags/offsets) are left alone.
 #
@@ -23,6 +24,7 @@ cmd=${1:-}
 tag=${PLAYGROUND_TAG:-maya-ab}
 offset=${PLAYGROUND_OFFSET:-23000}
 version=${PLAYGROUND_VERSION:-v8.5.8}
+kv=${PLAYGROUND_KV:-1}
 extra_config=${PLAYGROUND_TIDB_CONFIG:-}
 while getopts "t:o:v:c:" opt; do
     case $opt in
@@ -93,7 +95,7 @@ start() {
 auto-tls = true
 EOF
     echo "starting tiup playground $version tag=$tag offset=$offset (log: $log)"
-    nohup tiup playground "$version" --tag "$tag" --db 1 --pd 1 --kv 1 --tiflash 0 \
+    nohup tiup playground "$version" --tag "$tag" --db 1 --pd 1 --kv "$kv" --tiflash 0 \
         --port-offset "$offset" --without-monitor --db.config "$cfg" >"$log" 2>&1 &
     echo $! >"$pidfile"
     local deadline=$((SECONDS + ${PLAYGROUND_TIMEOUT:-180}))
