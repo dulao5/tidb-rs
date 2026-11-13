@@ -176,9 +176,9 @@ client-rust 侧每步一个 PR，按顺序：
 | # | 内容 | 依赖 |
 |---|---|---|
 | RR-1 | ReadIndexNotReady / ProposalInMergingMode / RegionNotInitialized 退避后重试，不失效 region 和 store（§2 那一行 P1） | 无 |
-| RR-2 | 抽出 `ReplicaSelector`，取代 `CandidateState` 和 `region_request_candidates`，只有 Leader 模式。纯重构，现有测试不变 | 无 |
-| RR-3 | `set_target`（写 `replica_read`、`stale_read`）；follower 读成功不更新 leader；短读超时路径：两种 deadline 都给 leader 打标志，下一次以 `replica_read = true` 发给 follower，不退避、不失效 region。完成后 §3 第二行关闭 | RR-2 |
-| RR-4 | Follower / Mixed / PreferLeader、标签匹配、`TransactionOptions` / `Snapshot` / `Transaction` 的 API；NotLeader、RegionNotFound、FlashbackInProgress 回退到 Leader 模式 | RR-3 |
+| RR-2 | 抽出 `ReplicaSelector`，取代 `CandidateState` 和 `region_request_candidates`，只有 Leader 模式。纯重构，现有测试不变。**完成后用 grep 确认没有别的读路径绕过选择器**（凡是自己调 `single_region_with_store` / `set_leader` 再重试的地方都要列出来），清单写进 PR | 无 |
+| RR-3 | `set_target`（写 `replica_read`、`stale_read`）；follower 读成功不更新 leader；短读超时路径：两种 deadline 都给 leader 打标志，下一次以 `replica_read = true` 发给 follower，不退避、不失效 region。**扫描（`RemoteScanner`）一并接入**：它不走 `RetryableMultiRegion`，每个 region 用 `single_region_with_store` 加自己的重试循环（`R/transaction/transaction/scanner.rs:331-420`），选择器在那里不生效，所以要让它每个 region 也持有一个选择器。完成后 §3 第二行关闭 | RR-2 |
+| RR-4 | Follower / Mixed / PreferLeader、标签匹配、`TransactionOptions` / `Snapshot` / `Transaction` 的 API；NotLeader、RegionNotFound、FlashbackInProgress 回退到 Leader 模式。扫描同样支持这些类型 | RR-3 |
 | RR-5 | cop 改用选择器，加 `CopRequest::replica_read` | RR-4 |
 | RR-6 | 接入 store 存活状态 | RR-2，存活状态 PR |
 
@@ -198,6 +198,7 @@ tidb-rs 侧：
 - follower 读成功后 leader 缓存不变；写请求和锁解析的 RPC 在任何类型下都是 `replica_read = false`。
 - follower 返回 KeyIsLocked：锁解析后重试仍是 replica read，并带上锁提示。
 - cop 走同样几例。
+- 扫描（`Snapshot::scan` / `RemoteScanner`）：Follower 类型只发 follower、`replica_read = true`；短读超时后第二次尝试发 follower。
 
 **真实集群**（`tools/ab/faults`，新场景 `slow_leader`）：
 1. 把 `sbtest1` 的 leader 都调度到一个 store。
@@ -216,7 +217,7 @@ tidb-rs 侧：
 - store 的慢分数（NotSlow 位）：等存活状态和健康状态做完再看。
 
 **已定（Maya，2026-11-13）：**
-1. **优先级**：整体 P1。RR-1 到 RR-3（足以支持"短读超时后改发 follower"）排在 C3 检查点（12-25，见 #54）之前；完整的 follower / closest 读（RR-4、RR-5、RR-7）排在 C5 之前。在那之前，`tidb_replica_read` 设为非 `leader` 的值时报错（N11 D10），不再默默读 leader。
+1. **优先级**：整体 P1。RR-1 到 RR-3 无论 D07 怎么定都要做；RR-4 及之后等 D07 定了再做（Lucky 与 Maya 一致）。RR-1 到 RR-3（足以支持"短读超时后改发 follower"）排在 C3 检查点（12-25，见 #54）之前；完整的 follower / closest 读（RR-4、RR-5、RR-7）排在 C5 之前。在那之前，`tidb_replica_read` 设为非 `leader` 的值时报错（N11 D10），不再默默读 leader。
 2. **closest-adaptive**：照 Go 按请求决定。
    - 能估算响应大小时：估算值 ≥ `tidb_adaptive_closest_read_threshold` 走 Mixed 加 zone 标签，否则读 leader。点查 / BatchGet 用 `avgRowSize × 行数`（`newReplicaReadAdjuster`，`pkg/executor/builder.go:5656-5669`，在 `:5591-5592` 设到 snapshot 上；点查见 `pkg/executor/point_get.go:97`）；coprocessor 用 `netDataSize` 按 task 数分摊（`newClosestReadAdjuster`，`builder.go:4892`，在 `pkg/store/copr/coprocessor.go:173-176` 调用）。
    - 无法估算响应大小时（没有 adjuster）：读 leader。
