@@ -186,6 +186,16 @@
 | EXC.B | EXC | 废弃或非默认路径：cascades（旧/新）、代价模型 v1、静态分区 | 5,158 |
 | X | X | DDL、lightning、BR、disttask、TTL、import、mock store、测试工具等 | 141,776 |
 
+### TiKV 客户端（L3，client-rust fork）
+
+TiKV 客户端不按函数移植：client-go（约 1.7 万行 Go）由我们的 client-rust fork 替代，见 [ADR 0008](../docs/adr/0008-client-rust-replaces-client-go.md)。工作量按 [client-go 对等对照表](D07.1-store/client-go-parity.md) §10 的项计，**不计入上面各阶段的"Go 函数体行数"**：
+
+| 阶段 | 项 |
+|---|---|
+| D07.1 / D07.2 接入真实集群之前 | P0-1 退避预算、P0-2 RPC 超时、P0-3 接收消息上限（小）；锁解析 R1–R12 已完成（#101） |
+| P2 之前 | 按时间计的 Backoffer、store 存活状态与后台刷新、region cache 的 TTL / `CurrentRegions` / 批量加载、`max_execution_duration_ms` 与读超时、HTTP/2 keepalive（各为小到中） |
+| 按需 | replica read（中到大）、BatchCommands（大，先测量）、region bucket（中，随 D07.2）、RU 拦截器（大，见 N10） |
+
 ## 5. 开工前的前置条件（P0 剩余工作）
 
 1. **基础设计 spec 确认**：N1（计划树/表达式树表示）、N2（会话状态拆分）、N3（并发与取消）、A1（内存模型）、A4（JSON），以及 **N4**（表达式求值框架：D08.1 和全部内置函数的代码形态取决于它）、**N8**（系统变量注册表：D05.1、D05.2 依赖它）、**N5a**（根节点内存中的列格式：D01.7 依赖它）。"定稿"包括验收指标的 Go 基线已经实测、数字已回填。
