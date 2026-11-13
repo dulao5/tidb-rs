@@ -186,9 +186,11 @@
 
 ### 6.1b 基准结果（2026-11-13，#53 / §6.1 / §6.1a / §9）
 
-**结论**：§6.1 的窗口方案满足 §9 的预算，可以作为 D3 的依据。10 ms 窗口、100% 采样时，sysbench 中 tidb-rs 每条查询的 CPU 与关闭记账相比多 +0.1%～+1.8%，与当前只读 `Instant` 的做法相比差 −0.3%～+1.3%，都在噪声内（同一配置三轮之间相差 1–2.6%）。0% / 1% 采样省下的开销小于噪声。每次 poll 读两次线程 CPU 时钟的做法确实不可行：Linux 上每次 poll 多 1.3 µs。建议窗口取 10 ms：1 ms 窗口的分摊稍准，但在 32 线程时开销 +1.6%～+1.8%，已接近预算。
+**结论**：未发现超过噪声的开销；按每条查询的 poll 次数推算，10 ms 窗口、100% 采样的开销上界为 **0.7%**（§9 预算 1%）。推算方法：上界 = 每条查询的 poll 次数 × 每次 poll 的额外开销 ÷ 每条查询的 CPU，见下文"开销上界"。sysbench 只用作交叉验证：同一配置三轮之间相差 1–2.6%，比 1% 的预算还大，本身不能证明"≤ 1%"。每次 poll 读两次线程 CPU 时钟的做法确实不可行（Linux 上每次 poll 多 1.0–1.3 µs）。
 
-**复现**：微基准 `cargo bench -p tidb-runtime --bench cpu_accounting`（`crates/runtime/benches/cpu_accounting.rs`，直接输出下面的表）。sysbench 用分支 `bench/N9-sysbench-switch`（8711ac3，不合并）：poll 包装器读环境变量 `TIDB_RS_CPU_ACCT=off|instant|win1|win10` 和 `TIDB_RS_CPU_SAMPLE`，语句开始时按采样率挂上或摘掉 `CpuRecorder`；驱动脚本 `scripts/n9-sysbench.sh`。
+窗口取 10 ms 是用精度换开销：1 ms 窗口的分摊更准，但在 32 线程时 sysbench 中多 +1.6%～+1.8%。10 ms 窗口在超额订阅时单轮的分摊比可能偏离约 10%（见"准确度"）。D14.3 实现后应在真实 TiKV 集群上复测：本次 TiKV 与 tidb-rs 在同一台机器上，tidb-rs 不是瓶颈，每条查询的 poll 次数也可能和真实部署不同。
+
+**复现**：微基准 `cargo bench -p tidb-runtime --bench cpu_accounting`（`crates/runtime/benches/cpu_accounting.rs`，直接输出下面的表）。sysbench 用分支 `bench/N9-sysbench-switch`（f85802b，不合并）：poll 包装器读环境变量 `TIDB_RS_CPU_ACCT=off|instant|win1|win10` 和 `TIDB_RS_CPU_SAMPLE`，语句开始时按采样率挂上或摘掉 `CpuRecorder`；驱动脚本 `scripts/n9-sysbench.sh`；`TIDB_RS_COUNT_POLLS=1` 时统计 poll 次数，退出时写进日志。
 
 #### 时钟读取（ns / 次）
 
@@ -216,18 +218,27 @@ Linux 的线程 CPU 时钟是真正的系统调用（与 §6.1 的前提一致�
 
 #### 微基准：分摊的准确度（100% 采样）
 
-一半任务每次 poll 做 1 份计算，一半做 4 份。heavy/light = 分到每个重任务的 CPU 与每个轻任务之比；attributed/process = 分摊给所有任务的 CPU 与进程 CPU 之比。超额订阅 = 另起与核数相同的空转线程。
+一半任务每次 poll 做 1 份计算，一半做 4 份。heavy/light = 分到每个重任务的 CPU 与每个轻任务之比，工作量之比为 4；括号内是 15 轮的最小～最大值。attributed/workers = 分摊给所有任务的 CPU 与运行时 worker 线程自身 CPU 之比（`/proc/self/task/<tid>/schedstat`，只在 Linux 上有），不含超额订阅时的空转线程。超额订阅 = 另起与核数相同的空转线程。`perpoll` 只作参照：每次 poll 内部读两次线程 CPU 时钟（Linux 上约 0.4 µs，而轻任务每次只做 1 µs 计算），这部分开销两类任务都有，所以它的比值约 3.6，**不是**真实比例。
 
-| 负载 | 模式 | Linux heavy/light | Linux attributed/process | macOS heavy/light | macOS attributed/process |
-|---|---|---|---|---|---|
-| 空闲 | win1ms | 3.993 | 0.992 | 3.915 | 0.993 |
-| 空闲 | win10ms | 4.012 | 0.946 | 3.882 | 0.947 |
-| 空闲 | perpoll | 3.646 | 0.907 | 3.677 | 0.853 |
-| 超额订阅 | win1ms | 3.979 | — | 3.897 | — |
-| 超额订阅 | win10ms | 3.616 | — | 3.941 | — |
-| 超额订阅 | perpoll | 3.641 | — | 3.762 | — |
+Linux（每轮 2000 次 poll，约 65 ms）：
 
-`perpoll` 只计 poll 内部的 CPU；窗口方案还把两次 poll 之间运行时自身的 CPU（调度、唤醒）按墙钟分给任务，所以总量更接近进程 CPU，比值也更接近工作量之比 4。attributed/process 低于 1 的部分是基准结束时尚未关闭的窗口（10 ms 窗口更明显）；实现中任务结束时要刷出（§3.6）。
+| 负载 | 模式 | heavy/light | attributed/workers |
+|---|---|---|---|
+| 空闲 | win1ms | 3.978（3.831–4.073） | 0.992 |
+| 空闲 | win10ms | 3.921（3.693–4.053） | 0.952 |
+| 空闲 | perpoll（参照） | 3.660（3.596–3.692） | 0.905 |
+| 超额订阅 | win1ms | 4.085（3.829–4.343） | 0.992 |
+| 超额订阅 | win10ms | 3.828（3.591–4.584） | 0.952 |
+| 超额订阅 | perpoll（参照） | 3.632（3.415–3.767） | 0.908 |
+
+macOS（Maya 在 Mac mini 上运行，5 轮中位数，没有 worker 线程 CPU）：空闲 win1ms 3.915、win10ms 3.882、perpoll 3.677；超额订阅 win1ms 3.897、win10ms 3.941、perpoll 3.762。
+
+解读：
+
+- **超额订阅时 10 ms 窗口的误差**：中位数接近 4，但单轮的比值在 3.59～4.58 之间，即偏离约 10%（第一次运行的中位数是 3.616）。被抢占时，poll 的墙钟包含了线程不在 CPU 上的时间，窗口越长，按墙钟分摊时这部分误差摊得越多；1 ms 窗口的范围（3.83～4.34）也不窄，但中位数更稳。选 10 ms 是用这部分精度换开销。
+- **没记到任何任务上的 CPU**：10 ms 窗口约 5%，1 ms 窗口约 0.8%，perpoll 约 9.5%。原因已验证：
+  - 窗口方案：每轮结束时每个 worker 还有一个没关闭的窗口（平均约半个窗口的 CPU）。把每轮加长到 4 倍（8000 次 poll）后，10 ms 窗口的缺口从 4.8% 降到 1.3%，1 ms 从 0.8% 降到 0.2%，与"缺口 ≈ 半个窗口 ÷ 每轮时长"一致。真实实现中，语句的任务在封存记录前会刷新并关闭它的 CPU 窗口（§3.6），所以这部分缺口只出现在基准里，不会出现在 tidb-rs 中。
+  - perpoll：只计 poll 内部的 CPU，poll 之外运行时自身的调度和唤醒没有记到任务上；加长轮次后不变（0.906 / 0.903）。窗口方案把这部分也按墙钟分给了任务，所以总量更接近 worker 的 CPU。
 
 #### sysbench（Linux arm64，tiup playground v8.5.8，同机 1 PD + 1 TiKV + tidb-rs）
 
@@ -242,12 +253,34 @@ Linux 的线程 CPU 时钟是真正的系统调用（与 §6.1 的前提一致�
 
 噪声：同一配置三轮之间相差 1–2.6%（例如 read_only 32 线程的 `off` 为 85.16～87.40）。所有差值都在这个范围内；只有 1 ms 窗口在 32 线程两种负载下都在 +1.5% 以上，倾向于真实但很小。
 
+#### 开销上界（按每条查询的 poll 次数推算）
+
+在 sysbench 分支上统计每条语句的 poll 次数（`TIDB_RS_COUNT_POLLS=1`，10 ms 窗口，20 s；几乎全部是语句任务的 poll）：
+
+| 负载 | 线程 | 查询数 | poll 数 | poll / 查询 |
+|---|---|---|---|---|
+| oltp_point_select | 8 | 516,588 | 1,031,557 | 2.00 |
+| oltp_point_select | 32 | 1,137,832 | 2,255,098 | 1.98 |
+| oltp_read_only | 8 | 360,864 | 958,774 | 2.66 |
+| oltp_read_only | 32 | 643,846 | 1,697,419 | 2.64 |
+
+每次 poll 的额外开销取微基准中每核一个 worker、10 ms 窗口、100% 采样的值，并取两个平台中较大的：Linux +114 ns、macOS +161 ns（都相对 `off`，所以已含 `instant` 本身）；按 165 ns 计。上界 = poll/查询 × 165 ns ÷ CPU/查询（sysbench 的 `off` 列）：
+
+| 负载 | 线程 | CPU / 查询 | 上界 |
+|---|---|---|---|
+| oltp_point_select | 8 | 75.4 µs | 0.44% |
+| oltp_point_select | 32 | 49.4 µs | **0.66%** |
+| oltp_read_only | 8 | 115.7 µs | 0.38% |
+| oltp_read_only | 32 | 85.7 µs | 0.51% |
+
+上界与每条查询的 CPU 成反比：tidb-rs 以后每条查询的 CPU 降到一半，上界就翻倍（点查约 1.3%）。届时要么复测，要么按 Lucky 在 #121 评审中的建议优化快路径：每次 poll 不碰引用计数和共享原子量，按任务在本地累计墙钟，窗口关闭时再分摊。微基准中单 worker 只多 +6 ns、每核一个 worker 多 +114 ns，差距说明多核时的开销主要来自任务在线程间迁移导致 `Arc<AtomicU64>` 缓存行来回传递，而不是设计本身。
+
 #### 对 §9 和 §6.1a 的含义
 
-- §9 默认路径（Top SQL 关）：`instant` 相对 `off` +0.5% 以内，满足 ≤ 1%。
-- §9 Top SQL 开（10 ms 窗口，100%）：相对 `instant` 在噪声内（−0.3%～+1.3%），满足"再增加 ≤ 1%"的目标，但 32 线程 read_only 的 +1.3% 接近上限，D14.3 实现后应在真实 TiKV 集群上复测，并以 Go 开 Top SQL 的开销作参照。
-- §6.1a 采样：既然 100% 的开销已在预算内，0% / 1% 省不下可测的 CPU。这支持 Lucky 在 #118 提出的选项：Top SQL 开启时慢日志的 `Tidb_cpu_time` 总是计算，采样率只用于 Top SQL 聚合（需负责人决定）。
-- 未测：`perf_event_open` 备选（§6.1 第 4 条）。在窗口方案已满足预算的情况下不需要。
+- §9 默认路径（Top SQL 关）：`instant` 相对 `off` 在微基准中每次 poll 多 0～48 ns，按上面的方法推算上界约 0.2%；sysbench 中未发现超过噪声的差别。
+- §9 Top SQL 开（10 ms 窗口，100%）：未发现超过噪声的开销，按 poll 次数推算的上界为 0.7%，在"再增加 ≤ 1%"之内；D14.3 实现后在真实 TiKV 集群上复测，并以 Go 开 Top SQL 的开销作参照。
+- §6.1a 采样：100% 的上界已在预算内，0% / 1% 能省下的最多也就是这 0.7%，测不出来。这支持 Lucky 在 #118 提出的选项：Top SQL 开启时慢日志的 `Tidb_cpu_time` 总是计算，采样率只用于 Top SQL 聚合（#122，需负责人决定）。
+- 未测：`perf_event_open` 备选（§6.1 第 4 条）。窗口方案已在预算内，不需要。
 
 ### 6.2 语句级 CPU 字段（`Tidb_cpu_time` 等）
 
