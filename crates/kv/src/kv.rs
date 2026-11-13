@@ -138,8 +138,16 @@ pub trait Retriever: Getter {
     /// If such entry is not found, it returns an invalid Iterator with no error.
     /// It yields only keys that < upperBound. If upperBound is nil, it means the upperBound
     /// is unbounded. The Iterator must be Closed after use.
-    fn iter<'a>(&'a self, k: &'a Key, upper_bound: &'a Key)
-    -> KvFuture<'a, Box<dyn Iterator + 'a>>;
+    ///
+    /// The returned iterator borrows only the retriever (`'a`), not the key arguments: they
+    /// are borrowed by the future (`'f`) alone, and an implementation that keeps a bound
+    /// in its iterator clones it. A caller can therefore build the start key locally and
+    /// keep the iterator after that key is gone, as Go code does.
+    fn iter<'a: 'f, 'f>(
+        &'a self,
+        k: &'f Key,
+        upper_bound: &'f Key,
+    ) -> KvFuture<'f, Box<dyn Iterator + 'a>>;
 
     // glue: Go interface method Retriever.IterReverse
     /// IterReverse creates a reversed Iterator positioned on the first entry which key is
@@ -147,11 +155,13 @@ pub trait Retriever: Getter {
     /// If k is nil, the returned iterator will be positioned at the last key.
     /// It yields only keys that >= lowerBound. If lowerBound is nil, it means the
     /// lowerBound is unbounded.
-    fn iter_reverse<'a>(
+    ///
+    /// As with [`Retriever::iter`], the iterator does not borrow the key arguments.
+    fn iter_reverse<'a: 'f, 'f>(
         &'a self,
-        k: &'a Key,
-        lower_bound: &'a Key,
-    ) -> KvFuture<'a, Box<dyn Iterator + 'a>>;
+        k: &'f Key,
+        lower_bound: &'f Key,
+    ) -> KvFuture<'f, Box<dyn Iterator + 'a>>;
 }
 
 /// EmptyIterator is an iterator without any entry
@@ -210,22 +220,22 @@ impl Getter for EmptyRetriever {
 impl Retriever for EmptyRetriever {
     /// Iter creates an Iterator. Always return EmptyIterator for this retriever
     // go: EmptyRetriever.Iter L1
-    fn iter<'a>(
+    fn iter<'a: 'f, 'f>(
         &'a self,
-        _k: &'a Key,
-        _upper_bound: &'a Key,
-    ) -> KvFuture<'a, Box<dyn Iterator + 'a>> {
+        _k: &'f Key,
+        _upper_bound: &'f Key,
+    ) -> KvFuture<'f, Box<dyn Iterator + 'a>> {
         Box::pin(async { Ok(Box::new(EmptyIterator) as Box<dyn Iterator>) })
     }
 
     /// IterReverse creates an reversed Iterator. Always return EmptyIterator for this
     /// retriever
     // go: EmptyRetriever.IterReverse L1
-    fn iter_reverse<'a>(
+    fn iter_reverse<'a: 'f, 'f>(
         &'a self,
-        _k: &'a Key,
-        _lower_bound: &'a Key,
-    ) -> KvFuture<'a, Box<dyn Iterator + 'a>> {
+        _k: &'f Key,
+        _lower_bound: &'f Key,
+    ) -> KvFuture<'f, Box<dyn Iterator + 'a>> {
         Box::pin(async { Ok(Box::new(EmptyIterator) as Box<dyn Iterator>) })
     }
 }

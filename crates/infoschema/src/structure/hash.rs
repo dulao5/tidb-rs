@@ -7,6 +7,7 @@
 use tidb_base::Error;
 use tidb_base::gostd::strconv;
 use tidb_kv::key::Key;
+use tidb_kv::kv::Iterator as KvIterator;
 
 use super::TxStructure;
 
@@ -195,53 +196,24 @@ impl TxStructure {
 }
 
 /// ReverseHashIterator is the reverse hash iterator.
-///
-/// Deviation (spec §4, L2): tidb-kv's `Retriever::iter_reverse` borrows its key arguments
-/// for the iterator's lifetime, so an iterator cannot outlive the function that builds its
-/// start key. The Rust iterator keeps the current entry and seeks again (`IterReverse(key,
-/// nil)` on the same snapshot) for each `Next`: the same entries in the same order, one
-/// seek per step instead of Go's batched scan.
 pub struct ReverseHashIterator<'a> {
     t: &'a TxStructure,
-    /// The current entry (raw key, value) of the underlying reverse iterator.
-    cur: Option<(Vec<u8>, Vec<u8>)>,
+    iter: Box<dyn KvIterator + 'a>,
     prefix: Vec<u8>,
     done: bool,
     field: Vec<u8>,
 }
 
 impl ReverseHashIterator<'_> {
-    /// The last entry whose key is < k (`IterReverse(k, nil)`, first entry).
-    // glue: one step of kv.Iterator over IterReverse
-    async fn seek_before(&self, k: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error> {
-        let start = Key(k);
-        let lower = Key(Vec::new());
-        let it = self.t.reader.iter_reverse(&start, &lower).await?;
-        Ok(if it.valid() {
-            Some((it.key().0.clone(), it.value().to_vec()))
-        } else {
-            None
-        })
-    }
-
     /// Next implements the Iterator Next.
-    // go: ReverseHashIterator.Next L2 (re-seeks, see the type)
+    // go: ReverseHashIterator.Next L1
     pub async fn next(&mut self) -> Result<(), Error> {
-        let Some((k, _)) = self.cur.take() else {
-            return Ok(());
-        };
-        self.cur = self.seek_before(k).await?;
-        // Go reads Key() without checking Valid(): an exhausted iterator's key is nil,
-        // which has no (non-empty) prefix.
-        let Some((k, _)) = &self.cur else {
-            self.done = true;
-            return Ok(());
-        };
-        if !k.starts_with(&self.prefix) {
+        self.iter.next().await?;
+        if !self.iter.key().starts_with(&self.prefix) {
             self.done = true;
             return Ok(());
         }
-        let (_, field) = self.t.decode_hash_data_key(k)?;
+        let (_, field) = self.t.decode_hash_data_key(self.iter.key())?;
         self.field = field;
         Ok(())
     }
@@ -249,7 +221,7 @@ impl ReverseHashIterator<'_> {
     /// Valid implements the Iterator Valid.
     // go: ReverseHashIterator.Valid L1
     pub fn valid(&self) -> bool {
-        self.cur.is_some() && !self.done
+        self.iter.valid() && !self.done
     }
 
     /// Key implements the Iterator Key. Go's first Key (before any Next) is the zero
@@ -262,7 +234,7 @@ impl ReverseHashIterator<'_> {
     /// Value implements the Iterator Value.
     // go: ReverseHashIterator.Value L1
     pub fn value(&self) -> &[u8] {
-        self.cur.as_ref().map_or(&[], |(_, v)| v.as_slice())
+        self.iter.value()
     }
 
     /// Close Implements the Iterator Close.
@@ -301,13 +273,15 @@ async fn new_hash_reverse_iter_impl<'a>(
     } else {
         prefix_next(&t.encode_hash_data_key_inner(key, field))
     };
-    let mut it = ReverseHashIterator {
+    let it = t
+        .reader
+        .iter_reverse(&Key(iter_start), &Key(Vec::new()))
+        .await?;
+    Ok(ReverseHashIterator {
         t,
-        cur: None,
+        iter: it,
         prefix: data_prefix,
         done: false,
         field: Vec::new(),
-    };
-    it.cur = it.seek_before(iter_start).await?;
-    Ok(it)
+    })
 }

@@ -102,7 +102,11 @@ impl KvIterator for It<'_> {
 }
 
 impl Retriever for Pairs {
-    fn iter<'a>(&'a self, k: &'a Key, upper: &'a Key) -> KvFuture<'a, Box<dyn KvIterator + 'a>> {
+    fn iter<'a: 'f, 'f>(
+        &'a self,
+        k: &'f Key,
+        upper: &'f Key,
+    ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
         let mut it = It {
             p: self,
             i: self.lower_bound(k) as isize,
@@ -113,11 +117,11 @@ impl Retriever for Pairs {
         it.load();
         Box::pin(async move { Ok(Box::new(it) as Box<dyn KvIterator + 'a>) })
     }
-    fn iter_reverse<'a>(
+    fn iter_reverse<'a: 'f, 'f>(
         &'a self,
-        k: &'a Key,
-        lower: &'a Key,
-    ) -> KvFuture<'a, Box<dyn KvIterator + 'a>> {
+        k: &'f Key,
+        lower: &'f Key,
+    ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
         let i = if k.0.is_empty() {
             self.0.len() as isize - 1
         } else {

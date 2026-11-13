@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::executor::block_on;
 use serde_json::{Map, Value, json};
@@ -26,8 +27,8 @@ use tidb_kv::Context;
 use tidb_kv::error::ErrNotExist;
 use tidb_kv::key::Key;
 use tidb_kv::kv::{
-    BatchGetOption, BatchGetter, GetOption, Getter, Iterator as KvIterator, KvFuture, OptionValue,
-    Retriever, Snapshot, ValueEntry, new_value_entry,
+    BatchGetOption, BatchGetter, EmptyRetriever, GetOption, Getter, Iterator as KvIterator,
+    KvFuture, OptionValue, Retriever, Snapshot, ValueEntry, new_value_entry,
 };
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
@@ -53,6 +54,8 @@ fn vectors() -> String {
 struct MemSnap {
     keys: Vec<Vec<u8>>,
     vals: Vec<Vec<u8>>,
+    /// The number of `Iter` / `IterReverse` calls (seeks).
+    seeks: AtomicUsize,
 }
 
 impl MemSnap {
@@ -60,6 +63,7 @@ impl MemSnap {
         let mut s = MemSnap {
             keys: vec![],
             vals: vec![],
+            seeks: AtomicUsize::new(0),
         };
         for p in pairs.as_array().into_iter().flatten() {
             s.keys.push(hx(&p[0]));
@@ -144,7 +148,12 @@ impl KvIterator for MemIter<'_> {
 }
 
 impl Retriever for MemSnap {
-    fn iter<'a>(&'a self, k: &'a Key, upper: &'a Key) -> KvFuture<'a, Box<dyn KvIterator + 'a>> {
+    fn iter<'a: 'f, 'f>(
+        &'a self,
+        k: &'f Key,
+        upper: &'f Key,
+    ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
+        self.seeks.fetch_add(1, Ordering::Relaxed);
         let mut it = MemIter {
             s: self,
             i: self.lower_bound(k) as isize,
@@ -155,11 +164,12 @@ impl Retriever for MemSnap {
         it.load();
         Box::pin(async move { Ok(Box::new(it) as Box<dyn KvIterator + 'a>) })
     }
-    fn iter_reverse<'a>(
+    fn iter_reverse<'a: 'f, 'f>(
         &'a self,
-        k: &'a Key,
-        lower: &'a Key,
-    ) -> KvFuture<'a, Box<dyn KvIterator + 'a>> {
+        k: &'f Key,
+        lower: &'f Key,
+    ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
+        self.seeks.fetch_add(1, Ordering::Relaxed);
         let i = if k.0.is_empty() {
             self.keys.len() as isize - 1
         } else {
@@ -900,4 +910,65 @@ fn govec_meta() {
             replay(f);
         }
     }
+}
+
+/// D07.0 T11 (D06.2 spec §4 item 1): `ReverseHashIterator` seeks once and then walks the
+/// underlying reverse iterator, as Go does, instead of one `IterReverse` per `Next`. The
+/// start key is built inside `newHashReverseIter`, so this also shows that the iterator
+/// outlives its key arguments.
+#[test]
+fn reverse_hash_iterator_seeks_once() {
+    let enc = structure::new_structure(Arc::new(EmptyRetriever), b"m");
+    let mut pairs = vec![];
+    // Neighbouring hashes on both sides, so the walk has to stop at the prefix.
+    for (key, field) in [
+        (&b"a"[..], &b"z"[..]),
+        (b"h", b"f1"),
+        (b"h", b"f2"),
+        (b"h", b"f3"),
+        (b"h", b"f4"),
+        (b"i", b"f0"),
+    ] {
+        let v = [key, b"=", field].concat();
+        pairs.push((enc.encode_hash_data_key(key, field), v));
+    }
+    pairs.sort();
+    let snap = Arc::new(MemSnap {
+        keys: pairs.iter().map(|p| p.0.clone()).collect(),
+        vals: pairs.iter().map(|p| p.1.clone()).collect(),
+        seeks: AtomicUsize::new(0),
+    });
+    let t = structure::new_structure(snap.clone(), b"m");
+
+    let walk = |field: Option<&[u8]>| {
+        block_on(async {
+            let mut it = match field {
+                None => new_hash_reverse_iter(&t, b"h").await.unwrap(),
+                Some(f) => new_hash_reverse_iter_begin_with_field(&t, b"h", f)
+                    .await
+                    .unwrap(),
+            };
+            let mut out = vec![];
+            while it.valid() {
+                out.push((it.key().to_vec(), it.value().to_vec()));
+                it.next().await.unwrap();
+            }
+            out
+        })
+    };
+
+    let before = snap.seeks.load(Ordering::Relaxed);
+    let all = walk(None);
+    assert_eq!(snap.seeks.load(Ordering::Relaxed) - before, 1);
+    // Go's first Key() (before any Next) is the zero field.
+    let fields: Vec<&[u8]> = all.iter().map(|(k, _)| k.as_slice()).collect();
+    assert_eq!(fields, [&b""[..], b"f3", b"f2", b"f1"]);
+    let values: Vec<&[u8]> = all.iter().map(|(_, v)| v.as_slice()).collect();
+    assert_eq!(values, [&b"h=f4"[..], b"h=f3", b"h=f2", b"h=f1"]);
+
+    let before = snap.seeks.load(Ordering::Relaxed);
+    let from_f2 = walk(Some(b"f2"));
+    assert_eq!(snap.seeks.load(Ordering::Relaxed) - before, 1);
+    let values: Vec<&[u8]> = from_f2.iter().map(|(_, v)| v.as_slice()).collect();
+    assert_eq!(values, [&b"h=f2"[..], b"h=f1"]);
 }
