@@ -112,6 +112,7 @@ impl SchemaSync {
     /// first reload succeeds; statements use synced mode only after that (see
     /// [`Registry::admit`]).
     pub async fn start(kv: KvClient, cfg: SyncConfig) -> Result<SchemaSync> {
+        cfg.limits.check().map_err(Error::Other)?;
         let etcd = EtcdClient::connect(
             &cfg.pd_endpoints,
             Some(
@@ -343,25 +344,30 @@ impl Inner {
 
     /// Reload the schema at a fresh TSO if its version changed (full reload; Go applies schema
     /// diffs incrementally). The version is the one whose diff exists, as in ADR 0003.
+    ///
+    /// Every successful reload renews the schema lease at its TSO, whether or not the version
+    /// changed (Go: `Domain.Reload` calls `SchemaValidator.Update` "despite it is cache or
+    /// not").
     async fn reload(&self) -> Result<()> {
+        let requested_at = Instant::now();
         let ts = self.kv.current_ts().await?;
         let mut snapshot = self.kv.snapshot(ts);
         let version = MetaReader::new(&mut snapshot)
             .schema_version_with_non_empty_diff()
             .await?;
-        if self
-            .registry
-            .loaded_version()
-            .is_some_and(|loaded| loaded >= version)
-        {
-            return Ok(());
+        let loaded = self.registry.loaded_version();
+        let old_version = loaded.unwrap_or(0);
+        let full_load = loaded.is_none_or(|loaded| loaded < version);
+        if full_load {
+            let started = Instant::now();
+            let schema = InfoSchema::load(&mut snapshot).await?;
+            let version = schema.version();
+            self.registry.install(Arc::new(schema), Instant::now());
+            self.registry.count(|s| s.reloads += 1);
+            info!(version, elapsed = ?started.elapsed(), "schema loaded");
         }
-        let started = Instant::now();
-        let schema = InfoSchema::load(&mut snapshot).await?;
-        let version = schema.version();
-        self.registry.install(Arc::new(schema), Instant::now());
-        self.registry.count(|s| s.reloads += 1);
-        info!(version, elapsed = ?started.elapsed(), "schema loaded");
+        self.registry
+            .reloaded(ts, requested_at, old_version, full_load);
         Ok(())
     }
 
@@ -603,7 +609,9 @@ impl Inner {
     }
 
     /// Deregister the node when it is not keeping up (Go has no such bound: a stuck Go TiDB
-    /// blocks DDL until its lease expires).
+    /// blocks DDL until its lease expires). The bound (`max_staleness`) is at least the schema
+    /// lease, and admission already stops when the bound is reached, so the node never
+    /// deregisters while it still admits statements.
     async fn watchdog(self: Arc<Self>) {
         let mut stop = self.stop.subscribe();
         loop {
@@ -611,7 +619,12 @@ impl Inner {
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                 _ = stop.changed() => return,
             }
-            if self.registry.should_deregister(Instant::now()) {
+            let now = Instant::now();
+            if self.registry.should_deregister(now) {
+                debug_assert!(
+                    !self.registry.admissible(now),
+                    "deregistering while statements are admitted"
+                );
                 self.deregister("not keeping up with the cluster").await;
             }
         }

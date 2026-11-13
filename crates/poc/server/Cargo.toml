@@ -18,6 +18,8 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "http2", "server-auto", "tokio"] }
 serde_json = { workspace = true }
+# gostd::time::parse_duration for --lease (Go's duration flag syntax).
+tidb-base = { workspace = true }
 tidb-distsql = { workspace = true }
 poc-domain = { workspace = true }
 poc-kv = { workspace = true }

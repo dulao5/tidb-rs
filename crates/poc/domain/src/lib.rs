@@ -5,9 +5,11 @@
 //! background, and follows the metadata-lock (MDL) protocol, so the DDL owner waits for it
 //! the way it waits for a Go TiDB. Statements then use the in-memory schema without reading
 //! the schema version, and autocommit point gets read at MaxTS without a TSO ("synced mode").
-//! When the node cannot prove it is in sync it stops admitting statements to synced mode,
-//! removes its registration so DDL is never blocked by it, and statements fall back to the
-//! snapshot-consistent path of ADR 0003. See `docs/adr/0005-schema-sync.md`.
+//! Like Go, the cached schema stays usable for one schema lease after the last successful
+//! reload ([`SchemaCheckError`], Go's `SchemaValidator`), so a slow reload does not stop the
+//! node. When the node cannot prove it is in sync it stops admitting statements to synced
+//! mode, then removes its registration so DDL is never blocked by it, and statements fall back
+//! to the snapshot-consistent path of ADR 0003. See `docs/adr/0005-schema-sync.md`.
 //!
 //! - [`ServerInfo`]: the `/tidb/server/info/<ddl_id>` record.
 //! - [`Registry`]: the loaded schema, the health state machine and the in-flight statements.
@@ -17,16 +19,21 @@
 
 pub mod keys;
 mod registry;
+mod schema_validator;
 pub mod serverinfo;
 mod sync;
 pub mod systable_io;
 
 pub use crate::registry::Admission;
+pub use crate::registry::DEF_SCHEMA_LEASE;
 pub use crate::registry::Limits;
 pub use crate::registry::MdlJob;
 pub use crate::registry::Registry;
+pub use crate::registry::ResultCheck;
 pub use crate::registry::StmtGuard;
 pub use crate::registry::SyncStats;
+pub use crate::schema_validator::SchemaCheckError;
+pub use crate::schema_validator::SchemaCheckRetry;
 pub use crate::serverinfo::ServerInfo;
 pub use crate::sync::SchemaSync;
 pub use crate::sync::SyncConfig;

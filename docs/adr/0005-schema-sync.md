@@ -108,11 +108,13 @@ version ahead of an in-flight statement.
   `IsPointGetWithPKOrUniqueKeyByAutoCommit`: a handle `PointGet` with nothing on top, not on
   a cached table. Every tidb-rs statement is autocommit, and there are no unique-index point
   gets or batch point gets yet.
-- **Other reads** take a TSO (requested after planning) and do no schema-version check.
+- **Other reads** take a TSO (requested after planning) and read no schema version.
 - **Fencing.** When the read completes, the result is accepted only if the node is still in
-  the registration epoch it was admitted in *and* the lease is proven alive for at least
+  the registration epoch it was admitted in *and* the etcd lease is proven alive for at least
   3 more seconds (`StmtGuard::results_valid`). Otherwise the result is discarded and the
-  statement runs again on the ADR 0003 path.
+  statement runs again on the ADR 0003 path. Then the schema lease is checked at the read TS
+  (`StmtGuard::check_results`, see "Schema lease"); if it has expired there and no reload
+  renews it, the statement fails with error 8027 as in Go.
 - **Name resolution.** `USE` and `COM_STMT_PREPARE` resolve names against the synced schema
   when it is admissible, and against the schema at a fresh TSO otherwise.
 
@@ -136,25 +138,68 @@ version ahead of an in-flight statement.
 
 ### Joining, leaving, and self-protection
 
-The node is **healthy**, and may admit statements, only while all of these hold:
+The node may admit statements only while all of these hold:
 
-- it is registered and its lease is proven alive (keepalive send time + granted TTL) beyond
-  a 3 s margin;
+- it is registered and its etcd lease is proven alive (keepalive send time + granted TTL)
+  beyond a 3 s margin;
 - a full cycle (reload check + MDL refresh + reports, all without error) that *started after
-  the current registration* completed within `--schema-sync-max-staleness` (default 5 s);
-- it has not been behind the newest `global_schema_version` it saw for longer than that
-  bound.
+  the current registration* has completed;
+- the **schema lease** has not expired: the last successful reload is at most `--lease`
+  (default 45 s, Go's `DefSchemaLease`) old (see "Schema lease" below);
+- the node is not about to deregister (the condition below does not hold).
 
-When the node becomes unhealthy, statements stop being admitted at once, because
-admissibility is evaluated at every statement. A watchdog (every 100 ms) then checks the
-deregistration condition: the lease is not proven alive, or the loop has made no progress
-for the bound, or the node has lagged for the bound. If the condition holds, the watchdog:
+Admissibility is evaluated at every statement. A watchdog (every 100 ms) checks the
+deregistration condition: the etcd lease is not proven alive, or no full cycle has completed
+for `--schema-sync-max-staleness` (default: the schema lease), or the node has lagged the
+newest `global_schema_version` it saw for that long. If the condition holds, the watchdog:
 
 1. starts a new **epoch** under the registry lock, and
 2. revokes the lease, so both keys disappear; if the revoke fails, it deletes the keys.
 
 The node registers again only from the sync loop and only after a successful reload, and it
-admits statements again only after a full cycle that started after the new registration.
+admits statements again only after a full cycle that started after the new registration and
+a reload at a TSO taken after it.
+
+### Schema lease (#136)
+
+Go TiDB keeps running statements on its cached schema while a reload is slow or failing,
+for one schema lease (`pkg/domain/schema_validator.go`, ported in
+`crates/poc/domain/src/schema_validator.rs`):
+
+- Every successful reload renews the lease at the TSO it read the schema version at, whether
+  or not the version changed (`Domain.Reload` → `SchemaValidator.Update`).
+- A synced statement's reads are accepted only if its read TS is at most one lease after that
+  TSO (`SchemaValidator.Check`, measured in TSO, not on the local clock). Otherwise it waits
+  for a reload as Go's `SchemaChecker.CheckBySchemaVer` does (10 × 500 ms) and then fails with
+  `ErrInfoSchemaExpired` (8027). A point get at MaxTS has no TS; it and admission use the same
+  bound on the monotonic clock, counted from when the reload *requested* its TSO, which never
+  expires later than the TSO bound.
+- Deregistration stops the validator (Go: `Stop` when the etcd session is gone); registering
+  restarts it and requires a new reload (Go: `Restart` after `mustReload`).
+- With MDL (always on here) a statement on a version older than the latest one passes, as in
+  Go; the delta queue is not needed.
+
+Before #136 any reload failure stopped admission after 5 s and deregistered the node; every
+statement then read the schema version from the meta region. When the meta region's leader
+was on a killed TiKV, all statements on the node waited for the region's election (~12 s).
+Now an outage shorter than the lease does not stop synced mode, and statements do not read
+the schema version.
+
+**Invariant: admission window ⊆ registration window.** The DDL owner waits only for
+registered servers. A node that served statements on its cached schema after deregistering
+could see the cluster move two schema versions ahead (for example an index in the middle of
+a reorg), which is a correctness bug, not just an availability one. So:
+
+1. Admission requires that the deregistration condition does *not* hold, and deregistration
+   stops admission (new epoch, validator stopped) under the registry lock *before* the lease
+   is revoked. The watchdog `debug_assert`s that nothing is admissible when it deregisters;
+   `registry::tests::admission_stops_before_deregistration` checks it on a 1 ms grid.
+2. `--schema-sync-max-staleness` must not be shorter than `--lease` (`Limits::check`; the
+   server refuses to start otherwise). A reload failure therefore runs out the schema lease
+   no later than it triggers deregistration, and the node never deregisters while the lease
+   would still admit statements.
+
+The N11 spec (cluster membership / schema sync / MDL) should carry this invariant over.
 
 **In-flight statements during deregistration.** Once the epoch has changed, statements
 admitted earlier no longer hold back MDL reports (the node is leaving the wait set anyway),
@@ -205,8 +250,8 @@ depends on the sync loop being healthy.
 |---|---|---|
 | graceful stop (SIGTERM/SIGINT) | node unlisted ~20 ms after the signal; next ADD COLUMN 90 ms (124 ms from the signal) | connections closed after the keys are gone |
 | `kill -9` / host loss | every DDL step waits until the lease expires: ADD COLUMN took **91.4 s** | — |
-| sync loop stuck (test hook) | node deregisters at the bound (5.04 s default; 2.0 s with `--schema-sync-max-staleness 2`); a DDL started at the stall finished 5.15 s later | served via ADR 0003, correct (new column visible); re-registers ~1 s after recovery |
-| reload failing / lagging `global_schema_version` | same bound as above | same |
+| sync loop stuck (test hook) | node deregisters at the bound (the schema lease, 45 s by default; measured 5.02 s with a 5 s lease and 2.08 s with `--lease 2s --schema-sync-max-staleness 2`); a DDL started at the stall finished 5.19 s later with the 5 s lease | synced on the cached schema until the lease runs out, then ADR 0003, correct (new column visible); re-registers ~1 s after recovery |
+| reload failing (e.g. the meta region electing a leader, #136) / lagging `global_schema_version` | same bound as above | same: an outage shorter than the lease is invisible to statements |
 | etcd unreachable | keepalive fails, so the node is unhealthy once the lease is no longer proven alive beyond the margin; the owner drops the node at lease expiry | ADR 0003 path (needs only TiKV/PD TSO) |
 | whole process frozen (no watchdog) | like `kill -9`: until lease expiry (≤ 90 s) | — |
 
@@ -234,7 +279,9 @@ max 473 ms).
 
 - While the node is registered, every DDL step also waits for its reload and MDL report.
   An idle ADD/DROP COLUMN pair went from p50 118 ms to 157 ms per DDL (30 DDLs each, the
-  node registered vs. not). A crashed node blocks DDL for up to 90 s.
+  node registered vs. not). A crashed node blocks DDL for up to 90 s, and a node whose sync
+  loop is stuck blocks it for up to `--schema-sync-max-staleness` (the schema lease, 45 s, by
+  default; it was 5 s before #136).
 - The node is listed in `information_schema.tidb_servers_info` and `cluster_info`.
   `inspection_result` flags the git hash as inconsistent, and `/info/all` and `/upgrade/show`
   report a version mismatch.

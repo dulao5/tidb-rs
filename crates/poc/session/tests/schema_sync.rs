@@ -197,9 +197,11 @@ async fn setup(listening_port: u32) -> Option<Env> {
         ..DagContext::select_utc()
     };
     let info = ServerInfo::new("127.0.0.1".to_owned(), listening_port, 0);
-    let sync = SchemaSync::start(kv.clone(), SyncConfig::new(vec![pd], info, dag.clone()))
-        .await
-        .unwrap();
+    let mut cfg = SyncConfig::new(vec![pd], info, dag.clone());
+    // A short schema lease keeps the stuck-loop test short (the default is Go's 45 s).
+    cfg.limits.schema_lease = Duration::from_secs(5);
+    cfg.limits.max_staleness = Duration::from_secs(5);
+    let sync = SchemaSync::start(kv.clone(), cfg).await.unwrap();
     assert!(
         sync.wait_admissible(Duration::from_secs(15)).await,
         "synced mode not reached"
@@ -312,9 +314,10 @@ async fn in_flight_statement_holds_back_ddl_on_its_table_only() {
     env.stop().await;
 }
 
-/// (d) A stuck sync loop: the node deregisters within the staleness bound, so DDL proceeds;
-/// it keeps answering correctly on the fallback (ADR 0003) path; once the loop resumes it
-/// registers again and returns to synced mode.
+/// (d) A stuck sync loop: within the schema lease the node keeps admitting statements on the
+/// cached schema (#136); it deregisters within the staleness bound, so DDL proceeds; it keeps
+/// answering correctly on the fallback (ADR 0003) path; once the loop resumes it registers
+/// again and returns to synced mode.
 #[tokio::test(flavor = "multi_thread")]
 async fn stuck_sync_loop_deregisters_and_falls_back() {
     let _serial = SERIAL.lock().await;
@@ -328,6 +331,15 @@ async fn stuck_sync_loop_deregisters_and_falls_back() {
 
     let stalled = Instant::now();
     env.sync.set_stalled(true);
+    // Reloads have stopped, but the lease has not run out: still synced, still registered.
+    let admitted = registry.stats().admitted;
+    env.same(&mut s, "SELECT * FROM a WHERE id = 2").await;
+    assert_eq!(
+        registry.stats().admitted,
+        admitted + 1,
+        "admitted within the lease"
+    );
+    assert!(registry.is_registered());
     // A DDL started now completes once the node has deregistered.
     let ddl = format!("ALTER TABLE {DB}.a ADD COLUMN c INT NOT NULL DEFAULT 5");
     let mut child = go_spawn(&env.port, &ddl);

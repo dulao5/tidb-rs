@@ -8,7 +8,7 @@ results stay correct (compared with a snapshot taken before any fault), the erro
 longest stall and the p99 latency. See README.md.
 
     tools/ab/faults/faults.py --a 127.0.0.1:28000 --b 127.0.0.1:28001 --pd 127.0.0.1:26379 \
-        [--scenarios split_merge,transfer_leader,kill_tikv,slow_tikv,net_cut] \
+        [--scenarios split_merge,transfer_leader,kill_tikv,kill_tikv_meta,slow_tikv,net_cut] \
         [--json out.json] [--expected expected.json]
 
 Exit status:
@@ -31,10 +31,12 @@ import os
 import random
 import re
 import signal
+import struct
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 import pymysql
@@ -455,8 +457,62 @@ def sc_transfer_leader(args, log):
     time.sleep(args.phase / 2)
 
 
+def mem_encode_bytes(b):
+    """TiDB's `codec.EncodeBytes` (memcomparable: 8-byte groups, each followed by 0xFF - pad)."""
+    out = bytearray()
+    for i in range(0, len(b) + 1, 8):
+        group = b[i:i + 8]
+        pad = 8 - len(group)
+        out += group + b"\0" * pad + bytes([0xFF - pad])
+    return bytes(out)
+
+
+def schema_version_region_key():
+    """The schema version key (`m` + EncodeBytes("SchemaVersionKey") + EncodeUint('s'), Go's
+    `structure.encodeStringDataKey`) as PD stores region boundaries (EncodeBytes again)."""
+    raw = b"m" + mem_encode_bytes(b"SchemaVersionKey") + struct.pack(">Q", ord("s"))
+    return mem_encode_bytes(raw)
+
+
+def meta_region(pd):
+    """The region holding the schema version key: every statement that checks the schema
+    version reads it, and the schema sync loop reloads from it (#136)."""
+    key = urllib.parse.quote(schema_version_region_key(), safe="")
+    return pd_api(pd, f"region/key/{key}")
+
+
+def move_meta_leader(pd, store, log, timeout=30):
+    """Transfer the meta region's leader to `store` and wait until PD reports it there."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        region = meta_region(pd)
+        if region["leader"]["store_id"] == store:
+            log(f"meta region {region['id']} leader on store {store}")
+            return True
+        try:
+            pd_api(pd, "operators", {"name": "transfer-leader", "region_id": region["id"],
+                                     "to_store_id": store})
+        except Exception:  # noqa: BLE001 - an operator is already running, etc.
+            pass
+        time.sleep(1)
+    return False
+
+
 def sc_kill_tikv(args, log):
+    kill_and_restart(args, log, busiest_store(args.pd))
+
+
+def sc_kill_tikv_meta(args, log):
+    """kill_tikv with the meta region's leader moved onto the killed store first (#136): the
+    schema version key is unreadable until a new leader is elected. tidb-rs must keep serving
+    on its cached schema within the schema lease, as Go TiDB does."""
     store = busiest_store(args.pd)
+    if not move_meta_leader(args.pd, store, log):
+        raise RuntimeError(f"could not move the meta region's leader to store {store}")
+    kill_and_restart(args, log, store)
+
+
+def kill_and_restart(args, log, store):
     addr = stores(args.pd)[store]["store"]["address"]
     pid = tikv_pid(addr)
     with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -573,6 +629,7 @@ SCENARIOS = {
     "split_merge": sc_split_merge,
     "transfer_leader": sc_transfer_leader,
     "kill_tikv": sc_kill_tikv,
+    "kill_tikv_meta": sc_kill_tikv_meta,
     "slow_tikv": sc_slow_tikv,
     "net_cut": sc_net_cut,
     "pause_tikv": sc_pause_tikv,

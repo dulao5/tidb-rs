@@ -4,7 +4,9 @@
 //! **Synced mode** (`--schema-sync`, ADR 0005): while the node is registered and in sync with
 //! the cluster (`poc_domain::Registry::admit`), a SELECT uses the newest schema loaded in the
 //! background and holds a metadata-lock entry until its response is written. Autocommit point
-//! gets by handle read at MaxTS without a TSO; other reads take a TSO but no schema check. If
+//! gets by handle read at MaxTS without a TSO; other reads take a TSO but read no schema
+//! version: the schema lease (Go's `SchemaValidator`) bounds how old the cached schema may be
+//! at the read TS, so a slow reload does not send statements to the meta region (#136). If
 //! the node left sync before the read finished, the result is discarded and the statement
 //! runs on the path below.
 //!
@@ -30,6 +32,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use poc_domain::Admission;
+use poc_domain::ResultCheck;
 use poc_domain::SchemaSync;
 use poc_domain::StmtGuard;
 use poc_executor::ExecContext;
@@ -500,13 +503,13 @@ impl Session {
         guard.set_tables(vec![plan.table.id]);
         self.timer.set_kind(Kind::of(&plan));
         self.timer.mark(Phase::Plan);
-        let mut snapshot = if max_ts_point_get(&plan) {
-            self.shared.kv.latest_snapshot()
+        let (mut snapshot, start_ts) = if max_ts_point_get(&plan) {
+            (self.shared.kv.latest_snapshot(), None)
         } else {
             let start_ts = TsFuture::request(&self.shared.kv).wait().await?;
             self.stmt.took_ts = true;
             self.timer.mark(Phase::Tso);
-            self.shared.kv.snapshot(start_ts)
+            (self.shared.kv.snapshot(start_ts), Some(start_ts))
         };
         let cx = ExecContext {
             dag: self.shared.dag.clone(),
@@ -514,8 +517,11 @@ impl Session {
         };
         let rows = poc_executor::read_source(&plan, &mut snapshot, &cx).await;
         self.timer.mark(Phase::KvRead);
-        if !guard.results_valid() {
-            return Ok(None);
+        // Fencing, then the schema lease at the read TS (Go: `SchemaChecker.Check`).
+        match guard.check_results(start_ts).await {
+            ResultCheck::Valid => {}
+            ResultCheck::Fallback => return Ok(None),
+            ResultCheck::Err(e) => return Err(SqlError::new(e.code(), e.to_string())),
         }
         self.mdl = Some(guard);
         Ok(Some((plan, rows?)))
