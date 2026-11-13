@@ -104,7 +104,7 @@
 |---|---|
 | 锁解析（ForRead、后台清锁、TTL 退避、shared lock、lite、缓存、请求合并、低精度时间戳；锁等待已按睡眠时间计预算） | lock-resolver.md R1–R12，client-rust#1–#9 |
 | `resource_group_tag`、`request_source` | N9 §6.4 |
-| 低精度时间戳、stale read、`tidb_low_resolution_tso` | N11（读时间戳 spec，编写中）；组件 `pd::LowResolutionTs` 已在 R7 加入 |
+| 低精度时间戳、stale read、`tidb_low_resolution_tso` | [N11](../exceptions/N11-cluster-readts/spec.md) §4.4；组件 `pd::LowResolutionTs` 已在 R7 加入 |
 
 ## 9. P0 的复现方法与修复范围
 
