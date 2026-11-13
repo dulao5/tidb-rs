@@ -58,6 +58,15 @@ not been compared.
    PR with a client-go cross-reference table and tests, CI on `tidb-rs/*` (client-rust#7). tidb-rs
    pins a commit (`Cargo.toml`) and bumps it in a separate PR. Upstreaming to `tikv/client-rust`
    is welcome but not required.
+7. **Sync with upstream `tikv/client-rust`:** the tidb-rs maintainer of the D07 blocks owns it
+   (currently the agent working on #101 / #128, reviewed by the project's reviewer). It runs
+   once a month, and also before each tidb-rs milestone:
+   - merge `tikv/client-rust` master into `tidb-rs/metrics` in one PR;
+   - resolve conflicts against the parity table's decisions;
+   - run the fork CI and the `tools/ab/locks` / `tools/ab/faults` comparisons;
+   - bump tidb-rs.
+
+   Upstream changes that touch behaviour covered by the parity table are listed in that PR.
 
 ## Consequences
 

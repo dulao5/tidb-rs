@@ -20,7 +20,7 @@
 ## 1. 先说结论
 
 1. **三项 P0，都是"Go 能扛过去、tidb-rs 报错"的可用性问题**，详见 §9：
-   - **P0-1 退避预算**。点查、max-ts 点查和锁解析用的是固定的 10 次退避（约 1.5 s，所有错误共用一条曲线）；Go 是 20 s 的时间预算，每种错误一条曲线。ServerIsBusy 2 ms 后就重试，Go 等 2–10 s。leader 切换、store 宕机、TiKV 繁忙时，点查约 1.5 s 后报错。
+   - **P0-1 退避预算**。点查、max-ts 点查和锁解析用的是固定的 10 次退避（约 1.5 s，所有错误共用一条曲线）；Go 是 20 s 的时间预算，每种错误一条曲线。ServerIsBusy 2 ms 后就重试，Go 等 2–10 s，而且这部分睡眠最多 10 分钟不计入预算（`config/retry/config.go:144`），TiKV 持续繁忙时 Go 会一直等。leader 切换、store 宕机、TiKV 繁忙时，点查约 1.5 s 后报错。
    - **P0-2 KV RPC 超时 2 s**。Go 是 30 s / 60 s。负载高时大的 BatchGet / Scan 会误报超时。
    - **P0-3 gRPC 接收消息上限 4 MiB**。Go 没有上限。宽行表的 coprocessor 响应、大的 BatchGet 会直接失败。
 2. **最大的结构差异**：
@@ -45,17 +45,18 @@
 | StaleCommand：不退避、不失效，换下一个 peer（`client-go/internal/locate/region_request.go:1969-1981`） | 失效加退避（`R/request/plan.rs:987`） | 多一次 PD 调用 | 性能 | P2 |
 | KeyNotInRegion：失效 region，不退避（`region_request.go:1910-1914`） | 落入兜底分支：失效 region **和 store**、丢弃 gRPC 连接、退避（`R/request/plan.rs:1006-1016`） | 不必要地丢掉 store 和连接 | 性能、运维 | P1 |
 | ReadIndexNotReady、ProposalInMergingMode、RegionNotInitialized：退避后重试同一 peer（`region_request.go:2013-2051`） | 兜底分支（同上） | 分裂、合并期间反复重建连接 | 性能、运维 | P1 |
+| MaxTimestampNotSynced：BoMaxTsNotSynced 退避后重试（`region_request.go:2003-2010`） | 立即失败（`R/request/plan.rs:1004`） | 不重试 | 无：TiKV 只在 prewrite（写路径）返回这个错误，tidb-rs 只读 | P2 |
 | FlashbackInProgress / NotPrepared：立即失败（`region_request.go:1870-1897`） | 兜底分支，重试到预算用完 | 失败得慢 | 小 | P2 |
 | region bucket：加载（`G/region_cache.go:2134`）、`LocateBucket`（`:1197`）、`UpdateBucketsIfNeeded`（`:2771`），用于按 bucket 拆 cop 任务 | 无 | cop 任务不能按 bucket 拆 | 性能：大 region 上并行度低（D07.2） | P2 |
 | store 后台维护：定期重新解析 store 地址、标签（`client-go/internal/locate/store_cache.go:485-534`）；每 10 s 刷新 store 列表（`G/region_cache.go:785`） | 无，只在出错时丢弃并按需重新加载（`R/request/plan.rs:500`、`:982`） | store 地址变化要等一次失败才更新 | 运维：k8s 中 TiKV pod 重新调度后，第一批请求失败或变慢 | P1 |
 | store 存活状态（reachable / unreachable / unknown）与健康检查循环（`store_cache.go:603-686`） | 无；只按 gRPC 状态码分类（`R/request/plan.rs:331-368`） | 每个请求自己重新发现宕机的 store | 性能、可用性：每个新请求都要先等一次对宕机 store 的连接超时 | P1 |
-| — | `read_through_region_by_id` 在 PD 调用失败时提前返回，留下 `on_my_way_id` 条目，之后的调用方会一直等（`R/region_cache.rs:150-160`、`:116-118`） | client-rust 自身的缺陷（依据代码推断，未复现） | 正确性：挂起。唯一调用方是 raw client 的 `store_for_id`（`R/raw/client.rs:821`），不在事务读路径上 | P2 |
+| — | `read_through_region_by_id` 在 PD 调用失败时提前返回，留下 `on_my_way_id` 条目，之后的调用方会一直等（`R/region_cache.rs:150-160`、`:116-118`） | client-rust 自身的缺陷（依据代码推断，未复现） | 正确性：挂起。唯一调用方是 raw client 的 `store_for_id`（`R/raw/client.rs:821`），不在事务读路径上 | P2，但改动小，与 P0-1 一起修（§9） |
 
 ## 3. 副本选择与故障切换
 
 | client-go | client-rust | 缺口 | 影响 | 优先级 |
 |---|---|---|---|---|
-| `ReplicaReadType`：Leader / Follower / Mixed / Learner / PreferLeader（`pkg/kv` 的 `store_vars.go:60-71`）；TiDB 的 closest-replica、closest-adaptive 映射为带标签匹配的 Mixed（`G/replica_selector.go:181-190`、`:393-432`）；系统变量 `tidb_replica_read` | 只读 leader；`replica_read` 除测试外从不设为 true。所谓 follower 尝试只是把 leader 请求发给另一个 voter（`R/request/plan.rs:370-388`） | 不支持 `tidb_replica_read` | 性能：读负载全落在 leader 上，跨 AZ 读没有节省；正确性无影响 | P1（若 D07.1 / D07.2 需要 follower 或 closest 读则为 P0） |
+| `ReplicaReadType`：Leader / Follower / Mixed / Learner / PreferLeader（`pkg/kv` 的 `store_vars.go:60-71`）；TiDB 的 closest-replica、closest-adaptive 映射为带标签匹配的 Mixed（`G/replica_selector.go:181-190`、`:393-432`）；系统变量 `tidb_replica_read` | 只读 leader；`replica_read` 除测试外从不设为 true。所谓 follower 尝试只是把 leader 请求发给另一个 voter（`R/request/plan.rs:370-388`） | 不支持 `tidb_replica_read`：设成 follower 等值时 tidb-rs **默默读 leader**（已写进 `docs/compatibility.md`；修复项包括 SET 时给 warning） | 性能：读负载全落在 leader 上，跨 AZ 读没有节省；正确性无影响；运维：用户以为分流了实际没有 | P1（若 D07.1 / D07.2 需要 follower 或 closest 读则为 P0） |
 | leader 不可用：`isLeaderCandidate` 在 leader 的 store 不可达、遇到 NotLeader / 超时、或已尝试 10 次 / 50 s 时跳过它（`G/replica_selector.go:233-248`、`region_request.go:709-713`），再按评分选副本；可经 follower 转发（`G/replica_selector.go:129-138`、`:436-461`） | 先试缓存的 leader，再按顺序试每个 voter（不含 learner、witness）（`R/request/plan.rs:558-680`）。Unavailable 等错误失效 store 并丢弃连接；DeadlineExceeded 换下一个 peer（`:331-368`、`:536-549`） | 没有存活记忆，没有转发 | 性能：PD 报告新 leader 之前，每个新请求都重复一次对宕机 leader 的超时 | P1 |
 | 按负载选副本：`busyThreshold`、store 估计等待时间（`G/replica_selector.go:142-156`、`:339`） | 无。两次 `ServerIsBusy(0)` 后的一次性 probe 只能发现 leader 变化（`R/request/plan.rs:295-303`） | 无 | 性能：热点下 | P2 |
 | stale read：第二次尝试回退到 leader（`G/replica_selector.go:170-179`） | 无 stale read | 无 | 只在 D07 需要 `AS OF TIMESTAMP` 时相关 | P2 |
@@ -68,7 +69,7 @@
 | `Backoffer` 按总睡眠毫秒数（`maxSleep`）计预算，各种退避共享预算、各自维护指数状态（`client-go/config/retry/backoff.go:63`、`:146`、`:188-195`）；`Fork` / `Clone`（`:259`、`:278`）；ServerBusy 的睡眠不计入预算（`config/retry/config.go:144`） | `Backoff` 按次数计（`R/backoff.rs:21-35`），无总预算、无排除、无 fork | 模型不同 | 运维：重试时间只能按次数推算，与 TiDB 的配置无法对应 | P1 |
 | 每种退避一条曲线（`config/retry/config.go:122-140`）：RegionMiss 2/500 ms；TiKVRPC 100/2000 ms 等抖动；TxnLock 100/3000 ms；ServerBusy 2000/10000 ms；StaleCmd 2/1000 ms 等 | region 错误、ServerIsBusy、gRPC 错误共用一条（`R/request/plan.rs:686-692`、`:891-900`、`:927-939`）；锁退避见 R3 / R7 | ServerIsBusy 2 ms 后重试，Go 等 2–10 s | 可用性：对过载的 TiKV 形成重试风暴，预算很快用完 | **P0（P0-1）** |
 | 预算：Get / BatchGet / Scan 20000 ms（`txnkv/txnsnapshot/snapshot.go:183`、`:698`，`scan.go:115`）；coprocessor 每个 region `CopNextMaxBackoff` 20000 ms（`pkg/store/copr/coprocessor.go:72-73`） | BatchGet、Scan、coprocessor 用调用方的 `RetryOptions`（tidb-rs 设为 48 次，约 20.5 s）。**`Transaction::get` 和 max-ts 点查写死 `DEFAULT_REGION_BACKOFF`**（10 次，约 1.5 s，`R/transaction/transaction.rs:185`、`:1212`），锁解析的 CheckTxnStatus 等也是（`R/transaction/lock.rs`） | 点查只有约 1.5 s | 可用性 | **P0（P0-1）** |
-| `tikv_client_read_timeout`（v8.5.8 中的名字，默认 0，`pkg/sessionctx/variable/sysvar.go:1733`）：设置每个 RPC 的超时，并把 `MaxExecutionDurationMs` 告诉 TiKV（`snapshot.go:630-635`、`:844-849`；copr `coprocessor.go:1353-1356`）。未设置时由 RPC 超时填入（`region_request.go:1393-1397`）。读超时后换副本重试（`:1614-1618`） | 源码中没有 `max_execution_duration`；所有 KV RPC 用一个 `Config.timeout`，默认 **2 s**（`R/config.rs:34`、`R/store/request.rs:116`）；coprocessor 60 s（`R/transaction/coprocessor.rs:80`） | 没有每语句的读超时；TiKV 不知道截止时间；2 s 默认值远低于 Go 的 30 / 60 s（`client-go/internal/client/client.go:87-88`） | 可用性（P0-2）；性能：TiKV 继续执行客户端已经放弃的请求 | **P0（P0-2）**；`max_execution_duration_ms` 与读超时为 P1 |
+| `tikv_client_read_timeout`（v8.5.8 中的名字，默认 0，`pkg/sessionctx/variable/sysvar.go:1733`）：设置每个 RPC 的超时，并把 `MaxExecutionDurationMs` 告诉 TiKV（`snapshot.go:630-635`、`:844-849`；copr `coprocessor.go:1353-1356`）。未设置时由 RPC 超时填入（`region_request.go:1393-1397`）。读超时后换副本重试（`:1614-1618`） | 源码中没有 `max_execution_duration`；所有 KV RPC 用一个 `Config.timeout`，默认 **2 s**（`R/config.rs:34`、`R/store/request.rs:116`）；coprocessor 60 s（`R/transaction/coprocessor.rs:80`） | 没有每语句的读超时；TiKV 不知道截止时间；2 s 默认值远低于 Go 的 30 s（Get）/ 60 s（BatchGet、Scan、cop）（`client-go/internal/client/client.go:87-88`；Get `snapshot.go:844`，BatchGet `:630`，Scan `scan.go:265`） | 可用性（P0-2）；性能：TiKV 继续执行客户端已经放弃的请求 | **P0（P0-2）**；`max_execution_duration_ms` 与读超时为 P1 |
 | `max_execution_time`：expensivequery 看门狗 kill 会话、取消 context，`Backoff` 检查 `ctx.Done`（`pkg/util/expensivequery/expensivequery.go:96-99`） | 无截止时间接口；只能由调用方丢弃 future 取消（`R/transaction/coprocessor.rs:243`） | 需要 SQL 层（N3 取消令牌）自己包 | 由 tidb-rs 的 N3 承担 | P1 |
 
 ## 5. BatchCommands 与连接
@@ -108,8 +109,8 @@
 
 | # | 问题 | 复现方法 / 真实集群上的触发条件 | 建议修复范围 |
 |---|---|---|---|
-| P0-1 | 点查、max-ts 点查、锁解析的退避只有 10 次（约 1.5 s），所有错误共用 2 ms 起步的曲线；ServerIsBusy 2 ms 后重试 | **触发**：(a) 3 TiKV 集群上 `kill -9` 一个 TiKV，其上 leader 的 region 要经过选举（默认选举超时约 10 s）；期间对这些 region 的点查约 1.5 s 后报错，Go 等到新 leader 后成功。(b) `pd-ctl operator add transfer-leader` 并发大量点查。(c) TiKV 的 `server_is_busy` 故障注入（failpoint）或 CPU 打满。**复现**：#128 第 2 项的 3 TiKV 故障场景测试里加这几种，对比 Go；单测可用 mock 连续返回 11 次 `ServerIsBusy` / `NotLeader`，tidb-rs 报错而按 Go 的预算应成功 | (1) `Transaction::get`、`get_at_max_ts` 和锁解析改用调用方的 `RetryOptions`（小改动）；(2) 按 Go 为 ServerIsBusy、gRPC 错误、region 错误分开退避曲线（中等）；(3) 长期：按时间计的 Backoffer（P1，与 R3 / R7 的 `LockBackoff` 统一） |
-| P0-2 | 所有 KV RPC 超时默认 2 s | **触发**：TiKV 负载高、大的 BatchGet（几千个 key）、Scan 跨大 region、跨 AZ 高延迟。**复现**：`tc qdisc add dev lo root netem delay 2500ms`（或 TiKV 的 grpc 延迟 failpoint）后点查和 BatchGet 报 DeadlineExceeded，Go 成功 | (1) 默认值按 Go 改为 30 s（批量读）/ 60 s（Get、Scan），或在 tidb-rs 侧设置（小改动）；(2) P1：`tikv_client_read_timeout` 与 `max_execution_duration_ms` |
+| P0-1 | 点查、max-ts 点查、锁解析的退避只有 10 次（约 1.5 s），所有错误共用 2 ms 起步的曲线；ServerIsBusy 2 ms 后重试 | **触发**：(a) 3 TiKV 集群上 `kill -9` 一个 TiKV，其上 leader 的 region 要经过选举（默认选举超时约 10 s）；期间对这些 region 的点查约 1.5 s 后报错，Go 等到新 leader 后成功。(b) `pd-ctl operator add transfer-leader` 并发大量点查。(c) TiKV 的 `server_is_busy` 故障注入（failpoint）或 CPU 打满。**复现**：#128 第 2 项的 3 TiKV 故障场景测试里加这几种，对比 Go；单测可用 mock 连续返回 11 次 `ServerIsBusy` / `NotLeader`，tidb-rs 报错而按 Go 的预算应成功 | (1) `Transaction::get`、`get_at_max_ts` 和锁解析改用调用方的 `RetryOptions`（小改动）；(2) 按 Go 为 ServerIsBusy、gRPC 错误、region 错误分开退避曲线，**并照 Go 把 ServerIsBusy 的睡眠排除在预算外（最多 10 分钟，`config/retry/config.go:144`）**（中等）；(3) 长期：按时间计的 Backoffer（P1，与 R3 / R7 的 `LockBackoff` 统一）；(4) 一并修 §2 的 `on_my_way_id` 挂起缺陷（小） |
+| P0-2 | 所有 KV RPC 超时默认 2 s | **触发**：TiKV 负载高、大的 BatchGet（几千个 key）、Scan 跨大 region、跨 AZ 高延迟。**复现**：`tc qdisc add dev lo root netem delay 2500ms`（或 TiKV 的 grpc 延迟 failpoint）后点查和 BatchGet 报 DeadlineExceeded，Go 成功 | (1) 默认值按 Go 改为 Get 30 s（`ReadTimeoutShort`，`txnkv/txnsnapshot/snapshot.go:844`）、BatchGet / Scan / coprocessor 60 s（`ReadTimeoutMedium`，`snapshot.go:630`、`scan.go:265`；cop `CoprReqTimeout` 60 s），或在 tidb-rs 侧设置（小改动）。注意 `client.go:87-88` 两个常量的注释容易读反；(2) P1：`tikv_client_read_timeout` 与 `max_execution_duration_ms` |
 | P0-3 | gRPC 接收消息上限 4 MiB | **触发**：宽行表（例如单行 64 KiB 的 text / json）上的全表扫描，一次 cop 响应超过 4 MiB；或几百个大 key 的 BatchGet。**复现**：建表 `t(id int primary key, v longtext)`，插入 200 行 64 KiB 的值（同一 region），经 tidb-rs `select * from t`，报解码错误；Go 正常 | 把上限设为 Go 的值（`usize::MAX` 或足够大），可在 tidb-rs 侧的 `Config` 设置（小改动），并加测试 |
 
 P0 修复本身先不做，按本表评审后排期（Maya）。
