@@ -93,6 +93,26 @@ pub(super) fn expr_of(ctx: &Ctxs, v: &Value, fts: &[FieldType]) -> ExprRef {
             })
             .into_ref()
         }
+        // D08.2 part 2 ("evnull"): ["defer", recipe(, stale datum)] -> a constant whose
+        // value is the recipe's (evaluated now, or the stale datum) and whose DeferredExpr is
+        // the recipe.
+        "defer" => {
+            let e = expr_of(ctx, &a[1], fts);
+            let ev = ctx.0.get_eval_ctx();
+            let mut v = e
+                .eval(
+                    &*ev,
+                    &tidb_expression::expression::EvalState::new(),
+                    Default::default(),
+                )
+                .unwrap();
+            if a.len() > 2 {
+                v = datum_in(&a[2]);
+            }
+            let mut c = Constant::new(v, e.get_type(&*ev).into_owned());
+            c.deferred_expr = Some(e);
+            Expr::Constant(c).into_ref()
+        }
         // D08.4 batch 1: ["fn", name, [recipes]] -> NewFunctionBase (no folding).
         "fn" => tidb_expression::scalar_function::new_function_base(
             &*ctx.0,

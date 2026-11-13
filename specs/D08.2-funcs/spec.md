@@ -2,6 +2,8 @@
 
 状态：第 1 部分——函数注册表、签名的 `baseBuiltinFunc` 构造、collation 推导。`newBaseBuiltinFuncWithTp`、`newBaseBuiltinCastFunc4String` 随 D08.8 第 2b-1 部分移植（D08.2 matched 79/151；TIME/DURATION/JSON/VECTOR 参数的包装为临时桩，随 D08.8 第 2b-2 部分）。第 2 部分随 D08.8 CAST 的第一批签名和 D08.1 2b；第 3 部分为 grouping sets。
 
+收敛检查（第 2 部分收尾，`foldConstant` 的 null-reject 分支与 `EvaluateExprWithNull`）：D08.2 matched 108/151（`constant_fold.go` 7/7、`constant_propagation.go` 27/27、`builtin.go` 51/51；其余为第 2 部分的 `builtin_func_param.go` 8 个（随 REGEXP/ILIKE）、第 3 部分 `grouping_sets.go` 29 个、`simple_rewriter.go` 4 个（D09.2）、cascades 的 2 个）；D08.1 296/348；D08.8 266/266。govec `cast` 追加 `evnull` 2,000 条（§5）。
+
 收敛检查（第 1 部分）：D08.2 matched 68/151，missing 8（第 2 部分的 6 个 + cascades 的 2 个），另有 5 个 Go 文件（75 个函数）属于第 2、3 部分。govec `funcs` 领域 7,448 条，覆盖 57 个函数，豁免 94 个（`funcs_pending.go`）。
 
 ## 1. 范围
@@ -69,11 +71,24 @@ LIKE、ILIKE、REGEXP、JSON_SCHEMA_VALID 按 `EvalContext.CtxID()` 缓存编译
    - `ExtractColumns` 把列复制进新的 `Arc`（Go 保留表达式中的 `*Column`），字段相同。
    - 依赖：D08.1 `SplitCNFItems` 等 6 个函数；D08.12 `ColumnSubstitute`、`ColumnSubstituteAll`、`ColumnSubstituteImpl`、`cowExprRef`、`SetExprColumnInOperand`、`checkCollationStrictness`、`ExtractColumns`/`extractColumns`、`RemoveDupExprs`、`IsMutableEffectsExpr`、`BuildNotNullExpr`、`ConstExprConsiderPlanCache`（`util.rs`）；D00.3 `disjointset.SimpleIntSet`（`tidb_base::disjointset`）；D08.5 IS NULL（`BuildNotNullExpr` 需要）。`CollationStrictnessGroup` / `CollationStrictness` 是 `collation.rs` 中的两个函数（Go 包级 map）。
 
+8. **常量折叠的 null-reject 分支与 `EvaluateExprWithNull`**（第 2 部分收尾；`EvaluateExprWithNull`、`evaluateExprWithNull`、`evaluateExprWithNullInNullRejectCheck`、`isColumnInOperand` 属 D08.1 `expression.go`，随本部分移植）：
+   - 原来的临时桩（不建 dummy 调用、保留原表达式）已删除：`foldConstant` 在 `IsInNullRejectCheck` 下用 `NewFunctionBase` 建把非常量参数换成 1 的 dummy 调用，结果为 NULL 或假时折叠成常量，与 Go 相同（L1，只有"没有扩展函数"一处 L2）。dummy 调用失败（函数类未移植）时保留原表达式，与 Go 构建失败的处理相同；被折叠的节点本身已经由同一个函数类建出，所以这种情况不会出现。
+   - **M-FT 审查**（D09.7 pilot report 的规则，本部分移植的代码中的原地 `RetType`/`FieldType` 修改与共享）：
+     | Go 位置 | Go 的做法 | tidb-rs | 可见影响 |
+     |---|---|---|---|
+     | `foldConstant` null-reject 分支 `NewFunctionBase(ctx, x.FuncName.L, x.GetType(ctx), constArgs...)` | 把节点自己的 `*FieldType` 传给 `newFunctionImpl`；后者只替换局部变量，不写入。会写入的 `ast.Cast` 等只有一个参数，进不了这个分支（一个参数时"不全是常量"就没有 NULL 参数） | 传副本 | 无 |
+     | 同一分支的 `&Constant{Value: value, RetType: x.RetType}`（NULL 与假两处） | 常量与被折叠的节点共享 `*FieldType`；之后 `FoldConstant` 写回 charset/collation（同值，无变化）；被折叠的节点在这条路径上总是 `NewFunction` 刚建的，随即丢弃 | 复制 | 无 |
+     | `evaluateExprWithNull*` 的 `NewFunction(ctx, x.FuncName.L, x.RetType.Clone(), args...)` | 复制 | 复制 | 无 |
+     | `evaluateExprWithNull*` 把输入中的常量原样交给重建的函数 | 重建比较时 `PropagateType`（ETReal）原地修改输入中 DECIMAL 常量的 flen / decimal（与第 7 条同一处），输入条件被改；govec `evnull` 2,000 条中 13 条（生成器标 `known_deviation`） | 修改副本，输入不变 | 结果相同：这 13 条在回放中逐字节一致，所以 `evnull` 不用第 7 条的容忍，要求全部相同 |
+   - 测试上下文（`exprstatic`）默认开启 plan cache、类型为 `DefaultNoCache`：`EvaluateExprWithNull` 遇到 deferred 常量时 `SetSkipPlanCache` 追加 warning "unknown cache type"，记录中可见（Go 与 tidb-rs 相同）。
+   - 没有被覆盖的分支：`ConcatWS` 的排除（CONCAT_WS 属 D08.6，尚未移植，构建不出这种节点）。
+
 ## 5. 验证
 
 - govec `funcs` 领域（tracker `govec/domains/funcs.go`），Rust 回放 `crates/expression/tests/govec_funcs.rs`：
   - `derive` 4,000 条：随机的函数名（`deriveCollation` 的所有分支和若干普通函数）、参数（各种字符集与 collation 的字符串列与常量、JSON、BIT、NULL 类型、数值，以及 concat/upper/coalesce 等小函数树）、显式 coercibility/repertoire 覆盖、连接字符集、new collation 开关；400 条专门覆盖"JSON 参数 + 显式非 binary collation"。
   - `newbase` 1,300 条：`newBaseBuiltinFunc`/`newBaseBuiltinFuncWithFieldType` 的结果类型、NOT NULL 标志、collation 信息，以及 collator 对探测字符串的 key。
   - `retft` 828、`verify` 400、`setflen` 300、`deferred` 618、`registry` 1、`baseerr` 1。
+- govec `cast` 领域 `evnull`（tracker `govec/domains/cast_d082d.go`）2,000 条，回放 `tests/cast_cprop/mod.rs`：`EvaluateExprWithNull` 在普通上下文与 `WithNullRejectCheck` 上下文（约 2/3）下，条件取 `cprop` 的条件，另加 deferred 常量（一半带过期的值，折叠后应换成重新求出的值；最外层直接是 deferred 常量）、与 NULL 常量的算术与比较、`INTERVAL(n, col, NULL)`（dummy 调用结果为 0：假的分支）、`COALESCE(NULL, col)`、AND/OR 中的 NULL 字面量和不决定结果的常量（AND 1、OR 0）。记录逐字节一致（`GOVEC_CPROP_STRICT=1` 下也是）。反证（arm64 回放，81,164 条中报错的条数）：删掉 null-reject 分支（回到原来的桩）275；dummy 参数用 0 代替 1 145；不处理 NULL 结果 258、不处理假结果 17；AND 中来自 schema 的 NULL 换成 0 33、OR 中换成 1 28；`allArgsNullFromSet` 不置假 68、条件取反 88；列的 `nullFromSet` 返回假 60；忽略 null-reject 上下文 60；`hasNonConstantArg` 恒真 127；两条路径不折叠 deferred 常量 20 / 35；不调用 `SetSkipPlanCache` 433；去掉 `NullEQ` 的排除 13；`schema.Contains` 取反 952。
 - Go 侧通过 `go:linkname` 调用未导出的函数；`baseBuiltinFunc` 用布局相同的镜像结构体接收（`init` 中核对大小为 152 字节）。
 - 函数参数的树由 Go 的 `NewFunctionBase` 构建，以 dump 形式给出，Rust 用只有描述的签名重建（同 `expr` 领域）。

@@ -7,8 +7,9 @@
 - [x] T5 `function_traits.rs`
 - [x] T6 govec `funcs` 领域与回放、单元测试；反证
 - [x] T7a `baseBuiltinCastFunc`（`newBaseBuiltinCastFunc`、`metadata`、`cloneFrom`；随 D08.8 第 1 部分）
-- [ ] T7b `newBaseBuiltinFuncWithTp`/`WithFieldTypes`（要 CAST 到 STRING/TIME 等，D08.8 第 2 部分；`derive` 记录经它们回放）、`get_function`、`NewFunction*`
-- [x] T8a 常量折叠 `constant_fold.go`（随 D08.8 第 1 部分；IF/IFNULL/CASE/ISNULL 的处理已移植，随这些函数在 govec 中覆盖；null-reject 分支等 `NewFunctionBase`）
+- [x] T7b `newBaseBuiltinFuncWithTp`/`WithFieldTypes`、`get_function`、`NewFunction*`（D08.8 第 2b-1、2b-3a 部分，#86、#95）
+- [x] T8a 常量折叠 `constant_fold.go`（随 D08.8 第 1 部分；IF/IFNULL/CASE/ISNULL 的处理已移植，随这些函数在 govec 中覆盖）
+- [x] T8a2 `foldConstant` 的 null-reject 分支（`NewFunctionBase` 的 dummy 调用，删除临时桩）与 D08.1 的 `EvaluateExprWithNull`、`evaluateExprWithNull`、`evaluateExprWithNullInNullRejectCheck`、`isColumnInOperand`；govec `evnull` 2,000 条；M-FT 审查（spec §4 第 8 条）
 - [x] T8b 常量传播 `constant_propagation.go`（`PropagateConstant`、`PropConstOverOuterJoin`；govec `cprop`；spec §4 第 7 条）
 - [ ] T8c（planner / 第一条经过 `PropagateConstant` 的 SQL 路径）SQL 测试固定 tidb-rs 对 YEAR 原地修改偏离的结果（#104，`docs/compatibility.md`）：表 `yy(y1 YEAR, y2 YEAR)`，行按 #104 的复现；`y1 = y2 AND y2 < 1.0` 只返回 0000（v8.5.8 还返回 1990、2000），`y1 = y2 AND y2 >= 0.5` 与 v8.5.8 相同
 - [ ] T8d（D08.6，交给 D08.6 的任务列表）govec 配方覆盖 `ColumnSubstituteImpl` 的 #53730 `LENGTH` 分支（替换进 `LENGTH(col)` 的参数时检查 collation/类型），LENGTH 移植后加

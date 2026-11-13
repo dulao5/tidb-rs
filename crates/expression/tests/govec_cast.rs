@@ -748,6 +748,8 @@ fn replay(path: &str) {
         let mut rec: Value = serde_json::from_str(line).unwrap();
         let is_cprop = rec["op"] == "cprop" || rec["op"] == "util";
         cprop += usize::from(is_cprop);
+        // "evnull" records are marked the same way (Go's PropagateType on a DECIMAL constant
+        // of the input) but compared exactly: their results do not depend on the change.
         // "cprop": the generator marks the records where Go changed a node of the input
         // conditions in place (every holder sees it); tidb-rs changes copies (D08.2 spec §4
         // item 7, a deliberate deviation, #104). Every record is executed; a marked record

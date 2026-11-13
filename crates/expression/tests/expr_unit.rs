@@ -245,3 +245,41 @@ fn vectorizable_by_function_names() {
     assert!(!vectorizable(&[next.clone(), next.clone()]));
     assert!(vectorizable(&[last, set]));
 }
+
+/// `StringifyExpressionsWithCtx`: the expressions' strings between brackets, separated by
+/// one space (Go test TestExpressionString-style; no govec op prints expressions).
+#[test]
+fn stringify_expressions_with_ctx() {
+    use tidb_expression::expression::stringify_expressions_with_ctx;
+    use tidb_types::field_type::new_field_type;
+    let c = ctx(StrictFlags, None);
+    let one = Expr::Constant(Constant::new(
+        new_int_datum(1),
+        new_field_type(tidb_base::mysql::TypeLonglong),
+    ))
+    .into_ref();
+    let col = Expr::Column(Column {
+        unique_id: 7,
+        ..Column::default()
+    })
+    .into_ref();
+    assert_eq!(stringify_expressions_with_ctx(&*c, &[]), b"[]");
+    assert_eq!(
+        stringify_expressions_with_ctx(&*c, &[one.clone(), col.clone()]),
+        [
+            b"[".to_vec(),
+            one.string_with_ctx(&*c, tidb_base::errors::RedactLogDisable),
+            b" ".to_vec(),
+            col.string_with_ctx(&*c, tidb_base::errors::RedactLogDisable),
+            b"]".to_vec()
+        ]
+        .concat()
+    );
+}
+
+/// `inCastContext.String` (the key is never set or read in v8.5.8).
+#[test]
+fn in_cast_context_string() {
+    use tidb_expression::builtin_cast::inUnionCastContext;
+    assert_eq!(inUnionCastContext.to_string(), "__cast_ctx");
+}
