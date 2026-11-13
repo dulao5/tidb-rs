@@ -3888,6 +3888,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-planner-pilot"
+version = "0.0.0"
+dependencies = [
+ "tidb-base",
+ "tidb-expression",
+ "tidb-model",
+ "tidb-parser",
+ "tidb-sessionctx",
+ "tidb-types",
+]
+
+[[package]]
 name = "tidb-query-smoke"
 version = "0.0.0"
 dependencies = [

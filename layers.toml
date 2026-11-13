@@ -162,6 +162,14 @@ blocks = [
   "D13.1", "D13.2", "D13.3",
 ]
 
+# SPIKE, not for merging (methodology §8, ROADMAP P0 item 3): the D09.7 design pilot that
+# validates N1 (plan arena, PlanCtx::split, Arc<Expr> COW, frozen physical plans). Placed at
+# the rank of the planned tidb-planner; owns no block (the D09.7 functions stay in
+# tidb-planner and are not counted as ported). Delete together with crates/spike/.
+[crate.tidb-planner-pilot]
+rank = 13
+blocks = []
+
 [crate.tidb-executor]
 rank = 14
 planned = true

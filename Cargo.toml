@@ -28,6 +28,8 @@ members = [
   "crates/expression/macros",
   "crates/execdetails",
   "crates/infoschema",
+  # SPIKE (D09.7 design pilot for N1): not for merging, not counted in coverage.
+  "crates/spike/planner-pilot",
   "tools/ab",
   # TiKV's TiDB-query crates, vendored unmodified (see third_party/tikv/PROVENANCE.md).
   # They do not opt into [workspace.lints] and are not formatted or linted by our checks.
