@@ -138,6 +138,30 @@ client-rust#11 让点查（TSO、max-ts）和清锁改用调用方的预算。�
   - 但日志里的请求没有标出是 Get 还是 CheckTxnStatus，所以"清锁的 CheckTxnStatus"仍然是推断。要直接确认，需要在 fork 的重试日志里加上请求名。这个改动很小，P0-1b 会顺带加上。
 - **预算仍然是层层相乘的**（Lucky 在 #11 上的意见）：一次读的 region 重试、它的清锁和锁等待各自有一份预算，store 宕机时总时长可能远超 Go 的 20 s。P0-1b 改为每次读一份共享的时间预算。
 
+## P0-1b 之后：共享的 20 s 时间预算（tidb-rs `de641f8`）
+
+client-rust#12 之后，tidb-rs 的 region 重试和锁等待都用 `Backoff::time_budget(20_000)`：
+- 每次读一份预算，它的 region 重试、清锁和锁等待共用；
+- 每种错误一条曲线；
+- ServerIsBusy 不计入预算。
+
+复跑了 kill -9、限 CPU、SIGSTOP，tidb-rs 开 debug 日志，重试日志带请求名：
+
+| 场景 | 读法 | Go TiDB：错误 / 最长挂起 | tidb-rs：错误 / 最长挂起 |
+|---|---|---|---|
+| kill -9 | 点查 max-ts / TSO | 0 / 13.2 s、12.2 s | 0 / 13.3 s、13.3 s |
+| | 范围 / 聚合 | 0 / 13.2 s、13.2 s | 0 / 13.7 s、14.0 s |
+| | 写入行：点查 max-ts / TSO / 扫描 | 0 / 0.06 s | 0 / **7.1 s** |
+| 限 CPU 3% | 全部 | 0 / ≤ 6.4 s | 0 / ≤ 6.4 s |
+| SIGSTOP 5 s | 全部 | 0 / 5.0 s | 0 / 5.0 s |
+
+写入方分别成功提交 9905、2107、1889 次，没有错误。所有场景两边都没有错误结果，配对检查也没有违反。
+
+- **最长挂起都在预算之内**：最长 14.0 s，低于"20 s 加越过预算的那一次睡眠"。与 Go 相差不超过约 1 s。
+- **写入行多挂起 7 s**：这一轮写入行所在 region 的 leader 在 Go 看来不在被杀的 TiKV 上（Go 最长挂起 0.06 s），tidb-rs 却在这些读上挂起了 7.1 s。日志显示 tidb-rs 先把请求发往被杀的 store，等连接失败后才换 leader。推测与对照表的 P1 "store 存活检测"有关：Go 会把不可达的 store 尽快标记出来，fork 没有这一步。这一项列为待查，没有报错，也没有错误结果。
+- **扫描那个错误的来源已确认**：带请求名的重试日志里，断开期间有 8 次 `retry_after_routing_error kv_check_txn_status: GrpcAPI(...)`，即清锁的 CheckTxnStatus 发往了被杀的 store 并重试。P0-1a 之前，这条路径用的是写死的 `DEFAULT_REGION_BACKOFF`，10 次后报 `Leader of region N is not found`。这与之前的推断一致。
+- **ServerIsBusy**：限 CPU 时 TiKV 仍然没有返回 ServerIsBusy。所以"排除在预算外"这一点只有 client-rust 的单测覆盖（60 次 ServerIsBusy 后读成功）。
+
 ## 对对照表的更新（client-go-parity.md §9）
 
 | P0 | 本次结果 | 写回对照表的内容 |
