@@ -126,7 +126,7 @@ def section_sysbench(cur, prev, lines):
     if not cur or "results" not in cur:
         lines.append("_Not run._\n")
         return
-    lines.append("| workload | threads | Go TiDB QPS | tidb-rs QPS | B/A | last week |")
+    lines.append("| workload | threads | Go TiDB QPS | tidb-rs QPS | B/A | last run |")
     lines.append("|---|---|---|---|---|---|")
     for w, rows in cur["results"].items():
         for t in sorted(rows, key=int):

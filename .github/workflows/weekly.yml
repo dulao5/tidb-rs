@@ -17,9 +17,6 @@ on:
   schedule:
     - cron: "0 9 * * 5"
     - cron: "0 18 * * *"
-  # TEMPORARY (remove before merging): exercise the workflow from this branch.
-  push:
-    branches: [ci/weekly]
   workflow_dispatch:
     inputs:
       mode:
