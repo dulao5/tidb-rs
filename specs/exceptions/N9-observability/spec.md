@@ -193,7 +193,7 @@ Go 中 label 和 table id 是**每个请求**按它的第一个 key 算的（§1
 
 ### 6.5 上报与归属
 
-实现 `TopSQLPubSub` gRPC 服务（tipb proto，L1），挂在 status 端口；`TopSQLAgent` 客户端模式可以晚做。SQL meta / plan meta 的规范化文本照 Go（`NormalizeSQL`、`NormalizeFlatPlan`）。归属：标签与 CPU 记账拆成 D14.3 放进 P2（D4 已同意），上报留在 D14.2（P5）。
+实现 `TopSQLPubSub` gRPC 服务（tipb proto，L1），挂在 status 端口；`TopSQLAgent` 客户端模式可以晚做。SQL meta / plan meta 的规范化文本照 Go（`NormalizeSQL`、`NormalizeFlatPlan`）。归属：标签与 CPU 记账拆成 D14.3 放进 P2（D4 已由 Lucky 同意），上报留在 D14.2（P5）。
 
 ## 7. 主题 5：TRACE（细节）
 
@@ -249,16 +249,16 @@ Go 中 label 和 table id 是**每个请求**按它的第一个 key 算的（§1
 
 ## 10. 需要负责人决定（候选 `block` issue）
 
-2026-11-14：D1、D2、D4、D5、D6 负责人已同意（frame pointer；D14.3 拆分）。
+2026-11-13：D2、D4、D5、D6 由评审者 Lucky 同意（技术决定，frame pointer；D14.3 拆分），不需要负责人决定。**D1（#115）和 D3（#116）等负责人决定。**
 
 | # | 问题 | 建议 | 状态 |
 |---|---|---|---|
-| D1 | `/debug/pprof/goroutine`、`/debug/pprof/mutex` 没有 Go 格式的对应物：(a) 返回 tidb-rs 自己的任务转储/锁等待文本，Dashboard 对应视图不可用；(b) 返回 404；(c) 与 Dashboard 协调新格式 | (a)，并在 `docs/compatibility.md` 中列出；先确认 ng-monitoring 请求的 `debug=` 变体（§4） | 已同意 |
-| D2 | CPU profile 的栈展开：frame pointer 还是 DWARF | frame pointer | 已同意 |
+| D1 | `/debug/pprof/goroutine`、`/debug/pprof/mutex` 没有 Go 格式的对应物：(a) 返回 tidb-rs 自己的任务转储/锁等待文本，Dashboard 对应视图不可用；(b) 返回 404；(c) 与 Dashboard 协调新格式 | (a)，并在 `docs/compatibility.md` 中列出；先确认 ng-monitoring 请求的 `debug=` 变体（§4） | 待负责人决定（#115） |
+| D2 | CPU profile 的栈展开：frame pointer 还是 DWARF | frame pointer | 已同意（Lucky，技术决定） |
 | D3 | Top SQL 与语句级 CPU（`Tidb_cpu_time` 等）用 **poll 级记账**（每次 poll 读 `Instant`，线程 CPU 时钟按 1–10ms 窗口读并按墙钟分摊）代替 Go 的 CPU profile 采样归因。数值比 Go 准，和 Go 不完全一致；字段是否出现仍跟随 `tidb_enable_top_sql`（同 Go）。**先做 §6.1 的基准再决定**（#116） | 同意例外，前提是基准满足 §9 | 待基准 |
-| D4 | `util/topsql` 的标签与 CPU 记账拆成 D14.3 提前到 P2，上报留在 P5 | 同意 | 已同意 |
-| D5 | 只读阶段先做慢日志文件 + 语句摘要 v1，v2 随 P5 | 同意 | 已同意 |
-| D6 | TRACE 的 span 名称、层次照 Go（含 client-go 的 24 处，在 client-rust fork 中加） | 照 Go | 已同意 |
+| D4 | `util/topsql` 的标签与 CPU 记账拆成 D14.3 提前到 P2，上报留在 P5 | 同意 | 已同意（Lucky，技术决定） |
+| D5 | 只读阶段先做慢日志文件 + 语句摘要 v1，v2 随 P5 | 同意 | 已同意（Lucky，技术决定） |
+| D6 | TRACE 的 span 名称、层次照 Go（含 client-go 的 24 处，在 client-rust fork 中加） | 照 Go | 已同意（Lucky，技术决定） |
 
 ## 11. 风险
 
@@ -275,4 +275,4 @@ Go 中 label 和 table id 是**每个请求**按它的第一个 key 算的（§1
 - D14.0（`tidb-execdetails`）：`ExecDetails`、`RuntimeStatsColl`、`String()` 已移植，正是 `StmtExecRecord` 的主体；不需要重写。
 - D05.2 的 `slow_log.rs`：规则匹配已移植；`SlowLogFormat` 等归 D14.2。
 - D05.4（事务上下文）、D07.1（snapshot）：承载 tagger（§6.4）。
-- ROADMAP：新增"D14.3 Top SQL 标签与 CPU 记账（P2）"（D4 已同意）。
+- ROADMAP：新增"D14.3 Top SQL 标签与 CPU 记账（P2）"（D4 已由 Lucky 同意）。
