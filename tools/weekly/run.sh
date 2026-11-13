@@ -126,6 +126,9 @@ EOF
 faults)
     rc=0
     (cd "$root" && tools/ab/faults/run.sh -b "$bin" -j "$out/faults-raw.json") >"$out/faults.log" 2>&1 || rc=$?
+    # tidb-rs's and the cluster's logs, to diagnose what the report shows.
+    cp "$root"/target/faults/*-tidb-rs.log "$out/" 2>/dev/null
+    cp /tmp/tidb-rs-playground/maya-faults.log "$out/faults-playground.log" 2>/dev/null
     if [ ! -f "$out/faults-raw.json" ]; then
         # No results at all: the cluster or tidb-rs did not come up. Incomplete, not a failure.
         rc=2

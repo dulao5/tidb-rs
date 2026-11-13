@@ -284,6 +284,10 @@ class Stats:
 def classify(e):
     code = e.args[0] if getattr(e, "args", None) else None
     msg = str(e.args[1]) if len(getattr(e, "args", ())) > 1 else str(e)
+    # client-rust's internal errors start with "[<source path>:<line>]: "; keep the file name
+    # and line (which identify the error) and drop the path, which would fill the 90 bytes
+    # kept below and differs between machines.
+    msg = re.sub(r"\[[^\]]*/([^/\]]+:\d+)\]: ", r"[\1]: ", msg)
     msg = re.sub(r"\d+", "N", msg)[:90]
     return f"{code}: {msg}"
 
