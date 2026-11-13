@@ -141,7 +141,7 @@ tidb-expression-macros = { path = "crates/expression/macros" }
 # when a budget runs out; client-go's per-request RPC timeouts and deadlines, and
 # `tikv_client_read_timeout` (P0-2); a broken TSO stream is reopened and its requests resent
 # (P0-4).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "36068d0b4514d3a5562ea1d3dc15ef4ef11c3543", default-features = false, features = ["client-go-metrics"] }
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "370cff42937d9b3c529bd9845ae990fb24c261a1", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 bytes = "1.11"
 # Global allocator of the server and the benchmarks (A1 / P0 decision D7: jemalloc).
