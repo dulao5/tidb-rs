@@ -28,6 +28,7 @@ pub mod builtin_math;
 pub mod builtin_op;
 pub mod builtin_registry;
 mod builtin_registry_gen;
+pub mod builtin_vec;
 pub mod chunk_executor;
 pub mod collation;
 pub mod column;

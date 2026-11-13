@@ -13,6 +13,7 @@ mod cast_cprop;
 mod cast_eval;
 mod cast_math;
 mod cast_util;
+mod cast_vec;
 
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -695,6 +696,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
             .or_else(|| cast_cprop::exec(op, p))
             .or_else(|| cast_math::exec(op, p))
             .or_else(|| cast_util::exec(op, p))
+            .or_else(|| cast_vec::exec(op, p))
             .unwrap_or_else(|| panic!("cast: op {op}")),
     }
 }
