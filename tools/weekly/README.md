@@ -5,7 +5,7 @@ and writes one page of report.
 
 | mode | when | parts | report |
 |---|---|---|---|
-| weekly | Fridays 09:00 UTC (18:00 JST), or by hand | ab, sysbench, faults, locks | artifact, job summary, comment on #54, tag `weekly-YYYY-Www` |
+| weekly | Fridays 09:00 UTC (18:00 JST), or by hand | ab, sysbench, faults, locks, tpch | artifact, job summary, comment on #54, tag `weekly-YYYY-Www` |
 | nightly | 18:00 UTC (03:00 JST), or by hand | ab, locks | artifact, job summary |
 
 The parts run in parallel jobs, each against its own cluster (`run.sh <part> <out-dir>`):
@@ -16,6 +16,7 @@ The parts run in parallel jobs, each against its own cluster (`run.sh <part> <ou
 | `sysbench` | `oltp_point_select` and `oltp_read_only`, 1 and 8 threads, Go TiDB then tidb-rs; B/A QPS | 1 TiKV |
 | `faults` | `tools/ab/faults/run.sh` (needs passwordless sudo, which GitHub's hosted runners have) | 3 TiKV |
 | `locks` | `tools/ab/locks/mixed_locks.py` with `lockgen` | 1 TiKV |
+| `tpch` | TPC-H queries 1-22 (`tpch/queries.sql`, from go-tpc) on `tiup bench tpch prepare --sf 1` data: `tidb-ab` result comparison and per-query time on both sides (`tpch_time.py`, median of 3). SF 1 because `tiup bench` takes an integer scale factor; loading takes about 6 minutes | 1 TiKV |
 
 `report.py` turns the parts' JSON into the report:
 

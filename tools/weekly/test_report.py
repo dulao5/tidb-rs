@@ -82,5 +82,15 @@ class VerdictTest(unittest.TestCase):
             self.assertTrue(first.startswith("**REGRESSED**"), first)
 
 
+    def test_tpch_query_no_longer_executable_is_regressed(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/cur", "tpch.json", {"part": "tpch", "status": "ok"})
+            write(f"{d}/cur", "tpch-time.json", {"Q6": {"a_ms": 1.0, "b_ms": None, "b_error": "1235: x"}})
+            write(f"{d}/prev", "tpch-time.json", {"Q6": {"a_ms": 1.0, "b_ms": 2.0, "b_error": None}})
+            rc, first = report(f"{d}/cur", f"{d}/prev", parts="tpch")
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+
+
 if __name__ == "__main__":
     unittest.main()

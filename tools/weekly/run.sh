@@ -10,6 +10,9 @@
 #   sysbench  oltp_point_select and oltp_read_only on Go TiDB then tidb-rs, B/A QPS ratio; 1 TiKV
 #   faults    tools/ab/faults/run.sh (3 TiKV, its own cluster; needs passwordless sudo)
 #   locks     tools/ab/locks/mixed_locks.py (needs LOCKGEN=path to the lockgen binary); 1 TiKV
+#   tpch      TPC-H queries 1-22 (tools/weekly/tpch/queries.sql) on `tiup bench tpch prepare`
+#             data (SF 1: tiup bench takes an integer scale factor): tidb-ab result comparison
+#             and relative time (tpch_time.py); 1 TiKV
 #
 # Environment: TIDB_RS_BIN (tidb-server, default target/release/tidb-server), TIDB_AB_BIN
 # (default target/release/ab), SYSBENCH_TIME (seconds per run, default 20),
@@ -40,8 +43,11 @@ cleanup() {
 # Cluster, data (sbtest1, 100k rows, 8 regions) and tidb-rs on 27001.
 start_cluster() {
     trap cleanup EXIT
-    "$root/scripts/playground.sh" start >"$out/$part-playground.log" 2>&1 || return 2
-    "$root/scripts/sysbench-prepare.sh" -P 27000 -t 1 -s 100000 -r 8 >>"$out/$part-playground.log" 2>&1 || return 2
+    "$root/scripts/playground.sh" start ${PLAYGROUND_EXTRA_CONFIG:+-c "$PLAYGROUND_EXTRA_CONFIG"} \
+        >"$out/$part-playground.log" 2>&1 || return 2
+    if [ "${LOAD_SBTEST:-1}" = 1 ]; then
+        "$root/scripts/sysbench-prepare.sh" -P 27000 -t 1 -s 100000 -r 8 >>"$out/$part-playground.log" 2>&1 || return 2
+    fi
     "$bin" -P 27001 --status-port 10081 --pd "$pd" --auto-tls=false >"$out/$part-tidb-rs.log" 2>&1 &
     rs_pid=$!
     for _ in $(seq 120); do
@@ -131,6 +137,20 @@ faults)
         rc=2
     fi
     write_status "$(status_of $rc)" "{\"raw\": \"faults-raw.json\", \"exit\": $rc}"
+    exit "$rc"
+    ;;
+tpch)
+    LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$root/tools/weekly/tpch/tidb.toml start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
+    tiup bench tpch --sf "${TPCH_SF:-1}" -H 127.0.0.1 -P 27000 -D tpch -T 4 prepare --analyze --dropdata \
+        >"$out/tpch-prepare.log" 2>&1 || { write_status incomplete '{"error": "tpch prepare failed"}'; exit 2; }
+    rc=0
+    "$ab" -a "$a" -b "$b" -D tpch --tls off --timeout 600 --out-dir "$out/ab-tpch" \
+        file "$root/tools/weekly/tpch/queries.sql" >"$out/ab-tpch.log" 2>&1 || rc=$?
+    python3 "$root/tools/weekly/classify.py" --a "$a" --db tpch --results "$out/ab-tpch/results.jsonl" \
+        --json "$out/tpch-classified.json" || rc=2
+    python3 "$root/tools/weekly/tpch_time.py" --queries "$root/tools/weekly/tpch/queries.sql" \
+        --a "$a" --b "$b" --json "$out/tpch-time.json" >"$out/tpch-time.log" 2>&1 || rc=2
+    write_status "$(status_of $rc)" "{\"classified\": \"tpch-classified.json\", \"time\": \"tpch-time.json\", \"exit\": $rc}"
     exit "$rc"
     ;;
 locks)

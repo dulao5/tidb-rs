@@ -43,6 +43,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True, nargs="+")
     ap.add_argument("--a", default="127.0.0.1:27000")
+    ap.add_argument("--db", default="sbtest")
     ap.add_argument("--json", required=True)
     args = ap.parse_args()
 
@@ -56,7 +57,7 @@ def main():
     # bind parameters; file workloads share one template name across statements).
     host, port = args.a.split(":")
     conn = pymysql.connect(host=host, port=int(port), user="root", autocommit=True,
-                           database="sbtest", connect_timeout=5, read_timeout=60)
+                           database=args.db, connect_timeout=5, read_timeout=60)
     ops_of_query, sample = {}, {}
     for r in records:
         if r["protocol"] == "text":

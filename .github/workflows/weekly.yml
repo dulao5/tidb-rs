@@ -4,7 +4,7 @@ name: Weekly build
 # playgrounds, one page of report (tools/weekly/report.py).
 #
 # - weekly (Fridays 09:00 UTC = 18:00 JST): result comparison per operator, sysbench, fault
-#   scenarios, lock resolution; the report is uploaded, posted on #54 and the commit is tagged
+#   scenarios, lock resolution, TPC-H; the report is uploaded, posted on #54 and the commit is tagged
 #   weekly-YYYY-Www.
 # - nightly (18:00 UTC = 03:00 JST): result comparison and lock resolution only; report
 #   uploaded, not posted.
@@ -62,7 +62,7 @@ jobs:
             mode="${{ inputs.mode || 'weekly' }}"; publish="${{ inputs.publish || false }}"
           fi
           [ "$mode" = nightly ] && publish=false
-          if [ "$mode" = weekly ]; then parts='["ab","sysbench","faults","locks"]'; else parts='["ab","locks"]'; fi
+          if [ "$mode" = weekly ]; then parts='["ab","sysbench","faults","locks","tpch"]'; else parts='["ab","locks"]'; fi
           { echo "mode=$mode"; echo "parts=$parts"; echo "publish=$publish"; } >> "$GITHUB_OUTPUT"
 
   build:
@@ -131,7 +131,7 @@ jobs:
           # downloaded them itself.
           for i in 1 2 3 4 5; do
             tiup mirror set https://tiup-mirrors.pingcap.com \
-              && tiup install playground pd:${TIUP_VERSION_PLAYGROUND} tikv:${TIUP_VERSION_PLAYGROUND} tidb:${TIUP_VERSION_PLAYGROUND} \
+              && tiup install playground bench pd:${TIUP_VERSION_PLAYGROUND} tikv:${TIUP_VERSION_PLAYGROUND} tidb:${TIUP_VERSION_PLAYGROUND} \
               && break
             echo "::warning::tiup install failed (attempt $i)"; sleep 10
           done

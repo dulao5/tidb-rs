@@ -11,8 +11,9 @@ shows what changed (newly executable operators, agreement, QPS ratios).
 Verdict (the report's first line, and the exit status):
 - RED (1): a part found a wrong result, a mismatch or a new inconsistency;
 - INCOMPLETE (2): a part did not run fully (skipped, failed to set up, missing);
-- REGRESSED (2): against the previous run, an operator tidb-rs executed is no longer executable,
-  `unsupported` statements increased, or a sysbench B/A ratio dropped by more than 15%;
+- REGRESSED (2): against the previous run, an operator or a TPC-H query tidb-rs executed is no
+  longer executable, `unsupported` statements increased, or a sysbench B/A ratio dropped by more
+  than 15%;
 - GREEN (0): none of these.
 """
 
@@ -21,7 +22,7 @@ import glob
 import json
 import os
 
-PARTS = ("ab", "sysbench", "faults", "locks")
+PARTS = ("ab", "sysbench", "faults", "locks", "tpch")
 
 
 def load(base, name):
@@ -74,9 +75,14 @@ def wrong_results(base):
     return out
 
 
-def regressions(cur_ab, prev_ab, cur_sb, prev_sb):
+def regressions(cur_ab, prev_ab, cur_sb, prev_sb, cur_tpch=None, prev_tpch=None):
     """What got worse against the previous run (each a short line)."""
     out = []
+    if cur_tpch and prev_tpch:
+        lost = sorted((q for q, r in prev_tpch.items() if r.get("b_ms") is not None
+                       and cur_tpch.get(q, {}).get("b_ms") is None), key=lambda q: int(q[1:]))
+        if lost:
+            out.append("TPC-H queries no longer executable on tidb-rs: " + ", ".join(lost))
     if cur_ab and prev_ab:
         lost = executable(prev_ab) - executable(cur_ab)
         if lost:
@@ -181,6 +187,33 @@ def section_faults(raw, lines):
     lines.append("")
 
 
+def section_tpch(classified, times, prev_times, lines):
+    lines.append("## TPC-H (SF 1, queries 1-22)\n")
+    if not times:
+        lines.append("_Not run._\n")
+        return
+    if classified:
+        t = classified["totals"]
+        ran, agree = agreement(t)
+        lines.append(
+            f"tidb-ab: {t['match']} match, {t['mismatch']} **mismatch**, {t['both_error']} both error, "
+            f"{t['unsupported']} unsupported (both protocols). Agreement on what tidb-rs executed: "
+            f"{pct(agree, ran)}.\n"
+        )
+    runs = sum(1 for r in times.values() if r.get("b_ms") is not None)
+    lines.append(f"tidb-rs executes {runs} / {len(times)} queries.\n")
+    lines.append("| query | Go TiDB | tidb-rs | B/A | last run | tidb-rs error |")
+    lines.append("|---|---|---|---|---|---|")
+    for q, r in times.items():
+        p = (prev_times or {}).get(q, {}).get("ratio_b_over_a")
+        a = f"{r['a_ms']:.0f} ms" if r.get("a_ms") is not None else "—"
+        b = f"{r['b_ms']:.0f} ms" if r.get("b_ms") is not None else "—"
+        ratio_s = f"{r['ratio_b_over_a']:.2f}" if r.get("ratio_b_over_a") else "—"
+        err = (r.get("b_error") or "").replace("|", "/")
+        lines.append(f"| {q} | {a} | {b} | {ratio_s} | {f'{p:.2f}' if p else '—'} | {err} |")
+    lines.append("")
+
+
 def section_locks(raw, lines):
     lines.append("## Lock resolution (tools/ab/locks)\n")
     if raw is None:
@@ -218,7 +251,8 @@ def main():
 
     cur_ab, prev_ab = load(args.inp, "ab-classified.json"), load(args.previous, "ab-classified.json")
     cur_sb, prev_sb = load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json")
-    regressed = regressions(cur_ab, prev_ab, cur_sb, prev_sb)
+    regressed = regressions(cur_ab, prev_ab, cur_sb, prev_sb,
+                            load(args.inp, "tpch-time.json"), load(args.previous, "tpch-time.json"))
     if any(s == "fail" for s in status.values()):
         verdict, code = "RED", 1
     elif any(s in ("incomplete", "missing") for s in status.values()):
@@ -256,6 +290,9 @@ def main():
         section_faults(load(args.inp, "faults-raw.json"), lines)
     if "locks" in expected:
         section_locks(load(args.inp, "locks-raw.json"), lines)
+    if "tpch" in expected:
+        section_tpch(load(args.inp, "tpch-classified.json"), load(args.inp, "tpch-time.json"),
+                     load(args.previous, "tpch-time.json"), lines)
     if not args.previous:
         lines.append("_No previous run to compare with._\n")
 
