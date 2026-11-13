@@ -215,13 +215,19 @@ tidb-rs 侧：
 - 经 follower 转发（forwarding）。
 - store 的慢分数（NotSlow 位）：等存活状态和健康状态做完再看。
 
+**已定（Maya，2026-11-13）：**
+1. **优先级**：整体 P1。RR-1 到 RR-3（足以支持"短读超时后改发 follower"）排在 C3 检查点（12-25，见 #54）之前；完整的 follower / closest 读（RR-4、RR-5、RR-7）排在 C5 之前。在那之前，`tidb_replica_read` 设为非 `leader` 的值时报错（N11 D10），不再默默读 leader。
+2. **closest-adaptive**：照 Go 按请求决定。
+   - 能估算响应大小时：估算值 ≥ `tidb_adaptive_closest_read_threshold` 走 Mixed 加 zone 标签，否则读 leader。点查 / BatchGet 用 `avgRowSize × 行数`（`newReplicaReadAdjuster`，`pkg/executor/builder.go:5656-5669`，在 `:5591-5592` 设到 snapshot 上；点查见 `pkg/executor/point_get.go:97`）；coprocessor 用 `netDataSize` 按 task 数分摊（`newClosestReadAdjuster`，`builder.go:4892`，在 `pkg/store/copr/coprocessor.go:173-176` 调用）。
+   - 无法估算响应大小时（没有 adjuster）：读 leader。
+   - 全局开关见 `IsReplicaReadClosestAdaptive`（`pkg/sessionctx/variable/session.go:2511-2513`）。
+   tidb-rs 在 D07.2 之前没有这些估算，所以 `closest-adaptive` 等同于读 leader，这与 Go 中没有 adjuster 的请求一致。
+3. **zone**：照 Go。tidb-rs 的 zone 取自它自己配置里的 `labels.zone`（Go 的 `config.GetTxnScopeFromConfig()` / `placement.DCLabelKey`，`pkg/ddl/placement/common.go:64`）；store 的 zone 取自 PD 返回的 store labels 中的 `zone`。
+
 **开放问题：**
-1. **D07.1 / D07.2 是否需要 follower 或 closest 读**（决定 P1 还是 P0）？若只需要"leader 慢时换 follower"，RR-1 到 RR-3 就够了，RR-4 / RR-5 可以推后。
-2. **closest-adaptive** 依赖 TiDB 的大小估算（`avgRowSize`、`netDataSize`）。tidb-rs 在 D07.2 之前是先当作 leader，还是先当作 closest-replicas？
-3. **zone 配置的来源**：tidb-rs 的配置项是否沿用 TiDB 的 `labels.zone`？
-4. **slow_leader 场景的注入方式**：只拖慢读、不拖慢 raft 的那种（读线程池占满，还是按进程加网络延迟），要在 RR-3 的 PR 里定。
-5. leader 在 ReadIndex 时的内存锁检查不认 `resolved_locks`：async commit 冲突多的负载下，会不会让 follower read 的锁重试明显多于 leader 读？这需要实测；TiKV 侧不改。
-6. 保持 Leader 模式的冷 region voter 遍历（发 leader 请求找新 leader），还是像 Go 那样直接靠 NotLeader 提示和存活状态？本设计先保持现状，等存活状态合并后再评估。
+1. **slow_leader 场景的注入方式**：只拖慢读、不拖慢 raft 的那种（读线程池占满，还是按进程加网络延迟），要在 RR-3 的 PR 里定。
+2. leader 在 ReadIndex 时的内存锁检查不认 `resolved_locks`：async commit 冲突多的负载下，会不会让 follower read 的锁重试明显多于 leader 读？这需要实测；TiKV 侧不改。
+3. 保持 Leader 模式的冷 region voter 遍历（发 leader 请求找新 leader），还是像 Go 那样直接靠 NotLeader 提示和存活状态？本设计先保持现状，等存活状态合并后再评估。
 
 ## 4. 退避、超时与语句截止时间
 
