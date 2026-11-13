@@ -130,7 +130,7 @@
 | `nonAsyncCommitLock` → `resolve(l, forceSyncCommit=true)` 重查（`go:566`） | `fallback_2pc` → `get_txn_status_from_lock(..., true)`（`rs:528`） | **一致** |
 | 状态已定时直接清 `secondaries + primary`（`go:1066`） | 无对应分支 | **一致**：进入该函数的前提是 `primaryLock != nil`（锁仍在），状态不可能已定，此分支实际走不到 |
 | `resolveAsyncResolveData`：按 region 分组，`ResolveLock` 带 `Keys`，并发（`go:1026`、`go:1148`） | 对每个 key 的 region 发不带 keys 的整 region `ResolveLock`，串行，按 `clean_regions` 去重（`rs:201`） | **差异**（整 region 扫描、串行；结果相同） |
-| `resolveRegionLocks` 遇 `KeyError` 只记日志并返回 nil（`go:1196`） | `resolve_lock_with_retry` 返回错误（`rs:365`） | **差异**：Go 吞掉错误，Rust 上抛。建议保留 Rust 行为并在 spec 中记为例外，或改为与 Go 一致，需评审决定 |
+| `resolveRegionLocks` 遇 `KeyError` 只记日志并返回 nil（`go:1196`）；普通路径 `resolveLock` 遇 `KeyError` 则返回错误（`go:1262`） | async commit 整笔清锁与普通路径共用 `resolve_lock_with_retry`，都返回错误（`rs:365`） | **差异，决定照搬 Go（L1）**：只在 async commit 整笔清锁这一处吞掉 `KeyError`（记日志、返回成功），普通路径仍返回错误。这是有意与 Go 一致：锁没清掉时，调用方重读会再次遇到这个锁，事务状态已在缓存中，于是再次清锁或进入退避，不会读到错误的数据 |
 
 ### 3.8 悲观锁
 
@@ -187,7 +187,7 @@
 | R6 | 跨请求共享的状态缓存（2048 FIFO）+ `HasSameDeterminedStatus` 断言 | §3.5 | 移植 |
 | R7 | `current_ts` 用低精度本地时钟，去掉每次 CheckTxnStatus 后的额外 TSO | §3.4 | 移植（减少 PD RPC） |
 | R8 | async commit 清锁按 region 分组带 keys、并发 | §3.7 | 可选（性能） |
-| R9 | `resolveRegionLocks` 吞 `KeyError` | §3.7 | 需决定：照搬 Go，或保留 Rust 上抛并记例外 |
+| R9 | `resolveRegionLocks` 吞 `KeyError` | §3.7 | 已决定：照搬 Go（L1），只限 async commit 整笔清锁 |
 | R10 | `Resolving()`（DATA_LOCK_WAITS）、`ResolveLockTime` | §3.10 | 归入观测相关块，不在本次 |
 | R11 | `MaxExecutionDurationMs`、`RequestSource`、`ResourceGroupName` | §3.9 | 单独评估（与资源管控一起） |
 
