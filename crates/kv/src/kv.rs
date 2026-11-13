@@ -831,8 +831,14 @@ pub trait Iterator: Send {
     // glue: Go interface method Iterator.Valid
     fn valid(&self) -> bool;
     // glue: Go interface method Iterator.Key
+    /// The current key. When the iterator is not valid (exhausted, or never positioned on an
+    /// entry) it returns the empty key and must not panic: callers ported from Go read
+    /// `Key()` after `Next` without checking `Valid()` (client-go's `Scanner.Key` returns
+    /// nil), e.g. D06.2's `ReverseHashIterator::next`.
     fn key(&self) -> &Key;
     // glue: Go interface method Iterator.Value
+    /// The current value; empty when the iterator is not valid, and must not panic (as
+    /// [`Iterator::key`]).
     fn value(&self) -> &[u8];
     // glue: Go interface method Iterator.Next
     fn next(&mut self) -> KvFuture<'_, ()>;
