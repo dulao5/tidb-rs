@@ -302,14 +302,18 @@ impl Getter for MockTxn {
     }
 }
 impl Retriever for MockTxn {
-    fn iter<'a>(&'a self, _: &'a Key, _: &'a Key) -> KvFuture<'a, Box<dyn KvIterator + 'a>> {
+    fn iter<'a: 'f, 'f>(
+        &'a self,
+        _: &'f Key,
+        _: &'f Key,
+    ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
         unimplemented!()
     }
-    fn iter_reverse<'a>(
+    fn iter_reverse<'a: 'f, 'f>(
         &'a self,
-        _: &'a Key,
-        _: &'a Key,
-    ) -> KvFuture<'a, Box<dyn KvIterator + 'a>> {
+        _: &'f Key,
+        _: &'f Key,
+    ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
         unimplemented!()
     }
 }
@@ -457,14 +461,18 @@ impl Getter for MockSnap {
     }
 }
 impl Retriever for MockSnap {
-    fn iter<'a>(&'a self, _: &'a Key, _: &'a Key) -> KvFuture<'a, Box<dyn KvIterator + 'a>> {
+    fn iter<'a: 'f, 'f>(
+        &'a self,
+        _: &'f Key,
+        _: &'f Key,
+    ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
         unimplemented!()
     }
-    fn iter_reverse<'a>(
+    fn iter_reverse<'a: 'f, 'f>(
         &'a self,
-        _: &'a Key,
-        _: &'a Key,
-    ) -> KvFuture<'a, Box<dyn KvIterator + 'a>> {
+        _: &'f Key,
+        _: &'f Key,
+    ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
         unimplemented!()
     }
 }
