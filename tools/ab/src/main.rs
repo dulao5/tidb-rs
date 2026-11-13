@@ -155,6 +155,9 @@ struct Report {
     skipped: BTreeMap<String, u64>,
     mismatches: BufWriter<File>,
     unsupported: BufWriter<File>,
+    /// Every compared statement and its verdict, without rows (for the weekly report's
+    /// per-operator agreement, `tools/weekly`).
+    results: BufWriter<File>,
     report_rows: usize,
     verbose: bool,
 }
@@ -221,6 +224,16 @@ impl Report {
             .entry((case.template.clone(), protocol))
             .or_default()
             .add(verdict);
+        writeln!(
+            self.results,
+            "{}",
+            json!({
+                "template": case.template,
+                "protocol": protocol,
+                "verdict": verdict.name(),
+                "query": query,
+            })
+        )?;
         let out = match verdict {
             Verdict::Mismatch(diff) => {
                 if self.verbose {
@@ -523,6 +536,7 @@ async fn run(cli: Cli) -> Result<bool, String> {
         skipped: BTreeMap::new(),
         mismatches: open("mismatches.jsonl")?,
         unsupported: open("unsupported.jsonl")?,
+        results: open("results.jsonl")?,
         report_rows: cli.report_rows,
         verbose: cli.verbose,
     };
@@ -552,6 +566,7 @@ async fn run(cli: Cli) -> Result<bool, String> {
         .mismatches
         .flush()
         .and_then(|_| report.unsupported.flush())
+        .and_then(|_| report.results.flush())
         .map_err(|e| e.to_string())?;
 
     let all = report.print_summary();

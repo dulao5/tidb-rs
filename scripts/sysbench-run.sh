@@ -14,6 +14,8 @@
 #   -D db         database                                 (default sbtest)
 #   -o dir        results directory                        (default target/sysbench)
 #   -x "args"     extra sysbench arguments
+#   -W workload   sysbench workload: oltp_read_only (default, with our latency histogram) or a
+#                 bundled one such as oltp_point_select (no p95 then)
 #
 # Each run's raw output is saved as <dir>/<timestamp>-<name>-t<threads>.txt and summarised as one
 # line: QPS, average and p95 latency (ms, per oltp_read_only event = 10 point selects + 4 range
@@ -40,7 +42,8 @@ db=sbtest
 script_dir=$(cd "$(dirname "$0")" && pwd)
 outdir=$(cd "$script_dir/.." && pwd)/target/sysbench
 extra=
-while getopts "e:n:a:b:T:d:t:s:D:o:x:" opt; do
+workload=oltp_read_only
+while getopts "e:n:a:b:T:d:t:s:D:o:x:W:" opt; do
     case $opt in
         e) endpoint=$OPTARG ;;
         n) name=$OPTARG ;;
@@ -53,7 +56,8 @@ while getopts "e:n:a:b:T:d:t:s:D:o:x:" opt; do
         D) db=$OPTARG ;;
         o) outdir=$OPTARG ;;
         x) extra=$OPTARG ;;
-        *) sed -n '2,25p' "$0" >&2; exit 2 ;;
+        W) workload=$OPTARG ;;
+        *) sed -n '2,27p' "$0" >&2; exit 2 ;;
     esac
 done
 mkdir -p "$outdir"
@@ -69,8 +73,12 @@ run_one() {
     local rc=0
     # The braces' 2>/dev/null swallows bash's "Segmentation fault" job message: sysbench 1.0.20
     # crashes after a failed thread_init (e.g. the server rejects the prepared statements).
+    local lua=$workload lat_arg=
+    if [ "$workload" = oltp_read_only ]; then
+        lua=$script_dir/oltp_read_only_lat.lua lat_arg=--lat_dir=$lat
+    fi
     # shellcheck disable=SC2086
-    { sysbench "$script_dir/oltp_read_only_lat.lua" --lat_dir="$lat" \
+    { sysbench "$lua" $lat_arg \
         --mysql-host="$host" --mysql-port="$port" --mysql-user="${MYSQL_USER:-root}" \
         --mysql-db="$db" --tables="$tables" --table-size="$size" \
         --skip_trx=on --db-ps-mode=auto --threads="$t" --time="$duration" \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Entry point of the TiKV fault-scenario comparison (#128 item 2), meant for a weekly build.
 #
-#   tools/ab/faults/run.sh [-b path/to/tidb-server] [-s scenarios] [-p phase-seconds] [-k]
+#   tools/ab/faults/run.sh [-b path/to/tidb-server] [-s scenarios] [-p phase-seconds] [-k] [-j results.json]
 #
 # Starts (or reuses) a tiup playground v8.5.8 with 1 PD + 3 TiKV + Go TiDB (tag maya-faults,
 # port offset 24000: Go TiDB 127.0.0.1:28000, PD 127.0.0.1:26379), loads sbtest1 (100k rows,
@@ -20,13 +20,15 @@ bin=""
 scenarios="split_merge,transfer_leader,kill_tikv,slow_tikv,net_cut,pause_tikv,wide_rows"
 phase=10
 keep=0
-while getopts "b:s:p:k" opt; do
+json_out=""
+while getopts "b:s:p:kj:" opt; do
     case $opt in
         b) bin=$OPTARG ;;
         s) scenarios=$OPTARG ;;
         p) phase=$OPTARG ;;
         k) keep=1 ;;
-        *) echo "usage: $0 [-b tidb-server] [-s scenarios] [-p phase] [-k]" >&2; exit 2 ;;
+        j) json_out=$OPTARG ;;
+        *) echo "usage: $0 [-b tidb-server] [-s scenarios] [-p phase] [-k] [-j results.json]" >&2; exit 2 ;;
     esac
 done
 
@@ -64,5 +66,6 @@ python3 "$root/tools/ab/faults/faults.py" --a "$a" --b "$b" --pd "$pd" \
     --expected "$root/tools/ab/faults/expected.json" --json "$out/$stamp.json" | tee "$out/$stamp.log"
 status=${PIPESTATUS[0]}
 set -e
+if [ -n "$json_out" ] && [ -f "$out/$stamp.json" ]; then cp "$out/$stamp.json" "$json_out"; fi
 echo "results: $out/$stamp.json (exit $status)"
 exit "$status"
