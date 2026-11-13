@@ -132,6 +132,7 @@ impl<'a> Elements<'a> {
     }
 
     // glue: `for _, v := range elements`
+    #[inline]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = f32> + 'a {
         self.0
             .as_chunks::<4>()
@@ -208,6 +209,7 @@ impl<'a> VectorFloat32<'a> {
     /// Len returns the length (dimension) of the vector.
     // go: VectorFloat32.Len L1
     #[allow(clippy::len_without_is_empty)] // Go's is IsZeroValue
+    #[inline]
     pub fn len(&self) -> usize {
         let d = &self.data;
         u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize
@@ -218,6 +220,7 @@ impl<'a> VectorFloat32<'a> {
     /// Read-only view here; see [`VectorFloat32::elements_mut`]. Panics like Go when the
     /// length word exceeds the data (Go: `&v.data[4]`).
     // go: VectorFloat32.Elements L2 (a view type instead of an aliasing []float32; elements_mut for writes)
+    #[inline]
     pub fn elements(&self) -> Elements<'_> {
         let l = self.len();
         if l == 0 {
@@ -337,23 +340,35 @@ impl<'a> VectorFloat32<'a> {
 ///
 /// The size is computed in u32 as in Go (`elements*4 + 4` wraps for elements >= 2^30).
 // go: PeekBytesAsVectorFloat32 L1 [M-ERR, M-INT]
+#[inline]
 pub fn peek_bytes_as_vector_float32(b: &[u8]) -> Result<usize, Error> {
     if b.len() < 4 {
-        return Err(errors::errorf(
-            "bad VectorFloat32 value header (len=%d)",
-            &[Arg::from(b.len())],
-        ));
+        return Err(bad_vector_header(b.len()));
     }
 
     let elements = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     let total_data_size = elements.wrapping_mul(4).wrapping_add(4);
     if b.len() < total_data_size as usize {
-        return Err(errors::errorf(
-            "bad VectorFloat32 value (len=%d, expected=%d)",
-            &[Arg::from(b.len()), Arg::from(total_data_size)],
-        ));
+        return Err(bad_vector_value(b.len(), total_data_size));
     }
     Ok(total_data_size as usize)
+}
+
+// glue: the first error of PeekBytesAsVectorFloat32, out of line (cold path)
+#[cold]
+#[inline(never)]
+fn bad_vector_header(len: usize) -> Error {
+    errors::errorf("bad VectorFloat32 value header (len=%d)", &[Arg::from(len)])
+}
+
+// glue: the second error of PeekBytesAsVectorFloat32, out of line (cold path)
+#[cold]
+#[inline(never)]
+fn bad_vector_value(len: usize, expected: u32) -> Error {
+    errors::errorf(
+        "bad VectorFloat32 value (len=%d, expected=%d)",
+        &[Arg::from(len), Arg::from(expected)],
+    )
 }
 
 /// ZeroCopyDeserializeVectorFloat32 deserializes the byte slice into a vector, without memory copy.
@@ -361,6 +376,7 @@ pub fn peek_bytes_as_vector_float32(b: &[u8]) -> Result<usize, Error> {
 ///
 /// Returns the vector and the remaining bytes; on error Go returns `ZeroVectorFloat32, b`.
 // go: ZeroCopyDeserializeVectorFloat32 L1 [M-ERR]
+#[inline]
 pub fn zero_copy_deserialize_vector_float32(b: &[u8]) -> Result<(VectorFloat32<'_>, &[u8]), Error> {
     let length = peek_bytes_as_vector_float32(b)?;
     Ok((

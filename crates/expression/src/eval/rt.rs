@@ -185,17 +185,18 @@ impl<'a> JsonView<'a> {
     }
 }
 
-/// The vectors of an argument column.
-pub struct VectorView<'a>(&'a Column);
+/// The vectors of an argument column: its offsets and data are taken once per chunk.
+#[derive(Clone, Copy)]
+pub struct VectorView<'a>(tidb_chunk::column::VarLenView<'a>);
 
 impl<'a> VectorView<'a> {
     /// The view of `col`.
     #[inline(always)]
     // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn new(col: &'a Column, _n: usize) -> Self {
-        VectorView(col)
+        VectorView(col.var_len_view())
     }
-    /// Row `i` (borrowed from the column).
+    /// Row `i` (borrowed from the column; Go `GetVectorFloat32(i)`).
     #[inline(always)]
     // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn get(&self, i: usize) -> VectorFloat32<'a> {
@@ -634,6 +635,9 @@ impl<'a> FirstColArgs<'a> {
 /// [`Args`] of the vector driver: reads row `i` of the evaluated argument columns.
 pub struct VecArgs<'a> {
     cols: &'a [&'a Column],
+    /// Per-chunk views of the VECTOR arguments (`None` for the others), see
+    /// [`VecArgs::with_vectors`].
+    vectors: &'a [Option<VectorView<'a>>],
     i: usize,
 }
 
@@ -642,7 +646,24 @@ impl<'a> VecArgs<'a> {
     #[inline(always)]
     // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn new(_f: &'a BuiltinFunc, cols: &'a [&'a Column], i: usize) -> Self {
-        VecArgs { cols, i }
+        VecArgs {
+            cols,
+            vectors: &[],
+            i,
+        }
+    }
+
+    /// The accessor for row `i`, reading the VECTOR arguments through views taken once per
+    /// chunk (`vectors[k]` is the view of `cols[k]`, or `None`).
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn with_vectors(
+        _f: &'a BuiltinFunc,
+        cols: &'a [&'a Column],
+        vectors: &'a [Option<VectorView<'a>>],
+        i: usize,
+    ) -> Self {
+        VecArgs { cols, vectors, i }
     }
 }
 
@@ -755,7 +776,13 @@ impl<'a> VecArgs<'a> {
     // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     fn vector_float32_at(&self, i: usize) -> Option<VectorFloat32<'a>> {
         let c = self.cols[i];
-        (!c.is_null(self.i)).then(|| c.get_vector_float32(self.i))
+        if c.is_null(self.i) {
+            return None;
+        }
+        Some(match self.vectors.get(i) {
+            Some(Some(v)) => v.get(self.i),
+            _ => c.get_vector_float32(self.i),
+        })
     }
 }
 

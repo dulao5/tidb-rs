@@ -307,14 +307,15 @@ impl Expr {
         }
     }
 
-    /// EvalVectorFloat32 returns the VectorFloat32 representation of expression.
+    /// EvalVectorFloat32 returns the VectorFloat32 representation of expression. A column's
+    /// value borrows from the row (Go's `row.GetVectorFloat32` does not copy either).
     // glue: dispatch of Expression.EvalVectorFloat32
-    pub fn eval_vector_float32(
+    pub fn eval_vector_float32<'r>(
         &self,
         ctx: &dyn EvalContext,
         st: &EvalState,
-        row: Row<'_>,
-    ) -> Result<Option<VectorFloat32<'static>>, Error> {
+        row: Row<'r>,
+    ) -> Result<Option<VectorFloat32<'r>>, Error> {
         match self {
             Expr::Column(c) => c.eval_vector_float32(ctx, row),
             Expr::CorrelatedColumn(c) => c.eval_vector_float32(ctx, st, row),

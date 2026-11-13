@@ -1005,11 +1005,22 @@ impl Column {
 
     /// GetVectorFloat32 returns the VectorFloat32 in the specific row.
     // go: Column.GetVectorFloat32 L1
+    #[inline]
     pub fn get_vector_float32(&self, row_id: usize) -> VectorFloat32<'_> {
-        let data = self.get_bytes(row_id);
-        match zero_copy_deserialize_vector_float32(data) {
-            Ok((v, _)) => v,
-            Err(err) => panic!("{err}"),
+        vector_float32_of(self.get_bytes(row_id))
+    }
+
+    /// The rows of a variable-length column through its offsets and data taken once: what
+    /// a loop over `GetBytes(i)` / `GetVectorFloat32(i)` reads, without re-reading the
+    /// column's buffers on every row.
+    // glue: per-chunk access to the offsets and data of a var-length column (M-EVAL)
+    #[inline]
+    pub fn var_len_view(&self) -> VarLenView<'_> {
+        let offsets =
+            <[I64]>::ref_from_bytes(self.offsets.bytes()).expect("offsets are 8-byte words");
+        VarLenView {
+            offsets,
+            data: self.data.capb(),
         }
     }
 
@@ -1287,5 +1298,42 @@ impl Column {
             self.data.cap(),
             self.elem_buf.as_ref().map_or(0, |e| e.cap),
         )
+    }
+}
+
+/// `Column.GetVectorFloat32` on the bytes of one row: panics like Go on a malformed value.
+// glue: the shared body of Column.GetVectorFloat32 and VarLenView::get_vector_float32
+#[inline(always)]
+fn vector_float32_of(data: &[u8]) -> VectorFloat32<'_> {
+    match zero_copy_deserialize_vector_float32(data) {
+        Ok((v, _)) => v,
+        Err(err) => panic!("{err}"),
+    }
+}
+
+/// See [`Column::var_len_view`].
+#[derive(Clone, Copy, Debug)]
+pub struct VarLenView<'a> {
+    offsets: &'a [I64],
+    data: &'a [u8],
+}
+
+impl<'a> VarLenView<'a> {
+    /// `GetBytes(i)`.
+    // glue: Column.GetBytes through the per-chunk view
+    #[inline(always)]
+    pub fn get_bytes(&self, i: usize) -> &'a [u8] {
+        let (start, end) = (
+            self.offsets[i].get() as usize,
+            self.offsets[i + 1].get() as usize,
+        );
+        &self.data[start..end]
+    }
+
+    /// `GetVectorFloat32(i)` (borrowed from the column).
+    // glue: Column.GetVectorFloat32 through the per-chunk view
+    #[inline(always)]
+    pub fn get_vector_float32(&self, i: usize) -> VectorFloat32<'a> {
+        vector_float32_of(self.get_bytes(i))
     }
 }

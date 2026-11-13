@@ -6,8 +6,8 @@ name: Expression gate (N4 §5)
 # processes is compared (scripts/eval-gate.sh, scripts/eval_gate_summary.py). The table is
 # written to the job summary, the raw outputs are uploaded.
 #
-# Manual: gh workflow run eval-gate.yml --ref <branch> [-f rounds=5]. It also runs on a push
-# that changes the gate itself.
+# Manual: gh workflow run eval-gate.yml --ref <branch> [-f rounds=5] (once the workflow is on
+# main). It also runs on a push that changes the gate, the drivers or the macro.
 
 on:
   workflow_dispatch:
@@ -18,6 +18,12 @@ on:
   push:
     paths:
       - crates/expression/benches/**
+      # The drivers, the macro and the hot accessors they call (plan.md: re-confirm on amd64
+      # after each change to the drivers or the macro).
+      - crates/expression/macros/**
+      - crates/expression/src/eval/**
+      - crates/chunk/src/column.rs
+      - crates/types/src/vector*.rs
       - scripts/eval-gate.sh
       - scripts/eval_gate_summary.py
       - .github/workflows/eval-gate.yml
