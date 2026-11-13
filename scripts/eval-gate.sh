@@ -31,12 +31,13 @@ cp "$root/crates/expression/benches/go/gate_vec_test.go" "$TIDB_SRC/pkg/expressi
 trap 'rm -f "$TIDB_SRC/pkg/expression/zz_gate_vec_test.go"' EXIT
 (cd "$TIDB_SRC" && go test -c -o "$out/expr.test" ./pkg/expression)
 
-rust_bin=$(cd "$root" && cargo bench -p tidb-expression --bench eval_gate --no-run --message-format=json 2>/dev/null |
+rust_bin=$(cd "$root" && cargo bench -p tidb-expression --bench eval_gate --no-run --message-format=json |
   python3 -c 'import json,sys
 for l in sys.stdin:
     m = json.loads(l)
     if m.get("reason") == "compiler-artifact" and m["target"]["name"] == "eval_gate" and m.get("executable"):
         print(m["executable"])')
+[ -n "$rust_bin" ] || { echo "eval_gate did not build" >&2; exit 1; }
 
 # Go benchmark (regexp, positional filter); the filter selects the signature among the
 # function family's cases (bench_test.go testFunc).

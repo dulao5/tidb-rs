@@ -339,6 +339,9 @@ fn longlong(unsigned: bool) -> FieldType {
     ft
 }
 
+/// A prototype case's name, result type and inputs (reused by its `-port` case).
+type Proto = (String, FieldType, Vec<(FieldType, Gen)>);
+
 struct Case {
     name: String,
     expr: ExprRef,
@@ -476,7 +479,7 @@ fn cases() -> Vec<Case> {
         ("LTInt", &cm::builtinLTIntSig),
         ("CastIntAsReal", &ca::builtinCastIntAsRealSig),
     ];
-    let protos: Vec<(String, FieldType, Vec<(FieldType, Gen)>)> = out
+    let protos: Vec<Proto> = out
         .iter()
         .map(|c| (c.name.clone(), c.ret.clone(), c.children.clone()))
         .collect();

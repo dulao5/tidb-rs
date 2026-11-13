@@ -25,6 +25,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # As in ci.yml: grpcio-sys's bundled gRPC needs <cstdint> on GCC 13.
+  CXXFLAGS: -include cstdint
 
 jobs:
   gate:
@@ -42,6 +44,20 @@ jobs:
         with:
           go-version-file: tidb/go.mod
           cache-dependency-path: tidb/go.sum
+      # Same native build dependencies as ci.yml (the workspace's vendored TiKV crates).
+      - name: Install system dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=5 update || echo "::warning::apt-get update failed"
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            build-essential cmake pkg-config libssl-dev zlib1g-dev protobuf-compiler \
+            || echo "::warning::apt-get install failed"
+          if ! command -v protoc >/dev/null; then
+            v=29.3
+            curl -fsSL --retry 5 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-linux-x86_64.zip"
+            echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+          fi
       # Installs the toolchain pinned in rust-toolchain.toml.
       - name: Install Rust
         run: rustup toolchain install

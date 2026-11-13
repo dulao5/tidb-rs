@@ -109,7 +109,7 @@ def main():
         print(f"### {'Vector driver (gate)' if gated else 'Row driver (not gated, #75)'}\n")
         print("| case | Go | Go allocs/op | Rust | Rust allocs/batch | Go/Rust | threshold | ≥ 1.5× | result |")
         print("|---|--:|--:|--:|--:|--:|--:|:-:|:-:|")
-        cases = sorted({n[: -len("-" + mode)] for n in rust if n.endswith("-" + mode)}, key=list(rust).index)
+        cases = [n[: -len("-" + mode)] for n in rust if n.endswith("-" + mode)]
         for case in cases:
             base = case[: -len("-port")] if case.endswith("-port") else case
             g = go.get((base, mode))
