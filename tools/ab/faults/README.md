@@ -23,9 +23,17 @@ tools/ab/faults/run.sh -b path/to/tidb-server -s kill_tikv,net_cut -p 10 -k
 4. It writes `target/faults/<timestamp>.json` / `.log`.
 5. It cleans the cluster unless `-k` is given.
 
-**Exit status:** 1 if any read returned a wrong result, or if tidb-rs showed an error kind that Go TiDB did not and that `expected.json` does not list. Known gaps go in `expected.json` with a reason, so the run stays green until they are fixed and goes red on anything new.
+**Exit status:**
 
-**Requirements:** tiup, the mysql client, `python3-pymysql`, and passwordless `sudo` for cgroup v2 and iptables.
+- **1**: a read returned a wrong result, or tidb-rs showed an error kind that Go TiDB did not and that `expected.json` does not list. Known gaps go in `expected.json` with a reason, so the run stays green until they are fixed and goes red on anything new.
+- **2**: nothing new, but the run is incomplete: a scenario was skipped or could not inject its fault. Each one is printed as `INCOMPLETE:` and listed under `incomplete` in the JSON. A misconfigured runner therefore never reports green.
+- **0**: every scenario ran and nothing new was found.
+
+Error kinds seen on **both** sides are not gated, because they are not a parity gap. They are still printed (`BOTH:`) and saved as `errors_on_both`, so a regression on both sides stays visible.
+
+**What is checked:** every result is compared with a snapshot taken before the faults, and nothing writes during the run. So this catches corrupted or partial results, but **not** stale reads or reads that miss a committed write. A writer with a monotonic check is the planned follow-up; see the report.
+
+**Requirements:** tiup, the mysql client, `python3-pymysql`, and passwordless `sudo`. Without passwordless sudo, `slow_tikv` (cgroup v2) and `net_cut` (iptables) are skipped and the run exits 2. The other scenarios need no root.
 
 ## Read load
 

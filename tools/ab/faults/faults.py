@@ -9,11 +9,19 @@ longest stall and the p99 latency. See README.md.
 
     tools/ab/faults/faults.py --a 127.0.0.1:28000 --b 127.0.0.1:28001 --pd 127.0.0.1:26379 \
         [--scenarios split_merge,transfer_leader,kill_tikv,slow_tikv,net_cut] \
-        [--json out.json] [--report out.md] [--expected expected.json]
+        [--json out.json] [--expected expected.json]
 
-Exit status: 0 when every result is correct and every error is either also seen on A or listed
-in the expected file (known gaps, e.g. the P0 items of specs/D07.1-store/client-go-parity.md);
-1 otherwise (a new inconsistency). Faults use sudo (cgroup v2, iptables) and kill -9 one TiKV.
+Exit status:
+- 1: a new inconsistency, i.e. a wrong result, or an error on B that A did not show and that the
+  expected file does not list (known gaps, e.g. the P0 items of
+  specs/D07.1-store/client-go-parity.md);
+- 2: no new inconsistency, but a scenario was skipped (no passwordless sudo for slow_tikv /
+  net_cut) or failed to inject its fault, so the run is incomplete;
+- 0: every scenario ran and nothing new was found.
+Faults use sudo (cgroup v2, iptables) and kill -9 one TiKV.
+
+Results are checked against static data only: nothing writes during the run, so stale reads and
+reads that miss a committed write are not detected (see specs/D07.1-store/fault-scenarios.md).
 """
 
 import argparse
@@ -357,6 +365,13 @@ def sc_wide_rows(args, log):
 
 ARGS_STATS = None
 
+# Scenarios that need passwordless sudo; without it they are skipped and the run exits 2.
+NEEDS_SUDO = {"slow_tikv", "net_cut"}
+
+
+def have_sudo():
+    return subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+
 SCENARIOS = {
     "split_merge": sc_split_merge,
     "transfer_leader": sc_transfer_leader,
@@ -387,6 +402,19 @@ def inconsistencies(name, summary, expected):
             if any(re.search(k, f"{shape} {err}") for k in known):
                 continue
             out.append(f"{name}/B/{shape}: {n} × {err} (not on A, not expected)")
+    return out
+
+
+def shared_errors(summary):
+    """Error kinds seen on both sides: not gated (no parity gap), but reported so that a
+    regression on both sides is still visible."""
+    a, b = summary.get("A", {}), summary.get("B", {})
+    out = []
+    for shape, d in b.items():
+        a_errors = a.get(shape, {}).get("errors", {})
+        for err, n in d["errors"].items():
+            if err in a_errors:
+                out.append(f"{shape}: {err} (A {a_errors[err]}, B {n})")
     return out
 
 
@@ -423,6 +451,8 @@ def main():
 
     results = []
     new = []
+    incomplete = []
+    sudo_ok = have_sudo()
     try:
         time.sleep(args.phase)
         stats.reset()
@@ -439,18 +469,27 @@ def main():
                 events.append((round(time.monotonic() - t0, 1), msg))
                 print(f"  [{name} +{events[-1][0]}s] {msg}", flush=True)
 
+            if name in NEEDS_SUDO and not sudo_ok:
+                print(f"{name}: SKIPPED (needs passwordless sudo)", flush=True)
+                incomplete.append(f"{name}: skipped, needs passwordless sudo")
+                results.append({"scenario": name, "skipped": "needs passwordless sudo"})
+                continue
             stats.reset()
             try:
                 SCENARIOS[name](args, log)
             except Exception as e:  # noqa: BLE001 - report and go on
                 log(f"scenario error: {e!r}")
+                incomplete.append(f"{name}: scenario error {e!r}")
             summary = stats.summary()
-            results.append({"scenario": name, "events": events, "summary": summary})
+            both = shared_errors(summary)
+            results.append({"scenario": name, "events": events, "summary": summary, "errors_on_both": both})
             found = inconsistencies(name, summary, expected)
             new += found
             print(f"{name}: {json.dumps(summary)}", flush=True)
             for f in found:
                 print(f"  NEW: {f}", flush=True)
+            for f in both:
+                print(f"  BOTH: {f}", flush=True)
             time.sleep(args.phase / 2)  # let the cluster settle
     finally:
         stop.set()
@@ -458,9 +497,11 @@ def main():
             t.join(timeout=130)
     if args.json:
         with open(args.json, "w") as f:
-            json.dump({"results": results, "new_inconsistencies": new}, f, indent=1)
+            json.dump({"results": results, "new_inconsistencies": new, "incomplete": incomplete}, f, indent=1)
     print(f"{len(new)} new inconsistencies")
-    sys.exit(1 if new else 0)
+    for i in incomplete:
+        print(f"INCOMPLETE: {i}")
+    sys.exit(1 if new else 2 if incomplete else 0)
 
 
 if __name__ == "__main__":
