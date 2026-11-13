@@ -886,6 +886,38 @@ fn value_diff(got: &Value, want: &Value) -> String {
     }
 }
 
+/// go-fix pingcap/tidb@4f61995df8 + @84040e1f0a (#71844, #72214; release-8.5 after
+/// v8.5.8): `ast.RedactURL` drops userinfo, fragments and unknown query options and
+/// redacts endpoints. The vectors are from v8.5.8 without this fix; for the
+/// `tidb_cloud_storage_uri` inputs whose redacted value changes, the expected value is
+/// the fixed `RedactURL`'s (upstream code at 84040e1f0a, run with go1.25.12) until the
+/// vectors are regenerated with the fix applied (tracker `govec/fixes`).
+const REDACT_URL_FIXED: &[(&str, &str)] = &[
+    (
+        "s3://b/p?access_key=AK&Session_Token=T&endpoint=http%3A%2F%2Fminio%3A9000",
+        "s3://b/p?Session_Token=xxxxxx&access_key=xxxxxx&endpoint=xxxxxx",
+    ),
+    ("S3://b?x=1&ACCESS-KEY=k", "s3://b?ACCESS-KEY=xxxxxx"),
+    (
+        "azure://c/p?sas-token=abc&foo=b%20c",
+        "azure://c/p?sas-token=xxxxxx",
+    ),
+    (
+        "gcs://b/p?credentials-file=/x/y.json",
+        "gcs://b/p?credentials-file=xxxxxx",
+    ),
+    ("s3://user:pass@host:80/p?a=1#frag", "s3://host:80/p"),
+    ("s3://h:abc/p", "(invalid URL)"),
+    ("s3://[1.2.3.4]/b", "(invalid URL)"),
+    ("s3://b/p?a=%zz&access-key=k", "s3://b/p"),
+    ("s3://b/p?;access-key=k&b=2", "s3://b/p"),
+    (
+        "s3://b/p?k=v+w&access-key=a+b",
+        "s3://b/p?access-key=xxxxxx",
+    ),
+    ("//host/p?access-key=k", "//host/p"),
+];
+
 /// Replays one file: (records checked, records skipped as pending).
 fn replay(path: &str) -> (usize, usize) {
     let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(path).expect("vectors"));
@@ -899,7 +931,15 @@ fn replay(path: &str) -> (usize, usize) {
     let mut fails = vec![];
     let (mut n, mut skipped) = (0, 0);
     for line in lines {
-        let rec: Value = serde_json::from_str(line).unwrap();
+        let mut rec: Value = serde_json::from_str(line).unwrap();
+        if rec["op"] == "set_global_hook"
+            && rec["args"][0] == "tidb_cloud_storage_uri"
+            && let Some((_, fixed)) = REDACT_URL_FIXED
+                .iter()
+                .find(|(input, _)| rec["args"][1] == *input)
+        {
+            rec["out"]["after"] = Value::String((*fixed).to_owned());
+        }
         let op = rec["op"].as_str().unwrap();
         let args = rec["args"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
         // Go panicked inside a GetGlobal hook (the test accessor panics on
