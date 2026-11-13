@@ -74,24 +74,19 @@ impl From<KeyRange> for BoundRange {
     }
 }
 
-/// Retry budgets modelled on TiDB / client-go.
+/// Retry budgets of TiDB / client-go.
 ///
-/// client-go bounds the *total* sleep of a read (20 s for `Get`/`BatchGet`, coprocessor
-/// `copNextMaxBackoff` = 20 s) and backs off on locks with `BoTxnLockFast` (base
-/// `tidb_backoff_lock_fast` = 10 ms, cap 3 s, equal jitter) and on region errors with
-/// `BoRegionMiss` (2 ms, cap 500 ms, no jitter). tikv-client counts attempts instead of time, so
-/// the attempt limits below are chosen to give roughly the same budget:
-///
-/// - locks: 10, 20, ..., 2560 ms (9 attempts, about 3.8 s with equal jitter), then 3 s capped
-///   attempts; 16 attempts sleep about 20 s on average (at most 26 s). tikv-client's default
-///   (`2..500 ms`, 10 attempts) gives up after about 1.5 s, much earlier than TiDB, and turns a
-///   slow-but-live writer into a read error.
-/// - region errors: 2..256 ms (8 attempts, 0.5 s) then 500 ms; 48 attempts is about 20 s.
+/// client-go gives each read one `Backoffer` with a 20 s budget of total sleep (`Get`,
+/// `BatchGet`, a scan page, a coprocessor task: `getMaxBackoff`, `batchGetMaxBackoff`,
+/// `scannerNextMaxBackoff`, `copNextMaxBackoff`), with one curve per kind of error
+/// (`BoRegionMiss` 2..500 ms, `BoTiKVRPC` 100..2000 ms, `BoTxnLockFast` 10..3000 ms, ...), and
+/// does not charge `ServerIsBusy` waits to it (up to 10 minutes). `Backoff::time_budget` is that
+/// `Backoffer` (client-rust#12): given for both region errors and lock waits, a read's region
+/// retries, its lock resolution and its lock waits all draw from the same 20 s
+/// (`specs/D07.1-store/client-go-parity.md` P0-1).
 pub fn tidb_retry_options() -> RetryOptions {
-    RetryOptions::new(
-        Backoff::no_jitter_backoff(2, 500, 48),
-        Backoff::equal_jitter_backoff(10, 3000, 16),
-    )
+    let budget = Backoff::time_budget(20_000);
+    RetryOptions::new(budget.clone(), budget)
 }
 
 /// A connection to a TiKV cluster through PD.
@@ -339,9 +334,11 @@ mod tests {
         assert!(KeyRange::new(b"c".to_vec(), b"b".to_vec()).is_empty());
     }
 
-    /// The lock budget must be close to TiDB's 20 s, not tikv-client's ~1.5 s default.
+    /// Both budgets are client-go's 20 s of sleep, not tikv-client's ~1.5 s default.
     #[test]
     fn lock_backoff_budget_is_tidb_like() {
+        assert!(tidb_retry_options().region_backoff.is_time_budget());
+        assert!(tidb_retry_options().lock_backoff.is_time_budget());
         let mut lock = tidb_retry_options().lock_backoff;
         let mut total = std::time::Duration::ZERO;
         while let Some(d) = lock.next_delay_duration() {
