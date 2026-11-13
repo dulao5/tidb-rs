@@ -31,7 +31,7 @@ exported test probes (`StoreProbe`, `TxnProbe`, `CommitterProbe`):
 | `get -keys …` | prints committed values |
 
 `mixed_locks.py` runs every case on fresh rows, separately for A and B and for each read shape,
-so that one reader never resolves the locks the other is about to meet. A locked row's new value
+so that one reader never resolves the locks the other is about to meet. Read shapes: an autocommit point get (both sides at MaxTS, no TSO), the same point get under `max()` (both at the statement's start_ts; tidb-rs through client-rust `Transaction::get`), and a range scan (coprocessor). A locked row's new value
 is a copy of row 99999, so every returned row reads NEW (the locking transaction committed) or
 OLD. B reads twice; between the two reads `scanlocks` shows whether the locks are gone (the
 background cleanup, R2). RPC counts are the `tidb_tikvclient_request_seconds_count` deltas of

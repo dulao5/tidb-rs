@@ -66,8 +66,12 @@ CASES = [
 ]
 
 SHAPES = {
-    # The secondary row alone: a point get.
-    "point": lambda p, s: f"select id, c from {TABLE} where id = {s}",
+    # The secondary row alone: an autocommit point get, which both sides send at MaxTS
+    # (Go: sessiontxn/isolation/optimistic.go:110-121; tidb-rs: `max_ts_point_get`).
+    "point-maxts": lambda p, s: f"select id, c from {TABLE} where id = {s}",
+    # The same point get under an aggregation: no MaxTS optimization, so both read at the
+    # statement's start_ts (tidb-rs: `snapshot(start_ts)` + client-rust `Transaction::get`).
+    "point-tso": lambda p, s: f"select max(c) from {TABLE} where id = {s}",
     # (No batch point get: tidb-rs's SQL layer does not plan `IN` / `OR` on the handle yet;
     # BatchGet's lock handling is covered by client-rust's unit tests.)
     # A range over both rows: a coprocessor table scan.
@@ -161,7 +165,7 @@ class Run:
     def outcome(self, rows):
         if rows is None:
             return None
-        return [("NEW" if r[1] == self.marker_c else "OLD") for r in rows]
+        return [("NEW" if r[-1] == self.marker_c else "OLD") for r in rows]
 
     def case(self, case, side, shape):
         endpoint = self.args.a if side == "A" else self.args.b
@@ -235,7 +239,8 @@ def shared_lock_case(run, shape):
             break
         time.sleep(0.1)
     sql = {
-        "point": f"select id, v from locktest.fk_parent where id = {parent + 1}",
+        "point-maxts": f"select id, v from locktest.fk_parent where id = {parent + 1}",
+        "point-tso": f"select max(v) from locktest.fk_parent where id = {parent + 1}",
         "range": f"select id, v from locktest.fk_parent where id between {parent} and {parent + 1} order by id",
     }[shape]
     out = {}
@@ -288,7 +293,7 @@ def main():
                 mismatches += 1
             results.append({"case": case["name"], "shape": shape, "A": a, "B": b, "same": same, "expected": expect_ok})
             print(
-                f"{case['name']:22} {shape:6} A={ra['outcome'] or ra['error']} {ra['ms']}ms {ra['rpcs']}/{ra['rpcs_total']} | "
+                f"{case['name']:22} {shape:11} A={ra['outcome'] or ra['error']} {ra['ms']}ms {ra['rpcs']}/{ra['rpcs_total']} | "
                 f"B={rb['outcome'] or rb['error']} {rb['ms']}ms {rb['rpcs']}/{rb['rpcs_total']}, 2nd read {b['reads'][1]['ms']}ms "
                 f"{b['reads'][1]['rpcs_total']}, locks {b['locks_before']}->{rb['locks_after']}->{b['reads'][1]['locks_after']}"
                 f" {'OK' if same else 'MISMATCH'}",
@@ -302,7 +307,7 @@ def main():
             mismatches += 1
         results.append({"case": "fk-shared-lock", "shape": shape, **r, "same": same})
         print(
-            f"{'fk-shared-lock':22} {shape:6} locks {r['locks']} A={r['A']['rows'] or r['A']['error']} "
+            f"{'fk-shared-lock':22} {shape:11} locks {r['locks']} A={r['A']['rows'] or r['A']['error']} "
             f"{r['A']['ms']}ms | B={r['B']['rows'] or r['B']['error']} {r['B']['ms']}ms "
             f"{'OK' if same else 'MISMATCH'}",
             flush=True,
