@@ -130,8 +130,9 @@ tidb-expression = { path = "crates/expression" }
 tidb-expression-macros = { path = "crates/expression/macros" }
 # TiKV Rust client: our fork (dulao5/client-rust, branch tidb-rs/metrics): `Snapshot::coprocessor`,
 # several connections per store, client-go/PD metrics (feature client-go-metrics), and
-# client-go's ForRead lock resolution (#101 R1, R2).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "3e1cf83a218cb6e64b04628170a8d6961388d07c", default-features = false, features = ["client-go-metrics"] }
+# client-go's ForRead lock resolution (#101 R1-R4: lock hints, background cleanup,
+# TTL-capped lock backoff, shared lock wrappers in the coprocessor).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "ee7f1e224f1d8eb9639c766cd014913e770eaef5", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 bytes = "1.11"
 # Global allocator of the server and the benchmarks (A1 / P0 decision D7: jemalloc).
