@@ -106,7 +106,8 @@ fn eliminates_column_projection_under_aggregation() {
 /// nullable. Merging the projections folds `IF(1, a, b)` to the column `a`, and Go then sets
 /// the IF's nullability on the folded node in place: the `*Column` (and its `*FieldType`)
 /// is shared with the DataSource, so Go clears NOT NULL on the DataSource's `a` as well
-/// (inferred from the code, see the report). With copy-on-write only the projection's copy
+/// (code path confirmed in the #147 review; for memory tables the effect is global and was
+/// reproduced on v8.5.8, report §3.3.1 and #148). With copy-on-write only the projection's copy
 /// changes. This test pins the Rust behaviour; the divergence is a finding, not a fix.
 #[test]
 #[ignore = "blocked-by:D08.9 (the IF function class is not ported; run when it is)"]

@@ -1,6 +1,6 @@
 # D09.7 设计试点报告：验证 N1 计划表示
 
-状态：试点完成（2026-11-13），供 N1 定稿评审。类型：spike，**不合入主线，不计入覆盖率**（方法论 §8、ROADMAP P0 第 3 项）。回应 #128 第一节第 4 条。
+状态：试点完成（2026-11-13），供 N1 定稿评审；同日按 #147 评审意见（Lucky）修订：E3 在真实 Go v8.5.8 上复现，FieldType 方法调用式修改补审计（附录 B），M-FT 给出推荐方案。类型：spike，**不合入主线，不计入覆盖率**（方法论 §8、ROADMAP P0 第 3 项）。回应 #128 第一节第 4 条。
 
 代码位置：`crates/spike/planner-pilot`（crate `tidb-planner-pilot`）。在 `layers.toml` 中登记为 rank 13（与规划中的 `tidb-planner` 同层），`blocks = []`，D09.7 的函数仍属于 `tidb-planner`，不计为已移植。`tools/first-party.sh` 增加了 `crates/spike/*`，所以 fmt 和 clippy 会检查它。删除试点时，连同这两处登记一起删。
 
@@ -9,7 +9,10 @@
 **N1 的方向可以确认，但需要修订后定稿，修订项见第 6 节。** 按 spec 写，L1 规则代码能与 Go 逐行对照，借用检查器带来的偏离都可以用固定写法机械处理。试点发现了 N1 没有覆盖的三件事：
 
 1. **固定写法应改为"摘出节点再分派"，不是 `PlanCtx::split()`**（§2、§4）。规则方法在 `&mut self` 上运行，节点先从 arena 中暂时摘出，Go 的 `p.Conditions = ...`、`p.Children()[0] = ...` 都能原样写。整个试点没有一处用到 `split()`。
-2. **共享修改的审计范围要扩大到 `*FieldType` 和 `*Schema` 的别名**（§3）。Go 的 `Column.Clone()` 是浅拷贝，`RetType` 指针仍然共享。所以 `GetType().SetFlag(...)` 这类修改在 Go 中对整个查询可见，在 Rust 中不可见。试点找到一处会改变计划的地方：`rule_eliminate_projection.go:201`。44 处 `.Index =`/`.RetType =` 中，只有 `rule_partition_processor.go:157` 依赖修改的可见性。
+2. **共享修改的审计范围要扩大到 `*FieldType` 和 `*Schema` 的别名**（§3）。Go 的 `Column.Clone()` 是浅拷贝，`RetType` 指针仍然共享。所以 `GetType().SetFlag(...)` 这类修改在 Go 中对整个查询可见，在 Rust 中不可见。
+   - **已在真实的 Go v8.5.8 上复现，而且比预想严重**：memory table 的列直接指向进程全局的 infoschema 定义，所以对 `information_schema` 表执行一条 E3 形状的查询，或者一条普通的 `FIRST_VALUE(col) OVER ()`，之后**该 tidb-server 上所有查询**的计划都会变（§3.3，已登记为 upstream-pitfall #148）。
+   - **审计结果**：44 处 `.Index =`/`.RetType =` 中，只有 `rule_partition_processor.go:157` 依赖修改的可见性（附录 A）。FieldType 方法调用式的原地修改有 156 处，其中"共享且可见性有影响"的按机制合并为 10 组（附录 B），已实测确认 2 组。
+   - **M-FT 推荐方案 (a)**：默认写时复制。只在 Go 的别名会改变 EXPLAIN 能看到的计划时，在该处显式模拟（§6 第 3 条）。
 3. **物理计划建议从一开始就用 `Arc`，不分 `Box` 阶段和冻结阶段**（§5）。语句独占时用 `Arc::get_mut` 原地改；共享后（plan cache、记忆化的子计划）写时复制。plan cache 命中后的重建用路径复制，比 Go 每次深拷贝整棵计划便宜。只有实例级 plan cache 时，这个设计可以支持。
 
 ## 1. 范围与交付物
@@ -242,7 +245,7 @@ Go 的 `Column.Clone()` 是 `newCol := *col`，`RetType` 指针仍然共享。�
 
 于是同一源列的 `FieldType`，在整条查询里实际上是**一个共享的可变对象**。Rust 的 `Column.ret_type` 是按值保存的（D08.1 已经这样定了），这种别名不存在。
 
-**E3 的具体例子**（推断，按代码逐步推出，没有在 Go 中运行）：
+**E3 的具体例子**（代码链条已由 #147 评审逐步核实；普通表上的单查询影响未能用 EXPLAIN 观察到，memory table 上的全局影响已实测，见 3.3.1）：
 
 建表 `t(a INT NOT NULL, b INT)`，查询 `SELECT IF(x,a,b) FROM (SELECT 1 x, a, b FROM t) s`。
 
@@ -262,6 +265,73 @@ ProjectionEliminator 之后读取 NotNull 的规则还有：PPD（`logical_join.
 - `FoldConstant` 里的 `SetCoercibility` 选择了保持共享（collationInfo 的 coercibility 是原子量，"a shared node is changed in place, as in Go"）。
 
 这说明需要一条**全局规则**，而不是每个块各自决定。
+
+#### 3.3.1 在 Go v8.5.8 上实测（2026-11-13）
+
+**环境**：`tiup playground v8.5.8 --tag d097-e3 --port-offset 29000 --without-monitor`，`tidb_version()` 显示 commit `8b857efa2`。实测后已清理。
+
+**为什么 memory table 是全局的**：`buildMemTable` 用 `RetType: &col.FieldType` 建列（`logical_plan_builder.go:5510`），指向进程全局的 infoschema `TableInfo`。普通表则按查询 `col.FieldType.Clone()`（`:5346`）。
+
+测试用的表是 `information_schema.KEY_COLUMN_USAGE`：`ORDINAL_POSITION`、`TABLE_NAME` 为 NOT NULL，`POSITION_IN_UNIQUE_CONSTRAINT` 可空（`infoschema/tables.go:563-576`）。
+
+**第 1 步，触发前**（每条都是新连接）：
+
+```
+EXPLAIN SELECT ORDINAL_POSITION FROM information_schema.KEY_COLUMN_USAGE WHERE ORDINAL_POSITION IS NULL;
+TableDual_6	0.00	root		rows:0
+
+EXPLAIN SELECT MAX(ORDINAL_POSITION) FROM information_schema.KEY_COLUMN_USAGE;
+StreamAgg_9	1.00	root		funcs:max(Column#8)->Column#13
+└─TopN_10	1.00	root		Column#8:desc, offset:0, count:1
+  └─MemTableScan_17	10000.00	root	table:KEY_COLUMN_USAGE
+```
+
+**第 2 步，执行一次 E3 形状的查询**（任意会话）：
+
+```sql
+SELECT IF(x, ORDINAL_POSITION, POSITION_IN_UNIQUE_CONSTRAINT) AS y
+FROM (SELECT 1 AS x, ORDINAL_POSITION, POSITION_IN_UNIQUE_CONSTRAINT
+      FROM information_schema.KEY_COLUMN_USAGE) s LIMIT 1;
+```
+
+它的计划是 `Limit_8 → MemTableScan_11`：两层投影已被合并消除，第 201 行确实执行到了。
+
+**第 3 步，新连接再查**，计划变了：
+
+```
+EXPLAIN SELECT ORDINAL_POSITION FROM information_schema.KEY_COLUMN_USAGE WHERE ORDINAL_POSITION IS NULL;
+Projection_4	8000.00	root		Column#8
+└─Selection_5	8000.00	root		isnull(Column#8)
+  └─MemTableScan_6	10000.00	root	table:KEY_COLUMN_USAGE
+
+EXPLAIN SELECT MAX(ORDINAL_POSITION) FROM information_schema.KEY_COLUMN_USAGE;
+StreamAgg_10	1.00	root		funcs:max(Column#8)->Column#13
+└─TopN_13	1.00	root		Column#8:desc, offset:0, count:1
+  └─Selection_18	8000.00	root		not(isnull(Column#8))
+    └─MemTableScan_19	10000.00	root	table:KEY_COLUMN_USAGE
+```
+
+**第 4 步，确认影响不会自行消失**：
+
+- 执行一次 DDL（`CREATE DATABASE d097; CREATE TABLE d097.t(a INT NOT NULL PRIMARY KEY, b INT)`），schema version 变了，第 3 步的计划仍然保持不变。
+- 用普通表 `d097.t` 执行同样形状的查询作对照，之后 `EXPLAIN SELECT a FROM d097.t WHERE a IS NULL` 前后都是 `TableDual`：对普通表，影响只限于当次查询。
+
+**第 5 步，另一条 V1 也能复现**（附录 B 第 5 组，`window_func.go:76`），而且触发它只需要一条普通的窗口函数查询：
+
+```
+EXPLAIN SELECT TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_NAME IS NULL;   -- TableDual_6
+SELECT FIRST_VALUE(TABLE_NAME) OVER () FROM information_schema.KEY_COLUMN_USAGE LIMIT 1;
+EXPLAIN SELECT TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_NAME IS NULL;   -- Projection_4 → Selection_5 isnull(Column#6) → MemTableScan_6
+```
+
+**没有复现成功的**：
+
+- **E3 在普通表上的单查询影响**：`EXPLAIN SELECT MAX(a) FROM (SELECT IF(x,a,b) AS y, a FROM (SELECT 1 AS x, a, b FROM d097.t) s) s2 WHERE y > 0`，与把 `IF` 换成 `a` 的对照查询，计划相同，都是主键倒序 RangeScan 加 Limit，没有 Selection。a 是主键，range 扫描已经隐含非空，所以看不出差别。第 255 行的推断仍然是推断。
+- **`IF(1, CONSTRAINT_NAME, NULL)` 走的 `constant_fold.go:46/47`**：它改的是 charset/collation，不是 NotNull，`IS NULL` 观察不到，所以既没有确认也没有否定。
+
+**结论**：这是上游 bug。它只影响计划质量，没有观察到错误结果；但一台 tidb-server 的计划会依赖它此前执行过哪些查询，不可复现。已登记为 #148（upstream-pitfall），没有向 pingcap 仓库提交。
+
+**对 tidb-rs 的含义**：Rust 不可能、也不应该复现这种全局污染。这是推荐 M-FT 方案 (a) 的直接论据，见 §6。
 
 ### 3.4 `*Schema` 别名
 
@@ -344,7 +414,17 @@ Rust 的做法：
    - (a) 默认写时复制，凡是 Go 改变了共享对象的地方，逐处登记为已知差异，并配回归测试；
    - (b) `Column.ret_type` 改为 `Arc<FieldType>`，保留指针身份，同时为"对所有共享者生效的修改"提供一个显式操作。
 
-   试点倾向 (a)：目前只找到 E3 一处会影响计划，而 (b) 要改 D08.1 已定的表示。但需要项目负责人决定。另外，`rule_partition_processor.go:157` 要在 PartitionProcessor 块的 plan 里写明怎么改写。
+   **推荐 (a)，并做一处细化**（试点作者、Lucky 与协调人一致；待项目负责人确认）：
+   - **默认写时复制**。Go 的这种别名是偶然形成的，不是设计：对普通表它只是降低计划质量，对 memory table 它会污染全局状态（§3.3.1，#148）。`Column.ret_type` 保持按值保存，**不改成 `Arc<FieldType>`**，保留 D08.1 已定的表示。
+   - **逐处显式模拟**：只有当 Go 的别名会改变 golden test 或 EXPLAIN 对照能看到的计划时，才在那一处模拟 Go 的效果。例如 E3 遇上 MaxMinEliminator：除了改投影里的副本，还按 UniqueID 同步改同一查询里来源列的类型。写法固定为：
+     - 加注释 `// Go aliasing (M-FT): <site>, <effect>`；
+     - 配一个回归测试；
+     - 在该块 plan 的"已知差异/模拟"表里登记。
+   - **不模拟跨查询的全局效果**（memory table 的情况）。它属于上游 bug，按 upstream-pitfall 处理。
+   - 这样每一处差异都能 grep 到（`M-FT`），由项目负责人逐处接受或否决。
+   - **工作量**：附录 B 中 V1 的数量是 planner 4 处、expression 9 处，按机制合并为 10 组。逐处模拟的成本是有限的，而 (b) 要改动所有表达式类型的表示。
+   - **每块 plan 模板加一项**：运行附录 B 的方法调用 grep，以及附录 A 的赋值 grep，逐处给出 S/V0/V1 结论。
+   - 另外，`rule_partition_processor.go:157` 要在 PartitionProcessor 块（D09.12）的 plan 里写明怎么改写。
 4. **§3 补充 `M-SELF` 的细节**：嵌入链用 `base()` / `schema_producer()` 两个访问器加宏；有副作用的 getter 用 `OnceCell`；Go 的指针比较 `p.Schema() == child.Schema()` 对应引用比较。
 5. **N4（另一份 spec）的成本项**：schema 里是 `Arc<Column>`，表达式里是内嵌的 `Column`，两种表示之间每转换一次都要分配。规划器全面移植前，应该测一下这个开销，必要时改成 `Expr::Column(Arc<Column>)`。另外，表达式缓存在跨会话共享时的语义（§5 风险 3）也要在 N4 中定。
 6. **§5 验收指标仍未测**：要等 planbuilder（D09.1）可用，才能测优化耗时与 Go 对比。§3.2 的 `taskMap` 旁表也没有被本试点覆盖，留给 D10.2。
@@ -355,7 +435,7 @@ Rust 的做法：
 
 - **按算子方法组织的规则**（PruneColumns、PredicatePushDown、DeriveStats、BuildKeyInfo 等）：Rust 行数约为 Go 的 1.0 至 1.15 倍，翻译是机械的。工作量与原计划基本相同。
 - **遍历树的自由函数规则**（投影消除、去关联、join reorder、聚合下推等）：约 1.5 至 1.7 倍，每个函数多花 30% 至 60% 的时间。
-- **新增的一次性工作**：每个块的 plan 都要列出本块对共享 `FieldType` 和 `Schema` 的原地修改，并逐处给出结论。按本试点的经验，大的块约多 1 至 2 天。
+- **新增的一次性工作**：每个块的 plan 都要列出本块对共享 `FieldType` 和 `Schema` 的原地修改，并逐处给出结论。审计方法见附录 A（赋值）和附录 B（方法调用）。全仓库的初筛已经完成：planner 101 处、expression 55 处，绝大多数是 S 类，所以分摊到每个块的审计只是复核加上处理 V1。按本试点的经验，大的块约多 1 至 2 天，V1 每处另加约半天（模拟加回归测试）。
 
 合计：P3 比"纯逐行翻译"的基线多 **10% 至 20%**。N1 没有带来数量级的额外成本，**不需要换方案**。最大的不确定因素是 FindBestTask 和 `taskMap`（D10.2，5.9k 行），本试点没有覆盖。建议在 D10.2 开工时补一个小试点，只验证 `taskMap` 的回滚和 `Arc` 子计划共享。
 
@@ -405,3 +485,67 @@ grep 抓不到、但同类的原地修改：
 - `rule/util/misc.go:37`：E2；
 - `resolve_indices.go` 中对 `p.Exprs[i]`、`aggFun.Args[i]`、`col.VirtualExpr` 的槽位写入：与逻辑节点共享 slice，但不依赖（推断）；
 - `expression/grouping_sets.go:506`：`schema.Columns[idx].RetType.SetFlag`，**未核查**。
+
+## 附录 B：FieldType 方法调用式的原地修改（#147 评审补充）
+
+附录 A 只 grep 了 `.Index =` 和 `.RetType =` 两种赋值，抓不到通过方法调用原地修改 FieldType 的写法。E3 就是读代码时发现的，grep 没有命中。本附录补上这一类。
+
+**范围**：
+
+- `pkg/planner`：`grep -rnE '\.(SetFlag|AddFlag|DelFlag|SetFlen|SetDecimal|SetCharset|SetCollate|SetType|SetFlenUnderLimit|SetDecimalUnderLimit|SetElems|SetArray|ToggleFlag|AndFlag)\(' pkg/planner --include='*.go' | grep -v _test.go`，共 101 处；
+- `pkg/expression`：改动"不是自己新建的参数或表达式"的类型的 helper，包括 grouping_sets、constant_fold、PropagateType、WrapWithCastAsInt、SetBinFlagOrBinStr 的各处调用等。
+
+**分类**：
+
+| 类 | 含义 |
+|---|---|
+| S | 新建的或已 Clone 的对象（安全） |
+| V0 | 可能共享，但其他持有者是否看到修改无关紧要 |
+| V1 | 共享，且其他持有者看到修改后，计划、结果、EXPLAIN 或协议元数据会变；需要显式模拟或登记 |
+| A | 改的是 AST，不是计划里的 FieldType |
+
+除非注明"已实测"，结论都来自读代码，标"推断"的需要在 Go 上实测确认。
+
+### B.1 计数
+
+| 部分 | S | V0 | V1 | A | 合计 |
+|---|--:|--:|--:|--:|--:|
+| pkg/planner | 92 | 2 | 4 | 3 | 101 |
+| pkg/expression，逐条核对的 | 7 | 4 | 9 | 0 | 20 |
+| pkg/expression helper 写自己新建的 `bf.tp` / `a.RetTp`（SetBinFlagOrBinStr 16、addBinFlag 7、SetBinChsClnFlag 12） | 35 | 0 | 0 | 0 | 35 |
+
+V1 按机制合并为 **10 组**，见 B.3。另有 3 处 A 类。
+
+### B.2 pkg/planner 中的非 S 项，以及成批的 S 项
+
+| file:line | 被改对象 | 类 | 说明 |
+|---|---|---|---|
+| rule_eliminate_projection.go:201 | FoldConstant 的结果，可能就是共享列本身 | **V1** | E3。**已实测**：对 memory table 是全局影响（§3.3.1） |
+| expression_rewriter.go:1701 | `COLLATE` 作用在非 `*Column` 的参数上，包括 `*CorrelatedColumn`；它的 RetType 与外层 schema 列共用（`:2630` 构造 `CorrelatedColumn{Column: *column}`） | **V1** | 推断 |
+| logical_plan_builder.go:2065、2066 | UNION 一侧是 NULL 类型时，`unionJoinFieldType` 直接返回另一侧子列的 RetType，随后原地改 charset/collate | **V1**（2） | 推断 |
+| logical_plan_builder.go:2043 | 同一个 `resultTp` | V0 | 共享时算出的 flen 不变（推断） |
+| point_get_plan.go:2268 | point plan schema 列，`:2409` 按语句 Clone 过 | V0 | 加 EnumSetAsIntFlag 是幂等的（推断） |
+| preprocess.go:1520、1521、2046 | DDL AST 中 ColumnDef 的类型 | A（3） | 有意改写 AST（DECIMAL(0) 补默认 flen；非严格模式下 VARCHAR 转 BLOB），DDL 侧要读到改写结果 |
+| 其余 92 处 | `NewFieldType`、`&FieldType{}`、`.Clone()`、值拷贝、`ArrayType()`、`AggFieldType` 返回的局部值、`InferType4ControlFuncs` 新建的结果 | S | 集中在 planbuilder.go 的元数据 schema（12）、task.go（13）、logical_plan_builder.go（union 6 处等）、expression_rewriter.go（15）、point_get_plan.go（4）、mock.go（17，测试辅助代码），以及 Lucky 已核实的 rule_decorrelate.go:286、logical_plan_builder.go:8217、logical_projection.go:668、indexmerge_path.go:1422-1424 |
+
+### B.3 V1 全表（按机制合并，10 组）
+
+| # | 位置 | 机制 | 场景 | 状态 |
+|---|---|---|---|---|
+| 1 | rule_eliminate_projection.go:201 | 合并投影后 FoldConstant，再 SetFlag | `SELECT IF(x,a,b) FROM (SELECT 1 x,a,b ...) s` | **已实测**（memory table，全局） |
+| 2 | expression/aggregation/window_func.go:76 | FIRST_VALUE/LAST_VALUE/NTH_VALUE 的 `RetTp = Args[0].GetType()` 不克隆，随后 DelFlag(NotNull) | `SELECT FIRST_VALUE(col) OVER () FROM t`，会使 `col IS NULL` 不再被折叠 | **已实测**（memory table，全局） |
+| 3 | expression/constant_fold.go:46、47 | IF/IFNULL/CASE 的特殊折叠返回原参数，再 SetCharset/SetCollate | `SELECT IF(1, int_col, 'abc') FROM t` 改变该列的 charset 元数据；`ORDER BY IF(1, a, 'x' COLLATE utf8mb4_general_ci)` 改变 a 的 collation | 推断（实测 `IF(1, CONSTRAINT_NAME, NULL)` 时，用 IS NULL 观察不到） |
+| 4 | planner/core/expression_rewriter.go:1701 | 对关联列的 COLLATE 改到外层列的类型 | `... WHERE EXISTS(SELECT 1 FROM t2 WHERE t2.b = t1.a COLLATE utf8mb4_general_ci) ORDER BY a` | 推断 |
+| 5 | planner/core/logical_plan_builder.go:2065、2066 | UNION 的 NULL 侧借用另一侧子列的 RetType 后原地改 | `SELECT j FROM t UNION ALL SELECT NULL`（j 是 JSON）：Go 不加 cast，Rust 会多出 `cast(j as json)` | 推断 |
+| 6 | expression/grouping_sets.go:506 | `expandSchema` 是浅拷贝，DelFlag 会改到 Agg 的分组项 | `GROUP BY a WITH ROLLUP`（MPP） | 推断 |
+| 7 | expression/builtin_cast.go:2525 WrapWithCastAsInt | 只有 `*Column` 先克隆；enum 类型的关联列、ScalarFunction、Constant 原地加 EnumSetAsIntFlag | 关联子查询中的 `t1.e & 1`（e 是 enum） | 推断 |
+| 8 | expression/builtin_time.go:2632 EXTRACT | 字符串参数不包 cast 时，直接改调用方传进来的列的 decimal | `SELECT s, EXTRACT(DAY_MICROSECOND FROM s) FROM t` | 推断 |
+| 9 | expression/expression.go:1252、1253 PropagateType | Column 和 CorrelatedColumn 先克隆，但 ScalarFunction 和 Constant 原地改。D08.1 的 Rust 移植已选择复制，是一处已登记的差异 | 谓词下推时复用子 Projection 的 `p.Exprs`，`d + 0e0 > ...` 会改到共享的除法表达式的小数位 | 推断 |
+| 10 | expression/util.go:1302 DisableParseJSONFlag4Expr | ScalarFunction 原地清 ParseToJSONFlag | 谓词下推后重建的 JSON_UNQUOTE 改到子 Projection 中共享的 `cast(s as json)` | 推断 |
+
+**对 M-FT 的含义**：
+
+- V1 一共 10 组，其中 4 组只影响元数据（charset、collate、decimal）。
+- 真正可能改变计划的是第 1、2、5、6 组，加上附录 A 的 `rule_partition_processor.go:157`。
+- 按方案 (a) 逐处显式模拟（或明确登记为不模拟）的工作量是有限的，不需要把 `ret_type` 全部改成 `Arc`。
+- 第 1、2 组在 memory table 上的全局效果属于上游 bug（#148），**不模拟**。只在需要 EXPLAIN 对照时，模拟它们在单个查询内的效果。
