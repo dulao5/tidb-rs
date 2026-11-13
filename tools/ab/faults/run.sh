@@ -8,9 +8,11 @@
 # 8 regions), starts tidb-rs on 127.0.0.1:28001, runs tools/ab/faults/faults.py and writes
 # target/faults/<timestamp>.json and .log. -k keeps the cluster afterwards (default: clean it).
 #
-# Exit status: faults.py's, i.e. 1 if any read returned a wrong result, or tidb-rs showed an
-# error kind that Go TiDB did not and that tools/ab/faults/expected.json does not list.
-# Requires: tiup, mysql client, python3-pymysql, passwordless sudo (cgroup v2, iptables).
+# Exit status: faults.py's: 1 if any read returned a wrong result (including a read of the
+# written rows that went back in time), or tidb-rs showed an error kind that Go TiDB did not and
+# that tools/ab/faults/expected.json does not list; 2 if nothing new was found but a scenario
+# was skipped or failed to inject its fault; 0 otherwise.
+# Requires: tiup, mysql client, python3-pymysql; passwordless sudo for slow_tikv / net_cut.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../.." && pwd)
