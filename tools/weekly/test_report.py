@@ -47,6 +47,17 @@ class VerdictTest(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertTrue(first.startswith("**RED**"), first)
 
+    def test_mismatch_in_results_jsonl_is_red_without_classified(self):
+        # classify.py failed: no ab-classified.json, but tidb-ab's results hold a mismatch.
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/part-ab", "ab.json", {"part": "ab", "status": "incomplete"})
+            os.makedirs(f"{d}/part-ab/ab-sysbench")
+            with open(f"{d}/part-ab/ab-sysbench/results.jsonl", "w") as f:
+                f.write(json.dumps({"template": "t", "protocol": "text", "verdict": "mismatch", "query": "q"}) + "\n")
+            rc, first = report(d)
+            self.assertEqual(rc, 1)
+            self.assertTrue(first.startswith("**RED**"), first)
+
     def test_faults_and_locks_raw_wrong_results_are_red(self):
         with tempfile.TemporaryDirectory() as d:
             write(d, "faults.json", {"part": "faults", "status": "ok"})
@@ -78,6 +89,16 @@ class VerdictTest(unittest.TestCase):
             write(f"{d}/cur", "ab-classified.json", classified(unsupported=3))
             write(f"{d}/prev", "ab-classified.json", classified())
             rc, first = report(f"{d}/cur", f"{d}/prev")
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+
+
+    def test_tpch_query_no_longer_executable_is_regressed(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/cur", "tpch.json", {"part": "tpch", "status": "ok"})
+            write(f"{d}/cur", "tpch-time.json", {"Q6": {"a_ms": 1.0, "b_ms": None, "b_error": "1235: x"}})
+            write(f"{d}/prev", "tpch-time.json", {"Q6": {"a_ms": 1.0, "b_ms": 2.0, "b_error": None}})
+            rc, first = report(f"{d}/cur", f"{d}/prev", parts="tpch")
             self.assertEqual(rc, 2)
             self.assertTrue(first.startswith("**REGRESSED**"), first)
 

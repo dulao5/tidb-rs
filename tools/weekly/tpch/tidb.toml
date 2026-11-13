@@ -1,0 +1,6 @@
+# Go TiDB settings for the weekly build's tpch part (appended by scripts/playground.sh -c).
+# The coprocessor cache answers a repeated aggregation from TiDB's memory (Q1 and Q6 took
+# 2 ms on the second run); tidb-rs has none, so the per-query times would compare a cache
+# with a computation. Off for the timing.
+[tikv-client.copr-cache]
+capacity-mb = 0.0
