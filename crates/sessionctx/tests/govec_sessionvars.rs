@@ -892,6 +892,7 @@ fn value_diff(got: &Value, want: &Value) -> String {
 /// `tidb_cloud_storage_uri` inputs whose redacted value changes, the expected value is
 /// the fixed `RedactURL`'s (upstream code at 84040e1f0a, run with go1.25.12) until the
 /// vectors are regenerated with the fix applied (tracker `govec/fixes`).
+/// Temporary (临时，见 #156): deleted once the regenerated vectors land.
 const REDACT_URL_FIXED: &[(&str, &str)] = &[
     (
         "s3://b/p?access_key=AK&Session_Token=T&endpoint=http%3A%2F%2Fminio%3A9000",
