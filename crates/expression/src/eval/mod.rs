@@ -909,6 +909,18 @@ pub trait Args {
         ctx: &dyn EvalContext,
         i: usize,
     ) -> Result<Option<VectorFloat32<'_>>, Error>;
+    /// Two arguments lent at once, in Go's order: `b.args[i].EvalVectorFloat32(ctx, row)`,
+    /// returning `None` on NULL **before** `b.args[j]` is evaluated, then
+    /// `b.args[j].EvalVectorFloat32(ctx, row)` (`None` on NULL). The values borrow from the
+    /// argument columns where [`Args::vector_float32`] would, so a body that needs both (the
+    /// distance functions) does not copy the first one to end its borrow of `self`.
+    // glue: N4 §3 evaluation framework (signature descriptors, drivers, RPN; M-EVAL)
+    fn vector_float32_pair(
+        &mut self,
+        ctx: &dyn EvalContext,
+        i: usize,
+        j: usize,
+    ) -> Result<Option<(VectorFloat32<'_>, VectorFloat32<'_>)>, Error>;
 }
 
 /// One node of an [`RpnProgram`] (post-order).

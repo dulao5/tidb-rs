@@ -465,6 +465,22 @@ impl Args for RowArgs<'_> {
     ) -> Result<Option<VectorFloat32<'_>>, Error> {
         self.f.args[i].eval_vector_float32(ctx, self.st, self.row)
     }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_pair(
+        &mut self,
+        ctx: &dyn EvalContext,
+        i: usize,
+        j: usize,
+    ) -> Result<Option<(VectorFloat32<'_>, VectorFloat32<'_>)>, Error> {
+        let Some(a) = self.f.args[i].eval_vector_float32(ctx, self.st, self.row)? else {
+            return Ok(None);
+        };
+        let Some(b) = self.f.args[j].eval_vector_float32(ctx, self.st, self.row)? else {
+            return Ok(None);
+        };
+        Ok(Some((a, b)))
+    }
 }
 
 /// [`Args`] of [`ArgsFallback::OwnArgs`](super::ArgsFallback) (INTERVAL): `args[0]` is read
@@ -577,6 +593,36 @@ impl Args for FirstColArgs<'_> {
         ctx: &dyn EvalContext,
         i: usize,
     ) -> Result<Option<VectorFloat32<'_>>, Error> {
+        self.vector_float32_at(ctx, i)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_pair(
+        &mut self,
+        ctx: &dyn EvalContext,
+        i: usize,
+        j: usize,
+    ) -> Result<Option<(VectorFloat32<'_>, VectorFloat32<'_>)>, Error> {
+        let Some(a) = self.vector_float32_at(ctx, i)? else {
+            return Ok(None);
+        };
+        let Some(b) = self.vector_float32_at(ctx, j)? else {
+            return Ok(None);
+        };
+        Ok(Some((a, b)))
+    }
+}
+
+impl<'a> FirstColArgs<'a> {
+    /// `args[i]` as a vector: row `i` of `col0` for `args[0]` (borrowed), the others evaluated
+    /// on the row. Takes `&self`, so two values can be held at once.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_at(
+        &self,
+        ctx: &dyn EvalContext,
+        i: usize,
+    ) -> Result<Option<VectorFloat32<'a>>, Error> {
         if i == 0 {
             let c = self.col0;
             return Ok((!c.is_null(self.i)).then(|| c.get_vector_float32(self.i)));
@@ -683,12 +729,33 @@ impl Args for VecArgs<'_> {
         _ctx: &dyn EvalContext,
         i: usize,
     ) -> Result<Option<VectorFloat32<'_>>, Error> {
+        Ok(self.vector_float32_at(i))
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_pair(
+        &mut self,
+        _ctx: &dyn EvalContext,
+        i: usize,
+        j: usize,
+    ) -> Result<Option<(VectorFloat32<'_>, VectorFloat32<'_>)>, Error> {
+        let Some(a) = self.vector_float32_at(i) else {
+            return Ok(None);
+        };
+        let Some(b) = self.vector_float32_at(j) else {
+            return Ok(None);
+        };
+        Ok(Some((a, b)))
+    }
+}
+
+impl<'a> VecArgs<'a> {
+    /// Row `self.i` of the evaluated column `i` as a vector, borrowed from the column.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_at(&self, i: usize) -> Option<VectorFloat32<'a>> {
         let c = self.cols[i];
-        Ok(if c.is_null(self.i) {
-            None
-        } else {
-            Some(c.get_vector_float32(self.i))
-        })
+        (!c.is_null(self.i)).then(|| c.get_vector_float32(self.i))
     }
 }
 

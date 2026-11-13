@@ -142,7 +142,8 @@ pub fn vec_dims(
 
 /// The distance bodies: `args[1]` is not evaluated when `args[0]` is NULL (row version);
 /// the vector driver evaluates both columns first (Go's `MergeNulls`). A distance error
-/// (different dimensions) is returned; a NaN distance is NULL.
+/// (different dimensions) is returned; a NaN distance is NULL. Both arguments are lent at
+/// once (`vector_float32_pair`), so neither is copied.
 macro_rules! vec_distance {
     ($fn:ident, $method:ident) => {
         #[eval_fn(Real, lazy, args(VectorFloat32, VectorFloat32))]
@@ -151,13 +152,7 @@ macro_rules! vec_distance {
             _f: &impl SigView,
             args: &mut impl Args,
         ) -> Result<Option<f64>, Error> {
-            let Some(v1) = args
-                .vector_float32(ctx, 0)?
-                .map(|v| VectorFloat32::clone(&v))
-            else {
-                return Ok(None);
-            };
-            let Some(v2) = args.vector_float32(ctx, 1)? else {
+            let Some((v1, v2)) = args.vector_float32_pair(ctx, 0, 1)? else {
                 return Ok(None);
             };
             let d = v1.$method(&v2)?;

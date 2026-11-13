@@ -1,0 +1,60 @@
+name: Expression gate (N4 §5)
+
+# The N4 §5 expression performance gate on amd64 (D08.1 plan.md "性能门禁的测量规则": after
+# each change to the drivers or the macro, confirm on the amd64 CI runner). Go TiDB v8.5.8
+# and tidb-rs run alternately in several processes on the same runner; the minimum over
+# processes is compared (scripts/eval-gate.sh, scripts/eval_gate_summary.py). The table is
+# written to the job summary, the raw outputs are uploaded.
+#
+# Manual: gh workflow run eval-gate.yml --ref <branch> [-f rounds=5]. It also runs on a push
+# that changes the gate itself.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Processes per side
+        default: "5"
+  push:
+    paths:
+      - crates/expression/benches/**
+      - scripts/eval-gate.sh
+      - scripts/eval_gate_summary.py
+      - .github/workflows/eval-gate.yml
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  gate:
+    name: N4 §5 gate (ubuntu-24.04, amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: pingcap/tidb
+          ref: v8.5.8
+          path: tidb
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tidb/go.mod
+          cache-dependency-path: tidb/go.sum
+      # Installs the toolchain pinned in rust-toolchain.toml.
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Gate
+        run: TIDB_SRC="$GITHUB_WORKSPACE/tidb" scripts/eval-gate.sh -n "${{ inputs.rounds || '5' }}" -o gate-amd64
+      - name: Job summary
+        if: always()
+        run: cat gate-amd64/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-gate-amd64
+          path: |
+            gate-amd64/*.txt
+            gate-amd64/summary.md
