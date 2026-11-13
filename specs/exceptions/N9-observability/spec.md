@@ -42,7 +42,7 @@
 - 计划：`getEncodedPlan`（L1964）用 `plannercore.EncodeFlatPlan` 得到 `Plan` 字段（`plancodec` 压缩 + base64，`tidb_decode_plan` 解码）；`getBinaryPlan`（L1926）得到 `Binary_plan`（tipb `ExplainData` protobuf → snappy → base64，`tidb_decode_binary_plan` 解码）；`NormalizeFlatPlan` 得到 plan digest。这些编码依赖 `FlattenPhysicalPlan` 的扁平树（`flat_plan.go`）。
 - 慢日志是**文本契约**：`SLOW_QUERY` 表、Dashboard 慢查询页、`pt-query-digest` 一类工具都解析它；字段顺序和格式要逐字节一致（D05.2 已移植规则匹配部分 `MatchEqual`/`matchGE`/`CollectWarningsForSlowLog`，`SlowLogFormat` 等 5 个函数归 D14.2）。
 - 语句摘要：`stmtsummary` v1（内存 map + 历史窗口）和 v2（持久化到文件）；记录按 (schema, digest, plan digest, resource group) 聚合，`STATEMENTS_SUMMARY`、`_HISTORY`、`_EVICTED`、`CLUSTER_*` 表读它。
-- **语句级 CPU（`util/ppcpuusage`）**：慢日志 `Tidb_cpu_time`/`Tikv_cpu_time`（`slow_log.go:139–142`，只在 > 0 时写出）、`STATEMENTS_SUMMARY.AVG_TIDB_CPU_TIME`（`infoschema/tables.go:1387`）、PROCESSLIST 的 TiDB/TiKV CPU（`processinfo.go:154`）。TiDB 部分来自 Top SQL 的 CPU profile：`server/conn.go:1341` **只在 Top SQL 开启时**分配 `sql_global_uid` 标签（`SQLCPUUsages.AllocNewSQLID`），`collector/cpu.go` 把采样到的 CPU 按 (conn, sqlID) 合并进去（`MergeTidbCPUTime`），sqlID 用来丢弃上一条语句迟到的样本。所以 Top SQL 关闭时没有 `Tidb_cpu_time`，列为 0；开启时短语句会少算（1 秒一轮的 profile 晚于慢日志写出）。
+- **语句级 CPU（`util/ppcpuusage`）**：慢日志 `Tidb_cpu_time`/`Tikv_cpu_time`（`slow_log.go:139–142`，只在 > 0 时写出）、`STATEMENTS_SUMMARY.AVG_TIDB_CPU_TIME`（`infoschema/tables.go:1387`）、PROCESSLIST 的 TiDB/TiKV CPU（`processinfo.go:154`）。TiDB 部分来自 Top SQL 的 CPU profile：`server/conn.go:1341` **只在 Top SQL 开启时**分配 `sql_global_uid` 标签（`SQLCPUUsages.AllocNewSQLID`），`collector/cpu.go` 把采样到的 CPU 按 (conn, sqlID) 合并进去（`MergeTidbCPUTime`），sqlID 用来丢弃上一条语句迟到的样本。所以 Top SQL 关闭时没有 `Tidb_cpu_time`，列为 0（`Tikv_cpu_time` 不受影响：它是 TiKV 返回的 ProcessTime，无条件累加，`select_result.go:665`、`point_get.go:266`）；开启时短语句会少算（1 秒一轮的 profile 晚于慢日志写出）。
 
 ### 1.4 主题 3：EXPLAIN / EXPLAIN ANALYZE
 
@@ -139,11 +139,11 @@
 
 ## 4. 主题 1：profile（细节）
 
-- **CPU**：`pprof-rs`（TiKV 同版本系列；D2 已定 frame pointer，**待验证**：目标平台的预编译 `std` 是否带 frame pointer，否则经过 `std` 的栈会被截断，除非自己编译 std），`/debug/pprof/profile?seconds=N` 输出 pprof protobuf（与 Go 同格式，Dashboard 可直接用）；需要 frame pointer 或 DWARF 展开（TiKV 用 `pprof-fp` feature + `-C force-frame-pointers`），这是**构建配置**，要现在定（待定 D2）。
+- **CPU**：`pprof-rs`（TiKV 同版本系列；D2 已定 frame pointer，**待验证**：目标平台的预编译 `std` 是否带 frame pointer，否则经过 `std` 的栈会被截断，除非自己编译 std），`/debug/pprof/profile?seconds=N` 输出 pprof protobuf（与 Go 同格式，Dashboard 可直接用）；需要 frame pointer 或 DWARF 展开（TiKV 用 `pprof-fp` feature + `-C force-frame-pointers`），这是**构建配置**，要现在定（D2 已定：frame pointer）。
 - **heap**：jemalloc profiling（A1 已定 jemalloc）。需要编译时开 `profiling` feature、运行时 `prof:true,prof_active:false`，按 TiKV 的 `heap_activate/heap_deactivate/heap_list` 加上 Go 的 `/debug/pprof/heap`。**待验证（不阻塞）**：tidb-rs 节点注册为 TiDB 实例，Dashboard / ng-monitoring 取 `/debug/pprof/heap` 时期望 Go 的 pprof protobuf；jemalloc `prof.dump` 是 jeprof 格式（TiKV 的 heap 在 Dashboard 中走 TiKV 专用的路径）。需要先查 Dashboard 的抓取代码，可能要在进程内把 jemalloc 的 profile 转成 pprof protobuf。
 - **goroutine / mutex 的对应物**（D1，**负责人决定：返回 404 / not supported**，#115，2026-11-13）：`/debug/pprof/goroutine`、`/debug/pprof/mutex` 返回 404（not supported），写进 `docs/compatibility.md`。下面的任务转储和锁等待统计仍可作为 tidb-rs 自己的诊断手段（例如另设路径或 `/debug/zip` 中的文件），不占用 Go 的这两个路径：
-  - goroutine → **任务转储**：tokio 的 `Handle::dump()`（需要 `tokio_unstable` + `taskdump`，只在 Linux x86_64/aarch64），或 N3 运行时自己维护"活跃任务表"（task id、所属连接、当前语句 digest、已运行 CPU、最近一次 poll 开始时间）。建议后者：开销可控、跨平台，且对 PROCESSLIST 也有用。`/debug/pprof/goroutine` 返回这个表的文本形式（不是 Go 格式，Dashboard 的 goroutine 视图不可用——需要负责人确认）。
-  - **待验证**：ng-monitoring 持续性能分析对 goroutine/mutex 请求的是哪种 `debug=` 变体，决定 D1 (a) 是只影响一个视图，还是让这个节点的持续性能分析整体失败。
+  - goroutine → **任务转储**：tokio 的 `Handle::dump()`（需要 `tokio_unstable` + `taskdump`，只在 Linux x86_64/aarch64），或 N3 运行时自己维护"活跃任务表"（task id、所属连接、当前语句 digest、已运行 CPU、最近一次 poll 开始时间）。建议后者：开销可控、跨平台，且对 PROCESSLIST 也有用。按 D1 的决定，`/debug/pprof/goroutine` 返回 404；这个表作为 tidb-rs 自己的诊断，放在别的路径或 `/debug/zip` 中。
+  - **待验证**：ng-monitoring 持续性能分析对 goroutine/mutex 请求的是哪种 `debug=` 变体，确认 ng-monitoring 持续性能分析遇到 goroutine/mutex 的 404 时，是只跳过这两项，还是让这个节点的持续性能分析整体失败（D1 已定返回 404）。
   - mutex/block → 锁等待：N3 已有停顿检测（`on_cpu`/`blocked`/`preempted` 分类）；`parking_lot` 锁等待时间可以用 `lock_api` 包装统计。`/debug/pprof/mutex` 无法给出 Go 格式。
 - `/debug/zip`：打包 CPU profile、heap、任务转储、配置、版本，路径保留。
 - **持续 profile**（Dashboard "持续性能分析"由 ng-monitoring 定期拉 `/debug/pprof/*`）：只要上面的路径和格式兼容即可，不需要 tidb-rs 内部常驻 profiler。Go 的常驻 1 秒 profiler 是为 Top SQL 服务的；tidb-rs 的 Top SQL 不用采样（§6），所以**不需要常驻 profiler**。
@@ -178,18 +178,19 @@
 设计（细节由 Maya、Lucky 在 D14.3 spec 中定稿）：
 
 - **新系统变量**（名字待定，暂称 `tidb_top_sql_sample_rate`）：GLOBAL，可动态修改，取值 0–100（百分比，允许小数）或 0.0–1.0，在 D14.3 中定一种；Go 中没有这个变量。
-- **与 `tidb_enable_top_sql` 的关系**（暂定，D14.3 定稿）：新变量没有设置时，`tidb_enable_top_sql = OFF` 等同于 0（与 Go 的默认值一致），`ON` 等同于 100%；新变量设置后以它为准，`tidb_enable_top_sql` 只为兼容保留（读回的值反映"采样率是否大于 0"）。
+- **与 `tidb_enable_top_sql` 的关系**（Lucky 评审 #118）：**实际采样率 = `tidb_enable_top_sql` ? 采样率 : 0**，采样率默认 100%。原因：系统变量总有值，"新变量没设置"需要隐藏状态；更重要的是 `tidb_enable_top_sql` 是 Dashboard / ng-monitoring 的开关，并同步到 PD 全局配置 `enable_resource_metering`（TiKV 也跟着它）。这样默认行为和 Go 完全一样，Dashboard 上关闭 Top SQL 永远生效，新变量只负责往下调。
 - **采样的粒度是一次语句执行**：在语句开始时（plan digest 附上之前）决定是否采样，决定结果记在 `ObsCtx` 中，派生的任务继承。没采中的执行完全跳过 CPU 窗口分摊、Top SQL 打标和累计（§3.6），开销和采样率成正比；`resource_group_tag` 仍按 Go 照常计算（它也用于资源管控，与采样无关，§6.4）。
-- **用户可见的影响**：`Tidb_cpu_time`、`Tikv_cpu_time`、PROCESSLIST 的 CPU 列只在采中的执行上出现；语句摘要的 `AVG_TIDB_CPU_TIME` 等按采中的执行求平均。Top SQL 上报的是采中执行的原始值还是按采样率外推，结合 ng-monitoring 的格式在 D14.3 中决定。
+- **用户可见的影响**：`Tidb_cpu_time`、PROCESSLIST 的 TiDB CPU 列只在采中的执行上出现（`Tikv_cpu_time` 和 TiKV CPU 列与 Top SQL 无关，照 Go 无条件出现）；语句摘要的 `AVG_TIDB_CPU_TIME` 等按采中的执行求平均。Top SQL 上报的是采中执行的原始值还是按采样率外推，结合 ng-monitoring 的格式在 D14.3 中决定。
 - **动态修改**：修改采样率只影响之后开始的语句；正在执行的语句保持开始时的决定。
+- **留给 D14.3**（Lucky 评审 #118，不阻塞）：随机采样（每次执行按概率抽），不用"每 100 次取 1 次"，以免和周期性负载对齐；§6.1 的基准加上 0%/1%/100% 三档（`Instant` 本来就要读、CPU 窗口按线程读，不采样能省下的可能很少）；如果 100% 的开销已在预算内，可以请负责人考虑"Top SQL 开启时慢日志的 `Tidb_cpu_time` 总是计算，采样率只用于 Top SQL 聚合"，否则 1% 时几乎所有慢日志都没有 TiDB CPU；上报倾向按采样率外推，因为 Dashboard 把 TiDB 和全量统计的 TiKV CPU 并排显示。
 
 ### 6.2 语句级 CPU 字段（`Tidb_cpu_time` 等）
 
 Go v8.5.8 的慢日志 `Tidb_cpu_time`/`Tikv_cpu_time`、`STATEMENTS_SUMMARY.AVG_TIDB_CPU_TIME`、PROCESSLIST 的 CPU 列（`util/ppcpuusage`）就是 `StmtExecRecord` 中的 CPU 数值。按 Go：
 
-- **是否出现跟随 `tidb_enable_top_sql`**：Top SQL 关闭时，慢日志不写 `Tidb_cpu_time`，表中的列为 0；开启时才有值（Go `server/conn.go:1341` 只在 Top SQL 开启时分配 sqlID）。tidb-rs 照此（L1）；如果以后想在 Top SQL 关闭时也给出数值，是功能例外，要写进 `docs/compatibility.md`。
+- **`Tidb_cpu_time` 是否出现跟随 `tidb_enable_top_sql`**（及采样，§6.1a）：Top SQL 关闭时，慢日志不写 `Tidb_cpu_time`，表中的列为 0；开启时才有值（Go `server/conn.go:1341` 只在 Top SQL 开启时分配 sqlID）。tidb-rs 照此（L1）；如果以后想在 Top SQL 关闭时也给出数值，是功能例外，要写进 `docs/compatibility.md`。
 - **数值的计算方法不同**：Go 是 1 秒 profile 采样，短语句常常少算（profile 晚于慢日志写出）；tidb-rs 是 §6.1 的窗口分摊，语句结束时刷出，数值更接近真实值。这是实现例外，归 D3。
-- `Tikv_cpu_time` 来自 TiKV 回包中的时间统计（D14.0 的 `ExecDetails`），和 Go 相同。
+- `Tikv_cpu_time` 来自 TiKV 回包中的 ProcessTime（D14.0 的 `ExecDetails`），**与 Top SQL 无关、无条件累加**（Go `select_result.go:665`、`point_get.go:266`），Top SQL 关闭时慢日志中也有，和 Go 相同；采样率也不影响它。
 
 ### 6.3 执行次数、时长、网络字节
 

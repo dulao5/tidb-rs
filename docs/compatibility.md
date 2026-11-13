@@ -25,7 +25,7 @@ Following the constitution (article 1, item 2), tidb-rs ports security and data-
 | Area | v8.5.8 behavior | tidb-rs behavior | Reason |
 |---|---|---|---|
 | `/debug/pprof/goroutine`, `/debug/pprof/mutex` | Go runtime profiles in pprof format | **404 / not supported** ([#115](https://github.com/dulao5/tidb-rs/issues/115)) | tidb-rs has no goroutines or Go mutex profiler; no Go-format equivalent. CPU and heap profiles keep Go's paths. |
-| Top SQL / statement-level CPU (`Tidb_cpu_time`, `Tikv_cpu_time`, `AVG_TIDB_CPU_TIME`, PROCESSLIST CPU) | Sampling-based attribution, present when `tidb_enable_top_sql = ON` | Window-apportioned CPU accounting plus a dynamic **per-execution sampling rate** sysvar (0 = off, 100% = all); `tidb_enable_top_sql` kept for compatibility. CPU fields appear only on sampled executions ([#116](https://github.com/dulao5/tidb-rs/issues/116)) | Owner decision: lower and tunable overhead; numbers more accurate than Go's, not identical. |
+| Top SQL / TiDB-side statement CPU (`Tidb_cpu_time`, `AVG_TIDB_CPU_TIME`, PROCESSLIST TiDB CPU) | Sampling-based attribution, present when `tidb_enable_top_sql = ON` | Window-apportioned CPU accounting plus a dynamic **per-execution sampling rate** sysvar (default 100%); effective rate = `tidb_enable_top_sql` ? rate : 0, so turning Top SQL off from TiDB Dashboard always works. TiDB CPU fields appear only on sampled executions. (`Tikv_cpu_time` is unaffected: TiKV process time, always present as in Go.) ([#116](https://github.com/dulao5/tidb-rs/issues/116)) | Owner decision: lower and tunable overhead; numbers more accurate than Go's, not identical. |
 
 ## Transitional gaps (until the session layer is ported)
 
