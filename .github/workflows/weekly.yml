@@ -1,0 +1,217 @@
+name: Weekly build
+
+# The weekly build of #128 (and its nightly short form): Go TiDB v8.5.8 vs tidb-rs on tiup
+# playgrounds, one page of report (tools/weekly/report.py).
+#
+# - weekly (Fridays 09:00 UTC = 18:00 JST): result comparison per operator, sysbench, fault
+#   scenarios, lock resolution; the report is uploaded, posted on #54 and the commit is tagged
+#   weekly-YYYY-Www.
+# - nightly (18:00 UTC = 03:00 JST): result comparison and lock resolution only; report
+#   uploaded, not posted.
+# - manual: choose the mode; `publish` (comment + tag) is off unless asked for.
+#
+# Outcome: red if any part found a wrong result or a new inconsistency; a warning (yellow step,
+# not a pass) if a part is incomplete; green otherwise.
+
+on:
+  schedule:
+    - cron: "0 9 * * 5"
+    - cron: "0 18 * * *"
+  # TEMPORARY (remove before merging): exercise the workflow from this branch.
+  push:
+    branches: [ci/weekly]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: weekly or nightly
+        type: choice
+        options: [weekly, nightly]
+        default: weekly
+      publish:
+        description: post the report on #54 and push the weekly tag
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # the weekly-YYYY-Www tag
+  issues: write # the report comment on #54
+  actions: read # last run's results, for the comparison
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # See ci.yml: grpcio-sys needs <cstdint> force-included on GCC 13.
+  CXXFLAGS: -include cstdint
+  TIUP_VERSION_PLAYGROUND: v8.5.8
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.m.outputs.mode }}
+      parts: ${{ steps.m.outputs.parts }}
+      publish: ${{ steps.m.outputs.publish }}
+    steps:
+      - id: m
+        run: |
+          if [ "${{ github.event_name }}" = schedule ]; then
+            if [ "${{ github.event.schedule }}" = "0 9 * * 5" ]; then mode=weekly; publish=true
+            else mode=nightly; publish=false; fi
+          else
+            mode="${{ inputs.mode || 'weekly' }}"; publish="${{ inputs.publish || false }}"
+          fi
+          [ "$mode" = nightly ] && publish=false
+          if [ "$mode" = weekly ]; then parts='["ab","sysbench","faults","locks"]'; else parts='["ab","locks"]'; fi
+          { echo "mode=$mode"; echo "parts=$parts"; echo "publish=$publish"; } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        # As in ci.yml: apt is best effort, protoc falls back to the release binary.
+        run: |
+          sudo apt-get -o Acquire::Retries=5 update || echo "::warning::apt-get update failed"
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            build-essential cmake pkg-config libssl-dev zlib1g-dev protobuf-compiler \
+            || echo "::warning::apt-get install failed"
+          if ! command -v protoc >/dev/null; then
+            v=29.3
+            curl -fsSL --retry 5 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-linux-x86_64.zip"
+            echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+          fi
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: weekly-release
+      - name: Build tidb-rs and tidb-ab (release)
+        run: cargo build --release --locked -p poc-server -p tidb-ab
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: tools/ab/locks/go.sum
+      - name: Build lockgen
+        run: cd tools/ab/locks && go build -o ../../../target/release/lockgen ./lockgen
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: |
+            target/release/tidb-server
+            target/release/ab
+            target/release/lockgen
+          retention-days: 3
+
+  part:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(needs.plan.outputs.parts) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: target/release
+      - name: Tools (tiup, sysbench, PyMySQL)
+        run: |
+          chmod +x target/release/*
+          curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+          echo "$HOME/.tiup/bin" >> "$GITHUB_PATH"
+          sudo apt-get -o Acquire::Retries=5 update || true
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends sysbench mysql-client \
+            || echo "::warning::apt-get install failed"
+          python3 -m pip install --user pymysql
+          sudo -n true && echo "passwordless sudo: yes"
+      - name: Run ${{ matrix.part }}
+        env:
+          LOCKGEN: ${{ github.workspace }}/target/release/lockgen
+          SYSBENCH_TIME: "30"
+        run: |
+          rc=0
+          tools/weekly/run.sh ${{ matrix.part }} out/${{ matrix.part }} || rc=$?
+          echo "exit status $rc"
+          # The report decides red / yellow / green; a part only fails here if it wrote nothing.
+          test -f out/${{ matrix.part }}/${{ matrix.part }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: part-${{ matrix.part }}
+          path: out/${{ matrix.part }}
+          retention-days: 90
+
+  report:
+    needs: [plan, part]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: part-*
+          path: results
+      - name: Last run's results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev=$(gh run list --workflow weekly.yml --branch "${{ github.ref_name }}" --status success \
+            --json databaseId,displayTitle,event --jq '.[] | .databaseId' -L 20 | grep -v "^${{ github.run_id }}$" | head -1 || true)
+          if [ -n "$prev" ]; then
+            gh run download "$prev" -n "${{ needs.plan.outputs.mode }}-results" -D previous || echo "no results in run $prev"
+          fi
+      - name: Report
+        id: report
+        run: |
+          week=$(date -u +%G-W%V)
+          title="tidb-rs ${{ needs.plan.outputs.mode }} build $week ($(date -u +%F))"
+          prev=; [ -d previous ] && prev="--previous previous"
+          parts=$(echo '${{ needs.plan.outputs.parts }}' | tr -d '[]" ')
+          rc=0
+          python3 tools/weekly/report.py --in results $prev --parts "$parts" --title "$title" \
+            --commit "${{ github.sha }}" --out report.md || rc=$?
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          { echo "rc=$rc"; echo "week=$week"; } >> "$GITHUB_OUTPUT"
+      - name: Keep results for next time
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.plan.outputs.mode }}-results
+          path: |
+            results
+            report.md
+          retention-days: 90
+      - name: Post on #54
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            cat report.md
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > comment.md
+          gh issue comment 54 --body-file comment.md
+      - name: Tag
+        if: needs.plan.outputs.publish == 'true'
+        run: |
+          tag=weekly-${{ steps.report.outputs.week }}
+          git tag -f "$tag" "${{ github.sha }}"
+          git push -f origin "refs/tags/$tag"
+      - name: Incomplete parts (warning, not a pass)
+        if: steps.report.outputs.rc == '2'
+        continue-on-error: true
+        run: |
+          echo "::warning::some parts are INCOMPLETE (skipped or failed to set up); see the report"
+          exit 1
+      - name: Verdict
+        if: steps.report.outputs.rc == '1'
+        run: |
+          echo "::error::wrong results or new inconsistencies; see the report"
+          exit 1
