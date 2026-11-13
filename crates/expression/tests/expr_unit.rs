@@ -283,3 +283,63 @@ fn in_cast_context_string() {
     use tidb_expression::builtin_cast::inUnionCastContext;
     assert_eq!(inUnionCastContext.to_string(), "__cast_ctx");
 }
+
+/// `CNFExprs.Clone` / `Shallow`: a new list over the same (immutable, shared) nodes.
+#[test]
+fn cnf_exprs_clone_and_shallow() {
+    let a = Expr::Constant(new_one()).into_ref();
+    let b = Expr::Column(Column {
+        unique_id: 3,
+        ..Column::default()
+    })
+    .into_ref();
+    let cnf: CNFExprs = vec![a, b];
+    for c in [cnf_exprs_clone(&cnf), cnf_exprs_shallow(&cnf)] {
+        assert_eq!(c.len(), 2);
+        assert!(Arc::ptr_eq(&c[0], &cnf[0]) && Arc::ptr_eq(&c[1], &cnf[1]));
+    }
+    assert!(cnf_exprs_clone(&Vec::new()).is_empty());
+}
+
+/// `Schema.MemoryUsage`. The expected values are Go v8.5.8's for the same schema (columns
+/// `UniqueID` 1 BIGINT `t.a` and 2 VARCHAR `t.bb`; Keys `[[c1]]`, UniqueKeys `[[c1, c2]]`).
+#[test]
+fn schema_memory_usage_matches_go() {
+    use tidb_base::mysql::{TypeLonglong, TypeVarString};
+    use tidb_types::field_type::new_field_type;
+    let c1 = Arc::new(Column {
+        unique_id: 1,
+        ret_type: new_field_type(TypeLonglong),
+        orig_name: "t.a".into(),
+        ..Column::default()
+    });
+    let c2 = Arc::new(Column {
+        unique_id: 2,
+        ret_type: new_field_type(TypeVarString),
+        orig_name: "t.bb".into(),
+        ..Column::default()
+    });
+    assert_eq!((c1.memory_usage(), c2.memory_usage()), (303, 310));
+    assert_eq!(new_schema(Vec::new()).memory_usage(), 72);
+    let mut s = new_schema(vec![c1.clone(), c2.clone()]);
+    assert_eq!(s.memory_usage(), 701);
+    s.keys = vec![vec![c1.clone()]];
+    s.unique_keys = vec![vec![c1, c2]];
+    assert_eq!(s.memory_usage(), 1689);
+}
+
+/// `Column.EvalVirtualColumn` evaluates the column's `VirtualExpr` on the row.
+#[test]
+fn eval_virtual_column_evaluates_the_expression() {
+    use tidb_chunk::chunk::new_chunk_with_capacity;
+    let c = Column {
+        unique_id: 5,
+        virtual_expr: Some(Expr::Constant(new_one()).into_ref()),
+        ..Column::default()
+    };
+    let chk = new_chunk_with_capacity(&[], 1);
+    let ctx = ctx(Flags::default(), None);
+    let st = EvalState::new();
+    let d = c.eval_virtual_column(&*ctx, &st, chk.get_row(0)).unwrap();
+    assert_eq!(d.get_int64(), 1);
+}

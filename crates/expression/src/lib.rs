@@ -41,6 +41,7 @@ pub mod eval;
 pub mod evaluator;
 pub mod expression;
 pub mod function_traits;
+pub mod helper;
 pub mod scalar_function;
 pub mod schema;
 pub mod size;
