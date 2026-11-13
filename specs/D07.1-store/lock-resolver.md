@@ -27,7 +27,7 @@
 2. **读路径的主要差距是"读优化"整体缺失**（§3.1）。client-go 8.5 的所有快照读（Get / BatchGet）和 coprocessor 都走 `ForRead=true`：已提交或已回滚的事务，不等它的锁被清掉，而是把事务 ID 记进 `resolved_locks` / `committed_locks` 集合，清锁放到后台做。集合存在快照（Get / BatchGet）或整个 coprocessor 请求上，此后该快照、该请求发出的每个 RPC 都带上。client-rust 只在 max-ts 点查里用了 `resolved_locks`，而且只在一次调用内有效，`committed_locks` 完全没用；其他读都是"同步清锁，再重读"。结果相同，但遇锁时延迟更高、RPC 更多。
 3. **遇到活跃锁时的等待策略不同**（§3.2）。client-go 按锁剩余 TTL（`msBeforeTxnExpired`）限制每次退避的最长睡眠；client-rust 只用固定的 `lock_backoff` 序列，不看 TTL。
 4. **事务状态缓存的作用域不同**（§3.5）。client-go 每个 store 一个 2048 条的 FIFO 缓存，跨请求共享；client-rust 的缓存每次 `resolve_locks` 调用新建一个，调用结束就丢。
-5. **shared lock**（§3.6）：v8.5.8 只有在 `tidb_foreign_key_check_in_shared_lock = ON`（默认 OFF）时才产生。client-go 的快照读遇到也报错（与 client-rust 的 `reject_shared_locks` 一致）；**但 TiDB 的 coprocessor 会把 `shared_lock_infos` 展开逐个解析**，client-rust 的 coprocessor 会直接报错。这是唯一一处"Go 能读、Rust 报错"的点。
+5. **shared lock**（§3.6）：v8.5.8 只有在 `tidb_foreign_key_check_in_shared_lock = ON`（默认 OFF）时才产生。已对照 TiKV v8.5.8 源码确认：读请求不会拿到 shared lock wrapper（`check_ts_conflict` 忽略 shared lock），所以 TiDB coprocessor 展开 `shared_lock_infos` 的代码是防御性的，读路径上走不到。R4 仍照搬了这段展开（dulao5/client-rust#4），以与 Go 一致；快照读和 GC 遇到 wrapper 照 Go 报错。
 6. **#101 列出的三项在 8.5 中不存在**：txn file 锁、`asyncResolveTaskPool`、lock hints（`LockHintsInRequest` / `backoffOnLockHintsInRequest`）。见 §4。
 
 ## 2. 调用方：谁用什么参数调 resolver
@@ -114,10 +114,14 @@
 | 产生条件：`tidb_foreign_key_check_in_shared_lock = ON`（默认 OFF，TiDB `sessionctx/variable/tidb_vars.go:1598`），外键检查用 `InShareMode` 加锁（`executor/adapter.go:1201`），prewrite 为 `Op_SharedLock`（client-go `transaction/2pc.go:555`） | — | v8.5.8 **会**产生，但默认关闭 |
 | `resolveLocks` / `BatchResolveLocks` 遇到 `IsShared()` 报 "misuse" 错误（`go:605`、`go:291`） | `reject_shared_locks`（`rs:62`）在 `resolve_locks_impl`、`cleanup_locks` 入口报错 | **一致**（错误文字不同） |
 | 快照读 Get/BatchGet/Scan：`ExtractLockFromKeyErr` 不展开 wrapper，直接进 `resolveLocks` → 报错 | 报错 | **一致** |
-| TiDB coprocessor 展开 `GetSharedLockInfos()`，对每个成员锁分别解析（`pkg/store/copr/coprocessor.go:1824`） | `coprocessor.rs:645` 整个 wrapper 交给 `resolve_locks` → 报错 | **差异**：Go 能读、Rust 报错 |
-| `IsPessimistic` 含 `SharedPessimisticLock`（`go:202`） | 被 `reject_shared_locks` 一并拒绝 | 展开后的成员锁不会是 shared 类型（`go:205` 注释），按普通锁处理即可 |
+| TiDB coprocessor 展开 `GetSharedLockInfos()`，对每个成员锁分别解析（`pkg/store/copr/coprocessor.go:1824-1831`） | R4（dulao5/client-rust#4）：`expand_shared_lock`，同样展开后逐个解析 | **一致**（R4 之前：整个 wrapper 交给 `resolve_locks` → 报错） |
+| `IsShared` 只认 `Op_SharedLock`（`go:207`）；`IsPessimistic` 含 `SharedPessimisticLock`（`go:201-202`） | R4：`reject_shared_locks` 只拒绝 wrapper（`shared_lock_infos` 非空或 `Op::SharedLock`）；`is_pessimistic` 含 `SharedPessimisticLock`，用于所有区分悲观锁的地方 | **一致**（R4 之前：`SharedPessimisticLock` 成员也被拒绝） |
 
-未验证：读请求是否真的会碰到 shared lock。`Op_Lock` 类锁本来不阻塞 SI 读，TiKV 对 `SharedLock` wrapper 的读冲突检查需要看 TiKV 8.5 代码确认。TiDB 的 coprocessor 专门处理了它，说明至少在某些情况下会返回。
+**已验证（TiKV `v8.5.8` 源码）：读请求不会拿到 shared lock wrapper。**
+
+- 所有读路径的锁冲突检查都走 `txn_types::check_ts_conflict`。SI 和 RcCheckTs 遇到 `SharedLocks` 都直接忽略（`components/txn_types/src/lock.rs:370-373`、`:431-434`，"Ignore SharedLocks"）。走这个检查的有：点查（`src/storage/mvcc/reader/point_getter.rs:240`），正反向扫描（`src/storage/mvcc/reader/scanner/forward.rs:401`、`:657`，`backward.rs:165`），内存锁表与 async commit 的读检查（`src/storage/mod.rs:1526`、`:3465`），coprocessor（`src/coprocessor/endpoint.rs:1045`）。wrapper 里嵌的锁只可能是 `Lock` 或悲观类型，SI 读本来也忽略这两类。
+- wrapper 由 `SharedLocks::into_lock_info`（`lock.rs:927`）生成，只出现在写路径（prewrite、加悲观锁、cleanup、txn_heart_beat）、`scan_lock`（GC），以及 primary key 上是 shared lock 时 CheckTxnStatus 返回的 `PrimaryMismatch`（`src/storage/txn/commands/check_txn_status.rs:134-145`）。最后这种情况，Go 只在解析悲观锁时把 primaryMismatch 转为回滚（`go:868`），否则报错；Rust 相同（§3.8）。
+- 因此 TiDB coprocessor 的展开对 TiKV 8.5.8 是防御性代码，读路径上走不到。R4 照搬它（L1），只为与 Go 一致，也为以后的 TiKV 版本留出余地，对 v8.5.8 的读结果没有影响；R4 的单测用 mock 构造 wrapper。
 
 ### 3.7 async commit
 
@@ -184,7 +188,7 @@
 | R1 | 通用 ForRead：canIgnore（含已回滚、提交在读之后）/ canAccess、`committed_locks`，用于 Get / BatchGet / coprocessor；集合每个快照一份、每个 coprocessor 请求一份 | §3.1 | 移植（L3：与 client-go 行为一致） |
 | R2 | ForRead 下后台异步清锁（含 async commit 整笔清锁）及 `Close` 取消 | §3.1 | 随 R1 移植；8.5 没有任务池，按 8.5 每锁一个 task 的语义即可。后台任务不跟随语句取消：Go 用 `LockResolver` 自己的 context（`asyncResolveCtx`）和独立的 40 秒 backoffer（`asyncResolveLockMaxBackoff`），只在 `Close` 时取消 |
 | R3 | `msBeforeTxnExpired` 及按 TTL 限制退避睡眠 | §3.2 | 移植 |
-| R4 | coprocessor 展开 `shared_lock_infos` | §3.6 | 移植（只在 coprocessor；快照读保持报错，与 Go 一致） |
+| R4 | coprocessor 展开 `shared_lock_infos` | §3.6 | 已移植（dulao5/client-rust#4，只在 coprocessor；快照读保持报错，与 Go 一致）。TiKV 8.5.8 的读请求拿不到 wrapper，属于保真改动 |
 | R5 | lite 模式（`TxnSize < 16`、Get 的 `lite=true`、primary 跳过） | §3.3 | 移植（性能，结果不变） |
 | R6 | 跨请求共享的状态缓存（2048 FIFO）+ `HasSameDeterminedStatus` 断言 | §3.5 | 移植 |
 | R7 | `current_ts` 用低精度本地时钟，去掉每次 CheckTxnStatus 后的额外 TSO | §3.4 | 移植（减少 PD RPC） |
@@ -193,4 +197,4 @@
 | R10 | `Resolving()`（DATA_LOCK_WAITS）、`ResolveLockTime` | §3.10 | 归入观测相关块，不在本次 |
 | R11 | `MaxExecutionDurationMs`、`RequestSource`、`ResourceGroupName` | §3.9 | 单独评估（与资源管控一起） |
 
-测试：R1–R4 需要 #101 计划第 3 步的混合集群场景（真实锁：prewrite 后暂停、悲观事务持锁、async commit 中断、`tidb_foreign_key_check_in_shared_lock=ON` 的外键检查，同时用来验证 §3.6 中读请求何时会遇到 shared lock wrapper），比较 Go TiDB 与 tidb-rs 的读结果和错误；R5–R8 结果不变，用单元测试（mock KV client 计数 RPC）验证 RPC 次数与请求字段。
+测试：R1–R4 需要 #101 计划第 3 步的混合集群场景（真实锁：prewrite 后暂停、悲观事务持锁、async commit 中断、`tidb_foreign_key_check_in_shared_lock=ON` 的外键检查，用来在真实集群上复核 §3.6：读请求不会遇到 shared lock wrapper），比较 Go TiDB 与 tidb-rs 的读结果和错误；R5–R8 结果不变，用单元测试（mock KV client 计数 RPC）验证 RPC 次数与请求字段。
