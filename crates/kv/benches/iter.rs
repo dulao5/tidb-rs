@@ -4,7 +4,9 @@
 //!
 //! T11 candidates (specs/D07.0-kv/iter-next-fill.md): C, a synchronous `advance` plus an
 //! asynchronous `fill` per batch; D, `next` returning an enum future that allocates only to
-//! fetch a batch. Both refill every `BATCH` rows with an already completed fetch.
+//! fetch a batch; H (hybrid, #123 review), implementors provide C's `advance` / `fill` and
+//! callers use a provided `next` returning D's enum future. All refill every `BATCH` rows with
+//! an already completed fetch.
 
 use std::future::Future;
 use std::hint::black_box;
@@ -23,6 +25,8 @@ use tidb_kv::kv::KvFuture;
 /// Rows per fetched batch for the batched candidates (client-go's scanner default
 /// `scanBatchSize` is 256).
 const BATCH: usize = 256;
+
+static EMPTY: Key = Key(Vec::new());
 
 const ROWS: usize = 1024;
 
@@ -116,11 +120,12 @@ impl SplitIter for Batched {
     }
     // glue: benchmark fixture
     fn key(&self) -> &Key {
-        &self.m.keys[self.m.pos]
+        // Empty when not valid: the `Iterator::key` contract.
+        self.m.keys.get(self.m.pos).unwrap_or(&EMPTY)
     }
     // glue: benchmark fixture
     fn value(&self) -> &[u8] {
-        &self.m.vals[self.m.pos]
+        self.m.vals.get(self.m.pos).map_or(&[], |v| v.as_slice())
     }
     // glue: benchmark fixture
     #[inline(never)]
@@ -178,11 +183,54 @@ impl EnumIter for Batched {
     // glue: benchmark fixture
     #[inline(never)]
     fn next(&mut self) -> Next<'_> {
+        if SplitIter::advance(self) {
+            Next::Ready
+        } else {
+            Next::Fetch(SplitIter::fill(self))
+        }
+    }
+}
+
+// ---------------------------------------------------------------- candidate H: hybrid
+
+/// Candidate H (Lucky, #123): implementors provide `advance` / `fill`, callers use the
+/// provided `next`, which is D's enum future. Composite iterators compose on `advance`.
+trait HybridIter: Send {
+    fn valid(&self) -> bool;
+    fn key(&self) -> &Key;
+    fn value(&self) -> &[u8];
+    fn advance(&mut self) -> bool;
+    fn fill(&mut self) -> KvFuture<'_, ()>;
+    // glue: benchmark fixture (the provided method)
+    fn next(&mut self) -> Next<'_> {
         if self.advance() {
             Next::Ready
         } else {
             Next::Fetch(self.fill())
         }
+    }
+}
+
+impl HybridIter for Batched {
+    // glue: benchmark fixture
+    fn valid(&self) -> bool {
+        SplitIter::valid(self)
+    }
+    // glue: benchmark fixture
+    fn key(&self) -> &Key {
+        SplitIter::key(self)
+    }
+    // glue: benchmark fixture
+    fn value(&self) -> &[u8] {
+        SplitIter::value(self)
+    }
+    // glue: benchmark fixture
+    fn advance(&mut self) -> bool {
+        SplitIter::advance(self)
+    }
+    // glue: benchmark fixture
+    fn fill(&mut self) -> KvFuture<'_, ()> {
+        SplitIter::fill(self)
     }
 }
 
@@ -237,6 +285,21 @@ fn bench(c: &mut Criterion) {
         let mut m = Batched::new();
         b.iter(|| {
             let it: &mut dyn EnumIter = &mut m;
+            futures::executor::block_on(async {
+                let mut n = 0usize;
+                while it.valid() {
+                    n += it.key().0.len() + it.value().len();
+                    it.next().await.unwrap();
+                }
+                black_box(n);
+            });
+            m.reset();
+        })
+    });
+    g.bench_function("hybrid_next_dyn", |b| {
+        let mut m = Batched::new();
+        b.iter(|| {
+            let it: &mut dyn HybridIter = &mut m;
             futures::executor::block_on(async {
                 let mut n = 0usize;
                 while it.valid() {

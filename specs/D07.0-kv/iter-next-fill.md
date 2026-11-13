@@ -13,8 +13,9 @@
 | A（现状） | `fn next(&mut self) -> KvFuture<'_, ()>` | `it.next().await?` | 1 次分配 + 1 次虚调用 | 同左 |
 | C 拆分 | `fn advance(&mut self) -> bool`（同步，批用完时返回 false）+ `fn fill(&mut self) -> KvFuture<'_, ()>` | `if !it.advance() { it.fill().await? }` | 1 次虚调用 | 1 次分配 |
 | D 枚举 future | `fn next(&mut self) -> Next<'_>`，`enum Next<'a> { Ready, Fetch(KvFuture<'a, ()>) }` 实现 `Future` | `it.next().await?`（不变） | 1 次虚调用 + 一个分支 | 1 次分配 |
+| H 混合（Lucky，#123） | 实现方提供 C 的 `advance` + `fill`；trait 提供默认方法 `fn next(&mut self) -> Next<'_>`（即 D：`advance()` 为 true 返回 `Ready`，否则返回 `Fetch(self.fill())`） | `it.next().await?`（不变） | 1 次虚调用 + 一个分支 | 1 次分配 |
 
-C 和 D 都保持 trait 可以做成 `dyn`。
+C、D、H 都保持 trait 可以做成 `dyn`。
 
 ## 3. 测量
 
@@ -26,6 +27,7 @@ C 和 D 都保持 trait 可以做成 `dyn`。
 | 同步循环（下限） | 1.21 µs | 1.2 ns |
 | C `advance` + `fill` | 2.35 µs | 2.3 ns |
 | D 枚举 future | 3.37 µs | 3.3 ns |
+| H 混合（第二次运行：A 9.7、C 2.6、D 3.1） | 3.08 µs | 3.0 ns |
 
 （tasks.md T11 中 arm64 Mac 上 A 为每行约 11.2 ns，与此一致。）
 
@@ -37,7 +39,8 @@ TiDB v8.5.8 中 `kv.Iterator` 的读路径使用方（`Iter` / `IterReverse` 调
 |---|---|---|---|
 | coprocessor（`store/copr`） | 表扫描、索引扫描、聚合 | — | **不经过 `kv.Iterator`**：结果按 chunk 返回（`kv.Response.Next`，每个响应一次 await），三种方案都不影响 |
 | snapshot 扫描（`store/driver`，D07.1 的 TiKV scanner） | meta（`structure` 的 hash / list）、DDL 历史 job、`information_schema` 的部分表 | 几十到几万行 | 很小：每批一次 RPC（毫秒级）远大于每行 ns 级的差别 |
-| memdb / `UnionIter`（`executor/mem_reader.go`） | 有未提交写入的事务读；tidb-rs 只读，暂不需要 | — | 目前不涉及 |
+| memdb（`executor/mem_reader.go`） | 有未提交写入的事务读；tidb-rs 只读，暂不需要 | — | 目前不涉及 |
+| `UnionIter`（`store/driver/txn/union_iter.go`） | memdb 与 snapshot 的合并迭代器；读路径中唯一的组合迭代器，tidb-rs 支持写事务后需要 | 同 snapshot | 不在于每行开销，而在于能否组合，见 §5 |
 | `executor/sample.go` | `TABLESAMPLE REGIONS()` | 每 region 若干行 | 很小 |
 | `table` / `statistics` / `ddl` | 记录迭代、统计信息读取、DDL 回填 | 统计信息可达百万行 | 中等：百万行时 A 比 D 多约 7 ms，与读取本身相比仍小 |
 
@@ -45,23 +48,53 @@ TiDB v8.5.8 中 `kv.Iterator` 的读路径使用方（`Iter` / `IterReverse` 调
 
 ## 5. 比较
 
-| | A 现状 | C 拆分 | D 枚举 future |
-|---|---|---|---|
-| 每行开销 | 10.0 ns | 2.3 ns | 3.3 ns |
-| 调用方改动 | 无 | 所有循环改成两步；漏写 `fill` 会静默地提前结束迭代 | 无（`it.next().await?` 不变） |
-| 与 Go 代码形状的一致性（移植规则） | 一致 | 不一致：Go 只有 `Next()` | 一致 |
-| 实现方改动 | 无 | 每个实现拆成两个方法 | 每个实现把 `Box::pin(async {..})` 换成 `Next::Ready` / `Next::Fetch(..)`，组合迭代器（`UnionIter` 等）直接转发内部的 `Next` |
-| 风险 | 无 | 中：调用方容易写错 | 低：`Next` 只是一个两分支的 future |
+**选择取决于组合迭代器怎样实现，而不是每行开销**：§4 的使用方都测不出 A、C、D、H 之间几 ns 的差别。
+
+关键是 `UnionIter`。Go 的 `UnionIter.updateCur`（`union_iter.go:66`）是一个循环，一次外层 `Next` 可能多次调用 `dirtyNext()` 和 `snapshotNext()`（跳过已删除的脏数据，key 相等时两边都前进）。在 D 下，外层 `next()` 调用 `self.snapshot.next()`，如果返回 `Fetch(f)`，循环的剩余部分要在 `f` 完成后才能继续；而 `f` 可变借用了 `self.snapshot`，继续执行又需要 `&mut self`，一个装箱的 `async move { f.await?; self.update_cur().await }` 同时持有不了两者（Lucky，#123）。只用 D 的 trait，就只能每次都走装箱的慢路径，失去 D 的好处；要避免这一点，需要事先知道内层这一步会不会取批，也就是 C 的 `advance()`。
+
+| | A 现状 | C 拆分 | D 枚举 future | H 混合 |
+|---|---|---|---|---|
+| 每行开销 | 10.0 ns | 2.3 ns | 3.3 ns | 3.0 ns |
+| 调用方写法 | `it.next().await?` | 两步循环，漏写 `fill` 会静默地提前结束 | `it.next().await?` | `it.next().await?` |
+| 与 Go `Next()` 的一致性 | 一致 | 不一致 | 一致 | 一致 |
+| 组合迭代器（`UnionIter`） | 可以（每步装箱） | 可以，在内层 `advance` 上同步组合 | **不能直接组合**（见上） | 可以：组合迭代器实现 `advance` / `fill`，在内层 `advance` 上同步组合 |
+| 风险 | 无 | 中：调用方容易写错 | 高：组合迭代器写不出来 | 低 |
 
 ## 6. 建议
 
-**D（枚举 future），在 D07.1 移植 TiKV scanner 和 memdb 之前改。** 理由：
+**H（混合），在 D07.1 移植 TiKV scanner 和 memdb 之前改。**
 
-1. 调用方写法不变，和 Go 的 `Next()` 一一对应，符合逐函数移植的规则；C 的两步写法在每个调用处都偏离 Go，而且漏写 `fill` 不会报错。
-2. 每行开销从 10 ns 降到 3.3 ns，与 C 只差约 1 ns/行，在 §4 的使用方中都不可测。
-3. 现在改成本最低：目前的实现只有 `EmptyIterator`、测试 mock 和 PoC 示例；等 D07.1 写完 TiKV scanner、memdb、`UnionIter` 再改，就要改动更多实现。
+```rust
+pub trait Iterator: Send {
+    fn valid(&self) -> bool;
+    fn key(&self) -> &Key;
+    fn value(&self) -> &[u8];
+    /// 实现方：在已缓存的批内前进；返回 false 表示需要 `fill`。
+    fn advance(&mut self) -> bool;
+    /// 实现方：取下一批，并定位到 `next` 本应到达的位置。
+    fn fill(&mut self) -> KvFuture<'_, ()>;
+    /// 调用方（Go 的 `Next`）：`it.next().await?`。
+    fn next(&mut self) -> Next<'_> {
+        if self.advance() { Next::Ready } else { Next::Fetch(self.fill()) }
+    }
+    fn close(&mut self);
+}
+```
 
-如果评审认为每行开销本来就不重要（§4），也可以保持 A 不动，在 T11 中记为"已评估，不改"。D 的改动量很小，所以仍推荐 D。
+理由：
+
+1. 调用方写法不变（`it.next().await?`），与 Go 的 `Next()` 一一对应，也不会漏掉 `fill`。
+2. 组合迭代器在内层的 `advance` 上同步组合：`UnionIter::advance` 用内层的 `advance()` 跑 `updateCur` 的循环，一旦内层需要取批就返回 false；它的 `fill` 先填充那个内层迭代器，再把循环跑完。单一来源的迭代器（TiKV scanner、memdb）自然对应：`advance` 在缓存的批内移动，`fill` 是 RPC。
+3. 每行开销与 D 相同（3.0 ns），比现状少约 7 ns；`next` 是 trait 提供的默认方法，trait 仍可以做成 `dyn`。
+4. 现在改成本最低：目前的实现只有 `EmptyIterator`、测试 mock 和 PoC 示例。
+
+**实现方的约定**（写进 trait 文档）：
+
+- **只有 `fill` 会出错，`advance` 不会**。这与 Go 一致：`Next` 的错误只来自 scanner 的 RPC 和内层迭代器的 `Next`。
+- **`fill` 完成后，迭代器的位置必须与 `next` 本应到达的位置完全相同**：取到下一批就定位到它的第一条，没有更多数据就 `valid() = false`。
+- **最后一批**：单一来源的迭代器在批用完时并不知道后面还有没有数据，所以 `advance` 返回 false，由 `fill` 发现数据已结束并把迭代器置为失效。这只在最后多一次装箱 future，可以接受。内存迭代器（memdb、内存批）知道自己已到末尾时，`advance` 可以直接返回 true 并让 `valid()` 为 false，不经过 `fill`。
+
+如果评审认为每行开销本来就不重要（§4），也可以保持 A 不动，在 T11 中记为"已评估，不改"。但 A 下组合迭代器每步都要装箱，H 的改动量又很小，所以仍推荐 H。
 
 ## 7. 附带：`key()` / `value()` 在迭代器失效时的约定
 
