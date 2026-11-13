@@ -75,9 +75,16 @@ Both sides read the rows (one thread per side and shape):
 | `split_merge` | `SPLIT TABLE … REGIONS 48` through A; then PD merge settings made aggressive (`max-merge-region-size` 64, `split-merge-interval` 1s, …) | merge settings restored |
 | `transfer_leader` | `evict-leader-scheduler` on the store with most leaders for one phase, then `transfer-leader` of 40 of the table's regions (PD HTTP API) | scheduler removed |
 | `kill_tikv` | `kill -9` of the TiKV with most leaders | restarted with its original command line after two phases |
+| `kill_tikv_meta` | like `kill_tikv`, but first moves the leader of the meta region (the region holding the schema version key, found with PD's `region/key` API) onto that TiKV with a PD `transfer-leader` operator, and waits until PD reports it there. The schema version is unreadable until a new leader is elected, so the schema sync cannot reload (#136). tidb-rs must keep serving on its cached schema within the schema lease (45 s), as Go TiDB does | as `kill_tikv` |
 | `slow_tikv` | that TiKV moved into a cgroup v2 limited to 3% of one CPU (`cpu.max 3000 100000`) | moved back |
 | `net_cut` | `iptables` drops all TCP to and from that TiKV's port (clients, PD and raft peers alike) | rules removed |
 | `pause_tikv` | `SIGSTOP` of that TiKV for 5 s (a hung store: connections stay open, nothing answers) | `SIGCONT` |
 | `wide_rows` | not a fault: reads ~6 MiB in one coprocessor response from `sbtest.wide` (100 rows × 64 KiB, created through A), plus a small read of the same table. Reproduces parity P0-3 (4 MiB gRPC receive limit) | — |
+
+Run only the #136 regression (Linux, like `kill_tikv`: it reads `/proc/<pid>/cmdline` to restart the TiKV):
+
+```sh
+tools/ab/faults/run.sh -s kill_tikv_meta
+```
 
 `-s` picks scenarios (default: all of the above). A phase is `-p` seconds (default 10). The cluster gets half a phase to settle between scenarios.

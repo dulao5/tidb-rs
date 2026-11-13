@@ -227,6 +227,8 @@ fn stall_file_deregisters_and_recovers() {
         &[
             "--schema-sync-stall-file",
             stall.to_str().unwrap(),
+            "--lease",
+            "2s",
             "--schema-sync-max-staleness",
             "2",
         ],

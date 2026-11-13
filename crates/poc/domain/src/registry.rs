@@ -15,24 +15,61 @@ use std::time::Instant;
 
 use tidb_meta::InfoSchema;
 
+use crate::schema_validator::CheckResult;
+use crate::schema_validator::SchemaCheckError;
+use crate::schema_validator::SchemaCheckRetry;
+use crate::schema_validator::SchemaValidator;
+
+/// Default schema lease (Go: `config.DefSchemaLease`, the `--lease` flag): 45 s.
+pub const DEF_SCHEMA_LEASE: Duration =
+    Duration::from_nanos(tidb_base::config::DefSchemaLease.0 as u64);
+
 /// Bounds of the health state machine.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// Synced mode needs a completed reload + MDL cycle at most this long ago, and the node
-    /// may lag `global_schema_version` at most this long. Past either bound the node
-    /// deregisters.
+    /// The schema lease (Go: `--lease`): statements may use the cached schema while the last
+    /// successful reload is at most this long ago, measured in TSO ([`SchemaValidator`]).
+    pub schema_lease: Duration,
+    /// The node deregisters when it has completed no reload + MDL cycle for this long, or has
+    /// lagged `global_schema_version` for this long. Must not be shorter than
+    /// `schema_lease` (see [`Limits::check`]).
     pub max_staleness: Duration,
-    /// Synced mode (and accepting a synced statement's result) needs the lease to be proven
-    /// alive for at least this much longer.
+    /// Synced mode (and accepting a synced statement's result) needs the etcd lease to be
+    /// proven alive for at least this much longer.
     pub lease_margin: Duration,
+    /// How long a synced statement whose read TS is past the schema lease waits for a reload
+    /// before it falls back to the ADR 0003 path (Go: `SchemaOutOfDateRetry*`).
+    pub schema_check_retry: SchemaCheckRetry,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            max_staleness: Duration::from_secs(5),
+            schema_lease: DEF_SCHEMA_LEASE,
+            max_staleness: DEF_SCHEMA_LEASE,
             lease_margin: Duration::from_secs(3),
+            schema_check_retry: SchemaCheckRetry::default(),
         }
+    }
+}
+
+impl Limits {
+    /// The node must stop admitting statements before it deregisters, and stay registered
+    /// while it admits them: once it is deregistered the DDL owner no longer waits for it, so
+    /// a statement on the cached schema could see data two schema versions ahead. Admission
+    /// lasts at most one lease after the last reload, deregistration comes `max_staleness`
+    /// after the last cycle, so `max_staleness` must be at least the lease.
+    pub fn check(&self) -> Result<(), String> {
+        if self.schema_lease.is_zero() {
+            return Err("the schema lease must be greater than 0".to_owned());
+        }
+        if self.max_staleness < self.schema_lease {
+            return Err(format!(
+                "schema-sync max staleness ({:?}) must not be shorter than the schema lease ({:?})",
+                self.max_staleness, self.schema_lease
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -55,7 +92,7 @@ impl MdlJob {
 }
 
 /// Health inputs. See [`Health::admissible`] and [`Health::should_deregister`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct Health {
     /// When the current registration completed; `None` while not registered.
     registered_at: Option<Instant>,
@@ -69,9 +106,22 @@ pub(crate) struct Health {
     global_seen: i64,
     /// Since when the loaded version has been below `global_seen`.
     behind_since: Option<Instant>,
+    /// The schema lease (Go: `do.SchemaValidator`).
+    validator: SchemaValidator,
 }
 
 impl Health {
+    fn new(limits: &Limits) -> Health {
+        Health {
+            registered_at: None,
+            lease_deadline: None,
+            cycle_ok_at: None,
+            global_seen: 0,
+            behind_since: None,
+            validator: SchemaValidator::new(limits.schema_lease),
+        }
+    }
+
     fn lease_ok(&self, now: Instant, limits: &Limits) -> bool {
         self.lease_deadline
             .is_some_and(|d| now + limits.lease_margin < d)
@@ -82,19 +132,28 @@ impl Health {
             .is_some_and(|t| now >= t + limits.max_staleness)
     }
 
-    /// Whether a statement may start in synced mode now.
+    /// Whether a statement may start in synced mode now: the node is registered with its
+    /// etcd lease proven alive, has completed a cycle since registering, and the schema lease
+    /// has not expired (Go admits statements on the cached schema the same way, and checks
+    /// the lease with `SchemaValidator`). A slow or failing reload therefore does not stop
+    /// admission until the lease runs out (#136).
+    ///
+    /// Admission also requires that the node is not about to deregister, so the admission
+    /// window always lies inside the registration window (see [`Limits::check`]).
     pub(crate) fn admissible(&self, now: Instant, limits: &Limits) -> bool {
         self.registered_at.is_some()
-            && self
-                .cycle_ok_at
-                .is_some_and(|t| now < t + limits.max_staleness)
+            && self.cycle_ok_at.is_some()
             && self.lease_ok(now, limits)
-            && !self.behind_too_long(now, limits)
+            && self.validator.is_started()
+            && !self.validator.is_lease_expired(now)
+            && !self.should_deregister(now, limits)
     }
 
     /// Whether the node must give up its registration so that DDL is not blocked by it: the
-    /// lease is (nearly) gone, or the sync loop has made no progress for too long, or it has
-    /// lagged the global version for too long.
+    /// etcd lease is (nearly) gone, or the sync loop has made no progress for `max_staleness`,
+    /// or it has lagged the global version for that long. `max_staleness` is not shorter than
+    /// the schema lease, so a reload that fails for less than a lease (a meta-region leader
+    /// election, #136) neither deregisters the node nor stops admission.
     pub(crate) fn should_deregister(&self, now: Instant, limits: &Limits) -> bool {
         let Some(registered_at) = self.registered_at else {
             return false;
@@ -119,7 +178,6 @@ struct Entry {
     tables: Option<Vec<i64>>,
 }
 
-#[derive(Default)]
 struct State {
     schema: Option<Arc<InfoSchema>>,
     health: Health,
@@ -167,6 +225,23 @@ pub struct StmtGuard {
     registry: Arc<Registry>,
     id: u64,
     epoch: u64,
+    /// Version of the schema the statement uses.
+    version: i64,
+}
+
+/// Outcome of [`StmtGuard::check_results`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultCheck {
+    /// The result may be returned.
+    Valid,
+    /// Discard the result and run the statement on the fallback (ADR 0003) path: the node
+    /// left sync (deregistered, or its etcd lease is not proven alive), or the schema lease
+    /// had expired at the read TS and no reload renewed it while waiting. Reads never return
+    /// `ErrInfoSchemaExpired` (8027): Go's reads do not either.
+    Fallback,
+    /// The schema lease check failed with a definite result (Go: `ResultFail` →
+    /// `ErrInfoSchemaChanged`, 8028).
+    Err(SchemaCheckError),
 }
 
 impl StmtGuard {
@@ -196,6 +271,49 @@ impl StmtGuard {
         }
         ok
     }
+
+    /// The schema lease check of the statement's reads: at its read TS `txn_ts` (`None` for a
+    /// point get at MaxTS, checked with the local clock instead). Call it after the reads have
+    /// completed.
+    ///
+    /// `txn_ts` must be a TS fetched for this statement *after* its admission (i.e. "now");
+    /// never a transaction's `start_ts` (D05.4, explicit transactions, must not pass one).
+    fn schema_check_at(&self, txn_ts: Option<u64>, now: Instant) -> CheckResult {
+        let state = self.registry.lock();
+        let v = &state.health.validator;
+        match txn_ts {
+            Some(ts) => v.check(ts, self.version),
+            None => v.check_now(now, self.version),
+        }
+    }
+
+    /// Whether a result read at `txn_ts` with the admitted schema may be returned: first the
+    /// fencing of [`StmtGuard::results_valid`] (failing it means [`ResultCheck::Fallback`]),
+    /// then the schema lease at the read TS. While the lease has expired at that TS, wait for
+    /// a reload to renew it as Go does; if none does, return [`ResultCheck::Fallback`] (not
+    /// Go's `ErrInfoSchemaExpired`: Go only returns it at commit, and its reads never fail
+    /// with it; the fallback path re-reads the schema at a fresh TSO and succeeds once the
+    /// meta region and TSO are available again).
+    ///
+    /// `txn_ts` only accepts a TS fetched for this statement after admission (i.e. "now");
+    /// never a transaction's `start_ts`. `None` means a MaxTS point get. D05.4 (explicit
+    /// transactions) must not pass a transaction's `start_ts` here: the lease bounds the
+    /// schema's age at the moment of the read, not at the transaction's start.
+    // go: SchemaChecker.CheckBySchemaVer L2 (async sleep; re-checks the fencing on every try; falls back instead of ErrInfoSchemaExpired)
+    pub async fn check_results(&self, txn_ts: Option<u64>) -> ResultCheck {
+        let retry = self.registry.limits.schema_check_retry;
+        for _ in 0..retry.times {
+            if !self.results_valid() {
+                return ResultCheck::Fallback;
+            }
+            match self.schema_check_at(txn_ts, Instant::now()) {
+                CheckResult::Succ => return ResultCheck::Valid,
+                CheckResult::Fail => return ResultCheck::Err(SchemaCheckError::Changed),
+                CheckResult::Unknown => tokio::time::sleep(retry.interval).await,
+            }
+        }
+        ResultCheck::Fallback
+    }
 }
 
 impl Drop for StmtGuard {
@@ -206,9 +324,16 @@ impl Drop for StmtGuard {
 
 impl Registry {
     pub fn new(limits: Limits) -> Arc<Registry> {
+        debug_assert!(limits.check().is_ok(), "{:?}", limits.check());
         Arc::new(Registry {
             limits,
-            state: Mutex::default(),
+            state: Mutex::new(State {
+                schema: None,
+                health: Health::new(&limits),
+                epoch: 0,
+                entries: HashMap::new(),
+                next_id: 0,
+            }),
             invalidated: AtomicU64::new(0),
             admitted: AtomicU64::new(0),
             counters: Mutex::default(),
@@ -236,10 +361,11 @@ impl Registry {
         let id = state.next_id;
         state.next_id += 1;
         let epoch = state.epoch;
+        let version = schema.version();
         state.entries.insert(
             id,
             Entry {
-                version: schema.version(),
+                version,
                 epoch,
                 tables: None,
             },
@@ -252,6 +378,7 @@ impl Registry {
                 registry: self.clone(),
                 id,
                 epoch,
+                version,
             },
         })
     }
@@ -314,6 +441,26 @@ impl Registry {
         Self::update_behind(&mut state, now);
     }
 
+    /// A reload succeeded at the TSO `lease_grant_ts`, requested at `requested_at`; `old_ver`
+    /// is the version loaded before it, and `full_load` whether it loaded a new schema (every
+    /// load is a full one here). Renews the schema lease even if the version did not change.
+    // go-part: Domain.Reload (`SchemaValidator.Reset` on a full load, then `Update`)
+    pub(crate) fn reloaded(
+        &self,
+        lease_grant_ts: u64,
+        requested_at: Instant,
+        old_ver: i64,
+        full_load: bool,
+    ) {
+        let mut state = self.lock();
+        let curr_ver = state.schema.as_ref().map_or(0, |s| s.version());
+        let validator = &mut state.health.validator;
+        if full_load {
+            validator.reset();
+        }
+        validator.update(lease_grant_ts, requested_at, old_ver, curr_ver);
+    }
+
     /// A `global_schema_version` value seen in etcd.
     pub(crate) fn note_global(&self, version: i64, now: Instant) {
         let mut state = self.lock();
@@ -337,6 +484,10 @@ impl Registry {
         state.health.registered_at = Some(now);
         state.health.lease_deadline = Some(lease_deadline);
         state.health.cycle_ok_at = None;
+        // Go: `do.SchemaValidator.Restart()` after the syncer restarted and reloaded.
+        let loaded = state.schema.as_ref().map_or(0, |s| s.version());
+        state.health.validator.restart(loaded);
+        state.health.validator.forget_lease();
         drop(state);
         self.count(|s| s.registrations += 1);
         self.lock().epoch
@@ -376,6 +527,8 @@ impl Registry {
         let was = state.health.registered_at.take().is_some();
         state.health.lease_deadline = None;
         state.health.cycle_ok_at = None;
+        // Go: `do.SchemaValidator.Stop()` when the schema syncer's session is gone.
+        state.health.validator.stop();
         state.epoch += 1;
         drop(state);
         if was {
@@ -428,9 +581,19 @@ mod tests {
 
     fn limits() -> Limits {
         Limits {
+            schema_lease: 5 * S,
             max_staleness: 5 * S,
             lease_margin: 3 * S,
+            schema_check_retry: SchemaCheckRetry {
+                interval: Duration::from_millis(1),
+                times: 3,
+            },
         }
+    }
+
+    /// A TSO `secs` seconds after an arbitrary origin.
+    fn tso(secs: f64) -> u64 {
+        (1_700_000_000_000 + (secs * 1000.0) as u64) << 18
     }
 
     fn schema(v: i64) -> Arc<InfoSchema> {
@@ -442,6 +605,7 @@ mod tests {
         let r = Registry::new(limits());
         r.install(schema(10), t0);
         r.registered(t0, t0 + 90 * S);
+        r.reloaded(tso(0.0), t0, 10, false);
         r.cycle_completed(t0);
         assert!(r.admissible(t0));
         r
@@ -459,7 +623,10 @@ mod tests {
         // A cycle that started before the registration completed does not count.
         r.cycle_completed(t0);
         assert!(!r.admissible(t0 + S));
+        // A reload before registering does not renew the schema lease either.
         r.cycle_completed(t0 + 2 * S);
+        assert!(!r.admissible(t0 + 2 * S), "no reload after registering yet");
+        r.reloaded(tso(2.0), t0 + 2 * S, 10, false);
         assert!(r.admissible(t0 + 2 * S));
         assert!(r.admit(t0 + 2 * S).is_some());
     }
@@ -490,6 +657,7 @@ mod tests {
         let a = r.admit(t0).unwrap();
         // Keepalives keep extending the deadline; cycles keep the loop fresh.
         r.lease_renewed(epoch, t0 + 100 * S);
+        r.reloaded(tso(96.0), t0 + 96 * S, 10, false);
         r.cycle_completed(t0 + 96 * S);
         assert!(r.admissible(t0 + 96 * S));
         assert!(a.guard.results_valid_at(t0 + 96 * S));
@@ -512,6 +680,7 @@ mod tests {
         r.note_global(10, t0);
         assert!(!r.should_deregister(t0 + S));
         r.note_global(11, t0 + S);
+        r.reloaded(tso(5.0), t0 + 5 * S, 10, false);
         r.cycle_completed(t0 + 5 * S);
         assert!(r.admissible(t0 + 5 * S), "behind for 4 s only");
         assert!(!r.admissible(t0 + 6 * S));
@@ -535,6 +704,7 @@ mod tests {
         // Results of statements admitted before are refused even after re-registering.
         assert!(!a.guard.results_valid_at(t0));
         r.registered(t0 + S, t0 + 91 * S);
+        r.reloaded(tso(1.0), t0 + S, 10, false);
         r.cycle_completed(t0 + S);
         assert!(r.admissible(t0 + S));
         assert!(!a.guard.results_valid_at(t0 + S));
@@ -591,6 +761,209 @@ mod tests {
         // Installing an older version is ignored.
         r.install(schema(9), t0);
         assert_eq!(r.loaded_version(), Some(11));
+    }
+
+    /// #136: the meta region's leader is on a killed TiKV, so reloads fail for ~12 s. With
+    /// Go's 45 s schema lease the node keeps admitting statements on the cached schema and
+    /// stays registered; both end only when the lease runs out.
+    #[test]
+    fn failing_reloads_within_the_lease_keep_admitting() {
+        let t0 = Instant::now();
+        let r = Registry::new(Limits::default());
+        r.install(schema(10), t0);
+        r.registered(t0, t0 + 90 * S);
+        r.reloaded(tso(0.0), t0, 10, false);
+        r.cycle_completed(t0);
+        let epoch = r.lock().epoch;
+        for secs in [1, 5, 12, 30, 44] {
+            let now = t0 + secs * S;
+            // Keepalives go to etcd, not TiKV: they still succeed.
+            r.lease_renewed(epoch, now + 90 * S);
+            assert!(r.admissible(now), "{secs} s");
+            assert!(!r.should_deregister(now), "{secs} s");
+        }
+        // The meta region is back after 12 s: a reload renews the lease from its TSO.
+        r.reloaded(tso(12.0), t0 + 12 * S, 10, false);
+        r.cycle_completed(t0 + 12 * S);
+        assert!(r.admissible(t0 + 50 * S));
+        // No reload for a whole lease: stop admitting, then deregister.
+        let r = Registry::new(Limits::default());
+        r.install(schema(10), t0);
+        r.registered(t0, t0 + 1000 * S);
+        r.reloaded(tso(0.0), t0, 10, false);
+        r.cycle_completed(t0);
+        assert!(r.admissible(t0 + 44 * S));
+        assert!(!r.admissible(t0 + 45 * S));
+        assert!(r.should_deregister(t0 + 45 * S));
+    }
+
+    /// Lucky's invariant on #136: admission window <= registration window. At every instant
+    /// at which a statement may be admitted, the watchdog must not deregister; admission
+    /// stops no later than deregistration.
+    #[test]
+    fn admission_stops_before_deregistration() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis(1);
+        type Drive = Box<dyn Fn(&Registry)>;
+        let scenarios: Vec<(&str, Limits, Drive)> = vec![
+            (
+                "stuck loop, max_staleness = lease",
+                limits(),
+                Box::new(|_| {}),
+            ),
+            (
+                "stuck loop, max_staleness > lease",
+                Limits {
+                    max_staleness: 8 * S,
+                    ..limits()
+                },
+                Box::new(|_| {}),
+            ),
+            (
+                // Cycles (MDL reports) keep failing while reloads succeed.
+                "reloads only",
+                limits(),
+                Box::new(move |r: &Registry| {
+                    for i in 1..20 {
+                        r.reloaded(
+                            tso(f64::from(i)),
+                            t0 + u32::try_from(i).unwrap() * S,
+                            10,
+                            false,
+                        );
+                    }
+                }),
+            ),
+            (
+                "lagging the global version",
+                limits(),
+                Box::new(move |r: &Registry| {
+                    r.note_global(11, t0 + S);
+                    for i in 1..20 {
+                        r.reloaded(
+                            tso(f64::from(i)),
+                            t0 + u32::try_from(i).unwrap() * S,
+                            10,
+                            false,
+                        );
+                        r.cycle_completed(t0 + u32::try_from(i).unwrap() * S);
+                    }
+                }),
+            ),
+        ];
+        for (name, limits, drive) in scenarios {
+            let r = Registry::new(limits);
+            r.install(schema(10), t0);
+            r.registered(t0, t0 + 30 * S);
+            r.reloaded(tso(0.0), t0, 10, false);
+            r.cycle_completed(t0);
+            drive(&r);
+            let mut stopped_admitting = None;
+            let mut deregister_at = None;
+            for step in 0..40_000u32 {
+                let now = t0 + step * ms;
+                let admissible = r.admissible(now);
+                let deregister = r.should_deregister(now);
+                assert!(
+                    !(admissible && deregister),
+                    "{name}: admits and deregisters at {step} ms"
+                );
+                if !admissible && stopped_admitting.is_none() {
+                    stopped_admitting = Some(step);
+                }
+                if deregister && deregister_at.is_none() {
+                    deregister_at = Some(step);
+                }
+            }
+            let (Some(stop), Some(dereg)) = (stopped_admitting, deregister_at) else {
+                panic!("{name}: {stopped_admitting:?} {deregister_at:?}");
+            };
+            assert!(
+                stop <= dereg,
+                "{name}: stops admitting at {stop} ms, deregisters at {dereg} ms"
+            );
+        }
+        // And deregistering stops admission at once, before the lease is revoked.
+        let r = healthy(t0);
+        assert!(r.deregister());
+        assert!(!r.admissible(t0) && r.admit(t0).is_none());
+    }
+
+    #[test]
+    fn max_staleness_must_cover_the_lease() {
+        assert!(Limits::default().check().is_ok());
+        assert_eq!(Limits::default().schema_lease, Duration::from_secs(45));
+        let short = Limits {
+            max_staleness: 5 * S,
+            ..Limits::default()
+        };
+        assert!(short.check().unwrap_err().contains("must not be shorter"));
+    }
+
+    #[tokio::test]
+    async fn results_are_checked_against_the_lease_at_the_read_ts() {
+        let t0 = Instant::now();
+        let r = healthy(t0);
+        let a = r.admit(t0).unwrap();
+        // Read TS within one lease of the reload's TS (Go: ResultSucc).
+        assert_eq!(
+            a.guard.check_results(Some(tso(4.9))).await,
+            ResultCheck::Valid
+        );
+        // Past it (Go: ResultUnknown, retried): no reload renews it, so the statement falls
+        // back to the ADR 0003 path instead of returning ErrInfoSchemaExpired (8027).
+        let invalidated = r.stats().invalidated;
+        let got = a.guard.check_results(Some(tso(5.0))).await;
+        assert_eq!(got, ResultCheck::Fallback);
+        assert_eq!(
+            r.stats().invalidated,
+            invalidated,
+            "the node is still in sync"
+        );
+        // A MaxTS point get has no TS: the local clock decides (the lease is still fresh).
+        assert_eq!(a.guard.check_results(None).await, ResultCheck::Valid);
+        // A newer schema installed meanwhile: with MDL, the older statement passes.
+        r.install(schema(11), t0);
+        r.reloaded(tso(1.0), t0 + S, 10, true);
+        assert_eq!(
+            a.guard.check_results(Some(tso(100.0))).await,
+            ResultCheck::Valid
+        );
+        // Deregistered: the result is discarded and the statement falls back.
+        assert!(r.deregister());
+        assert_eq!(
+            a.guard.check_results(Some(tso(1.0))).await,
+            ResultCheck::Fallback
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reload_during_the_retries_renews_the_lease() {
+        let t0 = Instant::now();
+        let r = Registry::new(Limits {
+            schema_check_retry: SchemaCheckRetry {
+                interval: Duration::from_millis(20),
+                times: 50,
+            },
+            ..limits()
+        });
+        r.install(schema(10), t0);
+        r.registered(t0, Instant::now() + 90 * S);
+        r.reloaded(tso(0.0), t0, 10, false);
+        r.cycle_completed(t0);
+        let a = r.admit(Instant::now()).unwrap();
+        let renew = {
+            let r = r.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                r.reloaded(tso(6.0), Instant::now(), 10, false);
+            })
+        };
+        assert_eq!(
+            a.guard.check_results(Some(tso(6.0))).await,
+            ResultCheck::Valid
+        );
+        renew.await.unwrap();
     }
 
     #[test]

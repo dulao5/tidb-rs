@@ -49,5 +49,17 @@ class ClassifyTest(unittest.TestCase):
         self.assertIn("timestamp.rs:70]: TimestampRequest channel is closed", list(s["error_samples"].values())[0])
 
 
+class MetaRegionKeyTest(unittest.TestCase):
+    def test_encode_bytes_like_tidb_codec(self):
+        self.assertEqual(faults.mem_encode_bytes(b""), b"\0" * 8 + b"\xf7")
+        self.assertEqual(faults.mem_encode_bytes(b"m"), b"m" + b"\0" * 7 + b"\xf8")
+        self.assertEqual(faults.mem_encode_bytes(b"12345678"), b"12345678\xff" + b"\0" * 8 + b"\xf7")
+
+    def test_schema_version_key(self):
+        # m + EncodeBytes("SchemaVersionKey") + EncodeUint('s'), encoded once more for PD.
+        raw = b"m" + b"SchemaVe\xffrsionKey\xff" + b"\0" * 8 + b"\xf7" + b"\0" * 7 + b"s"
+        self.assertEqual(faults.schema_version_region_key(), faults.mem_encode_bytes(raw))
+
+
 if __name__ == "__main__":
     unittest.main()

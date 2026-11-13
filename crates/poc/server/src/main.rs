@@ -98,11 +98,17 @@ struct Args {
     /// warning) with --status-port 0.
     #[arg(long)]
     advertise_status_port: Option<u16>,
-    /// Synced mode needs a completed reload + MDL cycle within SECS, and the node may lag the
-    /// cluster's schema version at most SECS; otherwise it deregisters (DDL stops waiting
-    /// for it) and statements fall back until it is in sync again.
-    #[arg(long, value_name = "SECS", default_value_t = 5.0)]
-    schema_sync_max_staleness: f64,
+    /// Schema lease (Go's `--lease`, a Go duration such as `45s`): synced statements use the
+    /// cached schema while the last successful reload is at most one lease old (measured in
+    /// TSO, Go's `SchemaValidator`); later reads fall back to the per-statement schema check.
+    #[arg(long, value_name = "DURATION", default_value = "45s", value_parser = parse_go_duration)]
+    lease: Duration,
+    /// The node deregisters (DDL stops waiting for it) when it has completed no reload + MDL
+    /// cycle for SECS, or has lagged the cluster's schema version for SECS; statements then
+    /// fall back until it is in sync again. Default and minimum: the schema lease, so the
+    /// node stops admitting statements before it deregisters.
+    #[arg(long, value_name = "SECS")]
+    schema_sync_max_staleness: Option<f64>,
     /// Test hook: while this file exists the schema sync loop does nothing, as if stuck.
     #[arg(long, hide = true)]
     schema_sync_stall_file: Option<PathBuf>,
@@ -118,6 +124,16 @@ struct Args {
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
     log_level: tracing::Level,
+}
+
+/// `--lease`: Go's `time.ParseDuration`; the lease must be positive.
+// glue: clap value parser
+fn parse_go_duration(s: &str) -> Result<Duration, String> {
+    let ns = tidb_base::gostd::time::parse_duration(s)?;
+    if ns <= 0 {
+        return Err(format!("the schema lease must be positive, got {s:?}"));
+    }
+    Ok(Duration::from_nanos(ns as u64))
 }
 
 fn main() {
@@ -231,7 +247,10 @@ fn main() {
                 u32::from(advertised_status_port),
             );
             let mut cfg = SyncConfig::new(args.pd.clone(), info, dag.clone());
-            cfg.limits.max_staleness = Duration::from_secs_f64(args.schema_sync_max_staleness);
+            cfg.limits.schema_lease = args.lease;
+            cfg.limits.max_staleness = args
+                .schema_sync_max_staleness
+                .map_or(args.lease, Duration::from_secs_f64);
             cfg.stall_file = args.schema_sync_stall_file.clone();
             let sync = SchemaSync::start(kv.clone(), cfg)
                 .await

@@ -17,7 +17,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 bin=""
-scenarios="split_merge,transfer_leader,kill_tikv,slow_tikv,net_cut,pause_tikv,wide_rows"
+scenarios="split_merge,transfer_leader,kill_tikv,kill_tikv_meta,slow_tikv,net_cut,pause_tikv,wide_rows"
 phase=10
 keep=0
 json_out=""

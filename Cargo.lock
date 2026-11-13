@@ -2583,6 +2583,7 @@ dependencies = [
  "poc-kv",
  "poc-session",
  "serde_json",
+ "tidb-base",
  "tidb-distsql",
  "tidb-meta",
  "tidb-metrics",
