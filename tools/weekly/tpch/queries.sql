@@ -1,6 +1,6 @@
 -- TPC-H queries 1-22 as run by `tiup bench tpch` (pingcap/go-tpc a9ca481, tpch/query.go,
 -- Apache-2.0, https://github.com/pingcap/go-tpc), for the weekly build's tpch part
--- (tools/weekly/run.sh). Database: tpch, SF 0.1 (tiup bench tpch prepare).
+-- (tools/weekly/run.sh). Database: tpch, SF 1 (tiup bench tpch prepare; its --sf is an integer).
 
 -- ab:setup
 -- The view Q15 reads, as `tiup bench tpch run` creates it (go-tpc cmd/go-tpc/misc.go).

@@ -150,6 +150,12 @@ tpch)
         --json "$out/tpch-classified.json" || rc=2
     python3 "$root/tools/weekly/tpch_time.py" --queries "$root/tools/weekly/tpch/queries.sql" \
         --a "$a" --b "$b" --json "$out/tpch-time.json" >"$out/tpch-time.log" 2>&1 || rc=2
+    # A query Go TiDB cannot run at all means the data or the setup is broken: incomplete.
+    if python3 -c "import json,sys; sys.exit(any(r['a_ms'] is None for r in json.load(open(sys.argv[1])).values()))" \
+        "$out/tpch-time.json" 2>/dev/null; then :; else
+        echo "a TPC-H query failed on Go TiDB (or no timing)" >&2
+        [ "$rc" = 1 ] || rc=2
+    fi
     write_status "$(status_of $rc)" "{\"classified\": \"tpch-classified.json\", \"time\": \"tpch-time.json\", \"exit\": $rc}"
     exit "$rc"
     ;;

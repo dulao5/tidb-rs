@@ -46,3 +46,5 @@ cargo build --release -p poc-server -p tidb-ab
 tools/weekly/run.sh ab /tmp/weekly/ab
 python3 tools/weekly/report.py --in /tmp/weekly --parts ab --out /tmp/weekly/report.md
 ```
+
+**TPC-H and ordering.** Q3, Q10 and Q18 end with `ORDER BY … LIMIT` on keys that can tie. Once tidb-rs runs them, ties may come back in a different order, or a different row may fall at the limit, and that would show as mismatches. When that happens, append the primary key to their `ORDER BY` in `tpch/queries.sql`, on both sides, so the order is total.

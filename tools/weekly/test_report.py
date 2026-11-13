@@ -47,6 +47,17 @@ class VerdictTest(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertTrue(first.startswith("**RED**"), first)
 
+    def test_mismatch_in_results_jsonl_is_red_without_classified(self):
+        # classify.py failed: no ab-classified.json, but tidb-ab's results hold a mismatch.
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/part-ab", "ab.json", {"part": "ab", "status": "incomplete"})
+            os.makedirs(f"{d}/part-ab/ab-sysbench")
+            with open(f"{d}/part-ab/ab-sysbench/results.jsonl", "w") as f:
+                f.write(json.dumps({"template": "t", "protocol": "text", "verdict": "mismatch", "query": "q"}) + "\n")
+            rc, first = report(d)
+            self.assertEqual(rc, 1)
+            self.assertTrue(first.startswith("**RED**"), first)
+
     def test_faults_and_locks_raw_wrong_results_are_red(self):
         with tempfile.TemporaryDirectory() as d:
             write(d, "faults.json", {"part": "faults", "status": "ok"})

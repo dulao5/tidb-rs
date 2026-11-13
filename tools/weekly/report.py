@@ -59,9 +59,19 @@ PERF_DROP = 0.15
 def wrong_results(base):
     """Parts whose raw results show a wrong result, whatever their status says."""
     out = {}
+    # Counted from tidb-ab's results.jsonl themselves, not from the classified summary (which
+    # a failed classify.py would leave out). ab-tpch/ belongs to the tpch part.
+    for path in glob.glob(os.path.join(base, "**", "results.jsonl"), recursive=True):
+        part = "tpch" if os.path.basename(os.path.dirname(path)) == "ab-tpch" else "ab"
+        with open(path) as f:
+            n = sum(1 for line in f if line.strip() and json.loads(line).get("verdict") == "mismatch")
+        if n:
+            prev = int(out.get(part, "0 ").split()[0])
+            out[part] = f"{prev + n} mismatches"
+    # The classified summary too, in case only it survived.
     for part, name in (("ab", "ab-classified.json"), ("tpch", "tpch-classified.json")):
         c = load(base, name)
-        if c and c["totals"].get("mismatch", 0) > 0:
+        if part not in out and c and c["totals"].get("mismatch", 0) > 0:
             out[part] = f"{c['totals']['mismatch']} mismatches"
     f = load(base, "faults-raw.json")
     if f:
