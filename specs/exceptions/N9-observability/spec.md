@@ -184,6 +184,71 @@
 - **动态修改**：修改采样率只影响之后开始的语句；正在执行的语句保持开始时的决定。
 - **留给 D14.3**（Lucky 评审 #118，不阻塞）：随机采样（每次执行按概率抽），不用"每 100 次取 1 次"，以免和周期性负载对齐；§6.1 的基准加上 0%/1%/100% 三档（`Instant` 本来就要读、CPU 窗口按线程读，不采样能省下的可能很少）；如果 100% 的开销已在预算内，可以请负责人考虑"Top SQL 开启时慢日志的 `Tidb_cpu_time` 总是计算，采样率只用于 Top SQL 聚合"，否则 1% 时几乎所有慢日志都没有 TiDB CPU；上报倾向按采样率外推，因为 Dashboard 把 TiDB 和全量统计的 TiKV CPU 并排显示。
 
+### 6.1b 基准结果（2026-11-13，#53 / §6.1 / §6.1a / §9）
+
+**结论**：§6.1 的窗口方案满足 §9 的预算，可以作为 D3 的依据。10 ms 窗口、100% 采样时，sysbench 中 tidb-rs 每条查询的 CPU 与关闭记账相比多 +0.1%～+1.8%，与当前只读 `Instant` 的做法相比差 −0.3%～+1.3%，都在噪声内（同一配置三轮之间相差 1–2.6%）。0% / 1% 采样省下的开销小于噪声。每次 poll 读两次线程 CPU 时钟的做法确实不可行：Linux 上每次 poll 多 1.3 µs。建议窗口取 10 ms：1 ms 窗口的分摊稍准，但在 32 线程时开销 +1.6%～+1.8%，已接近预算。
+
+**复现**：微基准 `cargo bench -p tidb-runtime --bench cpu_accounting`（`crates/runtime/benches/cpu_accounting.rs`，直接输出下面的表）。sysbench 用分支 `bench/N9-sysbench-switch`（8711ac3，不合并）：poll 包装器读环境变量 `TIDB_RS_CPU_ACCT=off|instant|win1|win10` 和 `TIDB_RS_CPU_SAMPLE`，语句开始时按采样率挂上或摘掉 `CpuRecorder`；驱动脚本 `scripts/n9-sysbench.sh`。
+
+#### 时钟读取（ns / 次）
+
+| 时钟 | Linux arm64（10 核虚拟机） | macOS arm64（Mac mini，12 核） |
+|---|---|---|
+| `Instant::now` | 13.7 | 25.3 |
+| `CLOCK_MONOTONIC` | 14.9 | 18.8 |
+| `CLOCK_THREAD_CPUTIME_ID` | 201.1 | 78.6 |
+
+Linux 的线程 CPU 时钟是真正的系统调用（与 §6.1 的前提一致）；macOS 上它比 Linux 便宜，而 `Instant` 更贵。
+
+#### 微基准：每次 poll 的开销
+
+人造负载：每个 worker 线程 8 个任务，每个任务 2000 次 poll，每次 poll 做 1 µs 或 4 µs 的计算后让出（比点查的 poll 短，开销的百分比因此偏高）。表中是进程 CPU 比 `off`（不记账）多出的 ns / poll，各配置交替跑 15 轮取中位数。`instant` = 只读 `Instant`；`winN` = `instant` 加 N ms 窗口读线程 CPU 时钟并按墙钟分摊；`perpoll` = 每次 poll 读两次线程 CPU 时钟（参照）。
+
+| 模式 | 采样率 | Linux 单 worker | Linux 每核一个 worker | macOS 单 worker | macOS 每核一个 worker |
+|---|---|---|---|---|---|
+| 噪声（`off` 的四分位距） | | ±8.1 | ±28.2 | ±42.8 | ±153.9 |
+| instant | 0% / 1% / 100% | −22 / −23 / −1 | 0 / +8 / +48 | +3 / +4 / +40 | −41 / +3 / −4 |
+| win1ms | 0% / 1% / 100% | +1 / −2 / +40 | +48 / +52 / +150 | +54 / +50 / +58 | +54 / +29 / +36 |
+| win10ms | 0% / 1% / 100% | −3 / −1 / +6 | +62 / +42 / +114 | +50 / +52 / +54 | −18 / +48 / +161 |
+| perpoll | 0% / 1% / 100% | −3 / −2 / **+1302** | +53 / +60 / **+983** | +51 / +50 / **+124** | −50 / −81 / **+311** |
+
+说明：macOS 上窗口方案在 0% 采样时也多约 50 ns，原因不是窗口检查，而是基准中窗口模式每次 poll 读两次 `Instant`（`instant` 模式没采中时只读一次）；`perpoll` 0% 同样只多读一次 `Instant`，也是 +50 ns。真实的 N3 poll 包装器本来就每次 poll 读两次 `Instant`（时间片、停顿检测），所以这不是窗口方案的额外开销；窗口方案真正增加的是一次线程局部累加，以及每个窗口一次线程 CPU 时钟读取。
+
+#### 微基准：分摊的准确度（100% 采样）
+
+一半任务每次 poll 做 1 份计算，一半做 4 份。heavy/light = 分到每个重任务的 CPU 与每个轻任务之比；attributed/process = 分摊给所有任务的 CPU 与进程 CPU 之比。超额订阅 = 另起与核数相同的空转线程。
+
+| 负载 | 模式 | Linux heavy/light | Linux attributed/process | macOS heavy/light | macOS attributed/process |
+|---|---|---|---|---|---|
+| 空闲 | win1ms | 3.993 | 0.992 | 3.915 | 0.993 |
+| 空闲 | win10ms | 4.012 | 0.946 | 3.882 | 0.947 |
+| 空闲 | perpoll | 3.646 | 0.907 | 3.677 | 0.853 |
+| 超额订阅 | win1ms | 3.979 | — | 3.897 | — |
+| 超额订阅 | win10ms | 3.616 | — | 3.941 | — |
+| 超额订阅 | perpoll | 3.641 | — | 3.762 | — |
+
+`perpoll` 只计 poll 内部的 CPU；窗口方案还把两次 poll 之间运行时自身的 CPU（调度、唤醒）按墙钟分给任务，所以总量更接近进程 CPU，比值也更接近工作量之比 4。attributed/process 低于 1 的部分是基准结束时尚未关闭的窗口（10 ms 窗口更明显）；实现中任务结束时要刷出（§3.6）。
+
+#### sysbench（Linux arm64，tiup playground v8.5.8，同机 1 PD + 1 TiKV + tidb-rs）
+
+1 张表 10 万行，`--db-ps-mode=auto --skip_trx=on`，每次 30 s（另有 5 s 预热），三轮交替取中位数。指标是 tidb-rs 进程每条查询的 CPU（`/proc/<pid>/stat`），QPS 主要受同机 TiKV 限制，各配置相同。32 线程超过 10 核，属于超额订阅。
+
+| 负载 | 线程 | off（µs / 查询） | instant | win10 0% | win10 1% | win10 100% | win1 100% |
+|---|---|---|---|---|---|---|---|
+| oltp_point_select | 8 | 75.43 | +0.50% | +0.45% | +0.69% | +0.17% | +0.56% |
+| oltp_point_select | 32 | 49.37 | +0.51% | +0.32% | +0.81% | +0.97% | +1.78% |
+| oltp_read_only | 8 | 115.72 | −0.06% | −0.16% | +0.09% | +0.11% | +0.74% |
+| oltp_read_only | 32 | 85.68 | +0.49% | +0.81% | −0.34% | +1.79% | +1.55% |
+
+噪声：同一配置三轮之间相差 1–2.6%（例如 read_only 32 线程的 `off` 为 85.16～87.40）。所有差值都在这个范围内；只有 1 ms 窗口在 32 线程两种负载下都在 +1.5% 以上，倾向于真实但很小。
+
+#### 对 §9 和 §6.1a 的含义
+
+- §9 默认路径（Top SQL 关）：`instant` 相对 `off` +0.5% 以内，满足 ≤ 1%。
+- §9 Top SQL 开（10 ms 窗口，100%）：相对 `instant` 在噪声内（−0.3%～+1.3%），满足"再增加 ≤ 1%"的目标，但 32 线程 read_only 的 +1.3% 接近上限，D14.3 实现后应在真实 TiKV 集群上复测，并以 Go 开 Top SQL 的开销作参照。
+- §6.1a 采样：既然 100% 的开销已在预算内，0% / 1% 省不下可测的 CPU。这支持 Lucky 在 #118 提出的选项：Top SQL 开启时慢日志的 `Tidb_cpu_time` 总是计算，采样率只用于 Top SQL 聚合（需负责人决定）。
+- 未测：`perf_event_open` 备选（§6.1 第 4 条）。在窗口方案已满足预算的情况下不需要。
+
 ### 6.2 语句级 CPU 字段（`Tidb_cpu_time` 等）
 
 Go v8.5.8 的慢日志 `Tidb_cpu_time`/`Tikv_cpu_time`、`STATEMENTS_SUMMARY.AVG_TIDB_CPU_TIME`、PROCESSLIST 的 CPU 列（`util/ppcpuusage`）就是 `StmtExecRecord` 中的 CPU 数值。按 Go：
