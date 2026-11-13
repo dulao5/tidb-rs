@@ -99,84 +99,99 @@ D08.2 第 1 部分（`specs/D08.2-funcs`）移植了函数注册表 `funcs`（�
 - 仍在 2b 范围之外：`builtin_vectorized.go` 的 `vecEvalIntByRows`/`vecEvalStringByRows`、局部列池（随第一个用到它们的函数族；列池按 M-POOL 不移植）；`Column.EvalVirtualColumn`（随生成列）。
 
 
-## 门禁重测（2026-11-14，P1 收尾；**未通过**）
+## 门禁重测（2026-11-14，P1 收尾；修复后**通过**）
 
 Lucky 在 #163 评审中不同意把门禁移交 A5：先做 T7a，再按上面的测量规则重测，然后才能勾掉 P1。指标不放宽。
 
 **方法**：`scripts/eval-gate.sh`（Go 与 Rust 交替运行，各 5 个独立进程，Go 每进程 3 个样本、Rust 为 criterion 的点估计，取最小值；`scripts/eval_gate_summary.py` 逐项对照门槛）。Go 一侧是 v8.5.8 `pkg/expression` 的 `BenchmarkVectorizedBuiltin*Func`，外加 `crates/expression/benches/go/gate_vec_test.go`（距离函数 3 维与 768 维，同一个 `newVectorFloat32RandGener`）；Rust 一侧是 `benches/eval_gate.rs`。测量集比 #75 多了三类：已移植的 PlusInt/LTInt/CastIntAsReal 签名（`-port`，#75 时只有原型）、四个距离函数（3 维、768 维，T7a）、`RpnProgram::compile` 与每 chunk 的堆分配次数。
-- arm64：本机 Mac mini（Apple M4 Pro，12 核），go1.25.12，rustc 1.99.1；各轮开始时 load average 2.1–4.6（本机常驻负载约 2）。
-- amd64：CI `ubuntu-24.04`（AMD EPYC 7763，4 核），workflow `eval-gate.yml`（run 43491177313，产物 `eval-gate-amd64`）。
+
+**门槛**（N4 §5 与负责人确认的口径）：向量驱动每个签名不低于 Go（Go/Rust ≥ 1.0）；Rust 一侧有堆分配的基准差距 ≤ 5%（≥ 0.95，D01.2 spec §5 的口径）；吞吐 ≥ 1.5 倍为目标（逐项列出，不作为通过条件，与 #75 相同）；定长结果每 chunk 除结果列外 0 次堆分配；编译每个节点 ≤ 1 µs。逐行驱动按 #75 不计入门禁，只列出。sysbench `oltp_point_select` 是端到端指标，由 weekly 构建测量，不在本门禁中。
+
+### 第一次测量（T7a 之后、修复之前）：未通过
+
+完整输出：`gate-rerun-arm64-before.md`、`gate-rerun-amd64-before.md`（amd64：CI run 43491177313）。向量驱动低于 Go 的项：3 维距离函数（arm64：L2 0.52×、COSINE 0.46×、NEGATIVE_INNER_PRODUCT 0.62×；amd64：四个都在 0.42–0.52×）；移植后的 CastIntAsReal（arm64 0.91×，amd64 1.18×）。逐行驱动的距离函数每行 2 次分配（Go 0 次）。
+
+原因（`sample` 剖析，arm64）：3 维时每行的固定开销占主导——约一半时间在 `Column::get_vector_float32` → `get_bytes` → `zero_copy_deserialize_vector_float32` → `peek_bytes_as_vector_float32`，其余在 `check_identical_dims`、`elements`、`Elements::iter`，都是没有内联的跨 crate 小函数（带出错路径的 `errorf` 让它们变大；fat LTO 也没有内联）。CastIntAsReal 的移植是默认形式，每行读 unsigned 标志和 `inUnion`，循环不能向量化。逐行驱动的分配来自 `Column::eval_vector_float32` 返回自有值（从行复制）。
+
+### 修复（同一 PR，行为不变）
+
+1. **距离函数**：lazy 函数体的向量驱动对 `args(VectorFloat32, ..)` 中的 VECTOR 参数每 chunk 取一次视图（`Column::var_len_view` 取出 offsets 与 data，`rt::VectorView`、`VecArgs::with_vectors`），行内不再经过列的缓冲区；`Column::get_vector_float32`、`peek_bytes_as_vector_float32`、`zero_copy_deserialize_vector_float32`、`VectorFloat32::len/elements`、`Elements::iter`、`check_identical_dims` 与各距离方法加 `#[inline]`，出错路径移到 `#[cold]` 函数（文案与 panic 不变）。
+2. **CastIntAsReal**：改为 `checked(nflags = 3)`（参数 unsigned、结果 unsigned、`inUnion`），标志每 chunk 读一次（Go 的 `vecEvalReal` 也在循环外读）。满足 spec §3.4 三条：(a) 没有可能出错的检查，NULL 行的值被空位图屏蔽；(b) 没有逐行副作用（无 warning、无状态）；(c) 行版与向量版计算同一个值。
+3. **逐行驱动不复制**：`Column::eval_vector_float32` / `Expr::eval_vector_float32` 返回借用行的 `VectorFloat32<'r>`（Go 的 `row.GetVectorFloat32` 也不复制）；距离函数等 VECTOR 函数的逐行驱动每行 0 次分配。
+
+govec `cast` 回放：本机 arm64 与 CI 的 amd64、arm64 都通过；`tidb-types`、`tidb-chunk`、`tidb-expression` 的测试全部通过。
+
+### 修复后的测量：通过
+
+- arm64：本机 Mac mini（Apple M4 Pro，12 核），go1.25.12，rustc 1.99.1；各轮开始时 load average 1.8–2.6（第 1 轮 14.9：刚结束编译；取多进程最小值）。
+- amd64：CI `ubuntu-24.04`（这次是 AMD EPYC 9V74，4 核；第一次测量是 EPYC 7763），workflow `eval-gate.yml`（run 43500047141，产物 `eval-gate-amd64`）。
 - 完整输出：`gate-rerun-arm64.md`、`gate-rerun-amd64.md`。
 
-**门槛**（N4 §5 与负责人确认的口径）：向量驱动每个签名不低于 Go（Go/Rust ≥ 1.0）；Rust 一侧有堆分配的基准差距 ≤ 5%（≥ 0.95，D01.2 spec §5 的口径）；吞吐 ≥ 1.5 倍为目标（逐项列出，不作为通过条件，与 #75 相同）；定长结果每 chunk 除结果列外 0 次堆分配；编译每个节点 ≤ 1 µs。逐行驱动按 #75 不计入门禁，只列出。
+#### 向量驱动（门禁；每 1024 行）
 
-### 向量驱动（门禁；ns 或 µs / 1024 行）
-
-| 签名 | 门槛 | arm64 Go | arm64 Rust | arm64 比值 | amd64 Go | amd64 Rust | amd64 比值 | 结果 |
+| 签名 | 门槛 | arm64 Go | arm64 Rust | arm64 Go/Rust | amd64 Go | amd64 Rust | amd64 Go/Rust | 结果 |
 |---|---|--:|--:|--:|--:|--:|--:|:-:|
-| PlusInt-SS | ≥ 1.0× | 1,380 ns | 477 ns | 2.89× | 2,107 ns | 1,172 ns | 1.80× | 通过 |
-| PlusInt-UU | ≥ 1.0× | 738 ns | 459 ns | 1.61× | 1,551 ns | 1,316 ns | 1.18× | 通过 |
-| PlusInt-SU | ≥ 1.0× | 980 ns | 669 ns | 1.47× | 2,007 ns | 1,676 ns | 1.20× | 通过 |
-| PlusInt-US | ≥ 1.0× | 985 ns | 669 ns | 1.47× | 1,866 ns | 1,683 ns | 1.11× | 通过 |
-| LTInt | ≥ 1.0× | 1,803 ns | 370 ns | 4.87× | 3,020 ns | 755 ns | 4.00× | 通过 |
-| CastIntAsReal | ≥ 1.0× | 1,069 ns | 265 ns | 4.03× | 1,842 ns | 516 ns | 3.57× | 通过 |
-| Concat | ≥ 0.95×（含分配） | 35.59 µs | 13.30 µs | 2.67× | 88.44 µs | 18.40 µs | 4.81× | 通过 |
-| Like | ≥ 0.95×（含分配） | 54.72 µs | 41.00 µs | 1.33× | 100.98 µs | 62.23 µs | 1.62× | 通过 |
-| PlusInt-SS-port | ≥ 1.0× | 1,380 ns | 1,097 ns | 1.26× | 2,107 ns | 1,737 ns | 1.21× | 通过 |
-| PlusInt-UU-port | ≥ 1.0× | 738 ns | 454 ns | 1.63× | 1,551 ns | 1,387 ns | 1.12× | 通过 |
-| PlusInt-SU-port | ≥ 1.0× | 980 ns | 674 ns | 1.45× | 2,007 ns | 1,527 ns | 1.31× | 通过 |
-| PlusInt-US-port | ≥ 1.0× | 985 ns | 672 ns | 1.47× | 1,866 ns | 1,521 ns | 1.23× | 通过 |
-| LTInt-port | ≥ 1.0× | 1,803 ns | 370 ns | 4.87× | 3,020 ns | 749 ns | 4.03× | 通过 |
-| CastIntAsReal-port | ≥ 1.0× | 1,069 ns | 1,178 ns | 0.91× | 1,842 ns | 1,566 ns | 1.18× | arm64 未通过，amd64 通过 |
-| VecL1Distance-d3 | ≥ 1.0× | 23.20 µs | 17.20 µs | 1.35× | 28.20 µs | 54.16 µs | 0.52× | arm64 通过，amd64 未通过 |
-| VecL2Distance-d3 | ≥ 1.0× | 10.20 µs | 19.53 µs | 0.52× | 25.77 µs | 61.24 µs | 0.42× | 未通过 |
-| VecCosineDistance-d3 | ≥ 1.0× | 11.47 µs | 25.05 µs | 0.46× | 32.77 µs | 67.44 µs | 0.49× | 未通过 |
-| VecNegativeInnerProduct-d3 | ≥ 1.0× | 10.15 µs | 16.50 µs | 0.62× | 24.96 µs | 53.89 µs | 0.46× | 未通过 |
-| VecL1Distance-d768 | ≥ 1.0× | 3,320.63 µs | 408.32 µs | 8.13× | 5,608.72 µs | 792.37 µs | 7.08× | 通过 |
-| VecL2Distance-d768 | ≥ 1.0× | 755.18 µs | 634.23 µs | 1.19× | 1,021.95 µs | 797.88 µs | 1.28× | 通过 |
-| VecCosineDistance-d768 | ≥ 1.0× | 769.42 µs | 640.15 µs | 1.20× | 1,034.96 µs | 805.33 µs | 1.29× | 通过 |
-| VecNegativeInnerProduct-d768 | ≥ 1.0× | 705.59 µs | 613.36 µs | 1.15× | 1,019.82 µs | 790.91 µs | 1.29× | 通过 |
+| PlusInt-SS | ≥ 1.0× | 1,377 ns | 477 ns | 2.89× | 1,635 ns | 958 ns | 1.71× | 通过 |
+| PlusInt-UU | ≥ 1.0× | 736 ns | 458 ns | 1.61× | 1,210 ns | 1,099 ns | 1.10× | 通过 |
+| PlusInt-SU | ≥ 1.0× | 975 ns | 666 ns | 1.46× | 1,550 ns | 1,399 ns | 1.11× | 通过 |
+| PlusInt-US | ≥ 1.0× | 976 ns | 666 ns | 1.47× | 1,639 ns | 1,349 ns | 1.21× | 通过 |
+| LTInt | ≥ 1.0× | 1,782 ns | 370 ns | 4.82× | 2,421 ns | 606 ns | 3.99× | 通过 |
+| CastIntAsReal | ≥ 1.0× | 1,065 ns | 264 ns | 4.03× | 1,388 ns | 420 ns | 3.30× | 通过 |
+| Concat | ≥ 0.95×（含分配） | 35.46 µs | 13.26 µs | 2.67× | 61.95 µs | 13.97 µs | 4.43× | 通过 |
+| Like | ≥ 0.95×（含分配） | 55.25 µs | 40.86 µs | 1.35× | 74.92 µs | 41.66 µs | 1.80× | 通过 |
+| PlusInt-SS-port | ≥ 1.0× | 1,377 ns | 1,079 ns | 1.28× | 1,635 ns | 1,358 ns | 1.20× | 通过 |
+| PlusInt-UU-port | ≥ 1.0× | 736 ns | 454 ns | 1.62× | 1,210 ns | 1,207 ns | 1.00× | 通过 |
+| PlusInt-SU-port | ≥ 1.0× | 975 ns | 658 ns | 1.48× | 1,550 ns | 1,205 ns | 1.29× | 通过 |
+| PlusInt-US-port | ≥ 1.0× | 976 ns | 674 ns | 1.45× | 1,639 ns | 1,210 ns | 1.36× | 通过 |
+| LTInt-port | ≥ 1.0× | 1,782 ns | 369 ns | 4.83× | 2,421 ns | 609 ns | 3.97× | 通过 |
+| CastIntAsReal-port | ≥ 1.0× | 1,065 ns | 265 ns | 4.02× | 1,388 ns | 422 ns | 3.29× | 通过 |
+| VecL1Distance-d3 | ≥ 1.0× | 23.27 µs | 6,974 ns | 3.34× | 20.07 µs | 12.14 µs | 1.65× | 通过 |
+| VecL2Distance-d3 | ≥ 1.0× | 10.34 µs | 6,850 ns | 1.51× | 20.63 µs | 11.90 µs | 1.73× | 通过 |
+| VecCosineDistance-d3 | ≥ 1.0× | 11.42 µs | 7,171 ns | 1.59× | 22.07 µs | 15.06 µs | 1.47× | 通过 |
+| VecNegativeInnerProduct-d3 | ≥ 1.0× | 10.14 µs | 6,804 ns | 1.49× | 20.34 µs | 11.37 µs | 1.79× | 通过 |
+| VecL1Distance-d768 | ≥ 1.0× | 3,244.25 µs | 338.41 µs | 9.59× | 4,712.30 µs | 640.16 µs | 7.36× | 通过 |
+| VecL2Distance-d768 | ≥ 1.0× | 736.96 µs | 555.85 µs | 1.33× | 884.41 µs | 636.06 µs | 1.39× | 通过 |
+| VecCosineDistance-d768 | ≥ 1.0× | 758.82 µs | 580.85 µs | 1.31× | 893.12 µs | 659.86 µs | 1.35× | 通过 |
+| VecNegativeInnerProduct-d768 | ≥ 1.0× | 707.57 µs | 538.60 µs | 1.31× | 877.60 µs | 630.04 µs | 1.39× | 通过 |
 
-### 其余指标
+#### 其余指标
 
 | 指标 | 门槛 | arm64 | amd64 | 结果 |
 |---|---|--:|--:|:-:|
 | 定长结果每 chunk 的堆分配（20 个用例，向量驱动） | 0 | 0 | 0 | 通过 |
-| `RpnProgram::compile` 每个节点（66 个节点） | ≤ 1 µs | 9.4 ns | 18.5 ns | 通过 |
-| 吞吐 ≥ 1.5 倍（目标） | — | 22 项中 8 项 | 22 项中 7 项 | 目标未全部达到（#75 时 Like 也是 1.4×） |
-| sysbench `oltp_point_select` 不低于 PoC 基线 | — | — | — | 本次未测（这是端到端指标，不在本门禁的微基准中） |
+| `RpnProgram::compile` 每个节点（66 个节点） | ≤ 1 µs | 9.5 ns | 14.7 ns | 通过 |
+| 吞吐 ≥ 1.5 倍（目标，不作为通过条件） | — | 22 项中 12 项 | 22 项中 11 项 | 目标未全部达到 |
+| sysbench `oltp_point_select` 不低于 PoC 基线 | — | — | — | 由 weekly 构建测量 |
 
-### 逐行驱动（不计入门禁，#75）
+amd64 上 PlusInt-UU-port 为 1.00×（1,207 vs 1,210 ns），刚好不低于 Go（第一次测量 1.12×）；它是 D08.5 的移植，溢出判断照 Go 写成比较、没有向量化（原型用 `overflowing_add` 的等价形式为 1.10–1.61×）。不是本 PR 改动的签名，记为余量很小的项。
 
-| 签名 | 门槛 | arm64 Go | arm64 Rust | arm64 比值 | amd64 Go | amd64 Rust | amd64 比值 | 结果 |
+#### 逐行驱动（不计入门禁，#75）
+
+| 签名 | 门槛 | arm64 Go | arm64 Rust | arm64 Go/Rust | amd64 Go | amd64 Rust | amd64 Go/Rust | 结果 |
 |---|---|--:|--:|--:|--:|--:|--:|:-:|
-| PlusInt-SS | ≥ 1.0× | 12.88 µs | 8,827 ns | 1.46× | 26.99 µs | 24.39 µs | 1.11× | ≥ Go |
-| PlusInt-UU | ≥ 1.0× | 10.35 µs | 8,822 ns | 1.17× | 23.04 µs | 24.34 µs | 0.95× | arm64 ≥ Go，amd64 低于 Go |
-| PlusInt-SU | ≥ 1.0× | 10.56 µs | 8,821 ns | 1.20× | 23.36 µs | 24.66 µs | 0.95× | arm64 ≥ Go，amd64 低于 Go |
-| PlusInt-US | ≥ 1.0× | 10.43 µs | 8,820 ns | 1.18× | 23.60 µs | 24.36 µs | 0.97× | arm64 ≥ Go，amd64 低于 Go |
-| LTInt | ≥ 1.0× | 13.78 µs | 10.76 µs | 1.28× | 28.62 µs | 24.74 µs | 1.16× | ≥ Go |
-| CastIntAsReal | ≥ 1.0× | 8,811 ns | 6,221 ns | 1.42× | 17.68 µs | 15.89 µs | 1.11× | ≥ Go |
-| Concat | ≥ 0.95×（含分配） | 47.09 µs | 83.39 µs | 0.56× | 107.81 µs | 122.08 µs | 0.88× | 低于 Go |
-| Like | ≥ 0.95×（含分配） | 72.80 µs | 93.05 µs | 0.78× | 153.40 µs | 129.00 µs | 1.19× | arm64 低于 Go，amd64 ≥ Go |
-| PlusInt-SS-port | ≥ 1.0× | 12.88 µs | 10.73 µs | 1.20× | 26.99 µs | 22.56 µs | 1.20× | ≥ Go |
-| PlusInt-UU-port | ≥ 1.0× | 10.35 µs | 8,153 ns | 1.27× | 23.04 µs | 20.61 µs | 1.12× | ≥ Go |
-| PlusInt-SU-port | ≥ 1.0× | 10.56 µs | 8,210 ns | 1.29× | 23.36 µs | 21.23 µs | 1.10× | ≥ Go |
-| PlusInt-US-port | ≥ 1.0× | 10.43 µs | 8,199 ns | 1.27× | 23.60 µs | 21.22 µs | 1.11× | ≥ Go |
-| LTInt-port | ≥ 1.0× | 13.78 µs | 10.79 µs | 1.28× | 28.62 µs | 22.16 µs | 1.29× | ≥ Go |
-| CastIntAsReal-port | ≥ 1.0× | 8,811 ns | 6,422 ns | 1.37× | 17.68 µs | 14.28 µs | 1.24× | ≥ Go |
-| VecL1Distance-d3 | ≥ 0.95×（含分配） | 29.64 µs | 39.89 µs | 0.74× | 45.88 µs | 85.03 µs | 0.54× | 低于 Go |
-| VecL2Distance-d3 | ≥ 0.95×（含分配） | 16.37 µs | 40.38 µs | 0.41× | 37.75 µs | 90.98 µs | 0.41× | 低于 Go |
-| VecCosineDistance-d3 | ≥ 0.95×（含分配） | 16.90 µs | 40.05 µs | 0.42× | 43.08 µs | 96.89 µs | 0.44× | 低于 Go |
-| VecNegativeInnerProduct-d3 | ≥ 0.95×（含分配） | 16.44 µs | 40.10 µs | 0.41× | 37.60 µs | 84.19 µs | 0.45× | 低于 Go |
-| VecL1Distance-d768 | ≥ 0.95×（含分配） | 3,478.28 µs | 506.37 µs | 6.87× | 5,354.44 µs | 998.69 µs | 5.36× | ≥ Go |
-| VecL2Distance-d768 | ≥ 0.95×（含分配） | 662.79 µs | 752.78 µs | 0.88× | 778.52 µs | 1,008.30 µs | 0.77× | 低于 Go |
-| VecCosineDistance-d768 | ≥ 0.95×（含分配） | 682.77 µs | 767.07 µs | 0.89× | 789.89 µs | 1,017.50 µs | 0.78× | 低于 Go |
-| VecNegativeInnerProduct-d768 | ≥ 0.95×（含分配） | 621.68 µs | 729.25 µs | 0.85× | 773.94 µs | 999.55 µs | 0.77× | 低于 Go |
+| PlusInt-SS | ≥ 1.0× | 12.77 µs | 8,823 ns | 1.45× | 17.09 µs | 19.89 µs | 0.86× | arm64 ≥ Go / amd64 低于 Go |
+| PlusInt-UU | ≥ 1.0× | 10.34 µs | 8,821 ns | 1.17× | 16.89 µs | 19.89 µs | 0.85× | arm64 ≥ Go / amd64 低于 Go |
+| PlusInt-SU | ≥ 1.0× | 10.59 µs | 8,815 ns | 1.20× | 17.01 µs | 19.91 µs | 0.85× | arm64 ≥ Go / amd64 低于 Go |
+| PlusInt-US | ≥ 1.0× | 10.53 µs | 8,815 ns | 1.19× | 17.14 µs | 19.95 µs | 0.86× | arm64 ≥ Go / amd64 低于 Go |
+| LTInt | ≥ 1.0× | 13.47 µs | 10.41 µs | 1.29× | 17.51 µs | 18.55 µs | 0.94× | arm64 ≥ Go / amd64 低于 Go |
+| CastIntAsReal | ≥ 1.0× | 8,733 ns | 5,903 ns | 1.48× | 10.77 µs | 11.10 µs | 0.97× | arm64 ≥ Go / amd64 低于 Go |
+| Concat | ≥ 0.95×（含分配） | 47.67 µs | 82.82 µs | 0.58× | 72.63 µs | 87.41 µs | 0.83× | 低于 Go |
+| Like | ≥ 0.95×（含分配） | 72.80 µs | 92.14 µs | 0.79× | 114.21 µs | 86.59 µs | 1.32× | arm64 低于 Go / amd64 ≥ Go |
+| PlusInt-SS-port | ≥ 1.0× | 12.77 µs | 10.14 µs | 1.26× | 17.09 µs | 16.99 µs | 1.01× | ≥ Go |
+| PlusInt-UU-port | ≥ 1.0× | 10.34 µs | 7,898 ns | 1.31× | 16.89 µs | 16.60 µs | 1.02× | ≥ Go |
+| PlusInt-SU-port | ≥ 1.0× | 10.59 µs | 7,935 ns | 1.34× | 17.01 µs | 17.16 µs | 0.99× | arm64 ≥ Go / amd64 低于 Go |
+| PlusInt-US-port | ≥ 1.0× | 10.53 µs | 8,013 ns | 1.31× | 17.14 µs | 17.25 µs | 0.99× | arm64 ≥ Go / amd64 低于 Go |
+| LTInt-port | ≥ 1.0× | 13.47 µs | 10.41 µs | 1.29× | 17.51 µs | 16.31 µs | 1.07× | ≥ Go |
+| CastIntAsReal-port | ≥ 1.0× | 8,733 ns | 6,560 ns | 1.33× | 10.77 µs | 10.80 µs | 1.00× | arm64 ≥ Go / amd64 低于 Go |
+| VecL1Distance-d3 | ≥ 1.0× | 30.20 µs | 14.76 µs | 2.05× | 28.14 µs | 29.53 µs | 0.95× | arm64 ≥ Go / amd64 低于 Go |
+| VecL2Distance-d3 | ≥ 1.0× | 16.48 µs | 14.72 µs | 1.12× | 28.59 µs | 29.38 µs | 0.97× | arm64 ≥ Go / amd64 低于 Go |
+| VecCosineDistance-d3 | ≥ 1.0× | 16.92 µs | 15.20 µs | 1.11× | 30.89 µs | 33.62 µs | 0.92× | arm64 ≥ Go / amd64 低于 Go |
+| VecNegativeInnerProduct-d3 | ≥ 1.0× | 16.39 µs | 14.42 µs | 1.14× | 28.52 µs | 29.31 µs | 0.97× | arm64 ≥ Go / amd64 低于 Go |
+| VecL1Distance-d768 | ≥ 1.0× | 3,139.61 µs | 343.54 µs | 9.14× | 4,369.78 µs | 666.32 µs | 6.56× | ≥ Go |
+| VecL2Distance-d768 | ≥ 1.0× | 654.07 µs | 574.38 µs | 1.14× | 670.04 µs | 670.64 µs | 1.00× | arm64 ≥ Go / amd64 低于 Go |
+| VecCosineDistance-d768 | ≥ 1.0× | 671.89 µs | 597.47 µs | 1.12× | 678.28 µs | 677.56 µs | 1.00× | ≥ Go |
+| VecNegativeInnerProduct-d768 | ≥ 1.0× | 612.34 µs | 554.85 µs | 1.10× | 665.28 µs | 664.63 µs | 1.00× | ≥ Go |
 
-### 未通过的项、原因与修复建议（待决定，未改指标）
+距离函数的逐行驱动现在每行 0 次分配；amd64 上 3 维仍略低于 Go（0.92–0.97×），768 维持平（1.00×）。整数签名的原型在 amd64 上逐行低于 Go（0.86–0.97×，原型不是移植后的签名；移植后的签名 0.99–1.07×）。Concat、Like 的逐行驱动与 #75 相同，仍低于 Go（#75 记为后续项）。
 
-1. **3 维距离函数（arm64：L2、COSINE、NEGATIVE_INNER_PRODUCT；amd64：四个都低于 Go，0.42–0.62×）**。768 维时四个都高于 Go（1.15–8.1×），所以差距在每行的固定开销，不在求和循环。`sample` 剖析（arm64，COSINE 3 维向量驱动）：约一半时间在 `Column::get_vector_float32` → `get_bytes` → `zero_copy_deserialize_vector_float32` → `peek_bytes_as_vector_float32`，其余在 `check_identical_dims`、`VectorFloat32::elements` 和距离函数本身——这些都是跨 crate 的小函数，没有内联（release 没有 LTO；加 `lto = "fat"`、`codegen-units = 1` 后剖析中仍是函数调用）。实验（未提交）：给 `tidb-chunk` 的 `get_bytes`/`get_vector_float32` 和 `tidb-types` 的 `peek_bytes_as_vector_float32`/`zero_copy_deserialize_vector_float32`/`len`/`elements`/`check_identical_dims`/距离函数加 `#[inline]`，arm64 上 L2 19.5 → 10.7 µs、COSINE 25.1 → 12.3 µs、NIP 16.5 → 10.5 µs、L1 17.2 → 10.8 µs，与 Go（10.2、11.5、10.2、23.2 µs）基本持平，仍略低于 Go。**建议**：(a) 上述 `#[inline]`（只影响代码生成，L2）；(b) 距离函数的向量驱动不再每行经过 `VecArgs` 和完整的反序列化检查：每 chunk 用 `VectorView`（严格签名已有）一次取出两列的偏移，行内只读维度字和元素切片（列中的值是 `append_vector_float32` 写入的，格式已检查过；格式错误时仍按 Go panic）。(a)+(b) 后重测 3 维；amd64 的差距更大，以 amd64 结果为准。
-2. **CastIntAsReal（移植后的签名，arm64 0.91×；amd64 1.18× 通过）**。原型用 `checked` 形式，标志组合每 chunk 读一次（arm64 265 ns，4.0×）；D08.8 的移植是默认形式，函数体每行读 `f.arg_type(0)`、`f.tp` 的 unsigned 标志和 `in_union`，循环里有分支、不能向量化（1,178 ns）。**建议**：按 spec §3.4 改为 `checked(nflags = 3, flags = …, err = …)`（参数 unsigned、结果 unsigned、`inUnion`）：这个签名没有出错行、没有逐行副作用，行版与向量版结果相同，满足三条使用条件；govec `cast` 回放核对。PlusInt 的移植（arm64 SS 1.26×，原型 2.89×）同理：溢出判断照 Go 写成比较，改为 `overflowing_add` 的等价形式可以让循环向量化（不是门禁项，吞吐目标项）。
-3. **逐行驱动的距离函数（不计入门禁，但 Rust 有分配而 Go 没有：每行 2 次）**：`Column::eval_vector_float32` 返回 `VectorFloat32<'static>`，从行复制一份（Go 的 `row.GetVectorFloat32` 不复制）。T7a 去掉的是函数体里的那一次复制（原来每行 3 次）。**建议**：`Expr::eval_vector_float32` 的返回值借用行（`VectorFloat32<'r>`，常量与函数结果仍是自有值），`RowArgs::vector_float32_pair` 就能不复制。若"含分配的基准差距 ≤ 5%"也适用于逐行驱动，768 维 L2/COSINE/NIP（0.77–0.89×）和 Concat/Like（#75 已知）都要按此处理。
-
-**结论**：D08.1 的 T6c（门禁验收）仍未完成，P1 暂不能勾掉。T7a 已完成。
+**结论**：N4 §5 门禁在 arm64 与 amd64 上都通过，D08.1 T6c 的门禁验收完成。
