@@ -67,13 +67,16 @@ case $part in
 ab)
     start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
     rc=0 runs=()
+    # rc: 1 (a mismatch) wins over 2 (an error), so a wrong result is never reported as
+    # incomplete. report.py also reads the mismatches from the raw results.
+    worst() { if [ "$1" = 1 ] || [ "$rc" = 1 ]; then rc=1; elif [ "$1" != 0 ]; then rc=$1; fi; }
     "$ab" -a "$a" -b "$b" -D sbtest --tls off --out-dir "$out/ab-sysbench" sysbench -n 100 \
-        >"$out/ab-sysbench.log" 2>&1 || rc=$(( $? > rc ? $? : rc ))
+        >"$out/ab-sysbench.log" 2>&1; worst $?
     runs+=("$out/ab-sysbench/results.jsonl")
     for w in "$root"/tools/ab/workloads/*.sql; do
         n=$(basename "$w" .sql)
         "$ab" -a "$a" -b "$b" -D sbtest --tls off --out-dir "$out/ab-$n" file "$w" \
-            >"$out/ab-$n.log" 2>&1 || rc=$(( $? > rc ? $? : rc ))
+            >"$out/ab-$n.log" 2>&1; worst $?
         runs+=("$out/ab-$n/results.jsonl")
     done
     # Every workload must have compared something: an empty run is incomplete, not ok.
@@ -81,10 +84,10 @@ ab)
     for r in "${runs[@]}"; do [ -s "$r" ] || empty+=("$(basename "$(dirname "$r")")"); done
     if [ ${#empty[@]} -gt 0 ]; then
         echo "no statements compared: ${empty[*]}" >&2
-        [ "$rc" = 0 ] && rc=2
+        worst 2
     fi
     python3 "$root/tools/weekly/classify.py" --a "$a" --results "${runs[@]}" --json "$out/ab-classified.json" \
-        || rc=2
+        || worst 2
     write_status "$(status_of $rc)" "{\"classified\": \"ab-classified.json\", \"empty_workloads\": \"${empty[*]}\", \"exit\": $rc}"
     exit "$rc"
     ;;

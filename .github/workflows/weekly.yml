@@ -28,6 +28,10 @@ on:
         description: post the report on #54 and push the weekly tag
         type: boolean
         default: false
+      accept_baseline:
+        description: make this run the comparison baseline even if REGRESSED or INCOMPLETE (never if RED)
+        type: boolean
+        default: false
 
 permissions:
   contents: write # the weekly-YYYY-Www tag
@@ -166,13 +170,14 @@ jobs:
         with:
           pattern: part-*
           path: results
-      - name: Last run's results
-        # The newest `<mode>-results` artifact of an earlier run on this branch. Not "the last
-        # successful run": before Friday's weekly that is Thursday's nightly, which has no
-        # weekly results (#140 review).
+      - name: Baseline
+        # The newest `<mode>-baseline` artifact of an earlier run on this branch: uploaded only by
+        # GREEN runs (or accepted by hand), so a regression stays reported until it is fixed or
+        # accepted, instead of becoming next week's normal (#140 review). Looked up by name, not
+        # as "the last successful run": before Friday's weekly that is Thursday's nightly.
         env:
           GH_TOKEN: ${{ github.token }}
-          NAME: ${{ needs.plan.outputs.mode }}-results
+          NAME: ${{ needs.plan.outputs.mode }}-baseline
         run: |
           prev=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=$NAME&per_page=100" \
             --jq '.artifacts[] | select(.expired | not)
@@ -197,10 +202,19 @@ jobs:
             --commit "${{ github.sha }}" --out report.md || rc=$?
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           { echo "rc=$rc"; echo "week=$week"; echo "verdict=$(cat verdict.txt)"; } >> "$GITHUB_OUTPUT"
-      - name: Keep results for next time
+      - name: Keep the results
         uses: actions/upload-artifact@v4
         with:
           name: ${{ needs.plan.outputs.mode }}-results
+          path: |
+            results
+            report.md
+          retention-days: 90
+      - name: New baseline
+        if: steps.report.outputs.rc == '0' || (inputs.accept_baseline && steps.report.outputs.rc != '1')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.plan.outputs.mode }}-baseline
           path: |
             results
             report.md

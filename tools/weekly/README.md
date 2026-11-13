@@ -25,7 +25,9 @@ The parts run in parallel jobs, each against its own cluster (`run.sh <part> <ou
 - the fault scenarios;
 - the lock cases.
 
-It compares with the last successful run of the same mode, whose results are kept as an artifact for 90 days.
+It compares with the **baseline** of the same mode: the `<mode>-baseline` artifact, uploaded only by GREEN runs (or by a manual run with `accept_baseline`, never a RED one), kept 90 days. A regression therefore stays reported until it is fixed or accepted. Every run also keeps its own `<mode>-results`.
+
+A wrong result in the raw data (a mismatch, a wrong fault-scenario read, a lock case that differs) makes the run RED whatever the part's exit status; `test_report.py` covers the verdicts and runs in CI.
 
 **Verdict** (first line of the report, exit status of `report.py`):
 

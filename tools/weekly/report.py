@@ -55,6 +55,25 @@ def executable(classified):
 PERF_DROP = 0.15
 
 
+def wrong_results(base):
+    """Parts whose raw results show a wrong result, whatever their status says."""
+    out = {}
+    for part, name in (("ab", "ab-classified.json"), ("tpch", "tpch-classified.json")):
+        c = load(base, name)
+        if c and c["totals"].get("mismatch", 0) > 0:
+            out[part] = f"{c['totals']['mismatch']} mismatches"
+    f = load(base, "faults-raw.json")
+    if f:
+        wrong = sum(v["wrong"] for r in f.get("results", []) for side in r.get("summary", {}).values()
+                    for v in side.values())
+        if wrong or f.get("new_inconsistencies"):
+            out["faults"] = f"{wrong} wrong results, {len(f.get('new_inconsistencies', []))} new inconsistencies"
+    locks = load(base, "locks-raw.json")
+    if locks and any(not r.get("same", True) for r in locks):
+        out["locks"] = "lock cases that differ"
+    return out
+
+
 def regressions(cur_ab, prev_ab, cur_sb, prev_sb):
     """What got worse against the previous run (each a short line)."""
     out = []
@@ -190,6 +209,12 @@ def main():
     for p in expected:
         j = load(args.inp, f"{p}.json")
         status[p] = j["status"] if j else "missing"
+    # A wrong result in the raw data is RED whatever a part's exit-code arithmetic said
+    # (#140 review: a mismatch in one workload plus an error in another came out INCOMPLETE).
+    for p, why in wrong_results(args.inp).items():
+        if p in status:
+            status[p] = "fail"
+            print(f"{p}: {why}")
 
     cur_ab, prev_ab = load(args.inp, "ab-classified.json"), load(args.previous, "ab-classified.json")
     cur_sb, prev_sb = load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json")
