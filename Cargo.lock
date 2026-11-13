@@ -2606,6 +2606,7 @@ dependencies = [
  "tidb-meta",
  "tidb-metrics",
  "tidb-mysql-protocol",
+ "tidb-runtime",
  "tidb-sql",
  "tokio",
 ]

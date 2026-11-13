@@ -215,13 +215,25 @@ impl<F: Future> Future for Instrumented<F> {
         } else {
             None
         };
-        TASK.with(|t| {
-            t.cpu.set(t.cpu.get() + d);
-            if let Some(r) = t.recorder.borrow().as_ref() {
-                r.add(d);
+        match acct::mode() {
+            acct::Mode::Off => {}
+            acct::Mode::Instant => {
+                TASK.with(|t| {
+                    t.cpu.set(t.cpu.get() + d);
+                    if let Some(r) = t.recorder.borrow().as_ref() {
+                        r.add(d);
+                    }
+                });
+                metrics::cpu_slice(d, end);
             }
-        });
-        metrics::cpu_slice(d, end);
+            acct::Mode::Window(w) => {
+                TASK.with(|t| {
+                    t.cpu.set(t.cpu.get() + d);
+                    acct::window_poll(t.recorder.borrow().as_ref(), d, end, w);
+                });
+                metrics::cpu_slice(d, end);
+            }
+        }
         if d > cfg.stall_threshold {
             let cause = match (before, after) {
                 (Some(b), Some(a)) => crate::stall::classify(d, &b, &a),
@@ -378,4 +390,161 @@ pub fn set_cpu_recorder(r: Option<CpuRecorder>) -> Option<CpuRecorder> {
 // glue: CPU accounting
 pub fn task_cpu_time() -> Option<Duration> {
     TASK.try_with(|t| t.cpu.get()).ok()
+}
+
+/// Attach a fresh [`CpuRecorder`] to the current task with probability
+/// `TIDB_RS_CPU_SAMPLE` (default 1), or detach it: the per-execution sampling decision of
+/// N9 §6.1a, made at statement start. Benchmark switch, see [`acct`].
+// glue: N9 §6.1a sampling (benchmark switch)
+pub fn start_statement_sampling() {
+    let sampled = acct::sample();
+    set_cpu_recorder(sampled.then(CpuRecorder::new));
+}
+
+/// Benchmark switch for N9 §6.1 (not a design): the CPU accounting of [`Instrumented`],
+/// chosen once per process by `TIDB_RS_CPU_ACCT`:
+///
+/// - `off`: no accounting (the poll's `Instant` reads stay: the time slice needs them);
+/// - `instant` (default, the current behavior): each poll's wall time is added to the task and
+///   its recorder;
+/// - `win1` / `win10`: as `instant` for the task total; in addition every worker thread keeps a
+///   window of the polls of sampled tasks (those with a recorder) and of the other polls, and
+///   once 1 / 10 ms have passed reads `CLOCK_THREAD_CPUTIME_ID` once and splits the CPU since
+///   the last read over the window's polls by wall time; the recorders get that CPU.
+pub mod acct {
+    use std::cell::RefCell;
+    use std::sync::OnceLock;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use super::CpuRecorder;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Mode {
+        Off,
+        Instant,
+        Window(Duration),
+    }
+
+    static CONFIG: OnceLock<(Mode, f64)> = OnceLock::new();
+
+    // glue: benchmark switch
+    fn config() -> (Mode, f64) {
+        *CONFIG.get_or_init(|| {
+            let mode = match std::env::var("TIDB_RS_CPU_ACCT").as_deref() {
+                Ok("off") => Mode::Off,
+                Ok("win1") => Mode::Window(Duration::from_millis(1)),
+                Ok("win10") => Mode::Window(Duration::from_millis(10)),
+                _ => Mode::Instant,
+            };
+            let rate = std::env::var("TIDB_RS_CPU_SAMPLE")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(1.0);
+            tracing::info!(?mode, rate, "CPU accounting (N9 benchmark switch)");
+            (mode, rate)
+        })
+    }
+
+    // glue: benchmark switch
+    pub fn mode() -> Mode {
+        config().0
+    }
+
+    thread_local! {
+        static RNG: std::cell::Cell<u64> = std::cell::Cell::new(
+            0x9E37_79B9_7F4A_7C15 ^ (std::ptr::from_ref(&()) as usize as u64),
+        );
+        static WIN: RefCell<Option<Win>> = const { RefCell::new(None) };
+    }
+
+    /// One random draw against the sample rate (xorshift; quality is not a concern here).
+    // glue: benchmark switch
+    pub(super) fn sample() -> bool {
+        let rate = config().1;
+        if rate >= 1.0 {
+            return true;
+        }
+        if rate <= 0.0 {
+            return false;
+        }
+        RNG.with(|r| {
+            let mut x = r.get() | 1;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            r.set(x);
+            ((x >> 11) as f64 / (1u64 << 53) as f64) < rate
+        })
+    }
+
+    struct Win {
+        last_cpu: Duration,
+        last_read: Instant,
+        polls: Vec<(CpuRecorder, u64)>,
+        sampled_wall: u64,
+        other_wall: u64,
+    }
+
+    // glue: benchmark switch
+    fn thread_cpu() -> Duration {
+        nix::time::clock_gettime(nix::time::ClockId::CLOCK_THREAD_CPUTIME_ID).map_or(
+            Duration::ZERO,
+            |ts| {
+                Duration::new(
+                    u64::try_from(ts.tv_sec()).unwrap_or(0),
+                    u32::try_from(ts.tv_nsec()).unwrap_or(0),
+                )
+            },
+        )
+    }
+
+    /// Record one poll of `wall` ending at `end` in this thread's window.
+    // glue: benchmark switch
+    pub(super) fn window_poll(
+        rec: Option<&CpuRecorder>,
+        wall: Duration,
+        end: Instant,
+        win: Duration,
+    ) {
+        let wall = u64::try_from(wall.as_nanos()).unwrap_or(u64::MAX);
+        WIN.with(|w| {
+            let mut w = w.borrow_mut();
+            let Some(rec) = rec else {
+                if let Some(w) = w.as_mut() {
+                    w.other_wall += wall;
+                }
+                return;
+            };
+            let w = w.get_or_insert_with(|| Win {
+                last_cpu: thread_cpu(),
+                last_read: end,
+                polls: Vec::with_capacity(64),
+                sampled_wall: 0,
+                other_wall: 0,
+            });
+            match w.polls.last_mut() {
+                Some((r, n)) if std::sync::Arc::ptr_eq(&r.0, &rec.0) => *n += wall,
+                _ => w.polls.push((rec.clone(), wall)),
+            }
+            w.sampled_wall += wall;
+            if end.saturating_duration_since(w.last_read) >= win {
+                let cpu = thread_cpu();
+                let delta = cpu.saturating_sub(w.last_cpu).as_nanos();
+                let total = u128::from(w.sampled_wall + w.other_wall);
+                for (r, n) in w.polls.drain(..) {
+                    if total > 0 {
+                        let share = delta * u128::from(n) / total;
+                        r.add(Duration::from_nanos(
+                            u64::try_from(share).unwrap_or(u64::MAX),
+                        ));
+                    }
+                }
+                w.sampled_wall = 0;
+                w.other_wall = 0;
+                w.last_cpu = cpu;
+                w.last_read = end;
+            }
+        });
+    }
 }

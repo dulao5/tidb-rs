@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+tidb-runtime = { workspace = true }
 futures = { workspace = true }
 tidb-distsql = { workspace = true }
 poc-domain = { workspace = true }

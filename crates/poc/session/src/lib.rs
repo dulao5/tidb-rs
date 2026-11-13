@@ -778,6 +778,7 @@ impl Session {
         let lowered = tidb_sql::parse_and_lower(sql)?;
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
+        tidb_runtime::slice::start_statement_sampling();
         self.stmt.start(stmt_type(&lowered.stmt), parse);
         self.timer.mark(Phase::Parse);
         if lowered.param_count > 0 {
@@ -842,6 +843,7 @@ impl Session {
         let ts =
             (needs_ts(&lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
         let params = params_to_literals(params)?;
+        tidb_runtime::slice::start_statement_sampling();
         self.stmt.start(stmt_type(&lowered.stmt), start.elapsed());
         // No plan cache: every execute plans again (Go counts a prepared plan cache miss).
         tidb_metrics::plan_cache_miss_prepared();
