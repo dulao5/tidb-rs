@@ -174,6 +174,29 @@ client-rust#12 之后，tidb-rs 的 region 重试和锁等待都用 `Backoff::ti
 - **扫描那个错误的来源已确认**：带请求名的重试日志里，断开期间有 8 次 `retry_after_routing_error kv_check_txn_status: GrpcAPI(...)`，即清锁的 CheckTxnStatus 发往了被杀的 store 并重试。P0-1a 之前，这条路径用的是写死的 `DEFAULT_REGION_BACKOFF`，10 次后报 `Leader of region N is not found`。这与之前的推断一致。
 - **ServerIsBusy**：限 CPU 时 TiKV 仍然没有返回 ServerIsBusy。所以"排除在预算外"这一点只有 client-rust 的单测覆盖（60 次 ServerIsBusy 后读成功）。
 
+## P0-2 之后：全部场景复跑（tidb-rs `82fd763`）
+
+client-rust#13–#15 之后（预算用完时报睡得最久的那种错误、Go 的按请求超时和截止时间、短读超时到期后立即重试），带写入方复跑了全部 7 个场景：
+
+| 场景 | 写入方提交 / 错误 | 错误结果 | 错误（Go / tidb-rs） | 最长挂起（Go / tidb-rs） |
+|---|---|---|---|---|
+| 稳态 | 2001 / 0 | 0 | 0 / 0 | 0.04 s / 0.04 s |
+| 分裂与合并 | 5887 / 0 | 0 | 0 / 0 | 0.05 s / 0.05 s |
+| leader 迁移 | 4094 / 0 | 0 | 0 / 0 | 0.04 s / 0.04 s |
+| kill -9 | 2764 / 0 | 0 | 0 / **2** | 27.8 s / 27.7 s |
+| 限 CPU 3% | 2054 / 0 | 0 | 0 / 0 | 6.3 s / **12.0 s** |
+| 断网 10 s | 2181 / 0 | 0 | 0 / 0 | 11.1 s / 13.3 s |
+| SIGSTOP 5 s | 2025 / 0 | 0 | 0 / 0 | 5.0 s / 5.0 s |
+| 宽行（约 6 MiB） | 1541 / 0 | 0 | 0 / 0 | — |
+
+- **所有场景两边都没有错误结果**，配对检查也没有违反。宽行的大响应两边都是 5 / 5 成功。
+- **kill -9 有 2 个新的不一致**：
+  - 这一轮写入行的 region 约 28 s 没有可用的 leader，Go 等到了恢复（最长挂起 27.8 s），没有报错。
+  - tidb-rs 有 1 次点查（max-ts）在约 20.4 s 时报 `region unavailable: regionMiss backoff budget exceeded`，有 1 次扫描报 `tikvRPC backoff budget exceeded`。
+  - 推测原因：连接被拒是立即返回的，tidb-rs 几乎把全部等待时间都花在退避睡眠上，而睡眠全部计入 20 s 预算。Go 把不可达的 store 标记出来（store 存活状态），改试 follower，用的是更便宜的 regionScheduling 退避。
+  - 已列进 `expected.json` 并附原因，对应对照表的"store 存活状态"一行，建议升为 P0。原因还要用 debug 日志确认。
+- **限 CPU 时 tidb-rs 最长挂起 12.0 s，Go 6.3 s**：两边都没有报错。被限的 store 上，每次请求现在等的是 30 s 超时而不是 2 s，这是 P0-2 的预期效果，与 Go 一致；但 Go 的挂起更短，差别原因待查（可能是 Go 的 replica selector 遇到慢的 leader 会去试 follower）。
+
 ## 对对照表的更新（client-go-parity.md §9）
 
 | P0 | 本次结果 | 写回对照表的内容 |
