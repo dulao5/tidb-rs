@@ -8,7 +8,12 @@
 //! Not here yet: the wake-up channel of N3 3.3 item 2 (`M-GOCTX`, a `CancellationToken`
 //! triggered by `SendKillSignal`). It belongs with `ExecCtx` (block D00.1) and is attached
 //! through [`SqlKiller::set_on_kill`]. The `randomPanic` failpoint of `HandleSignal` is not
-//! ported (no failpoints in tidb-rs yet).
+//! ported (no failpoints in tidb-rs yet); the two `InjectCall` failpoints of the go-fix below
+//! are test-only hooks (`inject_call`).
+//!
+//! go-fix pingcap/tidb#70776 (commit 05c7dd7b96, release-8.5 after v8.5.8): `Reset` swaps the
+//! signal to 0 instead of load + store, so a kill signal sent between the two is not lost;
+//! `SendKillSignal` logs the reason it stored instead of re-loading the signal.
 
 // Signal constants keep their Go names (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -83,6 +88,32 @@ const fn in_test() -> bool {
     cfg!(test)
 }
 
+/// A Go `failpoint.InjectCall` site: a callback set by a test (Go `testfailpoint.EnableCall`).
+// glue: Go failpoint.InjectCall (tests only)
+type InjectCallFp = std::thread::LocalKey<std::cell::RefCell<Option<Box<dyn Fn()>>>>;
+
+thread_local! {
+    /// Go failpoint `beforeLogKillSignal`.
+    static BEFORE_LOG_KILL_SIGNAL: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Go failpoint `afterResetKillSignalSwap`.
+    static AFTER_RESET_KILL_SIGNAL_SWAP: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the callback of failpoint `fp` if a test set one; a no-op outside this crate's tests.
+// glue: Go failpoint.InjectCall (tests only)
+#[inline]
+fn inject_call(fp: &'static InjectCallFp) {
+    if in_test() {
+        fp.with(|f| {
+            if let Some(f) = f.borrow().as_ref() {
+                f();
+            }
+        });
+    }
+}
+
 impl SqlKiller {
     // glue: constructor (Go: zero value `sqlkiller.SQLKiller{}`)
     pub fn new() -> Arc<SqlKiller> {
@@ -97,14 +128,17 @@ impl SqlKiller {
     }
 
     // go: SQLKiller.SendKillSignal L1
+    // go-fix: pingcap/tidb@05c7dd7b96 #70776
     pub fn send_kill_signal(&self, reason: KillSignal) {
         if self
             .signal
             .compare_exchange(0, reason, SeqCst, SeqCst)
             .is_ok()
         {
-            let status = self.signal.load(SeqCst);
-            let err = self.get_kill_error(status);
+            // go-fix pingcap/tidb#70776: use `reason`, not a re-load (a concurrent `Reset`
+            // may already have cleared the signal).
+            inject_call(&BEFORE_LOG_KILL_SIGNAL);
+            let err = self.get_kill_error(reason);
             let reason = err
                 .map(|e| String::from_utf8_lossy(&e.error()).into_owned())
                 .unwrap_or_else(|| "<nil>".to_owned());
@@ -213,11 +247,15 @@ impl SqlKiller {
     }
 
     // go: SQLKiller.Reset L1
+    // go-fix: pingcap/tidb@05c7dd7b96 #70776
     pub fn reset(&self) {
-        if self.signal.load(SeqCst) != 0 {
+        // go-fix pingcap/tidb#70776: one swap instead of load + store, so a signal sent in
+        // between is not overwritten.
+        let status = self.signal.swap(UnspecifiedKillSignal, SeqCst);
+        inject_call(&AFTER_RESET_KILL_SIGNAL_SWAP);
+        if status != UnspecifiedKillSignal {
             tracing::warn!(conn = self.conn_id.load(SeqCst), "kill finished");
         }
-        self.signal.store(0, SeqCst);
         self.last_check_time.store(None);
     }
 }
@@ -250,6 +288,48 @@ mod tests {
         assert!(k.handle_signal().is_ok());
         std::thread::sleep(Duration::from_millis(5));
         assert_eq!(k.handle_signal().unwrap_err().code(), 1317);
+    }
+
+    /// Go `testfailpoint.EnableCall`: sets the callback of `fp` until the guard is dropped.
+    struct EnableCall(&'static InjectCallFp);
+
+    impl EnableCall {
+        fn new(fp: &'static InjectCallFp, f: impl Fn() + 'static) -> EnableCall {
+            fp.with(|c| *c.borrow_mut() = Some(Box::new(f)));
+            EnableCall(fp)
+        }
+    }
+
+    impl Drop for EnableCall {
+        fn drop(&mut self) {
+            self.0.with(|c| *c.borrow_mut() = None);
+        }
+    }
+
+    // Go TestSQLKillerConcurrentReset (pingcap/tidb#70776).
+    #[test]
+    fn concurrent_reset_after_successful_kill_signal_cas() {
+        let killer = SqlKiller::new();
+        let k = killer.clone();
+        let _fp = EnableCall::new(&BEFORE_LOG_KILL_SIGNAL, move || k.reset());
+
+        killer.send_kill_signal(QueryInterrupted);
+        assert_eq!(killer.get_kill_signal(), UnspecifiedKillSignal);
+        assert!(killer.handle_signal().is_ok());
+    }
+
+    #[test]
+    fn concurrent_reset_kill_signal_after_reset_clear() {
+        let killer = SqlKiller::new();
+        killer.send_kill_signal(QueryInterrupted);
+        let k = killer.clone();
+        let _fp = EnableCall::new(&AFTER_RESET_KILL_SIGNAL_SWAP, move || {
+            k.send_kill_signal(MaxExecTimeExceeded)
+        });
+
+        killer.reset();
+        assert_eq!(killer.get_kill_signal(), MaxExecTimeExceeded);
+        assert!(killer.handle_signal().is_err());
     }
 
     #[test]
