@@ -114,7 +114,12 @@ faults)
     rc=0
     (cd "$root" && tools/ab/faults/run.sh -b "$bin") >"$out/faults.log" 2>&1 || rc=$?
     f=$(ls -t "$root"/target/faults/*.json 2>/dev/null | head -1)
-    [ -n "$f" ] && cp "$f" "$out/faults-raw.json"
+    if [ -n "$f" ]; then
+        cp "$f" "$out/faults-raw.json"
+    else
+        # No results at all: the cluster or tidb-rs did not come up. Incomplete, not a failure.
+        rc=2
+    fi
     write_status "$(status_of $rc)" "{\"raw\": \"faults-raw.json\", \"exit\": $rc}"
     exit "$rc"
     ;;

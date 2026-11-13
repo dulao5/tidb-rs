@@ -124,6 +124,17 @@ jobs:
           chmod +x target/release/*
           curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
           echo "$HOME/.tiup/bin" >> "$GITHUB_PATH"
+          export PATH=$HOME/.tiup/bin:$PATH
+          # Fetch the mirror's root of trust and the components up front, with retries: the
+          # first run failed with "no trusted root in the local manifests" when playground
+          # downloaded them itself.
+          for i in 1 2 3 4 5; do
+            tiup mirror set https://tiup-mirrors.pingcap.com \
+              && tiup install playground pd:${TIUP_VERSION_PLAYGROUND} tikv:${TIUP_VERSION_PLAYGROUND} tidb:${TIUP_VERSION_PLAYGROUND} \
+              && break
+            echo "::warning::tiup install failed (attempt $i)"; sleep 10
+          done
+          tiup list --installed
           sudo apt-get -o Acquire::Retries=5 update || true
           sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends sysbench mysql-client \
             || echo "::warning::apt-get install failed"
