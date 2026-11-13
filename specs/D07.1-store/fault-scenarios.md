@@ -197,6 +197,19 @@ client-rust#13–#15 之后（预算用完时报睡得最久的那种错误、Go
   - 已列进 `expected.json` 并附原因，对应对照表的"store 存活状态"一行，建议升为 P0。原因还要用 debug 日志确认。
 - **限 CPU 时 tidb-rs 最长挂起 12.0 s，Go 6.3 s**：两边都没有报错。被限的 store 上，每次请求现在等的是 30 s 超时而不是 2 s，这是 P0-2 的预期效果，与 Go 一致；但 Go 的挂起更短，差别原因待查（可能是 Go 的 replica selector 遇到慢的 leader 会去试 follower）。
 
+## kill -9 那 2 个错误的诊断：预算只有 Go 的一半
+
+上一节 kill -9 下 tidb-rs 的 2 个错误，起初推测是缺 store 存活状态；用 Go 的慢日志核对后，结论是**预算只有 Go 的一半**：
+
+- **Go 那两条 27.8 s 的语句都睡了超过 20 s**：
+  - 点查 `Backoff_total` 27.6 s：regionMiss 41 次共 17 s，regionScheduling 约 10 s，tikvRPC 只有约 0.59 s；`KV_total` 只有 0.11 s。
+  - 扫描 `Backoff_time` 38.2 s：cop 的 regionMiss 69 次共 27.5 s，regionScheduling 27 次共 10 s，tikvRPC 4 次共 0.63 s。
+- **原因**：client-go 的 `NewBackofferWithVars` 把预算乘以 `tidb_backoff_weight`（`config/retry/backoff.go:106-110`），TiDB 默认取 2（`kv/variables.go:71`，sysvar.go:2321）。所以 Get、BatchGet、scan、cop（copr/coprocessor.go:1248）的实际预算都是 40 s。
+- **存活状态的作用很小**：Go 的 tikvRPC 退避每条语句不到 1 s，所以缺存活状态不是这次的主因。它回到 P1。
+- **修复**：`poc-kv` 的预算改成 `BASE_READ_BACKOFF_MS`（20 000）× `DEFAULT_BACKOFF_WEIGHT`（2）= 40 s；会话变量接入前用默认值（D05.2 §4 第 19 条）。`expected.json` 里 kill_tikv 那一条已删。
+- **复跑**：改动后跑了两轮 kill -9，两边都是 0 个错误、0 个错误结果，最长挂起 Go 15.3 s / 14.8 s，tidb-rs 15.4 s / 15.2 s。不过这两轮没有再出现超过 20 s 无 leader 的情况，所以"约 28 s 的停顿下不报错"由上面的预算计算保证，没有在实测中直接复现。
+- **限 CPU 那条（12.0 s 对 6.3 s）**：诊断版日志显示限 CPU 期间 tidb-rs 没有 region 错误或 tikvRPC 退避，只有 613 次锁等待（每次 ≤ 9 ms，合计 4.3 s）。挂起来自卡在被限 leader 上的长 RPC，归入对照表 replica read 那一行。
+
 ## 对对照表的更新（client-go-parity.md §9）
 
 | P0 | 本次结果 | 写回对照表的内容 |

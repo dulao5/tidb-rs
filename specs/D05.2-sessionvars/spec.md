@@ -157,6 +157,7 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
     - **会话状态**：`sessionstates.SessionStates` 的类型移到 `tidb_sessionctx::sessionstates`（nil map / 指针为 `None`）；它的 JSON 编码由显示状态的语句做（D12.12），这里不做。`EncodeSessionStates` 复制 `HypoIndexes`，Go 共享同一个 map（之后改其中一边另一边也会变）；调用方编码后立即序列化，观察不到。
     - **块的调整**（tracker rules）：`SlowLogFormat`、`writeSlowLogItem`、`kvExecDetailFormat`、`makeExecDetailAccessor`、`makeKVExecDetailAccessor` 归 D14.2（慢日志写入，需要 D11 的 `UsedStatsInfo`、请求上下文中 client-go 的 `util.ExecDetails`、`ProcessInfo` 的用户和连接信息、RU/CPU）；`session_token.go` 归 D04.1（会话迁移的签名 token，属认证）。
     - **剩余豁免**：savepoint 的 6 个函数等 D07.1（memdb checkpoint）；`pkg/session/cursor/tracker.go`（8 个）随 D05.3。D05.2 converge 205/219。
+19. **`tidb_backoff_weight`、`tidb_backoff_lock_fast` 未接到读路径**（`KVVars.BackOffWeight` / `BackoffLockFast`，sysvar.go:2317-2324）：client-go 的每个 `Backoffer` 把预算乘以 weight（`config/retry/backoff.go:106-110`），`txnLockFast` 的起步值取 lock fast。tidb-rs 的读路径（`poc-kv` 的 `tidb_retry_options`）暂用默认值：预算 20 000 ms × 2 = 40 s，lock fast 10 ms（client-rust 的 `go_curve`）。**接入时按会话取值**（D07.1 对照表 P0-1）。
 
 ## 5. 验证结果（PR A）
 

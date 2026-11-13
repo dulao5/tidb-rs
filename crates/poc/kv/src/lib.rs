@@ -74,18 +74,27 @@ impl From<KeyRange> for BoundRange {
     }
 }
 
+/// client-go's base budget of a read's `Backoffer`, in ms of total sleep: `getMaxBackoff`,
+/// `batchGetMaxBackoff`, `scannerNextMaxBackoff` (txnsnapshot) and TiDB's `CopNextMaxBackoff`.
+pub const BASE_READ_BACKOFF_MS: u64 = 20_000;
+
+/// TiDB's default `tidb_backoff_weight` (client-go `kv.DefBackOffWeight`, kv/variables.go:71).
+/// `NewBackofferWithVars` multiplies every budget by it (config/retry/backoff.go:106-110), so
+/// a read really gets 40 s. The variable is not wired to sessions yet (D05.2 §4): when it is,
+/// the budget must follow the session's value.
+pub const DEFAULT_BACKOFF_WEIGHT: u64 = 2;
+
 /// Retry budgets of TiDB / client-go.
 ///
-/// client-go gives each read one `Backoffer` with a 20 s budget of total sleep (`Get`,
-/// `BatchGet`, a scan page, a coprocessor task: `getMaxBackoff`, `batchGetMaxBackoff`,
-/// `scannerNextMaxBackoff`, `copNextMaxBackoff`), with one curve per kind of error
-/// (`BoRegionMiss` 2..500 ms, `BoTiKVRPC` 100..2000 ms, `BoTxnLockFast` 10..3000 ms, ...), and
-/// does not charge `ServerIsBusy` waits to it (up to 10 minutes). `Backoff::time_budget` is that
-/// `Backoffer` (client-rust#12): given for both region errors and lock waits, a read's region
-/// retries, its lock resolution and its lock waits all draw from the same 20 s
-/// (`specs/D07.1-store/client-go-parity.md` P0-1).
+/// client-go gives each read one `Backoffer` with a budget of total sleep of
+/// [`BASE_READ_BACKOFF_MS`] × `tidb_backoff_weight` (40 s by default), with one curve per kind
+/// of error (`BoRegionMiss` 2..500 ms, `BoTiKVRPC` 100..2000 ms, `BoTxnLockFast` 10..3000 ms,
+/// ...), and does not charge `ServerIsBusy` waits to it (up to 10 minutes).
+/// `Backoff::time_budget` is that `Backoffer` (client-rust#12): given for both region errors and
+/// lock waits, a read's region retries, its lock resolution and its lock waits all draw from
+/// the same budget (`specs/D07.1-store/client-go-parity.md` P0-1).
 pub fn tidb_retry_options() -> RetryOptions {
-    let budget = Backoff::time_budget(20_000);
+    let budget = Backoff::time_budget(BASE_READ_BACKOFF_MS * DEFAULT_BACKOFF_WEIGHT);
     RetryOptions::new(budget.clone(), budget)
 }
 
@@ -334,7 +343,8 @@ mod tests {
         assert!(KeyRange::new(b"c".to_vec(), b"b".to_vec()).is_empty());
     }
 
-    /// Both budgets are client-go's 20 s of sleep, not tikv-client's ~1.5 s default.
+    /// Both budgets are client-go's 40 s of sleep (20 s × `tidb_backoff_weight` 2), not
+    /// tikv-client's ~1.5 s default.
     #[test]
     fn lock_backoff_budget_is_tidb_like() {
         assert!(tidb_retry_options().region_backoff.is_time_budget());
@@ -344,14 +354,13 @@ mod tests {
         while let Some(d) = lock.next_delay_duration() {
             total += d;
         }
-        assert!(total.as_secs() >= 10, "{total:?}");
-        assert!(total.as_secs() <= 30, "{total:?}");
+        assert!((38..=42).contains(&total.as_secs()), "{total:?}");
 
         let mut region = tidb_retry_options().region_backoff;
         let mut total = std::time::Duration::ZERO;
         while let Some(d) = region.next_delay_duration() {
             total += d;
         }
-        assert!((15..=25).contains(&total.as_secs()), "{total:?}");
+        assert!((38..=42).contains(&total.as_secs()), "{total:?}");
     }
 }
