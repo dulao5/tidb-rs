@@ -33,5 +33,10 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time",
 name = "overhead"
 harness = false
 
+# N9 §6.1: cost and accuracy of per-poll / windowed CPU accounting (prints tables).
+[[bench]]
+name = "cpu_accounting"
+harness = false
+
 [lints]
 workspace = true
