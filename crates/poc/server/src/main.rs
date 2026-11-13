@@ -285,6 +285,8 @@ fn main() {
                 _ = term.recv() => {}
             }
             info!("received SIGINT/SIGTERM");
+            let (polls, stmt_polls) = tidb_runtime::slice::acct::poll_counts();
+            info!(polls, stmt_polls, "N9 poll counts");
             Ok::<(), std::io::Error>(())
         };
         let shutdown = async {

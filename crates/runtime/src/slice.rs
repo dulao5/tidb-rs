@@ -215,6 +215,7 @@ impl<F: Future> Future for Instrumented<F> {
         } else {
             None
         };
+        acct::count_poll(TASK.with(|t| t.recorder.borrow().is_some()));
         match acct::mode() {
             acct::Mode::Off => {}
             acct::Mode::Instant => {
@@ -427,6 +428,31 @@ pub mod acct {
     }
 
     static CONFIG: OnceLock<(Mode, f64)> = OnceLock::new();
+    static COUNT: OnceLock<bool> = OnceLock::new();
+    static POLLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static STMT_POLLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Count polls (all, and those of tasks with a recorder) when `TIDB_RS_COUNT_POLLS=1`;
+    /// a shared atomic, so only for a separate counting run.
+    // glue: benchmark switch
+    pub(super) fn count_poll(with_recorder: bool) {
+        if !*COUNT.get_or_init(|| std::env::var_os("TIDB_RS_COUNT_POLLS").is_some()) {
+            return;
+        }
+        POLLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if with_recorder {
+            STMT_POLLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// (all polls, polls of tasks with a recorder) so far.
+    // glue: benchmark switch
+    pub fn poll_counts() -> (u64, u64) {
+        (
+            POLLS.load(std::sync::atomic::Ordering::Relaxed),
+            STMT_POLLS.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
 
     // glue: benchmark switch
     fn config() -> (Mode, f64) {
