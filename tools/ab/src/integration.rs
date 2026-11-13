@@ -113,6 +113,10 @@ struct Writers {
     statements: BufWriter<File>,
     mismatches: BufWriter<File>,
     files: BufWriter<File>,
+    /// Every read compared on B, in the format of the other workloads' results.jsonl (one
+    /// line per statement: template = test file, protocol, verdict, query), plus the line and
+    /// B's error for `unsupported` / `b_error` (for the weekly report, `tools/weekly`).
+    results: BufWriter<File>,
 }
 
 /// Escapes a TSV field (backslash, tab, newline, carriage return).
@@ -394,6 +398,26 @@ impl Runner<'_> {
             r.ms,
             tsv(&truncate(r.sql, 1000)),
         );
+        if matches!(
+            r.verdict,
+            StmtOutcome::Match
+                | StmtOutcome::Mismatch
+                | StmtOutcome::Unsupported
+                | StmtOutcome::BError
+        ) {
+            let mut rec = json!({
+                "template": r.file,
+                "protocol": "text",
+                "verdict": r.verdict.name(),
+                "query": r.sql,
+                "line": r.line,
+            });
+            if r.verdict != StmtOutcome::Match {
+                rec["kind"] = json!(r.kind);
+                rec["detail"] = json!(truncate(&r.detail, 300));
+            }
+            let _ = writeln!(self.w.results, "{rec}");
+        }
         if self.opts.verbose && matches!(r.verdict, StmtOutcome::Mismatch) {
             eprintln!(
                 "MISMATCH {}:{} [{}] {}\n    {}",
@@ -819,6 +843,7 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
         statements: open("statements.tsv")?,
         mismatches: open("mismatches.jsonl")?,
         files: open("files.tsv")?,
+        results: open("results.jsonl")?,
     };
     writeln!(
         w.statements,
@@ -878,6 +903,7 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
         let _ = r.w.files.flush();
         let _ = r.w.statements.flush();
         let _ = r.w.mismatches.flush();
+        let _ = r.w.results.flush();
         println!(
             "[{}/{n}] {t}: {} stmts, {} reads: match {} mismatch {} unsupported {} b_error {} a_error {} skipped {} ({secs:.1}s)",
             i + 1,

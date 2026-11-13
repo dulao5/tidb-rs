@@ -36,6 +36,19 @@ def report(inp, prev=None, parts="ab"):
         return rc, f.readline().strip()
 
 
+def it_results(d, rows):
+    """An integrationtest part: integrationtest.json and ab-integrationtest/results.jsonl from
+    (test, verdict) pairs."""
+    write(d, "integrationtest.json", {"part": "integrationtest", "status": "ok", "tests": 2, "seconds": 60})
+    os.makedirs(f"{d}/ab-integrationtest", exist_ok=True)
+    with open(f"{d}/ab-integrationtest/results.jsonl", "w") as f:
+        for i, (test, verdict) in enumerate(rows):
+            r = {"template": test, "protocol": "text", "verdict": verdict, "query": "select 1", "line": i}
+            if verdict != "match":
+                r.update(kind="", detail="not supported yet: function 'x'")
+            f.write(json.dumps(r) + "\n")
+
+
 class VerdictTest(unittest.TestCase):
     def test_mismatch_plus_error_is_red(self):
         # One workload mismatched (exit 1), another errored (exit 2): run.sh may record the
@@ -92,7 +105,6 @@ class VerdictTest(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertTrue(first.startswith("**REGRESSED**"), first)
 
-
     def test_tpch_query_no_longer_executable_is_regressed(self):
         with tempfile.TemporaryDirectory() as d:
             write(f"{d}/cur", "tpch.json", {"part": "tpch", "status": "ok"})
@@ -101,6 +113,49 @@ class VerdictTest(unittest.TestCase):
             rc, first = report(f"{d}/cur", f"{d}/prev", parts="tpch")
             self.assertEqual(rc, 2)
             self.assertTrue(first.startswith("**REGRESSED**"), first)
+
+
+    def test_integrationtest_mismatch_is_red(self):
+        # Even though run.sh said ok: the raw results hold a mismatch.
+        with tempfile.TemporaryDirectory() as d:
+            it_results(f"{d}/part-integrationtest", [("a/t", "match"), ("a/t", "mismatch")])
+            rc, first = report(d, parts="integrationtest")
+            self.assertEqual(rc, 1)
+            self.assertTrue(first.startswith("**RED**"), first)
+
+    def test_integrationtest_unsupported_is_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            it_results(d, [("a/t", "match"), ("a/t", "unsupported"), ("b/t", "unsupported")])
+            rc, first = report(d, parts="integrationtest")
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
+
+    def test_integrationtest_more_unsupported_than_baseline_is_regressed(self):
+        with tempfile.TemporaryDirectory() as d:
+            it_results(f"{d}/cur", [("a/t", "unsupported"), ("a/t", "unsupported")])
+            it_results(f"{d}/prev", [("a/t", "match"), ("a/t", "unsupported")])
+            rc, first = report(f"{d}/cur", f"{d}/prev", parts="integrationtest")
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+
+    def test_integrationtest_unsupported_in_a_new_test_is_not_regressed(self):
+        # A test the baseline did not run (the selection changed) is not compared.
+        with tempfile.TemporaryDirectory() as d:
+            it_results(f"{d}/cur", [("a/t", "match"), ("b/t", "unsupported")])
+            it_results(f"{d}/prev", [("a/t", "match")])
+            rc, first = report(f"{d}/cur", f"{d}/prev", parts="integrationtest")
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
+
+    def test_integrationtest_results_do_not_count_for_ab(self):
+        # A mismatch of the integration tests must not turn the ab part red.
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/part-ab", "ab.json", {"part": "ab", "status": "ok"})
+            write(f"{d}/part-ab", "ab-classified.json", classified())
+            it_results(f"{d}/part-integrationtest", [("a/t", "mismatch")])
+            rc, first = report(d, parts="ab")
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
 
 
 if __name__ == "__main__":

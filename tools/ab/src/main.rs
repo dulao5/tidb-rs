@@ -109,8 +109,8 @@ enum Workload {
         no_prepared: bool,
     },
     /// TiDB's integration tests (mysql-tester `.test` files) in hybrid mode: every statement
-    /// on A, reads also on B and compared. Writes statements.tsv, files.tsv and
-    /// mismatches.jsonl to --out-dir.
+    /// on A, reads also on B and compared. Writes statements.tsv, files.tsv,
+    /// mismatches.jsonl and results.jsonl to --out-dir.
     Integrationtest {
         /// `tests/integrationtest/t` of a TiDB checkout.
         #[arg(long)]

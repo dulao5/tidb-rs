@@ -13,10 +13,16 @@
 #   tpch      TPC-H queries 1-22 (tools/weekly/tpch/queries.sql) on `tiup bench tpch prepare`
 #             data (SF 1: tiup bench takes an integer scale factor): tidb-ab result comparison
 #             and relative time (tpch_time.py); 1 TiKV
+#   integrationtest
+#             TiDB v8.5.8's tests/integrationtest (sparse, shallow clone) through
+#             `ab integrationtest` (hybrid mode: everything on Go TiDB, reads also on tidb-rs and
+#             compared), with tools/ab/integrationtest.toml; 1 TiKV
 #
 # Environment: TIDB_RS_BIN (tidb-server, default target/release/tidb-server), TIDB_AB_BIN
 # (default target/release/ab), SYSBENCH_TIME (seconds per run, default 20),
-# SYSBENCH_THREADS (default "1 8").
+# SYSBENCH_THREADS (default "1 8"), IT_TIDB_DIR (an existing tests/integrationtest/t; default:
+# clone it), IT_TESTS (tests or prefixes for `ab integrationtest`; default: see the part),
+# IT_BUDGET (seconds, default 2400).
 #
 # Exit status: the part's own (0 ok, 1 wrong results / new inconsistencies, 2 incomplete);
 # the JSON carries the same as "status".
@@ -160,6 +166,55 @@ tpch)
         [ "$rc" = 1 ] || rc=2
     fi
     write_status "$(status_of $rc)" "{\"classified\": \"tpch-classified.json\", \"time\": \"tpch-time.json\", \"exit\": $rc}"
+    exit "$rc"
+    ;;
+integrationtest)
+    tag=v8.5.8
+    dir=${IT_TIDB_DIR:-}
+    if [ -z "$dir" ]; then
+        # Only tests/integrationtest of the release under test: a shallow, sparse, blob-less clone.
+        src=${TMPDIR:-/tmp}/weekly-integrationtest-tidb
+        rm -rf "$src"
+        { git clone -q --depth 1 --branch "$tag" --filter=blob:none --sparse https://github.com/pingcap/tidb "$src" \
+            && git -C "$src" sparse-checkout set tests/integrationtest; } >"$out/integrationtest-clone.log" 2>&1 \
+            || { write_status incomplete '{"error": "cannot fetch pingcap/tidb tests/integrationtest"}'; exit 2; }
+        dir=$src/tests/integrationtest/t
+    fi
+    # Default: every test without a statement that makes Go TiDB call every TiDB server's status
+    # port (ANALYZE, cluster tables, tidb_decode_sql_digests): tidb-rs's does not answer, so each
+    # waits about 40 s, and the 67 such files would take about 3 hours. The other 179 take about
+    # 15 minutes (README.md).
+    if [ -n "${IT_TESTS:-}" ]; then
+        read -r -a tests <<<"$IT_TESTS"
+    else
+        slow='^\s*analyze\s|analyze partition|tidb_decode_sql_digests|tidb_servers_info|cluster_(slow_query|statements|processlist|config|info|load|hardware|systeminfo|log|tidb_trx|deadlocks)'
+        mapfile -t tests < <(cd "$dir" && grep -LiE "$slow" -r --include='*.test' . | sed 's|^\./||; s|\.test$||' | sort)
+        [ ${#tests[@]} -gt 0 ] || { write_status incomplete '{"error": "no tests found"}'; exit 2; }
+    fi
+    # As TiDB's run-tests.sh (and scripts/integrationtest.sh): the expected results assume it.
+    export TZ=Asia/Shanghai
+    LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$root/tools/ab/integrationtest.toml start_cluster \
+        || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
+    # As scripts/integrationtest.sh: the ingest backfill refuses to run on a nearly full disk.
+    mysql -h 127.0.0.1 -P 27000 -u root -e \
+        "SET GLOBAL tidb_ddl_enable_fast_reorg = OFF; SET GLOBAL tidb_enable_dist_task = OFF" \
+        >>"$out/$part-playground.log" 2>&1
+    rc=0
+    start=$(date +%s)
+    # A time budget (IT_BUDGET seconds, default 40 min), so a slow runner reports what it ran as
+    # incomplete instead of hitting the job's timeout; ab writes its results after every file.
+    timeout "${IT_BUDGET:-2400}" "$ab" -a "$a" -b "$b" --tls off --timeout 60 --out-dir "$out/ab-integrationtest" \
+        integrationtest --dir "$dir" "${tests[@]}" >"$out/ab-integrationtest.log" 2>&1 || rc=$?
+    seconds=$(( $(date +%s) - start ))
+    # ab: 0 no mismatch, 1 mismatches, 2 could not run (or the cluster died midway); 124 timeout.
+    [ "$rc" -gt 2 ] && rc=2
+    if [ ! -s "$out/ab-integrationtest/results.jsonl" ]; then
+        echo "no statements compared" >&2
+        [ "$rc" = 1 ] || rc=2
+    fi
+    commit=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo unknown)
+    write_status "$(status_of $rc)" "{\"results\": \"ab-integrationtest/results.jsonl\", \"tidb_tag\": \"$tag\",
+        \"tidb_commit\": \"$commit\", \"tests\": ${#tests[@]}, \"seconds\": $seconds, \"exit\": $rc}"
     exit "$rc"
     ;;
 locks)

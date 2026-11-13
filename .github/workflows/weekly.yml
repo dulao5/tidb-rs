@@ -4,8 +4,8 @@ name: Weekly build
 # playgrounds, one page of report (tools/weekly/report.py).
 #
 # - weekly (Fridays 09:00 UTC = 18:00 JST): result comparison per operator, sysbench, fault
-#   scenarios, lock resolution, TPC-H; the report is uploaded, posted on #54 and the commit is tagged
-#   weekly-YYYY-Www.
+#   scenarios, lock resolution, TPC-H, TiDB's integration tests; the report is uploaded, posted
+#   on #54 and the commit is tagged weekly-YYYY-Www.
 # - nightly (18:00 UTC = 03:00 JST): result comparison and lock resolution only; report
 #   uploaded, not posted.
 # - manual: choose the mode; `publish` (comment + tag) is off unless asked for.
@@ -62,7 +62,7 @@ jobs:
             mode="${{ inputs.mode || 'weekly' }}"; publish="${{ inputs.publish || false }}"
           fi
           [ "$mode" = nightly ] && publish=false
-          if [ "$mode" = weekly ]; then parts='["ab","sysbench","faults","locks","tpch"]'; else parts='["ab","locks"]'; fi
+          if [ "$mode" = weekly ]; then parts='["ab","sysbench","faults","locks","tpch","integrationtest"]'; else parts='["ab","locks"]'; fi
           { echo "mode=$mode"; echo "parts=$parts"; echo "publish=$publish"; } >> "$GITHUB_OUTPUT"
 
   build:

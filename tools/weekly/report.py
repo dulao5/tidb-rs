@@ -4,7 +4,8 @@
     report.py --in DIR [--previous DIR] [--title T] [--commit SHA] --out report.md
 
 DIR holds what tools/weekly/run.sh wrote for each part (ab.json, ab-classified.json,
-sysbench.json, faults.json, faults-raw.json, locks.json, locks-raw.json), possibly in
+sysbench.json, faults.json, faults-raw.json, locks.json, locks-raw.json, integrationtest.json and
+ab-integrationtest/results.jsonl), possibly in
 sub-directories (one per CI job). --previous is the same for last week's run: the report then
 shows what changed (newly executable operators, agreement, QPS ratios).
 
@@ -12,8 +13,8 @@ Verdict (the report's first line, and the exit status):
 - RED (1): a part found a wrong result, a mismatch or a new inconsistency;
 - INCOMPLETE (2): a part did not run fully (skipped, failed to set up, missing);
 - REGRESSED (2): against the previous run, an operator or a TPC-H query tidb-rs executed is no
-  longer executable, `unsupported` statements increased, or a sysbench B/A ratio dropped by more
-  than 15%;
+  longer executable, `unsupported` statements increased (tidb-ab workloads, or the integration
+  tests both runs ran), or a sysbench B/A ratio dropped by more than 15%;
 - GREEN (0): none of these.
 """
 
@@ -21,8 +22,12 @@ import argparse
 import glob
 import json
 import os
+import re
+from collections import Counter, defaultdict
 
-PARTS = ("ab", "sysbench", "faults", "locks", "tpch")
+PARTS = ("ab", "sysbench", "faults", "locks", "tpch", "integrationtest")
+# tidb-ab output directories (results.jsonl) of parts other than `ab`.
+RESULT_DIRS = {"ab-tpch": "tpch", "ab-integrationtest": "integrationtest"}
 
 
 def load(base, name):
@@ -60,9 +65,10 @@ def wrong_results(base):
     """Parts whose raw results show a wrong result, whatever their status says."""
     out = {}
     # Counted from tidb-ab's results.jsonl themselves, not from the classified summary (which
-    # a failed classify.py would leave out). ab-tpch/ belongs to the tpch part.
+    # a failed classify.py would leave out). ab-tpch/ belongs to the tpch part,
+    # ab-integrationtest/ to the integrationtest part.
     for path in glob.glob(os.path.join(base, "**", "results.jsonl"), recursive=True):
-        part = "tpch" if os.path.basename(os.path.dirname(path)) == "ab-tpch" else "ab"
+        part = RESULT_DIRS.get(os.path.basename(os.path.dirname(path)), "ab")
         with open(path) as f:
             n = sum(1 for line in f if line.strip() and json.loads(line).get("verdict") == "mismatch")
         if n:
@@ -85,9 +91,61 @@ def wrong_results(base):
     return out
 
 
-def regressions(cur_ab, prev_ab, cur_sb, prev_sb, cur_tpch=None, prev_tpch=None):
+def integration(base):
+    """Summary of the integrationtest part from tidb-ab's ab-integrationtest/results.jsonl:
+    {"totals": {verdict: n}, "tests": {test: {verdict: n}}, "reasons": Counter (unsupported),
+    "errors": Counter (b_error), "mismatches": [record]}, or None when there is none."""
+    if not base:
+        return None
+    hits = sorted(glob.glob(os.path.join(base, "**", "ab-integrationtest", "results.jsonl"), recursive=True))
+    if not hits:
+        return None
+    totals, tests, reasons, errors, mismatches = Counter(), defaultdict(Counter), Counter(), Counter(), []
+    with open(hits[0]) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            v = r.get("verdict", "?")
+            totals[v] += 1
+            tests[r.get("template", "?")][v] += 1
+            if v == "unsupported":
+                reasons[reason(r.get("detail") or r.get("kind") or "")] += 1
+            elif v == "b_error":
+                errors[f"{r.get('kind', '')}: {reason(r.get('detail') or '')}"] += 1
+            elif v == "mismatch":
+                mismatches.append(r)
+    return {"totals": totals, "tests": tests, "reasons": reasons, "errors": errors, "mismatches": mismatches}
+
+
+def reason(detail):
+    """An unsupported message without its specifics, to group by: tidb-rs's 1235 text
+    ("This version of TiDB doesn't yet support '<what>'") reduced to <what>, with quoted
+    table / column names and AST node numbers (`ExplainStmt#11`) taken out."""
+    m = re.fullmatch(r"This version of TiDB doesn't yet support '(.*)'", detail.strip(), re.S)
+    d = m.group(1) if m else detail
+    d = re.sub(r"'[^']*'|`[^`]*`", "?", d)
+    d = re.sub(r"#\d+", "", d)
+    return " ".join(d.split())[:120] or "(no message)"
+
+
+def it_unsupported_growth(cur, prev):
+    """(previous, current) unsupported counts over the tests both runs ran, or None."""
+    if not cur or not prev:
+        return None
+    common = set(cur["tests"]) & set(prev["tests"])
+    if not common:
+        return None
+    return (sum(prev["tests"][t]["unsupported"] for t in common),
+            sum(cur["tests"][t]["unsupported"] for t in common))
+
+
+def regressions(cur_ab, prev_ab, cur_sb, prev_sb, cur_tpch=None, prev_tpch=None, cur_it=None, prev_it=None):
     """What got worse against the previous run (each a short line)."""
     out = []
+    g = it_unsupported_growth(cur_it, prev_it)
+    if g and g[1] > g[0]:
+        out.append(f"integration tests: `unsupported` statements up by {g[1] - g[0]} ({g[0]} → {g[1]})")
     if cur_tpch and prev_tpch:
         lost = sorted((q for q, r in prev_tpch.items() if r.get("b_ms") is not None
                        and cur_tpch.get(q, {}).get("b_ms") is None), key=lambda q: int(q[1:]))
@@ -224,6 +282,50 @@ def section_tpch(classified, times, prev_times, lines):
     lines.append("")
 
 
+def section_integration(status, cur, prev, lines):
+    lines.append("## TiDB integration tests (v8.5.8 tests/integrationtest, hybrid mode)\n")
+    if not cur:
+        lines.append("_Not run._\n")
+        return
+    t = cur["totals"]
+    ran = t["match"] + t["mismatch"] + t["b_error"]
+    status = status or {}
+    lines.append(
+        f"{status.get('tests', '?')} test files selected, {len(cur['tests'])} with reads sent to tidb-rs"
+        + (f", {status['seconds'] // 60} min" if status.get("seconds") else "")
+        + f". {sum(t.values())} reads sent to tidb-rs: {t['match']} match, {t['mismatch']} **mismatch**, "
+        f"{t['b_error']} tidb-rs error, {t['unsupported']} unsupported. Agreement on what tidb-rs "
+        f"executed (match / match + mismatch + error): **{pct(t['match'], ran)}**.\n"
+    )
+    g = it_unsupported_growth(cur, prev)
+    if g:
+        lines.append(f"Unsupported over the tests both runs ran: {g[0]} last run, {g[1]} now.\n")
+    if cur["mismatches"]:
+        lines.append("Mismatches:\n")
+        for r in cur["mismatches"][:20]:
+            q = " ".join(r.get("query", "").split())[:100].replace("|", "/")
+            lines.append(f"- `{r.get('template')}:{r.get('line', '?')}` ({r.get('kind', '')}) `{q}`")
+        if len(cur["mismatches"]) > 20:
+            lines.append(f"- … {len(cur['mismatches']) - 20} more (ab-integrationtest/mismatches.jsonl)")
+        lines.append("")
+    for title, counter in (("top unsupported reasons", cur["reasons"]), ("top tidb-rs errors", cur["errors"])):
+        if counter:
+            lines.append(f"| {title} | statements |")
+            lines.append("|---|---|")
+            for why, n in counter.most_common(10):
+                lines.append(f"| {why.replace('|', '/')} | {n} |")
+            lines.append("")
+    lines.append("| test | reads | match | mismatch | error | unsupported |")
+    lines.append("|---|---|---|---|---|---|")
+    top = sorted(cur["tests"].items(), key=lambda kv: (-kv[1]["mismatch"], -kv[1]["unsupported"], kv[0]))
+    for name, c in top[:15]:
+        lines.append(f"| {name} | {sum(c.values())} | {c['match']} | {c['mismatch']} | {c['b_error']} | "
+                     f"{c['unsupported']} |")
+    if len(top) > 15:
+        lines.append(f"| … {len(top) - 15} more | | | | | |")
+    lines.append("")
+
+
 def section_locks(raw, lines):
     lines.append("## Lock resolution (tools/ab/locks)\n")
     if raw is None:
@@ -261,8 +363,10 @@ def main():
 
     cur_ab, prev_ab = load(args.inp, "ab-classified.json"), load(args.previous, "ab-classified.json")
     cur_sb, prev_sb = load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json")
+    cur_it, prev_it = integration(args.inp), integration(args.previous)
     regressed = regressions(cur_ab, prev_ab, cur_sb, prev_sb,
-                            load(args.inp, "tpch-time.json"), load(args.previous, "tpch-time.json"))
+                            load(args.inp, "tpch-time.json"), load(args.previous, "tpch-time.json"),
+                            cur_it, prev_it)
     if any(s == "fail" for s in status.values()):
         verdict, code = "RED", 1
     elif any(s in ("incomplete", "missing") for s in status.values()):
@@ -303,6 +407,8 @@ def main():
     if "tpch" in expected:
         section_tpch(load(args.inp, "tpch-classified.json"), load(args.inp, "tpch-time.json"),
                      load(args.previous, "tpch-time.json"), lines)
+    if "integrationtest" in expected:
+        section_integration(load(args.inp, "integrationtest.json"), cur_it, prev_it, lines)
     if not args.previous:
         lines.append("_No previous run to compare with._\n")
 

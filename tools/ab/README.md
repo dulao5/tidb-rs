@@ -165,6 +165,10 @@ Output in `--out-dir`:
   skipped, write, b_set_rejected, retried, seconds.
 - `mismatches.jsonl`: every mismatch and b_error with both answers (columns and up to
   `--report-rows` rows) and the session statements B had rejected in that connection.
+- `results.jsonl`: every read sent to B (match, mismatch, unsupported, b_error), one JSON
+  object per line in the format of the other workloads (`template` = test name, `protocol`
+  `text`, `verdict`, `query`) plus `line`, and for anything but a match the `kind` and
+  `detail` of `statements.tsv`. The weekly build's `integrationtest` part reads it (`tools/weekly`).
 
 The tidb-rs-tracker imports the directory (`scripts/tracker.py import-integration`) and
 publishes per-file counts, reasons and every mismatch (R1).
