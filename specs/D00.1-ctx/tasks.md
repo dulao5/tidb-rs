@@ -8,9 +8,10 @@
 - [x] T6a exprctx、expropt/optional.go、exprstatic（第 2a 部分）
 - [x] T6b expropt 的具体 provider（第 2b 部分）；sessionexpr 等 D05.3 的会话与 T9（豁免）
 - [x] T7 planctx、core/base（PlanCounterTp）、debugtrace、sessionctx/context.go 的 basicCtxType（第 2b 部分）；`ValidateSnapshotReadTS` 等 D07.1，distsql/context 等 D14.0/D07.2（豁免）
-- [ ] T8 stmtctx 剩余：digest（D02.2）、used-stats（D11）、LogicalPlanBuildState（P3）。ExecDetails（D14.0）已完成：`SyncExecDetails`、`RuntimeStatsColl`、`GetExecDetails`、`ResetForRetry` 重置 exec details
-- [ ] T9 D05.2 `session.rs` 的 StatementContext 替身换成 `stmtctx::StatementContext`
+- [x] T8 stmtctx 剩余：P1 收尾时移交——digest 6 个给 D14.2、used-stats 10 个给 D11.2、LogicalPlanBuildState 2 个给 D09.13、`GetOrInitDistSQLFromCache` 给 D07.3、`GetStmtLabel`/`WithStmtLabel` 给 D12.0（各块 tasks.md 的"从 P1 继承"）。ExecDetails（D14.0）已完成：`SyncExecDetails`、`RuntimeStatsColl`、`GetExecDetails`、`ResetForRetry` 重置 exec details
+- [x] T9 D05.2 `session.rs` 的 StatementContext 替身换成 `stmtctx::StatementContext`（D05.2 E，#87）
 - [x] T10 #65 评审的后续：`pkg/util/context` 改归 tidb-base 所有的块 D00.4；替换 handler 并 reset 后旧副本写 warning 的单元测试；spec 记下 ErrorGroup 分支在 INSERT 写路径上可达、`Reset` 与 `Arc::get_mut` 的对应
 - [x] T11 #68 评审：块 D00.1a 改名为 D00.4；`UserVarsReader` 与空的 `UserVars` 替身移到 `variable/uservars.rs`（Go 在 `pkg/sessionctx/variable` 定义），`exprctx` 再导出；`EvalWarnSink` 改用 `OnceLock`（Go 的 `EvalContext` 构造后不再换 handler）
-- [ ] T12 D05.2 移植 `PlanCacheParamList` 时：`exprstatic` 的 `Apply` 现在深拷贝参数列表，Go 共享底层的字节；改为 `Arc<[Datum]>` 共享（#68 评审）
+- [x] T12（P1 收尾时移交给 D13.1 plan cache）D05.2 移植 `PlanCacheParamList` 时：`exprstatic` 的 `Apply` 现在深拷贝参数列表，Go 共享底层的字节；改为 `Arc<[Datum]>` 共享（#68 评审）
 - [x] T13 govec `ctx2b` 领域与回放（第 2b 部分）；`planctx_unit.rs`；反证
+- [x] T14 P1 收尾（#48）：剩余函数逐个定为已移植、正式豁免或移交（sessionexpr 57 个与 expropt/sessionvars 4 个、debugtrace 4 个的 PlanContext 接入给 D05.3；`ValidateSnapshotReadTS` 给 D07.1；distsql/context 给 D07.3）；tracker 豁免表不再指向本块后续部分

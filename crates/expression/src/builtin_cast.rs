@@ -84,6 +84,7 @@ use crate::errors::{ErrInvalidJSONForFuncIndex, ErrInvalidTypeForJSON, ErrNotSup
 use crate::errors::{handle_allowed_packet_overflowed, handle_invalid_time_error};
 use crate::eval::{Args, BuiltinFunc, SigDesc, SigDrivers, SigView};
 use crate::expression::{ConstStrict, EvalState, Expr, ExprRef, is_binary_literal};
+use crate::helper::get_stmt_timestamp;
 use crate::scalar_function::ScalarFunction;
 use tidb_expression_macros::eval_fn;
 
@@ -1258,12 +1259,10 @@ fn truncate_to_date(t: &mut Time, tp: u8) {
     }
 }
 
-/// `getStmtTimestamp(ctx)` (`ctx.CurrentTime()`; the `intest` random location and the
-/// `injectNow` failpoint are test-only), falling back to `gotime.Now()` on error as the CAST
-/// signatures do.
-// glue: boundary stub for getStmtTimestamp (helper.go, block D08.12) and the gotime.Now() fallback of the CAST signatures
+/// [`get_stmt_timestamp`], falling back to `gotime.Now()` on error as the CAST signatures do.
+// glue: the gotime.Now() fallback of the CAST signatures around getStmtTimestamp
 fn stmt_timestamp(ctx: &dyn EvalContext) -> gotime::Time {
-    ctx.current_time().unwrap_or_else(|_| gotime::now())
+    get_stmt_timestamp(ctx).unwrap_or_else(|_| gotime::now())
 }
 
 /// `errors.Is(err, strconv.ErrSyntax) || errors.Is(err, strconv.ErrRange)`: the
