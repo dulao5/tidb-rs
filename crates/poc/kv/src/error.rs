@@ -71,12 +71,21 @@ mod tests {
             last: Box::new(tikv_client::Error::StringError("last".to_owned())),
         };
         for kind in [B::RegionMiss, B::RegionScheduling, B::StaleCommand] {
-            assert!(matches!(Error::from(exhausted(kind)), Error::RegionUnavailable(_)));
+            assert!(matches!(
+                Error::from(exhausted(kind)),
+                Error::RegionUnavailable(_)
+            ));
         }
         for kind in [B::TikvLockFast, B::TxnNotFound] {
-            assert!(matches!(Error::from(exhausted(kind)), Error::LockTimeout(_)));
+            assert!(matches!(
+                Error::from(exhausted(kind)),
+                Error::LockTimeout(_)
+            ));
         }
-        assert!(matches!(Error::from(exhausted(B::TikvRpc)), Error::Unavailable(_)));
+        assert!(matches!(
+            Error::from(exhausted(B::TikvRpc)),
+            Error::Unavailable(_)
+        ));
     }
 
     #[test]
