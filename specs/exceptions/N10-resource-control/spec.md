@@ -8,14 +8,14 @@
 
 ## 0. 总结
 
-1. **Go 的计量缺口**（§2.3）：多资源组时，TiDB 自身执行 SQL 的 CPU **完全不计 RU**（PD `model.go:312-315` 返回 0，带 TODO）；TiKV CPU 只对读请求计费（PD `model.go:108`）；写失败的退款永远不执行（CG `resource_control.go:177-179`，`Succeed()` 恒为 true）。
+1. **Go 的计量缺口**（§2.3）：on-prem 的 TiDB 从来不把自身执行 SQL 的 CPU 计入 RU，单组也一样。PD client 只在 `EnableSingleGroupByKeyspace`（serverless）模式下取进程 CPU，v8.5.8 创建控制器时不传这个选项（`domain/runaway.go:37`），否则返回 0（PD `model.go:312-315`，带 TODO）。TiKV CPU 只对读请求计费（PD `model.go:108`）；写失败的退款永远不执行（CG `resource_control.go:177-179`，`Succeed()` 恒为 true）。
 2. **Go 的限流粒度**（§2.2）：每个进程、每个资源组一个令牌桶，等待加在**每个 KV RPC 发出之前**。同组请求之间没有公平性，按抢锁顺序；读费用响应后才扣，可欠账；`BURSTABLE` 等于完全不限（tidb#54554）。
-3. **Go 的 runaway 判定**（§2.4）：只在 cop 请求前后、执行前，以及 100 ms 的 tick 上检查，而且 tick 只看时间。只在 TiDB 内部做的计算、不再发 cop 请求的查询会漏检（tidb#69254），KILL 生效会延迟（tidb#70333）。rule 触发的 SWITCH_GROUP 只作用于 cop 请求。
+3. **Go 的 runaway 判定**（§2.4）：EXEC_ELAPSED 由 100 ms 的 tick 检查，刚过期就结束的语句会漏记（tidb#69254）；KILL 只是发信号，要等执行器下次检查才生效（tidb#70333：300 s 拖到 419 s）；RU 和 PROCESSED_KEYS 只在 cop 响应时检查。COOLDOWN（rule 或 watch 触发）和 rule 触发的 SWITCH_GROUP 只作用于 cop 请求。
 4. **tidb-rs 设计**（§4）：
    - **计量**：放在 client-rust 的请求完成钩子里，与 N9 的 KV 统计同一处；TiDB 侧 SQL CPU 用 N9 的窗口分摊记到语句所在的资源组。
    - **限流**：从"每个 RPC 前睡眠"改为在 N3 运行时里按资源组排队、加权公平地调度语句的任务，令牌桶协议不变。
    - **runaway**：在 N3 的 checkpoint 和 poll 包装器里持续检查，TiDB 侧的计算也能及时发现。
-5. **需要负责人决定**的 5 点见 §6，其中最重要的是 D1：SQL CPU 是否计入本地令牌桶。计入会改变限流结果，与 Go 不同，但更接近 RU 的定义。
+5. **需要负责人决定**的 6 点见 §6。最重要的是 D1：建议 SQL CPU 默认只计入 RU 指标，参与限流作为显式开关（on-prem 的 Go 从不计 SQL CPU，直接计入会改变所有现有部署的 `RU_PER_SEC` 含义）。
 
 ## 1. 范围
 
@@ -56,7 +56,7 @@
 | 读/写 base、写字节 × 副本数 | 请求前 | 请求内容（写只算 Prewrite、Commit） | PD `model.go:81-103`，CG `resource_control.go:42-71` |
 | 读字节 | 响应后 | `ScanDetailV2.ProcessedVersionsSize`，否则 cop `Data.Size()` 或整个 Scan 响应大小 | CG `resource_control.go:110-164`；PD `model.go:106-135` |
 | TiKV CPU | 响应后，**只对读** | `TimeDetailV2.ProcessWallTimeNs`：TiKV 的注释说它"在大多数情况下非常接近 CPU 时间"，但包含 RocksDB 内部的 mutex 等待，所以叫墙钟；TiKV 8.5 的回包里没有真正的 CPU 字段 | PD `model.go:108`："For now, we can only collect the KV CPU cost for a read request."；CG `resource_control.go:152` TODO |
-| TiDB SQL CPU | 每秒，按整个进程 | 只在"一个 keyspace 一个组"模式下取进程 CPU；多组时返回 0 | PD `model.go:158-165`、`:295-315`（`// TODO: Need a way to calculate in the case of multiple groups.`） |
+| TiDB SQL CPU | 每秒，按整个进程 | 只在 `EnableSingleGroupByKeyspace`（serverless，一个 keyspace 一个组）模式下取进程 CPU，其余情况返回 0。v8.5.8 创建控制器时只传 `WithMaxWaitDuration`，不开这个模式（`domain/runaway.go:37`），所以 on-prem 部署**无论几个组**都不计 | PD `model.go:158-165`、`:295-315`（`// TODO: Need a way to calculate in the case of multiple groups.`） |
 | 写失败退款 | — | `Succeed()` 恒为 true，退款逻辑走不到 | CG `resource_control.go:177-179`，PD `model.go:110-112` |
 
 ### 2.4 runaway query
@@ -89,15 +89,15 @@
 
 | # | 问题 | 证据 | 影响 |
 |---|---|---|---|
-| P1 | 多资源组时 TiDB SQL CPU 不计 RU | PD `model.go:312-315`；pd#10940（SQL 层 CPU 计入 RU 指标却不进本地令牌桶，口径不一致） | TiDB 侧计算重的查询（大 join、聚合、排序）几乎不受 RU 限制；一个组可以占满 TiDB CPU |
+| P1 | on-prem TiDB 从不把 SQL CPU 计入 RU（单组也是） | `domain/runaway.go:37`（不开 `EnableSingleGroupByKeyspace`）；PD `model.go:312-315`；pd#10940（serverless 下 SQL 层 CPU 计入 RU 指标却不进本地令牌桶，口径不一致） | TiDB 侧计算重的查询（大 join、聚合、排序）几乎不受 RU 限制；一个组可以占满 TiDB CPU。反过来说，现有部署的 `RU_PER_SEC` 配额和 `CALIBRATE RESOURCE` 的估算都是在"不含 SQL CPU"的口径下得出的 |
 | P2 | TiKV CPU 只对读计费；口径含 RocksDB mutex 等待 | PD `model.go:108`；CG `resource_control.go:152`；tidb#42141（早期用 1 ms 粒度的 TimeDetail，已改用 V2 的 ns） | 写请求的 CPU 不计（tidb-rs 只读，影响小）；锁争用重时读的 CPU 偏大。TiKV 回包没有更准的字段，TiDB 侧无法单独修 |
 | P3 | 读字节口径粗糙 | CG `resource_control.go:137`、`:143` TODO（拿整个响应大小当读字节） | RU 与实际读取量偏离 |
 | P4 | 写失败退款失效 | CG `resource_control.go:177-179` | 写冲突重试被重复计费（tidb-rs 只读，影响小） |
 | P5 | 限流等待在每个 RPC 之前、桶内无公平性 | PD `limiter.go:402-404`、`controller.go:1451-1483` | 一条语句的多个 cop 任务各自等待，尾延迟叠加；同组内大查询可以饿死小查询；语句已经占着运行时资源（内存、并发槽）却在 RPC 前睡眠 |
 | P6 | 欠账无下限、大响应才事后等待 | PD `controller.go:1552`、`limiter.go:330` | 突发读可以把桶打成很深的负数，之后整组长时间被限 |
 | P7 | `BURSTABLE` 等于不限 | PD `controller.go:1464`；tidb#54554（一个组打开 burstable 后吃掉其他组约 100K RU/s） | 打开 burstable 的组没有上限 |
-| P8 | runaway 只在 cop 边界和 100 ms tick 上判定 | `checker.go:250`、`coprocessor.go:1362-1366`、`:1989-1996`；tidb#69254（EXEC_ELAPSED 对不再发 cop 请求的查询漏检，KILL 也只是时有时无）；tidb#70333（300 s 的 KILL 拖到 419 s） | TiDB 侧的长计算无法及时发现和终止 |
-| P9 | rule 触发的 SWITCH_GROUP / COOLDOWN 只作用于 cop 请求 | `checker.go:186`、`:214-217` | 点查、批量点查、事务请求仍按原组计费、原优先级执行 |
+| P8 | runaway 的判定粒度粗、生效晚 | (1) EXEC_ELAPSED 由 expensivequery 每 100 ms 检查（`expensivequery.go:57`），能发现，但 100 ms 的粒度会漏掉刚过期就结束的语句：tidb#69254（阈值 200 ms、查询 220 ms，时有时无）。(2) KILL 只是发信号（`server.go:965-966`），要等执行器下一次检查 kill 标志才生效：tidb#70333（300 s 的 KILL 拖到 419 s）。(3) RU 和 PROCESSED_KEYS 只在 cop 响应时检查（`coprocessor.go:1989-1996`，tick 传入的 RU 为 nil，`checker.go:250`） | 刚超阈值的语句漏记；KILL 延迟取决于执行器的检查间隔；TiDB 侧计算累计的 RU（若 D1 计入）不会触发 RU 规则 |
+| P9 | COOLDOWN（rule 或 QUERY WATCH 触发）和 rule 触发的 SWITCH_GROUP 只作用于 cop 请求 | COOLDOWN 只在 `BeforeCopRequest` 里设置 `OverridePriority`，watch 命中也一样（`checker.go:184-187`，注释"Other watch actions should already been handled in `BeforeExecutor`"，即 COOLDOWN 没有在执行前处理）；rule 的 SWITCH_GROUP 见 `checker.go:214-217` | 点查、批量点查、事务请求仍按原组计费、原优先级执行 |
 | P10 | runaway 记录与 watch 同步可能丢失 | `manager.go:277`、`:353`（通道满静默丢弃）；tidb#70036（watch 刷新出错会静默关闭跨节点隔离）；tidb#67772（`tidb_runaway_watch_done` 无限增长） | 隔离不可靠、系统表膨胀 |
 | P11 | 令牌申请的 trickle 实现 | pd#11317（截止后客户端继续按 trickle 速率加 PD 没给的令牌）；pd#10985（写消耗上报时机） | 实际速率超过配额 |
 
@@ -118,7 +118,7 @@
 |---|---|---|
 | KV 请求 base、字节 | client-rust fork 的请求完成钩子（N9 §3.3 的同一钩子），公式照 PD `model.go` | 同 Go |
 | TiKV CPU | 照 Go 用 `TimeDetailV2.process_wall_time_ns`（TiKV 8.5 回包中最接近 CPU 的字段，已核对 kvrpcpb） | 同 Go；P2 需要 TiKV 回包加字段，不在本 spec 范围 |
-| TiDB SQL CPU | N9 §6.1 的窗口分摊已经把 CPU 记到每个任务的 `ObsCtx`；同一份数字按语句的资源组累计，乘 `CPUMsCost` 记为 RRU | 修 P1。是否进入本地令牌桶见 D1 |
+| TiDB SQL CPU | N9 §6.1 的窗口分摊已经把 CPU 记到每个任务的 `ObsCtx`；同一份数字按语句的资源组累计，乘 `CPUMsCost` 记为 RRU | 修 P1。**默认只计入指标**（上报和 `information_schema`），不进本地令牌桶；进入限流由显式开关控制，见 D1 |
 | 写失败退款 | 按响应真实结果判断成功，失败时退款 | 修 P4（tidb-rs 目前只读，主要为完整性） |
 | background 请求 | 照 Go 不在 TiDB 侧计量 | 同 Go |
 
@@ -128,11 +128,13 @@
 
 **令牌桶**：resource manager 客户端（Rust 新写，相当于 PD `controller.go` / `limiter.go`）。每个组一个桶，后台一个任务批量申请令牌、上报消耗，协议照 Go。同时修 P11 的 trickle 截止问题，不加 PD 没给的令牌。
 
-**在哪里等**：Go 是每个 KV RPC 发出前睡眠（P5）。tidb-rs 改为两层：
+**在哪里等**：Go 是每个 KV RPC 发出前睡眠（P5）。tidb-rs 分三层，**只有第 3 层（RPC 层）真正扣令牌**，前两层只读桶的状态（余量、是否欠账、是否在 trickle 中）做调度决定：
 
-1. **语句准入**（N3 的 Q1 准入队列，`crates/runtime/src/admission.rs`）：语句开始执行前按资源组排队。组的桶为负或欠账超过上限时，新语句在这里等，而不是执行到一半在 RPC 前睡眠。被限流的语句不占并发槽和内存预算。
-2. **任务调度**（N3 运行时）：已经在执行的语句，任务按资源组加权公平调度，权重为 `RU_PER_SEC`，同组内 FIFO。超出配额的组，其任务被延后 poll，而不是阻塞线程。PRIORITY 高的组优先。
-3. **RPC 层**：仍按 Go 在每个请求前预约令牌，保证与 Go 相同的计量和最长等待（30 s 后报 8252）。正常情况下第 1、2 层已经限住，这一层很少真的等待。
+1. **语句准入**（N3 的 Q1 准入队列，`crates/runtime/src/admission.rs`）：语句开始执行前按资源组排队。组的桶为负或欠账超过下限时，新语句在这里等，而不是执行到一半在 RPC 前睡眠。被限流的语句不占并发槽和内存预算。等待超过 `LTBMaxWaitDuration`（30 s）时报 8252。Go 只在 RPC 层报 8252，这是用户可见的变化，见 D6。
+2. **任务调度**（N3 运行时）：已经在执行的语句，任务按资源组加权公平调度，权重为 `RU_PER_SEC`，同组内 FIFO，PRIORITY 高的组优先。这一层分配的是 **TiDB 的 CPU**（poll 的机会），不是 TiKV 的 RU。超出配额的组，其任务被延后 poll，而不是阻塞线程。
+3. **RPC 层**：照 Go 在每个请求前预约令牌、响应后结算，计量和最长等待（30 s 后报 8252）与 Go 相同。正常情况下第 1、2 层已经让请求的速率接近配额，这一层很少真的等待。
+
+**优先级反转**：第 2 层延后 poll 一个组的任务时，如果这个任务持有别的组正在等的资源，别的组也会被拖慢。例如 R12 合并请求的 leader：其他组的语句正等着它的 ResolveLock 结果。缓解：持有共享资源的任务（合并请求的 leader、后台清锁、schema 同步等运行时内部任务）不归属任何资源组，不参与按组延后。见 §8。
 
 `BURSTABLE`：照 Go 不受本组上限限制，但在第 2 层仍参与加权公平调度，不会饿死其他组（P7）。这改变了 burstable 组与其他组之间的相对速度，见 D2。
 
@@ -145,7 +147,7 @@
   - poll 包装器：每次 poll 结束时检查 EXEC_ELAPSED。
   - RU 与 PROCESSED_KEYS：在 KV 请求完成钩子里累计，超过阈值时设置语句的 runaway 标志，下一个 checkpoint 生效。
 
-  这样 TiDB 侧的计算也能在约 1 个时间片内被发现（修 P8），不依赖 cop 请求或 100 ms tick。
+  修 P8：EXEC_ELAPSED 在每次 poll 结束时比较截止时间，不受 100 ms 粒度影响；KILL 走取消令牌，在下一个 checkpoint（不超过一个时间片，默认 1 ms）生效；RU 和 PROCESSED_KEYS 在每个 KV 请求完成时、以及 SQL CPU 刷出时（若 D1 打开限流开关）检查，不依赖 cop 响应。
 - **KILL**：走 N3 的取消令牌（与 `KILL QUERY` 相同的路径），错误码照 Go（8253 / 8254）。仍按 Go 把剩余时间写进 cop 请求的 `max_execution_duration_ms`，让 TiKV 也能及时停止。
 - **COOLDOWN / SWITCH_GROUP**：作用于**语句的全部请求**，包括点查、批量点查，以及语句发起的事务请求。组名和优先级放在语句的请求上下文里，生效后对之后发出的所有请求都适用（修 P9）。这是用户可见的行为差异，见 D4。
 - **QUERY WATCH**：匹配规则照 Go（SQL 文本、SQL digest、plan digest）。watch 列表同步照 Go 每 1 s 一次。写入 `mysql.tidb_runaway_*` 改为有界队列：满时计数并在日志和指标中报出，不再静默丢弃（P10）。`watch_done` 的清理见 D5。
@@ -169,8 +171,8 @@ N9 的采样率（§6.1a）只决定 Top SQL 是否聚合。资源管控的 RU �
 |---|---|---|
 | DDL、hint、`SET RESOURCE GROUP`、`CURRENT_RESOURCE_GROUP()`、`QUERY WATCH`、`CALIBRATE RESOURCE` | 语法、选项、权限检查、错误 | — |
 | 系统变量、系统表、`mysql.tidb_runaway_*` | 名字、类型、默认值、列 | — |
-| 错误码 8248–8255、8257 | 相同 | 8252（Throttled）在语句准入层等待超时时也会出现，Go 只在 RPC 层出现 |
-| RU 数值 | KV 部分公式和口径相同 | 多组时多出 SQL CPU 的 RRU（D1） |
+| 错误码 8248–8255、8257 | 相同 | 8252（Throttled）在语句准入层等待超时时也会出现，Go 只在 RPC 层出现（D6） |
+| RU 数值 | KV 部分公式和口径相同 | 指标中多出 SQL CPU 的 RRU（默认只计入指标）；开关打开后也参与限流（D1） |
 | 限流结果 | 单组、无 burstable、无 TiDB 侧重计算时基本相同 | 同组内更公平；burstable 组不再挤占其他组（D2）；欠账有下限（D3） |
 | runaway | 规则、动作、记录格式相同 | 发现得更早（TiDB 侧计算也能发现）；COOLDOWN / SWITCH_GROUP 作用于语句全部请求（D4） |
 
@@ -180,11 +182,12 @@ N9 的采样率（§6.1a）只决定 Top SQL 是否聚合。资源管控的 RU �
 
 | # | 问题 | 选项 | 建议 |
 |---|---|---|---|
-| D1 | TiDB SQL CPU 是否计入 RU 并参与本地限流 | (a) 照 Go：多组时不计；(b) 计入 RRU，只用于指标和 `information_schema`；(c) 计入 RRU 并参与限流 | (c)：RU 的定义本来包含 CPU，Go 是因为做不到（TODO）而没计。但这会让 TiDB 侧计算重的组被更早限流，与 Go 集群混部时同一负载的 RU 读数不同。可以先 (b) 观察，再切到 (c) |
+| D1 | TiDB SQL CPU 是否计入 RU | (a) 照 Go 完全不计；(b) 计入 RRU，只用于指标和 `information_schema`，不参与限流；(c) 计入并参与限流 | **默认 (b)，(c) 作为显式开关**（例如新 GLOBAL 系统变量，名字待定，默认关）。理由：on-prem 的 Go 从不计 SQL CPU（P1），现有部署的 `RU_PER_SEC` 都是在这个口径下设的，直接改成 (c) 会改变**所有** on-prem 部署（单组也一样）的 RU 含义。`CALIBRATE RESOURCE` 在 (c) 下的含义：它按 TiKV 侧的消耗估算集群容量（不含 TiDB CPU），打开 (c) 后同一负载每秒消耗的 RU 更多，估算出的容量需要按 SQL CPU 占比调高，或者 `CALIBRATE` 也把 TiDB 节点的 CPU 计入容量；开关文档要说明这一点，具体做法在实现前定 |
 | D2 | `BURSTABLE` 组是否参与加权公平调度 | (a) 照 Go 完全不限；(b) 不受本组上限限制，但调度时与其他组按权重公平 | (b)，回应 tidb#54554 |
 | D3 | 欠账下限 | (a) 照 Go 无下限；(b) 下限为一个上报周期（5 s）的配额，超过后语句准入暂停 | (b) |
 | D4 | rule 触发的 COOLDOWN / SWITCH_GROUP 的作用范围 | (a) 照 Go 只作用于 cop 请求；(b) 作用于语句之后发出的全部请求 | (b)：Go 的行为更像实现限制，不是设计 |
 | D5 | `mysql.tidb_runaway_watch_done` 的清理 | (a) 照 Go 不清理；(b) 按 `tidb_runaway_queries` 的 7 天规则一并清理 | (b)，回应 tidb#67772 |
+| D6 | 语句准入层的限流（§4.3 第 1 层） | (a) 不要第 1 层，只在 RPC 层等待（同 Go）；(b) 要第 1 层，等待超时同样报 8252 | (b)：被限流的语句不再占着并发槽和内存等在 RPC 前。用户可见的变化是 8252 可能在语句开始前出现（Go 只在 RPC 时出现），错误码和文字不变 |
 
 ## 7. 验收
 
@@ -203,6 +206,7 @@ N9 的采样率（§6.1a）只决定 Top SQL 是否聚合。资源管控的 RU �
 
 - **resource manager 客户端是新写的**：client-rust 没有对应实现，令牌申请、trickle、上报周期的细节多，PD 侧也在变（pd#10940、#10985、#11317）。缓解：先照 Go 的协议和测试移植一版，再做改进；与 PD 的交互用集成测试覆盖。
 - **语句准入层限流可能让短语句排在长语句之后**：在第 1 层按组分队，组内 FIFO，并对超时报 8252；验收第 3 项专门测。
+- **第 2 层的优先级反转**（§4.3）：被延后的任务若持有其他组在等的资源（R12 合并请求的 leader、后台清锁、锁等），会拖慢其他组。缓解：运行时内部任务和合并请求的 leader 不归属资源组；实现时用一个测试覆盖"低配额组持有合并请求的 leader，高配额组等待其结果"。
 - **D1 选 (c) 后与 Go TiDB 混部**：同一集群中 Go 和 tidb-rs 对同一负载的 RU 计数不同，配额消耗速度不同。这需要在文档中说明，或只在纯 tidb-rs 集群中启用。
 
 ## 9. 与其他 spec 的关系
