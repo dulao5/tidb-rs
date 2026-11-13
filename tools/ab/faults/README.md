@@ -31,7 +31,10 @@ tools/ab/faults/run.sh -b path/to/tidb-server -s kill_tikv,net_cut -p 10 -k
 
 Error kinds seen on **both** sides are not gated, because they are not a parity gap. They are still printed (`BOTH:`) and saved as `errors_on_both`, so a regression on both sides stays visible.
 
-**What is checked:** every result is compared with a snapshot taken before the faults, and nothing writes during the run. So this catches corrupted or partial results, but **not** stale reads or reads that miss a committed write. A writer with a monotonic check is the planned follow-up; see the report.
+**What is checked:**
+
+- reads of `sbtest1`, which nothing writes, are compared with a snapshot taken before the faults (corrupted or partial results);
+- reads of `sbtest.counters`, which a writer updates throughout the run, must not go back in time (stale reads, and reads that miss a committed write). See "Writes" below.
 
 **Requirements:** tiup, the mysql client, `python3-pymysql`, and passwordless `sudo`. Without passwordless sudo, `slow_tikv` (cgroup v2) and `net_cut` (iptables) are skipped and the run exits 2. The other scenarios need no root.
 
@@ -45,6 +48,25 @@ Two threads per side and shape, picking random keys:
 | `point-tso` | `select max(c) … where id = ?` | point get at the statement's start_ts (tidb-rs: client-rust `Transaction::get`) |
 | `range` | `select id, k … where id between ? and ?+9 order by id` | coprocessor table scan |
 | `agg` | `select count(*), sum(k) … where id between ? and ?+1999` | coprocessor aggregation |
+
+## Writes
+
+`sbtest.counters` has 8 rows, each in its own region. One Go TiDB connection keeps updating them with autocommit, using values from one increasing sequence:
+
+- odd steps update one row: a 1PC commit;
+- even steps update two rows in different regions in one statement: an async commit with a secondary lock.
+
+Both are TiDB v8.5.8 defaults, so commit-path locks are present when TiKV is killed or leaders move. The writer records, for every row, the time each commit returned and its value.
+
+Both sides read the rows (one thread per side and shape):
+
+| shape | SQL |
+|---|---|
+| `w-point-maxts` | `select v … where id = ?` |
+| `w-point-tso` | `select max(v) … where id = ?` |
+| `w-scan` | `select id, v … order by id` (all 8 rows) |
+
+**Rule:** a read that started after a commit returned must see at least that commit's value. It also must not see more than the largest value attempted. A write whose outcome is unknown (an error) does not raise the floor. A violation counts as a wrong result. The first 20 per scenario are printed as `WRONG:` and saved as `wrong_samples`. `transfer_leader` also moves the leaders of the 8 counter regions.
 
 ## Scenarios
 

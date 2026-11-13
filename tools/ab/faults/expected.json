@@ -1,9 +1,8 @@
 {
   "_comment": "Known inconsistencies (tidb-rs errors that Go TiDB does not show), as regexes on '<shape> <error>'. Each entry cites its gap in specs/D07.1-store/client-go-parity.md; remove it when the gap is fixed.",
   "kill_tikv": [
-    "^point-(maxts|tso) 1105: region unavailable: (Leader of region N is not found|Region error: Error \\{ message: \"peer is not leader)"
+    "^(w-)?point-(maxts|tso) 1105: region unavailable: (Leader of region N is not found|Region error: Error \\{ message: \"peer is not leader)",
+    "^w-scan 1105: region unavailable: Leader of region N is not found"
   ],
-  "wide_rows": [
-    "^wide-6MiB 1105: TiKV/PD unavailable: gRPC api error: status: OutOfRange"
-  ]
+  "_kill_tikv": "P0-1: point gets, and lock resolution (CheckTxnStatus on the primary of a writer's async-commit lock, met by w-scan's coprocessor read), retry region errors on a fixed DEFAULT_REGION_BACKOFF (~1.5 s) instead of the caller's budget. Fixed by client-rust P0-1a."
 }

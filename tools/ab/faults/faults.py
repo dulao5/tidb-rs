@@ -25,6 +25,7 @@ reads that miss a committed write are not detected (see specs/D07.1-store/fault-
 """
 
 import argparse
+import bisect
 import json
 import os
 import random
@@ -63,6 +64,18 @@ def norm(rows):
     return [tuple("" if v is None else str(v) for v in r) for r in rows]
 
 
+# Rows written during the run (see Writer). One row per region, so leaders spread over the stores.
+COUNTERS = "sbtest.counters"
+COUNTER_ROWS = 8
+
+# Reads of the written rows, checked against what had been committed when the read started.
+WRITE_SHAPES = {
+    "w-point-maxts": lambda r: f"select v from {COUNTERS} where id = {r}",
+    "w-point-tso": lambda r: f"select max(v) from {COUNTERS} where id = {r}",
+    "w-scan": lambda r: f"select id, v from {COUNTERS} order by id",
+}
+
+
 # ------------------------------------------------------------------ baseline
 
 
@@ -82,6 +95,128 @@ def baseline(a, keys):
     return out
 
 
+# ------------------------------------------------------------------ writer
+
+
+def setup_counters(a):
+    conn = connect(a)
+    with conn.cursor() as cur:
+        cur.execute(f"drop table if exists {COUNTERS}")
+        cur.execute(f"create table {COUNTERS} (id int primary key, v bigint not null)")
+        cur.execute(f"insert into {COUNTERS} values " + ",".join(f"({r}, 0)" for r in range(1, COUNTER_ROWS + 1)))
+        cur.execute(f"split table {COUNTERS} by " + ",".join(f"({r})" for r in range(2, COUNTER_ROWS + 1)))
+    conn.close()
+
+
+class Writer:
+    """One Go TiDB connection that keeps committing increasing values to the counter rows.
+
+    Values come from one global sequence, so each row's value only grows in commit order (a
+    later transaction that meets an earlier one's lock resolves it first). Odd steps update one
+    row (1PC); even steps update two rows in different regions in one statement (async commit
+    with a secondary), so commit-path locks are in play during the faults. Both are the v8.5.8
+    defaults (tidb_enable_1pc, tidb_enable_async_commit).
+
+    For every row it records (time the commit returned, value). A read that started after a
+    commit returned must see at least that value; the check is in `check`.
+    """
+
+    def __init__(self, endpoint, stats):
+        self.endpoint = endpoint
+        self.stats = stats
+        self.lock = threading.Lock()
+        self.commits = {r: ([0.0], [0]) for r in range(1, COUNTER_ROWS + 1)}  # times, values
+        self.seq = 0
+        self.max_attempted = 0
+
+    def floor(self, row, started):
+        """The value of the last commit to `row` that returned before `started`."""
+        with self.lock:
+            times, values = self.commits[row]
+            return values[bisect.bisect_left(times, started) - 1]
+
+    def check(self, row, value, started):
+        """Whether `value`, read from `row` by a read that started at `started`, is allowed."""
+        if value is None:
+            return False
+        value = int(value)
+        with self.lock:
+            ceiling = self.max_attempted
+        return self.floor(row, started) <= value <= ceiling
+
+    def run(self, stop):
+        conn = None
+        last_ok = time.monotonic()
+        step = 0
+        while not stop.is_set():
+            step += 1
+            r = step % COUNTER_ROWS + 1
+            rows = [r] if step % 2 else [r, (r + COUNTER_ROWS // 2 - 1) % COUNTER_ROWS + 1]
+            with self.lock:
+                self.seq += 1
+                v = self.seq
+                self.max_attempted = v
+            ids = ",".join(map(str, rows))
+            t0 = time.monotonic()
+            try:
+                if conn is None:
+                    conn = connect(self.endpoint)
+                with conn.cursor() as cur:
+                    cur.execute(f"update {COUNTERS} set v = {v} where id in ({ids})")
+                now = time.monotonic()
+                with self.lock:
+                    for row in rows:
+                        times, values = self.commits[row]
+                        times.append(now)
+                        values.append(v)
+                self.stats.record("W", "write", True, False, None, now - t0, now - last_ok)
+                last_ok = now
+            except Exception as e:  # noqa: BLE001 - outcome unknown; the floor stays where it was
+                now = time.monotonic()
+                self.stats.record("W", "write", False, False, classify(e), now - t0, now - last_ok)
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                conn = None
+                time.sleep(0.05)
+
+
+def write_worker(side, endpoint, shape, writer, stats, stop):
+    conn = None
+    last_ok = time.monotonic()
+    rnd = random.Random(hash((side, shape)))
+    while not stop.is_set():
+        r = rnd.randint(1, COUNTER_ROWS)
+        sql = WRITE_SHAPES[shape](r)
+        t0 = time.monotonic()
+        try:
+            if conn is None:
+                conn = connect(endpoint)
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+            now = time.monotonic()
+            if shape == "w-scan":
+                wrong = len(rows) != COUNTER_ROWS or not all(writer.check(int(i), v, t0) for i, v in rows)
+            else:
+                wrong = len(rows) != 1 or not writer.check(r, rows[0][0], t0)
+            if wrong:
+                stats.note_wrong(side, shape, f"{sql} -> {rows} (floor at start: "
+                                 f"{[writer.floor(i, t0) for i in range(1, COUNTER_ROWS + 1)]})")
+            stats.record(side, shape, not wrong, wrong, None, now - t0, now - last_ok)
+            last_ok = now
+        except Exception as e:  # noqa: BLE001
+            now = time.monotonic()
+            stats.record(side, shape, False, False, classify(e), now - t0, now - last_ok)
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            conn = None
+            time.sleep(0.05)
+
+
 # ------------------------------------------------------------------ load
 
 
@@ -93,6 +228,13 @@ class Stats:
     def reset(self):
         with self.lock:
             self.data = {}
+            self.wrong_samples = []
+
+    def note_wrong(self, side, shape, what):
+        """Keep the first few wrong results of a scenario for the report."""
+        with self.lock:
+            if len(self.wrong_samples) < 20:
+                self.wrong_samples.append(f"{side}/{shape}: {what}")
 
     def record(self, side, shape, ok, wrong, err, latency, gap):
         with self.lock:
@@ -142,6 +284,8 @@ def worker(side, endpoint, shape, ids, expected, stats, stop):
                 rows = norm(cur.fetchall())
             now = time.monotonic()
             wrong = rows != expected[key]
+            if wrong:
+                stats.note_wrong(side, shape, f"{sql} -> {rows[:3]} expected {expected[key][:3]}")
             gap = now - last_ok
             last_ok = now
             stats.record(side, shape, not wrong, wrong, None, now - t0, gap)
@@ -175,10 +319,10 @@ def stores(pd):
     return {s["store"]["id"]: s for s in pd_api(pd, "stores")["stores"]}
 
 
-def table_regions(a):
+def table_regions(a, table=TABLE):
     conn = connect(a)
     with conn.cursor() as cur:
-        cur.execute(f"show table {TABLE} regions")
+        cur.execute(f"show table {table} regions")
         cols = [c[0] for c in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     conn.close()
@@ -208,6 +352,23 @@ def wait_store_up(pd, store_id, timeout=120):
             pass
         time.sleep(1)
     return False
+
+
+def wait_readable(endpoint, sql, timeout=60):
+    """Wait until `endpoint` can run `sql` (a new table becomes visible after a schema reload)."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            conn = connect(endpoint)
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                cur.fetchall()
+            conn.close()
+            return
+        except Exception:  # noqa: BLE001
+            if time.time() > deadline:
+                raise
+            time.sleep(0.5)
 
 
 def sh(*cmd):
@@ -244,9 +405,9 @@ def sc_transfer_leader(args, log):
     time.sleep(args.phase)
     pd_api(args.pd, f"schedulers/evict-leader-scheduler-{store}", method="DELETE")
     log("evict-leader-scheduler removed")
-    # Then single transfers of the table's regions, one per 200 ms.
+    # Then single transfers of the written rows' regions and the table's, one per 200 ms.
     st = list(stores(args.pd))
-    for n, r in enumerate(table_regions(args.a)[:40]):
+    for n, r in enumerate(table_regions(args.a, COUNTERS) + table_regions(args.a)[:40]):
         target = st[n % len(st)]
         try:
             pd_api(args.pd, "operators", {"name": "transfer-leader", "region_id": int(r["REGION_ID"]),
@@ -254,7 +415,7 @@ def sc_transfer_leader(args, log):
         except Exception:  # noqa: BLE001 - already the leader, etc.
             pass
         time.sleep(0.2)
-    log("transfer-leader of 40 regions")
+    log(f"transfer-leader of {COUNTER_ROWS} counter regions and 40 table regions")
     time.sleep(args.phase / 2)
 
 
@@ -436,18 +597,25 @@ def main():
     keys = {s: [rnd.randint(1, ROWS - 2000) for _ in range(300)] for s in SHAPES}
     print("taking the baseline from A ...", flush=True)
     exp = baseline(args.a, keys)
+    setup_counters(args.a)
+    wait_readable(args.b, f"select count(*) from {COUNTERS}")
 
     global ARGS_STATS
     stats = Stats()
     ARGS_STATS = stats
     stop = threading.Event()
-    threads = []
+    writer = Writer(args.a, stats)
+    threads = [threading.Thread(target=writer.run, args=(stop,), daemon=True)]
     for side, ep in (("A", args.a), ("B", args.b)):
         for shape in SHAPES:
             for _ in range(args.threads):
-                t = threading.Thread(target=worker, args=(side, ep, shape, keys[shape], exp, stats, stop), daemon=True)
-                t.start()
-                threads.append(t)
+                threads.append(threading.Thread(target=worker, args=(side, ep, shape, keys[shape], exp, stats, stop),
+                                                daemon=True))
+        for shape in WRITE_SHAPES:
+            threads.append(threading.Thread(target=write_worker, args=(side, ep, shape, writer, stats, stop),
+                                            daemon=True))
+    for t in threads:
+        t.start()
 
     results = []
     new = []
@@ -458,9 +626,11 @@ def main():
         stats.reset()
         time.sleep(args.phase)
         steady = stats.summary()
-        results.append({"scenario": "steady", "events": [], "summary": steady})
+        results.append({"scenario": "steady", "events": [], "summary": steady, "wrong_samples": stats.wrong_samples})
         new += inconsistencies("steady", steady, expected)
         print(f"steady: {json.dumps(steady)}", flush=True)
+        for w in stats.wrong_samples:
+            print(f"  WRONG: {w}", flush=True)
         for name in args.scenarios.split(","):
             events = []
             t0 = time.monotonic()
@@ -482,7 +652,8 @@ def main():
                 incomplete.append(f"{name}: scenario error {e!r}")
             summary = stats.summary()
             both = shared_errors(summary)
-            results.append({"scenario": name, "events": events, "summary": summary, "errors_on_both": both})
+            results.append({"scenario": name, "events": events, "summary": summary, "errors_on_both": both,
+                            "wrong_samples": stats.wrong_samples})
             found = inconsistencies(name, summary, expected)
             new += found
             print(f"{name}: {json.dumps(summary)}", flush=True)
@@ -490,6 +661,8 @@ def main():
                 print(f"  NEW: {f}", flush=True)
             for f in both:
                 print(f"  BOTH: {f}", flush=True)
+            for w in stats.wrong_samples:
+                print(f"  WRONG: {w}", flush=True)
             time.sleep(args.phase / 2)  # let the cluster settle
     finally:
         stop.set()
