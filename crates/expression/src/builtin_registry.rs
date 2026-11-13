@@ -195,6 +195,26 @@ pub static PORTED_FUNCTION_CLASSES: &[(&str, &(dyn FunctionClass + 'static))] = 
         &crate::builtin_op::IS_TRUTH_WITH_NULL_CLASS,
     ),
     (ast::IsFalsity, &crate::builtin_op::IS_FALSITY_CLASS),
+    (ast::VecDims, &crate::builtin_vec::VEC_DIMS_CLASS),
+    (
+        ast::VecL1Distance,
+        &crate::builtin_vec::VEC_L1_DISTANCE_CLASS,
+    ),
+    (
+        ast::VecL2Distance,
+        &crate::builtin_vec::VEC_L2_DISTANCE_CLASS,
+    ),
+    (
+        ast::VecNegativeInnerProduct,
+        &crate::builtin_vec::VEC_NEGATIVE_INNER_PRODUCT_CLASS,
+    ),
+    (
+        ast::VecCosineDistance,
+        &crate::builtin_vec::VEC_COSINE_DISTANCE_CLASS,
+    ),
+    (ast::VecL2Norm, &crate::builtin_vec::VEC_L2_NORM_CLASS),
+    (ast::VecFromText, &crate::builtin_vec::VEC_FROM_TEXT_CLASS),
+    (ast::VecAsText, &crate::builtin_vec::VEC_AS_TEXT_CLASS),
     (ast::And, &crate::builtin_op::BIT_AND_CLASS),
     (ast::Or, &crate::builtin_op::BIT_OR_CLASS),
     (ast::Xor, &crate::builtin_op::BIT_XOR_CLASS),

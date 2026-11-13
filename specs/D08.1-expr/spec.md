@@ -107,6 +107,19 @@ Go 中有些签名的向量版不使用父表达式求好的参数列，而是�
 - 回退时的逐行求值 `eval_rows_into` 按结果的求值类型写列（定长类型 `ResizeXxx` 后逐行设置；字符串、JSON、VECTOR 逐行追加），第一个错误直接返回，和 Go 的 `fallbackEvalXxx` 一样。
 - AND/OR 的记录（`logic`、`logicfb`）在泛化后仍是 0 条不一致；反证："`SecondArg` 的基准改成 `args[0]` 之前"报 1 条不一致。
 
+### 3.7 VECTOR 函数（第 3 部分，`builtin_vec.rs`）
+
+`builtin_vec.go`、`builtin_vec_vec.go`、`vs_helper.go` 的全部 41 个函数：8 个函数类（`VecFunctionClass` 的 8 个实例，登记为 `vec_dims vec_l1_distance vec_l2_distance vec_negative_inner_product vec_cosine_distance vec_l2_norm vec_from_text vec_as_text`）、8 个签名和 `ExtractVectorHelper`。
+
+- pb code 取自 go-tipb：VecAsText 5110、VecDims 5112、VecL1Distance 5113、VecL2Distance 5114、VecNegativeInnerProduct 5115、VecCosineDistance 5116、VecL2Norm 5117；VecFromText 为 0（Go 把 `setPbCode` 注释掉了）。
+- 距离的数值由 D01.6 已移植的 `VectorFloat32` 方法计算（逐位与 Go 一致的 FMA/NaN 规则见 D01.6）；结果为 NaN 时两种求值都返回 NULL。
+- 单参数的 VEC_DIMS、VEC_L2_NORM、VEC_FROM_TEXT、VEC_AS_TEXT：逐行版和向量版逐行做同样的事。VEC_L2_NORM 把 float32 元素的平方在 float64 中求和，连 +Inf 都到不了，所以它的 NaN → NULL 分支走不到。
+- **四个距离函数的逐行版和向量版**：逐行版在 `args[0]` 为 NULL 时不求 `args[1]`，向量版先求出两列再合并 NULL，所以函数体是 lazy（`args(VectorFloat32, VectorFloat32)`，和 LogicXor、位运算相同）。按负责人 2026-11-12 的规则只分析开关为 ON 时逐行版能否走到：能走到的地方是按行求值的执行器（例如 `UPDATE ... SET`）和不能向量化的表达式（#83 的第二类）。以下两处差异**用户可见**，已在 v8.5.8 集群上实测（#83）：
+  - `a` 为 NULL、`s` 是无效的向量文本时，`vec_l2_distance(a, vec_from_text(s))` 逐行求值时返回 NULL，向量求值时报 `Invalid vector text`（实测：开关 ON 的 SELECT 报错，OFF 返回 NULL；ON 时 `UPDATE ... SET` 走逐行版，得到 NULL。govec `vecfb` 400 条，其中 99 条两种模式不同）；
+  - 同一列中一行维度不同、另一行文本无效时，两种模式报出的错误不同（向量版先求完整列，所以先报参数的错误；`vec` 中 66 条）。
+- `ExtractVectorHelper`：Go 的 intest 断言在生产构建中不存在，这里也不检查。两个类型检查（列和常量都必须是 VECTOR 类型）在通过函数类构建的表达式上走不到（非 VECTOR 的参数会被包成 CAST）；"恰好一个列、一个常量"的计数能走到（两个列或两个常量），但被其后的 Option 检查重复覆盖（Rust 的 `?` 已返回 None），所以故意改坏它们回放看不出来（见 tasks T7 的反证）。
+- **NULL 的 VECTOR 常量**：`vec_l2_distance(a, NULL)` 中一个向量列加一个 NULL 常量时，Go 对 NULL datum 调 `GetVectorFloat32` 会 panic（`bad VectorFloat32 value header (len=0)`），SQL 可达：v8.5.8 上 `ORDER BY vec_l2_distance(a, NULL) LIMIT 1` 报 ERROR 1105，去掉 LIMIT 则正常（上游坑 #117）。Rust 照搬（同样 panic）；govec `vsh` 追加 300 条 NULL 常量的记录（`vshnull`）。
+
 ## 4. 偏离与豁免
 
 1. **向量化方法不移植**（N4 §3.3 M-EVAL）：`Column`/`CorrelatedColumn`/`Constant` 的 `VecEval*` 由向量驱动（RPN）取代。tracker 豁免（`expr_pending.go`）。例外：`Column.VecEvalInt/Real/String` 中会转换的分支（hybrid 列读成 int/string、FLOAT 列读成 real）已移植（D08.8 第 2 部分），RPN 按父签名读取的求值类型（`SigDrivers::arg_eval_type`）选择：转换（`RpnNode::ColumnConv`）、照搬，或者在编译时 panic——列的存储与读取类型不符、Go 也不转换的组合（例如 FLOAT 列读成 int），Go 的函数类不会构造这种调用，RPN 拒绝而不是让签名误读字节（Lucky 评审 #82）。
