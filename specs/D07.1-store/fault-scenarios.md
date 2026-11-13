@@ -158,7 +158,19 @@ client-rust#12 之后，tidb-rs 的 region 重试和锁等待都用 `Backoff::ti
 写入方分别成功提交 9905、2107、1889 次，没有错误。所有场景两边都没有错误结果，配对检查也没有违反。
 
 - **最长挂起都在预算之内**：最长 14.0 s，低于"20 s 加越过预算的那一次睡眠"。与 Go 相差不超过约 1 s。
-- **写入行多挂起 7 s**：这一轮写入行所在 region 的 leader 在 Go 看来不在被杀的 TiKV 上（Go 最长挂起 0.06 s），tidb-rs 却在这些读上挂起了 7.1 s。日志显示 tidb-rs 先把请求发往被杀的 store，等连接失败后才换 leader。推测与对照表的 P1 "store 存活检测"有关：Go 会把不可达的 store 尽快标记出来，fork 没有这一步。这一项列为待查，没有报错，也没有错误结果。
+- **写入行多挂起 7 s，原因在 tidb-rs 的 domain，不在 client-rust**（#136 用 debug 日志查过）：
+  - 写入行的 8 个 region，这一轮没有一个请求发往被杀的 store（store 1）：store 7 上 7307 次，store 2 上 889 次。
+  - 07:28:39.03–46.11 这 7.08 s 里，这些 region **一个请求都没有**，而且整个 tidb-rs 几乎停住：没有新的快照、TSO 或 coprocessor 请求。所以读并不是卡在重试上，而是在发出请求之前就被挡住了。
+  - 原因：
+    - 存 schema 版本的 meta region（132）的 leader 在被杀的 store 上，schema 同步循环读不到它，不再推进；
+    - 5 s 后（`max_staleness`，poc/domain/src/registry.rs:33）watchdog 注销了这个节点（日志 `deregistered from etcd why="not keeping up with the cluster"`，07:28:39.136，poc/domain/src/sync.rs:615）；
+    - 注销后，语句不再走 synced 模式，每条语句都要从 TiKV 读 schema 版本键来校验（`check_at`，meta/src/infoschema.rs:249），而这个键也在 region 132 上；
+    - 于是**所有语句**都要等 region 132 选出新 leader（07:28:46.109，kill 后约 11.7 s），46.21 重新注册。
+  - client-rust 在 region 132 上的行为与 Go 相当：
+    - 断开期间共 92 次尝试，每次都是连接被拒（立即失败），然后失效缓存、从 PD 重新加载；
+    - PD 在选举结束前一直返回旧 leader（store 1），所以重新加载拿回的仍是旧 leader，这一点 Go 也一样；
+    - 新 leader 在 PD 上出现后立即切过去。数据 region 上两边的最长挂起相同（tidb-rs 13.3 s，Go 13.2 s）。
+  - **结论**：这不是 client-rust 失效路径的缺陷。它是 tidb-rs domain 的可用性问题：meta region 的一次故障切换，被放大成全节点所有语句停顿。Go 在 schema lease（45 s）内照常用缓存的 schema 执行语句，不会因为一次 reload 慢了 5 s 就去逐条读 meta。建议在 domain（D06.2）里按 Go 的 SchemaValidator 处理：lease 内继续 admit；`max_staleness` 不应短于 lease。
 - **扫描那个错误的来源已确认**：带请求名的重试日志里，断开期间有 8 次 `retry_after_routing_error kv_check_txn_status: GrpcAPI(...)`，即清锁的 CheckTxnStatus 发往了被杀的 store 并重试。P0-1a 之前，这条路径用的是写死的 `DEFAULT_REGION_BACKOFF`，10 次后报 `Leader of region N is not found`。这与之前的推断一致。
 - **ServerIsBusy**：限 CPU 时 TiKV 仍然没有返回 ServerIsBusy。所以"排除在预算外"这一点只有 client-rust 的单测覆盖（60 次 ServerIsBusy 后读成功）。
 
