@@ -118,7 +118,10 @@ class Writer:
     defaults (tidb_enable_1pc, tidb_enable_async_commit).
 
     For every row it records (time the commit returned, value). A read that started after a
-    commit returned must see at least that value; the check is in `check`.
+    commit returned must see at least that value; the check is in `check`. A scan must also see
+    a two-row commit atomically: if one row shows a value written together with another row,
+    that other row must show at least the same value (`check_pairs`), which catches a snapshot
+    that sees a committed primary but misses its secondary.
     """
 
     def __init__(self, endpoint, stats):
@@ -128,6 +131,7 @@ class Writer:
         self.commits = {r: ([0.0], [0]) for r in range(1, COUNTER_ROWS + 1)}  # times, values
         self.seq = 0
         self.max_attempted = 0
+        self.pair_of = {}  # value -> the two rows written with it in one transaction
 
     def floor(self, row, started):
         """The value of the last commit to `row` that returned before `started`."""
@@ -144,6 +148,19 @@ class Writer:
             ceiling = self.max_attempted
         return self.floor(row, started) <= value <= ceiling
 
+    def check_pairs(self, rows):
+        """For a scan result [(id, v), ...]: every two-row commit is seen whole or not at all."""
+        seen = {int(i): int(v) for i, v in rows if v is not None}
+        with self.lock:
+            for row, value in seen.items():
+                pair = self.pair_of.get(value)
+                if pair is None:
+                    continue
+                partner = pair[1] if row == pair[0] else pair[0]
+                if seen.get(partner, -1) < value:
+                    return False
+        return True
+
     def run(self, stop):
         conn = None
         last_ok = time.monotonic()
@@ -156,6 +173,8 @@ class Writer:
                 self.seq += 1
                 v = self.seq
                 self.max_attempted = v
+                if len(rows) == 2:
+                    self.pair_of[v] = tuple(rows)
             ids = ",".join(map(str, rows))
             t0 = time.monotonic()
             try:
@@ -198,7 +217,8 @@ def write_worker(side, endpoint, shape, writer, stats, stop):
                 rows = cur.fetchall()
             now = time.monotonic()
             if shape == "w-scan":
-                wrong = len(rows) != COUNTER_ROWS or not all(writer.check(int(i), v, t0) for i, v in rows)
+                wrong = (len(rows) != COUNTER_ROWS or not all(writer.check(int(i), v, t0) for i, v in rows)
+                         or not writer.check_pairs(rows))
             else:
                 wrong = len(rows) != 1 or not writer.check(r, rows[0][0], t0)
             if wrong:

@@ -66,7 +66,7 @@ Both sides read the rows (one thread per side and shape):
 | `w-point-tso` | `select max(v) … where id = ?` |
 | `w-scan` | `select id, v … order by id` (all 8 rows) |
 
-**Rule:** a read that started after a commit returned must see at least that commit's value. It also must not see more than the largest value attempted. A write whose outcome is unknown (an error) does not raise the floor. A violation counts as a wrong result. The first 20 per scenario are printed as `WRONG:` and saved as `wrong_samples`. `transfer_leader` also moves the leaders of the 8 counter regions.
+**Rule:** a read that started after a commit returned must see at least that commit's value. It also must not see more than the largest value attempted. A scan must also see each two-row commit whole: if one row shows a value written together with another row, that other row must show at least the same value. This catches a snapshot that sees a committed primary but misses its secondary (the lock-resolution case R1–R7 changed). A write whose outcome is unknown (an error) does not raise the floor. A violation counts as a wrong result. The first 20 per scenario are printed as `WRONG:` and saved as `wrong_samples`. `transfer_leader` also moves the leaders of the 8 counter regions.
 
 ## Scenarios
 
