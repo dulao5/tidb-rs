@@ -9,6 +9,8 @@
 - [x] T6a 第 2 部分 2a：N4 §5 门禁（`checked` 形式，通过）、`#[eval_fn]`、两种驱动、RPN、ScalarFunction 规划侧方法、baseBuiltinFunc 字段
   - 验收：`scalar_function.rs` 中不再有临时桩（`part2_stub!` 全部删除，Lucky 评审 #73）——已完成
 - [x] T6b 第 2 部分 2b：EvaluatorSuite、chunk_executor、VecEvalBool/EvalExpr（D08.8 2b-3c）；NewFunction*（D08.8 2b-3a，#95）
+- [x] T6b2 `EvaluateExprWithNull` 系列与 `isColumnInOperand`（随 D08.2 第 2 部分收尾，D08.2 spec §4 第 8 条）、`StringifyExpressionsWithCtx`（单元测试）；converge D08.1 296/348
+- [ ] T6f 其余 43 个（交接）：`Column`/`CorrelatedColumn`/`Constant` 的 `VecEval*`（M-EVAL，豁免）、`Hash64`/`Equals`（EXC.B，豁免）；`allocSelSlice` 等 4 个与 `builtin_vectorized.go` 的列池（M-POOL，向量驱动不用；`vecEvalIntByRows`/`vecEvalStringByRows` 随第一个用到它们的签名）、`vectorized.go` `genVecFromConstExpr`（随用到它的签名）；`WithTableInfo` 等 4 个 `BuildOption` 与 `ParseSimpleExpr`（D09.2）；`NewValuesFunc`、`Assignment`（写路径 INSERT ... ON DUPLICATE / UPDATE）；`Args2Expressions4Test`（测试辅助）；`wrapEvalAssert`、`assertionEvalContext`（intest 构建）
 - [ ] T6c 随第一个 `funcs` 函数族（D08.3–D08.9）完成 T6b 留下的验收项（第一个函数族是 D08.4 比较，结果见 specs/D08.4-compare/spec.md §3.4：(a) 比较没有出错行；(b) 比较签名无状态，留给 D08.6 LIKE/REGEXP；(c) fold 1 已覆盖，TryFold 的 warning 分支由 D08.5 第 1 批的 `artryfold` 记录覆盖；(a) 由 D08.5 第 1 批的 checked 算术（PlusInt 等）覆盖；(d) DisableParseJSONFlag4Expr 已覆盖）：
   - 验收：采用 `checked` 的函数族满足 spec §3.4 三条，govec 含"NULL 下藏着出错值"和"第一个出错行不在第 0 行"的记录
   - 验收：第一个带状态的签名按 spec §3.5 对照 Go 的 `Clone`，govec 有"克隆后分别求值"的操作——已完成（D08.5 第 4 批：RAND，`SigExtra::Rand` 与 Go 一样让克隆共用生成器；govec `mathclone` 800 条，反证 199 条不一致）

@@ -46,7 +46,7 @@
 
 ## 第 2b-2b-ii 部分（完成）
 
-CAST 到 JSON、JSON ARRAY、VECTOR（spec §3.6），`WrapWithCastAsJSON/VectorFloat32`、`ConvertJSON2Tp`；`cast_not_ported` 与 `newBaseBuiltinFuncWithTp` 的桩分支已删除；Lucky 在 #91 的 3 条已处理（spec §3.5 的表、§4 第 3 条、`TimeAs*` 的说明）。converge：D08.8 265/266（只剩 `inCastContext.String`，规划器的会话键，D09）。
+CAST 到 JSON、JSON ARRAY、VECTOR（spec §3.6），`WrapWithCastAsJSON/VectorFloat32`、`ConvertJSON2Tp`；`cast_not_ported` 与 `newBaseBuiltinFuncWithTp` 的桩分支已删除；Lucky 在 #91 的 3 条已处理（spec §3.5 的表、§4 第 3 条、`TimeAs*` 的说明）。converge：D08.8 265/266（只剩 `inCastContext.String`，规划器的会话键，D09）。之后随 D08.2 第 2 部分收尾移植 `inCastContext.String`（v8.5.8 中没有任何代码设置或读取这个键；单元测试），D08.8 266/266。
 
 **留给以后的覆盖**（Lucky 评审 #91）：值的 fsp 与声明的 fsp 不同的最常见来源是函数结果，例如 `TIME(varchar)`、`ADDTIME`、`SEC_TO_TIME`；移植这些函数（D08.7）时，在 govec 中加上以它们为参数的 CAST 记录（`DurationAsTime`、`DurationAsDuration`、`DurationAsString` 等两种模式各自跟随 Go）。
 

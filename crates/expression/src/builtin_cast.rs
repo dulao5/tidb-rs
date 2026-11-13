@@ -2645,6 +2645,23 @@ pub(crate) fn type_after_real_wrap(ev: &dyn EvalContext, arg: &ExprRef) -> Field
 
 // ---------------------------------------------------------------- building CAST
 
+/// inCastContext is session key type that indicates whether executing in special cast
+/// context that negative unsigned num will be zero. In v8.5.8 nothing sets or reads the
+/// key (`BuildCastFunction4Union` passes `inUnion` instead).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InCastContext(pub i32);
+
+impl std::fmt::Display for InCastContext {
+    // go: inCastContext.String L1
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("__cast_ctx")
+    }
+}
+
+/// inUnionCastContext is session key value that indicates whether executing in union cast
+/// context. @see BuildCastFunction4Union
+pub const inUnionCastContext: InCastContext = InCastContext(0);
+
 /// CanImplicitEvalInt represents the builtin functions that have an implicit path to
 /// evaluate as integer, regardless of the type that type inference decides it to be
 /// (MySQL's `dayname()`).

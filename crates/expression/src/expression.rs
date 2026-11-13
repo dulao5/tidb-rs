@@ -11,8 +11,8 @@
 //! correlated columns (spec §3.2). `Ok(None)` is Go's `isNull == true`.
 //!
 //! Part 1 ports the node types and the functions of this file that do not build scalar
-//! functions; `ComposeCNFCondition`, `EvaluateExprWithNull`, `wrapWithIsTrue`, the
-//! `VecEvalBool` family and the other builders come with part 2 (spec §1).
+//! functions; `ComposeCNFCondition`, `wrapWithIsTrue`, the `VecEvalBool` family and the
+//! other builders come with part 2 (spec §1), `EvaluateExprWithNull` with D08.2 part 2.
 
 #![allow(non_upper_case_globals)]
 
@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use tidb_base::Error;
+use tidb_base::errors::RedactLogDisable;
 use tidb_base::mysql;
 use tidb_chunk::Row;
 use tidb_model::{ColumnInfo, StatePublic, TableInfo};
@@ -30,6 +31,7 @@ use tidb_sessionctx::exprctx::{BuildContextRef, ctx_with_handle_truncate_err_lev
 use tidb_types::datum::{Datum, KindBinaryLiteral};
 use tidb_types::etc::FieldType;
 use tidb_types::field_name::FieldName;
+use tidb_types::field_type::new_field_type;
 use tidb_types::json::BinaryJSON;
 use tidb_types::mydecimal::MyDecimal;
 use tidb_types::time::{Duration, Time};
@@ -38,8 +40,11 @@ use tidb_types::vector::VectorFloat32;
 use crate::collation::{Coercibility, Repertoire};
 use crate::column::{Column, CorrelatedColumn};
 use crate::constant::Constant;
+use crate::constant::{new_one, new_zero};
+use crate::constant_fold::{fold_constant, maybe_over_optimized4_plan_cache};
+use crate::context::BuildContext;
 use crate::context::{EvalContext, ParamValues, type_ctx};
-use crate::scalar_function::{ScalarFunction, ast_func};
+use crate::scalar_function::{ScalarFunction, ast_func, new_function};
 use crate::schema::{KeyInfo, Schema, new_schema};
 
 /// Hash code flag of a constant (`constantFlag`).
@@ -537,6 +542,11 @@ pub fn cnf_exprs_shallow(e: &CNFExprs) -> CNFExprs {
     e.clone()
 }
 
+// go: isColumnInOperand L1
+fn is_column_in_operand(c: &Column) -> bool {
+    c.in_operand
+}
+
 /// IsEQCondFromIn checks if an expression is equal condition converted from `[not] in (subq)`.
 // go: IsEQCondFromIn L1
 pub fn is_eq_cond_from_in(expr: &Expr) -> bool {
@@ -550,7 +560,7 @@ pub fn is_eq_cond_from_in(expr: &Expr) -> bool {
     for arg in sf.get_args() {
         extract_columns_into(arg, &mut cols);
     }
-    cols.iter().any(|c| c.in_operand)
+    cols.iter().any(|c| is_column_in_operand(c))
 }
 
 /// The `ExtractColumns` walk used by `IsEQCondFromIn` (`util.go`, block D08.12).
@@ -1299,4 +1309,158 @@ pub fn split_cnf_items(on_expr: &ExprRef) -> Vec<ExprRef> {
 // go: SplitDNFItems L1
 pub fn split_dnf_items(on_expr: &ExprRef) -> Vec<ExprRef> {
     split_normal_form_items(on_expr, ast_func::LogicOr)
+}
+
+/// EvaluateExprWithNull sets columns in schema as null and calculate the final result of
+/// the scalar function. If the Expression is a non-constant value, it means the result is
+/// unknown.
+// go: EvaluateExprWithNull L1
+pub fn evaluate_expr_with_null(
+    ctx: &dyn BuildContext,
+    schema: &Schema,
+    expr: &ExprRef,
+) -> Result<ExprRef, Error> {
+    if maybe_over_optimized4_plan_cache(ctx, std::slice::from_ref(expr)) {
+        let s = expr.string_with_ctx(&*ctx.get_eval_ctx(), RedactLogDisable);
+        ctx.set_skip_plan_cache(&format!(
+            "{} affects null check",
+            String::from_utf8_lossy(&s)
+        ));
+    }
+    if ctx.is_in_null_reject_check() {
+        let (res, _) = evaluate_expr_with_null_in_null_reject_check(ctx, schema, expr)?;
+        return Ok(res);
+    }
+    evaluate_expr_with_null_inner(ctx, schema, expr)
+}
+
+/// `&Constant{Value: types.Datum{}, RetType: types.NewFieldType(mysql.TypeNull)}`: the NULL
+/// a column of the schema becomes.
+// glue: Constant struct literal of evaluateExprWithNull*
+fn null_constant_for_column() -> ExprRef {
+    Expr::Constant(Constant::new(
+        Datum::default(),
+        new_field_type(mysql::TypeNull),
+    ))
+    .into_ref()
+}
+
+// go: evaluateExprWithNull L1
+fn evaluate_expr_with_null_inner(
+    ctx: &dyn BuildContext,
+    schema: &Schema,
+    expr: &ExprRef,
+) -> Result<ExprRef, Error> {
+    match &**expr {
+        Expr::ScalarFunction(x) => {
+            let mut args = Vec::with_capacity(x.get_args().len());
+            for arg in x.get_args() {
+                args.push(evaluate_expr_with_null(ctx, schema, arg)?);
+            }
+            new_function(ctx, &x.func_name.l, x.ret_type().clone(), args)
+        }
+        Expr::Column(x) => {
+            if !schema.contains(x) {
+                return Ok(expr.clone());
+            }
+            Ok(null_constant_for_column())
+        }
+        Expr::Constant(x) if x.deferred_expr.is_some() => Ok(fold_constant(ctx, expr.clone())),
+        _ => Ok(expr.clone()),
+    }
+}
+
+/// evaluateExprWithNullInNullRejectCheck sets columns in schema as null and calculate the
+/// final result of the scalar function. If the Expression is a non-constant value, it means
+/// the result is unknown. The returned bool values indicates whether the value is influenced
+/// by the Null Constant transformed from schema column when the value is Null Constant.
+// go: evaluateExprWithNullInNullRejectCheck L1
+fn evaluate_expr_with_null_in_null_reject_check(
+    ctx: &dyn BuildContext,
+    schema: &Schema,
+    expr: &ExprRef,
+) -> Result<(ExprRef, bool), Error> {
+    match &**expr {
+        Expr::ScalarFunction(x) => {
+            let n = x.get_args().len();
+            let mut args = Vec::with_capacity(n);
+            let mut null_from_sets = Vec::with_capacity(n);
+            for arg in x.get_args() {
+                let (res, null_from_set) =
+                    evaluate_expr_with_null_in_null_reject_check(ctx, schema, arg)?;
+                args.push(res);
+                null_from_sets.push(null_from_set);
+            }
+            let mut all_args_null_from_set = true;
+            for i in 0..args.len() {
+                if let Some(cons) = args[i].as_constant()
+                    && cons.value.is_null()
+                    && !null_from_sets[i]
+                {
+                    all_args_null_from_set = false;
+                    break;
+                }
+            }
+
+            // If one of the args of `AND` and `OR` are Null Constant from the column schema,
+            // and the another argument is Constant, then we should keep it. Otherwise, we
+            // shouldn't let Null Constant which affected by the column schema participate in
+            // computing in `And` and `OR` due to the result of `AND` and `OR` are uncertain
+            // if one of the arguments is NULL.
+            if x.func_name.l == ast_func::LogicAnd || x.func_name.l == ast_func::LogicOr {
+                let has_non_constant_arg = args.iter().any(|arg| arg.as_constant().is_none());
+                if has_non_constant_arg {
+                    for i in 0..args.len() {
+                        if let Some(cons) = args[i].as_constant()
+                            && cons.value.is_null()
+                            && null_from_sets[i]
+                        {
+                            if x.func_name.l == ast_func::LogicAnd {
+                                args[i] = Expr::Constant(new_one()).into_ref();
+                                break;
+                            }
+                            if x.func_name.l == ast_func::LogicOr {
+                                args[i] = Expr::Constant(new_zero()).into_ref();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let c = new_function(ctx, &x.func_name.l, x.ret_type().clone(), args)?;
+            // If the return expr is Null Constant, and all the Null Constant arguments are
+            // affected by column schema, then we think the result Null Constant is also
+            // affected by the column schema
+            let null_from_set = matches!(c.as_constant(), Some(cons) if cons.value.is_null())
+                && all_args_null_from_set;
+            Ok((c, null_from_set))
+        }
+        Expr::Column(x) => {
+            if !schema.contains(x) {
+                return Ok((expr.clone(), false));
+            }
+            Ok((null_constant_for_column(), true))
+        }
+        Expr::Constant(x) if x.deferred_expr.is_some() => {
+            Ok((fold_constant(ctx, expr.clone()), false))
+        }
+        _ => Ok((expr.clone(), false)),
+    }
+}
+
+/// StringifyExpressionsWithCtx turns a slice of expressions into string
+// go: StringifyExpressionsWithCtx L1
+pub fn stringify_expressions_with_ctx(ctx: &dyn EvalContext, exprs: &[ExprRef]) -> Vec<u8> {
+    let mut sb = Vec::new();
+    sb.push(b'[');
+    for (i, expr) in exprs.iter().enumerate() {
+        sb.extend_from_slice(&expr.string_with_ctx(ctx, RedactLogDisable));
+
+        if i != exprs.len() - 1 {
+            sb.push(b' ');
+        }
+    }
+    sb.push(b']');
+    sb
 }

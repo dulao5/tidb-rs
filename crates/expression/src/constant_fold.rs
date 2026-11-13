@@ -13,10 +13,11 @@ use tidb_chunk::Row;
 use tidb_types::datum::Datum;
 
 use crate::ast_funcs as ast;
-use crate::constant::{Constant, new_zero};
-use crate::context::{BuildContext, EvalContext};
+use crate::constant::{Constant, new_one, new_zero};
+use crate::context::{BuildContext, EvalContext, type_ctx};
 use crate::expression::{EvalState, Expr, ExprRef};
 use crate::function_traits::unFoldableFunctions;
+use crate::scalar_function::new_function_base;
 
 /// FoldConstant does constant folding optimization on an expression excluding deferred
 /// ones.
@@ -204,8 +205,8 @@ fn case_when_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) 
 /// A special folding function of [`special_fold_handler`].
 type FoldHandler = fn(&dyn BuildContext, &ExprRef) -> (ExprRef, bool);
 
-/// `specialFoldHandler[name]`.
-// glue: the specialFoldHandler map of constant_fold.go (init)
+/// `specialFoldHandler[name]`: the map `init` fills, as a `match` on the name.
+// go: init L2 (the package map specialFoldHandler is a match)
 fn special_fold_handler(name: &str) -> Option<FoldHandler> {
     Some(match name {
         ast::If => if_fold_handler,
@@ -248,10 +249,10 @@ fn contain_mutable_const(ctx: &dyn EvalContext, exprs: &[ExprRef]) -> bool {
     false
 }
 
-/// The null-reject path builds a dummy call with `NewFunctionBase`, which comes with D08.1
-/// part 2b: until then that path keeps the expression (what Go does when `NewFunctionBase`
-/// fails; temporary stub, constitution art. 4.3).
-// go: foldConstant L2 (no extension functions in tidb-rs; the InNullRejectCheck dummy call is a temporary stub until NewFunctionBase, D08.1 2b)
+/// tidb-rs has no extension functions (`extensionFuncSig`). The constants of the null-reject
+/// branch get a copy of the node's type; Go shares the node's `*FieldType` (M-FT: nothing in
+/// v8.5.8 changes it afterwards, D08.2 spec §4 item 8).
+// go: foldConstant L2 (no extension functions in tidb-rs; see the doc comment)
 #[allow(clippy::collapsible_if)]
 fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
     match &**expr {
@@ -267,14 +268,16 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
 
             let args = x.get_args();
             let mut has_null_arg = false;
+            let mut arg_is_const = vec![false; args.len()];
             let mut all_const_arg = true;
             let mut is_deferred_const = false;
-            for arg in args {
+            for (i, arg) in args.iter().enumerate() {
                 match arg.as_constant() {
                     Some(c) => {
                         is_deferred_const = is_deferred_const
                             || c.deferred_expr.is_some()
                             || c.param_marker.is_some();
+                        arg_is_const[i] = true;
                         has_null_arg = has_null_arg || c.value.is_null();
                     }
                     None => all_const_arg = false,
@@ -290,7 +293,46 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
                 {
                     return (expr.clone(), is_deferred_const);
                 }
-                // NewFunctionBase(ctx, x.FuncName.L, ..., constArgs...) is not ported yet.
+                let const_args: Vec<ExprRef> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, arg)| {
+                        if arg_is_const[i] {
+                            arg.clone()
+                        } else {
+                            Expr::Constant(new_one()).into_ref()
+                        }
+                    })
+                    .collect();
+                let ectx = ctx.get_eval_ctx();
+                let dummy_scalar_func = match new_function_base(
+                    ctx,
+                    &x.func_name.l,
+                    expr.get_type(&*ectx).into_owned(),
+                    const_args,
+                ) {
+                    Ok(f) => f,
+                    Err(_) => return (expr.clone(), is_deferred_const),
+                };
+                let value = match dummy_scalar_func.eval(&*ectx, &EvalState::new(), Row::default())
+                {
+                    Ok(v) => v,
+                    Err(_) => return (expr.clone(), is_deferred_const),
+                };
+                if value.is_null() {
+                    // This Constant is created to compose the result expression of
+                    // EvaluateExprWithNull when InNullRejectCheck is true. We just check
+                    // whether the result expression is null or false and then let it die.
+                    // Basically, the constant is used once briefly and will not be retained
+                    // for a long time. Hence setting DeferredExpr of Constant to nil is ok.
+                    return (new_const(value, x.ret_type().clone(), None), false);
+                }
+                let (is_true, err) = value.to_bool(&type_ctx(&*ectx));
+                if err.is_ok() && is_true == 0 {
+                    // This Constant is created to compose the result expression of
+                    // EvaluateExprWithNull when InNullRejectCheck is true (see above).
+                    return (new_const(value, x.ret_type().clone(), None), false);
+                }
                 return (expr.clone(), is_deferred_const);
             }
             let ectx = ctx.get_eval_ctx();
