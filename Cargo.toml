@@ -140,7 +140,9 @@ tidb-expression-macros = { path = "crates/expression/macros" }
 # waits, per-error curves, ServerIsBusy excluded (P0-1a, P0-1b); the longest-slept error kind
 # when a budget runs out; client-go's per-request RPC timeouts and deadlines, and
 # `tikv_client_read_timeout` (P0-2); a broken TSO stream is reopened and its requests resent
-# (P0-4).
+# (P0-4); and client-go's store liveness: after a connection-level failure a gRPC health
+# check (1 s timeout), an unreachable store skipped as a target (also by the coprocessor
+# and scanner) and probed every second until it recovers (specs/D07.1-store/fault-scenarios.md).
 tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "370cff42937d9b3c529bd9845ae990fb24c261a1", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 bytes = "1.11"
