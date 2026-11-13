@@ -1,0 +1,82 @@
+name: Expression gate (N4 §5)
+
+# The N4 §5 expression performance gate on amd64 (D08.1 plan.md "性能门禁的测量规则": after
+# each change to the drivers or the macro, confirm on the amd64 CI runner). Go TiDB v8.5.8
+# and tidb-rs run alternately in several processes on the same runner; the minimum over
+# processes is compared (scripts/eval-gate.sh, scripts/eval_gate_summary.py). The table is
+# written to the job summary, the raw outputs are uploaded.
+#
+# Manual: gh workflow run eval-gate.yml --ref <branch> [-f rounds=5] (once the workflow is on
+# main). It also runs on a push that changes the gate, the drivers or the macro.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Processes per side
+        default: "5"
+  push:
+    paths:
+      - crates/expression/benches/**
+      # The drivers, the macro and the hot accessors they call (plan.md: re-confirm on amd64
+      # after each change to the drivers or the macro).
+      - crates/expression/macros/**
+      - crates/expression/src/eval/**
+      - crates/chunk/src/column.rs
+      - crates/types/src/vector*.rs
+      - scripts/eval-gate.sh
+      - scripts/eval_gate_summary.py
+      - .github/workflows/eval-gate.yml
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # As in ci.yml: grpcio-sys's bundled gRPC needs <cstdint> on GCC 13.
+  CXXFLAGS: -include cstdint
+
+jobs:
+  gate:
+    name: N4 §5 gate (ubuntu-24.04, amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: pingcap/tidb
+          ref: v8.5.8
+          path: tidb
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tidb/go.mod
+          cache-dependency-path: tidb/go.sum
+      # Same native build dependencies as ci.yml (the workspace's vendored TiKV crates).
+      - name: Install system dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=5 update || echo "::warning::apt-get update failed"
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            build-essential cmake pkg-config libssl-dev zlib1g-dev protobuf-compiler \
+            || echo "::warning::apt-get install failed"
+          if ! command -v protoc >/dev/null; then
+            v=29.3
+            curl -fsSL --retry 5 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-linux-x86_64.zip"
+            echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+          fi
+      # Installs the toolchain pinned in rust-toolchain.toml.
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Gate
+        run: TIDB_SRC="$GITHUB_WORKSPACE/tidb" scripts/eval-gate.sh -n "${{ inputs.rounds || '5' }}" -o gate-amd64
+      - name: Job summary
+        if: always()
+        run: cat gate-amd64/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-gate-amd64
+          path: |
+            gate-amd64/*.txt
+            gate-amd64/summary.md

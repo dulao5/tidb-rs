@@ -303,3 +303,137 @@ fn arg_eval_types_of_lazy_bodies() {
     // A strict body: its parameters.
     assert_eq!(ADD_OR_NULL.arg_eval_type(1), Some(ETInt));
 }
+
+// An argument whose evaluation fails: tells whether a body evaluated it.
+#[eval_fn(VectorFloat32)]
+fn vboom(
+    _ctx: &dyn EvalContext,
+    _f: &impl SigView,
+    _a: i64,
+) -> Result<Option<tidb_types::vector::VectorFloat32<'static>>, Error> {
+    Err(Error::plain("args[1] evaluated"))
+}
+
+static VBOOM_SIG: SigDesc = SigDesc {
+    name: "vboom",
+    pb_code: 0,
+    vectorized: true,
+    drivers: VBOOM,
+    args_fallback: tidb_expression::eval::ArgsFallback::None,
+};
+
+/// `Args::vector_float32_pair` (D08.1 T7a): both values at once, borrowed from the argument
+/// columns in the vector driver and in `FirstColArgs`; the second argument is evaluated only
+/// when the first is not NULL (Go's row versions of the distance functions).
+#[test]
+fn vector_float32_pair_lends_both() {
+    use tidb_expression::eval::rt::{FirstColArgs, RowArgs, VecArgs};
+    use tidb_types::vector::parse_vector_float32;
+
+    let vt = new_field_type(mysql::TypeTiDBVectorFloat32);
+    let int = new_field_type(mysql::TypeLonglong);
+    // Rows: (v, w), (NULL, w), (v, NULL).
+    let v = parse_vector_float32(b"[1,2,3]").unwrap();
+    let w = parse_vector_float32(b"[4,5,6]").unwrap();
+    let mut chk = new_chunk_with_capacity(&[vt.clone(), vt.clone(), int.clone()], 3);
+    for (a, b) in [(Some(&v), Some(&w)), (None, Some(&w)), (Some(&v), None)] {
+        match a {
+            Some(x) => chk.append_vector_float32(0, x),
+            None => chk.append_null(0),
+        }
+        match b {
+            Some(x) => chk.append_vector_float32(1, x),
+            None => chk.append_null(1),
+        }
+        chk.append_int64(2, 0);
+    }
+    let ctx = new_eval_context(vec![]);
+    let ctx: &dyn EvalContext = &*ctx;
+    let st = EvalState::new();
+    let real = new_field_type(mysql::TypeDouble);
+    let f = BuiltinFunc::new(
+        &VBOOM_SIG,
+        vec![col(0, &vt), col(1, &vt)],
+        real.clone(),
+        "utf8mb4",
+        "utf8mb4_bin",
+    );
+
+    // Vector driver: both borrowed from the columns; NULL in either is NULL.
+    let (c0, c1) = (chk.column(0), chk.column(1));
+    let cols = [c0, c1];
+    let mut a = VecArgs::new(&f, &cols, 0);
+    let (x, y) = a.vector_float32_pair(ctx, 0, 1).unwrap().unwrap();
+    assert_eq!(x.zero_copy_serialize().as_ptr(), c0.get_bytes(0).as_ptr());
+    assert_eq!(y.zero_copy_serialize().as_ptr(), c1.get_bytes(0).as_ptr());
+    assert_eq!(
+        (x.elements().to_vec(), y.elements().to_vec()),
+        (vec![1., 2., 3.], vec![4., 5., 6.])
+    );
+    for i in [1, 2] {
+        assert!(
+            VecArgs::new(&f, &cols, i)
+                .vector_float32_pair(ctx, 0, 1)
+                .unwrap()
+                .is_none()
+        );
+    }
+    // The order matters only for which one is read first; (1, 0) lends them swapped.
+    let mut a = VecArgs::new(&f, &cols, 0);
+    let (x, y) = a.vector_float32_pair(ctx, 1, 0).unwrap().unwrap();
+    assert_eq!((x.elements().get(0), y.elements().get(0)), (4., 1.));
+
+    // Row driver: args[1] (an error) is evaluated only when args[0] is not NULL.
+    let g = BuiltinFunc::new(
+        &VBOOM_SIG,
+        vec![
+            col(0, &vt),
+            func(&VBOOM_SIG, vec![col(2, &int)], vt.clone()),
+        ],
+        real.clone(),
+        "utf8mb4",
+        "utf8mb4_bin",
+    );
+    let pair = |i: usize| {
+        RowArgs::new(&g, &st, chk.get_row(i))
+            .vector_float32_pair(ctx, 0, 1)
+            .map(|p| p.map(|(x, y)| (x.elements().to_vec(), y.elements().to_vec())))
+    };
+    assert!(
+        pair(1).unwrap().is_none(),
+        "args[0] NULL: args[1] not evaluated"
+    );
+    assert!(
+        pair(0).is_err() && pair(2).is_err(),
+        "args[0] not NULL: args[1] evaluated"
+    );
+    let h = BuiltinFunc::new(
+        &VBOOM_SIG,
+        vec![col(0, &vt), col(1, &vt)],
+        real.clone(),
+        "utf8mb4",
+        "utf8mb4_bin",
+    );
+    let pair = |i: usize| {
+        RowArgs::new(&h, &st, chk.get_row(i))
+            .vector_float32_pair(ctx, 0, 1)
+            .unwrap()
+            .map(|(x, y)| (x.elements().to_vec(), y.elements().to_vec()))
+    };
+    assert_eq!(pair(0), Some((vec![1., 2., 3.], vec![4., 5., 6.])));
+    assert_eq!((pair(1), pair(2)), (None, None));
+
+    // FirstColArgs (args[0] from its evaluated column, the rest on the row).
+    for (i, want) in [(0, Err(())), (1, Ok(true)), (2, Err(()))] {
+        let mut a = FirstColArgs::new(&g, &st, chk.get_row(i), c0, i);
+        let got = a
+            .vector_float32_pair(ctx, 0, 1)
+            .map(|p| p.is_none())
+            .map_err(|_| ());
+        assert_eq!(got, want, "row {i}");
+    }
+    let mut a = FirstColArgs::new(&h, &st, chk.get_row(0), c0, 0);
+    let (x, y) = a.vector_float32_pair(ctx, 0, 1).unwrap().unwrap();
+    assert_eq!(x.zero_copy_serialize().as_ptr(), c0.get_bytes(0).as_ptr());
+    assert_eq!(y.elements().get(2), 6.);
+}

@@ -644,17 +644,18 @@ impl Column {
         Ok(Some(row.get_json(self.index as usize).into_owned()))
     }
 
-    /// EvalVectorFloat32 returns VectorFloat32 representation of Column.
+    /// EvalVectorFloat32 returns VectorFloat32 representation of Column. The value borrows
+    /// from the row, as Go's (`row.GetVectorFloat32` is a zero-copy view).
     // go: Column.EvalVectorFloat32 L1
-    pub fn eval_vector_float32(
+    pub fn eval_vector_float32<'r>(
         &self,
         _ctx: &dyn EvalContext,
-        row: Row<'_>,
-    ) -> Result<Option<VectorFloat32<'static>>, Error> {
+        row: Row<'r>,
+    ) -> Result<Option<VectorFloat32<'r>>, Error> {
         if row.is_null(self.index as usize) {
             return Ok(None);
         }
-        Ok(Some(row.get_vector_float32(self.index as usize).clone()))
+        Ok(Some(row.get_vector_float32(self.index as usize)))
     }
 
     /// IsCorrelated implements Expression interface.

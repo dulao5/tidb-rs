@@ -185,17 +185,18 @@ impl<'a> JsonView<'a> {
     }
 }
 
-/// The vectors of an argument column.
-pub struct VectorView<'a>(&'a Column);
+/// The vectors of an argument column: its offsets and data are taken once per chunk.
+#[derive(Clone, Copy)]
+pub struct VectorView<'a>(tidb_chunk::column::VarLenView<'a>);
 
 impl<'a> VectorView<'a> {
     /// The view of `col`.
     #[inline(always)]
     // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn new(col: &'a Column, _n: usize) -> Self {
-        VectorView(col)
+        VectorView(col.var_len_view())
     }
-    /// Row `i` (borrowed from the column).
+    /// Row `i` (borrowed from the column; Go `GetVectorFloat32(i)`).
     #[inline(always)]
     // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn get(&self, i: usize) -> VectorFloat32<'a> {
@@ -465,6 +466,22 @@ impl Args for RowArgs<'_> {
     ) -> Result<Option<VectorFloat32<'_>>, Error> {
         self.f.args[i].eval_vector_float32(ctx, self.st, self.row)
     }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_pair(
+        &mut self,
+        ctx: &dyn EvalContext,
+        i: usize,
+        j: usize,
+    ) -> Result<Option<(VectorFloat32<'_>, VectorFloat32<'_>)>, Error> {
+        let Some(a) = self.f.args[i].eval_vector_float32(ctx, self.st, self.row)? else {
+            return Ok(None);
+        };
+        let Some(b) = self.f.args[j].eval_vector_float32(ctx, self.st, self.row)? else {
+            return Ok(None);
+        };
+        Ok(Some((a, b)))
+    }
 }
 
 /// [`Args`] of [`ArgsFallback::OwnArgs`](super::ArgsFallback) (INTERVAL): `args[0]` is read
@@ -577,6 +594,36 @@ impl Args for FirstColArgs<'_> {
         ctx: &dyn EvalContext,
         i: usize,
     ) -> Result<Option<VectorFloat32<'_>>, Error> {
+        self.vector_float32_at(ctx, i)
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_pair(
+        &mut self,
+        ctx: &dyn EvalContext,
+        i: usize,
+        j: usize,
+    ) -> Result<Option<(VectorFloat32<'_>, VectorFloat32<'_>)>, Error> {
+        let Some(a) = self.vector_float32_at(ctx, i)? else {
+            return Ok(None);
+        };
+        let Some(b) = self.vector_float32_at(ctx, j)? else {
+            return Ok(None);
+        };
+        Ok(Some((a, b)))
+    }
+}
+
+impl<'a> FirstColArgs<'a> {
+    /// `args[i]` as a vector: row `i` of `col0` for `args[0]` (borrowed), the others evaluated
+    /// on the row. Takes `&self`, so two values can be held at once.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_at(
+        &self,
+        ctx: &dyn EvalContext,
+        i: usize,
+    ) -> Result<Option<VectorFloat32<'a>>, Error> {
         if i == 0 {
             let c = self.col0;
             return Ok((!c.is_null(self.i)).then(|| c.get_vector_float32(self.i)));
@@ -588,6 +635,9 @@ impl Args for FirstColArgs<'_> {
 /// [`Args`] of the vector driver: reads row `i` of the evaluated argument columns.
 pub struct VecArgs<'a> {
     cols: &'a [&'a Column],
+    /// Per-chunk views of the VECTOR arguments (`None` for the others), see
+    /// [`VecArgs::with_vectors`].
+    vectors: &'a [Option<VectorView<'a>>],
     i: usize,
 }
 
@@ -596,7 +646,24 @@ impl<'a> VecArgs<'a> {
     #[inline(always)]
     // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
     pub fn new(_f: &'a BuiltinFunc, cols: &'a [&'a Column], i: usize) -> Self {
-        VecArgs { cols, i }
+        VecArgs {
+            cols,
+            vectors: &[],
+            i,
+        }
+    }
+
+    /// The accessor for row `i`, reading the VECTOR arguments through views taken once per
+    /// chunk (`vectors[k]` is the view of `cols[k]`, or `None`).
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    pub fn with_vectors(
+        _f: &'a BuiltinFunc,
+        cols: &'a [&'a Column],
+        vectors: &'a [Option<VectorView<'a>>],
+        i: usize,
+    ) -> Self {
+        VecArgs { cols, vectors, i }
     }
 }
 
@@ -683,11 +750,38 @@ impl Args for VecArgs<'_> {
         _ctx: &dyn EvalContext,
         i: usize,
     ) -> Result<Option<VectorFloat32<'_>>, Error> {
+        Ok(self.vector_float32_at(i))
+    }
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_pair(
+        &mut self,
+        _ctx: &dyn EvalContext,
+        i: usize,
+        j: usize,
+    ) -> Result<Option<(VectorFloat32<'_>, VectorFloat32<'_>)>, Error> {
+        let Some(a) = self.vector_float32_at(i) else {
+            return Ok(None);
+        };
+        let Some(b) = self.vector_float32_at(j) else {
+            return Ok(None);
+        };
+        Ok(Some((a, b)))
+    }
+}
+
+impl<'a> VecArgs<'a> {
+    /// Row `self.i` of the evaluated column `i` as a vector, borrowed from the column.
+    #[inline(always)]
+    // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
+    fn vector_float32_at(&self, i: usize) -> Option<VectorFloat32<'a>> {
         let c = self.cols[i];
-        Ok(if c.is_null(self.i) {
-            None
-        } else {
-            Some(c.get_vector_float32(self.i))
+        if c.is_null(self.i) {
+            return None;
+        }
+        Some(match self.vectors.get(i) {
+            Some(Some(v)) => v.get(self.i),
+            _ => c.get_vector_float32(self.i),
         })
     }
 }

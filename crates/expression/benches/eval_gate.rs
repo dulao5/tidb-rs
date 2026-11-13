@@ -8,11 +8,27 @@
 //! the vector driver (`-Vec`, Go `vecEvalXxx` incl. evaluating the column children) and the
 //! row driver (`-Row`, Go's `NonVecBuiltinFunc`: `evalXxx` for each of the 1024 rows).
 //!
+//! Besides the five prototypes, the gate measures the ported signatures of the same
+//! functions (`-port` cases: PlusInt in D08.5, LTInt in D08.4, CastIntAsReal in D08.8) and the
+//! four vector distance functions (D08.1 part 3) at 3 dimensions (Go's
+//! `BenchmarkVectorizedBuiltinVecFunc`) and 768 dimensions (D08.1 T7a; Go side in
+//! `benches/go/gate_vec_test.go`, inputs `newVectorFloat32RandGener(d)`: no NULLs, elements
+//! in [0, 1)). `Compile` measures `RpnProgram::compile` over all the cases' expressions.
+//!
+//! Before the benchmarks, the number of heap allocations per chunk of the vector driver is
+//! printed for every case (`ALLOCS_VEC <case> <n>`; `ALLOCS_ROW` for the 1024 rows of the row
+//! driver): N4 §5 requires 0 for fixed-length results
+//! outside the result column (the result column is allocated once before the loop).
+//!
 //! Go numbers: `go test -c` in pkg/expression, then
 //! `expr.test -test.run '^$' -test.bench 'BenchmarkVectorizedBuiltinArithmeticFunc$' builtinArithmeticPlusIntSig`.
+//! `scripts/eval-gate.sh` runs both sides alternately in several processes and takes the
+//! minimum (D08.1 plan.md, "性能门禁的测量规则").
 
+use std::alloc::{GlobalAlloc, Layout};
 use std::hint::black_box;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use tidb_base::Error;
@@ -27,9 +43,40 @@ use tidb_sessionctx::exprstatic::new_eval_context;
 use tidb_types::errors::ErrOverflow;
 use tidb_types::etc::FieldType;
 use tidb_types::field_type::new_field_type;
+use tidb_types::vector::init_vector_float32;
+
+/// jemalloc (as in the server), counting allocations while `COUNTING` is set.
+struct Counting;
+
+static COUNTING: AtomicBool = AtomicBool::new(false);
+static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if COUNTING.load(Ordering::Relaxed) {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
+        unsafe { tikv_jemallocator::Jemalloc.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { tikv_jemallocator::Jemalloc.dealloc(ptr, layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if COUNTING.load(Ordering::Relaxed) {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
+        unsafe { tikv_jemallocator::Jemalloc.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if COUNTING.load(Ordering::Relaxed) {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
+        unsafe { tikv_jemallocator::Jemalloc.realloc(ptr, layout, new_size) }
+    }
+}
 
 #[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+static ALLOC: Counting = Counting;
 
 const N: usize = 1024;
 
@@ -232,6 +279,8 @@ enum Gen {
     Range(i64, i64),
     /// defaultGener(0.2, ETString): randString
     DefaultString,
+    /// newVectorFloat32RandGener(d): no NULL, elements in [0, 1)
+    Vector(usize),
 }
 
 fn fill(chk: &mut Chunk, col: usize, g: Gen, rng: &mut Rng) {
@@ -270,6 +319,14 @@ fn fill(chk: &mut Chunk, col: usize, g: Gen, rng: &mut Rng) {
                     .collect();
                 chk.append_string(col, &s);
             }
+            Gen::Vector(d) => {
+                let mut v = init_vector_float32(d);
+                let mut e = v.elements_mut();
+                for k in 0..d {
+                    e.set(k, (rng.f64() as f32).min(0.999_999_94));
+                }
+                chk.append_vector_float32(col, &v);
+            }
         }
     }
 }
@@ -282,11 +339,16 @@ fn longlong(unsigned: bool) -> FieldType {
     ft
 }
 
+/// A prototype case's name, result type and inputs (reused by its `-port` case).
+type Proto = (String, FieldType, Vec<(FieldType, Gen)>);
+
 struct Case {
     name: String,
     expr: ExprRef,
     input: Chunk,
     ret_eval_int: bool,
+    ret: FieldType,
+    children: Vec<(FieldType, Gen)>,
 }
 
 fn case(
@@ -315,13 +377,17 @@ fn case(
     let ret_eval_int = sig.drivers.eval_type() == Some(tidb_parser::types::ETInt);
     let function = BuiltinFunc::new(sig, args, ret.clone(), "utf8mb4", "utf8mb4_bin");
     let expr = Arc::new(Expr::ScalarFunction(ScalarFunction::new(
-        name, ret, function,
+        name,
+        ret.clone(),
+        function,
     )));
     Case {
         name: name.into(),
         expr,
         input,
         ret_eval_int,
+        ret,
+        children,
     }
 }
 
@@ -330,7 +396,7 @@ fn cases() -> Vec<Case> {
     let int = longlong(false);
     let half = (i64::MIN / 2, i64::MAX / 2);
     let pos = (0, i64::MAX);
-    vec![
+    let mut out = vec![
         case(
             "PlusInt-SS",
             &PLUS_INT_SIG,
@@ -402,20 +468,102 @@ fn cases() -> Vec<Case> {
                 (longlong(false), Gen::Range(92, 93)),
             ],
         ),
-    ]
+    ];
+    // The ported signatures of the same functions, on the same inputs.
+    use tidb_expression::{builtin_arithmetic as ar, builtin_cast as ca, builtin_compare as cm};
+    let ported: [(&str, &'static SigDesc); 6] = [
+        ("PlusInt-SS", &ar::builtinArithmeticPlusIntSig),
+        ("PlusInt-UU", &ar::builtinArithmeticPlusIntSig),
+        ("PlusInt-SU", &ar::builtinArithmeticPlusIntSig),
+        ("PlusInt-US", &ar::builtinArithmeticPlusIntSig),
+        ("LTInt", &cm::builtinLTIntSig),
+        ("CastIntAsReal", &ca::builtinCastIntAsRealSig),
+    ];
+    let protos: Vec<Proto> = out
+        .iter()
+        .map(|c| (c.name.clone(), c.ret.clone(), c.children.clone()))
+        .collect();
+    for (name, sig) in ported {
+        let (_, ret, children) = protos.iter().find(|p| p.0 == name).unwrap();
+        out.push(case(
+            &format!("{name}-port"),
+            sig,
+            ret.clone(),
+            children.clone(),
+        ));
+    }
+    // The vector distance functions (D08.1 part 3).
+    use tidb_expression::builtin_vec as bv;
+    let vt = new_field_type(mysql::TypeTiDBVectorFloat32);
+    let dbl = new_field_type(mysql::TypeDouble);
+    for d in [3, 768] {
+        for (name, sig) in [
+            ("VecL1Distance", &bv::builtinVecL1DistanceSig),
+            ("VecL2Distance", &bv::builtinVecL2DistanceSig),
+            ("VecCosineDistance", &bv::builtinVecCosineDistanceSig),
+            (
+                "VecNegativeInnerProduct",
+                &bv::builtinVecNegativeInnerProductSig,
+            ),
+        ] {
+            out.push(case(
+                &format!("{name}-d{d}"),
+                sig,
+                dbl.clone(),
+                vec![(vt.clone(), Gen::Vector(d)), (vt.clone(), Gen::Vector(d))],
+            ));
+        }
+    }
+    out
+}
+
+/// Heap allocations of one vector evaluation, after a warm-up evaluation (intermediate and
+/// result columns already sized).
+fn allocs_per_chunk(
+    ctx: &dyn EvalContext,
+    st: &EvalState,
+    prog: &RpnProgram,
+    rpn: &mut RpnState,
+    input: &Chunk,
+    result: &mut tidb_chunk::Column,
+) -> usize {
+    const RUNS: usize = 16;
+    ALLOCS.store(0, Ordering::SeqCst);
+    COUNTING.store(true, Ordering::SeqCst);
+    for _ in 0..RUNS {
+        prog.eval(ctx, st, rpn, input, result).unwrap();
+    }
+    COUNTING.store(false, Ordering::SeqCst);
+    ALLOCS.load(Ordering::SeqCst).div_ceil(RUNS)
 }
 
 fn bench(c: &mut Criterion) {
     let ctx = new_eval_context(vec![]);
     let ctx: &dyn EvalContext = &*ctx;
     let st = EvalState::new();
-    for case in cases() {
+    let all = cases();
+    // N4 §5: compiling an expression costs at most 1µs per node (here 2–4 nodes each).
+    let nodes: usize = all
+        .iter()
+        .map(|c| 1 + c.expr.as_scalar_function().unwrap().function.args.len())
+        .sum();
+    println!("COMPILE_NODES {nodes}");
+    c.bench_function("Compile-all", |b| {
+        b.iter(|| {
+            for case in &all {
+                black_box(RpnProgram::compile(black_box(&case.expr)));
+            }
+        })
+    });
+    for case in all {
         let prog = RpnProgram::compile(&case.expr);
         let mut rpn = RpnState::default();
         let mut result = new_empty_column(case.expr.as_scalar_function().unwrap().ret_type());
         // Errors would make the comparison meaningless: every case must evaluate cleanly.
         prog.eval(ctx, &st, &mut rpn, &case.input, &mut result)
             .expect("vector evaluation");
+        let n = allocs_per_chunk(ctx, &st, &prog, &mut rpn, &case.input, &mut result);
+        println!("ALLOCS_VEC {} {n}", case.name);
         c.bench_function(&format!("{}-Vec", case.name), |b| {
             b.iter(|| {
                 prog.eval(ctx, &st, &mut rpn, black_box(&case.input), &mut result)
@@ -423,20 +571,25 @@ fn bench(c: &mut Criterion) {
             })
         });
         let f = &case.expr.as_scalar_function().unwrap().function;
-        c.bench_function(&format!("{}-Row", case.name), |b| {
-            b.iter(|| {
-                for i in 0..case.input.num_rows() {
-                    let row = case.input.get_row(i);
-                    if case.ret_eval_int {
-                        black_box(f.eval_int(ctx, &st, row).unwrap());
-                    } else if f.sig.drivers.eval_type() == Some(tidb_parser::types::ETReal) {
-                        black_box(f.eval_real(ctx, &st, row).unwrap());
-                    } else {
-                        black_box(f.eval_string(ctx, &st, row).unwrap());
-                    }
+        let row_batch = || {
+            for i in 0..case.input.num_rows() {
+                let row = case.input.get_row(i);
+                if case.ret_eval_int {
+                    black_box(f.eval_int(ctx, &st, row).unwrap());
+                } else if f.sig.drivers.eval_type() == Some(tidb_parser::types::ETReal) {
+                    black_box(f.eval_real(ctx, &st, row).unwrap());
+                } else {
+                    black_box(f.eval_string(ctx, &st, row).unwrap());
                 }
-            })
-        });
+            }
+        };
+        row_batch();
+        ALLOCS.store(0, Ordering::SeqCst);
+        COUNTING.store(true, Ordering::SeqCst);
+        row_batch();
+        COUNTING.store(false, Ordering::SeqCst);
+        println!("ALLOCS_ROW {} {}", case.name, ALLOCS.load(Ordering::SeqCst));
+        c.bench_function(&format!("{}-Row", case.name), |b| b.iter(row_batch));
     }
 }
 

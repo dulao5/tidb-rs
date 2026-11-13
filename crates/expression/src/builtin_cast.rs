@@ -530,18 +530,14 @@ pub fn cast_int_as_int(
 
 // go: builtinCastIntAsRealSig.evalReal L1
 // go: builtinCastIntAsRealSig.Clone L2 (BuiltinFunc::clone_from_base)
-// go: builtinCastIntAsRealSig.vecEvalReal L2 (the vector driver of this body, M-EVAL)
+// go: builtinCastIntAsRealSig.vecEvalReal L2 (the checked vector driver: one loop per flag combination, read once per chunk as Go does)
 // go: builtinCastIntAsRealSig.vectorized L2 (SigDesc.vectorized)
-#[eval_fn(Real)]
-pub fn cast_int_as_real(
-    _ctx: &dyn EvalContext,
-    f: &impl SigView,
-    val: i64,
-) -> Result<Option<f64>, Error> {
-    let unsigned_args0 = has_unsigned_flag(f.arg_type(0).get_flag());
-    let res = if !has_unsigned_flag(f.tp.get_flag()) && !unsigned_args0 {
+#[eval_fn(Real, checked(nflags = 3, flags = cast_int_as_real_flags, err = cast_int_as_real_err))]
+pub fn cast_int_as_real<const FL: u8>(val: i64) -> (f64, bool) {
+    let (unsigned_args0, unsigned_ret, in_union) = (FL & 1 != 0, FL & 2 != 0, FL & 4 != 0);
+    let res = if !unsigned_ret && !unsigned_args0 {
         val as f64
-    } else if in_union(f) && !unsigned_args0 && val < 0 {
+    } else if in_union && !unsigned_args0 && val < 0 {
         // Round up to 0 if the value is negative but the expression eval type is unsigned
         // in `UNION` statement.
         0.0
@@ -549,7 +545,25 @@ pub fn cast_int_as_real(
         // recall that, int to float is different from uint to float
         val as u64 as f64
     };
-    Ok(Some(res))
+    (res, false)
+}
+
+/// The flag combination of `cast_int_as_real` (the `checked` form, D08.1 spec §3.4: no
+/// error rows, no per-row side effects, the row and vector versions compute the same value;
+/// Go's vector version also reads the flags once per call): bit 0 = the argument is
+/// unsigned, bit 1 = the result is unsigned, bit 2 = `inUnion`.
+// glue: the flag combination of the checked CAST(int AS REAL) body (D08.1 spec §3.4)
+#[inline]
+fn cast_int_as_real_flags(f: &impl SigView) -> u8 {
+    u8::from(has_unsigned_flag(f.arg_type(0).get_flag()))
+        | (u8::from(has_unsigned_flag(f.tp.get_flag())) << 1)
+        | (u8::from(in_union(f)) << 2)
+}
+
+// glue: the error builder of the checked CAST(int AS REAL) body, which has no error rows
+#[cold]
+fn cast_int_as_real_err(_ctx: &dyn EvalContext, _f: &impl SigView, _a: i64) -> Error {
+    unreachable!("CAST(int AS REAL) has no error rows")
 }
 
 // go: builtinCastIntAsDecimalSig.evalDecimal L1

@@ -370,13 +370,42 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
     };
 
     // ---- vector driver
+    // A lazy body with VECTOR arguments (`args(VectorFloat32, ..)`) reads them through views
+    // taken once per chunk (Go's vector versions read `buf.GetVectorFloat32(i)` row by row
+    // from the evaluated columns).
+    let vector_args: Vec<usize> = attr
+        .args
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| **k == ArgKind::Vector)
+        .map(|(i, _)| i)
+        .collect();
+    let (vviews, vec_args_new) = if attr.lazy && !vector_args.is_empty() {
+        let nviews = attr.args.as_ref().map_or(0, |a| a.len());
+        let elems = (0..nviews).map(|k| {
+            if vector_args.contains(&k) {
+                quote!(cols.get(#k).map(|c| #rt::VectorView::new(c, n)))
+            } else {
+                quote!(::std::option::Option::None)
+            }
+        });
+        (
+            quote!(let vviews: [::std::option::Option<#rt::VectorView<'_>>; #nviews] = [#(#elems),*];),
+            quote!(#rt::VecArgs::with_vectors(f, cols, &vviews, i)),
+        )
+    } else {
+        (quote!(), quote!(#rt::VecArgs::new(f, cols, i)))
+    };
     let vec_body = if attr.lazy {
         match ret {
             Ret::String => quote! {
                 #rt::reset_string(result, n);
                 let mut out = ::std::vec::Vec::new();
+                #vviews
                 for i in 0..n {
-                    let mut args = #rt::VecArgs::new(f, cols, i);
+                    let mut args = #vec_args_new;
                     out.clear();
                     match #name(ctx, &s, &mut args, &mut out)? {
                         ::std::option::Option::Some(()) => result.append_bytes(&out),
@@ -389,8 +418,9 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
                 let (reserve, append) = appended_out(ret);
                 quote! {
                     result.#reserve(n);
+                        #vviews
                     for i in 0..n {
-                        let mut args = #rt::VecArgs::new(f, cols, i);
+                        let mut args = #vec_args_new;
                         match #name(ctx, &s, &mut args)? {
                             ::std::option::Option::Some(v) => result.#append(&v),
                             ::std::option::Option::None => result.append_null(),
@@ -403,8 +433,9 @@ fn expand(attr: Attr, mut func: ItemFn) -> syn::Result<TokenStream2> {
                 let out = fixed_out(ret);
                 quote! {
                     let mut res = #out::new(result, n, &[]);
+                        #vviews
                     for i in 0..n {
-                        let mut args = #rt::VecArgs::new(f, cols, i);
+                        let mut args = #vec_args_new;
                         match #name(ctx, &s, &mut args)? {
                             ::std::option::Option::Some(v) => res.set(i, v),
                             ::std::option::Option::None => res.set_null(i),

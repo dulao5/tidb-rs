@@ -243,14 +243,22 @@ fn arm_fmadd_nan64(a: f64, n: f64, m: f64) -> Option<f64> {
     Some(r)
 }
 
+// glue: the error of VectorFloat32.checkIdenticalDims, out of line (cold path)
+#[cold]
+#[inline(never)]
+fn different_dims(a: usize, b: usize) -> Error {
+    errors::errorf(
+        "vectors have different dimensions: %d and %d",
+        &[Arg::from(a), Arg::from(b)],
+    )
+}
+
 impl VectorFloat32<'_> {
     // go: VectorFloat32.checkIdenticalDims L1 [M-ERR]
+    #[inline]
     fn check_identical_dims(&self, b: &VectorFloat32<'_>) -> Result<(), Error> {
         if self.len() != b.len() {
-            return Err(errors::errorf(
-                "vectors have different dimensions: %d and %d",
-                &[Arg::from(self.len()), Arg::from(b.len())],
-            ));
+            return Err(different_dims(self.len(), b.len()));
         }
         Ok(())
     }
@@ -258,6 +266,7 @@ impl VectorFloat32<'_> {
     /// L2SquaredDistance returns the squared L2 distance between two vectors.
     /// This saves a sqrt calculation.
     // go: VectorFloat32.L2SquaredDistance L1 [M-ERR, M-FMA]
+    #[inline]
     pub fn l2_squared_distance(&self, b: &VectorFloat32<'_>) -> Result<f64, Error> {
         self.check_identical_dims(b)?;
 
@@ -284,6 +293,7 @@ impl VectorFloat32<'_> {
 
     /// L2Distance returns the L2 distance between two vectors.
     // go: VectorFloat32.L2Distance L1 [M-ERR]
+    #[inline]
     pub fn l2_distance(&self, b: &VectorFloat32<'_>) -> Result<f64, Error> {
         let d = self.l2_squared_distance(b)?;
         Ok(d.sqrt())
@@ -291,6 +301,7 @@ impl VectorFloat32<'_> {
 
     /// InnerProduct returns the inner product of two vectors.
     // go: VectorFloat32.InnerProduct L1 [M-ERR, M-FMA]
+    #[inline]
     pub fn inner_product(&self, b: &VectorFloat32<'_>) -> Result<f64, Error> {
         self.check_identical_dims(b)?;
 
@@ -316,6 +327,7 @@ impl VectorFloat32<'_> {
 
     /// NegativeInnerProduct returns the negative inner product of two vectors.
     // go: VectorFloat32.NegativeInnerProduct L1 [M-ERR]
+    #[inline]
     pub fn negative_inner_product(&self, b: &VectorFloat32<'_>) -> Result<f64, Error> {
         let d = self.inner_product(b)?;
         // `d * -1`: gc rewrites a multiplication by the constant -1 into a negation (the
@@ -325,6 +337,7 @@ impl VectorFloat32<'_> {
 
     /// CosineDistance returns the cosine distance between two vectors.
     // go: VectorFloat32.CosineDistance L1 [M-ERR, M-FMA]
+    #[inline]
     pub fn cosine_distance(&self, b: &VectorFloat32<'_>) -> Result<f64, Error> {
         self.check_identical_dims(b)?;
 
@@ -357,6 +370,7 @@ impl VectorFloat32<'_> {
 
     /// L1Distance returns the L1 distance between two vectors.
     // go: VectorFloat32.L1Distance L1 [M-ERR]
+    #[inline]
     pub fn l1_distance(&self, b: &VectorFloat32<'_>) -> Result<f64, Error> {
         self.check_identical_dims(b)?;
 
