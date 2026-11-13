@@ -40,7 +40,7 @@
    - Go v8.5.8 里 `START TRANSACTION READ ONLY`（不带 AS OF）是 noop 函数：`tidb_enable_noop_functions=OFF`（默认）时报 **1235**，打开后接受但**不强制只读**（`pkg/executor/simple.go:618-644`）。错误码 1792 定义了但从未使用（`pkg/errno/errcode.go:758`）。
    - **`BEGIN READ ONLY` 和 `BEGIN /*T! READ ONLY */` 在 Go 里是语法错误**（实测 parser v8.5.8，§2.6）。
    - tidb-rs 的显式事务语义见 §4.5，用户可见的选择见 D8。
-6. **需要负责人决定**的 10 点见 §6。最重要的是 D3/D4（lease 移到准入、过期后怎么办）和 D8（显式只读事务的语法与错误码）。
+6. **需要负责人决定**的 11 点见 §6。最重要的是 D3/D4（lease 移到准入、过期后回退）和 D8（显式只读事务的语法与错误码）。
 
 ## 1. 范围
 
@@ -183,7 +183,7 @@
 
 **RC**
 - 每条语句一个新 TSO；事务第一条语句用 start_ts（`pkg/sessiontxn/isolation/readcommitted.go:142-176`）。
-- `tidb_rc_read_check_ts`（INSTANCE，默认 OFF）复用上一个 ts，遇到写冲突再取新的（`sysvar.go:593-598`；`readcommitted.go:107-115`、`:202-213`）。
+- `tidb_rc_read_check_ts`（INSTANCE，默认 OFF，`sysvar.go:593-598`）：事务内的只读语句复用上一个 ts（`readcommitted.go:142-158`），但**读请求带 `kv.RCCheckTS` 隔离级别**（快照 `readcommitted.go:355-356`；cop 请求 `pkg/distsql/request_builder.go:352`）。TiKV 发现比该 ts 新的版本时返回 `WriteConflict`，语句用新 TSO 重试（`readcommitted.go:202-213`）。所以这个检查发生在**读**上，只读节点也会遇到。条件见 `readcommitted.go:96-115`。
 - RR / optimistic 的读都用事务 start_ts（`repeatable_read.go:66-67`；`optimistic.go:46-47`）。
 
 **MaxTS 点查**
@@ -324,19 +324,31 @@
   - status 端口提供 gRPC `Coprocessor`，只实现 `ExecType_TypeKill` 和 cluster 内存表需要的部分（N9 的 `CLUSTER_*`）；
   - `KILL` 不是本机的 ID 时，照 Go 转发。
   - 在此之前（D2 选 (a)），连接 ID 至少避开 Go 节点可能使用的 serverID 段。理由（推断，未实测）：从 Go 节点对一个 tidb-rs 连接 ID 执行 `KILL`，会按 ID 的高位找节点，可能落到某个 Go 节点上。
-- **minstartts**：显式只读事务（§4.5）会让读的寿命超过 `tidb_gc_life_time`，需要照 Go 每 30 s 上报（`info.go:814-878`）。autocommit 读不需要。
+- **minstartts**：照 Go 每 30 s 上报本节点**所有活跃语句和事务**中最老的 start_ts（`info.go:814-878`）。
+  - Go 遍历整个 processlist 的 `CurTxnStartTS`，autocommit 语句也算，另外还有游标的 start_ts（`info.go:819`、`:837-851`）。
+  - 不能只算显式事务：一条运行超过 `tidb_gc_life_time`（默认 10 min）的 autocommit 分析查询，会被 GC 越过它的 start_ts，然后报 9006。
+  - 照 Go 只计入 `now - tidb_gc_max_wait_time` 之后的 start_ts（`info.go:826-829`）；MaxTS 点查没有 start_ts，不计入。
 
 ### 4.2 schema 同步：lease 按 TSO、准入窗口 ≤ 注册窗口（#136）
 
-**规则**（#136 Lucky 的三点，本 spec 写成不变式）：
+**规则**（#136 Lucky 的三点，本 spec 写成不变式；实现见 PR #145，ADR 0005 新增的 "Schema lease (#136)" 一节）：
 
 1. **lease 按 TSO 计**，照 `schema_validator.go:134-148`：
    - 每轮完整同步循环开始时取一个 TSO `sync_ts`，用它读版本并 reload（ADR 0005 已经这样做）。
    - 循环成功后，`expire_ts = phys(sync_ts) + lease - 1ms`。
-2. **语句准入**：语句的读 ts `read_ts` 满足 `phys(read_ts) <= expire_ts` 才用同步的 schema。
-   - 这是 Go 写事务提交检查（`:274-278`）**移到了读语句的准入**：Go 不检查读，tidb-rs 只有读，见 D3。
-   - MaxTS 点查没有 `read_ts`，用 `LowResolutionTs` 的最新值加上其最大年龄比较（推断：这是保守的上界）。
-   - stale read / `tidb_snapshot` 用历史 schema，不受此限（与 Go 一致，§2.2）。
+2. **语句准入要求两个相互独立的条件同时成立**：
+   - **(a) schema lease 未过期**：`phys(now_ts) <= expire_ts`。
+     - `now_ts` 是"当前"的 ts，**不是语句的读 ts**。显式事务（RR / optimistic）的读 ts 是事务的 start_ts，可能很旧；用它比较，长事务里之后的每条语句都会通过，即使同步已经停了几个小时。Go 在提交时用的也是**提交 ts**，即"当前"（CG `txnkv/transaction/2pc.go:1934`、`:2114`）。
+     - **接口规则**：lease 检查只接受**为本语句、在准入之后**得到的"当前"ts，**永远不接受事务的 start_ts**。
+       - 语句自己取了新 TSO 时，就用这个 TSO。
+       - 语句没有自己的 TSO 时（MaxTS 点查、显式事务的后续语句），在准入时取一个当前时刻的保守上界：`LowResolutionTs` 的最新值加上它的最大年龄；或者照 PR #145，用单调时钟，从 reload 的 TSO **请求发出时**算起。两者都不会晚于 TSO 的界限。
+       - 类型上，检查函数的参数是一个只能由"准入后取 ts"构造的 `NowTs`，不能从 `TxnStart(u64)` 转换得到。
+     - 这是 Go 写事务提交检查（`schema_validator.go:274-278`）**移到了读语句的准入**：Go 不检查读，tidb-rs 只有读，见 D3。
+   - **(b) etcd 注册的 lease 仍然有效**：`now < 上次成功 keepalive 的发送时刻 + 授予的 TTL - 余量`（本地单调时钟；余量覆盖两边时钟速率的差异）。这就是 `registry.rs` 现有的"lease 至少还剩 3 s"条件（`registry.rs:74-78`），**保留，不由 (a) 取代**。
+     - 原因：MDL 开启时，一个已注册、只是 schema 落后的节点是安全的，owner 会无限期等它（§2.2）。危险的是**被动失去注册**：etcd 分区或 keepalive 失败，serverinfo 的 lease 过期（90 s），owner 不再等它。
+     - 此时同步循环可能仍然成功，因为它从 TiKV 而不是 etcd 读版本，所以 `expire_ts` 继续前进，只看 (a) 会继续准入。但 owner 已经可以把版本推进两步。例如 DROP INDEX 从 public → write-only → delete-only 之后，写入不再维护该索引，经由该索引的读会漏行。
+     - Go 对 session 丢失的反应也是停止 validator（`domain.go:1169-1193`）：失去注册即停止准入，tidb-rs 照此处理。
+   - stale read / `tidb_snapshot` 用历史 schema，不受 (a) 限制（与 Go 一致，§2.2）。
 3. **先停止准入，再注销；准入期间保持注册**。不变式：
 
    > 任何被准入的语句，在它整个执行期间，本节点都在 owner 的等待集合中（serverinfo 键存在），或者该语句的结果被丢弃。
@@ -354,9 +366,13 @@
 - meta region 选举（#136 中约 12 s）期间，节点继续用已加载的 schema 准入语句，不注销，也不走回退路径。
 - owner 在这段时间等待本节点（Go 节点在同样情况下也会让 owner 等待，§2.2）。
 
-**lease 过期之后**（D4）
-- 节点停止准入，注销，然后：(a) 照现在走 ADR 0003 回退路径（每条语句读版本键）；或 (b) 照 Go 写事务的语义报 8027，直到重新同步。
-- 建议 (a)：它是正确的，代价只在可用性。
+**lease 过期之后**（D4，与修订后的 PR #145 一致）
+- 两种情形同样处理：
+  - lease 过期后才到达的新语句；
+  - 已准入的语句，它的检查 ts 越过了过期时间。
+- 照 Go 的 `SchemaChecker` 先等待 reload，最多 10 次 × 500 ms（`pkg/domain/schema_checker.go:41-45`、`:63-80`）。期间 reload 成功、lease 续上，就继续用同步的 schema。
+- 结果仍是 `ResultUnknown` 时，**退回 ADR 0003 的逐语句路径**：在语句的 ts 上读 schema 版本键并校验。**读语句永远不报 8027**：Go 对读也从不报这个错误（§2.3，只读事务的提交不检查）。
+- 理由：同步已经连续失败 45 s 时，坏掉的是 meta region 或 TSO 本身。回退路径会等它恢复，然后成功；8027 则立即失败。#136 的停顿来自"5 s 就注销、所有语句都去读 meta region"，而不是回退路径本身。lease 放宽到 45 s 之后，回退路径只在真正长时间的故障中使用。
 
 **显式只读事务与 MDL**（§4.5）
 - 事务在 registry 中的条目从**第一次访问表**开始，到 COMMIT / ROLLBACK 为止；表集合随语句累加。这与 Go 一致（`preprocess.go:2101`）。
@@ -371,10 +387,10 @@ tidb-rs 在升级后的集群里始终是旧节点，Go 的"忽略未知"对它�
 
 | 检测点 | 条件 | 动作 |
 |---|---|---|
-| 启动和每轮同步 | `mysql.tidb.tidb_server_version` > 232（v8.5.8 的 `currentBootstrapVersion`） | **节点级**：停止准入、注销、所有语句报明确错误（D7 定错误码），指标 `tidb_rs_unknown_metadata{kind="bootstrap"}` = 1，ERROR 日志 |
-| reload | 不认识的 `SchemaDiff.Type` | 节点级（同上）。tidb-rs 现在每次都全量 reload，所以这一项用来发现"集群跑了新 DDL"；改成增量 reload 后，这是必需的 |
+| 启动和每轮同步 | `mysql.tidb.tidb_server_version` > 232（v8.5.8 的 `currentBootstrapVersion`） | **只报警**：指标 `tidb_rs_unknown_metadata{kind="bootstrap"}` = 1，WARN 日志。同一小版本的 patch 发布也会提高 bootstrap 版本（加系统表列、改 sysvar 默认值），因此不能据此拒绝整个节点；tidb-rs 真正依赖的变化由下面几行检出 |
+| reload | 不认识的 `SchemaDiff.Type` | **节点级**：停止准入、注销、所有语句报明确错误（D7 定错误码），指标 `kind="diff"` = 1，ERROR 日志。tidb-rs 现在每次都全量 reload，所以这一项用来发现"集群跑了新 DDL"；改成增量 reload 后，这是必需的 |
 | reload | `TableInfo.Version` > 5，或 JSON 中有不认识的字段 | **表级**：该表报错（`ErrTableNotExists` 不合适，D7 定错误码），其他表照常；指标 `kind="table"` |
-| reload | `mysql.tidb_mdl_info` 及 tidb-rs 读取的其他系统表多了或少了列 | 节点级：MDL 协议依赖这些列 |
+| reload | `mysql.tidb_mdl_info` 及 tidb-rs 读取的其他系统表多了或少了列 | 节点级（同上）：MDL 协议依赖这些列 |
 | 注册时 | 集群中有 serverinfo 的 `version` 高于 v8.5 的大版本 | 只报警，不拒绝：升级过程中的正常状态 |
 
 "不认识的 JSON 字段"需要在 D06.1 的 Go-JSON 层加一个**只在 reload 时启用**的严格模式（L2 胶水，标注）。普通解码仍照 Go 忽略未知字段，保证 L1 测试不变。
@@ -427,7 +443,9 @@ enum ReadTsSource {
 
 **RC**
 - 照 Go：pessimistic + RC 的显式事务每条语句取新 TSO。
-- `tidb_rc_read_check_ts` 照 Go 复用上一个 ts。tidb-rs 没有写冲突，复用总是成立：只读事务里不会遇到 `WriteConflict`（推断）。
+- `tidb_rc_read_check_ts`：照 Go 实现，或者报"不支持"，**不能**只复用 ts 而不做检查，那样就是 stale read（§2.5）。
+  - 实现需要 CR 支持在读请求上设 `IsolationLevel::RcCheckTs`，把 TiKV 的 `WriteConflict` 交给语句层，再由 provider 用新 TSO 重试（`readcommitted.go:202-213`）。
+  - 在 CR 支持之前，设置为 ON 时报错（宪章第五条）。见 D11。
 
 ### 4.5 显式只读事务
 
@@ -450,7 +468,7 @@ enum ReadTsSource {
 | `SELECT ... FOR UPDATE` / `FOR SHARE` | autocommit 下照 Go 忽略锁子句（`builder.go:775-794`）。事务内 Go 会加锁（写 TiKV），tidb-rs 不能，所以报错（D8） |
 | 状态标志 | OK / EOF 包的 `SERVER_STATUS_IN_TRANS` 照 Go 设置。TiProxy 依赖这个标志判断能否迁移（ADR 0009 §2） |
 | MDL | §4.2 |
-| minstartts | 有显式事务时上报（§4.1） |
+| minstartts | 有活跃语句或事务时上报（§4.1） |
 
 ## 5. 兼容性
 
@@ -474,13 +492,14 @@ enum ReadTsSource {
 | D1 | 是否写 `/topology/tidb` | (a) 不写（ADR 0005 现状）；(b) 写，Dashboard 和 TiProxy 都能看到 | **(a)**：TiProxy 按连接路由，没有读写分离（ADR 0009 §2），进入 topology 会收到写连接。tidb-rs 的发现另走 ADR 0009 D3 |
 | D2 | server ID 与 global KILL | (a) 维持 `server_id=0`，不支持跨节点 KILL；(b) 照 Go 抢占 server ID，globalconn 连接 ID，status 端口 gRPC 接收 KILL | **(b)**，随 D03.1 / status 端口 gRPC 一起做；之前按 (a)，并按 §4.1 避开 Go 的 ID 段 |
 | D3 | schema lease 是否用于读语句准入 | (a) 照 Go，读不检查（节点失联后无限期用旧 schema）；(b) 按 TSO 在准入时检查（§4.2） | **(b)**：只读节点的读就是全部流量；这是 #136 的修复方向 |
-| D4 | lease 过期后的语句 | (a) ADR 0003 回退路径（每条语句读版本键，正确但依赖 meta region）；(b) 报 8027 直到重新同步 | **(a)** |
+| D4 | lease 过期后的语句（新语句，以及检查 ts 越过过期时间的已准入语句） | (a) **回退**：照 Go 等待 reload（10 × 500 ms），仍未恢复时走 ADR 0003 的逐语句路径，读语句不报错；(b) **给读引入一个 Go 没有的错误**：等待后报 8027 | **(a) 回退**，与修订后的 PR #145 一致。理由：reload 已经连续失败 45 s，坏的是 meta region 或 TSO 本身；回退路径会等它恢复，然后成功，8027 则立即失败。Go 对读也从不报 8027 |
 | D5 | lease 与 `max_staleness` 默认值 | (a) 都取 45 s（Go 的 lease），卡住的 tidb-rs 最多挡 DDL 约 45 s；(b) 更短（如 15 s），可用性窗口也更短 | **(a)**，两者可配置，启动时校验 `max_staleness ≥ lease` |
 | D6 | 显式只读事务对 DDL 的阻挡 | (a) 照 Go，事务多长就挡多久；(b) 加上限（超过后事务报 8028，释放 MDL） | **(a)** 照 Go；监控里给出阻挡 DDL 的 tidb-rs 事务 |
-| D7 | 升级检查的粒度和错误码 | (a) 全部节点级；(b) bootstrap 版本、diff 类型、系统表列为节点级，表元数据为表级（§4.3） | **(b)**。错误码：8027 的文字是固定的（"schema failed to update in 1 lease, please make sure TiDB can connect to TiKV"，`pkg/errno/errname.go:984`），不能说明原因，会误导排查。建议用 1105 加明确文字（"tidb-rs v8.5.8 cannot read metadata written by a newer TiDB: ..."），不新增错误码 |
+| D7 | 升级检查的粒度和错误码 | (a) 全部节点级；(b) diff 类型、系统表列为节点级，表元数据为表级，bootstrap 版本只报警（§4.3） | **(b)**。错误码：8027 的文字是固定的（"schema failed to update in 1 lease, please make sure TiDB can connect to TiKV"，`pkg/errno/errname.go:984`），不能说明原因，会误导排查。建议用 1105 加明确文字（"tidb-rs v8.5.8 cannot read metadata written by a newer TiDB: ..."），不新增错误码 |
 | D8 | 显式事务的语法与错误码 | **语法**：(a) 照 Go，`READ ONLY` 受 `tidb_enable_noop_functions` 控制，默认 1235；(b) tidb-rs 始终接受 `READ ONLY` 并强制只读。**写语句**：用 1792（MySQL 的语义，Go 定义了但没用）或 1836。**事务内加锁读**：1792 或 1235 | 语法 **(b)**（特性例外，用户可见）；写语句和事务内加锁读都用 **1792** |
 | D9 | 低精度 TSO 后台刷新 | (a) 保持惰性；(b) 照 Go 加后台刷新，周期可调 | **(b)**，按需启用（§4.4） |
 | D10 | `tidb_replica_read` 在 CR 支持前的行为 | (a) 静默忽略（现状）；(b) 非 `leader` 值报错 | **(b)**（宪章第五条） |
+| D11 | `tidb_rc_read_check_ts` | (a) 实现：CR 在读请求上带 `RcCheckTs`，`WriteConflict` 后用新 TSO 重试（`readcommitted.go:202-213`、`:355-356`）；(b) 设置为 ON 时报"不支持" | 先 **(b)**，CR 支持后做 (a)。不允许只复用 ts、不做检查 |
 
 ## 7. 验收
 
@@ -491,27 +510,32 @@ enum ReadTsSource {
    - 单元测试：准入与注销交错时，结果被拒绝；
    - `debug_assert!` 覆盖 §4.2 第 3 条；
    - 启动参数 `max_staleness < lease` 时拒绝启动。
-3. **lease 按 TSO**：用 failpoint 冻结同步循环。`phys(read_ts) > expire_ts` 的语句不被准入；注销发生在准入停止之后（日志顺序加上 etcd 键消失的时间）。
-4. **MDL**：
+3. **lease 按 TSO、按"当前"计**：
+   - 用 failpoint 冻结同步循环：`phys(now_ts) > expire_ts` 之后不再准入；注销发生在准入停止之后（日志顺序加上 etcd 键消失的时间）。
+   - 一个 RR 显式事务在同步停止前开始：lease 过期后，它的下一条语句走等待 reload → ADR 0003 回退路径，而不是因为 start_ts 旧而按同步的 schema 通过；不报 8027。
+   - **被动失去注册**：阻断 tidb-rs 到 etcd 的连接，但保持它到 TiKV / PD TSO 的连接（同步循环仍然成功）。etcd lease 的余量耗尽后，节点停止准入；Go 上的 DROP INDEX 推进到 delete-only 之后，tidb-rs 不会经由该索引读。
+4. **minstartts**：一条 autocommit 查询运行超过 `tidb_gc_life_time` 时，GC safepoint 不越过它的 start_ts（`gc_worker.go:536-560` 的日志 "gc safepoint blocked by a running session"），查询不报 9006。
+5. **MDL**：
    - 显式只读事务读表 t 时，Go 上的 `ALTER TABLE t ADD COLUMN` 等到事务结束才完成；
    - autocommit 读不阻挡；
    - 事务内首次访问一个新加了索引的表，不使用该索引（与 Go 对照）。
-5. **升级**：在 playground 里手工把 `tidb_server_version` 改成 233，节点在一个同步周期内拒绝服务，指标为 1；改回后恢复。
-6. **读 ts**：
+6. **升级**：在 playground 里手工把 `tidb_server_version` 改成 233，节点只报警（指标为 1），照常服务；用 failpoint 注入一个不认识的 diff 类型，节点在一个同步周期内拒绝服务，去掉后恢复。
+7. **读 ts**：
    - `tidb_low_resolution_tso=ON` 时语句不发 TSO 请求（PD 请求计数）；
    - 后台刷新周期跟随 sysvar；
    - RC 显式事务每条语句一个 TSO，RR 一个。
-7. **显式事务**：
+8. **显式事务**：
    - 两条 SELECT 之间 Go 提交了一行，RR 事务内看不到，RC 看得到；
    - 写语句报 D8 的错误码；
    - `SERVER_STATUS_IN_TRANS` 在 BEGIN 之后置位、COMMIT 之后清除（抓包）。
-8. **global KILL**（D2 (b)）：从 Go 节点 `KILL` tidb-rs 的连接，语句在一个 checkpoint 内结束（N3）。
+9. **global KILL**（D2 (b)）：从 Go 节点 `KILL` tidb-rs 的连接，语句在一个 checkpoint 内结束（N3）。
 
 ## 8. 风险
 
 - **lease 变长后 DDL 被挡得更久**：卡住的 tidb-rs 最多挡 45 s（现在 5 s）。Go 节点在 etcd 还活着的情况下会挡更久（无上限），所以这仍不差于 Go，但会被用户看到。缓解：D5 可配置；指标和日志报出"本节点正在挡 DDL"。
 - **TSO 与本地时钟**：准入用 TSO，watchdog 拿不到 TSO 时（PD 不可用）只能用墙钟加余量来判断。这正是 PD 不可用的时候，语句本身也取不到 TSO，影响有限（推断）。
 - **严格模式误报**：Go 小版本也可能在 JSON 中加字段，导致表级拒绝。缓解：上游同步流程把新增字段登记为"已知"；报警而不是静默。
+- **默认 `autocommit=0` 的驱动**：Python DB-API（PyMySQL 默认关闭 autocommit）和一些 JDBC 连接池，在连接上执行查询后从不 COMMIT。这样的连接会长期占着快照、MDL 条目（挡住相关表的 DDL）和 minstartts（挡住 GC）。Go 的行为相同，但只读的 BI 工具正是模式 3 的用户。缓解：指标报出最老事务的年龄、正在挡 DDL 的 tidb-rs 事务、本节点压住的 GC safepoint；`wait_timeout` 断开空闲连接（需要协议层支持）；在用户文档中说明。
 - **显式事务的生命周期**：tidb-rs 第一次需要跨语句的会话状态（快照、MDL 条目、minstartts）。客户端忘了 COMMIT 时，资源一直被占着，与 Go 相同；靠 `wait_timeout` 断开连接，需要协议层支持。
 
 ## 9. 与其他 spec 的关系

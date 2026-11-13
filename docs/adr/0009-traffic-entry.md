@@ -78,6 +78,8 @@ tidb-go 一侧（v8.5.8）与本 ADR 相关的事实：
 
 tidb-rs 的执行在应用的关键路径之外。影子连接积压时，TiProxy 丢弃影子请求并计数，不反压应用。
 
+**注入 ts 的语义**（D1）：注入的 `ts` 取代 tidb-go 中该语句（RR 事务则是整个事务）的**所有**读 ts 来源，包括 MaxTS 点查（`optimistic.go:128-172`）和低精度 TSO（`base.go:643-660`）。tidb-rs 侧同样用 `External(ts)`，不走 MaxTS。
+
 **TSO 的正确性**（D2）
 - 应用看到的是 tidb-go 的结果，所以注入的 `ts` 必须和 tidb-go 自己取的 TSO 一样新：**在语句到达 TiProxy 之后发出请求**。只有这样，应用在此之前确认过的提交才对它可见。
 - 多个连接同一时间段到达的语句**合批**取 TSO，是安全的（PD client 本来就这样做，PD `pkg/batch/batch_controller.go:68-183`）。
@@ -117,7 +119,7 @@ tidb-rs 的执行在应用的关键路径之外。影子连接积压时，TiProx
 | 组件 | 改动 |
 |---|---|
 | TiProxy | PD TSO client（合批、不复用，D2）；每个客户端连接一个影子后端连接；会话状态命令的转发与 prepared ID 映射；结果摘要；把 `(语句, ts, g)` 送到 tidb-rs；限流与丢弃；tidb-rs 的发现（D3） |
-| tidb-go | 接受注入的读 ts（D1），语义等同"刚从 PD 取到的 TSO"：用最新 schema、持有 MDL、照常走 SchemaValidator；校验 `ts` 不晚于 PD 当前时间（CG `ValidateReadTS`，`oracle/oracles/pd.go:667-713`），或只对可信连接免校验（D1） |
+| tidb-go | 接受注入的读 ts（D1），语义等同"刚从 PD 取到的 TSO"：用最新 schema、持有 MDL、照常走 SchemaValidator。**注入的 ts 取代所有读 ts 来源**：该语句不走 MaxTS 点查优化（否则 Go 读最新数据、tidb-rs 读在 `ts` 上，每个 autocommit 点查都是假的不一致；`pkg/sessiontxn/isolation/optimistic.go:128-172`），也不用低精度 TSO（`base.go:643-660`）；校验 `ts` 不晚于 PD 当前时间（CG `ValidateReadTS`，`oracle/oracles/pd.go:667-713`），或只对可信连接免校验（D1） |
 | tidb-rs | 影子连接的命令（接收 `ts` 和 `g`，执行，比对，记录，只回 OK）；N11 §4.4 的 `External(ts)` 读 ts（准入照 §4.2，用同步的 schema）；诊断记录的存储与查询（N9 的语句记录加一个"影子比对"字段）；会话状态的 `SET SESSION_STATES` 和 token 认证 |
 
 ### 3.3 模式 2：直连，`autocommit=1`
@@ -158,6 +160,15 @@ ORM 和 JDBC 常把读包在 `autocommit=0` 的事务里（#128），这是模�
   - tidb-go 遇到不认识的 feature ID，整段当普通注释，结果是普通 BEGIN（`parser/lexer.go:560-571`、`parser/tidb/features.go:54-61`，实测）；
   - TiProxy 识别这个标记，转发给 tidb-rs 时改写成 `START TRANSACTION READ ONLY`。
   - 这样 tidb-rs 的 parser 不用加 feature ID，仍按 Go 移植；`READ ONLY` 的语义由 N11 D8 决定。
+
+**钉在 tidb-go 上的会话**：TiProxy 不解析表名，所以出现以下情况之一后，会话在剩余的生命周期里不再分流（直到 `COM_RESET_CONNECTION` / `COM_CHANGE_USER` 清除这些状态）：
+- `CREATE [GLOBAL] TEMPORARY TABLE`：之后发往 tidb-rs 的 SELECT 会找不到该表，或读到同名的普通表；
+- `LOCK TABLES`；
+- advisory lock（`GET_LOCK`，Go 的 `session.advisoryLocks`，`pkg/session/session.go:233`、`:1670`）。
+
+这与 tidb-go 拒绝迁移会话的条件一致（8146，`pkg/session/session.go:4665-4692`）。
+
+**标记可能在途中丢失**：`mysql` 命令行客户端默认去掉注释（只保留 `/*!` 和 hint，除非加 `--comments` / `-c`），有些代理和 ORM 也会这样做。`/*T![...]` 被去掉后，事务成了普通 `BEGIN`，静默地走 tidb-go。这是安全的方向（结果正确，只是没有分流），但测试和排查时要知道：用 `mysql` 命令行验证分流时必须加 `--comments`。TiProxy 为每个会话计数"带标记的事务"，便于确认标记是否到达。
 
 **会话状态在两个后端之间**（D5）
 - 每个客户端连接同时保持一个 tidb-go 连接和一个 tidb-rs 连接。
@@ -211,12 +222,12 @@ ORM 和 JDBC 常把读包在 `autocommit=0` 的事务里（#128），这是模�
 
 | # | 问题 | 选项 | 建议 |
 |---|---|---|---|
-| D1 | tidb-go 怎样接受 TiProxy 给的 start_ts（模式 1） | (a) 新增隐藏的一次性会话变量，取精确 TSO，语义等同新取的 TSO（持有 MDL、用最新 schema），由 TiProxy 在语句前设置（用 multi-statement 或紧跟的一个包，避免多一次往返）；(b) COM_QUERY 用语句注释，二进制协议用变量；(c) 不改 tidb-go：tidb-go 照常执行，TiProxy 事后读 `@@tidb_last_query_info` 得到 `start_ts` 再交给 tidb-rs，但多一条语句，并会覆盖 `SHOW WARNINGS` 等"上一条语句"状态；(d) 用 `tidb_snapshot`：语义不同（历史 schema、无 MDL、不进事务），**不可用** | **(a)**；校验方式二选一：照 `ValidateReadTS` 校验（ts 新于缓存时多一次 PD 请求），或者只对持有新权限（如 `RESTRICTED_SHADOW_READ`，名字待定）的连接免校验。建议后者。(c) 可作为不改 Go 的早期验证手段 |
+| D1 | tidb-go 怎样接受 TiProxy 给的 start_ts（模式 1） | (a) 新增隐藏的一次性会话变量，取精确 TSO，语义等同新取的 TSO（持有 MDL、用最新 schema），并**取代所有读 ts 来源**（关闭该语句的 MaxTS 点查和低精度 TSO），由 TiProxy 在语句前设置（用 multi-statement 或紧跟的一个包，避免多一次往返）；(b) COM_QUERY 用语句注释，二进制协议用变量；(c) 不改 tidb-go：tidb-go 照常执行，TiProxy 事后读 `@@tidb_last_query_info` 得到 `start_ts` 再交给 tidb-rs，但多一条语句，并会覆盖 `SHOW WARNINGS` 等"上一条语句"状态；(d) 用 `tidb_snapshot`：语义不同（历史 schema、无 MDL、不进事务），**不可用** | **(a)**；校验方式二选一：照 `ValidateReadTS` 校验（ts 新于缓存时多一次 PD 请求），或者只对持有新权限（如 `RESTRICTED_SHADOW_READ`，名字待定）的连接免校验。建议后者。(c) 可作为不改 Go 的早期验证手段 |
 | D2 | TiProxy 的 TSO 缓存 | (a) 只合批，每个请求在语句到达之后发出；(b) 允许复用最近的 TSO（低精度语义） | **(a)**；只有会话本身开着 `tidb_low_resolution_tso` 时才允许 (b) |
 | D3 | TiProxy 怎样发现 tidb-rs | (a) tidb-rs 写 `/topology/tidb-rs/<ip:port>/{info,ttl}`，JSON 与 Go 的 topology 相同，TiProxy 增加一个前缀；(b) TiProxy 静态配置 tidb-rs 地址 | **(a)**：与现有的发现和健康检查代码同构，也可供 Dashboard 后续使用 |
 | D4 | 比对在哪里做（模式 1） | (a) TiProxy 算 tidb-go 的摘要，交给 tidb-rs，由 tidb-rs 比对和记录；(b) TiProxy 比对；(c) 两边各自落日志，离线比对 | **(a)**，与负责人"tidb-rs 做比对和诊断"一致；tidb-rs 有计划，能判断顺序和非确定性 |
 | D5 | 模式 4 的会话状态同步 | (a) 广播会话命令 + prepared ID 映射，必要时在事务边界 `SET SESSION_STATES`；(b) 每次切换后端都 `SHOW/SET SESSION_STATES`（每次 2 个往返加 JSON） | **(a)** |
-| D6 | 只读事务的标记 | (a) `BEGIN /*T![tidb_rs_read_only] READ ONLY */`，TiProxy 改写后发给 tidb-rs；(b) `START TRANSACTION READ ONLY`，tidb-go 打开 `tidb_enable_noop_functions`（会同时放开其他 noop 函数，如 `LOCK IN SHARE MODE`）；(c) `BEGIN /*T! READ ONLY */`：tidb-go 报语法错误，**不可用** | **(a)**；feature ID 的名字待定 |
+| D6 | 只读事务的标记 | (a) `BEGIN /*T![tidb_rs_read_only] READ ONLY */`，TiProxy 改写后发给 tidb-rs；(b) `START TRANSACTION READ ONLY`，tidb-go 打开 `tidb_enable_noop_functions`（会同时放开其他 noop 函数，如 `LOCK IN SHARE MODE`）；(c) `BEGIN /*T! READ ONLY */`：tidb-go 报语法错误，**不可用** | **(a)**；feature ID 的名字待定。标记被客户端去掉时（`mysql` 命令行默认如此），事务安全地走 tidb-go |
 | D7 | 写语句和"可改道"的错误码 | autocommit 写：1836 "Running in read-only mode"（Go 的只读模式）；事务内写：1792（N11 D8）；"可改道"：一个固定的错误码加固定的文字前缀，TiProxy 据此重试 | 如左。"可改道"建议用 1105 加前缀 `tidb-rs: reroute:`，不占用 TiDB 的错误码段 |
 | D8 | 落地顺序与外部改动的归属 | 顺序：(a) 2 → 3 → 1 → 4；(b) 1 优先（先验证一致性）。TiProxy、tidb-go 的改动：在 `dulao5/tiproxy`、`dulao5/tidb`（v8.5.8 + 补丁）的 fork 中维护，或向上游提 | 顺序 **(a)**：2、3 只依赖 tidb-rs 自身，能先给出可用的只读端点；1 需要改 TiProxy 和 Go，但能验证 4 所需的列定义和会话状态兼容性，所以排在 4 之前。外部改动先放 fork，与 ADR 0008 的 client-rust fork 同样的维护方式 |
 
