@@ -24,7 +24,7 @@
 ## 1. 先说结论
 
 1. **核心状态判定一致。** `CheckTxnStatus` 的请求参数、TTL=0 特殊协议、`TxnNotFound` 重试、悲观锁 `primaryMismatch`、async commit 从 secondaries 恢复状态、fallback 到 `forceSyncCommit`，client-rust 都已按 client-go 实现，且有单元测试。正确性上没有发现会让读结果不同的缺口。
-2. **读路径的主要差距是"读优化"整体缺失**（§3.1）。client-go 8.5 的所有快照读（Get / BatchGet）和 coprocessor 都走 `ForRead=true`：已提交或已回滚的事务，不等它的锁被清掉，而是把事务 ID 放进重试请求的 `Context.resolved_locks` / `committed_locks`，清锁放到后台做。client-rust 只在 max-ts 点查里用了 `resolved_locks`，`committed_locks` 完全没用；其他读都是"同步清锁，再重读"。结果相同，但遇锁时延迟更高、RPC 更多。
+2. **读路径的主要差距是"读优化"整体缺失**（§3.1）。client-go 8.5 的所有快照读（Get / BatchGet）和 coprocessor 都走 `ForRead=true`：已提交或已回滚的事务，不等它的锁被清掉，而是把事务 ID 记进 `resolved_locks` / `committed_locks` 集合，清锁放到后台做。集合存在快照（Get / BatchGet）或整个 coprocessor 请求上，此后该快照、该请求发出的每个 RPC 都带上。client-rust 只在 max-ts 点查里用了 `resolved_locks`，而且只在一次调用内有效，`committed_locks` 完全没用；其他读都是"同步清锁，再重读"。结果相同，但遇锁时延迟更高、RPC 更多。
 3. **遇到活跃锁时的等待策略不同**（§3.2）。client-go 按锁剩余 TTL（`msBeforeTxnExpired`）限制每次退避的最长睡眠；client-rust 只用固定的 `lock_backoff` 序列，不看 TTL。
 4. **事务状态缓存的作用域不同**（§3.5）。client-go 每个 store 一个 2048 条的 FIFO 缓存，跨请求共享；client-rust 的缓存每次 `resolve_locks` 调用新建一个，调用结束就丢。
 5. **shared lock**（§3.6）：v8.5.8 只有在 `tidb_foreign_key_check_in_shared_lock = ON`（默认 OFF）时才产生。client-go 的快照读遇到也报错（与 client-rust 的 `reject_shared_locks` 一致）；**但 TiDB 的 coprocessor 会把 `shared_lock_infos` 展开逐个解析**，client-rust 的 coprocessor 会直接报错。这是唯一一处"Go 能读、Rust 报错"的点。
@@ -35,7 +35,7 @@
 | 读路径 | client-go 8.5 / TiDB v8.5.8 | client-rust `2fc142f` | 结论 |
 |---|---|---|---|
 | 点查 `Get`（普通 start_ts） | `txnsnapshot/snapshot.go:786` `NewClientHelper(..., resolveLite=true)` → `ForRead=true, Lite=true`；ignore/access 进 `resolvedLocks`/`committedLocks` | `ResolveLock` plan（`src/request/plan.rs:1286`）→ `resolve_locks`（非 ForRead） | **差异**（§3.1、§3.3） |
-| 点查 `Get`（`version == MaxUint64`，autocommit 点查） | `snapshot.go:900`：只被第一个锁阻塞，之后遇到的其他事务的锁直接放入 `resolvedLocks` | `transaction.rs:1157` `get_at_max_ts`：同样只被第一个锁阻塞；`resolve_locks_for_max_ts_read` 只把 `MinCommitTsPushed` 放入 `resolved_locks` | **差异**：Rust 未处理 canAccess；已提交/已回滚走同步清锁 |
+| 点查 `Get`（`version == MaxUint64`，autocommit 点查） | `snapshot.go:900`：只被第一个锁阻塞，之后遇到的其他事务的锁直接放入 `resolvedLocks` | `transaction.rs:1157` `get_at_max_ts`：同样只被第一个锁阻塞；`resolve_locks_for_max_ts_read` 只把 `MinCommitTsPushed` 放入 `resolved_locks`；该集合是 `get_at_max_ts` 的局部变量，只在一次调用内有效 | **差异**：Rust 未处理 canAccess；已提交/已回滚走同步清锁；集合不跨调用（Go 存在快照上） |
 | `BatchGet` | `snapshot.go:591` `resolveLite=false`，`ForRead=true` | `ResolveLock` plan → `resolve_locks` | **差异**（§3.1） |
 | Scan（`txnsnapshot/scan.go:313`） | `ResolveLocks`（**非** ForRead，同步） | `ResolveLock` plan → `resolve_locks` | **一致** |
 | coprocessor | TiDB `pkg/store/copr/coprocessor.go:924` `resolveLite=false`，`ForRead=true`；`:1824` 展开 `shared_lock_infos` | `src/transaction/coprocessor.rs:645` `resolve_locks`（非 ForRead），不发 `resolved_locks`/`committed_locks` | **差异**（§3.1、§3.6） |
@@ -51,6 +51,8 @@
 | `resolveLocks` 中 `!forRead` 时 TTL 未过期才 `continue`（`go:616`）；ForRead 时对活跃锁也做 canIgnore 判断 | 无 | **缺失** |
 | canIgnore：`action == MinCommitTSPushed` 或已回滚 或 `commitTS > callerStartTS`（`go:624`） | 仅 `MinCommitTsPushed` 且 max-ts（`rs:188`） | **缺失**（已回滚、提交在读之后两种情况） |
 | canAccess：已提交且 `commitTS <= callerStartTS`（`go:630`），由 `ClientHelper` 放入 `Context.committed_locks`（`txnsnapshot/client_helper.go`） | 无；`committed_locks` 字段从未赋值 | **缺失** |
+| 集合的作用域：`resolvedLocks` / `committedLocks` 是 `KVSnapshot` 的字段（`txnsnapshot/snapshot.go:124`），Get / BatchGet 共用；coprocessor 是 `copIterator` 的字段（TiDB `pkg/store/copr/coprocessor.go:708`），整个请求的所有 task 共用；`ClientHelper.SendReqCtx` 每次发请求都带上全集 | 仅 `get_at_max_ts` 的局部变量 | **缺失**。R1 在 Rust 中必须是每个快照一份、每个 coprocessor 请求一份的状态，不能是重试循环里的局部变量 |
+| 自己的 start_ts：coprocessor 非 stale read 时把 `req.StartTs` 放入 `resolvedLocks`（TiDB `coprocessor.go:204`）；`KVSnapshot.SetPipelined(ts)` 同样放入（`snapshot.go:1263`）。原因：8.5 的 `tidb_dml_type = "bulk"`（pipelined DML）会在读的同时写出 ts 与自己 start_ts 相同的锁 | 无 | **缺失，暂不做**：只在 tidb-rs 支持 pipelined DML（写路径）时需要，随那次移植一起做 |
 | ForRead 时非悲观锁的 `resolveLock` 在 goroutine 里异步执行（`go:584`），用 `asyncResolveCtx` + `asyncResolveLockMaxBackoff = 40000` | 同步 `resolve_lock_with_retry`（`rs:203`），完成后才重读 | **差异**（延迟） |
 | ForRead 时 async commit 的整笔清锁也异步执行（`resolveAsyncCommitLock(..., asyncResolveAll=forRead)`，`go:1092`） | 同步 | **差异**（延迟） |
 | `LockResolver.Close()` 取消后台任务（`go:110`） | 无后台任务 | 随上项一起处理 |
@@ -63,7 +65,7 @@
 |---|---|---|
 | 对所有锁先查事务状态，状态已定就立即清锁，不看锁 TTL（`go:604`、`resolve` 闭包） | 同（`rs:156` 注释及循环） | **一致** |
 | 活跃锁：`UntilExpired(txnID, ttl)` 取最小值作为 `ResolveLockResult.TTL`（`go:617`、`go:636`、`go:671`） | 只返回活跃锁列表 `live`，不算剩余时间 | **缺失** |
-| 调用方用 `BackoffWithMaxSleepTxnLockFast(msBeforeExpired)`：每次睡眠不超过锁剩余 TTL（`snapshot.go:582`、copr `coprocessor.go:1843`） | `ResolveLock` plan / coprocessor 用固定 `lock_backoff.next_delay_duration()`（`plan.rs:1310`、`coprocessor.rs:653`） | **差异**：锁快过期时 Rust 可能睡得比需要的久；锁 TTL 很长时 Go 也是按退避上限睡，二者相近 |
+| 调用方用 `BackoffWithMaxSleepTxnLockFast(msBeforeExpired)`：每次睡眠不超过锁剩余 TTL（`snapshot.go:582`、copr `coprocessor.go:1843`） | `ResolveLock` plan / coprocessor 用固定 `lock_backoff.next_delay_duration()`（`plan.rs:1310`、`coprocessor.rs:653`） | **差异**：锁快过期时 Rust 可能睡得比需要的久；锁 TTL 很长时 Go 也是按退避上限睡，二者相近。预算来源也不同：Go 的退避计入语句级 backoffer 的总预算，Rust 的 `lock_backoff` 是每个 plan / coprocessor task 各自的固定序列，用完即返回 `ResolveLockError` |
 | 出错时 `msBeforeTxnExpired.update(0)`（`go:611`） | 直接返回错误 | **一致**（调用方都把错误上抛） |
 
 ### 3.3 lite 模式
@@ -179,8 +181,8 @@
 
 | # | 内容 | 依据 | 建议 |
 |---|---|---|---|
-| R1 | 通用 ForRead：canIgnore（含已回滚、提交在读之后）/ canAccess、`committed_locks`，用于 Get / BatchGet / coprocessor | §3.1 | 移植（L3：与 client-go 行为一致） |
-| R2 | ForRead 下后台异步清锁（含 async commit 整笔清锁）及 `Close` 取消 | §3.1 | 随 R1 移植；8.5 没有任务池，按 8.5 每锁一个 task 的语义即可 |
+| R1 | 通用 ForRead：canIgnore（含已回滚、提交在读之后）/ canAccess、`committed_locks`，用于 Get / BatchGet / coprocessor；集合每个快照一份、每个 coprocessor 请求一份 | §3.1 | 移植（L3：与 client-go 行为一致） |
+| R2 | ForRead 下后台异步清锁（含 async commit 整笔清锁）及 `Close` 取消 | §3.1 | 随 R1 移植；8.5 没有任务池，按 8.5 每锁一个 task 的语义即可。后台任务不跟随语句取消：Go 用 `LockResolver` 自己的 context（`asyncResolveCtx`）和独立的 40 秒 backoffer（`asyncResolveLockMaxBackoff`），只在 `Close` 时取消 |
 | R3 | `msBeforeTxnExpired` 及按 TTL 限制退避睡眠 | §3.2 | 移植 |
 | R4 | coprocessor 展开 `shared_lock_infos` | §3.6 | 移植（只在 coprocessor；快照读保持报错，与 Go 一致） |
 | R5 | lite 模式（`TxnSize < 16`、Get 的 `lite=true`、primary 跳过） | §3.3 | 移植（性能，结果不变） |
@@ -191,4 +193,4 @@
 | R10 | `Resolving()`（DATA_LOCK_WAITS）、`ResolveLockTime` | §3.10 | 归入观测相关块，不在本次 |
 | R11 | `MaxExecutionDurationMs`、`RequestSource`、`ResourceGroupName` | §3.9 | 单独评估（与资源管控一起） |
 
-测试：R1–R4 需要 #101 计划第 3 步的混合集群场景（真实锁：prewrite 后暂停、悲观事务持锁、async commit 中断、`tidb_foreign_key_check_in_shared_lock=ON` 的外键检查），比较 Go TiDB 与 tidb-rs 的读结果和错误；R5–R8 结果不变，用单元测试（mock KV client 计数 RPC）验证 RPC 次数与请求字段。
+测试：R1–R4 需要 #101 计划第 3 步的混合集群场景（真实锁：prewrite 后暂停、悲观事务持锁、async commit 中断、`tidb_foreign_key_check_in_shared_lock=ON` 的外键检查，同时用来验证 §3.6 中读请求何时会遇到 shared lock wrapper），比较 Go TiDB 与 tidb-rs 的读结果和错误；R5–R8 结果不变，用单元测试（mock KV client 计数 RPC）验证 RPC 次数与请求字段。
