@@ -1,0 +1,25 @@
+[package]
+name = "tidb-planner-pilot"
+version = "0.0.0"
+description = "SPIKE, not for merging: D09.7 design pilot (column pruning + projection elimination) validating the N1 plan representation"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), mysql constants.
+tidb-base = { workspace = true }
+# FieldType, Datum.
+tidb-types = { workspace = true }
+# ast function names, CIStr.
+tidb-parser = { workspace = true }
+# TableInfo / ColumnInfo.
+tidb-model = { workspace = true }
+# SessionVars (N2 PlanCtx), exprctx.
+tidb-sessionctx = { workspace = true }
+# Expression tree (Arc<Expr>, Column, Schema) and its helpers (D08.1).
+tidb-expression = { workspace = true }
+
+[lints]
+workspace = true
