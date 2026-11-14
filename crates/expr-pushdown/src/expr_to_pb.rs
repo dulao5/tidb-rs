@@ -299,9 +299,11 @@ impl PbConverter<'_> {
 
 /// ToPBFieldType converts *types.FieldType to *tipb.FieldType.
 ///
-/// tipb's `elems` are `string`s: an element that is not UTF-8 (an ENUM / SET element from a
-/// binary literal) is converted lossily, where Go marshals its bytes (spec §4).
-// go: ToPBFieldType L2 (non-UTF-8 elements converted lossily)
+/// tipb's `elems` are `string`s. v8.5.8 replaces invalid UTF-8 in ENUM / SET elements with
+/// U+FFFD at CREATE TABLE (`enum(x'ff')` is stored as `EF BF BD`), so the elements are UTF-8
+/// and the conversion gives Go's bytes; an element that is not (metadata written by another
+/// version) is logged, asserted in debug builds and converted lossily (spec §4.2).
+// go: ToPBFieldType L2 (non-UTF-8 elements, which v8.5.8 never writes, converted lossily)
 pub fn to_pb_field_type(ft: &FieldType) -> tipb::FieldType {
     let mut pb = tipb::FieldType::default();
     pb.set_tp(ft.get_type() as i32);
@@ -312,14 +314,26 @@ pub fn to_pb_field_type(ft: &FieldType) -> tipb::FieldType {
     pb.set_collate(collate::collation_to_proto(ft.get_collate()));
     if let Some(elems) = ft.get_elems() {
         pb.set_elems(RepeatedField::from_vec(
-            elems
-                .iter()
-                .map(|e| String::from_utf8_lossy(e).into_owned())
-                .collect(),
+            elems.iter().map(|e| elem_to_pb(e)).collect(),
         ));
     }
     pb.set_array(false);
     pb
+}
+
+/// An ENUM / SET element as a tipb `string` (spec §4.2).
+// glue: Go's string -> proto string needs no conversion
+fn elem_to_pb(e: &[u8]) -> String {
+    match std::str::from_utf8(e) {
+        Ok(s) => s.to_owned(),
+        Err(_) => {
+            log::warn!(
+                "ToPBFieldType: ENUM/SET element is not UTF-8, converted lossily elem={e:x?}"
+            );
+            debug_assert!(false, "ENUM/SET element is not UTF-8: {e:x?}");
+            String::from_utf8_lossy(e).into_owned()
+        }
+    }
 }
 
 /// ToPBFieldTypeWithCheck converts *types.FieldType to *tipb.FieldType with checking the
