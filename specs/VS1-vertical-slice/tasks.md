@@ -26,7 +26,7 @@
 
 | # | 任务 | 块 | 标签 | 周 | 依赖 | 完成条件 | 状态 |
 |---|---|---|---|--:|---|---|---|
-| VS1-10 | planbuilder 骨架、preprocess（SELECT）、`planner.Optimize` / `optimize` | D09.0、D09.13 | depth | 0.17 | VS1-01 | govec preprocess 向量一致 | 进行中（分支 `vs1/planner-optimize`） |
+| VS1-10 | planbuilder 骨架、preprocess（SELECT）、`planner.Optimize` / `optimize` | D09.0、D09.13 | depth | 0.17 | VS1-01 | govec preprocess 向量一致 | 进行中（#224） |
 | VS1-11 | `TryFastPlan`、`PointGetPlan` | D10.8 | depth | 0.07 | VS1-10、VS1-19 | 点查计划向量一致 | 未开始 |
 | VS1-19 | `property`、`planner/util`、`baseimpl`、`base_physical_plan` | D10.10、D10.1 | depth | 0.11 | VS1-01 | Go 单测与 govec 通过 | 进行中（#223） |
 | VS1-12 | 点查执行器、`NewRowDecoder`；table 读取部分 | D12.1、D06.4 | depth + breadth | 0.13 | VS1-13、VS1-18 | 行解码 / 默认值 govec；ab `Point_Get` | 未开始 |
