@@ -144,7 +144,6 @@ blocks = ["D05.4"]
 
 [crate.tidb-expr-pushdown]
 rank = 12
-planned = true
 blocks = ["D08.3"]
 
 [crate.tidb-domain]

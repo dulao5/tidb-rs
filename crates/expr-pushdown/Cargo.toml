@@ -1,0 +1,41 @@
+[package]
+name = "tidb-expr-pushdown"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/expression push-down (block D08.3): push-down eligibility (infer_pushdown.go) and the conversion of expressions to tipb (expr_to_pb.go)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), plannererrors, mysql constants, kv.StoreType, contextutil.WarnAppender.
+tidb-base = { workspace = true }
+# Datum, FieldType, collate (CollationToProto, NewCollationEnabled).
+tidb-types = { workspace = true }
+# parser/types (TypeStr), ast function names, charset.
+tidb-parser = { workspace = true }
+# chunk.Row (evaluating constants).
+tidb-chunk = { workspace = true }
+# util/codec: EncodeInt/Uint/Float/Decimal, EncodeMySQLTime.
+tidb-codec = { workspace = true }
+# kv.Client, request types.
+tidb-kv = { workspace = true }
+# EvalContext, SessionVars (NewPushDownContextFromSessionVars).
+tidb-sessionctx = { workspace = true }
+# The expression tree and the signatures' pb codes (D08.1).
+tidb-expression = { workspace = true }
+# tipb.Expr, tipb.FieldType, tipb.ByItem.
+tipb = { workspace = true }
+protobuf = { workspace = true }
+# DefaultExprPushDownBlacklist (atomic.Value, M-SNAP).
+arc-swap = "1"
+# logutil (ported crates log through the `log` facade).
+log = "0.4"
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
