@@ -17,7 +17,7 @@ The parts run in parallel jobs, each against its own cluster (`run.sh <part> <ou
 | `faults` | `tools/ab/faults/run.sh` (needs passwordless sudo, which GitHub's hosted runners have) | 3 TiKV |
 | `locks` | `tools/ab/locks/mixed_locks.py` with `lockgen` | 1 TiKV |
 | `tpch` | TPC-H queries 1-22 (`tpch/queries.sql`, from go-tpc) on `tiup bench tpch prepare --sf 1` data: `tidb-ab` result comparison and per-query time on both sides (`tpch_time.py`, median of 3). SF 1 because `tiup bench` takes an integer scale factor; loading takes about 6 minutes | 1 TiKV |
-| `integrationtest` | TiDB v8.5.8's `tests/integrationtest` (shallow, sparse clone of pingcap/tidb) through `ab integrationtest` in hybrid mode: every statement on Go TiDB, the reads also on tidb-rs and compared; the playground gets `tools/ab/integrationtest.toml`, `TZ=Asia/Shanghai`. A subset of the tests, see below | 1 TiKV |
+| `integrationtest` | TiDB v8.5.8's `tests/integrationtest` (shallow, sparse clone of pingcap/tidb) through `ab integrationtest` in hybrid mode: every statement on Go TiDB, the reads also on tidb-rs and compared; the playground gets `tools/ab/integrationtest.toml`, `TZ=Asia/Shanghai`. All 246 test files, see below | 1 TiKV |
 
 `report.py` turns the parts' JSON into the report:
 
@@ -72,12 +72,10 @@ whose session diverged (tidb-rs rejected a result-affecting `SET` / `USE`; `tool
 after such an `ALTER` would differ (listed entries would come out as "fixed"). So `run.sh` gives
 Go TiDB a `temp-dir` on `/dev/shm` when there is one.
 
-Which tests: every file except those with a statement that makes Go TiDB call the status port of
-every TiDB server in the cluster (`ANALYZE`, `cluster_*` tables, `tidb_decode_sql_digests`,
-`tidb_servers_info`): tidb-rs's status port does not answer that, so Go retries for about 40 s
-per statement and the 67 such files alone would take about 3 hours (`ab integrationtest`'s
-README section). That leaves 179 of the 246 files (about 31k statements, 10k reads sent to
-tidb-rs); the whole part took about 12 minutes locally (11.5 of them in `ab`); `IT_BUDGET` (default 40
+Which tests: all 246 files (about 50k statements, 17k reads sent to tidb-rs). Files with
+`ANALYZE` or `cluster_*` tables used to be skipped: for those Go TiDB calls every TiDB server's
+status port, and until #175 tidb-rs's did not answer, so each such statement took about 40 s.
+The whole part took about 21 minutes locally (20.8 of them in `ab`); `IT_BUDGET` (default 40
 minutes) stops `ab` early and reports the part as incomplete with what it ran. `IT_TESTS`
 selects other tests (names or `prefix/`), `IT_TIDB_DIR` uses an existing checkout instead of
 cloning.

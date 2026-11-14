@@ -25,21 +25,6 @@
     "reason": "YEAR 0 shown as 0, Go shows 0000",
     "issue": "TODO-issue: YEAR value 0 is returned as \"0\" instead of \"0000\""
   },
-  "executor/insert:389": {
-    "class": "bug",
-    "reason": "YEAR 0 shown as 0, Go shows 0000",
-    "issue": "TODO-issue: YEAR value 0 is returned as \"0\" instead of \"0000\""
-  },
-  "executor/insert:393": {
-    "class": "bug",
-    "reason": "YEAR 0 shown as 0, Go shows 0000",
-    "issue": "TODO-issue: YEAR value 0 is returned as \"0\" instead of \"0000\""
-  },
-  "executor/insert:395": {
-    "class": "bug",
-    "reason": "YEAR 0 shown as 0, Go shows 0000",
-    "issue": "TODO-issue: YEAR value 0 is returned as \"0\" instead of \"0000\""
-  },
   "ddl/multi_schema_change:165": {
     "class": "bug",
     "reason": "B ignores the hint for an index that does not exist (dropped by the preceding ALTER); Go fails with 1176",
@@ -90,11 +75,6 @@
     "reason": "B ignores the hint for an index that does not exist (dropped by the preceding ALTER); Go fails with 1176",
     "issue": "TODO-issue: USE/FORCE INDEX naming a nonexistent index is ignored instead of failing with 1176"
   },
-  "executor/autoid:98": {
-    "class": "bug",
-    "reason": "rows >= 2^63 come first: ordered as signed",
-    "issue": "TODO-issue: ORDER BY a BIGINT UNSIGNED primary key returns values >= 2^63 first (signed handle order)"
-  },
   "executor/autoid:195": {
     "class": "bug",
     "reason": "rows >= 2^63 come first: ordered as signed",
@@ -105,37 +85,12 @@
     "reason": "rows >= 2^63 come first: ordered as signed",
     "issue": "TODO-issue: ORDER BY a BIGINT UNSIGNED primary key returns values >= 2^63 first (signed handle order)"
   },
-  "executor/executor:1091": {
+  "executor/autoid:98": {
     "class": "bug",
     "reason": "rows >= 2^63 come first: ordered as signed",
     "issue": "TODO-issue: ORDER BY a BIGINT UNSIGNED primary key returns values >= 2^63 first (signed handle order)"
   },
-  "executor/charset:9": {
-    "class": "bug",
-    "reason": "B accepted the SET but still answers in utf8mb4",
-    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
-  },
   "executor/charset:10": {
-    "class": "bug",
-    "reason": "B accepted the SET but still answers in utf8mb4",
-    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
-  },
-  "new_character_set:11": {
-    "class": "bug",
-    "reason": "B accepted the SET but still answers in utf8mb4",
-    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
-  },
-  "new_character_set:23": {
-    "class": "bug",
-    "reason": "B accepted the SET but still answers in utf8mb4",
-    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
-  },
-  "new_character_set:25": {
-    "class": "bug",
-    "reason": "B accepted the SET but still answers in utf8mb4",
-    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
-  },
-  "new_character_set:27": {
     "class": "bug",
     "reason": "B accepted the SET but still answers in utf8mb4",
     "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
@@ -145,15 +100,10 @@
     "reason": "same message, error code 1064 instead of 1115",
     "issue": "TODO-issue: unknown character set in an introducer, CHAR(... USING) or CONVERT(... USING) fails with 1064 instead of 1115"
   },
-  "expression/builtin:610": {
+  "executor/charset:9": {
     "class": "bug",
-    "reason": "same message, error code 1064 instead of 1115",
-    "issue": "TODO-issue: unknown character set in an introducer, CHAR(... USING) or CONVERT(... USING) fails with 1064 instead of 1115"
-  },
-  "expression/builtin:910": {
-    "class": "bug",
-    "reason": "same message, error code 1064 instead of 1115",
-    "issue": "TODO-issue: unknown character set in an introducer, CHAR(... USING) or CONVERT(... USING) fails with 1064 instead of 1115"
+    "reason": "B accepted the SET but still answers in utf8mb4",
+    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
   },
   "executor/delete:131": {
     "class": "bug",
@@ -170,20 +120,10 @@
     "reason": "the --enable_warnings SHOW WARNINGS has different column metadata",
     "issue": "TODO-issue: SHOW WARNINGS column metadata differs from Go (no INFORMATION_SCHEMA.WARNINGS origin, lengths, flags)"
   },
-  "executor/executor:3": {
+  "executor/executor:1091": {
     "class": "bug",
-    "reason": "column length metadata of the literal",
-    "issue": "TODO-issue: column length of some literals differs from Go (_utf8 introducer counts 4 bytes per char; negative / negated decimal literals)"
-  },
-  "expression/builtin:491": {
-    "class": "bug",
-    "reason": "column length metadata of the literal",
-    "issue": "TODO-issue: column length of some literals differs from Go (_utf8 introducer counts 4 bytes per char; negative / negated decimal literals)"
-  },
-  "expression/builtin:492": {
-    "class": "bug",
-    "reason": "column length metadata of the literal",
-    "issue": "TODO-issue: column length of some literals differs from Go (_utf8 introducer counts 4 bytes per char; negative / negated decimal literals)"
+    "reason": "rows >= 2^63 come first: ordered as signed",
+    "issue": "TODO-issue: ORDER BY a BIGINT UNSIGNED primary key returns values >= 2^63 first (signed handle order)"
   },
   "executor/executor:1673": {
     "class": "bug",
@@ -270,10 +210,25 @@
     "reason": "result column name of a literal",
     "issue": "TODO-issue: column names of literal expressions differ from Go (NULL spellings, leading whitespace/control characters, adjacent string literals, unary plus)"
   },
-  "expression/builtin:963": {
+  "executor/executor:3": {
     "class": "bug",
-    "reason": "result column name of a literal",
-    "issue": "TODO-issue: column names of literal expressions differ from Go (NULL spellings, leading whitespace/control characters, adjacent string literals, unary plus)"
+    "reason": "column length metadata of the literal",
+    "issue": "TODO-issue: column length of some literals differs from Go (_utf8 introducer counts 4 bytes per char; negative / negated decimal literals)"
+  },
+  "executor/insert:389": {
+    "class": "bug",
+    "reason": "YEAR 0 shown as 0, Go shows 0000",
+    "issue": "TODO-issue: YEAR value 0 is returned as \"0\" instead of \"0000\""
+  },
+  "executor/insert:393": {
+    "class": "bug",
+    "reason": "YEAR 0 shown as 0, Go shows 0000",
+    "issue": "TODO-issue: YEAR value 0 is returned as \"0\" instead of \"0000\""
+  },
+  "executor/insert:395": {
+    "class": "bug",
+    "reason": "YEAR 0 shown as 0, Go shows 0000",
+    "issue": "TODO-issue: YEAR value 0 is returned as \"0\" instead of \"0000\""
   },
   "executor/insert:942": {
     "class": "bug",
@@ -289,6 +244,81 @@
     "class": "bug",
     "reason": "error code 1193 (unknown variable) instead of Go's 8136 / 1238",
     "issue": "TODO-issue: SELECT @@ of a removed or wrong-scope system variable fails with 1193 instead of 8136 / 1238"
+  },
+  "expression/builtin:491": {
+    "class": "bug",
+    "reason": "column length metadata of the literal",
+    "issue": "TODO-issue: column length of some literals differs from Go (_utf8 introducer counts 4 bytes per char; negative / negated decimal literals)"
+  },
+  "expression/builtin:492": {
+    "class": "bug",
+    "reason": "column length metadata of the literal",
+    "issue": "TODO-issue: column length of some literals differs from Go (_utf8 introducer counts 4 bytes per char; negative / negated decimal literals)"
+  },
+  "expression/builtin:610": {
+    "class": "bug",
+    "reason": "same message, error code 1064 instead of 1115",
+    "issue": "TODO-issue: unknown character set in an introducer, CHAR(... USING) or CONVERT(... USING) fails with 1064 instead of 1115"
+  },
+  "expression/builtin:910": {
+    "class": "bug",
+    "reason": "same message, error code 1064 instead of 1115",
+    "issue": "TODO-issue: unknown character set in an introducer, CHAR(... USING) or CONVERT(... USING) fails with 1064 instead of 1115"
+  },
+  "expression/builtin:963": {
+    "class": "bug",
+    "reason": "result column name of a literal",
+    "issue": "TODO-issue: column names of literal expressions differ from Go (NULL spellings, leading whitespace/control characters, adjacent string literals, unary plus)"
+  },
+  "expression/issues:73": {
+    "class": "bug",
+    "reason": "same message, error code 1064 instead of 1115",
+    "issue": "TODO-issue: unknown character set in an introducer, CHAR(... USING) or CONVERT(... USING) fails with 1064 instead of 1115"
+  },
+  "new_character_set:11": {
+    "class": "bug",
+    "reason": "B accepted the SET but still answers in utf8mb4",
+    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
+  },
+  "new_character_set:23": {
+    "class": "bug",
+    "reason": "B accepted the SET but still answers in utf8mb4",
+    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
+  },
+  "new_character_set:25": {
+    "class": "bug",
+    "reason": "B accepted the SET but still answers in utf8mb4",
+    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
+  },
+  "new_character_set:27": {
+    "class": "bug",
+    "reason": "B accepted the SET but still answers in utf8mb4",
+    "issue": "TODO-issue: SET of character_set_connection / character_set_results to gbk, NULL or binary is accepted but has no effect"
+  },
+  "select:104": {
+    "class": "bug",
+    "reason": "result column name of a literal",
+    "issue": "TODO-issue: column names of literal expressions differ from Go (NULL spellings, leading whitespace/control characters, adjacent string literals, unary plus)"
+  },
+  "select:93": {
+    "class": "bug",
+    "reason": "column length metadata of the literal",
+    "issue": "TODO-issue: column length of some literals differs from Go (_utf8 introducer counts 4 bytes per char; negative / negated decimal literals)"
+  },
+  "select:94": {
+    "class": "bug",
+    "reason": "result column name of a literal",
+    "issue": "TODO-issue: column names of literal expressions differ from Go (NULL spellings, leading whitespace/control characters, adjacent string literals, unary plus)"
+  },
+  "select:95": {
+    "class": "bug",
+    "reason": "result column name of a literal",
+    "issue": "TODO-issue: column names of literal expressions differ from Go (NULL spellings, leading whitespace/control characters, adjacent string literals, unary plus)"
+  },
+  "select:96": {
+    "class": "bug",
+    "reason": "result column name of a literal",
+    "issue": "TODO-issue: column names of literal expressions differ from Go (NULL spellings, leading whitespace/control characters, adjacent string literals, unary plus)"
   },
   "session/vars:133": {
     "class": "bug",

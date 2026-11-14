@@ -180,15 +180,12 @@ integrationtest)
             || { write_status incomplete '{"error": "cannot fetch pingcap/tidb tests/integrationtest"}'; exit 2; }
         dir=$src/tests/integrationtest/t
     fi
-    # Default: every test without a statement that makes Go TiDB call every TiDB server's status
-    # port (ANALYZE, cluster tables, tidb_decode_sql_digests): tidb-rs's does not answer, so each
-    # waits about 40 s, and the 67 such files would take about 3 hours. The other 179 take about
-    # 15 minutes (README.md).
+    # Default: every test file. (Before #175 the files with ANALYZE / cluster_* statements were
+    # skipped: Go TiDB calls every TiDB server's status port for them, and tidb-rs's did not answer.)
     if [ -n "${IT_TESTS:-}" ]; then
         read -r -a tests <<<"$IT_TESTS"
     else
-        slow='^\s*analyze\s|analyze partition|tidb_decode_sql_digests|tidb_servers_info|cluster_(slow_query|statements|processlist|config|info|load|hardware|systeminfo|log|tidb_trx|deadlocks)'
-        mapfile -t tests < <(cd "$dir" && grep -LiE "$slow" -r --include='*.test' . | sed 's|^\./||; s|\.test$||' | sort)
+        mapfile -t tests < <(cd "$dir" && find . -name '*.test' | sed 's|^\./||; s|\.test$||' | sort)
         [ ${#tests[@]} -gt 0 ] || { write_status incomplete '{"error": "no tests found"}'; exit 2; }
     fi
     # As TiDB's run-tests.sh (and scripts/integrationtest.sh): the expected results assume it.
