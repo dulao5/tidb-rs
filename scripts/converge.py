@@ -27,7 +27,9 @@ Checks, per Rust file:
 
 A block ported in parts (VS1 plan §0 item 3, as D06.2 / D06.3 "part 1"): with
 `--part <functions.tsv> --item <ID>` only the block's functions listed for that work item
-(columns `item`, `block`, `file`, `function`, e.g. specs/VS1-vertical-slice/functions.tsv)
+(columns `item`, `block`, `file`, `function`, e.g. specs/VS1-vertical-slice/functions.tsv;
+an optional `not_ported` column gives the reason a listed function is not ported: such rows
+are exempt, printed with their reason, neither required nor counted as `blocked-by`)
 must converge; the rest of the block is reported as `blocked-by:<block>` (its boundary
 stubs are registered in the tracker's data/stubs.tsv).
 
@@ -86,10 +88,18 @@ def load_funcs(path):
 
 def load_part(path, item, block):
     """(file, symbol) of the rows of work item `item` and block `block` in a part's function
-    list (one item may port parts of several blocks)."""
+    list (one item may port parts of several blocks), and those of them marked not ported
+    (column `not_ported`: the reason, as in the tracker's exemptions), as
+    (part, {(file, symbol): reason})."""
+    part, not_ported = set(), {}
     with open(path, newline="") as f:
-        return {(row["file"], row["function"]) for row in csv.DictReader(f, delimiter="\t")
-                if row["item"] == item and row["block"] == block}
+        for row in csv.DictReader(f, delimiter="\t"):
+            if row["item"] != item or row["block"] != block:
+                continue
+            part.add((row["file"], row["function"]))
+            if (row.get("not_ported") or "").strip():
+                not_ported[(row["file"], row["function"])] = row["not_ported"].strip()
+    return part, not_ported
 
 
 def parse_go_annotation(text, go_files, funcs):
@@ -229,13 +239,16 @@ def main():
     if bool(args.part) != bool(args.item):
         ap.error("--part and --item go together")
     if args.part:
-        part = load_part(args.part, args.item, args.block)
+        part, not_ported = load_part(args.part, args.item, args.block)
         if not part:
             ap.error(f"{args.part}: no function of item {args.item} in block {args.block}")
         part_problems = [f"{args.part}: {f} {s} ({args.item}) is not a function of block {args.block} "
                          f"in func_blocks.tsv" for f, s in sorted(part - expected)]
         rest = expected - part
-        expected &= part
+        # Rows marked not ported are exempt: neither required nor reported as blocked-by.
+        for (f, sym), why in sorted(not_ported.items()):
+            print(f"not ported ({args.part}): {f} {sym}: {why}")
+        expected &= part - set(not_ported)
     expected_files = {f for f, _ in expected}
 
     seen = defaultdict(list)  # (file, symbol) -> [rs locations]

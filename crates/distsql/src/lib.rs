@@ -50,18 +50,30 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Options of a coprocessor read.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct SelectOptions {
     /// Return rows in handle order (descending if the plan scans `desc`).
     pub keep_order: bool,
     /// Region tasks in flight; `None` for the client default (15, TiDB's
     /// `tidb_distsql_scan_concurrency`).
     pub concurrency: Option<usize>,
-    /// TiKV paging `(min_rows, max_rows)`; TiDB uses (128, 50000) (`tidb_min_paging_size`,
-    /// `tidb_max_paging_size`) for paging-enabled readers.
+    /// TiKV paging `(min_rows, max_rows)`, `None` to disable. On by default like Go
+    /// (`tidb_enable_paging`, `tidb_min_paging_size` 128, `tidb_max_paging_size` 50000;
+    /// client-go parity §6); Go turns it off for the index side of IndexLookUp only.
     pub paging: Option<(u64, u64)>,
     /// Schema version the plan was built against (`coprocessor.Request.schema_ver`).
     pub schema_version: i64,
+}
+
+impl Default for SelectOptions {
+    fn default() -> SelectOptions {
+        SelectOptions {
+            keep_order: false,
+            concurrency: None,
+            paging: Some((128, 50000)),
+            schema_version: 0,
+        }
+    }
 }
 
 /// Run `plan` over `ranges` at the snapshot and decode all rows. With partial aggregation
@@ -77,23 +89,46 @@ pub async fn select(
         .get_executors()
         .first()
         .is_some_and(|e| e.get_tbl_scan().get_desc());
-    let mut req = CopRequest::new(
-        REQ_TYPE_DAG,
-        plan.encode()?,
-        ranges.into_iter().map(Into::into).collect(),
-    )
-    .keep_order(options.keep_order)
-    .desc(desc)
-    .schema_ver(options.schema_version);
-    if let Some(c) = options.concurrency {
-        req = req.concurrency(c);
-    }
+    // The kv.Request as Go's distsql.RequestBuilder fills it for a table reader (D07.3 ports
+    // the builder; the PoC sets the fields copr reads): SetDAGRequest (type, data, cacheable,
+    // LimitSize from a trailing Limit), SetKeyRanges, SetDesc, SetKeepOrder, SetFromSessionVars
+    // (isolation SI, paging, store batch size `tidb_store_batch_size` 4), concurrency
+    // `tidb_distsql_scan_concurrency` 15.
+    let limit_size = plan
+        .request
+        .get_executors()
+        .last()
+        .filter(|e| e.has_limit())
+        .map_or(0, |e| e.get_limit().get_limit());
+    let mut req = CopRequest {
+        tp: REQ_TYPE_DAG,
+        data: plan.encode()?,
+        key_ranges: Some(tidb_kv::kv::new_non_partitioned_key_ranges(
+            ranges
+                .into_iter()
+                .map(|r| tidb_kv::KeyRange {
+                    start_key: tidb_kv::Key(r.start),
+                    end_key: tidb_kv::Key(r.end),
+                })
+                .collect(),
+        )),
+        concurrency: options.concurrency.unwrap_or(15) as isize,
+        keep_order: options.keep_order,
+        desc,
+        cacheable: true,
+        schema_var: options.schema_version,
+        store_batch_size: 4,
+        limit_size,
+        ..Default::default()
+    };
     if let Some((min, max)) = options.paging {
-        req = req.paging(min, max);
+        req.paging.enable = true;
+        req.paging.min_paging_size = min;
+        req.paging.max_paging_size = max;
     }
     let paging = options.paging.is_some();
     let start = std::time::Instant::now();
-    let responses = snapshot.coprocessor(req).await?.collect_all().await?;
+    let responses = snapshot.coprocessor(req).await?;
     // Go `selectResult.fetchResp`: the time spent waiting for coprocessor responses, recorded
     // once the last one arrived.
     tidb_metrics::distsql_query(start.elapsed(), paging);
@@ -103,7 +138,7 @@ pub async fn select(
         // per-`Next` check: yields once this poll has used its time slice, so decoding a
         // large result does not hold the worker. No KILL hook yet in the PoC.
         let Ok(()) = tidb_runtime::checkpoint(&()).await;
-        let part = decode_select_response(&resp.data, &plan.output_types)?;
+        let part = decode_select_response(&resp, &plan.output_types)?;
         out.rows.extend(part.rows);
         out.warnings.extend(part.warnings);
     }

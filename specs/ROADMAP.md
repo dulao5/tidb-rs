@@ -87,7 +87,7 @@
 | L1 | [D08.3](D08.3-pushdown/spec.md) | 下推判定与 protobuf 转换（infer_pushdown、expr_to_pb、distsql_builtin；crate `tidb-expr-pushdown`。converge 50/50；`PBToExpr` 中未移植函数族的 316 个 pb code 为 `blocked-by` 边界桩） | 2,073 | 3 | D08.7(97), D08.6(77), D08.9(71), D08.10(26) |
 | L1 | D14.0 | 执行统计数据结构（execdetails、runtime stats） | 1,747 | 3 | — |
 | L2 | D06.4 | table 抽象（tables、index、partition 的读取路径） | 7,136 | 17 | — |
-| L2 | [D07.2](D07.2-copr/spec.md) | coprocessor 客户端（不含 batch/MPP；crate `tidb-store`，第 1、2 部分：建任务、paging、iterator 与 worker、响应处理、client-rust 适配，converge 104/116，其余为豁免；PoC 接入待最后一个 PR） | 2,306 | 5 | D15.1(16), D07.4(10) |
+| L2 | [D07.2](D07.2-copr/spec.md) | coprocessor 客户端（不含 batch/MPP；crate `tidb-store`，第 1、2 部分：建任务、paging、iterator 与 worker、响应处理、client-rust 适配，converge 104/116，其余为豁免；PoC 读取已改走本块，paging 默认开，playground 对比一致） | 2,306 | 5 | D15.1(16), D07.4(10) |
 | L3 | [D06.3](D06.3-infoschema/spec.md) | InfoSchema 构建与缓存（只移植 v2，缓存按 A3；2026-11-14 测试辅助与 auto ID 写入的 25 个函数归 X，295 → 270 个；第 1 部分：v2 的构建与读取，converge 184/270，v1 的 42 个永久豁免） | 4,090 | 9 | D06.6(11) |
 | L3 | D07.3 | distsql 请求构建与结果 | 1,838 | 4 | D10.4(23), D15.1(11), X(10) |
 | L4 | D05.4 | 事务上下文（sessiontxn：isolation、staleread，只读路径） | 1,931 | 14 | D10.1(12) |

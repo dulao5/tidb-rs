@@ -252,7 +252,10 @@ fn main() {
         };
         let kv = KvClient::connect_with(args.pd.clone(), args.tikv_connections)
             .await
-            .map_err(|e| std::io::Error::other(format!("connect to PD {:?}: {e}", args.pd)))?;
+            .map_err(|e| std::io::Error::other(format!("connect to PD {:?}: {e}", args.pd)))?
+            // The coprocessor client's workers run on the ExecPool (D07.2, N3 M-GO).
+            .with_exec_pool(pool.clone())
+            .map_err(|e| std::io::Error::other(format!("coprocessor client: {e}")))?;
         let schema = SchemaCache::new(kv.clone());
         let new_collation = poc_session::detect_new_collation(&kv, &schema)
             .await
