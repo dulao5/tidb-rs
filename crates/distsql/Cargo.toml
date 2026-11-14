@@ -15,6 +15,8 @@ protobuf = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 poc-kv = { workspace = true }
+# kv.Request / KeyRange of the coprocessor client (D07.2).
+tidb-kv = { workspace = true }
 tidb-meta = { workspace = true }
 tidb-metrics = { workspace = true }
 tidb_query_datatype = { workspace = true }

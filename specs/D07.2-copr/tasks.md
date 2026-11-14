@@ -17,5 +17,5 @@
 - [x] T8 `coprocessor.go` 其余部分：`CopClient`（`Send`、`BuildCopIterator`）、`copIterator`（open、Next、Close、lite worker、运行时统计）、worker 与 task sender（N3：ExecPool 上的 task、取消安全的 channel，M-GO / M-CH）、`handleTaskOnce`（请求字段：`Context` 的隔离级别、priority、`RecordTimeStat`、`BusyThresholdMs`、`BucketsVersion`、`max_execution_duration_ms` / `tikv_client_read_timeout`）、响应处理（region 错误重建任务、锁、paging 的剩余区间、store batch 的应答）、`rateLimitAction`（A1）、`copResponse`；`eventCb`（trxevents，D00.3）
 - [x] T9（桩）N9 / N10 钩子：只填资源组名，tagger / runaway / RU 未接（spec §6.3 第 8 条）；原条目：N9 / N10 钩子：`ResourceGroupTagger`（与 D07.0 T8 一起）、request source、`ResourceControlContext` 只填组名（N10 未定之前为桩）；copr 的指标（`metrics.go`）
 - [x] T10 `store.go` 的 `Store` / `kvStore` / `tikvClient` 包装（`coprCache` 为 D07.4，例外 A3）
-- [ ] T11 paging 默认开（client-go-parity §6）：`tidb_enable_paging`、min 128 / max 50000、index lookup 与小 LIMIT 关闭由 D07.3 的请求构建与本块共同保证；PoC 的 coprocessor 读改走本块
-- [ ] T12 集成测试：tiup playground v8.5.8 上与 Go TiDB 对比 cop 读（region 分裂、锁、paging）
+- [x] T11（spec §7.1）paging 默认开（client-go-parity §6）：`tidb_enable_paging`、min 128 / max 50000、index lookup 与小 LIMIT 关闭由 D07.3 的请求构建与本块共同保证；PoC 的 coprocessor 读改走本块
+- [x] T12（spec §7.2）集成测试：tiup playground v8.5.8 上与 Go TiDB 对比 cop 读（region 分裂、锁、paging）

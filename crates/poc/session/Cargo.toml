@@ -28,6 +28,8 @@ tidb-sessionctx = { workspace = true }
 
 [dev-dependencies]
 tidb-distsql = { workspace = true }
+# The tidb_rc_read_check_ts error of the new stack (router test, N11 D11).
+tidb-sessiontxn = { workspace = true }
 tokio = { workspace = true }
 
 [lints]

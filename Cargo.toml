@@ -33,6 +33,7 @@ members = [
   "crates/planner",
   "crates/executor",
   "crates/session",
+  "crates/sessiontxn",
   # SPIKE (D09.7 design pilot for N1): not for merging, not counted in coverage.
   "crates/spike/planner-pilot",
   "tools/ab",
@@ -131,6 +132,7 @@ tidb-codec = { path = "crates/codec" }
 tidb-tablecodec = { path = "crates/tablecodec" }
 tidb-execdetails = { path = "crates/execdetails" }
 tidb-infoschema = { path = "crates/infoschema" }
+tidb-sessiontxn = { path = "crates/sessiontxn" }
 tidb-sessionctx = { path = "crates/sessionctx" }
 tidb-systable = { path = "crates/systable" }
 tidb-expression = { path = "crates/expression" }
@@ -155,8 +157,9 @@ tidb-session = { path = "crates/session" }
 # and scanner) and probed every second until it recovers (specs/D07.1-store/fault-scenarios.md);
 # the kvproto messages re-exported as `tikv_client::proto` for the copr port (client-rust#21,
 # D07.2), and `CopSender`, one coprocessor RPC per region with client-go `SendReqCtx`
-# semantics (client-rust#22, D07.2 part 2).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "ad0d8fca6ca714f18c1d150b0a6f77417577c4ec", default-features = false, features = ["client-go-metrics"] }
+# semantics (client-rust#22, D07.2 part 2); `Transaction::coprocessor` retired (client-rust#23,
+# D07.2 final).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "0208dfbc367a61519079f3591ff3ab849c5d6652", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 async-trait = "0.1"
 bytes = "1.11"
