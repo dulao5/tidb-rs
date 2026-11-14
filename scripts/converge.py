@@ -30,7 +30,9 @@ Besides `// go:`, a function of the block counts as accounted for when it is
     `// go-exception: EXC.B SortItem.Hash64 (cascades)`; or
   * a boundary stub: `// glue: stub of <Symbol>, blocked-by:<block> (<what>)` above the stub
     function (registered in the tracker's data/stubs.tsv);
-both are reported separately from the ported functions.
+both are reported on a separate line ("accounted"); "matched" counts ported functions only.
+With --blocks-done (tracker data/blocks_done.tsv), a block marked done may have no stub
+blocked-by itself.
 
 A block ported in parts (VS1 plan §0 item 3, as D06.2 / D06.3 "part 1"): with
 `--part <functions.tsv> --item <ID>` only the block's functions listed for that work item
@@ -59,8 +61,8 @@ ALLOW_RE = re.compile(r"^\s*#(!?)\[allow\(")
 LEVEL_RE = re.compile(r"^(L1(\s+\[M-[A-Z][A-Z0-9]*(,\s*M-[A-Z][A-Z0-9]*)*\])?|L2\s+\(.+\)|L3)$")
 RULES_RE = re.compile(r"\[(M-[A-Z][A-Z0-9]*(?:,\s*M-[A-Z][A-Z0-9]*)*)\]")
 FMA_MARK_RE = re.compile(r"//.*\[M-FMA\]\s+(\S+\.go):(\d+)")
-FMA_TARGETS_END = "instrs"
-STUB_RE = re.compile(r"^stub of (\S+), blocked-by:(\S+)")  # go_fma_sites.tsv: target columns are between symbol and instrs
+FMA_TARGETS_END = "instrs"  # go_fma_sites.tsv: target columns are between symbol and instrs
+STUB_RE = re.compile(r"^stub of (\S+), blocked-by:(\S+)")
 
 
 def load_rules(path):
@@ -224,6 +226,8 @@ def main():
                     help="function list of the block's parts (item, block, file, function); with --item, "
                          "only that part must converge")
     ap.add_argument("--item", help="the work item of --part (e.g. VS1-10)")
+    ap.add_argument("--blocks-done", help="tracker data/blocks_done.tsv: a done block may have no stub "
+                                          "blocked-by itself")
     ap.add_argument("files", nargs="+")
     args = ap.parse_args()
     lint_allow = load_lint_allow(args.workspace_toml)
@@ -292,8 +296,8 @@ def main():
                             accounted[(f, sym)] = what
                             break
                     else:
-                        if kind == "go-exception":
-                            problems.append(f"{rs}:{line_no}: symbol {sym} not in {go_files} (func_blocks.tsv)")
+                        problems.append(f"{rs}:{line_no}: {kind} names {sym}, which is not in {go_files} "
+                                        f"(func_blocks.tsv)")
                 continue
             if kind != "go":
                 continue
@@ -341,12 +345,22 @@ def main():
     if fma_sites is not None:
         print(f"M-FMA: {fma_checked} registered site(s) in the ported Go files")
     acc = [k for k in expected if k in accounted and k not in seen]
-    print(f"matched {len(expected & set(seen)) + len(acc)}/{len(expected)} (ported {len(expected & set(seen))}, "
-          f"stubs {sum(1 for k in acc if accounted[k].startswith('stub'))}, "
-          f"exceptions {sum(1 for k in acc if accounted[k].startswith('exception'))}), missing {len(missing)}, "
+    n_stubs = sum(1 for k in acc if accounted[k].startswith("stub"))
+    n_exc = sum(1 for k in acc if accounted[k].startswith("exception"))
+    # matched counts ported functions only; stubs and exceptions are reported apart.
+    print(f"matched {len(expected & set(seen))}/{len(expected)}, missing {len(missing)}, "
           f"extra {len(extra)}, duplicated {len(dups)}")
+    print(f"accounted (stubs {n_stubs} / exceptions {n_exc})")
     for k in sorted(acc):
         print(f"accounted: {k[0]} {k[1]}: {accounted[k]}")
+    if args.blocks_done:
+        with open(args.blocks_done, newline="") as f:
+            done = {row["block"] for row in csv.DictReader(f, delimiter="\t")}
+        if args.block in done:
+            own = sorted(k for k in acc if accounted[k] == f"stub {args.block}")
+            for k in own:
+                problems.append(f"{k[0]} {k[1]}: stub blocked-by:{args.block}, but {args.block} is done "
+                                f"(blocks_done.tsv)")
     for k in both:
         problems.append(f"{k[0]} {k[1]} is both ported (go:) and {accounted[k]}")
     for f in not_covered:
