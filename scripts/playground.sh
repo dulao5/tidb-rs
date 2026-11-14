@@ -35,6 +35,12 @@ while getopts "t:o:v:c:" opt; do
         *) echo "usage: $0 start|stop|status|clean [-t tag] [-o offset] [-v version] [-c extra-tidb.toml]" >&2; exit 2 ;;
     esac
 done
+# The tag names a directory that `clean` removes (~/.tiup/data/<tag>): letters, digits, `_`
+# and `-` only, so it can never be empty, `.`, `..` or a path.
+if ! [[ $tag =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "$0: invalid tag '$tag' (allowed: A-Z a-z 0-9 _ -)" >&2
+    exit 2
+fi
 
 tiup_home=${TIUP_HOME:-$HOME/.tiup}
 data_dir=$tiup_home/data/$tag
