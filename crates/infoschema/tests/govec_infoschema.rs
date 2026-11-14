@@ -822,8 +822,14 @@ fn replay(path: &str) {
     assert_eq!(n as u64, header["records"].as_u64().unwrap());
 }
 
+/// The tests of this file run one at a time: `loadTableSF` is process-wide and keyed by
+/// (schema ID, table ID, schema version), like Go's, which assumes one cluster per process;
+/// two scenarios replayed at once are two clusters with the same IDs and versions.
+static SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 #[test]
 fn govec_infoschema() {
+    let _serial = SERIAL.lock();
     replay(&vectors());
     if let Ok(files) = std::env::var("GOVEC_INFOSCHEMA_FILES") {
         for f in files.split(',').filter(|f| !f.is_empty()) {
@@ -850,6 +856,7 @@ fn cache_independent(q: Value) -> Value {
 /// version present, as Go's GetOldestSchemaVersion guarantees) to the same `Data`.
 #[test]
 fn readers_at_a_fixed_version_while_the_builder_writes() {
+    let _serial = SERIAL.lock();
     let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(vectors()).expect("vectors"));
     let mut text = String::new();
     gz.read_to_string(&mut text).unwrap();
