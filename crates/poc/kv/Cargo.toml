@@ -12,6 +12,11 @@ futures = { workspace = true }
 thiserror = { workspace = true }
 tikv-client = { workspace = true }
 tokio = { workspace = true }
+# The coprocessor client (D07.2): cop reads go through `tidb_store::copr`.
+tidb-base = { workspace = true }
+tidb-kv = { workspace = true }
+tidb-runtime = { workspace = true }
+tidb-store = { workspace = true }
 
 [lints]
 workspace = true

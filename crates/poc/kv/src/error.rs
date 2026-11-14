@@ -16,6 +16,9 @@ pub enum Error {
     /// PD or TiKV could not be reached, or a gRPC call failed.
     #[error("TiKV/PD unavailable: {0}")]
     Unavailable(#[source] Box<tikv_client::Error>),
+    /// An error of the coprocessor client (`tidb_store::copr`, D07.2): already a TiDB error.
+    #[error("{0}")]
+    Copr(tidb_base::errors::Error),
     /// Any other client error.
     #[error("TiKV client error: {0}")]
     Other(#[source] Box<tikv_client::Error>),
