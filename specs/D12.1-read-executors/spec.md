@@ -8,15 +8,15 @@ Go 范围：`pkg/executor` 中读取类执行器（point get、batch point get�
 
 ### 1.1 第 1 部分（VS1-12：点查，不含加锁）
 
-函数清单是 `specs/VS1-vertical-slice/functions.tsv` 中 VS1-12 / D12.1 的 31 个函数。
+函数清单是 `specs/VS1-vertical-slice/functions.tsv` 中 VS1-12 / D12.1 的 33 个函数（`fillRowChecksum`、`shouldFillRowChecksum` 按 #234 评审补登记）。
 
 | Go | Rust（`crates/executor/src/`） | 内容 |
 |---|---|---|
-| `point_get.go` | `point_get.rs` | `buildPointGet`、`PointGetExecutor`（`Init`、`Open`、`Next`、`Close`、`get`、`buildVirtualColumnInfo`）、`GetPhysID`、`DecodeRowValToChunk`、`decodeOldRowValToChunk`、`tryDecodeFromHandle`、`notPKPrefixCol`、`getColInfoByID`、`runtimeStatsWithSnapshot`；清单外顺带移植 `matchPartitionNames`、`getAndLock`、`lockKeyIfNeeded`、`lockKeyIfExists`、`lockKeyBase`（加锁分支是桩）、`verifyTxnScope`、`shouldFillRowChecksum`、`fillRowChecksum` |
+| `point_get.go` | `point_get.rs` | `buildPointGet`、`PointGetExecutor`（`Init`、`Open`、`Next`、`Close`、`get`、`buildVirtualColumnInfo`）、`GetPhysID`、`DecodeRowValToChunk`、`decodeOldRowValToChunk`、`tryDecodeFromHandle`、`notPKPrefixCol`、`getColInfoByID`、`runtimeStatsWithSnapshot`；`shouldFillRowChecksum`、`fillRowChecksum`；清单外顺带移植 `matchPartitionNames`、`getAndLock`、`lockKeyIfNeeded`、`lockKeyIfExists`、`lockKeyBase`（加锁分支是桩）、`verifyTxnScope` |
 | `builder.go` | `builder.rs` | `NewRowDecoder`、`getSnapshot`、`getSnapshotTS`、`validCanRead*`、`buildIndexUsageReporter`、`newReplicaReadAdjuster`、`isCommonHandleRead`、`getPhysicalTableID`、`buildHandleColsForExec` |
 | `table_reader.go` | `table_reader.rs` | 只有点查用到的 `buildVirtualColumnIndex`（其余随 VS1-34） |
 
-converge：`scripts/converge.py --block D12.1 --part specs/VS1-vertical-slice/functions.tsv --item VS1-12 crates/executor/src/{point_get,builder,table_reader}.rs` 为 29/31 移植 + 2 个边界桩（`getCacheTable` → D06.4 第 2 部分；`newClosestReadAdjuster` → D07.3，只有 table reader 用）。
+converge：`scripts/converge.py --block D12.1 --part specs/VS1-vertical-slice/functions.tsv --item VS1-12 crates/executor/src/{point_get,builder,table_reader}.rs` 为 31/33 移植 + 2 个边界桩（`getCacheTable` → D06.4 第 2 部分；`newClosestReadAdjuster` → D07.3，只有 table reader 用）。
 
 ### 1.2 块内其余（`blocked-by:D12.1`）
 
@@ -55,6 +55,8 @@ BatchPointGet、TableReader（VS1-34）、IndexReader、IndexLookUp、IndexMerge
 1. `buildPointGet` 在执行器共享语句上下文之前写 `StmtCtx.IndexNames`（Go 在建好之后写，中间没有人读）。
 2. `newReplicaReadAdjuster` 在建立时读 `tidb_adaptive_closest_read_threshold`（Go 在调用时读，同一语句内不变）；client-go 的 `StoreSelectorOption` 表示为它要匹配的 label 列表。
 
+3. **行 checksum 的时区**：Go 的 `fillRowChecksum` 用 `SessionVars.TimeZone`，可能为 nil（此时 `DecodeRowWithMapNew` 不转换 TIMESTAMP，而非零值的 `ConvertTimeZone(UTC, nil)` 在 `Time.In` 中 panic）；Rust 传 `Location()`（nil 时为系统时区）。会话执行语句前总会加载 `time_zone`，此后两者相同（#234 评审认可，代码注释中写明）。TIMESTAMP 先解码到会话时区，`appendDatumForChecksum` 再换回 UTC 计算，所以只要两处用同一个时区，checksum 与时区无关；govec 的 `row_checksum` 记录覆盖 UTC 与 +8、-3、+5:30、-9:30 的会话时区（把 Rust 侧改成固定 UTC，有 66 条记录不同）。
+
 ## 5. 待定与可能的上游问题
 
 1. **唯一索引点查不在任何 VS1 工作项中。** `EncodeUniqueIndexKey` / `EncodeUniqueIndexValuesForKey` 在 tracker 中属于 D09.0，但 VS1 的函数清单（VS1-10、VS1-11）都没有它们，而 plan 的 C2 形态包括"唯一索引等值"点查。建议并入 VS1-11（与 `PointGetPlan` 一起），否则 ab 的唯一索引 `Point_Get` 形态会一直回退。
@@ -63,8 +65,10 @@ BatchPointGet、TableReader（VS1-34）、IndexReader、IndexLookUp、IndexMerge
 
 ## 6. 测试
 
-- **govec 领域 `pointget`**（tracker `govec/domains/pointget.go`）：`NewRowDecoder` + `DecodeRowValToChunk`，3600 条：行格式 v1 720 条、v2 2880 条（其中 large 452、带 checksum 726、含 NULL 列 728），common handle 536 条（含前缀列、需要 restored data 的列），`_tidb_rowid` 883 条，虚拟列 272 条；每行只存部分列，其余按 origin default 读（"新增列"），错误 649 条（默认值转换失败等）。`crates/executor/tests/govec_pointget.rs` 回放每条记录两次（第二次结果必须相同：每次解码只借用 field type），再把没有错误、没有虚拟列的记录交给完整的点查执行器（`glue::PointGetPlan` + 内存快照），行必须相同，且只读了那一个 record key。
+- **govec 领域 `pointget`**（tracker `govec/domains/pointget.go`）：`NewRowDecoder` + `DecodeRowValToChunk`，共 5850 条，其中 `decode_row_val` 4050 条（下面是最初 3600 条的分布）：行格式 v1 720 条、v2 2880 条（其中 large 452、带 checksum 726、含 NULL 列 728），common handle 536 条（含前缀列、需要 restored data 的列），`_tidb_rowid` 883 条，虚拟列 272 条；每行只存部分列，其余按 origin default 读（"新增列"），错误 649 条（默认值转换失败等）。`crates/executor/tests/govec_pointget.rs` 回放每条记录两次（第二次结果必须相同：每次解码只借用 field type），再把没有错误、没有虚拟列的记录交给完整的点查执行器（`glue::PointGetPlan` + 内存快照），行必须相同，且只读了那一个 record key。
+- **行 checksum**（`row_checksum`，1800 条）：`fillRowChecksum` 写进新 chunk 的 `_tidb_row_checksum` 列，与 Go 比较每列（未写 / NULL / checksum 字符串）和错误。schema 中 checksum 列位置随机；int handle、`_tidb_rowid` 表与聚簇表；行只含部分列（新增列取 origin default，默认值转换失败的报错 359 条）；行格式 v1 的 checksum 为 NULL（356 条）；约一半的表带一个 TIMESTAMP 列；会话时区见 §4 第 3 条。另有 450 条 `decode_row_val` 的 schema 含 checksum 列：v2 时解码器给 NULL，v1 时 Go 的 `getColInfoByID(-4)` 为 nil 而 panic，Rust 同样 panic。Go 侧经 `go:linkname` 调用未导出的 `fillRowChecksum`。
 - **record key**：`pointget` 不重复 handle 编码的向量。`tablecodec` 领域的 `keys` 记录（`EncodeRowKeyWithHandle`，int / common / partition handle，`rowh`）经点查执行器回放，执行器读的 key 必须等于 Go 的 `rowh`（评审要求：handle 编码与 VS1-18 的 snapshot `Get` 共用一套向量；VS1-18 本身没有 govec 领域，它读的 key 就是这一份）。
+- 唯一索引路径（索引 key、`decode_handle_in_index_value`、全局索引分区 ID、不一致错误）要等 `EncodeUniqueIndexKey` 等移植后测试，已写入 VS1-11 的完成条件。
 - **单测**（`point_get/tests.rs`）：int handle 读行（handle 列、存储列、新增列的默认值）、快照选项、读到的 key；行不存在；`Init` 复用后读新 handle、虚拟列求值；`Init` 共享 schema 的 `Arc<FieldType>`；`FOR UPDATE` / 分区表 / 缓存表 / 本地临时表 + `tidb_snapshot` / 唯一索引各自停在对应的块或 Go 的错误；`GetPhysID`、`matchPartitionNames`、`runtimeStatsWithSnapshot`。
 - CI：`govec_pointget` 也在 `TZ=America/Sao_Paulo` 下运行，arm64 job 回放 arm64 向量。
 - ab `Point_Get`：要等 VS1-11（`TryFastPlan` / `PointGetPlan`）和 VS1-14（会话）接上才能跑，属于 VS1-20 的集成验收。

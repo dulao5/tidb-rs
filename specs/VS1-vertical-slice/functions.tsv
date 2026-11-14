@@ -285,12 +285,14 @@ VS1-12	D12.1	pkg/executor/point_get.go	PointGetExecutor.buildVirtualColumnInfo	9
 VS1-12	D12.1	pkg/executor/point_get.go	PointGetExecutor.get	45	
 VS1-12	D12.1	pkg/executor/point_get.go	decodeOldRowValToChunk	48	
 VS1-12	D12.1	pkg/executor/point_get.go	executorBuilder.buildPointGet	87	
+VS1-12	D12.1	pkg/executor/point_get.go	fillRowChecksum	84	
 VS1-12	D12.1	pkg/executor/point_get.go	getColInfoByID	8	
 VS1-12	D12.1	pkg/executor/point_get.go	notPKPrefixCol	8	
 VS1-12	D12.1	pkg/executor/point_get.go	runtimeStatsWithSnapshot.Clone	8	
 VS1-12	D12.1	pkg/executor/point_get.go	runtimeStatsWithSnapshot.Merge	14	
 VS1-12	D12.1	pkg/executor/point_get.go	runtimeStatsWithSnapshot.String	6	
 VS1-12	D12.1	pkg/executor/point_get.go	runtimeStatsWithSnapshot.Tp	3	
+VS1-12	D12.1	pkg/executor/point_get.go	shouldFillRowChecksum	7	
 VS1-12	D12.1	pkg/executor/point_get.go	tryDecodeFromHandle	27	
 VS1-13	D12.0	pkg/executor/adapter.go	ExecStmt.CloseRecordSet	5	
 VS1-13	D12.0	pkg/executor/adapter.go	ExecStmt.Exec	174	

@@ -35,7 +35,7 @@ use tidb_executor::builder::{new_executor_builder, new_row_decoder};
 use tidb_executor::exec::ExecCtx;
 use tidb_executor::glue::{InfoSchemaRef, Plan, PointGetPlan, SessionContext};
 use tidb_executor::internal::exec::executor as exec;
-use tidb_executor::point_get::decode_row_val_to_chunk;
+use tidb_executor::point_get::{decode_row_val_to_chunk, fill_row_checksum};
 use tidb_expression::Column;
 use tidb_expression::constant::new_zero;
 use tidb_expression::expression::Expr;
@@ -48,7 +48,7 @@ use tidb_kv::kv::{
     Retriever, Snapshot, ValueEntry,
 };
 use tidb_memory::sqlkiller::SqlKiller;
-use tidb_model::{ExtraHandleID, TableInfo};
+use tidb_model::{ExtraHandleID, ExtraRowChecksumID, TableInfo};
 use tidb_sessionctx::errctx::{Level, LevelMap};
 use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_sessionctx::exprstatic as es;
@@ -396,6 +396,21 @@ fn schema_of(tbl: &TableInfo, spec: &Value) -> tidb_expression::Schema {
             .enumerate()
             .map(|(i, c)| {
                 let off = c["off"].as_i64().unwrap();
+                if off == -2 {
+                    // _tidb_row_checksum: CHAR(MaxBlobWidth) in the default charset.
+                    let mut ft = new_field_type(tidb_base::mysql::TypeString);
+                    ft.set_charset("utf8mb4");
+                    ft.set_collate("utf8mb4_bin");
+                    ft.set_flen(tidb_base::mysql::MaxBlobWidth);
+                    ft.set_decimal(0);
+                    return Arc::new(Column {
+                        ret_type: Arc::new(ft),
+                        id: ExtraRowChecksumID as i64,
+                        unique_id: ExtraRowChecksumID as i64,
+                        index: i as isize,
+                        ..Column::default()
+                    });
+                }
                 if off < 0 {
                     return Arc::new(Column {
                         ret_type: Arc::new(new_field_type(TypeLonglong)),
@@ -493,9 +508,16 @@ fn executor_replay(a: &[Value], want: &[Datum]) -> Option<String> {
     t.table_cache_status_type = tidb_model::TableCacheStatusDisable;
     let tbl = Arc::new(t);
     let schema = schema_of(&tbl, &a[2]);
-    if schema.is_empty() || schema.columns.iter().any(|c| c.virtual_expr.is_some()) {
+    if schema.is_empty()
+        || schema
+            .columns
+            .iter()
+            .any(|c| c.virtual_expr.is_some() || c.id == ExtraRowChecksumID as i64)
+    {
         // No column: the chunk has no rows to compare. A virtual column:
-        // FillVirtualColumnValue would evaluate the placeholder expression.
+        // FillVirtualColumnValue would evaluate the placeholder expression. The checksum
+        // column: Next then fills it (fillRowChecksum, the row_checksum records), which
+        // the decode-only record does not show.
         return None;
     }
     let h = handle_of(&a[3]);
@@ -533,10 +555,75 @@ fn executor_replay(a: &[Value], want: &[Datum]) -> Option<String> {
     (got_v != want_v).then(|| format!("executor rows: got {got_v:?}\n    want {want_v:?}"))
 }
 
+/// row_checksum: `fillRowChecksum` of one row into a fresh chunk, in the session zone
+/// `a[1]`. Each column: `"-"` (no row: untouched, or an error before `SetCol`), null, or
+/// the checksum string.
+fn row_checksum(a: &[Value]) -> Value {
+    let (ctx, ev) = ctx_of(&a[0]);
+    let tz = fixed_zone("Z", a[1].as_i64().unwrap() as i32);
+    let tbl = tbl_in(&a[2]);
+    let schema = schema_of(&tbl, &a[3]);
+    let h = handle_of(&a[4]);
+    let val = unhex(a[5].as_str().unwrap());
+    let expr_ctx: ExprContextRef = ctx;
+    let r = try_(|| {
+        let fts: Vec<Arc<_>> = schema
+            .columns
+            .iter()
+            .map(|c| Arc::clone(&c.ret_type))
+            .collect();
+        let mut chk = new_chunk_with_capacity(&fts, 1);
+        let e = fill_row_checksum(
+            &*expr_ctx,
+            &tz,
+            0,
+            1,
+            &schema,
+            &tbl,
+            &[&val],
+            &[&h],
+            &mut chk,
+            Vec::new(),
+        );
+        let mut res = serde_json::Map::new();
+        if let Err(e) = &e {
+            res.insert("err".into(), gs(&e.error()));
+        }
+        let cols: Vec<Value> = (0..chk.num_cols())
+            .map(|i| {
+                let c = chk.column(i);
+                if c.rows() == 0 {
+                    json!("-")
+                } else if c.is_null(0) {
+                    Value::Null
+                } else {
+                    gs(c.get_string(0))
+                }
+            })
+            .collect();
+        res.insert(
+            "cols".into(),
+            if cols.is_empty() {
+                Value::Null
+            } else {
+                Value::Array(cols)
+            },
+        );
+        Value::Object(res)
+    });
+    let w = warns(&ev.truncate_warnings(0));
+    json!({ "r": r, "w": w })
+}
+
 fn check_pointget(rec: &Value) -> Option<String> {
     let op = rec["op"].as_str().unwrap();
-    assert_eq!(op, "decode_row_val");
     let args = rec["args"].as_array().unwrap();
+    if op == "row_checksum" {
+        let got = catch_unwind(AssertUnwindSafe(|| row_checksum(args)))
+            .unwrap_or_else(|_| json!("Rust panicked outside the call"));
+        return (got != rec["out"]).then(|| format!("out: got {got}\n    want {}", rec["out"]));
+    }
+    assert_eq!(op, "decode_row_val");
     let got = catch_unwind(AssertUnwindSafe(|| decode_row_val(args)));
     let d = match got {
         Ok(d) => d,

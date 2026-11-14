@@ -702,6 +702,7 @@ impl Executor for PointGetExecutor {
             self.row_decoder.as_ref().expect("Init built the decoder"),
         )?;
 
+        // Go: `sctx.GetSessionVars().TimeZone`; `Location()` here (see fill_row_checksum).
         fill_row_checksum(
             &*expr_ctx,
             &self.sess.location,
@@ -761,9 +762,17 @@ fn should_fill_row_checksum(schema: &Schema) -> (usize, bool) {
 ///
 /// `sctx` is what Go reads from the session: its expression context and time zone. The
 /// field types of the decode are the table columns', borrowed (Go `&col.FieldType`).
+///
+/// Time zone: Go passes `SessionVars.TimeZone`, which may be nil (`DecodeRowWithMapNew`
+/// then leaves TIMESTAMP values in UTC, and `ConvertTimeZone(UTC, nil)` of a non-zero one
+/// panics in `Time.In`); the caller here passes `Location()` (the system zone when nil).
+/// The two are the same once the session has loaded `time_zone`, which a session always
+/// does before it runs a statement (D12.1 spec §4 item 3). TIMESTAMP values are decoded
+/// into that zone and converted back to UTC for the checksum (`appendDatumForChecksum`),
+/// so a consistent zone gives the UTC-based checksum.
 // go: fillRowChecksum L1 [M-CTX]
 #[allow(clippy::too_many_arguments)]
-fn fill_row_checksum(
+pub fn fill_row_checksum(
     ectx: &dyn BuildContext,
     tz: &Arc<Location>,
     start: usize,
