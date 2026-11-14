@@ -2,8 +2,6 @@
 //!
 //! Infoschema v2: [`Data`], the multi-version index of all schemas and tables shared by
 //! every InfoSchema version of a node, and [`InfoSchemaV2`], one version's view of it.
-//! (The builder's v2 methods and the `applyXxx` dispatch functions of this file come in the
-//! next PR of part 1, with the builder.)
 //!
 //! Exception A3 (specs/D06.3-infoschema/spec.md §5). The business logic is Go's: the same
 //! items keyed by (name or ID, schema version), tomb records, the version-visibility
@@ -31,20 +29,23 @@ use futures::future::{BoxFuture, Shared};
 use parking_lot::{Mutex, RwLock};
 use tidb_base::Error;
 use tidb_base::gofmt::Arg;
+use tidb_base::terror;
 use tidb_kv::option::TiKVClientReadTimeout;
 use tidb_kv::version::new_version;
 use tidb_model::{
-    DBInfo, FKVersion1, PartitionDefinition, ReferredFKInfo, TableInfo, TableNameInfo,
+    DBInfo, FKVersion1, PartitionDefinition, ReferredFKInfo, SchemaDiff, TableInfo, TableNameInfo,
 };
 use tidb_parser::model::CIStr;
 
 use crate::autoid::{self, Requirement};
 use crate::builder::{
-    Factory, convert_charset_collate_to_lower_case_if_need,
-    convert_old_version_utf8_to_utf8mb4_if_need, table_from_meta, table_id_is_valid,
+    Builder, Factory, append_affected_ids, apply_create_table,
+    convert_charset_collate_to_lower_case_if_need, convert_old_version_utf8_to_utf8mb4_if_need,
+    drop_table_for_update, table_from_meta, table_id_is_valid,
 };
+use crate::bundle_builder::BundleInfoBuilder;
 use crate::context::{self as infoschemacontext, SpecialAttributeFilter, TableInfoResult};
-use crate::error::ErrTableNotExists;
+use crate::error::{ErrDatabaseExists, ErrDatabaseNotExists, ErrTableNotExists};
 use crate::infoschema::{
     InfoSchemaMisc, SchemaTables, get_table_info, get_table_info_list, new_info_schema,
 };
@@ -402,6 +403,21 @@ impl Data {
         btree_set(&self.schema_map, schema_item_key(&item), item);
         btree_set(&self.schema_id2_name, schema_id_name_key(&n), n);
     }
+
+    /// Go mutates the `*model.DBInfo` that `SchemaByID` returned, which every schema item
+    /// holding that pointer shares (older versions included). Rust replaces the `Arc` in
+    /// those items, so later lookups see what they see in Go.
+    // go-part: Builder.applyModifySchemaCharsetAndCollateV2
+    fn replace_shared_db_info(&self, old: &Arc<DBInfo>, new: &Arc<DBInfo>) {
+        let mut m = self.schema_map.write();
+        let lo = (old.name.l.clone(), i64::MIN);
+        let hi = (old.name.l.clone(), i64::MAX);
+        for (_, item) in m.range_mut(lo..=hi) {
+            if Arc::ptr_eq(&item.db_info, old) {
+                item.db_info = new.clone();
+            }
+        }
+    }
 }
 
 struct ReferredForeignKeysHelper {
@@ -598,7 +614,15 @@ impl Data {
 }
 
 /// gcCollectTableItem returns up to maxItems old tableItem versions for GC.
-// go: gcCollectTableItem L1
+///
+/// Deliberate deviation (tidb-rs #195, docs/compatibility.md): Go deletes every item older
+/// than the cut whose previous (newer) item is the same table, without requiring that newer
+/// item to be at or below the cut. A table created at v3 and altered at v8, GC'd with cut 5
+/// (`meta.GetOldestSchemaVersion`, the oldest version in use), loses its v3 item, and an
+/// InfoSchema at v5 (a stale read, `tidb_snapshot`) then reports "table doesn't exist".
+/// tidb-rs keeps, per table, the newest item at or below the cut (what a reader at the cut
+/// uses) and deletes only the items older than it.
+// go: gcCollectTableItem L2 (deviation #195: keep the newest item <= cut of each table)
 fn gc_collect_table_item(
     bt: &BTreeMap<NameKey, TableItem>,
     cut_ver: i64,
@@ -606,26 +630,31 @@ fn gc_collect_table_item(
 ) -> Vec<TableItem> {
     let mut dels = Vec::new();
     let mut prev: Option<&TableItem> = None;
+    // Whether the current table's newest item at or below the cut has been seen.
+    let mut anchored = false;
     // Example:
     // gcOldVersion to v4
     //	db3 tbl1 v5
-    //	db3 tbl1 v4
-    //	db3 tbl1 v3    <- delete, because v3 < v4
-    //	db2 tbl2 v1    <- keep, need to keep the latest version if all versions are less than v4
-    //	db2 tbl2 v0    <- delete, because v0 < v4
-    //	db1 tbl3 v4
-    //	...
-    // So the rule can be simplify to "remove all items whose (version < schemaVersion && previous item is same table)"
+    //	db3 tbl1 v4    <- kept: the newest item <= v4
+    //	db3 tbl1 v3    <- delete, older than the kept v4
+    //	db2 tbl2 v1    <- keep, the newest item <= v4
+    //	db2 tbl2 v0    <- delete
+    //	db1 tbl3 v8
+    //	db1 tbl3 v3    <- keep (Go deletes it: v3 < v4 and the previous item is the same table)
     for item in bt.values().rev() {
-        if item.schema_version < cut_ver
-            && let Some(p) = prev
-            && p.db_name.l == item.db_name.l
-            && p.table_name.l == item.table_name.l
-        {
+        let same = prev
+            .is_some_and(|p| p.db_name.l == item.db_name.l && p.table_name.l == item.table_name.l);
+        if !same {
+            anchored = false;
+        }
+        if anchored {
             dels.push(item.clone());
             if dels.len() >= max_items {
                 break;
             }
+        }
+        if item.schema_version <= cut_ver {
+            anchored = true;
         }
         prev = Some(item);
     }
@@ -633,8 +662,8 @@ fn gc_collect_table_item(
 }
 
 /// gcCollectReferredForeignKeyItem returns up to maxItems old referredForeignKeyItem
-/// versions for GC.
-// go: gcCollectReferredForeignKeyItem L1
+/// versions for GC. Same deliberate deviation as [`gc_collect_table_item`] (#195).
+// go: gcCollectReferredForeignKeyItem L2 (deviation #195: keep the newest item <= cut of each table)
 fn gc_collect_referred_foreign_key_item(
     bt: &BTreeMap<FkKey, ReferredForeignKeyItem>,
     cut_ver: i64,
@@ -642,16 +671,21 @@ fn gc_collect_referred_foreign_key_item(
 ) -> Vec<FkKey> {
     let mut dels = Vec::new();
     let mut prev: Option<&ReferredForeignKeyItem> = None;
+    let mut anchored = false;
     for (k, item) in bt.iter().rev() {
-        if item.schema_version < cut_ver
-            && let Some(p) = prev
-            && p.db_name == item.db_name
-            && p.table_name == item.table_name
-        {
+        let same =
+            prev.is_some_and(|p| p.db_name == item.db_name && p.table_name == item.table_name);
+        if !same {
+            anchored = false;
+        }
+        if anchored {
             dels.push(k.clone());
             if dels.len() >= max_items {
                 break;
             }
+        }
+        if item.schema_version <= cut_ver {
+            anchored = true;
         }
         prev = Some(item);
     }
@@ -1703,13 +1737,11 @@ impl InfoSchemaV2 {
                 })
                 .clone()
         };
-        let res = fut.clone().await;
-        {
-            let mut sf = LOAD_TABLE_SF.lock();
-            if sf.get(&key).is_some_and(|f| f.ptr_eq(&fut)) {
-                sf.remove(&key);
-            }
-        }
+        // The guard removes the entry once the load has finished, or when its last waiter
+        // is dropped before that (the load is cancelled with it).
+        let guard = LoadTableSfGuard { key, fut };
+        let res = guard.fut.clone().await;
+        drop(guard);
 
         match res? {
             Some(t) => Ok(t),
@@ -1717,6 +1749,28 @@ impl InfoSchemaV2 {
                 Arg::from(format!("(Schema ID {db_id})")),
                 Arg::from(format!("(Table ID {tbl_id})")),
             ])),
+        }
+    }
+}
+
+/// Removes a `loadTableSF` entry when a waiter leaves: always once the load is done (Go:
+/// `Do` deletes the key after the function returns), and when the last waiter is dropped
+/// before that (Go's goroutine would finish the load alone; here the load is cancelled with
+/// its last waiter, so a later call starts a new one instead of joining a dead future).
+struct LoadTableSfGuard {
+    key: String,
+    fut: Shared<BoxFuture<'static, LoadResult>>,
+}
+
+impl Drop for LoadTableSfGuard {
+    // glue: singleflight.Group's key removal under cancellation (M-GOCTX)
+    fn drop(&mut self) {
+        let mut sf = LOAD_TABLE_SF.lock();
+        let ours = sf.get(&self.key).is_some_and(|f| f.ptr_eq(&self.fut));
+        // The map holds one clone, this guard another: 2 means no other waiter.
+        let last = self.fut.strong_count().is_none_or(|n| n <= 2);
+        if ours && (self.fut.peek().is_some() || last) {
+            sf.remove(&self.key);
         }
     }
 }
@@ -1777,6 +1831,361 @@ pub(crate) fn cistr_arg(s: &CIStr) -> Arg {
 // go: IsV2 L2 (only v2 exists: always true)
 pub fn is_v2(is: &InfoSchemaV2) -> (bool, &InfoSchemaV2) {
     (true, is)
+}
+
+// go: applyTableUpdate L1
+pub(crate) async fn apply_table_update(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<Vec<i64>, Error> {
+    b.apply_table_update_v2(m, diff).await
+}
+
+// go: applyCreateSchema L1
+pub(crate) async fn apply_create_schema(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<(), Error> {
+    b.apply_create_schema(m, diff).await
+}
+
+// go: applyDropSchema L1
+pub(crate) async fn apply_drop_schema(b: &mut Builder, diff: &SchemaDiff) -> Vec<i64> {
+    b.apply_drop_schema_v2(diff).await
+}
+
+/// `ReadTableFromMeta` (BR's recover schema) lists the tables with
+/// `meta.ListSimpleTables`, which is D06.2 part 2.
+// go: applyRecoverSchema L1
+pub(crate) async fn apply_recover_schema(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<Vec<i64>, Error> {
+    if diff.read_table_from_meta {
+        // recover tables under the database and set them to diff.AffectedOpts
+        // glue: stub, blocked-by:D06.2 (part 2: Mutator.ListSimpleTables)
+        return Err(tidb_base::errors::new(
+            "infoschema: recover schema with ReadTableFromMeta is not supported yet (blocked-by:D06.2 part 2, Mutator.ListSimpleTables)",
+        ));
+    }
+
+    b.apply_recover_schema_v2(m, diff).await
+}
+
+impl Builder {
+    // go: Builder.applyRecoverSchemaV2 L1
+    async fn apply_recover_schema_v2(
+        &mut self,
+        m: &Mutator,
+        diff: &SchemaDiff,
+    ) -> Result<Vec<i64>, Error> {
+        if let Some(di) = self.is.schema_by_id(diff.schema_id) {
+            return Err(ErrDatabaseExists
+                .gen_with_stack_by_args(vec![Arg::from(format!("(Schema ID {})", di.id))]));
+        }
+        let (di, err) = m.get_database(diff.schema_id).await;
+        err?;
+        // Go passes a nil *DBInfo on to addDB, which dereferences it.
+        let di = di.unwrap_or_else(|| {
+            panic!("runtime error: invalid memory address or nil pointer dereference")
+        });
+        self.info_data.add_db(diff.version, di);
+        apply_create_tables(self, m, diff).await
+    }
+}
+
+// go: applyModifySchemaCharsetAndCollate L1
+pub(crate) async fn apply_modify_schema_charset_and_collate(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<(), Error> {
+    b.apply_modify_schema_charset_and_collate_v2(m, diff).await
+}
+
+// go: applyModifySchemaDefaultPlacement L1
+pub(crate) async fn apply_modify_schema_default_placement(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<(), Error> {
+    b.apply_modify_schema_default_placement_v2(m, diff).await
+}
+
+// go: applyDropTable L1
+pub(crate) async fn apply_drop_table(
+    b: &mut Builder,
+    diff: &SchemaDiff,
+    db_info: &DBInfo,
+    table_id: i64,
+    affected: Vec<i64>,
+) -> Vec<i64> {
+    b.apply_drop_table_v2(diff, db_info, table_id, affected)
+        .await
+}
+
+// go: applyCreateTables L1
+pub(crate) async fn apply_create_tables(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<Vec<i64>, Error> {
+    b.apply_create_tables(m, diff).await
+}
+
+// go: updateInfoSchemaBundles L1
+pub(crate) async fn update_info_schema_bundles(b: &mut Builder) {
+    let is = b.is.clone();
+    let misc = Arc::make_mut(&mut b.is.misc);
+    b.bundle.update_info_schema_bundles_v2(&is, misc).await;
+}
+
+// go: oldSchemaInfo L1
+pub(crate) fn old_schema_info(b: &Builder, diff: &SchemaDiff) -> Option<Arc<DBInfo>> {
+    b.is.schema_by_id(diff.old_schema_id)
+}
+
+/// allocByID returns the Allocators of a table.
+// go: allocByID L1
+pub(crate) async fn alloc_by_id(b: &Builder, id: i64) -> (autoid::Allocators, bool) {
+    match b.is.table_by_id(Ctx::background(), id).await {
+        Some(tbl) => (tbl.allocators(), true),
+        None => (autoid::Allocators::default(), false),
+    }
+}
+
+impl Builder {
+    // TODO: more UT to check the correctness.
+    // go: Builder.applyTableUpdateV2 L1
+    pub(crate) async fn apply_table_update_v2(
+        &mut self,
+        m: &Mutator,
+        diff: &SchemaDiff,
+    ) -> Result<Vec<i64>, Error> {
+        let Some(old_db_info) = self.is.schema_by_id(diff.schema_id) else {
+            return Err(
+                ErrDatabaseNotExists.gen_with_stack_by_args(vec![Arg::from(format!(
+                    "(Schema ID {})",
+                    diff.schema_id
+                ))]),
+            );
+        };
+
+        let (old_table_id, new_table_id) = self.get_table_ids(m, diff).await?;
+        self.update_bundle_for_table_update(diff, new_table_id, old_table_id);
+
+        let (mut tbl_ids, allocs) =
+            drop_table_for_update(self, new_table_id, old_table_id, &old_db_info, diff).await?;
+
+        if table_id_is_valid(new_table_id) {
+            // All types except DropTableOrView.
+            tbl_ids = apply_create_table(
+                self,
+                m,
+                &old_db_info,
+                new_table_id,
+                allocs,
+                diff.type_,
+                tbl_ids,
+                diff.version,
+            )
+            .await?;
+        }
+        Ok(tbl_ids)
+    }
+
+    // go: Builder.applyDropSchemaV2 L1
+    pub(crate) async fn apply_drop_schema_v2(&mut self, diff: &SchemaDiff) -> Vec<i64> {
+        let Some(di) = self.is.schema_by_id(diff.schema_id) else {
+            return Vec::new();
+        };
+
+        let mut table_ids = Vec::with_capacity(di.deprecated.tables.as_ref().map_or(0, Vec::len));
+        let tables = match self
+            .is
+            .schema_table_infos(Ctx::background(), &di.name)
+            .await
+        {
+            Ok(t) => t,
+            Err(err) => {
+                terror::log(Some(&err));
+                None
+            }
+        };
+        for tbl in tables.iter().flatten() {
+            table_ids = append_affected_ids(table_ids, tbl);
+        }
+
+        for &id in &table_ids {
+            let misc = Arc::make_mut(&mut self.is.misc);
+            self.bundle.delete_bundle(misc, id);
+            self.apply_drop_table_v2(diff, &di, id, Vec::new()).await;
+        }
+        self.info_data.delete_db(di, diff.version);
+        table_ids
+    }
+
+    /// Go returns nil when the table is not found (not `affected`).
+    // go: Builder.applyDropTableV2 L1
+    pub(crate) async fn apply_drop_table_v2(
+        &mut self,
+        diff: &SchemaDiff,
+        db_info: &DBInfo,
+        table_id: i64,
+        mut affected: Vec<i64>,
+    ) -> Vec<i64> {
+        // Remove the table in temporaryTables
+        if let Some(ids) = &mut Arc::make_mut(&mut self.is.misc).temporary_table_ids {
+            ids.remove(&table_id);
+        }
+
+        let Some(table) = self.is.table_by_id(Ctx::background(), table_id).await else {
+            return Vec::new();
+        };
+        let tbl_info = table.meta();
+
+        // The old DBInfo still holds a reference to old table info, we need to remove it.
+        // (Go also calls b.infoSchema.deleteReferredForeignKeys: the v1 map, empty under v2.)
+        self.is
+            .data
+            .delete_referred_foreign_keys(&db_info.name, tbl_info, diff.version);
+
+        if let Some(pi) = table.meta().get_partition_info() {
+            for def in pi.definitions.iter().flatten() {
+                let p = PartitionItem {
+                    partition_id: def.id,
+                    schema_version: diff.version,
+                    table_id: table.meta().id,
+                    tomb: true,
+                };
+                btree_set(&self.info_data.pid2tid, partition_item_key(&p), p);
+            }
+        }
+
+        self.info_data.remove(TableItem {
+            db_name: db_info.name.clone(),
+            db_id: db_info.id,
+            table_name: tbl_info.name.clone(),
+            table_id: tbl_info.id,
+            schema_version: diff.version,
+            tomb: false,
+        });
+        affected = append_affected_ids(affected, tbl_info);
+
+        affected
+    }
+
+    /// Go writes the new charset into the `*DBInfo` it got from `SchemaByID`, which the
+    /// older schema items share; [`Data::replace_shared_db_info`] gives the same lookups.
+    /// A nil DBInfo panics as in Go.
+    // go: Builder.applyModifySchemaCharsetAndCollateV2 L2 (Go mutates the shared *DBInfo; Rust replaces it in the items that share it)
+    pub(crate) async fn apply_modify_schema_charset_and_collate_v2(
+        &mut self,
+        m: &Mutator,
+        diff: &SchemaDiff,
+    ) -> Result<(), Error> {
+        let (di, err) = m.get_database(diff.schema_id).await;
+        err?;
+        let Some(di) = di else {
+            // This should never happen.
+            return Err(
+                ErrDatabaseNotExists.gen_with_stack_by_args(vec![Arg::from(format!(
+                    "(Schema ID {})",
+                    diff.schema_id
+                ))]),
+            );
+        };
+        let old = self.is.schema_by_id(diff.schema_id).unwrap_or_else(|| {
+            panic!("runtime error: invalid memory address or nil pointer dereference")
+        });
+        let mut new_db_info = old.copy();
+        new_db_info.charset = di.charset.clone();
+        new_db_info.collate = di.collate.clone();
+        let new_db_info = Arc::new(new_db_info);
+        self.info_data.replace_shared_db_info(&old, &new_db_info);
+        self.info_data.delete_db(Arc::new(di), diff.version);
+        self.info_data.add_db_arc(diff.version, new_db_info);
+        Ok(())
+    }
+
+    // go: Builder.applyModifySchemaDefaultPlacementV2 L2 (Go mutates the shared *DBInfo; Rust replaces it in the items that share it)
+    pub(crate) async fn apply_modify_schema_default_placement_v2(
+        &mut self,
+        m: &Mutator,
+        diff: &SchemaDiff,
+    ) -> Result<(), Error> {
+        let (di, err) = m.get_database(diff.schema_id).await;
+        err?;
+        let Some(di) = di else {
+            // This should never happen.
+            return Err(
+                ErrDatabaseNotExists.gen_with_stack_by_args(vec![Arg::from(format!(
+                    "(Schema ID {})",
+                    diff.schema_id
+                ))]),
+            );
+        };
+        let old = self.is.schema_by_id(diff.schema_id).unwrap_or_else(|| {
+            panic!("runtime error: invalid memory address or nil pointer dereference")
+        });
+        let mut new_db_info = old.copy();
+        new_db_info.placement_policy_ref = di.placement_policy_ref.clone();
+        let new_db_info = Arc::new(new_db_info);
+        self.info_data.replace_shared_db_info(&old, &new_db_info);
+        self.info_data.delete_db(Arc::new(di), diff.version);
+        self.info_data.add_db_arc(diff.version, new_db_info);
+        Ok(())
+    }
+}
+
+impl BundleInfoBuilder {
+    // go: bundleInfoBuilder.updateInfoSchemaBundlesV2 L1 [M-MAPORDER]
+    pub(crate) async fn update_info_schema_bundles_v2(
+        &mut self,
+        is: &InfoSchemaV2,
+        misc: &mut InfoSchemaMisc,
+    ) {
+        if self.delta_update {
+            self.complete_update_tables_v2(is);
+            let ids: Vec<i64> = self.update_tables.keys().copied().collect();
+            for tbl_id in ids {
+                self.update_table_bundles(is, misc, tbl_id).await;
+            }
+            return;
+        }
+
+        // do full update bundles
+        misc.rule_bundle_map = HashMap::new();
+        let tmp =
+            is.list_tables_with_special_attribute(infoschemacontext::placement_policy_attribute);
+        for v in tmp {
+            for tbl in &v.table_infos {
+                self.update_table_bundles(is, misc, tbl.id).await;
+            }
+        }
+    }
+
+    // go: bundleInfoBuilder.completeUpdateTablesV2 L1
+    fn complete_update_tables_v2(&mut self, is: &InfoSchemaV2) {
+        if self.update_policies.is_empty() {
+            return;
+        }
+
+        let dbs = is.list_tables_with_special_attribute(infoschemacontext::AllSpecialAttribute);
+        for db in dbs {
+            for tbl in &db.table_infos {
+                let tbl_info = tbl;
+                if let Some(r) = &tbl_info.placement_policy_ref
+                    && self.update_policies.contains_key(&r.id)
+                {
+                    self.mark_table_bundle_should_update(tbl_info.id);
+                }
+            }
+        }
+    }
 }
 
 impl InfoSchemaV2 {
@@ -2002,5 +2411,215 @@ mod tests {
         // ensure getTableReferredForeignKeys respects GC boundary
         let g = data.get_table_referred_foreign_keys("db1", "table1", 5);
         assert_eq!(*g[0], rfk("s", "t", "fk"));
+    }
+
+    // ------------------------------------------------------------ singleflight guard
+
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::task::{Context as TaskContext, Poll};
+
+    use tidb_kv::Context as KvContext;
+    use tidb_kv::key::Key;
+    use tidb_kv::kv::{
+        BatchGetOption, BatchGetter, Client, GetOption, Getter, Iterator as KvIterator, KvFuture,
+        OptionValue, Retriever, Snapshot, Storage, Transaction, TxnOption, ValueEntry,
+    };
+    use tidb_kv::version::Version;
+
+    /// A snapshot whose reads never finish.
+    struct PendingSnap;
+
+    impl Getter for PendingSnap {
+        fn get<'a>(
+            &'a self,
+            _: &'a KvContext,
+            _: &'a Key,
+            _: &'a [GetOption],
+        ) -> KvFuture<'a, ValueEntry> {
+            Box::pin(futures::future::pending())
+        }
+    }
+    impl Retriever for PendingSnap {
+        fn iter<'a: 'f, 'f>(
+            &'a self,
+            _: &'f Key,
+            _: &'f Key,
+        ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
+            Box::pin(futures::future::pending())
+        }
+        fn iter_reverse<'a: 'f, 'f>(
+            &'a self,
+            _: &'f Key,
+            _: &'f Key,
+        ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
+            Box::pin(futures::future::pending())
+        }
+    }
+    impl BatchGetter for PendingSnap {
+        fn batch_get<'a>(
+            &'a self,
+            _: &'a KvContext,
+            _: &'a [Key],
+            _: &'a [BatchGetOption],
+        ) -> KvFuture<'a, HashMap<Vec<u8>, ValueEntry>> {
+            Box::pin(futures::future::pending())
+        }
+    }
+    impl Snapshot for PendingSnap {
+        fn set_option(&self, _: isize, _: OptionValue) {}
+    }
+
+    struct PendingStore;
+
+    impl Storage for PendingStore {
+        fn begin<'a>(&'a self, _: &'a [TxnOption]) -> KvFuture<'a, Box<dyn Transaction>> {
+            unimplemented!()
+        }
+        fn get_snapshot(&self, _: Version) -> Arc<dyn Snapshot> {
+            Arc::new(PendingSnap)
+        }
+        fn get_client(&self) -> Arc<dyn Client> {
+            unimplemented!()
+        }
+        fn close(&self) -> Result<(), tidb_base::Error> {
+            Ok(())
+        }
+        fn uuid(&self) -> String {
+            String::new()
+        }
+        fn current_version<'a>(&'a self, _: &'a str) -> KvFuture<'a, Version> {
+            unimplemented!()
+        }
+        fn name(&self) -> String {
+            String::new()
+        }
+        fn describe(&self) -> String {
+            String::new()
+        }
+        fn get_min_safe_ts(&self, _: &str) -> u64 {
+            0
+        }
+    }
+
+    struct PendingReq;
+
+    impl Requirement for PendingReq {
+        fn store(&self) -> Arc<dyn Storage> {
+            Arc::new(PendingStore)
+        }
+    }
+
+    fn poll_once<F: Future>(f: &mut std::pin::Pin<Box<F>>) -> Poll<F::Output> {
+        let waker = futures::task::noop_waker();
+        f.as_mut().poll(&mut TaskContext::from_waker(&waker))
+    }
+
+    /// A key's `loadTableSF` entry is removed when every waiter is dropped before the load
+    /// finishes, so a later lookup starts a new load instead of joining a cancelled one.
+    #[test]
+    fn load_table_sf_entry_removed_when_waiters_cancelled() {
+        let data = new_data();
+        let db = DBInfo {
+            id: 1_000_001,
+            name: ci("sfdb"),
+            ..Default::default()
+        };
+        data.add_db(1, db);
+        // A name-only table (not in the cache): TableByID has to load it.
+        data.add_name_only(TableItem {
+            db_name: ci("sfdb"),
+            db_id: 1_000_001,
+            table_name: ci("sft"),
+            table_id: 1_000_002,
+            schema_version: 1,
+            tomb: false,
+        });
+        let mut is = new_info_schema_v2(Some(Arc::new(PendingReq)), None, data);
+        Arc::make_mut(&mut is.misc).schema_meta_version = 1;
+        let key = format!("{}-{}-{}", 1_000_001, 1_000_002, 1);
+        let has_key = || LOAD_TABLE_SF.lock().contains_key(&key);
+
+        let mut a = Box::pin(is.table_by_id(Ctx::background(), 1_000_002));
+        let mut b = Box::pin(is.table_by_id(Ctx::background(), 1_000_002));
+        assert!(poll_once(&mut a).is_pending());
+        assert!(poll_once(&mut b).is_pending());
+        assert!(has_key());
+        drop(a); // b still waits
+        assert!(has_key());
+        drop(b); // the last waiter
+        assert!(!has_key());
+
+        // A new lookup starts a new load.
+        let mut c = Box::pin(is.table_by_id(Ctx::background(), 1_000_002));
+        assert!(poll_once(&mut c).is_pending());
+        assert!(has_key());
+        drop(c);
+        assert!(!has_key());
+    }
+
+    /// Deliberate deviation #195. Go's GC rule ("delete an item older than the cut if the
+    /// previous, newer item is the same table") also deletes the item a reader **at** the
+    /// cut needs when that newer item is above the cut: here Go deletes v3 and the reader at
+    /// v5 no longer finds the table. tidb-rs keeps the newest item <= cut (v3) and deletes
+    /// only what is older (v1); the same for the referred foreign keys.
+    #[test]
+    fn gc_keeps_the_item_a_reader_at_the_cut_needs() {
+        let data = new_data();
+        let item = |ver: i64| TableItem {
+            db_name: ci("db"),
+            db_id: 1,
+            table_name: ci("t"),
+            table_id: 10,
+            schema_version: ver,
+            tomb: false,
+        };
+        let tbl = crate::table::table_from_meta(
+            crate::autoid::Allocators::default(),
+            Arc::new(TableInfo {
+                id: 10,
+                name: ci("t"),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        data.add(item(1), tbl.clone()); // created at v1
+        data.add(item(3), tbl.clone()); // altered at v3
+        data.add(item(8), tbl); // altered at v8
+        let mut is5 = new_info_schema_v2(None, None, data.clone());
+        Arc::make_mut(&mut is5.misc).schema_meta_version = 5;
+        assert!(is5.table_item_by_id(10).is_some());
+        // The oldest version in use is 5 (the reader above): only v1 goes (Go: v1 and v3).
+        assert_eq!(data.gc_old_version(5).0, 1);
+        assert!(is5.table_item_by_id(10).is_some());
+        let vers: Vec<i64> = data
+            .by_name
+            .read()
+            .values()
+            .map(|i| i.schema_version)
+            .collect();
+        assert_eq!(vers, [3, 8]);
+
+        // Referred foreign keys: v1, v3, v8 of db.p; cut 5 keeps v3 (Go deletes v1 and v3).
+        let mk = |ver: i64| ReferredForeignKeyItem {
+            db_name: "db".to_owned(),
+            table_name: "p".to_owned(),
+            schema_version: ver,
+            tomb: false,
+            referred_fk_info: vec![Arc::new(rfk("db", "t", &format!("fk{ver}")))],
+        };
+        for v in [1, 3, 8] {
+            let it = mk(v);
+            btree_set(
+                &data.referred_foreign_keys,
+                referred_foreign_key_item_key(&it),
+                it,
+            );
+        }
+        assert_eq!(data.gc_old_fk_version(5), 1);
+        assert_eq!(
+            got(data.get_table_referred_foreign_keys("db", "p", 5)),
+            vec![rfk("db", "t", "fk3")]
+        );
     }
 }

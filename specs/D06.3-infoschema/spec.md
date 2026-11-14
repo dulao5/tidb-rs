@@ -62,8 +62,9 @@ v2 也调用 v1 结构的地方，在 v2 下这些结构恒为空，调用不产
 4. **failpoint**：`repairFetchCreateTable`、`mockLoadTableInfoError`、`skipGet` 不移植；`tracing.StartRegion` 不移植。
 5. **`DBInfoAsInfoSchema.SchemaTableInfos`** 对 nil 的 `Deprecated.Tables` 返回空切片（Go 的 nil 与空切片对调用方相同）。
 6. **N11 升级检查的钩子**（§6）：默认关闭，关闭时与 Go 相同。
+7. **GC 保留截止版本上的读者需要的 item**（有意偏离，[#195](https://github.com/dulao5/tidb-rs/issues/195)，2026-11-14 Maya + Lucky 决定）：`gcCollectTableItem`、`gcCollectReferredForeignKeyItem` 每张表保留截止版本及以下最新的 item，只删更旧的（Go 见 §9 第 7 条）。govec 向量由只改了这两个函数的 v8.5.8 生成（tracker `govec/fixes/pkg/infoschema/infoschema_v2.go.fixed`，fix `tidb-rs#195`）。
 
-用户可见的差异只有 §5.4（`tidb_schema_cache_size = 0`），已写入 `docs/compatibility.md`。
+用户可见的差异有 §5.4（`tidb_schema_cache_size = 0`）和第 7 条（GC），都已写入 `docs/compatibility.md`。
 
 ## 5. 例外 A3：infoschema v2 的缓存（设计，待确认）
 
@@ -133,6 +134,9 @@ N11 §4.3（调研草案）建议：遇到 v8.5.8 不认识的 `SchemaDiff.Type`
 - **govec `infoschema` 领域**（tracker `govec/domains/infoschema.go`）：220 个随机场景，每个场景在一个 `Data` 上依次做全量加载（照 `domain.fetchAllSchemasWithTables` 的 v2 路径）、成批应用 schema diff（照 `tryLoadSchemaDiffs`，出错时照 domain 退回全量加载）、全量重载、GC、容量为 1、查询较早的版本。diff 覆盖 `ApplyDiff` 的所有分支：建删库、建删表（含删除中的中间状态）、truncate、跨库 rename、修改表（各种 action，含 v8.5.8 不认识的类型 200）、分区的 truncate / drop / reorganize、exchange partition（public 与非 public 两种）、修改库字符集与 placement、placement policy 与 resource group 的增改删、recover table / schema、create tables、flashback、refresh meta、过期的 diff（库或表已不存在）。每个 InfoSchema 查询全部读取 API（约 25 组，含表的 Go JSON、外键引用、特殊属性过滤、缓存状态、`EvictTable`）。meta 状态由 Go 的 `meta.Mutator` 写出；store 按 commit ts 返回状态（`loadTableInfo` 在 InfoSchema 的 ts 读）。内存库（D06.6）在生成时去掉（清空 `drivers`）。
 - Rust 回放 `tests/govec_infoschema.rs`（PR 1b）：全部一致；种子 1–8 的 1,760 条也一致。反证：把 `TableByName` 的默认回填改成 false、GC 的 `<` 改成 `<=`、`ListTablesWithSpecialAttribute` 的去重条件改掉、去掉 §4 第 1 条的替换，分别有 157、16、147、5 条记录不一致。
 - `sieve_test.go` 的 6 个测试移植为单元测试（`sieve::tests`）；`infoschema_v2_test.go` 中只用 `Data` 的 `TestReferredForeignKeys`、`TestGCOldFKVersion` 移植到 `infoschema_v2::tests`（PR 1a）；`builder_test.go` 的 `TestGetKeptAllocators`（PR 1b）。
+- A3 §5.1 的并发论证（PR 1b）：`readers_at_a_fixed_version_while_the_builder_writes` 固定版本 v 的全部查询结果（与缓存无关的部分），4 个线程反复查询 v，同时一个线程在同一个 `Data` 上反复应用该场景之后的 diff、更晚版本的全量重载，并以 v 为截止版本 GC；v 的结果始终不变。反证：截止版本改为 v + 1000 时立即不一致。
+- `loadTableInfo` 的 singleflight：等待者全部取消时删除该键（`load_table_sf_entry_removed_when_waiters_cancelled`），之后的查询重新加载，不会加入一个已取消的 future。
+- 生成器在同一个库内做只改大小写的 rename（`t` → `T`），覆盖 §9 第 4 条：62 个输出中出现 Go 的重复项，Rust 一致；改成按 `L` 去重时 30 条记录不一致。
 - 混合集群（v8.5.8 playground 上用 Go 执行 DDL、tidb-rs 增量应用 diff）随 D06.5 的 domain 接入做。
 
 ## 8. converge
@@ -155,3 +159,4 @@ D06.3：270 个函数（295 个中 25 个归 X）。PR 1a 之后 `matched 120/27
 4. **按 `CIStr` 整体比较的去重**：`SchemaSimpleTableInfos`、`IterateAllTableItems`、`allSchemas` 用整个 `CIStr`（含原始大小写）判断"同一张表 / 同一个库的不同版本"，而索引按 `L` 排序。只改大小写的 rename 之后，同一张表的新旧版本会被当成两张表各输出一次（旧版本若不是 tomb）。
 5. **`Purge` 后的 hand**：`Sieve.Purge` 不重置 `hand`，之后的 `evict` 从已删除的元素开始；若该 key 不在 map 中则 panic（"sieve: evicting non-existent element"）。v8.5.8 只有测试调用 `Purge` / `Close`。
 6. **`Data.mu.versionTimestamps` 从不写入**，`getVersionByTS` 恒返回 (0, false)：死代码。
+7. **GC 删掉截止版本上的读者需要的 item**（已确认，单独的 issue [#195](https://github.com/dulao5/tidb-rs/issues/195)）：`gcCollectTableItem`（`infoschema_v2.go:424`）、`gcCollectReferredForeignKeyItem`（`:452`）删除"比截止版本旧、且同一张表有更新 item"的 item，但更新的 item 可能在截止版本之上。例如表在 v3 建、v8 改，截止版本（`GetOldestSchemaVersion`）为 5 时 v3 被删，版本 5 的 InfoSchema 报表不存在。tidb-rs 作为有意偏离修正（§4 第 7 条）；单元测试 `gc_keeps_the_item_a_reader_at_the_cut_needs` 的注释记录了 Go 的行为。

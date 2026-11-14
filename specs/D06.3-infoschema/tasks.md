@@ -10,7 +10,7 @@
 | T4 | `infoschema_v2`：`Data`、`InfoSchemaV2`（PR 1a）、v2 builder 方法（PR 1b） | govec 回放一致 | 完成 |
 | T5 | `builder`、`builder_misc`、`bundle_builder`（PR 1b）、`infoschema`（misc，PR 1a） | govec 回放一致 | 完成 |
 | T6 | govec `infoschema` 领域与 Rust 回放（PR 1b），种子 1–8，反证 | 全部一致；豁免表理由合规 | 完成 |
-| T7 | amd64 向量：取 tracker PR 的 CI artifact | x86_64 CI 通过 | 见 PR |
+| T7 | amd64 向量：取 tracker#73 的 CI artifact | x86_64 CI 通过 | 完成 |
 | T8 | 第 2 部分：`InfoCache` | converge +16 | 未开始 |
 | T9 | 第 2 部分：`InfoSchema` trait、`SessionTables`、`SessionExtendedInfoSchema`、接口辅助函数、`init` | converge +26 | 未开始 |
 | T10 | 第 2 部分：混合集群测试、N11 表级检查（随 D06.5） | — | 未开始 |

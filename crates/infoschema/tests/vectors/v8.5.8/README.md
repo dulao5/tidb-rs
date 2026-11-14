@@ -12,3 +12,18 @@
 The two targets hold the same records.
 
 Records with `err.name == "panic"` must panic in Rust with the same message.
+
+## Domain "infoschema" (block D06.3 part 1)
+
+`<target>/infoschema.jsonl.gz` are copied unmodified from the tidb-rs-tracker repository:
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/infoschema.jsonl.gz` (branch `block/D06.3-infoschema-1b`, tracker#73) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2` with fix `tidb-rs#195`, the GC deviation; go1.25.12, seed 20261114), 220 records |
+| `arm64/infoschema.jsonl.gz` sha256 | `ddc27c6200f7db0416b2695cbe50895b3eee0748a029cf26f0526d7acedbf8b0` (generated locally) |
+| `amd64/infoschema.jsonl.gz` sha256 | `879f1769cf733a84c248085e03ee1c731bb175412c3eeb57587739bb0d13773b` (GOARCH=amd64, GOAMD64=v1; tracker#73 CI artifact, run 43543149312) |
+
+The two targets hold the same records.
+
+The replay (`tests/govec_infoschema.rs`) treats Go's nil and empty slices as equal.

@@ -30,6 +30,8 @@ parking_lot = "0.12"
 futures = { workspace = true }
 # The 200 ms waits of the "in flashback progress" retries (time.Sleep).
 tokio = { workspace = true, features = ["time"] }
+# logutil.BgLogger().Error of the bundle builder.
+log = "0.4"
 
 [dev-dependencies]
 # The govec vectors are committed as .jsonl.gz.

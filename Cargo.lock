@@ -3804,6 +3804,7 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "futures",
+ "log",
  "parking_lot 0.12.5",
  "regex",
  "serde_json",
