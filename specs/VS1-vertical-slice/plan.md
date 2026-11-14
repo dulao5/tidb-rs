@@ -1,6 +1,6 @@
 # VS1：第一条纵向切片（检查点 C2）计划
 
-状态：规划草案（2026-11-14），待项目负责人确认 §10 的决定项。类型：跨块的排期与集成计划，不是新的功能块，也不是例外。回应 #128 §二.2（纵向切片）和 #54 的检查点 C2。
+状态：规划草案（2026-11-14）；同日按 #205 评审（Lucky）补充 §4.3 第 0 步、§4.5–4.7 的路由约束和 VS1-32，§10 记录评审意见，待项目负责人确认。类型：跨块的排期与集成计划，不是新的功能块，也不是例外。回应 #128 §二.2（纵向切片）和 #54 的检查点 C2。
 
 相关：[ROADMAP](../ROADMAP.md)、[宪章](../../CONSTITUTION.md)（第四条 3 边界桩、第七条 4 端到端不退化）、[方法论](../../docs/porting/methodology.md) §6、[N1](../exceptions/N1-plan-representation/spec.md) 与 [D09.7 试点报告](../D09.7-column-pruning/pilot-report.md)（#149 已批准的修订：摘出分派、物理计划一开始就是 `Arc`、M-FT 方案 (a)）、[N2](../exceptions/N2-session-context/spec.md)、[N3+A1](../exceptions/N3-A1-concurrency-memory/spec.md)、[N4](../exceptions/N4-expr-eval/spec.md)、P2 里程碑 #49。
 
@@ -18,11 +18,12 @@
    - 符合 VS1 形态的 SELECT（含预处理语句）交给新的 `tidb-session`；其余语句，以及规划阶段碰到边界桩的语句，回退到 PoC。
    - 回退只会发生在执行器打开之前，所以不会有副作用。
    - `strict` 模式不回退，供每周构建统计"新栈能执行的形态"。
+   - 路由的约束（#205 评审）：先检查会话条件（显式事务、`autocommit=0`、快照 / 过期读变量、同步白名单之外的变量）；两边 InfoSchema 版本必须相等；回退时恢复新会话的状态；"上一条语句"的状态要同步；预处理语句区分四种组合。见 §4.3–4.7。
 5. **日程**（§6）：
-   - 按负责人定的 30% 深度份额，C2 整体要到约 1 月底，赶不上 #54 草案的 12-11。
+   - 按负责人定的 30% 深度份额，C2 整体要到约 2 月初，赶不上 #54 草案的 12-11。
    - 建议把 C2 拆成两步：
-     - **C2a（12-11）**：点查纵向（会话、预处理、点查快速路径、点查执行器、结果编码），sysbench point_select ≥ 0.9×。
-     - **C2b**：扫描、过滤、投影、limit、order by，再加 read_only ≥ 0.9×。30% 份额下约 1 月底；如果到 C2 之前把深度份额临时提到 50%，约 12-30。
+     - **C2a（约 12-11 至 12-14）**：点查纵向（会话、预处理、点查快速路径、点查执行器、结果编码），sysbench point_select ≥ 0.9×。
+     - **C2b**：扫描、过滤、投影、limit、order by，再加 read_only ≥ 0.9×。30% 份额下约 2 月初；如果到 C2 之前把深度份额临时提到 50%，约 12-31。
    - 这两个选项由负责人定（🔶 §10-2）。
 6. **最大的三个风险**（§8）：
    - FindBestTask 和 `taskMap` 还没有验证过 N1 的表示（D10.2 开工前补一个小试点）；
@@ -168,10 +169,14 @@ PoC 连接循环（tidb-mysql-protocol：握手、包读写，C2 时保留）
 ```
 
 - **InfoSchema**：新栈只认 `tidb-infoschema` 的 v2（D06.3）。VS1-17 移植 D06.5 的 `loadInfoSchema` / `tryLoadSchemaDiffs`，由 PoC domain 的同步循环驱动：同一个 schema version、同一批 SchemaDiff，两边各自应用。
-- **语句开始时校验版本**：如果新 InfoSchema 的版本还没追上 PoC 的版本，这条语句走 PoC，不等待，也不会读到不一致的 schema。D06.5 完成后由 domain 统一驱动，PoC 的 `tidb-meta` 退出。
+- **语句开始时校验版本**：只有当新 InfoSchema 的版本与 PoC 的版本**相等**时，才走新栈。落后和领先都走 PoC：新栈先应用了某个 diff、PoC 还没有应用，结果同样可能不同。
+  - 比较在路由时做一次。之后整条语句（含规划和执行）固定使用这一版新 InfoSchema。
+  - 不等待版本追上。
+  - D06.5 完成后由 domain 统一驱动，PoC 的 `tidb-meta` 退出，这条检查随之去掉。
 - **会话状态**：唯一的真实来源是新会话中的 `SessionVars`（D05.2，已移植）。
-  - `USE`、`SET NAMES`、`SET` 系统变量仍由 PoC 解析（这些语句属于 D12.12，P5），解析后同步写入新会话。字段只有 PoC 已经支持的那几个：current_db、charset / collation、results charset、PoC 接受的 sysvar。
-  - `SHOW WARNINGS` 由上一条语句的执行方回答，路由器记住"上一条语句由谁执行"。
+  - `USE`、`SET NAMES`、`SET` 系统变量仍由 PoC 解析（这些语句属于 D12.12，P5），解析后同步写入新会话。同步只覆盖白名单内的变量：current_db、charset / collation、results charset、PoC 接受的 sysvar。白名单写在 VS1-02 的代码中。
+  - 白名单之外的变量只要取了非默认值，就不走新栈（§4.3 第 0 步）。
+  - "上一条语句"的状态见 §4.5。
 
 ### 4.2 被替换的 PoC 部件（只针对 VS1 形态）
 
@@ -204,6 +209,13 @@ PoC 连接循环（tidb-mysql-protocol：握手、包读写，C2 时保留）
 
 **判定顺序**（每条语句一次，开销要求小于 1 µs）：
 
+0. **会话条件（先于 AST 预检）**：下面任何一条成立，就走 PoC。否则新栈会用一个新的 TSO 去读，而 PoC 那边的事务期待的是它自己的快照。
+   - PoC 会话处在显式事务中（BEGIN / START TRANSACTION 之后，包括 ADR 0009 模式 3 的只读显式事务）；
+   - `autocommit = 0`（每条 SELECT 都会开启事务）；
+   - `tidb_snapshot`、`tidb_read_staleness`、`tx_read_ts`、`tidb_txn_mode` 中任何一个取了非默认值；
+   - 任何**不在 §4.1 同步白名单内**的系统变量取了非默认值。实现方法：路由器维护一个"已偏离默认值、但新会话不知道"的变量集合，集合非空就走 PoC。
+   - 新旧 InfoSchema 版本不相等（§4.1）；
+   - COM_STMT_EXECUTE 带游标标志（`CURSOR_TYPE_READ_ONLY`）：游标（D05.3 tasks P1-4）不在 VS1 内。
 1. **语句类型**：只有 `SelectStmt`（COM_QUERY，或预处理语句的 SELECT）是候选。
 2. **AST 预检**（glue，只用于提前分流，不承担语义）。下面任何一项不满足，就直接走 PoC，不进新规划器：
    - FROM 只有一个 `TableName`，或者没有 FROM；
@@ -211,13 +223,87 @@ PoC 连接循环（tidb-mysql-protocol：握手、包读写，C2 时保留）
    - 没有聚合函数、GROUP BY、HAVING、DISTINCT、窗口；
    - 没有 FOR UPDATE / 锁子句、INTO、`AS OF`；
    - 函数名都在新栈的函数注册表里。
-3. **规划**：新栈规划。只要碰到任何 `blocked-by` 桩（比如选中了索引路径、表是分区表），就返回 `Blocked(block)`。这时还没有打开执行器，没有副作用，路由器把这条语句交给 PoC 重新执行（`vs1` 模式），或者报错（`strict` 模式）。
-4. **预处理语句**：PREPARE 时两边都做（PoC prepare + 新栈 `PrepareStmt`）。
-   - 新栈返回 `Blocked`：这个 stmt id 标记为只走 PoC，之后每次 EXECUTE 都不再尝试新栈。
-   - 新栈成功：列元数据用新栈的（与 Go 一致）。
-   - EXECUTE 时规划碰到桩（例如参数让计划变成了索引路径），只回退这一次。
+3. **规划**：新栈规划。
+   - 只要碰到任何 `blocked-by` 桩（比如选中了索引路径、表是分区表），就返回 `Blocked(block)`。这时还没有打开执行器，存储层没有副作用；新会话的状态按 §4.6 恢复。然后由路由器把这条语句交给 PoC 重新执行（`vs1` 模式），或者报错（`strict` 模式）。
+   - 新栈返回的其他错误（例如 1054 未知列）是按 Go 移植的错误，**直接返回给客户端，不回退**。
+4. **预处理语句**：见 §4.7。
 
-**度量**：指标 `tidbrs_route_total{engine="new|poc",reason="<block>|ast|kind"}`。每周报告据此给出"新栈执行的语句数 / 按 `blocked-by` 块归类的回退数"，回应 #128 §二.1 的"新栈上能跑的查询形态"指标。
+**度量**：指标 `tidbrs_route_total{engine="new|poc",reason="<block>|ast|kind|session|schema_version"}`。每周报告据此给出"新栈执行的语句数 / 按原因归类的回退数"，回应 #128 §二.1 的"新栈上能跑的查询形态"指标。
+
+### 4.5 "上一条语句"的状态
+
+下一条语句可能由另一个引擎执行，所以下表中的状态不能只留在执行上一条语句的那一方。
+
+**做法**：路由器持有一份 `LastStmtInfo`（glue）。
+- 每条语句结束时，执行它的那一方（新栈或 PoC）把下表的字段**全部写入** `LastStmtInfo`，再同步给另一方：新会话写入 `SessionVars` 的对应字段，PoC 写入它自己的字段。
+- 只有 warning / error 的**文本列表**不同步：SHOW WARNINGS / SHOW ERRORS 交给上一条语句的执行方回答。
+- 读取这些状态的语句，大多会因为函数没有移植（如 `FOUND_ROWS()`、`ROW_COUNT()` 属于 D08.9），或者是 SHOW / SET 语句，本来就由 PoC 执行。所以同步的方向主要是"新栈 → PoC"。
+
+| 状态 | Go 中的位置 | 谁会读 | 处理 |
+|---|---|---|---|
+| OK / EOF 包里的 `warning_count` | `StmtCtx.WarningCount()`，由 `writeOK` / `writeEOF` 写出 | 客户端 | 由执行方自己写出，不需要同步 |
+| SHOW WARNINGS / SHOW ERRORS 的内容 | 上一条语句的 `StmtCtx` warnings | 下一条语句 | 交给上一条语句的执行方回答 |
+| `@@warning_count`、`@@error_count` | `SessionVars.SysErrorCount` / `StmtCtx` | 下一条语句 | 同步 |
+| `ROW_COUNT()` | `StmtCtx.PrevAffectedRows`（SELECT 为 -1） | 下一条语句 | 同步 |
+| `FOUND_ROWS()` | `SessionVars.LastFoundRows` | 下一条语句 | 同步 |
+| `LAST_INSERT_ID()` | `SessionVars.StmtCtx.PrevLastInsertID` | 下一条语句 | 只读节点不改它，同步一次初值 |
+| `@@last_plan_from_cache` | `SessionVars.PrevFoundInPlanCache` | 下一条语句 | 同步（PoC 永远是 0） |
+| `@@last_plan_from_binding` | `SessionVars.PrevFoundInBinding` | 下一条语句 | 同步（VS1 中永远是 0） |
+| `@@last_sql_use_alloc` | `SessionVars.PrevStmtUseChunkAlloc`（D05.2 E 已移植） | 下一条语句 | 同步 |
+| `@@tidb_last_query_info` | `SessionVars.LastQueryInfo`（`ExecStmt.recordLastQueryInfo`） | 下一条语句 | 同步（start_ts、for_update_ts、error） |
+| `@@tidb_last_txn_info` | `SessionVars.LastTxnInfo` | 下一条语句 | 同步 |
+| `@@tidb_current_ts` | `TxnCtx.StartTS` | 同一事务 | 只在 autocommit 下走新栈，语句结束后为 0，两边一致 |
+| OK 包的 server status（`SERVER_STATUS_IN_TRANS`、`AUTOCOMMIT`） | `SessionVars.Status()` | 客户端 | 第 0 步保证新栈只在 autocommit、无事务时执行，两边相同 |
+
+**测试**（VS1-02）：
+- 对每一行构造"新栈语句 → PoC 读取"和"PoC 语句 → 新栈读取"两种顺序，结果与 Go 相同。
+- ab 的 integrationtest 子集在 `vs1` 模式下运行。
+
+### 4.6 回退时恢复新会话的状态
+
+回退之前，新会话已经走过 `ExecuteStmt` → `Compile` → `Optimize`。即使存储层没有副作用，`SessionVars` 也已经被改了。
+
+**要求**：回退之后，新会话必须看起来像这条语句**从未在新栈上执行过**。
+
+1. **范围**：进入新栈之前，路由器对 `SessionVars` 中这条路径会改动的字段取检查点，回退时整体恢复。字段包括：
+   - `StmtCtx`（warnings、flags、`PrevAffectedRows`）；
+   - `TxnCtx`，以及 `PrepareTxnCtx` / `PrepareTSFuture` 建立的事务上下文；
+   - `LastFoundRows`；
+   - plan cache 参数（`PlanCacheParams`）、`FoundInPlanCache`；
+   - `LastQueryInfo`、语句计数、`StmtCtx` 的 plan id 计数器。
+
+   完整清单在 VS1-14 的 plan 中逐字段列出，依据是 L1 移植的代码实际写了哪些字段。
+2. **TSO future**：新栈已经发出的 TSO 请求交给 PoC 继续用，PoC 的 `TsFuture` 可以接收一个已经发出的请求，这样不多花一次 PD 往返。如果做不到，就丢弃。
+3. **测试**：
+   - **快照测试**：对每一种回退原因（每个 `blocked-by` 桩至少一条），把回退前、回退后的 `SessionVars` 序列化快照逐字段比较，必须相等。另外检查 SHOW WARNINGS 只显示 PoC 的 warning。
+   - **随机测试**：随机交替执行"走新栈 / 回退 / 走 PoC"的语句序列，与 Go 的结果对照。
+
+### 4.7 预处理语句
+
+**四种组合**：PREPARE 时两边都做（PoC prepare + 新栈 `PrepareStmt`），stmt id 共用一个，路由器记录每个 stmt id 归谁。
+
+| 新栈 PREPARE | PoC PREPARE | stmt id 归属 | EXECUTE 的行为 |
+|---|---|---|---|
+| 成功 | 成功 | both | 走新栈；规划碰到 `Blocked` 时只把这一次交给 PoC（第 0 步的条件不满足时也一样） |
+| `Blocked` | 成功 | poc | 一直走 PoC，不再尝试新栈 |
+| 成功 | 失败（PoC 不支持，而新栈支持） | new | 走新栈；规划碰到 `Blocked`、或第 0 步要求走 PoC 时，**没有可以回退的对象**，报 1235，消息中写明桩所在的块或会话条件；`vs1` 和 `strict` 模式相同 |
+| 失败 | 失败 | — | PREPARE 报错。新栈的错误如果不是 `Blocked`，就返回它，因为它是按 Go 移植的错误；否则返回 PoC 的错误 |
+
+**列元数据**：归属为 both 或 new 的语句，PREPARE 时返回的是新栈的列定义（与 Go 一致）。客户端会缓存这些定义，有的驱动按 PREPARE 时的类型解码。所以：
+- 某次 EXECUTE 回退到 PoC 时，PoC 结果集的列定义必须与 PREPARE 时发出的**逐字段相同**：名字、表名、库名、类型、长度、flags、小数位、字符集。
+- 路由器在发送之前做比较。不相等时不发送，报 1105，消息中写明 `VS1 column metadata mismatch`，并作为 `bug` 处理，因为它意味着 PoC 和新栈对同一语句的类型推导不同。
+- ab 在 `vs1` 模式下增加一项检查：对每条预处理语句，比较 PREPARE 返回的元数据和每次 EXECUTE 的列定义。
+
+**按 stmt id 路由其他命令**：
+- `COM_STMT_CLOSE`、`COM_STMT_RESET`：发给归属的一方，归属为 both 时两边都发；
+- `COM_STMT_SEND_LONG_DATA`：同样处理，数据追加到归属的一方或两方；
+- `COM_STMT_FETCH`：带游标的 EXECUTE 在第 0 步已经走 PoC，所以 FETCH 发给 PoC。归属为 new 的语句用游标执行时，按上表报 1235。
+
+**测试**（VS1-14 / VS1-15）：
+- 四种组合各有用例；
+- 第三种组合要构造一条 PoC 不支持、新栈支持的语句；
+- RESET / LONG_DATA / FETCH / CLOSE 各一个用例；
+- 元数据比较有一个反证用例：人为改动 PoC 的一个列定义，ab 检查必须报错。
 
 ### 4.4 AST 与 `Session: Send`
 
@@ -238,7 +324,7 @@ PoC 连接循环（tidb-mysql-protocol：握手、包读写，C2 时保留）
 |---|---|---|--:|---|--:|---|---|
 | VS1-00 | N1 修订 PR 合入（摘出分派、`Arc` 物理计划、M-FT、M-SELF），同步改 `mappings.md` 的 M-PLAN | N1 | — | depth | 0.03 | #149 | 负责人确认 |
 | VS1-01 | 建立 `tidb-planner`、`tidb-executor`、`tidb-session` 三个 crate（去掉 `planned`）；arena / `PlanCtx` / `M-SELF` 宏 / `make_mut_plan`；执行器 trait（N3 async `Next`）；plan 模板写进固定写法 | N0 / N1 / N3 | — | depth | 0.10 | VS1-00 | `check_layers.py` 通过；试点中的固定写法测试移过来后通过 |
-| VS1-02 | 路由器与开关（§4.3）、`Blocked` 错误类型、会话状态同步、`tidbrs_route_total` 指标 | glue | — | depth | 0.08 | VS1-01 | 开关为 `off` 时 ab 与 sysbench 不变；单元测试覆盖判定顺序 |
+| VS1-02 | 路由器与开关（§4.3，含第 0 步的会话条件和 InfoSchema 版本相等的检查）、`Blocked` 错误类型、会话状态同步白名单、`LastStmtInfo`（§4.5）、stmt id 归属表（§4.7）、`tidbrs_route_total` 指标 | glue | — | depth | 0.12 | VS1-01 | 开关为 `off` 时 ab 与 sysbench 不变；单元测试覆盖判定顺序，第 0 步每个条件一个用例；§4.5 每行两种顺序的测试 |
 | VS1-03 | tracker：块的部分（part）覆盖率、`stubs.tsv` 的 `blocked-by` 登记；ab / 每周构建：`strict` 模式加一轮，报告按 engine 分列 | 工具 | — | depth | 0.05 | — | 每周报告出现"新栈"一节 |
 | VS1-04 | parser AST 的 `Rc<WithClause>` → `Arc`；`Session: Send` 静态断言 | D02 | — | depth | 0.02 | — | parser 全部测试通过 |
 
@@ -253,7 +339,7 @@ PoC 连接循环（tidb-mysql-protocol：握手、包读写，C2 时保留）
 | VS1-19 | 规划器基础：`property`、`planner/util`、`baseimpl`、`base_physical_plan`、`IsPointGetWithPKOrUniqueKeyByAutoCommit` | D10.10、D10.1（部分） | 1,709 | depth | 0.11 | VS1-01 | 移植 `property` / `util` 的 Go 单测；govec（handle_cols、path） |
 | VS1-12 | 点查执行器（不含加锁）、`NewRowDecoder`；table 抽象的读取部分 | D12.1（部分）、D06.4（部分，breadth） | 1,875 | depth 0.05 + breadth 0.08 | 0.13 | VS1-13、VS1-18 | govec：`DecodeRowValToChunk` / 默认值（含 NULL / 零值 / 新增列）；ab 的 `Point_Get` |
 | VS1-13 | 执行器框架：`ExecStmt`、`recordSet`、`Compiler.Compile`、`executorBuilder.build`、`internal/exec` | D12.0 | 2,012 | depth | 0.15 | VS1-01 | 移植 `internal/exec` 的单测；`ExecStmt.PointGet` 的 MaxTS 短路径与 PoC 现有判定一致 |
-| VS1-14 | 会话：`ExecuteStmt` / `runStmt` / `PrepareStmt` / `ExecutePreparedStmt`、`LazyTxn` 只读部分、txnManager；sessiontxn 的只读 provider | D05.3（部分）、D05.4（部分，breadth） | 2,806 | depth 0.16 + breadth 0.05 | 0.21 | VS1-13 | N2 §5 的编译期断言；SQL 级：autocommit 读、TSO 预取、warning 计数与 Go 一致 |
+| VS1-14 | 会话：`ExecuteStmt` / `runStmt` / `PrepareStmt` / `ExecutePreparedStmt`、`LazyTxn` 只读部分、txnManager；sessiontxn 的只读 provider | D05.3（部分）、D05.4（部分，breadth） | 2,806 | depth 0.19 + breadth 0.05 | 0.24 | VS1-13 | N2 §5 的编译期断言；SQL 级：autocommit 读、TSO 预取、warning 计数与 Go 一致；§4.6 回退恢复：每种回退原因的 `SessionVars` 快照前后相等、随机交替测试；§4.7 预处理语句四种组合、RESET / LONG_DATA / FETCH / CLOSE、列元数据 ab 检查 |
 | VS1-15 | 预处理语句：`PlanCacheStmt`、`GetPlanFromPlanCache` 的未命中路径、参数、可缓存性检查；`PrepareExec` | D13.1（部分）、D12.12（部分） | 1,157 | depth | 0.08 | VS1-14 | govec：可缓存性检查（`plan_cacheable_checker_test.go` 的表）；ab 的预处理语句部分 |
 | VS1-16 | 结果编码与预处理语句协议：`driver_tidb` 结果集、`writeResultSet` / `writeChunks`、`internal/column` / `dump`、`conn_stmt` 执行与二进制参数（含 D03.1 tasks P1-1） | D03.1（部分） | 1,943 | breadth | 0.13 | VS1-14 | govec：`dumpTextRow` / `dumpBinaryRow` 的类型矩阵；`tools/protocol-smoke` 通过 |
 | VS1-17 | InfoSchema 接入：D06.3 第 2 部分（`InfoCache`、`InfoSchema` trait）；D06.5 的 `loadInfoSchema` / `tryLoadSchemaDiffs` / validator，由 PoC domain 驱动 | D06.3、D06.5（部分） | 约 1,420 | breadth | 0.10 | — | 现有 `schema_sync_process` 测试在新 InfoSchema 上通过；DDL 后版本追上 |
@@ -277,6 +363,7 @@ PoC 连接循环（tidb-mysql-protocol：握手、包读写，C2 时保留）
 | VS1-29 | 基数估算（pseudo 路径）与统计结构的读取部分 | D10.6、D11.1（部分） | 2,922 | depth | 0.21 | — | govec：pseudo selectivity / 行数（`selectivity_test.go` 中的 pseudo 用例） |
 | VS1-30 | 代价模型 v2（VS1 算子） | D10.5（部分） | 641 | depth | 0.04 | VS1-19 | govec：代价公式（`plan_cost_ver2_test.go`） |
 | VS1-31 | `ResolveIndices`、`ToPB`、access object（VS1 算子） | D10.9（部分） | 663 | depth | 0.04 | VS1-27 | `ToPB` 产出的 DAG 与 Go 逐字节相同（govec，用 tipb 编码比较） |
+| VS1-32 | **规划耗时的早期测量**（为 §10-3 提供数据）：VS1-24 / VS1-28 一能产出计划就做，不等 VS1-37。用只含 VS1 语句的 sysbench lua（预处理语句的 simple_ranges / order_ranges，加 point_selects），在 `vs1` 模式下运行。这时扫描执行器还没有，这些语句在 `executorBuilder.build` 处碰到 `Blocked` 后回退 PoC，但 `timing.rs` 的分阶段计时已经记录了新栈每次 EXECUTE 的 parse / optimize 耗时。与 Go 对照两组：plan cache 打开（默认）和关闭 | glue | — | depth | 0.03 | VS1-24、VS1-28 | 报告：每次 EXECUTE 的优化耗时（p50 / p99），以及它占 Go 有缓存时单语句耗时的比例；结论写进 §10-3 |
 
 ### Phase 3：扫描执行与集成（C2b）
 
@@ -305,27 +392,27 @@ VS1-00 → VS1-01 → VS1-10 → VS1-21 → VS1-24 ┐
 
 | 部分 | 深度（周） | 广度（周） |
 |---|--:|--:|
-| Phase 0 | 0.28 | — |
-| Phase 1（C2a） | 0.87 | 0.40 |
-| Phase 2 | 1.77 | — |
+| Phase 0 | 0.32 | — |
+| Phase 1（C2a） | 0.90 | 0.40 |
+| Phase 2 | 1.80 | — |
 | Phase 3（不含可选 / 有条件项） | 0.29 | 0.20 |
-| **合计** | **3.21** | **0.60** |
+| **合计** | **3.31** | **0.60** |
 | 可选 / 有条件（VS1-38、VS1-39） | 0.20 | — |
 
 深度线的日历时间，从 11-16 起算：
 
-| 深度份额 | C2a（Phase 0 + 1，1.15 周产能） | C2 整体（3.21 周产能） |
+| 深度份额 | C2a（Phase 0 + 1，1.22 周产能） | C2 整体（3.31 周产能） |
 |---|---|---|
-| 30%（负责人当前的设定） | 约 3.8 周 → **约 12-11** | 约 10.7 周 → 约 2 月初 |
-| 50%（到 C2 为止临时调高） | 约 2.3 周 → 约 12-02 | 约 6.4 周 → **约 12-30** |
-| 30%，按 PR 时间算的速度（约 25k 行/周） | 约 2.3 周 | 约 6.4 周 → 约 12-30 |
+| 30%（负责人当前的设定） | 约 4.1 周 → **约 12-14** | 约 11 周 → 约 2 月初 |
+| 50%（到 C2 为止临时调高） | 约 2.4 周 → 约 12-03 | 约 6.6 周 → **约 12-31** |
+| 30%，按 PR 时间算的速度（约 25k 行/周） | 约 2.4 周 | 约 6.6 周 → 约 12-31 |
 
 说明：
 
 - **速度的不确定性**：#54 草案说"P1 约 3 周完成 17/24"，按它算 15k 行/周；但 P1 的大部分 PR 合入集中在 11-07 至 11-13，按 PR 时间算接近 25k 行/周。本计划用保守的 15k。每周构建的"本周用量"有了数据之后再校正。
 - **调高深度份额不影响 C3**：P2 未完成的部分约 30k 行，其中 8.1k 已经算在 VS1 的广度项里。剩下约 22k 行，按 50% 份额（7.5k 行/周）约 3 周，仍然赶得上 C3（12-25）的估计。
-- **建议**：C2a 定在 12-11（30% 份额就可以达到）。C2b 有两个选项，由负责人定（🔶 §10-2）：
-  - 到 12-11 为止把深度份额临时调到 50%，C2b 目标约 12-30；
+- **建议**：C2a 定在 12-11 至 12-14（30% 份额就可以达到，评审增加的路由要求使 Phase 0 多了约 0.04 周）。C2b 有两个选项，由负责人定（🔶 §10-2）：
+  - 到 12-11 为止把深度份额临时调到 50%，C2b 目标约 12-31；
   - 保持 30%，C2b 目标约 2 月初。
 
 ## 7. 验收
@@ -356,11 +443,11 @@ VS1-00 → VS1-01 → VS1-10 → VS1-21 → VS1-24 ┐
 | # | 风险 | 影响 | 缓解 |
 |---|---|---|---|
 | 1 | **N1 的 `taskMap` 没有验证过**：FindBestTask 用 `taskMap` 记忆化，并按时间戳回滚（`taskMapBak`）。D09.7 试点没有覆盖这部分（试点报告 §6 第 6 条）。 | 这是 VS1-28（3.1k 行，最贵的一项）的形态问题。如果中途发现 `Arc` 共享或回滚的写法行不通，要返工 VS1-27 / VS1-28 | VS1-26 在 D10.2 开工前补一个小试点（0.05 周），覆盖三点：同一子计划挂在多个父候选下、回滚、落选候选丢弃后 `Arc::get_mut` 能拿到独占。不通过时先修订 N1 再开工。VS1-26 不依赖其他项，可以在 Phase 1 期间就做 |
-| 2 | **plan cache 的时机**（#128 §一.5）：Go 默认开着会话级 prepared plan cache（`DefTiDBEnablePrepPlanCache = true`，`tidb_vars.go:1556`），sysbench 用预处理语句，所以 Go 基线有缓存。tidb-rs 只做实例级（负责人决定），VS1 没有缓存。 | 点查走 `TryFastPlan`，开销小；range / order 语句每次 EXECUTE 都要完整优化一遍，read_only 可能低于 0.9×。负责人要求 D13.1 在 PoC 规划器被替换之前完成 | (a) VS1-15 先做 `PlanCacheStmt` 和未命中路径，预处理语句的结构与 Go 相同，以后加缓存不用改会话。(b) VS1-39 是有条件项：测得 read_only < 0.9×，或者负责人要求"切换默认值之前必须有实例级 plan cache"时才做，并且先写 A3 的 plan cache spec。spec 要处理三件事：试点报告 §5 的风险 1–4，以及 N4 的 `BuiltinFuncCache` 在多个会话共享计划时的锁争用（试点报告 §5 风险 3）。(c) 开关默认值是否切换，以这一条为前提（🔶 §10-3） |
+| 2 | **plan cache 的时机**（#128 §一.5）：Go 默认开着会话级 prepared plan cache（`DefTiDBEnablePrepPlanCache = true`，`tidb_vars.go:1556`），sysbench 用预处理语句，所以 Go 基线有缓存。tidb-rs 只做实例级（负责人决定），VS1 没有缓存。 | 点查走 `TryFastPlan`，开销小；range / order 语句每次 EXECUTE 都要完整优化一遍，read_only 可能低于 0.9×。负责人要求 D13.1 在 PoC 规划器被替换之前完成 | (a) VS1-15 先做 `PlanCacheStmt` 和未命中路径，预处理语句的结构与 Go 相同，以后加缓存不用改会话。(b) VS1-32 在规划器能产出计划时就测量每次 EXECUTE 的优化耗时，§10-3 的决定有数据可依。VS1-39 是有条件项：测得 read_only < 0.9×，或者负责人要求"切换默认值之前必须有实例级 plan cache"时才做，并且先写 A3 的 plan cache spec。spec 要处理三件事：试点报告 §5 的风险 1–4，以及 N4 的 `BuiltinFuncCache` 在多个会话共享计划时的锁争用（试点报告 §5 风险 3）。(c) 开关默认值是否切换，以这一条为前提（🔶 §10-3） |
 | 3 | **相对 PoC 的性能回退**：PoC 是 Go 的 1.13–1.27 倍（每周构建 W46），新栈的目标是 ≥ 0.9 倍。 | 默认值切到 `vs1` 时，每周构建的结论会变成 REGRESSED；宪章第七条 4 要求端到端不退化 | 不退化的检查对象是正确性。性能基线在负责人确认后，随默认值切换重新设定（🔶 §10-4）。默认值在连续两次每周构建达标后才切换。每个 Phase 用 `poc-session` 的分阶段计时（`timing.rs`）比较 parse / plan / execute，再按需优化：TSO 预取、点查 MaxTS 短路径、chunk 复用、arena 一次性释放。不加 Go 没有的捷径 |
 | 4 | 速度与范围：C2 按 30% 份额赶不上 12-11 | 检查点失信 | §6 拆成 C2a / C2b；每周构建报告新栈的覆盖面，逐周校正 |
-| 5 | 两份 schema 状态不一致：PoC 的 `tidb-meta` 和新的 v2 InfoSchema 同时存在 | 新栈读到旧 schema，结果错误 | 同一个 diff 流驱动两边；每条语句检查版本，新 InfoSchema 落后时走 PoC（§4.1）；故障场景加一个"扫描期间 DDL"的情况 |
-| 6 | 会话状态分叉：current_db、charset、sysvar、warning、预处理语句 id | 结果或报错不同 | 唯一的真实来源是新会话的 `SessionVars`；PoC 处理完 SET / USE 后写入它；SHOW WARNINGS 按上一条语句的执行方回答；ab 的 integrationtest 子集在 `vs1` 模式下跑 |
+| 5 | 两份 schema 状态不一致：PoC 的 `tidb-meta` 和新的 v2 InfoSchema 同时存在 | 新栈读到旧 schema，结果错误 | 同一个 diff 流驱动两边；每条语句检查版本，两边版本**相等**才走新栈，落后和领先都走 PoC（§4.1）；故障场景加一个"扫描期间 DDL"的情况 |
+| 6 | 会话状态分叉：current_db、charset、sysvar、事务状态、"上一条语句"的状态、回退留下的痕迹、预处理语句 | 结果或报错不同，或者新栈用新的 TSO 读了 PoC 事务应该读的数据 | 第 0 步的会话条件（§4.3）；同步白名单之外的变量偏离默认值时走 PoC；`LastStmtInfo`（§4.5）；回退时用检查点恢复，并有快照测试（§4.6）；预处理语句的四种组合与列元数据检查（§4.7）；ab 的 integrationtest 子集在 `vs1` 模式下跑。以上都在 VS1-02 开工之前写成要求（Lucky 评审 #205） |
 | 7 | 只有 pseudo 统计信息（D11.2 在 P3 后段）：Go 集群里有真实统计信息时，计划可能不同 | 有索引竞争时访问路径不同；EXPLAIN 的 estRows 不同 | VS1 形态的主路径（handle 点查、handle 范围、Sort / TopN / Limit）不依赖统计信息；计划向量去掉 estRows；选中索引路径时本来就回退 PoC；`docs/compatibility.md` 中写明 |
 | 8 | 按块的一部分移植与宪章第四条 2 的关系 | 覆盖率口径混乱，以及"拉进单个函数"的嫌疑 | 沿用 D06.2 / D06.3 第 1 部分的先例：每个部分有函数清单（`functions.tsv`）、converge 按部分统计、其余函数登记 `blocked-by`。tracker 加部分标签（VS1-03）。需要负责人确认（🔶 §10-1） |
 | 9 | 桩泄漏到执行阶段：规划时没有拦住，执行时才发现 | 执行了一半才报错 | `Blocked` 只允许在规划和 `executorBuilder.build` 期间返回（这时还没有 `Open`）；之后出现就按 1235 报错，并计入 `bug`；`strict` 模式的 ab 会暴露这种情况 |
@@ -389,14 +476,22 @@ VS1-00 → VS1-01 → VS1-10 → VS1-21 → VS1-24 ┐
 
 ## 10. 需要负责人决定（🔶）
 
-1. **按块的一部分移植**：VS1 的工作项都是"块 X 的 VS1 部分"，块内其余函数登记为 `blocked-by:X`，块留到后续完成（D06.2 / D06.3 已有先例）。是否作为宪章第四条 2 的正式解释写进方法论？
+#205 的评审意见（Maya、Lucky，2026-11-14）记在各项之下。
+
+1. **按块的一部分移植**：VS1 的工作项都是"块 X 的 VS1 部分"，块内其余函数登记为 `blocked-by:X`，块留到后续完成（D06.2 / D06.3 已有先例）。
+   - **评审：Maya、Lucky 同意**，条件有三：每个部分有函数清单；converge 按部分统计；桩登记为 `blocked-by`。另外，CI 已经会拒绝指向已完成的块或本块自身的豁免理由。
+   - 待负责人确认后，作为宪章第四条 2 的解释写进方法论。
 2. **C2 的日程**：
-   - (a) 拆成 C2a（12-11，点查纵向）和 C2b；
-   - (b) C2b 前把深度份额临时调到 50%（约 12-30），或者保持 30%（约 2 月初）。
-3. **实例级 plan cache 与切换默认值的关系**（#128 §一.5）：
-   - 默认值切到 `vs1` 之前，是否必须先有 VS1 形态的实例级 plan cache（VS1-39，约 0.15 周，加 A3 spec）？
-   - 还是只要 read_only 达到 ≥ 0.9× 就可以切换？
-4. **开关默认值切换与性能基线**：C2a / C2b 达标后，默认值改为 `vs1`，每周构建的性能基线随之改为新栈。同意后，切换那一周的 REGRESSED 视为预期。
+   - **评审：同意拆成 C2a（点查纵向，约 12-11 至 12-14）和 C2b。**
+   - 深度份额由负责人定：C2b 前临时调到 50%（约 12-31），还是保持 30%（约 2 月初）。
+3. **实例级 plan cache 与切换默认值的关系**（#128 §一.5）。
+   - **评审（Lucky）**：只要 read_only 在 Go **打开**会话级 plan cache 的条件下达到 ≥ 0.9×，就可以切换默认值；实例级 plan cache 不作为前提。理由有两条：C5 之前本来就必须做实例级 plan cache；把它定为前提，会让切换默认值依赖 A3 spec 的进度。
+   - 如果 VS1-32 的早期测量显示优化耗时占主要部分，就提前做 VS1-39。
+   - 待负责人确认。
+4. **开关默认值切换与性能基线**：
+   - 条件：C2a / C2b 达标后，**连续两次每周构建**都达标，才把默认值改为 `vs1`。
+   - 切换时，每周构建的性能基线随之改为新栈；切换那一周的 REGRESSED 视为预期。
+   - **评审：同意**。待负责人确认。
 
 ## 附录 A：每个块的 VS1 函数数
 
