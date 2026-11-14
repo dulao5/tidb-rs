@@ -1,6 +1,6 @@
 # 基础设计 spec 之间的接口汇总
 
-状态：草案，随 N1、N2、N3+A1、A4（以及之后的 N4、N5a、N8）一起定稿。各块 plan 模板中的函数签名以本页为准。这里只列类型签名和"谁拥有谁"。理由和细节看各 spec，映射规则看 [mappings.md](../../docs/porting/mappings.md)。
+状态：草案，随 N1、N2、N3+A1、A4（以及之后的 N4、N5a、N8）一起定稿；N1 部分已于 2026-11-14 确认（#149）。各块 plan 模板中的函数签名以本页为准。这里只列类型签名和"谁拥有谁"。理由和细节看各 spec，映射规则看 [mappings.md](../../docs/porting/mappings.md)。
 
 ## 1. 所有权关系
 
@@ -10,10 +10,10 @@
      ├─ vars: SessionVars            (!Sync)        N2   只有持有会话的任务可写；系统变量存储见 N8
      ├─ shared: Arc<SessionShared>   (Send+Sync)    N2   其他会话和后台可见：SqlKiller、会话根 MemTracker、ArcSwap<ProcessInfo>
      └─ 语句（在连接任务内；先过 Q1 准入，N3 3.6）
-         ├─ PlanCtx<'s>                              N1/N2 规划期：&mut SessionVars、&StmtCtx、InfoSchema、PlanArena
-         │    └─ PlanArena                            N1   逻辑计划节点（Box<dyn LogicalPlan>），PlanId 引用；随规划结束释放
+         ├─ PlanCtx<'s>                              N1/N2 规划期：&mut SessionVars、ExprContextRef、&StmtCtx、InfoSchema、PlanArena（字段公开）
+         │    └─ PlanArena                            N1   逻辑计划节点（Box<dyn LogicalPlan>），PlanId 引用；调用方法时摘出再放回；随规划结束释放
          ├─ Arc<StmtCtx>             (Send+Sync)     N2   冻结的只读变量 + 执行期共享部分（warnings、RuntimeStatsColl、语句 tracker）
-         ├─ Arc<dyn PhysicalPlan>    (Send+Sync)     N1   DoOptimize 末尾冻结；可进 plan cache
+         ├─ Arc<dyn PhysicalPlan>    (Send+Sync)     N1   从一开始就是 Arc 树：独占时原地改，共享后写时复制；可进 plan cache
          └─ 执行器树 Box<dyn Executor> (Send)          N3   由物理计划构建；worker task 只拿 ExecCtx
               └─ worker task（pool.spawn，仅当计划带并行 worker） N3   捕获 ExecCtx + 自己的 Arc<…Shared>；子执行器可被 move 进 fetcher，Close 前交回
 
@@ -25,26 +25,59 @@
 ```rust
 // ---- N1 计划表示 ----
 pub struct PlanId(u32);                         // arena 下标，仅内部使用
-pub struct PlanArena { /* Vec<Box<dyn LogicalPlan>>, 旁表 task_map 等 */ }
+pub struct PlanArena { /* Vec<Option<Box<dyn LogicalPlan>>>, 旁表 task_map 等 */ }
+impl PlanArena {
+    pub fn take(&mut self, id: PlanId) -> Box<dyn LogicalPlan>;     // 摘出；重复摘出 panic
+    pub fn put(&mut self, id: PlanId, p: Box<dyn LogicalPlan>);    // 放回
+    pub fn schema_mut(&mut self, id: PlanId) -> &mut Schema;       // 写到 schema 的拥有者（Go 的 Schema() 可能返回子节点的）
+}
+/// 标准写法（N1 §4）：摘出节点，以 &mut self 调用方法（旁边是 &mut PlanCtx），再放回
+pub fn with_detached<R>(ctx: &mut PlanCtx<'_>, id: PlanId,
+    f: impl FnOnce(&mut dyn LogicalPlan, &mut PlanCtx<'_>) -> R) -> R;
 pub trait LogicalPlan: Any + Send {
     fn kind(&self) -> LogicalKind;              // M-IFACE：type switch → match
     fn id(&self) -> i32;                        // Go 的 plan id（PlanID.Add(1)），不同于 PlanId
     fn as_any(&self) -> &dyn Any;
-    // …与 Go base.LogicalPlan 一一对应的方法，接收 (&mut PlanCtx, PlanId)
+    fn base(&self) -> &BaseLogicalPlan;         // M-SELF：Go 嵌入结构的访问器，宏生成
+    fn base_mut(&mut self) -> &mut BaseLogicalPlan;
+    fn schema_producer(&self) -> Option<&LogicalSchemaProducer> { None }
+    fn schema_producer_mut(&mut self) -> Option<&mut LogicalSchemaProducer> { None }
+    // …与 Go base.LogicalPlan 一一对应的方法：fn xxx(&mut self, ctx: &mut PlanCtx, this: PlanId, …)
+    //   this = 节点自己的 PlanId（Go 的 return p → Ok(this)）；嵌入结构的方法写成默认方法
 }
-pub trait PhysicalPlan: Any + Send + Sync { fn kind(&self) -> PhysicalKind; fn id(&self) -> i32; /* … */ }
+// 每个 Go 接口方法一个同名分派函数：fn xxx(ctx: &mut PlanCtx, p: PlanId, …) { with_detached(ctx, p, |n, ctx| n.xxx(ctx, p, …)) }
+pub struct LogicalSchemaProducer { schema: OnceCell<Schema>, /* … */ } // 有副作用的 getter（惰性从子节点克隆）用 OnceCell
+pub trait PhysicalPlan: Any + Send + Sync {
+    fn kind(&self) -> PhysicalKind; fn id(&self) -> i32;
+    fn children(&self) -> &[PhysicalPlanRef];
+    fn children_mut(&mut self) -> &mut Vec<PhysicalPlanRef>;
+    fn clone_node(&self) -> PhysicalPlanRef;    // 浅拷贝一个节点：子节点、表达式仍共享（取代 Go 的 CloneForPlanCache 深拷贝）
+    /* … */
+}
+pub type PhysicalPlanRef = Arc<dyn PhysicalPlan>;
+pub fn make_mut_plan(p: &mut PhysicalPlanRef) -> &mut dyn PhysicalPlan;  // 独占时原地；共享时先 clone_node（M-PLAN）
+pub fn map_children(p: &mut PhysicalPlanRef, f: impl FnMut(PhysicalPlanRef) -> PhysicalPlanRef); // p.Children()[i] = f(child)；共享时只在子节点变化时复制
 pub type Expr = Arc<Expression>;                // 不可变共享，写时复制（M-EXPR）；具体结构见 N4
 
 // ---- N2 上下文 ----
 pub struct Session { pub vars: SessionVars, pub shared: Arc<SessionShared>, /* … */ }
 pub struct SessionShared { pub killer: SqlKiller, pub mem_root: Arc<MemTracker>, pub process: ArcSwap<ProcessInfo> }
 pub struct StmtCtx { pub vars: FrozenVars, pub cop_meta: CopRequestMeta, /* warnings, rows, runtime stats, mem/disk tracker … */ }
-pub struct PlanCtx<'s> { /* &'s mut SessionVars, &'s StmtCtx, InfoSchema, PlanArena */ }
-impl<'s> PlanCtx<'s> {
-    pub fn split(&mut self) -> (&mut PlanArena, &mut EvalCtx); // 唯一允许的同时借用写法（N1 §4）；EvalCtx 含 &mut WarnBuf（常量折叠会产生 warning），所以是可变借用
+pub struct PlanCtx<'s> {                         // 字段公开：同一函数内 ctx.arena / ctx.expr_ctx / ctx.vars 是互不重叠的字段借用
+    pub arena: PlanArena,
+    pub vars: &'s mut SessionVars,
+    pub expr_ctx: ExprContextRef,
+    /* &'s StmtCtx, InfoSchema … */
 }
-pub struct EvalCtx;   // 对应 Go exprstatic.EvalContext：冻结快照的视图
-pub struct BuildCtx;  // 对应 Go exprctx.BuildContext：列 ID 分配器、plan cache 标志等
+impl<'s> PlanCtx<'s> {
+    pub fn eval_ctx(&self) -> EvalContextRef;
+    pub fn alloc_plan_id(&self) -> i32;         // Go 的 PlanID.Add(1)，在 Go 分配的同一位置调用（N1 §3.6）
+    // 备用写法（N1 §4）：只在需要跨函数边界一次传出多个借用时用；标准写法是摘出分派
+    pub fn split(&mut self) -> (&mut PlanArena, &dyn ExprContext, &mut SessionVars);
+}
+// 表达式上下文（N4 已移植，crates/sessionctx exprctx）：共享引用，warning 和列 ID 分配器内部可变，不需要 &mut
+pub type ExprContextRef = Arc<dyn ExprContext>;  // 对应 Go exprctx.ExprContext（含 BuildContext：列 ID 分配器、plan cache 标志等）
+pub type EvalContextRef = Arc<dyn EvalContext>;  // 对应 Go exprctx.EvalContext：冻结快照的视图 + warning
 
 // ---- N3 并发与取消 ----
 #[derive(Clone)]

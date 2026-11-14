@@ -15,9 +15,10 @@ Go TiDB 的很多写法只是因为 Go 运行时才那样写（goroutine、chann
 
 | ID | Go 写法 | Rust 对应物 | 依据 | 机器检查 |
 |---|---|---|---|---|
-| M-PLAN | 逻辑计划用接口指针互相引用，规则返回新子树根、由调用方 `SetChild` | 语句级 arena，节点用 `PlanId` 引用；物理计划在 `DoOptimize` 结束时冻结为不可变 `Arc` 树 | N1 | — |
+| M-PLAN | 逻辑计划用接口指针互相引用，规则返回新子树根、由调用方 `SetChild`；物理计划原地修改，进 plan cache 时深拷贝 | 语句级 arena，节点用 `PlanId` 引用。调用 arena 中节点的方法：同名分派函数 `with_detached` 摘出节点，以 `&mut self` 调用 trait 方法（旁边是 `&mut PlanCtx`），再放回；`PlanCtx::split()` 只作备用。物理计划从一开始就是 `Arc` 树：写节点用 `make_mut_plan`（独占时原地改，共享时浅拷贝一个节点），改子节点用 `map_children`；plan cache 命中后的改写用同一机制做路径复制 | N1 §3.4、§3.5、§4 | — |
 | M-EXPR | 表达式指针在计划节点间共享，修改前先 `Clone()` | `Arc<Expr>` 不可变共享，写时复制 | N1 | — |
-| M-SELF | `BaseLogicalPlan.self` 字段回调具体算子 | trait 默认方法 | N1 | — |
+| M-FT | 改 `GetType()` 返回的 `*FieldType`（赋值 `.RetType =`，方法调用 `SetFlag`/`DelFlag`/`SetFlen`/`SetDecimal`/`SetCharset`/`SetCollate`/`SetType` 等）。Go 的 `Column.Clone()`、`Schema.Clone` 等只复制列，`FieldType` 指针仍共享，修改对同一查询中所有持有者可见（memory table 上甚至是进程全局的，#148）；`SetSchema(x.Schema())` 不 Clone 时 `*Schema` 同理 | **默认写时复制**：`Column.ret_type` 按值保存（D08.1），只改本处的副本。只有当 Go 的别名会改变 golden test 或 EXPLAIN 对照能看到的计划时，才在**那一处**显式模拟：除本处副本外，按 UniqueID 同步改同一查询中来源列的类型；加注释 `// Go aliasing (M-FT): <file>.go:<line>, <effect>`，配回归测试，在块 plan 的"已知差异 / 模拟"表中登记。跨查询的全局效果（#148）不模拟。只改 charset / collation / decimal 的修改，到达发给客户端的列定义时按可见差异处理。每块 plan 都运行两个审计 grep（赋值 `.Index =` / `.RetType =`；方法调用 `SetFlag`/`DelFlag`/`SetFlen`/`SetCharset`/`SetCollate`/…），逐处给出 S/V0/V1 结论 | N1 §3.3、§5；D09.7 试点报告 §3.3、§6、附录 A/B；#149 | `grep -rn 'Go aliasing (M-FT)'` 列出全部模拟位置，与块 plan 的登记表对照 |
+| M-SELF | `BaseLogicalPlan.self` 字段回调具体算子；struct 嵌入（`LogicalProjection` 嵌 `LogicalSchemaProducer` 嵌 `BaseLogicalPlan`）；有副作用的 getter | trait 默认方法。嵌入结构用宏生成的 `base()` / `schema_producer()`（及 `_mut`）访问器，嵌入结构的方法写成默认方法；有副作用的 getter（如惰性从子节点克隆 schema）用 `OnceCell`，读路径仍是 `&self`；trait 方法多接收 `this: PlanId`（节点自己的下标），Go 的 `return p` 写成 `Ok(this)`、`s.Self()` 传 `this`；指针比较 `p.Schema() == child.Schema()` 用 `std::ptr::eq` | N1 §3.7 | — |
 | M-IFACE | 接口 + 类型断言 / `switch x := p.(type)` | trait + `kind()` 枚举 `match`；必要时 `as_any` 向下转型 | N1 | — |
 | M-CTX | 随处传 `sessionctx.Context`，直接读写 `SessionVars` / `StmtCtx` | 三层上下文：会话独占的可变 `SessionVars`；跨线程共享的 KILL / PROCESSLIST 小对象；语句开始时冻结的只读 `ExecCtx`。窄接口沿用 Go 的 `exprctx` / `planctx` / `DistSQLContext` 边界 | N2 | `ExecCtx: Send + Sync`、`Session: Send` 静态断言 |
 | M-GOCTX | `context.Context` | 取消令牌 + `ExecCtx` 中的少数值（request source、internal source type、tracing span） | N3 | — |

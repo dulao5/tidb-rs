@@ -150,7 +150,7 @@
 
 ## 5. 主题 2、3：慢日志、语句摘要、EXPLAIN（细节）
 
-- **计划编码依赖扁平计划**：`Plan`/`Binary_plan`/plan digest 都基于 `FlattenPhysicalPlan`，而 N1 规定计划在 `DoOptimize` 结束时冻结。所以扁平化和编码只读冻结计划，可以放到语句结束后（甚至后台）做；但 **plan digest 必须在执行开始前算出**——Top SQL 标签和 `resource_group_tag` 要用（Go 在 `ExecStmt.Exec` 前 `AttachSQLAndPlanInfo`）。这一点碰 N1 和 D05.3 的顺序，要现在定。
+- **计划编码依赖扁平计划**：`Plan`/`Binary_plan`/plan digest 都基于 `FlattenPhysicalPlan`，而 N1 规定物理计划是 `Arc` 树，`DoOptimize` 结束后不再修改（2026-11-14 修订：不再有单独的冻结步骤，共享后的修改一律写时复制）。所以扁平化和编码只读冻结计划，可以放到语句结束后（甚至后台）做；但 **plan digest 必须在执行开始前算出**——Top SQL 标签和 `resource_group_tag` 要用（Go 在 `ExecStmt.Exec` 前 `AttachSQLAndPlanInfo`）。这一点碰 N1 和 D05.3 的顺序，要现在定。
 - **算子统计的写入点集中在执行器框架**：Go 已经这样做——`exec.Next`（`executor/internal/exec/executor.go:443–445`）对每个执行器统一记时间和行数，分散的只是 14 种算子特有的 `RuntimeStats`。D12.0 照此移植：`next()` 由框架包一层（计时、行数、loops、checkpoint），算子特有统计通过 `RuntimeStats` trait 注册。
 - **进行中可读**：`StmtExecRecord` 内部可变（原子计数 + 少量 `Mutex`），`EXPLAIN FOR CONNECTION` 和 `PROCESSLIST` 读的是同一份。这要求 N2 的 `StmtShared` 包含 `RuntimeStatsColl` 和 `ExecDetails`（#53 已列 `ExecDetails`，要补 `RuntimeStatsColl` 和 plan 句柄）。Go 在语句之间复用 `RuntimeStatsColl`；在 Rust 中它在 `Arc` 后面，可能被另一个会话持有（`EXPLAIN FOR CONNECTION`），所以只有唯一持有时才复用，否则新建。
 - **兼容测试**：慢日志行、`SLOW_QUERY` 解析、计划编码/解码、EXPLAIN 文字都能用 govec 对照（输入是构造好的记录/计划）；SQL 层用混合集群对照 `SLOW_QUERY`、`STATEMENTS_SUMMARY` 和 `tidb_decode_plan` 的结果（Go 解码 tidb-rs 写的计划）。
