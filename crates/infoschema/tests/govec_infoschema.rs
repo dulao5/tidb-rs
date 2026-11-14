@@ -831,3 +831,116 @@ fn govec_infoschema() {
         }
     }
 }
+
+/// The query results that do not depend on the table cache (Go's `isQueries` minus the
+/// `TableIsCached` probes and the clone).
+fn cache_independent(q: Value) -> Value {
+    let mut q = q;
+    if let Value::Object(m) = &mut q {
+        for k in ["cached0", "cached1", "cached2", "clone"] {
+            m.remove(k);
+        }
+    }
+    q
+}
+
+/// Exception A3 §5.1: the multi-version maps are updated in place under locks, not
+/// copied. A reader pinned at version v must see the same results while another thread
+/// applies schema diffs, full reloads (at later versions) and GC (cut <= v, the oldest
+/// version present, as Go's GetOldestSchemaVersion guarantees) to the same `Data`.
+#[test]
+fn readers_at_a_fixed_version_while_the_builder_writes() {
+    let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(vectors()).expect("vectors"));
+    let mut text = String::new();
+    gz.read_to_string(&mut text).unwrap();
+    // A scenario with many tables at its first version and at least 3 batches of diffs.
+    let rec: Value = text
+        .lines()
+        .skip(1)
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .filter(|r| {
+            r["args"][0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|s| s["k"] == "diffs")
+                .count()
+                >= 3
+        })
+        .max_by_key(|r| r["out"][0]["q"]["iter"].as_array().map_or(0, Vec::len))
+        .unwrap();
+    let steps = rec["args"][0].as_array().unwrap().clone();
+    assert_eq!(steps[0]["k"], "full");
+    let v = steps[0]["ver"].as_i64().unwrap();
+
+    let store = Arc::new(MvccStore::default());
+    let req: Arc<dyn Requirement> = Arc::new(Req(store.clone()));
+    let data = new_data();
+    let mut built = vec![];
+    let mut latest = None;
+    let mut o = Map::new();
+    block_on(step(
+        &steps[0],
+        &store,
+        &req,
+        &data,
+        &mut built,
+        &mut latest,
+        &mut o,
+    ));
+    let is_v = latest.clone().expect("the full load builds");
+    let pinned = cache_independent(block_on(queries(&is_v)));
+
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (store, req, data, done) = (store.clone(), req.clone(), data.clone(), done.clone());
+        let steps = steps.clone();
+        std::thread::spawn(move || {
+            let mut built = built;
+            let mut latest = latest;
+            for _ in 0..20 {
+                for st in &steps[1..] {
+                    let mut st = st.clone();
+                    match st["k"].as_str().unwrap() {
+                        // A full load at v itself would rewrite v's items (as in Go).
+                        "full" if st["ver"].as_i64().unwrap_or(0) <= v => continue,
+                        "gc" => st["ver"] = json!(st["ver"].as_i64().unwrap_or(0).min(v)),
+                        _ => {}
+                    }
+                    let mut o = Map::new();
+                    block_on(step(
+                        &st,
+                        &store,
+                        &req,
+                        &data,
+                        &mut built,
+                        &mut latest,
+                        &mut o,
+                    ));
+                    // GC at the oldest version in use (Go: GetOldestSchemaVersion).
+                    data.gc_old_version(v);
+                }
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let (is_v, pinned, done) = (is_v.clone(), pinned.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut n = 0;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) || n == 0 {
+                    let got = cache_independent(block_on(queries(&is_v)));
+                    if let Some(d) = first_diff(&pinned, &got, "q") {
+                        panic!("version {v} changed under the writer: {d}");
+                    }
+                    n += 1;
+                }
+                n
+            })
+        })
+        .collect();
+    writer.join().expect("writer");
+    let rounds: usize = readers.into_iter().map(|r| r.join().expect("reader")).sum();
+    assert!(rounds > 0);
+}

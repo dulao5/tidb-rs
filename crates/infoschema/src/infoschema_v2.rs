@@ -1719,13 +1719,11 @@ impl InfoSchemaV2 {
                 })
                 .clone()
         };
-        let res = fut.clone().await;
-        {
-            let mut sf = LOAD_TABLE_SF.lock();
-            if sf.get(&key).is_some_and(|f| f.ptr_eq(&fut)) {
-                sf.remove(&key);
-            }
-        }
+        // The guard removes the entry once the load has finished, or when its last waiter
+        // is dropped before that (the load is cancelled with it).
+        let guard = LoadTableSfGuard { key, fut };
+        let res = guard.fut.clone().await;
+        drop(guard);
 
         match res? {
             Some(t) => Ok(t),
@@ -1733,6 +1731,28 @@ impl InfoSchemaV2 {
                 Arg::from(format!("(Schema ID {db_id})")),
                 Arg::from(format!("(Table ID {tbl_id})")),
             ])),
+        }
+    }
+}
+
+/// Removes a `loadTableSF` entry when a waiter leaves: always once the load is done (Go:
+/// `Do` deletes the key after the function returns), and when the last waiter is dropped
+/// before that (Go's goroutine would finish the load alone; here the load is cancelled with
+/// its last waiter, so a later call starts a new one instead of joining a dead future).
+struct LoadTableSfGuard {
+    key: String,
+    fut: Shared<BoxFuture<'static, LoadResult>>,
+}
+
+impl Drop for LoadTableSfGuard {
+    // glue: singleflight.Group's key removal under cancellation (M-GOCTX)
+    fn drop(&mut self) {
+        let mut sf = LOAD_TABLE_SF.lock();
+        let ours = sf.get(&self.key).is_some_and(|f| f.ptr_eq(&self.fut));
+        // The map holds one clone, this guard another: 2 means no other waiter.
+        let last = self.fut.strong_count().is_none_or(|n| n <= 2);
+        if ours && (self.fut.peek().is_some() || last) {
+            sf.remove(&self.key);
         }
     }
 }
@@ -2373,5 +2393,183 @@ mod tests {
         // ensure getTableReferredForeignKeys respects GC boundary
         let g = data.get_table_referred_foreign_keys("db1", "table1", 5);
         assert_eq!(*g[0], rfk("s", "t", "fk"));
+    }
+
+    // ------------------------------------------------------------ singleflight guard
+
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::task::{Context as TaskContext, Poll};
+
+    use tidb_kv::Context as KvContext;
+    use tidb_kv::key::Key;
+    use tidb_kv::kv::{
+        BatchGetOption, BatchGetter, Client, GetOption, Getter, Iterator as KvIterator, KvFuture,
+        OptionValue, Retriever, Snapshot, Storage, Transaction, TxnOption, ValueEntry,
+    };
+    use tidb_kv::version::Version;
+
+    /// A snapshot whose reads never finish.
+    struct PendingSnap;
+
+    impl Getter for PendingSnap {
+        fn get<'a>(
+            &'a self,
+            _: &'a KvContext,
+            _: &'a Key,
+            _: &'a [GetOption],
+        ) -> KvFuture<'a, ValueEntry> {
+            Box::pin(futures::future::pending())
+        }
+    }
+    impl Retriever for PendingSnap {
+        fn iter<'a: 'f, 'f>(
+            &'a self,
+            _: &'f Key,
+            _: &'f Key,
+        ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
+            Box::pin(futures::future::pending())
+        }
+        fn iter_reverse<'a: 'f, 'f>(
+            &'a self,
+            _: &'f Key,
+            _: &'f Key,
+        ) -> KvFuture<'f, Box<dyn KvIterator + 'a>> {
+            Box::pin(futures::future::pending())
+        }
+    }
+    impl BatchGetter for PendingSnap {
+        fn batch_get<'a>(
+            &'a self,
+            _: &'a KvContext,
+            _: &'a [Key],
+            _: &'a [BatchGetOption],
+        ) -> KvFuture<'a, HashMap<Vec<u8>, ValueEntry>> {
+            Box::pin(futures::future::pending())
+        }
+    }
+    impl Snapshot for PendingSnap {
+        fn set_option(&self, _: isize, _: OptionValue) {}
+    }
+
+    struct PendingStore;
+
+    impl Storage for PendingStore {
+        fn begin<'a>(&'a self, _: &'a [TxnOption]) -> KvFuture<'a, Box<dyn Transaction>> {
+            unimplemented!()
+        }
+        fn get_snapshot(&self, _: Version) -> Arc<dyn Snapshot> {
+            Arc::new(PendingSnap)
+        }
+        fn get_client(&self) -> Arc<dyn Client> {
+            unimplemented!()
+        }
+        fn close(&self) -> Result<(), tidb_base::Error> {
+            Ok(())
+        }
+        fn uuid(&self) -> String {
+            String::new()
+        }
+        fn current_version<'a>(&'a self, _: &'a str) -> KvFuture<'a, Version> {
+            unimplemented!()
+        }
+        fn name(&self) -> String {
+            String::new()
+        }
+        fn describe(&self) -> String {
+            String::new()
+        }
+        fn get_min_safe_ts(&self, _: &str) -> u64 {
+            0
+        }
+    }
+
+    struct PendingReq;
+
+    impl Requirement for PendingReq {
+        fn store(&self) -> Arc<dyn Storage> {
+            Arc::new(PendingStore)
+        }
+    }
+
+    fn poll_once<F: Future>(f: &mut std::pin::Pin<Box<F>>) -> Poll<F::Output> {
+        let waker = futures::task::noop_waker();
+        f.as_mut().poll(&mut TaskContext::from_waker(&waker))
+    }
+
+    /// A key's `loadTableSF` entry is removed when every waiter is dropped before the load
+    /// finishes, so a later lookup starts a new load instead of joining a cancelled one.
+    #[test]
+    fn load_table_sf_entry_removed_when_waiters_cancelled() {
+        let data = new_data();
+        let db = DBInfo {
+            id: 1_000_001,
+            name: ci("sfdb"),
+            ..Default::default()
+        };
+        data.add_db(1, db);
+        // A name-only table (not in the cache): TableByID has to load it.
+        data.add_name_only(TableItem {
+            db_name: ci("sfdb"),
+            db_id: 1_000_001,
+            table_name: ci("sft"),
+            table_id: 1_000_002,
+            schema_version: 1,
+            tomb: false,
+        });
+        let mut is = new_info_schema_v2(Some(Arc::new(PendingReq)), None, data);
+        Arc::make_mut(&mut is.misc).schema_meta_version = 1;
+        let key = format!("{}-{}-{}", 1_000_001, 1_000_002, 1);
+        let has_key = || LOAD_TABLE_SF.lock().contains_key(&key);
+
+        let mut a = Box::pin(is.table_by_id(Ctx::background(), 1_000_002));
+        let mut b = Box::pin(is.table_by_id(Ctx::background(), 1_000_002));
+        assert!(poll_once(&mut a).is_pending());
+        assert!(poll_once(&mut b).is_pending());
+        assert!(has_key());
+        drop(a); // b still waits
+        assert!(has_key());
+        drop(b); // the last waiter
+        assert!(!has_key());
+
+        // A new lookup starts a new load.
+        let mut c = Box::pin(is.table_by_id(Ctx::background(), 1_000_002));
+        assert!(poll_once(&mut c).is_pending());
+        assert!(has_key());
+        drop(c);
+        assert!(!has_key());
+    }
+
+    /// Go's GC rule ("delete an item older than the cut if a newer item of the same table
+    /// exists") also deletes the item a reader **at** the cut version needs when the newer
+    /// item is above the cut (spec §9 item 6). Kept as in Go; this test pins the behaviour.
+    #[test]
+    fn gc_at_the_cut_drops_the_item_a_reader_at_the_cut_needs() {
+        let data = new_data();
+        let item = |ver: i64| TableItem {
+            db_name: ci("db"),
+            db_id: 1,
+            table_name: ci("t"),
+            table_id: 10,
+            schema_version: ver,
+            tomb: false,
+        };
+        let tbl = crate::table::table_from_meta(
+            crate::autoid::Allocators::default(),
+            Arc::new(TableInfo {
+                id: 10,
+                name: ci("t"),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        data.add(item(3), tbl.clone()); // created at v3
+        data.add(item(8), tbl); // altered at v8
+        let mut is5 = new_info_schema_v2(None, None, data.clone());
+        Arc::make_mut(&mut is5.misc).schema_meta_version = 5;
+        assert!(is5.table_item_by_id(10).is_some());
+        // The oldest version in use is 5 (the reader above).
+        assert_eq!(data.gc_old_version(5).0, 1);
+        assert!(is5.table_item_by_id(10).is_none());
     }
 }
