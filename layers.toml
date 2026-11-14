@@ -152,7 +152,6 @@ blocks = ["D06.5"]
 
 [crate.tidb-planner]
 rank = 13
-planned = true
 blocks = [
   "D09.0", "D09.1", "D09.2", "D09.3", "D09.4", "D09.5", "D09.6", "D09.7", "D09.8", "D09.9",
   "D09.10", "D09.11", "D09.12", "D09.13", "D09.14", "D09.16",
@@ -170,7 +169,6 @@ blocks = []
 
 [crate.tidb-executor]
 rank = 14
-planned = true
 blocks = [
   "D12.0", "D12.1", "D12.2", "D12.3", "D12.4", "D12.5", "D12.6", "D12.7", "D12.8", "D12.9",
   "D12.10", "D12.11", "D12.12", "D12.13",
@@ -178,7 +176,6 @@ blocks = [
 
 [crate.tidb-session]
 rank = 15
-planned = true
 blocks = ["D05.3"]
 
 [crate.tidb-server]

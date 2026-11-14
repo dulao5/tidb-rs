@@ -30,6 +30,9 @@ members = [
   "crates/execdetails",
   "crates/infoschema",
   "crates/store",
+  "crates/planner",
+  "crates/executor",
+  "crates/session",
   # SPIKE (D09.7 design pilot for N1): not for merging, not counted in coverage.
   "crates/spike/planner-pilot",
   "tools/ab",
@@ -134,6 +137,9 @@ tidb-expression = { path = "crates/expression" }
 tidb-expression-macros = { path = "crates/expression/macros" }
 tidb-expr-pushdown = { path = "crates/expr-pushdown" }
 tidb-store = { path = "crates/store" }
+tidb-planner = { path = "crates/planner" }
+tidb-executor = { path = "crates/executor" }
+tidb-session = { path = "crates/session" }
 # TiKV Rust client: our fork (dulao5/client-rust, branch tidb-rs/metrics): `Snapshot::coprocessor`,
 # several connections per store, client-go/PD metrics (feature client-go-metrics), and
 # client-go's lock resolution (#101 R1-R7, R12: lock hints, background cleanup,
@@ -151,6 +157,7 @@ tidb-store = { path = "crates/store" }
 # D07.2).
 tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "86d5197cf25db6e2f6c34ef4ede457014b11cb62", default-features = false, features = ["client-go-metrics"] }
 # External crates.
+async-trait = "0.1"
 bytes = "1.11"
 # Global allocator of the server and the benchmarks (A1 / P0 decision D7: jemalloc).
 tikv-jemallocator = "0.6"

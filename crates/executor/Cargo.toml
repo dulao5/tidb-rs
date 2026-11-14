@@ -1,0 +1,27 @@
+[package]
+name = "tidb-executor"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/executor (blocks D12.x): the async executor interface of N3; the executors come with the VS1 work items"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Boxed futures for `dyn Executor` (N3 §3.1 item 1: one boxed future per Next).
+async-trait = { workspace = true }
+# Errors (M-ERR).
+tidb-base = { workspace = true }
+# Chunk (D01.7, N5a).
+tidb-chunk = { workspace = true }
+# StatementContext carried by ExecCtx (N2).
+tidb-sessionctx = { workspace = true }
+# Physical plans the builder turns into executors (N1).
+tidb-planner = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+tidb-types = { workspace = true }
+
+[lints]
+workspace = true
