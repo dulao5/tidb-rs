@@ -20,7 +20,11 @@
 //!   (`copIteratorWorker.handleCopResponse`).
 //! - Diagnostics: an empty `ServerInfoResponse` and an empty `search_log` stream, so Go adds
 //!   no rows and no warning for this node.
-//! - Other methods: `Unimplemented`, as grpc-go answers an unknown method.
+//! - Other methods: `Unimplemented`, as grpc-go answers an unknown method. Go also serves
+//!   `CoprocessorStream`, `BatchCommands` (client-go batches only to TiKV),
+//!   `ReportMPPTaskStatus` (TiFlash reports to the coordinating TiDB, never this node) and
+//!   TopSQL's `TopSQLPubSub` (ng-monitoring finds TiDBs in `/topology/tidb`, which tidb-rs
+//!   does not write).
 //!
 //! There is no gRPC server stack here: the requests arrive in the status server's hyper
 //! service (Go uses cmux on one port the same way), and the few kvproto messages are declared
@@ -216,7 +220,8 @@ fn build_dag_executor(req: &CopRequest) -> Result<DagRequest, String> {
 }
 
 // go: PBPlanBuilder.Build L2 (checks each executor; there is no plan to build)
-// go: PBPlanBuilder.pbToPhysicalPlan L2 (same dispatch; Kill is not supported)
+// go: PBPlanBuilder.pbToPhysicalPlan L2 (same dispatch; Kill is not supported: Go sends a
+// remote KILL only to the node of the connection's server ID, and tidb-rs registers none)
 fn build(executors: &[Executor]) -> Result<(), String> {
     if executors.is_empty() {
         // glue: Go dereferences the nil plan and answers with its recovered panic.
@@ -226,7 +231,9 @@ fn build(executors: &[Executor]) -> Result<(), String> {
         match e.get_tp() {
             // pbToTableScan: a TiDB memory table, read from this node. tidb-rs has no TiDB
             // memory-table rows yet, so every table is empty (Go also checks that the table
-            // ID is a cluster table; tidb-rs has no table for the ID).
+            // ID is a cluster table; tidb-rs has no table for the ID). Go's partial
+            // aggregation without GROUP BY sends one row (e.g. count 0) for an empty table;
+            // here none, which Go's final aggregation merges to the same result.
             ExecType::TypeTableScan
             | ExecType::TypeSelection
             | ExecType::TypeTopN
