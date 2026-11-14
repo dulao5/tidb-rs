@@ -1,11 +1,12 @@
 //! Constants and handle ranges: turns `handle OP constant` conjunctions into one inclusive
-//! range of integer handles.
+//! range of integer handles (UNSIGNED handles: values in `[0, u64::MAX]`).
 //!
 //! Comparisons are evaluated exactly, as Go's `RefineComparedConstant` + ranger do for an
 //! integer column compared with a numeric constant: `id < 5.5` is `id <= 5`, `id = 5.5` is
-//! empty, `id = '7'` is `id = 7`, any comparison with NULL is empty. Values beyond the `i64`
+//! empty, `id = '7'` is `id = 7`, any comparison with NULL is empty. Values beyond the handle's
 //! domain saturate (they cannot match any handle).
 
+use tidb_distsql::IntRange;
 use tidb_mysql_protocol::SqlError;
 use tidb_mysql_protocol::Value;
 
@@ -231,6 +232,18 @@ impl Interval {
         let hi = self.hi.min(i128::from(i64::MAX));
         (lo <= hi).then_some((lo as i64, hi as i64))
     }
+
+    /// The range restricted to the handle column's domain, or `None` if it holds no value:
+    /// `i64`, or `[0, u64::MAX]` for an UNSIGNED handle, whose ranges Go's ranger builds with
+    /// `KindUint64` datums (`ranger.FullIntRange(isUnsigned)`).
+    pub fn to_int_range(self, unsigned: bool) -> Option<IntRange> {
+        if !unsigned {
+            return self.to_i64().map(|(lo, hi)| IntRange::Signed(lo, hi));
+        }
+        let lo = self.lo.max(0);
+        let hi = self.hi.min(i128::from(u64::MAX));
+        (lo <= hi).then_some(IntRange::Unsigned(lo as u64, hi as u64))
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +338,31 @@ mod tests {
             .intersect(Interval::from_cmp(CmpOp::Le, Some(n("5"))));
         assert!(b.is_empty());
         assert_eq!(b.to_i64(), None);
+    }
+
+    #[test]
+    fn unsigned_domain() {
+        let r = |op, s: &str| Interval::from_cmp(op, Some(n(s))).to_int_range(true);
+        assert_eq!(
+            Interval::full().to_int_range(true),
+            Some(IntRange::Unsigned(0, u64::MAX))
+        );
+        assert_eq!(
+            r(CmpOp::Ge, "9223372036854775807"),
+            Some(IntRange::Unsigned(i64::MAX as u64, u64::MAX))
+        );
+        assert_eq!(r(CmpOp::Gt, "-5"), Some(IntRange::Unsigned(0, u64::MAX)));
+        assert_eq!(r(CmpOp::Lt, "0"), None);
+        assert_eq!(r(CmpOp::Gt, "18446744073709551615"), None);
+        assert_eq!(
+            r(CmpOp::Le, "1000000000000000000000000000000"),
+            Some(IntRange::Unsigned(0, u64::MAX))
+        );
+        // Signed handles keep the i64 domain.
+        assert_eq!(
+            Interval::full().to_int_range(false),
+            Some(IntRange::Signed(i64::MIN, i64::MAX))
+        );
     }
 
     #[test]

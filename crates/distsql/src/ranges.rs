@@ -57,6 +57,96 @@ impl HandleRange {
     }
 }
 
+/// A non-empty inclusive range of integer handle *values*: Go's `ranger.Range` over an int
+/// handle, whose datums are `KindInt64`, or `KindUint64` when the handle column is UNSIGNED
+/// (`ranger.FullIntRange(isUnsigned)`). Ranges of one read are sorted by value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntRange {
+    Signed(i64, i64),
+    Unsigned(u64, u64),
+}
+
+impl IntRange {
+    /// The handles the range covers. The key of a row is the int64 encoding of its handle;
+    /// for an UNSIGNED handle that is the bit pattern of the value (Go `encodeHandleKey` uses
+    /// `Datum.GetInt64()`), so `Unsigned(lo, hi)` must not straddle `i64::MAX` (see
+    /// [`split_ranges_across_int64_boundary`]).
+    pub fn to_handle_range(self) -> HandleRange {
+        match self {
+            IntRange::Signed(lo, hi) => HandleRange::inclusive(lo, hi),
+            IntRange::Unsigned(lo, hi) => {
+                debug_assert!(
+                    lo > i64::MAX as u64 || hi <= i64::MAX as u64,
+                    "unsigned range [{lo},{hi}] straddles the int64 boundary"
+                );
+                HandleRange::inclusive(lo as i64, hi as i64)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for IntRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntRange::Signed(lo, hi) => write!(f, "[{lo},{hi}]"),
+            IntRange::Unsigned(lo, hi) => write!(f, "[{lo},{hi}]"),
+        }
+    }
+}
+
+// go: distsql.SplitRangesAcrossInt64Boundary (pkg/distsql/request_builder.go)
+/// Splits `ranges` into two groups: the values `<= i64::MAX` ("signed") and the values
+/// `> i64::MAX` ("unsigned"), splitting a range that straddles the boundary. Row keys encode
+/// a handle as an int64, so an UNSIGNED value `>= 2^63` sorts *before* zero in key order.
+///
+/// Without `keep_order` both groups go into one request, the unsigned ones first (which is key
+/// order); with `keep_order` the first group is read before the second in a separate request:
+/// signed then unsigned ascending, unsigned then signed descending. Signed (`KindInt64`)
+/// ranges are returned unchanged. (Go's common-handle case does not arise: these are int
+/// handles only.)
+pub fn split_ranges_across_int64_boundary(
+    ranges: &[IntRange],
+    keep_order: bool,
+    desc: bool,
+) -> (Vec<IntRange>, Vec<IntRange>) {
+    const MAX_I64: u64 = i64::MAX as u64;
+    let hi_of = |r: &IntRange| match *r {
+        IntRange::Unsigned(_, hi) => hi,
+        IntRange::Signed(..) => unreachable!("mixed signed and unsigned ranges"),
+    };
+    if ranges.is_empty() || matches!(ranges[0], IntRange::Signed(..)) {
+        return (ranges.to_vec(), Vec::new());
+    }
+    let idx = ranges.partition_point(|r| hi_of(r) <= MAX_I64);
+    if idx == ranges.len() {
+        return (ranges.to_vec(), Vec::new());
+    }
+    let IntRange::Unsigned(lo, hi) = ranges[idx] else {
+        unreachable!("mixed signed and unsigned ranges")
+    };
+    let (signed, unsigned) = if lo > MAX_I64 {
+        (ranges[..idx].to_vec(), ranges[idx..].to_vec())
+    } else {
+        // Straddles the boundary. Go skips an empty half (`(MaxInt64, ..` / `.., MaxInt64+1)`
+        // with an exclusive bound); inclusive bounds never leave one empty.
+        let mut signed = ranges[..idx].to_vec();
+        signed.push(IntRange::Unsigned(lo, MAX_I64));
+        let mut unsigned = vec![IntRange::Unsigned(MAX_I64 + 1, hi)];
+        unsigned.extend_from_slice(&ranges[idx + 1..]);
+        (signed, unsigned)
+    };
+    if !keep_order {
+        let mut all = unsigned;
+        all.extend(signed);
+        return (all, Vec::new());
+    }
+    if desc {
+        (unsigned, signed)
+    } else {
+        (signed, unsigned)
+    }
+}
+
 /// Raw key of the row with integer handle `handle` (Go: `tablecodec.EncodeRowKeyWithHandle`).
 pub fn row_key(table_id: i64, handle: i64) -> Vec<u8> {
     table::encode_row_key(table_id, handle)
@@ -115,6 +205,79 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn split_across_int64_boundary() {
+        const B: u64 = i64::MAX as u64;
+        let u = IntRange::Unsigned;
+        let full = [u(0, u64::MAX)];
+        // The full UNSIGNED range (`ranger.FullIntRange(true)`).
+        assert_eq!(
+            split_ranges_across_int64_boundary(&full, true, false),
+            (vec![u(0, B)], vec![u(B + 1, u64::MAX)])
+        );
+        assert_eq!(
+            split_ranges_across_int64_boundary(&full, true, true),
+            (vec![u(B + 1, u64::MAX)], vec![u(0, B)])
+        );
+        assert_eq!(
+            split_ranges_across_int64_boundary(&full, false, false),
+            (vec![u(B + 1, u64::MAX), u(0, B)], vec![])
+        );
+        // Entirely on one side.
+        assert_eq!(
+            split_ranges_across_int64_boundary(&[u(1, 5)], true, false),
+            (vec![u(1, 5)], vec![])
+        );
+        assert_eq!(
+            split_ranges_across_int64_boundary(&[u(1, 5), u(B + 2, B + 9)], true, false),
+            (vec![u(1, 5)], vec![u(B + 2, B + 9)])
+        );
+        assert_eq!(
+            split_ranges_across_int64_boundary(&[u(B + 2, B + 9)], true, false),
+            (vec![], vec![u(B + 2, B + 9)])
+        );
+        // Several ranges around a straddling one.
+        assert_eq!(
+            split_ranges_across_int64_boundary(
+                &[u(1, 2), u(B - 1, B + 1), u(B + 5, B + 6)],
+                true,
+                true
+            ),
+            (
+                vec![u(B + 1, B + 1), u(B + 5, B + 6)],
+                vec![u(1, 2), u(B - 1, B)]
+            )
+        );
+        // Exactly at the boundary.
+        assert_eq!(
+            split_ranges_across_int64_boundary(&[u(B, B + 1)], true, false),
+            (vec![u(B, B)], vec![u(B + 1, B + 1)])
+        );
+        // Signed ranges are untouched.
+        let s = [IntRange::Signed(i64::MIN, i64::MAX)];
+        assert_eq!(
+            split_ranges_across_int64_boundary(&s, true, true),
+            (s.to_vec(), vec![])
+        );
+        assert_eq!(
+            split_ranges_across_int64_boundary(&[], true, false),
+            (vec![], vec![])
+        );
+    }
+
+    #[test]
+    fn unsigned_values_map_to_their_bit_pattern() {
+        assert_eq!(
+            IntRange::Unsigned(1 << 63, u64::MAX).to_handle_range(),
+            HandleRange::inclusive(i64::MIN, -1)
+        );
+        // The end key of `u64::MAX` is the row key of handle 0, as Go's `PrefixNext`.
+        assert_eq!(
+            record_range(7, IntRange::Unsigned(1 << 63, u64::MAX).to_handle_range()),
+            Some(KeyRange::new(row_key(7, i64::MIN), row_key(7, 0)))
+        );
     }
 
     #[test]

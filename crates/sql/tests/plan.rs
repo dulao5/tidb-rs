@@ -1,5 +1,6 @@
 //! Plan shapes, name resolution errors and result metadata for an in-memory sysbench schema.
 
+use tidb_distsql::IntRange;
 use tidb_meta::InfoSchema;
 use tidb_meta::model::CIStr;
 use tidb_meta::model::ColumnInfo;
@@ -96,6 +97,8 @@ fn schema() -> InfoSchema {
     unsigned.id = 115;
     unsigned.name = name("upk");
     unsigned.columns[0].field_type.flag |= flag::UNSIGNED;
+    unsigned.columns[0].field_type.tp = tp::LONGLONG;
+    unsigned.columns[0].field_type.flen = 20;
     let mut rowid = sbtest1.clone();
     rowid.id = 116;
     rowid.name = name("norowid");
@@ -184,7 +187,7 @@ fn sysbench_simple_range() {
     assert_eq!(
         explain("SELECT c FROM sbtest1 WHERE id BETWEEN 5018 AND 5117"),
         "Projection [c]\n\
-         └─TableReader keep_order:true\n\
+         └─TableReader keep_order:false\n\
          \x20 └─TableRangeScan sbtest1 range:[5018,5117] columns:[c]\n"
     );
 }
@@ -219,7 +222,7 @@ fn sysbench_order_range() {
         explain("SELECT c FROM sbtest1 WHERE id BETWEEN 5018 AND 5117 ORDER BY c"),
         "Projection [c]\n\
          └─Sort [c]\n\
-         \x20 └─TableReader keep_order:true\n\
+         \x20 └─TableReader keep_order:false\n\
          \x20   └─TableRangeScan sbtest1 range:[5018,5117] columns:[c]\n"
     );
 }
@@ -262,10 +265,9 @@ fn prepared_statements_describe_without_params() {
 fn ranges_and_edge_cases() {
     let src = |sql: &str| plan(sql).source;
     let reader = |lo, hi| Source::TableReader {
-        lo,
-        hi,
+        range: IntRange::Signed(lo, hi),
         desc: false,
-        keep_order: true,
+        keep_order: false,
         limit: None,
         agg: None,
     };
@@ -355,7 +357,7 @@ fn limit_and_handle_order() {
         "Projection [c]\n\
          └─Limit offset:0 count:1\n\
          \x20 └─Sort [k:desc, c]\n\
-         \x20   └─TableReader keep_order:true\n\
+         \x20   └─TableReader keep_order:false\n\
          \x20     └─TableRangeScan sbtest1 range:[-9223372036854775808,9223372036854775807] columns:[c, k]\n"
     );
     let p = plan_with("SELECT c FROM sbtest1 LIMIT ?", &[Literal::Int(4)], false).unwrap();
@@ -520,7 +522,6 @@ fn unsupported_is_an_error() {
     for sql in [
         "SELECT c FROM sbtest1 WHERE k = 5",
         "SELECT c FROM sbtest1 WHERE id = k",
-        "SELECT c FROM upk WHERE id = 5",
         "SELECT c FROM norowid WHERE id = 5",
         "SELECT ts FROM withts",
         "SELECT c, SUM(k) FROM sbtest1",
@@ -535,5 +536,60 @@ fn unsupported_is_an_error() {
     assert_eq!(
         plan("SELECT c FROM withts WHERE id = 1").source,
         Source::PointGet { handle: 1 }
+    );
+}
+
+/// #186: an UNSIGNED handle's ranges hold `u64` values (Go `ranger.FullIntRange(true)`); the
+/// executor splits them at the int64 boundary, so ORDER BY the handle is unsigned order.
+#[test]
+fn unsigned_handle_ranges() {
+    let src = |sql: &str| plan(sql).source;
+    let reader = |lo, hi, desc, keep_order| Source::TableReader {
+        range: IntRange::Unsigned(lo, hi),
+        desc,
+        keep_order,
+        limit: None,
+        agg: None,
+    };
+    const B: u64 = 1 << 63;
+    assert_eq!(
+        src("SELECT c FROM upk ORDER BY id"),
+        reader(0, u64::MAX, false, true)
+    );
+    assert_eq!(
+        src("SELECT c FROM upk ORDER BY id DESC"),
+        reader(0, u64::MAX, true, true)
+    );
+    assert_eq!(src("SELECT c FROM upk"), reader(0, u64::MAX, false, false));
+    assert_eq!(
+        src("SELECT c FROM upk WHERE id >= 9223372036854775806 AND id < 9223372036854775810"),
+        reader(B - 2, B + 1, false, false)
+    );
+    assert_eq!(
+        src("SELECT c FROM upk WHERE id > -1 ORDER BY id"),
+        reader(0, u64::MAX, false, true)
+    );
+    assert_eq!(src("SELECT c FROM upk WHERE id < 0"), Source::Dual);
+    assert_eq!(
+        src("SELECT c FROM upk WHERE id > 18446744073709551615"),
+        Source::Dual
+    );
+    // A point: the handle is the value's bit pattern (Go `kv.IntHandle(d.GetInt64())`).
+    assert_eq!(
+        src("SELECT c FROM upk WHERE id = 9223372036854775808"),
+        Source::PointGet { handle: i64::MIN }
+    );
+    assert_eq!(
+        src("SELECT c FROM upk WHERE id = 5"),
+        Source::PointGet { handle: 5 }
+    );
+    assert_eq!(src("SELECT c FROM upk WHERE id = -1"), Source::Dual);
+    assert_eq!(
+        explain("SELECT id FROM upk WHERE id > 9223372036854775800 ORDER BY id DESC LIMIT 3"),
+        "Projection [id]\n\
+         └─Limit offset:0 count:3\n\
+         \x20 └─TableReader keep_order:true\n\
+         \x20   └─Limit(cop) 3\n\
+         \x20     └─TableRangeScan upk range:[9223372036854775801,18446744073709551615] desc columns:[id]\n"
     );
 }

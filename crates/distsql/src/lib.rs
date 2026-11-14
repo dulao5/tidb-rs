@@ -27,9 +27,11 @@ pub use crate::decode::SelectRows;
 pub use crate::decode::decode_row_value;
 pub use crate::decode::decode_select_response;
 pub use crate::ranges::HandleRange;
+pub use crate::ranges::IntRange;
 pub use crate::ranges::record_range;
 pub use crate::ranges::record_ranges;
 pub use crate::ranges::row_key;
+pub use crate::ranges::split_ranges_across_int64_boundary;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
