@@ -167,7 +167,7 @@ class VerdictTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             it_results(d, [("a/t", "mismatch"), ("a/t", "mismatch")], status="fail")
             rc, first = report(d, parts="integrationtest",
-                               expected={"a/t:0": {"class": "benign", "reason": "r"}})
+                               expected={"a/t:0": {"class": "nondeterministic", "reason": "r"}})
             self.assertEqual(rc, 1)
             self.assertTrue(first.startswith("**RED**"), first)
 
@@ -181,7 +181,7 @@ class VerdictTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             with open(f"{d}/report.md") as f:
                 text = f.read()
-            self.assertIn("Fixed, remove from integrationtest-expected.json: `a/t:0`", text)
+            self.assertIn("Fixed, remove from integrationtest-expected.json: `a/t:0` (now match)", text)
             self.assertNotIn("b/t:5", text)
 
     def test_integrationtest_results_do_not_count_for_ab(self):
@@ -193,6 +193,20 @@ class VerdictTest(unittest.TestCase):
             rc, first = report(d, parts="ab")
             self.assertEqual(rc, 0)
             self.assertTrue(first.startswith("**GREEN**"), first)
+
+    def test_shipped_integrationtest_expected_is_well_formed(self):
+        # Only tidb-rs bugs (with an issue) and nondeterministic answers, each with a reason.
+        path = os.path.join(HERE, "integrationtest-expected.json")
+        with open(path) as f:
+            entries = json.load(f)
+        for key, e in entries.items():
+            if key.startswith("_"):
+                continue
+            self.assertRegex(key, r"^[\w/.-]+:\d+$")
+            self.assertIn(e.get("class"), ("bug", "nondeterministic"), key)
+            self.assertTrue(e.get("reason"), key)
+            if e["class"] == "bug":
+                self.assertTrue(e.get("issue"), key)
 
 
 if __name__ == "__main__":

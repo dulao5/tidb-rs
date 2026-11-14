@@ -56,14 +56,21 @@ python3 tools/weekly/report.py --in /tmp/weekly --parts ab --out /tmp/weekly/rep
 **Integration tests.** Only autocommit reads run on tidb-rs; a statement tidb-rs answers with
 1235 (`ER_NOT_SUPPORTED_YET`) is `unsupported`, counted and shown but not a failure, and
 `b_error` (tidb-rs failed otherwise) is shown too. The verdicts come from
-`ab-integrationtest/results.jsonl` (`tools/ab/README.md`, "Integration tests"). A `mismatch`
-makes the run RED unless it is listed in `integrationtest-expected.json`: accepted mismatches
-keyed by `test:line` (the tests are pinned to v8.5.8, so lines are stable), each with a
-`class` (`bug`: a tidb-rs bug, with its `issue`; `benign`: a nondeterministic answer) and a
-one-line `reason`. Listed mismatches are reported as known; a listed statement that ran on
-tidb-rs and no longer mismatches is reported as "fixed, remove from expected" (not a failure).
-Mismatches caused by the harness (tidb-rs rejecting a session setting) are not listed: `ab`
-skips the reads of a connection whose session diverged (`tools/ab/README.md`).
+`ab-integrationtest/results.jsonl` (`tools/ab/README.md`, "Integration tests").
+
+A `mismatch` makes the run RED unless it is listed in `integrationtest-expected.json`: accepted
+mismatches keyed by `test:line` (the tests are pinned to v8.5.8, so lines are stable), each with
+a `class` (`bug`: a tidb-rs bug, with the `issue` that tracks it; `nondeterministic`: an answer
+whose row order the test does not fix) and a one-line `reason`. Listed mismatches are counted as
+known; a listed statement that ran on tidb-rs and no longer mismatches is reported as "fixed,
+remove from integrationtest-expected.json" (not a failure): delete the entry. Mismatches the
+harness causes are fixed in `ab`, not listed: for example `ab` skips the reads of a connection
+whose session diverged (tidb-rs rejected a result-affecting `SET` / `USE`; `tools/ab/README.md`).
+
+`ddl/index_modify` turns `tidb_ddl_enable_fast_reorg` on, and Go TiDB then refuses `ADD INDEX`
+(8256, "no enough space") when the disk under its `temp-dir` has less than 10% free; the reads
+after such an `ALTER` would differ (listed entries would come out as "fixed"). So `run.sh` gives
+Go TiDB a `temp-dir` on `/dev/shm` when there is one.
 
 Which tests: every file except those with a statement that makes Go TiDB call the status port of
 every TiDB server in the cluster (`ANALYZE`, `cluster_*` tables, `tidb_decode_sql_digests`,

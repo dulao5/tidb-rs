@@ -115,7 +115,7 @@ def integration(base, expected=None):
     """Summary of the integrationtest part from tidb-ab's ab-integrationtest/results.jsonl:
     {"totals": {verdict: n}, "tests": {test: {verdict: n}}, "reasons": Counter (unsupported),
     "errors": Counter (b_error), "mismatches": [record] (not in `expected`), "known": [record]
-    (in `expected`), "fixed": [key] (in `expected`, ran on tidb-rs, no longer a mismatch)}, or None
+    (in `expected`), "fixed": [(key, verdict)] (in `expected`, ran on tidb-rs, no longer a mismatch)}, or None
     when there is none."""
     expected = expected or {}
     if not base:
@@ -124,7 +124,7 @@ def integration(base, expected=None):
     if not hits:
         return None
     totals, tests, reasons, errors, mismatches, known = Counter(), defaultdict(Counter), Counter(), Counter(), [], []
-    ran = set()
+    ran = {}
     with open(hits[0]) as f:
         for line in f:
             if not line.strip():
@@ -133,7 +133,7 @@ def integration(base, expected=None):
             v = r.get("verdict", "?")
             totals[v] += 1
             tests[r.get("template", "?")][v] += 1
-            ran.add(it_key(r))
+            ran[it_key(r)] = v
             if v == "unsupported":
                 reasons[reason(r.get("detail") or r.get("kind") or "")] += 1
             elif v == "b_error":
@@ -142,7 +142,7 @@ def integration(base, expected=None):
                 (known if it_key(r) in expected else mismatches).append(r)
     # Fixed: the statement ran on tidb-rs this time and did not mismatch (not merely skipped).
     seen = {it_key(r) for r in known}
-    fixed = sorted(k for k in expected if k in ran and k not in seen)
+    fixed = sorted((k, ran[k]) for k in expected if k in ran and k not in seen)
     return {"totals": totals, "tests": tests, "reasons": reasons, "errors": errors,
             "mismatches": mismatches, "known": known, "fixed": fixed}
 
@@ -336,7 +336,7 @@ def section_integration(status, cur, prev, lines, expected=None):
     )
     if cur["fixed"]:
         lines.append("Fixed, remove from integrationtest-expected.json: "
-                     + ", ".join(f"`{k}`" for k in cur["fixed"]) + ".\n")
+                     + ", ".join(f"`{k}` (now {v})" for k, v in cur["fixed"]) + ".\n")
     g = it_unsupported_growth(cur, prev)
     if g:
         lines.append(f"Unsupported over the tests both runs ran: {g[0]} last run, {g[1]} now.\n")

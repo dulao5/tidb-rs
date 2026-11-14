@@ -193,7 +193,16 @@ integrationtest)
     fi
     # As TiDB's run-tests.sh (and scripts/integrationtest.sh): the expected results assume it.
     export TZ=Asia/Shanghai
-    LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$root/tools/ab/integrationtest.toml start_cluster \
+    # ddl/index_modify turns tidb_ddl_enable_fast_reorg back on, and Go TiDB then refuses ADD INDEX
+    # (8256 "no enough space") when the disk under its temp-dir has less than 10% free, which
+    # changes what the later reads see. On Linux, give Go TiDB a temp-dir on tmpfs.
+    cfg=$root/tools/ab/integrationtest.toml
+    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+        mkdir -p /dev/shm/weekly-integrationtest-tidb
+        { echo 'temp-dir = "/dev/shm/weekly-integrationtest-tidb"'; cat "$cfg"; } >"$out/integrationtest-tidb.toml"
+        cfg=$out/integrationtest-tidb.toml
+    fi
+    LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$cfg start_cluster \
         || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
     # As scripts/integrationtest.sh: the ingest backfill refuses to run on a nearly full disk.
     mysql -h 127.0.0.1 -P 27000 -u root -e \
