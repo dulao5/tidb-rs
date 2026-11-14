@@ -25,6 +25,15 @@ Checks, per Rust file:
     `[workspace.metadata.porting] style-lint-allow` of Cargo.toml; item-level `#[allow]`s
     are listed for the reviewer (reported, not an error).
 
+Besides `// go:`, a function of the block counts as accounted for when it is
+  * replaced by an exception spec: `// go-exception: <EXC> <Symbol> (<reason>)`, e.g.
+    `// go-exception: EXC.B SortItem.Hash64 (cascades)`; or
+  * a boundary stub: `// glue: stub of <Symbol>, blocked-by:<block> (<what>)` above the stub
+    function (registered in the tracker's data/stubs.tsv);
+both are reported on a separate line ("accounted"); "matched" counts ported functions only.
+With --blocks-done (tracker data/blocks_done.tsv), a block marked done may have no stub
+blocked-by itself.
+
 A block ported in parts (VS1 plan §0 item 3, as D06.2 / D06.3 "part 1"): with
 `--part <functions.tsv> --item <ID>` only the block's functions listed for that work item
 (columns `item`, `block`, `file`, `function`, e.g. specs/VS1-vertical-slice/functions.tsv;
@@ -55,6 +64,7 @@ LEVEL_RE = re.compile(r"^(L1(\s+\[M-[A-Z][A-Z0-9]*(,\s*M-[A-Z][A-Z0-9]*)*\])?|L2
 RULES_RE = re.compile(r"\[(M-[A-Z][A-Z0-9]*(?:,\s*M-[A-Z][A-Z0-9]*)*)\]")
 FMA_MARK_RE = re.compile(r"//.*\[M-FMA\]\s+(\S+\.go):(\d+)")
 FMA_TARGETS_END = "instrs"  # go_fma_sites.tsv: target columns are between symbol and instrs
+STUB_RE = re.compile(r"^stub of (\S+), blocked-by:(\S+)")
 
 
 def load_rules(path):
@@ -226,6 +236,8 @@ def main():
                     help="function list of the block's parts (item, block, file, function); with --item, "
                          "only that part must converge")
     ap.add_argument("--item", help="the work item of --part (e.g. VS1-10)")
+    ap.add_argument("--blocks-done", help="tracker data/blocks_done.tsv: a done block may have no stub "
+                                          "blocked-by itself")
     ap.add_argument("files", nargs="+")
     args = ap.parse_args()
     lint_allow = load_lint_allow(args.workspace_toml)
@@ -252,6 +264,7 @@ def main():
     expected_files = {f for f, _ in expected}
 
     seen = defaultdict(list)  # (file, symbol) -> [rs locations]
+    accounted = {}  # (file, symbol) -> "exception EXC.B" / "stub D10.1" (not ported, accounted for)
     problems = []
     other_blocks = []
     kinds = defaultdict(int)
@@ -283,6 +296,22 @@ def main():
                 parts = text.split()
                 sym = parts[1] if parts[0].endswith(".go") and len(parts) > 1 else parts[0]
                 sym_rules[sym].update(r for m in RULES_RE.finditer(text) for r in re.split(r",\s*", m.group(1)))
+            if kind in ("go-exception", "glue"):
+                if kind == "go-exception":
+                    parts_ = text.split()
+                    what, sym = (f"exception {parts_[0]}", parts_[1]) if len(parts_) > 1 else (None, None)
+                else:
+                    m = STUB_RE.match(text)
+                    what, sym = (f"stub {m.group(2).rstrip(',')}", m.group(1)) if m else (None, None)
+                if sym:
+                    for f in go_files:
+                        if (f, sym) in funcs:
+                            accounted[(f, sym)] = what
+                            break
+                    else:
+                        problems.append(f"{rs}:{line_no}: {kind} names {sym}, which is not in {go_files} "
+                                        f"(func_blocks.tsv)")
+                continue
             if kind != "go":
                 continue
             f, sym, level, err = parse_go_annotation(text, go_files, funcs)
@@ -311,7 +340,8 @@ def main():
                     print(f"note: {rs}:{line_no} {sym} (Go line {start}) comes after {prev[1]} (Go line {prev[0]})")
                 prev = (start, sym)
 
-    missing = sorted(k for k in expected if k[0] in covered_files and k not in seen)
+    missing = sorted(k for k in expected if k[0] in covered_files and k not in seen and k not in accounted)
+    both = sorted(k for k in accounted if k in seen)
     not_covered = sorted(expected_files - covered_files)
     dups = {k: v for k, v in seen.items() if len(v) > 1}
     extra = [p for p in problems if "not in" in p]
@@ -327,8 +357,25 @@ def main():
     print(f"mapping rules: " + (", ".join(f"{k}={v}" for k, v in sorted(rule_uses.items())) or "none"))
     if fma_sites is not None:
         print(f"M-FMA: {fma_checked} registered site(s) in the ported Go files")
+    acc = [k for k in expected if k in accounted and k not in seen]
+    n_stubs = sum(1 for k in acc if accounted[k].startswith("stub"))
+    n_exc = sum(1 for k in acc if accounted[k].startswith("exception"))
+    # matched counts ported functions only; stubs and exceptions are reported apart.
     print(f"matched {len(expected & set(seen))}/{len(expected)}, missing {len(missing)}, "
           f"extra {len(extra)}, duplicated {len(dups)}")
+    print(f"accounted (stubs {n_stubs} / exceptions {n_exc})")
+    for k in sorted(acc):
+        print(f"accounted: {k[0]} {k[1]}: {accounted[k]}")
+    if args.blocks_done:
+        with open(args.blocks_done, newline="") as f:
+            done = {row["block"] for row in csv.DictReader(f, delimiter="\t")}
+        if args.block in done:
+            own = sorted(k for k in acc if accounted[k] == f"stub {args.block}")
+            for k in own:
+                problems.append(f"{k[0]} {k[1]}: stub blocked-by:{args.block}, but {args.block} is done "
+                                f"(blocks_done.tsv)")
+    for k in both:
+        problems.append(f"{k[0]} {k[1]} is both ported (go:) and {accounted[k]}")
     for f in not_covered:
         print(f"MISSING FILE: no Rust file has `//! go-file: {f}`")
     for f, s in missing:

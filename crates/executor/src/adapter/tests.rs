@@ -14,6 +14,7 @@ use tidb_expression::Column;
 use tidb_expression::schema::new_schema;
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_parser::model::CIStr;
+use tidb_planner::physicalop::BasePhysicalPlan;
 use tidb_planner::{
     PhysicalKind, PhysicalPlan, PhysicalPlanRef, Schema, physical_plan_boilerplate,
 };
@@ -121,6 +122,7 @@ pub(crate) struct Counters {
 /// what the plan reports.
 #[derive(Clone)]
 pub(crate) struct MockPhysicalPlan {
+    base: BasePhysicalPlan,
     id: i32,
     kind: PhysicalKind,
     schema: Schema,
@@ -176,6 +178,15 @@ impl PhysicalPlan for MockPhysicalPlan {
     fn children_mut(&mut self) -> &mut Vec<PhysicalPlanRef> {
         &mut self.children
     }
+    fn as_dyn(&self) -> &dyn PhysicalPlan {
+        self
+    }
+    fn base_physical(&self) -> &BasePhysicalPlan {
+        &self.base
+    }
+    fn base_physical_mut(&mut self) -> &mut BasePhysicalPlan {
+        &mut self.base
+    }
     fn clone_node(&self) -> PhysicalPlanRef {
         Arc::new(self.clone())
     }
@@ -184,6 +195,7 @@ impl PhysicalPlan for MockPhysicalPlan {
 /// A plain plan of `kind` (no executor of its own).
 #[derive(Clone)]
 struct KindPlan {
+    base: BasePhysicalPlan,
     id: i32,
     kind: PhysicalKind,
     schema: Schema,
@@ -215,6 +227,15 @@ impl PhysicalPlan for KindPlan {
     fn children_mut(&mut self) -> &mut Vec<PhysicalPlanRef> {
         &mut self.children
     }
+    fn as_dyn(&self) -> &dyn PhysicalPlan {
+        self
+    }
+    fn base_physical(&self) -> &BasePhysicalPlan {
+        &self.base
+    }
+    fn base_physical_mut(&mut self) -> &mut BasePhysicalPlan {
+        &mut self.base
+    }
     fn clone_node(&self) -> PhysicalPlanRef {
         Arc::new(self.clone())
     }
@@ -225,9 +246,7 @@ impl PhysicalPlan for KindPlan {
 fn _boilerplate_compiles() {
     #[derive(Clone)]
     struct P {
-        id: i32,
-        schema: Schema,
-        children: Vec<PhysicalPlanRef>,
+        base: BasePhysicalPlan,
     }
     impl PhysicalPlan for P {
         physical_plan_boilerplate!(TableDual);
@@ -236,6 +255,7 @@ fn _boilerplate_compiles() {
 
 pub(crate) fn test_plan(kind: PhysicalKind) -> Plan {
     Arc::new(KindPlan {
+        base: BasePhysicalPlan::default(),
         id: 1,
         kind,
         schema: new_schema(vec![col(1)]),
@@ -245,6 +265,7 @@ pub(crate) fn test_plan(kind: PhysicalKind) -> Plan {
 
 fn mock_plan(rows: i64, columns: usize, point_get: bool, counters: &Arc<Counters>) -> Plan {
     Arc::new(MockPhysicalPlan {
+        base: BasePhysicalPlan::default(),
         id: 3,
         kind: PhysicalKind::PointGet,
         schema: new_schema((0..columns as i64).map(col).collect()),
@@ -463,6 +484,7 @@ fn fast_plans() {
     assert!(is_fast_plan(&test_plan(PhysicalKind::TableDual)));
     assert!(!is_fast_plan(&test_plan(PhysicalKind::TableReader)));
     let proj: Plan = Arc::new(KindPlan {
+        base: BasePhysicalPlan::default(),
         id: 2,
         kind: PhysicalKind::Projection,
         schema: new_schema(vec![col(1)]),
@@ -471,6 +493,7 @@ fn fast_plans() {
     assert!(is_fast_plan(&proj));
     assert!(!is_no_result_plan(&proj));
     let empty: Plan = Arc::new(KindPlan {
+        base: BasePhysicalPlan::default(),
         id: 3,
         kind: PhysicalKind::TableDual,
         schema: new_schema(Vec::new()),

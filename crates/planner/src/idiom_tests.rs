@@ -14,6 +14,7 @@ use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 use tidb_types::field_type::new_field_type;
 
 use crate::logicalop::{BaseLogicalPlan, LogicalSchemaProducer};
+use crate::physicalop::BasePhysicalPlan;
 use crate::{
     LogicalKind, LogicalPlan, PhysicalKind, PhysicalPlan, PhysicalPlanRef, PlanCtx, PlanId,
     logical_dispatch, logical_plan_boilerplate, make_mut_plan, map_children,
@@ -320,35 +321,56 @@ type Range = (i64, i64);
 
 #[derive(Clone)]
 struct Scan {
-    id: i32,
+    base: BasePhysicalPlan,
     schema: Schema,
-    children: Vec<PhysicalPlanRef>,
     ranges: Vec<Range>,
 }
 
 #[derive(Clone)]
 struct Reader {
-    id: i32,
+    base: BasePhysicalPlan,
     schema: Schema,
-    children: Vec<PhysicalPlanRef>,
     table_plans: Vec<PhysicalPlanRef>,
 }
 
 #[derive(Clone)]
 struct PProj {
-    id: i32,
+    base: BasePhysicalPlan,
     schema: Schema,
-    children: Vec<PhysicalPlanRef>,
+}
+
+/// The stand-ins own their schema (Go's `physicalSchemaProducer`, VS1-10).
+macro_rules! own_schema {
+    () => {
+        fn schema(&self) -> &Schema {
+            &self.schema
+        }
+        fn set_schema(&mut self, schema: Schema) {
+            self.schema = schema;
+        }
+    };
 }
 
 impl PhysicalPlan for Scan {
     physical_plan_boilerplate!(TableScan);
+    own_schema!();
 }
 impl PhysicalPlan for Reader {
     physical_plan_boilerplate!(TableReader);
+    own_schema!();
 }
 impl PhysicalPlan for PProj {
     physical_plan_boilerplate!(Projection);
+    own_schema!();
+}
+
+/// A `BasePhysicalPlan` with plan id `id` and `children`.
+fn pbase(tp: &'static str, id: i32, children: Vec<PhysicalPlanRef>) -> BasePhysicalPlan {
+    let mut b = BasePhysicalPlan::default();
+    b.plan.set_tp(tp);
+    b.plan.set_id(id);
+    b.children = children;
+    b
 }
 
 const _: () = {
@@ -360,24 +382,21 @@ const _: () = {
 
 fn reader(ranges: Vec<Range>) -> PhysicalPlanRef {
     let scan = Scan {
-        id: 1,
+        base: pbase("TableFullScan", 1, vec![]),
         schema: schema(&[1, 2]),
-        children: vec![],
         ranges,
     };
     Arc::new(Reader {
-        id: 2,
+        base: pbase("TableReader", 2, vec![]),
         schema: schema(&[1, 2]),
-        children: vec![],
         table_plans: vec![Arc::new(scan)],
     })
 }
 
 fn proj(id: i32, child: PhysicalPlanRef) -> PhysicalPlanRef {
     Arc::new(PProj {
-        id,
         schema: child.schema().clone_schema(),
-        children: vec![child],
+        base: pbase("Projection", id, vec![child]),
     })
 }
 
@@ -451,9 +470,8 @@ fn post_optimize_in_place_on_owned_tree() {
     let r = reader(vec![]);
     let r_ptr = ptr(&r);
     let root = Arc::new(Reader {
-        id: 9,
+        base: pbase("TableReader", 9, vec![proj(4, r)]),
         schema: schema(&[1, 2]),
-        children: vec![proj(4, r)],
         table_plans: vec![],
     }) as PhysicalPlanRef;
     let root_ptr = ptr(&root);

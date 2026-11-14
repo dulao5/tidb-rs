@@ -3959,10 +3959,23 @@ dependencies = [
 name = "tidb-planner"
 version = "0.0.0"
 dependencies = [
+ "flate2",
+ "log",
+ "parking_lot 0.12.5",
+ "serde_json",
  "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
+ "tidb-execdetails",
+ "tidb-expr-pushdown",
  "tidb-expression",
+ "tidb-kv",
+ "tidb-model",
+ "tidb-parser",
  "tidb-sessionctx",
+ "tidb-tablecodec",
  "tidb-types",
+ "tipb",
 ]
 
 [[package]]
@@ -4267,7 +4280,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.4.0"
-source = "git+https://github.com/dulao5/client-rust.git?rev=0208dfbc367a61519079f3591ff3ab849c5d6652#0208dfbc367a61519079f3591ff3ab849c5d6652"
+source = "git+https://github.com/dulao5/client-rust.git?rev=58b504ec5e97d4b31c363c407ee34e47290ab52b#58b504ec5e97d4b31c363c407ee34e47290ab52b"
 dependencies = [
  "async-recursion",
  "async-trait",
