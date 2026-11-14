@@ -2,8 +2,6 @@
 //!
 //! Infoschema v2: [`Data`], the multi-version index of all schemas and tables shared by
 //! every InfoSchema version of a node, and [`InfoSchemaV2`], one version's view of it.
-//! (The builder's v2 methods and the `applyXxx` dispatch functions of this file come in the
-//! next PR of part 1, with the builder.)
 //!
 //! Exception A3 (specs/D06.3-infoschema/spec.md §5). The business logic is Go's: the same
 //! items keyed by (name or ID, schema version), tomb records, the version-visibility
@@ -31,20 +29,23 @@ use futures::future::{BoxFuture, Shared};
 use parking_lot::{Mutex, RwLock};
 use tidb_base::Error;
 use tidb_base::gofmt::Arg;
+use tidb_base::terror;
 use tidb_kv::option::TiKVClientReadTimeout;
 use tidb_kv::version::new_version;
 use tidb_model::{
-    DBInfo, FKVersion1, PartitionDefinition, ReferredFKInfo, TableInfo, TableNameInfo,
+    DBInfo, FKVersion1, PartitionDefinition, ReferredFKInfo, SchemaDiff, TableInfo, TableNameInfo,
 };
 use tidb_parser::model::CIStr;
 
 use crate::autoid::{self, Requirement};
 use crate::builder::{
-    Factory, convert_charset_collate_to_lower_case_if_need,
-    convert_old_version_utf8_to_utf8mb4_if_need, table_from_meta, table_id_is_valid,
+    Builder, Factory, append_affected_ids, apply_create_table,
+    convert_charset_collate_to_lower_case_if_need, convert_old_version_utf8_to_utf8mb4_if_need,
+    drop_table_for_update, table_from_meta, table_id_is_valid,
 };
+use crate::bundle_builder::BundleInfoBuilder;
 use crate::context::{self as infoschemacontext, SpecialAttributeFilter, TableInfoResult};
-use crate::error::ErrTableNotExists;
+use crate::error::{ErrDatabaseExists, ErrDatabaseNotExists, ErrTableNotExists};
 use crate::infoschema::{
     InfoSchemaMisc, SchemaTables, get_table_info, get_table_info_list, new_info_schema,
 };
@@ -401,6 +402,21 @@ impl Data {
         };
         btree_set(&self.schema_map, schema_item_key(&item), item);
         btree_set(&self.schema_id2_name, schema_id_name_key(&n), n);
+    }
+
+    /// Go mutates the `*model.DBInfo` that `SchemaByID` returned, which every schema item
+    /// holding that pointer shares (older versions included). Rust replaces the `Arc` in
+    /// those items, so later lookups see what they see in Go.
+    // go-part: Builder.applyModifySchemaCharsetAndCollateV2
+    fn replace_shared_db_info(&self, old: &Arc<DBInfo>, new: &Arc<DBInfo>) {
+        let mut m = self.schema_map.write();
+        let lo = (old.name.l.clone(), i64::MIN);
+        let hi = (old.name.l.clone(), i64::MAX);
+        for (_, item) in m.range_mut(lo..=hi) {
+            if Arc::ptr_eq(&item.db_info, old) {
+                item.db_info = new.clone();
+            }
+        }
     }
 }
 
@@ -1777,6 +1793,361 @@ pub(crate) fn cistr_arg(s: &CIStr) -> Arg {
 // go: IsV2 L2 (only v2 exists: always true)
 pub fn is_v2(is: &InfoSchemaV2) -> (bool, &InfoSchemaV2) {
     (true, is)
+}
+
+// go: applyTableUpdate L1
+pub(crate) async fn apply_table_update(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<Vec<i64>, Error> {
+    b.apply_table_update_v2(m, diff).await
+}
+
+// go: applyCreateSchema L1
+pub(crate) async fn apply_create_schema(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<(), Error> {
+    b.apply_create_schema(m, diff).await
+}
+
+// go: applyDropSchema L1
+pub(crate) async fn apply_drop_schema(b: &mut Builder, diff: &SchemaDiff) -> Vec<i64> {
+    b.apply_drop_schema_v2(diff).await
+}
+
+/// `ReadTableFromMeta` (BR's recover schema) lists the tables with
+/// `meta.ListSimpleTables`, which is D06.2 part 2.
+// go: applyRecoverSchema L1
+pub(crate) async fn apply_recover_schema(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<Vec<i64>, Error> {
+    if diff.read_table_from_meta {
+        // recover tables under the database and set them to diff.AffectedOpts
+        // glue: stub, blocked-by:D06.2 (part 2: Mutator.ListSimpleTables)
+        return Err(tidb_base::errors::new(
+            "infoschema: recover schema with ReadTableFromMeta is not supported yet (blocked-by:D06.2 part 2, Mutator.ListSimpleTables)",
+        ));
+    }
+
+    b.apply_recover_schema_v2(m, diff).await
+}
+
+impl Builder {
+    // go: Builder.applyRecoverSchemaV2 L1
+    async fn apply_recover_schema_v2(
+        &mut self,
+        m: &Mutator,
+        diff: &SchemaDiff,
+    ) -> Result<Vec<i64>, Error> {
+        if let Some(di) = self.is.schema_by_id(diff.schema_id) {
+            return Err(ErrDatabaseExists
+                .gen_with_stack_by_args(vec![Arg::from(format!("(Schema ID {})", di.id))]));
+        }
+        let (di, err) = m.get_database(diff.schema_id).await;
+        err?;
+        // Go passes a nil *DBInfo on to addDB, which dereferences it.
+        let di = di.unwrap_or_else(|| {
+            panic!("runtime error: invalid memory address or nil pointer dereference")
+        });
+        self.info_data.add_db(diff.version, di);
+        apply_create_tables(self, m, diff).await
+    }
+}
+
+// go: applyModifySchemaCharsetAndCollate L1
+pub(crate) async fn apply_modify_schema_charset_and_collate(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<(), Error> {
+    b.apply_modify_schema_charset_and_collate_v2(m, diff).await
+}
+
+// go: applyModifySchemaDefaultPlacement L1
+pub(crate) async fn apply_modify_schema_default_placement(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<(), Error> {
+    b.apply_modify_schema_default_placement_v2(m, diff).await
+}
+
+// go: applyDropTable L1
+pub(crate) async fn apply_drop_table(
+    b: &mut Builder,
+    diff: &SchemaDiff,
+    db_info: &DBInfo,
+    table_id: i64,
+    affected: Vec<i64>,
+) -> Vec<i64> {
+    b.apply_drop_table_v2(diff, db_info, table_id, affected)
+        .await
+}
+
+// go: applyCreateTables L1
+pub(crate) async fn apply_create_tables(
+    b: &mut Builder,
+    m: &Mutator,
+    diff: &SchemaDiff,
+) -> Result<Vec<i64>, Error> {
+    b.apply_create_tables(m, diff).await
+}
+
+// go: updateInfoSchemaBundles L1
+pub(crate) async fn update_info_schema_bundles(b: &mut Builder) {
+    let is = b.is.clone();
+    let misc = Arc::make_mut(&mut b.is.misc);
+    b.bundle.update_info_schema_bundles_v2(&is, misc).await;
+}
+
+// go: oldSchemaInfo L1
+pub(crate) fn old_schema_info(b: &Builder, diff: &SchemaDiff) -> Option<Arc<DBInfo>> {
+    b.is.schema_by_id(diff.old_schema_id)
+}
+
+/// allocByID returns the Allocators of a table.
+// go: allocByID L1
+pub(crate) async fn alloc_by_id(b: &Builder, id: i64) -> (autoid::Allocators, bool) {
+    match b.is.table_by_id(Ctx::background(), id).await {
+        Some(tbl) => (tbl.allocators(), true),
+        None => (autoid::Allocators::default(), false),
+    }
+}
+
+impl Builder {
+    // TODO: more UT to check the correctness.
+    // go: Builder.applyTableUpdateV2 L1
+    pub(crate) async fn apply_table_update_v2(
+        &mut self,
+        m: &Mutator,
+        diff: &SchemaDiff,
+    ) -> Result<Vec<i64>, Error> {
+        let Some(old_db_info) = self.is.schema_by_id(diff.schema_id) else {
+            return Err(
+                ErrDatabaseNotExists.gen_with_stack_by_args(vec![Arg::from(format!(
+                    "(Schema ID {})",
+                    diff.schema_id
+                ))]),
+            );
+        };
+
+        let (old_table_id, new_table_id) = self.get_table_ids(m, diff).await?;
+        self.update_bundle_for_table_update(diff, new_table_id, old_table_id);
+
+        let (mut tbl_ids, allocs) =
+            drop_table_for_update(self, new_table_id, old_table_id, &old_db_info, diff).await?;
+
+        if table_id_is_valid(new_table_id) {
+            // All types except DropTableOrView.
+            tbl_ids = apply_create_table(
+                self,
+                m,
+                &old_db_info,
+                new_table_id,
+                allocs,
+                diff.type_,
+                tbl_ids,
+                diff.version,
+            )
+            .await?;
+        }
+        Ok(tbl_ids)
+    }
+
+    // go: Builder.applyDropSchemaV2 L1
+    pub(crate) async fn apply_drop_schema_v2(&mut self, diff: &SchemaDiff) -> Vec<i64> {
+        let Some(di) = self.is.schema_by_id(diff.schema_id) else {
+            return Vec::new();
+        };
+
+        let mut table_ids = Vec::with_capacity(di.deprecated.tables.as_ref().map_or(0, Vec::len));
+        let tables = match self
+            .is
+            .schema_table_infos(Ctx::background(), &di.name)
+            .await
+        {
+            Ok(t) => t,
+            Err(err) => {
+                terror::log(Some(&err));
+                None
+            }
+        };
+        for tbl in tables.iter().flatten() {
+            table_ids = append_affected_ids(table_ids, tbl);
+        }
+
+        for &id in &table_ids {
+            let misc = Arc::make_mut(&mut self.is.misc);
+            self.bundle.delete_bundle(misc, id);
+            self.apply_drop_table_v2(diff, &di, id, Vec::new()).await;
+        }
+        self.info_data.delete_db(di, diff.version);
+        table_ids
+    }
+
+    /// Go returns nil when the table is not found (not `affected`).
+    // go: Builder.applyDropTableV2 L1
+    pub(crate) async fn apply_drop_table_v2(
+        &mut self,
+        diff: &SchemaDiff,
+        db_info: &DBInfo,
+        table_id: i64,
+        mut affected: Vec<i64>,
+    ) -> Vec<i64> {
+        // Remove the table in temporaryTables
+        if let Some(ids) = &mut Arc::make_mut(&mut self.is.misc).temporary_table_ids {
+            ids.remove(&table_id);
+        }
+
+        let Some(table) = self.is.table_by_id(Ctx::background(), table_id).await else {
+            return Vec::new();
+        };
+        let tbl_info = table.meta();
+
+        // The old DBInfo still holds a reference to old table info, we need to remove it.
+        // (Go also calls b.infoSchema.deleteReferredForeignKeys: the v1 map, empty under v2.)
+        self.is
+            .data
+            .delete_referred_foreign_keys(&db_info.name, tbl_info, diff.version);
+
+        if let Some(pi) = table.meta().get_partition_info() {
+            for def in pi.definitions.iter().flatten() {
+                let p = PartitionItem {
+                    partition_id: def.id,
+                    schema_version: diff.version,
+                    table_id: table.meta().id,
+                    tomb: true,
+                };
+                btree_set(&self.info_data.pid2tid, partition_item_key(&p), p);
+            }
+        }
+
+        self.info_data.remove(TableItem {
+            db_name: db_info.name.clone(),
+            db_id: db_info.id,
+            table_name: tbl_info.name.clone(),
+            table_id: tbl_info.id,
+            schema_version: diff.version,
+            tomb: false,
+        });
+        affected = append_affected_ids(affected, tbl_info);
+
+        affected
+    }
+
+    /// Go writes the new charset into the `*DBInfo` it got from `SchemaByID`, which the
+    /// older schema items share; [`Data::replace_shared_db_info`] gives the same lookups.
+    /// A nil DBInfo panics as in Go.
+    // go: Builder.applyModifySchemaCharsetAndCollateV2 L2 (Go mutates the shared *DBInfo; Rust replaces it in the items that share it)
+    pub(crate) async fn apply_modify_schema_charset_and_collate_v2(
+        &mut self,
+        m: &Mutator,
+        diff: &SchemaDiff,
+    ) -> Result<(), Error> {
+        let (di, err) = m.get_database(diff.schema_id).await;
+        err?;
+        let Some(di) = di else {
+            // This should never happen.
+            return Err(
+                ErrDatabaseNotExists.gen_with_stack_by_args(vec![Arg::from(format!(
+                    "(Schema ID {})",
+                    diff.schema_id
+                ))]),
+            );
+        };
+        let old = self.is.schema_by_id(diff.schema_id).unwrap_or_else(|| {
+            panic!("runtime error: invalid memory address or nil pointer dereference")
+        });
+        let mut new_db_info = old.copy();
+        new_db_info.charset = di.charset.clone();
+        new_db_info.collate = di.collate.clone();
+        let new_db_info = Arc::new(new_db_info);
+        self.info_data.replace_shared_db_info(&old, &new_db_info);
+        self.info_data.delete_db(Arc::new(di), diff.version);
+        self.info_data.add_db_arc(diff.version, new_db_info);
+        Ok(())
+    }
+
+    // go: Builder.applyModifySchemaDefaultPlacementV2 L2 (Go mutates the shared *DBInfo; Rust replaces it in the items that share it)
+    pub(crate) async fn apply_modify_schema_default_placement_v2(
+        &mut self,
+        m: &Mutator,
+        diff: &SchemaDiff,
+    ) -> Result<(), Error> {
+        let (di, err) = m.get_database(diff.schema_id).await;
+        err?;
+        let Some(di) = di else {
+            // This should never happen.
+            return Err(
+                ErrDatabaseNotExists.gen_with_stack_by_args(vec![Arg::from(format!(
+                    "(Schema ID {})",
+                    diff.schema_id
+                ))]),
+            );
+        };
+        let old = self.is.schema_by_id(diff.schema_id).unwrap_or_else(|| {
+            panic!("runtime error: invalid memory address or nil pointer dereference")
+        });
+        let mut new_db_info = old.copy();
+        new_db_info.placement_policy_ref = di.placement_policy_ref.clone();
+        let new_db_info = Arc::new(new_db_info);
+        self.info_data.replace_shared_db_info(&old, &new_db_info);
+        self.info_data.delete_db(Arc::new(di), diff.version);
+        self.info_data.add_db_arc(diff.version, new_db_info);
+        Ok(())
+    }
+}
+
+impl BundleInfoBuilder {
+    // go: bundleInfoBuilder.updateInfoSchemaBundlesV2 L1 [M-MAPORDER]
+    pub(crate) async fn update_info_schema_bundles_v2(
+        &mut self,
+        is: &InfoSchemaV2,
+        misc: &mut InfoSchemaMisc,
+    ) {
+        if self.delta_update {
+            self.complete_update_tables_v2(is);
+            let ids: Vec<i64> = self.update_tables.keys().copied().collect();
+            for tbl_id in ids {
+                self.update_table_bundles(is, misc, tbl_id).await;
+            }
+            return;
+        }
+
+        // do full update bundles
+        misc.rule_bundle_map = HashMap::new();
+        let tmp =
+            is.list_tables_with_special_attribute(infoschemacontext::placement_policy_attribute);
+        for v in tmp {
+            for tbl in &v.table_infos {
+                self.update_table_bundles(is, misc, tbl.id).await;
+            }
+        }
+    }
+
+    // go: bundleInfoBuilder.completeUpdateTablesV2 L1
+    fn complete_update_tables_v2(&mut self, is: &InfoSchemaV2) {
+        if self.update_policies.is_empty() {
+            return;
+        }
+
+        let dbs = is.list_tables_with_special_attribute(infoschemacontext::AllSpecialAttribute);
+        for db in dbs {
+            for tbl in &db.table_infos {
+                let tbl_info = tbl;
+                if let Some(r) = &tbl_info.placement_policy_ref
+                    && self.update_policies.contains_key(&r.id)
+                {
+                    self.mark_table_bundle_should_update(tbl_info.id);
+                }
+            }
+        }
+    }
 }
 
 impl InfoSchemaV2 {

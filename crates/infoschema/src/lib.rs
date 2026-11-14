@@ -11,8 +11,7 @@
 //! owner's decision; v1 is not ported), its caching layout by exception A3.
 //! - [`infoschema_v2`]: `Data` (the multi-version index shared by all versions) and
 //!   `InfoSchemaV2` (one version's view);
-//! - [`builder`]: the table construction and charset conversions shared with the lazy
-//!   table loading (the full load and the schema diffs come in the next PR of part 1);
+//! - [`builder`], [`builder_misc`], [`bundle_builder`]: full load and schema diffs;
 //! - [`infoschema`]: `infoSchemaMisc` and helpers; [`sieve`]: the table cache;
 //! - [`context`]: `pkg/infoschema/context`; [`error`]: the package's errors.
 //!
@@ -24,6 +23,8 @@
 
 pub mod autoid;
 pub mod builder;
+pub mod builder_misc;
+pub mod bundle_builder;
 pub mod context;
 pub mod error;
 pub mod infoschema;
@@ -35,6 +36,7 @@ pub mod sieve;
 pub mod structure;
 pub mod table;
 
+pub use builder::{Builder, new_builder};
 pub use infoschema_v2::{Data, InfoSchemaV2, new_data};
 
 impl tidb_sessionctx::expropt::MetaOnlyInfoSchema for InfoSchemaV2 {
