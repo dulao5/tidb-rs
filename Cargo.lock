@@ -3764,11 +3764,21 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "futures",
+ "log",
+ "parking_lot 0.12.5",
  "tidb-base",
  "tidb-chunk",
+ "tidb-execdetails",
+ "tidb-expression",
+ "tidb-infoschema",
+ "tidb-memory",
+ "tidb-model",
+ "tidb-parser",
  "tidb-planner",
  "tidb-sessionctx",
  "tidb-types",
+ "tipb",
+ "tokio",
 ]
 
 [[package]]
