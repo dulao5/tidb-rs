@@ -47,7 +47,7 @@
 | B5 | 代价模型 v1：不移植，设置时报错 | 特性 | 原则同意 | P3 |
 | C1 | JSON_TABLE | 特性（新增） | 原则同意 | 只读移植完成后 |
 | C2 | cached table 新做法 | 特性（新增） | 原则同意 | C1 之后 |
-| C3 | PostgreSQL / DuckDB 风格的语法和特性 | 特性（新增） | 原则同意 | 移植阶段结束后 |
+| C3 | PostgreSQL / DuckDB 风格的语法和特性（PG / Oracle 的语法与协议现在只留设计余地，见 [ADR 0010](../../docs/adr/0010-protocol-dialect-layering.md)） | 特性（新增） | 原则同意 | 移植阶段结束后 |
 | D1 | TiFlash / MPP：只读阶段不做，边界桩隔开 | 范围 | 原则同意 | — |
 
 不作为例外、按 Go 照搬的判断示例（B6、B7 及"第三类"）见 [candidates.md](candidates.md)。
