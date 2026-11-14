@@ -90,7 +90,7 @@ tracker 的 `govec/cmd/rsgen -model` 从 Go 反射读出 36 个结构体（`refl
 
 | Go | Rust | 说明 |
 |---|---|---|
-| `[]T`、`map[K]V` | `Option<Vec<T>>`、`Option<BTreeMap<K, V>>` | `None` 即 nil；`null` 与 `[]` 不同（D02.3 3.3） |
+| `[]T`、`map[K]V` | `Option<Vec<T>>`、`Option<BTreeMap<K, V>>` | `None` 即 nil；`null` 与 `[]` 不同（D02.3 3.3）。例外：长期共享结构中很少设置的字段装箱，`Option<Box<BTreeMap<K, V>>>`、`Option<Box<[u8]>>`（`ColumnInfo.Dependences`、`OriginDefaultValueBit`、`DefaultValueBit`；生成器 `boxedFields`，N13 §9），nil / 空值的区分与 JSON 不变 |
 | `*T` | `Option<Box<T>>` | |
 | `[]*T`，长期持有者共享元素的（`TableInfo.Columns`、`TableInfo.Indices`、`DBInfo.Deprecated.Tables`） | `Option<Vec<Arc<T>>>` | 表对象、InfoSchema 共享这些元素（3.5，[N13](../exceptions/N13-shared-metadata/spec.md)）；生成器的 `sharedFields` 列出这些字段 |
 | 其余 `[]*T` | `Option<Vec<T>>` | 元素按值持有：没有长期持有者共享它们（N13 §6）；`null` 元素见第 4 节第 1 条 |
@@ -162,3 +162,4 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
 - `tidb-base` 单元测试 `tests/json_map_unmarshaler.rs`：通用 map 解码器在值的 `UnmarshalJSON` 致命出错时的状态，期望值取自 Go。
 - clippy `-D warnings`、fmt、`check_layers --blocks`、`cargo test --workspace`。
 - #229（N13）：`TableInfo.Columns` / `Indices` 改为 `Arc` 后 govec `model` 领域 62,826 条照旧通过（JSON 逐字节不变）；`gocopy.rs` 单元测试：`GoCopy` 共享、`make_mut` 只复制被改的元素并保留 nil、`TableInfo::clone` 深拷贝。
+- #229 批次 E（N13 §9）：`ColumnInfo.Dependences`、`OriginDefaultValueBit`、`DefaultValueBit` 装箱后，govec `model` 领域加入 7 条装箱字段的 `into` 记录（nil、非 nil 空值、非空值），共 62,833 条通过；`crates/model/tests/layout.rs` 逐字节检查三种取值的编码与解码。

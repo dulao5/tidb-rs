@@ -33,6 +33,13 @@ impl<T: GoCopy> GoCopy for Box<T> {
     }
 }
 
+impl GoCopy for Box<[u8]> {
+    // glue: Go copy of a []byte held boxed (spec N13 §9: rarely set fields are boxed)
+    fn go_copy(&self) -> Self {
+        self.clone()
+    }
+}
+
 impl<T> GoCopy for Arc<T> {
     // glue: Go copy of a shared pointer (the pointer: both copies point at the same value)
     fn go_copy(&self) -> Self {
