@@ -4,7 +4,7 @@
 #   scripts/playground.sh start  [-t tag] [-o port-offset] [-v version] [-c extra-tidb.toml]
 #   scripts/playground.sh status [-t tag] [-o port-offset]
 #   scripts/playground.sh stop   [-t tag]
-#   scripts/playground.sh clean  [-t tag]      # stop + `tiup clean <tag>`
+#   scripts/playground.sh clean  [-t tag]      # stop + remove the tag's data directory
 #
 # Defaults: tag maya-ab, offset 23000, version v8.5.8, 1 TiKV (env: PLAYGROUND_TAG,
 # PLAYGROUND_OFFSET, PLAYGROUND_VERSION, PLAYGROUND_KV; the fault scenarios of tools/ab/faults
@@ -35,6 +35,12 @@ while getopts "t:o:v:c:" opt; do
         *) echo "usage: $0 start|stop|status|clean [-t tag] [-o offset] [-v version] [-c extra-tidb.toml]" >&2; exit 2 ;;
     esac
 done
+# The tag names a directory that `clean` removes (~/.tiup/data/<tag>): letters, digits, `_`
+# and `-` only, so it can never be empty, `.`, `..` or a path.
+if ! [[ $tag =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "$0: invalid tag '$tag' (allowed: A-Z a-z 0-9 _ -)" >&2
+    exit 2
+fi
 
 tiup_home=${TIUP_HOME:-$HOME/.tiup}
 data_dir=$tiup_home/data/$tag
@@ -170,7 +176,14 @@ case $cmd in
     status) status ;;
     clean)
         stop
-        tiup clean "$tag" || true
+        # `tiup clean <tag>` needs the instance's meta file, which a playground stopped by
+        # signal does not leave behind ("missing meta file"): the data would carry over to the
+        # next start (e.g. users and tables of an earlier integration-test run). Remove the
+        # tag's data directory directly; stop has already ended its processes.
+        tiup clean "$tag" >/dev/null 2>&1 || true
+        if [ -n "$tag" ] && [ -d "$data_dir" ]; then
+            rm -rf -- "$data_dir"
+        fi
         rm -f "$state_dir/$tag-tidb.toml"
         ;;
     *) echo "usage: $0 start|stop|status|clean [-t tag] [-o offset] [-v version]" >&2; exit 2 ;;
