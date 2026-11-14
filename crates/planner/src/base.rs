@@ -302,22 +302,20 @@ pub trait PhysicalPlan: Any + Send + Sync {
     /// `GetPlanCostVer1`.
     // glue: dispatch (Go BasePhysicalPlan.GetPlanCostVer1)
     fn get_plan_cost_ver1(
-        &mut self,
+        &self,
         task_type: TaskType,
         option: &PlanCostOption,
     ) -> Result<f64, Error> {
-        self.base_physical_mut()
-            .get_plan_cost_ver1(task_type, option)
+        self.base_physical().get_plan_cost_ver1(task_type, option)
     }
     /// `GetPlanCostVer2`.
     // glue: dispatch (Go BasePhysicalPlan.GetPlanCostVer2)
     fn get_plan_cost_ver2(
-        &mut self,
+        &self,
         task_type: TaskType,
         option: &PlanCostOption,
     ) -> Result<CostVer2, Error> {
-        self.base_physical_mut()
-            .get_plan_cost_ver2(task_type, option)
+        self.base_physical().get_plan_cost_ver2(task_type, option)
     }
     /// `ToPB`.
     // glue: dispatch (Go BasePhysicalPlan.ToPB)

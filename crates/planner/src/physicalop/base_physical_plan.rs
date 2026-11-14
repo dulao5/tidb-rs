@@ -7,11 +7,16 @@
 //!   [`PhysicalPlan`] trait's default methods, which dispatch to the functions here with the
 //!   node as `&dyn PhysicalPlan`; the ones that only read embedded fields are methods of
 //!   [`BasePhysicalPlan`].
-//! - Children are `Arc`s (N1 §3.4). Methods that change children (`ResolveIndices`, the cost
-//!   memo of `GetPlanCostVer1/2`) reach them with [`make_mut_plan`]: in place while the
-//!   statement owns the tree, a copy of the child once it is shared (a `taskMap` candidate,
-//!   the plan cache). Whether `FindBestTask` keeps the cost memo on shared candidates is the
-//!   open point N1 §7 item 3 (VS1-26).
+//! - Children are `Arc`s (N1 §3.4). `ResolveIndices` changes children and reaches them with
+//!   [`make_mut_plan`] (in place while the statement owns the tree).
+//! - The cost memo (`PlanCostInit` / `PlanCost` / `PlanCostVer2`) is written through `&self`:
+//!   in `FindBestTask` a child is shared by many candidates and the `taskMap`, and Go fills
+//!   the memo once on the shared node for all of them. Writing through `make_mut_plan` would
+//!   copy every shared node on the costed path and leave the memo on the copy (review of
+//!   #223). The memo is a `parking_lot::Mutex<PlanCostCache>` (`M-LOCK`): the node must stay
+//!   `Sync`; `CostFlagRecalculate` overwrites a filled memo, which rules out `OnceLock`; the
+//!   memo holds a `CostVer2` (a float and an `Arc` trace), too large for atomics; the lock is
+//!   uncontended (one planning task) and never held while children are costed.
 //! - `childrenReqProps []*PhysicalProperty` (nil entries allowed) is
 //!   `Vec<Option<Arc<PhysicalProperty>>>`.
 //! - `probeParents` (the IndexJoin / Apply operators above this one) keeps Go's type; nothing
@@ -29,6 +34,8 @@ use tidb_execdetails::execdetails::RuntimeStatsColl;
 use tidb_execdetails::tracing::opt_trace::{CandidatePlanTrace, PlanTrace};
 use tidb_expression::{CorrelatedColumn, Schema};
 use tidb_sessionctx::planctx::BuildPBContext;
+
+use parking_lot::Mutex;
 
 use super::{PhysicalPlanRef, make_mut_plan};
 use crate::base::PhysicalPlan;
@@ -56,8 +63,20 @@ const SIZE_OF_UINT64: i64 = 8;
 /// `size.SizeOfBool`.
 const SIZE_OF_BOOL: i64 = 1;
 
-/// BasePhysicalPlan is the common structure that used in physical plan.
+/// Go's `PlanCostInit`, `PlanCost` and `PlanCostVer2` fields of `BasePhysicalPlan`: the cost
+/// memo `GetPlanCostVer1/2` fill.
 #[derive(Clone, Debug, Default)]
+pub struct PlanCostCache {
+    /// PlanCostInit.
+    pub plan_cost_init: bool,
+    /// PlanCost.
+    pub plan_cost: f64,
+    /// PlanCostVer2.
+    pub plan_cost_ver2: CostVer2,
+}
+
+/// BasePhysicalPlan is the common structure that used in physical plan.
+#[derive(Debug, Default)]
 pub struct BasePhysicalPlan {
     /// The embedded `baseimpl.Plan`.
     pub plan: Plan,
@@ -66,13 +85,9 @@ pub struct BasePhysicalPlan {
     /// children.
     pub children: Vec<PhysicalPlanRef>,
 
-    // used by the new cost interface
-    /// PlanCostInit.
-    pub plan_cost_init: bool,
-    /// PlanCost.
-    pub plan_cost: f64,
-    /// PlanCostVer2.
-    pub plan_cost_ver2: CostVer2,
+    /// used by the new cost interface: `PlanCostInit`, `PlanCost`, `PlanCostVer2`. Written
+    /// through `&self` (see the module doc).
+    pub cost: Mutex<PlanCostCache>,
 
     /// probeParents records the IndexJoins and Applys with this operator in their inner children.
     /// Please see comments in op.PhysicalPlan for details.
@@ -82,6 +97,22 @@ pub struct BasePhysicalPlan {
     /// 1. For ExchangeSender, means its output will be partitioned by hash key.
     /// 2. For ExchangeReceiver/Window/Sort, means its input is already partitioned.
     pub tiflash_fine_grained_shuffle_stream_count: u64,
+}
+
+impl Clone for BasePhysicalPlan {
+    /// Go's struct copy: the cost memo is copied with the other fields.
+    // glue: Clone of a struct with a lock (Go copies the fields)
+    fn clone(&self) -> BasePhysicalPlan {
+        BasePhysicalPlan {
+            plan: self.plan.clone(),
+            children_req_props: self.children_req_props.clone(),
+            children: self.children.clone(),
+            cost: Mutex::new(self.cost.lock().clone()),
+            probe_parents: self.probe_parents.clone(),
+            tiflash_fine_grained_shuffle_stream_count: self
+                .tiflash_fine_grained_shuffle_stream_count,
+        }
+    }
 }
 
 impl std::fmt::Debug for dyn PhysicalPlan {
@@ -132,49 +163,58 @@ pub fn build_plan_trace(p: &dyn PhysicalPlan) -> PlanTrace {
 impl BasePhysicalPlan {
     /// GetPlanCostVer1 implements the base.PhysicalPlan.<0th> interface.
     /// which calculates the cost of the plan if it has not been calculated yet and returns the cost.
-    // go: BasePhysicalPlan.GetPlanCostVer1 L1 [M-PLAN]
+    // go: BasePhysicalPlan.GetPlanCostVer1 L1 [M-LOCK]
     pub fn get_plan_cost_ver1(
-        &mut self,
+        &self,
         task_type: TaskType,
         option: &PlanCostOption,
     ) -> Result<f64, Error> {
         let cost_flag = option.cost_flag;
-        if self.plan_cost_init && !has_cost_flag(cost_flag, CostFlagRecalculate) {
-            // just calculate the cost once and always reuse it
-            return Ok(self.plan_cost);
+        {
+            let c = self.cost.lock();
+            if c.plan_cost_init && !has_cost_flag(cost_flag, CostFlagRecalculate) {
+                // just calculate the cost once and always reuse it
+                return Ok(c.plan_cost);
+            }
         }
-        self.plan_cost = 0.0; // the default implementation, the operator have no cost
-        for child in &mut self.children {
-            let child_cost = make_mut_plan(child).get_plan_cost_ver1(task_type, option)?;
-            self.plan_cost += child_cost;
+        let mut plan_cost = 0.0; // the default implementation, the operator have no cost
+        for child in &self.children {
+            let child_cost = child.get_plan_cost_ver1(task_type, option)?;
+            plan_cost += child_cost;
         }
-        self.plan_cost_init = true;
-        Ok(self.plan_cost)
+        let mut c = self.cost.lock();
+        c.plan_cost = plan_cost;
+        c.plan_cost_init = true;
+        Ok(c.plan_cost)
     }
 
     /// GetPlanCostVer2 implements the base.PhysicalPlan.<1st> interface.
     /// which calculates the cost of the plan if it has not been calculated yet and returns the cost.
-    // go: BasePhysicalPlan.GetPlanCostVer2 L1 [M-PLAN]
+    // go: BasePhysicalPlan.GetPlanCostVer2 L1 [M-LOCK]
     pub fn get_plan_cost_ver2(
-        &mut self,
+        &self,
         task_type: TaskType,
         option: &PlanCostOption,
     ) -> Result<CostVer2, Error> {
-        if self.plan_cost_init && !has_cost_flag(option.cost_flag, CostFlagRecalculate) {
-            return Ok(self.plan_cost_ver2.clone());
+        {
+            let c = self.cost.lock();
+            if c.plan_cost_init && !has_cost_flag(option.cost_flag, CostFlagRecalculate) {
+                return Ok(c.plan_cost_ver2.clone());
+            }
         }
         let mut child_costs = Vec::with_capacity(self.children.len());
-        for child in &mut self.children {
-            let child_cost = make_mut_plan(child).get_plan_cost_ver2(task_type, option)?;
+        for child in &self.children {
+            let child_cost = child.get_plan_cost_ver2(task_type, option)?;
             child_costs.push(child_cost);
         }
+        let mut c = self.cost.lock();
         if child_costs.is_empty() {
-            self.plan_cost_ver2 = new_zero_cost_ver2(trace_cost(Some(option)));
+            c.plan_cost_ver2 = new_zero_cost_ver2(trace_cost(Some(option)));
         } else {
-            self.plan_cost_ver2 = sum_cost_ver2(&child_costs);
+            c.plan_cost_ver2 = sum_cost_ver2(&child_costs);
         }
-        self.plan_cost_init = true;
-        Ok(self.plan_cost_ver2.clone())
+        c.plan_cost_init = true;
+        Ok(c.plan_cost_ver2.clone())
     }
 }
 

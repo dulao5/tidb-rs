@@ -329,6 +329,11 @@ impl CommonHandleCols {
     }
 
     /// Compare implements the kv.HandleCols interface.
+    ///
+    /// Note: Go indexes the collators by the handle column's position (`ctors[i]`) while the
+    /// only caller (UnionScan's `compareExec`) passes one collator per row column, so a
+    /// handle column that is not the i-th row column is compared with another column's
+    /// collation. Ported as is (upstream-pitfall #226).
     // go: CommonHandleCols.Compare L1 [M-ERRVAL]
     pub fn compare(
         &self,
@@ -503,8 +508,9 @@ impl IntHandleCols {
 
     /// Compare implements the kv.HandleCols interface.
     ///
-    /// Note: Go indexes the collators with the column's index in the row
-    /// (`ctors[ib.col.Index]`), not 0; ported as is.
+    /// The collators are indexed by the column's position in the row (`ctors[ib.col.Index]`),
+    /// which is what the only caller (UnionScan's `compareExec`) passes: one collator per row
+    /// column.
     // go: IntHandleCols.Compare L1 [M-ERRVAL]
     pub fn compare(
         &self,

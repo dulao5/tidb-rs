@@ -359,7 +359,7 @@ fn base_physical_plan_methods() {
     let node = tidb_planner::make_mut_plan(&mut p);
     let c = node.get_plan_cost_ver2(RootTaskType, &opt).unwrap();
     assert_eq!(c.get_cost(), 0.0);
-    assert!(node.base_physical().plan_cost_init);
+    assert!(node.base_physical().cost.lock().plan_cost_init);
     opt.with_cost_flag(CostFlagRecalculate | CostFlagTrace);
     let c = node.get_plan_cost_ver2(RootTaskType, &opt).unwrap();
     assert!(c.get_trace().is_some());
@@ -431,4 +431,20 @@ fn optimize_options() {
         o
     }));
     assert_ne!(opt.cost_flag & CostFlagTrace, 0);
+}
+
+/// The cost memo is written through `&self`: a child shared by two candidate parents (the
+/// `taskMap` case) is costed once, on the shared node, and nothing is copied.
+#[test]
+fn cost_memo_on_a_shared_child_is_filled_in_place() {
+    let shared = leaf(1);
+    let a = inner(2, vec![Arc::clone(&shared)]);
+    let b = inner(3, vec![Arc::clone(&shared)]);
+    let opt = new_default_plan_cost_option();
+    a.get_plan_cost_ver2(RootTaskType, &opt).unwrap();
+    assert!(Arc::ptr_eq(&a.children()[0], &shared));
+    assert!(shared.base_physical().cost.lock().plan_cost_init);
+    b.get_plan_cost_ver2(RootTaskType, &opt).unwrap();
+    assert!(Arc::ptr_eq(&b.children()[0], &shared));
+    assert_eq!(Arc::strong_count(&shared), 3);
 }
