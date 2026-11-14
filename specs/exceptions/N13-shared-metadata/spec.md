@@ -32,7 +32,7 @@ Go 用指针共享长期存在的元数据：`InfoSchema` 中的 `*model.TableIn
 
 1. **哪些用 `Arc`**：Go 中被**长期存在的结构**共享的 `*T`（InfoSchema、表对象、分区、各种缓存），Rust 中是 `Arc<T>`；Go 的 `[]*T` 是 `Vec<Arc<T>>`。只在单条语句或单行内使用的值（计划中间结果、执行器状态、行数据）继续按值持有，或按 N1 处理。是否改成 `Arc` 以"有没有长期持有者共享它"为准，不是凡 `*T` 都改。
 2. **只经写时复制修改**：共享的值只能拿到 `&T`。要改时用 `Arc::make_mut`（只有一个持有者时原地改，否则先复制再改，别的持有者看到的仍是旧值）。D06.1 的模型类型用 `tidb_model::make_mut`：复制用 `GoCopy`（Go 的结构体赋值），不用 `Clone`。原因是 D06.1 中一些类型的 `Clone` 是 Go `Clone` 方法的移植，会把 nil 切片变成空切片（如 `IndexInfo.Clone` 的 `Columns`），用它做写时复制会改变 JSON（`null` 变 `[]`）。
-3. **共享的元数据内部不用内部可变性**：不放 `Mutex`、`RwLock`、`RefCell`、`Cell`、原子类型、`OnceCell` 一类可以经 `&T` 修改的字段。否则规则 2 的保证失效，#148 这类 bug 又回来了。需要缓存的派生值放在持有者一侧（如表对象），或在构造时算好。CI 检查 `scripts/check_model_mutability.py`：`crates/model/src`（生成和手写的类型）中出现 `Cell`、`RefCell`、`OnceCell`、`Mutex`、`RwLock`、`OnceLock`、`LazyLock`、原子类型、`thread_local!`、`static mut` 等即失败；注释和 `use` 不算，只初始化一次的 `static X: LazyLock<T>`（Go 的包级变量，不是共享类型的字段）不算。确有必要的例外在同一行写 `// N13-allow: <理由>`，按例外评审。
+3. **共享的元数据内部不用内部可变性**：不放 `Mutex`、`RwLock`、`RefCell`、`Cell`、原子类型、`OnceCell` 一类可以经 `&T` 修改的字段。否则规则 2 的保证失效，#148 这类 bug 又回来了。需要缓存的派生值放在持有者一侧（如表对象），或在构造时算好。CI 检查 `scripts/check_model_mutability.py`（脚本自身的测试 `scripts/test_check_model_mutability.py` 在同一步运行）：`crates/model/src`（生成和手写的类型）和 `FieldType` 所在的 `crates/parser/src/types/field_type.rs`（`FieldType` 以 `Arc<FieldType>` 共享，§8）中出现 `Cell`、`RefCell`、`OnceCell`、`Mutex`、`RwLock`、`OnceLock`、`LazyLock`、原子类型、`thread_local!`、`static mut` 等即失败；注释和 `use` 不算，只初始化一次的 `static X: LazyLock<T>`（Go 的包级变量，不是共享类型的字段）不算。确有必要的例外在同一行写 `// N13-allow: <理由>`，按例外评审。现有两处，都是全局量，不是 `FieldType` 的字段：`TiDBStrictIntegerDisplayWidth`（Go 的包级配置开关）、`intern_name` 的名字集合（§8.2）。
 4. **指针只向下**：父对象持有子对象的 `Arc`（`TableInfo` → `ColumnInfo`、表对象 → `TableInfo`）。子对象要找父对象时，按 ID 查，或由调用方作为参数传入；**不保存指向父对象的 `Arc` 或 `Weak`**。这样不会出现引用环，旧版本释放后整棵子树一起释放；也不会因为 `Weak` 的存在让 `Arc::get_mut` 失败（N1 §3.4 对计划树的同一要求）。
 5. **`GoCopy` 与 `Clone`**：
    - `GoCopy`（生成）是 Go 的 `nt := *t`：`Arc` 字段克隆 `Arc`，与 Go 共享同样的对象；
@@ -140,7 +140,7 @@ Go 用指针共享长期存在的元数据：`InfoSchema` 中的 `*model.TableIn
 
 | 位置 | 之前 | 现在 | 理由 |
 |---|---|---|---|
-| `FieldType.charset` / `collate`（D02.3） | `String` | `&'static str`，`tidb_parser::types::intern_name` | 复制 `FieldType` 不再分配；字符集 / 排序规则表中的名字直接返回静态字符串，其他名字（schema JSON 中的未知名字、大小写不同的写法）在进程级集合中复制一次、不释放。SQL 路径在名字进入 `FieldType` 之前都校验过（`Unknown character set` / `Unknown collation`），集合只随不同的名字增长。不用 `Arc<str>`：每次复制要原子加减；不用 `Cow<'static, str>`：24 B，JSON 解码出的名字仍要分配。JSON 编解码不变（govec 逐字节对照通过）。全局集合不在共享元数据内部，不违反规则 3。`FieldType` 128 B → 112 B（Go 120 B） |
+| `FieldType.charset` / `collate`（D02.3） | `String` | `&'static str`，`tidb_parser::types::intern_name` | 复制 `FieldType` 不再分配；字符集 / 排序规则表中的名字直接返回静态字符串，其他名字（schema JSON 中的未知名字、大小写不同的写法）在进程级集合中复制一次、不释放。SQL 路径在名字进入 `FieldType` 之前都校验过（`Unknown character set` / `Unknown collation`），集合只随不同的名字增长。不用 `Arc<str>`：每次复制要原子加减；不用 `Cow<'static, str>`：24 B，JSON 解码出的名字仍要分配。JSON 编解码不变（govec 逐字节对照通过）。全局集合不在共享元数据内部，不违反规则 3（标 `N13-allow`）。各入口（`crates/sessionctx/tests/interned_names.rs`，`interned_name_count` 计数）：parser 的 `CharsetName` / `CollationName`（CAST、`COLLATE`、`CONVERT … USING`、introducer）校验并转小写，未知名字报错；`SET NAMES … COLLATE 'x'` 的排序规则在 Go 中也是原样的 `StringName`，经 `collation_connection` 的校验转成规范名；`character_set_*` / `collation_*` 系统变量的校验返回规范名，未知名字报错——这些入口都不增加集合。schema JSON 解码保留存储的写法（TableInfoVersion3 之前的大写名字、未知名字），与 Go 相同，否则 JSON 不能逐字节往返，所以**不**在解码时规范化：每个不同的名字复制一次，重复解码不再增加（随后 `ConvertCharsetCollateToLowerCaseIfNeed` 对旧版本表转小写，得到的是表中的名字）。`FieldType` 128 B → 112 B（Go 120 B） |
 | `ColumnInfo.field_type`（D06.1） | `FieldType` | 不变，按值 | Go 是值字段。普通表建计划时 Go 也复制一次；借用者（`DecodeRawRowData`、systable、distsql）用 `&FieldType`。改成 `Arc` 要改生成器（tracker `govec/cmd/rsgen`），每列多 16 B 的 `Arc` 头，在 memory table 计划移植之前没有收益（§8.4） |
 | `expression::Column.ret_type`（D08.1） | `FieldType` | `Arc<FieldType>` | `Column.Clone`、`Schema.Clone` 克隆 `Arc`，与 Go 共享同一个类型；改用 `Column::ret_type_mut`（`Arc::make_mut`）。`Column::default()` 的类型是一个共享的默认值，不分配 |
 | `BuiltinFunc.tp`，即 `ScalarFunction` 的 `RetType`（D08.1 / D08.2） | `FieldType` | `Arc<FieldType>` | `cloneFrom` 共享；`ScalarFunction::ret_type_mut` 和函数类型推导中的写入都是 `Arc::make_mut(&mut bf.tp)`。构建时引用计数为 1，原地写，与 Go 逐行对应；`ScalarFunction::new` 接收 `impl Into<Arc<FieldType>>`，CAST 直接传签名的 `Arc`（Go 的同一个指针） |
@@ -156,6 +156,8 @@ Go 用指针共享长期存在的元数据：`InfoSchema` 中的 `*model.TableIn
 
 - `crates/expression/tests/expr_unit.rs` `clones_share_ret_type_and_writes_copy`：`Column.Clone`、`Schema.Clone`、`ScalarFunction.Clone` 之后是同一个 `Arc`；`ret_type_mut` 之后只有写入方是新的，原值不变。
 - `crates/executor/src/internal/exec/executor.rs` `ret_field_types_share_the_schema_types`：meta 和分配器是同一个切片，元素与 schema 列的 `ret_type` `Arc::ptr_eq`（`BuildNewBaseExecutorV2` 同样）。
+- `crates/sessionctx/tests/interned_names.rs` `entry_points_do_not_grow_the_intern_set`：parser、系统变量、schema JSON 三类入口，大小写变体和未知名字不增加名字集合（JSON 中的变体每个不同的名字只复制一次）。
+- `scripts/test_check_model_mutability.py`：结构体字段中的内部可变性类型（失败）、单行 `static`（未标记时失败）、`// N13-allow:`（通过）、块注释中的提及（通过）、仓库中的检查范围（通过）。
 - `crates/model/src/gocopy.rs` `move_column_info_copies_only_changed_indices`（Lucky 对 #230 的评审第 3 条）：`MoveColumnInfo` 只对偏移量变化的索引调用 `make_mut`，其余索引在共享的 `TableInfo` 之间仍 `Arc::ptr_eq`。
 - govec：`model`、`infoschema`、`table`、`expr`、`funcs`、`cast`、`chunk`、`tablecodec` 等全部通过，`FieldType` 的 JSON 逐字节不变。
 

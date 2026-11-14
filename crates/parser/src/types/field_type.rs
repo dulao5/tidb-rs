@@ -28,7 +28,7 @@ pub const UnspecifiedLength: isize = -1;
 
 /// TiDBStrictIntegerDisplayWidth represent whether return warnings when integerType with
 /// (length) was parsed. The default is `false`. A Go package variable set by the config.
-pub static TiDBStrictIntegerDisplayWidth: AtomicBool = AtomicBool::new(false);
+pub static TiDBStrictIntegerDisplayWidth: AtomicBool = AtomicBool::new(false); // N13-allow: Go package-level config flag, not a FieldType field
 
 /// IHasher is internal usage represent cascades/base.Hasher.
 pub trait IHasher {
@@ -1009,9 +1009,11 @@ impl Clone for FieldType {
 /// The charset / collation name `s` as a `&'static str`: the names of the generated charset
 /// and collation tables are returned as they are; any other name (an unsupported name read
 /// from a schema JSON, a name in another letter case) is copied once into a process-wide set
-/// and never freed. The set grows only with distinct names: every SQL path validates the names
-/// before they reach a `FieldType` (`Unknown character set` / `Unknown collation`), so in
-/// practice it holds the few names of stored schemas.
+/// and never freed. The set grows only with distinct names: the SQL paths (parser
+/// `CharsetName` / `CollationName`, the `character_set_*` / `collation_*` sysvar checks)
+/// validate and lower-case the names before they reach a `FieldType`; only a schema JSON
+/// keeps its names as stored (as Go does, so the JSON round-trips), see
+/// [`interned_name_count`] and spec N13 §8.
 // glue: N13 §8 interned FieldType charset / collation names (Go strings share their bytes)
 pub fn intern_name(s: &str) -> &'static str {
     static KNOWN: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -1028,11 +1030,10 @@ pub fn intern_name(s: &str) -> &'static str {
         }
         set
     });
-    static OTHER: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
     if let Some(k) = KNOWN.get(s) {
         return k;
     }
-    let mut other = OTHER.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut other = OTHER_NAMES.lock().unwrap_or_else(PoisonError::into_inner);
     let other = other.get_or_insert_with(HashSet::new);
     if let Some(k) = other.get(s) {
         return k;
@@ -1040,4 +1041,20 @@ pub fn intern_name(s: &str) -> &'static str {
     let k: &'static str = Box::leak(Box::from(s));
     other.insert(k);
     k
+}
+
+/// The interned names that are not in the generated tables (see [`intern_name`]). Global,
+/// not a field of any `FieldType`: a `FieldType` holds only the `&'static str`.
+// glue: N13 §8 intern set of intern_name
+static OTHER_NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None); // N13-allow: process-wide intern set, never reachable through a FieldType
+
+/// How many names [`intern_name`] has copied (names outside the charset / collation tables):
+/// the memory the intern set holds, for tests and diagnostics.
+// glue: N13 §8 intern set size
+pub fn interned_name_count() -> usize {
+    OTHER_NAMES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map_or(0, HashSet::len)
 }

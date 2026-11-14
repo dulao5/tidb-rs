@@ -4,7 +4,9 @@
 Shared metadata (`Arc<TableInfo>`, `Arc<ColumnInfo>`, ...) is changed only through
 copy on write (`make_mut`). A field that can be changed through `&T` (`Cell`, `RefCell`,
 `Mutex`, atomics, ...) would bypass that and bring back the #148 class of bugs, so the
-model crate (crates/model/src, generated and hand-written types) must not contain one.
+shared metadata types must not contain one. Scope (`SCOPE`): the model crate
+(crates/model/src, generated and hand-written types) and the `FieldType` file
+(crates/parser/src/types/field_type.rs; `FieldType` is shared as `Arc<FieldType>`, N13 §8).
 
 Fails on any of these names outside comments and `use` declarations:
 
@@ -20,7 +22,8 @@ with the reason, and is reviewed like any N13 exception:
 
     foo: SomeCache<..>, // N13-allow: <why this cannot change shared metadata>
 
-    scripts/check_model_mutability.py [paths...]   # default: crates/model/src
+    scripts/check_model_mutability.py [paths...]   # default: SCOPE
+    python3 scripts/test_check_model_mutability.py # tests of this script (CI runs both)
 """
 
 import re
@@ -35,6 +38,10 @@ NAMES = re.compile(
 MARKER = "N13-allow:"
 STATIC_INIT_ONCE = re.compile(r"^\s*(pub(\([^)]*\))?\s+)?static\s+\w+\s*:\s*(LazyLock|OnceLock)\b")
 INIT_ONCE_CONT = re.compile(r"^\s*(LazyLock|OnceLock)::new\b")
+
+
+REPO = Path(__file__).resolve().parent.parent
+SCOPE = ["crates/model/src", "crates/parser/src/types/field_type.rs"]
 
 
 def strip_comment(line: str) -> str:
@@ -55,10 +62,13 @@ def check_file(path: Path) -> list[str]:
                 continue
             code = code[end + 2 :]
             in_block_comment = False
-        start = code.find("/*")
-        if start >= 0 and code.find("*/", start) < 0:
-            in_block_comment = True
-            code = code[:start]
+        while (start := code.find("/*")) >= 0:
+            end = code.find("*/", start + 2)
+            if end < 0:
+                in_block_comment = True
+                code = code[:start]
+                break
+            code = code[:start] + " " + code[end + 2 :]
         code = strip_comment(code)
         stripped = code.strip()
         is_static = bool(STATIC_INIT_ONCE.match(code))
@@ -78,7 +88,7 @@ def check_file(path: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    roots = [Path(a) for a in argv] or [Path(__file__).resolve().parent.parent / "crates/model/src"]
+    roots = [Path(a) for a in argv] or [REPO / p for p in SCOPE]
     errors = []
     for root in roots:
         files = [root] if root.is_file() else sorted(root.rglob("*.rs"))
@@ -93,7 +103,8 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 1
-    print("model interior-mutability check: ok")
+    shown = [str(r.relative_to(REPO)) if r.is_relative_to(REPO) else str(r) for r in roots]
+    print(f"model interior-mutability check: ok ({', '.join(shown)})")
     return 0
 
 

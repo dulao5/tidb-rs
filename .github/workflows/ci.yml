@@ -81,9 +81,12 @@ jobs:
         run: python3 scripts/check_layers.py
 
       # N13 §3 rule 3: no interior mutability (Cell / Mutex / atomics ...) in the shared
-      # metadata model; reviewed exceptions carry `// N13-allow: <reason>`.
+      # metadata types (crates/model/src, FieldType); reviewed exceptions carry
+      # `// N13-allow: <reason>`. The script's own tests run first.
       - name: model interior mutability
-        run: python3 scripts/check_model_mutability.py
+        run: |
+          python3 scripts/test_check_model_mutability.py
+          python3 scripts/check_model_mutability.py
 
       - name: weekly report verdicts, fault error classification
         run: |
