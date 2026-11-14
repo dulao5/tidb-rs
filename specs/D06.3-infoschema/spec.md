@@ -2,7 +2,7 @@
 
 块 D06.3（ROADMAP P2 L3）：`pkg/infoschema` 的 `builder.go`、`builder_misc.go`、`bundle_builder.go`、`infoschema.go`、`infoschema_v2.go`、`cache.go`、`sieve.go`、`internal/sizer.go`，以及 `pkg/infoschema/context`。crate `tidb-infoschema`（N0 rank 9，与 D06.2、D06.4、D06.6 同一个 crate），模块在 crate 根下：`builder`、`builder_misc`、`bundle_builder`、`infoschema`、`infoschema_v2`、`sieve`、`context`、`error`。
 
-状态：第 1 部分，分两个 PR：**1a**（本 spec、例外 A3 的设计、`Data` 与 `InfoSchemaV2` 的读取、SIEVE、边界桩，converge 120/270）和 **1b**（builder、`ApplyDiff`、govec 回放，converge 184/270）。§5（例外 A3 的设计）和 §6 的 N11 钩子**等待项目负责人确认**；确认前代码按本 spec 实现，确认后若有改动在本 spec 内修订。
+状态：第 1 部分，分两个 PR：**1a**（本 spec、例外 A3 的设计、`Data` 与 `InfoSchemaV2` 的读取、SIEVE、边界桩，converge 120/270）和 **1b**（builder、`ApplyDiff`、govec 回放，converge 184/270）。§5.6 的四项 2026-11-14 已确认（协调人 Maya：1–3 是例外 A3 内的工程选择，4 来自负责人"v1 是技术债"的决定）；§6 的 N11 钩子保持默认关闭，等 N11 D7。
 
 ## 1. 范围
 
@@ -63,7 +63,7 @@ v2 也调用 v1 结构的地方，在 v2 下这些结构恒为空，调用不产
 5. **`DBInfoAsInfoSchema.SchemaTableInfos`** 对 nil 的 `Deprecated.Tables` 返回空切片（Go 的 nil 与空切片对调用方相同）。
 6. **N11 升级检查的钩子**（§6）：默认关闭，关闭时与 Go 相同。
 
-用户可见的差异只有 §5.4（`tidb_schema_cache_size = 0`），确认后写入 `docs/compatibility.md`。
+用户可见的差异只有 §5.4（`tidb_schema_cache_size = 0`），已写入 `docs/compatibility.md`。
 
 ## 5. 例外 A3：infoschema v2 的缓存（设计，待确认）
 
@@ -117,12 +117,12 @@ Go 的 `entry.Size()` 用反射按 **Go 的内存布局**遍历 `table.Table` �
 
 版本可见性（`search`、`tableByNameHelper`、`SchemaByName`/`SchemaByID` 的遍历、`IterateAllTableItems`、`SchemaSimpleTableInfos` 的去重——包括它们按整个 `CIStr`（含 `O`）而不是 `L` 比较的地方）、tomb 规则、`GCOldVersion` 的选择规则与每次 1024 个的上限、`resetBeforeFullLoad` 的 tomb、外键引用的增删与排序、`ListTablesWithSpecialAttribute` 的分组（包括 §9 第 3 条的行为）、`keepAlive`、`loadTableInfo` 的 singleflight 键和重试、refill 规则（`TableByID` 默认不回填、`TableByName` 默认回填）、`EvictTable`。
 
-### 5.6 需要负责人确认
+### 5.6 决定（2026-11-14 已确认，全部按提议）
 
 1. §5.1 的数据结构（锁 + `BTreeMap`，不用写时复制）。
 2. §5.2 保留 SIEVE。
 3. §5.3 的大小估算方式（Rust 布局，不追求与 Go 字节数一致）。
-4. §5.4 `tidb_schema_cache_size = 0` 为不限容量（用户可见：内存不受该变量限制；确认后写入 `docs/compatibility.md`）。
+4. §5.4 `tidb_schema_cache_size = 0` 为不限容量（用户可见：内存不受该变量限制；已写入 `docs/compatibility.md` 的 "Deliberate deviations"）。
 
 ## 6. N11 升级检查的钩子（待 N11 D7 决定）
 
