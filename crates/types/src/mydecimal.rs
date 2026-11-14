@@ -33,12 +33,7 @@ use crate::errors::{
 use crate::gostd;
 use crate::helper::{is_digit, is_space, str_to_int};
 use tidb_base::gofmt::Arg;
-
-/// `mysql.MaxDecimalScale` (pkg/parser/mysql/const.go).
-// glue: stub blocked-by D00.2 (pkg/parser/mysql constants)
-pub(crate) mod mysql {
-    pub const MAX_DECIMAL_SCALE: i8 = 30;
-}
+use tidb_base::mysql::MaxDecimalScale;
 
 /// RoundMode is the type for round mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1446,7 +1441,7 @@ impl MyDecimal {
     ) -> (Vec<u8>, Result<(), Error>) {
         if precision > DIGITS_PER_WORD * MAX_WORD_BUF_LEN as isize
             || precision < 0
-            || frac > mysql::MAX_DECIMAL_SCALE as isize
+            || frac > MaxDecimalScale
             || frac < 0
         {
             return (buf, Err(ErrBadNumber.share()));
@@ -2296,7 +2291,7 @@ pub fn decimal_mul(from1: &MyDecimal, from2: &MyDecimal, to: &mut MyDecimal) -> 
     to.result_frac = from1
         .result_frac
         .wrapping_add(from2.result_frac)
-        .min(mysql::MAX_DECIMAL_SCALE);
+        .min(MaxDecimalScale as i8);
     (words_int_to, words_frac_to, err) = fix_word_cnt_error(words_int_to, words_frac_to);
     to.negative = from1.negative != from2.negative;
     to.digits_frac = from1.digits_frac.wrapping_add(from2.digits_frac);
@@ -2428,7 +2423,7 @@ pub fn decimal_div(
     to.result_frac = from1
         .result_frac
         .wrapping_add(frac_incr as i8)
-        .min(mysql::MAX_DECIMAL_SCALE);
+        .min(MaxDecimalScale as i8);
     do_div_mod(from1, from2, Some(to), None, frac_incr)
 }
 

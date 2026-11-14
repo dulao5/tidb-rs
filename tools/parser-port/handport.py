@@ -307,7 +307,15 @@ act("SelectStmtLimit", "limit LimitOption", "Box::new(Limit { count: $2, offset:
 act("SelectStmtLimit", "limit LimitOption ',' LimitOption", "Box::new(Limit { offset: Some($2), count: $4 })")
 act("SelectStmtLimit", "limit LimitOption offset LimitOption", "Box::new(Limit { offset: Some($4), count: $2 })")
 act("LimitOption", "LengthNum", "val(Datum::Uint($1), p)")
-act("LengthNum", "NUM", "$1 as u64")
+act("LengthNum", "NUM", """{
+        // getUint64FromNUM: NUM holds an int64, or an uint64 above MaxInt64 (which NUM's
+        // i64 value cannot carry), so read it from the source text.
+        let s = $lexer.src_str($span);
+        s.parse::<u64>().unwrap_or_else(|_| {
+            p.fail(format!("{s} is out of range [0,18446744073709551615]"), $span.start());
+            0
+        })
+    }""")
 act("NUM", "intLit", "$lexer.src_str(tok_span(&$1)).parse::<i64>().unwrap_or(0)")
 
 # --- expressions: literals, variables, markers ---------------------------------------------------
@@ -1181,8 +1189,17 @@ for syms, tp in [("forKwd update OfTablesOpt", "ForUpdate"), ("forKwd share OfTa
                  ("forKwd update OfTablesOpt skip locked", "ForUpdateSkipLocked"),
                  ("forKwd share OfTablesOpt skip locked", "ForShareSkipLocked")]:
     act("SelectLockOpt", syms, LOCK % tp)
-act("SelectLockOpt", "forKwd update OfTablesOpt wait NUM",
-    "Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec: $5 as u64, tables: $3, unported: None }))")
+act("SelectLockOpt", "forKwd update OfTablesOpt wait NUM", """{
+        // getUint64FromNUM($5): NUM's i64 value cannot carry an uint64 above MaxInt64, so
+        // read the literal (the digits after WAIT) from the source text.
+        let text = $lexer.src_str(Span::new(tok_span(&$4).end(), $span.end()));
+        let s = text.trim_end().rsplit(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+        let wait_sec = s.parse::<u64>().unwrap_or_else(|_| {
+            p.fail(format!("{s} is out of range [0,18446744073709551615]"), $span.start());
+            0
+        });
+        Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec, tables: $3, unported: None }))
+    }""")
 act("SelectLockOpt", "lock in share mode",
     "Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShare, ..Default::default() }))")
 act("OfTablesOpt", "of TableNameList", "$2")
@@ -1276,7 +1293,7 @@ for syms in ["WithClause SetOprStmtWithLimitOrderBy", "WithClause SetOprStmtWout
     act("SetOprStmt", syms, """{
         match $2 {
             Stmt::SetOpr(mut set_opr) => {
-                set_opr.with = Some(std::rc::Rc::from($1));
+                set_opr.with = Some(std::sync::Arc::from($1));
                 Stmt::SetOpr(set_opr)
             }
             other => other,
@@ -1285,14 +1302,14 @@ for syms in ["WithClause SetOprStmtWithLimitOrderBy", "WithClause SetOprStmtWout
 act("SelectStmtWithClause", "WithClause SelectStmt", """{
         match $2 {
             Stmt::Select(mut sel) => {
-                sel.with = Some(std::rc::Rc::from($1));
+                sel.with = Some(std::sync::Arc::from($1));
                 Stmt::Select(sel)
             }
             other => other,
         }
     }""")
 act("SelectStmtWithClause", "WithClause SubSelect", """{
-        let with = std::rc::Rc::from($1);
+        let with = std::sync::Arc::from($1);
         match $2 {
             Expr::Subquery(sq) => match sq.query {
                 ResultSetNode::Select(mut x) => {
@@ -1420,9 +1437,9 @@ fn stmt_to_result_set(s: Stmt) -> ResultSetNode {
 
 /// The `switch x := $n.(*ast.SubqueryExpr).Query.(type)` of the set-operation actions: the
 /// operand's selects, With, Limit and OrderBy (a SELECT keeps its own With / Limit / OrderBy;
-/// Go shares the With pointer, hence the `Rc`).
+/// Go shares the With pointer, hence the `Arc`).
 #[allow(clippy::type_complexity)]
-fn subselect_operand(e: Expr) -> (Vec<SetOprNode>, Option<std::rc::Rc<WithClause>>, Option<Box<Limit>>, Option<Box<OrderByClause>>) {
+fn subselect_operand(e: Expr) -> (Vec<SetOprNode>, Option<std::sync::Arc<WithClause>>, Option<Box<Limit>>, Option<Box<OrderByClause>>) {
     match e {
         Expr::Subquery(sq) => match sq.query {
             ResultSetNode::Select(x) => {

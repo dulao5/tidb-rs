@@ -1,0 +1,24 @@
+[package]
+name = "tidb-session"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/session (block D05.3): the protocol-neutral session of N2 / ADR 0010; statement execution comes with VS1-14"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), boundary stubs.
+tidb-base = { workspace = true }
+# The AST the session executes (ADR 0010 §4.2: the only boundary to the semantic core).
+tidb-parser = { workspace = true }
+# SessionVars, StatementContext (D05.2, D00.1).
+tidb-sessionctx = { workspace = true }
+# Datum parameters.
+tidb-types = { workspace = true }
+# Planner and executors (VS1-10…VS1-15).
+tidb-planner = { workspace = true }
+tidb-executor = { workspace = true }
+
+[lints]
+workspace = true

@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod blocked;
 pub mod config;
 pub mod contextutil;
 pub mod dbterror;

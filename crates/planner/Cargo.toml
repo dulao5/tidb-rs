@@ -1,0 +1,22 @@
+[package]
+name = "tidb-planner"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/planner (blocks D09.x, D10.x, D13.1-D13.3): the plan representation of N1 (arena, PlanCtx, Arc physical plans); operators and rules come with the VS1 work items"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR).
+tidb-base = { workspace = true }
+# Expression tree and Schema (D08.1).
+tidb-expression = { workspace = true }
+# SessionVars and the expression context of PlanCtx (N2).
+tidb-sessionctx = { workspace = true }
+
+[dev-dependencies]
+tidb-types = { workspace = true }
+
+[lints]
+workspace = true
