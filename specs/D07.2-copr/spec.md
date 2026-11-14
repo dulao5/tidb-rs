@@ -66,6 +66,8 @@ Go `make(chan *copResponse, 2 或 18)`；移植用容量相同的 `tokio::sync::
 3. **failpoint**：`setRangesPerTask`（测试用）改为 `BuildCopTaskOpt.ranges_per_task_limit` 字段，默认 `rangesPerTask`；`disableFixedRowCountHint`、`DisablePaging`、`checkKeyRangeSortedForPaging` 不移植。
 4. **`eventCb`**（`trxevents`，锁事件回调）：只在 worker 的锁处理中使用，随第 2 部分加入 `copTask` 和 `buildCopTaskOpt`。
 
+5. **上游的坑**（照搬，未向上游报告）：`isSmallTask` 中 `&&` 优先于 `||`，带 batched task 的任务在 row count hint ≤ 64（含 0 和 -1）时都算小任务；`KeyRanges.RefAt` 越过 `mid` 时返回可能为 nil 的 `last`。见 #216。
+
 ## 5. 验收（第 1 部分）
 
 - converge：`matched 41/116`，其余 75 个在 tracker govec `copr` 领域的豁免表中（72 个 "D07.2 part 2"，3 个永久：DEF.MPP 两个、D06.5 边界桩一个）。
