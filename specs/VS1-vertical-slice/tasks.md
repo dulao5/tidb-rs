@@ -26,7 +26,7 @@
 
 | # | 任务 | 块 | 标签 | 周 | 依赖 | 完成条件 | 状态 |
 |---|---|---|---|--:|---|---|---|
-| VS1-10 | planbuilder 骨架、preprocess（SELECT）、`planner.Optimize` / `optimize` | D09.0、D09.13 | depth | 0.17 | VS1-01 | govec preprocess 向量一致 | 未开始 |
+| VS1-10 | planbuilder 骨架、preprocess（SELECT）、`planner.Optimize` / `optimize` | D09.0、D09.13 | depth | 0.17 | VS1-01 | govec preprocess 向量一致 | 进行中（#224） |
 | VS1-11 | `TryFastPlan`、`PointGetPlan` | D10.8 | depth | 0.07 | VS1-10、VS1-19 | 点查计划向量一致 | 未开始 |
 | VS1-19 | `property`、`planner/util`、`baseimpl`、`base_physical_plan` | D10.10、D10.1 | depth | 0.11 | VS1-01 | Go 单测与 govec 通过 | 进行中（#223） |
 | VS1-12 | 点查执行器、`NewRowDecoder`；table 读取部分 | D12.1、D06.4 | depth + breadth | 0.13 | VS1-13、VS1-18 | 行解码 / 默认值 govec；ab `Point_Get` | 未开始 |
@@ -54,6 +54,12 @@
 | VS1-30 | 代价模型 v2（VS1 算子） | D10.5 | depth | 0.04 | VS1-19 | 代价 govec 一致 | 未开始 |
 | VS1-31 | `ResolveIndices`、`ToPB`、access object（VS1 算子） | D10.9 | depth | 0.04 | VS1-27 | DAG 逐字节一致 | 未开始 |
 | VS1-32 | 规划耗时的早期测量：VS1-24 / VS1-28 一能产出计划就用只含 VS1 语句的 lua 测每次 EXECUTE 的优化耗时，与 Go（plan cache 打开 / 关闭）对照 | glue | depth | 0.03 | VS1-24、VS1-28 | 报告写进 plan §10-3 | 未开始 |
+
+Phase 2 的待定设计问题（来自 VS1-19 / VS1-10 的评审，#223 / #224）：
+
+- **VS1-23**：`BaseLogicalPlan` 是否改为嵌入 `baseimpl::Plan`（与 `BasePhysicalPlan` 一致，Go 的 `BaseLogicalPlan` 嵌入 `baseimpl.Plan`）；同时统一 query block offset 的类型（物理侧 `baseimpl::Plan.qb_block` 为 `isize`，按 M-INT；逻辑侧 `BaseLogicalPlan.qb_offset` 为 `i32`）。
+- **VS1-24**：`probeParents`（`propagateProbeParents` 设置）指向祖先节点，需要一种不形成 `Arc` 环的表示（计划树中不允许 `Weak`，N1 §3.4）。在此之前 `BasePhysicalPlan.probe_parents` 保留 Go 的类型，不被设置。
+- **VS1-26**：代价缓存（`PlanCostInit` / `PlanCost` / `PlanCostVer2`）已改为经 `&self` 写在共享节点上（`Mutex<PlanCostCache>`，#223 评审），不再经 `make_mut_plan` 复制共享子节点。试点需统计代价计算期间 `clone_node` 的调用次数（应为 0），并确认 `taskMap` 中的共享与 Go 一致（N1 §7 第 3 条）。
 
 ## Phase 3：扫描执行与集成（C2b）
 
