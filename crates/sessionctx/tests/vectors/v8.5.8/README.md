@@ -22,9 +22,9 @@ its own target.
 | | |
 |---|---|
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/sessionvars.jsonl.gz` (branch `govec/sessionvars-D05.2-f`, D05.2 PR F) |
-| generator | `govec` (seed 5052, with upstream fix pingcap/tidb#65884: header `"fixes"`; errors recorded as `errors.Cause`, the client's view; the accessor holds an in-memory mysql.tidb), 67,583 records: after the 1,208 `tidb_table` (`sys/tidb_table`, PR C: the tidb_gc_* hooks), the 1,095 PR D records (`methods`, `uservars`, `paramlist`, `svmisc`), the 563 PR E records (`stmtvars`, `stmthints`) and the 650 PR F records (`redact`, `lazytext`, `lru`, `stmtcache`, `parsecfg`, `slowwarn`, `matchers`, `sessstates`): 68,796 records; both targets hold the same records |
-| `arm64/sessionvars.jsonl.gz` sha256 | `5bdca1f4e603ba91a606c28f016b1a598b8af13d14e6cc1af720acef68ddc182` (GOARCH=arm64, generated locally, D05.2 PR F) |
-| `amd64/sessionvars.jsonl.gz` sha256 | `aee917cc7c72e00505723ed33cd766aa7b2ae65be32e6b08b76eebfe0b914f93` (tracker CI artifact, run 43026098745, D05.2 PR F) |
+| generator | `govec` (seed 5052, with upstream fixes pingcap/tidb#65884 and pingcap/tidb#71844 + #72214 (`RedactURL`, tracker #66): header `"fixes"`; errors recorded as `errors.Cause`, the client's view; the accessor holds an in-memory mysql.tidb), 67,583 records: after the 1,208 `tidb_table` (`sys/tidb_table`, PR C: the tidb_gc_* hooks), the 1,095 PR D records (`methods`, `uservars`, `paramlist`, `svmisc`), the 563 PR E records (`stmtvars`, `stmthints`) and the 650 PR F records (`redact`, `lazytext`, `lru`, `stmtcache`, `parsecfg`, `slowwarn`, `matchers`, `sessstates`): 68,796 records; both targets hold the same records |
+| `arm64/sessionvars.jsonl.gz` sha256 | `4c973afa6f9c3a82afcd00e2d1b809fb26469705b3f69c37ed559838a2548fdf` (GOARCH=arm64, generated locally, go-fix pingcap/tidb#71844 + #72214, tracker #66) |
+| `amd64/sessionvars.jsonl.gz` sha256 | `ba4c0bf566f7588b4178b3e804f21e7f47164b8837f3c0c798f95eaa98dd044c` (tracker CI artifact, run 43441515645, go-fix pingcap/tidb#71844 + #72214, tracker #66) |
 
 ## Domain "stmtctx" (block D00.1 part 1)
 
