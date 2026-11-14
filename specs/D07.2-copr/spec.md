@@ -69,6 +69,6 @@ Go `make(chan *copResponse, 2 或 18)`；移植用容量相同的 `tokio::sync::
 ## 5. 验收（第 1 部分）
 
 - converge：`matched 41/116`，其余 75 个在 tracker govec `copr` 领域的豁免表中（72 个 "D07.2 part 2"，3 个永久：DEF.MPP 两个、D06.5 边界桩一个）。
-- govec `copr`（tracker `govec/domains/copr.go`）：2,621 条记录，抄自 14 个 Go 测试（key_ranges_test.go、coprocessor_test.go 中不依赖 iterator 的全部测试）加随机用例。`split` / `build` 在 mocktikv 上运行，记录 region 布局，Rust 回放按布局实现 client-go `BatchLocateKeyRanges` 的结果（`tests/govec_copr.rs` 的 `LayoutCache`）。arm64 本地生成，amd64 取自 tracker CI。
+- govec `copr`（tracker `govec/domains/copr.go`）：2,621 条记录，抄自 14 个 Go 测试（key_ranges_test.go、coprocessor_test.go 中不依赖 iterator 的全部测试）加随机用例。`split` / `build` 在 mocktikv 上运行，记录 region 布局，Rust 回放按布局实现 client-go `BatchLocateKeyRanges` 的结果（`tests/govec_copr.rs` 的 `LayoutCache`）。arm64 本地生成，amd64 取自 tracker CI（两个目标的记录相同）。
 - 反证：7 处单行改动（small task 的 `<=`、小 LIMIT 关 paging 的 `<`、`Split` 的 `>`、row hint 的回退一步、bucket 的结束 key 相等判断、合并 task 的 busy threshold、`GrowPagingSize` 的下限）都被回放发现。
 - mocktikv 的限制：多个区间中含开放结束 key 时，批量 region 扫描返回 "PD server timeout"，随机用例只在单个区间时用开放结束 key。
