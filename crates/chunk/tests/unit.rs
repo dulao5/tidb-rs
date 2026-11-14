@@ -24,6 +24,11 @@ fn fts() -> Vec<FieldType> {
     ]
 }
 
+/// `fts()` as Go's `[]*types.FieldType` (the allocators' argument).
+fn arc_fts() -> Vec<Arc<FieldType>> {
+    fts().into_iter().map(Arc::new).collect()
+}
+
 fn fill(c: &mut Chunk, n: i64) {
     for i in 0..n {
         c.append_int64(0, i);
@@ -53,7 +58,7 @@ fn allocators_never_reuse() {
             (alloc::new_sync_allocator(alloc::new_allocator()), want_pool),
         ] {
             assert_eq!(a.check_reuse_alloc_size(), want, "{sizes:?}");
-            let c = a.alloc(&fts(), 8, 32);
+            let c = a.alloc(&arc_fts(), 8, 32);
             let want = chunk::new(&fts(), 8, 32);
             assert_eq!((c.capacity(), c.required_rows(), c.num_cols()), (8, 32, 2));
             assert_eq!(c.memory_usage(), want.memory_usage());
@@ -64,7 +69,7 @@ fn allocators_never_reuse() {
     // The hook runs once, on the first allocation, when the inner allocator would reuse.
     for (inner_pool, want_calls) in [(false, 0), (true, 1)] {
         let calls = Arc::new(AtomicUsize::new(0));
-        let k = calls.clone();
+        let k = Arc::clone(&calls);
         let inner = if inner_pool {
             alloc::new_allocator()
         } else {
@@ -76,8 +81,8 @@ fn allocators_never_reuse() {
                 k.fetch_add(1, SeqCst);
             }),
         );
-        let _ = a.alloc(&fts(), 4, 4);
-        let _ = a.alloc(&fts(), 4, 4);
+        let _ = a.alloc(&arc_fts(), 4, 4);
+        let _ = a.alloc(&arc_fts(), 4, 4);
         assert_eq!(a.check_reuse_alloc_size(), inner_pool);
         a.reset();
         assert_eq!(calls.load(SeqCst), want_calls);
@@ -98,7 +103,7 @@ fn destroy_data_for_test_changes_the_data() {
 #[test]
 fn tracked_columns_account_their_capacity() {
     let root = new_tracker(1, -1);
-    let a = TrackedAlloc::new(root.clone());
+    let a = TrackedAlloc::new(Arc::clone(&root));
     {
         let mut c = chunk::new_in(&fts(), 32, 1024, ColAlloc::Tracked(a.clone()));
         fill(&mut c, 5000);

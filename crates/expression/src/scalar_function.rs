@@ -107,8 +107,12 @@ impl ScalarFunction {
     /// `ret_type` becomes the signature's `tp`: every Go literal passes `f.getRetTp()` or the
     /// pointer the signature was built with, so the two are one type.
     // glue: constructor of the node (Go builds ScalarFunction literals in newFunctionImpl)
-    pub fn new(func_name: &str, ret_type: FieldType, mut function: BuiltinFunc) -> ScalarFunction {
-        function.tp = ret_type;
+    pub fn new(
+        func_name: &str,
+        ret_type: impl Into<Arc<FieldType>>,
+        mut function: BuiltinFunc,
+    ) -> ScalarFunction {
+        function.tp = ret_type.into();
         ScalarFunction {
             func_name: CIStr::new(func_name),
             function,
@@ -194,7 +198,7 @@ impl ScalarFunction {
     pub fn ret_type_mut(&mut self) -> &mut FieldType {
         self.hashcode = OnceLock::new();
         self.canonicalhashcode = OnceLock::new();
-        &mut self.function.tp
+        Arc::make_mut(&mut self.function.tp)
     }
 
     /// Equal implements Expression interface.
@@ -897,7 +901,7 @@ fn new_function_impl_inner(
     let mut func_name = func_name;
     match func_name {
         ast_func::Cast => {
-            return build_cast_function(ctx, args[0].clone(), ret_type);
+            return build_cast_function(ctx, Arc::clone(&args[0]), ret_type);
         }
         ast_func::GetVar => {
             // BuildGetVarFunction is D08.9.
@@ -908,12 +912,12 @@ fn new_function_impl_inner(
         InternalFuncFromBinary => {
             return Ok(build_from_binary_function(
                 ctx,
-                args[0].clone(),
+                Arc::clone(&args[0]),
                 ret_type,
                 false,
             ));
         }
-        InternalFuncToBinary => return Ok(build_to_binary_function(ctx, args[0].clone())),
+        InternalFuncToBinary => return Ok(build_to_binary_function(ctx, Arc::clone(&args[0]))),
         ast_func::Sysdate if ctx.get_sysdate_is_now() => func_name = ast_func::Now,
         _ => {}
     }
@@ -972,7 +976,7 @@ fn new_function_impl_inner(
         // try to fold constants, and return the original function if errors/warnings occur
         let eval_ctx = ctx.get_eval_ctx();
         let before_warns = warning_count(&*eval_ctx);
-        let new_sf = fold_constant(ctx, sf.clone());
+        let new_sf = fold_constant(ctx, Arc::clone(&sf));
         let after_warns = warning_count(&*eval_ctx);
         if after_warns > before_warns {
             truncate_warnings(&*eval_ctx, before_warns);

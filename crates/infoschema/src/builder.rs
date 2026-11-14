@@ -863,7 +863,7 @@ pub(crate) async fn apply_create_table(
     let allocs = b.build_allocs_for_create_table(tp, db_info, &tbl_info, allocs);
 
     let tbl_info = Arc::new(tbl_info);
-    let tbl = table_from_meta(allocs, b.factory.as_ref(), tbl_info.clone())?;
+    let tbl = table_from_meta(allocs, b.factory.as_ref(), Arc::clone(&tbl_info))?;
 
     // (Go: metrics.DDLResetTempIndexWrite when all indices are public; not ported.)
     let _all_index_public = tbl_info
@@ -1049,21 +1049,22 @@ impl Builder {
             di.deprecated.tables.take().into_iter().flatten().collect();
         for t in &deprecated_tables {
             let allocs = autoid::new_allocators_from_tbl_info(self.requirement.as_ref(), di.id, t);
-            let tbl = table_from_meta(allocs, self.factory.as_ref(), t.clone()).map_err(|err| {
-                tidb_base::errors::errorf(
-                    "%s: %s",
-                    &[
-                        Arg::from(format!(
-                            "Build table `{}`.`{}` schema failed",
-                            di.name.o, t.name.o
-                        )),
-                        Arg::Error(err.error()),
-                    ],
-                )
-            })?;
+            let tbl =
+                table_from_meta(allocs, self.factory.as_ref(), Arc::clone(t)).map_err(|err| {
+                    tidb_base::errors::errorf(
+                        "%s: %s",
+                        &[
+                            Arg::from(format!(
+                                "Build table `{}`.`{}` schema failed",
+                                di.name.o, t.name.o
+                            )),
+                            Arg::Error(err.error()),
+                        ],
+                    )
+                })?;
 
-            tables.insert(t.name.l.clone(), tbl.clone());
-            self.add_table(schema_version, &di, t, tbl.clone());
+            tables.insert(t.name.l.clone(), Arc::clone(&tbl));
+            self.add_table(schema_version, &di, t, Arc::clone(&tbl));
             if let Some(m) = &mut di.table_name2_id
                 && !m.is_empty()
             {
@@ -1106,7 +1107,7 @@ impl Builder {
         if is_special_db(&di.name.l) {
             let di = Arc::new(di);
             self.info_data.add_special_db(
-                &di.clone(),
+                &Arc::clone(&di),
                 Arc::new(SchemaTables {
                     db_info: di,
                     tables,
@@ -1171,10 +1172,10 @@ pub fn new_builder(
 ) -> Builder {
     let builder = Builder {
         requirement: r.clone(),
-        is: new_info_schema_v2(r, factory.clone(), info_data.clone()),
+        is: new_info_schema_v2(r, factory.clone(), Arc::clone(&info_data)),
         factory,
         bundle: BundleInfoBuilder::default(),
-        info_data: info_data.clone(),
+        info_data: Arc::clone(&info_data),
         store: None,
         refuse_unknown_actions: false,
     };

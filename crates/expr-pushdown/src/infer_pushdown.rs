@@ -663,7 +663,7 @@ pub fn new_push_down_context_from_session_vars(
 ) -> PushDownContext<'static> {
     let sc = sess_vars.stmt_ctx();
     let (warn, extra): (WarnAppenderRef, WarnAppenderRef) =
-        (sc.warn_handler(), sc.extra_warn_handler.clone());
+        (sc.warn_handler(), Arc::clone(&sc.extra_warn_handler) as _);
     new_push_down_context(
         eval_ctx,
         client,

@@ -181,7 +181,7 @@ impl Storage for MvccStore {
         let mut snap = Arc::new(MemSnap::from_pairs([]));
         for (ts, s) in self.states.read().iter() {
             if *ts <= ver.ver {
-                snap = s.clone();
+                snap = Arc::clone(s);
             }
         }
         snap
@@ -213,7 +213,7 @@ pub struct Req(pub Arc<MvccStore>);
 
 impl Requirement for Req {
     fn store(&self) -> Arc<dyn Storage> {
-        self.0.clone()
+        Arc::clone(&self.0) as _
     }
 }
 

@@ -504,7 +504,7 @@ fn const_misc(ctx: &Arc<es::EvalContext>, c: &Constant) -> serde_json::Map<Strin
             json!(c.equal(
                 ec,
                 &Expr::Column(Column {
-                    ret_type: c.ret_type.clone(),
+                    ret_type: Arc::new(c.ret_type.clone()),
                     ..Column::default()
                 })
             ))
@@ -566,7 +566,7 @@ fn ex_cols(v: &Value) -> Vec<Arc<Column>> {
                 id: s[1].as_i64().unwrap(),
                 is_prefix: s[2].as_bool().unwrap(),
                 orig_name: s[3].as_str().unwrap().to_string(),
-                ret_type: new_field_type(mysql::TypeLonglong),
+                ret_type: Arc::new(new_field_type(mysql::TypeLonglong)),
                 index: i as isize,
                 ..Column::default()
             })
@@ -602,7 +602,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
                 let mut c = chunk::new_chunk_with_capacity(std::slice::from_ref(&ft), 1);
                 append(&mut c, &ft, 0, &p[1]);
                 let col = Expr::Column(Column {
-                    ret_type: ft.clone(),
+                    ret_type: Arc::new(ft.clone()),
                     index: 0,
                     unique_id: 1,
                     ..Column::default()
@@ -618,7 +618,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
             let ec: &dyn EvalContext = &*ctx;
             let d = datum_in(&p[1]);
             let cc = CorrelatedColumn::new(Column {
-                ret_type: ft.clone(),
+                ret_type: Arc::new(ft.clone()),
                 unique_id: 7,
                 orig_name: "t.c".into(),
                 ..Column::default()
@@ -670,7 +670,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
                         7,
                         Arc::new(Column {
                             unique_id: 9,
-                            ret_type: ft.clone(),
+                            ret_type: Arc::new(ft.clone()),
                             ..Column::default()
                         }),
                     )]);
@@ -755,7 +755,7 @@ fn exec(op: &str, p: &[Value]) -> Value {
                 id: p[1].as_i64().unwrap(),
                 orig_name: p[2].as_str().unwrap().into(),
                 is_hidden: p[3].as_bool().unwrap(),
-                ret_type: ft_of(&p[4]),
+                ret_type: Arc::new(ft_of(&p[4])),
                 ..Column::default()
             };
             if let Some(cs) = p[5].as_array().filter(|cs| cs.len() == 2) {
@@ -1084,7 +1084,7 @@ fn sf_tree(v: &Value) -> ExprRef {
         return Expr::Column(Column {
             unique_id: a[0].as_i64().unwrap(),
             index: a[1].as_i64().unwrap() as isize,
-            ret_type: ft_in(&a[2]),
+            ret_type: Arc::new(ft_in(&a[2])),
             orig_name: String::from_utf8(ungs(&a[3])).unwrap(),
             virtual_expr: a.get(4).filter(|x| !x.is_null()).map(sf_tree),
             ..Column::default()
@@ -1095,7 +1095,7 @@ fn sf_tree(v: &Value) -> ExprRef {
         let a = a.as_array().unwrap();
         return Expr::CorrelatedColumn(CorrelatedColumn::new(Column {
             unique_id: a[0].as_i64().unwrap(),
-            ret_type: ft_in(&a[1]),
+            ret_type: Arc::new(ft_in(&a[1])),
             ..Column::default()
         }))
         .into_ref();
@@ -1210,7 +1210,7 @@ fn exec_sf(op: &str, p: &[Value], want: &Value) -> Value {
                         pr[0].as_i64().unwrap(),
                         Arc::new(Column {
                             unique_id: pr[1].as_i64().unwrap(),
-                            ret_type: new_field_type(mysql::TypeLonglong),
+                            ret_type: Arc::new(new_field_type(mysql::TypeLonglong)),
                             ..Column::default()
                         }),
                     )

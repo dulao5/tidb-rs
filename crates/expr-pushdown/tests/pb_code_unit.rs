@@ -34,7 +34,7 @@ fn pb_codes() {
 fn col(tp: u8) -> ExprRef {
     Expr::Column(Column {
         unique_id: 1,
-        ret_type: new_field_type(tp),
+        ret_type: std::sync::Arc::new(new_field_type(tp)),
         ..Column::default()
     })
     .into_ref()

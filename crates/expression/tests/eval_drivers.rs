@@ -64,7 +64,7 @@ static CAT_SIG: SigDesc = SigDesc {
 fn col(i: isize, ft: &FieldType) -> ExprRef {
     Arc::new(Expr::Column(Column {
         index: i,
-        ret_type: ft.clone(),
+        ret_type: Arc::new(ft.clone()),
         ..Column::default()
     }))
 }

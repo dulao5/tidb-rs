@@ -246,16 +246,20 @@ pub fn get_cmp_function(ctx: &dyn BuildContext, lhs: &ExprRef, rhs: &ExprRef) ->
         ETReal => CompareFunc::Real,
         ETDecimal => CompareFunc::Decimal,
         ETString => {
-            let coll =
-                check_and_derive_collation_from_exprs(ctx, "", ETInt, &[lhs.clone(), rhs.clone()])
-                    // Go ignores the error and reads `coll.Collation` of the nil result:
-                    // a nil-pointer panic (M-PANIC).
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "GetCmpFunction: nil ExprCollation ({})",
-                            String::from_utf8_lossy(&e.error())
-                        )
-                    });
+            let coll = check_and_derive_collation_from_exprs(
+                ctx,
+                "",
+                ETInt,
+                &[Arc::clone(lhs), Arc::clone(rhs)],
+            )
+            // Go ignores the error and reads `coll.Collation` of the nil result:
+            // a nil-pointer panic (M-PANIC).
+            .unwrap_or_else(|e| {
+                panic!(
+                    "GetCmpFunction: nil ExprCollation ({})",
+                    String::from_utf8_lossy(&e.error())
+                )
+            });
             CompareFunc::String(coll.collation)
         }
         ETDuration => CompareFunc::Duration,
@@ -636,7 +640,7 @@ impl CompareFunctionClass {
     ) -> Result<Option<Vec<ExprRef>>, Error> {
         // check if a constant value becomes null after being cast to a duration type.
         let cast_to_duration_is_null = |arg: &ExprRef| -> Result<bool, Error> {
-            let f = wrap_with_cast_as_duration(ctx, arg.clone())?;
+            let f = wrap_with_cast_as_duration(ctx, Arc::clone(arg))?;
             let v = f.eval_duration(&*ctx.get_eval_ctx(), &EvalState::new(), Row::default())?;
             Ok(v.is_none())
         };
@@ -778,7 +782,7 @@ impl CompareFunctionClass {
         // We should remove the mutable constant for correctness, because its value may be
         // changed.
         remove_mutable_const(ctx, &mut args)?;
-        let (mut final_arg0, mut final_arg1) = (args[0].clone(), args[1].clone());
+        let (mut final_arg0, mut final_arg1) = (Arc::clone(&args[0]), Arc::clone(&args[1]));
 
         // Handle comparison between a duration type column and a non-duration type constant.
         if self.op == Op::NullEQ
@@ -960,8 +964,8 @@ impl CompareFunctionClass {
         for i in 0..2 {
             let con = args[1 - i].as_constant().cloned();
             let col_tp = match &*args[i] {
-                Expr::Column(c) => Some(c.ret_type.clone()),
-                Expr::CorrelatedColumn(c) => Some(c.column.ret_type.clone()),
+                Expr::Column(c) => Some(Arc::clone(&c.ret_type)),
+                Expr::CorrelatedColumn(c) => Some(Arc::clone(&c.column.ret_type)),
                 _ => None,
             };
             let (Some(con), Some(col_tp)) = (con, col_tp) else {
@@ -1042,7 +1046,7 @@ impl CompareFunctionClass {
                 disable_parse_json_flag4_expr(&*ev, a);
             }
         }
-        bf.tp.set_flen(1);
+        Arc::make_mut(&mut bf.tp).set_flen(1);
         let table: &[&'static SigDesc; 7] = match tp {
             ETInt => &INT_SIGS,
             ETReal => &REAL_SIGS,
@@ -1606,7 +1610,7 @@ impl FunctionClass for CoalesceFunctionClass {
             &field_eval_tps,
         )?;
 
-        bf.tp = result_field_type;
+        bf.tp = Arc::new(result_field_type);
 
         let sig: &'static SigDesc = match ret_eval_tp {
             ETInt => &builtinCoalesceIntSig,
@@ -1970,7 +1974,7 @@ impl FunctionClass for ExtremumFunctionClass {
         let g = self.greatest;
         let sig: &'static SigDesc = match arg_tp {
             ETInt => {
-                bf.tp.add_flag(res_field_type.get_flag());
+                Arc::make_mut(&mut bf.tp).add_flag(res_field_type.get_flag());
                 if g {
                     &builtinGreatestIntSig
                 } else {
@@ -2058,9 +2062,9 @@ impl FunctionClass for ExtremumFunctionClass {
         let mut f = bf.with_sig(sig);
         // Go: sig.getRetTp().SetFlenUnderLimit(..) — getRetTp runs on the type of before.
         f.get_ret_tp();
-        f.tp.set_flen_under_limit(flen);
+        Arc::make_mut(&mut f.tp).set_flen_under_limit(flen);
         f.get_ret_tp();
-        f.tp.set_decimal_under_limit(decimal);
+        Arc::make_mut(&mut f.tp).set_decimal_under_limit(decimal);
         Ok(f)
     }
 }

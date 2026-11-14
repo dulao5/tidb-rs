@@ -56,7 +56,7 @@ fn count_group_by_a() {
         vec![(ast::AggFuncCount, vec![one()])],
         vec![col_expr(&a)],
     );
-    let c = new_col(&ctx, out[0].ret_type.clone());
+    let c = new_col(&ctx, (*out[0].ret_type).clone());
     let proj = projection(&mut ctx, agg, vec![(col_expr(&out[0]), c)]);
     let root = prune(&mut ctx, proj);
     assert_eq!(ctx.arena.get(ds).id(), 1);
@@ -78,7 +78,7 @@ fn count_star_keeps_handle() {
     let mut ctx = PlanCtx::new(&mut vars, expr_ctx());
     let ds = data_source(&mut ctx);
     let (agg, out) = aggregation(&mut ctx, ds, vec![(ast::AggFuncCount, vec![one()])], vec![]);
-    let c = new_col(&ctx, out[0].ret_type.clone());
+    let c = new_col(&ctx, (*out[0].ret_type).clone());
     let proj = projection(&mut ctx, agg, vec![(col_expr(&out[0]), c)]);
     prune(&mut ctx, proj);
     assert_eq!(ds_cols(&ctx, ds), ["test.t.a"]);
@@ -100,7 +100,7 @@ fn join_with_pushed_down_filter() {
         .all_conds = vec![cond];
     let j = join(&mut ctx, l, r, JoinType::InnerJoin);
     let (agg, out) = aggregation(&mut ctx, j, vec![(ast::AggFuncCount, vec![one()])], vec![]);
-    let c = new_col(&ctx, out[0].ret_type.clone());
+    let c = new_col(&ctx, (*out[0].ret_type).clone());
     let proj = projection(&mut ctx, agg, vec![(col_expr(&out[0]), c)]);
     prune(&mut ctx, proj);
     assert_eq!((ctx.arena.get(l).id(), ctx.arena.get(r).id()), (1, 2));
@@ -124,7 +124,7 @@ fn join_on_equal_condition() {
         .unwrap()
         .equal_conditions = vec![eq];
     let (agg, out) = aggregation(&mut ctx, j, vec![(ast::AggFuncCount, vec![one()])], vec![]);
-    let c = new_col(&ctx, out[0].ret_type.clone());
+    let c = new_col(&ctx, (*out[0].ret_type).clone());
     let proj = projection(&mut ctx, agg, vec![(col_expr(&out[0]), c)]);
     prune(&mut ctx, proj);
     assert_eq!(ds_cols(&ctx, l), ["test.t.a"]);
@@ -223,7 +223,7 @@ fn projection_with_all_columns_pruned_is_removed() {
         vec![(ast::AggFuncCount, vec![col_expr(&b)])],
         vec![],
     );
-    let cnt = new_col(&ctx, out[0].ret_type.clone());
+    let cnt = new_col(&ctx, (*out[0].ret_type).clone());
     let inner = projection(&mut ctx, agg, vec![(col_expr(&out[0]), cnt)]);
     let c1 = new_col(&ctx, int_type(true));
     let outer = projection(&mut ctx, inner, vec![(one(), c1)]);

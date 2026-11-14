@@ -132,7 +132,7 @@ pub fn new_evaluator_suite(exprs: &[ExprRef], avoid_column_evaluator: bool) -> E
             progs: Vec::with_capacity(exprs.len()),
             vectorizable: false,
         });
-        d.exprs.push(expr.clone());
+        d.exprs.push(std::sync::Arc::clone(expr));
         d.progs.push(RpnProgram::compile(expr));
         d.output_idxes.push(i);
     }

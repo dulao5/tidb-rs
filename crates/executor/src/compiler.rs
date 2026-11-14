@@ -92,7 +92,7 @@ impl Compiler {
         if sctx.get_session_vars().stmt_ctx().priority == NoPriority {
             lower_priority = need_lower_priority(&final_plan);
         }
-        let plan_any: Arc<dyn std::any::Any + Send + Sync> = Arc::new(final_plan.clone());
+        let plan_any: Arc<dyn std::any::Any + Send + Sync> = Arc::new(Arc::clone(&final_plan));
         sctx.get_session_vars_mut()
             .stmt_ctx_mut()
             .set_plan(Some(plan_any));

@@ -29,7 +29,7 @@ use crate::internal::exec::executor::{
     self as exec, BaseExecutorV2, Executor, new_base_executor_v2,
 };
 
-struct Acc;
+pub(crate) struct Acc;
 
 impl GlobalVarAccessor for Acc {
     fn get_global_sys_var(&self, _: &str) -> Result<String, Error> {
@@ -74,7 +74,7 @@ impl SessionContext for MockSession {
         &mut self.vars
     }
     fn sql_killer(&self) -> Arc<SqlKiller> {
-        self.killer.clone()
+        Arc::clone(&self.killer)
     }
     fn get_stmt_read_ts(&mut self) -> futures::future::BoxFuture<'_, Result<u64, Error>> {
         let ts = self.read_ts;
@@ -106,7 +106,7 @@ impl SessionContext for MockSession {
 fn col(id: i64) -> Arc<Column> {
     Arc::new(Column {
         unique_id: id,
-        ret_type: new_field_type(TypeLonglong),
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
         ..Column::default()
     })
 }
@@ -147,7 +147,7 @@ impl MockPhysicalPlan {
             next: 0,
             n: self.rows,
             point_get: self.point_get,
-            counters: self.counters.clone(),
+            counters: Arc::clone(&self.counters),
         })
     }
 }
@@ -272,7 +272,7 @@ fn mock_plan(rows: i64, columns: usize, point_get: bool, counters: &Arc<Counters
         children: Vec::new(),
         rows,
         point_get,
-        counters: counters.clone(),
+        counters: Arc::clone(counters),
     })
 }
 
@@ -376,7 +376,7 @@ async fn point_get_with_a_tso_does_not_cache() {
     let counters = Arc::new(Counters::default());
     let plan = mock_plan(1, 1, true, &counters);
     let mut s = MockSession::new(449_000_000_000_000_000);
-    let mut stmt = point_stmt(plan.clone());
+    let mut stmt = point_stmt(Arc::clone(&plan));
     stmt.ps_stmt.as_ref().unwrap().lock().point_get_executor = Some(
         plan.as_any()
             .downcast_ref::<MockPhysicalPlan>()

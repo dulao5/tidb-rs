@@ -1,5 +1,6 @@
 //! Decoding of coprocessor responses and of row values read by point gets.
 
+use std::borrow::Borrow;
 use std::collections::HashMap as StdHashMap;
 
 use protobuf::Message;
@@ -51,7 +52,10 @@ fn keep_raw(ft: &FieldType) -> bool {
 /// Decode a `tipb.SelectResponse` with `EncodeType::TypeDefault` rows of `types`.
 /// Date/time and duration values are returned as `Datum::Time` / `Datum::Dur`; enum, set
 /// and bit values keep their raw datum.
-pub fn decode_select_response(data: &[u8], types: &[FieldType]) -> Result<SelectRows> {
+pub fn decode_select_response<F: Borrow<FieldType>>(
+    data: &[u8],
+    types: &[F],
+) -> Result<SelectRows> {
     let mut resp = SelectResponse::default();
     resp.merge_from_bytes(data)
         .map_err(|e| codec_err("decode SelectResponse", e))?;
@@ -62,7 +66,7 @@ pub fn decode_select_response(data: &[u8], types: &[FieldType]) -> Result<Select
             msg: e.get_msg().to_owned(),
         });
     }
-    let infos: Vec<tipb::ColumnInfo> = types.iter().map(decode_info).collect();
+    let infos: Vec<tipb::ColumnInfo> = types.iter().map(|t| decode_info(t.borrow())).collect();
     let mut ctx = EvalContext::default();
     let mut rows = Vec::new();
     let mut row = Vec::with_capacity(types.len());
@@ -74,7 +78,7 @@ pub fn decode_select_response(data: &[u8], types: &[FieldType]) -> Result<Select
                 datum::split_datum(buf, false).map_err(|e| codec_err("split datum", e))?;
             buf = rest;
             let mut one = one;
-            let d = if keep_raw(&types[i]) {
+            let d = if keep_raw(types[i].borrow()) {
                 datum::decode(&mut one)
                     .map_err(|e| codec_err("decode datum", e))?
                     .pop()

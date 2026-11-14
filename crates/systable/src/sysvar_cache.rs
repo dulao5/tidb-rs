@@ -144,9 +144,10 @@ pub fn decode_global_variables(
             "mysql.global_variables has no variable_name / variable_value column",
         ));
     };
-    let types: HashMap<i64, Arc<FieldType>> = [name, value]
+    // Go `&col.FieldType`: borrowed for the decode, not copied (#229).
+    let types: HashMap<i64, &FieldType> = [name, value]
         .iter()
-        .map(|c| (c.id, Arc::new(c.field_type.clone())))
+        .map(|c| (c.id, &c.field_type))
         .collect();
     let loc = utc();
     let mut out = HashMap::with_capacity(records.len());

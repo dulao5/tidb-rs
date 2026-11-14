@@ -247,7 +247,7 @@ fn col_names2_result_fields(
         }
         let mut rf = ResultField {
             column_name: orig_col_name,
-            column_type: schema.columns[i].ret_type.clone(),
+            column_type: tidb_parser::types::FieldType::clone(&schema.columns[i].ret_type),
             column_as_name: names[i].col_name.clone(),
             empty_org_name,
             table_name: names[i].orig_tbl_name.clone(),
@@ -400,7 +400,7 @@ impl ExecStmt {
                     // CachedPlan type is already checked in last step
                     pg.init(self.plan.as_ref().expect("point get plan"))?;
                     executor = Some(cached);
-                    point_get_cache = Some(ps_stmt.clone());
+                    point_get_cache = Some(Arc::clone(&ps_stmt));
                 }
             }
         }
@@ -408,7 +408,8 @@ impl ExecStmt {
         let mut executor = match executor {
             Some(e) => e,
             None => {
-                let mut b = new_executor_builder(sctx, self.info_schema.clone(), self.ti.clone());
+                let mut b =
+                    new_executor_builder(sctx, self.info_schema.clone(), Arc::clone(&self.ti));
                 let e = b.build(sctx, self.plan.as_ref());
                 if let Some(err) = b.err {
                     return Err(err);
@@ -423,7 +424,7 @@ impl ExecStmt {
                     // Go keeps the executor in the cache and uses it for this execution too
                     // (one pointer); here the cache gets it back when the record set
                     // finishes.
-                    point_get_cache = Some(ps_stmt.clone());
+                    point_get_cache = Some(Arc::clone(&ps_stmt));
                 }
                 e
             }
@@ -674,7 +675,7 @@ impl ExecStmt {
                     stmt_ctx.priority = LowPriority;
                 }
             }
-            let mut b = new_executor_builder(sctx, self.info_schema.clone(), self.ti.clone());
+            let mut b = new_executor_builder(sctx, self.info_schema.clone(), Arc::clone(&self.ti));
             let e = b.build(sctx, self.plan.as_ref());
             if let Some(err) = b.err {
                 return Err(err);
@@ -806,7 +807,7 @@ impl ExecStmt {
         if let Some(plan) = &self.plan {
             // If this statement has a Plan, the StmtCtx.plan should have been set when it
             // comes here, but we set it again in case we missed some code paths.
-            let plan: Arc<dyn std::any::Any + Send + Sync> = Arc::new(plan.clone());
+            let plan: Arc<dyn std::any::Any + Send + Sync> = Arc::new(Arc::clone(plan));
             Self::stmt_ctx_mut(sctx).set_plan(Some(plan));
         }
         // `LowSlowQuery` and `SummaryStmt` must be called before recording `PrevStmt`.

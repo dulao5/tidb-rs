@@ -82,7 +82,7 @@ impl DataSource {
         let mut tp = new_field_type(TypeLonglong);
         tp.set_flag(NotNullFlag | PriKeyFlag);
         Column {
-            ret_type: tp,
+            ret_type: Arc::new(tp),
             unique_id: ctx.vars.alloc_plan_column_id(),
             id: ExtraHandleID as i64,
             orig_name: format!(

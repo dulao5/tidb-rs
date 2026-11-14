@@ -53,7 +53,7 @@ pub(super) fn exec(op: &str, p: &[Value]) -> Option<Value> {
     let Some((conds, filters)) = built else {
         return Some(Value::Object(m));
     };
-    let ectx: ExprContextRef = ctx.0.clone();
+    let ectx: ExprContextRef = Arc::clone(&ctx.0) as _;
     m.insert(
         "res".into(),
         ex_try(|| {
@@ -66,7 +66,7 @@ pub(super) fn exec(op: &str, p: &[Value]) -> Option<Value> {
                 let c = Arc::new(Column {
                     unique_id: i as i64 + 1,
                     index: i as isize,
-                    ret_type: ft.clone(),
+                    ret_type: Arc::new(ft.clone()),
                     orig_name: "c".into(),
                     ..Column::default()
                 });
@@ -128,15 +128,15 @@ fn exec_evnull(p: &[Value]) -> Value {
             Arc::new(Column {
                 unique_id: i as i64 + 1,
                 index: i as isize,
-                ret_type: fts[i].clone(),
+                ret_type: Arc::new(fts[i].clone()),
                 orig_name: "c".into(),
                 ..Column::default()
             })
         })
         .collect();
     let schema = new_schema(cols);
-    let ectx: ExprContextRef = ctx.0.clone();
-    let null_reject = with_null_reject_check(ectx.clone());
+    let ectx: ExprContextRef = Arc::clone(&ctx.0) as _;
+    let null_reject = with_null_reject_check(Arc::clone(&ectx));
     let bctx: &dyn BuildContext = if p[4].as_bool().unwrap() {
         &null_reject
     } else {

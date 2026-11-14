@@ -59,7 +59,7 @@ struct Shared(Arc<std::sync::Mutex<Box<dyn Allocator>>>);
 impl Allocator for Shared {
     fn alloc(
         &mut self,
-        fields: &[tidb_types::etc::FieldType],
+        fields: &[Arc<tidb_types::etc::FieldType>],
         capacity: usize,
         max_chunk_size: usize,
     ) -> tidb_chunk::chunk::Chunk {
@@ -154,7 +154,8 @@ fn call(
             Value::Null
         }
         "Alloc" => vars.get_chunk_allocator(|a| {
-            let chk = a.alloc(&fts(), 1, 32);
+            let fts: Vec<_> = fts().into_iter().map(Arc::new).collect();
+            let chk = a.alloc(&fts, 1, 32);
             json!([chk.capacity(), chk.required_rows(), chk.num_cols()])
         }),
         "ExchangeChunkStatus" => {

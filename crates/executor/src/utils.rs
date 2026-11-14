@@ -6,6 +6,9 @@
 // Go identifiers for the constants (M-GONAME).
 #![allow(non_upper_case_globals)]
 
+use std::borrow::Borrow;
+use std::sync::Arc;
+
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_chunk::chunk::{Chunk, ZeroCapacity};
@@ -57,7 +60,7 @@ const dmlChildChunkTargetBytes: isize = 256 * 1024;
 // go: newDMLChildChunk L1
 pub fn new_dml_child_chunk(
     dml_exec: &dyn Executor,
-    fields: &[FieldType],
+    fields: &[Arc<FieldType>],
     max_init_cap: isize,
 ) -> Chunk {
     let max_chunk_size = dml_exec.max_chunk_size();
@@ -66,8 +69,8 @@ pub fn new_dml_child_chunk(
 }
 
 // go: estimateDMLChildChunkInitCap L1
-pub fn estimate_dml_child_chunk_init_cap(
-    fields: &[FieldType],
+pub fn estimate_dml_child_chunk_init_cap<F: Borrow<FieldType>>(
+    fields: &[F],
     max_chunk_size: isize,
     max_init_cap: isize,
 ) -> isize {
@@ -76,7 +79,7 @@ pub fn estimate_dml_child_chunk_init_cap(
     }
     let mut row_width: isize = 0;
     for field in fields {
-        row_width += tidb_chunk::codec::estimate_type_width(field);
+        row_width += tidb_chunk::codec::estimate_type_width(field.borrow());
     }
     if row_width <= 0 {
         return max_chunk_size.min(max_init_cap);
@@ -235,7 +238,10 @@ mod tests {
         let ints = vec![new_field_type(TypeLonglong); 2];
         assert_eq!(estimate_dml_child_chunk_init_cap(&ints, 1024, 32), 32);
         assert_eq!(estimate_dml_child_chunk_init_cap(&ints, 0, 32), 0);
-        assert_eq!(estimate_dml_child_chunk_init_cap(&[], 1024, 2048), 1024);
+        assert_eq!(
+            estimate_dml_child_chunk_init_cap::<FieldType>(&[], 1024, 2048),
+            1024
+        );
         let mut wide = new_field_type(TypeVarchar);
         wide.set_flen(1 << 20);
         let w = estimate_dml_child_chunk_init_cap(&[wide], 1024, 1024);

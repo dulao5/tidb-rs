@@ -79,13 +79,14 @@ impl TableCommon {
             if col.state == StateDeleteOnly || col.state == StateDeleteReorganization {
                 continue;
             }
-            self.writable_columns.push(col.clone());
+            self.writable_columns.push(Arc::clone(col));
         }
 
         self.full_hidden_cols_and_visible_columns = Vec::with_capacity(self.columns.len());
         for col in &self.columns {
             if col.hidden || col.state == StatePublic {
-                self.full_hidden_cols_and_visible_columns.push(col.clone());
+                self.full_hidden_cols_and_visible_columns
+                    .push(Arc::clone(col));
             }
         }
     }
@@ -108,7 +109,7 @@ impl TableCommon {
             {
                 continue;
             }
-            columns.push(col.clone());
+            columns.push(Arc::clone(col));
         }
         columns
     }
@@ -311,7 +312,7 @@ pub fn table_from_meta(allocs: Allocators, tbl_info: Arc<TableInfo>) -> Result<T
             let gen_str = col_info.generated_expr_string.clone();
             // Built once to report its error now, as Go does; the node is rebuilt on use.
             build_generated_expr(&tbl_info, &gen_str)?;
-            let ti = tbl_info.clone();
+            let ti = Arc::clone(&tbl_info);
             col.generated_expr = Some(new_clonable_expr_node(Arc::new(move || {
                 build_generated_expr(&ti, &gen_str).inspect_err(|err1| {
                     log::warn!(
@@ -371,7 +372,7 @@ fn init_table_common(
         table_id: tbl_info.id,
         physical_table_id,
         allocs,
-        meta: tbl_info.clone(),
+        meta: Arc::clone(tbl_info),
         columns: cols,
         public_columns: Vec::new(),
         visible_columns: Vec::new(),
@@ -391,7 +392,7 @@ fn init_table_common(
 /// initTableIndices initializes the indices of the TableCommon.
 // go: initTableIndices L1 [M-SHARE]
 fn init_table_indices(t: &mut TableCommon) -> Result<(), Error> {
-    let tbl_info = t.meta.clone();
+    let tbl_info = Arc::clone(&t.meta);
     for idx_info in tbl_info.indices.iter().flatten() {
         if idx_info.state == StateNone {
             return Err(ErrIndexStateCantNone
@@ -646,7 +647,7 @@ pub fn try_get_common_pk_columns(tbl: &dyn Table) -> Option<Vec<ColumnRef>> {
     let cols = tbl.cols();
     let mut pk_cols = Vec::with_capacity(idx_columns(pk_idx).len());
     for idx_col in idx_columns(pk_idx) {
-        pk_cols.push(cols[idx_col.offset as usize].clone());
+        pk_cols.push(Arc::clone(&cols[idx_col.offset as usize]));
     }
     Some(pk_cols)
 }

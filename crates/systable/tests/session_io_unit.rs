@@ -84,7 +84,7 @@ impl Snapshot for Txn {
 
 impl SysTableTxn for Txn {
     fn table_info(&mut self, name: &str) -> Result<Arc<TableInfo>, Error> {
-        Ok(self.store.tables[name].clone())
+        Ok(Arc::clone(&self.store.tables[name]))
     }
     fn commit(self: Box<Self>, mb: &MemBuffer, _: &[Arc<TableInfo>]) -> Result<(), CommitError> {
         let f = self.store.interleave.lock().take();
@@ -124,7 +124,7 @@ impl SysTableStore for StoreRef {
             .map(|(k, (_, v))| (k.clone(), v.clone()))
             .collect();
         Ok(Box::new(Txn {
-            store: self.0.clone(),
+            store: Arc::clone(&self.0),
             start,
             snap,
         }))
@@ -203,7 +203,7 @@ fn store(version: &str) -> Arc<Store> {
 #[test]
 fn write_read_back_and_notify() {
     let s = store("232");
-    let w = SysTables::new(Arc::new(StoreRef(s.clone())));
+    let w = SysTables::new(Arc::new(StoreRef(Arc::clone(&s))));
     let notes = Notes::default();
     let rebuilds = AtomicUsize::new(0);
     let mut rebuild = || {
@@ -264,13 +264,13 @@ fn write_read_back_and_notify() {
 #[test]
 fn concurrent_writer_last_commit_wins_after_retry() {
     let s = store("232");
-    let w = Arc::new(SysTables::new(Arc::new(StoreRef(s.clone()))));
+    let w = Arc::new(SysTables::new(Arc::new(StoreRef(Arc::clone(&s)))));
     let notes = Notes::default();
     w.replace_global_variables_table_value("v1", "a", false, &notes, &mut || Ok(()))
         .unwrap();
     // Another instance changes the row between our start and our commit: our commit hits a
     // write conflict, the statement is retried with a new snapshot and wins.
-    let w2 = SysTables::new(Arc::new(StoreRef(s.clone())));
+    let w2 = SysTables::new(Arc::new(StoreRef(Arc::clone(&s))));
     *s.interleave.lock() = Some(Box::new(move |_| {
         w2.replace_global_variables_table_value(
             "v1",
@@ -285,11 +285,11 @@ fn concurrent_writer_last_commit_wins_after_retry() {
         .unwrap();
     assert_eq!(w.get_table_value("global_variables", "v1").unwrap(), "c");
     // Retry budget exhausted: the conflict error comes back.
-    let mut w3 = SysTables::new(Arc::new(StoreRef(s.clone())));
+    let mut w3 = SysTables::new(Arc::new(StoreRef(Arc::clone(&s))));
     w3.retry_limit = 0;
-    let s2 = s.clone();
+    let s2 = Arc::clone(&s);
     *s.interleave.lock() = Some(Box::new(move |_| {
-        SysTables::new(Arc::new(StoreRef(s2.clone())))
+        SysTables::new(Arc::new(StoreRef(Arc::clone(&s2))))
             .replace_global_variables_table_value("v1", "d", false, &Notes::default(), &mut || {
                 Ok(())
             })
@@ -305,7 +305,7 @@ fn concurrent_writer_last_commit_wins_after_retry() {
 #[test]
 fn bootstrap_version_mismatch_is_refused() {
     let s = store("231");
-    let w = SysTables::new(Arc::new(StoreRef(s.clone())));
+    let w = SysTables::new(Arc::new(StoreRef(Arc::clone(&s))));
     let err = w
         .replace_global_variables_table_value("v", "1", false, &Notes::default(), &mut || Ok(()))
         .unwrap_err();

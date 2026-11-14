@@ -719,7 +719,7 @@ pub fn column_infos_to_columns_and_names(
             ..FieldName::default()
         });
         let new_col = Column {
-            ret_type: col.field_type.clone(),
+            ret_type: Arc::new(col.field_type.clone()),
             id: col.id,
             unique_id: ctx.alloc_plan_column_id(),
             index: col.offset,
@@ -1362,12 +1362,12 @@ fn evaluate_expr_with_null_inner(
         }
         Expr::Column(x) => {
             if !schema.contains(x) {
-                return Ok(expr.clone());
+                return Ok(Arc::clone(expr));
             }
             Ok(null_constant_for_column())
         }
-        Expr::Constant(x) if x.deferred_expr.is_some() => Ok(fold_constant(ctx, expr.clone())),
-        _ => Ok(expr.clone()),
+        Expr::Constant(x) if x.deferred_expr.is_some() => Ok(fold_constant(ctx, Arc::clone(expr))),
+        _ => Ok(Arc::clone(expr)),
     }
 }
 
@@ -1439,14 +1439,14 @@ fn evaluate_expr_with_null_in_null_reject_check(
         }
         Expr::Column(x) => {
             if !schema.contains(x) {
-                return Ok((expr.clone(), false));
+                return Ok((Arc::clone(expr), false));
             }
             Ok((null_constant_for_column(), true))
         }
         Expr::Constant(x) if x.deferred_expr.is_some() => {
-            Ok((fold_constant(ctx, expr.clone()), false))
+            Ok((fold_constant(ctx, Arc::clone(expr)), false))
         }
-        _ => Ok((expr.clone(), false)),
+        _ => Ok((Arc::clone(expr), false)),
     }
 }
 
