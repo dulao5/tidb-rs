@@ -178,55 +178,55 @@ VS1-12	D06.4	pkg/table/column.go	getColDefaultExprValue	18
 VS1-12	D06.4	pkg/table/column.go	getColDefaultValue	44	
 VS1-12	D06.4	pkg/table/column.go	getColDefaultValueFromNil	40	
 VS1-12	D06.4	pkg/table/column.go	handleZeroDatetime	83	
-VS1-12	D06.4	pkg/table/index.go	CreateIdxOpt.FromBackFill	3	
-VS1-12	D06.4	pkg/table/index.go	CreateIdxOpt.IgnoreAssertion	3	
-VS1-12	D06.4	pkg/table/index.go	IndexKVGenerator.Next	18	
-VS1-12	D06.4	pkg/table/index.go	IndexKVGenerator.Valid	6	
-VS1-12	D06.4	pkg/table/index.go	NewCreateIdxOpt	7	
-VS1-12	D06.4	pkg/table/index.go	NewMultiValueIndexKVGenerator	19	
-VS1-12	D06.4	pkg/table/index.go	NewPlainIndexKVGenerator	18	
-VS1-12	D06.4	pkg/table/index.go	fromBackfill.applyCreateIdxOpt	3	
-VS1-12	D06.4	pkg/table/index.go	withIgnoreAssertion.applyCreateIdxOpt	3	
-VS1-12	D06.4	pkg/table/table.go	AddRecordOpt.GenerateRecordID	3	
-VS1-12	D06.4	pkg/table/table.go	AddRecordOpt.GetCreateIdxOpt	3	
-VS1-12	D06.4	pkg/table/table.go	AddRecordOpt.IsUpdate	3	
-VS1-12	D06.4	pkg/table/table.go	AddRecordOpt.ReserveAutoID	3	
-VS1-12	D06.4	pkg/table/table.go	AllocAutoIncrementValue	11	
-VS1-12	D06.4	pkg/table/table.go	AllocBatchAutoIncrementValue	12	
-VS1-12	D06.4	pkg/table/table.go	CheckRowConstraint	12	
-VS1-12	D06.4	pkg/table/table.go	CheckRowConstraintWithDatum	6	
-VS1-12	D06.4	pkg/table/table.go	CommonMutateOptFunc.applyAddRecordOpt	3	
-VS1-12	D06.4	pkg/table/table.go	CommonMutateOptFunc.applyCreateIdxOpt	3	
-VS1-12	D06.4	pkg/table/table.go	CommonMutateOptFunc.applyUpdateRecordOpt	3	
-VS1-12	D06.4	pkg/table/table.go	DupKeyCheckMode.applyAddRecordOpt	3	
-VS1-12	D06.4	pkg/table/table.go	DupKeyCheckMode.applyCreateIdxOpt	3	
-VS1-12	D06.4	pkg/table/table.go	DupKeyCheckMode.applyUpdateRecordOpt	3	
-VS1-12	D06.4	pkg/table/table.go	IndexesLayout.GetIndexLayout	6	
-VS1-12	D06.4	pkg/table/table.go	IndexesLayout.applyRemoveRecordOpt	3	
-VS1-12	D06.4	pkg/table/table.go	NewAddRecordOpt	7	
-VS1-12	D06.4	pkg/table/table.go	NewRemoveRecordOpt	7	
-VS1-12	D06.4	pkg/table/table.go	NewUpdateRecordOpt	7	
-VS1-12	D06.4	pkg/table/table.go	PessimisticLazyDupKeyCheckMode.applyAddRecordOpt	3	
-VS1-12	D06.4	pkg/table/table.go	PessimisticLazyDupKeyCheckMode.applyCreateIdxOpt	3	
-VS1-12	D06.4	pkg/table/table.go	PessimisticLazyDupKeyCheckMode.applyUpdateRecordOpt	3	
-VS1-12	D06.4	pkg/table/table.go	RemoveRecordOpt.GetIndexLayout	3	
-VS1-12	D06.4	pkg/table/table.go	RemoveRecordOpt.GetIndexesLayout	3	
-VS1-12	D06.4	pkg/table/table.go	RemoveRecordOpt.HasIndexesLayout	3	
+VS1-12	D06.4	pkg/table/index.go	CreateIdxOpt.FromBackFill	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/index.go	CreateIdxOpt.IgnoreAssertion	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/index.go	IndexKVGenerator.Next	18	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/index.go	IndexKVGenerator.Valid	6	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/index.go	NewCreateIdxOpt	7	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/index.go	NewMultiValueIndexKVGenerator	19	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/index.go	NewPlainIndexKVGenerator	18	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/index.go	fromBackfill.applyCreateIdxOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/index.go	withIgnoreAssertion.applyCreateIdxOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	AddRecordOpt.GenerateRecordID	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	AddRecordOpt.GetCreateIdxOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	AddRecordOpt.IsUpdate	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	AddRecordOpt.ReserveAutoID	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	AllocAutoIncrementValue	11	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	AllocBatchAutoIncrementValue	12	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	CheckRowConstraint	12	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	CheckRowConstraintWithDatum	6	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	CommonMutateOptFunc.applyAddRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	CommonMutateOptFunc.applyCreateIdxOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	CommonMutateOptFunc.applyUpdateRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	DupKeyCheckMode.applyAddRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	DupKeyCheckMode.applyCreateIdxOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	DupKeyCheckMode.applyUpdateRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	IndexesLayout.GetIndexLayout	6	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	IndexesLayout.applyRemoveRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	NewAddRecordOpt	7	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	NewRemoveRecordOpt	7	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	NewUpdateRecordOpt	7	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	PessimisticLazyDupKeyCheckMode.applyAddRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	PessimisticLazyDupKeyCheckMode.applyCreateIdxOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	PessimisticLazyDupKeyCheckMode.applyUpdateRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	RemoveRecordOpt.GetIndexLayout	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	RemoveRecordOpt.GetIndexesLayout	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	RemoveRecordOpt.HasIndexesLayout	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
 VS1-12	D06.4	pkg/table/table.go	Type.IsClusterTable	3	
 VS1-12	D06.4	pkg/table/table.go	Type.IsNormalTable	3	
 VS1-12	D06.4	pkg/table/table.go	Type.IsVirtualTable	3	
-VS1-12	D06.4	pkg/table/table.go	UpdateRecordOpt.GetAddRecordOpt	3	
-VS1-12	D06.4	pkg/table/table.go	UpdateRecordOpt.GetAddRecordOptKeepRecordID	3	
-VS1-12	D06.4	pkg/table/table.go	UpdateRecordOpt.GetCreateIdxOpt	3	
-VS1-12	D06.4	pkg/table/table.go	UpdateRecordOpt.SkipWriteUntouchedIndices	3	
-VS1-12	D06.4	pkg/table/table.go	WithCtx	5	
-VS1-12	D06.4	pkg/table/table.go	WithReserveAutoIDHint.applyAddRecordOpt	3	
-VS1-12	D06.4	pkg/table/table.go	commonMutateOpt.Ctx	3	
-VS1-12	D06.4	pkg/table/table.go	commonMutateOpt.DupKeyCheck	3	
-VS1-12	D06.4	pkg/table/table.go	commonMutateOpt.PessimisticLazyDupKeyCheck	3	
-VS1-12	D06.4	pkg/table/table.go	getIncrementAndOffset	11	
-VS1-12	D06.4	pkg/table/table.go	isUpdate.applyAddRecordOpt	4	
-VS1-12	D06.4	pkg/table/table.go	skipWriteUntouchedIndices.applyUpdateRecordOpt	3	
+VS1-12	D06.4	pkg/table/table.go	UpdateRecordOpt.GetAddRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	UpdateRecordOpt.GetAddRecordOptKeepRecordID	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	UpdateRecordOpt.GetCreateIdxOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	UpdateRecordOpt.SkipWriteUntouchedIndices	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	WithCtx	5	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	WithReserveAutoIDHint.applyAddRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	commonMutateOpt.Ctx	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	commonMutateOpt.DupKeyCheck	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	commonMutateOpt.PessimisticLazyDupKeyCheck	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	getIncrementAndOffset	11	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	isUpdate.applyAddRecordOpt	4	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
+VS1-12	D06.4	pkg/table/table.go	skipWriteUntouchedIndices.applyUpdateRecordOpt	3	write path: tidb-rs is read-only (permanent exemption, D06.4 spec §1.2)
 VS1-12	D06.4	pkg/table/tables/tables.go	BuildTableScanFromInfos	12	
 VS1-12	D06.4	pkg/table/tables/tables.go	CanSkip	23	
 VS1-12	D06.4	pkg/table/tables/tables.go	ConvertDatumToTailSpaceCount	5	

@@ -1018,7 +1018,7 @@ pub fn set_pb_columns_default_value(
 }
 
 /// TempTableFromMeta builds a TempTable from model.TableInfo.
-// glue: stub, blocked-by:D06.4 (part 2: TempTableFromMeta, temporary tables)
+// glue: stub of TempTableFromMeta, blocked-by:D06.4 (part 2: temporary tables)
 pub fn temp_table_from_meta(_tbl_info: &TableInfo) -> Result<(), Error> {
     Err(tidb_base::blocked::blocked("D06.4", "temporary tables"))
 }
