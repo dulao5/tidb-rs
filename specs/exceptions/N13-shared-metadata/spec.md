@@ -1,6 +1,6 @@
 # N13：长期共享的元数据：`Arc` 共享与写时复制（基础设计 spec）
 
-状态：**spec 待确认**（2026-11-15，#229 第一个 PR；§8 `FieldType` 的共享为批次 A，同日，待确认）。类型：实现例外（基础设计）+ 映射规则 `M-SHARE`。
+状态：**spec 待确认**（2026-11-15，#229 第一个 PR；§8 `FieldType` 的共享为批次 A，同日，待确认；§9 元数据的内存布局为批次 E 第 1 步，同日，待确认）。类型：实现例外（基础设计）+ 映射规则 `M-SHARE`。
 所属块：D06.1（元数据模型）、D06.3（InfoSchema）、D06.4（table 抽象）；§8 另涉及 D02.3（`FieldType`）、D08.1 / D08.2（表达式）、D01.7（chunk）、D12.0（执行器）；约束今后所有持有元数据的块（统计信息、plan cache、bindinfo、权限缓存移植时同样适用）。
 相关：N1（计划树、表达式树：语句级的 `Arc` 与写时复制，`M-PLAN` / `M-EXPR` / `M-FT`）、A3（InfoSchema v2 的缓存）、[D06.1 spec](../../D06.1-model/spec.md) §3.4、§3.5、[D06.4 spec](../../D06.4-table/spec.md) §2。
 
@@ -116,6 +116,7 @@ Go 用指针共享长期存在的元数据：`InfoSchema` 中的 `*model.TableIn
 - 是否有子对象保存父对象的 `Arc` / `Weak`（规则 4）；
 - `Arc` 字段上的 `.clone()` 是否其实想要 Go 的 `Clone`（规则 5；开启 `clone_on_ref_ptr` 的 crate 由 clippy 检查）；
 - 新移植的 Go 代码中通过共享指针写入的位置，是否按 §4 的两类登记在块 plan 中。
+- 长期共享的元数据结构加字段或改字段类型：`ArcInner` 是否仍在原来的 jemalloc 大小级别（§9.2，`crates/model/tests/layout.rs` 守住）；很少设置的可为 nil 的字段是否经生成器的 `boxedFields` 装箱。
 
 ## 8. `FieldType` 的共享（#229 批次 A）
 
@@ -171,7 +172,7 @@ Go 用指针共享长期存在的元数据：`InfoSchema` 中的 `*model.TableIn
 | `size_of::<ColumnInfo>()` | 416 B | 400 B | — |
 | 表对象、InfoSchema v2 全量加载 | 38.5 / 47.0 MiB | 38.5 / 47.0 MiB | — |
 
-这个形状中只有一半的列（VARCHAR）有字符集名字，BIGINT 列的名字为空，所以模型只少 3.4 MiB。剩下与 Go 的差距不在 `FieldType`（Rust 112 B，Go 120 B，都不再有堆分配）：`ColumnInfo` 的其他字段、`CIStr` 的两次分配（Go `NewCIStr` 对已是小写的名字共享同一个字符串）、每列 `Arc` 的 16 B 头等，另行处理。
+这个形状中只有一半的列（VARCHAR）有字符集名字，BIGINT 列的名字为空，所以模型只少 3.4 MiB。剩下与 Go 的差距不在 `FieldType`（Rust 112 B，Go 120 B，都不再有堆分配）：`ColumnInfo` 的其他字段、`CIStr` 的两次分配（Go `NewCIStr` 对已是小写的名字共享同一个字符串）等，见 §9。（本节原写"每列 `Arc` 的 16 B 头"：16 B 本身只是每列 16 B；它要紧，只是因为 400 B 的 `ColumnInfo` 加上它是 416 B，越过了 jemalloc 384 B 的大小级别，落进 448 B 级别，每列多付 64 B，§9.1。）
 
 分配次数（`crates/expression/tests/fieldtype_sharing.rs`，计数分配器；30 列的表，BIGINT 列 `binary` / `binary`，VARCHAR(64) 列 `utf8mb4` / `utf8mb4_bin`；次数 / 字节）：
 
@@ -194,3 +195,62 @@ Go 用指针共享长期存在的元数据：`InfoSchema` 中的 `*model.TableIn
 - `PBToExpr`（`tidb-expr-pushdown`，`distsql_builtin.rs`）的 `tps: &[FieldType]`：Go `RetType: tps[offset]` 共享，Rust 每个列引用复制一次；改为 `&[Arc<FieldType>]` 要连带调用方，另做。
 - `tablecodec::rowcodec::ColInfo.ft` 由调用方从 `ColumnInfo` 复制一次（每个执行器 / 请求一次，Go 共享指针）；随 `ColumnInfo.field_type` 一起处理。
 - 批次 B、C、D 见 §6。
+- 元数据的内存布局（批次 E）见 §9。
+
+## 9. 元数据的内存布局（#229 批次 E）
+
+### 9.1 剩余差距的构成
+
+批次 A（§8）之后，§5 的形状（10,000 张表 × 30 列 × 3 个索引）中模型是 152.8 MiB（534 B/列），Go 117.6 MiB（411 B/列）。逐个释放各组成部分测得（Rust jemalloc `stats.allocated`，Go `HeapAlloc`；各项之和与总差距相差 0.05 MiB）：
+
+| 组成部分 | Rust B/列 | Go B/列 | 差距 MiB | 原因 |
+|---|--:|--:|--:|---|
+| `Arc<ColumnInfo>` 与列表 | 456.2 | 360.0 | **27.53** | `ColumnInfo` 400 B（Go 344 B）+ `Arc` 头 16 B = 416 B，落进 jemalloc 448 B 级别；Go 344 B 落进 352 B 级别 |
+| 列名（`CIStr`） | 16.1 | 2.9 | 3.77 | Rust 两次分配；Go 在 O 与 L 相同时共享同一个字符串，且有 tiny 分配器 |
+| `Arc<IndexInfo>` | 26.7 | 20.0 | 1.93 | 224 B + 16 B = 240 B，落进 256 B 级别；Go 192 B |
+| 索引列名 | 2.1 | 0 | 0.61 | Rust 复制 `CIStr`；Go 共享底层字符串 |
+| 索引名、表名 | 3.2 | 1.6 | 0.46 | O / L 不共享 |
+| 索引列列表 | 10.5 | 9.6 | 0.27 | |
+| 表结构体 | 18.8 | 16.8 | 0.58 | 512 B 级别；Go 480 B |
+
+`ColumnInfo` 比 Go 大 56 B：两个 `AnyValue`（默认值、原始默认值）各 32 B，Go 的 `interface{}` 16 B（+32）；`Option<BTreeMap>` 32 B，Go 的 map 指针 8 B（+24）；`String` 24 B，Go 16 B（`CIStr` +16，另两个字符串 +16）；`FieldType` −8；Go 的对齐填充 −24。
+
+### 9.2 大小级别与规则
+
+**分配器**：tidb-server（`crates/poc/server/src/main.rs`）无条件以 jemalloc（`tikv-jemallocator`）为全局分配器，Linux 与 macOS 相同（A1 / P0 决定 D7），没有按平台的条件编译；基准程序和 §5 的内存测试用的也是它。jemalloc 把请求向上取整到大小级别：128 B 以内每 16 B 一级，之后每次翻倍分四级（…、256、320、384、448、512、640…）。级别与平台无关（64 位目标上 `size_of` 也相同）。一个长期存活的 `Arc<T>` 是一次 `ArcInner<T>` = 16 B 引用计数 + `T` 的分配，所以：
+
+- 结构体变小只在 `ArcInner<T>` 跨进更低的级别时省内存。`ColumnInfo` 从 400 B 缩到 369 B 不省一个字节（385–448 B 都是 448 B 级别）；缩到 368 B 每列省 64 B。
+- 反过来，在级别边界上加一个字段，每张表的每一列都多付一整级。
+- 换分配器时这一推理要重做：glibc malloc 按 16 B 取整，省下的只是真正去掉的字节（本步每列 32 B，约 9.2 MiB；推算，未测：服务器不用 glibc malloc）；mimalloc 的级别与 jemalloc 相近，同样有级别效应。
+
+**规则**（`M-SHARE` 的补充）：
+
+1. 长期存活的共享元数据（`ColumnInfo`、`IndexInfo`、`TableInfo` 及今后同类结构）中**很少被设置**的可为 nil 的字段装箱：Go 的 map → `Option<Box<BTreeMap<_, _>>>`，`[]byte` → `Option<Box<[u8]>>`。`None` 是 Go 的 nil，`Some` 了一个空值是 Go 的非 nil 空值，JSON 与 Go 逐字节相同（nil 编码为 `null`，非 nil 空值为 `{}` / `""`）。装箱在生成器中按字段登记（tracker `govec/cmd/rsgen` 的 `boxedFields`，与 `sharedFields` 同一机制），不手改生成的文件。
+2. 这些结构体的 `size_of` 由测试守住当前级别（`crates/model/tests/layout.rs`）：`size_of::<ColumnInfo>() ≤ 368`（`ArcInner` ≤ 384 B），`IndexInfo` + 16 ≤ 256，`TableInfo` + 16 ≤ 512。改动越过级别时测试失败；办法是把另一个很少设置的字段装箱，或者在 spec 中说明为什么值得多付一级。
+3. 常用字段（每列都有值的默认值、名字、类型）不装箱：多一次分配和一次间接访问，省不下内存。
+
+### 9.3 第 1 步（本 PR）
+
+`ColumnInfo` 的三个很少设置的字段装箱：`dependences`（只有被生成列引用的列才有）→ `Option<Box<BTreeMap<String, ()>>>`，`origin_default_value_bit`、`default_value_bit`（只有带默认值的 BIT 列才有）→ `Option<Box<[u8]>>`。三个字段从 80 B 降到 40 B，`size_of::<ColumnInfo>()` 从 400 B 降到 368 B（剩下 8 B 是小字段的对齐填充），`ArcInner<ColumnInfo>` 384 B，正好落进 384 B 级别。
+
+生成器（`boxedFields`）只改字段类型和解码：解码时把值移出盒子，按原来的规则解码（map 与 encoding/json 一样合并进已有的 map，`[]byte` 整体替换；`null` 置为 nil），再放回盒子。编码与 `omitempty` 经 `Deref` 读取，与原来相同。手写代码只有 `SetOriginDefaultValue` / `SetDefaultValue` 的赋值（`Some(v.into())`）和 `GoCopy for Box<[u8]>`。
+
+### 9.4 测试与测量（arm64 macOS，jemalloc）
+
+- `crates/model/tests/layout.rs`：§9.2 规则 2 的三个 `size_of` 守卫；三个装箱字段的 nil、非 nil 空值、非空值各自的编码字节（`null` / `""` / `{}` / base64 / 排序的对象），以及解码到空的和已填充的 `ColumnInfo`（`null` 置 nil，`{}` 合并进已有的 map，字节替换）。
+- govec `model` 领域新增 7 条 `into` 记录（`site/boxed/*`：nil、空值、非空值、JSON 数组形式的字节，分别解码到零值和已填充的 `ColumnInfo` 后编码），共 62,833 条，全部通过；`infoschema`、`table` 领域不变。
+- 内存（§5 的 `arc_sharing_mem`）：
+
+| 结构 | 批次 A 之后 | 本步 | Go v8.5.8 |
+|---|--:|--:|--:|
+| `TableInfo`（模型） | 152.8 MiB（534 B/列） | **134.4 MiB（470 B/列）** | 117.6 MiB（411 B/列） |
+| `size_of::<ColumnInfo>()` / `ArcInner` 级别 | 400 B / 448 B | 368 B / 384 B | 344 B / 352 B |
+| 表对象、InfoSchema v2 全量加载 | 38.5 / 47.0 MiB | 38.5 / 47.0 MiB | — |
+
+  −18.4 MiB，与每列 64 B × 300,000 列（18.3 MiB）相符。数字为 arm64 macOS 上的实测；Linux 上分配器、级别、`size_of` 相同，未单独测（本地没有可用的 Linux 环境）。
+
+### 9.5 后续
+
+- **第 2 步（提议，未实现）**：`ColumnInfo` ≤ 304 B，`ArcInner` 进 320 B 级别，再省约 18 MiB（模型约 116 MiB，与 Go 相当）。做法：两个默认值改 `Option<Box<AnyValue>>`（`None` = nil，大多数列没有默认值；各 32 B → 8 B），`CIStr` 与 `comment` 改紧凑表示（如 `Box<str>`，或 O 与 L 相同时只存一份）。风险中等：nil 有两种表示（`None` 与 `Some(AnyValue::Nil)`）时比较和编码可能出错，需要由构造函数保证只有 `None`；`default_value` 的读写分布在 DDL、`GetDefaultValue`、执行器的默认值求值中，都要改；`CIStr` 属 D02.3，`name.o` / `name.l` 的直接字段访问遍及各 crate，改表示是大范围的 API 变化。需要先单独评估，另开 PR。
+- **第 3 步**：`CIStr` 在 O 与 L 相同时共享（约 −2.9 MiB）；`IndexInfo` ≤ 176 B（进 192 B 级别，约 −1.9 MiB）。
+- 每一步改变级别时同时收紧 `layout.rs` 中的守卫。

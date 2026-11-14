@@ -4,11 +4,11 @@
 
 | | |
 |---|---|
-| source | `tidb-rs-tracker`, `vectors/v8.5.8/<target>/model.jsonl.gz` (branch `govec/model-D06.1-b`, PR #16) |
-| tracker commit | `a50d2b5` |
-| `arm64/model.jsonl.gz` sha256 | `d2b701780e3a579f1176f14f1e5dd6198d4761fcb4721181ff7dea3a99ab38ed` (GOARCH=arm64, generated locally) |
-| `amd64/model.jsonl.gz` sha256 | `6d1bb591701232d922385c2f25eff091c17ed89fff4f39b6dc23a916bf72b96b` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact) |
-| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 1618), 62,826 records: 50,918 `roundtrip` (866 meta exported from a v8.5.8 cluster, 15,000 random values of 28 types, 15,000 object-level mutations, 20,000 `luckyMutate` mutations, 68 time values), 3,093 `into` (93 of them one per error / early-return site of encoding/json decode.go and of the JSON methods of terror.Error, atomic.Int64, json.RawMessage), 8,815 method calls (865 of them for job.go / reorg.go / ColumnNeedRestoredData); 8,474 Go errors; 9 records marked `known_deviation` |
+| source | `tidb-rs-tracker`, `vectors/v8.5.8/<target>/model.jsonl.gz` (branch `rsgen/229-columninfo-size`, tidb-rs #229 batch E) |
+| tracker commit | `28b6d6b` |
+| `arm64/model.jsonl.gz` sha256 | `15e966da46fe61c475f6ec019c6778b0f0847243f57b7684d97010b1cae42655` (GOARCH=arm64, generated locally) |
+| `amd64/model.jsonl.gz` sha256 | `1306eaeb6c925ab658b3bf93980ad891b8b0cfc4521055deef2a87f3cca4cf8c` (GOARCH=amd64, GOAMD64=v1 header; the arm64 records, checked by the tracker CI `govec.sh --check` on amd64) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 1618), 62,833 records: 50,918 `roundtrip` (866 meta exported from a v8.5.8 cluster, 15,000 random values of 28 types, 15,000 object-level mutations, 20,000 `luckyMutate` mutations, 68 time values), 3,100 `into` (100 of them one per error / early-return site of encoding/json decode.go and of the JSON methods of terror.Error, atomic.Int64, json.RawMessage, and 7 for the fields boxed in Rust, spec N13 §9), 8,815 method calls (865 of them for job.go / reorg.go / ColumnNeedRestoredData); 8,474 Go errors; 9 records marked `known_deviation` |
 
 Both targets have the same records (the CI artifact differs from the local arm64 file only in
 the header); the per-target layout only follows the tracker's.
