@@ -15,8 +15,9 @@
 //! - `[]byte` arguments Go distinguishes as nil vs empty (`DecodeRowWithMap*`'s and
 //!   `CutRowNew`'s row): an empty slice is Go's non-nil empty slice (every Go caller passes
 //!   a KV value, never nil).
-//! - `map[int64]*types.FieldType` is `HashMap<i64, Arc<FieldType>>` (Go shares the field
-//!   types by pointer); `map[int64]types.Datum` is `HashMap<i64, Datum>`.
+//! - `map[int64]*types.FieldType` is `HashMap<i64, F>` with `F: Borrow<FieldType>` (Go shares
+//!   the field types by pointer: callers pass `&FieldType` or `Arc<FieldType>`, never a copy);
+//!   `map[int64]types.Datum` is `HashMap<i64, Datum>`.
 //! - Not ported (tracker block X, spec §2): the row and index value encoders (`EncodeRow`,
 //!   `EncodeOldRow`, `GenIndexValue*`, `EncodeHandleInUniqueIndexValue`), the temp-index value
 //!   codec, `IsUntouchedIndexKValue`, `IndexKVIsUnique`, `TempIndexKey2IndexKey` (write path,
@@ -26,7 +27,7 @@
 // Go identifiers for the key layout constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -543,9 +544,9 @@ pub fn decode_column_value_with_datum(
 
 /// DecodeRowWithMapNew decode a row to datum map.
 // go: DecodeRowWithMapNew L1
-pub fn decode_row_with_map_new(
+pub fn decode_row_with_map_new<F: Borrow<FieldType>>(
     b: &[u8],
-    cols: &HashMap<i64, Arc<FieldType>>,
+    cols: &HashMap<i64, F>,
     loc: Option<&Arc<Location>>,
     row: Option<HashMap<i64, Datum>>,
 ) -> Result<HashMap<i64, Datum>, Error> {
@@ -554,24 +555,18 @@ pub fn decode_row_with_map_new(
         return Ok(row);
     }
 
-    let req_cols: Vec<ColInfo> = cols
-        .iter()
-        .map(|(&id, tp)| ColInfo {
-            id,
-            ft: Arc::clone(tp),
-            ..ColInfo::default()
-        })
-        .collect();
-    let rd = rowcodec::new_datum_map_decoder(req_cols, loc.cloned());
-    rd.decode_to_datum_map(b, Some(row))
+    // Go's `reqCols` (`rowcodec.ColInfo{ID, Ft}` sharing `cols`' field types): the decoder
+    // iterates the borrowed `(id, ft)` pairs directly.
+    let rd = rowcodec::new_datum_map_decoder(Vec::new(), loc.cloned());
+    rd.decode_cols_to_datum_map(b, cols.iter().map(|(&id, ft)| (id, ft.borrow())), row)
 }
 
 /// DecodeRowWithMap decodes a byte slice into datums with an existing row map.
 /// Row layout: colID1, value1, colID2, value2, .....
 // go: DecodeRowWithMap L1
-pub fn decode_row_with_map(
+pub fn decode_row_with_map<F: Borrow<FieldType>>(
     mut b: &[u8],
-    cols: &HashMap<i64, Arc<FieldType>>,
+    cols: &HashMap<i64, F>,
     loc: Option<&Arc<Location>>,
     row: Option<HashMap<i64, Datum>>,
 ) -> Result<HashMap<i64, Datum>, Error> {
@@ -591,6 +586,7 @@ pub fn decode_row_with_map(
         b = rest;
         let id = cid.get_int64();
         if let Some(ft) = cols.get(&id) {
+            let ft: &FieldType = ft.borrow();
             let (_, v, err) = decode_one(data);
             err?;
             let (v, err) = unflatten(v, ft, loc);
@@ -610,9 +606,9 @@ pub fn decode_row_with_map(
 /// Row layout: colID1, value1, colID2, value2, .....
 /// Default value columns, generated columns and handle columns are unprocessed.
 // go: DecodeRowToDatumMap L1
-pub fn decode_row_to_datum_map(
+pub fn decode_row_to_datum_map<F: Borrow<FieldType>>(
     b: &[u8],
-    cols: &HashMap<i64, Arc<FieldType>>,
+    cols: &HashMap<i64, F>,
     loc: Option<&Arc<Location>>,
 ) -> Result<HashMap<i64, Datum>, Error> {
     if !rowcodec::is_new_format(b) {
@@ -625,10 +621,10 @@ pub fn decode_row_to_datum_map(
 ///
 /// Returns the map with the error as Go (M-ERRVAL); Go's nil map is an empty map.
 // go: DecodeHandleToDatumMap L1 [M-ERRVAL]
-pub fn decode_handle_to_datum_map(
+pub fn decode_handle_to_datum_map<F: Borrow<FieldType>>(
     handle: Option<&Handle>,
     handle_col_ids: &[i64],
-    cols: &HashMap<i64, Arc<FieldType>>,
+    cols: &HashMap<i64, F>,
     loc: Option<&Arc<Location>>,
     row: Option<HashMap<i64, Datum>>,
 ) -> (HashMap<i64, Datum>, Result<(), Error>) {
@@ -643,6 +639,7 @@ pub fn decode_handle_to_datum_map(
         let Some(ft) = cols.get(id) else {
             continue;
         };
+        let ft: &FieldType = ft.borrow();
         if need_restored_data(ft) {
             continue;
         }

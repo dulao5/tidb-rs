@@ -2579,6 +2579,8 @@ mod tests {
             Arc::new(TableInfo {
                 id: 10,
                 name: ci("t"),
+                // TableFromMeta rejects StateNone (D06.4).
+                state: tidb_model::StatePublic,
                 ..Default::default()
             }),
         )

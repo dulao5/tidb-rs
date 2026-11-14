@@ -15,8 +15,13 @@
 //! - [`infoschema`]: `infoSchemaMisc` and helpers; [`sieve`]: the table cache;
 //! - [`context`]: `pkg/infoschema/context`; [`error`]: the package's errors.
 //!
-//! Stand-ins until their blocks land: [`table`] (`pkg/table`, D06.4), [`autoid`]
-//! (`pkg/meta/autoid`, D06.2 part 2), [`placement`] (`pkg/ddl/placement`, X).
+//! Block D06.4 part 1 (specs/D06.4-table): the read path of the table abstraction.
+//! - [`table`]: `pkg/table`, the `Table` / `Index` interfaces, columns and default values;
+//! - [`tables`]: `pkg/table/tables`, `TableCommon`, `TableFromMeta`, raw row decoding;
+//! - [`util`]: the `pkg/util` leaf files they need first (`generatedexpr`, `misc`).
+//!
+//! Stand-ins until their blocks land: [`autoid`] (`pkg/meta/autoid`, D06.2 part 2),
+//! [`placement`] (`pkg/ddl/placement`, X).
 //!
 //! tidb-rs is read-only: the writers (`Mutator.Create*`, `TxStructure.HSet`, ...) run in
 //! Go TiDB and are not ported (X, tracker rules).
@@ -35,6 +40,8 @@ pub mod placement;
 pub mod sieve;
 pub mod structure;
 pub mod table;
+pub mod tables;
+pub mod util;
 
 pub use builder::{Builder, new_builder};
 pub use infoschema_v2::{Data, InfoSchemaV2, new_data};

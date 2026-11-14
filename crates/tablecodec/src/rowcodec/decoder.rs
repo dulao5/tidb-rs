@@ -124,38 +124,55 @@ impl DatumMapDecoder {
         row_data: &[u8],
         row: Option<HashMap<i64, Datum>>,
     ) -> Result<HashMap<i64, Datum>, Error> {
-        let mut row = row.unwrap_or_else(|| HashMap::with_capacity(self.decoder.columns.len()));
+        let row = row.unwrap_or_else(|| HashMap::with_capacity(self.decoder.columns.len()));
+        self.decode_cols_to_datum_map(
+            row_data,
+            self.decoder.columns.iter().map(|c| (c.id, &*c.ft)),
+            row,
+        )
+    }
+
+    /// The body of `DecodeToDatumMap` over `(column ID, field type)` pairs, so
+    /// `DecodeRowWithMapNew` can decode with borrowed field types (Go's `reqCols` share the
+    /// caller's `*types.FieldType`) without building `ColInfo`s.
+    pub(crate) fn decode_cols_to_datum_map<'a>(
+        &self,
+        row_data: &[u8],
+        cols: impl Iterator<Item = (i64, &'a FieldType)>,
+        mut row: HashMap<i64, Datum>,
+    ) -> Result<HashMap<i64, Datum>, Error> {
         let mut r = Row::default();
         r.from_bytes(row_data)?;
-        for col in &self.decoder.columns {
-            let (idx, is_nil, not_found) = r.find_col_id(col.id);
+        for (id, ft) in cols {
+            let (idx, is_nil, not_found) = r.find_col_id(id);
             if !not_found && !is_nil {
                 let col_data = r.get_data(idx);
-                let d = self.decode_col_datum(col, col_data)?;
-                row.insert(col.id, d);
+                let d = self.decode_col_datum(ft, col_data)?;
+                row.insert(id, d);
                 continue;
             }
 
             if is_nil {
                 let mut d = Datum::default();
                 d.set_null();
-                row.insert(col.id, d);
+                row.insert(id, d);
                 continue;
             }
         }
         Ok(row)
     }
 
+    /// `ft` is Go's `col.Ft`, the only `ColInfo` field `decodeColDatum` reads.
     // go: DatumMapDecoder.decodeColDatum L1
-    fn decode_col_datum(&self, col: &ColInfo, col_data: &[u8]) -> Result<Datum, Error> {
+    fn decode_col_datum(&self, ft: &FieldType, col_data: &[u8]) -> Result<Datum, Error> {
         let mut d = Datum::default();
-        match col.ft.get_type() {
+        match ft.get_type() {
             mysql::TypeLonglong
             | mysql::TypeLong
             | mysql::TypeInt24
             | mysql::TypeShort
             | mysql::TypeTiny => {
-                if mysql::has_unsigned_flag(col.ft.get_flag()) {
+                if mysql::has_unsigned_flag(ft.get_flag()) {
                     d.set_uint64(decode_uint(col_data));
                 } else {
                     d.set_int64(decode_int(col_data));
@@ -177,7 +194,7 @@ impl DatumMapDecoder {
             | mysql::TypeTinyBlob
             | mysql::TypeMediumBlob
             | mysql::TypeLongBlob => {
-                d.set_string(col_data.to_vec(), col.ft.get_collate().to_owned());
+                d.set_string(col_data.to_vec(), ft.get_collate().to_owned());
             }
             mysql::TypeNewDecimal => {
                 let (_, dec, precision, frac, err) = decode_decimal(col_data);
@@ -188,10 +205,10 @@ impl DatumMapDecoder {
             }
             mysql::TypeDate | mysql::TypeDatetime | mysql::TypeTimestamp => {
                 let mut t = Time::default();
-                t.set_type(col.ft.get_type());
-                t.set_fsp(col.ft.get_decimal());
+                t.set_type(ft.get_type());
+                t.set_fsp(ft.get_decimal());
                 t.from_packed_uint(decode_uint(col_data))?;
-                if col.ft.get_type() == mysql::TypeTimestamp && !t.is_zero() {
+                if ft.get_type() == mysql::TypeTimestamp && !t.is_zero() {
                     convert_from_utc(&mut t, self.decoder.loc.as_ref())?;
                 }
                 d.set_mysql_time(t);
@@ -199,24 +216,22 @@ impl DatumMapDecoder {
             mysql::TypeDuration => {
                 let dur = Duration {
                     duration: decode_int(col_data),
-                    fsp: col.ft.get_decimal(),
+                    fsp: ft.get_decimal(),
                 };
                 d.set_mysql_duration(dur);
             }
             mysql::TypeEnum => {
                 // ignore error deliberately, to read empty enum value.
-                let enum_ =
-                    parse_enum_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))
-                        .unwrap_or_default();
-                d.set_mysql_enum(enum_, col.ft.get_collate().to_owned());
+                let enum_ = parse_enum_value(ft.get_elems().unwrap_or(&[]), decode_uint(col_data))
+                    .unwrap_or_default();
+                d.set_mysql_enum(enum_, ft.get_collate().to_owned());
             }
             mysql::TypeSet => {
-                let set =
-                    parse_set_value(col.ft.get_elems().unwrap_or(&[]), decode_uint(col_data))?;
-                d.set_mysql_set(set, col.ft.get_collate().to_owned());
+                let set = parse_set_value(ft.get_elems().unwrap_or(&[]), decode_uint(col_data))?;
+                d.set_mysql_set(set, ft.get_collate().to_owned());
             }
             mysql::TypeBit => {
-                let byte_size = (col.ft.get_flen() + 7) >> 3;
+                let byte_size = (ft.get_flen() + 7) >> 3;
                 d.set_mysql_bit(new_binary_literal_from_uint(
                     decode_uint(col_data),
                     byte_size,
