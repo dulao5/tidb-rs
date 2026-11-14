@@ -201,7 +201,8 @@ class VerdictTest(unittest.TestCase):
     def test_integrationtest_more_diverged_skips_than_baseline_is_regressed(self):
         # tidb-rs starts rejecting a USE: its reads are skipped, nothing mismatches.
         with tempfile.TemporaryDirectory() as d:
-            it_records(f"{d}/prev", [{"verdict": "match", "query": "select 1", "line": 1}])
+            it_records(f"{d}/prev", [{"verdict": "match", "query": "select 1", "line": 1},
+                                     {"verdict": "b_set_rejected", "query": "set x = 1", "line": 9}])
             it_records(f"{d}/cur", [
                 {"verdict": "b_error", "query": "use  DB1;", "line": 1, "kind": "use rejected",
                  "detail": "1049: Unknown database 'db1'"},
@@ -228,6 +229,18 @@ class VerdictTest(unittest.TestCase):
                 text = f.read()
             self.assertIn("| `set names gbk` | 1 | 1 |", text)
             self.assertNotIn("(new)", text)
+
+    def test_integrationtest_baseline_without_rejected_records_is_not_compared(self):
+        # A baseline from before ab recorded rejected statements: no REGRESSED, nothing "new".
+        with tempfile.TemporaryDirectory() as d:
+            it_records(f"{d}/prev", [{"verdict": "match", "query": "select 1", "line": 1}])
+            it_records(f"{d}/cur", [
+                {"verdict": "b_set_rejected", "query": "set names gbk", "line": 1, "kind": "session"},
+                diverged(2, 1, "set names gbk")])
+            rc, first = report(f"{d}/cur", prev=f"{d}/prev", parts="integrationtest")
+            self.assertTrue(first.startswith("**GREEN**"), first)
+            with open(f"{d}/cur/report.md") as f:
+                self.assertNotIn("(new)", f.read())
 
     def test_integrationtest_skipped_expected_entry_is_not_fixed(self):
         # A listed read skipped as "session diverged" did not run on tidb-rs: not "fixed".

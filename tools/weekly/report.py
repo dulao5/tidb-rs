@@ -153,7 +153,10 @@ def integration(base, expected=None):
     fixed = sorted((k, ran[k]) for k in expected if k in ran and k not in seen)
     return {"totals": totals, "tests": tests, "reasons": reasons, "errors": errors,
             "mismatches": mismatches, "known": known, "fixed": fixed, "rejected": rejected,
-            "causes": causes}
+            "causes": causes,
+            # Results written before ab recorded rejected session statements have none; every
+            # real run has some (the tests set plan variables tidb-rs does not know).
+            "records_rejected": bool(rejected)}
 
 
 # results.jsonl verdicts of reads sent to tidb-rs (the others: "b_set_rejected", a session
@@ -199,7 +202,10 @@ def it_unsupported_growth(cur, prev):
 
 def it_diverged_growth(cur, prev):
     """Reads skipped as "session diverged" (tidb-rs rejected a result-affecting session
-    statement), over the tests both runs ran: more means tidb-rs answers fewer of them."""
+    statement), over the tests both runs ran: more means tidb-rs answers fewer of them. None
+    when the previous run's results do not record them."""
+    if not prev or not prev.get("records_rejected"):
+        return None
     return it_growth(cur, prev, "skipped")
 
 
@@ -420,7 +426,7 @@ def section_diverged(cur, prev, lines):
                      f"{g[1]} now.\n")
     if not rejected:
         return
-    before = prev["rejected"] if prev else None
+    before = prev["rejected"] if prev and prev.get("records_rejected") else None
     new = [q for q in rejected if before is not None and q not in before]
     if new:
         lines.append(f"Newly rejected (not rejected last run): {len(new)}.\n")
