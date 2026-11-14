@@ -1,7 +1,7 @@
 [package]
 name = "tidb-store"
 version = "0.0.0"
-description = "Port of Go TiDB v8.5.8 pkg/store (blocks D07.1-D07.4); so far the coprocessor client pkg/store/copr (block D07.2, part 1: key ranges, task building, paging)"
+description = "Port of Go TiDB v8.5.8 pkg/store (blocks D07.1-D07.4); so far the store driver's point reads (D07.1 part 1) and the coprocessor client pkg/store/copr (block D07.2)"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -32,13 +32,18 @@ futures = { workspace = true }
 # handleTiDBSendReqErr builds a tipb.SelectResponse.
 tipb = { workspace = true }
 protobuf = { workspace = true }
+# The driver (D07.1): TableInfo of the duplicate-key errors, the key decoding of the write
+# conflict message, the snapshot's option lock (M-LOCK), json.Unmarshal of a lock key.
+tidb-model = { workspace = true }
+tidb-tablecodec = { workspace = true }
+parking_lot = "0.12"
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # Multi-threaded runtime for the drop test.
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 # The govec vectors are committed as .jsonl.gz.
 flate2 = "1.0"
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

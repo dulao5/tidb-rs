@@ -12,9 +12,11 @@ futures = { workspace = true }
 thiserror = { workspace = true }
 tikv-client = { workspace = true }
 tokio = { workspace = true }
-# The coprocessor client (D07.2): cop reads go through `tidb_store::copr`.
+# TIDB_RS_POINT_GET=d07.1: point gets through the ported store driver (D07.1, VS1-18), for
+# the fault-scenario comparison (tools/ab/faults).
 tidb-base = { workspace = true }
 tidb-kv = { workspace = true }
+# The coprocessor client (D07.2): cop reads go through `tidb_store::copr`.
 tidb-runtime = { workspace = true }
 tidb-store = { workspace = true }
 

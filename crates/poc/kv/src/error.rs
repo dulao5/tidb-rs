@@ -22,6 +22,10 @@ pub enum Error {
     /// Any other client error.
     #[error("TiKV client error: {0}")]
     Other(#[source] Box<tikv_client::Error>),
+    /// An error of the ported store driver (D07.1), already a TiDB error
+    /// (`TIDB_RS_POINT_GET=d07.1`).
+    #[error("{0}")]
+    Driver(Box<tidb_base::Error>),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

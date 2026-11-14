@@ -101,9 +101,18 @@ pub fn tidb_retry_options() -> RetryOptions {
 pub struct KvClient {
     inner: TransactionClient,
     retry: RetryOptions,
+    /// The ported store driver's `KVStore` when `TIDB_RS_POINT_GET=d07.1`: snapshots then
+    /// do their point gets and batch gets through `tidb_store::driver` (D07.1, VS1-18), so
+    /// that the fault scenarios (tools/ab/faults) compare it with this crate's own reads.
+    driver: Option<std::sync::Arc<tidb_store::driver::tikv::KVStore>>,
     /// The coprocessor client's store (D07.2); its workers run on the ExecPool once
     /// [`with_exec_pool`](KvClient::with_exec_pool) is called.
     copr: std::sync::Arc<CoprStore>,
+}
+
+/// Whether `TIDB_RS_POINT_GET=d07.1` is set (see [`KvClient`]).
+fn driver_point_gets() -> bool {
+    std::env::var("TIDB_RS_POINT_GET").is_ok_and(|v| v == "d07.1")
 }
 
 /// The copr store over `inner`, its workers on `pool` (N3 ExecPool) when given.
@@ -144,10 +153,13 @@ impl KvClient {
         let inner = TransactionClient::new_with_config(pd_endpoints, config)
             .await
             .map_err(Error::from)?;
+        let driver = driver_point_gets()
+            .then(|| tidb_store::driver::tikv::KVStore::new(std::sync::Arc::new(inner.clone())));
         let copr = std::sync::Arc::new(copr_store(&inner, None)?);
         Ok(KvClient {
             inner,
             retry: tidb_retry_options(),
+            driver,
             copr,
         })
     }
@@ -209,6 +221,10 @@ impl KvClient {
         KvSnapshot {
             inner: self.inner.snapshot(Timestamp::from_version(ts), options),
             ts,
+            driver: self
+                .driver
+                .as_ref()
+                .map(|kv| tidb_store::driver::txn::snapshot::new_snapshot(kv.get_snapshot(ts))),
             copr: self.copr.clone(),
         }
     }
@@ -248,6 +264,8 @@ pub fn register_client_metrics() {
 pub struct KvSnapshot {
     inner: tikv_client::Snapshot,
     ts: u64,
+    /// The D07.1 snapshot at the same timestamp (`TIDB_RS_POINT_GET=d07.1`).
+    driver: Option<tidb_store::driver::txn::snapshot::TikvSnapshot>,
     copr: std::sync::Arc<CoprStore>,
 }
 
@@ -261,11 +279,30 @@ impl KvSnapshot {
     }
 
     pub async fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        if let Some(snap) = &self.driver {
+            use tidb_kv::kv::Getter;
+            let ctx = tidb_kv::Context::background();
+            return match snap.get(&ctx, &tidb_kv::Key(key), &[]).await {
+                Ok(entry) => Ok(Some(entry.value)),
+                Err(e) if tidb_kv::error::is_err_not_found(&e) => Ok(None),
+                Err(e) => Err(Error::Driver(Box::new(e))),
+            };
+        }
         self.inner.get(key).await.map_err(Error::from)
     }
 
     /// Values of the keys that exist, in no particular order.
     pub async fn batch_get(&mut self, keys: Vec<Vec<u8>>) -> Result<Vec<KvPair>> {
+        if let Some(snap) = &self.driver {
+            use tidb_kv::kv::BatchGetter;
+            let ctx = tidb_kv::Context::background();
+            let keys: Vec<tidb_kv::Key> = keys.into_iter().map(tidb_kv::Key).collect();
+            let values = snap
+                .batch_get(&ctx, &keys, &[])
+                .await
+                .map_err(|e| Error::Driver(Box::new(e)))?;
+            return Ok(values.into_iter().map(|(k, v)| (k, v.value)).collect());
+        }
         let pairs = self.inner.batch_get(keys).await.map_err(Error::from)?;
         Ok(pairs.map(|p| (p.0.into(), p.1)).collect())
     }
