@@ -10,7 +10,7 @@
   "String": 77,
   "value struct / enum (CIStr, Op, JoinType, ...)": 74,
   "primitive": 73,
-  "catch-all Item (Box<dyn Any>)": 25,
+  "catch-all Item (Box<dyn Any + Send + Sync>)": 25,
   "unit (untyped in goyacc)": 9
  },
  "type_source": {

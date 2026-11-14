@@ -8,7 +8,7 @@ Per nonterminal a Rust type is inferred from (in order):
   1. goyacc %type tag: <expr> -> Expr, <statement> -> Stmt, <ident> -> String
   2. for <item>: consumer assertions `$n.(T)` (majority vote), then the nonterminal's own
      `$$ = &ast.X{...}` / `[]*ast.X{` / literal shapes, then passthrough propagation,
-     else the catch-all `Item` (= Box<dyn Any>)
+     else the catch-all `Item` (= Box<dyn Any + Send + Sync>)
   3. nullability (`$$ = nil` or consumers testing `$n != nil`) wraps the type in Option<>
 Actions emitted:
   * hand-ported Rust (handport.py)                                    -> "ported"
@@ -322,7 +322,7 @@ def main():
         return rtype[s] if s in rules else "TOKEN"
 
     def placeholder(lhs, i, a):
-        kids = [f"Box::new(${k + 1}) as Box<dyn Any>" for k, s in enumerate(a["syms"])
+        kids = [f"Box::new(${k + 1}) as Item" for k, s in enumerate(a["syms"])
                 if s in rules and rtype[s] != "()"]
         return f'ph("{lhs}#{i}", $span, vec![{", ".join(kids)}])'
 
@@ -435,7 +435,7 @@ def main():
         if t == "()":
             return "unit (untyped in goyacc)"
         if t == "Item":
-            return "catch-all Item (Box<dyn Any>)"
+            return "catch-all Item (Box<dyn Any + Send + Sync>)"
         base = t[7:-1] if t.startswith("Option<") else t
         if base in ("Expr", "Stmt", "ResultSetNode"):
             return "AST enum (Expr/Stmt/ResultSetNode)"

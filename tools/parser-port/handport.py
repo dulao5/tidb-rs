@@ -1276,7 +1276,7 @@ for syms in ["WithClause SetOprStmtWithLimitOrderBy", "WithClause SetOprStmtWout
     act("SetOprStmt", syms, """{
         match $2 {
             Stmt::SetOpr(mut set_opr) => {
-                set_opr.with = Some(std::rc::Rc::from($1));
+                set_opr.with = Some(std::sync::Arc::from($1));
                 Stmt::SetOpr(set_opr)
             }
             other => other,
@@ -1285,14 +1285,14 @@ for syms in ["WithClause SetOprStmtWithLimitOrderBy", "WithClause SetOprStmtWout
 act("SelectStmtWithClause", "WithClause SelectStmt", """{
         match $2 {
             Stmt::Select(mut sel) => {
-                sel.with = Some(std::rc::Rc::from($1));
+                sel.with = Some(std::sync::Arc::from($1));
                 Stmt::Select(sel)
             }
             other => other,
         }
     }""")
 act("SelectStmtWithClause", "WithClause SubSelect", """{
-        let with = std::rc::Rc::from($1);
+        let with = std::sync::Arc::from($1);
         match $2 {
             Expr::Subquery(sq) => match sq.query {
                 ResultSetNode::Select(mut x) => {
@@ -1420,9 +1420,9 @@ fn stmt_to_result_set(s: Stmt) -> ResultSetNode {
 
 /// The `switch x := $n.(*ast.SubqueryExpr).Query.(type)` of the set-operation actions: the
 /// operand's selects, With, Limit and OrderBy (a SELECT keeps its own With / Limit / OrderBy;
-/// Go shares the With pointer, hence the `Rc`).
+/// Go shares the With pointer, hence the `Arc`).
 #[allow(clippy::type_complexity)]
-fn subselect_operand(e: Expr) -> (Vec<SetOprNode>, Option<std::rc::Rc<WithClause>>, Option<Box<Limit>>, Option<Box<OrderByClause>>) {
+fn subselect_operand(e: Expr) -> (Vec<SetOprNode>, Option<std::sync::Arc<WithClause>>, Option<Box<Limit>>, Option<Box<OrderByClause>>) {
     match e {
         Expr::Subquery(sq) => match sq.query {
             ResultSetNode::Select(x) => {
