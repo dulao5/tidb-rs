@@ -35,7 +35,7 @@
 | VS1-15 | `PlanCacheStmt`、`GetPlanFromPlanCache` 未命中路径、可缓存性检查、`PrepareExec` | D13.1、D12.12 | depth | 0.08 | VS1-14 | 可缓存性 govec；ab 预处理语句部分 | 未开始 |
 | VS1-16 | 结果集与 `writeResultSet` / `writeChunks`、`column` / `dump`、`conn_stmt` 执行与二进制参数 | D03.1 | breadth | 0.13 | VS1-14 | dump govec；protocol-smoke 通过 | 未开始 |
 | VS1-17 | D06.3 第 2 部分（T8 / T9）；D06.5 `loadInfoSchema` / `tryLoadSchemaDiffs` / validator，由 PoC domain 驱动 | D06.3、D06.5 | breadth | 0.10 | — | schema 同步测试在新 InfoSchema 上通过 | 未开始 |
-| VS1-18 | snapshot `Get` / `BatchGet` / `SetOption`、错误转换 | D07.1 | breadth | 0.04 | — | 故障场景点查与 PoC 相同 | 未开始 |
+| VS1-18 | snapshot `Get` / `BatchGet` / `SetOption`、错误转换 | D07.1 | breadth | 0.04 | — | 故障场景点查与 PoC 相同 | 评审中（PR 待开） |
 | VS1-20 | C2a 集成与 point_select 调优 | glue | depth | 0.08 | Phase 1 其余各项 | ab `strict` 的 `Point_Get` 100%；point_select ≥ 0.9× Go（1 / 8 线程） | 未开始 |
 
 ## Phase 2：规划器主体
