@@ -1,7 +1,7 @@
 [package]
 name = "tidb-infoschema"
 version = "0.0.0"
-description = "Blocks D06.2-D06.4, D06.6 of the Go TiDB v8.5.8 port: meta / structure reads (D06.2), later the InfoSchema, tables and memory tables"
+description = "Blocks D06.2-D06.4, D06.6 of the Go TiDB v8.5.8 port: meta / structure reads (D06.2), InfoSchema v2 build and cache (D06.3), later tables and memory tables"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -22,6 +22,14 @@ tidb-kv = { workspace = true }
 tidb-codec = { workspace = true }
 # The regexps of GetAllNameToIDAndTheMustLoadedTableInfo (Go regexp, RE2 semantics).
 regex = "1"
+# tidb_schema_cache_size (SchemaCacheSize), the MetaOnlyInfoSchema stand-in (D06.3).
+tidb-sessionctx = { workspace = true }
+# Go sync.Mutex / RWMutex (mapping rule M-LOCK): the infoschema v2 indexes and the SIEVE cache.
+parking_lot = "0.12"
+# BoxFuture / Shared: ApplyDiff's recursion, loadTableInfo's singleflight.
+futures = { workspace = true }
+# The 200 ms waits of the "in flashback progress" retries (time.Sleep).
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 # The govec vectors are committed as .jsonl.gz.

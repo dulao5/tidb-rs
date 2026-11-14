@@ -3780,6 +3780,7 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "futures",
+ "parking_lot 0.12.5",
  "regex",
  "serde_json",
  "tidb-base",
@@ -3787,7 +3788,9 @@ dependencies = [
  "tidb-kv",
  "tidb-model",
  "tidb-parser",
+ "tidb-sessionctx",
  "tidb-types",
+ "tokio",
 ]
 
 [[package]]

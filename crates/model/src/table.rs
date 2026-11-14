@@ -909,3 +909,19 @@ impl Clone for SoftdeleteInfo {
         self.struct_copy()
     }
 }
+
+/// TableNameInfo provides meta data describing a table name info.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TableNameInfo {
+    pub id: i64,
+    pub name: CIStr,
+}
+
+/// ReferredFKInfo provides the cited foreign key in the child table.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReferredFKInfo {
+    pub cols: Option<Vec<CIStr>>,
+    pub child_schema: CIStr,
+    pub child_table: CIStr,
+    pub child_fk_name: CIStr,
+}
