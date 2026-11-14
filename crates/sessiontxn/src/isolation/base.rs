@@ -80,6 +80,8 @@ pub struct BaseTxnContextProvider {
     /// save the cpu cycles `PrepareTSFuture` will also not be called when warmup (postpone
     /// to activate txn).
     pub(crate) const_start_ts: u64,
+    /// The TSO requests of the current statement (N11 §4.4), reset by `OnStmtStart`.
+    pub(crate) stmt_tso_requests: u32,
 }
 
 impl BaseTxnContextProvider {
@@ -94,6 +96,7 @@ impl BaseTxnContextProvider {
             is_txn_prepared: false,
             enter_new_txn_type: EnterNewTxnType::EnterNewTxnDefault,
             const_start_ts: 0,
+            stmt_tso_requests: 0,
         }
     }
 
@@ -237,12 +240,9 @@ impl BaseTxnContextProvider {
             Kind::Optimistic { .. } | Kind::PessimisticSerializable => {
                 self.get_txn_start_ts(sctx).await
             }
-            // glue: stub, the RR for-update ts is the write path (SELECT ... FOR UPDATE in a
-            // transaction is rejected by the session, N11 D8)
-            Kind::PessimisticRR { .. } => Err(crate::blocked(
-                "D05.4",
-                "the for-update ts of a pessimistic repeatable-read transaction (write path)",
-            )),
+            // The RR for-update ts is the write path: writes and locking reads in a
+            // transaction are rejected (N11 D8, 1792), by the session first.
+            Kind::PessimisticRR { .. } => Err(err_read_only_txn()),
         }
     }
 
@@ -289,7 +289,10 @@ impl BaseTxnContextProvider {
     /// temporary table created.
     // glue: stub, blocked-by:D06.4 (part 2: temptable.AttachLocalTemporaryTableInfoSchema)
     pub fn on_local_temporary_table_created_base(&mut self) -> Result<(), Error> {
-        Err(crate::blocked("D06.4", "local temporary tables"))
+        Err(tidb_base::blocked::blocked(
+            "D06.4",
+            "local temporary tables",
+        ))
     }
 
     /// OnStmtErrorForNextAction is the hook that should be called when a new statement get an error
@@ -396,7 +399,7 @@ impl BaseTxnContextProvider {
         }
 
         let scope = sctx.get_session_vars().state.txn_ctx.txn_scope.clone();
-        let future = new_oracle_future(sctx, &scope);
+        let future = self.oracle_future(sctx, &scope);
         self.replace_txn_ts_future(sctx, TxnTsFuture::Oracle(future))
     }
 
@@ -409,8 +412,15 @@ impl BaseTxnContextProvider {
         }
 
         let scope = sctx.get_session_vars().state.txn_ctx.txn_scope.clone();
-        let future = new_oracle_future(sctx, &scope);
+        let future = self.oracle_future(sctx, &scope);
         self.replace_txn_ts_future(sctx, TxnTsFuture::Oracle(future))
+    }
+
+    /// `newOracleFuture`, counting the statement's TSO requests (N11 §4.4).
+    // glue: N11 §4.4 TSO request count around newOracleFuture
+    pub(crate) fn oracle_future(&mut self, sctx: &dyn SessionCtx, scope: &str) -> TsFuture {
+        self.stmt_tso_requests += 1;
+        new_oracle_future(sctx, scope)
     }
 
     // go: baseTxnContextProvider.forcePrepareConstStartTS L1
@@ -559,8 +569,9 @@ impl BaseTxnContextProvider {
         txn.set_option(tidb_kv::option::SessionID, Box::new(conn_id));
     }
 
-    /// Where the statement's read ts comes from (N11 §4.4): `tidb_snapshot`, the point-get
-    /// MaxTS, an explicit transaction's start ts, the RC statement ts, or a fresh TSO.
+    /// Where the statement's read ts came from (N11 §4.4): `tidb_snapshot`, the point-get
+    /// MaxTS, a TSO the statement requested (regular or low-resolution), or else the
+    /// transaction's start ts.
     // glue: N11 §4.4 ReadTsSource (no Go counterpart)
     pub fn read_ts_source_base(&self, sctx: &dyn SessionCtx) -> ReadTsSource {
         let vars = sctx.get_session_vars();
@@ -573,16 +584,23 @@ impl BaseTxnContextProvider {
         {
             return ReadTsSource::MaxTs;
         }
-        let in_txn_reuse = !matches!(self.kind, Kind::PessimisticRC(_))
-            && self.enter_new_txn_type == EnterNewTxnType::EnterNewTxnWithBeginStmt;
-        if in_txn_reuse && vars.state.txn_ctx.start_ts != 0 {
-            return ReadTsSource::TxnStart(vars.state.txn_ctx.start_ts);
+        if self.stmt_tso_requests > 0 {
+            if vars.use_low_resolution_tso() {
+                return ReadTsSource::LowResolution;
+            }
+            return ReadTsSource::Tso;
         }
-        if vars.use_low_resolution_tso() {
-            return ReadTsSource::LowResolution;
-        }
-        ReadTsSource::Tso
+        ReadTsSource::TxnStart(vars.state.txn_ctx.start_ts)
     }
+}
+
+/// 1792 `ErrCantExecuteInReadOnlyTransaction`: a write or a locking read in a transaction
+/// on the read-only node (N11 D8, approved in #146). Go defines the code but never uses it.
+// go-exception: N11 D8 (writes and locking reads in a transaction are rejected)
+pub(crate) fn err_read_only_txn() -> Error {
+    tidb_base::terror::ClassSession
+        .new_std(tidb_base::errno::ErrCantExecuteInReadOnlyTransaction)
+        .gen_with_stack_by_args(vec![])
 }
 
 /// canReuseTxnWhenExplicitBegin returns whether we should reuse the txn when starting a
@@ -692,6 +710,7 @@ impl TxnContextProvider for BaseTxnContextProvider {
         sctx: &mut dyn SessionCtx,
         node: Option<&dyn StmtInfo>,
     ) -> Result<(), Error> {
+        self.stmt_tso_requests = 0;
         match self.kind {
             Kind::PessimisticRR { .. } => self.rr_on_stmt_start(),
             Kind::PessimisticRC(_) => self.rc_on_stmt_start(sctx, node),
@@ -759,9 +778,11 @@ impl TxnContextProvider for BaseTxnContextProvider {
 
     // glue: N11 §4.4 ReadTsSource
     fn read_ts_source(&self, sctx: &dyn SessionCtx) -> ReadTsSource {
-        match &self.kind {
-            Kind::PessimisticRC(rc) if rc.stmt_ts != 0 => ReadTsSource::Tso,
-            _ => self.read_ts_source_base(sctx),
-        }
+        self.read_ts_source_base(sctx)
+    }
+
+    // glue: N11 §4.4 TSO request count
+    fn stmt_tso_requests(&self) -> u32 {
+        self.stmt_tso_requests
     }
 }

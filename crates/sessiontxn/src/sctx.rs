@@ -137,21 +137,44 @@ pub trait PlanInfo {
     fn is_point_get_with_pk_or_unique_key_by_auto_commit(&self, vars: &SessionVars) -> bool;
 }
 
-/// Where a statement's read timestamp comes from (N11 §4.4, the tidb-rs carrier of the
-/// providers' choice; the schema lease check at admission, N11 §4.2 / ADR 0005, only
-/// accepts a fresh `Tso` of the statement, never the transaction's start ts).
+/// Where a statement's read timestamp comes from (N11 §4.4), and so how the statement is
+/// admitted against the schema lease (N11 §4.2, ADR 0005, #145).
+///
+/// The lease check compares a "now" with `expire_ts = phys(sync_ts) + lease - 1ms` of the
+/// last successful schema sync, and only accepts a "now" obtained for this statement after
+/// admission, never a transaction's start ts. Per source:
+///
+/// | source | schema | "now" for the lease check | TSO requests |
+/// |---|---|---|---|
+/// | `Tso` | synced | the statement's own fresh TSO (`phys(ts) <= expire_ts`) | 1 |
+/// | `LowResolution` | synced | the low-resolution ts plus its maximum age (a conservative upper bound) | 0 (low-resolution oracle) |
+/// | `MaxTs` | synced | the validator's local clock bound: monotonic time since the sync's TSO request was sent, within the etcd lease | 0 |
+/// | `TxnStart` | synced (the transaction's) | as `MaxTs`: the local clock bound, not the start ts | 0 |
+/// | `Stale` | the InfoSchema at the ts (`GetSnapshotInfoSchema`, no MDL) | none: the synced schema and its lease are not used | 0 |
+/// | `Snapshot` | the InfoSchema at the ts (`tidb_snapshot`) | none, as `Stale` | 0 |
+///
+/// The provider reports the source after the statement got its read ts
+/// (`TxnContextProvider::read_ts_source`), with the TSO requests the statement issued
+/// (`TxnContextProvider::stmt_tso_requests`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadTsSource {
-    /// A new TSO (a future: issued before planning, waited after).
+    /// A new TSO of the statement (a future: issued before planning, waited after). Admitted
+    /// with this TSO.
     Tso,
-    /// `tidb_low_resolution_tso`.
+    /// `tidb_low_resolution_tso`: the low-resolution oracle, no TSO request. Admitted with
+    /// the low-resolution ts plus its maximum age.
     LowResolution,
-    /// The autocommit point get (`IsPointGetWithPKOrUniqueKeyByAutoCommit`).
+    /// The autocommit point get (`IsPointGetWithPKOrUniqueKeyByAutoCommit`): reads at
+    /// MaxUint64, no TSO request. Admitted with the validator's local clock bound (etcd
+    /// lease).
     MaxTs,
-    /// RR / optimistic explicit transactions: the transaction's start ts.
+    /// RR / optimistic statements after the first of an explicit or lazy transaction: the
+    /// transaction's start ts, no TSO request. Admitted with the local clock bound, never
+    /// with the start ts.
     TxnStart(u64),
-    /// AS OF / `tx_read_ts` / `tidb_read_staleness` / external ts.
+    /// AS OF / `tx_read_ts` / `tidb_read_staleness` / external ts: the schema at the ts; no
+    /// lease check.
     Stale(u64),
-    /// `tidb_snapshot`.
+    /// `tidb_snapshot`: the schema at the ts; no lease check.
     Snapshot(u64),
 }

@@ -40,17 +40,28 @@ tidb-rs 是只读节点；显式事务里的写语句和加锁读由会话拒绝
 ## 3. 读时间戳与 N11
 
 - **TSO 预取**：照 Go，`AdviseWarmup`（规划前）发出 TSO 请求，`ActivateTxn`（首次需要读 ts）等待；点查在 `AdviseOptimizeWithPlan` 中改用 MaxTS，不取 TSO。
-- **`ReadTsSource`**（N11 §4.4）：provider 给出本语句读 ts 的来源（`Tso`、`LowResolution`、`MaxTs`、`TxnStart`、`Stale`、`Snapshot`）。schema lease 检查（N11 §4.2、ADR 0005、#145）在语句准入时进行，只接受本语句自己的新 TSO，不接受事务的 start ts；它由会话 / domain 实现（VS1-14、VS1-17），本块只提供来源。
+- **`ReadTsSource`**（N11 §4.4）：provider 在语句取得读 ts 之后给出它的来源，以及本语句发出的 TSO 请求数（`stmt_tso_requests`，从 `OnStmtStart` 起计）。schema lease 检查（N11 §4.2、ADR 0005、#145）在语句准入时进行，只接受本语句在准入之后得到的"当前"，不接受事务的 start ts。各来源的准入规则（由会话 / domain 实现，VS1-14、VS1-17）：
+
+  | 来源 | 用的 schema | lease 检查用的"当前" | TSO 请求 |
+  |---|---|---|---|
+  | `Tso` | 同步的 | 本语句自己的新 TSO | 1 |
+  | `LowResolution` | 同步的 | 低精度 ts 加它的最大年龄（保守上界） | 0（低精度 oracle） |
+  | `MaxTs` | 同步的 | validator 的本地时钟上界：从同步的 TSO 请求发出时起的单调时钟，在 etcd lease 之内 | 0 |
+  | `TxnStart` | 同步的（事务的） | 同 `MaxTs`，不用 start ts | 0 |
+  | `Stale` | 该 ts 上的 InfoSchema（不持有 MDL） | 不检查（不用同步的 schema） | 0 |
+  | `Snapshot` | 该 ts 上的 InfoSchema（`tidb_snapshot`） | 不检查 | 0 |
+
+  govec `sessiontxn` 的 `read_ts`（随机语句序列，记录每次读的来源与 TSO 请求数）是它的对照（#219 评审）。
 - **显式只读事务**（N11 D8，已确认）：`EnterNewTxnWithBeginStmt` 照 Go 进入（RR / optimistic 用一个 start ts，RC 每条语句一个 ts）。`READ ONLY` 的接受与写语句 1792 由会话负责（D05.3 / VS1-14）。
-- **`tidb_rc_read_check_ts`**（N11 D11）：Go 在事务内的只读语句上设置 `RCCheckTS`，复用上一个 ts 并让 TiKV 检查写冲突。client-rust 支持之前，该语句报 1235（"not supported"），不能只复用 ts 而不检查（`go-exception: N11 D11`）。D11 在 #146 中尚待负责人确认，本 PR 按任务要求实现建议方案。
+- **`tidb_rc_read_check_ts`**（N11 D11，**暂定**，待负责人在 #146 决定）：Go 在事务内的只读语句上设置 `RCCheckTS`，复用上一个 ts 并让 TiKV 检查写冲突。client-rust 支持之前，该语句返回 TiDB 的 1235（`ErrNotSupportedYet`）。它是真正的错误，**不是** `blocked` 边界桩：路由器不能回退到 PoC（PoC 会只复用 ts 而不检查）。路由器测试 `rc_read_check_ts_is_not_a_fallback`（`crates/poc/session`）固定这一点。
 
 ## 4. 与 Go 的差异（均已在代码中标注）
 
 1. `GetTxnInfoSchema` 不返回 `SnapshotInfoschema`（该会话字段随 D05.2 / D06.5；`tidb_snapshot` 语句由 VS1 路由到 PoC），也不包 `SessionExtendedInfoSchema`（D06.3 第 2 部分 T9）。
 2. `TransactionContext` 不记录 `CreateTime`（指标与慢日志，D14.x）；`History` 只用于写重试，恒为 nil。
 3. `RetryInfo.Retrying`（写重试）恒为 false。
-4. 临时表：`OnLocalTemporaryTableCreated` 与快照 interceptor 是 `blocked-by:D06.4` 的桩。
-5. RR provider 不保存 for-update 状态（写路径）；它的 `GetStmtForUpdateTS` 是桩。
+4. 临时表：`OnLocalTemporaryTableCreated` 与快照 interceptor 是 `blocked-by:D06.4` 的桩（`tidb_base::blocked`）。
+5. RR provider 不保存 for-update 状态（写路径）；它的 `GetStmtForUpdateTS` 返回 1792（N11 D8，事务内的写与加锁读）。
 
 ## 5. 测试
 

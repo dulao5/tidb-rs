@@ -10,8 +10,8 @@ mod serializable;
 pub use base::{BaseTxnContextProvider, Kind};
 pub use optimistic::OptimisticTxnContextProvider;
 pub use readcommitted::{
-    PessimisticRCTxnContextProvider, RcState, need_set_rc_check_ts_flag,
-    new_pessimistic_rc_txn_context_provider,
+    PessimisticRCTxnContextProvider, RcState, err_rc_read_check_ts_not_supported,
+    need_set_rc_check_ts_flag, new_pessimistic_rc_txn_context_provider,
 };
 pub use repeatable_read::{
     PessimisticRRTxnContextProvider, new_pessimistic_rr_txn_context_provider,

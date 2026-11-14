@@ -33,7 +33,7 @@ pub fn new_staleness_txn_context_provider(
 /// The stub error of the stale-read methods of part 2.
 // glue: stub, blocked-by:D05.4 (part 2: stale read transactions)
 fn stale_read_blocked() -> Error {
-    crate::blocked("D05.4", "stale read transactions (part 2)")
+    tidb_base::blocked::blocked("D05.4", "stale read transactions (part 2)")
 }
 
 impl StalenessTxnContextProvider {
@@ -154,7 +154,10 @@ impl TxnContextProvider for StalenessTxnContextProvider {
         &mut self,
         _sctx: &mut dyn SessionCtx,
     ) -> Result<(), Error> {
-        Err(crate::blocked("D06.4", "local temporary tables"))
+        Err(tidb_base::blocked::blocked(
+            "D06.4",
+            "local temporary tables",
+        ))
     }
 
     // glue: stub, blocked-by:D05.4 (part 2: StalenessTxnContextProvider.ActivateTxn)
@@ -168,5 +171,10 @@ impl TxnContextProvider for StalenessTxnContextProvider {
     // glue: N11 §4.4 ReadTsSource
     fn read_ts_source(&self, _sctx: &dyn SessionCtx) -> ReadTsSource {
         ReadTsSource::Stale(self.ts)
+    }
+
+    // glue: N11 §4.4 (a stale read takes no TSO)
+    fn stmt_tso_requests(&self) -> u32 {
+        0
     }
 }

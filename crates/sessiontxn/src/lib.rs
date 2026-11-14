@@ -196,9 +196,13 @@ pub trait TxnContextProvider: Send {
         &'a mut self,
         sctx: &'a mut dyn SessionCtx,
     ) -> BoxFuture<'a, Result<(), Error>>;
-    /// Where the statement's read ts comes from (N11 §4.4).
+    /// Where the statement's read ts came from (N11 §4.4), after it got its read ts.
     // glue: N11 §4.4 ReadTsSource (no Go counterpart)
     fn read_ts_source(&self, sctx: &dyn SessionCtx) -> sctx::ReadTsSource;
+    /// The TSO requests (regular or low-resolution) the current statement issued, counted
+    /// from `OnStmtStart` (N11 §4.4: a `MaxTs` / `TxnStart` statement issues none).
+    // glue: N11 §4.4 (no Go counterpart)
+    fn stmt_tso_requests(&self) -> u32;
 }
 
 /// TxnManager is an interface providing txn context management in session (implemented by
@@ -253,20 +257,4 @@ pub async fn new_txn(txn_manager: &mut dyn TxnManager) -> Result<(), Error> {
 pub async fn new_txn_in_stmt(txn_manager: &mut dyn TxnManager) -> Result<(), Error> {
     new_txn(txn_manager).await?;
     txn_manager.on_stmt_start_with_current_stmt()
-}
-
-/// The error of a temporary boundary stub (constitution §4.3): MySQL 1235 with the RFC code
-/// text `blocked-by:<block>`, the same error as `tidb_base::blocked::blocked` of VS1-02,
-/// which replaces this copy once it lands.
-// glue: boundary stub error (constitution §4.3, VS1 plan §4.3)
-pub(crate) fn blocked(block: &str, what: &str) -> Error {
-    use tidb_base::errors::{IntoErrCode, mysql_error_code, normalize, rfc_code_text};
-    let msg = format!("This version of TiDB doesn't yet support '{what} (blocked-by:{block})'");
-    normalize(
-        msg,
-        [
-            rfc_code_text(format!("blocked-by:{block}")),
-            mysql_error_code(tidb_base::mysql::ErrNotSupportedYet.into_err_code()),
-        ],
-    )
 }

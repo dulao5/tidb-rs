@@ -20,7 +20,7 @@ use tidb_kv::option::{IsolationLevel, SnapshotTS};
 use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sessionctx::variable::tidb_vars::EnableRCReadCheckTS;
 
-use super::base::{BaseTxnContextProvider, Kind, new_oracle_future};
+use super::base::{BaseTxnContextProvider, Kind};
 use crate::sctx::{PlanInfo, PlanKind, SessionCtx, StmtInfo, TsFuture};
 use crate::{StmtErrorAction, StmtErrorHandlePoint, no_idea, retry_ready};
 
@@ -77,6 +77,22 @@ pub fn new_pessimistic_rc_txn_context_provider(
     )
 }
 
+/// The error of a statement that would read with `tidb_rc_read_check_ts` (N11 D11):
+/// TiDB's 1235 "not supported" error, returned to the client. It is not a boundary stub
+/// (`tidb_base::blocked`): the VS1 router must not send the statement to the PoC, which
+/// would read at the reused ts without the check.
+///
+/// Provisional: N11 D11 is pending the owner's decision (#146); the alternative is to
+/// implement the check once client-rust supports `RcCheckTs` reads.
+// go-exception: N11 D11 (provisional, #146)
+pub fn err_rc_read_check_ts_not_supported() -> Error {
+    tidb_base::dbterror::plannererrors::ErrNotSupportedYet.gen_with_stack_by_args(vec![
+        tidb_base::gofmt::Arg::from(
+            "tidb_rc_read_check_ts (read-committed reads with ts checking; provisional, N11 D11)",
+        ),
+    ])
+}
+
 /// NeedSetRCCheckTSFlag checks whether it's needed to set `RCCheckTS` flag in current stmtctx.
 // go: NeedSetRCCheckTSFlag L1
 pub fn need_set_rc_check_ts_flag(vars: &SessionVars, node: &dyn StmtInfo) -> bool {
@@ -107,7 +123,7 @@ impl BaseTxnContextProvider {
     /// Go sets `StmtCtx.RCCheckTS` (`tidb_rc_read_check_ts`), the statement is rejected
     /// (module docs).
     // go: PessimisticRCTxnContextProvider.OnStmtStart L1
-    // go-exception: N11 D11 (tidb_rc_read_check_ts is rejected until client-rust checks reads)
+    // go-exception: N11 D11 (provisional, #146: tidb_rc_read_check_ts is rejected until client-rust checks reads)
     pub(crate) fn rc_on_stmt_start(
         &mut self,
         sctx: &mut dyn SessionCtx,
@@ -118,10 +134,7 @@ impl BaseTxnContextProvider {
         if let Some(node) = node
             && need_set_rc_check_ts_flag(sctx.get_session_vars(), node)
         {
-            return Err(crate::blocked(
-                "N11 D11",
-                "tidb_rc_read_check_ts (read-committed reads with ts checking)",
-            ));
+            return Err(err_rc_read_check_ts_not_supported());
         }
         let prepared = self.is_txn_prepared;
         let rc = self.rc();
@@ -177,9 +190,9 @@ impl BaseTxnContextProvider {
     /// The TSO future of the statement (Go wraps it with the for-update ts bookkeeping,
     /// done when it is waited: [`BaseTxnContextProvider::rc_get_stmt_ts`]).
     // go: PessimisticRCTxnContextProvider.getOracleFuture L2 (the wrapper runs where the future is waited)
-    fn rc_get_oracle_future(&self, sctx: &mut dyn SessionCtx) -> StmtTsFuture {
+    fn rc_get_oracle_future(&mut self, sctx: &mut dyn SessionCtx) -> StmtTsFuture {
         let scope = sctx.get_session_vars().state.txn_ctx.txn_scope.clone();
-        StmtTsFuture::Oracle(new_oracle_future(sctx, &scope))
+        StmtTsFuture::Oracle(self.oracle_future(sctx, &scope))
     }
 
     // go: PessimisticRCTxnContextProvider.getStmtTS L1
