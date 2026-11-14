@@ -122,7 +122,7 @@ Go `make(chan *copResponse, 2 或 18)`；移植用容量相同的 `tokio::sync::
 
 ### 6.4 验收（第 2 部分）
 
-- converge：`matched 104/116`；其余 12 个：6.3 第 14 条的 10 个（DEF.MPP 2、`tikv.Client` 透传 6、cache 指标 2），`buildTiDBMemCopTasks`（D06.5 边界桩，标注为 `glue`），以及 `coprocessor.go` 的 `init`（只做 `finCopResp = &copResponse{}`，移植中这个哨兵是 `RespMsg::Fin` 变体，没有全局对象）。
+- converge：`matched 104/116`；其余 12 个：6.3 第 14 条的 10 个（DEF.MPP 2、`tikv.Client` 透传 6、cache 指标 2），`buildTiDBMemCopTasks`（D06.5 边界桩，标注为 `glue`），以及 `coprocessor.go` 的 `init`（只做 `finCopResp = &copResponse{}`，移植中这个哨兵是 `RespMsg::Fin` 变体，没有全局对象）。VS1-33 的清单（`specs/VS1-vertical-slice/functions.tsv`）含其中 8 个（`buildTiDBMemCopTasks`、`init`、`kvStore.GetTiKVClient`、`tikvClient.*` 5 个），保留并在 `not_ported` 列写明理由；`converge.py --part … --item VS1-33` 对 D07.2 为 88/88。
 - govec：第 2 部分的函数需要 TiKV store，不出向量；tracker 豁免理由指向 mock store 单元测试 `crates/store/tests/copr_iter.rs`（保序 / 逆序 / 不保序、region 错误重建任务、锁解析后重试、paging 的剩余区间与页大小翻倍、write conflict、other error、lite worker）。client-rust 侧 7 个单测（client-rust#22）。
 - PoC 接入、`Snapshot::coprocessor` 退役、playground 上与 Go 的对比：见 §7（已完成）。
 
