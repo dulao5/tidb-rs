@@ -887,6 +887,21 @@ pub fn try_lock_mdl_and_update_schema_if_necessary() -> Result<(), Error> {
 
 /// Calls `Enter` / `Leave` of the preprocessor in the order of Go's `Accept` methods (see
 /// the module doc). Every method returns Go's `ok`: false stops the walk.
+///
+/// Every node `Enter` does not name (Go's `default` arm) clears `parentIsJoin`, so the walker
+/// visits exactly the nodes Go's `Accept` visits, intermediate ones included (`WithClause`,
+/// `TableOptimizerHint`, `FieldList`, `SelectField`, `TableRefsClause`, `OnCondition`, the
+/// `USING` columns, `HavingClause`, `OrderByClause`, `ByItem`, `Limit`, `WindowSpec` and its
+/// `PartitionByClause` / `FrameClause`, `AsOfClause`, `ColumnNameExpr` + `ColumnName`).
+/// Audit (review of #224): the walker visits no node that Go's `Accept` does not visit, so
+/// there is no extra clearing of `parentIsJoin`. It visits fewer nodes in two places, both
+/// inside subtrees whose root (a `default` node) has already cleared the flag, so the result
+/// is the same: the internals of `TableOptimizerHint` and `FrameClause` (not ported in the
+/// Rust AST). Fixed in the audit: the children of `PatternLike` / `PatternRegexp` /
+/// `SetCollation` / `JSONSumCrc32` / `WindowFuncExpr` / `MatchAgainst` / `DefaultExpr`,
+/// the `ORDER BY` of an aggregate, `WindowSpec`, `AsOfClause`, the `ColumnName` under a
+/// column expression, and the `TableName` of a sequence function (`TableNameExpr`), which
+/// Go resolves with `handleTableName`.
 struct Walker<'p, 'a>(&'p mut Preprocessor<'a>);
 
 impl Walker<'_, '_> {
@@ -972,6 +987,27 @@ impl Walker<'_, '_> {
         })
     }
 
+    /// `WindowSpec.Accept`: PartitionBy, OrderBy, Frame.
+    // glue: AST walk (Go Accept)
+    fn window_spec(&mut self, spec: &mut ast::WindowSpec) -> bool {
+        self.other(|w| {
+            if let Some(p) = &mut spec.partition_by
+                && !w.other(|w| w.by_items(&mut p.items))
+            {
+                return false;
+            }
+            if let Some(o) = &mut spec.order_by
+                && !w.other(|w| w.by_items(&mut o.items))
+            {
+                return false;
+            }
+            if spec.frame.is_some() && !w.other(|_| true) {
+                return false;
+            }
+            true
+        })
+    }
+
     /// `SelectStmt.Accept`.
     // glue: AST walk (Go Accept)
     fn select(&mut self, n: &mut SelectStmt) -> bool {
@@ -1028,9 +1064,8 @@ impl Walker<'_, '_> {
                 return false;
             }
         }
-        for _ in &n.window_specs {
-            // WindowSpec: window functions are D09.4 (outside VS1); a leaf here.
-            if !self.other(|_| true) {
+        for spec in &mut n.window_specs {
+            if !self.window_spec(spec) {
                 return false;
             }
         }
@@ -1172,7 +1207,8 @@ impl Walker<'_, '_> {
             return self.0.leave(PNode::TableName(n));
         }
         if let Some(as_of) = &mut n.as_of {
-            let _ = self.expr(&mut as_of.ts_expr);
+            // Go treats the AsOfClause's ok as skipChildren and leaves either way.
+            let _ = self.other(|w| w.expr(&mut as_of.ts_expr));
         }
         self.0.leave(PNode::TableName(n))
     }
@@ -1286,6 +1322,11 @@ impl Walker<'_, '_> {
                         return false;
                     }
                 }
+                if let Some(o) = &mut a.order
+                    && !self.other(|w| w.by_items(&mut o.items))
+                {
+                    return false;
+                }
                 self.0.leave(PNode::Other)
             }
             Expr::Case(c) => {
@@ -1309,6 +1350,26 @@ impl Walker<'_, '_> {
                 }
                 self.0.leave(PNode::Other)
             }
+            // ColumnNameExpr and its ColumnName.
+            Expr::Column(_) | Expr::Values(_) => self.other(|w| w.other(|_| true)),
+            Expr::PatternLike(x) => children!(&mut x.expr, &mut x.pattern),
+            Expr::PatternRegexp(x) => children!(&mut x.expr, &mut x.pattern),
+            Expr::SetCollation(x) => children!(&mut x.expr),
+            Expr::JSONSumCrc32(x) => children!(&mut x.expr),
+            Expr::Window(x) => {
+                let (args, spec) = (&mut x.args, &mut x.spec);
+                self.other(|w| args.iter_mut().all(|a| w.expr(a)) && w.window_spec(spec))
+            }
+            Expr::Default(x) => {
+                let has_name = x.name.is_some();
+                self.other(|w| !has_name || w.other(|_| true))
+            }
+            Expr::MatchAgainst(x) => {
+                let (cols, against) = (x.column_names.len(), &mut x.against);
+                self.other(|w| (0..cols).all(|_| w.other(|_| true)) && w.expr(against))
+            }
+            // TableNameExpr (sequence functions): its TableName is resolved like any other.
+            Expr::TableName(t) => self.other(|w| w.table_name(t)),
             _ => leaf!(PNode::Other),
         }
     }

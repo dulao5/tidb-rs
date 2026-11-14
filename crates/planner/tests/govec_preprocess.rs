@@ -2,10 +2,11 @@
 //! block D09.0, the VS1-10 part of `preprocess.go` — the SELECT checks of
 //! `preprocess_test.go` `TestValidator` and more — against Go TiDB v8.5.8.
 //!
-//! Records whose statement the Rust parser does not parse yet are skipped, and records whose
-//! Rust result is a boundary stub (`blocked-by:<block>`: resolving a base table needs the
-//! InfoSchema interface of D06.3 part 2, VS1-17) are counted as blocked (constitution §7.3).
-//! Every other record must match Go's error code and message (or Go's success).
+//! Records whose Rust result is a boundary stub (`blocked-by:<block>`: resolving a base
+//! table needs the InfoSchema interface of D06.3 part 2, VS1-17) are counted as blocked
+//! (constitution §7.3); the count per block is pinned below, so a stub that starts answering
+//! for records it should not cannot stay green. A record Go parses must parse in Rust. Every
+//! other record must match Go's error code and message (or Go's success).
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -19,6 +20,9 @@ use tidb_planner::core::preprocess::{
 };
 use tidb_planner::core::resolve::new_node_w;
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
+
+/// The number of records answered by each boundary stub.
+const EXPECTED_BLOCKED: [(&str, usize); 3] = [("D02.2", 4), ("D06.3", 11), ("D09.5", 3)];
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -101,7 +105,7 @@ fn govec_preprocess() {
         let rec: Value = serde_json::from_str(line).unwrap();
         let sql = rec["args"][0].as_str().unwrap();
         if rec["out"].get("parse").is_some() {
-            unparsed.push(sql.to_string());
+            // Go does not parse it either: nothing to compare.
             continue;
         }
         match run(sql, rec["args"][1].as_bool().unwrap()) {
@@ -127,5 +131,17 @@ fn govec_preprocess() {
         "{} of {n} records differ:\n{}",
         fails.len(),
         fails.join("\n")
+    );
+    assert!(
+        unparsed.is_empty(),
+        "Go parses, Rust does not: {unparsed:?}"
+    );
+    // The records each boundary stub answers today; change with the stub (and the vectors).
+    let counts: BTreeMap<&str, usize> =
+        blocked.iter().map(|(b, v)| (b.as_str(), v.len())).collect();
+    assert_eq!(
+        counts,
+        BTreeMap::from(EXPECTED_BLOCKED),
+        "blocked records: {blocked:?}"
     );
 }
