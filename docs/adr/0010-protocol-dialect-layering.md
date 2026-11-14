@@ -15,7 +15,7 @@
 | 与 Go TiDB 共存 | 超集特性与 Go 节点的共存问题，**等 tidb-go 退役后**再考虑 | #167 第 3 条 |
 | Oracle 协议 | Oracle 的 TNS / Net8 没有公开规范。如果做不了，优先在 MySQL / PG 协议上支持 Oracle 风格的语法 | #166（私信 2026-11-14） |
 | 现在做什么 | "当前只需要考虑为**协议层**和 **SQL 解析层**留出设计余地"；会话层与协议无关、解析器到 planbuilder 之间留边界（#166 的建议，已采纳） | #168、#166 |
-| digest 与 plan cache 键 | 在归一化后的 AST / IR 上计算，不在 SQL 文本上计算；数组 / IN 列表参数归一化为一个占位。**digest 允许与 Go 不同**（项目负责人批准的例外） | #169 |
+| digest 与 plan cache 键 | 在归一化后的 AST / IR 上计算，不在 SQL 文本上计算；数组 / IN 列表参数归一化为一个占位。**digest 允许与 Go 不同**（项目负责人批准的例外）。共存期间，以存储的 Go digest 为键的特性另算 Go 的文本 digest（#204 评审，§4.3） | #169 |
 
 ## 2. 决定
 
@@ -41,7 +41,7 @@
 - **语义核心只有一份**，按 Go TiDB v8.5.8 逐函数移植，类型系统、错误码、collation 都是 MySQL / TiDB 的。其他方言只决定"怎么写"，"是什么意思"由核心定义。方言需要的语义差异将来以"核心语义 + 方言开关"的形式加进核心，边界未定（§5）。
 - **协议适配器和语法前端是两条独立的轴**。现在只有 MySQL 协议 + MySQL 语法这一种组合；租户与协议 1 对 1，所以实际部署中协议决定了方言，但代码中两者分开（Oracle 风格的语法可能跑在 MySQL 或 PG 协议上，§5）。
 - **AST 是语法前端和语义核心之间的唯一边界**。现在不另设一层新的 IR：planbuilder 要按 L1 移植，就必须吃 Go 的 AST 形状。其他前端产出同样的 AST。
-- **digest 和 plan cache 键在归一化后的 AST 上计算**，不在 SQL 文本上计算，所以不同前端、不同写法的同一条语句可以得到同一个 digest 和同一个计划。
+- **digest 和 plan cache 键在归一化后的 AST 上计算**，不在 SQL 文本上计算，所以不同前端、不同写法的同一条语句可以得到同一个 digest 和同一个计划。例外：与 tidb-go 共存期间，以存储的 Go digest 为键的特性（binding、runaway watch、plan replayer 等）另用 Go 的文本 digest（§4.3）。
 
 ## 3. 现状：各边界在今天的代码中的位置
 
@@ -94,14 +94,25 @@ Go 自己的边界已经接近本 ADR 的形状：`pkg/server` 解析后调用 `
 2. **AST 中的原始文本是前端的输出，不是 MySQL 词法的副产品**。§3 第 4 条的 18 处依赖原始文本（列名、错误消息），其他前端必须为这些节点填上等价的文本跨度。所以 AST 保留 Go 的 `Text()` / `OriginTextPosition()` 语义，移植这些调用的块在 plan 中登记，标明"前端须提供"。
 3. **标识符和字面量在 AST 中已经规范化**：大小写折叠、引号（反引号 / 双引号）、字符集引导符（`_utf8mb4'x'`）在前端处理完，AST 里是 `CIStr` 和带类型的值，与 Go 相同。语义核心不判断"这个标识符原来是怎么写的"。
 4. **不分叉 MySQL 语法**：方言不做成 MySQL 语法内部的开关，也不在 `grammar/tidb_typed.y` 里加别的方言的产生式。将来 PG / Oracle 语法是独立的前端（可以共享 LR 驱动和词法框架），产出同一种 AST；AST 不够表达的超集语法再加节点，加在核心里，所有前端可用。
-5. **`ParseOptions` 是前端的配置入口**。现在不加字段；将来选择前端的是会话的 dialect（§4.4），不是 `ParseOptions` 里的一个标志。
+5. **`ParseOptions` 是前端的配置入口**。将来选择前端的是会话的 dialect（§4.4），不是 `ParseOptions` 里的一个标志。
+6. **`sql_mode` 不是方言开关**。MySQL 前端本来就有随 `sql_mode` 变化的词法和语法：`ANSI_QUOTES`（`"x"` 是标识符）、`PIPES_AS_CONCAT`、`HIGH_NOT_PRECEDENCE`、`IGNORE_SPACE`、`NO_BACKSLASH_ESCAPES`，Go 经 `Parser.SetSQLMode`（`pkg/parser/yy_parser.go:242`）设置。它们是 **MySQL 自己的语义**，正当地属于 MySQL 语法内部的开关（第 4 条禁止的是"用 MySQL 语法内部的开关表达别的方言"，不是这些），而且按语句取会话当前的 `sql_mode`，与按连接固定的 dialect 不同。`ParseOptions` 将来承载由 `sql_mode` 导出的词法 / 语法标志（对应 Go 的 `SetSQLMode`），这不是方言切换；不要把 `ANSI_QUOTES` 之类做成 dialect。
 
-### 4.3 digest 和 plan cache 键在归一化 AST 上计算
+### 4.3 digest 和 plan cache 键：AST digest 为主，共存期间另算 Go 的文本 digest
 
-1. **SQL digest、归一化文本、plan cache 键都从归一化后的 AST 计算**：字面量和参数变成占位，`IN (…)` 列表和 `INSERT … VALUES` 的多行（以及将来的数组参数）归一化为**一个**占位（#169），然后对归一化 AST 求哈希。不对原始文本做词法归一化。
-2. **与 Go 不同，项目负责人已批准**（#169 第 3 条）。用户可见的影响：`statements_summary` / 慢日志中的 `DIGEST`、`DIGEST_TEXT` 与 Go 节点不同；按 digest 关联 tidb-go 与 tidb-rs 的诊断（ADR 0009 的影子读比对）要按语句文本或 tidb-rs 自己的 digest 关联。正式的例外条目在 D14.2（statement summary）和 D13.1（plan cache）的块 spec 中登记，`DIGEST_TEXT` 用哪种方言打印也在那里定。
-3. **plan cache 键带上 dialect**（以及将来的租户 / keyspace）。租户之间元数据隔离（#167、#168），所以同一 digest 不跨租户共享计划。
-4. **plan digest 不变**：它本来就在物理计划上计算（N9），与前端无关。
+1. **AST digest**：字面量和参数变成占位，`IN (…)` 列表和 `INSERT … VALUES` 的多行（以及将来的数组参数）归一化为**一个**占位（#169），然后对归一化 AST 求哈希。tidb-rs 自己的 plan cache 和 #169 的自适应计划用它。它与 Go 的 digest 不同，项目负责人已批准（#169 第 3 条）。
+2. **Go 的 digest 在共存期间也是持久化、跨节点共享的键，不只是诊断信息**。v8.5.8 有几项特性把 Go 算出的 digest 存进系统表，每个节点都拿它匹配语句。只有 AST digest 时，这些特性在 tidb-rs 上会**悄悄失效**，属于正确性问题（例如在 Go 节点上建的 binding 在 tidb-rs 上不生效，计划就不同）：
+
+   | 使用者 | 存储 | Go 的计算方式 |
+   |---|---|---|
+   | SQL binding | `mysql.bind_info.sql_digest` 与归一化文本 | `parser.NormalizeDigestForBinding`（`pkg/parser/digester.go:133`） |
+   | runaway query watch（`QUERY WATCH … SQL DIGEST '…'` / `PLAN DIGEST`） | `mysql.tidb_runaway_watch.watch_text` | `parser.NormalizeDigest` |
+   | plan replayer capture | `mysql.plan_replayer_task.sql_digest`（及 `plan_replayer_status`） | `parser.NormalizeDigest` |
+   | 诊断：`statements_summary`、慢日志、ADR 0009 的影子读比对 | 内存 / 日志 | `parser.NormalizeDigest` |
+
+   其他以存储的 digest 为键的管理特性，移植时按同样方式归类。
+3. **共存期间的规则**（Maya、Lucky，#204 评审）：只要集群中还有 tidb-go，tidb-rs 除 AST digest 外**也计算 Go 的文本 digest**（`NormalizeDigest` / `NormalizeDigestForBinding`，只对 MySQL 前端有意义，按 L1 移植 `pkg/parser/digester.go`），上表中的使用者一律用文本 digest，结果与 Go 节点相同。AST digest 只服务于 tidb-rs 自己的 plan cache 和 #169。tidb-go 退役后，文本 digest 可以去掉，那时再决定这些使用者是否改用 AST digest。拥有这些使用者的块（bindinfo、resource group 的 runaway、plan replayer）在各自的块 spec 中登记这一条，与 D14.2（statement summary）、D13.1（plan cache）并列；`statements_summary` 中是否同时展示两种 digest、`DIGEST_TEXT` 用哪种方言打印，在 D14.2 中定。
+4. **plan cache 键只替换文本部分**：Go 的 `NewPlanCacheKey`（`pkg/planner/core/plan_cache_utils.go:257`）中的语句文本换成归一化 AST 的哈希，**其余组成部分全部保留**：schema version、当前库、`sql_mode`、时区、连接字符集与 collation、用户、binding、隔离读引擎等会话变量。不同 `sql_mode` 下解析结果不同的两段文本本来就得到不同的 AST，但 Go 键中的这些分量还有语义上的原因，不能因为改用 AST 而省掉。另外加上 dialect（以及将来的租户 / keyspace）。租户之间元数据隔离（#167、#168），所以同一 digest 不跨租户共享计划。
+5. **plan digest 不变**：它本来就在物理计划上计算（N9），与前端无关。
 
 ### 4.4 会话中预留 dialect 属性
 
@@ -117,7 +128,8 @@ Go 自己的边界已经接近本 ADR 的形状：`pkg/server` 解析后调用 `
 | 会话及以下不依赖协议 crate | `layers.toml` + `scripts/check_layers.py`（已有）；协议 crate 登记在 rank ≥ 16 |
 | planner 不调用解析器 | `tidb-planner` 中 grep `tidb_parser::parse` / `Parser::`，只允许经会话提供的入口 |
 | 依赖原始文本的位置 | 块 plan 中登记 `.Text()` / `OriginTextPosition()` 的移植位置 |
-| digest 从 AST 计算 | D14.2 / D13.1 的测试：同一语句不同 IN 列表长度、不同空白和注释，得到同一 digest 和同一 plan cache 项 |
+| digest 从 AST 计算 | D14.2 / D13.1 的测试：同一语句不同 IN 列表长度、不同空白和注释，得到同一 AST digest 和同一 plan cache 项 |
+| 共存期间文本 digest 与 Go 相同 | govec 向量：`NormalizeDigest` / `NormalizeDigestForBinding` 的输出与 Go 逐字节相同；binding、runaway watch、plan replayer 的块测试用 Go 写入的系统表记录匹配 |
 
 ## 5. 明确不决定的事
 
@@ -132,5 +144,5 @@ Go 自己的边界已经接近本 ADR 的形状：`pkg/server` 解析后调用 `
 ## 6. 后果
 
 - 对移植工作量几乎没有影响：D03.x、D05.3、D09.1 本来就按 Go 的 `pkg/server` / `pkg/session` / `pkg/parser/ast` 边界移植。新增的工作是三项登记（§4.1 第 2 条、§4.2 第 1–2 条）和 digest 的计算方式（§4.3，D14.2 / D13.1）。
-- digest 与 Go 不同，影响按 digest 跨节点关联的诊断和比对（§4.3 第 2 条）。
+- 共存期间要维护两种 digest：Go 的文本 digest 用于持久化、跨节点的使用者（binding、runaway watch、plan replayer、诊断），AST digest 用于 tidb-rs 自己的 plan cache 和 #169（§4.3）。文本 digest 随 tidb-go 退役去掉。
 - PoC crate（`tidb-sql`、`poc-executor`、`poc-session`）中的协议类型渗透不修，随 PoC 退役消失。
