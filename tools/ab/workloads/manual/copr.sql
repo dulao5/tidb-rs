@@ -1,6 +1,7 @@
 # Coprocessor reads over several regions (D07.2): table copr.t has 20000 rows split into 8
 # regions at handle multiples of 2500, copr.acct 2000 rows in 4 regions, copr.e is empty.
-# Prepare with the statements in specs/D07.2-copr/spec.md §7. Paging is on (128 → 50000 rows
+# Prepare with the statements in specs/D07.2-copr/spec.md §7.2. Kept out of tools/ab/workloads/
+# (whose *.sql the weekly build runs against sbtest only) because it needs that data. Paging is on (128 → 50000 rows
 # per page), so a region of 2500 rows takes several pages.
 SELECT COUNT(*) FROM copr.t;
 SELECT SUM(k), MIN(id), MAX(id) FROM copr.t;

@@ -138,8 +138,17 @@ Go `make(chan *copResponse, 2 或 18)`；移植用容量相同的 `tokio::sync::
 
 准备（在 Go TiDB 上执行）：`copr.t(id BIGINT PRIMARY KEY, k INT, c VARCHAR(32))` 20000 行，`SPLIT TABLE t BETWEEN (0) AND (20000) REGIONS 8`（每 2500 个 handle 一个 region）；`copr.acct(id INT PRIMARY KEY, bal INT)` 2000 行，`SPLIT TABLE acct BY (500), (1000), (1500)`；空表 `copr.e`。
 
-1. **结果对比**：`tools/ab/workloads/copr.sql`（26 条：跨 region 的全表 / 范围扫描、region 边界两侧的范围、正序 / 逆序加 LIMIT、聚合与 GROUP BY、刚好 128 / 129 行的范围（paging 第一页的边界）、空结果、空表），文本协议与预处理语句各一遍：**52/52 一致**。tidb-rs 的 `tidb_distsql_handle_query_duration_seconds_count{copr_type="paging"}` 表明全部走 paging。
+1. **结果对比**：`tools/ab/workloads/manual/copr.sql`（26 条：跨 region 的全表 / 范围扫描、region 边界两侧的范围、正序 / 逆序加 LIMIT、聚合与 GROUP BY、刚好 128 / 129 行的范围（paging 第一页的边界）、空结果、空表），文本协议与预处理语句各一遍：**52/52 一致**。tidb-rs 的 `tidb_distsql_handle_query_duration_seconds_count{copr_type="paging"}` 表明全部走 paging。
 2. **锁与 region 分裂并发**（40 s）：4 个连接在 Go TiDB 上不断做乐观事务转账（`acct` 两行 ±1、`t` 两行 ±1，总和不变），另一个连接每秒在新的位置 `SPLIT TABLE`；同时 Go TiDB 一个、tidb-rs 两个连接循环读 `SUM(bal), COUNT(*)` 与 `COUNT(*), SUM(k)`。结果：Go 1082 次、tidb-rs 1354 + 1361 次，**全部等于不变量，0 次错误**。期间 tidb-rs 解锁 1177 次（其中 595 次查到已提交、559 次等待未过期的锁）、遇到 96 次 EpochNotMatch 并按 `BoRegionMiss` 退避 98 次后重建任务。
 3. `tidb-distsql` 与 `poc-session` 的集群测试（`TIDB_RS_PD` / `TIDB_RS_TIDB_PORT`）对同一集群通过。
 
 没有发现与 Go 不同的结果。未覆盖：TiKV 宕机与 leader 切换（`tools/ab/faults` 的故障场景，留给 D07.1 / 运维回归）、超过 4 MiB 的单个响应（P0-3 已在 client-rust 侧验证过）。
+
+### 7.3 weekly（故障场景与 sysbench）
+
+在本分支上手动运行 weekly（run 43574020336，commit `2f87985`），与当天 main 上一次 GREEN（run 43551977017，`c1bbf46`，旧的 client-rust cop 路径）对比：
+
+- **整体 GREEN**：ab 0 mismatch（1515 match，与基线相同）；锁 18/18；故障场景 9 个全部 0 错结果、0 错误。
+- **故障场景**（最长卡顿 Go / tidb-rs，基线在括号内）：kill_tikv 17.8 / 14.8 s（12.9 / 12.9），kill_tikv_meta 16.8 / 16.2 s（13.9 / 13.9），transfer_leader 0.0 / 0.0 s（0.1 / 0.0），slow_tikv（CPU 限制）3.1 / 2.9 s（5.2 / 5.6），net_cut 10.5 / 13.1 s（10.9 / 13.3），pause_tikv 5.0 / 5.0 s（同）。kill_tikv 两边同时变长，是本次运行的选举时间，不是 tidb-rs 侧的差异。
+- **sysbench**（B/A QPS，基线在括号内）：oltp_read_only 1 线程 1.23（1.27），8 线程 1.20（1.27）；oltp_point_select 1.22（1.23）、1.10（1.14）。tidb-rs 的 read_only 8 线程 QPS 5979（6304，−5%）；不走 cop 的 point_select 也降了 3%，主要是运行器波动，read_only 多出的约 2 个百分点可能是新 cop 路径（每个请求的 worker spawn、paging 默认开）的开销，留待下周 weekly 确认。
+- ab 的 both_error 从 18 变为 70：多出的 52 条是本 PR 一开始把 `copr.sql` 放进了 `tools/ab/workloads/`，而 weekly 只准备 sbtest 数据；已移到 `tools/ab/workloads/manual/`。
