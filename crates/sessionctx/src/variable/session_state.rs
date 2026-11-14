@@ -76,12 +76,39 @@ pub struct TransactionContext {
     pub is_staleness: bool,
     /// EnableMDL indicates whether the transaction uses the metadata lock.
     pub enable_mdl: bool,
+    /// TxnScope stores the value of 'txn_scope'.
+    pub txn_scope: String,
+    /// InfoSchema is the information schema of the transaction (Go `any`: an
+    /// `infoschema.InfoSchema`, a type of a higher crate; set by sessiontxn, D05.4).
+    pub info_schema: Option<TxnInfoSchema>,
     /// forUpdateTS is used for pessimistic transaction.
     for_update_ts: u64,
     /// relatedTableForMDL records the `table ID -> schema version` of the tables the
     /// transaction uses (Go: `*sync.Map`, guarded by `tdmLock`).
     pub(crate) related_table_for_mdl: Option<RelatedTableForMDL>,
 }
+
+/// `TransactionContext.InfoSchema` (Go `any`): the transaction's `infoschema.InfoSchema`,
+/// shared by `Arc`, equal when it is the same value.
+// glue: Go interface value of a type in a higher crate (N0)
+#[derive(Clone)]
+pub struct TxnInfoSchema(pub std::sync::Arc<dyn std::any::Any + Send + Sync>);
+
+impl std::fmt::Debug for TxnInfoSchema {
+    // glue: the value is opaque here
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TxnInfoSchema(..)")
+    }
+}
+
+impl PartialEq for TxnInfoSchema {
+    // glue: pointer equality of a Go interface value holding a pointer
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for TxnInfoSchema {}
 
 /// The `relatedTableForMDL` map of `TransactionContext` (Go `*sync.Map` of table ID to
 /// schema version): shared by `Arc`, equal when it is the same map.
