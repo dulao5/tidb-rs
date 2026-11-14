@@ -3,7 +3,7 @@
 
 pub mod funcs;
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::span::Span;
 
@@ -997,7 +997,7 @@ impl FromNode for SetOprNode {
 /// `ast.SetOprSelectList`.
 #[derive(Debug, Default)]
 pub struct SetOprSelectList {
-    pub with: Option<Rc<WithClause>>,
+    pub with: Option<Arc<WithClause>>,
     pub after_set_operator: Option<SetOprType>,
     pub selects: Vec<SetOprNode>,
     pub limit: Option<Box<Limit>>,
@@ -1011,7 +1011,7 @@ pub struct SetOprStmt {
     pub select_list: Box<SetOprSelectList>,
     pub order_by: Option<Box<OrderByClause>>,
     pub limit: Option<Box<Limit>>,
-    pub with: Option<Rc<WithClause>>,
+    pub with: Option<Arc<WithClause>>,
 }
 
 /// `ast.WithClause`.
@@ -1062,9 +1062,9 @@ pub struct SelectStmt {
     pub kind: SelectStmtKind,
     /// `IsInBraces`: a parenthesised SELECT used as a statement (or set-operation operand).
     pub is_in_braces: bool,
-    /// `With`; shared (`Rc`) where Go shares the `*WithClause` with an enclosing
+    /// `With`; shared (`Arc`) where Go shares the `*WithClause` with an enclosing
     /// `SetOprSelectList`.
-    pub with: Option<Rc<WithClause>>,
+    pub with: Option<Arc<WithClause>>,
     /// `WithBeforeBraces`: `WITH ... (SELECT ...)`.
     pub with_before_braces: bool,
     /// `AfterSetOperator`: the operator preceding this SELECT in a set operation.

@@ -162,31 +162,31 @@ Start -> Vec<Stmt>:
     StatementList { $1 }
   ;
 AlterTableStmt -> Stmt:
-    alter IgnoreOptional tableKwd TableName AlterTableSpecListOpt AlterTableSpecSingleOpt { ph("AlterTableStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | alter IgnoreOptional tableKwd TableName analyze partition PartitionNameList AnalyzeOptionListOpt { ph("AlterTableStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | alter IgnoreOptional tableKwd TableName analyze partition PartitionNameList index IndexNameList AnalyzeOptionListOpt { ph("AlterTableStmt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>]) }
-  | alter IgnoreOptional tableKwd TableName compact { ph("AlterTableStmt#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | alter IgnoreOptional tableKwd TableName compact tiFlash replica { ph("AlterTableStmt#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | alter IgnoreOptional tableKwd TableName compact partition PartitionNameList { ph("AlterTableStmt#5", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | alter IgnoreOptional tableKwd TableName compact partition PartitionNameList tiFlash replica { ph("AlterTableStmt#6", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    alter IgnoreOptional tableKwd TableName AlterTableSpecListOpt AlterTableSpecSingleOpt { ph("AlterTableStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
+  | alter IgnoreOptional tableKwd TableName analyze partition PartitionNameList AnalyzeOptionListOpt { ph("AlterTableStmt#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($7) as Item, Box::new($8) as Item]) }
+  | alter IgnoreOptional tableKwd TableName analyze partition PartitionNameList index IndexNameList AnalyzeOptionListOpt { ph("AlterTableStmt#2", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($7) as Item, Box::new($9) as Item, Box::new($10) as Item]) }
+  | alter IgnoreOptional tableKwd TableName compact { ph("AlterTableStmt#3", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | alter IgnoreOptional tableKwd TableName compact tiFlash replica { ph("AlterTableStmt#4", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | alter IgnoreOptional tableKwd TableName compact partition PartitionNameList { ph("AlterTableStmt#5", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($7) as Item]) }
+  | alter IgnoreOptional tableKwd TableName compact partition PartitionNameList tiFlash replica { ph("AlterTableStmt#6", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($7) as Item]) }
   ;
 SplitIndexListOpt -> Vec<SplitIndexOption>:
      %prec lowerThanCreateTableSelect { Vec::new() }
-  | SplitIndexList %prec lowerThanComma { ph("SplitIndexListOpt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SplitIndexList %prec lowerThanComma { ph("SplitIndexListOpt#1", $span, vec![Box::new($1) as Item]) }
   ;
 SplitIndexList -> Vec<SplitIndexOption>:
-    SplitIndexOption { ph("SplitIndexList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SplitIndexList SplitIndexOption { ph("SplitIndexList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    SplitIndexOption { ph("SplitIndexList#0", $span, vec![Box::new($1) as Item]) }
+  | SplitIndexList SplitIndexOption { ph("SplitIndexList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 SplitIndexOption -> Box<SplitIndexOption>:
-    split primary key SplitOptionBetween { ph("SplitIndexOption#0", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | split index Identifier SplitOptionBetween { ph("SplitIndexOption#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | split SplitOptionBetween { ph("SplitIndexOption#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    split primary key SplitOptionBetween { ph("SplitIndexOption#0", $span, vec![Box::new($4) as Item]) }
+  | split index Identifier SplitOptionBetween { ph("SplitIndexOption#1", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | split SplitOptionBetween { ph("SplitIndexOption#2", $span, vec![Box::new($2) as Item]) }
   ;
 ResourceGroupOptionList -> Vec<ResourceGroupOption>:
-    DirectResourceGroupOption { ph("ResourceGroupOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ResourceGroupOptionList DirectResourceGroupOption { ph("ResourceGroupOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | ResourceGroupOptionList ',' DirectResourceGroupOption { ph("ResourceGroupOptionList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    DirectResourceGroupOption { ph("ResourceGroupOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | ResourceGroupOptionList DirectResourceGroupOption { ph("ResourceGroupOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | ResourceGroupOptionList ',' DirectResourceGroupOption { ph("ResourceGroupOptionList#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ResourceGroupPriorityOption -> u64:
     low { ph("ResourceGroupPriorityOption#0", $span, vec![]) }
@@ -194,9 +194,9 @@ ResourceGroupPriorityOption -> u64:
   | high { ph("ResourceGroupPriorityOption#2", $span, vec![]) }
   ;
 ResourceGroupRunawayOptionList -> Vec<ResourceGroupRunawayOption>:
-    DirectResourceGroupRunawayOption { ph("ResourceGroupRunawayOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ResourceGroupRunawayOptionList DirectResourceGroupRunawayOption { ph("ResourceGroupRunawayOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | ResourceGroupRunawayOptionList ',' DirectResourceGroupRunawayOption { ph("ResourceGroupRunawayOptionList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    DirectResourceGroupRunawayOption { ph("ResourceGroupRunawayOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | ResourceGroupRunawayOptionList DirectResourceGroupRunawayOption { ph("ResourceGroupRunawayOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | ResourceGroupRunawayOptionList ',' DirectResourceGroupRunawayOption { ph("ResourceGroupRunawayOptionList#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ResourceGroupRunawayWatchOption -> RunawayWatchType:
     exact { ph("ResourceGroupRunawayWatchOption#0", $span, vec![]) }
@@ -207,86 +207,86 @@ ResourceGroupRunawayActionOption -> Box<ResourceGroupRunawayActionOption>:
     dryRun { ph("ResourceGroupRunawayActionOption#0", $span, vec![]) }
   | cooldown { ph("ResourceGroupRunawayActionOption#1", $span, vec![]) }
   | kill { ph("ResourceGroupRunawayActionOption#2", $span, vec![]) }
-  | switchGroup '(' ResourceGroupName ')' { ph("ResourceGroupRunawayActionOption#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | switchGroup '(' ResourceGroupName ')' { ph("ResourceGroupRunawayActionOption#3", $span, vec![Box::new($3) as Item]) }
   ;
 DirectResourceGroupRunawayOption -> Box<ResourceGroupRunawayOption>:
-    execElapsed EqOpt stringLit { ph("DirectResourceGroupRunawayOption#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | processedKeys EqOpt intLit { ph("DirectResourceGroupRunawayOption#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | ru EqOpt intLit { ph("DirectResourceGroupRunawayOption#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | action EqOpt ResourceGroupRunawayActionOption { ph("DirectResourceGroupRunawayOption#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | watch EqOpt ResourceGroupRunawayWatchOption WatchDurationOption { ph("DirectResourceGroupRunawayOption#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    execElapsed EqOpt stringLit { ph("DirectResourceGroupRunawayOption#0", $span, vec![Box::new($2) as Item]) }
+  | processedKeys EqOpt intLit { ph("DirectResourceGroupRunawayOption#1", $span, vec![Box::new($2) as Item]) }
+  | ru EqOpt intLit { ph("DirectResourceGroupRunawayOption#2", $span, vec![Box::new($2) as Item]) }
+  | action EqOpt ResourceGroupRunawayActionOption { ph("DirectResourceGroupRunawayOption#3", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | watch EqOpt ResourceGroupRunawayWatchOption WatchDurationOption { ph("DirectResourceGroupRunawayOption#4", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 WatchDurationOption -> String:
      { ph("WatchDurationOption#0", $span, vec![]) }
   | timeDuration EqOpt stringLit { tok_text($lexer, &$3) }
-  | timeDuration EqOpt unlimited { ph("WatchDurationOption#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | timeDuration EqOpt unlimited { ph("WatchDurationOption#2", $span, vec![Box::new($2) as Item]) }
   ;
 DirectResourceGroupOption -> Box<ResourceGroupOption>:
-    ruRate EqOpt LengthNum { ph("DirectResourceGroupOption#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ruRate EqOpt unlimited { ph("DirectResourceGroupOption#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | priority EqOpt ResourceGroupPriorityOption { ph("DirectResourceGroupOption#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    ruRate EqOpt LengthNum { ph("DirectResourceGroupOption#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | ruRate EqOpt unlimited { ph("DirectResourceGroupOption#1", $span, vec![Box::new($2) as Item]) }
+  | priority EqOpt ResourceGroupPriorityOption { ph("DirectResourceGroupOption#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   | burstable { ph("DirectResourceGroupOption#3", $span, vec![]) }
-  | burstable EqOpt moderated { ph("DirectResourceGroupOption#4", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | burstable EqOpt unlimited { ph("DirectResourceGroupOption#5", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | burstable EqOpt off { ph("DirectResourceGroupOption#6", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | queryLimit EqOpt '(' ResourceGroupRunawayOptionList ')' { ph("DirectResourceGroupOption#7", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | queryLimit EqOpt '(' ')' { ph("DirectResourceGroupOption#8", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | queryLimit EqOpt null { ph("DirectResourceGroupOption#9", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | background EqOpt '(' ResourceGroupBackgroundOptionList ')' { ph("DirectResourceGroupOption#10", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | background EqOpt '(' ')' { ph("DirectResourceGroupOption#11", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | background EqOpt null { ph("DirectResourceGroupOption#12", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | burstable EqOpt moderated { ph("DirectResourceGroupOption#4", $span, vec![Box::new($2) as Item]) }
+  | burstable EqOpt unlimited { ph("DirectResourceGroupOption#5", $span, vec![Box::new($2) as Item]) }
+  | burstable EqOpt off { ph("DirectResourceGroupOption#6", $span, vec![Box::new($2) as Item]) }
+  | queryLimit EqOpt '(' ResourceGroupRunawayOptionList ')' { ph("DirectResourceGroupOption#7", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | queryLimit EqOpt '(' ')' { ph("DirectResourceGroupOption#8", $span, vec![Box::new($2) as Item]) }
+  | queryLimit EqOpt null { ph("DirectResourceGroupOption#9", $span, vec![Box::new($2) as Item]) }
+  | background EqOpt '(' ResourceGroupBackgroundOptionList ')' { ph("DirectResourceGroupOption#10", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | background EqOpt '(' ')' { ph("DirectResourceGroupOption#11", $span, vec![Box::new($2) as Item]) }
+  | background EqOpt null { ph("DirectResourceGroupOption#12", $span, vec![Box::new($2) as Item]) }
   ;
 ResourceGroupBackgroundOptionList -> Vec<ResourceGroupBackgroundOption>:
-    DirectResourceGroupBackgroundOption { ph("ResourceGroupBackgroundOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ResourceGroupBackgroundOptionList DirectResourceGroupBackgroundOption { ph("ResourceGroupBackgroundOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | ResourceGroupBackgroundOptionList ',' DirectResourceGroupBackgroundOption { ph("ResourceGroupBackgroundOptionList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    DirectResourceGroupBackgroundOption { ph("ResourceGroupBackgroundOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | ResourceGroupBackgroundOptionList DirectResourceGroupBackgroundOption { ph("ResourceGroupBackgroundOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | ResourceGroupBackgroundOptionList ',' DirectResourceGroupBackgroundOption { ph("ResourceGroupBackgroundOptionList#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 DirectResourceGroupBackgroundOption -> Box<ResourceGroupBackgroundOption>:
-    taskTypes EqOpt stringLit { ph("DirectResourceGroupBackgroundOption#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | utilizationLimit EqOpt LengthNum { ph("DirectResourceGroupBackgroundOption#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    taskTypes EqOpt stringLit { ph("DirectResourceGroupBackgroundOption#0", $span, vec![Box::new($2) as Item]) }
+  | utilizationLimit EqOpt LengthNum { ph("DirectResourceGroupBackgroundOption#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 PlacementOptionList -> Vec<PlacementOption>:
-    DirectPlacementOption { ph("PlacementOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | PlacementOptionList DirectPlacementOption { ph("PlacementOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | PlacementOptionList ',' DirectPlacementOption { ph("PlacementOptionList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    DirectPlacementOption { ph("PlacementOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | PlacementOptionList DirectPlacementOption { ph("PlacementOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | PlacementOptionList ',' DirectPlacementOption { ph("PlacementOptionList#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 DirectPlacementOption -> Box<PlacementOption>:
-    primaryRegion EqOpt stringLit { ph("DirectPlacementOption#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | regions EqOpt stringLit { ph("DirectPlacementOption#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | followers EqOpt LengthNum { ph("DirectPlacementOption#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | voters EqOpt LengthNum { ph("DirectPlacementOption#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | learners EqOpt LengthNum { ph("DirectPlacementOption#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | schedule EqOpt stringLit { ph("DirectPlacementOption#5", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | constraints EqOpt stringLit { ph("DirectPlacementOption#6", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | leaderConstraints EqOpt stringLit { ph("DirectPlacementOption#7", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | followerConstraints EqOpt stringLit { ph("DirectPlacementOption#8", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | voterConstraints EqOpt stringLit { ph("DirectPlacementOption#9", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | learnerConstraints EqOpt stringLit { ph("DirectPlacementOption#10", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | survivalPreferences EqOpt stringLit { ph("DirectPlacementOption#11", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    primaryRegion EqOpt stringLit { ph("DirectPlacementOption#0", $span, vec![Box::new($2) as Item]) }
+  | regions EqOpt stringLit { ph("DirectPlacementOption#1", $span, vec![Box::new($2) as Item]) }
+  | followers EqOpt LengthNum { ph("DirectPlacementOption#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | voters EqOpt LengthNum { ph("DirectPlacementOption#3", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | learners EqOpt LengthNum { ph("DirectPlacementOption#4", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | schedule EqOpt stringLit { ph("DirectPlacementOption#5", $span, vec![Box::new($2) as Item]) }
+  | constraints EqOpt stringLit { ph("DirectPlacementOption#6", $span, vec![Box::new($2) as Item]) }
+  | leaderConstraints EqOpt stringLit { ph("DirectPlacementOption#7", $span, vec![Box::new($2) as Item]) }
+  | followerConstraints EqOpt stringLit { ph("DirectPlacementOption#8", $span, vec![Box::new($2) as Item]) }
+  | voterConstraints EqOpt stringLit { ph("DirectPlacementOption#9", $span, vec![Box::new($2) as Item]) }
+  | learnerConstraints EqOpt stringLit { ph("DirectPlacementOption#10", $span, vec![Box::new($2) as Item]) }
+  | survivalPreferences EqOpt stringLit { ph("DirectPlacementOption#11", $span, vec![Box::new($2) as Item]) }
   ;
 PlacementPolicyOption -> Box<PlacementOption>:
-    placement policy EqOpt stringLit { ph("PlacementPolicyOption#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | placement policy EqOpt PolicyName { ph("PlacementPolicyOption#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | placement policy EqOpt defaultKwd { ph("PlacementPolicyOption#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    placement policy EqOpt stringLit { ph("PlacementPolicyOption#0", $span, vec![Box::new($3) as Item]) }
+  | placement policy EqOpt PolicyName { ph("PlacementPolicyOption#1", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | placement policy EqOpt defaultKwd { ph("PlacementPolicyOption#2", $span, vec![Box::new($3) as Item]) }
   | placement policy set defaultKwd { ph("PlacementPolicyOption#3", $span, vec![]) }
   ;
 AttributesOpt -> Box<AttributesSpec>:
-    attributes EqOpt defaultKwd { ph("AttributesOpt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | attributes EqOpt stringLit { ph("AttributesOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    attributes EqOpt defaultKwd { ph("AttributesOpt#0", $span, vec![Box::new($2) as Item]) }
+  | attributes EqOpt stringLit { ph("AttributesOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 StatsOptionsOpt -> Box<StatsOptionsSpec>:
-    statsOptions EqOpt defaultKwd { ph("StatsOptionsOpt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | statsOptions EqOpt stringLit { ph("StatsOptionsOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    statsOptions EqOpt defaultKwd { ph("StatsOptionsOpt#0", $span, vec![Box::new($2) as Item]) }
+  | statsOptions EqOpt stringLit { ph("StatsOptionsOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 AlterTableSpecSingleOpt -> Option<Box<AlterTableSpec>>:
-    PartitionOpt { ph("AlterTableSpecSingleOpt#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    PartitionOpt { ph("AlterTableSpecSingleOpt#0", $span, vec![Box::new($1) as Item]) }
   | remove partitioning { ph("AlterTableSpecSingleOpt#1", $span, vec![]) }
-  | reorganize partition NoWriteToBinLogAliasOpt ReorganizePartitionRuleOpt { ph("AlterTableSpecSingleOpt#2", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | SplitIndexOption { ph("AlterTableSpecSingleOpt#3", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | split maxValue partition less than '(' BitExpr ')' { ph("AlterTableSpecSingleOpt#4", $span, vec![Box::new($7) as Box<dyn Any>]) }
-  | merge first partition less than '(' BitExpr ')' { ph("AlterTableSpecSingleOpt#5", $span, vec![Box::new($7) as Box<dyn Any>]) }
-  | partition Identifier AttributesOpt { ph("AlterTableSpecSingleOpt#6", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | partition Identifier PartDefOptionList { ph("AlterTableSpecSingleOpt#7", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | reorganize partition NoWriteToBinLogAliasOpt ReorganizePartitionRuleOpt { ph("AlterTableSpecSingleOpt#2", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | SplitIndexOption { ph("AlterTableSpecSingleOpt#3", $span, vec![Box::new($1) as Item]) }
+  | split maxValue partition less than '(' BitExpr ')' { ph("AlterTableSpecSingleOpt#4", $span, vec![Box::new($7) as Item]) }
+  | merge first partition less than '(' BitExpr ')' { ph("AlterTableSpecSingleOpt#5", $span, vec![Box::new($7) as Item]) }
+  | partition Identifier AttributesOpt { ph("AlterTableSpecSingleOpt#6", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | partition Identifier PartDefOptionList { ph("AlterTableSpecSingleOpt#7", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   | remove ttl { ph("AlterTableSpecSingleOpt#8", $span, vec![]) }
   ;
 LocationLabelList -> Vec<String>:
@@ -294,80 +294,80 @@ LocationLabelList -> Vec<String>:
   | location labels StringList { $3 }
   ;
 AlterTableSpec -> Box<AlterTableSpec>:
-    TableOptionList %prec higherThanComma { ph("AlterTableSpec#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | set tiFlash replica LengthNum LocationLabelList { ph("AlterTableSpec#1", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | set hypo tiFlash replica LengthNum LocationLabelList { ph("AlterTableSpec#2", $span, vec![Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | convert to CharsetKw CharsetName OptCollate { ph("AlterTableSpec#3", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | convert to CharsetKw defaultKwd OptCollate { ph("AlterTableSpec#4", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | add ColumnKeywordOpt IfNotExists ColumnDef ColumnPosition { ph("AlterTableSpec#5", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | add ColumnKeywordOpt IfNotExists '(' TableElementList ')' { ph("AlterTableSpec#6", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | add ConstraintWithColumnarIndex { ph("AlterTableSpec#7", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | add partition IfNotExists NoWriteToBinLogAliasOpt PartitionDefinitionListOpt { ph("AlterTableSpec#8", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | add partition IfNotExists NoWriteToBinLogAliasOpt partitions NUM { ph("AlterTableSpec#9", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | last partition less than '(' BitExpr ')' NoWriteToBinLogAliasOpt { ph("AlterTableSpec#10", $span, vec![Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | add statsExtended IfNotExists Identifier StatsType '(' ColumnNameList ')' { ph("AlterTableSpec#11", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | add masking Type ColumnOptionListOpt ColumnPosition { ph("AlterTableSpec#12", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | add masking serial ColumnOptionListOpt ColumnPosition { ph("AlterTableSpec#13", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | add masking policy PolicyName on '(' Identifier ')' as Expression MaskingPolicyRestrictOnOpt MaskingPolicyStateOpt { ph("AlterTableSpec#14", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($11) as Box<dyn Any>, Box::new($12) as Box<dyn Any>]) }
-  | enable masking policy PolicyName { ph("AlterTableSpec#15", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | disable masking policy PolicyName { ph("AlterTableSpec#16", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | drop masking policy PolicyName { ph("AlterTableSpec#17", $span, vec![Box::new($4) as Box<dyn Any>]) }
+    TableOptionList %prec higherThanComma { ph("AlterTableSpec#0", $span, vec![Box::new($1) as Item]) }
+  | set tiFlash replica LengthNum LocationLabelList { ph("AlterTableSpec#1", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
+  | set hypo tiFlash replica LengthNum LocationLabelList { ph("AlterTableSpec#2", $span, vec![Box::new($5) as Item, Box::new($6) as Item]) }
+  | convert to CharsetKw CharsetName OptCollate { ph("AlterTableSpec#3", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
+  | convert to CharsetKw defaultKwd OptCollate { ph("AlterTableSpec#4", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | add ColumnKeywordOpt IfNotExists ColumnDef ColumnPosition { ph("AlterTableSpec#5", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
+  | add ColumnKeywordOpt IfNotExists '(' TableElementList ')' { ph("AlterTableSpec#6", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($5) as Item]) }
+  | add ConstraintWithColumnarIndex { ph("AlterTableSpec#7", $span, vec![Box::new($2) as Item]) }
+  | add partition IfNotExists NoWriteToBinLogAliasOpt PartitionDefinitionListOpt { ph("AlterTableSpec#8", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
+  | add partition IfNotExists NoWriteToBinLogAliasOpt partitions NUM { ph("AlterTableSpec#9", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item]) }
+  | last partition less than '(' BitExpr ')' NoWriteToBinLogAliasOpt { ph("AlterTableSpec#10", $span, vec![Box::new($6) as Item, Box::new($8) as Item]) }
+  | add statsExtended IfNotExists Identifier StatsType '(' ColumnNameList ')' { ph("AlterTableSpec#11", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
+  | add masking Type ColumnOptionListOpt ColumnPosition { ph("AlterTableSpec#12", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
+  | add masking serial ColumnOptionListOpt ColumnPosition { ph("AlterTableSpec#13", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
+  | add masking policy PolicyName on '(' Identifier ')' as Expression MaskingPolicyRestrictOnOpt MaskingPolicyStateOpt { ph("AlterTableSpec#14", $span, vec![Box::new($4) as Item, Box::new($7) as Item, Box::new($10) as Item, Box::new($11) as Item, Box::new($12) as Item]) }
+  | enable masking policy PolicyName { ph("AlterTableSpec#15", $span, vec![Box::new($4) as Item]) }
+  | disable masking policy PolicyName { ph("AlterTableSpec#16", $span, vec![Box::new($4) as Item]) }
+  | drop masking policy PolicyName { ph("AlterTableSpec#17", $span, vec![Box::new($4) as Item]) }
   | drop masking RestrictOrCascadeOpt { ph("AlterTableSpec#18", $span, vec![]) }
-  | modify masking policy PolicyName set Identifier eq Expression { ph("AlterTableSpec#19", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | modify masking Type ColumnOptionListOpt ColumnPosition { ph("AlterTableSpec#20", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | modify masking serial ColumnOptionListOpt ColumnPosition { ph("AlterTableSpec#21", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | modify masking policy PolicyName set restrict on '(' MaskingPolicyRestrictOperationList ')' { ph("AlterTableSpec#22", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
-  | modify masking policy PolicyName set restrict on none { ph("AlterTableSpec#23", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | AttributesOpt { ph("AlterTableSpec#24", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | StatsOptionsOpt { ph("AlterTableSpec#25", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | check partition AllOrPartitionNameList { ph("AlterTableSpec#26", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | coalesce partition NoWriteToBinLogAliasOpt NUM { ph("AlterTableSpec#27", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | drop ColumnKeywordOpt IfExists ColumnName RestrictOrCascadeOpt { ph("AlterTableSpec#28", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | modify masking policy PolicyName set Identifier eq Expression { ph("AlterTableSpec#19", $span, vec![Box::new($4) as Item, Box::new($6) as Item, Box::new($8) as Item]) }
+  | modify masking Type ColumnOptionListOpt ColumnPosition { ph("AlterTableSpec#20", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
+  | modify masking serial ColumnOptionListOpt ColumnPosition { ph("AlterTableSpec#21", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
+  | modify masking policy PolicyName set restrict on '(' MaskingPolicyRestrictOperationList ')' { ph("AlterTableSpec#22", $span, vec![Box::new($4) as Item, Box::new($9) as Item]) }
+  | modify masking policy PolicyName set restrict on none { ph("AlterTableSpec#23", $span, vec![Box::new($4) as Item]) }
+  | AttributesOpt { ph("AlterTableSpec#24", $span, vec![Box::new($1) as Item]) }
+  | StatsOptionsOpt { ph("AlterTableSpec#25", $span, vec![Box::new($1) as Item]) }
+  | check partition AllOrPartitionNameList { ph("AlterTableSpec#26", $span, vec![Box::new($3) as Item]) }
+  | coalesce partition NoWriteToBinLogAliasOpt NUM { ph("AlterTableSpec#27", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | drop ColumnKeywordOpt IfExists ColumnName RestrictOrCascadeOpt { ph("AlterTableSpec#28", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
   | drop primary key { ph("AlterTableSpec#29", $span, vec![]) }
-  | drop partition IfExists PartitionNameList %prec lowerThanComma { ph("AlterTableSpec#30", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | first partition less than '(' BitExpr ')' IfExists { ph("AlterTableSpec#31", $span, vec![Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | drop statsExtended IfExists Identifier { ph("AlterTableSpec#32", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | exchange partition Identifier with tableKwd TableName WithValidationOpt { ph("AlterTableSpec#33", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | truncate partition AllOrPartitionNameList { ph("AlterTableSpec#34", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | optimize partition NoWriteToBinLogAliasOpt AllOrPartitionNameList { ph("AlterTableSpec#35", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | repair partition NoWriteToBinLogAliasOpt AllOrPartitionNameList { ph("AlterTableSpec#36", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | importKwd partition AllOrPartitionNameList tablespace { ph("AlterTableSpec#37", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | discard partition AllOrPartitionNameList tablespace { ph("AlterTableSpec#38", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | drop partition IfExists PartitionNameList %prec lowerThanComma { ph("AlterTableSpec#30", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | first partition less than '(' BitExpr ')' IfExists { ph("AlterTableSpec#31", $span, vec![Box::new($6) as Item, Box::new($8) as Item]) }
+  | drop statsExtended IfExists Identifier { ph("AlterTableSpec#32", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | exchange partition Identifier with tableKwd TableName WithValidationOpt { ph("AlterTableSpec#33", $span, vec![Box::new($3) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
+  | truncate partition AllOrPartitionNameList { ph("AlterTableSpec#34", $span, vec![Box::new($3) as Item]) }
+  | optimize partition NoWriteToBinLogAliasOpt AllOrPartitionNameList { ph("AlterTableSpec#35", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | repair partition NoWriteToBinLogAliasOpt AllOrPartitionNameList { ph("AlterTableSpec#36", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | importKwd partition AllOrPartitionNameList tablespace { ph("AlterTableSpec#37", $span, vec![Box::new($3) as Item]) }
+  | discard partition AllOrPartitionNameList tablespace { ph("AlterTableSpec#38", $span, vec![Box::new($3) as Item]) }
   | importKwd tablespace { ph("AlterTableSpec#39", $span, vec![]) }
   | discard tablespace { ph("AlterTableSpec#40", $span, vec![]) }
-  | rebuild partition NoWriteToBinLogAliasOpt AllOrPartitionNameList { ph("AlterTableSpec#41", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | drop KeyOrIndex IfExists Identifier { ph("AlterTableSpec#42", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | drop foreign key Symbol { ph("AlterTableSpec#43", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | order by AlterOrderList %prec lowerThenOrder { ph("AlterTableSpec#44", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | rebuild partition NoWriteToBinLogAliasOpt AllOrPartitionNameList { ph("AlterTableSpec#41", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | drop KeyOrIndex IfExists Identifier { ph("AlterTableSpec#42", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | drop foreign key Symbol { ph("AlterTableSpec#43", $span, vec![Box::new($4) as Item]) }
+  | order by AlterOrderList %prec lowerThenOrder { ph("AlterTableSpec#44", $span, vec![Box::new($3) as Item]) }
   | disable keys { ph("AlterTableSpec#45", $span, vec![]) }
   | enable keys { ph("AlterTableSpec#46", $span, vec![]) }
-  | modify ColumnKeywordOpt IfExists ColumnDef ColumnPosition { ph("AlterTableSpec#47", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | change ColumnKeywordOpt IfExists ColumnName ColumnDef ColumnPosition { ph("AlterTableSpec#48", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | alter ColumnKeywordOpt ColumnName set defaultKwd SignedLiteral { ph("AlterTableSpec#49", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | alter ColumnKeywordOpt ColumnName set defaultKwd '(' Expression ')' { ph("AlterTableSpec#50", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | alter ColumnKeywordOpt ColumnName drop defaultKwd { ph("AlterTableSpec#51", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | rename column Identifier to Identifier { ph("AlterTableSpec#52", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | rename to TableName { ph("AlterTableSpec#53", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | rename EqOpt TableName { ph("AlterTableSpec#54", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | rename as TableName { ph("AlterTableSpec#55", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | rename KeyOrIndex Identifier to Identifier { ph("AlterTableSpec#56", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | LockClause { ph("AlterTableSpec#57", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | Writeable { ph("AlterTableSpec#58", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlgorithmClause { ph("AlterTableSpec#59", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | modify ColumnKeywordOpt IfExists ColumnDef ColumnPosition { ph("AlterTableSpec#47", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
+  | change ColumnKeywordOpt IfExists ColumnName ColumnDef ColumnPosition { ph("AlterTableSpec#48", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
+  | alter ColumnKeywordOpt ColumnName set defaultKwd SignedLiteral { ph("AlterTableSpec#49", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($6) as Item]) }
+  | alter ColumnKeywordOpt ColumnName set defaultKwd '(' Expression ')' { ph("AlterTableSpec#50", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($7) as Item]) }
+  | alter ColumnKeywordOpt ColumnName drop defaultKwd { ph("AlterTableSpec#51", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | rename column Identifier to Identifier { ph("AlterTableSpec#52", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | rename to TableName { ph("AlterTableSpec#53", $span, vec![Box::new($3) as Item]) }
+  | rename EqOpt TableName { ph("AlterTableSpec#54", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | rename as TableName { ph("AlterTableSpec#55", $span, vec![Box::new($3) as Item]) }
+  | rename KeyOrIndex Identifier to Identifier { ph("AlterTableSpec#56", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($5) as Item]) }
+  | LockClause { ph("AlterTableSpec#57", $span, vec![Box::new($1) as Item]) }
+  | Writeable { ph("AlterTableSpec#58", $span, vec![Box::new($1) as Item]) }
+  | AlgorithmClause { ph("AlterTableSpec#59", $span, vec![Box::new($1) as Item]) }
   | force { ph("AlterTableSpec#60", $span, vec![]) }
   | with validation { ph("AlterTableSpec#61", $span, vec![]) }
   | without validation { ph("AlterTableSpec#62", $span, vec![]) }
   | secondaryLoad { ph("AlterTableSpec#63", $span, vec![]) }
   | secondaryUnload { ph("AlterTableSpec#64", $span, vec![]) }
-  | alter CheckConstraintKeyword Identifier EnforcedOrNot { ph("AlterTableSpec#65", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | drop CheckConstraintKeyword Identifier { ph("AlterTableSpec#66", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | alter index Identifier IndexInvisible { ph("AlterTableSpec#67", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | alter CheckConstraintKeyword Identifier EnforcedOrNot { ph("AlterTableSpec#65", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | drop CheckConstraintKeyword Identifier { ph("AlterTableSpec#66", $span, vec![Box::new($3) as Item]) }
+  | alter index Identifier IndexInvisible { ph("AlterTableSpec#67", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   | cache { ph("AlterTableSpec#68", $span, vec![]) }
   | nocache { ph("AlterTableSpec#69", $span, vec![]) }
   ;
 ReorganizePartitionRuleOpt -> Box<AlterTableSpec>:
      %prec lowerThanRemove { ph("ReorganizePartitionRuleOpt#0", $span, vec![]) }
-  | PartitionNameList into '(' PartitionDefinitionList ')' { ph("ReorganizePartitionRuleOpt#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | PartitionNameList into '(' PartitionDefinitionList ')' { ph("ReorganizePartitionRuleOpt#1", $span, vec![Box::new($1) as Item, Box::new($4) as Item]) }
   ;
 AllOrPartitionNameList -> Vec<CIStr>:
     all { Vec::new() }
@@ -391,15 +391,15 @@ GlobalOrLocalOpt -> String:
   | global { ph("GlobalOrLocalOpt#2", $span, vec![]) }
   ;
 AlgorithmClause -> AlgorithmType:
-    algorithm EqOpt defaultKwd { ph("AlgorithmClause#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | algorithm EqOpt copyKwd { ph("AlgorithmClause#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | algorithm EqOpt inplace { ph("AlgorithmClause#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | algorithm EqOpt instant { ph("AlgorithmClause#3", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | algorithm EqOpt identifier { ph("AlgorithmClause#4", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    algorithm EqOpt defaultKwd { ph("AlgorithmClause#0", $span, vec![Box::new($2) as Item]) }
+  | algorithm EqOpt copyKwd { ph("AlgorithmClause#1", $span, vec![Box::new($2) as Item]) }
+  | algorithm EqOpt inplace { ph("AlgorithmClause#2", $span, vec![Box::new($2) as Item]) }
+  | algorithm EqOpt instant { ph("AlgorithmClause#3", $span, vec![Box::new($2) as Item]) }
+  | algorithm EqOpt identifier { ph("AlgorithmClause#4", $span, vec![Box::new($2) as Item]) }
   ;
 LockClause -> LockType:
-    lock EqOpt defaultKwd { ph("LockClause#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | lock EqOpt Identifier { ph("LockClause#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    lock EqOpt defaultKwd { ph("LockClause#0", $span, vec![Box::new($2) as Item]) }
+  | lock EqOpt Identifier { ph("LockClause#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 Writeable -> bool:
     read write { true }
@@ -420,15 +420,15 @@ ColumnKeywordOpt -> String:
 ColumnPosition -> Box<ColumnPosition>:
      { ph("ColumnPosition#0", $span, vec![]) }
   | first { ph("ColumnPosition#1", $span, vec![]) }
-  | after ColumnName { ph("ColumnPosition#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | after ColumnName { ph("ColumnPosition#2", $span, vec![Box::new($2) as Item]) }
   ;
 AlterTableSpecListOpt -> Vec<AlterTableSpec>:
      { ph("AlterTableSpecListOpt#0", $span, vec![]) }
   | AlterTableSpecList { $1 }
   ;
 AlterTableSpecList -> Vec<AlterTableSpec>:
-    AlterTableSpec { ph("AlterTableSpecList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlterTableSpecList ',' AlterTableSpec { ph("AlterTableSpecList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    AlterTableSpec { ph("AlterTableSpecList#0", $span, vec![Box::new($1) as Item]) }
+  | AlterTableSpecList ',' AlterTableSpec { ph("AlterTableSpecList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 PartitionNameList -> Vec<CIStr>:
     Identifier { vec![CIStr::new($1)] }
@@ -443,65 +443,65 @@ Symbol -> String:
     Identifier { $1 }
   ;
 RenameTableStmt -> Stmt:
-    rename tableKwd TableToTableList { ph("RenameTableStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    rename tableKwd TableToTableList { ph("RenameTableStmt#0", $span, vec![Box::new($3) as Item]) }
   ;
 TableToTableList -> Vec<TableToTable>:
-    TableToTable { ph("TableToTableList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TableToTableList ',' TableToTable { ph("TableToTableList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    TableToTable { ph("TableToTableList#0", $span, vec![Box::new($1) as Item]) }
+  | TableToTableList ',' TableToTable { ph("TableToTableList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 TableToTable -> Box<TableToTable>:
-    TableName to TableName { ph("TableToTable#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    TableName to TableName { ph("TableToTable#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 RenameUserStmt -> Stmt:
-    rename user UserToUserList { ph("RenameUserStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    rename user UserToUserList { ph("RenameUserStmt#0", $span, vec![Box::new($3) as Item]) }
   ;
 UserToUserList -> Vec<UserToUser>:
-    UserToUser { ph("UserToUserList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | UserToUserList ',' UserToUser { ph("UserToUserList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    UserToUser { ph("UserToUserList#0", $span, vec![Box::new($1) as Item]) }
+  | UserToUserList ',' UserToUser { ph("UserToUserList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 UserToUser -> Box<UserToUser>:
-    Username to Username { ph("UserToUser#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Username to Username { ph("UserToUser#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 RecoverTableStmt -> Stmt:
-    recover tableKwd by job Int64Num { ph("RecoverTableStmt#0", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | recover tableKwd TableName { ph("RecoverTableStmt#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | recover tableKwd TableName Int64Num { ph("RecoverTableStmt#2", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    recover tableKwd by job Int64Num { ph("RecoverTableStmt#0", $span, vec![Box::new($5) as Item]) }
+  | recover tableKwd TableName { ph("RecoverTableStmt#1", $span, vec![Box::new($3) as Item]) }
+  | recover tableKwd TableName Int64Num { ph("RecoverTableStmt#2", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 FlashbackToTimestampStmt -> Stmt:
     flashback cluster toTimestamp stringLit { ph("FlashbackToTimestampStmt#0", $span, vec![]) }
-  | flashback tableKwd TableNameList toTimestamp stringLit { ph("FlashbackToTimestampStmt#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | flashback DatabaseSym DBName toTimestamp stringLit { ph("FlashbackToTimestampStmt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | flashback cluster toTSO LengthNum { ph("FlashbackToTimestampStmt#3", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | flashback tableKwd TableNameList toTSO LengthNum { ph("FlashbackToTimestampStmt#4", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | flashback DatabaseSym DBName toTSO LengthNum { ph("FlashbackToTimestampStmt#5", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | flashback tableKwd TableNameList toTimestamp stringLit { ph("FlashbackToTimestampStmt#1", $span, vec![Box::new($3) as Item]) }
+  | flashback DatabaseSym DBName toTimestamp stringLit { ph("FlashbackToTimestampStmt#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | flashback cluster toTSO LengthNum { ph("FlashbackToTimestampStmt#3", $span, vec![Box::new($4) as Item]) }
+  | flashback tableKwd TableNameList toTSO LengthNum { ph("FlashbackToTimestampStmt#4", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | flashback DatabaseSym DBName toTSO LengthNum { ph("FlashbackToTimestampStmt#5", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($5) as Item]) }
   ;
 FlashbackTableStmt -> Stmt:
-    flashback tableKwd TableName FlashbackToNewName { ph("FlashbackTableStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    flashback tableKwd TableName FlashbackToNewName { ph("FlashbackTableStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 FlashbackToNewName -> String:
      { ph("FlashbackToNewName#0", $span, vec![]) }
   | to Identifier { $2 }
   ;
 FlashbackDatabaseStmt -> Stmt:
-    flashback DatabaseSym DBName FlashbackToNewName { ph("FlashbackDatabaseStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    flashback DatabaseSym DBName FlashbackToNewName { ph("FlashbackDatabaseStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 DistributeTableStmt -> Stmt:
-    distribute tableKwd TableName PartitionNameListOpt rule EqOpt stringLit engine EqOpt stringLit { ph("DistributeTableStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
-  | distribute tableKwd TableName PartitionNameListOpt rule EqOpt stringLit engine EqOpt stringLit timeout EqOpt stringLit { ph("DistributeTableStmt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($12) as Box<dyn Any>]) }
+    distribute tableKwd TableName PartitionNameListOpt rule EqOpt stringLit engine EqOpt stringLit { ph("DistributeTableStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($9) as Item]) }
+  | distribute tableKwd TableName PartitionNameListOpt rule EqOpt stringLit engine EqOpt stringLit timeout EqOpt stringLit { ph("DistributeTableStmt#1", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($9) as Item, Box::new($12) as Item]) }
   ;
 CancelDistributionJobStmt -> Stmt:
-    cancel distribution job Int64Num { ph("CancelDistributionJobStmt#0", $span, vec![Box::new($4) as Box<dyn Any>]) }
+    cancel distribution job Int64Num { ph("CancelDistributionJobStmt#0", $span, vec![Box::new($4) as Item]) }
   ;
 SplitRegionStmt -> Stmt:
-    split SplitSyntaxOption tableKwd TableName PartitionNameListOpt SplitOption { ph("SplitRegionStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | split SplitSyntaxOption tableKwd TableName PartitionNameListOpt index Identifier SplitOption { ph("SplitRegionStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
+    split SplitSyntaxOption tableKwd TableName PartitionNameListOpt SplitOption { ph("SplitRegionStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
+  | split SplitSyntaxOption tableKwd TableName PartitionNameListOpt index Identifier SplitOption { ph("SplitRegionStmt#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item]) }
   ;
 SplitOptionBetween -> Box<SplitOption>:
-    between RowValue and RowValue regions Int64Num { ph("SplitOptionBetween#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    between RowValue and RowValue regions Int64Num { ph("SplitOptionBetween#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($6) as Item]) }
   ;
 SplitOption -> Box<SplitOption>:
     SplitOptionBetween { $1 }
-  | by ValuesList { ph("SplitOption#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | by ValuesList { ph("SplitOption#1", $span, vec![Box::new($2) as Item]) }
   ;
 SplitSyntaxOption -> Box<SplitSyntaxOption>:
      { ph("SplitSyntaxOption#0", $span, vec![]) }
@@ -510,16 +510,16 @@ SplitSyntaxOption -> Box<SplitSyntaxOption>:
   | region forKwd partition { ph("SplitSyntaxOption#3", $span, vec![]) }
   ;
 AnalyzeTableStmt -> Stmt:
-    analyze NoWriteToBinLogAliasOpt tableKwd TableNameList AllColumnsOrPredicateColumnsOpt AnalyzeOptionListOpt { ph("AnalyzeTableStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | analyze NoWriteToBinLogAliasOpt tableKwd TableName index IndexNameList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | analyze NoWriteToBinLogAliasOpt incremental tableKwd TableName index IndexNameList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | analyze NoWriteToBinLogAliasOpt tableKwd TableName partition PartitionNameList AllColumnsOrPredicateColumnsOpt AnalyzeOptionListOpt { ph("AnalyzeTableStmt#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | analyze NoWriteToBinLogAliasOpt tableKwd TableName partition PartitionNameList index IndexNameList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
-  | analyze NoWriteToBinLogAliasOpt incremental tableKwd TableName partition PartitionNameList index IndexNameList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#5", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>]) }
-  | analyze NoWriteToBinLogAliasOpt tableKwd TableName update histogram on IdentList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#6", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
-  | analyze NoWriteToBinLogAliasOpt tableKwd TableName drop histogram on IdentList { ph("AnalyzeTableStmt#7", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | analyze NoWriteToBinLogAliasOpt tableKwd TableName columns IdentList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#8", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | analyze NoWriteToBinLogAliasOpt tableKwd TableName partition PartitionNameList columns IdentList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#9", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
+    analyze NoWriteToBinLogAliasOpt tableKwd TableNameList AllColumnsOrPredicateColumnsOpt AnalyzeOptionListOpt { ph("AnalyzeTableStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
+  | analyze NoWriteToBinLogAliasOpt tableKwd TableName index IndexNameList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
+  | analyze NoWriteToBinLogAliasOpt incremental tableKwd TableName index IndexNameList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#2", $span, vec![Box::new($2) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item]) }
+  | analyze NoWriteToBinLogAliasOpt tableKwd TableName partition PartitionNameList AllColumnsOrPredicateColumnsOpt AnalyzeOptionListOpt { ph("AnalyzeTableStmt#3", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($7) as Item, Box::new($8) as Item]) }
+  | analyze NoWriteToBinLogAliasOpt tableKwd TableName partition PartitionNameList index IndexNameList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#4", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($8) as Item, Box::new($9) as Item]) }
+  | analyze NoWriteToBinLogAliasOpt incremental tableKwd TableName partition PartitionNameList index IndexNameList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#5", $span, vec![Box::new($2) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($9) as Item, Box::new($10) as Item]) }
+  | analyze NoWriteToBinLogAliasOpt tableKwd TableName update histogram on IdentList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#6", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($8) as Item, Box::new($9) as Item]) }
+  | analyze NoWriteToBinLogAliasOpt tableKwd TableName drop histogram on IdentList { ph("AnalyzeTableStmt#7", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($8) as Item]) }
+  | analyze NoWriteToBinLogAliasOpt tableKwd TableName columns IdentList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#8", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
+  | analyze NoWriteToBinLogAliasOpt tableKwd TableName partition PartitionNameList columns IdentList AnalyzeOptionListOpt { ph("AnalyzeTableStmt#9", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($8) as Item, Box::new($9) as Item]) }
   ;
 AllColumnsOrPredicateColumnsOpt -> ColumnChoice:
      { ph("AllColumnsOrPredicateColumnsOpt#0", $span, vec![]) }
@@ -528,21 +528,21 @@ AllColumnsOrPredicateColumnsOpt -> ColumnChoice:
   ;
 AnalyzeOptionListOpt -> Vec<AnalyzeOpt>:
      { Vec::new() }
-  | with AnalyzeOptionList { ph("AnalyzeOptionListOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | with AnalyzeOptionList { ph("AnalyzeOptionListOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 AnalyzeOptionList -> Vec<AnalyzeOpt>:
-    AnalyzeOption { ph("AnalyzeOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AnalyzeOptionList ',' AnalyzeOption { ph("AnalyzeOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | AnalyzeOptionList AnalyzeOption { ph("AnalyzeOptionList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    AnalyzeOption { ph("AnalyzeOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | AnalyzeOptionList ',' AnalyzeOption { ph("AnalyzeOptionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | AnalyzeOptionList AnalyzeOption { ph("AnalyzeOptionList#2", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 AnalyzeOption -> AnalyzeOpt:
-    NUM buckets { ph("AnalyzeOption#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | NUM topn { ph("AnalyzeOption#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | NUM cmSketch depth { ph("AnalyzeOption#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | NUM cmSketch width { ph("AnalyzeOption#3", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | NUM samples { ph("AnalyzeOption#4", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | NumLiteral sampleRate { ph("AnalyzeOption#5", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | NumLiteral ndvRate { ph("AnalyzeOption#6", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    NUM buckets { ph("AnalyzeOption#0", $span, vec![Box::new($1) as Item]) }
+  | NUM topn { ph("AnalyzeOption#1", $span, vec![Box::new($1) as Item]) }
+  | NUM cmSketch depth { ph("AnalyzeOption#2", $span, vec![Box::new($1) as Item]) }
+  | NUM cmSketch width { ph("AnalyzeOption#3", $span, vec![Box::new($1) as Item]) }
+  | NUM samples { ph("AnalyzeOption#4", $span, vec![Box::new($1) as Item]) }
+  | NumLiteral sampleRate { ph("AnalyzeOption#5", $span, vec![Box::new($1) as Item]) }
+  | NumLiteral ndvRate { ph("AnalyzeOption#6", $span, vec![Box::new($1) as Item]) }
   | defaultKwd buckets { ph("AnalyzeOption#7", $span, vec![]) }
   | defaultKwd topn { ph("AnalyzeOption#8", $span, vec![]) }
   | defaultKwd samples { ph("AnalyzeOption#9", $span, vec![]) }
@@ -550,11 +550,11 @@ AnalyzeOption -> AnalyzeOpt:
   | defaultKwd ndvRate { ph("AnalyzeOption#11", $span, vec![]) }
   ;
 Assignment -> Box<Assignment>:
-    ColumnName EqOrAssignmentEq ExprOrDefault { ph("Assignment#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    ColumnName EqOrAssignmentEq ExprOrDefault { ph("Assignment#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 AssignmentList -> Vec<Assignment>:
-    Assignment { ph("AssignmentList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AssignmentList ',' Assignment { ph("AssignmentList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Assignment { ph("AssignmentList#0", $span, vec![Box::new($1) as Item]) }
+  | AssignmentList ',' Assignment { ph("AssignmentList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 BeginTransactionStmt -> Stmt:
     begin { Stmt::Begin(Box::new(BeginStmt { ..Default::default() })) }
@@ -571,8 +571,8 @@ BinlogStmt -> Stmt:
     binlog stringLit { ph("BinlogStmt#0", $span, vec![]) }
   ;
 ColumnDef -> Box<ColumnDef>:
-    ColumnName Type ColumnOptionListOpt { ph("ColumnDef#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ColumnName serial ColumnOptionListOpt { ph("ColumnDef#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    ColumnName Type ColumnOptionListOpt { ph("ColumnDef#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | ColumnName serial ColumnOptionListOpt { ph("ColumnDef#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ColumnName -> Box<ColumnName>:
     Identifier { Box::new(ColumnName { name: CIStr::new($1), ..Default::default() }) }
@@ -600,16 +600,16 @@ ColumnNameOrUserVarListOpt -> Vec<ColumnNameOrUserVar>:
   | ColumnNameOrUserVariableList { $1 }
   ;
 ColumnNameOrUserVariableList -> Vec<ColumnNameOrUserVar>:
-    ColumnNameOrUserVariable { ph("ColumnNameOrUserVariableList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ColumnNameOrUserVariableList ',' ColumnNameOrUserVariable { ph("ColumnNameOrUserVariableList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    ColumnNameOrUserVariable { ph("ColumnNameOrUserVariableList#0", $span, vec![Box::new($1) as Item]) }
+  | ColumnNameOrUserVariableList ',' ColumnNameOrUserVariable { ph("ColumnNameOrUserVariableList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ColumnNameOrUserVariable -> Box<ColumnNameOrUserVar>:
-    ColumnName { ph("ColumnNameOrUserVariable#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | UserVariable { ph("ColumnNameOrUserVariable#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    ColumnName { ph("ColumnNameOrUserVariable#0", $span, vec![Box::new($1) as Item]) }
+  | UserVariable { ph("ColumnNameOrUserVariable#1", $span, vec![Box::new($1) as Item]) }
   ;
 ColumnNameOrUserVarListOptWithBrackets -> Vec<ColumnNameOrUserVar>:
      { Vec::new() }
-  | '(' ColumnNameOrUserVarListOpt ')' { ph("ColumnNameOrUserVarListOptWithBrackets#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | '(' ColumnNameOrUserVarListOpt ')' { ph("ColumnNameOrUserVarListOptWithBrackets#1", $span, vec![Box::new($2) as Item]) }
   ;
 CommitStmt -> Stmt:
     commit { Stmt::Commit(Box::default()) }
@@ -632,38 +632,38 @@ EnforcedOrNotOpt -> bool:
   | EnforcedOrNot { $1 }
   ;
 EnforcedOrNotOrNotNullOpt -> i64:
-    NotSym null { ph("EnforcedOrNotOrNotNullOpt#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | EnforcedOrNotOpt { ph("EnforcedOrNotOrNotNullOpt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    NotSym null { ph("EnforcedOrNotOrNotNullOpt#0", $span, vec![Box::new($1) as Item]) }
+  | EnforcedOrNotOpt { ph("EnforcedOrNotOrNotNullOpt#1", $span, vec![Box::new($1) as Item]) }
   ;
 ColumnOption -> Box<ColumnOption>:
-    NotSym null { ph("ColumnOption#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    NotSym null { ph("ColumnOption#0", $span, vec![Box::new($1) as Item]) }
   | null { ph("ColumnOption#1", $span, vec![]) }
   | autoIncrement { ph("ColumnOption#2", $span, vec![]) }
-  | PrimaryOpt key GlobalOrLocalOpt { ph("ColumnOption#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | PrimaryOpt key WithClustered GlobalOrLocalOpt { ph("ColumnOption#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | PrimaryOpt key GlobalOrLocalOpt { ph("ColumnOption#3", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | PrimaryOpt key WithClustered GlobalOrLocalOpt { ph("ColumnOption#4", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
   | unique global { ph("ColumnOption#5", $span, vec![]) }
   | unique local { ph("ColumnOption#6", $span, vec![]) }
   | unique %prec lowerThanKey { ph("ColumnOption#7", $span, vec![]) }
-  | unique key GlobalOrLocalOpt { ph("ColumnOption#8", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | defaultKwd DefaultValueExpr { ph("ColumnOption#9", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | unique key GlobalOrLocalOpt { ph("ColumnOption#8", $span, vec![Box::new($3) as Item]) }
+  | defaultKwd DefaultValueExpr { ph("ColumnOption#9", $span, vec![Box::new($2) as Item]) }
   | serial defaultKwd value { ph("ColumnOption#10", $span, vec![]) }
-  | on update NowSymOptionFraction { ph("ColumnOption#11", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | on update NowSymOptionFraction { ph("ColumnOption#11", $span, vec![Box::new($3) as Item]) }
   | comment stringLit { ph("ColumnOption#12", $span, vec![]) }
-  | ConstraintKeywordOpt check '(' Expression ')' EnforcedOrNotOrNotNullOpt { ph("ColumnOption#13", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | GeneratedAlways as '(' Expression ')' VirtualOrStored { ph("ColumnOption#14", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | ReferDef { ph("ColumnOption#15", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | collate CollationName { ph("ColumnOption#16", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | columnFormat ColumnFormat { ph("ColumnOption#17", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | storage StorageMedia { ph("ColumnOption#18", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | autoRandom AutoRandomOpt { ph("ColumnOption#19", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | secondaryEngineAttribute EqOpt stringLit { ph("ColumnOption#20", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | ConstraintKeywordOpt check '(' Expression ')' EnforcedOrNotOrNotNullOpt { ph("ColumnOption#13", $span, vec![Box::new($1) as Item, Box::new($4) as Item, Box::new($6) as Item]) }
+  | GeneratedAlways as '(' Expression ')' VirtualOrStored { ph("ColumnOption#14", $span, vec![Box::new($4) as Item, Box::new($6) as Item]) }
+  | ReferDef { ph("ColumnOption#15", $span, vec![Box::new($1) as Item]) }
+  | collate CollationName { ph("ColumnOption#16", $span, vec![Box::new($2) as Item]) }
+  | columnFormat ColumnFormat { ph("ColumnOption#17", $span, vec![Box::new($2) as Item]) }
+  | storage StorageMedia { ph("ColumnOption#18", $span, vec![Box::new($2) as Item]) }
+  | autoRandom AutoRandomOpt { ph("ColumnOption#19", $span, vec![Box::new($2) as Item]) }
+  | secondaryEngineAttribute EqOpt stringLit { ph("ColumnOption#20", $span, vec![Box::new($2) as Item]) }
   | GeneratedAlways as row start { ph("ColumnOption#21", $span, vec![]) }
   | GeneratedAlways as row end { ph("ColumnOption#22", $span, vec![]) }
   ;
 AutoRandomOpt -> AutoRandomOption:
      { ph("AutoRandomOpt#0", $span, vec![]) }
-  | '(' LengthNum ')' { ph("AutoRandomOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | '(' LengthNum ',' LengthNum ')' { ph("AutoRandomOpt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | '(' LengthNum ')' { ph("AutoRandomOpt#1", $span, vec![Box::new($2) as Item]) }
+  | '(' LengthNum ',' LengthNum ')' { ph("AutoRandomOpt#2", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 StorageMedia -> String:
     defaultKwd { tok_text($lexer, &$1) }
@@ -685,20 +685,20 @@ VirtualOrStored -> bool:
   | stored { true }
   ;
 ColumnOptionList -> ColumnOptionList:
-    ColumnOption { ph("ColumnOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ColumnOptionList ColumnOption { ph("ColumnOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    ColumnOption { ph("ColumnOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | ColumnOptionList ColumnOption { ph("ColumnOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 ColumnOptionListOpt -> ColumnOptionList:
      { ph("ColumnOptionListOpt#0", $span, vec![]) }
   | ColumnOptionList { $1 }
   ;
 ConstraintElem -> Box<Constraint>:
-    primary key IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintElem#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | fulltext KeyOrIndexOpt IndexName '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintElem#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | KeyOrIndex IfNotExists IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintElem#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | unique KeyOrIndexOpt IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintElem#3", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | foreign key IfNotExists IndexName '(' IndexPartSpecificationList ')' ReferDef { ph("ConstraintElem#4", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | check '(' Expression ')' EnforcedOrNotOpt { ph("ConstraintElem#5", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    primary key IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintElem#0", $span, vec![Box::new($3) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
+  | fulltext KeyOrIndexOpt IndexName '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintElem#1", $span, vec![Box::new($3) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
+  | KeyOrIndex IfNotExists IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintElem#2", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
+  | unique KeyOrIndexOpt IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintElem#3", $span, vec![Box::new($3) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
+  | foreign key IfNotExists IndexName '(' IndexPartSpecificationList ')' ReferDef { ph("ConstraintElem#4", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($8) as Item]) }
+  | check '(' Expression ')' EnforcedOrNotOpt { ph("ConstraintElem#5", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
   ;
 Match -> Item:
     match full { ph("Match#0", $span, vec![]) }
@@ -707,23 +707,23 @@ Match -> Item:
   ;
 MatchOpt -> MatchType:
      { ph("MatchOpt#0", $span, vec![]) }
-  | Match { ph("MatchOpt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | Match { ph("MatchOpt#1", $span, vec![Box::new($1) as Item]) }
   ;
 ReferDef -> Box<ReferenceDef>:
-    references TableName IndexPartSpecificationListOpt MatchOpt OnDeleteUpdateOpt { ph("ReferDef#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    references TableName IndexPartSpecificationListOpt MatchOpt OnDeleteUpdateOpt { ph("ReferDef#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 OnDelete -> Box<OnDeleteOpt>:
-    on deleteKwd ReferOpt { ph("OnDelete#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    on deleteKwd ReferOpt { ph("OnDelete#0", $span, vec![Box::new($3) as Item]) }
   ;
 OnUpdate -> Box<OnUpdateOpt>:
-    on update ReferOpt { ph("OnUpdate#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    on update ReferOpt { ph("OnUpdate#0", $span, vec![Box::new($3) as Item]) }
   ;
 OnDeleteUpdateOpt -> Item:
      %prec lowerThanOn { ph("OnDeleteUpdateOpt#0", $span, vec![]) }
-  | OnDelete %prec lowerThanOn { ph("OnDeleteUpdateOpt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | OnUpdate %prec lowerThanOn { ph("OnDeleteUpdateOpt#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | OnDelete OnUpdate { ph("OnDeleteUpdateOpt#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | OnUpdate OnDelete { ph("OnDeleteUpdateOpt#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | OnDelete %prec lowerThanOn { ph("OnDeleteUpdateOpt#1", $span, vec![Box::new($1) as Item]) }
+  | OnUpdate %prec lowerThanOn { ph("OnDeleteUpdateOpt#2", $span, vec![Box::new($1) as Item]) }
+  | OnDelete OnUpdate { ph("OnDeleteUpdateOpt#3", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | OnUpdate OnDelete { ph("OnDeleteUpdateOpt#4", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 ReferOpt -> ReferOptionType:
     restrict { ph("ReferOpt#0", $span, vec![]) }
@@ -737,29 +737,29 @@ DefaultValueExpr -> Expr:
   | SignedLiteral { $1 }
   | NextValueForSequenceParentheses { $1 }
   | BuiltinFunction { $1 }
-  | '(' Identifier ')' { ph("DefaultValueExpr#4", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | '(' Identifier ')' { ph("DefaultValueExpr#4", $span, vec![Box::new($2) as Item]) }
   | '(' SignedLiteral ')' { $2 }
   ;
 BuiltinFunction -> Expr:
-    '(' BuiltinFunction ')' { ph("BuiltinFunction#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    '(' BuiltinFunction ')' { ph("BuiltinFunction#0", $span, vec![Box::new($2) as Item]) }
   | identifier '(' ')' { ph("BuiltinFunction#1", $span, vec![]) }
-  | identifier '(' ExpressionList ')' { ph("BuiltinFunction#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | identifier '(' ExpressionList ')' { ph("BuiltinFunction#2", $span, vec![Box::new($3) as Item]) }
   | uuid '(' ')' { ph("BuiltinFunction#3", $span, vec![]) }
-  | replace '(' ExpressionList ')' { ph("BuiltinFunction#4", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | replace '(' ExpressionList ')' { ph("BuiltinFunction#4", $span, vec![Box::new($3) as Item]) }
   ;
 NowSymOptionFractionParentheses -> Expr:
-    '(' NowSymOptionFractionParentheses ')' { ph("NowSymOptionFractionParentheses#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    '(' NowSymOptionFractionParentheses ')' { ph("NowSymOptionFractionParentheses#0", $span, vec![Box::new($2) as Item]) }
   | NowSymOptionFraction { $1 }
   ;
 NowSymOptionFraction -> Expr:
-    NowSym { ph("NowSymOptionFraction#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | NowSymFunc '(' ')' { ph("NowSymOptionFraction#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | NowSymFunc '(' NUM ')' { ph("NowSymOptionFraction#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | CurdateSym '(' ')' { ph("NowSymOptionFraction#3", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    NowSym { ph("NowSymOptionFraction#0", $span, vec![Box::new($1) as Item]) }
+  | NowSymFunc '(' ')' { ph("NowSymOptionFraction#1", $span, vec![Box::new($1) as Item]) }
+  | NowSymFunc '(' NUM ')' { ph("NowSymOptionFraction#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | CurdateSym '(' ')' { ph("NowSymOptionFraction#3", $span, vec![Box::new($1) as Item]) }
   | currentDate { ph("NowSymOptionFraction#4", $span, vec![]) }
   ;
 NextValueForSequenceParentheses -> Expr:
-    '(' NextValueForSequenceParentheses ')' { ph("NextValueForSequenceParentheses#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    '(' NextValueForSequenceParentheses ')' { ph("NextValueForSequenceParentheses#0", $span, vec![Box::new($2) as Item]) }
   | NextValueForSequence { $1 }
   ;
 NextValueForSequence -> Expr:
@@ -782,9 +782,9 @@ CurdateSym -> String:
   | currentDate { tok_text($lexer, &$1) }
   ;
 SignedLiteral -> Expr:
-    Literal { ph("SignedLiteral#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | '+' NumLiteral { ph("SignedLiteral#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | '-' NumLiteral { ph("SignedLiteral#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    Literal { ph("SignedLiteral#0", $span, vec![Box::new($1) as Item]) }
+  | '+' NumLiteral { ph("SignedLiteral#1", $span, vec![Box::new($2) as Item]) }
+  | '-' NumLiteral { ph("SignedLiteral#2", $span, vec![Box::new($2) as Item]) }
   ;
 NumLiteral -> Datum:
     intLit { int_lit_datum($lexer.src_str(tok_span(&$1))) }
@@ -801,32 +801,32 @@ BindingStatusType -> BindingStatusType:
   | disabled { ph("BindingStatusType#1", $span, vec![]) }
   ;
 CreateStatisticsStmt -> Stmt:
-    create statistics IfNotExists Identifier '(' StatsType ')' on TableName '(' ColumnNameList ')' { ph("CreateStatisticsStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($11) as Box<dyn Any>]) }
+    create statistics IfNotExists Identifier '(' StatsType ')' on TableName '(' ColumnNameList ')' { ph("CreateStatisticsStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($9) as Item, Box::new($11) as Item]) }
   ;
 DropStatisticsStmt -> Stmt:
-    drop statistics Identifier { ph("DropStatisticsStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    drop statistics Identifier { ph("DropStatisticsStmt#0", $span, vec![Box::new($3) as Item]) }
   ;
 CreateIndexStmt -> Stmt:
-    create IndexKeyTypeOpt index IfNotExists Identifier IndexTypeOpt on TableName '(' IndexPartSpecificationList ')' IndexOptionList IndexLockAndAlgorithmOpt { ph("CreateIndexStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($12) as Box<dyn Any>, Box::new($13) as Box<dyn Any>]) }
+    create IndexKeyTypeOpt index IfNotExists Identifier IndexTypeOpt on TableName '(' IndexPartSpecificationList ')' IndexOptionList IndexLockAndAlgorithmOpt { ph("CreateIndexStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($8) as Item, Box::new($10) as Item, Box::new($12) as Item, Box::new($13) as Item]) }
   ;
 IndexPartSpecificationListOpt -> Vec<IndexPartSpecification>:
      { ph("IndexPartSpecificationListOpt#0", $span, vec![]) }
   | '(' IndexPartSpecificationList ')' { $2 }
   ;
 IndexPartSpecificationList -> Vec<IndexPartSpecification>:
-    IndexPartSpecification { ph("IndexPartSpecificationList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | IndexPartSpecificationList ',' IndexPartSpecification { ph("IndexPartSpecificationList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    IndexPartSpecification { ph("IndexPartSpecificationList#0", $span, vec![Box::new($1) as Item]) }
+  | IndexPartSpecificationList ',' IndexPartSpecification { ph("IndexPartSpecificationList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 IndexPartSpecification -> Box<IndexPartSpecification>:
-    ColumnName OptFieldLen OptOrder { ph("IndexPartSpecification#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | '(' Expression ')' OptOrder { ph("IndexPartSpecification#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    ColumnName OptFieldLen OptOrder { ph("IndexPartSpecification#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | '(' Expression ')' OptOrder { ph("IndexPartSpecification#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 IndexLockAndAlgorithmOpt -> Option<Box<IndexLockAndAlgorithm>>:
      { None }
-  | LockClause { ph("IndexLockAndAlgorithmOpt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlgorithmClause { ph("IndexLockAndAlgorithmOpt#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | LockClause AlgorithmClause { ph("IndexLockAndAlgorithmOpt#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | AlgorithmClause LockClause { ph("IndexLockAndAlgorithmOpt#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | LockClause { ph("IndexLockAndAlgorithmOpt#1", $span, vec![Box::new($1) as Item]) }
+  | AlgorithmClause { ph("IndexLockAndAlgorithmOpt#2", $span, vec![Box::new($1) as Item]) }
+  | LockClause AlgorithmClause { ph("IndexLockAndAlgorithmOpt#3", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | AlgorithmClause LockClause { ph("IndexLockAndAlgorithmOpt#4", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 IndexKeyTypeOpt -> IndexKeyType:
      { ph("IndexKeyTypeOpt#0", $span, vec![]) }
@@ -837,11 +837,11 @@ IndexKeyTypeOpt -> IndexKeyType:
   | columnar { ph("IndexKeyTypeOpt#5", $span, vec![]) }
   ;
 AlterDatabaseStmt -> Stmt:
-    alter DatabaseSym DBName DatabaseOptionList { ph("AlterDatabaseStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | alter DatabaseSym DatabaseOptionList { ph("AlterDatabaseStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    alter DatabaseSym DBName DatabaseOptionList { ph("AlterDatabaseStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | alter DatabaseSym DatabaseOptionList { ph("AlterDatabaseStmt#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 CreateDatabaseStmt -> Stmt:
-    create DatabaseSym IfNotExists DBName DatabaseOptionListOpt { ph("CreateDatabaseStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    create DatabaseSym IfNotExists DBName DatabaseOptionListOpt { ph("CreateDatabaseStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 DBName -> String:
     Identifier { $1 }
@@ -854,24 +854,24 @@ ResourceGroupName -> String:
   | defaultKwd { tok_text($lexer, &$1) }
   ;
 DatabaseOption -> Box<DatabaseOption>:
-    DefaultKwdOpt CharsetKw EqOpt CharsetName { ph("DatabaseOption#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | DefaultKwdOpt collate EqOpt CollationName { ph("DatabaseOption#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | DefaultKwdOpt encryption EqOpt EncryptionOpt { ph("DatabaseOption#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | DefaultKwdOpt PlacementPolicyOption { ph("DatabaseOption#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | PlacementPolicyOption { ph("DatabaseOption#4", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | set tiFlash replica LengthNum LocationLabelList { ph("DatabaseOption#5", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    DefaultKwdOpt CharsetKw EqOpt CharsetName { ph("DatabaseOption#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | DefaultKwdOpt collate EqOpt CollationName { ph("DatabaseOption#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | DefaultKwdOpt encryption EqOpt EncryptionOpt { ph("DatabaseOption#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | DefaultKwdOpt PlacementPolicyOption { ph("DatabaseOption#3", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | PlacementPolicyOption { ph("DatabaseOption#4", $span, vec![Box::new($1) as Item]) }
+  | set tiFlash replica LengthNum LocationLabelList { ph("DatabaseOption#5", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 DatabaseOptionListOpt -> Vec<DatabaseOption>:
      { Vec::new() }
   | DatabaseOptionList { $1 }
   ;
 DatabaseOptionList -> Vec<DatabaseOption>:
-    DatabaseOption { ph("DatabaseOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | DatabaseOptionList DatabaseOption { ph("DatabaseOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    DatabaseOption { ph("DatabaseOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | DatabaseOptionList DatabaseOption { ph("DatabaseOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 CreateTableStmt -> Stmt:
-    create OptTemporary tableKwd IfNotExists TableName TableElementListOpt CreateTableOptionListOpt PartitionOpt SplitIndexListOpt DuplicateOpt AsOpt CreateTableSelectOpt OnCommitOpt { ph("CreateTableStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($11) as Box<dyn Any>, Box::new($12) as Box<dyn Any>, Box::new($13) as Box<dyn Any>]) }
-  | create OptTemporary tableKwd IfNotExists TableName LikeTableWithOrWithoutParen OnCommitOpt { ph("CreateTableStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    create OptTemporary tableKwd IfNotExists TableName TableElementListOpt CreateTableOptionListOpt PartitionOpt SplitIndexListOpt DuplicateOpt AsOpt CreateTableSelectOpt OnCommitOpt { ph("CreateTableStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($9) as Item, Box::new($10) as Item, Box::new($11) as Item, Box::new($12) as Item, Box::new($13) as Item]) }
+  | create OptTemporary tableKwd IfNotExists TableName LikeTableWithOrWithoutParen OnCommitOpt { ph("CreateTableStmt#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
   ;
 OnCommitOpt -> Option<bool>:
      { None }
@@ -884,48 +884,48 @@ DefaultKwdOpt -> String:
   ;
 PartitionOpt -> Option<Box<PartitionOptions>>:
      { None }
-  | partition by PartitionMethod PartitionNumOpt SubPartitionOpt PartitionDefinitionListOpt UpdateIndexesOpt { ph("PartitionOpt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+  | partition by PartitionMethod PartitionNumOpt SubPartitionOpt PartitionDefinitionListOpt UpdateIndexesOpt { ph("PartitionOpt#1", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
   ;
 GlobalOrLocal -> bool:
     local { false }
   | global { true }
   ;
 UpdateIndexElem -> Box<Constraint>:
-    Identifier GlobalOrLocal { ph("UpdateIndexElem#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    Identifier GlobalOrLocal { ph("UpdateIndexElem#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 UpdateIndexesList -> Vec<Constraint>:
-    UpdateIndexElem { ph("UpdateIndexesList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | UpdateIndexesList ',' UpdateIndexElem { ph("UpdateIndexesList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    UpdateIndexElem { ph("UpdateIndexesList#0", $span, vec![Box::new($1) as Item]) }
+  | UpdateIndexesList ',' UpdateIndexElem { ph("UpdateIndexesList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 UpdateIndexesOpt -> Vec<Constraint>:
      { Vec::new() }
   | update indexes '(' UpdateIndexesList ')' { $4 }
   ;
 SubPartitionMethod -> Box<PartitionMethod>:
-    LinearOpt key PartitionKeyAlgorithmOpt '(' ColumnNameListOpt ')' { ph("SubPartitionMethod#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | LinearOpt hash '(' BitExpr ')' { ph("SubPartitionMethod#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    LinearOpt key PartitionKeyAlgorithmOpt '(' ColumnNameListOpt ')' { ph("SubPartitionMethod#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($5) as Item]) }
+  | LinearOpt hash '(' BitExpr ')' { ph("SubPartitionMethod#1", $span, vec![Box::new($1) as Item, Box::new($4) as Item]) }
   ;
 PartitionKeyAlgorithmOpt -> Option<Box<PartitionKeyAlgorithm>>:
      { None }
-  | algorithm eq NUM { ph("PartitionKeyAlgorithmOpt#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | algorithm eq NUM { ph("PartitionKeyAlgorithmOpt#1", $span, vec![Box::new($3) as Item]) }
   ;
 PartitionMethod -> Box<PartitionMethod>:
     SubPartitionMethod { $1 }
-  | rangeKwd '(' BitExpr ')' PartitionIntervalOpt { ph("PartitionMethod#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | rangeKwd FieldsOrColumns '(' ColumnNameList ')' PartitionIntervalOpt { ph("PartitionMethod#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | list '(' BitExpr ')' { ph("PartitionMethod#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | list FieldsOrColumns '(' ColumnNameList ')' { ph("PartitionMethod#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | systemTime interval Expression TimeUnit { ph("PartitionMethod#5", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | systemTime limit LengthNum { ph("PartitionMethod#6", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | rangeKwd '(' BitExpr ')' PartitionIntervalOpt { ph("PartitionMethod#1", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | rangeKwd FieldsOrColumns '(' ColumnNameList ')' PartitionIntervalOpt { ph("PartitionMethod#2", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($6) as Item]) }
+  | list '(' BitExpr ')' { ph("PartitionMethod#3", $span, vec![Box::new($3) as Item]) }
+  | list FieldsOrColumns '(' ColumnNameList ')' { ph("PartitionMethod#4", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | systemTime interval Expression TimeUnit { ph("PartitionMethod#5", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | systemTime limit LengthNum { ph("PartitionMethod#6", $span, vec![Box::new($3) as Item]) }
   | systemTime { ph("PartitionMethod#7", $span, vec![]) }
   ;
 PartitionIntervalOpt -> Option<Box<PartitionInterval>>:
      { None }
-  | interval '(' IntervalExpr ')' FirstAndLastPartOpt NullPartOpt MaxValPartOpt { ph("PartitionIntervalOpt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+  | interval '(' IntervalExpr ')' FirstAndLastPartOpt NullPartOpt MaxValPartOpt { ph("PartitionIntervalOpt#1", $span, vec![Box::new($3) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
   ;
 IntervalExpr -> PartitionIntervalExpr:
-    BitExpr { ph("IntervalExpr#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | BitExpr TimeUnit { ph("IntervalExpr#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    BitExpr { ph("IntervalExpr#0", $span, vec![Box::new($1) as Item]) }
+  | BitExpr TimeUnit { ph("IntervalExpr#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 NullPartOpt -> bool:
      { false }
@@ -937,7 +937,7 @@ MaxValPartOpt -> bool:
   ;
 FirstAndLastPartOpt -> PartitionInterval:
      { ph("FirstAndLastPartOpt#0", $span, vec![]) }
-  | first partition less than '(' BitExpr ')' last partition less than '(' BitExpr ')' { ph("FirstAndLastPartOpt#1", $span, vec![Box::new($6) as Box<dyn Any>, Box::new($13) as Box<dyn Any>]) }
+  | first partition less than '(' BitExpr ')' last partition less than '(' BitExpr ')' { ph("FirstAndLastPartOpt#1", $span, vec![Box::new($6) as Item, Box::new($13) as Item]) }
   ;
 LinearOpt -> String:
      { ph("LinearOpt#0", $span, vec![]) }
@@ -945,63 +945,63 @@ LinearOpt -> String:
   ;
 SubPartitionOpt -> Option<Box<PartitionMethod>>:
      { None }
-  | subpartition by SubPartitionMethod SubPartitionNumOpt { ph("SubPartitionOpt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | subpartition by SubPartitionMethod SubPartitionNumOpt { ph("SubPartitionOpt#1", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 SubPartitionNumOpt -> u64:
      { ph("SubPartitionNumOpt#0", $span, vec![]) }
-  | subpartitions LengthNum { ph("SubPartitionNumOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | subpartitions LengthNum { ph("SubPartitionNumOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 PartitionNumOpt -> u64:
      { ph("PartitionNumOpt#0", $span, vec![]) }
-  | partitions LengthNum { ph("PartitionNumOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | partitions LengthNum { ph("PartitionNumOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 PartitionDefinitionListOpt -> Vec<PartitionDefinition>:
      %prec lowerThanCreateTableSelect { Vec::new() }
-  | '(' PartitionDefinitionList ')' { ph("PartitionDefinitionListOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | '(' PartitionDefinitionList ')' { ph("PartitionDefinitionListOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 PartitionDefinitionList -> Vec<PartitionDefinition>:
-    PartitionDefinition { ph("PartitionDefinitionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | PartitionDefinitionList ',' PartitionDefinition { ph("PartitionDefinitionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    PartitionDefinition { ph("PartitionDefinitionList#0", $span, vec![Box::new($1) as Item]) }
+  | PartitionDefinitionList ',' PartitionDefinition { ph("PartitionDefinitionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 PartitionDefinition -> Box<PartitionDefinition>:
-    partition Identifier PartDefValuesOpt PartDefOptionList SubPartDefinitionListOpt { ph("PartitionDefinition#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    partition Identifier PartDefValuesOpt PartDefOptionList SubPartDefinitionListOpt { ph("PartitionDefinition#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 SubPartDefinitionListOpt -> Vec<SubPartitionDefinition>:
      { ph("SubPartDefinitionListOpt#0", $span, vec![]) }
   | '(' SubPartDefinitionList ')' { $2 }
   ;
 SubPartDefinitionList -> Vec<SubPartitionDefinition>:
-    SubPartDefinition { ph("SubPartDefinitionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SubPartDefinitionList ',' SubPartDefinition { ph("SubPartDefinitionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    SubPartDefinition { ph("SubPartDefinitionList#0", $span, vec![Box::new($1) as Item]) }
+  | SubPartDefinitionList ',' SubPartDefinition { ph("SubPartDefinitionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 SubPartDefinition -> Box<SubPartitionDefinition>:
-    subpartition Identifier PartDefOptionList { ph("SubPartDefinition#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    subpartition Identifier PartDefOptionList { ph("SubPartDefinition#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 PartDefOptionList -> Vec<TableOption>:
      { ph("PartDefOptionList#0", $span, vec![]) }
-  | PartDefOptionList PartDefOption { ph("PartDefOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | PartDefOptionList PartDefOption { ph("PartDefOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 PartDefOption -> Box<TableOption>:
-    comment EqOpt stringLit { ph("PartDefOption#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | engine EqOpt StringName { ph("PartDefOption#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | storage engine EqOpt StringName { ph("PartDefOption#2", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | engine_attribute EqOpt StringName { ph("PartDefOption#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | secondaryEngineAttribute EqOpt stringLit { ph("PartDefOption#4", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | insertMethod EqOpt StringName { ph("PartDefOption#5", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | data directory EqOpt stringLit { ph("PartDefOption#6", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | index directory EqOpt stringLit { ph("PartDefOption#7", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | maxRows EqOpt LengthNum { ph("PartDefOption#8", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | minRows EqOpt LengthNum { ph("PartDefOption#9", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | tablespace EqOpt Identifier { ph("PartDefOption#10", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | nodegroup EqOpt LengthNum { ph("PartDefOption#11", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | PlacementPolicyOption { ph("PartDefOption#12", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    comment EqOpt stringLit { ph("PartDefOption#0", $span, vec![Box::new($2) as Item]) }
+  | engine EqOpt StringName { ph("PartDefOption#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | storage engine EqOpt StringName { ph("PartDefOption#2", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
+  | engine_attribute EqOpt StringName { ph("PartDefOption#3", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | secondaryEngineAttribute EqOpt stringLit { ph("PartDefOption#4", $span, vec![Box::new($2) as Item]) }
+  | insertMethod EqOpt StringName { ph("PartDefOption#5", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | data directory EqOpt stringLit { ph("PartDefOption#6", $span, vec![Box::new($3) as Item]) }
+  | index directory EqOpt stringLit { ph("PartDefOption#7", $span, vec![Box::new($3) as Item]) }
+  | maxRows EqOpt LengthNum { ph("PartDefOption#8", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | minRows EqOpt LengthNum { ph("PartDefOption#9", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | tablespace EqOpt Identifier { ph("PartDefOption#10", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | nodegroup EqOpt LengthNum { ph("PartDefOption#11", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | PlacementPolicyOption { ph("PartDefOption#12", $span, vec![Box::new($1) as Item]) }
   ;
 PartDefValuesOpt -> PartitionDefinitionClause:
      { ph("PartDefValuesOpt#0", $span, vec![]) }
   | values less than maxValue { ph("PartDefValuesOpt#1", $span, vec![]) }
-  | values less than '(' MaxValueOrExpressionList ')' { ph("PartDefValuesOpt#2", $span, vec![Box::new($5) as Box<dyn Any>]) }
+  | values less than '(' MaxValueOrExpressionList ')' { ph("PartDefValuesOpt#2", $span, vec![Box::new($5) as Item]) }
   | defaultKwd { ph("PartDefValuesOpt#3", $span, vec![]) }
-  | values in '(' DefaultOrExpressionList ')' { ph("PartDefValuesOpt#4", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | values in '(' DefaultOrExpressionList ')' { ph("PartDefValuesOpt#4", $span, vec![Box::new($4) as Item]) }
   | history { ph("PartDefValuesOpt#5", $span, vec![]) }
   | current { ph("PartDefValuesOpt#6", $span, vec![]) }
   ;
@@ -1016,23 +1016,23 @@ AsOpt -> String:
   ;
 CreateTableSelectOpt -> Box<CreateTableStmt>:
      { ph("CreateTableSelectOpt#0", $span, vec![]) }
-  | SetOprStmt { ph("CreateTableSelectOpt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SelectStmt { ph("CreateTableSelectOpt#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SelectStmtWithClause { ph("CreateTableSelectOpt#3", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SubSelect { ph("CreateTableSelectOpt#4", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SetOprStmt { ph("CreateTableSelectOpt#1", $span, vec![Box::new($1) as Item]) }
+  | SelectStmt { ph("CreateTableSelectOpt#2", $span, vec![Box::new($1) as Item]) }
+  | SelectStmtWithClause { ph("CreateTableSelectOpt#3", $span, vec![Box::new($1) as Item]) }
+  | SubSelect { ph("CreateTableSelectOpt#4", $span, vec![Box::new($1) as Item]) }
   ;
 CreateViewSelectOpt -> Stmt:
     SetOprStmt { $1 }
   | SelectStmt { $1 }
   | SelectStmtWithClause { $1 }
-  | SubSelect { ph("CreateViewSelectOpt#3", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SubSelect { ph("CreateViewSelectOpt#3", $span, vec![Box::new($1) as Item]) }
   ;
 LikeTableWithOrWithoutParen -> Box<TableName>:
     like TableName { $2 }
   | '(' like TableName ')' { $3 }
   ;
 CreateViewStmt -> Stmt:
-    create OrReplace ViewAlgorithm ViewDefiner ViewSQLSecurity view ViewName ViewFieldList as CreateViewSelectOpt ViewCheckOption { ph("CreateViewStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($11) as Box<dyn Any>]) }
+    create OrReplace ViewAlgorithm ViewDefiner ViewSQLSecurity view ViewName ViewFieldList as CreateViewSelectOpt ViewCheckOption { ph("CreateViewStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($10) as Item, Box::new($11) as Item]) }
   ;
 OrReplace -> bool:
      { false }
@@ -1058,11 +1058,11 @@ ViewName -> Box<TableName>:
   ;
 ViewFieldList -> Vec<CIStr>:
      { Vec::new() }
-  | '(' ColumnList ')' { ph("ViewFieldList#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | '(' ColumnList ')' { ph("ViewFieldList#1", $span, vec![Box::new($2) as Item]) }
   ;
 ColumnList -> Vec<CIStr>:
-    Identifier { ph("ColumnList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ColumnList ',' Identifier { ph("ColumnList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Identifier { ph("ColumnList#0", $span, vec![Box::new($1) as Item]) }
+  | ColumnList ',' Identifier { ph("ColumnList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ViewCheckOption -> Option<ViewCheckOption>:
      { None }
@@ -1071,7 +1071,7 @@ ViewCheckOption -> Option<ViewCheckOption>:
   | with local check option { ph("ViewCheckOption#3", $span, vec![]) }
   ;
 CreateMaterializedViewStmt -> Stmt:
-    create materialized view TableName '(' ColumnList ')' MViewTableOptionListOpt MViewRefreshClauseOpt MViewAttributesOpt as CreateViewSelectOpt { ph("CreateMaterializedViewStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($12) as Box<dyn Any>]) }
+    create materialized view TableName '(' ColumnList ')' MViewTableOptionListOpt MViewRefreshClauseOpt MViewAttributesOpt as CreateViewSelectOpt { ph("CreateMaterializedViewStmt#0", $span, vec![Box::new($4) as Item, Box::new($6) as Item, Box::new($8) as Item, Box::new($9) as Item, Box::new($10) as Item, Box::new($12) as Item]) }
   ;
 MViewTableOptionListOpt -> Box<MviewCreateOptions>:
      { ph("MViewTableOptionListOpt#0", $span, vec![]) }
@@ -1079,34 +1079,34 @@ MViewTableOptionListOpt -> Box<MviewCreateOptions>:
   ;
 MViewTableOptionList -> Box<MviewCreateOptions>:
     MViewTableOption { $1 }
-  | MViewTableOptionList MViewTableOption { ph("MViewTableOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | MViewTableOptionList MViewTableOption { ph("MViewTableOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 MViewTableOption -> Box<MviewCreateOptions>:
-    comment EqOpt stringLit { ph("MViewTableOption#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | shardRowIDBits EqOpt LengthNum { ph("MViewTableOption#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | preSplitRegions EqOpt LengthNum { ph("MViewTableOption#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    comment EqOpt stringLit { ph("MViewTableOption#0", $span, vec![Box::new($2) as Item]) }
+  | shardRowIDBits EqOpt LengthNum { ph("MViewTableOption#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | preSplitRegions EqOpt LengthNum { ph("MViewTableOption#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 MViewRefreshClauseOpt -> Box<MViewRefreshClause>:
      { ph("MViewRefreshClauseOpt#0", $span, vec![]) }
-  | MViewRefreshClause { ph("MViewRefreshClauseOpt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | MViewRefreshClause { ph("MViewRefreshClauseOpt#1", $span, vec![Box::new($1) as Item]) }
   ;
 MViewAttributesOpt -> String:
      { ph("MViewAttributesOpt#0", $span, vec![]) }
   | attributes EqOpt stringLit { tok_text($lexer, &$3) }
   ;
 MViewRefreshClause -> Item:
-    refresh fast MViewStartWithOrNextOpt { ph("MViewRefreshClause#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    refresh fast MViewStartWithOrNextOpt { ph("MViewRefreshClause#0", $span, vec![Box::new($3) as Item]) }
   ;
 MViewStartWithOrNextOpt -> Option<Box<MViewRefreshClause>>:
      { ph("MViewStartWithOrNextOpt#0", $span, vec![]) }
   | MViewStartWithOrNext { Some($1) }
   ;
 MViewStartWithOrNext -> Box<MViewRefreshClause>:
-    start with Expression next Expression { ph("MViewStartWithOrNext#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | next Expression { ph("MViewStartWithOrNext#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    start with Expression next Expression { ph("MViewStartWithOrNext#0", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | next Expression { ph("MViewStartWithOrNext#1", $span, vec![Box::new($2) as Item]) }
   ;
 CreateMaterializedViewLogStmt -> Stmt:
-    create materialized view log on TableName '(' ColumnList ')' MLogCreateOptionListOpt MLogPurgeClauseOpt MLogAccumulationAlertClauseOpt { ph("CreateMaterializedViewLogStmt#0", $span, vec![Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($11) as Box<dyn Any>, Box::new($12) as Box<dyn Any>]) }
+    create materialized view log on TableName '(' ColumnList ')' MLogCreateOptionListOpt MLogPurgeClauseOpt MLogAccumulationAlertClauseOpt { ph("CreateMaterializedViewLogStmt#0", $span, vec![Box::new($6) as Item, Box::new($8) as Item, Box::new($10) as Item, Box::new($11) as Item, Box::new($12) as Item]) }
   ;
 MLogCreateOptionListOpt -> Box<MlogCreateOptions>:
      { ph("MLogCreateOptionListOpt#0", $span, vec![]) }
@@ -1114,11 +1114,11 @@ MLogCreateOptionListOpt -> Box<MlogCreateOptions>:
   ;
 MLogCreateOptionList -> Box<MlogCreateOptions>:
     MLogCreateOption { $1 }
-  | MLogCreateOptionList MLogCreateOption { ph("MLogCreateOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | MLogCreateOptionList MLogCreateOption { ph("MLogCreateOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 MLogCreateOption -> Box<MlogCreateOptions>:
-    shardRowIDBits EqOpt LengthNum { ph("MLogCreateOption#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | preSplitRegions EqOpt LengthNum { ph("MLogCreateOption#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    shardRowIDBits EqOpt LengthNum { ph("MLogCreateOption#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | preSplitRegions EqOpt LengthNum { ph("MLogCreateOption#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 MLogPurgeClauseOpt -> Box<MLogPurgeClause>:
      { ph("MLogPurgeClauseOpt#0", $span, vec![]) }
@@ -1126,7 +1126,7 @@ MLogPurgeClauseOpt -> Box<MLogPurgeClause>:
   ;
 MLogPurgeClause -> Box<MLogPurgeClause>:
     purge immediate { ph("MLogPurgeClause#0", $span, vec![]) }
-  | purge MLogStartWithOpt next Expression { ph("MLogPurgeClause#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | purge MLogStartWithOpt next Expression { ph("MLogPurgeClause#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 MLogStartWithOpt -> Option<Expr>:
      { None }
@@ -1137,52 +1137,52 @@ MLogAccumulationAlertClauseOpt -> Box<MLogAccumulationAlertClause>:
   | MLogAccumulationAlertClause { $1 }
   ;
 MLogAccumulationAlertClause -> Box<MLogAccumulationAlertClause>:
-    alert rows SignedNum { ph("MLogAccumulationAlertClause#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    alert rows SignedNum { ph("MLogAccumulationAlertClause#0", $span, vec![Box::new($3) as Item]) }
   ;
 AlterMaterializedViewStmt -> Stmt:
-    alter materialized view TableName AlterMaterializedViewActionList { ph("AlterMaterializedViewStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    alter materialized view TableName AlterMaterializedViewActionList { ph("AlterMaterializedViewStmt#0", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 AlterMaterializedViewActionList -> Vec<AlterMaterializedViewAction>:
-    AlterMaterializedViewAction { ph("AlterMaterializedViewActionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlterMaterializedViewActionList ',' AlterMaterializedViewAction { ph("AlterMaterializedViewActionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    AlterMaterializedViewAction { ph("AlterMaterializedViewActionList#0", $span, vec![Box::new($1) as Item]) }
+  | AlterMaterializedViewActionList ',' AlterMaterializedViewAction { ph("AlterMaterializedViewActionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 AlterMaterializedViewAction -> Box<AlterMaterializedViewAction>:
-    comment EqOpt stringLit { ph("AlterMaterializedViewAction#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | refresh MViewStartWithOrNextOpt { ph("AlterMaterializedViewAction#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | attributes EqOpt stringLit { ph("AlterMaterializedViewAction#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    comment EqOpt stringLit { ph("AlterMaterializedViewAction#0", $span, vec![Box::new($2) as Item]) }
+  | refresh MViewStartWithOrNextOpt { ph("AlterMaterializedViewAction#1", $span, vec![Box::new($2) as Item]) }
+  | attributes EqOpt stringLit { ph("AlterMaterializedViewAction#2", $span, vec![Box::new($2) as Item]) }
   ;
 AlterMaterializedViewLogStmt -> Stmt:
-    alter materialized view log on TableName AlterMaterializedViewLogActionList { ph("AlterMaterializedViewLogStmt#0", $span, vec![Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    alter materialized view log on TableName AlterMaterializedViewLogActionList { ph("AlterMaterializedViewLogStmt#0", $span, vec![Box::new($6) as Item, Box::new($7) as Item]) }
   ;
 AlterMaterializedViewLogActionList -> Vec<AlterMaterializedViewLogAction>:
-    AlterMaterializedViewLogAction { ph("AlterMaterializedViewLogActionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlterMaterializedViewLogActionList ',' AlterMaterializedViewLogAction { ph("AlterMaterializedViewLogActionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    AlterMaterializedViewLogAction { ph("AlterMaterializedViewLogActionList#0", $span, vec![Box::new($1) as Item]) }
+  | AlterMaterializedViewLogActionList ',' AlterMaterializedViewLogAction { ph("AlterMaterializedViewLogActionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 AlterMaterializedViewLogAction -> Box<AlterMaterializedViewLogAction>:
-    AlterMLogPurgeClause { ph("AlterMaterializedViewLogAction#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | add ColumnKeywordOpt '(' ColumnList ')' { ph("AlterMaterializedViewLogAction#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    AlterMLogPurgeClause { ph("AlterMaterializedViewLogAction#0", $span, vec![Box::new($1) as Item]) }
+  | add ColumnKeywordOpt '(' ColumnList ')' { ph("AlterMaterializedViewLogAction#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 AlterMLogPurgeClause -> Box<MLogPurgeClause>:
     MLogPurgeClause { $1 }
   | purge { ph("AlterMLogPurgeClause#1", $span, vec![]) }
   ;
 DropMaterializedViewStmt -> Stmt:
-    drop materialized view TableName { ph("DropMaterializedViewStmt#0", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | drop materialized view ifKwd exists TableName { ph("DropMaterializedViewStmt#1", $span, vec![Box::new($6) as Box<dyn Any>]) }
+    drop materialized view TableName { ph("DropMaterializedViewStmt#0", $span, vec![Box::new($4) as Item]) }
+  | drop materialized view ifKwd exists TableName { ph("DropMaterializedViewStmt#1", $span, vec![Box::new($6) as Item]) }
   ;
 DropMaterializedViewLogStmt -> Stmt:
-    drop materialized view log IfExists on TableName { ph("DropMaterializedViewLogStmt#0", $span, vec![Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    drop materialized view log IfExists on TableName { ph("DropMaterializedViewLogStmt#0", $span, vec![Box::new($5) as Item, Box::new($7) as Item]) }
   ;
 PurgeMaterializedViewLogStmt -> Stmt:
-    purge materialized view log on TableName { ph("PurgeMaterializedViewLogStmt#0", $span, vec![Box::new($6) as Box<dyn Any>]) }
+    purge materialized view log on TableName { ph("PurgeMaterializedViewLogStmt#0", $span, vec![Box::new($6) as Item]) }
   ;
 CancelMaterializedViewJobStmt -> Stmt:
-    cancel materialized view refresh job Int64Num { ph("CancelMaterializedViewJobStmt#0", $span, vec![Box::new($6) as Box<dyn Any>]) }
-  | cancel materialized view log purge job Int64Num { ph("CancelMaterializedViewJobStmt#1", $span, vec![Box::new($7) as Box<dyn Any>]) }
+    cancel materialized view refresh job Int64Num { ph("CancelMaterializedViewJobStmt#0", $span, vec![Box::new($6) as Item]) }
+  | cancel materialized view log purge job Int64Num { ph("CancelMaterializedViewJobStmt#1", $span, vec![Box::new($7) as Item]) }
   ;
 RefreshMaterializedViewStmt -> Stmt:
-    refresh materialized view TableName RefreshWithAsyncModeOpt complete RefreshCompleteMode RefreshMaterializedViewObserveOpt { ph("RefreshMaterializedViewStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
-  | refresh materialized view TableName RefreshWithAsyncModeOpt fast AsOfClauseOpt RefreshMaterializedViewObserveOpt { ph("RefreshMaterializedViewStmt#1", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
+    refresh materialized view TableName RefreshWithAsyncModeOpt complete RefreshCompleteMode RefreshMaterializedViewObserveOpt { ph("RefreshMaterializedViewStmt#0", $span, vec![Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item]) }
+  | refresh materialized view TableName RefreshWithAsyncModeOpt fast AsOfClauseOpt RefreshMaterializedViewObserveOpt { ph("RefreshMaterializedViewStmt#1", $span, vec![Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item]) }
   ;
 RefreshMaterializedViewObserveOpt -> RefreshMaterializedViewObserveType:
      { ph("RefreshMaterializedViewObserveOpt#0", $span, vec![]) }
@@ -1199,33 +1199,33 @@ RefreshCompleteMode -> RefreshMaterializedViewCompleteType:
   | delta apply { ph("RefreshCompleteMode#2", $span, vec![]) }
   ;
 DoStmt -> Stmt:
-    do ExpressionList { ph("DoStmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    do ExpressionList { ph("DoStmt#0", $span, vec![Box::new($2) as Item]) }
   ;
 DeleteWithoutUsingStmt -> Stmt:
-    deleteKwd TableOptimizerHintsOpt PriorityOpt QuickOptional IgnoreOptional from TableName PartitionNameListOpt TableAsNameOptDelete IndexHintListOpt WhereClauseOptional OrderByOptional LimitClause ReturningClause { ph("DeleteWithoutUsingStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($11) as Box<dyn Any>, Box::new($12) as Box<dyn Any>, Box::new($13) as Box<dyn Any>, Box::new($14) as Box<dyn Any>]) }
-  | deleteKwd TableOptimizerHintsOpt PriorityOpt QuickOptional IgnoreOptional TableAliasRefList from TableRefs WhereClauseOptional { ph("DeleteWithoutUsingStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
+    deleteKwd TableOptimizerHintsOpt PriorityOpt QuickOptional IgnoreOptional from TableName PartitionNameListOpt TableAsNameOptDelete IndexHintListOpt WhereClauseOptional OrderByOptional LimitClause ReturningClause { ph("DeleteWithoutUsingStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($9) as Item, Box::new($10) as Item, Box::new($11) as Item, Box::new($12) as Item, Box::new($13) as Item, Box::new($14) as Item]) }
+  | deleteKwd TableOptimizerHintsOpt PriorityOpt QuickOptional IgnoreOptional TableAliasRefList from TableRefs WhereClauseOptional { ph("DeleteWithoutUsingStmt#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($8) as Item, Box::new($9) as Item]) }
   ;
 DeleteWithUsingStmt -> Stmt:
-    deleteKwd TableOptimizerHintsOpt PriorityOpt QuickOptional IgnoreOptional from TableAliasRefList using TableRefs WhereClauseOptional { ph("DeleteWithUsingStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>]) }
+    deleteKwd TableOptimizerHintsOpt PriorityOpt QuickOptional IgnoreOptional from TableAliasRefList using TableRefs WhereClauseOptional { ph("DeleteWithUsingStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($9) as Item, Box::new($10) as Item]) }
   ;
 DeleteFromStmt -> Stmt:
     DeleteWithoutUsingStmt { $1 }
   | DeleteWithUsingStmt { $1 }
-  | WithClause DeleteWithoutUsingStmt { ph("DeleteFromStmt#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | WithClause DeleteWithUsingStmt { ph("DeleteFromStmt#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | WithClause DeleteWithoutUsingStmt { ph("DeleteFromStmt#2", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | WithClause DeleteWithUsingStmt { ph("DeleteFromStmt#3", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 DatabaseSym -> String:
     database { tok_text($lexer, &$1) }
   ;
 DropDatabaseStmt -> Stmt:
-    drop DatabaseSym IfExists DBName { ph("DropDatabaseStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    drop DatabaseSym IfExists DBName { ph("DropDatabaseStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 DropIndexStmt -> Stmt:
-    drop index IfExists Identifier on TableName IndexLockAndAlgorithmOpt { ph("DropIndexStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | drop hypo index IfExists Identifier on TableName { ph("DropIndexStmt#1", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    drop index IfExists Identifier on TableName IndexLockAndAlgorithmOpt { ph("DropIndexStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
+  | drop hypo index IfExists Identifier on TableName { ph("DropIndexStmt#1", $span, vec![Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
   ;
 DropTableStmt -> Stmt:
-    drop OptTemporary TableOrTables IfExists TableNameList RestrictOrCascadeOpt { ph("DropTableStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    drop OptTemporary TableOrTables IfExists TableNameList RestrictOrCascadeOpt { ph("DropTableStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 OptTemporary -> TemporaryKeyword:
      { ph("OptTemporary#0", $span, vec![]) }
@@ -1233,21 +1233,21 @@ OptTemporary -> TemporaryKeyword:
   | global temporary { ph("OptTemporary#2", $span, vec![]) }
   ;
 DropViewStmt -> Stmt:
-    drop view TableNameList RestrictOrCascadeOpt { ph("DropViewStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | drop view ifKwd exists TableNameList RestrictOrCascadeOpt { ph("DropViewStmt#1", $span, vec![Box::new($5) as Box<dyn Any>]) }
+    drop view TableNameList RestrictOrCascadeOpt { ph("DropViewStmt#0", $span, vec![Box::new($3) as Item]) }
+  | drop view ifKwd exists TableNameList RestrictOrCascadeOpt { ph("DropViewStmt#1", $span, vec![Box::new($5) as Item]) }
   ;
 DropUserStmt -> Stmt:
-    drop user UsernameList { ph("DropUserStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | drop user ifKwd exists UsernameList { ph("DropUserStmt#1", $span, vec![Box::new($5) as Box<dyn Any>]) }
+    drop user UsernameList { ph("DropUserStmt#0", $span, vec![Box::new($3) as Item]) }
+  | drop user ifKwd exists UsernameList { ph("DropUserStmt#1", $span, vec![Box::new($5) as Item]) }
   ;
 DropRoleStmt -> Stmt:
-    drop role RolenameList { ph("DropRoleStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | drop role ifKwd exists RolenameList { ph("DropRoleStmt#1", $span, vec![Box::new($5) as Box<dyn Any>]) }
+    drop role RolenameList { ph("DropRoleStmt#0", $span, vec![Box::new($3) as Item]) }
+  | drop role ifKwd exists RolenameList { ph("DropRoleStmt#1", $span, vec![Box::new($5) as Item]) }
   ;
 DropStatsStmt -> Stmt:
-    drop stats TableNameList { ph("DropStatsStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | drop stats TableName partition PartitionNameList { ph("DropStatsStmt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | drop stats TableName global { ph("DropStatsStmt#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    drop stats TableNameList { ph("DropStatsStmt#0", $span, vec![Box::new($3) as Item]) }
+  | drop stats TableName partition PartitionNameList { ph("DropStatsStmt#1", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | drop stats TableName global { ph("DropStatsStmt#2", $span, vec![Box::new($3) as Item]) }
   ;
 RestrictOrCascadeOpt -> ():
      { () }
@@ -1266,10 +1266,10 @@ EmptyStmt -> Option<Stmt>:
      { None }
   ;
 TraceStmt -> Stmt:
-    trace TraceableStmt { ph("TraceStmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | trace format eq stringLit TraceableStmt { ph("TraceStmt#1", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | trace plan TraceableStmt { ph("TraceStmt#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | trace plan target eq stringLit TraceableStmt { ph("TraceStmt#3", $span, vec![Box::new($6) as Box<dyn Any>]) }
+    trace TraceableStmt { ph("TraceStmt#0", $span, vec![Box::new($2) as Item]) }
+  | trace format eq stringLit TraceableStmt { ph("TraceStmt#1", $span, vec![Box::new($5) as Item]) }
+  | trace plan TraceableStmt { ph("TraceStmt#2", $span, vec![Box::new($3) as Item]) }
+  | trace plan target eq stringLit TraceableStmt { ph("TraceStmt#3", $span, vec![Box::new($6) as Item]) }
   ;
 ExplainSym -> String:
     explain { tok_text($lexer, &$1) }
@@ -1277,28 +1277,28 @@ ExplainSym -> String:
   | desc { tok_text($lexer, &$1) }
   ;
 ExplainStmt -> Stmt:
-    ExplainSym explore SelectStmt { ph("ExplainStmt#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ExplainSym explore stringLit { ph("ExplainStmt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ExplainSym explore replayer stringLit { ph("ExplainStmt#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ExplainSym explore analyze SelectStmt { ph("ExplainStmt#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | ExplainSym explore analyze stringLit { ph("ExplainStmt#4", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ExplainSym TableName { ph("ExplainStmt#5", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | ExplainSym TableName ColumnName { ph("ExplainStmt#6", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ExplainSym ExplainableStmt { ph("ExplainStmt#7", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | ExplainSym stringLit { ph("ExplainStmt#8", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ExplainSym forKwd connection NUM { ph("ExplainStmt#9", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | ExplainSym format eq stringLit forKwd connection NUM { ph("ExplainStmt#10", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | ExplainSym format eq stringLit ExplainableStmt { ph("ExplainStmt#11", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | ExplainSym format eq ExplainFormatType forKwd connection NUM { ph("ExplainStmt#12", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | ExplainSym format eq ExplainFormatType ExplainableStmt { ph("ExplainStmt#13", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | ExplainSym format eq ExplainFormatType stringLit { ph("ExplainStmt#14", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | ExplainSym format eq stringLit stringLit { ph("ExplainStmt#15", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ExplainSym analyze ExplainableStmt { ph("ExplainStmt#16", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ExplainSym analyze stringLit { ph("ExplainStmt#17", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ExplainSym analyze format eq ExplainFormatType ExplainableStmt { ph("ExplainStmt#18", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | ExplainSym analyze format eq ExplainFormatType stringLit { ph("ExplainStmt#19", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | ExplainSym analyze format eq stringLit stringLit { ph("ExplainStmt#20", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ExplainSym analyze format eq stringLit ExplainableStmt { ph("ExplainStmt#21", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    ExplainSym explore SelectStmt { ph("ExplainStmt#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | ExplainSym explore stringLit { ph("ExplainStmt#1", $span, vec![Box::new($1) as Item]) }
+  | ExplainSym explore replayer stringLit { ph("ExplainStmt#2", $span, vec![Box::new($1) as Item]) }
+  | ExplainSym explore analyze SelectStmt { ph("ExplainStmt#3", $span, vec![Box::new($1) as Item, Box::new($4) as Item]) }
+  | ExplainSym explore analyze stringLit { ph("ExplainStmt#4", $span, vec![Box::new($1) as Item]) }
+  | ExplainSym TableName { ph("ExplainStmt#5", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | ExplainSym TableName ColumnName { ph("ExplainStmt#6", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | ExplainSym ExplainableStmt { ph("ExplainStmt#7", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | ExplainSym stringLit { ph("ExplainStmt#8", $span, vec![Box::new($1) as Item]) }
+  | ExplainSym forKwd connection NUM { ph("ExplainStmt#9", $span, vec![Box::new($1) as Item, Box::new($4) as Item]) }
+  | ExplainSym format eq stringLit forKwd connection NUM { ph("ExplainStmt#10", $span, vec![Box::new($1) as Item, Box::new($7) as Item]) }
+  | ExplainSym format eq stringLit ExplainableStmt { ph("ExplainStmt#11", $span, vec![Box::new($1) as Item, Box::new($5) as Item]) }
+  | ExplainSym format eq ExplainFormatType forKwd connection NUM { ph("ExplainStmt#12", $span, vec![Box::new($1) as Item, Box::new($4) as Item, Box::new($7) as Item]) }
+  | ExplainSym format eq ExplainFormatType ExplainableStmt { ph("ExplainStmt#13", $span, vec![Box::new($1) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
+  | ExplainSym format eq ExplainFormatType stringLit { ph("ExplainStmt#14", $span, vec![Box::new($1) as Item, Box::new($4) as Item]) }
+  | ExplainSym format eq stringLit stringLit { ph("ExplainStmt#15", $span, vec![Box::new($1) as Item]) }
+  | ExplainSym analyze ExplainableStmt { ph("ExplainStmt#16", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | ExplainSym analyze stringLit { ph("ExplainStmt#17", $span, vec![Box::new($1) as Item]) }
+  | ExplainSym analyze format eq ExplainFormatType ExplainableStmt { ph("ExplainStmt#18", $span, vec![Box::new($1) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
+  | ExplainSym analyze format eq ExplainFormatType stringLit { ph("ExplainStmt#19", $span, vec![Box::new($1) as Item, Box::new($5) as Item]) }
+  | ExplainSym analyze format eq stringLit stringLit { ph("ExplainStmt#20", $span, vec![Box::new($1) as Item]) }
+  | ExplainSym analyze format eq stringLit ExplainableStmt { ph("ExplainStmt#21", $span, vec![Box::new($1) as Item, Box::new($6) as Item]) }
   ;
 ExplainFormatType -> String:
     traditional { tok_text($lexer, &$1) }
@@ -1312,39 +1312,39 @@ ExplainFormatType -> String:
   | ru { tok_text($lexer, &$1) }
   ;
 SavepointStmt -> Stmt:
-    savepoint Identifier { ph("SavepointStmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    savepoint Identifier { ph("SavepointStmt#0", $span, vec![Box::new($2) as Item]) }
   ;
 ReleaseSavepointStmt -> Stmt:
-    release savepoint Identifier { ph("ReleaseSavepointStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    release savepoint Identifier { ph("ReleaseSavepointStmt#0", $span, vec![Box::new($3) as Item]) }
   ;
 BRIEStmt -> Stmt:
-    backup BRIETables to stringLit BRIEOptions { ph("BRIEStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | backup logs to stringLit BRIEOptions { ph("BRIEStmt#1", $span, vec![Box::new($5) as Box<dyn Any>]) }
+    backup BRIETables to stringLit BRIEOptions { ph("BRIEStmt#0", $span, vec![Box::new($2) as Item, Box::new($5) as Item]) }
+  | backup logs to stringLit BRIEOptions { ph("BRIEStmt#1", $span, vec![Box::new($5) as Item]) }
   | stop backup logs { ph("BRIEStmt#2", $span, vec![]) }
-  | pause backup logs BRIEOptions { ph("BRIEStmt#3", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | pause backup logs BRIEOptions { ph("BRIEStmt#3", $span, vec![Box::new($4) as Item]) }
   | resume backup logs { ph("BRIEStmt#4", $span, vec![]) }
-  | purge backup logs from stringLit BRIEOptions { ph("BRIEStmt#5", $span, vec![Box::new($6) as Box<dyn Any>]) }
+  | purge backup logs from stringLit BRIEOptions { ph("BRIEStmt#5", $span, vec![Box::new($6) as Item]) }
   | show backup logs status { ph("BRIEStmt#6", $span, vec![]) }
   | show backup logs metadata from stringLit { ph("BRIEStmt#7", $span, vec![]) }
-  | show br job Int64Num { ph("BRIEStmt#8", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | show br job query Int64Num { ph("BRIEStmt#9", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | cancel br job Int64Num { ph("BRIEStmt#10", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | show br job Int64Num { ph("BRIEStmt#8", $span, vec![Box::new($4) as Item]) }
+  | show br job query Int64Num { ph("BRIEStmt#9", $span, vec![Box::new($5) as Item]) }
+  | cancel br job Int64Num { ph("BRIEStmt#10", $span, vec![Box::new($4) as Item]) }
   | show backup metadata from stringLit { ph("BRIEStmt#11", $span, vec![]) }
-  | restore BRIETables from stringLit BRIEOptions { ph("BRIEStmt#12", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | restore point from stringLit BRIEOptions { ph("BRIEStmt#13", $span, vec![Box::new($5) as Box<dyn Any>]) }
+  | restore BRIETables from stringLit BRIEOptions { ph("BRIEStmt#12", $span, vec![Box::new($2) as Item, Box::new($5) as Item]) }
+  | restore point from stringLit BRIEOptions { ph("BRIEStmt#13", $span, vec![Box::new($5) as Item]) }
   ;
 BRIETables -> Box<BRIEStmt>:
-    DatabaseSym '*' { ph("BRIETables#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | DatabaseSym DBNameList { ph("BRIETables#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | tableKwd TableNameList { ph("BRIETables#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    DatabaseSym '*' { ph("BRIETables#0", $span, vec![Box::new($1) as Item]) }
+  | DatabaseSym DBNameList { ph("BRIETables#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | tableKwd TableNameList { ph("BRIETables#2", $span, vec![Box::new($2) as Item]) }
   ;
 DBNameList -> Vec<String>:
-    DBName { ph("DBNameList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | DBNameList ',' DBName { ph("DBNameList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    DBName { ph("DBNameList#0", $span, vec![Box::new($1) as Item]) }
+  | DBNameList ',' DBName { ph("DBNameList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 BRIEOptions -> Vec<BRIEOption>:
      %prec empty { Vec::new() }
-  | BRIEOptions BRIEOption { ph("BRIEOptions#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | BRIEOptions BRIEOption { ph("BRIEOptions#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 BRIEIntegerOptionName -> BRIEOptionType:
     concurrency { ph("BRIEIntegerOptionName#0", $span, vec![]) }
@@ -1381,27 +1381,27 @@ BRIEKeywordOptionName -> BRIEOptionType:
   | on duplicate { ph("BRIEKeywordOptionName#2", $span, vec![]) }
   ;
 BRIEOption -> Box<BRIEOption>:
-    BRIEIntegerOptionName EqOpt LengthNum { ph("BRIEOption#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | BRIEBooleanOptionName EqOpt Boolean { ph("BRIEOption#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | BRIEStringOptionName EqOpt stringLit { ph("BRIEOption#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | BRIEKeywordOptionName EqOpt StringNameOrBRIEOptionKeyword { ph("BRIEOption#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | snapshot EqOpt LengthNum TimestampUnit ago { ph("BRIEOption#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | snapshot EqOpt stringLit { ph("BRIEOption#5", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | snapshot EqOpt LengthNum { ph("BRIEOption#6", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | lastBackup EqOpt stringLit { ph("BRIEOption#7", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | lastBackup EqOpt LengthNum { ph("BRIEOption#8", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | rateLimit EqOpt LengthNum mb '/' second { ph("BRIEOption#9", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | csvHeader EqOpt FieldsOrColumns { ph("BRIEOption#10", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | csvHeader EqOpt LengthNum { ph("BRIEOption#11", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | checksum EqOpt Boolean { ph("BRIEOption#12", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | checksum EqOpt OptionLevel { ph("BRIEOption#13", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | analyze EqOpt Boolean { ph("BRIEOption#14", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | analyze EqOpt OptionLevel { ph("BRIEOption#15", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | fullBackupStorage EqOpt stringLit { ph("BRIEOption#16", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | restoredTS EqOpt stringLit { ph("BRIEOption#17", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | startTS EqOpt stringLit { ph("BRIEOption#18", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | untilTS EqOpt stringLit { ph("BRIEOption#19", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | gcTTL EqOpt stringLit { ph("BRIEOption#20", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    BRIEIntegerOptionName EqOpt LengthNum { ph("BRIEOption#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | BRIEBooleanOptionName EqOpt Boolean { ph("BRIEOption#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | BRIEStringOptionName EqOpt stringLit { ph("BRIEOption#2", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | BRIEKeywordOptionName EqOpt StringNameOrBRIEOptionKeyword { ph("BRIEOption#3", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | snapshot EqOpt LengthNum TimestampUnit ago { ph("BRIEOption#4", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | snapshot EqOpt stringLit { ph("BRIEOption#5", $span, vec![Box::new($2) as Item]) }
+  | snapshot EqOpt LengthNum { ph("BRIEOption#6", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | lastBackup EqOpt stringLit { ph("BRIEOption#7", $span, vec![Box::new($2) as Item]) }
+  | lastBackup EqOpt LengthNum { ph("BRIEOption#8", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | rateLimit EqOpt LengthNum mb '/' second { ph("BRIEOption#9", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | csvHeader EqOpt FieldsOrColumns { ph("BRIEOption#10", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | csvHeader EqOpt LengthNum { ph("BRIEOption#11", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | checksum EqOpt Boolean { ph("BRIEOption#12", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | checksum EqOpt OptionLevel { ph("BRIEOption#13", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | analyze EqOpt Boolean { ph("BRIEOption#14", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | analyze EqOpt OptionLevel { ph("BRIEOption#15", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | fullBackupStorage EqOpt stringLit { ph("BRIEOption#16", $span, vec![Box::new($2) as Item]) }
+  | restoredTS EqOpt stringLit { ph("BRIEOption#17", $span, vec![Box::new($2) as Item]) }
+  | startTS EqOpt stringLit { ph("BRIEOption#18", $span, vec![Box::new($2) as Item]) }
+  | untilTS EqOpt stringLit { ph("BRIEOption#19", $span, vec![Box::new($2) as Item]) }
+  | gcTTL EqOpt stringLit { ph("BRIEOption#20", $span, vec![Box::new($2) as Item]) }
   ;
 LengthNum -> u64:
     NUM { {
@@ -1431,7 +1431,7 @@ NUM -> i64:
     intLit { $lexer.src_str(tok_span(&$1)).parse::<i64>().unwrap_or(0) }
   ;
 Boolean -> bool:
-    NUM { ph("Boolean#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    NUM { ph("Boolean#0", $span, vec![Box::new($1) as Item]) }
   | falseKwd { false }
   | trueKwd { true }
   ;
@@ -1441,7 +1441,7 @@ OptionLevel -> BRIEOptionLevel:
   | required { ph("OptionLevel#2", $span, vec![]) }
   ;
 CancelImportStmt -> Stmt:
-    cancel importKwd job Int64Num { ph("CancelImportStmt#0", $span, vec![Box::new($4) as Box<dyn Any>]) }
+    cancel importKwd job Int64Num { ph("CancelImportStmt#0", $span, vec![Box::new($4) as Item]) }
   ;
 Expression -> Expr:
     singleAtIdentifier assignmentEq Expression %prec assignmentEq { Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1))), value: Some($3), ..Default::default() })) }
@@ -1491,12 +1491,12 @@ ExpressionList -> Vec<Expr>:
   | ExpressionList ',' Expression { { let mut v = $1; v.push($3); v } }
   ;
 MaxValueOrExpressionList -> Vec<Expr>:
-    MaxValueOrExpression { ph("MaxValueOrExpressionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | MaxValueOrExpressionList ',' MaxValueOrExpression { ph("MaxValueOrExpressionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    MaxValueOrExpression { ph("MaxValueOrExpressionList#0", $span, vec![Box::new($1) as Item]) }
+  | MaxValueOrExpressionList ',' MaxValueOrExpression { ph("MaxValueOrExpressionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 DefaultOrExpressionList -> Vec<Expr>:
-    DefaultOrExpression { ph("DefaultOrExpressionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | DefaultOrExpressionList ',' DefaultOrExpression { ph("DefaultOrExpressionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    DefaultOrExpression { ph("DefaultOrExpressionList#0", $span, vec![Box::new($1) as Item]) }
+  | DefaultOrExpressionList ',' DefaultOrExpression { ph("DefaultOrExpressionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ExpressionListOpt -> Vec<Expr>:
      { Vec::new() }
@@ -1678,40 +1678,40 @@ IgnoreOptional -> bool:
   ;
 IndexName -> Box<NullString>:
      { ph("IndexName#0", $span, vec![]) }
-  | Identifier { ph("IndexName#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | Identifier { ph("IndexName#1", $span, vec![Box::new($1) as Item]) }
   ;
 IndexOptionList -> Option<Box<IndexOption>>:
      { None }
-  | IndexOptionList IndexOption { ph("IndexOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | IndexOptionList IndexOption { ph("IndexOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 IndexOption -> Box<IndexOption>:
-    keyBlockSize EqOpt LengthNum { ph("IndexOption#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    keyBlockSize EqOpt LengthNum { ph("IndexOption#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   | addColumnarReplicaOnDemand { ph("IndexOption#1", $span, vec![]) }
-  | IndexType { ph("IndexOption#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | with parser Identifier { ph("IndexOption#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | IndexType { ph("IndexOption#2", $span, vec![Box::new($1) as Item]) }
+  | with parser Identifier { ph("IndexOption#3", $span, vec![Box::new($3) as Item]) }
   | comment stringLit { ph("IndexOption#4", $span, vec![]) }
-  | IndexInvisible { ph("IndexOption#5", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | WithClustered { ph("IndexOption#6", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | IndexInvisible { ph("IndexOption#5", $span, vec![Box::new($1) as Item]) }
+  | WithClustered { ph("IndexOption#6", $span, vec![Box::new($1) as Item]) }
   | global { ph("IndexOption#7", $span, vec![]) }
   | local { ph("IndexOption#8", $span, vec![]) }
-  | preSplitRegions EqOpt '(' SplitOption ')' { ph("IndexOption#9", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | preSplitRegions EqOpt Int64Num { ph("IndexOption#10", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | preSplitRegions EqOpt auto { ph("IndexOption#11", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | secondaryEngineAttribute EqOpt stringLit { ph("IndexOption#12", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | where Expression { ph("IndexOption#13", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | preSplitRegions EqOpt '(' SplitOption ')' { ph("IndexOption#9", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | preSplitRegions EqOpt Int64Num { ph("IndexOption#10", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | preSplitRegions EqOpt auto { ph("IndexOption#11", $span, vec![Box::new($2) as Item]) }
+  | secondaryEngineAttribute EqOpt stringLit { ph("IndexOption#12", $span, vec![Box::new($2) as Item]) }
+  | where Expression { ph("IndexOption#13", $span, vec![Box::new($2) as Item]) }
   ;
 IndexNameAndTypeOpt -> Item:
-    IndexName { ph("IndexNameAndTypeOpt#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | IndexName using IndexTypeName { ph("IndexNameAndTypeOpt#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | Identifier tp IndexTypeName { ph("IndexNameAndTypeOpt#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    IndexName { ph("IndexNameAndTypeOpt#0", $span, vec![Box::new($1) as Item]) }
+  | IndexName using IndexTypeName { ph("IndexNameAndTypeOpt#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | Identifier tp IndexTypeName { ph("IndexNameAndTypeOpt#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 IndexTypeOpt -> Option<IndexType>:
      { None }
   | IndexType { Some($1) }
   ;
 IndexType -> IndexType:
-    using IndexTypeName { ph("IndexType#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | tp IndexTypeName { ph("IndexType#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    using IndexTypeName { ph("IndexType#0", $span, vec![Box::new($2) as Item]) }
+  | tp IndexTypeName { ph("IndexType#1", $span, vec![Box::new($2) as Item]) }
   ;
 IndexTypeName -> Item:
     btree { ph("IndexTypeName#0", $span, vec![]) }
@@ -2333,41 +2333,41 @@ NotKeywordToken -> String:
   | utilizationLimit { tok_text($lexer, &$1) }
   ;
 CallStmt -> Stmt:
-    call ProcedureCall { ph("CallStmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    call ProcedureCall { ph("CallStmt#0", $span, vec![Box::new($2) as Item]) }
   ;
 ProcedureCall -> Expr:
     identifier { ph("ProcedureCall#0", $span, vec![]) }
-  | Identifier '.' Identifier { ph("ProcedureCall#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | identifier '(' ExpressionListOpt ')' { ph("ProcedureCall#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | Identifier '.' Identifier '(' ExpressionListOpt ')' { ph("ProcedureCall#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | Identifier '.' Identifier { ph("ProcedureCall#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | identifier '(' ExpressionListOpt ')' { ph("ProcedureCall#2", $span, vec![Box::new($3) as Item]) }
+  | Identifier '.' Identifier '(' ExpressionListOpt ')' { ph("ProcedureCall#3", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($5) as Item]) }
   ;
 InsertIntoStmt -> Stmt:
-    insert TableOptimizerHintsOpt PriorityOpt IgnoreOptional IntoOpt TableName PartitionNameListOpt InsertValues OnDuplicateKeyUpdate ReturningClause { ph("InsertIntoStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>]) }
+    insert TableOptimizerHintsOpt PriorityOpt IgnoreOptional IntoOpt TableName PartitionNameListOpt InsertValues OnDuplicateKeyUpdate ReturningClause { ph("InsertIntoStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($9) as Item, Box::new($10) as Item]) }
   ;
 IntoOpt -> String:
      { ph("IntoOpt#0", $span, vec![]) }
   | into { tok_text($lexer, &$1) }
   ;
 InsertValues -> Box<InsertStmt>:
-    '(' ColumnNameListOpt ')' ValueSym ValuesList InsertRowAliasOpt { ph("InsertValues#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | '(' ColumnNameListOpt ')' SetOprStmt { ph("InsertValues#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | '(' ColumnNameListOpt ')' SelectStmt { ph("InsertValues#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | '(' ColumnNameListOpt ')' SelectStmtWithClause { ph("InsertValues#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | '(' ColumnNameListOpt ')' SubSelect { ph("InsertValues#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | ValueSym ValuesList InsertRowAliasOpt %prec insertValues { ph("InsertValues#5", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | SetOprStmt { ph("InsertValues#6", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SelectStmt { ph("InsertValues#7", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SelectStmtWithClause { ph("InsertValues#8", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SubSelect { ph("InsertValues#9", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | set ColumnSetValueList InsertRowAliasOpt { ph("InsertValues#10", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    '(' ColumnNameListOpt ')' ValueSym ValuesList InsertRowAliasOpt { ph("InsertValues#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
+  | '(' ColumnNameListOpt ')' SetOprStmt { ph("InsertValues#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | '(' ColumnNameListOpt ')' SelectStmt { ph("InsertValues#2", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | '(' ColumnNameListOpt ')' SelectStmtWithClause { ph("InsertValues#3", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | '(' ColumnNameListOpt ')' SubSelect { ph("InsertValues#4", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | ValueSym ValuesList InsertRowAliasOpt %prec insertValues { ph("InsertValues#5", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | SetOprStmt { ph("InsertValues#6", $span, vec![Box::new($1) as Item]) }
+  | SelectStmt { ph("InsertValues#7", $span, vec![Box::new($1) as Item]) }
+  | SelectStmtWithClause { ph("InsertValues#8", $span, vec![Box::new($1) as Item]) }
+  | SubSelect { ph("InsertValues#9", $span, vec![Box::new($1) as Item]) }
+  | set ColumnSetValueList InsertRowAliasOpt { ph("InsertValues#10", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 ValueSym -> String:
     value { tok_text($lexer, &$1) }
   | values { tok_text($lexer, &$1) }
   ;
 ValuesList -> Vec<Vec<Expr>>:
-    RowValue { ph("ValuesList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ValuesList ',' RowValue { ph("ValuesList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    RowValue { ph("ValuesList#0", $span, vec![Box::new($1) as Item]) }
+  | ValuesList ',' RowValue { ph("ValuesList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 RowValue -> Vec<Expr>:
     '(' ValuesOpt ')' { $2 }
@@ -2385,13 +2385,13 @@ ExprOrDefault -> Expr:
   | defaultKwd { Expr::Default(Box::default()) }
   ;
 ColumnSetValueList -> Box<InsertStmt>:
-    ColumnName EqOrAssignmentEq ExprOrDefault { ph("ColumnSetValueList#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ColumnSetValueList ',' ColumnName EqOrAssignmentEq ExprOrDefault { ph("ColumnSetValueList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    ColumnName EqOrAssignmentEq ExprOrDefault { ph("ColumnSetValueList#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | ColumnSetValueList ',' ColumnName EqOrAssignmentEq ExprOrDefault { ph("ColumnSetValueList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($5) as Item]) }
   ;
 InsertRowAliasOpt -> Option<Box<InsertRowAlias>>:
      %prec empty { None }
-  | as Identifier { ph("InsertRowAliasOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | as Identifier '(' IdentList ')' { ph("InsertRowAliasOpt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | as Identifier { ph("InsertRowAliasOpt#1", $span, vec![Box::new($2) as Item]) }
+  | as Identifier '(' IdentList ')' { ph("InsertRowAliasOpt#2", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 OnDuplicateKeyUpdate -> Vec<Assignment>:
      { Vec::new() }
@@ -2402,7 +2402,7 @@ ReturningClause -> Vec<SelectField>:
   | returning FieldList { $2 }
   ;
 ReplaceIntoStmt -> Stmt:
-    replace TableOptimizerHintsOpt PriorityOpt IntoOpt TableName PartitionNameListOpt InsertValues { ph("ReplaceIntoStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    replace TableOptimizerHintsOpt PriorityOpt IntoOpt TableName PartitionNameListOpt InsertValues { ph("ReplaceIntoStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
   ;
 Literal -> Expr:
     falseKwd { val(Datum::Bool(false), p) }
@@ -2484,11 +2484,11 @@ StringLiteral -> Expr:
     } }
   ;
 AlterOrderList -> Vec<AlterOrderItem>:
-    AlterOrderItem { ph("AlterOrderList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlterOrderList ',' AlterOrderItem { ph("AlterOrderList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    AlterOrderItem { ph("AlterOrderList#0", $span, vec![Box::new($1) as Item]) }
+  | AlterOrderList ',' AlterOrderItem { ph("AlterOrderList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 AlterOrderItem -> Box<AlterOrderItem>:
-    ColumnName OptOrder { ph("AlterOrderItem#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    ColumnName OptOrder { ph("AlterOrderItem#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 OrderBy -> Box<OrderByClause>:
     order by ByList { Box::new(OrderByClause { items: $3 }) }
@@ -3031,12 +3031,12 @@ TableNameList -> Vec<TableName>:
   | TableNameList ',' TableName { { let mut v = $1; v.push(*$3); v } }
   ;
 TableNameOptWild -> Box<TableName>:
-    Identifier OptWild { ph("TableNameOptWild#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | Identifier '.' Identifier OptWild { ph("TableNameOptWild#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    Identifier OptWild { ph("TableNameOptWild#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | Identifier '.' Identifier OptWild { ph("TableNameOptWild#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 TableAliasRefList -> Vec<TableName>:
-    TableNameOptWild { ph("TableAliasRefList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TableAliasRefList ',' TableNameOptWild { ph("TableAliasRefList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    TableNameOptWild { ph("TableAliasRefList#0", $span, vec![Box::new($1) as Item]) }
+  | TableAliasRefList ',' TableNameOptWild { ph("TableAliasRefList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 OptWild -> Item:
      %prec empty { ph("OptWild#0", $span, vec![]) }
@@ -3047,22 +3047,22 @@ QuickOptional -> bool:
   | quick { true }
   ;
 PreparedStmt -> Stmt:
-    prepare Identifier from PrepareSQL { ph("PreparedStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    prepare Identifier from PrepareSQL { ph("PreparedStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 PrepareSQL -> Expr:
     stringLit { ph("PrepareSQL#0", $span, vec![]) }
   | UserVariable { $1 }
   ;
 ExecuteStmt -> Stmt:
-    execute Identifier { ph("ExecuteStmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | execute Identifier using UserVariableList { ph("ExecuteStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    execute Identifier { ph("ExecuteStmt#0", $span, vec![Box::new($2) as Item]) }
+  | execute Identifier using UserVariableList { ph("ExecuteStmt#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 UserVariableList -> Vec<Expr>:
-    UserVariable { ph("UserVariableList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | UserVariableList ',' UserVariable { ph("UserVariableList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    UserVariable { ph("UserVariableList#0", $span, vec![Box::new($1) as Item]) }
+  | UserVariableList ',' UserVariable { ph("UserVariableList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 DeallocateStmt -> Stmt:
-    DeallocateSym prepare Identifier { ph("DeallocateStmt#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    DeallocateSym prepare Identifier { ph("DeallocateStmt#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 DeallocateSym -> String:
     deallocate { tok_text($lexer, &$1) }
@@ -3142,8 +3142,8 @@ SelectStmtFromTable -> Box<SelectStmt>:
   ;
 TableSampleOpt -> Option<Box<TableSample>>:
      %prec empty { None }
-  | tableSample TableSampleMethodOpt '(' Expression TableSampleUnitOpt ')' RepeatableOpt { ph("TableSampleOpt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | tableSample TableSampleMethodOpt '(' ')' RepeatableOpt { ph("TableSampleOpt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | tableSample TableSampleMethodOpt '(' Expression TableSampleUnitOpt ')' RepeatableOpt { ph("TableSampleOpt#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
+  | tableSample TableSampleMethodOpt '(' ')' RepeatableOpt { ph("TableSampleOpt#2", $span, vec![Box::new($2) as Item, Box::new($5) as Item]) }
   ;
 TableSampleMethodOpt -> SampleMethodType:
      %prec empty { ph("TableSampleMethodOpt#0", $span, vec![]) }
@@ -3207,14 +3207,14 @@ SelectStmtWithClause -> Stmt:
     WithClause SelectStmt { {
         match $2 {
             Stmt::Select(mut sel) => {
-                sel.with = Some(std::rc::Rc::from($1));
+                sel.with = Some(std::sync::Arc::from($1));
                 Stmt::Select(sel)
             }
             other => other,
         }
     } }
   | WithClause SubSelect { {
-        let with = std::rc::Rc::from($1);
+        let with = std::sync::Arc::from($1);
         match $2 {
             Expr::Subquery(sq) => match sq.query {
                 ResultSetNode::Select(mut x) => {
@@ -3409,7 +3409,7 @@ TableFactor -> ResultSetNode:
             other => unreachable!("SubSelect yields a SubqueryExpr, got {other:?}"),
         }
     } }
-  | lateral SubSelect TableAsName IdentListWithParenOpt { ph("TableFactor#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+  | lateral SubSelect TableAsName IdentListWithParenOpt { ph("TableFactor#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
   | '(' TableRefs ')' { {
         let mut j = $2;
         j.explicit_parens = true;
@@ -3498,7 +3498,7 @@ CrossOpt -> String:
   ;
 LimitClause -> Option<Box<Limit>>:
      %prec empty { None }
-  | limit LimitOption { ph("LimitClause#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | limit LimitOption { ph("LimitClause#1", $span, vec![Box::new($2) as Item]) }
   ;
 LimitOption -> Expr:
     LengthNum { val(Datum::Uint($1), p) }
@@ -3587,7 +3587,7 @@ SelectStmtGroup -> Option<Box<GroupByClause>>:
   ;
 SelectStmtIntoOption -> Option<Box<SelectIntoOption>>:
      { None }
-  | into outfile stringLit Fields Lines { ph("SelectStmtIntoOption#1", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | into outfile stringLit Fields Lines { ph("SelectStmtIntoOption#1", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 SubSelect -> Expr:
     '(' SelectStmt ')' { subquery(stmt_to_result_set($2)) }
@@ -3606,7 +3606,17 @@ SelectLockOpt -> Option<Box<SelectLockInfo>>:
   | forKwd update OfTablesOpt { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdate, tables: $3, ..Default::default() })) }
   | forKwd share OfTablesOpt { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShare, tables: $3, ..Default::default() })) }
   | forKwd update OfTablesOpt nowait { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateNoWait, tables: $3, ..Default::default() })) }
-  | forKwd update OfTablesOpt wait LengthNum { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec: $5, tables: $3, unported: None })) }
+  | forKwd update OfTablesOpt wait NUM { {
+        // getUint64FromNUM($5): NUM's i64 value cannot carry an uint64 above MaxInt64, so
+        // read the literal (the digits after WAIT) from the source text.
+        let text = $lexer.src_str(Span::new(tok_span(&$4).end(), $span.end()));
+        let s = text.trim_end().rsplit(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+        let wait_sec = s.parse::<u64>().unwrap_or_else(|_| {
+            p.fail(format!("{s} is out of range [0,18446744073709551615]"), $span.start());
+            0
+        });
+        Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec, tables: $3, unported: None }))
+    } }
   | forKwd share OfTablesOpt nowait { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShareNoWait, tables: $3, ..Default::default() })) }
   | forKwd update OfTablesOpt skip locked { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateSkipLocked, tables: $3, ..Default::default() })) }
   | forKwd share OfTablesOpt skip locked { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShareSkipLocked, tables: $3, ..Default::default() })) }
@@ -3622,7 +3632,7 @@ SetOprStmt -> Stmt:
   | WithClause SetOprStmtWithLimitOrderBy { {
         match $2 {
             Stmt::SetOpr(mut set_opr) => {
-                set_opr.with = Some(std::rc::Rc::from($1));
+                set_opr.with = Some(std::sync::Arc::from($1));
                 Stmt::SetOpr(set_opr)
             }
             other => other,
@@ -3631,7 +3641,7 @@ SetOprStmt -> Stmt:
   | WithClause SetOprStmtWoutLimitOrderBy { {
         match $2 {
             Stmt::SetOpr(mut set_opr) => {
-                set_opr.with = Some(std::rc::Rc::from($1));
+                set_opr.with = Some(std::sync::Arc::from($1));
                 Stmt::SetOpr(set_opr)
             }
             other => other,
@@ -3760,10 +3770,10 @@ SetOprOpt -> bool:
   ;
 SetStmt -> Stmt:
     set VariableAssignmentList { Stmt::Set(Box::new(SetStmt { variables: $2 })) }
-  | set password EqOrAssignmentEq PasswordOpt { ph("SetStmt#1", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | set password EqOrAssignmentEq PasswordOpt retain current password { ph("SetStmt#2", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | set password forKwd Username EqOrAssignmentEq PasswordOpt { ph("SetStmt#3", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | set password forKwd Username EqOrAssignmentEq PasswordOpt retain current password { ph("SetStmt#4", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+  | set password EqOrAssignmentEq PasswordOpt { ph("SetStmt#1", $span, vec![Box::new($4) as Item]) }
+  | set password EqOrAssignmentEq PasswordOpt retain current password { ph("SetStmt#2", $span, vec![Box::new($4) as Item]) }
+  | set password forKwd Username EqOrAssignmentEq PasswordOpt { ph("SetStmt#3", $span, vec![Box::new($4) as Item, Box::new($6) as Item]) }
+  | set password forKwd Username EqOrAssignmentEq PasswordOpt retain current password { ph("SetStmt#4", $span, vec![Box::new($4) as Item, Box::new($6) as Item]) }
   | set global transaction TransactionChars { {
         let mut vars = $4;
         for v in &mut vars { v.is_global = true; }
@@ -3780,24 +3790,24 @@ SetStmt -> Stmt:
         }
         Stmt::Set(Box::new(SetStmt { variables: assigns }))
     } }
-  | set config Identifier ConfigItemName EqOrAssignmentEq SetExpr { ph("SetStmt#8", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | set config stringLit ConfigItemName EqOrAssignmentEq SetExpr { ph("SetStmt#9", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+  | set config Identifier ConfigItemName EqOrAssignmentEq SetExpr { ph("SetStmt#8", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item]) }
+  | set config stringLit ConfigItemName EqOrAssignmentEq SetExpr { ph("SetStmt#9", $span, vec![Box::new($4) as Item, Box::new($6) as Item]) }
   | set sessionStates stringLit { ph("SetStmt#10", $span, vec![]) }
-  | set resource group ResourceGroupName { ph("SetStmt#11", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | set resource group ResourceGroupName { ph("SetStmt#11", $span, vec![Box::new($4) as Item]) }
   ;
 SetRoleStmt -> Stmt:
-    set role SetRoleOpt { ph("SetRoleStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    set role SetRoleOpt { ph("SetRoleStmt#0", $span, vec![Box::new($3) as Item]) }
   ;
 SetDefaultRoleStmt -> Stmt:
-    set defaultKwd role SetDefaultRoleOpt to UsernameList { ph("SetDefaultRoleStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    set defaultKwd role SetDefaultRoleOpt to UsernameList { ph("SetDefaultRoleStmt#0", $span, vec![Box::new($4) as Item, Box::new($6) as Item]) }
   ;
 SetDefaultRoleOpt -> Box<SetRoleStmt>:
     none { ph("SetDefaultRoleOpt#0", $span, vec![]) }
   | all { ph("SetDefaultRoleOpt#1", $span, vec![]) }
-  | RolenameList { ph("SetDefaultRoleOpt#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | RolenameList { ph("SetDefaultRoleOpt#2", $span, vec![Box::new($1) as Item]) }
   ;
 SetRoleOpt -> Box<SetRoleStmt>:
-    all except RolenameList { ph("SetRoleOpt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    all except RolenameList { ph("SetRoleOpt#0", $span, vec![Box::new($3) as Item]) }
   | SetDefaultRoleOpt { $1 }
   | defaultKwd { ph("SetRoleOpt#2", $span, vec![]) }
   ;
@@ -3832,8 +3842,8 @@ VariableName -> String:
   ;
 ConfigItemName -> String:
     Identifier { $1 }
-  | Identifier '.' ConfigItemName { ph("ConfigItemName#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | Identifier '-' ConfigItemName { ph("ConfigItemName#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | Identifier '.' ConfigItemName { ph("ConfigItemName#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | Identifier '-' ConfigItemName { ph("ConfigItemName#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 VariableAssignment -> Box<VariableAssignment>:
     VariableName EqOrAssignmentEq SetExpr { Box::new(VariableAssignment { name: $1, value: $3, is_system: true, ..Default::default() }) }
@@ -3928,14 +3938,14 @@ UserVariable -> Expr:
     singleAtIdentifier { Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1))), ..Default::default() })) }
   ;
 Username -> Box<AuthUserIdentity>:
-    StringName { ph("Username#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | StringName '@' StringName { ph("Username#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | StringName singleAtIdentifier { ph("Username#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | currentUser OptionalBraces { ph("Username#3", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    StringName { ph("Username#0", $span, vec![Box::new($1) as Item]) }
+  | StringName '@' StringName { ph("Username#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | StringName singleAtIdentifier { ph("Username#2", $span, vec![Box::new($1) as Item]) }
+  | currentUser OptionalBraces { ph("Username#3", $span, vec![Box::new($2) as Item]) }
   ;
 UsernameList -> Vec<AuthUserIdentity>:
-    Username { ph("UsernameList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | UsernameList ',' Username { ph("UsernameList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Username { ph("UsernameList#0", $span, vec![Box::new($1) as Item]) }
+  | UsernameList ',' Username { ph("UsernameList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 PasswordOpt -> String:
     stringLit { tok_text($lexer, &$1) }
@@ -3949,25 +3959,25 @@ RoleNameString -> String:
   | identifier { tok_text($lexer, &$1) }
   ;
 RolenameComposed -> Item:
-    StringName '@' StringName { ph("RolenameComposed#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | StringName singleAtIdentifier { ph("RolenameComposed#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    StringName '@' StringName { ph("RolenameComposed#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | StringName singleAtIdentifier { ph("RolenameComposed#1", $span, vec![Box::new($1) as Item]) }
   ;
 RolenameWithoutIdent -> Item:
     stringLit { ph("RolenameWithoutIdent#0", $span, vec![]) }
   | RolenameComposed { $1 }
   ;
 Rolename -> Box<AuthRoleIdentity>:
-    RoleNameString { ph("Rolename#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | RolenameComposed { ph("Rolename#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    RoleNameString { ph("Rolename#0", $span, vec![Box::new($1) as Item]) }
+  | RolenameComposed { ph("Rolename#1", $span, vec![Box::new($1) as Item]) }
   ;
 RolenameList -> Vec<AuthRoleIdentity>:
-    Rolename { ph("RolenameList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | RolenameList ',' Rolename { ph("RolenameList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Rolename { ph("RolenameList#0", $span, vec![Box::new($1) as Item]) }
+  | RolenameList ',' Rolename { ph("RolenameList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 AdminStmtLimitOpt -> Box<LimitSimple>:
-    limit LengthNum { ph("AdminStmtLimitOpt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | limit LengthNum ',' LengthNum { ph("AdminStmtLimitOpt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | limit LengthNum offset LengthNum { ph("AdminStmtLimitOpt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    limit LengthNum { ph("AdminStmtLimitOpt#0", $span, vec![Box::new($2) as Item]) }
+  | limit LengthNum ',' LengthNum { ph("AdminStmtLimitOpt#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | limit LengthNum offset LengthNum { ph("AdminStmtLimitOpt#2", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 BDRRole -> BDRRole:
     primary { ph("BDRRole#0", $span, vec![]) }
@@ -3975,28 +3985,28 @@ BDRRole -> BDRRole:
   ;
 AdminStmt -> Stmt:
     admin show ddl { ph("AdminStmt#0", $span, vec![]) }
-  | admin show ddl jobs WhereClauseOptional { ph("AdminStmt#1", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | admin show ddl jobs Int64Num WhereClauseOptional { ph("AdminStmt#2", $span, vec![Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | admin show TableName next_row_id { ph("AdminStmt#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | admin check tableKwd TableNameList { ph("AdminStmt#4", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | admin check index TableName Identifier { ph("AdminStmt#5", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | admin recover index TableName Identifier { ph("AdminStmt#6", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | admin show ddl jobs WhereClauseOptional { ph("AdminStmt#1", $span, vec![Box::new($5) as Item]) }
+  | admin show ddl jobs Int64Num WhereClauseOptional { ph("AdminStmt#2", $span, vec![Box::new($5) as Item, Box::new($6) as Item]) }
+  | admin show TableName next_row_id { ph("AdminStmt#3", $span, vec![Box::new($3) as Item]) }
+  | admin check tableKwd TableNameList { ph("AdminStmt#4", $span, vec![Box::new($4) as Item]) }
+  | admin check index TableName Identifier { ph("AdminStmt#5", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
+  | admin recover index TableName Identifier { ph("AdminStmt#6", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
   | admin create workload snapshot { ph("AdminStmt#7", $span, vec![]) }
-  | admin cleanup index TableName Identifier { ph("AdminStmt#8", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | admin check index TableName Identifier HandleRangeList { ph("AdminStmt#9", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | admin checksum tableKwd TableNameList { ph("AdminStmt#10", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | admin cancel ddl jobs NumList { ph("AdminStmt#11", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | admin pause ddl jobs NumList { ph("AdminStmt#12", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | admin resume ddl jobs NumList { ph("AdminStmt#13", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | admin show ddl job queries NumList { ph("AdminStmt#14", $span, vec![Box::new($6) as Box<dyn Any>]) }
-  | admin show ddl job queries AdminStmtLimitOpt { ph("AdminStmt#15", $span, vec![Box::new($6) as Box<dyn Any>]) }
-  | admin show slow AdminShowSlow { ph("AdminStmt#16", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | admin cleanup index TableName Identifier { ph("AdminStmt#8", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
+  | admin check index TableName Identifier HandleRangeList { ph("AdminStmt#9", $span, vec![Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
+  | admin checksum tableKwd TableNameList { ph("AdminStmt#10", $span, vec![Box::new($4) as Item]) }
+  | admin cancel ddl jobs NumList { ph("AdminStmt#11", $span, vec![Box::new($5) as Item]) }
+  | admin pause ddl jobs NumList { ph("AdminStmt#12", $span, vec![Box::new($5) as Item]) }
+  | admin resume ddl jobs NumList { ph("AdminStmt#13", $span, vec![Box::new($5) as Item]) }
+  | admin show ddl job queries NumList { ph("AdminStmt#14", $span, vec![Box::new($6) as Item]) }
+  | admin show ddl job queries AdminStmtLimitOpt { ph("AdminStmt#15", $span, vec![Box::new($6) as Item]) }
+  | admin show slow AdminShowSlow { ph("AdminStmt#16", $span, vec![Box::new($4) as Item]) }
   | admin reload exprPushdownBlacklist { ph("AdminStmt#17", $span, vec![]) }
   | admin reload optRuleBlacklist { ph("AdminStmt#18", $span, vec![]) }
-  | admin plugins enable PluginNameList { ph("AdminStmt#19", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | admin plugins disable PluginNameList { ph("AdminStmt#20", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | admin cleanup tableKwd lock TableNameList { ph("AdminStmt#21", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | admin repair tableKwd TableName CreateTableStmt { ph("AdminStmt#22", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | admin plugins enable PluginNameList { ph("AdminStmt#19", $span, vec![Box::new($4) as Item]) }
+  | admin plugins disable PluginNameList { ph("AdminStmt#20", $span, vec![Box::new($4) as Item]) }
+  | admin cleanup tableKwd lock TableNameList { ph("AdminStmt#21", $span, vec![Box::new($5) as Item]) }
+  | admin repair tableKwd TableName CreateTableStmt { ph("AdminStmt#22", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
   | admin flush bindings { ph("AdminStmt#23", $span, vec![]) }
   | admin capture bindings { ph("AdminStmt#24", $span, vec![]) }
   | admin evolve bindings { ph("AdminStmt#25", $span, vec![]) }
@@ -4004,35 +4014,35 @@ AdminStmt -> Stmt:
   | admin reload cluster bindings { ph("AdminStmt#27", $span, vec![]) }
   | admin reload statsExtended { ph("AdminStmt#28", $span, vec![]) }
   | admin reload statistics { ph("AdminStmt#29", $span, vec![]) }
-  | admin flush StatementScope planCache { ph("AdminStmt#30", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | admin set bdr role BDRRole { ph("AdminStmt#31", $span, vec![Box::new($5) as Box<dyn Any>]) }
+  | admin flush StatementScope planCache { ph("AdminStmt#30", $span, vec![Box::new($3) as Item]) }
+  | admin set bdr role BDRRole { ph("AdminStmt#31", $span, vec![Box::new($5) as Item]) }
   | admin show bdr role { ph("AdminStmt#32", $span, vec![]) }
   | admin unset bdr role { ph("AdminStmt#33", $span, vec![]) }
-  | admin alter ddl jobs Int64Num AlterJobOptionList { ph("AdminStmt#34", $span, vec![Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+  | admin alter ddl jobs Int64Num AlterJobOptionList { ph("AdminStmt#34", $span, vec![Box::new($5) as Item, Box::new($6) as Item]) }
   ;
 AlterJobOptionList -> Vec<AlterJobOption>:
-    AlterJobOption { ph("AlterJobOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlterJobOptionList ',' AlterJobOption { ph("AlterJobOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    AlterJobOption { ph("AlterJobOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | AlterJobOptionList ',' AlterJobOption { ph("AlterJobOptionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 AlterJobOption -> Box<AlterJobOption>:
-    identifier eq SignedLiteral { ph("AlterJobOption#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    identifier eq SignedLiteral { ph("AlterJobOption#0", $span, vec![Box::new($3) as Item]) }
   ;
 AdminShowSlow -> Box<ShowSlow>:
-    recent NUM { ph("AdminShowSlow#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | top NUM { ph("AdminShowSlow#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | top internal NUM { ph("AdminShowSlow#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | top all NUM { ph("AdminShowSlow#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    recent NUM { ph("AdminShowSlow#0", $span, vec![Box::new($2) as Item]) }
+  | top NUM { ph("AdminShowSlow#1", $span, vec![Box::new($2) as Item]) }
+  | top internal NUM { ph("AdminShowSlow#2", $span, vec![Box::new($3) as Item]) }
+  | top all NUM { ph("AdminShowSlow#3", $span, vec![Box::new($3) as Item]) }
   ;
 HandleRangeList -> Vec<HandleRange>:
-    HandleRange { ph("HandleRangeList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | HandleRangeList ',' HandleRange { ph("HandleRangeList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    HandleRange { ph("HandleRangeList#0", $span, vec![Box::new($1) as Item]) }
+  | HandleRangeList ',' HandleRange { ph("HandleRangeList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 HandleRange -> HandleRange:
-    '(' Int64Num ',' Int64Num ')' { ph("HandleRange#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    '(' Int64Num ',' Int64Num ')' { ph("HandleRange#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 NumList -> Vec<i64>:
-    Int64Num { ph("NumList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | NumList ',' Int64Num { ph("NumList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Int64Num { ph("NumList#0", $span, vec![Box::new($1) as Item]) }
+  | NumList ',' Int64Num { ph("NumList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ShowStmt -> Stmt:
     show ShowTargetFilterable ShowLikeOrWhereOpt { {
@@ -4050,7 +4060,7 @@ ShowStmt -> Stmt:
   | show create sequence TableName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreateSequence, table: Some($4), ..Default::default() })) }
   | show create placement policy PolicyName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreatePlacementPolicy, db_name: $5, ..Default::default() })) }
   | show create resource group ResourceGroupName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreateResourceGroup, resource_group_name: $5, ..Default::default() })) }
-  | show create user Username { ph("ShowStmt#7", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | show create user Username { ph("ShowStmt#7", $span, vec![Box::new($4) as Item]) }
   | show masking policies forKwd TableName WhereClauseOptional { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::MaskingPolicies, table: Some($5), where_: $6, ..Default::default() })) }
   | show tableKwd TableName PartitionNameListOpt regions WhereClauseOptional { {
         let mut table = $3;
@@ -4064,16 +4074,16 @@ ShowStmt -> Stmt:
         Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Regions, table: Some(table), index_name: CIStr::new($6), where_: $8, ..Default::default() }))
     } }
   | show grants { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Grants, ..Default::default() })) }
-  | show grants forKwd Username UsingRoles { ph("ShowStmt#13", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | show grants forKwd Username UsingRoles { ph("ShowStmt#13", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
   | show master status { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::MasterStatus, ..Default::default() })) }
   | show binaryType log status { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::BinlogStatus, ..Default::default() })) }
   | show Replica status { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::ReplicaStatus, ..Default::default() })) }
   | show OptFull processlist { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::ProcessList, full: $2, ..Default::default() })) }
   | show profiles { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Profiles, ..Default::default() })) }
-  | show profile ShowProfileTypesOpt ShowProfileArgsOpt SelectStmtLimitOpt { ph("ShowStmt#19", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+  | show profile ShowProfileTypesOpt ShowProfileArgsOpt SelectStmtLimitOpt { ph("ShowStmt#19", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
   | show privileges { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Privileges, ..Default::default() })) }
   | show builtins { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::Builtins, ..Default::default() })) }
-  | show placement forKwd ShowPlacementTarget { ph("ShowStmt#22", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | show placement forKwd ShowPlacementTarget { ph("ShowStmt#22", $span, vec![Box::new($4) as Item]) }
   | show ShowImportJobTarget Int64Num { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::ImportJobs, import_job_id: Some($3), import_job_raw: $2, ..Default::default() })) }
   | show distribution job Int64Num { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::DistributionJobs, distribution_job_id: Some($4), ..Default::default() })) }
   | show create procedure TableName { Stmt::Show(Box::new(ShowStmt { tp: ShowStmtType::CreateProcedure, procedure: Some($4), ..Default::default() })) }
@@ -4084,17 +4094,17 @@ ShowStmt -> Stmt:
     } }
   ;
 ShowPlacementTarget -> Box<ShowStmt>:
-    DatabaseSym DBName { ph("ShowPlacementTarget#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | tableKwd TableName { ph("ShowPlacementTarget#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | tableKwd TableName partition Identifier { ph("ShowPlacementTarget#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    DatabaseSym DBName { ph("ShowPlacementTarget#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | tableKwd TableName { ph("ShowPlacementTarget#1", $span, vec![Box::new($2) as Item]) }
+  | tableKwd TableName partition Identifier { ph("ShowPlacementTarget#2", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 ShowProfileTypesOpt -> Vec<i64>:
      { Vec::new() }
   | ShowProfileTypes { $1 }
   ;
 ShowProfileTypes -> Vec<i64>:
-    ShowProfileType { ph("ShowProfileTypes#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ShowProfileTypes ',' ShowProfileType { ph("ShowProfileTypes#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    ShowProfileType { ph("ShowProfileTypes#0", $span, vec![Box::new($1) as Item]) }
+  | ShowProfileTypes ',' ShowProfileType { ph("ShowProfileTypes#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ShowProfileType -> i64:
     cpu { ph("ShowProfileType#0", $span, vec![]) }
@@ -4109,11 +4119,11 @@ ShowProfileType -> i64:
   ;
 ShowProfileArgsOpt -> Item:
      { Box::new(()) as Item }
-  | forKwd query Int64Num { ph("ShowProfileArgsOpt#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | forKwd query Int64Num { ph("ShowProfileArgsOpt#1", $span, vec![Box::new($3) as Item]) }
   ;
 UsingRoles -> Vec<AuthRoleIdentity>:
      { Vec::new() }
-  | using RolenameList { ph("UsingRoles#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | using RolenameList { ph("UsingRoles#1", $span, vec![Box::new($2) as Item]) }
   ;
 ShowIndexKwd -> String:
     index { tok_text($lexer, &$1) }
@@ -4212,21 +4222,21 @@ Replica -> String:
   | slave { tok_text($lexer, &$1) }
   ;
 FlushStmt -> Stmt:
-    flush NoWriteToBinLogAliasOpt FlushOption { ph("FlushStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    flush NoWriteToBinLogAliasOpt FlushOption { ph("FlushStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 PluginNameList -> Vec<String>:
-    Identifier { ph("PluginNameList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | PluginNameList ',' Identifier { ph("PluginNameList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Identifier { ph("PluginNameList#0", $span, vec![Box::new($1) as Item]) }
+  | PluginNameList ',' Identifier { ph("PluginNameList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 FlushOption -> Box<FlushStmt>:
     privileges { ph("FlushOption#0", $span, vec![]) }
   | status { ph("FlushOption#1", $span, vec![]) }
-  | tidb plugins PluginNameList { ph("FlushOption#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | tidb plugins PluginNameList { ph("FlushOption#2", $span, vec![Box::new($3) as Item]) }
   | hosts { ph("FlushOption#3", $span, vec![]) }
-  | LogTypeOpt logs { ph("FlushOption#4", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TableOrTables TableNameListOpt WithReadLockOpt { ph("FlushOption#5", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | LogTypeOpt logs { ph("FlushOption#4", $span, vec![Box::new($1) as Item]) }
+  | TableOrTables TableNameListOpt WithReadLockOpt { ph("FlushOption#5", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   | clientErrorsSummary { ph("FlushOption#6", $span, vec![]) }
-  | statsDelta StatsObjectList ClusterOpt { ph("FlushOption#7", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | statsDelta StatsObjectList ClusterOpt { ph("FlushOption#7", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 LogTypeOpt -> LogType:
      { ph("LogTypeOpt#0", $span, vec![]) }
@@ -4390,7 +4400,7 @@ TraceableStmt -> Stmt:
   | SetOprStmt { $1 }
   | SelectStmt { $1 }
   | SelectStmtWithClause { $1 }
-  | SubSelect { ph("TraceableStmt#7", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SubSelect { ph("TraceableStmt#7", $span, vec![Box::new($1) as Item]) }
   | LoadDataStmt { $1 }
   | BeginTransactionStmt { $1 }
   | CommitStmt { $1 }
@@ -4408,7 +4418,7 @@ ExplainableStmt -> Stmt:
   | SetOprStmt { $1 }
   | SelectStmt { $1 }
   | SelectStmtWithClause { $1 }
-  | SubSelect { ph("ExplainableStmt#7", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SubSelect { ph("ExplainableStmt#7", $span, vec![Box::new($1) as Item]) }
   | AlterTableStmt { $1 }
   | ImportIntoStmt { $1 }
   ;
@@ -4417,18 +4427,18 @@ StatementList -> Vec<Stmt>:
   | StatementList ';' Statement { { let mut v = $1; if let Some(s) = $3 { v.push(s) } v } }
   ;
 Constraint -> Item:
-    ConstraintKeywordOpt ConstraintElem { ph("Constraint#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    ConstraintKeywordOpt ConstraintElem { ph("Constraint#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 ConstraintVectorIndex -> Item:
-    vectorType index IfNotExists IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintVectorIndex#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
+    vectorType index IfNotExists IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintVectorIndex#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($8) as Item]) }
   ;
 ConstraintColumnarIndex -> Box<Constraint>:
-    columnar index IfNotExists IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintColumnarIndex#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
+    columnar index IfNotExists IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList { ph("ConstraintColumnarIndex#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($8) as Item]) }
   ;
 ConstraintWithColumnarIndex -> Box<Constraint>:
-    Constraint { ph("ConstraintWithColumnarIndex#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ConstraintVectorIndex { ph("ConstraintWithColumnarIndex#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ConstraintColumnarIndex { ph("ConstraintWithColumnarIndex#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    Constraint { ph("ConstraintWithColumnarIndex#0", $span, vec![Box::new($1) as Item]) }
+  | ConstraintVectorIndex { ph("ConstraintWithColumnarIndex#1", $span, vec![Box::new($1) as Item]) }
+  | ConstraintColumnarIndex { ph("ConstraintWithColumnarIndex#2", $span, vec![Box::new($1) as Item]) }
   ;
 CheckConstraintKeyword -> ():
     check { () }
@@ -4439,60 +4449,60 @@ TableElement -> Item:
   | ConstraintWithColumnarIndex { Box::new($1) as Item }
   ;
 TableElementList -> Item:
-    TableElement { ph("TableElementList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TableElementList ',' TableElement { ph("TableElementList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    TableElement { ph("TableElementList#0", $span, vec![Box::new($1) as Item]) }
+  | TableElementList ',' TableElement { ph("TableElementList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 TableElementListOpt -> Box<CreateTableStmt>:
      %prec lowerThanCreateTableSelect { ph("TableElementListOpt#0", $span, vec![]) }
-  | '(' TableElementList ')' { ph("TableElementListOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | '(' TableElementList ')' { ph("TableElementListOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 TableOption -> Box<TableOption>:
     PartDefOption { $1 }
-  | storageClass EqOpt StringName { ph("TableOption#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | DefaultKwdOpt CharsetKw EqOpt CharsetName { ph("TableOption#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | DefaultKwdOpt collate EqOpt CollationName { ph("TableOption#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | ForceOpt autoIncrement EqOpt LengthNum { ph("TableOption#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | autoIdCache EqOpt LengthNum { ph("TableOption#5", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ForceOpt autoRandomBase EqOpt LengthNum { ph("TableOption#6", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | avgRowLength EqOpt LengthNum { ph("TableOption#7", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | connection EqOpt stringLit { ph("TableOption#8", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | checksum EqOpt LengthNum { ph("TableOption#9", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | tableChecksum EqOpt LengthNum { ph("TableOption#10", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | password EqOpt stringLit { ph("TableOption#11", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | compression EqOpt stringLit { ph("TableOption#12", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | keyBlockSize EqOpt LengthNum { ph("TableOption#13", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | delayKeyWrite EqOpt LengthNum { ph("TableOption#14", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | RowFormat { ph("TableOption#15", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | statsPersistent EqOpt StatsPersistentVal { ph("TableOption#16", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | statsAutoRecalc EqOpt LengthNum { ph("TableOption#17", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | statsAutoRecalc EqOpt defaultKwd { ph("TableOption#18", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | statsSamplePages EqOpt LengthNum { ph("TableOption#19", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | statsSamplePages EqOpt defaultKwd { ph("TableOption#20", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | statsBuckets EqOpt LengthNum { ph("TableOption#21", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | statsTopN EqOpt LengthNum { ph("TableOption#22", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | statsSampleRate EqOpt NumLiteral { ph("TableOption#23", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | statsColChoice EqOpt stringLit { ph("TableOption#24", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | statsColList EqOpt stringLit { ph("TableOption#25", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | shardRowIDBits EqOpt LengthNum { ph("TableOption#26", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | preSplitRegions EqOpt LengthNum { ph("TableOption#27", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | packKeys EqOpt StatsPersistentVal { ph("TableOption#28", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | storageClass EqOpt StringName { ph("TableOption#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | DefaultKwdOpt CharsetKw EqOpt CharsetName { ph("TableOption#2", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | DefaultKwdOpt collate EqOpt CollationName { ph("TableOption#3", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | ForceOpt autoIncrement EqOpt LengthNum { ph("TableOption#4", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | autoIdCache EqOpt LengthNum { ph("TableOption#5", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | ForceOpt autoRandomBase EqOpt LengthNum { ph("TableOption#6", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | avgRowLength EqOpt LengthNum { ph("TableOption#7", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | connection EqOpt stringLit { ph("TableOption#8", $span, vec![Box::new($2) as Item]) }
+  | checksum EqOpt LengthNum { ph("TableOption#9", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | tableChecksum EqOpt LengthNum { ph("TableOption#10", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | password EqOpt stringLit { ph("TableOption#11", $span, vec![Box::new($2) as Item]) }
+  | compression EqOpt stringLit { ph("TableOption#12", $span, vec![Box::new($2) as Item]) }
+  | keyBlockSize EqOpt LengthNum { ph("TableOption#13", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | delayKeyWrite EqOpt LengthNum { ph("TableOption#14", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | RowFormat { ph("TableOption#15", $span, vec![Box::new($1) as Item]) }
+  | statsPersistent EqOpt StatsPersistentVal { ph("TableOption#16", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | statsAutoRecalc EqOpt LengthNum { ph("TableOption#17", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | statsAutoRecalc EqOpt defaultKwd { ph("TableOption#18", $span, vec![Box::new($2) as Item]) }
+  | statsSamplePages EqOpt LengthNum { ph("TableOption#19", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | statsSamplePages EqOpt defaultKwd { ph("TableOption#20", $span, vec![Box::new($2) as Item]) }
+  | statsBuckets EqOpt LengthNum { ph("TableOption#21", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | statsTopN EqOpt LengthNum { ph("TableOption#22", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | statsSampleRate EqOpt NumLiteral { ph("TableOption#23", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | statsColChoice EqOpt stringLit { ph("TableOption#24", $span, vec![Box::new($2) as Item]) }
+  | statsColList EqOpt stringLit { ph("TableOption#25", $span, vec![Box::new($2) as Item]) }
+  | shardRowIDBits EqOpt LengthNum { ph("TableOption#26", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | preSplitRegions EqOpt LengthNum { ph("TableOption#27", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | packKeys EqOpt StatsPersistentVal { ph("TableOption#28", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   | storage memory { ph("TableOption#29", $span, vec![]) }
   | storage disk { ph("TableOption#30", $span, vec![]) }
-  | secondaryEngine EqOpt null { ph("TableOption#31", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | secondaryEngine EqOpt StringName { ph("TableOption#32", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | union EqOpt '(' TableNameListOpt ')' { ph("TableOption#33", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | encryption EqOpt EncryptionOpt { ph("TableOption#34", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ttl EqOpt Identifier '+' interval Literal TimeUnit { ph("TableOption#35", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | ttlEnable EqOpt stringLit { ph("TableOption#36", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | ttlJobInterval EqOpt stringLit { ph("TableOption#37", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | autoextendSize EqOpt StringName { ph("TableOption#38", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | affinity EqOpt StringName { ph("TableOption#39", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | pageChecksum EqOpt LengthNum { ph("TableOption#40", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | pageCompressed EqOpt LengthNum { ph("TableOption#41", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | pageCompressionLevel EqOpt LengthNum { ph("TableOption#42", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | transactional EqOpt LengthNum { ph("TableOption#43", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | sequence EqOpt LengthNum { ph("TableOption#44", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | ietfQuotes EqOpt StringName { ph("TableOption#45", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | secondaryEngine EqOpt null { ph("TableOption#31", $span, vec![Box::new($2) as Item]) }
+  | secondaryEngine EqOpt StringName { ph("TableOption#32", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | union EqOpt '(' TableNameListOpt ')' { ph("TableOption#33", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | encryption EqOpt EncryptionOpt { ph("TableOption#34", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | ttl EqOpt Identifier '+' interval Literal TimeUnit { ph("TableOption#35", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
+  | ttlEnable EqOpt stringLit { ph("TableOption#36", $span, vec![Box::new($2) as Item]) }
+  | ttlJobInterval EqOpt stringLit { ph("TableOption#37", $span, vec![Box::new($2) as Item]) }
+  | autoextendSize EqOpt StringName { ph("TableOption#38", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | affinity EqOpt StringName { ph("TableOption#39", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | pageChecksum EqOpt LengthNum { ph("TableOption#40", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | pageCompressed EqOpt LengthNum { ph("TableOption#41", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | pageCompressionLevel EqOpt LengthNum { ph("TableOption#42", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | transactional EqOpt LengthNum { ph("TableOption#43", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | sequence EqOpt LengthNum { ph("TableOption#44", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | ietfQuotes EqOpt StringName { ph("TableOption#45", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 ForceOpt -> bool:
      { false }
@@ -4500,25 +4510,25 @@ ForceOpt -> bool:
   ;
 StatsPersistentVal -> Item:
     defaultKwd { ph("StatsPersistentVal#0", $span, vec![]) }
-  | LengthNum { ph("StatsPersistentVal#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | LengthNum { ph("StatsPersistentVal#1", $span, vec![Box::new($1) as Item]) }
   ;
 CreateTableOptionListOpt -> Vec<TableOption>:
      %prec lowerThanCreateTableSelect { Vec::new() }
   | CreateTableOptionList %prec lowerThanComma { $1 }
   ;
 CreateTableOptionList -> Vec<TableOption>:
-    CreateTableOption { ph("CreateTableOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | CreateTableOptionList CreateTableOption { ph("CreateTableOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | CreateTableOptionList ',' CreateTableOption { ph("CreateTableOptionList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    CreateTableOption { ph("CreateTableOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | CreateTableOptionList CreateTableOption { ph("CreateTableOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | CreateTableOptionList ',' CreateTableOption { ph("CreateTableOptionList#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 CreateTableOption -> Box<TableOption>:
     TableOption { $1 }
   | start transaction { ph("CreateTableOption#1", $span, vec![]) }
   ;
 TableOptionList -> Vec<TableOption>:
-    TableOption { ph("TableOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TableOptionList TableOption { ph("TableOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | TableOptionList ',' TableOption { ph("TableOptionList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    TableOption { ph("TableOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | TableOptionList TableOption { ph("TableOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | TableOptionList ',' TableOption { ph("TableOptionList#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 CreateSequenceTableOptionListOpt -> Vec<TableOption>:
      %prec lowerThanCreateTableSelect { Vec::new() }
@@ -4529,36 +4539,36 @@ OptTable -> String:
   | tableKwd { tok_text($lexer, &$1) }
   ;
 TruncateTableStmt -> Stmt:
-    truncate OptTable TableName { ph("TruncateTableStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    truncate OptTable TableName { ph("TruncateTableStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 RowFormat -> u64:
-    rowFormat EqOpt defaultKwd { ph("RowFormat#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt dynamic { ph("RowFormat#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt fixed { ph("RowFormat#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt compressed { ph("RowFormat#3", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt redundant { ph("RowFormat#4", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt compact { ph("RowFormat#5", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt tokudbDefault { ph("RowFormat#6", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt tokudbFast { ph("RowFormat#7", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt tokudbSmall { ph("RowFormat#8", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt tokudbZlib { ph("RowFormat#9", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt tokudbZstd { ph("RowFormat#10", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt tokudbQuickLZ { ph("RowFormat#11", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt tokudbLzma { ph("RowFormat#12", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt tokudbSnappy { ph("RowFormat#13", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | rowFormat EqOpt tokudbUncompressed { ph("RowFormat#14", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    rowFormat EqOpt defaultKwd { ph("RowFormat#0", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt dynamic { ph("RowFormat#1", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt fixed { ph("RowFormat#2", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt compressed { ph("RowFormat#3", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt redundant { ph("RowFormat#4", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt compact { ph("RowFormat#5", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt tokudbDefault { ph("RowFormat#6", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt tokudbFast { ph("RowFormat#7", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt tokudbSmall { ph("RowFormat#8", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt tokudbZlib { ph("RowFormat#9", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt tokudbZstd { ph("RowFormat#10", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt tokudbQuickLZ { ph("RowFormat#11", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt tokudbLzma { ph("RowFormat#12", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt tokudbSnappy { ph("RowFormat#13", $span, vec![Box::new($2) as Item]) }
+  | rowFormat EqOpt tokudbUncompressed { ph("RowFormat#14", $span, vec![Box::new($2) as Item]) }
   ;
 Type -> Box<FieldType>:
-    NumericType { ph("Type#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | StringType { ph("Type#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | DateAndTimeType { ph("Type#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    NumericType { ph("Type#0", $span, vec![Box::new($1) as Item]) }
+  | StringType { ph("Type#1", $span, vec![Box::new($1) as Item]) }
+  | DateAndTimeType { ph("Type#2", $span, vec![Box::new($1) as Item]) }
   ;
 NumericType -> Item:
-    IntegerType OptFieldLen FieldOpts { ph("NumericType#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | BooleanType FieldOpts { ph("NumericType#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | FixedPointType FloatOpt FieldOpts { ph("NumericType#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | FloatingPointType FloatOpt FieldOpts { ph("NumericType#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | BitValueType OptFieldLen { ph("NumericType#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    IntegerType OptFieldLen FieldOpts { ph("NumericType#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | BooleanType FieldOpts { ph("NumericType#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | FixedPointType FloatOpt FieldOpts { ph("NumericType#2", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | FloatingPointType FloatOpt FieldOpts { ph("NumericType#3", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | BitValueType OptFieldLen { ph("NumericType#4", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 IntegerType -> u8:
     tinyIntType { ph("IntegerType#0", $span, vec![]) }
@@ -4600,23 +4610,23 @@ BitValueType -> u8:
     bitType { ph("BitValueType#0", $span, vec![]) }
   ;
 StringType -> Item:
-    Char FieldLen OptBinary { ph("StringType#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | Char OptBinary { ph("StringType#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | NChar FieldLen OptBinary { ph("StringType#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | NChar OptBinary { ph("StringType#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | Varchar FieldLen OptBinary { ph("StringType#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | NVarchar FieldLen OptBinary { ph("StringType#5", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | binaryType OptFieldLen { ph("StringType#6", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | varbinaryType FieldLen { ph("StringType#7", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | BlobType { ph("StringType#8", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TextType OptCharsetWithOptBinary { ph("StringType#9", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | enum '(' TextStringList ')' OptCharsetWithOptBinary { ph("StringType#10", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | set '(' TextStringList ')' OptCharsetWithOptBinary { ph("StringType#11", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    Char FieldLen OptBinary { ph("StringType#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | Char OptBinary { ph("StringType#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | NChar FieldLen OptBinary { ph("StringType#2", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | NChar OptBinary { ph("StringType#3", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | Varchar FieldLen OptBinary { ph("StringType#4", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | NVarchar FieldLen OptBinary { ph("StringType#5", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
+  | binaryType OptFieldLen { ph("StringType#6", $span, vec![Box::new($2) as Item]) }
+  | varbinaryType FieldLen { ph("StringType#7", $span, vec![Box::new($2) as Item]) }
+  | BlobType { ph("StringType#8", $span, vec![Box::new($1) as Item]) }
+  | TextType OptCharsetWithOptBinary { ph("StringType#9", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | enum '(' TextStringList ')' OptCharsetWithOptBinary { ph("StringType#10", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | set '(' TextStringList ')' OptCharsetWithOptBinary { ph("StringType#11", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
   | jsonType { ph("StringType#12", $span, vec![]) }
   | uuid { ph("StringType#13", $span, vec![]) }
-  | long Varchar OptCharsetWithOptBinary { ph("StringType#14", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | long OptCharsetWithOptBinary { ph("StringType#15", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | vectorType OptVectorElementType OptFieldLen { ph("StringType#16", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | long Varchar OptCharsetWithOptBinary { ph("StringType#14", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | long OptCharsetWithOptBinary { ph("StringType#15", $span, vec![Box::new($2) as Item]) }
+  | vectorType OptVectorElementType OptFieldLen { ph("StringType#16", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 Char -> String:
     character { tok_text($lexer, &$1) }
@@ -4649,14 +4659,14 @@ Year -> String:
   ;
 BlobType -> Box<FieldType>:
     tinyblobType { ph("BlobType#0", $span, vec![]) }
-  | blobType OptFieldLen { ph("BlobType#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | blobType OptFieldLen { ph("BlobType#1", $span, vec![Box::new($2) as Item]) }
   | mediumblobType { ph("BlobType#2", $span, vec![]) }
   | longblobType { ph("BlobType#3", $span, vec![]) }
   | long varbinaryType { ph("BlobType#4", $span, vec![]) }
   ;
 TextType -> Box<FieldType>:
     tinytextType { ph("TextType#0", $span, vec![]) }
-  | textType OptFieldLen { ph("TextType#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | textType OptFieldLen { ph("TextType#1", $span, vec![Box::new($2) as Item]) }
   | mediumtextType { ph("TextType#2", $span, vec![]) }
   | longtextType { ph("TextType#3", $span, vec![]) }
   ;
@@ -4672,10 +4682,10 @@ OptCharsetWithOptBinary -> Box<OptBinary>:
   ;
 DateAndTimeType -> Item:
     dateType { ph("DateAndTimeType#0", $span, vec![]) }
-  | datetimeType OptFieldLen { ph("DateAndTimeType#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | timestampType OptFieldLen { ph("DateAndTimeType#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | timeType OptFieldLen { ph("DateAndTimeType#3", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | Year OptFieldLen FieldOpts { ph("DateAndTimeType#4", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | datetimeType OptFieldLen { ph("DateAndTimeType#1", $span, vec![Box::new($2) as Item]) }
+  | timestampType OptFieldLen { ph("DateAndTimeType#2", $span, vec![Box::new($2) as Item]) }
+  | timeType OptFieldLen { ph("DateAndTimeType#3", $span, vec![Box::new($2) as Item]) }
+  | Year OptFieldLen FieldOpts { ph("DateAndTimeType#4", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 FieldLen -> i64:
     '(' LengthNum ')' { $2 as i64 }
@@ -4691,7 +4701,7 @@ FieldOpt -> Box<TypeOpt>:
   ;
 FieldOpts -> Vec<TypeOpt>:
      { Vec::new() }
-  | FieldOpts FieldOpt { ph("FieldOpts#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | FieldOpts FieldOpt { ph("FieldOpts#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 FloatOpt -> Box<FloatOpt>:
      { Box::new(FloatOpt { flen: UNSPECIFIED_LENGTH, decimal: UNSPECIFIED_LENGTH }) }
@@ -4730,7 +4740,7 @@ OptCollate -> String:
   ;
 StringList -> Vec<String>:
     stringLit { ph("StringList#0", $span, vec![]) }
-  | StringList ',' stringLit { ph("StringList#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | StringList ',' stringLit { ph("StringList#1", $span, vec![Box::new($1) as Item]) }
   ;
 TextString -> Box<TextString>:
     stringLit { ph("TextString#0", $span, vec![]) }
@@ -4738,8 +4748,8 @@ TextString -> Box<TextString>:
   | bitLit { ph("TextString#2", $span, vec![]) }
   ;
 TextStringList -> Vec<TextString>:
-    TextString { ph("TextStringList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TextStringList ',' TextString { ph("TextStringList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    TextString { ph("TextStringList#0", $span, vec![Box::new($1) as Item]) }
+  | TextStringList ',' TextString { ph("TextStringList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 StringName -> String:
     stringLit { tok_text($lexer, &$1) }
@@ -4752,11 +4762,11 @@ StringNameOrBRIEOptionKeyword -> String:
   ;
 UpdateStmt -> Stmt:
     UpdateStmtNoWith { $1 }
-  | WithClause UpdateStmtNoWith { ph("UpdateStmt#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | WithClause UpdateStmtNoWith { ph("UpdateStmt#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 UpdateStmtNoWith -> Stmt:
-    update TableOptimizerHintsOpt PriorityOpt IgnoreOptional TableRef set AssignmentList WhereClauseOptional OrderByOptional LimitClause ReturningClause { ph("UpdateStmtNoWith#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($11) as Box<dyn Any>]) }
-  | update TableOptimizerHintsOpt PriorityOpt IgnoreOptional TableRefs set AssignmentList WhereClauseOptional ReturningClause { ph("UpdateStmtNoWith#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
+    update TableOptimizerHintsOpt PriorityOpt IgnoreOptional TableRef set AssignmentList WhereClauseOptional OrderByOptional LimitClause ReturningClause { ph("UpdateStmtNoWith#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($9) as Item, Box::new($10) as Item, Box::new($11) as Item]) }
+  | update TableOptimizerHintsOpt PriorityOpt IgnoreOptional TableRefs set AssignmentList WhereClauseOptional ReturningClause { ph("UpdateStmtNoWith#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($9) as Item]) }
   ;
 UseStmt -> Stmt:
     use DBName { Stmt::Use(Box::new(UseStmt { db_name: $2 })) }
@@ -4769,60 +4779,60 @@ WhereClauseOptional -> Option<Expr>:
   | WhereClause { Some($1) }
   ;
 CreateUserStmt -> Stmt:
-    create user IfNotExists UserSpecList RequireClauseOpt ConnectionOptions PasswordOrLockOptions CommentOrAttributeOption ResourceGroupNameOption { ph("CreateUserStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
+    create user IfNotExists UserSpecList RequireClauseOpt ConnectionOptions PasswordOrLockOptions CommentOrAttributeOption ResourceGroupNameOption { ph("CreateUserStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($9) as Item]) }
   ;
 CreateRoleStmt -> Stmt:
-    create role IfNotExists RoleSpecList { ph("CreateRoleStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    create role IfNotExists RoleSpecList { ph("CreateRoleStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 AlterUserStmt -> Stmt:
-    alter user IfExists AlterUserSpecList RequireClauseOpt ConnectionOptions AlterPasswordOrLockOptions CommentOrAttributeOption ResourceGroupNameOption { ph("AlterUserStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
-  | alter user IfExists user '(' ')' identified by AuthString { ph("AlterUserStmt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
-  | alter user IfExists user '(' ')' identified by AuthString retain current password { ph("AlterUserStmt#2", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
-  | alter user IfExists user '(' ')' discard old password { ph("AlterUserStmt#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    alter user IfExists AlterUserSpecList RequireClauseOpt ConnectionOptions AlterPasswordOrLockOptions CommentOrAttributeOption ResourceGroupNameOption { ph("AlterUserStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($9) as Item]) }
+  | alter user IfExists user '(' ')' identified by AuthString { ph("AlterUserStmt#1", $span, vec![Box::new($3) as Item, Box::new($9) as Item]) }
+  | alter user IfExists user '(' ')' identified by AuthString retain current password { ph("AlterUserStmt#2", $span, vec![Box::new($3) as Item, Box::new($9) as Item]) }
+  | alter user IfExists user '(' ')' discard old password { ph("AlterUserStmt#3", $span, vec![Box::new($3) as Item]) }
   ;
 AlterInstanceStmt -> Stmt:
-    alter instance InstanceOption { ph("AlterInstanceStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    alter instance InstanceOption { ph("AlterInstanceStmt#0", $span, vec![Box::new($3) as Item]) }
   ;
 AlterRangeStmt -> Stmt:
-    alter rangeKwd Identifier PlacementPolicyOption { ph("AlterRangeStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    alter rangeKwd Identifier PlacementPolicyOption { ph("AlterRangeStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 InstanceOption -> Box<AlterInstanceStmt>:
     reload tls { ph("InstanceOption#0", $span, vec![]) }
   | reload tls no rollback on errorKwd { ph("InstanceOption#1", $span, vec![]) }
   ;
 UserSpec -> Box<UserSpec>:
-    Username AuthOption { ph("UserSpec#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    Username AuthOption { ph("UserSpec#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 UserSpecList -> Vec<UserSpec>:
-    UserSpec { ph("UserSpecList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | UserSpecList ',' UserSpec { ph("UserSpecList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    UserSpec { ph("UserSpecList#0", $span, vec![Box::new($1) as Item]) }
+  | UserSpecList ',' UserSpec { ph("UserSpecList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 AlterUserSpec -> Box<UserSpec>:
-    Username AuthOption { ph("AlterUserSpec#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | Username AuthOptionWithPassword retain current password { ph("AlterUserSpec#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | Username discard old password { ph("AlterUserSpec#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    Username AuthOption { ph("AlterUserSpec#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | Username AuthOptionWithPassword retain current password { ph("AlterUserSpec#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | Username discard old password { ph("AlterUserSpec#2", $span, vec![Box::new($1) as Item]) }
   ;
 AlterUserSpecList -> Vec<UserSpec>:
-    AlterUserSpec { ph("AlterUserSpecList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlterUserSpecList ',' AlterUserSpec { ph("AlterUserSpecList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    AlterUserSpec { ph("AlterUserSpecList#0", $span, vec![Box::new($1) as Item]) }
+  | AlterUserSpecList ',' AlterUserSpec { ph("AlterUserSpecList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 AuthOptionWithPassword -> Box<AuthOption>:
-    identified by AuthString { ph("AuthOptionWithPassword#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | identified with AuthPlugin by AuthString { ph("AuthOptionWithPassword#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    identified by AuthString { ph("AuthOptionWithPassword#0", $span, vec![Box::new($3) as Item]) }
+  | identified with AuthPlugin by AuthString { ph("AuthOptionWithPassword#1", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
   ;
 ConnectionOptions -> Vec<ResourceOption>:
      { ph("ConnectionOptions#0", $span, vec![]) }
-  | with ConnectionOptionList { ph("ConnectionOptions#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | with ConnectionOptionList { ph("ConnectionOptions#1", $span, vec![Box::new($2) as Item]) }
   ;
 ConnectionOptionList -> Vec<ResourceOption>:
-    ConnectionOption { ph("ConnectionOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ConnectionOptionList ConnectionOption { ph("ConnectionOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    ConnectionOption { ph("ConnectionOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | ConnectionOptionList ConnectionOption { ph("ConnectionOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 ConnectionOption -> Box<ResourceOption>:
-    maxQueriesPerHour Int64Num { ph("ConnectionOption#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | maxUpdatesPerHour Int64Num { ph("ConnectionOption#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | maxConnectionsPerHour Int64Num { ph("ConnectionOption#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | maxUserConnections Int64Num { ph("ConnectionOption#3", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    maxQueriesPerHour Int64Num { ph("ConnectionOption#0", $span, vec![Box::new($2) as Item]) }
+  | maxUpdatesPerHour Int64Num { ph("ConnectionOption#1", $span, vec![Box::new($2) as Item]) }
+  | maxConnectionsPerHour Int64Num { ph("ConnectionOption#2", $span, vec![Box::new($2) as Item]) }
+  | maxUserConnections Int64Num { ph("ConnectionOption#3", $span, vec![Box::new($2) as Item]) }
   ;
 RequireClauseOpt -> Vec<AuthTokenOrTLSOption>:
      { Vec::new() }
@@ -4835,9 +4845,9 @@ RequireClause -> Vec<AuthTokenOrTLSOption>:
   | require RequireList { $2 }
   ;
 RequireList -> Vec<AuthTokenOrTLSOption>:
-    RequireListElement { ph("RequireList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | RequireList and RequireListElement { ph("RequireList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | RequireList RequireListElement { ph("RequireList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    RequireListElement { ph("RequireList#0", $span, vec![Box::new($1) as Item]) }
+  | RequireList and RequireListElement { ph("RequireList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | RequireList RequireListElement { ph("RequireList#2", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 RequireListElement -> Box<AuthTokenOrTLSOption>:
     issuer stringLit { ph("RequireListElement#0", $span, vec![]) }
@@ -4853,29 +4863,29 @@ CommentOrAttributeOption -> Option<Box<CommentOrAttributeOption>>:
   ;
 ResourceGroupNameOption -> Option<Box<ResourceGroupNameOption>>:
      { None }
-  | resource group ResourceGroupName { ph("ResourceGroupNameOption#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | resource group ResourceGroupName { ph("ResourceGroupNameOption#1", $span, vec![Box::new($3) as Item]) }
   ;
 AlterPasswordOrLockOptions -> Vec<PasswordOrLockOption>:
      { Vec::new() }
   | AlterPasswordOrLockOptionList { $1 }
   ;
 AlterPasswordOrLockOptionList -> Vec<PasswordOrLockOption>:
-    AlterPasswordOrLockOption { ph("AlterPasswordOrLockOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlterPasswordOrLockOptionList AlterPasswordOrLockOption { ph("AlterPasswordOrLockOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    AlterPasswordOrLockOption { ph("AlterPasswordOrLockOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | AlterPasswordOrLockOptionList AlterPasswordOrLockOption { ph("AlterPasswordOrLockOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 AlterPasswordOrLockOption -> Box<PasswordOrLockOption>:
     account unlock { ph("AlterPasswordOrLockOption#0", $span, vec![]) }
   | account lock { ph("AlterPasswordOrLockOption#1", $span, vec![]) }
   | password history defaultKwd { ph("AlterPasswordOrLockOption#2", $span, vec![]) }
-  | password history NUM { ph("AlterPasswordOrLockOption#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | password history NUM { ph("AlterPasswordOrLockOption#3", $span, vec![Box::new($3) as Item]) }
   | password reuse interval defaultKwd { ph("AlterPasswordOrLockOption#4", $span, vec![]) }
-  | password reuse interval NUM day { ph("AlterPasswordOrLockOption#5", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | password reuse interval NUM day { ph("AlterPasswordOrLockOption#5", $span, vec![Box::new($4) as Item]) }
   | password expire { ph("AlterPasswordOrLockOption#6", $span, vec![]) }
-  | password expire interval Int64Num day { ph("AlterPasswordOrLockOption#7", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | password expire interval Int64Num day { ph("AlterPasswordOrLockOption#7", $span, vec![Box::new($4) as Item]) }
   | password expire never { ph("AlterPasswordOrLockOption#8", $span, vec![]) }
   | password expire defaultKwd { ph("AlterPasswordOrLockOption#9", $span, vec![]) }
-  | failedLoginAttempts Int64Num { ph("AlterPasswordOrLockOption#10", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | passwordLockTime Int64Num { ph("AlterPasswordOrLockOption#11", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | failedLoginAttempts Int64Num { ph("AlterPasswordOrLockOption#10", $span, vec![Box::new($2) as Item]) }
+  | passwordLockTime Int64Num { ph("AlterPasswordOrLockOption#11", $span, vec![Box::new($2) as Item]) }
   | passwordLockTime unbounded { ph("AlterPasswordOrLockOption#12", $span, vec![]) }
   | password require current defaultKwd { ph("AlterPasswordOrLockOption#13", $span, vec![]) }
   ;
@@ -4884,19 +4894,19 @@ PasswordOrLockOptions -> Vec<PasswordOrLockOption>:
   | PasswordOrLockOptionList { $1 }
   ;
 PasswordOrLockOptionList -> Vec<PasswordOrLockOption>:
-    PasswordOrLockOption { ph("PasswordOrLockOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | PasswordOrLockOptionList PasswordOrLockOption { ph("PasswordOrLockOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    PasswordOrLockOption { ph("PasswordOrLockOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | PasswordOrLockOptionList PasswordOrLockOption { ph("PasswordOrLockOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 PasswordOrLockOption -> Box<PasswordOrLockOption>:
     AlterPasswordOrLockOption { $1 }
   ;
 AuthOption -> Option<Box<AuthOption>>:
      { None }
-  | identified by AuthString { ph("AuthOption#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | identified with AuthPlugin { ph("AuthOption#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | identified with AuthPlugin by AuthString { ph("AuthOption#3", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | identified with AuthPlugin as HashString { ph("AuthOption#4", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | identified by password HashString { ph("AuthOption#5", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | identified by AuthString { ph("AuthOption#1", $span, vec![Box::new($3) as Item]) }
+  | identified with AuthPlugin { ph("AuthOption#2", $span, vec![Box::new($3) as Item]) }
+  | identified with AuthPlugin by AuthString { ph("AuthOption#3", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | identified with AuthPlugin as HashString { ph("AuthOption#4", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | identified by password HashString { ph("AuthOption#5", $span, vec![Box::new($4) as Item]) }
   ;
 AuthPlugin -> String:
     StringName { $1 }
@@ -4906,73 +4916,73 @@ HashString -> String:
   | hexLit { ph("HashString#1", $span, vec![]) }
   ;
 RoleSpec -> Box<UserSpec>:
-    Rolename { ph("RoleSpec#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    Rolename { ph("RoleSpec#0", $span, vec![Box::new($1) as Item]) }
   ;
 RoleSpecList -> Vec<UserSpec>:
-    RoleSpec { ph("RoleSpecList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | RoleSpecList ',' RoleSpec { ph("RoleSpecList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    RoleSpec { ph("RoleSpecList#0", $span, vec![Box::new($1) as Item]) }
+  | RoleSpecList ',' RoleSpec { ph("RoleSpecList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 BindableStmt -> Stmt:
     SetOprStmt { $1 }
   | SelectStmt { $1 }
   | SelectStmtWithClause { $1 }
-  | SubSelect { ph("BindableStmt#3", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SubSelect { ph("BindableStmt#3", $span, vec![Box::new($1) as Item]) }
   | UpdateStmt { $1 }
   | DeleteWithoutUsingStmt { $1 }
   | InsertIntoStmt { $1 }
   | ReplaceIntoStmt { $1 }
   ;
 CreateBindingStmt -> Stmt:
-    create GlobalScope binding forKwd BindableStmt using BindableStmt { ph("CreateBindingStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | create GlobalScope binding using BindableStmt { ph("CreateBindingStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | create GlobalScope binding from history using plan digest StringLitOrUserVariableList { ph("CreateBindingStmt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
+    create GlobalScope binding forKwd BindableStmt using BindableStmt { ph("CreateBindingStmt#0", $span, vec![Box::new($2) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
+  | create GlobalScope binding using BindableStmt { ph("CreateBindingStmt#1", $span, vec![Box::new($2) as Item, Box::new($5) as Item]) }
+  | create GlobalScope binding from history using plan digest StringLitOrUserVariableList { ph("CreateBindingStmt#2", $span, vec![Box::new($2) as Item, Box::new($9) as Item]) }
   ;
 StringLitOrUserVariableList -> Vec<StringOrUserVar>:
-    StringLitOrUserVariable { ph("StringLitOrUserVariableList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | StringLitOrUserVariableList ',' StringLitOrUserVariable { ph("StringLitOrUserVariableList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    StringLitOrUserVariable { ph("StringLitOrUserVariableList#0", $span, vec![Box::new($1) as Item]) }
+  | StringLitOrUserVariableList ',' StringLitOrUserVariable { ph("StringLitOrUserVariableList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 StringLitOrUserVariable -> Box<StringOrUserVar>:
     stringLit { ph("StringLitOrUserVariable#0", $span, vec![]) }
-  | UserVariable { ph("StringLitOrUserVariable#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | UserVariable { ph("StringLitOrUserVariable#1", $span, vec![Box::new($1) as Item]) }
   ;
 DropBindingStmt -> Stmt:
-    drop GlobalScope binding forKwd BindableStmt { ph("DropBindingStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | drop GlobalScope binding forKwd BindableStmt using BindableStmt { ph("DropBindingStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | drop GlobalScope binding forKwd sql digest StringLitOrUserVariableList { ph("DropBindingStmt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    drop GlobalScope binding forKwd BindableStmt { ph("DropBindingStmt#0", $span, vec![Box::new($2) as Item, Box::new($5) as Item]) }
+  | drop GlobalScope binding forKwd BindableStmt using BindableStmt { ph("DropBindingStmt#1", $span, vec![Box::new($2) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
+  | drop GlobalScope binding forKwd sql digest StringLitOrUserVariableList { ph("DropBindingStmt#2", $span, vec![Box::new($2) as Item, Box::new($7) as Item]) }
   ;
 SetBindingStmt -> Stmt:
-    set binding BindingStatusType forKwd BindableStmt { ph("SetBindingStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | set binding BindingStatusType forKwd BindableStmt using BindableStmt { ph("SetBindingStmt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | set binding BindingStatusType forKwd sql digest stringLit { ph("SetBindingStmt#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    set binding BindingStatusType forKwd BindableStmt { ph("SetBindingStmt#0", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | set binding BindingStatusType forKwd BindableStmt using BindableStmt { ph("SetBindingStmt#1", $span, vec![Box::new($3) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
+  | set binding BindingStatusType forKwd sql digest stringLit { ph("SetBindingStmt#2", $span, vec![Box::new($3) as Item]) }
   ;
 RecommendIndexStmt -> Stmt:
-    recommend index returnKwd result forKwd stringLit RecommendIndexOptionListOpt { ph("RecommendIndexStmt#0", $span, vec![Box::new($7) as Box<dyn Any>]) }
-  | recommend index run forKwd stringLit RecommendIndexOptionListOpt { ph("RecommendIndexStmt#1", $span, vec![Box::new($6) as Box<dyn Any>]) }
-  | recommend index run RecommendIndexOptionListOpt { ph("RecommendIndexStmt#2", $span, vec![Box::new($4) as Box<dyn Any>]) }
+    recommend index returnKwd result forKwd stringLit RecommendIndexOptionListOpt { ph("RecommendIndexStmt#0", $span, vec![Box::new($7) as Item]) }
+  | recommend index run forKwd stringLit RecommendIndexOptionListOpt { ph("RecommendIndexStmt#1", $span, vec![Box::new($6) as Item]) }
+  | recommend index run RecommendIndexOptionListOpt { ph("RecommendIndexStmt#2", $span, vec![Box::new($4) as Item]) }
   | recommend index show option { ph("RecommendIndexStmt#3", $span, vec![]) }
-  | recommend index apply NUM { ph("RecommendIndexStmt#4", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | recommend index ignore NUM { ph("RecommendIndexStmt#5", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | recommend index set RecommendIndexOptionList { ph("RecommendIndexStmt#6", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | recommend index apply NUM { ph("RecommendIndexStmt#4", $span, vec![Box::new($4) as Item]) }
+  | recommend index ignore NUM { ph("RecommendIndexStmt#5", $span, vec![Box::new($4) as Item]) }
+  | recommend index set RecommendIndexOptionList { ph("RecommendIndexStmt#6", $span, vec![Box::new($4) as Item]) }
   ;
 RecommendIndexOptionListOpt -> Vec<RecommendIndexOption>:
      { Vec::new() }
-  | with RecommendIndexOptionList { ph("RecommendIndexOptionListOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | with RecommendIndexOptionList { ph("RecommendIndexOptionListOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 RecommendIndexOptionList -> Vec<RecommendIndexOption>:
-    RecommendIndexOption { ph("RecommendIndexOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | RecommendIndexOptionList ',' RecommendIndexOption { ph("RecommendIndexOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    RecommendIndexOption { ph("RecommendIndexOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | RecommendIndexOptionList ',' RecommendIndexOption { ph("RecommendIndexOptionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 RecommendIndexOption -> RecommendIndexOption:
-    Identifier eq Literal { ph("RecommendIndexOption#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Identifier eq Literal { ph("RecommendIndexOption#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 GrantStmt -> Stmt:
-    grant RoleOrPrivElemList on ObjectType PrivLevel to UserSpecList RequireClauseOpt WithGrantOptionOpt { ph("GrantStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
+    grant RoleOrPrivElemList on ObjectType PrivLevel to UserSpecList RequireClauseOpt WithGrantOptionOpt { ph("GrantStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($9) as Item]) }
   ;
 GrantProxyStmt -> Stmt:
-    grant proxy on Username to UsernameList WithGrantOptionOpt { ph("GrantProxyStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    grant proxy on Username to UsernameList WithGrantOptionOpt { ph("GrantProxyStmt#0", $span, vec![Box::new($4) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
   ;
 GrantRoleStmt -> Stmt:
-    grant RoleOrPrivElemList to UsernameList { ph("GrantRoleStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    grant RoleOrPrivElemList to UsernameList { ph("GrantRoleStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 WithGrantOptionOpt -> bool:
      { false }
@@ -4984,22 +4994,22 @@ WithGrantOptionOpt -> bool:
   ;
 ExtendedPriv -> Vec<String>:
     identifier { ph("ExtendedPriv#0", $span, vec![]) }
-  | ExtendedPriv identifier { ph("ExtendedPriv#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | ExtendedPriv identifier { ph("ExtendedPriv#1", $span, vec![Box::new($1) as Item]) }
   ;
 RoleOrPrivElem -> Box<RoleOrPriv>:
-    PrivElem { ph("RoleOrPrivElem#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | RolenameWithoutIdent { ph("RoleOrPrivElem#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ExtendedPriv { ph("RoleOrPrivElem#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    PrivElem { ph("RoleOrPrivElem#0", $span, vec![Box::new($1) as Item]) }
+  | RolenameWithoutIdent { ph("RoleOrPrivElem#1", $span, vec![Box::new($1) as Item]) }
+  | ExtendedPriv { ph("RoleOrPrivElem#2", $span, vec![Box::new($1) as Item]) }
   | load from s3 { ph("RoleOrPrivElem#3", $span, vec![]) }
   | selectKwd into s3 { ph("RoleOrPrivElem#4", $span, vec![]) }
   ;
 RoleOrPrivElemList -> Vec<RoleOrPriv>:
-    RoleOrPrivElem { ph("RoleOrPrivElemList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | RoleOrPrivElemList ',' RoleOrPrivElem { ph("RoleOrPrivElemList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    RoleOrPrivElem { ph("RoleOrPrivElemList#0", $span, vec![Box::new($1) as Item]) }
+  | RoleOrPrivElemList ',' RoleOrPrivElem { ph("RoleOrPrivElemList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 PrivElem -> Box<PrivElem>:
-    PrivType { ph("PrivElem#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | PrivType '(' ColumnNameList ')' { ph("PrivElem#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    PrivType { ph("PrivElem#0", $span, vec![Box::new($1) as Item]) }
+  | PrivType '(' ColumnNameList ')' { ph("PrivElem#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 PrivType -> MysqlPrivilegeType:
     all { ph("PrivType#0", $span, vec![]) }
@@ -5049,18 +5059,18 @@ ObjectType -> ObjectTypeType:
 PrivLevel -> Box<GrantLevel>:
     '*' { ph("PrivLevel#0", $span, vec![]) }
   | '*' '.' '*' { ph("PrivLevel#1", $span, vec![]) }
-  | Identifier '.' '*' { ph("PrivLevel#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | Identifier '.' Identifier { ph("PrivLevel#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | Identifier { ph("PrivLevel#4", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | Identifier '.' '*' { ph("PrivLevel#2", $span, vec![Box::new($1) as Item]) }
+  | Identifier '.' Identifier { ph("PrivLevel#3", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | Identifier { ph("PrivLevel#4", $span, vec![Box::new($1) as Item]) }
   ;
 RevokeStmt -> Stmt:
-    revoke RoleOrPrivElemList on ObjectType PrivLevel from UserSpecList { ph("RevokeStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    revoke RoleOrPrivElemList on ObjectType PrivLevel from UserSpecList { ph("RevokeStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item]) }
   ;
 RevokeRoleStmt -> Stmt:
-    revoke RoleOrPrivElemList from UsernameList { ph("RevokeRoleStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    revoke RoleOrPrivElemList from UsernameList { ph("RevokeRoleStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 LoadDataStmt -> Stmt:
-    load data LowPriorityOpt LocalOpt infile stringLit FormatOpt DuplicateOpt into tableKwd TableName CharsetOpt Fields Lines IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt LoadDataOptionListOpt { ph("LoadDataStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($11) as Box<dyn Any>, Box::new($12) as Box<dyn Any>, Box::new($13) as Box<dyn Any>, Box::new($14) as Box<dyn Any>, Box::new($15) as Box<dyn Any>, Box::new($16) as Box<dyn Any>, Box::new($17) as Box<dyn Any>, Box::new($18) as Box<dyn Any>]) }
+    load data LowPriorityOpt LocalOpt infile stringLit FormatOpt DuplicateOpt into tableKwd TableName CharsetOpt Fields Lines IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt LoadDataOptionListOpt { ph("LoadDataStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($7) as Item, Box::new($8) as Item, Box::new($11) as Item, Box::new($12) as Item, Box::new($13) as Item, Box::new($14) as Item, Box::new($15) as Item, Box::new($16) as Item, Box::new($17) as Item, Box::new($18) as Item]) }
   ;
 LowPriorityOpt -> bool:
      { false }
@@ -5072,11 +5082,11 @@ FormatOpt -> Item:
   ;
 IgnoreLines -> Item:
      { ph("IgnoreLines#0", $span, vec![]) }
-  | ignore NUM lines { ph("IgnoreLines#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | ignore NUM lines { ph("IgnoreLines#1", $span, vec![Box::new($2) as Item]) }
   ;
 CharsetOpt -> Item:
      { ph("CharsetOpt#0", $span, vec![]) }
-  | character set CharsetName { ph("CharsetOpt#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | character set CharsetName { ph("CharsetOpt#1", $span, vec![Box::new($3) as Item]) }
   ;
 LocalOpt -> Item:
      { Box::new(()) as Item }
@@ -5084,23 +5094,23 @@ LocalOpt -> Item:
   ;
 Fields -> Option<Box<FieldsClause>>:
      { ph("Fields#0", $span, vec![]) }
-  | FieldsOrColumns FieldItemList { ph("Fields#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | FieldsOrColumns FieldItemList { ph("Fields#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 FieldsOrColumns -> String:
     fields { tok_text($lexer, &$1) }
   | columns { tok_text($lexer, &$1) }
   ;
 FieldItemList -> Vec<FieldItem>:
-    FieldItemList FieldItem { ph("FieldItemList#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | FieldItem { ph("FieldItemList#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    FieldItemList FieldItem { ph("FieldItemList#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | FieldItem { ph("FieldItemList#1", $span, vec![Box::new($1) as Item]) }
   ;
 FieldItem -> Box<FieldItem>:
-    terminated by FieldTerminator { ph("FieldItem#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | optionallyEnclosedBy FieldTerminator { ph("FieldItem#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | enclosed by FieldTerminator { ph("FieldItem#2", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | escaped by FieldTerminator { ph("FieldItem#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | defined null by TextString { ph("FieldItem#4", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | defined null by TextString optionally enclosed { ph("FieldItem#5", $span, vec![Box::new($4) as Box<dyn Any>]) }
+    terminated by FieldTerminator { ph("FieldItem#0", $span, vec![Box::new($3) as Item]) }
+  | optionallyEnclosedBy FieldTerminator { ph("FieldItem#1", $span, vec![Box::new($2) as Item]) }
+  | enclosed by FieldTerminator { ph("FieldItem#2", $span, vec![Box::new($3) as Item]) }
+  | escaped by FieldTerminator { ph("FieldItem#3", $span, vec![Box::new($3) as Item]) }
+  | defined null by TextString { ph("FieldItem#4", $span, vec![Box::new($4) as Item]) }
+  | defined null by TextString optionally enclosed { ph("FieldItem#5", $span, vec![Box::new($4) as Item]) }
   ;
 FieldTerminator -> String:
     stringLit { tok_text($lexer, &$1) }
@@ -5109,61 +5119,61 @@ FieldTerminator -> String:
   ;
 Lines -> Option<Box<LinesClause>>:
      { ph("Lines#0", $span, vec![]) }
-  | lines Starting LinesTerminated { ph("Lines#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | lines Starting LinesTerminated { ph("Lines#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 Starting -> Item:
      { ph("Starting#0", $span, vec![]) }
-  | starting by FieldTerminator { ph("Starting#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | starting by FieldTerminator { ph("Starting#1", $span, vec![Box::new($3) as Item]) }
   ;
 LinesTerminated -> Item:
      { ph("LinesTerminated#0", $span, vec![]) }
-  | terminated by FieldTerminator { ph("LinesTerminated#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | terminated by FieldTerminator { ph("LinesTerminated#1", $span, vec![Box::new($3) as Item]) }
   ;
 LoadDataSetSpecOpt -> Vec<Assignment>:
      { ph("LoadDataSetSpecOpt#0", $span, vec![]) }
   | set LoadDataSetList { $2 }
   ;
 LoadDataSetList -> Vec<Assignment>:
-    LoadDataSetList ',' LoadDataSetItem { ph("LoadDataSetList#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | LoadDataSetItem { ph("LoadDataSetList#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    LoadDataSetList ',' LoadDataSetItem { ph("LoadDataSetList#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | LoadDataSetItem { ph("LoadDataSetList#1", $span, vec![Box::new($1) as Item]) }
   ;
 LoadDataSetItem -> Box<Assignment>:
-    SimpleIdent eq ExprOrDefault { ph("LoadDataSetItem#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    SimpleIdent eq ExprOrDefault { ph("LoadDataSetItem#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 LoadDataOptionListOpt -> Vec<LoadDataOpt>:
      { Vec::new() }
-  | with LoadDataOptionList { ph("LoadDataOptionListOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | with LoadDataOptionList { ph("LoadDataOptionListOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 LoadDataOptionList -> Vec<LoadDataOpt>:
-    LoadDataOption { ph("LoadDataOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | LoadDataOptionList ',' LoadDataOption { ph("LoadDataOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    LoadDataOption { ph("LoadDataOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | LoadDataOptionList ',' LoadDataOption { ph("LoadDataOptionList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 LoadDataOption -> Box<LoadDataOpt>:
     identifier { ph("LoadDataOption#0", $span, vec![]) }
-  | identifier eq SignedLiteral { ph("LoadDataOption#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | identifier eq SignedLiteral { ph("LoadDataOption#1", $span, vec![Box::new($3) as Item]) }
   ;
 ImportIntoStmt -> Stmt:
-    importKwd into TableName ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt from stringLit FormatOpt LoadDataOptionListOpt { ph("ImportIntoStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>]) }
-  | importKwd into TableName ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt from ImportFromSelectStmt LoadDataOptionListOpt { ph("ImportIntoStmt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($7) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
+    importKwd into TableName ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt from stringLit FormatOpt LoadDataOptionListOpt { ph("ImportIntoStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($8) as Item, Box::new($9) as Item]) }
+  | importKwd into TableName ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt from ImportFromSelectStmt LoadDataOptionListOpt { ph("ImportIntoStmt#1", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($7) as Item, Box::new($8) as Item]) }
   ;
 ImportFromSelectStmt -> Stmt:
     SelectStmt { $1 }
   | SetOprStmt { $1 }
   | SelectStmtWithClause { $1 }
-  | SubSelect { ph("ImportFromSelectStmt#3", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SubSelect { ph("ImportFromSelectStmt#3", $span, vec![Box::new($1) as Item]) }
   ;
 UnlockTablesStmt -> Stmt:
-    unlock TablesTerminalSym { ph("UnlockTablesStmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    unlock TablesTerminalSym { ph("UnlockTablesStmt#0", $span, vec![Box::new($2) as Item]) }
   ;
 LockTablesStmt -> Stmt:
-    lock TablesTerminalSym TableLockList { ph("LockTablesStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    lock TablesTerminalSym TableLockList { ph("LockTablesStmt#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 TablesTerminalSym -> String:
     tables { tok_text($lexer, &$1) }
   | tableKwd { tok_text($lexer, &$1) }
   ;
 TableLock -> TableLock:
-    TableName LockType { ph("TableLock#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    TableName LockType { ph("TableLock#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 LockType -> TableLockType:
     read { ph("LockType#0", $span, vec![]) }
@@ -5172,11 +5182,11 @@ LockType -> TableLockType:
   | write local { ph("LockType#3", $span, vec![]) }
   ;
 TableLockList -> Vec<TableLock>:
-    TableLock { ph("TableLockList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TableLockList ',' TableLock { ph("TableLockList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    TableLock { ph("TableLockList#0", $span, vec![Box::new($1) as Item]) }
+  | TableLockList ',' TableLock { ph("TableLockList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 NonTransactionalDMLStmt -> Stmt:
-    batch OptionalShardColumn limit NUM DryRunOptions ShardableStmt { ph("NonTransactionalDMLStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    batch OptionalShardColumn limit NUM DryRunOptions ShardableStmt { ph("NonTransactionalDMLStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
   ;
 ShardableStmt -> Stmt:
     DeleteFromStmt { $1 }
@@ -5191,16 +5201,16 @@ DryRunOptions -> i64:
   ;
 OptionalShardColumn -> Box<ColumnName>:
      { ph("OptionalShardColumn#0", $span, vec![]) }
-  | on ColumnName { ph("OptionalShardColumn#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | on ColumnName { ph("OptionalShardColumn#1", $span, vec![Box::new($2) as Item]) }
   ;
 OptimizeTableStmt -> Stmt:
-    optimize NoWriteToBinLogAliasOpt TableOrTables TableNameList { ph("OptimizeTableStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    optimize NoWriteToBinLogAliasOpt TableOrTables TableNameList { ph("OptimizeTableStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 KillStmt -> Stmt:
-    KillOrKillTiDB NUM { ph("KillStmt#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | KillOrKillTiDB connection NUM { ph("KillStmt#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | KillOrKillTiDB query NUM { ph("KillStmt#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | KillOrKillTiDB BuiltinFunction { ph("KillStmt#3", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    KillOrKillTiDB NUM { ph("KillStmt#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | KillOrKillTiDB connection NUM { ph("KillStmt#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | KillOrKillTiDB query NUM { ph("KillStmt#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | KillOrKillTiDB BuiltinFunction { ph("KillStmt#3", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 KillOrKillTiDB -> bool:
     kill { false }
@@ -5210,25 +5220,25 @@ LoadStatsStmt -> Stmt:
     load stats stringLit { ph("LoadStatsStmt#0", $span, vec![]) }
   ;
 LockStatsStmt -> Stmt:
-    lock stats TableNameList { ph("LockStatsStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | lock stats TableName partition PartitionNameList { ph("LockStatsStmt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | lock stats TableName partition '(' PartitionNameList ')' { ph("LockStatsStmt#2", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    lock stats TableNameList { ph("LockStatsStmt#0", $span, vec![Box::new($3) as Item]) }
+  | lock stats TableName partition PartitionNameList { ph("LockStatsStmt#1", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | lock stats TableName partition '(' PartitionNameList ')' { ph("LockStatsStmt#2", $span, vec![Box::new($3) as Item, Box::new($6) as Item]) }
   ;
 UnlockStatsStmt -> Stmt:
-    unlock stats TableNameList { ph("UnlockStatsStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | unlock stats TableName partition PartitionNameList { ph("UnlockStatsStmt#1", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
-  | unlock stats TableName partition '(' PartitionNameList ')' { ph("UnlockStatsStmt#2", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    unlock stats TableNameList { ph("UnlockStatsStmt#0", $span, vec![Box::new($3) as Item]) }
+  | unlock stats TableName partition PartitionNameList { ph("UnlockStatsStmt#1", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
+  | unlock stats TableName partition '(' PartitionNameList ')' { ph("UnlockStatsStmt#2", $span, vec![Box::new($3) as Item, Box::new($6) as Item]) }
   ;
 RefreshStatsStmt -> Stmt:
-    refresh stats StatsObjectList RefreshStatsModeOpt RefreshStatsClusterOpt { ph("RefreshStatsStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    refresh stats StatsObjectList RefreshStatsModeOpt RefreshStatsClusterOpt { ph("RefreshStatsStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 StatsObjectList -> Vec<StatsObject>:
-    StatsObject { ph("StatsObjectList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | StatsObjectList ',' StatsObject { ph("StatsObjectList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    StatsObject { ph("StatsObjectList#0", $span, vec![Box::new($1) as Item]) }
+  | StatsObjectList ',' StatsObject { ph("StatsObjectList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 RefreshStatsModeOpt -> Option<Box<RefreshStatsMode>>:
      { None }
-  | RefreshStatsMode { ph("RefreshStatsModeOpt#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | RefreshStatsMode { ph("RefreshStatsModeOpt#1", $span, vec![Box::new($1) as Item]) }
   ;
 RefreshStatsMode -> RefreshStatsMode:
     full { ph("RefreshStatsMode#0", $span, vec![]) }
@@ -5240,24 +5250,24 @@ RefreshStatsClusterOpt -> bool:
   ;
 StatsObject -> Box<StatsObject>:
     '*' '.' '*' { ph("StatsObject#0", $span, vec![]) }
-  | Identifier '.' '*' { ph("StatsObject#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | Identifier '.' Identifier { ph("StatsObject#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | Identifier { ph("StatsObject#3", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | Identifier '.' '*' { ph("StatsObject#1", $span, vec![Box::new($1) as Item]) }
+  | Identifier '.' Identifier { ph("StatsObject#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | Identifier { ph("StatsObject#3", $span, vec![Box::new($1) as Item]) }
   ;
 DropPolicyStmt -> Stmt:
-    drop placement policy IfExists PolicyName { ph("DropPolicyStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    drop placement policy IfExists PolicyName { ph("DropPolicyStmt#0", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 CreateResourceGroupStmt -> Stmt:
-    create resource group IfNotExists ResourceGroupName ResourceGroupOptionList { ph("CreateResourceGroupStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    create resource group IfNotExists ResourceGroupName ResourceGroupOptionList { ph("CreateResourceGroupStmt#0", $span, vec![Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
   ;
 AlterResourceGroupStmt -> Stmt:
-    alter resource group IfExists ResourceGroupName ResourceGroupOptionList { ph("AlterResourceGroupStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    alter resource group IfExists ResourceGroupName ResourceGroupOptionList { ph("AlterResourceGroupStmt#0", $span, vec![Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
   ;
 DropResourceGroupStmt -> Stmt:
-    drop resource group IfExists ResourceGroupName { ph("DropResourceGroupStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    drop resource group IfExists ResourceGroupName { ph("DropResourceGroupStmt#0", $span, vec![Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 CreatePolicyStmt -> Stmt:
-    create OrReplace placement policy IfNotExists PolicyName PlacementOptionList { ph("CreatePolicyStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
+    create OrReplace placement policy IfNotExists PolicyName PlacementOptionList { ph("CreatePolicyStmt#0", $span, vec![Box::new($2) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($7) as Item]) }
   ;
 MaskingPolicyStateOpt -> Box<MaskingPolicyState>:
      { ph("MaskingPolicyStateOpt#0", $span, vec![]) }
@@ -5266,45 +5276,45 @@ MaskingPolicyStateOpt -> Box<MaskingPolicyState>:
   ;
 MaskingPolicyRestrictOnOpt -> MaskingPolicyRestrictOps:
      { ph("MaskingPolicyRestrictOnOpt#0", $span, vec![]) }
-  | restrict on '(' MaskingPolicyRestrictOperationList ')' { ph("MaskingPolicyRestrictOnOpt#1", $span, vec![Box::new($4) as Box<dyn Any>]) }
+  | restrict on '(' MaskingPolicyRestrictOperationList ')' { ph("MaskingPolicyRestrictOnOpt#1", $span, vec![Box::new($4) as Item]) }
   | restrict on none { ph("MaskingPolicyRestrictOnOpt#2", $span, vec![]) }
   ;
 MaskingPolicyRestrictOperationList -> MaskingPolicyRestrictOps:
-    MaskingPolicyRestrictOperation { ph("MaskingPolicyRestrictOperationList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | MaskingPolicyRestrictOperationList ',' MaskingPolicyRestrictOperation { ph("MaskingPolicyRestrictOperationList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    MaskingPolicyRestrictOperation { ph("MaskingPolicyRestrictOperationList#0", $span, vec![Box::new($1) as Item]) }
+  | MaskingPolicyRestrictOperationList ',' MaskingPolicyRestrictOperation { ph("MaskingPolicyRestrictOperationList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 MaskingPolicyRestrictOperation -> MaskingPolicyRestrictOps:
-    Identifier { ph("MaskingPolicyRestrictOperation#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    Identifier { ph("MaskingPolicyRestrictOperation#0", $span, vec![Box::new($1) as Item]) }
   ;
 CreateMaskingPolicyStmt -> Stmt:
-    create OrReplace masking policy IfNotExists PolicyName on TableName '(' Identifier ')' as Expression MaskingPolicyRestrictOnOpt MaskingPolicyStateOpt { ph("CreateMaskingPolicyStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($13) as Box<dyn Any>, Box::new($14) as Box<dyn Any>, Box::new($15) as Box<dyn Any>]) }
+    create OrReplace masking policy IfNotExists PolicyName on TableName '(' Identifier ')' as Expression MaskingPolicyRestrictOnOpt MaskingPolicyStateOpt { ph("CreateMaskingPolicyStmt#0", $span, vec![Box::new($2) as Item, Box::new($5) as Item, Box::new($6) as Item, Box::new($8) as Item, Box::new($10) as Item, Box::new($13) as Item, Box::new($14) as Item, Box::new($15) as Item]) }
   ;
 AlterPolicyStmt -> Stmt:
-    alter placement policy IfExists PolicyName PlacementOptionList { ph("AlterPolicyStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    alter placement policy IfExists PolicyName PlacementOptionList { ph("AlterPolicyStmt#0", $span, vec![Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
   ;
 CreateSequenceStmt -> Stmt:
-    create sequence IfNotExists TableName CreateSequenceOptionListOpt CreateSequenceTableOptionListOpt { ph("CreateSequenceStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    create sequence IfNotExists TableName CreateSequenceOptionListOpt CreateSequenceTableOptionListOpt { ph("CreateSequenceStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
   ;
 CreateSequenceOptionListOpt -> Vec<SequenceOption>:
      { Vec::new() }
   | SequenceOptionList { $1 }
   ;
 SequenceOptionList -> Vec<SequenceOption>:
-    SequenceOption { ph("SequenceOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SequenceOptionList SequenceOption { ph("SequenceOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    SequenceOption { ph("SequenceOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | SequenceOptionList SequenceOption { ph("SequenceOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 SequenceOption -> Box<SequenceOption>:
-    increment EqOpt SignedNum { ph("SequenceOption#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | increment by SignedNum { ph("SequenceOption#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | start EqOpt SignedNum { ph("SequenceOption#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | start with SignedNum { ph("SequenceOption#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | minValue EqOpt SignedNum { ph("SequenceOption#4", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    increment EqOpt SignedNum { ph("SequenceOption#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | increment by SignedNum { ph("SequenceOption#1", $span, vec![Box::new($3) as Item]) }
+  | start EqOpt SignedNum { ph("SequenceOption#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | start with SignedNum { ph("SequenceOption#3", $span, vec![Box::new($3) as Item]) }
+  | minValue EqOpt SignedNum { ph("SequenceOption#4", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   | nominvalue { ph("SequenceOption#5", $span, vec![]) }
   | no minValue { ph("SequenceOption#6", $span, vec![]) }
-  | maxValue EqOpt SignedNum { ph("SequenceOption#7", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | maxValue EqOpt SignedNum { ph("SequenceOption#7", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   | nomaxvalue { ph("SequenceOption#8", $span, vec![]) }
   | no maxValue { ph("SequenceOption#9", $span, vec![]) }
-  | cache EqOpt SignedNum { ph("SequenceOption#10", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+  | cache EqOpt SignedNum { ph("SequenceOption#10", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   | nocache { ph("SequenceOption#11", $span, vec![]) }
   | no cache { ph("SequenceOption#12", $span, vec![]) }
   | cycle { ph("SequenceOption#13", $span, vec![]) }
@@ -5328,20 +5338,20 @@ SignedNum -> i64:
     } }
   ;
 DropSequenceStmt -> Stmt:
-    drop sequence IfExists TableNameList { ph("DropSequenceStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    drop sequence IfExists TableNameList { ph("DropSequenceStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 AlterSequenceStmt -> Stmt:
-    alter sequence IfExists TableName AlterSequenceOptionList { ph("AlterSequenceStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    alter sequence IfExists TableName AlterSequenceOptionList { ph("AlterSequenceStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 AlterSequenceOptionList -> Vec<SequenceOption>:
-    AlterSequenceOption { ph("AlterSequenceOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | AlterSequenceOptionList AlterSequenceOption { ph("AlterSequenceOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    AlterSequenceOption { ph("AlterSequenceOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | AlterSequenceOptionList AlterSequenceOption { ph("AlterSequenceOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 AlterSequenceOption -> Box<SequenceOption>:
     SequenceOption { $1 }
   | restart { ph("AlterSequenceOption#1", $span, vec![]) }
-  | restart EqOpt SignedNum { ph("AlterSequenceOption#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | restart with SignedNum { ph("AlterSequenceOption#3", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | restart EqOpt SignedNum { ph("AlterSequenceOption#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | restart with SignedNum { ph("AlterSequenceOption#3", $span, vec![Box::new($3) as Item]) }
   ;
 EncryptionOpt -> String:
     stringLit { ph("EncryptionOpt#0", $span, vec![]) }
@@ -5354,57 +5364,57 @@ RowStmt -> Box<RowExpr>:
     row RowValue { Box::new(RowExpr { values: $2 }) }
   ;
 PlanReplayerStmt -> Stmt:
-    plan replayer dump PlanReplayerDumpOpt explain ExplainableStmt { ph("PlanReplayerStmt#0", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
-  | plan replayer dump PlanReplayerDumpOpt explain analyze ExplainableStmt { ph("PlanReplayerStmt#1", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | plan replayer dump PlanReplayerDumpOpt explain slow query WhereClauseOptional OrderByOptional SelectStmtLimitOpt { ph("PlanReplayerStmt#2", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($8) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>]) }
-  | plan replayer dump PlanReplayerDumpOpt explain analyze slow query WhereClauseOptional OrderByOptional SelectStmtLimitOpt { ph("PlanReplayerStmt#3", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($9) as Box<dyn Any>, Box::new($10) as Box<dyn Any>, Box::new($11) as Box<dyn Any>]) }
-  | plan replayer dump PlanReplayerDumpOpt explain stringLit { ph("PlanReplayerStmt#4", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | plan replayer dump PlanReplayerDumpOpt explain analyze stringLit { ph("PlanReplayerStmt#5", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | plan replayer dump PlanReplayerDumpOpt explain '(' StringList ')' { ph("PlanReplayerStmt#6", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($7) as Box<dyn Any>]) }
-  | plan replayer dump PlanReplayerDumpOpt explain analyze '(' StringList ')' { ph("PlanReplayerStmt#7", $span, vec![Box::new($4) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
+    plan replayer dump PlanReplayerDumpOpt explain ExplainableStmt { ph("PlanReplayerStmt#0", $span, vec![Box::new($4) as Item, Box::new($6) as Item]) }
+  | plan replayer dump PlanReplayerDumpOpt explain analyze ExplainableStmt { ph("PlanReplayerStmt#1", $span, vec![Box::new($4) as Item, Box::new($7) as Item]) }
+  | plan replayer dump PlanReplayerDumpOpt explain slow query WhereClauseOptional OrderByOptional SelectStmtLimitOpt { ph("PlanReplayerStmt#2", $span, vec![Box::new($4) as Item, Box::new($8) as Item, Box::new($9) as Item, Box::new($10) as Item]) }
+  | plan replayer dump PlanReplayerDumpOpt explain analyze slow query WhereClauseOptional OrderByOptional SelectStmtLimitOpt { ph("PlanReplayerStmt#3", $span, vec![Box::new($4) as Item, Box::new($9) as Item, Box::new($10) as Item, Box::new($11) as Item]) }
+  | plan replayer dump PlanReplayerDumpOpt explain stringLit { ph("PlanReplayerStmt#4", $span, vec![Box::new($4) as Item]) }
+  | plan replayer dump PlanReplayerDumpOpt explain analyze stringLit { ph("PlanReplayerStmt#5", $span, vec![Box::new($4) as Item]) }
+  | plan replayer dump PlanReplayerDumpOpt explain '(' StringList ')' { ph("PlanReplayerStmt#6", $span, vec![Box::new($4) as Item, Box::new($7) as Item]) }
+  | plan replayer dump PlanReplayerDumpOpt explain analyze '(' StringList ')' { ph("PlanReplayerStmt#7", $span, vec![Box::new($4) as Item, Box::new($8) as Item]) }
   | plan replayer load stringLit { ph("PlanReplayerStmt#8", $span, vec![]) }
   | plan replayer capture stringLit stringLit { ph("PlanReplayerStmt#9", $span, vec![]) }
   | plan replayer capture remove stringLit stringLit { ph("PlanReplayerStmt#10", $span, vec![]) }
   ;
 PlanReplayerDumpOpt -> Option<Box<AsOfClause>>:
      { None }
-  | with stats AsOfClause { ph("PlanReplayerDumpOpt#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
+  | with stats AsOfClause { ph("PlanReplayerDumpOpt#1", $span, vec![Box::new($3) as Item]) }
   ;
 TrafficStmt -> Stmt:
-    traffic capture to stringLit TrafficCaptureOptList { ph("TrafficStmt#0", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | traffic replay from stringLit TrafficReplayOptList { ph("TrafficStmt#1", $span, vec![Box::new($5) as Box<dyn Any>]) }
+    traffic capture to stringLit TrafficCaptureOptList { ph("TrafficStmt#0", $span, vec![Box::new($5) as Item]) }
+  | traffic replay from stringLit TrafficReplayOptList { ph("TrafficStmt#1", $span, vec![Box::new($5) as Item]) }
   | show traffic jobs { ph("TrafficStmt#2", $span, vec![]) }
   | cancel traffic jobs { ph("TrafficStmt#3", $span, vec![]) }
   ;
 TrafficCaptureOptList -> Vec<TrafficOption>:
-    TrafficCaptureOpt { ph("TrafficCaptureOptList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TrafficCaptureOptList TrafficCaptureOpt { ph("TrafficCaptureOptList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    TrafficCaptureOpt { ph("TrafficCaptureOptList#0", $span, vec![Box::new($1) as Item]) }
+  | TrafficCaptureOptList TrafficCaptureOpt { ph("TrafficCaptureOptList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 TrafficCaptureOpt -> Box<TrafficOption>:
-    timeDuration EqOpt stringLit { ph("TrafficCaptureOpt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | encryptionMethod EqOpt stringLit { ph("TrafficCaptureOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | compress EqOpt Boolean { ph("TrafficCaptureOpt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    timeDuration EqOpt stringLit { ph("TrafficCaptureOpt#0", $span, vec![Box::new($2) as Item]) }
+  | encryptionMethod EqOpt stringLit { ph("TrafficCaptureOpt#1", $span, vec![Box::new($2) as Item]) }
+  | compress EqOpt Boolean { ph("TrafficCaptureOpt#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 TrafficReplayOptList -> Vec<TrafficOption>:
-    TrafficReplayOpt { ph("TrafficReplayOptList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | TrafficReplayOptList TrafficReplayOpt { ph("TrafficReplayOptList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    TrafficReplayOpt { ph("TrafficReplayOptList#0", $span, vec![Box::new($1) as Item]) }
+  | TrafficReplayOptList TrafficReplayOpt { ph("TrafficReplayOptList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 TrafficReplayOpt -> Box<TrafficOption>:
-    user EqOpt stringLit { ph("TrafficReplayOpt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | password EqOpt stringLit { ph("TrafficReplayOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | speed EqOpt NumLiteral { ph("TrafficReplayOpt#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | readOnly EqOpt Boolean { ph("TrafficReplayOpt#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    user EqOpt stringLit { ph("TrafficReplayOpt#0", $span, vec![Box::new($2) as Item]) }
+  | password EqOpt stringLit { ph("TrafficReplayOpt#1", $span, vec![Box::new($2) as Item]) }
+  | speed EqOpt NumLiteral { ph("TrafficReplayOpt#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | readOnly EqOpt Boolean { ph("TrafficReplayOpt#3", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 OptSpPdparams -> Vec<StoreParameter>:
      { Vec::new() }
   | SpPdparams { $1 }
   ;
 SpPdparams -> Vec<StoreParameter>:
-    SpPdparams ',' SpPdparam { ph("SpPdparams#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | SpPdparam { ph("SpPdparams#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    SpPdparams ',' SpPdparam { ph("SpPdparams#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+  | SpPdparam { ph("SpPdparams#1", $span, vec![Box::new($1) as Item]) }
   ;
 SpPdparam -> Box<StoreParameter>:
-    SpOptInout Identifier Type { ph("SpPdparam#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    SpOptInout Identifier Type { ph("SpPdparam#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 SpOptInout -> i64:
      { ph("SpOptInout#0", $span, vec![]) }
@@ -5415,7 +5425,7 @@ SpOptInout -> i64:
 ProcedureStatementStmt -> Stmt:
     SelectStmt { $1 }
   | SelectStmtWithClause { $1 }
-  | SubSelect { ph("ProcedureStatementStmt#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SubSelect { ph("ProcedureStatementStmt#2", $span, vec![Box::new($1) as Item]) }
   | SetStmt { $1 }
   | UpdateStmt { $1 }
   | UseStmt { $1 }
@@ -5432,41 +5442,41 @@ ProcedureStatementStmt -> Stmt:
 ProcedureCursorSelectStmt -> Stmt:
     SelectStmt { $1 }
   | SelectStmtWithClause { $1 }
-  | SubSelect { ph("ProcedureCursorSelectStmt#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | SubSelect { ph("ProcedureCursorSelectStmt#2", $span, vec![Box::new($1) as Item]) }
   | SetOprStmt { $1 }
   ;
 ProcedureUnlabeledBlock -> Stmt:
     ProcedureBlockContent { $1 }
   ;
 ProcedureDeclIdents -> Vec<String>:
-    Identifier { ph("ProcedureDeclIdents#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ProcedureDeclIdents ',' Identifier { ph("ProcedureDeclIdents#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    Identifier { ph("ProcedureDeclIdents#0", $span, vec![Box::new($1) as Item]) }
+  | ProcedureDeclIdents ',' Identifier { ph("ProcedureDeclIdents#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ProcedureOptDefault -> Option<Expr>:
      { None }
   | defaultKwd Expression { Some($2) }
   ;
 ProcedureDecl -> DeclNode:
-    declare ProcedureDeclIdents Type ProcedureOptDefault { ph("ProcedureDecl#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | declare identifier cursor forKwd ProcedureCursorSelectStmt { ph("ProcedureDecl#1", $span, vec![Box::new($5) as Box<dyn Any>]) }
-  | declare ProcedureHandlerType handler forKwd ProcedureHcondList ProcedureProcStmt { ph("ProcedureDecl#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($5) as Box<dyn Any>, Box::new($6) as Box<dyn Any>]) }
+    declare ProcedureDeclIdents Type ProcedureOptDefault { ph("ProcedureDecl#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
+  | declare identifier cursor forKwd ProcedureCursorSelectStmt { ph("ProcedureDecl#1", $span, vec![Box::new($5) as Item]) }
+  | declare ProcedureHandlerType handler forKwd ProcedureHcondList ProcedureProcStmt { ph("ProcedureDecl#2", $span, vec![Box::new($2) as Item, Box::new($5) as Item, Box::new($6) as Item]) }
   ;
 ProcedureHandlerType -> i64:
     continueKwd { ph("ProcedureHandlerType#0", $span, vec![]) }
   | exit { ph("ProcedureHandlerType#1", $span, vec![]) }
   ;
 ProcedureHcondList -> Vec<ErrNode>:
-    ProcedureHcond { ph("ProcedureHcondList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ProcedureHcondList ',' ProcedureHcond { ph("ProcedureHcondList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    ProcedureHcond { ph("ProcedureHcondList#0", $span, vec![Box::new($1) as Item]) }
+  | ProcedureHcondList ',' ProcedureHcond { ph("ProcedureHcondList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 ProcedureHcond -> Stmt:
-    ProcedurceCond { ph("ProcedureHcond#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    ProcedurceCond { ph("ProcedureHcond#0", $span, vec![Box::new($1) as Item]) }
   | sqlwarning { ph("ProcedureHcond#1", $span, vec![]) }
   | not found { ph("ProcedureHcond#2", $span, vec![]) }
   | sqlexception { ph("ProcedureHcond#3", $span, vec![]) }
   ;
 ProcedurceCond -> Stmt:
-    NUM { ph("ProcedurceCond#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    NUM { ph("ProcedurceCond#0", $span, vec![Box::new($1) as Item]) }
   | sqlstate optValue stringLit { ph("ProcedurceCond#1", $span, vec![]) }
   ;
 optValue -> ():
@@ -5477,7 +5487,7 @@ ProcedureOpenCur -> Stmt:
     open identifier { ph("ProcedureOpenCur#0", $span, vec![]) }
   ;
 ProcedureFetchInto -> Stmt:
-    fetch ProcedureOptFetchNo identifier into ProcedureFetchList { ph("ProcedureFetchInto#0", $span, vec![Box::new($5) as Box<dyn Any>]) }
+    fetch ProcedureOptFetchNo identifier into ProcedureFetchList { ph("ProcedureFetchInto#0", $span, vec![Box::new($5) as Item]) }
   ;
 ProcedureCloseCur -> Stmt:
     close identifier { ph("ProcedureCloseCur#0", $span, vec![]) }
@@ -5489,82 +5499,82 @@ ProcedureOptFetchNo -> ():
   ;
 ProcedureFetchList -> Vec<String>:
     identifier { ph("ProcedureFetchList#0", $span, vec![]) }
-  | ProcedureFetchList ',' identifier { ph("ProcedureFetchList#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | ProcedureFetchList ',' identifier { ph("ProcedureFetchList#1", $span, vec![Box::new($1) as Item]) }
   ;
 ProcedureDeclsOpt -> Vec<DeclNode>:
      { Vec::new() }
   | ProcedureDecls { $1 }
   ;
 ProcedureDecls -> Vec<DeclNode>:
-    ProcedureDecl ';' { ph("ProcedureDecls#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ProcedureDecls ProcedureDecl ';' { ph("ProcedureDecls#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    ProcedureDecl ';' { ph("ProcedureDecls#0", $span, vec![Box::new($1) as Item]) }
+  | ProcedureDecls ProcedureDecl ';' { ph("ProcedureDecls#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 ProcedureProcStmts -> Vec<Stmt>:
      { Vec::new() }
-  | ProcedureProcStmts ProcedureProcStmt ';' { ph("ProcedureProcStmts#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+  | ProcedureProcStmts ProcedureProcStmt ';' { ph("ProcedureProcStmts#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 ProcedureProcStmt1s -> Vec<Stmt>:
-    ProcedureProcStmt ';' { ph("ProcedureProcStmt1s#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | ProcedureProcStmt1s ProcedureProcStmt ';' { ph("ProcedureProcStmt1s#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    ProcedureProcStmt ';' { ph("ProcedureProcStmt1s#0", $span, vec![Box::new($1) as Item]) }
+  | ProcedureProcStmt1s ProcedureProcStmt ';' { ph("ProcedureProcStmt1s#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 ProcedureBlockContent -> Stmt:
-    begin ProcedureDeclsOpt ProcedureProcStmts end { ph("ProcedureBlockContent#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    begin ProcedureDeclsOpt ProcedureProcStmts end { ph("ProcedureBlockContent#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 ProcedureIfstmt -> Stmt:
-    ifKwd ProcedureIf end ifKwd { ph("ProcedureIfstmt#0", $span, vec![Box::new($2) as Box<dyn Any>]) }
+    ifKwd ProcedureIf end ifKwd { ph("ProcedureIfstmt#0", $span, vec![Box::new($2) as Item]) }
   ;
 ProcedureIf -> Stmt:
-    Expression then ProcedureProcStmt1s procedurceElseIfs { ph("ProcedureIf#0", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    Expression then ProcedureProcStmt1s procedurceElseIfs { ph("ProcedureIf#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 procedurceElseIfs -> Option<Stmt>:
      { None }
-  | elseIfKwd ProcedureIf { ph("procedurceElseIfs#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | elseKwd ProcedureProcStmt1s { ph("procedurceElseIfs#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | elseIfKwd ProcedureIf { ph("procedurceElseIfs#1", $span, vec![Box::new($2) as Item]) }
+  | elseKwd ProcedureProcStmt1s { ph("procedurceElseIfs#2", $span, vec![Box::new($2) as Item]) }
   ;
 ProcedureCaseStmt -> Stmt:
     ProcedureSimpleCase { $1 }
   | ProcedureSearchedCase { $1 }
   ;
 SimpleWhenThenList -> Vec<SimpleWhenThenStmt>:
-    SimpleWhenThen { ph("SimpleWhenThenList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SimpleWhenThenList SimpleWhenThen { ph("SimpleWhenThenList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    SimpleWhenThen { ph("SimpleWhenThenList#0", $span, vec![Box::new($1) as Item]) }
+  | SimpleWhenThenList SimpleWhenThen { ph("SimpleWhenThenList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 SearchedWhenThenList -> Vec<SearchWhenThenStmt>:
-    SearchWhenThen { ph("SearchedWhenThenList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | SearchedWhenThenList SearchWhenThen { ph("SearchedWhenThenList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
+    SearchWhenThen { ph("SearchedWhenThenList#0", $span, vec![Box::new($1) as Item]) }
+  | SearchedWhenThenList SearchWhenThen { ph("SearchedWhenThenList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
   ;
 SimpleWhenThen -> Stmt:
-    when Expression then ProcedureProcStmt1s { ph("SimpleWhenThen#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    when Expression then ProcedureProcStmt1s { ph("SimpleWhenThen#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 SearchWhenThen -> Stmt:
-    when Expression then ProcedureProcStmt1s { ph("SearchWhenThen#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    when Expression then ProcedureProcStmt1s { ph("SearchWhenThen#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 ElseCaseOpt -> Vec<Stmt>:
      { Vec::new() }
-  | elseKwd ProcedureProcStmt1s { ph("ElseCaseOpt#1", $span, vec![Box::new($2) as Box<dyn Any>]) }
+  | elseKwd ProcedureProcStmt1s { ph("ElseCaseOpt#1", $span, vec![Box::new($2) as Item]) }
   ;
 ProcedureSimpleCase -> Stmt:
-    caseKwd Expression SimpleWhenThenList ElseCaseOpt end caseKwd { ph("ProcedureSimpleCase#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    caseKwd Expression SimpleWhenThenList ElseCaseOpt end caseKwd { ph("ProcedureSimpleCase#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 ProcedureSearchedCase -> Stmt:
-    caseKwd SearchedWhenThenList ElseCaseOpt end caseKwd { ph("ProcedureSearchedCase#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    caseKwd SearchedWhenThenList ElseCaseOpt end caseKwd { ph("ProcedureSearchedCase#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
   ;
 ProcedureUnlabelLoopBlock -> Stmt:
     ProcedureUnlabelLoopStmt { $1 }
   ;
 ProcedureUnlabelLoopStmt -> Stmt:
-    while Expression do ProcedureProcStmt1s end while { ph("ProcedureUnlabelLoopStmt#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
-  | repeat ProcedureProcStmt1s until Expression end repeat { ph("ProcedureUnlabelLoopStmt#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    while Expression do ProcedureProcStmt1s end while { ph("ProcedureUnlabelLoopStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+  | repeat ProcedureProcStmt1s until Expression end repeat { ph("ProcedureUnlabelLoopStmt#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 ProcedureLabeledBlock -> Stmt:
-    identifier ':' ProcedureBlockContent ProcedurceLabelOpt { ph("ProcedureLabeledBlock#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    identifier ':' ProcedureBlockContent ProcedurceLabelOpt { ph("ProcedureLabeledBlock#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 ProcedurceLabelOpt -> String:
      { ph("ProcedurceLabelOpt#0", $span, vec![]) }
   | identifier { tok_text($lexer, &$1) }
   ;
 ProcedurelabeledLoopStmt -> Stmt:
-    identifier ':' ProcedureUnlabelLoopStmt ProcedurceLabelOpt { ph("ProcedurelabeledLoopStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    identifier ':' ProcedureUnlabelLoopStmt ProcedurceLabelOpt { ph("ProcedurelabeledLoopStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 ProcedureIterate -> Stmt:
     iterate identifier { ph("ProcedureIterate#0", $span, vec![]) }
@@ -5587,29 +5597,29 @@ ProcedureProcStmt -> Stmt:
   | ProcedureLeave { $1 }
   ;
 CreateProcedureStmt -> Stmt:
-    create procedure IfNotExists TableName '(' OptSpPdparams ')' ProcedureProcStmt { ph("CreateProcedureStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($6) as Box<dyn Any>, Box::new($8) as Box<dyn Any>]) }
+    create procedure IfNotExists TableName '(' OptSpPdparams ')' ProcedureProcStmt { ph("CreateProcedureStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item, Box::new($6) as Item, Box::new($8) as Item]) }
   ;
 DropProcedureStmt -> Stmt:
-    drop procedure IfExists TableName { ph("DropProcedureStmt#0", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($4) as Box<dyn Any>]) }
+    drop procedure IfExists TableName { ph("DropProcedureStmt#0", $span, vec![Box::new($3) as Item, Box::new($4) as Item]) }
   ;
 CalibrateResourceStmt -> Stmt:
-    calibrate resource CalibrateOption { ph("CalibrateResourceStmt#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
+    calibrate resource CalibrateOption { ph("CalibrateResourceStmt#0", $span, vec![Box::new($3) as Item]) }
   ;
 CalibrateOption -> Box<CalibrateResourceStmt>:
      { ph("CalibrateOption#0", $span, vec![]) }
-  | DynamicCalibrateOptionList { ph("CalibrateOption#1", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | CalibrateResourceWorkloadOption { ph("CalibrateOption#2", $span, vec![Box::new($1) as Box<dyn Any>]) }
+  | DynamicCalibrateOptionList { ph("CalibrateOption#1", $span, vec![Box::new($1) as Item]) }
+  | CalibrateResourceWorkloadOption { ph("CalibrateOption#2", $span, vec![Box::new($1) as Item]) }
   ;
 DynamicCalibrateOptionList -> Vec<DynamicCalibrateResourceOption>:
-    DynamicCalibrateResourceOption { ph("DynamicCalibrateOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | DynamicCalibrateOptionList DynamicCalibrateResourceOption { ph("DynamicCalibrateOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | DynamicCalibrateOptionList ',' DynamicCalibrateResourceOption { ph("DynamicCalibrateOptionList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    DynamicCalibrateResourceOption { ph("DynamicCalibrateOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | DynamicCalibrateOptionList DynamicCalibrateResourceOption { ph("DynamicCalibrateOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | DynamicCalibrateOptionList ',' DynamicCalibrateResourceOption { ph("DynamicCalibrateOptionList#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 DynamicCalibrateResourceOption -> Box<DynamicCalibrateResourceOption>:
-    startTime EqOpt Expression { ph("DynamicCalibrateResourceOption#0", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | endTime EqOpt Expression { ph("DynamicCalibrateResourceOption#1", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | timeDuration EqOpt stringLit { ph("DynamicCalibrateResourceOption#2", $span, vec![Box::new($2) as Box<dyn Any>]) }
-  | timeDuration EqOpt interval Expression TimeUnit { ph("DynamicCalibrateResourceOption#3", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($4) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    startTime EqOpt Expression { ph("DynamicCalibrateResourceOption#0", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | endTime EqOpt Expression { ph("DynamicCalibrateResourceOption#1", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | timeDuration EqOpt stringLit { ph("DynamicCalibrateResourceOption#2", $span, vec![Box::new($2) as Item]) }
+  | timeDuration EqOpt interval Expression TimeUnit { ph("DynamicCalibrateResourceOption#3", $span, vec![Box::new($2) as Item, Box::new($4) as Item, Box::new($5) as Item]) }
   ;
 CalibrateResourceWorkloadOption -> CalibrateResourceType:
     workload tpcc { ph("CalibrateResourceWorkloadOption#0", $span, vec![]) }
@@ -5619,28 +5629,28 @@ CalibrateResourceWorkloadOption -> CalibrateResourceType:
   | workload tpch10 { ph("CalibrateResourceWorkloadOption#4", $span, vec![]) }
   ;
 AddQueryWatchStmt -> Stmt:
-    query watch add QueryWatchOptionList { ph("AddQueryWatchStmt#0", $span, vec![Box::new($4) as Box<dyn Any>]) }
+    query watch add QueryWatchOptionList { ph("AddQueryWatchStmt#0", $span, vec![Box::new($4) as Item]) }
   ;
 QueryWatchOptionList -> Vec<QueryWatchOption>:
-    QueryWatchOption { ph("QueryWatchOptionList#0", $span, vec![Box::new($1) as Box<dyn Any>]) }
-  | QueryWatchOptionList QueryWatchOption { ph("QueryWatchOptionList#1", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($2) as Box<dyn Any>]) }
-  | QueryWatchOptionList ',' QueryWatchOption { ph("QueryWatchOptionList#2", $span, vec![Box::new($1) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
+    QueryWatchOption { ph("QueryWatchOptionList#0", $span, vec![Box::new($1) as Item]) }
+  | QueryWatchOptionList QueryWatchOption { ph("QueryWatchOptionList#1", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+  | QueryWatchOptionList ',' QueryWatchOption { ph("QueryWatchOptionList#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
   ;
 QueryWatchOption -> Box<QueryWatchOption>:
-    resource group ResourceGroupName { ph("QueryWatchOption#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | resource group UserVariable { ph("QueryWatchOption#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | action EqOpt ResourceGroupRunawayActionOption { ph("QueryWatchOption#2", $span, vec![Box::new($2) as Box<dyn Any>, Box::new($3) as Box<dyn Any>]) }
-  | QueryWatchTextOption { ph("QueryWatchOption#3", $span, vec![Box::new($1) as Box<dyn Any>]) }
+    resource group ResourceGroupName { ph("QueryWatchOption#0", $span, vec![Box::new($3) as Item]) }
+  | resource group UserVariable { ph("QueryWatchOption#1", $span, vec![Box::new($3) as Item]) }
+  | action EqOpt ResourceGroupRunawayActionOption { ph("QueryWatchOption#2", $span, vec![Box::new($2) as Item, Box::new($3) as Item]) }
+  | QueryWatchTextOption { ph("QueryWatchOption#3", $span, vec![Box::new($1) as Item]) }
   ;
 QueryWatchTextOption -> Box<QueryWatchTextOption>:
-    sql digest SimpleExpr { ph("QueryWatchTextOption#0", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | plan digest SimpleExpr { ph("QueryWatchTextOption#1", $span, vec![Box::new($3) as Box<dyn Any>]) }
-  | sql textType ResourceGroupRunawayWatchOption to SimpleExpr { ph("QueryWatchTextOption#2", $span, vec![Box::new($3) as Box<dyn Any>, Box::new($5) as Box<dyn Any>]) }
+    sql digest SimpleExpr { ph("QueryWatchTextOption#0", $span, vec![Box::new($3) as Item]) }
+  | plan digest SimpleExpr { ph("QueryWatchTextOption#1", $span, vec![Box::new($3) as Item]) }
+  | sql textType ResourceGroupRunawayWatchOption to SimpleExpr { ph("QueryWatchTextOption#2", $span, vec![Box::new($3) as Item, Box::new($5) as Item]) }
   ;
 DropQueryWatchStmt -> Stmt:
-    query watch remove NUM { ph("DropQueryWatchStmt#0", $span, vec![Box::new($4) as Box<dyn Any>]) }
-  | query watch remove resource group ResourceGroupName { ph("DropQueryWatchStmt#1", $span, vec![Box::new($6) as Box<dyn Any>]) }
-  | query watch remove resource group UserVariable { ph("DropQueryWatchStmt#2", $span, vec![Box::new($6) as Box<dyn Any>]) }
+    query watch remove NUM { ph("DropQueryWatchStmt#0", $span, vec![Box::new($4) as Item]) }
+  | query watch remove resource group ResourceGroupName { ph("DropQueryWatchStmt#1", $span, vec![Box::new($6) as Item]) }
+  | query watch remove resource group UserVariable { ph("DropQueryWatchStmt#2", $span, vec![Box::new($6) as Item]) }
   ;
 %%
 #[allow(unused_imports)] use crate::ast::*;
@@ -5708,9 +5718,9 @@ fn stmt_to_result_set(s: Stmt) -> ResultSetNode {
 
 /// The `switch x := $n.(*ast.SubqueryExpr).Query.(type)` of the set-operation actions: the
 /// operand's selects, With, Limit and OrderBy (a SELECT keeps its own With / Limit / OrderBy;
-/// Go shares the With pointer, hence the `Rc`).
+/// Go shares the With pointer, hence the `Arc`).
 #[allow(clippy::type_complexity)]
-fn subselect_operand(e: Expr) -> (Vec<SetOprNode>, Option<std::rc::Rc<WithClause>>, Option<Box<Limit>>, Option<Box<OrderByClause>>) {
+fn subselect_operand(e: Expr) -> (Vec<SetOprNode>, Option<std::sync::Arc<WithClause>>, Option<Box<Limit>>, Option<Box<OrderByClause>>) {
     match e {
         Expr::Subquery(sq) => match sq.query {
             ResultSetNode::Select(x) => {

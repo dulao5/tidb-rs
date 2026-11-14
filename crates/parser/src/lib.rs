@@ -113,6 +113,16 @@ pub struct ParseOutput {
     pub warnings: Vec<Diagnostic>,
 }
 
+// The AST can be kept in a session across statements (prepared statements, VS1 plan §4.4):
+// N2 requires `Session: Send`, and a plan cache shared between sessions needs `Sync`.
+// The shared `WithClause` is therefore an `Arc`, not an `Rc` (VS1-04).
+const _: () = {
+    // glue: compile-time check
+    const fn send_sync<T: Send + Sync>() {}
+    send_sync::<Stmt>();
+    send_sync::<ParseOutput>();
+};
+
 /// Why the input was rejected. Positions are byte offsets into the SQL text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {

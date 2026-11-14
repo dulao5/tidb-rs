@@ -3,8 +3,10 @@ use std::any::Any;
 
 use crate::span::Span;
 
-/// Catch-all value type for nonterminals whose Go type could not be inferred.
-pub type Item = Box<dyn Any>;
+/// Catch-all value type for nonterminals whose Go type could not be inferred. `Send + Sync`
+/// so that the AST (which embeds placeholder [`Node`]s) can be kept in a session and shared
+/// by a plan cache (N2 `Session: Send`, VS1-04).
+pub type Item = Box<dyn Any + Send + Sync>;
 /// The value of a terminal in an action (`$n` for a token): its id and source range.
 pub type Tok = crate::lexer::Tok;
 
@@ -15,7 +17,7 @@ pub struct Node {
     /// Source range of the production.
     pub span: Span,
     /// Values of the production's nonterminal children (type-erased).
-    pub children: Vec<Box<dyn Any>>,
+    pub children: Vec<Item>,
 }
 
 impl std::fmt::Debug for Node {
@@ -37,7 +39,7 @@ pub trait FromNode {
 }
 
 #[inline]
-pub fn ph<T: FromNode>(kind: &'static str, span: Span, children: Vec<Box<dyn Any>>) -> T {
+pub fn ph<T: FromNode>(kind: &'static str, span: Span, children: Vec<Item>) -> T {
     T::from_node(Node {
         kind,
         span,
