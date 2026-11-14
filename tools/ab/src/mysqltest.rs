@@ -6,7 +6,7 @@
 //! A comment or directive line also ends a statement that has no `;` yet. `connect (...)`,
 //! `connection name` and `disconnect name` are written without `--`.
 
-use crate::sql::{Word, words};
+use crate::sql::{Word, skip_quoted, words};
 
 /// One item of a test file, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,6 +304,117 @@ pub fn prepare_parts(sql: &str) -> Option<(String, Option<String>)> {
     Some((name, None))
 }
 
+/// The session variables a session statement assigns, lower-cased without `@@session.` /
+/// `SESSION`, each with whether it is set back to `DEFAULT`. `SET NAMES` / `SET CHARACTER SET`
+/// assign the connection's character set variables; `USE` assigns `database`. User variables
+/// (`@x`) and other statements give nothing.
+pub fn session_vars(sql: &str) -> Vec<(String, bool)> {
+    let w = words(sql);
+    let first = w.first().map_or("", |x| x.text.as_str());
+    let second = w.get(1).map_or("", |x| x.text.as_str());
+    if first == "USE" {
+        return vec![("database".into(), false)];
+    }
+    if first != "SET" {
+        return Vec::new();
+    }
+    if second == "NAMES"
+        || second == "CHARSET"
+        || (second == "CHARACTER" && w.get(2).is_some_and(|x| x.text == "SET"))
+    {
+        let default = w.get(2).is_some_and(|x| x.text == "DEFAULT")
+            || w.get(3).is_some_and(|x| x.text == "DEFAULT");
+        return [
+            "character_set_client",
+            "character_set_connection",
+            "character_set_results",
+            "collation_connection",
+        ]
+        .iter()
+        .map(|v| (v.to_string(), default))
+        .collect();
+    }
+    // `SET a = x, @@b = y, SESSION c := z`: split at top-level commas.
+    let t = sql.trim_start();
+    if !t.get(..3).is_some_and(|k| k.eq_ignore_ascii_case("set")) {
+        return Vec::new();
+    }
+    let body = t[3..].trim_end().trim_end_matches(';');
+    let b = body.as_bytes();
+    let mut items = Vec::new();
+    let (mut depth, mut start, mut i) = (0u32, 0, 0);
+    while i < b.len() {
+        match b[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_quoted(b, i);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                items.push(&body[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    items.push(&body[start..]);
+    let mut out = Vec::new();
+    for item in items {
+        let Some(eq) = item.find('=') else { continue };
+        let target = item[..eq].trim_end_matches(':').trim().to_ascii_lowercase();
+        let value = item[eq + 1..].trim().to_ascii_uppercase();
+        let mut name = target.as_str();
+        for p in ["session ", "local "] {
+            if let Some(r) = name.strip_prefix(p) {
+                name = r.trim_start();
+            }
+        }
+        for p in ["@@session.", "@@local.", "@@"] {
+            if let Some(r) = name.strip_prefix(p) {
+                name = r;
+                break;
+            }
+        }
+        if name.is_empty() || name.starts_with('@') {
+            continue;
+        }
+        out.push((name.trim_matches('`').to_string(), value == "DEFAULT"));
+    }
+    out
+}
+
+/// Whether a session variable can change what a read returns (the database, character sets
+/// and collations, SQL mode, time, memory quota, snapshot / external timestamp reads, ...).
+/// When tidb-rs rejects setting one of these, its session no longer answers like Go's; the
+/// other variables only steer plans and execution (cost model, concurrency, chunk sizes, ...),
+/// and a mismatch after rejecting one of those is reported.
+pub fn affects_results(var: &str) -> bool {
+    var.starts_with("character_set_")
+        || var.starts_with("collation_")
+        || matches!(
+            var,
+            "database"
+                | "sql_mode"
+                | "time_zone"
+                | "timestamp"
+                | "default_collation_for_utf8mb4"
+                | "div_precision_increment"
+                | "sql_select_limit"
+                | "max_execution_time"
+                | "group_concat_max_len"
+                | "block_encryption_mode"
+                | "lc_time_names"
+                | "tidb_mem_quota_query"
+                | "tidb_enable_external_ts_read"
+                | "tidb_external_ts"
+                | "tidb_snapshot"
+                | "tidb_read_staleness"
+                | "tidb_enable_noop_functions"
+        )
+}
+
 /// Transaction effect of a statement that succeeded on A.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxnEffect {
@@ -573,6 +684,32 @@ mod tests {
             classify("explain analyze format='brief' select 1", none),
             Class::Read("explain")
         );
+    }
+
+    #[test]
+    fn session_variables() {
+        let v = |s: &str| session_vars(s);
+        assert_eq!(v("use test"), vec![("database".to_string(), false)]);
+        assert_eq!(v("set names gbk").len(), 4);
+        assert!(v("SET NAMES default").iter().all(|(_, d)| *d));
+        assert_eq!(v("set character set utf8")[0].0, "character_set_client");
+        assert_eq!(
+            v("set @@session.sql_mode = 'a,b', tidb_mem_quota_query=DEFAULT, @x = 1"),
+            vec![
+                ("sql_mode".to_string(), false),
+                ("tidb_mem_quota_query".to_string(), true)
+            ]
+        );
+        assert_eq!(
+            v("SET SESSION time_zone := '+08:00'"),
+            vec![("time_zone".to_string(), false)]
+        );
+        assert_eq!(v("set @@rand_seed1=1,@@rand_seed2=2").len(), 2);
+        assert!(v("set @a = 1").is_empty());
+        assert!(v("select 1").is_empty());
+        assert!(affects_results("character_set_results"));
+        assert!(affects_results("sql_mode"));
+        assert!(!affects_results("tidb_cost_model_version"));
     }
 
     #[test]

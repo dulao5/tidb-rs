@@ -26,9 +26,14 @@ def write(d, name, obj):
         json.dump(obj, f)
 
 
-def report(inp, prev=None, parts="ab"):
+def report(inp, prev=None, parts="ab", expected=None):
+    """Runs report.py; `expected` is the accepted integration-test mismatches (default: none)."""
     out = os.path.join(inp, "report.md")
-    cmd = [sys.executable, os.path.join(HERE, "report.py"), "--in", inp, "--parts", parts, "--out", out]
+    exp = os.path.join(inp, "it-expected.json")
+    with open(exp, "w") as f:
+        json.dump(expected or {}, f)
+    cmd = [sys.executable, os.path.join(HERE, "report.py"), "--in", inp, "--parts", parts, "--out", out,
+           "--it-expected", exp]
     if prev:
         cmd += ["--previous", prev]
     rc = subprocess.run(cmd, capture_output=True, text=True).returncode
@@ -36,10 +41,10 @@ def report(inp, prev=None, parts="ab"):
         return rc, f.readline().strip()
 
 
-def it_results(d, rows):
+def it_results(d, rows, status="ok"):
     """An integrationtest part: integrationtest.json and ab-integrationtest/results.jsonl from
-    (test, verdict) pairs."""
-    write(d, "integrationtest.json", {"part": "integrationtest", "status": "ok", "tests": 2, "seconds": 60})
+    (test, verdict) pairs; the statement of the i-th pair is at line i."""
+    write(d, "integrationtest.json", {"part": "integrationtest", "status": status, "tests": 2, "seconds": 60})
     os.makedirs(f"{d}/ab-integrationtest", exist_ok=True)
     with open(f"{d}/ab-integrationtest/results.jsonl", "w") as f:
         for i, (test, verdict) in enumerate(rows):
@@ -146,6 +151,38 @@ class VerdictTest(unittest.TestCase):
             rc, first = report(f"{d}/cur", f"{d}/prev", parts="integrationtest")
             self.assertEqual(rc, 0)
             self.assertTrue(first.startswith("**GREEN**"), first)
+
+    def test_integrationtest_expected_mismatch_is_not_red(self):
+        # run.sh says fail (ab exits 1 on any mismatch); the only mismatch is accepted.
+        with tempfile.TemporaryDirectory() as d:
+            it_results(d, [("a/t", "match"), ("a/t", "mismatch")], status="fail")
+            rc, first = report(d, parts="integrationtest",
+                               expected={"a/t:1": {"class": "bug", "reason": "r", "issue": "TODO"}})
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
+            with open(f"{d}/report.md") as f:
+                self.assertIn("**0 new**, 1 known", f.read())
+
+    def test_integrationtest_unlisted_mismatch_is_red(self):
+        with tempfile.TemporaryDirectory() as d:
+            it_results(d, [("a/t", "mismatch"), ("a/t", "mismatch")], status="fail")
+            rc, first = report(d, parts="integrationtest",
+                               expected={"a/t:0": {"class": "benign", "reason": "r"}})
+            self.assertEqual(rc, 1)
+            self.assertTrue(first.startswith("**RED**"), first)
+
+    def test_integrationtest_stale_expected_entry_is_reported(self):
+        # a/t:0 ran and matched: listed as fixed, not a failure. b/t:5 did not run: not listed.
+        with tempfile.TemporaryDirectory() as d:
+            it_results(d, [("a/t", "match")])
+            rc, first = report(d, parts="integrationtest", expected={
+                "a/t:0": {"class": "bug", "reason": "r", "issue": "TODO"},
+                "b/t:5": {"class": "bug", "reason": "r", "issue": "TODO"}})
+            self.assertEqual(rc, 0)
+            with open(f"{d}/report.md") as f:
+                text = f.read()
+            self.assertIn("Fixed, remove from integrationtest-expected.json: `a/t:0`", text)
+            self.assertNotIn("b/t:5", text)
 
     def test_integrationtest_results_do_not_count_for_ab(self):
         # A mismatch of the integration tests must not turn the ab part red.

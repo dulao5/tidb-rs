@@ -59,7 +59,7 @@ fn is_dash_comment(b: &[u8], i: usize) -> bool {
 }
 
 /// Index just past the quoted run starting at `i` (backslash escapes and doubled quotes).
-fn skip_quoted(b: &[u8], i: usize) -> usize {
+pub(crate) fn skip_quoted(b: &[u8], i: usize) -> usize {
     let q = b[i];
     let mut j = i + 1;
     while j < b.len() {

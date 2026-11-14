@@ -28,6 +28,22 @@ from collections import Counter, defaultdict
 PARTS = ("ab", "sysbench", "faults", "locks", "tpch", "integrationtest")
 # tidb-ab output directories (results.jsonl) of parts other than `ab`.
 RESULT_DIRS = {"ab-tpch": "tpch", "ab-integrationtest": "integrationtest"}
+# Accepted integration-test mismatches (tidb-rs bugs with an issue, nondeterministic results),
+# keyed by "test:line": not RED, reported as known. --it-expected overrides the path.
+IT_EXPECTED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "integrationtest-expected.json")
+
+
+def it_expected(path=None):
+    """{"test:line": {"class", "reason", "issue"?}} from the accepted-mismatches file."""
+    path = path or IT_EXPECTED
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+
+
+def it_key(r):
+    return f"{r.get('template')}:{r.get('line')}"
 
 
 def load(base, name):
@@ -61,8 +77,10 @@ def executable(classified):
 PERF_DROP = 0.15
 
 
-def wrong_results(base):
-    """Parts whose raw results show a wrong result, whatever their status says."""
+def wrong_results(base, expected=None):
+    """Parts whose raw results show a wrong result, whatever their status says. Integration-test
+    mismatches listed in `expected` (it_expected()) do not count."""
+    expected = expected or {}
     out = {}
     # Counted from tidb-ab's results.jsonl themselves, not from the classified summary (which
     # a failed classify.py would leave out). ab-tpch/ belongs to the tpch part,
@@ -70,7 +88,9 @@ def wrong_results(base):
     for path in glob.glob(os.path.join(base, "**", "results.jsonl"), recursive=True):
         part = RESULT_DIRS.get(os.path.basename(os.path.dirname(path)), "ab")
         with open(path) as f:
-            n = sum(1 for line in f if line.strip() and json.loads(line).get("verdict") == "mismatch")
+            rows = [json.loads(line) for line in f if line.strip()]
+        n = sum(1 for r in rows if r.get("verdict") == "mismatch"
+                and not (part == "integrationtest" and it_key(r) in expected))
         if n:
             prev = int(out.get(part, "0 ").split()[0])
             out[part] = f"{prev + n} mismatches"
@@ -91,16 +111,20 @@ def wrong_results(base):
     return out
 
 
-def integration(base):
+def integration(base, expected=None):
     """Summary of the integrationtest part from tidb-ab's ab-integrationtest/results.jsonl:
     {"totals": {verdict: n}, "tests": {test: {verdict: n}}, "reasons": Counter (unsupported),
-    "errors": Counter (b_error), "mismatches": [record]}, or None when there is none."""
+    "errors": Counter (b_error), "mismatches": [record] (not in `expected`), "known": [record]
+    (in `expected`), "fixed": [key] (in `expected`, ran on tidb-rs, no longer a mismatch)}, or None
+    when there is none."""
+    expected = expected or {}
     if not base:
         return None
     hits = sorted(glob.glob(os.path.join(base, "**", "ab-integrationtest", "results.jsonl"), recursive=True))
     if not hits:
         return None
-    totals, tests, reasons, errors, mismatches = Counter(), defaultdict(Counter), Counter(), Counter(), []
+    totals, tests, reasons, errors, mismatches, known = Counter(), defaultdict(Counter), Counter(), Counter(), [], []
+    ran = set()
     with open(hits[0]) as f:
         for line in f:
             if not line.strip():
@@ -109,13 +133,18 @@ def integration(base):
             v = r.get("verdict", "?")
             totals[v] += 1
             tests[r.get("template", "?")][v] += 1
+            ran.add(it_key(r))
             if v == "unsupported":
                 reasons[reason(r.get("detail") or r.get("kind") or "")] += 1
             elif v == "b_error":
                 errors[f"{r.get('kind', '')}: {reason(r.get('detail') or '')}"] += 1
             elif v == "mismatch":
-                mismatches.append(r)
-    return {"totals": totals, "tests": tests, "reasons": reasons, "errors": errors, "mismatches": mismatches}
+                (known if it_key(r) in expected else mismatches).append(r)
+    # Fixed: the statement ran on tidb-rs this time and did not mismatch (not merely skipped).
+    seen = {it_key(r) for r in known}
+    fixed = sorted(k for k in expected if k in ran and k not in seen)
+    return {"totals": totals, "tests": tests, "reasons": reasons, "errors": errors,
+            "mismatches": mismatches, "known": known, "fixed": fixed}
 
 
 def reason(detail):
@@ -282,7 +311,7 @@ def section_tpch(classified, times, prev_times, lines):
     lines.append("")
 
 
-def section_integration(status, cur, prev, lines):
+def section_integration(status, cur, prev, lines, expected=None):
     lines.append("## TiDB integration tests (v8.5.8 tests/integrationtest, hybrid mode)\n")
     if not cur:
         lines.append("_Not run._\n")
@@ -297,11 +326,22 @@ def section_integration(status, cur, prev, lines):
         f"{t['b_error']} tidb-rs error, {t['unsupported']} unsupported. Agreement on what tidb-rs "
         f"executed (match / match + mismatch + error): **{pct(t['match'], ran)}**.\n"
     )
+    lines.append(
+        f"Mismatches: **{len(cur['mismatches'])} new**, {len(cur['known'])} known "
+        f"(tools/weekly/integrationtest-expected.json"
+        + (", " + ", ".join(f"{n} {c}" for c, n in sorted(Counter(
+            (expected or {}).get(it_key(r), {}).get("class", "?") for r in cur["known"]).items()))
+           if cur["known"] else "")
+        + ").\n"
+    )
+    if cur["fixed"]:
+        lines.append("Fixed, remove from integrationtest-expected.json: "
+                     + ", ".join(f"`{k}`" for k in cur["fixed"]) + ".\n")
     g = it_unsupported_growth(cur, prev)
     if g:
         lines.append(f"Unsupported over the tests both runs ran: {g[0]} last run, {g[1]} now.\n")
     if cur["mismatches"]:
-        lines.append("Mismatches:\n")
+        lines.append("New mismatches:\n")
         for r in cur["mismatches"][:20]:
             q = " ".join(r.get("query", "").split())[:100].replace("|", "/")
             lines.append(f"- `{r.get('template')}:{r.get('line', '?')}` ({r.get('kind', '')}) `{q}`")
@@ -347,6 +387,7 @@ def main():
     ap.add_argument("--commit", default="")
     ap.add_argument("--parts", default=",".join(PARTS), help="parts expected in this run")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--it-expected", help=f"accepted integration-test mismatches (default {IT_EXPECTED})")
     args = ap.parse_args()
 
     expected = [p for p in args.parts.split(",") if p]
@@ -356,14 +397,19 @@ def main():
         status[p] = j["status"] if j else "missing"
     # A wrong result in the raw data is RED whatever a part's exit-code arithmetic said
     # (#140 review: a mismatch in one workload plus an error in another came out INCOMPLETE).
-    for p, why in wrong_results(args.inp).items():
+    accepted = it_expected(args.it_expected)
+    # The integrationtest part's own status counts every mismatch (ab exits 1); here only the
+    # ones not accepted in the expected list do.
+    if status.get("integrationtest") == "fail" and integration(args.inp) is not None:
+        status["integrationtest"] = "ok"
+    for p, why in wrong_results(args.inp, accepted).items():
         if p in status:
             status[p] = "fail"
             print(f"{p}: {why}")
 
     cur_ab, prev_ab = load(args.inp, "ab-classified.json"), load(args.previous, "ab-classified.json")
     cur_sb, prev_sb = load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json")
-    cur_it, prev_it = integration(args.inp), integration(args.previous)
+    cur_it, prev_it = integration(args.inp, accepted), integration(args.previous, accepted)
     regressed = regressions(cur_ab, prev_ab, cur_sb, prev_sb,
                             load(args.inp, "tpch-time.json"), load(args.previous, "tpch-time.json"),
                             cur_it, prev_it)
@@ -408,7 +454,7 @@ def main():
         section_tpch(load(args.inp, "tpch-classified.json"), load(args.inp, "tpch-time.json"),
                      load(args.previous, "tpch-time.json"), lines)
     if "integrationtest" in expected:
-        section_integration(load(args.inp, "integrationtest.json"), cur_it, prev_it, lines)
+        section_integration(load(args.inp, "integrationtest.json"), cur_it, prev_it, lines, accepted)
     if not args.previous:
         lines.append("_No previous run to compare with._\n")
 

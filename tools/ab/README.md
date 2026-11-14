@@ -138,6 +138,13 @@ Outcome per statement:
   depending on session history B does not share: SHOW WARNINGS/ERRORS, `@@warning_count`,
   `ROW_COUNT()`, `FOUND_ROWS()`, `@@last_plan_from_cache`, ... unless the previous statement
   ran on both and matched (after an error A lists it as a warning, B does not), and `LAST_INSERT_ID()` / `@@tidb_last_txn_info` / `@@tidb_last_query_info` always.
+  Also `session diverged`: B rejected a session statement that sets a variable which can change
+  a read's answer (`USE`, `SET NAMES`, `character_set_*`, `collation_*`, `sql_mode`,
+  `time_zone`, `tidb_mem_quota_query`, `tidb_enable_external_ts_read`, ...; the list is
+  `mysqltest::affects_results`), so B's session no longer answers like A's. Reads in that
+  connection are skipped until the variable is set again on both sides, or set back to `DEFAULT`
+  on A (B never changed it). Rejected settings of other variables (cost model, concurrency,
+  chunk sizes, ...) do not stop the comparison.
 - `write`: a session or write statement that A ran as the test expected.
 
 One statement is never run: `SET GLOBAL tidb_enable_ddl = OFF` (`ddl/db_integration`). The test

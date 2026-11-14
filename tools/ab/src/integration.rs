@@ -95,6 +95,10 @@ struct Conn {
     temp_tables: BTreeSet<String>,
     /// Session statements B rejected (still possibly in effect on A).
     rejected: Vec<String>,
+    /// Result-affecting session variables (`mysqltest::affects_results`) that A has set and B
+    /// rejected, with the statement: while any is in effect, B's session does not answer like
+    /// A's, so reads are not sent to B (skipped, "session diverged").
+    diverged: BTreeMap<String, String>,
     /// The previous statement ran on B too (so SHOW WARNINGS etc. are comparable).
     last_on_both: bool,
 }
@@ -462,6 +466,7 @@ impl Runner<'_> {
             prepared: BTreeMap::new(),
             temp_tables: BTreeSet::new(),
             rejected: Vec::new(),
+            diverged: BTreeMap::new(),
             last_on_both: false,
         })
     }
@@ -666,16 +671,15 @@ impl Runner<'_> {
                     return out;
                 }
                 let ob = conn.b.query(sql).await;
-                match &ob {
-                    Outcome::Error { .. } | Outcome::Client(_) => {
-                        counts.b_set_rejected += 1;
-                        out.detail = format!("B rejected: {}", brief(&ob));
-                        conn.rejected.push(truncate(sql, 120));
-                    }
-                    _ => {
-                        conn.b.log_session(sql);
-                        conn.last_on_both = true;
-                    }
+                let b_failed = matches!(ob, Outcome::Error { .. } | Outcome::Client(_));
+                track_divergence(&mut conn.diverged, sql, b_failed);
+                if b_failed {
+                    counts.b_set_rejected += 1;
+                    out.detail = format!("B rejected: {}", brief(&ob));
+                    conn.rejected.push(truncate(sql, 120));
+                } else {
+                    conn.b.log_session(sql);
+                    conn.last_on_both = true;
                 }
                 out
             }
@@ -701,6 +705,12 @@ impl Runner<'_> {
                 if let Some(why) = why {
                     out.verdict = StmtOutcome::Skipped;
                     out.kind = why.into();
+                    return out;
+                }
+                if let Some((var, stmt)) = conn.diverged.iter().next() {
+                    out.verdict = StmtOutcome::Skipped;
+                    out.kind = "session diverged".into();
+                    out.detail = format!("B rejected `{stmt}` ({var})");
                     return out;
                 }
                 if mysqltest::mentions(sql, &conn.temp_tables) {
@@ -956,6 +966,22 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
     Ok(t.get("mismatch") == 0)
 }
 
+/// After a session statement A ran: records in `diverged` the result-affecting variables it
+/// set that B rejected, and forgets those it set on both sides. Set back to DEFAULT on A, a
+/// variable agrees again even if B rejected that too (B never changed it).
+fn track_divergence(diverged: &mut BTreeMap<String, String>, sql: &str, b_failed: bool) {
+    for (var, default) in mysqltest::session_vars(sql) {
+        if !mysqltest::affects_results(&var) {
+            continue;
+        }
+        if b_failed && !default {
+            diverged.insert(var, truncate(sql, 120));
+        } else {
+            diverged.remove(&var);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,6 +1000,26 @@ mod tests {
             state: "HY000".into(),
             message: "m".into(),
         }
+    }
+
+    #[test]
+    fn divergence() {
+        let mut d = BTreeMap::new();
+        // Rejected plan-only setting: no divergence.
+        track_divergence(&mut d, "set tidb_cost_model_version = 2", true);
+        assert!(d.is_empty());
+        track_divergence(&mut d, "set names gbk", true);
+        track_divergence(&mut d, "set sql_mode = ''", true);
+        assert_eq!(d.len(), 5);
+        // Set on both sides again / back to DEFAULT (even if B rejects that too).
+        track_divergence(&mut d, "set names utf8mb4", false);
+        assert_eq!(d.keys().collect::<Vec<_>>(), ["sql_mode"]);
+        track_divergence(&mut d, "set @@sql_mode = default", true);
+        assert!(d.is_empty());
+        track_divergence(&mut d, "use db1", true);
+        assert!(d.contains_key("database"));
+        track_divergence(&mut d, "use db2", false);
+        assert!(d.is_empty());
     }
 
     #[test]
