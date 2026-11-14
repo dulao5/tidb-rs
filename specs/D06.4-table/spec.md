@@ -39,7 +39,8 @@ tidb-rs 是只读节点。以下函数不移植，tracker 中豁免理由为 "wr
 ## 2. 承载方式
 
 - `table.Table` / `table.Index` 是 trait（`Send + Sync`），值为 `Arc<dyn Table>` / `Arc<dyn Index>`；Go 的类型断言（`t.(table.PhysicalTable)`、`t.(table.CachedTable)`、`t.(*tables.TableCommon)`）是 `as_physical_table` / `as_cached_table` / `as_any`（M-IFACE）。
-- `table.Column` 嵌入 `*model.ColumnInfo`：Rust 中 `Column { info: Arc<ColumnInfo>, .. }` 加 `Deref`。`TableFromMeta` 为每列复制一份 `ColumnInfo`（Go 是指向 `tblInfo.Columns` 的指针；`TableInfo` 不可变，结果相同）。
+- `table.Column` 嵌入 `*model.ColumnInfo`：Rust 中 `Column { info: Arc<ColumnInfo>, .. }` 加 `Deref`。按 [N13](../exceptions/N13-shared-metadata/spec.md)（`M-SHARE`，#229），`TableFromMeta` / `MockTableFromMeta` 直接克隆 `TableInfo.Columns` 中的 `Arc`，`NewIndex` 克隆 `TableInfo.Indices` 中的 `Arc`，与 Go 指向 `tblInfo.Columns[i]` / `tblInfo.Indices[i]` 相同，不复制。`Index::meta` 返回 `&Arc<IndexInfo>`（Go 的 `*IndexInfo`）。表对象和 `TableInfo` 都只读；要改先 `make_mut`（N13 §3）。
+- 分区（第 2 部分）：Go 的每个分区与父表共享同一份列列表（`table/tables/partition.go:184` 传入 `tbl.Columns`），Rust 也共享（如 `Arc<[ColumnRef]>`），不为每个分区各建一份。Go 为每个分区把索引列表临时换进 `tblInfo.Indices`（`partition.go:164`–`:182`），Rust 不写元数据，把索引列表作为参数传给 `initTableCommonWithIndices`（N13 §4 第 4 行）。
 - 生成列和默认值表达式的 AST：parser 的 AST 目前不是 `Send`（ADR 0004，VS1-04 修改），而表在会话之间共享，所以列中不保存 AST。`ClonableExprNode` 保存 Go 的构造函数，`Clone` 与 Go 相同地重新构造；`Internal` 也重新构造（L2）。`TableFromMeta` 照 Go 先构造一次，以便在同一时刻报告解析错误。
 - `Table.Allocators` 不带 `AllocatorContext`：Go 只用它为临时表取替代分配器（第 2 部分）。
 - protobuf：Go 的 gogoproto 非 nullable 字段总会写出，`tipb.ColumnInfo` / `tipb.TableScan` 中显式设置这些字段（与 `expr_to_pb.rs` 相同），向量逐字节比较。
@@ -64,5 +65,6 @@ InfoSchema 为每张表调用 `TableFromMeta`，所以第 1 部分不能对这�
 ## 5. 测试
 
 - govec 领域 `table`（tracker `govec/domains/table.go`）：`TableFromMeta` 的各列表与索引、列转换、默认值（含时区、严格模式、`NOT NULL`、枚举、自增）、`GetTimeValue`、`DecodeRawRowData`（int handle、公共 handle、前缀主键、默认值、DDL 中的列）、`FindCols`、`CanSkip`、restored data、`BuildTableScanFromInfos`（逐字节）与 `SetPBColumnsDefaultValue`。tidb-rs `crates/infoschema/tests/govec_table.rs` 回放。
+- 共享（#229，N13 §5）：`tests/arc_sharing.rs` 检查表对象的每列、每个索引与 `TableInfo` 中的是同一个 `Arc`，DDL 轮次之后旧版本的值全部释放；`tests/arc_sharing_mem.rs` 测 10,000 张表 × 30 列 × 3 个索引：表对象 38.5 MiB（Go 30.1 MiB），去掉的副本 151.4 MiB。
 - 单元测试：`table::column::tests::fill_virtual_column_value_cases`；`fill_virtual_column_value_shares_without_aliasing_writes`（照 Go `SetCol` 与临时 chunk 共享算出的列，不复制；返回后 `req` 独占该列，再次填充不改动先前取得的列）；`govec_table` 的 `decode_row` 回放（`DecodeRawRowData` 只在一次解码内借用列的 `FieldType`，照 Go `&col.FieldType` 不复制；同一行解码两次结果相同）。
 - Go 单测：`column_test.go` 的 `TestGetZeroValue`、`TestCastValue`、`TestGetDefaultValue` 的用例形状进入向量；其余测试依赖 store / 写路径。
