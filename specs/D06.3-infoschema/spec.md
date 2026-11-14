@@ -62,8 +62,9 @@ v2 也调用 v1 结构的地方，在 v2 下这些结构恒为空，调用不产
 4. **failpoint**：`repairFetchCreateTable`、`mockLoadTableInfoError`、`skipGet` 不移植；`tracing.StartRegion` 不移植。
 5. **`DBInfoAsInfoSchema.SchemaTableInfos`** 对 nil 的 `Deprecated.Tables` 返回空切片（Go 的 nil 与空切片对调用方相同）。
 6. **N11 升级检查的钩子**（§6）：默认关闭，关闭时与 Go 相同。
+7. **GC 保留截止版本上的读者需要的 item**（有意偏离，[#195](https://github.com/dulao5/tidb-rs/issues/195)，2026-11-14 Maya + Lucky 决定）：`gcCollectTableItem`、`gcCollectReferredForeignKeyItem` 每张表保留截止版本及以下最新的 item，只删更旧的（Go 见 §9 第 7 条）。govec 向量由只改了这两个函数的 v8.5.8 生成（tracker `govec/fixes/pkg/infoschema/infoschema_v2.go.fixed`，fix `tidb-rs#195`）。
 
-用户可见的差异只有 §5.4（`tidb_schema_cache_size = 0`），已写入 `docs/compatibility.md`。
+用户可见的差异有 §5.4（`tidb_schema_cache_size = 0`）和第 7 条（GC），都已写入 `docs/compatibility.md`。
 
 ## 5. 例外 A3：infoschema v2 的缓存（设计，待确认）
 
@@ -158,4 +159,4 @@ D06.3：270 个函数（295 个中 25 个归 X）。PR 1a 之后 `matched 120/27
 4. **按 `CIStr` 整体比较的去重**：`SchemaSimpleTableInfos`、`IterateAllTableItems`、`allSchemas` 用整个 `CIStr`（含原始大小写）判断"同一张表 / 同一个库的不同版本"，而索引按 `L` 排序。只改大小写的 rename 之后，同一张表的新旧版本会被当成两张表各输出一次（旧版本若不是 tomb）。
 5. **`Purge` 后的 hand**：`Sieve.Purge` 不重置 `hand`，之后的 `evict` 从已删除的元素开始；若该 key 不在 map 中则 panic（"sieve: evicting non-existent element"）。v8.5.8 只有测试调用 `Purge` / `Close`。
 6. **`Data.mu.versionTimestamps` 从不写入**，`getVersionByTS` 恒返回 (0, false)：死代码。
-7. **GC 删掉截止版本上的读者需要的 item**（疑似）：`gcCollectTableItem`（`infoschema_v2.go:424`）删除"比截止版本旧、且同一张表有更新 item"的 item，但更新的 item 可能在截止版本之上。例如表在 v3 建、v8 改，截止版本（`GetOldestSchemaVersion`，正在使用的最老版本）为 5 时 v3 被删，版本 5 的 InfoSchema 从此找不到这张表。单元测试 `gc_at_the_cut_drops_the_item_a_reader_at_the_cut_needs` 固定了这个行为（照 Go）。
+7. **GC 删掉截止版本上的读者需要的 item**（已确认，单独的 issue [#195](https://github.com/dulao5/tidb-rs/issues/195)）：`gcCollectTableItem`（`infoschema_v2.go:424`）、`gcCollectReferredForeignKeyItem`（`:452`）删除"比截止版本旧、且同一张表有更新 item"的 item，但更新的 item 可能在截止版本之上。例如表在 v3 建、v8 改，截止版本（`GetOldestSchemaVersion`）为 5 时 v3 被删，版本 5 的 InfoSchema 报表不存在。tidb-rs 作为有意偏离修正（§4 第 7 条）；单元测试 `gc_keeps_the_item_a_reader_at_the_cut_needs` 的注释记录了 Go 的行为。

@@ -614,7 +614,15 @@ impl Data {
 }
 
 /// gcCollectTableItem returns up to maxItems old tableItem versions for GC.
-// go: gcCollectTableItem L1
+///
+/// Deliberate deviation (tidb-rs #195, docs/compatibility.md): Go deletes every item older
+/// than the cut whose previous (newer) item is the same table, without requiring that newer
+/// item to be at or below the cut. A table created at v3 and altered at v8, GC'd with cut 5
+/// (`meta.GetOldestSchemaVersion`, the oldest version in use), loses its v3 item, and an
+/// InfoSchema at v5 (a stale read, `tidb_snapshot`) then reports "table doesn't exist".
+/// tidb-rs keeps, per table, the newest item at or below the cut (what a reader at the cut
+/// uses) and deletes only the items older than it.
+// go: gcCollectTableItem L2 (deviation #195: keep the newest item <= cut of each table)
 fn gc_collect_table_item(
     bt: &BTreeMap<NameKey, TableItem>,
     cut_ver: i64,
@@ -622,26 +630,31 @@ fn gc_collect_table_item(
 ) -> Vec<TableItem> {
     let mut dels = Vec::new();
     let mut prev: Option<&TableItem> = None;
+    // Whether the current table's newest item at or below the cut has been seen.
+    let mut anchored = false;
     // Example:
     // gcOldVersion to v4
     //	db3 tbl1 v5
-    //	db3 tbl1 v4
-    //	db3 tbl1 v3    <- delete, because v3 < v4
-    //	db2 tbl2 v1    <- keep, need to keep the latest version if all versions are less than v4
-    //	db2 tbl2 v0    <- delete, because v0 < v4
-    //	db1 tbl3 v4
-    //	...
-    // So the rule can be simplify to "remove all items whose (version < schemaVersion && previous item is same table)"
+    //	db3 tbl1 v4    <- kept: the newest item <= v4
+    //	db3 tbl1 v3    <- delete, older than the kept v4
+    //	db2 tbl2 v1    <- keep, the newest item <= v4
+    //	db2 tbl2 v0    <- delete
+    //	db1 tbl3 v8
+    //	db1 tbl3 v3    <- keep (Go deletes it: v3 < v4 and the previous item is the same table)
     for item in bt.values().rev() {
-        if item.schema_version < cut_ver
-            && let Some(p) = prev
-            && p.db_name.l == item.db_name.l
-            && p.table_name.l == item.table_name.l
-        {
+        let same = prev
+            .is_some_and(|p| p.db_name.l == item.db_name.l && p.table_name.l == item.table_name.l);
+        if !same {
+            anchored = false;
+        }
+        if anchored {
             dels.push(item.clone());
             if dels.len() >= max_items {
                 break;
             }
+        }
+        if item.schema_version <= cut_ver {
+            anchored = true;
         }
         prev = Some(item);
     }
@@ -649,8 +662,8 @@ fn gc_collect_table_item(
 }
 
 /// gcCollectReferredForeignKeyItem returns up to maxItems old referredForeignKeyItem
-/// versions for GC.
-// go: gcCollectReferredForeignKeyItem L1
+/// versions for GC. Same deliberate deviation as [`gc_collect_table_item`] (#195).
+// go: gcCollectReferredForeignKeyItem L2 (deviation #195: keep the newest item <= cut of each table)
 fn gc_collect_referred_foreign_key_item(
     bt: &BTreeMap<FkKey, ReferredForeignKeyItem>,
     cut_ver: i64,
@@ -658,16 +671,21 @@ fn gc_collect_referred_foreign_key_item(
 ) -> Vec<FkKey> {
     let mut dels = Vec::new();
     let mut prev: Option<&ReferredForeignKeyItem> = None;
+    let mut anchored = false;
     for (k, item) in bt.iter().rev() {
-        if item.schema_version < cut_ver
-            && let Some(p) = prev
-            && p.db_name == item.db_name
-            && p.table_name == item.table_name
-        {
+        let same =
+            prev.is_some_and(|p| p.db_name == item.db_name && p.table_name == item.table_name);
+        if !same {
+            anchored = false;
+        }
+        if anchored {
             dels.push(k.clone());
             if dels.len() >= max_items {
                 break;
             }
+        }
+        if item.schema_version <= cut_ver {
+            anchored = true;
         }
         prev = Some(item);
     }
@@ -2540,11 +2558,13 @@ mod tests {
         assert!(!has_key());
     }
 
-    /// Go's GC rule ("delete an item older than the cut if a newer item of the same table
-    /// exists") also deletes the item a reader **at** the cut version needs when the newer
-    /// item is above the cut (spec §9 item 6). Kept as in Go; this test pins the behaviour.
+    /// Deliberate deviation #195. Go's GC rule ("delete an item older than the cut if the
+    /// previous, newer item is the same table") also deletes the item a reader **at** the
+    /// cut needs when that newer item is above the cut: here Go deletes v3 and the reader at
+    /// v5 no longer finds the table. tidb-rs keeps the newest item <= cut (v3) and deletes
+    /// only what is older (v1); the same for the referred foreign keys.
     #[test]
-    fn gc_at_the_cut_drops_the_item_a_reader_at_the_cut_needs() {
+    fn gc_keeps_the_item_a_reader_at_the_cut_needs() {
         let data = new_data();
         let item = |ver: i64| TableItem {
             db_name: ci("db"),
@@ -2563,13 +2583,43 @@ mod tests {
             }),
         )
         .unwrap();
-        data.add(item(3), tbl.clone()); // created at v3
+        data.add(item(1), tbl.clone()); // created at v1
+        data.add(item(3), tbl.clone()); // altered at v3
         data.add(item(8), tbl); // altered at v8
         let mut is5 = new_info_schema_v2(None, None, data.clone());
         Arc::make_mut(&mut is5.misc).schema_meta_version = 5;
         assert!(is5.table_item_by_id(10).is_some());
-        // The oldest version in use is 5 (the reader above).
+        // The oldest version in use is 5 (the reader above): only v1 goes (Go: v1 and v3).
         assert_eq!(data.gc_old_version(5).0, 1);
-        assert!(is5.table_item_by_id(10).is_none());
+        assert!(is5.table_item_by_id(10).is_some());
+        let vers: Vec<i64> = data
+            .by_name
+            .read()
+            .values()
+            .map(|i| i.schema_version)
+            .collect();
+        assert_eq!(vers, [3, 8]);
+
+        // Referred foreign keys: v1, v3, v8 of db.p; cut 5 keeps v3 (Go deletes v1 and v3).
+        let mk = |ver: i64| ReferredForeignKeyItem {
+            db_name: "db".to_owned(),
+            table_name: "p".to_owned(),
+            schema_version: ver,
+            tomb: false,
+            referred_fk_info: vec![Arc::new(rfk("db", "t", &format!("fk{ver}")))],
+        };
+        for v in [1, 3, 8] {
+            let it = mk(v);
+            btree_set(
+                &data.referred_foreign_keys,
+                referred_foreign_key_item_key(&it),
+                it,
+            );
+        }
+        assert_eq!(data.gc_old_fk_version(5), 1);
+        assert_eq!(
+            got(data.get_table_referred_foreign_keys("db", "p", 5)),
+            vec![rfk("db", "t", "fk3")]
+        );
     }
 }
