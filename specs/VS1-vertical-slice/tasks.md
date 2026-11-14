@@ -28,7 +28,7 @@
 |---|---|---|---|--:|---|---|---|
 | VS1-10 | planbuilder 骨架、preprocess（SELECT）、`planner.Optimize` / `optimize` | D09.0、D09.13 | depth | 0.17 | VS1-01 | govec preprocess 向量一致 | 未开始 |
 | VS1-11 | `TryFastPlan`、`PointGetPlan` | D10.8 | depth | 0.07 | VS1-10、VS1-19 | 点查计划向量一致 | 未开始 |
-| VS1-19 | `property`、`planner/util`、`baseimpl`、`base_physical_plan` | D10.10、D10.1 | depth | 0.11 | VS1-01 | Go 单测与 govec 通过 | 未开始 |
+| VS1-19 | `property`、`planner/util`、`baseimpl`、`base_physical_plan` | D10.10、D10.1 | depth | 0.11 | VS1-01 | Go 单测与 govec 通过 | 进行中（分支 `vs1/planner-base`） |
 | VS1-12 | 点查执行器、`NewRowDecoder`；table 读取部分 | D12.1、D06.4 | depth + breadth | 0.13 | VS1-13、VS1-18 | 行解码 / 默认值 govec；ab `Point_Get` | 未开始 |
 | VS1-13 | `ExecStmt`、`recordSet`、`Compiler`、`executorBuilder.build`、`internal/exec` | D12.0 | depth | 0.15 | VS1-01 | 单测通过；MaxTS 点查判定与 Go 一致 | 评审中（#222） |
 | VS1-14 | 会话 `ExecuteStmt` / `PrepareStmt` / `ExecutePreparedStmt`、`LazyTxn`、txnManager、sessiontxn 只读 provider；回退时的检查点与恢复（plan §4.6）；预处理语句四种组合与按 stmt id 路由（§4.7） | D05.3、D05.4 | depth + breadth | 0.24 | VS1-13 | N2 §5 断言；autocommit 读、TSO 预取、warning 与 Go 一致；每种回退原因的 `SessionVars` 快照前后相等，SHOW WARNINGS 只有 PoC 的 warning；四种组合与 RESET / LONG_DATA / FETCH / CLOSE 用例；ab 比较 PREPARE 列元数据与每次 EXECUTE 的列定义（含反证）；`RecordSet` 没有 `Drop`（#222）：语句中途被丢弃（取消、KILL、断连）时，会话在下一条语句之前补做未完成的 finish（`close_record_set` / `FinishExecuteStmt`），用例检查中途丢弃后的会话状态 | 未开始 |

@@ -3948,10 +3948,23 @@ dependencies = [
 name = "tidb-planner"
 version = "0.0.0"
 dependencies = [
+ "flate2",
+ "log",
+ "parking_lot 0.12.5",
+ "serde_json",
  "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
+ "tidb-execdetails",
+ "tidb-expr-pushdown",
  "tidb-expression",
+ "tidb-kv",
+ "tidb-model",
+ "tidb-parser",
  "tidb-sessionctx",
+ "tidb-tablecodec",
  "tidb-types",
+ "tipb",
 ]
 
 [[package]]

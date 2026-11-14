@@ -25,6 +25,13 @@ Checks, per Rust file:
     `[workspace.metadata.porting] style-lint-allow` of Cargo.toml; item-level `#[allow]`s
     are listed for the reviewer (reported, not an error).
 
+Besides `// go:`, a function of the block counts as accounted for when it is
+  * replaced by an exception spec: `// go-exception: <EXC> <Symbol> (<reason>)`, e.g.
+    `// go-exception: EXC.B SortItem.Hash64 (cascades)`; or
+  * a boundary stub: `// glue: stub of <Symbol>, blocked-by:<block> (<what>)` above the stub
+    function (registered in the tracker's data/stubs.tsv);
+both are reported separately from the ported functions.
+
 A block ported in parts (VS1 plan §0 item 3, as D06.2 / D06.3 "part 1"): with
 `--part <functions.tsv> --item <ID>` only the block's functions listed for that work item
 (columns `item`, `block`, `file`, `function`, e.g. specs/VS1-vertical-slice/functions.tsv)
@@ -52,7 +59,8 @@ ALLOW_RE = re.compile(r"^\s*#(!?)\[allow\(")
 LEVEL_RE = re.compile(r"^(L1(\s+\[M-[A-Z][A-Z0-9]*(,\s*M-[A-Z][A-Z0-9]*)*\])?|L2\s+\(.+\)|L3)$")
 RULES_RE = re.compile(r"\[(M-[A-Z][A-Z0-9]*(?:,\s*M-[A-Z][A-Z0-9]*)*)\]")
 FMA_MARK_RE = re.compile(r"//.*\[M-FMA\]\s+(\S+\.go):(\d+)")
-FMA_TARGETS_END = "instrs"  # go_fma_sites.tsv: target columns are between symbol and instrs
+FMA_TARGETS_END = "instrs"
+STUB_RE = re.compile(r"^stub of (\S+), blocked-by:(\S+)")  # go_fma_sites.tsv: target columns are between symbol and instrs
 
 
 def load_rules(path):
@@ -239,6 +247,7 @@ def main():
     expected_files = {f for f, _ in expected}
 
     seen = defaultdict(list)  # (file, symbol) -> [rs locations]
+    accounted = {}  # (file, symbol) -> "exception EXC.B" / "stub D10.1" (not ported, accounted for)
     problems = []
     other_blocks = []
     kinds = defaultdict(int)
@@ -270,6 +279,22 @@ def main():
                 parts = text.split()
                 sym = parts[1] if parts[0].endswith(".go") and len(parts) > 1 else parts[0]
                 sym_rules[sym].update(r for m in RULES_RE.finditer(text) for r in re.split(r",\s*", m.group(1)))
+            if kind in ("go-exception", "glue"):
+                if kind == "go-exception":
+                    parts_ = text.split()
+                    what, sym = (f"exception {parts_[0]}", parts_[1]) if len(parts_) > 1 else (None, None)
+                else:
+                    m = STUB_RE.match(text)
+                    what, sym = (f"stub {m.group(2).rstrip(',')}", m.group(1)) if m else (None, None)
+                if sym:
+                    for f in go_files:
+                        if (f, sym) in funcs:
+                            accounted[(f, sym)] = what
+                            break
+                    else:
+                        if kind == "go-exception":
+                            problems.append(f"{rs}:{line_no}: symbol {sym} not in {go_files} (func_blocks.tsv)")
+                continue
             if kind != "go":
                 continue
             f, sym, level, err = parse_go_annotation(text, go_files, funcs)
@@ -298,7 +323,8 @@ def main():
                     print(f"note: {rs}:{line_no} {sym} (Go line {start}) comes after {prev[1]} (Go line {prev[0]})")
                 prev = (start, sym)
 
-    missing = sorted(k for k in expected if k[0] in covered_files and k not in seen)
+    missing = sorted(k for k in expected if k[0] in covered_files and k not in seen and k not in accounted)
+    both = sorted(k for k in accounted if k in seen)
     not_covered = sorted(expected_files - covered_files)
     dups = {k: v for k, v in seen.items() if len(v) > 1}
     extra = [p for p in problems if "not in" in p]
@@ -314,8 +340,15 @@ def main():
     print(f"mapping rules: " + (", ".join(f"{k}={v}" for k, v in sorted(rule_uses.items())) or "none"))
     if fma_sites is not None:
         print(f"M-FMA: {fma_checked} registered site(s) in the ported Go files")
-    print(f"matched {len(expected & set(seen))}/{len(expected)}, missing {len(missing)}, "
+    acc = [k for k in expected if k in accounted and k not in seen]
+    print(f"matched {len(expected & set(seen)) + len(acc)}/{len(expected)} (ported {len(expected & set(seen))}, "
+          f"stubs {sum(1 for k in acc if accounted[k].startswith('stub'))}, "
+          f"exceptions {sum(1 for k in acc if accounted[k].startswith('exception'))}), missing {len(missing)}, "
           f"extra {len(extra)}, duplicated {len(dups)}")
+    for k in sorted(acc):
+        print(f"accounted: {k[0]} {k[1]}: {accounted[k]}")
+    for k in both:
+        problems.append(f"{k[0]} {k[1]} is both ported (go:) and {accounted[k]}")
     for f in not_covered:
         print(f"MISSING FILE: no Rust file has `//! go-file: {f}`")
     for f, s in missing:

@@ -39,6 +39,7 @@ pub mod context;
 pub mod errors;
 pub mod eval;
 pub mod evaluator;
+pub mod explain;
 pub mod expression;
 pub mod function_traits;
 pub mod helper;
