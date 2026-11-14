@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod rpc;
 mod status;
 
 use std::net::IpAddr;

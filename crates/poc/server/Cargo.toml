@@ -23,6 +23,11 @@ tidb-base = { workspace = true }
 tidb-distsql = { workspace = true }
 poc-domain = { workspace = true }
 poc-kv = { workspace = true }
+# rpc.rs: the kvproto messages of the status-port gRPC services (prost, as tikv-client's).
+prost = "0.13"
+# rpc.rs: tipb (rust-protobuf) DAG requests and select responses.
+protobuf = { workspace = true }
+tipb = { workspace = true }
 tidb-meta = { workspace = true }
 tidb-metrics = { workspace = true }
 tidb-mysql-protocol = { path = "../../mysql-protocol" }
@@ -36,6 +41,10 @@ tracing = "0.1"
 # (tidb-base terror/config, tidb-types collate/time, tidb-parser gocharset, ...) reach this
 # subscriber. Without it their records were dropped (PR #18 review).
 tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std", "tracing-log"] }
+
+[dev-dependencies]
+# status.rs tests: an HTTP/2 client for the gRPC routing.
+hyper = { version = "1", features = ["client", "http2"] }
 
 [lints]
 workspace = true

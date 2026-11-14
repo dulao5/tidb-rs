@@ -5,20 +5,26 @@
 //!   `/status` (without Go's `status.init_stats_percentage`: there are no statistics here).
 //!
 //! Every other path answers `404 page not found` (Go's `http.NotFound` text). The listener
-//! speaks HTTP/1.1 and HTTP/2 (prior knowledge), so Go TiDB's gRPC calls to the status port
-//! (cluster memory tables, diagnostics) get an immediate HTTP/2 404, which gRPC reports as
-//! `Unimplemented`, rather than a protocol error; see `docs/adr/0006-metrics.md`.
+//! speaks HTTP/1.1 and HTTP/2 (prior knowledge). HTTP/2 requests with a gRPC content type go
+//! to `rpc` (Go's cmux splits the port the same way): the TiDB coprocessor and diagnostics
+//! services that Go TiDB calls on every node's status port (issue #161,
+//! `docs/adr/0006-metrics.md`).
 
 use std::convert::Infallible;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 
 use bytes::Bytes;
-use http_body_util::Full;
+use hyper::HeaderMap;
 use hyper::Request;
 use hyper::Response;
 use hyper::StatusCode;
+use hyper::body::Frame;
 use hyper::body::Incoming;
+use hyper::body::SizeHint;
 use hyper::header::CONTENT_TYPE;
 use hyper::header::HeaderValue;
 use hyper::service::service_fn;
@@ -65,7 +71,14 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
         conns.spawn(async move {
             let service = service_fn(move |req| {
                 let info = Arc::clone(&info);
-                async move { Ok::<_, Infallible>(handle(&req, &info)) }
+                async move {
+                    let resp = if crate::rpc::is_grpc(&req) {
+                        crate::rpc::serve(req).await
+                    } else {
+                        handle(&req, &info)
+                    };
+                    Ok::<_, Infallible>(resp)
+                }
             });
             if let Err(e) = auto::Builder::new(TokioExecutor::new())
                 .serve_connection(TokioIo::new(stream), service)
@@ -78,7 +91,7 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
     conns.shutdown().await;
 }
 
-fn handle(req: &Request<Incoming>, info: &StatusInfo) -> Response<Full<Bytes>> {
+fn handle(req: &Request<Incoming>, info: &StatusInfo) -> Response<Body> {
     match req.uri().path() {
         "/metrics" => response(
             StatusCode::OK,
@@ -94,12 +107,73 @@ fn handle(req: &Request<Incoming>, info: &StatusInfo) -> Response<Full<Bytes>> {
     }
 }
 
-fn response(status: StatusCode, content_type: &'static str, body: String) -> Response<Full<Bytes>> {
-    let mut resp = Response::new(Full::new(Bytes::from(body)));
+fn response(status: StatusCode, content_type: &'static str, body: String) -> Response<Body> {
+    let mut resp = Response::new(Body::full(Bytes::from(body)));
     *resp.status_mut() = status;
     resp.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     resp
+}
+
+/// A response body: one data frame, then optional trailers (gRPC's status).
+// glue: Go's net/http and grpc-go write bodies and trailers directly.
+#[derive(Debug, Default)]
+pub(crate) struct Body {
+    data: Option<Bytes>,
+    trailers: Option<HeaderMap>,
+}
+
+impl Body {
+    pub(crate) fn empty() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn full(data: Bytes) -> Self {
+        Self {
+            data: Some(data).filter(|d| !d.is_empty()),
+            trailers: None,
+        }
+    }
+
+    pub(crate) fn with_trailers(data: Bytes, trailers: HeaderMap) -> Self {
+        Self {
+            trailers: Some(trailers),
+            ..Self::full(data)
+        }
+    }
+}
+
+impl hyper::body::Body for Body {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        let this = self.get_mut();
+        let frame = match this.data.take() {
+            Some(d) => Some(Frame::data(d)),
+            None => this.trailers.take().map(Frame::trailers),
+        };
+        Poll::Ready(frame.map(Ok))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.data.is_none() && self.trailers.is_none()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let len = self.data.as_ref().map_or(0, |d| d.len() as u64);
+        if self.trailers.is_some() {
+            // No content-length on a gRPC message stream.
+            let mut hint = SizeHint::new();
+            hint.set_lower(len);
+            hint
+        } else {
+            SizeHint::with_exact(len)
+        }
+    }
 }
 
 /// Go's `/status` body, in the field order of Go's `status` struct.
