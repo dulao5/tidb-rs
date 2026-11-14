@@ -20,9 +20,9 @@ Records with `err.name == "panic"` must panic in Rust with the same message.
 | | |
 |---|---|
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/infoschema.jsonl.gz` (branch `block/D06.3-infoschema-1b`, tracker#73) |
-| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261114), 220 records |
-| `arm64/infoschema.jsonl.gz` sha256 | `83a5aaf332da6d2d2ad4f994d7f2d570d37e056c6f6d9ee34bc1b79db3320a98` (generated locally) |
-| `amd64/infoschema.jsonl.gz` sha256 | `0544438a4f6f00564c8883a098842ab12ecf66fc7b7cdc1b9d52cb4e429fce5f` (GOARCH=amd64, GOAMD64=v1; tracker#73 CI artifact, run 43536418561) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2` with fix `tidb-rs#195`, the GC deviation; go1.25.12, seed 20261114), 220 records |
+| `arm64/infoschema.jsonl.gz` sha256 | `ddc27c6200f7db0416b2695cbe50895b3eee0748a029cf26f0526d7acedbf8b0` (generated locally) |
+| `amd64/infoschema.jsonl.gz` sha256 | `879f1769cf733a84c248085e03ee1c731bb175412c3eeb57587739bb0d13773b` (GOARCH=amd64, GOAMD64=v1; tracker#73 CI artifact, run 43543149312) |
 
 The two targets hold the same records.
 
