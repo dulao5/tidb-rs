@@ -158,8 +158,9 @@ tidb-session = { path = "crates/session" }
 # the kvproto messages re-exported as `tikv_client::proto` for the copr port (client-rust#21,
 # D07.2), and `CopSender`, one coprocessor RPC per region with client-go `SendReqCtx`
 # semantics (client-rust#22, D07.2 part 2); `Transaction::coprocessor` retired (client-rust#23,
-# D07.2 final).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "0208dfbc367a61519079f3591ff3ab849c5d6652", default-features = false, features = ["client-go-metrics"] }
+# D07.2 final); and a TSO request no longer stranded for 15 s when the oracle's
+# pending-batch lock is busy as the request stream is polled (client-rust#24, #225).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "58b504ec5e97d4b31c363c407ee34e47290ab52b", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 async-trait = "0.1"
 bytes = "1.11"

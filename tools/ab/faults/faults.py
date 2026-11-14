@@ -672,6 +672,29 @@ def inconsistencies(name, summary, expected):
     return out
 
 
+# Steady phase (no fault): a stall on B longer than this, and than STEADY_STALL_FACTOR times A's
+# on the same shape, is an inconsistency. #225: TSO-fetching reads of tidb-rs stalled 15 s in
+# steady state (a TSO request stranded until client-rust's TSO_WAIT_LIMIT) while A stayed
+# under 0.4 s.
+STEADY_STALL_LIMIT_MS = 2000
+STEADY_STALL_FACTOR = 3
+# The steady phase lasts at least this long, whatever --phase is: the #225 stalls came every
+# ~16 s, and a 10 s window could miss them.
+STEADY_MIN_SECONDS = 30
+
+
+def steady_stalls(summary):
+    """Shapes on which B stalled in the steady phase far longer than A did."""
+    out = []
+    a = summary.get("A", {})
+    for shape, d in summary.get("B", {}).items():
+        b_ms = d["max_stall_ms"]
+        a_ms = a.get(shape, {}).get("max_stall_ms", 0)
+        if b_ms > STEADY_STALL_LIMIT_MS and b_ms > STEADY_STALL_FACTOR * a_ms:
+            out.append(f"steady/B/{shape}: stalled {b_ms} ms with no fault (A: {a_ms} ms)")
+    return out
+
+
 def shared_errors(summary):
     """Error kinds seen on both sides: not gated (no parity gap), but reported so that a
     regression on both sides is still visible."""
@@ -730,10 +753,14 @@ def main():
     try:
         time.sleep(args.phase)
         stats.reset()
-        time.sleep(args.phase)
+        time.sleep(max(args.phase, STEADY_MIN_SECONDS))
         steady = stats.summary()
         results.append({"scenario": "steady", "events": [], "summary": steady, "wrong_samples": stats.wrong_samples})
         new += inconsistencies("steady", steady, expected)
+        stalls = steady_stalls(steady)
+        new += stalls
+        for f in stalls:
+            print(f"  NEW: {f}", flush=True)
         print(f"steady: {json.dumps(steady)}", flush=True)
         for w in stats.wrong_samples:
             print(f"  WRONG: {w}", flush=True)
