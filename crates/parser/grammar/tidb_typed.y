@@ -3606,7 +3606,17 @@ SelectLockOpt -> Option<Box<SelectLockInfo>>:
   | forKwd update OfTablesOpt { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdate, tables: $3, ..Default::default() })) }
   | forKwd share OfTablesOpt { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShare, tables: $3, ..Default::default() })) }
   | forKwd update OfTablesOpt nowait { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateNoWait, tables: $3, ..Default::default() })) }
-  | forKwd update OfTablesOpt wait LengthNum { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec: $5, tables: $3, unported: None })) }
+  | forKwd update OfTablesOpt wait NUM { {
+        // getUint64FromNUM($5): NUM's i64 value cannot carry an uint64 above MaxInt64, so
+        // read the literal (the digits after WAIT) from the source text.
+        let text = $lexer.src_str(Span::new(tok_span(&$4).end(), $span.end()));
+        let s = text.trim_end().rsplit(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+        let wait_sec = s.parse::<u64>().unwrap_or_else(|_| {
+            p.fail(format!("{s} is out of range [0,18446744073709551615]"), $span.start());
+            0
+        });
+        Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec, tables: $3, unported: None }))
+    } }
   | forKwd share OfTablesOpt nowait { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShareNoWait, tables: $3, ..Default::default() })) }
   | forKwd update OfTablesOpt skip locked { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateSkipLocked, tables: $3, ..Default::default() })) }
   | forKwd share OfTablesOpt skip locked { Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShareSkipLocked, tables: $3, ..Default::default() })) }

@@ -307,7 +307,15 @@ act("SelectStmtLimit", "limit LimitOption", "Box::new(Limit { count: $2, offset:
 act("SelectStmtLimit", "limit LimitOption ',' LimitOption", "Box::new(Limit { offset: Some($2), count: $4 })")
 act("SelectStmtLimit", "limit LimitOption offset LimitOption", "Box::new(Limit { offset: Some($4), count: $2 })")
 act("LimitOption", "LengthNum", "val(Datum::Uint($1), p)")
-act("LengthNum", "NUM", "$1 as u64")
+act("LengthNum", "NUM", """{
+        // getUint64FromNUM: NUM holds an int64, or an uint64 above MaxInt64 (which NUM's
+        // i64 value cannot carry), so read it from the source text.
+        let s = $lexer.src_str($span);
+        s.parse::<u64>().unwrap_or_else(|_| {
+            p.fail(format!("{s} is out of range [0,18446744073709551615]"), $span.start());
+            0
+        })
+    }""")
 act("NUM", "intLit", "$lexer.src_str(tok_span(&$1)).parse::<i64>().unwrap_or(0)")
 
 # --- expressions: literals, variables, markers ---------------------------------------------------
@@ -1181,8 +1189,17 @@ for syms, tp in [("forKwd update OfTablesOpt", "ForUpdate"), ("forKwd share OfTa
                  ("forKwd update OfTablesOpt skip locked", "ForUpdateSkipLocked"),
                  ("forKwd share OfTablesOpt skip locked", "ForShareSkipLocked")]:
     act("SelectLockOpt", syms, LOCK % tp)
-act("SelectLockOpt", "forKwd update OfTablesOpt wait NUM",
-    "Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec: $5 as u64, tables: $3, unported: None }))")
+act("SelectLockOpt", "forKwd update OfTablesOpt wait NUM", """{
+        // getUint64FromNUM($5): NUM's i64 value cannot carry an uint64 above MaxInt64, so
+        // read the literal (the digits after WAIT) from the source text.
+        let text = $lexer.src_str(Span::new(tok_span(&$4).end(), $span.end()));
+        let s = text.trim_end().rsplit(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+        let wait_sec = s.parse::<u64>().unwrap_or_else(|_| {
+            p.fail(format!("{s} is out of range [0,18446744073709551615]"), $span.start());
+            0
+        });
+        Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForUpdateWaitN, wait_sec, tables: $3, unported: None }))
+    }""")
 act("SelectLockOpt", "lock in share mode",
     "Some(Box::new(SelectLockInfo { lock_type: SelectLockType::ForShare, ..Default::default() }))")
 act("OfTablesOpt", "of TableNameList", "$2")
