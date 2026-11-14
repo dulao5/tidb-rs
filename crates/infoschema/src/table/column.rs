@@ -756,7 +756,11 @@ pub fn optional_fsp(field_type: &FieldType) -> String {
 
 /// FillVirtualColumnValue will calculate the virtual column value by evaluating generated
 /// expression using rows from a chunk, and then fill this value into the chunk.
-// go: FillVirtualColumnValue L2 (the filled column is copied into req, not shared with virCols)
+///
+/// As Go, `req` and `virCols` share the filled column (`SetCol(idx, virCols.Column(i))`);
+/// `virCols` is dropped on return, so `req` then owns it alone. Any write to a shared
+/// column goes through the chunk's copy-on-write path (`col_mut`), never in place.
+// go: FillVirtualColumnValue L1
 pub fn fill_virtual_column_value(
     virtual_ret_types: &[FieldType],
     virtual_column_index: &[usize],
@@ -778,29 +782,27 @@ pub fn fill_virtual_column_value(
         for r in 0..req.num_rows() {
             let row = req.get_row(r);
             let datum = exp_cols[idx].eval_virtual_column(&*eval_ctx, &st, row)?;
+            // Whether the uncast datum is negative (the clip test below), taken before the
+            // datum moves into the cast: Go passes it by value and reads it after.
+            let negative = match datum.kind() {
+                KindInt64 => datum.get_int64() < 0,
+                KindFloat32 | KindFloat64 => helper::round_float(datum.get_float64()) < 0.0,
+                KindMysqlDecimal => datum.get_mysql_decimal().is_negative(),
+                _ => false,
+            };
             // Because the expression might return different type from the generated column,
             // we should wrap a CAST on the result.
             let (mut cast_datum, err) =
-                cast_column_value(ectx, datum.clone(), &col_infos[idx], false, true);
+                cast_column_value(ectx, datum, &col_infos[idx], false, true);
             err?;
 
             // Clip to zero if get negative value after cast to unsigned.
             if mysql::has_unsigned_flag(col_infos[idx].field_type.get_flag())
                 && !cast_datum.is_null()
                 && tc.flags().allow_negative_to_unsigned()
+                && negative
             {
-                match datum.kind() {
-                    KindInt64 if datum.get_int64() < 0 => {
-                        cast_datum = get_zero_value(&col_infos[idx]);
-                    }
-                    KindFloat32 | KindFloat64 if helper::round_float(datum.get_float64()) < 0.0 => {
-                        cast_datum = get_zero_value(&col_infos[idx]);
-                    }
-                    KindMysqlDecimal if datum.get_mysql_decimal().is_negative() => {
-                        cast_datum = get_zero_value(&col_infos[idx]);
-                    }
-                    _ => {}
-                }
+                cast_datum = get_zero_value(&col_infos[idx]);
             }
 
             // Handle the bad null error.
@@ -812,7 +814,7 @@ pub fn fill_virtual_column_value(
             }
             vir_cols.append_datum(i, &cast_datum);
         }
-        req.set_col(idx, tidb_chunk::ColArc::new(vir_cols.column(i).clone()));
+        req.set_col(idx, vir_cols.column_arc(i).clone());
     }
     Ok(())
 }
@@ -898,6 +900,84 @@ mod tests {
         assert_eq!(col.get_uint64(2), 0);
         // Nothing to do without virtual columns.
         fill_virtual_column_value(&[], &[], &exp_cols, &infos, &*ctx, &mut chk).unwrap();
+    }
+
+    /// FillVirtualColumnValue shares the filled column with its temporary chunk as Go's
+    /// `SetCol(idx, virCols.Column(i))` (no copy, #229); on return `req` owns it alone, and a
+    /// later fill (a write to that slot) leaves a handle taken before untouched.
+    #[test]
+    fn fill_virtual_column_value_shares_without_aliasing_writes() {
+        let int = new_field_type(TypeLonglong);
+        let src = ExprColumn {
+            ret_type: int.clone(),
+            index: 0,
+            unique_id: 1,
+            ..Default::default()
+        };
+        let vcol = ExprColumn {
+            ret_type: int.clone(),
+            index: 1,
+            unique_id: 2,
+            virtual_expr: Some(Arc::new(Expr::Column(src.clone()))),
+            ..Default::default()
+        };
+        let exp_cols = vec![Arc::new(src), Arc::new(vcol)];
+        let info = Arc::new(ColumnInfo {
+            field_type: int.clone(),
+            ..Default::default()
+        });
+        let infos = vec![Arc::clone(&info), info];
+        let fts = [int.clone(), int.clone()];
+        let ctx = es::new_expr_context(vec![]);
+        let fill = |chk: &mut tidb_chunk::chunk::Chunk| {
+            fill_virtual_column_value(
+                std::slice::from_ref(&int),
+                &[1],
+                &exp_cols,
+                &infos,
+                &*ctx,
+                chk,
+            )
+            .unwrap()
+        };
+        let chunk_of = |vals: &[i64]| {
+            let mut chk = tidb_chunk::chunk::new_chunk_with_capacity(&fts, 4);
+            for &v in vals {
+                let mut d = Datum::default();
+                d.set_int64(v);
+                chk.append_datum(0, &d);
+                chk.append_datum(1, &Datum::default());
+            }
+            chk
+        };
+
+        let mut chk = chunk_of(&[1, 2]);
+        fill(&mut chk);
+        // The temporary chunk is gone: req is the only owner, so in-place writes are safe.
+        assert_eq!(tidb_chunk::ColArc::count(chk.column_arc(1)), 1);
+        let before = chk.column_arc(1).clone();
+
+        // Refill req from new source values: the slot is replaced, `before` keeps its data.
+        let fresh = chunk_of(&[7, 8]);
+        chk.set_col(0, fresh.column_arc(0).clone());
+        fill(&mut chk);
+        assert!(!tidb_chunk::ColArc::ptr_eq(&before, chk.column_arc(1)));
+        assert_eq!((before.get_int64(0), before.get_int64(1)), (1, 2));
+        assert_eq!(
+            (chk.column(1).get_int64(0), chk.column(1).get_int64(1)),
+            (7, 8)
+        );
+
+        // A write to a column shared with another handle copies first (the chunk's
+        // copy-on-write `col_mut`; debug builds reject it, so it runs in release only).
+        #[cfg(not(debug_assertions))]
+        {
+            let shared = chk.column_arc(1).clone();
+            chk.column_mut(1).set_null(0, true);
+            assert!(chk.column(1).is_null(0));
+            assert!(!shared.is_null(0));
+            assert_eq!((shared.get_int64(0), shared.get_int64(1)), (7, 8));
+        }
     }
 
     /// A version-0 TIMESTAMP default is in the system time zone (`timeutil.SystemLocation`),

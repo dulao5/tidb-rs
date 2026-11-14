@@ -675,7 +675,8 @@ pub fn decode_raw_row_data(
     value: &[u8],
 ) -> Result<(Vec<Datum>, HashMap<i64, Datum>), Error> {
     let mut v: Vec<Datum> = vec![Datum::default(); cols.len()];
-    let mut col_tps: HashMap<i64, Arc<FieldType>> = HashMap::with_capacity(cols.len());
+    // Go `colTps[col.ID] = &col.FieldType`: borrowed for this one decode call, not copied.
+    let mut col_tps: HashMap<i64, &FieldType> = HashMap::with_capacity(cols.len());
     let mut prefix_cols: HashSet<i64> = HashSet::new();
     let loc = ctx.get_eval_ctx().location();
     for (i, col) in cols.iter().enumerate() {
@@ -702,7 +703,7 @@ pub fn decode_raw_row_data(
             }
             prefix_cols.insert(col.id);
         }
-        col_tps.insert(col.id, Arc::new(col.field_type.clone()));
+        col_tps.insert(col.id, &col.field_type);
     }
     let row_map =
         tidb_tablecodec::tablecodec::decode_row_to_datum_map(value, &col_tps, Some(&loc))?;

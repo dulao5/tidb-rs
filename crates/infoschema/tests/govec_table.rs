@@ -547,16 +547,21 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<Error>) {
                 })
                 .collect();
             let value = unhex(a[4].as_str().unwrap());
-            let r = try_(
-                || match tables::decode_raw_row_data(&*ctx, &tbl, &h, &cols, &value) {
-                    Ok((v, m)) => json!({ "v": datum_outs(&v), "m": map_out(&m) }),
-                    Err(e) => json!({ "err": gs(&e.error()) }),
-                },
-            );
-            (
-                json!({ "r": r, "w": warns(&ev.truncate_warnings(0)) }),
-                None,
-            )
+            let decode = || {
+                try_(
+                    || match tables::decode_raw_row_data(&*ctx, &tbl, &h, &cols, &value) {
+                        Ok((v, m)) => json!({ "v": datum_outs(&v), "m": map_out(&m) }),
+                        Err(e) => json!({ "err": gs(&e.error()) }),
+                    },
+                )
+            };
+            let r = decode();
+            let w = warns(&ev.truncate_warnings(0));
+            // The column field types are borrowed for one decode call only (#229): decoding
+            // the same row again gives the same result.
+            assert_eq!(decode(), r, "decode_raw_row_data twice");
+            ev.truncate_warnings(0);
+            (json!({ "r": r, "w": w }), None)
         }
         "find_cols" => {
             let tbl = tbl_in(&a[0]);

@@ -59,11 +59,10 @@ InfoSchema 为每张表调用 `TableFromMeta`，所以第 1 部分不能对这�
 3. `NewIndex` 不解析部分索引条件（`ConditionExprString`）：Go 中它只被写路径 `MeetPartialCondition` 使用；无法解析的条件在 Rust 中不报错。
 4. `TableFromMeta` / `MockTableFromMeta` 不加载检查约束（写路径），所以约束表达式的解析错误不报告。
 5. `EvalColDefaultExpr`、`getColDefaultExprValue`（默认值是表达式，如 `DEFAULT (rand())`）、`GetTimeValue` 的一元运算分支需要 `expression.EvalSimpleAst`（规划器的表达式改写，D09.2）：返回 `blocked-by:D09.2` 错误（1235）。
-6. `FillVirtualColumnValue` 把算出的列复制进 `req`，Go 与临时 chunk 共享该列（L2）。
-7. 列值转换错误：照 M-ERR 只保留 cause（Go 的 `errors.Wrap` 前缀不移植）。
+6. 列值转换错误：照 M-ERR 只保留 cause（Go 的 `errors.Wrap` 前缀不移植）。
 
 ## 5. 测试
 
 - govec 领域 `table`（tracker `govec/domains/table.go`）：`TableFromMeta` 的各列表与索引、列转换、默认值（含时区、严格模式、`NOT NULL`、枚举、自增）、`GetTimeValue`、`DecodeRawRowData`（int handle、公共 handle、前缀主键、默认值、DDL 中的列）、`FindCols`、`CanSkip`、restored data、`BuildTableScanFromInfos`（逐字节）与 `SetPBColumnsDefaultValue`。tidb-rs `crates/infoschema/tests/govec_table.rs` 回放。
-- 单元测试：`table::column::tests::fill_virtual_column_value_cases`。
+- 单元测试：`table::column::tests::fill_virtual_column_value_cases`；`fill_virtual_column_value_shares_without_aliasing_writes`（照 Go `SetCol` 与临时 chunk 共享算出的列，不复制；返回后 `req` 独占该列，再次填充不改动先前取得的列）；`govec_table` 的 `decode_row` 回放（`DecodeRawRowData` 只在一次解码内借用列的 `FieldType`，照 Go `&col.FieldType` 不复制；同一行解码两次结果相同）。
 - Go 单测：`column_test.go` 的 `TestGetZeroValue`、`TestCastValue`、`TestGetDefaultValue` 的用例形状进入向量；其余测试依赖 store / 写路径。
