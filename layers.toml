@@ -138,7 +138,6 @@ blocks = ["D07.1", "D07.2", "D07.3", "D07.4"]
 
 [crate.tidb-sessiontxn]
 rank = 11
-planned = true
 blocks = ["D05.4"]
 
 [crate.tidb-expr-pushdown]

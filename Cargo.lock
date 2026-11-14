@@ -2619,6 +2619,7 @@ dependencies = [
  "tidb-parser",
  "tidb-session",
  "tidb-sessionctx",
+ "tidb-sessiontxn",
  "tidb-sql",
  "tokio",
 ]
@@ -4022,6 +4023,21 @@ dependencies = [
  "tidb-parser",
  "tidb-types",
  "tipb",
+]
+
+[[package]]
+name = "tidb-sessiontxn"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "futures",
+ "log",
+ "parking_lot 0.12.5",
+ "serde_json",
+ "tidb-base",
+ "tidb-infoschema",
+ "tidb-kv",
+ "tidb-sessionctx",
 ]
 
 [[package]]

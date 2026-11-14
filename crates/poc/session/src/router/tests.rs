@@ -169,6 +169,9 @@ enum Answer {
     Rows,
     /// A Go-ported error (1054).
     GoError,
+    /// The 1235 of `tidb_rc_read_check_ts` (sessiontxn, N11 D11): TiDB's "not supported",
+    /// not a boundary stub.
+    RcReadCheckTsNotSupported,
     /// Writes session state, then hits the boundary stub of this block.
     Blocked(&'static str),
 }
@@ -225,6 +228,9 @@ impl FakeNew {
                 "Unknown column 'x' in 'field list'",
                 [errors::mysql_error_code(1054)],
             )),
+            Answer::RcReadCheckTsNotSupported => {
+                Err(tidb_sessiontxn::isolation::err_rc_read_check_ts_not_supported())
+            }
             Answer::Blocked(block) => {
                 write_statement_state(&mut self.session);
                 Err(blocked(block, "something"))
@@ -562,6 +568,19 @@ fn go_ported_error_is_not_a_fallback() {
     script.lock().unwrap().answer = Some(Answer::GoError);
     let e = block_on(r.query(&mut p, POINT)).unwrap_err();
     assert_eq!(e.code, 1054);
+    assert!(!p.log.iter().any(|l| l.starts_with("run")));
+}
+
+/// `tidb_rc_read_check_ts` is rejected by the new stack with a real 1235 (N11 D11,
+/// provisional, #146): returned to the client, never a fallback (the PoC would read at the
+/// reused ts without the check).
+#[test]
+fn rc_read_check_ts_is_not_a_fallback() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    script.lock().unwrap().answer = Some(Answer::RcReadCheckTsNotSupported);
+    let e = block_on(r.query(&mut p, POINT)).unwrap_err();
+    assert_eq!(e.code, 1235);
     assert!(!p.log.iter().any(|l| l.starts_with("run")));
 }
 

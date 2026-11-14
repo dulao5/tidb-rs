@@ -1,0 +1,31 @@
+[package]
+name = "tidb-sessiontxn"
+version = "0.0.0"
+description = "Block D05.4 of the Go TiDB v8.5.8 port: pkg/sessiontxn, the transaction context providers (read path)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), errno, dbterror classes.
+tidb-base = { workspace = true }
+# kv.Transaction / Snapshot / Storage, option IDs, IsoLevel, scopes (D07.0).
+tidb-kv = { workspace = true }
+# SessionVars, TransactionContext, StatementContext (D05.2, D00.1).
+tidb-sessionctx = { workspace = true }
+# infoschema.InfoSchema of the transaction (D06.3).
+tidb-infoschema = { workspace = true }
+# BoxFuture: the providers wait for TSO futures (N3: async).
+futures = { workspace = true }
+log = "0.4"
+
+[dev-dependencies]
+futures = { workspace = true }
+parking_lot = "0.12"
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
