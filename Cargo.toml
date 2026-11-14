@@ -156,8 +156,8 @@ tidb-session = { path = "crates/session" }
 # the kvproto messages re-exported as `tikv_client::proto` for the copr port (client-rust#21,
 # D07.2), and `CopSender`, one coprocessor RPC per region with client-go `SendReqCtx`
 # semantics (client-rust#22, D07.2 part 2); `Transaction::coprocessor` retired (client-rust#23,
-# pinned to the PR commit until it merges).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "2aff1e4dcece0c8dfcef8458f3696c7b217cbb8a", default-features = false, features = ["client-go-metrics"] }
+# D07.2 final).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "0208dfbc367a61519079f3591ff3ab849c5d6652", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 async-trait = "0.1"
 bytes = "1.11"
