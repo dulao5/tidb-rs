@@ -26,8 +26,8 @@
    - 规则 B（`in` 能否下推）：只有 `N × 预计 RPC 数 ≤ K_push`（建议初值 10⁶，约 0.4 s TiKV CPU）时才把 `in` 下推到 TiKV；超过时 IN 留在 TiDB 做 hash 过滤（或 hash semi join），TiKV 只扫描。
    - 规则 C：range 超过内存上限时**不**退化为"全范围 + 下推 `in`"（Go 最差的情况），而是按规则 A/B 走扫描 + TiDB 侧 hash。
    - **不需要真的建临时表**：临时表的装载（60 万行 1.1 s）和 join 本身一样贵；tidb-rs 直接用内存中的列表做 hash semi join 的 build 侧。
-5. **设计**（§4）：IN 列表在 AST 规范化时变成一个"列表参数槽"，plan cache key 用规范化文本（与长度无关）+ 元素类型 + 一个"规模档位"（点访问档 / 扫描档），所以一条语句最多 2 个缓存条目。计划里只记"range / handle / 过滤值来自槽 k"，执行时按实际值构造 range、BatchGet 的 key 和下推的 DAG。计划是 N1 的不可变 `Arc` 树，命中时不需要复制或路径复制。
-6. **兼容性**（§5）：查询结果与 Go 相同。SQL digest 可以**保持与 Go 相同**（Go 已经与长度无关）；不同的是 plan digest（档位决定的计划形状、新算子）、EXPLAIN、`last_plan_from_cache`、`statements_summary` 的 plan cache 命中数和若干 warning。
+5. **设计**（§4）：IN 列表在 AST 规范化时变成一个"列表参数槽"，plan cache key 用规范化文本（与长度无关）+ 元素类型 + 一个"规模档位"（点访问档 / 扫描档），单表语句每个槽最多 2 个缓存条目；槽的基数传到 join / 聚合时再加一个 `⌈log₁₀ N⌉` 基数档；执行时换档带滞后。hash set 和 range 按列的比较类型和排序规则建，每个元素只转换一次并产生与 Go 相同的 warning。计划里只记"range / handle / 过滤值来自槽 k"，执行时按实际值构造 range、BatchGet 的 key 和下推的 DAG。计划是 N1 的不可变 `Arc` 树，命中时不需要复制或路径复制。
+6. **兼容性**（§5）：查询结果和 warning 与 Go 相同。SQL digest **保持与 Go 相同**（Go 已经与长度无关）；回到 Go 计划的开关是 tidb-rs 配置项，不是系统变量（§8）；不同的是 plan digest（档位决定的计划形状、新算子）、EXPLAIN、`last_plan_from_cache`、`statements_summary` 的 plan cache 命中数和若干 warning。
 
 ## 1. 问题与范围
 
@@ -221,9 +221,28 @@ plan digest：`PhysicalSelection` / `PhysicalProjection` 的规范化信息在 `
 | 点访问档 | §4.6 规则 A 判定点访问更便宜 | 整数主键 / 唯一索引：`BatchPointGet`（N = 1 也用它，Go 的快速路径对 `IN (x)` 也生成 BatchPointGet，§2.7）；其他索引：`IndexRangeScan` / `IndexLookUp` / `TableRangeScan`，range 来源记为"槽 k" | 去重、按排序规则排序，生成 handle / key / range |
 | 扫描档 | 规则 A 判定扫描更便宜，或规则 C | 读算子按其他条件扫描（无其他条件则全表），上面接 `InListSemiJoin`（hash semi join，build 侧是槽里的值）；或 `in` 作为过滤下推（只在规则 B 允许时） | 建 hash set（记入语句内存，A1）；下推时把值序列化进 DAG |
 
-档位进入缓存匹配，所以一条语句最多 2 个条目（每个槽的档位独立时为 2^槽数，实际中槽数为 1–2）。执行时按实际 N 重新判定档位：落在同一档位就复用，否则查（或生成）另一档位的计划。判定只用缓存在计划上的数据（表行数估计、行宽、region 数、代价因子），O(1)，不重新优化。
+**哪些估算用到 `n_est`**：(1) 访问路径本身的行数（点访问档 = 去重后的 N，扫描档 = `R_scan × N / NDV(col)` 的选择率）；(2) 访问路径的代价（规则 A/B）；(3) 槽所在算子**之上**的所有行数估计——join 的输入行数，进而影响 join 顺序、join 算法（index join 还是 hash join）、聚合下推和位置、TopN / Limit 的下推。
+
+**缓存匹配的维度**（评审 #207 第 1 点）：
+
+- **档位**（点访问 / 扫描）总是进入匹配。
+- **基数档 `⌈log₁₀ N⌉`**（N = 1 时为 0，2–10 为 1，11–100 为 2，…）**只在槽的基数传到访问路径以外时**进入匹配：即槽所在的 DataSource 上面还有 join、聚合、窗口、`IN`/`EXISTS` 子查询或 TopN/Limit（判断在生成计划时做，结果作为计划的属性存进缓存条目）。这时 N = 3 和 N = 50,000 虽然同在点访问档，也是不同的条目，不会把为 3 行选的 index join 用到 5 万行上。
+- 所以：**单表语句（槽的基数只影响访问路径）每个槽最多 2 个条目**；多表语句每个槽最多 2 × (⌈log₁₀ N_max⌉ + 1) 个（N ≤ 10⁶ 时 ≤ 14）。多个槽各自独立组合，实际中槽数为 1–2。
+
+**执行时的档位判定与滞后**（评审 #207 第 3 点）：执行时按实际 N 重新判定档位和基数档，只用缓存在条目上的数据（表行数估计、行宽、region 数、代价因子），O(1)，不重新优化。为避免 N 落在边界附近时每次执行都在两个计划之间来回（`last_plan_from_cache` 和 `statements_summary` 的 plan digest 会随之交替），判定带**滞后**：
+
+- 档位：当前（上次使用的）是点访问档时，只有 `cost_point / cost_scan > 1 + ε` 才换到扫描档；当前是扫描档时，只有 `< 1 − ε` 才换回。ε 建议 0.2（代价因子，随 §4.6 校准）。"上次使用的档位"按缓存 key 记在实例级缓存中（一个原子变量，跨会话共享）。
+- 基数档：只有 `log₁₀ N` 越过档边界 0.3 以上（约 2 倍）才换档，否则沿用相邻的已缓存条目。
+- 滞后只影响选哪个计划，不影响结果；两个计划都在缓存中，换档没有额外的优化成本。
 
 `InListSemiJoin` 是新算子（EXPLAIN 中可见），语义等于 `col IN (值集合)` 的过滤；实现上是 Go `HashJoin`（semi）的 build 侧换成内存数组，probe 侧照 Go。不建临时表（§3.3 第 5 点）。
+
+**hash set 按比较语义建，不按字节**（评审 #207 第 2 点）。这与 Go 在 TiDB 侧求值 `in` 时的做法一致，Go 也为常量参数建 hash set（`expression/builtin_other.go:191-230`）：
+
+- **比较类型**：先按 Go 确定 `col` 与元素的比较类型。左边是 INT 列时，每个常量元素照 `inToExpression` 用 `RefineComparedConstant`（`planner/core/expression_rewriter.go:2012`，`expression/builtin_compare.go:1513`）改写；range 构造时照 `buildFromIn` → `convertPointsInPlace` / `convertPointInPlace`（`util/ranger/points.go:620-716`，`ranger.go:65`、`:177`）转换。有符号 / 无符号混合、decimal / float 元素对 INT 列（越界、带小数的值）都按这两处的规则处理，结果是"永不相等"的元素直接丢弃，不是报错。（评审提到的 `getCmpTp4MinMax` 在 v8.5.8 中不存在，这里以上面两处为准。）
+- **字符串**：key 是列排序规则的排序键，`Collator::key`，对应 Go 的 `collator.Key(val)`（`builtin_other.go:343`、`:380-382`）。所以 `_ci` 下 `'a'` = `'A'`，PAD SPACE 排序规则下尾部空格不参与比较；`_bin` / `binary` 仍按字节。range 构造的排序和去重也用同一个 collator（`points.go:689-707`）。
+- **其他类型**（decimal、时间、JSON 以外的类型）：key 用 Go `Datum.ToHashKey` 的等价编码（`builtin_other.go:531`、`:572`）。
+- **每个元素只转换一次**，在执行开始建 hash set / range 时；转换按 Go 的规则产生同样的 **warning**（例如 `'1abc'` 对 INT 列的 `Truncated incorrect …`）。Go 中 warning 的产生时机取决于路径：常量在计划阶段（`RefineComparedConstant`、range 构造）各转换一次，参数在执行时转换。tidb-rs 按 Go 对同一路径的 warning 内容和条数输出；如果某条路径上 Go 是逐行求值、按行重复报 warning，这条路径不用槽（退回逐元素表达式），以保证 warning 一致。逐路径的核对在 D13.1 开工时完成（推断：常量列表在 Go 中都在计划阶段转换，逐行重复的情况只出现在非常量元素上，而非常量元素本来就不进槽）。
 
 ### 4.3 range、BatchGet 和下推推迟到执行期
 
@@ -235,7 +254,7 @@ plan digest：`PhysicalSelection` / `PhysicalProjection` 的规范化信息在 `
 ### 4.4 plan cache key（D13.1）
 
 - key = Go `NewPlanCacheKey` 的全部字段，只把 `stmt.StmtText`（`plan_cache_utils.go:312`）换成**规范化后的文本**（槽写作 `(?…)`）。用户、库、schema 版本、统计信息版本、sql_mode 等照 Go。
-- 同一 key 下的条目按（非槽参数的类型列表，各槽的元素类型，各槽的档位）匹配，对应 Go `checkTypesCompatibility4PC`（`:661-688`）的位置。
+- 同一 key 下的条目按（非槽参数的类型列表，各槽的元素类型，各槽的档位，以及槽的基数传到访问路径以外时各槽的基数档，§4.2）匹配，对应 Go `checkTypesCompatibility4PC`（`:661-688`）的位置。
 - 不同个数的 `?` 的 PREPARE（`IN (?,?,?)` 与 `IN (?,?,?,?,?)`）规范化后是同一文本，所以**在实例级缓存中共用计划**。会话中的 prepared 对象（语句 ID、参数个数、参数元数据）仍按协议各自独立。
 - 只做实例级 plan cache（#128 第 5 项，负责人已定）。缓存的值是 N1 的 `Arc` 物理计划，不含槽的值，内存与 N 无关。
 
@@ -282,13 +301,13 @@ plan digest：`PhysicalSelection` / `PhysicalProjection` 的规范化信息在 `
 
 | 方面 | Go v8.5.8 | tidb-rs | 用户可见的影响 |
 |---|---|---|---|
-| SQL digest | 长度 ≥ 2 折叠为 `in ( ... )`，`IN (?)` 单独一个（§2.1） | **建议与 Go 相同**（槽只用于内部的缓存 key，不改 digest） | 无。负责人已批准 digest 可以不同；若选择把 `IN (?)` 也并入 `in ( ... )`，`statements_summary` 中长度 1 的语句会并入同一行（§8 第 1 点） |
-| plan digest | 随计划形状变化；`tidb_ignore_inlist_plan_digest` 影响是否计入 IN 常量 | 按档位：同一语句最多 2 个 plan digest；扫描档出现新算子 `InListSemiJoin` | 与 Go 节点对照时 plan digest 不同；SQL binding 的计划匹配要用 tidb-rs 自己的 plan digest |
+| SQL digest | 长度 ≥ 2 折叠为 `in ( ... )`，`IN (?)` 单独一个（§2.1） | **与 Go 相同**（槽只用于内部的缓存 key，不改 digest；§8 第 1 点） | 无 |
+| plan digest | 随计划形状变化；`tidb_ignore_inlist_plan_digest` 影响是否计入 IN 常量 | 按档位（多表语句还按基数档，§4.2）：单表语句最多 2 个 plan digest；扫描档出现新算子 `InListSemiJoin`；滞后使边界附近的语句不来回切换 | 与 Go 节点对照时 plan digest 不同；SQL binding 的计划匹配要用 tidb-rs 自己的 plan digest |
 | EXPLAIN | 主键 IN 总是 `Batch_Point_Get`；二级索引按代价，可能是全表扫描 + `in(…)`；超大列表时全范围 + `in(…)` | 按规则 A/B/C：大列表时 `InListSemiJoin`；`in` 下推只在规则 B 允许时出现；operator info 中显示本次的值（与 Go 一样列出 handle / range） | 计划不同，结果相同 |
 | `@@last_plan_from_cache` / `PLAN_CACHE_HITS` / `PLAN_IN_CACHE` | 不同长度各自缓存；> 200 个元素不缓存；主键 IN 字面量不走 non-prepared 缓存 | 与长度无关地命中 | 命中率更高 |
 | warning | `skip prepared plan-cache: too many values in in-list`、`Batch/PointGet plans may be over-optimized`、`Memory capacity of … for 'tidb_opt_range_max_size' exceeded …` | 槽适用时前两个不再出现；第三个出现时含义变为"转扫描档"（文案保留，§8 第 3 点） | `SHOW WARNINGS` 的内容不同 |
 | `tidb_opt_range_max_size` | 超限时退化为全范围 | 超限时转扫描档（规则 C） | 计划不同 |
-| 混合集群（#153 D1，ADR 0009 模式 1/4） | — | 结果一致，计划级字段（plan digest、EXPLAIN、warning、plan cache 命中）不同 | 影子读对照要忽略这些字段 |
+| 混合集群（#153 D1，ADR 0009 模式 1/4） | — | 结果和 warning 一致，计划级字段（plan digest、EXPLAIN、plan cache 命中）不同；tidb-rs 配置项可以整体关掉，回到 Go 的计划（§8 第 2 点） | 影子读对照要忽略计划级字段 |
 
 实现后在 `docs/compatibility.md` 的 "Deliberate deviations from v8.5.8" 中登记（负责人决定 (3)），本 spec 合并时不改 `docs/compatibility.md`（尚未实现）。
 
@@ -298,7 +317,8 @@ plan digest：`PhysicalSelection` / `PhysicalProjection` 的规范化信息在 `
 |---|---|---|---|
 | A1 | plan cache 条目与长度无关 | `plancache_probe.py` 对 tidb-rs 运行（prepared + 字面量，`id` / `k`，n = 1…1000 及 10,000） | 每条语句的实例级缓存条目 ≤ 档位数（2），Go 为每个长度 1 个（§2.7）；n > 200 也命中 |
 | A2 | `statements_summary` 不退化 | 同上，查 `statements_summary` | 每条语句的行数与 Go 相同（建议的 digest 方案下）；`PLAN_CACHE_HITS / EXEC_COUNT` 预热后 ≥ 99%；不同的 plan digest ≤ 2 |
-| A3 | 结果等价 | tools/ab 对照：随机列表（含重复、NULL、越界值、有符号/无符号混合、字符串与排序规则、`NOT IN`），长度 1…10⁵，Go 与 tidb-rs 比较结果集（不计顺序） | 全部一致 |
+| A3 | 结果和 warning 等价 | tools/ab 对照：随机列表（含重复、NULL、越界值、有符号/无符号混合、decimal/float 对 INT 列、`'1abc'` 一类需要截断的字符串对 INT 列、`_ci` / `_bin` / PAD SPACE 排序规则下大小写和尾部空格不同的字符串、`NOT IN`、选择列表中的 `x IN (…)`），长度 1…10⁵，单表和 join 两种形状；Go 与 tidb-rs 比较结果集（不计顺序）**以及 `SHOW WARNINGS`（内容、条数、顺序）** | 全部一致 |
+| A3b | 基数档与滞后 | 多表语句中同一槽 N = 3 / 50 / 50,000 交替执行；单表语句 N 在规则 A 分界点 ±10% 内交替执行 | 多表：不同基数档用不同条目、计划与重新优化的结果相同；单表：条目 ≤ 2，档位不来回切换 |
 | A4 | 大列表性能（问题 3） | `tools/bench/in-list` 对 tidb-rs 运行（`_in` 变体） | N = 600,000 时 `k` / `v` 的墙钟 ≤ 2 s、TiKV CPU ≤ 1 s（Go：42 s / 78 s）；`id` 的 TiKV CPU ≤ 1 s（Go：24 s） |
 | A5 | 小列表不变慢 | 同上，N ≤ 10,000 | 墙钟与 TiKV CPU 不高于 Go 的 110% |
 | A6 | 规划成本 | 慢日志 `Compile_time` | 命中缓存时与 N 无关；N = 600,000 未命中时 ≤ 0.2 s（Go：1.1–3.8 s） |
@@ -323,11 +343,13 @@ Go v8.5.8 的事实：
 
 ## 8. 需要负责人决定
 
-1. **SQL digest**：建议**保持与 Go 相同**（Go 已经与长度无关，§2.1），把批准的例外只用在 plan digest / EXPLAIN 上；另一选项是把 `IN (?)` 也并入 `in ( ... )`（与 binding 的规范化一致，`digester.go:243-247`），代价是与 Go 节点的 digest 在长度 1 时不同。
-2. **开关**：是否加一个 tidb-rs 自己的系统变量（例如 `tidb_rs_adaptive_in_list`，默认 ON）在混合集群中关掉这套行为、回到 Go 的计划。建议加（#153 D1："用户可见行为跟随集群的 Go 基线"；有开关时运维可以选择计划一致）。
-3. **warning 文案**：规则 C 触发时，是保留 Go 的 `tidb_opt_range_max_size` warning 文案（建议），还是换成说明"转扫描档"的新 warning。
-4. **校准环境**：§3 的数字来自单 TiKV 笔记本。是否在 3 TiKV、数据不全在内存的集群上重测，再定 `c_point`、`c_scan`、`K_push` 的初值（建议在 D13.1 开工前做一次）。
-5. **`K_push` 和兜底下限**是做成代价因子（随代价模型校准）还是系统变量。建议代价因子，不加新变量。
+以下是评审（Lucky、Maya，#207）后的建议，等负责人确认：
+
+1. **SQL digest：保持与 Go 相同。** Go 已经与长度无关（§2.1），`IN (?)` 也照 Go 保留单独的 digest。批准的例外只用在 plan digest / EXPLAIN 上。这也让存储 digest 的消费者（Go 文本 digest）在 IN 列表上保持一致。
+2. **回到 Go 计划的开关：要，但做成 tidb-rs 的配置项（toml / 启动参数），不加系统变量。** 理由：`tidb_rs_*` 一类的 GLOBAL 变量会写进 `mysql.global_variables`，Go 节点读到不认识的变量；VS1 有意不新增系统变量。配置项关闭时，槽不生效，计划、cache key、warning 全部回到 Go 的行为（逐元素参数、200 上限、快速路径）。
+3. **warning 文案：保留 Go 的 `tidb_opt_range_max_size` 文案。** 规则 C 触发时照样报这条 warning（含义从"退化为全范围"变为"转扫描档"，只在 `docs/compatibility.md` 中说明）。
+4. **校准：D13.1 开工前在 3 TiKV、数据不全在内存的集群上重测**，再定 `c_point`、`c_scan`、`K_push`、ε 的初值。单节点、全内存的数字低估了 `c_point`（没有磁盘读和网络扇出），高估了扫描的相对代价。
+5. **`K_push`、兜底下限、滞后 ε 都做成代价因子**（随代价模型校准），不加系统变量。
 
 ## 9. 替换的 Go 范围
 
