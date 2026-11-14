@@ -16,13 +16,16 @@ use std::mem::size_of;
 
 use tidb_model::{ColumnInfo, IndexInfo, TableInfo};
 
-/// The `ArcInner` header: strong + weak counts.
+/// The `ArcInner` header: strong + weak counts. The size guards are for 64-bit targets (the
+/// server's); 32-bit targets have other sizes.
+#[cfg(target_pointer_width = "64")]
 const ARC_HEADER: usize = 16;
 
 /// ColumnInfo: `ArcInner<ColumnInfo>` must stay in jemalloc's 384 B class (ColumnInfo ≤ 368 B;
 /// 400 B before batch E put it in the 448 B class, +64 B per column). A new field or a wider
 /// type that breaks this must box a rarely set field instead (spec N13 §9.2).
 #[test]
+#[cfg(target_pointer_width = "64")]
 fn column_info_fits_the_384_byte_class() {
     assert!(
         size_of::<ColumnInfo>() <= 368,
@@ -34,6 +37,7 @@ fn column_info_fits_the_384_byte_class() {
 
 /// IndexInfo: `ArcInner<IndexInfo>` stays in the 256 B class (not shrunk yet; spec N13 §9.5).
 #[test]
+#[cfg(target_pointer_width = "64")]
 fn index_info_fits_the_256_byte_class() {
     assert!(
         size_of::<IndexInfo>() + ARC_HEADER <= 256,
@@ -44,6 +48,7 @@ fn index_info_fits_the_256_byte_class() {
 
 /// TableInfo: `ArcInner<TableInfo>` stays in the 512 B class.
 #[test]
+#[cfg(target_pointer_width = "64")]
 fn table_info_fits_the_512_byte_class() {
     assert!(
         size_of::<TableInfo>() + ARC_HEADER <= 512,

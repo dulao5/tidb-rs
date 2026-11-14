@@ -247,10 +247,10 @@ Go 用指针共享长期存在的元数据：`InfoSchema` 中的 `*model.TableIn
 | `size_of::<ColumnInfo>()` / `ArcInner` 级别 | 400 B / 448 B | 368 B / 384 B | 344 B / 352 B |
 | 表对象、InfoSchema v2 全量加载 | 38.5 / 47.0 MiB | 38.5 / 47.0 MiB | — |
 
-  −18.4 MiB，与每列 64 B × 300,000 列（18.3 MiB）相符。数字为 arm64 macOS 上的实测；Linux 上分配器、级别、`size_of` 相同，未单独测（本地没有可用的 Linux 环境）。
+  −18.4 MiB，与每列 64 B × 300,000 列（18.3 MiB）相符。数字为 arm64 macOS 上的实测（测试构建）。Linux arm64 上以 jemalloc、release 构建另测一次（评审 Lucky），结果相同：模型 134.4 MiB（470 B/列），表对象 38.5 MiB，InfoSchema v2 全量加载 46.9 MiB，`size_of::<ColumnInfo>()` 368 B。§9.2 的 `size_of` 守卫只在 64 位目标上运行（`#[cfg(target_pointer_width = "64")]`）。
 
 ### 9.5 后续
 
-- **第 2 步（提议，未实现）**：`ColumnInfo` ≤ 304 B，`ArcInner` 进 320 B 级别，再省约 18 MiB（模型约 116 MiB，与 Go 相当）。做法：两个默认值改 `Option<Box<AnyValue>>`（`None` = nil，大多数列没有默认值；各 32 B → 8 B），`CIStr` 与 `comment` 改紧凑表示（如 `Box<str>`，或 O 与 L 相同时只存一份）。风险中等：nil 有两种表示（`None` 与 `Some(AnyValue::Nil)`）时比较和编码可能出错，需要由构造函数保证只有 `None`；`default_value` 的读写分布在 DDL、`GetDefaultValue`、执行器的默认值求值中，都要改；`CIStr` 属 D02.3，`name.o` / `name.l` 的直接字段访问遍及各 crate，改表示是大范围的 API 变化。需要先单独评估，另开 PR。
+- **第 2 步（提议，未实现）**：`ColumnInfo` ≤ 304 B，`ArcInner` 进 320 B 级别，再省约 18 MiB（模型约 116 MiB，与 Go 相当）。做法：两个默认值改 `Option<Box<AnyValue>>`（`None` = nil，大多数列没有默认值；各 32 B → 8 B），`CIStr` 与 `comment` 改紧凑表示（如 `Box<str>`，或 O 与 L 相同时只存一份）。nil 只有一种表示：两个默认值字段设为私有，只经 `default_value()` / `set_default_value()`（原始默认值同样）访问，setter 把 `AnyValue::Nil` 映射为 `None`，于是 `Some(AnyValue::Nil)` 不会出现，这一点在一处保证（生成的 JSON 解码同样经 setter）。风险中等：`default_value` 的读写分布在 DDL、`GetDefaultValue`、执行器的默认值求值中，都要改；`CIStr` 属 D02.3，`name.o` / `name.l` 的直接字段访问遍及各 crate，改表示是大范围的 API 变化。需要先单独评估，另开 PR。
 - **第 3 步**：`CIStr` 在 O 与 L 相同时共享（约 −2.9 MiB）；`IndexInfo` ≤ 176 B（进 192 B 级别，约 −1.9 MiB）。
 - 每一步改变级别时同时收紧 `layout.rs` 中的守卫。
