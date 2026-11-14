@@ -40,7 +40,7 @@ A wrong result in the raw data (a mismatch, a wrong fault-scenario read, a lock 
 
 - **RED:** a wrong result, a mismatch (also of an integration test, unless accepted in `integrationtest-expected.json`) or a new inconsistency. The run fails and no tag is pushed.
 - **INCOMPLETE:** a part did not run fully: skipped, failed to set up, missing, or with too few results (an empty `ab` workload, a sysbench workload × thread count without both sides, fewer than 18 lock cases). This is not a pass.
-- **REGRESSED:** compared with the last run, an operator is no longer executable on tidb-rs, `unsupported` statements increased (for the integration tests: over the tests both runs ran; there also the reads skipped as `session diverged`), the new stack executed fewer statements in the strict round, or a sysbench B/A ratio dropped by more than 15%.
+- **REGRESSED:** compared with the last run, an operator is no longer executable on tidb-rs, `unsupported` statements increased (for the integration tests: over the tests both runs ran; there also the reads skipped as `session diverged`), the new stack executed fewer statements of a workload both runs ran (strict round, `ab-strict-new.tsv`), or a sysbench B/A ratio dropped by more than 15%.
 - **GREEN:** otherwise.
 
 INCOMPLETE and REGRESSED show as a warning (a failed `continue-on-error` step). The weekly tag gets a `-incomplete` / `-regressed` suffix.

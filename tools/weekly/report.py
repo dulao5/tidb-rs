@@ -15,7 +15,8 @@ Verdict (the report's first line, and the exit status):
 - INCOMPLETE (2): a part did not run fully (skipped, failed to set up, missing);
 - REGRESSED (2): against the previous run, an operator or a TPC-H query tidb-rs executed is no
   longer executable, `unsupported` statements increased (tidb-ab workloads, or the integration
-  tests both runs ran), the new stack (VS1, strict round) executed fewer statements, or a
+  tests both runs ran), the new stack (VS1, strict round) executed fewer statements of a
+  workload both runs ran, or a
   sysbench B/A ratio dropped by more than 15%;
 - GREEN (0): none of these.
 """
@@ -237,6 +238,23 @@ def strict_routes(base):
     return out
 
 
+def strict_new_per_workload(base):
+    """{workload: statements the new stack ran} of the strict round (ab-strict-new.tsv), or
+    None when there is none."""
+    if not base:
+        return None
+    hits = sorted(glob.glob(os.path.join(base, "**", "ab-strict-new.tsv"), recursive=True))
+    if not hits:
+        return None
+    with open(hits[0]) as f:
+        rows = [line.rstrip("\n").split("\t") for line in f if line.strip()]
+    return {w: int(n) for w, n in rows[1:]}
+
+
+def engine_total(routes, engine):
+    return sum(n for (e, _), n in routes.items() if e == engine)
+
+
 def new_stack_executed(routes):
     """Statements the new stack ran (engine="new", answered or with a Go-ported error)."""
     return sum(n for (engine, _), n in routes.items() if engine == "new") if routes is not None else None
@@ -261,13 +279,15 @@ def strict_blocks(base):
 
 
 def regressions(cur_ab, prev_ab, cur_sb, prev_sb, cur_tpch=None, prev_tpch=None, cur_it=None, prev_it=None,
-                cur_routes=None, prev_routes=None):
-    """What got worse against the previous run (each a short line)."""
+                cur_new=None, prev_new=None):
+    """What got worse against the previous run (each a short line). `cur_new` / `prev_new`:
+    statements the new stack ran per workload of the strict round (compared only over the
+    workloads both runs ran)."""
     out = []
-    now, before = new_stack_executed(cur_routes), new_stack_executed(prev_routes)
-    if now is not None and before is not None and now < before:
-        out.append(f"new stack (VS1, strict round): statements executed down by {before - now} "
-                   f"({before} → {now})")
+    for w in sorted(set(cur_new or {}) & set(prev_new or {})):
+        if cur_new[w] < prev_new[w]:
+            out.append(f"new stack (VS1, strict round), workload `{w}`: statements executed down by "
+                       f"{prev_new[w] - cur_new[w]} ({prev_new[w]} → {cur_new[w]})")
     g = it_unsupported_growth(cur_it, prev_it)
     if g and g[1] > g[0]:
         out.append(f"integration tests: `unsupported` statements up by {g[1] - g[0]} ({g[0]} → {g[1]})")
@@ -336,7 +356,7 @@ def section_ab(cur, prev, lines):
     lines.append("")
 
 
-def section_new_stack(cur, routes, prev_routes, blocks, ab_status, lines):
+def section_new_stack(cur, routes, prev_routes, blocks, ab_status, lines, cur_new=None, prev_new=None):
     """The VS1 strict round (run.sh ab): what the new stack runs and why the rest falls back."""
     lines.append("## New stack (VS1, `--new-stack=strict`)\n")
     lines.append(
@@ -355,11 +375,19 @@ def section_new_stack(cur, routes, prev_routes, blocks, ab_status, lines):
         lines.append(
             f"Statements routed: {total}; on the new stack: **{now}**"
             + (f" (last run: {before})" if before is not None else "")
-            + f"; on the PoC: {total - now}.\n")
+            + f"; on the PoC: {engine_total(routes, 'poc')}; answered 1235 without running "
+            f"anywhere (`none`): {engine_total(routes, 'none')}.\n")
         lines.append("| engine | reason | statements |")
         lines.append("|---|---|---|")
         for (engine, reason), n in sorted(routes.items(), key=lambda kv: (kv[0][0], -kv[1], kv[0][1])):
             lines.append(f"| {engine} | {reason} | {n} |")
+        lines.append("")
+    if cur_new:
+        lines.append("| workload | on the new stack | last run |")
+        lines.append("|---|---|---|")
+        for w, n in sorted(cur_new.items()):
+            p = (prev_new or {}).get(w)
+            lines.append(f"| {w} | {n} | {'—' if p is None else p} |")
         lines.append("")
     if blocks:
         lines.append("| boundary stub hit (1235 answers) | statements |")
@@ -587,9 +615,10 @@ def main():
     cur_sb, prev_sb = load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json")
     cur_it, prev_it = integration(args.inp, accepted), integration(args.previous, accepted)
     cur_routes, prev_routes = strict_routes(args.inp), strict_routes(args.previous)
+    cur_new, prev_new = strict_new_per_workload(args.inp), strict_new_per_workload(args.previous)
     regressed = regressions(cur_ab, prev_ab, cur_sb, prev_sb,
                             load(args.inp, "tpch-time.json"), load(args.previous, "tpch-time.json"),
-                            cur_it, prev_it, cur_routes, prev_routes)
+                            cur_it, prev_it, cur_new, prev_new)
     if any(s == "fail" for s in status.values()):
         verdict, code = "RED", 1
     elif any(s in ("incomplete", "missing") for s in status.values()):
@@ -622,7 +651,7 @@ def main():
     if "ab" in expected:
         section_ab(cur_ab, prev_ab, lines)
         section_new_stack(load(args.inp, "ab-strict-classified.json"), cur_routes, prev_routes,
-                          strict_blocks(args.inp), load(args.inp, "ab.json"), lines)
+                          strict_blocks(args.inp), load(args.inp, "ab.json"), lines, cur_new, prev_new)
     if "sysbench" in expected:
         section_sysbench(cur_sb, prev_sb, lines)
     if "faults" in expected:

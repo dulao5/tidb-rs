@@ -68,13 +68,19 @@ def diverged(line, cause_line, cause_sql):
             "cause": {"line": cause_line, "sql": cause_sql, "var": "database"}}
 
 
-def strict_round(d, new_ok=3, unsupported=2, mismatch=0, block="D05.3"):
-    """The ab part's strict new-stack round (run.sh): routes, results and 1235 answers."""
+def strict_round(d, new_ok=3, unsupported=2, mismatch=0, block="D05.3", per_workload=None):
+    """The ab part's strict new-stack round (run.sh): routes, results, 1235 answers and the
+    new stack's statements per workload (default: all in `sysbench`)."""
     os.makedirs(d, exist_ok=True)
+    with open(f"{d}/ab-strict-new.tsv", "w") as f:
+        f.write("workload\tnew_stack\n")
+        for w, n in (per_workload or {"sysbench": new_ok}).items():
+            f.write(f"{w}\t{n}\n")
     with open(f"{d}/ab-strict-routes.txt", "w") as f:
         f.write(f'tidbrs_route_total{{engine="new",reason="ok"}} {new_ok}\n')
         f.write(f'tidbrs_route_total{{engine="poc",reason="{block}"}} {unsupported}\n')
         f.write('tidbrs_route_total{engine="poc",reason="kind"} 7\n')
+        f.write('tidbrs_route_total{engine="none",reason="session"} 1\n')
     ops = {"Point_Get": {"match": new_ok, "mismatch": mismatch, "unsupported": unsupported, "both_error": 0}}
     write(d, "ab-strict-classified.json", {
         "statements": new_ok + unsupported + mismatch,
@@ -298,6 +304,7 @@ class VerdictTest(unittest.TestCase):
             self.assertIn("on the new stack: **0**", text)
             self.assertIn("| `D05.3` | 5 |", text)
             self.assertIn("| poc | D05.3 | 5 |", text)
+            self.assertIn("on the PoC: 12; answered 1235 without running anywhere (`none`): 1", text)
 
     def test_strict_round_mismatch_is_red(self):
         with tempfile.TemporaryDirectory() as d:
@@ -321,6 +328,23 @@ class VerdictTest(unittest.TestCase):
             # More is fine, and so is a first run with a strict round.
             rc, first = report(prev, cur)
             self.assertEqual(rc, 0, first)
+
+    def test_new_stack_compared_per_workload(self):
+        # A workload dropped from this run makes the total smaller: not a regression. A
+        # workload both runs ran with fewer new-stack statements is.
+        with tempfile.TemporaryDirectory() as d:
+            prev, cur = f"{d}/prev", f"{d}/cur"
+            for x, per in ((prev, {"sysbench": 5, "sample": 4}), (cur, {"sysbench": 6})):
+                write(x, "ab.json", {"part": "ab", "status": "ok", "strict": "ok"})
+                write(x, "ab-classified.json", classified())
+                strict_round(x, new_ok=sum(per.values()), per_workload=per)
+            rc, first = report(cur, prev)
+            self.assertEqual(rc, 0, first)
+            write(cur, "ab.json", {"part": "ab", "status": "ok", "strict": "ok"})
+            strict_round(cur, new_ok=8, per_workload={"sysbench": 4, "sample": 4})
+            rc, first = report(cur, prev)
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
 
     def test_strict_unsupported_does_not_count_as_ab_unsupported(self):
         # The strict round answers more 1235s than the baseline's default round had

@@ -126,15 +126,33 @@ ab)
     # answers (`unsupported`) are expected and counted in the report's "New stack" section; a
     # mismatch is a wrong result like any other (report.py reads every results.jsonl).
     strict=ok strict_runs=()
+    # Statements the new stack ran so far (tidbrs_route_total{engine="new"}, all reasons).
+    new_total() {
+        curl -sf "http://127.0.0.1:$strict_status_port/metrics" \
+            | awk '/^tidbrs_route_total\{.*engine="new"/ { n += $NF } END { print n + 0 }'
+    }
+    # strict_run <workload> <ab args...>: one workload, and how many of its statements the new
+    # stack ran (ab-strict-new.tsv: report.py compares that per workload with the last run).
+    strict_run() {
+        local n=$1 before after
+        shift
+        before=$(new_total) || before=
+        "$ab" -a "$a" -b "$bs" -D sbtest --tls off --out-dir "$out/ab-strict-$n" "$@" \
+            >"$out/ab-strict-$n.log" 2>&1; worst $?
+        strict_runs+=("$out/ab-strict-$n/results.jsonl")
+        after=$(new_total) || after=
+        if [ -n "$before" ] && [ -n "$after" ]; then
+            printf '%s\t%s\n' "$n" $((after - before)) >>"$out/ab-strict-new.tsv"
+        else
+            strict=incomplete
+            worst 2
+        fi
+    }
     if start_strict; then
-        "$ab" -a "$a" -b "$bs" -D sbtest --tls off --out-dir "$out/ab-strict-sysbench" sysbench -n 100 \
-            >"$out/ab-strict-sysbench.log" 2>&1; worst $?
-        strict_runs+=("$out/ab-strict-sysbench/results.jsonl")
+        printf 'workload\tnew_stack\n' >"$out/ab-strict-new.tsv"
+        strict_run sysbench sysbench -n 100
         for w in "$root"/tools/ab/workloads/*.sql; do
-            n=$(basename "$w" .sql)
-            "$ab" -a "$a" -b "$bs" -D sbtest --tls off --out-dir "$out/ab-strict-$n" file "$w" \
-                >"$out/ab-strict-$n.log" 2>&1; worst $?
-            strict_runs+=("$out/ab-strict-$n/results.jsonl")
+            strict_run "$(basename "$w" .sql)" file "$w"
         done
         # tidbrs_route_total{engine, reason}: what the new stack ran, and why the rest fell back.
         curl -sf "http://127.0.0.1:$strict_status_port/metrics" | grep '^tidbrs_route_total' \
