@@ -17,12 +17,12 @@
 
 ## 索引
 
-2026-11-01：以下各项项目负责人均"原则同意"，团队评审中。2026-11-02：基础设计 spec N1、N2、N3+A1（含 A2）和 A4 已写好，等待确认。2026-11-04：N4、N8 和 N5a（列格式）提前到 P1 之前定稿（PR #1 评审），spec 已写好，等待确认。
+2026-11-01：以下各项项目负责人均"原则同意"，团队评审中。2026-11-02：基础设计 spec N1、N2、N3+A1（含 A2）和 A4 已写好，等待确认。2026-11-04：N4、N8 和 N5a（列格式）提前到 P1 之前定稿（PR #1 评审），spec 已写好，等待确认。2026-11-14：N1 按 D09.7 设计试点修订后确认（#149）。
 
 | ID | 名称 | 类型 | 状态 | 计划定稿时间 |
 |---|---|---|---|---|
 | [N0](N0-crate-layering/spec.md) | crate 分层与依赖方向（`layers.toml` + CI 检查） | 实现（基础设计） | spec 待确认 | D00.2 开工前 |
-| [N1](N1-plan-representation/spec.md) | 计划树、表达式树的表示与所有权（语句级 arena） | 实现（基础设计） | spec 待确认 | P1 之前 |
+| [N1](N1-plan-representation/spec.md) | 计划树、表达式树的表示与所有权（语句级 arena；摘出分派；物理计划 `Arc` 树；`M-FT`） | 实现（基础设计） | 已确认（2026-11-14，[#149](https://github.com/dulao5/tidb-rs/issues/149)；依据 [D09.7 试点报告](../D09.7-column-pruning/pilot-report.md)） | P1 之前 |
 | [N2](N2-session-context/spec.md) | 会话、语句上下文的共享状态拆分 | 实现（基础设计） | spec 待确认 | P1 之前 |
 | [N3](N3-A1-concurrency-memory/spec.md) | 并发、取消与错误边界（含 A2） | 实现（基础设计） | spec 待确认 | P1 之前 |
 | [A1](N3-A1-concurrency-memory/spec.md) | 统一内存模型（缓冲区、语句级内存、可计算预算） | 实现（基础设计） | spec 待确认 | P1 之前 |
