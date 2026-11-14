@@ -8,15 +8,42 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Errors (M-ERR).
+# Errors (M-ERR), Go std helpers (fmt, strconv, time), boundary stubs.
 tidb-base = { workspace = true }
 # Expression tree and Schema (D08.1).
 tidb-expression = { workspace = true }
-# SessionVars and the expression context of PlanCtx (N2).
+# PushDownContext (planner/util GetPushDownCtx).
+tidb-expr-pushdown = { workspace = true }
+# SessionVars, StatementContext, PlanContext, ranger types and the expression context of
+# PlanCtx (N2).
 tidb-sessionctx = { workspace = true }
+# Datum, collations, FieldName (D01).
+tidb-types = { workspace = true }
+# FieldType, CIStr (D02.3).
+tidb-parser = { workspace = true }
+# TableInfo / IndexInfo / ColumnInfo (D06.1).
+tidb-model = { workspace = true }
+# kv.Handle (D07.0).
+tidb-kv = { workspace = true }
+# chunk.Row (handle columns).
+tidb-chunk = { workspace = true }
+# codec.EncodeKey / EncodeInt / EncodeFloat (hash codes, common handles).
+tidb-codec = { workspace = true }
+# tablecodec.TruncateIndexValues (common handles).
+tidb-tablecodec = { workspace = true }
+# util/tracing (plan traces) and RuntimeStatsColl (D14.0).
+tidb-execdetails = { workspace = true }
+# tipb.Executor (ToPB), tipb.ExchangeType.
+tipb = { workspace = true }
+# log.Warn.
+log = "0.4"
+# Tracers shared by the optimize options (M-LOCK).
+parking_lot = "0.12"
 
 [dev-dependencies]
-tidb-types = { workspace = true }
+# govec replay (tests/govec_planutil.rs).
+serde_json = { workspace = true }
+flate2 = "1.0"
 
 [lints]
 workspace = true

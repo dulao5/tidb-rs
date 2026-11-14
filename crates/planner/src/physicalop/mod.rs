@@ -12,11 +12,15 @@
 //! is silently copied. D10.2 (VS1-26 / VS1-28) checks this with
 //! `debug_assert!(Arc::strong_count(..) == 1)` at the entry of `postOptimize`.
 //!
-//! The operators are ported by VS1-19 / VS1-27 (D10.1).
+//! `BasePhysicalPlan` is VS1-19; the operators are ported by VS1-27 (D10.1).
 
 use std::sync::Arc;
 
 use crate::base::PhysicalPlan;
+
+pub mod base_physical_plan;
+
+pub use base_physical_plan::{BasePhysicalPlan, new_base_physical_plan};
 
 /// A physical plan node, shared.
 pub type PhysicalPlanRef = Arc<dyn PhysicalPlan>;
@@ -54,8 +58,8 @@ pub fn map_children(
     }
 }
 
-/// The per-type methods of [`crate::PhysicalPlan`] for an operator that is `Clone` and has
-/// the fields `id: i32`, `schema: Schema` and `children: Vec<PhysicalPlanRef>`.
+/// The per-type methods of [`crate::PhysicalPlan`] for an operator that is `Clone` and
+/// embeds a [`BasePhysicalPlan`] in the field `base` (`M-IFACE`, `M-SELF`).
 ///
 /// ```ignore
 /// impl PhysicalPlan for PhysicalSelection {
@@ -70,10 +74,6 @@ macro_rules! physical_plan_boilerplate {
             $crate::PhysicalKind::$kind
         }
         // glue: M-IFACE (generated per operator)
-        fn id(&self) -> i32 {
-            self.id
-        }
-        // glue: M-IFACE (generated per operator)
         fn as_any(&self) -> &dyn ::std::any::Any {
             self
         }
@@ -81,21 +81,17 @@ macro_rules! physical_plan_boilerplate {
         fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
             self
         }
-        // glue: M-IFACE (generated per operator)
-        fn schema(&self) -> &$crate::Schema {
-            &self.schema
+        // glue: M-SELF (generated per operator)
+        fn as_dyn(&self) -> &dyn $crate::PhysicalPlan {
+            self
         }
-        // glue: M-IFACE (generated per operator)
-        fn set_schema(&mut self, schema: $crate::Schema) {
-            self.schema = schema;
+        // glue: M-SELF (generated per operator)
+        fn base_physical(&self) -> &$crate::physicalop::BasePhysicalPlan {
+            &self.base
         }
-        // glue: M-IFACE (generated per operator)
-        fn children(&self) -> &[$crate::PhysicalPlanRef] {
-            &self.children
-        }
-        // glue: M-IFACE (generated per operator)
-        fn children_mut(&mut self) -> &mut Vec<$crate::PhysicalPlanRef> {
-            &mut self.children
+        // glue: M-SELF (generated per operator)
+        fn base_physical_mut(&mut self) -> &mut $crate::physicalop::BasePhysicalPlan {
+            &mut self.base
         }
         // glue: M-IFACE (generated per operator)
         fn clone_node(&self) -> $crate::PhysicalPlanRef {
