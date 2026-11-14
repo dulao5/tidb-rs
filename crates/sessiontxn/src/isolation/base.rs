@@ -287,7 +287,7 @@ impl BaseTxnContextProvider {
 
     /// OnLocalTemporaryTableCreated is the hook that should be called when a local
     /// temporary table created.
-    // glue: stub, blocked-by:D06.4 (part 2: temptable.AttachLocalTemporaryTableInfoSchema)
+    // glue: stub of baseTxnContextProvider.OnLocalTemporaryTableCreated, blocked-by:D06.4 (part 2: temptable.AttachLocalTemporaryTableInfoSchema)
     pub fn on_local_temporary_table_created_base(&mut self) -> Result<(), Error> {
         Err(tidb_base::blocked::blocked(
             "D06.4",
@@ -596,7 +596,7 @@ impl BaseTxnContextProvider {
 
 /// 1792 `ErrCantExecuteInReadOnlyTransaction`: a write or a locking read in a transaction
 /// on the read-only node (N11 D8, approved in #146). Go defines the code but never uses it.
-// go-exception: N11 D8 (writes and locking reads in a transaction are rejected)
+// glue: N11 D8 (writes and locking reads in a transaction are rejected)
 pub(crate) fn err_read_only_txn() -> Error {
     tidb_base::terror::ClassSession
         .new_std(tidb_base::errno::ErrCantExecuteInReadOnlyTransaction)

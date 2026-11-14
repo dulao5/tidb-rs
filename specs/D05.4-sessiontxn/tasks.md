@@ -10,7 +10,7 @@ spec：[spec.md](spec.md)。状态截至 2026-11-14：第 1 部分进行中（�
 - [x] T4 `staleread`：`IsStmtStaleness`、provider 骨架
 - [x] T5 N11：`ReadTsSource`（§4.4）、`tidb_rc_read_check_ts` 拒绝（D11）
 - [x] T6 模拟会话的场景测试；tracker govec 领域 `sessiontxn`
-- [ ] T7 由 VS1-14 接入：会话实现 `SessionCtx` / `LazyTxn` / `TxnManager`，规划器实现 `PlanInfo` / `StmtInfo`，store 实现 `Oracle`；准入时的 lease 检查使用 `ReadTsSource`；显式只读事务的 1792（D05.3）
+- [ ] T7（部分完成：会话的 `SessionCtx` / `LazyTxn` / `TxnManager` 由 VS1-14 第 1 部分实现，D05.3 spec §2；lease 准入随 VS1-17，1792 随 BEGIN 的移植）由 VS1-14 接入：会话实现 `SessionCtx` / `LazyTxn` / `TxnManager`，规划器实现 `PlanInfo` / `StmtInfo`，store 实现 `Oracle`；准入时的 lease 检查使用 `ReadTsSource`；显式只读事务的 1792（D05.3）
 
 ## 第 2 部分（`blocked-by:D05.4`，块完成前移植或改为永久豁免）
 

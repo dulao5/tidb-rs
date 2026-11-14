@@ -88,6 +88,13 @@ impl ExecutorBuilder {
         {
             return Some(mp.get_executor());
         }
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(mp) = v
+            .as_any()
+            .downcast_ref::<crate::testutil::MockPhysicalPlan>()
+        {
+            return Some(mp.get_executor());
+        }
         // glue: stub, blocked-by:D12.1, D12.2, D12.5, D12.0 (the buildXxx of each executor)
         let (block, what) = match v.kind() {
             // b.buildPointGet(v)

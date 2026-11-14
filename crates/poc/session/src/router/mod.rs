@@ -17,7 +17,10 @@
 //!    session ([`tidb_session::StmtCheckpoint`], §4.6) and falls back to the PoC (`vs1`) or
 //!    returns the 1235 error (`strict`). Any other error of the new stack is a Go-ported error
 //!    and goes to the client as it is;
-//! 4. prepared statements: §4.7, by statement id ([`Owner`]).
+//! 4. prepared statements: §4.7, by statement id ([`Owner`]). VS1-14 part 1 does not
+//!    prepare on the new stack: every prepared statement is owned by the PoC with the reason
+//!    `prepared` in all modes (`specs/D05.3-session/spec.md` §0); the §4.7 machinery below is
+//!    switched on by part 2 (VS1-14b).
 //!
 //! After each statement the engine that ran it writes the "previous statement" state
 //! ([`LastStmtInfo`], §4.5) and the router copies it to the other side.
@@ -37,6 +40,7 @@ mod tests;
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tidb_base::Error;
@@ -90,6 +94,8 @@ pub enum Reason {
     Ast(&'static str),
     /// Step 3: the new stack hit a boundary stub of this block.
     Blocked(String),
+    /// A prepared statement while the new stack does not prepare (VS1-14 part 1).
+    Prepared,
 }
 
 impl Reason {
@@ -101,6 +107,7 @@ impl Reason {
             Reason::Kind => "kind",
             Reason::Ast(_) => "ast",
             Reason::Blocked(block) => block,
+            Reason::Prepared => "prepared",
         }
     }
 }
@@ -134,7 +141,11 @@ pub trait NewStack: Send {
     /// The version of the InfoSchema the new stack would plan with, `None` while it has none.
     fn info_schema_version(&self) -> Option<i64>;
     /// `COM_QUERY`.
-    fn execute<'a>(&'a mut self, stmt: &'a ast::Stmt) -> BoxFut<'a, Result<Response, Error>>;
+    fn execute<'a>(
+        &'a mut self,
+        stmt: Arc<ast::Stmt>,
+        sql: &'a str,
+    ) -> BoxFut<'a, Result<Response, Error>>;
     /// `COM_STMT_PREPARE`.
     fn prepare<'a>(&'a mut self, stmt: &'a ast::Stmt) -> BoxFut<'a, Result<NewPrepared, Error>>;
     /// `COM_STMT_EXECUTE` of statement `stmt_id` (the new session's id).
@@ -207,8 +218,8 @@ enum Owner {
 
 /// A statement for the new stack.
 enum NewOp<'a> {
-    /// `COM_QUERY`.
-    Query(&'a ast::Stmt),
+    /// `COM_QUERY`: the statement and its text.
+    Query(Arc<ast::Stmt>, &'a str),
     /// `COM_STMT_EXECUTE` of the new session's statement.
     Execute(u32, &'a [Param]),
 }
@@ -226,6 +237,8 @@ pub struct Router {
     initial_txn_mode: String,
     /// `COM_STMT_EXECUTE` of the current command asked for a cursor.
     cursor: bool,
+    /// Prepared statements are prepared on the new stack too (§4.7): off until VS1-14b.
+    prepare_on_new: bool,
 }
 
 /// A new-stack error as the client sees it (Go's code and message).
@@ -288,6 +301,7 @@ impl Router {
             diverged: BTreeSet::new(),
             initial_txn_mode,
             cursor: false,
+            prepare_on_new: false,
         };
         let names = [tidb_sql::ir::SetAssignment::Names {
             charset: None,
@@ -297,6 +311,13 @@ impl Router {
         sync::sync_set(vars, &mut r.diverged, &names, poc);
         sync::sync_db(vars, poc);
         r
+    }
+
+    /// Prepares on the new stack too (§4.7), for the tests of the four combinations until
+    /// VS1-14b switches it on.
+    #[cfg(test)]
+    pub(crate) fn enable_prepare_on_new(&mut self) {
+        self.prepare_on_new = true;
     }
 
     /// The mode.
@@ -396,9 +417,12 @@ impl Router {
         op: NewOp<'_>,
         fallback: bool,
     ) -> Result<Result<Response, SqlError>, String> {
+        // A result dropped before it was closed is finished first: the checkpoint must not
+        // undo that finish (spec §2.3).
+        self.new.session_mut().finish_unfinished_stmt().await;
         let cp = self.new.session().checkpoint();
         let r = match op {
-            NewOp::Query(stmt) => self.new.execute(stmt).await,
+            NewOp::Query(stmt, sql) => self.new.execute(stmt, sql).await,
             NewOp::Execute(id, params) => self.new.execute_prepared(id, params).await,
         };
         match r {
@@ -411,7 +435,11 @@ impl Router {
             Err(e) => match blocked_by(&e) {
                 Some(block) => {
                     let block = block.to_owned();
-                    self.new.session_mut().restore(cp);
+                    if let Err(e) = self.new.session_mut().restore(cp) {
+                        // The session was not idle: a bug of the router (step 0).
+                        count(Engine::New, "error");
+                        return Ok(Err(SqlError::unknown(e.to_string())));
+                    }
                     if fallback {
                         count(Engine::Poc, &block);
                     } else {
@@ -446,7 +474,7 @@ impl Router {
         self.cursor = false;
         poc.begin_command();
         let start = Instant::now();
-        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let stmt = Arc::new(tidb_sql::ir::parse_one(sql)?);
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         let mut started = false;
@@ -455,7 +483,10 @@ impl Router {
                 poc.start_statement(StmtType::Select, parse);
                 started = true;
                 let fallback = self.mode != NewStackMode::Strict;
-                match self.try_new(NewOp::Query(&stmt), fallback).await {
+                match self
+                    .try_new(NewOp::Query(Arc::clone(&stmt), sql), fallback)
+                    .await
+                {
                     Ok(answered) => return answered,
                     Err(block) => {
                         if self.mode == NewStackMode::Strict {
@@ -507,21 +538,30 @@ impl Router {
         sql: &str,
     ) -> Result<PreparedInfo, SqlError> {
         let stmt = tidb_sql::ir::parse_one(sql)?;
+        // VS1-14 part 1: prepared statements are not prepared on the new stack (spec §0).
         // Not on the new stack when the InfoSchema versions differ: its column definitions
         // would come from another version, and a later fallback would fail check_columns.
-        let candidate = Self::candidate(&stmt, true).and_then(|()| {
-            if self.schema_versions_equal(poc) {
-                Ok(())
-            } else {
-                Err(Reason::SchemaVersion)
-            }
-        });
+        let candidate = if !self.prepare_on_new {
+            Err(Reason::Prepared)
+        } else {
+            Self::candidate(&stmt, true).and_then(|()| {
+                if self.schema_versions_equal(poc) {
+                    Ok(())
+                } else {
+                    Err(Reason::SchemaVersion)
+                }
+            })
+        };
         let new = match candidate {
             Ok(()) => {
                 let cp = self.new.session().checkpoint();
                 let r = self.new.prepare(&stmt).await;
                 match &r {
-                    Err(e) if blocked_by(e).is_some() => self.new.session_mut().restore(cp),
+                    Err(e) if blocked_by(e).is_some() => {
+                        if let Err(e) = self.new.session_mut().restore(cp) {
+                            log::error!("VS1 checkpoint of PREPARE: {e}");
+                        }
+                    }
                     _ => drop(cp),
                 }
                 Ok(r)

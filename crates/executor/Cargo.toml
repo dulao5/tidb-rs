@@ -33,6 +33,10 @@ futures = { workspace = true }
 parking_lot = "0.12"
 log = "0.4"
 
+[features]
+# Test doubles for the crates above (the session's tests): `testutil`.
+test-util = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 

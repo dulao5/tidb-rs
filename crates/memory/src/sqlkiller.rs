@@ -57,8 +57,9 @@ pub type AliveFn = Box<dyn Fn() -> bool + Send + Sync>;
 /// the memory controller and the trackers.
 #[derive(Default)]
 pub struct SqlKiller {
-    /// Go `Signal` (accessed with atomics).
-    pub signal: AtomicU32,
+    /// Go `Signal` (accessed with atomics). Shared: the coprocessor client of the session
+    /// reads it (Go `tikv.Variables.Killed = &SQLKiller.Signal`, [`SqlKiller::signal_handle`]).
+    pub signal: Arc<AtomicU32>,
     /// Go `ConnID`.
     pub conn_id: AtomicU64,
     /// Go `FinishFuncLock` + `Finish`: the lock guards the callback (L2: one `Mutex<Option<_>>`).
@@ -118,6 +119,13 @@ impl SqlKiller {
     // glue: constructor (Go: zero value `sqlkiller.SQLKiller{}`)
     pub fn new() -> Arc<SqlKiller> {
         Arc::new(SqlKiller::default())
+    }
+
+    /// `&SQLKiller.Signal`: the signal shared with the coprocessor client
+    /// (`tikv.Variables.Killed`), whose workers stop when it is set.
+    // glue: Go's pointer to the Signal field
+    pub fn signal_handle(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.signal)
     }
 
     /// Runs `f` after a successful `SendKillSignal` (N3 3.3 item 2, `M-GOCTX`): `ExecCtx`

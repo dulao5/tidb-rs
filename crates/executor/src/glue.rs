@@ -48,7 +48,7 @@ pub trait SessionContext: Send {
     fn get_stmt_read_ts(&mut self) -> BoxFuture<'_, Result<u64, Error>>;
     /// `sessiontxn.GetTxnManager(sctx).GetTxnInfoSchema()`.
     // glue: interface method sessiontxn.TxnManager.GetTxnInfoSchema (VS1-14)
-    fn get_txn_info_schema(&self) -> Option<InfoSchemaRef>;
+    fn get_txn_info_schema(&mut self) -> Option<InfoSchemaRef>;
     /// `sessiontxn.GetTxnManager(sctx).GetTxnScope()`.
     // glue: interface method sessiontxn.TxnManager.GetTxnScope (VS1-14)
     fn get_txn_scope(&self) -> String;

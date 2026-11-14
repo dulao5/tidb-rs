@@ -24,6 +24,9 @@ pub mod exec;
 pub mod glue;
 pub mod internal;
 pub mod metrics;
+pub mod select;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testutil;
 pub mod utils;
 
 pub use exec::{ExecCtx, Executor};

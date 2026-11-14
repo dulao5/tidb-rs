@@ -249,7 +249,11 @@ impl NewStack for FakeNew {
     fn info_schema_version(&self) -> Option<i64> {
         self.script.lock().unwrap().version
     }
-    fn execute<'a>(&'a mut self, _stmt: &'a ast::Stmt) -> BoxFut<'a, Result<Response, Error>> {
+    fn execute<'a>(
+        &'a mut self,
+        _stmt: Arc<ast::Stmt>,
+        _sql: &'a str,
+    ) -> BoxFut<'a, Result<Response, Error>> {
         let answer = self.script.lock().unwrap().answer.clone();
         let r = self.run(answer, "execute".into());
         Box::pin(async move { r })
@@ -296,7 +300,10 @@ fn scripted(mode: NewStackMode, poc: &FakePoc) -> (Router, Arc<Mutex<Script>>) {
         session: Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
         script: script.clone(),
     };
-    (Router::new(mode, Box::new(new), &poc.values()), script)
+    let mut r = Router::new(mode, Box::new(new), &poc.values());
+    // The §4.7 combinations (VS1-14b switches them on).
+    r.enable_prepare_on_new();
+    (r, script)
 }
 
 fn real(mode: NewStackMode, poc: &FakePoc) -> Router {
@@ -613,8 +620,8 @@ fn fallback_restores_the_new_session() {
     }
 }
 
-/// The real phase-0 session: every candidate is `blocked-by:D05.3`; `vs1` falls back with
-/// the session unchanged, `strict` returns the 1235 error.
+/// The real session: every candidate reaches `Compile`, whose planner is `blocked-by:D09.13`;
+/// `vs1` falls back with the session unchanged, `strict` returns the 1235 error.
 #[test]
 fn phase0_session_falls_back_or_reports_1235() {
     let mut p = poc();
@@ -633,7 +640,7 @@ fn phase0_session_falls_back_or_reports_1235() {
     let mut r = real(NewStackMode::Strict, &p);
     let e = block_on(r.query(&mut p, POINT)).unwrap_err();
     assert_eq!(e.code, 1235);
-    assert!(e.message.contains("blocked-by:D05.3"), "{}", e.message);
+    assert!(e.message.contains("blocked-by:D09.13"), "{}", e.message);
     assert!(!p.log.iter().any(|l| l.starts_with("run")));
     // Not a candidate: still the PoC in strict mode.
     assert!(block_on(r.query(&mut p, "SET NAMES utf8mb4")).is_ok());
@@ -937,20 +944,35 @@ fn close_by_owner() {
     assert!(!p.log.contains(&"close 3".to_owned()));
 }
 
-/// The real phase-0 session cannot prepare: every candidate is owned by the PoC.
+/// VS1-14 part 1 (spec §0, Lucky): prepared statements are not prepared on the new stack;
+/// every one is owned by the PoC with the reason `prepared`, in `vs1` and `strict` mode
+/// alike, and EXECUTE / CLOSE go to the PoC only.
 #[test]
-fn phase0_prepare_is_poc_owned() {
+fn part1_prepare_is_poc_owned() {
+    for mode in [NewStackMode::Vs1, NewStackMode::Strict] {
+        let mut p = poc();
+        let mut r = real(mode, &p);
+        let before = r.new.session().state_snapshot();
+        block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+        assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::Prepared)));
+        assert_eq!(Reason::Prepared.label(), "prepared");
+        assert_eq!(r.new.session().state_snapshot(), before, "{mode:?}");
+        assert_eq!(
+            rows(&block_on(r.execute(&mut p, 1, vec![]))).map(|r| r.0),
+            Some(3),
+            "{mode:?}"
+        );
+        r.close(&mut p, 1);
+        assert!(p.log.contains(&"close 1".to_owned()));
+    }
+    // The scripted new stack is never asked either.
     let mut p = poc();
-    let mut r = real(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    r.prepare_on_new = false;
+    script.lock().unwrap().prepare = Some(Answer::Rows);
     block_on(r.prepare(&mut p, 1, POINT)).unwrap();
-    assert_eq!(
-        r.owner(1),
-        Some(&Owner::Poc(Reason::Blocked("D05.3".into())))
-    );
-    assert_eq!(
-        rows(&block_on(r.execute(&mut p, 1, vec![]))).map(|r| r.0),
-        Some(3)
-    );
+    assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::Prepared)));
+    assert!(script.lock().unwrap().log.is_empty());
 }
 
 /// Every COM_STMT_EXECUTE starts its statement exactly once (the statement counter feeds the
