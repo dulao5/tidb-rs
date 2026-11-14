@@ -55,7 +55,7 @@ fn arc_sharing_memory_10k_tables() {
     let before = live();
     let tables: Vec<_> = infos
         .iter()
-        .map(|t| table_from_meta(Allocators::default(), t.clone()).unwrap())
+        .map(|t| table_from_meta(Allocators::default(), Arc::clone(t)).unwrap())
         .collect();
     let objects = live() - before;
     for (t, info) in tables.iter().zip(&infos) {
@@ -97,7 +97,7 @@ fn arc_sharing_memory_10k_tables() {
     // The decoded TableInfos are moved in (shared, as Go's `[]*TableInfo`).
     db.deprecated.tables = Some(infos);
     let data = new_data();
-    let mut b = new_builder(None, None, data.clone());
+    let mut b = new_builder(None, None, Arc::clone(&data));
     block_on(b.init_with_db_infos(vec![db], vec![], vec![], 1)).unwrap();
     let is = block_on(b.build(1));
     let full_load = live() - before;

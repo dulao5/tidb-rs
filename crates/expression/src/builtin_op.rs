@@ -7,6 +7,8 @@
 //! (specs/D08.5-arith).
 #![allow(non_upper_case_globals)]
 
+use std::sync::Arc;
+
 use tidb_base::Error;
 use tidb_base::gofmt::Arg;
 use tidb_base::mysql::{self, has_unsigned_flag};
@@ -74,12 +76,12 @@ impl FunctionClass for LogicFunctionClass {
         mut args: Vec<ExprRef>,
     ) -> Result<BuiltinFunc, Error> {
         self.base.verify_args(&args)?;
-        args[0] = crate::expression::wrap_with_is_true(ctx, true, args[0].clone(), false)?;
-        args[1] = crate::expression::wrap_with_is_true(ctx, true, args[1].clone(), false)?;
+        args[0] = crate::expression::wrap_with_is_true(ctx, true, Arc::clone(&args[0]), false)?;
+        args[1] = crate::expression::wrap_with_is_true(ctx, true, Arc::clone(&args[1]), false)?;
 
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[ETInt, ETInt])?;
-        bf.tp.set_flen(1);
+        Arc::make_mut(&mut bf.tp).set_flen(1);
         let sig: &'static SigDesc = match self.kind {
             LogicKind::And => &builtinLogicAndSig,
             LogicKind::Or => &builtinLogicOrSig,
@@ -230,7 +232,7 @@ impl FunctionClass for IsTrueOrFalseFunctionClass {
 
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[arg_tp])?;
-        bf.tp.set_flen(1);
+        Arc::make_mut(&mut bf.tp).set_flen(1);
         bf.extra = SigExtra::IsTrueOrFalse {
             keep_null: self.keep_null,
         };
@@ -384,7 +386,7 @@ impl FunctionClass for UnaryNotFunctionClass {
 
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[arg_tp])?;
-        bf.tp.set_flen(1);
+        Arc::make_mut(&mut bf.tp).set_flen(1);
 
         let sig: &'static SigDesc = match arg_tp {
             ETReal => &builtinUnaryNotRealSig,
@@ -492,7 +494,7 @@ impl FunctionClass for IsNullFunctionClass {
         }
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[arg_tp])?;
-        bf.tp.set_flen(1);
+        Arc::make_mut(&mut bf.tp).set_flen(1);
         let sig: &'static SigDesc = match arg_tp {
             ETInt => &builtinIntIsNullSig,
             ETDecimal => &builtinDecimalIsNullSig,
@@ -676,7 +678,7 @@ impl FunctionClass for UnaryMinusFunctionClass {
                     )?;
                     (bf, &builtinUnaryMinusIntSig)
                 };
-                bf.tp.set_decimal(0);
+                Arc::make_mut(&mut bf.tp).set_decimal(0);
                 (bf, sig)
             }
             ETReal => {
@@ -705,7 +707,7 @@ impl FunctionClass for UnaryMinusFunctionClass {
                         ETDecimal,
                         &[ETDecimal],
                     )?;
-                    bf.tp.set_decimal_under_limit(arg_expr_tp.get_decimal());
+                    Arc::make_mut(&mut bf.tp).set_decimal_under_limit(arg_expr_tp.get_decimal());
                     bf.extra = SigExtra::UnaryMinusDecimal {
                         constant_arg_overflow: false,
                     };
@@ -722,7 +724,7 @@ impl FunctionClass for UnaryMinusFunctionClass {
                 }
             }
         };
-        bf.tp.set_flen_under_limit(arg_expr_tp.get_flen() + 1);
+        Arc::make_mut(&mut bf.tp).set_flen_under_limit(arg_expr_tp.get_flen() + 1);
         Ok(bf.with_sig(sig))
     }
 }
@@ -842,7 +844,7 @@ impl FunctionClass for BitBinaryFunctionClass {
             BitKind::RightShift => &builtinRightShiftSig,
         };
         // Go sets the flag on sig.tp after setPbCode; RetType and sig.tp are one object.
-        bf.tp.add_flag(mysql::UnsignedFlag);
+        Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
         Ok(bf.with_sig(sig))
     }
 }
@@ -937,7 +939,7 @@ impl FunctionClass for BitNegFunctionClass {
         self.base.verify_args(&args)?;
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[ETInt])?;
-        bf.tp.add_flag(mysql::UnsignedFlag);
+        Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
         Ok(bf.with_sig(&builtinBitNegSig))
     }
 }

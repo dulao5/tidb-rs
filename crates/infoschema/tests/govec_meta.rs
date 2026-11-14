@@ -938,7 +938,7 @@ fn reverse_hash_iterator_seeks_once() {
         vals: pairs.iter().map(|p| p.1.clone()).collect(),
         seeks: AtomicUsize::new(0),
     });
-    let t = structure::new_structure(snap.clone(), b"m");
+    let t = structure::new_structure(Arc::clone(&snap) as _, b"m");
 
     let walk = |field: Option<&[u8]>| {
         block_on(async {

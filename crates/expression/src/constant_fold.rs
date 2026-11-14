@@ -86,11 +86,11 @@ fn is_null_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
             Ok(v) => v,
             // Failed to fold this expr to a constant: return the original expression to let
             // the error be evaluated again (Go logs it at DEBUG).
-            Err(_) => return (expr.clone(), is_deferred_const),
+            Err(_) => return (Arc::clone(expr), is_deferred_const),
         };
         if is_deferred_const {
             return (
-                new_const(value, sf.ret_type().clone(), Some(expr.clone())),
+                new_const(value, sf.ret_type().clone(), Some(Arc::clone(expr))),
                 true,
             );
         }
@@ -99,7 +99,7 @@ fn is_null_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
     if mysql::has_not_null_flag(arg0.get_type(&*ectx).get_flag()) {
         return (Expr::Constant(new_zero()).into_ref(), false);
     }
-    (expr.clone(), false)
+    (Arc::clone(expr), false)
 }
 
 // go: ifFoldHandler L1
@@ -111,7 +111,7 @@ fn if_fold_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
         let ectx = ctx.get_eval_ctx();
         let arg0 = match const_arg.eval_int(&*ectx, &EvalState::new(), Row::default()) {
             Ok(v) => v,
-            Err(_) => return (expr.clone(), false),
+            Err(_) => return (Arc::clone(expr), false),
         };
         if matches!(arg0, Some(v) if v != 0) {
             return fold_constant_inner(ctx, &args[1]);
@@ -119,7 +119,7 @@ fn if_fold_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
         return fold_constant_inner(ctx, &args[2]);
     }
     // if the condition is not const, which branch is unknown to run, so directly return.
-    (expr.clone(), false)
+    (Arc::clone(expr), false)
 }
 
 /// Go also sets IFNULL's own result charset/collation to the second argument's (issue
@@ -139,14 +139,14 @@ fn if_null_fold_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, boo
         return (folded_arg0, is_deferred);
     }
     // if the condition is not const, which branch is unknown to run, so directly return.
-    (expr.clone(), false)
+    (Arc::clone(expr), false)
 }
 
 /// Go writes the folded conditions back into the CASE node's arguments in place; this
 /// builds a new node with them.
 // go: caseWhenHandler L2 (the folded conditions go into a copy of the node)
 fn case_when_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
-    let mut expr = expr.clone();
+    let mut expr = Arc::clone(expr);
     let l = expr
         .as_scalar_function()
         .expect("scalar function")
@@ -156,10 +156,10 @@ fn case_when_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) 
     let mut is_deferred_const = false;
     let mut i = 0;
     while i + 1 < l {
-        let arg = expr.as_scalar_function().unwrap().get_args()[i].clone();
+        let arg = Arc::clone(&expr.as_scalar_function().unwrap().get_args()[i]);
         let (folded, is_deferred) = fold_constant_inner(ctx, &arg);
         if let Expr::ScalarFunction(sf) = Arc::make_mut(&mut expr) {
-            sf.function.args[i] = folded.clone();
+            sf.function.args[i] = Arc::clone(&folded);
         }
         is_deferred_const = is_deferred_const || is_deferred;
         if folded.as_constant().is_none() {
@@ -175,7 +175,7 @@ fn case_when_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) 
             Err(_) => return (expr, false),
         };
         if matches!(val, Some(v) if v != 0) {
-            let body = expr.as_scalar_function().unwrap().get_args()[i + 1].clone();
+            let body = Arc::clone(&expr.as_scalar_function().unwrap().get_args()[i + 1]);
             let (mut folded_expr, is_deferred) = fold_constant_inner(ctx, &body);
             is_deferred_const = is_deferred_const || is_deferred;
             if folded_expr.as_constant().is_some() {
@@ -190,7 +190,7 @@ fn case_when_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) 
     // then the folded else execution body is returned. otherwise the execution body of the
     // else are folded and replaced.
     if l % 2 == 1 {
-        let body = expr.as_scalar_function().unwrap().get_args()[l - 1].clone();
+        let body = Arc::clone(&expr.as_scalar_function().unwrap().get_args()[l - 1]);
         let (mut folded_expr, is_deferred) = fold_constant_inner(ctx, &body);
         is_deferred_const = is_deferred_const || is_deferred;
         if folded_expr.as_constant().is_some() {
@@ -258,7 +258,7 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
     match &**expr {
         Expr::ScalarFunction(x) => {
             if unFoldableFunctions.contains(&x.func_name.l.as_str()) {
-                return (expr.clone(), false);
+                return (Arc::clone(expr), false);
             }
             if let Some(function) = special_fold_handler(&x.func_name.l) {
                 if !maybe_over_optimized4_plan_cache(ctx, std::slice::from_ref(expr)) {
@@ -291,14 +291,14 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
                     || x.func_name.l == ast::NullEQ
                     || x.func_name.l == ast::ConcatWS
                 {
-                    return (expr.clone(), is_deferred_const);
+                    return (Arc::clone(expr), is_deferred_const);
                 }
                 let const_args: Vec<ExprRef> = args
                     .iter()
                     .enumerate()
                     .map(|(i, arg)| {
                         if arg_is_const[i] {
-                            arg.clone()
+                            Arc::clone(arg)
                         } else {
                             Expr::Constant(new_one()).into_ref()
                         }
@@ -312,12 +312,12 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
                     const_args,
                 ) {
                     Ok(f) => f,
-                    Err(_) => return (expr.clone(), is_deferred_const),
+                    Err(_) => return (Arc::clone(expr), is_deferred_const),
                 };
                 let value = match dummy_scalar_func.eval(&*ectx, &EvalState::new(), Row::default())
                 {
                     Ok(v) => v,
-                    Err(_) => return (expr.clone(), is_deferred_const),
+                    Err(_) => return (Arc::clone(expr), is_deferred_const),
                 };
                 if value.is_null() {
                     // This Constant is created to compose the result expression of
@@ -333,14 +333,14 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
                     // EvaluateExprWithNull when InNullRejectCheck is true (see above).
                     return (new_const(value, x.ret_type().clone(), None), false);
                 }
-                return (expr.clone(), is_deferred_const);
+                return (Arc::clone(expr), is_deferred_const);
             }
             let ectx = ctx.get_eval_ctx();
             let value = x.eval(&*ectx, &EvalState::new(), Row::default());
             let mut ret_type = x.ret_type().clone();
             let value = match value {
                 Ok(v) => v,
-                Err(_) => return (expr.clone(), is_deferred_const),
+                Err(_) => return (Arc::clone(expr), is_deferred_const),
             };
             if !has_null_arg {
                 // set right not null flag for constant value
@@ -351,7 +351,7 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
                 }
             }
             if is_deferred_const {
-                return (new_const(value, ret_type, Some(expr.clone())), true);
+                return (new_const(value, ret_type, Some(Arc::clone(expr))), true);
             }
             (new_const(value, ret_type, None), false)
         }
@@ -361,7 +361,7 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
                 let val = match pm.get_user_var(&*ectx) {
                     Ok(v) => v,
                     // Go logs a warning ("fail to get param").
-                    Err(_) => return (expr.clone(), true),
+                    Err(_) => return (Arc::clone(expr), true),
                 };
                 let mut c = Constant::new(val, x.ret_type.clone());
                 c.deferred_expr = x.deferred_expr.clone();
@@ -370,15 +370,15 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
             } else if let Some(de) = &x.deferred_expr {
                 let value = match de.eval(&*ectx, &EvalState::new(), Row::default()) {
                     Ok(v) => v,
-                    Err(_) => return (expr.clone(), true),
+                    Err(_) => return (Arc::clone(expr), true),
                 };
                 return (
                     new_const(value, x.ret_type.clone(), x.deferred_expr.clone()),
                     true,
                 );
             }
-            (expr.clone(), false)
+            (Arc::clone(expr), false)
         }
-        _ => (expr.clone(), false),
+        _ => (Arc::clone(expr), false),
     }
 }

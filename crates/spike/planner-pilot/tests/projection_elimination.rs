@@ -75,7 +75,7 @@ fn eliminates_column_projection_under_aggregation() {
     let ds = data_source(&mut ctx);
     let b = schema_of(&ctx, ds).columns[1].clone();
     // (select b as x from t): a projection whose output column is new.
-    let x = new_col(&ctx, b.ret_type.clone());
+    let x = new_col(&ctx, (*b.ret_type).clone());
     let proj = projection(&mut ctx, ds, vec![(col_expr(&b), x.clone())]);
     // count(x + 1)
     let arg = func(&ctx, ast::Plus, vec![col_expr(&x), one()]);

@@ -532,7 +532,7 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<Error>) {
         "decode_row" => {
             let (ctx, ev) = ctx_of(&a[0]);
             let tbl = tbl_in(&a[1]);
-            let t = match tables::table_from_meta(Allocators::default(), tbl.clone()) {
+            let t = match tables::table_from_meta(Allocators::default(), Arc::clone(&tbl)) {
                 Ok(t) => t,
                 Err(e) => return (Value::Null, Some(e)),
             };
@@ -543,7 +543,7 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<Error>) {
                 .iter()
                 .map(|o| {
                     let o = o.as_i64().unwrap();
-                    (o >= 0).then(|| t.cols()[o as usize].clone())
+                    (o >= 0).then(|| Arc::clone(&t.cols()[o as usize]))
                 })
                 .collect();
             let value = unhex(a[4].as_str().unwrap());

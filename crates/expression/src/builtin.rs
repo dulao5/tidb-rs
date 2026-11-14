@@ -13,7 +13,7 @@
 
 #![allow(non_upper_case_globals)]
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tidb_base::{Error, mysql};
 use tidb_parser::gocharset::{CharsetBin, CollationBin};
@@ -165,7 +165,12 @@ pub fn new_base_builtin_func(
 
     let mut bf = BuiltinFunc::base(args, tp);
     set_collation(&mut bf, &ec);
-    adjust_null_flag_for_return_type(&*ctx.get_eval_ctx(), func_name, &bf.args, &mut bf.tp);
+    adjust_null_flag_for_return_type(
+        &*ctx.get_eval_ctx(),
+        func_name,
+        &bf.args,
+        Arc::make_mut(&mut bf.tp),
+    );
     Ok(bf)
 }
 
@@ -216,7 +221,12 @@ pub fn new_base_builtin_func_with_tp(
     let mut bf = BuiltinFunc::base(wrapped, field_type);
     set_collation(&mut bf, &ec);
     // note this function must be called after wrap cast function to the args
-    adjust_null_flag_for_return_type(&*ctx.get_eval_ctx(), func_name, &bf.args, &mut bf.tp);
+    adjust_null_flag_for_return_type(
+        &*ctx.get_eval_ctx(),
+        func_name,
+        &bf.args,
+        Arc::make_mut(&mut bf.tp),
+    );
     Ok(bf)
 }
 
@@ -275,7 +285,12 @@ pub fn new_base_builtin_func_with_field_types(
     let mut bf = BuiltinFunc::base(wrapped, field_type);
     set_collation(&mut bf, &ec);
     // note this function must be called after wrap cast function to the args
-    adjust_null_flag_for_return_type(&*ctx.get_eval_ctx(), func_name, &bf.args, &mut bf.tp);
+    adjust_null_flag_for_return_type(
+        &*ctx.get_eval_ctx(),
+        func_name,
+        &bf.args,
+        Arc::make_mut(&mut bf.tp),
+    );
     Ok(bf)
 }
 
@@ -421,32 +436,32 @@ impl BuiltinFunc {
 
     // go: baseBuiltinFunc.setDecimalAndFlenForDatetime L1
     pub fn set_decimal_and_flen_for_datetime(&mut self, fsp: i32) {
-        self.tp.set_decimal_under_limit(fsp as isize);
-        self.tp
+        Arc::make_mut(&mut self.tp).set_decimal_under_limit(fsp as isize);
+        Arc::make_mut(&mut self.tp)
             .set_flen_under_limit(mysql::MaxDatetimeWidthNoFsp + fsp as isize);
         if fsp > 0 {
             // Add the length for `.`.
             let flen = self.tp.get_flen();
-            self.tp.set_flen_under_limit(flen + 1);
+            Arc::make_mut(&mut self.tp).set_flen_under_limit(flen + 1);
         }
     }
 
     // go: baseBuiltinFunc.setDecimalAndFlenForDate L1
     pub fn set_decimal_and_flen_for_date(&mut self) {
-        self.tp.set_decimal(0);
-        self.tp.set_flen(mysql::MaxDateWidth);
-        self.tp.set_type(mysql::TypeDate);
+        Arc::make_mut(&mut self.tp).set_decimal(0);
+        Arc::make_mut(&mut self.tp).set_flen(mysql::MaxDateWidth);
+        Arc::make_mut(&mut self.tp).set_type(mysql::TypeDate);
     }
 
     // go: baseBuiltinFunc.setDecimalAndFlenForTime L1
     pub fn set_decimal_and_flen_for_time(&mut self, fsp: i32) {
-        self.tp.set_decimal_under_limit(fsp as isize);
-        self.tp
+        Arc::make_mut(&mut self.tp).set_decimal_under_limit(fsp as isize);
+        Arc::make_mut(&mut self.tp)
             .set_flen_under_limit(mysql::MaxDurationWidthNoFsp + fsp as isize);
         if fsp > 0 {
             // Add the length for `.`.
             let flen = self.tp.get_flen();
-            self.tp.set_flen_under_limit(flen + 1);
+            Arc::make_mut(&mut self.tp).set_flen_under_limit(flen + 1);
         }
     }
 }

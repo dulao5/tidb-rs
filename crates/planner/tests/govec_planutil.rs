@@ -137,7 +137,7 @@ fn col(v: &Value) -> Arc<Column> {
     Arc::new(Column {
         unique_id: i(&a[0]),
         id: i(&a[0]),
-        ret_type: field_type(a[1].as_str().unwrap(), i(&a[2]) as isize),
+        ret_type: Arc::new(field_type(a[1].as_str().unwrap(), i(&a[2]) as isize)),
         ..Default::default()
     })
 }
@@ -146,7 +146,7 @@ fn int_col(id: i64) -> Column {
     Column {
         unique_id: id,
         id,
-        ret_type: new_field_type(TypeLonglong),
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
         ..Default::default()
     }
 }
@@ -520,7 +520,7 @@ fn handle_common(p: &[Value]) -> Value {
             unique_id: 100 + k as i64,
             id: k as i64 + 1,
             index: k as isize,
-            ret_type: ft,
+            ret_type: Arc::new(ft),
             ..Default::default()
         }));
     }

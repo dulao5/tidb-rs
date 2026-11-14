@@ -53,9 +53,7 @@ impl HandleCols {
 pub fn reset_not_null_flag(schema: &mut Schema, start: usize, end: usize) {
     for i in start..end {
         let mut col = (*schema.columns[i]).clone();
-        let mut new_field_type = col.ret_type.clone();
-        new_field_type.del_flag(NotNullFlag);
-        col.ret_type = new_field_type;
+        col.ret_type_mut().del_flag(NotNullFlag);
         schema.columns[i] = Arc::new(col);
     }
 }

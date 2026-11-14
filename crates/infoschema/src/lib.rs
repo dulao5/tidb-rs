@@ -25,6 +25,9 @@
 //!
 //! tidb-rs is read-only: the writers (`Mutator.Create*`, `TxStructure.HSet`, ...) run in
 //! Go TiDB and are not ported (X, tracker rules).
+// N13 rule 5 (M-SHARE): a clone of an `Arc` is written `Arc::clone(&x)`, so a bare `.clone()`
+// is always a value clone (Go `Clone`).
+#![warn(clippy::clone_on_ref_ptr)]
 
 pub mod autoid;
 pub mod builder;

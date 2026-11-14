@@ -12,6 +12,7 @@
 //! is read by `SELECT @@last_sql_use_alloc`. So the no-reuse allocator returned by
 //! `NewAllocator` still answers like Go's pool.
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -25,9 +26,11 @@ use crate::chunk::new;
 /// The typical usage is to call Reset() to recycle objects into a pool,
 /// and Alloc() allocates from the pool.
 pub trait Allocator: Send {
-    /// Alloc allocates a chunk.
+    /// Alloc allocates a chunk. `fields` is Go's `[]*types.FieldType`: the caller's shared
+    /// types (an executor's return types, N13 §8).
     // glue: Go interface method
-    fn alloc(&mut self, fields: &[FieldType], capacity: usize, max_chunk_size: usize) -> Chunk;
+    fn alloc(&mut self, fields: &[Arc<FieldType>], capacity: usize, max_chunk_size: usize)
+    -> Chunk;
     /// CheckReuseAllocSize reports whether the allocator would reuse memory.
     // glue: Go interface method
     fn check_reuse_alloc_size(&self) -> bool;
@@ -77,7 +80,12 @@ struct PoolSizeAllocator {
 impl Allocator for PoolSizeAllocator {
     /// Alloc allocates a new chunk (M-POOL: never from a free list).
     // glue: allocator.Alloc is X (M-POOL); allocates like emptyAllocator.Alloc
-    fn alloc(&mut self, fields: &[FieldType], capacity: usize, max_chunk_size: usize) -> Chunk {
+    fn alloc(
+        &mut self,
+        fields: &[Arc<FieldType>],
+        capacity: usize,
+        max_chunk_size: usize,
+    ) -> Chunk {
         new(fields, capacity, max_chunk_size)
     }
 
@@ -108,7 +116,12 @@ pub fn new_sync_allocator(alloc: Box<dyn Allocator>) -> Box<dyn Allocator> {
 impl Allocator for SyncAllocator {
     /// Alloc implements `Allocator` for `*syncAllocator`
     // go: syncAllocator.Alloc L1
-    fn alloc(&mut self, fields: &[FieldType], capacity: usize, max_chunk_size: usize) -> Chunk {
+    fn alloc(
+        &mut self,
+        fields: &[Arc<FieldType>],
+        capacity: usize,
+        max_chunk_size: usize,
+    ) -> Chunk {
         self.alloc.lock().alloc(fields, capacity, max_chunk_size)
     }
 
@@ -148,7 +161,12 @@ pub fn new_reuse_hook_allocator(
 impl Allocator for ReuseHookAllocator {
     /// Alloc implements the Allocator interface
     // go: reuseHookAllocator.Alloc L1
-    fn alloc(&mut self, fields: &[FieldType], capacity: usize, max_chunk_size: usize) -> Chunk {
+    fn alloc(
+        &mut self,
+        fields: &[Arc<FieldType>],
+        capacity: usize,
+        max_chunk_size: usize,
+    ) -> Chunk {
         if self.alloc.check_reuse_alloc_size() && !self.once {
             self.once = true;
             (self.f)();
@@ -182,7 +200,12 @@ pub fn new_empty_allocator() -> Box<dyn Allocator> {
 impl Allocator for EmptyAllocator {
     /// Alloc implements the Allocator interface
     // go: emptyAllocator.Alloc L1
-    fn alloc(&mut self, fields: &[FieldType], capacity: usize, max_chunk_size: usize) -> Chunk {
+    fn alloc(
+        &mut self,
+        fields: &[Arc<FieldType>],
+        capacity: usize,
+        max_chunk_size: usize,
+    ) -> Chunk {
         new(fields, capacity, max_chunk_size)
     }
 

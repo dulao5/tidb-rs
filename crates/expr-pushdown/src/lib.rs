@@ -7,6 +7,9 @@
 //! (`distsql_builtin.go`, `PBToExpr`, part 2).
 
 #![deny(unsafe_code)]
+// N13 rule 5 (M-SHARE): a clone of an `Arc` is written `Arc::clone(&x)`, so a bare `.clone()`
+// is always a value clone (Go `Clone`).
+#![warn(clippy::clone_on_ref_ptr)]
 
 pub mod distsql_builtin;
 pub mod expr_to_pb;

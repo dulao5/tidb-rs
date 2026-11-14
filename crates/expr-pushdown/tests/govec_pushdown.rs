@@ -246,7 +246,7 @@ fn tree(v: &Value, st: &mut EvalState) -> ExprRef {
         return Expr::Column(Column {
             unique_id: a[0].as_i64().unwrap(),
             index: a[1].as_i64().unwrap() as isize,
-            ret_type: ft_in(&a[2]),
+            ret_type: Arc::new(ft_in(&a[2])),
             id: a[3].as_i64().unwrap(),
             ..Column::default()
         })
@@ -256,7 +256,7 @@ fn tree(v: &Value, st: &mut EvalState) -> ExprRef {
         let a = a.as_array().unwrap();
         let c = CorrelatedColumn::new(Column {
             unique_id: a[0].as_i64().unwrap(),
-            ret_type: ft_in(&a[1]),
+            ret_type: Arc::new(ft_in(&a[1])),
             id: a[3].as_i64().unwrap(),
             ..Column::default()
         });

@@ -163,7 +163,7 @@ fn tree(v: &Value) -> Expr {
         return Expr::Column(Column {
             unique_id: a[0].as_i64().unwrap(),
             index: a[1].as_i64().unwrap() as isize,
-            ret_type: ft_in(&a[2]),
+            ret_type: Arc::new(ft_in(&a[2])),
             orig_name: String::from_utf8(ungs(&a[3])).unwrap(),
             ..Column::default()
         });

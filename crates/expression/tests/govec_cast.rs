@@ -347,7 +347,7 @@ fn arg_of(v: &Value, rows: Option<&Value>) -> (ExprRef, Option<tidb_chunk::Chunk
             let col = Column {
                 unique_id: 1,
                 index: 0,
-                ret_type: ft,
+                ret_type: Arc::new(ft),
                 orig_name: "c".into(),
                 ..Column::default()
             };

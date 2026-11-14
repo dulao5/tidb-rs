@@ -182,7 +182,7 @@ pub fn find_cols(
     let mut rcols: Vec<ColumnRef> = Vec::new();
     for name in names {
         if let Some(col) = find_col(cols, name) {
-            rcols.push(col.clone());
+            rcols.push(Arc::clone(col));
         } else if *name == tidb_model::ExtraHandleName.l && !pk_is_handle {
             rcols.push(extra_handle_column(cols.len()));
         } else {
@@ -204,7 +204,7 @@ pub fn find_columns(
     let mut rcols: Vec<ColumnRef> = Vec::new();
     for (i, name) in names.iter().enumerate() {
         if let Some(col) = find_col_lower_case(cols, name) {
-            rcols.push(col.clone());
+            rcols.push(Arc::clone(col));
         } else if *name == tidb_model::ExtraHandleName.l && !pk_is_handle {
             rcols.push(extra_handle_column(cols.len()));
         } else {
@@ -843,13 +843,13 @@ mod tests {
         let mut uint_nn = new_field_type(TypeLonglong);
         uint_nn.add_flag(UnsignedFlag | NotNullFlag);
         let src = ExprColumn {
-            ret_type: int.clone(),
+            ret_type: Arc::new(int.clone()),
             index: 0,
             unique_id: 1,
             ..Default::default()
         };
         let vcol = ExprColumn {
-            ret_type: uint_nn.clone(),
+            ret_type: Arc::new(uint_nn.clone()),
             index: 1,
             unique_id: 2,
             virtual_expr: Some(Arc::new(Expr::Column(src.clone()))),
@@ -909,13 +909,13 @@ mod tests {
     fn fill_virtual_column_value_shares_without_aliasing_writes() {
         let int = new_field_type(TypeLonglong);
         let src = ExprColumn {
-            ret_type: int.clone(),
+            ret_type: Arc::new(int.clone()),
             index: 0,
             unique_id: 1,
             ..Default::default()
         };
         let vcol = ExprColumn {
-            ret_type: int.clone(),
+            ret_type: Arc::new(int.clone()),
             index: 1,
             unique_id: 2,
             virtual_expr: Some(Arc::new(Expr::Column(src.clone()))),

@@ -409,7 +409,7 @@ async fn full_load(
     ts: u64,
 ) -> Result<InfoSchemaV2, Error> {
     let (dbs, policies, groups) = fetch_all(m).await?;
-    let mut b = new_builder(Some(req.clone()), None, data.clone());
+    let mut b = new_builder(Some(Arc::clone(req)), None, Arc::clone(data));
     b.init_with_db_infos(dbs, policies, groups, ver).await?;
     Ok(b.build(ts).await)
 }
@@ -424,7 +424,7 @@ fn panic_msg(e: Box<dyn std::any::Any + Send>) -> String {
 /// One record: Go `infoschemaExec`.
 async fn exec(steps: &[Value]) -> Value {
     let store = Arc::new(MvccStore::default());
-    let req: Arc<dyn Requirement> = Arc::new(Req(store.clone()));
+    let req: Arc<dyn Requirement> = Arc::new(Req(Arc::clone(&store)));
     let data = new_data();
     let mut built: Vec<InfoSchemaV2> = vec![];
     let mut latest: Option<InfoSchemaV2> = None;
@@ -463,7 +463,7 @@ async fn step(
     match st["k"].as_str().unwrap() {
         "full" => {
             let snap = Arc::new(mem_snap(&st["pairs"]));
-            store.states.write().push((ts, snap.clone()));
+            store.states.write().push((ts, Arc::clone(&snap)));
             let m = meta::new_reader(snap);
             match full_load(req, data, &m, st["ver"].as_i64().unwrap_or(0), ts).await {
                 Ok(is) => {
@@ -478,12 +478,12 @@ async fn step(
         }
         "diffs" => {
             let snap = Arc::new(mem_snap(&st["pairs"]));
-            store.states.write().push((ts, snap.clone()));
+            store.states.write().push((ts, Arc::clone(&snap)));
             let m = meta::new_reader(snap);
-            let mut b = new_builder(Some(req.clone()), None, data.clone());
+            let mut b = new_builder(Some(Arc::clone(req)), None, Arc::clone(data));
             b.init_with_old_info_schema(latest.as_ref().expect("a full load first"))
                 .unwrap();
-            b = b.with_store(store.clone());
+            b = b.with_store(Arc::clone(store) as _);
             b.set_delta_update_bundles();
             let diffs: Vec<SchemaDiff> = st["diffs"]
                 .as_array()
@@ -688,7 +688,7 @@ fn readers_at_a_fixed_version_while_the_builder_writes() {
     let v = steps[0]["ver"].as_i64().unwrap();
 
     let store = Arc::new(MvccStore::default());
-    let req: Arc<dyn Requirement> = Arc::new(Req(store.clone()));
+    let req: Arc<dyn Requirement> = Arc::new(Req(Arc::clone(&store)));
     let data = new_data();
     let mut built = vec![];
     let mut latest = None;
@@ -707,7 +707,12 @@ fn readers_at_a_fixed_version_while_the_builder_writes() {
 
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let writer = {
-        let (store, req, data, done) = (store.clone(), req.clone(), data.clone(), done.clone());
+        let (store, req, data, done) = (
+            Arc::clone(&store),
+            Arc::clone(&req),
+            Arc::clone(&data),
+            Arc::clone(&done),
+        );
         let steps = steps.clone();
         std::thread::spawn(move || {
             let mut built = built;
@@ -740,7 +745,7 @@ fn readers_at_a_fixed_version_while_the_builder_writes() {
     };
     let readers: Vec<_> = (0..4)
         .map(|_| {
-            let (is_v, pinned, done) = (is_v.clone(), pinned.clone(), done.clone());
+            let (is_v, pinned, done) = (is_v.clone(), pinned.clone(), Arc::clone(&done));
             std::thread::spawn(move || {
                 let mut n = 0;
                 while !done.load(std::sync::atomic::Ordering::SeqCst) || n == 0 {

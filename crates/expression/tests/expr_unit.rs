@@ -103,6 +103,45 @@ fn correlated_slot_is_shared_by_clone_and_remap() {
 /// One result type per function node (D08.1 spec §3.2, Lucky review #94): clearing
 /// `ParseToJSONFlag` on `CAST(c AS JSON)` changes how the signature evaluates, as in Go
 /// (v8.5.8: `CAST('[1]' AS JSON) = '[1]'` is 0 because the string is then not parsed).
+/// Go shares `RetType` between clones (`Column.Clone`, `Schema.Clone`, `ScalarFunction.Clone`):
+/// the clones hold the same `Arc<FieldType>`; a change copies first, so the other holders keep
+/// the old type (`M-FT` copy on write, N13 §8).
+#[test]
+fn clones_share_ret_type_and_writes_copy() {
+    use tidb_expression::builtin_cast::build_cast_function;
+    use tidb_sessionctx::exprstatic as es;
+    use tidb_types::field_type::new_field_type;
+
+    let col = tidb_expression::column::Column {
+        unique_id: 1,
+        ret_type: Arc::new(new_field_type(tidb_base::mysql::TypeLonglong)),
+        ..Default::default()
+    };
+    let mut c2 = col.clone();
+    assert!(Arc::ptr_eq(&col.ret_type, &c2.ret_type));
+    let schema = new_schema(vec![Arc::new(col.clone())]);
+    let cloned = schema.clone_schema();
+    assert!(Arc::ptr_eq(&cloned.columns[0].ret_type, &col.ret_type));
+    c2.ret_type_mut().add_flag(tidb_base::mysql::NotNullFlag);
+    assert!(!Arc::ptr_eq(&col.ret_type, &c2.ret_type));
+    assert!(!tidb_base::mysql::has_not_null_flag(
+        col.ret_type.get_flag()
+    ));
+    assert!(tidb_base::mysql::has_not_null_flag(c2.ret_type.get_flag()));
+
+    let ev = es::new_eval_context(vec![]);
+    let ctx = es::new_expr_context(vec![es::with_eval_ctx(Arc::clone(&ev))]);
+    let arg = tidb_expression::expression::Expr::Column(col).into_ref();
+    let cast =
+        build_cast_function(&*ctx, arg, new_field_type(tidb_base::mysql::TypeVarchar)).unwrap();
+    let sf = cast.as_scalar_function().unwrap();
+    let mut sf2 = sf.clone();
+    assert!(std::ptr::eq(sf.ret_type(), sf2.ret_type()));
+    sf2.ret_type_mut().set_flen(7);
+    assert!(!std::ptr::eq(sf.ret_type(), sf2.ret_type()));
+    assert_ne!(sf.ret_type().get_flen(), 7);
+}
+
 #[test]
 fn disable_parse_json_flag_reaches_the_signature() {
     use tidb_chunk::chunk::new_chunk_with_capacity;
@@ -120,7 +159,7 @@ fn disable_parse_json_flag_reaches_the_signature() {
     let col = tidb_expression::column::Column {
         unique_id: 1,
         index: 0,
-        ret_type: ft,
+        ret_type: Arc::new(ft),
         orig_name: "c".into(),
         ..Default::default()
     };
@@ -162,7 +201,7 @@ fn type_infer_for_null_skips_parameter_markers() {
     let int_col = Expr::Column(tidb_expression::column::Column {
         unique_id: 1,
         index: 0,
-        ret_type: new_field_type(tidb_base::mysql::TypeLonglong),
+        ret_type: Arc::new(new_field_type(tidb_base::mysql::TypeLonglong)),
         ..Default::default()
     })
     .into_ref();
@@ -209,7 +248,7 @@ fn vectorizable_by_function_names() {
     let ctx = es::new_expr_context(vec![es::with_eval_ctx(std::sync::Arc::clone(&ev))]);
     let col = Expr::Column(tidb_expression::column::Column {
         unique_id: 1,
-        ret_type: new_field_type(tidb_base::mysql::TypeLonglong),
+        ret_type: Arc::new(new_field_type(tidb_base::mysql::TypeLonglong)),
         ..Default::default()
     })
     .into_ref();
@@ -220,29 +259,29 @@ fn vectorizable_by_function_names() {
         sf.func_name = CIStr::new(name);
         Expr::ScalarFunction(sf).into_ref()
     };
-    let plain = named("cast", col.clone());
+    let plain = named("cast", Arc::clone(&col));
     assert!(vectorizable(std::slice::from_ref(&plain)));
     // GetVar / SetVar anywhere in the tree.
-    let getvar = named("getvar", col.clone());
-    assert!(has_get_set_var_func(&named("cast", getvar.clone())));
-    assert!(!vectorizable(&[plain.clone(), named("cast", getvar)]));
-    assert!(has_get_set_var_func(&named("setvar", col.clone())));
+    let getvar = named("getvar", Arc::clone(&col));
+    assert!(has_get_set_var_func(&named("cast", Arc::clone(&getvar))));
+    assert!(!vectorizable(&[Arc::clone(&plain), named("cast", getvar)]));
+    assert!(has_get_set_var_func(&named("setvar", Arc::clone(&col))));
     // SetVar assigns only when an argument is a function.
-    assert!(!has_assign_set_var_func(&named("setvar", col.clone())));
+    assert!(!has_assign_set_var_func(&named("setvar", Arc::clone(&col))));
     assert!(has_assign_set_var_func(&named(
         "cast",
-        named("setvar", plain.clone())
+        named("setvar", Arc::clone(&plain))
     )));
     // Sequences: nextval with another sequence function, or two nextval.
     let (next, last, set) = (
-        named("nextval", col.clone()),
-        named("lastval", col.clone()),
-        named("setval", col.clone()),
+        named("nextval", Arc::clone(&col)),
+        named("lastval", Arc::clone(&col)),
+        named("setval", Arc::clone(&col)),
     );
-    assert!(vectorizable(&[next.clone(), plain.clone()]));
-    assert!(!vectorizable(&[next.clone(), last.clone()]));
-    assert!(!vectorizable(&[next.clone(), set.clone()]));
-    assert!(!vectorizable(&[next.clone(), next.clone()]));
+    assert!(vectorizable(&[Arc::clone(&next), Arc::clone(&plain)]));
+    assert!(!vectorizable(&[Arc::clone(&next), Arc::clone(&last)]));
+    assert!(!vectorizable(&[Arc::clone(&next), Arc::clone(&set)]));
+    assert!(!vectorizable(&[Arc::clone(&next), Arc::clone(&next)]));
     assert!(vectorizable(&[last, set]));
 }
 
@@ -265,7 +304,7 @@ fn stringify_expressions_with_ctx() {
     .into_ref();
     assert_eq!(stringify_expressions_with_ctx(&*c, &[]), b"[]");
     assert_eq!(
-        stringify_expressions_with_ctx(&*c, &[one.clone(), col.clone()]),
+        stringify_expressions_with_ctx(&*c, &[Arc::clone(&one), Arc::clone(&col)]),
         [
             b"[".to_vec(),
             one.string_with_ctx(&*c, tidb_base::errors::RedactLogDisable),
@@ -309,21 +348,21 @@ fn schema_memory_usage_matches_go() {
     use tidb_types::field_type::new_field_type;
     let c1 = Arc::new(Column {
         unique_id: 1,
-        ret_type: new_field_type(TypeLonglong),
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
         orig_name: "t.a".into(),
         ..Column::default()
     });
     let c2 = Arc::new(Column {
         unique_id: 2,
-        ret_type: new_field_type(TypeVarString),
+        ret_type: Arc::new(new_field_type(TypeVarString)),
         orig_name: "t.bb".into(),
         ..Column::default()
     });
     assert_eq!((c1.memory_usage(), c2.memory_usage()), (303, 310));
     assert_eq!(new_schema(Vec::new()).memory_usage(), 72);
-    let mut s = new_schema(vec![c1.clone(), c2.clone()]);
+    let mut s = new_schema(vec![Arc::clone(&c1), Arc::clone(&c2)]);
     assert_eq!(s.memory_usage(), 701);
-    s.keys = vec![vec![c1.clone()]];
+    s.keys = vec![vec![Arc::clone(&c1)]];
     s.unique_keys = vec![vec![c1, c2]];
     assert_eq!(s.memory_usage(), 1689);
 }
@@ -337,7 +376,7 @@ fn eval_virtual_column_evaluates_the_expression() {
         virtual_expr: Some(Expr::Constant(new_one()).into_ref()),
         ..Column::default()
     };
-    let chk = new_chunk_with_capacity(&[], 1);
+    let chk = new_chunk_with_capacity::<tidb_types::etc::FieldType>(&[], 1);
     let ctx = ctx(Flags::default(), None);
     let st = EvalState::new();
     let d = c.eval_virtual_column(&*ctx, &st, chk.get_row(0)).unwrap();

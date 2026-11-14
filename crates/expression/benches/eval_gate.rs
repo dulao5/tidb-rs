@@ -369,7 +369,7 @@ fn case(
         .map(|(i, ft)| {
             Arc::new(Expr::Column(Column {
                 index: i as isize,
-                ret_type: ft.clone(),
+                ret_type: Arc::new(ft.clone()),
                 ..Column::default()
             }))
         })
