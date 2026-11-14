@@ -23,6 +23,8 @@ tools/ab/faults/run.sh -b path/to/tidb-server -s kill_tikv,net_cut -p 10 -k
 4. It writes `target/faults/<timestamp>.json` / `.log`.
 5. It cleans the cluster unless `-k` is given.
 
+In the `steady` phase (before any fault, at least 30 s), a tidb-rs stall longer than 2 s and than three times Go TiDB's on the same shape is also an inconsistency (#225).
+
 **Exit status:**
 
 - **1**: a read returned a wrong result, or tidb-rs showed an error kind that Go TiDB did not and that `expected.json` does not list. Known gaps go in `expected.json` with a reason, so the run stays green until they are fixed and goes red on anything new.

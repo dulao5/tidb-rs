@@ -49,6 +49,22 @@ class ClassifyTest(unittest.TestCase):
         self.assertIn("timestamp.rs:70]: TimestampRequest channel is closed", list(s["error_samples"].values())[0])
 
 
+class SteadyStallTest(unittest.TestCase):
+    @staticmethod
+    def summary(a_ms, b_ms):
+        return {side: {"point-tso": {"max_stall_ms": ms}} for side, ms in (("A", a_ms), ("B", b_ms))}
+
+    def test_long_stall_on_b_only_is_flagged(self):
+        # #225: tidb-rs stalled ~15 s on TSO reads in steady state, Go TiDB under 0.4 s.
+        out = faults.steady_stalls(self.summary(400, 15800))
+        self.assertEqual(len(out), 1)
+        self.assertIn("steady/B/point-tso", out[0])
+
+    def test_short_stall_or_one_on_both_sides_is_not(self):
+        self.assertEqual(faults.steady_stalls(self.summary(30, 1500)), [])
+        self.assertEqual(faults.steady_stalls(self.summary(5000, 6000)), [])
+
+
 class MetaRegionKeyTest(unittest.TestCase):
     def test_encode_bytes_like_tidb_codec(self):
         self.assertEqual(faults.mem_encode_bytes(b""), b"\0" * 8 + b"\xf7")
