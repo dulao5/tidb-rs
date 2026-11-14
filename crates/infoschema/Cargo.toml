@@ -49,6 +49,9 @@ flate2 = "1.0"
 protobuf = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }
+# arc_sharing_mem: live heap bytes under the server's allocator (jemalloc stats, as A1 3.2).
+tikv-jemallocator = { workspace = true }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [lints]
 workspace = true

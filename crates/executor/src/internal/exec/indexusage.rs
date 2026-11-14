@@ -190,15 +190,15 @@ mod tests {
         assert_eq!(get_cluster_index_id(&t), None);
         t.is_common_handle = true;
         t.indices = Some(vec![
-            tidb_model::IndexInfo {
+            std::sync::Arc::new(tidb_model::IndexInfo {
                 id: 1,
                 ..Default::default()
-            },
-            tidb_model::IndexInfo {
+            }),
+            std::sync::Arc::new(tidb_model::IndexInfo {
                 id: 2,
                 primary: true,
                 ..Default::default()
-            },
+            }),
         ]);
         assert_eq!(get_cluster_index_id(&t), Some(2));
         // Without statistics (D11.2) every report is skipped.

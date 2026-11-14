@@ -485,7 +485,7 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<Error>) {
                     column::get_col_origin_default_value_without_strict_sql_mode(&*ctx, ci),
                 ),
                 _ => {
-                    let col = column::to_column(Arc::new(ci.clone()));
+                    let col = column::to_column(Arc::clone(ci));
                     let mut vals = vec![Datum::default(); tbl.columns.as_ref().unwrap().len()];
                     let d1 = tables::get_col_default_value(&*ctx, &col, &mut vals);
                     let d2 = tables::get_col_default_value(&*ctx, &col, &mut vals);
@@ -569,7 +569,7 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<Error>) {
                 .columns
                 .iter()
                 .flatten()
-                .map(|c| Arc::new(column::to_column(Arc::new(c.clone()))))
+                .map(|c| Arc::new(column::to_column(Arc::clone(c))))
                 .collect();
             let names: Vec<String> = a[1]
                 .as_array()
@@ -604,7 +604,7 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<Error>) {
         "can_skip" => {
             let tbl = tbl_in(&a[0]);
             let ci = &tbl.columns.as_ref().unwrap()[a[1].as_u64().unwrap() as usize];
-            let col = column::to_column(Arc::new(ci.clone()));
+            let col = column::to_column(Arc::clone(ci));
             let d = datum_in(&a[2]);
             (try_(|| json!(tables::can_skip(&tbl, &col, &d))), None)
         }

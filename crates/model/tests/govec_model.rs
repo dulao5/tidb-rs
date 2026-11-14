@@ -96,7 +96,7 @@ fn table(text: &Value) -> TableInfo {
     t
 }
 
-fn col_names(cols: &[Option<&ColumnInfo>]) -> Value {
+fn col_names(cols: &[Option<&std::sync::Arc<ColumnInfo>>]) -> Value {
     cols.iter()
         .map(|c| c.map_or(Value::Null, |c| json!(c.name.o)))
         .collect()
@@ -349,7 +349,8 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<String>) {
         "marshal_nan" => {
             let mut t = table(&a[0]);
             let f = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][i(&a[1]) as usize];
-            t.columns.as_mut().unwrap()[0].default_value = AnyValue::Value(JValue::Number(f));
+            tidb_model::make_mut(&mut t.columns.as_mut().unwrap()[0]).default_value =
+                AnyValue::Value(JValue::Number(f));
             (mo(t.marshal_json()), None)
         }
         "table" => (table_out(&table(&a[0]), &a[1], i(&a[2])), None),
@@ -428,7 +429,7 @@ fn exec(op: &str, a: &[Value]) -> (Value, Option<String>) {
                         "removing_origin": idx.get_removing_origin_name(), "changing_origin": idx.get_changing_origin_name(),
                         "prefix": idx.has_prefix_index(), "public": idx.is_public(), "tiflash": idx.is_tiflash_local_index(),
                         "cond": idx.has_condition(), "find_col": idx.find_column_by_name(name).is_some(),
-                        "find_col_idx": i2, "find_col2": ic2.is_some(), "clone": mo(idx.clone().marshal_json()),
+                        "find_col_idx": i2, "find_col2": ic2.is_some(), "clone": mo(IndexInfo::clone(idx).marshal_json()),
                         "changing_fts": if fts.is_empty() { Value::Null } else { json!(fts) },
                     })
                 })
@@ -686,11 +687,11 @@ fn misc(a: &[Value]) -> (Value, Option<String>) {
             let (mut x, mut y) = (DBInfo::default(), DBInfo::default());
             x.unmarshal_json(&gs_bytes(&a[1])).unwrap();
             y.unmarshal_json(&gs_bytes(&a[2])).unwrap();
-            x.deprecated.tables = Some(vec![TableInfo {
+            x.deprecated.tables = Some(vec![std::sync::Arc::new(TableInfo {
                 id: 7,
                 name: CIStr::new("x"),
                 ..TableInfo::default()
-            }]);
+            })]);
             (
                 json!({"clone": mo(x.clone().marshal_json()), "copy": mo(x.copy().marshal_json()),
                     "clone_tables": sl(&x.clone().deprecated.tables).len(), "less": less_db_info(&x, &y)}),

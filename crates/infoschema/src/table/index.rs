@@ -16,7 +16,7 @@ use tidb_model::{IndexInfo, TableInfo};
 pub trait Index: Send + Sync {
     /// Meta returns IndexInfo.
     // glue: interface method Index.Meta
-    fn meta(&self) -> &IndexInfo;
+    fn meta(&self) -> &Arc<IndexInfo>;
     /// TableMeta returns TableInfo
     // glue: interface method Index.TableMeta
     fn table_meta(&self) -> &Arc<TableInfo>;

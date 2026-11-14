@@ -3853,6 +3853,8 @@ dependencies = [
  "tidb-sessionctx",
  "tidb-tablecodec",
  "tidb-types",
+ "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
  "tipb",
  "tokio",
 ]

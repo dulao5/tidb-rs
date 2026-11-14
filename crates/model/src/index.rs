@@ -3,6 +3,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::LazyLock;
 
 use tidb_base::Error;
@@ -177,9 +178,9 @@ impl IndexInfo {
 // go: FindIndexByColumns L1
 pub fn find_index_by_columns<'a>(
     tb_info: &TableInfo,
-    indices: &'a [IndexInfo],
+    indices: &'a [Arc<IndexInfo>],
     cols: &[CIStr],
-) -> Option<&'a IndexInfo> {
+) -> Option<&'a Arc<IndexInfo>> {
     indices
         .iter()
         .find(|index| is_index_prefix_covered(tb_info, index, cols))
@@ -210,9 +211,9 @@ pub fn is_index_prefix_covered(tb_info: &TableInfo, index: &IndexInfo, cols: &[C
 // go: FindIndexByColumnsForForeignKey L1
 pub fn find_index_by_columns_for_foreign_key<'a>(
     tb_info: &TableInfo,
-    indices: &'a [IndexInfo],
+    indices: &'a [Arc<IndexInfo>],
     cols: &[CIStr],
-) -> Option<&'a IndexInfo> {
+) -> Option<&'a Arc<IndexInfo>> {
     indices
         .iter()
         .find(|index| is_index_prefix_covered_for_foreign_key(tb_info, index, cols))
@@ -257,7 +258,7 @@ fn is_index_condition_covered_by_foreign_key_cols(index: &IndexInfo, cols: &[CIS
 
 /// FindIndexInfoByID finds IndexInfo in indices by id.
 // go: FindIndexInfoByID L1
-pub fn find_index_info_by_id(indices: &[IndexInfo], id: i64) -> Option<&IndexInfo> {
+pub fn find_index_info_by_id(indices: &[Arc<IndexInfo>], id: i64) -> Option<&Arc<IndexInfo>> {
     indices.iter().find(|idx| idx.id == id)
 }
 

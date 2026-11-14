@@ -17,6 +17,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::gostd::json::{self, Decoder, Raw};
@@ -221,8 +222,8 @@ impl DBInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.DBInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -250,7 +251,8 @@ impl DBInfo {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DBInfoDeprecated {
     /// json: `-`
-    pub tables: Option<Vec<TableInfo>>,
+    /// Shared with the table objects (`Arc`, copy-on-write; spec N13).
+    pub tables: Option<Vec<Arc<TableInfo>>>,
 }
 
 impl GoCopy for DBInfoDeprecated {
@@ -316,9 +318,11 @@ pub struct TableInfo {
     /// json: `collate`
     pub collate: String,
     /// json: `cols`
-    pub columns: Option<Vec<ColumnInfo>>,
+    /// Shared with the table objects (`Arc`, copy-on-write; spec N13).
+    pub columns: Option<Vec<Arc<ColumnInfo>>>,
     /// json: `index_info`
-    pub indices: Option<Vec<IndexInfo>>,
+    /// Shared with the table objects (`Arc`, copy-on-write; spec N13).
+    pub indices: Option<Vec<Arc<IndexInfo>>>,
     /// json: `constraint_info`
     pub constraints: Option<Vec<ConstraintInfo>>,
     /// json: `fk_info`
@@ -1182,12 +1186,12 @@ impl TableInfo {
                         v,
                         &mut self.columns,
                         "[]*model.ColumnInfo",
-                        |d, v, x: &mut ColumnInfo| {
+                        |d, v, x: &mut Arc<ColumnInfo>| {
                             if let Raw::Null = v {
                                 *x = Default::default();
                                 return;
                             }
-                            (*x).decode_json(d, v);
+                            crate::gocopy::make_mut(x).decode_json(d, v);
                         },
                     );
                 }
@@ -1196,12 +1200,12 @@ impl TableInfo {
                         v,
                         &mut self.indices,
                         "[]*model.IndexInfo",
-                        |d, v, x: &mut IndexInfo| {
+                        |d, v, x: &mut Arc<IndexInfo>| {
                             if let Raw::Null = v {
                                 *x = Default::default();
                                 return;
                             }
-                            (*x).decode_json(d, v);
+                            crate::gocopy::make_mut(x).decode_json(d, v);
                         },
                     );
                 }
@@ -1422,8 +1426,8 @@ impl TableInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.TableInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -1893,8 +1897,8 @@ impl ColumnInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.ColumnInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -2422,8 +2426,8 @@ impl IndexInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.IndexInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -2565,8 +2569,8 @@ impl IndexColumn {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.IndexColumn (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -2901,8 +2905,8 @@ impl ConstraintInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.ConstraintInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -3201,8 +3205,8 @@ impl FKInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.FKInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -3853,8 +3857,8 @@ impl PartitionInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.PartitionInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -4096,8 +4100,8 @@ impl PartitionDefinition {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.PartitionDefinition (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -5982,8 +5986,8 @@ impl TTLInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.TTLInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -6066,8 +6070,8 @@ impl TableAffinityInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.TableAffinityInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -6185,8 +6189,8 @@ impl SoftdeleteInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.SoftdeleteInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -6958,8 +6962,8 @@ impl PolicyInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.PolicyInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -7243,8 +7247,8 @@ impl PlacementSettings {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.PlacementSettings (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -7570,8 +7574,8 @@ impl ResourceGroupInfo {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.ResourceGroupInfo (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()
@@ -7803,8 +7807,8 @@ impl ResourceGroupSettings {
     }
 
     /// Go's struct copy `*x` (every field copied as is, without the Go `Clone` methods of
-    /// the field types; Rust has no shared pointers to keep), the starting point of the
-    /// hand-ported `Clone`.
+    /// the field types; shared `Arc` fields share their elements as Go does), the starting
+    /// point of the hand-ported `Clone`.
     // glue: Go struct copy of model.ResourceGroupSettings (generated)
     pub(crate) fn struct_copy(&self) -> Self {
         self.go_copy()

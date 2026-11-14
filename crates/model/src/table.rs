@@ -3,7 +3,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::collections::BTreeMap;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use tidb_base::gostd::time::{Duration, Time};
 use tidb_base::{Error, errors, gofmt::Arg, mysql};
@@ -13,6 +13,7 @@ use tidb_parser::model::{
 };
 
 use crate::column::{find_column_info_by_id, sl};
+use crate::gocopy::make_mut;
 use crate::index::find_index_info_by_id;
 use crate::{
     ActionAddTablePartition, ActionDropTablePartition, ActionNone, ActionTruncateTablePartition,
@@ -68,7 +69,7 @@ impl TableInfo {
     /// GetPkColInfo gets the ColumnInfo of pk if exists. Make sure PkIsHandle checked before
     /// call this method.
     // go: TableInfo.GetPkColInfo L1
-    pub fn get_pk_col_info(&self) -> Option<&ColumnInfo> {
+    pub fn get_pk_col_info(&self) -> Option<&Arc<ColumnInfo>> {
         sl(&self.columns)
             .iter()
             .find(|c| mysql::has_pri_key_flag(c.get_flag()))
@@ -76,7 +77,7 @@ impl TableInfo {
 
     /// GetAutoIncrementColInfo gets the ColumnInfo of auto_increment column if exists.
     // go: TableInfo.GetAutoIncrementColInfo L1
-    pub fn get_auto_increment_col_info(&self) -> Option<&ColumnInfo> {
+    pub fn get_auto_increment_col_info(&self) -> Option<&Arc<ColumnInfo>> {
         sl(&self.columns)
             .iter()
             .find(|c| mysql::has_auto_increment_flag(c.get_flag()))
@@ -116,9 +117,9 @@ impl TableInfo {
     /// to the largest public offset. Go leaves a nil at an offset whose column is not public;
     /// that is `None` here. Panics on an offset out of range, as Go does.
     // go: TableInfo.Cols L1
-    pub fn cols(&self) -> Vec<Option<&ColumnInfo>> {
+    pub fn cols(&self) -> Vec<Option<&Arc<ColumnInfo>>> {
         let columns = sl(&self.columns);
-        let mut public_columns: Vec<Option<&ColumnInfo>> = vec![None; columns.len()];
+        let mut public_columns: Vec<Option<&Arc<ColumnInfo>>> = vec![None; columns.len()];
         let mut max_offset: isize = -1;
         for col in columns {
             if col.state != StatePublic {
@@ -135,26 +136,26 @@ impl TableInfo {
 
     /// FindIndexByName finds index by name.
     // go: TableInfo.FindIndexByName L1
-    pub fn find_index_by_name(&self, idx_name: &str) -> Option<&IndexInfo> {
+    pub fn find_index_by_name(&self, idx_name: &str) -> Option<&Arc<IndexInfo>> {
         sl(&self.indices).iter().find(|i| i.name.l == idx_name)
     }
 
     /// FindColumnByID finds ColumnInfo by id.
     // go: TableInfo.FindColumnByID L1
-    pub fn find_column_by_id(&self, id: i64) -> Option<&ColumnInfo> {
+    pub fn find_column_by_id(&self, id: i64) -> Option<&Arc<ColumnInfo>> {
         sl(&self.columns).iter().find(|c| c.id == id)
     }
 
     /// FindIndexByID finds index by id.
     // go: TableInfo.FindIndexByID L1
-    pub fn find_index_by_id(&self, id: i64) -> Option<&IndexInfo> {
+    pub fn find_index_by_id(&self, id: i64) -> Option<&Arc<IndexInfo>> {
         sl(&self.indices).iter().find(|i| i.id == id)
     }
 
     /// FindPublicColumnByName finds the public column by name. A non-public hole in
     /// `Cols()` panics, as the nil dereference does in Go.
     // go: TableInfo.FindPublicColumnByName L1 [M-PANIC]
-    pub fn find_public_column_by_name(&self, col_name_l: &str) -> Option<&ColumnInfo> {
+    pub fn find_public_column_by_name(&self, col_name_l: &str) -> Option<&Arc<ColumnInfo>> {
         for col in self.cols() {
             let col = col.expect("invalid memory address or nil pointer dereference");
             if col.name.l == col_name_l {
@@ -174,7 +175,7 @@ impl TableInfo {
 
     /// MoveColumnInfo moves a column to another offset. It maintains the offsets of all
     /// affects columns and index columns.
-    // go: TableInfo.MoveColumnInfo L1
+    // go: TableInfo.MoveColumnInfo L1 [M-SHARE]
     pub fn move_column_info(&mut self, from: usize, to: usize) {
         if from == to {
             return;
@@ -186,22 +187,23 @@ impl TableInfo {
         if from < to {
             for i in from..to {
                 columns[i] = columns[i + 1].clone();
-                columns[i].offset = i as isize;
+                make_mut(&mut columns[i]).offset = i as isize;
                 updated_offsets.insert((i + 1) as isize, i as isize);
             }
         } else if from > to {
             for i in (to + 1..=from).rev() {
                 columns[i] = columns[i - 1].clone();
-                columns[i].offset = i as isize;
+                make_mut(&mut columns[i]).offset = i as isize;
                 updated_offsets.insert((i - 1) as isize, i as isize);
             }
         }
         columns[to] = src;
-        columns[to].offset = to as isize;
+        make_mut(&mut columns[to]).offset = to as isize;
 
         // Update index column offsets.
         updated_offsets.insert(from as isize, to as isize);
         for idx in self.indices.iter_mut().flatten() {
+            let idx = make_mut(idx);
             for idx_col in idx.columns.iter_mut().flatten() {
                 if let Some(&new_offset) = updated_offsets.get(&idx_col.offset) {
                     idx_col.offset = new_offset;
@@ -216,8 +218,11 @@ impl TableInfo {
 
         // Reconstruct the dependency column offsets.
         for col in self.columns.iter_mut().flatten() {
-            if let Some(csi) = &mut col.change_state_info
-                && let Some(&new_offset) = updated_offsets.get(&csi.dependency_column_offset)
+            if let Some(&new_offset) = col
+                .change_state_info
+                .as_ref()
+                .and_then(|csi| updated_offsets.get(&csi.dependency_column_offset))
+                && let Some(csi) = &mut make_mut(col).change_state_info
             {
                 csi.dependency_column_offset = new_offset;
             }
@@ -239,8 +244,8 @@ impl TableInfo {
     /// primary key could be explicit or implicit. If there is no explicit primary key in
     /// table, the first UNIQUE INDEX on NOT NULL column(s) will be taken.
     // go: TableInfo.GetPrimaryKey L1
-    pub fn get_primary_key(&self) -> Option<&IndexInfo> {
-        let mut implicit_pk: Option<&IndexInfo> = None;
+    pub fn get_primary_key(&self) -> Option<&Arc<IndexInfo>> {
+        let mut implicit_pk: Option<&Arc<IndexInfo>> = None;
         for key in sl(&self.indices) {
             if key.primary {
                 // table has explicit primary key
@@ -347,7 +352,7 @@ impl TableInfo {
 
     /// GetColumnByID finds the public ColumnInfo by id.
     // go: TableInfo.GetColumnByID L1
-    pub fn get_column_by_id(&self, id: i64) -> Option<&ColumnInfo> {
+    pub fn get_column_by_id(&self, id: i64) -> Option<&Arc<ColumnInfo>> {
         sl(&self.columns)
             .iter()
             .find(|c| c.state == StatePublic && c.id == id)
@@ -357,8 +362,8 @@ impl TableInfo {
     /// changed (the originals of changing columns are dropped). Go returns them in map
     /// iteration order (random); here they are in name order (M-MAPORDER).
     // go: TableInfo.GetNonTempColumns L1 [M-MAPORDER]
-    pub fn get_non_temp_columns(&self) -> Vec<&ColumnInfo> {
-        let mut col_map: BTreeMap<&str, &ColumnInfo> = BTreeMap::new();
+    pub fn get_non_temp_columns(&self) -> Vec<&Arc<ColumnInfo>> {
+        let mut col_map: BTreeMap<&str, &Arc<ColumnInfo>> = BTreeMap::new();
         for col in sl(&self.columns) {
             if col.is_removing() {
                 continue;
@@ -381,9 +386,9 @@ impl TableInfo {
 /// `col.Name.L` on a nil entry and panics; so does this.
 // go-part: TableInfo.GetPrimaryKey
 fn find_public_hole_tolerant<'a>(
-    cols: &[Option<&'a ColumnInfo>],
+    cols: &[Option<&'a Arc<ColumnInfo>>],
     name: &str,
-) -> Option<&'a ColumnInfo> {
+) -> Option<&'a Arc<ColumnInfo>> {
     let name = tidb_base::gostd::to_lower(name);
     for col in cols {
         let col = col.expect("invalid memory address or nil pointer dereference");
@@ -400,8 +405,19 @@ impl Clone for TableInfo {
     // go: TableInfo.Clone L1
     fn clone(&self) -> TableInfo {
         let mut nt = self.struct_copy();
-        nt.columns = Some(sl(&self.columns).to_vec());
-        nt.indices = Some(sl(&self.indices).to_vec());
+        // Go clones each column and index (`t.Columns[i].Clone()`): new values, not shared.
+        nt.columns = Some(
+            sl(&self.columns)
+                .iter()
+                .map(|c| Arc::new(c.as_ref().clone()))
+                .collect(),
+        );
+        nt.indices = Some(
+            sl(&self.indices)
+                .iter()
+                .map(|i| Arc::new(i.as_ref().clone()))
+                .collect(),
+        );
         nt.foreign_keys = None;
         if !sl(&self.foreign_keys).is_empty() {
             nt.foreign_keys = Some(sl(&self.foreign_keys).to_vec());

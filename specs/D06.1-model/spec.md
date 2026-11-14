@@ -38,7 +38,8 @@ tracker 的 `govec/cmd/rsgen -model` 从 Go 反射读出 36 个结构体（`refl
 
 - 结构体定义（`types_gen.rs`）和常量、命名类型（`consts_gen.rs`）；
 - `encode_json` / `decode_json`：按 `encoding/json` 的 `typeFields` 计算字段表（嵌入字段的提升、同名字段的支配规则、同一深度同名字段**全部丢弃**、`json:"-"`、无效 tag、`omitempty`），按字段索引排序；
-- `GoCopy`：Go 的结构体赋值 `nt := *t`（见 3.5）。
+- `GoCopy`：Go 的结构体赋值 `nt := *t`（见 3.5）；
+- `TableInfo.Columns` / `Indices` 的元素用 `Arc`（`sharedFields`，见 3.4、3.5）。
 
 方法（139 个函数）手写在以 Go 文件命名的模块中。生成器不生成逻辑，只生成数据和机械的编解码。
 
@@ -91,7 +92,8 @@ tracker 的 `govec/cmd/rsgen -model` 从 Go 反射读出 36 个结构体（`refl
 |---|---|---|
 | `[]T`、`map[K]V` | `Option<Vec<T>>`、`Option<BTreeMap<K, V>>` | `None` 即 nil；`null` 与 `[]` 不同（D02.3 3.3） |
 | `*T` | `Option<Box<T>>` | |
-| `[]*T` | `Option<Vec<T>>` | 元素按值持有，见第 4 节第 1 条 |
+| `[]*T`，长期持有者共享元素的（`TableInfo.Columns`、`TableInfo.Indices`、`DBInfo.Deprecated.Tables`） | `Option<Vec<Arc<T>>>` | 表对象、InfoSchema 共享这些元素（3.5，[N13](../exceptions/N13-shared-metadata/spec.md)）；生成器的 `sharedFields` 列出这些字段 |
+| 其余 `[]*T` | `Option<Vec<T>>` | 元素按值持有：没有长期持有者共享它们（N13 §6）；`null` 元素见第 4 节第 1 条 |
 | `interface{}` | `AnyValue` | `Value`（JSON 形状的值）或 `GoString(Vec<u8>)`（Go 代码放进去的任意字节，如 BIT 列默认值） |
 | `string` | `String` | 来自 JSON 的值，见 mappings.md M-BYTES |
 | `[]byte`、可能是用户原始字节的 `string` | `Vec<u8>` | 同上 |
@@ -103,7 +105,14 @@ tracker 的 `govec/cmd/rsgen -model` 从 Go 反射读出 36 个结构体（`refl
 
 Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对部分字段调用各自的 `Clone`。这些 `Clone` 的结果与浅拷贝不同：`make([]T, len(nil))` 得到空切片，所以 nil 变 `[]`。如果 Rust 的结构体拷贝直接用 `Clone`，`Constraints` 这类 Go 只浅拷贝的字段就会被"Go 式克隆"，JSON 从 `null` 变成 `[]`。
 
-所以结构体赋值用单独的 `GoCopy`（生成），手写的 `Clone` 实现 Go 的 `Clone` 方法，二者不混用。Rust 没有共享指针，"共享"一律是复制；Go 代码不依赖修改副本会影响原对象（见第 4 节第 3 条）。
+所以结构体赋值用单独的 `GoCopy`（生成），手写的 `Clone` 实现 Go 的 `Clone` 方法，二者不混用。
+
+共享按 [N13](../exceptions/N13-shared-metadata/spec.md)（映射规则 `M-SHARE`，#229）：
+
+- 长期持有者共享的 Go 指针是 `Arc`：`TableInfo.Columns` / `Indices` 的元素是 `Arc<ColumnInfo>` / `Arc<IndexInfo>`，表对象（D06.4）直接持有这些 `Arc`；`DBInfo.Deprecated.Tables` 的元素是 `Arc<TableInfo>`，InfoSchema 全量加载直接持有。
+- `GoCopy` 是 Go 的 `nt := *t`：`Arc` 字段克隆指针，与 Go 共享同样的对象；`DBInfo.Copy`（新的表列表，元素共享）同理。手写的 `Clone` 是 Go 的 `Clone` 方法：`TableInfo.Clone` 在 Go 中逐个 `Clone` 列和索引，`DBInfo.Clone` 逐个 `Clone` 表，Rust 也深拷贝（`Arc::new(ColumnInfo::clone(c))`），结果不与原值共享。
+- 修改共享的元素只经 `tidb_model::make_mut`：只有一个持有者时原地改，否则先用 `GoCopy` 复制再改，别的持有者看到的仍是旧值。复制不用 `Clone`，因为 `IndexInfo` 等的 `Clone` 是 Go `Clone` 方法的移植，会把 nil 切片变成空切片，JSON 随之从 `null` 变成 `[]`。生成的 `decode_json` 解码到已有的元素时也经 `make_mut`。
+- Go 中通过共享指针原地修改、对别的持有者可见的位置，见 N13 §4。D06.1 本身的方法（`MoveColumnInfo` 等）只用于 DDL 新解码的 `TableInfo`，经 `make_mut` 不会复制。
 
 ### 3.7 Part 2：job 相关结构体
 
@@ -127,7 +136,7 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
    - 这类记录同时带有 `"ported"`：把 nil 元素换成 `new(T)` 后 Go 的 `Marshal` 输出，即移植版应有的输出；回放要求 Rust 的输出与它严格相等（Part 1 评审建议），所以同一条记录中的其他差异不会被掩盖。
    - 同类的另一处（D02.3 §4 第 3 条）：同一个切片字段在一个对象中出现三次以上、中间一次更短时，Go 在底层数组的容量内"复活"旧元素，Rust 截断后重新填充。当前向量中没有命中。
 2. `time.Time.UnmarshalJSON`：Go 解析引号之间的**原始字节**，不处理 JSON 转义（go.dev/issue/47353，Go 自己的 TODO）；Rust 用解码后的字符串。只有时间串里写了 JSON 转义（如 `\u0032024-…`）时结果不同，Go 写出的 JSON 不会这样。其余与 Go 相同：Go 1.25 的 `parseStrictRFC3339` 在快速路径失败时就是 `time.Parse(RFC3339)`（严格复查被禁用，所以一位数的小时、逗号小数点、`+24:00` 都被接受），这条回退连同 `ParseError` 的消息一起移植了（`tidb_base::gostd::time`）。数字时区用固定时区而不是 `Local`，`MarshalJSON` 的输出相同。
-3. `Clone` / `Copy`：Go 浅拷贝共享指针，Rust 复制（3.5）。`DBInfo.Copy` 复制表信息而不是共享，标为 L2。
+3. 共享指针：`TableInfo.Columns` / `Indices`、`DBInfo.Deprecated.Tables` 与 Go 一样共享，`DBInfo.Copy` 与 Go 一样共享表信息（3.5，N13；原来的 L2 已去掉）。仍然不同的只有：Go 可以经共享指针原地修改并让别的持有者看到，Rust 只能写时复制（N13 §4 逐处列出 v8.5.8 中这样的位置，读路径上都是"Go 应该先复制"）。其余 `[]*T`（`Constraints`、`ForeignKeys` 等）没有长期持有者共享，按值持有，结果与 Go 相同（N13 §6）。
 4. `TableInfo.GetNonTempColumns` 的结果顺序：Go 遍历 map，顺序随机；Rust 按列名排序（M-MAPORDER）。向量排序后比较。
 5. JSON 语法错误的消息文本不移植（D02.3 3.1）。
 6. `Job.Mu`：Go 用它保护 `RowCount` 和 reorg 警告，防止 DDL worker 并发修改；Rust 不持有这个锁，`GetRowCount`、`GetWarnings` 借用 `&self`（L2）。tidb-rs 只读取自己解码的 job。
@@ -152,3 +161,4 @@ Go 的 `TableInfo.Clone` 先 `nt := *t`（浅拷贝，共享指针），再对�
   - 反证：分别让 RawMessage 忽略原始字节、terror 的错误带上外层上下文、map 在值出错后仍存入、atomic 的 `null` 保持原值，回放分别报 3、149、65、1 条不一致。
 - `tidb-base` 单元测试 `tests/json_map_unmarshaler.rs`：通用 map 解码器在值的 `UnmarshalJSON` 致命出错时的状态，期望值取自 Go。
 - clippy `-D warnings`、fmt、`check_layers --blocks`、`cargo test --workspace`。
+- #229（N13）：`TableInfo.Columns` / `Indices` 改为 `Arc` 后 govec `model` 领域 62,826 条照旧通过（JSON 逐字节不变）；`gocopy.rs` 单元测试：`GoCopy` 共享、`make_mut` 只复制被改的元素并保留 nil、`TableInfo::clone` 深拷贝。

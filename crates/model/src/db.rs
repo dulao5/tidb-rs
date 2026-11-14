@@ -1,27 +1,43 @@
 //! go-file: pkg/meta/model/db.go
 
-use crate::{DBInfo, DBInfoDeprecated};
+use std::sync::Arc;
+
+use crate::{DBInfo, DBInfoDeprecated, TableInfo};
 
 impl Clone for DBInfo {
-    /// Clone clones DBInfo (the deprecated table list is cloned, never nil).
+    /// Clone clones DBInfo (each table of the deprecated list is cloned; the list is never
+    /// nil).
     // go: DBInfo.Clone L1
     fn clone(&self) -> DBInfo {
         let mut new_info = self.struct_copy();
         new_info.deprecated = DBInfoDeprecated {
-            tables: Some(self.deprecated.tables.iter().flatten().cloned().collect()),
+            tables: Some(
+                self.deprecated
+                    .tables
+                    .iter()
+                    .flatten()
+                    .map(|t| Arc::new(TableInfo::clone(t)))
+                    .collect(),
+            ),
         };
         new_info
     }
 }
 
 impl DBInfo {
-    /// Copy shallow copies DBInfo. Go shares the `*TableInfo` of the deprecated list; Rust
-    /// copies them (no shared pointers).
-    // go: DBInfo.Copy L2 (table infos copied instead of shared)
+    /// Copy shallow copies DBInfo: a new deprecated table list sharing the `TableInfo`s
+    /// (spec N13).
+    // go: DBInfo.Copy L1 [M-SHARE]
     pub fn copy(&self) -> DBInfo {
         let mut new_info = self.struct_copy();
-        new_info.deprecated.tables =
-            Some(self.deprecated.tables.iter().flatten().cloned().collect());
+        new_info.deprecated.tables = Some(
+            self.deprecated
+                .tables
+                .iter()
+                .flatten()
+                .map(Arc::clone)
+                .collect(),
+        );
         new_info
     }
 }

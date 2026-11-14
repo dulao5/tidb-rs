@@ -260,7 +260,7 @@ pub fn mock_table_from_meta(tbl_info: Arc<TableInfo>) -> Option<TableRef> {
         .columns
         .iter()
         .flatten()
-        .map(|col_info| Arc::new(to_column(Arc::new(col_info.clone()))))
+        .map(|col_info| Arc::new(to_column(Arc::clone(col_info))))
         .collect();
 
     let mut t = init_table_common(&tbl_info, tbl_info.id, columns, Allocators::default());
@@ -306,7 +306,7 @@ pub fn table_from_meta(allocs: Allocators, tbl_info: Arc<TableInfo>) -> Result<T
             );
         }
 
-        let mut col = to_column(Arc::new(col_info.clone()));
+        let mut col = to_column(Arc::clone(col_info));
         if col.is_generated() {
             let gen_str = col_info.generated_expr_string.clone();
             // Built once to report its error now, as Go does; the node is rebuilt on use.
@@ -389,7 +389,7 @@ fn init_table_common(
 }
 
 /// initTableIndices initializes the indices of the TableCommon.
-// go: initTableIndices L1
+// go: initTableIndices L1 [M-SHARE]
 fn init_table_indices(t: &mut TableCommon) -> Result<(), Error> {
     let tbl_info = t.meta.clone();
     for idx_info in tbl_info.indices.iter().flatten() {
@@ -399,7 +399,7 @@ fn init_table_indices(t: &mut TableCommon) -> Result<(), Error> {
         }
 
         // Use partition ID for index, because TableCommon may be table or partition.
-        let idx = index::new_index(t.physical_table_id, &tbl_info, Arc::new(idx_info.clone()))?;
+        let idx = index::new_index(t.physical_table_id, &tbl_info, Arc::clone(idx_info))?;
         t.indices.push(idx);
     }
     Ok(())
@@ -582,7 +582,7 @@ impl CachedTable for CachedTableStub {}
 
 /// FindPrimaryIndex uses to find primary index in tableInfo.
 // go: FindPrimaryIndex L1
-pub fn find_primary_index(tbl_info: &TableInfo) -> Option<&IndexInfo> {
+pub fn find_primary_index(tbl_info: &TableInfo) -> Option<&Arc<IndexInfo>> {
     tbl_info.indices.iter().flatten().find(|idx| idx.primary)
 }
 
@@ -594,7 +594,7 @@ fn primary_index(tbl_info: &TableInfo) -> &IndexInfo {
 
 /// The columns of a table (`tbl.Columns`).
 // glue: range over a possibly nil Go slice
-fn tbl_columns(tbl: &TableInfo) -> &[ColumnInfo] {
+fn tbl_columns(tbl: &TableInfo) -> &[Arc<ColumnInfo>] {
     tbl.columns.as_deref().unwrap_or(&[])
 }
 
