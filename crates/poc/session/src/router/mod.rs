@@ -245,6 +245,10 @@ fn nothing_to_fall_back(why: &str) -> SqlError {
     )
 }
 
+/// The `engine` label of a statement that ran nowhere (1235 in `strict` mode, or a
+/// new-only prepared statement the new stack cannot run now).
+const NOWHERE: &str = "none";
+
 /// `tidbrs_route_total`.
 fn count(engine: Engine, reason: &str) {
     tidb_metrics::route(engine.label(), reason);
@@ -384,8 +388,14 @@ impl Router {
 
     /// Runs `op` on the new stack with a checkpoint. `Ok(Ok(resp))` / `Ok(Err(e))`: the new
     /// stack answered (`e` is a Go-ported error, returned as it is); `Err(block)`: blocked
-    /// before any executor opened, the new session restored (§4.6).
-    async fn try_new(&mut self, op: NewOp<'_>) -> Result<Result<Response, SqlError>, String> {
+    /// before any executor opened, the new session restored (§4.6). `fallback`: the PoC will
+    /// run the statement after a `Blocked` (the metric's engine is `poc`; otherwise `none`:
+    /// the statement gets 1235 and runs nowhere).
+    async fn try_new(
+        &mut self,
+        op: NewOp<'_>,
+        fallback: bool,
+    ) -> Result<Result<Response, SqlError>, String> {
         let cp = self.new.session().checkpoint();
         let r = match op {
             NewOp::Query(stmt) => self.new.execute(stmt).await,
@@ -402,7 +412,11 @@ impl Router {
                 Some(block) => {
                     let block = block.to_owned();
                     self.new.session_mut().restore(cp);
-                    count(Engine::Poc, &block);
+                    if fallback {
+                        count(Engine::Poc, &block);
+                    } else {
+                        tidb_metrics::route(NOWHERE, &block);
+                    }
                     Err(block)
                 }
                 None => {
@@ -440,7 +454,8 @@ impl Router {
             Route::New => {
                 poc.start_statement(StmtType::Select, parse);
                 started = true;
-                match self.try_new(NewOp::Query(&stmt)).await {
+                let fallback = self.mode != NewStackMode::Strict;
+                match self.try_new(NewOp::Query(&stmt), fallback).await {
                     Ok(answered) => return answered,
                     Err(block) => {
                         if self.mode == NewStackMode::Strict {
@@ -492,7 +507,16 @@ impl Router {
         sql: &str,
     ) -> Result<PreparedInfo, SqlError> {
         let stmt = tidb_sql::ir::parse_one(sql)?;
-        let new = match Self::candidate(&stmt, true) {
+        // Not on the new stack when the InfoSchema versions differ: its column definitions
+        // would come from another version, and a later fallback would fail check_columns.
+        let candidate = Self::candidate(&stmt, true).and_then(|()| {
+            if self.schema_versions_equal(poc) {
+                Ok(())
+            } else {
+                Err(Reason::SchemaVersion)
+            }
+        });
+        let new = match candidate {
             Ok(()) => {
                 let cp = self.new.session().checkpoint();
                 let r = self.new.prepare(&stmt).await;
@@ -553,7 +577,7 @@ impl Router {
             None => poc.execute(stmt_id, params).await,
             Some(Owner::Poc(reason)) => match reason {
                 Reason::Blocked(block) if self.mode == NewStackMode::Strict => {
-                    count(Engine::Poc, &block);
+                    tidb_metrics::route(NOWHERE, &block);
                     self.cursor = false;
                     return self.fail(sql_error(&tidb_base::blocked::blocked(
                         &block,
@@ -573,14 +597,21 @@ impl Router {
                     count(Engine::Poc, Reason::SchemaVersion.label());
                     poc.execute(stmt_id, params).await
                 } else {
+                    // The statement is started (metrics) only once it is known which engine
+                    // answers: the PoC's EXECUTE path starts it itself.
                     poc.begin_command();
-                    poc.start_statement(StmtType::Select, Duration::ZERO);
-                    match self.try_new(NewOp::Execute(new_id, &params)).await {
+                    let fallback = self.mode != NewStackMode::Strict;
+                    match self
+                        .try_new(NewOp::Execute(new_id, &params), fallback)
+                        .await
+                    {
                         Ok(answered) => {
+                            poc.start_statement(StmtType::Select, Duration::ZERO);
                             self.cursor = false;
                             return answered;
                         }
                         Err(block) if self.mode == NewStackMode::Strict => {
+                            poc.start_statement(StmtType::Select, Duration::ZERO);
                             self.cursor = false;
                             return self.fail(sql_error(&tidb_base::blocked::blocked(
                                 &block,
@@ -607,12 +638,13 @@ impl Router {
                 };
                 self.cursor = false;
                 if let Some(why) = why {
-                    count(Engine::Poc, "session");
+                    tidb_metrics::route(NOWHERE, "session");
                     return self.fail(nothing_to_fall_back(&why));
                 }
                 poc.begin_command();
+                let r = self.try_new(NewOp::Execute(new_id, &params), false).await;
                 poc.start_statement(StmtType::Select, Duration::ZERO);
-                return match self.try_new(NewOp::Execute(new_id, &params)).await {
+                return match r {
                     Ok(answered) => answered,
                     Err(block) => self.fail(nothing_to_fall_back(&format!("blocked-by:{block}"))),
                 };

@@ -551,7 +551,7 @@ static ROUTE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
 });
 
-/// A statement routed to `engine` (`new` / `poc`) for `reason` (`ok`, `error`, `session`,
+/// A statement routed to `engine` (`new` / `poc`, or `none`: answered 1235, run nowhere) for `reason` (`ok`, `error`, `session`,
 /// `schema_version`, `kind`, `ast`, or the block of a boundary stub).
 pub fn route(engine: &str, reason: &str) {
     ROUTE_TOTAL.with_label_values(&[engine, reason]).inc();

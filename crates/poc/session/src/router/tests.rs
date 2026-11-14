@@ -144,6 +144,8 @@ impl PocEngine for FakePoc {
         _params: Vec<Param>,
     ) -> BoxFut<'_, Result<Response, SqlError>> {
         Box::pin(async move {
+            // As the real `execute_inner`: it starts the statement itself.
+            self.log.push("start Select".into());
             self.log.push(format!("execute {stmt_id}"));
             if !self.prepared.contains_key(&stmt_id) {
                 return Err(SqlError::unknown_stmt(stmt_id, "stmt_execute"));
@@ -930,4 +932,50 @@ fn phase0_prepare_is_poc_owned() {
         rows(&block_on(r.execute(&mut p, 1, vec![]))).map(|r| r.0),
         Some(3)
     );
+}
+
+/// Every COM_STMT_EXECUTE starts its statement exactly once (the statement counter feeds the
+/// weekly QPS): answered by the new stack, fallen back, or 1235.
+#[test]
+fn execute_starts_the_statement_once() {
+    let starts = |p: &FakePoc| p.log.iter().filter(|l| l.starts_with("start")).count();
+    for (mode, answer) in [
+        (NewStackMode::Vs1, Answer::Rows),
+        (NewStackMode::Vs1, Answer::Blocked("D10.2")),
+        (NewStackMode::Vs1, Answer::GoError),
+        (NewStackMode::Strict, Answer::Blocked("D10.2")),
+    ] {
+        let mut p = poc();
+        let (mut r, script) = scripted(mode, &p);
+        script.lock().unwrap().prepare = Some(Answer::Rows);
+        block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+        script.lock().unwrap().answer = Some(answer.clone());
+        p.log.clear();
+        let _ = block_on(r.execute(&mut p, 1, vec![]));
+        assert_eq!(starts(&p), 1, "{mode:?} {answer:?}: {:?}", p.log);
+    }
+    // New-only statements too.
+    let mut p = poc();
+    p.prepare_fails = true;
+    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    for answer in [Answer::Rows, Answer::Blocked("D10.4")] {
+        script.lock().unwrap().answer = Some(answer.clone());
+        p.log.clear();
+        let _ = block_on(r.execute(&mut p, 1, vec![]));
+        assert_eq!(starts(&p), 1, "new-only {answer:?}: {:?}", p.log);
+    }
+}
+
+/// PREPARE while the InfoSchema versions differ stays on the PoC (the new stack's column
+/// definitions would come from another version).
+#[test]
+fn prepare_with_unequal_schema_versions_is_poc_owned() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    script.lock().unwrap().version = Some(2);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::SchemaVersion)));
+    assert!(script.lock().unwrap().log.is_empty());
 }
