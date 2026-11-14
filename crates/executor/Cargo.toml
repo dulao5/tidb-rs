@@ -1,7 +1,7 @@
 [package]
 name = "tidb-executor"
 version = "0.0.0"
-description = "Port of Go TiDB v8.5.8 pkg/executor (blocks D12.x): the async executor interface of N3; the executors come with the VS1 work items"
+description = "Port of Go TiDB v8.5.8 pkg/executor (blocks D12.x): the executor framework of D12.0 (VS1-13) on the async executor interface of N3; the executors come with the VS1 work items"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -18,10 +18,22 @@ tidb-chunk = { workspace = true }
 tidb-sessionctx = { workspace = true }
 # Physical plans the builder turns into executors (N1).
 tidb-planner = { workspace = true }
+# VS1-13 (D12.0): schemas, field types and names, runtime stats, the SQL killer, the info
+# schema of ExecStmt, the parser AST, the DAG request types, the prepared statement cache lock.
+tidb-expression = { workspace = true }
+tidb-parser = { workspace = true }
+tidb-types = { workspace = true }
+tidb-execdetails = { workspace = true }
+tidb-memory = { workspace = true }
+tidb-model = { workspace = true }
+tidb-infoschema = { workspace = true }
+tipb = { workspace = true }
+parking_lot = "0.12"
+log = "0.4"
 
 [dev-dependencies]
 futures = { workspace = true }
-tidb-types = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
