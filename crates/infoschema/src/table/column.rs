@@ -550,7 +550,7 @@ pub fn eval_col_default_expr(
     _col: &ColumnInfo,
     _default_expr: &ast::Expr,
 ) -> Result<Datum, Error> {
-    Err(crate::blocked(
+    Err(tidb_base::blocked::blocked(
         "D09.2",
         "a column default expression (expression.EvalSimpleAst)",
     ))
@@ -564,7 +564,7 @@ fn get_col_default_expr_value(
     _col: &ColumnInfo,
     _default_value: &str,
 ) -> Result<Datum, Error> {
-    Err(crate::blocked(
+    Err(tidb_base::blocked::blocked(
         "D09.2",
         "a column default expression (expression.EvalSimpleAst)",
     ))
@@ -898,5 +898,33 @@ mod tests {
         assert_eq!(col.get_uint64(2), 0);
         // Nothing to do without virtual columns.
         fill_virtual_column_value(&[], &[], &exp_cols, &infos, &*ctx, &mut chk).unwrap();
+    }
+
+    /// A version-0 TIMESTAMP default is in the system time zone (`timeutil.SystemLocation`),
+    /// then converted to the session's: with the session in the same zone the wall clock is
+    /// kept. (The govec vectors avoid this branch: it depends on the host's zone.)
+    #[test]
+    fn version0_timestamp_default_uses_the_system_location() {
+        use tidb_base::mysql::TypeTimestamp;
+        use tidb_model::AnyValue;
+
+        let ft = new_field_type(TypeTimestamp);
+        let mut col = ColumnInfo {
+            field_type: ft,
+            version: 0,
+            ..Default::default()
+        };
+        col.default_value = AnyValue::Value(tidb_base::gostd::json::Value::String(
+            "2019-05-06 12:48:49".to_owned(),
+        ));
+        let ev = es::new_eval_context(vec![es::with_location(Some(
+            tidb_base::gostd::time::local(),
+        ))]);
+        let ctx = es::new_expr_context(vec![es::with_eval_ctx(ev)]);
+        let d = super::get_col_default_value(&*ctx, &col).unwrap();
+        assert_eq!(
+            String::from_utf8(d.get_mysql_time().string()).unwrap(),
+            "2019-05-06 12:48:49"
+        );
     }
 }

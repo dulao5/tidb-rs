@@ -52,19 +52,3 @@ impl tidb_sessionctx::expropt::MetaOnlyInfoSchema for InfoSchemaV2 {
         self.base().schema_meta_version()
     }
 }
-
-/// The error of a temporary boundary stub (constitution §4.3): MySQL 1235 with the RFC code
-/// text `blocked-by:<block>`, the same error as `tidb_base::blocked::blocked` of VS1-02,
-/// which replaces this copy once it lands.
-// glue: boundary stub error (constitution §4.3, VS1 plan §4.3)
-pub(crate) fn blocked(block: &str, what: &str) -> tidb_base::Error {
-    use tidb_base::errors::{IntoErrCode, mysql_error_code, normalize, rfc_code_text};
-    let msg = format!("This version of TiDB doesn't yet support '{what} (blocked-by:{block})'");
-    normalize(
-        msg,
-        [
-            rfc_code_text(format!("blocked-by:{block}")),
-            mysql_error_code(tidb_base::mysql::ErrNotSupportedYet.into_err_code()),
-        ],
-    )
-}

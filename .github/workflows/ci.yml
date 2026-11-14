@@ -97,6 +97,13 @@ jobs:
       # Go-ported crates again, optimised but with integer overflow checks (profile
       # release-checked): vector replay plus a few minutes of the overflow fuzz. A Go
       # wrap that is not written wrapping_* (M-INT) panics here.
+      # Replays that read the process time zone (column defaults of TIMESTAMP columns with
+      # version 0 use the system location) also run in a non-UTC zone (#217 review).
+      - name: test (govec_table, non-UTC TZ)
+        if: runner.os == 'Linux'
+        env:
+          TZ: America/Sao_Paulo
+        run: cargo test --locked -p tidb-infoschema --test govec_table
       - name: test (release-checked, Go-ported crates)
         env:
           TIDB_TYPES_FUZZ_ITERS: "500000000"

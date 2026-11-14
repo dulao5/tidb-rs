@@ -164,8 +164,9 @@ pub fn get_time_value(
             // support some expression, like `-1`: EvalSimpleAst, then a cast to BIGINT.
             // glue: stub, blocked-by:D09.2 (GetTimeValue's UnaryOperationExpr case: EvalSimpleAst)
             let _ = TypeLonglong;
-            return Err(tidb_base::errors::new(
-                "This version of TiDB doesn't yet support 'a unary-operator time default value (blocked-by:D09.2)'",
+            return Err(tidb_base::blocked::blocked(
+                "D09.2",
+                "a unary-operator time default value (expression.EvalSimpleAst)",
             ));
         }
         TimeValueArg::Other => return Ok(d),

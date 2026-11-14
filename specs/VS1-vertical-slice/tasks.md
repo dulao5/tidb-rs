@@ -43,7 +43,7 @@
 | # | 任务 | 块 | 标签 | 周 | 依赖 | 完成条件 | 状态 |
 |---|---|---|---|--:|---|---|---|
 | VS1-26 | `taskMap` 小试点（spike） | N1 | depth | 0.05 | VS1-01 | 试点报告；不通过时先修订 N1 | 未开始 |
-| VS1-21 | `buildSelect` 等 SELECT 构建，加 `resolveHavingAndOrderBy` | D09.1、D09.4 | depth | 0.18 | VS1-10、VS1-22、VS1-23 | 逻辑计划向量一致 | 未开始 |
+| VS1-21 | `buildSelect` 等 SELECT 构建，加 `resolveHavingAndOrderBy` | D09.1、D09.4 | depth | 0.18 | VS1-10、VS1-22、VS1-23 | 逻辑计划向量一致；分区表返回 `blocked-by:D09.12`（D06.4 第 1 部分的分区表只是标记，读它的 record prefix 会触发 `debug_assert`，#217 评审） | 未开始 |
 | VS1-22 | 表达式改写（子查询之外） | D09.2 | depth | 0.14 | VS1-10 | 表达式向量一致 | 未开始 |
 | VS1-23 | 逻辑算子公共部分，以及列裁剪、投影消除、谓词下推与简化、TopN / Limit 下推（VS1 的算子）；M-FT 审计 | D09.14、D09.7、D09.8、D09.11 | depth | 0.21 | VS1-01 | 规则级计划向量一致；审计表写进 plan | 未开始 |
 | VS1-24 | `DoOptimize`、`postOptimize`、`InjectExtraProjection`、`ResultReorder`；hint 骨架 | D09.13、D13.3 | depth | 0.19 | VS1-21 | 物理计划向量一致 | 未开始 |

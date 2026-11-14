@@ -349,7 +349,14 @@ fn table_summary(t: &dyn Table) -> Value {
         },
     );
     out.insert("del_idx".into(), json!(t.deletable_indices().len()));
-    out.insert("rp".into(), json!(hex(&t.record_prefix().0)));
+    // A partitioned table's record prefix is a debug_assert in part 1 (VS1-21: the planner
+    // refuses partitioned tables): the logical table's prefix is computed here instead.
+    let rp = if t.get_partitioned_table().is_some() {
+        tidb_tablecodec::tablecodec::gen_table_record_prefix(meta.id)
+    } else {
+        t.record_prefix().clone()
+    };
+    out.insert("rp".into(), json!(hex(&rp.0)));
     out.insert("ip".into(), json!(hex(&t.index_prefix().0)));
     out.insert(
         "type".into(),

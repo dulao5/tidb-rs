@@ -487,6 +487,7 @@ macro_rules! embed_table_common {
             }
             // glue: embedded TableCommon.RecordPrefix
             fn record_prefix(&self) -> &Key {
+                self.check_record_prefix();
                 self.0.record_prefix()
             }
             // glue: embedded TableCommon.IndexPrefix
@@ -540,6 +541,18 @@ embed_table_common!(PartitionedTableStub);
 embed_table_common!(CachedTableStub);
 
 impl PartitionedTableStub {
+    /// A partitioned table's rows are in its partitions: reading the logical table's record
+    /// prefix would read nothing. Until partitions come (D06.4 part 2) the planner refuses
+    /// partitioned tables (`blocked-by:D09.12`, VS1-21), so nothing may get here.
+    // glue: debug check of the part-1 stub (VS1-21 acceptance)
+    fn check_record_prefix(&self) {
+        debug_assert!(
+            false,
+            "record prefix of partitioned table {} (the planner returns blocked-by:D09.12 for partitioned tables)",
+            self.0.meta().name.o
+        );
+    }
+
     // glue: stub, blocked-by:D06.4 (part 2: partitionedTable.GetPartitionedTable)
     fn partitioned(&self) -> Option<&dyn PartitionedTable> {
         Some(self)
@@ -551,6 +564,9 @@ impl PartitionedTableStub {
 }
 
 impl CachedTableStub {
+    // glue: a cached table reads its own record prefix (no check)
+    fn check_record_prefix(&self) {}
+
     // glue: cachedTable embeds TableCommon: GetPartitionedTable is nil
     fn partitioned(&self) -> Option<&dyn PartitionedTable> {
         None
@@ -1002,5 +1018,5 @@ pub fn set_pb_columns_default_value(
 /// TempTableFromMeta builds a TempTable from model.TableInfo.
 // glue: stub, blocked-by:D06.4 (part 2: TempTableFromMeta, temporary tables)
 pub fn temp_table_from_meta(_tbl_info: &TableInfo) -> Result<(), Error> {
-    Err(crate::blocked("D06.4", "temporary tables"))
+    Err(tidb_base::blocked::blocked("D06.4", "temporary tables"))
 }
