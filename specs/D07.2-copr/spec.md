@@ -122,6 +122,33 @@ Go `make(chan *copResponse, 2 或 18)`；移植用容量相同的 `tokio::sync::
 
 ### 6.4 验收（第 2 部分）
 
-- converge：`matched 104/116`；其余 12 个：6.3 第 14 条的 10 个（DEF.MPP 2、`tikv.Client` 透传 6、cache 指标 2），`buildTiDBMemCopTasks`（D06.5 边界桩，标注为 `glue`），以及 `coprocessor.go` 的 `init`（只做 `finCopResp = &copResponse{}`，移植中这个哨兵是 `RespMsg::Fin` 变体，没有全局对象）。
+- converge：`matched 104/116`；其余 12 个：6.3 第 14 条的 10 个（DEF.MPP 2、`tikv.Client` 透传 6、cache 指标 2），`buildTiDBMemCopTasks`（D06.5 边界桩，标注为 `glue`），以及 `coprocessor.go` 的 `init`（只做 `finCopResp = &copResponse{}`，移植中这个哨兵是 `RespMsg::Fin` 变体，没有全局对象）。VS1-33 的清单（`specs/VS1-vertical-slice/functions.tsv`）含其中 8 个（`buildTiDBMemCopTasks`、`init`、`kvStore.GetTiKVClient`、`tikvClient.*` 5 个），保留并在 `not_ported` 列写明理由；`converge.py --part … --item VS1-33` 对 D07.2 为 88/88。
 - govec：第 2 部分的函数需要 TiKV store，不出向量；tracker 豁免理由指向 mock store 单元测试 `crates/store/tests/copr_iter.rs`（保序 / 逆序 / 不保序、region 错误重建任务、锁解析后重试、paging 的剩余区间与页大小翻倍、write conflict、other error、lite worker）。client-rust 侧 7 个单测（client-rust#22）。
-- PoC 接入、`Snapshot::coprocessor` 退役、playground 上与 Go 的对比：最后一个 PR（tasks T11、T12）。
+- PoC 接入、`Snapshot::coprocessor` 退役、playground 上与 Go 的对比：见 §7（已完成）。
+
+## 7. 收尾：PoC 接入与真实集群对比（D07.2 完成）
+
+### 7.1 PoC 接入
+
+- `poc-kv` 的 `KvClient` 持有一个 `copr::store::Store<ClientRustStore>`；服务进程用 `with_exec_pool` 让 iterator 的 worker 跑在 N3 ExecPool 上（M-GO）。`KvSnapshot::coprocessor` 改为 `CopClient.Send` 加逐个 `Next`（`kv.Response`），请求是 TiDB 的 `kv.Request`。
+- `tidb-distsql`（PoC）的 `select` 按 Go `distsql.RequestBuilder` 给表读取填 `kv.Request`（D07.3 会正式移植 builder）：DAG 类型与数据、`Cacheable`、末尾 Limit 的 `LimitSize`（小 LIMIT 关 paging）、key ranges、desc、keep order、并发 15、`StoreBatchSize` 4。**paging 默认开**（`SelectOptions::default()`：128 → 50000，`tidb_enable_paging` 等的默认值，client-go 对照表 §6）。Go 的"简单扫描加小 LIMIT 时并发设为 1"（`SetDAGRequest`）留给 D07.3。
+- client-rust#23 删除 `Transaction::coprocessor` / `Snapshot::coprocessor` 及其流水线；tidb-rs 中没有调用方。
+
+### 7.2 与 Go TiDB 的对比（tiup playground v8.5.8，1 PD、1 TiKV）
+
+准备（在 Go TiDB 上执行）：`copr.t(id BIGINT PRIMARY KEY, k INT, c VARCHAR(32))` 20000 行，`SPLIT TABLE t BETWEEN (0) AND (20000) REGIONS 8`（每 2500 个 handle 一个 region）；`copr.acct(id INT PRIMARY KEY, bal INT)` 2000 行，`SPLIT TABLE acct BY (500), (1000), (1500)`；空表 `copr.e`。
+
+1. **结果对比**：`tools/ab/workloads/manual/copr.sql`（26 条：跨 region 的全表 / 范围扫描、region 边界两侧的范围、正序 / 逆序加 LIMIT、聚合与 GROUP BY、刚好 128 / 129 行的范围（paging 第一页的边界）、空结果、空表），文本协议与预处理语句各一遍：**52/52 一致**。tidb-rs 的 `tidb_distsql_handle_query_duration_seconds_count{copr_type="paging"}` 表明全部走 paging。
+2. **锁与 region 分裂并发**（40 s）：4 个连接在 Go TiDB 上不断做乐观事务转账（`acct` 两行 ±1、`t` 两行 ±1，总和不变），另一个连接每秒在新的位置 `SPLIT TABLE`；同时 Go TiDB 一个、tidb-rs 两个连接循环读 `SUM(bal), COUNT(*)` 与 `COUNT(*), SUM(k)`。结果：Go 1082 次、tidb-rs 1354 + 1361 次，**全部等于不变量，0 次错误**。期间 tidb-rs 解锁 1177 次（其中 595 次查到已提交、559 次等待未过期的锁）、遇到 96 次 EpochNotMatch 并按 `BoRegionMiss` 退避 98 次后重建任务。
+3. `tidb-distsql` 与 `poc-session` 的集群测试（`TIDB_RS_PD` / `TIDB_RS_TIDB_PORT`）对同一集群通过。
+
+没有发现与 Go 不同的结果。未覆盖：TiKV 宕机与 leader 切换（`tools/ab/faults` 的故障场景，留给 D07.1 / 运维回归）、超过 4 MiB 的单个响应（P0-3 已在 client-rust 侧验证过）。
+
+### 7.3 weekly（故障场景与 sysbench）
+
+在本分支上手动运行 weekly（run 43574020336，commit `2f87985`），与当天 main 上一次 GREEN（run 43551977017，`c1bbf46`，旧的 client-rust cop 路径）对比：
+
+- **整体 GREEN**：ab 0 mismatch（1515 match，与基线相同）；锁 18/18；故障场景 9 个全部 0 错结果、0 错误。
+- **故障场景**（最长卡顿 Go / tidb-rs，基线在括号内）：kill_tikv 17.8 / 14.8 s（12.9 / 12.9），kill_tikv_meta 16.8 / 16.2 s（13.9 / 13.9），transfer_leader 0.0 / 0.0 s（0.1 / 0.0），slow_tikv（CPU 限制）3.1 / 2.9 s（5.2 / 5.6），net_cut 10.5 / 13.1 s（10.9 / 13.3），pause_tikv 5.0 / 5.0 s（同）。kill_tikv 两边同时变长，是本次运行的选举时间，不是 tidb-rs 侧的差异。
+- **sysbench**（B/A QPS，基线在括号内）：oltp_read_only 1 线程 1.23（1.27），8 线程 1.20（1.27）；oltp_point_select 1.22（1.23）、1.10（1.14）。tidb-rs 的 read_only 8 线程 QPS 5979（6304，−5%）；不走 cop 的 point_select 也降了 3%，主要是运行器波动，read_only 多出的约 2 个百分点可能是新 cop 路径（每个请求的 worker spawn、paging 默认开）的开销，留待下周 weekly 确认。
+- ab 的 both_error 从 18 变为 70：多出的 52 条是本 PR 一开始把 `copr.sql` 放进了 `tools/ab/workloads/`，而 weekly 只准备 sbtest 数据；已移到 `tools/ab/workloads/manual/`。

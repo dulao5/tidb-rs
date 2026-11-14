@@ -16,6 +16,8 @@ tokio = { workspace = true }
 # the fault-scenario comparison (tools/ab/faults).
 tidb-base = { workspace = true }
 tidb-kv = { workspace = true }
+# The coprocessor client (D07.2): cop reads go through `tidb_store::copr`.
+tidb-runtime = { workspace = true }
 tidb-store = { workspace = true }
 
 [lints]

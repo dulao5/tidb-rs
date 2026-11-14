@@ -2568,6 +2568,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tidb-base",
  "tidb-kv",
+ "tidb-runtime",
  "tidb-store",
  "tikv-client",
  "tokio",
@@ -3737,6 +3738,7 @@ dependencies = [
  "protobuf",
  "serde_json",
  "thiserror 1.0.69",
+ "tidb-kv",
  "tidb-meta",
  "tidb-metrics",
  "tidb-runtime",
@@ -4260,7 +4262,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.4.0"
-source = "git+https://github.com/dulao5/client-rust.git?rev=ad0d8fca6ca714f18c1d150b0a6f77417577c4ec#ad0d8fca6ca714f18c1d150b0a6f77417577c4ec"
+source = "git+https://github.com/dulao5/client-rust.git?rev=0208dfbc367a61519079f3591ff3ab849c5d6652#0208dfbc367a61519079f3591ff3ab849c5d6652"
 dependencies = [
  "async-recursion",
  "async-trait",

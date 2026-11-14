@@ -22,10 +22,6 @@ mod error;
 use std::time::Duration;
 use std::time::Instant;
 
-use futures::Stream;
-use futures::StreamExt;
-use futures::TryStreamExt;
-use futures::stream::BoxStream;
 use tikv_client::Backoff;
 use tikv_client::BoundRange;
 use tikv_client::RetryOptions;
@@ -36,9 +32,11 @@ use tikv_client::TransactionOptions;
 
 pub use crate::error::Error;
 pub use crate::error::Result;
-pub use tikv_client::CopRequest;
-pub use tikv_client::CopResponse;
-pub use tikv_client::transaction::REQ_TYPE_DAG;
+pub use tidb_kv::kv::ReqTypeDAG as REQ_TYPE_DAG;
+pub use tidb_kv::kv::Request as CopRequest;
+
+/// The coprocessor store of D07.2 over this client (`tidb_store::copr`, ADR 0008).
+type CoprStore = tidb_store::copr::store::Store<tidb_store::copr::client_rust::ClientRustStore>;
 
 /// The read timestamp of [`KvClient::latest_snapshot`] (Go: `math.MaxUint64`).
 pub const MAX_TS: u64 = u64::MAX;
@@ -107,11 +105,36 @@ pub struct KvClient {
     /// do their point gets and batch gets through `tidb_store::driver` (D07.1, VS1-18), so
     /// that the fault scenarios (tools/ab/faults) compare it with this crate's own reads.
     driver: Option<std::sync::Arc<tidb_store::driver::tikv::KVStore>>,
+    /// The coprocessor client's store (D07.2); its workers run on the ExecPool once
+    /// [`with_exec_pool`](KvClient::with_exec_pool) is called.
+    copr: std::sync::Arc<CoprStore>,
 }
 
 /// Whether `TIDB_RS_POINT_GET=d07.1` is set (see [`KvClient`]).
 fn driver_point_gets() -> bool {
     std::env::var("TIDB_RS_POINT_GET").is_ok_and(|v| v == "d07.1")
+}
+
+/// The copr store over `inner`, its workers on `pool` (N3 ExecPool) when given.
+fn copr_store(
+    inner: &TransactionClient,
+    pool: Option<tidb_runtime::pool::ExecPool>,
+) -> Result<CoprStore> {
+    let store =
+        tidb_store::copr::client_rust::ClientRustStore::new(std::sync::Arc::new(inner.clone()))
+            .map_err(Error::Copr)?;
+    Ok(tidb_store::copr::store::new_store(
+        std::sync::Arc::new(store),
+        pool,
+        rand_seed(),
+    ))
+}
+
+/// Go `rand.Uint32()` for the replica-read seed of `copr.NewStore`.
+fn rand_seed() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos())
 }
 
 impl KvClient {
@@ -132,11 +155,19 @@ impl KvClient {
             .map_err(Error::from)?;
         let driver = driver_point_gets()
             .then(|| tidb_store::driver::tikv::KVStore::new(std::sync::Arc::new(inner.clone())));
+        let copr = std::sync::Arc::new(copr_store(&inner, None)?);
         Ok(KvClient {
             inner,
             retry: tidb_retry_options(),
             driver,
+            copr,
         })
+    }
+
+    /// Run the coprocessor client's workers on `pool` (M-GO) instead of the current runtime.
+    pub fn with_exec_pool(mut self, pool: tidb_runtime::pool::ExecPool) -> Result<KvClient> {
+        self.copr = std::sync::Arc::new(copr_store(&self.inner, Some(pool))?);
+        Ok(self)
     }
 
     /// Override the retry budgets used by snapshots created from now on (mainly for tests).
@@ -194,6 +225,7 @@ impl KvClient {
                 .driver
                 .as_ref()
                 .map(|kv| tidb_store::driver::txn::snapshot::new_snapshot(kv.get_snapshot(ts))),
+            copr: self.copr.clone(),
         }
     }
 }
@@ -234,6 +266,7 @@ pub struct KvSnapshot {
     ts: u64,
     /// The D07.1 snapshot at the same timestamp (`TIDB_RS_POINT_GET=d07.1`).
     driver: Option<tidb_store::driver::txn::snapshot::TikvSnapshot>,
+    copr: std::sync::Arc<CoprStore>,
 }
 
 /// Batch size of [`KvSnapshot::scan_all`].
@@ -305,36 +338,33 @@ impl KvSnapshot {
         }
     }
 
-    /// Send a coprocessor request at this snapshot. Unless the request sets its own retry
-    /// options, it uses the client's (TiDB-like) ones.
-    pub async fn coprocessor(&mut self, request: CopRequest) -> Result<CopStream> {
-        let stream = self.inner.coprocessor(request).await.map_err(Error::from)?;
-        Ok(CopStream {
-            inner: stream.map_err(Error::from).boxed(),
-        })
-    }
-}
-
-/// The responses of a coprocessor request; ends after the first error.
-pub struct CopStream {
-    inner: BoxStream<'static, Result<CopResponse>>,
-}
-
-impl CopStream {
-    /// Wait for all responses.
-    pub async fn collect_all(self) -> Result<Vec<CopResponse>> {
-        self.inner.try_collect().await
-    }
-}
-
-impl Stream for CopStream {
-    type Item = Result<CopResponse>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        self.inner.poll_next_unpin(cx)
+    /// Send a coprocessor request at this snapshot through the coprocessor client of D07.2
+    /// (`copr.CopClient.Send`, then `Next` until the end) and return every response's data,
+    /// in the iterator's order. `req.start_ts` is the snapshot's timestamp.
+    pub async fn coprocessor(&mut self, mut req: CopRequest) -> Result<Vec<Vec<u8>>> {
+        req.start_ts = self.ts;
+        let client = self.copr.get_client();
+        // `tikv.Variables`: TiDB's default backoff weight (client-go parity P0-1).
+        let vars: tidb_kv::kv::OptionValue = Box::new(tidb_store::copr::tikv::Variables {
+            backoff_weight: DEFAULT_BACKOFF_WEIGHT as i64,
+            killed: None,
+        });
+        let option = tidb_kv::kv::ClientSendOption::default();
+        let mut resp = client.send(&req, Some(&vars), &option);
+        let ctx = tidb_kv::Context::background();
+        let mut out = Vec::new();
+        loop {
+            match resp.next(&ctx).await {
+                Ok(Some(r)) => out.push(r.get_data().to_vec()),
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = resp.close();
+                    return Err(Error::Copr(e));
+                }
+            }
+        }
+        let _ = resp.close();
+        Ok(out)
     }
 }
 
