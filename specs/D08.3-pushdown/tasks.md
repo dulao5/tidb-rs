@@ -9,9 +9,9 @@
 
 ## 第 2 部分
 
-- [ ] T5 `distsql_builtin.go`（16 个函数）：`PBToExpr`、`getSignatureByPB`（未移植函数族的分支为 `blocked-by` 边界桩，plan "第 2 部分"）
-- [ ] T6 govec：`ExprToPB` → `PBToExpr` 往返；常量的 `convert*`
-- [ ] T7 收尾：D08.3 converge 50/50，tracker `blocks_done.tsv`
+- [x] T5 `distsql_builtin.go`（16 个函数）：`PBToExpr`、`getSignatureByPB`（生成的签名表 `gen_pb_sigs.py`；未移植函数族的 316 个 pb code 为 `blocked-by` 边界桩，登记在 D08.6/D08.7/D08.9 的 tasks.md，spec §6.1）
+- [x] T6 govec：`ExprToPB` → `PBToExpr` 往返（`pbexpr`）、手工构造的消息（`pbraw`）；反证（spec §6.3）
+- [x] T7 收尾：D08.3 converge 50/50，tracker `blocks_done.tsv`
 
 ## 从 P1 继承
 

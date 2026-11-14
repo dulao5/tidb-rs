@@ -1,6 +1,8 @@
 # D08.3 下推判定与 protobuf 转换：spec
 
-状态：**第 1 部分**——下推判定（`infer_pushdown.go`）与表达式到 tipb 的转换（`expr_to_pb.go`），新 crate `tidb-expr-pushdown`（N0 rank 12）。第 2 部分为反方向的 `distsql_builtin.go`（`PBToExpr`，按 pb code 构造各函数族的签名）。
+状态：**完成**。第 1 部分（#179）——下推判定（`infer_pushdown.go`）与表达式到 tipb 的转换（`expr_to_pb.go`），新 crate `tidb-expr-pushdown`（N0 rank 12）；第 2 部分——反方向的 `distsql_builtin.go`（`PBToExpr`，按 pb code 构造各函数族的签名，§6）。
+
+收敛检查（第 2 部分）：D08.3 matched **50/50**，missing 0，extra 0，duplicated 0。govec `pushdown` 领域 10,366 条（第 1 部分的 7,259 条不变，追加第 2 部分的 3,107 条）。`getSignatureByPB` 的 559 个 pb code 中 243 个构造出 tidb-expression 的签名，316 个属于尚未移植的函数族，是边界桩（§6.1）。
 
 收敛检查（第 1 部分）：D08.3 matched **34/50**（第 1 部分之前 0/50），missing 0，extra 0，duplicated 0；其余 16 个是第 2 部分 `distsql_builtin.go` 的函数（tracker 豁免表中写 "D08.3 part 2"）。govec `pushdown` 领域 7,259 条（§5）。
 
@@ -12,7 +14,7 @@
 | `infer_pushdown.go`（21 个）：`canFuncBePushed`、`canScalarFuncPushDown`、`canExprPushDown`、`scalarExprSupportedByTiDB/TiKV/Flash`、`canEnumPushdownPreliminarily`、`IsPushDownEnabled`、`PushDownContext` 及其 5 个方法、`NewPushDownContext(FromSessionVars)`、`PushDownExprs(WithExtraInfo)`、`CanExprsPushDown(WithExtraInfo)`、`storeTypeMask`、`init`；包级变量 `DefaultExprPushDownBlacklist`、`ExprPushDownBlackListReloadTimeStamp` | `infer_pushdown.rs` |
 | tipb Go 模块的 `ScalarFuncSig` 常量与 `ScalarFuncSig.String()` | `tipb_sig.rs`、生成的 `tipb_sig_gen.rs`（§3.1） |
 
-第 2 部分（16 个）：`PbTypeToFieldType`、`getSignatureByPB`、`newDistSQLFunctionBySig`、`PBToExprs`、`PBToExpr`、`convertTime/Int/Uint/String/Float/Decimal/Duration/JSON/VectorFloat32/Enum`、`decodeValueList`。
+第 2 部分（16 个，§6）：`PbTypeToFieldType`、`getSignatureByPB`、`newDistSQLFunctionBySig`、`PBToExprs`、`PBToExpr`、`convertTime/Int/Uint/String/Float/Decimal/Duration/JSON/VectorFloat32/Enum`、`decodeValueList`。
 
 ## 2. 依赖、位置与 TiFlash
 
@@ -59,3 +61,29 @@ Go 的 `conOrCorColToPBExpr` 对相关列求值，读 `CorrelatedColumn.Data`：
   - `split` 700（多个条件的 `PushDownExprs*`、`CanExprsPushDown`）、`ft` 352、`ftpb` 300、`enabled` 400、`ctx` 10。
 - 反证（arm64，7,259 条中报错的记录数）：不设 `has_distinct` 2,904；非函数节点不设 `sig` 2,841；TiKV 表去掉 CAST 1,720；TiFlash 表不排除 `LTJson` 1（`lt` 的 JSON 签名只有这一个 pb code；其他 JSON 比较各自的 pb code 同样各有记录）；TiKV 推带小数位的 ROUND 7；CONV 不检查混合类型 8；TiKV 不检查 REGEXP 的 binary collation 63；`UnSpecified` 的掩码只含 TiKV 98；接受 ID 为 0 的列 73；EXPLAIN 时选 extra handler 957；`canEnumPushdownPreliminarily` 不含 DECIMAL 100；不把 collation 写入结果类型 692；`approx_count_distinct` 只对 TiKV 禁止 18；TiFlash 接受非法 decimal 79；TIMESTAMP 常量不转 UTC 9；黑名单不查 pb 名 69；decimal 常量按列类型的精度编码 33；TiFlash 接受 YEAR 到时间的 CAST 13。
 - 单元测试 `tests/pb_code_unit.rs`：Go 的 631 个 `ScalarFuncSig` 值都在 Rust 枚举中；P1-1（D08.1，Lucky 评审 #102）：IS TRUE/FALSE 的 6 个 `...WithNull` pb code（`builtin_op.rs` 的 `+ 20`）与 tipb 一致，`istrue_with_null` 建出的 3 个签名的 pb code 与 tipb 一致。
+
+## 6. 第 2 部分：`distsql_builtin.go`（`PBToExpr`）
+
+| Go | Rust（`crates/expr-pushdown/src/`） |
+|---|---|
+| `PbTypeToFieldType`、`getSignatureByPB`、`newDistSQLFunctionBySig`、`PBToExprs`、`PBToExpr`、`convertTime/Int/Uint/String/Float/Decimal/Duration/JSON/VectorFloat32/Enum`、`decodeValueList` | `distsql_builtin.rs` |
+| `getSignatureByPB` 的 `switch sigCode`（559 个 pb code） | 生成的 `distsql_builtin_gen.rs`（`tools/expr-gen/gen_pb_sigs.py`） |
+
+### 6.1 设计
+
+- **签名表**：`gen_pb_sigs.py` 读 Go 的 `distsql_builtin.go`，每个 `case` 一行：pb code、结构体字面量的 Go 签名类型、字面量如何填写 `baseBuiltinFunc` 以外的字段（`Ctor`：`Base`、`Cast{inUnion: false}`、`Extremum(cmpAsDate)`、`IntervalInt/Real(hasNullable)`、`UnaryMinusDecimal`、`IsTrueOrFalse(keepNull)`、`FromBinary`、`MaxAllowedPacket`、`AddSubDate`）以及签名类型所属的块（tracker `func_blocks.tsv` 中 `<类型>.Clone` 的块）；`PORTED` 列出 tidb-expression 的全部 `SigDesc`（扫描 `*_sig!` 宏与 `pub static ...: SigDesc`）。`getSignatureByPB` 先按 `newBaseBuiltinFuncWithFieldType` 建 base，查表，取 `SigDesc`（先按（Go 类型，pb code），再按唯一的 Go 类型：GREATEST(date) 与 GREATEST(datetime) 是同一个 Go 类型的两个 `SigDesc`，IS TRUE/FALSE 的 `WithNull` 只有普通签名的 `SigDesc`），按 `Ctor` 设置 `SigExtra`，最后 `setPbCode(sigCode)`。函数族增加签名后重跑生成器。标 L2（switch 写成生成的表）。
+- **边界桩**（宪章第四条 3，`blocked-by`）：签名类型属于未移植函数族的 pb code 返回 `signature <Go 类型> (pb code <名字>) is not ported yet (<块>)`：D08.6 字符串 74 个（其中 12 个是 `maxAllowedPacket` 的字面量）、D08.7 时间 145 个（其中 56 个 ADDDATE/SUBDATE 调用 `addSubDateFunctionClass.getFunction`）、D08.9 杂项 70 个、D08.10 JSON 27 个。D08.6、D08.7、D08.9 的 tasks.md 登记了"移植签名后重跑生成器"（"从 D08.3 继承"）；D08.10 开工时同样处理。D08.1、D08.4、D08.5、D08.8 的签名全部能构造。
+- 函数名 `fmt.Sprintf("sig_%T", f)` 是 `sig_*expression.<SigDesc.name>`（`SigDesc.name` 是 Go 类型名）。
+- Rust `tipb` 不认识的表达式类型或签名值（Go 的 tipb 模块也不认识的，或 Rust 版本更新而多出的）在 Rust 消息中进了 unknown fields：`raw_enum` 从那里读出原值，Go 的行为（`panic("should be a tipb.ExprType_ScalarFunc")`、`ErrFunctionNotExists` 报出数字）不变。
+- Go 解引用 nil `FieldType`、列下标越界时 panic，Rust 同样 panic（govec 有这类记录）。
+
+### 6.2 偏离
+
+1. **`decodeValueList` 的常量**：Go 的 `&Constant{Value: value}` 的 `RetType` 是 nil，Rust 常量的类型不能为空，用零值 `FieldType`（L2）；构造签名时不读它（`newBaseBuiltinFuncWithFieldType` 不看参数类型）。TiDB 自己的 `ExprToPB` 不产生 `ValueList`。
+2. **`ParseEnumValue` 的错误文字**（`convertEnum`）：Go 用 `errors.Wrap` 加上 `convert to MySQL enum failed: number N overflow enum boundary [1, M]: ` 前缀；M-ERR 不移植包装函数（D01.1），Rust 的消息只有 `[types:1265]Data truncated ...`。错误码相同。回放容许这一处前缀不同。
+3. `PBToExprs` 中"`PBToExpr` 返回 nil 表达式而无错误"的分支不可达（Rust 返回 `Result`），不移植。
+
+### 6.3 验证
+
+- govec `pushdown` 追加三个 op（tracker `govec/domains/pushdown_pb.go`）：`pbtps` 1 条（列引用的字段类型）；`pbexpr` 2,960 条——第 1 部分的配方（每个内置函数、CAST 矩阵、单独的列与常量）经 `ExprToPB` 转成 pb（1,239 条不能转换），再 `PBToExpr`：1,719 条得到表达式，2 条 panic（客户端不支持 DAG 时列按 ID 编码，ID 超出字段类型列表）；`pbraw` 146 条手工构造的消息：每种常量的合法值与错误值、缺 `FieldType`、`ValueList`（空、有值、坏值）、未知签名、Rust tipb 才有的签名值、未知表达式类型、`WithNull`、GREATEST(date)、INTERVAL、`from_binary`、桩、嵌套的桩、多个表达式。输出 285 种签名类型。Rust 回放逐条比较表达式（函数名、签名类型、结果类型、pb code、collation、`SigExtra`、参数；常量的 datum、length、frac、类型）、错误文字与是否 panic；遇到边界桩时检查 Go 的结果确实含该签名类型且块是 D08.6/D08.7/D08.9/D08.10（636 条记录，种子 1–8 本地全部通过）。
+- 反证（arm64，10,366 条中报错的记录数）：CAST 的 `inUnion` 取反 471；忽略 `keepNull` 29；不按 case 设置 pb code 29；TIMESTAMP 常量不转时区 6；空 `ValueList` 不折叠成常量、不按唯一的 Go 类型查找签名（`WithNull`）：回放的桩检查失败；FLOAT32 常量存成 FLOAT64 10；不设 decimal 的 length 23；忽略字符串常量的 flen 64；函数名不含 Go 类型 921；忽略 `cmpAsDate` 4；DURATION 常量的 fsp 用 0 11；未知签名值读成 `Unspecified` 2。`Bytes` 常量的 nil 与空值在输出中无法区分（hex 都是空串），没有反证。
