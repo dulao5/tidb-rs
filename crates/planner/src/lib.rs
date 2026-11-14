@@ -24,6 +24,7 @@ pub mod base;
 pub mod baseimpl;
 pub mod core;
 pub mod logicalop;
+pub mod optimize;
 pub mod physicalop;
 pub mod planctx;
 pub mod property;
