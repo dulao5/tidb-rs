@@ -28,11 +28,12 @@ tidb-memory = { workspace = true }
 tidb-model = { workspace = true }
 tidb-infoschema = { workspace = true }
 tipb = { workspace = true }
+# The boxed future of SessionContext::get_stmt_read_ts (the provider waits for the TSO).
+futures = { workspace = true }
 parking_lot = "0.12"
 log = "0.4"
 
 [dev-dependencies]
-futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]

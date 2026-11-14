@@ -75,8 +75,9 @@ impl SessionContext for MockSession {
     fn sql_killer(&self) -> Arc<SqlKiller> {
         self.killer.clone()
     }
-    fn get_stmt_read_ts(&mut self) -> Result<u64, Error> {
-        Ok(self.read_ts)
+    fn get_stmt_read_ts(&mut self) -> futures::future::BoxFuture<'_, Result<u64, Error>> {
+        let ts = self.read_ts;
+        Box::pin(async move { Ok(ts) })
     }
     fn get_txn_info_schema(&self) -> Option<InfoSchemaRef> {
         None

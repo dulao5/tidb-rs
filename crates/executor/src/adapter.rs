@@ -41,6 +41,14 @@ use crate::internal::exec::executor::{self as exec, Executor};
 use crate::metrics::{self as executor_metrics, METRICS, Observer};
 
 /// recordSet wraps an executor, implements sqlexec.RecordSet interface
+///
+/// **No `Drop`.** `finish` / `close` are async and need the statement and the session, so
+/// dropping a record set without `close` (the statement's future cancelled, KILL, the client
+/// disconnecting) closes nothing on the session side: `ExecStmt::close_record_set` /
+/// `FinishExecuteStmt` (last query info, phase metrics, the statement context resets) does
+/// not run and `last_errs` is lost; the executor tree is just dropped. The session (VS1-14)
+/// must notice a statement that did not finish and do the missing finish before it runs the
+/// next statement (Go always runs `Close` through `defer` in the protocol layer).
 pub struct RecordSet {
     fields: Vec<ResultField>,
     executor: Option<Box<dyn Executor>>,
@@ -365,7 +373,7 @@ impl ExecStmt {
     /// PointGet short path for point exec directly from plan, keep only necessary steps
     // go: ExecStmt.PointGet L2 (no tracing region / Top SQL, D14.2; executor type checks through Executor::as_point_get)
     pub async fn point_get(&mut self, sctx: &mut dyn SessionContext) -> Result<RecordSet, Error> {
-        let start_ts = sctx.get_stmt_read_ts()?;
+        let start_ts = sctx.get_stmt_read_ts().await?;
         Self::stmt_ctx_mut(sctx).priority = HighPriority;
 
         let mut executor: Option<Box<dyn Executor>> = None;

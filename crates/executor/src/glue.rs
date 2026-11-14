@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use futures::future::BoxFuture;
 use tidb_base::Error;
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_parser::model::CIStr;
@@ -40,9 +41,11 @@ pub trait SessionContext: Send {
     /// `GetSessionVars().SQLKiller` (the session's shared part, N2 `SessionShared`).
     // glue: SessionVars.SQLKiller (N2 SessionShared)
     fn sql_killer(&self) -> Arc<SqlKiller>;
-    /// `sessiontxn.GetTxnManager(sctx).GetStmtReadTS()`.
+    /// `sessiontxn.GetTxnManager(sctx).GetStmtReadTS()`. Async: the provider may wait for
+    /// the TSO its warm-up requested (`TxnContextProvider::get_stmt_read_ts` of D05.4 returns
+    /// a future), which must not block the session's task.
     // glue: interface method sessiontxn.TxnManager.GetStmtReadTS (D05.3 / D05.4, VS1-14)
-    fn get_stmt_read_ts(&mut self) -> Result<u64, Error>;
+    fn get_stmt_read_ts(&mut self) -> BoxFuture<'_, Result<u64, Error>>;
     /// `sessiontxn.GetTxnManager(sctx).GetTxnInfoSchema()`.
     // glue: interface method sessiontxn.TxnManager.GetTxnInfoSchema (VS1-14)
     fn get_txn_info_schema(&self) -> Option<InfoSchemaRef>;
