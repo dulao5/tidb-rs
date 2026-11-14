@@ -7,7 +7,7 @@
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/planutil.jsonl.gz` (branch `vs1/planner-base`) |
 | generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261115), 2862 records |
 | `arm64/planutil.jsonl.gz` sha256 | `3ab79cf026ceb4f51f111a463395231ccfc803a14bf3a5667594bd41453cbe50` (generated locally) |
-| `amd64/planutil.jsonl.gz` sha256 | (tracker CI artifact, GOARCH=amd64, GOAMD64=v1) |
+| `amd64/planutil.jsonl.gz` sha256 | `e731c8b46e642b2851768bd3c37590b5f911d0f118b741d7ad7ee4bba392af44` (tracker CI artifact, run 43575124447, GOARCH=amd64, GOAMD64=v1) |
 
 The functions the domain covers only add, multiply and divide floats (no multiply-add for gc to
 fuse), and the two targets hold the same records (tracker `TestTargetsDiffer`).
