@@ -7,12 +7,44 @@ use async_trait::async_trait;
 use tidb_base::Error;
 use tidb_base::mysql::TypeLonglong;
 use tidb_chunk::chunk::{Chunk, new_chunk_with_capacity};
+use tidb_executor::internal::exec::executor::{BaseExecutorV2, new_base_executor_v2};
 use tidb_executor::{ExecCtx, Executor};
+use tidb_memory::sqlkiller::SqlKiller;
 use tidb_sessionctx::stmtctx::new_stmt_ctx;
+use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 use tidb_types::field_type::new_field_type;
+
+struct Acc;
+
+impl GlobalVarAccessor for Acc {
+    fn get_global_sys_var(&self, _: &str) -> Result<String, Error> {
+        Ok(String::new())
+    }
+    fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
+        Ok(())
+    }
+    fn get_tidb_table_value(&self, _: &str) -> Result<String, Error> {
+        Ok(String::new())
+    }
+    fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+/// The base executor of a test executor (no schema, no children).
+fn base() -> BaseExecutorV2 {
+    new_base_executor_v2(
+        &SessionVars::new(Box::new(Acc)),
+        &SqlKiller::new(),
+        None,
+        0,
+        Vec::new(),
+    )
+}
 
 /// Produces 0..n, at most `batch` rows per Next.
 struct Numbers {
+    base: BaseExecutorV2,
     next: i64,
     n: i64,
     batch: usize,
@@ -21,6 +53,12 @@ struct Numbers {
 
 #[async_trait]
 impl Executor for Numbers {
+    fn base(&self) -> &BaseExecutorV2 {
+        &self.base
+    }
+    fn base_mut(&mut self) -> &mut BaseExecutorV2 {
+        &mut self.base
+    }
     async fn open(&mut self, _ctx: &ExecCtx) -> Result<(), Error> {
         self.opened = true;
         Ok(())
@@ -41,12 +79,19 @@ impl Executor for Numbers {
 
 /// Keeps the even numbers of its child.
 struct Even {
+    base: BaseExecutorV2,
     child: Box<dyn Executor>,
     buf: Chunk,
 }
 
 #[async_trait]
 impl Executor for Even {
+    fn base(&self) -> &BaseExecutorV2 {
+        &self.base
+    }
+    fn base_mut(&mut self) -> &mut BaseExecutorV2 {
+        &mut self.base
+    }
     async fn open(&mut self, ctx: &ExecCtx) -> Result<(), Error> {
         self.child.open(ctx).await
     }
@@ -81,7 +126,9 @@ fn int_chunk() -> Chunk {
 fn volcano_over_trait_objects() {
     let ctx = ExecCtx::new(Arc::new(new_stmt_ctx()));
     let mut root: Box<dyn Executor> = Box::new(Even {
+        base: base(),
         child: Box::new(Numbers {
+            base: base(),
             next: 0,
             n: 10,
             batch: 3,
