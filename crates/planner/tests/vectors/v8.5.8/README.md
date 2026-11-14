@@ -32,9 +32,9 @@ of failing on them, and pins the count per block (`D06.3` base table 11, `D02.2`
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cardinality.jsonl.gz` (branch `govec/stats-vs29`) |
 | generator | `govec` (seed 20261115), 5685 records |
 | `arm64/cardinality.jsonl.gz` sha256 | `8a5d303ddd1e13fca00c56e749534602dc59ce1603cd3014c1daa559d8832898` (generated locally) |
-| `amd64/cardinality.jsonl.gz` sha256 | (tracker CI artifact, pending) |
+| `amd64/cardinality.jsonl.gz` sha256 | `3e3c0504c348a5699dfff89bec7026a8880c295866188cdea1704098edb0b869` (tracker CI artifact, run 43653955539, GOARCH=amd64, GOAMD64=v1) |
 
 The estimation formulas have multiply-adds that gc fuses on arm64 only (D10.6 spec §2 item 5),
-so the two targets may differ in the last bits. `tests/govec_cardinality.rs` counts the
+so the two targets differ in the last bits of 8 records (7 `hist`, 1 `mv_sel`; tracker `targetdiffs_test.go`). `tests/govec_cardinality.rs` counts the
 `selectivity` records whose Rust result is a boundary (D10.4 range building, D08.9 IN) instead
 of failing on them; any other difference fails.

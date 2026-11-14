@@ -125,4 +125,3 @@ macro_rules! logical_plan_boilerplate {
         }
     };
 }
-

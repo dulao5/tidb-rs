@@ -10,7 +10,7 @@ spec：[spec.md](spec.md)。状态截至 2026-11-15：第 1 部分评审中（VS
 - [x] T4 `ndv.go`、`row_size.go`
 - [x] T5 `StatsInfo.HistColl`
 - [x] T6 govec `cardinality` 领域（与 D11.1 共用）与回放；`go_fma_sites.tsv` 加入两个包
-- [ ] T7 amd64 向量（tracker CI artifact）
+- [x] T7 amd64 向量（tracker#91 CI artifact，run 43653955539；与 arm64 有 8 条只差最后几位，M-FMA）
 
 ## 第 2 部分（`blocked-by:D10.6`）
 

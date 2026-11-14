@@ -50,7 +50,7 @@
 | VS1-25 | ranger 整块 | D10.4 | depth | 0.22 | — | ranger govec 一致 | 未开始 |
 | VS1-27 | 物理算子与 task（VS1 算子）、`exhaustPhysicalPlans`（Sel / Proj / Sort / TopN / Limit） | D10.1、D10.3 | depth | 0.18 | VS1-19 | 随 VS1-28 验收 | 未开始 |
 | VS1-28 | FindBestTask：DataSource / TableDual、skyline、表路径、访问路径、路径统计 | D10.2 | depth | 0.31 | VS1-26、VS1-27、VS1-29、VS1-30 | EXPLAIN 计划向量（去掉 estRows / cost）一致 | 未开始 |
-| VS1-29 | pseudo 基数估算、统计结构读取部分 | D10.6、D11.1 | depth | 0.21 | — | pseudo selectivity govec 一致 | 评审中（D10.6 converge 38/54 + 16 桩，D11.1 85/85；govec `cardinality` 5,685 条，`selectivity` 442 条停在 D10.4 / D08.9 边界） |
+| VS1-29 | pseudo 基数估算、统计结构读取部分 | D10.6、D11.1 | depth | 0.21 | — | pseudo selectivity govec 一致 | 评审中（#236；D10.6 converge 38/54 + 16 桩，D11.1 85/85；govec `cardinality` 5,685 条，`selectivity` 442 条停在 D10.4 / D08.9 边界） |
 | VS1-30 | 代价模型 v2（VS1 算子） | D10.5 | depth | 0.04 | VS1-19 | 代价 govec 一致 | 未开始 |
 | VS1-31 | `ResolveIndices`、`ToPB`、access object（VS1 算子） | D10.9 | depth | 0.04 | VS1-27 | DAG 逐字节一致 | 未开始 |
 | VS1-32 | 规划耗时的早期测量：VS1-24 / VS1-28 一能产出计划就用只含 VS1 语句的 lua 测每次 EXECUTE 的优化耗时，与 Go（plan cache 打开 / 关闭）对照 | glue | depth | 0.03 | VS1-24、VS1-28 | 报告写进 plan §10-3 | 未开始 |
