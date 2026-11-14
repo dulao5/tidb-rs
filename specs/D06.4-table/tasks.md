@@ -10,7 +10,7 @@ spec：[spec.md](spec.md)。状态截至 2026-11-14：第 1 部分进行中（�
 - [x] T4 `tables/index.go`：`NewIndex`、`Meta` / `TableMeta`
 - [x] T5 `util/generatedexpr`、`util.ColumnsToProto`（D00.3，首次需要）
 - [x] T6 govec `table` 领域与回放；InfoSchema 改用真正的 `TableFromMeta`
-- [ ] T7 amd64 向量（tracker CI artifact）
+- [x] T7 amd64 向量（tracker#77 CI artifact）
 
 ## 第 2 部分（`blocked-by:D06.4`，块完成前移植或改为永久豁免）
 
