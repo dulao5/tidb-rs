@@ -400,6 +400,11 @@ fn kind_and_ast_precheck() {
             "SELECT c FROM t WHERE id = ?",
             Reason::Ast("parameter marker"),
         ),
+        (
+            "SELECT @@max_allowed_packet, @@wait_timeout",
+            Reason::Ast("variable"),
+        ),
+        ("SELECT c FROM t WHERE id = @x", Reason::Ast("variable")),
     ] {
         assert_eq!(route(sql), Route::Poc(want), "{sql}");
     }

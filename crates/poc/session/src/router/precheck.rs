@@ -174,10 +174,11 @@ impl Walker {
             }
             Expr::Row(r) => self.exprs(&r.values),
             Expr::SetCollation(s) => self.expr(&s.expr),
-            Expr::Variable(v) => match &v.value {
-                Some(e) => self.expr(e),
-                None => Ok(()),
-            },
+            // `@@var` / `@var`: connectors read system variables right after connecting
+            // (`SELECT @@max_allowed_packet, ...`), and not every variable is synced into the
+            // new session; the PoC answers them. TODO(VS1-22): with the expression rewriter's
+            // variable handling and the full sysvar sync.
+            Expr::Variable(_) => Err("variable"),
             Expr::MatchAgainst(m) => self.expr(&m.against),
             Expr::Column(_)
             | Expr::Value(_)
