@@ -78,7 +78,8 @@ start_strict() {
         >"$out/$part-tidb-rs-strict.log" 2>&1 &
     strict_pid=$!
     for _ in $(seq 120); do
-        mysql -h 127.0.0.1 -P 27002 -u root -N -e 'select 1' >/dev/null 2>&1 && return 0
+        # Not `select 1`: strict mode answers that VS1 candidate with 1235 until the new stack runs it.
+        mysql -h 127.0.0.1 -P 27002 -u root -N -e 'set names utf8mb4' >/dev/null 2>&1 && return 0
         sleep 0.5
     done
     echo "tidb-rs --new-stack=strict did not come up" >&2
