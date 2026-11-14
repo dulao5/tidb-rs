@@ -200,40 +200,49 @@ fn metrics_expose_every_dashboard_family() {
     mysql(go, &format!("DROP DATABASE {DB}")).unwrap();
 }
 
-/// Go TiDB's cluster tables fan out to every registered TiDB's status port (TiDB coprocessor
-/// gRPC, HTTP `/config`, diagnostics gRPC). A listening status server must not make them
-/// slower or fail differently than a status port where nothing listens (`--status-port 0`,
-/// the behaviour before the status server existed). Both end in a warning for this node;
-/// the coprocessor-based tables (`cluster_processlist`, ...) take about 40 s either way
-/// because Go's client retries the failed TiDB RPC with backoff (see ADR 0006).
+/// Go TiDB's cluster tables and `ANALYZE` fan out to every registered TiDB's status port (TiDB
+/// coprocessor gRPC, HTTP `/config`, diagnostics gRPC). Before the status port answered the
+/// gRPC services, the coprocessor-based ones (`cluster_processlist`, the `FLUSH STATS_DELTA`
+/// broadcast of `ANALYZE`, ...) took about 40 s per tidb-rs node, because Go's client retries a
+/// failed TiDB RPC with backoff (issue #161, ADR 0006). Now they take Go's own time and get no
+/// warning for this node; only `cluster_config` (HTTP `/config`, not served) still warns.
 #[test]
-fn cluster_tables_no_slower_with_status_server() {
+fn cluster_tables_fast_with_status_server() {
     let Some((pd, go)) = cluster() else { return };
     let _serial = serial();
     let queries = [
-        "SELECT COUNT(*) FROM information_schema.cluster_processlist",
-        "SELECT COUNT(*) FROM information_schema.cluster_config WHERE type = 'tidb'",
-        "SELECT COUNT(*) FROM information_schema.cluster_load WHERE type = 'tidb'",
-        "SELECT COUNT(*) FROM information_schema.cluster_info",
+        (
+            "SELECT COUNT(*) FROM information_schema.cluster_processlist",
+            false,
+        ),
+        (
+            "SELECT COUNT(*) FROM information_schema.cluster_memory_usage",
+            false,
+        ),
+        ("ANALYZE TABLE mysql.stats_meta", false),
+        (
+            "SELECT COUNT(*) FROM information_schema.cluster_config WHERE type = 'tidb'",
+            true,
+        ),
+        (
+            "SELECT COUNT(*) FROM information_schema.cluster_load WHERE type = 'tidb'",
+            false,
+        ),
+        (
+            "SELECT COUNT(*) FROM information_schema.cluster_info",
+            false,
+        ),
     ];
-    let mut took = Vec::new();
-    for (label, status_port) in [("listening", free_port()), ("port 0", 0)] {
-        let node = Node::start(&pd, status_port);
-        for q in queries {
-            let start = Instant::now();
-            let out = mysql(go, q).unwrap_or_else(|e| panic!("{label}: {q}: {e}"));
-            let elapsed = start.elapsed();
-            let warning = out.lines().find(|l| l.contains("Warning")).unwrap_or("");
-            println!("{label:>10} {elapsed:>10.3?}  {q}\n{:>22}{warning}", "");
-            took.push(elapsed);
-        }
-        drop(node);
+    let node = Node::start(&pd, free_port());
+    for (q, warns) in queries {
+        let start = Instant::now();
+        let out = mysql(go, q).unwrap_or_else(|e| panic!("{q}: {e}"));
+        let elapsed = start.elapsed();
+        let warning = out.lines().find(|l| l.contains("Warning")).unwrap_or("");
+        println!("{elapsed:>10.3?}  {q}\n{:>12}{warning}", "");
+        // cluster_load samples the load for about 1.5 s on each node.
+        assert!(elapsed < Duration::from_secs(5), "{q}: {elapsed:?}");
+        assert_eq!(!warning.is_empty(), warns, "{q}: {out}");
     }
-    let (listening, none) = took.split_at(queries.len());
-    for ((q, l), n) in queries.iter().zip(listening).zip(none) {
-        assert!(
-            *l <= n.mul_f64(1.25) + Duration::from_secs(2),
-            "{q}: {l:?} with the status server, {n:?} without"
-        );
-    }
+    drop(node);
 }

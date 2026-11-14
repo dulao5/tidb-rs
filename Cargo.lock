@@ -2576,12 +2576,15 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "clap 4.6.7",
+ "flate2",
  "http-body-util",
  "hyper",
  "hyper-util",
  "poc-domain",
  "poc-kv",
  "poc-session",
+ "prost",
+ "protobuf",
  "serde_json",
  "tidb-base",
  "tidb-distsql",
@@ -2590,6 +2593,7 @@ dependencies = [
  "tidb-mysql-protocol",
  "tidb-runtime",
  "tikv-jemallocator",
+ "tipb",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3741,6 +3745,26 @@ dependencies = [
  "serde",
  "serde_json",
  "tidb-base",
+ "tipb",
+]
+
+[[package]]
+name = "tidb-expr-pushdown"
+version = "0.0.0"
+dependencies = [
+ "arc-swap 1.9.3",
+ "flate2",
+ "log",
+ "protobuf",
+ "serde_json",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
+ "tidb-expression",
+ "tidb-kv",
+ "tidb-parser",
+ "tidb-sessionctx",
+ "tidb-types",
  "tipb",
 ]
 
