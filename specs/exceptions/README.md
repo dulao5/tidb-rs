@@ -40,6 +40,7 @@
 | [N9](N9-observability/spec.md) | 可观测性：统一的语句执行记录与任务级观测上下文（profile、慢日志与语句摘要、EXPLAIN ANALYZE、Top SQL、TRACE） | 实现（基础设计）+ 待决定的特性问题 | 调研草案 | P2 之前（D12.0、D05.3、D07.2 开工前） |
 | [N10](N10-resource-control/spec.md) | 资源管控：资源组 RU 计量、按组加权公平的限流、runaway 在 checkpoint 上判定（兼容面不变） | 实现 + 待决定的特性问题 | 调研草案 | D05.3 之前（读路径接入 TiKV 后） |
 | [N11](N11-cluster-readts/spec.md) | 集群成员身份、schema 同步与 MDL（lease 按 TSO、准入窗口 ≤ 注册窗口、升级时拒绝不认识的元数据）、读时间戳（TSO、低精度、stale、replica read）、显式只读事务；流量接入见 [ADR 0009](../../docs/adr/0009-traffic-entry.md) | 实现 + 待决定的特性问题 | 调研草案 | lease 修复（#136）立即；其余 D05.4 开工前 |
+| [N12](N12-adaptive-in-list/spec.md) | 自适应 IN 列表：列表参数槽、与长度无关的 plan cache key（D13.1）、超大列表改走扫描 + TiDB 侧 hash（#169，含 v8.5.8 基准）；`INSERT … VALUES` 只有设计草图 | 特性 + 实现 | 调研草案 | D13.1 开工前；INSERT 部分在写路径阶段 |
 | B1 | 静态分区裁剪：不移植，设置时报错 | 特性 | 原则同意 | P3 |
 | B2 | v1 统计信息：只读 v2，v1 表按无统计处理 | 特性 | 原则同意 | P3 |
 | B3 | 旧 cascades 优化器：不移植 | 特性 | 原则同意 | P3 |
