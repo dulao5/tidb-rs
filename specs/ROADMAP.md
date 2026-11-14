@@ -88,7 +88,7 @@
 | L1 | D14.0 | 执行统计数据结构（execdetails、runtime stats） | 1,747 | 3 | — |
 | L2 | D06.4 | table 抽象（tables、index、partition 的读取路径） | 7,136 | 17 | — |
 | L2 | D07.2 | coprocessor 客户端（不含 batch/MPP） | 2,306 | 5 | D15.1(16), D07.4(10) |
-| L3 | D06.3 | InfoSchema 构建与缓存（v2 按 A3） | 4,396 | 10 | D06.6(11), X(10) |
+| L3 | [D06.3](D06.3-infoschema/spec.md) | InfoSchema 构建与缓存（只移植 v2，缓存按 A3；2026-11-14 测试辅助与 auto ID 写入的 25 个函数归 X，295 → 270 个；第 1 部分：v2 的构建与读取，converge 184/270，v1 的 42 个永久豁免） | 4,090 | 9 | D06.6(11) |
 | L3 | D07.3 | distsql 请求构建与结果 | 1,838 | 4 | D10.4(23), D15.1(11), X(10) |
 | L4 | D05.4 | 事务上下文（sessiontxn：isolation、staleread，只读路径） | 1,931 | 14 | D10.1(12) |
 | L4 | D06.5 | schema 同步与 domain（schema validator、infosync） | 5,786 | 21 | X(205), DEF.MPP(47), D11.2(45), D13.2(14) |

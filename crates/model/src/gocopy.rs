@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 /// Go's assignment copy of a value: structs field by field, slices / maps / pointers by
 /// their elements (Rust holds them by value), leaves with `Clone`.
-pub(crate) trait GoCopy {
+pub trait GoCopy {
     // glue: Go's assignment copy
     fn go_copy(&self) -> Self;
 }
