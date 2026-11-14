@@ -60,7 +60,8 @@ pub fn map_children(p: &mut PhysicalPlanRef, f: impl FnMut(PhysicalPlanRef) -> P
 pub type Expr = Arc<Expression>;                // 不可变共享，写时复制（M-EXPR）；具体结构见 N4
 
 // ---- N2 上下文 ----
-pub struct Session { pub vars: SessionVars, pub shared: Arc<SessionShared>, /* … */ }
+pub struct Session { pub vars: SessionVars, pub shared: Arc<SessionShared>, dialect: Dialect, /* … */ }
+pub enum Dialect { MySQL }                       // ADR 0010 §4.4：连接建立时设定，会话存续期间不变，不是系统变量；选择语法前端、进 plan cache 键
 pub struct SessionShared { pub killer: SqlKiller, pub mem_root: Arc<MemTracker>, pub process: ArcSwap<ProcessInfo> }
 pub struct StmtCtx { pub vars: FrozenVars, pub cop_meta: CopRequestMeta, /* warnings, rows, runtime stats, mem/disk tracker … */ }
 pub struct PlanCtx<'s> {                         // 字段公开：同一函数内 ctx.arena / ctx.expr_ctx / ctx.vars 是互不重叠的字段借用

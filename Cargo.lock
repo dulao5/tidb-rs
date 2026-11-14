@@ -3749,6 +3749,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-executor"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-planner",
+ "tidb-sessionctx",
+ "tidb-types",
+]
+
+[[package]]
 name = "tidb-expr-pushdown"
 version = "0.0.0"
 dependencies = [
@@ -3917,6 +3930,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-planner"
+version = "0.0.0"
+dependencies = [
+ "tidb-base",
+ "tidb-expression",
+ "tidb-sessionctx",
+ "tidb-types",
+]
+
+[[package]]
 name = "tidb-planner-pilot"
 version = "0.0.0"
 dependencies = [
@@ -3950,6 +3973,18 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tidb-session"
+version = "0.0.0"
+dependencies = [
+ "tidb-base",
+ "tidb-executor",
+ "tidb-parser",
+ "tidb-planner",
+ "tidb-sessionctx",
+ "tidb-types",
 ]
 
 [[package]]
