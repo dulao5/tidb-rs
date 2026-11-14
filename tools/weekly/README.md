@@ -77,7 +77,7 @@ every TiDB server in the cluster (`ANALYZE`, `cluster_*` tables, `tidb_decode_sq
 `tidb_servers_info`): tidb-rs's status port does not answer that, so Go retries for about 40 s
 per statement and the 67 such files alone would take about 3 hours (`ab integrationtest`'s
 README section). That leaves 179 of the 246 files (about 31k statements, 10k reads sent to
-tidb-rs); the whole part took 14 minutes locally (13.5 of them in `ab`); `IT_BUDGET` (default 40
+tidb-rs); the whole part took about 12 minutes locally (11.5 of them in `ab`); `IT_BUDGET` (default 40
 minutes) stops `ab` early and reports the part as incomplete with what it ran. `IT_TESTS`
 selects other tests (names or `prefix/`), `IT_TIDB_DIR` uses an existing checkout instead of
 cloning.
