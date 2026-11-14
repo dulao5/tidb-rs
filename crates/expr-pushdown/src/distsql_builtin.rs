@@ -511,3 +511,119 @@ fn convert_enum(val: &[u8], tp: &tipb::FieldType) -> Result<Constant, Error> {
     let d = new_mysql_enum_datum(e);
     Ok(Constant::new(d, field_type_from_pb(tp)))
 }
+
+/// The generated table is up to date with tidb-expression (Lucky, review of #182): a block that
+/// adds signatures but does not rerun `tools/expr-gen/gen_pb_sigs.py` fails here.
+#[cfg(test)]
+mod gen_tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// `gen_pb_sigs.py`'s scan of `crates/expression/src`: the first argument of the
+    /// `*_sig!` macros (`^\s*\w*sig!\(\s*(builtin\w+)`, the identifier may be on the next
+    /// line) and `^pub static (builtin\w+): SigDesc`, as `module::name`.
+    fn scan_expression_sigs() -> BTreeSet<String> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../expression/src");
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .collect();
+        files.sort();
+        let ident = |s: &str| -> String {
+            s.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect()
+        };
+        let mut out = BTreeSet::new();
+        for path in files {
+            let module = path.file_stem().unwrap().to_str().unwrap().to_owned();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let mut offset = 0;
+            for line in text.split_inclusive('\n') {
+                let start = offset;
+                offset += line.len();
+                let body = line.trim_start();
+                if let Some(rest) = body.strip_prefix("pub static ")
+                    && line == body
+                {
+                    let name = ident(rest);
+                    if name.starts_with("builtin") && rest[name.len()..].starts_with(": SigDesc") {
+                        out.insert(format!("{module}::{name}"));
+                    }
+                    continue;
+                }
+                let Some(pos) = body.find("sig!(") else {
+                    continue;
+                };
+                if !body[..pos]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    continue;
+                }
+                let after = start + (line.len() - body.len()) + pos + "sig!(".len();
+                let name = ident(text[after..].trim_start());
+                if name.starts_with("builtin") {
+                    out.insert(format!("{module}::{name}"));
+                }
+            }
+        }
+        out
+    }
+
+    /// The `PORTED` entries of the generated file, as `module::name`.
+    fn generated_ported() -> BTreeSet<String> {
+        include_str!("distsql_builtin_gen.rs")
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("&tidb_expression::"))
+            .map(|l| l.trim_end_matches(',').to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn ported_is_up_to_date() {
+        let scanned = scan_expression_sigs();
+        let generated = generated_ported();
+        assert_eq!(generated.len(), PORTED.len());
+        let missing: Vec<_> = scanned.difference(&generated).collect();
+        let stale: Vec<_> = generated.difference(&scanned).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "rerun tools/expr-gen/gen_pb_sigs.py: signatures not in PORTED {missing:?}, \
+             PORTED entries no longer in tidb-expression {stale:?}"
+        );
+    }
+
+    #[test]
+    fn stubs_are_not_ported() {
+        let mut names: BTreeSet<&str> = PORTED.iter().map(|s| s.name).collect();
+        let scanned = scan_expression_sigs();
+        names.extend(scanned.iter().map(|s| s.split("::").nth(1).unwrap()));
+        let mut stubs = 0;
+        for &(code, go, ctor, block) in PB_SIGS {
+            let stub = ported_sig(go, code).is_none()
+                || matches!(ctor, Ctor::MaxAllowedPacket | Ctor::AddSubDate { .. });
+            if !stub {
+                continue;
+            }
+            stubs += 1;
+            assert!(
+                !names.contains(go),
+                "pb code {} is a boundary stub ({block}) but tidb-expression has {go}: \
+                 rerun tools/expr-gen/gen_pb_sigs.py, and for a struct literal with fields \
+                 ({ctor:?}) set them in get_signature_by_pb",
+                scalar_func_sig_string(code)
+            );
+            assert!(
+                ["D08.6", "D08.7", "D08.9", "D08.10"].contains(&block),
+                "{go}: a stub of block {block}"
+            );
+        }
+        assert_eq!(
+            stubs, 316,
+            "stubs left (update spec §6.1 when this changes)"
+        );
+    }
+}
