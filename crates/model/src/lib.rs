@@ -13,7 +13,7 @@ mod column;
 mod consts_gen;
 mod db;
 mod gocopy;
-pub use gocopy::GoCopy;
+pub use gocopy::{GoCopy, make_mut};
 mod gotime;
 mod index;
 mod job;

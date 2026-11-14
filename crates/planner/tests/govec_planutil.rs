@@ -509,13 +509,13 @@ fn handle_common(p: &[Value]) -> Value {
     let mut table_columns = Vec::new();
     for (k, tc) in arr(&p[0]).iter().enumerate() {
         let ft = field_type(tc[0].as_str().unwrap(), i(&tc[1]) as isize);
-        tbl.columns.as_mut().unwrap().push(ColumnInfo {
+        tbl.columns.as_mut().unwrap().push(Arc::new(ColumnInfo {
             id: k as i64 + 1,
             offset: k as isize,
             name: CIStr::new(&format!("c{k}")),
             field_type: ft.clone(),
             ..Default::default()
-        });
+        }));
         table_columns.push(Arc::new(Column {
             unique_id: 100 + k as i64,
             id: k as i64 + 1,
@@ -778,11 +778,11 @@ fn exec_op(op: &str, p: &[Value]) -> Value {
             }
             let tbl = TableInfo {
                 pk_is_handle: b(&p[1]),
-                columns: Some(vec![ColumnInfo {
+                columns: Some(vec![Arc::new(ColumnInfo {
                     name: CIStr::new("a"),
                     field_type: ft,
                     ..Default::default()
-                }]),
+                })]),
                 ..Default::default()
             };
             let path = AccessPath {

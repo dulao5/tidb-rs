@@ -112,7 +112,7 @@ pub fn data_source_with(ctx: &mut PlanCtx<'_>, names: &[&str]) -> PlanId {
         id: 100,
         name: CIStr::new("t"),
         pk_is_handle: true,
-        columns: Some(infos.clone()),
+        columns: Some(infos.iter().cloned().map(Arc::new).collect()),
         ..TableInfo::default()
     });
     let handle = HandleCols::Int(cols[0].clone());

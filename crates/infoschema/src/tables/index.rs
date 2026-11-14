@@ -46,7 +46,7 @@ pub fn new_index(
 impl Index for IndexImpl {
     /// Meta returns index info.
     // go: index.Meta L1
-    fn meta(&self) -> &IndexInfo {
+    fn meta(&self) -> &Arc<IndexInfo> {
         &self.idx_info
     }
 

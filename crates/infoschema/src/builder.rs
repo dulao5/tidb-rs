@@ -41,9 +41,9 @@ use tidb_model::{
     ActionRebaseAutoRandomBase, ActionRecoverSchema, ActionRecoverTable, ActionRefreshMeta,
     ActionRemovePartitioning, ActionRenameTable, ActionRenameTables, ActionReorganizePartition,
     ActionRepairTable, ActionTruncateTable, ActionTruncateTablePartition, ActionType,
-    AffectedOption, ColumnInfoVersion2, DBInfo, GoCopy, PolicyInfo, PolicyRefInfo,
-    ResourceGroupInfo, SchemaDiff, StateNone, StatePublic, TableInfo, TableInfoVersion2,
-    TableInfoVersion3, TempTableNone,
+    AffectedOption, ColumnInfoVersion2, DBInfo, PolicyInfo, PolicyRefInfo, ResourceGroupInfo,
+    SchemaDiff, StateNone, StatePublic, TableInfo, TableInfoVersion2, TableInfoVersion3,
+    TempTableNone,
 };
 use tidb_parser::gocharset::{CharsetUTF8, CharsetUTF8MB4, CollationUTF8MB4};
 use tidb_parser::model::CIStr;
@@ -885,7 +885,7 @@ pub(crate) async fn apply_create_table(
 
 /// ConvertCharsetCollateToLowerCaseIfNeed convert the charset / collation of table and its
 /// columns to lower case, if the table's version is prior to TableInfoVersion3.
-// go: ConvertCharsetCollateToLowerCaseIfNeed L1
+// go: ConvertCharsetCollateToLowerCaseIfNeed L1 [M-SHARE]
 pub fn convert_charset_collate_to_lower_case_if_need(tb_info: &mut TableInfo) {
     if tb_info.version >= TableInfoVersion3 {
         return;
@@ -893,6 +893,8 @@ pub fn convert_charset_collate_to_lower_case_if_need(tb_info: &mut TableInfo) {
     tb_info.charset = to_lower(&tb_info.charset);
     tb_info.collate = to_lower(&tb_info.collate);
     for col in tb_info.columns.iter_mut().flatten() {
+        // A freshly loaded TableInfo: the columns are not shared yet, make_mut does not copy.
+        let col = tidb_model::make_mut(col);
         let cs = to_lower(col.get_charset());
         col.set_charset(&cs);
         let co = to_lower(col.get_collate());
@@ -902,7 +904,7 @@ pub fn convert_charset_collate_to_lower_case_if_need(tb_info: &mut TableInfo) {
 
 /// ConvertOldVersionUTF8ToUTF8MB4IfNeed convert old version UTF8 to UTF8MB4 if
 /// config.TreatOldVersionUTF8AsUTF8MB4 is enable.
-// go: ConvertOldVersionUTF8ToUTF8MB4IfNeed L1
+// go: ConvertOldVersionUTF8ToUTF8MB4IfNeed L1 [M-SHARE]
 pub fn convert_old_version_utf8_to_utf8mb4_if_need(tb_info: &mut TableInfo) {
     if tb_info.version >= TableInfoVersion2
         || !tidb_base::config::get_global_config().treat_old_version_utf8_as_utf8mb4
@@ -915,6 +917,7 @@ pub fn convert_old_version_utf8_to_utf8mb4_if_need(tb_info: &mut TableInfo) {
     }
     for col in tb_info.columns.iter_mut().flatten() {
         if col.version < ColumnInfoVersion2 && col.get_charset() == CharsetUTF8 {
+            let col = tidb_model::make_mut(col);
             col.set_charset(CharsetUTF8MB4);
             col.set_collate(CollationUTF8MB4);
         }
@@ -1042,14 +1045,8 @@ impl Builder {
         let mut tables: HashMap<String, TableRef> =
             HashMap::with_capacity(di.deprecated.tables.as_ref().map_or(0, Vec::len));
         let special = is_special_db(&di.name.l);
-        let deprecated_tables: Vec<Arc<TableInfo>> = di
-            .deprecated
-            .tables
-            .take()
-            .into_iter()
-            .flatten()
-            .map(Arc::new)
-            .collect();
+        let deprecated_tables: Vec<Arc<TableInfo>> =
+            di.deprecated.tables.take().into_iter().flatten().collect();
         for t in &deprecated_tables {
             let allocs = autoid::new_allocators_from_tbl_info(self.requirement.as_ref(), di.id, t);
             let tbl = table_from_meta(allocs, self.factory.as_ref(), t.clone()).map_err(|err| {
@@ -1092,7 +1089,7 @@ impl Builder {
         }
         if special {
             // Go's addSpecialDB keeps the DBInfo with its tables (the same pointers).
-            di.deprecated.tables = Some(deprecated_tables.iter().map(|t| t.go_copy()).collect());
+            di.deprecated.tables = Some(deprecated_tables);
         }
         self.add_db(schema_version, di, tables);
 

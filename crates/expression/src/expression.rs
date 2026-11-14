@@ -768,11 +768,11 @@ pub fn table_info_to_schema_and_names(
     let tbl_cols: Vec<&ColumnInfo> = tbl
         .cols()
         .into_iter()
-        .map(|c| c.expect("Go dereferences a nil *ColumnInfo"))
+        .map(|c| &**c.expect("Go dereferences a nil *ColumnInfo"))
         .collect();
     let (cols, names) = column_infos_to_columns_and_names(ctx, db_name, &tbl.name, &tbl_cols, tbl)?;
     let indices: &[_] = tbl.indices.as_deref().unwrap_or(&[]);
-    let tbl_columns: &[ColumnInfo] = tbl.columns.as_deref().unwrap_or(&[]);
+    let tbl_columns: &[std::sync::Arc<ColumnInfo>] = tbl.columns.as_deref().unwrap_or(&[]);
     let mut keys: Vec<KeyInfo> = Vec::with_capacity(indices.len() + 1);
     for idx in indices {
         if !idx.unique || idx.state != StatePublic {

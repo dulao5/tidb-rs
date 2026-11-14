@@ -1,5 +1,6 @@
 //! go-file: pkg/meta/model/column.go
 
+use std::sync::Arc;
 use tidb_base::gofmt::Arg;
 use tidb_base::{Error, mysql};
 
@@ -308,14 +309,17 @@ impl ColumnInfo {
 
 /// FindColumnInfo finds ColumnInfo in cols by name.
 // go: FindColumnInfo L1
-pub fn find_column_info<'a>(cols: &'a [ColumnInfo], name: &str) -> Option<&'a ColumnInfo> {
+pub fn find_column_info<'a>(
+    cols: &'a [Arc<ColumnInfo>],
+    name: &str,
+) -> Option<&'a Arc<ColumnInfo>> {
     let name = tidb_base::gostd::to_lower(name);
     cols.iter().find(|col| col.name.l == name)
 }
 
 /// FindColumnInfoByID finds ColumnInfo in cols by id.
 // go: FindColumnInfoByID L1
-pub fn find_column_info_by_id(cols: &[ColumnInfo], id: i64) -> Option<&ColumnInfo> {
+pub fn find_column_info_by_id(cols: &[Arc<ColumnInfo>], id: i64) -> Option<&Arc<ColumnInfo>> {
     cols.iter().find(|col| col.id == id)
 }
 

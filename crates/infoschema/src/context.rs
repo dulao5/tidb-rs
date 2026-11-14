@@ -123,7 +123,7 @@ impl DBInfoAsInfoSchema {
     /// SchemaTableInfos implement infoschema.SchemaAndTable interface. Go compares the
     /// whole `CIStr` (`db.Name == schema`); a missing schema gives no tables.
     // go: DBInfoAsInfoSchema.SchemaTableInfos L1
-    pub fn schema_table_infos(&self, schema: &CIStr) -> Result<&[TableInfo], Error> {
+    pub fn schema_table_infos(&self, schema: &CIStr) -> Result<&[Arc<TableInfo>], Error> {
         for db in &self.0 {
             if db.name == *schema {
                 return Ok(db.deprecated.tables.as_deref().unwrap_or(&[]));
