@@ -59,7 +59,7 @@ was advertised (`--advertise-status-port`, default 0), but nothing listened.
 `reports/serverinfo-impact-v8.5.md` §1/§4 lists every v8.5.8 consumer that calls a registered
 TiDB's `status_port`. `git grep '\.StatusPort'` on R adds nothing remote beyond these.
 
-| Consumer | Call | Before: port 0 | Now: listening, 404 | Measured (`tests/metrics_process.rs`) |
+| Consumer | Call | Port 0 | Listening, 404 (before #161) | Measured (`tests/metrics_process.rs`) |
 |---|---|---|---|---|
 | `CLUSTER_PROCESSLIST`, `CLUSTER_SLOW_QUERY`, `CLUSTER_STATEMENTS_SUMMARY*`, `CLUSTER_TIDB_TRX` (and so `mysql.tidb_mdl_view`), `CLUSTER_DEADLOCKS`, `CLUSTER_MEMORY_USAGE*`, global KILL fan-out (never, `server_id` 0) | TiDB coprocessor gRPC (`R:pkg/store/copr/coprocessor.go:609`) | gRPC `Unavailable` (dial fails), warning | HTTP/2 404 → gRPC `Unimplemented`, warning | `cluster_processlist` 41.6 s (listening) vs 40.2 s (port 0) |
 | `cluster_config` | HTTP `GET /config` (`R:pkg/executor/memtable_reader.go:219-251`) | dial error, warning | `404 Not Found`, warning | 45 ms vs 45 ms |
@@ -70,16 +70,43 @@ TiDB's `status_port`. `git grep '\.StatusPort'` on R adds nothing remote beyond 
 **Finding: the old "fails fast" claim (ADR 0005) is false for the coprocessor-based cluster
 tables.**
 - Go's TiDB-coprocessor client retries a failed RPC to a TiDB store with backoff whatever the
-  gRPC code. One query against `cluster_processlist` takes about 41 s, both with port 0 and
-  with the status server.
-- So the listening server is no worse, but no better either.
-- Making those tables fast needs a real reply on the status port, which means implementing
-  enough of TiDB's coprocessor gRPC service to return an empty result or a non-retryable
-  error. That is out of scope here and reported to the owner.
-- `tests/metrics_process.rs::cluster_tables_no_slower_with_status_server` asserts "listening
-  ≤ port 0 × 1.25 + 2 s" for each query.
-- Measured on playground v8.5.8 with exactly one tidb-rs node registered (2026-10-28). With
-  more nodes registered, each one adds its own fan-out failure.
+  gRPC code. One query against `cluster_processlist` took about 41 s, both with port 0 and
+  with a status server that answered 404; so did every `ANALYZE` (its `FLUSH STATS_DELTA`
+  broadcast). Measured on playground v8.5.8 with exactly one tidb-rs node registered
+  (2026-10-28). With more nodes registered, each one adds its own fan-out failure.
+- **Fixed by issue #161**: the status port now serves `tikvpb.Tikv/Coprocessor` (Go's
+  `CoprocessorDAGHandler`, `crates/poc/server/src/rpc.rs`) and `diagnosticspb.Diagnostics`
+  (`server_info`, `search_log`). The broadcast succeeds, memory-table scans return an empty
+  result, diagnostics return no rows; Go's queries take their own time again (table below)
+  with no warning for this node. Other gRPC methods answer `Unimplemented`; the
+  diagnostics calls never retried (a warning only), the coprocessor ones no longer reach the
+  retry path.
+- **Request compression**: with `tikv-client.grpc-compression-type = "gzip"`, client-go
+  gzips every request, those to TiDB status ports included (`internal/client/client.go`,
+  `grpc.UseCompressor`). The status port decodes `grpc-encoding: gzip` (the 4 MiB limit
+  counts the decompressed size) and refuses other encodings with `Unimplemented`, as grpc-go
+  does. Responses are sent uncompressed (grpc-go would reply in the request's encoding; the
+  client accepts either).
+- **Not covered: TLS.** With cluster TLS (`security.cluster-ssl-*`), Go TiDB dials status
+  ports over TLS; tidb-rs's status port speaks plain HTTP, so those calls still fail and are
+  retried until the 40 s budget runs out. To fix with the status port's TLS support.
+- An unimplemented `tikvpb.Tikv` method called on the status port is logged at `warn`, at
+  most once a minute: it means a Go caller this port does not answer.
+- `tests/metrics_process.rs::cluster_tables_fast_with_status_server` asserts each query
+  (including `ANALYZE`) stays under 5 s and warns only for `cluster_config`.
+
+After #161 (playground v8.5.8 + one tidb-rs node, 2026-11-14; seconds on Go TiDB):
+
+| Query on Go TiDB | Go only | + tidb-rs, 404 | + tidb-rs, #161 |
+|---|---|---|---|
+| `ANALYZE TABLE a.t` | 0.26 | 40.49 | 0.04 |
+| `cluster_processlist` | 0.04 | 41.33 (warning) | 0.02 |
+| `cluster_slow_query` | 0.05 | 40.74 (warning) | 0.02 |
+| `cluster_memory_usage` | 0.06 | 40.96 (warning) | 0.02 |
+| `cluster_load` | 1.56 | 1.53 (warning) | 1.53 |
+| `cluster_log` (10 min range) | 0.11 | 0.03 (warning) | 0.03 |
+| `cluster_hardware` / `cluster_systeminfo` | 0.09 / 0.15 | 0.03 / 0.04 (warning) | 0.03 / 0.04 |
+| `cluster_info` | 0.05 | 0.03 | 0.02 |
 
 ## Metric table
 
@@ -190,5 +217,5 @@ So the ab run is not "0 mismatches", but this change adds none.
   `inspection_*` queries, and with a real status port in `cluster_info`.
 - `tikv-client` temporarily comes from a `file://` clone of the fork (rev `2fc142f`, branch
   `tidb-rs/metrics`, not pushed). Switch back to the GitHub URL after review.
-- The coprocessor-based cluster tables still take about 40 s with a tidb-rs node registered.
-  That is unchanged from before and needs its own fix.
+- The coprocessor-based cluster tables took about 40 s with a tidb-rs node registered until
+  issue #161 made the status port answer Go's coprocessor and diagnostics gRPC.

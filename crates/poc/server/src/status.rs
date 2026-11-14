@@ -5,20 +5,26 @@
 //!   `/status` (without Go's `status.init_stats_percentage`: there are no statistics here).
 //!
 //! Every other path answers `404 page not found` (Go's `http.NotFound` text). The listener
-//! speaks HTTP/1.1 and HTTP/2 (prior knowledge), so Go TiDB's gRPC calls to the status port
-//! (cluster memory tables, diagnostics) get an immediate HTTP/2 404, which gRPC reports as
-//! `Unimplemented`, rather than a protocol error; see `docs/adr/0006-metrics.md`.
+//! speaks HTTP/1.1 and HTTP/2 (prior knowledge). HTTP/2 requests with a gRPC content type go
+//! to `rpc` (Go's cmux splits the port the same way): the TiDB coprocessor and diagnostics
+//! services that Go TiDB calls on every node's status port (issue #161,
+//! `docs/adr/0006-metrics.md`).
 
 use std::convert::Infallible;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 
 use bytes::Bytes;
-use http_body_util::Full;
+use hyper::HeaderMap;
 use hyper::Request;
 use hyper::Response;
 use hyper::StatusCode;
+use hyper::body::Frame;
 use hyper::body::Incoming;
+use hyper::body::SizeHint;
 use hyper::header::CONTENT_TYPE;
 use hyper::header::HeaderValue;
 use hyper::service::service_fn;
@@ -65,7 +71,14 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
         conns.spawn(async move {
             let service = service_fn(move |req| {
                 let info = Arc::clone(&info);
-                async move { Ok::<_, Infallible>(handle(&req, &info)) }
+                async move {
+                    let resp = if crate::rpc::is_grpc(&req) {
+                        crate::rpc::serve(req).await
+                    } else {
+                        handle(&req, &info)
+                    };
+                    Ok::<_, Infallible>(resp)
+                }
             });
             if let Err(e) = auto::Builder::new(TokioExecutor::new())
                 .serve_connection(TokioIo::new(stream), service)
@@ -78,7 +91,7 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
     conns.shutdown().await;
 }
 
-fn handle(req: &Request<Incoming>, info: &StatusInfo) -> Response<Full<Bytes>> {
+fn handle(req: &Request<Incoming>, info: &StatusInfo) -> Response<Body> {
     match req.uri().path() {
         "/metrics" => response(
             StatusCode::OK,
@@ -94,12 +107,73 @@ fn handle(req: &Request<Incoming>, info: &StatusInfo) -> Response<Full<Bytes>> {
     }
 }
 
-fn response(status: StatusCode, content_type: &'static str, body: String) -> Response<Full<Bytes>> {
-    let mut resp = Response::new(Full::new(Bytes::from(body)));
+fn response(status: StatusCode, content_type: &'static str, body: String) -> Response<Body> {
+    let mut resp = Response::new(Body::full(Bytes::from(body)));
     *resp.status_mut() = status;
     resp.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     resp
+}
+
+/// A response body: one data frame, then optional trailers (gRPC's status).
+// glue: Go's net/http and grpc-go write bodies and trailers directly.
+#[derive(Debug, Default)]
+pub(crate) struct Body {
+    data: Option<Bytes>,
+    trailers: Option<HeaderMap>,
+}
+
+impl Body {
+    pub(crate) fn empty() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn full(data: Bytes) -> Self {
+        Self {
+            data: Some(data).filter(|d| !d.is_empty()),
+            trailers: None,
+        }
+    }
+
+    pub(crate) fn with_trailers(data: Bytes, trailers: HeaderMap) -> Self {
+        Self {
+            trailers: Some(trailers),
+            ..Self::full(data)
+        }
+    }
+}
+
+impl hyper::body::Body for Body {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        let this = self.get_mut();
+        let frame = match this.data.take() {
+            Some(d) => Some(Frame::data(d)),
+            None => this.trailers.take().map(Frame::trailers),
+        };
+        Poll::Ready(frame.map(Ok))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.data.is_none() && self.trailers.is_none()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let len = self.data.as_ref().map_or(0, |d| d.len() as u64);
+        if self.trailers.is_some() {
+            // No content-length on a gRPC message stream.
+            let mut hint = SizeHint::new();
+            hint.set_lower(len);
+            hint
+        } else {
+            SizeHint::with_exact(len)
+        }
+    }
 }
 
 /// Go's `/status` body, in the field order of Go's `status` struct.
@@ -182,23 +256,214 @@ mod tests {
         let _ = stop.send(());
     }
 
-    /// A gRPC client (HTTP/2 with prior knowledge, what Go TiDB's coprocessor and diagnostics
-    /// clients send to a TiDB status port) gets an HTTP/2 response at once, not a hang.
+    /// An HTTP/2 (prior knowledge) client, as Go TiDB's gRPC clients connect to a status port.
+    async fn h2(
+        addr: std::net::SocketAddr,
+    ) -> hyper::client::conn::http2::SendRequest<http_body_util::Full<Bytes>> {
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (send, conn) =
+            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+                .await
+                .unwrap();
+        tokio::spawn(conn);
+        send
+    }
+
+    /// One gRPC call: the response headers, the response messages, the trailers.
+    async fn grpc_call(
+        addr: std::net::SocketAddr,
+        path: &str,
+        msg: &[u8],
+    ) -> (hyper::HeaderMap, Vec<Vec<u8>>, Option<hyper::HeaderMap>) {
+        grpc_call_encoded(addr, path, msg, None).await
+    }
+
+    /// `grpc_call` with the message compressed in `encoding` (`grpc-encoding`).
+    async fn grpc_call_encoded(
+        addr: std::net::SocketAddr,
+        path: &str,
+        msg: &[u8],
+        encoding: Option<&str>,
+    ) -> (hyper::HeaderMap, Vec<Vec<u8>>, Option<hyper::HeaderMap>) {
+        use http_body_util::BodyExt;
+        let gzipped;
+        let (flag, msg) = match encoding {
+            Some("gzip") => {
+                gzipped = crate::rpc::testdata::gzip(msg);
+                (1u8, &gzipped[..])
+            }
+            Some(_) => (1u8, msg),
+            None => (0u8, msg),
+        };
+        let mut framed = vec![flag];
+        framed.extend_from_slice(&u32::try_from(msg.len()).unwrap().to_be_bytes());
+        framed.extend_from_slice(msg);
+        let mut req = Request::post(format!("http://{addr}{path}"))
+            .version(hyper::Version::HTTP_2)
+            .header(CONTENT_TYPE, "application/grpc")
+            .header("te", "trailers");
+        if let Some(encoding) = encoding {
+            req = req.header("grpc-encoding", encoding);
+        }
+        let req = req
+            .body(http_body_util::Full::new(Bytes::from(framed)))
+            .unwrap();
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            h2(addr).await.send_request(req),
+        )
+        .await
+        .expect("server answers gRPC promptly")
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let headers = resp.headers().clone();
+        let collected = resp.into_body().collect().await.unwrap();
+        let trailers = collected.trailers().cloned();
+        let mut body = collected.to_bytes();
+        let mut messages = Vec::new();
+        while !body.is_empty() {
+            assert_eq!(body[0], 0, "uncompressed");
+            let len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
+            messages.push(body[5..5 + len].to_vec());
+            body = body.slice(5 + len..);
+        }
+        (headers, messages, trailers)
+    }
+
+    /// gRPC requests on the status port reach `rpc`: Go TiDB's ANALYZE broadcast and memory-table
+    /// scans get an answer, unknown methods get `Unimplemented` (issue #161).
     #[tokio::test]
-    async fn http2_prior_knowledge_gets_a_404() {
+    async fn grpc_requests_are_routed_to_rpc() {
+        use crate::rpc::testdata::*;
+        use prost::Message as _;
         let (addr, stop) = start().await;
-        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        // Connection preface + an empty SETTINGS frame.
-        s.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
-            .await
-            .unwrap();
-        let mut buf = [0u8; 9];
-        tokio::time::timeout(std::time::Duration::from_secs(5), s.read_exact(&mut buf))
-            .await
-            .expect("server answers HTTP/2 promptly")
-            .unwrap();
-        // The server's first frame is its SETTINGS frame (type 4).
-        assert_eq!(buf[3], 4, "{buf:?}");
+
+        let req = crate::rpc::CopRequest {
+            tp: 103,
+            data: dag(
+                vec![broadcast("FLUSH STATS_DELTA `a`.`t` CLUSTER")],
+                EncodeType::TypeDefault,
+                false,
+            ),
+        };
+        let (headers, messages, trailers) =
+            grpc_call(addr, crate::rpc::COPROCESSOR, &req.encode_to_vec()).await;
+        assert_eq!(headers[CONTENT_TYPE], "application/grpc");
+        assert_eq!(trailers.unwrap()["grpc-status"], "0");
+        assert_eq!(messages.len(), 1);
+        let resp = crate::rpc::CopResponse::decode(&messages[0][..]).unwrap();
+        assert_eq!(resp.other_error, "");
+        assert!(select_response(&resp.data).get_chunks().is_empty());
+
+        let req = crate::rpc::CopRequest {
+            tp: 103,
+            data: dag(vec![table_scan(1)], EncodeType::TypeChunk, false),
+        };
+        let (_, messages, trailers) =
+            grpc_call(addr, crate::rpc::COPROCESSOR, &req.encode_to_vec()).await;
+        assert_eq!(trailers.unwrap()["grpc-status"], "0");
+        let resp = crate::rpc::CopResponse::decode(&messages[0][..]).unwrap();
+        assert_eq!(resp.other_error, "");
+        assert_eq!(
+            select_response(&resp.data).get_encode_type(),
+            EncodeType::TypeChunk
+        );
+
+        // server_info: one empty response; search_log: an empty stream.
+        let (_, messages, trailers) = grpc_call(addr, crate::rpc::SERVER_INFO, &[8, 1]).await;
+        assert_eq!(trailers.unwrap()["grpc-status"], "0");
+        assert_eq!(messages, vec![Vec::<u8>::new()]);
+        let (_, messages, trailers) = grpc_call(addr, crate::rpc::SEARCH_LOG, &[8, 1, 16, 2]).await;
+        assert_eq!(trailers.unwrap()["grpc-status"], "0");
+        assert!(messages.is_empty());
+
+        // Trailers-only answers: the status is in the headers.
+        for (path, code, message) in [
+            (
+                "/tikvpb.Tikv/KvGet",
+                "12",
+                "unknown method KvGet for service tikvpb.Tikv",
+            ),
+            (
+                "/tikvpb.Tikv/CoprocessorStream",
+                "12",
+                "unknown method CoprocessorStream for service tikvpb.Tikv",
+            ),
+            (
+                "/grpc.health.v1.Health/Check",
+                "12",
+                "unknown service grpc.health.v1.Health",
+            ),
+        ] {
+            let (headers, messages, trailers) = grpc_call(addr, path, &[]).await;
+            assert_eq!(headers["grpc-status"], code, "{path}");
+            assert_eq!(headers["grpc-message"], message, "{path}");
+            assert!(messages.is_empty() && trailers.is_none(), "{path}");
+        }
+        let (headers, _, _) = grpc_call(addr, crate::rpc::COPROCESSOR, &[0xff]).await;
+        assert_eq!(headers["grpc-status"], "13");
+        let _ = stop.send(());
+    }
+
+    /// Go TiDB with `tikv-client.grpc-compression-type = "gzip"` compresses its requests to
+    /// status ports too: they are answered, not refused (which client-go would retry for 40 s).
+    #[tokio::test]
+    async fn gzip_grpc_requests_are_answered() {
+        use crate::rpc::testdata::*;
+        use prost::Message as _;
+        let (addr, stop) = start().await;
+        let req = crate::rpc::CopRequest {
+            tp: 103,
+            data: dag(
+                vec![broadcast("FLUSH STATS_DELTA `a`.`t` CLUSTER")],
+                EncodeType::TypeDefault,
+                false,
+            ),
+        };
+        let (_, messages, trailers) = grpc_call_encoded(
+            addr,
+            crate::rpc::COPROCESSOR,
+            &req.encode_to_vec(),
+            Some("gzip"),
+        )
+        .await;
+        assert_eq!(trailers.unwrap()["grpc-status"], "0");
+        let resp = crate::rpc::CopResponse::decode(&messages[0][..]).unwrap();
+        assert_eq!(resp.other_error, "");
+
+        let (headers, messages, _) =
+            grpc_call_encoded(addr, crate::rpc::SERVER_INFO, &[8, 1], Some("snappy")).await;
+        assert_eq!(headers["grpc-status"], "12");
+        assert_eq!(
+            headers["grpc-message"],
+            "grpc: Decompressor is not installed for grpc-encoding \"snappy\""
+        );
+        assert!(messages.is_empty());
+        let _ = stop.send(());
+    }
+
+    /// HTTP/2 without a gRPC content type is still the status API.
+    #[tokio::test]
+    async fn http2_without_grpc_is_the_status_api() {
+        use http_body_util::BodyExt;
+        let (addr, stop) = start().await;
+        for (path, status) in [
+            ("/status", StatusCode::OK),
+            ("/tikvpb.Tikv/Coprocessor", StatusCode::NOT_FOUND),
+        ] {
+            let req = Request::get(format!("http://{addr}{path}"))
+                .version(hyper::Version::HTTP_2)
+                .body(http_body_util::Full::new(Bytes::new()))
+                .unwrap();
+            let resp = h2(addr).await.send_request(req).await.unwrap();
+            assert_eq!(resp.status(), status, "{path}");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            if status == StatusCode::OK {
+                assert!(body.starts_with(b"{\"connections\""), "{body:?}");
+            } else {
+                assert_eq!(&body[..], b"404 page not found\n");
+            }
+        }
         let _ = stop.send(());
     }
 }
