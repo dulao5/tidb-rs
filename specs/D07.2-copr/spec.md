@@ -74,3 +74,54 @@ Go `make(chan *copResponse, 2 或 18)`；移植用容量相同的 `tokio::sync::
 - govec `copr`（tracker `govec/domains/copr.go`）：2,621 条记录，抄自 14 个 Go 测试（key_ranges_test.go、coprocessor_test.go 中不依赖 iterator 的全部测试）加随机用例。`split` / `build` 在 mocktikv 上运行，记录 region 布局，Rust 回放按布局实现 client-go `BatchLocateKeyRanges` 的结果（`tests/govec_copr.rs` 的 `LayoutCache`）。arm64 本地生成，amd64 取自 tracker CI（两个目标的记录相同）。
 - 反证：7 处单行改动（small task 的 `<=`、小 LIMIT 关 paging 的 `<`、`Split` 的 `>`、row hint 的回退一步、bucket 的结束 key 相等判断、合并 task 的 busy threshold、`GrowPagingSize` 的下限）都被回放发现。
 - mocktikv 的限制：多个区间中含开放结束 key 时，批量 region 扫描返回 "PD server timeout"，随机用例只在单个区间时用开放结束 key。
+
+## 6. 第 2 部分：client、iterator、worker 与响应处理
+
+依赖 client-rust#22（`tikv_client::CopSender`：单个 region 的 cop 请求，client-go `SendReqCtx` 的语义；`locate_key_ranges`、`rpc_context`、`resolve_lock`；`Backoff::backoff` 等）。
+
+### 6.1 边界的扩展（`copr::tikv`）
+
+| trait / 类型 | Go | client-rust 实现（`copr::client_rust`） |
+|---|---|---|
+| `Backoffer` | TiDB `backoff.Backoffer`（D07.1）：`Backoff(BoRegionMiss)`、`BackoffWithMaxSleepTxnLockFast`、`GetTotalSleep` | `ClientRustBackoffer`（client-rust 的时间预算 `Backoff`） |
+| `ClientHelper` | client-go `txnsnapshot.ClientHelper`（每个 iterator 一个，带 resolved / committed 锁集合）：`SendReqCtx`、`ResolveLocksWithOpts` | `ClientRustHelper`（iterator 的 `start_ts` 上的 `CopSender`） |
+| `TiKVStore` | `tikv.KVStore`：`NewClientHelper`、`NewBackofferWithVars`、`CheckVisibility` | `ClientRustStore`（`TransactionClient`） |
+| `RateLimit`、`get_request_source`、`merge_from_time_detail`、`merge_from_scan_detail_v2`、`EndpointType`、`Variables` | client-go `util.RateLimit`、`RequestSource.GetRequestSource`、`TimeDetail.MergeFromTimeDetail`、`ScanDetail.MergeFromScanDetailV2`、`tikvrpc.EndpointType`、`kv.Variables` | 按 client-go 写（`go-l3: ADR-0008`） |
+
+`handleLockErr` 的"解锁 + `BackoffWithMaxSleepTxnLockFast(msBeforeExpired)`"在 client-rust 中是一次调用（`resolve_lock_and_wait`）。
+
+### 6.2 并发与通道（N3）
+
+- worker 与 task sender 在 `Store` 的 ExecPool 上 spawn（M-GO）；没有 pool 时（测试）在当前 tokio runtime 上。`Close` 等待它们（M-WG）。
+- `finishCh` 是 `watch` 通道；所有收发都与它 `select`（M-CH），与 Go 相同。`taskCh` 容量 1，多个 worker 共享接收端（`Mutex<Receiver>`）。
+- 不保序时 Go 的 `respChan` 无缓冲；tokio 通道至少一个槽位（L2：worker 最多多领先一个响应，受 `sendRate` 约束不变）。`finCopResp` 是 `RespMsg::Fin`。
+- `handleTask` 的 `recover` 是 `catch_unwind`，panic 变成错误响应。
+- **取消**：N3 取消语句是丢弃 future，用 `?` 提前返回的执行器也不会调用 `Close`。所以 `CopIterator` 实现 `Drop`：关闭 `finishCh`、中止 worker（相当于 Go `Close` 中的 `rpcCancel.CancelAll()`）、关闭 OOM action；否则 worker 会在 region 退避、锁解析、paging 续读中一直访问 TiKV，直到退避预算用完（Lucky 的评审）。测试 `dropping_the_iterator_stops_the_workers`。
+- `copIterator.Next` 不直接实现 `kv.Response`：`kv.Client.Send` 是同步接口，而建任务要定位 region（I/O），所以 `CopClient::send` 返回 `LazyCopResponse`，在第一次 `Next` 时建任务并 `open`。Go 中建任务的错误也是在第一次 `Next`（`copErrorResponse`）报出，行为相同（L2）。
+- #123 的混合 Iterator（`advance` / `fill`）只针对 `kv.Iterator`；coprocessor 走 `kv.Response.Next`，每个响应一次 await，不受影响（D07.0 `iter-next-fill.md`）。
+
+### 6.3 已知差异（第 2 部分）
+
+1. **replica read 与 stale read**：client-rust 只读 leader（对照表 §3.1，RR-5）。`req.ReplicaRead` 非 leader 或 `IsStaleness` 时 `handleTaskOnce` 报错，不静默读 leader。`MatchStoreLabels`、`redirect2Replica` 随之不生效。
+2. **region bucket**：client-rust 没有 bucket，位置不带 bucket，`UpdateBucketsIfNeeded` 为空操作（对照表 §2，P2）。
+3. **store 的估计等待时间**恒为 0：store batch 不会因 leader 繁忙而退回（`BuildBatchTask` 的 busy 分支）。
+4. **client-go 的请求统计**（`RegionRequestRuntimeStats`、backoff 次数）没有对应：`CopRuntimeStats` 只记录 TiKV 返回的时间 / 扫描明细与被调用地址（地址在 client-rust 中未知，为空）。
+5. **`CheckVisibility`**：client-rust 没有 GC safe point 缓存，恒为可见。这是边界桩（`blocked-by`：client-rust 的 safe point），登记在 [client-go 对等对照表](../D07.1-store/client-go-parity.md) §4 的 `CheckVisibility` 一行（P1，正确性：低于 safe point 的读不报错，可能读到已被 GC 的数据）。
+6. **错误转换**：D07.1 的 `derr.ToTiDBErr` 还没有，client-rust 的错误转成带原消息的普通错误。
+7. **锁集合**：client-rust 的锁提示从空开始，不预先放入 `start_ts`（Go `resolvedLocks.Put(req.StartTs)`，只对 pipelined DML 写入的锁有意义，属于写路径）。
+8. **未移植的 `kv.Request` 字段**（D07.0 spec §4 第 3 条）：`CoprRequestRateLimit`（`GetRequestRateLimit` 返回 None）、`ResourceGroupTagger`（N9，D07.0 T8）、`RunawayChecker`（N10）。`ResourceControlContext` 只填组名（N10 未定）。
+9. **coprocessor cache**（D07.4，例外 A3）：`buildCacheKey` 不生成 key；TiKV 报 cache hit 时按 Go 返回 "Internal error: received illegal TiKV response"。
+10. **`trxevents` 回调**未移植：`handleLockErr` 照 Go 无回调时的分支打 debug 日志。
+11. **`rpcCancel.CancelAll()`**：client-rust 没有逐 RPC 的取消器；`Close` 后 worker 在下一次发送或检查 `finishCh` 时退出，进行中的 RPC 跑完。
+12. **`regionErr.String()`**（gogo 文本格式）在退避错误消息中写成 prost 的 `Debug` 格式。
+13. **`copResponse.MemSize`**：不缓存到 `respSize`，每次重算（值相同）；`pbResp.Size()` 是 prost 的 `encoded_len`。
+14. **`OnSendFailForBatchRegions`、`GetMPPClient`**（DEF.MPP），**`kvStore.GetTiKVClient` 与 `tikvClient.*`**（client-go `tikv.Client` 的透传，读路径上没有调用方，ADR 0008），**`metrics.go`**（coprocessor cache 的指标，A3）：不移植。
+15. **client-rust#22 的 `CopSender` 与 client-go `SendReqCtx` 的两处差异**：
+    - (a) MaxTimestampNotSynced、ReadIndexNotReady、DataIsNotReady 等 region 错误：client-go 在调用内部按各自的退避（`BoMaxTsNotSynced`、`BoRegionScheduling`、stale read 的 DataIsNotReady 处理）重试；`CopSender` 把它们交回调用方，copr 按 `BoRegionMiss` 退避后重新拆分任务（多一次 region 定位，结果相同）。
+    - (b) 设了读超时（`tikv_client_read_timeout`）时，第一次尝试的 gRPC DeadlineExceeded：client-go 不退避、立即重试（`onReadReqConfigurableTimeout`）；`CopSender` 按 `TikvRpc` 退避后重试（只对 TiKV 返回的 ServerIsBusy "deadline is exceeded" 立即重试）。
+
+### 6.4 验收（第 2 部分）
+
+- converge：`matched 104/116`；其余 12 个：6.3 第 14 条的 10 个（DEF.MPP 2、`tikv.Client` 透传 6、cache 指标 2），`buildTiDBMemCopTasks`（D06.5 边界桩，标注为 `glue`），以及 `coprocessor.go` 的 `init`（只做 `finCopResp = &copResponse{}`，移植中这个哨兵是 `RespMsg::Fin` 变体，没有全局对象）。
+- govec：第 2 部分的函数需要 TiKV store，不出向量；tracker 豁免理由指向 mock store 单元测试 `crates/store/tests/copr_iter.rs`（保序 / 逆序 / 不保序、region 错误重建任务、锁解析后重试、paging 的剩余区间与页大小翻倍、write conflict、other error、lite worker）。client-rust 侧 7 个单测（client-rust#22）。
+- PoC 接入、`Snapshot::coprocessor` 退役、playground 上与 Go 的对比：最后一个 PR（tasks T11、T12）。

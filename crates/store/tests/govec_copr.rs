@@ -176,11 +176,11 @@ impl LayoutCache {
 }
 
 impl TiKVRegionCache for LayoutCache {
-    type Backoffer = ();
+    type Backoffer = NoBo;
 
     async fn batch_locate_key_ranges(
         &self,
-        _bo: &mut (),
+        _bo: &mut NoBo,
         key_ranges: &[KeyRange],
         _need_leader: bool,
         need_buckets: bool,
@@ -220,7 +220,7 @@ impl TiKVRegionCache for LayoutCache {
 
     async fn get_tikv_rpc_context(
         &self,
-        _bo: &mut (),
+        _bo: &mut NoBo,
         id: RegionVerID,
         _replica_read: ReplicaReadType,
         _seed: u32,
@@ -236,6 +236,25 @@ impl TiKVRegionCache for LayoutCache {
                 store_id: r.store,
                 store_estimated_wait_time: Duration::ZERO,
             }))
+    }
+}
+
+/// The layout cache does not back off.
+struct NoBo;
+
+impl tidb_store::copr::tikv::Backoffer for NoBo {
+    async fn backoff_region_miss(&mut self, _err: Error) -> Result<(), Error> {
+        Ok(())
+    }
+    async fn backoff_with_max_sleep_txn_lock_fast(
+        &mut self,
+        _ms: i64,
+        _err: Error,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+    fn get_total_sleep(&self) -> i64 {
+        0
     }
 }
 
@@ -354,20 +373,20 @@ fn exec_split(args: &[Value], out: &Value) -> Value {
     let limit = i(&args[3]) as isize;
     let res = match args[2].as_str().unwrap() {
         "regions" => {
-            let v = block_on(cache.split_region_ranges(&mut (), rs, limit)).unwrap();
+            let v = block_on(cache.split_region_ranges(&mut NoBo, rs, limit)).unwrap();
             ranges_out(&v)
         }
         f => {
             let locs = if f == "locs" {
                 block_on(cache.split_key_ranges_by_locations(
-                    &mut (),
+                    &mut NoBo,
                     new_key_ranges(rs),
                     limit,
                     args[4].as_bool().unwrap(),
                     args[5].as_bool().unwrap(),
                 ))
             } else {
-                block_on(cache.split_key_ranges_by_buckets(&mut (), new_key_ranges(rs)))
+                block_on(cache.split_key_ranges_by_buckets(&mut NoBo, new_key_ranges(rs)))
             }
             .unwrap();
             if locs.is_empty() {
@@ -396,7 +415,7 @@ fn exec_build(args: &[Value], out: &Value) -> Value {
     opt.resp_chan = args[4].as_bool().unwrap();
     opt.ignore_tikv_client_read_timeout = args[5].as_bool().unwrap();
     let tasks = block_on(build_cop_tasks(
-        &mut (),
+        &mut NoBo,
         &new_key_ranges(ranges(&args[1])),
         &mut opt,
     ))
@@ -574,6 +593,6 @@ fn tidb_store_type_is_a_boundary_stub() {
     };
     let mut opt = BuildCopTaskOpt::new(&req, &cache);
     let ranges = new_key_ranges(build_key_ranges(&[b"a", b"b"]));
-    let err = block_on(build_cop_tasks(&mut (), &ranges, &mut opt)).unwrap_err();
+    let err = block_on(build_cop_tasks(&mut NoBo, &ranges, &mut opt)).unwrap_err();
     assert!(err.to_string().contains("D06.5"), "{err}");
 }
