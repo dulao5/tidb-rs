@@ -55,6 +55,12 @@
 | VS1-31 | `ResolveIndices`、`ToPB`、access object（VS1 算子） | D10.9 | depth | 0.04 | VS1-27 | DAG 逐字节一致 | 未开始 |
 | VS1-32 | 规划耗时的早期测量：VS1-24 / VS1-28 一能产出计划就用只含 VS1 语句的 lua 测每次 EXECUTE 的优化耗时，与 Go（plan cache 打开 / 关闭）对照 | glue | depth | 0.03 | VS1-24、VS1-28 | 报告写进 plan §10-3 | 未开始 |
 
+Phase 2 的待定设计问题（来自 VS1-19 / VS1-10 的评审，#223 / #224）：
+
+- **VS1-23**：`BaseLogicalPlan` 是否改为嵌入 `baseimpl::Plan`（与 `BasePhysicalPlan` 一致，Go 的 `BaseLogicalPlan` 嵌入 `baseimpl.Plan`）；同时统一 query block offset 的类型（物理侧 `baseimpl::Plan.qb_block` 为 `isize`，按 M-INT；逻辑侧 `BaseLogicalPlan.qb_offset` 为 `i32`）。
+- **VS1-24**：`probeParents`（`propagateProbeParents` 设置）指向祖先节点，需要一种不形成 `Arc` 环的表示（计划树中不允许 `Weak`，N1 §3.4）。在此之前 `BasePhysicalPlan.probe_parents` 保留 Go 的类型，不被设置。
+- **VS1-26**：`GetPlanCostVer1/2` 的代价缓存经 `make_mut_plan` 写子节点，子节点被共享时（`taskMap` 候选）会被写时复制，缓存落在副本上。试点需确认这是否可接受（N1 §7 第 3 条）。
+
 ## Phase 3：扫描执行与集成（C2b）
 
 | # | 任务 | 块 | 标签 | 周 | 依赖 | 完成条件 | 状态 |
