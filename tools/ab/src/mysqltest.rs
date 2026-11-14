@@ -385,6 +385,11 @@ pub fn session_vars(sql: &str) -> Vec<(String, bool)> {
     out
 }
 
+/// Whether a statement is `USE db`.
+pub fn is_use(sql: &str) -> bool {
+    words(sql).first().is_some_and(|w| w.text == "USE")
+}
+
 /// Whether a session variable can change what a read returns (the database, character sets
 /// and collations, SQL mode, time, memory quota, snapshot / external timestamp reads, ...).
 /// When tidb-rs rejects setting one of these, its session no longer answers like Go's; the
@@ -707,6 +712,8 @@ mod tests {
         assert_eq!(v("set @@rand_seed1=1,@@rand_seed2=2").len(), 2);
         assert!(v("set @a = 1").is_empty());
         assert!(v("select 1").is_empty());
+        assert!(is_use(" USE `db`"));
+        assert!(!is_use("set names utf8"));
         assert!(affects_results("character_set_results"));
         assert!(affects_results("sql_mode"));
         assert!(!affects_results("tidb_cost_model_version"));

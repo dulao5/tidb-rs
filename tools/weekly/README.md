@@ -27,7 +27,8 @@ The parts run in parallel jobs, each against its own cluster (`run.sh <part> <ou
 - the fault scenarios;
 - the lock cases;
 - the integration tests: reads sent to tidb-rs and their verdicts, agreement on what tidb-rs
-  executed, the mismatches, the top `unsupported` reasons and tidb-rs errors, and the tests
+  executed, the mismatches, the session statements tidb-rs rejected and the reads skipped
+  because of them, the top `unsupported` reasons and tidb-rs errors, and the tests
   with the most mismatches / unsupported statements.
 
 It compares with the **baseline** of the same mode: the `<mode>-baseline` artifact, uploaded only by GREEN runs (or by a manual run with `accept_baseline`, never a RED one), kept 90 days. A regression therefore stays reported until it is fixed or accepted. Every run also keeps its own `<mode>-results`.
@@ -38,7 +39,7 @@ A wrong result in the raw data (a mismatch, a wrong fault-scenario read, a lock 
 
 - **RED:** a wrong result, a mismatch (also of an integration test, unless accepted in `integrationtest-expected.json`) or a new inconsistency. The run fails and no tag is pushed.
 - **INCOMPLETE:** a part did not run fully: skipped, failed to set up, missing, or with too few results (an empty `ab` workload, a sysbench workload × thread count without both sides, fewer than 18 lock cases). This is not a pass.
-- **REGRESSED:** compared with the last run, an operator is no longer executable on tidb-rs, `unsupported` statements increased (for the integration tests: over the tests both runs ran), or a sysbench B/A ratio dropped by more than 15%.
+- **REGRESSED:** compared with the last run, an operator is no longer executable on tidb-rs, `unsupported` statements increased (for the integration tests: over the tests both runs ran; there also the reads skipped as `session diverged`), or a sysbench B/A ratio dropped by more than 15%.
 - **GREEN:** otherwise.
 
 INCOMPLETE and REGRESSED show as a warning (a failed `continue-on-error` step). The weekly tag gets a `-incomplete` / `-regressed` suffix.
@@ -66,6 +67,10 @@ known; a listed statement that ran on tidb-rs and no longer mismatches is report
 remove from integrationtest-expected.json" (not a failure): delete the entry. Mismatches the
 harness causes are fixed in `ab`, not listed: for example `ab` skips the reads of a connection
 whose session diverged (tidb-rs rejected a result-affecting `SET` / `USE`; `tools/ab/README.md`).
+Those skips must not hide defects, so the report counts them, lists the rejected session
+statements with the reads skipped after each (statements not rejected in the previous run are
+marked **new**), and an increase over the tests both runs ran is REGRESSED. A rejected `USE`
+also counts as a tidb-rs error.
 
 `ddl/index_modify` turns `tidb_ddl_enable_fast_reorg` on, and Go TiDB then refuses `ADD INDEX`
 (8256, "no enough space") when the disk under its `temp-dir` has less than 10% free; the reads

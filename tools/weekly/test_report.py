@@ -54,6 +54,20 @@ def it_results(d, rows, status="ok"):
             f.write(json.dumps(r) + "\n")
 
 
+def it_records(d, records):
+    """An integrationtest part from raw results.jsonl records (dicts)."""
+    write(d, "integrationtest.json", {"part": "integrationtest", "status": "ok", "tests": 1, "seconds": 60})
+    os.makedirs(f"{d}/ab-integrationtest", exist_ok=True)
+    with open(f"{d}/ab-integrationtest/results.jsonl", "w") as f:
+        for r in records:
+            f.write(json.dumps({"template": "a/t", "protocol": "text", **r}) + "\n")
+
+
+def diverged(line, cause_line, cause_sql):
+    return {"verdict": "skipped", "query": "select 1", "line": line, "kind": "session diverged",
+            "cause": {"line": cause_line, "sql": cause_sql, "var": "database"}}
+
+
 class VerdictTest(unittest.TestCase):
     def test_mismatch_plus_error_is_red(self):
         # One workload mismatched (exit 1), another errored (exit 2): run.sh may record the
@@ -183,6 +197,46 @@ class VerdictTest(unittest.TestCase):
                 text = f.read()
             self.assertIn("Fixed, remove from integrationtest-expected.json: `a/t:0` (now match)", text)
             self.assertNotIn("b/t:5", text)
+
+    def test_integrationtest_more_diverged_skips_than_baseline_is_regressed(self):
+        # tidb-rs starts rejecting a USE: its reads are skipped, nothing mismatches.
+        with tempfile.TemporaryDirectory() as d:
+            it_records(f"{d}/prev", [{"verdict": "match", "query": "select 1", "line": 1}])
+            it_records(f"{d}/cur", [
+                {"verdict": "b_error", "query": "use  DB1;", "line": 1, "kind": "use rejected",
+                 "detail": "1049: Unknown database 'db1'"},
+                diverged(2, 1, "use  DB1;"), diverged(3, 1, "use  DB1;")])
+            rc, first = report(f"{d}/cur", prev=f"{d}/prev", parts="integrationtest")
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+            with open(f"{d}/cur/report.md") as f:
+                text = f.read()
+            self.assertIn("`session diverged` up by 2 (0 → 2)", text)
+            self.assertIn("| `use db1` **(new)** | 1 | 2 |", text)
+            self.assertIn("use rejected: 1049", text)  # a rejected USE is a tidb-rs error
+            self.assertIn("1 reads sent to tidb-rs", text)  # skipped reads are not sent
+
+    def test_integrationtest_rejected_statement_seen_before_is_not_new(self):
+        with tempfile.TemporaryDirectory() as d:
+            rej = {"verdict": "b_set_rejected", "query": "set names gbk", "line": 1, "kind": "session",
+                   "detail": "1235: x"}
+            it_records(f"{d}/prev", [rej, diverged(2, 1, "set names gbk")])
+            it_records(f"{d}/cur", [rej, diverged(2, 1, "set names gbk")])
+            rc, first = report(f"{d}/cur", prev=f"{d}/prev", parts="integrationtest")
+            self.assertTrue(first.startswith("**GREEN**"), first)
+            with open(f"{d}/cur/report.md") as f:
+                text = f.read()
+            self.assertIn("| `set names gbk` | 1 | 1 |", text)
+            self.assertNotIn("(new)", text)
+
+    def test_integrationtest_skipped_expected_entry_is_not_fixed(self):
+        # A listed read skipped as "session diverged" did not run on tidb-rs: not "fixed".
+        with tempfile.TemporaryDirectory() as d:
+            it_records(d, [diverged(5, 1, "use x")])
+            rc, first = report(d, parts="integrationtest",
+                               expected={"a/t:5": {"class": "bug", "reason": "r", "issue": "#1"}})
+            with open(f"{d}/report.md") as f:
+                self.assertNotIn("Fixed, remove", f.read())
 
     def test_integrationtest_results_do_not_count_for_ab(self):
         # A mismatch of the integration tests must not turn the ab part red.

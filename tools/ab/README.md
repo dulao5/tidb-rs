@@ -132,6 +132,8 @@ Outcome per statement:
 - `unsupported`: B answered 1235 (`ER_NOT_SUPPORTED_YET`), or B could not log in as the user of
   a `connect` (tidb-rs has a single account).
 - `b_error`: A succeeded and B failed otherwise (other error code, timeout, lost connection).
+  Also a `USE` that B rejects (kind `use rejected`): the database exists on A, so this is a
+  tidb-rs defect; the reads after it are still skipped (`session diverged`).
 - `a_error`: A failed and the test does not expect an error (`--error`). Any class; not scored.
   Mostly features of TiDB master missing in the release under test.
 - `skipped`: a read not sent to B: inside a transaction on A (BEGIN/START TRANSACTION until
@@ -145,7 +147,8 @@ Outcome per statement:
   `mysqltest::affects_results`), so B's session no longer answers like A's. Reads in that
   connection are skipped until the variable is set again on both sides, or set back to `DEFAULT`
   on A (B never changed it). Rejected settings of other variables (cost model, concurrency,
-  chunk sizes, ...) do not stop the comparison.
+  chunk sizes, ...) do not stop the comparison. `SET GLOBAL` is a write, not tracked: B
+  rejecting one shows up as mismatches in later connections, not as skipped reads.
 - `write`: a session or write statement that A ran as the test expected.
 
 One statement is never run: `SET GLOBAL tidb_enable_ddl = OFF` (`ddl/db_integration`). The test
@@ -176,7 +179,11 @@ Output in `--out-dir`:
 - `results.jsonl`: every read sent to B (match, mismatch, unsupported, b_error), one JSON
   object per line in the format of the other workloads (`template` = test name, `protocol`
   `text`, `verdict`, `query`) plus `line`, and for anything but a match the `kind` and
-  `detail` of `statements.tsv`. The weekly build's `integrationtest` part reads it (`tools/weekly`).
+  `detail` of `statements.tsv`. Also what the session divergence hides: every session
+  statement B rejected (verdict `b_set_rejected`, `detail` = B's error; a rejected `USE` is a
+  `b_error`), and every read skipped as `session diverged` (verdict `skipped`, with `cause`:
+  the `line`, `sql` and variable of the rejected statement). The weekly build's
+  `integrationtest` part reads it (`tools/weekly`).
 
 The tidb-rs-tracker imports the directory (`scripts/tracker.py import-integration`) and
 publishes per-file counts, reasons and every mismatch (R1).

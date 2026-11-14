@@ -115,8 +115,11 @@ def integration(base, expected=None):
     """Summary of the integrationtest part from tidb-ab's ab-integrationtest/results.jsonl:
     {"totals": {verdict: n}, "tests": {test: {verdict: n}}, "reasons": Counter (unsupported),
     "errors": Counter (b_error), "mismatches": [record] (not in `expected`), "known": [record]
-    (in `expected`), "fixed": [(key, verdict)] (in `expected`, ran on tidb-rs, no longer a mismatch)}, or None
-    when there is none."""
+    (in `expected`), "fixed": [(key, verdict)] (in `expected`, ran on tidb-rs, no longer a mismatch),
+    "rejected": Counter (normalized session statements tidb-rs rejected: `b_set_rejected` records
+    and `USE` counted as b_error), "causes": Counter (normalized causing statement -> reads
+    skipped as "session diverged")}, or None when there is none. Per test, "skipped" counts the
+    reads skipped as "session diverged"."""
     expected = expected or {}
     if not base:
         return None
@@ -124,7 +127,7 @@ def integration(base, expected=None):
     if not hits:
         return None
     totals, tests, reasons, errors, mismatches, known = Counter(), defaultdict(Counter), Counter(), Counter(), [], []
-    ran = {}
+    ran, rejected, causes = {}, Counter(), Counter()
     with open(hits[0]) as f:
         for line in f:
             if not line.strip():
@@ -133,7 +136,12 @@ def integration(base, expected=None):
             v = r.get("verdict", "?")
             totals[v] += 1
             tests[r.get("template", "?")][v] += 1
-            ran[it_key(r)] = v
+            if v in SENT:
+                ran[it_key(r)] = v
+            if v == "b_set_rejected" or (v == "b_error" and r.get("kind") == "use rejected"):
+                rejected[norm_sql(r.get("query", ""))] += 1
+            elif v == "skipped":
+                causes[norm_sql((r.get("cause") or {}).get("sql", "?"))] += 1
             if v == "unsupported":
                 reasons[reason(r.get("detail") or r.get("kind") or "")] += 1
             elif v == "b_error":
@@ -144,7 +152,23 @@ def integration(base, expected=None):
     seen = {it_key(r) for r in known}
     fixed = sorted((k, ran[k]) for k in expected if k in ran and k not in seen)
     return {"totals": totals, "tests": tests, "reasons": reasons, "errors": errors,
-            "mismatches": mismatches, "known": known, "fixed": fixed}
+            "mismatches": mismatches, "known": known, "fixed": fixed, "rejected": rejected,
+            "causes": causes}
+
+
+# results.jsonl verdicts of reads sent to tidb-rs (the others: "b_set_rejected", a session
+# statement tidb-rs rejected; "skipped", a read not sent because the session diverged).
+SENT = ("match", "mismatch", "unsupported", "b_error")
+
+
+def norm_sql(sql):
+    """A statement to group by: lower case, single spaces, no trailing semicolon."""
+    return " ".join(sql.split()).rstrip(";").strip().lower()[:120]
+
+
+def sent(c):
+    """Reads sent to tidb-rs among verdict counts `c` (b_error includes a rejected USE)."""
+    return sum(c[v] for v in SENT)
 
 
 def reason(detail):
@@ -158,15 +182,25 @@ def reason(detail):
     return " ".join(d.split())[:120] or "(no message)"
 
 
-def it_unsupported_growth(cur, prev):
-    """(previous, current) unsupported counts over the tests both runs ran, or None."""
+def it_growth(cur, prev, verdict):
+    """(previous, current) counts of `verdict` over the tests both runs ran, or None."""
     if not cur or not prev:
         return None
     common = set(cur["tests"]) & set(prev["tests"])
     if not common:
         return None
-    return (sum(prev["tests"][t]["unsupported"] for t in common),
-            sum(cur["tests"][t]["unsupported"] for t in common))
+    return (sum(prev["tests"][t][verdict] for t in common),
+            sum(cur["tests"][t][verdict] for t in common))
+
+
+def it_unsupported_growth(cur, prev):
+    return it_growth(cur, prev, "unsupported")
+
+
+def it_diverged_growth(cur, prev):
+    """Reads skipped as "session diverged" (tidb-rs rejected a result-affecting session
+    statement), over the tests both runs ran: more means tidb-rs answers fewer of them."""
+    return it_growth(cur, prev, "skipped")
 
 
 def regressions(cur_ab, prev_ab, cur_sb, prev_sb, cur_tpch=None, prev_tpch=None, cur_it=None, prev_it=None):
@@ -175,6 +209,10 @@ def regressions(cur_ab, prev_ab, cur_sb, prev_sb, cur_tpch=None, prev_tpch=None,
     g = it_unsupported_growth(cur_it, prev_it)
     if g and g[1] > g[0]:
         out.append(f"integration tests: `unsupported` statements up by {g[1] - g[0]} ({g[0]} → {g[1]})")
+    g = it_diverged_growth(cur_it, prev_it)
+    if g and g[1] > g[0]:
+        out.append(f"integration tests: reads skipped as `session diverged` up by {g[1] - g[0]} "
+                   f"({g[0]} → {g[1]})")
     if cur_tpch and prev_tpch:
         lost = sorted((q for q, r in prev_tpch.items() if r.get("b_ms") is not None
                        and cur_tpch.get(q, {}).get("b_ms") is None), key=lambda q: int(q[1:]))
@@ -320,9 +358,10 @@ def section_integration(status, cur, prev, lines, expected=None):
     ran = t["match"] + t["mismatch"] + t["b_error"]
     status = status or {}
     lines.append(
-        f"{status.get('tests', '?')} test files selected, {len(cur['tests'])} with reads sent to tidb-rs"
+        f"{status.get('tests', '?')} test files selected, "
+        f"{sum(1 for c in cur['tests'].values() if sent(c))} with reads sent to tidb-rs"
         + (f", {status['seconds'] // 60} min" if status.get("seconds") else "")
-        + f". {sum(t.values())} reads sent to tidb-rs: {t['match']} match, {t['mismatch']} **mismatch**, "
+        + f". {sent(t)} reads sent to tidb-rs: {t['match']} match, {t['mismatch']} **mismatch**, "
         f"{t['b_error']} tidb-rs error, {t['unsupported']} unsupported. Agreement on what tidb-rs "
         f"executed (match / match + mismatch + error): **{pct(t['match'], ran)}**.\n"
     )
@@ -340,6 +379,7 @@ def section_integration(status, cur, prev, lines, expected=None):
     g = it_unsupported_growth(cur, prev)
     if g:
         lines.append(f"Unsupported over the tests both runs ran: {g[0]} last run, {g[1]} now.\n")
+    section_diverged(cur, prev, lines)
     if cur["mismatches"]:
         lines.append("New mismatches:\n")
         for r in cur["mismatches"][:20]:
@@ -359,10 +399,40 @@ def section_integration(status, cur, prev, lines, expected=None):
     lines.append("|---|---|---|---|---|---|")
     top = sorted(cur["tests"].items(), key=lambda kv: (-kv[1]["mismatch"], -kv[1]["unsupported"], kv[0]))
     for name, c in top[:15]:
-        lines.append(f"| {name} | {sum(c.values())} | {c['match']} | {c['mismatch']} | {c['b_error']} | "
+        lines.append(f"| {name} | {sent(c)} | {c['match']} | {c['mismatch']} | {c['b_error']} | "
                      f"{c['unsupported']} |")
     if len(top) > 15:
         lines.append(f"| … {len(top) - 15} more | | | | | |")
+    lines.append("")
+
+
+def section_diverged(cur, prev, lines):
+    """Session statements tidb-rs rejected and the reads skipped because of them."""
+    rejected, causes = cur["rejected"], cur["causes"]
+    lines.append(
+        f"Session statements tidb-rs rejected: {sum(rejected.values())} ({len(rejected)} distinct; "
+        f"a rejected `USE` also counts as a tidb-rs error). Reads skipped because a rejected "
+        f"statement left tidb-rs's session answering differently (`session diverged`): "
+        f"**{sum(causes.values())}**.\n")
+    g = it_diverged_growth(cur, prev)
+    if g:
+        lines.append(f"Skipped as `session diverged` over the tests both runs ran: {g[0]} last run, "
+                     f"{g[1]} now.\n")
+    if not rejected:
+        return
+    before = prev["rejected"] if prev else None
+    new = [q for q in rejected if before is not None and q not in before]
+    if new:
+        lines.append(f"Newly rejected (not rejected last run): {len(new)}.\n")
+    lines.append("| rejected session statement | times | reads skipped after it |")
+    lines.append("|---|---|---|")
+    # New ones first, then by the reads they hide.
+    order = sorted(rejected, key=lambda q: (q not in new, -causes.get(q, 0), -rejected[q], q))
+    for q in order[:20]:
+        mark = " **(new)**" if q in new else ""
+        lines.append(f"| `{q.replace('|', '/')}`{mark} | {rejected[q]} | {causes.get(q, 0)} |")
+    if len(order) > 20:
+        lines.append(f"| … {len(order) - 20} more | | |")
     lines.append("")
 
 
