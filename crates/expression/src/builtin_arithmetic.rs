@@ -612,24 +612,18 @@ fn plus_int_err(ctx: &dyn EvalContext, f: &impl SigView, _a: i64, _b: i64) -> Er
 /// skipped before the error, and the row and vector versions report the same error.
 ///
 /// Go writes each check as comparisons against `math.MaxUint64`/`MaxInt64`/`MinInt64`; here
-/// each is the carry or overflow flag of one 64-bit add (L2, #165), which the vector driver
-/// can vectorize. Equivalence, with `a`, `b` the mathematical values of the operands and `r`
-/// the wrapping u64 sum:
+/// each is the carry/overflow flag of one `overflowing_add` (L2, #165: the comparisons do not
+/// vectorize). Equivalence, with `a`, `b` the mathematical values of the operands:
 /// - UU: `uint64(a) > MaxUint64 - uint64(b)` ⇔ `a + b ≥ 2^64` ⇔ the u64 add carries.
 /// - US (`b` signed): Go reports overflow iff `a + b < 0` (`b < 0 && uint64(-b) > a`; for
 ///   `b = MinInt64`, `uint64(-b)` is 2^63 = |b|) or `a + b ≥ 2^64` (`b > 0`). As u64,
 ///   `b` is `b + 2^64` when `b < 0`, so the add carries iff `a + b ≥ 0`; when `b ≥ 0` it
-///   carries iff `a + b ≥ 2^64`. Hence overflow ⇔ `carry XOR (b < 0)`. SU is symmetric.
+///   carries iff `a + b ≥ 2^64`. Hence overflow ⇔ `carry != (b < 0)`. SU is symmetric.
 /// - SS: `MaxInt64 - a` (a > 0) and `MinInt64 - a` (a < 0) never wrap, so Go's check is
 ///   exactly `a + b ∉ [MinInt64, MaxInt64]`, i.e. `i64::overflowing_add`.
-///
-/// UU and SS use `overflowing_add`. In the mixed cases the carry is computed bitwise, as the
-/// carry out of bit 63 (`maj(a63, b63, c63)` with `r63 = a63 ^ b63 ^ c63`, i.e. bit 63 of
-/// `(a & b) | ((a | b) & !r)`), and the sign of the signed operand is its bit 63: on x86-64
-/// (baseline SSE2 has no 64-bit vector compare) `overflowing_add(..).1 != (b < 0)` stays
-/// scalar and measured 0.97× of Go (eval-gate run 43528651387); the bitwise form vectorizes.
-/// UU keeps `overflowing_add`: the bitwise carry is slower on arm64 (639 vs 461 ns).
-/// Without overflow the value is the wrapping sum in every case (Go's `a + b`).
+/// Without overflow the value is the wrapping sum in every case (Go's `a + b`). (A bitwise
+/// carry for the mixed cases, `((a & b) | ((a | b) & !r)) ^ signed` bit 63, was tried for
+/// #165 and measured slower on both amd64 and arm64.)
 /// `plus_int_matches_go_checks` tests this against a transcription of Go's checks.
 // go: builtinArithmeticPlusIntSig.evalInt L1
 // go: builtinArithmeticPlusIntSig.Clone L2 (BuiltinFunc::clone_from_base)
@@ -647,17 +641,16 @@ pub fn plus_int<const FL: u8>(a: i64, b: i64) -> (i64, bool) {
             let (v, carry) = (a as u64).overflowing_add(b as u64);
             (v as i64, carry)
         }
-        (false, false) => a.overflowing_add(b),
-        // Mixed signs: uint64(a) + b must stay in [0, 2^64), so a carry and a negative signed
-        // operand cancel out. Bit 63 of `carry` is the carry out of the u64 add, bit 63 of
-        // the signed operand its sign.
-        _ => {
-            let (ua, ub) = (a as u64, b as u64);
-            let r = ua.wrapping_add(ub);
-            let carry = (ua & ub) | ((ua | ub) & !r);
-            let signed = if is_lhs_unsigned { ub } else { ua };
-            (r as i64, (carry ^ signed) >> 63 != 0)
+        // uint64(a) + b must stay in [0, 2^64): a carry and a negative b cancel out.
+        (true, false) => {
+            let (v, carry) = (a as u64).overflowing_add(b as u64);
+            (v as i64, carry != (b < 0))
         }
+        (false, true) => {
+            let (v, carry) = (b as u64).overflowing_add(a as u64);
+            (v as i64, carry != (a < 0))
+        }
+        (false, false) => a.overflowing_add(b),
     }
 }
 
