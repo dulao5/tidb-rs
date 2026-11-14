@@ -3745,6 +3745,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-expr-pushdown"
+version = "0.0.0"
+dependencies = [
+ "arc-swap 1.9.3",
+ "flate2",
+ "log",
+ "protobuf",
+ "serde_json",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
+ "tidb-expression",
+ "tidb-kv",
+ "tidb-parser",
+ "tidb-sessionctx",
+ "tidb-types",
+ "tipb",
+]
+
+[[package]]
 name = "tidb-expression"
 version = "0.0.0"
 dependencies = [

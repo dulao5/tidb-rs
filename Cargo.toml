@@ -26,6 +26,7 @@ members = [
   "crates/systable",
   "crates/expression",
   "crates/expression/macros",
+  "crates/expr-pushdown",
   "crates/execdetails",
   "crates/infoschema",
   # SPIKE (D09.7 design pilot for N1): not for merging, not counted in coverage.
@@ -130,6 +131,7 @@ tidb-sessionctx = { path = "crates/sessionctx" }
 tidb-systable = { path = "crates/systable" }
 tidb-expression = { path = "crates/expression" }
 tidb-expression-macros = { path = "crates/expression/macros" }
+tidb-expr-pushdown = { path = "crates/expr-pushdown" }
 # TiKV Rust client: our fork (dulao5/client-rust, branch tidb-rs/metrics): `Snapshot::coprocessor`,
 # several connections per store, client-go/PD metrics (feature client-go-metrics), and
 # client-go's lock resolution (#101 R1-R7, R12: lock hints, background cleanup,
