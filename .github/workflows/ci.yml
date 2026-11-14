@@ -136,3 +136,6 @@ jobs:
         run: cargo test --locked -p tidb-types -p tidb-base -p tidb-memory -p tidb-parser -p tidb-model -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-expr-pushdown -p tidb-execdetails -p tidb-infoschema -p tidb-store -p tidb-sessiontxn
       - name: test (release-checked)
         run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-expr-pushdown -p tidb-execdetails -p tidb-infoschema -p tidb-store -p tidb-sessiontxn
+      # The cardinality vectors (VS1-29) differ by target (M-FMA in the estimation formulas).
+      - name: test (statistics, planner)
+        run: cargo test --locked -p tidb-statistics -p tidb-planner

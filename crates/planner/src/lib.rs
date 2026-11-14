@@ -25,6 +25,7 @@
 pub mod arena;
 pub mod base;
 pub mod baseimpl;
+pub mod cardinality;
 pub mod core;
 pub mod logicalop;
 pub mod optimize;

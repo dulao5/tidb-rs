@@ -312,7 +312,7 @@ pub fn derive_limit_stats(child_profile: &StatsInfo, limit_count: f64) -> StatsI
         row_count: go_min(limit_count, child_profile.row_count),
         col_ndvs: std::collections::HashMap::with_capacity(child_profile.col_ndvs.len()),
         // limit operation does not change the histogram (kind of sample).
-        // HistColl: childProfile.HistColl (the field comes with D11.1, stats_info.rs)
+        hist_coll: child_profile.hist_coll.as_ref().map(std::sync::Arc::clone),
         ..Default::default()
     };
     for (id, c) in &child_profile.col_ndvs {
