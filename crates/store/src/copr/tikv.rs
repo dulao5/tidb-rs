@@ -8,12 +8,14 @@
 //! (`internal/locate/region_cache.go`), because copr's task splitting reads them.
 
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use tidb_base::errors::Error;
 use tidb_kv::KeyRange;
 use tidb_kv::option::ReplicaReadType;
-use tikv_client::proto::metapb;
+use tikv_client::proto::{coprocessor, kvrpcpb, metapb};
 
 /// `bytes.Compare`.
 // go-std: bytes.Compare L1
@@ -218,10 +220,10 @@ pub struct RPCContext {
 ///
 /// Errors are already TiDB errors (copr wraps every call in `derr.ToTiDBErr`, which is the
 /// identity on an error that is not a client-go one).
-pub trait TiKVRegionCache: Send + Sync {
+pub trait TiKVRegionCache: Send + Sync + 'static {
     /// The `*retry.Backoffer` the calls take (TiDB's `backoff.Backoffer` passes its
     /// `TiKVBackoffer()`).
-    type Backoffer: Send;
+    type Backoffer: Backoffer;
 
     /// `RegionCache.BatchLocateKeyRanges(bo, ranges, opts...)` with
     /// `WithNeedRegionHasLeaderPeer()` when `need_leader` and `WithNeedBuckets()` when
@@ -245,4 +247,205 @@ pub trait TiKVRegionCache: Send + Sync {
         replica_read: ReplicaReadType,
         follower_store_seed: u32,
     ) -> impl Future<Output = Result<Option<RPCContext>, Error>> + Send;
+}
+
+/// `tikv.Variables`: the per-session values the client reads.
+#[derive(Clone, Debug)]
+pub struct Variables {
+    /// `BackoffWeight`: multiplies every backoff budget (`tidb_backoff_weight`, default 2).
+    pub backoff_weight: i64,
+    /// `Killed`: non-zero once the statement is killed.
+    pub killed: Option<Arc<AtomicU32>>,
+}
+
+impl Default for Variables {
+    // go-l3: ADR-0008 client-go kv NewVariables
+    fn default() -> Self {
+        Variables {
+            backoff_weight: 2,
+            killed: None,
+        }
+    }
+}
+
+/// TiDB's `backoff.Backoffer` (`pkg/store/driver/backoff`, block D07.1) over client-go's
+/// `retry.Backoffer`: the methods copr calls. Errors are already TiDB errors.
+pub trait Backoffer: Send + Sync + 'static {
+    /// `bo.Backoff(tikv.BoRegionMiss(), err)`.
+    // go-l3: ADR-0008 client-go config/retry Backoffer.Backoff
+    fn backoff_region_miss(&mut self, err: Error)
+    -> impl Future<Output = Result<(), Error>> + Send;
+    /// `bo.BackoffWithMaxSleepTxnLockFast(maxSleepMs, err)`.
+    // go-l3: ADR-0008 client-go config/retry Backoffer.BackoffWithMaxSleepTxnLockFast
+    fn backoff_with_max_sleep_txn_lock_fast(
+        &mut self,
+        max_sleep_ms: i64,
+        err: Error,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+    /// `bo.GetTotalSleep()` (ms).
+    // go-l3: ADR-0008 client-go config/retry Backoffer.GetTotalSleep
+    fn get_total_sleep(&self) -> i64;
+}
+
+/// client-go `txnsnapshot.ClientHelper` bound to one iterator's lock sets
+/// (`NewClientHelper(store, &it.resolvedLocks, &it.committedLocks, false)`).
+pub trait ClientHelper: Send + Sync + 'static {
+    type Backoffer: Backoffer;
+
+    /// `ClientHelper.SendReqCtx(bo, req, regionID, timeout, et, directStoreAddr)`: one
+    /// coprocessor RPC with client-go's retries; region errors the caller must handle come
+    /// back in the response. Returns `(resp, rpcCtx, storeAddr)`.
+    // go-l3: ADR-0008 client-go txnkv/txnsnapshot ClientHelper.SendReqCtx
+    fn send_req_ctx(
+        &self,
+        bo: &mut Self::Backoffer,
+        req: coprocessor::Request,
+        region: RegionVerID,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<(coprocessor::Response, Option<RPCContext>, String), Error>> + Send;
+
+    /// `ClientHelper.ResolveLocksWithOpts` for the locks of `lock_info` (a shared-lock
+    /// wrapper through its members), then `bo.BackoffWithMaxSleepTxnLockFast(msBeforeExpired)`
+    /// while a lock is alive: the two steps of `copIteratorWorker.handleLockErr` after the
+    /// event callback (client-rust resolves and waits in one call).
+    // go-l3: ADR-0008 client-go txnkv/txnsnapshot ClientHelper.ResolveLocksWithOpts
+    fn resolve_lock_and_wait(
+        &self,
+        bo: &mut Self::Backoffer,
+        lock_info: kvrpcpb::LockInfo,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// The `tikv.KVStore` methods copr calls besides the region cache.
+pub trait TiKVStore: TiKVRegionCache {
+    type Helper: ClientHelper<Backoffer = Self::Backoffer>;
+
+    /// A client helper for one iterator reading at `start_ts`; `resolved_start_ts`: whether
+    /// the iterator's resolved-lock set starts with `start_ts` (`!req.IsStaleness`).
+    // go-l3: ADR-0008 client-go txnkv/txnsnapshot NewClientHelper
+    fn new_client_helper(&self, start_ts: u64, resolved_start_ts: bool) -> Self::Helper;
+
+    /// `backoff.NewBackofferWithVars(ctx, maxSleep, vars)`: `max_sleep_ms × backoff weight`.
+    // go-l3: ADR-0008 client-go config/retry NewBackofferWithVars
+    fn new_backoffer(&self, max_sleep_ms: i64, vars: &Variables) -> Self::Backoffer;
+
+    /// `KVStore.CheckVisibility(startTS)`: fails when the GC safe point passed `start_ts`.
+    // go-l3: ADR-0008 client-go tikv KVStore.CheckVisibility
+    fn check_visibility(&self, start_ts: u64) -> Result<(), Error>;
+}
+
+/// client-go `util.RateLimit`: a token bucket of fixed capacity.
+pub struct RateLimit {
+    sem: tokio::sync::Semaphore,
+    capacity: usize,
+}
+
+impl RateLimit {
+    // go-l3: ADR-0008 client-go util NewRateLimit
+    pub fn new(n: usize) -> RateLimit {
+        if n == 0 {
+            panic!("invalid rate limit capacity");
+        }
+        RateLimit {
+            sem: tokio::sync::Semaphore::new(n),
+            capacity: n,
+        }
+    }
+
+    /// `GetToken(done)`: waits for a token; `true` (exit) when `done` fires first.
+    // go-l3: ADR-0008 client-go util RateLimit.GetToken
+    pub async fn get_token(&self, done: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+        if *done.borrow() {
+            return true;
+        }
+        tokio::select! {
+            permit = self.sem.acquire() => {
+                permit.expect("rate limit semaphore closed").forget();
+                false
+            }
+            _ = done.wait_for(|d| *d) => true,
+        }
+    }
+
+    // go-l3: ADR-0008 client-go util RateLimit.PutToken
+    pub fn put_token(&self) {
+        self.sem.add_permits(1);
+    }
+
+    // go-l3: ADR-0008 client-go util RateLimit.GetCapacity
+    pub fn get_capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+/// client-go `util.RequestSource.GetRequestSource`.
+// go-l3: ADR-0008 client-go util RequestSource.GetRequestSource
+pub fn get_request_source(r: &tidb_kv::context::RequestSource) -> String {
+    let mut source = "unknown".to_string();
+    let mut origin = "external";
+    if r.request_source_type.is_empty() && r.explicit_request_source_type.is_empty() {
+        return source;
+    }
+    if r.request_source_internal {
+        origin = "internal";
+    }
+    let mut label_list = vec![origin.to_string()];
+    if !r.request_source_type.is_empty() {
+        source = r.request_source_type.clone();
+    }
+    label_list.push(source);
+    if !r.explicit_request_source_type.is_empty()
+        && r.explicit_request_source_type != r.request_source_type
+    {
+        label_list.push(r.explicit_request_source_type.clone());
+    }
+    label_list.join("_")
+}
+
+/// client-go `TimeDetail.MergeFromTimeDetail`.
+// go-l3: ADR-0008 client-go util TimeDetail.MergeFromTimeDetail
+pub fn merge_from_time_detail(
+    td: &mut tidb_execdetails::clientgo::TimeDetail,
+    v2: Option<&kvrpcpb::TimeDetailV2>,
+    v1: Option<&kvrpcpb::TimeDetail>,
+) {
+    if let Some(v2) = v2 {
+        td.wait_time += v2.wait_wall_time_ns as i64;
+        td.process_time += v2.process_wall_time_ns as i64;
+        td.suspend_time += v2.process_suspend_wall_time_ns as i64;
+        td.kv_read_wall_time += v2.kv_read_wall_time_ns as i64;
+        td.total_rpc_wall_time += v2.total_rpc_wall_time_ns as i64;
+    } else if let Some(v1) = v1 {
+        td.wait_time += v1.wait_wall_time_ms as i64 * 1_000_000;
+        td.process_time += v1.process_wall_time_ms as i64 * 1_000_000;
+        td.kv_read_wall_time += v1.kv_read_wall_time_ms as i64 * 1_000_000;
+        td.total_rpc_wall_time += v1.total_rpc_wall_time_ns as i64;
+    }
+}
+
+/// client-go `ScanDetail.MergeFromScanDetailV2`.
+// go-l3: ADR-0008 client-go util ScanDetail.MergeFromScanDetailV2
+pub fn merge_from_scan_detail_v2(
+    sd: &mut tidb_execdetails::clientgo::ScanDetail,
+    v2: &kvrpcpb::ScanDetailV2,
+) {
+    sd.total_keys += v2.total_versions as i64;
+    sd.processed_keys += v2.processed_versions as i64;
+    sd.processed_keys_size += v2.processed_versions_size as i64;
+    sd.rocksdb_delete_skipped_count += v2.rocksdb_delete_skipped_count;
+    sd.rocksdb_key_skipped_count += v2.rocksdb_key_skipped_count;
+    sd.rocksdb_block_cache_hit_count += v2.rocksdb_block_cache_hit_count;
+    sd.rocksdb_block_read_count += v2.rocksdb_block_read_count;
+    sd.rocksdb_block_read_byte += v2.rocksdb_block_read_byte;
+    sd.rocksdb_block_read_duration += v2.rocksdb_block_read_nanos as i64;
+    sd.get_snapshot_duration += v2.get_snapshot_nanos as i64;
+}
+
+/// client-go `tikvrpc.EndpointType`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndpointType {
+    TiKV,
+    TiFlash,
+    TiDB,
+    TiFlashCompute,
 }

@@ -148,8 +148,9 @@ tidb-store = { path = "crates/store" }
 # check (1 s timeout), an unreachable store skipped as a target (also by the coprocessor
 # and scanner) and probed every second until it recovers (specs/D07.1-store/fault-scenarios.md);
 # the kvproto messages re-exported as `tikv_client::proto` for the copr port (client-rust#21,
-# D07.2).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "86d5197cf25db6e2f6c34ef4ede457014b11cb62", default-features = false, features = ["client-go-metrics"] }
+# D07.2), and `CopSender`, one coprocessor RPC per region with client-go `SendReqCtx`
+# semantics (client-rust#22, D07.2 part 2; pinned to the PR commit until it merges).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "6a82fa58dce87ac5cf0078bb9d31aa9ef13bb1d1", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 bytes = "1.11"
 # Global allocator of the server and the benchmarks (A1 / P0 decision D7: jemalloc).

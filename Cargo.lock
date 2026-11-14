@@ -3988,10 +3988,16 @@ dependencies = [
  "flate2",
  "futures",
  "log",
+ "prost",
+ "protobuf",
  "serde_json",
  "tidb-base",
+ "tidb-execdetails",
  "tidb-kv",
+ "tidb-memory",
+ "tidb-runtime",
  "tikv-client",
+ "tipb",
  "tokio",
 ]
 
@@ -4182,7 +4188,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.4.0"
-source = "git+https://github.com/dulao5/client-rust.git?rev=86d5197cf25db6e2f6c34ef4ede457014b11cb62#86d5197cf25db6e2f6c34ef4ede457014b11cb62"
+source = "git+https://github.com/dulao5/client-rust.git?rev=6a82fa58dce87ac5cf0078bb9d31aa9ef13bb1d1#6a82fa58dce87ac5cf0078bb9d31aa9ef13bb1d1"
 dependencies = [
  "async-recursion",
  "async-trait",

@@ -4,7 +4,9 @@
 //! are TiFlash only and belong to DEF.MPP; the coprocessor cache (`coprocessor_cache.go`)
 //! is D07.4 (exception A3).
 
+pub mod client_rust;
 pub mod coprocessor;
 pub mod key_ranges;
 pub mod region_cache;
+pub mod store;
 pub mod tikv;
