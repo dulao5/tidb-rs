@@ -9,9 +9,45 @@
 # crates/expression/benches/go/gate_vec_test.go (copied into $TIDB_SRC/pkg/expression; the
 # checkout is otherwise not modified). Rust side: crates/expression/benches/eval_gate.rs.
 # Raw outputs go to <outdir>/{go,rust}-<round>.txt, the table to <outdir>/summary.md
-# (scripts/eval_gate_summary.py). Close other heavy processes first; the load average of
-# each round is recorded in <outdir>/machine.txt.
+# (scripts/eval_gate_summary.py). Close other heavy processes first.
+#
+# Load rule (plan.md "性能门禁的测量规则", #165): each round starts only when the 1-minute load
+# average is below EVAL_GATE_MAX_LOAD (default 2); otherwise the script waits, polling every
+# 10 s, for at most EVAL_GATE_LOAD_WAIT seconds (default 600). A round that starts above the
+# limit after the wait is marked "LOADED" in <outdir>/machine.txt (and so in summary.md) and
+# a warning is printed; such a measurement does not count for the gate and is re-run. The
+# load at the start of every round is recorded in machine.txt.
 set -euo pipefail
+
+max_load=${EVAL_GATE_MAX_LOAD:-2}
+load_wait=${EVAL_GATE_LOAD_WAIT:-600}
+
+# The 1-minute load average.
+load1() {
+  if [ "$(uname)" = Darwin ]; then
+    sysctl -n vm.loadavg | awk '{print $2}'
+  else
+    cut -d' ' -f1 /proc/loadavg
+  fi
+}
+
+# Waits until load1 < max_load or load_wait seconds pass; prints the status line of the round.
+wait_for_load() {
+  local waited=0 l
+  l=$(load1)
+  while awk -v l="$l" -v m="$max_load" 'BEGIN { exit !(l >= m) }'; do
+    if [ "$waited" -ge "$load_wait" ]; then
+      echo "LOADED: load $l >= $max_load after waiting ${waited}s; this round does not count, re-run" >&2
+      echo "load1 $l (LOADED, >= $max_load after ${waited}s wait)"
+      return
+    fi
+    echo "load $l >= $max_load, waiting (${waited}s/${load_wait}s)" >&2
+    sleep 10
+    waited=$((waited + 10))
+    l=$(load1)
+  done
+  echo "load1 $l (< $max_load, waited ${waited}s)"
+}
 
 rounds=5
 out=target/eval-gate
@@ -64,7 +100,8 @@ go_specs=(
 } > "$out/machine.txt"
 
 for r in $(seq 1 "$rounds"); do
-  echo "round $r/$rounds: load $(uptime | sed 's/.*load average[s]*: //')" | tee -a "$out/machine.txt"
+  status=$(wait_for_load)
+  echo "round $r/$rounds: $status; load average $(uptime | sed 's/.*load average[s]*: //')" | tee -a "$out/machine.txt"
   : > "$out/go-$r.txt"
   for spec in "${go_specs[@]}"; do
     read -r bench filter <<<"$spec"
@@ -76,3 +113,6 @@ for r in $(seq 1 "$rounds"); do
 done
 
 python3 "$root/scripts/eval_gate_summary.py" "$out" | tee "$out/summary.md"
+if grep -q LOADED "$out/machine.txt"; then
+  echo "WARNING: some rounds started with load >= $max_load (see machine.txt); re-run the gate" >&2
+fi

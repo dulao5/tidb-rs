@@ -610,6 +610,21 @@ fn plus_int_err(ctx: &dyn EvalContext, f: &impl SigView, _a: i64, _b: i64) -> Er
 /// `builtinArithmeticPlusIntSig.evalInt`: the overflow checks of the four unsigned-flag
 /// combinations. The `checked` form (D08.1 spec §3.4): no per-row side effects, NULL rows
 /// skipped before the error, and the row and vector versions report the same error.
+///
+/// Go writes each check as comparisons against `math.MaxUint64`/`MaxInt64`/`MinInt64`; here
+/// each is the carry/overflow flag of one `overflowing_add` (L2, #165: the comparisons do not
+/// vectorize). Equivalence, with `a`, `b` the mathematical values of the operands:
+/// - UU: `uint64(a) > MaxUint64 - uint64(b)` ⇔ `a + b ≥ 2^64` ⇔ the u64 add carries.
+/// - US (`b` signed): Go reports overflow iff `a + b < 0` (`b < 0 && uint64(-b) > a`; for
+///   `b = MinInt64`, `uint64(-b)` is 2^63 = |b|) or `a + b ≥ 2^64` (`b > 0`). As u64,
+///   `b` is `b + 2^64` when `b < 0`, so the add carries iff `a + b ≥ 0`; when `b ≥ 0` it
+///   carries iff `a + b ≥ 2^64`. Hence overflow ⇔ `carry != (b < 0)`. SU is symmetric.
+/// - SS: `MaxInt64 - a` (a > 0) and `MinInt64 - a` (a < 0) never wrap, so Go's check is
+///   exactly `a + b ∉ [MinInt64, MaxInt64]`, i.e. `i64::overflowing_add`.
+/// Without overflow the value is the wrapping sum in every case (Go's `a + b`). (A bitwise
+/// carry for the mixed cases, `((a & b) | ((a | b) & !r)) ^ signed` bit 63, was tried for
+/// #165 and measured slower on both amd64 and arm64.)
+/// `plus_int_matches_go_checks` tests this against a transcription of Go's checks.
 // go: builtinArithmeticPlusIntSig.evalInt L1
 // go: builtinArithmeticPlusIntSig.Clone L2 (BuiltinFunc::clone_from_base)
 // go: builtinArithmeticPlusIntSig.vecEvalInt L2 (the checked vector driver: one loop per unsigned-flag combination)
@@ -621,19 +636,22 @@ fn plus_int_err(ctx: &dyn EvalContext, f: &impl SigView, _a: i64, _b: i64) -> Er
 #[eval_fn(Int, checked(nflags = 2, flags = unsigned_flags, err = plus_int_err))]
 pub fn plus_int<const FL: u8>(a: i64, b: i64) -> (i64, bool) {
     let (is_lhs_unsigned, is_rhs_unsigned) = (FL & 1 != 0, FL & 2 != 0);
-    let overflow = match (is_lhs_unsigned, is_rhs_unsigned) {
-        (true, true) => (a as u64) > u64::MAX - (b as u64),
+    match (is_lhs_unsigned, is_rhs_unsigned) {
+        (true, true) => {
+            let (v, carry) = (a as u64).overflowing_add(b as u64);
+            (v as i64, carry)
+        }
+        // uint64(a) + b must stay in [0, 2^64): a carry and a negative b cancel out.
         (true, false) => {
-            (b < 0 && (b.wrapping_neg() as u64) > (a as u64))
-                || (b > 0 && (a as u64) > u64::MAX - (b as u64))
+            let (v, carry) = (a as u64).overflowing_add(b as u64);
+            (v as i64, carry != (b < 0))
         }
         (false, true) => {
-            (a < 0 && (a.wrapping_neg() as u64) > (b as u64))
-                || (a > 0 && (b as u64) > u64::MAX - (a as u64))
+            let (v, carry) = (b as u64).overflowing_add(a as u64);
+            (v as i64, carry != (a < 0))
         }
-        (false, false) => (a > 0 && b > i64::MAX - a) || (a < 0 && b < i64::MIN - a),
-    };
-    (a.wrapping_add(b), overflow)
+        (false, false) => a.overflowing_add(b),
+    }
 }
 
 /// `builtinArithmeticPlusDecimalSig.evalDecimal`.
@@ -1249,3 +1267,118 @@ vector_sig!(
     builtinArithmeticMultiplyVectorFloat32Sig,
     MULTIPLY_VECTOR_FLOAT32
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Go's checks of `builtinArithmeticPlusIntSig.evalInt` (and plusUU/US/SU/SS), transcribed
+    /// comparison by comparison (Go's `-x` on int64 wraps).
+    fn go_plus_int_overflow(lu: bool, ru: bool, a: i64, b: i64) -> bool {
+        match (lu, ru) {
+            (true, true) => (a as u64) > u64::MAX - (b as u64),
+            (true, false) => {
+                (b < 0 && (b.wrapping_neg() as u64) > (a as u64))
+                    || (b > 0 && (a as u64) > u64::MAX - (b as u64))
+            }
+            (false, true) => {
+                (a < 0 && (a.wrapping_neg() as u64) > (b as u64))
+                    || (a > 0 && (b as u64) > u64::MAX - (a as u64))
+            }
+            (false, false) => (a > 0 && b > i64::MAX - a) || (a < 0 && b < i64::MIN - a),
+        }
+    }
+
+    /// The mathematical definition: the exact sum is outside the result type's range.
+    fn exact_overflow(lu: bool, ru: bool, a: i64, b: i64) -> bool {
+        let v = |x: i64, u: bool| {
+            if u {
+                i128::from(x as u64)
+            } else {
+                i128::from(x)
+            }
+        };
+        let sum = v(a, lu) + v(b, ru);
+        if lu || ru {
+            !(0..=i128::from(u64::MAX)).contains(&sum)
+        } else {
+            !(i128::from(i64::MIN)..=i128::from(i64::MAX)).contains(&sum)
+        }
+    }
+
+    fn check(a: i64, b: i64) {
+        for (fl, got) in [
+            (0u8, plus_int::<0>(a, b)),
+            (1, plus_int::<1>(a, b)),
+            (2, plus_int::<2>(a, b)),
+            (3, plus_int::<3>(a, b)),
+        ] {
+            let (lu, ru) = (fl & 1 != 0, fl & 2 != 0);
+            let want = go_plus_int_overflow(lu, ru, a, b);
+            assert_eq!(got.1, want, "overflow FL={fl} a={a} b={b}");
+            assert_eq!(
+                want,
+                exact_overflow(lu, ru, a, b),
+                "Go vs exact FL={fl} a={a} b={b}"
+            );
+            if !want {
+                assert_eq!(got.0, a.wrapping_add(b), "value FL={fl} a={a} b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn plus_int_matches_go_checks() {
+        // Boundary values of both interpretations (as i64 and as u64), mixed signs.
+        let mut edges = vec![
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            i64::MAX,
+            i64::MAX - 1,
+            i64::MIN,
+            i64::MIN + 1,
+            u64::MAX as i64,
+            (u64::MAX - 1) as i64,
+            (1u64 << 63) as i64,
+            ((1u64 << 63) + 1) as i64,
+            (1i64 << 62),
+            -(1i64 << 62),
+            (1i64 << 32),
+            -(1i64 << 32),
+        ];
+        let extra: Vec<i64> = edges
+            .iter()
+            .flat_map(|&x| [x.wrapping_add(3), x.wrapping_sub(3)])
+            .collect();
+        edges.extend(extra);
+        for &a in &edges {
+            for &b in &edges {
+                check(a, b);
+            }
+            // The partners that put a + b exactly at (and one past) each limit.
+            for limit in [i64::MAX, i64::MIN, u64::MAX as i64, 0] {
+                let b = limit.wrapping_sub(a);
+                for d in -1..=1 {
+                    check(a, b.wrapping_add(d));
+                }
+            }
+        }
+        // Pseudo-random pairs (xorshift; deterministic), also near the limits.
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..200_000 {
+            let (a, b) = (next() as i64, next() as i64);
+            check(a, b);
+            check(a, i64::MAX.wrapping_sub(a).wrapping_add(b % 4));
+            check(a, a.wrapping_neg().wrapping_add(b % 4));
+        }
+    }
+}

@@ -642,9 +642,10 @@ fn row_prologue(kinds: &[ArgKind], eager: bool) -> Vec<TokenStream2> {
 ///   error row returns `err_fn(..)`.
 /// - Vector driver: the flags are read once per chunk and select the copy of the loop
 ///   compiled for them (one driver per flag combination). The loop has no early exit: every
-///   row's value is written and the error flags of the rows that are not NULL are ORed. Only
-///   if one is set, a second scan finds the first such row and returns its error — the row
-///   and the error Go's vector version stops at.
+///   row's value is written and the error flags of all rows, NULL ones included, are ORed
+///   (not masked with the null bitmap, #165). Only if one is set, a second scan finds the
+///   first flagged row that is not NULL and returns its error — the row and the error Go's
+///   vector version stops at; if every flagged row is NULL there is no error.
 ///
 /// Only for bodies without per-row side effects (warnings, state): those keep the one-pass
 /// form.

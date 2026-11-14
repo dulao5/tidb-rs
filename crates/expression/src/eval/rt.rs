@@ -300,35 +300,22 @@ macro_rules! fixed_out {
             }
 
             /// `checked` loop: calls `f` for every row of `0..n` (NULL ones too: their
-            /// values are garbage and their flags are masked), stores the values and
-            /// returns whether any row that is not NULL is flagged. No early exit, so the
-            /// compiler can vectorize the loop; 8 rows (one bitmap byte) at a time.
+            /// values are garbage), stores the values and returns whether any row is
+            /// flagged — NULL rows included, so `true` only means "maybe": the caller's
+            /// second scan finds the first flagged row that is not NULL, or none (#165). The
+            /// flags are not masked with the null bitmap here, so the hot loop is a plain
+            /// map plus an OR reduction with no early exit, which the compiler vectorizes.
             #[inline(always)]
             // glue: N4 §3 runtime support of the generated drivers (M-EVAL)
             pub fn run_checked<F>(&mut self, n: usize, f: F) -> bool
             where
                 F: Fn(usize) -> ($t, bool),
             {
-                let full = n / 8;
-                let (head, tail) = self.data[..n].split_at_mut(full * 8);
                 let mut bad = false;
-                for ((blk, out8), byte) in head
-                    .chunks_exact_mut(8)
-                    .enumerate()
-                    .zip(&self.nulls[..full])
-                {
-                    let base = blk * 8;
-                    for j in 0..8 {
-                        let (v, b) = f(base + j);
-                        out8[j] = $wire(v);
-                        bad |= b & ((byte >> j) & 1 == 1);
-                    }
-                }
-                for (j, o) in tail.iter_mut().enumerate() {
-                    let i = full * 8 + j;
+                for (i, o) in self.data[..n].iter_mut().enumerate() {
                     let (v, b) = f(i);
                     *o = $wire(v);
-                    bad |= b & (self.nulls[i >> 3] & (1 << (i & 7)) != 0);
+                    bad |= b;
                 }
                 bad
             }

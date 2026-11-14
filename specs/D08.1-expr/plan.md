@@ -67,7 +67,7 @@
 - `Clone` 与 Go 一样复制 hash 缓存；`Decorrelate`/`RemapColumn` 返回新节点并清空缓存（Go 原地修改后清空）。
 - `emptyScalarFunctionSize` 104、`emptyBaseBuiltinFunc` 152、`onceSize` 12：govec `sizes` 记录 Go 的实测值，回放时核对。
 
-**性能门禁的测量规则**（Lucky 评审 #75）：同一台机器上 Go 与 Rust 交替运行，每个签名在**多个独立进程**中各跑若干次、取最小值（虚拟机或混合大小核的机器上，单个进程偶尔会被调度到能效核，慢 3–4 倍）；每次改动驱动或宏之后，在 amd64 CI（`ubuntu-latest`）上再确认一次。
+**性能门禁的测量规则**（Lucky 评审 #75）：同一台机器上 Go 与 Rust 交替运行，每个签名在**多个独立进程**中各跑若干次、取最小值（虚拟机或混合大小核的机器上，单个进程偶尔会被调度到能效核，慢 3–4 倍）；每次改动驱动或宏之后，在 amd64 CI（`ubuntu-latest`）上再确认一次。**负载**（Lucky 评审 #164，#165）：每一轮只在 1 分钟 load average 低于 2 时开始，否则等待；`scripts/eval-gate.sh` 每轮开始前按 10 秒间隔等待（上限 `EVAL_GATE_LOAD_WAIT`，默认 600 秒；门槛 `EVAL_GATE_MAX_LOAD`，默认 2），等不到时照常测量但在 `machine.txt`（因而在 `summary.md`）中把该轮标为 `LOADED` 并给出警告——有 `LOADED` 轮次的结果不作为门禁结论，重测。每轮开始时的负载记录在输出中。**CPU 型号**（#165）：GitHub 的 amd64 runner 池里有不同的 CPU（AMD EPYC 7763 / 9V74、Intel Xeon 6975P-C 等），Go 与 Rust 的相对速度随型号变化（#165 中同一代码在 Xeon 上 0.97×、在 EPYC 上 1.04–1.18×）。每个 amd64 结果都要记下 CPU 型号（`machine.txt` 的 `cpu:` 行）；确认时多触发几次 `eval-gate.yml`，尽量在池中的每种型号上各得到一次结果；**门禁只有在观察到的每种 CPU 型号上都通过才算通过**。
 
 **第 2 部分 2b（下一个 PR）**：
 1. `evaluator.go`（`EvaluatorSuite`、`defaultEvaluator`、`GetOptionalEvalPropsForExpr`）、`chunk_executor.go`（`VectorizedExecute`、`VectorizedFilter(ConsiderNull)`、`evalOneVec/Column/Cell`、`executeToXxx`、`Vectorizable`、`HasGetSetVarFunc` 等）、`expression.go` 的 `VecEvalBool`/`toBool`/`EvalExpr`/`implicitEvalReal`、`vectorized.go` 的 `genVecFromConstExpr`（现在在 `rt::fill_constant`）、`builtin_vectorized.go` 的 `vecEvalIntByRows`/`vecEvalStringByRows`。这些要用真实的签名才能和 Go 对照：和 D08.2（函数注册、`newBaseBuiltinFunc`）、D08.8 CAST 的第一批签名一起做，govec 用真实表达式在 chunk 上求值。
@@ -99,7 +99,7 @@ D08.2 第 1 部分（`specs/D08.2-funcs`）移植了函数注册表 `funcs`（�
 - 仍在 2b 范围之外：`builtin_vectorized.go` 的 `vecEvalIntByRows`/`vecEvalStringByRows`、局部列池（随第一个用到它们的函数族；列池按 M-POOL 不移植）；`Column.EvalVirtualColumn`（随生成列）。
 
 
-## 门禁重测（2026-11-14，P1 收尾；修复后**通过**）
+## 门禁重测（2026-11-13 UTC，P1 收尾；修复后**通过**）
 
 Lucky 在 #163 评审中不同意把门禁移交 A5：先做 T7a，再按上面的测量规则重测，然后才能勾掉 P1。指标不放宽。
 
@@ -163,7 +163,7 @@ govec `cast` 回放：本机 arm64 与 CI 的 amd64、arm64 都通过；`tidb-ty
 | 吞吐 ≥ 1.5 倍（目标，不作为通过条件） | — | 22 项中 12 项 | 22 项中 11 项 | 目标未全部达到 |
 | sysbench `oltp_point_select` 不低于 PoC 基线 | — | — | — | 由 weekly 构建测量 |
 
-amd64 上 PlusInt-UU-port 为 1.00×（1,207 vs 1,210 ns），刚好不低于 Go（第一次测量 1.12×）；它是 D08.5 的移植，溢出判断照 Go 写成比较、没有向量化（原型用 `overflowing_add` 的等价形式为 1.10–1.61×）。不是本 PR 改动的签名，记为余量很小的项。
+amd64 上 PlusInt-UU-port 为 1.00×（1,207 vs 1,210 ns），刚好不低于 Go（第一次测量 1.12×）；它是 D08.5 的移植，溢出判断照 Go 写成比较、没有向量化（原型用 `overflowing_add` 的等价形式为 1.10–1.61×）。不是本 PR 改动的签名，记为余量很小的项（#165 的后续见文末）。
 
 #### 逐行驱动（不计入门禁，#75）
 
@@ -195,3 +195,63 @@ amd64 上 PlusInt-UU-port 为 1.00×（1,207 vs 1,210 ns），刚好不低于 Go
 距离函数的逐行驱动现在每行 0 次分配；amd64 上 3 维仍略低于 Go（0.92–0.97×），768 维持平（1.00×）。整数签名的原型在 amd64 上逐行低于 Go（0.86–0.97×，原型不是移植后的签名；移植后的签名 0.99–1.07×）。Concat、Like 的逐行驱动与 #75 相同，仍低于 Go（#75 记为后续项）。
 
 **结论**：N4 §5 门禁在 arm64 与 amd64 上都通过，D08.1 T6c 的门禁验收完成。
+
+## PlusInt 移植签名的余量与 checked 驱动（#165，2026-11-14 UTC）：arm64 与 amd64 四种 CPU 上**通过**
+
+Lucky 在 #164 评审中指出移植后的 PlusInt 余量很小（amd64 UU 1.00×、arm64 SS 1.28×），而原型用 `overflowing_add` 的等价形式。本次把 `plus_int` 的四种符号组合都改为原型的形式（L2，行为不变）：
+
+- UU：`uint64(a) > MaxUint64 - uint64(b)` ⇔ 数学和 ≥ 2^64 ⇔ u64 加法进位。
+- US（b 有符号）：Go 在 `a + b < 0`（`b < 0 && uint64(-b) > a`；`b = MinInt64` 时 `uint64(-b)` = 2^63 = |b|）或 `a + b ≥ 2^64`（`b > 0`）时报溢出。按 u64，`b < 0` 时 `b` 是 `b + 2^64`，进位 ⇔ `a + b ≥ 0`；`b ≥ 0` 时进位 ⇔ `a + b ≥ 2^64`。所以溢出 ⇔ `carry != (b < 0)`。SU 对称。
+- SS：`a > 0` 时 `MaxInt64 - a`、`a < 0` 时 `MinInt64 - a` 都不回绕，Go 的判断就是 `a + b ∉ [MinInt64, MaxInt64]`，即 `i64::overflowing_add`。
+- 不溢出时四种情况的值都是回绕和（Go 的 `a + b`）。
+
+单元测试 `builtin_arithmetic::tests::plus_int_matches_go_checks` 对四种组合把新形式与逐条照抄的 Go 判断、以及 i128 精确和比较：边界值（0、±1、±2、i64::MIN/MAX 及其 ±1、u64::MAX、2^63、±2^62、±2^32 及各值 ±3）的笛卡尔积，每个 `a` 配上使和恰好落在各个界限及其 ±1 的 `b`，再加 20 万组伪随机值。govec `cast` 回放（含 arith `arbuild`）在本机 arm64 与 CI 的 amd64、arm64 上 0 不一致。
+
+### 第一步：只改函数体，amd64 Intel runner 上未通过
+
+改为 `overflowing_add` 形式后（arm64：本机 M4 Pro，`gate-165-arm64-masked.md`；amd64：run 43541321945 与 43528651387，都是 Intel Xeon 6975P-C，`gate-165-amd64-xeon-masked.md`）：
+
+| 签名（向量驱动） | arm64 之前（#164） | arm64 | amd64 之前（#164，EPYC 9V74） | amd64 Xeon 6975P-C |
+|---|--:|--:|--:|--:|
+| PlusInt-SS-port | 1.28× | 2.81× | 1.20× | 1.88× |
+| PlusInt-UU-port | 1.62× | 1.56× | 1.00× | 1.11× |
+| PlusInt-SU-port | 1.48× | 1.43× | 1.29× | **0.97×** |
+| PlusInt-US-port | 1.45× | 1.44× | 1.36× | **0.97×** |
+
+移植签名与原型逐项相同；但 Go 在 Xeon 6975P-C 上快得多，混合符号的原型与移植签名都是 0.97×，门禁未通过。x86-64 基线上这个循环是标量的：`run_checked` 每行要用空位图屏蔽溢出标志（`bad |= b & (byte >> j) & 1`）。
+
+### 第二步：`run_checked` 不再逐行屏蔽（负责人决定，选项 (a)）
+
+`rt::Vec*::run_checked`（所有 `checked` 签名共用的向量循环）把所有行的溢出标志直接 OR 起来，NULL 行也算在内；宏生成的第二遍扫描本来就跳过 NULL 行、找第一个非 NULL 的出错行，找不到就没有错误。所以结果不变，热循环只剩"逐行计算 + OR 归约"。NULL 行的垃圾值触发标志时只多一次第二遍扫描。单元测试 `eval_drivers::checked_null_overflow_rows_are_not_errors`：所有会溢出的行都是 NULL（两个参数轮流为 NULL）时没有错误、结果为 NULL、其余行的值正确；再留一个非 NULL 的溢出行时，两种驱动都报这一行的错误（n = 1、8、9、1024）。原有的 `checked_drivers_agree` 也通过；govec 回放（`cast` 含 arith、`expr`、`funcs`）在本机 arm64 与 CI 的 amd64、arm64 上 0 不一致。
+
+另试过混合符号用位运算求进位（`((a & b) | ((a | b) & !r)) ^ signed` 的第 63 位），在 amd64（EPYC 7763，run 43535335370）上更慢（SU 2,051 ns、US 2,060 ns，`overflowing_add` 形式 1,667 / 1,665 ns），arm64 也稍慢，没有采用（输出 `gate-165-amd64-bitwise.md`）。
+
+**测量**（`scripts/eval-gate.sh`，5 个进程取最小值，各轮在 load < 2 时开始）。amd64 触发了 4 次 `eval-gate.yml`，分到 4 种 CPU：
+
+| 运行 | CPU | 各轮开始时 load | 输出 | 结果 |
+|---|---|---|---|:-:|
+| 本机 | Apple M4 Pro（arm64） | 1.55–1.97 | `gate-165-arm64.md` | 通过 |
+| run 43546039243 | Intel Xeon 6975P-C | 1.07–1.92 | `gate-165-amd64-xeon.md` | 通过 |
+| run 43546031813 | AMD EPYC 7763 | 1.20–1.89 | `gate-165-amd64-epyc7763.md` | 通过 |
+| run 43546046445 | AMD EPYC 9V74 | 1.07–1.90 | `gate-165-amd64-epyc9v74.md` | 通过 |
+| run 43546001327 | AMD EPYC 9V45 | 1.20–1.89 | `gate-165-amd64-epyc9v45.md` | 通过 |
+
+`checked` 签名（向量驱动，Go/Rust，括号内为 Go / Rust 每 1024 行）：
+
+| 签名 | arm64 M4 Pro | Xeon 6975P-C | EPYC 7763 | EPYC 9V74 | EPYC 9V45 |
+|---|--:|--:|--:|--:|--:|
+| PlusInt-SS-port | 3.38× (1,312 ns / 388 ns) | 2.61× (1,374 ns / 527 ns) | 2.42× (2,122 ns / 876 ns) | 2.24× (1,658 ns / 740 ns) | 1.83× (904 ns / 494 ns) |
+| PlusInt-UU-port | 2.99× (714 ns / 239 ns) | 1.55× (953 ns / 616 ns) | 2.24× (1,642 ns / 732 ns) | 2.22× (1,327 ns / 598 ns) | 1.50× (696 ns / 464 ns) |
+| PlusInt-SU-port | 3.23× (943 ns / 292 ns) | 1.37× (1,027 ns / 749 ns) | 2.25× (1,972 ns / 876 ns) | 2.08× (1,542 ns / 741 ns) | 1.44× (785 ns / 547 ns) |
+| PlusInt-US-port | 3.20× (939 ns / 294 ns) | 1.38× (1,028 ns / 744 ns) | 2.02× (1,808 ns / 897 ns) | 2.31× (1,695 ns / 734 ns) | 1.64× (887 ns / 539 ns) |
+| LTInt-port | 6.71× (1,703 ns / 254 ns) | 3.78× (2,144 ns / 567 ns) | 4.36× (3,028 ns / 694 ns) | 4.31× (2,396 ns / 556 ns) | 2.47× (1,057 ns / 428 ns) |
+| CastIntAsReal-port | 5.20× (1,045 ns / 201 ns) | 6.21× (1,610 ns / 259 ns) | 4.29× (1,833 ns / 427 ns) | 4.03× (1,387 ns / 344 ns) | 3.64× (908 ns / 250 ns) |
+| PlusInt-SS | 3.36× (1,312 ns / 391 ns) | 2.61× (1,374 ns / 527 ns) | 2.42× (2,122 ns / 878 ns) | 2.24× (1,658 ns / 739 ns) | 1.84× (904 ns / 490 ns) |
+| PlusInt-UU | 2.99× (714 ns / 239 ns) | 1.55× (953 ns / 615 ns) | 2.26× (1,642 ns / 727 ns) | 2.24× (1,327 ns / 592 ns) | 1.51× (696 ns / 460 ns) |
+| PlusInt-SU | 3.22× (943 ns / 293 ns) | 1.38× (1,027 ns / 744 ns) | 2.20× (1,972 ns / 897 ns) | 2.09× (1,542 ns / 737 ns) | 1.43× (785 ns / 549 ns) |
+| PlusInt-US | 3.21× (939 ns / 293 ns) | 1.39× (1,028 ns / 741 ns) | 2.05× (1,808 ns / 884 ns) | 2.32× (1,695 ns / 731 ns) | 1.64× (887 ns / 541 ns) |
+| LTInt | 6.80× (1,703 ns / 251 ns) | 3.80× (2,144 ns / 564 ns) | 4.32× (3,028 ns / 701 ns) | 4.31× (2,396 ns / 556 ns) | 2.46× (1,057 ns / 430 ns) |
+| CastIntAsReal | 5.22× (1,045 ns / 200 ns) | 6.24× (1,610 ns / 258 ns) | 4.17× (1,833 ns / 440 ns) | 4.05× (1,387 ns / 343 ns) | 2.72× (908 ns / 333 ns) |
+22 项向量驱动门禁中每种 CPU 的最小比值：arm64 1.28×（Like，未改动），Xeon 1.37×，EPYC 7763 1.36×，EPYC 9V74 1.36×，EPYC 9V45 1.35×；其余指标（堆分配、编译每节点）都通过。没有签名退化：同一 Xeon 上 SU/US-port 由 0.97× 到 1.37–1.38×；arm64 上 PlusInt-SU-port 667 → 292 ns，LTInt-port 370 → 254 ns，CastIntAsReal-port 266 → 201 ns。
+
+**结论**：PlusInt 在 arm64 与观察到的 4 种 amd64 CPU 上都通过，最小余量 1.37×（Xeon 的 SU-port）；#165 第 1 项完成。

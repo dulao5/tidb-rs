@@ -257,6 +257,72 @@ fn checked_drivers_agree() {
     }
 }
 
+/// #165: the checked vector loop ORs the flags of all rows, NULL ones included (no masking
+/// with the null bitmap in the hot loop). NULL rows whose garbage values overflow must not
+/// produce an error; the second scan reports the first non-NULL overflowing row only.
+#[test]
+fn checked_null_overflow_rows_are_not_errors() {
+    let int = new_field_type(mysql::TypeLonglong);
+    let ctx = new_eval_context(vec![]);
+    let ctx: &dyn EvalContext = &*ctx;
+    let st = EvalState::new();
+    let e = func(
+        &CHECKED_ADD_SIG,
+        vec![col(0, &int), col(1, &int)],
+        int.clone(),
+    );
+    let prog = RpnProgram::compile(&e);
+    let mut rpn = RpnState::default();
+    for n in [1usize, 8, 9, 1024] {
+        // Rows where i % 3 != 1 hold i64::MAX (overflows with + 1000); those in `nulls` are NULL.
+        let overflowing = |i: usize| i % 3 != 1;
+        let build = |nulls: &dyn Fn(usize) -> bool| {
+            let mut chk = new_chunk_with_capacity(&[int.clone(), int.clone()], n);
+            for i in 0..n {
+                chk.append_int64(0, if overflowing(i) { i64::MAX } else { i as i64 });
+                chk.append_int64(1, 1000);
+            }
+            for i in (0..n).filter(|&i| nulls(i)) {
+                // Odd rows: NULL in the first argument, even rows: in the second.
+                chk.column_mut(i & 1).set_null(i, true);
+            }
+            chk
+        };
+        // Every overflowing row is NULL: no error, NULL results, correct values elsewhere.
+        let chk = build(&overflowing);
+        let mut res = new_empty_column(&int);
+        prog.eval(ctx, &st, &mut rpn, &chk, &mut res)
+            .unwrap_or_else(|err| panic!("n {n}: spurious error {err}"));
+        for i in 0..n {
+            assert_eq!(res.is_null(i), overflowing(i), "n {n} row {i}");
+            if !overflowing(i) {
+                assert_eq!(res.get_int64(i), i as i64 + 1000, "n {n} row {i}");
+            }
+            assert!(
+                e.eval_int(ctx, &st, chk.get_row(i)).is_ok(),
+                "n {n} row {i}"
+            );
+        }
+        // The same with one overflowing row left non-NULL near the end: its error, from both
+        // drivers.
+        let last = (0..n).rev().find(|&i| overflowing(i)).unwrap();
+        let chk = build(&|i| overflowing(i) && i != last);
+        let mut res = new_empty_column(&int);
+        let err = prog.eval(ctx, &st, &mut rpn, &chk, &mut res).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("overflow {} + 1000", i64::MAX),
+            "n {n}"
+        );
+        let row_err = (0..n).find_map(|i| e.eval_int(ctx, &st, chk.get_row(i)).err());
+        assert_eq!(
+            row_err.map(|e| e.to_string()),
+            Some(err.to_string()),
+            "n {n}"
+        );
+    }
+}
+
 /// A FLOAT, ENUM or DOUBLE column fed to a body that reads int64 values: Go's
 /// `Column.VecEvalInt` would copy storage that does not hold int64s, so the RPN refuses to
 /// compile it instead of letting the signature misread the bytes (Lucky #82).
