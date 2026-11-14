@@ -252,6 +252,19 @@ pub fn parse_and_lower(sql: &str) -> Result<Lowered, SqlError> {
     }
 }
 
+/// Parse `sql` into its single statement, with the errors of [`parse_and_lower`]. The VS1
+/// router (poc-session) looks at the AST before it lowers it with [`lower_statement`].
+pub fn parse_one(sql: &str) -> Result<ast::Stmt, SqlError> {
+    let out = tidb_parser::parse(sql, &tidb_parser::ParseOptions::default())
+        .map_err(|e| parse_error(sql, &e))?;
+    let mut stmts = out.stmts;
+    match stmts.len() {
+        0 => Err(SqlError::new(1065, "Query was empty")),
+        1 => Ok(stmts.remove(0)),
+        _ => Err(unsupported("multiple statements in one query")),
+    }
+}
+
 /// TiDB's syntax error (1064) for a parse error.
 fn parse_error(sql: &str, e: &tidb_parser::ParseError) -> SqlError {
     use tidb_parser::ParseError;

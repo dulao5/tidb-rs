@@ -122,6 +122,13 @@ struct Args {
     /// `no-steal` (one current-thread runtime per worker; a connection stays on its thread).
     #[arg(long, default_value = "steal", value_parser = ["steal", "no-steal"])]
     runtime_topology: String,
+    /// The first vertical slice (VS1, specs/VS1-vertical-slice/plan.md §4.3): `off` runs
+    /// every statement on the prototype (the default); `vs1` sends VS1-shaped SELECTs to the
+    /// ported stack and falls back to the prototype on a boundary stub; `strict` returns the
+    /// stub's 1235 error instead (for the weekly build). The environment variable
+    /// TIDB_RS_NEW_STACK, when set, overrides this flag.
+    #[arg(long, default_value = "off", value_parser = ["off", "vs1", "strict"])]
+    new_stack: String,
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
     log_level: tracing::Level,
@@ -137,6 +144,14 @@ fn parse_go_duration(s: &str) -> Result<Duration, String> {
     Ok(Duration::from_nanos(ns as u64))
 }
 
+/// `--new-stack`, overridden by `TIDB_RS_NEW_STACK` (VS1 plan §4.3).
+fn new_stack_mode(flag: &str) -> Result<poc_session::router::NewStackMode, String> {
+    match std::env::var("TIDB_RS_NEW_STACK") {
+        Ok(v) if !v.is_empty() => v.parse(),
+        _ => flag.parse(),
+    }
+}
+
 fn main() {
     let args = Args::parse();
     tracing_subscriber::fmt()
@@ -148,6 +163,13 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             error!(host = %args.host, port = args.port, error = %e, "invalid listen address");
+            std::process::exit(2);
+        }
+    };
+    let new_stack = match new_stack_mode(&args.new_stack) {
+        Ok(m) => m,
+        Err(e) => {
+            error!(error = %e, "invalid TIDB_RS_NEW_STACK");
             std::process::exit(2);
         }
     };
@@ -270,7 +292,11 @@ fn main() {
             credential: Credential::native_from_password(&args.password),
             server_version: config.server_version.clone(),
             tls_enabled: config.tls.is_some(),
-        });
+        })
+        .with_new_stack(new_stack);
+        if new_stack != poc_session::router::NewStackMode::Off {
+            info!(mode = ?new_stack, "VS1 router on: VS1-shaped SELECTs go to the new stack");
+        }
         if args.stmt_timing > 0 {
             poc_session::timing::set_enabled(true);
             let every = std::time::Duration::from_secs(args.stmt_timing);

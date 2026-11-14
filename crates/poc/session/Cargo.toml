@@ -18,6 +18,13 @@ tidb-metrics = { workspace = true }
 tidb-mysql-protocol = { workspace = true }
 tidb-sql = { workspace = true }
 tokio = { workspace = true }
+# The VS1 router (glue, VS1-02): the AST it checks, the new session, its variables, the
+# boundary-stub error, the ported function registry.
+tidb-base = { workspace = true }
+tidb-expression = { workspace = true }
+tidb-parser = { workspace = true }
+tidb-session = { workspace = true }
+tidb-sessionctx = { workspace = true }
 
 [dev-dependencies]
 tidb-distsql = { workspace = true }

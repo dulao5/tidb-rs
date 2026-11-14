@@ -99,6 +99,11 @@ pub trait SessionHandler: Send + 'static {
         params: Vec<Param>,
     ) -> impl Future<Output = Result<Response, SqlError>> + Send;
 
+    /// The flags byte of the coming `COM_STMT_EXECUTE` (`cursor_type::*`), called right before
+    /// [`SessionHandler::execute`]. `CURSOR_TYPE_READ_ONLY` is accepted without opening a
+    /// cursor; the VS1 router keeps such executions on the PoC. The default ignores it.
+    fn execute_flags(&mut self, _stmt_id: u32, _flags: u8) {}
+
     /// `COM_STMT_CLOSE` (no response is sent to the client). Also called for every open
     /// statement on `COM_RESET_CONNECTION`.
     fn close(&mut self, stmt_id: u32);
