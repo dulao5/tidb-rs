@@ -57,7 +57,9 @@ not been compared.
 6. **Fork maintenance:** changes go to stacked `tidb-rs/*` branches of `dulao5/client-rust`, each
    PR with a client-go cross-reference table and tests, CI on `tidb-rs/*` (client-rust#7). tidb-rs
    pins a commit (`Cargo.toml`) and bumps it in a separate PR. Upstreaming to `tikv/client-rust`
-   is welcome but not required.
+   is welcome but not required. The kvproto messages are part of the fork's public API
+   (`tikv_client::proto`, client-rust#21, used by the copr port of D07.2): a kvproto upgrade
+   changes both repositories together.
 7. **Sync with upstream `tikv/client-rust`:** the tidb-rs maintainer of the D07 blocks owns it
    (currently the agent working on #101 / #128, reviewed by the project's reviewer). It runs
    once a month, and also before each tidb-rs milestone:

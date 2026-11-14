@@ -1,0 +1,30 @@
+[package]
+name = "tidb-store"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/store (blocks D07.1-D07.4); so far the coprocessor client pkg/store/copr (block D07.2, part 1: key ranges, task building, paging)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), kv.StoreType.
+tidb-base = { workspace = true }
+# kv.Request, kv.KeyRange, kv.Key, kv.ReplicaReadType, kv.IsoLevel.
+tidb-kv = { workspace = true }
+# The kvproto messages (prost) the coprocessor requests are made of: coprocessor.KeyRange,
+# coprocessor.StoreBatchTask, metapb.Peer / RegionEpoch / Buckets, kvrpcpb enums
+# (`tikv_client::proto`, client-rust#21). client-rust is the TiKV client (ADR 0008).
+tikv-client = { workspace = true }
+# copTask.respChan (`make(chan *copResponse, n)`, M-CH).
+tokio = { workspace = true, features = ["sync"] }
+log = "0.4"
+
+[dev-dependencies]
+# The govec vectors are committed as .jsonl.gz.
+flate2 = "1.0"
+futures = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
