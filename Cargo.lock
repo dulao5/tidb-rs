@@ -2576,6 +2576,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "clap 4.6.7",
+ "flate2",
  "http-body-util",
  "hyper",
  "hyper-util",

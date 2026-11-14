@@ -34,6 +34,12 @@
 //! go-file: pkg/executor/coprocessor.go
 //! go-file: pkg/planner/core/pb_to_plan.go
 
+use std::io::Read as _;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
 use bytes::BufMut;
 use bytes::Bytes;
 use bytes::BytesMut;
@@ -55,6 +61,7 @@ use tipb::Executor;
 use tipb::ExecutorExecutionSummary;
 use tipb::SelectResponse;
 use tracing::debug;
+use tracing::warn;
 
 use crate::status::Body;
 
@@ -67,6 +74,41 @@ const REQ_TYPE_DAG: i64 = 103;
 
 /// grpc-go's default `MaxRecvMsgSize` (4 MiB); Go TiDB's status server keeps it.
 const MAX_RECV_MSG_SIZE: usize = 4 << 20;
+
+/// The request header naming the message compression (gRPC over HTTP/2).
+const GRPC_ENCODING: &str = "grpc-encoding";
+
+/// The request message encodings grpc-go's server decodes in Go TiDB: identity, and gzip
+/// (registered by client-go's import of `encoding/gzip`). client-go compresses every request
+/// with gzip, those to TiDB status ports included, when `tikv-client.grpc-compression-type`
+/// is `"gzip"` (`internal/client/client.go`, `grpc.UseCompressor`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Encoding {
+    Identity,
+    Gzip,
+}
+
+/// Unix seconds of the last warning about an unimplemented `tikvpb.Tikv` method.
+static LAST_UNIMPLEMENTED_WARN: AtomicU64 = AtomicU64::new(0);
+
+/// A `tikvpb.Tikv` method that is not served here: another TiDB node called it, so a Go
+/// caller exists that this port does not answer. Warned at most once a minute.
+// glue: grpc-go answers unknown methods silently; tidb-rs serves a subset of Go's methods.
+fn warn_unimplemented_tikv(path: &str) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let last = LAST_UNIMPLEMENTED_WARN.load(Ordering::Relaxed);
+    if now >= last + 60
+        && LAST_UNIMPLEMENTED_WARN
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        warn!(%path, "status port: unimplemented tikvpb.Tikv method called (logged at most once a minute)");
+    } else {
+        debug!(%path, "status port: unimplemented gRPC method");
+    }
+}
 
 /// kvproto `coprocessor.Request`: the fields read here (prost skips the others).
 #[derive(Clone, PartialEq, prost::Message)]
@@ -129,9 +171,27 @@ pub(crate) fn is_grpc<B>(req: &Request<B>) -> bool {
 pub(crate) async fn serve(req: Request<Incoming>) -> Response<Body> {
     let path = req.uri().path().to_owned();
     if !matches!(path.as_str(), COPROCESSOR | SERVER_INFO | SEARCH_LOG) {
-        debug!(%path, "status port: unimplemented gRPC method");
+        if path.starts_with("/tikvpb.Tikv/") {
+            warn_unimplemented_tikv(&path);
+        } else {
+            debug!(%path, "status port: unimplemented gRPC method");
+        }
         return status_only(Code::Unimplemented, &unknown_method(&path));
     }
+    // grpc-go processUnaryRPC / processStreamingRPC: an unknown request encoding is refused
+    // before the message is read.
+    let encoding = match req.headers().get(GRPC_ENCODING).map(|v| v.to_str()) {
+        None => Encoding::Identity,
+        Some(Ok("identity")) => Encoding::Identity,
+        Some(Ok("gzip")) => Encoding::Gzip,
+        Some(v) => {
+            let name = v.map_or_else(|_| "<non-ascii>".to_owned(), str::to_owned);
+            return status_only(
+                Code::Unimplemented,
+                &format!("grpc: Decompressor is not installed for grpc-encoding {name:?}"),
+            );
+        }
+    };
     let body = match Limited::new(req.into_body(), MAX_RECV_MSG_SIZE + 5)
         .collect()
         .await
@@ -145,9 +205,9 @@ pub(crate) async fn serve(req: Request<Incoming>) -> Response<Body> {
         }
         Err(e) => return status_only(Code::Internal, &format!("grpc: {e}")),
     };
-    let msg = match unframe(&body) {
+    let msg = match unframe(&body, encoding) {
         Ok(m) => m,
-        Err(e) => return status_only(Code::Internal, &e),
+        Err((code, e)) => return status_only(code, &e),
     };
     let unmarshal_error = |e: prost::DecodeError| {
         status_only(
@@ -309,23 +369,50 @@ fn server_info(_req: &ServerInfoRequest) -> ServerInfoResponse {
 
 /// The one length-prefixed message of a unary or server-streaming request.
 // glue: gRPC over HTTP/2 framing (grpc-go rpc_util.go recvMsg).
-fn unframe(body: &Bytes) -> Result<Bytes, String> {
+fn unframe(body: &Bytes, encoding: Encoding) -> Result<Bytes, (Code, String)> {
+    let internal = |m: String| (Code::Internal, m);
     if body.len() < 5 {
-        return Err("grpc: missing request message".to_owned());
+        return Err(internal("grpc: missing request message".to_owned()));
     }
-    if body[0] != 0 {
-        return Err("grpc: compressed flag set with identity or empty encoding".to_owned());
-    }
+    let compressed = body[0] != 0;
     let len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
     if len > MAX_RECV_MSG_SIZE {
-        return Err(format!(
-            "grpc: received message larger than max ({len} vs. {MAX_RECV_MSG_SIZE})"
+        return Err((
+            Code::ResourceExhausted,
+            format!("grpc: received message larger than max ({len} vs. {MAX_RECV_MSG_SIZE})"),
         ));
     }
     if body.len() != 5 + len {
-        return Err("grpc: malformed request message".to_owned());
+        return Err(internal("grpc: malformed request message".to_owned()));
     }
-    Ok(body.slice(5..))
+    let msg = body.slice(5..);
+    if !compressed {
+        return Ok(msg);
+    }
+    // grpc-go checkRecvPayload / decompress (grpc v1.82.1 rpc_util.go).
+    if encoding == Encoding::Identity {
+        return Err(internal(
+            "grpc: compressed flag set with identity or empty encoding".to_owned(),
+        ));
+    }
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(&msg[..])
+        .take(MAX_RECV_MSG_SIZE as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| {
+            internal(format!(
+                "grpc: failed to decompress the received message: {e}"
+            ))
+        })?;
+    if out.len() > MAX_RECV_MSG_SIZE {
+        return Err((
+            Code::ResourceExhausted,
+            format!(
+                "grpc: received message after decompression larger than max {MAX_RECV_MSG_SIZE}"
+            ),
+        ));
+    }
+    Ok(Bytes::from(out))
 }
 
 /// An OK response carrying `messages` (none for an empty server stream).
@@ -416,6 +503,13 @@ pub(crate) mod testdata {
         e
     }
 
+    pub(crate) fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
     pub(crate) fn select_response(data: &[u8]) -> SelectResponse {
         protobuf::parse_from_bytes(data).unwrap()
     }
@@ -428,6 +522,56 @@ mod tests {
 
     fn cop(tp: i64, data: Vec<u8>) -> CopResponse {
         coprocessor(&CopRequest { tp, data })
+    }
+
+    fn frame(flag: u8, msg: &[u8]) -> Bytes {
+        let mut b = vec![flag];
+        b.extend_from_slice(&u32::try_from(msg.len()).unwrap().to_be_bytes());
+        b.extend_from_slice(msg);
+        Bytes::from(b)
+    }
+
+    /// client-go with `grpc-compression-type = "gzip"` sends gzip-compressed messages; an
+    /// uncompressed message under a gzip encoding is fine too (the flag decides).
+    #[test]
+    fn unframe_decompresses_gzip() {
+        let msg = b"hello coprocessor";
+        for encoding in [Encoding::Identity, Encoding::Gzip] {
+            assert_eq!(unframe(&frame(0, msg), encoding).unwrap(), &msg[..]);
+        }
+        assert_eq!(
+            unframe(&frame(1, &gzip(msg)), Encoding::Gzip).unwrap(),
+            &msg[..]
+        );
+        let (code, e) = unframe(&frame(1, &gzip(msg)), Encoding::Identity).unwrap_err();
+        assert_eq!(code, Code::Internal);
+        assert_eq!(
+            e,
+            "grpc: compressed flag set with identity or empty encoding"
+        );
+        let (code, e) = unframe(&frame(1, b"not gzip"), Encoding::Gzip).unwrap_err();
+        assert_eq!(code, Code::Internal);
+        assert!(
+            e.starts_with("grpc: failed to decompress the received message: "),
+            "{e}"
+        );
+        // The 4 MiB limit counts the decompressed size.
+        let big = vec![0u8; MAX_RECV_MSG_SIZE + 1];
+        let (code, e) = unframe(&frame(1, &gzip(&big)), Encoding::Gzip).unwrap_err();
+        assert_eq!(code, Code::ResourceExhausted);
+        assert_eq!(
+            e,
+            format!(
+                "grpc: received message after decompression larger than max {MAX_RECV_MSG_SIZE}"
+            )
+        );
+        let exact = vec![0u8; MAX_RECV_MSG_SIZE];
+        assert_eq!(
+            unframe(&frame(1, &gzip(&exact)), Encoding::Gzip)
+                .unwrap()
+                .len(),
+            MAX_RECV_MSG_SIZE
+        );
     }
 
     #[test]

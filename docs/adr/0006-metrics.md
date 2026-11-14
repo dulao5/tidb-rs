@@ -81,6 +81,17 @@ tables.**
   with no warning for this node. Other gRPC methods answer `Unimplemented`; the
   diagnostics calls never retried (a warning only), the coprocessor ones no longer reach the
   retry path.
+- **Request compression**: with `tikv-client.grpc-compression-type = "gzip"`, client-go
+  gzips every request, those to TiDB status ports included (`internal/client/client.go`,
+  `grpc.UseCompressor`). The status port decodes `grpc-encoding: gzip` (the 4 MiB limit
+  counts the decompressed size) and refuses other encodings with `Unimplemented`, as grpc-go
+  does. Responses are sent uncompressed (grpc-go would reply in the request's encoding; the
+  client accepts either).
+- **Not covered: TLS.** With cluster TLS (`security.cluster-ssl-*`), Go TiDB dials status
+  ports over TLS; tidb-rs's status port speaks plain HTTP, so those calls still fail and are
+  retried until the 40 s budget runs out. To fix with the status port's TLS support.
+- An unimplemented `tikvpb.Tikv` method called on the status port is logged at `warn`, at
+  most once a minute: it means a Go caller this port does not answer.
 - `tests/metrics_process.rs::cluster_tables_fast_with_status_server` asserts each query
   (including `ANALYZE`) stays under 5 s and warns only for `cluster_config`.
 

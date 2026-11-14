@@ -275,14 +275,37 @@ mod tests {
         path: &str,
         msg: &[u8],
     ) -> (hyper::HeaderMap, Vec<Vec<u8>>, Option<hyper::HeaderMap>) {
+        grpc_call_encoded(addr, path, msg, None).await
+    }
+
+    /// `grpc_call` with the message compressed in `encoding` (`grpc-encoding`).
+    async fn grpc_call_encoded(
+        addr: std::net::SocketAddr,
+        path: &str,
+        msg: &[u8],
+        encoding: Option<&str>,
+    ) -> (hyper::HeaderMap, Vec<Vec<u8>>, Option<hyper::HeaderMap>) {
         use http_body_util::BodyExt;
-        let mut framed = vec![0u8];
+        let gzipped;
+        let (flag, msg) = match encoding {
+            Some("gzip") => {
+                gzipped = crate::rpc::testdata::gzip(msg);
+                (1u8, &gzipped[..])
+            }
+            Some(_) => (1u8, msg),
+            None => (0u8, msg),
+        };
+        let mut framed = vec![flag];
         framed.extend_from_slice(&u32::try_from(msg.len()).unwrap().to_be_bytes());
         framed.extend_from_slice(msg);
-        let req = Request::post(format!("http://{addr}{path}"))
+        let mut req = Request::post(format!("http://{addr}{path}"))
             .version(hyper::Version::HTTP_2)
             .header(CONTENT_TYPE, "application/grpc")
-            .header("te", "trailers")
+            .header("te", "trailers");
+        if let Some(encoding) = encoding {
+            req = req.header("grpc-encoding", encoding);
+        }
+        let req = req
             .body(http_body_util::Full::new(Bytes::from(framed)))
             .unwrap();
         let resp = tokio::time::timeout(
@@ -379,6 +402,43 @@ mod tests {
         }
         let (headers, _, _) = grpc_call(addr, crate::rpc::COPROCESSOR, &[0xff]).await;
         assert_eq!(headers["grpc-status"], "13");
+        let _ = stop.send(());
+    }
+
+    /// Go TiDB with `tikv-client.grpc-compression-type = "gzip"` compresses its requests to
+    /// status ports too: they are answered, not refused (which client-go would retry for 40 s).
+    #[tokio::test]
+    async fn gzip_grpc_requests_are_answered() {
+        use crate::rpc::testdata::*;
+        use prost::Message as _;
+        let (addr, stop) = start().await;
+        let req = crate::rpc::CopRequest {
+            tp: 103,
+            data: dag(
+                vec![broadcast("FLUSH STATS_DELTA `a`.`t` CLUSTER")],
+                EncodeType::TypeDefault,
+                false,
+            ),
+        };
+        let (_, messages, trailers) = grpc_call_encoded(
+            addr,
+            crate::rpc::COPROCESSOR,
+            &req.encode_to_vec(),
+            Some("gzip"),
+        )
+        .await;
+        assert_eq!(trailers.unwrap()["grpc-status"], "0");
+        let resp = crate::rpc::CopResponse::decode(&messages[0][..]).unwrap();
+        assert_eq!(resp.other_error, "");
+
+        let (headers, messages, _) =
+            grpc_call_encoded(addr, crate::rpc::SERVER_INFO, &[8, 1], Some("snappy")).await;
+        assert_eq!(headers["grpc-status"], "12");
+        assert_eq!(
+            headers["grpc-message"],
+            "grpc: Decompressor is not installed for grpc-encoding \"snappy\""
+        );
+        assert!(messages.is_empty());
         let _ = stop.send(());
     }
 
