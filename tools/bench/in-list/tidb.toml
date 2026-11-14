@@ -1,0 +1,4 @@
+# Extra Go TiDB config for tools/bench/in-list: disable the coprocessor cache so repeated
+# runs of the same statement measure TiKV work instead of cache hits.
+[tikv-client.copr-cache]
+capacity-mb = 0.0
