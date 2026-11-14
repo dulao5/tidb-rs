@@ -593,6 +593,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         } else {
             Vec::new()
         };
+        self.handler.execute_flags(id, flags);
         let resp = self.handler.execute(id, params).await;
         self.write_timed(start, resp, true).await
     }

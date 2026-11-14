@@ -15,6 +15,17 @@
 //!   `LastQueryInfo`, the prepared statements);
 //! - `SessionVars.LastQueryInfo`.
 //!
+//! What it does not restore: state changed *through* shared `Arc`s (the interior of
+//! `user_vars`, any cache shared with other sessions). That is correct only while such state
+//! changes after executors open (`SELECT @a := 1` assigns during execution; `set_var` is never
+//! folded at planning time), i.e. never before a `Blocked` can occur. A planner-time cache in
+//! shared state would escape the restore: it must not be added without extending this.
+//!
+//! Cost (Lucky, #212 review): `checkpoint()` + drop about 330 ns per statement, with
+//! `restore` about 390 ns (release build), against a ~100 µs point select. It stays cheap
+//! because the cloned parts hold `Arc`s (`prepared_stmts`, `user_vars`): O(#prepared)
+//! refcount bumps, no deep copies. Keep it so when the field list is narrowed.
+//!
 //! TODO(VS1-14): narrow this to the field list of the VS1-14 plan (what the ported statement
 //! path actually writes), and hand an already-sent TSO request over to the PoC (§4.6 item 2).
 //! The new statement path must install a fresh statement context before writing its plain

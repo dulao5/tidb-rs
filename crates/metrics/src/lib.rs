@@ -537,6 +537,26 @@ fn register_all() {
     LazyLock::force(&DISTSQL_QUERY);
 }
 
+// ---------------------------------------------------------------------------------------------
+// tidbrs_* (tidb-rs's own metrics; no Go counterpart).
+
+/// `tidbrs_route_total{engine, reason}`: statements by the engine that ran them and why
+/// (VS1 plan §4.3). Registered on first use, so `--new-stack=off` exposes nothing new.
+static ROUTE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    counter_vec(
+        ("tidbrs", "", "route_total"),
+        "Statements by the engine that ran them (new: the ported stack, poc: the prototype) \
+         and the routing reason (VS1).",
+        &["engine", "reason"],
+    )
+});
+
+/// A statement routed to `engine` (`new` / `poc`, or `none`: answered 1235, run nowhere) for `reason` (`ok`, `error`, `session`,
+/// `schema_version`, `kind`, `ast`, or the block of a boundary stub).
+pub fn route(engine: &str, reason: &str) {
+    ROUTE_TOTAL.with_label_values(&[engine, reason]).inc();
+}
+
 /// Every registered metric in Go's text format (the body of `GET /metrics`).
 pub fn gather_text() -> String {
     encode::encode_text(&prometheus::gather())

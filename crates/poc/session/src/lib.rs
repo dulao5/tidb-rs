@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod constant;
+pub mod router;
 pub mod timing;
 
 use std::cell::Cell;
@@ -66,6 +67,9 @@ use tidb_sql::ranges::param_literal;
 use tidb_sql::types::apply_result_charset;
 
 use crate::constant::ConstEnv;
+use crate::router::NewStackMode;
+use crate::router::PocValues;
+use crate::router::Router;
 use crate::timing::Kind;
 use crate::timing::Phase;
 use crate::timing::Timer;
@@ -88,13 +92,23 @@ pub struct Shared {
 #[derive(Clone)]
 pub struct Factory {
     shared: Arc<Shared>,
+    /// `--new-stack` (VS1 plan §4.3).
+    new_stack: NewStackMode,
 }
 
 impl Factory {
     pub fn new(shared: Shared) -> Factory {
         Factory {
             shared: Arc::new(shared),
+            new_stack: NewStackMode::Off,
         }
+    }
+
+    /// Sessions route VS1 statements to the new stack (`vs1` / `strict`, [`router`]); with
+    /// `off` (the default) they run everything on the PoC, as before.
+    pub fn with_new_stack(mut self, mode: NewStackMode) -> Factory {
+        self.new_stack = mode;
+        self
     }
 
     /// The state shared by this factory's sessions.
@@ -126,7 +140,7 @@ impl SessionFactory for Factory {
             63 => ("binary", "binary"),
             _ => ("utf8mb4", "utf8mb4_bin"),
         };
-        Ok(Session {
+        let mut session = Session {
             shared: self.shared.clone(),
             current_db: None,
             user: format!(
@@ -143,7 +157,14 @@ impl SessionFactory for Factory {
             timer: Timer::default(),
             mdl: None,
             stmt: StmtMetrics::default(),
-        })
+            router: None,
+        };
+        if self.new_stack != NewStackMode::Off {
+            let new = Box::new(router::newstack::NewSession::new());
+            let r = Router::new(self.new_stack, new, &session.poc_values());
+            session.router = Some(Box::new(r));
+        }
+        Ok(session)
     }
 }
 
@@ -169,6 +190,8 @@ pub struct Session {
     mdl: Option<StmtGuard>,
     /// Prometheus bookkeeping of the statement in flight.
     stmt: StmtMetrics,
+    /// The VS1 router (`--new-stack=vs1|strict`); `None` with `off`.
+    router: Option<Box<Router>>,
 }
 
 /// What the Go session metrics need to know about the statement in flight: its type and how
@@ -192,6 +215,11 @@ impl StmtMetrics {
     /// A statement of type `t` starts executing after `parse` (`COM_QUERY`: parsing,
     /// `COM_STMT_EXECUTE`: decoding parameters, which Go does not count as parsing).
     fn start(&mut self, t: StmtType, parse: Duration) {
+        if self.active {
+            // Started already in this command: the VS1 router started it for the new stack
+            // and the statement fell back to the PoC. Never the case with `--new-stack=off`.
+            return;
+        }
         *self = StmtMetrics {
             active: true,
             stmt_type: Some(t),
@@ -219,7 +247,7 @@ impl StmtMetrics {
 }
 
 /// Go `ast.GetStmtLabel`.
-fn stmt_type(stmt: &Statement) -> StmtType {
+pub(crate) fn stmt_type(stmt: &Statement) -> StmtType {
     match stmt {
         Statement::Select(_) => StmtType::Select,
         Statement::Use(_) => StmtType::Use,
@@ -267,6 +295,14 @@ impl TsFuture {
     async fn wait(self) -> Result<u64, SqlError> {
         self.0.wait().await.map_err(kv_error)
     }
+}
+
+/// `?` in a `COM_QUERY` statement.
+pub(crate) fn param_in_query() -> SqlError {
+    SqlError::new(
+        1064,
+        "You have an error in your SQL syntax; '?' is only allowed in prepared statements",
+    )
 }
 
 /// Whether running the statement will need a start timestamp (a SELECT that reads a table).
@@ -738,20 +774,47 @@ fn params_to_literals(params: Vec<Param>) -> Result<Vec<Literal>, SqlError> {
 
 impl SessionHandler for Session {
     async fn query(&mut self, sql: &str) -> Result<Response, SqlError> {
-        let r = self.query_inner(sql).await;
+        let r = match self.router.take() {
+            None => self.query_inner(sql).await,
+            Some(mut router) => {
+                let r = router.query(self, sql).await;
+                self.router = Some(router);
+                r
+            }
+        };
         self.stmt.failed = r.is_err();
         r
     }
 
     async fn prepare(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
         self.stmt.stmt_type = None;
-        self.prepare_inner(stmt_id, sql).await
+        match self.router.take() {
+            None => self.prepare_inner(stmt_id, sql).await,
+            Some(mut router) => {
+                let r = router.prepare(self, stmt_id, sql).await;
+                self.router = Some(router);
+                r
+            }
+        }
     }
 
     async fn execute(&mut self, stmt_id: u32, params: Vec<Param>) -> Result<Response, SqlError> {
-        let r = self.execute_inner(stmt_id, params).await;
+        let r = match self.router.take() {
+            None => self.execute_inner(stmt_id, params).await,
+            Some(mut router) => {
+                let r = router.execute(self, stmt_id, params).await;
+                self.router = Some(router);
+                r
+            }
+        };
         self.stmt.failed = r.is_err();
         r
+    }
+
+    fn execute_flags(&mut self, _stmt_id: u32, flags: u8) {
+        if let Some(router) = &mut self.router {
+            router.set_execute_flags(flags);
+        }
     }
 
     fn command_done(&mut self, write: std::time::Duration, total: std::time::Duration) {
@@ -765,13 +828,29 @@ impl SessionHandler for Session {
     }
 
     fn close(&mut self, stmt_id: u32) {
-        self.stmts.remove(&stmt_id);
+        match self.router.take() {
+            None => {
+                self.stmts.remove(&stmt_id);
+            }
+            Some(mut router) => {
+                router.close(self, stmt_id);
+                self.router = Some(router);
+            }
+        }
     }
 
     async fn use_db(&mut self, db: &str) -> Result<(), SqlError> {
         // COM_INIT_DB and the handshake's database: Go runs them as a `USE` statement.
         tidb_metrics::statement(StmtType::Use);
-        self.use_db_inner(db).await
+        let r = self.use_db_inner(db).await;
+        if r.is_ok()
+            && let Some(router) = self.router.take()
+        {
+            let mut router = router;
+            router.use_db(self);
+            self.router = Some(router);
+        }
+        r
     }
 }
 
@@ -787,18 +866,38 @@ impl Session {
         self.stmt.start(stmt_type(&lowered.stmt), parse);
         self.timer.mark(Phase::Parse);
         if lowered.param_count > 0 {
-            return Err(SqlError::new(
-                1064,
-                "You have an error in your SQL syntax; '?' is only allowed in prepared statements",
-            ));
+            return Err(param_in_query());
         }
+        self.run_query(&lowered).await
+    }
+
+    /// A `COM_QUERY` statement after parsing: request the TSO early, then run it.
+    async fn run_query(&mut self, lowered: &Lowered) -> Result<Response, SqlError> {
         let ts =
-            (needs_ts(&lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
-        self.run(&lowered, &[], ts).await
+            (needs_ts(lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
+        self.run(lowered, &[], ts).await
+    }
+
+    /// The state the VS1 router syncs into the new session.
+    fn poc_values(&self) -> PocValues {
+        PocValues {
+            current_db: self.current_db.clone(),
+            charset: self.charset.clone(),
+            collation: self.collation.clone(),
+            results_charset: self.results_charset.clone(),
+        }
     }
 
     async fn prepare_inner(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
         let lowered = tidb_sql::parse_and_lower(sql)?;
+        self.prepare_lowered(stmt_id, lowered).await
+    }
+
+    async fn prepare_lowered(
+        &mut self,
+        stmt_id: u32,
+        lowered: Lowered,
+    ) -> Result<PreparedInfo, SqlError> {
         let param_count = u16::try_from(lowered.param_count).map_err(|_| {
             SqlError::new(1390, "Prepared statement contains too many placeholders")
         })?;
@@ -862,6 +961,67 @@ impl Session {
         }
         self.current_db = Some(db.to_owned());
         Ok(())
+    }
+}
+
+impl router::PocEngine for Session {
+    fn schema_version(&self) -> Option<i64> {
+        if let Some(is) = self
+            .shared
+            .sync
+            .as_ref()
+            .and_then(|s| s.registry().schema_if_admissible(Instant::now()))
+        {
+            return Some(is.version());
+        }
+        self.shared.schema.candidate().map(|is| is.version())
+    }
+
+    fn in_txn(&self) -> bool {
+        // BEGIN / START TRANSACTION and autocommit=0 are rejected: never in a transaction.
+        false
+    }
+
+    fn values(&self) -> PocValues {
+        self.poc_values()
+    }
+
+    fn begin_command(&mut self) {
+        self.timer.begin();
+        self.mdl = None;
+        self.stmt.stmt_type = None;
+    }
+
+    fn start_statement(&mut self, kind: StmtType, parse: Duration) {
+        self.stmt.start(kind, parse);
+        self.timer.mark(Phase::Parse);
+    }
+
+    fn run<'a>(
+        &'a mut self,
+        lowered: &'a Lowered,
+    ) -> router::BoxFut<'a, Result<Response, SqlError>> {
+        Box::pin(self.run_query(lowered))
+    }
+
+    fn prepare(
+        &mut self,
+        stmt_id: u32,
+        lowered: Lowered,
+    ) -> router::BoxFut<'_, Result<PreparedInfo, SqlError>> {
+        Box::pin(self.prepare_lowered(stmt_id, lowered))
+    }
+
+    fn execute(
+        &mut self,
+        stmt_id: u32,
+        params: Vec<Param>,
+    ) -> router::BoxFut<'_, Result<Response, SqlError>> {
+        Box::pin(self.execute_inner(stmt_id, params))
+    }
+
+    fn close(&mut self, stmt_id: u32) {
+        self.stmts.remove(&stmt_id);
     }
 }
 
