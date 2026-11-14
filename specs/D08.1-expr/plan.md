@@ -67,7 +67,7 @@
 - `Clone` 与 Go 一样复制 hash 缓存；`Decorrelate`/`RemapColumn` 返回新节点并清空缓存（Go 原地修改后清空）。
 - `emptyScalarFunctionSize` 104、`emptyBaseBuiltinFunc` 152、`onceSize` 12：govec `sizes` 记录 Go 的实测值，回放时核对。
 
-**性能门禁的测量规则**（Lucky 评审 #75）：同一台机器上 Go 与 Rust 交替运行，每个签名在**多个独立进程**中各跑若干次、取最小值（虚拟机或混合大小核的机器上，单个进程偶尔会被调度到能效核，慢 3–4 倍）；每次改动驱动或宏之后，在 amd64 CI（`ubuntu-latest`）上再确认一次。
+**性能门禁的测量规则**（Lucky 评审 #75）：同一台机器上 Go 与 Rust 交替运行，每个签名在**多个独立进程**中各跑若干次、取最小值（虚拟机或混合大小核的机器上，单个进程偶尔会被调度到能效核，慢 3–4 倍）；每次改动驱动或宏之后，在 amd64 CI（`ubuntu-latest`）上再确认一次。**负载**（Lucky 评审 #164，#165）：每一轮只在 1 分钟 load average 低于 2 时开始，否则等待；`scripts/eval-gate.sh` 每轮开始前按 10 秒间隔等待（上限 `EVAL_GATE_LOAD_WAIT`，默认 600 秒；门槛 `EVAL_GATE_MAX_LOAD`，默认 2），等不到时照常测量但在 `machine.txt`（因而在 `summary.md`）中把该轮标为 `LOADED` 并给出警告——有 `LOADED` 轮次的结果不作为门禁结论，重测。每轮开始时的负载记录在输出中。
 
 **第 2 部分 2b（下一个 PR）**：
 1. `evaluator.go`（`EvaluatorSuite`、`defaultEvaluator`、`GetOptionalEvalPropsForExpr`）、`chunk_executor.go`（`VectorizedExecute`、`VectorizedFilter(ConsiderNull)`、`evalOneVec/Column/Cell`、`executeToXxx`、`Vectorizable`、`HasGetSetVarFunc` 等）、`expression.go` 的 `VecEvalBool`/`toBool`/`EvalExpr`/`implicitEvalReal`、`vectorized.go` 的 `genVecFromConstExpr`（现在在 `rt::fill_constant`）、`builtin_vectorized.go` 的 `vecEvalIntByRows`/`vecEvalStringByRows`。这些要用真实的签名才能和 Go 对照：和 D08.2（函数注册、`newBaseBuiltinFunc`）、D08.8 CAST 的第一批签名一起做，govec 用真实表达式在 chunk 上求值。
@@ -99,7 +99,7 @@ D08.2 第 1 部分（`specs/D08.2-funcs`）移植了函数注册表 `funcs`（�
 - 仍在 2b 范围之外：`builtin_vectorized.go` 的 `vecEvalIntByRows`/`vecEvalStringByRows`、局部列池（随第一个用到它们的函数族；列池按 M-POOL 不移植）；`Column.EvalVirtualColumn`（随生成列）。
 
 
-## 门禁重测（2026-11-14，P1 收尾；修复后**通过**）
+## 门禁重测（2026-11-13 UTC，P1 收尾；修复后**通过**）
 
 Lucky 在 #163 评审中不同意把门禁移交 A5：先做 T7a，再按上面的测量规则重测，然后才能勾掉 P1。指标不放宽。
 
