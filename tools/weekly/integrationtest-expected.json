@@ -75,21 +75,6 @@
     "reason": "B ignores the hint for an index that does not exist (dropped by the preceding ALTER); Go fails with 1176",
     "issue": "#185"
   },
-  "executor/autoid:195": {
-    "class": "bug",
-    "reason": "rows >= 2^63 come first: ordered as signed",
-    "issue": "#186"
-  },
-  "executor/autoid:292": {
-    "class": "bug",
-    "reason": "rows >= 2^63 come first: ordered as signed",
-    "issue": "#186"
-  },
-  "executor/autoid:98": {
-    "class": "bug",
-    "reason": "rows >= 2^63 come first: ordered as signed",
-    "issue": "#186"
-  },
   "executor/charset:10": {
     "class": "bug",
     "reason": "B accepted the SET but still answers in utf8mb4",
@@ -119,11 +104,6 @@
     "class": "bug",
     "reason": "the --enable_warnings SHOW WARNINGS has different column metadata",
     "issue": "#189"
-  },
-  "executor/executor:1091": {
-    "class": "bug",
-    "reason": "rows >= 2^63 come first: ordered as signed",
-    "issue": "#186"
   },
   "executor/executor:1673": {
     "class": "bug",

@@ -16,6 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use tidb_distsql::AggFunc;
+use tidb_distsql::IntRange;
 use tidb_meta::InfoSchema;
 use tidb_meta::model::ColumnInfo;
 use tidb_meta::model::FieldType;
@@ -116,13 +117,16 @@ pub struct PushedAgg {
 pub enum Source {
     /// No rows (empty handle range, or prepare-time description).
     Dual,
-    /// A single row by handle (KV point get).
+    /// A single row by handle (KV point get). For an UNSIGNED handle column this is the
+    /// value's bit pattern, as Go's `kv.IntHandle(d.GetInt64())`.
     PointGet { handle: i64 },
-    /// A coprocessor read of the inclusive handle range `[lo, hi]`.
+    /// A coprocessor read of an inclusive range of handle values. The executor splits an
+    /// UNSIGNED range at the int64 boundary (Go `distsql.SplitRangesAcrossInt64Boundary`).
     TableReader {
-        lo: i64,
-        hi: i64,
+        range: IntRange,
         desc: bool,
+        /// Go's `KeepOrder`: the rows must come in handle order (an ORDER BY the handle was
+        /// eliminated).
         keep_order: bool,
         /// Limit applied by each cop task (before any root operator).
         limit: Option<u64>,
@@ -376,10 +380,13 @@ impl Resolved<'_> {
             .position(|c| c.field_type.has_flag(flag::PRI_KEY))
     }
 
-    /// The handle range selected by WHERE, `None` if empty.
-    fn handle_range(&self) -> Result<Option<(i64, i64)>, SqlError> {
+    /// The range of handle values selected by WHERE, `None` if empty.
+    fn handle_range(&self) -> Result<Option<IntRange>, SqlError> {
+        let handle = self.handle_column();
+        // go: ranger.FullIntRange(mysql.HasUnsignedFlag(pk.GetFlag())); `_tidb_rowid` is signed.
+        let unsigned = handle.is_some_and(|h| self.column(h).field_type.is_unsigned());
         let Some(w) = &self.sel.where_ else {
-            return Ok(Some((i64::MIN, i64::MAX)));
+            return Ok(Interval::full().to_int_range(unsigned));
         };
         let mut conjuncts = Vec::new();
         flatten_and(w, &mut conjuncts);
@@ -417,7 +424,6 @@ impl Resolved<'_> {
                 }
             }
         }
-        let handle = self.handle_column();
         let mut range = Interval::full();
         for (col, op, v) in comparisons {
             let idx = self.resolve_column(col, "where clause")?;
@@ -428,9 +434,6 @@ impl Resolved<'_> {
                     self.column(idx).name.o
                 )));
             }
-            if self.column(idx).field_type.is_unsigned() {
-                return Err(unsupported("ranges on an UNSIGNED integer primary key"));
-            }
             if self.cx.describe_only {
                 continue;
             }
@@ -440,7 +443,7 @@ impl Resolved<'_> {
         if self.cx.describe_only {
             return Ok(None);
         }
-        Ok(range.to_i64())
+        Ok(range.to_int_range(unsigned))
     }
 
     fn limit(&self) -> Result<Option<LimitSpec>, SqlError> {
@@ -669,8 +672,10 @@ impl Resolved<'_> {
             // Limit 0 down would also crash TiKV, which asserts a non-empty batch.)
             _ if limit.is_some_and(|l| l.count == 0) => SourceKind::Dual,
             None => SourceKind::Dual,
-            Some((lo, hi)) if lo == hi => SourceKind::Point(lo),
-            Some((lo, hi)) => SourceKind::Range(lo, hi),
+            Some(IntRange::Signed(lo, hi)) if lo == hi => SourceKind::Point(lo),
+            // go: `kv.IntHandle(d.GetInt64())`: the handle of an UNSIGNED value is its bits.
+            Some(IntRange::Unsigned(lo, hi)) if lo == hi => SourceKind::Point(lo as i64),
+            Some(r) => SourceKind::Range(r),
         };
 
         let mut output = Vec::new();
@@ -751,9 +756,8 @@ impl Resolved<'_> {
             source = match source_kind {
                 SourceKind::Dual => Source::Dual,
                 SourceKind::Point(h) => Source::PointGet { handle: h },
-                SourceKind::Range(lo, hi) => Source::TableReader {
-                    lo,
-                    hi,
+                SourceKind::Range(range) => Source::TableReader {
+                    range,
                     desc: false,
                     keep_order: false,
                     limit: None,
@@ -831,22 +835,27 @@ impl Resolved<'_> {
             source = match source_kind {
                 SourceKind::Dual => Source::Dual,
                 SourceKind::Point(h) => Source::PointGet { handle: h },
-                SourceKind::Range(lo, hi) => Source::TableReader {
-                    lo,
-                    hi,
+                SourceKind::Range(range) => Source::TableReader {
+                    range,
                     desc: false,
-                    keep_order: true,
+                    keep_order: false,
                     limit: None,
                     agg: None,
                 },
             };
-            // Sort elimination: ordering by the handle alone is the scan order.
+            // Sort elimination: ordering by the handle alone is the scan order. Like Go, the
+            // reader keeps order only then (the table scan's `KeepOrder` comes from the
+            // required sort property), which also decides how an UNSIGNED range is split.
             let handle_pos = self
                 .handle_column()
                 .and_then(|h| scan_columns.iter().position(|&c| c == h));
             if sort.len() == 1 && Some(sort[0].col) == handle_pos {
-                if let Source::TableReader { desc, .. } = &mut source {
+                if let Source::TableReader {
+                    desc, keep_order, ..
+                } = &mut source
+                {
                     *desc = sort[0].desc;
+                    *keep_order = true;
                 }
                 sort.clear();
             }
@@ -916,7 +925,7 @@ impl Resolved<'_> {
 enum SourceKind {
     Dual,
     Point(i64),
-    Range(i64, i64),
+    Range(IntRange),
 }
 
 fn scan_pos(cols: &mut Vec<usize>, idx: usize) -> usize {
@@ -1134,8 +1143,7 @@ impl fmt::Display for Plan {
                 scan_names.join(", ")
             )),
             Source::TableReader {
-                lo,
-                hi,
+                range,
                 desc,
                 keep_order,
                 limit,
@@ -1168,7 +1176,7 @@ impl fmt::Display for Plan {
                     ));
                 }
                 lines.push(format!(
-                    "TableRangeScan {} range:[{lo},{hi}]{} columns:[{}]",
+                    "TableRangeScan {} range:{range}{} columns:[{}]",
                     t.name.o,
                     if *desc { " desc" } else { "" },
                     scan_names.join(", ")
