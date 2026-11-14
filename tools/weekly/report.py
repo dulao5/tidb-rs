@@ -3,7 +3,8 @@
 
     report.py --in DIR [--previous DIR] [--title T] [--commit SHA] --out report.md
 
-DIR holds what tools/weekly/run.sh wrote for each part (ab.json, ab-classified.json,
+DIR holds what tools/weekly/run.sh wrote for each part (ab.json, ab-classified.json, the
+strict new-stack round's ab-strict-classified.json / ab-strict-routes.txt / ab-strict-*/,
 sysbench.json, faults.json, faults-raw.json, locks.json, locks-raw.json, integrationtest.json and
 ab-integrationtest/results.jsonl), possibly in
 sub-directories (one per CI job). --previous is the same for last week's run: the report then
@@ -14,7 +15,8 @@ Verdict (the report's first line, and the exit status):
 - INCOMPLETE (2): a part did not run fully (skipped, failed to set up, missing);
 - REGRESSED (2): against the previous run, an operator or a TPC-H query tidb-rs executed is no
   longer executable, `unsupported` statements increased (tidb-ab workloads, or the integration
-  tests both runs ran), or a sysbench B/A ratio dropped by more than 15%;
+  tests both runs ran), the new stack (VS1, strict round) executed fewer statements, or a
+  sysbench B/A ratio dropped by more than 15%;
 - GREEN (0): none of these.
 """
 
@@ -209,9 +211,63 @@ def it_diverged_growth(cur, prev):
     return it_growth(cur, prev, "skipped")
 
 
-def regressions(cur_ab, prev_ab, cur_sb, prev_sb, cur_tpch=None, prev_tpch=None, cur_it=None, prev_it=None):
+# The VS1 shapes (specs/VS1-vertical-slice/plan.md §1.1), by the Go plan's operators.
+VS1_OPERATORS = ("Point_Get", "TableReader", "TableFullScan", "TableRangeScan", "Selection",
+                 "Projection", "Limit", "Sort", "TopN", "TableDual")
+ROUTE_RE = re.compile(r'^tidbrs_route_total\{(.*)\}\s+([0-9.e+]+)\s*$')
+BLOCK_RE = re.compile(r"blocked-by:([A-Za-z0-9.]+)")
+
+
+def strict_routes(base):
+    """tidbrs_route_total of the strict tidb-rs (ab-strict-routes.txt): {(engine, reason): n},
+    or None when there is none."""
+    if not base:
+        return None
+    hits = sorted(glob.glob(os.path.join(base, "**", "ab-strict-routes.txt"), recursive=True))
+    if not hits:
+        return None
+    out = Counter()
+    with open(hits[0]) as f:
+        for line in f:
+            m = ROUTE_RE.match(line.strip())
+            if not m:
+                continue
+            labels = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1)))
+            out[(labels.get("engine", "?"), labels.get("reason", "?"))] += int(float(m.group(2)))
+    return out
+
+
+def new_stack_executed(routes):
+    """Statements the new stack ran (engine="new", answered or with a Go-ported error)."""
+    return sum(n for (engine, _), n in routes.items() if engine == "new") if routes is not None else None
+
+
+def strict_blocks(base):
+    """Counter of the boundary-stub blocks named by the strict round's 1235 answers
+    (ab-strict-*/unsupported.jsonl)."""
+    out = Counter()
+    if not base:
+        return out
+    for path in glob.glob(os.path.join(base, "**", "ab-strict-*", "unsupported.jsonl"), recursive=True):
+        with open(path) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                msg = ((r.get("b") or {}).get("error") or {}).get("message", "")
+                m = BLOCK_RE.search(msg)
+                out[m.group(1) if m else "(not a boundary stub)"] += 1
+    return out
+
+
+def regressions(cur_ab, prev_ab, cur_sb, prev_sb, cur_tpch=None, prev_tpch=None, cur_it=None, prev_it=None,
+                cur_routes=None, prev_routes=None):
     """What got worse against the previous run (each a short line)."""
     out = []
+    now, before = new_stack_executed(cur_routes), new_stack_executed(prev_routes)
+    if now is not None and before is not None and now < before:
+        out.append(f"new stack (VS1, strict round): statements executed down by {before - now} "
+                   f"({before} → {now})")
     g = it_unsupported_growth(cur_it, prev_it)
     if g and g[1] > g[0]:
         out.append(f"integration tests: `unsupported` statements up by {g[1] - g[0]} ({g[0]} → {g[1]})")
@@ -278,6 +334,50 @@ def section_ab(cur, prev, lines):
             change = "new"
         lines.append(f"| `{op}` | {total} | {pct(agree, ran)} | {c['mismatch']} | {c['unsupported']} | {change} |")
     lines.append("")
+
+
+def section_new_stack(cur, routes, prev_routes, blocks, ab_status, lines):
+    """The VS1 strict round (run.sh ab): what the new stack runs and why the rest falls back."""
+    lines.append("## New stack (VS1, `--new-stack=strict`)\n")
+    lines.append(
+        "The tidb-ab workloads again, against a second tidb-rs started with `--new-stack=strict` "
+        "(specs/VS1-vertical-slice/plan.md §4.3, §7.2): VS1-shaped SELECTs run on the new stack, a "
+        "boundary stub answers 1235 (`unsupported` here, expected, never a failure), everything else "
+        "runs on the PoC. A mismatch is a wrong result like any other.\n")
+    if (ab_status or {}).get("strict") == "incomplete":
+        lines.append("**The strict round did not run fully.**\n")
+    if routes is None and not cur:
+        lines.append("_Not run._\n")
+        return
+    if routes is not None:
+        now, before = new_stack_executed(routes), new_stack_executed(prev_routes)
+        total = sum(routes.values())
+        lines.append(
+            f"Statements routed: {total}; on the new stack: **{now}**"
+            + (f" (last run: {before})" if before is not None else "")
+            + f"; on the PoC: {total - now}.\n")
+        lines.append("| engine | reason | statements |")
+        lines.append("|---|---|---|")
+        for (engine, reason), n in sorted(routes.items(), key=lambda kv: (kv[0][0], -kv[1], kv[0][1])):
+            lines.append(f"| {engine} | {reason} | {n} |")
+        lines.append("")
+    if blocks:
+        lines.append("| boundary stub hit (1235 answers) | statements |")
+        lines.append("|---|---|")
+        for block, n in blocks.most_common(15):
+            lines.append(f"| `{block}` | {n} |")
+        lines.append("")
+    if cur:
+        lines.append("| VS1 operator (Go plan) | statements | agreement on what ran | mismatch | unsupported |")
+        lines.append("|---|---|---|---|---|")
+        for op in VS1_OPERATORS:
+            c = cur["operators"].get(op)
+            if not c:
+                continue
+            ran, agree = agreement(c)
+            lines.append(f"| `{op}` | {ran + c['unsupported']} | {pct(agree, ran)} | {c['mismatch']} | "
+                         f"{c['unsupported']} |")
+        lines.append("")
 
 
 def ratio(rows, t):
@@ -486,9 +586,10 @@ def main():
     cur_ab, prev_ab = load(args.inp, "ab-classified.json"), load(args.previous, "ab-classified.json")
     cur_sb, prev_sb = load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json")
     cur_it, prev_it = integration(args.inp, accepted), integration(args.previous, accepted)
+    cur_routes, prev_routes = strict_routes(args.inp), strict_routes(args.previous)
     regressed = regressions(cur_ab, prev_ab, cur_sb, prev_sb,
                             load(args.inp, "tpch-time.json"), load(args.previous, "tpch-time.json"),
-                            cur_it, prev_it)
+                            cur_it, prev_it, cur_routes, prev_routes)
     if any(s == "fail" for s in status.values()):
         verdict, code = "RED", 1
     elif any(s in ("incomplete", "missing") for s in status.values()):
@@ -520,6 +621,8 @@ def main():
 
     if "ab" in expected:
         section_ab(cur_ab, prev_ab, lines)
+        section_new_stack(load(args.inp, "ab-strict-classified.json"), cur_routes, prev_routes,
+                          strict_blocks(args.inp), load(args.inp, "ab.json"), lines)
     if "sysbench" in expected:
         section_sysbench(cur_sb, prev_sb, lines)
     if "faults" in expected:
