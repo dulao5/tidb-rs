@@ -37,7 +37,7 @@ The replay (`tests/govec_infoschema.rs`) treats Go's nil and empty slices as equ
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/table.jsonl.gz` (branch `block/D06.4-table`) |
 | generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261115), 8365 records |
 | `arm64/table.jsonl.gz` sha256 | `24dd5327d535840b0f50c14175137a4873c5dc16983a26fc4e01b45e5773435f` (generated locally) |
-| `amd64/table.jsonl.gz` sha256 | `ba26837de1bdce03cff4851ad70d3f4a06be156bc7db2fb596d59fba9a864ee2` (GOARCH=amd64, GOAMD64=v1; tracker#77 CI artifact, run 43572016142) |
+| `amd64/table.jsonl.gz` sha256 | `534fc0350576a3260b6e66431ba650f17c8b5fbb7318cba7f9c9f8b977d16d64` (GOARCH=amd64, GOAMD64=v1; tracker#77 CI artifact, run 43574870265) |
 
 The two targets hold the same records.
 
