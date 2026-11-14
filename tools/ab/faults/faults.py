@@ -512,12 +512,23 @@ def sc_kill_tikv_meta(args, log):
     kill_and_restart(args, log, store)
 
 
+def process_cmdline_cwd(pid):
+    """The command line and working directory of a process: from /proc on Linux; from ps and
+    lsof elsewhere (macOS), where the arguments are split on spaces (tiup's paths have none)."""
+    if os.path.exists(f"/proc/{pid}/cmdline"):
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd = [c.decode() for c in f.read().split(b"\0") if c]
+        return cmd, os.readlink(f"/proc/{pid}/cwd")
+    cmd = sh("ps", "-o", "args=", "-p", str(pid)).stdout.split()
+    cwd = next(line[1:] for line in sh("lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn").stdout.splitlines()
+               if line.startswith("n"))
+    return cmd, cwd
+
+
 def kill_and_restart(args, log, store):
     addr = stores(args.pd)[store]["store"]["address"]
     pid = tikv_pid(addr)
-    with open(f"/proc/{pid}/cmdline", "rb") as f:
-        cmd = [c.decode() for c in f.read().split(b"\0") if c]
-    cwd = os.readlink(f"/proc/{pid}/cwd")
+    cmd, cwd = process_cmdline_cwd(pid)
     os.kill(pid, signal.SIGKILL)
     log(f"kill -9 tikv store {store} ({addr}, pid {pid})")
     time.sleep(args.phase * 2)

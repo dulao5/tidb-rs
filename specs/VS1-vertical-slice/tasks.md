@@ -30,12 +30,12 @@
 | VS1-11 | `TryFastPlan`、`PointGetPlan` | D10.8 | depth | 0.07 | VS1-10、VS1-19 | 点查计划向量一致 | 未开始 |
 | VS1-19 | `property`、`planner/util`、`baseimpl`、`base_physical_plan` | D10.10、D10.1 | depth | 0.11 | VS1-01 | Go 单测与 govec 通过 | 未开始 |
 | VS1-12 | 点查执行器、`NewRowDecoder`；table 读取部分 | D12.1、D06.4 | depth + breadth | 0.13 | VS1-13、VS1-18 | 行解码 / 默认值 govec；ab `Point_Get` | 未开始 |
-| VS1-13 | `ExecStmt`、`recordSet`、`Compiler`、`executorBuilder.build`、`internal/exec` | D12.0 | depth | 0.15 | VS1-01 | 单测通过；MaxTS 点查判定与 Go 一致 | 未开始 |
-| VS1-14 | 会话 `ExecuteStmt` / `PrepareStmt` / `ExecutePreparedStmt`、`LazyTxn`、txnManager、sessiontxn 只读 provider；回退时的检查点与恢复（plan §4.6）；预处理语句四种组合与按 stmt id 路由（§4.7） | D05.3、D05.4 | depth + breadth | 0.24 | VS1-13 | N2 §5 断言；autocommit 读、TSO 预取、warning 与 Go 一致；每种回退原因的 `SessionVars` 快照前后相等，SHOW WARNINGS 只有 PoC 的 warning；四种组合与 RESET / LONG_DATA / FETCH / CLOSE 用例；ab 比较 PREPARE 列元数据与每次 EXECUTE 的列定义（含反证） | 未开始 |
+| VS1-13 | `ExecStmt`、`recordSet`、`Compiler`、`executorBuilder.build`、`internal/exec` | D12.0 | depth | 0.15 | VS1-01 | 单测通过；MaxTS 点查判定与 Go 一致 | 评审中（#222） |
+| VS1-14 | 会话 `ExecuteStmt` / `PrepareStmt` / `ExecutePreparedStmt`、`LazyTxn`、txnManager、sessiontxn 只读 provider；回退时的检查点与恢复（plan §4.6）；预处理语句四种组合与按 stmt id 路由（§4.7）。注（D07.2）：KILL 还到不了 coprocessor 读——`tidb_store::copr` 的 `Variables.killed` 现为 `None`（`poc-kv` `KvSnapshot::coprocessor`），本项要把会话的 kill 标志传进去，worker 的 `finished()` 才能看到（Go `vars.Killed`） | D05.3、D05.4 | depth + breadth | 0.24 | VS1-13 | N2 §5 断言；autocommit 读、TSO 预取、warning 与 Go 一致；每种回退原因的 `SessionVars` 快照前后相等，SHOW WARNINGS 只有 PoC 的 warning；四种组合与 RESET / LONG_DATA / FETCH / CLOSE 用例；ab 比较 PREPARE 列元数据与每次 EXECUTE 的列定义（含反证）；`RecordSet` 没有 `Drop`（#222）：语句中途被丢弃（取消、KILL、断连）时，会话在下一条语句之前补做未完成的 finish（`close_record_set` / `FinishExecuteStmt`），用例检查中途丢弃后的会话状态 | 未开始 |
 | VS1-15 | `PlanCacheStmt`、`GetPlanFromPlanCache` 未命中路径、可缓存性检查、`PrepareExec` | D13.1、D12.12 | depth | 0.08 | VS1-14 | 可缓存性 govec；ab 预处理语句部分 | 未开始 |
 | VS1-16 | 结果集与 `writeResultSet` / `writeChunks`、`column` / `dump`、`conn_stmt` 执行与二进制参数 | D03.1 | breadth | 0.13 | VS1-14 | dump govec；protocol-smoke 通过 | 未开始 |
 | VS1-17 | D06.3 第 2 部分（T8 / T9）；D06.5 `loadInfoSchema` / `tryLoadSchemaDiffs` / validator，由 PoC domain 驱动 | D06.3、D06.5 | breadth | 0.10 | — | schema 同步测试在新 InfoSchema 上通过 | 未开始 |
-| VS1-18 | snapshot `Get` / `BatchGet` / `SetOption`、错误转换 | D07.1 | breadth | 0.04 | — | 故障场景点查与 PoC 相同 | 未开始 |
+| VS1-18 | snapshot `Get` / `BatchGet` / `SetOption`、错误转换 | D07.1 | breadth | 0.04 | — | 故障场景点查与 PoC 相同 | 评审中（#221） |
 | VS1-20 | C2a 集成与 point_select 调优 | glue | depth | 0.08 | Phase 1 其余各项 | ab `strict` 的 `Point_Get` 100%；point_select ≥ 0.9× Go（1 / 8 线程） | 未开始 |
 
 ## Phase 2：规划器主体

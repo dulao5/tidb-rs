@@ -137,7 +137,7 @@ sysbench read_only 每个事务有 14 条语句，其中 12 条属于 VS1：10 �
 
 ### 3.3 函数清单的生成方法和精度
 
-- `functions.tsv` 由 tracker 数据生成，每行是 (工作项, 块, Go 文件, 函数, 行数)。
+- `functions.tsv` 由 tracker 数据生成，每行是 (工作项, 块, Go 文件, 函数, 行数, `not_ported`)。`not_ported` 一般为空；非空时是该函数按决定不移植的理由（与 tracker 的豁免理由相同），行保留以保持 Go 侧清单完整，`scripts/converge.py --part` 把这些行当作豁免。目前只有 D07.2 的 8 个（D07.2 spec §6.4）。
 - 选取规则：按 Go 调用链从入口开始，逐个文件挑出 VS1 算子和语句需要的函数。入口包括 `clientConn.handleQuery`、`handleStmtExecute`、`session.ExecuteStmt`、`ExecutePreparedStmt`、`planner.Optimize`、`executorBuilder.build`。挑选用的是函数名的规则，不是机器求出的可达闭包。按函数级引用，Go 是一个强连通分量（ROADMAP §3.1），求可达闭包会把几乎所有块都拉进来。
 - 所以这份清单是**规划精度，约 ±20%**。每个工作项开工时，在自己的 spec 中逐个确认函数，多出或缺少的函数在 spec 中写明。
 
