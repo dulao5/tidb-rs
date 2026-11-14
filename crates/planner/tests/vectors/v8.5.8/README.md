@@ -19,7 +19,7 @@ fuse), and the two targets hold the same records (tracker `TestTargetsDiffer`).
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/preprocess.jsonl.gz` (branch `vs1/planner-optimize`) |
 | generator | `govec` (seed 20261116), 75 records |
 | `arm64/preprocess.jsonl.gz` sha256 | `ac5c272997807c389ca8aaa20b5d2e7d44006d4e5314cd5a21aaa78a916d0037` (generated locally) |
-| `amd64/preprocess.jsonl.gz` sha256 | (tracker CI artifact; until then a copy of arm64: the records do not depend on the target) |
+| `amd64/preprocess.jsonl.gz` sha256 | `46e9c8b1dc53811609e228985a80a1e8c65a34aeac4b0dca51d06aaced168a72` (tracker CI artifact, run 43576655239) |
 
 `tests/govec_preprocess.rs` counts the records whose Rust result is a boundary stub
 (`blocked-by:D06.3` for a base table, `D02.2` for TABLESAMPLE, `D09.5` for a shared WITH
