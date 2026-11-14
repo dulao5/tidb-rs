@@ -27,3 +27,16 @@ Records with `err.name == "panic"` must panic in Rust with the same message.
 The two targets hold the same records.
 
 The replay (`tests/govec_infoschema.rs`) treats Go's nil and empty slices as equal.
+
+## Domain "table" (block D06.4 part 1)
+
+`<target>/table.jsonl.gz` are copied unmodified from the tidb-rs-tracker repository:
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/table.jsonl.gz` (branch `block/D06.4-table`) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261115), 8365 records |
+| `arm64/table.jsonl.gz` sha256 | `eba9cadf9bc4a2783dd3c161a8571e5f1c90e5b676dc6956ac7a6bec0dd47e8d` (generated locally) |
+| `amd64/table.jsonl.gz` | pending: the tracker CI artifact of the PR (GOARCH=amd64, GOAMD64=v1) |
+
+The replay (`tests/govec_table.rs`) compares parser errors (`[parser:1064]`) by code only (D06.4 spec §4).

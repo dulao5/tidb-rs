@@ -1,7 +1,7 @@
 [package]
 name = "tidb-infoschema"
 version = "0.0.0"
-description = "Blocks D06.2-D06.4, D06.6 of the Go TiDB v8.5.8 port: meta / structure reads (D06.2), InfoSchema v2 build and cache (D06.3), later tables and memory tables"
+description = "Blocks D06.2-D06.4, D06.6 of the Go TiDB v8.5.8 port: meta / structure reads (D06.2), InfoSchema v2 build and cache (D06.3), the table abstraction read path (D06.4), later memory tables"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -32,10 +32,21 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 # logutil.BgLogger().Error of the bundle builder.
 log = "0.4"
+# Table abstraction (D06.4): column casts and defaults (CastColumnValue, GetTimeValue),
+# expression.Column of virtual columns, BuildContext.
+tidb-expression = { workspace = true }
+# chunk.Chunk of FillVirtualColumnValue (D01.7).
+tidb-chunk = { workspace = true }
+# Record / index prefixes and keys, raw row decoding, Unflatten, EncodeValue (D01.11).
+tidb-tablecodec = { workspace = true }
+# tipb.TableScan / ColumnInfo of BuildTableScanFromInfos and SetPBColumnsDefaultValue.
+tipb = { workspace = true }
 
 [dev-dependencies]
 # The govec vectors are committed as .jsonl.gz.
 flate2 = "1.0"
+# tipb.TableScan bytes of the table vectors.
+protobuf = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }
 

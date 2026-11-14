@@ -1013,8 +1013,10 @@ impl Builder {
     }
 }
 
-/// The CachedTable branch of Go (`t.Init(factory session's SQLExecutor)`) needs the cached
-/// table of D06.4; the stand-in table is never a CachedTable.
+/// The CachedTable branch of Go (`t.Init(factory session's SQLExecutor)`, loading the
+/// cache through an internal session) is D06.4 part 2 (`cache.go`): a cached table is the
+/// part-1 [`table::CachedTable`] marker without a cache, so it is returned without `Init`
+/// and its readers stop at their boundary stubs (blocked-by:D06.4).
 // go: tableFromMeta L1
 pub(crate) fn table_from_meta(
     alloc: Allocators,
