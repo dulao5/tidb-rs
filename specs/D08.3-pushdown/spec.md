@@ -42,12 +42,12 @@ Go 的 `conOrCorColToPBExpr` 对相关列求值，读 `CorrelatedColumn.Data`：
 ## 4. 偏离与豁免
 
 1. **测试专用的 failpoint 不移植**：`PushDownTestSwitcher`（`canFuncBePushed`）、`PanicIfPbCodeUnspecified`（`scalarFuncToPBExpr`、`canScalarFuncPushDown`）。这三个函数标 L2。
-2. **`ToPBFieldType` 的 `elems` 不是 UTF-8 时有损转换**（L2）：tipb 的 `elems` 是 `repeated string`，Rust 消息的元素是 `String`；ENUM/SET 由二进制字面量定义、元素不是合法 UTF-8 时，Go 序列化原字节，Rust 写入替换字符。只影响这类列推到 TiKV 的类型信息；D07.3 构造 DAG 请求时如需完全一致，再改为直接写字段 7 的字节。
+2. **`ToPBFieldType` 的 `elems` 不是 UTF-8 时有损转换**（L2，实际不发生）：tipb 的 `elems` 是 `repeated string`，Rust 消息的元素是 `String`。v8.5.8 在 CREATE TABLE 时把 ENUM/SET 元素中的非法 UTF-8 换成 U+FFFD（`enum(x'ff')` 存为 `EF BF BD`，Lucky 评审 #179），所以 Go 的 `elems` 都是合法 UTF-8，Rust 的转换得到相同的字节。非 UTF-8 的元素只可能来自其他版本写入的元数据：这时记 warning 日志、debug 构建中 `debug_assert` 失败，再有损转换；不手写字段 7 的字节。
 3. **`FieldTypeFromPB` 中 `elems` 为空时是 `None`**：Go 的 nil 与空切片在一次 protobuf 往返后都是 nil，Rust 消息只有空列表这一种，统一当作 nil。govec 的 `ft`/`ftpb` 记录只给出 nil 或非空的 `Elems`（Go 中直接构造的非 nil 空切片在实际流程里不出现）。
 4. **`canScalarFuncPushDown` 的 metadata 序列化**：Go 序列化一次只为了在失败时记日志并返回 false；`InUnionMetadata` 的序列化不会失败，Rust 不做。
 5. 四个未导出的函数（`scalarExprSupportedByTiDB/TiKV/Flash`、`canEnumPushdownPreliminarily`）为了向量回放设为 `#[doc(hidden)] pub`。
 
-看起来像上游问题、按 Go 照搬的行为（只记录，不提交上游）：
+看起来像上游问题、按 Go 照搬的行为（只记录，不提交上游），合并登记为 [upstream-pitfall #180](https://github.com/dulao5/tidb-rs/issues/180)：
 
 - `columnToPBExpr` 检查黑名单时，BIT 列按 `kv.TiKV`（黑名单中 `bit` 只对 TiFlash 生效的条目不起作用），ENUM 列按 `kv.UnSpecified`（`enum` 必须对三种存储都列入黑名单才起作用）；调用方并不知道请求发往哪种存储。
 - `ExprToPB` 对相关列不检查列类型，而 `canExprPushDown` 对相关列另外调用 `columnToPBExpr(&x.Column, true)`：SET/GEOMETRY 类型的相关列能被 `ExprToPB` 转换，但判定为不能下推。
