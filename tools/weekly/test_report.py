@@ -68,6 +68,34 @@ def diverged(line, cause_line, cause_sql):
             "cause": {"line": cause_line, "sql": cause_sql, "var": "database"}}
 
 
+def strict_round(d, new_ok=3, unsupported=2, mismatch=0, block="D05.3", per_workload=None):
+    """The ab part's strict new-stack round (run.sh): routes, results, 1235 answers and the
+    new stack's statements per workload (default: all in `sysbench`)."""
+    os.makedirs(d, exist_ok=True)
+    with open(f"{d}/ab-strict-new.tsv", "w") as f:
+        f.write("workload\tnew_stack\n")
+        for w, n in (per_workload or {"sysbench": new_ok}).items():
+            f.write(f"{w}\t{n}\n")
+    with open(f"{d}/ab-strict-routes.txt", "w") as f:
+        f.write(f'tidbrs_route_total{{engine="new",reason="ok"}} {new_ok}\n')
+        f.write(f'tidbrs_route_total{{engine="poc",reason="{block}"}} {unsupported}\n')
+        f.write('tidbrs_route_total{engine="poc",reason="kind"} 7\n')
+        f.write('tidbrs_route_total{engine="none",reason="session"} 1\n')
+    ops = {"Point_Get": {"match": new_ok, "mismatch": mismatch, "unsupported": unsupported, "both_error": 0}}
+    write(d, "ab-strict-classified.json", {
+        "statements": new_ok + unsupported + mismatch,
+        "totals": {"match": new_ok, "mismatch": mismatch, "unsupported": unsupported, "both_error": 0},
+        "operators": ops, "templates": {}})
+    os.makedirs(f"{d}/ab-strict-sysbench", exist_ok=True)
+    with open(f"{d}/ab-strict-sysbench/results.jsonl", "w") as f:
+        for v in ["match"] * new_ok + ["unsupported"] * unsupported + ["mismatch"] * mismatch:
+            f.write(json.dumps({"template": "point", "protocol": "text", "verdict": v, "query": "q"}) + "\n")
+    msg = f"This version of TiDB doesn't yet support 'x (blocked-by:{block})'"
+    with open(f"{d}/ab-strict-sysbench/unsupported.jsonl", "w") as f:
+        for _ in range(unsupported):
+            f.write(json.dumps({"verdict": "unsupported", "b": {"error": {"code": 1235, "message": msg}}}) + "\n")
+
+
 class VerdictTest(unittest.TestCase):
     def test_mismatch_plus_error_is_red(self):
         # One workload mismatched (exit 1), another errored (exit 2): run.sh may record the
@@ -260,6 +288,85 @@ class VerdictTest(unittest.TestCase):
             rc, first = report(d, parts="ab")
             self.assertEqual(rc, 0)
             self.assertTrue(first.startswith("**GREEN**"), first)
+
+    def test_strict_round_unsupported_is_not_a_failure(self):
+        # VS1: the strict round's 1235 answers are expected; the report counts them.
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/part-ab", "ab.json", {"part": "ab", "status": "ok", "strict": "ok"})
+            write(f"{d}/part-ab", "ab-classified.json", classified())
+            strict_round(f"{d}/part-ab", new_ok=0, unsupported=5)
+            rc, first = report(d)
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
+            with open(os.path.join(d, "report.md")) as f:
+                text = f.read()
+            self.assertIn("## New stack (VS1, `--new-stack=strict`)", text)
+            self.assertIn("on the new stack: **0**", text)
+            self.assertIn("| `D05.3` | 5 |", text)
+            self.assertIn("| poc | D05.3 | 5 |", text)
+            self.assertIn("on the PoC: 12; answered 1235 without running anywhere (`none`): 1", text)
+
+    def test_strict_round_mismatch_is_red(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/part-ab", "ab.json", {"part": "ab", "status": "ok", "strict": "ok"})
+            write(f"{d}/part-ab", "ab-classified.json", classified())
+            strict_round(f"{d}/part-ab", mismatch=1)
+            rc, first = report(d)
+            self.assertEqual(rc, 1)
+            self.assertTrue(first.startswith("**RED**"), first)
+
+    def test_new_stack_running_less_is_regressed(self):
+        with tempfile.TemporaryDirectory() as d:
+            prev, cur = f"{d}/prev", f"{d}/cur"
+            for x, n in ((prev, 5), (cur, 3)):
+                write(x, "ab.json", {"part": "ab", "status": "ok", "strict": "ok"})
+                write(x, "ab-classified.json", classified())
+                strict_round(x, new_ok=n)
+            rc, first = report(cur, prev)
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+            # More is fine, and so is a first run with a strict round.
+            rc, first = report(prev, cur)
+            self.assertEqual(rc, 0, first)
+
+    def test_new_stack_compared_per_workload(self):
+        # A workload dropped from this run makes the total smaller: not a regression. A
+        # workload both runs ran with fewer new-stack statements is.
+        with tempfile.TemporaryDirectory() as d:
+            prev, cur = f"{d}/prev", f"{d}/cur"
+            for x, per in ((prev, {"sysbench": 5, "sample": 4}), (cur, {"sysbench": 6})):
+                write(x, "ab.json", {"part": "ab", "status": "ok", "strict": "ok"})
+                write(x, "ab-classified.json", classified())
+                strict_round(x, new_ok=sum(per.values()), per_workload=per)
+            rc, first = report(cur, prev)
+            self.assertEqual(rc, 0, first)
+            write(cur, "ab.json", {"part": "ab", "status": "ok", "strict": "ok"})
+            strict_round(cur, new_ok=8, per_workload={"sysbench": 4, "sample": 4})
+            rc, first = report(cur, prev)
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+
+    def test_strict_unsupported_does_not_count_as_ab_unsupported(self):
+        # The strict round answers more 1235s than the baseline's default round had
+        # `unsupported`: not a regression of the ab part.
+        with tempfile.TemporaryDirectory() as d:
+            prev, cur = f"{d}/prev", f"{d}/cur"
+            write(prev, "ab.json", {"part": "ab", "status": "ok"})
+            write(prev, "ab-classified.json", classified())
+            write(cur, "ab.json", {"part": "ab", "status": "ok", "strict": "ok"})
+            write(cur, "ab-classified.json", classified())
+            strict_round(cur, new_ok=0, unsupported=50)
+            rc, first = report(cur, prev)
+            self.assertEqual(rc, 0, first)
+
+    def test_strict_round_incomplete_is_shown(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/part-ab", "ab.json", {"part": "ab", "status": "incomplete", "strict": "incomplete"})
+            write(f"{d}/part-ab", "ab-classified.json", classified())
+            rc, first = report(d)
+            self.assertEqual(rc, 2)
+            with open(os.path.join(d, "report.md")) as f:
+                self.assertIn("The strict round did not run fully", f.read())
 
     def test_shipped_integrationtest_expected_is_well_formed(self):
         # Only tidb-rs bugs (with an issue) and nondeterministic answers, each with a reason.

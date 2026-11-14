@@ -12,7 +12,7 @@ The parts run in parallel jobs, each against its own cluster (`run.sh <part> <ou
 
 | part | what | cluster |
 |---|---|---|
-| `ab` | `tidb-ab` on the sysbench statements and `tools/ab/workloads/*.sql`; `classify.py` explains every text statement on Go TiDB and counts the verdicts per operator | 1 TiKV |
+| `ab` | `tidb-ab` on the sysbench statements and `tools/ab/workloads/*.sql`; `classify.py` explains every text statement on Go TiDB and counts the verdicts per operator. Then the **strict round** (VS1): the same workloads against a second tidb-rs on 27002 started with `--new-stack=strict` (status port `RS_STATUS_PORT + 1`), with its `tidbrs_route_total` metric (`ab-strict-routes.txt`) | 1 TiKV |
 | `sysbench` | `oltp_point_select` and `oltp_read_only`, 1 and 8 threads, Go TiDB then tidb-rs; B/A QPS | 1 TiKV |
 | `faults` | `tools/ab/faults/run.sh` (needs passwordless sudo, which GitHub's hosted runners have) | 3 TiKV |
 | `locks` | `tools/ab/locks/mixed_locks.py` with `lockgen` | 1 TiKV |
@@ -23,6 +23,7 @@ The parts run in parallel jobs, each against its own cluster (`run.sh <part> <ou
 
 - the status of every part;
 - agreement per operator (Go's plan), and which operators tidb-rs executed for the first time this week;
+- the new stack (VS1, `specs/VS1-vertical-slice/plan.md` §7.2): how many statements of the strict round ran on the new stack, the fallback reasons (`tidbrs_route_total{engine, reason}`), the boundary stubs named by its 1235 answers, and the agreement per VS1 operator. Its `unsupported` statements are expected and never a failure; a mismatch is RED like any other;
 - sysbench B/A ratios;
 - the fault scenarios;
 - the lock cases;
@@ -39,7 +40,7 @@ A wrong result in the raw data (a mismatch, a wrong fault-scenario read, a lock 
 
 - **RED:** a wrong result, a mismatch (also of an integration test, unless accepted in `integrationtest-expected.json`) or a new inconsistency. The run fails and no tag is pushed.
 - **INCOMPLETE:** a part did not run fully: skipped, failed to set up, missing, or with too few results (an empty `ab` workload, a sysbench workload × thread count without both sides, fewer than 18 lock cases). This is not a pass.
-- **REGRESSED:** compared with the last run, an operator is no longer executable on tidb-rs, `unsupported` statements increased (for the integration tests: over the tests both runs ran; there also the reads skipped as `session diverged`), or a sysbench B/A ratio dropped by more than 15%.
+- **REGRESSED:** compared with the last run, an operator is no longer executable on tidb-rs, `unsupported` statements increased (for the integration tests: over the tests both runs ran; there also the reads skipped as `session diverged`), the new stack executed fewer statements of a workload both runs ran (strict round, `ab-strict-new.tsv`), or a sysbench B/A ratio dropped by more than 15%.
 - **GREEN:** otherwise.
 
 INCOMPLETE and REGRESSED show as a warning (a failed `continue-on-error` step). The weekly tag gets a `-incomplete` / `-regressed` suffix.

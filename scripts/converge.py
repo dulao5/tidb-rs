@@ -25,6 +25,15 @@ Checks, per Rust file:
     `[workspace.metadata.porting] style-lint-allow` of Cargo.toml; item-level `#[allow]`s
     are listed for the reviewer (reported, not an error).
 
+A block ported in parts (VS1 plan §0 item 3, as D06.2 / D06.3 "part 1"): with
+`--part <functions.tsv> --item <ID>` only the block's functions listed for that work item
+(columns `item`, `block`, `file`, `function`, e.g. specs/VS1-vertical-slice/functions.tsv)
+must converge; the rest of the block is reported as `blocked-by:<block>` (its boundary
+stubs are registered in the tracker's data/stubs.tsv).
+
+    scripts/converge.py --block D09.0 --part specs/VS1-vertical-slice/functions.tsv \
+        --item VS1-10 --func-blocks ../tidb-rs-tracker/data/func_blocks.tsv crates/planner/src/...
+
 Exit status 1 if anything is missing, extra, duplicated, malformed or unannotated.
 """
 
@@ -73,6 +82,14 @@ def load_funcs(path):
         for row in csv.DictReader(f, delimiter="\t"):
             funcs[(row["file"], row["symbol"])] = (row["block"], int(row["start_line"]))
     return funcs
+
+
+def load_part(path, item, block):
+    """(file, symbol) of the rows of work item `item` and block `block` in a part's function
+    list (one item may port parts of several blocks)."""
+    with open(path, newline="") as f:
+        return {(row["file"], row["function"]) for row in csv.DictReader(f, delimiter="\t")
+                if row["item"] == item and row["block"] == block}
 
 
 def parse_go_annotation(text, go_files, funcs):
@@ -195,6 +212,10 @@ def main():
                                          "mappings.md"),
                     help="docs/porting/mappings.md (mapping rule IDs)")
     ap.add_argument("--fma-sites", help="tracker data/go_fma_sites.tsv (rule M-FMA)")
+    ap.add_argument("--part", metavar="FUNCTIONS_TSV",
+                    help="function list of the block's parts (item, block, file, function); with --item, "
+                         "only that part must converge")
+    ap.add_argument("--item", help="the work item of --part (e.g. VS1-10)")
     ap.add_argument("files", nargs="+")
     args = ap.parse_args()
     lint_allow = load_lint_allow(args.workspace_toml)
@@ -204,6 +225,17 @@ def main():
 
     funcs = load_funcs(args.func_blocks)
     expected = {k for k, (b, _) in funcs.items() if b == args.block}
+    part_problems, rest = [], set()
+    if bool(args.part) != bool(args.item):
+        ap.error("--part and --item go together")
+    if args.part:
+        part = load_part(args.part, args.item, args.block)
+        if not part:
+            ap.error(f"{args.part}: no function of item {args.item} in block {args.block}")
+        part_problems = [f"{args.part}: {f} {s} ({args.item}) is not a function of block {args.block} "
+                         f"in func_blocks.tsv" for f, s in sorted(part - expected)]
+        rest = expected - part
+        expected &= part
     expected_files = {f for f, _ in expected}
 
     seen = defaultdict(list)  # (file, symbol) -> [rs locations]
@@ -271,7 +303,12 @@ def main():
     dups = {k: v for k, v in seen.items() if len(v) > 1}
     extra = [p for p in problems if "not in" in p]
 
-    print(f"block {args.block}: {len(expected)} Go functions in {len(expected_files)} file(s)")
+    if args.part:
+        print(f"block {args.block} part {args.item}: {len(expected)} Go functions in {len(expected_files)} "
+              f"file(s); the other {len(rest)} function(s) of the block are blocked-by:{args.block}")
+    else:
+        print(f"block {args.block}: {len(expected)} Go functions in {len(expected_files)} file(s)")
+    problems += part_problems
     print(f"annotations: " + ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
     print(f"go: levels: " + ", ".join(f"{k}={v}" for k, v in sorted(levels.items())))
     print(f"mapping rules: " + (", ".join(f"{k}={v}" for k, v in sorted(rule_uses.items())) or "none"))

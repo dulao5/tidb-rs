@@ -6,7 +6,9 @@
 #
 # parts:
 #   ab        tidb-ab result comparison (sysbench statements + tools/ab/workloads/*.sql), with
-#             per-operator agreement (classify.py); 1 TiKV
+#             per-operator agreement (classify.py); then the same workloads against a second
+#             tidb-rs with --new-stack=strict (the VS1 new stack, plan §7.2) and its routing
+#             metrics; 1 TiKV
 #   sysbench  oltp_point_select and oltp_read_only on Go TiDB then tidb-rs, B/A QPS ratio; 1 TiKV
 #   faults    tools/ab/faults/run.sh (3 TiKV, its own cluster; needs passwordless sudo)
 #   locks     tools/ab/locks/mixed_locks.py (needs LOCKGEN=path to the lockgen binary); 1 TiKV
@@ -22,7 +24,8 @@
 # (default target/release/ab), SYSBENCH_TIME (seconds per run, default 20),
 # SYSBENCH_THREADS (default "1 8"), IT_TIDB_DIR (an existing tests/integrationtest/t; default:
 # clone it), IT_TESTS (tests or prefixes for `ab integrationtest`; default: see the part),
-# IT_BUDGET (seconds, default 2400).
+# IT_BUDGET (seconds, default 2400), RS_STATUS_PORT (tidb-rs's status port, default 10081; the
+# strict tidb-rs of the ab part uses RS_STATUS_PORT + 1).
 #
 # Exit status: the part's own (0 ok, 1 wrong results / new inconsistencies, 2 incomplete);
 # the JSON carries the same as "status".
@@ -38,11 +41,15 @@ ab=${TIDB_AB_BIN:-$root/target/release/ab}
 
 # 1-TiKV cluster of scripts/playground.sh defaults: Go TiDB 27000 (status 33080), PD 25379.
 a=127.0.0.1:27000 b=127.0.0.1:27001 pd=127.0.0.1:25379
+status_port=${RS_STATUS_PORT:-10081}
+# The ab part's second tidb-rs, with --new-stack=strict (VS1).
+bs=127.0.0.1:27002 strict_status_port=$((status_port + 1))
 export PLAYGROUND_TAG=weekly-$part PLAYGROUND_OFFSET=23000
 
-rs_pid=
+rs_pid= strict_pid=
 cleanup() {
     [ -n "$rs_pid" ] && kill "$rs_pid" 2>/dev/null && wait "$rs_pid" 2>/dev/null
+    [ -n "$strict_pid" ] && kill "$strict_pid" 2>/dev/null && wait "$strict_pid" 2>/dev/null
     "$root/scripts/playground.sh" clean >/dev/null 2>&1 || true
 }
 
@@ -54,13 +61,28 @@ start_cluster() {
     if [ "${LOAD_SBTEST:-1}" = 1 ]; then
         "$root/scripts/sysbench-prepare.sh" -P 27000 -t 1 -s 100000 -r 8 >>"$out/$part-playground.log" 2>&1 || return 2
     fi
-    "$bin" -P 27001 --status-port 10081 --pd "$pd" --auto-tls=false >"$out/$part-tidb-rs.log" 2>&1 &
+    "$bin" -P 27001 --status-port "$status_port" --pd "$pd" --auto-tls=false >"$out/$part-tidb-rs.log" 2>&1 &
     rs_pid=$!
     for _ in $(seq 120); do
         mysql -h 127.0.0.1 -P 27001 -u root -N -e 'select 1' >/dev/null 2>&1 && return 0
         sleep 0.5
     done
     echo "tidb-rs did not come up" >&2
+    return 2
+}
+
+# A second tidb-rs with --new-stack=strict on 27002 (VS1 plan §4.3: VS1-shaped SELECTs on the
+# new stack, a boundary stub answers 1235, everything else on the PoC).
+start_strict() {
+    TIDB_RS_NEW_STACK=strict "$bin" -P 27002 --status-port "$strict_status_port" --pd "$pd" --auto-tls=false \
+        >"$out/$part-tidb-rs-strict.log" 2>&1 &
+    strict_pid=$!
+    for _ in $(seq 120); do
+        # Not `select 1`: strict mode answers that VS1 candidate with 1235 until the new stack runs it.
+        mysql -h 127.0.0.1 -P 27002 -u root -N -e 'set names utf8mb4' >/dev/null 2>&1 && return 0
+        sleep 0.5
+    done
+    echo "tidb-rs --new-stack=strict did not come up" >&2
     return 2
 }
 
@@ -100,7 +122,49 @@ ab)
     fi
     python3 "$root/tools/weekly/classify.py" --a "$a" --results "${runs[@]}" --json "$out/ab-classified.json" \
         || worst 2
-    write_status "$(status_of $rc)" "{\"classified\": \"ab-classified.json\", \"empty_workloads\": \"${empty[*]}\", \"exit\": $rc}"
+    # The new stack (VS1 plan §7.2): the same workloads against the strict tidb-rs. Its 1235
+    # answers (`unsupported`) are expected and counted in the report's "New stack" section; a
+    # mismatch is a wrong result like any other (report.py reads every results.jsonl).
+    strict=ok strict_runs=()
+    # Statements the new stack ran so far (tidbrs_route_total{engine="new"}, all reasons).
+    new_total() {
+        curl -sf "http://127.0.0.1:$strict_status_port/metrics" \
+            | awk '/^tidbrs_route_total\{.*engine="new"/ { n += $NF } END { print n + 0 }'
+    }
+    # strict_run <workload> <ab args...>: one workload, and how many of its statements the new
+    # stack ran (ab-strict-new.tsv: report.py compares that per workload with the last run).
+    strict_run() {
+        local n=$1 before after
+        shift
+        before=$(new_total) || before=
+        "$ab" -a "$a" -b "$bs" -D sbtest --tls off --out-dir "$out/ab-strict-$n" "$@" \
+            >"$out/ab-strict-$n.log" 2>&1; worst $?
+        strict_runs+=("$out/ab-strict-$n/results.jsonl")
+        after=$(new_total) || after=
+        if [ -n "$before" ] && [ -n "$after" ]; then
+            printf '%s\t%s\n' "$n" $((after - before)) >>"$out/ab-strict-new.tsv"
+        else
+            strict=incomplete
+            worst 2
+        fi
+    }
+    if start_strict; then
+        printf 'workload\tnew_stack\n' >"$out/ab-strict-new.tsv"
+        strict_run sysbench sysbench -n 100
+        for w in "$root"/tools/ab/workloads/*.sql; do
+            strict_run "$(basename "$w" .sql)" file "$w"
+        done
+        # tidbrs_route_total{engine, reason}: what the new stack ran, and why the rest fell back.
+        curl -sf "http://127.0.0.1:$strict_status_port/metrics" | grep '^tidbrs_route_total' \
+            >"$out/ab-strict-routes.txt" || { strict=incomplete; worst 2; }
+        python3 "$root/tools/weekly/classify.py" --a "$a" --results "${strict_runs[@]}" \
+            --json "$out/ab-strict-classified.json" || { strict=incomplete; worst 2; }
+    else
+        strict=incomplete
+        worst 2
+    fi
+    write_status "$(status_of $rc)" "{\"classified\": \"ab-classified.json\", \"empty_workloads\": \"${empty[*]}\",
+        \"strict\": \"$strict\", \"strict_classified\": \"ab-strict-classified.json\", \"exit\": $rc}"
     exit "$rc"
     ;;
 sysbench)
@@ -227,7 +291,7 @@ locks)
     start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
     rc=0
     python3 "$root/tools/ab/locks/mixed_locks.py" --lockgen "${LOCKGEN:?LOCKGEN}" --a "$a" --b "$b" \
-        --a-status 127.0.0.1:33080 --b-status 127.0.0.1:10081 --pd "$pd" \
+        --a-status 127.0.0.1:33080 --b-status "127.0.0.1:$status_port" --pd "$pd" \
         --json "$out/locks-raw.json" >"$out/locks.log" 2>&1 || rc=$?
     # mixed_locks.py writes its JSON only after every case: none means its setup failed
     # (incomplete, not wrong results); fewer cases than expected is incomplete too.
