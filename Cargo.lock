@@ -2566,6 +2566,9 @@ version = "0.0.0"
 dependencies = [
  "futures",
  "thiserror 1.0.69",
+ "tidb-base",
+ "tidb-kv",
+ "tidb-store",
  "tikv-client",
  "tokio",
 ]
@@ -4038,6 +4041,7 @@ dependencies = [
  "flate2",
  "futures",
  "log",
+ "parking_lot 0.12.5",
  "prost",
  "protobuf",
  "serde_json",
@@ -4045,7 +4049,9 @@ dependencies = [
  "tidb-execdetails",
  "tidb-kv",
  "tidb-memory",
+ "tidb-model",
  "tidb-runtime",
+ "tidb-tablecodec",
  "tikv-client",
  "tipb",
  "tokio",
