@@ -21,6 +21,9 @@
 
 本块引用下层的 D08.4–D08.10 只在第 2 部分（`getSignatureByPB` 构造各函数族的签名）。
 
-## 第 2 部分
+## 第 2 部分（本 PR）
 
-`distsql_builtin.go`：`PBToExpr` 方向。`getSignatureByPB` 按 pb code 构造全部函数族的签名（约 600 个分支）：已移植函数族的签名用其 `SigDesc`（按 pb code 建索引，`SigExtra` 按 Go 的字面量设置，如 `newBaseBuiltinCastFunc(base, false)`、`builtinInternalFromBinarySig{base, false}`），未移植的函数族的分支按宪章第四条写边界桩（`blocked-by:<块>`，报统一的"不支持"错误），随各函数族移植而消失。govec 用 `ExprToPB` 的输出作为 `PBToExpr` 的输入（往返）。
+1. `tools/expr-gen/gen_pb_sigs.py`：从 `distsql_builtin.go` 生成 `src/distsql_builtin_gen.rs`（每个 pb code 的 Go 签名类型、字面量、所属块；tidb-expression 的全部 `SigDesc`），spec §6.1。
+2. `src/distsql_builtin.rs`：`distsql_builtin.go` 全文件，按 Go 顺序；未移植函数族的 pb code 为边界桩。
+3. govec `pushdown` 追加 `pbtps`、`pbexpr`、`pbraw`（tracker 分支 `block/D08.3-pbtoexpr`）；回放在 `tests/govec_pushdown.rs`。
+4. D08.6、D08.7、D08.9 的 tasks.md 登记桩的消失条件；tracker `blocks_done.tsv` 登记 D08.3。

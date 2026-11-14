@@ -10,3 +10,7 @@ P1 收尾（#48）时，各块把剩下的函数移交给真正使用它们的�
 - [ ] P1-2 （D08.12）`locateStringWithCollation`：LOCATE / INSTR 的按 collation 查找
 - [ ] P1-3 （D08.2 T8d）govec 配方覆盖 `ColumnSubstituteImpl` 的 #53730 `LENGTH` 分支（替换进 `LENGTH(col)` 的参数时检查 collation/类型），LENGTH 移植后加
 - [ ] P1-4 （D08.1 T6c (b)）第一个带状态的签名（LIKE / REGEXP 的 `builtinFuncCache`）按 D08.1 spec §3.5 对照 Go 的 `Clone`；`builtinFuncCache.getCache` / `getOrInitCache` 随这些函数族进入 govec 覆盖清单
+
+## 从 D08.3 继承
+
+- [ ] D08.3-1 （D08.3 第 2 部分）`getSignatureByPB` 中本块签名的 74 个 pb code 是边界桩（`blocked-by`）：移植签名后重跑 `tools/expr-gen/gen_pb_sigs.py`，桩自动消失，govec `pushdown` 的 `pbexpr`/`pbraw` 记录随之逐条比对（D08.3 spec §6）；`maxAllowedPacket` 的 12 个签名（`Ctor::MaxAllowedPacket`，加上对应的 `SigExtra`）需在 `distsql_builtin.rs` 中补上

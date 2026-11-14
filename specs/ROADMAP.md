@@ -84,7 +84,7 @@
 |---|---|---|--:|--:|---|
 | L1 | [D06.2](D06.2-meta/spec.md) | meta 读取（meta、structure、autoid 读取；2026-11-11 按只读读路径划分：写入 76 个归 X，316 → 240 个函数；crate `tidb-infoschema`，第 1 部分 converge 130/240） | 3,808 | 13 | — |
 | L1 | D07.1 | store driver（snapshot 读） | 2,473 | 16 | — |
-| L1 | [D08.3](D08.3-pushdown/spec.md) | 下推判定与 protobuf 转换（infer_pushdown、expr_to_pb、distsql_builtin；crate `tidb-expr-pushdown`。第 1 部分：infer_pushdown、expr_to_pb，converge 34/50；第 2 部分：distsql_builtin 的 `PBToExpr`） | 2,073 | 3 | D08.7(97), D08.6(77), D08.9(71), D08.10(26) |
+| L1 | [D08.3](D08.3-pushdown/spec.md) | 下推判定与 protobuf 转换（infer_pushdown、expr_to_pb、distsql_builtin；crate `tidb-expr-pushdown`。converge 50/50；`PBToExpr` 中未移植函数族的 316 个 pb code 为 `blocked-by` 边界桩） | 2,073 | 3 | D08.7(97), D08.6(77), D08.9(71), D08.10(26) |
 | L1 | D14.0 | 执行统计数据结构（execdetails、runtime stats） | 1,747 | 3 | — |
 | L2 | D06.4 | table 抽象（tables、index、partition 的读取路径） | 7,136 | 17 | — |
 | L2 | D07.2 | coprocessor 客户端（不含 batch/MPP） | 2,306 | 5 | D15.1(16), D07.4(10) |

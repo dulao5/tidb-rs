@@ -10,3 +10,7 @@ P1 收尾（#48）时，各块把剩下的函数移交给真正使用它们的�
 - [ ] P1-2 （D08.12）`PopRowFirstArg`：需要 ROW()
 - [ ] P1-3 （D08.1 T6e，Lucky 评审 #108）IF/IFNULL 的第三种 `ArgsFallback`（warning 基准在 `args[0]` 之后，回退时 `args[0]` 的 warning 出现两次）；守护测试：Go 中有 `fallbackEvalXxx` 的 30 个签名，已注册的都必须 `args_fallback != None`；`builtin_control.rs` 的 7 个函数仍归 D08.9，D08.9 第一批要覆盖 IF/IFNULL/CASE 的所有分支后再列入覆盖清单
 - [ ] P1-4 （D08.2）`constant_fold.go` 的 `ifFoldHandler`、`ifNullFoldHandler`、`caseWhenHandler` 已移植（`constant_fold.rs`），IF / IFNULL / CASE WHEN 注册后由 govec 覆盖
+
+## 从 D08.3 继承
+
+- [ ] D08.3-1 （D08.3 第 2 部分）`getSignatureByPB` 中本块签名的 70 个 pb code 是边界桩（`blocked-by`）：移植签名后重跑 `tools/expr-gen/gen_pb_sigs.py`，桩自动消失，govec `pushdown` 的 `pbexpr`/`pbraw` 记录随之逐条比对（D08.3 spec §6）
