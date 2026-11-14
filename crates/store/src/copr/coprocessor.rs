@@ -1474,6 +1474,27 @@ impl<S: TiKVStore> CopIterator<S> {
     }
 }
 
+impl<S: TiKVStore> Drop for CopIterator<S> {
+    /// N3 cancels a statement by dropping its future, and an executor that returns an error
+    /// never calls `Close`: dropping the iterator does what `Close` does without waiting —
+    /// close `finishCh`, cancel the in-flight RPCs (`rpcCancel.CancelAll()`, here: abort the
+    /// workers) and close the OOM action.
+    // glue: Close on drop (N3 cancellation; Go relies on Close / ctx.Done)
+    fn drop(&mut self) {
+        if self
+            .closed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let _ = self.finish_tx.send(true);
+        }
+        for h in self.handles.drain(..) {
+            h.abort();
+        }
+        self.action_on_exceed.close();
+    }
+}
+
 /// Associate each region with an independent backoffer. In this way, when multiple regions
 /// are unavailable, TiDB can execute very quickly without blocking
 // go: chooseBackoffer L1
@@ -2541,14 +2562,9 @@ impl<S: TiKVStore> tidb_kv::kv::Response for LazyCopResponse<S> {
 
     // glue: kv.Response.Close of CopClient.Send's result
     fn close(&mut self) -> Result<(), Error> {
-        if let Some(mut it) = self.it.take() {
-            // Close waits for the workers; they stop at their next check of finishCh.
-            let _ = it.finish_tx.send(true);
-            it.action_on_exceed.close();
-            for h in it.handles.drain(..) {
-                h.abort();
-            }
-        }
+        // `kv.Response.Close` is synchronous: the iterator's `Drop` closes `finishCh` and
+        // stops the workers without waiting for them.
+        drop(self.it.take());
         Ok(())
     }
 }

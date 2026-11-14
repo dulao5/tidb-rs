@@ -17,7 +17,7 @@ tidb-kv = { workspace = true }
 # (`tikv_client::proto`, client-rust#21). client-rust is the TiKV client (ADR 0008).
 tikv-client = { workspace = true }
 # copTask.respChan (`make(chan *copResponse, n)`, M-CH).
-tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
 log = "0.4"
 # copResponse.MemSize (encoded size of the prost response), as tikv-client's prost.
 prost = "0.13"
@@ -34,6 +34,8 @@ tipb = { workspace = true }
 protobuf = { workspace = true }
 
 [dev-dependencies]
+# Multi-threaded runtime for the drop test.
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 # The govec vectors are committed as .jsonl.gz.
 flate2 = "1.0"
 serde_json = { workspace = true }

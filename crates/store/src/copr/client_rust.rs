@@ -223,8 +223,10 @@ impl TiKVStore for ClientRustStore {
         ClientRustBackoffer(Backoff::time_budget(ms).start())
     }
 
-    /// client-rust has no GC safe-point check yet: always visible (spec §6).
-    // glue: KVStore.CheckVisibility (no safe-point cache in client-rust)
+    /// Boundary stub: client-rust has no GC safe-point cache yet, so a read below the safe
+    /// point does not fail with `ErrGCTooEarly` (client-go parity table §4, `CheckVisibility`
+    /// row, P1).
+    // glue: stub, blocked-by:client-rust GC safe point (client-go-parity.md §4 CheckVisibility)
     fn check_visibility(&self, _start_ts: u64) -> Result<(), Error> {
         Ok(())
     }

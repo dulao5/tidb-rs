@@ -197,6 +197,8 @@ impl ClientHelper for Helper {
         _bo: &mut Bo,
         _lock: kvrpcpb::LockInfo,
     ) -> Result<(), Error> {
+        // A lock wait sleeps (BackoffWithMaxSleepTxnLockFast).
+        tokio::time::sleep(Duration::from_millis(1)).await;
         self.0.resolved.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -458,4 +460,52 @@ async fn start_key_is_the_paging_range_or_the_first_range() {
     };
     assert_eq!(r.get_start_key().0, b"x");
     assert_eq!(r.mem_size(), r.start_key.0.capacity() as i64);
+}
+
+/// Dropping the iterator mid-stream (N3 cancellation, or an executor returning early with
+/// `?`) stops the workers: a task stuck on a live lock stops hitting the store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_the_iterator_stops_the_workers() {
+    let mock = Arc::new(MockStore::new(&[b"g"], |m, req, region| {
+        if region.id == 2 {
+            // Always locked: resolve, retry, forever (the mock backoffer never runs out).
+            return coprocessor::Response {
+                locked: Some(kvrpcpb::LockInfo {
+                    lock_version: 90,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+        }
+        echo(m, req, region)
+    }));
+    let store = Arc::new(new_store(Arc::new(Shared(mock.clone())), None, 0));
+    let client = store.get_client();
+    let mut it = client
+        .build_cop_iterator(
+            request(&[b"a", b"z"]),
+            Variables::default(),
+            &ClientSendOption::default(),
+        )
+        .await
+        .unwrap();
+    it.open(None);
+    let first = it
+        .next(&tidb_kv::Context::background())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.get_data(), b"1:a-g");
+    // Region 2's worker is looping on its lock.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(mock.sends.load(Ordering::SeqCst) > 2);
+    drop(it);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let after_drop = mock.sends.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        mock.sends.load(Ordering::SeqCst),
+        after_drop,
+        "workers still sending after drop"
+    );
 }
