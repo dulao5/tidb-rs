@@ -55,6 +55,8 @@ v8.5.8 中与表示相关的事实：
    - **共享后写时复制**：被 plan cache 或 `taskMap` 中的多个父候选共享的节点，`make_mut_plan` 先浅拷贝一个节点（`clone_node`：字段复制，子节点和表达式仍共享），再改。
    - **改子节点用 `map_children`**：Go 的 `p.Children()[i] = f(child)`。节点独占时把子节点移出再放回，`f` 看到的是子节点自己的引用计数；共享时只在子节点确实变化时复制父节点。不要直接 `child.clone()` 再写回：这会让每个子节点看起来都被共享，从而被复制（试点 B5）。
    - 理由：`FindBestTask` 的记忆化会把同一个子计划挂到多个父候选下。用 `Box` 意味着每挂一次就深拷贝；用 `Arc`，落选的候选被丢弃后子计划的引用计数回到 1，`postOptimize` 可以原地改。也不再需要单独的冻结步骤，`Arc<dyn PhysicalPlan>` 本身就可以进 plan cache、交给执行器 worker 共享，`Clone` 是引用计数加一。
+   - **前提：`postOptimize` 之前释放记忆化数据**。`taskMap` 旁表（§3.2）为每个胜出的 task 也持有一个 `Arc`。如果它在 `postOptimize` 运行时还活着，每个节点的引用计数都 ≥ 2，`make_mut_plan` 会悄悄地逐个复制：结果仍然正确，但不再是与 Go 逐行对应的原地修改，而且没有任何东西会报出来。所以 `FindBestTask` 结束后、`postOptimize` 之前，先 drop `taskMap`（或把最优计划从中摘出）。可观测性：`postOptimize` 入口处 `debug_assert!(Arc::strong_count(..) == 1)`（对根和逐个节点），测试中统计 `make_mut_plan` 的复制次数，语句独占的路径上应为 0。这一条列入 D10.2 小试点的验证项（§7 第 3 条）。
+   - **计划树中不出现 `Weak`**（如父节点指针）：存在 `Weak` 时 `Arc::get_mut` 也会失败，效果同上。
    - 这两个函数写进映射规则 `M-PLAN`，签名见 [foundation-interfaces.md](../foundation-interfaces.md)。
 5. **plan cache 命中后的改写：路径复制**，用与 §3.4 相同的机制。命中时 `RebuildPlan4CachedPlan` / `rebuildRange`（`plan_cache_rebuild.go:31`、`:77`）会按本次参数改写缓存计划中的 range。Rust 不复制整棵计划：对缓存中的 `Arc` 树，用 `map_children` 走到每个被改写的 reader / point get，用 `make_mut_plan` 改写，于是只有根到这些节点路径上的节点被浅拷贝，其余子树、表达式和 schema 都共享。缓存中的原计划不变，并发执行的语句互不影响（试点测试 `plan_cache_rebuild_by_path_copy`，4 个线程并发重建）。
    - 范围：**只考虑实例级 plan cache**（项目负责人 2026-11-14）。Go 在 Put 时和每次命中时都深拷贝（含 `util.CloneExpressions`），Rust 只浅拷贝路径。
@@ -118,6 +120,8 @@ fn predicate_push_down(&mut self, ctx: &mut PlanCtx<'_>, this: PlanId, predicate
 
 **摘出分派的约束**：节点被摘出期间再访问它会 panic（`take` 两次、`put` 一个没有摘出的节点都会 panic）。v8.5.8 的树规则不会在一次分派中两次访问同一节点；CTE 的子计划由 `LogicalCTE` 独立优化，不在同一次遍历里。D09.6（去关联）和 join reorder 移植时，要在块 plan 中核对这一点。
 
+**摘出期间不能"按 `this` 回查 arena"**：节点被摘出时，任何用 `ctx.arena.get(this)` 取节点本身的辅助函数（取 `ExplainID()`、`TP()`、schema 等）都会 panic，而 trace 辅助函数（`appendXxxTraceStep(p, …)`）正是这种调用。所以在摘出的方法内部，需要节点本身的辅助函数接收 `&self` / `&dyn LogicalPlan`（另传 `this` 只作为 id），`this` 只当 id 用，不用来回查 arena。
+
 ## 5. 验收与块 plan 模板
 
 **已完成**（D09.7 设计试点，2026-11-13，[试点报告](../../D09.7-column-pruning/pilot-report.md)）：
@@ -133,7 +137,7 @@ fn predicate_push_down(&mut self, ctx: &mut PlanCtx<'_>, this: PlanId, predicate
    - 另外，抓不到的 helper（改的是"不是自己新建的参数或表达式"的类型，如 `constant_fold`、`PropagateType`、`WrapWithCastAsInt`）和 `SetSchema(x.Schema())` 这类不 Clone 的 schema 共享，要读代码补充。
 2. **"已知差异 / 模拟"表**：每个 V1 一行，写明是按 `M-FT` 显式模拟（注释位置、回归测试名），还是登记为不模拟（理由）。
 3. **只改元数据的 V1 要单独核对**：附录 B 中有 4 组只改 charset、collation 或 decimal（第 3、4、8、9 组）。它们不改变计划，但如果改动后的类型会进入**发给客户端的列定义**（结果集元数据），就是用户可见的差异，不能当作无害。每块要核对本块的这类修改是否到达列定义，到达的按 V1 处理（Lucky，#149）。
-4. 用到 `split()` 的地方，以及摘出分派可能两次访问同一节点的地方（§4）。
+4. 用到 `split()` 的地方；摘出分派可能两次访问同一节点的地方；摘出期间按 `this` 回查 arena 的辅助函数（应改为接收 `&self`）（§4）。
 
 **仍未完成**：
 
@@ -151,4 +155,4 @@ fn predicate_push_down(&mut self, ctx: &mut PlanCtx<'_>, this: PlanId, predicate
 
 1. **N4：`Arc<Column>` 与内嵌 `Column` 两种表示之间的分配开销**。schema 里是 `Arc<Column>`，表达式里是 `Expr::Column(Column)`（列直接内嵌）。`ExtractColumns`、`Column2Exprs`、消除投影时往 replace map 里放列，每次转换都要分配一个新的 `Arc`，Go 在这些地方不分配。试点没有测绝对开销（与规则涉及的列引用数成正比）。规划器全面移植（P3）前在 N4 中测一下，必要时改成 `Expr::Column(Arc<Column>)`。
 2. **N4 / A3：跨会话共享计划时的函数缓存**。Go 的 `BuiltinFuncCache` 按 `ctx_id` 缓存、用 Mutex 保护。实例级 plan cache 让多个会话共享同一个表达式后，会争用这把锁，并因 `ctx_id` 不同而互相冲掉缓存。实例级 plan cache 打开前，要在 N4 或 A3 中决定：改为按执行状态缓存（N4 的 `RpnState`），或命中时复制带缓存的函数节点。A3 还要处理试点报告 §5 的其他风险：计划节点不能保存会话上下文（`p.SCtx()`、`PointGetPlan.ctx`），Go 在执行期修改计划的位置（`generateNewPlan` 注释 "execution (might modify the plan)"）要在 D12 移植时逐处找出。
-3. **§3.2 `taskMap` / `FindBestTask` 没有验证**。D09.7 用不到 FindBestTask，`taskMap` 旁表、按时间戳回滚、`Arc` 子计划在候选之间的共享都没有被试点覆盖（`memo_shared_child_is_copied_only_while_shared` 只是演示，属推断）。D10.2（约 5.9k 行）开工时补一个小试点，只验证这三件事；结论回写本 spec。
+3. **§3.2 `taskMap` / `FindBestTask` 没有验证**。D09.7 用不到 FindBestTask，`taskMap` 旁表、按时间戳回滚、`Arc` 子计划在候选之间的共享都没有被试点覆盖（`memo_shared_child_is_copied_only_while_shared` 只是演示，属推断）。D10.2（约 5.9k 行）开工时补一个小试点，验证这三件事，以及 `postOptimize` 之前释放 `taskMap` 后物理树的引用计数为 1、`make_mut_plan` 没有复制（§3.4）；结论回写本 spec。
