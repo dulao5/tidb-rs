@@ -26,14 +26,46 @@ def write(d, name, obj):
         json.dump(obj, f)
 
 
-def report(inp, prev=None, parts="ab"):
+def report(inp, prev=None, parts="ab", expected=None):
+    """Runs report.py; `expected` is the accepted integration-test mismatches (default: none)."""
     out = os.path.join(inp, "report.md")
-    cmd = [sys.executable, os.path.join(HERE, "report.py"), "--in", inp, "--parts", parts, "--out", out]
+    exp = os.path.join(inp, "it-expected.json")
+    with open(exp, "w") as f:
+        json.dump(expected or {}, f)
+    cmd = [sys.executable, os.path.join(HERE, "report.py"), "--in", inp, "--parts", parts, "--out", out,
+           "--it-expected", exp]
     if prev:
         cmd += ["--previous", prev]
     rc = subprocess.run(cmd, capture_output=True, text=True).returncode
     with open(out) as f:
         return rc, f.readline().strip()
+
+
+def it_results(d, rows, status="ok"):
+    """An integrationtest part: integrationtest.json and ab-integrationtest/results.jsonl from
+    (test, verdict) pairs; the statement of the i-th pair is at line i."""
+    write(d, "integrationtest.json", {"part": "integrationtest", "status": status, "tests": 2, "seconds": 60})
+    os.makedirs(f"{d}/ab-integrationtest", exist_ok=True)
+    with open(f"{d}/ab-integrationtest/results.jsonl", "w") as f:
+        for i, (test, verdict) in enumerate(rows):
+            r = {"template": test, "protocol": "text", "verdict": verdict, "query": "select 1", "line": i}
+            if verdict != "match":
+                r.update(kind="", detail="not supported yet: function 'x'")
+            f.write(json.dumps(r) + "\n")
+
+
+def it_records(d, records):
+    """An integrationtest part from raw results.jsonl records (dicts)."""
+    write(d, "integrationtest.json", {"part": "integrationtest", "status": "ok", "tests": 1, "seconds": 60})
+    os.makedirs(f"{d}/ab-integrationtest", exist_ok=True)
+    with open(f"{d}/ab-integrationtest/results.jsonl", "w") as f:
+        for r in records:
+            f.write(json.dumps({"template": "a/t", "protocol": "text", **r}) + "\n")
+
+
+def diverged(line, cause_line, cause_sql):
+    return {"verdict": "skipped", "query": "select 1", "line": line, "kind": "session diverged",
+            "cause": {"line": cause_line, "sql": cause_sql, "var": "database"}}
 
 
 class VerdictTest(unittest.TestCase):
@@ -92,7 +124,6 @@ class VerdictTest(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertTrue(first.startswith("**REGRESSED**"), first)
 
-
     def test_tpch_query_no_longer_executable_is_regressed(self):
         with tempfile.TemporaryDirectory() as d:
             write(f"{d}/cur", "tpch.json", {"part": "tpch", "status": "ok"})
@@ -101,6 +132,148 @@ class VerdictTest(unittest.TestCase):
             rc, first = report(f"{d}/cur", f"{d}/prev", parts="tpch")
             self.assertEqual(rc, 2)
             self.assertTrue(first.startswith("**REGRESSED**"), first)
+
+
+    def test_integrationtest_mismatch_is_red(self):
+        # Even though run.sh said ok: the raw results hold a mismatch.
+        with tempfile.TemporaryDirectory() as d:
+            it_results(f"{d}/part-integrationtest", [("a/t", "match"), ("a/t", "mismatch")])
+            rc, first = report(d, parts="integrationtest")
+            self.assertEqual(rc, 1)
+            self.assertTrue(first.startswith("**RED**"), first)
+
+    def test_integrationtest_unsupported_is_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            it_results(d, [("a/t", "match"), ("a/t", "unsupported"), ("b/t", "unsupported")])
+            rc, first = report(d, parts="integrationtest")
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
+
+    def test_integrationtest_more_unsupported_than_baseline_is_regressed(self):
+        with tempfile.TemporaryDirectory() as d:
+            it_results(f"{d}/cur", [("a/t", "unsupported"), ("a/t", "unsupported")])
+            it_results(f"{d}/prev", [("a/t", "match"), ("a/t", "unsupported")])
+            rc, first = report(f"{d}/cur", f"{d}/prev", parts="integrationtest")
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+
+    def test_integrationtest_unsupported_in_a_new_test_is_not_regressed(self):
+        # A test the baseline did not run (the selection changed) is not compared.
+        with tempfile.TemporaryDirectory() as d:
+            it_results(f"{d}/cur", [("a/t", "match"), ("b/t", "unsupported")])
+            it_results(f"{d}/prev", [("a/t", "match")])
+            rc, first = report(f"{d}/cur", f"{d}/prev", parts="integrationtest")
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
+
+    def test_integrationtest_expected_mismatch_is_not_red(self):
+        # run.sh says fail (ab exits 1 on any mismatch); the only mismatch is accepted.
+        with tempfile.TemporaryDirectory() as d:
+            it_results(d, [("a/t", "match"), ("a/t", "mismatch")], status="fail")
+            rc, first = report(d, parts="integrationtest",
+                               expected={"a/t:1": {"class": "bug", "reason": "r", "issue": "TODO"}})
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
+            with open(f"{d}/report.md") as f:
+                self.assertIn("**0 new**, 1 known", f.read())
+
+    def test_integrationtest_unlisted_mismatch_is_red(self):
+        with tempfile.TemporaryDirectory() as d:
+            it_results(d, [("a/t", "mismatch"), ("a/t", "mismatch")], status="fail")
+            rc, first = report(d, parts="integrationtest",
+                               expected={"a/t:0": {"class": "nondeterministic", "reason": "r"}})
+            self.assertEqual(rc, 1)
+            self.assertTrue(first.startswith("**RED**"), first)
+
+    def test_integrationtest_stale_expected_entry_is_reported(self):
+        # a/t:0 ran and matched: listed as fixed, not a failure. b/t:5 did not run: not listed.
+        with tempfile.TemporaryDirectory() as d:
+            it_results(d, [("a/t", "match")])
+            rc, first = report(d, parts="integrationtest", expected={
+                "a/t:0": {"class": "bug", "reason": "r", "issue": "TODO"},
+                "b/t:5": {"class": "bug", "reason": "r", "issue": "TODO"}})
+            self.assertEqual(rc, 0)
+            with open(f"{d}/report.md") as f:
+                text = f.read()
+            self.assertIn("Fixed, remove from integrationtest-expected.json: `a/t:0` (now match)", text)
+            self.assertNotIn("b/t:5", text)
+
+    def test_integrationtest_more_diverged_skips_than_baseline_is_regressed(self):
+        # tidb-rs starts rejecting a USE: its reads are skipped, nothing mismatches.
+        with tempfile.TemporaryDirectory() as d:
+            it_records(f"{d}/prev", [{"verdict": "match", "query": "select 1", "line": 1},
+                                     {"verdict": "b_set_rejected", "query": "set x = 1", "line": 9}])
+            it_records(f"{d}/cur", [
+                {"verdict": "b_error", "query": "use  DB1;", "line": 1, "kind": "use rejected",
+                 "detail": "1049: Unknown database 'db1'"},
+                diverged(2, 1, "use  DB1;"), diverged(3, 1, "use  DB1;")])
+            rc, first = report(f"{d}/cur", prev=f"{d}/prev", parts="integrationtest")
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+            with open(f"{d}/cur/report.md") as f:
+                text = f.read()
+            self.assertIn("`session diverged` up by 2 (0 → 2)", text)
+            self.assertIn("| `use db1` **(new)** | 1 | 2 |", text)
+            self.assertIn("use rejected: 1049", text)  # a rejected USE is a tidb-rs error
+            self.assertIn("1 reads sent to tidb-rs", text)  # skipped reads are not sent
+
+    def test_integrationtest_rejected_statement_seen_before_is_not_new(self):
+        with tempfile.TemporaryDirectory() as d:
+            rej = {"verdict": "b_set_rejected", "query": "set names gbk", "line": 1, "kind": "session",
+                   "detail": "1235: x"}
+            it_records(f"{d}/prev", [rej, diverged(2, 1, "set names gbk")])
+            it_records(f"{d}/cur", [rej, diverged(2, 1, "set names gbk")])
+            rc, first = report(f"{d}/cur", prev=f"{d}/prev", parts="integrationtest")
+            self.assertTrue(first.startswith("**GREEN**"), first)
+            with open(f"{d}/cur/report.md") as f:
+                text = f.read()
+            self.assertIn("| `set names gbk` | 1 | 1 |", text)
+            self.assertNotIn("(new)", text)
+
+    def test_integrationtest_baseline_without_rejected_records_is_not_compared(self):
+        # A baseline from before ab recorded rejected statements: no REGRESSED, nothing "new".
+        with tempfile.TemporaryDirectory() as d:
+            it_records(f"{d}/prev", [{"verdict": "match", "query": "select 1", "line": 1}])
+            it_records(f"{d}/cur", [
+                {"verdict": "b_set_rejected", "query": "set names gbk", "line": 1, "kind": "session"},
+                diverged(2, 1, "set names gbk")])
+            rc, first = report(f"{d}/cur", prev=f"{d}/prev", parts="integrationtest")
+            self.assertTrue(first.startswith("**GREEN**"), first)
+            with open(f"{d}/cur/report.md") as f:
+                self.assertNotIn("(new)", f.read())
+
+    def test_integrationtest_skipped_expected_entry_is_not_fixed(self):
+        # A listed read skipped as "session diverged" did not run on tidb-rs: not "fixed".
+        with tempfile.TemporaryDirectory() as d:
+            it_records(d, [diverged(5, 1, "use x")])
+            rc, first = report(d, parts="integrationtest",
+                               expected={"a/t:5": {"class": "bug", "reason": "r", "issue": "#1"}})
+            with open(f"{d}/report.md") as f:
+                self.assertNotIn("Fixed, remove", f.read())
+
+    def test_integrationtest_results_do_not_count_for_ab(self):
+        # A mismatch of the integration tests must not turn the ab part red.
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/part-ab", "ab.json", {"part": "ab", "status": "ok"})
+            write(f"{d}/part-ab", "ab-classified.json", classified())
+            it_results(f"{d}/part-integrationtest", [("a/t", "mismatch")])
+            rc, first = report(d, parts="ab")
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
+
+    def test_shipped_integrationtest_expected_is_well_formed(self):
+        # Only tidb-rs bugs (with an issue) and nondeterministic answers, each with a reason.
+        path = os.path.join(HERE, "integrationtest-expected.json")
+        with open(path) as f:
+            entries = json.load(f)
+        for key, e in entries.items():
+            if key.startswith("_"):
+                continue
+            self.assertRegex(key, r"^[\w/.-]+:\d+$")
+            self.assertIn(e.get("class"), ("bug", "nondeterministic"), key)
+            self.assertTrue(e.get("reason"), key)
+            if e["class"] == "bug":
+                self.assertTrue(e.get("issue"), key)
 
 
 if __name__ == "__main__":

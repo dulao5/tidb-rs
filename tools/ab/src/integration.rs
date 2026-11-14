@@ -95,6 +95,11 @@ struct Conn {
     temp_tables: BTreeSet<String>,
     /// Session statements B rejected (still possibly in effect on A).
     rejected: Vec<String>,
+    /// Result-affecting session variables (`mysqltest::affects_results`) that A has set and B
+    /// rejected, with the statement: while any is in effect, B's session does not answer like
+    /// A's, so reads are not sent to B (skipped, "session diverged"). Value: the statement's
+    /// line and text.
+    diverged: BTreeMap<String, (usize, String)>,
     /// The previous statement ran on B too (so SHOW WARNINGS etc. are comparable).
     last_on_both: bool,
 }
@@ -113,6 +118,10 @@ struct Writers {
     statements: BufWriter<File>,
     mismatches: BufWriter<File>,
     files: BufWriter<File>,
+    /// Every read compared on B, in the format of the other workloads' results.jsonl (one
+    /// line per statement: template = test file, protocol, verdict, query), plus the line and
+    /// B's error for `unsupported` / `b_error` (for the weekly report, `tools/weekly`).
+    results: BufWriter<File>,
 }
 
 /// Escapes a TSV field (backslash, tab, newline, carriage return).
@@ -375,6 +384,9 @@ struct Rec<'a> {
     detail: String,
     sql: &'a str,
     ms: u128,
+    /// A results.jsonl record for a statement that is not a compared read: its verdict there
+    /// and extra fields (a session statement B rejected, a read skipped as "session diverged").
+    result: Option<(&'static str, &'a serde_json::Value)>,
 }
 
 impl Runner<'_> {
@@ -394,6 +406,38 @@ impl Runner<'_> {
             r.ms,
             tsv(&truncate(r.sql, 1000)),
         );
+        if matches!(
+            r.verdict,
+            StmtOutcome::Match
+                | StmtOutcome::Mismatch
+                | StmtOutcome::Unsupported
+                | StmtOutcome::BError
+        ) {
+            let mut rec = json!({
+                "template": r.file,
+                "protocol": "text",
+                "verdict": r.verdict.name(),
+                "query": r.sql,
+                "line": r.line,
+            });
+            if r.verdict != StmtOutcome::Match {
+                rec["kind"] = json!(r.kind);
+                rec["detail"] = json!(truncate(&r.detail, 300));
+            }
+            let _ = writeln!(self.w.results, "{rec}");
+        } else if let Some((verdict, extra)) = r.result {
+            let mut rec = json!({
+                "template": r.file,
+                "protocol": "text",
+                "verdict": verdict,
+                "query": r.sql,
+                "line": r.line,
+            });
+            if let (Some(rec), Some(extra)) = (rec.as_object_mut(), extra.as_object()) {
+                rec.extend(extra.clone());
+            }
+            let _ = writeln!(self.w.results, "{rec}");
+        }
         if self.opts.verbose && matches!(r.verdict, StmtOutcome::Mismatch) {
             eprintln!(
                 "MISMATCH {}:{} [{}] {}\n    {}",
@@ -438,6 +482,7 @@ impl Runner<'_> {
             prepared: BTreeMap::new(),
             temp_tables: BTreeSet::new(),
             rejected: Vec::new(),
+            diverged: BTreeMap::new(),
             last_on_both: false,
         })
     }
@@ -588,6 +633,7 @@ impl Runner<'_> {
             verdict: StmtOutcome::Write,
             kind: String::new(),
             detail: String::new(),
+            result: None,
         };
         if matches!(class, Class::Read(_)) {
             counts.reads += 1;
@@ -642,16 +688,27 @@ impl Runner<'_> {
                     return out;
                 }
                 let ob = conn.b.query(sql).await;
-                match &ob {
-                    Outcome::Error { .. } | Outcome::Client(_) => {
-                        counts.b_set_rejected += 1;
+                let b_failed = matches!(ob, Outcome::Error { .. } | Outcome::Client(_));
+                track_divergence(&mut conn.diverged, line, sql, b_failed);
+                if b_failed {
+                    counts.b_set_rejected += 1;
+                    if mysqltest::is_use(sql) {
+                        // A database A has: tidb-rs has no reason to reject it, so a defect
+                        // (the reads after it are still skipped, "session diverged").
+                        out.verdict = StmtOutcome::BError;
+                        out.kind = "use rejected".into();
+                        out.detail = brief(&ob);
+                    } else {
                         out.detail = format!("B rejected: {}", brief(&ob));
-                        conn.rejected.push(truncate(sql, 120));
+                        out.result = Some((
+                            "b_set_rejected",
+                            json!({"kind": "session", "detail": truncate(&brief(&ob), 300)}),
+                        ));
                     }
-                    _ => {
-                        conn.b.log_session(sql);
-                        conn.last_on_both = true;
-                    }
+                    conn.rejected.push(truncate(sql, 120));
+                } else {
+                    conn.b.log_session(sql);
+                    conn.last_on_both = true;
                 }
                 out
             }
@@ -677,6 +734,20 @@ impl Runner<'_> {
                 if let Some(why) = why {
                     out.verdict = StmtOutcome::Skipped;
                     out.kind = why.into();
+                    return out;
+                }
+                if let Some((var, (at, stmt))) = conn.diverged.iter().next() {
+                    out.verdict = StmtOutcome::Skipped;
+                    out.kind = "session diverged".into();
+                    out.detail = format!("B rejected `{}` ({var}, line {at})", truncate(stmt, 120));
+                    out.result = Some((
+                        "skipped",
+                        json!({
+                            "kind": "session diverged",
+                            "detail": out.detail,
+                            "cause": {"line": at, "sql": stmt, "var": var},
+                        }),
+                    ));
                     return out;
                 }
                 if mysqltest::mentions(sql, &conn.temp_tables) {
@@ -764,6 +835,8 @@ struct Owned {
     verdict: StmtOutcome,
     kind: String,
     detail: String,
+    /// See `Rec::result`.
+    result: Option<(&'static str, serde_json::Value)>,
 }
 
 impl Owned {
@@ -785,6 +858,7 @@ impl Owned {
             detail: self.detail.clone(),
             sql,
             ms,
+            result: self.result.as_ref().map(|(v, x)| (*v, x)),
         }
     }
 }
@@ -819,6 +893,7 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
         statements: open("statements.tsv")?,
         mismatches: open("mismatches.jsonl")?,
         files: open("files.tsv")?,
+        results: open("results.jsonl")?,
     };
     writeln!(
         w.statements,
@@ -878,6 +953,7 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
         let _ = r.w.files.flush();
         let _ = r.w.statements.flush();
         let _ = r.w.mismatches.flush();
+        let _ = r.w.results.flush();
         println!(
             "[{}/{n}] {t}: {} stmts, {} reads: match {} mismatch {} unsupported {} b_error {} a_error {} skipped {} ({secs:.1}s)",
             i + 1,
@@ -930,6 +1006,29 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
     Ok(t.get("mismatch") == 0)
 }
 
+/// After a session statement A ran: records in `diverged` the result-affecting variables it
+/// set that B rejected, and forgets those it set on both sides. Set back to DEFAULT on A, a
+/// variable agrees again even if B rejected that too (B never changed it). `SET GLOBAL` /
+/// `@@global.x` are not session statements (`mysqltest::classify`): B rejecting one shows up as
+/// mismatches of later connections, not as hidden reads.
+fn track_divergence(
+    diverged: &mut BTreeMap<String, (usize, String)>,
+    line: usize,
+    sql: &str,
+    b_failed: bool,
+) {
+    for (var, default) in mysqltest::session_vars(sql) {
+        if !mysqltest::affects_results(&var) {
+            continue;
+        }
+        if b_failed && !default {
+            diverged.insert(var, (line, sql.to_string()));
+        } else {
+            diverged.remove(&var);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,6 +1047,26 @@ mod tests {
             state: "HY000".into(),
             message: "m".into(),
         }
+    }
+
+    #[test]
+    fn divergence() {
+        let mut d = BTreeMap::new();
+        // Rejected plan-only setting: no divergence.
+        track_divergence(&mut d, 1, "set tidb_cost_model_version = 2", true);
+        assert!(d.is_empty());
+        track_divergence(&mut d, 1, "set names gbk", true);
+        track_divergence(&mut d, 1, "set sql_mode = ''", true);
+        assert_eq!(d.len(), 5);
+        // Set on both sides again / back to DEFAULT (even if B rejects that too).
+        track_divergence(&mut d, 1, "set names utf8mb4", false);
+        assert_eq!(d.keys().collect::<Vec<_>>(), ["sql_mode"]);
+        track_divergence(&mut d, 1, "set @@sql_mode = default", true);
+        assert!(d.is_empty());
+        track_divergence(&mut d, 7, "use db1", true);
+        assert_eq!(d["database"], (7, "use db1".to_string()));
+        track_divergence(&mut d, 1, "use db2", false);
+        assert!(d.is_empty());
     }
 
     #[test]

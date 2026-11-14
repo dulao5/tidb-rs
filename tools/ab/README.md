@@ -97,11 +97,12 @@ does the whole run: build, `playground.sh start -c tools/ab/integrationtest.toml
 integration tests' TiDB settings that apply to a TiKV cluster), turn off the ingest backfill,
 join tidb-rs (`playground-join.sh`), run `ab integrationtest`, write `run.tsv` (commits,
 version, date, runner, duration) and tear everything down (`-k` keeps it). Like TiDB's
-`run-tests.sh` it sets `TZ=Asia/Shanghai`. A full run of the 263 files (52k statements) took
-3.6 h on a Mac mini (M4 Pro); about 2.5 h of it are ~280 ANALYZE statements at 40 s each: Go
+`run-tests.sh` it sets `TZ=Asia/Shanghai`. Before #175 a full run of the 263 files (52k statements) took
+3.6 h on a Mac mini (M4 Pro), about 2.5 h of it ~280 ANALYZE statements at 40 s each: Go
 TiDB's ANALYZE broadcasts a stats-delta flush to every registered TiDB server through its status
-port (`executor.flushStatsDeltaForAnalyze`), and tidb-rs's status port does not serve that
-request, so Go retries for about 40 s (the same effect as for `CLUSTER_*` tables). It needs
+port (`executor.flushStatsDeltaForAnalyze`), as it does to read `CLUSTER_*` tables, and tidb-rs's
+status port did not serve that request. Since #175 it does, and the 246 files of v8.5.8 take
+about 21 minutes on Linux (`tools/weekly`). It needs
 tiup, mysql, git and curl and should work unchanged on Linux CI. On a nearly full disk the
 ingest backfill fails (`8256 ... no enough space`) for files that turn
 `tidb_ddl_enable_fast_reorg` back on; those statements count as `a_error`.
@@ -131,6 +132,8 @@ Outcome per statement:
 - `unsupported`: B answered 1235 (`ER_NOT_SUPPORTED_YET`), or B could not log in as the user of
   a `connect` (tidb-rs has a single account).
 - `b_error`: A succeeded and B failed otherwise (other error code, timeout, lost connection).
+  Also a `USE` that B rejects (kind `use rejected`): the database exists on A, so this is a
+  tidb-rs defect; the reads after it are still skipped (`session diverged`).
 - `a_error`: A failed and the test does not expect an error (`--error`). Any class; not scored.
   Mostly features of TiDB master missing in the release under test.
 - `skipped`: a read not sent to B: inside a transaction on A (BEGIN/START TRANSACTION until
@@ -138,6 +141,14 @@ Outcome per statement:
   depending on session history B does not share: SHOW WARNINGS/ERRORS, `@@warning_count`,
   `ROW_COUNT()`, `FOUND_ROWS()`, `@@last_plan_from_cache`, ... unless the previous statement
   ran on both and matched (after an error A lists it as a warning, B does not), and `LAST_INSERT_ID()` / `@@tidb_last_txn_info` / `@@tidb_last_query_info` always.
+  Also `session diverged`: B rejected a session statement that sets a variable which can change
+  a read's answer (`USE`, `SET NAMES`, `character_set_*`, `collation_*`, `sql_mode`,
+  `time_zone`, `tidb_mem_quota_query`, `tidb_enable_external_ts_read`, ...; the list is
+  `mysqltest::affects_results`), so B's session no longer answers like A's. Reads in that
+  connection are skipped until the variable is set again on both sides, or set back to `DEFAULT`
+  on A (B never changed it). Rejected settings of other variables (cost model, concurrency,
+  chunk sizes, ...) do not stop the comparison. `SET GLOBAL` is a write, not tracked: B
+  rejecting one shows up as mismatches in later connections, not as skipped reads.
 - `write`: a session or write statement that A ran as the test expected.
 
 One statement is never run: `SET GLOBAL tidb_enable_ddl = OFF` (`ddl/db_integration`). The test
@@ -165,6 +176,14 @@ Output in `--out-dir`:
   skipped, write, b_set_rejected, retried, seconds.
 - `mismatches.jsonl`: every mismatch and b_error with both answers (columns and up to
   `--report-rows` rows) and the session statements B had rejected in that connection.
+- `results.jsonl`: every read sent to B (match, mismatch, unsupported, b_error), one JSON
+  object per line in the format of the other workloads (`template` = test name, `protocol`
+  `text`, `verdict`, `query`) plus `line`, and for anything but a match the `kind` and
+  `detail` of `statements.tsv`. Also what the session divergence hides: every session
+  statement B rejected (verdict `b_set_rejected`, `detail` = B's error; a rejected `USE` is a
+  `b_error`), and every read skipped as `session diverged` (verdict `skipped`, with `cause`:
+  the `line`, `sql` and variable of the rejected statement). The weekly build's
+  `integrationtest` part reads it (`tools/weekly`).
 
 The tidb-rs-tracker imports the directory (`scripts/tracker.py import-integration`) and
 publishes per-file counts, reasons and every mismatch (R1).
