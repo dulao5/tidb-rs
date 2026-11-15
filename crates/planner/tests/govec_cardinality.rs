@@ -58,6 +58,13 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "unsupported"
 };
 
+/// The `selectivity` records that stop at a boundary, per block, in the committed vectors
+/// (the same on both targets; constitution §7.3, as VS1-10's preprocess replay). They must
+/// drop to 0 when the block lands: D10.4 (VS1-25, range building) and D08.9 (the IN
+/// builtin). A boundary that starts answering, or a new one, fails here; update the pin in
+/// the same PR (and these records then compare against Go).
+const EXPECTED_BLOCKED: [(&str, usize); 2] = [("D08.9", 32), ("D10.4", 410)];
+
 fn vectors() -> String {
     format!(
         "{}/tests/vectors/v8.5.8/{GO_TARGET}/cardinality.jsonl.gz",
@@ -1042,7 +1049,7 @@ fn ndv_op(p: &[Value]) -> Value {
 
 // ---------------------------------------------------------------- replay
 
-fn replay(path: &str) {
+fn replay(path: &str) -> BTreeMap<(String, String), usize> {
     let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(path).expect("vectors"));
     let mut text = String::new();
     gz.read_to_string(&mut text).unwrap();
@@ -1117,11 +1124,20 @@ fn replay(path: &str) {
         );
     }
     assert_eq!(n as u64, header["records"].as_u64().unwrap());
+    blocked
 }
 
 #[test]
 fn govec_cardinality() {
-    replay(&vectors());
+    let blocked = replay(&vectors());
+    let got: Vec<(&str, usize)> = blocked
+        .iter()
+        .map(|((_, blk), n)| (blk.as_str(), *n))
+        .collect();
+    assert_eq!(
+        got, EXPECTED_BLOCKED,
+        "selectivity records blocked per block changed (pin EXPECTED_BLOCKED)"
+    );
     if let Ok(files) = std::env::var("GOVEC_CARDINALITY_FILES") {
         for f in files.split(',').filter(|f| !f.is_empty()) {
             replay(f);

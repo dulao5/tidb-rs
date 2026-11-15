@@ -30,9 +30,9 @@ of failing on them, and pins the count per block (`D06.3` base table 11, `D02.2`
 | | |
 |---|---|
 | source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cardinality.jsonl.gz` (branch `govec/stats-vs29`) |
-| generator | `govec` (seed 20261115), 5685 records |
-| `arm64/cardinality.jsonl.gz` sha256 | `8a5d303ddd1e13fca00c56e749534602dc59ce1603cd3014c1daa559d8832898` (generated locally) |
-| `amd64/cardinality.jsonl.gz` sha256 | `3e3c0504c348a5699dfff89bec7026a8880c295866188cdea1704098edb0b869` (tracker CI artifact, run 43653955539, GOARCH=amd64, GOAMD64=v1) |
+| generator | `govec` (seed 20261115), 5702 records |
+| `arm64/cardinality.jsonl.gz` sha256 | `fa33eb684978076874539483bc4bfb3b5629bf37c559878bcd29d3e0aba96d1e` (generated locally) |
+| `amd64/cardinality.jsonl.gz` sha256 | `385dce3c32de4f4bebfe4614dcee039893a845b68e740221914b1f5bfeee60fa` (tracker CI artifact, run 43658734459, GOARCH=amd64, GOAMD64=v1) |
 
 The estimation formulas have multiply-adds that gc fuses on arm64 only (D10.6 spec §2 item 5),
 so the two targets differ in the last bits of 8 records (7 `hist`, 1 `mv_sel`; tracker `targetdiffs_test.go`). `tests/govec_cardinality.rs` counts the

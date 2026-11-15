@@ -36,7 +36,7 @@
 | VS1-16 | 结果集与 `writeResultSet` / `writeChunks`、`column` / `dump`、`conn_stmt` 执行与二进制参数 | D03.1 | breadth | 0.13 | VS1-14 | dump govec；protocol-smoke 通过 | 未开始 |
 | VS1-17 | D06.3 第 2 部分（T8 / T9）；D06.5 `loadInfoSchema` / `tryLoadSchemaDiffs` / validator，由 PoC domain 驱动 | D06.3、D06.5 | breadth | 0.10 | — | schema 同步测试在新 InfoSchema 上通过 | 未开始 |
 | VS1-18 | snapshot `Get` / `BatchGet` / `SetOption`、错误转换 | D07.1 | breadth | 0.04 | — | 故障场景点查与 PoC 相同 | 评审中（#221） |
-| VS1-20 | C2a 集成与 point_select 调优 | glue | depth | 0.08 | Phase 1 其余各项 | ab `strict` 的 `Point_Get` 100%；point_select ≥ 0.9× Go（1 / 8 线程） | 未开始 |
+| VS1-20 | C2a 集成与 point_select 调优 | glue | depth | 0.08 | Phase 1 其余各项 | ab `strict` 的 `Point_Get` 100%；point_select ≥ 0.9× Go（1 / 8 线程）；ab 包含一个真正走到 `pseudoSelectivity` 唯一键查找的用例（UniqueID 与列 ID 的对应，D10.6 spec §5 第 1 条）；profile：记录每个点查计划的分配次数（每条语句重建 pseudo 表），据此决定是否缓存（D11.1 spec §3） | 未开始 |
 
 ## Phase 2：规划器主体
 
@@ -50,7 +50,7 @@
 | VS1-25 | ranger 整块 | D10.4 | depth | 0.22 | — | ranger govec 一致 | 未开始 |
 | VS1-27 | 物理算子与 task（VS1 算子）、`exhaustPhysicalPlans`（Sel / Proj / Sort / TopN / Limit） | D10.1、D10.3 | depth | 0.18 | VS1-19 | 随 VS1-28 验收 | 未开始 |
 | VS1-28 | FindBestTask：DataSource / TableDual、skyline、表路径、访问路径、路径统计 | D10.2 | depth | 0.31 | VS1-26、VS1-27、VS1-29、VS1-30 | EXPLAIN 计划向量（去掉 estRows / cost）一致 | 未开始 |
-| VS1-29 | pseudo 基数估算、统计结构读取部分 | D10.6、D11.1 | depth | 0.21 | — | pseudo selectivity govec 一致 | 评审中（#236；D10.6 converge 38/54 + 16 桩，D11.1 85/85；govec `cardinality` 5,685 条，`selectivity` 442 条停在 D10.4 / D08.9 边界） |
+| VS1-29 | pseudo 基数估算、统计结构读取部分 | D10.6、D11.1 | depth | 0.21 | — | pseudo selectivity govec 一致 | 评审中（#236；D10.6 converge 38/54 + 16 桩，D11.1 85/85；govec `cardinality` 5,702 条，`selectivity` 442 条停在 D10.4 / D08.9 边界） |
 | VS1-30 | 代价模型 v2（VS1 算子） | D10.5 | depth | 0.04 | VS1-19 | 代价 govec 一致 | 未开始 |
 | VS1-31 | `ResolveIndices`、`ToPB`、access object（VS1 算子） | D10.9 | depth | 0.04 | VS1-27 | DAG 逐字节一致 | 未开始 |
 | VS1-32 | 规划耗时的早期测量：VS1-24 / VS1-28 一能产出计划就用只含 VS1 语句的 lua 测每次 EXECUTE 的优化耗时，与 Go（plan cache 打开 / 关闭）对照 | glue | depth | 0.03 | VS1-24、VS1-28 | 报告写进 plan §10-3 | 未开始 |

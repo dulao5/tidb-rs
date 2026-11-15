@@ -102,24 +102,24 @@ govec 的 `row_count`、`col_est`、`selectivity`、`pseudo_table`、`row_size` 
 
 ## 5. 可能的上游问题（记录，不提 issue）
 
-1. `pseudoSelectivity`（`pseudo.go:52`、`:60`）用 `getConstantColumnID` 返回的 `col.ID`（列定义的 ID）调用 `coll.GetCol`，而语句的 `HistColl`（`GenerateHistCollFromColumnInfo`）以 `UniqueID` 为键。只有 ID 与某个 UniqueID 恰好相同时才找得到列，所以"唯一键等值 → `1/RealtimeCount`"的捷径与唯一索引检查在这条路径（条件超过 63 个、或 `HistColl` 没有列和索引）上基本不起作用。照搬。
-2. `GetRowCountByIntColumnRanges`（`row_count_column.go:104`）按第一个范围的下界是否为 `KindInt64` 选择有符号 / 无符号的 pseudo 算法：无符号列的范围下界若是 `NULL` / `MinNotNull`，会走有符号算法，上界的 `uint64` 被当成 `int64` 读。照搬。
+1. `pseudoSelectivity`（`pseudo.go:52`、`:60`）用 `getConstantColumnID` 返回的 `col.ID`（列定义的 ID）调用 `coll.GetCol`，而语句的 `HistColl`（`GenerateHistCollFromColumnInfo`）以 `UniqueID` 为键。只有 ID 与某个 UniqueID 恰好相同时才找得到列，所以"唯一键等值 → `1/RealtimeCount`"的捷径与唯一索引检查在这条路径（条件超过 63 个、或 `HistColl` 没有列和索引）上基本不起作用。照搬。后果：这条路径上的估算取决于某列的 UniqueID 是否恰好等于某个列 ID，所以这里要与 Go 计划一致，**UniqueID 的分配必须与 Go 完全相同**；VS1-20 的 ab 中加一个真正走到这次查找的用例（tasks.md）。
+2. `GetRowCountByIntColumnRanges`（`row_count_column.go:104`）按第一个范围的下界选算法：下界是 `KindInt64` 走有符号算法，其他（包括 `NULL` / `MinNotNull`）一律走无符号算法。于是**有符号**列的范围下界若是 `NULL` / `MinNotNull`，会走无符号算法，负的上界被当成很大的 `uint64` 读（无符号列从不走有符号算法）。例如 pseudo 表上 `[NULL, -5]` 得 3333.33（`tableRowCount / pseudoLessRate`），`[NULL, 5]` 得 5。照搬；govec `row_count` 中 `sys/int_low_null` 的 17 条记录正是这个形状（有符号列，下界 `NULL` / `MinNotNull`，上界为负数、正数、`MinInt64`、`MaxValue`）。
 3. 生成向量时发现（不属于本块）：DATETIME 列与整数常量比较时，Go 的 mock 上下文与 tidb-rs 测试用的表达式上下文对 `refineNumericConstantCmpDatetime` 中常量转换的错误处理不同（Go 得到常量，tidb-rs 得到 `cast(col)`），疑与表达式上下文的类型标志有关；govec 不生成这种条件，交给 D08.4 / D00.1 的负责人核对。
 
 ## 6. 测试
 
-govec 领域 `cardinality`（tracker `govec/domains/cardinality.go`，seed 20261115，5,685 条），tidb-rs `crates/planner/tests/govec_cardinality.rs` 回放，arm64 本地全部通过：
+govec 领域 `cardinality`（tracker `govec/domains/cardinality.go`，seed 20261115，5,702 条），tidb-rs `crates/planner/tests/govec_cardinality.rs` 回放，arm64 本地全部通过：
 
 | op | 条数 | 结果 |
 |---|--:|---|
 | `pseudo_table` / `hist_coll` / `table_ops` | 252 / 250 / 250 | 全部一致 |
-| `row_count`（列 / int / 索引范围） | 1,119 | 全部一致 |
+| `row_count`（列 / int / 索引范围；含 `sys/int_low_null` 17 条） | 1,136 | 全部一致 |
 | `col_est`（`TestPseudoTable` 与随机） | 502 | 全部一致 |
 | `selectivity` | 1,250 | 808 一致；410 `blocked-by:D10.4`（需要建范围）、32 `blocked-by:D08.9`（IN 内置函数未移植）；0 不一致 |
 | `row_size` / `avg_col` | 400 / 300 | 全部一致 |
 | `hist` / `col_stats` | 350 / 400 | 全部一致 |
 | `existence` / `ndv` / `mv_sel` / `topn` | 150 / 250 / 150 / 62 | 全部一致 |
 
-回放断言只允许 `selectivity` 停在 D08.9 / D10.4 / D10.6 / D10.7 的边界；VS1-25 合入后，D10.4 的 410 条应变为一致。amd64 向量来自 tracker CI 的 artifact。
+回放断言只允许 `selectivity` 停在边界，并把每个块的条数钉住（`EXPECTED_BLOCKED`：D10.4 410 条、D08.9 32 条，两个目标相同）：VS1-25（D10.4）或 D08.9 合入后这些条数必须降到 0、记录改为与 Go 比较，同一个 PR 更新这个常量。amd64 向量来自 tracker CI 的 artifact。
 
 单元测试：`selectivity::tests::selectivity_greedy_algo`（Go `TestSelectivityGreedyAlgo`）、`out_of_range_helpers`；`govec_cardinality.rs` 的 `pseudo_table_go_test`（Go `TestPseudoTable`，含未导出的 `columnLessRowCount` / `columnBetweenRowCount`）。`selectivity_test.go` 的其余用例都依赖存储（`testkit`）和真实统计，它们的 pseudo 部分由上表的向量按函数覆盖；EXPLAIN 级的 pseudo 用例（`TestIgnoreRealtimeStats`、`TestBuiltinInEstWithoutStats` 的 `stats:pseudo` 行）随 VS1-28 的计划向量验收。
