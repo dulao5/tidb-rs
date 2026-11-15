@@ -28,7 +28,10 @@ pub mod glue;
 pub mod internal;
 pub mod metrics;
 pub mod point_get;
+pub mod select;
 pub mod table_reader;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testutil;
 pub mod utils;
 
 pub use exec::{ExecCtx, Executor};

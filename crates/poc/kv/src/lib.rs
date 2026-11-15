@@ -19,6 +19,8 @@
 
 mod error;
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -340,14 +342,21 @@ impl KvSnapshot {
 
     /// Send a coprocessor request at this snapshot through the coprocessor client of D07.2
     /// (`copr.CopClient.Send`, then `Next` until the end) and return every response's data,
-    /// in the iterator's order. `req.start_ts` is the snapshot's timestamp.
-    pub async fn coprocessor(&mut self, mut req: CopRequest) -> Result<Vec<Vec<u8>>> {
+    /// in the iterator's order. `req.start_ts` is the snapshot's timestamp. `killed` is the
+    /// statement's kill signal (Go `tikv.Variables.Killed` = `&SQLKiller.Signal`): the
+    /// iterator's workers stop once it is non-zero (VS1-14; the PoC has no KILL and passes
+    /// `None`).
+    pub async fn coprocessor(
+        &mut self,
+        mut req: CopRequest,
+        killed: Option<Arc<AtomicU32>>,
+    ) -> Result<Vec<Vec<u8>>> {
         req.start_ts = self.ts;
         let client = self.copr.get_client();
         // `tikv.Variables`: TiDB's default backoff weight (client-go parity P0-1).
         let vars: tidb_kv::kv::OptionValue = Box::new(tidb_store::copr::tikv::Variables {
             backoff_weight: DEFAULT_BACKOFF_WEIGHT as i64,
-            killed: None,
+            killed,
         });
         let option = tidb_kv::kv::ClientSendOption::default();
         let mut resp = client.send(&req, Some(&vars), &option);

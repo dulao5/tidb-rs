@@ -86,7 +86,7 @@ impl SessionContext for MockSession {
         let ts = self.read_ts;
         Box::pin(async move { Ok(ts) })
     }
-    fn get_txn_info_schema(&self) -> Option<InfoSchemaRef> {
+    fn get_txn_info_schema(&mut self) -> Option<InfoSchemaRef> {
         None
     }
     fn get_txn_scope(&self) -> String {

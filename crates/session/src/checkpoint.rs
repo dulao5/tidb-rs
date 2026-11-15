@@ -26,11 +26,18 @@
 //! because the cloned parts hold `Arc`s (`prepared_stmts`, `user_vars`): O(#prepared)
 //! refcount bumps, no deep copies. Keep it so when the field list is narrowed.
 //!
-//! TODO(VS1-14): narrow this to the field list of the VS1-14 plan (what the ported statement
-//! path actually writes), and hand an already-sent TSO request over to the PoC (§4.6 item 2).
-//! The new statement path must install a fresh statement context before writing its plain
-//! fields: `stmt_ctx_mut()` on the checkpointed context panics because the checkpoint shares
-//! it.
+//! VS1-14 (spec `specs/D05.3-session/spec.md` §3): the field list of the statement path is in
+//! the spec (§3.1); the checkpoint keeps the whole scalar and non-scalar state rather than
+//! that list (cheaper to get right, and the cost above is already small). Besides
+//! `SessionVars`, the session has its transaction (`LazyTxn`), the transaction manager and
+//! the running statement (§3.2): the router only runs the new stack on an idle session
+//! (autocommit, no transaction: plan §4.3 step 0), so the checkpoint records that the
+//! session was idle and `restore` makes it idle again, dropping a pending TSO request and
+//! the provider (Go's `RollbackTxn`; the hand-over to the PoC is §3.3). A checkpoint of a session that was not
+//! idle cannot be restored: `restore` returns an error and the router reports it (a bug).
+//! The new statement path installs a fresh statement context before writing its plain
+//! fields (`ResetContextOfStmt` never writes the old one), so the checkpointed context is
+//! unchanged.
 
 use std::sync::Arc;
 
@@ -50,6 +57,8 @@ pub struct StmtCheckpoint {
     fields: Box<SessionVarsFields>,
     state: Box<SessionState>,
     last_query_info: QueryInfo,
+    /// The transaction, the transaction manager and the running statement were idle.
+    idle: bool,
 }
 
 impl Session {
@@ -65,12 +74,34 @@ impl Session {
             fields: Box::new(vars.fields.clone()),
             state: Box::new(vars.state.clone()),
             last_query_info: vars.last_query_info.clone(),
+            idle: self.is_idle(),
         }
+    }
+
+    /// No transaction (valid or pending), not in a transaction, no statement whose rows
+    /// are being read (spec §3.2). A provider left by a statement that failed before
+    /// `Compile` (Go keeps it too) does not count: the next statement enters a new one,
+    /// since the transaction is not valid or pending.
+    // glue: VS1-14 spec §3.2
+    pub fn is_idle(&self) -> bool {
+        !self.core.sctx.lazy_txn().valid_or_pending()
+            && !self.core.sctx.vars.in_txn()
+            && self.running.is_none()
     }
 
     /// Puts the session back to `cp`.
     // glue: VS1-02
-    pub fn restore(&mut self, cp: StmtCheckpoint) {
+    pub fn restore(&mut self, cp: StmtCheckpoint) -> Result<(), tidb_base::Error> {
+        if !cp.idle {
+            return Err(tidb_base::errors::new(
+                "VS1 checkpoint: the session was not idle when the statement started",
+            ));
+        }
+        // Go's RollbackTxn: the transaction (a pending TSO request is dropped, spec §3.3),
+        // the provider, the running statement.
+        self.running = None;
+        self.core.sctx.txn.change_to_invalid();
+        self.core.txn_manager = crate::txnmanager::new_txn_manager();
         let vars = self.vars_mut();
         cp.stmt_ctx.set_warnings(cp.warnings);
         cp.stmt_ctx.set_extra_warnings(cp.extra_warnings);
@@ -78,6 +109,7 @@ impl Session {
         vars.fields = *cp.fields;
         vars.state = *cp.state;
         vars.last_query_info = cp.last_query_info;
+        Ok(())
     }
 
     /// A serialized snapshot of the session state the router keeps in sync and restores:
@@ -104,6 +136,13 @@ impl Session {
         );
         let _ = writeln!(out, "LastQueryInfo={:?}", vars.last_query_info);
         let _ = writeln!(out, "state={:?}", vars.state);
+        let _ = writeln!(
+            out,
+            "txn={} txnInfo={:?} running={}",
+            self.core.sctx.lazy_txn().string(),
+            self.core.sctx.lazy_txn().txn_info(),
+            self.running.is_some()
+        );
         out
     }
 }
