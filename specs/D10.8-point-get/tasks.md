@@ -10,7 +10,7 @@ spec：[spec.md](spec.md)。状态截至 2026-11-15：第 1 部分（VS1-11）�
 - [x] T2 `util.go`：`EncodeUniqueIndexKey`、`EncodeUniqueIndexValuesForKey`；`consistency.Reporter.ReportLookupInconsistent`
 - [x] T3 执行器改用 planner 的 `PointGetPlan`，删除 `glue::PointGetPlan` 和三个桩（唯一索引 key、不一致错误）
 - [x] T4 govec `fastplan` 领域与回放（`fast`、`uidx`，后者经点查执行器）
-- [ ] T5 amd64 向量（tracker#92 的 CI artifact）
+- [x] T5 amd64 向量（tracker#92 CI artifact，run 43667682707；两个目标的记录相同）
 - [ ] T6 `Optimize` 中 `tidb_isolation_read_engines` 的检查（随 VS1-24 的 `Optimize`，spec §3）
 
 ## 块内其余（`blocked-by:D10.8`）
