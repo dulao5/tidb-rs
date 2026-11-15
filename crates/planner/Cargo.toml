@@ -12,6 +12,7 @@ publish.workspace = true
 tidb-base = { workspace = true }
 # table.CastValue (EncodeUniqueIndexValuesForKey), IsMemDB (TryFastPlan) (D06.4, D06.3).
 tidb-infoschema = { workspace = true }
+tidb-domain = { workspace = true }
 # Expression tree and Schema (D08.1).
 tidb-expression = { workspace = true }
 # PushDownContext (planner/util GetPushDownCtx).

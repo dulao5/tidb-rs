@@ -83,7 +83,7 @@ VS1-17 原计划还包括 schema validator。N11（集群成员身份、schema �
 ## 6. 验收结果（VS1-17 第 1 部分）
 
 - 新会话的 InfoSchema 来自 `tidb-domain` 的加载器（全量加载 + diff 增量），不再是空的替身。
-- 预处理的表查找可用：`PREPARE s FROM 'SELECT c FROM sbtest1 WHERE id=?'` 在新栈上通过表查找，停在下一个桩：表的元数据锁 `tryLockMDLAndUpdateSchemaIfNecessary`（`blocked-by:D05.4`，需要事务上下文）。
+- 预处理的表查找可用：`PREPARE s FROM 'SELECT c FROM sbtest1 WHERE id=?'` 在新栈上通过表查找，随后通过表的元数据锁（`tryLockMDLAndUpdateSchemaIfNecessary`，照 Go 移植，D05.4 spec §3a），停在规划器的 `buildSelect`（`blocked-by:D09.1`，计划构建器）。新栈会话的元数据锁登记尚未由本 domain 上报给集群（Go 的 MDL 检查循环属于本块的后续部分；桩 `report_metadata_locks`，#252）。
 - 规划器的表查找是同步的、不读 TiKV，会话在规划前先加载语句用到的表（D06.3 spec §11.2）。
 
 ## 7. converge

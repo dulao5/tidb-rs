@@ -54,7 +54,7 @@ converge：D13.1 `--item VS1-15` 44 个函数，24 个移植（L1 13、L2 11）+
 
 ### 3.3 PREPARE 与 EXECUTE 之间 schema 变了
 
-照 `planCachePreprocess` 第 3、4 步：逐表按 ID 重查（不在则按名、表 ID 变了删 `RelateVersion`），比 `Revision`；任一表变了或 schema 版本不同，清掉缓存的点查执行器，以 `InPrepare` 重新 preprocess，失败时报 `ErrSchemaChanged`（8113，`Schema change caused error: …`），成功则换上新的 resolve context 和版本。不复用旧的 `PlanCacheStmt` 内容。元数据锁（`tryLockMDLAndUpdateSchemaIfNecessary`）是 `blocked-by:D05.4` 的桩：Go 对它的错误只记日志、继续，桩的 `Blocked` 不能这样吞掉，所以直接返回。
+照 `planCachePreprocess` 第 3、4 步：逐表按 ID 重查（不在则按名、表 ID 变了删 `RelateVersion`），比 `Revision`；任一表变了或 schema 版本不同，清掉缓存的点查执行器，以 `InPrepare` 重新 preprocess，失败时报 `ErrSchemaChanged`（8113，`Schema change caused error: …`），成功则换上新的 resolve context 和版本。不复用旧的 `PlanCacheStmt` 内容。元数据锁（`tryLockMDLAndUpdateSchemaIfNecessary`）已照 Go 移植（D05.4 spec §3a，#252）：autocommit 的 EXECUTE 是只读语句，不登记；它的普通错误照 Go 记日志、让该表的缓存失效后继续；其中的边界桩（`Blocked`）不能这样吞掉，所以直接返回。
 
 ### 3.4 `max_prepared_stmt_count`
 
@@ -94,7 +94,7 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 5. `PlanBuilder.Build` 还不返回计划：`GeneratePlanCacheStmtWithAST` 在 Build 之后返回 `blocked-by:D09.1`，而不是带着空的列定义继续。
 6. `PrepareExec`：解析错误 / warning 交给 PoC（`D02.1`）；语句文本用整个 SQL（只允许一条语句）；Top SQL 未移植（D14.3）。
 7. `planCacheStmtProcessor` 不收集表列表（只给 cache key 的统计信息用，A3）。
-8. 元数据锁的桩返回 `Blocked` 而不是像 Go 那样吞掉错误（§3.3）。
+8. 元数据锁（已照 Go 移植，见 D05.4 事务上下文 spec §3a，#252）中的边界桩（没有 domain、会话扩展的 InfoSchema 未移植）返回 `Blocked`，而不是像 Go 那样把错误记日志后吞掉（§3.3）；Go 的普通错误照 Go 记日志、让缓存失效。
 
 ## 6. 边界桩（登记在 tracker `data/stubs.tsv`）
 

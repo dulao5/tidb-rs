@@ -1077,3 +1077,255 @@ fn prepare_stmt_runs_the_prepare_executor() {
     assert!(s.vars().state.prepared_stmts.is_empty());
     assert!(s.is_idle());
 }
+
+// ---------------------------------------------------------------- metadata lock, MaxTS
+
+/// An InfoSchema (version 1) with `test.sbtest1 (id BIGINT PRIMARY KEY, c CHAR)`, the table
+/// resident in the cache (as the router's tests build it).
+fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
+    use tidb_model::{ColumnInfo, DBInfo, StatePublic, TableInfo};
+    use tidb_parser::model::CIStr;
+    use tidb_parser::types::FieldType;
+    let col = |id: i64, name: &str, tp: u8| {
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset: (id - 1) as isize,
+            field_type: FieldType::new(tp),
+            state: StatePublic,
+            ..Default::default()
+        })
+    };
+    let t = TableInfo {
+        id: 110,
+        name: CIStr::new("sbtest1"),
+        columns: Some(vec![
+            col(1, "id", tidb_base::mysql::TypeLonglong),
+            col(2, "c", tidb_base::mysql::TypeString),
+        ]),
+        pk_is_handle: true,
+        state: StatePublic,
+        version: 5,
+        max_column_id: 2,
+        ..Default::default()
+    };
+    let mut db = DBInfo {
+        id: 2,
+        name: CIStr::new("test"),
+        state: StatePublic,
+        ..Default::default()
+    };
+    db.deprecated.tables = Some(vec![Arc::new(t)]);
+    let mut b = tidb_infoschema::new_builder(None, None, tidb_infoschema::new_data());
+    block_on(b.init_with_db_infos(vec![db], vec![], vec![], 1)).unwrap();
+    Arc::new(block_on(b.build(1)))
+}
+
+/// A session over `store` whose domain InfoSchema has `test.sbtest1`, with
+/// `tidb_enable_metadata_lock` on (Go's default; read at transaction start).
+fn sbtest_session(store: &Arc<MockStore>) -> Session {
+    tidb_sessionctx::variable::tidb_vars::EnableMDL.store(true, SeqCst);
+    let mut s = session(store);
+    s.set_domain_info_schema(sbtest_info_schema());
+    s.vars_mut().current_db = "test".to_owned();
+    s
+}
+
+const SBTEST_POINT: &str = "SELECT c FROM sbtest1 WHERE id=?";
+
+/// The table IDs and versions registered in the session's metadata-lock table.
+fn mdl_entries(s: &Session) -> Option<Vec<(i64, i64)>> {
+    let m = s.vars().state.txn_ctx.related_table_for_mdl()?;
+    let mut v: Vec<_> = m.0.lock().iter().map(|(k, v)| (*k, *v)).collect();
+    v.sort();
+    Some(v)
+}
+
+/// `PREPARE` registers the table (Go: a fresh statement context is not read-only, so the
+/// lock branch runs) with the domain's schema version while the prepare executor runs, and
+/// `PrepareStmt` clears it at the end (`rollbackOnError` → `RollbackTxn`), also when the
+/// statement fails. The statement passes the metadata lock and stops at the next boundary
+/// stub (see `prepare_of_the_sbtest_point_select_stops_after_the_lock`).
+#[test]
+fn prepare_registers_the_table_and_clears_it_at_the_end() {
+    let store = MockStore::new(10);
+    let mut s = sbtest_session(&store);
+    // PrepareStmt's steps up to the prepare executor.
+    let core = &mut s.core;
+    core.sctx.vars.state.txn_ctx.info_schema = Some(
+        tidb_sessionctx::variable::session_state::TxnInfoSchema(core.sctx.get_domain_info_schema()),
+    );
+    block_on(core.prepare_txn_ctx()).unwrap();
+    assert!(core.sctx.vars.state.txn_ctx.enable_mdl);
+    let mut exec = tidb_executor::prepared::new_prepare_exec(SBTEST_POINT);
+    let res = exec.next(core);
+    assert!(!core.sctx.vars.stmt_ctx().is_read_only);
+    assert_eq!(mdl_entries(&s), Some(vec![(110, 1)]), "{res:?}");
+    assert!(s.vars().stmt_ctx().related_table_ids.contains(&110));
+    s.core.rollback_on_error();
+    assert_eq!(mdl_entries(&s), None);
+
+    // The whole PrepareStmt: cleared at the end, whether it succeeds or not.
+    let _ = block_on(s.prepare_stmt(SBTEST_POINT));
+    assert_eq!(mdl_entries(&s), None);
+    assert!(s.is_idle());
+    // A failing PREPARE (a table that does not exist) leaves nothing either.
+    let _ = block_on(s.prepare_stmt("SELECT c FROM nosuch WHERE id=?"));
+    assert_eq!(mdl_entries(&s), None);
+}
+
+/// Where `PREPARE` + `EXECUTE` of the sysbench point select stops now on the real session
+/// over the sbtest InfoSchema (mock store): past the metadata lock.
+#[test]
+fn prepare_of_the_sbtest_point_select_stops_after_the_lock() {
+    let store = MockStore::new(10);
+    let mut s = sbtest_session(&store);
+    let Err(e) = block_on(s.prepare_stmt(SBTEST_POINT)) else {
+        panic!("PREPARE reached past the plan builder");
+    };
+    // The plan builder (`buildSelect`, D09.1) is next.
+    assert_eq!(blocked_by(&e), Some("D09.1"), "{e}");
+    assert_eq!(mdl_entries(&s), None);
+    // EXECUTE: the session's ExecutePreparedStmt needs `ast.ExecuteStmt` (D02.2), which the
+    // Rust AST does not have; no statement was prepared, so it is Go's 8111 here.
+    let Err(e) = block_on(s.execute_prepared_stmt(1, vec![])) else {
+        panic!("no statement 1");
+    };
+    assert_eq!(e.code(), 8111, "{e}");
+}
+
+/// An autocommit read (`EXECUTE`, a plain SELECT) registers nothing: its statement context is
+/// read-only and the session is not in a transaction (Go returns before the lock branch).
+/// A statement of an explicit transaction registers (and keeps it to the end of the
+/// transaction).
+#[test]
+fn autocommit_read_registers_nothing_explicit_txn_does() {
+    use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
+    use tidb_planner::core::preprocess::try_lock_mdl_and_update_schema_if_necessary as lock;
+    let store = MockStore::new(10);
+    let mut s = sbtest_session(&store);
+    let is = sbtest_info_schema();
+    let db = tidb_parser::model::CIStr::new("test");
+    let tbl = InfoSchemaLookup::table_by_name(
+        is.as_ref(),
+        &db,
+        &tidb_parser::model::CIStr::new("sbtest1"),
+    )
+    .unwrap();
+    // Autocommit read (what EXECUTE of the point select is).
+    let _ = compile(&mut s, "SELECT c FROM sbtest1 WHERE id = 1", 0);
+    // What Compile sets (`plannercore.IsReadOnly`, still a boundary stub: D09.13).
+    s.vars_mut().stmt_ctx_mut().is_read_only = true;
+    let t = lock(
+        &mut s.core.sctx.vars,
+        &db,
+        Arc::clone(&tbl),
+        is.as_ref(),
+        Some(is.as_ref()),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&t, &tbl));
+    assert_eq!(mdl_entries(&s).unwrap_or_default(), vec![]);
+    assert!(s.vars().stmt_ctx().related_table_ids.contains(&110));
+    s.core.rollback_txn();
+
+    // In an explicit transaction the same read registers.
+    s.vars_mut().set_in_txn(true);
+    s.vars_mut().state.txn_ctx.enable_mdl = true;
+    lock(
+        &mut s.core.sctx.vars,
+        &db,
+        tbl,
+        is.as_ref(),
+        Some(is.as_ref()),
+    )
+    .unwrap();
+    assert_eq!(mdl_entries(&s), Some(vec![(110, 1)]));
+    // Reported per Go: a DDL job on the table at version 2 is held back by this session.
+    let mut job2ver = HashMap::from([(7, 2), (8, 2)]);
+    let job2ids = HashMap::from([(7, [110].into()), (8, [111].into())]);
+    crate::session::remove_lock_ddl_jobs(s.vars(), &mut job2ver, &job2ids);
+    assert_eq!(job2ver, HashMap::from([(8, 2)]));
+    s.core.rollback_txn();
+    assert_eq!(mdl_entries(&s), None);
+}
+
+/// A point get by the integer primary key, and by the primary key of a clustered table, read
+/// at MaxTS with no TSO request (Go `IsPointGetWithPKOrUniqueKeyByAutoCommit`); a point get
+/// by a secondary unique index needs a second read and takes a TSO, as Go.
+#[test]
+fn autocommit_point_get_by_primary_key_reads_at_max_ts() {
+    use tidb_planner::core::point_get_plan::PointGetPlan;
+    let tbl = sbtest_info_schema()
+        .table_by_name_resident(
+            &tidb_parser::model::CIStr::new("test"),
+            &tidb_parser::model::CIStr::new("sbtest1"),
+        )
+        .unwrap()
+        .map(|t| Arc::clone(t.meta()))
+        .unwrap();
+    let uk = Arc::new(tidb_model::IndexInfo {
+        id: 1,
+        name: tidb_parser::model::CIStr::new("k"),
+        unique: true,
+        state: tidb_model::StatePublic,
+        ..Default::default()
+    });
+    let mut clustered = tidb_model::TableInfo::clone(&tbl);
+    clustered.is_common_handle = true;
+    let pk = Arc::new(tidb_model::IndexInfo {
+        primary: true,
+        ..(*uk).clone()
+    });
+    let cases: Vec<(&str, PointGetPlan, usize, bool)> = vec![
+        (
+            "int handle",
+            PointGetPlan {
+                tbl_info: Arc::clone(&tbl),
+                handle: Some(tidb_kv::Handle::Int(tidb_kv::key::IntHandle(1))),
+                ..PointGetPlan::default()
+            },
+            0,
+            true,
+        ),
+        (
+            "clustered primary key",
+            PointGetPlan {
+                tbl_info: Arc::new(clustered),
+                index_info: Some(pk),
+                ..PointGetPlan::default()
+            },
+            0,
+            true,
+        ),
+        (
+            "secondary unique index",
+            PointGetPlan {
+                tbl_info: Arc::clone(&tbl),
+                index_info: Some(uk),
+                ..PointGetPlan::default()
+            },
+            1,
+            false,
+        ),
+    ];
+    for (name, plan, tso, max_ts) in cases {
+        let store = MockStore::new(10);
+        let mut s = session(&store);
+        block_on(s.core.prepare_txn_ctx()).unwrap();
+        let node = parse("SELECT c FROM sbtest1 WHERE id = 1");
+        reset_context_of_stmt(&mut s.core, &node, "").unwrap();
+        s.core
+            .txn_manager
+            .on_stmt_start(&mut s.core.sctx, Some(node))
+            .unwrap();
+        let plan: tidb_planner::PhysicalPlanRef = Arc::new(plan);
+        s.core
+            .advise_optimize_with_plan_and_then_warm_up(&plan)
+            .unwrap();
+        let ts = block_on(s.core.get_stmt_read_ts()).unwrap();
+        assert_eq!(ts == u64::MAX, max_ts, "{name}: ts {ts}");
+        assert_eq!(store.requests.load(SeqCst), tso, "{name}");
+        s.core.rollback_txn();
+    }
+}

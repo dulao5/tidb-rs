@@ -13,6 +13,8 @@
 //! `OptimizeAstNode` is a package variable in Go (set by `pkg/planner` at init); here it is
 //! the `optimize_ast_node` argument, `crate::optimize::optimize_ast_node` in production.
 
+use std::sync::Arc;
+
 use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
 use tidb_base::contextutil::{SessionNonPrepared, SessionPrepared};
@@ -28,7 +30,7 @@ use crate::core::plan_cache_utils::{InfoSchemaLookup, PlanCacheStmt, new_plan_ca
 use crate::core::plan_cacheable_checker::is_plan_cacheable;
 use crate::core::preprocess::{
     InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, in_prepare, preprocess,
-    try_lock_mdl_and_update_schema_if_necessary, with_preprocessor_return,
+    try_lock_mdl_and_update_schema_if_necessary, with_domain_info_schema, with_preprocessor_return,
 };
 use crate::core::resolve::{NodeW, new_node_w, new_node_w_with_ctx};
 
@@ -71,6 +73,7 @@ pub fn plan_cache_preprocess(
     vars: &mut SessionVars,
     is_non_prepared: bool,
     is: &dyn InfoSchemaLookup,
+    domain_is: Option<&dyn InfoSchemaLookup>,
     stmt: &mut PlanCacheStmt,
     params: &[Datum],
 ) -> Result<(), Error> {
@@ -104,22 +107,30 @@ pub fn plan_cache_preprocess(
             }
         };
         // newTbl is the 'should be used' table info for this execution.
-        if let Err(err) = try_lock_mdl_and_update_schema_if_necessary() {
-            if blocked_by(&err).is_some() {
-                return Err(err);
+        let new_tbl = match try_lock_mdl_and_update_schema_if_necessary(
+            vars,
+            &stmt.db_name[i],
+            Arc::clone(&tbl),
+            is,
+            domain_is,
+        ) {
+            Ok(t) => t,
+            Err(err) => {
+                // A boundary stub stops the statement (the PoC answers) instead of being
+                // logged like Go's errors (D13.1 spec §3.3).
+                if blocked_by(&err).is_some() {
+                    return Err(err);
+                }
+                log::warn!(
+                    "meet error during tryLockMDLAndUpdateSchemaIfNecessary, table name: {}, error: {err}",
+                    tbl.name.o
+                );
+                // Invalid the cache key related fields to avoid using plan cache.
+                stmt.relate_version.insert(tbl.id, u64::MAX);
+                schema_not_match = true;
+                continue;
             }
-            log::warn!(
-                "meet error during tryLockMDLAndUpdateSchemaIfNecessary, table name: {}, error: {err}",
-                tbl.name.o
-            );
-            // Invalid the cache key related fields to avoid using plan cache.
-            stmt.relate_version.insert(tbl.id, u64::MAX);
-            schema_not_match = true;
-            continue;
-        }
-        // tryLockMDLAndUpdateSchemaIfNecessary returns the table to use; the stub returns
-        // before it can.
-        let new_tbl = tbl;
+        };
         if stmt.tbls[i].revision != new_tbl.revision {
             schema_not_match = true;
         }
@@ -147,7 +158,11 @@ pub fn plan_cache_preprocess(
             ..Default::default()
         };
         let mut node_w = new_node_w(&mut stmt.prepared_ast.stmt);
-        let opts: Vec<PreprocessOpt> = vec![Box::new(in_prepare), with_preprocessor_return(ret)];
+        let mut opts: Vec<PreprocessOpt> =
+            vec![Box::new(in_prepare), with_preprocessor_return(ret)];
+        if let Some(d) = domain_is {
+            opts.push(with_domain_info_schema(d.snapshot()));
+        }
         let (_, res) = preprocess(vars, &mut node_w, opts);
         if let Err(err) = res {
             if blocked_by(&err).is_some() {
@@ -188,11 +203,12 @@ pub fn get_plan_from_plan_cache(
     vars: &mut SessionVars,
     is_non_prepared: bool,
     is: &dyn InfoSchemaLookup,
+    domain_is: Option<&dyn InfoSchemaLookup>,
     stmt: &mut PlanCacheStmt,
     params: &[Datum],
     optimize_ast_node: OptimizeAstNodeFn<'_>,
 ) -> Result<(PhysicalPlanRef, NameSlice), Error> {
-    plan_cache_preprocess(vars, is_non_prepared, is, stmt, params)?;
+    plan_cache_preprocess(vars, is_non_prepared, is, domain_is, stmt, params)?;
 
     let cache_enabled;
     {

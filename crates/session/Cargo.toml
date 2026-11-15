@@ -33,6 +33,7 @@ parking_lot = "0.12"
 log = "0.4"
 
 [dev-dependencies]
+tidb-model = { workspace = true }
 tidb-executor = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 flate2 = "1.0"

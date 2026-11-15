@@ -373,6 +373,8 @@ fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
 
 /// The real new session, with an InfoSchema that has `test.sbtest1`.
 fn real(mode: NewStackMode, poc: &FakePoc) -> Router {
+    // `tidb_enable_metadata_lock` on, as on a cluster (Go's default).
+    tidb_session::session::init_mdl_variable();
     let mut new = NewSession::new(None);
     new.session_mut()
         .set_domain_info_schema(sbtest_info_schema());
@@ -1152,9 +1154,9 @@ fn real_prepare_is_blocked_and_restored() {
 }
 
 /// Where a real PREPARE of [`POINT`] stops on the new session: the preprocessor finds the
-/// table in the InfoSchema and then takes the metadata lock of the table
-/// (`tryLockMDLAndUpdateSchemaIfNecessary`, which needs the transaction context, D05.4).
-const REAL_PREPARE_BLOCK: &str = "D05.4";
+/// table, takes its metadata lock and resolves it; the plan builder (`buildSelect`, D09.1)
+/// is next.
+const REAL_PREPARE_BLOCK: &str = "D09.1";
 
 /// The real new session's `ExecutePreparedStmt` / `DropPreparedStmt` of an id it never
 /// prepared: Go's `ErrStmtNotFound` (8111), not a boundary stub; with no plan cache

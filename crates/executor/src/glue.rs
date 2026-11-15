@@ -51,6 +51,13 @@ pub trait SessionContext: Send {
     /// `sessiontxn.GetTxnManager(sctx).GetTxnInfoSchema()`.
     // glue: interface method sessiontxn.TxnManager.GetTxnInfoSchema (VS1-14)
     fn get_txn_info_schema(&mut self) -> Option<InfoSchemaRef>;
+    /// `domain.GetDomain(sctx).InfoSchema()`: the newest InfoSchema, read by the metadata
+    /// lock (`tryLockMDLAndUpdateSchemaIfNecessary`). None without a domain: a statement
+    /// that takes the lock then stops at a boundary stub (D06.5, the session's domain).
+    // glue: domain.GetDomain(sctx).InfoSchema() (D06.5)
+    fn get_domain_info_schema(&self) -> Option<InfoSchemaRef> {
+        None
+    }
     /// `sessiontxn.GetTxnManager(sctx).GetTxnScope()`.
     // glue: interface method sessiontxn.TxnManager.GetTxnScope (VS1-14)
     fn get_txn_scope(&self) -> String;

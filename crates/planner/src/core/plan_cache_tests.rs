@@ -132,7 +132,7 @@ fn prepare_stops_at_the_plan_builder_after_the_cacheability_warning() {
         .unwrap()
         .stmts
         .remove(0);
-    let e = generate_plan_cache_stmt_with_ast(&mut v, true, sql, st, &Is(1))
+    let e = generate_plan_cache_stmt_with_ast(&mut v, true, sql, st, &Is(1), None)
         .err()
         .unwrap();
     assert_eq!(blocked_by(&e), Some("D09.1"));
@@ -147,7 +147,7 @@ fn prepare_stops_at_the_plan_builder_after_the_cacheability_warning() {
         .unwrap()
         .stmts
         .remove(0);
-    let e = generate_plan_cache_stmt_with_ast(&mut v, true, sql, st, &Is(1))
+    let e = generate_plan_cache_stmt_with_ast(&mut v, true, sql, st, &Is(1), None)
         .err()
         .unwrap();
     assert_eq!(blocked_by(&e), Some("D09.1"));
@@ -158,12 +158,14 @@ fn prepare_stops_at_the_plan_builder_after_the_cacheability_warning() {
 fn execute_checks_the_parameter_count_and_sets_the_values_in_order() {
     let mut v = vars();
     let mut s = stmt("select ?, ?", vec![7, 10], 1);
-    let e = plan_cache_preprocess(&mut v, false, &Is(1), &mut s, &[new_int_datum(1)]).unwrap_err();
+    let e = plan_cache_preprocess(&mut v, false, &Is(1), None, &mut s, &[new_int_datum(1)])
+        .unwrap_err();
     assert_eq!(e.code(), 8112, "{e}"); // ErrWrongParamCount
     plan_cache_preprocess(
         &mut v,
         false,
         &Is(1),
+        None,
         &mut s,
         &[new_int_datum(1), new_string_datum("a")],
     )
@@ -184,17 +186,17 @@ fn execute_after_a_schema_change_preprocesses_again() {
     let mut s = stmt("select ?", vec![7], 1);
     s.point_get.executor = Some(Box::new(1u8));
     let ctx_before = Arc::clone(&s.resolve_ctx);
-    plan_cache_preprocess(&mut v, false, &Is(2), &mut s, &[Datum::default()]).unwrap();
+    plan_cache_preprocess(&mut v, false, &Is(2), None, &mut s, &[Datum::default()]).unwrap();
     assert_eq!(s.schema_version, 2);
     assert!(s.point_get.executor.is_none());
     assert!(!Arc::ptr_eq(&ctx_before, &s.resolve_ctx));
     // Same version: nothing is redone.
     s.point_get.executor = Some(Box::new(1u8));
-    plan_cache_preprocess(&mut v, false, &Is(2), &mut s, &[Datum::default()]).unwrap();
+    plan_cache_preprocess(&mut v, false, &Is(2), None, &mut s, &[Datum::default()]).unwrap();
     assert!(s.point_get.executor.is_some());
 
     let mut s = stmt("select * from (select 1) a, (select 2) a", vec![], 1);
-    let e = plan_cache_preprocess(&mut v, false, &Is(2), &mut s, &[]).unwrap_err();
+    let e = plan_cache_preprocess(&mut v, false, &Is(2), None, &mut s, &[]).unwrap_err();
     assert_eq!(e.code(), 8113, "{e}");
     assert_eq!(
         String::from_utf8_lossy(&e.get_msg()),
@@ -214,6 +216,7 @@ fn miss_path_checks_the_new_plan() {
         &mut v,
         false,
         &Is(1),
+        None,
         &mut s,
         &[new_int_datum(1)],
         &mut |v, _, _| {
@@ -239,7 +242,7 @@ fn miss_path_checks_the_new_plan() {
     let mut s = stmt("select 1", vec![], 1);
     s.stmt_cacheable = false;
     s.uncacheable_reason = "query has 'version' is un-cacheable".to_owned();
-    get_plan_from_plan_cache(&mut v, false, &Is(1), &mut s, &[], &mut |_, _, _| {
+    get_plan_from_plan_cache(&mut v, false, &Is(1), None, &mut s, &[], &mut |_, _, _| {
         Ok((dual(), Vec::new()))
     })
     .unwrap();
@@ -256,6 +259,7 @@ fn miss_path_checks_the_new_plan() {
         &mut v,
         false,
         &Is(1),
+        None,
         &mut s,
         &[],
         &mut crate::optimize::optimize_ast_node,
@@ -293,4 +297,231 @@ fn is_plan_cacheable_switches_and_size() {
         is_plan_cacheable(&v, &p, 1, 0, false).unwrap().1,
         "get a TableDual plan"
     );
+}
+
+// ---------------------------------------------------------------- metadata lock
+
+/// An InfoSchema with one table `test.t` (ID 10), at a version.
+struct OneTable(i64, Arc<tidb_model::TableInfo>);
+
+impl InfoSchemaLookup for OneTable {
+    fn table_by_name(&self, _: &CIStr, table: &CIStr) -> Result<Arc<tidb_model::TableInfo>, Error> {
+        if table.l == self.1.name.l {
+            return Ok(Arc::clone(&self.1));
+        }
+        Err(tidb_base::errors::new("no table"))
+    }
+    fn table_by_id(&self, id: i64) -> Result<Option<Arc<tidb_model::TableInfo>>, Error> {
+        Ok((id == self.1.id).then(|| Arc::clone(&self.1)))
+    }
+    fn schema_name_by_id(&self, _: i64) -> Option<CIStr> {
+        None
+    }
+    fn schema_meta_version(&self) -> i64 {
+        self.0
+    }
+    fn snapshot(&self) -> Arc<dyn InfoSchemaLookup> {
+        Arc::new(OneTable(self.0, Arc::clone(&self.1)))
+    }
+}
+
+fn mdl_table(revision: u64) -> tidb_model::TableInfo {
+    let col = |id: i64, name: &str| {
+        Arc::new(tidb_model::ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            state: tidb_model::StatePublic,
+            ..Default::default()
+        })
+    };
+    tidb_model::TableInfo {
+        id: 10,
+        name: CIStr::new("t"),
+        state: tidb_model::StatePublic,
+        revision,
+        columns: Some(vec![col(1, "a"), col(2, "b")]),
+        indices: Some(vec![Arc::new(tidb_model::IndexInfo {
+            id: 1,
+            name: CIStr::new("ia"),
+            state: tidb_model::StatePublic,
+            ..Default::default()
+        })]),
+        ..Default::default()
+    }
+}
+
+fn mdl_vars(read_only: bool, in_txn: bool) -> SessionVars {
+    let mut v = vars();
+    v.state.txn_ctx.enable_mdl = true;
+    v.stmt_ctx_mut().is_read_only = read_only;
+    v.set_in_txn(in_txn);
+    v
+}
+
+fn mdl_map(v: &SessionVars) -> Vec<(i64, i64)> {
+    let mut m: Vec<_> = v
+        .state
+        .txn_ctx
+        .related_table_for_mdl()
+        .map(|m| m.0.lock().iter().map(|(k, v)| (*k, *v)).collect())
+        .unwrap_or_default();
+    m.sort();
+    m
+}
+
+/// Go's skip conditions, in Go's order: MDL off, InfoSchema version 0, `tidb_snapshot`,
+/// stale read, local temporary table, autocommit read-only statement. The statement's
+/// related tables are recorded in every case (Go's `defer`), nothing is registered.
+#[test]
+fn metadata_lock_skips_as_go() {
+    use crate::core::preprocess::try_lock_mdl_and_update_schema_if_necessary as lock;
+    let db = CIStr::new("test");
+    let t = Arc::new(mdl_table(1));
+    let is = OneTable(5, Arc::clone(&t));
+    type Setup = fn(&mut SessionVars, &mut tidb_model::TableInfo) -> i64;
+    let cases: Vec<(&str, Setup)> = vec![
+        ("MDL off", |v, _| {
+            v.state.txn_ctx.enable_mdl = false;
+            5
+        }),
+        ("version 0", |_, _| 0),
+        ("tidb_snapshot", |v, _| {
+            v.state.snapshot_infoschema = true;
+            5
+        }),
+        ("stale read", |v, _| {
+            v.state.txn_ctx.is_staleness = true;
+            5
+        }),
+        ("local temporary table", |_, t| {
+            t.temp_table_type = tidb_model::TempTableLocal;
+            5
+        }),
+        ("autocommit read-only", |v, _| {
+            v.stmt_ctx_mut().is_read_only = true;
+            5
+        }),
+    ];
+    for (name, setup) in cases {
+        let mut v = mdl_vars(false, false);
+        let mut ti = mdl_table(1);
+        let ver = setup(&mut v, &mut ti);
+        let ti = Arc::new(ti);
+        let r = lock(
+            &mut v,
+            &db,
+            Arc::clone(&ti),
+            &OneTable(ver, Arc::clone(&ti)),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&r, &ti), "{name}");
+        assert_eq!(mdl_map(&v), vec![], "{name}");
+        assert!(v.stmt_ctx().related_table_ids.contains(&10), "{name}");
+    }
+    // A global temporary table (Go: skipLock, SessionExtendedInfoSchema.MdlTables).
+    let mut v = mdl_vars(false, false);
+    let mut g = mdl_table(1);
+    g.temp_table_type = tidb_model::TempTableGlobal;
+    let e = lock(&mut v, &db, Arc::new(g), &is, Some(&is)).unwrap_err();
+    assert_eq!(blocked_by(&e), Some("D06.3"));
+    assert_eq!(mdl_map(&v), vec![]);
+}
+
+/// A statement that is not an autocommit read (PREPARE's fresh statement context, a
+/// statement of an explicit transaction) registers the table at the domain's version; a
+/// table already registered is not looked up again. Without the session's domain the
+/// statement stops at a boundary stub and the 0 written first is deleted (Go's `defer`).
+#[test]
+fn metadata_lock_registers_at_the_domain_version() {
+    use crate::core::preprocess::try_lock_mdl_and_update_schema_if_necessary as lock;
+    let db = CIStr::new("test");
+    let t = Arc::new(mdl_table(1));
+    let is = OneTable(5, Arc::clone(&t));
+    for (read_only, in_txn) in [(false, false), (true, true), (false, true)] {
+        let mut v = mdl_vars(read_only, in_txn);
+        let r = lock(&mut v, &db, Arc::clone(&t), &is, Some(&is)).unwrap();
+        assert!(Arc::ptr_eq(&r, &t));
+        assert_eq!(mdl_map(&v), vec![(10, 5)]);
+        // Registered already: kept as it is, even if the domain moved on.
+        let newer = OneTable(6, Arc::new(mdl_table(2)));
+        lock(&mut v, &db, Arc::clone(&t), &is, Some(&newer)).unwrap();
+        assert_eq!(mdl_map(&v), vec![(10, 5)]);
+    }
+    // No domain: blocked, and the placeholder 0 is removed again.
+    let mut v = mdl_vars(false, false);
+    let e = lock(&mut v, &db, Arc::clone(&t), &is, None).unwrap_err();
+    assert_eq!(blocked_by(&e), Some("D06.5"));
+    assert_eq!(mdl_map(&v), vec![]);
+    // The domain has a newer definition of the table than the transaction's InfoSchema:
+    // the session-extended InfoSchema that would carry it is not ported (blocked).
+    let mut n = mdl_table(1);
+    n.update_ts = 9;
+    let newer = OneTable(6, Arc::new(n));
+    let e = lock(&mut v, &db, Arc::clone(&t), &is, Some(&newer)).unwrap_err();
+    assert_eq!(blocked_by(&e), Some("D06.3"));
+    assert_eq!(mdl_map(&v), vec![]);
+    // A table that is not public: ErrTableNotExists with the database and table names.
+    let mut np = mdl_table(1);
+    np.state = tidb_model::StateWriteOnly;
+    let np = Arc::new(np);
+    let mut v = mdl_vars(false, false);
+    let d = OneTable(5, Arc::clone(&np));
+    let e = lock(&mut v, &db, Arc::clone(&np), &d, Some(&d)).unwrap_err();
+    assert_eq!(e.code(), 1146, "{e}");
+    assert_eq!(e.to_string(), "[schema:1146]Table 'test.t' doesn't exist");
+    assert_eq!(mdl_map(&v), vec![]);
+    assert!(!v.stmt_ctx().related_table_ids.contains(&10));
+}
+
+/// The table-change check: an index that became public after the transaction's InfoSchema
+/// is hidden in a copy (the shared definition keeps its state), a changed public column ID
+/// is 8028 with Go's text.
+#[test]
+fn metadata_lock_table_change_check() {
+    use crate::core::preprocess::check_table_change;
+    let old = mdl_table(1);
+    let mut new = mdl_table(2);
+    new.indices
+        .as_mut()
+        .unwrap()
+        .push(Arc::new(tidb_model::IndexInfo {
+            id: 2,
+            name: CIStr::new("ib"),
+            state: tidb_model::StatePublic,
+            ..Default::default()
+        }));
+    let new = Arc::new(new);
+    let r = check_table_change(&old, Arc::clone(&new)).unwrap();
+    assert!(!Arc::ptr_eq(&r, &new));
+    let states: Vec<_> = r
+        .indices
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|i| i.state)
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            tidb_model::StatePublic,
+            tidb_model::StateWriteReorganization
+        ]
+    );
+    assert_eq!(
+        new.indices.as_ref().unwrap()[1].state,
+        tidb_model::StatePublic
+    );
+    // Nothing new: the same table.
+    let same = Arc::new(mdl_table(2));
+    assert!(Arc::ptr_eq(
+        &check_table_change(&old, Arc::clone(&same)).unwrap(),
+        &same
+    ));
+    // A public column with another ID.
+    let mut changed = mdl_table(2);
+    Arc::make_mut(&mut changed.columns.as_mut().unwrap()[1]).id = 3;
+    let e = check_table_change(&old, Arc::new(changed)).unwrap_err();
+    assert_eq!(e.code(), 8028);
+    assert_eq!(e.to_string(), "[domain:8028]public column b has changed");
 }
