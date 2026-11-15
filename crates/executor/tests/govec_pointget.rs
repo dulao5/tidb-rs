@@ -7,7 +7,7 @@
 //! Each record is replayed twice: through `new_row_decoder` / `decode_row_val_to_chunk`
 //! (compared as JSON with Go's output), and, when Go decodes it without error and the
 //! schema has no virtual column, through the whole point get executor (built from the
-//! plan carrier over a snapshot holding the row) whose row must be the same.
+//! planner's `PointGetPlan` over a snapshot holding the row) whose row must be the same.
 //!
 //! The record keys of a point get are not repeated in `pointget`: the `tablecodec` domain's
 //! `keys` records (`EncodeRowKeyWithHandle`, `rowh`) are replayed through the executor here,
@@ -33,7 +33,7 @@ use tidb_chunk::chunk::new_chunk_with_capacity;
 use tidb_executor::adapter::TelemetryInfo;
 use tidb_executor::builder::{new_executor_builder, new_row_decoder};
 use tidb_executor::exec::ExecCtx;
-use tidb_executor::glue::{InfoSchemaRef, Plan, PointGetPlan, SessionContext};
+use tidb_executor::glue::{InfoSchemaRef, Plan, SessionContext};
 use tidb_executor::internal::exec::executor as exec;
 use tidb_executor::point_get::{decode_row_val_to_chunk, fill_row_checksum};
 use tidb_expression::Column;
@@ -49,6 +49,8 @@ use tidb_kv::kv::{
 };
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_model::{ExtraHandleID, ExtraRowChecksumID, TableInfo};
+use tidb_planner::PhysicalPlan;
+use tidb_planner::core::point_get_plan::PointGetPlan;
 use tidb_sessionctx::errctx::{Level, LevelMap};
 use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_sessionctx::exprstatic as es;
@@ -527,14 +529,14 @@ fn executor_replay(a: &[Value], want: &[Datum]) -> Option<String> {
     snap.data.insert(key.0.clone(), val.clone());
     let snap = Arc::new(snap);
     let mut s = session(ctx, Some(loc), Arc::clone(&snap));
-    let plan = PointGetPlan {
-        id: 1,
+    let mut plan = PointGetPlan {
         schema,
         tbl_info: Arc::clone(&tbl),
         handle: Some(h),
         columns: tbl.columns.clone().unwrap_or_default(),
         ..PointGetPlan::default()
     };
+    plan.set_id(1);
     let got = match catch_unwind(AssertUnwindSafe(|| run_point_get(&mut s, plan))) {
         Ok(Ok(rows)) => rows,
         Ok(Err(e)) => return Some(format!("executor: {e}")),
@@ -715,8 +717,7 @@ fn govec_tablecodec_record_keys_through_the_point_get() {
         });
         let snap = Arc::new(MemSnapshot::default());
         let mut s = session(es::new_expr_context(Vec::new()), None, Arc::clone(&snap));
-        let plan = PointGetPlan {
-            id: 1,
+        let mut plan = PointGetPlan {
             schema: new_schema(vec![Arc::new(Column {
                 ret_type: Arc::new(new_field_type(TypeLonglong)),
                 id: ExtraHandleID as i64,
@@ -726,6 +727,7 @@ fn govec_tablecodec_record_keys_through_the_point_get() {
             handle: Some(h),
             ..PointGetPlan::default()
         };
+        plan.set_id(1);
         match run_point_get(&mut s, plan) {
             Ok(rows) if rows.is_empty() => {}
             other => fails.push(format!("{line}\n    {other:?}")),

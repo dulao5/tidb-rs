@@ -5,8 +5,9 @@
 //! until they are ported (VS1 plan §5: the non-fast path returns `Blocked` before Phase 2):
 //!
 //! - `Optimize`: hint extraction and the hint / binding handling first (D13.3 / D13.2), the
-//!   fast plan (`TryFastPlan`, D10.8, VS1-11), the plan cache (D13.1, VS1-15), then
-//!   `optimize`;
+//!   fast plan (`TryFastPlan`, D10.8, VS1-11: `core::point_get_plan::try_fast_plan`; Go tries
+//!   it only when `tidb_isolation_read_engines` holds TiKV, optimize.go:244, a check of this
+//!   driver, not of `TryFastPlan`), the plan cache (D13.1, VS1-15), then `optimize`;
 //! - `optimize` / `buildLogicalPlan`: `PlanBuilder.Build` (D09.1, VS1-21) and `DoOptimize`
 //!   (D09.13 core part, VS1-24);
 //! - `OptimizeExecStmt`: the prepared statement path (D13.1, VS1-15).

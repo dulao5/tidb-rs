@@ -106,6 +106,9 @@ VS1-10	D09.13	pkg/planner/optimize.go	optimize	138
 VS1-10	D09.13	pkg/planner/optimize.go	restoreLogicalPlanBuildCtx	7	
 VS1-10	D09.13	pkg/planner/optimize.go	saveLogicalPlanBuildCtx	9	
 VS1-10	D09.13	pkg/planner/optimize.go	setVarHintChecker	10	
+VS1-11	D00.3	pkg/util/logutil/consistency/reporter.go	Reporter.ReportLookupInconsistent	26	
+VS1-11	D09.0	pkg/planner/core/util.go	EncodeUniqueIndexKey	7	
+VS1-11	D09.0	pkg/planner/core/util.go	EncodeUniqueIndexValuesForKey	45	
 VS1-11	D10.8	pkg/planner/core/point_get_plan.go	PointGetPlan.AppendChildCandidate	1	
 VS1-11	D10.8	pkg/planner/core/point_get_plan.go	PointGetPlan.Attach2Task	3	
 VS1-11	D10.8	pkg/planner/core/point_get_plan.go	PointGetPlan.Children	3	

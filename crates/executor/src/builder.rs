@@ -40,9 +40,10 @@ use tidb_types::field_type::new_field_type;
 use tikv_client::proto::metapb;
 
 use crate::adapter::TelemetryInfo;
-use crate::glue::{InfoSchemaRef, Plan, PointGetPlan, SessionContext};
+use crate::glue::{InfoSchemaRef, Plan, SessionContext};
 use crate::internal::exec::executor::Executor;
 use crate::internal::exec::indexusage::IndexUsageReporter;
+use tidb_planner::core::point_get_plan::PointGetPlan;
 
 /// `placement.DCLabelKey` (`pkg/ddl/placement/common.go`): the store label of a zone.
 const DCLabelKey: &str = "zone";
@@ -123,9 +124,12 @@ impl ExecutorBuilder {
             return Some(mp.get_executor());
         }
         if v.kind() == PhysicalKind::PointGet {
-            // b.buildPointGet(v). The plan is the glue carrier until VS1-11 (glue::PointGetPlan).
+            // b.buildPointGet(v): `case *plannercore.PointGetPlan`.
             let Some(pg) = v.as_any().downcast_ref::<PointGetPlan>() else {
-                self.err = Some(blocked("D10.8", "the point get plan (VS1-11)"));
+                // A plan whose kind is PointGet is a PointGetPlan (only a test mock is not).
+                self.err = Some(Error::plain(
+                    "a PointGet plan that is not a *core.PointGetPlan".to_owned(),
+                ));
                 return None;
             };
             return self.build_point_get(sctx, pg).await;
@@ -524,8 +528,6 @@ mod tests {
         assert!(b.build(&mut s, None).await.is_none());
         assert!(b.err.is_none());
         for (kind, block) in [
-            // Not the point get carrier (glue::PointGetPlan): the plan is VS1-11's.
-            (PhysicalKind::PointGet, "D10.8"),
             (PhysicalKind::TableReader, "D12.1"),
             (PhysicalKind::Selection, "D12.2"),
             (PhysicalKind::TopN, "D12.5"),
