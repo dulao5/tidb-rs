@@ -3930,6 +3930,7 @@ version = "0.0.0"
 dependencies = [
  "codec",
  "futures",
+ "parking_lot 0.12.5",
  "poc-kv",
  "serde",
  "serde_json",
@@ -3991,6 +3992,7 @@ dependencies = [
  "flate2",
  "log",
  "lrtable",
+ "parking_lot 0.12.5",
  "serde_json",
  "tidb-base",
 ]
