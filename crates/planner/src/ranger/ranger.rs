@@ -938,7 +938,7 @@ pub(crate) fn new_function_internal_or_blocked(
     args: Vec<ExprRef>,
 ) -> Result<Option<ExprRef>, Error> {
     if tidb_expression::builtin_registry::function_class(func_name).is_none() {
-        // The IN function class is D08.9 (blocked-by:D08.9).
+        // glue: boundary of NewFunctionInternal(in) (another block), blocked-by:D08.9 (the IN function class)
         return Err(tidb_base::blocked::blocked(
             "D08.9",
             &format!("expression.NewFunctionInternal({func_name})"),
