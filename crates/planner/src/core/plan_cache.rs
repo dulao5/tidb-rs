@@ -27,7 +27,7 @@ use crate::PhysicalPlanRef;
 use crate::core::plan_cache_utils::{InfoSchemaLookup, PlanCacheStmt, new_plan_cache_key};
 use crate::core::plan_cacheable_checker::is_plan_cacheable;
 use crate::core::preprocess::{
-    PreprocessOpt, PreprocessorReturn, in_prepare, preprocess,
+    InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, in_prepare, preprocess,
     try_lock_mdl_and_update_schema_if_necessary, with_preprocessor_return,
 };
 use crate::core::resolve::{NodeW, new_node_w, new_node_w_with_ctx};
@@ -143,7 +143,7 @@ pub fn plan_cache_preprocess(
         // We should reset the tableRefs in the prepared update statements, otherwise, the ast nodes still hold the old
         // tableRefs columnInfo which will cause chaos in logic of trying point get plan. (should ban non-public column)
         let ret = PreprocessorReturn {
-            has_info_schema: true,
+            info_schema: Some(InfoSchemaHandle(is.snapshot())),
             ..Default::default()
         };
         let mut node_w = new_node_w(&mut stmt.prepared_ast.stmt);

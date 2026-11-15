@@ -1,0 +1,34 @@
+[package]
+name = "tidb-domain"
+version = "0.0.0"
+description = "Block D06.5 of the Go TiDB v8.5.8 port: pkg/domain, schema loading (loadInfoSchema, tryLoadSchemaDiffs, Reload); the rest of the domain later"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), config (TreatOldVersionUTF8AsUTF8MB4).
+tidb-base = { workspace = true }
+# kv.Storage / Snapshot / Version, the read-timeout option (D07.0).
+tidb-kv = { workspace = true }
+# DBInfo / SchemaDiff / ActionType (D06.1).
+tidb-model = { workspace = true }
+# meta.Reader, the InfoSchema v2 builder and InfoCache (D06.2, D06.3).
+tidb-infoschema = { workspace = true }
+# tidb_schema_cache_size, tidb_schema_version_cache_limit.
+tidb-sessionctx = { workspace = true }
+# Domain.m (Reload runs once at a time, held across the loads' awaits).
+tokio = { workspace = true, features = ["sync"] }
+# The concurrent fetch of schema groups (errgroup).
+futures = { workspace = true }
+log = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+parking_lot = "0.12"
+# CIStr / FieldType of the test tables.
+tidb-parser = { workspace = true }
+
+[lints]
+workspace = true

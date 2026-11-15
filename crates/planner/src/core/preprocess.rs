@@ -13,10 +13,11 @@
 //! - `p.sctx` is the session's `&mut SessionVars` (`M-CTX`). `sctx.GetPlanCtx()
 //!   .SetReadonlyUserVarMap` has no plan context to go to before the session (VS1-14): the
 //!   read-only variables are returned in `PreprocessorReturn::readonly_user_vars`.
-//! - `PreprocessorReturn.InfoSchema` and `table.Table` come with the `InfoSchema` interface
-//!   of D06.3 part 2 (VS1-17): resolving a base table is `blocked-by:D06.3` until then,
-//!   and a missing InfoSchema (`sessiontxn.GetTxnManager(...).GetTxnInfoSchema()`) is
-//!   `blocked-by:D05.4`. The stale-read processor (`staleread`, D05.4) and the MDL lock
+//! - `PreprocessorReturn.InfoSchema` is the narrow [`InfoSchemaLookup`] of the plan cache
+//!   (a shared value, [`InfoSchemaHandle`]); `TableByName` gives the table's meta (Go's
+//!   `table.Table.Meta()`). The lookup is synchronous: the session loads the statement's
+//!   tables into the InfoSchema's table cache before planning (D06.3 spec §11.2). A missing
+//!   InfoSchema (`sessiontxn.GetTxnManager(...).GetTxnInfoSchema()`) is `blocked-by:D05.4`. The stale-read processor (`staleread`, D05.4) and the MDL lock
 //!   (`tryLockMDLAndUpdateSchemaIfNecessary`, D05.4 / D06.5) are boundary stubs too.
 //! - The AST's `WithClause` is shared (`Arc`, as Go shares the `*WithClause`) and has no
 //!   `ConsumerCount`: the counts `UpdateCTEConsumerCount` keeps are a side table keyed by the
@@ -48,6 +49,7 @@ use tidb_sessionctx::variable::varsutil::{OffInt, OnInt};
 use tidb_types::errors::{ErrMBiggerThanD, ErrTooBigPrecision, ErrTooBigScale};
 use tidb_types::fsp::MaxFsp;
 
+use super::plan_cache_utils::InfoSchemaLookup;
 use super::resolve::{ContextRef, NodeW};
 
 /// `parser.ErrSyntax` (`pkg/parser/yy_parser.go`: `terror.ClassParser.NewStd(mysql.ErrSyntax)`).
@@ -153,7 +155,7 @@ pub fn preprocess(
     }
     Walker(&mut v).stmt(node.node);
     // InfoSchema must be non-nil after preprocessing
-    if let Err(e) = v.ensure_info_schema()
+    if let Err(e) = v.ensure_info_schema().map(drop)
         && v.err.is_none()
     {
         v.err = Some(e);
@@ -192,10 +194,21 @@ const IN_IMPORT_INTO: PreprocessorFlag = 1 << 7;
 /// inAnalyze is set when visiting an analyze statement.
 const IN_ANALYZE: PreprocessorFlag = 1 << 8;
 
+/// An InfoSchema handed around by value (Go's `infoschema.InfoSchema` interface value).
+#[derive(Clone)]
+pub struct InfoSchemaHandle(pub Arc<dyn InfoSchemaLookup>);
+
+impl std::fmt::Debug for InfoSchemaHandle {
+    // glue: Debug of the interface value
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "InfoSchema(v{})", self.0.schema_meta_version())
+    }
+}
+
 /// PreprocessorReturn is used to retain information obtained in the preprocessor.
 ///
-/// `InfoSchema` and `SnapshotTSEvaluator` come with D06.3 part 2 / D05.4 (see the module
-/// doc); `readonly_user_vars` is what Go hands to `SetReadonlyUserVarMap`.
+/// `SnapshotTSEvaluator` comes with D05.4 (see the module doc); `readonly_user_vars` is what
+/// Go hands to `SetReadonlyUserVarMap`.
 #[derive(Clone, Debug, Default)]
 pub struct PreprocessorReturn {
     /// initedLastSnapshotTS.
@@ -205,8 +218,8 @@ pub struct PreprocessorReturn {
     /// LastSnapshotTS is the last evaluated snapshotTS if any
     /// otherwise it defaults to zero
     pub last_snapshot_ts: u64,
-    /// Whether an InfoSchema was provided (Go: `InfoSchema != nil`).
-    pub has_info_schema: bool,
+    /// InfoSchema.
+    pub info_schema: Option<InfoSchemaHandle>,
     /// The read-only user variables (Go: `sctx.GetPlanCtx().SetReadonlyUserVarMap`).
     pub readonly_user_vars: HashSet<String>,
 }
@@ -630,23 +643,32 @@ impl Preprocessor<'_> {
             }
         }
 
-        if let Err(err) = self.table_by_name(tn) {
-            self.err = Some(err);
-            return;
-        }
+        let table = match self.table_by_name(tn) {
+            Ok(t) => t,
+            Err(err) => {
+                self.err = Some(err);
+                return;
+            }
+        };
         if !self.skip_lock_mdl()
             && let Err(err) = try_lock_mdl_and_update_schema_if_necessary()
         {
             self.err = Some(err);
             return;
         }
-        // SchemaByTable, the sequence check (inSequenceFunction) and resolveCtx.AddTableName
-        // follow once tableByName returns a table (D06.3, VS1-17).
-        let _ = (&self.resolve_ctx, IN_SEQUENCE_FUNCTION);
+        // tableInfo := table.Meta(); infoschema.SchemaByTable, the sequence check
+        // (inSequenceFunction) and resolveCtx.AddTableName follow the metadata lock above,
+        // a boundary stub (D05.4) that always returns first.
+        let _ = (table, &self.resolve_ctx, IN_SEQUENCE_FUNCTION);
     }
 
-    // go: preprocessor.tableByName L1
-    fn table_by_name(&mut self, tn: &TableName) -> Result<(), Error> {
+    /// The table's meta (Go returns the `table.Table`; the callers here use its `Meta()`).
+    ///
+    /// When the lookup fails, Go checks the user's privileges on the table first so that it
+    /// never tells a user without them whether the table exists. The privilege manager is
+    /// D04.1: a failed lookup is a boundary stub until then (the PoC answers).
+    // go: preprocessor.tableByName L2 (the privilege check of a failed lookup: blocked-by:D04.1)
+    fn table_by_name(&mut self, tn: &TableName) -> Result<Arc<tidb_model::TableInfo>, Error> {
         let mut current_db = self.vars.current_db.clone();
         if !tn.schema.o.is_empty() {
             current_db = tn.schema.l();
@@ -654,12 +676,24 @@ impl Preprocessor<'_> {
         if current_db.is_empty() {
             return Err(ErrNoDB.clone());
         }
-        self.ensure_info_schema()?;
-        // is.TableByName(...) and the privilege check of a missing table need the InfoSchema
-        // interface (D06.3 part 2, VS1-17) and the privilege manager (D04.1).
-        // glue: blocked-by:D06.3 (VS1-17: InfoSchema.TableByName)
-        let _ = self.stmt_type();
-        Err(blocked("D06.3", "InfoSchema.TableByName"))
+        let s_name = tidb_parser::model::CIStr::new(&current_db);
+        let is = self.ensure_info_schema()?;
+        match is.table_by_name(&s_name, &tidb_parser::model::CIStr::new(&tn.name.o)) {
+            Ok(tbl) => Ok(tbl),
+            Err(err) => {
+                if tidb_base::blocked::blocked_by(&err).is_some() {
+                    return Err(err);
+                }
+                // privilege.GetPrivilegeManager(p.sctx).RequestVerification(...) →
+                // ErrTableaccessDenied.GenWithStackByArgs(p.stmtType(), u, h, tn.Name.O)
+                let _ = self.stmt_type();
+                // glue: blocked-by:D04.1 (the privilege check of a failed table lookup)
+                Err(blocked(
+                    "D04.1",
+                    "the privilege check of a table that is not found",
+                ))
+            }
+        }
     }
 
     // go: preprocessor.checkFuncCastExpr L1
@@ -714,9 +748,9 @@ impl Preprocessor<'_> {
     }
 
     // go: preprocessor.ensureInfoSchema L1
-    fn ensure_info_schema(&mut self) -> Result<(), Error> {
-        if self.ret.as_ref().is_some_and(|r| r.has_info_schema) {
-            return Ok(());
+    fn ensure_info_schema(&mut self) -> Result<Arc<dyn InfoSchemaLookup>, Error> {
+        if let Some(is) = self.ret.as_ref().and_then(|r| r.info_schema.as_ref()) {
+            return Ok(Arc::clone(&is.0));
         }
         // sessiontxn.GetTxnManager(p.sctx).GetTxnInfoSchema() (D05.4, VS1-14).
         // glue: blocked-by:D05.4 (sessiontxn GetTxnInfoSchema)

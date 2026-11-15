@@ -1328,6 +1328,86 @@ impl InfoSchemaV2 {
         Ok(ret)
     }
 
+    /// The part of [`Self::table_by_name`] that reads no TiKV, for the synchronous planner
+    /// (spec §11.2): the same index search and cache lookup, `Ok(None)` where `TableByName`
+    /// would load the table from TiKV (the session loads it with `table_by_name` before
+    /// planning). Errors are `TableByName`'s.
+    // glue: the in-memory part of infoschemaV2.TableByName (spec §11.2)
+    pub fn table_by_name_resident(
+        &self,
+        schema: &CIStr,
+        tbl: &CIStr,
+    ) -> Result<Option<TableRef>, Error> {
+        if is_special_db(&schema.l) {
+            if let Some(tb_names) = self.data.specials.read().get(&schema.l)
+                && let Some(t) = tb_names.tables.get(&tbl.l)
+            {
+                return Ok(Some(Arc::clone(t)));
+            }
+            return Err(ErrTableNotExists.fast_gen_by_args(vec![cistr_arg(schema), cistr_arg(tbl)]));
+        }
+        self.keep_alive();
+        let mut h = TableByNameHelper {
+            end: TableItem {
+                db_name: schema.clone(),
+                db_id: 0,
+                table_name: tbl.clone(),
+                table_id: 0,
+                schema_version: i64::MAX,
+                tomb: false,
+            },
+            schema_version: self.schema_meta_version(),
+            found: false,
+            res: None,
+        };
+        {
+            let bt = self.data.by_name.read();
+            for item in bt.range(..=by_name_key(&h.end)).rev().map(|(_, v)| v) {
+                if !h.on_item(item) {
+                    break;
+                }
+            }
+        }
+        if !h.found {
+            return Err(ErrTableNotExists.fast_gen_by_args(vec![cistr_arg(schema), cistr_arg(tbl)]));
+        }
+        let itm = h.res.expect("found");
+        Ok(self.data.table_cache.get(&TableCacheKey {
+            table_id: itm.table_id,
+            schema_version: itm.schema_version,
+        }))
+    }
+
+    /// The part of [`Self::table_by_id`] that reads no TiKV (see
+    /// [`Self::table_by_name_resident`]): `Ok(None)` if there is no such table, `Err(())`
+    /// where `TableByID` would load the table from TiKV.
+    // glue: the in-memory part of infoschemaV2.TableByID (spec §11.2)
+    #[allow(clippy::result_unit_err)]
+    pub fn table_by_id_resident(&self, id: i64) -> Result<Option<TableRef>, ()> {
+        if !table_id_is_valid(id) {
+            return Ok(None);
+        }
+        self.keep_alive();
+        let (itm, ok) = self.search_table_item_by_id(id);
+        if !ok {
+            return Ok(None);
+        }
+        let itm = itm.expect("found");
+        if autoid::is_mem_schema_id(id) {
+            if let Some(sch_tbls) = self.data.specials.read().get(&itm.db_name.l) {
+                return Ok(sch_tbls.tables.get(&itm.table_name.l).cloned());
+            }
+            return Ok(None);
+        }
+        match self.data.table_cache.get(&TableCacheKey {
+            table_id: itm.table_id,
+            schema_version: itm.schema_version,
+        }) {
+            Some(t) => Ok(Some(t)),
+            None => Err(()),
+        }
+    }
+
     /// TableInfoByName implements InfoSchema.TableInfoByName
     // go: infoschemaV2.TableInfoByName L1
     pub async fn table_info_by_name(

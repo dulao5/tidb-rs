@@ -4,13 +4,15 @@
 //! The session runs `ExecuteStmt` (VS1-14 part 1), whose planner is still a boundary stub,
 //! so every statement falls back (or, in `strict` mode, reports 1235). Prepared statements
 //! go through the session's `PrepareStmt` and the prepare executor (prepared-statement
-//! planning, VS1-15), which stop in the preprocessor at the InfoSchema interface (a table:
-//! D06.3, VS1-17) or at the plan builder (D09.1, VS1-21). The pieces that turn a successful
-//! result into a response are stubs of their own until their work items land:
+//! planning, VS1-15), which stop in the preprocessor at the metadata lock of a table
+//! (`tryLockMDLAndUpdateSchemaIfNecessary`, D05.4) or at the plan builder (D09.1, VS1-21).
+//! The session's InfoSchema is the ported domain's (D06.5 part 1), which the PoC domain's
+//! sync loop reloads at the PoC's own reload timestamps (VS1 plan §4.1). The pieces that
+//! turn a successful result into a response are stubs of their own until their work items
+//! land:
 //!
 //! - TODO(VS1-16): result sets and column definitions (`writeResultSet`, `column` / `dump`,
-//!   D03.1) and binary parameters (`parseBinaryParams`, D03.1);
-//! - TODO(VS1-17): the new stack's InfoSchema, loaded from the same schema diffs as the PoC's.
+//!   D03.1) and binary parameters (`parseBinaryParams`, D03.1).
 
 use std::sync::Arc;
 
@@ -57,20 +59,23 @@ impl GlobalVarAccessor for DefaultGlobals {
 /// The ported stack of one connection.
 pub struct NewSession {
     session: Session,
+    /// The ported domain the InfoSchema comes from (`None` without schema sync).
+    domain: Option<Arc<tidb_domain::Domain>>,
 }
 
 impl NewSession {
     /// A new session in the MySQL dialect (the only protocol and front end, ADR 0010).
-    pub fn new() -> NewSession {
+    pub fn new(domain: Option<Arc<tidb_domain::Domain>>) -> NewSession {
         NewSession {
             session: Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
+            domain,
         }
     }
 }
 
 impl Default for NewSession {
     fn default() -> Self {
-        NewSession::new()
+        NewSession::new(None)
     }
 }
 
@@ -84,7 +89,19 @@ impl NewStack for NewSession {
     }
 
     fn info_schema_version(&self) -> Option<i64> {
-        None
+        self.domain.as_ref()?;
+        Some(
+            self.session
+                .sctx()
+                .get_domain_info_schema()
+                .schema_meta_version(),
+        )
+    }
+
+    fn refresh_info_schema(&mut self) {
+        if let Some(is) = self.domain.as_ref().and_then(|d| d.info_schema()) {
+            self.session.set_domain_info_schema(is);
+        }
     }
 
     fn execute<'a>(

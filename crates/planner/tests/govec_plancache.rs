@@ -83,6 +83,9 @@ impl InfoSchemaLookup for MockIs {
     fn schema_meta_version(&self) -> i64 {
         0
     }
+    fn snapshot(&self) -> Arc<dyn InfoSchemaLookup> {
+        Arc::new(MockIs(self.0.clone()))
+    }
 }
 
 enum Outcome {

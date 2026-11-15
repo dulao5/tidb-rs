@@ -150,6 +150,10 @@ pub trait NewStack: Send {
     fn session_mut(&mut self) -> &mut tidb_session::Session;
     /// The version of the InfoSchema the new stack would plan with, `None` while it has none.
     fn info_schema_version(&self) -> Option<i64>;
+    /// A command starts: take the domain's newest InfoSchema. The version compared in step 0
+    /// is then the one the statement plans with (§4.1: compared once, fixed for the
+    /// statement).
+    fn refresh_info_schema(&mut self) {}
     /// `COM_QUERY`.
     fn execute<'a>(
         &'a mut self,
@@ -397,8 +401,9 @@ impl Router {
     }
 
     /// Step 0: the InfoSchema versions are equal. The new stack gets its InfoSchema from
-    /// the PoC domain's sync loop (VS1-17); until then it has none and its planner returns
-    /// `Blocked`, so the check passes.
+    /// the ported domain that the PoC domain's sync loop reloads (§4.1); a session without
+    /// a domain (no schema sync) has none, and its planner returns `Blocked`, so the check
+    /// passes.
     fn schema_versions_equal(&self, poc: &dyn PocEngine) -> bool {
         match self.new.info_schema_version() {
             None => true,
@@ -578,6 +583,7 @@ impl Router {
         poc: &mut dyn PocEngine,
         sql: &str,
     ) -> Result<Response, SqlError> {
+        self.new.refresh_info_schema();
         let r = self.query_inner(poc, sql).await;
         self.end_of_command(poc);
         r
@@ -662,6 +668,7 @@ impl Router {
         stmt_id: u32,
         sql: &str,
     ) -> Result<PreparedInfo, SqlError> {
+        self.new.refresh_info_schema();
         let r = self.prepare_inner(poc, stmt_id, sql).await;
         self.stmt_ended = true;
         self.end_of_command(poc);
@@ -730,6 +737,7 @@ impl Router {
         stmt_id: u32,
         params: Vec<Param>,
     ) -> Result<Response, SqlError> {
+        self.new.refresh_info_schema();
         let r = self.execute_inner(poc, stmt_id, params).await;
         self.end_of_command(poc);
         r

@@ -14,8 +14,10 @@
 //!   into them (`param.Datum = val`). The Rust markers are not written: the values go to
 //!   `SessionVars.PlanCacheParams` only, by the marker's order, which is where the expression
 //!   rewriter reads them (D09.2). `params` keeps the markers' offsets in order.
-//! - `infoschema.InfoSchema` is the narrow [`InfoSchemaLookup`]: the InfoSchema interface of
-//!   D06.3 part 2 is VS1-17.
+//! - `infoschema.InfoSchema` is the narrow [`InfoSchemaLookup`] (the full `InfoSchema`
+//!   interface is D06.3 part 2, task T9). Its table lookups are synchronous and read no
+//!   TiKV: a table not in the InfoSchema's table cache is a boundary stub, and the session
+//!   loads the statement's tables before planning (D06.3 spec §11.2).
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -34,7 +36,8 @@ use crate::PhysicalPlanRef;
 use crate::core::plan_cacheable_checker::{CNode, Visit, Walker, is_ast_cacheable};
 use crate::core::planbuilder::new_plan_builder;
 use crate::core::preprocess::{
-    PreprocessOpt, PreprocessorReturn, in_prepare, preprocess, with_preprocessor_return,
+    InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, in_prepare, preprocess,
+    with_preprocessor_return,
 };
 use crate::core::resolve::{ContextRef, new_node_w};
 use crate::util::fixcontrol;
@@ -53,18 +56,38 @@ pub trait InfoSchemaLookup: Send + Sync {
     /// `SchemaMetaVersion()`.
     // glue: interface method infoschema.InfoSchema.SchemaMetaVersion
     fn schema_meta_version(&self) -> i64;
+    /// The InfoSchema as a shared value (Go copies the interface value into
+    /// `PreprocessorReturn.InfoSchema`).
+    // glue: Go interface value copy
+    fn snapshot(&self) -> Arc<dyn InfoSchemaLookup>;
 }
 
-/// The new session's InfoSchema: its table lookups are the InfoSchema interface of D06.3
-/// part 2 (VS1-17), as in the preprocessor.
+/// The error of a table that is in the InfoSchema but not in its table cache: loading it
+/// reads TiKV, which the synchronous planner does not do (D06.3 spec §11.2).
+// glue: the cache miss of a synchronous table lookup
+fn not_resident() -> Error {
+    // glue: blocked-by:D06.3 (a table the session did not load before planning)
+    blocked(
+        "D06.3",
+        "a table not loaded into the InfoSchema cache before planning",
+    )
+}
+
+/// The new session's InfoSchema (D06.3): the lookups without TiKV reads (see the module doc).
 impl InfoSchemaLookup for InfoSchemaV2 {
-    // glue: stub of infoschemaV2.TableByName for the plan cache, blocked-by:D06.3 (VS1-17: the InfoSchema interface)
-    fn table_by_name(&self, _: &CIStr, _: &CIStr) -> Result<Arc<TableInfo>, Error> {
-        Err(blocked("D06.3", "InfoSchema.TableByName"))
+    // glue: interface method infoschema.InfoSchema.TableByName (infoschemaV2.TableByName without the TiKV load)
+    fn table_by_name(&self, schema: &CIStr, table: &CIStr) -> Result<Arc<TableInfo>, Error> {
+        match self.table_by_name_resident(schema, table)? {
+            Some(t) => Ok(Arc::clone(t.meta())),
+            None => Err(not_resident()),
+        }
     }
-    // glue: stub of infoschemaV2.TableByID for the plan cache, blocked-by:D06.3 (VS1-17: the InfoSchema interface)
-    fn table_by_id(&self, _: i64) -> Result<Option<Arc<TableInfo>>, Error> {
-        Err(blocked("D06.3", "InfoSchema.TableByID"))
+    // glue: interface method infoschema.InfoSchema.TableByID (infoschemaV2.TableByID without the TiKV load)
+    fn table_by_id(&self, id: i64) -> Result<Option<Arc<TableInfo>>, Error> {
+        match self.table_by_id_resident(id) {
+            Ok(t) => Ok(t.map(|t| Arc::clone(t.meta()))),
+            Err(()) => Err(not_resident()),
+        }
     }
     // glue: interface method infoschema.InfoSchema.SchemaByID
     fn schema_name_by_id(&self, id: i64) -> Option<CIStr> {
@@ -73,6 +96,10 @@ impl InfoSchemaLookup for InfoSchemaV2 {
     // glue: interface method infoschema.InfoSchema.SchemaMetaVersion
     fn schema_meta_version(&self) -> i64 {
         InfoSchemaV2::schema_meta_version(self)
+    }
+    // glue: Go interface value copy (the version's Arcs are shared, N13)
+    fn snapshot(&self) -> Arc<dyn InfoSchemaLookup> {
+        Arc::new(self.clone())
     }
 }
 
@@ -208,6 +235,38 @@ impl Visit for ParamMarkerExtractor {
     }
 }
 
+/// Collects the table names of a statement (CTE names included: their lookup simply fails).
+#[derive(Default)]
+struct TableNameCollector {
+    names: Vec<(String, String)>,
+}
+
+impl Visit for TableNameCollector {
+    // glue: ast.Visitor (statement_table_names)
+    fn enter(&mut self, n: CNode<'_>) -> bool {
+        if let CNode::TableName(t) = n {
+            self.names.push((t.schema.o.clone(), t.name.o.clone()));
+        }
+        false
+    }
+    // glue: ast.Visitor (statement_table_names)
+    fn leave(&mut self, _: CNode<'_>) -> bool {
+        true
+    }
+    // glue: ast.Visitor (statement_table_names: the rest of the walk is skipped)
+    fn fail(&mut self, _: Error) {}
+}
+
+/// The `(schema, table)` names a statement refers to, the schema empty where the statement
+/// gives none. The session loads these tables into the InfoSchema's table cache before the
+/// synchronous planner looks them up (D06.3 spec §11.2).
+// glue: the tables to load before planning (D06.3 spec §11.2)
+pub fn statement_table_names(stmt: &Stmt) -> Vec<(String, String)> {
+    let mut c = TableNameCollector::default();
+    Walker(&mut c).stmt(stmt);
+    c.names
+}
+
 /// GeneratePlanCacheStmtWithAST generates the PlanCacheStmt structure for this AST.
 /// paramSQL is the corresponding parameterized sql like 'select * from t where a<? and b>?'.
 /// paramStmt is the Node of paramSQL.
@@ -260,7 +319,7 @@ pub fn generate_plan_cache_stmt_with_ast(
 
     let mut stmt = Box::new(param_stmt);
     let ret = PreprocessorReturn {
-        has_info_schema: true,
+        info_schema: Some(InfoSchemaHandle(is.snapshot())),
         ..Default::default()
     };
     let resolve_ctx = {

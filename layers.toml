@@ -145,7 +145,6 @@ blocks = ["D08.3"]
 
 [crate.tidb-domain]
 rank = 12
-planned = true
 blocks = ["D06.5"]
 
 [crate.tidb-planner]

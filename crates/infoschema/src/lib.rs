@@ -15,6 +15,8 @@
 //! - [`infoschema`]: `infoSchemaMisc` and helpers; [`sieve`]: the table cache;
 //! - [`context`]: `pkg/infoschema/context`; [`error`]: the package's errors.
 //!
+//! Block D06.3 part 2: [`cache`] (`InfoCache`, the domain's recent versions).
+//!
 //! Block D06.4 part 1 (specs/D06.4-table): the read path of the table abstraction.
 //! - [`table`]: `pkg/table`, the `Table` / `Index` interfaces, columns and default values;
 //! - [`tables`]: `pkg/table/tables`, `TableCommon`, `TableFromMeta`, raw row decoding;
@@ -33,6 +35,7 @@ pub mod autoid;
 pub mod builder;
 pub mod builder_misc;
 pub mod bundle_builder;
+pub mod cache;
 pub mod context;
 pub mod error;
 pub mod infoschema;
@@ -47,6 +50,7 @@ pub mod tables;
 pub mod util;
 
 pub use builder::{Builder, new_builder};
+pub use cache::{InfoCache, new_cache};
 pub use infoschema_v2::{Data, InfoSchemaV2, new_data};
 
 impl tidb_sessionctx::expropt::MetaOnlyInfoSchema for InfoSchemaV2 {

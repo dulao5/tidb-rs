@@ -25,6 +25,8 @@ tidb-base = { workspace = true }
 tidb-expression = { workspace = true }
 tidb-parser = { workspace = true }
 tidb-session = { workspace = true }
+# The ported domain the new sessions take their InfoSchema from (D06.5 part 1).
+tidb-domain = { workspace = true }
 tidb-sessionctx = { workspace = true }
 
 [dev-dependencies]
@@ -32,6 +34,9 @@ tidb-distsql = { workspace = true }
 # The tidb_rc_read_check_ts error of the new stack (router test, N11 D11).
 tidb-sessiontxn = { workspace = true }
 tokio = { workspace = true }
+# An InfoSchema with sbtest1 for the real new session (router tests).
+tidb-infoschema = { workspace = true }
+tidb-model = { workspace = true }
 
 [lints]
 workspace = true

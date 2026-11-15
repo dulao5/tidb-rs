@@ -94,6 +94,8 @@ struct Inner {
     kv: KvClient,
     etcd: EtcdClient,
     registry: Arc<Registry>,
+    /// The ported domain (D06.5 part 1), reloaded at the timestamp of every reload here.
+    ported: Arc<tidb_domain::Domain>,
     /// Held while registering or deregistering.
     registration: tokio::sync::Mutex<Option<Registration>>,
     wake: Notify,
@@ -125,6 +127,7 @@ impl SchemaSync {
         let (stop, _) = tokio::sync::watch::channel(false);
         let inner = Arc::new(Inner {
             registry: Registry::new(cfg.limits),
+            ported: crate::ported_domain::new_ported_domain(kv.clone()),
             cfg,
             kv,
             etcd,
@@ -143,6 +146,11 @@ impl SchemaSync {
             "schema sync started"
         );
         Ok(SchemaSync { inner })
+    }
+
+    /// The ported domain the new stack's sessions take their InfoSchema from.
+    pub fn ported_domain(&self) -> &Arc<tidb_domain::Domain> {
+        &self.inner.ported
     }
 
     pub fn registry(&self) -> &Arc<Registry> {
@@ -368,6 +376,13 @@ impl Inner {
         }
         self.registry
             .reloaded(ts, requested_at, old_version, full_load);
+        // The ported domain loads the same version at the same timestamp (VS1 plan §4.1): a
+        // diff load from its cached version, or a full load. A failure leaves the new stack
+        // on its older version, so the router sends statements to the PoC (unequal
+        // versions) until a later reload succeeds.
+        if let Err(e) = self.ported.reload_at(ts).await {
+            warn!(error = %e, "reloading the ported domain's InfoSchema failed");
+        }
         Ok(())
     }
 

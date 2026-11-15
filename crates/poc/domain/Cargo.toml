@@ -26,6 +26,9 @@ tokio = { workspace = true }
 tidb-systable = { workspace = true }
 tidb-base = { workspace = true }
 tidb-model = { workspace = true }
+# The ported domain (D06.5 part 1) and the kv.Storage it reads through (ported_domain.rs).
+tidb-domain = { workspace = true }
+tidb-kv = { workspace = true }
 tikv-client = { workspace = true }
 parking_lot = "0.12"
 tracing = "0.1"
@@ -34,7 +37,6 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 # examples/meta_cli.rs (D06.2 mixed-cluster check).
 tidb-infoschema = { workspace = true }
-tidb-kv = { workspace = true }
 # examples/systable_cli.rs (raw).
 tidb-tablecodec = { workspace = true }
 tidb-types = { workspace = true }
