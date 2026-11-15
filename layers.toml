@@ -129,7 +129,6 @@ blocks = ["D14.2", "D15.2"]
 
 [crate.tidb-statistics]
 rank = 10
-planned = true
 blocks = ["D11.1", "D11.2"]
 
 [crate.tidb-store]

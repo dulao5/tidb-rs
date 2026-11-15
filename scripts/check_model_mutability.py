@@ -6,7 +6,9 @@ copy on write (`make_mut`). A field that can be changed through `&T` (`Cell`, `R
 `Mutex`, atomics, ...) would bypass that and bring back the #148 class of bugs, so the
 shared metadata types must not contain one. Scope (`SCOPE`): the model crate
 (crates/model/src, generated and hand-written types) and the `FieldType` file
-(crates/parser/src/types/field_type.rs; `FieldType` is shared as `Arc<FieldType>`, N13 §8).
+(crates/parser/src/types/field_type.rs; `FieldType` is shared as `Arc<FieldType>`, N13 §8),
+and the statistics structures (crates/statistics/src; the stats cache shares `Arc<Table>`
+snapshots, specs/D11.1-statistics §3).
 
 Fails on any of these names outside comments and `use` declarations:
 
@@ -41,7 +43,7 @@ INIT_ONCE_CONT = re.compile(r"^\s*(LazyLock|OnceLock)::new\b")
 
 
 REPO = Path(__file__).resolve().parent.parent
-SCOPE = ["crates/model/src", "crates/parser/src/types/field_type.rs"]
+SCOPE = ["crates/model/src", "crates/parser/src/types/field_type.rs", "crates/statistics/src"]
 
 
 def strip_comment(line: str) -> str:

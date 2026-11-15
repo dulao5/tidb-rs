@@ -1,8 +1,8 @@
 //! go-file: pkg/planner/property/stats_info.go
 //!
-//! `StatsInfo.HistColl` (`*statistics.HistColl`) is not a field yet: the statistics
-//! structures are block D11.1 (VS1-29), which adds it; `Scale` and `DeriveLimitStats` copy it
-//! as Go does once it exists. Go's `map[int64]float64` is a `HashMap` (Go prints maps sorted
+//! `StatsInfo.HistColl` (`*statistics.HistColl`) is an `Option<Arc<HistColl>>`: the
+//! statistics of a query are shared read-only (N13, D11.1 spec §3); `Scale` and
+//! `DeriveLimitStats` copy the pointer as Go does. Go's `map[int64]float64` is a `HashMap` (Go prints maps sorted
 //! by key, so the `String` output does not depend on the iteration order, `M-MAPORDER`).
 
 use std::collections::HashMap;
@@ -55,7 +55,9 @@ pub struct StatsInfo {
     /// Column.UniqueID -> NDV
     pub col_ndvs: HashMap<i64, f64>,
 
-    // HistColl *statistics.HistColl: added with D11.1 (VS1-29), see the module doc.
+    /// HistColl collects the statistics of the columns and indices of the table (`nil` for
+    /// operators above a DataSource that do not keep it).
+    pub hist_coll: Option<Arc<tidb_statistics::HistColl>>,
     /// StatsVersion indicates the statistics version of a table.
     /// If the StatsInfo is calculated using the pseudo statistics on a table, StatsVersion will be PseudoVersion.
     pub stats_version: u64,
@@ -108,6 +110,7 @@ impl StatsInfo {
         let mut profile = StatsInfo {
             row_count: self.row_count * factor,
             col_ndvs: HashMap::with_capacity(self.col_ndvs.len()),
+            hist_coll: self.hist_coll.as_ref().map(Arc::clone),
             stats_version: self.stats_version,
             group_ndvs: Vec::with_capacity(self.group_ndvs.len()),
         };

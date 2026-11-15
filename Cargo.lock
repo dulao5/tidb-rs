@@ -3982,6 +3982,7 @@ dependencies = [
  "tidb-model",
  "tidb-parser",
  "tidb-sessionctx",
+ "tidb-statistics",
  "tidb-tablecodec",
  "tidb-types",
  "tipb",
@@ -4089,6 +4090,21 @@ dependencies = [
  "tidb-meta",
  "tidb-mysql-protocol",
  "tidb-parser",
+]
+
+[[package]]
+name = "tidb-statistics"
+version = "0.0.0"
+dependencies = [
+ "log",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
+ "tidb-expression",
+ "tidb-model",
+ "tidb-parser",
+ "tidb-sessionctx",
+ "tidb-types",
 ]
 
 [[package]]

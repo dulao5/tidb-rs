@@ -359,6 +359,7 @@ fn stats(v: &Value) -> Value {
         col_ndvs: HashMap::new(),
         stats_version: v["sv"].as_u64().unwrap(),
         group_ndvs: Vec::new(),
+        hist_coll: None,
     };
     for p in arr(&v["ndv"]) {
         st.col_ndvs.insert(s(&p[0]).parse().unwrap(), fl(&p[1]));

@@ -1,0 +1,31 @@
+[package]
+name = "tidb-statistics"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/statistics (blocks D11.1, D11.2): statistics structures shared read-only by the planner (N13), pseudo statistics; building, sketches and loading come in later parts"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), boundary stubs, Go math / conv (M-F2I), mysql constants.
+tidb-base = { workspace = true }
+# FieldType, charset names (D02.3).
+tidb-parser = { workspace = true }
+# Datum, types.Context, Time / Duration, MyDecimal (D01).
+tidb-types = { workspace = true }
+# TableInfo / ColumnInfo / IndexInfo, TableItemID (D06.1).
+tidb-model = { workspace = true }
+# Histogram bounds (chunk.Chunk, Compare, LowerBound).
+tidb-chunk = { workspace = true }
+# codec.DecodeRange (ValueToString of index buckets).
+tidb-codec = { workspace = true }
+# expression.Column (HistColl.ID2UniqueID, GenerateHistCollFromColumnInfo, MVIdx2Columns).
+tidb-expression = { workspace = true }
+# SessionVars / StatementContext read by ColumnStatsIsInvalid / IndexStatsIsInvalid.
+tidb-sessionctx = { workspace = true }
+# terror.Log of BucketToString.
+log = "0.4"
+
+[lints]
+workspace = true
