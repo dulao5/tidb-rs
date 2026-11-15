@@ -17,7 +17,10 @@
 //!    session ([`tidb_session::StmtCheckpoint`], §4.6) and falls back to the PoC (`vs1`) or
 //!    returns the 1235 error (`strict`). Any other error of the new stack is a Go-ported error
 //!    and goes to the client as it is;
-//! 4. prepared statements: §4.7, by statement id ([`Owner`]).
+//! 4. prepared statements: §4.7, by statement id ([`Owner`]). VS1-14 part 1 does not
+//!    prepare on the new stack: every prepared statement is owned by the PoC with the reason
+//!    `prepared` in all modes (`specs/D05.3-session/spec.md` §0); the §4.7 machinery below is
+//!    switched on by part 2 (VS1-14b).
 //!
 //! After each statement the engine that ran it writes the "previous statement" state
 //! ([`LastStmtInfo`], §4.5) and the router copies it to the other side.
@@ -37,6 +40,7 @@ mod tests;
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tidb_base::Error;
@@ -90,6 +94,11 @@ pub enum Reason {
     Ast(&'static str),
     /// Step 3: the new stack hit a boundary stub of this block.
     Blocked(String),
+    /// A prepared statement while the new stack does not prepare (VS1-14 part 1).
+    Prepared,
+    /// The new session was not idle when a statement was to start there (a transaction, a
+    /// running statement): a bug of the router (step 0 should have caught it).
+    NotIdle,
 }
 
 impl Reason {
@@ -101,6 +110,8 @@ impl Reason {
             Reason::Kind => "kind",
             Reason::Ast(_) => "ast",
             Reason::Blocked(block) => block,
+            Reason::Prepared => "prepared",
+            Reason::NotIdle => "not_idle",
         }
     }
 }
@@ -134,7 +145,11 @@ pub trait NewStack: Send {
     /// The version of the InfoSchema the new stack would plan with, `None` while it has none.
     fn info_schema_version(&self) -> Option<i64>;
     /// `COM_QUERY`.
-    fn execute<'a>(&'a mut self, stmt: &'a ast::Stmt) -> BoxFut<'a, Result<Response, Error>>;
+    fn execute<'a>(
+        &'a mut self,
+        stmt: Arc<ast::Stmt>,
+        sql: &'a str,
+    ) -> BoxFut<'a, Result<Response, Error>>;
     /// `COM_STMT_PREPARE`.
     fn prepare<'a>(&'a mut self, stmt: &'a ast::Stmt) -> BoxFut<'a, Result<NewPrepared, Error>>;
     /// `COM_STMT_EXECUTE` of statement `stmt_id` (the new session's id).
@@ -205,10 +220,26 @@ enum Owner {
     New { new_id: u32 },
 }
 
+/// Why the new stack did not answer a statement.
+#[derive(Debug)]
+enum NotRun {
+    /// Blocked by a boundary stub of this block before any executor opened; the new session
+    /// is restored (§4.6).
+    Blocked(String),
+    /// The new session was not idle, so it was not tried (a router bug; the PoC runs it).
+    NotIdle,
+}
+
+/// VS1 plan §4.3: a fallback only happens before any executor opened. `before` / `after` are
+/// the new session's executed-statement counts around the attempt.
+fn fallback_after_open(before: u64, after: u64) -> bool {
+    after != before
+}
+
 /// A statement for the new stack.
 enum NewOp<'a> {
-    /// `COM_QUERY`.
-    Query(&'a ast::Stmt),
+    /// `COM_QUERY`: the statement and its text.
+    Query(Arc<ast::Stmt>, &'a str),
     /// `COM_STMT_EXECUTE` of the new session's statement.
     Execute(u32, &'a [Param]),
 }
@@ -226,6 +257,8 @@ pub struct Router {
     initial_txn_mode: String,
     /// `COM_STMT_EXECUTE` of the current command asked for a cursor.
     cursor: bool,
+    /// Prepared statements are prepared on the new stack too (§4.7): off until VS1-14b.
+    prepare_on_new: bool,
 }
 
 /// A new-stack error as the client sees it (Go's code and message).
@@ -288,6 +321,7 @@ impl Router {
             diverged: BTreeSet::new(),
             initial_txn_mode,
             cursor: false,
+            prepare_on_new: false,
         };
         let names = [tidb_sql::ir::SetAssignment::Names {
             charset: None,
@@ -297,6 +331,13 @@ impl Router {
         sync::sync_set(vars, &mut r.diverged, &names, poc);
         sync::sync_db(vars, poc);
         r
+    }
+
+    /// Prepares on the new stack too (§4.7), for the tests of the four combinations until
+    /// VS1-14b switches it on.
+    #[cfg(test)]
+    pub(crate) fn enable_prepare_on_new(&mut self) {
+        self.prepare_on_new = true;
     }
 
     /// The mode.
@@ -395,10 +436,28 @@ impl Router {
         &mut self,
         op: NewOp<'_>,
         fallback: bool,
-    ) -> Result<Result<Response, SqlError>, String> {
+    ) -> Result<Result<Response, SqlError>, NotRun> {
+        // A result dropped before it was closed is finished first: the checkpoint must not
+        // undo that finish (spec §2.3).
+        self.new.session_mut().finish_unfinished_stmt().await;
+        // The checkpoint can only restore an idle session (§4.6): check before the attempt
+        // writes anything. Step 0 should make this impossible, so it is a router bug.
+        if !self.new.session().is_idle() {
+            log::error!(
+                "VS1 router bug: the new session is not idle at the start of a statement; the PoC runs it"
+            );
+            let label = Reason::NotIdle.label();
+            if fallback {
+                count(Engine::Poc, label);
+            } else {
+                tidb_metrics::route(NOWHERE, label);
+            }
+            return Err(NotRun::NotIdle);
+        }
         let cp = self.new.session().checkpoint();
+        let executed = self.new.session().executed_stmts();
         let r = match op {
-            NewOp::Query(stmt) => self.new.execute(stmt).await,
+            NewOp::Query(stmt, sql) => self.new.execute(stmt, sql).await,
             NewOp::Execute(id, params) => self.new.execute_prepared(id, params).await,
         };
         match r {
@@ -411,13 +470,25 @@ impl Router {
             Err(e) => match blocked_by(&e) {
                 Some(block) => {
                     let block = block.to_owned();
-                    self.new.session_mut().restore(cp);
+                    if fallback_after_open(executed, self.new.session().executed_stmts()) {
+                        // Plan §4.3: `Blocked` only before an executor opened. The new stack
+                        // gave up after running the statement (newstack.rs until VS1-16).
+                        log::error!(
+                            "VS1 router bug: blocked-by:{block} after the new stack's executors opened"
+                        );
+                        tidb_metrics::route(Engine::New.label(), "bug_blocked_after_open");
+                    }
+                    if let Err(e) = self.new.session_mut().restore(cp) {
+                        // Checked idle above: a bug of the checkpoint.
+                        count(Engine::New, "error");
+                        return Ok(Err(SqlError::unknown(e.to_string())));
+                    }
                     if fallback {
                         count(Engine::Poc, &block);
                     } else {
                         tidb_metrics::route(NOWHERE, &block);
                     }
-                    Err(block)
+                    Err(NotRun::Blocked(block))
                 }
                 None => {
                     drop(cp);
@@ -446,7 +517,7 @@ impl Router {
         self.cursor = false;
         poc.begin_command();
         let start = Instant::now();
-        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let stmt = Arc::new(tidb_sql::ir::parse_one(sql)?);
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         let mut started = false;
@@ -455,9 +526,13 @@ impl Router {
                 poc.start_statement(StmtType::Select, parse);
                 started = true;
                 let fallback = self.mode != NewStackMode::Strict;
-                match self.try_new(NewOp::Query(&stmt), fallback).await {
+                match self
+                    .try_new(NewOp::Query(Arc::clone(&stmt), sql), fallback)
+                    .await
+                {
                     Ok(answered) => return answered,
-                    Err(block) => {
+                    Err(NotRun::NotIdle) => {}
+                    Err(NotRun::Blocked(block)) => {
                         if self.mode == NewStackMode::Strict {
                             return self.fail(sql_error(&tidb_base::blocked::blocked(
                                 &block,
@@ -507,21 +582,30 @@ impl Router {
         sql: &str,
     ) -> Result<PreparedInfo, SqlError> {
         let stmt = tidb_sql::ir::parse_one(sql)?;
+        // VS1-14 part 1: prepared statements are not prepared on the new stack (spec §0).
         // Not on the new stack when the InfoSchema versions differ: its column definitions
         // would come from another version, and a later fallback would fail check_columns.
-        let candidate = Self::candidate(&stmt, true).and_then(|()| {
-            if self.schema_versions_equal(poc) {
-                Ok(())
-            } else {
-                Err(Reason::SchemaVersion)
-            }
-        });
+        let candidate = if !self.prepare_on_new {
+            Err(Reason::Prepared)
+        } else {
+            Self::candidate(&stmt, true).and_then(|()| {
+                if self.schema_versions_equal(poc) {
+                    Ok(())
+                } else {
+                    Err(Reason::SchemaVersion)
+                }
+            })
+        };
         let new = match candidate {
             Ok(()) => {
                 let cp = self.new.session().checkpoint();
                 let r = self.new.prepare(&stmt).await;
                 match &r {
-                    Err(e) if blocked_by(e).is_some() => self.new.session_mut().restore(cp),
+                    Err(e) if blocked_by(e).is_some() => {
+                        if let Err(e) = self.new.session_mut().restore(cp) {
+                            log::error!("VS1 checkpoint of PREPARE: {e}");
+                        }
+                    }
                     _ => drop(cp),
                 }
                 Ok(r)
@@ -610,7 +694,7 @@ impl Router {
                             self.cursor = false;
                             return answered;
                         }
-                        Err(block) if self.mode == NewStackMode::Strict => {
+                        Err(NotRun::Blocked(block)) if self.mode == NewStackMode::Strict => {
                             poc.start_statement(StmtType::Select, Duration::ZERO);
                             self.cursor = false;
                             return self.fail(sql_error(&tidb_base::blocked::blocked(
@@ -646,7 +730,12 @@ impl Router {
                 poc.start_statement(StmtType::Select, Duration::ZERO);
                 return match r {
                     Ok(answered) => answered,
-                    Err(block) => self.fail(nothing_to_fall_back(&format!("blocked-by:{block}"))),
+                    Err(NotRun::Blocked(block)) => {
+                        self.fail(nothing_to_fall_back(&format!("blocked-by:{block}")))
+                    }
+                    Err(NotRun::NotIdle) => {
+                        self.fail(nothing_to_fall_back("the new session is not idle"))
+                    }
                 };
             }
         };

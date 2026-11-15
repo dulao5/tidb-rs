@@ -1,7 +1,7 @@
 [package]
 name = "tidb-session"
 version = "0.0.0"
-description = "Port of Go TiDB v8.5.8 pkg/session (block D05.3): the protocol-neutral session of N2 / ADR 0010; statement execution comes with VS1-14"
+description = "Port of Go TiDB v8.5.8 pkg/session (block D05.3): the protocol-neutral session of N2 / ADR 0010; ExecuteStmt, LazyTxn and the transaction manager (VS1-14)"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -19,6 +19,24 @@ tidb-types = { workspace = true }
 # Planner and executors (VS1-10…VS1-15).
 tidb-planner = { workspace = true }
 tidb-executor = { workspace = true }
+# The transaction context providers (D05.4).
+tidb-sessiontxn = { workspace = true }
+# kv.Storage / kv.Transaction (D07.0), the coprocessor client's variables (D07.2).
+tidb-kv = { workspace = true }
+tidb-store = { workspace = true }
+tidb-infoschema = { workspace = true }
+tidb-chunk = { workspace = true }
+# The SQL killer (N2 SessionShared).
+tidb-memory = { workspace = true }
+futures = { workspace = true }
+parking_lot = "0.12"
+log = "0.4"
+
+[dev-dependencies]
+tidb-executor = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+flate2 = "1.0"
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

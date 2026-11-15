@@ -509,3 +509,52 @@ async fn dropping_the_iterator_stops_the_workers() {
         "workers still sending after drop"
     );
 }
+
+/// The kill signal of the statement (`Variables.Killed`, the session's `SQLKiller.Signal`,
+/// VS1-14) stops the workers: `copIteratorWorker.finished()` reads it before each task and
+/// each retry, so a task stuck on a live lock stops hitting the store once KILL arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_signal_stops_the_workers() {
+    let mock = Arc::new(MockStore::new(&[b"g"], |m, req, region| {
+        if region.id == 2 {
+            return coprocessor::Response {
+                locked: Some(kvrpcpb::LockInfo {
+                    lock_version: 90,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+        }
+        echo(m, req, region)
+    }));
+    let store = Arc::new(new_store(Arc::new(Shared(mock.clone())), None, 0));
+    let client = store.get_client();
+    let killed = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let vars = Variables {
+        killed: Some(Arc::clone(&killed)),
+        ..Variables::default()
+    };
+    let mut it = client
+        .build_cop_iterator(request(&[b"a", b"z"]), vars, &ClientSendOption::default())
+        .await
+        .unwrap();
+    it.open(None);
+    let first = it
+        .next(&tidb_kv::Context::background())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.get_data(), b"1:a-g");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(mock.sends.load(Ordering::SeqCst) > 2);
+    killed.store(1, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let after_kill = mock.sends.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        mock.sends.load(Ordering::SeqCst),
+        after_kill,
+        "workers still sending after KILL"
+    );
+    drop(it);
+}

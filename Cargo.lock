@@ -2608,6 +2608,7 @@ name = "poc-session"
 version = "0.0.0"
 dependencies = [
  "futures",
+ "log",
  "poc-domain",
  "poc-executor",
  "poc-kv",
@@ -4026,12 +4027,24 @@ dependencies = [
 name = "tidb-session"
 version = "0.0.0"
 dependencies = [
+ "flate2",
+ "futures",
+ "log",
+ "parking_lot 0.12.5",
+ "serde_json",
  "tidb-base",
+ "tidb-chunk",
  "tidb-executor",
+ "tidb-infoschema",
+ "tidb-kv",
+ "tidb-memory",
  "tidb-parser",
  "tidb-planner",
  "tidb-sessionctx",
+ "tidb-sessiontxn",
+ "tidb-store",
  "tidb-types",
+ "tokio",
 ]
 
 [[package]]
