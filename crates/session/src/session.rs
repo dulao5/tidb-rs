@@ -1196,8 +1196,9 @@ impl Session {
         ExecStmtResult::new(slot, seq)
     }
 
-    /// The number of statements whose executors were opened (VS1 plan §4.3: a fallback
-    /// after that is a bug of the caller).
+    /// The number of statements whose executors were built and opened (VS1 plan §4.3: a
+    /// fallback after that is a bug of the caller; a builder's `Blocked` is counted as not
+    /// run).
     // glue: VS1 plan §4.3 (router check)
     pub fn executed_stmts(&self) -> u64 {
         self.executed_stmts
@@ -1257,8 +1258,10 @@ impl Session {
         let r = if stmt.ps_stmt.is_some() {
             // point plan short path
             let mut stmt = stmt;
-            self.executed_stmts += 1;
             let r = stmt.point_get(&mut self.core).await;
+            if stmt.executor_opened {
+                self.executed_stmts += 1;
+            }
             self.core.sctx.txn.change_to_invalid();
             match r {
                 Ok(rs) => {
@@ -1580,8 +1583,10 @@ pub(crate) async fn run_stmt(
         crate::tidb::check_stmt_limit(&mut se.core, false).await?;
     }
 
-    se.executed_stmts += 1;
     let r = s.exec(&mut se.core).await;
+    if s.executor_opened {
+        se.executed_stmts += 1;
+    }
 
     // Pipelined DML errors: the write path.
     // se.updateTelemetryMetric: telemetry, not ported.

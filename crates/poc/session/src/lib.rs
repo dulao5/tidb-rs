@@ -822,6 +822,12 @@ impl SessionHandler for Session {
         }
     }
 
+    fn execute_raw_params(&mut self, _stmt_id: u32, raw: tidb_mysql_protocol::RawParams) {
+        if let Some(router) = &mut self.router {
+            router.set_execute_raw_params(raw);
+        }
+    }
+
     fn command_done(&mut self, write: std::time::Duration, total: std::time::Duration) {
         self.mdl = None;
         self.timer.end(write, total);
@@ -932,6 +938,7 @@ impl Session {
         Ok(PreparedInfo {
             param_count,
             columns,
+            ..Default::default()
         })
     }
 

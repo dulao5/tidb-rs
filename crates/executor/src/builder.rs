@@ -127,6 +127,7 @@ impl ExecutorBuilder {
         if let Some(mp) = v
             .as_any()
             .downcast_ref::<crate::testutil::MockPhysicalPlan>()
+            && mp.kind == PhysicalKind::TableReader
         {
             return Some(mp.get_executor());
         }

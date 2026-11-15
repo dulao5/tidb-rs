@@ -34,6 +34,7 @@ members = [
   "crates/planner",
   "crates/executor",
   "crates/session",
+  "crates/server",
   "crates/sessiontxn",
   "crates/domain",
   # SPIKE (D09.7 design pilot for N1): not for merging, not counted in coverage.
@@ -146,6 +147,7 @@ tidb-store = { path = "crates/store" }
 tidb-planner = { path = "crates/planner" }
 tidb-executor = { path = "crates/executor" }
 tidb-session = { path = "crates/session" }
+tidb-server = { path = "crates/server" }
 # TiKV Rust client: our fork (dulao5/client-rust, branch tidb-rs/metrics): `Snapshot::coprocessor`,
 # several connections per store, client-go/PD metrics (feature client-go-metrics), and
 # client-go's lock resolution (#101 R1-R7, R12: lock hints, background cleanup,

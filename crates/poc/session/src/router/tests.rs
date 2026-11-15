@@ -19,7 +19,7 @@ use tidb_base::errors;
 use tidb_metrics::StmtType;
 use tidb_mysql_protocol::constants::cursor_type;
 use tidb_mysql_protocol::{ColumnDef, ColumnType, OkInfo, Param, PreparedInfo, Response};
-use tidb_mysql_protocol::{ResultSet, SqlError, Value};
+use tidb_mysql_protocol::{RawParams, ResultSet, SqlError, Value};
 use tidb_parser::ast;
 use tidb_session::{Dialect, Session};
 use tidb_sessionctx::stmtctx::new_stmt_ctx;
@@ -135,6 +135,7 @@ impl PocEngine for FakePoc {
             Ok(PreparedInfo {
                 param_count,
                 columns: self.columns.clone(),
+                ..Default::default()
             })
         })
     }
@@ -177,6 +178,9 @@ enum Answer {
     RcReadCheckTsNotSupported,
     /// Writes session state, then hits the boundary stub of this block.
     Blocked(&'static str),
+    /// Opens the executors (the executed-statement count moves), then a boundary stub: a
+    /// bug of the new stack (plan §4.3).
+    BlockedAfterOpen(&'static str),
 }
 
 #[derive(Default)]
@@ -187,6 +191,8 @@ struct Script {
     columns: Vec<ColumnDef>,
     log: Vec<String>,
     next_id: u32,
+    /// The new session's executed-statement count as the router sees it.
+    executed: u64,
 }
 
 struct FakeNew {
@@ -238,6 +244,11 @@ impl FakeNew {
                 write_statement_state(&mut self.session);
                 Err(blocked(block, "something"))
             }
+            Answer::BlockedAfterOpen(block) => {
+                write_statement_state(&mut self.session);
+                script.executed += 1;
+                Err(blocked(block, "something after the executors opened"))
+            }
         }
     }
 }
@@ -251,6 +262,9 @@ impl NewStack for FakeNew {
     }
     fn info_schema_version(&self) -> Option<i64> {
         self.script.lock().unwrap().version
+    }
+    fn executed_stmts(&self) -> u64 {
+        self.script.lock().unwrap().executed
     }
     fn execute<'a>(
         &'a mut self,
@@ -271,6 +285,7 @@ impl NewStack for FakeNew {
                 info: PreparedInfo {
                     param_count: 0,
                     columns: script.columns.clone(),
+                    ..Default::default()
                 },
             }
         });
@@ -280,6 +295,7 @@ impl NewStack for FakeNew {
         &'a mut self,
         stmt_id: u32,
         params: &'a [Param],
+        _raw: &'a RawParams,
     ) -> BoxFut<'a, Result<Response, Error>> {
         if !params.is_empty() {
             self.script
@@ -1266,6 +1282,39 @@ fn not_idle_new_session_goes_to_the_poc() {
 fn fallback_after_open_is_detected() {
     assert!(!fallback_after_open(3, 3));
     assert!(fallback_after_open(3, 4));
+}
+
+/// VS1 plan §4.3: a `Blocked` after the executors opened is not a fallback. The statement
+/// may have read data and written session state; the PoC does not run it again. The
+/// client gets the 1235 of the stub (constitution article 5), the statement ends on the
+/// new stack, and `tidbrs_route_total{engine="new",reason="bug_blocked_after_open"}`
+/// counts it. A `Blocked` before (the builder's stubs) still falls back.
+#[test]
+fn blocked_after_open_is_an_error_not_a_fallback() {
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        let mut p = poc();
+        let (mut r, script) = scripted(mode, &p);
+        script.lock().unwrap().answer = Some(Answer::BlockedAfterOpen("D12.2"));
+        let e = block_on(r.query(&mut p, POINT)).unwrap_err();
+        assert_eq!(e.code, 1235, "{mode:?}");
+        assert!(e.message.contains("blocked-by:D12.2"), "{}", e.message);
+        assert!(
+            !p.log.iter().any(|l| l.starts_with("run")),
+            "{mode:?}: no fallback"
+        );
+        assert_eq!(r.last_stmt().engine, Engine::New);
+        // The new session kept what the statement wrote (no checkpoint restore).
+        assert_eq!(r.new.session().vars().last_found_rows, 5);
+    }
+    // Before the executors opened: the normal fallback.
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().answer = Some(Answer::Blocked("D12.2"));
+    assert_eq!(
+        rows(&block_on(r.query(&mut p, POINT))).map(|r| r.0),
+        Some(3)
+    );
+    assert!(p.log.iter().any(|l| l.starts_with("run")));
 }
 
 /// `--new-stack=off` (the default) builds no ported domain; the other modes do.

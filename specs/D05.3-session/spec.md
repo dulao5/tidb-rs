@@ -205,7 +205,7 @@ plan §4.6 第 2 条：新栈已发出的 TSO 请求交给 PoC。PoC 的 `TsFutu
 |---|---|---|
 | `new_prepare_exec`（`executor.NewPrepareExec` + `Next`） | D12.12 | 预处理执行器与 `PlanCacheStmt`，VS1-15 |
 | `PrepareStmt` 中 dedup cache 命中、`ExecutePreparedStmt` 找到语句之后、`GetSessionPlanCache` 建 cache | D13.1 | `PlanCacheStmt` / `EXECUTE` / LRU plan cache，VS1-15 |
-| `newstack.rs` 的列定义与二进制参数 | D03.1 | 第 1 部分已有，VS1-16 |
+| `newstack.rs` 的列定义与二进制参数 | D03.1 | 第 1 部分已有，VS1-16 已移植（结果编码与二进制参数，[D03.1 spec](../D03.1-server/spec.md)），桩已删除 |
 
 ### 6.6 测试
 

@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
 use tidb_metrics::StmtType;
-use tidb_mysql_protocol::{ColumnDef, Param, PreparedInfo, Response, SqlError};
+use tidb_mysql_protocol::{ColumnDef, Param, PreparedInfo, RawParams, Response, SqlError};
 use tidb_parser::ast;
 use tidb_sql::{Lowered, Statement};
 
@@ -170,12 +170,20 @@ pub trait NewStack: Send {
     ) -> BoxFut<'a, Result<Response, Error>>;
     /// `COM_STMT_PREPARE` of `sql` (Go's `PrepareStmt` parses the text itself).
     fn prepare<'a>(&'a mut self, sql: &'a str) -> BoxFut<'a, Result<NewPrepared, Error>>;
-    /// `COM_STMT_EXECUTE` of statement `stmt_id` (the new session's id).
+    /// `COM_STMT_EXECUTE` of statement `stmt_id` (the new session's id). `raw` is the
+    /// packet's parameter section, which the new stack decodes itself (Go's
+    /// `parseBinaryParams`); `params` is the protocol layer's decoding of it.
     fn execute_prepared<'a>(
         &'a mut self,
         stmt_id: u32,
         params: &'a [Param],
+        raw: &'a RawParams,
     ) -> BoxFut<'a, Result<Response, Error>>;
+    /// The new session's count of statements whose executors were built and opened (plan
+    /// §4.3: a `Blocked` after that is a bug).
+    fn executed_stmts(&self) -> u64 {
+        self.session().executed_stmts()
+    }
     /// `COM_STMT_CLOSE` (Go's `DropPreparedStmt`: the statement is only marked closed).
     fn close(&mut self, stmt_id: u32);
     /// A transaction ended on the PoC (§4.7, closed statements): the new session removes the
@@ -266,7 +274,7 @@ enum NewOp<'a> {
     /// `COM_QUERY`: the statement and its text.
     Query(Arc<ast::Stmt>, &'a str),
     /// `COM_STMT_EXECUTE` of the new session's statement.
-    Execute(u32, &'a [Param]),
+    Execute(u32, &'a [Param], &'a RawParams),
 }
 
 /// The routing state of one session.
@@ -282,6 +290,8 @@ pub struct Router {
     initial_txn_mode: String,
     /// `COM_STMT_EXECUTE` of the current command asked for a cursor.
     cursor: bool,
+    /// The raw parameter section of the current `COM_STMT_EXECUTE`.
+    raw_params: RawParams,
     /// The statements closed (`COM_STMT_CLOSE`) in the current transaction, in order: Go
     /// keeps a closed statement executable until the transaction ends (`DropPreparedStmt` /
     /// `cleanRetryInfo`), so the router keeps its owner and closes the PoC's copy then.
@@ -350,6 +360,7 @@ impl Router {
             diverged: BTreeSet::new(),
             initial_txn_mode,
             cursor: false,
+            raw_params: RawParams::default(),
             closed: Vec::new(),
             stmt_ended: false,
         };
@@ -502,10 +513,10 @@ impl Router {
             return Err(NotRun::NotIdle);
         }
         let cp = self.new.session().checkpoint();
-        let executed = self.new.session().executed_stmts();
+        let executed = self.new.executed_stmts();
         let r = match op {
             NewOp::Query(stmt, sql) => self.new.execute(stmt, sql).await,
-            NewOp::Execute(id, params) => self.new.execute_prepared(id, params).await,
+            NewOp::Execute(id, params, raw) => self.new.execute_prepared(id, params, raw).await,
         };
         match r {
             Ok(resp) => {
@@ -515,16 +526,22 @@ impl Router {
                 Ok(Ok(resp))
             }
             Err(e) => match blocked_by(&e) {
+                Some(block) if fallback_after_open(executed, self.new.executed_stmts()) => {
+                    // Plan §4.3: a fallback only before an executor opened; after that the
+                    // statement may have read data and changed the session, and running it
+                    // again on the PoC is not allowed. A boundary stub there is a bug of the
+                    // new stack: the client gets its 1235 (constitution article 5), the
+                    // statement ends on the new stack.
+                    log::error!(
+                        "VS1 router bug: blocked-by:{block} after the new stack's executors opened"
+                    );
+                    tidb_metrics::route(Engine::New.label(), "bug_blocked_after_open");
+                    drop(cp);
+                    self.finish_new();
+                    Ok(Err(sql_error(&e)))
+                }
                 Some(block) => {
                     let block = block.to_owned();
-                    if fallback_after_open(executed, self.new.session().executed_stmts()) {
-                        // Plan §4.3: `Blocked` only before an executor opened. The new stack
-                        // gave up after running the statement (newstack.rs until VS1-16).
-                        log::error!(
-                            "VS1 router bug: blocked-by:{block} after the new stack's executors opened"
-                        );
-                        tidb_metrics::route(Engine::New.label(), "bug_blocked_after_open");
-                    }
                     if let Err(e) = self.new.session_mut().restore(cp) {
                         // Checked idle above: a bug of the checkpoint.
                         count(Engine::New, "error");
@@ -758,6 +775,7 @@ impl Router {
         stmt_id: u32,
         params: Vec<Param>,
     ) -> Result<Response, SqlError> {
+        let raw = std::mem::take(&mut self.raw_params);
         let owner = self.owners.get(&stmt_id).cloned();
         let result = match owner {
             // Unknown here: the PoC reports Go's error for an unknown statement.
@@ -789,7 +807,7 @@ impl Router {
                     poc.begin_command();
                     let fallback = self.mode != NewStackMode::Strict;
                     match self
-                        .try_new(NewOp::Execute(new_id, &params), fallback)
+                        .try_new(NewOp::Execute(new_id, &params, &raw), fallback)
                         .await
                     {
                         Ok(answered) => {
@@ -834,7 +852,9 @@ impl Router {
                     return self.fail(nothing_to_fall_back(&why));
                 }
                 poc.begin_command();
-                let r = self.try_new(NewOp::Execute(new_id, &params), false).await;
+                let r = self
+                    .try_new(NewOp::Execute(new_id, &params, &raw), false)
+                    .await;
                 poc.start_statement(StmtType::Select, Duration::ZERO);
                 return match r {
                     Ok(answered) => answered,
@@ -878,6 +898,12 @@ impl Router {
     /// The flags of the coming `COM_STMT_EXECUTE` (`CURSOR_TYPE_READ_ONLY` is step 0).
     pub fn set_execute_flags(&mut self, flags: u8) {
         self.cursor = flags & tidb_mysql_protocol::constants::cursor_type::READ_ONLY != 0;
+    }
+
+    /// The raw parameters of the coming `COM_STMT_EXECUTE` (for the new stack's
+    /// `parseBinaryParams`).
+    pub fn set_execute_raw_params(&mut self, raw: RawParams) {
+        self.raw_params = raw;
     }
 
     /// The owner of a prepared statement, for tests.

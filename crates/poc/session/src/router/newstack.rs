@@ -7,19 +7,26 @@
 //! planning, VS1-15), which stop in the preprocessor at the metadata lock of a table
 //! (`tryLockMDLAndUpdateSchemaIfNecessary`, D05.4) or at the plan builder (D09.1, VS1-21).
 //! The session's InfoSchema is the ported domain's (D06.5 part 1), which the PoC domain's
-//! sync loop reloads at the PoC's own reload timestamps (VS1 plan §4.1). The pieces that
-//! turn a successful result into a response are stubs of their own until their work items
-//! land:
+//! sync loop reloads at the PoC's own reload timestamps (VS1 plan §4.1).
 //!
-//! - TODO(VS1-16): result sets and column definitions (`writeResultSet`, `column` / `dump`,
-//!   D03.1) and binary parameters (`parseBinaryParams`, D03.1).
+//! A statement that ran is answered here, never handed back to the router as `Blocked`
+//! (VS1 plan §4.3): its rows are encoded by the port of Go's result writing (`tidb-server`,
+//! D03.1 part 1: `writeResultSet` / `writeChunks`, `DumpTextRow` / `DumpBinaryRow`, column
+//! definitions) into packets the PoC's connection sends as they are; the parameters of
+//! `COM_STMT_EXECUTE` are decoded by Go's `parseBinaryParams` and `ExecBinaryParam`.
 
 use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
-use tidb_mysql_protocol::{Param, Response};
+use tidb_mysql_protocol::{
+    ColumnDef, ColumnType, EncodedResultSet, OkInfo, Param, PreparedInfo, RawParams, Response,
+};
 use tidb_parser::ast;
+use tidb_server::column::{Info, ResultEncoder, convert_column_info};
+use tidb_server::conn::{ResultPackets, init_input_encoder, write_result_set};
+use tidb_server::resultset::ResultSet;
+use tidb_session::exec_result::ExecStmtResult;
 use tidb_session::{Dialect, Session};
 use tidb_sessionctx::variable::session::GlobalVarAccessor;
 
@@ -61,6 +68,9 @@ pub struct NewSession {
     session: Session,
     /// The ported domain the InfoSchema comes from (`None` without schema sync).
     domain: Option<Arc<tidb_domain::Domain>>,
+    /// Go's `clientConn.rsEncoder`: the result encoder of the last result set (`None`
+    /// before the first), which `writePrepare` also dumps column definitions with.
+    rs_encoder: Option<ResultEncoder>,
 }
 
 impl NewSession {
@@ -69,6 +79,7 @@ impl NewSession {
         NewSession {
             session: Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
             domain,
+            rs_encoder: None,
         }
     }
 }
@@ -111,22 +122,31 @@ impl NewStack for NewSession {
     ) -> BoxFut<'a, Result<Response, Error>> {
         Box::pin(async move {
             let rs = self.session.execute_stmt(stmt, sql).await?;
-            if let Some(rs) = rs {
-                // The rows cannot be encoded yet (VS1-16): the statement is finished and
-                // closed before the router restores the checkpoint.
-                rs.close(&mut self.session).await?;
-            }
-            Err(blocked("D03.1", "result sets of the new stack"))
+            self.write_result(rs, false).await
         })
     }
 
     fn prepare<'a>(&'a mut self, sql: &'a str) -> BoxFut<'a, Result<NewPrepared, Error>> {
         Box::pin(async move {
+            // Go `TiDBContext.Prepare`: the statement, then its columns (ConvertColumnInfo).
             let info = self.session.prepare_stmt(sql).await?;
-            // The statement exists in the new session now; without its column definitions
-            // it cannot be used, so it is dropped again.
-            let _ = self.session.drop_prepared_stmt(info.stmt_id);
-            Err(blocked("D03.1", "column definitions of the new stack"))
+            let columns: Vec<Info> = info.fields.iter().map(convert_column_info).collect();
+            // Go `writePrepare`: the definitions are dumped with the connection's current
+            // result encoder (the default one before the first result set).
+            let mut column_packets = Vec::with_capacity(columns.len());
+            for c in &columns {
+                let mut b = Vec::new();
+                c.dump(&mut b, self.rs_encoder.as_mut());
+                column_packets.push(b);
+            }
+            Ok(NewPrepared {
+                stmt_id: info.stmt_id,
+                info: PreparedInfo {
+                    param_count: u16::try_from(info.param_count).unwrap_or(u16::MAX),
+                    columns: columns.iter().map(column_def).collect(),
+                    column_packets,
+                },
+            })
         })
     }
 
@@ -134,20 +154,97 @@ impl NewStack for NewSession {
         &'a mut self,
         stmt_id: u32,
         params: &'a [Param],
+        raw: &'a RawParams,
     ) -> BoxFut<'a, Result<Response, Error>> {
         Box::pin(async move {
-            if !params.is_empty() {
-                return Err(blocked("D03.1", "binary parameters of the new stack"));
+            // Go `executePreparedStmtAndWriteResult`: parseBinaryParams with the statement's
+            // long data and parameter types, then ExecBinaryParam with the type context of
+            // the session's current statement context.
+            let n = params.len();
+            let mut binary_params = vec![tidb_expression::param::BinaryParam::default(); n];
+            if n > 0 {
+                let enc = init_input_encoder(&mut self.session);
+                let mut bound = raw.bound.clone();
+                bound.resize(n, None);
+                tidb_server::params::parse_binary_params(
+                    &mut binary_params,
+                    &bound,
+                    &raw.null_bitmap,
+                    &raw.param_types,
+                    &raw.param_values,
+                    Some(&enc),
+                )?;
             }
-            let _rs = self
-                .session
-                .execute_prepared_stmt(stmt_id, Vec::new())
-                .await?;
-            Err(blocked("D03.1", "result sets of the new stack"))
+            let type_ctx = self.session.vars().stmt_ctx().type_ctx();
+            let args = tidb_expression::util::exec_binary_param(&type_ctx, &binary_params)?;
+            // The session takes the constants' values (its EXECUTE is D02.2 / D13.1).
+            let args = args.into_iter().map(|c| c.value).collect();
+            let rs = self.session.execute_prepared_stmt(stmt_id, args).await?;
+            self.write_result(rs, true).await
         })
     }
 
     fn close(&mut self, stmt_id: u32) {
         let _ = self.session.drop_prepared_stmt(stmt_id);
+    }
+}
+
+impl NewSession {
+    /// Go `handleQuery` / `executePreparedStmtAndWriteResult` after the statement ran: no
+    /// result set is an OK packet (`writeOK`), a result set is written with
+    /// `writeResultSet` and closed (`defer rs.Close()`: its error is only logged).
+    // glue: the response of D03.1's handleStmt (the connection writes the packets)
+    async fn write_result(
+        &mut self,
+        rs: Option<ExecStmtResult>,
+        binary: bool,
+    ) -> Result<Response, Error> {
+        let Some(rs) = rs else {
+            let sc = self.session.vars().stmt_ctx();
+            return Ok(Response::Ok(OkInfo {
+                affected_rows: sc.affected_rows(),
+                last_insert_id: sc.last_insert_id(),
+                warnings: sc.warning_count(),
+                info: String::new(),
+            }));
+        };
+        let mut trs = ResultSet::new(rs);
+        let mut out = ResultPackets::default();
+        let r = write_result_set(
+            &mut self.session,
+            &mut trs,
+            binary,
+            &mut self.rs_encoder,
+            &mut out,
+        )
+        .await;
+        if let Err(e) = trs.close(&mut self.session).await {
+            log::warn!("close result set: {e}");
+        }
+        r?;
+        Ok(Response::Encoded(EncodedResultSet {
+            columns: out.infos.iter().map(column_def).collect(),
+            column_packets: out.columns,
+            rows: out.rows,
+            warnings: self.session.vars().stmt_ctx().warning_count(),
+        }))
+    }
+}
+
+/// The PoC's description of a column definition the new stack sent, for the router's
+/// metadata checks (VS1 plan §4.7: a fallback must send the definitions of the PREPARE).
+// glue: column.Info → the PoC protocol's ColumnDef
+fn column_def(c: &Info) -> ColumnDef {
+    ColumnDef {
+        schema: c.schema.clone(),
+        table: c.table.clone(),
+        org_table: c.org_table.clone(),
+        name: c.name.clone(),
+        org_name: c.org_name.clone(),
+        charset: c.charset,
+        column_length: c.column_length,
+        column_type: ColumnType::from_u8(c.tp).unwrap_or(ColumnType::LongBlob),
+        flags: c.flag,
+        decimals: c.decimal,
     }
 }

@@ -74,6 +74,7 @@ impl SessionHandler for Session {
         Ok(PreparedInfo {
             param_count: 1,
             columns: vec![],
+            ..Default::default()
         })
     }
 

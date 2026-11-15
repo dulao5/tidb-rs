@@ -1,0 +1,32 @@
+[package]
+name = "tidb-server"
+version = "0.0.0"
+description = "Port of Go TiDB v8.5.8 pkg/server (block D03.1, part 1): result encoding (column definitions, text and binary rows) and binary statement parameters"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Errors (M-ERR), MySQL constants, strconv.
+tidb-base = { workspace = true }
+# Charsets and encodings (the result encoder, the input decoder).
+tidb-parser = { workspace = true }
+# Rows of the result (chunk.Row).
+tidb-chunk = { workspace = true }
+# Values written into rows; FieldType helpers.
+tidb-types = { workspace = true }
+# The binary parameters (pkg/param) and ExecBinaryParam.
+tidb-expression = { workspace = true }
+# ResultField (ConvertColumnInfo).
+tidb-executor = { workspace = true }
+# The session the result set belongs to (driver_tidb: TiDBContext → session).
+tidb-session = { workspace = true }
+log = "0.4"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+flate2 = "1.0"
+
+[lints]
+workspace = true

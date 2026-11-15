@@ -31,7 +31,8 @@ pub mod value;
 pub use auth::Credential;
 pub use error::SqlError;
 pub use handler::{
-    ConnectionInfo, OkInfo, PreparedInfo, Response, ResultSet, SessionFactory, SessionHandler,
+    ConnectionInfo, EncodedResultSet, OkInfo, PreparedInfo, RawParams, Response, ResultSet,
+    SessionFactory, SessionHandler,
 };
 pub use params::Param;
 pub use server::{Server, ServerConfig};

@@ -18,7 +18,7 @@ use tidb_base::blocked::blocked_by;
 use tidb_executor::adapter::ExecStmt;
 use tidb_executor::glue::SessionContext;
 use tidb_executor::select::reset_context_of_stmt;
-use tidb_executor::testutil::mock_plan;
+use tidb_executor::testutil::{mock_plan, mock_plan_of_kind};
 use tidb_kv::Context;
 use tidb_kv::key::Key;
 use tidb_kv::kv::{
@@ -388,6 +388,33 @@ fn autocommit_read_prefetches_tso_and_ends_idle() {
     assert_eq!(s.vars().last_query_info.start_ts, 10);
     assert_eq!(store.log.lock().as_slice(), ["begin 10", "rollback 10"]);
     assert_eq!(store.requests.load(SeqCst), 1);
+}
+
+/// VS1 plan §4.3: the executed-statement count (the router's "an executor opened" check)
+/// moves only after the executor was built and opened. A builder that stops at a boundary
+/// stub (here the table dual executor, `blocked-by:D12.2`; the cached-table, locking-read
+/// and txn-scope stubs of the builder are the same path) is a normal fallback.
+#[test]
+fn executed_stmts_counts_only_opened_executors() {
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    assert_eq!(s.executed_stmts(), 0);
+    let mut stmt = compile(&mut s, "SELECT a FROM t", 0);
+    stmt.plan = Some(mock_plan_of_kind(0, tidb_planner::PhysicalKind::TableDual).0);
+    let Err(e) = block_on(run_stmt(&mut s, stmt)) else {
+        panic!("the table dual executor is a boundary stub");
+    };
+    assert_eq!(blocked(&e), Some("D12.2"));
+    assert_eq!(
+        s.executed_stmts(),
+        0,
+        "a builder's Blocked is not an opened executor"
+    );
+
+    let stmt = compile(&mut s, "SELECT a FROM t", 1);
+    let rs = block_on(run_stmt(&mut s, stmt)).unwrap().expect("rows");
+    assert_eq!(s.executed_stmts(), 1);
+    let _ = block_on(rs.close(&mut s));
 }
 
 /// `autoCommitAfterStmt` without an error commits the autocommit transaction (`CommitTxn`):

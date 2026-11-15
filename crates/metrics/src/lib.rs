@@ -262,6 +262,14 @@ static DISCONNECTION_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
 });
 
+static PANIC_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    counter_vec(
+        ("tidb", "server", "panic_total"),
+        "Counter of panic.",
+        &["type"],
+    )
+});
+
 static EXECUTE_ERROR_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     counter_vec(
         ("tidb", "server", "execute_error_total"),
@@ -597,6 +605,19 @@ pub fn connections() -> i64 {
 pub enum Disconnect {
     Ok,
     Error,
+}
+
+/// Go `metrics.LabelSession`: the `type` of a panic recovered in a connection's loop.
+pub const PANIC_SESSION: &str = "session";
+
+/// Go `metrics.PanicCounter.WithLabelValues(kind).Inc()`.
+pub fn panicked(kind: &str) {
+    PANIC_TOTAL.with_label_values(&[kind]).inc();
+}
+
+/// `tidb_server_panic_total{type}` (tests).
+pub fn panic_total(kind: &str) -> u64 {
+    PANIC_TOTAL.with_label_values(&[kind]).get()
 }
 
 pub fn disconnected(how: Disconnect) {
