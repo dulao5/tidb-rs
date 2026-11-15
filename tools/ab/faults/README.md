@@ -40,7 +40,7 @@ Error kinds seen on **both** sides are not gated, because they are not a parity 
 
 **Requirements:** tiup, the mysql client, `python3-pymysql`, and passwordless `sudo`. Without passwordless sudo, `slow_tikv` (cgroup v2) and `net_cut` (iptables) are skipped and the run exits 2. The other scenarios need no root. `kill_tikv` / `kill_tikv_meta` read the TiKV's command line from `/proc` on Linux and from `ps` / `lsof` elsewhere (macOS); `slow_tikv` and `net_cut` are Linux only.
 
-**Point gets through the store driver:** with `TIDB_RS_POINT_GET=d07.1` in the environment of `run.sh`, tidb-rs (`poc-kv`) does its point gets and batch gets through the ported store driver (`tidb_store::driver`, D07.1 part 1, VS1-18) instead of client-rust directly, so the same scenarios compare the two implementations.
+**Point gets through the store driver:** with `TIDB_RS_POINT_GET=store-driver` in the environment of `run.sh`, tidb-rs (`poc-kv`) does its point gets and batch gets through the ported store driver (`tidb_store::driver`) instead of client-rust directly, so the same scenarios compare the two implementations.
 
 ## Read load
 

@@ -15,7 +15,7 @@ VS1-14 太大，拆成两部分，按顺序合入：
 
 **路由器在进新栈之前检查会话空闲**（#235 评审）：`is_idle()` 不成立时不进新栈，交给 PoC，原因 `not_idle`，记为路由器的 bug（日志 + `tidbrs_route_total{reason="not_idle"}`）；只有新栈能执行的预处理语句报 1235。这样不会出现新栈写了状态、恢复又失败的情况。另外，执行器打开之后的回退（plan §4.3 不允许；`newstack.rs` 在结果集编码完成前会这样做，VS1-16 去掉）由路由器检测，记日志与 `reason="bug_blocked_after_open"`。
 
-**第 1 部分中预处理语句一律走 PoC**（Lucky，VS1-14 评审要求）：路由器在 COM_STMT_PREPARE 时不再调用新栈，stmt id 直接归 PoC，原因记为 `prepared`（`tidbrs_route_total{engine="poc",reason="prepared"}`），`vs1` 与 `strict` 模式相同（`strict` 也不报 1235：这不是新栈碰到了桩，而是本部分不提供）。会话的 `prepare_stmt` / `execute_prepared_stmt` / `drop_prepared_stmt` 仍是 `blocked-by:D05.3` 的桩（第 2 部分）。§4.7 的路由表、列元数据检查（VS1-02 已写好）保留不动，第 2 部分打开。
+**第 1 部分中预处理语句一律走 PoC**（Lucky，VS1-14 评审要求）：路由器在 COM_STMT_PREPARE 时不再调用新栈，stmt id 直接归 PoC，原因记为 `prepared`（`tidbrs_route_total{engine="poc",reason="prepared"}`），`fallback` 与 `strict` 模式相同（`strict` 也不报 1235：这不是新栈碰到了桩，而是本部分不提供）。会话的 `prepare_stmt` / `execute_prepared_stmt` / `drop_prepared_stmt` 仍是 `blocked-by:D05.3` 的桩（第 2 部分）。§4.7 的路由表、列元数据检查（VS1-02 已写好）保留不动，第 2 部分打开。
 
 ## 1. 范围（第 1 部分）
 

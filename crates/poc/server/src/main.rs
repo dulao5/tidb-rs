@@ -122,12 +122,13 @@ struct Args {
     /// `no-steal` (one current-thread runtime per worker; a connection stays on its thread).
     #[arg(long, default_value = "steal", value_parser = ["steal", "no-steal"])]
     runtime_topology: String,
-    /// The first vertical slice (VS1, specs/VS1-vertical-slice/plan.md §4.3): `off` runs
-    /// every statement on the prototype (the default); `vs1` sends VS1-shaped SELECTs to the
-    /// ported stack and falls back to the prototype on a boundary stub; `strict` returns the
+    /// Which statements run on the ported stack (specs/VS1-vertical-slice/plan.md §4.3): `off`
+    /// runs every statement on the prototype (the default); `fallback` sends the SELECTs the
+    /// ported stack supports to it and falls back to the prototype when it reaches code that
+    /// is not ported yet; `strict` returns the
     /// stub's 1235 error instead (for the weekly build). The environment variable
     /// TIDB_RS_NEW_STACK, when set, overrides this flag.
-    #[arg(long, default_value = "off", value_parser = ["off", "vs1", "strict"])]
+    #[arg(long, default_value = "off", value_parser = ["off", "fallback", "strict"])]
     new_stack: String,
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
@@ -144,7 +145,7 @@ fn parse_go_duration(s: &str) -> Result<Duration, String> {
     Ok(Duration::from_nanos(ns as u64))
 }
 
-/// `--new-stack`, overridden by `TIDB_RS_NEW_STACK` (VS1 plan §4.3).
+/// `--new-stack`, overridden by `TIDB_RS_NEW_STACK` (vertical-slice plan §4.3).
 fn new_stack_mode(flag: &str) -> Result<poc_session::router::NewStackMode, String> {
     match std::env::var("TIDB_RS_NEW_STACK") {
         Ok(v) if !v.is_empty() => v.parse(),
@@ -173,6 +174,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if let Err(e) = poc_kv::point_get_store_driver_from_env() {
+        error!(error = %e, "invalid TIDB_RS_POINT_GET");
+        std::process::exit(2);
+    }
     let tls = match tls_config(&args) {
         Ok(tls) => tls,
         Err(e) => {

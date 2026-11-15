@@ -103,8 +103,8 @@ pub fn tidb_retry_options() -> RetryOptions {
 pub struct KvClient {
     inner: TransactionClient,
     retry: RetryOptions,
-    /// The ported store driver's `KVStore` when `TIDB_RS_POINT_GET=d07.1`: snapshots then
-    /// do their point gets and batch gets through `tidb_store::driver` (D07.1, VS1-18), so
+    /// The ported store driver's `KVStore` when `TIDB_RS_POINT_GET=store-driver`: snapshots then
+    /// do their point gets and batch gets through `tidb_store::driver`, the ported TiKV store driver, so
     /// that the fault scenarios (tools/ab/faults) compare it with this crate's own reads.
     driver: Option<std::sync::Arc<tidb_store::driver::tikv::KVStore>>,
     /// The coprocessor client's store (D07.2); its workers run on the ExecPool once
@@ -112,9 +112,28 @@ pub struct KvClient {
     copr: std::sync::Arc<CoprStore>,
 }
 
-/// Whether `TIDB_RS_POINT_GET=d07.1` is set (see [`KvClient`]).
+/// Reads `TIDB_RS_POINT_GET`: unset or empty means this crate's own reads, `store-driver`
+/// means point gets through the ported store driver (see [`KvClient`]). Any other value is an
+/// error, so a misspelled or old value (`d07.1`, renamed to `store-driver`) cannot silently
+/// fall back to this crate's reads and make the fault comparison compare it with itself.
+/// The server checks this at startup.
+pub fn point_get_store_driver_from_env() -> std::result::Result<bool, String> {
+    match std::env::var("TIDB_RS_POINT_GET") {
+        Err(_) => Ok(false),
+        Ok(v) if v.is_empty() => Ok(false),
+        Ok(v) if v == "store-driver" => Ok(true),
+        Ok(v) if v == "d07.1" => Err(
+            "TIDB_RS_POINT_GET=d07.1 was renamed: use TIDB_RS_POINT_GET=store-driver".to_string(),
+        ),
+        Ok(v) => Err(format!(
+            "TIDB_RS_POINT_GET must be empty or store-driver, got {v:?}"
+        )),
+    }
+}
+
+/// Whether point gets go through the store driver; an invalid value was rejected at startup.
 fn driver_point_gets() -> bool {
-    std::env::var("TIDB_RS_POINT_GET").is_ok_and(|v| v == "d07.1")
+    point_get_store_driver_from_env().unwrap_or(false)
 }
 
 /// The copr store over `inner`, its workers on `pool` (N3 ExecPool) when given.
@@ -266,7 +285,7 @@ pub fn register_client_metrics() {
 pub struct KvSnapshot {
     inner: tikv_client::Snapshot,
     ts: u64,
-    /// The D07.1 snapshot at the same timestamp (`TIDB_RS_POINT_GET=d07.1`).
+    /// The ported store driver's snapshot at the same timestamp (`TIDB_RS_POINT_GET=store-driver`).
     driver: Option<tidb_store::driver::txn::snapshot::TikvSnapshot>,
     copr: std::sync::Arc<CoprStore>,
 }

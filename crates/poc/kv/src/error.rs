@@ -22,8 +22,8 @@ pub enum Error {
     /// Any other client error.
     #[error("TiKV client error: {0}")]
     Other(#[source] Box<tikv_client::Error>),
-    /// An error of the ported store driver (D07.1), already a TiDB error
-    /// (`TIDB_RS_POINT_GET=d07.1`).
+    /// An error of the ported TiKV store driver, already a TiDB error
+    /// (`TIDB_RS_POINT_GET=store-driver`).
     #[error("{0}")]
     Driver(Box<tidb_base::Error>),
 }
