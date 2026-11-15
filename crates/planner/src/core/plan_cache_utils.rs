@@ -37,7 +37,7 @@ use crate::core::plan_cacheable_checker::{CNode, Visit, Walker, is_ast_cacheable
 use crate::core::planbuilder::new_plan_builder;
 use crate::core::preprocess::{
     InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, in_prepare, preprocess,
-    with_preprocessor_return,
+    with_domain_info_schema, with_preprocessor_return,
 };
 use crate::core::resolve::{ContextRef, new_node_w};
 use crate::util::fixcontrol;
@@ -53,6 +53,13 @@ pub trait InfoSchemaLookup: Send + Sync {
     /// `SchemaByID(id)`: the database's name.
     // glue: interface method infoschema.InfoSchema.SchemaByID
     fn schema_name_by_id(&self, id: i64) -> Option<CIStr>;
+    /// `SchemaByID(id)`: the database (`infoschema.SchemaByTable` looks the table's `DBID`
+    /// up with it). None by default: a lookup without databases.
+    // glue: interface method infoschema.InfoSchema.SchemaByID
+    fn schema_by_id(&self, id: i64) -> Option<Arc<tidb_model::DBInfo>> {
+        let _ = id;
+        None
+    }
     /// `SchemaMetaVersion()`.
     // glue: interface method infoschema.InfoSchema.SchemaMetaVersion
     fn schema_meta_version(&self) -> i64;
@@ -92,6 +99,10 @@ impl InfoSchemaLookup for InfoSchemaV2 {
     // glue: interface method infoschema.InfoSchema.SchemaByID
     fn schema_name_by_id(&self, id: i64) -> Option<CIStr> {
         InfoSchemaV2::schema_by_id(self, id).map(|db| db.name.clone())
+    }
+    // glue: interface method infoschema.InfoSchema.SchemaByID
+    fn schema_by_id(&self, id: i64) -> Option<Arc<tidb_model::DBInfo>> {
+        InfoSchemaV2::schema_by_id(self, id)
     }
     // glue: interface method infoschema.InfoSchema.SchemaMetaVersion
     fn schema_meta_version(&self) -> i64 {
@@ -287,6 +298,7 @@ pub fn generate_plan_cache_stmt_with_ast(
     param_sql: &str,
     param_stmt: Stmt,
     is: &dyn InfoSchemaLookup,
+    domain_is: Option<&dyn InfoSchemaLookup>,
 ) -> Result<(PlanCacheStmt, Option<PhysicalPlanRef>, usize), Error> {
     let mut extractor = ParamMarkerExtractor::default();
     Walker(&mut extractor).stmt(&param_stmt);
@@ -324,7 +336,12 @@ pub fn generate_plan_cache_stmt_with_ast(
     };
     let resolve_ctx = {
         let mut node_w = new_node_w(&mut stmt);
-        let opts: Vec<PreprocessOpt> = vec![Box::new(in_prepare), with_preprocessor_return(ret)];
+        let mut opts: Vec<PreprocessOpt> =
+            vec![Box::new(in_prepare), with_preprocessor_return(ret)];
+        // domain.GetDomain(sctx), for the metadata lock (preprocess module doc).
+        if let Some(d) = domain_is {
+            opts.push(with_domain_info_schema(d.snapshot()));
+        }
         let (_, res) = preprocess(vars, &mut node_w, opts);
         res?;
         node_w.get_resolve_context()

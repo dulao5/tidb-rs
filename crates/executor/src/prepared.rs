@@ -100,6 +100,7 @@ impl PrepareExec {
         if self.need_reset {
             reset_context_of_stmt(sctx, &stmt0, &self.sql_text)?;
         }
+        let domain_is = sctx.get_domain_info_schema();
         let Some(is) = sctx.get_txn_info_schema() else {
             // sessiontxn.GetTxnManager(e.Ctx()).GetTxnInfoSchema() is set by PrepareStmt.
             return Err(blocked("D05.4", "the transaction's InfoSchema"));
@@ -110,6 +111,9 @@ impl PrepareExec {
             &self.sql_text,
             stmt0,
             is.as_ref(),
+            domain_is
+                .as_deref()
+                .map(|d| d as &dyn tidb_planner::core::plan_cache_utils::InfoSchemaLookup),
         )?;
         // topsqlstate.TopSQLEnabled(): Top SQL is not ported (D14.3).
 

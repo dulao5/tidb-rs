@@ -405,11 +405,11 @@ fn run(rec: &Value) -> Outcome {
         {
             resolved = Some(TableNameW {
                 table_name: table_name_key(tn),
-                db_info: Arc::new(DBInfo {
+                db_info: Some(Arc::new(DBInfo {
                     id: 1,
                     name: CIStr::new("test"),
                     ..DBInfo::default()
-                }),
+                })),
                 table_info: Arc::clone(t),
             });
         }

@@ -29,8 +29,7 @@ use tidb_planner::core::resolve::new_node_w;
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 
 /// The number of records answered by each boundary stub.
-const EXPECTED_BLOCKED: [(&str, usize); 4] =
-    [("D02.2", 4), ("D04.1", 2), ("D05.4", 9), ("D09.5", 3)];
+const EXPECTED_BLOCKED: [(&str, usize); 3] = [("D02.2", 4), ("D04.1", 2), ("D09.5", 3)];
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -40,9 +39,9 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "unsupported"
 };
 
-/// The generator's InfoSchema by name only: `test.t` and `test.person` exist (their
-/// columns are not read before the metadata lock, a boundary stub of D05.4); a table that is
-/// not found stops at the privilege check (D04.1).
+/// The generator's InfoSchema by name only: `test.t` and `test.person` exist and are public
+/// (the preprocessor reads no columns; its InfoSchema version is 0, so the metadata lock is
+/// skipped as in Go); a table that is not found stops at the privilege check (D04.1).
 struct GeneratorTables;
 
 impl InfoSchemaLookup for GeneratorTables {
@@ -50,6 +49,7 @@ impl InfoSchemaLookup for GeneratorTables {
         if schema.l == "test" && (table.l == "t" || table.l == "person") {
             return Ok(Arc::new(TableInfo {
                 name: table.clone(),
+                state: tidb_model::StatePublic,
                 ..Default::default()
             }));
         }

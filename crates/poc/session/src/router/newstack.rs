@@ -4,8 +4,8 @@
 //! The session runs `ExecuteStmt` (VS1-14 part 1), whose planner is still a boundary stub,
 //! so every statement falls back (or, in `strict` mode, reports 1235). Prepared statements
 //! go through the session's `PrepareStmt` and the prepare executor (prepared-statement
-//! planning, VS1-15), which stop in the preprocessor at the metadata lock of a table
-//! (`tryLockMDLAndUpdateSchemaIfNecessary`, D05.4) or at the plan builder (D09.1, VS1-21).
+//! planning, VS1-15), which pass the metadata lock of their tables (registered while
+//! `PREPARE` runs, per Go, #252) and stop at the plan builder (D09.1, VS1-21).
 //! The session's InfoSchema is the ported domain's (D06.5 part 1), which the PoC domain's
 //! sync loop reloads at the PoC's own reload timestamps (VS1 plan §4.1).
 //!
@@ -76,6 +76,10 @@ pub struct NewSession {
 impl NewSession {
     /// A new session in the MySQL dialect (the only protocol and front end, ADR 0010).
     pub fn new(domain: Option<Arc<tidb_domain::Domain>>) -> NewSession {
+        if domain.is_some() {
+            // Go's bootstrap (`InitMDLVariable`); idempotent, so done with each session.
+            tidb_session::session::init_mdl_variable();
+        }
         NewSession {
             session: Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
             domain,

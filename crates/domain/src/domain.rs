@@ -556,6 +556,23 @@ fn get_flashback_start_ts_from_error_msg(err: &Error) -> u64 {
     slices[1].parse::<u64>().unwrap_or(0)
 }
 
+/// ErrInfoSchemaChanged returns the error that information schema is changed.
+///
+/// Go builds the message at package initialisation: the standard text plus ". " and
+/// `kv.TxnRetryableMark`.
+#[allow(non_upper_case_globals)]
+pub static ErrInfoSchemaChanged: std::sync::LazyLock<Error> = std::sync::LazyLock::new(|| {
+    let base = tidb_base::errno::MySQLErrName
+        .get(&tidb_base::errno::ErrInfoSchemaChanged)
+        .expect("registered error message");
+    let raw: &'static str =
+        Box::leak(format!("{}. {}", base.raw, tidb_kv::error::TxnRetryableMark).into_boxed_str());
+    tidb_base::dbterror::ClassDomain.new_std_err(
+        tidb_base::errno::ErrInfoSchemaChanged,
+        &tidb_base::mysql::message(raw, base.redact_arg_pos),
+    )
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;

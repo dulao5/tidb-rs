@@ -2213,3 +2213,5 @@ VS1-36	D12.5	pkg/executor/sortexec/topn_chunk_heap.go	topNChunkHeap.initPtrsImpl
 VS1-36	D12.5	pkg/executor/sortexec/topn_chunk_heap.go	topNChunkHeap.keyColumnsCompare	5	
 VS1-36	D12.5	pkg/executor/sortexec/topn_chunk_heap.go	topNChunkHeap.processChk	7	
 VS1-36	D12.5	pkg/executor/sortexec/topn_chunk_heap.go	topNChunkHeap.update	7	
+VS1-14m	D05.3	pkg/session/session.go	InitMDLVariable	24	
+VS1-14m	D05.3	pkg/session/session.go	RemoveLockDDLJobs	26	

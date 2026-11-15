@@ -223,6 +223,16 @@ must never block DDL for longer than the bound.
 
 ## Why synced mode is correct
 
+> **Scope (2026-11-15, #146 part 1, #252 `go-gap`).** This argument covers the prototype
+> path (`crates/poc`) only: its MaxTS case relies on the admission registry holding an entry
+> for every statement, autocommit reads included. The new stack (the Go port) follows Go
+> v8.5.8 instead: autocommit reads and `EXECUTE` register nothing, `PREPARE` registers while
+> it runs, and reads do not check the schema lease. So for a new-stack MaxTS point get the
+> owner is *not* held at `v+1` by an entry of ours; the read relies on Go's own argument
+> (the statement is short and uses one InfoSchema version), with the same gap Go has. That
+> gap, and the fact that new-stack registrations are not yet reported to the cluster, are
+> recorded in #252. See the sessiontxn spec (D05.4) §3a.
+
 Online DDL (F1) moves an element through states in which any two *adjacent* schema
 versions are compatible. The owner commits version `v+1` only after every registered node
 has acknowledged `v`. With MDL, a node acknowledges `v` for a job's tables only once no

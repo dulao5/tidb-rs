@@ -17,8 +17,13 @@
 //!   (a shared value, [`InfoSchemaHandle`]); `TableByName` gives the table's meta (Go's
 //!   `table.Table.Meta()`). The lookup is synchronous: the session loads the statement's
 //!   tables into the InfoSchema's table cache before planning (D06.3 spec §11.2). A missing
-//!   InfoSchema (`sessiontxn.GetTxnManager(...).GetTxnInfoSchema()`) is `blocked-by:D05.4`. The stale-read processor (`staleread`, D05.4) and the MDL lock
-//!   (`tryLockMDLAndUpdateSchemaIfNecessary`, D05.4 / D06.5) are boundary stubs too.
+//!   InfoSchema (`sessiontxn.GetTxnManager(...).GetTxnInfoSchema()`) is `blocked-by:D05.4`
+//!   (the transaction context). The stale-read processor (`staleread`, D05.4) is a boundary
+//!   stub too.
+//! - The metadata lock (`tryLockMDLAndUpdateSchemaIfNecessary`, per Go v8.5.8; the gaps Go
+//!   leaves are recorded in #252, label `go-gap`): Go reads the newest InfoSchema from
+//!   `domain.GetDomain(sctx)`; the preprocessor has no session, so the caller hands the
+//!   session's domain InfoSchema in with [`with_domain_info_schema`] (glue).
 //! - The AST's `WithClause` is shared (`Arc`, as Go shares the `*WithClause`) and has no
 //!   `ConsumerCount`: the counts `UpdateCTEConsumerCount` keeps are a side table keyed by the
 //!   CTE (L2; the CTE builder, D09.5, reads them).
@@ -50,7 +55,7 @@ use tidb_types::errors::{ErrMBiggerThanD, ErrTooBigPrecision, ErrTooBigScale};
 use tidb_types::fsp::MaxFsp;
 
 use super::plan_cache_utils::InfoSchemaLookup;
-use super::resolve::{ContextRef, NodeW};
+use super::resolve::{ContextRef, NodeW, TableNameW, table_name_key};
 
 /// `parser.ErrSyntax` (`pkg/parser/yy_parser.go`: `terror.ClassParser.NewStd(mysql.ErrSyntax)`).
 #[allow(non_upper_case_globals)]
@@ -84,6 +89,14 @@ pub fn init_txn_context_provider(p: &mut Preprocessor<'_>) {
 // go: WithPreprocessorReturn L1
 pub fn with_preprocessor_return(ret: PreprocessorReturn) -> PreprocessOpt {
     Box::new(move |p| p.ret = Some(ret))
+}
+
+/// The session's domain InfoSchema (Go `domain.GetDomain(sctx).InfoSchema()`), read by the
+/// metadata lock (see the module doc). Without it, a statement that has to take the lock
+/// stops at a boundary stub (`blocked-by:D06.5`, the session's domain).
+// glue: domain.GetDomain(sctx) for the preprocessor (M-CTX)
+pub fn with_domain_info_schema(is: Arc<dyn InfoSchemaLookup>) -> PreprocessOpt {
+    Box::new(move |p| p.domain_info_schema = Some(is))
 }
 
 /// TryAddExtraLimit trys to add an extra limit for SELECT or UNION statement when sql_select_limit is set.
@@ -145,6 +158,7 @@ pub fn preprocess(
         ret: None,
         err: None,
         resolve_ctx: node.get_resolve_context(),
+        domain_info_schema: None,
     };
     for opt_fn in preprocess_opt {
         opt_fn(&mut v);
@@ -275,6 +289,8 @@ pub struct Preprocessor<'a> {
     err: Option<Error>,
 
     resolve_ctx: ContextRef,
+    /// The session's domain InfoSchema ([`with_domain_info_schema`]).
+    domain_info_schema: Option<Arc<dyn InfoSchemaLookup>>,
 }
 
 /// A node the walker hands to `Enter` / `Leave` (Go: `ast.Node`).
@@ -650,16 +666,60 @@ impl Preprocessor<'_> {
                 return;
             }
         };
-        if !self.skip_lock_mdl()
-            && let Err(err) = try_lock_mdl_and_update_schema_if_necessary()
-        {
-            self.err = Some(err);
+        let mut table = table;
+        if !self.skip_lock_mdl() {
+            let is = match self.ensure_info_schema() {
+                Ok(is) => is,
+                Err(err) => {
+                    self.err = Some(err);
+                    return;
+                }
+            };
+            let domain_is = self.domain_info_schema.clone();
+            match try_lock_mdl_and_update_schema_if_necessary(
+                self.vars,
+                &tidb_parser::model::CIStr::new(&tn.schema.l()),
+                table,
+                is.as_ref(),
+                domain_is.as_deref(),
+            ) {
+                Ok(t) => table = t,
+                Err(err) => {
+                    self.err = Some(err);
+                    return;
+                }
+            }
+        }
+
+        let table_info = table;
+        // infoschema.SchemaByTable(p.ensureInfoSchema(), tableInfo)
+        let db_info = match self.ensure_info_schema() {
+            Ok(is) => is.schema_by_id(table_info.dbid),
+            Err(err) => {
+                self.err = Some(err);
+                return;
+            }
+        };
+        // tableName should be checked as sequence object.
+        if self.flag & IN_SEQUENCE_FUNCTION > 0 && !table_info.is_sequence() {
+            let db_name = db_info
+                .as_ref()
+                .map(|d| d.name.o.clone())
+                .unwrap_or_default();
+            self.err = Some(
+                tidb_infoschema::error::ErrWrongObject.gen_with_stack_by_args(vec![
+                    Arg::from(db_name),
+                    Arg::from(table_info.name.o.clone()),
+                    Arg::from("SEQUENCE"),
+                ]),
+            );
             return;
         }
-        // tableInfo := table.Meta(); infoschema.SchemaByTable, the sequence check
-        // (inSequenceFunction) and resolveCtx.AddTableName follow the metadata lock above,
-        // a boundary stub (D05.4) that always returns first.
-        let _ = (table, &self.resolve_ctx, IN_SEQUENCE_FUNCTION);
+        self.resolve_ctx.lock().add_table_name(TableNameW {
+            table_name: table_name_key(tn),
+            db_info,
+            table_info,
+        });
     }
 
     /// The table's meta (Go returns the `table.Table`; the callers here use its `Meta()`).
@@ -908,15 +968,217 @@ pub fn has_auto_convert_warning() -> Result<(), Error> {
     Err(blocked("D02.2", "hasAutoConvertWarning (ast.ColumnDef)"))
 }
 
-/// `tryLockMDLAndUpdateSchemaIfNecessary`: the metadata lock of the table a statement reads
-/// (`tidb_enable_metadata_lock`) needs the transaction context (D05.4) and `table.Table`
-/// (D06.3 part 2).
-// glue: stub of tryLockMDLAndUpdateSchemaIfNecessary, blocked-by:D05.4 (MDL: the txn context)
-pub fn try_lock_mdl_and_update_schema_if_necessary() -> Result<(), Error> {
-    Err(blocked(
-        "D05.4",
-        "metadata lock (tryLockMDLAndUpdateSchemaIfNecessary)",
-    ))
+/// `tryLockMDLAndUpdateSchemaIfNecessary`: registers the table a statement uses in the
+/// session's metadata-lock table (Go `SessionVars.GetRelatedTableForMDL()`, a map of table ID
+/// to the schema version in use, which the DDL owner's check reads) and switches to the
+/// domain's newest definition of the table. Per Go v8.5.8 (`preprocess.go:2057-2180`); the
+/// gaps of Go's rule (an autocommit read registers nothing) are recorded in #252
+/// (`go-gap`). The sessiontxn spec (D05.4) §3a.
+///
+/// The registration lives in the session's own transaction context (no lock shared by the
+/// read path). Who registers, as Go:
+/// - `PREPARE`: a fresh statement context has `IsReadOnly` false, so the lock branch runs;
+///   the registration is cleared when `PrepareStmt` ends (`rollbackOnError` → `RollbackTxn`
+///   → `TxnCtx.Cleanup`);
+/// - `EXECUTE` and other autocommit reads: `IsReadOnly` is true, nothing is registered;
+/// - DML and statements of explicit transactions: registered until the transaction ends.
+///
+/// Reporting the registrations to the cluster (Go `RemoveLockDDLJobs`, which the domain's
+/// MDL check loop runs over all sessions) is not wired for new-stack sessions yet: see
+/// [`remove_lock_ddl_jobs`].
+///
+/// Differences (boundary stubs):
+/// - `domain.GetDomain(sctx)` is the domain InfoSchema the caller hands in (the module doc);
+///   without one, the lock branch is `blocked-by:D06.5` (the session's domain).
+/// - Global temporary tables (`skipLock`, `SessionExtendedInfoSchema.MdlTables`) are
+///   `blocked-by:D06.3` (part 2: the session-extended InfoSchema).
+/// - `table.TableFromMeta(autoid.NewAllocatorsFromTblInfo(...))`: the planner uses the
+///   table's meta only, the copy with the hidden new index is that meta.
+/// - `SessionExtendedInfoSchema.UpdateTableInfo` (so that later lookups of the transaction
+///   see the newer table) is not ported (D06.3 part 2): when the domain's table is not the
+///   one of the transaction's InfoSchema, the statement stops at a boundary stub
+///   (`blocked-by:D06.3`) and the PoC answers. So the new stack never plans with a table
+///   definition newer than the transaction's InfoSchema, whose version the router compares
+///   with the PoC's (the column check of a prepared statement owned by both stays valid).
+/// - `curTxn.SetOption(kv.TableToColumnMaps, nil)` resets a cache of the write path: a
+///   read-only session never sets it.
+// go: tryLockMDLAndUpdateSchemaIfNecessary L2 (global temporary tables and UpdateTableInfo: blocked-by:D06.3; the domain is passed in)
+pub fn try_lock_mdl_and_update_schema_if_necessary(
+    vars: &mut SessionVars,
+    db_name: &tidb_parser::model::CIStr,
+    tbl: Arc<tidb_model::TableInfo>,
+    is: &dyn InfoSchemaLookup,
+    domain_is: Option<&dyn InfoSchemaLookup>,
+) -> Result<Arc<tidb_model::TableInfo>, Error> {
+    let mut locked_id: i64 = 0;
+    let mut res = try_lock_mdl_inner(vars, db_name, tbl, is, domain_is, &mut locked_id);
+
+    // defer:
+    // if the table is not in public state, avoid running any queries on it. This verification is actually
+    // not related to the MDL, but it's a good place to put it.
+    //
+    // This function may return a new table, so we need to check the return value in the `defer` block.
+    if let Ok(ret_tbl) = &res
+        && ret_tbl.state != tidb_model::StatePublic
+    {
+        res = Err(
+            tidb_infoschema::error::ErrTableNotExists.fast_gen_by_args(vec![
+                Arg::from(db_name.l.clone()),
+                Arg::from(ret_tbl.name.l.clone()),
+            ]),
+        );
+    }
+    if let Ok(ret_tbl) = &res {
+        vars.stmt_ctx_mut().related_table_ids.insert(ret_tbl.id);
+    }
+    if locked_id != 0 && res.is_err() {
+        // because `err != nil`, the `retTbl` is `nil` and the `tbl` can also be `nil` here. We use the `lockedID` instead.
+        vars.get_related_table_for_mdl().0.lock().remove(&locked_id);
+    }
+    res
+}
+
+/// The body of [`try_lock_mdl_and_update_schema_if_necessary`] before Go's `defer`.
+// go-part: tryLockMDLAndUpdateSchemaIfNecessary
+fn try_lock_mdl_inner(
+    vars: &mut SessionVars,
+    db_name: &tidb_parser::model::CIStr,
+    tbl: Arc<tidb_model::TableInfo>,
+    is: &dyn InfoSchemaLookup,
+    domain_is: Option<&dyn InfoSchemaLookup>,
+    locked_id: &mut i64,
+) -> Result<Arc<tidb_model::TableInfo>, Error> {
+    let mut skip_lock = false;
+    if !vars.state.txn_ctx.enable_mdl {
+        return Ok(tbl);
+    }
+    if is.schema_meta_version() == 0 {
+        return Ok(tbl);
+    }
+    if vars.state.snapshot_infoschema {
+        return Ok(tbl);
+    }
+    if vars.state.txn_ctx.is_staleness {
+        return Ok(tbl);
+    }
+    if tbl.temp_table_type == tidb_model::TempTableLocal {
+        // Don't attach, don't lock.
+        return Ok(tbl);
+    } else if tbl.temp_table_type == tidb_model::TempTableGlobal {
+        skip_lock = true;
+    }
+    if super::common_plans::is_auto_commit_txn(vars) && vars.stmt_ctx().is_read_only {
+        return Ok(tbl);
+    }
+    let table_info = tbl;
+    let mdl = vars.get_related_table_for_mdl();
+    if mdl.0.lock().contains_key(&table_info.id) {
+        return Ok(table_info);
+    }
+    if skip_lock {
+        // se.MdlTables.TableByID: "Already attach."
+        // glue: blocked-by:D06.3 (global temporary tables: SessionExtendedInfoSchema.MdlTables)
+        return Err(blocked(
+            "D06.3",
+            "global temporary tables (SessionExtendedInfoSchema.MdlTables)",
+        ));
+    }
+
+    // We need to write 0 to the map to block the txn.
+    // If we don't write 0, consider the following case:
+    // the background mdl check loop gets the mdl lock from this txn. But the domain infoSchema may be changed before writing the ver to the map.
+    // In this case, this TiDB wrongly gets the mdl lock.
+    mdl.0.lock().insert(table_info.id, 0);
+    *locked_id = table_info.id;
+    let Some(domain_schema) = domain_is else {
+        // glue: blocked-by:D06.5 (domain.GetDomain(sctx): no domain InfoSchema was handed in)
+        return Err(blocked("D06.5", "the session's domain (metadata lock)"));
+    };
+    let domain_schema_ver = domain_schema.schema_meta_version();
+    let mut tbl = domain_schema.table_by_name(db_name, &table_info.name)?;
+    mdl.0.lock().insert(tbl.id, domain_schema_ver);
+    *locked_id = tbl.id;
+    // Check the table change, if adding new public index or modify a column, we need to handle them.
+    if tbl.revision != table_info.revision && !vars.is_pessimistic_read_consistency() {
+        tbl = check_table_change(&table_info, tbl)?;
+    }
+
+    // se, ok := is.(*infoschema.SessionExtendedInfoSchema); se.UpdateTableInfo(db, tbl)
+    let same_table = Arc::ptr_eq(&tbl, &table_info)
+        || (tbl.id == table_info.id
+            && tbl.revision == table_info.revision
+            && tbl.update_ts == table_info.update_ts);
+    if !same_table {
+        // glue: blocked-by:D06.3 (SessionExtendedInfoSchema.UpdateTableInfo: a table newer than the transaction's InfoSchema)
+        return Err(blocked(
+            "D06.3",
+            "a table definition newer than the transaction's InfoSchema (SessionExtendedInfoSchema.UpdateTableInfo)",
+        ));
+    }
+    // curTxn.SetOption(kv.TableToColumnMaps, nil): the write path (see the doc comment).
+    Ok(tbl)
+}
+
+/// The table-change check of `tryLockMDLAndUpdateSchemaIfNecessary` when the domain's table
+/// has another `Revision` than the transaction's (`table_info`): an index that is public in
+/// the domain's table but not in the transaction's is hidden (a copy of the table with the
+/// index in `WriteReorganization`; the shared definition is not changed, N13), and a public
+/// column whose ID changed is `ErrInfoSchemaChanged` (8028).
+// go-part: tryLockMDLAndUpdateSchemaIfNecessary
+pub fn check_table_change(
+    table_info: &tidb_model::TableInfo,
+    mut tbl: Arc<tidb_model::TableInfo>,
+) -> Result<Arc<tidb_model::TableInfo>, Error> {
+    let mut copy_table_info: Option<tidb_model::TableInfo> = None;
+
+    let mut info_indices = HashMap::new();
+    for idx in table_info.indices.iter().flatten() {
+        info_indices.insert(idx.name.l.clone(), idx.id);
+    }
+
+    for (i, idx) in tbl.indices.iter().flatten().enumerate() {
+        if idx.state != tidb_model::StatePublic {
+            continue;
+        }
+        let found = info_indices.get(&idx.name.l);
+        if found != Some(&idx.id) {
+            // Go `tbl.Meta().Clone()`: a deep copy, the shared definition is not changed (N13).
+            let copy = copy_table_info.get_or_insert_with(|| tidb_model::TableInfo::clone(&tbl));
+            if let Some(indices) = copy.indices.as_mut() {
+                tidb_model::make_mut(&mut indices[i]).state = tidb_model::StateWriteReorganization;
+            }
+        }
+    }
+    if let Some(copy) = copy_table_info {
+        // table.TableFromMeta(allocs, copyTableInfo): the meta only (see the doc comment).
+        tbl = Arc::new(copy);
+    }
+    // Check the column change.
+    let mut info_columns = HashMap::new();
+    for col in table_info.columns.iter().flatten() {
+        info_columns.insert(col.name.l.clone(), col.id);
+    }
+    for col in tbl.columns.iter().flatten() {
+        if col.state != tidb_model::StatePublic {
+            continue;
+        }
+        if let Some(&colid) = info_columns.get(&col.name.l)
+            && colid != col.id
+        {
+            log::info!(
+                "public column changed column={} old_col={} new id={} old id={}",
+                col.name.l,
+                col.name.l,
+                col.id,
+                col.id
+            );
+            return Err(tidb_domain::ErrInfoSchemaChanged.gen_with_stack(
+                "public column %s has changed",
+                vec![Arg::from(col.name.o.clone())],
+            ));
+        }
+    }
+    Ok(tbl)
 }
 
 /// Calls `Enter` / `Leave` of the preprocessor in the order of Go's `Accept` methods (see

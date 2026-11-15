@@ -30,8 +30,8 @@ pub fn table_name_key(tn: &TableName) -> TableNameKey {
 pub struct TableNameW {
     /// The embedded `*ast.TableName`, by identity.
     pub table_name: TableNameKey,
-    /// DBInfo.
-    pub db_info: Arc<DBInfo>,
+    /// DBInfo (Go: nil when `SchemaByTable` finds no database).
+    pub db_info: Option<Arc<DBInfo>>,
     /// TableInfo.
     pub table_info: Arc<TableInfo>,
 }

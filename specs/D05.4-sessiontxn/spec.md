@@ -55,6 +55,46 @@ tidb-rs 是只读节点；显式事务里的写语句和加锁读由会话拒绝
 - **显式只读事务**（N11 D8，已确认）：`EnterNewTxnWithBeginStmt` 照 Go 进入（RR / optimistic 用一个 start ts，RC 每条语句一个 ts）。`READ ONLY` 的接受与写语句 1792 由会话负责（D05.3 / VS1-14）。
 - **`tidb_rc_read_check_ts`**（N11 D11，**暂定**，待负责人在 #146 决定）：Go 在事务内的只读语句上设置 `RCCheckTS`，复用上一个 ts 并让 TiKV 检查写冲突。client-rust 支持之前，该语句返回 TiDB 的 1235（`ErrNotSupportedYet`）。它是真正的错误，**不是** `blocked` 边界桩：路由器不能回退到 PoC（PoC 会只复用 ts 而不检查）。路由器测试 `rc_read_check_ts_is_not_a_fallback`（`crates/poc/session`）固定这一点。
 
+## 3a. 元数据锁（MDL）与读路径（照 Go v8.5.8；Go 本身的缺口见 #252，标签 `go-gap`）
+
+负责人决定（#146 第一部分，2026-11-15）：新栈的元数据锁、lease、MaxTS 三项都**照 Go**。Go 的做法在只读节点上留下的缺口记录在 #252（`go-gap`），由负责人与内核团队讨论；代码注释同样引用 #252。
+
+**先说几个词**
+- **元数据锁（MDL）**：不是一把会让语句等待的锁，而是每个会话自己的一张登记表"本会话正在用表 t 的第 v 版结构"（Go `SessionVars.GetRelatedTableForMDL()`，表 ID → schema 版本）。DDL 每推进一步，都等所有节点上已经没有会话登记更旧的版本。它只让 DDL 等，从不让 SELECT 等。
+- **登记 / 清除**：`tryLockMDLAndUpdateSchemaIfNecessary`（预处理器查到表之后调用，`planner/core/preprocess.rs`）写登记；事务结束时 `TxnCtx.Cleanup` 清掉整张表。
+- **上报**：Go 的 domain 每 50 ms 对本节点所有会话调用 `RemoveLockDDLJobs`，只有没有会话还在用旧版本时，才向 etcd 报告"本节点已到新版本"。
+
+**谁登记（照 Go）**
+
+| 语句 | 登记吗 | Go 依据 |
+|---|---|---|
+| `PREPARE` | **登记**，并改用 domain 最新的表定义；`PrepareStmt` 结束时清除（`rollbackOnError` → `RollbackTxn`），失败时同样清除 | 新建的语句上下文 `IsReadOnly` 为 false，不满足"autocommit 只读就跳过"（`preprocess.go:2101`、`session.go:2547`） |
+| `EXECUTE`、autocommit 的普通 SELECT | **不登记** | autocommit、不在事务中、`IsReadOnly` 为 true，直接返回 |
+| DML、显式事务里的语句 | 登记，直到事务结束 | 只读节点上这些语句目前由路由器交给 PoC；会话侧的结构已按 Go 实现，不加新的路由 |
+
+跳过的条件按 Go 的顺序：`TxnCtx.EnableMDL` 关（事务开始时取自 `tidb_enable_metadata_lock`）、InfoSchema 版本为 0、`tidb_snapshot`、stale read、本地临时表（不登记也不加锁）、全局临时表（Go 的 `skipLock`，查 `MdlTables`）、autocommit 且只读。
+
+**写入顺序**：先写 0，再取 domain 最新的 InfoSchema，再写它的版本（Go 的注释：否则后台检查可能在 domain 版本变化之前看到本会话"没有登记"而误报）。Go 的 `defer` 三件事照搬：表不是 public → `ErrTableNotExists`（用换过的表）；成功时（包括跳过的分支）记入语句的 `RelatedTableIDs`；出错时按已登记的表 ID 删除登记。
+
+**表定义变了（`Revision` 不同，且不是悲观 RC 事务）**：domain 的表里新变成 public、而事务的表里没有的索引，在一份**复制**的表定义里标成 `WriteReorganization`（不用于读；共享的定义不改，N13）；public 列的 ID 变了 → `ErrInfoSchemaChanged`（8028，文案照 Go：标准文案加 ". [try again later]"）。
+
+**登记存放在哪里**：每个会话自己的事务上下文（`TransactionContext.related_table_for_mdl`，`Arc<parking_lot::Mutex<HashMap>>`）。读路径上没有全局锁；这张表会被上报跨连接读取（Go `sync.Map`），所以用 `parking_lot` 锁（M-LOCK 规则）。
+
+**与 Go 的差异（边界桩，代码中已标注）**
+1. **上报未接到 etcd**（`tidb_session::session::report_metadata_locks`，`blocked-by:D06.5`，即"domain 的 MDL 检查循环尚未移植"）：`RemoveLockDDLJobs` 已照 Go 移植（`remove_lock_ddl_jobs`），但没有调用者。本节点向集群的上报仍由原型路径（`crates/poc/domain`，根据它自己的准入登记）完成，它看不到新栈会话的登记。后果：**DDL 不会等新栈上正在执行的 `PREPARE`**（比 Go 宽松；PREPARE 中只用一个 InfoSchema 版本，路由器又比较它与 PoC 的版本）。在上报接上之前，路由器**不得**把 DML 或显式事务交给新栈（VS1 tasks 的完成条件），因为它们的登记跨语句存在。
+2. `domain.GetDomain(sctx)`：预处理器没有会话，调用方用 `with_domain_info_schema` 传入会话的 domain InfoSchema；没有时，需要加锁的语句停在 `blocked-by:D06.5`。
+3. `SessionExtendedInfoSchema.UpdateTableInfo`（让事务后续的查找看到更新的表）未移植（D06.3 第 2 部分，"会话扩展的 InfoSchema"）：domain 的表与事务 InfoSchema 的表不同时，语句停在 `blocked-by:D06.3`，由 PoC 回答。因此新栈**永远不会**用比事务 InfoSchema 更新的表定义规划；路由器在 PREPARE 前已要求新栈与 PoC 的 schema 版本相同，所以"两边都持有"的预处理语句的列检查（`check_columns`）不会因为这里换表而不一致（Lucky 评审第 4 点）。全局临时表同样停在 `blocked-by:D06.3`。
+4. `InitMDLVariable`（启动时从 meta 读 `MetadataLock` 键）：新栈启动时假设为 Go 的默认值"开"（`init_mdl_variable`，`blocked-by:D06.5`）；`SET GLOBAL tidb_enable_metadata_lock` 由 PoC 执行。
+5. `table.TableFromMeta` / autoid 分配器：规划只用表的元数据，复制的表定义就是元数据。
+
+**lease**：照 Go，新栈的读语句**不检查** schema lease（Go 只在写事务提交时检查，`session.go:510-513`；#252）。§3 表格中"lease 检查用的当前"一列描述的是 PoC 的准入，新栈不做。
+
+**MaxTS**：照 Go，autocommit 点查若不需要二次读取，读在 MaxTS（`IsPointGetWithPKOrUniqueKeyByAutoCommit`，规划器已有移植，会话经 `AdviseOptimizeWithPlanAndThenWarmUp` 接入），0 次 TSO 请求。注意 Go 的名字容易误解：**整数主键**和**聚簇表的主键**用 MaxTS；**普通唯一索引**要回表（二次读取），Go 不用 MaxTS，取 TSO（1 次请求）。
+
+**现在停在哪里**（真实新会话 + sbtest InfoSchema + 模拟存储）：`PREPARE s FROM 'SELECT c FROM sbtest1 WHERE id=?'` 通过元数据锁与表的解析（`resolveCtx.AddTableName`），停在**规划器**的 `buildSelect`（`blocked-by:D09.1`，计划构建器）。路由器因此把该语句交给 PoC，`EXECUTE` 也由 PoC 执行；新会话的 `ExecutePreparedStmt` 本身还停在**会话**里的 `ast.ExecuteStmt`（`blocked-by:D02.2`，Rust AST 没有 EXECUTE 节点）。所以用模拟存储还不能返回行。
+
+**测试**：`crates/session/src/tests.rs`（PREPARE 登记并在结束时清除，失败也清除；autocommit 读不登记、显式事务登记并按 Go 上报；整数主键 / 聚簇主键点查 MaxTS、0 次 TSO，普通唯一索引 1 次 TSO；PREPARE 停在 D09.1），`crates/planner/src/core/plan_cache_tests.rs`（跳过条件、写 0 再写版本、出错删除、非 public、表定义变化）。govec：`preprocess` 原先停在元数据锁桩的 9 条记录现在与 Go 输出一致（92 条一致，原 83）；元数据锁本身的行为依赖会话内部状态与 domain，Go 的输出（登记表）不在 SQL 结果中，没有可直接对照的 Go 输出，用上面的场景测试代替。
+
 ## 4. 与 Go 的差异（均已在代码中标注）
 
 1. `GetTxnInfoSchema` 不返回 `SnapshotInfoschema`（该会话字段随 D05.2 / D06.5；`tidb_snapshot` 语句由 VS1 路由到 PoC），也不包 `SessionExtendedInfoSchema`（D06.3 第 2 部分 T9）。

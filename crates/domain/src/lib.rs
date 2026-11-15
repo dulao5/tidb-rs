@@ -11,4 +11,4 @@
 
 pub mod domain;
 
-pub use domain::{Domain, RelatedSchemaChange, new_domain};
+pub use domain::{Domain, ErrInfoSchemaChanged, RelatedSchemaChange, new_domain};

@@ -800,6 +800,10 @@ impl SessionContext for SessionCore {
     fn get_txn_info_schema(&mut self) -> Option<InfoSchemaRef> {
         self.txn_manager.get_txn_info_schema(&mut self.sctx)
     }
+    // glue: domain.GetDomain(sctx).InfoSchema() (the session's domain InfoSchema)
+    fn get_domain_info_schema(&self) -> Option<InfoSchemaRef> {
+        Some(self.sctx.get_domain_info_schema())
+    }
     // glue: interface method sessiontxn.TxnManager.GetTxnScope
     fn get_txn_scope(&self) -> String {
         self.txn_manager.get_txn_scope(&self.sctx)
@@ -1603,4 +1607,64 @@ pub(crate) async fn run_stmt(
     // query, we record its slow log here, then it could include the transaction commit time.
     s.finish_execute_stmt(&mut se.core, orig_txn_start_ts, err.as_ref().err(), false);
     err.map(|()| None)
+}
+
+/// RemoveLockDDLJobs removes the DDL jobs which doesn't get the metadata lock from job2ver.
+///
+/// Go's DDL check loop (`domain.mdlCheckLoop`) calls it for every session of the node and
+/// reports a job as done on this node only if no session still uses an older schema version
+/// of the job's tables. Ported per Go (`session.go:4936-4961`; the gaps of Go's rule are
+/// recorded in #252, `go-gap`). `job2ids` holds each job's table IDs (Go passes the
+/// comma-separated string and parses it here, `util.Str2Int64Map`). Go logs a transaction
+/// that blocks a DDL for over a minute; that log needs `TxnCtx.StartTS` and is left to the
+/// reporting hook ([`report_metadata_locks`]). Nothing calls it yet: see that hook.
+// go: RemoveLockDDLJobs L2 (the log of a long blocking transaction is left to the reporting hook)
+pub fn remove_lock_ddl_jobs(
+    vars: &SessionVars,
+    job2ver: &mut HashMap<i64, i64>,
+    job2ids: &HashMap<i64, std::collections::HashSet<i64>>,
+) {
+    if vars.in_restricted_sql {
+        return;
+    }
+    let Some(mdl) = vars.state.txn_ctx.related_table_for_mdl() else {
+        return;
+    };
+    for (tbl_id, value) in mdl.0.lock().iter() {
+        job2ver.retain(|job_id, ver| {
+            let holds = job2ids.get(job_id).is_some_and(|ids| ids.contains(tbl_id));
+            !(holds && *value < *ver)
+        });
+    }
+}
+
+/// The hook through which this node's metadata-lock report would include the new-stack
+/// sessions (Go: the domain's `mdlCheckLoop` → `CheckOldRunningTxn` → [`remove_lock_ddl_jobs`]
+/// over every session). Not wired in this version: the cluster report of this node is still
+/// made by the prototype (`crates/poc/domain`, from its own admission registry), which does
+/// not see the registrations of new-stack sessions. Consequences, until the hook lands:
+/// - the DDL owner does not wait for a `PREPARE` running on the new stack (looser than Go;
+///   the statement's table lookups use one InfoSchema version and the router compares it
+///   with the prototype's);
+/// - the router must not send DML or explicit transactions to the new stack (VS1 tasks,
+///   completion conditions), because their registrations last across statements.
+// glue: stub of the new-stack MDL reporting hook (domain.mdlCheckLoop over new-stack sessions), blocked-by:D06.5 (the domain's MDL check loop is still the prototype's)
+pub fn report_metadata_locks() -> Result<(), Error> {
+    Err(blocked(
+        "D06.5",
+        "reporting the metadata locks of new-stack sessions to the cluster",
+    ))
+}
+
+/// InitMDLVariable initializes the metadata lock variable (`tidb_enable_metadata_lock`, read
+/// by each new transaction into `TxnCtx.EnableMDL`).
+///
+/// Go reads the `MetadataLock` key of the meta (`meta.Mutator.GetMetadataLock`) at bootstrap
+/// and writes `true` when it is unset. Reading the meta at bootstrap is the domain's start-up
+/// (D06.5); until then the new stack assumes Go's default, on (v8.5.8 clusters are
+/// bootstrapped with it; `SET GLOBAL tidb_enable_metadata_lock` runs on the prototype).
+// glue: stub of InitMDLVariable, blocked-by:D06.5 (the meta read at bootstrap; Go's default ON is assumed)
+pub fn init_mdl_variable() {
+    tidb_sessionctx::variable::tidb_vars::EnableMDL
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 }

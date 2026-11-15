@@ -331,6 +331,8 @@
 
 ### 4.2 schema 同步：lease 按 TSO、准入窗口 ≤ 注册窗口（#136）
 
+> **新栈（按 Go 逐函数移植的执行路径）照 Go；见 #252（`go-gap`，Go 本身的缺口）。** 负责人决定（#146 第一部分，2026-11-15）：新栈的读语句**不检查** schema lease（Go 只在写事务提交时检查），也**不经过** PoC 的准入登记。本节的准入规则（lease 检查、准入登记、结果 fencing）只适用于原型路径（`crates/poc`，即目前处理大部分语句的旧实现），它在退役之前保持现状。新栈的元数据锁见 D05.4（事务上下文）spec §3a。
+
 **规则**（#136 Lucky 的三点，本 spec 写成不变式；实现见 PR #145，ADR 0005 新增的 "Schema lease (#136)" 一节）：
 
 1. **lease 按 TSO 计**，照 `schema_validator.go:134-148`：
@@ -375,6 +377,7 @@
 - 理由：同步已经连续失败 45 s 时，坏掉的是 meta region 或 TSO 本身。回退路径会等它恢复，然后成功；8027 则立即失败。#136 的停顿来自"5 s 就注销、所有语句都去读 meta region"，而不是回退路径本身。lease 放宽到 45 s 之后，回退路径只在真正长时间的故障中使用。
 
 **显式只读事务与 MDL**（§4.5）
+- 新栈照 Go（#252 `go-gap`）：`PREPARE` 期间登记、结束时清除；`EXECUTE` 与 autocommit 读不登记；DML 与显式事务登记到事务结束。登记在每个会话自己的事务上下文里，读路径上没有全局锁。新栈会话的登记**尚未上报**给集群（上报仍由原型路径完成，它看不到这些登记），所以在上报接上之前，路由器不把 DML 与显式事务交给新栈。详见 D05.4 spec §3a。
 - 事务在 registry 中的条目从**第一次访问表**开始，到 COMMIT / ROLLBACK 为止；表集合随语句累加。这与 Go 一致（`preprocess.go:2101`）。
 - 事务内第一次访问某表时，用当前同步的 schema，并照 Go 处理新索引和列 ID 变化（`preprocess.go:2132-2175`）。
 - 长事务会挡住 DDL，与 Go 一致；`mysql.tidb_mdl_view` 看不到它（ADR 0005 已列）。D6 决定是否加上限。
@@ -432,7 +435,7 @@ enum ReadTsSource {
 
 | 读 ts 来源 | 用的 schema | MDL |
 |---|---|---|
-| Tso / LowResolution / MaxTs / TxnStart | 同步的 schema（§4.2 准入） | 显式事务持有，autocommit 不持有 |
+| Tso / LowResolution / MaxTs / TxnStart | 同步的 schema（原型路径：§4.2 准入；新栈：照 Go 不检查 lease，#252） | 显式事务持有，autocommit 不持有（新栈另有 `PREPARE` 期间持有，照 Go） |
 | Stale / Snapshot | `GetSnapshotInfoSchema(ts)`：ADR 0003 的"在 ts 上读版本并加载"，带缓存 | 不持有 |
 | External | 同 Tso（ADR 0009 模式 1 中，注入的 ts 是刚从 PD 取的 TSO） | 同 autocommit |
 
@@ -491,7 +494,7 @@ enum ReadTsSource {
 |---|---|---|---|
 | D1 | 是否写 `/topology/tidb` | (a) 不写（ADR 0005 现状）；(b) 写，Dashboard 和 TiProxy 都能看到 | **(a)**：TiProxy 按连接路由，没有读写分离（ADR 0009 §2），进入 topology 会收到写连接。tidb-rs 的发现另走 ADR 0009 D3 |
 | D2 | server ID 与 global KILL | (a) 维持 `server_id=0`，不支持跨节点 KILL；(b) 照 Go 抢占 server ID，globalconn 连接 ID，status 端口 gRPC 接收 KILL | **(b)**，随 D03.1 / status 端口 gRPC 一起做；之前按 (a)，并按 §4.1 避开 Go 的 ID 段 |
-| D3 | schema lease 是否用于读语句准入 | (a) 照 Go，读不检查（节点失联后无限期用旧 schema）；(b) 按 TSO 在准入时检查（§4.2） | **(b)**：只读节点的读就是全部流量；这是 #136 的修复方向 |
+| D3 | schema lease 是否用于读语句准入（**新栈已定：照 Go，不检查，#252 `go-gap`**；下面的推荐只对原型路径有效） | (a) 照 Go，读不检查（节点失联后无限期用旧 schema）；(b) 按 TSO 在准入时检查（§4.2） | **(b)**：只读节点的读就是全部流量；这是 #136 的修复方向 |
 | D4 | lease 过期后的语句（新语句，以及检查 ts 越过过期时间的已准入语句） | (a) **回退**：照 Go 等待 reload（10 × 500 ms），仍未恢复时走 ADR 0003 的逐语句路径，读语句不报错；(b) **给读引入一个 Go 没有的错误**：等待后报 8027 | **(a) 回退**，与修订后的 PR #145 一致。理由：reload 已经连续失败 45 s，坏的是 meta region 或 TSO 本身；回退路径会等它恢复，然后成功，8027 则立即失败。Go 对读也从不报 8027 |
 | D5 | lease 与 `max_staleness` 默认值 | (a) 都取 45 s（Go 的 lease），卡住的 tidb-rs 最多挡 DDL 约 45 s；(b) 更短（如 15 s），可用性窗口也更短 | **(a)**，两者可配置，启动时校验 `max_staleness ≥ lease` |
 | D6 | 显式只读事务对 DDL 的阻挡 | (a) 照 Go，事务多长就挡多久；(b) 加上限（超过后事务报 8028，释放 MDL） | **(a)** 照 Go；监控里给出阻挡 DDL 的 tidb-rs 事务 |
