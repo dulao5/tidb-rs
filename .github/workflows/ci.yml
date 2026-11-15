@@ -112,6 +112,11 @@ jobs:
         env:
           TZ: America/Sao_Paulo
         run: cargo test --locked -p tidb-infoschema --test govec_table
+      - name: test (govec_pointget, non-UTC TZ)
+        if: runner.os == 'Linux'
+        env:
+          TZ: America/Sao_Paulo
+        run: cargo test --locked -p tidb-executor --test govec_pointget
       - name: test (release-checked, Go-ported crates)
         env:
           TIDB_TYPES_FUZZ_ITERS: "500000000"
@@ -134,5 +139,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: test
         run: cargo test --locked -p tidb-types -p tidb-base -p tidb-memory -p tidb-parser -p tidb-model -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-expr-pushdown -p tidb-execdetails -p tidb-infoschema -p tidb-store -p tidb-sessiontxn
+      # The point get replay (govec pointget, VS1-12) on this target's vectors.
+      - name: test (govec_pointget)
+        run: cargo test --locked -p tidb-executor --test govec_pointget
       - name: test (release-checked)
         run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-expr-pushdown -p tidb-execdetails -p tidb-infoschema -p tidb-store -p tidb-sessiontxn

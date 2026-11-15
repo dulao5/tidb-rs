@@ -32,9 +32,19 @@ tipb = { workspace = true }
 futures = { workspace = true }
 parking_lot = "0.12"
 log = "0.4"
+# VS1-12 (D12.1 point get): snapshots and handles (D07.0), the row decoders and record keys
+# (D01.11), the old row format's chunk decoder (D01.8), the session's store labels of a
+# closest replica read (kvproto `metapb.StoreLabel` is client-rust's, ADR 0008).
+tidb-kv = { workspace = true }
+tidb-tablecodec = { workspace = true }
+tidb-codec = { workspace = true }
+tikv-client = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+# The govec vectors (pointget, and tablecodec's record keys) are .jsonl.gz.
+flate2 = "1.0"
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
