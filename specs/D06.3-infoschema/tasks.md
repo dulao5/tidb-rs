@@ -1,6 +1,6 @@
 # D06.3：tasks
 
-状态截至 2026-11-14。
+状态截至 2026-11-15。
 
 | # | 任务 | 完成条件 | 状态 |
 |---|---|---|---|
@@ -11,6 +11,6 @@
 | T5 | `builder`、`builder_misc`、`bundle_builder`（PR 1b）、`infoschema`（misc，PR 1a） | govec 回放一致 | 完成 |
 | T6 | govec `infoschema` 领域与 Rust 回放（PR 1b），种子 1–8，反证 | 全部一致；豁免表理由合规 | 完成 |
 | T7 | amd64 向量：取 tracker#73 的 CI artifact | x86_64 CI 通过 | 完成 |
-| T8 | 第 2 部分：`InfoCache` | converge +16 | 未开始 |
-| T9 | 第 2 部分：`InfoSchema` trait、`SessionTables`、`SessionExtendedInfoSchema`、接口辅助函数、`init` | converge +26 | 未开始 |
+| T8 | 第 2 部分：`InfoCache`（spec §10） | converge +16 | 完成（VS1-17，评审中）：15/16 + `gcOldVersion` 桩 |
+| T9 | 第 2 部分：`InfoSchema` trait、`SessionTables`、`SessionExtendedInfoSchema`、接口辅助函数、`init` | converge +26 | 部分：规划器用窄接口 `InfoSchemaLookup` 和同步查找（spec §11），完整 trait 未做 |
 | T10 | 第 2 部分：混合集群测试、N11 表级检查（随 D06.5） | — | 未开始 |

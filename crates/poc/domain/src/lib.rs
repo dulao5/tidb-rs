@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 pub mod keys;
+pub mod ported_domain;
 mod registry;
 mod schema_validator;
 pub mod serverinfo;

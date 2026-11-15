@@ -2,7 +2,7 @@
 
 块 D06.3（ROADMAP P2 L3）：`pkg/infoschema` 的 `builder.go`、`builder_misc.go`、`bundle_builder.go`、`infoschema.go`、`infoschema_v2.go`、`cache.go`、`sieve.go`、`internal/sizer.go`，以及 `pkg/infoschema/context`。crate `tidb-infoschema`（N0 rank 9，与 D06.2、D06.4、D06.6 同一个 crate），模块在 crate 根下：`builder`、`builder_misc`、`bundle_builder`、`infoschema`、`infoschema_v2`、`sieve`、`context`、`error`。
 
-状态：第 1 部分，分两个 PR：**1a**（本 spec、例外 A3 的设计、`Data` 与 `InfoSchemaV2` 的读取、SIEVE、边界桩，converge 120/270）和 **1b**（builder、`ApplyDiff`、govec 回放，converge 184/270）。§5.6 的四项 2026-11-14 已确认（协调人 Maya：1–3 是例外 A3 内的工程选择，4 来自负责人"v1 是技术债"的决定）；§6 的 N11 钩子保持默认关闭，等 N11 D7。
+状态：第 2 部分进行中（VS1-17）：`InfoCache`（T8，§10）完成；规划器用的表查找（§11）以窄接口 `InfoSchemaLookup` 先接通，完整的 `InfoSchema` trait（T9）未做。第 1 部分，分两个 PR：**1a**（本 spec、例外 A3 的设计、`Data` 与 `InfoSchemaV2` 的读取、SIEVE、边界桩，converge 120/270）和 **1b**（builder、`ApplyDiff`、govec 回放，converge 184/270）。§5.6 的四项 2026-11-14 已确认（协调人 Maya：1–3 是例外 A3 内的工程选择，4 来自负责人"v1 是技术债"的决定）；§6 的 N11 钩子保持默认关闭，等 N11 D7。
 
 ## 1. 范围
 
@@ -160,3 +160,42 @@ D06.3：270 个函数（295 个中 25 个归 X）。PR 1a 之后 `matched 120/27
 5. **`Purge` 后的 hand**：`Sieve.Purge` 不重置 `hand`，之后的 `evict` 从已删除的元素开始；若该 key 不在 map 中则 panic（"sieve: evicting non-existent element"）。v8.5.8 只有测试调用 `Purge` / `Close`。
 6. **`Data.mu.versionTimestamps` 从不写入**，`getVersionByTS` 恒返回 (0, false)：死代码。
 7. **GC 删掉截止版本上的读者需要的 item**（已确认，单独的 issue [#195](https://github.com/dulao5/tidb-rs/issues/195)）：`gcCollectTableItem`（`infoschema_v2.go:424`）、`gcCollectReferredForeignKeyItem`（`:452`）删除"比截止版本旧、且同一张表有更新 item"的 item，但更新的 item 可能在截止版本之上。例如表在 v3 建、v8 改，截止版本（`GetOldestSchemaVersion`）为 5 时 v3 被删，版本 5 的 InfoSchema 报表不存在。tidb-rs 作为有意偏离修正（§4 第 7 条）；单元测试 `gc_keeps_the_item_a_reader_at_the_cut_needs` 的注释记录了 Go 的行为。
+
+## 10. 第 2 部分：`InfoCache`（T8）
+
+`cache.go` 的 16 个函数，模块 `cache`。domain（D06.5）用它保存最近的若干个版本（容量 `tidb_schema_version_cache_limit`，默认 16）。
+
+- 每个版本是 `Arc<InfoSchemaV2>`（N13：版本是不可变快照，各版本共享同一个 `Data`）。版本被挤出缓存时从切片中移除，最后一个持有它的语句结束时释放（单元测试 `evicted_versions_are_freed`）。
+- Go 的 `cap(h.cache)` 是字段 `capacity`。查找、插入、`ReSize`、空版本表的逻辑按 L1 移植。
+- `IsV2` 恒为真（§1.2）：`Insert` 中"同版本但 v1/v2 不同"的分支不会出现；`Upsert`（v1/v2 切换）照 Go 移植但不会被调用，Go 返回的"销毁旧对象"函数在 Rust 中什么也不做（旧版本随切片释放）。
+- **边界桩** `gcOldVersion`（`blocked-by:D06.2`）：Go 用 `meta.GetOldestSchemaVersion` 经 `store/helper` 读 schema version 键的 MVCC 历史（TiKV 的调试接口），得到集群中仍在使用的最旧版本，再 `Data.GCOldVersion`。在 D06.2 第 2 部分移植之前，`Data` 中旧版本的 item 不清理：每次 DDL 留下的 item 数量与 Go 在 GC 之前相同，随 DDL 次数增长，重启后清零。表对象缓存（SIEVE）仍按容量淘汰，所以增长的只是 item（名字、ID、版本号），不是 `TableInfo`。这是暂时的偏离，需要在 D06.2 第 2 部分去掉。
+- metrics（`GetLatestCounter` 等）不移植（§4 第 3 条）。
+- 测试：Go `test/cachetest/cache_test.go` 的 7 个测试移植为单元测试（Go 的 `MockInfoSchemaWithSchemaVer` 是 v1，用只设了版本的空 v2 代替；Go 的 `require.Equal(isN, ...)` 比较版本），另加 `evicted_versions_are_freed`。
+
+converge：`scripts/converge.py --block D06.3 --part specs/VS1-vertical-slice/functions.tsv --item VS1-17 crates/infoschema/src/cache.rs`：`matched 15/16`，桩 1 个（`gcOldVersion`）。
+
+## 11. 第 2 部分：规划器的表查找
+
+### 11.1 接口
+
+完整的 `InfoSchema` trait（`interface.go`，T9）、`SessionTables`、`SessionExtendedInfoSchema` 还没有做（临时表属于写路径之外的 D06.4，新栈不处理）。规划器目前通过 D13.1 的窄接口 `InfoSchemaLookup`（`TableByName`、`TableByID`、`SchemaByID`、`SchemaMetaVersion`）使用 InfoSchema；`InfoSchemaV2` 实现它，预处理的 `PreprocessorReturn.InfoSchema` 是它的共享值（`InfoSchemaHandle`）。T9 做完后，`InfoSchemaLookup` 换成完整的 trait。
+
+### 11.2 同步查找与规划前的加载（协调人决定，Maya，2026-11-15）
+
+这是内部的工程选择，与 §5.6 第 1–3 条同类：读到的是同一个版本、同一个时间戳，缓存未命中的语句交给 PoC，没有用户可见的差别。
+
+Go 的 `infoschemaV2.TableByName` 在表对象不在缓存中时读 TiKV（`loadTableInfo`），所以在 Rust 中是 `async`（§3）。而规划器（预处理、plan builder、点查快速路径）是同步的：Go 在这些地方直接调用 `TableByName`，把规划器整体改成 `async` 代价很大，在同步代码中 `block_on` 又违反 N3（M-BLOCK）。
+
+做法：
+
+1. `InfoSchemaV2` 增加两个只读内存的方法 `table_by_name_resident` / `table_by_id_resident`：与 `TableByName` / `TableByID` 相同的索引查找和缓存查找，只是在需要读 TiKV 的地方返回"不在缓存中"。表不存在等错误与 Go 相同。
+2. 规划器的 `InfoSchemaLookup` 用这两个方法。不在缓存中时返回边界桩错误（`blocked-by:D06.3`），路由器把语句交给 PoC，结果仍然正确。
+3. 会话在规划之前（`PrepareStmt` 中运行 prepare 执行器之前、`ExecuteStmt` 中编译之前）找出语句中的表名，逐个 `await TableByName`（默认回填缓存），把表对象放进缓存。规划器随后就能在缓存中找到它们。表名由 plan cache 的 AST walker 收集（`statement_table_names`），CTE 名字也会被尝试，查不到就算了，错误留给规划器自己的查找报告。
+
+与 Go 的差别：
+
+- 多出的只是一次提前的 `TableByName`，它本来就会在规划中发生，读到的是同一个版本、同一个时间戳，结果相同。
+- `PrepareStmt` 要把 SQL 文本多解析一次（Go 只在 prepare 执行器中解析一次），只发生在 PREPARE。
+- 加载和规划之间如果表对象被淘汰（缓存容量很小、并发访问大量的表），规划器返回边界桩，语句走 PoC。默认容量 512 MiB 下不会发生。
+
+另一个可选方案是把规划器中查表的路径改成 `async`。规划器是 VS1 的主体，这个改动会波及 D09 / D10 的所有入口，所以不采用。两处额外开销（PREPARE 多解析一次、每条语句提前加载表）列入 VS1-20 的 profile 清单。

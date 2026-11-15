@@ -167,6 +167,43 @@ const _: () = {
     send::<ast::Stmt>();
 };
 
+/// Loads the tables `stmt` names into the table cache of the session's InfoSchema
+/// (`InfoSchema.TableByName`, which refills the cache), so that the synchronous planner
+/// finds them there (D06.3 spec §11.2). Errors are left to the planner's own lookup.
+// glue: the table loads before planning (D06.3 spec §11.2)
+fn load_stmt_tables(
+    sctx: &SessCtx,
+    stmt: &ast::Stmt,
+) -> impl std::future::Future<Output = ()> + Send + use<> {
+    let names: Vec<(String, String)> =
+        tidb_planner::core::plan_cache_utils::statement_table_names(stmt)
+            .into_iter()
+            .filter_map(|(schema, table)| {
+                let schema = if schema.is_empty() {
+                    sctx.vars.current_db.clone()
+                } else {
+                    schema
+                };
+                (!schema.is_empty()).then_some((schema, table))
+            })
+            .collect();
+    let is = sctx.get_info_schema();
+    load_tables(is, names)
+}
+
+// glue: the table loads before planning (D06.3 spec §11.2)
+async fn load_tables(is: InfoSchemaRef, names: Vec<(String, String)>) {
+    for (schema, table) in names {
+        let _ = is
+            .table_by_name(
+                tidb_infoschema::infoschema_v2::Ctx::background(),
+                &tidb_parser::model::CIStr::new(&schema),
+                &tidb_parser::model::CIStr::new(&table),
+            )
+            .await;
+    }
+}
+
 impl SessCtx {
     // go: session.GetSessionVars L1
     pub fn get_session_vars(&self) -> &SessionVars {
@@ -1180,6 +1217,9 @@ impl Session {
         let stmt_label = crate::glue::get_stmt_label(&stmt_node)?;
         self.core.set_request_source(&stmt_label);
 
+        // The planner's table lookups do not read TiKV (D06.3 spec §11.2).
+        load_stmt_tables(&self.core.sctx, &stmt_node).await;
+
         // Transform abstract syntax tree to a physical plan(stored in executor.ExecStmt).
         let text = self.core.sctx.vars.stmt_ctx().original_sql.clone();
         let compiler = Compiler;
@@ -1344,6 +1384,19 @@ impl Session {
                     "the prepare dedup cache (the plan-cache exception A3)",
                 ));
             }
+        }
+
+        // The planner's table lookups do not read TiKV (D06.3 spec §11.2): load the
+        // statement's tables into the InfoSchema's table cache first. The prepare executor
+        // parses the text again (Go parses it once, inside the executor).
+        let load = tidb_parser::parse(sql, &tidb_parser::ParseOptions::default())
+            .ok()
+            .and_then(|out| match out.stmts.as_slice() {
+                [stmt] => Some(load_stmt_tables(&core.sctx, stmt)),
+                _ => None,
+            });
+        if let Some(load) = load {
+            load.await;
         }
 
         let mut prepare_exec = new_prepare_exec(sql);

@@ -35,6 +35,7 @@ members = [
   "crates/executor",
   "crates/session",
   "crates/sessiontxn",
+  "crates/domain",
   # SPIKE (D09.7 design pilot for N1): not for merging, not counted in coverage.
   "crates/spike/planner-pilot",
   "tools/ab",
@@ -135,6 +136,7 @@ tidb-execdetails = { path = "crates/execdetails" }
 tidb-infoschema = { path = "crates/infoschema" }
 tidb-statistics = { path = "crates/statistics" }
 tidb-sessiontxn = { path = "crates/sessiontxn" }
+tidb-domain = { path = "crates/domain" }
 tidb-sessionctx = { path = "crates/sessionctx" }
 tidb-systable = { path = "crates/systable" }
 tidb-expression = { path = "crates/expression" }

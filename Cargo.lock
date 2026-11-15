@@ -2532,6 +2532,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tidb-base",
  "tidb-distsql",
+ "tidb-domain",
  "tidb-infoschema",
  "tidb-kv",
  "tidb-meta",
@@ -2614,9 +2615,12 @@ dependencies = [
  "poc-kv",
  "tidb-base",
  "tidb-distsql",
+ "tidb-domain",
  "tidb-expression",
+ "tidb-infoschema",
  "tidb-meta",
  "tidb-metrics",
+ "tidb-model",
  "tidb-mysql-protocol",
  "tidb-parser",
  "tidb-session",
@@ -3746,6 +3750,22 @@ dependencies = [
  "tidb_query_datatype",
  "tipb",
  "tipb_helper",
+ "tokio",
+]
+
+[[package]]
+name = "tidb-domain"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "log",
+ "parking_lot 0.12.5",
+ "tidb-base",
+ "tidb-infoschema",
+ "tidb-kv",
+ "tidb-model",
+ "tidb-parser",
+ "tidb-sessionctx",
  "tokio",
 ]
 

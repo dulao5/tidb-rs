@@ -2,8 +2,9 @@
 //! block D09.0, the VS1-10 part of `preprocess.go` — the SELECT checks of
 //! `preprocess_test.go` `TestValidator` and more — against Go TiDB v8.5.8.
 //!
-//! Records whose Rust result is a boundary stub (`blocked-by:<block>`: resolving a base
-//! table needs the InfoSchema interface of D06.3 part 2, VS1-17) are counted as blocked
+//! Records whose Rust result is a boundary stub (`blocked-by:<block>`: the InfoSchema here
+//! has no tables, and a table that is not found needs the privilege check of D04.1) are
+//! counted as blocked
 //! (constitution §7.3); the count per block is pinned below, so a stub that starts answering
 //! for records it should not cannot stay green. A record Go parses must parse in Rust. Every
 //! other record must match Go's error code and message (or Go's success).
@@ -12,17 +13,24 @@ use std::collections::BTreeMap;
 use std::io::Read;
 
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
 use tidb_parser::{ParseOptions, parse};
+
+use tidb_model::TableInfo;
+use tidb_parser::model::CIStr;
+use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
 use tidb_planner::core::preprocess::{
-    PreprocessOpt, PreprocessorReturn, in_prepare, preprocess, with_preprocessor_return,
+    InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, in_prepare, preprocess,
+    with_preprocessor_return,
 };
 use tidb_planner::core::resolve::new_node_w;
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 
 /// The number of records answered by each boundary stub.
-const EXPECTED_BLOCKED: [(&str, usize); 3] = [("D02.2", 4), ("D06.3", 11), ("D09.5", 3)];
+const EXPECTED_BLOCKED: [(&str, usize); 4] =
+    [("D02.2", 4), ("D04.1", 2), ("D05.4", 9), ("D09.5", 3)];
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -31,6 +39,38 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
 } else {
     "unsupported"
 };
+
+/// The generator's InfoSchema by name only: `test.t` and `test.person` exist (their
+/// columns are not read before the metadata lock, a boundary stub of D05.4); a table that is
+/// not found stops at the privilege check (D04.1).
+struct GeneratorTables;
+
+impl InfoSchemaLookup for GeneratorTables {
+    fn table_by_name(&self, schema: &CIStr, table: &CIStr) -> Result<Arc<TableInfo>, Error> {
+        if schema.l == "test" && (table.l == "t" || table.l == "person") {
+            return Ok(Arc::new(TableInfo {
+                name: table.clone(),
+                ..Default::default()
+            }));
+        }
+        Err(tidb_base::errors::new(format!(
+            "no table {}.{}",
+            schema.o, table.o
+        )))
+    }
+    fn table_by_id(&self, _: i64) -> Result<Option<Arc<TableInfo>>, Error> {
+        Ok(None)
+    }
+    fn schema_name_by_id(&self, _: i64) -> Option<CIStr> {
+        None
+    }
+    fn schema_meta_version(&self) -> i64 {
+        0
+    }
+    fn snapshot(&self) -> Arc<dyn InfoSchemaLookup> {
+        Arc::new(GeneratorTables)
+    }
+}
 
 struct Acc;
 
@@ -70,7 +110,7 @@ fn run(sql: &str, prepare: bool) -> Outcome {
         opts.push(Box::new(in_prepare));
     }
     opts.push(with_preprocessor_return(PreprocessorReturn {
-        has_info_schema: true,
+        info_schema: Some(InfoSchemaHandle(Arc::new(GeneratorTables))),
         ..Default::default()
     }));
     let (_, res) = preprocess(&mut vars, &mut node, opts);

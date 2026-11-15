@@ -283,6 +283,8 @@ fn main() {
                 .schema_sync_max_staleness
                 .map_or(args.lease, Duration::from_secs_f64);
             cfg.stall_file = args.schema_sync_stall_file.clone();
+            // The new stack's InfoSchema (the ported domain) only when the new stack is on.
+            cfg.ported_domain = new_stack.uses_ported_domain();
             let sync = SchemaSync::start(kv.clone(), cfg)
                 .await
                 .map_err(|e| std::io::Error::other(format!("start schema sync: {e}")))?;

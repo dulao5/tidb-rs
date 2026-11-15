@@ -314,8 +314,53 @@ fn scripted(mode: NewStackMode, poc: &FakePoc) -> (Router, Arc<Mutex<Script>>) {
     (r, script)
 }
 
+/// An InfoSchema with `test.sbtest1 (id BIGINT PRIMARY KEY, c CHAR(120))`, built by a full
+/// load as the domain builds it.
+fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
+    use tidb_model::{ColumnInfo, DBInfo, StatePublic, TableInfo};
+    use tidb_parser::model::CIStr;
+    use tidb_parser::types::FieldType;
+    let col = |id: i64, name: &str, tp: u8| {
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset: (id - 1) as isize,
+            field_type: FieldType::new(tp),
+            state: StatePublic,
+            ..Default::default()
+        })
+    };
+    let t = TableInfo {
+        id: 110,
+        name: CIStr::new("sbtest1"),
+        columns: Some(vec![
+            col(1, "id", tidb_base::mysql::TypeLonglong),
+            col(2, "c", tidb_base::mysql::TypeString),
+        ]),
+        pk_is_handle: true,
+        state: StatePublic,
+        version: 5,
+        max_column_id: 2,
+        ..Default::default()
+    };
+    let mut db = DBInfo {
+        id: 2,
+        name: CIStr::new("test"),
+        state: StatePublic,
+        ..Default::default()
+    };
+    db.deprecated.tables = Some(vec![Arc::new(t)]);
+    let mut b = tidb_infoschema::new_builder(None, None, tidb_infoschema::new_data());
+    block_on(b.init_with_db_infos(vec![db], vec![], vec![], 1)).unwrap();
+    Arc::new(block_on(b.build(1)))
+}
+
+/// The real new session, with an InfoSchema that has `test.sbtest1`.
 fn real(mode: NewStackMode, poc: &FakePoc) -> Router {
-    Router::new(mode, Box::new(NewSession::new()), &poc.values())
+    let mut new = NewSession::new(None);
+    new.session_mut()
+        .set_domain_info_schema(sbtest_info_schema());
+    Router::new(mode, Box::new(new), &poc.values())
 }
 
 fn parse(sql: &str) -> ast::Stmt {
@@ -1090,9 +1135,10 @@ fn real_prepare_is_blocked_and_restored() {
     }
 }
 
-/// Where a real PREPARE of [`POINT`] stops on the new session: the preprocessor resolves
-/// the table through the InfoSchema interface (D06.3 part 2, VS1-17).
-const REAL_PREPARE_BLOCK: &str = "D06.3";
+/// Where a real PREPARE of [`POINT`] stops on the new session: the preprocessor finds the
+/// table in the InfoSchema and then takes the metadata lock of the table
+/// (`tryLockMDLAndUpdateSchemaIfNecessary`, which needs the transaction context, D05.4).
+const REAL_PREPARE_BLOCK: &str = "D05.4";
 
 /// The real new session's `ExecutePreparedStmt` / `DropPreparedStmt` of an id it never
 /// prepared: Go's `ErrStmtNotFound` (8111), not a boundary stub; with no plan cache
@@ -1220,4 +1266,13 @@ fn not_idle_new_session_goes_to_the_poc() {
 fn fallback_after_open_is_detected() {
     assert!(!fallback_after_open(3, 3));
     assert!(fallback_after_open(3, 4));
+}
+
+/// `--new-stack=off` (the default) builds no ported domain; the other modes do.
+#[test]
+fn ported_domain_only_with_the_new_stack_on() {
+    assert!(!NewStackMode::default().uses_ported_domain());
+    assert!(!NewStackMode::Off.uses_ported_domain());
+    assert!(NewStackMode::Fallback.uses_ported_domain());
+    assert!(NewStackMode::Strict.uses_ported_domain());
 }

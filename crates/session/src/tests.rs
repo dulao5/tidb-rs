@@ -1033,7 +1033,8 @@ fn max_prepared_stmt_count_counts_closed_stmts() {
 }
 
 /// The real `PrepareStmt` runs the prepare executor: a SELECT without a table stops at the
-/// plan builder (D09.1), one with a table at the InfoSchema interface (D06.3); two
+/// plan builder (D09.1), one with a table that the (empty) InfoSchema does not have at the
+/// privilege check of a missing table (D04.1); two
 /// statements are Go's `ErrPrepareMulti`; nothing is added to the session.
 #[test]
 fn prepare_stmt_runs_the_prepare_executor() {
@@ -1043,7 +1044,7 @@ fn prepare_stmt_runs_the_prepare_executor() {
     let e = block_on(s.prepare_stmt("select ?")).unwrap_err();
     assert_eq!(blocked_by(&e), Some("D09.1"), "{e}");
     let e = block_on(s.prepare_stmt("select c from sbtest1 where id = ?")).unwrap_err();
-    assert_eq!(blocked_by(&e), Some("D06.3"), "{e}");
+    assert_eq!(blocked_by(&e), Some("D04.1"), "{e}");
     let e = block_on(s.prepare_stmt("select 1; select 2")).unwrap_err();
     assert_eq!(e.code(), 8115, "{e}");
     assert!(s.vars().state.prepared_stmts.is_empty());

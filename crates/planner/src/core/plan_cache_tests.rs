@@ -70,6 +70,9 @@ impl InfoSchemaLookup for Is {
     fn schema_meta_version(&self) -> i64 {
         self.0
     }
+    fn snapshot(&self) -> Arc<dyn InfoSchemaLookup> {
+        Arc::new(Is(self.0))
+    }
 }
 
 #[derive(Clone)]

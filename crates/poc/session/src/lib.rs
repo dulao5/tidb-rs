@@ -160,7 +160,12 @@ impl SessionFactory for Factory {
             router: None,
         };
         if self.new_stack != NewStackMode::Off {
-            let new = Box::new(router::newstack::NewSession::new());
+            let domain = self
+                .shared
+                .sync
+                .as_ref()
+                .and_then(|s| s.ported_domain().cloned());
+            let new = Box::new(router::newstack::NewSession::new(domain));
             let r = Router::new(self.new_stack, new, &session.poc_values());
             session.router = Some(Box::new(r));
         }
