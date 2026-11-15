@@ -358,7 +358,7 @@ def section_ab(cur, prev, lines):
 
 def section_new_stack(cur, routes, prev_routes, blocks, ab_status, lines, cur_new=None, prev_new=None):
     """The VS1 strict round (run.sh ab): what the new stack runs and why the rest falls back."""
-    lines.append("## New stack (VS1, `--new-stack=strict`)\n")
+    lines.append("## New stack (`--new-stack=strict`)\n")
     lines.append(
         "The tidb-ab workloads again, against a second tidb-rs started with `--new-stack=strict` "
         "(specs/VS1-vertical-slice/plan.md §4.3, §7.2): VS1-shaped SELECTs run on the new stack, a "

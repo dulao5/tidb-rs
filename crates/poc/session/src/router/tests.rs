@@ -349,7 +349,7 @@ fn snap(r: &Router) -> String {
 #[test]
 fn mode_parsing() {
     assert_eq!("off".parse(), Ok(NewStackMode::Off));
-    assert_eq!("vs1".parse(), Ok(NewStackMode::Vs1));
+    assert_eq!("fallback".parse(), Ok(NewStackMode::Fallback));
     assert_eq!("strict".parse(), Ok(NewStackMode::Strict));
     assert!("on".parse::<NewStackMode>().is_err());
     assert_eq!(NewStackMode::default(), NewStackMode::Off);
@@ -358,7 +358,7 @@ fn mode_parsing() {
 #[test]
 fn kind_and_ast_precheck() {
     let p = poc();
-    let r = real(NewStackMode::Vs1, &p);
+    let r = real(NewStackMode::Fallback, &p);
     let route = |sql: &str| r.route(&parse(sql), &p, false);
     for ok in [
         POINT,
@@ -521,7 +521,7 @@ fn step0_each_session_condition() {
 #[test]
 fn step0_schema_versions_must_be_equal() {
     let p = poc();
-    let (r, script) = scripted(NewStackMode::Vs1, &p);
+    let (r, script) = scripted(NewStackMode::Fallback, &p);
     for (v, want) in [
         (None, Route::New),
         (Some(1), Route::New),
@@ -545,7 +545,7 @@ fn step0_schema_versions_must_be_equal() {
 fn step0_comes_first() {
     let mut p = poc();
     p.in_txn = true;
-    let r = real(NewStackMode::Vs1, &p);
+    let r = real(NewStackMode::Fallback, &p);
     assert_eq!(
         r.route(&parse("SELECT count(*) FROM t"), &p, false),
         Route::Poc(Reason::Session("explicit transaction"))
@@ -558,7 +558,7 @@ fn step0_comes_first() {
 #[test]
 fn new_stack_answer_is_returned() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().answer = Some(Answer::Rows);
     let res = block_on(r.query(&mut p, POINT));
     assert_eq!(rows(&res).map(|r| r.0), Some(1));
@@ -571,7 +571,7 @@ fn new_stack_answer_is_returned() {
 #[test]
 fn go_ported_error_is_not_a_fallback() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().answer = Some(Answer::GoError);
     let e = block_on(r.query(&mut p, POINT)).unwrap_err();
     assert_eq!(e.code, 1054);
@@ -584,7 +584,7 @@ fn go_ported_error_is_not_a_fallback() {
 #[test]
 fn rc_read_check_ts_is_not_a_fallback() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().answer = Some(Answer::RcReadCheckTsNotSupported);
     let e = block_on(r.query(&mut p, POINT)).unwrap_err();
     assert_eq!(e.code, 1235);
@@ -599,10 +599,10 @@ fn rc_read_check_ts_is_not_a_fallback() {
 fn fallback_restores_the_new_session() {
     for block in ["D05.3", "D10.2", "D09.12", "D03.1"] {
         let mut p = poc();
-        let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+        let (mut r, script) = scripted(NewStackMode::Fallback, &p);
         script.lock().unwrap().answer = Some(Answer::Blocked(block));
         let mut pc = poc();
-        let (mut control, cscript) = scripted(NewStackMode::Vs1, &pc);
+        let (mut control, cscript) = scripted(NewStackMode::Fallback, &pc);
         cscript.lock().unwrap().version = Some(-1);
         for sql in [POINT, "SET NAMES latin1", POINT] {
             let a = block_on(r.query(&mut p, sql));
@@ -621,16 +621,16 @@ fn fallback_restores_the_new_session() {
 }
 
 /// The real session: every candidate reaches `Compile`, whose planner is `blocked-by:D09.13`;
-/// `vs1` falls back with the session unchanged, `strict` returns the 1235 error.
+/// `fallback` falls back with the session unchanged, `strict` returns the 1235 error.
 #[test]
 fn phase0_session_falls_back_or_reports_1235() {
     let mut p = poc();
-    let mut r = real(NewStackMode::Vs1, &p);
+    let mut r = real(NewStackMode::Fallback, &p);
     let before = r.new.session().state_snapshot();
     let res = block_on(r.query(&mut p, POINT));
     assert_eq!(rows(&res).map(|r| r.0), Some(3));
     // Only the PoC's previous-statement state was written.
-    let mut expected = real(NewStackMode::Vs1, &p);
+    let mut expected = real(NewStackMode::Fallback, &p);
     LastStmtInfo::from_poc(&LastStmtInfo::default(), &res)
         .apply_to(expected.new.session_mut().vars_mut());
     assert_eq!(snap(&r), snap(&expected));
@@ -655,7 +655,7 @@ fn phase0_session_falls_back_or_reports_1235() {
 #[test]
 fn last_stmt_new_then_poc() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     r.new
         .session_mut()
         .vars_mut()
@@ -689,7 +689,7 @@ fn last_stmt_new_then_poc() {
 #[test]
 fn last_stmt_poc_then_new() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     // The new stack ran a statement before (plan from cache, warnings, ...).
     script.lock().unwrap().answer = Some(Answer::Rows);
     block_on(r.query(&mut p, POINT)).unwrap();
@@ -726,7 +726,7 @@ fn last_stmt_poc_then_new() {
 #[test]
 fn session_state_sync() {
     let mut p = poc();
-    let (mut r, _) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, _) = scripted(NewStackMode::Fallback, &p);
     block_on(r.query(&mut p, "SET NAMES latin1")).unwrap();
     assert_eq!(get(&mut r, "character_set_client"), "latin1");
     assert_eq!(get(&mut r, "character_set_connection"), "latin1");
@@ -759,7 +759,7 @@ fn session_state_sync() {
         },
         ..poc()
     };
-    let mut r = real(NewStackMode::Vs1, &p);
+    let mut r = real(NewStackMode::Fallback, &p);
     assert_eq!(get(&mut r, "collation_connection"), "utf8_general_ci");
 }
 
@@ -769,7 +769,7 @@ fn session_state_sync() {
 #[test]
 fn prepared_both() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().prepare = Some(Answer::Rows);
     script.lock().unwrap().columns = vec![col("c")];
     let info = block_on(r.prepare(&mut p, 1, "SELECT c FROM t WHERE id = ?")).unwrap();
@@ -806,7 +806,7 @@ fn prepared_both() {
 #[test]
 fn prepared_fallback_metadata_mismatch() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().prepare = Some(Answer::Rows);
     block_on(r.prepare(&mut p, 1, POINT)).unwrap();
     script.lock().unwrap().answer = Some(Answer::Blocked("D10.2"));
@@ -834,7 +834,7 @@ fn prepared_fallback_metadata_mismatch() {
 fn prepared_poc_only() {
     // New stack Blocked at PREPARE: the PoC owns it for good.
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().prepare = Some(Answer::Blocked("D13.1"));
     let info = block_on(r.prepare(&mut p, 1, POINT)).unwrap();
     assert_eq!(info.columns, p.columns);
@@ -867,7 +867,7 @@ fn prepared_poc_only() {
 fn prepared_new_only() {
     let mut p = poc();
     p.prepare_fails = true;
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().prepare = Some(Answer::Rows);
     block_on(r.prepare(&mut p, 1, POINT)).unwrap();
     assert_eq!(r.owner(1), Some(&Owner::New { new_id: 101 }));
@@ -901,7 +901,7 @@ fn prepared_both_fail() {
     // Blocked + PoC error: the PoC's error.
     let mut p = poc();
     p.prepare_fails = true;
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().prepare = Some(Answer::Blocked("D13.1"));
     let e = block_on(r.prepare(&mut p, 1, POINT)).unwrap_err();
     assert_eq!(e.code, 1235);
@@ -924,7 +924,7 @@ fn prepared_both_fail() {
 #[test]
 fn close_by_owner() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().prepare = Some(Answer::Rows);
     block_on(r.prepare(&mut p, 1, POINT)).unwrap();
     script.lock().unwrap().prepare = Some(Answer::Blocked("D13.1"));
@@ -945,11 +945,11 @@ fn close_by_owner() {
 }
 
 /// VS1-14 part 1 (spec §0, Lucky): prepared statements are not prepared on the new stack;
-/// every one is owned by the PoC with the reason `prepared`, in `vs1` and `strict` mode
+/// every one is owned by the PoC with the reason `prepared`, in `fallback` and `strict` mode
 /// alike, and EXECUTE / CLOSE go to the PoC only.
 #[test]
 fn part1_prepare_is_poc_owned() {
-    for mode in [NewStackMode::Vs1, NewStackMode::Strict] {
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
         let mut p = poc();
         let mut r = real(mode, &p);
         let before = r.new.session().state_snapshot();
@@ -967,7 +967,7 @@ fn part1_prepare_is_poc_owned() {
     }
     // The scripted new stack is never asked either.
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     r.prepare_on_new = false;
     script.lock().unwrap().prepare = Some(Answer::Rows);
     block_on(r.prepare(&mut p, 1, POINT)).unwrap();
@@ -981,9 +981,9 @@ fn part1_prepare_is_poc_owned() {
 fn execute_starts_the_statement_once() {
     let starts = |p: &FakePoc| p.log.iter().filter(|l| l.starts_with("start")).count();
     for (mode, answer) in [
-        (NewStackMode::Vs1, Answer::Rows),
-        (NewStackMode::Vs1, Answer::Blocked("D10.2")),
-        (NewStackMode::Vs1, Answer::GoError),
+        (NewStackMode::Fallback, Answer::Rows),
+        (NewStackMode::Fallback, Answer::Blocked("D10.2")),
+        (NewStackMode::Fallback, Answer::GoError),
         (NewStackMode::Strict, Answer::Blocked("D10.2")),
     ] {
         let mut p = poc();
@@ -998,7 +998,7 @@ fn execute_starts_the_statement_once() {
     // New-only statements too.
     let mut p = poc();
     p.prepare_fails = true;
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().prepare = Some(Answer::Rows);
     block_on(r.prepare(&mut p, 1, POINT)).unwrap();
     for answer in [Answer::Rows, Answer::Blocked("D10.4")] {
@@ -1014,7 +1014,7 @@ fn execute_starts_the_statement_once() {
 #[test]
 fn prepare_with_unequal_schema_versions_is_poc_owned() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Vs1, &p);
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().version = Some(2);
     block_on(r.prepare(&mut p, 1, POINT)).unwrap();
     assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::SchemaVersion)));
@@ -1027,7 +1027,7 @@ fn prepare_with_unequal_schema_versions_is_poc_owned() {
 /// written to the new session that a restore would have to undo.
 #[test]
 fn not_idle_new_session_goes_to_the_poc() {
-    for mode in [NewStackMode::Vs1, NewStackMode::Strict] {
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
         let mut p = poc();
         let (mut r, script) = scripted(mode, &p);
         script.lock().unwrap().answer = Some(Answer::Rows);

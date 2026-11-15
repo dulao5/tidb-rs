@@ -1,6 +1,6 @@
 //! The VS1 router (glue, VS1-02; `specs/VS1-vertical-slice/plan.md` §4.3–§4.7).
 //!
-//! With `--new-stack=vs1|strict`, every statement of a session passes here before the PoC
+//! With `--new-stack=fallback|strict`, every statement of a session passes here before the PoC
 //! sees it. VS1-shaped `SELECT`s (text and prepared) go to the ported stack (`tidb-session`);
 //! everything else, and every statement the new stack answers with a boundary stub
 //! (`tidb_base::blocked`), runs on the PoC. With `--new-stack=off` (the default) no router
@@ -14,7 +14,7 @@
 //!    (diverged in the sync, [`sync`]), a cursor; then equal InfoSchema versions;
 //! 1. the statement kind (`SELECT` only) and 2. the AST pre-check ([`precheck`]);
 //! 3. the new stack plans; `Blocked(block)` (before any executor opened) restores the new
-//!    session ([`tidb_session::StmtCheckpoint`], §4.6) and falls back to the PoC (`vs1`) or
+//!    session ([`tidb_session::StmtCheckpoint`], §4.6) and falls back to the PoC (`fallback`) or
 //!    returns the 1235 error (`strict`). Any other error of the new stack is a Go-ported error
 //!    and goes to the client as it is;
 //! 4. prepared statements: §4.7, by statement id ([`Owner`]). VS1-14 part 1 does not
@@ -55,15 +55,17 @@ pub use last_stmt::{Engine, LastStmtInfo};
 /// A boxed `Send` future (the engines are trait objects).
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// `--new-stack` / `TIDB_RS_NEW_STACK` (VS1 plan §4.3).
+/// `--new-stack` / `TIDB_RS_NEW_STACK`: which statements run on the ported (new) stack
+/// (vertical-slice plan §4.3).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NewStackMode {
     /// Everything on the PoC, as before. The default.
     #[default]
     Off,
-    /// VS1 candidates on the new stack; `Blocked` falls back to the PoC.
-    Vs1,
-    /// VS1 candidates on the new stack; `Blocked` is returned as 1235 (the weekly build's
+    /// Statements the new stack supports run there; when it reaches code that is not ported
+    /// yet (`Blocked`), the statement falls back to the PoC.
+    Fallback,
+    /// Statements the new stack supports run there; reaching unported code (`Blocked`) is returned as 1235 (the weekly build's
     /// measure of what the new stack runs). Other statements still run on the PoC.
     Strict,
 }
@@ -74,9 +76,11 @@ impl std::str::FromStr for NewStackMode {
     fn from_str(s: &str) -> Result<NewStackMode, String> {
         match s {
             "off" => Ok(NewStackMode::Off),
-            "vs1" => Ok(NewStackMode::Vs1),
+            "fallback" => Ok(NewStackMode::Fallback),
             "strict" => Ok(NewStackMode::Strict),
-            _ => Err(format!("--new-stack must be off, vs1 or strict, got {s:?}")),
+            _ => Err(format!(
+                "--new-stack must be off, fallback or strict, got {s:?}"
+            )),
         }
     }
 }

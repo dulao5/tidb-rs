@@ -103,8 +103,8 @@ pub fn tidb_retry_options() -> RetryOptions {
 pub struct KvClient {
     inner: TransactionClient,
     retry: RetryOptions,
-    /// The ported store driver's `KVStore` when `TIDB_RS_POINT_GET=d07.1`: snapshots then
-    /// do their point gets and batch gets through `tidb_store::driver` (D07.1, VS1-18), so
+    /// The ported store driver's `KVStore` when `TIDB_RS_POINT_GET=store-driver`: snapshots then
+    /// do their point gets and batch gets through `tidb_store::driver`, the ported TiKV store driver, so
     /// that the fault scenarios (tools/ab/faults) compare it with this crate's own reads.
     driver: Option<std::sync::Arc<tidb_store::driver::tikv::KVStore>>,
     /// The coprocessor client's store (D07.2); its workers run on the ExecPool once
@@ -112,9 +112,9 @@ pub struct KvClient {
     copr: std::sync::Arc<CoprStore>,
 }
 
-/// Whether `TIDB_RS_POINT_GET=d07.1` is set (see [`KvClient`]).
+/// Whether `TIDB_RS_POINT_GET=store-driver` is set (see [`KvClient`]).
 fn driver_point_gets() -> bool {
-    std::env::var("TIDB_RS_POINT_GET").is_ok_and(|v| v == "d07.1")
+    std::env::var("TIDB_RS_POINT_GET").is_ok_and(|v| v == "store-driver")
 }
 
 /// The copr store over `inner`, its workers on `pool` (N3 ExecPool) when given.
@@ -266,7 +266,7 @@ pub fn register_client_metrics() {
 pub struct KvSnapshot {
     inner: tikv_client::Snapshot,
     ts: u64,
-    /// The D07.1 snapshot at the same timestamp (`TIDB_RS_POINT_GET=d07.1`).
+    /// The ported store driver's snapshot at the same timestamp (`TIDB_RS_POINT_GET=store-driver`).
     driver: Option<tidb_store::driver::txn::snapshot::TikvSnapshot>,
     copr: std::sync::Arc<CoprStore>,
 }

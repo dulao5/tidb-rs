@@ -104,7 +104,7 @@ impl Factory {
         }
     }
 
-    /// Sessions route VS1 statements to the new stack (`vs1` / `strict`, [`router`]); with
+    /// Sessions route statements the ported stack supports to it (`fallback` / `strict`, [`router`]); with
     /// `off` (the default) they run everything on the PoC, as before.
     pub fn with_new_stack(mut self, mode: NewStackMode) -> Factory {
         self.new_stack = mode;
@@ -190,7 +190,7 @@ pub struct Session {
     mdl: Option<StmtGuard>,
     /// Prometheus bookkeeping of the statement in flight.
     stmt: StmtMetrics,
-    /// The VS1 router (`--new-stack=vs1|strict`); `None` with `off`.
+    /// The router between the PoC and the ported stack (`--new-stack=fallback|strict`); `None` with `off`.
     router: Option<Box<Router>>,
 }
 

@@ -300,7 +300,7 @@ class VerdictTest(unittest.TestCase):
             self.assertTrue(first.startswith("**GREEN**"), first)
             with open(os.path.join(d, "report.md")) as f:
                 text = f.read()
-            self.assertIn("## New stack (VS1, `--new-stack=strict`)", text)
+            self.assertIn("## New stack (`--new-stack=strict`)", text)
             self.assertIn("on the new stack: **0**", text)
             self.assertIn("| `D05.3` | 5 |", text)
             self.assertIn("| poc | D05.3 | 5 |", text)

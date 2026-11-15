@@ -122,12 +122,13 @@ struct Args {
     /// `no-steal` (one current-thread runtime per worker; a connection stays on its thread).
     #[arg(long, default_value = "steal", value_parser = ["steal", "no-steal"])]
     runtime_topology: String,
-    /// The first vertical slice (VS1, specs/VS1-vertical-slice/plan.md §4.3): `off` runs
-    /// every statement on the prototype (the default); `vs1` sends VS1-shaped SELECTs to the
-    /// ported stack and falls back to the prototype on a boundary stub; `strict` returns the
+    /// Which statements run on the ported stack (specs/VS1-vertical-slice/plan.md §4.3): `off`
+    /// runs every statement on the prototype (the default); `fallback` sends the SELECTs the
+    /// ported stack supports to it and falls back to the prototype when it reaches code that
+    /// is not ported yet; `strict` returns the
     /// stub's 1235 error instead (for the weekly build). The environment variable
     /// TIDB_RS_NEW_STACK, when set, overrides this flag.
-    #[arg(long, default_value = "off", value_parser = ["off", "vs1", "strict"])]
+    #[arg(long, default_value = "off", value_parser = ["off", "fallback", "strict"])]
     new_stack: String,
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
