@@ -1,26 +1,33 @@
 //! go-file: pkg/planner/util/fixcontrol/get.go
 //!
-//! Go package `pkg/planner/util/fixcontrol` (block D09.13): the `tidb_opt_fix_control`
-//! switches. So far the boolean getters and the switch the point get fast path reads
-//! (VS1-11); the other getters and switch numbers come with their users.
+//! Part of `fixcontrol` (block D09.13): the boolean lookups that ranger (D10.4) reads,
+//! ported early under constitution §4.5 (no outgoing edges) and counted for D09.13. The
+//! other getters and the full list of fix numbers come with D09.13; only the numbers
+//! ranger and the point get fast path read are here.
 
+// Go constant names (M-GONAME).
 #![allow(non_upper_case_globals)]
 
 use std::collections::HashMap;
 
-/// Fix52592 controls whether to disallow fast path for Get and BatchGet.
+/// Fix44389 controls whether to consider non-point ranges of some CNF item when building ranges.
+pub const Fix44389: u64 = 44389;
+/// Fix54337 controls whether to apply or not range intersection for index access.
+pub const Fix54337: u64 = 54337;
+/// Fix52592 controls whether to disallow fast path for Get and BatchGet (the point get fast
+/// path, D10.8).
 pub const Fix52592: u64 = 52592;
 
 /// GetBool fetches the given key from the fix control map as a boolean type.
 ///
-/// Go's nil map is an empty one here (the session's map is never nil-observable).
+/// Go's nil map is an empty map here (both have no keys).
 // go: GetBool L1
 pub fn get_bool(fix_control_map: &HashMap<u64, String>, key: u64) -> (bool, bool) {
     let Some(raw_value) = fix_control_map.get(&key) else {
         return (false, false);
     };
     // The same as TiDBOptOn in sessionctx/variable.
-    let value = tidb_base::gostd::equal_fold(raw_value, "ON") || raw_value == "1";
+    let value = raw_value.eq_ignore_ascii_case("ON") || raw_value == "1";
     (value, true)
 }
 

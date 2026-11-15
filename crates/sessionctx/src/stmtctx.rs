@@ -314,8 +314,9 @@ pub struct StatementContext {
 
     /// `contextutil.PlanCacheTracker` (embedded in Go).
     pub plan_cache_tracker: Arc<PlanCacheTracker>,
-    /// `contextutil.RangeFallbackHandler` (embedded in Go).
-    pub range_fallback_handler: RangeFallbackHandler,
+    /// `contextutil.RangeFallbackHandler` (embedded in Go). Shared with the statement's
+    /// `RangerContext` (Go: `&sc.RangeFallbackHandler`).
+    pub range_fallback_handler: Arc<RangeFallbackHandler>,
 
     /// IgnoreExplainIDSuffix indicates whether to ignore the explain ID suffix.
     pub ignore_explain_id_suffix: bool,
@@ -516,8 +517,10 @@ pub fn new_stmt_ctx_with_time_zone(tz: Arc<Location>) -> StatementContext {
     let type_ctx = tidb_types::context::new_context(DefaultStmtFlags, tz, appender.clone());
     let err_ctx = new_err_ctx(&type_ctx, DefaultStmtErrLevels, appender.clone());
     let plan_cache_tracker = Arc::new(new_plan_cache_tracker(Some(appender.clone())));
-    let range_fallback_handler =
-        new_range_fallback_handler(Arc::clone(&plan_cache_tracker), appender);
+    let range_fallback_handler = Arc::new(new_range_fallback_handler(
+        Arc::clone(&plan_cache_tracker),
+        appender,
+    ));
     StatementContext {
         stmt_hints: crate::hint::StmtHints::default(),
         ctx_id: gen_context_id(),
@@ -669,8 +672,10 @@ impl StatementContext {
         self.type_ctx = tidb_types::context::new_context(DefaultStmtFlags, utc(), appender.clone());
         self.err_ctx = new_err_ctx(&self.type_ctx, DefaultStmtErrLevels, appender.clone());
         self.plan_cache_tracker = Arc::new(new_plan_cache_tracker(Some(appender.clone())));
-        self.range_fallback_handler =
-            new_range_fallback_handler(Arc::clone(&self.plan_cache_tracker), appender);
+        self.range_fallback_handler = Arc::new(new_range_fallback_handler(
+            Arc::clone(&self.plan_cache_tracker),
+            appender,
+        ));
         if !warn_handler.try_reset() {
             self.warn_sink.set(Arc::new(new_static_warn_handler(0)));
         }

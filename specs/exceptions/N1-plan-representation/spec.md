@@ -43,7 +43,7 @@ v8.5.8 中与表示相关的事实：
 2. **`taskMap` 等记忆化数据放旁表**：`HashMap<(PlanId, PropKey), Task>`，回滚逻辑按 Go 的时间戳语义移植。**本条没有被 D09.7 验证**，见 §7 第 3 条。
 3. **表达式用 `Arc<Expr>`，不可变共享，写时复制**：Go 的"先 Clone 再改"对应 `Arc::make_mut`。列身份继续用 `UniqueID`。审计范围包括三类共享对象：
    - **表达式节点**（`.Index =` / `.RetType =` 赋值）：44 处已在 D09.7 审计完（试点报告附录 A）。唯一依赖可见性的 `rule_partition_processor.go:157`（改 `partCols[i].Index`，期望在 `hashExpr` 中生效）在 PartitionProcessor 块（D09.12）的 plan 中写明改写方式：按 UniqueID 映射到位置，重写出一个新的 `hashExpr`。
-   - **`FieldType`**（`GetType()` 返回的对象上的赋值和方法调用）：按映射规则 **`M-FT`** 处理。默认写时复制：Go 的别名不模拟（D09.7 试点报告修订建议 3 的方案 (a)）。载体：`Column.ret_type` 原按值保存（D08.1）；N13 §8（#229 批次 A，待确认）改为 `Arc<FieldType>`，只经 `Arc::make_mut` 修改，语义仍是本条的写时复制，只是 Go 共享类型的地方不再复制。`Arc` 的指针身份**不**用来让写入对别的持有者可见（方案 (b) 仍然否决）。只有当 Go 的别名会改变 golden test 或 EXPLAIN 对照能看到的计划时，才在那一处显式模拟 Go 的效果：除了改本处的副本，还按 UniqueID 同步改同一查询中来源列（以及引用它的列）的类型。例如 E3（`rule_eliminate_projection.go:201`）遇上 MaxMinEliminator 时，Go 会多出一个 `not(isnull(a))` 的 Selection，Rust 要在这一处模拟。每处模拟都：
+   - **`FieldType`**（`GetType()` 返回的对象上的赋值和方法调用）：按映射规则 **`M-FT`** 处理。默认写时复制：Go 的别名不模拟（D09.7 试点报告修订建议 3 的方案 (a)）。载体：`Column.ret_type` 原按值保存（D08.1）；N13 §8（#229 批次 A，负责人 2026-11-15 确认，#232）改为 `Arc<FieldType>`，只经 `Arc::make_mut` 修改，语义仍是本条的写时复制，只是 Go 共享类型的地方不再复制。`Arc` 的指针身份**不**用来让写入对别的持有者可见（方案 (b) 仍然否决）。只有当 Go 的别名会改变 golden test 或 EXPLAIN 对照能看到的计划时，才在那一处显式模拟 Go 的效果：除了改本处的副本，还按 UniqueID 同步改同一查询中来源列（以及引用它的列）的类型。例如 E3（`rule_eliminate_projection.go:201`）遇上 MaxMinEliminator 时，Go 会多出一个 `not(isnull(a))` 的 Selection，Rust 要在这一处模拟。每处模拟都：
      - 加注释 `// Go aliasing (M-FT): <file>.go:<line>, <effect>`；
      - 配一个回归测试；
      - 在该块 plan 的"已知差异 / 模拟"表里登记，由项目负责人逐处接受或否决。

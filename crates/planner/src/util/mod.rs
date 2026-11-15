@@ -1,5 +1,5 @@
 //! Go package `pkg/planner/util` and its sub-packages `costusage` and `optimizetrace`
-//! (block D10.10; `optimizetrace` and `fixcontrol` are D09.13): access paths, handle columns, ORDER BY items,
+//! (block D10.10; `optimizetrace` is D09.13): access paths, handle columns, ORDER BY items,
 //! clone helpers and the cost-model-v2 bookkeeping.
 
 pub mod byitem;

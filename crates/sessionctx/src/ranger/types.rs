@@ -110,13 +110,22 @@ impl std::fmt::Debug for Range {
 }
 
 /// Go interface equality of two collators: same dynamic type and same pointer.
+///
+/// Every Go collator of a zero-size type (`binCollator`, `binPaddingCollator`,
+/// `derivedBinCollator`, `generalCICollator`, ...) is allocated with `&T{}`, which gc points at
+/// the one `runtime.zerobase`: two of them of the same type are equal (Go's
+/// `GetCollator("utf8mb4_0900_bin") == GetBinaryCollator()` is true). Rust's zero-size statics
+/// and boxes have different addresses, so a zero-size type compares by type only (D10.4 spec
+/// §5: found by the `rangerbuild` vectors).
 // glue: Go interface value comparison of collate.Collator
 pub fn same_collator(a: &'static dyn Collator, b: &'static dyn Collator) -> bool {
     let (ta, tb) = (
         (a as &dyn std::any::Any).type_id(),
         (b as &dyn std::any::Any).type_id(),
     );
-    ta == tb && std::ptr::addr_eq(a as *const dyn Collator, b as *const dyn Collator)
+    ta == tb
+        && (std::mem::size_of_val(a) == 0
+            || std::ptr::addr_eq(a as *const dyn Collator, b as *const dyn Collator))
 }
 
 impl Range {

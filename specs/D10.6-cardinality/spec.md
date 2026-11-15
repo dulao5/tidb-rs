@@ -31,7 +31,7 @@ Go 范围：`pkg/planner/cardinality`，加上 logicalop 中各算子的 `Derive
 | `GetColumnRowCount`、`equalRowCountOnColumn`、`betweenRowCountOnColumn` | D11.1 第 2 部分 | 用真实统计估算（TopN、CMSketch、越界估算）。没有统计加载（D11.2）之前统计总是 pseudo，走不到 |
 | `getIndexRowCountForStatsV1` / `V2`、`getEqualCondSelectivity`、`crossValidationSelectivity` | D10.6 第 2 部分 | 用真实索引统计估算，同上 |
 | `GetSelectivityByFilter` | D10.6 第 2 部分 | TopN 辅助估算；只有 `tidb_default_string_match_selectivity = 0` 时调用，`Selectivity` 此时返回边界错误 |
-| 范围构建：`ranger.ExtractAccessConditionsForColumn`、`BuildColumnRange`、`DetachCondAndBuildRangeForIndex`、`MergeDNFItems4Col` | D10.4（VS1-25） | `Selectivity` 中涉及 `HistColl` 的列或索引的条件需要先建范围：在 VS1-25 合入前返回 `blocked-by:D10.4` |
+| ~~范围构建：`ranger.ExtractAccessConditionsForColumn`、`BuildColumnRange`、`DetachCondAndBuildRangeForIndex`、`MergeDNFItems4Col`~~ | ~~D10.4（VS1-25）~~ | 已由 VS1-25 解除：`Selectivity` 调用移植的 ranger（[D10.4 spec](../D10.4-ranger/spec.md)） |
 | MV 索引：`collectFilters4MVIndex`、`buildPartialPaths4MVIndex`（及 D11.1 的 `PrepareCols4MVIndex`） | D10.7 | 有 MV 索引的表回退 |
 | `recordUsedItemStatsStatus` | D11.2 | 记录语句用到的统计（慢日志 `Stats:`）；`StatementContext.UsedStatsInfo` 未移植（D11.2 tasks P1-1）。不影响估算 |
 | optimizer debug trace / CE trace（`trace.go`、`debugtrace`） | D10.6 第 2 部分 | 入口（`Selectivity`、`GetRowCountBy*Ranges`）在 `EnableOptimizerDebugTrace` 或 `EnableOptimizerCETrace` 打开时返回 `blocked-by:D10.6`（`TRACE PLAN TARGET='estimation'`、plan replayer，VS1 不路由这些语句），不返回一个缺少 trace 的估算 |
@@ -115,11 +115,11 @@ govec 领域 `cardinality`（tracker `govec/domains/cardinality.go`，seed 20261
 | `pseudo_table` / `hist_coll` / `table_ops` | 252 / 250 / 250 | 全部一致 |
 | `row_count`（列 / int / 索引范围；含 `sys/int_low_null` 17 条） | 1,136 | 全部一致 |
 | `col_est`（`TestPseudoTable` 与随机） | 502 | 全部一致 |
-| `selectivity` | 1,250 | 808 一致；410 `blocked-by:D10.4`（需要建范围）、32 `blocked-by:D08.9`（IN 内置函数未移植）；0 不一致 |
+| `selectivity` | 1,250 | 1,218 一致（其中 410 条需要建范围，VS1-25 前停在 `blocked-by:D10.4`）；32 `blocked-by:D08.9`（IN 内置函数未移植）；0 不一致 |
 | `row_size` / `avg_col` | 400 / 300 | 全部一致 |
 | `hist` / `col_stats` | 350 / 400 | 全部一致 |
 | `existence` / `ndv` / `mv_sel` / `topn` | 150 / 250 / 150 / 62 | 全部一致 |
 
-回放断言只允许 `selectivity` 停在边界，并把每个块的条数钉住（`EXPECTED_BLOCKED`：D10.4 410 条、D08.9 32 条，两个目标相同）：VS1-25（D10.4）或 D08.9 合入后这些条数必须降到 0、记录改为与 Go 比较，同一个 PR 更新这个常量。amd64 向量来自 tracker CI 的 artifact。
+回放断言只允许 `selectivity` 停在边界，并把每个块的条数钉住（`EXPECTED_BLOCKED`，两个目标相同）：原为 D10.4 410 条、D08.9 32 条；VS1-25（D10.4）合入后 D10.4 降到 0，现在只有 D08.9 32 条（条件含 `in(...)`，回放建不出输入），D08.9 合入后降到 0、同一个 PR 更新这个常量。amd64 向量来自 tracker CI 的 artifact。
 
 单元测试：`selectivity::tests::selectivity_greedy_algo`（Go `TestSelectivityGreedyAlgo`）、`out_of_range_helpers`；`govec_cardinality.rs` 的 `pseudo_table_go_test`（Go `TestPseudoTable`，含未导出的 `columnLessRowCount` / `columnBetweenRowCount`）。`selectivity_test.go` 的其余用例都依赖存储（`testkit`）和真实统计，它们的 pseudo 部分由上表的向量按函数覆盖；EXPLAIN 级的 pseudo 用例（`TestIgnoreRealtimeStats`、`TestBuiltinInEstWithoutStats` 的 `stats:pseudo` 行）随 VS1-28 的计划向量验收。
