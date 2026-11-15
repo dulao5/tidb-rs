@@ -75,6 +75,8 @@ Go 的 `Chunk.Reset` 对每个槽位调用 `col.reset()`，同一个列被两个
 
 A1 删除复用池：`NewAllocator`、`NewSyncAllocator`、`NewReuseHookAllocator`、`NewEmptyAllocator` 都返回不复用的分配器（Go 的 `emptyAllocator` 行为），`InitChunkAllocSize` 忽略参数，`NewChunkFromPoolWithCapacity` 等同 `New(fields, cap, cap)`，`Chunk.Destroy` 直接丢弃。池的内部实现归 X。
 
+字段类型参数（N13 §8，#229 批次 A）：Go 的 `[]*types.FieldType`。`Allocator::alloc` 接收 `&[Arc<FieldType>]`（调用方是执行器，传它共享的返回类型）；`New`、`NewChunkWithCapacity`、`NewChunkFromPoolWithCapacity`、`NewEmptyChunk` 对 `F: Borrow<FieldType>` 泛型，`&[FieldType]` 和 `&[Arc<FieldType>]` 都可以传，不复制类型。
+
 ### 3.7 其他按 Go 保留的细节
 
 - `ColumnSwapHelper.SwapColumns` 在 Go 中按 map 顺序遍历；Rust 按输入下标顺序（`M-MAPORDER`），任何顺序得到的列共享关系都相同。

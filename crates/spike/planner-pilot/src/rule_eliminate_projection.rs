@@ -253,8 +253,8 @@ fn set_ret_type_flag(e: &mut ExprRef, flag: usize) {
         return;
     }
     match Arc::make_mut(e) {
-        Expr::Column(c) => c.ret_type.set_flag(flag),
-        Expr::CorrelatedColumn(c) => c.column.ret_type.set_flag(flag),
+        Expr::Column(c) => c.ret_type_mut().set_flag(flag),
+        Expr::CorrelatedColumn(c) => c.column.ret_type_mut().set_flag(flag),
         Expr::Constant(c) => c.ret_type.set_flag(flag),
         Expr::ScalarFunction(f) => f.ret_type_mut().set_flag(flag),
     }

@@ -8,7 +8,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use tidb_base::Error;
 use tidb_base::dbterror::ClassExpression;
@@ -97,7 +97,7 @@ impl TidbToBinaryFunctionClass {
         tp.set_type(tidb_base::mysql::TypeVarString);
         tp.set_charset(CharsetBin);
         tp.set_collate(CollationBin);
-        bf.tp = tp;
+        bf.tp = Arc::new(tp);
         Ok(bf.with_sig(&builtinInternalToBinarySig))
     }
 }
@@ -145,7 +145,7 @@ impl TidbFromBinaryFunctionClass {
         }
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETString, &[ETString])?;
-        bf.tp = self.tp.clone();
+        bf.tp = Arc::new(self.tp.clone());
         bf.extra = crate::eval::SigExtra::FromBinary {
             cannot_convert_string_as_warning: self.cannot_convert_string_as_warning,
         };

@@ -24,7 +24,7 @@ const _: () = {
 fn col(id: i64) -> Arc<Column> {
     Arc::new(Column {
         unique_id: id,
-        ret_type: new_field_type(TypeLonglong),
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
         orig_name: format!("test.t.c{id}"),
         ..Column::default()
     })

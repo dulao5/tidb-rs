@@ -80,7 +80,7 @@ pub(super) fn exec(op: &str, p: &[Value]) -> Option<Value> {
         ex_try(|| {
             let tp = new_field_type(tidb_base::mysql::TypeUnspecified);
             let name = p[1].as_str().unwrap();
-            let args = vec![l.clone(), r.clone()];
+            let args = vec![std::sync::Arc::clone(&l), std::sync::Arc::clone(&r)];
             let res = if p[0].as_i64().unwrap() == 0 {
                 new_function_base(&*ctx.0, name, tp, args)
             } else {

@@ -63,7 +63,7 @@ fn schema_cols(fts: &[tidb_parser::types::FieldType], n: usize) -> Vec<Arc<Colum
             Arc::new(Column {
                 unique_id: i as i64 + 1,
                 index: i as isize,
-                ret_type: fts[i].clone(),
+                ret_type: Arc::new(fts[i].clone()),
                 orig_name: "c".into(),
                 ..Column::default()
             })

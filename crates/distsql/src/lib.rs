@@ -80,7 +80,7 @@ impl Default for SelectOptions {
 /// there is one partial result per region (page), to be merged by the caller.
 pub async fn select(
     snapshot: &mut KvSnapshot,
-    plan: &DagPlan,
+    plan: &DagPlan<'_>,
     ranges: Vec<poc_kv::KeyRange>,
     options: SelectOptions,
 ) -> Result<SelectRows> {

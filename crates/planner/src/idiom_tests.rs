@@ -48,7 +48,7 @@ fn session() -> SessionVars {
 fn col(id: i64) -> Arc<Column> {
     Arc::new(Column {
         unique_id: id,
-        ret_type: new_field_type(TypeLonglong),
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
         orig_name: format!("test.t.c{id}"),
         ..Column::default()
     })
@@ -410,7 +410,7 @@ fn eliminate_projection(p: PhysicalPlanRef) -> PhysicalPlanRef {
     let mut p = p;
     map_children(&mut p, eliminate_projection);
     if p.kind() == PhysicalKind::Projection {
-        return p.children()[0].clone();
+        return Arc::clone(&p.children()[0]);
     }
     p
 }
@@ -430,7 +430,7 @@ fn make_mut_plan_in_place_when_owned() {
 #[test]
 fn make_mut_plan_copies_when_shared() {
     let cached = proj(3, reader(vec![]));
-    let mut p = cached.clone();
+    let mut p = Arc::clone(&cached);
     make_mut_plan(&mut p).set_schema(schema(&[1]));
     assert_ne!(ptr(&p), ptr(&cached));
     assert_eq!(ids(cached.schema()), [1, 2]);
@@ -454,10 +454,10 @@ fn map_children_on_an_owned_node_copies_nothing() {
 #[test]
 fn map_children_on_a_shared_node_copies_on_change() {
     let cached = proj(4, proj(3, reader(vec![])));
-    let mut p = cached.clone();
+    let mut p = Arc::clone(&cached);
     map_children(&mut p, |c| c);
     assert!(Arc::ptr_eq(&p, &cached));
-    map_children(&mut p, |c| c.children()[0].clone());
+    map_children(&mut p, |c| Arc::clone(&c.children()[0]));
     assert!(!Arc::ptr_eq(&p, &cached));
     assert_eq!(p.children()[0].id(), 2);
     assert_eq!(cached.children()[0].id(), 3);
@@ -485,8 +485,8 @@ fn post_optimize_in_place_on_owned_tree() {
 #[test]
 fn memo_shared_child_is_copied_only_while_shared() {
     let shared = proj(5, reader(vec![]));
-    let winner = proj(6, shared.clone());
-    let loser = proj(7, shared.clone());
+    let winner = proj(6, Arc::clone(&shared));
+    let loser = proj(7, Arc::clone(&shared));
     drop(shared);
     let loser_child = ptr(&loser.children()[0]);
     let out = eliminate_projection(winner);
@@ -512,7 +512,7 @@ fn rebuild_range(p: &mut PhysicalPlanRef, low: i64) {
         }
         PhysicalKind::TableReader => {
             let r = p.as_any().downcast_ref::<Reader>().unwrap();
-            let mut tp = r.table_plans[0].clone();
+            let mut tp = Arc::clone(&r.table_plans[0]);
             rebuild_range(&mut tp, low);
             let r = make_mut_plan(p)
                 .as_any_mut()
@@ -528,9 +528,9 @@ fn rebuild_range(p: &mut PhysicalPlanRef, low: i64) {
 }
 
 fn scan_ranges(p: &PhysicalPlanRef) -> Vec<Range> {
-    let mut p = p.clone();
+    let mut p = Arc::clone(p);
     while p.kind() != PhysicalKind::TableReader {
-        p = p.children()[0].clone();
+        p = Arc::clone(&p.children()[0]);
     }
     let r = p.as_any().downcast_ref::<Reader>().unwrap();
     r.table_plans[0]
@@ -548,9 +548,9 @@ fn plan_cache_rebuild_by_path_copy() {
     let cached = proj(10, proj(11, reader(vec![(1, 1)])));
     std::thread::scope(|s| {
         for k in 0..4i64 {
-            let cached = cached.clone();
+            let cached = Arc::clone(&cached);
             s.spawn(move || {
-                let mut plan = cached.clone();
+                let mut plan = Arc::clone(&cached);
                 rebuild_range(&mut plan, k);
                 assert_eq!(scan_ranges(&plan), [(k, k + 10)]);
                 assert!(!Arc::ptr_eq(&plan, &cached));

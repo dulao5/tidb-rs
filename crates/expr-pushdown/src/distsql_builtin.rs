@@ -214,7 +214,7 @@ fn new_dist_sql_function_by_sig(
     let f = get_signature_by_pb(ctx, sig_code, tp, args)?;
     // fmt.Sprintf("sig_%T", f): the Go type of the signature.
     let name = format!("sig_*expression.{}", f.sig.name);
-    let ret_type = f.tp.clone();
+    let ret_type = Arc::clone(&f.tp);
     Ok(Expr::ScalarFunction(ScalarFunction::new(&name, ret_type, f)).into_ref())
 }
 
@@ -285,7 +285,7 @@ pub fn pb_to_expr(
             let (_, offset) = decode_int(v)?;
             return Ok(Expr::Column(Column {
                 index: offset as isize,
-                ret_type: tps[offset as usize].clone(),
+                ret_type: Arc::new(tps[offset as usize].clone()),
                 ..Column::default()
             })
             .into_ref());

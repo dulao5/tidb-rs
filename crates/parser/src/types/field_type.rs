@@ -3,14 +3,18 @@
 //! `types.FieldType`: the column / expression type every layer uses, and its JSON form (part
 //! of the schema stored in TiKV by Go TiDB, so it must be byte-identical).
 //!
-//! Go strings: `charset` and `collate` are charset / collation names (ASCII) and are held as
-//! `String`; enum / set elements may be binary literals (`elemsIsBinaryLit`), so they are
+//! Go strings: `charset` and `collate` are charset / collation names and are held as
+//! `&'static str` from [`intern_name`] (spec N13 §8: a `FieldType` copy allocates nothing for
+//! them, and the names are shared by every `FieldType` like Go's string constants); enum / set
+//! elements may be binary literals (`elemsIsBinaryLit`), so they are
 //! bytes. A Go nil slice is `None` (`json.Marshal` writes `null` for it and `[]` for an empty
 //! one).
 
 #![allow(non_upper_case_globals)]
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use tidb_base::Error;
 use tidb_base::gostd::json::{self, Decoder};
@@ -24,7 +28,7 @@ pub const UnspecifiedLength: isize = -1;
 
 /// TiDBStrictIntegerDisplayWidth represent whether return warnings when integerType with
 /// (length) was parsed. The default is `false`. A Go package variable set by the config.
-pub static TiDBStrictIntegerDisplayWidth: AtomicBool = AtomicBool::new(false);
+pub static TiDBStrictIntegerDisplayWidth: AtomicBool = AtomicBool::new(false); // N13-allow: Go package-level config flag, not a FieldType field
 
 /// IHasher is internal usage represent cascades/base.Hasher.
 pub trait IHasher {
@@ -74,10 +78,10 @@ pub struct FieldType {
     flen: isize,
     /// decimal represent decimal length of the field
     decimal: isize,
-    /// charset represent character set
-    charset: String,
-    /// collate represent collate rules of the charset
-    collate: String,
+    /// charset represent character set (interned, [`intern_name`])
+    charset: &'static str,
+    /// collate represent collate rules of the charset (interned, [`intern_name`])
+    collate: &'static str,
     /// elems is the element list for enum and set type.
     elems: Option<Vec<Vec<u8>>>,
     elems_is_binary_lit: Option<Vec<bool>>,
@@ -142,8 +146,8 @@ impl FieldType {
             flag: self.flag,
             flen: self.flen,
             decimal: self.decimal,
-            charset: self.charset.clone(),
-            collate: self.collate.clone(),
+            charset: self.charset,
+            collate: self.collate,
             array: self.array,
             elems: self.elems.clone().filter(|e| !e.is_empty()),
             elems_is_binary_lit: self.elems_is_binary_lit.clone().filter(|e| !e.is_empty()),
@@ -259,14 +263,14 @@ impl FieldType {
 
     /// GetCharset returns the field's charset.
     // go: FieldType.GetCharset L1
-    pub fn get_charset(&self) -> &str {
-        &self.charset
+    pub fn get_charset(&self) -> &'static str {
+        self.charset
     }
 
     /// GetCollate returns the collation of the field.
     // go: FieldType.GetCollate L1
-    pub fn get_collate(&self) -> &str {
-        &self.collate
+    pub fn get_collate(&self) -> &'static str {
+        self.collate
     }
 
     /// GetElems returns the elements of the FieldType (`None`: nil).
@@ -372,13 +376,13 @@ impl FieldType {
     /// SetCharset sets the charset of the FieldType.
     // go: FieldType.SetCharset L1
     pub fn set_charset(&mut self, charset: &str) {
-        charset.clone_into(&mut self.charset);
+        self.charset = intern_name(charset);
     }
 
     /// SetCollate sets the collation of the FieldType.
     // go: FieldType.SetCollate L1
     pub fn set_collate(&mut self, collate: &str) {
-        collate.clone_into(&mut self.collate);
+        self.collate = intern_name(collate);
     }
 
     /// SetElems sets the elements of the FieldType (`None`: nil).
@@ -540,7 +544,7 @@ impl FieldType {
     /// type in infoschema.
     // go: FieldType.CompactStr L1
     pub fn compact_str(&self) -> String {
-        let ts = type_to_str(self.get_type(), &self.charset);
+        let ts = type_to_str(self.get_type(), self.charset);
         let mut suffix = String::new();
 
         let (default_flen, default_decimal) =
@@ -661,7 +665,7 @@ impl FieldType {
     /// enum / set elements are written as they are.
     // go: FieldType.Restore L1
     pub fn restore(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        write_keyword(out, &type_to_str(self.get_type(), &self.charset));
+        write_keyword(out, &type_to_str(self.get_type(), self.charset));
 
         let mut precision = UnspecifiedLength;
         let mut scale = UnspecifiedLength;
@@ -745,7 +749,7 @@ impl FieldType {
                     }
                     if self.charset != CHARSET_BIN && self.charset != mysql::DefaultCharset {
                         write_keyword(out, " CHARSET ");
-                        write_keyword(out, &self.charset);
+                        write_keyword(out, self.charset);
                     }
                 }
             }
@@ -862,6 +866,7 @@ impl FieldType {
     // go-part: FieldType.UnmarshalJSON
     pub fn decode_json(&mut self, v: &json::Raw) -> Result<(), json::DecodeError> {
         let mut r = FieldType::default();
+        let (mut charset, mut collate) = (String::new(), String::new());
         let mut d = Decoder::new();
         let (mut tp, mut flag, mut flen, mut decimal) = (0u64, 0u64, 0i64, 0i64);
         d.object(
@@ -874,8 +879,8 @@ impl FieldType {
                 1 => d.uint(v, &mut flag, usize::MAX as u64, "uint"),
                 2 => d.int(v, &mut flen, isize::MIN as i64, isize::MAX as i64, "int"),
                 3 => d.int(v, &mut decimal, isize::MIN as i64, isize::MAX as i64, "int"),
-                4 => d.string(v, &mut r.charset),
-                5 => d.string(v, &mut r.collate),
+                4 => d.string(v, &mut charset),
+                5 => d.string(v, &mut collate),
                 6 => d.slice(v, &mut r.elems, "[]string", |d, v, e: &mut Vec<u8>| {
                     let mut s = String::from_utf8(std::mem::take(e)).unwrap_or_default();
                     d.string(v, &mut s);
@@ -892,6 +897,8 @@ impl FieldType {
         r.flag = flag as usize;
         r.flen = flen as isize;
         r.decimal = decimal as isize;
+        r.charset = intern_name(&charset);
+        r.collate = intern_name(&collate);
         *self = r;
         Ok(())
     }
@@ -904,9 +911,9 @@ impl FieldType {
             "{{\"Tp\":{},\"Flag\":{},\"Flen\":{},\"Decimal\":{},\"Charset\":",
             self.tp, self.flag, self.flen, self.decimal
         );
-        json::append_string(&mut out, &self.charset);
+        json::append_string(&mut out, self.charset);
         out.push_str(",\"Collate\":");
-        json::append_string(&mut out, &self.collate);
+        json::append_string(&mut out, self.collate);
         out.push_str(",\"Elems\":");
         match &self.elems {
             None => out.push_str("null"),
@@ -990,11 +997,64 @@ impl Clone for FieldType {
             flag: self.flag,
             flen: self.flen,
             decimal: self.decimal,
-            charset: self.charset.clone(),
-            collate: self.collate.clone(),
+            charset: self.charset,
+            collate: self.collate,
             elems: self.elems.clone(),
             elems_is_binary_lit: self.elems_is_binary_lit.clone(),
             array: self.array,
         }
     }
+}
+
+/// The charset / collation name `s` as a `&'static str`: the names of the generated charset
+/// and collation tables are returned as they are; any other name (an unsupported name read
+/// from a schema JSON, a name in another letter case) is copied once into a process-wide set
+/// and never freed. The set grows only with distinct names: the SQL paths (parser
+/// `CharsetName` / `CollationName`, the `character_set_*` / `collation_*` sysvar checks)
+/// validate and lower-case the names before they reach a `FieldType`; only a schema JSON
+/// keeps its names as stored (as Go does, so the JSON round-trips), see
+/// [`interned_name_count`] and spec N13 §8.
+// glue: N13 §8 interned FieldType charset / collation names (Go strings share their bytes)
+pub fn intern_name(s: &str) -> &'static str {
+    static KNOWN: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+        use crate::charset_gen::{COLLATIONS, KNOWN_CHARSETS, SUPPORTED_CHARSETS};
+        let mut set: HashSet<&'static str> = HashSet::new();
+        set.insert("");
+        for (cs, coll) in SUPPORTED_CHARSETS.iter().chain(KNOWN_CHARSETS) {
+            set.insert(cs);
+            set.insert(coll);
+        }
+        for (_, cs, coll) in COLLATIONS {
+            set.insert(cs);
+            set.insert(coll);
+        }
+        set
+    });
+    if let Some(k) = KNOWN.get(s) {
+        return k;
+    }
+    let mut other = OTHER_NAMES.lock().unwrap_or_else(PoisonError::into_inner);
+    let other = other.get_or_insert_with(HashSet::new);
+    if let Some(k) = other.get(s) {
+        return k;
+    }
+    let k: &'static str = Box::leak(Box::from(s));
+    other.insert(k);
+    k
+}
+
+/// The interned names that are not in the generated tables (see [`intern_name`]). Global,
+/// not a field of any `FieldType`: a `FieldType` holds only the `&'static str`.
+// glue: N13 §8 intern set of intern_name
+static OTHER_NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None); // N13-allow: process-wide intern set, never reachable through a FieldType
+
+/// How many names [`intern_name`] has copied (names outside the charset / collation tables):
+/// the memory the intern set holds, for tests and diagnostics.
+// glue: N13 §8 intern set size
+pub fn interned_name_count() -> usize {
+    OTHER_NAMES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map_or(0, HashSet::len)
 }

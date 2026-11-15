@@ -810,7 +810,7 @@ fn step(st: &mut State, a: &[Value]) -> Value {
         "list_new" => {
             let fts = fts_of(&a[2]);
             let tr = new_tracker(LabelForChunkList, -1);
-            let l = list::new_list_with_mem_tracker(fts, ci(3), ci(4), tr.clone());
+            let l = list::new_list_with_mem_tracker(fts, ci(3), ci(4), Arc::clone(&tr));
             st.lists.insert(ci(1), (l, tr));
         }
         "list_app" => {

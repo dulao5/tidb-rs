@@ -125,7 +125,7 @@ fn int_col(id: i64) -> Arc<Column> {
     Arc::new(Column {
         unique_id: id,
         id,
-        ret_type: new_field_type(TypeLonglong),
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
         ..Default::default()
     })
 }

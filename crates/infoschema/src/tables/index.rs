@@ -37,7 +37,7 @@ pub fn new_index(
 ) -> Result<IndexRef, Error> {
     let index = IndexImpl {
         idx_info: index_info,
-        tbl_info: tbl_info.clone(),
+        tbl_info: Arc::clone(tbl_info),
         phy_tbl_id: physical_id,
     };
     Ok(Arc::new(index))

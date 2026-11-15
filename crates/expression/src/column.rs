@@ -313,8 +313,9 @@ impl CorrelatedColumn {
 /// Column represents a column.
 #[derive(Debug)]
 pub struct Column {
-    /// RetType.
-    pub ret_type: FieldType,
+    /// RetType. Go's `*FieldType`, shared by the clones of the column (`Column.Clone` copies
+    /// the pointer); changed only through [`Column::ret_type_mut`] (copy on write, N13 §8).
+    pub ret_type: Arc<FieldType>,
     /// ID is used to specify whether this column is ExtraHandleColumn or to access histogram.
     /// We'll try to remove it in the future.
     pub id: i64,
@@ -354,7 +355,7 @@ impl Default for Column {
     // glue: Go zero value of Column (RetType nil is a default FieldType here, spec §4)
     fn default() -> Self {
         Column {
-            ret_type: FieldType::default(),
+            ret_type: default_ret_type(),
             id: 0,
             unique_id: 0,
             index: 0,
@@ -370,6 +371,15 @@ impl Default for Column {
     }
 }
 
+/// The `ret_type` of `Column::default()` (Go's nil `RetType` is a default `FieldType`, spec
+/// §4): one shared value, so a default column allocates no type.
+// glue: shared default FieldType of Column::default (N13 §8)
+pub(crate) fn default_ret_type() -> Arc<FieldType> {
+    static DEFAULT: std::sync::LazyLock<Arc<FieldType>> =
+        std::sync::LazyLock::new(|| Arc::new(FieldType::default()));
+    Arc::clone(&DEFAULT)
+}
+
 #[allow(non_upper_case_globals)]
 const columnPrefix: &str = "Column#";
 
@@ -378,7 +388,7 @@ impl Clone for Column {
     // go: Column.Clone L1
     fn clone(&self) -> Self {
         Column {
-            ret_type: self.ret_type.clone(),
+            ret_type: Arc::clone(&self.ret_type),
             id: self.id,
             unique_id: self.unique_id,
             index: self.index,
@@ -453,6 +463,15 @@ impl Column {
     #[inline]
     pub fn get_static_type(&self) -> &FieldType {
         &self.ret_type
+    }
+
+    /// `RetType` for an in-place change (Go's `col.RetType.SetXxx(..)` / `col.RetType = ..`
+    /// through the shared pointer): copy on write (`Arc::make_mut`), so the clones that share
+    /// the type keep the old one (`M-FT`: Rust changes only this column's type; N13 §8).
+    // glue: M-FT / M-SHARE copy on write of the shared *FieldType
+    #[inline]
+    pub fn ret_type_mut(&mut self) -> &mut FieldType {
+        Arc::make_mut(&mut self.ret_type)
     }
 
     /// Traverse implements the TraverseDown interface.
@@ -800,7 +819,7 @@ impl Column {
     pub fn to_info(&self) -> ColumnInfo {
         ColumnInfo {
             id: self.id,
-            field_type: self.ret_type.clone(),
+            field_type: FieldType::clone(&self.ret_type),
             ..ColumnInfo::default()
         }
     }

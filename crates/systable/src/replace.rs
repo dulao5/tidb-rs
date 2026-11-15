@@ -11,7 +11,6 @@
 //! flags included.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::errors;
@@ -173,10 +172,8 @@ fn old_row(
         )));
     };
     let cols = tbl.columns.as_deref().unwrap_or(&[]);
-    let types: HashMap<i64, Arc<FieldType>> = cols
-        .iter()
-        .map(|c| (c.id, Arc::new(c.field_type.clone())))
-        .collect();
+    // Go `colTps[col.ID] = &col.FieldType`: borrowed for this decode, not copied (#229).
+    let types: HashMap<i64, &FieldType> = cols.iter().map(|c| (c.id, &c.field_type)).collect();
     let m = tc::decode_row_to_datum_map(&v, &types, Some(&utc()))?;
     Ok(cols
         .iter()

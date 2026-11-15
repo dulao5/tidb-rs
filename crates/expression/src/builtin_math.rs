@@ -116,18 +116,17 @@ impl FunctionClass for CeilFloorFunctionClass {
     ) -> Result<BuiltinFunc, Error> {
         self.base.verify_args(&args)?;
         let ev = ctx.get_eval_ctx();
-        let arg0 = args[0].clone();
+        let arg0 = Arc::clone(&args[0]);
         let (ret_tp, arg_tp) = get_eval_tp4_floor_and_ceil(&*ev, &arg0);
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ret_tp, &[arg_tp])?;
         // Go reads args[0] after newBaseBuiltinFuncWithTp replaced it with the wrapped one.
-        let wrapped = bf.args[0].clone();
-        set_flag4_floor_and_ceil(&*ev, &mut bf.tp, &wrapped);
+        let wrapped = Arc::clone(&bf.args[0]);
+        set_flag4_floor_and_ceil(&*ev, Arc::make_mut(&mut bf.tp), &wrapped);
         // ETInt or ETReal is set correctly by newBaseBuiltinFuncWithTp, only need to handle ETDecimal.
         if ret_tp == ETDecimal {
-            bf.tp
-                .set_flen_under_limit(wrapped.get_type(&*ev).get_flen());
-            bf.tp.set_decimal(0);
+            Arc::make_mut(&mut bf.tp).set_flen_under_limit(wrapped.get_type(&*ev).get_flen());
+            Arc::make_mut(&mut bf.tp).set_decimal(0);
         }
         let sig: &'static SigDesc = match (arg_tp, ret_tp, self.ceil) {
             (ETInt, ETInt, true) => &builtinCeilIntToIntSig,
@@ -467,15 +466,15 @@ fn abs_get_function(
     }
     let mut bf = new_base_builtin_func_with_tp(ctx, c.func_name, args, arg_tp, &[arg_tp])?;
     if mysql::has_unsigned_flag(arg_field_tp.get_flag()) {
-        bf.tp.add_flag(mysql::UnsignedFlag);
+        Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
     }
     if arg_tp == ETReal {
         let (flen, decimal) = mysql::get_default_field_length_and_decimal(TypeDouble);
-        bf.tp.set_flen(flen);
-        bf.tp.set_decimal(decimal);
+        Arc::make_mut(&mut bf.tp).set_flen(flen);
+        Arc::make_mut(&mut bf.tp).set_decimal(decimal);
     } else {
-        bf.tp.set_flen_under_limit(arg_field_tp.get_flen());
-        bf.tp.set_decimal_under_limit(arg_field_tp.get_decimal());
+        Arc::make_mut(&mut bf.tp).set_flen_under_limit(arg_field_tp.get_flen());
+        Arc::make_mut(&mut bf.tp).set_decimal_under_limit(arg_field_tp.get_decimal());
     }
     let sig: &'static SigDesc = match arg_tp {
         ETInt => {
@@ -569,21 +568,21 @@ fn round_get_function(
     // Go reads args[0] after newBaseBuiltinFuncWithTp replaced it with the wrapped one.
     let arg_field_tp = bf.args[0].get_type(&*ev).into_owned();
     if mysql::has_unsigned_flag(arg_field_tp.get_flag()) {
-        bf.tp.add_flag(mysql::UnsignedFlag);
+        Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
     }
     // ETInt or ETReal is set correctly by newBaseBuiltinFuncWithTp, only need to handle ETDecimal.
     if arg_tp == ETDecimal {
-        bf.tp.set_flen_under_limit(arg_field_tp.get_flen());
+        Arc::make_mut(&mut bf.tp).set_flen_under_limit(arg_field_tp.get_flen());
         let dec = calculate_decimal4_round_and_truncate(ctx, &bf.args, arg_tp);
-        bf.tp.set_decimal_under_limit(dec);
+        Arc::make_mut(&mut bf.tp).set_decimal_under_limit(dec);
         if bf.tp.get_decimal() != UnspecifiedLength {
             if arg_field_tp.get_decimal() != UnspecifiedLength {
                 let decimal_delta = bf.tp.get_decimal() - arg_field_tp.get_decimal();
-                bf.tp
-                    .set_flen_under_limit(bf.tp.get_flen() + decimal_delta.max(0));
+                let flen = bf.tp.get_flen() + decimal_delta.max(0);
+                Arc::make_mut(&mut bf.tp).set_flen_under_limit(flen);
             } else {
-                bf.tp
-                    .set_flen_under_limit(arg_field_tp.get_flen() + bf.tp.get_decimal());
+                let flen = arg_field_tp.get_flen() + bf.tp.get_decimal();
+                Arc::make_mut(&mut bf.tp).set_flen_under_limit(flen);
             }
         }
     }
@@ -735,13 +734,12 @@ fn truncate_get_function(
     // ETInt or ETReal is set correctly by newBaseBuiltinFuncWithTp, only need to handle ETDecimal.
     if arg_tp == ETDecimal {
         let dec = calculate_decimal4_round_and_truncate(ctx, &bf.args, arg_tp);
-        bf.tp.set_decimal_under_limit(dec);
-        bf.tp.set_flen_under_limit(
-            arg_field_tp.get_flen() - arg_field_tp.get_decimal() + bf.tp.get_decimal(),
-        );
+        Arc::make_mut(&mut bf.tp).set_decimal_under_limit(dec);
+        let flen = arg_field_tp.get_flen() - arg_field_tp.get_decimal() + bf.tp.get_decimal();
+        Arc::make_mut(&mut bf.tp).set_flen_under_limit(flen);
     }
     if mysql::has_unsigned_flag(arg_field_tp.get_flag()) {
-        bf.tp.add_flag(mysql::UnsignedFlag);
+        Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
     }
     let sig: &'static SigDesc = match arg_tp {
         ETInt => {
@@ -1312,8 +1310,8 @@ fn pi_get_function(
 ) -> Result<BuiltinFunc, Error> {
     c.verify_args(&args)?;
     let mut bf = new_base_builtin_func_with_tp(ctx, c.func_name, args, ETReal, &[])?;
-    bf.tp.set_decimal(6);
-    bf.tp.set_flen(8);
+    Arc::make_mut(&mut bf.tp).set_decimal(6);
+    Arc::make_mut(&mut bf.tp).set_flen(8);
     Ok(bf.with_sig(&builtinPISig))
 }
 
@@ -1401,9 +1399,9 @@ fn conv_get_function(
     let mut bf =
         new_base_builtin_func_with_tp(ctx, c.func_name, args, ETString, &[ETString, ETInt, ETInt])?;
     let (charset, collate) = ctx.get_charset_info();
-    bf.tp.set_charset(&charset);
-    bf.tp.set_collate(&collate);
-    bf.tp.set_flen(64);
+    Arc::make_mut(&mut bf.tp).set_charset(&charset);
+    Arc::make_mut(&mut bf.tp).set_collate(&collate);
+    Arc::make_mut(&mut bf.tp).set_flen(64);
     Ok(bf.with_sig(&builtinConvSig))
 }
 
@@ -1598,8 +1596,8 @@ fn crc32_get_function(
 ) -> Result<BuiltinFunc, Error> {
     c.verify_args(&args)?;
     let mut bf = new_base_builtin_func_with_tp(ctx, c.func_name, args, ETInt, &[ETString])?;
-    bf.tp.set_flen(10);
-    bf.tp.add_flag(mysql::UnsignedFlag);
+    Arc::make_mut(&mut bf.tp).set_flen(10);
+    Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
     Ok(bf.with_sig(&builtinCRC32Sig))
 }
 

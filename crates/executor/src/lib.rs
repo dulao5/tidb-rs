@@ -12,6 +12,9 @@
 //! the session and from unported blocks is in [`glue`]. The executors come with VS1-12 and
 //! VS1-34…VS1-36.
 #![deny(unsafe_code)]
+// N13 rule 5 (M-SHARE): a clone of an `Arc` is written `Arc::clone(&x)`, so a bare `.clone()`
+// is always a value clone (Go `Clone`).
+#![warn(clippy::clone_on_ref_ptr)]
 
 pub mod adapter;
 pub mod builder;

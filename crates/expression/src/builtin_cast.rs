@@ -2164,7 +2164,7 @@ impl CastAsJSONFunctionClass {
             ETJson => bf.with_sig(&builtinCastJSONAsJSONSig),
             ETString => {
                 let mut sig = bf.with_sig(&builtinCastStringAsJSONSig);
-                sig.tp.add_flag(ParseToJSONFlag);
+                Arc::make_mut(&mut sig.tp).add_flag(ParseToJSONFlag);
                 sig
             }
             ETVectorFloat32 => bf.with_sig(&builtinCastVectorFloat32AsUnsupportedSig),
@@ -2367,7 +2367,7 @@ impl CastAsStringFunctionClass {
             bf.args[0] = build_cast_function(ctx, a, tp)?;
         }
         let arg_ft = bf.args[0].get_type(&*ctx.get_eval_ctx()).into_owned();
-        adjust_ret_ft_for_cast_string(&mut bf.tp, &arg_ft);
+        adjust_ret_ft_for_cast_string(Arc::make_mut(&mut bf.tp), &arg_ft);
 
         let arg_tp = arg_ft.eval_type();
         Ok(match arg_tp {
@@ -2583,8 +2583,8 @@ pub(crate) fn float_length(src_decimal: isize, decimal_par: isize) -> isize {
 // glue: in-place change of a node's *FieldType (Arc nodes are immutable, M-EXPR)
 pub(crate) fn with_type_mut(e: &mut ExprRef, f: impl FnOnce(&mut FieldType)) {
     match Arc::make_mut(e) {
-        Expr::Column(c) => f(&mut c.ret_type),
-        Expr::CorrelatedColumn(c) => f(&mut c.column.ret_type),
+        Expr::Column(c) => f(c.ret_type_mut()),
+        Expr::CorrelatedColumn(c) => f(c.column.ret_type_mut()),
         Expr::Constant(c) => {
             if c.param_marker.is_none() {
                 f(&mut c.ret_type);
@@ -2651,7 +2651,7 @@ pub(crate) fn type_after_real_wrap(ev: &dyn EvalContext, arg: &ExprRef) -> Field
     {
         return tp;
     }
-    let mut a = [arg.clone()];
+    let mut a = [Arc::clone(arg)];
     propagate_type(ev, ETReal, &mut a);
     a[0].get_type(ev).into_owned()
 }
@@ -2783,7 +2783,7 @@ pub fn build_cast_function_with_check(
     };
     // Go's RetType is the class's tp, the pointer the signature keeps (newBaseBuiltinFunc
     // may have changed its NOT NULL flag).
-    let res = Expr::ScalarFunction(ScalarFunction::new(ast::Cast, f.tp.clone(), f)).into_ref();
+    let res = Expr::ScalarFunction(ScalarFunction::new(ast::Cast, Arc::clone(&f.tp), f)).into_ref();
     // We do not fold CAST if the eval type of this scalar function is ETJson since we may
     // reset the flag of the field type of CastAsJson later which would affect the
     // evaluation of it.

@@ -10,6 +10,9 @@
 //! (spec `specs/D08.8-cast`).
 
 #![deny(unsafe_code)]
+// N13 rule 5 (M-SHARE): a clone of an `Arc` is written `Arc::clone(&x)`, so a bare `.clone()`
+// is always a value clone (Go `Clone`).
+#![warn(clippy::clone_on_ref_ptr)]
 
 // `#[eval_fn]` refers to this crate as `::tidb_expression`, also from inside it.
 #[allow(unused_extern_crates)]

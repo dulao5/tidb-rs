@@ -155,7 +155,7 @@ impl HandleCols {
 
     /// GetFieldsTypes return field types of columns.
     // glue: M-IFACE (dispatch of HandleCols.GetFieldsTypes)
-    pub fn get_fields_types(&self) -> Vec<FieldType> {
+    pub fn get_fields_types(&self) -> Vec<Arc<FieldType>> {
         match self {
             HandleCols::Common(c) => c.get_fields_types(),
             HandleCols::Int(c) => c.get_fields_types(),
@@ -356,10 +356,10 @@ impl CommonHandleCols {
 
     /// GetFieldsTypes implements the kv.HandleCols interface.
     // go: CommonHandleCols.GetFieldsTypes L1 [M-FT]
-    pub fn get_fields_types(&self) -> Vec<FieldType> {
+    pub fn get_fields_types(&self) -> Vec<Arc<FieldType>> {
         let mut field_tps = Vec::with_capacity(self.columns.len());
         for col in &self.columns {
-            field_tps.push(col.ret_type.clone());
+            field_tps.push(Arc::clone(&col.ret_type));
         }
         field_tps
     }
@@ -532,8 +532,8 @@ impl IntHandleCols {
 
     /// GetFieldsTypes implements the kv.HandleCols interface.
     // go: IntHandleCols.GetFieldsTypes L1
-    pub fn get_fields_types(&self) -> Vec<FieldType> {
-        vec![new_field_type(TypeLonglong)]
+    pub fn get_fields_types(&self) -> Vec<Arc<FieldType>> {
+        vec![Arc::new(new_field_type(TypeLonglong))]
     }
 
     /// MemoryUsage return the memory usage of IntHandleCols

@@ -101,7 +101,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{GoCopy, make_mut};
-    use crate::{ColumnInfo, IndexInfo, TableInfo};
+    use crate::{ColumnInfo, IndexColumn, IndexInfo, TableInfo};
 
     fn table() -> TableInfo {
         TableInfo {
@@ -157,6 +157,45 @@ mod tests {
         let p = Arc::as_ptr(&nt.indices.as_ref().unwrap()[0]);
         make_mut(&mut nt.indices.as_mut().unwrap()[0]).id = 10;
         assert_eq!(Arc::as_ptr(&nt.indices.as_ref().unwrap()[0]), p);
+    }
+
+    /// `MoveColumnInfo` on a copy of a shared `TableInfo` copies only the columns and the
+    /// indices whose offsets change; the other indices stay shared (Lucky's review of #230).
+    #[test]
+    fn move_column_info_copies_only_changed_indices() {
+        let idx = |id: i64, off: isize| {
+            Arc::new(IndexInfo {
+                id,
+                columns: Some(vec![IndexColumn {
+                    offset: off,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            })
+        };
+        let mut t = table();
+        t.columns.as_mut().unwrap().push(Arc::new(ColumnInfo {
+            id: 3,
+            offset: 3,
+            ..Default::default()
+        }));
+        t.indices = Some(vec![idx(1, 0), idx(2, 3), idx(3, 1)]);
+        let mut nt = t.go_copy();
+        nt.move_column_info(1, 2);
+        let (oi, ni) = (t.indices.as_ref().unwrap(), nt.indices.as_ref().unwrap());
+        assert!(Arc::ptr_eq(&oi[0], &ni[0]));
+        assert!(Arc::ptr_eq(&oi[1], &ni[1]));
+        assert!(!Arc::ptr_eq(&oi[2], &ni[2]));
+        let off = |i: &IndexInfo| i.columns.as_ref().unwrap()[0].offset;
+        assert_eq!((off(&oi[2]), off(&ni[2])), (1, 2));
+        let (oc, nc) = (t.columns.as_ref().unwrap(), nt.columns.as_ref().unwrap());
+        assert!(Arc::ptr_eq(&oc[0], &nc[0]));
+        assert!(Arc::ptr_eq(&oc[3], &nc[3]));
+        assert_eq!(
+            (nc[1].id, nc[1].offset, nc[2].id, nc[2].offset),
+            (2, 1, 1, 2)
+        );
+        assert_eq!((oc[1].id, oc[1].offset), (1, 1));
     }
 
     /// Go `TableInfo.Clone` clones every column and index: nothing is shared.

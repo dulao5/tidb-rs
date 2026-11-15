@@ -40,7 +40,7 @@ D06.1 的表结构（`TableInfo`、`ColumnInfo` 等）存在 TiKV 里，与 Go T
 ### 3.2 字符串类型
 
 - `FieldType` 的 `elems` 是字节串（`Vec<u8>`）：ENUM / SET 的元素可以是二进制字面量（`elemsIsBinaryLit` 就是为此存在的），不一定是 UTF-8。
-- `charset`、`collate`、`CIStr`、`UserIdentity` 的字段用 `String`：它们是字符集、排序规则名或 SQL 标识符，来自 lexer（合法 UTF-8）或 schema JSON（解码器已替换无效 UTF-8）。
+- `FieldType` 的 `charset`、`collate` 是 `&'static str`（N13 §8，#229 批次 A）：`intern_name` 对生成的字符集 / 排序规则表中的名字直接返回静态字符串，其他名字在进程级集合中复制一次、不释放；复制 `FieldType` 不分配，JSON 不变。`CIStr`、`UserIdentity` 的字段用 `String`：它们是字符集、排序规则名或 SQL 标识符，来自 lexer（合法 UTF-8）或 schema JSON（解码器已替换无效 UTF-8）。
 - `CompactStr`、`InfoSchemaStr`、`String` 返回 `String`：`format.OutputFormat` 按 rune 遍历，Go 的输出本来就是合法 UTF-8。`Restore` 原样写出元素，输出到 `Vec<u8>`。
 
 ### 3.3 nil 切片

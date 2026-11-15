@@ -58,7 +58,7 @@ impl Env {
     /// A full load of the database with the anchor table at version 1.
     fn new() -> Env {
         let store = Arc::new(MvccStore::default());
-        let req: Arc<dyn tidb_infoschema::autoid::Requirement> = Arc::new(Req(store.clone()));
+        let req: Arc<dyn tidb_infoschema::autoid::Requirement> = Arc::new(Req(Arc::clone(&store)));
         let data = new_data();
         let anchor = table_info(ANCHOR_ID, 30, 3);
         store
@@ -67,7 +67,7 @@ impl Env {
             .push((1, Arc::new(meta_state(&[&anchor]))));
         let mut db = db_info();
         db.deprecated.tables = Some(vec![Arc::new(anchor)]);
-        let mut b = new_builder(Some(req.clone()), None, data.clone());
+        let mut b = new_builder(Some(Arc::clone(&req)), None, Arc::clone(&data));
         block_on(b.init_with_db_infos(vec![db], vec![], vec![], 1)).unwrap();
         let latest = block_on(b.build(1));
         Env {
@@ -85,11 +85,11 @@ impl Env {
         self.ver += 1;
         let ts = self.ver as u64;
         let snap = Arc::new(meta_state(tables));
-        self.store.states.write().push((ts, snap.clone()));
+        self.store.states.write().push((ts, Arc::clone(&snap)));
         let m = meta::new_reader(snap);
-        let mut b = new_builder(Some(self.req.clone()), None, self.data.clone());
+        let mut b = new_builder(Some(Arc::clone(&self.req)), None, Arc::clone(&self.data));
         b.init_with_old_info_schema(&self.latest).unwrap();
-        b = b.with_store(self.store.clone());
+        b = b.with_store(Arc::clone(&self.store) as _);
         let diff = SchemaDiff {
             version: self.ver,
             type_: tp,

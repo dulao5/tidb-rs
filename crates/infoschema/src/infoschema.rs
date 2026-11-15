@@ -171,7 +171,7 @@ pub fn has_auto_increment_column(tb_info: &TableInfo) -> (bool, String) {
 
 // go: getTableInfo L1
 pub(crate) fn get_table_info(tbl: Option<&TableRef>) -> Option<Arc<TableInfo>> {
-    tbl.map(|t| t.meta().clone())
+    tbl.map(|t| Arc::clone(t.meta()))
 }
 
 /// `None` for Go's nil slice.
@@ -180,7 +180,7 @@ pub(crate) fn get_table_info_list(tables: Option<&[TableRef]>) -> Option<Vec<Arc
     let tables = tables?;
     let mut info_lost = Vec::with_capacity(tables.len());
     for tbl in tables {
-        info_lost.push(tbl.meta().clone());
+        info_lost.push(Arc::clone(tbl.meta()));
     }
     Some(info_lost)
 }

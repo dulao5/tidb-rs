@@ -96,7 +96,7 @@ impl LogicalPlan for LogicalProjection {
             self.exprs[0] = Expr::Constant(new_zero()).into_ref();
             let col = Column {
                 unique_id: ctx.vars.alloc_plan_column_id(),
-                ret_type: self.exprs[0].get_type(&*ctx.eval_ctx()).into_owned(),
+                ret_type: Arc::new(self.exprs[0].get_type(&*ctx.eval_ctx()).into_owned()),
                 ..Column::default()
             };
             let schema = self.schema_mut(&mut ctx.arena);

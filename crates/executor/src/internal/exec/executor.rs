@@ -14,6 +14,7 @@
 //! - Go recovers panics in `Open` / `Next` / `Close`; here a panic is caught at the task
 //!   boundary only (`M-PANIC`).
 
+use std::borrow::Borrow;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -60,7 +61,7 @@ pub trait Executor: Send {
     // glue: Go interface method Executor.NewChunkWithCapacity
     fn new_chunk_with_capacity(
         &self,
-        fields: &[FieldType],
+        fields: &[Arc<FieldType>],
         capacity: isize,
         max_cache_size: isize,
     ) -> Chunk {
@@ -115,7 +116,7 @@ pub trait Executor: Send {
         self.base().meta.schema()
     }
     // glue: Go interface method Executor.RetFieldTypes
-    fn ret_field_types(&self) -> &[FieldType] {
+    fn ret_field_types(&self) -> &[Arc<FieldType>] {
         self.base().meta.ret_field_types()
     }
     // glue: Go interface method Executor.InitCap
@@ -143,11 +144,19 @@ pub trait Executor: Send {
     }
 }
 
+/// Go's `retFieldTypes []*types.FieldType`, shared by an executor's meta and its chunk
+/// allocator.
+type RetFieldTypes = Arc<[Arc<FieldType>]>;
+
 /// executorChunkAllocator is a helper to implement `Chunk` related methods in `Executor`
 /// interface. Go's `AllocPool` is not kept (`M-POOL`).
+///
+/// `retFieldTypes` is the executor meta's slice (Go assigns the same `[]*types.FieldType`
+/// to both): one `Arc<[Arc<FieldType>]>`, whose types are the schema columns' `RetType`s
+/// (N13 §8).
 #[derive(Clone, Debug, Default)]
 pub struct ExecutorChunkAllocator {
-    ret_field_types: Vec<FieldType>,
+    ret_field_types: RetFieldTypes,
     init_cap: isize,
     max_chunk_size: isize,
 }
@@ -156,7 +165,7 @@ pub struct ExecutorChunkAllocator {
 // go: newExecutorChunkAllocator L2 (no allocator pool, M-POOL)
 fn new_executor_chunk_allocator(
     vars: &SessionVars,
-    ret_field_types: Vec<FieldType>,
+    ret_field_types: RetFieldTypes,
 ) -> ExecutorChunkAllocator {
     ExecutorChunkAllocator {
         init_cap: vars.init_chunk_size as isize,
@@ -203,9 +212,9 @@ impl ExecutorChunkAllocator {
     /// NewChunkWithCapacity allows the caller to allocate the chunk with any types, capacity
     /// and max size in the pool
     // go: executorChunkAllocator.NewChunkWithCapacity L2 (allocated directly, M-POOL)
-    pub fn new_chunk_with_capacity(
+    pub fn new_chunk_with_capacity<F: Borrow<FieldType>>(
         &self,
-        fields: &[FieldType],
+        fields: &[F],
         capacity: isize,
         max_cache_size: isize,
     ) -> Chunk {
@@ -223,7 +232,7 @@ pub struct ExecutorMeta {
     /// `nil` is `None`.
     schema: Option<Schema>,
     children: Vec<Box<dyn Executor>>,
-    ret_field_types: Vec<FieldType>,
+    ret_field_types: RetFieldTypes,
     id: isize,
 }
 
@@ -238,11 +247,11 @@ fn new_executor_meta(
         id,
         schema,
         children,
-        ret_field_types: Vec::new(),
+        ret_field_types: RetFieldTypes::default(),
     };
     if let Some(schema) = &e.schema {
         let cols = &schema.columns;
-        e.ret_field_types = cols.iter().map(|c| c.ret_type.clone()).collect();
+        e.ret_field_types = cols.iter().map(|c| Arc::clone(&c.ret_type)).collect();
     }
     e
 }
@@ -251,7 +260,7 @@ impl ExecutorMeta {
     /// NewChunkWithCapacity allows the caller to allocate the chunk with any types, capacity
     /// and max size in the pool
     // go: executorMeta.RetFieldTypes L1
-    pub fn ret_field_types(&self) -> &[FieldType] {
+    pub fn ret_field_types(&self) -> &[Arc<FieldType>] {
         &self.ret_field_types
     }
 
@@ -331,7 +340,7 @@ pub struct ExecutorStats {
 // go: newExecutorStats L2 (digests not copied: their reader is Top SQL, D14.2)
 fn new_executor_stats(stmt_ctx: &Arc<StatementContext>, id: isize) -> ExecutorStats {
     let mut e = ExecutorStats {
-        stmt_ctx: Some(stmt_ctx.clone()),
+        stmt_ctx: Some(Arc::clone(stmt_ctx)),
         in_restricted_sql: stmt_ctx.in_restricted_sql,
         runtime_stats: None,
     };
@@ -414,12 +423,12 @@ pub fn new_base_executor_v2(
     children: Vec<Box<dyn Executor>>,
 ) -> BaseExecutorV2 {
     let executor_meta = new_executor_meta(schema, id, children);
-    let ret = executor_meta.ret_field_types().to_vec();
+    let ret = Arc::clone(&executor_meta.ret_field_types);
     BaseExecutorV2 {
         meta: executor_meta,
         stats: new_executor_stats(&vars.stmt_ctx_arc(), id),
         alloc: new_executor_chunk_allocator(vars, ret),
-        killer: new_executor_killer_handler(killer.clone()),
+        killer: new_executor_killer_handler(Arc::clone(killer)),
     }
 }
 
@@ -485,7 +494,7 @@ impl BaseExecutorV2 {
         }
 
         let mut new_chunk_allocator = self.alloc.clone();
-        new_chunk_allocator.ret_field_types = new_executor_meta.ret_field_types().to_vec();
+        new_chunk_allocator.ret_field_types = Arc::clone(&new_executor_meta.ret_field_types);
         BaseExecutorV2 {
             meta: new_executor_meta,
             stats: new_executor_stats,
@@ -558,7 +567,7 @@ pub fn try_new_cache_chunk(e: &dyn Executor) -> Chunk {
 
 /// RetTypes returns all output column types.
 // go: RetTypes L1
-pub fn ret_types(e: &dyn Executor) -> &[FieldType] {
+pub fn ret_types(e: &dyn Executor) -> &[Arc<FieldType>] {
     e.ret_field_types()
 }
 
@@ -603,4 +612,60 @@ pub async fn next(ctx: &ExecCtx, e: &mut dyn Executor, req: &mut Chunk) -> Resul
 // go: Close L2 (panics are caught at the task boundary, M-PANIC)
 pub async fn close(e: &mut dyn Executor) -> Result<(), Error> {
     e.close().await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tidb_base::mysql::TypeLonglong;
+    use tidb_expression::{Column, Schema};
+    use tidb_memory::sqlkiller::SqlKiller;
+    use tidb_sessionctx::variable::session::SessionVars;
+    use tidb_types::field_type::new_field_type;
+
+    use super::new_base_executor_v2;
+
+    /// Go assigns `cols[i].RetType` to `retFieldTypes[i]` and gives the same slice to the
+    /// chunk allocator: no `FieldType` is copied (N13 §8).
+    #[test]
+    fn ret_field_types_share_the_schema_types() {
+        let vars = SessionVars::new(Box::new(crate::adapter::tests::Acc));
+        let schema = Schema {
+            columns: (0..3)
+                .map(|i| {
+                    Arc::new(Column {
+                        unique_id: i,
+                        ret_type: Arc::new(new_field_type(TypeLonglong)),
+                        ..Column::default()
+                    })
+                })
+                .collect(),
+            ..Schema::default()
+        };
+        let b = new_base_executor_v2(
+            &vars,
+            &SqlKiller::new(),
+            Some(schema.clone()),
+            1,
+            Vec::new(),
+        );
+        assert!(Arc::ptr_eq(
+            &b.meta.ret_field_types,
+            &b.alloc.ret_field_types
+        ));
+        for (t, c) in b.meta.ret_field_types().iter().zip(&schema.columns) {
+            assert!(Arc::ptr_eq(t, &c.ret_type));
+        }
+        let nb = b.build_new_base_executor_v2(None, Some(schema.clone()), 2, Vec::new());
+        assert!(Arc::ptr_eq(
+            &nb.meta.ret_field_types,
+            &nb.alloc.ret_field_types
+        ));
+        assert!(Arc::ptr_eq(
+            &nb.meta.ret_field_types()[0],
+            &schema.columns[0].ret_type
+        ));
+        assert_eq!(b.alloc.new_chunk().num_cols(), 3);
+    }
 }

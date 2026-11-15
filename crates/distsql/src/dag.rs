@@ -3,6 +3,8 @@
 //! `pkg/util.ColumnsToProto`, `pkg/table/tables.SetPBColumnsDefaultValue`,
 //! `pkg/executor/internal/builder.ConstructDAGReq`).
 
+use std::borrow::Cow;
+
 use protobuf::Message;
 use tidb_meta::model::ColumnInfo;
 use tidb_meta::model::FieldType;
@@ -291,14 +293,16 @@ pub struct DagSpec<'a> {
 
 /// A built request and the types of the rows it returns.
 #[derive(Clone, Debug)]
-pub struct DagPlan {
+pub struct DagPlan<'a> {
     pub request: DagRequest,
     /// Output column types: the scanned columns, or for an aggregation its function results
-    /// followed by the group-by columns (TiKV's aggregation output schema).
-    pub output_types: Vec<FieldType>,
+    /// followed by the group-by columns (TiKV's aggregation output schema). The scanned
+    /// columns' types are borrowed from the spec's columns (Go `&col.FieldType`, issue #229);
+    /// only the aggregation results are computed values.
+    pub output_types: Vec<Cow<'a, FieldType>>,
 }
 
-impl DagPlan {
+impl DagPlan<'_> {
     /// Protobuf bytes of the request, the payload of a coprocessor DAG request.
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.request
@@ -313,7 +317,7 @@ impl DagPlan {
 /// vendored codecs decode most directly ([`crate::decode_select_response`]), and does not
 /// depend on TiKV's chunk-format type support. Go TiDB uses `TypeChunk` when possible; the
 /// row values are the same.
-pub fn build_dag(spec: &DagSpec<'_>, ctx: &DagContext) -> Result<DagPlan> {
+pub fn build_dag<'a>(spec: &DagSpec<'a>, ctx: &DagContext) -> Result<DagPlan<'a>> {
     spec.table
         .check_int_handle_readable()
         .map_err(|e| Error::Unsupported(e.to_string()))?;
@@ -345,8 +349,11 @@ pub fn build_dag(spec: &DagSpec<'_>, ctx: &DagContext) -> Result<DagPlan> {
     exec.set_executor_id(String::new());
     executors.push(exec);
 
-    let mut output_types: Vec<FieldType> =
-        spec.columns.iter().map(|c| c.field_type.clone()).collect();
+    let mut output_types: Vec<Cow<'a, FieldType>> = spec
+        .columns
+        .iter()
+        .map(|&c| Cow::Borrowed(&c.field_type))
+        .collect();
 
     if let Some((funcs, group_by)) = &spec.aggregation {
         let input = output_types;
@@ -366,7 +373,7 @@ pub fn build_dag(spec: &DagSpec<'_>, ctx: &DagContext) -> Result<DagPlan> {
                 .build();
             expr.set_agg_func_mode(AggFunctionMode::Partial1Mode);
             agg.mut_agg_func().push(expr);
-            out.push(ret);
+            out.push(Cow::Owned(ret));
         }
         for &g in group_by {
             agg.mut_group_by().push(col_ref(g)?);

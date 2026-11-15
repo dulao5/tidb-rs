@@ -139,7 +139,7 @@ impl LogicalPlan for LogicalAggregation {
             };
             let col = Column {
                 unique_id: ctx.vars.alloc_plan_column_id(),
-                ret_type: new_agg.ret_tp.clone(),
+                ret_type: Arc::new(new_agg.ret_tp.clone()),
                 ..Column::default()
             };
             self.agg_funcs.push(new_agg);

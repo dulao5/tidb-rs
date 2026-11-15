@@ -20,6 +20,7 @@ use smallvec::SmallVec;
 use std::any::Any;
 use std::borrow::Cow;
 use std::cell::{RefCell, RefMut};
+use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::mysql;
@@ -256,8 +257,10 @@ pub struct BuiltinFunc {
     pub sig: &'static SigDesc,
     /// `args`.
     pub args: Vec<ExprRef>,
-    /// `tp`: the result type.
-    pub tp: FieldType,
+    /// `tp`: the result type. Go's `*FieldType`, shared with the `ScalarFunction.RetType`
+    /// and with the clones of the signature (`cloneFrom` copies the pointer); changed only
+    /// through `Arc::make_mut` (copy on write, N13 §8).
+    pub tp: Arc<FieldType>,
     /// `pbCode`.
     pub pb_code: i32,
     /// `ctor`: the collator, `nil` until `SetCollator`.
@@ -436,7 +439,7 @@ impl BuiltinFunc {
         BuiltinFunc {
             sig: &crate::builtin::baseBuiltinFuncSig,
             args,
-            tp,
+            tp: Arc::new(tp),
             pb_code: 0,
             ctor: None,
             collation_info: CollationInfo::default(),
@@ -459,7 +462,7 @@ impl BuiltinFunc {
     pub fn new(
         sig: &'static SigDesc,
         args: Vec<ExprRef>,
-        tp: FieldType,
+        tp: impl Into<Arc<FieldType>>,
         charset: &str,
         collation: &str,
     ) -> BuiltinFunc {
@@ -468,7 +471,7 @@ impl BuiltinFunc {
         BuiltinFunc {
             sig,
             args,
-            tp,
+            tp: tp.into(),
             pb_code: sig.pb_code,
             ctor: Some(collate::get_collator(collation)),
             collation_info,
@@ -560,14 +563,14 @@ impl BuiltinFunc {
     pub fn get_ret_tp(&mut self) -> &FieldType {
         if self.tp.eval_type() == ETString {
             if self.tp.get_flen() >= mysql::MaxBlobWidth {
-                self.tp.set_type(mysql::TypeLongBlob);
+                Arc::make_mut(&mut self.tp).set_type(mysql::TypeLongBlob);
             } else if self.tp.get_flen() >= 65536 {
-                self.tp.set_type(mysql::TypeMediumBlob);
+                Arc::make_mut(&mut self.tp).set_type(mysql::TypeMediumBlob);
             }
             if self.tp.get_charset().is_empty() {
                 let (charset, collate) = gocharset::get_default_charset_and_collate();
-                self.tp.set_charset(charset);
-                self.tp.set_collate(collate);
+                Arc::make_mut(&mut self.tp).set_charset(charset);
+                Arc::make_mut(&mut self.tp).set_collate(collate);
             }
         }
         &self.tp
@@ -1196,18 +1199,18 @@ fn compile_into(e: &ExprRef, as_type: EvalType, nodes: &mut Vec<RpnNode>) {
                 index: c.index as usize,
             },
             ColumnRead::Convert => RpnNode::ColumnConv {
-                expr: e.clone(),
+                expr: Arc::clone(e),
                 as_type,
             },
         }),
         Expr::Constant(_) | Expr::CorrelatedColumn(_) => nodes.push(RpnNode::Constant {
-            expr: e.clone(),
+            expr: Arc::clone(e),
             as_type,
         }),
         Expr::ScalarFunction(sf) if sf.function.sig.args_fallback != ArgsFallback::None => {
             let drivers = &sf.function.sig.drivers;
             nodes.push(RpnNode::RowFallback {
-                func: e.clone(),
+                func: Arc::clone(e),
                 args: sf
                     .function
                     .args
@@ -1232,7 +1235,7 @@ fn compile_into(e: &ExprRef, as_type: EvalType, nodes: &mut Vec<RpnNode>) {
                 compile_into(a, read, nodes);
             }
             nodes.push(RpnNode::Call {
-                func: e.clone(),
+                func: Arc::clone(e),
                 nargs: sf.function.args.len(),
             });
         }

@@ -5,6 +5,8 @@
 //! (the six function classes and their 20 signatures) and `+ - *` over VECTOR (3 signatures).
 #![allow(non_upper_case_globals)]
 
+use std::sync::Arc;
+
 use tidb_base::Error;
 use tidb_base::errors::RedactLogDisable;
 use tidb_base::gofmt::Arg;
@@ -267,8 +269,15 @@ impl ArithmeticFunctionClass {
                 ETReal,
                 &[ETReal, ETReal],
             )?;
-            let (a0, a1) = (bf.args[0].clone(), bf.args[1].clone());
-            set_flen_decimal4_real_or_decimal(&*ev, &mut bf.tp, &a0, &a1, true, false);
+            let (a0, a1) = (Arc::clone(&bf.args[0]), Arc::clone(&bf.args[1]));
+            set_flen_decimal4_real_or_decimal(
+                &*ev,
+                Arc::make_mut(&mut bf.tp),
+                &a0,
+                &a1,
+                true,
+                false,
+            );
             return Ok(bf.with_sig(&builtinArithmeticPlusRealSig));
         } else if lhs_eval_tp == ETDecimal || rhs_eval_tp == ETDecimal {
             let mut bf = new_base_builtin_func_with_tp(
@@ -278,8 +287,15 @@ impl ArithmeticFunctionClass {
                 ETDecimal,
                 &[ETDecimal, ETDecimal],
             )?;
-            let (a0, a1) = (bf.args[0].clone(), bf.args[1].clone());
-            set_flen_decimal4_real_or_decimal(&*ev, &mut bf.tp, &a0, &a1, false, false);
+            let (a0, a1) = (Arc::clone(&bf.args[0]), Arc::clone(&bf.args[1]));
+            set_flen_decimal4_real_or_decimal(
+                &*ev,
+                Arc::make_mut(&mut bf.tp),
+                &a0,
+                &a1,
+                false,
+                false,
+            );
             return Ok(bf.with_sig(&builtinArithmeticPlusDecimalSig));
         }
         let mut bf =
@@ -288,7 +304,7 @@ impl ArithmeticFunctionClass {
         if has_unsigned_flag(bf.args[0].get_type(&*ev).get_flag())
             || has_unsigned_flag(bf.args[1].get_type(&*ev).get_flag())
         {
-            bf.tp.add_flag(mysql::UnsignedFlag);
+            Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
         }
         Ok(bf.with_sig(&builtinArithmeticPlusIntSig))
     }
@@ -318,8 +334,15 @@ impl ArithmeticFunctionClass {
                 ETReal,
                 &[ETReal, ETReal],
             )?;
-            let (a0, a1) = (bf.args[0].clone(), bf.args[1].clone());
-            set_flen_decimal4_real_or_decimal(&*ev, &mut bf.tp, &a0, &a1, true, false);
+            let (a0, a1) = (Arc::clone(&bf.args[0]), Arc::clone(&bf.args[1]));
+            set_flen_decimal4_real_or_decimal(
+                &*ev,
+                Arc::make_mut(&mut bf.tp),
+                &a0,
+                &a1,
+                true,
+                false,
+            );
             return Ok(bf.with_sig(&builtinArithmeticMinusRealSig));
         } else if lhs_eval_tp == ETDecimal || rhs_eval_tp == ETDecimal {
             let mut bf = new_base_builtin_func_with_tp(
@@ -329,8 +352,15 @@ impl ArithmeticFunctionClass {
                 ETDecimal,
                 &[ETDecimal, ETDecimal],
             )?;
-            let (a0, a1) = (bf.args[0].clone(), bf.args[1].clone());
-            set_flen_decimal4_real_or_decimal(&*ev, &mut bf.tp, &a0, &a1, false, false);
+            let (a0, a1) = (Arc::clone(&bf.args[0]), Arc::clone(&bf.args[1]));
+            set_flen_decimal4_real_or_decimal(
+                &*ev,
+                Arc::make_mut(&mut bf.tp),
+                &a0,
+                &a1,
+                false,
+                false,
+            );
             return Ok(bf.with_sig(&builtinArithmeticMinusDecimalSig));
         }
         let mut bf =
@@ -340,7 +370,7 @@ impl ArithmeticFunctionClass {
             || has_unsigned_flag(bf.args[1].get_type(&*ev).get_flag()))
             && !ev.sql_mode().has_no_unsigned_subtraction_mode()
         {
-            bf.tp.add_flag(mysql::UnsignedFlag);
+            Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
         }
         Ok(bf.with_sig(&builtinArithmeticMinusIntSig))
     }
@@ -374,8 +404,15 @@ impl ArithmeticFunctionClass {
                 ETReal,
                 &[ETReal, ETReal],
             )?;
-            let (a0, a1) = (bf.args[0].clone(), bf.args[1].clone());
-            set_flen_decimal4_real_or_decimal(&*ev, &mut bf.tp, &a0, &a1, true, true);
+            let (a0, a1) = (Arc::clone(&bf.args[0]), Arc::clone(&bf.args[1]));
+            set_flen_decimal4_real_or_decimal(
+                &*ev,
+                Arc::make_mut(&mut bf.tp),
+                &a0,
+                &a1,
+                true,
+                true,
+            );
             return Ok(bf.with_sig(&builtinArithmeticMultiplyRealSig));
         } else if lhs_eval_tp == ETDecimal || rhs_eval_tp == ETDecimal {
             let mut bf = new_base_builtin_func_with_tp(
@@ -385,14 +422,21 @@ impl ArithmeticFunctionClass {
                 ETDecimal,
                 &[ETDecimal, ETDecimal],
             )?;
-            let (a0, a1) = (bf.args[0].clone(), bf.args[1].clone());
-            set_flen_decimal4_real_or_decimal(&*ev, &mut bf.tp, &a0, &a1, false, true);
+            let (a0, a1) = (Arc::clone(&bf.args[0]), Arc::clone(&bf.args[1]));
+            set_flen_decimal4_real_or_decimal(
+                &*ev,
+                Arc::make_mut(&mut bf.tp),
+                &a0,
+                &a1,
+                false,
+                true,
+            );
             return Ok(bf.with_sig(&builtinArithmeticMultiplyDecimalSig));
         }
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[ETInt, ETInt])?;
         if has_unsigned_flag(lhs_flag) || has_unsigned_flag(rhs_flag) {
-            bf.tp.add_flag(mysql::UnsignedFlag);
+            Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
             return Ok(bf.with_sig(&builtinArithmeticMultiplyIntUnsignedSig));
         }
         Ok(bf.with_sig(&builtinArithmeticMultiplyIntSig))
@@ -413,7 +457,7 @@ impl ArithmeticFunctionClass {
                 ETReal,
                 &[ETReal, ETReal],
             )?;
-            set_type4_div_real(&mut bf.tp);
+            set_type4_div_real(Arc::make_mut(&mut bf.tp));
             return Ok(bf.with_sig(&builtinArithmeticDivideRealSig));
         }
         let mut bf = new_base_builtin_func_with_tp(
@@ -428,7 +472,7 @@ impl ArithmeticFunctionClass {
             bf.args[1].get_type(&*ev).into_owned(),
         );
         set_type4_div_decimal(
-            &mut bf.tp,
+            Arc::make_mut(&mut bf.tp),
             &lhs_tp,
             &rhs_tp,
             ev.get_div_precision_increment() as isize,
@@ -457,7 +501,7 @@ impl ArithmeticFunctionClass {
                 &[ETInt, ETInt],
             )?;
             if unsigned {
-                bf.tp.add_flag(mysql::UnsignedFlag);
+                Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
             }
             return Ok(bf.with_sig(&builtinArithmeticIntDivideIntSig));
         }
@@ -469,7 +513,7 @@ impl ArithmeticFunctionClass {
             &[ETDecimal, ETDecimal],
         )?;
         if unsigned {
-            bf.tp.add_flag(mysql::UnsignedFlag);
+            Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
         }
         Ok(bf.with_sig(&builtinArithmeticIntDivideDecimalSig))
     }
@@ -495,9 +539,9 @@ impl ArithmeticFunctionClass {
                 ETReal,
                 &[ETReal, ETReal],
             )?;
-            set_type4_mod_real_or_decimal(&mut bf.tp, &lhs_tp, &rhs_tp, false);
+            set_type4_mod_real_or_decimal(Arc::make_mut(&mut bf.tp), &lhs_tp, &rhs_tp, false);
             if lhs_unsigned {
-                bf.tp.add_flag(mysql::UnsignedFlag);
+                Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
             }
             return Ok(bf.with_sig(&builtinArithmeticModRealSig));
         } else if lhs_eval_tp == ETDecimal || rhs_eval_tp == ETDecimal {
@@ -512,16 +556,16 @@ impl ArithmeticFunctionClass {
                 ETDecimal,
                 &[ETDecimal, ETDecimal],
             )?;
-            set_type4_mod_real_or_decimal(&mut bf.tp, &lhs_tp, &rhs_tp, true);
+            set_type4_mod_real_or_decimal(Arc::make_mut(&mut bf.tp), &lhs_tp, &rhs_tp, true);
             if lhs_unsigned {
-                bf.tp.add_flag(mysql::UnsignedFlag);
+                Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
             }
             return Ok(bf.with_sig(&builtinArithmeticModDecimalSig));
         }
         let mut bf =
             new_base_builtin_func_with_tp(ctx, self.base.func_name, args, ETInt, &[ETInt, ETInt])?;
         if lhs_unsigned {
-            bf.tp.add_flag(mysql::UnsignedFlag);
+            Arc::make_mut(&mut bf.tp).add_flag(mysql::UnsignedFlag);
         }
         // Go reads args[i] after newBaseBuiltinFuncWithTp replaced them with the wrapped ones.
         let is_lhs_unsigned = has_unsigned_flag(bf.args[0].get_type(&*ev).get_flag());

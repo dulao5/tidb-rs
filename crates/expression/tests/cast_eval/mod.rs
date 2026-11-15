@@ -52,7 +52,7 @@ pub(super) fn expr_of(ctx: &Ctxs, v: &Value, fts: &[FieldType]) -> ExprRef {
             Expr::Column(Column {
                 unique_id: i as i64 + 1,
                 index: i as isize,
-                ret_type: fts[i].clone(),
+                ret_type: std::sync::Arc::new(fts[i].clone()),
                 orig_name: "c".into(),
                 ..Column::default()
             })
@@ -73,7 +73,7 @@ pub(super) fn expr_of(ctx: &Ctxs, v: &Value, fts: &[FieldType]) -> ExprRef {
             Expr::CorrelatedColumn(CorrelatedColumn::new(Column {
                 unique_id: 101 + i as i64,
                 index: i as isize,
-                ret_type: fts[i].clone(),
+                ret_type: std::sync::Arc::new(fts[i].clone()),
                 orig_name: "c".into(),
                 ..Column::default()
             }))
@@ -86,7 +86,7 @@ pub(super) fn expr_of(ctx: &Ctxs, v: &Value, fts: &[FieldType]) -> ExprRef {
             Expr::Column(Column {
                 unique_id: 201 + i as i64,
                 index: i as isize,
-                ret_type: fts[i].clone(),
+                ret_type: std::sync::Arc::new(fts[i].clone()),
                 orig_name: "c".into(),
                 virtual_expr: Some(expr_of(ctx, &a[2], fts)),
                 ..Column::default()

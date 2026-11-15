@@ -183,16 +183,16 @@ impl TableInfo {
         // Update column offsets.
         let mut updated_offsets: BTreeMap<isize, isize> = BTreeMap::new();
         let columns = self.columns.get_or_insert_with(Vec::new);
-        let src = columns[from].clone();
+        let src = Arc::clone(&columns[from]);
         if from < to {
             for i in from..to {
-                columns[i] = columns[i + 1].clone();
+                columns[i] = Arc::clone(&columns[i + 1]);
                 make_mut(&mut columns[i]).offset = i as isize;
                 updated_offsets.insert((i + 1) as isize, i as isize);
             }
         } else if from > to {
             for i in (to + 1..=from).rev() {
-                columns[i] = columns[i - 1].clone();
+                columns[i] = Arc::clone(&columns[i - 1]);
                 make_mut(&mut columns[i]).offset = i as isize;
                 updated_offsets.insert((i - 1) as isize, i as isize);
             }
@@ -203,6 +203,14 @@ impl TableInfo {
         // Update index column offsets.
         updated_offsets.insert(from as isize, to as isize);
         for idx in self.indices.iter_mut().flatten() {
+            // Copy on write only an index whose offsets change (N13 §3 rule 2): the others
+            // stay shared with the other holders of this `TableInfo`'s indices.
+            let moved = |o: &isize| updated_offsets.contains_key(o);
+            if !idx.columns.iter().flatten().any(|c| moved(&c.offset))
+                && !idx.affect_column.iter().flatten().any(|c| moved(&c.offset))
+            {
+                continue;
+            }
             let idx = make_mut(idx);
             for idx_col in idx.columns.iter_mut().flatten() {
                 if let Some(&new_offset) = updated_offsets.get(&idx_col.offset) {

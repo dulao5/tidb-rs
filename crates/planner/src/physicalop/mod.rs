@@ -51,7 +51,7 @@ pub fn map_children(
         return;
     }
     for i in 0..p.children().len() {
-        let new_child = f(p.children()[i].clone());
+        let new_child = f(Arc::clone(&p.children()[i]));
         if !Arc::ptr_eq(&new_child, &p.children()[i]) {
             make_mut_plan(p).children_mut()[i] = new_child;
         }

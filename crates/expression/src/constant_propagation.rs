@@ -138,7 +138,7 @@ impl BasePropConstSolver {
             }
             let elems = col_tp.get_elems().unwrap_or(&[]);
             let enum_con = |e| {
-                let mut c = Constant::new(new_mysql_enum_datum(e), col.ret_type.clone());
+                let mut c = Constant::new(new_mysql_enum_datum(e), (*col.ret_type).clone());
                 c.collation_info = col.collation_info.clone();
                 Expr::Constant(c).into_ref()
             };

@@ -327,12 +327,12 @@ pub fn get_charset_info(cs: &str) -> (Option<Arc<Charset>>, Result<(), Error>) {
     }
 
     if let Some(c) = CharacterSetInfos.read().unwrap().get(&to_lower(cs)) {
-        return (Some(c.clone()), Ok(()));
+        return (Some(Arc::clone(c)), Ok(()));
     }
 
     if let Some(c) = st.read().unwrap().charsets.get(&to_lower(cs)) {
         return (
-            Some(c.clone()),
+            Some(Arc::clone(c)),
             Err(errors::errorf(
                 "Unsupported charset %s",
                 &[Arg::from(cs.to_owned())],
@@ -396,7 +396,7 @@ fn utf8_alias(csname: &str) -> String {
 pub fn get_collation_by_name(name: &str) -> Result<Arc<Collation>, Error> {
     let csname = utf8_alias(&to_lower(name));
     match st().read().unwrap().collations_name_map.get(&csname) {
-        Some(collation) => Ok(collation.clone()),
+        Some(collation) => Ok(Arc::clone(collation)),
         None => Err(ErrUnknownCollation.gen_with_stack_by_args(vec![Arg::from(name.to_owned())])),
     }
 }
@@ -405,7 +405,7 @@ pub fn get_collation_by_name(name: &str) -> Result<Arc<Collation>, Error> {
 // go: GetCollationByID L1 [M-ERR]
 pub fn get_collation_by_id(id: isize) -> Result<Arc<Collation>, Error> {
     match st().read().unwrap().collations_id_map.get(&id) {
-        Some(collation) => Ok(collation.clone()),
+        Some(collation) => Ok(Arc::clone(collation)),
         None => Err(errors::errorf("Unknown collation id %d", &[Arg::from(id)])),
     }
 }
@@ -513,11 +513,11 @@ pub fn add_collation(c: Arc<Collation>) {
 // go-part: AddCollation
 fn add_collation_to(st: &RwLock<State>, c: Arc<Collation>) {
     let mut s = st.write().unwrap();
-    s.collations_id_map.insert(c.id, c.clone());
-    s.collations_name_map.insert(c.name.clone(), c.clone());
+    s.collations_id_map.insert(c.id, Arc::clone(&c));
+    s.collations_name_map.insert(c.name.clone(), Arc::clone(&c));
 
     if supportedCollationNames.contains(&c.name.as_str()) {
-        add_supported_collation_to(&mut s, c.clone());
+        add_supported_collation_to(&mut s, Arc::clone(&c));
     }
 
     if let Some(charset) = CharacterSetInfos.read().unwrap().get(&c.charset_name) {
@@ -525,7 +525,7 @@ fn add_collation_to(st: &RwLock<State>, c: Arc<Collation>) {
             .collations
             .write()
             .unwrap()
-            .insert(c.name.clone(), c.clone());
+            .insert(c.name.clone(), Arc::clone(&c));
     }
 
     if let Some(charset) = s.charsets.get(&c.charset_name) {
@@ -533,7 +533,7 @@ fn add_collation_to(st: &RwLock<State>, c: Arc<Collation>) {
             .collations
             .write()
             .unwrap()
-            .insert(c.name.clone(), c.clone());
+            .insert(c.name.clone(), Arc::clone(&c));
     }
 }
 

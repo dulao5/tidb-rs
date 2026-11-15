@@ -12,6 +12,8 @@
 // Go names for package-level constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
+use std::borrow::Borrow;
+
 use crate::ColArc as Arc;
 
 use tidb_base::Error;
@@ -102,10 +104,10 @@ fn unshare_col(a: &mut Arc<Column>) {
 
 /// NewEmptyChunk creates an empty chunk
 // go: NewEmptyChunk L1
-pub fn new_empty_chunk(fields: &[FieldType]) -> Chunk {
+pub fn new_empty_chunk<F: Borrow<FieldType>>(fields: &[F]) -> Chunk {
     let mut columns = Vec::with_capacity(fields.len());
     for f in fields {
-        columns.push(Arc::new(new_empty_column(f)));
+        columns.push(Arc::new(new_empty_column(f.borrow())));
     }
     Chunk {
         columns: Some(columns),
@@ -115,13 +117,16 @@ pub fn new_empty_chunk(fields: &[FieldType]) -> Chunk {
 
 /// NewChunkWithCapacity creates a new chunk with field types and capacity.
 // go: NewChunkWithCapacity L1
-pub fn new_chunk_with_capacity(fields: &[FieldType], capacity: usize) -> Chunk {
+pub fn new_chunk_with_capacity<F: Borrow<FieldType>>(fields: &[F], capacity: usize) -> Chunk {
     new(fields, capacity, capacity)
 }
 
 /// NewChunkFromPoolWithCapacity creates a new chunk with field types and capacity from the pool.
 // go: NewChunkFromPoolWithCapacity L2 (M-POOL: no pool; Go's pooled columns are created like New's)
-pub fn new_chunk_from_pool_with_capacity(fields: &[FieldType], init_cap: usize) -> Chunk {
+pub fn new_chunk_from_pool_with_capacity<F: Borrow<FieldType>>(
+    fields: &[F],
+    init_cap: usize,
+) -> Chunk {
     new(fields, init_cap, init_cap)
 }
 
@@ -130,14 +135,14 @@ pub fn new_chunk_from_pool_with_capacity(fields: &[FieldType], init_cap: usize) 
 ///   cap: the limit for the max number of rows.
 ///   maxChunkSize: the max limit for the number of rows.
 // go: New L1
-pub fn new(fields: &[FieldType], capacity: usize, max_chunk_size: usize) -> Chunk {
+pub fn new<F: Borrow<FieldType>>(fields: &[F], capacity: usize, max_chunk_size: usize) -> Chunk {
     new_in(fields, capacity, max_chunk_size, ColAlloc::Global)
 }
 
 /// [`new`] with the columns allocating through `alloc` (A1 3.3, N5a 3.7).
 // glue: N5a 3.7 New with a TrackedAlloc
-pub fn new_in(
-    fields: &[FieldType],
+pub fn new_in<F: Borrow<FieldType>>(
+    fields: &[F],
     capacity: usize,
     max_chunk_size: usize,
     alloc: ColAlloc,
@@ -145,7 +150,7 @@ pub fn new_in(
     let capacity = capacity.min(max_chunk_size);
     let mut columns = Vec::with_capacity(fields.len());
     for f in fields {
-        let mut col = new_column_for(f, capacity);
+        let mut col = new_column_for(f.borrow(), capacity);
         if !matches!(alloc, ColAlloc::Global) {
             col = new_column(col.type_size(), capacity, alloc.clone());
         }

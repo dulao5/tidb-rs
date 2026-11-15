@@ -73,7 +73,7 @@ pub fn func(ctx: &PlanCtx<'_>, name: &str, args: Vec<ExprRef>) -> ExprRef {
 pub fn new_col(ctx: &PlanCtx<'_>, tp: FieldType) -> Arc<Column> {
     Arc::new(Column {
         unique_id: ctx.vars.alloc_plan_column_id(),
-        ret_type: tp,
+        ret_type: Arc::new(tp),
         ..Column::default()
     })
 }
@@ -102,7 +102,7 @@ pub fn data_source_with(ctx: &mut PlanCtx<'_>, names: &[&str]) -> PlanId {
         cols.push(Arc::new(Column {
             unique_id: ctx.vars.alloc_plan_column_id(),
             id: info.id,
-            ret_type: tp,
+            ret_type: Arc::new(tp),
             orig_name: format!("test.t.{n}"),
             ..Column::default()
         }));

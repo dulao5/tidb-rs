@@ -300,7 +300,7 @@ impl Data {
                 table_id: item.table_id,
                 schema_version: item.schema_version,
             },
-            tbl.clone(),
+            Arc::clone(&tbl),
         );
         let ti = tbl.meta();
         if let Some(pi) = ti.get_partition_info() {
@@ -319,7 +319,7 @@ impl Data {
                 db_name: item.db_name.clone(),
                 table_id: item.table_id,
                 schema_version: item.schema_version,
-                table_info: Some(ti.clone()),
+                table_info: Some(Arc::clone(ti)),
                 tomb: false,
             };
             btree_set(&self.table_info_resident, table_info_item_key(&r), r);
@@ -414,7 +414,7 @@ impl Data {
         let hi = (old.name.l.clone(), i64::MAX);
         for (_, item) in m.range_mut(lo..=hi) {
             if Arc::ptr_eq(&item.db_info, old) {
-                item.db_info = new.clone();
+                item.db_info = Arc::clone(new);
             }
         }
     }
@@ -1101,7 +1101,7 @@ impl InfoSchemaV2 {
         };
 
         if refill {
-            self.data.table_cache.set(key, ret.clone());
+            self.data.table_cache.set(key, Arc::clone(&ret));
         }
         Some(ret)
     }
@@ -1267,7 +1267,7 @@ impl InfoSchemaV2 {
             if let Some(tb_names) = self.data.specials.read().get(&schema.l)
                 && let Some(t) = tb_names.tables.get(&tbl.l)
             {
-                return Ok(t.clone());
+                return Ok(Arc::clone(t));
             }
             return Err(ErrTableNotExists.fast_gen_by_args(vec![cistr_arg(schema), cistr_arg(tbl)]));
         }
@@ -1322,7 +1322,7 @@ impl InfoSchemaV2 {
 
         let refill = ctx.refill.unwrap_or(true);
         if refill {
-            self.data.table_cache.set(old_key, ret.clone());
+            self.data.table_cache.set(old_key, Arc::clone(&ret));
         }
 
         Ok(ret)
@@ -1499,7 +1499,7 @@ impl InfoSchemaV2 {
                 .specials
                 .read()
                 .get(&schema.l)
-                .map(|s| s.db_info.clone());
+                .map(|s| Arc::clone(&s.db_info));
         }
 
         let mut val = None;
@@ -1515,7 +1515,7 @@ impl InfoSchemaV2 {
             if item.schema_version <= self.schema_meta_version() {
                 if !item.tomb {
                     // If the item is a tomb record, the database is dropped.
-                    val = Some(item.db_info.clone());
+                    val = Some(Arc::clone(&item.db_info));
                 }
                 break;
             }
@@ -1553,7 +1553,7 @@ impl InfoSchemaV2 {
     // go: infoschemaV2.AllSchemas L1
     pub fn all_schemas(&self) -> Vec<Arc<DBInfo>> {
         let mut schemas = Vec::new();
-        self.all_schemas_visit(|di| schemas.push(di.clone()));
+        self.all_schemas_visit(|di| schemas.push(Arc::clone(di)));
         schemas
     }
 
@@ -1674,7 +1674,7 @@ impl InfoSchemaV2 {
                 .read()
                 .values()
                 .find(|tmp| tmp.db_info.id == id)
-                .map(|st| st.db_info.clone());
+                .map(|st| Arc::clone(&st.db_info));
         }
         let mut ok = false;
         let mut name = CIStr::default();
@@ -2228,16 +2228,16 @@ impl InfoSchemaV2 {
                     db_name: item.db_name.clone(),
                     table_infos: Vec::new(),
                 };
-                res.table_infos.push(table_info.clone());
+                res.table_infos.push(Arc::clone(table_info));
             } else if curr_db == item.db_name.l {
-                res.table_infos.push(table_info.clone());
+                res.table_infos.push(Arc::clone(table_info));
             } else {
                 ret.push(std::mem::take(&mut res));
                 res = TableInfoResult {
                     db_name: item.db_name.clone(),
                     table_infos: Vec::new(),
                 };
-                res.table_infos.push(table_info.clone());
+                res.table_infos.push(Arc::clone(table_info));
             }
         }
         if !res.table_infos.is_empty() {
@@ -2585,10 +2585,10 @@ mod tests {
             }),
         )
         .unwrap();
-        data.add(item(1), tbl.clone()); // created at v1
-        data.add(item(3), tbl.clone()); // altered at v3
+        data.add(item(1), Arc::clone(&tbl)); // created at v1
+        data.add(item(3), Arc::clone(&tbl)); // altered at v3
         data.add(item(8), tbl); // altered at v8
-        let mut is5 = new_info_schema_v2(None, None, data.clone());
+        let mut is5 = new_info_schema_v2(None, None, Arc::clone(&data));
         Arc::make_mut(&mut is5.misc).schema_meta_version = 5;
         assert!(is5.table_item_by_id(10).is_some());
         // The oldest version in use is 5 (the reader above): only v1 goes (Go: v1 and v3).
