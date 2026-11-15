@@ -122,7 +122,7 @@ fn restore_undoes_every_group() {
             before,
             "{name}: the snapshot must see it"
         );
-        s.restore(cp);
+        s.restore(cp).unwrap();
         assert_eq!(s.state_snapshot(), before, "{name}: not restored");
     }
 }
@@ -135,13 +135,14 @@ fn restore_undoes_all_groups_together() {
     for (_, f) in mutations() {
         f(&mut s);
     }
-    s.restore(cp);
+    s.restore(cp).unwrap();
     assert_eq!(s.state_snapshot(), before);
     // Only the earlier warning is left (SHOW WARNINGS shows the PoC's, VS1 plan §4.6).
     assert_eq!(s.vars().stmt_ctx().warning_count(), 1);
 }
 
-/// The phase-0 session plans nothing: every statement path is the D05.3 boundary stub.
+/// The session plans nothing yet: `ExecuteStmt` reaches `Compile`, whose planner is a
+/// boundary stub; prepared statements are part 2 (VS1-14b).
 #[test]
 fn statement_paths_are_blocked() {
     let mut s = session();
@@ -150,8 +151,11 @@ fn statement_paths_are_blocked() {
         .stmts
         .remove(0);
     let block = |e: Error| tidb_base::blocked::blocked_by(&e).map(str::to_owned);
-    let got = block_on(Box::pin(async { s.execute_stmt(&stmt).await.err() }));
-    assert_eq!(got.and_then(block), Some("D05.3".to_owned()));
+    let stmt = Arc::new(stmt);
+    let got = block_on(Box::pin(async {
+        s.execute_stmt(Arc::clone(&stmt), "SELECT 1").await.err()
+    }));
+    assert_eq!(got.and_then(block), Some("D09.13".to_owned()));
     let got = block_on(Box::pin(async { s.prepare_stmt(&stmt).await.err() }));
     assert_eq!(got.and_then(block), Some("D05.3".to_owned()));
     assert_eq!(s.dialect(), Dialect::MySQL);

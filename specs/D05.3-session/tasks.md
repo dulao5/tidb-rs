@@ -1,6 +1,11 @@
 # D05.3 会话执行主流程（tasks）
 
-本块尚未开工，只有下面从其他块移交来的条目；开工时并入正式的任务列表。
+本块按 VS1 的工作项分部分移植，见 [spec](spec.md)：
+
+- [ ] VS1-14 第 1 部分：`ExecuteStmt` / `runStmt` / `finishStmt`、`LazyTxn` 只读部分、txnManager、回退检查点（VS1 plan §4.6）、KILL 到 coprocessor、中途丢弃的结果集（评审中）
+- [ ] VS1-14b 第 2 部分：`PrepareStmt` / `ExecutePreparedStmt` / `DropPreparedStmt` / `resolvePreparedStmt` / `GetSessionPlanCache`，预处理语句四种组合（VS1 plan §4.7）
+
+下面是从其他块移交来的条目。
 
 ## 从 P1 继承
 

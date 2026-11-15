@@ -1,13 +1,16 @@
 //! The real [`NewStack`]: a `tidb_session::Session` and the glue between its results and the
 //! MySQL protocol responses of the PoC's connection loop.
 //!
-//! In VS1 phase 0 the session's statement paths are `blocked-by:D05.3` stubs, so every
-//! statement falls back (or, in `strict` mode, reports 1235). The pieces that turn a
-//! successful result into a response are stubs of their own until their work items land:
+//! The session runs `ExecuteStmt` (VS1-14 part 1), whose planner is still a boundary stub,
+//! so every statement falls back (or, in `strict` mode, reports 1235); prepared statements
+//! are not prepared here before VS1-14b. The pieces that turn a successful result into a
+//! response are stubs of their own until their work items land:
 //!
 //! - TODO(VS1-16): result sets and column definitions (`writeResultSet`, `column` / `dump`,
 //!   D03.1) and binary parameters (`parseBinaryParams`, D03.1);
 //! - TODO(VS1-17): the new stack's InfoSchema, loaded from the same schema diffs as the PoC's.
+
+use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
@@ -82,9 +85,18 @@ impl NewStack for NewSession {
         None
     }
 
-    fn execute<'a>(&'a mut self, stmt: &'a ast::Stmt) -> BoxFut<'a, Result<Response, Error>> {
+    fn execute<'a>(
+        &'a mut self,
+        stmt: Arc<ast::Stmt>,
+        sql: &'a str,
+    ) -> BoxFut<'a, Result<Response, Error>> {
         Box::pin(async move {
-            let _rs = self.session.execute_stmt(stmt).await?;
+            let rs = self.session.execute_stmt(stmt, sql).await?;
+            if let Some(rs) = rs {
+                // The rows cannot be encoded yet (VS1-16): the statement is finished and
+                // closed before the router restores the checkpoint.
+                rs.close(&mut self.session).await?;
+            }
             Err(blocked("D03.1", "result sets of the new stack"))
         })
     }

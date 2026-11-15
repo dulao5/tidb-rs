@@ -81,6 +81,14 @@ pub struct TransactionContext {
     /// InfoSchema is the information schema of the transaction (Go `any`: an
     /// `infoschema.InfoSchema`, a type of a higher crate; set by sessiontxn, D05.4).
     pub info_schema: Option<TxnInfoSchema>,
+    /// CouldRetry indicates whether the transaction could retry (set by the optimistic
+    /// provider for retryable writes: the write path, always false on the read-only node).
+    pub could_retry: bool,
+    /// StaleReadTs is the read ts of a stale read transaction (`EnterNewTxn` with a stale
+    /// read ts, D05.4).
+    pub stale_read_ts: u64,
+    /// StatementCount is the number of statements of the transaction (`runStmt`).
+    pub statement_count: i32,
     /// forUpdateTS is used for pessimistic transaction.
     for_update_ts: u64,
     /// relatedTableForMDL records the `table ID -> schema version` of the tables the

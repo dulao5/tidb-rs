@@ -40,6 +40,10 @@ tidb-tablecodec = { workspace = true }
 tidb-codec = { workspace = true }
 tikv-client = { workspace = true }
 
+[features]
+# Test doubles for the crates above (the session's tests): `testutil`.
+test-util = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 # The govec vectors (pointget, and tablecodec's record keys) are .jsonl.gz.

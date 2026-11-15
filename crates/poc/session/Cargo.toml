@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 futures = { workspace = true }
+log = "0.4"
 tidb-distsql = { workspace = true }
 poc-domain = { workspace = true }
 poc-executor = { workspace = true }

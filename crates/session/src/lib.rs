@@ -6,14 +6,34 @@
 //! its state (in a transaction, autocommit, current database); protocol adapters translate.
 //! It holds the connection's [`Dialect`] (ADR 0010 §4.4).
 //!
-//! VS1 phase 0 (`specs/VS1-vertical-slice/plan.md` §4): the session exists so that the PoC's
-//! router can keep its state in sync and roll it back ([`checkpoint`]); statement
-//! execution (`ExecuteStmt`, `PrepareStmt`, `ExecutePreparedStmt`) is a boundary stub
-//! (`blocked-by:D05.3`) until VS1-14, so every statement still runs on the PoC.
+//! VS1-14 part 1 (`specs/D05.3-session/spec.md`): `ExecuteStmt` / `runStmt` /
+//! `finishStmt` ([`session`], [`tidb`]), the lazy transaction ([`txn`]), the transaction
+//! manager ([`txnmanager`]) over the sessiontxn providers (D05.4), the result of a statement
+//! with rows ([`exec_result`]), and the statement checkpoint of the router ([`checkpoint`],
+//! VS1 plan §4.6). Prepared statements are part 2 (VS1-14b).
+//!
+//! N2 §5: the session is `Send`; `SessionVars` is not `Sync`, so an executor worker cannot
+//! share it:
+//!
+//! ```compile_fail
+//! fn sync<T: Sync>() {}
+//! sync::<tidb_sessionctx::variable::session::SessionVars>();
+//! ```
 #![deny(unsafe_code)]
+// N13 rule 5 (M-SHARE): a clone of an `Arc` is written `Arc::clone(&x)`.
+#![warn(clippy::clone_on_ref_ptr)]
 
 pub mod checkpoint;
+pub mod exec_result;
+pub mod glue;
+pub mod metrics;
 pub mod session;
+pub mod tidb;
+pub mod txn;
+pub mod txnmanager;
 
 pub use checkpoint::StmtCheckpoint;
-pub use session::{Dialect, PreparedStmtInfo, RecordSet, Session};
+pub use exec_result::ExecStmtResult;
+pub use session::{Dialect, PreparedStmtInfo, SessCtx, Session, SessionCore};
+#[cfg(test)]
+mod tests;
