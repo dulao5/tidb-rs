@@ -114,18 +114,21 @@ impl std::fmt::Debug for Range {
 /// Every Go collator of a zero-size type (`binCollator`, `binPaddingCollator`,
 /// `derivedBinCollator`, `generalCICollator`, ...) is allocated with `&T{}`, which gc points at
 /// the one `runtime.zerobase`: two of them of the same type are equal (Go's
-/// `GetCollator("utf8mb4_0900_bin") == GetBinaryCollator()` is true). Rust's zero-size statics
-/// and boxes have different addresses, so a zero-size type compares by type only (D10.4 spec
-/// §5: found by the `rangerbuild` vectors).
+/// `GetCollator("utf8mb4_0900_bin") == GetBinaryCollator()` is true). The Go spec leaves the
+/// equality of pointers to distinct zero-size variables open; this pins gc's behaviour, which
+/// the `rangerbuild` vectors show for v8.5.8 (D10.4 spec §5 item 1). Rust's zero-size statics
+/// and boxes have different addresses, so a type that is zero-size **in Go** compares by type
+/// only. Go's `gbkBinCollator` holds an `*encoding.Encoder` (not zero-size; Rust's
+/// `GbkBinCollator` is): it compares by address.
 // glue: Go interface value comparison of collate.Collator
 pub fn same_collator(a: &'static dyn Collator, b: &'static dyn Collator) -> bool {
-    let (ta, tb) = (
-        (a as &dyn std::any::Any).type_id(),
-        (b as &dyn std::any::Any).type_id(),
-    );
-    ta == tb
-        && (std::mem::size_of_val(a) == 0
-            || std::ptr::addr_eq(a as *const dyn Collator, b as *const dyn Collator))
+    let (aa, ba) = (a as &dyn std::any::Any, b as &dyn std::any::Any);
+    if aa.type_id() != ba.type_id() {
+        return false;
+    }
+    let go_zero_size =
+        std::mem::size_of_val(a) == 0 && !aa.is::<tidb_types::collate::GbkBinCollator>();
+    go_zero_size || std::ptr::addr_eq(a as *const dyn Collator, b as *const dyn Collator)
 }
 
 impl Range {
@@ -841,4 +844,43 @@ pub fn full_not_null_range() -> Ranges {
         collators: get_binary_collator_slice(1),
         ..Default::default()
     }]
+}
+
+#[cfg(test)]
+mod same_collator_tests {
+    use tidb_types::collate::{
+        get_binary_collator, get_collator, set_new_collation_enabled_for_test,
+    };
+
+    use super::same_collator;
+
+    /// `same_collator` pins gc's behaviour for zero-size collators (D10.4 spec §5 item 1):
+    /// same type and zero size compare equal whatever the addresses; other collators compare
+    /// by address.
+    #[test]
+    fn same_collator_zero_size_and_address() {
+        set_new_collation_enabled_for_test(true);
+        // Same zero-size type, different Rust addresses (a static and a box): equal, as Go's
+        // `GetCollator("utf8mb4_0900_bin") == GetBinaryCollator()` (both derivedBinCollator).
+        let (derived, binary) = (get_collator("utf8mb4_0900_bin"), get_binary_collator());
+        assert_eq!(std::mem::size_of_val(derived), 0);
+        assert!(same_collator(derived, binary));
+        assert!(same_collator(
+            get_collator("utf8mb4_bin"),
+            get_collator("ascii_bin")
+        ));
+        // Different zero-size types: not equal (binCollator vs derivedBinCollator).
+        assert!(!same_collator(get_collator("binary"), binary));
+        assert!(!same_collator(
+            get_collator("utf8mb4_bin"),
+            get_collator("utf8mb4_general_ci")
+        ));
+        // gbk_bin is not zero-size in Go (`*encoding.Encoder`): it compares by address. The
+        // name map's instance equals itself and differs from other types. (Go's name-map and
+        // id-map gbk_bin instances differ; Rust's zero-size boxes share one address, so they
+        // compare equal — not reachable from ranger, which takes collators by name; spec §5.)
+        let gbk = get_collator("gbk_bin");
+        assert!(same_collator(gbk, get_collator("gbk_bin")));
+        assert!(!same_collator(gbk, get_collator("gbk_chinese_ci")));
+    }
 }
