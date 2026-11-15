@@ -229,7 +229,7 @@ impl ColumnInfo {
                 return Ok(());
             }
             if let Some(v) = self.origin_default_value.as_go_string() {
-                self.origin_default_value_bit = Some(v.to_vec());
+                self.origin_default_value_bit = Some(v.into());
                 return Ok(());
             }
             return Err(
@@ -264,7 +264,7 @@ impl ColumnInfo {
                 return Ok(());
             }
             if let Some(v) = self.default_value.as_go_string() {
-                self.default_value_bit = Some(v.to_vec());
+                self.default_value_bit = Some(v.into());
                 return Ok(());
             }
             return Err(

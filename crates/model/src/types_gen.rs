@@ -1463,11 +1463,13 @@ pub struct ColumnInfo {
     /// json: `origin_default`
     pub origin_default_value: AnyValue,
     /// json: `origin_default_bit`
-    pub origin_default_value_bit: Option<Vec<u8>>,
+    /// Boxed: rarely set; keeps the struct in its allocator size class (spec N13 §9).
+    pub origin_default_value_bit: Option<Box<[u8]>>,
     /// json: `default`
     pub default_value: AnyValue,
     /// json: `default_bit`
-    pub default_value_bit: Option<Vec<u8>>,
+    /// Boxed: rarely set; keeps the struct in its allocator size class (spec N13 §9).
+    pub default_value_bit: Option<Box<[u8]>>,
     /// json: `default_is_expr`
     pub default_is_expr: bool,
     /// json: `generated_expr_string`
@@ -1475,7 +1477,8 @@ pub struct ColumnInfo {
     /// json: `generated_stored`
     pub generated_stored: bool,
     /// json: `dependences`
-    pub dependences: Option<BTreeMap<String, ()>>,
+    /// Boxed: rarely set; keeps the struct in its allocator size class (spec N13 §9).
+    pub dependences: Option<Box<BTreeMap<String, ()>>>,
     /// json: `type`
     pub field_type: FieldType,
     /// json: `changing_type,omitempty`
@@ -1825,13 +1828,17 @@ impl ColumnInfo {
                     self.origin_default_value.decode_json(d, v);
                 }
                 4 => {
-                    d.bytes(v, &mut self.origin_default_value_bit, "[]uint8", "uint8");
+                    let mut b = self.origin_default_value_bit.take().map(Vec::from);
+                    d.bytes(v, &mut b, "[]uint8", "uint8");
+                    self.origin_default_value_bit = b.map(Vec::into_boxed_slice);
                 }
                 5 => {
                     self.default_value.decode_json(d, v);
                 }
                 6 => {
-                    d.bytes(v, &mut self.default_value_bit, "[]uint8", "uint8");
+                    let mut b = self.default_value_bit.take().map(Vec::from);
+                    d.bytes(v, &mut b, "[]uint8", "uint8");
+                    self.default_value_bit = b.map(Vec::into_boxed_slice);
                 }
                 7 => {
                     d.bool(v, &mut self.default_is_expr);
@@ -1843,9 +1850,10 @@ impl ColumnInfo {
                     d.bool(v, &mut self.generated_stored);
                 }
                 10 => {
+                    let mut m = self.dependences.take().map(|b| *b);
                     d.map(
                         v,
-                        &mut self.dependences,
+                        &mut m,
                         "map[string]struct {}",
                         |_, k| Some(k.to_owned()),
                         |d, v, x: &mut ()| {
@@ -1853,6 +1861,7 @@ impl ColumnInfo {
                             d.object(v, "", "struct {}", &[], |_, _, _| {});
                         },
                     );
+                    self.dependences = m.map(Box::new);
                 }
                 11 => {
                     if let Err(e) = self.field_type.decode_json(v) {
