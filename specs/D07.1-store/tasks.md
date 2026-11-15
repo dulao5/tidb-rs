@@ -29,4 +29,4 @@ P1 收尾（#48）时，各块把剩下的函数移交给真正使用它们的�
 5. **其他**：读后不做 GC safe point 检查（与 copr 的适配器相同）；同一个快照上的读串行执行；`Backoffer.GetBackoffTimes` / `GetBackoffSleepMS` 返回空表（client-rust 不提供按类型的计数）。
 6. **预算**：每次读 `getMaxBackoff`（20 s）× `tidb_backoff_weight`（默认 2）= 40 s，与 PoC 的 `tidb_retry_options` 相同。
 
-故障场景对照：`TIDB_RS_POINT_GET=d07.1` 让 PoC（`poc-kv`）的点查和 BatchGet 改走本部分的快照，`tools/ab/faults/run.sh` 即可在同一套场景下比较两种实现，结果见 PR。
+故障场景对照：`TIDB_RS_POINT_GET=store-driver` 让 PoC（`poc-kv`）的点查和 BatchGet 改走本部分的快照，`tools/ab/faults/run.sh` 即可在同一套场景下比较两种实现，结果见 PR。
