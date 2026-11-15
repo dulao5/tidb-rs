@@ -1,6 +1,6 @@
 # D05.3 会话执行主流程（spec）
 
-状态：VS1-14 第 1 部分进行中（2026-11-15）。块：D05.3（`pkg/session`），crate `tidb-session`（N0 rank 15）。相关：[VS1 plan](../VS1-vertical-slice/plan.md) §4.1、§4.3、§4.5–§4.7，VS1-14；[D05.4 spec](../D05.4-sessiontxn/spec.md)（sessiontxn，#219）；[D12.0 tasks](../D12.0-executor/tasks.md)（`ExecStmt`，#222）；[N2](../exceptions/N2-session-context/spec.md)；[N11](../exceptions/N11-cluster-readts/spec.md)；ADR 0010（会话与协议无关）。
+状态：第 1 部分（VS1-14，会话执行主流程）已合入（#235）；第 2 部分（VS1-14b，预处理语句）评审中（2026-11-15），见 §6。块：D05.3（`pkg/session`），crate `tidb-session`（N0 rank 15）。相关：[VS1 plan](../VS1-vertical-slice/plan.md) §4.1、§4.3、§4.5–§4.7，VS1-14；[D05.4 spec](../D05.4-sessiontxn/spec.md)（sessiontxn，#219）；[D12.0 tasks](../D12.0-executor/tasks.md)（`ExecStmt`，#222）；[N2](../exceptions/N2-session-context/spec.md)；[N11](../exceptions/N11-cluster-readts/spec.md)；ADR 0010（会话与协议无关）。
 
 ## 0. 分两个 PR
 
@@ -8,14 +8,14 @@ VS1-14 太大，拆成两部分，按顺序合入：
 
 | 部分 | 工作项 | 内容 |
 |---|---|---|
-| 第 1 部分（本 PR） | `VS1-14` | `ExecuteStmt` / `runStmt` / `finishStmt`、`LazyTxn` 的只读部分、`txnManager`、sessiontxn provider 的接入、`ResetContextOfStmt`（从 VS1-35 提前）、回退时的检查点与恢复（plan §4.6）、中途丢弃的结果集的补做（#222）、KILL 标志到 coprocessor 读（D07.2 的注） |
-| 第 2 部分 | `VS1-14b` | `PrepareStmt` / `ExecutePreparedStmt` / `DropPreparedStmt` / `resolvePreparedStmt` / `GetSessionPlanCache`，预处理语句四种组合与按 stmt id 路由（plan §4.7）的新栈一侧，列元数据的 ab 检查 |
+| 第 1 部分（#235，已合入） | `VS1-14` | `ExecuteStmt` / `runStmt` / `finishStmt`、`LazyTxn` 的只读部分、`txnManager`、sessiontxn provider 的接入、`ResetContextOfStmt`（从 VS1-35 提前）、回退时的检查点与恢复（plan §4.6）、中途丢弃的结果集的补做（#222）、KILL 标志到 coprocessor 读（D07.2 的注） |
+| 第 2 部分（§6） | `VS1-14b` | `PrepareStmt` / `ExecutePreparedStmt` / `DropPreparedStmt` / `resolvePreparedStmt` / `GetSessionPlanCache`，预处理语句四种组合与按 stmt id 路由（plan §4.7）的新栈一侧，列元数据的 ab 检查 |
 
 `specs/VS1-vertical-slice/functions.tsv` 里第 2 部分的 5 个函数改记在 `VS1-14b` 名下，converge 按部分分别计算。
 
 **路由器在进新栈之前检查会话空闲**（#235 评审）：`is_idle()` 不成立时不进新栈，交给 PoC，原因 `not_idle`，记为路由器的 bug（日志 + `tidbrs_route_total{reason="not_idle"}`）；只有新栈能执行的预处理语句报 1235。这样不会出现新栈写了状态、恢复又失败的情况。另外，执行器打开之后的回退（plan §4.3 不允许；`newstack.rs` 在结果集编码完成前会这样做，VS1-16 去掉）由路由器检测，记日志与 `reason="bug_blocked_after_open"`。
 
-**第 1 部分中预处理语句一律走 PoC**（Lucky，VS1-14 评审要求）：路由器在 COM_STMT_PREPARE 时不再调用新栈，stmt id 直接归 PoC，原因记为 `prepared`（`tidbrs_route_total{engine="poc",reason="prepared"}`），`fallback` 与 `strict` 模式相同（`strict` 也不报 1235：这不是新栈碰到了桩，而是本部分不提供）。会话的 `prepare_stmt` / `execute_prepared_stmt` / `drop_prepared_stmt` 仍是 `blocked-by:D05.3` 的桩（第 2 部分）。§4.7 的路由表、列元数据检查（VS1-02 已写好）保留不动，第 2 部分打开。
+**第 1 部分中预处理语句一律走 PoC**（Lucky，VS1-14 评审要求）：路由器在 COM_STMT_PREPARE 时不再调用新栈，stmt id 直接归 PoC，原因记为 `prepared`（`tidbrs_route_total{engine="poc",reason="prepared"}`），`fallback` 与 `strict` 模式相同（`strict` 也不报 1235：这不是新栈碰到了桩，而是本部分不提供）。会话的 `prepare_stmt` / `execute_prepared_stmt` / `drop_prepared_stmt` 仍是 `blocked-by:D05.3` 的桩（第 2 部分）。§4.7 的路由表、列元数据检查（VS1-02 已写好）保留不动，第 2 部分打开。**第 2 部分已经取代这一段**：原因 `prepared` 与只在测试中打开 §4.7 的开关都已删除（§6.2）。
 
 ## 1. 范围（第 1 部分）
 
@@ -46,7 +46,7 @@ VS1-14 在 D05.3 中的 129 个函数去掉第 2 部分的 5 个，剩 124 个�
 | `SetCollation` | D02.2 | `charset.GetCharsetInfoByID` |
 | `InitMetricsVars`、`init` | D14.1 | 会话指标 |
 | `kv.Storage` / `oracle.Oracle` 的实现（PoC 接线处） | D07.1 | store driver 的 `Begin` / `GetOracle` 还没有移植；PoC 的 `NewSession` 用一个报 `blocked-by:D07.1` 的存储。当前 `Compile` 在取 TSO 之前就返回 `Blocked`，所以不影响行为 |
-| `PrepareStmt` 等第 2 部分的 5 个 | D05.3 | VS1-14b |
+| `PrepareStmt` 等第 2 部分的 5 个 | — | 第 2 部分已移植，剩下的桩见 §6.5 |
 
 ### 1.3 不移植（写路径，永久）
 
@@ -164,7 +164,57 @@ plan §4.6 第 2 条：新栈已发出的 TSO 请求交给 PoC。PoC 的 `TsFutu
 - govec `resetstmt`：700 条（arm64 本机生成；amd64 来自 tracker CI 的 artifact），`crates/session/tests/govec_resetstmt.rs` 全部一致。
 - 一个限制：`finishStmt` 要问 `ExecStmt.IsReadOnly`，它仍是 `blocked-by:D09.13` 的桩（`planner.IsReadOnly` → `ast.IsReadOnly`，D02.2）。这里把它的错误当作语句的错误（autocommit 事务回滚，会话照样回到空闲），所以在它移植之前，走到执行器的语句在 `Close` 时返回这个错误。现在没有语句能走到执行器（`Compile` 先返回 `Blocked`），只有测试会遇到；它应在 C2a 之前随 VS1-10 / VS1-11 的后续移植。
 
-## 6. 待定
+## 6. 第 2 部分：预处理语句（VS1-14b）
+
+### 6.1 Go 函数
+
+5 个函数都在 `session.go`，移植在 `crates/session/src/session.rs`，都是 L2（converge `--item VS1-14b`：5/5，无桩）。"准备一条语句"本身——`executor.NewPrepareExec`（D12.12，预处理执行器）和它生成的 `PlanCacheStmt`（D13.1，plan cache 用的语句对象）——属于下一个工作项 VS1-15（预处理语句的规划），这里是边界桩（§6.5）。
+
+| Go | 移植的内容 | 与 Go 的差异 |
+|---|---|---|
+| `PrepareStmt` | 全部步骤照 Go：`TxnCtx.InfoSchema` 为空时取 domain 的；`loadCommonGlobalVariablesIfNeeded`；`PrepareTxnCtx`；以一个 `PREPARE` 节点调 `onTxnManagerStmtStartOrRetry`；`AdviseWarmup`（发出 TSO 请求）；`tidb_enable_cache_prepare_stmt` 打开时按 Go 的 key 查 dedup cache；`NewPrepareExec`；无论成败都 `rollbackOnError` | ① `StmtCtx.DetachMemDiskTracker`：会话没有内存 tracker（A1）；② Rust AST 没有 `PrepareStmt`，用语法里未移植产生式的节点（`Stmt::Unported`，kind `PreparedStmt#0`）代替，provider 只问节点是不是 SELECT / 事务语句，两者答案相同；③ dedup cache 命中后的 `rebuildFromPrepareCache` 需要 `PlanCacheStmt`，是 `blocked-by:D13.1`——只有 `NewPrepareExec` 成功才会写这个缓存，所以 VS1-15 之前走不到 |
+| `ExecutePreparedStmt` | 按 id 找语句，找不到时记日志并返回 `ErrStmtNotFound`（8111） | 找到之后 Go 把 `PlanCacheStmt` 包成 `ast.ExecuteStmt` 交给 `ExecuteStmt`：两者都随 VS1-15，`blocked-by:D13.1`。VS1-15 之前新会话里不会有预处理语句（`PrepareStmt` 不会成功），所以实际只会走到 8111 |
+| `DropPreparedStmt` | 不存在时 `ErrStmtNotFound` | Go 只把 id 记进 `RetryInfo.DroppedPreparedStmtIDs`，事务结束时由 `cleanRetryInfo` 删除，为的是乐观事务重试时还能执行它。重试只在写路径上发生（N11 D8，只读节点没有），`RetryInfo` 没有移植，所以这里**立即删除**。`cleanRetryInfo` 同时从会话 plan cache 删掉这条语句的计划：VS1-15 之前不会建 plan cache（`GetSessionPlanCache`），没有可删的 |
+| `resolvePreparedStmt` | 非 `EXECUTE` 的语句返回自身 | Rust AST 没有 `EXECUTE`（Go 用 `plannercore.GetPreparedStmt` 解析，D13.1），所以所有语句都返回自身；Go 唯一的调用方 `shouldCheckConnectionAliveBeforeCommit` 只问语句是不是写，属于写路径，不移植 |
+| `GetSessionPlanCache` | 两种 plan cache 都关时返回 `None` | 否则 Go 懒构造 `NewLRUPlanCache`（D13.1）：VS1-15 的 plan cache 查找才会用到，这里 `blocked-by:D13.1` |
+
+### 6.2 PREPARE 的路由（plan §4.7）
+
+- 第 1 部分的原因 `prepared` 和只在测试中打开 §4.7 的开关都删除了：候选语句（第 1、2 步通过、InfoSchema 版本相等）在 PREPARE 时两边都准备，四种组合照 plan §4.7 的表。
+- 进新栈之前与 `COM_QUERY` 一样：先补做没关闭的结果集（§2.3），会话不空闲就不试（路由器的 bug，记日志，归属 PoC、原因 `not_idle`）；然后取检查点。新栈返回 `Blocked` 时恢复检查点——之后新会话与没见过这条 PREPARE 的会话相同（Lucky，#205：回退之后会话状态等于全新会话），归属 PoC、原因是那个块；恢复失败（bug）时 PREPARE 报 1105，PoC 不再准备。新栈返回按 Go 移植的错误时照旧返回它（§4.3 第 3 步）。
+- **现在的实际效果**：真正的新会话在 `NewPrepareExec` 返回 `Blocked("D12.12")`，所以每条候选语句都归 PoC，原因 `D12.12`。`fallback` 模式下 EXECUTE 走 PoC，行为与第 1 部分相同；`strict` 模式下 EXECUTE 报 1235（`blocked-by:D12.12`），这是 plan §4.7 第 2 行的规定（`strict` 统计新栈能跑多少），与第 1 部分"`strict` 也不报 1235"不同。新会话的结果集与列定义的编码（`newstack.rs`，D03.1）仍是 VS1-16 的桩：VS1-15 之后 PREPARE 会停在那里，同样归 PoC。
+
+### 6.3 其他协议命令（plan §4.7"按 stmt id 路由其他命令"）
+
+| 命令 | 做法 |
+|---|---|
+| `COM_STMT_CLOSE` | 路由器按归属发：both 两边都发，new 只发新栈，poc 只发 PoC（`close_by_owner`、`real_prepare_is_blocked_and_restored`） |
+| `COM_STMT_SEND_LONG_DATA` | 长数据由协议层保存，EXECUTE 时一次性解码进参数（ADR 0010 §4.1），哪一方执行就把同样的参数交给哪一方，所以"发给归属的一方、both 时两方"天然成立，不需要路由（`long_data_params_reach_the_engine_that_runs`） |
+| `COM_STMT_RESET` | 同上，由协议层清掉长数据（`raw_without_deprecate_eof` 新增的 RESET 用例） |
+| `COM_STMT_FETCH` | 协议层回答 1235，与 PoC 相同（从不打开游标）；带游标标志的 EXECUTE 是第 0 步条件：both / poc 走 PoC，new 报 1235（`prepared_both`、`prepared_new_only`，以及协议层的 FETCH 用例） |
+
+### 6.4 列元数据
+
+- 路由器：both 归属的语句回退到 PoC 时，PoC 结果集的列定义必须与 PREPARE 发出的逐字段相同，否则不发送、报 1105 `VS1 column metadata mismatch`（VS1-02 已实现，反证用例 `prepared_fallback_metadata_mismatch`）。
+- ab：每条预处理语句比较 B 的 PREPARE 列定义与 EXECUTE 的列定义。Go 本身对某些语句（选择列表里有 `?`）PREPARE 与 EXECUTE 的列定义就不同，所以只报告"B 有而 A 没有"的差异（按列号与字段比较），记为 `metadata` 不一致。反证：`tools/ab` 的单测 `execute_metadata_differs_from_prepare`。
+
+### 6.5 边界桩（登记在 tracker `data/stubs.tsv`）
+
+| 位置 | 块 | 原因 |
+|---|---|---|
+| `new_prepare_exec`（`executor.NewPrepareExec` + `Next`） | D12.12 | 预处理执行器与 `PlanCacheStmt`，VS1-15 |
+| `PrepareStmt` 中 dedup cache 命中、`ExecutePreparedStmt` 找到语句之后、`GetSessionPlanCache` 建 cache | D13.1 | `PlanCacheStmt` / `EXECUTE` / LRU plan cache，VS1-15 |
+| `newstack.rs` 的列定义与二进制参数 | D03.1 | 第 1 部分已有，VS1-16 |
+
+### 6.6 测试
+
+- 会话：`statement_paths_are_blocked`（`PrepareStmt` 停在 D12.12，之后会话空闲）、`real_session_prepared_lookup`（8111、`GetSessionPlanCache`）。
+- 路由器（四种组合用脚本化的新栈，因为真正的新会话还不能成功准备）：`prepared_both`、`prepared_poc_only`、`prepared_new_only`、`prepared_both_fail`、`prepared_fallback_metadata_mismatch`、`close_by_owner`、`execute_starts_the_statement_once`、`prepare_with_unequal_schema_versions_is_poc_owned`；真正的新会话：`real_prepare_is_blocked_and_restored`（两种模式，归属、与全新会话的快照相等、EXECUTE、CLOSE）；`long_data_params_reach_the_engine_that_runs`。
+- 协议层：RESET 清掉长数据、FETCH 报 1235（`crates/mysql-protocol/tests/integration.rs`）。
+- 第三种组合（PoC 不支持、新栈支持）在真正的栈上还构造不出来：新栈现在什么都准备不了。用例用脚本化的新栈加"PoC 准备失败"模拟；真正的语句要等 VS1-15 之后找。
+- govec：本部分没有。5 个函数只是会话状态的转换（单测覆盖），没有可以按输入输出对照的计算；预处理语句的 govec（可缓存性检查等）属于 VS1-15。
+
+## 7. 待定
 
 1. **plan 的排期**：`ResetContextOfStmt` 本应在 C2a 之前（本 PR 已提前）。同样在 C2a 之前、但不在任何 Phase 1 工作项里的还有：新会话接上真正的存储与 oracle（`kv.Storage` 的 `Begin` / `GetOracle`，D07.1），以及 `planner.IsReadOnly` / `ast.IsReadOnly`（D02.2，§5.1）。建议记入 VS1-20 或 VS1-10 的后续。
 2. **TSO 交接**（§3.3）随 VS1-20。

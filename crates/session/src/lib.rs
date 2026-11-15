@@ -10,7 +10,9 @@
 //! `finishStmt` ([`session`], [`tidb`]), the lazy transaction ([`txn`]), the transaction
 //! manager ([`txnmanager`]) over the sessiontxn providers (D05.4), the result of a statement
 //! with rows ([`exec_result`]), and the statement checkpoint of the router ([`checkpoint`],
-//! VS1 plan §4.6). Prepared statements are part 2 (VS1-14b).
+//! VS1 plan §4.6). Part 2 (VS1-14b): the prepared-statement entry points (`PrepareStmt`,
+//! `ExecutePreparedStmt`, `DropPreparedStmt`); what they prepare and execute is the
+//! plan-cache statement of prepared-statement planning (VS1-15), a boundary stub until then.
 //!
 //! N2 §5: the session is `Send`; `SessionVars` is not `Sync`, so an executor worker cannot
 //! share it:

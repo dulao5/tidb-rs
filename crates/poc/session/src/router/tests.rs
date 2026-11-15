@@ -141,12 +141,15 @@ impl PocEngine for FakePoc {
     fn execute(
         &mut self,
         stmt_id: u32,
-        _params: Vec<Param>,
+        params: Vec<Param>,
     ) -> BoxFut<'_, Result<Response, SqlError>> {
         Box::pin(async move {
             // As the real `execute_inner`: it starts the statement itself.
             self.log.push("start Select".into());
             self.log.push(format!("execute {stmt_id}"));
+            if !params.is_empty() {
+                self.log.push(format!("params {params:?}"));
+            }
             if !self.prepared.contains_key(&stmt_id) {
                 return Err(SqlError::unknown_stmt(stmt_id, "stmt_execute"));
             }
@@ -258,7 +261,7 @@ impl NewStack for FakeNew {
         let r = self.run(answer, "execute".into());
         Box::pin(async move { r })
     }
-    fn prepare<'a>(&'a mut self, _stmt: &'a ast::Stmt) -> BoxFut<'a, Result<NewPrepared, Error>> {
+    fn prepare<'a>(&'a mut self, _sql: &'a str) -> BoxFut<'a, Result<NewPrepared, Error>> {
         let answer = self.script.lock().unwrap().prepare.clone();
         let r = self.run(answer, "prepare".into()).map(|_| {
             let mut script = self.script.lock().unwrap();
@@ -276,8 +279,15 @@ impl NewStack for FakeNew {
     fn execute_prepared<'a>(
         &'a mut self,
         stmt_id: u32,
-        _params: &'a [Param],
+        params: &'a [Param],
     ) -> BoxFut<'a, Result<Response, Error>> {
+        if !params.is_empty() {
+            self.script
+                .lock()
+                .unwrap()
+                .log
+                .push(format!("params {params:?}"));
+        }
         let answer = self.script.lock().unwrap().answer.clone();
         let r = self.run(answer, format!("execute {stmt_id}"));
         Box::pin(async move { r })
@@ -300,9 +310,7 @@ fn scripted(mode: NewStackMode, poc: &FakePoc) -> (Router, Arc<Mutex<Script>>) {
         session: Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
         script: script.clone(),
     };
-    let mut r = Router::new(mode, Box::new(new), &poc.values());
-    // The §4.7 combinations (VS1-14b switches them on).
-    r.enable_prepare_on_new();
+    let r = Router::new(mode, Box::new(new), &poc.values());
     (r, script)
 }
 
@@ -944,35 +952,85 @@ fn close_by_owner() {
     assert!(!p.log.contains(&"close 3".to_owned()));
 }
 
-/// VS1-14 part 1 (spec §0, Lucky): prepared statements are not prepared on the new stack;
-/// every one is owned by the PoC with the reason `prepared`, in `fallback` and `strict` mode
-/// alike, and EXECUTE / CLOSE go to the PoC only.
+/// The real new session prepares a candidate (`PrepareStmt`: transaction context, statement
+/// start, TSO warm-up) and ends `Blocked` at the prepare executor (prepared-statement
+/// planning, VS1-15). The PoC owns the statement with the block as the reason, and the new
+/// session afterwards equals a fresh one (Lucky, #205: no trace of the attempt). `strict`
+/// reports the block at EXECUTE (§4.7 row 2); CLOSE goes to the PoC only.
 #[test]
-fn part1_prepare_is_poc_owned() {
+fn real_prepare_is_blocked_and_restored() {
     for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
         let mut p = poc();
+        let fresh = snap(&real(mode, &p));
         let mut r = real(mode, &p);
-        let before = r.new.session().state_snapshot();
         block_on(r.prepare(&mut p, 1, POINT)).unwrap();
-        assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::Prepared)));
-        assert_eq!(Reason::Prepared.label(), "prepared");
-        assert_eq!(r.new.session().state_snapshot(), before, "{mode:?}");
-        assert_eq!(
-            rows(&block_on(r.execute(&mut p, 1, vec![]))).map(|r| r.0),
-            Some(3),
-            "{mode:?}"
-        );
+        let Some(Owner::Poc(Reason::Blocked(block))) = r.owner(1).cloned() else {
+            panic!("{mode:?}: {:?}", r.owner(1));
+        };
+        assert_eq!(block, "D12.12", "{mode:?}");
+        assert_eq!(snap(&r), fresh, "{mode:?}");
+        assert!(r.new.session().is_idle());
+        let res = block_on(r.execute(&mut p, 1, vec![]));
+        match mode {
+            NewStackMode::Strict => {
+                let e = res.unwrap_err();
+                assert!(e.code == 1235 && e.message.contains("blocked-by:D12.12"));
+            }
+            _ => assert_eq!(rows(&res).map(|r| r.0), Some(3)),
+        }
         r.close(&mut p, 1);
-        assert!(p.log.contains(&"close 1".to_owned()));
+        assert_eq!(p.log.last().map(String::as_str), Some("close 1"));
+        assert_eq!(r.owner(1), None);
     }
-    // The scripted new stack is never asked either.
+}
+
+/// The real new session's `ExecutePreparedStmt` / `DropPreparedStmt` of an id it never
+/// prepared: Go's `ErrStmtNotFound` (8111), not a boundary stub; with no plan cache
+/// switched on, `GetSessionPlanCache` is `None`, otherwise the cache is a stub (VS1-15).
+#[test]
+fn real_session_prepared_lookup() {
+    let mut s = Session::new(Dialect::MySQL, Box::new(DefaultGlobals));
+    let e = block_on(s.execute_prepared_stmt(7, vec![])).err().unwrap();
+    assert_eq!(e.code(), 8111, "{e}");
+    let e = s.drop_prepared_stmt(7).unwrap_err();
+    assert_eq!(e.code(), 8111, "{e}");
+    s.vars_mut().enable_prepared_plan_cache = false;
+    s.vars_mut().enable_non_prepared_plan_cache = false;
+    assert_eq!(s.get_session_plan_cache().unwrap(), None);
+    s.vars_mut().enable_prepared_plan_cache = true;
+    let e = s.get_session_plan_cache().unwrap_err();
+    assert_eq!(tidb_base::blocked::blocked_by(&e), Some("D13.1"));
+}
+
+/// COM_STMT_SEND_LONG_DATA (§4.7): the protocol layer folds long data into the decoded
+/// parameters (ADR 0010 §4.1), and the router hands them to the engine that runs the
+/// EXECUTE: the new stack, or the PoC on a fallback (owner both), or the only owner.
+#[test]
+fn long_data_params_reach_the_engine_that_runs() {
+    let long = || {
+        vec![Param {
+            ty: ColumnType::VarString,
+            unsigned: false,
+            value: Value::Bytes(b"long data".to_vec()),
+        }]
+    };
     let mut p = poc();
     let (mut r, script) = scripted(NewStackMode::Fallback, &p);
-    r.prepare_on_new = false;
     script.lock().unwrap().prepare = Some(Answer::Rows);
-    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
-    assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::Prepared)));
-    assert!(script.lock().unwrap().log.is_empty());
+    block_on(r.prepare(&mut p, 1, "SELECT c FROM t WHERE id = ?")).unwrap();
+    script.lock().unwrap().answer = Some(Answer::Rows);
+    block_on(r.execute(&mut p, 1, long())).unwrap();
+    let want = format!("params {:?}", long());
+    assert!(script.lock().unwrap().log.contains(&want));
+    script.lock().unwrap().answer = Some(Answer::Blocked("D10.2"));
+    block_on(r.execute(&mut p, 1, long())).unwrap();
+    assert!(p.log.contains(&want), "{:?}", p.log);
+    // PoC-owned.
+    script.lock().unwrap().prepare = Some(Answer::Blocked("D12.12"));
+    p.log.clear();
+    block_on(r.prepare(&mut p, 2, "SELECT c FROM t WHERE id = ?")).unwrap();
+    block_on(r.execute(&mut p, 2, long())).unwrap();
+    assert!(p.log.contains(&want), "{:?}", p.log);
 }
 
 /// Every COM_STMT_EXECUTE starts its statement exactly once (the statement counter feeds the

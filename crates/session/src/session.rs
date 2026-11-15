@@ -9,7 +9,9 @@
 //! see: [`SessCtx`], the part the providers see, plus the transaction manager) + the
 //! statement whose rows are being read ([`crate::exec_result`]).
 //!
-//! Prepared statements are part 2 (VS1-14b): their entry points are boundary stubs.
+//! Prepared statements (part 2, VS1-14b, spec §6): `PrepareStmt` runs Go's transaction
+//! steps and stops at the prepare executor; `ExecutePreparedStmt` stops after the lookup:
+//! both need the plan-cache statement of prepared-statement planning (VS1-15).
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -20,6 +22,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
+use tidb_base::dbterror::plannererrors::ErrStmtNotFound;
 use tidb_executor::adapter::ExecStmt;
 use tidb_executor::compiler::Compiler;
 use tidb_executor::glue::{Plan, SessionContext};
@@ -28,6 +31,8 @@ use tidb_kv::kv::{Client, Storage};
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_parser::ast;
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
+use tidb_sessionctx::variable::session_methods::prepare_dedup_cache_key;
+use tidb_sessionctx::variable::session_state::TxnInfoSchema;
 use tidb_sessiontxn::sctx::{
     InfoSchemaRef, LazyTxn as SctxLazyTxn, Oracle, PlanInfo, SessionCtx, TxnTsFuture,
 };
@@ -53,7 +58,8 @@ pub enum Dialect {
 
 /// What `PrepareStmt` returns (Go: `stmtID, paramCount, fields`).
 ///
-/// TODO(VS1-14b): the result fields (`[]*resolve.ResultField`).
+/// TODO(VS1-15): the result fields (`[]*resolve.ResultField`), built by the prepare executor
+/// that comes with prepared-statement planning.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedStmtInfo {
     /// The session's id of the statement (Go `SessionVars.GetNextPreparedStmtID`), not the
@@ -1173,40 +1179,171 @@ impl Session {
         self.running.is_some()
     }
 
-    /// `PrepareStmt` prepares a statement (Go `session.PrepareStmt`, `session.go:2483`).
-    // glue: stub of session.PrepareStmt, blocked-by:D05.3 (VS1-14b, prepared statements)
-    pub async fn prepare_stmt(&mut self, stmt: &ast::Stmt) -> Result<PreparedStmtInfo, Error> {
-        let _ = stmt;
-        Err(blocked(
-            "D05.3",
-            "prepared statements in the new session (VS1-14b)",
-        ))
+    /// PrepareStmt is used for executing prepare statement in binary protocol.
+    ///
+    /// The statement itself is prepared by `executor.NewPrepareExec` (D12.12), which builds
+    /// the plan-cache statement (`PlanCacheStmt`, D13.1): both are the next work item (VS1-15,
+    /// prepared-statement planning) and a boundary stub here, so every PREPARE on the new
+    /// session ends `Blocked` after the transaction work below; the router then restores the
+    /// session (spec §6.2) and the PoC owns the statement.
+    // go: session.PrepareStmt L2 (StmtCtx.DetachMemDiskTracker: no session memory tracker, A1; the dedup-cache hit and NewPrepareExec are stubs for VS1-15)
+    pub async fn prepare_stmt(&mut self, sql: &str) -> Result<PreparedStmtInfo, Error> {
+        let core = &mut self.core;
+        if core.sctx.vars.state.txn_ctx.info_schema.is_none() {
+            // We don't need to create a transaction for prepare statement, just get
+            // information schema will do.
+            core.sctx.vars.state.txn_ctx.info_schema =
+                Some(TxnInfoSchema(core.sctx.get_domain_info_schema()));
+        }
+        core.sctx.load_common_global_variables_if_needed()?;
+
+        // NewPrepareExec may need startTS to build the executor, for example prepare
+        // statement has subquery in int. So we have to call PrepareTxnCtx here.
+        core.prepare_txn_ctx().await?;
+
+        core.on_txn_manager_stmt_start_or_retry(Arc::new(prepare_stmt_node()))?;
+
+        core.txn_manager.advise_warmup(&mut core.sctx)?;
+
+        let mut dedup_key = Vec::new();
+        if core.sctx.vars.enable_cache_prepare_stmt {
+            // Session-level prepare dedup cache: if the same SQL text has been prepared
+            // before in this session (with the same charset/collation/currentDB), reuse
+            // the already-built PlanCacheStmt and skip the expensive Preprocess+Build.
+            let vars = &mut core.sctx.vars;
+            let (charset, collation) = vars.get_charset_info();
+            dedup_key = prepare_dedup_cache_key(
+                sql.as_bytes(),
+                &charset,
+                &collation,
+                &vars.current_db,
+                tidb_base::mysql::SQLMode(vars.sql_mode),
+            );
+            if vars.get_prepare_stmt_dedup_cache(&dedup_key).is_some() {
+                // The entry is a `PrepareStmtCacheEntry` and `rebuildFromPrepareCache`
+                // rebuilds a `PlanCacheStmt` from it (D13.1). Only a successful
+                // NewPrepareExec fills the cache, so this is not reached before VS1-15.
+                core.rollback_on_error();
+                return Err(blocked(
+                    "D13.1",
+                    "the prepare dedup cache (PlanCacheStmt, prepared-statement planning)",
+                ));
+            }
+        }
+
+        let prepare_exec = new_prepare_exec(sql);
+        // Rollback even if err is nil.
+        core.rollback_on_error();
+        let prepared = prepare_exec?;
+
+        // Store the result in the dedup cache for future Prepares of the same SQL: the
+        // entry holds the PlanCacheStmt (D13.1), with NewPrepareExec above.
+        let _ = dedup_key;
+        Ok(prepared)
     }
 
-    /// `ExecutePreparedStmt` executes a prepared statement (Go
-    /// `session.ExecutePreparedStmt`, `session.go:2654`).
-    // glue: stub of session.ExecutePreparedStmt, blocked-by:D05.3 (VS1-14b, prepared statements)
+    /// ExecutePreparedStmt executes a prepared statement.
+    ///
+    /// Go turns the statement into an `ast.ExecuteStmt` holding its `PlanCacheStmt` and runs
+    /// it through `ExecuteStmt`; neither the plan-cache statement (D13.1) nor `EXECUTE` in
+    /// the Rust AST exists before VS1-15 (prepared-statement planning), so after the lookup
+    /// this is a boundary stub. No statement can be found yet anyway: `PrepareStmt` never
+    /// adds one before VS1-15.
+    // go: session.ExecutePreparedStmt L2 (PlanCacheStmt / ast.ExecuteStmt are stubs for VS1-15)
     pub async fn execute_prepared_stmt(
         &mut self,
         stmt_id: u32,
         params: Vec<Datum>,
     ) -> Result<Option<ExecStmtResult>, Error> {
-        let _ = (stmt_id, params);
+        if self
+            .core
+            .sctx
+            .vars
+            .get_prepared_stmt_by_id(stmt_id)
+            .is_err()
+        {
+            log::error!("prepared statement not found, stmtID: {stmt_id}");
+            return Err(ErrStmtNotFound.clone());
+        }
+        // stmt, ok := prepStmt.(*plannercore.PlanCacheStmt); execStmt := &ast.ExecuteStmt{
+        // BinaryArgs: params, PrepStmt: stmt, PrepStmtId: stmtID}; s.ExecuteStmt(ctx, execStmt)
+        let _ = params;
         Err(blocked(
-            "D05.3",
-            "prepared statements in the new session (VS1-14b)",
+            "D13.1",
+            "executing a prepared statement (PlanCacheStmt, prepared-statement planning)",
         ))
     }
 
-    /// `DropPreparedStmt` (COM_STMT_CLOSE).
-    // glue: stub of session.DropPreparedStmt, blocked-by:D05.3 (VS1-14b, prepared statements)
+    /// DropPreparedStmt (COM_STMT_CLOSE).
+    ///
+    /// Go only records the id in `RetryInfo.DroppedPreparedStmtIDs`; `cleanRetryInfo` removes
+    /// the statement when the transaction ends, so that a retried optimistic transaction can
+    /// still execute it. Retrying is the write path (never on the read-only node, N11 D8), so
+    /// the statement is removed at once (spec §6.1). `cleanRetryInfo` also
+    /// deletes the statement's plan from the session plan cache: the cache is never built
+    /// before VS1-15 ([`Session::get_session_plan_cache`]), so there is nothing to delete.
+    // go: session.DropPreparedStmt L2 (removed at once: RetryInfo is the write path)
     pub fn drop_prepared_stmt(&mut self, stmt_id: u32) -> Result<(), Error> {
-        let _ = stmt_id;
+        let vars = &mut self.core.sctx.vars;
+        if !vars.state.prepared_stmts.contains_key(&stmt_id) {
+            return Err(ErrStmtNotFound.clone());
+        }
+        // cleanRetryInfo: GetSessionPlanCache().Delete(NewPlanCacheKey(...)): no cache yet.
+        vars.remove_prepared_stmt(stmt_id);
+        Ok(())
+    }
+
+    /// GetSessionPlanCache: the session's prepared plan cache, `None` when both plan caches
+    /// are off. The cache (`plannercore.NewLRUPlanCache`, D13.1) is built lazily by the first
+    /// plan-cache lookup, which is VS1-15 (prepared-statement planning): until then building
+    /// it is a boundary stub, and nothing on the new stack asks for it.
+    // go: session.GetSessionPlanCache L2 (the LRU plan cache is a stub for VS1-15)
+    pub fn get_session_plan_cache(&mut self) -> Result<Option<()>, Error> {
+        let vars = &self.core.sctx.vars;
+        // use the prepared plan cache
+        if !vars.enable_prepared_plan_cache && !vars.enable_non_prepared_plan_cache {
+            return Ok(None);
+        }
         Err(blocked(
-            "D05.3",
-            "prepared statements in the new session (VS1-14b)",
+            "D13.1",
+            "the session plan cache (prepared-statement planning)",
         ))
     }
+}
+
+/// The node `PrepareStmt` starts the transaction manager's statement with (Go
+/// `&ast.PrepareStmt{SQLText: sql}`): `PREPARE` is not in the Rust AST, so it is the
+/// grammar's unported production. The providers only ask whether a node is a `SELECT` or a
+/// transaction statement, which it is not.
+// glue: ast.PrepareStmt (not in the Rust AST)
+fn prepare_stmt_node() -> ast::Stmt {
+    ast::Stmt::Unported(Box::new(tidb_parser::Node {
+        kind: "PreparedStmt#0",
+        span: tidb_parser::Span::default(),
+        children: Vec::new(),
+    }))
+}
+
+/// `executor.NewPrepareExec(s, sql)` followed by `Next`: parses the statement, checks it,
+/// builds the `PlanCacheStmt` (D13.1) and adds it to the session. The next work item
+/// (VS1-15, prepared-statement planning) ports it.
+// glue: stub, blocked-by:D12.12 (executor.NewPrepareExec: the prepare executor and the plan-cache statement come with prepared-statement planning)
+fn new_prepare_exec(sql: &str) -> Result<PreparedStmtInfo, Error> {
+    let _ = sql;
+    Err(blocked(
+        "D12.12",
+        "preparing a statement (PrepareExec, prepared-statement planning)",
+    ))
+}
+
+/// resolvePreparedStmt: the statement an `EXECUTE` runs. `EXECUTE` is not in the Rust AST
+/// (Go reads it with `plannercore.GetPreparedStmt`, D13.1, VS1-15), so every statement
+/// resolves to itself. Go's only caller (`shouldCheckConnectionAliveBeforeCommit`) asks
+/// whether a statement writes; it is not ported (the write path).
+// go: resolvePreparedStmt L2 (no EXECUTE in the Rust AST)
+pub fn resolve_prepared_stmt<'a>(stmt: &'a ast::Stmt, vars: &SessionVars) -> &'a ast::Stmt {
+    let _ = vars;
+    stmt
 }
 
 /// The deferred `OnStmtEnd`s of `ExecuteStmt` (Go: `defer s.txn.onStmtEnd()`, `defer

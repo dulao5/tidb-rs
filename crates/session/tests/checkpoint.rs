@@ -142,7 +142,9 @@ fn restore_undoes_all_groups_together() {
 }
 
 /// The session plans nothing yet: `ExecuteStmt` reaches `Compile`, whose planner is a
-/// boundary stub; prepared statements are part 2 (VS1-14b).
+/// boundary stub; `PrepareStmt` reaches the prepare executor, a boundary stub until
+/// prepared-statement planning (VS1-15), and rolls its transaction back (Go's
+/// `rollbackOnError`).
 #[test]
 fn statement_paths_are_blocked() {
     let mut s = session();
@@ -156,8 +158,9 @@ fn statement_paths_are_blocked() {
         s.execute_stmt(Arc::clone(&stmt), "SELECT 1").await.err()
     }));
     assert_eq!(got.and_then(block), Some("D09.13".to_owned()));
-    let got = block_on(Box::pin(async { s.prepare_stmt(&stmt).await.err() }));
-    assert_eq!(got.and_then(block), Some("D05.3".to_owned()));
+    let got = block_on(Box::pin(async { s.prepare_stmt("SELECT 1").await.err() }));
+    assert_eq!(got.and_then(block), Some("D12.12".to_owned()));
+    assert!(s.is_idle());
     assert_eq!(s.dialect(), Dialect::MySQL);
     assert!(s.is_autocommit() && !s.in_txn() && s.current_db().is_empty());
 }
