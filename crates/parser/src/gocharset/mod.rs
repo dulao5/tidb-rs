@@ -29,7 +29,9 @@ mod gbk_encode_data;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, RwLock, RwLockReadGuard};
+use std::sync::{Arc, LazyLock};
+
+use parking_lot::{RwLock, RwLockReadGuard};
 
 use tidb_base::gofmt::Arg;
 use tidb_base::gostd::to_lower;
@@ -74,19 +76,19 @@ impl Charset {
     /// The field `DefaultCollation`.
     // glue: Go field read
     pub fn default_collation(&self) -> String {
-        self.default_collation.read().unwrap().clone()
+        self.default_collation.read().clone()
     }
 
     /// `cs.DefaultCollation = name`.
     // glue: Go field write
     pub fn set_default_collation(&self, name: &str) {
-        *self.default_collation.write().unwrap() = name.to_owned();
+        *self.default_collation.write() = name.to_owned();
     }
 
     /// The field `Collations` (read).
     // glue: Go field read
     pub fn collations(&self) -> RwLockReadGuard<'_, HashMap<String, Arc<Collation>>> {
-        self.collations.read().unwrap()
+        self.collations.read()
     }
 }
 
@@ -245,12 +247,7 @@ pub fn character_set_infos() -> &'static RwLock<HashMap<String, Arc<Charset>>> {
 // go: GetSupportedCharsets L1
 pub fn get_supported_charsets() -> Vec<Arc<Charset>> {
     let _ = st();
-    let mut charsets: Vec<Arc<Charset>> = CharacterSetInfos
-        .read()
-        .unwrap()
-        .values()
-        .cloned()
-        .collect();
+    let mut charsets: Vec<Arc<Charset>> = CharacterSetInfos.read().values().cloned().collect();
 
     // sort charset by name.
     charsets.sort_by(|i, j| i.name.cmp(&j.name));
@@ -260,7 +257,7 @@ pub fn get_supported_charsets() -> Vec<Arc<Charset>> {
 /// GetSupportedCollations gets information for all collations supported so far.
 // go: GetSupportedCollations L1
 pub fn get_supported_collations() -> Vec<Arc<Collation>> {
-    st().read().unwrap().supported_collations.clone()
+    st().read().supported_collations.clone()
 }
 
 /// ValidCharsetAndCollation checks the charset and the collation validity
@@ -326,11 +323,11 @@ pub fn get_charset_info(cs: &str) -> (Option<Arc<Charset>>, Result<(), Error>) {
         cs = CharsetUTF8;
     }
 
-    if let Some(c) = CharacterSetInfos.read().unwrap().get(&to_lower(cs)) {
+    if let Some(c) = CharacterSetInfos.read().get(&to_lower(cs)) {
         return (Some(Arc::clone(c)), Ok(()));
     }
 
-    if let Some(c) = st.read().unwrap().charsets.get(&to_lower(cs)) {
+    if let Some(c) = st.read().charsets.get(&to_lower(cs)) {
         return (
             Some(Arc::clone(c)),
             Err(errors::errorf(
@@ -359,7 +356,7 @@ pub fn get_charset_info_by_id(co_id: isize) -> (String, String, Result<(), Error
             Ok(()),
         );
     }
-    if let Some(collation) = st().read().unwrap().collations_id_map.get(&co_id) {
+    if let Some(collation) = st().read().collations_id_map.get(&co_id) {
         return (
             collation.charset_name.clone(),
             collation.name.clone(),
@@ -395,7 +392,7 @@ fn utf8_alias(csname: &str) -> String {
 // go: GetCollationByName L1 [M-ERR]
 pub fn get_collation_by_name(name: &str) -> Result<Arc<Collation>, Error> {
     let csname = utf8_alias(&to_lower(name));
-    match st().read().unwrap().collations_name_map.get(&csname) {
+    match st().read().collations_name_map.get(&csname) {
         Some(collation) => Ok(Arc::clone(collation)),
         None => Err(ErrUnknownCollation.gen_with_stack_by_args(vec![Arg::from(name.to_owned())])),
     }
@@ -404,7 +401,7 @@ pub fn get_collation_by_name(name: &str) -> Result<Arc<Collation>, Error> {
 /// GetCollationByID returns collations by given id.
 // go: GetCollationByID L1 [M-ERR]
 pub fn get_collation_by_id(id: isize) -> Result<Arc<Collation>, Error> {
-    match st().read().unwrap().collations_id_map.get(&id) {
+    match st().read().collations_id_map.get(&id) {
         Some(collation) => Ok(Arc::clone(collation)),
         None => Err(errors::errorf("Unknown collation id %d", &[Arg::from(id)])),
     }
@@ -482,7 +479,7 @@ pub const CharsetUTF32: &str = "utf32";
 // go: AddCharset L1
 pub fn add_charset(c: Arc<Charset>) {
     let _ = st();
-    CharacterSetInfos.write().unwrap().insert(c.name.clone(), c);
+    CharacterSetInfos.write().insert(c.name.clone(), c);
 }
 
 /// RemoveCharset remove a charset.
@@ -490,10 +487,10 @@ pub fn add_charset(c: Arc<Charset>) {
 // go: RemoveCharset L1
 pub fn remove_charset(c: &str) {
     let st = st();
-    CharacterSetInfos.write().unwrap().remove(c);
+    CharacterSetInfos.write().remove(c);
     // Go removes while ranging over the indexes of the original slice: an element
     // shifted into index i is not examined again.
-    let mut s = st.write().unwrap();
+    let mut s = st.write();
     // Like Go, indexing past the shortened slice panics.
     let n = s.supported_collations.len();
     for i in 0..n {
@@ -512,7 +509,7 @@ pub fn add_collation(c: Arc<Collation>) {
 
 // go-part: AddCollation
 fn add_collation_to(st: &RwLock<State>, c: Arc<Collation>) {
-    let mut s = st.write().unwrap();
+    let mut s = st.write();
     s.collations_id_map.insert(c.id, Arc::clone(&c));
     s.collations_name_map.insert(c.name.clone(), Arc::clone(&c));
 
@@ -520,11 +517,10 @@ fn add_collation_to(st: &RwLock<State>, c: Arc<Collation>) {
         add_supported_collation_to(&mut s, Arc::clone(&c));
     }
 
-    if let Some(charset) = CharacterSetInfos.read().unwrap().get(&c.charset_name) {
+    if let Some(charset) = CharacterSetInfos.read().get(&c.charset_name) {
         charset
             .collations
             .write()
-            .unwrap()
             .insert(c.name.clone(), Arc::clone(&c));
     }
 
@@ -532,7 +528,6 @@ fn add_collation_to(st: &RwLock<State>, c: Arc<Collation>) {
         charset
             .collations
             .write()
-            .unwrap()
             .insert(c.name.clone(), Arc::clone(&c));
     }
 }
@@ -541,7 +536,7 @@ fn add_collation_to(st: &RwLock<State>, c: Arc<Collation>) {
 /// Use only when adding a custom collation to the parser.
 // go: AddSupportedCollation L1
 pub fn add_supported_collation(c: Arc<Collation>) {
-    add_supported_collation_to(&mut st().write().unwrap(), c);
+    add_supported_collation_to(&mut st().write(), c);
 }
 
 // go-part: AddSupportedCollation

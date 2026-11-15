@@ -7,7 +7,7 @@ use tidb_parser::gocharset::{
 /// switchDefaultCollation switch the default collation for charset according to the new collation config.
 // go: switchDefaultCollation L1
 pub(super) fn switch_default_collation(flag: bool) {
-    let infos = character_set_infos().read().unwrap();
+    let infos = character_set_infos().read();
     let gbk = &infos[CharsetGBK];
     if flag {
         gbk.set_default_collation(CollationGBKChineseCI);

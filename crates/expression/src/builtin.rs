@@ -13,7 +13,9 @@
 
 #![allow(non_upper_case_globals)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use tidb_base::{Error, mysql};
 use tidb_parser::gocharset::{CharsetBin, CollationBin};
@@ -486,7 +488,7 @@ impl<T: Clone> BuiltinFuncCache<T> {
 
     // go: builtinFuncCache.getCache L2 (mutex instead of atomic.Pointer)
     pub fn get_cache(&self, ctx_id: u64) -> Option<T> {
-        match &*self.cached.lock().unwrap() {
+        match &*self.cached.lock() {
             Some((id, item)) if *id == ctx_id => Some(item.clone()),
             _ => None,
         }
@@ -499,7 +501,7 @@ impl<T: Clone> BuiltinFuncCache<T> {
         construct_cache: impl FnOnce() -> Result<T, Error>,
     ) -> Result<T, Error> {
         let ctx_id = ctx.ctx_id();
-        let mut cached = self.cached.lock().unwrap();
+        let mut cached = self.cached.lock();
         if let Some((id, item)) = &*cached
             && *id == ctx_id
         {

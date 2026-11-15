@@ -5,9 +5,9 @@
 //! Everything here is synchronous and takes the current [`Instant`] as an argument, so the
 //! state machine and the drain logic are unit-tested without a cluster.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -340,8 +340,8 @@ impl Registry {
         })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().expect("schema sync registry lock")
+    fn lock(&self) -> parking_lot::MutexGuard<'_, State> {
+        self.state.lock()
     }
 
     pub fn limits(&self) -> Limits {
@@ -417,14 +417,14 @@ impl Registry {
     }
 
     pub fn stats(&self) -> SyncStats {
-        let mut s = *self.counters.lock().expect("stats lock");
+        let mut s = *self.counters.lock();
         s.admitted = self.admitted.load(Ordering::Relaxed);
         s.invalidated = self.invalidated.load(Ordering::Relaxed);
         s
     }
 
     pub(crate) fn count(&self, f: impl FnOnce(&mut SyncStats)) {
-        f(&mut self.counters.lock().expect("stats lock"));
+        f(&mut self.counters.lock());
     }
 
     /// Install a newly loaded schema (newer versions only).

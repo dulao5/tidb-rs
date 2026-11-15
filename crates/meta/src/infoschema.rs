@@ -1,9 +1,9 @@
 //! An immutable snapshot of all schemas, and a per-statement versioned cache of them.
 
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -249,7 +249,7 @@ impl SchemaCache {
     pub async fn check_at(&self, candidate: &InfoSchema, start_ts: u64) -> Result<SchemaCheck> {
         self.max_ts.fetch_max(start_ts, Ordering::Relaxed);
         let (read_ts, probe) = {
-            let mut probes = self.probes.lock().expect("schema probe lock");
+            let mut probes = self.probes.lock();
             match (&probes.done, &probes.inflight) {
                 (Some((t, raw)), _) if *t >= start_ts => {
                     let (t, raw) = (*t, *raw);
@@ -270,18 +270,14 @@ impl SchemaCache {
                     .boxed()
                     .shared();
                     probes.inflight = Some((read_ts, probe.clone()));
-                    self.state
-                        .lock()
-                        .expect("schema cache lock")
-                        .stats
-                        .version_reads += 1;
+                    self.state.lock().stats.version_reads += 1;
                     (read_ts, probe)
                 }
             }
         };
         let result = probe.await;
         {
-            let mut probes = self.probes.lock().expect("schema probe lock");
+            let mut probes = self.probes.lock();
             // Clear the in-flight read on failure too, so later checks retry instead of
             // joining a failed read.
             if probes.inflight.as_ref().is_some_and(|(t, _)| *t == read_ts) {
@@ -300,7 +296,7 @@ impl SchemaCache {
     /// Apply [`check_accepts`] to a version key `raw` read at `read_ts >= start_ts`.
     fn decide(&self, candidate: &InfoSchema, start_ts: u64, read_ts: u64, raw: i64) -> SchemaCheck {
         debug_assert!(read_ts >= start_ts);
-        let mut state = self.state.lock().expect("schema cache lock");
+        let mut state = self.state.lock();
         if check_accepts(state.entries.get(&raw), candidate.version(), raw, start_ts) {
             state.stats.checks_passed += 1;
             SchemaCheck::Valid
@@ -335,16 +331,16 @@ impl SchemaCache {
 
     /// The newest cached schema, if any.
     pub fn latest(&self) -> Option<Arc<InfoSchema>> {
-        let state = self.state.lock().expect("schema cache lock");
+        let state = self.state.lock();
         state.entries.values().next_back().map(|e| e.schema.clone())
     }
 
     pub fn stats(&self) -> CacheStats {
-        self.state.lock().expect("schema cache lock").stats
+        self.state.lock().stats
     }
 
     fn lookup(&self, version: i64, ok: impl Fn(&CacheEntry) -> bool) -> Option<Arc<InfoSchema>> {
-        let mut state = self.state.lock().expect("schema cache lock");
+        let mut state = self.state.lock();
         let entry = state.entries.get(&version).filter(|e| ok(e))?;
         let schema = entry.schema.clone();
         state.stats.hits += 1;
@@ -353,14 +349,14 @@ impl SchemaCache {
 
     fn note_diff_seen(&self, version: i64, seen_at: Option<u64>) {
         let Some(ts) = seen_at else { return };
-        let mut state = self.state.lock().expect("schema cache lock");
+        let mut state = self.state.lock();
         if let Some(e) = state.entries.get_mut(&version) {
             e.diff_seen_at = Some(e.diff_seen_at.map_or(ts, |t| t.min(ts)));
         }
     }
 
     fn insert(&self, schema: Arc<InfoSchema>, diff_seen_at: Option<u64>) {
-        let mut state = self.state.lock().expect("schema cache lock");
+        let mut state = self.state.lock();
         state.stats.full_loads += 1;
         let version = schema.version();
         state.entries.entry(version).or_insert(CacheEntry {
@@ -410,6 +406,33 @@ mod tests {
             schema: Arc::new(InfoSchema::new(version, vec![])),
             diff_seen_at,
         }
+    }
+
+    /// The cache is shared by every connection, and a connection's panic is recovered (the
+    /// client gets an error, the server keeps serving). A panic while the cache lock is held
+    /// must therefore leave the lock usable for the other connections: no lock poisoning.
+    #[test]
+    fn schema_cache_lock_survives_a_panic_while_held() {
+        let state: Arc<Mutex<CacheState>> = Arc::default();
+        let held = Arc::clone(&state);
+        let panicked = std::thread::spawn(move || {
+            let mut s = held.lock();
+            s.entries.insert(1, entry(1, None));
+            panic!("connection panics while holding the schema cache lock");
+        })
+        .join();
+        assert!(panicked.is_err());
+
+        let other = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let mut s = other.lock();
+            assert!(s.entries.contains_key(&1));
+            s.entries.insert(2, entry(2, None));
+            s.stats.hits += 1;
+        })
+        .join()
+        .expect("another connection can still use the schema cache");
+        assert_eq!(state.lock().entries.len(), 2);
     }
 
     #[test]
