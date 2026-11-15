@@ -544,7 +544,7 @@ pub fn get_col_default_value(ctx: &dyn BuildContext, col: &ColumnInfo) -> Result
 /// EvalColDefaultExpr eval default expr node to explicit default value.
 ///
 /// Needs `expression.EvalSimpleAst`, which the expression rewriter assigns (D09.2).
-// glue: stub, blocked-by:D09.2 (EvalColDefaultExpr: expression.EvalSimpleAst)
+// glue: stub of EvalColDefaultExpr, blocked-by:D09.2 (expression.EvalSimpleAst)
 pub fn eval_col_default_expr(
     _ctx: &dyn BuildContext,
     _col: &ColumnInfo,
@@ -558,7 +558,7 @@ pub fn eval_col_default_expr(
 
 /// getColDefaultExprValue: `select <default expr>` evaluated by `expression.EvalSimpleAst`
 /// (D09.2).
-// glue: stub, blocked-by:D09.2 (getColDefaultExprValue: expression.EvalSimpleAst)
+// glue: stub of getColDefaultExprValue, blocked-by:D09.2 (expression.EvalSimpleAst)
 fn get_col_default_expr_value(
     _ctx: &dyn BuildContext,
     _col: &ColumnInfo,
@@ -757,12 +757,15 @@ pub fn optional_fsp(field_type: &FieldType) -> String {
 /// FillVirtualColumnValue will calculate the virtual column value by evaluating generated
 /// expression using rows from a chunk, and then fill this value into the chunk.
 ///
+/// `virtual_ret_types` are Go's shared `[]*types.FieldType`: the callers' `Arc`s (the plan
+/// schema's `RetType`s) or plain values, borrowed (N13).
+///
 /// As Go, `req` and `virCols` share the filled column (`SetCol(idx, virCols.Column(i))`);
 /// `virCols` is dropped on return, so `req` then owns it alone. Any write to a shared
 /// column goes through the chunk's copy-on-write path (`col_mut`), never in place.
 // go: FillVirtualColumnValue L1
-pub fn fill_virtual_column_value(
-    virtual_ret_types: &[FieldType],
+pub fn fill_virtual_column_value<F: std::borrow::Borrow<FieldType>>(
+    virtual_ret_types: &[F],
     virtual_column_index: &[usize],
     exp_cols: &[Arc<ExprColumn>],
     col_infos: &[Arc<ColumnInfo>],
@@ -899,7 +902,15 @@ mod tests {
         assert!(!col.is_null(2));
         assert_eq!(col.get_uint64(2), 0);
         // Nothing to do without virtual columns.
-        fill_virtual_column_value(&[], &[], &exp_cols, &infos, &*ctx, &mut chk).unwrap();
+        fill_virtual_column_value::<tidb_parser::types::FieldType>(
+            &[],
+            &[],
+            &exp_cols,
+            &infos,
+            &*ctx,
+            &mut chk,
+        )
+        .unwrap();
     }
 
     /// FillVirtualColumnValue shares the filled column with its temporary chunk as Go's

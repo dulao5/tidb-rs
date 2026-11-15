@@ -53,6 +53,10 @@ pub(crate) struct MockSession {
     pub killer: Arc<SqlKiller>,
     pub read_ts: u64,
     pub process_info: Vec<String>,
+    /// `GetExprCtx()`: a static expression context.
+    pub expr_ctx: tidb_sessionctx::exprctx::ExprContextRef,
+    /// The snapshot `GetSnapshotWithStmtReadTS` gives (`None`: an error).
+    pub snapshot: Option<Arc<dyn tidb_kv::kv::Snapshot>>,
 }
 
 impl MockSession {
@@ -62,6 +66,8 @@ impl MockSession {
             killer: SqlKiller::new(),
             read_ts,
             process_info: Vec::new(),
+            expr_ctx: tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
+            snapshot: None,
         }
     }
 }
@@ -100,6 +106,15 @@ impl SessionContext for MockSession {
     }
     fn advise_optimize_with_plan_and_then_warm_up(&mut self, _: &Plan) -> Result<(), Error> {
         Ok(())
+    }
+    fn get_expr_ctx(&self) -> tidb_sessionctx::exprctx::ExprContextRef {
+        Arc::clone(&self.expr_ctx)
+    }
+    fn get_snapshot_with_stmt_read_ts(
+        &mut self,
+    ) -> futures::future::BoxFuture<'_, Result<Arc<dyn tidb_kv::kv::Snapshot>, Error>> {
+        let snap = self.snapshot.clone();
+        Box::pin(async move { snap.ok_or_else(|| Error::plain("MockSession: no snapshot")) })
     }
 }
 
@@ -286,7 +301,7 @@ struct Numbers {
 }
 
 impl PointGetExecutor for Numbers {
-    fn init(&mut self, _plan: &Plan) -> Result<(), Error> {
+    fn init(&mut self, _sctx: &mut dyn SessionContext, _plan: &Plan) -> Result<(), Error> {
         self.counters.inits.fetch_add(1, Ordering::SeqCst);
         self.next = 0;
         Ok(())

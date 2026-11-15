@@ -398,7 +398,7 @@ impl ExecStmt {
                 }
                 Some(pg) => {
                     // CachedPlan type is already checked in last step
-                    pg.init(self.plan.as_ref().expect("point get plan"))?;
+                    pg.init(sctx, self.plan.as_ref().expect("point get plan"))?;
                     executor = Some(cached);
                     point_get_cache = Some(Arc::clone(&ps_stmt));
                 }
@@ -410,7 +410,7 @@ impl ExecStmt {
             None => {
                 let mut b =
                     new_executor_builder(sctx, self.info_schema.clone(), Arc::clone(&self.ti));
-                let e = b.build(sctx, self.plan.as_ref());
+                let e = b.build(sctx, self.plan.as_ref()).await;
                 if let Some(err) = b.err {
                     return Err(err);
                 }
@@ -512,7 +512,7 @@ impl ExecStmt {
         self.inherit_context_from_execute_stmt();
         // The runaway checker is resource control (N10); Top SQL is D14.2.
 
-        let mut e = self.build_executor(sctx)?;
+        let mut e = self.build_executor(sctx).await?;
 
         let cmd = sctx.get_session_vars().command_value as u8;
         let sql = self.get_sql_for_process_info();
@@ -662,12 +662,12 @@ impl ExecStmt {
     }
 
     // go: ExecStmt.buildExecutor L2 (no Execute / Analyze plans: D13.1, delegated)
-    fn build_executor(
+    async fn build_executor(
         &mut self,
         sctx: &mut dyn SessionContext,
     ) -> Result<Box<dyn Executor>, Error> {
         let start = Instant::now();
-        let r = (|| {
+        let r = async {
             // `*plannercore.Execute` (D13.1) is not a plan of the new stack.
             {
                 let stmt_ctx = Self::stmt_ctx_mut(sctx);
@@ -676,7 +676,7 @@ impl ExecStmt {
                 }
             }
             let mut b = new_executor_builder(sctx, self.info_schema.clone(), Arc::clone(&self.ti));
-            let e = b.build(sctx, self.plan.as_ref());
+            let e = b.build(sctx, self.plan.as_ref()).await;
             if let Some(err) = b.err {
                 return Err(err);
             }
@@ -687,7 +687,8 @@ impl ExecStmt {
                     && !stmt_ctx.in_update_stmt
                     && !stmt_ctx.in_insert_stmt);
             e.ok_or_else(|| Error::plain("no executor was built"))
-        })();
+        }
+        .await;
         self.phase_build_durations[0] += start.elapsed();
         r
     }
