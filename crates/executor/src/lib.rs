@@ -11,6 +11,9 @@
 //! ([`builder`]), [`detach`], the executor metrics and helpers. What the framework needs from
 //! the session and from unported blocks is in [`glue`]. The executors come with VS1-12 and
 //! VS1-34…VS1-36.
+//!
+//! VS1-12 (block D12.1): the point get executor ([`point_get`]) and the builder helpers it
+//! needs (`NewRowDecoder`, the snapshot, ... in [`builder`]).
 #![deny(unsafe_code)]
 // N13 rule 5 (M-SHARE): a clone of an `Arc` is written `Arc::clone(&x)`, so a bare `.clone()`
 // is always a value clone (Go `Clone`).
@@ -24,7 +27,9 @@ pub mod exec;
 pub mod glue;
 pub mod internal;
 pub mod metrics;
+pub mod point_get;
 pub mod select;
+pub mod table_reader;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testutil;
 pub mod utils;

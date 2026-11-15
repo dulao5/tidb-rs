@@ -97,6 +97,9 @@ pub struct SessCtx {
     /// The transaction ended inside a provider call (`CommitBeforeEnterNewTxn`): the
     /// manager's `OnTxnEnd` is still to run (txnmanager.rs module doc).
     txn_end: bool,
+    /// The expression context the session gives its executors (`GetExprCtx`): a static
+    /// context with the defaults until the session's own (`sessionexpr`, D05.3 tasks P1-1).
+    expr_ctx: tidb_sessionctx::exprctx::ExprContextRef,
     /// `currentPlan`.
     pub(crate) current_plan: Option<Plan>,
     /// `SetProcessInfo` (spec §1.2).
@@ -554,12 +557,6 @@ impl SessionCore {
 /// yet provide (spec §1.2). They are not called: the planner gets a `PlanCtx` (N2) from
 /// `Compile`, which is still a boundary stub.
 impl SessionCore {
-    /// `GetExprCtx()`: the session's `ExprContext` (`sessionexpr`, D05.3 tasks P1-1).
-    // glue: stub of session.GetExprCtx, blocked-by:D05.3 (P1-1: sessionexpr, the session's ExprContext)
-    pub fn get_expr_ctx(&self) -> Result<(), Error> {
-        Err(blocked("D05.3", "the session's ExprContext (sessionexpr)"))
-    }
-
     /// `GetPlanCtx()`.
     // glue: stub of session.GetPlanCtx, blocked-by:D05.3 (P1-1: the PlanCtx is built over the session's ExprContext)
     pub fn get_plan_ctx(&self) -> Result<(), Error> {
@@ -682,6 +679,24 @@ impl SessionContext for SessionCore {
     fn advise_optimize_with_plan_and_then_warm_up(&mut self, plan: &Plan) -> Result<(), Error> {
         let info = PhysicalPlanInfo::new(plan.as_dyn());
         tidb_sessiontxn::advise_optimize_with_plan_and_then_warm_up(self, Some(&info))
+    }
+    /// `GetExprCtx()`: the session's `ExprContext` is `sessionexpr` (D05.3 tasks P1-1, not
+    /// ported): until then a static context with Go's defaults, not the session's variables
+    /// (spec §1.2). No statement reaches the executors yet (`Compile` is a boundary stub).
+    // glue: stub of session.GetExprCtx, blocked-by:D05.3 (P1-1: sessionexpr; a static default context until then)
+    fn get_expr_ctx(&self) -> tidb_sessionctx::exprctx::ExprContextRef {
+        Arc::clone(&self.sctx.expr_ctx) as tidb_sessionctx::exprctx::ExprContextRef
+    }
+    // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS
+    fn get_snapshot_with_stmt_read_ts(
+        &mut self,
+    ) -> BoxFuture<'_, Result<Arc<dyn tidb_kv::kv::Snapshot>, Error>> {
+        async move {
+            self.txn_manager
+                .get_snapshot_with_stmt_read_ts(&mut self.sctx)
+                .await
+        }
+        .boxed()
     }
 }
 
@@ -836,6 +851,7 @@ impl Session {
                     )),
                     values: HashMap::new(),
                     txn_end: false,
+                    expr_ctx: tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
                     current_plan: None,
                     process: None,
                     start_time: None,

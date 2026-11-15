@@ -19,7 +19,7 @@ Go 范围：`pkg/table`（`table.go`、`column.go`、`index.go`、`constraint.go
 | `util/generatedexpr`（D00.3） | `util/generatedexpr.rs` | `ParseExpression`、`SimpleResolveName`（宪章第四条 4：首次需要时整文件移植） |
 | `util/misc.go` `ColumnsToProto` / `ColumnToProto`（D00.3） | `util/misc.rs` | 表扫描的列（宪章第四条 4、5） |
 
-converge：D06.4 0/416 → 76/416。
+converge：D06.4 0/416 → 76/416。VS1-12 的 D06.4 部分（`functions.tsv` 中 103 个函数）：54 个移植、3 个桩（`EvalColDefaultExpr`、`getColDefaultExprValue` → D09.2，`TempTableFromMeta` → D06.4 第 2 部分），其余 46 个是 §1.2 的写路径，在 `functions.tsv` 中标为 `not_ported`；`scripts/converge.py --block D06.4 --part specs/VS1-vertical-slice/functions.tsv --item VS1-12` 为 OK。
 
 ### 1.2 永久豁免：写路径
 
@@ -65,6 +65,7 @@ InfoSchema 为每张表调用 `TableFromMeta`，所以第 1 部分不能对这�
 ## 5. 测试
 
 - govec 领域 `table`（tracker `govec/domains/table.go`）：`TableFromMeta` 的各列表与索引、列转换、默认值（含时区、严格模式、`NOT NULL`、枚举、自增）、`GetTimeValue`、`DecodeRawRowData`（int handle、公共 handle、前缀主键、默认值、DDL 中的列）、`FindCols`、`CanSkip`、restored data、`BuildTableScanFromInfos`（逐字节）与 `SetPBColumnsDefaultValue`。tidb-rs `crates/infoschema/tests/govec_table.rs` 回放。
+- VS1-12（D12.1 spec §2 第 5 条）：`fill_virtual_column_value` 的 `virtual_ret_types` 改为 `&[F]`（`F: Borrow<FieldType>`），点查执行器直接传 schema 列的 `Arc<FieldType>`，不复制。
 - 共享（#229，N13 §5）：`tests/arc_sharing.rs` 检查表对象的每列、每个索引与 `TableInfo` 中的是同一个 `Arc`，DDL 轮次之后旧版本的值全部释放；`tests/arc_sharing_mem.rs` 测 10,000 张表 × 30 列 × 3 个索引：表对象 38.5 MiB（Go 30.1 MiB），去掉的副本 151.4 MiB。
 - 单元测试：`table::column::tests::fill_virtual_column_value_cases`；`fill_virtual_column_value_shares_without_aliasing_writes`（照 Go `SetCol` 与临时 chunk 共享算出的列，不复制；返回后 `req` 独占该列，再次填充不改动先前取得的列）；`govec_table` 的 `decode_row` 回放（`DecodeRawRowData` 只在一次解码内借用列的 `FieldType`，照 Go `&col.FieldType` 不复制；同一行解码两次结果相同）。
 - Go 单测：`column_test.go` 的 `TestGetZeroValue`、`TestCastValue`、`TestGetDefaultValue` 的用例形状进入向量；其余测试依赖 store / 写路径。

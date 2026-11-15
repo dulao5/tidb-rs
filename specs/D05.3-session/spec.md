@@ -36,7 +36,7 @@ VS1-14 在 D05.3 中的 129 个函数去掉第 2 部分的 5 个，剩 124 个�
 
 | 函数 | 块 | 原因 |
 |---|---|---|
-| `GetExprCtx`、`GetPlanCtx`、`GetRangerCtx` | D05.3 | 会话背后的 `ExprContext`（`sessionexpr`，D05.3 tasks P1-1，不在 VS1-14 的清单里）；规划器拿的是 `PlanCtx`（N2），由 `Compile` 构造，`Compile` 现在还是 `blocked-by:D09.13` |
+| `GetExprCtx`、`GetPlanCtx`、`GetRangerCtx` | D05.3 | 会话背后的 `ExprContext`（`sessionexpr`，D05.3 tasks P1-1，不在 VS1-14 的清单里）。#234 之后执行器通过 `SessionContext::get_expr_ctx` 取它：在 `sessionexpr` 移植之前，会话给出一个按 Go 默认值构造的静态 `ExprContext`（不反映会话变量），C2a 之前必须换成真正的；规划器拿的是 `PlanCtx`（N2），由 `Compile` 构造，`Compile` 现在还是 `blocked-by:D09.13` |
 | `GetDistSQLCtx` | D07.3 | `DistSQLContext` 随 VS1-33 |
 | `GetBuildPBCtx` | D10.9 | `BuildPBContext` 随 `ToPB` |
 | `GetTableCtx` | D06.4 | `tblctx`，写路径之外只有 D06.4 第 2 部分用 |
