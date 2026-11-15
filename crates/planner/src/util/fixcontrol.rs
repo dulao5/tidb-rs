@@ -2,8 +2,8 @@
 //!
 //! Part of `fixcontrol` (block D09.13): the boolean lookups that ranger (D10.4) reads,
 //! ported early under constitution §4.5 (no outgoing edges) and counted for D09.13. The
-//! other getters and the full list of fix numbers come with D09.13; only the two numbers
-//! ranger reads are here.
+//! other getters and the full list of fix numbers come with D09.13; only the numbers
+//! ranger and the point get fast path read are here.
 
 // Go constant names (M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -14,6 +14,9 @@ use std::collections::HashMap;
 pub const Fix44389: u64 = 44389;
 /// Fix54337 controls whether to apply or not range intersection for index access.
 pub const Fix54337: u64 = 54337;
+/// Fix52592 controls whether to disallow fast path for Get and BatchGet (the point get fast
+/// path, D10.8).
+pub const Fix52592: u64 = 52592;
 
 /// GetBool fetches the given key from the fix control map as a boolean type.
 ///

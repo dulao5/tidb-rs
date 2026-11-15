@@ -28,7 +28,7 @@ pub fn init_physical_operator() -> Result<(), Error> {
 }
 
 /// The `Init` of the point-get plans.
-// glue: stub of PointGetPlan.Init, blocked-by:D10.8 (VS1-11: PointGetPlan)
+// glue: stub of PointGetPlan.Init, blocked-by:D10.8 (the point get of FindBestTask, VS1-28: ExpandVirtualColumn; the fast path builds with newPointGetPlan)
 // glue: stub of BatchPointGetPlan.Init, blocked-by:D10.8 (BatchPointGetPlan)
 pub fn init_point_get_plan() -> Result<(), Error> {
     Err(blocked("D10.8", "the Init of a point-get plan"))

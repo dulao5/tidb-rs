@@ -9,7 +9,7 @@
 //!   a session that is passed in): the expression context, the time zone, the
 //!   pessimistic-read-consistency flag, `tidb_enable_point_get_cache`. The statement context
 //!   is the executor's `ExecCtx`.
-//! - **The plan** is the glue carrier [`PointGetPlan`] until VS1-11.
+//! - **The plan** is the planner's [`PointGetPlan`] (D10.8, VS1-11).
 //! - **No locking** (VS1 plan §3: the point get without locks). `SELECT ... FOR UPDATE`
 //!   (`p.Lock`) and the for-update snapshot are the write path (block X): the builder stops
 //!   with `blocked-by:X` before the executor runs. The lock helpers are ported for their
@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::gostd::time::Location;
-use tidb_base::mysql;
+use tidb_base::mysql::{self, SQLMode};
 use tidb_chunk::chunk::{Chunk, new_chunk_with_capacity};
 use tidb_codec::codec::{Decoder, new_decoder};
 use tidb_execdetails::execdetails::{RuntimeStats, TpRuntimeStatsWithSnapshot};
@@ -59,23 +59,23 @@ use crate::builder::{
     ExecutorBuilder, build_index_usage_reporter, is_common_handle_read, new_replica_read_adjuster,
     new_row_decoder,
 };
+use crate::consistency::Reporter;
 use crate::exec::ExecCtx;
-use crate::glue::{
-    self, Plan, PointGetPlan, SessionContext, SnapshotRuntimeStats, encode_unique_index_key,
-    encode_unique_index_values_for_key, report_lookup_inconsistent,
-};
+use crate::glue::{self, Plan, SessionContext, SnapshotRuntimeStats};
 use crate::internal::exec::executor::{BaseExecutor, BaseExecutorV2, Executor, new_base_executor};
 use crate::internal::exec::indexusage::IndexUsageReporter;
 use crate::table_reader::build_virtual_column_index;
+use tidb_planner::PhysicalPlan;
+use tidb_planner::core::point_get_plan::PointGetPlan;
+use tidb_planner::core::util::{encode_unique_index_key, encode_unique_index_values_for_key};
 
 impl ExecutorBuilder {
     /// The point get executor of `p` (`None` with `b.err` set on failure, as Go).
     ///
     /// Differences from Go (all because of the carriers above):
     /// - `p.Lock` (`SELECT ... FOR UPDATE`) is `blocked-by:X` (no locking point get);
-    /// - a `TableDual` for a pruned-away partition comes with partitioned tables
-    ///   (`PrunePartitions` is VS1-11's; the planner refuses partitioned tables, VS1 plan
-    ///   §3.2);
+    /// - a `TableDual` for a pruned-away partition comes with partitioned tables (pruning
+    ///   by value is D06.4 part 2's); the plan of a partitioned table is pruned on a copy;
     /// - `StmtCtx.IndexNames` is written before the executor shares the statement context.
     // go: executorBuilder.buildPointGet L2 (no locking: p.Lock is blocked-by:X; IndexNames written before the executor shares the statement context)
     pub async fn build_point_get(
@@ -88,18 +88,34 @@ impl ExecutorBuilder {
             return None;
         }
 
-        let is_table_dual = match p.prune_partitions() {
-            Ok(v) => v,
-            Err(err) => {
-                self.err = Some(err);
-                return None;
+        // Go prunes on the plan itself (`PrunePartitions` sets `PartitionIdx` on the cached
+        // plan); the plan is shared here (N1 §3.4), so a partitioned table's plan is pruned on
+        // a copy the executor reads. A table without partitions needs no pruning.
+        let pruned;
+        let p = if p.tbl_info.get_partition_info().is_none() {
+            p
+        } else {
+            let mut q = p.clone();
+            let use_cache = sctx
+                .get_session_vars()
+                .stmt_ctx()
+                .plan_cache_tracker
+                .use_cache();
+            match q.prune_partitions(use_cache) {
+                Ok(true) => {
+                    // TableDualExec with no rows (D12.2, VS1-35).
+                    self.err = Some(blocked("D12.2", "the table dual executor (VS1-35)"));
+                    return None;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    self.err = Some(err);
+                    return None;
+                }
             }
+            pruned = q;
+            &pruned
         };
-        if is_table_dual {
-            // TableDualExec with no rows (D12.2, VS1-35).
-            self.err = Some(blocked("D12.2", "the table dual executor (VS1-35)"));
-            return None;
-        }
 
         if p.lock && p.tbl_info.temp_table_type == TempTableNone {
             // `inSelectLockStmt`, then the pessimistic lock of the read key (Init sets e.lock
@@ -197,6 +213,12 @@ struct SessionState {
     pessimistic_read_consistency: bool,
     /// `sctx.GetSessionVars().EnablePointGetCache`.
     enable_point_get_cache: bool,
+    /// `sctx.GetSessionVars().SQLMode` and `.ConnectionID`: `table.CastValue` of the unique
+    /// index values (`EncodeUniqueIndexValuesForKey`).
+    sql_mode: SQLMode,
+    connection_id: u64,
+    /// `sctx.GetSessionVars().EnableRedactLog` (the inconsistency report).
+    enable_redact_log: String,
 }
 
 impl SessionState {
@@ -209,6 +231,9 @@ impl SessionState {
             location: vars.location(),
             pessimistic_read_consistency: vars.is_pessimistic_read_consistency(),
             enable_point_get_cache: vars.enable_point_get_cache,
+            sql_mode: SQLMode(vars.sql_mode),
+            connection_id: vars.connection_id,
+            enable_redact_log: vars.enable_redact_log.clone(),
         }
     }
 }
@@ -299,7 +324,7 @@ impl PointGetExecutor {
                 sctx.get_session_vars(),
                 &killer,
                 Some(p.schema.clone()),
-                p.id as isize,
+                p.id() as isize,
                 Vec::new(),
             ),
             index_usage_reporter,
@@ -363,7 +388,7 @@ impl PointGetExecutor {
             sctx.get_session_vars(),
             &killer,
             Some(p.schema.clone()),
-            p.id as isize,
+            p.id() as isize,
             Vec::new(),
         );
         self.index_usage_reporter = build_index_usage_reporter(sctx, p);
@@ -565,7 +590,7 @@ impl Executor for PointGetExecutor {
     }
 
     /// Next implements the Executor interface.
-    // go: PointGetExecutor.Next L2 (no locking; the unique index key encoding is a D09.0 stub; Go's ctx is a background KV context, M-GOCTX)
+    // go: PointGetExecutor.Next L2 (no locking; Go's ctx is a background KV context, M-GOCTX)
     async fn next(&mut self, ctx: &ExecCtx, req: &mut Chunk) -> Result<(), Error> {
         req.reset();
         if self.done {
@@ -580,9 +605,12 @@ impl Executor for PointGetExecutor {
         if let Some(idx_info) = self.idx_info.clone() {
             if is_common_handle_read(&self.tbl_info, &idx_info) {
                 let handle_bytes = match encode_unique_index_values_for_key(
+                    &ctx.stmt,
+                    self.sess.sql_mode,
+                    self.sess.connection_id,
                     &self.tbl_info,
                     &idx_info,
-                    &self.idx_vals,
+                    &mut self.idx_vals,
                 ) {
                     Ok(b) => b,
                     Err(err) => {
@@ -595,9 +623,12 @@ impl Executor for PointGetExecutor {
                 self.handle = Some(Handle::Common(Arc::new(new_common_handle(handle_bytes)?)));
             } else {
                 self.idx_key = match encode_unique_index_key(
+                    &ctx.stmt,
+                    self.sess.sql_mode,
+                    self.sess.connection_id,
                     &self.tbl_info,
                     &idx_info,
-                    &self.idx_vals,
+                    &mut self.idx_vals,
                     tbl_id,
                 ) {
                     Ok(k) => Some(Key(k)),
@@ -684,7 +715,20 @@ impl Executor for PointGetExecutor {
                 && !is_common_handle_read(&self.tbl_info, idx_info)
                 && !ctx.stmt.weak_consistency
             {
-                return Err(report_lookup_inconsistent(&self.tbl_info, idx_info));
+                // Go's HandleEncode / IndexEncode / Storage feed the MVCC dump only (see
+                // crate::consistency).
+                return Err(Reporter {
+                    tbl: &self.tbl_info,
+                    idx: idx_info,
+                    enable_redact_log: self.sess.enable_redact_log.clone(),
+                }
+                .report_lookup_inconsistent(
+                    1,
+                    0,
+                    std::slice::from_ref(&handle),
+                    std::slice::from_ref(&handle),
+                    1,
+                ));
             }
             return Ok(());
         }
@@ -737,7 +781,10 @@ impl glue::PointGetExecutor for PointGetExecutor {
     // glue: Go method PointGetExecutor.Init through the type assertion
     fn init(&mut self, sctx: &mut dyn SessionContext, plan: &Plan) -> Result<(), Error> {
         let Some(p) = plan.as_any().downcast_ref::<PointGetPlan>() else {
-            return Err(blocked("D10.8", "the point get plan (VS1-11)"));
+            return Err(Error::plain(
+                "a cached point get executor with a plan that is not a *core.PointGetPlan"
+                    .to_owned(),
+            ));
         };
         PointGetExecutor::init(self, sctx, p);
         Ok(())

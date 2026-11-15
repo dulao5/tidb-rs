@@ -32,6 +32,7 @@ use tidb_parser::gocharset::encoding_gbk::ErrInvalidCharacterString;
 use tidb_parser::types::FieldType;
 use tidb_sessionctx::errctx::{self, ErrGroupDupKey};
 use tidb_sessionctx::exprctx::BuildContext;
+use tidb_sessionctx::stmtctx::StatementContext;
 use tidb_sessionctx::variable::session::SessionVars;
 use tidb_types::context::Context as TypeContext;
 use tidb_types::datum::{
@@ -353,15 +354,38 @@ pub fn cast_value(
     return_err: bool,
     force_ignore_truncate: bool,
 ) -> (Datum, Result<(), Error>) {
-    let sc = vars.stmt_ctx();
+    cast_value_with_stmt_ctx(
+        vars.stmt_ctx(),
+        mysql::SQLMode(vars.sql_mode),
+        vars.connection_id,
+        val,
+        col,
+        return_err,
+        force_ignore_truncate,
+    )
+}
+
+/// `CastValue` for a caller that holds the statement's context, SQL mode and connection ID
+/// rather than the session (an executor's `Next`, N2): what Go's `CastValue` reads from
+/// `sctx.GetSessionVars()`.
+// glue: M-CTX (CastValue's session reads passed in: StmtCtx, SQLMode, ConnectionID)
+pub fn cast_value_with_stmt_ctx(
+    sc: &StatementContext,
+    sql_mode: mysql::SQLMode,
+    connection_id: u64,
+    val: Datum,
+    col: &ColumnInfo,
+    return_err: bool,
+    force_ignore_truncate: bool,
+) -> (Datum, Result<(), Error>) {
     cast_column_value_inner(
         &sc.type_ctx(),
         &sc.err_ctx(),
-        mysql::SQLMode(vars.sql_mode),
+        sql_mode,
         val,
         &col.field_type,
         &col.name.o,
-        vars.connection_id,
+        connection_id,
         return_err,
         force_ignore_truncate,
     )

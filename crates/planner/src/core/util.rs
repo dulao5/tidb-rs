@@ -8,15 +8,28 @@
 //!   read (a getter with a side effect): a `OnceLock` keeps the read path `&self` and the node
 //!   `Sync` (N1 §3.7). `SetSchema(nil)` resets it.
 //! - The context arguments of the clone helpers are dropped (`M-CTX`).
+//! - `EncodeUniqueIndexKey` / `EncodeUniqueIndexValuesForKey` (VS1-11, by decision: the
+//!   unique-index key of a point get, D12.1 spec §5) take the statement context, SQL mode and
+//!   connection ID instead of the session (`M-CTX`).
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
+use tidb_base::mysql::{SQLMode, TypeEnum, TypeString, TypeVarString, TypeVarchar};
+use tidb_codec::encode_key;
 use tidb_expression::{Schema, new_schema};
+use tidb_infoschema::table::column::cast_value_with_stmt_ctx;
+use tidb_kv::error::ErrNotExist;
+use tidb_model::{IndexInfo, TableInfo};
 use tidb_parser::model::CIStr;
+use tidb_sessionctx::stmtctx::StatementContext;
 use tidb_sessionctx::variable::session::SessionVars;
+use tidb_tablecodec::tablecodec;
+use tidb_types::datum::{Datum, KindBinaryLiteral, KindBytes, KindString};
+use tidb_types::enum_type::parse_enum_name;
+use tidb_types::errors as terr;
 use tidb_types::field_name::NameSlice;
 
 use crate::baseimpl::Plan;
@@ -242,4 +255,114 @@ pub fn get_lower_db(db_name: &CIStr, vars: &SessionVars) -> String {
         db_name_l = tidb_base::gostd::to_lower(&vars.current_db);
     }
     db_name_l
+}
+
+/// EncodeUniqueIndexKey encodes a unique index key.
+///
+/// Go takes the session (`sessionctx.Context`) and reads its statement context, SQL mode and
+/// connection ID (`table.CastValue`); the point get executor calls it from `Next`, where it
+/// holds those rather than the session (N2), so they are the arguments (`M-CTX`). Go casts
+/// `idxVals` in place (the executor's slice is the plan's); `idx_vals` is changed in place
+/// too.
+// go: EncodeUniqueIndexKey L1 [M-CTX]
+pub fn encode_unique_index_key(
+    sc: &StatementContext,
+    sql_mode: SQLMode,
+    connection_id: u64,
+    tbl_info: &TableInfo,
+    idx_info: &IndexInfo,
+    idx_vals: &mut [Datum],
+    t_id: i64,
+) -> Result<Vec<u8>, Error> {
+    let encoded_idx_vals = encode_unique_index_values_for_key(
+        sc,
+        sql_mode,
+        connection_id,
+        tbl_info,
+        idx_info,
+        idx_vals,
+    )?;
+    Ok(tablecodec::encode_index_seek_key(t_id, idx_info.id, &encoded_idx_vals).0)
+}
+
+/// EncodeUniqueIndexValuesForKey encodes unique index values for a key.
+///
+/// The context arguments are those of [`encode_unique_index_key`].
+// go: EncodeUniqueIndexValuesForKey L1 [M-CTX, M-ERRVAL]
+pub fn encode_unique_index_values_for_key(
+    sc: &StatementContext,
+    sql_mode: SQLMode,
+    connection_id: u64,
+    tbl_info: &TableInfo,
+    idx_info: &IndexInfo,
+    idx_vals: &mut [Datum],
+) -> Result<Vec<u8>, Error> {
+    let columns = tbl_info.columns.as_deref().unwrap_or(&[]);
+    let idx_columns = idx_info.columns.as_deref().unwrap_or(&[]);
+    for i in 0..idx_vals.len() {
+        let col_info = &columns[idx_columns[i].offset as usize];
+        let tp = col_info.get_type();
+        // table.CastValue will append 0x0 if the string value's length is smaller than the BINARY column's length.
+        // So we don't use CastValue for string value for now.
+        // TODO: The first if branch should have been removed, because the functionality of set the collation of the datum
+        // have been moved to util/ranger (normal path) and getNameValuePairs/getPointGetValue (fast path). But this change
+        // will be cherry-picked to a hotfix, so we choose to be a bit conservative and keep this for now.
+        let err: Result<(), Error> = if tp == TypeString || tp == TypeVarString || tp == TypeVarchar
+        {
+            // Go sets the string ToString returned (empty on an error) before checking it.
+            let (s, e) = match idx_vals[i].to_string() {
+                Ok(s) => (s, Ok(())),
+                Err(e) => (Vec::new(), Err(e)),
+            };
+            let collation = idx_vals[i].collation().to_owned();
+            idx_vals[i].set_string(s, collation);
+            e
+        } else if tp == TypeEnum
+            && (idx_vals[i].kind() == KindString
+                || idx_vals[i].kind() == KindBytes
+                || idx_vals[i].kind() == KindBinaryLiteral)
+        {
+            let Ok(s) = idx_vals[i].to_string() else {
+                return Err(ErrNotExist.clone());
+            };
+            let Ok(e) = parse_enum_name(
+                col_info.field_type.get_elems().unwrap_or(&[]),
+                &s,
+                col_info.field_type.get_collate(),
+            ) else {
+                return Err(ErrNotExist.clone());
+            };
+            idx_vals[i].set_mysql_enum(e, col_info.field_type.get_collate());
+            Ok(())
+        } else {
+            // If a truncated error or an overflow error is thrown when converting the type of `idxVal[i]` to
+            // the type of `colInfo`, the `idxVal` does not exist in the `idxInfo` for sure.
+            let (casted, e) = cast_value_with_stmt_ctx(
+                sc,
+                sql_mode,
+                connection_id,
+                std::mem::take(&mut idx_vals[i]),
+                col_info,
+                true,
+                false,
+            );
+            idx_vals[i] = casted;
+            if let Err(e) = &e
+                && (terr::ErrOverflow.equal(e)
+                    || terr::ErrDataTooLong.equal(e)
+                    || terr::ErrTruncated.equal(e)
+                    || terr::ErrTruncatedWrongVal.equal(e))
+            {
+                return Err(ErrNotExist.clone());
+            }
+            e
+        };
+        err?;
+    }
+
+    let mut encoded_idx_vals = Vec::new();
+    if let Err(err) = encode_key(&sc.time_zone(), &mut encoded_idx_vals, idx_vals) {
+        sc.handle_error(err)?;
+    }
+    Ok(encoded_idx_vals)
 }
