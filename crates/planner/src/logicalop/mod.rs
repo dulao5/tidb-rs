@@ -4,6 +4,8 @@
 //! module holds the two embedded structures every operator reuses and the macro that writes
 //! the per-type boilerplate (`M-SELF`).
 
+pub mod derive_stats;
+
 use std::cell::OnceCell;
 
 use tidb_expression::{Schema, new_schema};

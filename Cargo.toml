@@ -29,6 +29,7 @@ members = [
   "crates/expr-pushdown",
   "crates/execdetails",
   "crates/infoschema",
+  "crates/statistics",
   "crates/store",
   "crates/planner",
   "crates/executor",
@@ -132,6 +133,7 @@ tidb-codec = { path = "crates/codec" }
 tidb-tablecodec = { path = "crates/tablecodec" }
 tidb-execdetails = { path = "crates/execdetails" }
 tidb-infoschema = { path = "crates/infoschema" }
+tidb-statistics = { path = "crates/statistics" }
 tidb-sessiontxn = { path = "crates/sessiontxn" }
 tidb-sessionctx = { path = "crates/sessionctx" }
 tidb-systable = { path = "crates/systable" }

@@ -1715,7 +1715,7 @@ VS1-29	D10.6	pkg/planner/cardinality/row_count_column.go	betweenRowCountOnColumn
 VS1-29	D10.6	pkg/planner/cardinality/row_count_column.go	columnBetweenRowCount	22	
 VS1-29	D10.6	pkg/planner/cardinality/row_count_column.go	columnLessRowCount	7	
 VS1-29	D10.6	pkg/planner/cardinality/row_count_column.go	equalRowCountOnColumn	54	
-VS1-29	D10.6	pkg/planner/cardinality/row_count_column.go	init	5	
+VS1-29	D10.6	pkg/planner/cardinality/row_count_column.go	init	5	registers the cardinality functions in statistics function variables to break an import cycle; Rust has no such cycle
 VS1-29	D10.6	pkg/planner/cardinality/row_size.go	AvgColSize	27	
 VS1-29	D10.6	pkg/planner/cardinality/row_size.go	AvgColSizeChunkFormat	17	
 VS1-29	D10.6	pkg/planner/cardinality/row_size.go	AvgColSizeDataInDiskByRows	21	

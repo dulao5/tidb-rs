@@ -24,3 +24,17 @@ fuse), and the two targets hold the same records (tracker `TestTargetsDiffer`).
 `tests/govec_preprocess.rs` counts the records whose Rust result is a boundary stub instead
 of failing on them, and pins the count per block (`D06.3` base table 11, `D02.2` TABLESAMPLE 4,
 `D09.5` shared WITH clause 3); a record Go parses must parse in Rust.
+
+## Domain "cardinality" (blocks D10.6 / D11.1, VS1-29 part)
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/cardinality.jsonl.gz` (branch `govec/stats-vs29`) |
+| generator | `govec` (seed 20261115), 5702 records |
+| `arm64/cardinality.jsonl.gz` sha256 | `fa33eb684978076874539483bc4bfb3b5629bf37c559878bcd29d3e0aba96d1e` (generated locally) |
+| `amd64/cardinality.jsonl.gz` sha256 | `385dce3c32de4f4bebfe4614dcee039893a845b68e740221914b1f5bfeee60fa` (tracker CI artifact, run 43658734459, GOARCH=amd64, GOAMD64=v1) |
+
+The estimation formulas have multiply-adds that gc fuses on arm64 only (D10.6 spec §2 item 5),
+so the two targets differ in the last bits of 8 records (7 `hist`, 1 `mv_sel`; tracker `targetdiffs_test.go`). `tests/govec_cardinality.rs` counts the
+`selectivity` records whose Rust result is a boundary (D10.4 range building, D08.9 IN) instead
+of failing on them; any other difference fails.

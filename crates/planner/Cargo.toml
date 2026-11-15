@@ -35,6 +35,8 @@ tidb-codec = { workspace = true }
 tidb-tablecodec = { workspace = true }
 # util/tracing (plan traces) and RuntimeStatsColl (D14.0).
 tidb-execdetails = { workspace = true }
+# Statistics structures and pseudo statistics (D11.1), read by the cardinality estimation.
+tidb-statistics = { workspace = true }
 # tipb.Executor (ToPB), tipb.ExchangeType.
 tipb = { workspace = true }
 # log.Warn.
