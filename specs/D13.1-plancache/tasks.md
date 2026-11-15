@@ -1,10 +1,10 @@
 # D13.1 Plan Cache（例外 A3）（tasks）
 
-本块尚未开工，只有下面从其他块移交来的条目；开工时并入正式的任务列表。
+VS1-15（预处理语句的规划）移植了非缓存部分，见 [spec](spec.md)；缓存本身（例外 A3）未开工。
 
 ## 给 VS1-15（预处理语句的规划）的注
 
-- [ ] **`cleanRetryInfo` 删 plan cache 的 Go 行为要照搬**（VS1-14b 评审，D05.3 spec §6.1）：Go 只在第一条被关闭的语句上取 `preparedObj`（`PlanCacheStmt`），之后每次循环都用这同一个对象调用 `NewPlanCacheKey`，所以一个事务里关闭多条语句时，每次删除的都是第一条语句的计划，其他语句的计划留在 cache 里。这可能是上游的 bug，但 Go v8.5.8 就是这样，移植 `session.cleanRetryInfo` 的 plan cache 部分（`crates/session/src/session.rs` 的 `SessCtx::clean_retry_info`，现在只有注释）时照 Go 写，并加一个"关闭两条语句只删掉第一条的计划"的用例。
+- [x] **`cleanRetryInfo` 删 plan cache 的 Go 行为要照搬**（VS1-15，spec §4.3，`clean_retry_info_deletes_the_first_closed_stmt_plan_each_time`）（VS1-14b 评审，D05.3 spec §6.1）：Go 只在第一条被关闭的语句上取 `preparedObj`（`PlanCacheStmt`），之后每次循环都用这同一个对象调用 `NewPlanCacheKey`，所以一个事务里关闭多条语句时，每次删除的都是第一条语句的计划，其他语句的计划留在 cache 里。这可能是上游的 bug，但 Go v8.5.8 就是这样，移植 `session.cleanRetryInfo` 的 plan cache 部分（`crates/session/src/session.rs` 的 `SessCtx::clean_retry_info`，现在只有注释）时照 Go 写，并加一个"关闭两条语句只删掉第一条的计划"的用例。
 
 ## 从 P1 继承
 

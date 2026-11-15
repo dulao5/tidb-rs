@@ -7,6 +7,11 @@ pub mod initialize;
 pub mod logical_plan_builder;
 pub mod optimizer;
 pub mod plan;
+pub mod plan_cache;
+#[cfg(test)]
+mod plan_cache_tests;
+pub mod plan_cache_utils;
+pub mod plan_cacheable_checker;
 pub mod plan_cost_ver1;
 pub mod planbuilder;
 pub mod point_get_plan;

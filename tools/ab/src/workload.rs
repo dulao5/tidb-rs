@@ -201,6 +201,22 @@ pub fn sysbench_cases(spec: &SysbenchSpec, rng: &mut Rng) -> Vec<Case> {
             }
         }
     }
+    // A parameter in the select list (VS1 plan §4.7, prepared-statement planning): Go's
+    // PREPARE describes `?` with a placeholder type and each EXECUTE with the bound value's,
+    // so the PREPARE-vs-EXECUTE metadata check (`execute_metadata_diffs`) sees a column whose
+    // definition comes from the parameter.
+    for params in [
+        vec![Param::Int(7), Param::Int(1)],
+        vec![Param::UInt(u64::MAX), Param::Int(1)],
+        vec![Param::Str("x".into()), Param::Int(1)],
+    ] {
+        cases.push(mk(
+            "param_in_select_list",
+            "SELECT ?, c FROM sbtest{} WHERE id=?",
+            1,
+            params,
+        ));
+    }
     cases
 }
 

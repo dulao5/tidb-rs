@@ -29,6 +29,7 @@ pub mod glue;
 pub mod internal;
 pub mod metrics;
 pub mod point_get;
+pub mod prepared;
 pub mod select;
 pub mod table_reader;
 #[cfg(any(test, feature = "test-util"))]

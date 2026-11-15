@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use tidb_base::Error;
 use tidb_base::kv::StoreType;
 
-/// `tikvstore.Variables` (client-go `kv.Variables`): the KV options of a session.
 /// RetryInfo saves retry information (Go `variable.RetryInfo`). Only the part a read-only
 /// node uses: `Retrying` (the retry of optimistic writes, always false here) and the
 /// prepared statements closed in the current transaction, which stay executable until the
@@ -34,6 +33,7 @@ impl RetryInfo {
     }
 }
 
+/// `tikvstore.Variables` (client-go `kv.Variables`): the KV options of a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KVVars {
     /// BackoffLockFast specifies the LockFast backoff base duration in milliseconds.

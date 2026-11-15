@@ -882,9 +882,14 @@ fn random_interleaving_of_new_fallback_and_poc() {
 /// transaction ends. Each end removes it — commit, rollback, the end of an autocommit
 /// statement — but closing the session does not clean (Go: `inCloseSession`; `Close`
 /// withdraws every statement instead).
+/// The global prepared-statement count and limit are process-wide: the tests that read them
+/// run one at a time.
+static PREPARED_COUNT: Mutex<()> = Mutex::new(());
+
 #[test]
 fn closed_prepared_stmt_lives_until_txn_end() {
     use tidb_sessionctx::variable::session_methods::PreparedStmtCount;
+    let _serial = PREPARED_COUNT.lock();
     let store = MockStore::new(10);
     let found = |s: &mut Session| match block_on(s.execute_prepared_stmt(1, vec![])) {
         Ok(_) => true,
@@ -939,4 +944,108 @@ fn closed_prepared_stmt_lives_until_txn_end() {
         assert_eq!(PreparedStmtCount.load(SeqCst), before, "{end}: uncounted");
         assert_eq!(s.drop_prepared_stmt(1).unwrap_err().code(), 8111);
     }
+}
+
+/// A prepared statement on the plan cache's side (`PlanCacheStmt`) with `sql` as its text.
+fn plan_cache_stmt(sql: &str) -> Arc<dyn std::any::Any + Send + Sync> {
+    let st = tidb_planner::core::plan_cache_utils::PlanCacheStmt {
+        stmt_text: sql.to_owned(),
+        stmt_db: "test".to_owned(),
+        ..Default::default()
+    };
+    Arc::new(Mutex::new(st))
+}
+
+/// Go v8.5.8's `cleanRetryInfo` (D13.1 tasks, possibly an upstream bug, kept as it is): with
+/// two statements closed in one transaction, the plan cache key is computed from the first
+/// statement both times, so the first statement's plan is deleted twice and the second's is
+/// never deleted. Both statements are removed.
+#[test]
+fn clean_retry_info_deletes_the_first_closed_stmt_plan_each_time() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    s.vars_mut().enable_prepared_plan_cache = true;
+    s.vars_mut().set_in_txn(true); // BEGIN
+    s.vars_mut()
+        .add_prepared_stmt(1, plan_cache_stmt("select 1"))
+        .unwrap();
+    s.vars_mut()
+        .add_prepared_stmt(2, plan_cache_stmt("select 2"))
+        .unwrap();
+    s.drop_prepared_stmt(1).unwrap();
+    s.drop_prepared_stmt(2).unwrap();
+    s.core.rollback_txn();
+    let key = |sql: &str| {
+        let st = tidb_planner::core::plan_cache_utils::PlanCacheStmt {
+            stmt_text: sql.to_owned(),
+            stmt_db: "test".to_owned(),
+            ..Default::default()
+        };
+        tidb_planner::core::plan_cache_utils::new_plan_cache_key(&st)
+            .unwrap()
+            .0
+    };
+    let first = key("select 1");
+    assert_ne!(first, key("select 2"));
+    assert!(s.vars().state.prepared_stmts.is_empty());
+    assert_eq!(
+        s.get_session_plan_cache().unwrap().deleted_keys,
+        vec![first.clone(), first]
+    );
+
+    // tidb_ignore_prepared_cache_close_stmt keeps the plans; the statements still go.
+    s.vars_mut().ignore_prepared_cache_close_stmt = true;
+    s.vars_mut()
+        .add_prepared_stmt(3, plan_cache_stmt("select 3"))
+        .unwrap();
+    s.drop_prepared_stmt(3).unwrap();
+    s.core.rollback_txn();
+    assert!(s.vars().state.prepared_stmts.is_empty());
+    assert_eq!(s.get_session_plan_cache().unwrap().deleted_keys.len(), 2);
+}
+
+/// `PrepareExec` adds the statement with `AddPreparedStmt`, which checks
+/// `max_prepared_stmt_count` (1461); a closed statement still counts until the transaction
+/// ends (spec §6.1).
+#[test]
+fn max_prepared_stmt_count_counts_closed_stmts() {
+    use tidb_sessionctx::variable::session_methods::PreparedStmtCount;
+    use tidb_sessionctx::variable::tidb_vars::MaxPreparedStmtCountValue;
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    s.vars_mut().set_in_txn(true); // BEGIN
+    let old_max = MaxPreparedStmtCountValue.load(SeqCst);
+    MaxPreparedStmtCountValue.store(PreparedStmtCount.load(SeqCst) + 1, SeqCst);
+    s.vars_mut()
+        .add_prepared_stmt(1, plan_cache_stmt("select 1"))
+        .unwrap();
+    s.drop_prepared_stmt(1).unwrap();
+    let e = s
+        .vars_mut()
+        .add_prepared_stmt(2, plan_cache_stmt("select 2"))
+        .unwrap_err();
+    MaxPreparedStmtCountValue.store(old_max, SeqCst);
+    assert_eq!(e.code(), 1461, "{e}");
+    s.core.rollback_txn();
+    assert!(s.vars().state.prepared_stmts.is_empty());
+}
+
+/// The real `PrepareStmt` runs the prepare executor: a SELECT without a table stops at the
+/// plan builder (D09.1), one with a table at the InfoSchema interface (D06.3); two
+/// statements are Go's `ErrPrepareMulti`; nothing is added to the session.
+#[test]
+fn prepare_stmt_runs_the_prepare_executor() {
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    s.vars_mut().current_db = "test".to_owned();
+    let e = block_on(s.prepare_stmt("select ?")).unwrap_err();
+    assert_eq!(blocked_by(&e), Some("D09.1"), "{e}");
+    let e = block_on(s.prepare_stmt("select c from sbtest1 where id = ?")).unwrap_err();
+    assert_eq!(blocked_by(&e), Some("D06.3"), "{e}");
+    let e = block_on(s.prepare_stmt("select 1; select 2")).unwrap_err();
+    assert_eq!(e.code(), 8115, "{e}");
+    assert!(s.vars().state.prepared_stmts.is_empty());
+    assert!(s.is_idle());
 }

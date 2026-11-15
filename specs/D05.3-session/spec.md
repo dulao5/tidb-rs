@@ -189,7 +189,7 @@ plan §4.6 第 2 条：新栈已发出的 TSO 请求交给 PoC。PoC 的 `TsFutu
 
 | 命令 | 做法 |
 |---|---|
-| `COM_STMT_CLOSE` | 路由器按归属发：both 两边都发，new 只发新栈，poc 只发 PoC（`close_by_owner`、`real_prepare_is_blocked_and_restored`） |
+| `COM_STMT_CLOSE` | 路由器按归属发：both / new 发给新栈（只登记），PoC 的副本与路由器的归属在事务结束时才删除，与 Go 的 `DropPreparedStmt` 相同（VS1-15 改，见 [D13.1 spec](../D13.1-plancache/spec.md) §4.2；`close_by_owner`、`closed_stmt_lives_until_txn_end`、`autocommit_close_then_poc_statement`） |
 | `COM_STMT_SEND_LONG_DATA` | 长数据由协议层保存，EXECUTE 时一次性解码进参数（ADR 0010 §4.1），哪一方执行就把同样的参数交给哪一方，所以"发给归属的一方、both 时两方"天然成立，不需要路由（`long_data_params_reach_the_engine_that_runs`） |
 | `COM_STMT_RESET` | 同上，由协议层清掉长数据（`raw_without_deprecate_eof` 新增的 RESET 用例） |
 | `COM_STMT_FETCH` | 协议层回答 1235，与 PoC 相同（从不打开游标）；带游标标志的 EXECUTE 是第 0 步条件：both / poc 走 PoC，new 报 1235（`prepared_both`、`prepared_new_only`，以及协议层的 FETCH 用例） |

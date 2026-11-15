@@ -3,9 +3,10 @@
 //!
 //! The session runs `ExecuteStmt` (VS1-14 part 1), whose planner is still a boundary stub,
 //! so every statement falls back (or, in `strict` mode, reports 1235). Prepared statements
-//! go through the session's `PrepareStmt` (VS1-14b), which ends `Blocked` at the prepare
-//! executor until prepared-statement planning (VS1-15). The pieces that turn a successful result into a
-//! response are stubs of their own until their work items land:
+//! go through the session's `PrepareStmt` and the prepare executor (prepared-statement
+//! planning, VS1-15), which stop in the preprocessor at the InfoSchema interface (a table:
+//! D06.3, VS1-17) or at the plan builder (D09.1, VS1-21). The pieces that turn a successful
+//! result into a response are stubs of their own until their work items land:
 //!
 //! - TODO(VS1-16): result sets and column definitions (`writeResultSet`, `column` / `dump`,
 //!   D03.1) and binary parameters (`parseBinaryParams`, D03.1);

@@ -36,10 +36,30 @@ pub fn optimize_stmt(node: &Stmt) -> Result<(), Error> {
     Err(blocked("D13.3", "Optimize (statement hints)"))
 }
 
+/// `OptimizeAstNode` (the function the plan cache's miss path calls, `generateNewPlan`):
+/// `planner.Optimize` for the prepared statement's AST, a boundary stub like [`optimize_stmt`].
+// glue: stub of OptimizeAstNode, blocked-by:D13.3 (planner.Optimize: hint extraction comes first, VS1-24)
+pub fn optimize_ast_node(
+    vars: &mut tidb_sessionctx::variable::session::SessionVars,
+    node: &mut crate::core::resolve::NodeW<'_>,
+    is: &dyn crate::core::plan_cache_utils::InfoSchemaLookup,
+) -> Result<(crate::PhysicalPlanRef, tidb_types::field_name::NameSlice), Error> {
+    let _ = (vars, is);
+    optimize_stmt(node.node)?;
+    Err(blocked("D13.3", "Optimize (statement hints)"))
+}
+
 /// OptimizeExecStmt to handle the "execute" statement
-// glue: stub of OptimizeExecStmt, blocked-by:D13.1 (VS1-15: PlanCacheStmt, GetPlanFromPlanCache)
+///
+/// Go builds the `Execute` plan of the `EXECUTE` node and calls `OptimizePreparedPlan`, which
+/// reaches `GetPlanFromPlanCache` (`core::plan_cache`, ported). The Rust AST has no
+/// `ExecuteStmt` (D02.2), so nothing can reach this yet.
+// glue: stub of OptimizeExecStmt, blocked-by:D02.2 (ast.ExecuteStmt is not in the Rust AST; the plan cache entry it reaches is core::plan_cache)
 pub fn optimize_exec_stmt() -> Result<(), Error> {
-    Err(blocked("D13.1", "OptimizeExecStmt (plan cache)"))
+    Err(blocked(
+        "D02.2",
+        "OptimizeExecStmt (the EXECUTE statement node)",
+    ))
 }
 
 /// `allowInReadOnlyMode`: Go returns true at once when no privilege manager is registered.

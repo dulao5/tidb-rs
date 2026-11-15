@@ -139,7 +139,7 @@ impl RecordSet {
             // which are not ported: there is nothing to reset.
             let executor = self.executor.take();
             if let (Some(cache), Some(e)) = (self.point_get_cache.take(), executor) {
-                cache.lock().point_get_executor = Some(e);
+                crate::glue::set_cached_point_get_executor(&mut cache.lock(), Some(e));
             }
             self.exec_ctx = None;
             let killer = sctx.sql_killer();
@@ -227,7 +227,7 @@ fn join_errors(errs: &[Error]) -> Option<Error> {
 
 // go: colNames2ResultFields L1
 #[allow(clippy::needless_range_loop)] // Go's index loop over two slices
-fn col_names2_result_fields(
+pub(crate) fn col_names2_result_fields(
     schema: &Schema,
     names: &[FieldName],
     default_db: &str,
@@ -387,7 +387,7 @@ impl ExecStmt {
             .clone()
             .expect("point plan short path has a prepared statement");
         let cached = if use_max_ts {
-            ps_stmt.lock().point_get_executor.take()
+            crate::glue::take_cached_point_get_executor(&mut ps_stmt.lock())
         } else {
             None
         };

@@ -26,10 +26,12 @@ use tidb_base::dbterror::plannererrors::ErrStmtNotFound;
 use tidb_executor::adapter::ExecStmt;
 use tidb_executor::compiler::Compiler;
 use tidb_executor::glue::{Plan, SessionContext};
+use tidb_executor::prepared::new_prepare_exec;
 use tidb_executor::select::reset_context_of_stmt;
 use tidb_kv::kv::{Client, Storage};
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_parser::ast;
+use tidb_planner::core::plan_cache_utils::{PlanCacheStmt, PlanCacheStmtRef, new_plan_cache_key};
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 use tidb_sessionctx::variable::session_methods::prepare_dedup_cache_key;
 use tidb_sessionctx::variable::session_state::TxnInfoSchema;
@@ -57,16 +59,15 @@ pub enum Dialect {
 }
 
 /// What `PrepareStmt` returns (Go: `stmtID, paramCount, fields`).
-///
-/// TODO(VS1-15): the result fields (`[]*resolve.ResultField`), built by the prepare executor
-/// that comes with prepared-statement planning.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PreparedStmtInfo {
     /// The session's id of the statement (Go `SessionVars.GetNextPreparedStmtID`), not the
     /// protocol's: the adapter maps between them (ADR 0010 §4.1).
     pub stmt_id: u32,
     /// Number of `?` placeholders.
     pub param_count: usize,
+    /// The result columns (`PrepareExec.Fields`).
+    pub fields: Vec<tidb_executor::glue::ResultField>,
 }
 
 /// `sessionctx.QueryString`: the key of the current statement's text in the session values.
@@ -114,6 +115,26 @@ pub struct SessCtx {
     pub(crate) start_time: Option<Instant>,
     /// `sessionVars.CommonGlobalLoaded`.
     common_global_loaded: bool,
+    /// `sessionPlanCache`: built by the first `GetSessionPlanCache`.
+    pub(crate) plan_cache: Option<SessionPlanCache>,
+}
+
+/// `sessionctx.SessionPlanCache` (`plannercore.NewLRUPlanCache`): the cache is the plan-cache
+/// exception A3, whose spec is not confirmed, so this stand-in holds no plan (every lookup of
+/// the miss path misses, D13.1 `core::plan_cache`). It keeps the keys `Delete` was called
+/// with, so the deletions of `cleanRetryInfo` can be checked against Go's (spec §6).
+#[derive(Debug, Default)]
+pub struct SessionPlanCache {
+    /// The keys passed to `Delete`, in order.
+    pub deleted_keys: Vec<String>,
+}
+
+impl SessionPlanCache {
+    /// `Delete(key)`: there is no plan to delete; the key is recorded.
+    // glue: stub of LRUPlanCache.Delete, blocked-by:D13.1 (the cache is the plan-cache exception A3: it holds no plans)
+    pub fn delete(&mut self, key: &str) {
+        self.deleted_keys.push(key.to_owned());
+    }
 }
 
 /// The session as `ExecStmt`, the compiler and the transaction manager's helpers see it.
@@ -360,28 +381,77 @@ impl SessCtx {
     }
 
     /// cleanRetryInfo: removes the prepared statements closed in the transaction (Go keeps
-    /// them executable until the transaction ends, `DropPreparedStmt`). Called from
+    /// them executable until the transaction ends, `DropPreparedStmt`), and their plans from
+    /// the session plan cache when `tidb_enable_prepared_plan_cache` is on. Called from
     /// `doCommitWithRetry` (commit, and the end of an autocommit statement through
     /// `finishStmt` → `CommitTxn`) and `RollbackTxn` (not when the session closes), as Go.
     ///
-    /// Go also deletes the statements' plans from the session plan cache when
-    /// `tidb_enable_prepared_plan_cache` is on. That cache is not built before
-    /// prepared-statement planning (VS1-15, `GetSessionPlanCache`), so there is nothing to
-    /// delete yet. Go computes the cache key from the first dropped statement only and reuses
-    /// that statement for every iteration (spec §6.1): VS1-15 ports that as it is.
-    // go: session.cleanRetryInfo L2 (the plan-cache delete waits for the session plan cache, VS1-15)
+    /// As Go v8.5.8 (D13.1 tasks, possibly an upstream bug): the cache key is computed from
+    /// the first closed statement only, and that same statement is used again for every
+    /// later one, so closing several statements in one transaction deletes the first one's
+    /// plan each time. The cache holds no plans (`SessionPlanCache`), the keys are recorded.
+    // go: session.cleanRetryInfo L1
     fn clean_retry_info(&mut self) {
-        let retry_info = &mut self.vars.state.retry_info;
-        if retry_info.retrying {
+        if self.vars.state.retry_info.retrying {
             return;
         }
+
         // defer retryInfo.Clean()
-        let dropped = std::mem::take(&mut retry_info.dropped_prepared_stmt_ids);
-        retry_info.clean();
-        for stmt_id in dropped {
-            // planCacheEnabled: GetSessionPlanCache().Delete(cacheKey): no cache yet.
+        let dropped = std::mem::take(&mut self.vars.state.retry_info.dropped_prepared_stmt_ids);
+        self.vars.state.retry_info.clean();
+        if dropped.is_empty() {
+            return;
+        }
+
+        let plan_cache_enabled = self.vars.enable_prepared_plan_cache;
+        let mut cache_key = String::new();
+        let mut prepared_obj: Option<PlanCacheStmtRef> = None;
+        if plan_cache_enabled {
+            let first_stmt_id = dropped[0];
+            if let Some(prepared_pointer) = self.vars.state.prepared_stmts.get(&first_stmt_id) {
+                prepared_obj = Arc::clone(prepared_pointer)
+                    .downcast::<parking_lot::Mutex<PlanCacheStmt>>()
+                    .ok();
+                if let Some(obj) = &prepared_obj {
+                    match new_plan_cache_key(&obj.lock()) {
+                        Ok((key, ..)) => cache_key = key,
+                        Err(e) => {
+                            log::warn!("clean cached plan failed: {e}");
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        for (i, stmt_id) in dropped.into_iter().enumerate() {
+            if plan_cache_enabled {
+                if i > 0
+                    && let Some(obj) = &prepared_obj
+                {
+                    match new_plan_cache_key(&obj.lock()) {
+                        Ok((key, ..)) => cache_key = key,
+                        Err(e) => {
+                            log::warn!("clean cached plan failed: {e}");
+                            return;
+                        }
+                    }
+                }
+                if !self.vars.ignore_prepared_cache_close_stmt {
+                    // keep the plan in cache
+                    self.get_session_plan_cache().delete(&cache_key);
+                }
+            }
             self.vars.remove_prepared_stmt(stmt_id);
         }
+    }
+
+    /// `GetSessionPlanCache()` for a caller that has checked a plan cache is on: the cache,
+    /// built by the first call (`plannercore.NewLRUPlanCache`, a stand-in, see
+    /// [`SessionPlanCache`]).
+    // glue: the lazily built cache of session.GetSessionPlanCache
+    pub(crate) fn get_session_plan_cache(&mut self) -> &mut SessionPlanCache {
+        self.plan_cache
+            .get_or_insert_with(SessionPlanCache::default)
     }
 
     /// Whether a transaction ended inside a provider call, and clears it.
@@ -897,6 +967,7 @@ impl Session {
                     process: None,
                     start_time: None,
                     common_global_loaded: false,
+                    plan_cache: None,
                 },
                 txn_manager: new_txn_manager(),
             },
@@ -1219,11 +1290,17 @@ impl Session {
     /// PrepareStmt is used for executing prepare statement in binary protocol.
     ///
     /// The statement itself is prepared by `executor.NewPrepareExec` (D12.12), which builds
-    /// the plan-cache statement (`PlanCacheStmt`, D13.1): both are the next work item (VS1-15,
-    /// prepared-statement planning) and a boundary stub here, so every PREPARE on the new
-    /// session ends `Blocked` after the transaction work below; the router then restores the
-    /// session (spec §6.2) and the PoC owns the statement.
-    // go: session.PrepareStmt L2 (StmtCtx.DetachMemDiskTracker: no session memory tracker, A1; the dedup-cache hit and NewPrepareExec are stubs for VS1-15)
+    /// the plan-cache statement (`PlanCacheStmt`, D13.1). Its preprocessor and plan builder
+    /// are not complete yet: a statement on a table stops at the InfoSchema interface
+    /// (`blocked-by:D06.3`, VS1-17) and every SELECT at `PlanBuilder.Build`
+    /// (`blocked-by:D09.1`, VS1-21); the router then restores the session (spec §6.2) and the
+    /// PoC owns the statement.
+    ///
+    /// The prepare dedup cache (`tidb_enable_cache_prepare_stmt`) keeps `PlanCacheStmt`s for
+    /// reuse: it is a cache of the plan cache's objects and is counted with the plan-cache
+    /// exception A3, so the new session neither reads (a hit is a boundary stub) nor writes
+    /// it (D13.1 spec §3).
+    // go: session.PrepareStmt L2 (StmtCtx.DetachMemDiskTracker: no session memory tracker, A1; the prepare dedup cache is the plan-cache exception A3)
     pub async fn prepare_stmt(&mut self, sql: &str) -> Result<PreparedStmtInfo, Error> {
         let core = &mut self.core;
         if core.sctx.vars.state.txn_ctx.info_schema.is_none() {
@@ -1258,35 +1335,41 @@ impl Session {
             );
             if vars.get_prepare_stmt_dedup_cache(&dedup_key).is_some() {
                 // The entry is a `PrepareStmtCacheEntry` and `rebuildFromPrepareCache`
-                // rebuilds a `PlanCacheStmt` from it (D13.1). Only a successful
-                // NewPrepareExec fills the cache, so this is not reached before VS1-15.
+                // rebuilds a `PlanCacheStmt` from it. The new session never writes the
+                // cache (A3, see above), so this is not reached.
                 core.rollback_on_error();
+                // glue: blocked-by:D13.1 (the prepare dedup cache is the plan-cache exception A3)
                 return Err(blocked(
                     "D13.1",
-                    "the prepare dedup cache (PlanCacheStmt, prepared-statement planning)",
+                    "the prepare dedup cache (the plan-cache exception A3)",
                 ));
             }
         }
 
-        let prepare_exec = new_prepare_exec(sql);
+        let mut prepare_exec = new_prepare_exec(sql);
+        let res = prepare_exec.next(core);
         // Rollback even if err is nil.
         core.rollback_on_error();
-        let prepared = prepare_exec?;
+        res?;
 
-        // Store the result in the dedup cache for future Prepares of the same SQL: the
-        // entry holds the PlanCacheStmt (D13.1), with NewPrepareExec above.
+        // Store the result in the dedup cache for future Prepares of the same SQL
+        // (SetPrepareStmtDedupCache): not written, the plan-cache exception A3 (see above).
         let _ = dedup_key;
-        Ok(prepared)
+        Ok(PreparedStmtInfo {
+            stmt_id: prepare_exec.id,
+            param_count: prepare_exec.param_count,
+            fields: prepare_exec.fields,
+        })
     }
 
     /// ExecutePreparedStmt executes a prepared statement.
     ///
     /// Go turns the statement into an `ast.ExecuteStmt` holding its `PlanCacheStmt` and runs
-    /// it through `ExecuteStmt`; neither the plan-cache statement (D13.1) nor `EXECUTE` in
-    /// the Rust AST exists before VS1-15 (prepared-statement planning), so after the lookup
-    /// this is a boundary stub. No statement can be found yet anyway: `PrepareStmt` never
-    /// adds one before VS1-15.
-    // go: session.ExecutePreparedStmt L2 (PlanCacheStmt / ast.ExecuteStmt are stubs for VS1-15)
+    /// it through `ExecuteStmt`, whose compiler reaches the plan cache's miss path
+    /// (`GetPlanFromPlanCache`, ported in the planner's `core::plan_cache`). The Rust AST has
+    /// no `ExecuteStmt` (D02.2), so after the lookup this is a boundary stub. No statement
+    /// can be found yet on a real session anyway: `PrepareStmt` stops at the plan builder.
+    // go: session.ExecutePreparedStmt L2 (ast.ExecuteStmt is not in the Rust AST: D02.2)
     pub async fn execute_prepared_stmt(
         &mut self,
         stmt_id: u32,
@@ -1302,12 +1385,19 @@ impl Session {
             log::error!("prepared statement not found, stmtID: {stmt_id}");
             return Err(ErrStmtNotFound.clone());
         }
-        // stmt, ok := prepStmt.(*plannercore.PlanCacheStmt); execStmt := &ast.ExecuteStmt{
-        // BinaryArgs: params, PrepStmt: stmt, PrepStmtId: stmtID}; s.ExecuteStmt(ctx, execStmt)
-        let _ = params;
+        let prep_stmt = self.core.sctx.vars.get_prepared_stmt_by_id(stmt_id)?;
+        let Ok(stmt) = prep_stmt.downcast::<parking_lot::Mutex<PlanCacheStmt>>() else {
+            return Err(tidb_base::errors::new(format!(
+                "invalid PlanCacheStmt type, stmtID: {stmt_id}"
+            )));
+        };
+        // execStmt := &ast.ExecuteStmt{BinaryArgs: params, PrepStmt: stmt, PrepStmtId:
+        // stmtID}; s.ExecuteStmt(ctx, execStmt)
+        let _ = (stmt, params);
+        // glue: blocked-by:D02.2 (ast.ExecuteStmt is not in the Rust AST)
         Err(blocked(
-            "D13.1",
-            "executing a prepared statement (PlanCacheStmt, prepared-statement planning)",
+            "D02.2",
+            "the EXECUTE statement node (ast.ExecuteStmt)",
         ))
     }
 
@@ -1328,21 +1418,24 @@ impl Session {
         Ok(())
     }
 
+    /// The transaction ended in a statement another engine ran (the PoC, VS1 plan §4.7): the
+    /// statements closed in it are removed now, as Go's `cleanRetryInfo` at the end of that
+    /// statement would (the router calls it; spec §6.1).
+    // glue: VS1 plan §4.7 (cleanRetryInfo for a statement the PoC ran)
+    pub fn clean_closed_prepared_stmts(&mut self) {
+        self.core.sctx.clean_retry_info();
+    }
+
     /// GetSessionPlanCache: the session's prepared plan cache, `None` when both plan caches
-    /// are off. The cache (`plannercore.NewLRUPlanCache`, D13.1) is built lazily by the first
-    /// plan-cache lookup, which is VS1-15 (prepared-statement planning): until then building
-    /// it is a boundary stub, and nothing on the new stack asks for it.
-    // go: session.GetSessionPlanCache L2 (the LRU plan cache is a stub for VS1-15)
-    pub fn get_session_plan_cache(&mut self) -> Result<Option<()>, Error> {
+    /// are off; built lazily (a stand-in that holds no plans, [`SessionPlanCache`]).
+    // go: session.GetSessionPlanCache L1
+    pub fn get_session_plan_cache(&mut self) -> Option<&mut SessionPlanCache> {
         let vars = &self.core.sctx.vars;
         // use the prepared plan cache
         if !vars.enable_prepared_plan_cache && !vars.enable_non_prepared_plan_cache {
-            return Ok(None);
+            return None;
         }
-        Err(blocked(
-            "D13.1",
-            "the session plan cache (prepared-statement planning)",
-        ))
+        Some(self.core.sctx.get_session_plan_cache())
     }
 }
 
@@ -1357,18 +1450,6 @@ fn prepare_stmt_node() -> ast::Stmt {
         span: tidb_parser::Span::default(),
         children: Vec::new(),
     }))
-}
-
-/// `executor.NewPrepareExec(s, sql)` followed by `Next`: parses the statement, checks it,
-/// builds the `PlanCacheStmt` (D13.1) and adds it to the session. The next work item
-/// (VS1-15, prepared-statement planning) ports it.
-// glue: stub, blocked-by:D12.12 (executor.NewPrepareExec: the prepare executor and the plan-cache statement come with prepared-statement planning)
-fn new_prepare_exec(sql: &str) -> Result<PreparedStmtInfo, Error> {
-    let _ = sql;
-    Err(blocked(
-        "D12.12",
-        "preparing a statement (PrepareExec, prepared-statement planning)",
-    ))
 }
 
 /// resolvePreparedStmt: the statement an `EXECUTE` runs. `EXECUTE` is not in the Rust AST

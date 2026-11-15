@@ -164,8 +164,13 @@ pub trait NewStack: Send {
         stmt_id: u32,
         params: &'a [Param],
     ) -> BoxFut<'a, Result<Response, Error>>;
-    /// `COM_STMT_CLOSE`.
+    /// `COM_STMT_CLOSE` (Go's `DropPreparedStmt`: the statement is only marked closed).
     fn close(&mut self, stmt_id: u32);
+    /// A transaction ended on the PoC (§4.7, closed statements): the new session removes the
+    /// statements closed in it, as Go's `cleanRetryInfo` at the end of that statement would.
+    fn txn_ended_elsewhere(&mut self) {
+        self.session_mut().clean_closed_prepared_stmts();
+    }
 }
 
 /// The PoC session's state the router syncs from (§4.1).
@@ -265,6 +270,12 @@ pub struct Router {
     initial_txn_mode: String,
     /// `COM_STMT_EXECUTE` of the current command asked for a cursor.
     cursor: bool,
+    /// The statements closed (`COM_STMT_CLOSE`) in the current transaction, in order: Go
+    /// keeps a closed statement executable until the transaction ends (`DropPreparedStmt` /
+    /// `cleanRetryInfo`), so the router keeps its owner and closes the PoC's copy then.
+    closed: Vec<u32>,
+    /// A statement ran (on either engine) since the last transaction-end check.
+    stmt_ended: bool,
 }
 
 /// A new-stack error as the client sees it (Go's code and message).
@@ -327,6 +338,8 @@ impl Router {
             diverged: BTreeSet::new(),
             initial_txn_mode,
             cursor: false,
+            closed: Vec::new(),
+            stmt_ended: false,
         };
         let names = [tidb_sql::ir::SetAssignment::Names {
             charset: None,
@@ -416,6 +429,28 @@ impl Router {
     /// The new stack finished a statement: record its state and copy it to the PoC side.
     fn finish_new(&mut self) {
         self.last = LastStmtInfo::from_new(self.new.session().vars());
+        self.stmt_ended = true;
+    }
+
+    /// After a command: if a statement ran and no transaction is open on either side, the
+    /// transaction (an explicit one, or the autocommit statement itself) has ended, and the
+    /// statements closed in it are removed now (§4.7): the PoC's copies are closed, the new
+    /// session removes its own (`cleanRetryInfo`; a no-op when the new stack ran the
+    /// statement and has already done it), and the router forgets the owners.
+    fn end_of_command(&mut self, poc: &mut dyn PocEngine) {
+        if !std::mem::take(&mut self.stmt_ended) || self.closed.is_empty() {
+            return;
+        }
+        if poc.in_txn() || self.new.session().in_txn() {
+            return;
+        }
+        self.new.txn_ended_elsewhere();
+        for stmt_id in std::mem::take(&mut self.closed) {
+            match self.owners.remove(&stmt_id) {
+                Some(Owner::Both { .. }) | Some(Owner::Poc(_)) => poc.close(stmt_id),
+                Some(Owner::New { .. }) | None => {}
+            }
+        }
     }
 
     /// The PoC finished a statement with `result`: record its state and copy it into the new
@@ -423,6 +458,7 @@ impl Router {
     fn finish_poc(&mut self, result: &Result<Response, SqlError>) {
         self.last = LastStmtInfo::from_poc(&self.last, result);
         self.last.apply_to(self.new.session_mut().vars_mut());
+        self.stmt_ended = true;
     }
 
     /// Runs `op` on the new stack with a checkpoint. `Ok(Ok(resp))` / `Ok(Err(e))`: the new
@@ -538,6 +574,17 @@ impl Router {
 
     /// `COM_QUERY`.
     pub async fn query(
+        &mut self,
+        poc: &mut dyn PocEngine,
+        sql: &str,
+    ) -> Result<Response, SqlError> {
+        let r = self.query_inner(poc, sql).await;
+        self.end_of_command(poc);
+        r
+    }
+
+    /// [`Router::query`] before the transaction-end check.
+    async fn query_inner(
         &mut self,
         poc: &mut dyn PocEngine,
         sql: &str,
@@ -665,6 +712,18 @@ impl Router {
         stmt_id: u32,
         params: Vec<Param>,
     ) -> Result<Response, SqlError> {
+        let r = self.execute_inner(poc, stmt_id, params).await;
+        self.end_of_command(poc);
+        r
+    }
+
+    /// [`Router::execute`] before the transaction-end check.
+    async fn execute_inner(
+        &mut self,
+        poc: &mut dyn PocEngine,
+        stmt_id: u32,
+        params: Vec<Param>,
+    ) -> Result<Response, SqlError> {
         let owner = self.owners.get(&stmt_id).cloned();
         let result = match owner {
             // Unknown here: the PoC reports Go's error for an unknown statement.
@@ -760,15 +819,25 @@ impl Router {
         result
     }
 
-    /// `COM_STMT_CLOSE`: to the owner, to both when both prepared it.
+    /// `COM_STMT_CLOSE`: to the owner, to both when both prepared it. As Go
+    /// (`DropPreparedStmt`), the statement stays executable until the transaction ends: the
+    /// new session only marks it closed, and the PoC's copy is closed and the owner
+    /// forgotten at the end of the next statement that ends a transaction
+    /// ([`Router::end_of_command`]). A statement the router does not know goes to the PoC at
+    /// once (it reports Go's error).
     pub fn close(&mut self, poc: &mut dyn PocEngine, stmt_id: u32) {
-        match self.owners.remove(&stmt_id) {
-            Some(Owner::Both { new_id, .. }) => {
-                self.new.close(new_id);
-                poc.close(stmt_id);
+        match self.owners.get(&stmt_id) {
+            Some(Owner::Both { new_id, .. }) | Some(Owner::New { new_id }) => {
+                self.new.close(*new_id)
             }
-            Some(Owner::New { new_id }) => self.new.close(new_id),
-            Some(Owner::Poc(_)) | None => poc.close(stmt_id),
+            Some(Owner::Poc(_)) => {}
+            None => {
+                poc.close(stmt_id);
+                return;
+            }
+        }
+        if !self.closed.contains(&stmt_id) {
+            self.closed.push(stmt_id);
         }
     }
 
