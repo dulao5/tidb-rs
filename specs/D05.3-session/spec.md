@@ -168,13 +168,14 @@ plan §4.6 第 2 条：新栈已发出的 TSO 请求交给 PoC。PoC 的 `TsFutu
 
 ### 6.1 Go 函数
 
-5 个函数都在 `session.go`，移植在 `crates/session/src/session.rs`，都是 L2（converge `--item VS1-14b`：5/5，无桩）。"准备一条语句"本身——`executor.NewPrepareExec`（D12.12，预处理执行器）和它生成的 `PlanCacheStmt`（D13.1，plan cache 用的语句对象）——属于下一个工作项 VS1-15（预处理语句的规划），这里是边界桩（§6.5）。
+5 个函数都在 `session.go`，移植在 `crates/session/src/session.rs`：`DropPreparedStmt` 是 L1，其余 4 个 L2（converge `--item VS1-14b`：5/5，无桩）。"准备一条语句"本身——`executor.NewPrepareExec`（D12.12，预处理执行器）和它生成的 `PlanCacheStmt`（D13.1，plan cache 用的语句对象）——属于下一个工作项 VS1-15（预处理语句的规划），这里是边界桩（§6.5）。
 
 | Go | 移植的内容 | 与 Go 的差异 |
 |---|---|---|
 | `PrepareStmt` | 全部步骤照 Go：`TxnCtx.InfoSchema` 为空时取 domain 的；`loadCommonGlobalVariablesIfNeeded`；`PrepareTxnCtx`；以一个 `PREPARE` 节点调 `onTxnManagerStmtStartOrRetry`；`AdviseWarmup`（发出 TSO 请求）；`tidb_enable_cache_prepare_stmt` 打开时按 Go 的 key 查 dedup cache；`NewPrepareExec`；无论成败都 `rollbackOnError` | ① `StmtCtx.DetachMemDiskTracker`：会话没有内存 tracker（A1）；② Rust AST 没有 `PrepareStmt`，用语法里未移植产生式的节点（`Stmt::Unported`，kind `PreparedStmt#0`）代替，provider 只问节点是不是 SELECT / 事务语句，两者答案相同；③ dedup cache 命中后的 `rebuildFromPrepareCache` 需要 `PlanCacheStmt`，是 `blocked-by:D13.1`——只有 `NewPrepareExec` 成功才会写这个缓存，所以 VS1-15 之前走不到 |
 | `ExecutePreparedStmt` | 按 id 找语句，找不到时记日志并返回 `ErrStmtNotFound`（8111） | 找到之后 Go 把 `PlanCacheStmt` 包成 `ast.ExecuteStmt` 交给 `ExecuteStmt`：两者都随 VS1-15，`blocked-by:D13.1`。VS1-15 之前新会话里不会有预处理语句（`PrepareStmt` 不会成功），所以实际只会走到 8111 |
-| `DropPreparedStmt` | 不存在时 `ErrStmtNotFound` | Go 只把 id 记进 `RetryInfo.DroppedPreparedStmtIDs`，事务结束时由 `cleanRetryInfo` 删除，为的是乐观事务重试时还能执行它。重试只在写路径上发生（N11 D8，只读节点没有），`RetryInfo` 没有移植，所以这里**立即删除**。`cleanRetryInfo` 同时从会话 plan cache 删掉这条语句的计划：VS1-15 之前不会建 plan cache（`GetSessionPlanCache`），没有可删的 |
+| `DropPreparedStmt` | 照 Go（L1）：不存在时 `ErrStmtNotFound`；否则只把 id 记进 `RetryInfo.DroppedPreparedStmtIDs`，语句在**事务结束时**才由 `cleanRetryInfo` 删除 | 无。用户可见的效果与 Go 相同：`BEGIN; PREPARE → 1; CLOSE 1; EXECUTE 1` 成功，关闭的语句在事务结束前仍计入 `max_prepared_stmt_count`。`RetryInfo` 只移植了这一部分与 `Retrying`（恒为 false，见下），放在 `SessionState`，因此检查点自动包含它 |
+| `cleanRetryInfo`（不在 VS1 函数清单里，随 `DropPreparedStmt` 移植） | 挂在 Go 的同样位置（`crates/session/src/session.rs`）：`SessCtx::do_commit_with_retry`（提交；autocommit 语句结束时 `finishStmt` → `autoCommitAfterStmt` → `CommitTxn` 也经过这里）、`SessCtx::rollback_txn_state_in`（`RollbackTxn`，包括 `rollbackOnError`、autocommit 出错时的回滚、`EnterNewTxn` 失败时的回滚）；会话关闭（`Session::close`）时不清理，对应 Go 的 `inCloseSession`（`Close` 改由 `WithdrawAllPreparedStmt` 减计数） | 同时删除 plan cache 中的计划：VS1-15 之前不会建 plan cache，没有可删的。**Go 的坑**（照搬，记在 [D13.1 tasks](../D13.1-plancache/tasks.md) 给 VS1-15）：只取第一条被关闭语句的 `preparedObj`，之后每次循环都用它算 cache key，所以一个事务里关闭多条语句时，删掉的总是第一条语句的计划 |
 | `resolvePreparedStmt` | 非 `EXECUTE` 的语句返回自身 | Rust AST 没有 `EXECUTE`（Go 用 `plannercore.GetPreparedStmt` 解析，D13.1），所以所有语句都返回自身；Go 唯一的调用方 `shouldCheckConnectionAliveBeforeCommit` 只问语句是不是写，属于写路径，不移植 |
 | `GetSessionPlanCache` | 两种 plan cache 都关时返回 `None` | 否则 Go 懒构造 `NewLRUPlanCache`（D13.1）：VS1-15 的 plan cache 查找才会用到，这里 `blocked-by:D13.1` |
 
@@ -208,7 +209,7 @@ plan §4.6 第 2 条：新栈已发出的 TSO 请求交给 PoC。PoC 的 `TsFutu
 
 ### 6.6 测试
 
-- 会话：`statement_paths_are_blocked`（`PrepareStmt` 停在 D12.12，之后会话空闲）、`real_session_prepared_lookup`（8111、`GetSessionPlanCache`）。
+- 会话：`statement_paths_are_blocked`（`PrepareStmt` 停在 D12.12，之后会话空闲）、`closed_prepared_stmt_lives_until_txn_end`（`BEGIN; PREPARE; CLOSE; EXECUTE` 找得到、计数仍在；提交、回滚、autocommit 语句结束三条路径各自删除并减计数；会话关闭不清理）、`real_session_prepared_lookup`（8111、`GetSessionPlanCache`）。
 - 路由器（四种组合用脚本化的新栈，因为真正的新会话还不能成功准备）：`prepared_both`、`prepared_poc_only`、`prepared_new_only`、`prepared_both_fail`、`prepared_fallback_metadata_mismatch`、`close_by_owner`、`execute_starts_the_statement_once`、`prepare_with_unequal_schema_versions_is_poc_owned`；真正的新会话：`real_prepare_is_blocked_and_restored`（两种模式，归属、与全新会话的快照相等、EXECUTE、CLOSE）；`long_data_params_reach_the_engine_that_runs`。
 - 协议层：RESET 清掉长数据、FETCH 报 1235（`crates/mysql-protocol/tests/integration.rs`）。
 - 第三种组合（PoC 不支持、新栈支持）在真正的栈上还构造不出来：新栈现在什么都准备不了。用例用脚本化的新栈加"PoC 准备失败"模拟；真正的语句要等 VS1-15 之后找。

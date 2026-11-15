@@ -319,7 +319,7 @@ impl SessCtx {
         self.vars
             .set_txn_isolation_level_one_shot_state_for_next_txn();
         self.txn.change_to_invalid();
-        // cleanRetryInfo: the retry of optimistic writes.
+        self.clean_retry_info();
         r
     }
 
@@ -336,17 +336,52 @@ impl SessCtx {
     /// `RollbackTxn` without the manager's `OnTxnEnd`.
     // go-part: session.RollbackTxn
     pub(crate) fn rollback_txn_state(&mut self) {
+        self.rollback_txn_state_in(false);
+    }
+
+    /// `RollbackTxn`; `in_close_session`: Go's `ctx.Value(inCloseSession{}) != nil` (from
+    /// `Close`), where the closed prepared statements are not cleaned (`Close` withdraws all
+    /// of them).
+    // go-part: session.RollbackTxn
+    fn rollback_txn_state_in(&mut self, in_close_session: bool) {
         if self.txn.valid()
             && let Err(e) = self.txn.rollback()
         {
             log::error!("{e}");
         }
-        // cleanRetryInfo: the retry of optimistic writes.
+        if !in_close_session {
+            self.clean_retry_info();
+        }
         self.txn.change_to_invalid();
         self.vars.state.txn_ctx.cleanup();
         self.vars.cleanup_txn_read_ts_if_used();
         self.vars.set_in_txn(false);
         // metrics.DDLRollbackTempIndexWrite: DDL (delegated).
+    }
+
+    /// cleanRetryInfo: removes the prepared statements closed in the transaction (Go keeps
+    /// them executable until the transaction ends, `DropPreparedStmt`). Called from
+    /// `doCommitWithRetry` (commit, and the end of an autocommit statement through
+    /// `finishStmt` → `CommitTxn`) and `RollbackTxn` (not when the session closes), as Go.
+    ///
+    /// Go also deletes the statements' plans from the session plan cache when
+    /// `tidb_enable_prepared_plan_cache` is on. That cache is not built before
+    /// prepared-statement planning (VS1-15, `GetSessionPlanCache`), so there is nothing to
+    /// delete yet. Go computes the cache key from the first dropped statement only and reuses
+    /// that statement for every iteration (spec §6.1): VS1-15 ports that as it is.
+    // go: session.cleanRetryInfo L2 (the plan-cache delete waits for the session plan cache, VS1-15)
+    fn clean_retry_info(&mut self) {
+        let retry_info = &mut self.vars.state.retry_info;
+        if retry_info.retrying {
+            return;
+        }
+        // defer retryInfo.Clean()
+        let dropped = std::mem::take(&mut retry_info.dropped_prepared_stmt_ids);
+        retry_info.clean();
+        for stmt_id in dropped {
+            // planCacheEnabled: GetSessionPlanCache().Delete(cacheKey): no cache yet.
+            self.vars.remove_prepared_stmt(stmt_id);
+        }
     }
 
     /// Whether a transaction ended inside a provider call, and clears it.
@@ -981,7 +1016,9 @@ impl Session {
     // go: session.Close L2 (table / advisory locks, stats and index usage collectors, bindings, plan cache: not on the read-only node or not ported)
     pub fn close(&mut self) {
         self.running = None;
-        self.core.rollback_txn();
+        // RollbackTxn(context.WithValue(ctx, inCloseSession{}, struct{}{})).
+        self.core.sctx.rollback_txn_state_in(true);
+        self.core.txn_manager.on_txn_end(&self.core.sctx);
         self.core.sctx.vars.withdraw_all_prepared_stmt();
         // stmtStats.SetFinished: D14.2. ClearDiskFullOpt: write option. Trackers: A1.
     }
@@ -1274,22 +1311,20 @@ impl Session {
         ))
     }
 
-    /// DropPreparedStmt (COM_STMT_CLOSE).
-    ///
-    /// Go only records the id in `RetryInfo.DroppedPreparedStmtIDs`; `cleanRetryInfo` removes
-    /// the statement when the transaction ends, so that a retried optimistic transaction can
-    /// still execute it. Retrying is the write path (never on the read-only node, N11 D8), so
-    /// the statement is removed at once (spec §6.1). `cleanRetryInfo` also
-    /// deletes the statement's plan from the session plan cache: the cache is never built
-    /// before VS1-15 ([`Session::get_session_plan_cache`]), so there is nothing to delete.
-    // go: session.DropPreparedStmt L2 (removed at once: RetryInfo is the write path)
+    /// DropPreparedStmt (COM_STMT_CLOSE): the statement is only recorded; `cleanRetryInfo`
+    /// removes it when the transaction ends (commit, rollback, the end of an autocommit
+    /// statement), so until then it can still be executed and still counts toward
+    /// `max_prepared_stmt_count` (spec §6.1).
+    // go: session.DropPreparedStmt L1
     pub fn drop_prepared_stmt(&mut self, stmt_id: u32) -> Result<(), Error> {
         let vars = &mut self.core.sctx.vars;
         if !vars.state.prepared_stmts.contains_key(&stmt_id) {
             return Err(ErrStmtNotFound.clone());
         }
-        // cleanRetryInfo: GetSessionPlanCache().Delete(NewPlanCacheKey(...)): no cache yet.
-        vars.remove_prepared_stmt(stmt_id);
+        vars.state
+            .retry_info
+            .dropped_prepared_stmt_ids
+            .push(stmt_id);
         Ok(())
     }
 

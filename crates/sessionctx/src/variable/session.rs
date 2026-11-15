@@ -167,6 +167,8 @@ pub struct SessionState {
     /// duplicate task in plan replayer continues capture
     pub plan_replayer_finished_task_key:
         Option<std::collections::HashSet<super::session_state::PlanReplayerTaskKey>>,
+    /// RetryInfo saves retry information.
+    pub retry_info: super::session_state::RetryInfo,
 }
 
 impl Default for SessionState {
@@ -224,6 +226,7 @@ impl Default for SessionState {
             plan_column_id: Default::default(),
             map_scalar_sub_q: Vec::new(),
             plan_replayer_finished_task_key: None,
+            retry_info: Default::default(),
         }
     }
 }

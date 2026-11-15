@@ -46,7 +46,7 @@ parameters):
 - column definitions: name, org_name, schema, table, org_table, type, length, decimals, flags,
   charset/collation; for prepared statements also the parameter count and the columns returned
   by COM_STMT_PREPARE, and that B's EXECUTE returns the columns its PREPARE returned (a
-  difference A does not have is a `metadata` mismatch: with `--new-stack=fallback` an
+  difference A does not have, or a field A changed to another value, is a `metadata` mismatch: with `--new-stack=fallback` an
   EXECUTE that falls back to the PoC must carry the new stack's PREPARE metadata,
   vertical-slice plan §4.7).
 - errors: both fail with the same code => `both_error` (counts as agreement); B fails with 1235
