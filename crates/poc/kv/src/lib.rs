@@ -112,9 +112,28 @@ pub struct KvClient {
     copr: std::sync::Arc<CoprStore>,
 }
 
-/// Whether `TIDB_RS_POINT_GET=store-driver` is set (see [`KvClient`]).
+/// Reads `TIDB_RS_POINT_GET`: unset or empty means this crate's own reads, `store-driver`
+/// means point gets through the ported store driver (see [`KvClient`]). Any other value is an
+/// error, so a misspelled or old value (`d07.1`, renamed to `store-driver`) cannot silently
+/// fall back to this crate's reads and make the fault comparison compare it with itself.
+/// The server checks this at startup.
+pub fn point_get_store_driver_from_env() -> std::result::Result<bool, String> {
+    match std::env::var("TIDB_RS_POINT_GET") {
+        Err(_) => Ok(false),
+        Ok(v) if v.is_empty() => Ok(false),
+        Ok(v) if v == "store-driver" => Ok(true),
+        Ok(v) if v == "d07.1" => Err(
+            "TIDB_RS_POINT_GET=d07.1 was renamed: use TIDB_RS_POINT_GET=store-driver".to_string(),
+        ),
+        Ok(v) => Err(format!(
+            "TIDB_RS_POINT_GET must be empty or store-driver, got {v:?}"
+        )),
+    }
+}
+
+/// Whether point gets go through the store driver; an invalid value was rejected at startup.
 fn driver_point_gets() -> bool {
-    std::env::var("TIDB_RS_POINT_GET").is_ok_and(|v| v == "store-driver")
+    point_get_store_driver_from_env().unwrap_or(false)
 }
 
 /// The copr store over `inner`, its workers on `pool` (N3 ExecPool) when given.

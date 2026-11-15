@@ -12,7 +12,7 @@ futures = { workspace = true }
 thiserror = { workspace = true }
 tikv-client = { workspace = true }
 tokio = { workspace = true }
-# TIDB_RS_POINT_GET=store-driver: point gets through the ported store driver (the ported TiKV store driver), for
+# TIDB_RS_POINT_GET=store-driver: point gets through the ported TiKV store driver, for
 # the fault-scenario comparison (tools/ab/faults).
 tidb-base = { workspace = true }
 tidb-kv = { workspace = true }

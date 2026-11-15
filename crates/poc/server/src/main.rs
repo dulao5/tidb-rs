@@ -145,7 +145,7 @@ fn parse_go_duration(s: &str) -> Result<Duration, String> {
     Ok(Duration::from_nanos(ns as u64))
 }
 
-/// `--new-stack`, overridden by `TIDB_RS_NEW_STACK` (VS1 plan §4.3).
+/// `--new-stack`, overridden by `TIDB_RS_NEW_STACK` (vertical-slice plan §4.3).
 fn new_stack_mode(flag: &str) -> Result<poc_session::router::NewStackMode, String> {
     match std::env::var("TIDB_RS_NEW_STACK") {
         Ok(v) if !v.is_empty() => v.parse(),
@@ -174,6 +174,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if let Err(e) = poc_kv::point_get_store_driver_from_env() {
+        error!(error = %e, "invalid TIDB_RS_POINT_GET");
+        std::process::exit(2);
+    }
     let tls = match tls_config(&args) {
         Ok(tls) => tls,
         Err(e) => {
