@@ -7,8 +7,8 @@
 //!   `tidb_sessiontxn::sctx::SessionCtx` (#219).
 //! - [`ResultField`]: `resolve.ResultField` (`pkg/planner/core/resolve/result.go`, D09.0,
 //!   VS1-10); moves to the planner when D09.0 lands.
-//! - [`PlanCacheStmt`]: the part of `plannercore.PlanCacheStmt` (D13.1, VS1-15) that
-//!   `ExecStmt.PointGet` reads, the cached point get executor.
+//! - [`PlanCacheStmt`]: `plannercore.PlanCacheStmt` (D13.1) of the planner; `ExecStmt.PointGet`
+//!   reads its cached point get executor.
 //! - [`Plan`]: Go's `base.Plan`. The new stack only builds physical plans in VS1 (no
 //!   `Execute`, `Set`, `Simple`, ... plans), so it is the physical plan.
 
@@ -102,17 +102,29 @@ pub struct ResultField {
     pub db_name: CIStr,
 }
 
-/// `plannercore.PlanCacheStmt.PointGet`: the point get executor cached with a prepared
-/// statement (`PointGet.Executor`).
-#[derive(Default)]
-pub struct PlanCacheStmt {
-    /// `PointGet.Executor`.
-    pub point_get_executor: Option<Box<dyn Executor>>,
+/// `plannercore.PlanCacheStmt` (D13.1): its `PointGet.Executor` holds the cached point get
+/// executor as a `Box<Box<dyn Executor>>` (the planner, below this crate, keeps it as `Any`).
+pub type PlanCacheStmt = tidb_planner::core::plan_cache_utils::PlanCacheStmt;
+
+/// A prepared statement shared by the session's statement map and the statements that
+/// execute it.
+pub type PlanCacheStmtRef = tidb_planner::core::plan_cache_utils::PlanCacheStmtRef;
+
+/// `stmt.PointGet.Executor = e`.
+// glue: PointGetExecutorCache.Executor (an Any in the planner)
+pub fn set_cached_point_get_executor(stmt: &mut PlanCacheStmt, e: Option<Box<dyn Executor>>) {
+    stmt.point_get.executor = e.map(|e| Box::new(e) as Box<dyn std::any::Any + Send>);
 }
 
-/// A prepared statement's cache entry, shared by the session's statement map and the
-/// statements that execute it.
-pub type PlanCacheStmtRef = Arc<parking_lot::Mutex<PlanCacheStmt>>;
+/// `stmt.PointGet.Executor`, taken out of the statement.
+// glue: PointGetExecutorCache.Executor (an Any in the planner)
+pub fn take_cached_point_get_executor(stmt: &mut PlanCacheStmt) -> Option<Box<dyn Executor>> {
+    stmt.point_get
+        .executor
+        .take()
+        .and_then(|b| b.downcast::<Box<dyn Executor>>().ok())
+        .map(|b| *b)
+}
 
 /// The `*PointGetExecutor` methods `ExecStmt.PointGet` calls on a cached executor (D12.1,
 /// VS1-12): Go type-asserts `exec.Executor` to `*PointGetExecutor`; here the point get

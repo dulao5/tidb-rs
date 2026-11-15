@@ -942,51 +942,161 @@ fn close_by_owner() {
     block_on(r.prepare(&mut p, 3, POINT)).unwrap();
     for id in [1, 2, 3] {
         r.close(&mut p, id);
-        assert_eq!(r.owner(id), None);
+        // Closed, but kept until the transaction ends (Go's DropPreparedStmt).
+        assert!(r.owner(id).is_some());
     }
     let new_log = script.lock().unwrap().log.clone();
     assert!(new_log.contains(&"close 101".to_owned()));
     assert!(new_log.contains(&"close 102".to_owned()));
+    assert!(!p.log.iter().any(|l| l.starts_with("close")));
+    // The next statement ends the (autocommit) transaction: the PoC's copies are closed.
+    script.lock().unwrap().answer = Some(Answer::Blocked("D09.1"));
+    block_on(r.query(&mut p, POINT)).unwrap();
+    for id in [1, 2, 3] {
+        assert_eq!(r.owner(id), None);
+    }
     assert!(p.log.contains(&"close 1".to_owned()));
     assert!(p.log.contains(&"close 2".to_owned()));
     assert!(!p.log.contains(&"close 3".to_owned()));
 }
 
+/// `BEGIN; PREPARE; CLOSE; EXECUTE` (Go: the closed statement stays executable until the
+/// transaction ends, `DropPreparedStmt` / `cleanRetryInfo`): the EXECUTE in the transaction
+/// succeeds; the statement is gone after COMMIT, on both engines.
+#[test]
+fn closed_stmt_lives_until_txn_end() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    p.in_txn = true; // BEGIN (on the PoC: an explicit transaction)
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    assert!(matches!(r.owner(1), Some(Owner::Both { .. })));
+    r.close(&mut p, 1);
+    assert!(script.lock().unwrap().log.contains(&"close 101".to_owned()));
+    let res = block_on(r.execute(&mut p, 1, vec![]));
+    assert_eq!(rows(&res).map(|r| r.0), Some(3));
+    let res = block_on(r.execute(&mut p, 1, vec![]));
+    assert_eq!(
+        rows(&res).map(|r| r.0),
+        Some(3),
+        "still there inside the transaction"
+    );
+    assert!(!p.log.contains(&"close 1".to_owned()));
+    // COMMIT ends the transaction (a statement the PoC runs).
+    p.in_txn = false;
+    script.lock().unwrap().answer = Some(Answer::Blocked("D09.1"));
+    block_on(r.query(&mut p, POINT)).unwrap();
+    assert!(p.log.contains(&"close 1".to_owned()));
+    assert_eq!(r.owner(1), None);
+    let e = block_on(r.execute(&mut p, 1, vec![])).unwrap_err();
+    assert_eq!(e.code, 1243, "{e:?}");
+}
+
+/// Autocommit: `CLOSE 1; PREPARE …; EXECUTE 1`. Go's `PrepareStmt` ends with
+/// `rollbackOnError`, which outside a transaction runs `cleanRetryInfo`: statement 1 is gone
+/// before the EXECUTE (1243), on both engines.
+#[test]
+fn autocommit_close_then_prepare() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    r.close(&mut p, 1);
+    assert!(r.owner(1).is_some());
+    block_on(r.prepare(&mut p, 2, POINT)).unwrap();
+    assert!(p.log.contains(&"close 1".to_owned()));
+    assert_eq!(r.owner(1), None);
+    assert!(r.owner(2).is_some());
+    let e = block_on(r.execute(&mut p, 1, vec![])).unwrap_err();
+    assert_eq!(e.code, 1243, "{e:?}");
+}
+
+/// Autocommit: `CLOSE` followed by a statement that the PoC runs. Go removes the closed
+/// statement at the end of that statement (its autocommit transaction): the PoC's copy is
+/// closed and the new session's statement removed (it no longer counts toward
+/// `max_prepared_stmt_count`), not kept until the new session's own next statement.
+#[test]
+fn autocommit_close_then_poc_statement() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    // A statement in the new session standing for the scripted one (101).
+    let vars = r.new.session_mut().vars_mut();
+    let id = vars.get_next_prepared_stmt_id();
+    vars.add_prepared_stmt(id, Arc::new(())).unwrap();
+    r.new.session_mut().drop_prepared_stmt(id).unwrap();
+    r.close(&mut p, 1);
+    assert!(
+        r.new
+            .session()
+            .vars()
+            .state
+            .prepared_stmts
+            .contains_key(&id)
+    );
+    // A statement the PoC runs (SET is not a candidate for the new stack).
+    block_on(r.query(&mut p, "SET NAMES utf8mb4")).unwrap();
+    assert!(p.log.contains(&"close 1".to_owned()));
+    assert_eq!(r.owner(1), None);
+    assert!(
+        !r.new
+            .session()
+            .vars()
+            .state
+            .prepared_stmts
+            .contains_key(&id),
+        "removed at the end of the PoC's statement, as Go"
+    );
+}
+
 /// The real new session prepares a candidate (`PrepareStmt`: transaction context, statement
-/// start, TSO warm-up) and ends `Blocked` at the prepare executor (prepared-statement
-/// planning, VS1-15). The PoC owns the statement with the block as the reason, and the new
+/// start, TSO warm-up, the prepare executor) and ends `Blocked` in the preprocessor
+/// ([`REAL_PREPARE_BLOCK`]). The PoC owns the statement with the block as the reason, and the new
 /// session afterwards equals a fresh one (Lucky, #205: no trace of the attempt). `strict`
 /// reports the block at EXECUTE (§4.7 row 2); CLOSE goes to the PoC only.
 #[test]
 fn real_prepare_is_blocked_and_restored() {
     for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
         let mut p = poc();
+        // A database is selected: without one the preprocessor answers Go's 1046.
+        p.values.current_db = Some("test".into());
         let fresh = snap(&real(mode, &p));
         let mut r = real(mode, &p);
         block_on(r.prepare(&mut p, 1, POINT)).unwrap();
         let Some(Owner::Poc(Reason::Blocked(block))) = r.owner(1).cloned() else {
             panic!("{mode:?}: {:?}", r.owner(1));
         };
-        assert_eq!(block, "D12.12", "{mode:?}");
+        assert_eq!(block, REAL_PREPARE_BLOCK, "{mode:?}");
         assert_eq!(snap(&r), fresh, "{mode:?}");
         assert!(r.new.session().is_idle());
         let res = block_on(r.execute(&mut p, 1, vec![]));
         match mode {
             NewStackMode::Strict => {
                 let e = res.unwrap_err();
-                assert!(e.code == 1235 && e.message.contains("blocked-by:D12.12"));
+                assert!(
+                    e.code == 1235
+                        && e.message
+                            .contains(&format!("blocked-by:{REAL_PREPARE_BLOCK}"))
+                );
             }
             _ => assert_eq!(rows(&res).map(|r| r.0), Some(3)),
         }
         r.close(&mut p, 1);
-        assert_eq!(p.log.last().map(String::as_str), Some("close 1"));
+        // Closed at the end of the next statement (Go's cleanRetryInfo).
+        let _ = block_on(r.query(&mut p, "SET NAMES utf8mb4"));
+        assert!(p.log.contains(&"close 1".to_owned()));
         assert_eq!(r.owner(1), None);
     }
 }
 
+/// Where a real PREPARE of [`POINT`] stops on the new session: the preprocessor resolves
+/// the table through the InfoSchema interface (D06.3 part 2, VS1-17).
+const REAL_PREPARE_BLOCK: &str = "D06.3";
+
 /// The real new session's `ExecutePreparedStmt` / `DropPreparedStmt` of an id it never
 /// prepared: Go's `ErrStmtNotFound` (8111), not a boundary stub; with no plan cache
-/// switched on, `GetSessionPlanCache` is `None`, otherwise the cache is a stub (VS1-15).
+/// switched on, `GetSessionPlanCache` is `None`, otherwise the (empty) stand-in cache.
 #[test]
 fn real_session_prepared_lookup() {
     let mut s = Session::new(Dialect::MySQL, Box::new(DefaultGlobals));
@@ -996,10 +1106,9 @@ fn real_session_prepared_lookup() {
     assert_eq!(e.code(), 8111, "{e}");
     s.vars_mut().enable_prepared_plan_cache = false;
     s.vars_mut().enable_non_prepared_plan_cache = false;
-    assert_eq!(s.get_session_plan_cache().unwrap(), None);
+    assert!(s.get_session_plan_cache().is_none());
     s.vars_mut().enable_prepared_plan_cache = true;
-    let e = s.get_session_plan_cache().unwrap_err();
-    assert_eq!(tidb_base::blocked::blocked_by(&e), Some("D13.1"));
+    assert!(s.get_session_plan_cache().unwrap().deleted_keys.is_empty());
 }
 
 /// COM_STMT_SEND_LONG_DATA (§4.7): the protocol layer folds long data into the decoded

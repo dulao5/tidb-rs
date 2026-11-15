@@ -371,7 +371,8 @@ async fn point_get_with_max_ts_caches_the_executor() {
             .as_ref()
             .unwrap()
             .lock()
-            .point_get_executor
+            .point_get
+            .executor
             .is_some()
     );
     assert_eq!(counters.built.load(Ordering::SeqCst), 1);
@@ -392,11 +393,14 @@ async fn point_get_with_a_tso_does_not_cache() {
     let plan = mock_plan(1, 1, true, &counters);
     let mut s = MockSession::new(449_000_000_000_000_000);
     let mut stmt = point_stmt(Arc::clone(&plan));
-    stmt.ps_stmt.as_ref().unwrap().lock().point_get_executor = Some(
-        plan.as_any()
-            .downcast_ref::<MockPhysicalPlan>()
-            .unwrap()
-            .get_executor(),
+    crate::glue::set_cached_point_get_executor(
+        &mut stmt.ps_stmt.as_ref().unwrap().lock(),
+        Some(
+            plan.as_any()
+                .downcast_ref::<MockPhysicalPlan>()
+                .unwrap()
+                .get_executor(),
+        ),
     );
     let built_before = counters.built.load(Ordering::SeqCst);
 
@@ -411,7 +415,8 @@ async fn point_get_with_a_tso_does_not_cache() {
             .as_ref()
             .unwrap()
             .lock()
-            .point_get_executor
+            .point_get
+            .executor
             .is_some()
     );
 }
@@ -431,7 +436,8 @@ async fn point_get_does_not_cache_other_executors() {
             .as_ref()
             .unwrap()
             .lock()
-            .point_get_executor
+            .point_get
+            .executor
             .is_none()
     );
 }

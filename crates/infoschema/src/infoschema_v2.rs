@@ -1015,7 +1015,7 @@ static LOAD_TABLE_SF: LazyLock<Mutex<HashMap<String, Shared<BoxFuture<'static, L
 impl InfoSchemaV2 {
     /// The schema version (Go reads `is.infoSchema.schemaMetaVersion`).
     // glue: field access of the embedded infoSchemaMisc
-    fn schema_meta_version(&self) -> i64 {
+    pub fn schema_meta_version(&self) -> i64 {
         self.misc.schema_meta_version
     }
 
