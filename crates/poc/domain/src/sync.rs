@@ -66,6 +66,9 @@ pub struct SyncConfig {
     pub dag: DagContext,
     /// Test hook: while this file exists the sync loop does nothing (as if stuck).
     pub stall_file: Option<PathBuf>,
+    /// Build and reload the ported domain (D06.5 part 1) for the new stack: only when the
+    /// new stack is on (`--new-stack` not `off`). Off by default.
+    pub ported_domain: bool,
 }
 
 impl SyncConfig {
@@ -79,6 +82,7 @@ impl SyncConfig {
             limits: Limits::default(),
             dag,
             stall_file: None,
+            ported_domain: false,
         }
     }
 }
@@ -94,8 +98,9 @@ struct Inner {
     kv: KvClient,
     etcd: EtcdClient,
     registry: Arc<Registry>,
-    /// The ported domain (D06.5 part 1), reloaded at the timestamp of every reload here.
-    ported: Arc<tidb_domain::Domain>,
+    /// The ported domain (D06.5 part 1), reloaded at the timestamp of every reload here;
+    /// `None` when the new stack is off.
+    ported: Option<Arc<tidb_domain::Domain>>,
     /// Held while registering or deregistering.
     registration: tokio::sync::Mutex<Option<Registration>>,
     wake: Notify,
@@ -127,7 +132,9 @@ impl SchemaSync {
         let (stop, _) = tokio::sync::watch::channel(false);
         let inner = Arc::new(Inner {
             registry: Registry::new(cfg.limits),
-            ported: crate::ported_domain::new_ported_domain(kv.clone()),
+            ported: crate::ported_domain::ported_domain_if(cfg.ported_domain, || {
+                crate::ported_domain::new_ported_domain(kv.clone())
+            }),
             cfg,
             kv,
             etcd,
@@ -149,8 +156,9 @@ impl SchemaSync {
     }
 
     /// The ported domain the new stack's sessions take their InfoSchema from.
-    pub fn ported_domain(&self) -> &Arc<tidb_domain::Domain> {
-        &self.inner.ported
+    /// `None` when the new stack is off.
+    pub fn ported_domain(&self) -> Option<&Arc<tidb_domain::Domain>> {
+        self.inner.ported.as_ref()
     }
 
     pub fn registry(&self) -> &Arc<Registry> {
@@ -380,7 +388,9 @@ impl Inner {
         // diff load from its cached version, or a full load. A failure leaves the new stack
         // on its older version, so the router sends statements to the PoC (unequal
         // versions) until a later reload succeeds.
-        if let Err(e) = self.ported.reload_at(ts).await {
+        if let Some(ported) = &self.ported
+            && let Err(e) = ported.reload_at(ts).await
+        {
             warn!(error = %e, "reloading the ported domain's InfoSchema failed");
         }
         Ok(())

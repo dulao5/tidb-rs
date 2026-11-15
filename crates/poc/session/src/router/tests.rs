@@ -1267,3 +1267,12 @@ fn fallback_after_open_is_detected() {
     assert!(!fallback_after_open(3, 3));
     assert!(fallback_after_open(3, 4));
 }
+
+/// `--new-stack=off` (the default) builds no ported domain; the other modes do.
+#[test]
+fn ported_domain_only_with_the_new_stack_on() {
+    assert!(!NewStackMode::default().uses_ported_domain());
+    assert!(!NewStackMode::Off.uses_ported_domain());
+    assert!(NewStackMode::Fallback.uses_ported_domain());
+    assert!(NewStackMode::Strict.uses_ported_domain());
+}

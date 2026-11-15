@@ -351,7 +351,7 @@ impl InfoCache {
     // glue: stub of InfoCache.gcOldVersion, blocked-by:D06.2 (meta.GetOldestSchemaVersion needs store/helper's MVCC API)
     fn gc_old_version(&self, current_version: i64) {
         let _ = &self.r;
-        log::info!(
+        log::debug!(
             "GC compact old schema version skipped: meta.GetOldestSchemaVersion is not ported, current version: {current_version}"
         );
     }

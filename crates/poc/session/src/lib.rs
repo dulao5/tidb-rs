@@ -164,7 +164,7 @@ impl SessionFactory for Factory {
                 .shared
                 .sync
                 .as_ref()
-                .map(|s| std::sync::Arc::clone(s.ported_domain()));
+                .and_then(|s| s.ported_domain().cloned());
             let new = Box::new(router::newstack::NewSession::new(domain));
             let r = Router::new(self.new_stack, new, &session.poc_values());
             session.router = Some(Box::new(r));

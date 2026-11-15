@@ -75,6 +75,14 @@ pub enum NewStackMode {
     Strict,
 }
 
+impl NewStackMode {
+    /// Whether the schema sync builds the ported domain the new sessions plan with: only
+    /// when the new stack is on, so `off` leaves the PoC's sync loop as it was.
+    pub fn uses_ported_domain(self) -> bool {
+        self != NewStackMode::Off
+    }
+}
+
 impl std::str::FromStr for NewStackMode {
     type Err = String;
 

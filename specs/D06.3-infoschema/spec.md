@@ -180,7 +180,9 @@ converge：`scripts/converge.py --block D06.3 --part specs/VS1-vertical-slice/fu
 
 完整的 `InfoSchema` trait（`interface.go`，T9）、`SessionTables`、`SessionExtendedInfoSchema` 还没有做（临时表属于写路径之外的 D06.4，新栈不处理）。规划器目前通过 D13.1 的窄接口 `InfoSchemaLookup`（`TableByName`、`TableByID`、`SchemaByID`、`SchemaMetaVersion`）使用 InfoSchema；`InfoSchemaV2` 实现它，预处理的 `PreprocessorReturn.InfoSchema` 是它的共享值（`InfoSchemaHandle`）。T9 做完后，`InfoSchemaLookup` 换成完整的 trait。
 
-### 11.2 同步查找与规划前的加载（设计决定，待负责人确认）
+### 11.2 同步查找与规划前的加载（协调人决定，Maya，2026-11-15）
+
+这是内部的工程选择，与 §5.6 第 1–3 条同类：读到的是同一个版本、同一个时间戳，缓存未命中的语句交给 PoC，没有用户可见的差别。
 
 Go 的 `infoschemaV2.TableByName` 在表对象不在缓存中时读 TiKV（`loadTableInfo`），所以在 Rust 中是 `async`（§3）。而规划器（预处理、plan builder、点查快速路径）是同步的：Go 在这些地方直接调用 `TableByName`，把规划器整体改成 `async` 代价很大，在同步代码中 `block_on` 又违反 N3（M-BLOCK）。
 
@@ -196,4 +198,4 @@ Go 的 `infoschemaV2.TableByName` 在表对象不在缓存中时读 TiKV（`load
 - `PrepareStmt` 要把 SQL 文本多解析一次（Go 只在 prepare 执行器中解析一次），只发生在 PREPARE。
 - 加载和规划之间如果表对象被淘汰（缓存容量很小、并发访问大量的表），规划器返回边界桩，语句走 PoC。默认容量 512 MiB 下不会发生。
 
-另一个可选方案是把规划器中查表的路径改成 `async`。规划器是 VS1 的主体，这个改动会波及 D09 / D10 的所有入口，所以暂不采用；如果负责人认为提前加载不可接受，再讨论。
+另一个可选方案是把规划器中查表的路径改成 `async`。规划器是 VS1 的主体，这个改动会波及 D09 / D10 的所有入口，所以不采用。两处额外开销（PREPARE 多解析一次、每条语句提前加载表）列入 VS1-20 的 profile 清单。

@@ -53,14 +53,10 @@ impl Storage for PocStorage {
             ts: ver.ver,
         })
     }
+    /// Schema loading sends no coprocessor requests; a client that answers every request
+    /// with an error, so a caller that does reach it fails instead of panicking.
     fn get_client(&self) -> Arc<dyn Client> {
-        panic!(
-            "{}",
-            blocked(
-                "D07.1",
-                "the coprocessor client of the ported domain's store"
-            )
-        )
+        Arc::new(NoCoprClient)
     }
     fn close(&self) -> Result<(), Error> {
         Ok(())
@@ -79,6 +75,44 @@ impl Storage for PocStorage {
     }
     fn get_min_safe_ts(&self, _: &str) -> u64 {
         0
+    }
+}
+
+/// The coprocessor client of [`PocStorage`]: every request fails.
+struct NoCoprClient;
+
+impl Client for NoCoprClient {
+    fn send(
+        &self,
+        _: &Context,
+        _: &tidb_kv::kv::Request,
+        _: Option<OptionValue>,
+        _: &tidb_kv::kv::ClientSendOption,
+    ) -> Box<dyn tidb_kv::kv::Response> {
+        Box::new(FailedResponse)
+    }
+    fn is_request_type_supported(&self, _: i64, _: i64) -> bool {
+        false
+    }
+}
+
+/// The response of [`NoCoprClient`]: its first `Next` is the error.
+struct FailedResponse;
+
+impl tidb_kv::kv::Response for FailedResponse {
+    fn next<'a>(
+        &'a mut self,
+        _: &'a Context,
+    ) -> KvFuture<'a, Option<Box<dyn tidb_kv::kv::ResultSubset>>> {
+        Box::pin(async {
+            Err(blocked(
+                "D07.1",
+                "coprocessor requests through the ported domain's store",
+            ))
+        })
+    }
+    fn close(&mut self) -> Result<(), Error> {
+        Ok(())
     }
 }
 
@@ -207,4 +241,76 @@ impl Snapshot for PocSnapshot {
 /// The ported domain over the PoC's TiKV client.
 pub fn new_ported_domain(kv: KvClient) -> Arc<tidb_domain::Domain> {
     Arc::new(tidb_domain::new_domain(Arc::new(PocStorage::new(kv))))
+}
+
+/// The ported domain if the new stack is on (`SyncConfig::ported_domain`), else none: with
+/// `--new-stack=off` the sync loop does exactly what it did before the new stack existed.
+pub(crate) fn ported_domain_if(
+    enabled: bool,
+    make: impl FnOnce() -> Arc<tidb_domain::Domain>,
+) -> Option<Arc<tidb_domain::Domain>> {
+    enabled.then(make)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidb_kv::kv::Response as _;
+
+    /// `--new-stack=off` (the default): no ported domain is built, so the PoC reload never
+    /// waits on it.
+    #[test]
+    fn off_mode_creates_no_ported_domain() {
+        let cfg = crate::SyncConfig::new(
+            vec![],
+            crate::ServerInfo::new("127.0.0.1".into(), 4000, 10080),
+            Default::default(),
+        );
+        assert!(!cfg.ported_domain, "off by default");
+        assert!(ported_domain_if(cfg.ported_domain, || unreachable!("not built")).is_none());
+        let store: Arc<dyn Storage> = Arc::new(StubStore);
+        assert!(ported_domain_if(true, || Arc::new(tidb_domain::new_domain(store))).is_some());
+    }
+
+    /// The store's coprocessor client fails a request instead of panicking.
+    #[test]
+    fn coprocessor_client_errors() {
+        let c = NoCoprClient;
+        assert!(!c.is_request_type_supported(0, 0));
+        let mut r = FailedResponse;
+        let ctx = Context::background();
+        assert!(futures::executor::block_on(r.next(&ctx)).is_err());
+    }
+
+    struct StubStore;
+
+    impl Storage for StubStore {
+        fn begin<'a>(&'a self, _: &'a [TxnOption]) -> KvFuture<'a, Box<dyn Transaction>> {
+            unimplemented!()
+        }
+        fn get_snapshot(&self, _: Version) -> Arc<dyn Snapshot> {
+            unimplemented!()
+        }
+        fn get_client(&self) -> Arc<dyn Client> {
+            Arc::new(NoCoprClient)
+        }
+        fn close(&self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn uuid(&self) -> String {
+            String::new()
+        }
+        fn current_version<'a>(&'a self, _: &'a str) -> KvFuture<'a, Version> {
+            unimplemented!()
+        }
+        fn name(&self) -> String {
+            String::new()
+        }
+        fn describe(&self) -> String {
+            String::new()
+        }
+        fn get_min_safe_ts(&self, _: &str) -> u64 {
+            0
+        }
+    }
 }

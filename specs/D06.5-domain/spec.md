@@ -28,14 +28,14 @@
 
 ### 2.2 由 PoC domain 驱动（VS1 plan §4.1）
 
-在 D06.5 整块完成之前，etcd 注册、同步循环、MDL、lease 仍由 PoC 的 `poc-domain` 负责。PoC 每次 reload 取一个 TSO，先加载 PoC 自己的 schema，再在**同一个时间戳**上调用 `Domain::reload_at(ts)`。所以两边读到的是同一个 schema 版本（都取 `GetSchemaVersionWithNonEmptyDiff`），新的一边用 diff 增量加载。
+在 D06.5 整块完成之前，etcd 注册、同步循环、MDL、lease 仍由 PoC 的 `poc-domain` 负责。只有新栈打开时（`--new-stack` 不是 `off`）才建立这个 domain；`off`（默认的生产模式）不建立，PoC 的同步循环与之前完全相同（测试 `off_mode_creates_no_ported_domain`、`ported_domain_only_with_the_new_stack_on`）。PoC 每次 reload 取一个 TSO，先加载 PoC 自己的 schema，再在**同一个时间戳**上调用 `Domain::reload_at(ts)`。所以两边读到的是同一个 schema 版本（都取 `GetSchemaVersionWithNonEmptyDiff`），新的一边用 diff 增量加载。
 
 - `reload_at` 是 Go `Reload` 在 `store.CurrentVersion` 之后的部分；`reload` 是完整的 `Reload`（自己取 TSO），留给 domain 自己的循环（第 2 部分）。
 - Go 的 `Reload` 在加载后更新 etcd 中的 self version、全量加载时重置 validator、续 lease。这三件事目前由 PoC 做，`reload_at` 把它们需要的信息（`hitCache`、旧版本、`RelatedSchemaChange`、时间戳）返回给调用方。
 - 新栈的会话从 `Domain::info_schema()` 取最新版本。路由器在每个命令开始时取一次（`NewStack::refresh_info_schema`），第 0 步比较的就是这一版，语句全程使用它（VS1 plan §4.1："比较一次，之后固定"）。版本不等时语句走 PoC。
 - 新的 domain 加载失败只记日志：新栈停在旧版本上，版本不等，语句走 PoC，直到下一次 reload 成功。
 
-PoC 侧的 store 是 `poc-domain` 中的 `PocStorage`：基于 `poc-kv` 的 `kv.Storage`（点查、批量点查、正向迭代器用缓冲的 scan 实现，足够读 meta hash）。原因是移植的 store driver 还没有 `kv.Storage` 和迭代器（D07.1 第 2 部分）。这是 glue，D07.1 完成后去掉。
+PoC 侧的 store 是 `poc-domain` 中的 `PocStorage`：基于 `poc-kv` 的 `kv.Storage`（点查、批量点查、正向迭代器用缓冲的 scan 实现，足够读 meta hash；schema 加载不发 coprocessor 请求，`GetClient` 返回的 client 对每个请求返回错误，不 panic）。原因是移植的 store driver 还没有 `kv.Storage` 和迭代器（D07.1 第 2 部分）。这是 glue，D07.1 完成后去掉。
 
 ### 2.3 只有 infoschema v2
 

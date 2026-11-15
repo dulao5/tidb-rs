@@ -36,7 +36,7 @@
 | VS1-16 | 结果集与 `writeResultSet` / `writeChunks`、`column` / `dump`、`conn_stmt` 执行与二进制参数；去掉 `newstack.rs` 中执行之后的回退（结果集不能编码时返回 `blocked-by:D03.1`，plan §4.3 不允许，路由器记为 bug，#235） | D03.1 | breadth | 0.13 | VS1-14 | dump govec；protocol-smoke 通过 | 未开始 |
 | VS1-17 | D06.3 第 2 部分（T8 / T9）；D06.5 `loadInfoSchema` / `tryLoadSchemaDiffs` / validator，由 PoC domain 驱动 | D06.3、D06.5 | breadth | 0.10 | — | schema 同步测试在新 InfoSchema 上通过 | 第 1 部分评审中：`InfoCache`、schema 加载（全量 + diff）、PoC domain 驱动、预处理查表；validator 等留给第 2 部分（VS1-17b，等 N11） |
 | VS1-18 | snapshot `Get` / `BatchGet` / `SetOption`、错误转换 | D07.1 | breadth | 0.04 | — | 故障场景点查与 PoC 相同 | 评审中（#221） |
-| VS1-20 | C2a 集成与 point_select 调优 | glue | depth | 0.08 | Phase 1 其余各项 | ab `strict` 的 `Point_Get` 100%；point_select ≥ 0.9× Go（1 / 8 线程）；ab 包含一个真正走到 `pseudoSelectivity` 唯一键查找的用例（UniqueID 与列 ID 的对应，D10.6 spec §5 第 1 条）；profile：记录每个点查计划的分配次数（每条语句重建 pseudo 表），据此决定是否缓存（D11.1 spec §3） | 未开始 |
+| VS1-20 | C2a 集成与 point_select 调优 | glue | depth | 0.08 | Phase 1 其余各项 | ab `strict` 的 `Point_Get` 100%；point_select ≥ 0.9× Go（1 / 8 线程）；ab 包含一个真正走到 `pseudoSelectivity` 唯一键查找的用例（UniqueID 与列 ID 的对应，D10.6 spec §5 第 1 条）；profile：记录每个点查计划的分配次数（每条语句重建 pseudo 表），据此决定是否缓存（D11.1 spec §3）；另记录 InfoSchema 查表的两处额外开销（D06.3 spec §11.2）：PREPARE 把 SQL 多解析一次、每条语句在规划前提前加载用到的表 | 未开始 |
 
 ## Phase 2：规划器主体
 
