@@ -125,29 +125,29 @@ structure. The rules are in [CONSTITUTION.md](CONSTITUTION.md) (Chinese); the me
 [docs/porting/methodology.md](docs/porting/methodology.md); deliberate deviations from Go are listed in
 [specs/exceptions/](specs/exceptions/README.md).
 
-## 符号与编号（Glossary）
+## Glossary of IDs
 
-文档、issue、PR 和代码注释里常用的编号，及其定义所在：
+IDs used in docs, issues, PRs and code comments, and where each is defined:
 
-| 写法 | 含义 | 定义在哪里 |
+| ID | Meaning | Defined in |
 |---|---|---|
-| **P0–P5** | 移植阶段：P0 准备（宪章、规划、基础设计），P1 地基（类型、编码、表达式框架、系统变量），P2 读取链路，P3 优化器，P4 执行器与会话主流程，P5 外围（字符串 / 时间 / 杂项函数、SHOW / EXPLAIN / SET、内存表、权限、binding、可观测性、HTTP 接口） | [specs/ROADMAP.md](specs/ROADMAP.md) §1 |
-| **Dxx.y**（如 D06.4、D10.6） | 移植**块**：按 Go 包划分的一组函数，整块移植。`Dxx` 是领域（D00 基础、D01 类型与编码、D05 会话、D06 元数据、D07 存储访问、D08 表达式、D09 计划构建与逻辑优化、D10 物理优化（ranger、代价、基数估算等）、D11 统计、D12 执行器、D13 plan cache 与 hint、D14 执行统计、D15 内存……），`.y` 是领域内的块。每块有 `specs/Dxx.y-<名称>/` | [specs/ROADMAP.md](specs/ROADMAP.md) §4 |
-| **ROADMAP 表里的"层" L1–L4** | 阶段**内部**的依赖层次：L1 先做，同层可并行。与下面的移植等级 L1/L2/L3 不是一回事 | [specs/ROADMAP.md](specs/ROADMAP.md) §4 |
-| **L1 / L2 / L3**（代码标注 `// go: Func L1`） | 移植**等级**：L1 忠实移植（换载体后 Go 单测不改断言能通过）；L2 语义不变的 Rust 化改写；L3 用同源的 Rust 实现替代（如 client-rust），要 ADR | [CONSTITUTION.md](CONSTITUTION.md) 第二条 |
-| **M-xxx**（如 M-FT、M-SHARE、M-CH） | 全局**映射规则**：Go 的某种写法在 Rust 中统一怎么改（例如 M-FT：表达式的 `FieldType` 写时复制）。标注写成 `L1 [M-FT]` | [docs/porting/mappings.md](docs/porting/mappings.md) |
-| **N0–N13** | **基础设计** spec（计划表示、会话上下文、并发、表达式求值、chunk、系统变量、可观测性、资源管控、共享元数据……），属于例外；N 系列和 A1、A4 确认后不可逆（宪章第三条 5） | [specs/exceptions/README.md](specs/exceptions/README.md) |
-| **A1–A6** | 实现类**例外**（内存模型、执行模型、缓存、JSON、SIMD、零拷贝读取）；其中 A1、A4 和 N 系列一样不可逆 | 同上 |
-| **B1–B5 / C1–C3 / D1** | 特性类例外：B 不移植的特性，C 新增特性，D1 范围外（TiFlash / MPP）。注意 D1 不是块编号 | 同上 |
-| **X、EXC.\*、DEF.\*** | 不对应真实块的"伪块"，出现在边界桩和 ROADMAP 里：X = 不移植（DDL、写路径、ANALYZE 等，由集群中的 Go TiDB 承担）；EXC.B = 例外 B1–B5 不移植的路径（cascades、代价模型 v1、静态分区）；DEF.MPP = 推迟（TiFlash / MPP） | [specs/ROADMAP.md](specs/ROADMAP.md) 末尾的伪块表、[CONSTITUTION.md](CONSTITUTION.md) 第四条 |
-| `blocked-by:Dxx.y` / `blocked("Dxx.y")` | 边界桩：这里还没移植，等某块完成；登记在 tracker 的 `data/stubs.tsv` | 同上 |
-| **Q1–Qn** | 方法论里已经定下的问题（基线版本、优化器范围、类型与编码等） | [docs/porting/methodology.md](docs/porting/methodology.md) |
-| **ADR nnnn** | 架构决定记录 | [docs/adr/](docs/adr/) |
-| **VS1-nn**、**C2a / C2b** | 纵向切片 VS1 的任务编号，及其检查点（C2a 点查跑通，C2b 扫描类语句跑通） | [specs/VS1-vertical-slice/](specs/VS1-vertical-slice/plan.md) |
-| **T1–Tn** | 单个块 spec 内的任务编号（`tasks.md`） | 各块的 `specs/Dxx.y-*/tasks.md` |
-| **govec** | 与 Go 的差分测试：用 Go v8.5.8 生成输入输出向量，Rust 回放对照 | [tidb-rs-tracker](https://github.com/dulao5/tidb-rs-tracker) |
-| **converge** | 块的移植进度：已移植 / 桩 / 不移植的函数数（`scripts/converge.py`） | [docs/porting/methodology.md](docs/porting/methodology.md) |
-| 主要标签 | `block` 需要负责人决定；`upstream-pitfall` Go TiDB 的上游问题；`depth` 纵向任务（推进算子层之外的层面）；`deferred` 已决定、推迟到之后的块做；`plan` 计划与里程碑；`arch-review` 每周架构评审及跟进；`showcase` 值得展示的工程做法 | [全部标签](https://github.com/dulao5/tidb-rs/labels) |
+| **P0–P5** | Porting phases: P0 preparation (charter, roadmap, foundation designs); P1 foundations (types, encoding, expression framework, system variables); P2 read path; P3 optimizer; P4 executors and the session main flow; P5 periphery (string / time / misc functions, SHOW / EXPLAIN / SET, memory tables, privileges, bindings, observability, HTTP API) | [specs/ROADMAP.md](specs/ROADMAP.md) §1–2 |
+| **Dxx.y** (e.g. D06.4, D10.6) | A porting **block**: a group of Go functions, usually one package, ported as a whole. `Dxx` is the domain (D00 base, D01 types and encoding, D05 session, D06 metadata, D07 storage access, D08 expressions, D09 plan building and logical optimization, D10 physical optimization: ranger, cost, cardinality…, D11 statistics, D12 executors, D13 plan cache and hints, D14 execution stats, D15 memory…), `.y` the block within it. Each block has `specs/Dxx.y-<name>/` | [specs/ROADMAP.md](specs/ROADMAP.md) §4 |
+| **Layers L1–L4 in ROADMAP tables** | Dependency layers **within** a phase: L1 first, same layer in parallel. Not the porting levels below | [specs/ROADMAP.md](specs/ROADMAP.md) §4 |
+| **L1 / L2 / L3** (code markers `// go: Func L1`) | Porting **levels**: L1 faithful port (Go unit tests pass unchanged once carriers are mapped); L2 Rust-style rewrite with the same semantics; L3 replaced by a same-origin Rust implementation (e.g. client-rust), needs an ADR | [CONSTITUTION.md](CONSTITUTION.md) art. 2 |
+| **M-xxx** (e.g. M-FT, M-SHARE, M-CH) | Global **mapping rules**: how a Go idiom is always rewritten in Rust (e.g. M-FT: an expression's `FieldType` is copy-on-write). Markers read `L1 [M-FT]` | [docs/porting/mappings.md](docs/porting/mappings.md) |
+| **N0–N13** | **Foundation design** specs (plan representation, session context, concurrency, expression evaluation, chunk, system variables, observability, resource control, shared metadata…). They are exceptions; once approved, the N series and A1, A4 are irreversible (charter art. 3.5) | [specs/exceptions/README.md](specs/exceptions/README.md) |
+| **A1–A6** | Implementation **exceptions** (memory model, execution model, caches, JSON, SIMD, zero-copy reads); A1 and A4 are irreversible like the N series | same |
+| **B1–B5 / C1–C3 / D1** | Feature exceptions: B = features not ported, C = new features, D1 = out of scope (TiFlash / MPP). D1 is not a block ID | same |
+| **X, EXC.\*, DEF.\*** | Pseudo-blocks used in stubs and ROADMAP: X = not ported (DDL, write path, ANALYZE…; done by Go TiDB in the cluster); EXC.B = paths dropped by exceptions B1–B5 (cascades, cost model v1, static partition pruning); DEF.MPP = deferred (TiFlash / MPP) | pseudo-block table at the end of [specs/ROADMAP.md](specs/ROADMAP.md), [CONSTITUTION.md](CONSTITUTION.md) art. 4 |
+| `blocked-by:Dxx.y` / `blocked("Dxx.y")` | Boundary stub: not ported yet, waits for that block; registered in the tracker's `data/stubs.tsv` | same |
+| **Q1–Qn** | Settled methodology questions (baseline version, optimizer scope, types and encoding…) | [docs/porting/methodology.md](docs/porting/methodology.md) |
+| **ADR nnnn** | Architecture decision record | [docs/adr/](docs/adr/) |
+| **VS1-nn**, **C2a / C2b** | Tasks of the VS1 vertical slice and its checkpoints (C2a: point queries end to end; C2b: scan-type queries) | [specs/VS1-vertical-slice/](specs/VS1-vertical-slice/plan.md) |
+| **T1–Tn** | Task numbers inside one block's spec | each block's `specs/Dxx.y-*/tasks.md` |
+| **govec** | Differential tests against Go: vectors generated by Go v8.5.8, replayed by Rust | [tidb-rs-tracker](https://github.com/dulao5/tidb-rs-tracker) |
+| **converge** | Block progress: functions ported / stubbed / not ported (`scripts/converge.py`) | [docs/porting/methodology.md](docs/porting/methodology.md) |
+| Main labels | `block` needs the owner's decision; `upstream-pitfall` upstream Go TiDB issue; `depth` vertical work beyond the operator layer; `deferred` decided, done in a later block; `plan` plans and milestones; `arch-review` weekly architecture review and follow-ups; `showcase` engineering worth showing | [all labels](https://github.com/dulao5/tidb-rs/labels) |
 
 ## Layout
 
