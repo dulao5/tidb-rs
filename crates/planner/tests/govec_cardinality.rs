@@ -2,9 +2,10 @@
 //! estimation and the read part of the statistics structures, against Go TiDB v8.5.8
 //! (tracker `govec/domains/cardinality.go`, which documents the record format).
 //!
-//! `selectivity` records whose conditions need ranges (D10.4, VS1-25), the IN builtin (D08.9)
-//! or the D10.6 / D10.7 boundaries return `blocked-by:<block>` in tidb-rs: they are counted
-//! per block and must not disagree otherwise (spec D10.6 §6).
+//! `selectivity` records whose conditions use the IN builtin (D08.9: the replay cannot build
+//! the input condition) or reach the D10.6 / D10.7 boundaries return `blocked-by:<block>` in
+//! tidb-rs: they are counted per block and must not disagree otherwise (spec D10.6 §6). The
+//! conditions that build ranges compare against Go since VS1-25 (D10.4).
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -60,10 +61,12 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
 
 /// The `selectivity` records that stop at a boundary, per block, in the committed vectors
 /// (the same on both targets; constitution §7.3, as VS1-10's preprocess replay). They must
-/// drop to 0 when the block lands: D10.4 (VS1-25, range building) and D08.9 (the IN
-/// builtin). A boundary that starts answering, or a new one, fails here; update the pin in
-/// the same PR (and these records then compare against Go).
-const EXPECTED_BLOCKED: [(&str, usize); 2] = [("D08.9", 32), ("D10.4", 410)];
+/// drop to 0 when the block lands: D08.9 (the IN builtin: the 32 records whose conditions
+/// contain `in(...)`, which the replay cannot build before the IN function class is ported).
+/// The 410 D10.4 records (range building) compare against Go since VS1-25. A boundary that
+/// starts answering, or a new one, fails here; update the pin in the same PR (and these
+/// records then compare against Go).
+const EXPECTED_BLOCKED: [(&str, usize); 1] = [("D08.9", 32)];
 
 fn vectors() -> String {
     format!(
@@ -1119,7 +1122,7 @@ fn replay(path: &str) -> BTreeMap<(String, String), usize> {
     for (op, blk) in blocked.keys() {
         assert_eq!(op, "selectivity", "unexpected boundary {blk} in {op}");
         assert!(
-            ["D08.9", "D10.4", "D10.6", "D10.7"].contains(&blk.as_str()),
+            ["D08.9", "D10.6", "D10.7"].contains(&blk.as_str()),
             "unexpected boundary {blk}"
         );
     }

@@ -3,9 +3,8 @@
 //! `Selectivity` and its helpers (D10.6, VS1-29).
 //!
 //! Boundaries (specs/D10.6-cardinality §1.2):
-//! - building ranges (`ranger.ExtractAccessConditionsForColumn`, `BuildColumnRange`,
-//!   `DetachCondAndBuildRangeForIndex`, `MergeDNFItems4Col`) is D10.4 (VS1-25): a condition on
-//!   a column or index of the `HistColl` returns `blocked-by:D10.4` until it lands;
+//! - building ranges is [`crate::ranger`] (D10.4, VS1-25); its own boundary is the IN
+//!   builtin (D08.9) when it rebuilds an IN condition;
 //! - MV index paths (`CollectFilters4MVIndex`, `BuildPartialPaths4MVIndex`) are D10.7;
 //! - TopN-assisted estimation (`GetSelectivityByFilter`), the index row counts from real
 //!   statistics (`getEqualCondSelectivity`, `crossValidationSelectivity`) and the traces are
@@ -31,6 +30,7 @@ use tidb_expression::{
     flatten_dnf_conditions,
 };
 use tidb_model::IndexInfo;
+use tidb_parser::types::UnspecifiedLength;
 use tidb_sessionctx::ranger::types::Range;
 use tidb_statistics::{HistColl, Histogram, column_stats_is_invalid, index_stats_is_invalid};
 use tidb_types::datum::Datum;
@@ -40,6 +40,7 @@ use super::row_count_column::{get_row_count_by_column_ranges, get_row_count_by_i
 use super::row_count_index::get_row_count_by_index_ranges;
 use super::trace::{StatsItem, check_no_trace, record_used_item_stats_status};
 use crate::PlanCtx;
+use crate::ranger::{self, RangeType};
 use crate::util::path::AccessPath;
 
 /// `outOfRangeBetweenRate` (selectivity.go:42), a package variable in Go.
@@ -326,7 +327,7 @@ pub fn selectivity(
         }
 
         let dnf_items = flatten_dnf_conditions(scalar_cond);
-        let dnf_items = ranger_merge_dnf_items4_col(ctx, dnf_items)?;
+        let dnf_items = ranger::merge_dnf_items4_col(&ctx.ranger_ctx(), &dnf_items);
         // If the conditions only contain a single column, we won't handle them.
         if dnf_items.len() <= 1 {
             continue;
@@ -845,17 +846,10 @@ fn find_prefix_of_index_by_col(
     find_prefix_of_index(cols, idx_col_ids)
 }
 
-/// `ranger.RangeType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RangeType {
-    ColumnRangeType,
-    IndexRangeType,
-}
-
 /// getMaskAndRanges.
 ///
-/// Returns Go's `(mask, ranges, partCover, minAccessCondsForDNFCond, err)`. Building the
-/// ranges is D10.4 (module doc); the cached path of an index is used as in Go.
+/// Returns Go's `(mask, ranges, partCover, minAccessCondsForDNFCond, err)`. Go panics on
+/// another range type (`IntRangeType`).
 // go: getMaskAndRanges L1
 fn get_mask_and_ranges(
     ctx: &PlanCtx<'_>,
@@ -870,10 +864,18 @@ fn get_mask_and_ranges(
     let ranges: Vec<Range>;
     let access_conds: Vec<ExprRef>;
     let mut remained_conds: Vec<ExprRef> = Vec::new();
+    let rctx = ctx.ranger_ctx();
     match range_type {
         RangeType::ColumnRangeType => {
-            let conds = ranger_extract_access_conditions_for_column(ctx, exprs, &cols[0])?;
-            (ranges, access_conds) = ranger_build_column_range(ctx, conds, &cols[0])?;
+            let conds = ranger::extract_access_conditions_for_column(&rctx, exprs, &cols[0]);
+            let (r, a, _) = ranger::build_column_range(
+                conds,
+                &rctx,
+                &cols[0].ret_type,
+                UnspecifiedLength,
+                ctx.vars.range_max_size,
+            )?;
+            (ranges, access_conds) = (r, a);
         }
         RangeType::IndexRangeType => {
             if let Some(cached_path) = cached_path {
@@ -883,7 +885,13 @@ fn get_mask_and_ranges(
                 is_dnf = cached_path.is_dnf_cond;
                 min_access_conds_for_dnf_cond = cached_path.min_access_conds_for_dnf_cond;
             } else {
-                let res = ranger_detach_cond_and_build_range_for_index(ctx, exprs, cols, lengths)?;
+                let res = ranger::detach_cond_and_build_range_for_index(
+                    &rctx,
+                    exprs,
+                    cols,
+                    lengths,
+                    ctx.vars.range_max_size,
+                )?;
                 ranges = res.ranges;
                 access_conds = res.access_conds;
                 remained_conds = res.remained_conds;
@@ -891,6 +899,7 @@ fn get_mask_and_ranges(
                 min_access_conds_for_dnf_cond = res.min_access_conds_for_dnf_cond;
             }
         }
+        RangeType::IntRangeType => panic!("should never be here"),
     }
     let mut mask: i64 = 0;
     if is_dnf && !access_conds.is_empty() {
@@ -912,58 +921,6 @@ fn get_mask_and_ranges(
         }
     }
     Ok((mask, ranges, false, 0))
-}
-
-/// The result of `ranger.DetachCondAndBuildRangeForIndex` that `getMaskAndRanges` reads.
-struct DetachRangeResult {
-    ranges: Vec<Range>,
-    access_conds: Vec<ExprRef>,
-    remained_conds: Vec<ExprRef>,
-    is_dnf_cond: bool,
-    min_access_conds_for_dnf_cond: isize,
-}
-
-/// `ranger.ExtractAccessConditionsForColumn`.
-// glue: boundary of ExtractAccessConditionsForColumn (another block), blocked-by:D10.4 (VS1-25: ranger)
-fn ranger_extract_access_conditions_for_column(
-    _ctx: &PlanCtx<'_>,
-    _conds: &[ExprRef],
-    _col: &Column,
-) -> Result<Vec<ExprRef>, Error> {
-    Err(blocked("D10.4", "ranger.ExtractAccessConditionsForColumn"))
-}
-
-/// `ranger.BuildColumnRange(accessConds, ctx.GetRangerCtx(), col.RetType,
-/// types.UnspecifiedLength, ctx.GetSessionVars().RangeMaxSize)`: the ranges and the access
-/// conditions.
-// glue: boundary of BuildColumnRange (another block), blocked-by:D10.4 (VS1-25: ranger)
-fn ranger_build_column_range(
-    _ctx: &PlanCtx<'_>,
-    _conds: Vec<ExprRef>,
-    _col: &Column,
-) -> Result<(Vec<Range>, Vec<ExprRef>), Error> {
-    Err(blocked("D10.4", "ranger.BuildColumnRange"))
-}
-
-/// `ranger.DetachCondAndBuildRangeForIndex(ctx.GetRangerCtx(), exprs, cols, lengths,
-/// ctx.GetSessionVars().RangeMaxSize)`.
-// glue: boundary of DetachCondAndBuildRangeForIndex (another block), blocked-by:D10.4 (VS1-25: ranger)
-fn ranger_detach_cond_and_build_range_for_index(
-    _ctx: &PlanCtx<'_>,
-    _conds: &[ExprRef],
-    _cols: &[Arc<Column>],
-    _lengths: &[isize],
-) -> Result<DetachRangeResult, Error> {
-    Err(blocked("D10.4", "ranger.DetachCondAndBuildRangeForIndex"))
-}
-
-/// `ranger.MergeDNFItems4Col(ctx.GetRangerCtx(), dnfItems)`.
-// glue: boundary of MergeDNFItems4Col (another block), blocked-by:D10.4 (VS1-25: ranger)
-fn ranger_merge_dnf_items4_col(
-    _ctx: &PlanCtx<'_>,
-    _dnf_items: Vec<ExprRef>,
-) -> Result<Vec<ExprRef>, Error> {
-    Err(blocked("D10.4", "ranger.MergeDNFItems4Col"))
 }
 
 /// getMaskAndSelectivityForMVIndex.

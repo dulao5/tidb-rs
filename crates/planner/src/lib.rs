@@ -32,6 +32,7 @@ pub mod optimize;
 pub mod physicalop;
 pub mod planctx;
 pub mod property;
+pub mod ranger;
 pub mod util;
 
 #[cfg(test)]
