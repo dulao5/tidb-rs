@@ -22,6 +22,7 @@
 pub mod adapter;
 pub mod builder;
 pub mod compiler;
+pub mod consistency;
 pub mod detach;
 pub mod exec;
 pub mod glue;

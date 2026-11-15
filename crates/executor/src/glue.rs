@@ -11,30 +11,18 @@
 //!   `ExecStmt.PointGet` reads, the cached point get executor.
 //! - [`Plan`]: Go's `base.Plan`. The new stack only builds physical plans in VS1 (no
 //!   `Execute`, `Set`, `Simple`, ... plans), so it is the physical plan.
-//! - [`PointGetPlan`]: the fields of `plannercore.PointGetPlan` (D10.8, VS1-11) that the
-//!   point get executor (D12.1, VS1-12) reads. VS1-11 replaces it with the planner's type
-//!   (same field names); the executor builder downcasts the plan to it.
-//! - [`encode_unique_index_key`] / [`encode_unique_index_values_for_key`]: the unique-index
-//!   key encoding of `plannercore` (`util.go`, D09.0), boundary stubs.
 
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use futures::future::BoxFuture;
 use tidb_base::Error;
-use tidb_base::blocked::blocked;
-use tidb_expression::Schema;
-use tidb_kv::key::Handle;
 use tidb_kv::kv::Snapshot;
 use tidb_memory::sqlkiller::SqlKiller;
-use tidb_model::{ColumnInfo, IndexInfo, TableInfo};
 use tidb_parser::model::CIStr;
 use tidb_parser::types::FieldType;
-use tidb_planner::physicalop::BasePhysicalPlan;
-use tidb_planner::{PhysicalKind, PhysicalPlan, PhysicalPlanRef};
 use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_sessionctx::variable::session::SessionVars;
-use tidb_types::datum::Datum;
 
 use crate::internal::exec::executor::Executor;
 
@@ -137,139 +125,6 @@ pub trait PointGetExecutor {
     /// `partitionDefIdx != nil`.
     // glue: Go field PointGetExecutor.partitionDefIdx (D12.1)
     fn is_partitioned(&self) -> bool;
-}
-
-/// `plannercore.PointGetPlan` (`pkg/planner/core/point_get_plan.go`, D10.8, VS1-11): the
-/// fields the point get executor reads, with Go's names. VS1-11 brings the real type (its
-/// `Init`, `PrunePartitions`, `LoadTableStats`, ...) to the planner and removes this one.
-///
-/// Go's `PartitionIdx *int` is `Option<isize>`; `TblInfo` / `IndexInfo` / `Columns` share
-/// the info schema's metadata (`plan-cache-clone:"shallow"`, N13).
-#[derive(Clone, Default)]
-pub struct PointGetPlan {
-    pub base: BasePhysicalPlan,
-    /// `ID()`.
-    pub id: i32,
-    /// `Schema()` (Go's `schema` field).
-    pub schema: Schema,
-    /// explicit partition selection
-    pub partition_names: Vec<CIStr>,
-    pub tbl_info: Arc<TableInfo>,
-    pub index_info: Option<Arc<IndexInfo>>,
-    pub partition_idx: Option<isize>,
-    pub handle: Option<Handle>,
-    pub index_values: Vec<Datum>,
-    pub lock: bool,
-    pub lock_wait_time: i64,
-    pub columns: Vec<Arc<ColumnInfo>>,
-}
-
-impl PhysicalPlan for PointGetPlan {
-    // glue: M-IFACE (the carrier's kind)
-    fn kind(&self) -> PhysicalKind {
-        PhysicalKind::PointGet
-    }
-    // glue: M-IFACE
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    // glue: M-IFACE
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    // glue: M-SELF
-    fn as_dyn(&self) -> &dyn PhysicalPlan {
-        self
-    }
-    // glue: M-SELF (Go PointGetPlan embeds baseimpl.Plan; the carrier keeps a base for the trait)
-    fn base_physical(&self) -> &BasePhysicalPlan {
-        &self.base
-    }
-    // glue: M-SELF
-    fn base_physical_mut(&mut self) -> &mut BasePhysicalPlan {
-        &mut self.base
-    }
-    // glue: N1 §3.5
-    fn clone_node(&self) -> PhysicalPlanRef {
-        Arc::new(self.clone())
-    }
-    /// `PointGetPlan.Schema()`: its own schema.
-    // glue: accessor (Go PointGetPlan.Schema, D10.8)
-    fn schema(&self) -> &Schema {
-        &self.schema
-    }
-    // glue: accessor (Go PointGetPlan.SetSchema, D10.8)
-    fn set_schema(&mut self, schema: Schema) {
-        self.schema = schema;
-    }
-    // glue: accessor (Go baseimpl.Plan.ID)
-    fn id(&self) -> i32 {
-        self.id
-    }
-}
-
-impl PointGetPlan {
-    /// PrunePartitions will check which partition to use; returns true if no matching
-    /// partition. A table without partitions needs no pruning (Go's first branch); the rest
-    /// is VS1-11's (and partitioned tables are refused by the planner, VS1 plan §3.2).
-    // glue: stub of PointGetPlan.PrunePartitions, blocked-by:D10.8 (partition pruning of a point get)
-    pub fn prune_partitions(&self) -> Result<bool, Error> {
-        if self.tbl_info.get_partition_info().is_none() {
-            return Ok(false);
-        }
-        Err(blocked("D10.8", "partition pruning of a point get"))
-    }
-
-    /// `PointGetPlan.GetAvgRowSize()`: the row size estimate of the closest-adaptive replica
-    /// read adjuster (cardinality, D10.6 / D10.8).
-    // glue: stub of PointGetPlan.GetAvgRowSize, blocked-by:D10.8 (row size of a point get for tidb_replica_read=closest-adaptive)
-    pub fn get_avg_row_size(&self) -> Result<f64, Error> {
-        Err(blocked(
-            "D10.8",
-            "the row size of a point get (tidb_replica_read=closest-adaptive)",
-        ))
-    }
-}
-
-/// EncodeUniqueIndexKey encodes a unique index key (`pkg/planner/core/util.go`, D09.0).
-/// Not in any VS1 work item's function list (VS1-12 spec §5): a unique-index point get stops
-/// here.
-// glue: stub of EncodeUniqueIndexKey, blocked-by:D09.0 (unique index key of a point get)
-pub fn encode_unique_index_key(
-    tbl_info: &TableInfo,
-    idx_info: &IndexInfo,
-    idx_vals: &[Datum],
-    t_id: i64,
-) -> Result<Vec<u8>, Error> {
-    let _ = (tbl_info, idx_info, idx_vals, t_id);
-    Err(blocked("D09.0", "the unique index key of a point get"))
-}
-
-/// EncodeUniqueIndexValuesForKey encodes unique index values for a key
-/// (`pkg/planner/core/util.go`, D09.0; see [`encode_unique_index_key`]).
-// glue: stub of EncodeUniqueIndexValuesForKey, blocked-by:D09.0 (clustered index handle of a point get)
-pub fn encode_unique_index_values_for_key(
-    tbl_info: &TableInfo,
-    idx_info: &IndexInfo,
-    idx_vals: &[Datum],
-) -> Result<Vec<u8>, Error> {
-    let _ = (tbl_info, idx_info, idx_vals);
-    Err(blocked(
-        "D09.0",
-        "the clustered index handle of a point get on the primary key index",
-    ))
-}
-
-/// `(&consistency.Reporter{...}).ReportLookupInconsistent(...)`
-/// (`pkg/util/logutil/consistency`, D00.3): the error (and log) of an index entry whose
-/// row is missing.
-// glue: stub of Reporter.ReportLookupInconsistent, blocked-by:D00.3 (data inconsistency report of a point get)
-pub fn report_lookup_inconsistent(tbl_info: &TableInfo, idx_info: &IndexInfo) -> Error {
-    let _ = (tbl_info, idx_info);
-    blocked(
-        "D00.3",
-        "the data inconsistency report of a unique index point get",
-    )
 }
 
 /// client-go `txnsnapshot.SnapshotRuntimeStats`: the RPC counts, backoffs and TiKV time

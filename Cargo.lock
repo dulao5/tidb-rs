@@ -3978,6 +3978,7 @@ dependencies = [
  "tidb-execdetails",
  "tidb-expr-pushdown",
  "tidb-expression",
+ "tidb-infoschema",
  "tidb-kv",
  "tidb-model",
  "tidb-parser",

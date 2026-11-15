@@ -27,7 +27,7 @@ BatchPointGet、TableReader（VS1-34）、IndexReader、IndexLookUp、IndexMerge
 1. **会话（N2）。** Go 的执行器保存 `e.Ctx()`，在 `Next` 中读会话。Rust 的执行器不持有会话：`Next` 要读的会话状态（表达式上下文、时区、`IsPessimisticReadConsistency`、`tidb_enable_point_get_cache`）在 `Init` 时取一份；语句状态读 `ExecCtx`。`Init` 因此多一个会话参数，`glue::PointGetExecutor::init(sctx, plan)`（`ExecStmt.PointGet` 复用缓存执行器时调用，#222）随之改了签名。
 2. **`SessionContext` 新增两项**（VS1-14 由会话实现）：`get_expr_ctx`（`GetExprCtx`）、`get_snapshot_with_stmt_read_ts`（`GetSnapshotWithStmtReadTS`，异步，provider 可能要等 TSO）。
 3. **`executorBuilder.build` 改为 async**：建读取执行器要取语句的快照，取快照可能等 TSO；Go 在这里阻塞 goroutine，Rust 在会话的 task 上 await（N3）。`ExecStmt.buildExecutor` 随之改为 async。以后带子执行器的 build 递归时要 `Box::pin`。
-4. **计划**：`PointGetPlan` 属于 VS1-11（D10.8），尚未开工。`glue::PointGetPlan` 是承载类型，字段名与 Go 相同（`TblInfo`、`IndexInfo`、`Handle`、`IndexValues`、`PartitionIdx`、`Lock`、`Columns`、`schema`……），实现 `PhysicalPlan`，kind 为 `PointGet`。builder 把计划向下转型成它。VS1-11 把真正的类型放进 planner、删掉 glue 中的这个，builder 只改一处 import。`PrunePartitions`（有分区信息时）和 `GetAvgRowSize` 是 `blocked-by:D10.8` 的桩。
+4. **计划**：planner 的 `PointGetPlan`（D10.8，VS1-11；[D10.8 spec](../D10.8-point-get/spec.md) §2 第 5 条）。VS1-12 时用的承载类型 `glue::PointGetPlan` 已删除，builder 改一处 import，计划 ID 从 `PhysicalPlan::id()` 读。有分区的表在计划的副本上裁剪（Go 改写缓存计划的 `PartitionIdx`；Rust 的计划是共享的 `Arc`）；按值裁剪是 `blocked-by:D06.4`，`GetAvgRowSize` 是 `blocked-by:D10.5`。
 5. **共享（N13）。** 解码器的 `ColInfo.ft` 是 schema 列 `RetType` 的 `Arc`（Go `Ft: col.RetType`），每次 `Init` 建一次，每行解码只借用；虚拟列的 `virtualColumnRetFieldTypes` 同样共享 schema 的 `Arc`；`fillRowChecksum` 解码时借用表列的 `&FieldType`（Go `&col.FieldType`）。为此 `table::column::fill_virtual_column_value`（D06.4）的类型参数改为 `F: Borrow<FieldType>`，与 `chunk::new_chunk_with_capacity` 相同。单测检查执行器和 schema 是同一个 `Arc`。
 6. **快照的运行时统计**：client-go 的 `SnapshotRuntimeStats` 在 client-rust 中没有（D07.1 差异 2），`glue::SnapshotRuntimeStats` 是一个总为空的替身，方法按 Go 对空值的结果返回。`Close` 注册统计时注册副本（Go 注册指针），内容为空，所以没有差别。
 7. **KV 的 `context.Context`**：用 `Context::background()`（M-GOCTX）；Go 的 ctx 中的 request source 已经由 provider 设置在快照上。
@@ -40,8 +40,6 @@ BatchPointGet、TableReader（VS1-34）、IndexReader、IndexLookUp、IndexMerge
 | `lockKeyBase` | `e.lock` 为真 | `blocked-by:X`（不可达，build 已拒绝） |
 | `get` | 事务的 mem buffer / 悲观锁缓存 | tidb-rs 的事务从不写，`txn.Valid() && !txn.IsReadOnly()` 恒为假，直接读快照 |
 | `get` | `LOCK TABLES ... READ` 且 `tidb_enable_point_get_cache` | `cacheDB.UnionGet` 是 X 块：`blocked-by:X` |
-| `Next` | 唯一索引点查：`EncodeUniqueIndexKey` / `EncodeUniqueIndexValuesForKey`（`pkg/planner/core/util.go`，D09.0） | `blocked-by:D09.0`（见 §5 第 1 条） |
-| `Next` | 索引有、行没有：`consistency.Reporter.ReportLookupInconsistent`（D00.3） | `blocked-by:D00.3` |
 | `buildPointGet` | 分区被裁剪为空（`TableDualExec`，D12.2） | `blocked-by:D12.2`；目前到不了（分区表在 `PrunePartitions` 已停） |
 | `buildPointGet` | 缓存表（`getCacheTable`） | `blocked-by:D06.4`（第 2 部分） |
 | `buildPointGet` | `tidb_replica_read=closest-adaptive`（`GetAvgRowSize`） | `blocked-by:D10.8` |
@@ -59,7 +57,7 @@ BatchPointGet、TableReader（VS1-34）、IndexReader、IndexLookUp、IndexMerge
 
 ## 5. 待定与可能的上游问题
 
-1. **唯一索引点查不在任何 VS1 工作项中。** `EncodeUniqueIndexKey` / `EncodeUniqueIndexValuesForKey` 在 tracker 中属于 D09.0，但 VS1 的函数清单（VS1-10、VS1-11）都没有它们，而 plan 的 C2 形态包括"唯一索引等值"点查。建议并入 VS1-11（与 `PointGetPlan` 一起），否则 ab 的唯一索引 `Point_Get` 形态会一直回退。
+1. **唯一索引点查**（已解决）：`EncodeUniqueIndexKey` / `EncodeUniqueIndexValuesForKey` 按决定并入 VS1-11，与 `ReportLookupInconsistent` 一起移植（D10.8 spec §1.1、§6），唯一索引路径经 govec `fastplan` 的 `uidx` 记录回放（D10.8 spec §7）。
 2. **可能的上游问题（不提交）**：`NewRowDecoder` 把 `_tidb_rowid`（`ExtraHandleID`）当作 handle 列；如果表是聚簇（common handle）表，`ChunkDecoder.tryAppendHandleColumn` 会把 common handle 的第一列按它自己的类型解码进 `_tidb_rowid` 的 BIGINT 列，`chunk.Column.AppendMyDecimal` 等通过 unsafe 写入 8 字节的 element buffer，越界写坏堆。SQL 层到不了（聚簇表没有 `_tidb_rowid`，planner 拒绝这个名字），govec 生成器最初构造了这种用例，表现为同一次运行中别的记录的字符串被清零、结果不确定；生成器已排除这种用例（tracker `govec/domains/pointget.go`）。Rust 的同一路径不会越界（安全代码），结果不保证与 Go 相同。
 3. tracker 的 `table` 领域 `decode_row`（D06.4）用 `var enc rowcodec.Encoder` 编码行，`Enable` 为 false，所以那批向量全是旧行格式（v1）。`pointget` 领域用 `Enable: true`，覆盖 v2。`table` 领域是否补 v2 由 D06.4 第 2 部分决定。
 
@@ -68,7 +66,7 @@ BatchPointGet、TableReader（VS1-34）、IndexReader、IndexLookUp、IndexMerge
 - **govec 领域 `pointget`**（tracker `govec/domains/pointget.go`）：`NewRowDecoder` + `DecodeRowValToChunk`，共 5850 条，其中 `decode_row_val` 4050 条（下面是最初 3600 条的分布）：行格式 v1 720 条、v2 2880 条（其中 large 452、带 checksum 726、含 NULL 列 728），common handle 536 条（含前缀列、需要 restored data 的列），`_tidb_rowid` 883 条，虚拟列 272 条；每行只存部分列，其余按 origin default 读（"新增列"），错误 649 条（默认值转换失败等）。`crates/executor/tests/govec_pointget.rs` 回放每条记录两次（第二次结果必须相同：每次解码只借用 field type），再把没有错误、没有虚拟列的记录交给完整的点查执行器（`glue::PointGetPlan` + 内存快照），行必须相同，且只读了那一个 record key。
 - **行 checksum**（`row_checksum`，1800 条）：`fillRowChecksum` 写进新 chunk 的 `_tidb_row_checksum` 列，与 Go 比较每列（未写 / NULL / checksum 字符串）和错误。schema 中 checksum 列位置随机；int handle、`_tidb_rowid` 表与聚簇表；行只含部分列（新增列取 origin default，默认值转换失败的报错 359 条）；行格式 v1 的 checksum 为 NULL（356 条）；约一半的表带一个 TIMESTAMP 列；会话时区见 §4 第 3 条。另有 450 条 `decode_row_val` 的 schema 含 checksum 列：v2 时解码器给 NULL，v1 时 Go 的 `getColInfoByID(-4)` 为 nil 而 panic，Rust 同样 panic。Go 侧经 `go:linkname` 调用未导出的 `fillRowChecksum`。
 - **record key**：`pointget` 不重复 handle 编码的向量。`tablecodec` 领域的 `keys` 记录（`EncodeRowKeyWithHandle`，int / common / partition handle，`rowh`）经点查执行器回放，执行器读的 key 必须等于 Go 的 `rowh`（评审要求：handle 编码与 VS1-18 的 snapshot `Get` 共用一套向量；VS1-18 本身没有 govec 领域，它读的 key 就是这一份）。
-- 唯一索引路径（索引 key、`decode_handle_in_index_value`、全局索引分区 ID、不一致错误）要等 `EncodeUniqueIndexKey` 等移植后测试，已写入 VS1-11 的完成条件。
-- **单测**（`point_get/tests.rs`）：int handle 读行（handle 列、存储列、新增列的默认值）、快照选项、读到的 key；行不存在；`Init` 复用后读新 handle、虚拟列求值；`Init` 共享 schema 的 `Arc<FieldType>`；`FOR UPDATE` / 分区表 / 缓存表 / 本地临时表 + `tidb_snapshot` / 唯一索引各自停在对应的块或 Go 的错误；`GetPhysID`、`matchPartitionNames`、`runtimeStatsWithSnapshot`。
+- 唯一索引路径（索引 key、`decode_handle_in_index_value`、restored data、全局索引分区 ID、不一致错误）：govec `fastplan` 的 `uidx` 记录经执行器回放（`crates/executor/tests/govec_fastplan_uidx.rs`，VS1-11，D10.8 spec §7），单测 `unique_index_point_get`。
+- **单测**（`point_get/tests.rs`）：int handle 读行（handle 列、存储列、新增列的默认值）、快照选项、读到的 key；行不存在；`Init` 复用后读新 handle、虚拟列求值；`Init` 共享 schema 的 `Arc<FieldType>`；`FOR UPDATE` / 分区表 / 缓存表 / 本地临时表 + `tidb_snapshot` 各自停在对应的块或 Go 的错误；`GetPhysID`、`matchPartitionNames`、`runtimeStatsWithSnapshot`。
 - CI：`govec_pointget` 也在 `TZ=America/Sao_Paulo` 下运行，arm64 job 回放 arm64 向量。
 - ab `Point_Get`：要等 VS1-11（`TryFastPlan` / `PointGetPlan`）和 VS1-14（会话）接上才能跑，属于 VS1-20 的集成验收。

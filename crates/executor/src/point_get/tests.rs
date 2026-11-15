@@ -143,14 +143,15 @@ fn plan(tbl: &Arc<TableInfo>, offs: &[usize], handle: i64) -> PointGetPlan {
             })
             .collect(),
     );
-    PointGetPlan {
-        id: 7,
+    let mut p = PointGetPlan {
         schema,
         tbl_info: Arc::clone(tbl),
         handle: Some(Handle::Int(IntHandle(handle))),
         columns: cols.to_vec(),
         ..PointGetPlan::default()
-    }
+    };
+    p.set_id(7);
+    p
 }
 
 /// The stored row of handle `h` (row format v2): only `c` (d was added later).
@@ -301,7 +302,7 @@ async fn locks_and_unported_paths_stop_at_their_blocks() {
     let err = build(&mut s, p).await.err().unwrap();
     assert_eq!(blocked_by(&err), Some("X"));
 
-    // Partitioned table: pruning is VS1-11's.
+    // Partitioned table: pruning by value needs the partitioned table (D06.4 part 2).
     let pt = tweak(|t| {
         t.partition = Some(Box::new(tidb_model::PartitionInfo {
             enable: true,
@@ -309,7 +310,7 @@ async fn locks_and_unported_paths_stop_at_their_blocks() {
         }))
     });
     let err = build(&mut s, plan(&pt, &[0], 5)).await.err().unwrap();
-    assert_eq!(blocked_by(&err), Some("D10.8"));
+    assert_eq!(blocked_by(&err), Some("D06.4"));
 
     // Cached table: D06.4 part 2.
     let ct = tweak(|t| t.table_cache_status_type = tidb_model::TableCacheStatusEnable);
@@ -325,21 +326,81 @@ async fn locks_and_unported_paths_stop_at_their_blocks() {
         "can not read local temporary table when 'tidb_snapshot' is set"
     );
     s.vars.snapshot_ts = 0;
+}
 
-    // A unique index point get: the key encoding is D09.0's.
-    let mut p = plan(&tbl, &[0, 4], 0);
-    p.handle = None;
-    p.index_info = Some(Arc::clone(&tbl.indices.as_ref().unwrap()[1]));
+/// A unique index point get (`u = 3`): the index key, the handle in the index value, the row;
+/// no index entry; an index entry without its row (the inconsistency error).
+#[tokio::test]
+async fn unique_index_point_get() {
+    let tbl = table();
+    let idx = Arc::clone(&tbl.indices.as_ref().unwrap()[1]);
     let mut d = Datum::default();
     d.set_int64(3);
-    p.index_values = vec![d];
-    let mut e = build(&mut s, p).await.unwrap();
-    let ctx = ExecCtx::new(s.vars.stmt_ctx_arc());
-    exec::open(&ctx, e.as_mut()).await.unwrap();
-    let mut chk = exec::new_first_chunk(e.as_ref());
-    let err = exec::next(&ctx, e.as_mut(), &mut chk).await.unwrap_err();
-    assert_eq!(blocked_by(&err), Some("D09.0"));
+    let mut enc_d = Vec::new();
+    tidb_codec::encode_key(&tidb_base::gostd::time::utc(), &mut enc_d, &[d.clone()]).unwrap();
+    let idx_key = tablecodec::encode_index_seek_key(100, 2, &enc_d).0;
+    let idx_val =
+        tablecodec::encode_handle_in_unique_index_value(&Handle::Int(IntHandle(5)), false);
+    let row_key = tablecodec::encode_row_key_with_handle(100, &Handle::Int(IntHandle(5))).0;
+    let mk_plan = || {
+        let mut p = plan(&tbl, &[0, 1], 0);
+        p.handle = None;
+        p.index_info = Some(Arc::clone(&idx));
+        p.index_values = vec![d.clone()];
+        p
+    };
+    async fn run(
+        snap: MemSnapshot,
+        p: PointGetPlan,
+    ) -> (MockSession, Result<Vec<Vec<Datum>>, Error>, Vec<Vec<u8>>) {
+        let snap = Arc::new(snap);
+        let mut s = MockSession::new(u64::MAX);
+        s.snapshot = Some(Arc::clone(&snap) as Arc<dyn Snapshot>);
+        let s = &mut s;
+        let mut e = build(s, p).await.unwrap();
+        let ctx = ExecCtx::new(s.vars.stmt_ctx_arc());
+        exec::open(&ctx, e.as_mut()).await.unwrap();
+        let mut chk = exec::new_first_chunk(e.as_ref());
+        let res = exec::next(&ctx, e.as_mut(), &mut chk).await.map(|()| {
+            let fts = [
+                tidb_types::field_type::new_field_type(tidb_base::mysql::TypeLonglong),
+                tidb_types::field_type::new_field_type(tidb_base::mysql::TypeVarchar),
+            ];
+            (0..chk.num_rows())
+                .map(|i| chk.get_row(i).get_datum_row(&fts))
+                .collect()
+        });
+        drop(e);
+        let gets = snap.gets.lock().clone();
+        (std::mem::replace(s, MockSession::new(u64::MAX)), res, gets)
+    }
+
+    // The index entry and the row.
+    let mut snap = snapshot_with_row(100, 5, "x");
+    snap.data.insert(idx_key.clone(), idx_val.clone());
+    let (s, rows, gets) = run(snap, mk_plan()).await;
+    let rows = rows.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].get_int64(), 5);
+    assert_eq!(rows[0][1].get_string(), b"x");
+    assert_eq!(gets, [idx_key.clone(), row_key.clone()]);
     assert_eq!(s.vars.stmt_ctx().index_names, ["t:u"]);
+
+    // No index entry: no row, the row key is not read.
+    let (_, rows, gets) = run(MemSnapshot::default(), mk_plan()).await;
+    assert!(rows.unwrap().is_empty());
+    assert_eq!(gets, std::slice::from_ref(&idx_key));
+
+    // The index entry without its row: Go's ReportLookupInconsistent error.
+    let mut snap = MemSnapshot::default();
+    snap.data.insert(idx_key.clone(), idx_val);
+    let (_, rows, gets) = run(snap, mk_plan()).await;
+    let err = rows.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "[executor:8133]data inconsistency in table: t, index: u, index-count:1 != record-count:0"
+    );
+    assert_eq!(gets, [idx_key, row_key]);
 }
 
 #[test]
