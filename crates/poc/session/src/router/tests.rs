@@ -992,6 +992,25 @@ fn closed_stmt_lives_until_txn_end() {
     assert_eq!(e.code, 1243, "{e:?}");
 }
 
+/// Autocommit: `CLOSE 1; PREPARE …; EXECUTE 1`. Go's `PrepareStmt` ends with
+/// `rollbackOnError`, which outside a transaction runs `cleanRetryInfo`: statement 1 is gone
+/// before the EXECUTE (1243), on both engines.
+#[test]
+fn autocommit_close_then_prepare() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    r.close(&mut p, 1);
+    assert!(r.owner(1).is_some());
+    block_on(r.prepare(&mut p, 2, POINT)).unwrap();
+    assert!(p.log.contains(&"close 1".to_owned()));
+    assert_eq!(r.owner(1), None);
+    assert!(r.owner(2).is_some());
+    let e = block_on(r.execute(&mut p, 1, vec![])).unwrap_err();
+    assert_eq!(e.code, 1243, "{e:?}");
+}
+
 /// Autocommit: `CLOSE` followed by a statement that the PoC runs. Go removes the closed
 /// statement at the end of that statement (its autocommit transaction): the PoC's copy is
 /// closed and the new session's statement removed (it no longer counts toward

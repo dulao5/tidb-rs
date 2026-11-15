@@ -651,7 +651,25 @@ impl Router {
     }
 
     /// `COM_STMT_PREPARE` (§4.7): both sides prepare; the table decides the owner.
+    ///
+    /// A PREPARE ends a statement like a query: Go's `PrepareStmt` calls `rollbackOnError`
+    /// after the prepare executor whether it succeeded or not (the parse is inside it), which
+    /// outside a transaction is `RollbackTxn` → `cleanRetryInfo`. So the transaction-end
+    /// check runs after it too.
     pub async fn prepare(
+        &mut self,
+        poc: &mut dyn PocEngine,
+        stmt_id: u32,
+        sql: &str,
+    ) -> Result<PreparedInfo, SqlError> {
+        let r = self.prepare_inner(poc, stmt_id, sql).await;
+        self.stmt_ended = true;
+        self.end_of_command(poc);
+        r
+    }
+
+    /// [`Router::prepare`] before the transaction-end check.
+    async fn prepare_inner(
         &mut self,
         poc: &mut dyn PocEngine,
         stmt_id: u32,

@@ -76,8 +76,9 @@ converge：D13.1 `--item VS1-15` 44 个函数，24 个移植（L1 13、L2 11）+
 Go：`COM_STMT_CLOSE`（`DropPreparedStmt`）只登记，语句在事务结束时由 `cleanRetryInfo` 删除，之前仍可执行。路由器原来立刻丢掉归属、PoC 立刻关闭。现在：
 
 - `Router::close`：归属为 both / new 时把 CLOSE 交给新会话（只登记）；PoC 的副本**不关**；语句记入 `closed`，归属保留。路由器不认识的 id 仍立即交给 PoC（它报 Go 的错误）。
-- 每个命令（`COM_QUERY`、`COM_STMT_EXECUTE`）结束时，如果这次有语句执行过（任一方）、两边都不在事务中，事务就结束了：关闭 PoC 的副本、让新会话执行 `cleanRetryInfo`（`clean_closed_prepared_stmts`；若语句由新栈执行，新会话已自行做过，再做一次无影响）、忘掉归属。解析失败的命令不算语句结束（Go 不会走到 `finishStmt`）。
-- 测试：`closed_stmt_lives_until_txn_end`（`BEGIN; PREPARE; CLOSE; EXECUTE` 在事务中成功，COMMIT 之后两边都没有了，EXECUTE 报 1243）；`autocommit_close_then_poc_statement`（autocommit 下 CLOSE 之后由 PoC 执行一条语句，结束时 PoC 关闭副本、新会话删掉语句，不再计入上限）；`close_by_owner` 改为下一条语句结束时才关闭。
+- 每个命令（`COM_QUERY`、`COM_STMT_EXECUTE`、`COM_STMT_PREPARE`）结束时，如果这次有语句执行过（任一方）、两边都不在事务中，事务就结束了：关闭 PoC 的副本、让新会话执行 `cleanRetryInfo`（`clean_closed_prepared_stmts`；若语句由新栈执行，新会话已自行做过，再做一次无影响）、忘掉归属。解析失败的 `COM_QUERY` 不算语句结束（Go 不会走到 `finishStmt`）。PREPARE 无论成败都算：Go 的 `PrepareStmt` 在预处理执行器之后总是调用 `rollbackOnError`，事务外即 `RollbackTxn` → `cleanRetryInfo`（解析在执行器内部，所以解析失败也算）。
+- 已知的提前一步：EXECUTE 一个不存在的 id 时，Go 在任何事务操作之前就返回（不清理），路由器却把 PoC 的每个结果都记为语句结束，所以这种情况下已关闭的语句会比 Go 早一个命令被删除。只影响"关闭之后、事务结束之前执行一个不存在的语句"这一种顺序，记为已知差异。
+- 测试：`autocommit_close_then_prepare`（autocommit 下 `CLOSE 1; PREPARE; EXECUTE 1` 报 1243，与 Go 相同）；`closed_stmt_lives_until_txn_end`（`BEGIN; PREPARE; CLOSE; EXECUTE` 在事务中成功，COMMIT 之后两边都没有了，EXECUTE 报 1243）；`autocommit_close_then_poc_statement`（autocommit 下 CLOSE 之后由 PoC 执行一条语句，结束时 PoC 关闭副本、新会话删掉语句，不再计入上限）；`close_by_owner` 改为下一条语句结束时才关闭。
 - `--new-stack=off`（没有路由器）时 PoC 仍立即关闭：那是 PoC 本身的行为，不在本项。
 
 ### 4.3 `cleanRetryInfo` 的 Go 坑（D13.1 tasks，照搬）
@@ -90,9 +91,10 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 2. `parser.NormalizeDigest` 未移植（D02.2）：`NormalizedSQL` / `SQLDigest` 为空，只影响 Top SQL、语句摘要和 cache key，新栈都没有。
 3. 语句标签 `stmtctx.GetStmtLabel` 只有 SELECT（其余 `blocked-by:D12.0`）。
 4. `checkPreparedPriv`：没有权限管理器（D04.1，与 Go 未注册权限管理器时相同），`CheckTableLock` 属写路径。
-5. `PrepareExec`：解析错误 / warning 交给 PoC（`D02.1`）；语句文本用整个 SQL（只允许一条语句）；Top SQL 未移植（D14.3）。
-6. `planCacheStmtProcessor` 不收集表列表（只给 cache key 的统计信息用，A3）。
-7. 元数据锁的桩返回 `Blocked` 而不是像 Go 那样吞掉错误（§3.3）。
+5. `PlanBuilder.Build` 还不返回计划：`GeneratePlanCacheStmtWithAST` 在 Build 之后返回 `blocked-by:D09.1`，而不是带着空的列定义继续。
+6. `PrepareExec`：解析错误 / warning 交给 PoC（`D02.1`）；语句文本用整个 SQL（只允许一条语句）；Top SQL 未移植（D14.3）。
+7. `planCacheStmtProcessor` 不收集表列表（只给 cache key 的统计信息用，A3）。
+8. 元数据锁的桩返回 `Blocked` 而不是像 Go 那样吞掉错误（§3.3）。
 
 ## 6. 边界桩（登记在 tracker `data/stubs.tsv`）
 

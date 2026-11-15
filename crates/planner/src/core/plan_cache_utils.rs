@@ -329,8 +329,13 @@ pub fn generate_plan_cache_stmt_with_ast(
     let mut dest_builder = new_plan_builder(&[]);
     let _ = dest_builder.init(vars);
     dest_builder.build(&prepared.stmt)?;
-    // p: Build returns the plan with D09.1 (VS1-21); it fails above until then.
+    // p: Build returns no plan before buildSelect (D09.1, VS1-21); without it the prepare
+    // executor would send no column definitions, so this is a boundary stub, not `None`.
+    // glue: blocked-by:D09.1 (the plan of PlanBuilder.Build)
     let p: Option<PhysicalPlanRef> = None;
+    if p.is_none() {
+        return Err(blocked("D09.1", "the plan of PlanBuilder.Build"));
+    }
 
     if cacheable && dest_builder.get_opt_flag() & FLAG_PARTITION_PROCESSOR > 0 {
         // dynamic prune mode is not used, could be that global statistics not yet available!
