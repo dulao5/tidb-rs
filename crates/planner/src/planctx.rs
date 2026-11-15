@@ -2,7 +2,10 @@
 //!
 //! glue: N1/N2 (Go: `base.PlanContext`, carried by every plan node).
 
-use tidb_sessionctx::exprctx::{EvalContextRef, ExprContext, ExprContextRef};
+use std::sync::Arc;
+
+use tidb_sessionctx::exprctx::{BuildContextRef, EvalContextRef, ExprContext, ExprContextRef};
+use tidb_sessionctx::ranger::context::RangerContext;
 use tidb_sessionctx::variable::session::SessionVars;
 
 use crate::arena::PlanArena;
@@ -39,6 +42,27 @@ impl<'s> PlanCtx<'s> {
     // glue: N2
     pub fn eval_ctx(&self) -> EvalContextRef {
         self.expr_ctx.get_eval_ctx()
+    }
+
+    /// `p.SCtx().GetRangerCtx()`: the context of the ranger functions, from the session
+    /// vars and the statement context (Go's mock context builds it on each call, the
+    /// session caches it in the statement context; the fields are the same). The plan
+    /// cache tracker and the range fallback handler are the statement's.
+    // glue: N2 (planctx.PlanContext.GetRangerCtx)
+    pub fn ranger_ctx(&self) -> RangerContext {
+        let sc = self.vars.stmt_ctx();
+        RangerContext {
+            expr_ctx: Arc::clone(&self.expr_ctx) as BuildContextRef,
+            type_ctx: sc.type_ctx(),
+            err_ctx: sc.err_ctx(),
+            in_prepared_plan_building: sc.in_prepared_plan_building,
+            regard_null_as_point: self.vars.regard_null_as_point,
+            opt_prefix_index_single_scan: self.vars.opt_prefix_index_single_scan,
+            optimizer_fix_control: self.vars.get_optimizer_fix_control_map().clone(),
+            plan_cache_tracker: Arc::clone(&sc.plan_cache_tracker),
+            range_fallback_handler: Arc::clone(&sc.range_fallback_handler),
+            use_cache: false,
+        }
     }
 
     /// N1 §4, the fallback idiom: disjoint borrows of the arena (mutable), the expression

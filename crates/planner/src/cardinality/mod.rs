@@ -4,7 +4,7 @@
 //! planner reads — `Selectivity`, the pseudo rates, the column / int / index range row
 //! counts on pseudo statistics, NDV and average row sizes. The estimation from real
 //! statistics (TopN, CM sketch, histograms), cross-column estimation and the traces are
-//! D10.6 part 2; building ranges is D10.4 (VS1-25).
+//! D10.6 part 2; ranges are built by `crate::ranger` (D10.4, VS1-25).
 
 pub mod ndv;
 pub mod pseudo;

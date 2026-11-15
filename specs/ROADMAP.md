@@ -100,7 +100,7 @@
 |---|---|---|--:|--:|---|
 | L1 | D08.11 | 聚合函数描述（expression/aggregation） | 1,592 | 16 | EXC.B(13) |
 | L1 | D10.10 | 物理属性与优化器工具（property、planner/util） | 1,745 | 12 | EXC.B(11) |
-| L1 | D10.4 | ranger（区间构造） | 3,855 | 6 | — |
+| L1 | [D10.4](D10.4-ranger/spec.md) | ranger（区间构造；VS1-25 整块，评审中） | 3,855 | 6 | — |
 | L2 | D09.14 | 逻辑算子公共部分与其余逻辑算子 | 1,597 | 14 | EXC.B(32), D14.2(15) |
 | L2 | D10.1 | 物理算子定义与 task（physical_plans、task、common_plans） | 6,197 | 7 | — |
 | L3 | D09.0 | planbuilder 骨架、语句分发、preprocess、名字解析 | 3,850 | 10 | D14.2(50), D09.16(14), D09.17(13) |

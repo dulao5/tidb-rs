@@ -5,6 +5,7 @@
 pub mod byitem;
 pub mod column;
 pub mod costusage;
+pub mod fixcontrol;
 pub mod handle_cols;
 pub mod misc;
 pub mod optimizetrace;
