@@ -25,6 +25,8 @@ tidb-base = { workspace = true }
 tidb-expression = { workspace = true }
 tidb-parser = { workspace = true }
 tidb-session = { workspace = true }
+# Result encoding and binary parameters of the new stack (D03.1 part 1).
+tidb-server = { workspace = true }
 # The ported domain the new sessions take their InfoSchema from (D06.5 part 1).
 tidb-domain = { workspace = true }
 tidb-sessionctx = { workspace = true }

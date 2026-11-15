@@ -21,6 +21,21 @@ pub enum Response {
     /// A result set. Rows are fully materialised for now; streaming can be added later
     /// without changing the wire behaviour.
     ResultSet(ResultSet),
+    /// A result set whose packets were encoded by the caller (the new stack's port of Go's
+    /// `writeChunks`, D03.1): the connection only frames them and adds the EOF / OK
+    /// packets.
+    Encoded(EncodedResultSet),
+}
+
+/// A result set as packet payloads: one per column definition, then one per row (text or
+/// binary, as the command asked). `columns` describe the same definitions for metadata
+/// checks; they are not what is sent.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EncodedResultSet {
+    pub columns: Vec<ColumnDef>,
+    pub column_packets: Vec<Vec<u8>>,
+    pub rows: Vec<Vec<u8>>,
+    pub warnings: u16,
 }
 
 impl Response {
@@ -56,6 +71,20 @@ pub struct PreparedInfo {
     /// Result columns, if known at prepare time (may be empty; the execute response always
     /// carries the actual column definitions).
     pub columns: Vec<ColumnDef>,
+    /// The column definition packets to send instead of encoding `columns` (the new
+    /// stack's port of Go's `Info.Dump`); empty: encode `columns`.
+    pub column_packets: Vec<Vec<u8>>,
+}
+
+/// The raw parameter section of a `COM_STMT_EXECUTE`, as Go's `parseBinaryParams` reads
+/// it: the NULL bitmap, the types (from this or an earlier execute), the values, and the
+/// data of `COM_STMT_SEND_LONG_DATA` per parameter.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RawParams {
+    pub null_bitmap: Vec<u8>,
+    pub param_types: Vec<u8>,
+    pub param_values: Vec<u8>,
+    pub bound: Vec<Option<Vec<u8>>>,
 }
 
 /// Information about an authenticated connection, passed when a session is opened.
@@ -103,6 +132,11 @@ pub trait SessionHandler: Send + 'static {
     /// [`SessionHandler::execute`]. `CURSOR_TYPE_READ_ONLY` is accepted without opening a
     /// cursor; the VS1 router keeps such executions on the PoC. The default ignores it.
     fn execute_flags(&mut self, _stmt_id: u32, _flags: u8) {}
+
+    /// The raw parameters of the coming `COM_STMT_EXECUTE`, called right before
+    /// [`SessionHandler::execute`] (after a successful decoding into `params`), for an
+    /// engine that decodes them itself. The default ignores them.
+    fn execute_raw_params(&mut self, _stmt_id: u32, _raw: RawParams) {}
 
     /// `COM_STMT_CLOSE` (no response is sent to the client). Also called for every open
     /// statement on `COM_RESET_CONNECTION`.

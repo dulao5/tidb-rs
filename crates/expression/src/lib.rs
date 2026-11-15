@@ -46,6 +46,7 @@ pub mod explain;
 pub mod expression;
 pub mod function_traits;
 pub mod helper;
+pub mod param;
 pub mod scalar_function;
 pub mod schema;
 pub mod size;

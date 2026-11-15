@@ -3,7 +3,10 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::time::Instant;
+
+use futures::FutureExt;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, trace, warn};
@@ -12,7 +15,10 @@ use crate::auth::{Credential, generate_salt};
 use crate::codec::{Reader, put_lenenc_int, put_lenenc_str};
 use crate::constants::{auth_plugin, capability::*, collation, command, cursor_type, header};
 use crate::error::{SqlError, code};
-use crate::handler::{ConnectionInfo, OkInfo, Response, ResultSet, SessionFactory, SessionHandler};
+use crate::handler::{
+    ConnectionInfo, EncodedResultSet, OkInfo, RawParams, Response, ResultSet, SessionFactory,
+    SessionHandler,
+};
 use crate::handshake::{HandshakeResponse, InitialHandshake, auth_switch_request};
 use crate::packet::{PacketError, PacketIo};
 use crate::params::decode_params;
@@ -98,6 +104,17 @@ pub(crate) async fn run<S, F>(
     }
     let _ = conn.io.shutdown().await;
     debug!(connection_id, "connection closed");
+}
+
+/// The text of a panic payload (Go's `fmt.Errorf("%v", r)`).
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic".to_owned()
+    }
 }
 
 /// `tidb_server_connections` for one connection: up when created, down when dropped.
@@ -393,7 +410,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                     tidb_metrics::disconnected(tidb_metrics::Disconnect::Ok);
                     return;
                 }
-                Some((&cmd, body)) => self.dispatch(cmd, body).await,
+                Some((&cmd, body)) => {
+                    // Go `clientConn.Run`'s deferred recover: a panic while running a command
+                    // is logged, written to the client as an error, counted
+                    // (`tidb_server_panic_total{type="session"}`), and the connection is
+                    // closed. The session is dropped with the connection, so no state of the
+                    // half-run command survives.
+                    match AssertUnwindSafe(self.dispatch(cmd, body))
+                        .catch_unwind()
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(payload) => {
+                            let msg = panic_message(payload.as_ref());
+                            tracing::error!(connection_id, err = %msg, "connection running loop panic");
+                            let e = SqlError::unknown(msg);
+                            let _ = write_err(&mut self.io, self.capability, &e).await;
+                            tidb_metrics::panicked(tidb_metrics::PANIC_SESSION);
+                            self.command_metrics(cmd, start, Some("unknown"));
+                            tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
+                            return;
+                        }
+                    }
+                }
             };
             let (error, keep_going) = match result {
                 Ok(()) => (None, true),
@@ -544,7 +583,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 self.write_eof(0).await?;
             }
         }
-        if !info.columns.is_empty() {
+        if !info.column_packets.is_empty() {
+            for p in &info.column_packets {
+                self.io.write_packet(p).await?;
+            }
+            if self.capability & CLIENT_DEPRECATE_EOF == 0 {
+                self.write_eof(0).await?;
+            }
+        } else if !info.columns.is_empty() {
             for c in &info.columns {
                 b.clear();
                 c.encode(&mut b);
@@ -580,6 +626,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         r.skip(4)?; // iteration count, always 1
 
         let n = usize::from(stmt.param_count);
+        let mut raw = RawParams::default();
         let params = if n > 0 {
             let null_bitmap = r.take(n.div_ceil(8))?;
             if r.u8()? == 1 {
@@ -587,13 +634,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             }
             let result =
                 decode_params(n, &stmt.long_data, null_bitmap, &stmt.param_types, r.rest());
-            // Long data is consumed by an execute, successful or not (TiDB resets the stmt).
-            stmt.long_data.iter_mut().for_each(|d| *d = None);
+            raw = RawParams {
+                null_bitmap: null_bitmap.to_vec(),
+                param_types: stmt.param_types.clone(),
+                param_values: r.rest().to_vec(),
+                // Long data is consumed by an execute, successful or not (TiDB resets the
+                // stmt).
+                bound: stmt.long_data.iter_mut().map(Option::take).collect(),
+            };
             result?
         } else {
             Vec::new()
         };
         self.handler.execute_flags(id, flags);
+        self.handler.execute_raw_params(id, raw);
         let resp = self.handler.execute(id, params).await;
         self.write_timed(start, resp, true).await
     }
@@ -649,7 +703,48 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 .await
             }
             Response::ResultSet(rs) => self.write_result_set(&rs, binary).await,
+            Response::Encoded(rs) if rs.column_packets.is_empty() => {
+                self.write_ok(&OkInfo {
+                    warnings: rs.warnings,
+                    ..Default::default()
+                })
+                .await
+            }
+            Response::Encoded(rs) => self.write_encoded_result_set(&rs).await,
         }
+    }
+
+    /// A result set encoded by the caller (Go's `writeChunks`: column count, column
+    /// definitions, EOF for old clients, rows, then EOF or the OK packet with the EOF
+    /// header).
+    async fn write_encoded_result_set(&mut self, rs: &EncodedResultSet) -> Result<(), ConnError> {
+        let status = self.handler.status_flags();
+        let mut b = Vec::with_capacity(16);
+        encode_column_count(&mut b, rs.column_packets.len());
+        self.io.write_packet(&b).await?;
+        for p in &rs.column_packets {
+            self.io.write_packet(p).await?;
+        }
+        if self.capability & CLIENT_DEPRECATE_EOF == 0 {
+            self.write_eof(rs.warnings).await?;
+        }
+        for row in &rs.rows {
+            self.io.write_packet(row).await?;
+        }
+        if self.capability & CLIENT_DEPRECATE_EOF != 0 {
+            self.write_ok_with_header(
+                header::EOF,
+                &OkInfo {
+                    warnings: rs.warnings,
+                    ..Default::default()
+                },
+                status,
+            )
+            .await?;
+        } else {
+            self.write_eof(rs.warnings).await?;
+        }
+        Ok(self.io.flush().await?)
     }
 
     async fn write_result_set(&mut self, rs: &ResultSet, binary: bool) -> Result<(), ConnError> {

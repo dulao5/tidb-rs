@@ -1852,3 +1852,256 @@ pub fn get_valid_prefix(s: &[u8], base: i64) -> &[u8] {
     }
     &s[..valid_len]
 }
+
+// ---------------------------------------------------------------------------------------------
+// Binary-protocol parameters (COM_STMT_EXECUTE). Block D08.12 hands these functions to the
+// server block (D03.1, tasks P1-1), which ports them with `parseBinaryParams`.
+
+use tidb_base::Error;
+use tidb_types::context::Context as TypeContext;
+use tidb_types::datum::{
+    new_bytes_datum, new_datum, new_decimal_datum, new_duration_datum, new_float32_datum,
+    new_float64_datum, new_int_datum, new_time_datum, new_uint_datum,
+};
+use tidb_types::mydecimal::MyDecimal;
+
+use crate::param::{BinaryParam, ErrUnknownFieldType};
+
+/// ExecBinaryParam parse execute binary param arguments to datum slice.
+///
+/// Go returns `[]Expression`; every element is a `*Constant`, returned here as they are.
+/// A NULL `DECIMAL` sent as a length-encoded NULL (`0xfb`, not the NULL bitmap) is Go's
+/// `NewDecimalDatum(nil)`, a decimal datum without a value; Go then dereferences the nil
+/// decimal when it infers the parameter's type and panics (the connection loop recovers:
+/// an error to the client, the connection closed). A Rust datum cannot hold it, so this
+/// panics at the same point, with Go's message (spec D03.1 §4, a possible upstream bug).
+// go: ExecBinaryParam L1 [M-ERRVAL]
+#[allow(non_upper_case_globals)]
+pub fn exec_binary_param(
+    typectx: &TypeContext,
+    binary_params: &[BinaryParam],
+) -> Result<Vec<Constant>, Error> {
+    use tidb_base::mysql::*;
+    let mut args: Vec<Datum> = Vec::with_capacity(binary_params.len());
+    let mut nil_decimals: Vec<usize> = Vec::new();
+    for p in binary_params {
+        let tp = p.tp;
+        let is_unsigned = p.is_unsigned;
+        let val = &p.val;
+        let d = match tp {
+            TypeNull => {
+                let mut nil_datum = Datum::default();
+                nil_datum.set_null();
+                nil_datum
+            }
+            TypeTiny => {
+                if is_unsigned {
+                    new_uint_datum(u64::from(val[0]))
+                } else {
+                    new_int_datum(i64::from(val[0] as i8))
+                }
+            }
+            TypeShort | TypeYear => {
+                let v = u16::from_le_bytes([val[0], val[1]]);
+                if is_unsigned {
+                    new_uint_datum(u64::from(v))
+                } else {
+                    new_int_datum(i64::from(v as i16))
+                }
+            }
+            TypeInt24 | TypeLong => {
+                let v = u32::from_le_bytes(val[..4].try_into().expect("4 bytes"));
+                if is_unsigned {
+                    new_uint_datum(u64::from(v))
+                } else {
+                    new_int_datum(i64::from(v as i32))
+                }
+            }
+            TypeLonglong => {
+                let v = u64::from_le_bytes(val[..8].try_into().expect("8 bytes"));
+                if is_unsigned {
+                    new_uint_datum(v)
+                } else {
+                    new_int_datum(v as i64)
+                }
+            }
+            TypeFloat => new_float32_datum(f32::from_bits(u32::from_le_bytes(
+                val[..4].try_into().expect("4 bytes"),
+            ))),
+            TypeDouble => new_float64_datum(f64::from_bits(u64::from_le_bytes(
+                val[..8].try_into().expect("8 bytes"),
+            ))),
+            TypeDate | TypeTimestamp | TypeDatetime => {
+                let tmp = match val.len() {
+                    0 => tidb_types::time::ZeroDatetimeStr.to_owned(),
+                    4 => binary_date(0, val).1,
+                    7 => binary_date_time(0, val).1,
+                    11 => binary_timestamp(0, val).1,
+                    13 => binary_timestamp_with_tz(0, val).1,
+                    _ => return Err(ErrMalformPacket.clone()),
+                };
+                // TODO: generate the time datum directly
+                // To be compatible with MySQL, even the type of parameter is TypeTimestamp,
+                // the return type should also be `Datetime`.
+                let (time, err) = if tp == TypeDate {
+                    tidb_types::time::parse_date(typectx, tmp.as_bytes())
+                } else {
+                    tidb_types::time::parse_datetime_str(typectx, tmp.as_bytes())
+                };
+                typectx.handle_truncate(err)?;
+                new_time_datum(time)
+            }
+            TypeDuration => {
+                let mut fsp = 0;
+                let tmp = match val.len() {
+                    0 => "0".to_owned(),
+                    8 => {
+                        let is_negative = val[0];
+                        if is_negative > 1 {
+                            return Err(ErrMalformPacket.clone());
+                        }
+                        binary_duration(1, val, is_negative).1
+                    }
+                    12 => {
+                        let is_negative = val[0];
+                        if is_negative > 1 {
+                            return Err(ErrMalformPacket.clone());
+                        }
+                        fsp = tidb_types::fsp::MaxFsp;
+                        binary_duration_with_ms(1, val, is_negative).1
+                    }
+                    _ => return Err(ErrMalformPacket.clone()),
+                };
+                // TODO: generate the duration datum directly
+                let (dur, _, err) = tidb_types::time::parse_duration(typectx, tmp.as_bytes(), fsp);
+                typectx.handle_truncate(err)?;
+                new_duration_datum(dur)
+            }
+            TypeNewDecimal => {
+                if p.is_null {
+                    // Go: NewDecimalDatum(nil); the type inference below dereferences it.
+                    nil_decimals.push(args.len());
+                    args.push(Datum::default());
+                    continue;
+                }
+                let mut dec = MyDecimal::default();
+                if !p.is_null
+                    && let Err(err) = typectx.handle_truncate(dec.from_string(val))
+                    && !tidb_types::errors::ErrTruncated.equal(&err)
+                {
+                    return Err(err);
+                }
+                new_decimal_datum(dec)
+            }
+            TypeBlob | TypeTinyBlob | TypeMediumBlob | TypeLongBlob => {
+                if p.is_null {
+                    new_bytes_datum(None)
+                } else {
+                    new_bytes_datum(val.clone())
+                }
+            }
+            TypeUnspecified | TypeVarchar | TypeVarString | TypeString | TypeEnum | TypeSet
+            | TypeGeometry | TypeBit => {
+                if !p.is_null {
+                    new_datum(tidb_types::datum::GoValue::String(val.clone()))
+                } else {
+                    new_datum(tidb_types::datum::GoValue::Nil)
+                }
+            }
+            _ => {
+                return Err(ErrUnknownFieldType.gen_with_stack(
+                    "stmt unknown field type %d",
+                    vec![tidb_base::gofmt::Arg::from(i64::from(tp))],
+                ));
+            }
+        };
+        args.push(d);
+    }
+
+    Ok(args
+        .into_iter()
+        .enumerate()
+        .map(|(i, d)| {
+            if nil_decimals.contains(&i) {
+                panic!("runtime error: invalid memory address or nil pointer dereference");
+            }
+            let mut ft = FieldType::default();
+            tidb_types::field_type::infer_param_type_from_underlying_value(&d.get_value(), &mut ft);
+            Constant::new(d, ft)
+        })
+        .collect())
+}
+
+// go: binaryDate L1
+fn binary_date(pos: usize, param_values: &[u8]) -> (usize, String) {
+    let mut pos = pos;
+    let year = u16::from_le_bytes([param_values[pos], param_values[pos + 1]]);
+    pos += 2;
+    let month = param_values[pos];
+    pos += 1;
+    let day = param_values[pos];
+    pos += 1;
+    (pos, format!("{year:04}-{month:02}-{day:02}"))
+}
+
+// go: binaryDateTime L1
+fn binary_date_time(pos: usize, param_values: &[u8]) -> (usize, String) {
+    let (mut pos, date) = binary_date(pos, param_values);
+    let hour = param_values[pos];
+    pos += 1;
+    let minute = param_values[pos];
+    pos += 1;
+    let second = param_values[pos];
+    pos += 1;
+    (pos, format!("{date} {hour:02}:{minute:02}:{second:02}"))
+}
+
+// go: binaryTimestamp L1
+fn binary_timestamp(pos: usize, param_values: &[u8]) -> (usize, String) {
+    let (mut pos, date_time) = binary_date_time(pos, param_values);
+    let micro_second = u32::from_le_bytes(param_values[pos..pos + 4].try_into().expect("4 bytes"));
+    pos += 4;
+    (pos, format!("{date_time}.{micro_second:06}"))
+}
+
+// go: binaryTimestampWithTZ L1
+fn binary_timestamp_with_tz(pos: usize, param_values: &[u8]) -> (usize, String) {
+    let (mut pos, timestamp) = binary_timestamp(pos, param_values);
+    let tz_shift_in_min = u16::from_le_bytes([param_values[pos], param_values[pos + 1]]) as i16;
+    let tz_shift_hour = tz_shift_in_min / 60;
+    let mut tz_shift_abs_min = tz_shift_in_min % 60;
+    if tz_shift_abs_min < 0 {
+        tz_shift_abs_min = -tz_shift_abs_min;
+    }
+    pos += 2;
+    (
+        pos,
+        format!("{timestamp}{tz_shift_hour:+02}:{tz_shift_abs_min:02}"),
+    )
+}
+
+// go: binaryDuration L1
+fn binary_duration(pos: usize, param_values: &[u8], is_negative: u8) -> (usize, String) {
+    let mut pos = pos;
+    let sign = if is_negative == 1 { "-" } else { "" };
+    let days = u32::from_le_bytes(param_values[pos..pos + 4].try_into().expect("4 bytes"));
+    pos += 4;
+    let hours = param_values[pos];
+    pos += 1;
+    let minutes = param_values[pos];
+    pos += 1;
+    let seconds = param_values[pos];
+    pos += 1;
+    (
+        pos,
+        format!("{sign}{days} {hours:02}:{minutes:02}:{seconds:02}"),
+    )
+}
+
+// go: binaryDurationWithMS L1
+fn binary_duration_with_ms(pos: usize, param_values: &[u8], is_negative: u8) -> (usize, String) {
+    let (mut pos, dur) = binary_duration(pos, param_values, is_negative);
+    let micro_second = u32::from_le_bytes(param_values[pos..pos + 4].try_into().expect("4 bytes"));
+    pos += 4;
+    (pos, format!("{dur}.{micro_second:06}"))
+}

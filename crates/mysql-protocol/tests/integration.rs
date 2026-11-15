@@ -137,6 +137,7 @@ impl SessionHandler for Session {
         Ok(PreparedInfo {
             param_count,
             columns: vec![],
+            ..Default::default()
         })
     }
 

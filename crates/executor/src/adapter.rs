@@ -325,6 +325,11 @@ pub struct ExecStmt {
     pub output_names: Vec<FieldName>,
     pub ps_stmt: Option<PlanCacheStmtRef>,
     pub ti: Arc<TelemetryInfo>,
+    /// The statement's executor was built and opened (not in Go). The VS1 router (plan
+    /// §4.3) may fall back to the PoC only before this: a builder that returns a boundary
+    /// stub (`Blocked`) is a normal fallback, a `Blocked` after it is a bug.
+    // glue: VS1 plan §4.3 (router check)
+    pub executor_opened: bool,
 }
 
 impl ExecStmt {
@@ -339,6 +344,7 @@ impl ExecStmt {
             lower_priority: false,
             is_prepared_stmt: false,
             is_select_for_update: false,
+            executor_opened: false,
             retry_count: 0,
             retry_start_time: None,
             phase_build_durations: [Duration::ZERO; 2],
@@ -437,6 +443,7 @@ impl ExecStmt {
             }
             return Err(err);
         }
+        self.executor_opened = true;
 
         let cmd = sctx.get_session_vars().command_value as u8;
         let sql = self.origin_text().to_owned();
@@ -531,6 +538,7 @@ impl ExecStmt {
             }
             return Err(err);
         }
+        self.executor_opened = true;
 
         let is_pessimistic = sctx.get_session_vars().state.txn_ctx.is_pessimistic;
 

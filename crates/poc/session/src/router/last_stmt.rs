@@ -85,6 +85,13 @@ impl LastStmtInfo {
                 info.affected_rows = -1;
                 info.found_rows = rs.rows.len() as u64;
             }
+            // Only the new stack answers with encoded rows, and its state is read from the
+            // new session (`from_new`); kept for completeness.
+            Ok(Response::Encoded(rs)) => {
+                info.warning_count = i64::from(rs.warnings);
+                info.affected_rows = -1;
+                info.found_rows = rs.rows.len() as u64;
+            }
             Ok(Response::Ok(ok)) => {
                 info.warning_count = i64::from(ok.warnings);
                 info.affected_rows = 0;

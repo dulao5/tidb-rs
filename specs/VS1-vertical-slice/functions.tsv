@@ -636,41 +636,41 @@ VS1-15	D13.1	pkg/planner/core/plan_cacheable_checker.go	getColType	15
 VS1-15	D13.1	pkg/planner/core/plan_cacheable_checker.go	getMaxParamLimit	14	
 VS1-15	D13.1	pkg/planner/core/plan_cacheable_checker.go	isPhysicalPlanCacheable	58	
 VS1-15	D13.1	pkg/planner/core/plan_cacheable_checker.go	isPlanCacheable	28	
-VS1-16	D03.1	pkg/server/conn.go	clientConn.handleQuery	117	
-VS1-16	D03.1	pkg/server/conn.go	clientConn.handleStmt	89	
+VS1-16	D03.1	pkg/server/conn.go	clientConn.handleQuery	117	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/conn.go	clientConn.handleStmt	89	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
 VS1-16	D03.1	pkg/server/conn.go	clientConn.writeChunks	100	
-VS1-16	D03.1	pkg/server/conn.go	clientConn.writeChunksWithFetchSize	59	
+VS1-16	D03.1	pkg/server/conn.go	clientConn.writeChunksWithFetchSize	59	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
 VS1-16	D03.1	pkg/server/conn.go	clientConn.writeColumnInfo	15	
-VS1-16	D03.1	pkg/server/conn.go	clientConn.writeEOF	16	
-VS1-16	D03.1	pkg/server/conn.go	clientConn.writeError	37	
-VS1-16	D03.1	pkg/server/conn.go	clientConn.writeOK	3	
+VS1-16	D03.1	pkg/server/conn.go	clientConn.writeEOF	16	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/conn.go	clientConn.writeError	37	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/conn.go	clientConn.writeOK	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
 VS1-16	D03.1	pkg/server/conn.go	clientConn.writeResultSet	37	
-VS1-16	D03.1	pkg/server/conn_stmt.go	clientConn.executePreparedStmtAndWriteResult	99	
-VS1-16	D03.1	pkg/server/conn_stmt.go	clientConn.handleStmtClose	17	
-VS1-16	D03.1	pkg/server/conn_stmt.go	clientConn.handleStmtExecute	97	
+VS1-16	D03.1	pkg/server/conn_stmt.go	clientConn.executePreparedStmtAndWriteResult	99	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/conn_stmt.go	clientConn.handleStmtClose	17	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/conn_stmt.go	clientConn.handleStmtExecute	97	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
 VS1-16	D03.1	pkg/server/conn_stmt_params.go	parseBinaryParams	118	
-VS1-16	D03.1	pkg/server/driver_tidb.go	NewTiDBDriver	6	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.Close	9	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.DecodeSessionStates	41	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.EncodeSessionStates	38	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.ExecuteStmt	20	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.GetStatement	7	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.Prepare	26	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.WarningCount	3	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBDriver.OpenCtx	21	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.AppendParam	44	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.BoundParams	3	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.Close	43	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.Execute	11	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.GetCursorActive	3	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.GetParamsType	3	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.GetResultSet	3	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.ID	3	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.NumParams	3	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.Reset	24	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.SetCursorActive	3	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.SetParamsType	3	
-VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.StoreResultSet	5	
+VS1-16	D03.1	pkg/server/driver_tidb.go	NewTiDBDriver	6	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.Close	9	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.DecodeSessionStates	41	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.EncodeSessionStates	38	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.ExecuteStmt	20	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.GetStatement	7	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.Prepare	26	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBContext.WarningCount	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBDriver.OpenCtx	21	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.AppendParam	44	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.BoundParams	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.Close	43	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.Execute	11	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.GetCursorActive	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.GetParamsType	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.GetResultSet	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.ID	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.NumParams	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.Reset	24	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.SetCursorActive	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.SetParamsType	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/driver_tidb.go	TiDBStatement.StoreResultSet	5	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
 VS1-16	D03.1	pkg/server/internal/column/column.go	DumpBinaryRow	60	
 VS1-16	D03.1	pkg/server/internal/column/column.go	DumpFlag	13	
 VS1-16	D03.1	pkg/server/internal/column/column.go	DumpTextRow	75	
@@ -696,17 +696,17 @@ VS1-16	D03.1	pkg/server/internal/dump/dump.go	LengthEncodedString	5
 VS1-16	D03.1	pkg/server/internal/dump/dump.go	Uint16	3	
 VS1-16	D03.1	pkg/server/internal/dump/dump.go	Uint32	3	
 VS1-16	D03.1	pkg/server/internal/dump/dump.go	Uint64	3	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	WrapWithLazyCursor	11	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	WrapWithRowContainerCursor	8	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.Close	3	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.Current	11	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.End	3	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.Error	3	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.Next	24	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	rowContainerReaderIter.Current	3	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	rowContainerReaderIter.Next	3	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	tidbCursorResultSet.GetRowIterator	3	
-VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	tidbLazyCursorResultSet.GetRowIterator	3	
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	WrapWithLazyCursor	11	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	WrapWithRowContainerCursor	8	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.Close	3	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.Current	11	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.End	3	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.Error	3	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	lazyRowIterator.Next	24	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	rowContainerReaderIter.Current	3	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	rowContainerReaderIter.Next	3	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	tidbCursorResultSet.GetRowIterator	3	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/cursor.go	tidbLazyCursorResultSet.GetRowIterator	3	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
 VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	New	6	
 VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.Close	9	
 VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.Columns	24	
@@ -715,20 +715,20 @@ VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.Finish	9
 VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.IsClosed	3	
 VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.NewChunk	3	
 VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.Next	5	
-VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.OnFetchReturned	5	
-VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.SetPreparedStmt	3	
+VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.OnFetchReturned	5	cursor fetch (COM_STMT_FETCH, D12.12): the VS1 router keeps cursors on the PoC (plan §4.3 step 0)
+VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.SetPreparedStmt	3	the prepared statement's column cache (PlanCacheStmt.PointGet.ColumnInfos) comes with prepared-statement planning (D13.1)
 VS1-16	D03.1	pkg/server/internal/resultset/resultset.go	tidbResultSet.TryDetach	17	
-VS1-16	D03.1	pkg/server/internal/util/buffered_read_conn.go	BufferedReadConn.IsAlive	29	
-VS1-16	D03.1	pkg/server/internal/util/buffered_read_conn.go	BufferedReadConn.Peek	3	
-VS1-16	D03.1	pkg/server/internal/util/buffered_read_conn.go	BufferedReadConn.Read	3	
-VS1-16	D03.1	pkg/server/internal/util/buffered_read_conn.go	NewBufferedReadConn	7	
+VS1-16	D03.1	pkg/server/internal/util/buffered_read_conn.go	BufferedReadConn.IsAlive	29	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/internal/util/buffered_read_conn.go	BufferedReadConn.Peek	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/internal/util/buffered_read_conn.go	BufferedReadConn.Read	3	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
+VS1-16	D03.1	pkg/server/internal/util/buffered_read_conn.go	NewBufferedReadConn	7	the server block's part 2 (D03.1): the connection loop, handshake and command dispatch are still the PoC's; part 1's glue (poc session newstack.rs) does this function's result and parameter steps
 VS1-16	D03.1	pkg/server/internal/util/util.go	AppendFormatFloat	42	
-VS1-16	D03.1	pkg/server/internal/util/util.go	CorsHandler.ServeHTTP	7	
+VS1-16	D03.1	pkg/server/internal/util/util.go	CorsHandler.ServeHTTP	7	permanent: the HTTP status server's CORS handler and Go's test configuration; tidb-rs has its own status server
 VS1-16	D03.1	pkg/server/internal/util/util.go	InputDecoder.DecodeInput	7	
 VS1-16	D03.1	pkg/server/internal/util/util.go	LengthEncodedIntSize	14	
-VS1-16	D03.1	pkg/server/internal/util/util.go	NewCorsHandler	3	
+VS1-16	D03.1	pkg/server/internal/util/util.go	NewCorsHandler	3	permanent: the HTTP status server's CORS handler and Go's test configuration; tidb-rs has its own status server
 VS1-16	D03.1	pkg/server/internal/util/util.go	NewInputDecoder	5	
-VS1-16	D03.1	pkg/server/internal/util/util.go	NewTestConfig	8	
+VS1-16	D03.1	pkg/server/internal/util/util.go	NewTestConfig	8	permanent: the HTTP status server's CORS handler and Go's test configuration; tidb-rs has its own status server
 VS1-16	D03.1	pkg/server/internal/util/util.go	ParseLengthEncodedBytes	16	
 VS1-16	D03.1	pkg/server/internal/util/util.go	ParseLengthEncodedInt	37	
 VS1-16	D03.1	pkg/server/internal/util/util.go	ParseNullTermString	7	

@@ -62,6 +62,10 @@ pub struct MockPhysicalPlan {
     schema: Schema,
     children: Vec<PhysicalPlanRef>,
     rows: i64,
+    /// The kind the plan reports. Only a `TableReader` mock is built into the mock executor;
+    /// any other kind reaches the builder's boundary stubs (`Blocked`), as a real plan of
+    /// that kind would.
+    pub kind: PhysicalKind,
     /// What the executors did.
     pub counters: Arc<MockCounters>,
 }
@@ -69,6 +73,12 @@ pub struct MockPhysicalPlan {
 /// A plan whose executor returns `0..rows`.
 // glue: test double
 pub fn mock_plan(rows: i64) -> (Plan, Arc<MockCounters>) {
+    mock_plan_of_kind(rows, PhysicalKind::TableReader)
+}
+
+/// [`mock_plan`] reporting `kind`.
+// glue: test double
+pub fn mock_plan_of_kind(rows: i64, kind: PhysicalKind) -> (Plan, Arc<MockCounters>) {
     let counters = Arc::new(MockCounters::default());
     let col = Arc::new(Column {
         unique_id: 1,
@@ -80,6 +90,7 @@ pub fn mock_plan(rows: i64) -> (Plan, Arc<MockCounters>) {
         schema: new_schema(vec![col]),
         children: Vec::new(),
         rows,
+        kind,
         counters: Arc::clone(&counters),
     });
     (plan, counters)
@@ -109,7 +120,7 @@ impl MockPhysicalPlan {
 impl PhysicalPlan for MockPhysicalPlan {
     // glue: test double
     fn kind(&self) -> PhysicalKind {
-        PhysicalKind::TableReader
+        self.kind
     }
     // glue: test double
     fn id(&self) -> i32 {

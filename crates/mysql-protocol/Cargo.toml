@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# catch_unwind of a command (Go clientConn.Run's recover).
+futures = { workspace = true }
 getrandom = "0.3"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 sha1 = "0.10"
@@ -20,6 +22,17 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["loggin
 tracing = "0.1"
 
 [dev-dependencies]
+# A real panic of the new stack for the connection loop's recovery test (Go clientConn.Run):
+# reading an old-format row with `_tidb_row_checksum` in the schema.
+tidb-base = { workspace = true }
+tidb-chunk = { workspace = true }
+tidb-executor = { workspace = true }
+tidb-expression = { workspace = true }
+tidb-kv = { workspace = true }
+tidb-model = { workspace = true }
+tidb-parser = { workspace = true }
+tidb-sessionctx = { workspace = true }
+tidb-types = { workspace = true }
 mysql_async = { version = "0.37", default-features = false, features = ["minimal", "ring", "rustls-tls", "tls12"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 

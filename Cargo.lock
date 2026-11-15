@@ -2623,6 +2623,7 @@ dependencies = [
  "tidb-model",
  "tidb-mysql-protocol",
  "tidb-parser",
+ "tidb-server",
  "tidb-session",
  "tidb-sessionctx",
  "tidb-sessiontxn",
@@ -3960,12 +3961,22 @@ dependencies = [
 name = "tidb-mysql-protocol"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "getrandom 0.3.4",
  "mysql_async",
  "rcgen",
  "sha1 0.10.7",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-executor",
+ "tidb-expression",
+ "tidb-kv",
  "tidb-metrics",
+ "tidb-model",
+ "tidb-parser",
  "tidb-runtime",
+ "tidb-sessionctx",
+ "tidb-types",
  "time 0.3.55",
  "tokio",
  "tokio-rustls",
@@ -4043,6 +4054,22 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tidb-server"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "log",
+ "serde_json",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-executor",
+ "tidb-expression",
+ "tidb-parser",
+ "tidb-session",
+ "tidb-types",
 ]
 
 [[package]]
