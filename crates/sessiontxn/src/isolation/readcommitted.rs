@@ -84,7 +84,7 @@ pub fn new_pessimistic_rc_txn_context_provider(
 ///
 /// Provisional: N11 D11 is pending the owner's decision (#146); the alternative is to
 /// implement the check once client-rust supports `RcCheckTs` reads.
-// go-exception: N11 D11 (provisional, #146)
+// glue: N11 D11 (provisional, #146)
 pub fn err_rc_read_check_ts_not_supported() -> Error {
     tidb_base::dbterror::plannererrors::ErrNotSupportedYet.gen_with_stack_by_args(vec![
         tidb_base::gofmt::Arg::from(
@@ -123,7 +123,7 @@ impl BaseTxnContextProvider {
     /// Go sets `StmtCtx.RCCheckTS` (`tidb_rc_read_check_ts`), the statement is rejected
     /// (module docs).
     // go: PessimisticRCTxnContextProvider.OnStmtStart L1
-    // go-exception: N11 D11 (provisional, #146: tidb_rc_read_check_ts is rejected until client-rust checks reads)
+    // N11 D11 (provisional, #146): tidb_rc_read_check_ts is rejected until client-rust checks reads.
     pub(crate) fn rc_on_stmt_start(
         &mut self,
         sctx: &mut dyn SessionCtx,

@@ -431,14 +431,14 @@ VS1-14	D05.3	pkg/session/session.go	getSnapshotInfoSchema	9
 VS1-14	D05.3	pkg/session/session.go	isEndTxnStmt	13	
 VS1-14	D05.3	pkg/session/session.go	logGeneralQuery	28	
 VS1-14	D05.3	pkg/session/session.go	logStmt	42	
-VS1-14	D05.3	pkg/session/session.go	resolvePreparedStmt	20	
+VS1-14b	D05.3	pkg/session/session.go	resolvePreparedStmt	20	
 VS1-14	D05.3	pkg/session/session.go	runStmt	82	
 VS1-14	D05.3	pkg/session/session.go	session.AffectedRows	3	
 VS1-14	D05.3	pkg/session/session.go	session.ClearValue	5	
 VS1-14	D05.3	pkg/session/session.go	session.Close	47	
 VS1-14	D05.3	pkg/session/session.go	session.CommitTxn	24	
-VS1-14	D05.3	pkg/session/session.go	session.DropPreparedStmt	8	
-VS1-14	D05.3	pkg/session/session.go	session.ExecutePreparedStmt	18	
+VS1-14b	D05.3	pkg/session/session.go	session.DropPreparedStmt	8	
+VS1-14b	D05.3	pkg/session/session.go	session.ExecutePreparedStmt	18	
 VS1-14	D05.3	pkg/session/session.go	session.ExecuteStmt	176	
 VS1-14	D05.3	pkg/session/session.go	session.GetBuildPBCtx	24	
 VS1-14	D05.3	pkg/session/session.go	session.GetClient	3	
@@ -452,14 +452,14 @@ VS1-14	D05.3	pkg/session/session.go	session.GetPreparedTxnFuture	6
 VS1-14	D05.3	pkg/session/session.go	session.GetRangerCtx	22	
 VS1-14	D05.3	pkg/session/session.go	session.GetSQLLabel	6	
 VS1-14	D05.3	pkg/session/session.go	session.GetSessionManager	3	
-VS1-14	D05.3	pkg/session/session.go	session.GetSessionPlanCache	11	
+VS1-14b	D05.3	pkg/session/session.go	session.GetSessionPlanCache	11	
 VS1-14	D05.3	pkg/session/session.go	session.GetSessionVars	3	
 VS1-14	D05.3	pkg/session/session.go	session.GetStore	3	
 VS1-14	D05.3	pkg/session/session.go	session.GetTableCtx	3	
 VS1-14	D05.3	pkg/session/session.go	session.LastMessage	3	
-VS1-14	D05.3	pkg/session/session.go	session.Parse	37	
-VS1-14	D05.3	pkg/session/session.go	session.ParseSQL	18	
-VS1-14	D05.3	pkg/session/session.go	session.PrepareStmt	82	
+VS1-14	D05.3	pkg/session/session.go	session.Parse	37	ADR 0010 §4.2: the session takes AST, parsing is the protocol adapter's; D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/session.go	session.ParseSQL	18	ADR 0010 §4.2: the session takes AST, parsing is the protocol adapter's; D05.3 spec §1.3
+VS1-14b	D05.3	pkg/session/session.go	session.PrepareStmt	82	
 VS1-14	D05.3	pkg/session/session.go	session.PrepareTSFuture	23	
 VS1-14	D05.3	pkg/session/session.go	session.PrepareTxnCtx	23	
 VS1-14	D05.3	pkg/session/session.go	session.RefreshTxnCtx	15	
@@ -484,37 +484,37 @@ VS1-14	D05.3	pkg/session/session.go	session.rollbackOnError	5
 VS1-14	D05.3	pkg/session/session.go	session.setRequestSource	29	
 VS1-14	D05.3	pkg/session/session.go	sqlForLog	6	
 VS1-14	D05.3	pkg/session/tidb.go	GetHistory	9	
-VS1-14	D05.3	pkg/session/tidb.go	GetRows4Test	23	
-VS1-14	D05.3	pkg/session/tidb.go	Parse	18	
-VS1-14	D05.3	pkg/session/tidb.go	ResultSetToStringSlice	28	
+VS1-14	D05.3	pkg/session/tidb.go	GetRows4Test	23	Go test kit helper; D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/tidb.go	Parse	18	ADR 0010 §4.2: the session takes AST, parsing is the protocol adapter's; D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/tidb.go	ResultSetToStringSlice	28	Go test kit helper; D05.3 spec §1.3
 VS1-14	D05.3	pkg/session/tidb.go	autoCommitAfterStmt	30	
 VS1-14	D05.3	pkg/session/tidb.go	checkStmtLimit	32	
 VS1-14	D05.3	pkg/session/tidb.go	finishStmt	42	
 VS1-14	D05.3	pkg/session/tidb.go	recordAbortTxnDuration	16	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.CacheTableInfo	3	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.CancelFairLocking	16	
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.CacheTableInfo	3	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.CancelFairLocking	16	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.Commit	33	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.DoneFairLocking	17	
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.DoneFairLocking	17	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.GetOption	9	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.GetTableInfo	3	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.IsInFairLockingMode	8	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.KeysNeedToLock	15	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.LockKeys	3	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.LockKeysFunc	23	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.Mem	6	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.RetryFairLocking	10	
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.GetTableInfo	3	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.IsInFairLockingMode	8	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.KeysNeedToLock	15	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.LockKeys	3	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.LockKeysFunc	23	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.Mem	6	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.RetryFairLocking	10	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.Rollback	11	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.RollbackMemDBToCheckpoint	5	
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.RollbackMemDBToCheckpoint	5	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.Size	6	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.StartFairLocking	11	
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.StartFairLocking	11	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.String	13	
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.Valid	3	
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.Wait	23	
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.changeToInvalid	23	
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.changeToPending	4	
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.cleanup	4	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.cleanupStmtBuf	14	
-VS1-14	D05.3	pkg/session/txn.go	LazyTxn.flushStmtBuf	20	
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.cleanupStmtBuf	14	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
+VS1-14	D05.3	pkg/session/txn.go	LazyTxn.flushStmtBuf	20	write path: tidb-rs is read-only (N11 D8); D05.3 spec §1.3
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.init	5	
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.onStmtEnd	6	
 VS1-14	D05.3	pkg/session/txn.go	LazyTxn.onStmtStart	15	
@@ -545,7 +545,7 @@ VS1-14	D05.3	pkg/session/txnmanager.go	txnManager.OnStmtRetry	6
 VS1-14	D05.3	pkg/session/txnmanager.go	txnManager.OnStmtRollback	7	
 VS1-14	D05.3	pkg/session/txnmanager.go	txnManager.OnStmtStart	15	
 VS1-14	D05.3	pkg/session/txnmanager.go	txnManager.OnTxnEnd	19	
-VS1-14	D05.3	pkg/session/txnmanager.go	txnManager.SetOptionsBeforeCommit	3	
+VS1-14	D05.3	pkg/session/txnmanager.go	txnManager.SetOptionsBeforeCommit	3	write path: commit options (N11 D8); D05.3 spec §1.3
 VS1-14	D05.3	pkg/session/txnmanager.go	txnManager.newProviderWithRequest	47	
 VS1-14	D05.3	pkg/session/txnmanager.go	txnManager.recordEvent	7	
 VS1-14	D05.3	pkg/session/txnmanager.go	txnManager.resetEvents	8	
@@ -556,7 +556,7 @@ VS1-14	D05.4	pkg/sessiontxn/interface.go	NewTxnInStmt	7
 VS1-14	D05.4	pkg/sessiontxn/interface.go	NoIdea	3	
 VS1-14	D05.4	pkg/sessiontxn/internal/txn.go	CommitBeforeEnterNewTxn	19	
 VS1-14	D05.4	pkg/sessiontxn/internal/txn.go	GetSnapshotWithTS	19	
-VS1-14	D05.4	pkg/sessiontxn/internal/txn.go	SetTxnAssertionLevel	10	
+VS1-14	D05.4	pkg/sessiontxn/internal/txn.go	SetTxnAssertionLevel	10	write path: tidb-rs is read-only (N11 D8); D05.4 spec §1.2
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.ActivateTxn	46	
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.AdviseOptimizeWithPlan	3	
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.AdviseWarmup	7	
@@ -571,7 +571,7 @@ VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.OnStmtCommi
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.OnStmtErrorForNextAction	9	
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.OnStmtRollback	3	
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.OnStmtStart	4	
-VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.SetOptionsBeforeCommit	99	
+VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.SetOptionsBeforeCommit	99	write path: tidb-rs is read-only (N11 D8); D05.4 spec §1.2
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.SetOptionsOnTxnActive	84	
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.forcePrepareConstStartTS	8	
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.getSnapshotByTS	22	
@@ -582,13 +582,13 @@ VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.prepareTxn	
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.prepareTxnWithOracleTS	8	
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	baseTxnContextProvider.replaceTxnTsFuture	18	
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	canReuseTxnWhenExplicitBegin	11	
-VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	funcFuture.Wait	3	
+VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	funcFuture.Wait	3	ported as the UseStartTs variant of the RC statement future (D05.4 spec §2)
 VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	newOracleFuture	16	
-VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	temporaryTableKVFilter.IsUnnecessaryKeyValue	12	
+VS1-14	D05.4	pkg/sessiontxn/isolation/base.go	temporaryTableKVFilter.IsUnnecessaryKeyValue	12	write path: tidb-rs is read-only (N11 D8); D05.4 spec §1.2
 VS1-14	D05.4	pkg/sessiontxn/isolation/optimistic.go	OptimisticTxnContextProvider.AdviseOptimizeWithPlan	45	
 VS1-14	D05.4	pkg/sessiontxn/isolation/optimistic.go	OptimisticTxnContextProvider.GetStmtReadTS	8	
 VS1-14	D05.4	pkg/sessiontxn/isolation/optimistic.go	OptimisticTxnContextProvider.ResetForNewTxn	8	
-VS1-14	D05.4	pkg/sessiontxn/isolation/optimistic.go	OptimisticTxnContextProvider.onTxnActive	10	
+VS1-14	D05.4	pkg/sessiontxn/isolation/optimistic.go	OptimisticTxnContextProvider.onTxnActive	10	write path: CouldRetry (optimistic retry); D05.4 spec §1.2
 VS1-14	D05.4	pkg/sessiontxn/isolation/repeatable_read.go	notNeedGetLatestTSFromPD	30	
 VS1-15	D12.12	pkg/executor/prepared.go	NewPrepareExec	9	
 VS1-15	D12.12	pkg/executor/prepared.go	PrepareExec.Next	78	
@@ -2118,7 +2118,7 @@ VS1-35	D12.2	pkg/executor/select.go	LimitExec.Close	17
 VS1-35	D12.2	pkg/executor/select.go	LimitExec.Next	64	
 VS1-35	D12.2	pkg/executor/select.go	LimitExec.Open	12	
 VS1-35	D12.2	pkg/executor/select.go	LimitExec.adjustRequiredRows	17	
-VS1-35	D12.2	pkg/executor/select.go	ResetContextOfStmt	338	
+VS1-14	D12.2	pkg/executor/select.go	ResetContextOfStmt	338	
 VS1-35	D12.2	pkg/executor/select.go	SelectionExec.Close	8	
 VS1-35	D12.2	pkg/executor/select.go	SelectionExec.Next	36	
 VS1-35	D12.2	pkg/executor/select.go	SelectionExec.Open	11	
@@ -2129,7 +2129,7 @@ VS1-35	D12.2	pkg/executor/select.go	TableDualExec.Open	4
 VS1-35	D12.2	pkg/executor/select.go	checkMaxExecutionTimeExceeded	31	
 VS1-35	D12.2	pkg/executor/select.go	globalPanicOnExceed.Action	17	
 VS1-35	D12.2	pkg/executor/select.go	globalPanicOnExceed.GetPriority	3	
-VS1-35	D12.2	pkg/executor/select.go	isWeakConsistencyRead	5	
+VS1-14	D12.2	pkg/executor/select.go	isWeakConsistencyRead	5	
 VS1-35	D12.2	pkg/executor/select.go	newSelectionExecutorContext	7	
 VS1-35	D12.2	pkg/executor/select.go	setOptionForTopSQL	13	
 VS1-36	D12.5	pkg/executor/builder.go	executorBuilder.buildSort	13	

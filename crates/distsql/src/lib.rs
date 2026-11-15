@@ -128,7 +128,7 @@ pub async fn select(
     }
     let paging = options.paging.is_some();
     let start = std::time::Instant::now();
-    let responses = snapshot.coprocessor(req).await?;
+    let responses = snapshot.coprocessor(req, None).await?;
     // Go `selectResult.fetchResp`: the time spent waiting for coprocessor responses, recorded
     // once the last one arrived.
     tidb_metrics::distsql_query(start.elapsed(), paging);

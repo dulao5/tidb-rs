@@ -123,6 +123,13 @@ impl ExecutorBuilder {
         {
             return Some(mp.get_executor());
         }
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(mp) = v
+            .as_any()
+            .downcast_ref::<crate::testutil::MockPhysicalPlan>()
+        {
+            return Some(mp.get_executor());
+        }
         if v.kind() == PhysicalKind::PointGet {
             // b.buildPointGet(v): `case *plannercore.PointGetPlan`.
             let Some(pg) = v.as_any().downcast_ref::<PointGetPlan>() else {
