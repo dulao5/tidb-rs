@@ -284,6 +284,15 @@ fn block_on<T>(f: impl std::future::Future<Output = T>) -> T {
 /// `ExecuteStmt` does before `runStmt`, with the planner's part (`AdviseWarmup`,
 /// `AdviseOptimizeWithPlan`) done on the mock plan.
 fn compile(s: &mut Session, sql: &str, rows: i64) -> ExecStmt {
+    compile_counted(s, sql, rows).0
+}
+
+/// [`compile`], with the counters of the plan's executors.
+fn compile_counted(
+    s: &mut Session,
+    sql: &str,
+    rows: i64,
+) -> (ExecStmt, Arc<tidb_executor::testutil::MockCounters>) {
     block_on(s.finish_unfinished_stmt());
     block_on(s.core.prepare_txn_ctx()).unwrap();
     let node = parse(sql);
@@ -292,19 +301,23 @@ fn compile(s: &mut Session, sql: &str, rows: i64) -> ExecStmt {
         .txn_manager
         .on_stmt_start(&mut s.core.sctx, Some(Arc::clone(&node)))
         .unwrap();
-    let (plan, _) = mock_plan(rows);
+    let (plan, counters) = mock_plan(rows);
     s.core
         .advise_optimize_with_plan_and_then_warm_up(&plan)
         .unwrap();
     let mut stmt = ExecStmt::new(sql.to_owned(), Some(plan), None);
     stmt.stmt_node = Some(node);
-    stmt
+    stmt.output_names = vec![tidb_types::field_name::FieldName {
+        col_name: tidb_parser::model::CIStr::new("a"),
+        ..Default::default()
+    }];
+    (stmt, counters)
 }
 
 /// Reads every row of a result.
 fn drain(s: &mut Session, rs: &mut crate::ExecStmtResult) -> Vec<i64> {
     let mut out = Vec::new();
-    let mut chk = rs.new_chunk();
+    let mut chk = rs.new_chunk().unwrap();
     loop {
         block_on(rs.next(s, &mut chk)).unwrap();
         if chk.num_rows() == 0 {
@@ -453,7 +466,7 @@ fn dropped_result_is_finished_before_the_next_statement() {
     let stmt = compile(&mut s, "SELECT a FROM t", 5);
     block_on(s.core.get_stmt_read_ts()).unwrap();
     let mut rs = block_on(run_stmt(&mut s, stmt)).unwrap().expect("rows");
-    let mut chk = rs.new_chunk();
+    let mut chk = rs.new_chunk().unwrap();
     block_on(rs.next(&mut s, &mut chk)).unwrap();
     drop(rs);
     assert!(s.has_unfinished_stmt());
@@ -475,6 +488,39 @@ fn dropped_result_is_finished_before_the_next_statement() {
     let rs = block_on(run_stmt(&mut s, stmt)).unwrap().expect("rows");
     drop(rs);
     block_on(s.finish_unfinished_stmt());
+    assert!(s.is_idle());
+}
+
+/// Lucky (#235): a result is bound to its statement. Keep result A, execute B (which
+/// finishes A first, as `ExecuteStmt` does), then use A: `next` and `fields` fail, `close`
+/// does nothing, and B's own result still reads and closes its statement.
+#[test]
+fn an_old_result_does_not_touch_a_newer_statement() {
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    let (stmt, a_counters) = compile_counted(&mut s, "SELECT a FROM t", 3);
+    block_on(s.core.get_stmt_read_ts()).unwrap();
+    let mut a = block_on(run_stmt(&mut s, stmt)).unwrap().expect("rows");
+    let mut chk = a.new_chunk().unwrap();
+    block_on(a.next(&mut s, &mut chk)).unwrap();
+    assert_eq!(chk.num_rows(), 1);
+
+    let stmt = compile(&mut s, "SELECT b FROM t", 2);
+    block_on(s.core.get_stmt_read_ts()).unwrap();
+    let mut b = block_on(run_stmt(&mut s, stmt)).unwrap().expect("rows");
+    // A was kept, not dropped: B's start finished it with its record set, executors closed.
+    assert_eq!(a_counters.closed.load(SeqCst), 1);
+
+    let e = block_on(a.next(&mut s, &mut chk)).unwrap_err();
+    assert_eq!(e.to_string(), "the record set is closed");
+    assert!(a.fields(&s).is_err());
+    block_on(a.close(&mut s)).unwrap();
+    assert!(s.has_unfinished_stmt(), "A's close left B running");
+
+    assert_eq!(b.fields(&s).unwrap().len(), 1);
+    assert_eq!(drain(&mut s, &mut b), vec![0, 1]);
+    let _ = block_on(b.close(&mut s));
+    assert!(!s.has_unfinished_stmt());
     assert!(s.is_idle());
 }
 

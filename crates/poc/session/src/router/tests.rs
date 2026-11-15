@@ -1020,3 +1020,37 @@ fn prepare_with_unequal_schema_versions_is_poc_owned() {
     assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::SchemaVersion)));
     assert!(script.lock().unwrap().log.is_empty());
 }
+
+/// Lucky (#235): the router checks that the new session is idle before it tries a statement
+/// there. A busy session (here a pending transaction) is a router bug: the statement goes to
+/// the PoC (reason `not_idle`) in both modes and the new stack is not asked, so nothing is
+/// written to the new session that a restore would have to undo.
+#[test]
+fn not_idle_new_session_goes_to_the_poc() {
+    for mode in [NewStackMode::Vs1, NewStackMode::Strict] {
+        let mut p = poc();
+        let (mut r, script) = scripted(mode, &p);
+        script.lock().unwrap().answer = Some(Answer::Rows);
+        let core = r.new.session_mut().core_mut();
+        block_on(core.prepare_txn_ctx()).unwrap();
+        tidb_sessiontxn::TxnManager::advise_warmup(core).unwrap();
+        assert!(!r.new.session().is_idle());
+        let before = r.new.session().state_snapshot();
+        let res = block_on(r.query(&mut p, POINT));
+        assert_eq!(rows(&res).map(|r| r.0), Some(3), "{mode:?}");
+        assert!(script.lock().unwrap().log.is_empty(), "{mode:?}");
+        assert_eq!(Reason::NotIdle.label(), "not_idle");
+        // Only the PoC's previous-statement state was written to the new session.
+        let after = r.new.session().state_snapshot();
+        assert!(after.contains("txn=txnFuture"), "{mode:?}");
+        assert_ne!(before, after);
+    }
+}
+
+/// VS1 plan §4.3: a fallback after the new stack's executors opened is detected (and logged
+/// and counted as a bug by `try_new`).
+#[test]
+fn fallback_after_open_is_detected() {
+    assert!(!fallback_after_open(3, 3));
+    assert!(fallback_after_open(3, 4));
+}

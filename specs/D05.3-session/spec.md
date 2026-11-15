@@ -13,6 +13,8 @@ VS1-14 太大，拆成两部分，按顺序合入：
 
 `specs/VS1-vertical-slice/functions.tsv` 里第 2 部分的 5 个函数改记在 `VS1-14b` 名下，converge 按部分分别计算。
 
+**路由器在进新栈之前检查会话空闲**（#235 评审）：`is_idle()` 不成立时不进新栈，交给 PoC，原因 `not_idle`，记为路由器的 bug（日志 + `tidbrs_route_total{reason="not_idle"}`）；只有新栈能执行的预处理语句报 1235。这样不会出现新栈写了状态、恢复又失败的情况。另外，执行器打开之后的回退（plan §4.3 不允许；`newstack.rs` 在结果集编码完成前会这样做，VS1-16 去掉）由路由器检测，记日志与 `reason="bug_blocked_after_open"`。
+
 **第 1 部分中预处理语句一律走 PoC**（Lucky，VS1-14 评审要求）：路由器在 COM_STMT_PREPARE 时不再调用新栈，stmt id 直接归 PoC，原因记为 `prepared`（`tidbrs_route_total{engine="poc",reason="prepared"}`），`vs1` 与 `strict` 模式相同（`strict` 也不报 1235：这不是新栈碰到了桩，而是本部分不提供）。会话的 `prepare_stmt` / `execute_prepared_stmt` / `drop_prepared_stmt` 仍是 `blocked-by:D05.3` 的桩（第 2 部分）。§4.7 的路由表、列元数据检查（VS1-02 已写好）保留不动，第 2 部分打开。
 
 ## 1. 范围（第 1 部分）
@@ -84,7 +86,13 @@ Session
 
 `recordSet` 没有 `Drop`：`finish` / `close` 是 async 且需要会话。Go 在协议层用 `defer rs.Close()` 保证 `finishStmt` 与 `ExecStmt.CloseRecordSet` 一定执行；Rust 中语句的 future 可能被取消（KILL、断连、客户端中断）。
 
-做法：`runStmt` 返回行时，`ExecStmt` 留在会话的 `running` 里，调用方拿到的 `ExecStmtResult` 只持有 `recordSet`。`ExecStmtResult` 的方法以 `&mut Session` 为参数；`close` 完成后清空 `running`。`next` 遇到的错误同时记入 `running`。如果 `ExecStmtResult` 没有 `close` 就被丢弃，会话在下一次 `ExecuteStmt`（以及路由器取检查点之前，§3）调用 `finish_unfinished_stmt`，补做 Go `execStmtResult.Close` 中会话侧的部分：`finishStmt(nil)`（autocommit 下 `CommitTxn`，`LazyTxn` 回到 invalid、`OnTxnEnd`），再 `ExecStmt.CloseRecordSet(txnStartTS, lastErrs)`（`LastQueryInfo`、`StmtCtx` 的清理）。执行器树已经随 `recordSet` 一起丢弃（Rust 所有权释放资源，与 `Close` 相同；点查执行器不再放回缓存，下次重建）。
+做法（含 #235 评审的修改）：
+
+- `runStmt` 返回行时，`ExecStmt` 留在会话的 `running` 里；`recordSet` 放在一个由结果与会话共享的槽中（`Arc<Mutex<Option<RecordSet>>>`，锁只在取出 / 放回时持有，不跨 `await`）。`ExecStmtResult` 的方法以 `&mut Session` 为参数，调用时把 `recordSet` 取出、用完放回；`close` 完成后清空 `running`。`next` 遇到的错误同时记入 `running`。
+- **结果与语句绑定**：每条返回行的语句有一个序号，同时存在 `running` 和结果里。会话已经结束了那条语句（下一条 `ExecuteStmt` 会先结束没关闭的语句）之后，旧结果的 `next` / `fields` 返回错误，`finish` / `close` 什么也不做，不会动到新语句（Lucky：保留结果 A、执行 B、再关 A，以前会关掉 B 的语句）。
+- 下一次 `ExecuteStmt`（以及路由器取检查点之前）调用 `finish_unfinished_stmt`：
+  - 结果还在（保留了但没关）：槽里有 `recordSet`，照 Go 的 `execStmtResult.Close` 执行（`Finish`：关闭执行器、`finishStmt`；再 `ExecStmt.CloseRecordSet`）。
+  - 结果已丢弃（或某个方法的 future 在取出期间被取消）：`recordSet` 随之丢弃，只补做会话一侧：`finishStmt(nil)`（autocommit 下 `CommitTxn`，`LazyTxn` 回到 invalid、`OnTxnEnd`），再 `CloseRecordSet(txnStartTS, lastErrs)`。执行器的 `Close` 不再执行（§4 第 6 条）；点查执行器不再放回缓存，下次重建。
 
 ### 2.4 `ResetContextOfStmt` 提前到本项
 
@@ -141,7 +149,9 @@ plan §4.6 第 2 条：新栈已发出的 TSO 请求交给 PoC。PoC 的 `TsFutu
 2. `loadCommonGlobalVariablesIfNeeded`：会话变量由路由器从 PoC 同步（plan §4.1），全局值来自编译期默认值（VS1-17 接上 domain 的 sysvar 缓存）；这里是 `glue`，只置位"已加载"。
 3. `SetProcessInfo` 只记下参数（§1.2）。
 4. `doCommitWithRetry` 不重试（只读事务的提交不会失败；`CouldRetry` 恒为 false，D05.4 spec §4）。
-5. `txnManager` 不预留两个 optimistic provider 轮换（`reservedOptimisticProviders`：Go 为减少分配；Rust 每个事务新建，M-POOL）。
+5. `ExecuteStmt` 的两个 `defer`（`txn.onStmtEnd`、`OnStmtEnd`）用 drop guard 实现（M-DEFER），语句的 future 被取消时也执行。
+6. 结果集被**丢弃**（不是保留不关）时，执行器的 `Close` 不执行：执行器的 runtime stats、内存 tracker 的释放记录等 `Close` 里做的事被跳过（资源随所有权释放）。会话一侧的结束（`finishStmt`、`CloseRecordSet`、`LastQueryInfo`）照常补做（§2.3）。
+7. `txnManager` 不预留两个 optimistic provider 轮换（`reservedOptimisticProviders`：Go 为减少分配；Rust 每个事务新建，M-POOL）。
 
 ## 5. 测试与 govec
 

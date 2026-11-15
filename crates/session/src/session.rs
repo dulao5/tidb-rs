@@ -118,6 +118,12 @@ pub struct Session {
     pub(crate) core: SessionCore,
     /// The statement whose rows are being read (spec §2.3).
     pub(crate) running: Option<RunningStmt>,
+    /// The sequence number of the last statement that returned a result: a result only acts
+    /// on its own statement (spec §2.3).
+    next_seq: u64,
+    /// Statements whose executors were built and opened (`ExecStmt.Exec` / `PointGet`
+    /// called): the router checks that no fallback happens after that (VS1 plan §4.3).
+    executed_stmts: u64,
     dialect: Dialect,
 }
 
@@ -838,6 +844,8 @@ impl Session {
                 txn_manager: new_txn_manager(),
             },
             running: None,
+            next_seq: 0,
+            executed_stmts: 0,
             dialect,
         }
     }
@@ -992,11 +1000,40 @@ impl Session {
         self.core
             .set_process_info(text, SystemTime::now(), cmd_byte, 0);
         self.core.sctx.txn.on_stmt_start(&digest);
-        // defer sessiontxn.GetTxnManager(s).OnStmtEnd(); defer s.txn.onStmtEnd()
-        let r = self.execute_stmt_started(stmt_node).await;
-        self.core.sctx.txn.on_stmt_end();
-        self.core.txn_manager.on_stmt_end();
-        r
+        // defer sessiontxn.GetTxnManager(s).OnStmtEnd(); defer s.txn.onStmtEnd(): a drop
+        // guard (M-DEFER), so they also run when the statement's future is cancelled.
+        let guard = OnStmtEnd(self);
+        guard.0.execute_stmt_started(stmt_node).await
+    }
+
+    /// The statement `stmt` returns rows: it stays in the session under a new sequence
+    /// number, which its result carries (spec §2.3).
+    // glue: spec §2.3
+    pub(crate) fn start_running(
+        &mut self,
+        stmt: ExecStmt,
+        rs: tidb_executor::adapter::RecordSet,
+        txn_start_ts: u64,
+        wrapped: bool,
+    ) -> ExecStmtResult {
+        self.next_seq += 1;
+        let seq = self.next_seq;
+        let slot = Arc::new(parking_lot::Mutex::new(Some(rs)));
+        self.running = Some(RunningStmt::new(
+            stmt,
+            txn_start_ts,
+            wrapped,
+            seq,
+            Arc::clone(&slot),
+        ));
+        ExecStmtResult::new(slot, seq)
+    }
+
+    /// The number of statements whose executors were opened (VS1 plan §4.3: a fallback
+    /// after that is a bug of the caller).
+    // glue: VS1 plan §4.3 (router check)
+    pub fn executed_stmts(&self) -> u64 {
+        self.executed_stmts
     }
 
     /// The part of `ExecuteStmt` after the deferred `OnStmtEnd`s are registered.
@@ -1050,13 +1087,13 @@ impl Session {
         let r = if stmt.ps_stmt.is_some() {
             // point plan short path
             let mut stmt = stmt;
+            self.executed_stmts += 1;
             let r = stmt.point_get(&mut self.core).await;
             self.core.sctx.txn.change_to_invalid();
             match r {
                 Ok(rs) => {
                     let txn_start_ts = rs.txn_start_ts();
-                    self.running = Some(RunningStmt::new(stmt, txn_start_ts, false));
-                    Ok(Some(ExecStmtResult::new(rs)))
+                    Ok(Some(self.start_running(stmt, rs, txn_start_ts, false)))
                 }
                 Err(e) => Err(e),
             }
@@ -1087,6 +1124,19 @@ impl Session {
     /// before it takes a checkpoint.
     // glue: spec §2.3 (Go's deferred rs.Close of the protocol layer)
     pub async fn finish_unfinished_stmt(&mut self) {
+        let Some(run) = self.running.as_ref() else {
+            return;
+        };
+        // A result kept but not closed: its record set is still in the slot, so this is
+        // Go's `execStmtResult.Close` (the executors are closed too).
+        let rs = run.rs.lock().take();
+        if let Some(mut rs) = rs {
+            if let Err(e) = crate::exec_result::close_running(self, &mut rs).await {
+                log::warn!("finish an unfinished statement: {e}");
+            }
+            return;
+        }
+        // The result was dropped: the session side of `Close` only (spec §2.3, §4).
         let Some(mut run) = self.running.take() else {
             return;
         };
@@ -1143,6 +1193,18 @@ impl Session {
     }
 }
 
+/// The deferred `OnStmtEnd`s of `ExecuteStmt` (Go: `defer s.txn.onStmtEnd()`, `defer
+/// sessiontxn.GetTxnManager(s).OnStmtEnd()`, run in that order).
+struct OnStmtEnd<'a>(&'a mut Session);
+
+impl Drop for OnStmtEnd<'_> {
+    // glue: M-DEFER
+    fn drop(&mut self) {
+        self.0.core.sctx.txn.on_stmt_end();
+        self.0.core.txn_manager.on_stmt_end();
+    }
+}
+
 /// `validateStatementInTxn`: only `IMPORT INTO` in a transaction is refused; it is not in the
 /// Rust AST.
 // glue: stub of session.validateStatementInTxn, blocked-by:D02.2 (ast.ImportIntoStmt: nothing to refuse)
@@ -1196,6 +1258,7 @@ pub(crate) async fn run_stmt(
         crate::tidb::check_stmt_limit(&mut se.core, false).await?;
     }
 
+    se.executed_stmts += 1;
     let r = s.exec(&mut se.core).await;
 
     // Pipelined DML errors: the write path.
@@ -1204,8 +1267,7 @@ pub(crate) async fn run_stmt(
     if let Ok(Some(rs)) = r {
         // StmtCtx.IsExplainAnalyzeDML: EXPLAIN ANALYZE of DML (write path).
         let txn_start_ts = rs.txn_start_ts();
-        se.running = Some(RunningStmt::new(s, txn_start_ts, true));
-        return Ok(Some(ExecStmtResult::new(rs)));
+        return Ok(Some(se.start_running(s, rs, txn_start_ts, true)));
     }
 
     let meets_err = r.err();
