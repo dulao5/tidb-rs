@@ -22,7 +22,9 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use serde_json::{Value as Json, json};
 
-use crate::compare::{Verdict, charset_name, compare, flag_names, prepare_diffs, type_name};
+use crate::compare::{
+    Verdict, charset_name, compare, execute_metadata_diffs, flag_names, prepare_diffs, type_name,
+};
 use crate::exec::{ColumnMeta, Outcome, PrepareMeta, Side, TlsMode};
 use crate::sql::Kind;
 use crate::workload::{Case, Param, SysbenchSpec};
@@ -338,7 +340,8 @@ async fn run_case(case: &Case, cli: &Cli, a: &mut Side, b: &mut Side, report: &m
         let (pb, ob) = b.prepared(&case.sql, &params).await;
         let mut v = compare(&oa, &ob, case.ordered);
         if let (Some(x), Some(y)) = (&pa, &pb) {
-            let d = prepare_diffs(x, y);
+            let mut d = prepare_diffs(x, y);
+            d.extend(execute_metadata_diffs((Some(x), &oa), (Some(y), &ob)));
             if !d.is_empty() && v != Verdict::Unsupported {
                 v = match v {
                     Verdict::Mismatch(mut prev) => {

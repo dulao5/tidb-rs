@@ -15,6 +15,25 @@ use tidb_base::Error;
 use tidb_base::kv::StoreType;
 
 /// `tikvstore.Variables` (client-go `kv.Variables`): the KV options of a session.
+/// RetryInfo saves retry information (Go `variable.RetryInfo`). Only the part a read-only
+/// node uses: `Retrying` (the retry of optimistic writes, always false here) and the
+/// prepared statements closed in the current transaction, which stay executable until the
+/// transaction ends (`DropPreparedStmt` / `cleanRetryInfo`). The auto-increment / auto-random
+/// ids are the write path (N11 D8); `LastRcReadTS` is read only by the RC provider's retry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RetryInfo {
+    pub retrying: bool,
+    pub dropped_prepared_stmt_ids: Vec<u32>,
+}
+
+impl RetryInfo {
+    /// Clean does some clean work.
+    // go: RetryInfo.Clean L2 (the auto-increment / auto-random ids are the write path)
+    pub fn clean(&mut self) {
+        self.dropped_prepared_stmt_ids.clear();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KVVars {
     /// BackoffLockFast specifies the LockFast backoff base duration in milliseconds.

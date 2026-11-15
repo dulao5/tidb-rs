@@ -2,8 +2,9 @@
 //! MySQL protocol responses of the PoC's connection loop.
 //!
 //! The session runs `ExecuteStmt` (VS1-14 part 1), whose planner is still a boundary stub,
-//! so every statement falls back (or, in `strict` mode, reports 1235); prepared statements
-//! are not prepared here before VS1-14b. The pieces that turn a successful result into a
+//! so every statement falls back (or, in `strict` mode, reports 1235). Prepared statements
+//! go through the session's `PrepareStmt` (VS1-14b), which ends `Blocked` at the prepare
+//! executor until prepared-statement planning (VS1-15). The pieces that turn a successful result into a
 //! response are stubs of their own until their work items land:
 //!
 //! - TODO(VS1-16): result sets and column definitions (`writeResultSet`, `column` / `dump`,
@@ -101,9 +102,9 @@ impl NewStack for NewSession {
         })
     }
 
-    fn prepare<'a>(&'a mut self, stmt: &'a ast::Stmt) -> BoxFut<'a, Result<NewPrepared, Error>> {
+    fn prepare<'a>(&'a mut self, sql: &'a str) -> BoxFut<'a, Result<NewPrepared, Error>> {
         Box::pin(async move {
-            let info = self.session.prepare_stmt(stmt).await?;
+            let info = self.session.prepare_stmt(sql).await?;
             // The statement exists in the new session now; without its column definitions
             // it cannot be used, so it is dropped again.
             let _ = self.session.drop_prepared_stmt(info.stmt_id);

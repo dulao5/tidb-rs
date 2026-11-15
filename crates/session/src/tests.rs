@@ -874,3 +874,69 @@ fn random_interleaving_of_new_fallback_and_poc() {
         );
     }
 }
+
+// ---------------------------------------------------------------- prepared statements
+
+/// Go's deferred `DropPreparedStmt` (spec §6.1): `BEGIN; PREPARE → 1; CLOSE 1; EXECUTE 1`
+/// still finds statement 1, and it still counts toward `max_prepared_stmt_count`, until the
+/// transaction ends. Each end removes it — commit, rollback, the end of an autocommit
+/// statement — but closing the session does not clean (Go: `inCloseSession`; `Close`
+/// withdraws every statement instead).
+#[test]
+fn closed_prepared_stmt_lives_until_txn_end() {
+    use tidb_sessionctx::variable::session_methods::PreparedStmtCount;
+    let store = MockStore::new(10);
+    let found = |s: &mut Session| match block_on(s.execute_prepared_stmt(1, vec![])) {
+        Ok(_) => true,
+        Err(e) => e.code() != 8111,
+    };
+    let prepare_and_close = |s: &mut Session| {
+        // PREPARE (the plan-cache statement is prepared-statement planning, VS1-15).
+        s.vars_mut().add_prepared_stmt(1, Arc::new(())).unwrap();
+        s.drop_prepared_stmt(1).unwrap();
+    };
+    for end in ["commit", "rollback", "autocommit statement", "close"] {
+        let mut s = session(&store);
+        if end != "autocommit statement" {
+            s.vars_mut().set_in_txn(true); // BEGIN
+        }
+        let before = PreparedStmtCount.load(SeqCst);
+        prepare_and_close(&mut s);
+        assert!(
+            found(&mut s),
+            "{end}: EXECUTE after CLOSE in the transaction"
+        );
+        assert_eq!(s.vars().state.prepared_stmts.len(), 1, "{end}");
+        assert_eq!(
+            PreparedStmtCount.load(SeqCst),
+            before + 1,
+            "{end}: still counted"
+        );
+        match end {
+            "commit" => block_on(s.core.commit_txn()).unwrap(),
+            "rollback" => s.core.rollback_txn(),
+            "autocommit statement" => {
+                let stmt = compile(&mut s, "SELECT 1", 0);
+                let _ = block_on(crate::tidb::finish_stmt(&mut s.core, None, &stmt));
+            }
+            _ => {
+                s.close();
+                // Not cleaned: still recorded, and Close withdrew it from the count.
+                assert_eq!(s.vars().state.retry_info.dropped_prepared_stmt_ids, [1]);
+                assert_eq!(PreparedStmtCount.load(SeqCst), before);
+                continue;
+            }
+        }
+        assert!(!found(&mut s), "{end}: EXECUTE after the transaction ended");
+        assert!(s.vars().state.prepared_stmts.is_empty(), "{end}");
+        assert!(
+            s.vars()
+                .state
+                .retry_info
+                .dropped_prepared_stmt_ids
+                .is_empty()
+        );
+        assert_eq!(PreparedStmtCount.load(SeqCst), before, "{end}: uncounted");
+        assert_eq!(s.drop_prepared_stmt(1).unwrap_err().code(), 8111);
+    }
+}

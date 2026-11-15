@@ -79,6 +79,49 @@ pub fn prepare_diffs(a: &PrepareMeta, b: &PrepareMeta) -> Vec<String> {
     d
 }
 
+/// The router check of the vertical-slice plan (§4.7), seen from the client: the column
+/// definitions of an EXECUTE must be those its COM_STMT_PREPARE returned. tidb-rs with
+/// `--new-stack=fallback` sends the new stack's definitions at PREPARE and may run an
+/// EXECUTE on the PoC; a difference there is a bug. Go itself can answer an EXECUTE with
+/// other definitions than its PREPARE (a `?` in the select list), so a difference is reported
+/// when A has none in that column and field, or when A's EXECUTE has another value there.
+pub fn execute_metadata_diffs(
+    a: (Option<&PrepareMeta>, &Outcome),
+    b: (Option<&PrepareMeta>, &Outcome),
+) -> Vec<String> {
+    // (key, message, the EXECUTE's value) per drifted field.
+    let drift = |(p, o): (Option<&PrepareMeta>, &Outcome)| match (p, o) {
+        (Some(p), Outcome::Rows { columns, .. }) => column_diffs("", &p.columns, columns)
+            .into_iter()
+            .map(|d| {
+                // "col[i].field: A=.. B=.." or "column count A=.. B=..".
+                let key = d.split([':', '=']).next().unwrap_or_default().to_owned();
+                let executed = d.rsplit_once(" B=").map(|(_, v)| v.to_owned());
+                let d = d
+                    .replacen("A=", "prepare=", 1)
+                    .replacen(" B=", " execute=", 1);
+                (key, format!("B execute vs its prepare: {d}"), executed)
+            })
+            .collect(),
+        _ => Vec::<(String, String, Option<String>)>::new(),
+    };
+    let on_a = drift(a);
+    drift(b)
+        .into_iter()
+        .filter_map(|(k, d, executed)| {
+            match on_a.iter().find(|(ka, _, _)| *ka == k) {
+                None => Some(d),
+                // Go drifted this field too: B must drift to Go's value.
+                Some((_, _, a_executed)) if *a_executed != executed => Some(format!(
+                    "{d} (A's execute={})",
+                    a_executed.as_deref().unwrap_or("?")
+                )),
+                Some(_) => None,
+            }
+        })
+        .collect()
+}
+
 fn brief(o: &Outcome) -> String {
     match o {
         Outcome::Rows { columns, rows, .. } => {
@@ -345,6 +388,59 @@ mod tests {
             warnings: 0,
         };
         assert_eq!(compare(&ok, &ok, false), Verdict::Match);
+    }
+
+    /// Counter-proof of the §4.7 check: B's EXECUTE returns another column definition than
+    /// its PREPARE (a fallback whose PoC metadata differs) and A's does not.
+    #[test]
+    fn execute_metadata_differs_from_prepare() {
+        let prep = PrepareMeta {
+            param_count: 0,
+            columns: vec![col("c")],
+        };
+        let same = rows(&[]);
+        let mut other = col("c");
+        other.length = 11;
+        let drifted = Outcome::Rows {
+            columns: vec![other],
+            rows: vec![],
+            warnings: 0,
+        };
+        assert!(execute_metadata_diffs((Some(&prep), &same), (Some(&prep), &same)).is_empty());
+        assert_eq!(
+            execute_metadata_diffs((Some(&prep), &same), (Some(&prep), &drifted)),
+            vec!["B execute vs its prepare: col[0].length: prepare=480 execute=11".to_string()]
+        );
+        // Go drifted the same field to another value: still B's fault.
+        let mut other_len = col("c");
+        other_len.length = 12;
+        let other_len = Outcome::Rows {
+            columns: vec![other_len],
+            rows: vec![],
+            warnings: 0,
+        };
+        assert_eq!(
+            execute_metadata_diffs((Some(&prep), &other_len), (Some(&prep), &drifted)),
+            vec![
+                "B execute vs its prepare: col[0].length: prepare=480 execute=11 (A's execute=12)"
+                    .to_string()
+            ]
+        );
+        // Go's own PREPARE/EXECUTE difference is not B's fault, another one is.
+        assert!(
+            execute_metadata_diffs((Some(&prep), &drifted), (Some(&prep), &drifted)).is_empty()
+        );
+        let mut flags = col("c");
+        flags.flags = 0;
+        let flags = Outcome::Rows {
+            columns: vec![flags],
+            rows: vec![],
+            warnings: 0,
+        };
+        assert_eq!(
+            execute_metadata_diffs((Some(&prep), &drifted), (Some(&prep), &flags)).len(),
+            1
+        );
     }
 
     #[test]

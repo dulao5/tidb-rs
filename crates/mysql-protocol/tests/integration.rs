@@ -545,6 +545,33 @@ async fn raw_without_deprecate_eof() {
     assert_eq!(c.read().await, [0, 0b100, 4, b'l', b'o', b'n', b'g']);
     assert!(is_eof(&c.read().await));
 
+    // COM_STMT_RESET drops the long data (VS1 plan §4.7: the protocol layer owns it for
+    // both engines): the same execute now sends the bound NULL of param 1.
+    c.command(command::STMT_SEND_LONG_DATA, &ld).await; // no response
+    c.command(command::STMT_RESET, &stmt_id.to_le_bytes()).await;
+    assert_eq!(c.read().await, [0, 0, 0, 2, 0, 0, 0]);
+    let mut body = stmt_id.to_le_bytes().to_vec();
+    body.push(0);
+    body.extend_from_slice(&1u32.to_le_bytes());
+    body.push(0b11); // both NULL
+    body.push(0);
+    c.command(command::STMT_EXECUTE, &body).await;
+    assert_eq!(c.read().await, [2]);
+    c.read().await;
+    c.read().await;
+    assert!(is_eof(&c.read().await));
+    assert_eq!(c.read().await, [0, 0b1100]);
+    assert!(is_eof(&c.read().await));
+
+    // COM_STMT_FETCH: no cursor is ever opened (cursor EXECUTEs run on the PoC, which
+    // answers FETCH like this): 1235.
+    let mut fetch = stmt_id.to_le_bytes().to_vec();
+    fetch.extend_from_slice(&1u32.to_le_bytes());
+    c.command(command::STMT_FETCH, &fetch).await;
+    let err = c.read().await;
+    assert_eq!(err[0], 0xff);
+    assert_eq!(u16::from_le_bytes([err[1], err[2]]), 1235);
+
     // Unknown statement -> ERR 1243; unknown command -> ERR 1105.
     c.command(command::STMT_RESET, &999u32.to_le_bytes()).await;
     let err = c.read().await;

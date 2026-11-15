@@ -45,7 +45,10 @@ parameters):
   ties differently; such diffs say "same rows in a different order".
 - column definitions: name, org_name, schema, table, org_table, type, length, decimals, flags,
   charset/collation; for prepared statements also the parameter count and the columns returned
-  by COM_STMT_PREPARE.
+  by COM_STMT_PREPARE, and that B's EXECUTE returns the columns its PREPARE returned (a
+  difference A does not have, or a field A changed to another value, is a `metadata` mismatch: with `--new-stack=fallback` an
+  EXECUTE that falls back to the PoC must carry the new stack's PREPARE metadata,
+  vertical-slice plan §4.7).
 - errors: both fail with the same code => `both_error` (counts as agreement); B fails with 1235
   (`ER_NOT_SUPPORTED_YET`) => `unsupported`; anything else (one side errors, different codes,
   connection errors, timeouts) => `mismatch`. Error messages and warning counts are not compared.
