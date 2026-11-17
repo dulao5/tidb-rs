@@ -525,3 +525,105 @@ fn metadata_lock_table_change_check() {
     assert_eq!(e.code(), 8028);
     assert_eq!(e.to_string(), "[domain:8028]public column b has changed");
 }
+
+/// `GetPreparedStmt`: the statement the node holds, else the one named in the session, else
+/// Go's `ErrStmtNotFound` (8111); a value that is not a `PlanCacheStmt` is an error.
+#[test]
+fn get_prepared_stmt_from_the_node_or_by_name() {
+    use crate::core::plan_cache_utils::get_prepared_stmt;
+    use tidb_parser::ast::ExecuteStmt;
+    let mut v = vars();
+    let held = Arc::new(parking_lot::Mutex::new(stmt("select 1", vec![], 1)));
+    let node = ExecuteStmt {
+        prep_stmt: Some(held.clone()),
+        ..Default::default()
+    };
+    assert!(Arc::ptr_eq(&get_prepared_stmt(&node, &v).unwrap(), &held));
+
+    let named = Arc::new(parking_lot::Mutex::new(stmt("select 2", vec![], 1)));
+    v.add_prepared_stmt(3, named.clone()).unwrap();
+    v.state.prepared_stmt_name_to_id.insert("s".to_owned(), 3);
+    let node = ExecuteStmt {
+        name: "s".to_owned(),
+        ..Default::default()
+    };
+    assert!(Arc::ptr_eq(&get_prepared_stmt(&node, &v).unwrap(), &named));
+
+    let node = ExecuteStmt {
+        name: "nope".to_owned(),
+        ..Default::default()
+    };
+    assert_eq!(get_prepared_stmt(&node, &v).err().unwrap().code(), 8111);
+    assert_eq!(
+        get_prepared_stmt(&ExecuteStmt::default(), &v)
+            .err()
+            .unwrap()
+            .code(),
+        8111
+    );
+    let node = ExecuteStmt {
+        prep_stmt: Some(Arc::new(())),
+        ..Default::default()
+    };
+    assert!(get_prepared_stmt(&node, &v).is_err());
+    v.remove_prepared_stmt(3);
+}
+
+/// `OptimizeExecStmt`: the `Execute` plan takes the binary arguments and the statement, then
+/// the plan cache's miss path runs (the statement's parameters are set) and ends in the
+/// statement's `Optimize`, a boundary stub; `EXECUTE ... USING @var` needs the expression
+/// rewriter first.
+#[test]
+fn optimize_exec_stmt_reaches_the_statement_optimizer() {
+    use crate::core::planbuilder::new_plan_builder;
+    use crate::optimize::optimize_exec_stmt;
+    use tidb_parser::ast::{ExecuteStmt, Stmt};
+    let mut v = vars();
+    let prep = Arc::new(parking_lot::Mutex::new(stmt("select ? + 1", vec![7], 1)));
+    let node = ExecuteStmt {
+        binary_args: Some(Arc::new(vec![new_int_datum(5)])),
+        prep_stmt: Some(prep.clone()),
+        prep_stmt_id: 1,
+        ..Default::default()
+    };
+    let exec = new_plan_builder(&[]).build_execute(&v, &node).unwrap();
+    assert_eq!(exec.params.len(), 1);
+    assert_eq!(exec.params[0].get_int64(), 5);
+    assert!(Arc::ptr_eq(&exec.prep_stmt, &prep));
+    assert!(exec.plan.is_none());
+
+    let e = optimize_exec_stmt(&mut v, &node, &Is(1), None)
+        .err()
+        .unwrap();
+    assert_eq!(blocked_by(&e), Some("D13.3"), "{e}");
+    // The miss path ran: the parameter values are in the session, and the statement was
+    // being planned (the flag is cleared again).
+    assert_eq!(v.state.plan_cache_params.all_param_values().len(), 1);
+    assert!(!v.stmt_ctx().in_prepared_plan_building);
+
+    // A wrong parameter count is Go's error, before the optimizer.
+    let node = ExecuteStmt {
+        binary_args: Some(Arc::new(Vec::<Datum>::new())),
+        prep_stmt: Some(prep.clone()),
+        ..Default::default()
+    };
+    let e = optimize_exec_stmt(&mut v, &node, &Is(1), None)
+        .err()
+        .unwrap();
+    assert_eq!(e.code(), 8112, "{e}");
+
+    // EXECUTE s USING @a: the variables go through the expression rewriter.
+    let Stmt::Execute(node) = parse("EXECUTE s USING @a", &ParseOptions::default())
+        .unwrap()
+        .stmts
+        .remove(0)
+    else {
+        panic!("not an EXECUTE");
+    };
+    assert_eq!(node.name, "s");
+    assert_eq!(node.using_vars.len(), 1);
+    let e = optimize_exec_stmt(&mut v, &node, &Is(1), None)
+        .err()
+        .unwrap();
+    assert_eq!(blocked_by(&e), Some("D09.2"), "{e}");
+}
