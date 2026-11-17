@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
-use tidb_expr_pushdown::infer_pushdown::{PushDownContext, new_push_down_context_from_session_vars};
+use tidb_expr_pushdown::infer_pushdown::{
+    PushDownContext, new_push_down_context_from_session_vars,
+};
 use tidb_kv::kv::Client;
 use tidb_sessionctx::exprctx::{BuildContextRef, EvalContextRef, ExprContext, ExprContextRef};
 use tidb_sessionctx::ranger::context::RangerContext;

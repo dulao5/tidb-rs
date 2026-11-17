@@ -12,7 +12,9 @@ use tidb_base::kv::StoreType;
 use tidb_expr_pushdown::infer_pushdown::can_exprs_push_down;
 use tidb_expression::chunk_executor::has_get_set_var_func;
 use tidb_expression::constant_propagation::{propagate_constant, valid_compare_constant_predicate};
-use tidb_expression::util::{contain_virtual_column, extract_columns_from_expressions, extract_cor_columns};
+use tidb_expression::util::{
+    contain_virtual_column, extract_columns_from_expressions, extract_cor_columns,
+};
 use tidb_expression::{Column, CorrelatedColumn, ExprRef};
 
 use crate::arena::PlanId;
@@ -86,7 +88,10 @@ impl LogicalPlan for LogicalSelection {
     /// HashCode implements base.LogicalPlan.<0th> interface.
     // glue: dispatch to the HashCode boundary stub above
     fn hash_code(&self) -> Result<Vec<u8>, Error> {
-        Err(selection_boundary("D14.2", "plancodec.TypeStringToPhysicalID (LogicalSelection.HashCode)"))
+        Err(selection_boundary(
+            "D14.2",
+            "plancodec.TypeStringToPhysicalID (LogicalSelection.HashCode)",
+        ))
     }
 
     /// PredicatePushDown implements base.LogicalPlan.<1st> interface.
@@ -234,8 +239,18 @@ pub fn append_table_dual_trace_step(
     opt: &LogicalOptimizeOp,
 ) {
     let dual = trace_id(ctx.arena.get(dual));
-    let action = || format!("{}_{} is replaced by {}_{}", replaced.0, replaced.1, dual.0, dual.1);
-    let reason = || format!("The conditions[{}] are constant false or null", conds_string(ctx, conditions));
+    let action = || {
+        format!(
+            "{}_{} is replaced by {}_{}",
+            replaced.0, replaced.1, dual.0, dual.1
+        )
+    };
+    let reason = || {
+        format!(
+            "The conditions[{}] are constant false or null",
+            conds_string(ctx, conditions)
+        )
+    };
     opt.append_step_to_current(dual.1 as isize, dual.0, reason, action);
 }
 

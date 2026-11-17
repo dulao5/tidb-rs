@@ -172,11 +172,11 @@ impl ExprPrefixAdder<'_, '_> {
                     );
                 } else if sf.func_name.l == ast::EQ || sf.func_name.l == ast::In {
                     // only add prefix expression for EQ or IN function
-                    let accesses =
-                        match self.add_expr_prefix4_cnf_cond(std::slice::from_ref(&item)) {
-                            Ok(a) => a,
-                            Err(err) => return Err(with_orig(err, condition_ref)),
-                        };
+                    let accesses = match self.add_expr_prefix4_cnf_cond(std::slice::from_ref(&item))
+                    {
+                        Ok(a) => a,
+                        Err(err) => return Err(with_orig(err, condition_ref)),
+                    };
                     // accesses is never empty: AddExpr4EqAndInCondition returns at least its input.
                     new_access_items.push(
                         compose_cnf_condition(expr_ctx, &accesses).expect("non-empty conditions"),

@@ -31,9 +31,9 @@ use crate::arena::{PlanArena, PlanId};
 use crate::logicalop::{self, BaseLogicalPlan, LogicalSchemaProducer};
 use crate::physicalop::PhysicalPlanRef;
 use crate::physicalop::base_physical_plan::{self, BasePhysicalPlan};
+use crate::planctx::PlanCtx;
 use crate::property::{PhysicalProperty, StatsInfo, TaskType};
 use crate::util::costusage::CostVer2;
-use crate::planctx::PlanCtx;
 use crate::util::optimizetrace::{LogicalOptimizeOp, PhysicalOptimizeOp, PlanCostOption};
 
 /// Logical operator kinds, for Go's `switch x := p.(type)` (`M-IFACE`, N1 §6.2). Variants

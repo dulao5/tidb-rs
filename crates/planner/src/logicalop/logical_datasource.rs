@@ -21,7 +21,9 @@ use tidb_expression::{
     Column, CorrelatedColumn, ExprRef, Schema, column2_exprs, gc_column_expr_is_tidb_shard,
     get_used_list, new_schema,
 };
-use tidb_model::{ColumnInfo, ExtraHandleID, ExtraHandleName, TableInfo, new_extra_handle_col_info};
+use tidb_model::{
+    ColumnInfo, ExtraHandleID, ExtraHandleName, TableInfo, new_extra_handle_col_info,
+};
 use tidb_parser::model::CIStr;
 use tidb_types::field_type::new_field_type;
 
@@ -225,8 +227,7 @@ impl LogicalPlan for DataSource {
         predicates = add_prefix4_shard_indexes(self, ctx, predicates);
         self.all_conds = predicates.clone();
         let pctx = ctx.push_down_ctx()?;
-        (self.pushed_down_conds, predicates) =
-            push_down_exprs(&pctx, &predicates, kv::UnSpecified);
+        (self.pushed_down_conds, predicates) = push_down_exprs(&pctx, &predicates, kv::UnSpecified);
         append_data_source_predicate_push_down_trace_step(self, ctx, opt);
         Ok((predicates, this))
     }
@@ -326,7 +327,9 @@ impl LogicalPlan for DataSource {
                 ctx,
                 self.query_block_offset(),
             );
-            proj.base.plan.set_stats(self.base.plan.stats_info().cloned());
+            proj.base
+                .plan
+                .set_stats(self.base.plan.stats_info().cloned());
             proj.sp.set_schema(Some(new_schema(parent_used_cols)));
             proj.set_children(vec![this]);
             return Ok(ctx.arena.alloc(Box::new(proj)));
@@ -409,10 +412,9 @@ fn append_data_source_predicate_push_down_trace_step(
             if i > 0 {
                 buffer.push(',');
             }
-            buffer.push_str(&String::from_utf8_lossy(&cond.string_with_ctx(
-                &*ectx,
-                tidb_base::errors::RedactLogDisable,
-            )));
+            buffer.push_str(&String::from_utf8_lossy(
+                &cond.string_with_ctx(&*ectx, tidb_base::errors::RedactLogDisable),
+            ));
         }
         buffer.push_str(&format!("] are pushed down across {}_{}", ds.tp(), ds.id()));
         buffer

@@ -50,7 +50,10 @@ impl LogicalTableDual {
 // glue: stub of LogicalTableDual.HashCode, blocked-by:D14.2 (plancodec.TypeStringToPhysicalID, util/plancodec)
 /// The boundary of the stubbed `LogicalTableDual.HashCode`.
 pub fn table_dual_hash_code_boundary() -> Error {
-    blocked("D14.2", "plancodec.TypeStringToPhysicalID (LogicalTableDual.HashCode)")
+    blocked(
+        "D14.2",
+        "plancodec.TypeStringToPhysicalID (LogicalTableDual.HashCode)",
+    )
 }
 
 impl LogicalPlan for LogicalTableDual {

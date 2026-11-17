@@ -89,7 +89,9 @@ impl LogicalPlan for LogicalSort {
         opt: &LogicalOptimizeOp,
     ) -> PlanId {
         let Some(top_n) = top_n else {
-            return crate::logicalop::base_logical_plan::push_down_top_n(self, ctx, this, None, opt);
+            return crate::logicalop::base_logical_plan::push_down_top_n(
+                self, ctx, this, None, opt,
+            );
         };
         let top_n_node = ctx
             .arena

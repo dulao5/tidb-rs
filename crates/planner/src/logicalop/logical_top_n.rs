@@ -70,23 +70,43 @@ impl LogicalTopN {
 
     /// AttachChild set p as topn's child, for difference with LogicalPlan.SetChild().
     /// AttachChild will tracer the children change while SetChild doesn't. `lt` is the
-    /// TopN in the arena, `p` the new child; returns the new root.
-    // go: LogicalTopN.AttachChild L1 [M-PLAN]
+    /// TopN in the arena, `p` the new child (in the arena); returns the new root.
+    // glue: N1 (dispatch of LogicalTopN.AttachChild to a child stored in the arena)
     pub fn attach_child(
         ctx: &mut PlanCtx<'_>,
         lt: PlanId,
         p: PlanId,
         opt: &LogicalOptimizeOp,
     ) -> PlanId {
+        crate::with_detached(ctx, p, |node, ctx| {
+            Self::attach_child_to(ctx, lt, p, node, opt)
+        })
+    }
+
+    /// AttachChild set p as topn's child, for difference with LogicalPlan.SetChild().
+    /// AttachChild will tracer the children change while SetChild doesn't. `lt` is the
+    /// TopN in the arena; `p_node` is the new child `p`, detached (Go passes the plan, which
+    /// is often the caller itself); returns the new root.
+    // go: LogicalTopN.AttachChild L1 [M-PLAN]
+    pub fn attach_child_to<P: LogicalPlan + ?Sized>(
+        ctx: &mut PlanCtx<'_>,
+        lt: PlanId,
+        p: PlanId,
+        p_node: &mut P,
+        opt: &LogicalOptimizeOp,
+    ) -> PlanId {
         let (offset, count) = {
-            let t = ctx.arena.downcast_ref::<LogicalTopN>(lt).expect("LogicalTopN");
+            let t = ctx
+                .arena
+                .downcast_ref::<LogicalTopN>(lt)
+                .expect("LogicalTopN");
             (t.offset, t.count)
         };
         // Remove this TopN if its child is a TableDual.
-        if ctx.arena.get(p).kind() == LogicalKind::TableDual {
-            let dual = ctx
-                .arena
-                .downcast_mut::<LogicalTableDual>(p)
+        if p_node.kind() == LogicalKind::TableDual {
+            let dual = p_node
+                .as_any_mut()
+                .downcast_mut::<LogicalTableDual>()
                 .expect("LogicalTableDual");
             let num_dual_rows = dual.row_count as u64;
             if num_dual_rows < offset {
@@ -96,7 +116,11 @@ impl LogicalTopN {
             dual.row_count = (num_dual_rows - offset).min(count) as isize;
             return p;
         }
-        let t = ctx.arena.downcast_ref::<LogicalTopN>(lt).expect("LogicalTopN");
+        let p_tid = trace_id(p_node);
+        let t = ctx
+            .arena
+            .downcast_ref::<LogicalTopN>(lt)
+            .expect("LogicalTopN");
         if t.is_limit() {
             let mut limit = LogicalLimit::init(t.offset, t.count, ctx, t.query_block_offset());
             limit.prefer_limit_to_cop = t.prefer_limit_to_cop;
@@ -104,14 +128,17 @@ impl LogicalTopN {
             limit.set_children(vec![p]);
             let limit_tid = trace_id(&limit);
             let limit = ctx.arena.alloc(Box::new(limit));
-            append_top_n_push_down_trace_step(limit_tid, trace_id(ctx.arena.get(p)), opt);
+            append_top_n_push_down_trace_step(limit_tid, p_tid, opt);
             return limit;
         }
         // Then lt must be topN.
-        let t = ctx.arena.downcast_mut::<LogicalTopN>(lt).expect("LogicalTopN");
+        let t = ctx
+            .arena
+            .downcast_mut::<LogicalTopN>(lt)
+            .expect("LogicalTopN");
         t.set_children(vec![p]);
         let lt_tid = trace_id(t);
-        append_top_n_push_down_trace_step(lt_tid, trace_id(ctx.arena.get(p)), opt);
+        append_top_n_push_down_trace_step(lt_tid, p_tid, opt);
         lt
     }
 

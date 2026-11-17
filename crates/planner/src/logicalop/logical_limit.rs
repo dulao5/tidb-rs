@@ -11,7 +11,9 @@ use tidb_expression::{Column, ExprRef};
 use crate::arena::PlanId;
 use crate::base::{self, LogicalPlan};
 use crate::logicalop::logical_schema_producer::{self, inline_projection};
-use crate::logicalop::{BaseLogicalPlan, LogicalSchemaProducer, LogicalTopN, new_base_logical_plan};
+use crate::logicalop::{
+    BaseLogicalPlan, LogicalSchemaProducer, LogicalTopN, new_base_logical_plan,
+};
 use crate::planctx::PlanCtx;
 use crate::property::SortItem;
 use crate::util::explain_misc::explain_partition_by;
@@ -59,7 +61,13 @@ impl LogicalLimit {
 
     // go: LogicalLimit.convertToTopN L1 [M-PLAN]
     fn convert_to_top_n(&self, ctx: &mut PlanCtx<'_>, opt: &LogicalOptimizeOp) -> PlanId {
-        let mut topn = LogicalTopN::init(Vec::new(), self.offset, self.count, ctx, self.query_block_offset());
+        let mut topn = LogicalTopN::init(
+            Vec::new(),
+            self.offset,
+            self.count,
+            ctx,
+            self.query_block_offset(),
+        );
         topn.prefer_limit_to_cop = self.prefer_limit_to_cop;
         append_convert_top_n_trace_step(trace_id(self), trace_id(&topn), opt);
         ctx.arena.alloc(Box::new(topn))
@@ -80,7 +88,10 @@ impl LogicalLimit {
 // glue: stub of LogicalLimit.HashCode, blocked-by:D14.2 (plancodec.TypeStringToPhysicalID, util/plancodec)
 /// The boundary of the stubbed `LogicalLimit.HashCode`.
 pub fn limit_hash_code_boundary() -> Error {
-    blocked("D14.2", "plancodec.TypeStringToPhysicalID (LogicalLimit.HashCode)")
+    blocked(
+        "D14.2",
+        "plancodec.TypeStringToPhysicalID (LogicalLimit.HashCode)",
+    )
 }
 
 impl LogicalPlan for LogicalLimit {

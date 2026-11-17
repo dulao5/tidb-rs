@@ -104,7 +104,12 @@ impl LogicalProjection {
         self.schema_mut(&mut ctx.arena).keys = Vec::new();
         let self_schema = self.schema(&ctx.arena).clone();
         let schema = self.build_schema_by_exprs(ctx, &self_schema);
-        let child_keys = ctx.arena.get(self.children()[0]).schema(&ctx.arena).keys.clone();
+        let child_keys = ctx
+            .arena
+            .get(self.children()[0])
+            .schema(&ctx.arena)
+            .keys
+            .clone();
         let mut keys = Vec::new();
         for key in &child_keys {
             let Some(indices) = schema.columns_indices(key) else {
@@ -169,7 +174,8 @@ impl LogicalProjection {
             Arc::make_mut(&mut col.ret_type).del_flag(ParseToJSONFlag);
         }
         let col = Arc::new(col);
-        self.schema_mut(&mut ctx.arena).append(vec![Arc::clone(&col)]);
+        self.schema_mut(&mut ctx.arena)
+            .append(vec![Arc::clone(&col)]);
         col
     }
 }
@@ -298,8 +304,11 @@ impl LogicalPlan for LogicalProjection {
             }
         }
         logicaltrace::append_column_prune_trace_step(self, ctx, &pruned_columns, opt);
-        let self_used_cols =
-            extract_columns_from_expressions(Vec::with_capacity(self.exprs.len()), &self.exprs, None);
+        let self_used_cols = extract_columns_from_expressions(
+            Vec::with_capacity(self.exprs.len()),
+            &self.exprs,
+            None,
+        );
         let child = self.children()[0];
         self.children_mut()[0] = base::prune_columns(ctx, child, self_used_cols, opt)?;
         // If its columns are all pruned, we directly use its child. The child will output at least one column.
@@ -336,7 +345,12 @@ impl LogicalPlan for LogicalProjection {
             for by in &by_items {
                 let substituted = fold_constant(
                     &*ctx.expr_ctx,
-                    column_substitute(&*ctx.expr_ctx, &by.expr, self.schema(&ctx.arena), &self.exprs),
+                    column_substitute(
+                        &*ctx.expr_ctx,
+                        &by.expr,
+                        self.schema(&ctx.arena),
+                        &self.exprs,
+                    ),
                 );
                 if !is_immutable_func(&substituted) {
                     // after substituting, if the order-by expression is un-deterministic like 'order by rand()', stop pushing down.
@@ -357,7 +371,7 @@ impl LogicalPlan for LogicalProjection {
                         let child = self.children()[0];
                         if !ctx.arena.get(child).schema(&ctx.arena).contains(col) {
                             self.children_mut()[0] = base::push_down_top_n(ctx, child, None, opt);
-                            return LogicalTopN::attach_child(ctx, top_n, this, opt);
+                            return LogicalTopN::attach_child_to(ctx, top_n, this, self, opt);
                         }
                     }
                 }
@@ -398,8 +412,10 @@ impl LogicalPlan for LogicalProjection {
         if !can_projection_be_eliminated_loose(self) {
             return Vec::new();
         }
-        let candidate_constant_predicates =
-            ctx.arena.get(self.children()[0]).pull_up_constant_predicates(ctx);
+        let candidate_constant_predicates = ctx
+            .arena
+            .get(self.children()[0])
+            .pull_up_constant_predicates(ctx);
         // replace predicate by projection expr
         // candidate predicate : a=1
         // projection: a as a'
@@ -509,7 +525,11 @@ pub fn inject_expr(ctx: &mut PlanCtx<'_>, p: PlanId, expr: ExprRef) -> (PlanId, 
     } else {
         let node = ctx.arena.get(p);
         let schema = node.schema(&ctx.arena).clone_schema();
-        let mut proj = LogicalProjection::init(column2_exprs(&schema.columns), ctx, node.query_block_offset());
+        let mut proj = LogicalProjection::init(
+            column2_exprs(&schema.columns),
+            ctx,
+            node.query_block_offset(),
+        );
         proj.sp.set_schema(Some(schema));
         proj.set_children(vec![p]);
         ctx.arena.alloc(Box::new(proj))

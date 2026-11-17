@@ -242,9 +242,8 @@ fn append_dup_proj_eliminate_trace_step(
     let (ctp, cid) = trace_id(child);
     let action = || {
         let ectx = ctx.eval_ctx();
-        let mut buffer = format!(
-            "{ctp}_{cid} is eliminated, {ptp}_{pid}'s expressions changed into["
-        );
+        let mut buffer =
+            format!("{ctp}_{cid} is eliminated, {ptp}_{pid}'s expressions changed into[");
         for (i, expr) in parent.exprs.iter().enumerate() {
             if i > 0 {
                 buffer.push(',');

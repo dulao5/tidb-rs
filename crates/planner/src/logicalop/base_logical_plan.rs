@@ -25,7 +25,9 @@ use tidb_types::field_name::NameSlice;
 use crate::arena::{PlanArena, PlanId};
 use crate::base::{self, LogicalPlan};
 use crate::baseimpl::{self, Plan};
-use crate::logicalop::logical_plans_misc::{add_selection, has_max_one_row, push_down_top_n_for_base_logical_plan};
+use crate::logicalop::logical_plans_misc::{
+    add_selection, has_max_one_row, push_down_top_n_for_base_logical_plan,
+};
 use crate::planctx::PlanCtx;
 use crate::util::misc::encode_int_as_uint32;
 use crate::util::optimizetrace::LogicalOptimizeOp;
@@ -267,7 +269,10 @@ pub fn can_push_to_cop<P: LogicalPlan + ?Sized>(
 /// ExtractFD implements LogicalPlan.<22nd> interface.
 // glue: stub of BaseLogicalPlan.ExtractFD, blocked-by:D09.14 (the functional dependency set, pkg/planner/funcdep, is not ported; used by ONLY_FULL_GROUP_BY checks and the FD-based rules)
 pub fn extract_fd() -> Result<(), Error> {
-    Err(blocked("D09.14", "functional dependencies of a logical plan (ExtractFD)"))
+    Err(blocked(
+        "D09.14",
+        "functional dependencies of a logical plan (ExtractFD)",
+    ))
 }
 
 // go: BaseLogicalPlan.GetBaseLogicalPlan L1 [M-SELF]
@@ -295,7 +300,10 @@ pub fn convert_outer_to_inner_join<P: LogicalPlan + ?Sized>(
 /// The memo of `FindBestTask` (`GetLogicalTS4TaskMap`, `GetTask`, `StoreTask`) comes with
 /// physical optimization (D10.2).
 pub fn task_map() -> Result<(), Error> {
-    Err(blocked("D10.2", "the FindBestTask memo of a logical plan (taskMap)"))
+    Err(blocked(
+        "D10.2",
+        "the FindBestTask memo of a logical plan (taskMap)",
+    ))
 }
 
 // go: BaseLogicalPlan.Self L1 [M-SELF]
@@ -307,12 +315,19 @@ pub fn task_map() -> Result<(), Error> {
 // glue: stub of BaseLogicalPlan.FDs, blocked-by:D09.14 (pkg/planner/funcdep is not ported)
 /// `SetFDs` / `FDs` store the functional dependency set (`pkg/planner/funcdep`).
 pub fn fds() -> Result<(), Error> {
-    Err(blocked("D09.14", "functional dependencies of a logical plan (FDs)"))
+    Err(blocked(
+        "D09.14",
+        "functional dependencies of a logical plan (FDs)",
+    ))
 }
 
 /// NewBaseLogicalPlan is the basic constructor of BaseLogicalPlan.
 // go: NewBaseLogicalPlan L1 [M-SELF, M-CTX]
-pub fn new_base_logical_plan(ctx: &PlanCtx<'_>, tp: &'static str, qb_offset: isize) -> BaseLogicalPlan {
+pub fn new_base_logical_plan(
+    ctx: &PlanCtx<'_>,
+    tp: &'static str,
+    qb_offset: isize,
+) -> BaseLogicalPlan {
     BaseLogicalPlan {
         plan: baseimpl::new_base_plan(ctx, tp, qb_offset),
         max_one_row: false,

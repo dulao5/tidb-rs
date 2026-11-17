@@ -23,9 +23,9 @@ use tidb_expression::scalar_function::new_function;
 use tidb_expression::util::maybe_over_optimized4_plan_cache_for_multi_expression;
 use tidb_expression::{Column, Constant, Expr, ExprRef, split_cnf_items};
 use tidb_parser::ast::funcs as ast;
+use tidb_parser::types::ETString;
 use tidb_types::collate::compatible_collate;
 use tidb_types::datum::new_int_datum;
-use tidb_parser::types::ETString;
 use tidb_types::field_type::new_field_type;
 
 use crate::arena::PlanId;
@@ -417,7 +417,10 @@ fn update_or_predicate(
     ) else {
         return (Arc::clone(or_predicate_list), false);
     };
-    (new_pred, is_first_condition_changed || is_second_condition_changed)
+    (
+        new_pred,
+        is_first_condition_changed || is_second_condition_changed,
+    )
 }
 
 /// pruneEmptyORBranches applies iteratively updateOrPredicate for each pair of OR predicate

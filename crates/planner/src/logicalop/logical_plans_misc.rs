@@ -36,9 +36,10 @@ pub fn has_max_one_row(p: LogicalKind, child_max_one_row: &[bool]) -> bool {
     }
     match p {
         // *LogicalLock, *LogicalApply, *LogicalWindow, *LogicalAggregation: not ported yet.
-        LogicalKind::Limit | LogicalKind::Sort | LogicalKind::Selection | LogicalKind::Projection => {
-            child_max_one_row[0]
-        }
+        LogicalKind::Limit
+        | LogicalKind::Sort
+        | LogicalKind::Selection
+        | LogicalKind::Projection => child_max_one_row[0],
         // *LogicalMaxOneRow: true; *LogicalJoin: by join type (not ported yet).
         _ => false,
     }
@@ -100,7 +101,7 @@ pub fn push_down_top_n_for_base_logical_plan<P: LogicalPlan + ?Sized>(
         p.children_mut()[i] = base::push_down_top_n(ctx, child, None, opt);
     }
     if let Some(top_n) = top_n {
-        return LogicalTopN::attach_child(ctx, top_n, this, opt);
+        return LogicalTopN::attach_child_to(ctx, top_n, this, p, opt);
     }
     this
 }
