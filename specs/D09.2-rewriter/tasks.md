@@ -1,6 +1,19 @@
 # D09.2 表达式改写（tasks）
 
-本块尚未开工，只有下面从其他块移交来的条目；开工时并入正式的任务列表。
+spec：[spec.md](spec.md)。
+
+## 第 1 部分：子查询之外的改写（VS1-22）
+
+进度记录（额度可能中断，随做随记）：
+- 2026-11-17：spec 初稿；分支 `vs1/expr-rewrite`（tidb-rs 与 tracker 同名）。
+
+- [ ] T1 `expression_rewriter.rs`：`rewrite`、`Enter` / `Leave`、列、常量、参数、一元 / 二元、IN、BETWEEN、LIKE、IS NULL / IS TRUE、函数调用、CAST、CASE、行、COLLATE；子查询等为桩（spec §4）
+- [ ] T2 `FindFieldName`、`ParamMarkerExpression`（P1-3、P1-4）
+- [ ] T3 govec `rewrite` 领域与回放
+- [ ] T4 amd64 向量（tracker CI artifact）
+- [ ] T5 converge、stubs 登记
+
+以下是从其他块移交来的条目。
 
 ## 从 P1 继承
 
