@@ -1,6 +1,6 @@
 # D09.2 表达式改写（spec）
 
-状态：第 1 部分（VS1-22，子查询之外的改写）进行中（2026-11-17）。块：D09.2（ROADMAP P3），crate `tidb-planner`。相关：[VS1 plan](../VS1-vertical-slice/plan.md) §3（D09.2 一行）、§3.2（子查询桩）、§5（VS1-22）；[tasks](tasks.md)；[N1](../exceptions/N1-plan-representation/spec.md)（计划与表达式的表示）。
+状态：第 1 部分（VS1-22，子查询之外的改写）评审中（2026-11-17）。块：D09.2（ROADMAP P3），crate `tidb-planner`。相关：[VS1 plan](../VS1-vertical-slice/plan.md) §3（D09.2 一行）、§3.2（子查询桩）、§5（VS1-22）；[tasks](tasks.md)；[N1](../exceptions/N1-plan-representation/spec.md)（计划与表达式的表示）。
 
 ## 1. 这一块做什么
 
@@ -53,16 +53,22 @@ Go 代码：`pkg/planner/core/expression_rewriter.go`（2,876 行）。另外两
 | `funcCallToExpressionWithPlanCtx` | `GROUPING()` | `blocked-by:D09.4` | 要 `ROLLUP` 的 Expand 算子（聚合构建，D09.4） |
 | `Leave` | `ORDER BY ?`（`PositionExpr` 的参数形式） | `blocked-by:D02.2` | Rust AST 的位置节点只有数字，没有参数标记（parser，D02.2）；数字形式已移植 |
 | `rewriteInsertOnDuplicateUpdate` | INSERT 的赋值 | 不在清单 | 写路径（D09.15） |
+| `NewFunction`（表达式包） | 函数族还没有移植的内置函数（`IN`、`CASE`、`IF` / `IFNULL` / `NULLIF`、`LIKE`、字符串函数、时间函数等） | `blocked-by:<该函数族的块>`（D08.6 / D08.7 / D08.9 / D08.10） | 改写器照常建函数调用，函数注册表发现函数族没有移植时返回带块号的桩错误（原来是普通错误）。块号取自 tracker 中该函数族 `getFunction` 所在的块（`builtin_registry_blocks.rs`） |
+| `evalAstExpr`、`buildSimpleExpr` | 没有计划的改写（P1 移交） | `blocked-by:D09.2`（第 2 部分） | 第 2 部分移植 `BuildOption` 和 `ParseSimpleExpr` 时一起做 |
 
 ## 5. 与 Go 的其他差异
 
-1. **`_utf8mb4'x'` 这类字符集引导符。** Go 的 parser 给带引导符的字面量加 `UnderScoreCharsetFlag`，改写时据此把 utf8mb4 字面量的排序规则换成会话的 `default_collation_for_utf8mb4`。Rust AST 的字面量没有这个标记（D02.2），只能看出字符集；字符集是 utf8mb4 且排序规则与连接默认不同时无法判断是否来自引导符。这一条在 govec 中不出现（生成器不产生引导符字面量），记为已知差异。
+1. **`_utf8mb4'x'` 这类字符集引导符。** Go 的 parser 给带引导符的字面量（`_charset'x'`、`N'x'`）加 `UnderScoreCharsetFlag`，改写时据此决定类型的标志和排序规则（utf8mb4 时换成会话的 `default_collation_for_utf8mb4`）。Rust AST 的字面量原来没有这个标记，本项在 `ValueExpr` 上加了 `underscore_charset`，由 parser 的三条引导符产生式设置（D02.2 的 AST，改动很小），改写器照 Go 的产生式补上字符集、排序规则和标志。govec 中有 `N'abc'`、`_binary'abc'`、`_latin1'abc'`，结果与 Go 相同。
 2. **内置函数使用统计。** `BuiltinFunctionUsageInc` 是遥测计数（D14 系列），不移植，不影响结果。
+3. **同一列的多次引用（Go 的别名，不模拟）。** Go 每次引用一列都把 schema 中的同一个 `*Column` 压栈，某次引用惰性算出的 coercibility 会缓存在这个共享对象上，之后的引用都看到它。Rust 每次引用复制一份列，coercibility 在各自的副本上算。只有一种情况结果不同：ENUM 列先在字符串比较中被引用（算出 implicit），再被 `WrapWithCastAsInt` 复制并加上"按整数"标志——Go 的副本带着缓存的 implicit，Rust 按整数类型算出 numeric。coercibility 只在推导字符串排序规则时有用，整数上下文不会用到，所以不影响结果；govec 中这样的记录有 1 条，测试中逐条登记（`KNOWN_ALIASING_DIFFS`）。
+4. **`collectPrivsForCount`。** Go 遍历 map 生成权限检查项，顺序随机；Rust 按（库，表）排序（`M-MAPORDER`，顺序不影响权限检查）。视图名需要 InfoSchema（视图还没有移植），按表名处理。
 
 ## 6. 测试
 
-- **govec 领域 `rewrite`**（tracker `govec/domains/rewrite.go`）：输入是一张表的定义、一个表达式的 SQL 文本、可选的参数值和几个会话开关（new collation、SQL mode）；Go 用 `rewriteAstExprWithPlanCtx`（以表的全部列为 schema 的假计划）改写，记录结果表达式的字符串形式（`StringWithCtx`）、返回类型（类型、长度、小数位、标志、字符集、排序规则）、是否常量、错误和 warning。Rust 用同样的 schema 调 `rewrite` 比较。用例覆盖 §2 的每种节点、sysbench 的条件、各种字面量和参数类型、错误（未知列、歧义列、行表达式列数不符）。
-- **单测**：桩的错误文本、聚合映射、位置表达式。
+- **govec 领域 `rewrite`**（tracker `govec/domains/rewrite.go`，2,392 条，`crates/planner/tests/govec_rewrite.rs`）：输入是一张表的定义、一个表达式的 SQL 文本、`?` 的参数值和会话开关（new collation、计划缓存、类型标志、SQL mode）；Go 用 `rewriteAstExprWithPlanCtx`（以表的全部列为 schema 的假计划）改写，记录整棵结果树（每个节点的类型、字符集、排序规则、coercibility、repertoire，常量的参数序号和延迟函数）、字符串形式、权限检查项（visit info）和 warning，或错误。Rust 解析同一条 SQL，用同样的 schema 调 `rewrite_ast_expr_with_plan_ctx` 比较。用例：sysbench 只读语句的条件（`id = ?`、`id BETWEEN ? AND ?` 等，参数值覆盖整数、无符号、浮点、字符串、十进制、NULL，计划缓存开 / 关）；§2 的每种节点；各种字面量；错误（未知列、行表达式列数不符、CAST 精度过大、参数个数）；桩；1,800 条随机组合。
+  - 结果：1,467 条与 Go 相同，1 条是 §5 第 3 条的已知差异，2 条 Go 解析失败跳过；922 条停在边界桩，按块固定在测试中：D08.6 407、D08.7 20、D08.9 473（函数族未移植，见 §4 最后几行）、D09.6 12、D09.15 4、D09.2 4、D09.4 2。
+  - tracker 中 D09.2 块 109 个函数：41 个由本领域覆盖，68 个豁免（子查询那一半和标量子查询表达式，以及桩）。
+- **converge**：`scripts/converge.py --block D09.2 --part specs/VS1-vertical-slice/functions.tsv --item VS1-22 crates/planner/src/core/expression_rewriter.rs`：44/53 移植 + 9 个桩，OK。
 
 ## 7. 可能的上游问题
 
