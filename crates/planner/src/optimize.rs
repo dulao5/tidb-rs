@@ -51,13 +51,15 @@ pub fn is_read_only(node: &Stmt, vars: &SessionVars) -> Result<bool, Error> {
 }
 
 /// `ast.IsReadOnly` (see [`is_read_only`]).
-// glue: stub of ast.IsReadOnly, blocked-by:D02.2 (its readOnlyChecker needs a visitor of the Rust AST)
+// glue: stub, blocked-by:D02.2 (the parser's ast.IsReadOnly: its readOnlyChecker needs a visitor of the Rust AST)
 fn ast_is_read_only(node: &Stmt) -> Result<bool, Error> {
     let _ = node;
     Err(blocked("D02.2", "IsReadOnly (ast.IsReadOnly)"))
 }
 
 /// Optimize does optimization and creates a Plan.
+///
+/// Go handles an `EXECUTE` first (before the hints): that branch is [`optimize_exec_stmt`].
 // glue: stub of Optimize, blocked-by:D13.3 (VS1-24: hint extraction comes first; then D13.2 bindings, D10.8 TryFastPlan, D13.1 plan cache)
 pub fn optimize_stmt(node: &Stmt) -> Result<(), Error> {
     let _ = node;

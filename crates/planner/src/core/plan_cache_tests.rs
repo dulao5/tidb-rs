@@ -535,13 +535,13 @@ fn get_prepared_stmt_from_the_node_or_by_name() {
     let mut v = vars();
     let held = Arc::new(parking_lot::Mutex::new(stmt("select 1", vec![], 1)));
     let node = ExecuteStmt {
-        prep_stmt: Some(held.clone()),
+        prep_stmt: Some(Arc::clone(&held) as _),
         ..Default::default()
     };
     assert!(Arc::ptr_eq(&get_prepared_stmt(&node, &v).unwrap(), &held));
 
     let named = Arc::new(parking_lot::Mutex::new(stmt("select 2", vec![], 1)));
-    v.add_prepared_stmt(3, named.clone()).unwrap();
+    v.add_prepared_stmt(3, Arc::clone(&named) as _).unwrap();
     v.state.prepared_stmt_name_to_id.insert("s".to_owned(), 3);
     let node = ExecuteStmt {
         name: "s".to_owned(),
@@ -582,7 +582,7 @@ fn optimize_exec_stmt_reaches_the_statement_optimizer() {
     let prep = Arc::new(parking_lot::Mutex::new(stmt("select ? + 1", vec![7], 1)));
     let node = ExecuteStmt {
         binary_args: Some(Arc::new(vec![new_int_datum(5)])),
-        prep_stmt: Some(prep.clone()),
+        prep_stmt: Some(Arc::clone(&prep) as _),
         prep_stmt_id: 1,
         ..Default::default()
     };
@@ -604,7 +604,7 @@ fn optimize_exec_stmt_reaches_the_statement_optimizer() {
     // A wrong parameter count is Go's error, before the optimizer.
     let node = ExecuteStmt {
         binary_args: Some(Arc::new(Vec::<Datum>::new())),
-        prep_stmt: Some(prep.clone()),
+        prep_stmt: Some(Arc::clone(&prep) as _),
         ..Default::default()
     };
     let e = optimize_exec_stmt(&mut v, &node, &Is(1), None)
