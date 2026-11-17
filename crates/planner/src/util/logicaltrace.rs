@@ -88,6 +88,14 @@ pub fn append_column_prune_trace_step<P: LogicalPlan + ?Sized>(
 }
 
 // glue: stub of AppendFunctionPruneTraceStep, blocked-by:D08.11 (aggregation.AggFuncDesc is not ported; only the aggregation's column pruning calls it)
+/// AppendFunctionPruneTraceStep appends a trace step for group by pruning: the aggregate
+/// function descriptors are not ported.
+pub fn append_function_prune_trace_step() -> Result<(), tidb_base::Error> {
+    Err(tidb_base::blocked::blocked(
+        "D08.11",
+        "the trace of pruned aggregate functions (AppendFunctionPruneTraceStep)",
+    ))
+}
 
 /// AppendByItemsPruneTraceStep appends a trace step for group by pruning.
 // go: AppendByItemsPruneTraceStep L1 [M-CTX]
