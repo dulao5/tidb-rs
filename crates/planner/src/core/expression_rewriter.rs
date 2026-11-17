@@ -835,10 +835,8 @@ impl<'a, 'b> ExpressionRewriter<'a, 'b> {
             },
             AstExpr::Row(r) => r.values.iter().try_for_each(|x| self.visit(x)),
             AstExpr::SetCollation(s) => self.visit(&s.expr),
-            AstExpr::Default(d) => match &d.name {
-                Some(n) => self.visit_column_name(n),
-                None => Ok(()),
-            },
+            // DefaultExpr.Accept does not visit its name.
+            AstExpr::Default(_) => Ok(()),
             AstExpr::MatchAgainst(m) => {
                 for c in &m.column_names {
                     self.visit_column_name(c)?;
