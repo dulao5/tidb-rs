@@ -1015,6 +1015,16 @@ impl<'a, 'b> ExpressionRewriter<'a, 'b> {
                 let go_val = value_expr_go_value(v);
                 let mut ret_type = FieldType::default();
                 default_type_for_value(&go_val, &mut ret_type, v.charset, v.collate);
+                if v.underscore_charset {
+                    // The parser's `UNDERSCORE_CHARSET` productions (`tp.SetCharset` /
+                    // `SetCollate` / `AddFlag` after `NewValueExpr`).
+                    ret_type.set_charset(v.charset);
+                    ret_type.set_collate(v.collate);
+                    ret_type.add_flag(UnderScoreCharsetFlag);
+                    if ret_type.get_collate() == tidb_parser::gocharset::CollationBin {
+                        ret_type.add_flag(mysql::BinaryFlag);
+                    }
+                }
                 let mut datum = value_expr_datum(v);
                 if datum.is_null() {
                     ret_type.del_flag(NotNullFlag);
