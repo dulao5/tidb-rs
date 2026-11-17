@@ -21,9 +21,8 @@ use std::sync::Arc;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::dbterror::plannererrors::{
-    ErrAmbiguous, ErrColumnaccessDenied, ErrInvalidGroupFuncUse, ErrNotSupportedYet,
-    ErrTableaccessDenied, ErrTooBigPrecision, ErrUnknownColumn, ErrViewInvalid,
-    ErrWindowInvalidWindowFuncUse,
+    ErrAmbiguous, ErrColumnaccessDenied, ErrInvalidGroupFuncUse, ErrTableaccessDenied,
+    ErrTooBigPrecision, ErrUnknownColumn, ErrViewInvalid, ErrWindowInvalidWindowFuncUse,
 };
 use tidb_base::errors::{RedactLogDisable, errorf};
 use tidb_base::go_args;
@@ -49,7 +48,7 @@ use tidb_expression::collation::{
 use tidb_expression::constant::{Constant, new_null};
 use tidb_expression::constant_fold::maybe_over_optimized4_plan_cache;
 use tidb_expression::context::BuildContext;
-use tidb_expression::errors::{ErrIncorrectParameterCount, ErrOperandColumns};
+use tidb_expression::errors::{ErrIncorrectParameterCount, ErrNotSupportedYet, ErrOperandColumns};
 use tidb_expression::expression::{
     EvalState, Expr, ExprRef, compose_cnf_condition, compose_dnf_condition,
 };
@@ -1211,7 +1210,7 @@ impl<'a, 'b> ExpressionRewriter<'a, 'b> {
         // SetCollationExpr sets the collation explicitly, even when the evaluation type of the expression is non-string.
         if matches!(&*arg, Expr::Column(_)) || arg_tp.get_type() == TypeJSON {
             if arg_tp.get_type() == TypeEnum || arg_tp.get_type() == TypeSet {
-                return Err(ErrNotSupportedYet
+                return Err(tidb_base::dbterror::plannererrors::ErrNotSupportedYet
                     .gen_with_stack_by_args(go_args!["use collate clause for enum or set"]));
             }
             // Wrap a cast here to avoid changing the original FieldType of the column expression.

@@ -30,6 +30,7 @@ pub mod builtin_convert_charset;
 pub mod builtin_math;
 pub mod builtin_op;
 pub mod builtin_registry;
+pub mod builtin_registry_blocks;
 mod builtin_registry_gen;
 pub mod builtin_vec;
 pub mod chunk_executor;

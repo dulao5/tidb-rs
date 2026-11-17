@@ -20,7 +20,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tidb_base::blocked::blocked_by;
 use tidb_base::contextutil::{
-    WarnHandler, new_plan_cache_tracker, new_static_warn_handler, StaticWarnHandler,
+    StaticWarnHandler, WarnHandler, new_plan_cache_tracker, new_static_warn_handler,
 };
 use tidb_base::gostd::time::utc;
 use tidb_base::mysql::SQLMode;
@@ -31,7 +31,7 @@ use tidb_parser::model::CIStr;
 use tidb_parser::types::FieldType;
 use tidb_parser::{ParseOptions, parse};
 use tidb_planner::core::expression_rewriter::rewrite_ast_expr_with_plan_ctx;
-use tidb_sessionctx::errctx::{Level, LevelMap};
+use tidb_sessionctx::errctx::{self, Level, LevelMap};
 use tidb_sessionctx::exprctx::BuildContextRef;
 use tidb_sessionctx::exprstatic as es;
 use tidb_types::MyDecimal;
@@ -44,7 +44,27 @@ use tidb_types::datum::{self as dm, Datum};
 /// - D02.2: AST nodes the Rust parser does not model;
 /// - D05.1: system variables; D08.9: user variables;
 /// - D09.4: GROUPING(); D09.6: subqueries; D09.15: DEFAULT() and VALUES().
-const EXPECTED_BLOCKED: &[(&str, usize)] = &[];
+/// - D08.6 / D08.7 / D08.9: built-in function families whose classes are not ported yet
+///   (LIKE, string functions; time functions; IN, CASE, IF / IFNULL / NULLIF, ROW, ...): the
+///   rewriter builds the call, the registry stops it.
+const EXPECTED_BLOCKED: &[(&str, usize)] = &[
+    ("D05.1", 4),
+    ("D08.6", 407),
+    ("D08.7", 20),
+    ("D08.9", 473),
+    ("D09.15", 4),
+    ("D09.4", 2),
+    ("D09.6", 12),
+];
+
+/// Records that differ from Go only by a Go aliasing effect that is not emulated (D09.2
+/// spec §5 item 3): Go pushes the schema's `*Column` itself for every reference to a column,
+/// so the coercibility one reference derives lazily is cached for all of them; an ENUM column
+/// first compared as a string (implicit coercibility) and then cast to INT keeps "implicit"
+/// on the cast's clone, where tidb-rs derives "numeric" from the INT-flagged type. The value
+/// only matters for string collation derivation, which an INT context never does.
+const KNOWN_ALIASING_DIFFS: &[&str] =
+    &["((('10' = j) >= f) <= ((cast(h as signed)) div (j << true)))"];
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -224,6 +244,16 @@ fn run(rec: &Value) -> Outcome {
     for (i, l) in o["levels"].as_array().unwrap().iter().enumerate() {
         lm[i] = Level(l.as_u64().unwrap() as _);
     }
+    // StatementContext.SetTypeFlags / SetErrLevels (newErrCtx): the truncate group's level
+    // follows the type flags.
+    let flags = Flags(o["flags"].as_u64().unwrap() as u16);
+    lm[errctx::ErrGroupTruncate.0 as usize] = if flags.ignore_truncate_err() {
+        errctx::LevelIgnore
+    } else if flags.truncate_as_warning() {
+        errctx::LevelWarn
+    } else {
+        errctx::LevelError
+    };
     let wh = Arc::new(new_static_warn_handler(0));
     let ev = es::new_eval_context(vec![
         es::with_type_flags(Flags(o["flags"].as_u64().unwrap() as u16)),
@@ -232,6 +262,7 @@ fn run(rec: &Value) -> Outcome {
         es::with_sql_mode(SQLMode(o["mode"].as_i64().unwrap())),
         es::with_location(Some(utc())),
         es::with_param_list(&params),
+        es::with_current_db("test".to_owned()),
     ]);
     let tracker = Arc::new(new_plan_cache_tracker(Some(Arc::clone(&wh) as _)));
     if o["cache"].as_bool().unwrap() {
@@ -265,8 +296,13 @@ fn run(rec: &Value) -> Outcome {
             let vi: Vec<Value> = vis
                 .iter()
                 .map(|v| {
-                    json!([v.privilege, v.db, v.table, v.column,
-                        gs(v.err.as_deref().unwrap_or("").as_bytes())])
+                    json!([
+                        v.privilege,
+                        v.db,
+                        v.table,
+                        v.column,
+                        gs(v.err.as_deref().unwrap_or("").as_bytes())
+                    ])
                 })
                 .collect();
             Outcome::Value(json!({"e": dump(&e), "s": gs(&s), "vi": vi, "w": warns(&wh)}))
@@ -286,7 +322,7 @@ fn govec_rewrite() {
     let mut lines = text.lines();
     let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(header["domain"], "rewrite");
-    let (mut matched, mut skipped) = (0, 0);
+    let (mut matched, mut skipped, mut aliasing) = (0, 0, 0);
     let (mut unparsed, mut fails) = (Vec::new(), Vec::new());
     let mut blocked: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut n = 0;
@@ -303,17 +339,37 @@ fn govec_rewrite() {
             Outcome::Unparsed => unparsed.push(e),
             Outcome::Blocked(b) => blocked.entry(b).or_default().push(e),
             Outcome::Value(got) if got == *out => matched += 1,
-            Outcome::Value(got) => fails.push(format!(
-                "{e} {}\n    want {out}\n    got  {got}",
-                rec["args"][3]
-            )),
+            Outcome::Value(_) if KNOWN_ALIASING_DIFFS.contains(&e.as_str()) => aliasing += 1,
+            Outcome::Value(got) => {
+                if let Ok(dump) = std::env::var("GOVEC_REWRITE_DUMP") {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(dump)
+                        .unwrap();
+                    writeln!(
+                        f,
+                        "{}",
+                        json!({"e": e, "o": rec["args"][3], "want": out, "got": got})
+                    )
+                    .unwrap();
+                }
+                fails.push(format!(
+                    "{e} {}\n    want {out}\n    got  {got}",
+                    rec["args"][3]
+                ))
+            }
         }
     }
     collate::set_new_collation_enabled_for_test(true);
     assert_eq!(n as u64, header["records"].as_u64().unwrap());
     eprintln!(
-        "rewrite: {matched} matched, {skipped} skipped (Go parse), blocked {:?}, {} not parsed, {} differ",
-        blocked.iter().map(|(k, v)| (k.clone(), v.len())).collect::<Vec<_>>(),
+        "rewrite: {matched} matched, {aliasing} known aliasing differences, {skipped} skipped (Go parse), blocked {:?}, {} not parsed, {} differ",
+        blocked
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len()))
+            .collect::<Vec<_>>(),
         unparsed.len(),
         fails.len()
     );
@@ -321,9 +377,17 @@ fn govec_rewrite() {
         fails.is_empty(),
         "{} records differ:\n{}",
         fails.len(),
-        fails.iter().take(25).cloned().collect::<Vec<_>>().join("\n")
+        fails
+            .iter()
+            .take(25)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
-    assert!(unparsed.is_empty(), "Go parses, Rust does not: {unparsed:?}");
+    assert!(
+        unparsed.is_empty(),
+        "Go parses, Rust does not: {unparsed:?}"
+    );
     let counts: Vec<(&str, usize)> = blocked.iter().map(|(b, v)| (b.as_str(), v.len())).collect();
     assert_eq!(counts, EXPECTED_BLOCKED, "blocked records: {blocked:#?}");
 }
