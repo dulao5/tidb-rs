@@ -110,7 +110,7 @@ pub fn inline_projection<P: LogicalPlan + ?Sized>(
         let mut min_col_len = isize::MAX;
         let mut chosen_pos = 0;
         for (i, col) in p.schema(&ctx.arena).columns.iter().enumerate() {
-            let flen = col.get_type().get_flen() as isize;
+            let flen = col.get_type().get_flen();
             if flen < min_col_len {
                 chosen_pos = i;
                 min_col_len = flen;
