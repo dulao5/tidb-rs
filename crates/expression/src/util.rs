@@ -2105,3 +2105,36 @@ fn binary_duration_with_ms(pos: usize, param_values: &[u8], is_negative: u8) -> 
     pos += 4;
     (pos, format!("{dur}.{micro_second:06}"))
 }
+
+// --- ParamMarkerExpression (D09.2 part 1, VS1-22) ---
+
+use crate::constant::ParamMarker;
+
+/// ParamMarkerExpression generate a getparam function expression.
+///
+/// Go reads the value `EXECUTE` wrote into the AST node (`ParamMarkerExpr.Datum`, set by
+/// `SetParameterValuesIntoSCtx`). The Rust AST keeps no value on the marker: the same value
+/// is read from the session's `PlanCacheParams` by the marker's order, where the same Go
+/// function puts it. Without a bound value (PREPARE) Go's datum is the zero datum (NULL), as
+/// here.
+// go: ParamMarkerExpression L2 (the value is read from PlanCacheParams by order: the Rust AST keeps no value on the marker)
+pub fn param_marker_expression(
+    ctx: &dyn BuildContext,
+    order: usize,
+    need_param: bool,
+) -> Result<Constant, Error> {
+    let use_cache = ctx.is_use_cache();
+    let mut tp = new_field_type(mysql::TypeUnspecified);
+    let datum = ctx
+        .get_eval_ctx()
+        .get_param_value(order as i64)
+        .unwrap_or_default();
+    tidb_types::field_type::infer_param_type_from_datum(&datum, &mut tp);
+    let mut value = Constant::new(datum, tp);
+    if use_cache || need_param {
+        value.param_marker = Some(ParamMarker {
+            order: order as i64,
+        });
+    }
+    Ok(value)
+}

@@ -49,6 +49,7 @@ pub mod helper;
 pub mod param;
 pub mod scalar_function;
 pub mod schema;
+pub mod simple_rewriter;
 pub mod size;
 pub mod util;
 

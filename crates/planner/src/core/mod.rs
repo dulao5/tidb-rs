@@ -3,6 +3,7 @@
 
 pub mod common_plans;
 pub mod core_init;
+pub mod expression_rewriter;
 pub mod initialize;
 pub mod logical_plan_builder;
 pub mod optimizer;
