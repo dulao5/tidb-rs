@@ -3054,12 +3054,12 @@ PrepareSQL -> Expr:
   | UserVariable { $1 }
   ;
 ExecuteStmt -> Stmt:
-    execute Identifier { ph("ExecuteStmt#0", $span, vec![Box::new($2) as Item]) }
-  | execute Identifier using UserVariableList { ph("ExecuteStmt#1", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
+    execute Identifier { Stmt::Execute(Box::new(ExecuteStmt { name: $2, ..Default::default() })) }
+  | execute Identifier using UserVariableList { Stmt::Execute(Box::new(ExecuteStmt { name: $2, using_vars: $4, ..Default::default() })) }
   ;
 UserVariableList -> Vec<Expr>:
-    UserVariable { ph("UserVariableList#0", $span, vec![Box::new($1) as Item]) }
-  | UserVariableList ',' UserVariable { ph("UserVariableList#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
+    UserVariable { vec![$1] }
+  | UserVariableList ',' UserVariable { { let mut v = $1; v.push($3); v } }
   ;
 DeallocateStmt -> Stmt:
     DeallocateSym prepare Identifier { ph("DeallocateStmt#0", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }

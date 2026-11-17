@@ -694,8 +694,28 @@ impl Stmt {
                 Ok(())
             }
             Stmt::Show(s) => s.restore(out),
+            Stmt::Execute(e) => e.restore(out),
             Stmt::Unported(n) => Err(format!("unported stmt {}", n.kind)),
         }
+    }
+}
+
+impl ExecuteStmt {
+    fn restore(&self, out: &mut String) -> R {
+        out.push_str("EXECUTE ");
+        name(out, &self.name);
+        if !self.using_vars.is_empty() {
+            out.push_str(" USING ");
+            for (i, val) in self.using_vars.iter().enumerate() {
+                if i != 0 {
+                    out.push(',');
+                }
+                val.restore(out).map_err(|e| {
+                    format!("An error occurred while restore ExecuteStmt.UsingVars index {i}: {e}")
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 
