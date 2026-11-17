@@ -82,12 +82,9 @@ struct Proj {
 }
 
 fn base(ctx: &PlanCtx<'_>, tp: &'static str, children: Vec<PlanId>) -> BaseLogicalPlan {
-    BaseLogicalPlan {
-        id: ctx.alloc_plan_id(),
-        tp,
-        qb_offset: 0,
-        children,
-    }
+    let mut b = crate::logicalop::new_base_logical_plan(ctx, tp, 0);
+    b.children = children;
+    b
 }
 
 impl LogicalPlan for Source {
