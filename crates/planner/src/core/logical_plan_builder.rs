@@ -4,6 +4,8 @@
 //! and `getUintFromNode`. The logical plan builder itself is VS1-21's (D09.1).
 
 use tidb_base::Error;
+
+use crate::core::planbuilder::VisitInfo;
 use tidb_base::blocked::blocked;
 use tidb_base::dbterror::plannererrors::ErrWrongArguments;
 use tidb_parser::ast::{self, Expr};
@@ -77,4 +79,24 @@ pub fn extract_limit_count_offset(
         offset = o;
     }
     Ok((count, offset))
+}
+
+/// appendVisitInfo.
+// go: appendVisitInfo L2 (the error is kept as its message, as VisitInfo.err)
+pub fn append_visit_info(
+    vi: &mut Vec<VisitInfo>,
+    privilege: u64,
+    db: &str,
+    tbl: &str,
+    col: &str,
+    err: Option<Error>,
+) {
+    vi.push(VisitInfo {
+        privilege,
+        db: db.to_owned(),
+        table: tbl.to_owned(),
+        column: col.to_owned(),
+        err: err.map(|e| String::from_utf8_lossy(&e.error()).into_owned()),
+        ..Default::default()
+    });
 }

@@ -82,6 +82,7 @@ use tidb_types::stringutil::{compile_pattern, is_exact_match};
 
 use crate::arena::{PlanArena, PlanId};
 use crate::base::LogicalKind;
+use crate::core::logical_plan_builder::append_visit_info;
 use crate::core::planbuilder::{PlanBuilder, VisitInfo};
 use crate::core::point_get_plan::value_expr_datum;
 
@@ -355,24 +356,52 @@ impl PlanBuilder {
     }
 }
 
-/// appendVisitInfo (planbuilder.go).
-// go: appendVisitInfo L1
-pub fn append_visit_info(
-    vi: &mut Vec<VisitInfo>,
-    privilege: u64,
-    db: &str,
-    tbl: &str,
-    col: &str,
-    err: Option<Error>,
-) {
-    vi.push(VisitInfo {
-        privilege,
-        db: db.to_owned(),
-        table: tbl.to_owned(),
-        column: col.to_owned(),
-        err: err.map(|e| String::from_utf8_lossy(&e.error()).into_owned()),
-        ..Default::default()
-    });
+/// evalAstExprWithPlanCtx evaluates ast expression with plan context.
+/// Different with expression.EvalSimpleAst, it uses planner context and is more powerful to build some special expressions
+/// like subquery, window function, etc.
+// go: evalAstExprWithPlanCtx L1
+pub fn eval_ast_expr_with_plan_ctx(
+    sctx: &dyn BuildContext,
+    expr: &AstExpr,
+) -> Result<tidb_types::datum::Datum, Error> {
+    if let AstExpr::Value(val) = expr {
+        return Ok(value_expr_datum(val));
+    }
+    let (new_expr, _) = rewrite_ast_expr_with_plan_ctx(sctx, expr, None, &[], false)?;
+    new_expr.eval(&*sctx.get_eval_ctx(), &EvalState::new(), Row::default())
+}
+
+/// evalAstExpr evaluates ast expression directly (through `buildSimpleExpr`).
+// glue: stub of evalAstExpr, blocked-by:D09.2 (part 2: the plan-less rewriter buildSimpleExpr)
+pub fn eval_ast_expr() -> Result<(), Error> {
+    Err(blocked(
+        "D09.2",
+        "evalAstExpr (the plan-less rewriter buildSimpleExpr)",
+    ))
+}
+
+/// buildSimpleExpr: the rewriter without a plan (`ParseSimpleExpr`, the `BuildOption`s;
+/// handed over from P1). [`ExpressionRewriter::new_simple`] is its rewriter.
+// glue: stub of buildSimpleExpr, blocked-by:D09.2 (part 2: the build options and the source-table columns)
+pub fn build_simple_expr() -> Result<(), Error> {
+    Err(blocked("D09.2", "buildSimpleExpr (the plan-less rewriter)"))
+}
+
+/// The DEFAULT(col) helpers of the rewriter read column default values; DEFAULT() is a
+/// boundary stub (spec §4).
+// glue: stub of expressionRewriter.evalDefaultExprForTable, blocked-by:D09.15 (column default values)
+pub fn eval_default_expr_for_table() -> Result<(), Error> {
+    Err(blocked("D09.15", "DEFAULT(col) (column default values)"))
+}
+
+// glue: stub of expressionRewriter.evalFieldDefaultValue, blocked-by:D09.15 (column default values)
+pub fn eval_field_default_value() -> Result<(), Error> {
+    Err(blocked("D09.15", "DEFAULT(col) (column default values)"))
+}
+
+// glue: stub of hasCurrentDatetimeDefault, blocked-by:D09.15 (column default values)
+pub fn has_current_datetime_default() -> Result<(), Error> {
+    Err(blocked("D09.15", "DEFAULT(col) (column default values)"))
 }
 
 /// rewriteAstExprWithPlanCtx rewrites ast expression directly.
@@ -491,6 +520,7 @@ fn go_errorf(format: &str, args: Vec<tidb_base::gofmt::Arg>) -> Error {
     errorf(format, &args)
 }
 
+// glue: Go's map membership test on DisableFoldFunctions / TryFoldFunctions
 fn in_set(set: &[&str], name: &str) -> bool {
     set.contains(&name)
 }
@@ -630,6 +660,7 @@ impl<'a, 'b> ExpressionRewriter<'a, 'b> {
         self.ctx_name_stk.push(name);
     }
 
+    // glue: er.sctx.GetEvalCtx()
     fn eval_ctx(&self) -> tidb_sessionctx::exprctx::EvalContextRef {
         self.sctx.get_eval_ctx()
     }
@@ -1048,10 +1079,10 @@ impl<'a, 'b> ExpressionRewriter<'a, 'b> {
                         in_node,
                         "accessing system variable requires plan context",
                     )?;
-                    // glue: stub of expressionRewriter.rewriteSystemVariable, blocked-by:D05.1 (system variable lookup)
+                    // glue: stub of expressionRewriter.rewriteSystemVariable, blocked-by:D09.2 (part 2: the rewriter does not get the session variables yet)
                     return Err(blocked(
-                        "D05.1",
-                        "a system variable in an expression (GetSysVar and the session's value)",
+                        "D09.2",
+                        "a system variable in an expression (the rewriter does not get the session variables yet)",
                     ));
                 }
                 // glue: stub of expressionRewriter.rewriteUserVariable, blocked-by:D08.9 (getvar / setvar functions)
@@ -2068,10 +2099,10 @@ impl<'a, 'b> ExpressionRewriter<'a, 'b> {
             && let Some(src) = self.source_table
             && (v.table.o.is_empty() || src.name.l == v.table.l())
         {
-            // glue: blocked-by:D08.2 (the column of buildSimpleExpr's source table; ParseSimpleExpr, P1-3)
+            // glue: blocked-by:D09.2 (part 2: the column of buildSimpleExpr's source table, ParseSimpleExpr)
             let _ = src;
             return Err(blocked(
-                "D08.2",
+                "D09.2",
                 "a column of the source table of a simple expression (ParseSimpleExpr)",
             ));
         }

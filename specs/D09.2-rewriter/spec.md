@@ -46,7 +46,8 @@ Go 代码：`pkg/planner/core/expression_rewriter.go`（2,876 行）。另外两
 | `toColumn` | 外层查询的列（相关列） | 不会出现 | 外层 schema 只在子查询里非空，子查询是桩 |
 | `findFieldNameFromNaturalUsingJoin` | `NATURAL JOIN` / `USING` 的合并列 | 走到 join 节点时 `blocked-by:D09.3` | join 构建（D09.3）还没有移植；没有 join 时与 Go 一样返回"没找到" |
 | `Leave` | `@var`、`@var := expr`（用户变量） | `blocked-by:D08.9` | 要 `getvar` / `setvar` 函数（杂项函数，D08.9）和会话的用户变量类型表 |
-| `Leave` | `@@var`（系统变量） | `blocked-by:D05.1` | 要按名字查系统变量定义并取会话值（`GetSysVar`、`GetSessionOrGlobalSystemVar`） |
+| `Leave` | `@@var`（系统变量） | `blocked-by:D09.2`（第 2 部分） | 要按名字查系统变量定义并取会话值；改写器目前只拿到表达式上下文，拿不到会话变量，第 2 部分把会话变量传进来 |
+| `toColumn` | 没有计划时按"源表"解析列（`buildSimpleExpr` 的路径） | `blocked-by:D09.2`（第 2 部分） | `buildSimpleExpr` / `ParseSimpleExpr`（P1 移交）在第 2 部分移植 |
 | `Leave` | `DEFAULT(col)` | `blocked-by:D09.15` | 读列默认值的路径主要服务 INSERT / UPDATE（写路径的计划构建，D09.15） |
 | `Enter` | `VALUES(col)` | `blocked-by:D09.15` | 只在 `INSERT ... ON DUPLICATE KEY UPDATE` 中有意义（P1 移交的 `NewValuesFunc`，D08.9） |
 | `funcCallToExpressionWithPlanCtx` | `GROUPING()` | `blocked-by:D09.4` | 要 `ROLLUP` 的 Expand 算子（聚合构建，D09.4） |

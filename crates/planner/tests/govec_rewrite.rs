@@ -42,17 +42,17 @@ use tidb_types::datum::{self as dm, Datum};
 /// The records answered by each boundary stub (D09.2 spec §4).
 ///
 /// - D02.2: AST nodes the Rust parser does not model;
-/// - D05.1: system variables; D08.9: user variables;
+/// - D09.2 (part 2): system variables; D08.9: user variables;
 /// - D09.4: GROUPING(); D09.6: subqueries; D09.15: DEFAULT() and VALUES().
 /// - D08.6 / D08.7 / D08.9: built-in function families whose classes are not ported yet
 ///   (LIKE, string functions; time functions; IN, CASE, IF / IFNULL / NULLIF, ROW, ...): the
 ///   rewriter builds the call, the registry stops it.
 const EXPECTED_BLOCKED: &[(&str, usize)] = &[
-    ("D05.1", 4),
     ("D08.6", 407),
     ("D08.7", 20),
     ("D08.9", 473),
     ("D09.15", 4),
+    ("D09.2", 4),
     ("D09.4", 2),
     ("D09.6", 12),
 ];
