@@ -1,0 +1,12 @@
+# The Go TiDB source tree that defines tidb-rs (CONSTITUTION.md article 1): every Go file an
+# agent or a script reads comes from this pin, through scripts/tidb-reference.sh.
+#
+# sha256 is the GitHub source archive of the tag (the script builds its URL from repo and tag).
+# The archive's pax header carries the commit (`git get-tar-commit-id`), which the script also
+# checks. The extracted tree is identical to `git archive v8.5.8` of a full clone (checked
+# 2026-11-21). Bumping the pin: change these lines, run scripts/tidb-reference.sh, and follow
+# the upstream sync process (docs/porting/sync-drill-8.5.x.md).
+repo=pingcap/tidb
+tag=v8.5.8
+commit=8b857efa20363d50a8fa2ea7dd9809a85a61b115
+sha256=98ac536eebafb9a6f602cbcaf641cb47865d1ae4d79a1cabb88d5ae6517d7d86
