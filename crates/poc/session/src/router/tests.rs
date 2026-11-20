@@ -1158,6 +1158,60 @@ fn real_prepare_is_blocked_and_restored() {
 /// is next.
 const REAL_PREPARE_BLOCK: &str = "D09.1";
 
+/// Where a real EXECUTE of [`POINT`] stops on the new session: the session hands the
+/// statement to `ExecuteStmt` as an EXECUTE node, `ResetContextOfStmt` reads the prepared
+/// statement, and the compiler's planner (`planner.IsReadOnly` / `Optimize`, D09.13) is next.
+const REAL_EXECUTE_BLOCK: &str = "D09.13";
+
+/// EXECUTE of a statement prepared on both sides reaches the planner of the real new session
+/// and falls back cleanly: `fallback` answers from the PoC and the new session is as before
+/// (no trace of the attempt); `strict` reports the block. PREPARE itself still stops at the
+/// plan builder on a real session, so the test puts the prepared statement into the new
+/// session as PREPARE would.
+#[test]
+fn real_execute_reaches_the_planner_and_falls_back() {
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        let mut p = poc();
+        p.values.current_db = Some("test".into());
+        let mut r = real(mode, &p);
+        block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+        // The column definitions PREPARE would have sent (the PoC's, in fallback mode).
+        r.mode = NewStackMode::Fallback;
+        let columns = rows(&block_on(r.execute(&mut p, 1, vec![]))).unwrap().1;
+        r.mode = mode;
+        let mut ps = tidb_planner::core::plan_cache_utils::PlanCacheStmt::default();
+        ps.prepared_ast.stmt = Box::new(parse(POINT));
+        ps.prepared_ast.stmt_type = "Select".to_owned();
+        ps.stmt_text = POINT.to_owned();
+        r.new
+            .session_mut()
+            .vars_mut()
+            .add_prepared_stmt(1, Arc::new(parking_lot::Mutex::new(ps)))
+            .unwrap();
+        r.owners.insert(1, Owner::Both { new_id: 1, columns });
+        let before = snap(&r);
+        let res = block_on(r.execute(&mut p, 1, vec![]));
+        match mode {
+            NewStackMode::Strict => {
+                let e = res.unwrap_err();
+                assert!(
+                    e.code == 1235
+                        && e.message
+                            .contains(&format!("blocked-by:{REAL_EXECUTE_BLOCK}")),
+                    "{e:?}"
+                );
+            }
+            _ => {
+                assert_eq!(rows(&res).map(|r| r.0), Some(3), "{res:?}");
+                // `strict` records its error as the statement's result in the session.
+                assert_eq!(snap(&r), before);
+            }
+        }
+        assert!(r.new.session().is_idle(), "{mode:?}");
+        assert_eq!(r.new.session().executed_stmts(), 0, "{mode:?}");
+    }
+}
+
 /// The real new session's `ExecutePreparedStmt` / `DropPreparedStmt` of an id it never
 /// prepared: Go's `ErrStmtNotFound` (8111), not a boundary stub; with no plan cache
 /// switched on, `GetSessionPlanCache` is `None`, otherwise the (empty) stand-in cache.

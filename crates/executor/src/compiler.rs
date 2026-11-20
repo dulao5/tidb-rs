@@ -39,10 +39,20 @@ fn preprocess(sctx: &mut dyn SessionContext, stmt_node: &ast::Stmt) -> Result<()
 }
 
 /// `plannercore.GetPreparedStmt(execStmt, sessVars)` for an `EXECUTE` statement.
-// glue: stub, blocked-by:D13.1 (plannercore.GetPreparedStmt, VS1-15)
-fn get_prepared_stmt(stmt_node: &ast::Stmt) -> Result<Option<PlanCacheStmtRef>, Error> {
-    let _ = stmt_node;
-    Ok(None)
+// glue: Compile's `if execStmt, ok := stmtNode.(*ast.ExecuteStmt)` around plannercore.GetPreparedStmt
+fn get_prepared_stmt(
+    sctx: &dyn SessionContext,
+    stmt_node: &ast::Stmt,
+) -> Result<Option<PlanCacheStmtRef>, Error> {
+    match stmt_node {
+        ast::Stmt::Execute(exec_stmt) => Ok(Some(
+            tidb_planner::core::plan_cache_utils::get_prepared_stmt(
+                exec_stmt,
+                sctx.get_session_vars(),
+            )?,
+        )),
+        _ => Ok(None),
+    }
 }
 
 /// `planner.Optimize(ctx, sctx, nodeW, is)`: the final plan and its output names.
@@ -76,7 +86,7 @@ impl Compiler {
 
         let is = sctx.get_txn_info_schema();
         // handle the execute statement
-        let prepared_obj = get_prepared_stmt(&stmt_node)?;
+        let prepared_obj = get_prepared_stmt(sctx, &stmt_node)?;
         // Build the final physical plan.
         let (final_plan, names) = planner_optimize(sctx, &stmt_node, is.as_ref())?;
 

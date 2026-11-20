@@ -22,15 +22,15 @@ use tidb_sessiontxn::sctx::{Oracle, PlanInfo, PlanKind, StmtInfo, TsFuture};
 pub struct StmtNode<'a>(pub &'a ast::Stmt);
 
 impl StmtInfo for StmtNode<'_> {
-    /// `plannercore.IsReadOnly` is a boundary stub (`blocked-by:D02.2`); sessiontxn only
+    /// `plannercore.IsReadOnly` (its `ast.IsReadOnly` is a boundary stub, `blocked-by:D02.2`,
+    /// also for the statement of an `EXECUTE`); sessiontxn only
     /// asks it for the RC check-ts flag (`NeedSetRCCheckTSFlag`), where "not read-only"
     /// means "no RCCheckTS": the statement then reads at its own TSO, the safe answer. The
     /// RC provider is only used in pessimistic explicit or `autocommit=0` transactions,
     /// which the VS1 router keeps on the PoC.
     // glue: planner/core IsReadOnly (D09.x; blocked-by:D02.2 answers false)
     fn is_read_only(&self, vars: &SessionVars) -> bool {
-        let _ = vars;
-        tidb_planner::optimize::is_read_only(self.0).unwrap_or(false)
+        tidb_planner::optimize::is_read_only(self.0, vars).unwrap_or(false)
     }
 }
 
@@ -94,6 +94,7 @@ pub fn stmt_kind(node: &ast::Stmt) -> &'static str {
         ast::Stmt::Use(_) => "Use",
         ast::Stmt::Set(_) => "Set",
         ast::Stmt::Show(_) => "Show",
+        ast::Stmt::Execute(_) => "Execute",
         ast::Stmt::Unported(_) => "other",
     }
 }

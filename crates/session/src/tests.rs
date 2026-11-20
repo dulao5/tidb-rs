@@ -1186,8 +1186,8 @@ fn prepare_of_the_sbtest_point_select_stops_after_the_lock() {
     // The plan builder (`buildSelect`, D09.1) is next.
     assert_eq!(blocked_by(&e), Some("D09.1"), "{e}");
     assert_eq!(mdl_entries(&s), None);
-    // EXECUTE: the session's ExecutePreparedStmt needs `ast.ExecuteStmt` (D02.2), which the
-    // Rust AST does not have; no statement was prepared, so it is Go's 8111 here.
+    // EXECUTE: no statement was prepared, so it is Go's 8111 here (an EXECUTE of a prepared
+    // statement reaches the planner: `execute_of_a_prepared_stmt_reaches_the_planner`).
     let Err(e) = block_on(s.execute_prepared_stmt(1, vec![])) else {
         panic!("no statement 1");
     };
@@ -1328,4 +1328,76 @@ fn autocommit_point_get_by_primary_key_reads_at_max_ts() {
         assert_eq!(store.requests.load(SeqCst), tso, "{name}");
         s.core.rollback_txn();
     }
+}
+
+/// A prepared statement as PREPARE leaves it in the session (on a real session PREPARE
+/// still stops at the plan builder, so the test builds the `PlanCacheStmt`).
+fn register_prepared(s: &mut Session, id: u32, sql: &str) {
+    let mut ps = tidb_planner::core::plan_cache_utils::PlanCacheStmt::default();
+    ps.prepared_ast.stmt = Box::new(Arc::try_unwrap(parse(sql)).unwrap());
+    ps.prepared_ast.stmt_type = "Select".to_owned();
+    ps.stmt_text = sql.to_owned();
+    s.vars_mut()
+        .add_prepared_stmt(id, Arc::new(parking_lot::Mutex::new(ps)))
+        .unwrap();
+}
+
+/// The binary protocol's EXECUTE of a prepared statement runs through `ExecuteStmt` with an
+/// EXECUTE node (Go `ExecutePreparedStmt`): `ResetContextOfStmt` works on the prepared
+/// SELECT and its text, and the statement reaches the compiler's planner (a boundary stub,
+/// so the caller falls back); restoring the checkpoint gives the session back. The
+/// statement-level helpers read the prepared statement too.
+#[test]
+fn execute_of_a_prepared_stmt_reaches_the_planner() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    let sql = "SELECT a FROM t WHERE id = ?";
+    register_prepared(&mut s, 1, sql);
+    s.vars().stmt_ctx().append_warning(Error::plain("earlier"));
+    let before = s.state_snapshot();
+    let cp = s.checkpoint();
+    let e = block_on(s.execute_prepared_stmt(1, vec![tidb_types::datum::new_int_datum(1)]))
+        .err()
+        .unwrap();
+    assert_eq!(blocked(&e), Some("D09.13"), "{e}");
+    let sc = s.vars().stmt_ctx();
+    assert!(sc.in_select_stmt);
+    assert_eq!(sc.original_sql, sql);
+    assert_eq!(s.executed_stmts(), 0);
+    s.restore(cp).unwrap();
+    assert_eq!(s.state_snapshot(), before);
+    assert!(s.is_idle());
+    assert_eq!(s.vars().stmt_ctx().warning_count(), 1);
+
+    // isEndTxnStmt of an EXECUTE is that of its statement; an unknown name is Go's 8111.
+    let exec_of = |s: &Session, id: u32| {
+        ast::Stmt::Execute(Box::new(ast::ExecuteStmt {
+            prep_stmt: Some(s.vars().get_prepared_stmt_by_id(id).unwrap()),
+            prep_stmt_id: id,
+            ..Default::default()
+        }))
+    };
+    assert!(!crate::session::is_end_txn_stmt(&exec_of(&s, 1), s.vars()).unwrap());
+    register_prepared(&mut s, 2, "COMMIT");
+    assert!(crate::session::is_end_txn_stmt(&exec_of(&s, 2), s.vars()).unwrap());
+    let by_name = ast::Stmt::Execute(Box::new(ast::ExecuteStmt {
+        name: "nope".to_owned(),
+        ..Default::default()
+    }));
+    let e = crate::session::is_end_txn_stmt(&by_name, s.vars()).unwrap_err();
+    assert_eq!(e.code(), 8111);
+    assert!(matches!(
+        crate::session::resolve_prepared_stmt(Some(&exec_of(&s, 2)), Some(s.vars())),
+        Ok(Some(crate::session::ResolvedStmt::Prepared(_)))
+    ));
+    assert!(matches!(
+        crate::session::resolve_prepared_stmt(Some(&exec_of(&s, 2)), None),
+        Ok(None)
+    ));
+
+    // A value that is not a plan-cache statement is refused before anything runs.
+    s.vars_mut().add_prepared_stmt(3, Arc::new(())).unwrap();
+    let e = block_on(s.execute_prepared_stmt(3, vec![])).err().unwrap();
+    assert!(e.to_string().contains("invalid PlanCacheStmt type"), "{e}");
 }

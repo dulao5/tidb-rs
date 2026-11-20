@@ -1,6 +1,7 @@
 //! go-file: pkg/planner/core/common_plans.go
 //!
-//! So far the two point-get helpers of VS1-19 (the point get arm with VS1-11); the other common plans (EXECUTE, SET,
+//! So far the two point-get helpers of VS1-19 (the point get arm with VS1-11) and the
+//! `Execute` plan of a prepared statement's execution (D13.1); the other common plans (SET,
 //! SIMPLE, EXPLAIN, ...) come with their blocks.
 
 use tidb_base::Error;
@@ -9,8 +10,30 @@ use tidb_sessionctx::variable::session::SessionVars;
 
 use tidb_model::TableCacheStatusDisable;
 
+use tidb_types::datum::Datum;
+use tidb_types::field_name::NameSlice;
+
+use crate::PhysicalPlanRef;
 use crate::base::{PhysicalKind, PhysicalPlan};
+use crate::core::plan_cache_utils::PlanCacheStmtRef;
 use crate::core::point_get_plan::PointGetPlan;
+
+/// Execute represents prepare plan.
+///
+/// - `Params`: Go's `[]expression.Expression` of the arguments; the new stack's arguments are
+///   the binary protocol's constants (the text protocol's `USING @var` needs the expression
+///   rewriter, D09.2), so their values are kept, as `SetParameterValuesIntoSCtx` reads them.
+/// - `Stmt` (Go: the prepared statement's AST, `PrepStmt.PreparedAst.Stmt`) is reached
+///   through `prep_stmt`: the AST is owned by the `PlanCacheStmt`.
+/// - `baseSchemaProducer`: only the output names are kept (the schema comes with the
+///   physical plan, `plan`).
+pub struct Execute {
+    pub name: String,
+    pub params: Vec<Datum>,
+    pub prep_stmt: PlanCacheStmtRef,
+    pub plan: Option<PhysicalPlanRef>,
+    pub output_names: NameSlice,
+}
 
 /// IsPointGetWithPKOrUniqueKeyByAutoCommit returns true when meets following conditions:
 ///  1. ctx is auto commit tagged

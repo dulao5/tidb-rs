@@ -129,6 +129,31 @@ jobs:
           TIDB_TYPES_FUZZ_JSON_ITERS: "300000"
         run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-expr-pushdown -p tidb-execdetails -p tidb-infoschema -p tidb-store -p tidb-sessiontxn
 
+  # The Go TiDB reference tree (tidb-reference.lock): the pinned source archive still has the
+  # recorded sha256 and commit, the tree built from it passes `--check` (which never fetches),
+  # and the lock agrees with the baseline written in CONSTITUTION.md article 1. The archive is
+  # fetched only when the cache for this lock is empty (scripts/tidb-reference.sh verifies it).
+  reference-tree:
+    name: reference tree lock
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/tidb-rs
+          key: tidb-reference-${{ hashFiles('tidb-reference.lock') }}
+      - name: fetch and verify (only when the cache is empty)
+        run: scripts/tidb-reference.sh --check || scripts/tidb-reference.sh
+      - name: tidb-reference.sh --check
+        run: scripts/tidb-reference.sh --check
+      - name: lock matches CONSTITUTION.md
+        run: |
+          tag=$(sed -n 's/^tag=//p' tidb-reference.lock)
+          commit=$(sed -n 's/^commit=//p' tidb-reference.lock)
+          line=$(grep -m1 "Go TiDB $tag" CONSTITUTION.md || true)
+          [[ "$line" == *"\`$tag\`"*"\`${commit:0:9}\`"* ]] || {
+            echo "::error::CONSTITUTION.md article 1 does not name tag $tag commit ${commit:0:9}"; exit 1; }
+
   # The Go vectors depend on the target (mapping rule M-FMA: gc fuses some float
   # multiply-adds into FMA on arm64 and not on amd64 GOAMD64=v1). The check job
   # (x86_64) replays vectors/v8.5.8/amd64; this job replays vectors/v8.5.8/arm64
@@ -155,3 +180,37 @@ jobs:
       # The cardinality vectors (VS1-29) differ by target (M-FMA in the estimation formulas).
       - name: test (statistics, planner)
         run: cargo test --locked -p tidb-statistics -p tidb-planner
+
+  # One translation per Go symbol (#264): no Go function, std/module function or Go type gets
+  # a second Rust translation (scripts/check_one_translation.py; known duplicates are listed
+  # in scripts/one_translation_allow.tsv, which may only shrink). On a pull request, also a
+  # report (not blocking) of the Go files the changed Rust files port, whether the PR body
+  # cites them, and the blocked-by stubs the diff adds vs the tracker's data/stubs.tsv.
+  one-translation:
+    name: one translation per Go symbol
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: check (and its tests)
+        run: |
+          python3 scripts/test_check_one_translation.py
+          python3 scripts/check_one_translation.py
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          repository: dulao5/tidb-rs-tracker
+          path: tracker
+          sparse-checkout: data
+      - name: PR report (Go files cited, stubs registered; not blocking)
+        if: github.event_name == 'pull_request'
+        run: |
+          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/pr-body.md"
+          {
+            echo '### One translation: PR report'
+            echo '```'
+            python3 scripts/check_one_translation.py --changed HEAD^1 \
+              --pr-body "$RUNNER_TEMP/pr-body.md" --stubs tracker/data/stubs.tsv
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,85 @@
+# Known duplicate translations (scripts/check_one_translation.py), a ratchet. One line per
+# finding: <kind> TAB <key fields> TAB <number of sites> TAB <reason>. Lines are only removed
+# (duplicate resolved) or their count lowered; a new duplicate, or a new site of a known one,
+# is fixed or marked `// go-dup: <reason>` at the site, not added here.
+dep	client-go oracle.GetTimeFromTS	2	baseline 2026-11-21: copies in kv, poc/domain; to consolidate into one crate
+dep	github.com/BurntSushi/toml@v1.5.0.parser.valueDatetime	2	baseline 2026-11-21: copies in base; to consolidate into one crate
+dep	github.com/pingcap/tidb/pkg/sessionctx/variable.GlobalSlowLogRateLimiter	2	baseline 2026-11-21: 2 sites in one file (crates/sessionctx/src/variable/hook_state.rs), per-type or per-call-site variants; review
+dep	github.com/pingcap/tidb/pkg/util/topsql/state.GlobalState	2	baseline 2026-11-21: 2 sites in one file (crates/sessionctx/src/variable/hook_state.rs), per-type or per-call-site variants; review
+std	bytes.Compare	4	baseline 2026-11-21: copies in kv, store, types; to consolidate (Go std into tidb_base::gostd)
+std	cmd/compile float64->int32 conversion	2	baseline 2026-11-21: 2 sites in one file (crates/base/src/gostd/conv.rs), per-type or per-call-site variants; review
+std	cmp.Compare	3	baseline 2026-11-21: copies in chunk, types; to consolidate (Go std into tidb_base::gostd)
+std	encoding/binary.PutUvarint	2	baseline 2026-11-21: copies in codec, types; to consolidate (Go std into tidb_base::gostd)
+std	encoding/binary.Uvarint	2	baseline 2026-11-21: copies in codec, types; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.Indent	2	baseline 2026-11-21: 2 sites in one file (crates/base/src/gostd/json.rs), per-type or per-call-site variants; review
+std	encoding/json.Marshal	3	baseline 2026-11-21: copies in base, execdetails; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.Unmarshal	3	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.UnsupportedValueError.Error	2	baseline 2026-11-21: copies in execdetails, sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.Valid	2	baseline 2026-11-21: copies in types; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.appendString	3	baseline 2026-11-21: 3 sites in one file (crates/base/src/gostd/json.rs), per-type or per-call-site variants; review
+std	encoding/json.decodeState.addErrorContext	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.decodeState.array	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.decodeState.literalStore	9	baseline 2026-11-21: 9 sites in one file (crates/base/src/gostd/json.rs), per-type or per-call-site variants; review
+std	encoding/json.decodeState.object	5	baseline 2026-11-21: 5 sites in one file (crates/base/src/gostd/json.rs), per-type or per-call-site variants; review
+std	encoding/json.decodeState.saveError	2	baseline 2026-11-21: 2 sites in one file (crates/base/src/gostd/json.rs), per-type or per-call-site variants; review
+std	encoding/json.decodeState.unmarshal	2	baseline 2026-11-21: 2 sites in one file (crates/base/src/gostd/json.rs), per-type or per-call-site variants; review
+std	encoding/json.decodeState.valueInterface	3	baseline 2026-11-21: copies in base, model; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.encodeState.reflectValue	7	baseline 2026-11-21: copies in base, execdetails, sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.floatEncoder.encode	3	baseline 2026-11-21: copies in base, execdetails; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.marshalerEncoder	2	baseline 2026-11-21: copies in base, sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	encoding/json.structEncoder	12	baseline 2026-11-21: 12 sites in one file (crates/execdetails/src/tracing/opt_trace.rs), per-type or per-call-site variants; review
+std	errors.Join	2	baseline 2026-11-21: copies in executor, session; to consolidate (Go std into tidb_base::gostd)
+std	fmt.Sscanf	2	baseline 2026-11-21: copies in sessionctx, types; to consolidate (Go std into tidb_base::gostd)
+std	math.Min	2	baseline 2026-11-21: copies in base, planner; to consolidate (Go std into tidb_base::gostd)
+std	math.Pow10	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	math.archExp	2	baseline 2026-11-21: 2 sites in one file (crates/base/src/gostd/math.rs), per-type or per-call-site variants; review
+std	path/filepath.Clean	2	baseline 2026-11-21: 2 sites in one file (crates/base/src/gostd/path.rs), per-type or per-call-site variants; review
+std	path/filepath.Join	2	baseline 2026-11-21: 2 sites in one file (crates/base/src/gostd/path.rs), per-type or per-call-site variants; review
+std	sort.Search	4	baseline 2026-11-21: copies in chunk, execdetails, store, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.Atoi	3	baseline 2026-11-21: copies in base, execdetails, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.FormatFloat	3	baseline 2026-11-21: copies in base, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.NumError.Error	5	baseline 2026-11-21: copies in base, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.ParseFloat	3	baseline 2026-11-21: copies in base, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.ParseInt	3	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.ParseInt(s, 10, 32)	2	baseline 2026-11-21: copies in sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	strconv.ParseUint	8	baseline 2026-11-21: copies in base, expression, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.fmtE	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.fmtF	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.formatDigits	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.genericFtoa	2	baseline 2026-11-21: copies in base; to consolidate (Go std into tidb_base::gostd)
+std	strconv.ryuFtoaShortest	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.syntaxError	2	baseline 2026-11-21: 2 sites in one file (crates/types/src/gostd.rs), per-type or per-call-site variants; review
+std	strings.EqualFold	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	strings.ToLower	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	strings.ToUpper	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	strings.TrimSpace	3	baseline 2026-11-21: copies in sessionctx, types; to consolidate (Go std into tidb_base::gostd)
+std	time.Duration.Seconds	2	baseline 2026-11-21: copies in execdetails, types; to consolidate (Go std into tidb_base::gostd)
+std	time.Location.lookup	2	baseline 2026-11-21: 2 sites in one file (crates/base/src/gostd/time/zoneinfo.rs), per-type or per-call-site variants; review
+std	time.ParseDuration	2	baseline 2026-11-21: copies in base, sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	time.ParseInLocation	3	baseline 2026-11-21: copies in sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	time.Time.Format	3	baseline 2026-11-21: copies in planner, sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	time.daysIn	2	baseline 2026-11-21: copies in base; to consolidate (Go std into tidb_base::gostd)
+std	time.getnum	3	baseline 2026-11-21: copies in base, sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	time.isDigit	2	baseline 2026-11-21: copies in base, sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	time.leadingInt	2	baseline 2026-11-21: copies in base; to consolidate (Go std into tidb_base::gostd)
+std	time.parse	3	baseline 2026-11-21: copies in base; to consolidate (Go std into tidb_base::gostd)
+std	time.quote	3	baseline 2026-11-21: copies in base, sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	time.skip	2	baseline 2026-11-21: copies in base, sessionctx; to consolidate (Go std into tidb_base::gostd)
+std	unicode.IsSpace	5	baseline 2026-11-21: copies in base, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
+std	unicode/utf8.DecodeLastRune	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
+std	unicode/utf8.DecodeRune	4	baseline 2026-11-21: copies in base, planner, types; to consolidate (Go std into tidb_base::gostd)
+std	unicode/utf8.RuneCount	2	baseline 2026-11-21: copies in base, planner; to consolidate (Go std into tidb_base::gostd)
+type-def	$GOROOT/src/strconv	DecimalSlice	2	duplicate port of strconv.decimalSlice in tidb-base gostd and tidb-types gostd; to resolve (types should use tidb_base::gostd)
+type-def	$GOROOT/src/time	Duration	2	config's reflect Duration vs gostd time.Duration alias; to resolve (use one)
+type-def	pkg/expression/exprctx	ExprContext	2	false positive: trait for the Go interface exprctx.ExprContext and the struct exprstatic.ExprContext (another Go type of the same name)
+type-def	pkg/meta/model	ColumnInfo	2	PoC stand-in in crates/meta (pre-port metadata reader); goes when the PoC is replaced (methodology Q4)
+type-def	pkg/meta/model	IndexColumn	2	PoC stand-in in crates/meta; goes when the PoC is replaced
+type-def	pkg/meta/model	IndexInfo	2	PoC stand-in in crates/meta; goes when the PoC is replaced
+type-def	pkg/meta/model	SchemaState	2	PoC stand-in in crates/meta; goes when the PoC is replaced
+type-def	pkg/meta/model	TableInfo	2	PoC stand-in in crates/meta; goes when the PoC is replaced
+type-def	pkg/parser/model	CIStr	2	parser/src/ast.rs hand-written AST stand-in (glue: poc); goes with the AST port
+type-def	pkg/parser/types	FieldType	3	PoC stand-ins: crates/meta and parser/src/ast.rs (glue: poc, replaced when the AST nodes holding it are ported)
+type-def	pkg/session	LazyTxn	2	boundary trait in sessiontxn for session.LazyTxn (crate layering), one implementation
+type-def	pkg/sessionctx/sessionstates	LastDDLInfo	2	real duplicate: sessionstates.rs and variable/session_state.rs both translate sessionstates.LastDDLInfo; to resolve
+type-def	pkg/sessionctx/sessionstates	QueryInfo	2	real duplicate: sessionstates.rs and variable/session_state.rs both translate sessionstates.QueryInfo; to resolve
+type-def	pkg/store/driver/backoff	Backoffer	2	boundary trait in store/copr for the driver's Backoffer (crate layering), one implementation

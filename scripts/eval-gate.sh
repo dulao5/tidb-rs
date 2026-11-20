@@ -3,11 +3,14 @@
 # specs/D08.1-expr/plan.md "性能门禁的测量规则" prescribes: Go and Rust alternately on the
 # same machine, each side in several independent processes, the minimum over processes.
 #
-#   TIDB_SRC=<TiDB v8.5.8 checkout> scripts/eval-gate.sh [-n rounds] [-o outdir]
+#   [TIDB_SRC=<tree>] scripts/eval-gate.sh [-n rounds] [-o outdir]
+#
+# TIDB_SRC defaults to the reference tree of tidb-reference.lock (scripts/tidb-reference.sh); a
+# given one (e.g. a git checkout) must match the lock.
 #
 # Go side: the stock BenchmarkVectorizedBuiltin*Func of pkg/expression plus
-# crates/expression/benches/go/gate_vec_test.go (copied into $TIDB_SRC/pkg/expression; the
-# checkout is otherwise not modified). Rust side: crates/expression/benches/eval_gate.rs.
+# crates/expression/benches/go/gate_vec_test.go (added to $TIDB_SRC/pkg/expression with
+# `go test -overlay`; the tree is not modified). Rust side: crates/expression/benches/eval_gate.rs.
 # Raw outputs go to <outdir>/{go,rust}-<round>.txt, the table to <outdir>/summary.md
 # (scripts/eval_gate_summary.py). Close other heavy processes first.
 #
@@ -55,17 +58,25 @@ while getopts "n:o:" opt; do
   case $opt in
     n) rounds=$OPTARG ;;
     o) out=$OPTARG ;;
-    *) echo "usage: TIDB_SRC=<dir> $0 [-n rounds] [-o outdir]" >&2; exit 2 ;;
+    *) echo "usage: [TIDB_SRC=<dir>] $0 [-n rounds] [-o outdir]" >&2; exit 2 ;;
   esac
 done
-: "${TIDB_SRC:?set TIDB_SRC to a TiDB v8.5.8 checkout}"
 root=$(cd "$(dirname "$0")/.." && pwd)
+# The Go side must be the pinned reference tree (tidb-reference.lock): verify a given TIDB_SRC,
+# otherwise use (and if needed fetch) the default one.
+if [ -n "${TIDB_SRC:-}" ]; then
+  TIDB_SRC=$(TIDB_REFERENCE_DIR=$TIDB_SRC "$root/scripts/tidb-reference.sh" --check)
+else
+  TIDB_SRC=$("$root/scripts/tidb-reference.sh")
+fi
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
-cp "$root/crates/expression/benches/go/gate_vec_test.go" "$TIDB_SRC/pkg/expression/zz_gate_vec_test.go"
-trap 'rm -f "$TIDB_SRC/pkg/expression/zz_gate_vec_test.go"' EXIT
-(cd "$TIDB_SRC" && go test -c -o "$out/expr.test" ./pkg/expression)
+# The gate's Go file joins pkg/expression through an overlay: the reference tree is read-only
+# and shared, nothing is written into it.
+printf '{"Replace":{"%s":"%s"}}\n' "$TIDB_SRC/pkg/expression/zz_gate_vec_test.go" \
+  "$root/crates/expression/benches/go/gate_vec_test.go" >"$out/overlay.json"
+(cd "$TIDB_SRC" && go test -c -overlay "$out/overlay.json" -o "$out/expr.test" ./pkg/expression)
 
 rust_bin=$(cd "$root" && cargo bench -p tidb-expression --bench eval_gate --no-run --message-format=json |
   python3 -c 'import json,sys

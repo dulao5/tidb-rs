@@ -206,7 +206,29 @@ TiKV 客户端不按函数移植：client-go（约 1.7 万行 Go）由我们的 
 6. **PoC 代码定性**：逐文件标注 `glue: poc`，列出各自将被哪个块替换。
 7. **crate 分层**（[N0](exceptions/N0-crate-layering/spec.md)）：每个块所在的 crate 和 crate 之间的依赖方向以仓库根目录的 `layers.toml` 为准，CI 检查。
 
-## 6. 维护
+## 6. 质量与性能门禁（2026-11-20 负责人采纳 pgrust 经验）
+
+依据：维护者对 pgrust（PostgreSQL 的 Rust 重写）工程方法的调研，负责人 2026-11-20 全部采纳。按优先级：
+
+| # | 内容 | issue | 时机 |
+|---|---|---|---|
+| ① | 防假绿：新栈覆盖率按"新栈执行 / 回退原型 / 出错 / 跳过"普查，四项之和等于总数；每层门禁配负对照 | #260 | 立即 |
+| ② | 全项目唯一的结果比较规格与比较器（逐行 / 多重集 / ORDER BY 分段 / LIMIT；错误码与消息） | #261 | 立即 |
+| ③ | 机器可读的偏差台账，命中计数与过期检查；例外补齐围栏五段（边界、理由、围栏位置、用户可见错误、重开条件） | #262 | ①② 之后 |
+| ④ | 性能门禁：每项指标都不差于 Go——延迟、每语句分配不高于 Go，吞吐不低于 Go；按 #263 规格的重复次数和置信区间判定，差于 Go 阻止合并 | #263 | 预处理点查跑通后立即加入，之后每条纵向切片（单表扫描、join、聚合…）各加一项 |
+| ⑤ | 仓库内 skill：find-next-block / port-block / audit-block；审计"一个 Go 类型只有一种 Rust 翻译" | #264 | 立即 |
+| ⑥ | 参照树 lock 校验（`--check` 进 CI）、共享构建目录、小步合并 | #265 | 立即 |
+
+推迟的两项（已决定，暂不实施）：
+
+| 内容 | issue | 开工条件 |
+|---|---|---|
+| 与 Go TiDB 的随机 SQL 差分测试（类似 pgrust fuzzgen）、TLP / NoREC 蜕变测试 | #266 | 阶段三（集中 QA）开头，前提是 P3 有一定覆盖：新栈能生成 SELECT 计划，① 的普查显示足够多的语句走新栈 |
+| arena + 零 drop 内存纪律 | #267 | 属于内存模型例外 A1；到性能阶段按 ④ 的数据决定，分配 / 析构是相对 Go 的主要差距时修订 A1 并立项 |
+
+不采用：Kani 形式化等价证明（pgrust 用 Kani 证明 C 与 Rust 实现等价，前提是两者能在同一个程序里执行，Go 做不到；govec 向量回放覆盖这一层）、seam 接口 crate（Go 没有 import 循环）。
+
+## 7. 维护
 
 - 划分规则在 [tidb-rs-tracker](https://github.com/dulao5/tidb-rs-tracker) 中维护（`scripts/blocks/rules.py`，数据 `data/blocks.tsv`、`data/func_blocks.tsv`、`data/block_edges.tsv`），由脚本生成本文的表格。调整划分时先改规则，再重新生成。
 - 每个块开工时，在 `specs/<块 ID>-<名称>/` 下建立 spec/plan/tasks，并在本文中链接。

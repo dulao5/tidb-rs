@@ -6,8 +6,8 @@
 //!
 //! Not ported here, each the business of another block (spec §2.4): the session memory and
 //! disk trackers and the OOM action (`SessionVars.MemTracker`, A1), the ANALYZE tracker
-//! (ANALYZE is delegated to Go TiDB), `EXECUTE` (`GetPreparedStmt`, D13.1), Top SQL and pprof
-//! labels (D14.2), the index usage collector (D11.2), the CTE / union-scan maps (their
+//! (ANALYZE is delegated to Go TiDB), the SQL digest of an `EXECUTE`'s statement (not
+//! computed, `parser.NormalizeDigest`), Top SQL and pprof labels (D14.2), the index usage collector (D11.2), the CTE / union-scan maps (their
 //! executors are not ported: nothing to clear), the plan cache switches (D13.1) and the
 //! planner context reset (N2: a `PlanCtx` is made per optimization). Statements outside the
 //! Rust AST (`Stmt::Unported`: INSERT, UPDATE, DELETE, EXPLAIN, ...) are a boundary stub
@@ -22,6 +22,7 @@ use tidb_base::mysql::{NoPriority, PriorityEnum, SQLMode, ServerStatusCursorExis
 use tidb_execdetails::execdetails::RuntimeStatsColl;
 use tidb_memory::tracker::LabelForSQLText;
 use tidb_parser::ast;
+use tidb_planner::core::plan_cache_utils::get_prepared_stmt;
 use tidb_sessionctx::errctx;
 use tidb_sessionctx::stmtctx::{StatementContext, allocate_task_id};
 use tidb_sessionctx::variable::session::SessionVars;
@@ -93,13 +94,43 @@ pub fn reset_context_of_stmt(
     killer.reset();
     killer.conn_id.store(vars.connection_id, Ordering::SeqCst);
 
-    // isAnalyze: ANALYZE and EXECUTE are not in the Rust AST (delegated / D13.1).
+    // isAnalyze: ANALYZE is delegated to Go TiDB (not in the Rust AST), also as the
+    // statement of an EXECUTE: the SQL text tracker.
+    let prepared = match s {
+        ast::Stmt::Execute(exec_stmt) => Some(get_prepared_stmt(exec_stmt, vars)?),
+        _ => None,
+    };
     sc.init_mem_tracker(LabelForSQLText, -1);
     // The OOM action (variable.OOMAction) and sc.MemTracker.AttachTo(vars.MemTracker): A1.
     sc.init_disk_tracker(LabelForSQLText, -1);
     // EnableTmpStorageOnOOM: the disk tracker is attached to the session's (A1).
 
-    // EXECUTE (GetPreparedStmt, the SQL digest of the prepared statement): D13.1.
+    // EXECUTE: Go's second GetPreparedStmt finds the same statement. `isWeakConsistencyRead`
+    // of the EXECUTE node reads the statement again (planner IsReadOnly), so it is evaluated
+    // before the statement is held for the rest of the function (the lock is not reentrant).
+    if let Some(prepare_stmt) = &prepared {
+        let select_without_lock = matches!(
+            &*prepare_stmt.lock().prepared_ast.stmt,
+            ast::Stmt::Select(sel) if sel.lock_info.is_none()
+        );
+        if select_without_lock {
+            sc.weak_consistency = is_weak_consistency_read(vars, s)?;
+        }
+    }
+    let prepared = prepared.as_ref().map(|p| p.lock());
+    let (s, text) = match &prepared {
+        Some(prepare_stmt) => {
+            // s = prepareStmt.PreparedAst.Stmt. sc.InitSQLDigest(prepareStmt.NormalizedSQL,
+            // prepareStmt.SQLDigest): both are empty (parser.NormalizeDigest is a boundary
+            // stub, plan_cache_utils), nothing to set; pprof labels and Top SQL: D14.2.
+            // `s.Text()` of the prepared statement is its SQL (`StmtText`).
+            (
+                &*prepare_stmt.prepared_ast.stmt,
+                prepare_stmt.stmt_text.as_str(),
+            )
+        }
+        None => (s, text),
+    };
     // execute missed stmtID uses empty sql
     sc.original_sql = text.to_owned();
     // EXPLAIN / EXPLAIN FOR are not in the Rust AST (D02.2).
@@ -257,5 +288,5 @@ fn is_weak_consistency_read(session_vars: &SessionVars, node: &ast::Stmt) -> Res
     Ok(session_vars.connection_id > 0
         && session_vars.read_consistency == "weak"
         && tidb_planner::core::common_plans::is_auto_commit_txn(session_vars)
-        && tidb_planner::optimize::is_read_only(node)?)
+        && tidb_planner::optimize::is_read_only(node, session_vars)?)
 }

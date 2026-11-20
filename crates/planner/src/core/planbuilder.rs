@@ -14,7 +14,12 @@ use std::collections::HashMap;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
-use tidb_parser::ast::{Expr, Op, SelectStmt, Stmt};
+use tidb_parser::ast::{ExecuteStmt, Expr, Op, SelectStmt, Stmt};
+use tidb_types::datum::Datum;
+use tidb_types::field_name::NameSlice;
+
+use crate::core::common_plans::Execute;
+use crate::core::plan_cache_utils::get_prepared_stmt;
 use tidb_sessionctx::stmtctx::TableEntry;
 use tidb_sessionctx::variable::session::SessionVars;
 
@@ -208,6 +213,40 @@ impl PlanBuilder {
             }
             _ => Err(blocked("D12.12", "the plan of this statement")),
         }
+    }
+
+    /// buildExecute: the `Execute` plan of an `EXECUTE` statement. `Build` returns no plan
+    /// yet (its arms are other blocks), so `OptimizeExecStmt` calls this arm directly.
+    ///
+    /// The text protocol's `USING @var, ...` needs the expression rewriter (`b.rewrite`, D09.2);
+    /// the binary protocol's arguments are the values of constants (see [`Execute`]).
+    // go: PlanBuilder.buildExecute L2 (USING variables need the expression rewriter; the binary arguments are values)
+    pub fn build_execute(&mut self, vars: &SessionVars, v: &ExecuteStmt) -> Result<Execute, Error> {
+        let mut params: Vec<Datum> = Vec::with_capacity(v.using_vars.len());
+        if !v.using_vars.is_empty() {
+            // newExpr, _, err := b.rewrite(ctx, expr, nil, nil, true) for each variable.
+            // glue: blocked-by:D09.2 (the expression rewriter, b.rewrite of EXECUTE ... USING)
+            return Err(blocked("D09.2", "b.rewrite of EXECUTE ... USING"));
+        }
+
+        let prep_stmt = get_prepared_stmt(v, vars)?;
+        if let Some(args) = &v.binary_args {
+            // v.BinaryArgs.([]expression.Expression): Go's type assertion panics on another
+            // type; the session always sets the values.
+            let Some(args) = args.downcast_ref::<Vec<Datum>>() else {
+                return Err(tidb_base::errors::new(
+                    "invalid EXECUTE binary arguments".to_owned(),
+                ));
+            };
+            params = args.clone();
+        }
+        Ok(Execute {
+            name: v.name.clone(),
+            params,
+            prep_stmt,
+            plan: None,
+            output_names: NameSlice::default(),
+        })
     }
 
     /// GetOptFlag gets the OptFlag of the PlanBuilder.

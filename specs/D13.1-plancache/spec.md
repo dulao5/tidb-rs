@@ -50,7 +50,7 @@ converge：D13.1 `--item VS1-15` 44 个函数，24 个移植（L1 13、L2 11）+
 ### 3.2 参数
 
 - 二进制协议参数（NULL 位图、unsigned 标志、长数据）到 `Datum` 的解码是 `parseBinaryParams`（D03.1，VS1-16），不在本项；新栈收到二进制参数时仍是 `newstack.rs` 的 `blocked-by:D03.1`。
-- 本项负责：`?` 的个数和顺序（按位置）；EXECUTE 时个数不等报 Go 的 `ErrWrongParamCount`（8112）；`SetParameterValuesIntoSCtx` 按顺序写入 `PlanCacheParams`。`EXECUTE ... USING @var`（文本协议，`isGetVarBinaryLiteral`）不在 Rust AST 里。
+- 本项负责：`?` 的个数和顺序（按位置）；EXECUTE 时个数不等报 Go 的 `ErrWrongParamCount`（8112）；`SetParameterValuesIntoSCtx` 按顺序写入 `PlanCacheParams`。`EXECUTE ... USING @var`（文本协议，`isGetVarBinaryLiteral`）的 EXECUTE 节点已在 Rust AST 里，但变量要经表达式改写（D09.2），现在是边界桩。
 
 ### 3.3 PREPARE 与 EXECUTE 之间 schema 变了
 
@@ -69,7 +69,10 @@ converge：D13.1 `--item VS1-15` 44 个函数，24 个移植（L1 13、L2 11）+
 ### 4.1 PREPARE / EXECUTE 走到哪里
 
 - `PrepareStmt` → `PrepareExec.Next`：解析（Rust 解析器的错误文本与 Go 不同，语法错误和解析 warning 都是 `blocked-by:D02.1`，交给 PoC）→ 多条语句报 `ErrPrepareMulti`（8115）→ `ResetContextOfStmt` → `GeneratePlanCacheStmtWithAST`。后者现在停在：有表的语句在 preprocess 查表（`blocked-by:D06.3`），无表的 SELECT 在 `PlanBuilder.Build`（`blocked-by:D09.1`）。没有库名时，有表的语句按 Go 报 1046。
-- `ExecutePreparedStmt`：按 id 找到 `PlanCacheStmt` 之后，Go 包成 `ast.ExecuteStmt` 交给 `ExecuteStmt`；Rust AST 没有 `ExecuteStmt`，这里是 `blocked-by:D02.2`。`OptimizeExecStmt` 同样改为 `blocked-by:D02.2`（它到达的 `GetPlanFromPlanCache` 已移植）。
+- `ExecutePreparedStmt`：按 id 找到 `PlanCacheStmt` 之后，照 Go 包成 EXECUTE 节点（`ast.ExecuteStmt`，解析器现已有这个节点，带 Restore）交给 `ExecuteStmt`。节点上的 `PrepStmt` / `BinaryArgs` 在 Go 是 `interface{}`，Rust 也存为 `Any`（参数是路由器已求值的常量值）。
+- 读这个节点的地方都照 Go 改为先取预处理语句（`GetPreparedStmt`）：`ResetContextOfStmt`（按预处理的 SELECT 设置语句上下文，`OriginalSQL` 取预处理的 SQL 文本）、语句标签、`isEndTxnStmt`、`resolvePreparedStmt`、`planner.IsReadOnly` 的 EXECUTE 分支、编译器取 `preparedObj`、preprocess 的 `resolveExecuteStmt`。
+- `OptimizeExecStmt` 已移植：`buildExecute` 生成 `Execute` 计划（`PlanBuilder.Build` 还不返回计划，所以直接调这个分支），然后走 `GetPlanFromPlanCache` 的未命中路径（照旧不缓存，A3 例外未确认），最后到语句自己的 `Optimize`（`OptimizeAstNode`，`blocked-by:D13.3`）。文本协议的 `EXECUTE s USING @a` 要先经表达式改写（`b.rewrite`，`blocked-by:D09.2`）。
+- **现在停在哪里**：会话的 EXECUTE 先经过 `ResetContextOfStmt`、语句开始、语句标签，停在编译器里规划器的入口（`planner.IsReadOnly` / `Optimize`，`blocked-by:D09.13`），会话恢复检查点后交给 PoC（`real_execute_reaches_the_planner_and_falls_back`、`execute_of_a_prepared_stmt_reaches_the_planner`）。编译器接上 `planner.Optimize` 之后，下一站是 `OptimizeAstNode`（D13.3），再之后是 `buildSelect`（D09.1）。
 
 ### 4.2 关闭的语句在事务结束时才删除（Lucky，#247 的完成条件）
 
@@ -102,7 +105,8 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 |---|---|---|
 | `lookupPlanCache`、`adjustCachedPlan`、`instancePlanCacheEnabled`、`NewPlanCacheKey`、`parseParamTypes`、`generateNewPlan` 的 Put、`LRUPlanCache.Delete` 替身、去重缓存命中 | D13.1 | 缓存本身，例外 A3 |
 | `NonPreparedPlanCacheableWithCtx`、`extractTableNames`、`getColType`、`plan_cache_param.go` 11 个函数、`Cacheable`（测试辅助） | D13.1 | 非预处理 plan cache，新栈不用 |
-| `GetPreparedStmt`、`OptimizeExecStmt`、`ExecutePreparedStmt` 之后 | D02.2 | Rust AST 没有 `ExecuteStmt` |
+| `buildExecute` 的 `USING` 变量 | D09.2 | 表达式改写 `b.rewrite` |
+| `planner.IsReadOnly` 里的 `ast.IsReadOnly` | D02.2 | 要遍历整条语句（找用户变量赋值），Rust AST 没有 visitor |
 | `OptimizeAstNode` | D13.3 | `planner.Optimize`（VS1-24） |
 | `isPhysicalPlanCacheable` 的 TableReader / TableScan | D10.1 | 物理算子（VS1-27） |
 | `IsASTCacheable` 的 hint、`Unported` 节点 | D13.3、D02.2 | hint 解析、Rust AST |
@@ -113,4 +117,4 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 
 - govec `plancache`：见 §3.1。
 - 单测：planner `plan_cache_tests`（PREPARE 停在 plan builder 之前发出的 warning、参数个数 8112 与顺序、schema 变化后重新 preprocess 与 8113、未命中路径的 `UseCache` / `InPreparedPlanBuilding` / `isPlanCacheable` warning、`isPlanCacheable` 的开关与大小）；session（`cleanRetryInfo` 的坑、1461 计入已关闭语句、真正的 `PrepareStmt` 停在 D09.1 / D06.3 / 8115）；路由器（§4.2）。
-- **预处理点查（`SELECT c FROM sbtest1 WHERE id=?`）在 `strict` 模式下由新栈执行：本项做不到**。这条路径还被以下各项挡住：preprocess 查表（D06.3，VS1-17）、`PlanBuilder.Build`（D09.1，VS1-21）、`planner.Optimize`（D13.3，VS1-24；点查的 `TryFastPlan` 由它调用）、`EXECUTE` 节点（D02.2）、结果集与二进制参数的编码（D03.1，VS1-16）。本项完成后，PREPARE 在新会话中走到 preprocess 查表，`strict` 模式下 EXECUTE 报 `1235 blocked-by:D06.3`。
+- **预处理点查（`SELECT c FROM sbtest1 WHERE id=?`）在 `strict` 模式下由新栈执行：本项做不到**。这条路径还被以下各项挡住：preprocess 查表（D06.3，VS1-17）、`PlanBuilder.Build`（D09.1，VS1-21）、`planner.Optimize`（D13.3，VS1-24；点查的 `TryFastPlan` 由它调用）、结果集与二进制参数的编码（D03.1，VS1-16）。本项完成后，PREPARE 在新会话中走到 preprocess 查表，`strict` 模式下 EXECUTE 报 `1235 blocked-by:D06.3`。

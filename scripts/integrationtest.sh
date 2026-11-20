@@ -5,8 +5,9 @@
 #   scripts/integrationtest.sh [-t tag] [-o port-offset] [-v version] [-d tests-dir] [-O out-dir]
 #                              [-k] [-- test names or prefixes...]
 #
-#   -d  tests/integrationtest/t of a TiDB checkout (default: $TIDB_SRC/tests/integrationtest/t,
-#       TIDB_SRC defaults to ~/src/pingcap/tidb-all-source-code/tidb)
+#   -d  tests/integrationtest/t of a TiDB tree (default: $TIDB_SRC/tests/integrationtest/t;
+#       TIDB_SRC defaults to the reference tree of tidb-reference.lock, scripts/tidb-reference.sh,
+#       and a given TIDB_SRC must match the lock too)
 #   -O  output directory (default target/integrationtest): statements.tsv, files.tsv,
 #       mismatches.jsonl, run.tsv, ab.log, tidb-rs.log
 #   -k  keep the playground and tidb-rs running afterwards (default: stop and clean them)
@@ -21,7 +22,13 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 tag=${PLAYGROUND_TAG:-maya-it}
 offset=${PLAYGROUND_OFFSET:-25000}
 version=${PLAYGROUND_VERSION:-v8.5.8}
-tidb_src=${TIDB_SRC:-$HOME/src/pingcap/tidb-all-source-code/tidb}
+# The Go tree must be the pinned reference (tidb-reference.lock): ensure the default one, verify a
+# given one.
+if [ -n "${TIDB_SRC:-}" ]; then
+    tidb_src=$(TIDB_REFERENCE_DIR=$TIDB_SRC "$repo/scripts/tidb-reference.sh" --check)
+else
+    tidb_src=$("$repo/scripts/tidb-reference.sh")
+fi
 tests_dir=
 out=$repo/target/integrationtest
 keep=0
@@ -90,7 +97,8 @@ tidb_version=$(mysql -h 127.0.0.1 -P "$a_port" -u root -N -e 'SELECT version()' 
     printf 'tidb_rs_commit\t%s\n' "$commit"
     printf 'tidb_rs_dirty\t%s\n' "$dirty"
     printf 'tidb_version\t%s\n' "${tidb_version:-$version}"
-    printf 'tests_commit\t%s\n' "$(git -C "$tests_dir" rev-parse HEAD 2>/dev/null || echo unknown)"
+    printf 'tests_commit\t%s\n' "$(git -C "$tests_dir" rev-parse HEAD 2>/dev/null ||
+        cut -d' ' -f3 "$tidb_src/.tidb-reference-stamp" 2>/dev/null || echo unknown)"
     printf 'date\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'runner\t%s\n' "$(uname -sm) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -n)"
     printf 'seconds\t%s\n' "$seconds"

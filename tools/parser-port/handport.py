@@ -958,6 +958,13 @@ act("AsOfClause", "asof timestampType Expression", "Box::new(AsOfClause { ts_exp
 
 # --- USE / SET -----------------------------------------------------------------------------------
 act("UseStmt", "use DBName", "Stmt::Use(Box::new(UseStmt { db_name: $2 }))")
+
+# --- EXECUTE -------------------------------------------------------------------------------------
+act("ExecuteStmt", "execute Identifier", "Stmt::Execute(Box::new(ExecuteStmt { name: $2, ..Default::default() }))")
+act("ExecuteStmt", "execute Identifier using UserVariableList",
+    "Stmt::Execute(Box::new(ExecuteStmt { name: $2, using_vars: $4, ..Default::default() }))")
+act("UserVariableList", "UserVariable", "vec![$1]")
+act("UserVariableList", "UserVariableList ',' UserVariable", "{ let mut v = $1; v.push($3); v }")
 act("SetStmt", "set VariableAssignmentList", "Stmt::Set(Box::new(SetStmt { variables: $2 }))")
 act("SetStmt", "set global transaction TransactionChars", """{
         let mut vars = $4;

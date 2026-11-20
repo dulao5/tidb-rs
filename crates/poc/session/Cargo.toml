@@ -39,6 +39,9 @@ tokio = { workspace = true }
 # An InfoSchema with sbtest1 for the real new session (router tests).
 tidb-infoschema = { workspace = true }
 tidb-model = { workspace = true }
+# A prepared statement registered in the real new session (router test of EXECUTE).
+tidb-planner = { workspace = true }
+parking_lot = "0.12"
 
 [lints]
 workspace = true
