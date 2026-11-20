@@ -54,7 +54,7 @@ fn is_word_byte(c: u8) -> bool {
 }
 
 /// `--` starts a comment when followed by whitespace or the end of input (MySQL rule).
-fn is_dash_comment(b: &[u8], i: usize) -> bool {
+pub(crate) fn is_dash_comment(b: &[u8], i: usize) -> bool {
     b.get(i + 1) == Some(&b'-') && b.get(i + 2).is_none_or(|c| c.is_ascii_whitespace())
 }
 
@@ -80,7 +80,7 @@ pub(crate) fn skip_quoted(b: &[u8], i: usize) -> usize {
 }
 
 /// Index of the newline ending the comment at `i` (or the end).
-fn skip_line(b: &[u8], i: usize) -> usize {
+pub(crate) fn skip_line(b: &[u8], i: usize) -> usize {
     let mut j = i;
     while j < b.len() && b[j] != b'\n' {
         j += 1;
@@ -88,7 +88,7 @@ fn skip_line(b: &[u8], i: usize) -> usize {
     j
 }
 
-fn skip_block(b: &[u8], i: usize) -> usize {
+pub(crate) fn skip_block(b: &[u8], i: usize) -> usize {
     let mut j = i + 2;
     while j + 1 < b.len() {
         if b[j] == b'*' && b[j + 1] == b'/' {
@@ -97,6 +97,123 @@ fn skip_block(b: &[u8], i: usize) -> usize {
         j += 1;
     }
     b.len()
+}
+
+/// Kind of a [`Token`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenKind {
+    /// Identifier-like run (keywords, names, `t.a`, `@x`); see [`words`].
+    Word,
+    /// Number literal.
+    Number,
+    /// Backquoted identifier.
+    Quoted,
+    /// String literal (`'..'` or `".."`).
+    Str,
+    /// Any other single character (`(`, `)`, `,`, `.`, operators).
+    Punct,
+}
+
+/// A token outside comments, with its byte range and parenthesis depth (a `(` has the depth
+/// outside it, its contents one more).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub start: usize,
+    pub end: usize,
+    pub depth: u32,
+}
+
+impl Token {
+    /// The token's text in `sql`.
+    pub fn text<'s>(&self, sql: &'s str) -> &'s str {
+        &sql[self.start..self.end]
+    }
+
+    /// Whether it is the word `kw` (case-insensitive).
+    pub fn is_word(&self, sql: &str, kw: &str) -> bool {
+        self.kind == TokenKind::Word && self.text(sql).eq_ignore_ascii_case(kw)
+    }
+
+    /// An identifier's name: a backquoted one unquoted, a word as it is.
+    pub fn ident(&self, sql: &str) -> String {
+        let t = self.text(sql);
+        match self.kind {
+            TokenKind::Quoted if t.len() >= 2 => t[1..t.len() - 1].replace("``", "`"),
+            _ => t.to_string(),
+        }
+    }
+}
+
+/// All tokens of `sql` outside comments (optimizer hints and executable comments included:
+/// they never contain ORDER BY / LIMIT of the statement itself).
+pub fn tokens(sql: &str) -> Vec<Token> {
+    let b = sql.as_bytes();
+    let mut out = Vec::new();
+    let mut depth: u32 = 0;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let start = i;
+        let kind = match c {
+            b'\'' | b'"' => {
+                i = skip_quoted(b, i);
+                TokenKind::Str
+            }
+            b'`' => {
+                i = skip_quoted(b, i);
+                TokenKind::Quoted
+            }
+            b'#' => {
+                i = skip_line(b, i);
+                continue;
+            }
+            b'-' if is_dash_comment(b, i) => {
+                i = skip_line(b, i);
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = skip_block(b, i);
+                continue;
+            }
+            _ if c.is_ascii_whitespace() => {
+                i += 1;
+                continue;
+            }
+            _ if c.is_ascii_digit() => {
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.') {
+                    i += 1;
+                }
+                TokenKind::Number
+            }
+            _ if is_word_byte(c) => {
+                while i < b.len() && (is_word_byte(b[i]) || b[i] == b'.') {
+                    i += 1;
+                }
+                TokenKind::Word
+            }
+            _ => {
+                // One character (UTF-8 aware: is_word_byte takes every non-ASCII byte).
+                i += 1;
+                TokenKind::Punct
+            }
+        };
+        let mut d = depth;
+        if kind == TokenKind::Punct && c == b')' {
+            depth = depth.saturating_sub(1);
+            d = depth;
+        }
+        out.push(Token {
+            kind,
+            start,
+            end: i,
+            depth: d,
+        });
+        if kind == TokenKind::Punct && c == b'(' {
+            depth += 1;
+        }
+    }
+    out
 }
 
 /// What the harness may do with a statement.
@@ -169,14 +286,6 @@ pub fn classify(sql: &str) -> Kind {
         }
         _ => other("not read-only"),
     }
-}
-
-/// Whether the statement has an ORDER BY at the top level (outside subqueries), i.e. whether
-/// its row order is defined.
-pub fn has_top_level_order_by(sql: &str) -> bool {
-    let w = words(sql);
-    w.windows(2)
-        .any(|p| p[0].depth == 0 && p[0].text == "ORDER" && p[1].text == "BY")
 }
 
 /// Which section of a workload file a statement is in.
@@ -348,18 +457,6 @@ mod tests {
         ] {
             assert!(matches!(classify(w), Kind::Other(_)), "{w}");
         }
-    }
-
-    #[test]
-    fn order_by() {
-        assert!(has_top_level_order_by(
-            "select c from t where id between 1 and 2 order by c"
-        ));
-        assert!(!has_top_level_order_by("select c from t"));
-        assert!(!has_top_level_order_by(
-            "select * from (select c from t order by c) x"
-        ));
-        assert!(!has_top_level_order_by("select 'order by'"));
     }
 
     #[test]

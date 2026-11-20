@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 use serde_json::json;
 
-use crate::compare::{ER_NOT_SUPPORTED_YET, Verdict, compare};
+use crate::compare::{
+    ER_NOT_SUPPORTED_YET, Observed, StmtClass, Verdict, classify, compare, compare_status_only,
+    needs_warnings, strip_limit,
+};
 use crate::exec::{Outcome, Side, TlsMode};
 use crate::mysqltest::{self, Class, Item, TxnEffect};
 use crate::outcome_json;
@@ -91,6 +94,8 @@ struct Conn {
     autocommit_off: bool,
     /// Prepared statement name -> whether it is a read.
     prepared: BTreeMap<String, bool>,
+    /// Prepared statement name -> its text, when literal (an EXECUTE is classified by it).
+    prepared_text: BTreeMap<String, String>,
     /// Local temporary tables created in this session.
     temp_tables: BTreeSet<String>,
     /// Session statements B rejected (still possibly in effect on A).
@@ -254,6 +259,12 @@ fn rewrite(o: &mut Outcome, p: &Pending) {
 
 /// Mismatch kind from the comparison's diff lines.
 fn mismatch_kind(d: &[String]) -> &'static str {
+    if d.iter().all(|s| s.starts_with("warnings:")) {
+        return "warnings";
+    }
+    if d.iter().all(|s| s.starts_with("affected rows")) {
+        return "affected_rows";
+    }
     let rows = d.iter().any(|s| {
         s.starts_with("row count") || s.contains(" only in ") || s.starts_with("first differing")
     });
@@ -309,58 +320,53 @@ fn brief(o: &Outcome) -> String {
     }
 }
 
-/// Judges a read: (verdict, kind, detail).
+/// Judges a read through the comparator: (verdict, kind, detail). `status_only`: tolerance T4
+/// (`--disable_result_log`).
 fn judge(
-    a: &Outcome,
-    b: &Outcome,
-    ordered: bool,
+    class: &StmtClass,
+    a: Observed<'_>,
+    b: Observed<'_>,
+    a_full: Option<&[Vec<String>]>,
     status_only: bool,
 ) -> (StmtOutcome, String, String) {
-    if let Outcome::Error { code, message, .. } = b
+    let (oa, ob) = (a.outcome, b.outcome);
+    if let Outcome::Error { code, message, .. } = ob
         && *code == ER_NOT_SUPPORTED_YET
     {
         return (StmtOutcome::Unsupported, String::new(), message.clone());
     }
-    match (a, b) {
-        (_, Outcome::Client(m)) => (StmtOutcome::BError, "client".into(), m.clone()),
-        (Outcome::Error { code: ca, .. }, Outcome::Error { code: cb, .. }) => {
-            if ca == cb {
-                (StmtOutcome::Match, String::new(), String::new())
-            } else {
-                (
-                    StmtOutcome::Mismatch,
-                    "error".into(),
-                    format!("A {} vs B {}", brief(a), brief(b)),
-                )
-            }
+    match (oa, ob) {
+        (_, Outcome::Client(m)) => return (StmtOutcome::BError, "client".into(), m.clone()),
+        (Outcome::Error { .. }, Outcome::Error { .. }) => {}
+        (Outcome::Error { .. }, _) => {
+            return (
+                StmtOutcome::Mismatch,
+                "error".into(),
+                format!("A {} vs B {}", brief(oa), brief(ob)),
+            );
         }
-        (Outcome::Error { .. }, _) => (
-            StmtOutcome::Mismatch,
-            "error".into(),
-            format!("A {} vs B {}", brief(a), brief(b)),
-        ),
         (_, Outcome::Error { code, message, .. }) => {
-            (StmtOutcome::BError, code.to_string(), message.clone())
+            return (StmtOutcome::BError, code.to_string(), message.clone());
         }
-        (Outcome::Rows { .. }, Outcome::Rows { .. }) | (Outcome::Ok { .. }, Outcome::Ok { .. })
-            if status_only =>
-        {
-            (StmtOutcome::Match, String::new(), String::new())
+        _ => {}
+    }
+    let v = if status_only {
+        compare_status_only(oa, ob)
+    } else {
+        compare(class, a, b, a_full)
+    };
+    match v {
+        Verdict::Match | Verdict::BothError => (StmtOutcome::Match, String::new(), String::new()),
+        Verdict::Unsupported => (StmtOutcome::Unsupported, String::new(), String::new()),
+        Verdict::Mismatch(d) => {
+            let kind = match (oa, ob) {
+                (Outcome::Error { .. }, Outcome::Error { .. }) => "error",
+                (Outcome::Rows { .. }, Outcome::Rows { .. })
+                | (Outcome::Ok { .. }, Outcome::Ok { .. }) => mismatch_kind(&d),
+                _ => "shape",
+            };
+            (StmtOutcome::Mismatch, kind.into(), d.join("; "))
         }
-        _ => match compare(a, b, ordered) {
-            Verdict::Match | Verdict::BothError => {
-                (StmtOutcome::Match, String::new(), String::new())
-            }
-            Verdict::Unsupported => (StmtOutcome::Unsupported, String::new(), String::new()),
-            Verdict::Mismatch(d) => {
-                let kind = if matches!((a, b), (Outcome::Rows { .. }, Outcome::Rows { .. })) {
-                    mismatch_kind(&d)
-                } else {
-                    "shape"
-                };
-                (StmtOutcome::Mismatch, kind.into(), d.join("; "))
-            }
-        },
     }
 }
 
@@ -480,6 +486,7 @@ impl Runner<'_> {
             in_txn: false,
             autocommit_off: false,
             prepared: BTreeMap::new(),
+            prepared_text: BTreeMap::new(),
             temp_tables: BTreeSet::new(),
             rejected: Vec::new(),
             diverged: BTreeMap::new(),
@@ -509,7 +516,6 @@ impl Runner<'_> {
         );
         let mut cur = "default".to_string();
         let mut pending = Pending::default();
-        let mut warnings = false;
         let mut result_log = true;
 
         for item in items {
@@ -525,8 +531,7 @@ impl Runner<'_> {
                         Ok(mut v) => pending.replace_column.append(&mut v),
                         Err(e) => pending.bad_directive = Some(format!("line {line}: {e}")),
                     },
-                    "enable_warnings" => warnings = true,
-                    "disable_warnings" => warnings = false,
+                    // Warnings are always compared (result-comparison spec §4).
                     "enable_result_log" => result_log = true,
                     "disable_result_log" => result_log = false,
                     // echo, enable/disable_info (affected-rows info of writes), remove_file,
@@ -581,17 +586,7 @@ impl Runner<'_> {
                     };
                     let t0 = Instant::now();
                     let rec = self
-                        .run_stmt(
-                            test,
-                            line,
-                            &cur,
-                            conn,
-                            &sql,
-                            &p,
-                            warnings,
-                            result_log,
-                            &mut counts,
-                        )
+                        .run_stmt(test, line, &cur, conn, &sql, &p, result_log, &mut counts)
                         .await;
                     let ms = t0.elapsed().as_millis();
                     self.write_stmt(&rec.as_rec(test, line, &cur, &sql, ms), &mut counts);
@@ -618,7 +613,6 @@ impl Runner<'_> {
         conn: &mut Conn,
         sql: &str,
         p: &Pending,
-        warnings: bool,
         result_log: bool,
         counts: &mut FileCounts,
     ) -> Owned {
@@ -678,10 +672,14 @@ impl Runner<'_> {
                     return out;
                 }
                 if let Some((name, text)) = mysqltest::prepare_parts(sql) {
-                    let is_read = text.is_some_and(|t| {
-                        matches!(mysqltest::classify(&t, |_| None), Class::Read(_))
+                    let is_read = text.as_ref().is_some_and(|t| {
+                        matches!(mysqltest::classify(t, |_| None), Class::Read(_))
                     });
-                    conn.prepared.insert(name, is_read);
+                    conn.prepared.insert(name.clone(), is_read);
+                    match text {
+                        Some(t) => conn.prepared_text.insert(name, t),
+                        None => conn.prepared_text.remove(&name),
+                    };
                 }
                 conn.a.log_session(sql);
                 if conn.b_login.is_some() {
@@ -782,25 +780,52 @@ impl Runner<'_> {
                     }
                     ob = again;
                 }
+                // Warnings right after the statement, on both sides (spec §4).
+                let (wa, wb) = if needs_warnings(&oa, &ob) && result_log {
+                    (conn.a.warnings().await, conn.b.warnings().await)
+                } else {
+                    (None, None)
+                };
                 rewrite(&mut oa, p);
                 rewrite(&mut ob, p);
-                let ordered = !p.sorted && crate::sql::has_top_level_order_by(sql);
-                let (mut v, kind, mut detail) = judge(&oa, &ob, ordered, !result_log);
-                let mut kind = if out.kind.is_empty() {
+                // An EXECUTE is classified by its prepared text.
+                let exec_text = sql
+                    .split_whitespace()
+                    .next()
+                    .filter(|w| w.eq_ignore_ascii_case("execute"))
+                    .and_then(|_| sql.split_whitespace().nth(1))
+                    .and_then(|n| conn.prepared_text.get(&n.to_ascii_lowercase()));
+                let class_sql = exec_text.map_or(sql, String::as_str);
+                let cols = match &oa {
+                    Outcome::Rows { columns, .. } => columns.clone(),
+                    _ => Vec::new(),
+                };
+                let class = classify(class_sql, &cols, p.sorted);
+                let obs_a = Observed::new(&oa, wa.as_deref());
+                let obs_b = Observed::new(&ob, wb.as_deref());
+                let (mut v, mut kind, mut detail) = judge(&class, obs_a, obs_b, None, !result_log);
+                let mut fetched_full = false;
+                if v == StmtOutcome::Mismatch
+                    && result_log
+                    && class.wants_full()
+                    && exec_text.is_none()
+                    && let Some(full_sql) = strip_limit(sql)
+                {
+                    // A's result without the LIMIT (spec §2.4). It changes A's "previous
+                    // statement" state, so the next history-dependent read is not compared.
+                    fetched_full = true;
+                    let mut full = conn.a.query(&full_sql).await;
+                    rewrite(&mut full, p);
+                    if let Outcome::Rows { rows, .. } = &full {
+                        (v, kind, detail) = judge(&class, obs_a, obs_b, Some(rows), false);
+                    }
+                }
+                let kind = if out.kind.is_empty() {
                     kind
                 } else {
                     format!("{kind} retried")
                 };
-                // --enable_warnings: mysql-tester prints SHOW WARNINGS after the statement.
-                if warnings && v == StmtOutcome::Match && !a_failed {
-                    let wa = conn.a.query("SHOW WARNINGS").await;
-                    let wb = conn.b.query("SHOW WARNINGS").await;
-                    if let Verdict::Mismatch(d) = compare(&wa, &wb, true) {
-                        v = StmtOutcome::Mismatch;
-                        kind = "warnings".into();
-                        detail = d.join("; ");
-                    }
-                }
+                let ordered = class.to_string();
                 if matches!(v, StmtOutcome::Mismatch | StmtOutcome::BError) {
                     let rec = json!({
                         "file": test,
@@ -809,7 +834,7 @@ impl Runner<'_> {
                         "verdict": v.name(),
                         "kind": kind,
                         "sql": sql,
-                        "ordered": ordered,
+                        "class": ordered,
                         "detail": detail,
                         "b_rejected_session_statements": conn.rejected,
                         "a": outcome_json(&oa, self.opts.report_rows),
@@ -819,7 +844,7 @@ impl Runner<'_> {
                 }
                 // Only an identical answer leaves the same warnings behind (B keeps none after
                 // an error, A keeps the error).
-                conn.last_on_both = v == StmtOutcome::Match;
+                conn.last_on_both = v == StmtOutcome::Match && !fetched_full;
                 out.verdict = v;
                 out.kind = kind;
                 out.detail = detail;
@@ -1069,36 +1094,74 @@ mod tests {
         assert!(d.is_empty());
     }
 
+    fn j(
+        a: &Outcome,
+        b: &Outcome,
+        ordered: bool,
+        status_only: bool,
+    ) -> (StmtOutcome, String, String) {
+        let class = if ordered {
+            StmtClass::Exact
+        } else {
+            StmtClass::Unordered
+        };
+        judge(
+            &class,
+            Observed::new(a, None),
+            Observed::new(b, None),
+            None,
+            status_only,
+        )
+    }
+
     #[test]
     fn judges() {
         assert_eq!(
-            judge(&rows(&["1"]), &rows(&["1"]), true, false).0,
+            j(&rows(&["1"]), &rows(&["1"]), true, false).0,
             StmtOutcome::Match
         );
-        let (v, k, _) = judge(&rows(&["1"]), &rows(&["2"]), false, false);
+        let (v, k, _) = j(&rows(&["1"]), &rows(&["2"]), false, false);
         assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "rows"));
-        let (v, k, _) = judge(&rows(&["1", "2"]), &rows(&["2", "1"]), true, false);
+        let (v, k, _) = j(&rows(&["1", "2"]), &rows(&["2", "1"]), true, false);
         assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "order"));
         assert_eq!(
-            judge(&rows(&["1"]), &rows(&["2"]), false, true).0,
+            j(&rows(&["1"]), &rows(&["2"]), false, true).0,
             StmtOutcome::Match
         );
         assert_eq!(
-            judge(&rows(&[]), &err(1235), false, false).0,
+            j(&rows(&[]), &err(1235), false, false).0,
             StmtOutcome::Unsupported
         );
         assert_eq!(
-            judge(&rows(&[]), &err(1105), false, false).0,
+            j(&rows(&[]), &err(1105), false, false).0,
             StmtOutcome::BError
         );
         assert_eq!(
-            judge(&err(1146), &err(1146), false, false).0,
+            j(&err(1146), &err(1146), false, false).0,
             StmtOutcome::Match
         );
-        let (v, k, _) = judge(&err(1146), &err(1105), false, false);
+        let (v, k, _) = j(&err(1146), &err(1105), false, false);
         assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "error"));
-        let (v, k, _) = judge(&err(1146), &rows(&[]), false, false);
+        let (v, k, _) = j(&err(1146), &rows(&[]), false, false);
         assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "error"));
+        // Same code, other message: different (the spec compares code, SQLSTATE and message).
+        let other = Outcome::Error {
+            code: 1146,
+            state: "HY000".into(),
+            message: "other".into(),
+        };
+        let (v, k, _) = j(&err(1146), &other, false, false);
+        assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "error"));
+        // Even with the result log off (T4) errors compare in full.
+        assert_eq!(j(&err(1146), &other, false, true).0, StmtOutcome::Mismatch);
+        // Warnings: a different count is a mismatch of kind "warnings".
+        let w = Outcome::Rows {
+            columns: Vec::new(),
+            rows: vec![vec!["1".into()]],
+            warnings: 1,
+        };
+        let (v, k, _) = j(&rows(&["1"]), &w, false, false);
+        assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "warnings"));
     }
 
     #[test]

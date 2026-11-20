@@ -35,23 +35,32 @@ match.
 
 ## What is compared
 
+Every judgement goes through the one result comparator, `src/compare.rs`, which implements
+`docs/testing/result-comparison.md` (statement classes, error / warning rules, the numbered
+tolerances of `docs/testing/tolerances.toml`; fixtures in `fixtures/compare/`). In short:
+
 For each statement, via the text protocol (COM_QUERY) and, when the workload marks it
 parameterizable, as a server-side prepared statement (COM_STMT_PREPARE/EXECUTE with bound
 parameters):
 
 - rows: values exactly, including their wire type (`"1"` from the text protocol, `1` / `1u` /
-  `1.5f64` / `DATE(...)` from the binary one). In order when the statement has a top-level
-  `ORDER BY`, otherwise as multisets. Note: `ORDER BY` on a non-unique key can legitimately order
-  ties differently; such diffs say "same rows in a different order".
+  `1.5f64` / `DATE(...)` from the binary one), by the statement's class: `exact` (EXPLAIN,
+  SHOW, ..., or an ORDER BY that does not resolve to result columns) as lists; `unordered` (no
+  top-level ORDER BY) as multisets; `ordered K` (ORDER BY resolved to result columns K) runs of
+  equal keys as multisets, the runs in order; `limited` (top-level LIMIT) also accepts other
+  members of A's result without the LIMIT, which is then fetched from A.
 - column definitions: name, org_name, schema, table, org_table, type, length, decimals, flags,
   charset/collation; for prepared statements also the parameter count and the columns returned
   by COM_STMT_PREPARE, and that B's EXECUTE returns the columns its PREPARE returned (a
   difference A does not have, or a field A changed to another value, is a `metadata` mismatch: with `--new-stack=fallback` an
   EXECUTE that falls back to the PoC must carry the new stack's PREPARE metadata,
   vertical-slice plan §4.7).
-- errors: both fail with the same code => `both_error` (counts as agreement); B fails with 1235
-  (`ER_NOT_SUPPORTED_YET`) => `unsupported`; anything else (one side errors, different codes,
-  connection errors, timeouts) => `mismatch`. Error messages and warning counts are not compared.
+- errors: both fail with the same code, SQLSTATE and message => `both_error` (counts as
+  agreement); B fails with 1235 (`ER_NOT_SUPPORTED_YET`) => `unsupported` (tolerance T1);
+  anything else (one side errors, another code / SQLSTATE / message, connection errors,
+  timeouts) => `mismatch`.
+- OK packets: affected rows and warning count. Warnings: when either side reports any, `SHOW
+  WARNINGS` runs on both and must be identical.
 
 Output: a table of match / mismatch / unsupported / both_error per template and protocol, and
 `<out-dir>/mismatches.jsonl` (query, params, both results with metadata and up to
@@ -124,14 +133,15 @@ What happens to a statement:
 
 Outcome per statement:
 
-- `match`: B answered like A: same rows (as multisets, in order when the statement has a
-  top-level ORDER BY and no `--sorted_result`), same column metadata, or the same error code
-  (also when the test expects the error). With `--enable_warnings`, `SHOW WARNINGS` must match
-  too. Under `--disable_result_log` only success vs error is compared. `--replace_regex` and
-  `--replace_column` are applied to both sides' values first.
+- `match`: the comparator judged B's answer equal to A's ("What is compared" above: rows by
+  the statement's class, `--sorted_result` making it unordered, column metadata, warnings, or
+  the same error with code, SQLSTATE and message, also when the test expects the error).
+  Under `--disable_result_log` only the shape is compared, errors still in full (T4).
+  `--replace_regex` and `--replace_column` are applied to both sides' values first (T3).
 - `mismatch`: B answered differently. Kinds: `rows` (wrong values or row count), `order`,
   `columns` (names or count), `metadata` (type, length, flags, charset), `error` (different
-  error code, or B returned a result where A failed), `shape` (result set vs OK), `warnings`.
+  error code / SQLSTATE / message, or B returned a result where A failed), `shape` (result set
+  vs OK), `warnings`, `affected_rows`.
 - `unsupported`: B answered 1235 (`ER_NOT_SUPPORTED_YET`), or B could not log in as the user of
   a `connect` (tidb-rs has a single account).
 - `b_error`: A succeeded and B failed otherwise (other error code, timeout, lost connection).

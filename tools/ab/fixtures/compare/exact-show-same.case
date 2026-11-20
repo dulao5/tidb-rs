@@ -1,0 +1,10 @@
+sql: SHOW TABLES
+cols: Tables_in_test
+class: exact
+verdict: match
+[a]
+t1
+t2
+[b]
+t1
+t2

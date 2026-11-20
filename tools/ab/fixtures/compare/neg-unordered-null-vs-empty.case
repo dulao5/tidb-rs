@@ -1,0 +1,8 @@
+sql: SELECT a FROM t
+cols: a
+class: unordered
+verdict: mismatch
+[a]
+NULL
+[b]
+""

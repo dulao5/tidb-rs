@@ -305,6 +305,15 @@ impl Side {
         }
     }
 
+    /// `SHOW WARNINGS` right after a statement (`None` if it failed): what the comparator
+    /// compares when a warning count is above zero.
+    pub async fn warnings(&mut self) -> Option<Vec<Vec<String>>> {
+        match self.query("SHOW WARNINGS").await {
+            Outcome::Rows { rows, .. } => Some(rows),
+            _ => None,
+        }
+    }
+
     pub async fn disconnect(&mut self) {
         if let Some(c) = self.conn.take() {
             let _ = c.disconnect().await;
