@@ -21,7 +21,10 @@ description: Port one block (or one part of a block) of Go TiDB v8.5.8 to tidb-r
 - 在 `specs/<块 ID>-<名称>/` 写 `spec.md`（中文、平实，负责人评审的是 spec 不是代码），格式照 `specs/D06.1-model/spec.md`；planner / expression 类的块用 `specs/templates/plan.md` 写 plan。
 - spec 必须与 Go 源码逐条核对（评审多次发现正负号写反、声称 Go 做了实际没做的事）。引用 Go 代码写文件和行号（基于参照树）。
 - **与 Go 的每一处差异**都写进 spec 的"已知差异"一节或代码的文档注释。没有登记的用户可见差异不允许以"写路径"之类的理由带过。
-- Go 的 bug 照搬，登记为 `upstream-pitfall`（写进 spec，不去上游提 issue）。依赖 gc 实现细节的行为（如零大小对象的指针相等）写明并用单元测试固定。
+- **Go 本身的问题，分两类登记**，都在 tidb-rs 开 issue（英文，写清在 v8.5.8 上怎么复现），spec 的"已知差异"一节引用这个 issue。不去 pingcap/tidb 提：
+  - Go 的**行为有错**（bug）：照 Go 移植，issue 加标签 `upstream-pitfall`；
+  - Go **缺少某个功能**：照 Go 移植（缺的照样缺），issue 加标签 `go-gap`，之后单独与内核团队讨论（VISION 的贯穿原则）。
+- 依赖 gc 实现细节的行为（如零大小对象的指针相等）写明，并用单元测试固定。
 - spec 标着"待确认"时不得合并依赖它的代码。
 
 ## 2. 写代码
@@ -32,8 +35,13 @@ description: Port one block (or one part of a block) of Go TiDB v8.5.8 to tidb-r
 - **承载方式**按 mappings.md：共享元数据用 `Arc`、只读，修改只经 `make_mut`，只对真正要改的节点调用 `make_mut`，每条语句的路径上不做深拷贝，`Arc::clone(&x)`（`clippy::clone_on_ref_ptr`）；内部可变性不进共享元数据（`check_model_mutability.py`）；跨连接共享的状态用 `parking_lot` 等不会毒化的锁；不跨 `.await` 持锁；同步函数里不阻塞等待 future（改成返回 boxed future 的方法）。
 - **顺序照抄 Go**：`defer`、事务结束、生命周期相关的先后顺序（如 PREPARE 结束自动提交事务、关闭的预处理语句在事务结束时才移除），以及报错的先后顺序（先做 Go 先做的权限检查、`sql_select_limit` 检查，再报"不支持"）。
 - **取消安全**：Go 用 `defer` 收尾的地方用 drop guard；持有后台 worker 的结构实现 `Drop`，通知结束并中止 worker；配一个在中途 drop 的测试。
+- **路由器与回退**（新栈和原型之间的路由，`--new-stack` 各模式）：
+  - 新栈一旦产生了副作用（执行器已经打开、已经发出结果、会话状态已经改了），之后再遇到 `blocked` 就**不能回退**到原型，直接报错，否则语句会执行两次。进入新栈之前，先检查回退需要的前置条件（如会话是否空闲 `is_idle()`）。
+  - 回退之后、以及新栈执行之后，会话状态要和 Go 一样：语句是否结束、命令是否结束、事务是否结束。在回退模式下为这些写测试。
+  - 计数器和指标只在语句真正执行之后才增加，不在构建计划之前加。被回退的语句不能计进新栈。
+  - 新栈里的 panic 像 Go 的 `clientConn.Run` 一样恢复成错误 1105，不能拖垮连接。
 - **新代码不进默认路径**：新移植的代码在默认的 `--new-stack=off` 模式下不能运行，做成 `Option` 构建，并测试 `off` 模式下一个也没建。
-- **命名**：标识符、环境变量、配置值、测试名、文件名里不出现项目 ID（VS1-xx、Dxx.y、Nxx、M-xx 等），按含义命名。注释、spec、PR 中出现 ID 时，句子本身用平实的话说清楚，ID 放在括号里。
+- **命名**：标识符、环境变量、配置值、测试名、文件名里不出现项目 ID（VS1-xx、Dxx.y、Nxx、M-xx 等），按含义命名。注释、spec、PR 中出现 ID 时，句子本身用平实的话说清楚，ID 放在括号里。给人看的文字（PR 正文、spec、issue、评论）在**文末给出所用 ID 的定义**，每个 ID 一行。
 - **注释**：Go 注释原样复制，缩进 4 格的段落用 ```` ```text ```` 包起来。
 - 尺寸和内存布局的测试加 `#[cfg(target_pointer_width = "64")]`。关于 Go 类型的事实（如"在 Go 中大小为零"）写成 Rust 类型旁边的 trait 常量，不要在别处硬编码类型判断。
 
@@ -65,8 +73,8 @@ description: Port one block (or one part of a block) of Go TiDB v8.5.8 to tidb-r
    - `python3 scripts/check_one_translation.py`
 2. converge：`scripts/converge.py --block <块> [--part specs/<...>/functions.tsv --item <任务>] --func-blocks ../tidb-rs-tracker/data/func_blocks.tsv <Rust 文件...>`。范围内的函数 100% 有 `// go:` 标注，或者登记为桩、不移植。
 3. 更新 tasks.md 中本任务行的状态。tracker 中更新 `data/block_parts.tsv` / `blocks_done.tsv`。
-4. **两个 PR**：先开 tracker PR（向量、桩登记），再开 tidb-rs PR。PR 正文写：做了什么、对应 spec 的章节、converge 数字、govec 条数、已知的 Go 差异、桩列表、本 PR 移植的 Go 文件（逐个列出，CI 会报告没有列出的）、合并顺序"tracker#N → #M"，末尾加 "🤖 Generated with [Claude Code](https://claude.com/claude-code)"。
-5. 等 CI 通过，失败就修。不要自己合并；评审由 Lucky 做。
+4. **两个 PR**：先开 tracker PR（向量、桩登记），再开 tidb-rs PR。PR 正文写：做了什么、对应 spec 的章节、converge 数字、govec 条数、已知的 Go 差异、桩列表、本 PR 移植的 Go 文件（逐个列出，CI 会报告没有列出的）、合并顺序"tracker#N → #M"、文末所用 ID 的定义，末尾加 "🤖 Generated with [Claude Code](https://claude.com/claude-code)"。
+5. 等 CI 通过，失败就修。不要自己合并；评审由评审者做（目前是 Lucky）。
 6. 和本块无关的改动单独提交，并在 PR 正文中说明。
 
 ## 6. 完成标准
