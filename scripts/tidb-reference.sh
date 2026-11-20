@@ -59,7 +59,7 @@ fi
 if [ -f "$stamp_file" ] && [ "$(cat "$stamp_file")" = "$want" ]; then
   # The fetched tree is read-only, so nothing (a test file of eval-gate, an agent's edit) can
   # be added to the tree every porting agent reads.
-  if [ -n "$(find "$dest" -perm -u+w -print -quit)" ]; then
+  if [ -n "$(find "$dest" ! -type l -perm -u+w -print -quit)" ]; then
     [ "$check" = 1 ] && fail "$dest has writable files (may have been modified); run scripts/tidb-reference.sh"
     chmod -R a-w "$dest"
   fi
