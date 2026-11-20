@@ -357,6 +357,10 @@ def changed(rev, pr_body, stubs):
             if "/tests/" in cur or base == "tests.rs" or base.endswith("_tests.rs"):
                 cur = None
         elif cur and line.startswith("+") and not line.startswith("+++"):
+            # a stub is a `glue:` comment or a blocked(...) call; prose mentioning
+            # blocked-by in other comments is not
+            if line[1:].lstrip().startswith("//") and "glue:" not in line:
+                continue
             for m in BLOCKED_RE.finditer(line):
                 new.append((cur, m.group(1) or m.group(2)))
     print(f"blocked-by markers added ({len(new)}):")
