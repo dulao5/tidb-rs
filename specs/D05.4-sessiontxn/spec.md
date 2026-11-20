@@ -91,7 +91,7 @@ tidb-rs 是只读节点；显式事务里的写语句和加锁读由会话拒绝
 
 **MaxTS**：照 Go，autocommit 点查若不需要二次读取，读在 MaxTS（`IsPointGetWithPKOrUniqueKeyByAutoCommit`，规划器已有移植，会话经 `AdviseOptimizeWithPlanAndThenWarmUp` 接入），0 次 TSO 请求。注意 Go 的名字容易误解：**整数主键**和**聚簇表的主键**用 MaxTS；**普通唯一索引**要回表（二次读取），Go 不用 MaxTS，取 TSO（1 次请求）。
 
-**现在停在哪里**（真实新会话 + sbtest InfoSchema + 模拟存储）：`PREPARE s FROM 'SELECT c FROM sbtest1 WHERE id=?'` 通过元数据锁与表的解析（`resolveCtx.AddTableName`），停在**规划器**的 `buildSelect`（`blocked-by:D09.1`，计划构建器）。路由器因此把该语句交给 PoC，`EXECUTE` 也由 PoC 执行；新会话的 `ExecutePreparedStmt` 本身还停在**会话**里的 `ast.ExecuteStmt`（`blocked-by:D02.2`，Rust AST 没有 EXECUTE 节点）。所以用模拟存储还不能返回行。
+**现在停在哪里**（真实新会话 + sbtest InfoSchema + 模拟存储）：`PREPARE s FROM 'SELECT c FROM sbtest1 WHERE id=?'` 通过元数据锁与表的解析（`resolveCtx.AddTableName`），停在**规划器**的 `buildSelect`（`blocked-by:D09.1`，计划构建器）。路由器因此把该语句交给 PoC，`EXECUTE` 也由 PoC 执行；新会话的 `ExecutePreparedStmt` 已照 Go 把语句包成 EXECUTE 节点交给 `ExecuteStmt`，停在编译器里规划器的入口（`blocked-by:D09.13`）。所以用模拟存储还不能返回行。
 
 **测试**：`crates/session/src/tests.rs`（PREPARE 登记并在结束时清除，失败也清除；autocommit 读不登记、显式事务登记并按 Go 上报；整数主键 / 聚簇主键点查 MaxTS、0 次 TSO，普通唯一索引 1 次 TSO；PREPARE 停在 D09.1），`crates/planner/src/core/plan_cache_tests.rs`（跳过条件、写 0 再写版本、出错删除、非 public、表定义变化）。govec：`preprocess` 原先停在元数据锁桩的 9 条记录现在与 Go 输出一致（92 条一致，原 83）；元数据锁本身的行为依赖会话内部状态与 domain，Go 的输出（登记表）不在 SQL 结果中，没有可直接对照的 Go 输出，用上面的场景测试代替。
 

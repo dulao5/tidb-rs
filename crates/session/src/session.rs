@@ -31,7 +31,9 @@ use tidb_executor::select::reset_context_of_stmt;
 use tidb_kv::kv::{Client, Storage};
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_parser::ast;
-use tidb_planner::core::plan_cache_utils::{PlanCacheStmt, PlanCacheStmtRef, new_plan_cache_key};
+use tidb_planner::core::plan_cache_utils::{
+    PlanCacheStmt, PlanCacheStmtRef, get_prepared_stmt, new_plan_cache_key,
+};
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 use tidb_sessionctx::variable::session_methods::prepare_dedup_cache_key;
 use tidb_sessionctx::variable::session_state::TxnInfoSchema;
@@ -885,13 +887,15 @@ pub fn err_is_noisy(err: &Error) -> bool {
     false
 }
 
-/// `EXECUTE` (Go reads the prepared statement, D13.1) is not in the Rust AST.
 // go: isEndTxnStmt L1 [M-ERRVAL]
 pub fn is_end_txn_stmt(stmt: &ast::Stmt, vars: &SessionVars) -> Result<bool, Error> {
-    let _ = vars;
     match stmt {
         ast::Stmt::Rollback(_) | ast::Stmt::Commit(_) => Ok(true),
-        // *ast.ExecuteStmt: plannercore.GetPreparedStmt (D13.1), not in the Rust AST.
+        ast::Stmt::Execute(n) => {
+            let ps = get_prepared_stmt(n, vars)?;
+            let ps = ps.lock();
+            is_end_txn_stmt(&ps.prepared_ast.stmt, vars)
+        }
         _ => Ok(false),
     }
 }
@@ -1155,7 +1159,8 @@ impl Session {
 
         // Some executions are done in compile stage, so we reset them before compile.
         reset_context_of_stmt(&mut self.core, &stmt_node, text)?;
-        // ExecuteStmt.BinaryArgs (EXECUTE): D13.1.
+        // ExecuteStmt.BinaryArgs as []param.BinaryParam is turned into expressions here
+        // (ExecBinaryParam); the router passes the arguments evaluated already (spec §6.1).
 
         // StmtCtx.SQLDigest: the normalized digest (parser.NormalizeDigest, D02.1).
         let digest = String::new();
@@ -1219,7 +1224,15 @@ impl Session {
 
         // failpoint mockStmtSlow: not ported.
 
-        let stmt_label = crate::glue::get_stmt_label(&stmt_node)?;
+        let mut stmt_label = String::new();
+        if let ast::Stmt::Execute(exec_stmt) = &*stmt_node
+            && let Ok(prepare_stmt) = get_prepared_stmt(exec_stmt, &self.core.sctx.vars)
+        {
+            stmt_label = crate::glue::get_stmt_label(&prepare_stmt.lock().prepared_ast.stmt)?;
+        }
+        if stmt_label.is_empty() {
+            stmt_label = crate::glue::get_stmt_label(&stmt_node)?;
+        }
         self.core.set_request_source(&stmt_label);
 
         // The planner's table lookups do not read TiKV (D06.3 spec §11.2).
@@ -1254,7 +1267,12 @@ impl Session {
         self.core.sctx.vars.duration_compile = dur_compile.as_nanos() as i64;
         // SessionExecuteCompileDuration{Internal,General}.Observe: D14.1.
         self.core.sctx.current_plan = stmt.plan.clone();
-        // ExecuteStmt without a name (binary protocol): EXECUTE is D13.1.
+        if let ast::Stmt::Execute(exec_stmt) = &*stmt_node
+            && exec_stmt.name.is_empty()
+        {
+            // for exec-stmt on bin-protocol, ignore the plan detail in `show process` to gain performance benefits.
+            self.core.sctx.current_plan = None;
+        }
 
         // Execute the physical plan.
         log_stmt(&stmt, &self.core);
@@ -1426,39 +1444,33 @@ impl Session {
     ///
     /// Go turns the statement into an `ast.ExecuteStmt` holding its `PlanCacheStmt` and runs
     /// it through `ExecuteStmt`, whose compiler reaches the plan cache's miss path
-    /// (`GetPlanFromPlanCache`, ported in the planner's `core::plan_cache`). The Rust AST has
-    /// no `ExecuteStmt` (D02.2), so after the lookup this is a boundary stub. No statement
-    /// can be found yet on a real session anyway: `PrepareStmt` stops at the plan builder.
-    // go: session.ExecutePreparedStmt L2 (ast.ExecuteStmt is not in the Rust AST: D02.2)
+    /// (`OptimizeExecStmt` → `GetPlanFromPlanCache`, ported in the planner). `params` are
+    /// the values of Go's `[]expression.Expression` (the router evaluates the binary
+    /// arguments, `ExecBinaryParam`, spec §6.1). The statement node has no text (Go's
+    /// `Text()` of a node built here is empty).
+    // go: session.ExecutePreparedStmt L1
     pub async fn execute_prepared_stmt(
         &mut self,
         stmt_id: u32,
         params: Vec<Datum>,
     ) -> Result<Option<ExecStmtResult>, Error> {
-        if self
-            .core
-            .sctx
-            .vars
-            .get_prepared_stmt_by_id(stmt_id)
-            .is_err()
-        {
+        let Ok(prep_stmt) = self.core.sctx.vars.get_prepared_stmt_by_id(stmt_id) else {
             log::error!("prepared statement not found, stmtID: {stmt_id}");
             return Err(ErrStmtNotFound.clone());
-        }
-        let prep_stmt = self.core.sctx.vars.get_prepared_stmt_by_id(stmt_id)?;
-        let Ok(stmt) = prep_stmt.downcast::<parking_lot::Mutex<PlanCacheStmt>>() else {
+        };
+        if !prep_stmt.is::<parking_lot::Mutex<PlanCacheStmt>>() {
             return Err(tidb_base::errors::new(format!(
                 "invalid PlanCacheStmt type, stmtID: {stmt_id}"
             )));
+        }
+        let exec_stmt = ast::ExecuteStmt {
+            binary_args: Some(Arc::new(params)),
+            prep_stmt: Some(prep_stmt),
+            prep_stmt_id: stmt_id,
+            ..Default::default()
         };
-        // execStmt := &ast.ExecuteStmt{BinaryArgs: params, PrepStmt: stmt, PrepStmtId:
-        // stmtID}; s.ExecuteStmt(ctx, execStmt)
-        let _ = (stmt, params);
-        // glue: blocked-by:D02.2 (ast.ExecuteStmt is not in the Rust AST)
-        Err(blocked(
-            "D02.2",
-            "the EXECUTE statement node (ast.ExecuteStmt)",
-        ))
+        self.execute_stmt(Arc::new(ast::Stmt::Execute(Box::new(exec_stmt))), "")
+            .await
     }
 
     /// DropPreparedStmt (COM_STMT_CLOSE): the statement is only recorded; `cleanRetryInfo`
@@ -1512,14 +1524,37 @@ fn prepare_stmt_node() -> ast::Stmt {
     }))
 }
 
-/// resolvePreparedStmt: the statement an `EXECUTE` runs. `EXECUTE` is not in the Rust AST
-/// (Go reads it with `plannercore.GetPreparedStmt`, D13.1, VS1-15), so every statement
-/// resolves to itself. Go's only caller (`shouldCheckConnectionAliveBeforeCommit`) asks
-/// whether a statement writes; it is not ported (the write path).
-// go: resolvePreparedStmt L2 (no EXECUTE in the Rust AST)
-pub fn resolve_prepared_stmt<'a>(stmt: &'a ast::Stmt, vars: &SessionVars) -> &'a ast::Stmt {
-    let _ = vars;
-    stmt
+/// resolvePreparedStmt: the statement an `EXECUTE` runs (`Go: (ast.StmtNode, error)`).
+///
+/// The statement of an `EXECUTE` is owned by its `PlanCacheStmt` behind a lock, so it is
+/// returned as the statement's handle ([`ResolvedStmt::Prepared`]); Go's `nil` (no session
+/// variables, or no prepared AST, which a `PlanCacheStmt` always has here) is `None`. Go's
+/// only caller (`shouldCheckConnectionAliveBeforeCommit`) asks whether a statement writes;
+/// it is not ported (the write path).
+// go: resolvePreparedStmt L2 (the prepared statement is returned as its handle)
+pub fn resolve_prepared_stmt<'a>(
+    stmt: Option<&'a ast::Stmt>,
+    vars: Option<&SessionVars>,
+) -> Result<Option<ResolvedStmt<'a>>, Error> {
+    let Some(stmt) = stmt else {
+        return Ok(None);
+    };
+    let ast::Stmt::Execute(exec_stmt) = stmt else {
+        return Ok(Some(ResolvedStmt::Stmt(stmt)));
+    };
+    let Some(vars) = vars else {
+        return Ok(None);
+    };
+    let prepare_stmt = get_prepared_stmt(exec_stmt, vars)?;
+    Ok(Some(ResolvedStmt::Prepared(prepare_stmt)))
+}
+
+/// The statement [`resolve_prepared_stmt`] finds.
+pub enum ResolvedStmt<'a> {
+    /// The statement itself (not an `EXECUTE`).
+    Stmt(&'a ast::Stmt),
+    /// The prepared statement of an `EXECUTE`: its AST is `PreparedAst.Stmt`.
+    Prepared(PlanCacheStmtRef),
 }
 
 /// The deferred `OnStmtEnd`s of `ExecuteStmt` (Go: `defer s.txn.onStmtEnd()`, `defer

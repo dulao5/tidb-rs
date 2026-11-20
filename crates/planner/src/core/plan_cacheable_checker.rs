@@ -299,6 +299,10 @@ impl<V: Visit> Walker<'_, V> {
         match s {
             Stmt::Select(sel) => self.select(sel),
             Stmt::SetOpr(set_opr) => self.set_opr(set_opr),
+            // ExecuteStmt.Accept: the USING variables.
+            Stmt::Execute(exec) => {
+                self.node(CNode::Other, |w| exec.using_vars.iter().all(|v| w.expr(v)))
+            }
             _ => self.node(CNode::Other, |_| true),
         }
     }

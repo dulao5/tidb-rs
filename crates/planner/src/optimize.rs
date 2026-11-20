@@ -10,26 +10,56 @@
 //!   driver, not of `TryFastPlan`), the plan cache (D13.1, VS1-15), then `optimize`;
 //! - `optimize` / `buildLogicalPlan`: `PlanBuilder.Build` (D09.1, VS1-21) and `DoOptimize`
 //!   (D09.13 core part, VS1-24);
-//! - `OptimizeExecStmt`: the prepared statement path (D13.1, VS1-15).
+//! - `OptimizeExecStmt`: the prepared statement path (D13.1, VS1-15): the `Execute` plan and
+//!   the plan cache's miss path, which ends in `OptimizeAstNode` (the statement's `Optimize`).
 
+use std::sync::Arc;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::dbterror::plannererrors::{ErrNotHintUpdatable, ErrUnresolvedHintName};
 use tidb_base::gofmt::Arg;
-use tidb_parser::ast::Stmt;
+
+use tidb_parser::ast::{ExecuteStmt, Stmt};
+use tidb_sessionctx::variable::session::SessionVars;
+use tidb_types::field_name::NameSlice;
+
+use crate::core::common_plans::Execute;
+use crate::core::plan_cache::get_plan_from_plan_cache;
+use crate::core::plan_cache_utils::{InfoSchemaLookup, get_prepared_stmt};
+use crate::core::planbuilder::new_plan_builder;
 use tidb_sessionctx::variable::variable::get_sys_var;
 
 /// IsReadOnly check whether the ast.Node is a read only statement.
 ///
-/// The EXECUTE branch reads the prepared statement (D13.1) and the rest is `ast.IsReadOnly`
-/// of the parser (D02.2).
-// glue: stub of IsReadOnly, blocked-by:D02.2 (ast.IsReadOnly; EXECUTE: D13.1)
-pub fn is_read_only(node: &Stmt) -> Result<bool, Error> {
+/// The `EXECUTE` branch is ported; `ast.IsReadOnly` of the parser walks the whole statement
+/// (its `readOnlyChecker` looks for user variable assignments) and needs a visitor of the
+/// Rust AST, which the parser does not have (D02.2).
+// go: IsReadOnly L2 (ast.IsReadOnly is a boundary stub: blocked-by:D02.2)
+pub fn is_read_only(node: &Stmt, vars: &SessionVars) -> Result<bool, Error> {
+    if let Stmt::Execute(exec_stmt) = node {
+        let prepare_stmt = match get_prepared_stmt(exec_stmt, vars) {
+            Ok(p) => p,
+            Err(err) => {
+                log::warn!("GetPreparedStmt failed: {err}");
+                return Ok(false);
+            }
+        };
+        let prepare_stmt = prepare_stmt.lock();
+        return ast_is_read_only(&prepare_stmt.prepared_ast.stmt);
+    }
+    ast_is_read_only(node)
+}
+
+/// `ast.IsReadOnly` (see [`is_read_only`]).
+// glue: stub, blocked-by:D02.2 (the parser's ast.IsReadOnly: its readOnlyChecker needs a visitor of the Rust AST)
+fn ast_is_read_only(node: &Stmt) -> Result<bool, Error> {
     let _ = node;
     Err(blocked("D02.2", "IsReadOnly (ast.IsReadOnly)"))
 }
 
 /// Optimize does optimization and creates a Plan.
+///
+/// Go handles an `EXECUTE` first (before the hints): that branch is [`optimize_exec_stmt`].
 // glue: stub of Optimize, blocked-by:D13.3 (VS1-24: hint extraction comes first; then D13.2 bindings, D10.8 TryFastPlan, D13.1 plan cache)
 pub fn optimize_stmt(node: &Stmt) -> Result<(), Error> {
     let _ = node;
@@ -51,15 +81,39 @@ pub fn optimize_ast_node(
 
 /// OptimizeExecStmt to handle the "execute" statement
 ///
-/// Go builds the `Execute` plan of the `EXECUTE` node and calls `OptimizePreparedPlan`, which
-/// reaches `GetPlanFromPlanCache` (`core::plan_cache`, ported). The Rust AST has no
-/// `ExecuteStmt` (D02.2), so nothing can reach this yet.
-// glue: stub of OptimizeExecStmt, blocked-by:D02.2 (ast.ExecuteStmt is not in the Rust AST; the plan cache entry it reaches is core::plan_cache)
-pub fn optimize_exec_stmt() -> Result<(), Error> {
-    Err(blocked(
-        "D02.2",
-        "OptimizeExecStmt (the EXECUTE statement node)",
-    ))
+/// `buildLogicalPlan` (`PlanBuilder.Build`) returns no plan yet, so its `EXECUTE` arm
+/// (`buildExecute`) is called directly; `PlanID` / `PlanColumnID` / `MapScalarSubQ` /
+/// `RewritePhaseInfo`, which `buildLogicalPlan` resets first, are not in the session
+/// variables yet. `GetPlanFromPlanCache` is the plan cache's miss path (nothing is cached,
+/// the plan-cache exception A3); it ends in `OptimizeAstNode`, a boundary stub until
+/// `planner.Optimize` is ported. `exec.Stmt` (the prepared AST) stays in `exec.prep_stmt`.
+/// `domain_is` is the session's newest InfoSchema for the metadata lock of the cache's
+/// preprocessing (`domain.GetDomain(sctx).InfoSchema()`).
+// go: OptimizeExecStmt L2 (Build returns no plan yet: buildExecute is called directly)
+pub fn optimize_exec_stmt(
+    vars: &mut SessionVars,
+    exec_ast: &ExecuteStmt,
+    is: &dyn InfoSchemaLookup,
+    domain_is: Option<&dyn InfoSchemaLookup>,
+) -> Result<(Execute, NameSlice), Error> {
+    let mut builder = new_plan_builder(&[]);
+    builder.init(vars);
+
+    let mut exec = builder.build_execute(vars, exec_ast)?;
+    let prep_stmt = Arc::clone(&exec.prep_stmt);
+    let mut prep_stmt = prep_stmt.lock();
+    let (plan, names) = get_plan_from_plan_cache(
+        vars,
+        false,
+        is,
+        domain_is,
+        &mut prep_stmt,
+        &exec.params,
+        &mut optimize_ast_node,
+    )?;
+    exec.plan = Some(plan);
+    exec.output_names = names.clone();
+    Ok((exec, names))
 }
 
 /// `allowInReadOnlyMode`: Go returns true at once when no privilege manager is registered.

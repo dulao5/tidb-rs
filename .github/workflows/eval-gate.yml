@@ -26,6 +26,8 @@ on:
       - crates/types/src/vector*.rs
       - scripts/eval-gate.sh
       - scripts/eval_gate_summary.py
+      - scripts/tidb-reference.sh
+      - tidb-reference.lock
       - .github/workflows/eval-gate.yml
 
 env:
@@ -41,15 +43,21 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      # The Go tree is the pinned reference (tidb-reference.lock), fetched and verified by
+      # scripts/tidb-reference.sh (sha256 + commit), cached per lock.
+      - uses: actions/cache@v4
         with:
-          repository: pingcap/tidb
-          ref: v8.5.8
-          path: tidb
+          path: ~/.cache/tidb-rs
+          key: tidb-reference-${{ hashFiles('tidb-reference.lock') }}
+      - name: Reference tree (tidb-reference.lock)
+        id: ref
+        run: |
+          scripts/tidb-reference.sh >/dev/null
+          echo "dir=$(scripts/tidb-reference.sh --check)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v5
         with:
-          go-version-file: tidb/go.mod
-          cache-dependency-path: tidb/go.sum
+          go-version-file: ${{ steps.ref.outputs.dir }}/go.mod
+          cache-dependency-path: ${{ steps.ref.outputs.dir }}/go.sum
       # Same native build dependencies as ci.yml (the workspace's vendored TiKV crates).
       - name: Install system dependencies
         run: |
@@ -69,7 +77,7 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Gate
-        run: TIDB_SRC="$GITHUB_WORKSPACE/tidb" scripts/eval-gate.sh -n "${{ inputs.rounds || '5' }}" -o gate-amd64
+        run: TIDB_SRC="${{ steps.ref.outputs.dir }}" scripts/eval-gate.sh -n "${{ inputs.rounds || '5' }}" -o gate-amd64
       - name: Job summary
         if: always()
         run: cat gate-amd64/summary.md >> "$GITHUB_STEP_SUMMARY" || true

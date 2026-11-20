@@ -320,6 +320,9 @@ pub fn lower_statement(stmt: &ast::Stmt, sql: &str) -> Result<Lowered, SqlError>
             }
         },
         ast::Stmt::SetOpr(_) => return Err(unsupported("UNION/EXCEPT/INTERSECT")),
+        ast::Stmt::Execute(_) => {
+            return Err(unsupported("EXECUTE statements (read-only prototype)"));
+        }
         ast::Stmt::Unported(n) => {
             return Err(unsupported(format!(
                 "{} statements (read-only prototype)",

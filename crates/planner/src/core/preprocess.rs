@@ -54,7 +54,7 @@ use tidb_sessionctx::variable::varsutil::{OffInt, OnInt};
 use tidb_types::errors::{ErrMBiggerThanD, ErrTooBigPrecision, ErrTooBigScale};
 use tidb_types::fsp::MaxFsp;
 
-use super::plan_cache_utils::InfoSchemaLookup;
+use super::plan_cache_utils::{InfoSchemaLookup, get_prepared_stmt};
 use super::resolve::{ContextRef, NodeW, TableNameW, table_name_key};
 
 /// `parser.ErrSyntax` (`pkg/parser/yy_parser.go`: `terror.ClassParser.NewStd(mysql.ErrSyntax)`).
@@ -308,6 +308,7 @@ enum PNode<'n> {
     Cte(&'n CommonTableExpression),
     Subquery,
     Variable(&'n ast::VariableExpr),
+    Execute(&'n ast::ExecuteStmt),
     Other,
 }
 
@@ -333,6 +334,10 @@ impl Preprocessor<'_> {
                     self.preprocess_with.cte_stack.push(Arc::clone(with));
                 }
                 self.check_set_opr_select_list(node);
+            }
+            PNode::Execute(node) => {
+                self.stmt_tp = TYPE_EXECUTE;
+                self.resolve_execute_stmt(node);
             }
             PNode::Join(node) => self.check_non_uniq_table_alias(node),
             PNode::FuncCast(node) => self.check_func_cast_expr(node),
@@ -827,6 +832,25 @@ impl Preprocessor<'_> {
         Ok(())
     }
 
+    /// `staleReadProcessor.OnExecutePreparedStmt(prepared.SnapshotTSEvaluator)`: a prepared
+    /// statement with `AS OF` stops at PREPARE (`handleTableName`), so its evaluator is nil,
+    /// and a session the router sends to the new stack has no stale-read state: the
+    /// processor returns nil (see [`Self::update_state_from_stale_read_processor`]).
+    // go: preprocessor.resolveExecuteStmt L1
+    fn resolve_execute_stmt(&mut self, node: &ast::ExecuteStmt) {
+        let prepared = match get_prepared_stmt(node, self.vars) {
+            Ok(p) => p,
+            Err(err) => {
+                self.err = Some(err);
+                return;
+            }
+        };
+        let _ = prepared; // OnExecutePreparedStmt(prepared.SnapshotTSEvaluator) == nil
+        if let Err(err) = self.update_state_from_stale_read_processor() {
+            self.err = Some(err);
+        }
+    }
+
     // go: preprocessor.skipLockMDL L1
     fn skip_lock_mdl(&self) -> bool {
         // skip lock mdl for IMPORT INTO statement,
@@ -947,12 +971,6 @@ pub fn get_table_refs_alias(table_refs: &ResultSetNode) -> Option<&ast::CIStr> {
         _ => {}
     }
     None
-}
-
-/// `preprocessor.resolveExecuteStmt`: the prepared statement cache is D13.1 (VS1-15).
-// glue: stub of preprocessor.resolveExecuteStmt, blocked-by:D13.1 (VS1-15: PlanCacheStmt)
-pub fn resolve_execute_stmt() -> Result<(), Error> {
-    Err(blocked("D13.1", "EXECUTE (PlanCacheStmt)"))
 }
 
 /// `preprocessor.checkNotInRepair`: `domainutil.RepairInfo` (D06.5).
@@ -1208,6 +1226,7 @@ impl Walker<'_, '_> {
         match s {
             Stmt::Select(sel) => self.select(sel),
             Stmt::SetOpr(set_opr) => self.set_opr(set_opr),
+            Stmt::Execute(exec) => self.execute(exec),
             _ => {
                 if self.0.enter(PNode::Other) {
                     return self.0.leave(PNode::Other);
@@ -1215,6 +1234,20 @@ impl Walker<'_, '_> {
                 self.0.leave(PNode::Other)
             }
         }
+    }
+
+    /// `ExecuteStmt.Accept`: the `USING` variables.
+    // glue: AST walk (Go Accept)
+    fn execute(&mut self, n: &mut ast::ExecuteStmt) -> bool {
+        if self.0.enter(PNode::Execute(n)) {
+            return self.0.leave(PNode::Execute(n));
+        }
+        for val in &mut n.using_vars {
+            if !self.expr(val) {
+                return false;
+            }
+        }
+        self.0.leave(PNode::Execute(n))
     }
 
     /// `WithClause.Accept` (the clause itself is a plain node for the preprocessor).
