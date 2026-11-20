@@ -9,8 +9,8 @@
 # given one (e.g. a git checkout) must match the lock.
 #
 # Go side: the stock BenchmarkVectorizedBuiltin*Func of pkg/expression plus
-# crates/expression/benches/go/gate_vec_test.go (copied into $TIDB_SRC/pkg/expression; the
-# checkout is otherwise not modified). Rust side: crates/expression/benches/eval_gate.rs.
+# crates/expression/benches/go/gate_vec_test.go (added to $TIDB_SRC/pkg/expression with
+# `go test -overlay`; the tree is not modified). Rust side: crates/expression/benches/eval_gate.rs.
 # Raw outputs go to <outdir>/{go,rust}-<round>.txt, the table to <outdir>/summary.md
 # (scripts/eval_gate_summary.py). Close other heavy processes first.
 #
@@ -72,9 +72,11 @@ fi
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
-cp "$root/crates/expression/benches/go/gate_vec_test.go" "$TIDB_SRC/pkg/expression/zz_gate_vec_test.go"
-trap 'rm -f "$TIDB_SRC/pkg/expression/zz_gate_vec_test.go"' EXIT
-(cd "$TIDB_SRC" && go test -c -o "$out/expr.test" ./pkg/expression)
+# The gate's Go file joins pkg/expression through an overlay: the reference tree is read-only
+# and shared, nothing is written into it.
+printf '{"Replace":{"%s":"%s"}}\n' "$TIDB_SRC/pkg/expression/zz_gate_vec_test.go" \
+  "$root/crates/expression/benches/go/gate_vec_test.go" >"$out/overlay.json"
+(cd "$TIDB_SRC" && go test -c -overlay "$out/overlay.json" -o "$out/expr.test" ./pkg/expression)
 
 rust_bin=$(cd "$root" && cargo bench -p tidb-expression --bench eval_gate --no-run --message-format=json |
   python3 -c 'import json,sys

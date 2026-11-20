@@ -59,5 +59,11 @@ $line
 EOF
   echo "shared-target: wrote $config" >&2
 fi
+# Other cargo projects under the same parent build into this directory too.
+for other in "$parent"/*/Cargo.toml; do
+  d=$(dirname "$other")
+  [ -e "$d/.git" ] && [ "$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" = "$main/.git" ] && continue
+  [ -f "$other" ] && echo "shared-target: note $d is another cargo project under $parent; it also builds into $shared" >&2
+done
 [ -n "${CARGO_TARGET_DIR:-}" ] && echo "shared-target: note CARGO_TARGET_DIR=$CARGO_TARGET_DIR overrides it in this shell" >&2
 echo "effective target dir: $(effective)"
