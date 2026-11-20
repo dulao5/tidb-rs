@@ -87,7 +87,7 @@ VS1 的清单是按函数名挑的（plan §3.3，精度约 ±20%）。逐个确
 3. **`LogicalSelection.DeriveTopN`**：只在子节点是窗口算子时才有动作，窗口算子（D09.4）还不能出现在树中，这一分支不可达（L2）。
 4. **`Conds2TableDual` 的 schema**：Go 让 dual 和原来的子节点共享同一个 `*Schema`，Rust 复制一份。共享的 schema 在两者同时在树中时不会被写（M-FT 审计第 5 条）。
 
-**可能的上游问题**（记录，不提交）：`LogicalSelection.PredicatePushDown` 在条件没有全部推下去时直接返回 `p`，没有把子节点换成下推返回的 `child`（`retConditions, child = p.Children()[0].PredicatePushDown(...)`，之后只在条件全部推下时用 `child`）。目前所有算子的下推在这种情况下都返回自己，所以没有可见影响；如果以后某个子算子在保留条件的同时换了根，Selection 会继续指向旧的子节点。Rust 照搬。
+**Go 的潜在问题**（#275，标签 `upstream-pitfall`）：`LogicalSelection.PredicatePushDown` 在条件没有全部推下去时直接返回 `p`，没有把子节点换成下推返回的 `child`（`retConditions, child = p.Children()[0].PredicatePushDown(...)`，之后只在条件全部推下时用 `child`）。目前所有算子的下推在这种情况下都返回自己，所以没有可见影响；如果以后某个子算子在保留条件的同时换了根，Selection 会继续指向旧的子节点。Rust 照搬。
 
 ## 5. 验证
 
@@ -98,3 +98,32 @@ VS1 的清单是按函数名挑的（plan §3.3，精度约 ±20%）。逐个确
 
 - §2 中的边界桩随各自的块解除；其中 `BuildKeyInfo` 的两个桩在 key-info 规则（VS1-24）移植 `rule/util/build_key_info_misc.go` 时一起解除。
 - 聚合和其他算子上的同名规则方法（join、window、CTE、union 等）不在 VS1。
+
+## 本文所用 ID
+
+- VS1-21：SELECT 语句的逻辑计划构建（`buildSelect` 等）
+- VS1-23：本任务，逻辑算子公共部分与基础逻辑规则
+- VS1-24：优化器驱动与后优化（`DoOptimize`、`postOptimize`）、key-info 规则
+- VS1-29：pseudo 基数估算与统计结构读取
+- VS1-37：新栈的集成与默认值评审
+- D08.9：控制流、信息、杂项函数（含 IN）
+- D08.11：聚合函数描述
+- D09.3：join 构建与逻辑 join 算子
+- D09.4：聚合、窗口的构建与逻辑算子
+- D09.7：列裁剪与投影消除
+- D09.8：谓词下推、谓词简化、约束
+- D09.11：TopN / Limit 下推与推导
+- D09.13：优化器驱动、规则框架、其他规则、函数依赖
+- D09.14：逻辑算子公共部分与其余逻辑算子
+- D10.1：物理算子定义与 task
+- D10.2：`FindBestTask` 与访问路径
+- D10.6：基数估算
+- D10.9：后处理（EXPLAIN 输出、plan 编码等）
+- D10.10：物理属性与优化器工具（`planner/util`）
+- D14.2：慢日志、语句摘要、plan 编码表
+- N1：计划表示的设计（arena 与 `PlanId`，§4 是摘出分派）
+- M-FT：`FieldType` 共享与原地修改的映射规则
+- M-INT：Go 定宽整数的映射规则
+- L1 / L2：来源标注的等级（L1 逐行对应；L2 有理由的改写）
+- 例外 B / B3：不移植的函数类别（cascades 专用接口；只有旧 cascades 优化器调用）
+- PoC：原型实现（新栈路由回退的目标）
