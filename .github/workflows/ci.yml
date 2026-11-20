@@ -180,3 +180,37 @@ jobs:
       # The cardinality vectors (VS1-29) differ by target (M-FMA in the estimation formulas).
       - name: test (statistics, planner)
         run: cargo test --locked -p tidb-statistics -p tidb-planner
+
+  # One translation per Go symbol (#264): no Go function, std/module function or Go type gets
+  # a second Rust translation (scripts/check_one_translation.py; known duplicates are listed
+  # in scripts/one_translation_allow.tsv, which may only shrink). On a pull request, also a
+  # report (not blocking) of the Go files the changed Rust files port, whether the PR body
+  # cites them, and the blocked-by stubs the diff adds vs the tracker's data/stubs.tsv.
+  one-translation:
+    name: one translation per Go symbol
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: check (and its tests)
+        run: |
+          python3 scripts/test_check_one_translation.py
+          python3 scripts/check_one_translation.py
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          repository: dulao5/tidb-rs-tracker
+          path: tracker
+          sparse-checkout: data
+      - name: PR report (Go files cited, stubs registered; not blocking)
+        if: github.event_name == 'pull_request'
+        run: |
+          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/pr-body.md"
+          {
+            echo '### One translation: PR report'
+            echo '```'
+            python3 scripts/check_one_translation.py --changed HEAD^1 \
+              --pr-body "$RUNNER_TEMP/pr-body.md" --stubs tracker/data/stubs.tsv
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
