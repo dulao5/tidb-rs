@@ -67,7 +67,7 @@ Output: a table of match / mismatch / unsupported / both_error per template and 
 `<out-dir>/mismatches.jsonl` (query, params, both results with metadata and up to
 `--report-rows` rows, and the diff) plus `<out-dir>/unsupported.jsonl`. `-v` prints mismatches
 as they happen. Exit status: 0 = no mismatch, 1 = mismatches, 2 = setup error (e.g. cannot
-connect).
+connect), 3 = the coverage census or its negative control failed (see below).
 
 Common options (before or after the workload): `-a/-b host:port`, `-u/-p`, `-D db`,
 `--tls prefer|on|off` (self-signed certificates accepted), `--seed N`, `--protocol both|text|ps`,
@@ -201,6 +201,20 @@ Output in `--out-dir`:
 
 The tidb-rs-tracker imports the directory (`scripts/tracker.py import-integration`) and
 publishes per-file counts, reasons and every mismatch (R1).
+
+## Coverage census and negative control
+
+Every run also writes a coverage census (`docs/testing/coverage-census.md`, #260): each statement
+it was given is `new_stack`, `fallback` (prototype, or 1235 in strict mode, with the router's
+reason / `blocked-by` block), `error` (sent to B, no route attributable) or `skipped` (never sent
+to B). The route comes from tidb-rs's route trace: start tidb-rs with `--route-trace` and pass
+its status address as `--b-status host:port` (without it every statement B ran is `error`).
+`--census-layer` names the layer (`integrationtest`, `workload`, `workload-strict`, `tpch`;
+default by subcommand); unknown names are refused. A negative control (`SELECT 'negative
+control'`, B's answer falsified) runs last and must be judged a mismatch. Output:
+`census.tsv`, `census-summary.tsv`, `census-reasons.tsv`. If the four paths do not add up to the
+statements given (INCOMPLETE CENSUS) or the negative control passed / did not run, `ab` exits 3.
+Only `new_stack` statements the comparator judged equal count as new-stack coverage.
 
 ## Scripts
 

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 use serde_json::json;
 
+use crate::census::{self, Census, CensusPath, Control, Record, RouteProbe};
 use crate::compare::{
     ER_NOT_SUPPORTED_YET, Observed, StmtClass, Verdict, b_not_implemented, classify, compare,
     compare_status_only, needs_warnings, strip_limit,
@@ -385,6 +386,9 @@ struct Runner<'a> {
     /// A session for creating/dropping the per-file databases.
     admin: Side,
     totals: FileCounts,
+    /// B's route trace and the census records so far.
+    probe: &'a RouteProbe,
+    census: Vec<Record>,
 }
 
 /// One statement's record.
@@ -401,10 +405,29 @@ struct Rec<'a> {
     /// A results.jsonl record for a statement that is not a compared read: its verdict there
     /// and extra fields (a session statement B rejected, a read skipped as "session diverged").
     result: Option<(&'static str, &'a serde_json::Value)>,
+    /// Census path and reason when B ran it (`None`: skipped).
+    census: Option<(CensusPath, String)>,
 }
 
 impl Runner<'_> {
     fn write_stmt(&mut self, r: &Rec<'_>, counts: &mut FileCounts) {
+        let (path, reason) = r.census.clone().unwrap_or_else(|| {
+            let why = match r.verdict {
+                StmtOutcome::Write => "write or not compared (A only)".to_string(),
+                StmtOutcome::AError => "A failed unexpectedly (not run on B)".to_string(),
+                _ if r.kind.is_empty() => format!("{} (not run on B)", r.verdict.name()),
+                _ => r.kind.clone(),
+            };
+            (CensusPath::Skipped, why)
+        });
+        self.census.push(Record {
+            unit: r.file.to_string(),
+            line: r.line,
+            protocol: "text",
+            path,
+            reason,
+            verdict: r.verdict.name().to_string(),
+        });
         counts.statements += 1;
         *counts.by.entry(r.verdict.name()).or_default() += 1;
         let _ = writeln!(
@@ -462,6 +485,26 @@ impl Runner<'_> {
                 truncate(&r.detail, 500)
             );
         }
+    }
+
+    /// A statement that did not run at all (the rest of an aborted file).
+    fn skip_stmt(
+        &mut self,
+        test: &str,
+        line: usize,
+        sql: &str,
+        why: &str,
+        counts: &mut FileCounts,
+    ) {
+        let rec = Owned {
+            class: "skipped",
+            verdict: StmtOutcome::Skipped,
+            kind: why.to_string(),
+            detail: String::new(),
+            result: None,
+            census: None,
+        };
+        self.write_stmt(&rec.as_rec(test, line, "-", sql, 0), counts);
     }
 
     async fn new_conn(&self, user: &str, password: &str, db: Option<&str>) -> Result<Conn, String> {
@@ -525,8 +568,16 @@ impl Runner<'_> {
         let mut cur = "default".to_string();
         let mut pending = Pending::default();
         let mut result_log = true;
+        // Set when the rest of the file cannot run: its statements are recorded as skipped.
+        let mut aborted: Option<String> = None;
 
         for item in items {
+            if let Some(why) = &aborted {
+                if let Item::Query { line, sql } = &item {
+                    self.skip_stmt(test, *line, sql, why, &mut counts);
+                }
+                continue;
+            }
             match item {
                 Item::Directive { line, cmd, arg } => match cmd.as_str() {
                     "error" => pending.error = Some(arg),
@@ -564,7 +615,8 @@ impl Runner<'_> {
                             eprintln!(
                                 "{test}:{line}: connect {name} failed on A: {e}; rest of file skipped"
                             );
-                            break;
+                            aborted =
+                                Some(format!("rest of file skipped: connect failed on A: {e}"));
                         }
                     }
                 }
@@ -573,7 +625,7 @@ impl Runner<'_> {
                         cur = name;
                     } else {
                         eprintln!("{test}:{line}: unknown connection {name}; rest of file skipped");
-                        break;
+                        aborted = Some(format!("rest of file skipped: unknown connection {name}"));
                     }
                 }
                 Item::Disconnect { name, .. } => {
@@ -590,7 +642,10 @@ impl Runner<'_> {
                     let p = std::mem::take(&mut pending);
                     let Some(conn) = conns.get_mut(&cur) else {
                         eprintln!("{test}:{line}: no current connection; rest of file skipped");
-                        break;
+                        let why = "rest of file skipped: no current connection".to_string();
+                        self.skip_stmt(test, line, &sql, &why, &mut counts);
+                        aborted = Some(why);
+                        continue;
                     };
                     let t0 = Instant::now();
                     let rec = self
@@ -636,6 +691,7 @@ impl Runner<'_> {
             kind: String::new(),
             detail: String::new(),
             result: None,
+            census: None,
         };
         if matches!(class, Class::Read(_)) {
             counts.reads += 1;
@@ -693,7 +749,9 @@ impl Runner<'_> {
                 if conn.b_login.is_some() {
                     return out;
                 }
+                let mark = self.probe.mark(&conn.b).await;
                 let ob = conn.b.query(sql).await;
+                out.census = Some(self.probe.route(&conn.b, mark).await.path(&ob));
                 let b_failed = matches!(ob, Outcome::Error { .. } | Outcome::Client(_));
                 track_divergence(&mut conn.diverged, line, sql, b_failed);
                 if b_failed {
@@ -768,7 +826,9 @@ impl Runner<'_> {
                     return out;
                 }
                 let mut oa = oa;
+                let mark = self.probe.mark(&conn.b).await;
                 let mut ob = conn.b.query(sql).await;
+                let mut route = self.probe.route(&conn.b, mark).await;
                 // A read right after DDL: B's schema sync should already have the new schema
                 // (the DDL owner waits for it). Retry once to detect lag.
                 if !a_failed
@@ -776,7 +836,9 @@ impl Runner<'_> {
                     && !names_system_object(&ob)
                 {
                     tokio::time::sleep(Duration::from_millis(1500)).await;
+                    let mark = self.probe.mark(&conn.b).await;
                     let again = conn.b.query(sql).await;
+                    route = self.probe.route(&conn.b, mark).await;
                     if error_code(&again) != error_code(&ob) {
                         counts.retried += 1;
                         eprintln!(
@@ -788,6 +850,7 @@ impl Runner<'_> {
                     }
                     ob = again;
                 }
+                out.census = Some(route.path(&ob));
                 // Warnings right after the statement, on both sides (spec §4).
                 let (wa, wb) = if needs_warnings(&oa, &ob) && result_log {
                     (conn.a.warnings().await, conn.b.warnings().await)
@@ -870,6 +933,8 @@ struct Owned {
     detail: String,
     /// See `Rec::result`.
     result: Option<(&'static str, serde_json::Value)>,
+    /// See `Rec::census`.
+    census: Option<(CensusPath, String)>,
 }
 
 impl Owned {
@@ -892,14 +957,34 @@ impl Owned {
             sql,
             ms,
             result: self.result.as_ref().map(|(v, x)| (*v, x)),
+            census: self.census.clone(),
         }
     }
 }
 
 const FILE_COLUMNS: &str = "file\tstatements\treads\tmatch\tmismatch\tunsupported\tb_error\ta_error\tskipped\twrite\tb_set_rejected\tretried\tseconds";
 
-/// Runs the selected test files; returns whether there were no mismatches.
-pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
+/// The statements (line, text) of a test file, as the runner sees them.
+fn file_queries(dir: &Path, test: &str) -> Result<Vec<(usize, String)>, String> {
+    let path = dir.join(format!("{test}.test"));
+    let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(mysqltest::parse(&src)
+        .into_iter()
+        .filter_map(|i| match i {
+            Item::Query { line, sql } => Some((line, sql)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Runs the selected test files; returns whether there were no mismatches. Every statement
+/// gets a census record in `census`, whose expected total is counted from the files first.
+pub async fn run(
+    ep: &Endpoints,
+    opts: &Options,
+    probe: &RouteProbe,
+    census: &mut Census,
+) -> Result<bool, String> {
     let mut tests = list_tests(&opts.dir)?;
     if !opts.only.is_empty() {
         tests.retain(|t| {
@@ -947,12 +1032,18 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
         .map_err(|e| format!("cannot connect to B: {e}"))?;
     b_probe.disconnect().await;
 
+    census.expected = 0;
+    for t in &tests {
+        census.expected += file_queries(&opts.dir, t)?.len() as u64;
+    }
     let mut r = Runner {
         ep,
         opts,
         w,
         admin,
         totals: FileCounts::default(),
+        probe,
+        census: Vec::new(),
     };
     let started = Instant::now();
     let n = tests.len();
@@ -962,7 +1053,12 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("{t}: {e}");
-                FileCounts::default()
+                // Its statements stay in the census, as skipped.
+                let mut c = FileCounts::default();
+                for (line, sql) in file_queries(&opts.dir, t)? {
+                    r.skip_stmt(t, line, &sql, &format!("file not run: {e}"), &mut c);
+                }
+                c
             }
         };
         let secs = t0.elapsed().as_secs_f64();
@@ -1018,6 +1114,28 @@ pub async fn run(ep: &Endpoints, opts: &Options) -> Result<bool, String> {
         for (k, v) in c.by {
             *r.totals.by.entry(k).or_default() += v;
         }
+    }
+    census.records.append(&mut r.census);
+    // The negative control: B's answer falsified, judged like any read.
+    if !census.fault("skip-negative-control") {
+        let mut b = Side::new("B", &ep.b, &ep.user, &ep.password, None, ep.tls, ep.timeout)?;
+        let oa = r.admin.query(census::CONTROL_SQL).await;
+        let mut ob = b.query(census::CONTROL_SQL).await;
+        b.disconnect().await;
+        census::tamper(&mut ob, census.fault("untampered-negative-control"));
+        let cols = match &oa {
+            Outcome::Rows { columns, .. } => columns.clone(),
+            _ => Vec::new(),
+        };
+        let class = classify(census::CONTROL_SQL, &cols, false);
+        let (v, _, _) = judge(
+            &class,
+            Observed::new(&oa, None),
+            Observed::new(&ob, None),
+            None,
+            false,
+        );
+        census.control = Control::Judged(v.name().to_string());
     }
     r.admin.disconnect().await;
     let t = &r.totals;
