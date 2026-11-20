@@ -19,11 +19,14 @@
 
 解开的树里有一个 `.tidb-reference-stamp`，记录它来自哪个 lock；lock 改了，旧树就是"过期"，`--check` 报错，不带参数运行会重新解开。
 
+解开的树是**只读的**（`chmod -R a-w`），任何人都不能往这棵共享的树里写文件。`--check` 发现可写的文件就报错（树可能被改过），不带参数运行会把它恢复成只读。需要给某个 Go 包加文件的工具，用 `go test -overlay` 叠加进去，不写进树里：`eval-gate.sh` 就是这样加入 `gate_vec_test.go` 的。
+
 在 shell 里取路径：`go_tree=$(scripts/tidb-reference.sh)`，然后读 `$go_tree/pkg/...`。
 
 已经改用它的地方：
 
 - `scripts/eval-gate.sh`、`scripts/integrationtest.sh`：`TIDB_SRC` 不给时用参照树；给了就先用 `--check` 核对，不符直接退出。
+  - integrationtest 的测试文件原来取自本机停在 master 的克隆，从 #269 起取自 v8.5.8。所以那以后的运行中，文件数、语句总数和各类计数会跳一下。这是分母变了，不是退化，也不是进步。tracker 的报表在每次运行的说明里写明测试文件来自哪个版本。
 - CI `ci.yml` 的 `reference tree lock` 任务：按 lock 的哈希缓存源码包，缓存为空时下载一次（脚本校验 sha256 和 commit），然后运行 `--check`，并核对 lock 与宪章第一条写的 tag、commit 一致。
 - CI `eval-gate.yml`：Go 一侧的源码从参照树来，不再单独 checkout。
 - tracker 的 govec 通过 Go 模块代理引用 TiDB（`govec/go.mod` 中的伪版本 `...-8b857efa2036`），tracker CI 核对这个伪版本与本 lock 的 commit 一致。
@@ -45,7 +48,9 @@ target-dir = "<主 checkout>/target"
 
 注意：
 
-- 多个 worktree 同时构建时，cargo 在目录锁上排队（"Blocking waiting for file lock"），这是预期的。
+- 多个 worktree 同时构建时，cargo 在目录锁上排队（"Blocking waiting for file lock"），这是预期的。并行的 agent 也在同一把锁上排队。
+- 这个父目录下的**其他 cargo 项目**（如放在同一层的 client-rust fork）也会构建到 `tidb-rs/target` 里。脚本发现这种项目时会提示。不想共享的项目，在它自己的 `.cargo/config.toml` 里设 `target-dir`，或者设 `CARGO_TARGET_DIR`。
+- 在任何一个 worktree 里运行 `cargo clean`，都会清掉所有 worktree 的产物。只想清某个包时，用 `cargo clean -p <包>`。
 - 各 worktree 的路径不同，工作区内的 crate（包括 `third_party/` 下的路径依赖）在每个 worktree 第一次构建时仍会重编，crates.io 的依赖只编一次。
 
 ### 增量重建基线（2026-11-21，Apple M4 Pro 12 核，dev profile，`cargo build --locked -p poc-server`）

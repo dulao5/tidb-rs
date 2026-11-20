@@ -13,7 +13,9 @@
 #
 # A fetched tree is the source archive of the tag, verified by sha256 and by the commit id in the
 # archive header, and carries a stamp (.tidb-reference-stamp) of the pin it was built from; a
-# changed pin makes it stale.
+# changed pin makes it stale. The fetched tree is read-only (chmod a-w); --check fails on a
+# writable file, the ensure mode makes it read-only again. Tools that need extra Go files in a
+# package use `go build/test -overlay` (scripts/eval-gate.sh), not files written into the tree.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -55,6 +57,12 @@ $dirty"
 fi
 
 if [ -f "$stamp_file" ] && [ "$(cat "$stamp_file")" = "$want" ]; then
+  # The fetched tree is read-only, so nothing (a test file of eval-gate, an agent's edit) can
+  # be added to the tree every porting agent reads.
+  if [ -n "$(find "$dest" -perm -u+w -print -quit)" ]; then
+    [ "$check" = 1 ] && fail "$dest has writable files (may have been modified); run scripts/tidb-reference.sh"
+    chmod -R a-w "$dest"
+  fi
   echo "$dest"
   exit 0
 fi
@@ -98,6 +106,10 @@ if [ ! -f "$work/go.mod" ] || [ ! -d "$work/pkg/expression" ]; then
   fail "unexpected archive layout in $tarball"
 fi
 echo "$want" >"$work/.tidb-reference-stamp"
-rm -rf "$dest"
+chmod -R a-w "$work"
+if [ -e "$dest" ]; then
+  chmod -R u+w "$dest"
+  rm -rf "$dest"
+fi
 mv "$work" "$dest"
 echo "$dest"
