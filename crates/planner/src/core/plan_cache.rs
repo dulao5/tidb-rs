@@ -45,10 +45,10 @@ pub type OptimizeAstNodeFn<'f> = &'f mut dyn FnMut(
 ///
 /// `params` are the values of Go's `[]expression.Expression`: the binary protocol's arguments
 /// are constants, whose `Eval` is the value. `EXECUTE ... USING @var` (text protocol, a
-/// `GetVar` function, and its `isGetVarBinaryLiteral`) is not in the Rust AST. The markers are
+/// `GetVar` function, and its `isGetVarBinaryLiteral`) needs the expression rewriter (D09.2). The markers are
 /// not written (plan_cache_utils module doc), and the debug trace of the parameters is not
 /// ported (optimizer debug trace, D09.13).
-// go: SetParameterValuesIntoSCtx L2 (constants only: EXECUTE ... USING is not in the Rust AST)
+// go: SetParameterValuesIntoSCtx L2 (constants only: EXECUTE ... USING needs the expression rewriter)
 pub fn set_parameter_values_into_sctx(vars: &mut SessionVars, is_non_prep: bool, params: &[Datum]) {
     vars.state.plan_cache_params.reset();
     for usage_param in params {

@@ -25,10 +25,12 @@ use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
-use tidb_base::dbterror::plannererrors::{ErrPrepareDDL, ErrPsManyParam, ErrUnsupportedPs};
+use tidb_base::dbterror::plannererrors::{
+    ErrPrepareDDL, ErrPsManyParam, ErrStmtNotFound, ErrUnsupportedPs,
+};
 use tidb_infoschema::InfoSchemaV2;
 use tidb_model::TableInfo;
-use tidb_parser::ast::Stmt;
+use tidb_parser::ast::{ExecuteStmt, Stmt};
 use tidb_parser::model::CIStr;
 use tidb_sessionctx::variable::session::SessionVars;
 
@@ -570,14 +572,34 @@ pub fn collect_plan_cache_stmt_info(stmt: &mut PlanCacheStmt) {
     plan_cache_stmt_process(stmt);
 }
 
-/// `GetPreparedStmt(execStmt, vars)`: the statement of an `EXECUTE` node, which the Rust AST
-/// does not have (the binary protocol's EXECUTE looks the statement up by id in the session).
-// glue: stub of GetPreparedStmt, blocked-by:D02.2 (ast.ExecuteStmt is not in the Rust AST)
-pub fn get_prepared_stmt() -> Result<PlanCacheStmtRef, Error> {
-    Err(blocked(
-        "D02.2",
-        "GetPreparedStmt (the EXECUTE statement node)",
-    ))
+/// GetPreparedStmt extract the prepared statement from the execute statement.
+///
+/// Go caches the statement found by name in the node (`stmt.PrepStmt = prepStmt`); the
+/// statement node is shared here (`Arc<Stmt>`, read-only), so a later call looks the name up
+/// again and finds the same statement (nothing can deallocate it inside one statement). Go's
+/// type assertion panics on a value that is not a `PlanCacheStmt`; that is an error here.
+// go: GetPreparedStmt L2 (the statement found by name is not written back into the shared node)
+pub fn get_prepared_stmt(
+    stmt: &ExecuteStmt,
+    vars: &SessionVars,
+) -> Result<PlanCacheStmtRef, Error> {
+    if let Some(prep_stmt) = &stmt.prep_stmt {
+        return as_plan_cache_stmt(Arc::clone(prep_stmt));
+    }
+    if !stmt.name.is_empty() {
+        let prep_stmt = vars.get_prepared_stmt_by_name(&stmt.name)?;
+        // stmt.PrepStmt = prepStmt: see the doc comment.
+        return as_plan_cache_stmt(prep_stmt);
+    }
+    Err(ErrStmtNotFound.clone())
+}
+
+/// `prepStmt.(*PlanCacheStmt)`: the session keeps its statements as `Any`.
+// glue: Go type assertion (an error instead of a panic, see get_prepared_stmt)
+fn as_plan_cache_stmt(prep_stmt: Arc<dyn Any + Send + Sync>) -> Result<PlanCacheStmtRef, Error> {
+    prep_stmt
+        .downcast::<parking_lot::Mutex<PlanCacheStmt>>()
+        .map_err(|_| tidb_base::errors::new("invalid PlanCacheStmt type".to_owned()))
 }
 
 /// `parseParamTypes`: the parameter types of the plan cache key.

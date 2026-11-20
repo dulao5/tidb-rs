@@ -746,6 +746,8 @@ pub enum Stmt {
     Use(Box<UseStmt>),
     Set(Box<SetStmt>),
     Show(Box<ShowStmt>),
+    /// `ExecuteStmt` (EXECUTE of a prepared statement).
+    Execute(Box<ExecuteStmt>),
     Unported(Box<Node>),
 }
 
@@ -784,6 +786,42 @@ pub struct CommitStmt {
 pub struct RollbackStmt {
     pub completion_type: CompletionType,
     pub savepoint_name: String,
+}
+
+/// `ast.ExecuteStmt`: a statement to execute a prepared statement (`EXECUTE name [USING
+/// @var, ...]`), or the binary protocol's COM_STMT_EXECUTE (`session.ExecutePreparedStmt`
+/// builds one with no name, the statement and its arguments).
+///
+/// Go's `BinaryArgs` and `PrepStmt` are `interface{}`: the parser does not know the types
+/// that fill them (the planner's `PlanCacheStmt`, the session's argument values), so they are
+/// `Any` here too, shared (`Arc`) because the prepared statement is shared with the session's
+/// statement map.
+#[derive(Default)]
+pub struct ExecuteStmt {
+    pub name: String,
+    pub using_vars: Vec<Expr>,
+    pub binary_args: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// the corresponding prepared statement
+    pub prep_stmt: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    pub prep_stmt_id: u32,
+    pub idx_in_multi: isize,
+    /// FromGeneralStmt indicates whether this execute-stmt is converted from a general query.
+    /// e.g. select * from t where a>2 --> execute 'select * from t where a>?' using 2
+    pub from_general_stmt: bool,
+}
+
+impl std::fmt::Debug for ExecuteStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecuteStmt")
+            .field("name", &self.name)
+            .field("using_vars", &self.using_vars)
+            .field("binary_args", &self.binary_args.is_some())
+            .field("prep_stmt", &self.prep_stmt.is_some())
+            .field("prep_stmt_id", &self.prep_stmt_id)
+            .field("idx_in_multi", &self.idx_in_multi)
+            .field("from_general_stmt", &self.from_general_stmt)
+            .finish()
+    }
 }
 
 /// `ast.UseStmt`.
