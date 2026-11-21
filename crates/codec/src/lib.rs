@@ -13,7 +13,7 @@ pub mod bytes;
 pub mod codec;
 pub mod decimal;
 pub mod float;
-pub mod gobinary;
+pub use tidb_base::gostd::binary as gobinary;
 pub mod number;
 
 pub use bytes::*;

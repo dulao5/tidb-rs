@@ -1,18 +1,8 @@
 //! go-file: pkg/types/compare.go
 
-use std::cmp::Ordering;
-
 use crate::collate;
 
-/// `cmp.Compare` for integers.
-// go-std: cmp.Compare L1
-fn cmp_compare<T: Ord>(x: T, y: T) -> isize {
-    match x.cmp(&y) {
-        Ordering::Less => -1,
-        Ordering::Equal => 0,
-        Ordering::Greater => 1,
-    }
-}
+use tidb_base::gostd::cmp::compare as cmp_compare;
 
 /// VecCompareUU returns []int64 comparing the []uint64 x to []uint64 y
 // go: VecCompareUU L1

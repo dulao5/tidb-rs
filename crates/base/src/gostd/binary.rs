@@ -1,5 +1,7 @@
-//! The `encoding/binary` varint functions the codec package calls (Go standard library,
-//! go1.25.12, `src/encoding/binary/varint.go`).
+//! go-file: $GOROOT/src/encoding/binary/varint.go
+//!
+//! The `encoding/binary` varint functions (Go standard library, go1.25.12), used by
+//! `util/codec` (re-exported as `tidb_codec::gobinary`) and the binary JSON of `types`.
 
 // Constants keep their Go names (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]

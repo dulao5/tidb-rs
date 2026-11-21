@@ -2327,23 +2327,11 @@ fn ss_tidb_ddl_reorg_priority(_s: &mut SessionVars, _val: &str) -> Result<(), Er
 // ---------------------------------------------------------------- hand-ported SetSession hooks
 
 /// `strconv.ParseUint(s, 10, 64)` with Go's `*strconv.NumError` text.
-// go-std: strconv.ParseUint L2 (base 10, bitSize 64 only)
+// glue: tidb_base::gostd::strconv::parse_uint_go(s, 10, 64) with the error as an Error
 pub(crate) fn go_parse_uint(s: &str) -> Result<u64, Error> {
-    let fail = |reason: &str| {
-        let quoted = tidb_base::gofmt::sprintf(
-            "%q",
-            &[tidb_base::gofmt::Arg::go_string(s.as_bytes().to_vec())],
-        );
-        let mut m = b"strconv.ParseUint: parsing ".to_vec();
-        m.extend_from_slice(&quoted);
-        m.extend_from_slice(b": ");
-        m.extend_from_slice(reason.as_bytes());
-        tidb_base::errors::new(m)
-    };
-    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(fail("invalid syntax"));
-    }
-    s.parse::<u64>().map_err(|_| fail("value out of range"))
+    let (n, err) = tidb_base::gostd::strconv::parse_uint_go(s.as_bytes(), 10, 64);
+    err.map(|()| n)
+        .map_err(|e| tidb_base::errors::new(e.error()))
 }
 
 // go-part: defaultSysVars (sysvar.go:L413 tidb_read_consistency SetSession closure) L1

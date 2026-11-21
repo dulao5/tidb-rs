@@ -13,8 +13,6 @@
 
 mod eisel_lemire;
 
-use std::fmt;
-
 use tidb_base::gostd::json;
 
 /// `utf8.DecodeRune`: the rune at the start of `s` and its width. An empty or invalid
@@ -86,57 +84,15 @@ pub(crate) fn trim_space(s: &[u8]) -> &[u8] {
     &s[start..stop]
 }
 
-/// `strconv.ErrSyntax` / `strconv.ErrRange`: the `Err` field of a `*strconv.NumError`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NumErrKind {
-    /// `strconv.ErrSyntax`: "invalid syntax".
-    Syntax,
-    /// `strconv.ErrRange`: "value out of range".
-    Range,
-}
-
-/// `*strconv.NumError` as `ParseFloat` returns it. Callers test `err` the way Go tests
-/// `err.(*strconv.NumError).Err == strconv.ErrRange` (or `errors.Is`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NumError {
-    /// The failing function (`"ParseFloat"`).
-    pub func: &'static str,
-    /// The input.
-    pub num: String,
-    /// Why it failed.
-    pub err: NumErrKind,
-}
-
-impl fmt::Display for NumError {
-    // go-std: strconv.NumError.Error L2 (strconv.Quote simplified: ASCII escapes only)
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let why = match self.err {
-            NumErrKind::Syntax => "invalid syntax",
-            NumErrKind::Range => "value out of range",
-        };
-        write!(f, "strconv.{}: parsing \"", self.func)?;
-        for c in self.num.chars() {
-            match c {
-                '"' => f.write_str("\\\"")?,
-                '\\' => f.write_str("\\\\")?,
-                '\n' => f.write_str("\\n")?,
-                '\t' => f.write_str("\\t")?,
-                '\r' => f.write_str("\\r")?,
-                c if (c as u32) < 0x20 || c as u32 == 0x7f => write!(f, "\\x{:02x}", c as u32)?,
-                c => write!(f, "{c}")?,
-            }
-        }
-        write!(f, "\": {why}")
-    }
-}
-
-impl std::error::Error for NumError {}
+/// `*strconv.NumError` (as `ParseFloat` returns it) and its `Err` kinds: tidb-base's port.
+/// Callers test `err` the way Go tests `err.(*strconv.NumError).Err == strconv.ErrRange`.
+pub use tidb_base::gostd::strconv::{NumErrKind, NumError};
 
 // go-std: strconv.syntaxError L2 (also strconv.rangeError: one constructor, the kind is an argument)
 fn num_error(s: &[u8], err: NumErrKind) -> NumError {
     NumError {
         func: "ParseFloat",
-        num: String::from_utf8_lossy(s).into_owned(),
+        num: s.to_vec(),
         err,
     }
 }
@@ -520,57 +476,7 @@ fn read_float(s: &[u8]) -> ReadFloat {
     r
 }
 
-// go-std: strconv.underscoreOK L1
-fn underscore_ok(s: &[u8]) -> bool {
-    // saw tracks the last character (class) we saw:
-    // ^ for beginning of number,
-    // 0 for a digit or base prefix,
-    // _ for an underscore,
-    // ! for none of the above.
-    let mut saw = b'^';
-    let mut i = 0;
-    let mut s = s;
-
-    // Optional sign.
-    if !s.is_empty() && (s[0] == b'-' || s[0] == b'+') {
-        s = &s[1..];
-    }
-
-    // Optional base prefix.
-    let mut hex = false;
-    if s.len() >= 2 && s[0] == b'0' && matches!(s[1].to_ascii_lowercase(), b'b' | b'o' | b'x') {
-        i = 2;
-        saw = b'0'; // base prefix counts as a digit for "underscore as digit separator"
-        hex = s[1].eq_ignore_ascii_case(&b'x');
-    }
-
-    // Number proper.
-    while i < s.len() {
-        // Digits are always okay.
-        if s[i].is_ascii_digit() || hex && (b'a'..=b'f').contains(&s[i].to_ascii_lowercase()) {
-            saw = b'0';
-            i += 1;
-            continue;
-        }
-        // Underscore must follow digit.
-        if s[i] == b'_' {
-            if saw != b'0' {
-                return false;
-            }
-            saw = b'_';
-            i += 1;
-            continue;
-        }
-        // Underscore must also be followed by digit.
-        if saw == b'_' {
-            return false;
-        }
-        // Saw non-digit, non-underscore.
-        saw = b'!';
-        i += 1;
-    }
-    saw != b'_'
-}
+use tidb_base::gostd::strconv::underscore_ok;
 
 // go-std: strconv.atofHex L1 (float64info only)
 fn atof_hex(
@@ -834,19 +740,14 @@ pub struct IntNumError {
 impl IntNumError {
     /// The error Go returns for it (`errors.Trace(err)` of the `*strconv.NumError`): Go's
     /// message `strconv.<Func>: parsing <strconv.Quote(num)>: <why>`.
-    // go-std: strconv.NumError.Error L1
+    // glue: NumError.Error of tidb-base on the same fields
     pub fn into_base(self) -> tidb_base::Error {
-        let why = match self.err {
-            NumErrKind::Syntax => "invalid syntax",
-            NumErrKind::Range => "value out of range",
+        let e = NumError {
+            func: self.func,
+            num: self.bytes,
+            err: self.err,
         };
-        let quoted =
-            tidb_base::gofmt::sprintf("%q", &[tidb_base::gofmt::Arg::go_string(self.bytes)]);
-        let mut msg = format!("strconv.{}: parsing ", self.func).into_bytes();
-        msg.extend_from_slice(&quoted);
-        msg.extend_from_slice(b": ");
-        msg.extend_from_slice(why.as_bytes());
-        tidb_base::Error::plain(msg)
+        tidb_base::Error::plain(e.error())
     }
 }
 
@@ -861,39 +762,20 @@ fn int_error(func: &'static str, s: &[u8], err: NumErrKind) -> IntNumError {
 
 /// `strconv.ParseUint(s, 10, bitSize)`. Go-shaped (`M-ERRVAL`): on a range error the value
 /// is the maximum of the type.
-// go-std: strconv.ParseUint L2 (base 10 only, so no prefixes or underscores)
+// glue: tidb_base::gostd::strconv::parse_uint_go(s, 10, bitSize) with this crate's IntNumError
 pub fn parse_uint(s: &[u8], bit_size: u32) -> (u64, Result<(), IntNumError>) {
-    const FN: &str = "ParseUint";
-    if s.is_empty() {
-        return (0, Err(int_error(FN, s, NumErrKind::Syntax)));
+    let (n, err) = tidb_base::gostd::strconv::parse_uint_go(s, 10, bit_size as i32);
+    (n, err.map_err(int_error_from_base))
+}
+
+/// A [`NumError`] as an [`IntNumError`].
+// glue: conversion between the two NumError carriers
+fn int_error_from_base(e: NumError) -> IntNumError {
+    IntNumError {
+        func: e.func,
+        bytes: e.num,
+        err: e.err,
     }
-    // Cutoff is the smallest number such that cutoff*base > maxUint64.
-    let cutoff: u64 = u64::MAX / 10 + 1;
-    let max_val: u64 = if bit_size == 64 {
-        u64::MAX
-    } else {
-        (1u64 << bit_size) - 1
-    };
-    let mut n: u64 = 0;
-    for &c in s {
-        let d = if c.is_ascii_digit() {
-            c - b'0'
-        } else {
-            return (0, Err(int_error(FN, s, NumErrKind::Syntax)));
-        };
-        if n >= cutoff {
-            // n*base overflows
-            return (max_val, Err(int_error(FN, s, NumErrKind::Range)));
-        }
-        n *= 10;
-        let n1 = n.wrapping_add(u64::from(d));
-        if n1 < n || n1 > max_val {
-            // n+d overflows
-            return (max_val, Err(int_error(FN, s, NumErrKind::Range)));
-        }
-        n = n1;
-    }
-    (n, Ok(()))
 }
 
 /// `strconv.ParseInt(s, 10, bitSize)`. Go-shaped (`M-ERRVAL`): on a range error the value
@@ -999,58 +881,9 @@ pub(crate) fn json_unmarshal_uint64(data: &[u8], v: u64) -> Result<u64, String> 
     Ok(out)
 }
 
-/// `strconv.ParseUint(s, 0, 64)`: `Some(v)` when Go returns a nil error. Base prefixes
-/// `0x`/`0X`, `0b`/`0B`, `0o`/`0O`, and a leading `0` for octal; `_` separators only with a
-/// base prefix and only between digits (`underscoreOK`); no sign.
-// go-std: strconv.ParseUint L2 (base 0, bitSize 64; only whether err == nil)
+/// `strconv.ParseUint(s, 0, 64)`: `Some(v)` when Go returns a nil error.
+// glue: success value of tidb_base::gostd::strconv::parse_uint_go(s, 0, 64)
 pub fn parse_uint_base0(s: &[u8]) -> Option<u64> {
-    if s.is_empty() {
-        return None;
-    }
-    let s0 = s;
-    let (base, mut s) = if s[0] == b'0' {
-        match s.get(1) {
-            Some(b'x' | b'X') if s.len() >= 3 => (16u64, &s[2..]),
-            Some(b'b' | b'B') if s.len() >= 3 => (2, &s[2..]),
-            Some(b'o' | b'O') if s.len() >= 3 => (8, &s[2..]),
-            _ => (8, &s[1..]),
-        }
-    } else {
-        (10, s)
-    };
-    if base == 8 && s0.len() == 1 {
-        // "0": base 8 with an empty remainder parses as 0.
-        s = b"";
-    }
-    let mut underscores = false;
-    let mut n: u64 = 0;
-    let cutoff = u64::MAX / base + 1;
-    for &c in s {
-        let d = match c {
-            b'_' => {
-                underscores = true;
-                continue;
-            }
-            b'0'..=b'9' => u64::from(c - b'0'),
-            b'a'..=b'z' => u64::from(c - b'a') + 10,
-            b'A'..=b'Z' => u64::from(c - b'A') + 10,
-            _ => return None,
-        };
-        if d >= base {
-            return None;
-        }
-        if n >= cutoff {
-            return None; // ErrRange
-        }
-        n *= base;
-        let n1 = n.wrapping_add(d);
-        if n1 < n {
-            return None; // ErrRange
-        }
-        n = n1;
-    }
-    if underscores && !underscore_ok(s0) {
-        return None;
-    }
-    Some(n)
+    let (n, err) = tidb_base::gostd::strconv::parse_uint_go(s, 0, 64);
+    err.ok().map(|()| n)
 }
