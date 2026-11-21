@@ -49,7 +49,7 @@
 | VS1-23 | 逻辑算子公共部分，以及列裁剪、投影消除、谓词下推与简化、TopN / Limit 下推（VS1 的算子）；M-FT 审计 | D09.14、D09.7、D09.8、D09.11 | depth | 0.21 | VS1-01 | 规则级计划向量一致；审计表写进 plan | 第 1 部分评审中（spec `specs/D09.14-logical-operators`；govec 6,630 步一致；M-FT 审计见 plan §11） |
 | VS1-24 | `DoOptimize`、`postOptimize`、`InjectExtraProjection`、`ResultReorder`；hint 骨架 | D09.13、D13.3 | depth | 0.19 | VS1-21 | 物理计划向量一致 | 未开始 |
 | VS1-25 | ranger 整块 | D10.4 | depth | 0.22 | — | ranger govec 一致 | 评审中（D10.4 converge 95/95；govec `rangerbuild` 5,721 条记录、18,198 个结果一致，121 个停在 D08.9 边界；`cardinality` 的 `selectivity` 410 条 D10.4 记录已与 Go 一致） |
-| VS1-27 | 物理算子与 task（VS1 算子）、`exhaustPhysicalPlans`（Sel / Proj / Sort / TopN / Limit） | D10.1、D10.3 | depth | 0.18 | VS1-19 | 随 VS1-28 验收 | 未开始 |
+| VS1-27 | 物理算子与 task（VS1 算子）、`exhaustPhysicalPlans`（Sel / Proj / Sort / TopN / Limit） | D10.1、D10.3 | depth | 0.18 | VS1-19 | 随 VS1-28 验收 | 评审中（D10.1 93/110 + 16 桩 + 1 例外，D10.3 22/22；govec `physops` 3,104 条，其中 `exhaustPhysicalPlans` 1,500 条、2,350 个候选与 Go 一致；`Attach2Task` / task 收拢由单元测试覆盖，随 VS1-28 的计划向量验收。spec `specs/D10.1-physical-plans/spec.md`） |
 | VS1-28 | FindBestTask：DataSource / TableDual、skyline、表路径、访问路径、路径统计 | D10.2 | depth | 0.31 | VS1-26、VS1-27、VS1-29、VS1-30 | EXPLAIN 计划向量（去掉 estRows / cost）一致 | 未开始 |
 | VS1-29 | pseudo 基数估算、统计结构读取部分 | D10.6、D11.1 | depth | 0.21 | — | pseudo selectivity govec 一致 | 评审中（#236；D10.6 converge 38/54 + 16 桩，D11.1 85/85；govec `cardinality` 5,702 条，`selectivity` 442 条停在 D10.4 / D08.9 边界） |
 | VS1-30 | 代价模型 v2（VS1 算子） | D10.5 | depth | 0.04 | VS1-19 | 代价 govec 一致 | 未开始 |

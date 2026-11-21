@@ -43,6 +43,17 @@ impl LogicalSort {
 impl LogicalPlan for LogicalSort {
     crate::logical_plan_boilerplate!(Sort);
 
+    /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
+    // go: LogicalSort.ExhaustPhysicalPlans L1 [M-PLAN]
+    fn exhaust_physical_plans(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        prop: &crate::property::PhysicalProperty,
+    ) -> Result<(Vec<crate::PhysicalPlanRef>, bool), Error> {
+        crate::core::exhaust_physical_plans::exhaust_physical_plans4_logical_sort(self, ctx, prop)
+    }
+
     /// ExplainInfo implements Plan interface.
     // go: LogicalSort.ExplainInfo L1
     fn explain_info(&self, ctx: &PlanCtx<'_>) -> Result<String, Error> {

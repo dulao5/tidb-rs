@@ -654,12 +654,12 @@ pub fn is_plan_cacheable(
 /// isPhysicalPlanCacheable returns whether this physical plan is cacheable and return the
 /// reason if not.
 ///
-/// The operators of the new stack (`PhysicalKind`) are the point get and the VS1 operators;
-/// the readers and scans are not ported yet (D10.1, VS1-27), so a plan holding one is a
-/// boundary stub (their fields decide the result). Go's arms for operators the new stack
-/// does not build (IndexReader, IndexLookUp, IndexMerge, IndexScan, Shuffle, MemTable,
-/// Apply) cannot be reached.
-// go: isPhysicalPlanCacheable L2 (TableReader / TableScan fields: blocked-by:D10.1; the other arms are operators the new stack does not build)
+/// The operators of the new stack (`PhysicalKind`) are the point get and the operators of
+/// the first vertical slice. Go's arms for operators the new stack does not build
+/// (IndexReader, IndexLookUp, IndexMerge, IndexScan, Shuffle, MemTable, Apply) cannot be
+/// reached; without an index merge `underIndexMerge` stays false, so the table scan's
+/// `isFullScan` (D10.9) is a boundary stub that cannot be reached either.
+// go: isPhysicalPlanCacheable L2 (the arms of the operators the new stack does not build are absent; isFullScan is blocked-by:D10.9)
 #[allow(clippy::only_used_in_recursion)] // Go reads sctx in the IndexMerge arm (no index merge on the new stack)
 pub fn is_physical_plan_cacheable(
     sctx: &SessionVars,
@@ -668,27 +668,42 @@ pub fn is_physical_plan_cacheable(
     limit_param_num: usize,
     under_index_merge: bool,
 ) -> Result<(bool, String), Error> {
+    let mut sub_plans: Vec<&PhysicalPlanRef> = Vec::new();
     match p.kind() {
         PhysicalKind::TableDual => {
             if param_num > 0 {
                 return Ok((false, "get a TableDual plan".to_owned()));
             }
         }
-        PhysicalKind::TableReader | PhysicalKind::TableScan => {
-            // TableReader: StoreType == TiFlash, tablePlan; TableScan: isFullScan under an
-            // index merge.
-            // glue: blocked-by:D10.1 (PhysicalTableReader / PhysicalTableScan, VS1-27)
-            return Err(blocked("D10.1", "isPhysicalPlanCacheable of a reader"));
+        PhysicalKind::TableReader => {
+            let x = p
+                .as_any()
+                .downcast_ref::<crate::core::physical_plans::PhysicalTableReader>()
+                .expect("PhysicalTableReader");
+            if x.store_type == tidb_base::kv::TiFlash {
+                return Ok((false, "TiFlash plan is un-cacheable".to_owned()));
+            }
+            if let Some(table_plan) = &x.table_plan {
+                sub_plans.push(table_plan);
+            }
+        }
+        PhysicalKind::TableScan => {
+            if under_index_merge {
+                // glue: blocked-by:D10.9 (PhysicalTableScan.isFullScan of explain.go; no index merge on the new stack)
+                return Err(blocked("D10.9", "PhysicalTableScan.isFullScan"));
+            }
         }
         PhysicalKind::PointGet
         | PhysicalKind::Selection
         | PhysicalKind::Projection
         | PhysicalKind::Limit
         | PhysicalKind::Sort
-        | PhysicalKind::TopN => {}
+        | PhysicalKind::TopN
+        | PhysicalKind::NominalSort => {}
     }
 
-    for c in p.children() {
+    sub_plans.extend(p.children());
+    for c in sub_plans {
         let (cacheable, reason) =
             is_physical_plan_cacheable(sctx, c, param_num, limit_param_num, under_index_merge)?;
         if !cacheable {

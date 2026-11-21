@@ -97,6 +97,17 @@ pub fn limit_hash_code_boundary() -> Error {
 impl LogicalPlan for LogicalLimit {
     crate::logical_plan_boilerplate!(Limit, producer);
 
+    /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
+    // go: LogicalLimit.ExhaustPhysicalPlans L1 [M-PLAN]
+    fn exhaust_physical_plans(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        prop: &crate::property::PhysicalProperty,
+    ) -> Result<(Vec<crate::PhysicalPlanRef>, bool), Error> {
+        crate::core::exhaust_physical_plans::exhaust_physical_plans4_logical_limit(self, ctx, prop)
+    }
+
     /// ExplainInfo implements Plan interface.
     // go: LogicalLimit.ExplainInfo L1
     fn explain_info(&self, ctx: &PlanCtx<'_>) -> Result<String, Error> {
