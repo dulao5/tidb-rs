@@ -40,9 +40,11 @@ pub struct CostVer2 {
 
 impl CostVer2 {
     /// GetCost returns the cost value of the costVer2
+    ///
+    /// Go's builtin `max` keeps a NaN cost (`f64::max` would return 0).
     // go: CostVer2.GetCost L1
     pub fn get_cost(&self) -> f64 {
-        self.cost.max(0.0)
+        tidb_base::gostd::math::max(self.cost, 0.0)
     }
 
     /// GetTrace returns the trace of current costVer2

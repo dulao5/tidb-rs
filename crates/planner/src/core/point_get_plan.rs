@@ -80,7 +80,7 @@ use crate::core::planbuilder::is_for_update_read_select_lock;
 use crate::core::resolve::{ContextRef, NodeW, TableNameW};
 use crate::physicalop::{BasePhysicalPlan, PhysicalPlanRef};
 use crate::planctx::PlanCtx;
-use crate::property::{PhysicalProperty, StatsInfo};
+use crate::property::{PhysicalProperty, StatsInfo, TaskType};
 use crate::util::costusage::CostVer2;
 use crate::util::fixcontrol::{self, Fix52592};
 use crate::util::handle_cols::{HandleCols, new_common_handle_cols, new_int_handle_cols};
@@ -158,9 +158,8 @@ pub struct PointGetPlan {
     pub cols_in_where_clause: Vec<String>,
 
     // required by cost model
-    pub plan_cost_init: bool,
-    pub plan_cost: f64,
-    pub plan_cost_ver2: CostVer2,
+    // (Go's `planCostInit`, `planCost` and `planCostVer2` are the memo of the embedded
+    // `BasePhysicalPlan`, written through `&self` like the other operators'.)
     /// accessCols represents actual columns the PointGet will access, which are used to calculate row-size
     pub access_cols: Vec<Arc<Column>>,
 }
@@ -176,6 +175,17 @@ pub struct NameValuePair {
 
 impl PhysicalPlan for PointGetPlan {
     crate::physical_plan_boilerplate!(PointGet);
+
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PointGetPlan.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &crate::util::optimizetrace::PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PointGetPlan::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
 
     /// Schema implements the Plan interface.
     // go: PointGetPlan.Schema L1

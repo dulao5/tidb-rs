@@ -1852,18 +1852,18 @@ VS1-29	D11.1	pkg/statistics/table.go	Table.MemoryUsage	22
 VS1-29	D11.1	pkg/statistics/table.go	Table.ReleaseAndPutToPool	10	
 VS1-29	D11.1	pkg/statistics/table.go	Table.ShallowCopy	22	
 VS1-29	D11.1	pkg/statistics/table.go	Table.String	22	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinCPUCostDetail.desc	13	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinCPUCostDetail.probeCostDesc	13	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinDiskCostDetail.desc	11	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinDiskCostDetail.probeDesc	10	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinMemoryCostDetail.desc	7	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setBatchPointGetPlanCostDetail	15	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPhysicalHashJoinCostDetail	63	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPhysicalIndexReaderCostDetail	17	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPhysicalTableOrIndexScanCostDetail	23	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPhysicalTableReaderCostDetail	18	
-VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPointGetPlanCostDetail	12	
-VS1-30	D10.5	pkg/planner/core/plan_cost_ver2.go	BatchPointGetPlan.GetPlanCostVer2	18	
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinCPUCostDetail.desc	13	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinCPUCostDetail.probeCostDesc	13	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinDiskCostDetail.desc	11	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinDiskCostDetail.probeDesc	10	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	HashJoinMemoryCostDetail.desc	7	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setBatchPointGetPlanCostDetail	15	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPhysicalHashJoinCostDetail	63	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPhysicalIndexReaderCostDetail	17	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPhysicalTableOrIndexScanCostDetail	23	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPhysicalTableReaderCostDetail	18	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_detail.go	setPointGetPlanCostDetail	12	only the cost model v1 calls it; the cost model v1 is exception B5, not ported (D10.5 spec §2)
+VS1-30	D10.5	pkg/planner/core/plan_cost_ver2.go	BatchPointGetPlan.GetPlanCostVer2	18	BatchPointGetPlan (D10.8) is outside the first vertical slice (D10.5 spec §2)
 VS1-30	D10.5	pkg/planner/core/plan_cost_ver2.go	PhysicalProjection.GetPlanCostVer2	23	
 VS1-30	D10.5	pkg/planner/core/plan_cost_ver2.go	PhysicalSelection.GetPlanCostVer2	19	
 VS1-30	D10.5	pkg/planner/core/plan_cost_ver2.go	PhysicalSort.GetPlanCostVer2	45	

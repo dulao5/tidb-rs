@@ -50,12 +50,13 @@ use crate::core::initialize::flatten_list_push_down_plan;
 use crate::core::util::PhysicalSchemaProducer;
 use crate::physicalop::{BasePhysicalPlan, PhysicalPlanRef, base_physical_plan, make_mut_plan};
 use crate::planctx::PlanCtx;
-use crate::property::{PhysicalProperty, SortItem};
+use crate::property::{PhysicalProperty, SortItem, TaskType};
 use crate::util::ByItems;
 use crate::util::HandleCols;
 use crate::util::coreusage::extract_correlated_cols4_physical_plan;
+use crate::util::costusage::CostVer2;
 use crate::util::misc::{clone_col_infos, clone_exprs, clone_ranges};
-use crate::util::optimizetrace::PhysicalOptimizeOp;
+use crate::util::optimizetrace::{PhysicalOptimizeOp, PlanCostOption};
 
 /// `size.SizeOfSlice`.
 const SIZE_OF_SLICE: i64 = 24;
@@ -234,6 +235,17 @@ pub fn set_mpp_or_batch_cop_for_table_scan(cur_plan: &mut PhysicalPlanRef) {
 
 impl PhysicalPlan for PhysicalTableReader {
     crate::physical_plan_boilerplate!(TableReader, sp);
+
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PhysicalTableReader.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PhysicalTableReader::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
 
     /// MemoryUsage return the memory usage of PhysicalTableReader
     // go: PhysicalTableReader.MemoryUsage L1
@@ -491,6 +503,17 @@ impl PhysicalTableScan {
 impl PhysicalPlan for PhysicalTableScan {
     crate::physical_plan_boilerplate!(TableScan, sp);
 
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PhysicalTableScan.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PhysicalTableScan::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
+
     /// Clone implements op.PhysicalPlan interface.
     ///
     /// Go's `*clonedScan = *ts` copies every field first; the fields Go then replaces are
@@ -677,6 +700,17 @@ pub struct PhysicalProjection {
 impl PhysicalPlan for PhysicalProjection {
     crate::physical_plan_boilerplate!(Projection, sp);
 
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PhysicalProjection.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PhysicalProjection::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
+
     /// Clone implements op.PhysicalPlan interface.
     // go: PhysicalProjection.Clone L1 [M-CTX]
     fn clone_plan(&self) -> Result<PhysicalPlanRef, Error> {
@@ -751,6 +785,17 @@ impl PhysicalTopN {
 
 impl PhysicalPlan for PhysicalTopN {
     crate::physical_plan_boilerplate!(TopN);
+
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PhysicalTopN.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PhysicalTopN::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
 
     /// Clone implements op.PhysicalPlan interface.
     // go: PhysicalTopN.Clone L1 [M-CTX]
@@ -882,6 +927,17 @@ pub struct PhysicalSort {
 impl PhysicalPlan for PhysicalSort {
     crate::physical_plan_boilerplate!(Sort);
 
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PhysicalSort.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PhysicalSort::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
+
     /// Clone implements op.PhysicalPlan interface.
     // go: PhysicalSort.Clone L1 [M-CTX]
     fn clone_plan(&self) -> Result<PhysicalPlanRef, Error> {
@@ -982,6 +1038,17 @@ pub struct PhysicalSelection {
 
 impl PhysicalPlan for PhysicalSelection {
     crate::physical_plan_boilerplate!(Selection);
+
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PhysicalSelection.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PhysicalSelection::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
 
     /// Clone implements op.PhysicalPlan interface.
     ///
