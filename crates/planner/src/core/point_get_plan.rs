@@ -358,10 +358,9 @@ impl PointGetPlan {
     /// Attach2Task makes the current physical plan as the father of task's physicalPlan and updates the cost of
     /// current task. If the child's task is cop task, some operator may close this task and return a new rootTask.
     ///
-    /// A point get attaches to no task: Go returns nil (`base.Task` is D10.1's, so the result
-    /// is `None` of nothing).
+    /// A point get attaches to no task: Go returns nil, which is `None`.
     // go: PointGetPlan.Attach2Task L1
-    pub fn attach2_task(&self) -> Option<std::convert::Infallible> {
+    pub fn attach2_task(&self) -> Option<crate::core::task_base::Task> {
         None
     }
 

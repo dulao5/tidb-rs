@@ -125,14 +125,56 @@ impl LogicalProjection {
     }
 
     /// TryToGetChildProp will check if this sort property can be pushed or not.
-    // glue: stub of LogicalProjection.TryToGetChildProp, blocked-by:D10.2 (physical properties of the plan enumeration, exhaust_physical_plans)
-    pub fn try_to_get_child_prop(&self) -> Result<(), Error> {
-        Err(blocked("D10.2", "LogicalProjection.TryToGetChildProp"))
+    /// When a sort column will be replaced by scalar function, we refuse it.
+    /// When a sort column will be replaced by a constant, we just remove it.
+    ///
+    /// Go's `(nil, false)` is `None`.
+    // go: LogicalProjection.TryToGetChildProp L1
+    pub fn try_to_get_child_prop(
+        &self,
+        ctx: &PlanCtx<'_>,
+        prop: &crate::property::PhysicalProperty,
+    ) -> Option<crate::property::PhysicalProperty> {
+        let mut new_prop = prop.clone_essential_fields();
+        if !prop.sort_items.is_empty() {
+            let new_sort_items = self.try_transform_sort_items(ctx, &prop.sort_items)?;
+            new_prop.sort_items = new_sort_items;
+        }
+        if let Some(partial_order_info) = &prop.partial_order_info {
+            let new_partial_order_items =
+                self.try_transform_sort_item_ptrs(ctx, &partial_order_info.sort_items)?;
+            new_prop.partial_order_info = Some(Arc::new(crate::property::PartialOrderInfo {
+                sort_items: new_partial_order_items,
+            }));
+        }
+        Some(new_prop)
     }
 
     // go: LogicalProjection.tryTransformSortItems L1
-    #[allow(dead_code)] // TryToGetChildProp is D10.2's
     fn try_transform_sort_items(
+        &self,
+        ctx: &PlanCtx<'_>,
+        items: &[SortItem],
+    ) -> Option<Vec<SortItem>> {
+        let mut new_items = Vec::with_capacity(items.len());
+        for item in items {
+            let idx = self.schema(&ctx.arena).column_index(&item.col);
+            match &*self.exprs[idx as usize] {
+                Expr::Column(expr) => new_items.push(SortItem {
+                    col: Arc::new(expr.clone()),
+                    desc: item.desc,
+                }),
+                Expr::ScalarFunction(_) => return None,
+                _ => {}
+            }
+        }
+        Some(new_items)
+    }
+
+    /// `tryTransformSortItemPtrs`: `tryTransformSortItems` over Go's `[]*SortItem` of the
+    /// partial order property (a `Vec<SortItem>` here).
+    // go: LogicalProjection.tryTransformSortItemPtrs L1
+    fn try_transform_sort_item_ptrs(
         &self,
         ctx: &PlanCtx<'_>,
         items: &[SortItem],
@@ -185,7 +227,6 @@ impl LogicalProjection {
 // glue: stub of LogicalProjection.HashCode, blocked-by:D14.2 (plancodec.TypeStringToPhysicalID, util/plancodec)
 // glue: stub of LogicalProjection.ExtractFD, blocked-by:D09.14 (pkg/planner/funcdep is not ported)
 // glue: stub of LogicalProjection.getGroupNDVs, blocked-by:D10.6 (only DeriveStats, a VS1-29 boundary, calls it)
-// glue: stub of LogicalProjection.tryTransformSortItemPtrs, blocked-by:D10.2 (partial order properties of TryToGetChildProp)
 /// The boundary of the stubbed `LogicalProjection` functions above.
 pub fn projection_boundary(block: &str, what: &str) -> Error {
     blocked(block, what)
@@ -193,6 +234,19 @@ pub fn projection_boundary(block: &str, what: &str) -> Error {
 
 impl LogicalPlan for LogicalProjection {
     crate::logical_plan_boilerplate!(Projection, producer);
+
+    /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
+    // go: LogicalProjection.ExhaustPhysicalPlans L1 [M-PLAN]
+    fn exhaust_physical_plans(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        prop: &crate::property::PhysicalProperty,
+    ) -> Result<(Vec<crate::PhysicalPlanRef>, bool), Error> {
+        crate::core::exhaust_physical_plans::exhaust_physical_plans4_logical_projection(
+            self, ctx, prop,
+        )
+    }
 
     /// ExplainInfo implements Plan interface.
     // go: LogicalProjection.ExplainInfo L2 (expression.ExplainExpressionList is blocked-by:D10.9)

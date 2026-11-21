@@ -27,7 +27,6 @@
 
 use std::sync::Arc;
 
-use tidb_base::blocked::blocked;
 use tidb_base::kv::StoreType;
 use tidb_base::{Error, errors};
 use tidb_execdetails::execdetails::RuntimeStatsColl;
@@ -43,6 +42,8 @@ use crate::baseimpl::{self, Plan};
 use crate::core::plan::{
     get_actual_probe_cnt_from_probe_parents, get_estimated_probe_cnt_from_probe_parents,
 };
+use crate::core::task::attach_plan2_task;
+use crate::core::task_base::Task;
 use crate::planctx::PlanCtx;
 use crate::property::{PhysicalProperty, TaskType};
 use crate::util::costusage::{
@@ -220,12 +221,12 @@ impl BasePhysicalPlan {
 
 /// Attach2Task implements the base.PhysicalPlan.<2nd> interface.
 ///
-/// `base.Task`, `Task.ConvertToRootTask` and `attachPlan2Task` are the task part of D10.1
-/// (VS1-27).
-// glue: stub of BasePhysicalPlan.Attach2Task, blocked-by:D10.1 (VS1-27: base.Task, attachPlan2Task)
-pub fn attach2_task(p: &dyn PhysicalPlan) -> Result<(), Error> {
-    let _ = p;
-    Err(blocked("D10.1", "Attach2Task (base.Task)"))
+/// `p` is the operator (Go's `p.Self`), owned by the caller (see `core::task::attach2_task`,
+/// the interface dispatch).
+// go: BasePhysicalPlan.Attach2Task L1 [M-SELF, M-CTX]
+pub fn attach2_task(ctx: &PlanCtx<'_>, p: PhysicalPlanRef, tasks: &[Task]) -> Result<Task, Error> {
+    let t = tasks[0].convert_to_root_task(ctx)?;
+    Ok(attach_plan2_task(p, t))
 }
 
 impl BasePhysicalPlan {

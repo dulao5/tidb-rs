@@ -1,6 +1,6 @@
 //! go-file: pkg/planner/core/plan.go
 //!
-//! `AsSctx`, `enforceProperty` (boundary stubs) and the probe-count helpers `BasePhysicalPlan` calls (Go reaches them through
+//! `AsSctx` (a boundary stub), `enforceProperty` and the probe-count helpers `BasePhysicalPlan` calls (Go reaches them through
 //! `utilfuncp` function pointers to break an import cycle; here they are called directly).
 //!
 //! Only `PhysicalApply`, `PhysicalIndexJoin`, `PhysicalIndexHashJoin` and
@@ -10,11 +10,20 @@
 //! `pp.Children()[1-getInnerChildIdx()]`) are added with those operators; until then nothing
 //! sets probe parents (`propagateProbeParents`, VS1-24).
 
+use std::sync::Arc;
+
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_execdetails::execdetails::RuntimeStatsColl;
+use tidb_expression::Expr;
 
+use crate::core::physical_plans::PhysicalSort;
+use crate::core::task::attach2_task;
+use crate::core::task_base::Task;
 use crate::physicalop::PhysicalPlanRef;
+use crate::planctx::PlanCtx;
+use crate::property::{MppTaskType, PhysicalProperty, RootTaskType};
+use crate::util::ByItems;
 
 /// AsSctx converts PlanContext to sessionctx.Context.
 ///
@@ -25,13 +34,71 @@ pub fn as_sctx() -> Result<(), Error> {
     Err(blocked("D05.3", "AsSctx (sessionctx.Context)"))
 }
 
-/// `enforceProperty` adds a `PhysicalSort` (and MPP exchangers) on top of a task.
-// glue: stub of enforceProperty, blocked-by:D10.1 (VS1-27: base.Task, PhysicalSort)
-pub fn enforce_property() -> Result<(), Error> {
-    Err(blocked(
-        "D10.1",
-        "enforceProperty (base.Task, PhysicalSort)",
-    ))
+/// `enforceProperty` adds a `PhysicalSort` (and MPP exchangers) on top of a task to give it
+/// the property `p`.
+///
+/// The MPP exchanger (`MppTask.enforceExchanger`) is outside the first vertical slice: a
+/// boundary stub on that branch.
+// go: enforceProperty L2 (the MPP exchanger is blocked-by:D10.1)
+pub fn enforce_property(
+    p: &PhysicalProperty,
+    mut tsk: Task,
+    ctx: &PlanCtx<'_>,
+) -> Result<Task, Error> {
+    if p.task_tp == MppTaskType {
+        let Task::Mpp(mpp) = &tsk else {
+            return Ok(Task::invalid_task());
+        };
+        if mpp.invalid() {
+            return Ok(Task::invalid_task());
+        }
+        if !p.is_sort_item_all_for_partition() {
+            ctx.vars.raise_warning_when_mpp_enforced(
+                "MPP mode may be blocked because operator `Sort` is not supported now.",
+            );
+            return Ok(Task::invalid_task());
+        }
+        // glue: blocked-by:D10.1 (MppTask.enforceExchanger; MPP is outside the first slice)
+        return Err(blocked(
+            "D10.1",
+            "enforceProperty of an MPP task (enforceExchanger)",
+        ));
+    }
+    // when task is double cop task warping a index merge reader, tsk.plan() may be nil when indexPlanFinished is marked
+    // as false, while the real plan is in idxMergePartPlans. tsk.plan()==nil is not right here.
+    if p.is_sort_item_empty() || tsk.invalid() {
+        return Ok(tsk);
+    }
+    if p.task_tp != MppTaskType {
+        tsk = tsk.convert_to_root_task(ctx)?;
+    }
+    let sort_req_prop = PhysicalProperty {
+        task_tp: RootTaskType,
+        sort_items: p.sort_items.clone(),
+        expected_cnt: f64::MAX,
+        ..Default::default()
+    };
+    let plan = tsk
+        .plan()
+        .expect("runtime error: invalid memory address or nil pointer dereference");
+    let mut sort = PhysicalSort {
+        by_items: Vec::with_capacity(p.sort_items.len()),
+        is_partial_sort: p.is_sort_item_all_for_partition(),
+        ..Default::default()
+    }
+    .init(
+        ctx,
+        plan.stats_info().map(Arc::clone),
+        plan.query_block_offset(),
+        vec![Some(Arc::new(sort_req_prop))],
+    );
+    for col in &p.sort_items {
+        sort.by_items.push(ByItems {
+            expr: Arc::new(Expr::Column((*col.col).clone())),
+            desc: col.desc,
+        });
+    }
+    attach2_task(ctx, Arc::new(sort), &[tsk])
 }
 
 // go: getEstimatedProbeCntFromProbeParents L1 [M-IFACE]

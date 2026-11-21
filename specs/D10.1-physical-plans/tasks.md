@@ -1,6 +1,12 @@
 # D10.1 物理算子定义（tasks）
 
-本块尚未开工，只有下面从其他块移交来的条目；开工时并入正式的任务列表。
+本块按 VS1 的条目分部分移植，spec 见 [spec.md](spec.md)。
+
+## 进度
+
+- [x] VS1-19（规划器基础）：`BasePhysicalPlan`、`baseimpl`。
+- [x] VS1-27（物理算子、task、物理实现枚举）：第一条纵向切片的八种算子、三种 task、它们的 `Attach2Task`，Selection / Projection / Sort / TopN / Limit 的 `exhaustPhysicalPlans`（D10.3）；govec `physops`。边界桩见 spec §4。
+- [ ] 其余算子（join、聚合、窗口、union、MPP、index 读取）和 spec §4 的边界桩，随各自的条目。spec §7 待定问题 1（虚拟生成列的原地展开）在 FindBestTask（VS1-28）时决定。
 
 ## 从 P1 继承
 
