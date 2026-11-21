@@ -11,12 +11,49 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use crate::exec::{ColumnMeta, Outcome, PrepareMeta};
 use crate::sql::{self, Token, TokenKind};
 
 /// ER_NOT_SUPPORTED_YET: tidb-rs's "not implemented" answer.
 pub const ER_NOT_SUPPORTED_YET: u16 = 1235;
+
+/// The prototype's fixed "not supported" answers (T1), generated from its sources by
+/// `scripts/prototype_not_supported.py`.
+const PROTOTYPE_NOT_SUPPORTED: &str = include_str!("../prototype-not-supported.txt");
+
+static PROTOTYPE_ANSWER: LazyLock<Regex> = LazyLock::new(|| {
+    let alts: Vec<&str> = PROTOTYPE_NOT_SUPPORTED
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    Regex::new(&format!(
+        "^This version of TiDB doesn't yet support '(?:{})'$",
+        alts.join("|")
+    ))
+    .expect("tools/ab/prototype-not-supported.txt: bad pattern")
+});
+
+/// T1: whether a 1235 message is tidb-rs's conventional "not implemented yet" answer: a
+/// boundary stub's (`blocked-by:<block>`, `tidb_base::blocked`) or one of the prototype's
+/// fixed answers. Any other 1235 (a ported Go `ErrNotSupportedYet` branch) is a normal error.
+pub fn is_not_implemented_answer(message: &str) -> bool {
+    message.contains("blocked-by:") || PROTOTYPE_ANSWER.is_match(message)
+}
+
+/// T1: B's answer counts as `unsupported`: B returned a not-implemented 1235 (see
+/// [`is_not_implemented_answer`]) and A did not also return 1235 (then both errors compare in
+/// full).
+pub fn b_not_implemented(a: &Outcome, b: &Outcome) -> bool {
+    let Outcome::Error { code, message, .. } = b else {
+        return false;
+    };
+    let a_1235 = matches!(a, Outcome::Error { code, .. } if *code == ER_NOT_SUPPORTED_YET);
+    *code == ER_NOT_SUPPORTED_YET && !a_1235 && is_not_implemented_answer(message)
+}
 
 /// The numbered tolerances (`docs/testing/tolerances.toml`; a unit test keeps both in step,
 /// and every fixture's `tolerance:` must name one of them).
@@ -34,7 +71,8 @@ pub enum Verdict {
     Match,
     /// Both failed with the same error (code, SQLSTATE and message).
     BothError,
-    /// B answered 1235 (not supported yet): T1. Never equal, never coverage.
+    /// B answered a not-implemented 1235 (T1: a boundary stub's or the prototype's fixed
+    /// answer). Never equal, never coverage.
     Unsupported,
     Mismatch(Vec<String>),
 }
@@ -111,6 +149,19 @@ fn classify_text(sql: &str, columns: &[ColumnMeta]) -> StmtClass {
     let Some(first) = toks.first() else {
         return StmtClass::Exact;
     };
+    // `(SELECT ... ORDER BY a LIMIT 3)`: the whole statement is one parenthesised query, whose
+    // ORDER BY / LIMIT are the statement's own.
+    if first.text(sql) == "(" {
+        let end = toks.iter().rposition(|t| t.text(sql) != ";").unwrap_or(0);
+        let close = toks
+            .iter()
+            .skip(1)
+            .position(|t| t.depth == 0 && t.text(sql) == ")")
+            .map(|i| i + 1);
+        if close == Some(end) && end > 1 {
+            return classify_text(&sql[toks[1].start..toks[end - 1].end], columns);
+        }
+    }
     let head = first.text(sql).to_ascii_uppercase();
     let query = matches!(head.as_str(), "SELECT" | "WITH" | "TABLE" | "VALUES") || head == "(";
     if !query || EXACT_HEADS.contains(&head.as_str()) {
@@ -277,6 +328,9 @@ fn ident_chain(sql: &str, item: &[Token]) -> Option<Vec<String>> {
 /// `None` when the clause is not just `LIMIT n [, m] | LIMIT n OFFSET m` at the end (with
 /// literal numbers), so the comparison stays strict.
 pub fn strip_limit(sql: &str) -> Option<String> {
+    if has_side_effects(sql) {
+        return None;
+    }
     let toks = sql::tokens(sql);
     let at = toks
         .iter()
@@ -289,6 +343,37 @@ pub fn strip_limit(sql: &str) -> Option<String> {
                 || (t.kind == TokenKind::Punct && matches!(t.text(sql), "," | ";"))
         });
     plain.then(|| sql[..toks[at].start].trim_end().to_string())
+}
+
+/// Whether running the statement again on A would change A's state (sequences, user
+/// variables, locks, sleeps, `LAST_INSERT_ID(expr)`, locking reads): such a statement is never
+/// re-run without its LIMIT, so its comparison stays strict (spec §2.4).
+pub fn has_side_effects(sql: &str) -> bool {
+    let toks = sql::tokens(sql);
+    let text = |i: usize| toks.get(i).map_or("", |t: &Token| t.text(sql));
+    (0..toks.len()).any(|i| {
+        let t = &toks[i];
+        let call = text(i + 1) == "(";
+        (t.kind == TokenKind::Word
+            && call
+            && [
+                "NEXTVAL",
+                "SETVAL",
+                "GET_LOCK",
+                "RELEASE_LOCK",
+                "RELEASE_ALL_LOCKS",
+                "SLEEP",
+            ]
+            .iter()
+            .any(|f| t.is_word(sql, f)))
+            || (t.is_word(sql, "LAST_INSERT_ID") && call && text(i + 2) != ")")
+            || (text(i) == ":" && text(i + 1) == "=")
+            || (t.is_word(sql, "FOR")
+                && (toks
+                    .get(i + 1)
+                    .is_some_and(|n| n.is_word(sql, "UPDATE") || n.is_word(sql, "SHARE"))))
+            || (t.is_word(sql, "LOCK") && toks.get(i + 1).is_some_and(|n| n.is_word(sql, "IN")))
+    })
 }
 
 /// What one side answered, as the comparator sees it.
@@ -327,9 +412,7 @@ pub fn compare(
     b: Observed<'_>,
     a_full: Option<&[Vec<String>]>,
 ) -> Verdict {
-    if let Outcome::Error { code, .. } = b.outcome
-        && *code == ER_NOT_SUPPORTED_YET
-    {
+    if b_not_implemented(a.outcome, b.outcome) {
         return Verdict::Unsupported;
     }
     let mut d = match (a.outcome, b.outcome) {
@@ -387,7 +470,7 @@ pub fn compare(
 /// errors in full.
 pub fn compare_status_only(a: &Outcome, b: &Outcome) -> Verdict {
     match (a, b) {
-        (_, Outcome::Error { code, .. }) if *code == ER_NOT_SUPPORTED_YET => Verdict::Unsupported,
+        _ if b_not_implemented(a, b) => Verdict::Unsupported,
         (Outcome::Error { .. }, Outcome::Error { .. }) => {
             let d = error_diffs(a, b);
             if d.is_empty() {
@@ -873,8 +956,26 @@ mod tests {
             cmp(&err(1146), &err(1105), &u),
             Verdict::Mismatch(_)
         ));
-        assert_eq!(cmp(&rows(&["a"]), &err(1235), &u), Verdict::Unsupported);
-        assert_eq!(cmp(&err(1146), &err(1235), &u), Verdict::Unsupported);
+        // T1: only a not-implemented 1235 (boundary stub or prototype answer).
+        let stub = Outcome::Error {
+            code: 1235,
+            state: "42000".into(),
+            message: "This version of TiDB doesn't yet support 'x (blocked-by:D09.1)'".into(),
+        };
+        let poc = Outcome::Error {
+            code: 1235,
+            state: "42000".into(),
+            message: "This version of TiDB doesn't yet support 'joins'".into(),
+        };
+        assert_eq!(cmp(&rows(&["a"]), &stub, &u), Verdict::Unsupported);
+        assert_eq!(cmp(&rows(&["a"]), &poc, &u), Verdict::Unsupported);
+        assert_eq!(cmp(&err(1146), &stub, &u), Verdict::Unsupported);
+        assert!(matches!(
+            cmp(&rows(&["a"]), &err(1235), &u),
+            Verdict::Mismatch(_)
+        ));
+        assert!(matches!(cmp(&err(1235), &stub, &u), Verdict::Mismatch(_)));
+        assert_eq!(cmp(&stub, &stub, &u), Verdict::BothError);
         assert!(matches!(
             cmp(&rows(&[]), &err(1105), &u),
             Verdict::Mismatch(_)
@@ -914,6 +1015,56 @@ mod tests {
             .collect();
         assert_eq!(ids.len(), names.len(), "every entry needs an id and a name");
         assert_eq!(ledger, TOLERANCES, "tolerances.toml and TOLERANCES differ");
+    }
+
+    #[test]
+    fn side_effects_keep_it_strict() {
+        for q in [
+            "select nextval(s) from t limit 1",
+            "select @v := a from t limit 1",
+            "select get_lock('x', 1) from t limit 1",
+            "select sleep(0) from t limit 1",
+            "select last_insert_id(a) from t limit 1",
+            "select a from t limit 1 for update",
+            "select a from t limit 1 lock in share mode",
+        ] {
+            assert!(has_side_effects(q), "{q}");
+            assert_eq!(strip_limit(q), None, "{q}");
+        }
+        assert!(!has_side_effects("select last_insert_id() from t limit 1"));
+        assert!(!has_side_effects("select 'sleep(1)', a from t limit 1"));
+    }
+
+    #[test]
+    fn outer_parentheses() {
+        let c = parse_cols("a");
+        assert_eq!(
+            classify("(SELECT a FROM t ORDER BY a LIMIT 3)", &c, false).to_string(),
+            "limited ordered 1"
+        );
+        assert_eq!(
+            classify("((select a from t order by a));", &c, false).to_string(),
+            "ordered 1"
+        );
+        assert_eq!(
+            classify(
+                "(select a from t order by a) union (select a from u)",
+                &c,
+                false
+            )
+            .to_string(),
+            "unordered"
+        );
+    }
+
+    #[test]
+    fn prototype_list_compiles() {
+        assert!(is_not_implemented_answer(
+            "This version of TiDB doesn't yet support 'aggregate function FOO'"
+        ));
+        assert!(!is_not_implemented_answer(
+            "This version of TiDB doesn't yet support 'something Go says'"
+        ));
     }
 
     #[test]

@@ -11,8 +11,8 @@
 id = "T1"
 name = "b-not-supported"
 scope = "所有层"
-rule = "B 返回 1235（ER_NOT_SUPPORTED_YET）时判为 unsupported：既不算一致，也不算不一致，不计入新栈覆盖"
-reason = "1235 是 tidb-rs 尚未实现的约定回答，单独计数，避免淹没真正的错误结果"
+rule = "B 返回 1235 且是\"尚未实现\"的约定回答时判为 unsupported（既不算一致也不算不一致，不计入新栈覆盖）。只认两种：消息带 blocked-by:<块名> 的边界桩回答（tidb_base::blocked），以及原型自己的固定文案（逐条列在 tools/ab/prototype-not-supported.txt，由 scripts/prototype_not_supported.py 从原型源码生成，CI 校验不过期）。A 也返回 1235 时两边按错误完整比较；其他 1235 是普通错误，A 成功即不一致"
+reason = "1235 是 tidb-rs 尚未实现的约定回答，单独计数；但移植来的 Go 代码本身也有 ErrNotSupportedYet 分支，新栈走错分支返回的 1235 不能被当成\"还不支持\"而漏掉"
 since = "2026-11-21"
 
 [[tolerance]]

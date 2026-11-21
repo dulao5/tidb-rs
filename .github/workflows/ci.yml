@@ -90,6 +90,7 @@ jobs:
 
       - name: weekly report verdicts, fault error classification
         run: |
+          python3 scripts/prototype_not_supported.py --check
           python3 tools/weekly/test_report.py
           python3 tools/ab/faults/test_faults.py
 

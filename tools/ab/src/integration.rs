@@ -15,8 +15,8 @@ use regex::Regex;
 use serde_json::json;
 
 use crate::compare::{
-    ER_NOT_SUPPORTED_YET, Observed, StmtClass, Verdict, classify, compare, compare_status_only,
-    needs_warnings, strip_limit,
+    ER_NOT_SUPPORTED_YET, Observed, StmtClass, Verdict, b_not_implemented, classify, compare,
+    compare_status_only, needs_warnings, strip_limit,
 };
 use crate::exec::{Outcome, Side, TlsMode};
 use crate::mysqltest::{self, Class, Item, TxnEffect};
@@ -330,8 +330,8 @@ fn judge(
     status_only: bool,
 ) -> (StmtOutcome, String, String) {
     let (oa, ob) = (a.outcome, b.outcome);
-    if let Outcome::Error { code, message, .. } = ob
-        && *code == ER_NOT_SUPPORTED_YET
+    if let Outcome::Error { message, .. } = ob
+        && b_not_implemented(oa, ob)
     {
         return (StmtOutcome::Unsupported, String::new(), message.clone());
     }
@@ -339,6 +339,14 @@ fn judge(
         (_, Outcome::Client(m)) => return (StmtOutcome::BError, "client".into(), m.clone()),
         (Outcome::Error { .. }, Outcome::Error { .. }) => {}
         (Outcome::Error { .. }, _) => {
+            return (
+                StmtOutcome::Mismatch,
+                "error".into(),
+                format!("A {} vs B {}", brief(oa), brief(ob)),
+            );
+        }
+        // T1 does not cover it: a 1235 where A answered is a wrong answer, not "not yet".
+        (_, Outcome::Error { code, .. }) if *code == ER_NOT_SUPPORTED_YET => {
             return (
                 StmtOutcome::Mismatch,
                 "error".into(),
@@ -1128,8 +1136,18 @@ mod tests {
             j(&rows(&["1"]), &rows(&["2"]), false, true).0,
             StmtOutcome::Match
         );
+        // An unmarked 1235 is not "unsupported" (T1): A answered, so it is a mismatch.
         assert_eq!(
             j(&rows(&[]), &err(1235), false, false).0,
+            StmtOutcome::Mismatch
+        );
+        let stub = Outcome::Error {
+            code: 1235,
+            state: "42000".into(),
+            message: "This version of TiDB doesn't yet support 'x (blocked-by:D05.3)'".into(),
+        };
+        assert_eq!(
+            j(&rows(&[]), &stub, false, false).0,
             StmtOutcome::Unsupported
         );
         assert_eq!(

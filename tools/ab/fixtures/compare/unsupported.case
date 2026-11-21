@@ -1,4 +1,4 @@
-# T1: 1235 from B is neither equal nor a mismatch.
+# T1: a boundary stub's 1235 from B is neither equal nor a mismatch.
 sql: SELECT a FROM t
 cols: a
 tolerance: T1
@@ -7,4 +7,4 @@ verdict: unsupported
 [a]
 1
 [b_error]
-1235|42000|This version of TiDB doesn't yet support 'x'
+1235|42000|This version of TiDB doesn't yet support 'a point get (blocked-by:D09.1)'

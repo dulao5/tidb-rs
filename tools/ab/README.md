@@ -56,8 +56,9 @@ parameters):
   EXECUTE that falls back to the PoC must carry the new stack's PREPARE metadata,
   vertical-slice plan §4.7).
 - errors: both fail with the same code, SQLSTATE and message => `both_error` (counts as
-  agreement); B fails with 1235 (`ER_NOT_SUPPORTED_YET`) => `unsupported` (tolerance T1);
-  anything else (one side errors, another code / SQLSTATE / message, connection errors,
+  agreement); B fails with a not-implemented 1235 (a boundary stub's `blocked-by:` answer or one
+  of the prototype's fixed answers in `prototype-not-supported.txt`) while A did not answer 1235
+  => `unsupported` (tolerance T1); any other 1235 is a normal error; anything else (one side errors, another code / SQLSTATE / message, connection errors,
   timeouts) => `mismatch`.
 - OK packets: affected rows and warning count. Warnings: when either side reports any, `SHOW
   WARNINGS` runs on both and must be identical.

@@ -47,6 +47,13 @@
 比较：按 A 的行把键值相同的最大连续区段切开；B 在同一位置区段内的行必须与 A 的该区段构成同一多重集，
 区段之间的顺序必须一致。键值相等按文本逐字节判定。`ASC` / `DESC` 不影响分段。
 
+注意：在不区分大小写的排序规则下，`'a'` 与 `'A'` 是相等的键，两边在这类并列行上的顺序可以不同，
+而按文本切段会把它们当成不同的键，报不一致。这是已知的误报，方向是安全的（宁可误报），**不要为它加容差**；
+遇到时修正测试或在偏差台账（#262）里逐条裁定。
+
+整条语句只是一个带括号的查询（`(SELECT a FROM t ORDER BY a LIMIT 3)`）时，先去掉最外层括号再分类，
+括号里的 ORDER BY / LIMIT 就是这条语句自己的。
+
 ### 2.4 limited（LIMIT 截断）
 
 有顶层 `LIMIT` 的查询，内层类别为去掉 LIMIT 后的类别（`limited unordered`、`limited ordered K`、
@@ -59,7 +66,10 @@
 
 拿不到 `a_full` 时保持严格（按内层类别）。`limited exact` 永远严格。runner 只在 LIMIT 子句是
 结尾处的 `LIMIT n [, m]` / `LIMIT n OFFSET m`（字面数字）时去掉它重跑 A（`strip_limit`）；
-预处理语句的 LIMIT 参数为 `?`、integrationtest 中的 `EXECUTE` 不重跑，保持严格。integrationtest
+预处理语句的 LIMIT 参数为 `?`、integrationtest 中的 `EXECUTE` 不重跑，保持严格。语句有副作用时
+（`NEXTVAL` / `SETVAL`、`@v :=` 赋值、`GET_LOCK` / `RELEASE_LOCK` / `RELEASE_ALL_LOCKS`、`SLEEP`、
+`LAST_INSERT_ID(expr)`、`FOR UPDATE` / `FOR SHARE` / `LOCK IN SHARE MODE`）也不重跑：在 A 上多跑一次
+会改变 A 的状态（`has_side_effects`）。integrationtest
 重跑 A 之后，A 的"上一条语句"状态已变，下一条依赖历史的读语句不再比较（记为 skipped）。
 
 ### 2.5 `--sorted_result`
@@ -81,7 +91,9 @@ mysqltest 指令 `--sorted_result` 使下一条语句按 unordered 比较（带 
 - 两边都报错：错误码、SQLSTATE、错误消息三项都必须相同，才算一致（`both_error`）。只有错误码相同
   不算一致。
 - 一边报错一边不报错：不一致（integrationtest 中 A 成功 B 报错记为 `b_error`，它同样不是一致）。
-- B 返回 1235：`unsupported`（容差 T1），既不算一致也不算不一致。
+- B 返回 1235：只有边界桩的回答（消息带 `blocked-by:`）或原型自己的固定文案（`tools/ab/prototype-not-supported.txt`）
+  才判为 `unsupported`（容差 T1），既不算一致也不算不一致。A 也返回 1235 时按上一条完整比较；其他
+  1235（例如移植来的 Go 代码走到 `ErrNotSupportedYet` 分支）是普通错误，A 成功即不一致。
 - warning：先比 warning 数；任一边大于 0 时，runner 必须在语句之后立即在两边各执行一次
   `SHOW WARNINGS`，比较器按 exact 逐行比较（Level、Code、Message）。warning 数大于 0 而 runner
   没有取回内容时，比较器判为不一致（"contents not fetched"），防止 runner 漏取而静默变绿。
@@ -99,7 +111,7 @@ mysqltest 指令 `--sorted_result` 使下一条语句按 unordered 比较（带 
 
 | 编号 | 名称 | 规则摘要 |
 |---|---|---|
-| T1 | b-not-supported | B 返回 1235 判为 unsupported，不算一致，不计入新栈覆盖 |
+| T1 | b-not-supported | B 返回带 `blocked-by:` 的 1235 或原型固定文案的 1235（且 A 不是 1235）判为 unsupported，不算一致，不计入新栈覆盖 |
 | T2 | sorted-result | `--sorted_result` 后按多重集比较 |
 | T3 | replace-directives | `--replace_regex` / `--replace_column` 同时作用于两边 |
 | T4 | result-log-off | `--disable_result_log` 期间只比形状，错误仍完整比较 |
@@ -118,5 +130,5 @@ limited、错误、warning）至少有一个判为一致的用例和一个**必�
 |---|---|---|
 | `match` | 一致 | 是 |
 | `both_error` | 两边同一错误（码 + SQLSTATE + 消息） | 是 |
-| `unsupported` | B 返回 1235（T1） | 否 |
+| `unsupported` | B 返回"尚未实现"的 1235（T1） | 否 |
 | `mismatch` | 不一致；integrationtest 的 kind 为 rows / order / columns / metadata / error / warnings / affected_rows / shape | 否 |
