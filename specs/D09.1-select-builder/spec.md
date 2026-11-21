@@ -27,7 +27,7 @@ Go 代码：`logical_plan_builder.go`（`buildSelect` 4346 行起，`buildDataSo
 
 ## 2. 范围
 
-函数清单是 `specs/VS1-vertical-slice/functions.tsv` 中 VS1-21 的 49 个函数（D09.1 43 个，D09.4 6 个）。
+函数清单是 `specs/VS1-vertical-slice/functions.tsv` 中 VS1-21 的 58 个函数（D09.1 43 个，D09.4 6 个，D10.2 9 个：访问路径和句柄列栈，原属 VS1-28，见 §2.2）。
 
 ### 2.1 converge（`--part specs/VS1-vertical-slice/functions.tsv --item VS1-21`）
 
@@ -35,12 +35,13 @@ Go 代码：`logical_plan_builder.go`（`buildSelect` 4346 行起，`buildDataSo
 |---|--:|--:|--:|
 | D09.1 SELECT 构建 | 29 | 14 | 43 |
 | D09.4 聚合、窗口构建（HAVING / ORDER BY 解析） | 6 | 0 | 6 |
+| D10.2 访问路径、句柄列栈 | 9 | 0 | 9 |
 
 missing 0、extra 0。D09.1 中不在 VS1 清单里的 5 个函数（视图 3 个、UPDATE / DELETE 的 `updatableTableListResolver` 2 个）属于本块第 2 部分。
 
 ### 2.2 清单之外一起移植的函数
 
-构建 SELECT 时直接调用、又不能做成桩的函数（做成桩的话每条 SELECT 都会停下）：
+构建 SELECT 时直接调用、又不能做成桩的函数（做成桩的话每条 SELECT 都会停下）。D10.2 的 9 个（`getPossibleAccessPaths`、`filterPathByIsolationRead`、`fillContentForTablePath`、`getPathByIndexName`、`isPrimaryIndex`、`removeIgnoredPaths`、`removeGlobalIndexPaths`、`handleColHelper.pushMap` / `popMap`）在 functions.tsv 中从 VS1-28 移到了 VS1-21，计入 §2.1；`genTiFlashPath`、`checkAutoForceIndexLookUpPushDown` 不在 VS1 清单中：
 
 | 函数 | 所属块 | 为什么 |
 |---|---|---|
@@ -109,6 +110,11 @@ SELECT 构建器开始往这些结构里写之前，先处理了表达式改写�
 | `itemTransformer.Enter` | `ORDER BY ?`（Rust 的位置节点没有参数标记形式，与改写器一致） | D02.2 |
 | `collectGenerateColumn`（`buildProjection` 有 ORDER BY 时） | 被索引覆盖的虚拟生成列（数据源已先停在虚拟生成列） | D09.13 |
 | 桩函数 | `CheckParamTypeInt64orUint64`（参数标记的值，D13.1）；`addAliasName`、`getTableOffset`、`collectTableName`（CREATE VIEW、UPDATE / DELETE，D09.15）；`addExtraPhysTblIDColumn4DS`（D09.12）；`findColumnNameByUniqueID`（D09.6）；`extractSingeValueColNamesFromWhere`、`allColFromAggExprNode`、`allColFromExprNode`、`colNameResolver`、`compareItems`、`getAllByItems`、`restoreByItemText`、`checkOrderByInDistinct`（D09.4） | 见左 |
+
+两处比 Go 停得更早，路由器会回退到原型：
+
+- READ COMMITTED 下（以及加锁读），连接号大于 0 的会话里，`getPossibleAccessPaths` 要从域中读最新的索引状态（`GetLatestIndexInfo`），这是桩，所以 READ COMMITTED 下对任何有二级索引的表的 SELECT 都会回退。
+- 不在 EXPLAIN 中的 `HYPO_INDEX` hint：Go 只给一个 warning 然后继续，Rust 停在 `blocked-by:D13.3`（hint 的语句级状态还没有移植）。
 
 用户变量赋值（`@a := ...`）在 `preprocessUserVarTypes` 中交给改写器，停在改写器的桩（D08.9）；系统变量停在改写器第 2 部分（D09.2）。
 

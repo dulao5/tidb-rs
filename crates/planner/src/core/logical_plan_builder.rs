@@ -386,6 +386,13 @@ fn has_subquery(e: &Expr) -> bool {
 /// (`SubqueryExpr`) is a leaf; the window specification of a window function and the
 /// ORDER BY of an aggregate are not expression children (the visitors that need them walk
 /// them).
+///
+/// `VALUES(col)` is a leaf too: Go's `ValuesExpr.Accept` visits its `ColumnNameExpr`, but the
+/// Rust AST keeps a bare column name there, not an expression node. The only effect is on
+/// the HAVING / ORDER BY resolver and the ONLY_FULL_GROUP_BY walk, which would resolve that
+/// column first: a statement with `VALUES(col)` stops at the rewriter's boundary
+/// (`blocked-by:D09.15`, INSERT ... ON DUPLICATE KEY UPDATE only) instead of, for an unknown
+/// column, Go's error, and the router's fallback then gives Go's answer.
 // glue: the child order of each ast node's Accept (the Rust AST has no visitor, D02.2)
 fn expr_children(e: &Expr) -> Vec<&Expr> {
     match e {
