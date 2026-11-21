@@ -99,10 +99,46 @@ fn handle(req: &Request<Incoming>, info: &StatusInfo) -> Response<Body> {
             tidb_metrics::gather_text(),
         ),
         "/status" => response(StatusCode::OK, "application/json", status_json(info)),
+        "/debug/route" => route_trace(req.uri().query()),
         _ => response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
             "404 page not found\n".to_owned(),
+        ),
+    }
+}
+
+/// `GET /debug/route?conn=<id>`: the route trace of a connection
+/// (`poc_session::router::trace`), as `<seq>\t<engine>\t<reason>\n`; 404 while the trace is
+/// off (`--route-trace`).
+fn route_trace(query: Option<&str>) -> Response<Body> {
+    use poc_session::router::trace;
+    const TEXT: &str = "text/plain; charset=utf-8";
+    if !trace::enabled() {
+        return response(
+            StatusCode::NOT_FOUND,
+            TEXT,
+            "route trace off (start with --route-trace)\n".to_owned(),
+        );
+    }
+    let conn = query
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .find_map(|kv| kv.strip_prefix("conn="))
+        .and_then(|v| v.parse::<u64>().ok());
+    match conn {
+        Some(c) => {
+            let l = trace::get(c);
+            response(
+                StatusCode::OK,
+                TEXT,
+                format!("{}\t{}\t{}\n", l.seq, l.engine, l.reason),
+            )
+        }
+        None => response(
+            StatusCode::BAD_REQUEST,
+            TEXT,
+            "want ?conn=<connection id>\n".to_owned(),
         ),
     }
 }

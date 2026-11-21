@@ -305,6 +305,11 @@ impl Side {
         }
     }
 
+    /// The server's id of the current connection, if connected.
+    pub fn connection_id(&self) -> Option<u32> {
+        self.conn.as_ref().map(Conn::id)
+    }
+
     /// `SHOW WARNINGS` right after a statement (`None` if it failed): what the comparator
     /// compares when a warning count is above zero.
     pub async fn warnings(&mut self) -> Option<Vec<Vec<String>>> {

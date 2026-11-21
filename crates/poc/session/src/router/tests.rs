@@ -691,6 +691,49 @@ fn fallback_restores_the_new_session() {
     }
 }
 
+/// The route trace (#260): every routing decision of the connection, with its engine and
+/// reason; a statement that never reaches routing leaves it unchanged.
+#[test]
+fn route_trace_records_each_statement() {
+    super::trace::enable();
+    let conn = 7_000_001;
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    r.set_connection_id(conn);
+    script.lock().unwrap().answer = Some(Answer::Rows);
+    block_on(r.query(&mut p, POINT)).unwrap();
+    assert_eq!(
+        super::trace::get(conn),
+        super::trace::Last {
+            seq: 1,
+            engine: "new",
+            reason: "ok".into()
+        }
+    );
+    script.lock().unwrap().answer = Some(Answer::Blocked("D05.3"));
+    block_on(r.query(&mut p, POINT)).unwrap();
+    assert_eq!(
+        super::trace::get(conn),
+        super::trace::Last {
+            seq: 2,
+            engine: "poc",
+            reason: "D05.3".into()
+        }
+    );
+    block_on(r.query(&mut p, "SET NAMES latin1")).unwrap();
+    assert_eq!(
+        super::trace::get(conn),
+        super::trace::Last {
+            seq: 3,
+            engine: "poc",
+            reason: "kind".into()
+        }
+    );
+    // A parse error never reaches routing.
+    assert!(block_on(r.query(&mut p, "SELEKT 1")).is_err());
+    assert_eq!(super::trace::get(conn).seq, 3);
+}
+
 /// The real session: every candidate reaches `Compile`, whose planner is `blocked-by:D09.13`;
 /// `fallback` falls back with the session unchanged, `strict` returns the 1235 error.
 #[test]
