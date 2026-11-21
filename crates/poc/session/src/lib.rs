@@ -344,6 +344,31 @@ fn not_in_txn(what: &str) -> SqlError {
     ))
 }
 
+/// The fence of explicit transactions (`specs/exceptions/fences.md`): the read-only node runs
+/// every statement in autocommit mode, so BEGIN / START TRANSACTION, COMMIT and ROLLBACK answer
+/// 1235. `None` for any other statement.
+fn txn_fence(stmt: &Statement) -> Option<SqlError> {
+    match stmt {
+        Statement::Begin => Some(not_in_txn("BEGIN/START TRANSACTION")),
+        Statement::Commit => Some(not_in_txn("COMMIT")),
+        Statement::Rollback => Some(not_in_txn("ROLLBACK")),
+        _ => None,
+    }
+}
+
+/// `SET autocommit = value`: on is accepted, off is the explicit-transaction fence (1235), a
+/// value that is not a boolean is 1231.
+fn autocommit_fence(value: &SetValue) -> Result<(), SqlError> {
+    match bool_value(value) {
+        Some(true) => Ok(()),
+        Some(false) => Err(not_in_txn("autocommit=0")),
+        None => Err(SqlError::new(
+            1231,
+            "Variable 'autocommit' can't be set to the value given",
+        )),
+    }
+}
+
 /// Whether `SET var = value` turns autocommit on (`Some(true)`), off, or is not a boolean.
 fn bool_value(v: &SetValue) -> Option<bool> {
     match v {
@@ -455,9 +480,9 @@ impl Session {
                 self.set(assignments)?;
                 Ok(ok())
             }
-            Statement::Begin => Err(not_in_txn("BEGIN/START TRANSACTION")),
-            Statement::Commit => Err(not_in_txn("COMMIT")),
-            Statement::Rollback => Err(not_in_txn("ROLLBACK")),
+            Statement::Begin | Statement::Commit | Statement::Rollback => {
+                Err(txn_fence(&lowered.stmt).unwrap_or_else(|| not_in_txn("this statement")))
+            }
             Statement::ShowWarnings { .. } => Ok(Response::ResultSet(show_warnings())),
         }
     }
@@ -703,16 +728,7 @@ impl Session {
                         return Err(SqlError::not_supported("SET GLOBAL"));
                     }
                     match name.as_str() {
-                        "autocommit" => match bool_value(value) {
-                            Some(true) => {}
-                            Some(false) => return Err(not_in_txn("autocommit=0")),
-                            None => {
-                                return Err(SqlError::new(
-                                    1231,
-                                    "Variable 'autocommit' can't be set to the value given",
-                                ));
-                            }
-                        },
+                        "autocommit" => autocommit_fence(value)?,
                         "character_set_results" => match set_string(value) {
                             Some(v) => results = Some(v),
                             None => return Err(SqlError::not_supported("this SET value")),
@@ -1079,4 +1095,66 @@ pub async fn detect_new_collation(kv: &KvClient, schema: &SchemaCache) -> Result
         r.first() == Some(&Value::from("new_collation_enabled"))
             && matches!(r.get(1), Some(Value::Bytes(b)) if b.eq_ignore_ascii_case(b"true"))
     }))
+}
+
+#[cfg(test)]
+mod fence_tests {
+    use tidb_sql::ir::SetAssignment;
+
+    use super::*;
+
+    const NOT_IN_TXN: &str = ": explicit transactions are not supported by the read-only node \
+                              (every statement runs in autocommit mode)'";
+
+    /// The explicit-transaction fence answers 1235 with the fixed text, never panics.
+    #[test]
+    fn explicit_transactions_answer_1235() {
+        for (sql, what) in [
+            ("BEGIN", "BEGIN/START TRANSACTION"),
+            ("START TRANSACTION", "BEGIN/START TRANSACTION"),
+            ("COMMIT", "COMMIT"),
+            ("ROLLBACK", "ROLLBACK"),
+        ] {
+            let lowered = tidb_sql::parse_and_lower(sql).unwrap();
+            let e = txn_fence(&lowered.stmt).unwrap_or_else(|| panic!("{sql}: no fence"));
+            assert_eq!(e.code, 1235, "{sql}");
+            assert_eq!(
+                e.message,
+                format!("This version of TiDB doesn't yet support '{what}{NOT_IN_TXN}"),
+                "{sql}"
+            );
+        }
+        let select = tidb_sql::parse_and_lower("SELECT 1").unwrap();
+        assert!(txn_fence(&select.stmt).is_none());
+    }
+
+    #[test]
+    fn autocommit_off_answers_1235() {
+        let value = |sql: &str| match tidb_sql::parse_and_lower(sql).unwrap().stmt {
+            Statement::Set(a) => match a.into_iter().next() {
+                Some(SetAssignment::SysVar { value, .. }) => value,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        for sql in [
+            "SET autocommit = 0",
+            "SET autocommit = OFF",
+            "SET @@autocommit = 'false'",
+        ] {
+            let e = autocommit_fence(&value(sql)).unwrap_err();
+            assert_eq!(e.code, 1235, "{sql}");
+            assert_eq!(
+                e.message,
+                format!("This version of TiDB doesn't yet support 'autocommit=0{NOT_IN_TXN}")
+            );
+        }
+        assert!(autocommit_fence(&value("SET autocommit = 1")).is_ok());
+        assert_eq!(
+            autocommit_fence(&value("SET autocommit = 'x'"))
+                .unwrap_err()
+                .code,
+            1231
+        );
+    }
 }
