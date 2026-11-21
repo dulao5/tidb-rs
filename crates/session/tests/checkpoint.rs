@@ -93,7 +93,6 @@ fn mutations() -> Vec<Mutation> {
         (
             "LastQueryInfo",
             Box::new(|s: &mut Session| {
-                s.vars_mut().state.last_query_info.start_ts = 7;
                 s.vars_mut().last_query_info.start_ts = 7;
             }),
         ),

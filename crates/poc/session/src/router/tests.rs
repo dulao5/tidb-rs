@@ -215,7 +215,7 @@ fn write_statement_state(s: &mut Session) {
     v.found_in_plan_cache = true;
     v.found_in_binding = true;
     v.last_found_rows = 5;
-    v.state.last_query_info.start_ts = 99;
+    v.last_query_info.start_ts = 99;
     v.last_txn_info = "{\"start_ts\":99}".into();
     v.state.txn_ctx.start_ts = 99;
 }

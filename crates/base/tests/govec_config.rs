@@ -115,7 +115,7 @@ fn conf_dump(s: &dyn GoStruct, path: &str, out: &mut Vec<String>) {
             ValRef::U64(x) => x.to_string(),
             ValRef::F64(x) => String::from_utf8(gofmt::sprintf("%v", &[Arg::from(*x)])).unwrap(),
             ValRef::Str(x) => q(x),
-            ValRef::Duration(d) => d.0.to_string(),
+            ValRef::Duration(d) => d.to_string(),
             ValRef::StrSlice(None) | ValRef::StrMap(None) => "nil".to_owned(),
             ValRef::StrSlice(Some(v)) => {
                 format!("[{}]", v.iter().map(|x| q(x)).collect::<Vec<_>>().join(" "))
@@ -343,10 +343,10 @@ fn exec(op: &str, a: &[Value]) -> Value {
             let t = c.open_tracing.to_tracing_config();
             json!({
                 "disabled": t.disabled, "rpc_metrics": t.rpc_metrics,
-                "reporter": [t.reporter.queue_size, t.reporter.buffer_flush_interval.0, t.reporter.log_spans,
+                "reporter": [t.reporter.queue_size, t.reporter.buffer_flush_interval, t.reporter.log_spans,
                     t.reporter.local_agent_host_port],
                 "sampler": [t.sampler.type_, String::from_utf8(gofmt::sprintf("%v", &[Arg::from(t.sampler.param)])).unwrap(),
-                    t.sampler.sampling_server_url, t.sampler.max_operations, t.sampler.sampling_refresh_interval.0],
+                    t.sampler.sampling_server_url, t.sampler.max_operations, t.sampler.sampling_refresh_interval],
             })
         }
         "tikv_config" => {

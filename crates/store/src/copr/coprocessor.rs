@@ -1772,8 +1772,7 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
         let mut timeout = Duration::from_nanos(
             tidb_base::config::get_global_config()
                 .tikv_client
-                .copr_req_timeout
-                .0 as u64,
+                .copr_req_timeout as u64,
         );
         if task.tikv_client_read_timeout > 0 {
             timeout = Duration::from_millis(task.tikv_client_read_timeout);

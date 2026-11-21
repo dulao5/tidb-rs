@@ -295,10 +295,10 @@ impl MetaData {
                 if let Value::Str(s) = data {
                     let dur = crate::gostd::time::parse_duration(s)
                         .map_err(|_| self.parse_err(LexErr::ParseDuration(s.clone())))?;
-                    v.0 = dur;
+                    *v = dur;
                     return Ok(());
                 }
-                self.unify_int(data, IntKind::I64).map(|n| v.0 = n)
+                self.unify_int(data, IntKind::I64).map(|n| *v = n)
             }
             ValMut::Struct(s) => self.unify_struct(data, s),
             ValMut::StrMap(m) => self.unify_map(data, m),

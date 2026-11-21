@@ -28,7 +28,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use tidb_types::{
     Error, MODE_CEILING, MODE_HALF_UP, MODE_TRUNCATE, MyDecimal, RoundMode, decimal_add,
     decimal_bin_size, decimal_div, decimal_mod, decimal_mul, decimal_neg, decimal_peak,
-    decimal_sub, gostd, new_max_or_min_dec,
+    decimal_sub, new_max_or_min_dec,
 };
 
 /// Go target (govec `vec.Target`) whose vectors this Rust target must reproduce.
@@ -262,7 +262,10 @@ fn exec_op(op: &str, a: &Args<'_>) -> (Value, Result<(), Error>) {
         }
         "to_float64" => {
             let (v, err) = a.dec(0).to_float64();
-            (json!(gostd::format_float_g(v)), err)
+            (
+                json!(tidb_base::gostd::strconv::format_float(v, b'g', -1, 64)),
+                err,
+            )
         }
         "round_inplace" => {
             let mut d = a.dec(0);

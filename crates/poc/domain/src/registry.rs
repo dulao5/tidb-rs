@@ -22,7 +22,7 @@ use crate::schema_validator::SchemaValidator;
 
 /// Default schema lease (Go: `config.DefSchemaLease`, the `--lease` flag): 45 s.
 pub const DEF_SCHEMA_LEASE: Duration =
-    Duration::from_nanos(tidb_base::config::DefSchemaLease.0 as u64);
+    Duration::from_nanos(tidb_base::config::DefSchemaLease as u64);
 
 /// Bounds of the health state machine.
 #[derive(Clone, Copy, Debug)]

@@ -37,17 +37,13 @@ std	path/filepath.Clean	2	baseline 2026-11-21: 2 sites in one file (crates/base/
 std	path/filepath.Join	2	baseline 2026-11-21: 2 sites in one file (crates/base/src/gostd/path.rs), per-type or per-call-site variants; review
 std	sort.Search	4	baseline 2026-11-21: copies in chunk, execdetails, store, types; to consolidate (Go std into tidb_base::gostd)
 std	strconv.Atoi	3	baseline 2026-11-21: copies in base, execdetails, types; to consolidate (Go std into tidb_base::gostd)
-std	strconv.FormatFloat	3	baseline 2026-11-21: copies in base, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
+std	strconv.FormatFloat	2	baseline 2026-11-21: copies in base, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
 std	strconv.NumError.Error	5	baseline 2026-11-21: copies in base, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
 std	strconv.ParseFloat	3	baseline 2026-11-21: copies in base, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
 std	strconv.ParseInt	3	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
 std	strconv.ParseInt(s, 10, 32)	2	baseline 2026-11-21: copies in sessionctx; to consolidate (Go std into tidb_base::gostd)
 std	strconv.ParseUint	8	baseline 2026-11-21: copies in base, expression, sessionctx, types; to consolidate (Go std into tidb_base::gostd)
-std	strconv.fmtE	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
-std	strconv.fmtF	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
-std	strconv.formatDigits	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
 std	strconv.genericFtoa	2	baseline 2026-11-21: copies in base; to consolidate (Go std into tidb_base::gostd)
-std	strconv.ryuFtoaShortest	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
 std	strconv.syntaxError	2	baseline 2026-11-21: 2 sites in one file (crates/types/src/gostd.rs), per-type or per-call-site variants; review
 std	strings.EqualFold	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
 std	strings.ToLower	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
@@ -69,8 +65,6 @@ std	unicode.IsSpace	5	baseline 2026-11-21: copies in base, sessionctx, types; to
 std	unicode/utf8.DecodeLastRune	2	baseline 2026-11-21: copies in base, types; to consolidate (Go std into tidb_base::gostd)
 std	unicode/utf8.DecodeRune	4	baseline 2026-11-21: copies in base, planner, types; to consolidate (Go std into tidb_base::gostd)
 std	unicode/utf8.RuneCount	2	baseline 2026-11-21: copies in base, planner; to consolidate (Go std into tidb_base::gostd)
-type-def	$GOROOT/src/strconv	DecimalSlice	2	duplicate port of strconv.decimalSlice in tidb-base gostd and tidb-types gostd; to resolve (types should use tidb_base::gostd)
-type-def	$GOROOT/src/time	Duration	2	config's reflect Duration vs gostd time.Duration alias; to resolve (use one)
 type-def	pkg/expression/exprctx	ExprContext	2	false positive: trait for the Go interface exprctx.ExprContext and the struct exprstatic.ExprContext (another Go type of the same name)
 type-def	pkg/meta/model	ColumnInfo	2	PoC stand-in in crates/meta (pre-port metadata reader); goes when the PoC is replaced (methodology Q4)
 type-def	pkg/meta/model	IndexColumn	2	PoC stand-in in crates/meta; goes when the PoC is replaced
@@ -80,6 +74,4 @@ type-def	pkg/meta/model	TableInfo	2	PoC stand-in in crates/meta; goes when the P
 type-def	pkg/parser/model	CIStr	2	parser/src/ast.rs hand-written AST stand-in (glue: poc); goes with the AST port
 type-def	pkg/parser/types	FieldType	3	PoC stand-ins: crates/meta and parser/src/ast.rs (glue: poc, replaced when the AST nodes holding it are ported)
 type-def	pkg/session	LazyTxn	2	boundary trait in sessiontxn for session.LazyTxn (crate layering), one implementation
-type-def	pkg/sessionctx/sessionstates	LastDDLInfo	2	real duplicate: sessionstates.rs and variable/session_state.rs both translate sessionstates.LastDDLInfo; to resolve
-type-def	pkg/sessionctx/sessionstates	QueryInfo	2	real duplicate: sessionstates.rs and variable/session_state.rs both translate sessionstates.QueryInfo; to resolve
 type-def	pkg/store/driver/backoff	Backoffer	2	boundary trait in store/copr for the driver's Backoffer (crate layering), one implementation

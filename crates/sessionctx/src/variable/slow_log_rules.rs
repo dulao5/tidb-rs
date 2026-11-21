@@ -42,7 +42,7 @@ impl Threshold {
         match self {
             Threshold::U64(v) => v.to_string(),
             Threshold::I64(v) => v.to_string(),
-            Threshold::F64(v) => tidb_types::gostd::format_float_g(*v),
+            Threshold::F64(v) => tidb_base::gostd::strconv::format_float(*v, b'g', -1, 64),
             Threshold::Bool(v) => v.to_string(),
             Threshold::Str(v) => v.clone(),
         }
@@ -165,13 +165,13 @@ fn parse_float64(v: &str) -> Result<Threshold, Error> {
     if f.is_nan() || f.is_infinite() {
         return Err(errors::new(format!(
             "threshold value must be finite, got {}",
-            tidb_types::gostd::format_float_g(f)
+            tidb_base::gostd::strconv::format_float(f, b'g', -1, 64)
         )));
     }
     if f < 0.0 {
         return Err(errors::new(format!(
             "threshold value must be non-negative, got {}",
-            tidb_types::gostd::format_float_g(f)
+            tidb_base::gostd::strconv::format_float(f, b'g', -1, 64)
         )));
     }
     Ok(Threshold::F64(f))

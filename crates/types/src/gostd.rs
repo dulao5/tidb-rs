@@ -3,14 +3,13 @@
 //!
 //! go-file: $GOROOT/src/strings/strings.go
 //! go-file: $GOROOT/src/unicode/utf8/utf8.go
-//! go-file: $GOROOT/src/strconv/ftoa.go
 //! go-file: $GOROOT/src/strconv/atof.go
 //! go-file: $GOROOT/src/strconv/atoi.go
 //! go-file: $GOROOT/src/encoding/json/decode.go
 //!
-//! Only the logic is ported; the shortest round-trip digits of a float come from the ryu
-//! crate (the same Ryū algorithm as Go's `ftoaryu.go`); JSON decoding is tidb-base's port of
-//! Go's `encoding/json` (`tidb_base::gostd::json`).
+//! Only the logic is ported. `strconv.FormatFloat` is tidb-base's port
+//! (`tidb_base::gostd::strconv::format_float`); JSON decoding is tidb-base's port of Go's
+//! `encoding/json` (`tidb_base::gostd::json`).
 
 mod eisel_lemire;
 
@@ -85,221 +84,6 @@ pub(crate) fn trim_space(s: &[u8]) -> &[u8] {
         stop -= w;
     }
     &s[start..stop]
-}
-
-/// `strconv.FormatFloat(f, 'g', -1, 64)`.
-// go-std: strconv.FormatFloat L2 (only fmt 'g', prec -1, bitSize 64; shortest digits from the ryu crate)
-pub fn format_float_g(f: f64) -> String {
-    if f.is_nan() {
-        return "NaN".to_string();
-    }
-    if f.is_infinite() {
-        return if f.is_sign_negative() { "-Inf" } else { "+Inf" }.to_string();
-    }
-    let neg = f.is_sign_negative();
-    let digs = ryu_ftoa_shortest(f.abs());
-    let mut dst = Vec::with_capacity(24);
-    // FormatFloat(.., 'g', -1, ..): shortest, prec = digs.nd.
-    let prec = digs.nd;
-    format_digits(&mut dst, true, neg, &digs, prec, b'g');
-    String::from_utf8(dst).expect("formatted float is ASCII")
-}
-
-/// `ryuFtoaShortest`: the shortest decimal digits that parse back to `f` (finite, `f >= 0`)
-/// and the decimal point position, without trailing zeros; zero is `nd = 0, dp = 0`.
-///
-/// Go's `ryuFtoaShortest` and the ryu crate are the same algorithm (Ryū, Adams 2018),
-/// including the round-half-even choice between two shortest candidates (e.g.
-/// 979980073090831.25 is "9799800730908312", where Rust's `{:e}` gives "...313"). The crate
-/// only exposes the formatted string, so its digits and exponent are read back from it.
-// go-std: strconv.ryuFtoaShortest L2 (ryu crate)
-fn ryu_ftoa_shortest(f: f64) -> DecimalSlice {
-    let mut digs = DecimalSlice {
-        d: Vec::with_capacity(17),
-        nd: 0,
-        dp: 0,
-    };
-    if f == 0.0 {
-        return digs;
-    }
-    let mut buf = ryu::Buffer::new();
-    // "1234.5", "0.00012345", "12340000000.0", "1e30", "1.234e-7".
-    let s = buf.format_finite(f).as_bytes();
-    let (mant, exp) = match s.iter().position(|&b| b == b'e') {
-        Some(i) => (&s[..i], parse_exp(&s[i + 1..])),
-        None => (s, 0),
-    };
-    let mut point = None;
-    for &b in mant {
-        if b == b'.' {
-            point = Some(digs.d.len() as isize);
-        } else if b == b'0' && digs.d.is_empty() {
-            // Leading zeros of "0.000123" only move the decimal point.
-            point = point.map(|p| p - 1);
-        } else {
-            digs.d.push(b);
-        }
-    }
-    while digs.d.last() == Some(&b'0') {
-        digs.d.pop();
-    }
-    digs.nd = digs.d.len() as isize;
-    digs.dp = point.unwrap_or(mant.len() as isize) + exp;
-    digs
-}
-
-/// The exponent of ryu's scientific form: `-?[0-9]{1,3}`.
-// glue: reads the exponent of ryu's scientific output (Go's ryuFtoaShortest fills a decimalSlice directly)
-fn parse_exp(e: &[u8]) -> isize {
-    let (neg, e) = match e.split_first() {
-        Some((b'-', rest)) => (true, rest),
-        _ => (false, e),
-    };
-    let v = e
-        .iter()
-        .fold(0isize, |v, &b| v * 10 + isize::from(b - b'0'));
-    if neg { -v } else { v }
-}
-
-struct DecimalSlice {
-    d: Vec<u8>,
-    nd: isize,
-    dp: isize,
-}
-
-// go-std: strconv.formatDigits L1
-fn format_digits(
-    dst: &mut Vec<u8>,
-    shortest: bool,
-    neg: bool,
-    digs: &DecimalSlice,
-    mut prec: isize,
-    fmt: u8,
-) {
-    match fmt {
-        b'e' | b'E' => fmt_e(dst, neg, digs, prec, fmt),
-        b'f' => fmt_f(dst, neg, digs, prec),
-        b'g' | b'G' => {
-            // trailing fractional zeros in 'e' form will be trimmed.
-            let mut eprec = prec;
-            if eprec > digs.nd && digs.nd >= digs.dp {
-                eprec = digs.nd;
-            }
-            // %e is used if the exponent from the conversion
-            // is less than -4 or greater than or equal to the precision.
-            // if precision was the shortest possible, use precision 6 for this decision.
-            if shortest {
-                eprec = 6;
-            }
-            let exp = digs.dp - 1;
-            if exp < -4 || exp >= eprec {
-                if prec > digs.nd {
-                    prec = digs.nd;
-                }
-                return fmt_e(dst, neg, digs, prec - 1, fmt + b'e' - b'g');
-            }
-            if prec > digs.dp {
-                prec = digs.nd;
-            }
-            fmt_f(dst, neg, digs, (prec - digs.dp).max(0))
-        }
-        _ => {
-            // unknown format
-            dst.push(b'%');
-            dst.push(fmt);
-        }
-    }
-}
-
-// go-std: strconv.fmtE L1
-fn fmt_e(dst: &mut Vec<u8>, neg: bool, d: &DecimalSlice, prec: isize, fmt: u8) {
-    // sign
-    if neg {
-        dst.push(b'-');
-    }
-
-    // first digit
-    let mut ch = b'0';
-    if d.nd != 0 {
-        ch = d.d[0];
-    }
-    dst.push(ch);
-
-    // .moredigits
-    if prec > 0 {
-        dst.push(b'.');
-        let mut i = 1;
-        let m = d.nd.min(prec + 1);
-        if i < m {
-            dst.extend_from_slice(&d.d[i as usize..m as usize]);
-            i = m;
-        }
-        while i <= prec {
-            dst.push(b'0');
-            i += 1;
-        }
-    }
-
-    // e±
-    dst.push(fmt);
-    let mut exp = d.dp - 1;
-    if d.nd == 0 {
-        // special case: 0 has exponent 0
-        exp = 0;
-    }
-    if exp < 0 {
-        ch = b'-';
-        exp = -exp;
-    } else {
-        ch = b'+';
-    }
-    dst.push(ch);
-
-    // dd or ddd
-    if exp < 10 {
-        dst.extend_from_slice(&[b'0', exp as u8 + b'0']);
-    } else if exp < 100 {
-        dst.extend_from_slice(&[(exp / 10) as u8 + b'0', (exp % 10) as u8 + b'0']);
-    } else {
-        dst.extend_from_slice(&[
-            (exp / 100) as u8 + b'0',
-            ((exp / 10) as u8) % 10 + b'0',
-            (exp % 10) as u8 + b'0',
-        ]);
-    }
-}
-
-// go-std: strconv.fmtF L1
-fn fmt_f(dst: &mut Vec<u8>, neg: bool, d: &DecimalSlice, prec: isize) {
-    // sign
-    if neg {
-        dst.push(b'-');
-    }
-
-    // integer, padded with zeros as needed.
-    if d.dp > 0 {
-        let mut m = d.nd.min(d.dp);
-        dst.extend_from_slice(&d.d[..m as usize]);
-        while m < d.dp {
-            dst.push(b'0');
-            m += 1;
-        }
-    } else {
-        dst.push(b'0');
-    }
-
-    // fraction
-    if prec > 0 {
-        dst.push(b'.');
-        for i in 0..prec {
-            let mut ch = b'0';
-            let j = d.dp + i;
-            if 0 <= j && j < d.nd {
-                ch = d.d[j as usize];
-            }
-            dst.push(ch);
-        }
-    }
 }
 
 /// `strconv.ErrSyntax` / `strconv.ErrRange`: the `Err` field of a `*strconv.NumError`.
@@ -949,7 +733,9 @@ mod tests {
 
     #[test]
     fn format_float_g_matches_go() {
-        // Expected strings from Go 1.25 strconv.FormatFloat(f, 'g', -1, 64).
+        // Expected strings from Go 1.25 strconv.FormatFloat(f, 'g', -1, 64), the form
+        // MyDecimal.FromFloat64 parses.
+        let format_float_g = |f| tidb_base::gostd::strconv::format_float(f, b'g', -1, 64);
         for (f, want) in [
             (0.0, "0"),
             (-0.0, "-0"),
