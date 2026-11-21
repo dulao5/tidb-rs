@@ -26,14 +26,27 @@ passed or did not run, a census missing for a part that ran, or an unknown layer
 Against the previous run, fewer statements (the denominator) or less new-stack coverage (new
 stack and equal to Go) in a layer is REGRESSED. The merged census goes to census.tsv next to
 --out, for the tracker.
+
+Divergence ledger (#262, docs/testing/rulings.md): a mismatch an approved ruling covers has the
+verdict `ruled` (not equal, not RED, counted and listed). A full run (one with the
+integrationtest part) writes its hit counts to rulings-run.tsv next to --out; with
+--rulings-history (earlier full runs' rulings-run.tsv, one sub-directory per run, newest first
+by name) the hit audit runs: a ruling with no hit in the last N full runs is RED; an expired
+cosmetic ruling is a warning (REGRESSED).
 """
 
 import argparse
+import datetime
 import glob
 import json
 import os
 import re
+import sys
 from collections import Counter, defaultdict
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                "scripts"))
+import check_rulings  # noqa: E402
 
 PARTS = ("ab", "sysbench", "faults", "locks", "tpch", "integrationtest")
 # Census layers (tools/ab/src/census.rs LAYERS) and the part that runs each.
@@ -79,7 +92,7 @@ def pct(n, d):
 
 def agreement(c):
     """match + both_error over everything but unsupported (statements B could execute)."""
-    ran = c["match"] + c["both_error"] + c["mismatch"]
+    ran = c["match"] + c["both_error"] + c["mismatch"] + c.get("ruled", 0)
     return ran, c["match"] + c["both_error"]
 
 
@@ -177,7 +190,7 @@ def integration(base, expected=None):
 
 # results.jsonl verdicts of reads sent to tidb-rs (the others: "b_set_rejected", a session
 # statement tidb-rs rejected; "skipped", a read not sent because the session diverged).
-SENT = ("match", "mismatch", "unsupported", "b_error")
+SENT = ("match", "mismatch", "ruled", "unsupported", "b_error")
 
 
 def norm_sql(sql):
@@ -502,15 +515,15 @@ def section_integration(status, cur, prev, lines, expected=None):
         lines.append("_Not run._\n")
         return
     t = cur["totals"]
-    ran = t["match"] + t["mismatch"] + t["b_error"]
+    ran = t["match"] + t["mismatch"] + t["ruled"] + t["b_error"]
     status = status or {}
     lines.append(
         f"{status.get('tests', '?')} test files selected, "
         f"{sum(1 for c in cur['tests'].values() if sent(c))} with reads sent to tidb-rs"
         + (f", {status['seconds'] // 60} min" if status.get("seconds") else "")
         + f". {sent(t)} reads sent to tidb-rs: {t['match']} match, {t['mismatch']} **mismatch**, "
-        f"{t['b_error']} tidb-rs error, {t['unsupported']} unsupported. Agreement on what tidb-rs "
-        f"executed (match / match + mismatch + error): **{pct(t['match'], ran)}**.\n"
+        f"{t['ruled']} ruled, {t['b_error']} tidb-rs error, {t['unsupported']} unsupported. Agreement "
+        f"on what tidb-rs executed (match / match + mismatch + ruled + error): **{pct(t['match'], ran)}**.\n"
     )
     lines.append(
         f"Mismatches: **{len(cur['mismatches'])} new**, {len(cur['known'])} known "
@@ -551,6 +564,71 @@ def section_integration(status, cur, prev, lines, expected=None):
     if len(top) > 15:
         lines.append(f"| … {len(top) - 15} more | | | | | |")
     lines.append("")
+
+
+def rulings_run(base):
+    """{id: hits} of this run (every part's rulings-hits.tsv, summed), or None without any."""
+    if not base or not glob.glob(os.path.join(base, "**", check_rulings.HITS_FILE), recursive=True):
+        return None
+    return check_rulings.read_hits(base)
+
+
+def ruled_records(base):
+    """Statements recorded as `ruled` (any part), as (unit, line, ruling kind, query)."""
+    out = []
+    for path in glob.glob(os.path.join(base, "**", "results.jsonl"), recursive=True):
+        with open(path) as f:
+            for line in f:
+                r = json.loads(line) if line.strip() else {}
+                if r.get("verdict") == "ruled":
+                    out.append((r.get("template", "?"), r.get("line", "-"),
+                                r.get("ruling") or r.get("kind", ""), r.get("query", "")))
+    return out
+
+
+def rulings_audit(ledger, base, history, full, today):
+    """(errors, warnings, table, this run's hits) of the hit audit. Only a full run counts; the
+    earlier full runs come from `history` (one sub-directory per run, newest first by name)."""
+    cur = rulings_run(base)
+    if not full or cur is None:
+        return [], [], [], cur
+    runs = [cur]
+    if history and os.path.isdir(history):
+        runs += [check_rulings.read_hits(os.path.join(history, d), check_rulings.RUN_FILE)
+                 for d in sorted(os.listdir(history)) if os.path.isdir(os.path.join(history, d))]
+    errors, warnings, table = check_rulings.audit(ledger, runs, today)
+    return errors, warnings, table, cur
+
+
+def section_rulings(ledger, cur, records, errors, warnings, table, full, lines):
+    lines.append("## Divergence ledger (docs/testing/rulings.toml)\n")
+    rulings = ledger.get("ruling", [])
+    pending = [r["id"] for r in rulings if r.get("approver") == check_rulings.PENDING]
+    matched = [r for r in rulings if r.get("layer") != "none"]
+    lines.append(f"{len(rulings)} rulings, {len(matched)} matched by the comparator, "
+                 f"{len(pending)} pending the owner (they suppress nothing). "
+                 f"Statements recorded as `ruled` this run: {len(records)}.\n")
+    if cur is None:
+        lines.append("_No rulings-hits.tsv in this run (tidb-ab did not run)._\n")
+    elif not full:
+        lines.append("_Not a full run (no integrationtest part): the hit audit did not run._\n")
+    if table:
+        lines.append("| ruling | approver | hits, newest full run first |")
+        lines.append("|---|---|---|")
+        for rid, approver, last in table:
+            lines.append(f"| {rid} | {approver} | {' / '.join(map(str, last)) or '—'} |")
+        lines.append("")
+    for e in errors:
+        lines.append(f"- **AUDIT FAILED**: {e}")
+    for w in warnings:
+        lines.append(f"- warning: {w}")
+    if errors or warnings:
+        lines.append("")
+    for unit, line, kind, q in records[:20]:
+        q = " ".join(q.split())[:100].replace("|", "/")
+        lines.append(f"- `{unit}:{line}` {kind} `{q}`")
+    if records:
+        lines.append("")
 
 
 def section_diverged(cur, prev, lines):
@@ -690,6 +768,10 @@ def main():
     ap.add_argument("--parts", default=",".join(PARTS), help="parts expected in this run")
     ap.add_argument("--out", required=True)
     ap.add_argument("--it-expected", help=f"accepted integration-test mismatches (default {IT_EXPECTED})")
+    ap.add_argument("--rulings", default=check_rulings.LEDGER, help="the divergence ledger")
+    ap.add_argument("--rulings-history", help="earlier full runs' rulings-run.tsv, one sub-directory "
+                    "per run, newest first by name")
+    ap.add_argument("--today", default=datetime.date.today().isoformat())
     args = ap.parse_args()
 
     expected = [p for p in args.parts.split(",") if p]
@@ -721,6 +803,28 @@ def main():
             status[p] = "fail"
         print(f"census: {why}")
     prev_cen = census_totals(census(args.previous)[0])
+    # The divergence ledger's hit audit, over full runs (those with the integrationtest part
+    # run to the end: an incomplete one would count missing statements as missing hits).
+    ledger, ledger_problems = check_rulings.load(args.rulings)
+    ledger_problems += check_rulings.check(ledger) if ledger else []
+    full = "integrationtest" in expected and status.get("integrationtest") in ("ok", "fail")
+    if ledger_problems:
+        for why in ledger_problems:
+            print(f"rulings: {why}")
+        status[next(iter(status))] = "fail"
+        rl_errors, rl_warnings, rl_table, rl_cur = ledger_problems, [], [], None
+    else:
+        rl_errors, rl_warnings, rl_table, rl_cur = rulings_audit(
+            ledger, args.inp, args.rulings_history, full, args.today)
+    if rl_errors and not ledger_problems:
+        status["integrationtest"] = "fail"
+        for why in rl_errors:
+            print(f"rulings: {why}")
+    if full and rl_cur is not None:
+        with open(os.path.join(os.path.dirname(os.path.abspath(args.out)), check_rulings.RUN_FILE), "w") as f:
+            f.write("id\thits\n")
+            for rid, n in sorted(rl_cur.items()):
+                f.write(f"{rid}\t{n}\n")
 
     cur_ab, prev_ab = load(args.inp, "ab-classified.json"), load(args.previous, "ab-classified.json")
     cur_sb, prev_sb = load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json")
@@ -731,6 +835,8 @@ def main():
                             load(args.inp, "tpch-time.json"), load(args.previous, "tpch-time.json"),
                             cur_it, prev_it, cur_new, prev_new)
     regressed += census_regressions(census_totals(cen_rows), prev_cen)
+    # An expired cosmetic ruling (still firing or not) is a warning: yellow, not a pass.
+    regressed += [f"divergence ledger: {w}" for w in rl_warnings]
     if any(s == "fail" for s in status.values()):
         verdict, code = "RED", 1
     elif any(s in ("incomplete", "missing") for s in status.values()):
@@ -777,6 +883,9 @@ def main():
         section_integration(load(args.inp, "integrationtest.json"), cur_it, prev_it, lines, accepted)
     if cen_rows or cen_problems:
         section_census(cen_rows, prev_cen, cen_problems, lines)
+    if ledger:
+        section_rulings(ledger, rl_cur, ruled_records(args.inp), rl_errors, rl_warnings, rl_table, full,
+                        lines)
     write_census_tsv(os.path.join(os.path.dirname(os.path.abspath(args.out)), "census.tsv"), cen_rows,
                      args.commit)
     if not args.previous:

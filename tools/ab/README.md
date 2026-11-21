@@ -63,7 +63,14 @@ parameters):
 - OK packets: affected rows and warning count. Warnings: when either side reports any, `SHOW
   WARNINGS` runs on both and must be identical.
 
-Output: a table of match / mismatch / unsupported / both_error per template and protocol, and
+A mismatch that an approved ruling of the divergence ledger covers (`docs/testing/rulings.toml`,
+spec `docs/testing/rulings.md`) is `ruled` instead: never a match, still counted, listed in
+mismatches.jsonl with its diff and the ruling id. A ruling still `pending-owner` changes nothing
+(the diff names it). Each run writes `<out-dir>/rulings-hits.tsv`, the hit count of every ruling
+the comparator can match (0 included). The ledger is built into `ab`; `--rulings FILE` reads
+another one.
+
+Output: a table of match / mismatch / ruled / unsupported / both_error per template and protocol, and
 `<out-dir>/mismatches.jsonl` (query, params, both results with metadata and up to
 `--report-rows` rows, and the diff) plus `<out-dir>/unsupported.jsonl`. `-v` prints mismatches
 as they happen. Exit status: 0 = no mismatch, 1 = mismatches, 2 = setup error (e.g. cannot
@@ -143,6 +150,9 @@ Outcome per statement:
   `columns` (names or count), `metadata` (type, length, flags, charset), `error` (different
   error code / SQLSTATE / message, or B returned a result where A failed), `shape` (result set
   vs OK), `warnings`, `affected_rows`.
+- `ruled`: a `mismatch` or `b_error` that an approved ruling of `docs/testing/rulings.toml`
+  covers; kind `ruled:<id>`. Not a match, not a failure, counted and listed. A pending ruling
+  leaves it a mismatch, with kind `<kind> (pending ruling <id>)`.
 - `unsupported`: B answered 1235 (`ER_NOT_SUPPORTED_YET`), or B could not log in as the user of
   a `connect` (tidb-rs has a single account).
 - `b_error`: A succeeded and B failed otherwise (other error code, timeout, lost connection).
@@ -187,10 +197,11 @@ Output in `--out-dir`:
   kind, B error code, skip reason, `session`), detail (B's message, the diff, A's error), elapsed
   ms, SQL. Fields are escaped (`\t`, `\n`, `\\`).
 - `files.tsv`: per file: statements, reads, match, mismatch, unsupported, b_error, a_error,
-  skipped, write, b_set_rejected, retried, seconds.
-- `mismatches.jsonl`: every mismatch and b_error with both answers (columns and up to
+  skipped, write, b_set_rejected, retried, seconds, ruled.
+- `rulings-hits.tsv`: hits per ruling (see above).
+- `mismatches.jsonl`: every mismatch, ruled read and b_error with both answers (columns and up to
   `--report-rows` rows) and the session statements B had rejected in that connection.
-- `results.jsonl`: every read sent to B (match, mismatch, unsupported, b_error), one JSON
+- `results.jsonl`: every read sent to B (match, mismatch, ruled, unsupported, b_error), one JSON
   object per line in the format of the other workloads (`template` = test name, `protocol`
   `text`, `verdict`, `query`) plus `line`, and for anything but a match the `kind` and
   `detail` of `statements.tsv`. Also what the session divergence hides: every session
