@@ -67,26 +67,7 @@ pub fn get_compare_func(tp: &FieldType) -> Option<CompareFunc> {
     Some(f)
 }
 
-/// Go's `cmp.Compare` for ordered values: NaN is less than every number and equal to NaN.
-// go-std: cmp.Compare L1
-pub(crate) fn go_cmp<T: PartialOrd>(x: T, y: T) -> isize {
-    #[allow(clippy::eq_op)]
-    let (x_nan, y_nan) = (x != x, y != y);
-    if x_nan {
-        if y_nan {
-            return 0;
-        }
-        return -1;
-    }
-    if y_nan {
-        return 1;
-    }
-    match x.partial_cmp(&y) {
-        Some(Ordering::Less) => -1,
-        Some(Ordering::Greater) => 1,
-        _ => 0,
-    }
-}
+pub(crate) use tidb_base::gostd::cmp::compare as go_cmp;
 
 // go: cmpNull L1
 fn cmp_null(l_null: bool, r_null: bool) -> isize {
@@ -301,26 +282,8 @@ pub fn compare(row: Row<'_>, col_idx: usize, ad: &Datum) -> isize {
     }
 }
 
-/// Go's `sort.Search(n, f)`: the smallest index in `[0, n)` at which `f` is true, assuming
-/// `f` is false then true; the calls are made in Go's order (`LowerBound`'s `f` has a side
-/// effect).
-// go-std: sort.Search L1
-fn sort_search(n: usize, mut f: impl FnMut(usize) -> bool) -> usize {
-    // Define f(-1) == false and f(n) == true.
-    // Invariant: f(i-1) == false, f(j) == true.
-    let (mut i, mut j) = (0usize, n);
-    while i < j {
-        let h = (i + j) >> 1; // avoid overflow when computing h
-        // i ≤ h < j
-        if !f(h) {
-            i = h + 1; // preserves f(i-1) == false
-        } else {
-            j = h; // preserves f(j) == true
-        }
-    }
-    // i == j, f(i-1) == false, and f(j) (= f(i)) == true  =>  answer is i.
-    i
-}
+// `LowerBound`'s `f` has a side effect: sort.Search makes the calls in Go's order.
+use tidb_base::gostd::sort::search as sort_search;
 
 impl Chunk {
     /// LowerBound searches on the non-decreasing Column colIdx,

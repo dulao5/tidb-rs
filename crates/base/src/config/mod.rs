@@ -93,12 +93,12 @@ pub const DefPluginAuditLogBufferSize: isize = 0;
 /// DefPluginAuditLogFlushInterval is the default time interval to flush plugin audit log.
 pub const DefPluginAuditLogFlushInterval: isize = 30;
 /// DefAuthTokenRefreshInterval is the default time interval to refresh tidb auth token.
-pub const DefAuthTokenRefreshInterval: Duration = Duration(3_600_000_000_000);
+pub const DefAuthTokenRefreshInterval: Duration = 3_600_000_000_000;
 /// EnvVarKeyspaceName is the system env name for keyspace name.
 pub const EnvVarKeyspaceName: &str = "KEYSPACE_NAME";
 /// MaxTokenLimit is the max token limit value.
 pub const MaxTokenLimit: usize = 1024 * 1024;
-pub const DefSchemaLease: Duration = Duration(45_000_000_000);
+pub const DefSchemaLease: Duration = 45_000_000_000;
 /// DefRowsForSampleRate is default sample rows used to calculate samplerate (const.go).
 pub const DefRowsForSampleRate: isize = 110000;
 

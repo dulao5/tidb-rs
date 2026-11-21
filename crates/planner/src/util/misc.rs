@@ -321,23 +321,7 @@ pub fn derive_limit_stats(child_profile: &StatsInfo, limit_count: f64) -> StatsI
     stats
 }
 
-/// Go's `math.Min`: NaN if either is NaN, -0 is smaller than +0.
-// go-std: math.Min L1
-fn go_min(x: f64, y: f64) -> f64 {
-    if x.is_infinite() && x < 0.0 || y.is_infinite() && y < 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if x.is_nan() || y.is_nan() {
-        return f64::NAN;
-    }
-    if x == 0.0 && x == y {
-        if x.is_sign_negative() {
-            return x;
-        }
-        return y;
-    }
-    if x < y { x } else { y }
-}
+use tidb_base::gostd::math::min as go_min;
 
 /// ExtractTableAlias returns table alias of the base.LogicalPlan's columns.
 /// It will return nil when there are multiple table alias, because the alias is only used to check if

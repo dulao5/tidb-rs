@@ -17,15 +17,7 @@ use tidb_kv::KeyRange;
 use tidb_kv::option::ReplicaReadType;
 use tikv_client::proto::{coprocessor, kvrpcpb, metapb};
 
-/// `bytes.Compare`.
-// go-std: bytes.Compare L1
-fn bytes_compare(a: &[u8], b: &[u8]) -> isize {
-    match a.cmp(b) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }
-}
+use tidb_base::gostd::bytes::compare as bytes_compare;
 
 /// `tikv.RegionVerID`: a region's id with its epoch, the identity a cop task is sent to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -184,19 +176,10 @@ impl Bucket {
     }
 }
 
-/// `sort.Search(n, f)`: the smallest index in [0, n) at which f is true, n if none.
-// go-std: sort.Search L1
-pub(crate) fn sort_search(n: isize, mut f: impl FnMut(usize) -> bool) -> isize {
-    let (mut i, mut j) = (0isize, n);
-    while i < j {
-        let h = ((i + j) as usize >> 1) as isize;
-        if !f(h as usize) {
-            i = h + 1;
-        } else {
-            j = h;
-        }
-    }
-    i
+/// `sort.Search(n, f)` with Go's `int` `n`: a negative `n` finds nothing (0), as in Go.
+// glue: isize form of tidb_base::gostd::sort::search
+pub(crate) fn sort_search(n: isize, f: impl FnMut(usize) -> bool) -> isize {
+    tidb_base::gostd::sort::search(n.max(0) as usize, f) as isize
 }
 
 /// The part of `tikv.RPCContext` (and of its `*tikv.Store`) that copr reads when it batches

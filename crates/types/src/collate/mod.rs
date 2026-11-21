@@ -29,7 +29,6 @@ mod unicode_0900_ai_ci_impl;
 mod unicode_ci;
 
 use std::any::Any;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
@@ -467,15 +466,7 @@ fn compare_common(a: &[u8], b: &[u8], key_func: impl Fn(char) -> u32) -> isize {
     cmp_compare(a.len() - ai, b.len() - bi)
 }
 
-/// Go `cmp.Compare` for ordered integers.
-// go-std: cmp.Compare L1
-fn cmp_compare<T: Ord>(x: T, y: T) -> isize {
-    match x.cmp(&y) {
-        Ordering::Less => -1,
-        Ordering::Equal => 0,
-        Ordering::Greater => 1,
-    }
-}
+use tidb_base::gostd::cmp::compare as cmp_compare;
 
 /// CanUseRawMemAsKey returns true if current collator can use the original raw memory as the key
 /// only return true for binCollator and derivedBinCollator

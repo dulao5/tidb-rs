@@ -307,21 +307,7 @@ impl TDigest {
     }
 }
 
-/// `sort.Search(n, f)`: the smallest index i in [0, n) at which f(i) is true, assuming that
-/// on the range [0, n), f(i) == true implies f(i+1) == true; n if there is no such index.
-// go-std: sort.Search L1
-fn search(n: usize, mut f: impl FnMut(usize) -> bool) -> usize {
-    let (mut i, mut j) = (0usize, n);
-    while i < j {
-        let h = (i + j) >> 1;
-        if !f(h) {
-            i = h + 1;
-        } else {
-            j = h;
-        }
-    }
-    i
-}
+use tidb_base::gostd::sort::search;
 
 // go-dep: github.com/influxdata/tdigest@v0.0.1.weightedAverage L1
 fn weighted_average(x1: f64, w1: f64, x2: f64, w2: f64) -> f64 {

@@ -36,11 +36,7 @@ pub fn check_fsp(fsp: isize) -> (isize, Result<(), Error>) {
     (fsp, Ok(()))
 }
 
-/// `math.Pow10(n)` for the small non-negative `n` used here (exact in float64).
-// go-std: math.Pow10 L2 (0 <= n <= 9 only)
-pub(crate) fn pow10(n: isize) -> f64 {
-    10f64.powi(n as i32)
-}
+pub(crate) use tidb_base::gostd::math::pow10;
 
 /// ParseFrac parses the input string according to fsp, returns the microsecond,
 /// and also a bool value to indice overflow. eg:

@@ -17,9 +17,8 @@
 //! fills `tidb_last_query_info` (the PoC does not report it: 0 until then).
 
 use tidb_mysql_protocol::{Response, SqlError};
-use tidb_sessionctx::sessionstates::QueryInfo as LastQueryInfo;
+use tidb_sessionctx::sessionstates::QueryInfo;
 use tidb_sessionctx::variable::session::SessionVars;
-use tidb_sessionctx::variable::session_state::QueryInfo;
 
 /// Which engine ran a statement.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -135,7 +134,7 @@ impl LastStmtInfo {
             plan_from_cache: vars.found_in_plan_cache,
             plan_from_binding: vars.found_in_binding,
             use_chunk_alloc: sc.get_use_chunk_alloc_status(),
-            query_info: vars.state.last_query_info.clone(),
+            query_info: vars.last_query_info.clone(),
             txn_info: vars.last_txn_info.clone(),
         }
     }
@@ -149,14 +148,7 @@ impl LastStmtInfo {
         vars.prev_found_in_plan_cache = self.plan_from_cache;
         vars.prev_found_in_binding = self.plan_from_binding;
         vars.pre_use_chunk_alloc = self.use_chunk_alloc;
-        vars.state.last_query_info = self.query_info.clone();
-        vars.last_query_info = LastQueryInfo {
-            txn_scope: self.query_info.txn_scope.clone(),
-            start_ts: self.query_info.start_ts,
-            for_update_ts: self.query_info.for_update_ts,
-            ru_consumption: self.query_info.ru_consumption,
-            err_msg: self.query_info.err_msg.clone(),
-        };
+        vars.last_query_info = self.query_info.clone();
         vars.last_txn_info = self.txn_info.clone();
         // Between statements nothing else holds the statement context.
         let sc = vars.stmt_ctx_mut();

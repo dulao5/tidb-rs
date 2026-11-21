@@ -449,6 +449,27 @@ fn reverse_range<T, F: FnMut(&T, &T) -> bool>(data: &mut Data<'_, T, F>, a: usiz
     }
 }
 
+/// `sort.Search(n, f)`: the smallest index `i` in `[0, n)` at which `f(i)` is true,
+/// assuming that on `[0, n)`, `f(i) == true` implies `f(i+1) == true`; `n` if there is no
+/// such index. The calls are made in Go's order (callers' `f` may have side effects).
+// go-std: sort.Search L1
+pub fn search(n: usize, mut f: impl FnMut(usize) -> bool) -> usize {
+    // Define f(-1) == false and f(n) == true.
+    // Invariant: f(i-1) == false, f(j) == true.
+    let (mut i, mut j) = (0usize, n);
+    while i < j {
+        let h = (i + j) >> 1; // avoid overflow when computing h
+        // i ≤ h < j
+        if !f(h) {
+            i = h + 1; // preserves f(i-1) == false
+        } else {
+            j = h; // preserves f(j) == true
+        }
+    }
+    // i == j, f(i-1) == false, and f(j) (= f(i)) == true  =>  answer is i.
+    i
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

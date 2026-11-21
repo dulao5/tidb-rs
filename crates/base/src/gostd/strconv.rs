@@ -175,37 +175,10 @@ fn append_shortest64(dst: &mut Vec<u8>, v: f64, fmt: u8) {
 
 /// `strconv.ParseUint(s, 10, 64)`: the value, or the `*strconv.NumError` text
 /// (`strconv.ParseUint: parsing "<Quote(s)>": invalid syntax | value out of range`).
-// go-std: strconv.ParseUint L1 (base 10, bitSize 64)
-// go-std: strconv.NumError.Error L1 (strconv.Quote via gofmt %q)
+// glue: Result form of parse_uint_go(s, 10, 64)
 pub fn parse_uint10(s: &[u8]) -> Result<u64, Vec<u8>> {
-    let num_err = |why: &str| {
-        let mut m = b"strconv.ParseUint: parsing ".to_vec();
-        m.extend_from_slice(&crate::gofmt::sprintf(
-            "%q",
-            &[crate::gofmt::Arg::go_string(s.to_vec())],
-        ));
-        m.extend_from_slice(b": ");
-        m.extend_from_slice(why.as_bytes());
-        m
-    };
-    if s.is_empty() {
-        return Err(num_err("invalid syntax"));
-    }
-    let mut n: u64 = 0;
-    for &c in s {
-        if !c.is_ascii_digit() {
-            return Err(num_err("invalid syntax"));
-        }
-        // Go returns ErrRange at the first overflowing digit, before later syntax errors.
-        match n
-            .checked_mul(10)
-            .and_then(|v| v.checked_add(u64::from(c - b'0')))
-        {
-            Some(v) => n = v,
-            None => return Err(num_err("value out of range")),
-        }
-    }
-    Ok(n)
+    let (n, err) = parse_uint_go(s, 10, 64);
+    err.map(|()| n).map_err(|e| e.error())
 }
 
 /// `*strconv.NumError.Error()`: `strconv.<func>: parsing <Quote(num)>: <why>`.
@@ -224,26 +197,16 @@ fn num_error_text(func: &str, num: &[u8], why: &str) -> Vec<u8> {
 /// `strconv.ParseUint(s, 10, 64)`, Go-shaped (`M-ERRVAL`): on `ErrRange` the value is
 /// `math.MaxUint64`, on `ErrSyntax` 0; the error is the `*strconv.NumError` text with
 /// `func` (`"ParseUint"`, or the caller's name when Go rewrites `NumError.Func`).
-// go-std: strconv.ParseUint L1 (base 10, bitSize 64)
-pub fn parse_uint(s: &[u8], func: &str) -> (u64, Result<(), Vec<u8>>) {
-    if s.is_empty() {
-        return (0, Err(num_error_text(func, s, "invalid syntax")));
-    }
-    let mut n: u64 = 0;
-    for &c in s {
-        if !c.is_ascii_digit() {
-            return (0, Err(num_error_text(func, s, "invalid syntax")));
-        }
-        // Go returns ErrRange at the first overflowing digit, before later syntax errors.
-        match n
-            .checked_mul(10)
-            .and_then(|v| v.checked_add(u64::from(c - b'0')))
-        {
-            Some(v) => n = v,
-            None => return (u64::MAX, Err(num_error_text(func, s, "value out of range"))),
-        }
-    }
-    (n, Ok(()))
+// glue: parse_uint_go(s, 10, 64) with the error as text and NumError.Func rewritten
+pub fn parse_uint(s: &[u8], func: &'static str) -> (u64, Result<(), Vec<u8>>) {
+    let (n, err) = parse_uint_go(s, 10, 64);
+    (
+        n,
+        err.map_err(|mut e| {
+            e.func = func;
+            e.error()
+        }),
+    )
 }
 
 /// `strconv.ParseInt(s, 10, 64)`, Go-shaped (`M-ERRVAL`): on `ErrRange` the value is
@@ -259,7 +222,7 @@ pub fn parse_int(s: &[u8], func: &str) -> (i64, Result<(), Vec<u8>>) {
         b'-' => (true, &s[1..]),
         _ => (false, s),
     };
-    let (un, err) = parse_uint(body, func);
+    let (un, err) = parse_uint_go(body, 10, 64);
     if err.is_err() && un != u64::MAX {
         // A syntax error: Go reports the input with its sign.
         return (0, Err(num_error_text(func, s, "invalid syntax")));
@@ -301,4 +264,274 @@ pub fn atoi(s: &[u8]) -> (i64, Result<(), Vec<u8>>) {
         return (n, Ok(()));
     }
     parse_int(s, "Atoi")
+}
+
+/// Why a `strconv` parse failed: the `Err` field of a `*strconv.NumError`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumErrKind {
+    /// `strconv.ErrSyntax`: "invalid syntax".
+    Syntax,
+    /// `strconv.ErrRange`: "value out of range".
+    Range,
+    /// `baseError`: "invalid base N".
+    Base(i32),
+    /// `bitSizeError`: "invalid bit size N".
+    BitSize(i32),
+}
+
+/// `*strconv.NumError`: the failing function, the input (a Go string: bytes) and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NumError {
+    /// The failing function (`"ParseUint"`, ...); callers may rewrite it, as Go code does.
+    pub func: &'static str,
+    /// The input.
+    pub num: Vec<u8>,
+    /// The reason.
+    pub err: NumErrKind,
+}
+
+impl NumError {
+    /// `Error()`: `strconv.<Func>: parsing <strconv.Quote(Num)>: <Err>`.
+    // go-std: strconv.NumError.Error L1 (strconv.Quote via gofmt %q)
+    pub fn error(&self) -> Vec<u8> {
+        let why = match self.err {
+            NumErrKind::Syntax => "invalid syntax".to_owned(),
+            NumErrKind::Range => "value out of range".to_owned(),
+            NumErrKind::Base(b) => format!("invalid base {b}"),
+            NumErrKind::BitSize(b) => format!("invalid bit size {b}"),
+        };
+        num_error_text(self.func, &self.num, &why)
+    }
+}
+
+impl std::fmt::Display for NumError {
+    // glue: fmt of an error value prints Error()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&String::from_utf8_lossy(&self.error()))
+    }
+}
+
+impl std::error::Error for NumError {}
+
+/// `strconv.ParseUint(s, base, bitSize)`: like `ParseInt` but for unsigned numbers; a sign
+/// prefix is not permitted. `base` 0 takes the base from the prefix (`0b`, `0o`, `0x`, or a
+/// leading `0` for octal) and allows underscores as digit separators. `bitSize` 0 is `int`
+/// (64 bits). On a range error the value is the largest value of the size (`M-ERRVAL`), on
+/// any other error 0.
+// go-std: strconv.ParseUint L1
+pub fn parse_uint_go(s: &[u8], base: i32, bit_size: i32) -> (u64, Result<(), NumError>) {
+    const FN_PARSE_UINT: &str = "ParseUint";
+    let err = |kind| NumError {
+        func: FN_PARSE_UINT,
+        num: s.to_vec(),
+        err: kind,
+    };
+    if s.is_empty() {
+        return (0, Err(err(NumErrKind::Syntax)));
+    }
+    let lower = |c: u8| c | (b'x' - b'X');
+
+    let base0 = base == 0;
+    let s0 = s;
+    let mut s = s;
+    let mut base = base;
+    if (2..=36).contains(&base) {
+        // valid base; nothing to do
+    } else if base == 0 {
+        // Look for octal, hex prefix.
+        base = 10;
+        if s[0] == b'0' {
+            if s.len() >= 3 && lower(s[1]) == b'b' {
+                base = 2;
+                s = &s[2..];
+            } else if s.len() >= 3 && lower(s[1]) == b'o' {
+                base = 8;
+                s = &s[2..];
+            } else if s.len() >= 3 && lower(s[1]) == b'x' {
+                base = 16;
+                s = &s[2..];
+            } else {
+                base = 8;
+                s = &s[1..];
+            }
+        }
+    } else {
+        return (0, Err(err(NumErrKind::Base(base))));
+    }
+
+    let mut bit_size = bit_size;
+    if bit_size == 0 {
+        bit_size = 64; // IntSize
+    } else if !(0..=64).contains(&bit_size) {
+        return (0, Err(err(NumErrKind::BitSize(bit_size))));
+    }
+
+    // Cutoff is the smallest number such that cutoff*base > maxUint64.
+    let cutoff = u64::MAX / base as u64 + 1;
+    // Go: uint64(1)<<uint(bitSize) - 1 (a shift by 64 is 0, so the result is MaxUint64).
+    let max_val = 1u64
+        .checked_shl(bit_size as u32)
+        .unwrap_or(0)
+        .wrapping_sub(1);
+
+    let mut underscores = false;
+    let mut n: u64 = 0;
+    for &c in s {
+        let d = if c == b'_' && base0 {
+            underscores = true;
+            continue;
+        } else if c.is_ascii_digit() {
+            c - b'0'
+        } else if lower(c).is_ascii_lowercase() {
+            lower(c) - b'a' + 10
+        } else {
+            return (0, Err(err(NumErrKind::Syntax)));
+        };
+
+        if i32::from(d) >= base {
+            return (0, Err(err(NumErrKind::Syntax)));
+        }
+
+        if n >= cutoff {
+            // n*base overflows
+            return (max_val, Err(err(NumErrKind::Range)));
+        }
+        n *= base as u64;
+
+        let n1 = n.wrapping_add(u64::from(d));
+        if n1 < n || n1 > max_val {
+            // n+d overflows
+            return (max_val, Err(err(NumErrKind::Range)));
+        }
+        n = n1;
+    }
+
+    if underscores && !underscore_ok(s0) {
+        return (0, Err(err(NumErrKind::Syntax)));
+    }
+
+    (n, Ok(()))
+}
+
+/// `underscoreOK` reports whether the underscores in s are allowed. Checking them in this
+/// one function lets all the parsers skip over them simply. Underscore must appear only
+/// between digits or between a base prefix and a digit.
+// go-std: strconv.underscoreOK L1
+pub fn underscore_ok(s: &[u8]) -> bool {
+    // saw tracks the last character (class) we saw:
+    // ^ for beginning of number,
+    // 0 for a digit or base prefix,
+    // _ for an underscore,
+    // ! for none of the above.
+    let mut saw = b'^';
+    let mut i = 0;
+    let mut s = s;
+
+    // Optional sign.
+    if !s.is_empty() && (s[0] == b'-' || s[0] == b'+') {
+        s = &s[1..];
+    }
+
+    // Optional base prefix.
+    let mut hex = false;
+    if s.len() >= 2 && s[0] == b'0' && matches!(s[1].to_ascii_lowercase(), b'b' | b'o' | b'x') {
+        i = 2;
+        saw = b'0'; // base prefix counts as a digit for "underscore as digit separator"
+        hex = s[1].eq_ignore_ascii_case(&b'x');
+    }
+
+    // Number proper.
+    while i < s.len() {
+        // Digits are always okay.
+        if s[i].is_ascii_digit() || hex && (b'a'..=b'f').contains(&s[i].to_ascii_lowercase()) {
+            saw = b'0';
+            i += 1;
+            continue;
+        }
+        // Underscore must follow digit.
+        if s[i] == b'_' {
+            if saw != b'0' {
+                return false;
+            }
+            saw = b'_';
+            i += 1;
+            continue;
+        }
+        // Underscore must also be followed by digit.
+        if saw == b'_' {
+            return false;
+        }
+        // Saw non-digit, non-underscore.
+        saw = b'!';
+        i += 1;
+    }
+    saw != b'_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NumErrKind, parse_uint_go};
+
+    #[test]
+    fn parse_uint_matches_go() {
+        // Expected values and errors of Go 1.25 strconv.ParseUint(s, base, bitSize).
+        use NumErrKind::*;
+        for (s, base, bits, want, err) in [
+            ("", 10, 64, 0, Some(Syntax)),
+            ("0", 0, 64, 0, None),
+            ("12", 10, 0, 12, None),
+            ("0x10", 0, 64, 16, None),
+            ("0X1f", 0, 64, 31, None),
+            ("0o17", 0, 64, 15, None),
+            ("017", 0, 64, 15, None),
+            ("08", 0, 64, 0, Some(Syntax)),
+            ("0x", 0, 64, 0, Some(Syntax)),
+            ("0b_1", 0, 64, 1, None),
+            ("1_2", 0, 64, 12, None),
+            ("_12", 0, 64, 0, Some(Syntax)),
+            ("1__2", 0, 64, 0, Some(Syntax)),
+            ("1_2", 10, 64, 0, Some(Syntax)),
+            ("-1", 10, 64, 0, Some(Syntax)),
+            ("zz", 36, 64, 1295, None),
+            ("18446744073709551615", 10, 64, u64::MAX, None),
+            ("18446744073709551616", 10, 64, u64::MAX, Some(Range)),
+            ("256", 10, 8, 255, Some(Range)),
+            ("11111111", 2, 8, 255, None),
+            ("10", 37, 64, 0, Some(Base(37))),
+            ("10", 1, 64, 0, Some(Base(1))),
+            ("1", 10, 65, 0, Some(BitSize(65))),
+        ] {
+            let (n, e) = parse_uint_go(s.as_bytes(), base, bits);
+            assert_eq!(
+                (n, e.as_ref().err().map(|e| e.err)),
+                (want, err),
+                "{s:?} {base} {bits}"
+            );
+        }
+        let msg = |s: &str, base, bits| {
+            String::from_utf8(
+                parse_uint_go(s.as_bytes(), base, bits)
+                    .1
+                    .unwrap_err()
+                    .error(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            msg("256", 10, 8),
+            "strconv.ParseUint: parsing \"256\": value out of range"
+        );
+        assert_eq!(
+            msg("a\n", 10, 64),
+            "strconv.ParseUint: parsing \"a\\n\": invalid syntax"
+        );
+        assert_eq!(
+            msg("1", 37, 64),
+            "strconv.ParseUint: parsing \"1\": invalid base 37"
+        );
+        assert_eq!(
+            msg("1", 10, -1),
+            "strconv.ParseUint: parsing \"1\": invalid bit size -1"
+        );
+    }
 }

@@ -142,10 +142,6 @@ pub struct SessionState {
     pub slow_log_rules: super::session_state::SessionSlowLogRules,
     /// RowEncoder is reused in session for encode row data (`RowEncoder.Enable`).
     pub row_encoder_enable: bool,
-    /// LastQueryInfo keeps track the info of last query.
-    pub last_query_info: super::session_state::QueryInfo,
-    /// LastDDLInfo keeps track the info of last DDL.
-    pub last_ddl_info: super::session_state::LastDDLInfo,
     /// SnapshotInfoschema is used with SnapshotTS (only whether it is set is kept).
     pub snapshot_infoschema: bool,
     /// UserVars is used to provide user variable operations.
@@ -215,8 +211,6 @@ impl Default for SessionState {
             analyze_skip_column_types: Default::default(),
             slow_log_rules: Default::default(),
             row_encoder_enable: false,
-            last_query_info: Default::default(),
-            last_ddl_info: Default::default(),
             snapshot_infoschema: false,
             user_vars: super::uservars::new_user_vars(),
             plan_cache_params: super::plan_cache_params::new_plan_cache_param_list(),
