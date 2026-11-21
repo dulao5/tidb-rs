@@ -155,6 +155,17 @@ impl LogicalTopN {
 impl LogicalPlan for LogicalTopN {
     crate::logical_plan_boilerplate!(TopN);
 
+    /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
+    // go: LogicalTopN.ExhaustPhysicalPlans L1 [M-PLAN]
+    fn exhaust_physical_plans(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        prop: &crate::property::PhysicalProperty,
+    ) -> Result<(Vec<crate::PhysicalPlanRef>, bool), Error> {
+        crate::core::exhaust_physical_plans::exhaust_physical_plans4_logical_top_n(self, ctx, prop)
+    }
+
     /// ExplainInfo implements Plan interface.
     // go: LogicalTopN.ExplainInfo L1
     fn explain_info(&self, ctx: &PlanCtx<'_>) -> Result<String, Error> {

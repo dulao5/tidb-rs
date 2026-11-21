@@ -68,6 +68,19 @@ pub fn selection_boundary(block: &str, what: &str) -> Error {
 impl LogicalPlan for LogicalSelection {
     crate::logical_plan_boilerplate!(Selection);
 
+    /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
+    // go: LogicalSelection.ExhaustPhysicalPlans L1 [M-PLAN]
+    fn exhaust_physical_plans(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        prop: &crate::property::PhysicalProperty,
+    ) -> Result<(Vec<crate::PhysicalPlanRef>, bool), Error> {
+        crate::core::exhaust_physical_plans::exhaust_physical_plans4_logical_selection(
+            self, ctx, prop,
+        )
+    }
+
     /// ExplainInfo implements Plan interface.
     // go: LogicalSelection.ExplainInfo L2 (expression.SortedExplainExpressionList is blocked-by:D10.9)
     fn explain_info(&self, _ctx: &PlanCtx<'_>) -> Result<String, Error> {

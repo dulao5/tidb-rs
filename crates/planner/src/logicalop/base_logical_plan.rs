@@ -247,6 +247,12 @@ pub fn pull_up_constant_predicates() -> Vec<ExprRef> {
     Vec::new()
 }
 
+/// ExhaustPhysicalPlans implements LogicalPlan.<14th> interface.
+// go: BaseLogicalPlan.ExhaustPhysicalPlans L1
+pub fn exhaust_physical_plans() -> ! {
+    panic!("baseLogicalPlan.ExhaustPhysicalPlans() should never be called.");
+}
+
 /// ExtractCorrelatedCols implements LogicalPlan.<15th> interface.
 // go: BaseLogicalPlan.ExtractCorrelatedCols L1
 pub fn extract_correlated_cols() -> Vec<Arc<CorrelatedColumn>> {
