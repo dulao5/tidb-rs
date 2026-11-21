@@ -22,6 +22,13 @@ pub mod base_physical_plan;
 
 pub use base_physical_plan::{BasePhysicalPlan, new_base_physical_plan};
 
+#[cfg(test)]
+thread_local! {
+    /// Spike VS1-26: the number of `clone_node` calls made by [`make_mut_plan`] on this
+    /// thread (`clone_node` has no other caller).
+    pub(crate) static CLONE_NODE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A physical plan node, shared.
 pub type PhysicalPlanRef = Arc<dyn PhysicalPlan>;
 
@@ -30,6 +37,8 @@ pub type PhysicalPlanRef = Arc<dyn PhysicalPlan>;
 // glue: N1 §3.4/§3.5
 pub fn make_mut_plan(p: &mut PhysicalPlanRef) -> &mut dyn PhysicalPlan {
     if Arc::get_mut(p).is_none() {
+        #[cfg(test)]
+        CLONE_NODE_CALLS.with(|c| c.set(c.get() + 1));
         *p = p.clone_node();
     }
     Arc::get_mut(p).expect("unique after the copy")

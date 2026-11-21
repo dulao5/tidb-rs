@@ -35,4 +35,6 @@ pub mod rule_topn_push_down;
 pub mod rule_util;
 pub mod task;
 pub mod task_base;
+#[cfg(test)]
+mod taskmap_spike_tests;
 pub mod util;
