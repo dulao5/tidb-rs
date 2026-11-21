@@ -1,0 +1,13 @@
+# Within a run of equal keys the order is free.
+sql: SELECT a, b FROM t ORDER BY a
+cols: a b
+class: ordered 1
+verdict: match
+[a]
+1|x
+1|y
+2|z
+[b]
+1|y
+1|x
+2|z

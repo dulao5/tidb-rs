@@ -23,7 +23,8 @@ use clap::{Parser, Subcommand};
 use serde_json::{Value as Json, json};
 
 use crate::compare::{
-    Verdict, charset_name, compare, execute_metadata_diffs, flag_names, prepare_diffs, type_name,
+    Observed, Verdict, charset_name, classify, compare, execute_metadata_diffs, flag_names,
+    needs_warnings, prepare_diffs, strip_limit, type_name,
 };
 use crate::exec::{ColumnMeta, Outcome, PrepareMeta, Side, TlsMode};
 use crate::sql::Kind;
@@ -308,6 +309,54 @@ impl Report {
     }
 }
 
+/// How to fetch A's result without the LIMIT (spec §2.4).
+enum Rerun<'a> {
+    Text,
+    Prepared(&'a [mysql_async::Value]),
+}
+
+/// Compares through the comparator: fetches `SHOW WARNINGS` on both sides when either
+/// reports warnings, and A's result without the LIMIT when the class asks for it.
+async fn judge(
+    case: &Case,
+    sql: &str,
+    rerun: Rerun<'_>,
+    a: &mut Side,
+    b: &mut Side,
+    oa: &Outcome,
+    ob: &Outcome,
+) -> Verdict {
+    let (wa, wb) = if needs_warnings(oa, ob) {
+        (a.warnings().await, b.warnings().await)
+    } else {
+        (None, None)
+    };
+    let cols = match oa {
+        Outcome::Rows { columns, .. } => columns.as_slice(),
+        _ => &[],
+    };
+    let class = classify(sql, cols, case.sorted);
+    let (obs_a, obs_b) = (
+        Observed::new(oa, wa.as_deref()),
+        Observed::new(ob, wb.as_deref()),
+    );
+    let v = compare(&class, obs_a, obs_b, None);
+    if !matches!(v, Verdict::Mismatch(_)) || !class.wants_full() {
+        return v;
+    }
+    let Some(full_sql) = strip_limit(sql) else {
+        return v;
+    };
+    let full = match rerun {
+        Rerun::Text => a.query(&full_sql).await,
+        Rerun::Prepared(params) => a.prepared(&full_sql, params).await.1,
+    };
+    match full {
+        Outcome::Rows { rows, .. } => compare(&class, obs_a, obs_b, Some(&rows)),
+        _ => v,
+    }
+}
+
 async fn run_case(case: &Case, cli: &Cli, a: &mut Side, b: &mut Side, report: &mut Report) {
     let text_sql = case.text_sql();
     if cli.protocol != Protocols::Ps || !case.prepared {
@@ -321,7 +370,7 @@ async fn run_case(case: &Case, cli: &Cli, a: &mut Side, b: &mut Side, report: &m
                 b.log_session(&text_sql);
             }
         }
-        let v = compare(&oa, &ob, case.ordered);
+        let v = judge(case, &text_sql, Rerun::Text, a, b, &oa, &ob).await;
         let ra = SideResult {
             prepare: None,
             outcome: &oa,
@@ -338,7 +387,7 @@ async fn run_case(case: &Case, cli: &Cli, a: &mut Side, b: &mut Side, report: &m
         let params: Vec<_> = case.params.iter().map(Param::to_value).collect();
         let (pa, oa) = a.prepared(&case.sql, &params).await;
         let (pb, ob) = b.prepared(&case.sql, &params).await;
-        let mut v = compare(&oa, &ob, case.ordered);
+        let mut v = judge(case, &case.sql, Rerun::Prepared(&params), a, b, &oa, &ob).await;
         if let (Some(x), Some(y)) = (&pa, &pb) {
             let mut d = prepare_diffs(x, y);
             d.extend(execute_metadata_diffs((Some(x), &oa), (Some(y), &ob)));

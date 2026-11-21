@@ -1,0 +1,10 @@
+sql: SELECT now()
+cols: n
+result_log: off
+tolerance: T4
+class: unordered
+verdict: match
+[a]
+x
+[b]
+y

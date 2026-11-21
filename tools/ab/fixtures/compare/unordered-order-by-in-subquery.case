@@ -1,0 +1,11 @@
+# The ORDER BY / LIMIT of a subquery and of a string do not order the result.
+sql: SELECT a FROM (SELECT a FROM t ORDER BY a LIMIT 3) x WHERE 'order by' <> 'limit 1'
+cols: a
+class: unordered
+verdict: match
+[a]
+1
+2
+[b]
+2
+1

@@ -1,0 +1,10 @@
+# T1: one of the prototype's fixed answers (tools/ab/prototype-not-supported.txt).
+sql: SELECT a FROM t JOIN u
+cols: a
+tolerance: T1
+class: unordered
+verdict: unsupported
+[a]
+1
+[b_error]
+1235|42000|This version of TiDB doesn't yet support 'joins'

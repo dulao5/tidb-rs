@@ -1,0 +1,8 @@
+sql: SET @a = 1
+class: exact
+verdict: mismatch
+diff: affected rows
+[a_ok]
+0
+[b_ok]
+1

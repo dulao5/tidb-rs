@@ -1,0 +1,8 @@
+sql: SELECT a FROM t WHERE 0
+cols: a
+class: unordered
+verdict: mismatch
+diff: row count A=0 B=1
+[a]
+[b]
+1

@@ -1,0 +1,11 @@
+# ORDER BY the underlying column of an alias.
+sql: select a as k, c from t order by a
+cols: k=a c
+class: ordered 1
+verdict: match
+[a]
+1|p
+1|q
+[b]
+1|q
+1|p

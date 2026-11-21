@@ -1,0 +1,48 @@
+# 结果比较的容差条目（规格：docs/testing/result-comparison.md §6）。
+#
+# 每条 [[tolerance]] 一个编号；比较器（tools/ab/src/compare.rs 的 TOLERANCES）与本文件逐条一致，
+# 单元测试 tolerances_match_the_ledger 校验两者。新增或放宽任何比较规则，先在这里加条目并经负责人
+# 同意；没有条目的放宽一律视为缺陷。格式与偏差台账（#262）共用：id / name / scope / rule /
+# reason / since。
+#
+# 浮点数没有容差：数值按线上协议的文本逐字节比较（见规格 §5）。
+
+[[tolerance]]
+id = "T1"
+name = "b-not-supported"
+scope = "所有层"
+rule = "B 返回 1235 且是\"尚未实现\"的约定回答时判为 unsupported（既不算一致也不算不一致，不计入新栈覆盖）。只认两种：消息带 blocked-by:<块名> 的边界桩回答（tidb_base::blocked），以及原型自己的固定文案（逐条列在 tools/ab/prototype-not-supported.txt，由 scripts/prototype_not_supported.py 从原型源码生成，CI 校验不过期）。A 也返回 1235 时两边按错误完整比较；其他 1235 是普通错误，A 成功即不一致"
+reason = "1235 是 tidb-rs 尚未实现的约定回答，单独计数；但移植来的 Go 代码本身也有 ErrNotSupportedYet 分支，新栈走错分支返回的 1235 不能被当成\"还不支持\"而漏掉"
+since = "2026-11-21"
+
+[[tolerance]]
+id = "T2"
+name = "sorted-result"
+scope = "integrationtest、workload 文件"
+rule = "语句前有 mysqltest 指令 --sorted_result 时按 unordered（多重集）比较；带 LIMIT 时按 limited unordered"
+reason = "测试作者声明顺序无关，mysql-tester 自己也是排序后再比较"
+since = "2026-11-21"
+
+[[tolerance]]
+id = "T3"
+name = "replace-directives"
+scope = "integrationtest"
+rule = "--replace_regex / --replace_column 在比较前同时作用于 A 和 B 的结果"
+reason = "mysql-tester 对它与 .result 文件比较的输出做同样的替换"
+since = "2026-11-21"
+
+[[tolerance]]
+id = "T4"
+name = "result-log-off"
+scope = "integrationtest"
+rule = "--disable_result_log 期间只比较回答的形状（结果集 / OK / 错误）；错误仍完整比较错误码、SQLSTATE、消息"
+reason = "Go 的 .result 文件在此期间也不记录行，测试本身不检查它们"
+since = "2026-11-21"
+
+[[tolerance]]
+id = "T5"
+name = "go-execute-metadata-drift"
+scope = "workload 预处理语句"
+rule = "Go 自己的 EXECUTE 列定义与其 PREPARE 不同时，B 在同一字段漂移到与 Go 相同的值不算差异"
+reason = "Go 对选择列表中的 ? 在 EXECUTE 时给出不同的列定义，这是 Go 的行为本身"
+since = "2026-11-21"

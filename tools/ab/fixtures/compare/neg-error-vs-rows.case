@@ -1,0 +1,8 @@
+sql: SELECT a FROM t
+cols: a
+class: unordered
+verdict: mismatch
+[a]
+1
+[b_error]
+1105|HY000|oops

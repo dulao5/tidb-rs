@@ -1,0 +1,7 @@
+sql: SELECT * FROM nope
+class: unordered
+verdict: both_error
+[a_error]
+1146|42S02|Table 'test.nope' doesn't exist
+[b_error]
+1146|42S02|Table 'test.nope' doesn't exist

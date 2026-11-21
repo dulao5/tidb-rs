@@ -1,0 +1,13 @@
+sql: SELECT CAST('1x' AS SIGNED)
+cols: c
+class: unordered
+verdict: mismatch
+diff: warnings: first differing row #0
+[a]
+1
+[b]
+1
+[a_warnings]
+Warning|1292|Truncated incorrect INTEGER value: '1x'
+[b_warnings]
+Warning|1292|Truncated incorrect DOUBLE value: '1x'
