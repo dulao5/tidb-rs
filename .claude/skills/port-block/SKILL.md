@@ -22,7 +22,7 @@ description: Port one block (or one part of a block) of Go TiDB v8.5.8 to tidb-r
 - spec 必须与 Go 源码逐条核对（评审多次发现正负号写反、声称 Go 做了实际没做的事）。引用 Go 代码写文件和行号（基于参照树）。
 - **与 Go 的每一处差异**都写进 spec 的"已知差异"一节或代码的文档注释。没有登记的用户可见差异不允许以"写路径"之类的理由带过。
 - **Go 本身的问题，分两类登记**，都在 tidb-rs 开 issue（英文，写清在 v8.5.8 上怎么复现），spec 的"已知差异"一节引用这个 issue。不去 pingcap/tidb 提：
-  - Go 的**行为有错**（bug）：照 Go 移植，issue 加标签 `upstream-pitfall`；
+  - Go 的**行为有错**（bug）：默认照 Go 移植，issue 加标签 `upstream-pitfall`。例外（宪章第一条 2，负责人 2026-11-21 确认）：照搬会造成安全问题、结果错误、数据损坏或丢失、泄露无关数据的，**按正确行为实现**（上游已修复的标 `go-fix` 并引用修复 commit），issue 照样加 `upstream-pitfall`，并在 `docs/testing/rulings.toml` 登记一条裁定（新条目先写 `approver = "pending-owner"`，由协调人请负责人批准）；
   - Go **缺少某个功能**：照 Go 移植（缺的照样缺），issue 加标签 `go-gap`，之后单独与内核团队讨论（VISION 的贯穿原则）。
 - 依赖 gc 实现细节的行为（如零大小对象的指针相等）写明，并用单元测试固定。
 - spec 标着"待确认"时不得合并依赖它的代码。
