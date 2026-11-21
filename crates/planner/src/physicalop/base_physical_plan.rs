@@ -164,9 +164,10 @@ pub fn build_plan_trace(p: &dyn PhysicalPlan) -> PlanTrace {
 impl BasePhysicalPlan {
     /// GetPlanCostVer1 implements the base.PhysicalPlan.<0th> interface.
     /// which calculates the cost of the plan if it has not been calculated yet and returns the cost.
-    // go: BasePhysicalPlan.GetPlanCostVer1 L1 [M-LOCK]
+    // go: BasePhysicalPlan.GetPlanCostVer1 L1 [M-LOCK, M-CTX]
     pub fn get_plan_cost_ver1(
         &self,
+        ctx: &PlanCtx<'_>,
         task_type: TaskType,
         option: &PlanCostOption,
     ) -> Result<f64, Error> {
@@ -180,7 +181,7 @@ impl BasePhysicalPlan {
         }
         let mut plan_cost = 0.0; // the default implementation, the operator have no cost
         for child in &self.children {
-            let child_cost = child.get_plan_cost_ver1(task_type, option)?;
+            let child_cost = child.get_plan_cost_ver1(ctx, task_type, option)?;
             plan_cost += child_cost;
         }
         let mut c = self.cost.lock();
@@ -191,9 +192,10 @@ impl BasePhysicalPlan {
 
     /// GetPlanCostVer2 implements the base.PhysicalPlan.<1st> interface.
     /// which calculates the cost of the plan if it has not been calculated yet and returns the cost.
-    // go: BasePhysicalPlan.GetPlanCostVer2 L1 [M-LOCK]
+    // go: BasePhysicalPlan.GetPlanCostVer2 L1 [M-LOCK, M-CTX]
     pub fn get_plan_cost_ver2(
         &self,
+        ctx: &PlanCtx<'_>,
         task_type: TaskType,
         option: &PlanCostOption,
     ) -> Result<CostVer2, Error> {
@@ -205,7 +207,7 @@ impl BasePhysicalPlan {
         }
         let mut child_costs = Vec::with_capacity(self.children.len());
         for child in &self.children {
-            let child_cost = child.get_plan_cost_ver2(task_type, option)?;
+            let child_cost = child.get_plan_cost_ver2(ctx, task_type, option)?;
             child_costs.push(child_cost);
         }
         let mut c = self.cost.lock();

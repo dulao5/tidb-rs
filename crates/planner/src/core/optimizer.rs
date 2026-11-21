@@ -16,7 +16,7 @@
 //!   (VS1 plan §3.2, the statistics row), so there is nothing to load and they leave the plan
 //!   unchanged ([`StatsLoadPoint`], registered as boundary stubs of D11.2);
 //! - `physicalOptimize`: the statistics derivation (D10.6), `preparePossibleProperties` and
-//!   `FindBestTask` (D10.2), `ResolveIndices` (D10.9) and the plan cost (D10.5);
+//!   `FindBestTask` (D10.2) and `ResolveIndices` (D10.9); the plan cost (D10.5) is called;
 //! - the post passes over operators that are not ported (Apply, joins, aggregations,
 //!   UnionAll, Lock, UnionScan, the index readers, ExchangeSender): their arms are not
 //!   reachable, because no plan can contain those operators yet.
@@ -892,7 +892,7 @@ fn is_logical_rule_disabled(r: &dyn LogicalOptRule) -> bool {
 
 /// `physicalOptimize`. The statistics derivation (`RecursiveDeriveStats`, D10.6),
 /// `preparePossibleProperties` and `FindBestTask` (D10.2), `ResolveIndices` (D10.9) and the
-/// plan cost (`getPlanCost`, D10.5) are the boundaries of the physical optimization; the
+/// plan cost (`getPlanCost`, ported with cost model v2) follow; the first three are the boundaries of the physical optimization; the
 /// first one reached returns its block.
 // go: physicalOptimize L1 [M-CTX]
 pub fn physical_optimize(
@@ -942,23 +942,13 @@ pub fn physical_optimize(
 
     let mut plan = Arc::clone(t.plan().expect("the best task's plan"));
     make_mut_plan(&mut plan).resolve_indices()?;
-    let cost = get_plan_cost(
+    let cost = crate::core::plan_cost_ver2::get_plan_cost_impl(
+        ctx,
         &*plan,
         crate::property::RootTaskType,
         &crate::util::optimizetrace::new_default_plan_cost_option(),
     )?;
     Ok((plan, cost))
-}
-
-/// `getPlanCost` (`plan_cost_ver2.go`): the cost models (D10.5) choose version 1 or 2.
-// glue: blocked-by:D10.5 (getPlanCost: the plan cost models; reached only after FindBestTask)
-fn get_plan_cost(
-    p: &dyn PhysicalPlan,
-    task_type: crate::property::TaskType,
-    option: &crate::util::optimizetrace::PlanCostOption,
-) -> Result<f64, Error> {
-    let _ = (p, task_type, option);
-    Err(blocked("D10.5", "getPlanCost (the plan cost models)"))
 }
 
 /// avoidColumnEvaluatorForProjBelowUnion sets AvoidColumnEvaluator to false for the projection operator which is a child of Union operator.

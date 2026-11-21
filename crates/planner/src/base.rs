@@ -537,23 +537,28 @@ pub trait PhysicalPlan: Any + Send + Sync {
 
     // ---- base.PhysicalPlan ----
 
-    /// `GetPlanCostVer1`.
+    /// `GetPlanCostVer1`; `ctx` is Go's `p.SCtx()` (`M-CTX`).
     // glue: dispatch (Go BasePhysicalPlan.GetPlanCostVer1)
     fn get_plan_cost_ver1(
         &self,
+        ctx: &PlanCtx<'_>,
         task_type: TaskType,
         option: &PlanCostOption,
     ) -> Result<f64, Error> {
-        self.base_physical().get_plan_cost_ver1(task_type, option)
+        self.base_physical()
+            .get_plan_cost_ver1(ctx, task_type, option)
     }
-    /// `GetPlanCostVer2`.
+    /// `GetPlanCostVer2`; `ctx` is Go's `p.SCtx()` (`M-CTX`). The operators of the cost model
+    /// (`core/plan_cost_ver2.rs`) override it.
     // glue: dispatch (Go BasePhysicalPlan.GetPlanCostVer2)
     fn get_plan_cost_ver2(
         &self,
+        ctx: &PlanCtx<'_>,
         task_type: TaskType,
         option: &PlanCostOption,
     ) -> Result<CostVer2, Error> {
-        self.base_physical().get_plan_cost_ver2(task_type, option)
+        self.base_physical()
+            .get_plan_cost_ver2(ctx, task_type, option)
     }
     /// `ToPB`.
     // glue: dispatch (Go BasePhysicalPlan.ToPB)

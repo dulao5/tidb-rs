@@ -20,7 +20,7 @@ Go 源码（v8.5.8）：`pkg/planner/core/optimizer.go`、`pkg/planner/optimize.
 
 converge（`--part specs/VS1-vertical-slice/functions.tsv --item VS1-24`）：D09.13 56/60（另 4 个登记为桩：`CheckPrivilege`、`refineCETrace`、`InjectProjBelowAgg`、`injectProjBelowUnion`），D13.3 38/38，D09.11 2/2，D10.9 1/1。
 
-**最终物理计划的向量要等 FindBestTask（VS1-28）。** 当前一条 SELECT 走完逻辑优化之后，物理优化的第一步（统计信息推导，属于基数估算 VS1-29）就返回 `blocked-by:D10.6`，之后依次是 `preparePossibleProperties` 和 `FindBestTask`（`blocked-by:D10.2`，VS1-28）、`ResolveIndices`（D10.9，VS1-31）、代价（D10.5，VS1-30）。这几项完成后，`DoOptimize` 的完整输出由 VS1-28 的 EXPLAIN 计划向量验收；本项能做的部分（逻辑优化经过驱动、手工物理计划上的 postOptimize）已经用向量验证。
+**最终物理计划的向量要等 FindBestTask（VS1-28）。** 当前一条 SELECT 走完逻辑优化之后，物理优化的第一步（统计信息推导，属于基数估算 VS1-29）就返回 `blocked-by:D10.6`，之后依次是 `preparePossibleProperties` 和 `FindBestTask`（`blocked-by:D10.2`，VS1-28）、`ResolveIndices`（D10.9，VS1-31），代价（`getPlanCost`，D10.5）已随代价模型 v2（VS1-30，#289）合并、直接调用。这几项完成后，`DoOptimize` 的完整输出由 VS1-28 的 EXPLAIN 计划向量验收；本项能做的部分（逻辑优化经过驱动、手工物理计划上的 postOptimize）已经用向量验证。
 
 ## 2. 函数清单的增减
 
