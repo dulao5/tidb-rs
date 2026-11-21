@@ -10,6 +10,7 @@ mod exec;
 mod integration;
 mod mysqltest;
 mod rng;
+mod rulings;
 mod sql;
 mod workload;
 
@@ -26,9 +27,10 @@ use serde_json::{Value as Json, json};
 use crate::census::{Census, CensusPath, Control, Record, RouteProbe};
 use crate::compare::{
     Observed, Verdict, charset_name, classify, compare, execute_metadata_diffs, flag_names,
-    needs_warnings, prepare_diffs, strip_limit, type_name,
+    mismatch_kind, needs_warnings, prepare_diffs, strip_limit, type_name,
 };
 use crate::exec::{ColumnMeta, Outcome, PrepareMeta, Side, TlsMode};
+use crate::rulings::Ledger;
 use crate::sql::Kind;
 use crate::workload::{Case, Param, SysbenchSpec};
 
@@ -84,6 +86,11 @@ struct Cli {
     /// untampered-negative-control.
     #[arg(long, global = true, hide = true)]
     gate_fault: Vec<String>,
+    /// The divergence ledger (default: docs/testing/rulings.toml as built into this binary).
+    /// Mismatches an approved ruling covers are `ruled:<id>`; hit counts go to
+    /// rulings-hits.tsv in --out-dir.
+    #[arg(long, global = true)]
+    rulings: Option<PathBuf>,
     #[command(subcommand)]
     workload: Workload,
 }
@@ -141,6 +148,7 @@ enum Workload {
 struct Counts {
     matched: u64,
     mismatch: u64,
+    ruled: u64,
     unsupported: u64,
     both_error: u64,
 }
@@ -152,16 +160,18 @@ impl Counts {
             Verdict::BothError => self.both_error += 1,
             Verdict::Unsupported => self.unsupported += 1,
             Verdict::Mismatch(_) => self.mismatch += 1,
+            Verdict::Ruled { .. } => self.ruled += 1,
         }
     }
 
     fn total(&self) -> u64 {
-        self.matched + self.mismatch + self.unsupported + self.both_error
+        self.matched + self.mismatch + self.ruled + self.unsupported + self.both_error
     }
 
     fn merge(&mut self, o: &Counts) {
         self.matched += o.matched;
         self.mismatch += o.mismatch;
+        self.ruled += o.ruled;
         self.unsupported += o.unsupported;
         self.both_error += o.both_error;
     }
@@ -177,6 +187,7 @@ struct Report {
     results: BufWriter<File>,
     report_rows: usize,
     verbose: bool,
+    ledger: Ledger,
 }
 
 fn column_json(c: &ColumnMeta) -> Json {
@@ -228,6 +239,26 @@ struct SideResult<'a> {
 }
 
 impl Report {
+    /// The divergence ledger on a mismatch: an approved ruling makes it `ruled:<id>`; a
+    /// pending one stays a mismatch with a diff line naming it.
+    fn rule(&mut self, case: &Case, query: &str, a: &Outcome, b: &Outcome, v: Verdict) -> Verdict {
+        let Verdict::Mismatch(mut diff) = v else {
+            return v;
+        };
+        let kind = mismatch_kind(a, b, &diff);
+        match self
+            .ledger
+            .rule("workload", &case.template, query, kind, &diff.join("; "))
+        {
+            Some(hit) if hit.approved => Verdict::Ruled { id: hit.id, diff },
+            Some(hit) => {
+                diff.push(hit.kind(kind));
+                Verdict::Mismatch(diff)
+            }
+            None => Verdict::Mismatch(diff),
+        }
+    }
+
     fn record(
         &mut self,
         case: &Case,
@@ -244,17 +275,26 @@ impl Report {
         writeln!(
             self.results,
             "{}",
-            json!({
-                "template": case.template,
-                "protocol": protocol,
-                "verdict": verdict.name(),
-                "query": query,
-            })
+            match verdict {
+                Verdict::Ruled { id, .. } => json!({
+                    "template": case.template,
+                    "protocol": protocol,
+                    "verdict": verdict.name(),
+                    "query": query,
+                    "ruling": id,
+                }),
+                _ => json!({
+                    "template": case.template,
+                    "protocol": protocol,
+                    "verdict": verdict.name(),
+                    "query": query,
+                }),
+            }
         )?;
         let out = match verdict {
-            Verdict::Mismatch(diff) => {
+            Verdict::Mismatch(diff) | Verdict::Ruled { diff, .. } => {
                 if self.verbose {
-                    eprintln!("MISMATCH [{protocol}] {query}");
+                    eprintln!("{} [{protocol}] {query}", verdict.name().to_uppercase());
                     for d in diff {
                         eprintln!("    {d}");
                     }
@@ -272,8 +312,13 @@ impl Report {
             "a": outcome_json(a.outcome, self.report_rows),
             "b": outcome_json(b.outcome, self.report_rows),
         });
-        if let Verdict::Mismatch(diff) = verdict {
-            rec["diff"] = json!(diff);
+        match verdict {
+            Verdict::Mismatch(diff) => rec["diff"] = json!(diff),
+            Verdict::Ruled { id, diff } => {
+                rec["diff"] = json!(diff);
+                rec["ruling"] = json!(id);
+            }
+            _ => {}
         }
         if let Some(s) = &case.source {
             rec["source"] = json!(s);
@@ -289,17 +334,18 @@ impl Report {
     fn print_summary(&self) -> Counts {
         println!();
         println!(
-            "{:<20} {:<5} {:>8} {:>8} {:>11} {:>10} {:>7}",
-            "template", "proto", "match", "mismatch", "unsupported", "both_error", "total"
+            "{:<20} {:<5} {:>8} {:>8} {:>6} {:>11} {:>10} {:>7}",
+            "template", "proto", "match", "mismatch", "ruled", "unsupported", "both_error", "total"
         );
         let mut all = Counts::default();
         for ((t, p), c) in &self.counts {
             println!(
-                "{:<20} {:<5} {:>8} {:>8} {:>11} {:>10} {:>7}",
+                "{:<20} {:<5} {:>8} {:>8} {:>6} {:>11} {:>10} {:>7}",
                 t,
                 p,
                 c.matched,
                 c.mismatch,
+                c.ruled,
                 c.unsupported,
                 c.both_error,
                 c.total()
@@ -307,11 +353,12 @@ impl Report {
             all.merge(c);
         }
         println!(
-            "{:<20} {:<5} {:>8} {:>8} {:>11} {:>10} {:>7}",
+            "{:<20} {:<5} {:>8} {:>8} {:>6} {:>11} {:>10} {:>7}",
             "TOTAL",
             "",
             all.matched,
             all.mismatch,
+            all.ruled,
             all.unsupported,
             all.both_error,
             all.total()
@@ -453,6 +500,7 @@ async fn run_case(
             }
         }
         let v = judge(case, &text_sql, Rerun::Text, a, b, &oa, &ob).await;
+        let v = report.rule(case, &text_sql, &oa, &ob, v);
         census.add(census_record(case, "text", route.path(&ob), v.name()));
         let ra = SideResult {
             prepare: None,
@@ -486,6 +534,7 @@ async fn run_case(
                 };
             }
         }
+        let v = report.rule(case, &case.sql, &oa, &ob, v);
         census.add(census_record(case, "ps", route.path(&ob), v.name()));
         let ra = SideResult {
             prepare: pa.as_ref(),
@@ -574,6 +623,11 @@ async fn run(cli: Cli) -> Result<RunResult, String> {
         .to_string()
     });
     let mut census = Census::new(&layer, &cli.gate_fault)?;
+    let mut ledger = match &cli.rulings {
+        Some(p) => Ledger::load(p)?,
+        None => Ledger::parse(rulings::BUILT_IN)
+            .map_err(|e| format!("{}: {e}", rulings::DEFAULT_PATH))?,
+    };
     let probe = RouteProbe::new(cli.b_status.clone());
     probe
         .check()
@@ -595,7 +649,8 @@ async fn run(cli: Cli) -> Result<RunResult, String> {
             report_rows: cli.report_rows,
             verbose: cli.verbose,
         };
-        let no_mismatch = integration::run(&ep, &opts, &probe, &mut census).await?;
+        let no_mismatch = integration::run(&ep, &opts, &probe, &mut census, &mut ledger).await?;
+        ledger.write_hits(&cli.out_dir.join(rulings::HITS_FILE))?;
         let gate_ok = census.write(&cli.out_dir)?;
         return Ok(RunResult {
             no_mismatch,
@@ -701,6 +756,7 @@ async fn run(cli: Cli) -> Result<RunResult, String> {
         results: open("results.jsonl")?,
         report_rows: cli.report_rows,
         verbose: cli.verbose,
+        ledger,
     };
 
     let started = Instant::now();
@@ -756,6 +812,9 @@ async fn run(cli: Cli) -> Result<RunResult, String> {
         cli.out_dir.join("mismatches.jsonl").display(),
         cli.out_dir.join("unsupported.jsonl").display()
     );
+    report
+        .ledger
+        .write_hits(&cli.out_dir.join(rulings::HITS_FILE))?;
     let gate_ok = census.write(&cli.out_dir)?;
     Ok(RunResult {
         no_mismatch: all.mismatch == 0,

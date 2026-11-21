@@ -23,7 +23,6 @@
 #![allow(non_upper_case_globals)]
 
 use std::borrow::Cow;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -36,15 +35,7 @@ use tidb_types::datum::new_int_datum;
 use crate::hack::GoLayout;
 use crate::hack::MemAwareMap;
 
-/// `bytes.Compare` as Go's `-1 / 0 / +1`.
-// go-std: bytes.Compare L1
-pub(crate) fn bytes_compare(a: &[u8], b: &[u8]) -> isize {
-    match a.cmp(b) {
-        Ordering::Less => -1,
-        Ordering::Equal => 0,
-        Ordering::Greater => 1,
-    }
-}
+pub(crate) use tidb_base::gostd::bytes::compare as bytes_compare;
 
 /// `make([]byte, n)` followed by `copy`: a vector of capacity exactly `n` (Go's `make`).
 // glue: Go make + copy with Go's capacity

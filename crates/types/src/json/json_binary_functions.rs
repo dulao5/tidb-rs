@@ -860,6 +860,7 @@ fn json_finished(buf: &[BinaryJSON<'_>], one: bool) -> bool {
 /// are mostly short, where a plain loop beats a call to `memcmp` (most of the time of a
 /// constant-path `Extract` went to it).
 // go-std: bytes.Compare L1
+// go-dup: hot path of object key lookup, returns Ordering and avoids memcmp for short keys
 #[inline]
 fn compare_key(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     let n = a.len().min(b.len());
@@ -874,20 +875,7 @@ fn compare_key(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     a.len().cmp(&b.len())
 }
 
-/// `sort.Search(n, f)`: the smallest index in [0, n) at which f is true, or n.
-// go-std: sort.Search L1
-fn sort_search(n: usize, f: impl Fn(usize) -> bool) -> usize {
-    let (mut i, mut j) = (0usize, n);
-    while i < j {
-        let h = (i + j) >> 1;
-        if !f(h) {
-            i = h + 1;
-        } else {
-            j = h;
-        }
-    }
-    i
-}
+use tidb_base::gostd::sort::search as sort_search;
 
 // go: buildBinaryJSONArray L1
 pub(crate) fn build_binary_json_array(elems: &[BinaryJSON<'_>]) -> BinaryJSON<'static> {
@@ -1392,14 +1380,7 @@ pub fn compare_binary_json(left: BinaryJSON<'_>, right: BinaryJSON<'_>) -> isize
     cmp
 }
 
-// go-std: bytes.Compare L1
-fn bytes_compare(a: &[u8], b: &[u8]) -> isize {
-    match a.cmp(b) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }
-}
+use tidb_base::gostd::bytes::compare as bytes_compare;
 
 /// MergePatchBinaryJSON implements RFC7396
 /// https://datatracker.ietf.org/doc/html/rfc7396

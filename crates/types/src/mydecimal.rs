@@ -1346,7 +1346,7 @@ impl MyDecimal {
     /// Goes through `from_string`, so the receiver is not reset either (see there).
     // go: MyDecimal.FromFloat64 L1 [M-ERRVAL]
     pub fn from_float64(&mut self, f: f64) -> Result<(), Error> {
-        let s = gostd::format_float_g(f);
+        let s = tidb_base::gostd::strconv::format_float(f, b'g', -1, 64);
         self.from_string(s.as_bytes())
     }
 
@@ -2795,7 +2795,7 @@ pub fn new_dec_from_float_for_test(f: f64) -> MyDecimal {
         // Go: log.Panic("encountered error", zap.Error(err), zap.String("DecimalStr", ...))
         panic!(
             "encountered error: {err}, DecimalStr: {}",
-            gostd::format_float_g(f)
+            tidb_base::gostd::strconv::format_float(f, b'g', -1, 64)
         );
     }
     dec

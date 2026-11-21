@@ -75,6 +75,14 @@ pub enum Verdict {
     /// answer). Never equal, never coverage.
     Unsupported,
     Mismatch(Vec<String>),
+    /// A mismatch an approved ruling of the divergence ledger covers (`ruled:<id>`,
+    /// `docs/testing/rulings.toml`): never equal, still counted and reported with its diff.
+    /// [`compare`] never returns it; the runners turn a [`Verdict::Mismatch`] into it through
+    /// `rulings::Ledger::rule`.
+    Ruled {
+        id: String,
+        diff: Vec<String>,
+    },
 }
 
 impl Verdict {
@@ -84,6 +92,7 @@ impl Verdict {
             Verdict::BothError => "both_error",
             Verdict::Unsupported => "unsupported",
             Verdict::Mismatch(_) => "mismatch",
+            Verdict::Ruled { .. } => "ruled",
         }
     }
 }
@@ -483,6 +492,40 @@ pub fn compare_status_only(a: &Outcome, b: &Outcome) -> Verdict {
             Verdict::Match
         }
         _ => Verdict::Mismatch(vec![format!("A {} vs B {}", brief(a), brief(b))]),
+    }
+}
+
+/// The kind of a mismatch (spec §8): `error` when both failed, `shape` when the answers have
+/// different shapes, else from the diff lines: `warnings`, `affected_rows`, `rows`, `order`,
+/// `columns` or `metadata`. Rulings match on it (their plane).
+pub fn mismatch_kind(a: &Outcome, b: &Outcome, d: &[String]) -> &'static str {
+    match (a, b) {
+        (Outcome::Error { .. }, Outcome::Error { .. }) => return "error",
+        (Outcome::Rows { .. }, Outcome::Rows { .. }) | (Outcome::Ok { .. }, Outcome::Ok { .. }) => {
+        }
+        _ => return "shape",
+    }
+    if d.iter().all(|s| s.starts_with("warnings:")) {
+        return "warnings";
+    }
+    if d.iter().all(|s| s.starts_with("affected rows")) {
+        return "affected_rows";
+    }
+    let rows = d.iter().any(|s| {
+        s.starts_with("row count") || s.contains(" only in ") || s.starts_with("first differing")
+    });
+    let order_only = d.iter().any(|s| s == "same rows in a different order");
+    if rows && !order_only {
+        "rows"
+    } else if order_only {
+        "order"
+    } else if d
+        .iter()
+        .any(|s| s.starts_with("column count") || s.contains("].name:"))
+    {
+        "columns"
+    } else {
+        "metadata"
     }
 }
 
@@ -1300,7 +1343,7 @@ mod tests {
         };
         let verdict = match v {
             Verdict::Match | Verdict::BothError => "equal",
-            Verdict::Mismatch(_) => "different",
+            Verdict::Mismatch(_) | Verdict::Ruled { .. } => "different",
             Verdict::Unsupported => "unsupported",
         };
         Ok((family, verdict))

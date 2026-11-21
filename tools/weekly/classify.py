@@ -16,7 +16,8 @@ from collections import defaultdict
 
 import pymysql
 
-VERDICTS = ("match", "mismatch", "unsupported", "both_error")
+# "ruled": a mismatch an approved ruling of docs/testing/rulings.toml covers (not equal).
+VERDICTS = ("match", "mismatch", "ruled", "unsupported", "both_error")
 
 
 def operators(conn, query):

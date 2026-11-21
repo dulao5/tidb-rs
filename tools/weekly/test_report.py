@@ -43,7 +43,7 @@ def census_file(d, layer, new_stack=1, fallback=2, error=0, skipped=1, equal=1, 
                 f"{control}\t{status}\n")
 
 
-def report(inp, prev=None, parts="ab", expected=None, census=True):
+def report(inp, prev=None, parts="ab", expected=None, census=True, extra=()):
     """Runs report.py; `expected` is the accepted integration-test mismatches (default: none).
     `census`: give every part that needs one a passing census, unless the test wrote its own."""
     if census and not any("census-summary.tsv" in fs for _, _, fs in os.walk(inp)):
@@ -58,6 +58,7 @@ def report(inp, prev=None, parts="ab", expected=None, census=True):
            "--it-expected", exp]
     if prev:
         cmd += ["--previous", prev]
+    cmd += list(extra)
     rc = subprocess.run(cmd, capture_output=True, text=True).returncode
     with open(out) as f:
         return rc, f.readline().strip()
@@ -118,7 +119,112 @@ def strict_round(d, new_ok=3, unsupported=2, mismatch=0, block="D05.3", per_work
             f.write(json.dumps({"verdict": "unsupported", "b": {"error": {"code": 1235, "message": msg}}}) + "\n")
 
 
+RULING = """
+[audit]
+runs = 3
+
+[[ruling]]
+id = "R1"
+name = "a-ruling"
+class = "divergence"
+plane = "error"
+layer = "integrationtest"
+unit = '^a/t$'
+stmt = '^select 1$'
+example = "a/t:1"
+source = "s"
+evidence = "e"
+rationale = "r"
+approver = "zhigang-du"
+approved = "2026-11-21"
+reopen = "o"
+"""
+
+
+def hits_file(d, hits):
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "rulings-hits.tsv"), "w") as f:
+        f.write("id\tstatus\tlayer\thits\n")
+        for rid, n in hits.items():
+            f.write(f"{rid}\tapproved\tintegrationtest\t{n}\n")
+
+
+def history(d, runs):
+    """Earlier full runs' rulings-run.tsv, newest first."""
+    for i, hits in enumerate(runs):
+        os.makedirs(f"{d}/{i:02d}-run", exist_ok=True)
+        with open(f"{d}/{i:02d}-run/rulings-run.tsv", "w") as f:
+            f.write("id\thits\n" + "".join(f"{k}\t{v}\n" for k, v in hits.items()))
+
+
 class VerdictTest(unittest.TestCase):
+    def test_ruled_statement_is_not_red_and_is_listed(self):
+        with tempfile.TemporaryDirectory() as d:
+            it_records(f"{d}/part", [{"verdict": "match", "query": "select 2", "line": 0},
+                                     {"verdict": "ruled", "kind": "ruled:R1", "query": "select 1", "line": 1}])
+            hits_file(f"{d}/part/ab-integrationtest", {"R1": 1})
+            ledger = os.path.join(d, "rulings.toml")
+            with open(ledger, "w") as f:
+                f.write(RULING)
+            rc, first = report(d, parts="integrationtest", extra=["--rulings", ledger])
+            self.assertEqual(rc, 0)
+            self.assertTrue(first.startswith("**GREEN**"), first)
+            with open(f"{d}/report.md") as f:
+                text = f.read()
+            self.assertIn("`a/t:1` ruled:R1 `select 1`", text)
+            self.assertIn("1 ruled", text)
+            with open(f"{d}/rulings-run.tsv") as f:
+                self.assertEqual(f.read(), "id\thits\nR1\t1\n")
+
+    def test_ruling_without_hits_in_n_full_runs_is_red(self):
+        # The negative control of the hit audit: 0 hits now and in the 2 earlier full runs.
+        with tempfile.TemporaryDirectory() as d:
+            it_records(f"{d}/part", [{"verdict": "match", "query": "select 2", "line": 0}])
+            hits_file(f"{d}/part/ab-integrationtest", {"R1": 0})
+            ledger = os.path.join(d, "rulings.toml")
+            with open(ledger, "w") as f:
+                f.write(RULING)
+            history(f"{d}/hist", [{"R1": 0}, {"R1": 0}])
+            rc, first = report(d, parts="integrationtest",
+                               extra=["--rulings", ledger, "--rulings-history", f"{d}/hist"])
+            self.assertEqual(rc, 1)
+            self.assertTrue(first.startswith("**RED**"), first)
+            with open(f"{d}/report.md") as f:
+                self.assertIn("AUDIT FAILED", f.read())
+            # A hit in the window: green. Only two full runs so far: not audited yet.
+            for runs in ([{"R1": 0}, {"R1": 2}], [{"R1": 0}]):
+                history(f"{d}/hist2-{len(runs)}", runs)
+                rc, first = report(d, parts="integrationtest",
+                                   extra=["--rulings", ledger, "--rulings-history", f"{d}/hist2-{len(runs)}"])
+                self.assertEqual(rc, 0, runs)
+
+    def test_expired_cosmetic_ruling_still_firing_is_a_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            it_records(f"{d}/part", [{"verdict": "ruled", "kind": "ruled:R1", "query": "select 1", "line": 1}])
+            hits_file(f"{d}/part/ab-integrationtest", {"R1": 1})
+            ledger = os.path.join(d, "rulings.toml")
+            with open(ledger, "w") as f:
+                f.write(RULING.replace('class = "divergence"', 'class = "cosmetic"')
+                        .replace('reopen = "o"', 'reopen = "o"\nexpires = "2026-11-01"'))
+            rc, first = report(d, parts="integrationtest", extra=["--rulings", ledger, "--today", "2026-11-21"])
+            self.assertEqual(rc, 2)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+            with open(f"{d}/report.md") as f:
+                self.assertIn("expired on 2026-11-01 and still fires", f.read())
+
+    def test_ledger_audit_needs_a_full_run(self):
+        # The nightly (no integrationtest part) does not audit, whatever the history says.
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "ab.json", {"part": "ab", "status": "ok"})
+            write(d, "ab-classified.json", classified())
+            hits_file(f"{d}/ab", {"R1": 0})
+            ledger = os.path.join(d, "rulings.toml")
+            with open(ledger, "w") as f:
+                f.write(RULING)
+            history(f"{d}/hist", [{"R1": 0}, {"R1": 0}])
+            rc, first = report(d, parts="ab", extra=["--rulings", ledger, "--rulings-history", f"{d}/hist"])
+            self.assertEqual(rc, 0, first)
+
     def test_mismatch_plus_error_is_red(self):
         # One workload mismatched (exit 1), another errored (exit 2): run.sh may record the
         # part as incomplete, but the raw results hold a mismatch.

@@ -1,0 +1,207 @@
+# 偏差台账（规格：docs/testing/rulings.md）。
+#
+# 每条 [[ruling]] 是一处经裁定、用户可见的 tidb-rs 与 Go TiDB v8.5.8 的差异。比较器遇到被某条
+# 已批准裁定覆盖的不一致时记为 ruled:<id>（仍然计数、仍然写进 mismatches.jsonl，不算一致）；
+# approver = "pending-owner" 的条目什么也不放行（照常记为不一致，只标出它将归入的条目）。
+# tidb-rs 自己的缺陷不是裁定：写进 issue（bug 标签）和 tools/weekly/integrationtest-expected.json。
+#
+# 字段（schema 由 scripts/check_rulings.py 检查，CI 运行）：
+#   id        R<n>，不重复，不复用
+#   name      短名（小写、连字符）
+#   class     divergence（行为差异，须负责人批准）| cosmetic（外观差异，维护者可批，可设 expires）
+#             | go-gap（照 Go 移植的已知缺口，与 Go 相同，记录决定与重开条件）
+#   plane     差在哪里。比较器能报告的：rows / order / columns / metadata / error / warnings /
+#             affected_rows / shape / b_error / explain；其余：session / protocol / tool /
+#             observability / behaviour
+#   layer     哪个测试层能看到：integrationtest / workload（比较器按下面的匹配规则匹配），
+#             none（没有测试层运行到它：不匹配、不做命中审计，靠 test 字段和重开条件维护）
+#   unit      （layer 不为 none 时必填）测试文件名（integrationtest，如 executor/set）或 workload
+#             模板名的正则
+#   stmt      （同上）SQL 文本的正则；detail（可选）比较器差异描述的正则
+#   example   （同上）integrationtest：固定版本测试集中一条被匹配的语句 test:line；workload：
+#             仓库内的 workload 文件 path:line。CI 检查匹配规则确实命中它
+#   test      （可选）钉住这一差异的测试，path::函数名，CI 检查它存在
+#   source    来源（issue、spec、docs/compatibility.md 的哪一节）
+#   evidence  证据（复现、对照结果、决定记录）
+#   rationale 理由
+#   approver  zhigang-du（负责人）| maintainer（只限 cosmetic）| pending-owner（待负责人批准）
+#   approved  批准日期 YYYY-MM-DD（pending-owner 时不写）
+#   reopen    重开条件：出现什么情况要重新裁定
+#   expires   （只限 cosmetic）过期日期；过期后仍命中时周报警告
+#
+# 只用 TOML 的一个子集（表、单行字符串、整数、注释）：比较器 tools/ab/src/rulings.rs 用
+# 小解析器读它，scripts/check_rulings.py 拒绝子集以外的写法。正则建议用单引号（字面字符串）。
+
+[audit]
+# N：一条可匹配的裁定在最近 N 次完整运行（weekly，含 integrationtest）中命中都为 0 时，审计报红。
+runs = 4
+
+# ---- 上游修复（go-fix，docs/compatibility.md "Upstream fixes ported from TiDB master"）----
+
+[[ruling]]
+id = "R1"
+name = "redact-log-global-only"
+class = "divergence"
+plane = "error"
+layer = "none"
+test = "crates/sessionctx/tests/govec_sessionvars.rs::govec_sessionvars"
+source = "docs/compatibility.md go-fix 表第 1 行；#62；上游 pingcap/tidb#62892"
+evidence = "v8.5.8 中 SET [SESSION] tidb_redact_log 成功但实际切换整个实例的进程级开关；tidb-rs 照上游 master 只允许 GLOBAL，SET / SET SESSION 报 1229"
+rationale = "宪章第一条 2 的例外：上游 v8.5.8 之后修复的安全问题（会话设置泄漏到全实例）"
+approver = "pending-owner"
+reopen = "上游把该修复回移到 release-8.5 并发版（差异消失，删除本条），或负责人决定不移植该修复"
+
+[[ruling]]
+id = "R2"
+name = "fix-control-empty-value"
+class = "divergence"
+plane = "error"
+layer = "none"
+source = "docs/compatibility.md go-fix 表第 2 行；上游 pingcap/tidb#65884"
+evidence = "v8.5.8 中 SET tidb_opt_fix_control = '123:' 报 1105 index out of range（内部 panic 被恢复）；tidb-rs 冒号后的值为空，不报错"
+rationale = "上游已修复的 panic；错误变为成功，不影响已有正确用法"
+approver = "pending-owner"
+reopen = "上游修复进入 release-8.5 发版，或基线升级到包含该修复的版本"
+
+[[ruling]]
+id = "R3"
+name = "collation-0900-ai-ci-u2cea1"
+class = "divergence"
+plane = "error"
+layer = "none"
+source = "docs/compatibility.md go-fix 表第 3 行；上游 pingcap/tidb#67149"
+evidence = "v8.5.8 在 utf8mb4_0900_ai_ci 下比较或排序含 U+2CEA1 的字符串报 1105 index out of range；tidb-rs 正常比较"
+rationale = "上游已修复的 panic（数据正确性）"
+approver = "pending-owner"
+reopen = "基线升级到包含该修复的版本"
+
+[[ruling]]
+id = "R4"
+name = "kill-signal-reset-race"
+class = "divergence"
+plane = "behaviour"
+layer = "none"
+source = "docs/compatibility.md go-fix 表第 4 行；上游 pingcap/tidb#70776"
+evidence = "v8.5.8 在语句结束重置 kill 状态时先读后清，期间到达的 KILL 会丢失；tidb-rs 用一次原子交换清除，不丢"
+rationale = "上游 release-8.5 在 v8.5.8 之后已修复（KILL 可靠性）"
+approver = "pending-owner"
+reopen = "基线升级到包含该修复的 8.5 版本（差异消失）"
+
+[[ruling]]
+id = "R5"
+name = "redact-url-credentials"
+class = "divergence"
+plane = "rows"
+layer = "none"
+source = "docs/compatibility.md go-fix 表第 5 行；上游 pingcap/tidb#71844、#72214（安全）"
+evidence = "v8.5.8 的 ast.RedactURL 保留 userinfo、fragment 和不认识的查询参数，SELECT @@global.tidb_cloud_storage_uri 会显示密钥；tidb-rs 按上游修复后的规则脱敏"
+rationale = "安全修复：凭据泄漏"
+approver = "pending-owner"
+reopen = "基线升级到包含该修复的版本"
+
+# ---- 有意的偏离（docs/compatibility.md "Deliberate deviations from v8.5.8"）----
+
+[[ruling]]
+id = "R6"
+name = "deredact-long-line"
+class = "divergence"
+plane = "tool"
+layer = "none"
+test = "crates/base/tests/redact_long_line.rs::de_redact_keeps_lines_after_a_long_line"
+source = "docs/compatibility.md 有意偏离第 1 行；#90"
+evidence = "v8.5.8 的 tidb-server --redact 遇到超过 64 KiB 的行时，该行及之后所有行被静默丢弃且退出码为 0；tidb-rs 处理所有行"
+rationale = "照搬会让恢复工具静默丢数据；含大 INSERT 的慢日志常超过 64 KiB"
+approver = "pending-owner"
+reopen = "上游修复该问题（差异消失），或决定照 Go"
+
+[[ruling]]
+id = "R7"
+name = "truncated-double-warning-value"
+class = "divergence"
+plane = "warnings"
+layer = "none"
+source = "docs/compatibility.md 有意偏离第 2 行；#97"
+evidence = "v8.5.8 向量化求值时 Truncated incorrect DOUBLE value 的文案在读取时才从可能已被复用的列缓冲格式化，SHOW WARNINGS 可能显示其他行的值（2000 条中 976 条）；tidb-rs 显示本行的值"
+rationale = "照搬会在 warning 中显示无关（可能是其他会话的）数据；tidb-rs 没有全局列池（M-POOL）"
+approver = "pending-owner"
+reopen = "上游修复，或 tidb-rs 引入列复用"
+
+[[ruling]]
+id = "R8"
+name = "year-constant-propagation-copy"
+class = "divergence"
+plane = "rows"
+layer = "none"
+test = "crates/expression/tests/govec_cast.rs::govec_cast"
+source = "docs/compatibility.md 有意偏离第 3 行；#104；D08.2 spec §4 第 7 条"
+evidence = "v8.5.8 常量传播原地改写共享的 YEAR 常量：y1 = y2 AND y2 < 1.0 多返回 1990、2000；tidb-rs 在副本上传播，结果与只写 y2 < 1.0 相同"
+rationale = "照搬会复现返回错误行的上游缺陷；tidb-rs 表达式是不可变的共享值"
+approver = "pending-owner"
+reopen = "上游修复该缺陷（差异消失）"
+
+[[ruling]]
+id = "R9"
+name = "schema-cache-size-zero-unbounded-v2"
+class = "divergence"
+plane = "behaviour"
+layer = "none"
+source = "docs/compatibility.md 有意偏离第 4 行；D06.3 spec §1.2（负责人决定，2026-11-14）、§5.4（例外 A3）"
+evidence = "v8.5.8 中 tidb_schema_cache_size = 0 切到 infoschema v1；tidb-rs 只有 v2，0 表示不限容量的 v2。查询结果相同，内存与读元数据次数不同"
+rationale = "负责人决定：infoschema v1 是技术债，不移植"
+approver = "zhigang-du"
+approved = "2026-11-14"
+reopen = "需要 v1 的全量加载语义（例如 IsV2 为假时的行为被用户依赖）"
+
+[[ruling]]
+id = "R10"
+name = "infoschema-gc-keeps-pivot"
+class = "divergence"
+plane = "error"
+layer = "none"
+source = "docs/compatibility.md 有意偏离第 5 行；#195（D06.3 决定，Maya + Lucky，2026-11-14）"
+evidence = "v8.5.8 的 v2 GC 删掉 GC 截止版本处读者需要的表版本，stale read 报表不存在；tidb-rs 保留截止点以下最新的版本。上游已在 master 修复（PR 66631）"
+rationale = "照搬会让正确的读失败；只有原来失败的读变为成功"
+approver = "pending-owner"
+reopen = "基线升级到包含上游修复的版本（差异消失）"
+
+# ---- 可观测性（docs/compatibility.md "Observability"，已决定、未实现）----
+
+[[ruling]]
+id = "R11"
+name = "pprof-goroutine-mutex-unsupported"
+class = "divergence"
+plane = "protocol"
+layer = "none"
+source = "docs/compatibility.md Observability 第 1 行；#115；例外 N9 D1"
+evidence = "Go 的 /debug/pprof/goroutine、/debug/pprof/mutex 返回 Go 运行时 profile；tidb-rs 返回 404（没有 goroutine，也没有 Go 格式的等价物）"
+rationale = "负责人决定（#115，2026-11-13，选项 2）"
+approver = "zhigang-du"
+approved = "2026-11-13"
+reopen = "出现依赖这两个端点的运维工具，或 tidb-rs 提供等价的诊断格式"
+
+[[ruling]]
+id = "R12"
+name = "statement-cpu-window-accounting"
+class = "divergence"
+plane = "observability"
+layer = "none"
+source = "docs/compatibility.md Observability 第 2 行；#116；例外 N9 D3"
+evidence = "Go 用采样归属语句 CPU；tidb-rs 用窗口分摊记账加动态采样率，数值更准但不逐值相同，只在被采样的执行上出现 TiDB CPU 字段"
+rationale = "负责人决定（#116，2026-11-13），以 §6.1 基准为条件"
+approver = "zhigang-du"
+approved = "2026-11-13"
+reopen = "§6.1 基准不达标，或 Top SQL / Dashboard 依赖逐值一致"
+
+# ---- Go 缺口（go-gap 标签：照 Go 移植，与 Go 相同，记录决定）----
+
+[[ruling]]
+id = "R13"
+name = "autocommit-read-mdl-lease-maxts"
+class = "go-gap"
+plane = "behaviour"
+layer = "none"
+source = "#252（go-gap）"
+evidence = "Go v8.5.8 的 autocommit 读不登记 MDL、读不检查 schema lease、点查用 MaxTS；tidb-rs 照 Go 移植，行为相同"
+rationale = "宪章第一条：照搬 Go 的行为；是否偏离待与内核团队讨论（例外 N11 D3 草案）"
+approver = "pending-owner"
+reopen = "N11 D3 定稿（lease 移到准入），或内核团队给出结论，或出现由此导致的错误结果"

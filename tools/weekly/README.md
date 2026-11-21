@@ -60,6 +60,12 @@ python3 tools/weekly/report.py --in /tmp/weekly --parts ab --out /tmp/weekly/rep
 `b_error` (tidb-rs failed otherwise) is shown too. The verdicts come from
 `ab-integrationtest/results.jsonl` (`tools/ab/README.md`, "Integration tests").
 
+A read an approved ruling of the divergence ledger covers is `ruled` (`docs/testing/rulings.md`):
+shown and counted, not RED. A weekly (full) run also writes `rulings-run.tsv`, kept as the
+`weekly-rulings-hits` artifact; the report audits the ledger over the last N full runs (N =
+`[audit] runs` in `docs/testing/rulings.toml`): a ruling the comparator can match that had no hit
+in any of them is RED, an expired cosmetic ruling a warning (REGRESSED).
+
 A `mismatch` makes the run RED unless it is listed in `integrationtest-expected.json`: accepted
 mismatches keyed by `test:line` (the tests are pinned to v8.5.8, so lines are stable), each with
 a `class` (`bug`: a tidb-rs bug, with the `issue` that tracks it; `nondeterministic`: an answer

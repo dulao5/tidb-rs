@@ -1501,19 +1501,10 @@ const CONV: SigDrivers = match CONV_VEC {
 
 /// `strconv.ParseUint(s, base, 64)` on a prefix `getValidPrefix` accepted (digits of the
 /// base only, non-empty): only a range error is possible.
-// go-std: strconv.ParseUint L2 (validated digits only)
+// glue: success value of tidb_base::gostd::strconv::parse_uint_go(s, base, 64)
 fn parse_uint_base(s: &[u8], base: u64) -> Option<u64> {
-    let mut n: u64 = 0;
-    for &c in s {
-        let d = match c {
-            b'0'..=b'9' => c - b'0',
-            b'a'..=b'z' => c - b'a' + 10,
-            b'A'..=b'Z' => c - b'A' + 10,
-            _ => return None,
-        };
-        n = n.checked_mul(base)?.checked_add(u64::from(d))?;
-    }
-    Some(n)
+    let (n, err) = tidb_base::gostd::strconv::parse_uint_go(s, base as i32, 64);
+    err.ok().map(|()| n)
 }
 
 /// `strconv.FormatUint(v, base)`: lower-case digits.

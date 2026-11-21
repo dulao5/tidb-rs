@@ -94,6 +94,13 @@ jobs:
           python3 tools/weekly/test_report.py
           python3 tools/ab/faults/test_faults.py
 
+      # The divergence ledger (#262, docs/testing/rulings.md): schema, and the checks that must
+      # go red (a ruling that cannot match, an expired cosmetic ruling, a ruling with no hits).
+      - name: divergence ledger
+        run: |
+          python3 scripts/test_check_rulings.py
+          python3 scripts/check_rulings.py
+
       - name: rustfmt (first-party crates)
         run: cargo fmt --check $(tools/first-party.sh)
 
@@ -147,6 +154,10 @@ jobs:
         run: scripts/tidb-reference.sh --check || scripts/tidb-reference.sh
       - name: tidb-reference.sh --check
         run: scripts/tidb-reference.sh --check
+      # Every matched ruling's example is a statement of the pinned integration tests that its
+      # match rule covers (docs/testing/rulings.md): a rule that cannot match anything is red.
+      - name: divergence ledger examples
+        run: python3 scripts/check_rulings.py --tests "$(scripts/tidb-reference.sh)/tests/integrationtest/t"
       - name: lock matches CONSTITUTION.md
         run: |
           tag=$(sed -n 's/^tag=//p' tidb-reference.lock)
@@ -198,6 +209,12 @@ jobs:
         run: |
           python3 scripts/test_check_one_translation.py
           python3 scripts/check_one_translation.py
+      # Temporary boundary stubs (blocked-by) may only go down per area (#262): a new stub over
+      # scripts/stub_ratchet.tsv fails; after removing stubs, lower it with --write.
+      - name: blocked-by ratchet (and its tests)
+        run: |
+          python3 scripts/test_check_stub_ratchet.py
+          python3 scripts/check_stub_ratchet.py
       - uses: actions/checkout@v4
         if: github.event_name == 'pull_request'
         with:

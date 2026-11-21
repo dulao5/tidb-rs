@@ -4,19 +4,10 @@ use crate::errors::{self, Error};
 use crate::gostd::{decode_rune, is_digit, is_digit_byte};
 
 /// Go `strconv.ParseUint(s, 10, 64)` (success only; the error value is not used here).
-// go-std: strconv.ParseUint L2 (base 10, bitSize 64; returns None on any error)
+// glue: success value of crate::gostd::strconv::parse_uint_go(s, 10, 64)
 fn parse_uint(s: &[u8]) -> Option<u64> {
-    if s.is_empty() {
-        return None;
-    }
-    let mut n: u64 = 0;
-    for &c in s {
-        if !c.is_ascii_digit() {
-            return None;
-        }
-        n = n.checked_mul(10)?.checked_add(u64::from(c - b'0'))?;
-    }
-    Some(n)
+    let (n, err) = crate::gostd::strconv::parse_uint_go(s, 10, 64);
+    err.ok().map(|()| n)
 }
 
 /// `formatENUS`, on the bytes of the Go strings.

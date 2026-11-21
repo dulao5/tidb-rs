@@ -205,13 +205,7 @@ impl Clone for GoValue {
     }
 }
 
-/// `time.Duration.Seconds`.
-// go-std: time.Duration.Seconds L1
-fn duration_seconds(d: i64) -> f64 {
-    let sec = d / 1_000_000_000;
-    let nsec = d % 1_000_000_000;
-    sec as f64 + nsec as f64 / 1e9
-}
+use tidb_base::gostd::time::duration_seconds;
 
 impl GoValue {
     /// The value as an argument of Go's `fmt` (`%v`, `%T`, ...).
