@@ -723,7 +723,7 @@ pub fn get_visit_info(
             table: tbl.to_owned(),
             column: name.orig_col_name.l.clone(),
             privilege: SelectPriv.0,
-            err: Some(String::from_utf8_lossy(&auth_err.error()).into_owned()),
+            err: Some(auth_err),
             ..Default::default()
         });
     }
@@ -740,7 +740,7 @@ pub fn get_visit_info(
             table: tbl.to_owned(),
             column: col.clone(),
             privilege: SelectPriv.0,
-            err: Some(String::from_utf8_lossy(&err.error()).into_owned()),
+            err: Some(err),
             ..Default::default()
         });
     }

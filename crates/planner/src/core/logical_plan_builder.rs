@@ -82,7 +82,7 @@ pub fn extract_limit_count_offset(
 }
 
 /// appendVisitInfo.
-// go: appendVisitInfo L2 (the error is kept as its message, as VisitInfo.err)
+// go: appendVisitInfo L1
 pub fn append_visit_info(
     vi: &mut Vec<VisitInfo>,
     privilege: u64,
@@ -96,7 +96,7 @@ pub fn append_visit_info(
         db: db.to_owned(),
         table: tbl.to_owned(),
         column: col.to_owned(),
-        err: err.map(|e| String::from_utf8_lossy(&e.error()).into_owned()),
+        err,
         ..Default::default()
     });
 }

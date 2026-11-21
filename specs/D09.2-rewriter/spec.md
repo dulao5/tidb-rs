@@ -31,7 +31,7 @@ Go 代码：`pkg/planner/core/expression_rewriter.go`（2,876 行）。另外两
 1. **遍历。** Go 用访问者模式：`Accept` 先调 `Enter`，再按固定顺序访问子节点，最后调 `Leave`；`Leave` 把结果压进一个栈（`ctxStack`），父节点从栈顶取子节点的结果。Rust 的 AST 没有访问者接口，改写器写成一个递归函数，对每种节点按 Go `Accept` 中子节点的顺序递归，`Enter` / `Leave` 的逻辑原样保留（含 `asScalar`、常量折叠计数器 `disableFoldCounter` / `tryFoldCounter` 的进出）。Go 中出错时设置 `er.err`、之后的 `Leave` 立即返回 false、整棵树停止遍历；Rust 用 `Result` 和 `?` 达到同样的效果（第一个错误即返回，与 Go 返回的错误相同）。
 2. **计划上下文。** Go 的 `rewrite(exprNode, p, aggMapper, asScalar)` 从计划 `p` 读输出 schema 和输出列名。Rust 的逻辑计划还没有输出列名（VS1-23 加），所以 `rewrite` 直接接收 schema 和列名（加上可选的计划 ID，供 `findFieldNameFromNaturalUsingJoin` 向下找 join）。Go 在改写结束后把 `p` 的输出列名截回原长度：只有子查询会给 `p` 加列（§4），子查询之外这一步什么也不改，不移植。
 3. **改写器池。** Go 的 `PlanBuilder` 缓存改写器对象（`rewriterPool`、`rewriterCounter`）以减少分配，这是 `M-POOL` 的情形：Rust 每次新建，`getExpressionRewriter` 只保留"重置各字段"的语义。
-4. **节点身份。** Go 的 `aggMapper`、`windowMapper`、`colMapper` 以 AST 节点指针为键。Rust 用节点地址（`usize`）为键，调用方在同一棵 AST 上建表和查表，与 Go 的指针身份等价。
+4. **节点身份。** Go 的 `aggMapper`、`windowMapper`、`colMapper` 以 AST 节点指针为键，map 持有指针，节点因此不会被回收，键始终唯一。Rust 的键是 `ByAddr<'ast, T>`：按节点地址比较和取哈希，同时借用该节点，借用检查保证表中每个键对应的节点比表活得久，不会出现"临时节点被释放、新节点恰好分配在同一地址、命中旧键"的情况（#258 评审第 1 条）。查表时传活节点的地址。`colMapper` 因此带上语句 AST 的生命周期，`PlanBuilder` 写成 `PlanBuilder<'ast>`。
 5. **聚合函数。** 改写时聚合已经由 `buildAggregation`（D09.4）建好，`aggMapper` 告诉改写器"这个 `SUM(k)` 是聚合算子输出的第几列"，改写器取那一列；不在表中时报 `ErrInvalidGroupFuncUse`。`COUNT` 离开时收集表级权限（`collectPrivsForCount`）。窗口函数同理（`windowMapper`）。
 6. **参数标记的值。** Go 在 `EXECUTE` 时把参数值写进 AST 的 `ParamMarkerExpr.Datum`，`ParamMarkerExpression` 从那里取值。Rust 的 AST 不带值（VS1-15 的决定：参数值只放在 `SessionVars.PlanCacheParams`），所以 Rust 的 `ParamMarkerExpression` 按参数序号从 `PlanCacheParams` 取值。两处的值是 Go 在同一处（`SetParameterValuesIntoSCtx`）写入的同一个值，等价。`PREPARE` 阶段（还没有值）Go 的 Datum 是空值（NULL），Rust 读不到参数时也给 NULL。
 7. **字面量的类型。** Go 的字面量节点带 parser 推导的 `FieldType`（`DefaultTypeForValue`）。Rust 的字面量节点只带值、字符集和排序规则，类型在改写时用同一个 `DefaultTypeForValue` 算出，结果相同。
@@ -60,7 +60,7 @@ Go 代码：`pkg/planner/core/expression_rewriter.go`（2,876 行）。另外两
 
 1. **`_utf8mb4'x'` 这类字符集引导符。** Go 的 parser 给带引导符的字面量（`_charset'x'`、`N'x'`）加 `UnderScoreCharsetFlag`，改写时据此决定类型的标志和排序规则（utf8mb4 时换成会话的 `default_collation_for_utf8mb4`）。Rust AST 的字面量原来没有这个标记，本项在 `ValueExpr` 上加了 `underscore_charset`，由 parser 的三条引导符产生式设置（D02.2 的 AST，改动很小），改写器照 Go 的产生式补上字符集、排序规则和标志。govec 中有 `N'abc'`、`_binary'abc'`、`_latin1'abc'`，结果与 Go 相同。
 2. **内置函数使用统计。** `BuiltinFunctionUsageInc` 是遥测计数（D14 系列），不移植，不影响结果。
-3. **同一列的多次引用（Go 的别名，不模拟）。** Go 每次引用一列都把 schema 中的同一个 `*Column` 压栈，某次引用惰性算出的 coercibility 会缓存在这个共享对象上，之后的引用都看到它。Rust 每次引用复制一份列，coercibility 在各自的副本上算。只有一种情况结果不同：ENUM 列先在字符串比较中被引用（算出 implicit），再被 `WrapWithCastAsInt` 复制并加上"按整数"标志——Go 的副本带着缓存的 implicit，Rust 按整数类型算出 numeric。coercibility 只在推导字符串排序规则时有用，整数上下文不会用到，所以不影响结果；govec 中这样的记录有 1 条，测试中逐条登记（`KNOWN_ALIASING_DIFFS`）。
+3. **同一列的多次引用（Go 的别名，不模拟）。** Go 每次引用一列都把 schema 中的同一个 `*Column` 压栈，某次引用惰性算出的 coercibility 会缓存在这个共享对象上，之后的引用都看到它。Rust 每次引用复制一份列，coercibility 在各自的副本上算。只有一种情况结果不同：ENUM 列先在字符串比较中被引用（算出 implicit），再被 `WrapWithCastAsInt` 复制并加上"按整数"标志——Go 的副本带着缓存的 implicit，Rust 按整数类型算出 numeric。coercibility 只在推导字符串排序规则时有用，整数上下文不会用到，所以不影响结果；govec 中这样的记录有 1 条，测试中逐条登记（`KNOWN_ALIASING_DIFFS`）：登记的是表达式和那一个值（cast 下面 ENUM 列的 coercibility）的 JSON 路径，比较时只把这一个值在两边置空，其余部分必须与 Go 相同（#258 评审第 3 条）。
 4. **`collectPrivsForCount`。** Go 遍历 map 生成权限检查项，顺序随机；Rust 按（库，表）排序（`M-MAPORDER`，顺序不影响权限检查）。视图名需要 InfoSchema（视图还没有移植），按表名处理。
 
 ## 6. 测试

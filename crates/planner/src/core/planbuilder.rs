@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
-use tidb_parser::ast::{ExecuteStmt, Expr, Op, SelectStmt, Stmt};
+use tidb_parser::ast::{ColumnName, ExecuteStmt, Expr, Op, SelectStmt, Stmt};
 use tidb_types::datum::Datum;
 use tidb_types::field_name::NameSlice;
 
@@ -23,7 +23,7 @@ use crate::core::plan_cache_utils::get_prepared_stmt;
 use tidb_sessionctx::stmtctx::TableEntry;
 use tidb_sessionctx::variable::session::SessionVars;
 
-use crate::core::expression_rewriter::{CheckSelectColumnPrivOption, ClauseCode};
+use crate::core::expression_rewriter::{ByAddr, CheckSelectColumnPrivOption, ClauseCode};
 
 /// visitInfo is used for privilege check.
 #[derive(Clone, Debug, Default)]
@@ -36,8 +36,9 @@ pub struct VisitInfo {
     pub table: String,
     /// column.
     pub column: String,
-    /// err (by identity in Go; the message here).
-    pub err: Option<String>,
+    /// err: the error `CheckPrivilege` returns when the privilege is missing (the full
+    /// error: the client sees its code and SQLSTATE).
+    pub err: Option<Error>,
     /// alterWritable.
     pub alter_writable: bool,
     /// dynamicPrivs.
@@ -47,14 +48,19 @@ pub struct VisitInfo {
 }
 
 impl VisitInfo {
-    /// Go compares `err` by identity (`==` on the interface); here by message.
-    // go: visitInfo.Equals L2 (err compared by message: Rust errors have no identity)
+    /// Go compares `err` by identity (`==` on the interface); Rust errors have no identity,
+    /// so two errors are equal when their code and message are.
+    // go: visitInfo.Equals L2 (err compared by code and message: Rust errors have no identity)
     pub fn equals(&self, other: &VisitInfo) -> bool {
         self.privilege == other.privilege
             && self.db == other.db
             && self.table == other.table
             && self.column == other.column
-            && self.err == other.err
+            && match (&self.err, &other.err) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.code() == b.code() && a.error() == b.error(),
+                _ => false,
+            }
             && self.alter_writable == other.alter_writable
             && self.dynamic_privs == other.dynamic_privs
             && self.dynamic_with_grant == other.dynamic_with_grant
@@ -99,7 +105,7 @@ pub fn get_db_table_info(visit_info: &[VisitInfo]) -> Vec<TableEntry> {
 ///
 /// The fields of the VS1-10 skeleton; the SELECT builder (VS1-21) adds the rest.
 #[derive(Debug, Default)]
-pub struct PlanBuilder {
+pub struct PlanBuilder<'ast> {
     /// visitInfo is used for privilege check.
     pub visit_info: Vec<VisitInfo>,
     /// optFlag.
@@ -122,16 +128,17 @@ pub struct PlanBuilder {
     pub cur_clause: ClauseCode,
     /// checkColPriv.
     pub check_col_priv: CheckSelectColumnPrivOption,
-    /// colMapper stores the column that must be pre-resolved, keyed by the address of the
-    /// `ColumnNameExpr` node (Go: the node pointer; D09.2 spec §3 item 4).
-    pub col_mapper: HashMap<usize, usize>,
+    /// colMapper stores the column that must be pre-resolved, keyed by the `ColumnNameExpr`
+    /// node's identity (Go: the node pointer; D09.2 spec §3 item 4): the key borrows the
+    /// node from the statement's AST (`'ast`).
+    pub col_mapper: HashMap<ByAddr<'ast, ColumnName>, usize>,
 }
 
 /// PlanBuilderOpt is used to adjust the plan builder.
 pub trait PlanBuilderOpt {
     /// Apply.
     // glue: interface method of PlanBuilderOpt
-    fn apply(&self, builder: &mut PlanBuilder);
+    fn apply(&self, builder: &mut PlanBuilder<'_>);
 }
 
 /// PlanBuilderOptNoExecution means the plan builder should not run any executor during Build().
@@ -141,7 +148,7 @@ pub struct PlanBuilderOptNoExecution;
 impl PlanBuilderOpt for PlanBuilderOptNoExecution {
     /// Apply implements the interface PlanBuilderOpt.
     // go: PlanBuilderOptNoExecution.Apply L1
-    fn apply(&self, builder: &mut PlanBuilder) {
+    fn apply(&self, builder: &mut PlanBuilder<'_>) {
         builder.disable_sub_query_preprocessing = true;
     }
 }
@@ -153,7 +160,7 @@ pub struct PlanBuilderOptAllowCastArray;
 impl PlanBuilderOpt for PlanBuilderOptAllowCastArray {
     /// Apply implements the interface PlanBuilderOpt.
     // go: PlanBuilderOptAllowCastArray.Apply L1
-    fn apply(&self, builder: &mut PlanBuilder) {
+    fn apply(&self, builder: &mut PlanBuilder<'_>) {
         builder.allow_build_cast_array = true;
     }
 }
@@ -163,7 +170,7 @@ impl PlanBuilderOpt for PlanBuilderOptAllowCastArray {
 /// Go also allocates `outerCTEs`, `colMapper`, `handleHelper` and `correlatedAggMapper`;
 /// those fields come with the SELECT builder (VS1-21).
 // go: NewPlanBuilder L1
-pub fn new_plan_builder(opts: &[&dyn PlanBuilderOpt]) -> PlanBuilder {
+pub fn new_plan_builder<'ast>(opts: &[&dyn PlanBuilderOpt]) -> PlanBuilder<'ast> {
     let mut builder = PlanBuilder::default();
     for opt in opts {
         opt.apply(&mut builder);
@@ -171,7 +178,7 @@ pub fn new_plan_builder(opts: &[&dyn PlanBuilderOpt]) -> PlanBuilder {
     builder
 }
 
-impl PlanBuilder {
+impl<'ast> PlanBuilder<'ast> {
     /// Init initialize a PlanBuilder.
     /// Return the original PlannerSelectBlockAsName as well, callers decide if
     /// PlannerSelectBlockAsName should be restored after using this builder.
@@ -188,7 +195,7 @@ impl PlanBuilder {
     /// ResetForReuse reset the plan builder, put it into pool for reuse.
     /// After reset for reuse, the object should be equal to a object returned by NewPlanBuilder().
     // go: PlanBuilder.ResetForReuse L1
-    pub fn reset_for_reuse(&mut self) -> &mut PlanBuilder {
+    pub fn reset_for_reuse(&mut self) -> &mut PlanBuilder<'ast> {
         // Reset ALL the fields.
         *self = PlanBuilder::default();
         self.no_decorrelate = false;

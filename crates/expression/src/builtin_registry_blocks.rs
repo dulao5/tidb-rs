@@ -290,3 +290,27 @@ pub fn class_block(class: &str) -> Option<&'static str> {
         .ok()
         .map(|i| CLASS_BLOCKS[i].1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CLASS_BLOCKS, class_block};
+    use crate::builtin_registry::function_class;
+    use crate::builtin_registry_gen::FUNCS;
+
+    /// The table is strictly sorted by class (the lookup is a binary search) and every class
+    /// of Go's `funcs` whose `getFunction` is not ported has a block: a class missing here
+    /// would turn its boundary stub into a plain "not ported" error, which the router does
+    /// not fall back on (review of the expression rewriter, point 4).
+    #[test]
+    fn class_blocks_sorted_and_complete() {
+        for w in CLASS_BLOCKS.windows(2) {
+            assert!(w[0].0 < w[1].0, "not sorted: {:?} >= {:?}", w[0], w[1]);
+        }
+        let missing: Vec<(&str, &str)> = FUNCS
+            .iter()
+            .filter(|e| function_class(e.name).is_none() && class_block(e.class).is_none())
+            .map(|e| (e.name, e.class))
+            .collect();
+        assert!(missing.is_empty(), "classes without a block: {missing:?}");
+    }
+}
