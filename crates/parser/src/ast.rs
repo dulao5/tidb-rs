@@ -144,6 +144,9 @@ pub struct ValueExpr {
     pub collate: &'static str,
     /// `projectionOffset` (`-1` = unset); set when adjacent string literals are concatenated.
     pub projection_offset: i32,
+    /// `Type.GetFlag() & mysql.UnderScoreCharsetFlag`: the literal has a character set
+    /// introducer (`_utf8mb4'x'`, `N'x'`); the expression rewriter reads it.
+    pub underscore_charset: bool,
 }
 impl ValueExpr {
     /// `ast.NewValueExpr(value, charset, collate)` with test_driver's `DefaultTypeForValue`.
@@ -157,6 +160,7 @@ impl ValueExpr {
             charset,
             collate,
             projection_offset: -1,
+            underscore_charset: false,
         }
     }
 }

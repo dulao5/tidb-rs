@@ -10,6 +10,8 @@
 //! - `hint.QBHintHandler` / `QBHintBuildState` and `SessionVars.PlannerSelectBlockAsName`
 //!   are D13.3 (VS1-24): `Init` keeps Go's shape without them.
 
+use std::collections::HashMap;
+
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_parser::ast::{ExecuteStmt, Expr, Op, SelectStmt, Stmt};
@@ -20,6 +22,8 @@ use crate::core::common_plans::Execute;
 use crate::core::plan_cache_utils::get_prepared_stmt;
 use tidb_sessionctx::stmtctx::TableEntry;
 use tidb_sessionctx::variable::session::SessionVars;
+
+use crate::core::expression_rewriter::{CheckSelectColumnPrivOption, ClauseCode};
 
 /// visitInfo is used for privilege check.
 #[derive(Clone, Debug, Default)]
@@ -114,6 +118,13 @@ pub struct PlanBuilder {
     pub disable_sub_query_preprocessing: bool,
     /// allowBuildCastArray indicates whether allow cast(... as ... array).
     pub allow_build_cast_array: bool,
+    /// curClause: the clause being built (the expression rewriter's error texts, D09.2).
+    pub cur_clause: ClauseCode,
+    /// checkColPriv.
+    pub check_col_priv: CheckSelectColumnPrivOption,
+    /// colMapper stores the column that must be pre-resolved, keyed by the address of the
+    /// `ColumnNameExpr` node (Go: the node pointer; D09.2 spec §3 item 4).
+    pub col_mapper: HashMap<usize, usize>,
 }
 
 /// PlanBuilderOpt is used to adjust the plan builder.

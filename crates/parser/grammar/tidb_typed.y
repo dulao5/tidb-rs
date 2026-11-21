@@ -2425,6 +2425,7 @@ Literal -> Expr:
                 let mut expr = ValueExpr::new(Datum::Str(tok_text($lexer, &$2)), cs, co);
                 expr.charset = cs;
                 expr.collate = co;
+                expr.underscore_charset = true;
                 Expr::Value(Box::new(expr))
             }
         }
@@ -2444,6 +2445,7 @@ Literal -> Expr:
                 let mut expr = ValueExpr::new(hex_lit($lexer.src_str(tok_span(&$2))), cs, co);
                 expr.charset = cs;
                 expr.collate = co;
+                expr.underscore_charset = true;
                 Expr::Value(Box::new(expr))
             }
         }
@@ -2461,6 +2463,7 @@ Literal -> Expr:
                 let mut expr = ValueExpr::new(bit_lit($lexer.src_str(tok_span(&$2))), cs, co);
                 expr.charset = cs;
                 expr.collate = co;
+                expr.underscore_charset = true;
                 Expr::Value(Box::new(expr))
             }
         }
