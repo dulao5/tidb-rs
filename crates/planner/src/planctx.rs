@@ -35,6 +35,10 @@ pub struct PlanCtx<'s> {
     /// (`util.GetPushDownCtx`). `None` until the session hands it over with the routed
     /// statement (VS1-24 / VS1-37); the push down functions then return a boundary error.
     pub client: Option<Arc<dyn Client>>,
+    /// `p.SCtx().HasDirtyContent(tid)`: whether the session's transaction has written the
+    /// table (its membuffer). `None` until the session hands it over with the routed
+    /// statement (VS1-24 / VS1-37); the plan builder then returns a boundary error.
+    pub has_dirty_content: Option<Arc<dyn Fn(i64) -> bool + Send + Sync>>,
 }
 
 impl<'s> PlanCtx<'s> {
@@ -46,6 +50,7 @@ impl<'s> PlanCtx<'s> {
             vars,
             expr_ctx,
             client: None,
+            has_dirty_content: None,
         }
     }
 

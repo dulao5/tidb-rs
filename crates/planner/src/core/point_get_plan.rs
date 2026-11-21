@@ -76,6 +76,7 @@ use crate::core::plan::{
     get_actual_probe_cnt_from_probe_parents, get_estimated_probe_cnt_from_probe_parents,
 };
 use crate::core::planbuilder::VisitInfo;
+use crate::core::planbuilder::is_for_update_read_select_lock;
 use crate::core::resolve::{ContextRef, NodeW, TableNameW};
 use crate::physicalop::{BasePhysicalPlan, PhysicalPlanRef};
 use crate::planctx::PlanCtx;
@@ -613,18 +614,6 @@ pub fn try_fast_plan(
         }
         _ => Ok(None),
     }
-}
-
-/// `isForUpdateReadSelectLock` (`planbuilder.go`, D09.0) checks if the lock type need to use
-/// forUpdateRead.
-// go: pkg/planner/core/planbuilder.go isForUpdateReadSelectLock L1
-fn is_for_update_read_select_lock(lock: Option<&SelectLockInfo>) -> bool {
-    let Some(lock) = lock else {
-        return false;
-    };
-    lock.lock_type == SelectLockType::ForUpdate
-        || lock.lock_type == SelectLockType::ForUpdateNoWait
-        || lock.lock_type == SelectLockType::ForUpdateWaitN
 }
 
 /// `logicalop.IsSupportedSelectLockType` (`logical_lock.go`, D09.14) checks if the lockType
