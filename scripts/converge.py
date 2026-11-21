@@ -18,9 +18,11 @@ Checks, per Rust file:
   * the `// go:` annotations follow Go's source order (reported, not an error);
   * every mapping rule ID in `L1 [M-..]` is a rule of docs/porting/mappings.md;
   * with --fma-sites (tracker data/go_fma_sites.tsv, mapping rule M-FMA): every Go line
-    that gc fuses into FMA on some target, in a Go file the Rust file ports, has a
-    `[M-FMA] <file>.go:<line>` comment in the Rust file, and the `go:` annotation of its
-    function carries M-FMA; every such comment names a registered line;
+    that gc fuses into FMA on some target, in a function the Rust file ports (a `go:` or
+    `go-part:` annotation; issue #286: the unported functions of a partly ported Go file
+    are not checked), has a `[M-FMA] <file>.go:<line>` comment in the Rust file, and the
+    `go:` annotation of its function (the `go-part:` one when there is no `go:`) carries
+    M-FMA; every such comment names a registered line;
   * every lint in a module-level `#![allow(...)]` is in the workspace list
     `[workspace.metadata.porting] style-lint-allow` of Cargo.toml; item-level `#[allow]`s
     are listed for the reviewer (reported, not an error).
@@ -192,8 +194,11 @@ def scan(path, funcs):
     return go_files, anns, errors, unannotated
 
 
-def check_fma(rs, go_files, sym_rules, sites, problems):
-    """Rule M-FMA, see the module doc. Returns the number of registered sites checked."""
+def check_fma(rs, go_files, sym_rules, part_rules, sites, problems):
+    """Rule M-FMA, see the module doc. Returns the number of registered sites checked.
+
+    sym_rules / part_rules: Go symbol -> rule IDs of its `go:` / `go-part:` annotations in
+    this file; a site in a function with neither is not checked (not ported here)."""
     marks = set()
     for n, line in enumerate(open(rs).read().splitlines(), 1):
         m = FMA_MARK_RE.search(line)
@@ -210,12 +215,16 @@ def check_fma(rs, go_files, sym_rules, sites, problems):
     for (f, ln), (sym, fused) in sorted(sites.items()):
         if f not in go_files:
             continue
+        syms = sym.split(",")
+        if not any(s in sym_rules or s in part_rules for s in syms):
+            continue  # the function is not ported in this file (issue #286)
         checked += 1
         if (f, ln) not in marks:
             problems.append(f"{rs}: {f}:{ln} ({sym}) is fused by gc on {', '.join(fused)}; "
                             f"no `// [M-FMA] {os.path.basename(f)}:{ln}` comment")
-        for s in sym.split(","):
-            if "M-FMA" not in sym_rules.get(s, ()):
+        for s in syms:
+            rules_ = sym_rules[s] if s in sym_rules else part_rules.get(s)
+            if rules_ is not None and "M-FMA" not in rules_:
                 problems.append(f"{rs}: {s} contains fused line {f}:{ln}; its annotation lacks [M-FMA]")
     return checked
 
@@ -285,6 +294,7 @@ def main():
         covered_files.update(go_files)
         order = []
         sym_rules = defaultdict(set)  # Go symbol -> rule IDs of its `go:` annotation
+        part_rules = defaultdict(set)  # Go symbol -> rule IDs of its `go-part:` annotations
         for line_no, kind, text in anns:
             kinds[kind] += 1
             for m in RULES_RE.finditer(text):
@@ -292,10 +302,11 @@ def main():
                     if rule not in rules:
                         problems.append(f"{rs}:{line_no}: mapping rule {rule} is not in {args.mappings}")
                     rule_uses[rule] += 1
-            if kind == "go" and text.split():
+            if kind in ("go", "go-part") and text.split():
                 parts = text.split()
                 sym = parts[1] if parts[0].endswith(".go") and len(parts) > 1 else parts[0]
-                sym_rules[sym].update(r for m in RULES_RE.finditer(text) for r in re.split(r",\s*", m.group(1)))
+                target = sym_rules if kind == "go" else part_rules
+                target[sym].update(r for m in RULES_RE.finditer(text) for r in re.split(r",\s*", m.group(1)))
             if kind in ("go-exception", "glue"):
                 if kind == "go-exception":
                     parts_ = text.split()
@@ -328,7 +339,7 @@ def main():
         for line_no, name in unannotated:
             problems.append(f"{rs}:{line_no}: fn {name} has no provenance annotation")
         if fma_sites is not None:
-            fma_checked += check_fma(rs, go_files, sym_rules, fma_sites, problems)
+            fma_checked += check_fma(rs, go_files, sym_rules, part_rules, fma_sites, problems)
         # Go order within each Go file.
         by_file = defaultdict(list)
         for start, sym, line_no, f in order:

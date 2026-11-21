@@ -22,6 +22,7 @@ mod plan_cache_tests;
 pub mod plan_cache_utils;
 pub mod plan_cacheable_checker;
 pub mod plan_cost_ver1;
+pub mod plan_cost_ver2;
 pub mod planbuilder;
 pub mod point_get_plan;
 pub mod preprocess;

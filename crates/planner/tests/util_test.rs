@@ -34,6 +34,29 @@ use tidb_types::datum::{Datum, min_not_null_datum, new_int_datum};
 use tidb_types::field_name::FieldName;
 use tidb_types::field_type::new_field_type;
 
+/// A session without global variables (the cost functions only read session fields).
+struct NoGlobals;
+
+impl tidb_sessionctx::variable::session::GlobalVarAccessor for NoGlobals {
+    fn get_global_sys_var(&self, _: &str) -> Result<String, tidb_base::Error> {
+        Ok(String::new())
+    }
+    fn set_global_sys_var_only(
+        &mut self,
+        _: &str,
+        _: &str,
+        _: bool,
+    ) -> Result<(), tidb_base::Error> {
+        Ok(())
+    }
+    fn get_tidb_table_value(&self, _: &str) -> Result<String, tidb_base::Error> {
+        Ok(String::new())
+    }
+    fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), tidb_base::Error> {
+        Ok(())
+    }
+}
+
 fn c2l(pairs: &[(i64, isize)]) -> Col2Len {
     pairs.iter().copied().collect()
 }
@@ -356,14 +379,22 @@ fn base_physical_plan_methods() {
 
     // The cost is computed once and reused unless CostFlagRecalculate is set.
     let mut opt = new_default_plan_cost_option();
+    let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
+    let ctx = tidb_planner::PlanCtx::new(
+        &mut vars,
+        tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
+    );
     let node = tidb_planner::make_mut_plan(&mut p);
-    let c = node.get_plan_cost_ver2(RootTaskType, &opt).unwrap();
+    let c = node.get_plan_cost_ver2(&ctx, RootTaskType, &opt).unwrap();
     assert_eq!(c.get_cost(), 0.0);
     assert!(node.base_physical().cost.lock().plan_cost_init);
     opt.with_cost_flag(CostFlagRecalculate | CostFlagTrace);
-    let c = node.get_plan_cost_ver2(RootTaskType, &opt).unwrap();
+    let c = node.get_plan_cost_ver2(&ctx, RootTaskType, &opt).unwrap();
     assert!(c.get_trace().is_some());
-    assert_eq!(node.get_plan_cost_ver1(RootTaskType, &opt).unwrap(), 0.0);
+    assert_eq!(
+        node.get_plan_cost_ver1(&ctx, RootTaskType, &opt).unwrap(),
+        0.0
+    );
 
     // Clone is not supported by the base; CloneForPlanCache neither.
     assert!(p.clone_plan().is_err());
@@ -441,10 +472,15 @@ fn cost_memo_on_a_shared_child_is_filled_in_place() {
     let a = inner(2, vec![Arc::clone(&shared)]);
     let b = inner(3, vec![Arc::clone(&shared)]);
     let opt = new_default_plan_cost_option();
-    a.get_plan_cost_ver2(RootTaskType, &opt).unwrap();
+    let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
+    let ctx = tidb_planner::PlanCtx::new(
+        &mut vars,
+        tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
+    );
+    a.get_plan_cost_ver2(&ctx, RootTaskType, &opt).unwrap();
     assert!(Arc::ptr_eq(&a.children()[0], &shared));
     assert!(shared.base_physical().cost.lock().plan_cost_init);
-    b.get_plan_cost_ver2(RootTaskType, &opt).unwrap();
+    b.get_plan_cost_ver2(&ctx, RootTaskType, &opt).unwrap();
     assert!(Arc::ptr_eq(&b.children()[0], &shared));
     assert_eq!(Arc::strong_count(&shared), 3);
 }
