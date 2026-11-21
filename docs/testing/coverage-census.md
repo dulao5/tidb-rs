@@ -78,11 +78,14 @@ tracker 的 `import-integration` 同时导入 integrationtest 的普查（见 tr
   返回 404。
 - `ab` 在 B 上执行每条语句之前、之后各读一次本连接的记录：序号增加才归属为该语句的路径，否则记为
   `error`（未经路由）。按连接读取，其它连接的语句不会混入。
-- 关闭时开销只是一次 relaxed 原子读；连接关闭时删除其记录。不改变任何语句的执行与结果。
+- 关闭时开销只是一次 relaxed 原子读；打开时每条语句要拿一次进程级的锁（`parking_lot::Mutex`）。
+  连接关闭时删除其记录。不改变任何语句的执行与结果。
+- **测性能的实例不开**：weekly 的 sysbench 部分（tidb-rs 与 Go 的 QPS 比值）以及以后的性能门禁（#263）
+  都不加 `--route-trace`；只有要做普查的部分（ab、tpch、integrationtest）打开。
 
-`scripts/integrationtest.sh` 与 `tools/weekly/run.sh` 启动的 tidb-rs 都带 `--route-trace`，并把
+`scripts/integrationtest.sh` 与 `tools/weekly/run.sh` 中做普查的部分启动的 tidb-rs 带 `--route-trace`，并把
 状态地址交给 `ab --b-status`。integrationtest 默认以 `--new-stack=fallback` 运行（`-n` 可改），
-weekly integrationtest 部分同样使用 fallback。
+weekly integrationtest 部分同样使用 fallback，测试文件取自参照树（`scripts/tidb-reference.sh`）。
 
 ## 7. 证明门禁会变红
 

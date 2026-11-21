@@ -16,14 +16,14 @@
 #             data (SF 1: tiup bench takes an integer scale factor): tidb-ab result comparison
 #             and relative time (tpch_time.py); 1 TiKV
 #   integrationtest
-#             TiDB v8.5.8's tests/integrationtest (sparse, shallow clone) through
+#             TiDB's tests/integrationtest from the reference tree (tidb-reference.lock) through
 #             `ab integrationtest` (hybrid mode: everything on Go TiDB, reads also on tidb-rs and
 #             compared), with tools/ab/integrationtest.toml; 1 TiKV
 #
 # Environment: TIDB_RS_BIN (tidb-server, default target/release/tidb-server), TIDB_AB_BIN
 # (default target/release/ab), SYSBENCH_TIME (seconds per run, default 20),
 # SYSBENCH_THREADS (default "1 8"), IT_TIDB_DIR (an existing tests/integrationtest/t; default:
-# clone it), IT_TESTS (tests or prefixes for `ab integrationtest`; default: see the part),
+# the reference tree's), IT_TESTS (tests or prefixes for `ab integrationtest`; default: see the part),
 # IT_BUDGET (seconds, default 2400), RS_STATUS_PORT (tidb-rs's status port, default 10081; the
 # strict tidb-rs of the ab part uses RS_STATUS_PORT + 1).
 #
@@ -65,9 +65,13 @@ start_cluster() {
     if [ "${LOAD_SBTEST:-1}" = 1 ]; then
         "$root/scripts/sysbench-prepare.sh" -P 27000 -t 1 -s 100000 -r 8 >>"$out/$part-playground.log" 2>&1 || return 2
     fi
-    # RS_EXTRA_ARGS: e.g. --new-stack=fallback (the integrationtest part).
+    # RS_EXTRA_ARGS: e.g. --new-stack=fallback (the integrationtest part). ROUTE_TRACE=1: the
+    # parts whose tidb-ab runs take a census. Never on the performance parts (sysbench, the
+    # future perf gate): the trace takes a process-wide lock per statement.
+    local trace=
+    [ "${ROUTE_TRACE:-0}" = 1 ] && trace=--route-trace
     # shellcheck disable=SC2086
-    "$bin" -P 27001 --status-port "$status_port" --pd "$pd" --auto-tls=false --route-trace ${RS_EXTRA_ARGS:-} \
+    "$bin" -P 27001 --status-port "$status_port" --pd "$pd" --auto-tls=false $trace ${RS_EXTRA_ARGS:-} \
         >"$out/$part-tidb-rs.log" 2>&1 &
     rs_pid=$!
     for _ in $(seq 120); do
@@ -106,7 +110,7 @@ status_of() { case $1 in 0) echo ok ;; 1) echo fail ;; *) echo incomplete ;; esa
 
 case $part in
 ab)
-    start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
+    ROUTE_TRACE=1 start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
     rc=0 runs=()
     # rc: 1 (a mismatch, or 3: the census / negative control failed) wins over 2 (an error), so
     # a wrong result is never reported as incomplete. report.py also reads the mismatches from
@@ -223,7 +227,7 @@ faults)
     exit "$rc"
     ;;
 tpch)
-    LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$root/tools/weekly/tpch/tidb.toml start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
+    ROUTE_TRACE=1 LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$root/tools/weekly/tpch/tidb.toml start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
     tiup bench tpch --sf "${TPCH_SF:-1}" -H 127.0.0.1 -P 27000 -D tpch -T 4 prepare --analyze --dropdata \
         >"$out/tpch-prepare.log" 2>&1 || { write_status incomplete '{"error": "tpch prepare failed"}'; exit 2; }
     rc=0
@@ -245,15 +249,12 @@ tpch)
     exit "$rc"
     ;;
 integrationtest)
-    tag=v8.5.8
+    tag=$(sed -n 's/^tag=//p' "$root/tidb-reference.lock")
     dir=${IT_TIDB_DIR:-}
     if [ -z "$dir" ]; then
-        # Only tests/integrationtest of the release under test: a shallow, sparse, blob-less clone.
-        src=${TMPDIR:-/tmp}/weekly-integrationtest-tidb
-        rm -rf "$src"
-        { git clone -q --depth 1 --branch "$tag" --filter=blob:none --sparse https://github.com/pingcap/tidb "$src" \
-            && git -C "$src" sparse-checkout set tests/integrationtest; } >"$out/integrationtest-clone.log" 2>&1 \
-            || { write_status incomplete '{"error": "cannot fetch pingcap/tidb tests/integrationtest"}'; exit 2; }
+        # The test files of the pinned reference tree (tidb-reference.lock), not a fresh clone.
+        src=$("$root/scripts/tidb-reference.sh" 2>"$out/integrationtest-reference.log") \
+            || { write_status incomplete '{"error": "cannot get the reference tree (scripts/tidb-reference.sh)"}'; exit 2; }
         dir=$src/tests/integrationtest/t
     fi
     # Default: every test file. (Before #175 the files with ANALYZE / cluster_* statements were
@@ -276,7 +277,7 @@ integrationtest)
         cfg=$out/integrationtest-tidb.toml
     fi
     # The new stack runs what it can (fallback): the census counts what it ran (#260).
-    RS_EXTRA_ARGS=--new-stack=fallback LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$cfg start_cluster \
+    ROUTE_TRACE=1 RS_EXTRA_ARGS=--new-stack=fallback LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$cfg start_cluster \
         || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
     # As scripts/integrationtest.sh: the ingest backfill refuses to run on a nearly full disk.
     mysql -h 127.0.0.1 -P 27000 -u root -e \
@@ -297,7 +298,7 @@ integrationtest)
         echo "no statements compared" >&2
         [ "$rc" = 1 ] || rc=2
     fi
-    commit=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo unknown)
+    commit=$(git -C "$dir" rev-parse HEAD 2>/dev/null || sed -n 's/^commit=//p' "$root/tidb-reference.lock")
     write_status "$(status_of $rc)" "{\"results\": \"ab-integrationtest/results.jsonl\", \"tidb_tag\": \"$tag\",
         \"tidb_commit\": \"$commit\", \"tests\": ${#tests[@]}, \"seconds\": $seconds, \"exit\": $rc}"
     exit "$rc"

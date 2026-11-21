@@ -8,13 +8,15 @@
 //! as `GET /debug/route?conn=<id>` (`<seq>\t<engine>\t<reason>`). The client reads it after
 //! each statement on its own connection, so other connections cannot be mistaken for it, and
 //! a statement that was never routed (a parse error, `COM_STMT_PREPARE`) leaves the sequence
-//! number unchanged. Off, recording is one relaxed atomic load.
+//! number unchanged. Off, recording is one relaxed atomic load; on, one process-wide lock per
+//! statement, so performance runs (weekly sysbench, the perf gate) leave it off.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+
+use parking_lot::Mutex;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -47,7 +49,7 @@ pub fn record(conn: u64, engine: &'static str, reason: &str) {
     if !enabled() {
         return;
     }
-    let mut m = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = LAST.lock();
     let e = m.entry(conn).or_default();
     e.seq += 1;
     e.engine = engine;
@@ -56,17 +58,13 @@ pub fn record(conn: u64, engine: &'static str, reason: &str) {
 
 /// Connection `conn`'s last routed statement (`seq` 0: none yet).
 pub fn get(conn: u64) -> Last {
-    LAST.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&conn)
-        .cloned()
-        .unwrap_or_default()
+    LAST.lock().get(&conn).cloned().unwrap_or_default()
 }
 
 /// The connection closed.
 pub fn forget(conn: u64) {
     if enabled() {
-        LAST.lock().unwrap_or_else(|e| e.into_inner()).remove(&conn);
+        LAST.lock().remove(&conn);
     }
 }
 
