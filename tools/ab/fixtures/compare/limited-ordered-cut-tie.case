@@ -1,0 +1,15 @@
+# ORDER BY a LIMIT 2 cuts inside the run a=2: any member of the run is right.
+sql: SELECT a, b FROM t ORDER BY a LIMIT 2
+cols: a b
+class: limited ordered 1
+verdict: match
+[a]
+1|x
+2|y
+[a_full]
+1|x
+2|y
+2|z
+[b]
+1|x
+2|z

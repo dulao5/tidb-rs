@@ -1,0 +1,11 @@
+# Without A's result without the LIMIT the comparison stays strict.
+sql: SELECT a FROM t LIMIT 2
+cols: a
+class: limited unordered
+verdict: mismatch
+[a]
+1
+2
+[b]
+3
+1

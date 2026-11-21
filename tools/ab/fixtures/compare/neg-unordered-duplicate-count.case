@@ -1,0 +1,14 @@
+# Multiset: a duplicate counts.
+sql: SELECT a FROM t
+cols: a
+class: unordered
+verdict: mismatch
+diff: only in A
+[a]
+1
+1
+2
+[b]
+1
+2
+2

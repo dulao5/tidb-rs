@@ -209,6 +209,7 @@ jobs:
           path: |
             results
             report.md
+            census.tsv
           retention-days: 90
       - name: New baseline
         if: steps.report.outputs.rc == '0' || (inputs.accept_baseline && steps.report.outputs.rc != '1')
@@ -218,6 +219,7 @@ jobs:
           path: |
             results
             report.md
+            census.tsv
           retention-days: 90
       - name: Post on #54
         if: needs.plan.outputs.publish == 'true'

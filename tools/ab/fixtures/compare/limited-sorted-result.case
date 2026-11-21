@@ -1,0 +1,12 @@
+sql: SELECT a FROM t ORDER BY b LIMIT 2
+cols: a
+sorted: yes
+tolerance: T2
+class: limited unordered
+verdict: match
+[a]
+1
+2
+[b]
+2
+1

@@ -1,0 +1,8 @@
+sql: SELECT * FROM nope
+class: unordered
+verdict: mismatch
+diff: error: code A=1146 B=1105
+[a_error]
+1146|42S02|Table 'test.nope' doesn't exist
+[b_error]
+1105|HY000|Table 'test.nope' doesn't exist

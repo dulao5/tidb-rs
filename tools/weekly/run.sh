@@ -16,19 +16,23 @@
 #             data (SF 1: tiup bench takes an integer scale factor): tidb-ab result comparison
 #             and relative time (tpch_time.py); 1 TiKV
 #   integrationtest
-#             TiDB v8.5.8's tests/integrationtest (sparse, shallow clone) through
+#             TiDB's tests/integrationtest from the reference tree (tidb-reference.lock) through
 #             `ab integrationtest` (hybrid mode: everything on Go TiDB, reads also on tidb-rs and
 #             compared), with tools/ab/integrationtest.toml; 1 TiKV
 #
 # Environment: TIDB_RS_BIN (tidb-server, default target/release/tidb-server), TIDB_AB_BIN
 # (default target/release/ab), SYSBENCH_TIME (seconds per run, default 20),
 # SYSBENCH_THREADS (default "1 8"), IT_TIDB_DIR (an existing tests/integrationtest/t; default:
-# clone it), IT_TESTS (tests or prefixes for `ab integrationtest`; default: see the part),
+# the reference tree's), IT_TESTS (tests or prefixes for `ab integrationtest`; default: see the part),
 # IT_BUDGET (seconds, default 2400), RS_STATUS_PORT (tidb-rs's status port, default 10081; the
 # strict tidb-rs of the ab part uses RS_STATUS_PORT + 1).
 #
-# Exit status: the part's own (0 ok, 1 wrong results / new inconsistencies, 2 incomplete);
-# the JSON carries the same as "status".
+# Every tidb-ab run writes a coverage census (census-summary.tsv in its out-dir; tidb-rs runs with
+# --route-trace, docs/testing/coverage-census.md); ab exits 3 when the census is incomplete or
+# its negative control passed, which fails the part like a wrong result.
+#
+# Exit status: the part's own (0 ok, 1 wrong results / new inconsistencies / gate failed,
+# 2 incomplete); the JSON carries the same as "status".
 set -uo pipefail
 
 part=${1:?part}
@@ -61,7 +65,14 @@ start_cluster() {
     if [ "${LOAD_SBTEST:-1}" = 1 ]; then
         "$root/scripts/sysbench-prepare.sh" -P 27000 -t 1 -s 100000 -r 8 >>"$out/$part-playground.log" 2>&1 || return 2
     fi
-    "$bin" -P 27001 --status-port "$status_port" --pd "$pd" --auto-tls=false >"$out/$part-tidb-rs.log" 2>&1 &
+    # RS_EXTRA_ARGS: e.g. --new-stack=fallback (the integrationtest part). ROUTE_TRACE=1: the
+    # parts whose tidb-ab runs take a census. Never on the performance parts (sysbench, the
+    # future perf gate): the trace takes a process-wide lock per statement.
+    local trace=
+    [ "${ROUTE_TRACE:-0}" = 1 ] && trace=--route-trace
+    # shellcheck disable=SC2086
+    "$bin" -P 27001 --status-port "$status_port" --pd "$pd" --auto-tls=false $trace ${RS_EXTRA_ARGS:-} \
+        >"$out/$part-tidb-rs.log" 2>&1 &
     rs_pid=$!
     for _ in $(seq 120); do
         mysql -h 127.0.0.1 -P 27001 -u root -N -e 'select 1' >/dev/null 2>&1 && return 0
@@ -74,7 +85,7 @@ start_cluster() {
 # A second tidb-rs with --new-stack=strict on 27002 (VS1 plan §4.3: VS1-shaped SELECTs on the
 # new stack, a boundary stub answers 1235, everything else on the PoC).
 start_strict() {
-    TIDB_RS_NEW_STACK=strict "$bin" -P 27002 --status-port "$strict_status_port" --pd "$pd" --auto-tls=false \
+    TIDB_RS_NEW_STACK=strict "$bin" -P 27002 --status-port "$strict_status_port" --pd "$pd" --auto-tls=false --route-trace \
         >"$out/$part-tidb-rs-strict.log" 2>&1 &
     strict_pid=$!
     for _ in $(seq 120); do
@@ -99,17 +110,19 @@ status_of() { case $1 in 0) echo ok ;; 1) echo fail ;; *) echo incomplete ;; esa
 
 case $part in
 ab)
-    start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
+    ROUTE_TRACE=1 start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
     rc=0 runs=()
-    # rc: 1 (a mismatch) wins over 2 (an error), so a wrong result is never reported as
-    # incomplete. report.py also reads the mismatches from the raw results.
-    worst() { if [ "$1" = 1 ] || [ "$rc" = 1 ]; then rc=1; elif [ "$1" != 0 ]; then rc=$1; fi; }
-    "$ab" -a "$a" -b "$b" -D sbtest --tls off --out-dir "$out/ab-sysbench" sysbench -n 100 \
+    # rc: 1 (a mismatch, or 3: the census / negative control failed) wins over 2 (an error), so
+    # a wrong result is never reported as incomplete. report.py also reads the mismatches from
+    # the raw results and the census from census-summary.tsv.
+    worst() { if [ "$1" = 1 ] || [ "$1" = 3 ] || [ "$rc" = 1 ]; then rc=1; elif [ "$1" != 0 ]; then rc=$1; fi; }
+    bstat=(--b-status "127.0.0.1:$status_port")
+    "$ab" -a "$a" -b "$b" "${bstat[@]}" -D sbtest --tls off --out-dir "$out/ab-sysbench" sysbench -n 100 \
         >"$out/ab-sysbench.log" 2>&1; worst $?
     runs+=("$out/ab-sysbench/results.jsonl")
     for w in "$root"/tools/ab/workloads/*.sql; do
         n=$(basename "$w" .sql)
-        "$ab" -a "$a" -b "$b" -D sbtest --tls off --out-dir "$out/ab-$n" file "$w" \
+        "$ab" -a "$a" -b "$b" "${bstat[@]}" -D sbtest --tls off --out-dir "$out/ab-$n" file "$w" \
             >"$out/ab-$n.log" 2>&1; worst $?
         runs+=("$out/ab-$n/results.jsonl")
     done
@@ -137,7 +150,8 @@ ab)
         local n=$1 before after
         shift
         before=$(new_total) || before=
-        "$ab" -a "$a" -b "$bs" -D sbtest --tls off --out-dir "$out/ab-strict-$n" "$@" \
+        "$ab" -a "$a" -b "$bs" --b-status "127.0.0.1:$strict_status_port" --census-layer workload-strict \
+            -D sbtest --tls off --out-dir "$out/ab-strict-$n" "$@" \
             >"$out/ab-strict-$n.log" 2>&1; worst $?
         strict_runs+=("$out/ab-strict-$n/results.jsonl")
         after=$(new_total) || after=
@@ -213,12 +227,14 @@ faults)
     exit "$rc"
     ;;
 tpch)
-    LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$root/tools/weekly/tpch/tidb.toml start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
+    ROUTE_TRACE=1 LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$root/tools/weekly/tpch/tidb.toml start_cluster || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
     tiup bench tpch --sf "${TPCH_SF:-1}" -H 127.0.0.1 -P 27000 -D tpch -T 4 prepare --analyze --dropdata \
         >"$out/tpch-prepare.log" 2>&1 || { write_status incomplete '{"error": "tpch prepare failed"}'; exit 2; }
     rc=0
-    "$ab" -a "$a" -b "$b" -D tpch --tls off --timeout 600 --out-dir "$out/ab-tpch" \
+    "$ab" -a "$a" -b "$b" --b-status "127.0.0.1:$status_port" --census-layer tpch -D tpch --tls off \
+        --timeout 600 --out-dir "$out/ab-tpch" \
         file "$root/tools/weekly/tpch/queries.sql" >"$out/ab-tpch.log" 2>&1 || rc=$?
+    [ "$rc" = 3 ] && rc=1
     python3 "$root/tools/weekly/classify.py" --a "$a" --db tpch --results "$out/ab-tpch/results.jsonl" \
         --json "$out/tpch-classified.json" || rc=2
     python3 "$root/tools/weekly/tpch_time.py" --queries "$root/tools/weekly/tpch/queries.sql" \
@@ -233,15 +249,12 @@ tpch)
     exit "$rc"
     ;;
 integrationtest)
-    tag=v8.5.8
+    tag=$(sed -n 's/^tag=//p' "$root/tidb-reference.lock")
     dir=${IT_TIDB_DIR:-}
     if [ -z "$dir" ]; then
-        # Only tests/integrationtest of the release under test: a shallow, sparse, blob-less clone.
-        src=${TMPDIR:-/tmp}/weekly-integrationtest-tidb
-        rm -rf "$src"
-        { git clone -q --depth 1 --branch "$tag" --filter=blob:none --sparse https://github.com/pingcap/tidb "$src" \
-            && git -C "$src" sparse-checkout set tests/integrationtest; } >"$out/integrationtest-clone.log" 2>&1 \
-            || { write_status incomplete '{"error": "cannot fetch pingcap/tidb tests/integrationtest"}'; exit 2; }
+        # The test files of the pinned reference tree (tidb-reference.lock), not a fresh clone.
+        src=$("$root/scripts/tidb-reference.sh" 2>"$out/integrationtest-reference.log") \
+            || { write_status incomplete '{"error": "cannot get the reference tree (scripts/tidb-reference.sh)"}'; exit 2; }
         dir=$src/tests/integrationtest/t
     fi
     # Default: every test file. (Before #175 the files with ANALYZE / cluster_* statements were
@@ -263,7 +276,8 @@ integrationtest)
         { echo 'temp-dir = "/dev/shm/weekly-integrationtest-tidb"'; cat "$cfg"; } >"$out/integrationtest-tidb.toml"
         cfg=$out/integrationtest-tidb.toml
     fi
-    LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$cfg start_cluster \
+    # The new stack runs what it can (fallback): the census counts what it ran (#260).
+    ROUTE_TRACE=1 RS_EXTRA_ARGS=--new-stack=fallback LOAD_SBTEST=0 PLAYGROUND_EXTRA_CONFIG=$cfg start_cluster \
         || { write_status incomplete '{"error": "cluster setup failed"}'; exit 2; }
     # As scripts/integrationtest.sh: the ingest backfill refuses to run on a nearly full disk.
     mysql -h 127.0.0.1 -P 27000 -u root -e \
@@ -273,16 +287,18 @@ integrationtest)
     start=$(date +%s)
     # A time budget (IT_BUDGET seconds, default 40 min), so a slow runner reports what it ran as
     # incomplete instead of hitting the job's timeout; ab writes its results after every file.
-    timeout "${IT_BUDGET:-2400}" "$ab" -a "$a" -b "$b" --tls off --timeout 60 --out-dir "$out/ab-integrationtest" \
+    timeout "${IT_BUDGET:-2400}" "$ab" -a "$a" -b "$b" --b-status "127.0.0.1:$status_port" --tls off --timeout 60 \
+        --out-dir "$out/ab-integrationtest" \
         integrationtest --dir "$dir" "${tests[@]}" >"$out/ab-integrationtest.log" 2>&1 || rc=$?
     seconds=$(( $(date +%s) - start ))
-    # ab: 0 no mismatch, 1 mismatches, 2 could not run (or the cluster died midway); 124 timeout.
-    [ "$rc" -gt 2 ] && rc=2
+    # ab: 0 no mismatch, 1 mismatches, 2 could not run (or the cluster died midway), 3 census /
+    # negative control failed (the gate itself: a failure); 124 timeout.
+    if [ "$rc" = 3 ]; then rc=1; elif [ "$rc" -gt 2 ]; then rc=2; fi
     if [ ! -s "$out/ab-integrationtest/results.jsonl" ]; then
         echo "no statements compared" >&2
         [ "$rc" = 1 ] || rc=2
     fi
-    commit=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo unknown)
+    commit=$(git -C "$dir" rev-parse HEAD 2>/dev/null || sed -n 's/^commit=//p' "$root/tidb-reference.lock")
     write_status "$(status_of $rc)" "{\"results\": \"ab-integrationtest/results.jsonl\", \"tidb_tag\": \"$tag\",
         \"tidb_commit\": \"$commit\", \"tests\": ${#tests[@]}, \"seconds\": $seconds, \"exit\": $rc}"
     exit "$rc"

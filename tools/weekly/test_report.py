@@ -26,8 +26,30 @@ def write(d, name, obj):
         json.dump(obj, f)
 
 
-def report(inp, prev=None, parts="ab", expected=None):
-    """Runs report.py; `expected` is the accepted integration-test mismatches (default: none)."""
+CENSUS_HEADER = ("layer\texpected\ttotal\tnew_stack\tfallback\terror\tskipped\tnew_stack_equal\t"
+                 "negative_control\tstatus\n")
+PART_LAYERS = {"ab": ("workload", "workload-strict"), "tpch": ("tpch",), "integrationtest": ("integrationtest",)}
+
+
+def census_file(d, layer, new_stack=1, fallback=2, error=0, skipped=1, equal=1, expected=None,
+                control="failed as required", status="ok", header=CENSUS_HEADER):
+    """A census-summary.tsv as tools/ab writes it."""
+    total = new_stack + fallback + error + skipped
+    expected = total if expected is None else expected
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "census-summary.tsv"), "w") as f:
+        f.write(header)
+        f.write(f"{layer}\t{expected}\t{total}\t{new_stack}\t{fallback}\t{error}\t{skipped}\t{equal}\t"
+                f"{control}\t{status}\n")
+
+
+def report(inp, prev=None, parts="ab", expected=None, census=True):
+    """Runs report.py; `expected` is the accepted integration-test mismatches (default: none).
+    `census`: give every part that needs one a passing census, unless the test wrote its own."""
+    if census and not any("census-summary.tsv" in fs for _, _, fs in os.walk(inp)):
+        for part in parts.split(","):
+            for layer in PART_LAYERS.get(part, ()):
+                census_file(os.path.join(inp, "census-default", layer), layer)
     out = os.path.join(inp, "report.md")
     exp = os.path.join(inp, "it-expected.json")
     with open(exp, "w") as f:
@@ -381,6 +403,94 @@ class VerdictTest(unittest.TestCase):
             self.assertTrue(e.get("reason"), key)
             if e["class"] == "bug":
                 self.assertTrue(e.get("issue"), key)
+
+
+class CensusTest(unittest.TestCase):
+    """The coverage census gate (#260): it must go red when broken."""
+
+    def green_ab(self, d):
+        write(d, "ab.json", {"part": "ab", "status": "ok"})
+        write(d, "ab-classified.json", classified())
+
+    def test_complete_census_is_green_and_published(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.green_ab(d)
+            census_file(f"{d}/ab-sysbench", "workload")
+            census_file(f"{d}/ab-strict-sysbench", "workload-strict", new_stack=5, equal=4)
+            rc, first = report(d)
+            self.assertEqual(rc, 0, first)
+            with open(f"{d}/report.md") as f:
+                text = f.read()
+            self.assertIn("## Coverage census", text)
+            self.assertIn("| workload-strict | 1 | 8 | 5 | 4 | 2 | 0 | 1 |", text)
+            with open(f"{d}/census.tsv") as f:
+                rows = f.read().splitlines()
+            self.assertEqual(len(rows), 3)
+            self.assertTrue(rows[0].startswith("commit\tlayer\texpected"), rows[0])
+
+    def test_incomplete_census_is_red(self):
+        # A statement dropped: the four paths add up to fewer than the statements given.
+        with tempfile.TemporaryDirectory() as d:
+            self.green_ab(d)
+            census_file(f"{d}/ab-sysbench", "workload", expected=5)
+            census_file(f"{d}/ab-strict-sysbench", "workload-strict")
+            rc, first = report(d)
+            self.assertEqual(rc, 1, first)
+            with open(f"{d}/report.md") as f:
+                self.assertIn("INCOMPLETE CENSUS (4 of 5 statements)", f.read())
+
+    def test_negative_control_passed_or_not_run_is_red(self):
+        for control in ("PASSED (match)", "NOT RUN"):
+            with tempfile.TemporaryDirectory() as d:
+                self.green_ab(d)
+                census_file(f"{d}/ab-sysbench", "workload", control=control)
+                census_file(f"{d}/ab-strict-sysbench", "workload-strict")
+                rc, first = report(d)
+                self.assertEqual(rc, 1, (control, first))
+
+    def test_missing_census_is_red(self):
+        # The part ran but wrote no census for one of its layers: the gate did not run.
+        with tempfile.TemporaryDirectory() as d:
+            self.green_ab(d)
+            census_file(f"{d}/ab-sysbench", "workload")
+            rc, first = report(d)
+            self.assertEqual(rc, 1, first)
+        with tempfile.TemporaryDirectory() as d:
+            self.green_ab(d)
+            self.assertEqual(report(d, census=False)[0], 1)
+
+    def test_unknown_layer_or_columns_are_red(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.green_ab(d)
+            census_file(f"{d}/ab-sysbench", "workload")
+            census_file(f"{d}/ab-strict-sysbench", "workload-strict")
+            census_file(f"{d}/ab-other", "workload-strikt")
+            self.assertEqual(report(d)[0], 1)
+        with tempfile.TemporaryDirectory() as d:
+            self.green_ab(d)
+            census_file(f"{d}/ab-sysbench", "workload")
+            census_file(f"{d}/ab-strict-sysbench", "workload-strict",
+                        header=CENSUS_HEADER.replace("skipped", "ignored"))
+            self.assertEqual(report(d)[0], 1)
+
+    def test_smaller_denominator_or_less_coverage_regresses(self):
+        with tempfile.TemporaryDirectory() as prev, tempfile.TemporaryDirectory() as cur:
+            for d in (prev, cur):
+                self.green_ab(d)
+            census_file(f"{prev}/ab-sysbench", "workload")
+            census_file(f"{prev}/ab-strict-sysbench", "workload-strict", new_stack=5, equal=4)
+            census_file(f"{cur}/ab-sysbench", "workload", skipped=0)
+            census_file(f"{cur}/ab-strict-sysbench", "workload-strict", new_stack=5, equal=4)
+            rc, first = report(cur, prev)
+            self.assertEqual(rc, 2, first)
+            self.assertTrue(first.startswith("**REGRESSED**"), first)
+        with tempfile.TemporaryDirectory() as prev, tempfile.TemporaryDirectory() as cur:
+            for d in (prev, cur):
+                self.green_ab(d)
+                census_file(f"{d}/ab-sysbench", "workload")
+            census_file(f"{prev}/ab-strict-sysbench", "workload-strict", new_stack=5, equal=4)
+            census_file(f"{cur}/ab-strict-sysbench", "workload-strict", new_stack=5, equal=3)
+            self.assertEqual(report(cur, prev)[0], 2)
 
 
 if __name__ == "__main__":

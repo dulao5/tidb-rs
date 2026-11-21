@@ -1,0 +1,12 @@
+sql: SELECT t.a AS k, `t`.`b` FROM t ORDER BY 2 DESC, k, t.b
+cols: k=a b
+class: ordered 2,1
+verdict: match
+[a]
+1|y
+2|y
+3|x
+[b]
+1|y
+2|y
+3|x

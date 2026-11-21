@@ -1,0 +1,9 @@
+# No float tolerance: values compare as exact text.
+sql: SELECT SUM(f) FROM t
+cols: s
+class: unordered
+verdict: mismatch
+[a]
+0.30000000000000004f64
+[b]
+0.3f64

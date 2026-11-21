@@ -1,0 +1,11 @@
+# ORDER BY a column that is not in the result: the stricter reading, rows as lists.
+sql: SELECT b FROM t ORDER BY a
+cols: b
+class: exact
+verdict: match
+[a]
+y
+x
+[b]
+y
+x

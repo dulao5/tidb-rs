@@ -38,7 +38,7 @@ A wrong result in the raw data (a mismatch, a wrong fault-scenario read, a lock 
 
 **Verdict** (first line of the report, exit status of `report.py`):
 
-- **RED:** a wrong result, a mismatch (also of an integration test, unless accepted in `integrationtest-expected.json`) or a new inconsistency. The run fails and no tag is pushed.
+- **RED:** a wrong result, a mismatch (also of an integration test, unless accepted in `integrationtest-expected.json`), a new inconsistency, or a failed coverage census (incomplete, a negative control that passed or did not run, a missing census, unknown layer names; `docs/testing/coverage-census.md`). The run fails and no tag is pushed.
 - **INCOMPLETE:** a part did not run fully: skipped, failed to set up, missing, or with too few results (an empty `ab` workload, a sysbench workload × thread count without both sides, fewer than 18 lock cases). This is not a pass.
 - **REGRESSED:** compared with the last run, an operator is no longer executable on tidb-rs, `unsupported` statements increased (for the integration tests: over the tests both runs ran; there also the reads skipped as `session diverged`), the new stack executed fewer statements of a workload both runs ran (strict round, `ab-strict-new.tsv`), or a sysbench B/A ratio dropped by more than 15%.
 - **GREEN:** otherwise.

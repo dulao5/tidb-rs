@@ -2,6 +2,7 @@
 //! plan helpers, ported file by file with the VS1 work items.
 
 pub mod common_plans;
+pub mod constraint;
 pub mod core_init;
 pub mod expression_rewriter;
 pub mod initialize;
@@ -18,4 +19,10 @@ pub mod planbuilder;
 pub mod point_get_plan;
 pub mod preprocess;
 pub mod resolve;
+pub mod rule_column_pruning;
+pub mod rule_eliminate_projection;
+pub mod rule_predicate_push_down;
+pub mod rule_predicate_simplification;
+pub mod rule_topn_push_down;
+pub mod rule_util;
 pub mod util;

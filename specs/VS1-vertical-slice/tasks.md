@@ -46,7 +46,7 @@
 | VS1-26 | `taskMap` 小试点（spike） | N1 | depth | 0.05 | VS1-01 | 试点报告；不通过时先修订 N1；统计代价计算期间 `clone_node` 的调用次数（代价缓存经 `&self` 写在共享节点上，应为 0，#223） | 未开始 |
 | VS1-21 | `buildSelect` 等 SELECT 构建，加 `resolveHavingAndOrderBy` | D09.1、D09.4 | depth | 0.18 | VS1-10、VS1-22、VS1-23 | 逻辑计划向量一致；分区表返回 `blocked-by:D09.12`（D06.4 第 1 部分的分区表只是标记，读它的 record prefix 会触发 `debug_assert`，#217 评审） | 未开始 |
 | VS1-22 | 表达式改写（子查询之外） | D09.2 | depth | 0.14 | VS1-10 | 表达式向量一致 | 评审中（#258；D09.2 converge 44/53 + 9 桩；govec `rewrite` 2,392 条，1,467 条一致、922 条停在桩（多数是未移植的函数族），1 条已知别名差异） |
-| VS1-23 | 逻辑算子公共部分，以及列裁剪、投影消除、谓词下推与简化、TopN / Limit 下推（VS1 的算子）；M-FT 审计 | D09.14、D09.7、D09.8、D09.11 | depth | 0.21 | VS1-01 | 规则级计划向量一致；审计表写进 plan | 未开始 |
+| VS1-23 | 逻辑算子公共部分，以及列裁剪、投影消除、谓词下推与简化、TopN / Limit 下推（VS1 的算子）；M-FT 审计 | D09.14、D09.7、D09.8、D09.11 | depth | 0.21 | VS1-01 | 规则级计划向量一致；审计表写进 plan | 第 1 部分评审中（spec `specs/D09.14-logical-operators`；govec 6,630 步一致；M-FT 审计见 plan §11） |
 | VS1-24 | `DoOptimize`、`postOptimize`、`InjectExtraProjection`、`ResultReorder`；hint 骨架 | D09.13、D13.3 | depth | 0.19 | VS1-21 | 物理计划向量一致 | 未开始 |
 | VS1-25 | ranger 整块 | D10.4 | depth | 0.22 | — | ranger govec 一致 | 评审中（D10.4 converge 95/95；govec `rangerbuild` 5,721 条记录、18,198 个结果一致，121 个停在 D08.9 边界；`cardinality` 的 `selectivity` 410 条 D10.4 记录已与 Go 一致） |
 | VS1-27 | 物理算子与 task（VS1 算子）、`exhaustPhysicalPlans`（Sel / Proj / Sort / TopN / Limit） | D10.1、D10.3 | depth | 0.18 | VS1-19 | 随 VS1-28 验收 | 未开始 |
@@ -58,7 +58,7 @@
 
 Phase 2 的待定设计问题（来自 VS1-19 / VS1-10 的评审，#223 / #224）：
 
-- **VS1-23**：`BaseLogicalPlan` 是否改为嵌入 `baseimpl::Plan`（与 `BasePhysicalPlan` 一致，Go 的 `BaseLogicalPlan` 嵌入 `baseimpl.Plan`）；同时统一 query block offset 的类型（物理侧 `baseimpl::Plan.qb_block` 为 `isize`，按 M-INT；逻辑侧 `BaseLogicalPlan.qb_offset` 为 `i32`）。
+- **VS1-23**（已决定，见 spec D09.14 §3：嵌入，offset 统一为 `isize`）：`BaseLogicalPlan` 是否改为嵌入 `baseimpl::Plan`（与 `BasePhysicalPlan` 一致，Go 的 `BaseLogicalPlan` 嵌入 `baseimpl.Plan`）；同时统一 query block offset 的类型（物理侧 `baseimpl::Plan.qb_block` 为 `isize`，按 M-INT；逻辑侧 `BaseLogicalPlan.qb_offset` 为 `i32`）。
 - **VS1-24**：`probeParents`（`propagateProbeParents` 设置）指向祖先节点，需要一种不形成 `Arc` 环的表示（计划树中不允许 `Weak`，N1 §3.4）。在此之前 `BasePhysicalPlan.probe_parents` 保留 Go 的类型，不被设置。
 - **VS1-26**：代价缓存（`PlanCostInit` / `PlanCost` / `PlanCostVer2`）已改为经 `&self` 写在共享节点上（`Mutex<PlanCostCache>`，#223 评审），不再经 `make_mut_plan` 复制共享子节点。试点需统计代价计算期间 `clone_node` 的调用次数（应为 0），并确认 `taskMap` 中的共享与 Go 一致（N1 §7 第 3 条）。
 

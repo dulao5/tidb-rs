@@ -1,0 +1,12 @@
+# SHOW output order is part of the answer.
+sql: show tables
+cols: Tables_in_test
+class: exact
+verdict: mismatch
+diff: same rows in a different order
+[a]
+t1
+t2
+[b]
+t2
+t1

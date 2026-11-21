@@ -166,10 +166,17 @@ impl SessionFactory for Factory {
                 .as_ref()
                 .and_then(|s| s.ported_domain().cloned());
             let new = Box::new(router::newstack::NewSession::new(domain));
-            let r = Router::new(self.new_stack, new, &session.poc_values());
+            let mut r = Router::new(self.new_stack, new, &session.poc_values());
+            r.set_connection_id(session.connection_id);
             session.router = Some(Box::new(r));
         }
         Ok(session)
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        router::trace::forget(self.connection_id);
     }
 }
 
@@ -780,7 +787,10 @@ fn params_to_literals(params: Vec<Param>) -> Result<Vec<Literal>, SqlError> {
 impl SessionHandler for Session {
     async fn query(&mut self, sql: &str) -> Result<Response, SqlError> {
         let r = match self.router.take() {
-            None => self.query_inner(sql).await,
+            None => {
+                router::trace::record(self.connection_id, "poc", "new_stack_off");
+                self.query_inner(sql).await
+            }
             Some(mut router) => {
                 let r = router.query(self, sql).await;
                 self.router = Some(router);
@@ -805,7 +815,10 @@ impl SessionHandler for Session {
 
     async fn execute(&mut self, stmt_id: u32, params: Vec<Param>) -> Result<Response, SqlError> {
         let r = match self.router.take() {
-            None => self.execute_inner(stmt_id, params).await,
+            None => {
+                router::trace::record(self.connection_id, "poc", "new_stack_off");
+                self.execute_inner(stmt_id, params).await
+            }
             Some(mut router) => {
                 let r = router.execute(self, stmt_id, params).await;
                 self.router = Some(router);

@@ -19,6 +19,13 @@ Verdict (the report's first line, and the exit status):
   workload both runs ran, or a
   sysbench B/A ratio dropped by more than 15%;
 - GREEN (0): none of these.
+
+Coverage census (#260, docs/testing/coverage-census.md): every tidb-ab run writes
+census-summary.tsv. A census that does not add up (INCOMPLETE CENSUS), a negative control that
+passed or did not run, a census missing for a part that ran, or an unknown layer / column is RED.
+Against the previous run, fewer statements (the denominator) or less new-stack coverage (new
+stack and equal to Go) in a layer is REGRESSED. The merged census goes to census.tsv next to
+--out, for the tracker.
 """
 
 import argparse
@@ -29,6 +36,12 @@ import re
 from collections import Counter, defaultdict
 
 PARTS = ("ab", "sysbench", "faults", "locks", "tpch", "integrationtest")
+# Census layers (tools/ab/src/census.rs LAYERS) and the part that runs each.
+CENSUS_LAYERS = {"workload": "ab", "workload-strict": "ab", "tpch": "tpch", "integrationtest": "integrationtest"}
+CENSUS_COLUMNS = ["layer", "expected", "total", "new_stack", "fallback", "error", "skipped",
+                  "new_stack_equal", "negative_control", "status"]
+CENSUS_PATHS = ("new_stack", "fallback", "error", "skipped")
+CONTROL_OK = "failed as required"
 # tidb-ab output directories (results.jsonl) of parts other than `ab`.
 RESULT_DIRS = {"ab-tpch": "tpch", "ab-integrationtest": "integrationtest"}
 # Accepted integration-test mismatches (tidb-rs bugs with an issue, nondeterministic results),
@@ -570,6 +583,91 @@ def section_diverged(cur, prev, lines):
     lines.append("")
 
 
+def census(base):
+    """Census rows by layer from every census-summary.tsv under `base`, and the problems found
+    (layer, problem). Unknown layers or columns are problems, never skipped."""
+    rows, problems = defaultdict(list), []
+    if not base:
+        return rows, problems
+    for path in sorted(glob.glob(os.path.join(base, "**", "census-summary.tsv"), recursive=True)):
+        where = os.path.relpath(path, base)
+        with open(path) as f:
+            lines = [l.rstrip("\n").split("\t") for l in f if l.strip()]
+        if not lines or lines[0] != CENSUS_COLUMNS:
+            problems.append((None, f"{where}: unknown census columns {lines[0] if lines else []}"))
+            continue
+        for cells in lines[1:]:
+            if len(cells) != len(CENSUS_COLUMNS):
+                problems.append((None, f"{where}: malformed census row {cells}"))
+                continue
+            r = dict(zip(CENSUS_COLUMNS, cells))
+            layer = r["layer"]
+            if layer not in CENSUS_LAYERS:
+                problems.append((None, f"{where}: unknown census layer {layer!r}"))
+                continue
+            try:
+                n = {k: int(r[k]) for k in ("expected", "total", "new_stack_equal") + CENSUS_PATHS}
+            except ValueError:
+                problems.append((layer, f"{where}: non-numeric census counts"))
+                continue
+            r.update(n)
+            r["where"] = where
+            rows[layer].append(r)
+            if sum(n[p] for p in CENSUS_PATHS) != n["total"] or n["total"] != n["expected"] or not n["expected"]:
+                problems.append((layer, f"{where}: INCOMPLETE CENSUS ({n['total']} of {n['expected']} statements)"))
+            if r["negative_control"] != CONTROL_OK:
+                problems.append((layer, f"{where}: negative control {r['negative_control']}"))
+            if r["status"] != "ok":
+                problems.append((layer, f"{where}: {r['status']}"))
+    return rows, problems
+
+
+def census_totals(rows):
+    """Per layer: summed counts."""
+    return {layer: {k: sum(r[k] for r in rs) for k in ("total", "new_stack_equal") + CENSUS_PATHS}
+            for layer, rs in rows.items()}
+
+
+def census_regressions(cur, prev):
+    out = []
+    for layer, c in sorted(cur.items()):
+        p = prev.get(layer)
+        if not p:
+            continue
+        if c["total"] < p["total"]:
+            out.append(f"census {layer}: {c['total']} statements, {p['total']} last time (the denominator shrank)")
+        if c["new_stack_equal"] < p["new_stack_equal"]:
+            out.append(f"census {layer}: new-stack coverage {c['new_stack_equal']}, {p['new_stack_equal']} last time")
+    return out
+
+
+def write_census_tsv(path, rows, commit):
+    with open(path, "w") as f:
+        f.write("commit\t" + "\t".join(CENSUS_COLUMNS) + "\tsource\n")
+        for layer in sorted(rows):
+            for r in rows[layer]:
+                f.write("\t".join([commit] + [str(r[k]) for k in CENSUS_COLUMNS] + [r["where"]]) + "\n")
+
+
+def section_census(rows, prev_totals, problems, lines):
+    lines.append("## Coverage census\n")
+    lines.append("Every statement of every tidb-ab run: on the new stack, fallen back to the prototype "
+                 "(or 1235 in strict mode), error, or skipped (not sent to tidb-rs). Coverage counts only "
+                 "new stack + equal to Go (docs/testing/coverage-census.md).\n")
+    lines.append("| layer | runs | statements | new stack | equal to Go | fallback | error | skipped |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for layer, t in sorted(census_totals(rows).items()):
+        p = prev_totals.get(layer)
+        delta = "" if not p else f" ({t['new_stack_equal'] - p['new_stack_equal']:+d})"
+        lines.append(f"| {layer} | {len(rows[layer])} | {t['total']} | {t['new_stack']} | "
+                     f"{t['new_stack_equal']}{delta} | {t['fallback']} | {t['error']} | {t['skipped']} |")
+    lines.append("")
+    for layer, why in problems:
+        lines.append(f"- **GATE FAILED** ({layer or 'census'}): {why}")
+    if problems:
+        lines.append("")
+
+
 def section_locks(raw, lines):
     lines.append("## Lock resolution (tools/ab/locks)\n")
     if raw is None:
@@ -610,6 +708,19 @@ def main():
         if p in status:
             status[p] = "fail"
             print(f"{p}: {why}")
+    # The coverage census: incomplete, a negative control that passed or did not run, unknown
+    # names, or no census from a part that ran: the gate itself failed.
+    cen_rows, cen_problems = census(args.inp)
+    for layer, part in CENSUS_LAYERS.items():
+        if part in expected and status.get(part) == "ok" and not cen_rows.get(layer):
+            cen_problems.append((layer, "no census (the gate did not run)"))
+    for layer, why in cen_problems:
+        part = CENSUS_LAYERS.get(layer)
+        targets = [part] if part in status else [p for p in status if p in CENSUS_LAYERS.values()]
+        for p in targets or list(status):
+            status[p] = "fail"
+        print(f"census: {why}")
+    prev_cen = census_totals(census(args.previous)[0])
 
     cur_ab, prev_ab = load(args.inp, "ab-classified.json"), load(args.previous, "ab-classified.json")
     cur_sb, prev_sb = load(args.inp, "sysbench.json"), load(args.previous, "sysbench.json")
@@ -619,6 +730,7 @@ def main():
     regressed = regressions(cur_ab, prev_ab, cur_sb, prev_sb,
                             load(args.inp, "tpch-time.json"), load(args.previous, "tpch-time.json"),
                             cur_it, prev_it, cur_new, prev_new)
+    regressed += census_regressions(census_totals(cen_rows), prev_cen)
     if any(s == "fail" for s in status.values()):
         verdict, code = "RED", 1
     elif any(s in ("incomplete", "missing") for s in status.values()):
@@ -663,6 +775,10 @@ def main():
                      load(args.previous, "tpch-time.json"), lines)
     if "integrationtest" in expected:
         section_integration(load(args.inp, "integrationtest.json"), cur_it, prev_it, lines, accepted)
+    if cen_rows or cen_problems:
+        section_census(cen_rows, prev_cen, cen_problems, lines)
+    write_census_tsv(os.path.join(os.path.dirname(os.path.abspath(args.out)), "census.tsv"), cen_rows,
+                     args.commit)
     if not args.previous:
         lines.append("_No previous run to compare with._\n")
 

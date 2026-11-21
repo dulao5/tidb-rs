@@ -1,0 +1,12 @@
+# The whole statement is one parenthesised query: its ORDER BY orders the result.
+sql: (SELECT a FROM t ORDER BY a)
+cols: a
+class: ordered 1
+verdict: mismatch
+diff: same rows in a different order
+[a]
+1
+2
+[b]
+2
+1

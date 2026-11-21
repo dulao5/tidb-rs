@@ -1,0 +1,10 @@
+sql: SELECT a+1, b FROM t ORDER BY a+1
+cols: a+1 b
+class: ordered 1
+verdict: match
+[a]
+2|x
+2|y
+[b]
+2|y
+2|x

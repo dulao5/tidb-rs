@@ -128,6 +128,22 @@ impl PlanArena {
     }
 }
 
+impl PlanArena {
+    /// `p.SetOutputNames(names)` for a node in the arena: written into the first node from
+    /// `id` down that owns its names (`BaseLogicalPlan` forwards to its child).
+    // glue: N1 (the forwarding of BaseLogicalPlan.SetOutputNames)
+    pub fn set_output_names(&mut self, id: PlanId, names: tidb_types::field_name::NameSlice) {
+        let mut owner = id;
+        while self.get(owner).schema_producer().is_none() {
+            owner = self.get(owner).children()[0];
+        }
+        self.get_mut(owner)
+            .schema_producer_mut()
+            .expect("owner")
+            .set_output_names(names);
+    }
+}
+
 /// Runs `f` on node `id` detached from the arena: `f` gets the `&mut` node and `&mut PlanCtx`
 /// (arena included) at once; the node is put back afterwards (N1 §4, the standard idiom).
 ///

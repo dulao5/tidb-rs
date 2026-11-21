@@ -1,0 +1,10 @@
+# A 1235 without the boundary-stub marker and not a prototype answer (a ported Go
+# ErrNotSupportedYet branch) where Go answers: a wrong answer, not "unsupported".
+sql: SELECT a FROM t
+cols: a
+class: unordered
+verdict: mismatch
+[a]
+1
+[b_error]
+1235|42000|This version of TiDB doesn't yet support 'something Go supports here'

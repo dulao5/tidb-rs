@@ -1,0 +1,11 @@
+# T4 still compares errors in full.
+sql: SELECT a FROM t
+result_log: off
+tolerance: T4
+class: unordered
+verdict: mismatch
+diff: error: message
+[a_error]
+1062|23000|Duplicate entry '1' for key 't.PRIMARY'
+[b_error]
+1062|23000|Duplicate entry '1' for key 'PRIMARY'

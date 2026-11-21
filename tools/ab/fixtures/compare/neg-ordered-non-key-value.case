@@ -1,0 +1,12 @@
+# A non-key value differs inside a run.
+sql: SELECT a, b FROM t ORDER BY a
+cols: a b
+class: ordered 1
+verdict: mismatch
+diff: only in A
+[a]
+1|x
+1|y
+[b]
+1|x
+1|z

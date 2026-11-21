@@ -1,0 +1,9 @@
+sql: EXPLAIN FORMAT='brief' SELECT * FROM t WHERE a = 1
+cols: id estRows task
+class: exact
+verdict: mismatch
+diff: first differing row #0
+[a]
+Point_Get|1.00|root
+[b]
+TableReader|1.00|root

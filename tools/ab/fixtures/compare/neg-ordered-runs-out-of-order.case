@@ -1,0 +1,12 @@
+# Same rows, but the runs come in another order.
+sql: SELECT a, b FROM t ORDER BY a
+cols: a b
+class: ordered 1
+verdict: mismatch
+diff: same rows in a different order
+[a]
+1|x
+2|y
+[b]
+2|y
+1|x
