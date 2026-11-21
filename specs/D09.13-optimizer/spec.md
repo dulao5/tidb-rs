@@ -37,7 +37,7 @@ converge（`--part specs/VS1-vertical-slice/functions.tsv --item VS1-24`）：D0
 1. **已移植的规则**：列裁剪（两次）、`ResultReorder`、投影消除、常量传播、谓词下推、谓词化简、`DeriveTopNFromWindow`、TopN 下推。
 2. **其他块的规则**（`UnportedRule`）：生成列替换、key-info（D09.13）、去相关 / 半连接 / 相关化（D09.6）、各种聚合规则（D09.4）、外连接相关（D09.3）、join 重排（D09.10）、sequence（D09.14）、Expand（D09.4）。标志位被设置时返回 `blocked-by:<块>`，路由器回退。VS1 的 SELECT 不会设置这些标志（向量中没有一条走到）。
 3. **两类特殊处理**，需要评审确认：
-   - **统计信息加载点**（`CollectPredicateColumnsPoint`、`SyncWaitStatsLoadPoint`）：Go 对每条用户语句都会设置这两个标志，它们只收集统计信息的使用情况、同步加载统计信息，不改计划（例外是索引数超过 `tidb_opt_index_prune_threshold`（默认 20）时的索引裁剪，VS1 的表达不到）。新栈的统计信息只有 pseudo 表（VS1 plan §3.2 统计信息一行），没有东西可加载，所以这两条规则**直接返回原计划**，不是 blocked。它们在 tracker 中登记为 `blocked-by:D11.2` 的桩，注明行为。差异：Go 会把谓词列写入统计信息使用记录（供自动 analyze），新栈不写。
+   - **统计信息加载点**（`CollectPredicateColumnsPoint`、`SyncWaitStatsLoadPoint`）：Go 对每条用户语句都会设置这两个标志，它们收集统计信息的使用情况、同步加载统计信息。`CollectPredicateColumnsPoint` 还会**裁剪索引路径**（`rule_prune_indexes.go`）：索引数超过 `tidb_opt_index_prune_threshold`（默认 20）时按阈值裁剪；**在阈值以下也会裁剪**——只要至少有一个索引得分，就去掉"零分"索引（既不覆盖查询列、也不含 WHERE / ORDER BY 列的索引，`rule_prune_indexes.go:86`）。所以表有两个及以上二级索引时，Go 在逻辑优化中就会去掉候选路径，新栈不去。sbtest（只有 `k_1`）不受影响，而且物理优化目前停在 D10.6，所以本项不改代码；`PruneIndexesByWhereAndOrder`（纯计算）由 VS1-28 移植并配 govec，使两个以上二级索引的表的候选路径与 Go 一致（负责人决定：移植，不作边界）。新栈的统计信息只有 pseudo 表（VS1 plan §3.2 统计信息一行），没有东西可加载，所以这两条规则**直接返回原计划**，不是 blocked。它们在 tracker 中登记为 `blocked-by:D11.2` 的桩，注明行为。差异：Go 会把谓词列写入统计信息使用记录（供自动 analyze），新栈不写。
    - **分区裁剪**（`PartitionProcessor`）：`UseDynamicPruneMode` 为 false 时 Go 会跑。构建器遇到分区表已经返回 `blocked-by:D09.12`，Go 对非分区表的数据源原样返回；所以这里遍历计划，遇到分区表才返回 `blocked-by:D09.12`，否则原样返回。
 - `isLogicalRuleDisabled` 读全局的禁用规则表（Go 由 domain 从 `mysql.opt_rule_blacklist` 加载）。新栈还不读这张表，表为空。差异：集群里配置了禁用规则时，新栈仍会跑这些规则；建议与 SQL binding 一样，由新栈启动时检查（列为开放问题）。
 - `optInteractionRuleList` 在 Go 中是空表，"再跑一次"的列表永远为空，照此移植。
@@ -68,6 +68,7 @@ Go 把同一个 `*Column` 同时放进底层投影的表达式和 schema（子�
 
 ### 4.4 计划树的写法（N1 §3.4 与 taskMap spike 的结论）
 
+- `rewrite_table_plan` 出错时（目前只有 TiFlash 延迟物化的边界会出错），reader 的链已交给 `f` 而 `table_plans` 已清空，reader 处于写了一半的状态。出错后整条语句回退到 PoC、这棵计划被丢弃，所以不影响结果；以后若有出错后继续使用计划的调用方，需要先恢复原链。
 - 计划是 `Arc` 树。Go 原地改节点的地方用 `make_mut_plan` / `map_children`：语句独占树时原地改，共享时只复制被改的那个节点。
 - `PhysicalTableReader` 的 `table_plans`（扁平列表）与 `table_plan`（链）持有相同的节点，所以 reader 下面的节点总有两个持有者，直接写会复制节点并让列表指向旧节点（taskMap spike #287 的发现）。所有写 reader 下层计划的 pass（投影消除、`InjectExtraProjection`、选择合并、延迟物化、probe parents）都通过 `rewrite_table_plan`：先清空 `table_plans`，在链上原地写，写完再从链重新生成列表。按 N1 §3.9（#288）只有链可写、列表只读；"列表不再存储、需要时从链推导"的形式涉及 `PhysicalTableReader` 的结构，留给 VS1-31。
 - FindBestTask 的 memo 必须只活在 `physicalOptimize` 内、返回前释放，否则 postOptimize 会把每个节点都看成共享而复制（spike 结论 3，由 VS1-28 实现；`physicalop` 模块文档中已有 postOptimize 入口的 `debug_assert` 要求）。候选计划要 `into_iter()` 移出，不要克隆 `Arc`（spike 结论 2）。
@@ -148,7 +149,7 @@ Go 在 `QBHintHandler.Enter` 中把编号写进 AST 节点（`SelectStmt.QueryBl
 
 ## 9. 开放问题（请评审确认）
 
-1. 统计信息加载点作为"不改计划的空操作"而不是 blocked（§3）。
+1. 统计信息加载点作为"不改计划的空操作"而不是 blocked（§3）；其中的索引裁剪由 VS1-28 移植。用户可见的后果写进 `docs/compatibility.md`：新栈上执行的查询不记录谓词列。
 2. 禁用规则表（`mysql.opt_rule_blacklist`）：是否像 SQL binding 一样，表非空时整体关闭新栈（§3）。
 3. EXECUTE 的参数值需要 sessionexpr（D05.3 P1-1），列为把 `Compile` 接入优化器的前置条件（§7）。
 

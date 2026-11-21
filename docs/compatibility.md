@@ -33,6 +33,12 @@ Following the constitution (article 1, item 2), tidb-rs ports security and data-
 | `/debug/pprof/goroutine`, `/debug/pprof/mutex` | Go runtime profiles in pprof format | **404 / not supported** ([#115](https://github.com/dulao5/tidb-rs/issues/115)) | tidb-rs has no goroutines or Go mutex profiler; no Go-format equivalent. CPU and heap profiles keep Go's paths. |
 | Top SQL / TiDB-side statement CPU (`Tidb_cpu_time`, `AVG_TIDB_CPU_TIME`, PROCESSLIST TiDB CPU) | Sampling-based attribution, present when `tidb_enable_top_sql = ON` | Window-apportioned CPU accounting plus a dynamic **per-execution sampling rate** sysvar (default 100%); effective rate = `tidb_enable_top_sql` ? rate : 0, so turning Top SQL off from TiDB Dashboard always works. TiDB CPU fields appear only on sampled executions. (`Tikv_cpu_time` is unaffected: TiKV process time, always present as in Go.) ([#116](https://github.com/dulao5/tidb-rs/issues/116)) | Owner decision: lower and tunable overhead; numbers more accurate than Go's, not identical. |
 
+## New stack (first vertical slice) differences
+
+| Area | v8.5.8 behavior | tidb-rs behavior | Reason |
+|---|---|---|---|
+| Statistics loading points of the optimizer (`CollectPredicateColumnsPoint`, `SyncWaitStatsLoadPoint`) | Every user query records its predicate columns (column stats usage) and waits for the sync load of the statistics it needs. v8.x `tidb_analyze_column_options` defaults to `PREDICATE`, so auto-analyze collects statistics for the recorded predicate columns. | On the new stack both rules return the plan unchanged: only pseudo statistics exist there, nothing is loaded and **no predicate column is recorded**. Queries executed only on the new stack therefore never mark their columns, and auto-analyze (with the default `PREDICATE`) may never collect statistics for those columns. | The new stack has only pseudo statistics until the statistics handle (D11.2) is ported (VS1 plan §3.2); D09.13 spec §3. |
+
 ## TiKV client gaps (client-rust fork, ADR 0008)
 
 Gaps of the TiKV client against client-go, tracked in [`specs/D07.1-store/client-go-parity.md`](../specs/D07.1-store/client-go-parity.md); listed here only when a user can see them.

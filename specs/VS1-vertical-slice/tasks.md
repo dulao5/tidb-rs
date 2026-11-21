@@ -50,7 +50,7 @@
 | VS1-24 | `DoOptimize`、`postOptimize`、`InjectExtraProjection`、`ResultReorder`；hint 骨架 | D09.13、D13.3 | depth | 0.19 | VS1-21 | 物理计划向量一致；PREPARE（`GeneratePlanCacheStmtWithAST`）使用同一个规划上下文，恢复对 `PlanBuilder.Build` 的调用（现在是 `blocked-by:D09.13` 的桩） | 评审中（spec `specs/D09.13-optimizer/spec.md`；D09.13 converge 56/60 + 4 桩，D13.3 38/38；govec `optdriver` 2,470 条：逻辑优化 1,638 条、postOptimize 412 条与 Go 一致，104 条停在构建器已有的边界；PREPARE 已恢复构建。最终物理计划的向量随 VS1-28 验收：物理优化依次停在统计信息推导（VS1-29）、FindBestTask（VS1-28）、ResolveIndices（VS1-31）、代价（VS1-30）） |
 | VS1-25 | ranger 整块 | D10.4 | depth | 0.22 | — | ranger govec 一致 | 评审中（D10.4 converge 95/95；govec `rangerbuild` 5,721 条记录、18,198 个结果一致，121 个停在 D08.9 边界；`cardinality` 的 `selectivity` 410 条 D10.4 记录已与 Go 一致） |
 | VS1-27 | 物理算子与 task（VS1 算子）、`exhaustPhysicalPlans`（Sel / Proj / Sort / TopN / Limit） | D10.1、D10.3 | depth | 0.18 | VS1-19 | 随 VS1-28 验收 | 评审中（D10.1 93/110 + 16 桩 + 1 例外，D10.3 22/22；govec `physops` 3,104 条，其中 `exhaustPhysicalPlans` 1,500 条、2,350 个候选与 Go 一致；`Attach2Task` / task 收拢由单元测试覆盖，随 VS1-28 的计划向量验收。spec `specs/D10.1-physical-plans/spec.md`） |
-| VS1-28 | FindBestTask：DataSource / TableDual、skyline、表路径、访问路径（`getPossibleAccessPaths`、`filterPathByIsolationRead` 等 9 个函数和句柄列栈的 `pushMap` / `popMap` 已随 VS1-21 移植，见 functions.tsv；本项解除其中 hint 以外的桩）、路径统计 | D10.2 | depth | 0.31 | VS1-26、VS1-27、VS1-29、VS1-30 | EXPLAIN 计划向量（去掉 estRows / cost）一致；`clone_node` 计数器与试点 E1/E2 两个单元测试（共享子计划的命中与回滚）进本块测试；遵守 N1 §3 第 9 条 | 未开始 |
+| VS1-28 | FindBestTask：DataSource / TableDual、skyline、表路径、访问路径（`getPossibleAccessPaths`、`filterPathByIsolationRead` 等 9 个函数和句柄列栈的 `pushMap` / `popMap` 已随 VS1-21 移植，见 functions.tsv；本项解除其中 hint 以外的桩）、路径统计 | D10.2 | depth | 0.31 | VS1-26、VS1-27、VS1-29、VS1-30 | EXPLAIN 计划向量（去掉 estRows / cost）一致；`clone_node` 计数器与试点 E1/E2 两个单元测试（共享子计划的命中与回滚）进本块测试；遵守 N1 §3 第 9 条；移植 `PruneIndexesByWhereAndOrder`（纯计算，配 govec），使有两个及以上二级索引的表的候选路径与 Go 一致（D09.13 spec §3）；路由器测试：`tidb_cost_model_version=1` 时 SELECT 回退 | 未开始 |
 | VS1-29 | pseudo 基数估算、统计结构读取部分 | D10.6、D11.1 | depth | 0.21 | — | pseudo selectivity govec 一致 | 评审中（#236；D10.6 converge 38/54 + 16 桩，D11.1 85/85；govec `cardinality` 5,702 条，`selectivity` 442 条停在 D10.4 / D08.9 边界） |
 | VS1-30 | 代价模型 v2（VS1 算子） | D10.5 | depth | 0.04 | VS1-19 | 代价 govec 一致；代价缓存经 `&self` 写在共享节点上，代价计算中不用 `make_mut_plan`，有测试证明计算期间 `clone_node` 为 0（N1 §3 第 9 条） | 未开始 |
 | VS1-31 | `ResolveIndices`、`ToPB`、access object（VS1 算子） | D10.9 | depth | 0.04 | VS1-27 | DAG 逐字节一致 | 未开始 |
@@ -70,7 +70,7 @@ Phase 2 的待定设计问题（来自 VS1-19 / VS1-10 的评审，#223 / #224�
 | VS1-34 | TableReader 执行器 | D12.1 | depth | 0.04 | VS1-13、VS1-31、VS1-33 | ab `TableReader` / `TableFullScan` / `TableRangeScan` | 未开始 |
 | VS1-35 | Selection / Limit / Projection / TableDual 执行器（`ResetContextOfStmt`、`isWeakConsistencyRead` 已由 VS1-14 提前移植） | D12.2 | depth | 0.07 | VS1-13 | 单测；ab 对应分类 | 未开始 |
 | VS1-36 | Sort / TopN（内存中） | D12.5 | depth | 0.08 | VS1-13 | 单测；ab `Sort` / `TopN` | 未开始 |
-| VS1-37 | C2b 集成与 read_only 调优；默认值评审 | glue | depth | 0.10 | Phase 3 其余各项 | ab `strict` 的 VS1 分类 100%；read_only ≥ 0.9× Go | 未开始 |
+| VS1-37 | C2b 集成与 read_only 调优；默认值评审 | glue | depth | 0.10 | Phase 3 其余各项 | ab `strict` 的 VS1 分类 100%；read_only ≥ 0.9× Go；`Compile` 接入 `planner.Optimize` 时加真实会话 EXECUTE 读取参数的测试（需要 sessionexpr，D09.13 spec §7） | 未开始 |
 | VS1-38 | （可选）EXPLAIN：只支持 VS1 算子 | D10.9、D09.16、D12.12 | depth | 0.05 | VS1-28 | ab 计划级对照 | 未开始 |
 | VS1-39 | （有条件，plan §10-3）实例级 plan cache（VS1 形态）与 A3 plan cache spec | D13.1 | depth | 0.15 | VS1-15、VS1-28 | spec 经负责人确认；read_only 达标 | 未开始 |
 

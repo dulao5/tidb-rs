@@ -188,9 +188,13 @@ const RESOLVE_EXPAND: UnportedRule = UnportedRule {
 /// The two statistics loading points of `optRuleList`. The new stack's statistics handle
 /// has only pseudo tables (VS1 plan §3.2, the statistics row; the full handle is D11.2),
 /// so there is no statistics item to collect usage for or to load: both leave the plan
-/// unchanged. Go also never changes the plan in these rules, except the index pruning of
-/// `CollectPredicateColumnsPoint`, which only acts above `tidb_opt_index_prune_threshold`
-/// indexes (not the case of the tables the new stack plans: recorded in the spec).
+/// unchanged. One difference in the plan: `CollectPredicateColumnsPoint` also prunes index
+/// paths (`rule_prune_indexes.go`) — above `tidb_opt_index_prune_threshold` (20) by the
+/// threshold, and below it too: when at least one index scores, it drops the "zero-score"
+/// indexes (neither covering nor holding WHERE / ORDER BY columns, `rule_prune_indexes.go:86`).
+/// So for a table with two or more secondary indexes Go removes candidate paths here and the
+/// new stack does not; the pruning (`PruneIndexesByWhereAndOrder`) is ported with FindBestTask
+/// (VS1-28). The new stack also records no predicate columns (docs/compatibility.md).
 #[derive(Clone, Copy, Debug)]
 pub struct StatsLoadPoint {
     name: &'static str,
@@ -532,7 +536,9 @@ pub fn merge_continuous_selections(p: &mut PhysicalPlanRef) {
 /// nodes as `tablePlan`, so every node under a reader has two owners: writing through it
 /// would copy the nodes and leave `TablePlans` on the old ones (the taskMap spike's finding;
 /// `ToPB` reads `TablePlans`). The list is cleared first, so the statement owns the nodes
-/// alone and `f` writes them in place, and rebuilt after.
+/// alone and `f` writes them in place, and rebuilt after. When `f` fails the reader is left
+/// half-written (the chain went to `f`, the list is empty); the statement then falls back
+/// and the plan is dropped, so no caller sees it (spec §4.4).
 // glue: N1 §3.4 (the two owners of the nodes under a table reader)
 pub(crate) fn rewrite_table_plan(
     plan: &mut PhysicalPlanRef,
