@@ -140,9 +140,10 @@ fn restore_undoes_all_groups_together() {
     assert_eq!(s.vars().stmt_ctx().warning_count(), 1);
 }
 
-/// The session plans nothing yet: `ExecuteStmt` reaches `Compile`, whose planner is a
-/// boundary stub; `PrepareStmt` runs the prepare executor up to the plan builder (its
-/// planning context, D09.13), and rolls its transaction back (Go's `rollbackOnError`).
+/// `ExecuteStmt` reaches `Compile`, whose planner is not wired yet (a boundary stub);
+/// `PrepareStmt` runs the prepare executor, whose plan builder builds the statement in the
+/// session's planning context, and ends with the transaction rolled back / finished (Go's
+/// `rollbackOnError` on failure, the statement end on success).
 #[test]
 fn statement_paths_are_blocked() {
     let mut s = session();
@@ -156,8 +157,8 @@ fn statement_paths_are_blocked() {
         s.execute_stmt(Arc::clone(&stmt), "SELECT 1").await.err()
     }));
     assert_eq!(got.and_then(block), Some("D09.13".to_owned()));
-    let got = block_on(Box::pin(async { s.prepare_stmt("SELECT 1").await.err() }));
-    assert_eq!(got.and_then(block), Some("D09.13".to_owned()));
+    let got = block_on(Box::pin(async { s.prepare_stmt("SELECT 1").await }));
+    assert_eq!(got.map(|info| info.fields.len()).ok(), Some(1));
     assert!(s.is_idle());
     assert_eq!(s.dialect(), Dialect::MySQL);
     assert!(s.is_autocommit() && !s.in_txn() && s.current_db().is_empty());

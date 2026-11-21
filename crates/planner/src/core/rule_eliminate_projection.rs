@@ -1,24 +1,28 @@
 //! go-file: pkg/planner/core/rule_eliminate_projection.go
 //!
-//! The logical projection elimination rule (block D09.7). The physical half
-//! (`eliminatePhysicalProjection`, run by `postOptimize`) needs the physical projection,
-//! table reader and aggregation operators: it is a boundary stub until the optimizer driver
-//! (VS1-24) and the physical operators come.
+//! The projection elimination rule (block D09.7): the logical rule, and the physical half
+//! (`eliminatePhysicalProjection`) that `postOptimize` runs first (ported with the optimizer
+//! driver, D09.13).
 
 use std::sync::Arc;
 
 use tidb_base::Error;
-use tidb_base::blocked::blocked;
 use tidb_base::errors::RedactLogDisable;
+use tidb_base::kv;
 use tidb_base::mysql::NotNullFlag;
 use tidb_expression::constant_fold::fold_constant;
 use tidb_expression::util::exprs_has_side_effects;
-use tidb_expression::{Expr, ExprRef, Schema};
+use tidb_expression::{Column, Expr, ExprRef, Schema};
 
 use crate::arena::{PlanId, with_detached};
-use crate::base::{LogicalKind, LogicalOptRule, LogicalPlan, ReplaceMap};
+use crate::base::{
+    LogicalKind, LogicalOptRule, LogicalPlan, PhysicalKind, PhysicalPlan, ReplaceMap,
+};
+use crate::core::optimizer::rewrite_table_plan;
+use crate::core::physical_plans::{PhysicalProjection, PhysicalTableReader};
 use crate::core::rule_util::resolve_column_and_replace;
 use crate::logicalop::LogicalProjection;
+use crate::physicalop::{PhysicalPlanRef, make_mut_plan, map_children};
 use crate::planctx::PlanCtx;
 use crate::util::logicaltrace::{TraceId, trace_id};
 use crate::util::optimizetrace::LogicalOptimizeOp;
@@ -43,15 +47,91 @@ pub fn can_projection_be_eliminated_loose(p: &LogicalProjection) -> bool {
     true
 }
 
-// glue: stub of canProjectionBeEliminatedStrict, blocked-by:D10.1 (PhysicalProjection / PhysicalHashAgg / PhysicalStreamAgg; postOptimize, VS1-24)
-// glue: stub of doPhysicalProjectionElimination, blocked-by:D10.1 (PhysicalProjection / PhysicalTableReader; postOptimize, VS1-24)
-// glue: stub of eliminatePhysicalProjection, blocked-by:D10.1 (the physical half of the rule, run by postOptimize, VS1-24)
-/// The physical projection elimination of `postOptimize`.
-pub fn eliminate_physical_projection() -> Result<(), Error> {
-    Err(blocked(
-        "D10.1",
-        "the physical projection elimination of postOptimize (eliminatePhysicalProjection)",
-    ))
+/// canProjectionBeEliminatedStrict checks whether a projection can be
+/// eliminated, returns true if the projection just copy its child's output.
+///
+/// The aggregation checks (`PhysicalHashAgg` / `PhysicalStreamAgg` in MPP final mode) need
+/// operators that are not ported (D10.1 / D09.4): no plan has them yet.
+// go: canProjectionBeEliminatedStrict L2 (the HashAgg / StreamAgg checks come with those operators)
+pub fn can_projection_be_eliminated_strict(p: &PhysicalProjection) -> bool {
+    // This is due to the in-compatibility between TiFlash and TiDB:
+    // For TiDB, the output schema of final agg is all the aggregated functions and for
+    // TiFlash, the output schema of agg(TiFlash not aware of the aggregation mode) is
+    // aggregated functions + group by columns, so to make the things work, for final
+    // mode aggregation that need to be running in TiFlash, always add an extra Project
+    // the align the output schema. In the future, we can solve this in-compatibility by
+    // passing down the aggregation mode to TiFlash.
+    // (PhysicalHashAgg / PhysicalStreamAgg: not ported operators, see the doc.)
+
+    // If this projection is specially added for `DO`, we keep it.
+    if p.calculate_no_delay {
+        return false;
+    }
+    if p.schema().is_empty() {
+        return true;
+    }
+    let child = &p.children()[0];
+    if p.schema().len() != child.schema().len() {
+        return false;
+    }
+    for (i, expr) in p.exprs.iter().enumerate() {
+        let Expr::Column(col) = &**expr else {
+            return false;
+        };
+        if !col.equal_column(&Expr::Column(Column::clone(&child.schema().columns[i]))) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `doPhysicalProjectionElimination`. `StmtCtx.ColRefFromUpdatePlan` is filled by the
+/// UPDATE plan builder (the write path, which the new stack does not build): it is empty
+/// for every statement here, so its check never keeps a projection.
+// go: doPhysicalProjectionElimination L2 (ColRefFromUpdatePlan is empty: no UPDATE on the new stack)
+pub fn do_physical_projection_elimination(mut p: PhysicalPlanRef) -> PhysicalPlanRef {
+    map_children(&mut p, do_physical_projection_elimination);
+
+    // eliminate projection in a coprocessor task
+    if let Some(table_reader) = p.as_any().downcast_ref::<PhysicalTableReader>()
+        && table_reader.store_type == kv::TiFlash
+    {
+        let _ = table_reader;
+        rewrite_table_plan(&mut p, |table_plan| {
+            Ok(eliminate_physical_projection(table_plan))
+        })
+        .expect("eliminating projections does not fail");
+        return p;
+    }
+
+    let Some(proj) = p.as_any().downcast_ref::<PhysicalProjection>() else {
+        return p;
+    };
+    if !can_projection_be_eliminated_strict(proj) {
+        return p;
+    }
+    let mut child = Arc::clone(&p.children()[0]);
+    if child.kind() == PhysicalKind::Projection {
+        // when current projection is an empty projection(schema pruned by column pruner), no need to reset child's schema
+        // TODO: avoid producing empty projection in column pruner.
+        if !p.schema().is_empty() {
+            let schema = p.schema().clone();
+            // Release the parent's reference so that the child is written in place when
+            // the statement owns the tree alone.
+            drop(p);
+            make_mut_plan(&mut child).set_schema(schema);
+        }
+    }
+    // for i, col := range p.Schema().Columns: StmtCtx.ColRefFromUpdatePlan.Has(col.UniqueID)
+    // is false for every column (see the doc).
+    child
+}
+
+/// `eliminatePhysicalProjection`, the first pass of `postOptimize`. The failpoint
+/// `DisableProjectionPostOptimization` is not ported (no failpoints).
+// go: eliminatePhysicalProjection L1
+pub fn eliminate_physical_projection(p: PhysicalPlanRef) -> PhysicalPlanRef {
+    do_physical_projection_elimination(p)
 }
 
 /// For select, insert, delete list

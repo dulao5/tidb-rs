@@ -94,6 +94,9 @@ pub struct SessCtx {
     /// The session variables: the only source of truth for session state (VS1 plan §4.1).
     pub vars: SessionVars,
     pub(crate) txn: LazyTxn,
+    /// Whether the store is a wired one (`with_store`): the stand-in [`UnwiredStore`] has no
+    /// client (the store driver's, D07.1), so the planning context gets none.
+    pub(crate) store_wired: bool,
     /// `SessionVars.SQLKiller`: the shared part of N2 (`SessionShared`).
     pub(crate) killer: Arc<SqlKiller>,
     store: Arc<dyn Storage>,
@@ -841,6 +844,37 @@ impl SessionContext for SessionCore {
     fn get_expr_ctx(&self) -> tidb_sessionctx::exprctx::ExprContextRef {
         Arc::clone(&self.sctx.expr_ctx) as tidb_sessionctx::exprctx::ExprContextRef
     }
+    /// `GetPlanCtx()`: the expression context ([`SessionContext::get_expr_ctx`]), the
+    /// store client when the session runs over a wired store (`None` over the stand-in
+    /// store: the push down checks are then a boundary of the store driver, D07.1) and
+    /// `HasDirtyContent`: Go looks for the table's keys in the transaction's membuffer; a
+    /// read-only (or no, or pipelined) transaction has none, so the answer is false for every
+    /// table. A transaction that wrote is not on the new stack (writes run on the PoC) and
+    /// the Rust transaction has no membuffer yet, so the check is then unknown (`None`, a
+    /// boundary of the plan builder).
+    // go: session.HasDirtyContent L2 (only the no-write answer: the membuffer is not in the Rust transaction)
+    fn get_plan_ctx(&self) -> tidb_planner::planctx::SessionPlanCtx {
+        let txn = &self.sctx.txn;
+        let no_dirty_content =
+            !txn.valid() || tidb_sessiontxn::sctx::LazyTxn::is_pipelined(txn) || txn.is_read_only();
+        let has_dirty_content: Option<tidb_planner::planctx::HasDirtyContentFn> =
+            no_dirty_content.then(|| Arc::new(|_tid: i64| false) as _);
+        // The session's expression context is a static stand-in until sessionexpr (D05.3
+        // P1-1); Go's sessionexpr answers IsUseCache from the statement's plan cache
+        // tracker, so the planning context's expression context shares that tracker (a
+        // PREPARE does not use the cache, an EXECUTE does once the miss path enables it).
+        let expr_ctx = tidb_sessionctx::exprstatic::new_expr_context(vec![
+            tidb_sessionctx::exprstatic::with_plan_cache_tracker(Arc::clone(
+                &self.sctx.vars.stmt_ctx().plan_cache_tracker,
+            )),
+        ]);
+        tidb_planner::planctx::SessionPlanCtx {
+            expr_ctx,
+            client: self.sctx.store_wired.then(|| self.sctx.store.get_client()),
+            has_dirty_content,
+            advise_txn_warmup: None,
+        }
+    }
     // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS
     fn get_snapshot_with_stmt_read_ts(
         &mut self,
@@ -975,7 +1009,13 @@ impl Session {
     // glue: stand-in for createSession / CreateSession4Test (D05.3)
     pub fn new(dialect: Dialect, global: Box<dyn GlobalVarAccessor>) -> Session {
         let store = Arc::new(UnwiredStore);
-        Session::with_store(dialect, global, Arc::<UnwiredStore>::clone(&store), store)
+        Session::build(
+            dialect,
+            global,
+            Arc::<UnwiredStore>::clone(&store),
+            store,
+            false,
+        )
     }
 
     /// A session over `store` and its TSO.
@@ -985,6 +1025,18 @@ impl Session {
         global: Box<dyn GlobalVarAccessor>,
         store: Arc<dyn Storage>,
         oracle: Arc<dyn Oracle>,
+    ) -> Session {
+        Session::build(dialect, global, store, oracle, true)
+    }
+
+    /// The session over `store` / `oracle`; `store_wired` tells whether the store has a client.
+    // glue: stand-in for createSession (D05.3)
+    fn build(
+        dialect: Dialect,
+        global: Box<dyn GlobalVarAccessor>,
+        store: Arc<dyn Storage>,
+        oracle: Arc<dyn Oracle>,
+        store_wired: bool,
     ) -> Session {
         let mut vars = SessionVars::new(global);
         let killer = SqlKiller::new();
@@ -997,6 +1049,7 @@ impl Session {
                 sctx: SessCtx {
                     vars,
                     txn: LazyTxn::default(),
+                    store_wired,
                     killer,
                     store,
                     oracle,

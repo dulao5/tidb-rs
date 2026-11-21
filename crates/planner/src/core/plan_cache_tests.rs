@@ -125,17 +125,26 @@ fn warnings(v: &SessionVars) -> Vec<String> {
 }
 
 #[test]
-fn prepare_stops_at_the_plan_builder_after_the_cacheability_warning() {
+fn prepare_builds_the_plan_after_the_cacheability_warning() {
     let mut v = vars();
     let sql = "select @a, ?";
     let st = parse(sql, &ParseOptions::default())
         .unwrap()
         .stmts
         .remove(0);
-    let e = generate_plan_cache_stmt_with_ast(&mut v, true, sql, st, &Is(1), None)
-        .err()
-        .unwrap();
-    assert_eq!(blocked_by(&e), Some("D09.13"));
+    // The plan builder runs (with the statement's planning context) and stops at the user
+    // variable `@a` (its builtin function family is not ported).
+    let e = generate_plan_cache_stmt_with_ast(
+        &mut test_parts().plan_ctx(&mut v),
+        true,
+        sql,
+        st,
+        &Is(1),
+        None,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(blocked_by(&e), Some("D08.9"));
     assert_eq!(
         warnings(&v),
         ["skip prepared plan-cache: query has user-defined variables is un-cacheable"]
@@ -147,11 +156,46 @@ fn prepare_stops_at_the_plan_builder_after_the_cacheability_warning() {
         .unwrap()
         .stmts
         .remove(0);
-    let e = generate_plan_cache_stmt_with_ast(&mut v, true, sql, st, &Is(1), None)
-        .err()
-        .unwrap();
-    assert_eq!(blocked_by(&e), Some("D09.13"));
+    let e = generate_plan_cache_stmt_with_ast(
+        &mut test_parts().plan_ctx(&mut v),
+        true,
+        sql,
+        st,
+        &Is(1),
+        None,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(blocked_by(&e), Some("D08.9"));
     assert!(warnings(&v).is_empty());
+
+    // PlanBuilder.Build is called again: a statement it builds gives PREPARE the plan's
+    // schema and output names (the column definitions of the prepare response).
+    let mut v = vars();
+    let sql = "select ?, 1 as b";
+    let st = parse(sql, &ParseOptions::default())
+        .unwrap()
+        .stmts
+        .remove(0);
+    let (ps, p, param_count) = generate_plan_cache_stmt_with_ast(
+        &mut test_parts().plan_ctx(&mut v),
+        true,
+        sql,
+        st,
+        &Is(1),
+        None,
+    )
+    .unwrap();
+    assert_eq!(param_count, 1);
+    assert_eq!(ps.params.len(), 1);
+    let p = p.expect("the built plan");
+    assert_eq!(p.schema.len(), 2);
+    let names: Vec<String> = p
+        .output_names
+        .iter()
+        .map(|n| n.col_name.o.clone())
+        .collect();
+    assert_eq!(names, ["?", "b"]);
 }
 
 #[test]
@@ -252,7 +296,8 @@ fn miss_path_checks_the_new_plan() {
         ["skip prepared plan-cache: query has 'version' is un-cacheable"]
     );
 
-    // The optimizer's error is returned (production: OptimizeAstNode is a boundary stub).
+    // The optimizer's error is returned: `select 1` is built and logically optimized, the
+    // physical optimization stops at the statistics derivation (D10.6).
     let mut v = vars();
     let mut s = stmt("select 1", vec![], 1);
     let e = get_plan_from_plan_cache(
@@ -262,11 +307,11 @@ fn miss_path_checks_the_new_plan() {
         None,
         &mut s,
         &[],
-        &mut crate::optimize::optimize_ast_node,
+        &mut |vars, node, is| crate::optimize::optimize_ast_node(&test_parts(), vars, node, is),
     )
     .err()
     .unwrap();
-    assert_eq!(blocked_by(&e), Some("D13.3"));
+    assert_eq!(blocked_by(&e), Some("D10.6"));
 }
 
 #[test]
@@ -592,10 +637,17 @@ fn optimize_exec_stmt_reaches_the_statement_optimizer() {
     assert!(Arc::ptr_eq(&exec.prep_stmt, &prep));
     assert!(exec.plan.is_none());
 
-    let e = optimize_exec_stmt(&mut v, &node, &Is(1), None)
-        .err()
-        .unwrap();
-    assert_eq!(blocked_by(&e), Some("D13.3"), "{e}");
+    // The session's expression context reads the parameter values (here a static context
+    // that holds them, as the session's sessionexpr context will).
+    let e = optimize_exec_stmt(
+        &mut test_parts_with_params(&[new_int_datum(5)]).plan_ctx(&mut v),
+        &node,
+        &Is(1),
+        None,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(blocked_by(&e), Some("D10.6"), "{e}");
     // The miss path ran: the parameter values are in the session, and the statement was
     // being planned (the flag is cleared again).
     assert_eq!(v.state.plan_cache_params.all_param_values().len(), 1);
@@ -607,7 +659,7 @@ fn optimize_exec_stmt_reaches_the_statement_optimizer() {
         prep_stmt: Some(Arc::clone(&prep) as _),
         ..Default::default()
     };
-    let e = optimize_exec_stmt(&mut v, &node, &Is(1), None)
+    let e = optimize_exec_stmt(&mut test_parts().plan_ctx(&mut v), &node, &Is(1), None)
         .err()
         .unwrap();
     assert_eq!(e.code(), 8112, "{e}");
@@ -622,8 +674,34 @@ fn optimize_exec_stmt_reaches_the_statement_optimizer() {
     };
     assert_eq!(node.name, "s");
     assert_eq!(node.using_vars.len(), 1);
-    let e = optimize_exec_stmt(&mut v, &node, &Is(1), None)
+    let e = optimize_exec_stmt(&mut test_parts().plan_ctx(&mut v), &node, &Is(1), None)
         .err()
         .unwrap();
     assert_eq!(blocked_by(&e), Some("D09.2"), "{e}");
+}
+
+/// The session's parts of the planning context, for the tests that plan: a static
+/// expression context, no store client, no dirty table.
+fn test_parts() -> crate::planctx::SessionPlanCtx {
+    crate::planctx::SessionPlanCtx {
+        // A statement's plan cache tracker (not enabled), as the session's planning context.
+        expr_ctx: tidb_sessionctx::exprstatic::new_expr_context(vec![
+            tidb_sessionctx::exprstatic::with_plan_cache_tracker(Arc::new(
+                tidb_base::contextutil::new_plan_cache_tracker(None),
+            )),
+        ]),
+        client: None,
+        has_dirty_content: Some(Arc::new(|_| false)),
+        advise_txn_warmup: None,
+    }
+}
+
+/// [`test_parts`] whose expression context holds the EXECUTE parameter values.
+fn test_parts_with_params(params: &[Datum]) -> crate::planctx::SessionPlanCtx {
+    use tidb_sessionctx::exprstatic as es;
+    let ev = es::new_eval_context(vec![es::with_param_list(params)]);
+    crate::planctx::SessionPlanCtx {
+        expr_ctx: es::new_expr_context(vec![es::with_eval_ctx(ev)]),
+        ..test_parts()
+    }
 }

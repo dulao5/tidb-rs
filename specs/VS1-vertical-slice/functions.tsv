@@ -1917,7 +1917,12 @@ VS1-31	D10.9	pkg/planner/core/resolve_indices.go	PhysicalTableScan.ResolveIndice
 VS1-31	D10.9	pkg/planner/core/resolve_indices.go	PhysicalTopN.ResolveIndices	27	
 VS1-31	D10.9	pkg/planner/core/resolve_indices.go	baseSchemaProducer.ResolveIndices	3	
 VS1-31	D10.9	pkg/planner/core/resolve_indices.go	physicalSchemaProducer.ResolveIndices	4	
-VS1-31	D10.9	pkg/planner/core/resolve_indices.go	refine4NeighbourProj	27	
+VS1-24	D10.9	pkg/planner/core/resolve_indices.go	refine4NeighbourProj	27	
+VS1-24	D09.13	pkg/planner/core/rule/rule_constant_propagation.go	ConstantPropagationSolver.Name	3	
+VS1-24	D09.13	pkg/planner/core/rule/rule_constant_propagation.go	ConstantPropagationSolver.Optimize	15	
+VS1-24	D09.13	pkg/planner/core/rule/rule_constant_propagation.go	ConstantPropagationSolver.execOptimize	12	
+VS1-24	D09.11	pkg/planner/core/rule_derive_topn_from_window.go	DeriveTopNFromWindow.Name	3	
+VS1-24	D09.11	pkg/planner/core/rule_derive_topn_from_window.go	DeriveTopNFromWindow.Optimize	4	
 VS1-31	D10.9	pkg/planner/core/resolve_indices.go	resolveIndicesForSort	23	
 VS1-31	D10.9	pkg/planner/core/resolve_indices.go	resolveIndicesForVirtualColumn	12	
 VS1-33	D07.2	pkg/store/copr/coprocessor.go	BuildKeyRanges	10	

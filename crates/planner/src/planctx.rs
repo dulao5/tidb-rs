@@ -38,7 +38,60 @@ pub struct PlanCtx<'s> {
     /// `p.SCtx().HasDirtyContent(tid)`: whether the session's transaction has written the
     /// table (its membuffer). `None` until the session hands it over with the routed
     /// statement (VS1-24 / VS1-37); the plan builder then returns a boundary error.
-    pub has_dirty_content: Option<Arc<dyn Fn(i64) -> bool + Send + Sync>>,
+    pub has_dirty_content: Option<HasDirtyContentFn>,
+    /// `p.SCtx().AdviseTxnWarmup()`: advises the transaction to warm up (fetch its start
+    /// TSO early). `None` is the mock contexts' `EmptyPlanContextExtended.AdviseTxnWarmup`
+    /// (nothing to do).
+    pub advise_txn_warmup: Option<AdviseTxnWarmupFn>,
+}
+
+/// `HasDirtyContent(tid)` of the session.
+pub type HasDirtyContentFn = Arc<dyn Fn(i64) -> bool + Send + Sync>;
+
+/// `AdviseTxnWarmup()` of the session.
+pub type AdviseTxnWarmupFn = Arc<dyn Fn() -> Result<(), Error> + Send + Sync>;
+
+/// What the session hands the planner for each statement, besides its session variables:
+/// the expression context, the store client, the transaction's dirty-table check and the
+/// warm-up hook. `planner.Optimize` and PREPARE (`GeneratePlanCacheStmtWithAST`) build their
+/// planning context from the same parts ([`SessionPlanCtx::plan_ctx`]), as Go's both use
+/// `sctx.GetPlanCtx()`.
+// glue: N2 (the session side of base.PlanContext: sctx.GetPlanCtx())
+#[derive(Clone)]
+pub struct SessionPlanCtx {
+    /// `GetExprCtx()`.
+    pub expr_ctx: ExprContextRef,
+    /// `GetClient()` (`None`: no store client; the push down checks are then a boundary).
+    pub client: Option<Arc<dyn Client>>,
+    /// `HasDirtyContent(tid)` (`None`: the transaction's dirty tables are unknown; the
+    /// plan builder is then a boundary).
+    pub has_dirty_content: Option<HasDirtyContentFn>,
+    /// `AdviseTxnWarmup()`.
+    pub advise_txn_warmup: Option<AdviseTxnWarmupFn>,
+}
+
+impl SessionPlanCtx {
+    /// The planning context of one statement over the session's variables.
+    // glue: N2 (sctx.GetPlanCtx())
+    pub fn plan_ctx<'s>(&self, vars: &'s mut SessionVars) -> PlanCtx<'s> {
+        let mut ctx = PlanCtx::new(vars, Arc::clone(&self.expr_ctx));
+        ctx.client = self.client.clone();
+        ctx.has_dirty_content = self.has_dirty_content.clone();
+        ctx.advise_txn_warmup = self.advise_txn_warmup.clone();
+        ctx
+    }
+
+    /// The parts of an existing planning context (for the nested `Optimize` of the plan
+    /// cache's miss path, which gets the session variables again).
+    // glue: N2 (the planning context of the same statement)
+    pub fn of(ctx: &PlanCtx<'_>) -> SessionPlanCtx {
+        SessionPlanCtx {
+            expr_ctx: Arc::clone(&ctx.expr_ctx),
+            client: ctx.client.clone(),
+            has_dirty_content: ctx.has_dirty_content.clone(),
+            advise_txn_warmup: ctx.advise_txn_warmup.clone(),
+        }
+    }
 }
 
 impl<'s> PlanCtx<'s> {
@@ -51,6 +104,7 @@ impl<'s> PlanCtx<'s> {
             expr_ctx,
             client: None,
             has_dirty_content: None,
+            advise_txn_warmup: None,
         }
     }
 

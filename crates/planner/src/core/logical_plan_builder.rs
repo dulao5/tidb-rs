@@ -76,6 +76,7 @@ use crate::core::rule::logical_rules::{
     FlagPredicatePushDown, FlagPredicateSimplification, FlagPushDownTopN,
 };
 use crate::core::util::table_has_dirty_content;
+use crate::hint::parse_plan_hints;
 use crate::logicalop::{
     DataSource, LogicalLimit, LogicalProjection, LogicalSelection, LogicalSort, LogicalTableDual,
 };
@@ -2063,20 +2064,27 @@ impl<'ast> PlanBuilder<'ast> {
     /// operator, D09.14). The recursive-CTE checks and `tryToBuildSequence` only act inside
     /// CTEs, which are not built yet.
     ///
-    /// `sel.QueryBlockOffset` is assigned by the hint handler (D13.3); until it is ported
-    /// every query block has offset 0, as with Go's `BuildLogicalPlanForTest`.
+    /// `sel.QueryBlockOffset` is the hint handler's ([`QBHintHandler::query_block_offset`],
+    /// D13.3): 0 without a handler or for a SELECT it did not walk, as with Go's
+    /// `BuildLogicalPlanForTest`. `pushTableHints` goes through the handler's
+    /// `GetCurrentStmtHints` and `ParsePlanHints`, which stop at a non-empty hint list
+    /// (`blocked-by:D02.2`, the parser's hint grammar); with no hints the pushed `PlanHints`
+    /// is empty, so `popTableHints` has no unmatched-hint warning and the builder keeps no
+    /// hint stack (`TableHints()` is always the empty hints, see [`NoTableHints`]).
     // go: PlanBuilder.buildSelect L2 (the branches of hints, CTEs, GROUP BY, windows, aggregation, DISTINCT, subqueries and locks are boundary stubs)
     pub fn build_select(
         &mut self,
         ctx: &mut PlanCtx<'_>,
         sel: &'ast ast::SelectStmt,
     ) -> Result<PlanId, Error> {
-        self.push_select_offset(0);
-        // b.pushTableHints(sel.TableHints, sel.QueryBlockOffset)
-        if !sel.table_hints.is_empty() || !sel.select_stmt_opts.table_hints.is_empty() {
+        let qb_offset = self
+            .hint_processor
+            .as_ref()
+            .map_or(0, |hp| hp.query_block_offset(sel));
+        self.push_select_offset(qb_offset);
+        if let Err(e) = self.push_table_hints(ctx, sel, qb_offset) {
             self.pop_select_offset();
-            // glue: blocked-by:D13.3 (table hints: hint.ParsePlanHints)
-            return Err(blocked("D13.3", "table hints of a query block"));
+            return Err(e);
         }
         let origin = self.in_straight_join;
         self.in_straight_join = sel.select_stmt_opts.straight_join;
@@ -2086,6 +2094,51 @@ impl<'ast> PlanBuilder<'ast> {
         // table hints are only visible in the current SELECT statement.
         // (b.popTableHints: the statement has none.)
         res
+    }
+
+    /// Go ignores the error of `ParsePlanHints` (a hint whose restore fails); the boundary
+    /// of a non-empty list (`blocked-by:D02.2`) is returned instead, never dropped. The
+    /// `SelectStmtOpts` hints are the same list in Go (the parser copies them into
+    /// `TableHints`); the Rust parser keeps both fields, so both are read.
+    // go: PlanBuilder.pushTableHints L2 (no hint stack is kept: the hints of a statement without hints are empty, see buildSelect)
+    fn push_table_hints(
+        &mut self,
+        ctx: &PlanCtx<'_>,
+        sel: &'ast ast::SelectStmt,
+        current_level: isize,
+    ) -> Result<(), Error> {
+        let hints: Vec<&tidb_parser::gen_types::TableOptimizerHint> = sel
+            .table_hints
+            .iter()
+            .chain(sel.select_stmt_opts.table_hints.iter())
+            .collect();
+        let sc = ctx.vars.stmt_ctx();
+        let hints = match &self.hint_processor {
+            Some(hp) => hp.get_current_stmt_hints(
+                &hints,
+                current_level,
+                self.hint_state.as_mut(),
+                Some(sc),
+            )?,
+            // Go's nil processor panics here; the builder is always given one by optimize and
+            // BuildLogicalPlanForTest. Without one the list is read as is.
+            None => hints,
+        };
+        let current_db = &ctx.vars.current_db;
+        // The sub-query context: buildSelect is not reached inside a subquery yet (D09.6).
+        let (_plan_hints, _sub_query_hint_flags) = parse_plan_hints(
+            &hints,
+            current_level,
+            current_db,
+            self.hint_processor.as_deref(),
+            sc.stmt_hints.straight_join_order,
+            false,
+            false,
+            true,
+            sc,
+        )?;
+        // b.tableHintInfo = append(b.tableHintInfo, planHints): the hints are empty here.
+        Ok(())
     }
 
     // go-part: PlanBuilder.buildSelect

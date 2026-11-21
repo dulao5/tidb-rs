@@ -17,7 +17,7 @@ use tidb_base::dbterror::exeerrors::ErrPrepareMulti;
 use tidb_parser::{ParseOptions, parse};
 use tidb_planner::core::plan_cache_utils::generate_plan_cache_stmt_with_ast;
 
-use crate::adapter::{col_names2_result_fields, is_no_result_plan};
+use crate::adapter::col_names2_result_fields;
 use crate::glue::{PlanCacheStmtRef, ResultField, SessionContext};
 use crate::select::reset_context_of_stmt;
 
@@ -105,8 +105,10 @@ impl PrepareExec {
             // sessiontxn.GetTxnManager(e.Ctx()).GetTxnInfoSchema() is set by PrepareStmt.
             return Err(blocked("D05.4", "the transaction's InfoSchema"));
         };
+        // The statement's planning context, built like planner.Optimize's (GetPlanCtx).
+        let plan_ctx = sctx.get_plan_ctx();
         let (stmt, p, param_cnt) = generate_plan_cache_stmt_with_ast(
-            sctx.get_session_vars_mut(),
+            &mut plan_ctx.plan_ctx(sctx.get_session_vars_mut()),
             true,
             &self.sql_text,
             stmt0,
@@ -129,11 +131,13 @@ impl PrepareExec {
         // In MySQL prepare protocol, the server need to tell the client how many column the prepared statement would return when executing it.
         // For a query with on result, e.g. an insert statement, there will be no result, so 'e.Fields' is not set.
         // Usually, p.Schema().Len() == 0 means no result. A special case is the 'do' statement, it looks like 'select' but discard the result.
+        // isNoResultPlan(p): an empty schema (the `DO` statement's projection, Go's other
+        // case, is not in the Rust AST).
         if let Some(p) = &p
-            && !is_no_result_plan(p)
+            && !p.schema.is_empty()
         {
-            let names: Vec<_> = p.output_names().iter().map(|n| (**n).clone()).collect();
-            self.fields = col_names2_result_fields(p.schema(), &names, &vars.current_db);
+            let names: Vec<_> = p.output_names.iter().map(|n| (**n).clone()).collect();
+            self.fields = col_names2_result_fields(&p.schema, &names, &vars.current_db);
         }
         if self.id == 0 {
             self.id = vars.get_next_prepared_stmt_id();

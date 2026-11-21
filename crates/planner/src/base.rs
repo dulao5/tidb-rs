@@ -291,7 +291,7 @@ pub trait LogicalPlan: Any + Send {
     fn constant_propagation(
         &mut self,
         ctx: &mut PlanCtx<'_>,
-        parent: PlanId,
+        parent: Option<PlanId>,
         current_child_idx: usize,
         opt: &LogicalOptimizeOp,
     ) -> Option<PlanId> {

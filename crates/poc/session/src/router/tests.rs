@@ -348,6 +348,8 @@ fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
     };
     let t = TableInfo {
         id: 110,
+        // The database's id, as the InfoSchema loader sets it.
+        dbid: 2,
         name: CIStr::new("sbtest1"),
         columns: Some(vec![
             col(1, "id", tidb_base::mysql::TypeLonglong),
@@ -1157,81 +1159,29 @@ fn autocommit_close_then_poc_statement() {
 }
 
 /// The real new session prepares a candidate (`PrepareStmt`: transaction context, statement
-/// start, TSO warm-up, the prepare executor) and ends `Blocked` in the preprocessor
-/// ([`REAL_PREPARE_BLOCK`]). The PoC owns the statement with the block as the reason, and the new
-/// session afterwards equals a fresh one (Lucky, #205: no trace of the attempt). `strict`
-/// reports the block at EXECUTE (§4.7 row 2); CLOSE goes to the PoC only.
+/// start, TSO warm-up, the prepare executor, whose `PlanBuilder.Build` runs in the planning
+/// context the session hands the planner): the statement is prepared on both sides, with the
+/// new stack's column definitions. EXECUTE reaches the compiler's planner, a boundary
+/// ([`REAL_EXECUTE_BLOCK`]): `fallback` answers from the PoC and leaves the new session as
+/// before (no trace of the attempt), `strict` reports the block (§4.7 row 2).
 #[test]
-fn real_prepare_is_blocked_and_restored() {
+fn real_prepare_builds_the_plan_and_execute_falls_back() {
     for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
         let mut p = poc();
         // A database is selected: without one the preprocessor answers Go's 1046.
         p.values.current_db = Some("test".into());
-        let fresh = snap(&real(mode, &p));
         let mut r = real(mode, &p);
         block_on(r.prepare(&mut p, 1, POINT)).unwrap();
-        let Some(Owner::Poc(Reason::Blocked(block))) = r.owner(1).cloned() else {
+        let Some(Owner::Both { columns, .. }) = r.owner(1).cloned() else {
             panic!("{mode:?}: {:?}", r.owner(1));
         };
-        assert_eq!(block, REAL_PREPARE_BLOCK, "{mode:?}");
-        assert_eq!(snap(&r), fresh, "{mode:?}");
+        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["c"], "{mode:?}");
+        assert_eq!(columns[0].table, "sbtest1");
         assert!(r.new.session().is_idle());
-        let res = block_on(r.execute(&mut p, 1, vec![]));
-        match mode {
-            NewStackMode::Strict => {
-                let e = res.unwrap_err();
-                assert!(
-                    e.code == 1235
-                        && e.message
-                            .contains(&format!("blocked-by:{REAL_PREPARE_BLOCK}"))
-                );
-            }
-            _ => assert_eq!(rows(&res).map(|r| r.0), Some(3)),
-        }
-        r.close(&mut p, 1);
-        // Closed at the end of the next statement (Go's cleanRetryInfo).
-        let _ = block_on(r.query(&mut p, "SET NAMES utf8mb4"));
-        assert!(p.log.contains(&"close 1".to_owned()));
-        assert_eq!(r.owner(1), None);
-    }
-}
-
-/// Where a real PREPARE of [`POINT`] stops on the new session: the preprocessor finds the
-/// table, takes its metadata lock and resolves it; the plan builder is next, which needs the
-/// planning context the optimizer driver sets up (D09.13).
-const REAL_PREPARE_BLOCK: &str = "D09.13";
-
-/// Where a real EXECUTE of [`POINT`] stops on the new session: the session hands the
-/// statement to `ExecuteStmt` as an EXECUTE node, `ResetContextOfStmt` reads the prepared
-/// statement, and the compiler's planner (`planner.IsReadOnly` / `Optimize`, D09.13) is next.
-const REAL_EXECUTE_BLOCK: &str = "D09.13";
-
-/// EXECUTE of a statement prepared on both sides reaches the planner of the real new session
-/// and falls back cleanly: `fallback` answers from the PoC and the new session is as before
-/// (no trace of the attempt); `strict` reports the block. PREPARE itself still stops at the
-/// plan builder on a real session, so the test puts the prepared statement into the new
-/// session as PREPARE would.
-#[test]
-fn real_execute_reaches_the_planner_and_falls_back() {
-    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
-        let mut p = poc();
-        p.values.current_db = Some("test".into());
-        let mut r = real(mode, &p);
-        block_on(r.prepare(&mut p, 1, POINT)).unwrap();
-        // The column definitions PREPARE would have sent (the PoC's, in fallback mode).
-        r.mode = NewStackMode::Fallback;
-        let columns = rows(&block_on(r.execute(&mut p, 1, vec![]))).unwrap().1;
-        r.mode = mode;
-        let mut ps = tidb_planner::core::plan_cache_utils::PlanCacheStmt::default();
-        ps.prepared_ast.stmt = Box::new(parse(POINT));
-        ps.prepared_ast.stmt_type = "Select".to_owned();
-        ps.stmt_text = POINT.to_owned();
-        r.new
-            .session_mut()
-            .vars_mut()
-            .add_prepared_stmt(1, Arc::new(parking_lot::Mutex::new(ps)))
-            .unwrap();
-        r.owners.insert(1, Owner::Both { new_id: 1, columns });
+        // The fake PoC answers with the same column definitions as a real one would (the
+        // router checks a fallback's columns against the prepared ones).
+        p.columns = columns.clone();
         let before = snap(&r);
         let res = block_on(r.execute(&mut p, 1, vec![]));
         match mode {
@@ -1246,14 +1196,25 @@ fn real_execute_reaches_the_planner_and_falls_back() {
             }
             _ => {
                 assert_eq!(rows(&res).map(|r| r.0), Some(3), "{res:?}");
-                // `strict` records its error as the statement's result in the session.
-                assert_eq!(snap(&r), before);
+                // Only the PoC's previous-statement state was written (found rows).
+                assert_ne!(snap(&r), before);
             }
         }
         assert!(r.new.session().is_idle(), "{mode:?}");
         assert_eq!(r.new.session().executed_stmts(), 0, "{mode:?}");
+        r.close(&mut p, 1);
+        // Closed at the end of the next statement (Go's cleanRetryInfo).
+        let _ = block_on(r.query(&mut p, "SET NAMES utf8mb4"));
+        assert!(p.log.contains(&"close 1".to_owned()));
+        assert_eq!(r.owner(1), None);
     }
 }
+
+/// Where a real EXECUTE of [`POINT`] stops on the new session: the session hands the
+/// statement to `ExecuteStmt` as an EXECUTE node, `ResetContextOfStmt` reads the prepared
+/// statement, and the compiler's planner (`planner.IsReadOnly` / `Optimize`, not wired into
+/// `Compile` yet) is next.
+const REAL_EXECUTE_BLOCK: &str = "D09.13";
 
 /// The real new session's `ExecutePreparedStmt` / `DropPreparedStmt` of an id it never
 /// prepared: Go's `ErrStmtNotFound` (8111), not a boundary stub; with no plan cache
@@ -1423,4 +1384,32 @@ fn ported_domain_only_with_the_new_stack_on() {
     assert!(!NewStackMode::Off.uses_ported_domain());
     assert!(NewStackMode::Fallback.uses_ported_domain());
     assert!(NewStackMode::Strict.uses_ported_domain());
+}
+
+/// EXPLAIN never routes to the new stack until the new stack has an EXPLAIN (its own task):
+/// even with the optimizer driver ported and a new stack that would answer, `EXPLAIN` and
+/// `EXPLAIN ANALYZE` of a candidate SELECT never reach the new stack, in `fallback` and in
+/// `strict` mode (the new stack is not asked at all; the PoC owns them).
+#[test]
+fn explain_is_never_routed_to_the_new_stack() {
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        for sql in [
+            format!("EXPLAIN {POINT}"),
+            format!("EXPLAIN ANALYZE {POINT}"),
+            format!("EXPLAIN FORMAT = 'brief' {POINT}"),
+            format!("DESC {POINT}"),
+        ] {
+            let mut p = poc();
+            let (mut r, script) = scripted(mode, &p);
+            script.lock().unwrap().answer = Some(Answer::Rows);
+            let _ = block_on(r.query(&mut p, &sql));
+            assert!(
+                script.lock().unwrap().log.is_empty(),
+                "{mode:?} {sql}: {:?}",
+                script.lock().unwrap().log
+            );
+            // Whatever the PoC answers (or its parser rejects), the new session is untouched.
+            assert_eq!(r.new.session().executed_stmts(), 0, "{mode:?} {sql}");
+        }
+    }
 }

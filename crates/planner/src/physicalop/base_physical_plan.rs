@@ -382,6 +382,12 @@ impl BasePhysicalPlan {
         sum
     }
 
+    /// The probe parents (Go reads the unexported field `probeParents`).
+    // glue: accessor of BasePhysicalPlan.probeParents
+    pub fn probe_parents(&self) -> &[PhysicalPlanRef] {
+        &self.probe_parents
+    }
+
     /// SetProbeParents implements base.PhysicalPlan.<17th> interface.
     // go: BasePhysicalPlan.SetProbeParents L1
     pub fn set_probe_parents(&mut self, probe_parents: Vec<PhysicalPlanRef>) {

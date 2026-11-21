@@ -27,6 +27,7 @@ pub mod base;
 pub mod baseimpl;
 pub mod cardinality;
 pub mod core;
+pub mod hint;
 pub mod logicalop;
 pub mod optimize;
 pub mod physicalop;

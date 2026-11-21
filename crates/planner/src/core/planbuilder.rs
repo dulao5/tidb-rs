@@ -7,8 +7,9 @@
 //!
 //! - `b.ctx` / `b.is`: the planner gets `&mut PlanCtx` per call (`M-CTX`); the InfoSchema is
 //!   D06.3 part 2 (VS1-17).
-//! - `hint.QBHintHandler` / `QBHintBuildState` and `SessionVars.PlannerSelectBlockAsName`
-//!   are D13.3 (VS1-24): `Init` keeps Go's shape without them.
+//! - `hint.QBHintHandler` / `QBHintBuildState` are the hint skeleton (D13.3, `crate::hint`);
+//!   `SessionVars.PlannerSelectBlockAsName` (the query block names the hints generated from a
+//!   plan read, SQL bindings D13.2) is not on the Rust session vars.
 
 use std::collections::HashMap;
 
@@ -32,6 +33,7 @@ use crate::core::common_plans::Execute;
 use crate::core::plan_cache_utils::get_prepared_stmt;
 use crate::core::preprocess::InfoSchemaHandle;
 use crate::core::rule::logical_rules::FlagPruneColumns;
+use crate::hint::{QBHintBuildState, QBHintHandler};
 use crate::planctx::PlanCtx;
 use crate::util::path::INDEX_LOOK_UP_PUSH_DOWN_BY_SYS_VAR;
 use crate::util::{AccessPath, HandleCols};
@@ -202,6 +204,12 @@ pub struct PlanBuilder<'ast> {
     /// allNames: the output names of the plans the query blocks being built read
     /// (`evalDefaultExpr` reads them, D09.15).
     pub all_names: Vec<NameSlice>,
+    /// hintProcessor: the query block hints of the statement (`hint.QBHintHandler`, D13.3),
+    /// shared by the build rounds of one statement (it keeps only AST-derived metadata).
+    pub hint_processor: Option<Arc<QBHintHandler>>,
+    /// hintState: the per-build state of the query block hints (`hint.QBHintBuildState`),
+    /// created by `Init` when there is a hint processor.
+    pub hint_state: Option<QBHintBuildState>,
 }
 
 /// PlanBuilderOpt is used to adjust the plan builder.
@@ -253,11 +261,21 @@ impl<'ast> PlanBuilder<'ast> {
     /// Return the original PlannerSelectBlockAsName as well, callers decide if
     /// PlannerSelectBlockAsName should be restored after using this builder.
     ///
-    /// `PlannerSelectBlockAsName` and the hint handler are D13.3 (see the module doc): the
-    /// saved block names are always empty for now.
-    // go: PlanBuilder.Init L1 [M-CTX]
-    pub fn init(&mut self, vars: &mut SessionVars, is: Option<InfoSchemaHandle>) -> Vec<String> {
+    /// `PlannerSelectBlockAsName` is not on the Rust session vars (see the module doc): the
+    /// saved block names are always empty, and the new list Go stores (one empty entry per
+    /// query block, `MaxSelectStmtOffset() + 1`) is not kept.
+    // go: PlanBuilder.Init L2 (PlannerSelectBlockAsName is not on the Rust session vars: SQL bindings, D13.2)
+    pub fn init(
+        &mut self,
+        vars: &mut SessionVars,
+        is: Option<InfoSchemaHandle>,
+        processor: Option<Arc<QBHintHandler>>,
+    ) -> Vec<String> {
         self.is = is;
+        if let Some(processor) = &processor {
+            self.hint_state = Some(processor.new_build_state());
+        }
+        self.hint_processor = processor;
         self.is_for_update_read = vars.is_pessimistic_read_consistency();
         self.no_decorrelate = vars.enable_no_decorrelate_in_select;
         Vec::new()
@@ -362,10 +380,23 @@ impl<'ast> PlanBuilder<'ast> {
         self.is_for_update_read
     }
 
-    /// GetHintState gets the HintState from the PlanBuilder (`hint.QBHintBuildState`, D13.3).
-    // glue: stub of PlanBuilder.GetHintState, blocked-by:D13.3 (hint.QBHintBuildState)
-    pub fn get_hint_state(&self) -> Result<(), Error> {
-        Err(blocked("D13.3", "GetHintState (hint.QBHintBuildState)"))
+    /// GetHintState gets the HintState from the PlanBuilder.
+    // go: PlanBuilder.GetHintState L1
+    pub fn get_hint_state(&self) -> Option<&QBHintBuildState> {
+        self.hint_state.as_ref()
+    }
+
+    /// HandleUnusedViewHints appends warnings for unused view hints in the current build.
+    ///
+    /// The warning handler Go's hint processor keeps is the statement context (`vars`).
+    // go: PlanBuilder.HandleUnusedViewHints L1 [M-CTX]
+    pub fn handle_unused_view_hints(&self, vars: &SessionVars) {
+        let Some(hp) = &self.hint_processor else {
+            return;
+        };
+        let sc = vars.stmt_ctx();
+        let warns = hp.handle_unused_view_hints(self.hint_state.as_ref(), Some(sc), Vec::new());
+        hp.set_warns(Some(sc), &warns);
     }
 
     // go: PlanBuilder.getSelectOffset L1

@@ -4016,6 +4016,7 @@ dependencies = [
  "tidb-expression",
  "tidb-infoschema",
  "tidb-kv",
+ "tidb-memory",
  "tidb-model",
  "tidb-parser",
  "tidb-sessionctx",

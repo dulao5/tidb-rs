@@ -331,6 +331,14 @@ impl SessionContext for Session {
     fn get_expr_ctx(&self) -> ExprContextRef {
         Arc::clone(&self.expr_ctx)
     }
+    fn get_plan_ctx(&self) -> tidb_planner::planctx::SessionPlanCtx {
+        tidb_planner::planctx::SessionPlanCtx {
+            expr_ctx: Arc::clone(&self.expr_ctx),
+            client: None,
+            has_dirty_content: None,
+            advise_txn_warmup: None,
+        }
+    }
     fn get_snapshot_with_stmt_read_ts(
         &mut self,
     ) -> BoxFuture<'_, Result<Arc<dyn Snapshot>, Error>> {

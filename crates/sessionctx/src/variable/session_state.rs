@@ -1,4 +1,5 @@
 //! go-file: pkg/sessionctx/variable/session.go (the non-scalar SessionVars state, D05.2 T6)
+//! go-file: pkg/planner/util/fixcontrol/set.go (ParseToMap: the session hook of tidb_opt_fix_control parses the value)
 //!
 //! The non-scalar fields of Go's `SessionVars` that the session hooks read or write, with the
 //! small helpers of other packages they call (`mathutil.MysqlRng`, `tiflash.ReplicaRead`,
@@ -452,7 +453,7 @@ pub fn to_exchange_compression_mode(name: &str) -> (i64, bool) {
 /// release-8.5): an empty value after the colon is the value `""`, no error, no warning. The
 /// fix is ported (constitution R1, as #67149); govec generates these records with the fix
 /// applied (tracker `scripts/govec-fixes.sh`).
-// go-dep: github.com/pingcap/tidb/pkg/planner/util/fixcontrol.ParseToMap L1
+// go: pkg/planner/util/fixcontrol/set.go ParseToMap L1
 // go-fix: pingcap/tidb@811a10e115 #65884
 pub fn parse_to_map(s: &str) -> Result<(HashMap<u64, String>, Vec<String>), Error> {
     let mut m: HashMap<u64, String> = HashMap::new();
