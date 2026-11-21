@@ -83,9 +83,9 @@ pub enum ValMut<'a> {
     Struct(&'a mut dyn GoStruct),
 }
 
-/// Go `time.Duration` (nanoseconds).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Duration(pub i64);
+/// Go `time.Duration` fields are [`crate::gostd::time::Duration`] (nanoseconds); the
+/// `Duration` variants of [`ValRef`] / [`ValMut`] tell them from plain `int64` fields.
+pub use crate::gostd::time::Duration;
 
 /// `nullableBool` defaults unset bool options to unset instead of false, which enables us to
 /// know if the user has set 2 conflict options at the same time.
@@ -196,7 +196,7 @@ fn val_to_json(v: ValRef<'_>, as_float: bool) -> Result<json::Value, Error> {
         ValRef::Uint(u) => int(*u as i128),
         ValRef::U32(u) => int(i128::from(*u)),
         ValRef::U64(u) => int(i128::from(*u)),
-        ValRef::Duration(d) => int(i128::from(d.0)),
+        ValRef::Duration(d) => int(i128::from(*d)),
         ValRef::F64(f) => {
             if !f.is_finite() {
                 let s = gofmt::sprintf("%v", &[Arg::from(*f)]);
@@ -273,7 +273,7 @@ fn set_zero_val(v: ValMut<'_>) {
         ValMut::U64(x) => *x = 0,
         ValMut::F64(x) => *x = 0.0,
         ValMut::Str(s) => s.clear(),
-        ValMut::Duration(d) => *d = Duration(0),
+        ValMut::Duration(d) => *d = 0,
         ValMut::StrSlice(s) => *s = None,
         ValMut::StrMap(m) => *m = None,
         ValMut::NullableBool(b) => *b = nbUnset,

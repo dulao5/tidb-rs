@@ -78,13 +78,7 @@ fn secs(d: Duration, prec: isize) -> String {
     format_float(duration_seconds(d), b'f', prec, 64)
 }
 
-/// `time.Duration.Seconds`.
-// go-std: time.Duration.Seconds L1
-fn duration_seconds(d: Duration) -> f64 {
-    let sec = d / SECOND;
-    let nsec = d % SECOND;
-    sec as f64 + nsec as f64 / 1e9
-}
+use tidb_base::gostd::time::duration_seconds;
 
 /// `fmt.Sprintf("%v", []string{...})`: `[a b c]`.
 // go-std: fmt %v of []string L1

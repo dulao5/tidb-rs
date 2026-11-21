@@ -209,6 +209,12 @@ jobs:
         run: |
           python3 scripts/test_check_one_translation.py
           python3 scripts/check_one_translation.py
+      # Temporary boundary stubs (blocked-by) may only go down per area (#262): a new stub over
+      # scripts/stub_ratchet.tsv fails; after removing stubs, lower it with --write.
+      - name: blocked-by ratchet (and its tests)
+        run: |
+          python3 scripts/test_check_stub_ratchet.py
+          python3 scripts/check_stub_ratchet.py
       - uses: actions/checkout@v4
         if: github.event_name == 'pull_request'
         with:

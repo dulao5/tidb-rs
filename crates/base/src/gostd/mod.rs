@@ -334,8 +334,10 @@ pub fn equal_fold(s: &str, t: &str) -> bool {
     tc.next().is_none()
 }
 
+pub mod binary;
 pub mod bufio;
 pub mod bytes;
+pub mod cmp;
 pub mod conv;
 pub mod crc32;
 pub mod json;

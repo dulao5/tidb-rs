@@ -429,6 +429,14 @@ fn less_than_half(x: Duration, y: Duration) -> bool {
     (x as u64).wrapping_add(x as u64) < y as u64
 }
 
+/// Seconds returns the duration as a floating point number of seconds.
+// go-std: time.Duration.Seconds L1
+pub fn duration_seconds(d: Duration) -> f64 {
+    let sec = d / SECOND;
+    let nsec = d % SECOND;
+    sec as f64 + nsec as f64 / 1e9
+}
+
 /// Abs returns the absolute value of d.
 /// As a special case, math.MinInt64 is converted to math.MaxInt64.
 // go-std: time.Duration.Abs L1

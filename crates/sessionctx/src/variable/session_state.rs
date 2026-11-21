@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use tidb_base::Error;
 use tidb_base::kv::StoreType;
 
+use crate::sessionstates::{LastDDLInfo, QueryInfo};
+
 /// RetryInfo saves retry information (Go `variable.RetryInfo`). Only the part a read-only
 /// node uses: `Retrying` (the retry of optimistic writes, always false here) and the
 /// prepared statements closed in the current transaction, which stay executable until the
@@ -523,21 +525,8 @@ fn go_quote(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// `sessionstates.QueryInfo`: the information of the last executed query.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct QueryInfo {
-    /// TxnScope of the query's transaction.
-    pub txn_scope: String,
-    /// StartTS of the query's transaction.
-    pub start_ts: u64,
-    /// ForUpdateTS of the query.
-    pub for_update_ts: u64,
-    /// RUConsumption of the query.
-    pub ru_consumption: f64,
-    /// ErrMsg is the error message (`omitempty`).
-    pub err_msg: String,
-}
-
+// The JSON form of sessionstates.QueryInfo / LastDDLInfo (`crate::sessionstates`) that the
+// `tidb_last_query_info` / `tidb_last_ddl_info` getters return.
 impl QueryInfo {
     /// `json.Marshal(QueryInfo)`.
     // glue: encoding/json of sessionstates.QueryInfo (field order and tags of the Go struct)
@@ -557,15 +546,6 @@ impl QueryInfo {
         out.push('}');
         out
     }
-}
-
-/// `sessionstates.LastDDLInfo`: the information of the last DDL.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LastDDLInfo {
-    /// Query of the DDL.
-    pub query: String,
-    /// SeqNum of the DDL.
-    pub seq_num: u64,
 }
 
 impl LastDDLInfo {

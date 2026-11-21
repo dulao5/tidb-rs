@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use super::reflect::{AtomicBool, Duration, NullableBool};
+use super::reflect::{AtomicBool, NullableBool};
 use super::types_gen::*;
 
 /// `defaultConf` (run-time value of Go `config.NewConfig()` at v8.5.8). `TempStoragePath` is
@@ -67,7 +67,7 @@ pub(crate) fn default_conf() -> Config {
                     compression: "".to_owned(),
                     is_buffered: false,
                     buffer_size: 0,
-                    buffer_flush_interval: Duration(0),
+                    buffer_flush_interval: 0,
                 },
             },
             slow_query_file: "tidb-slow.log".to_owned(),
@@ -191,11 +191,11 @@ pub(crate) fn default_conf() -> Config {
                 param: 1.0,
                 sampling_server_url: "".to_owned(),
                 max_operations: 0,
-                sampling_refresh_interval: Duration(0),
+                sampling_refresh_interval: 0,
             },
             reporter: OpenTracingReporter {
                 queue_size: 0,
-                buffer_flush_interval: Duration(0),
+                buffer_flush_interval: 0,
                 log_spans: false,
                 local_agent_host_port: "".to_owned(),
             },
@@ -220,13 +220,13 @@ pub(crate) fn default_conf() -> Config {
             async_commit: TikvAsyncCommit {
                 keys_limit: 256,
                 total_key_size_limit: 4096,
-                safe_window: Duration(2000000000),
-                allowed_clock_drift: Duration(500000000),
+                safe_window: 2000000000,
+                allowed_clock_drift: 500000000,
             },
             batch_policy: "standard".to_owned(),
             max_batch_size: 128,
             overload_threshold: 200,
-            max_batch_wait_time: Duration(0),
+            max_batch_wait_time: 0,
             batch_wait_size: 8,
             enable_chunk_rpc: true,
             region_cache_ttl: 600,
@@ -238,7 +238,7 @@ pub(crate) fn default_conf() -> Config {
                 admission_max_result_mb: 10.0,
                 admission_min_process_ms: 5,
             },
-            copr_req_timeout: Duration(60000000000),
+            copr_req_timeout: 60000000000,
             ttl_refreshed_txn_size: 33554432,
             resolve_lock_lite_threshold: 16,
             max_concurrency_request_limit: 9223372036854775807,
@@ -341,13 +341,13 @@ pub(crate) fn tikv_default_config() -> TikvConfig {
             async_commit: TikvAsyncCommit {
                 keys_limit: 256,
                 total_key_size_limit: 4096,
-                safe_window: Duration(2000000000),
-                allowed_clock_drift: Duration(500000000),
+                safe_window: 2000000000,
+                allowed_clock_drift: 500000000,
             },
             batch_policy: "standard".to_owned(),
             max_batch_size: 128,
             overload_threshold: 200,
-            max_batch_wait_time: Duration(0),
+            max_batch_wait_time: 0,
             batch_wait_size: 8,
             enable_chunk_rpc: true,
             region_cache_ttl: 600,
@@ -359,7 +359,7 @@ pub(crate) fn tikv_default_config() -> TikvConfig {
                 admission_max_result_mb: 10.0,
                 admission_min_process_ms: 5,
             },
-            copr_req_timeout: Duration(60000000000),
+            copr_req_timeout: 60000000000,
             ttl_refreshed_txn_size: 33554432,
             resolve_lock_lite_threshold: 16,
             max_concurrency_request_limit: 9223372036854775807,

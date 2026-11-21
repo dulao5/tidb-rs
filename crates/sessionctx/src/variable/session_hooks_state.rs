@@ -657,12 +657,12 @@ pub(super) fn gs_tidb_current_ts(s: &mut SessionVars) -> Result<String, Error> {
 
 // go-part: defaultSysVars (sysvar.go:L271 tidb_last_query_info GetSession closure) L1
 pub(super) fn gs_tidb_last_query_info(s: &mut SessionVars) -> Result<String, Error> {
-    Ok(s.state.last_query_info.marshal_json())
+    Ok(s.last_query_info.marshal_json())
 }
 
 // go-part: defaultSysVars (sysvar.go:L418 tidb_last_ddl_info GetSession closure) L1
 pub(super) fn gs_tidb_last_ddl_info(s: &mut SessionVars) -> Result<String, Error> {
-    Ok(s.state.last_ddl_info.marshal_json())
+    Ok(s.last_ddl_info.marshal_json())
 }
 
 // go-part: defaultSysVars (sysvar.go:L847 tidb_scatter_region GetSession closure) L1

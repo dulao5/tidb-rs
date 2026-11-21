@@ -3,6 +3,17 @@
 
 use super::decode_rune;
 
+/// `bytes.Compare`: `-1`, `0` or `+1` as `a` is less than, equal to or greater than `b`
+/// (lexicographic byte order).
+// go-std: bytes.Compare L1
+pub fn compare(a: &[u8], b: &[u8]) -> isize {
+    match a.cmp(b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
 /// `unicode.IsSpace`: Latin-1 `\t \n \v \f \r`, space, U+0085, U+00A0, and the
 /// `White_Space` table above Latin-1.
 // go-std: unicode.IsSpace L1

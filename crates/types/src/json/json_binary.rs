@@ -1074,38 +1074,7 @@ pub(crate) fn put_u32(b: &mut [u8], v: u32) {
     b[..4].copy_from_slice(&v.to_le_bytes());
 }
 
-/// `binary.Uvarint`: the value and the number of bytes read; `n == 0` if the buffer is too
-/// small, `n < 0` (the negated count) on a 64-bit overflow.
-// go-std: encoding/binary.Uvarint L1
-pub(crate) fn uvarint(buf: &[u8]) -> (u64, isize) {
-    let mut x: u64 = 0;
-    let mut s: u32 = 0;
-    for (i, &b) in buf.iter().enumerate() {
-        if i == 10 {
-            // Catch byte reads past MaxVarintLen64.
-            // See issue https://golang.org/issues/41185
-            return (0, -(i as isize + 1)); // overflow
-        }
-        if b < 0x80 {
-            if i == 9 && b > 1 {
-                return (0, -(i as isize + 1)); // overflow
-            }
-            return (x | (u64::from(b) << s), i as isize + 1);
-        }
-        x |= u64::from(b & 0x7f) << s;
-        s += 7;
-    }
-    (0, 0)
-}
-
-// go-std: encoding/binary.PutUvarint L1 (appends instead of writing into a sized buffer)
-pub(crate) fn put_uvarint(buf: &mut Vec<u8>, mut x: u64) {
-    while x >= 0x80 {
-        buf.push(x as u8 | 0x80);
-        x >>= 7;
-    }
-    buf.push(x as u8);
-}
+pub(crate) use tidb_base::gostd::binary::{put_uvarint, uvarint};
 
 /// Go's `s[lo:hi]` with `int` bounds: panics like Go on bounds Go rejects.
 // glue: Go slice expression with int indices

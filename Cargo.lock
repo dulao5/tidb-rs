@@ -4230,7 +4230,6 @@ dependencies = [
  "criterion 0.5.1",
  "flate2",
  "log",
- "ryu",
  "serde_json",
  "sha2",
  "tidb-base",

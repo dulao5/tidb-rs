@@ -150,21 +150,10 @@ pub fn compare_bytes(b: &[u8], b2: &[u8]) -> isize {
 
 /// `strconv.ParseUint(s, 2, 8)` for the 8-character groups of ParseBitStr: Go's
 /// `*strconv.NumError` text on a byte other than `0` / `1` (8 binary digits never overflow).
-// go-std: strconv.ParseUint L2 (base 2, bitSize 8, len(s) == 8)
+// glue: tidb_base::gostd::strconv::parse_uint_go(s, 2, 8) with the error as an Error
 fn parse_uint_base2_8(s: &[u8]) -> Result<u8, Error> {
-    let mut v: u8 = 0;
-    for &c in s {
-        match c {
-            b'0' | b'1' => v = (v << 1) | (c - b'0'),
-            _ => {
-                return Err(Error::plain(sprintf(
-                    "strconv.ParseUint: parsing %q: invalid syntax",
-                    &[Arg::go_string(s.to_vec())],
-                )));
-            }
-        }
-    }
-    Ok(v)
+    let (v, err) = tidb_base::gostd::strconv::parse_uint_go(s, 2, 8);
+    err.map(|()| v as u8).map_err(|e| Error::plain(e.error()))
 }
 
 /// `strings.Trim(s, "'")`.
