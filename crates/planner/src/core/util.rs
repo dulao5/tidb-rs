@@ -366,3 +366,32 @@ pub fn encode_unique_index_values_for_key(
     }
     Ok(encoded_idx_vals)
 }
+
+/// tableHasDirtyContent: whether the transaction wrote the table (or a partition of it).
+/// The session's dirty-table check is handed over through the planning context; without
+/// it this is a boundary stub (`blocked-by:D09.13`, the optimizer driver that sets up the
+/// planning context, VS1-24).
+// go: tableHasDirtyContent L2 (the session's dirty check comes through PlanCtx)
+pub fn table_has_dirty_content(
+    ctx: &crate::planctx::PlanCtx<'_>,
+    table_info: &tidb_model::TableInfo,
+) -> Result<bool, Error> {
+    let Some(has_dirty_content) = &ctx.has_dirty_content else {
+        // glue: blocked-by:D09.13 (the session's HasDirtyContent, handed over with the planning context)
+        return Err(blocked(
+            "D09.13",
+            "the transaction's dirty tables of the planning context (HasDirtyContent)",
+        ));
+    };
+    let Some(pi) = table_info.get_partition_info() else {
+        return Ok(has_dirty_content(table_info.id));
+    };
+    // Currently, we add UnionScan on every partition even though only one partition's data is changed.
+    // This is limited by current implementation of Partition Prune. It'll be updated once we modify that part.
+    for partition in pi.definitions.iter().flatten() {
+        if has_dirty_content(partition.id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

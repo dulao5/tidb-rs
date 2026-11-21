@@ -75,6 +75,11 @@
     "reason": "B ignores the hint for an index that does not exist (dropped by the preceding ALTER); Go fails with 1176",
     "issue": "#185"
   },
+  "executor/aggregate:439": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
   "executor/charset:10": {
     "class": "bug",
     "reason": "B accepted the SET but still answers in utf8mb4",
@@ -195,6 +200,11 @@
     "reason": "column length metadata of the literal",
     "issue": "#191"
   },
+  "executor/executor:704": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
   "executor/insert:389": {
     "class": "bug",
     "reason": "YEAR 0 shown as 0, Go shows 0000",
@@ -224,6 +234,46 @@
     "class": "bug",
     "reason": "error code 1193 (unknown variable) instead of Go's 8136 / 1238",
     "issue": "#193"
+  },
+  "expression/builtin:1588": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
+  "expression/builtin:1594": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
+  "expression/builtin:1600": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
+  "expression/builtin:1606": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
+  "expression/builtin:1612": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
+  "expression/builtin:1624": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
+  "expression/builtin:1630": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
+  "expression/builtin:1636": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
   },
   "expression/builtin:491": {
     "class": "bug",
@@ -260,6 +310,21 @@
     "reason": "B accepted the SET but still answers in utf8mb4",
     "issue": "#187"
   },
+  "new_character_set:125": {
+    "class": "bug",
+    "reason": "column definition charset 28 instead of 46 (utf8mb4_bin) after SET NAMES gbk / utf8mb4",
+    "issue": "#279"
+  },
+  "new_character_set:140": {
+    "class": "bug",
+    "reason": "column definition charset 28 instead of 46 (utf8mb4_bin) after SET NAMES gbk / utf8mb4",
+    "issue": "#279"
+  },
+  "new_character_set:147": {
+    "class": "bug",
+    "reason": "column definition charset 28 instead of 46 (utf8mb4_bin) after SET NAMES gbk / utf8mb4",
+    "issue": "#279"
+  },
   "new_character_set:23": {
     "class": "bug",
     "reason": "B accepted the SET but still answers in utf8mb4",
@@ -274,6 +339,16 @@
     "class": "bug",
     "reason": "B accepted the SET but still answers in utf8mb4",
     "issue": "#187"
+  },
+  "planner/core/memtable_predicate_extractor:16": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
+  },
+  "planner/core/memtable_predicate_extractor:18": {
+    "class": "bug",
+    "reason": "syntax error: same code and near text, different column in \"line 1 column N\"",
+    "issue": "#278"
   },
   "select:104": {
     "class": "bug",

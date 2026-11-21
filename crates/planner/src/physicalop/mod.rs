@@ -66,8 +66,50 @@ pub fn map_children(
 ///     physical_plan_boilerplate!(Selection);
 /// }
 /// ```
+///
+/// An operator that embeds a [`crate::core::util::PhysicalSchemaProducer`] in the field `sp`
+/// (Go's `physicalSchemaProducer`) uses `physical_plan_boilerplate!(Limit, sp)`, which also
+/// generates `schema` / `set_schema` from the producer.
 #[macro_export]
 macro_rules! physical_plan_boilerplate {
+    ($kind:ident, sp) => {
+        // glue: M-IFACE (generated per operator)
+        fn kind(&self) -> $crate::PhysicalKind {
+            $crate::PhysicalKind::$kind
+        }
+        // glue: M-IFACE (generated per operator)
+        fn as_any(&self) -> &dyn ::std::any::Any {
+            self
+        }
+        // glue: M-IFACE (generated per operator)
+        fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+            self
+        }
+        // glue: M-SELF (generated per operator)
+        fn as_dyn(&self) -> &dyn $crate::PhysicalPlan {
+            self
+        }
+        // glue: M-SELF (generated per operator)
+        fn base_physical(&self) -> &$crate::physicalop::BasePhysicalPlan {
+            &self.sp.base
+        }
+        // glue: M-SELF (generated per operator)
+        fn base_physical_mut(&mut self) -> &mut $crate::physicalop::BasePhysicalPlan {
+            &mut self.sp.base
+        }
+        // glue: M-IFACE (generated per operator)
+        fn clone_node(&self) -> $crate::PhysicalPlanRef {
+            ::std::sync::Arc::new(self.clone())
+        }
+        // glue: dispatch (Go physicalSchemaProducer.Schema, generated per operator)
+        fn schema(&self) -> &$crate::Schema {
+            self.sp.schema()
+        }
+        // glue: dispatch (Go physicalSchemaProducer.SetSchema, generated per operator)
+        fn set_schema(&mut self, schema: $crate::Schema) {
+            self.sp.set_schema(Some(schema));
+        }
+    };
     ($kind:ident) => {
         // glue: M-IFACE (generated per operator)
         fn kind(&self) -> $crate::PhysicalKind {

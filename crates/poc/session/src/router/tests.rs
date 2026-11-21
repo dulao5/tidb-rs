@@ -1197,9 +1197,9 @@ fn real_prepare_is_blocked_and_restored() {
 }
 
 /// Where a real PREPARE of [`POINT`] stops on the new session: the preprocessor finds the
-/// table, takes its metadata lock and resolves it; the plan builder (`buildSelect`, D09.1)
-/// is next.
-const REAL_PREPARE_BLOCK: &str = "D09.1";
+/// table, takes its metadata lock and resolves it; the plan builder is next, which needs the
+/// planning context the optimizer driver sets up (D09.13).
+const REAL_PREPARE_BLOCK: &str = "D09.13";
 
 /// Where a real EXECUTE of [`POINT`] stops on the new session: the session hands the
 /// statement to `ExecuteStmt` as an EXECUTE node, `ResetContextOfStmt` reads the prepared

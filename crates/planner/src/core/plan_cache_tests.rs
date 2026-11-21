@@ -135,7 +135,7 @@ fn prepare_stops_at_the_plan_builder_after_the_cacheability_warning() {
     let e = generate_plan_cache_stmt_with_ast(&mut v, true, sql, st, &Is(1), None)
         .err()
         .unwrap();
-    assert_eq!(blocked_by(&e), Some("D09.1"));
+    assert_eq!(blocked_by(&e), Some("D09.13"));
     assert_eq!(
         warnings(&v),
         ["skip prepared plan-cache: query has user-defined variables is un-cacheable"]
@@ -150,7 +150,7 @@ fn prepare_stops_at_the_plan_builder_after_the_cacheability_warning() {
     let e = generate_plan_cache_stmt_with_ast(&mut v, true, sql, st, &Is(1), None)
         .err()
         .unwrap();
-    assert_eq!(blocked_by(&e), Some("D09.1"));
+    assert_eq!(blocked_by(&e), Some("D09.13"));
     assert!(warnings(&v).is_empty());
 }
 

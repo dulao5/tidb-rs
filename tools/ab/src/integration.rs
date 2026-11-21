@@ -17,11 +17,12 @@ use serde_json::json;
 use crate::census::{self, Census, CensusPath, Control, Record, RouteProbe};
 use crate::compare::{
     ER_NOT_SUPPORTED_YET, Observed, StmtClass, Verdict, b_not_implemented, classify, compare,
-    compare_status_only, needs_warnings, strip_limit,
+    compare_status_only, mismatch_kind, needs_warnings, strip_limit,
 };
 use crate::exec::{Outcome, Side, TlsMode};
 use crate::mysqltest::{self, Class, Item, TxnEffect};
 use crate::outcome_json;
+use crate::rulings::Ledger;
 
 /// Connection settings shared by all sessions.
 pub struct Endpoints {
@@ -48,6 +49,8 @@ pub struct Options {
 pub enum StmtOutcome {
     Match,
     Mismatch,
+    /// A mismatch (or `b_error`) an approved ruling covers: `ruled:<id>` (not equal, counted).
+    Ruled,
     Unsupported,
     BError,
     AError,
@@ -60,6 +63,7 @@ impl StmtOutcome {
         match self {
             StmtOutcome::Match => "match",
             StmtOutcome::Mismatch => "mismatch",
+            StmtOutcome::Ruled => "ruled",
             StmtOutcome::Unsupported => "unsupported",
             StmtOutcome::BError => "b_error",
             StmtOutcome::AError => "a_error",
@@ -258,32 +262,6 @@ fn rewrite(o: &mut Outcome, p: &Pending) {
     }
 }
 
-/// Mismatch kind from the comparison's diff lines.
-fn mismatch_kind(d: &[String]) -> &'static str {
-    if d.iter().all(|s| s.starts_with("warnings:")) {
-        return "warnings";
-    }
-    if d.iter().all(|s| s.starts_with("affected rows")) {
-        return "affected_rows";
-    }
-    let rows = d.iter().any(|s| {
-        s.starts_with("row count") || s.contains(" only in ") || s.starts_with("first differing")
-    });
-    let order_only = d.iter().any(|s| s == "same rows in a different order");
-    if rows && !order_only {
-        "rows"
-    } else if order_only {
-        "order"
-    } else if d
-        .iter()
-        .any(|s| s.starts_with("column count") || s.contains("].name:"))
-    {
-        "columns"
-    } else {
-        "metadata"
-    }
-}
-
 fn error_code(o: &Outcome) -> Option<u16> {
     match o {
         Outcome::Error { code, .. } => Some(*code),
@@ -367,15 +345,38 @@ fn judge(
     match v {
         Verdict::Match | Verdict::BothError => (StmtOutcome::Match, String::new(), String::new()),
         Verdict::Unsupported => (StmtOutcome::Unsupported, String::new(), String::new()),
-        Verdict::Mismatch(d) => {
-            let kind = match (oa, ob) {
-                (Outcome::Error { .. }, Outcome::Error { .. }) => "error",
-                (Outcome::Rows { .. }, Outcome::Rows { .. })
-                | (Outcome::Ok { .. }, Outcome::Ok { .. }) => mismatch_kind(&d),
-                _ => "shape",
-            };
-            (StmtOutcome::Mismatch, kind.into(), d.join("; "))
-        }
+        // `compare` never rules; the runner applies the ledger afterwards.
+        Verdict::Mismatch(d) | Verdict::Ruled { diff: d, .. } => (
+            StmtOutcome::Mismatch,
+            mismatch_kind(oa, ob, &d).into(),
+            d.join("; "),
+        ),
+    }
+}
+
+/// The divergence ledger on a judged read (docs/testing/rulings.md): a mismatch or `b_error`
+/// an approved ruling covers becomes `ruled:<id>`; a pending ruling only names itself in the
+/// kind (the read stays a mismatch).
+fn apply_ledger(
+    ledger: &mut Ledger,
+    test: &str,
+    sql: &str,
+    v: StmtOutcome,
+    kind: String,
+    detail: &str,
+) -> (StmtOutcome, String) {
+    if !matches!(v, StmtOutcome::Mismatch | StmtOutcome::BError) {
+        return (v, kind);
+    }
+    let plane = if v == StmtOutcome::BError {
+        "b_error"
+    } else {
+        kind.as_str()
+    };
+    match ledger.rule("integrationtest", test, sql, plane, detail) {
+        Some(hit) if hit.approved => (StmtOutcome::Ruled, hit.kind(&kind)),
+        Some(hit) => (v, hit.kind(&kind)),
+        None => (v, kind),
     }
 }
 
@@ -389,6 +390,8 @@ struct Runner<'a> {
     /// B's route trace and the census records so far.
     probe: &'a RouteProbe,
     census: Vec<Record>,
+    /// The divergence ledger: mismatches it covers become `ruled:<id>`.
+    ledger: &'a mut Ledger,
 }
 
 /// One statement's record.
@@ -447,6 +450,7 @@ impl Runner<'_> {
             r.verdict,
             StmtOutcome::Match
                 | StmtOutcome::Mismatch
+                | StmtOutcome::Ruled
                 | StmtOutcome::Unsupported
                 | StmtOutcome::BError
         ) {
@@ -891,13 +895,17 @@ impl Runner<'_> {
                         (v, kind, detail) = judge(&class, obs_a, obs_b, Some(rows), false);
                     }
                 }
+                let (v, kind) = apply_ledger(self.ledger, test, sql, v, kind, &detail);
                 let kind = if out.kind.is_empty() {
                     kind
                 } else {
                     format!("{kind} retried")
                 };
                 let ordered = class.to_string();
-                if matches!(v, StmtOutcome::Mismatch | StmtOutcome::BError) {
+                if matches!(
+                    v,
+                    StmtOutcome::Mismatch | StmtOutcome::BError | StmtOutcome::Ruled
+                ) {
                     let rec = json!({
                         "file": test,
                         "line": line,
@@ -962,7 +970,7 @@ impl Owned {
     }
 }
 
-const FILE_COLUMNS: &str = "file\tstatements\treads\tmatch\tmismatch\tunsupported\tb_error\ta_error\tskipped\twrite\tb_set_rejected\tretried\tseconds";
+const FILE_COLUMNS: &str = "file\tstatements\treads\tmatch\tmismatch\tunsupported\tb_error\ta_error\tskipped\twrite\tb_set_rejected\tretried\tseconds\truled";
 
 /// The statements (line, text) of a test file, as the runner sees them.
 fn file_queries(dir: &Path, test: &str) -> Result<Vec<(usize, String)>, String> {
@@ -984,6 +992,7 @@ pub async fn run(
     opts: &Options,
     probe: &RouteProbe,
     census: &mut Census,
+    ledger: &mut Ledger,
 ) -> Result<bool, String> {
     let mut tests = list_tests(&opts.dir)?;
     if !opts.only.is_empty() {
@@ -1044,6 +1053,7 @@ pub async fn run(
         totals: FileCounts::default(),
         probe,
         census: Vec::new(),
+        ledger,
     };
     let started = Instant::now();
     let n = tests.len();
@@ -1064,7 +1074,7 @@ pub async fn run(
         let secs = t0.elapsed().as_secs_f64();
         let _ = writeln!(
             r.w.files,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}",
             t,
             c.statements,
             c.reads,
@@ -1077,19 +1087,21 @@ pub async fn run(
             c.get("write"),
             c.b_set_rejected,
             c.retried,
-            secs
+            secs,
+            c.get("ruled"),
         );
         let _ = r.w.files.flush();
         let _ = r.w.statements.flush();
         let _ = r.w.mismatches.flush();
         let _ = r.w.results.flush();
         println!(
-            "[{}/{n}] {t}: {} stmts, {} reads: match {} mismatch {} unsupported {} b_error {} a_error {} skipped {} ({secs:.1}s)",
+            "[{}/{n}] {t}: {} stmts, {} reads: match {} mismatch {} ruled {} unsupported {} b_error {} a_error {} skipped {} ({secs:.1}s)",
             i + 1,
             c.statements,
             c.reads,
             c.get("match"),
             c.get("mismatch"),
+            c.get("ruled"),
             c.get("unsupported"),
             c.get("b_error"),
             c.get("a_error"),
@@ -1140,11 +1152,12 @@ pub async fn run(
     r.admin.disconnect().await;
     let t = &r.totals;
     println!(
-        "TOTAL {n} files, {} statements, {} reads: match {} mismatch {} unsupported {} b_error {} | a_error {} skipped {} write {} | B rejected {} session statements, {} schema-lag retries; {:.0}s",
+        "TOTAL {n} files, {} statements, {} reads: match {} mismatch {} ruled {} unsupported {} b_error {} | a_error {} skipped {} write {} | B rejected {} session statements, {} schema-lag retries; {:.0}s",
         t.statements,
         t.reads,
         t.get("match"),
         t.get("mismatch"),
+        t.get("ruled"),
         t.get("unsupported"),
         t.get("b_error"),
         t.get("a_error"),
@@ -1298,6 +1311,61 @@ mod tests {
         };
         let (v, k, _) = j(&rows(&["1"]), &w, false, false);
         assert_eq!((v, k.as_str()), (StmtOutcome::Mismatch, "warnings"));
+    }
+
+    #[test]
+    fn ledger_rules_reads() {
+        let mut l = Ledger::parse(
+            "[[ruling]]\nid = \"R1\"\nplane = \"error\"\nlayer = \"integrationtest\"\n\
+             unit = '^t$'\nstmt = '^select 1$'\napprover = \"zhigang-du\"\n\
+             [[ruling]]\nid = \"R2\"\nplane = \"columns\"\nlayer = \"integrationtest\"\n\
+             unit = '^t$'\nstmt = '^select 2$'\napprover = \"pending-owner\"\n\
+             [[ruling]]\nid = \"R3\"\nplane = \"b_error\"\nlayer = \"integrationtest\"\n\
+             unit = '^t$'\nstmt = '^select 3$'\ndetail = 'Unknown'\napprover = \"zhigang-du\"\n",
+        )
+        .unwrap();
+        let mut a = |sql: &str, v: StmtOutcome, kind: &str, detail: &str| {
+            apply_ledger(&mut l, "t", sql, v, kind.to_string(), detail)
+        };
+        // Approved: ruled, still not a match.
+        assert_eq!(
+            a("select 1", StmtOutcome::Mismatch, "error", ""),
+            (StmtOutcome::Ruled, "ruled:R1".to_string())
+        );
+        // Pending: suppresses nothing, but names itself.
+        assert_eq!(
+            a("select 2", StmtOutcome::Mismatch, "columns", ""),
+            (
+                StmtOutcome::Mismatch,
+                "columns (pending ruling R2)".to_string()
+            )
+        );
+        // Another plane: not covered.
+        assert_eq!(
+            a("select 1", StmtOutcome::Mismatch, "rows", "").0,
+            StmtOutcome::Mismatch
+        );
+        // b_error, by message.
+        assert_eq!(
+            a(
+                "select 3",
+                StmtOutcome::BError,
+                "1193",
+                "Unknown system variable"
+            )
+            .0,
+            StmtOutcome::Ruled
+        );
+        assert_eq!(
+            a("select 3", StmtOutcome::BError, "1105", "other").0,
+            StmtOutcome::BError
+        );
+        // A match is never touched.
+        assert_eq!(
+            a("select 1", StmtOutcome::Match, "", "").0,
+            StmtOutcome::Match
+        );
+        assert_eq!((l.hits("R1"), l.hits("R2"), l.hits("R3")), (1, 1, 1));
     }
 
     #[test]

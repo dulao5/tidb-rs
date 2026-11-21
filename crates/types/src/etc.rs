@@ -203,7 +203,7 @@ pub fn is_type_temporal(tp: u8) -> bool {
 
 /// `opcode.Op.String()` (the `name` of Go's `ops` table) for the operators the parser has.
 // glue: opcode.Op.String (pkg/parser/opcode)
-fn op_name(o: tidb_parser::ast::Op) -> &'static str {
+pub fn op_name(o: tidb_parser::ast::Op) -> &'static str {
     use tidb_parser::ast::Op::*;
     match o {
         LogicAnd => "and",

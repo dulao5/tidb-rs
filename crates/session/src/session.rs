@@ -1357,8 +1357,9 @@ impl Session {
     /// The statement itself is prepared by `executor.NewPrepareExec` (D12.12), which builds
     /// the plan-cache statement (`PlanCacheStmt`, D13.1). Its preprocessor and plan builder
     /// are not complete yet: a statement on a table stops at the InfoSchema interface
-    /// (`blocked-by:D06.3`, VS1-17) and every SELECT at `PlanBuilder.Build`
-    /// (`blocked-by:D09.1`, VS1-21); the router then restores the session (spec §6.2) and the
+    /// (`blocked-by:D06.3`, VS1-17) and every SELECT at `PlanBuilder.Build`, which needs the
+    /// planning context of the optimizer driver (`blocked-by:D09.13`, VS1-24); the router
+    /// then restores the session (spec §6.2) and the
     /// PoC owns the statement.
     ///
     /// The prepare dedup cache (`tidb_enable_cache_prepare_stmt`) keeps `PlanCacheStmt`s for

@@ -14,7 +14,9 @@
 | 新栈 strict 轮（weekly ab 部分对 `--new-stack=strict` 的 tidb-rs） | 同上，B 换成 strict 实例 | 同上 |
 
 任何测试层都不得自己写"差不多就算一样"的判断。要放宽，只能在 `docs/testing/tolerances.toml`
-加一条有编号的容差条目（§6），并在比较器中实现。govec 向量回放比较的是函数级输出，不属于本规格。
+加一条有编号的容差条目（§6），并在比较器中实现。逐条接受的已知差异写进偏差台账
+（`docs/testing/rulings.toml`，规格 `rulings.md`）：被已批准的裁定覆盖的不一致记为 `ruled:<id>`，
+仍然不算一致（§8）。govec 向量回放比较的是函数级输出，不属于本规格。
 
 ## 2. 语句分类
 
@@ -106,7 +108,7 @@ mysqltest 指令 `--sorted_result` 使下一条语句按 unordered 比较（带 
 ## 6. 容差条目
 
 所有放宽写在 `docs/testing/tolerances.toml`，每条有编号（T1、T2……）、名称、适用范围、规则、理由与
-日期，格式与偏差台账（#262）共用。比较器中的 `TOLERANCES` 与该文件逐条一致（单元测试
+日期，字段习惯与偏差台账（`rulings.toml`，#262）相同；两者不合并，区别见 `rulings.md` §1。比较器中的 `TOLERANCES` 与该文件逐条一致（单元测试
 `tolerances_match_the_ledger` 校验）。当前条目：
 
 | 编号 | 名称 | 规则摘要 |
@@ -131,4 +133,5 @@ limited、错误、warning）至少有一个判为一致的用例和一个**必�
 | `match` | 一致 | 是 |
 | `both_error` | 两边同一错误（码 + SQLSTATE + 消息） | 是 |
 | `unsupported` | B 返回"尚未实现"的 1235（T1） | 否 |
+| `ruled` | 不一致，但被偏差台账中已批准的裁定覆盖（kind `ruled:<id>`，`rulings.md` §3）；仍计数、仍列出差异 | 否 |
 | `mismatch` | 不一致；integrationtest 的 kind 为 rows / order / columns / metadata / error / warnings / affected_rows / shape | 否 |
