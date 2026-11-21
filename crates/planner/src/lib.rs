@@ -39,7 +39,7 @@ pub mod util;
 mod idiom_tests;
 
 pub use arena::{PlanArena, PlanId, with_detached};
-pub use base::{LogicalKind, LogicalPlan, PhysicalKind, PhysicalPlan};
+pub use base::{LogicalKind, LogicalOptRule, LogicalPlan, PhysicalKind, PhysicalPlan, ReplaceMap};
 pub use physicalop::{PhysicalPlanRef, make_mut_plan, map_children};
 pub use planctx::PlanCtx;
 /// For [`physical_plan_boilerplate!`].

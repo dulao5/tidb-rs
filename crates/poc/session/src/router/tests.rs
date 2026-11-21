@@ -691,6 +691,49 @@ fn fallback_restores_the_new_session() {
     }
 }
 
+/// The route trace (#260): every routing decision of the connection, with its engine and
+/// reason; a statement that never reaches routing leaves it unchanged.
+#[test]
+fn route_trace_records_each_statement() {
+    super::trace::enable();
+    let conn = 7_000_001;
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    r.set_connection_id(conn);
+    script.lock().unwrap().answer = Some(Answer::Rows);
+    block_on(r.query(&mut p, POINT)).unwrap();
+    assert_eq!(
+        super::trace::get(conn),
+        super::trace::Last {
+            seq: 1,
+            engine: "new",
+            reason: "ok".into()
+        }
+    );
+    script.lock().unwrap().answer = Some(Answer::Blocked("D05.3"));
+    block_on(r.query(&mut p, POINT)).unwrap();
+    assert_eq!(
+        super::trace::get(conn),
+        super::trace::Last {
+            seq: 2,
+            engine: "poc",
+            reason: "D05.3".into()
+        }
+    );
+    block_on(r.query(&mut p, "SET NAMES latin1")).unwrap();
+    assert_eq!(
+        super::trace::get(conn),
+        super::trace::Last {
+            seq: 3,
+            engine: "poc",
+            reason: "kind".into()
+        }
+    );
+    // A parse error never reaches routing.
+    assert!(block_on(r.query(&mut p, "SELEKT 1")).is_err());
+    assert_eq!(super::trace::get(conn).seq, 3);
+}
+
 /// The real session: every candidate reaches `Compile`, whose planner is `blocked-by:D09.13`;
 /// `fallback` falls back with the session unchanged, `strict` returns the 1235 error.
 #[test]
@@ -1154,9 +1197,9 @@ fn real_prepare_is_blocked_and_restored() {
 }
 
 /// Where a real PREPARE of [`POINT`] stops on the new session: the preprocessor finds the
-/// table, takes its metadata lock and resolves it; the plan builder (`buildSelect`, D09.1)
-/// is next.
-const REAL_PREPARE_BLOCK: &str = "D09.1";
+/// table, takes its metadata lock and resolves it; the plan builder is next, which needs the
+/// planning context the optimizer driver sets up (D09.13).
+const REAL_PREPARE_BLOCK: &str = "D09.13";
 
 /// Where a real EXECUTE of [`POINT`] stops on the new session: the session hands the
 /// statement to `ExecuteStmt` as an EXECUTE node, `ResetContextOfStmt` reads the prepared

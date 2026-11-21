@@ -4020,6 +4020,7 @@ dependencies = [
  "tidb-parser",
  "tidb-sessionctx",
  "tidb-statistics",
+ "tidb-store",
  "tidb-tablecodec",
  "tidb-types",
  "tipb",

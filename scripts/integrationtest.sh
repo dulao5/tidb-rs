@@ -3,13 +3,17 @@
 # end to end: build, start a tiup playground, join tidb-rs, run `ab integrationtest`, tear down.
 #
 #   scripts/integrationtest.sh [-t tag] [-o port-offset] [-v version] [-d tests-dir] [-O out-dir]
-#                              [-k] [-- test names or prefixes...]
+#                              [-n off|fallback|strict] [-k] [-- test names or prefixes...]
 #
 #   -d  tests/integrationtest/t of a TiDB tree (default: $TIDB_SRC/tests/integrationtest/t;
 #       TIDB_SRC defaults to the reference tree of tidb-reference.lock, scripts/tidb-reference.sh,
 #       and a given TIDB_SRC must match the lock too)
 #   -O  output directory (default target/integrationtest): statements.tsv, files.tsv,
 #       mismatches.jsonl, run.tsv, ab.log, tidb-rs.log
+#   -n  tidb-rs --new-stack mode (default fallback). tidb-rs runs with --route-trace, and ab writes
+#       the coverage census (census.tsv, census-summary.tsv, census-reasons.tsv; see
+#       docs/testing/coverage-census.md): an incomplete census or a negative control that passes
+#       fails the run (ab exit 3)
 #   -k  keep the playground and tidb-rs running afterwards (default: stop and clean them)
 #
 # Defaults: tag maya-it, offset 25000, version v8.5.8. Ports: Go TiDB 4000+offset, tidb-rs
@@ -32,13 +36,15 @@ fi
 tests_dir=
 out=$repo/target/integrationtest
 keep=0
-while getopts "t:o:v:d:O:k" opt; do
+new_stack=fallback
+while getopts "t:o:v:d:O:n:k" opt; do
     case $opt in
         t) tag=$OPTARG ;;
         o) offset=$OPTARG ;;
         v) version=$OPTARG ;;
         d) tests_dir=$OPTARG ;;
         O) out=$OPTARG ;;
+        n) new_stack=$OPTARG ;;
         k) keep=1 ;;
         *) sed -n '2,20p' "$0" >&2; exit 2 ;;
     esac
@@ -62,6 +68,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The TiDB commit the test files come from. The default directory is in the reference tree, which
+# tidb-reference.sh verified against the lock: its commit is the lock's. `git -C <dir> rev-parse`
+# would name the commit of whatever repository encloses the tree (e.g. a dotfiles repo holding
+# ~/.cache). A -d directory counts only if it is tests/integrationtest/t of its own git checkout.
+tests_commit() {
+    if [ "$tests_dir" -ef "$tidb_src/tests/integrationtest/t" ]; then
+        sed -n 's/^commit=//p' "$repo/tidb-reference.lock"
+    elif [ "$(git -C "$tests_dir" rev-parse --show-toplevel 2>/dev/null)/tests/integrationtest/t" -ef \
+        "$tests_dir" ]; then
+        git -C "$tests_dir" rev-parse HEAD
+    else
+        echo unknown
+    fi
+}
+
 # Recorded before the run, so later edits to the checkout do not change it.
 commit=$(git -C "$repo" rev-parse HEAD)
 dirty=$(git -C "$repo" status --porcelain --untracked-files=no | grep -q . && echo yes || echo no)
@@ -76,14 +97,15 @@ echo "== playground $tag (offset $offset)"
 mysql -h 127.0.0.1 -P "$a_port" -u root -e \
     "SET GLOBAL tidb_ddl_enable_fast_reorg = OFF; SET GLOBAL tidb_enable_dist_task = OFF"
 
-echo "== tidb-rs on $b_port"
-"$repo/scripts/playground-join.sh" start -t "$tag" -P "$b_port" -s "$b_status"
+echo "== tidb-rs on $b_port (--new-stack=$new_stack)"
+"$repo/scripts/playground-join.sh" start -t "$tag" -P "$b_port" -s "$b_status" \
+    -- --new-stack="$new_stack" --route-trace
 
 echo "== ab integrationtest ($tests_dir) -> $out"
 start=$(date +%s)
 set +e
 "$repo/target/release/ab" -a "127.0.0.1:$a_port" -b "127.0.0.1:$b_port" --timeout 60 \
-    --out-dir "$out" integrationtest --dir "$tests_dir" "$@" 2>&1 | tee "$out/ab.log"
+    --b-status "127.0.0.1:$b_status" --out-dir "$out" integrationtest --dir "$tests_dir" "$@" 2>&1 | tee "$out/ab.log"
 status=${PIPESTATUS[0]}
 set -e
 seconds=$(( $(date +%s) - start ))
@@ -97,13 +119,14 @@ tidb_version=$(mysql -h 127.0.0.1 -P "$a_port" -u root -N -e 'SELECT version()' 
     printf 'tidb_rs_commit\t%s\n' "$commit"
     printf 'tidb_rs_dirty\t%s\n' "$dirty"
     printf 'tidb_version\t%s\n' "${tidb_version:-$version}"
-    printf 'tests_commit\t%s\n' "$(git -C "$tests_dir" rev-parse HEAD 2>/dev/null ||
-        cut -d' ' -f3 "$tidb_src/.tidb-reference-stamp" 2>/dev/null || echo unknown)"
+    printf 'tests_commit\t%s\n' "$(tests_commit)"
     printf 'date\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'runner\t%s\n' "$(uname -sm) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -n)"
     printf 'seconds\t%s\n' "$seconds"
     printf 'tidb_rs_alive_at_end\t%s\n' "$b_alive"
+    printf 'new_stack\t%s\n' "$new_stack"
 } >"$out/run.tsv"
 echo "== done in ${seconds}s (ab exit $status, tidb-rs alive at end: $b_alive); output in $out"
-# ab exits 1 when there are mismatches; that is a result, not a failure of the run.
+# ab exits 1 when there are mismatches; that is a result, not a failure of the run. 3: the
+# census is incomplete or the negative control passed (the gate itself failed).
 [ "$status" -le 1 ]

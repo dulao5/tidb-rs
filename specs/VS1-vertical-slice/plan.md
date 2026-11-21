@@ -493,6 +493,23 @@ VS1-00 → VS1-01 → VS1-10 → VS1-21 → VS1-24 ┐
    - 切换时，每周构建的性能基线随之改为新栈；切换那一周的 REGRESSED 视为预期。
    - **评审：同意**。待负责人确认。
 
+## 11. M-FT 审计（VS1-23：逻辑算子和基本逻辑规则）
+
+按 D09.7 试点报告附录 A / B 的方法，逐个检查 VS1-23 移植的代码中 Go 经共享指针原地写的地方（`*FieldType`、`*Schema`、`*Column`、`*ScalarFunction` 的参数、`*ByItems`）。M-FT 的方案 (a)：Rust 默认写时复制；只有当 Go 的共享会改变计划可见的结果时才显式模拟。结论：**在 VS1 的规则顺序和算子范围内，没有一处共享写对计划可见**，全部按写时复制处理。govec `logicalrules` 在每一步之后比较所有列和表达式的类型（含 flag），6,630 步与 Go 相同（spec D09.14 §5）。
+
+| # | Go 位置 | 共享了什么 | Go 中是否可见 | Rust |
+|---|---|---|---|---|
+| 1 | `ProjectionEliminator.eliminate`：`foldedExpr.GetType().SetFlag(...)` | 折叠后的表达式可能就是子投影的表达式，即与 DataSource schema 共享的 `*Column` 和它的 `RetType` | 否：共享时 `foldedExpr` 与 `proj.Exprs[i]` 是同一个节点，写入的 NotNull 位与原值相同，是空写；真正改变 flag 时表达式是折叠出的新节点 | flag 不同时才写，写时复制节点和类型（`set_ret_type_flag`） |
+| 2 | `ReplaceColumnOfExpr`、`ResolveExprAndReplace`：`v.GetArgs()[i] = ...` | 函数节点可能被多个算子引用 | 否：投影消除在谓词下推之前运行，此时条件和投影表达式还没有被分到多个算子；被删除的子投影不再在树中 | 只有参数真的变化时才复制节点（`Arc::make_mut`） |
+| 3 | `resolveColumnAndReplace`：`newCol.RetType = origin.RetType` | 新列与原列共享 `*FieldType` | 否：之后只有第 1 条会写类型，且是空写 | 共享 `Arc<FieldType>`，写时复制 |
+| 4 | `LogicalProjection.PushDownTopN`：`by.Expr = substituted` | `LogicalSort.PushDownTopN` 中 `topN.ByItems = ls.ByItems` 让 TopN 与 Sort 共享 `*ByItems` | 否：此时 Sort 已经离开计划树 | TopN 持有自己的 `Vec<ByItems>` |
+| 5 | `Conds2TableDual`：`dual.SetSchema(p.Schema())` | dual 与被替换的子节点共享 `*Schema`；之后 `LogicalTableDual.PruneColumns` 改写它的 `Columns` | 否：被替换的子节点已离开计划树 | dual 拿一份复制 |
+| 6 | `DataSource.PruneColumns`：`originSchemaColumns := ds.Schema().Columns`，随后原地 `append(s[:i], s[i+1:]...)` | 同一个底层数组 | 否：只在所有列都被删掉时读，此时从尾部删除不移动元素 | 复制一份 |
+| 7 | `LogicalProjection.PruneColumns`（子节点是 dual 时）：新列的 `RetType` 是常量的 `*FieldType` | 列与常量 0 共享类型 | 否：之后没有规则写它 | 复制 |
+| 8 | `LogicalLimit.PruneColumns`：`SetSchema(nil)` 后 `Schema()` 克隆子节点的 schema | `Schema.Clone` 是浅复制，`*Column` 共享 | 否：只删除自己切片中的元素 | `clone_schema`，共享 `Arc<Column>` |
+| 9 | `DataSource.PredicatePushDown`：`AllConds` 与 `PushedDownConds` 引用同一批表达式 | 表达式节点 | 否：之后的谓词简化建新节点，不原地改 | 共享 `ExprRef` |
+| 10 | `LogicalProjection.AppendExpr`：`DelFlag(ParseToJSONFlag)` | 无：写的是刚 `Clone` 的类型 | 否 | 新建的 `Arc<FieldType>` 上写 |
+
 ## 附录 A：每个块的 VS1 函数数
 
 | 工作项 | 块 | 函数数 | Go 行 |
@@ -507,13 +524,13 @@ VS1-00 → VS1-01 → VS1-10 → VS1-21 → VS1-24 ┐
 | VS1-17 | D06.5（另加 D06.3 第 2 部分约 600 行，未计入清单） | 36 | 820 |
 | VS1-18 | D07.1 | 40 | 591 |
 | VS1-19 | D10.1、D10.10 | 189 | 1,709 |
-| VS1-21 | D09.1、D09.4 | 49 | 2,293 |
+| VS1-21 | D09.1、D09.4、D10.2（访问路径 9 个，从 VS1-28 移来） | 58 | 2,661 |
 | VS1-22 | D09.2 | 53 | 1,789 |
 | VS1-23 | D09.7、D09.8、D09.11、D09.14 | 177 | 2,647 |
 | VS1-24 | D09.13、D13.3 | 95 | 2,171 |
 | VS1-25 | D10.4 | 95 | 3,309 |
 | VS1-27 | D10.1、D10.3 | 132 | 2,198 |
-| VS1-28 | D10.2 | 98 | 3,127 |
+| VS1-28 | D10.2 | 89 | 2,759 |
 | VS1-29 | D10.6、D11.1 | 140 | 2,922 |
 | VS1-30 | D10.5 | 32 | 641 |
 | VS1-31 | D10.9 | 36 | 663 |

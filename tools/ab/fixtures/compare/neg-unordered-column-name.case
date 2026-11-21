@@ -1,0 +1,11 @@
+# Column metadata is part of the answer.
+sql: SELECT a AS x FROM t
+cols: x=a
+b_cols: a
+class: unordered
+verdict: mismatch
+diff: col[0].name
+[a]
+1
+[b]
+1

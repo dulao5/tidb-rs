@@ -1,0 +1,11 @@
+# Stricter reading: even if `a` ties, b's order must be A's.
+sql: SELECT b FROM t ORDER BY a + 1
+cols: b
+class: exact
+verdict: mismatch
+[a]
+y
+x
+[b]
+x
+y

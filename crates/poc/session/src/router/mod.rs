@@ -41,6 +41,7 @@ mod precheck;
 pub mod sync;
 #[cfg(test)]
 mod tests;
+pub mod trace;
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
@@ -298,6 +299,8 @@ pub struct Router {
     closed: Vec<u32>,
     /// A statement ran (on either engine) since the last transaction-end check.
     stmt_ended: bool,
+    /// The connection's id, for the route trace ([`trace`]).
+    conn_id: u64,
 }
 
 /// A new-stack error as the client sees it (Go's code and message).
@@ -320,11 +323,6 @@ fn nothing_to_fall_back(why: &str) -> SqlError {
 /// The `engine` label of a statement that ran nowhere (1235 in `strict` mode, or a
 /// new-only prepared statement the new stack cannot run now).
 const NOWHERE: &str = "none";
-
-/// `tidbrs_route_total`.
-fn count(engine: Engine, reason: &str) {
-    tidb_metrics::route(engine.label(), reason);
-}
 
 /// §4.7: a fallback's result set must carry exactly the column definitions sent at PREPARE.
 fn check_columns(prepared: &[ColumnDef], resp: &Response) -> Result<(), SqlError> {
@@ -363,6 +361,7 @@ impl Router {
             raw_params: RawParams::default(),
             closed: Vec::new(),
             stmt_ended: false,
+            conn_id: 0,
         };
         let names = [tidb_sql::ir::SetAssignment::Names {
             charset: None,
@@ -372,6 +371,17 @@ impl Router {
         sync::sync_set(vars, &mut r.diverged, &names, poc);
         sync::sync_db(vars, poc);
         r
+    }
+
+    /// The connection's id (the route trace records under it).
+    pub fn set_connection_id(&mut self, id: u64) {
+        self.conn_id = id;
+    }
+
+    /// A routing decision: `tidbrs_route_total{engine, reason}` and the route trace.
+    fn note(&self, engine: &'static str, reason: &str) {
+        tidb_metrics::route(engine, reason);
+        trace::record(self.conn_id, engine, reason);
     }
 
     /// The mode.
@@ -506,9 +516,9 @@ impl Router {
             );
             let label = Reason::NotIdle.label();
             if fallback {
-                count(Engine::Poc, label);
+                self.note(Engine::Poc.label(), label);
             } else {
-                tidb_metrics::route(NOWHERE, label);
+                self.note(NOWHERE, label);
             }
             return Err(NotRun::NotIdle);
         }
@@ -522,7 +532,7 @@ impl Router {
             Ok(resp) => {
                 drop(cp);
                 self.finish_new();
-                count(Engine::New, "ok");
+                self.note(Engine::New.label(), "ok");
                 Ok(Ok(resp))
             }
             Err(e) => match blocked_by(&e) {
@@ -535,7 +545,7 @@ impl Router {
                     log::error!(
                         "VS1 router bug: blocked-by:{block} after the new stack's executors opened"
                     );
-                    tidb_metrics::route(Engine::New.label(), "bug_blocked_after_open");
+                    self.note(Engine::New.label(), "bug_blocked_after_open");
                     drop(cp);
                     self.finish_new();
                     Ok(Err(sql_error(&e)))
@@ -544,20 +554,20 @@ impl Router {
                     let block = block.to_owned();
                     if let Err(e) = self.new.session_mut().restore(cp) {
                         // Checked idle above: a bug of the checkpoint.
-                        count(Engine::New, "error");
+                        self.note(Engine::New.label(), "error");
                         return Err(NotRun::Unrestorable(SqlError::unknown(e.to_string())));
                     }
                     if fallback {
-                        count(Engine::Poc, &block);
+                        self.note(Engine::Poc.label(), &block);
                     } else {
-                        tidb_metrics::route(NOWHERE, &block);
+                        self.note(NOWHERE, &block);
                     }
                     Err(NotRun::Blocked(block))
                 }
                 None => {
                     drop(cp);
                     self.finish_new();
-                    count(Engine::New, "error");
+                    self.note(Engine::New.label(), "error");
                     Ok(Err(sql_error(&e)))
                 }
             },
@@ -649,7 +659,7 @@ impl Router {
                     }
                 }
             }
-            Route::Poc(reason) => count(Engine::Poc, reason.label()),
+            Route::Poc(reason) => self.note(Engine::Poc.label(), reason.label()),
         }
         let lowered = match tidb_sql::ir::lower_statement(&stmt, sql) {
             Ok(l) => l,
@@ -782,7 +792,7 @@ impl Router {
             None => poc.execute(stmt_id, params).await,
             Some(Owner::Poc(reason)) => match reason {
                 Reason::Blocked(block) if self.mode == NewStackMode::Strict => {
-                    tidb_metrics::route(NOWHERE, &block);
+                    self.note(NOWHERE, &block);
                     self.cursor = false;
                     return self.fail(sql_error(&tidb_base::blocked::blocked(
                         &block,
@@ -790,16 +800,16 @@ impl Router {
                     )));
                 }
                 reason => {
-                    count(Engine::Poc, reason.label());
+                    self.note(Engine::Poc.label(), reason.label());
                     poc.execute(stmt_id, params).await
                 }
             },
             Some(Owner::Both { new_id, columns }) => {
                 if let Some(c) = self.session_condition(poc) {
-                    count(Engine::Poc, Reason::Session(c).label());
+                    self.note(Engine::Poc.label(), Reason::Session(c).label());
                     poc.execute(stmt_id, params).await
                 } else if !self.schema_versions_equal(poc) {
-                    count(Engine::Poc, Reason::SchemaVersion.label());
+                    self.note(Engine::Poc.label(), Reason::SchemaVersion.label());
                     poc.execute(stmt_id, params).await
                 } else {
                     // The statement is started (metrics) only once it is known which engine
@@ -848,7 +858,7 @@ impl Router {
                 };
                 self.cursor = false;
                 if let Some(why) = why {
-                    tidb_metrics::route(NOWHERE, "session");
+                    self.note(NOWHERE, "session");
                     return self.fail(nothing_to_fall_back(&why));
                 }
                 poc.begin_command();

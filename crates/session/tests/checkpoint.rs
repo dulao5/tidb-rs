@@ -141,8 +141,8 @@ fn restore_undoes_all_groups_together() {
 }
 
 /// The session plans nothing yet: `ExecuteStmt` reaches `Compile`, whose planner is a
-/// boundary stub; `PrepareStmt` runs the prepare executor up to the plan builder (D09.1,
-/// `buildSelect`), and rolls its transaction back (Go's `rollbackOnError`).
+/// boundary stub; `PrepareStmt` runs the prepare executor up to the plan builder (its
+/// planning context, D09.13), and rolls its transaction back (Go's `rollbackOnError`).
 #[test]
 fn statement_paths_are_blocked() {
     let mut s = session();
@@ -157,7 +157,7 @@ fn statement_paths_are_blocked() {
     }));
     assert_eq!(got.and_then(block), Some("D09.13".to_owned()));
     let got = block_on(Box::pin(async { s.prepare_stmt("SELECT 1").await.err() }));
-    assert_eq!(got.and_then(block), Some("D09.1".to_owned()));
+    assert_eq!(got.and_then(block), Some("D09.13".to_owned()));
     assert!(s.is_idle());
     assert_eq!(s.dialect(), Dialect::MySQL);
     assert!(s.is_autocommit() && !s.in_txn() && s.current_db().is_empty());

@@ -1,0 +1,9 @@
+# A also answers 1235: both errors compare in full, even with the stub marker on B.
+sql: SELECT a FROM t
+class: unordered
+verdict: mismatch
+diff: error: message
+[a_error]
+1235|42000|This version of TiDB doesn't yet support 'this feature'
+[b_error]
+1235|42000|This version of TiDB doesn't yet support 'x (blocked-by:D09.1)'

@@ -1,0 +1,13 @@
+# --sorted_result makes even SHOW unordered.
+sql: SHOW TABLES
+cols: Tables_in_test
+sorted: yes
+tolerance: T2
+class: unordered
+verdict: match
+[a]
+t1
+t2
+[b]
+t2
+t1

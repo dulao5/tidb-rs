@@ -130,6 +130,11 @@ struct Args {
     /// TIDB_RS_NEW_STACK, when set, overrides this flag.
     #[arg(long, default_value = "off", value_parser = ["off", "fallback", "strict"])]
     new_stack: String,
+    /// Record which engine ran each connection's last statement and serve it on the status
+    /// port as `GET /debug/route?conn=<id>` (the test harness's coverage census, #260; off by
+    /// default). TIDB_RS_ROUTE_TRACE=1 turns it on too.
+    #[arg(long)]
+    route_trace: bool,
     /// Log level: error, warn, info, debug or trace.
     #[arg(long, default_value = "info")]
     log_level: tracing::Level,
@@ -306,6 +311,10 @@ fn main() {
         .with_new_stack(new_stack);
         if new_stack != poc_session::router::NewStackMode::Off {
             info!(mode = ?new_stack, "VS1 router on: VS1-shaped SELECTs go to the new stack");
+        }
+        if args.route_trace || std::env::var("TIDB_RS_ROUTE_TRACE").is_ok_and(|v| v == "1") {
+            poc_session::router::trace::enable();
+            info!("route trace on: GET /debug/route?conn=<id> on the status port");
         }
         if args.stmt_timing > 0 {
             poc_session::timing::set_enabled(true);

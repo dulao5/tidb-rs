@@ -1,0 +1,7 @@
+sql: SELECT a FROM t
+class: unordered
+verdict: both_error
+[a_error]
+1235|42000|This version of TiDB doesn't yet support 'this feature'
+[b_error]
+1235|42000|This version of TiDB doesn't yet support 'this feature'

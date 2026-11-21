@@ -1,0 +1,9 @@
+# Same code and SQLSTATE, another message: different.
+sql: SELECT * FROM nope
+class: unordered
+verdict: mismatch
+diff: error: message
+[a_error]
+1146|42S02|Table 'test.nope' doesn't exist
+[b_error]
+1146|42S02|table not found

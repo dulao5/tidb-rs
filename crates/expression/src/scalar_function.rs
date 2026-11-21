@@ -950,9 +950,17 @@ fn new_function_impl_inner(
     }
 
     let Some(fc) = function_class(func_name) else {
-        return Err(Error::plain(format!(
-            "the function class of {func_name} is not ported yet"
-        )));
+        // glue: blocked-by the block of the class (a built-in function family not ported yet, VS1 plan §3.2)
+        let class = lookup(func_name).map_or("", |e| e.class);
+        return Err(match crate::builtin_registry_blocks::class_block(class) {
+            Some(block) => tidb_base::blocked::blocked(
+                block,
+                &format!("the built-in function {func_name} ({class})"),
+            ),
+            None => Error::plain(format!(
+                "the function class of {func_name} is not ported yet"
+            )),
+        });
     };
     let mut f = fc.get_function(ctx, func_args)?;
     // §3.2: no v8.5.8 signature has a TypeUnspecified type, so the node's type and the

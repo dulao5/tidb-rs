@@ -4,11 +4,13 @@
 
 #![forbid(unsafe_code)]
 
+mod census;
 mod compare;
 mod exec;
 mod integration;
 mod mysqltest;
 mod rng;
+mod rulings;
 mod sql;
 mod workload;
 
@@ -22,10 +24,13 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use serde_json::{Value as Json, json};
 
+use crate::census::{Census, CensusPath, Control, Record, RouteProbe};
 use crate::compare::{
-    Verdict, charset_name, compare, execute_metadata_diffs, flag_names, prepare_diffs, type_name,
+    Observed, Verdict, charset_name, classify, compare, execute_metadata_diffs, flag_names,
+    mismatch_kind, needs_warnings, prepare_diffs, strip_limit, type_name,
 };
 use crate::exec::{ColumnMeta, Outcome, PrepareMeta, Side, TlsMode};
+use crate::rulings::Ledger;
 use crate::sql::Kind;
 use crate::workload::{Case, Param, SysbenchSpec};
 
@@ -69,6 +74,23 @@ struct Cli {
     /// Print every mismatch as it happens.
     #[arg(long, short = 'v', global = true)]
     verbose: bool,
+    /// B's status address (host:port) for the coverage census: tidb-rs must run with
+    /// `--route-trace`. Without it every statement B ran is census path `error`.
+    #[arg(long, global = true)]
+    b_status: Option<String>,
+    /// Census layer name (integrationtest, workload, workload-strict, tpch; default:
+    /// integrationtest / workload by subcommand). Unknown names are refused.
+    #[arg(long, global = true)]
+    census_layer: Option<String>,
+    /// Fault injection proving the gate goes red: drop-census-record, skip-negative-control,
+    /// untampered-negative-control.
+    #[arg(long, global = true, hide = true)]
+    gate_fault: Vec<String>,
+    /// The divergence ledger (default: docs/testing/rulings.toml as built into this binary).
+    /// Mismatches an approved ruling covers are `ruled:<id>`; hit counts go to
+    /// rulings-hits.tsv in --out-dir.
+    #[arg(long, global = true)]
+    rulings: Option<PathBuf>,
     #[command(subcommand)]
     workload: Workload,
 }
@@ -126,6 +148,7 @@ enum Workload {
 struct Counts {
     matched: u64,
     mismatch: u64,
+    ruled: u64,
     unsupported: u64,
     both_error: u64,
 }
@@ -137,16 +160,18 @@ impl Counts {
             Verdict::BothError => self.both_error += 1,
             Verdict::Unsupported => self.unsupported += 1,
             Verdict::Mismatch(_) => self.mismatch += 1,
+            Verdict::Ruled { .. } => self.ruled += 1,
         }
     }
 
     fn total(&self) -> u64 {
-        self.matched + self.mismatch + self.unsupported + self.both_error
+        self.matched + self.mismatch + self.ruled + self.unsupported + self.both_error
     }
 
     fn merge(&mut self, o: &Counts) {
         self.matched += o.matched;
         self.mismatch += o.mismatch;
+        self.ruled += o.ruled;
         self.unsupported += o.unsupported;
         self.both_error += o.both_error;
     }
@@ -162,6 +187,7 @@ struct Report {
     results: BufWriter<File>,
     report_rows: usize,
     verbose: bool,
+    ledger: Ledger,
 }
 
 fn column_json(c: &ColumnMeta) -> Json {
@@ -213,6 +239,26 @@ struct SideResult<'a> {
 }
 
 impl Report {
+    /// The divergence ledger on a mismatch: an approved ruling makes it `ruled:<id>`; a
+    /// pending one stays a mismatch with a diff line naming it.
+    fn rule(&mut self, case: &Case, query: &str, a: &Outcome, b: &Outcome, v: Verdict) -> Verdict {
+        let Verdict::Mismatch(mut diff) = v else {
+            return v;
+        };
+        let kind = mismatch_kind(a, b, &diff);
+        match self
+            .ledger
+            .rule("workload", &case.template, query, kind, &diff.join("; "))
+        {
+            Some(hit) if hit.approved => Verdict::Ruled { id: hit.id, diff },
+            Some(hit) => {
+                diff.push(hit.kind(kind));
+                Verdict::Mismatch(diff)
+            }
+            None => Verdict::Mismatch(diff),
+        }
+    }
+
     fn record(
         &mut self,
         case: &Case,
@@ -229,17 +275,26 @@ impl Report {
         writeln!(
             self.results,
             "{}",
-            json!({
-                "template": case.template,
-                "protocol": protocol,
-                "verdict": verdict.name(),
-                "query": query,
-            })
+            match verdict {
+                Verdict::Ruled { id, .. } => json!({
+                    "template": case.template,
+                    "protocol": protocol,
+                    "verdict": verdict.name(),
+                    "query": query,
+                    "ruling": id,
+                }),
+                _ => json!({
+                    "template": case.template,
+                    "protocol": protocol,
+                    "verdict": verdict.name(),
+                    "query": query,
+                }),
+            }
         )?;
         let out = match verdict {
-            Verdict::Mismatch(diff) => {
+            Verdict::Mismatch(diff) | Verdict::Ruled { diff, .. } => {
                 if self.verbose {
-                    eprintln!("MISMATCH [{protocol}] {query}");
+                    eprintln!("{} [{protocol}] {query}", verdict.name().to_uppercase());
                     for d in diff {
                         eprintln!("    {d}");
                     }
@@ -257,8 +312,13 @@ impl Report {
             "a": outcome_json(a.outcome, self.report_rows),
             "b": outcome_json(b.outcome, self.report_rows),
         });
-        if let Verdict::Mismatch(diff) = verdict {
-            rec["diff"] = json!(diff);
+        match verdict {
+            Verdict::Mismatch(diff) => rec["diff"] = json!(diff),
+            Verdict::Ruled { id, diff } => {
+                rec["diff"] = json!(diff);
+                rec["ruling"] = json!(id);
+            }
+            _ => {}
         }
         if let Some(s) = &case.source {
             rec["source"] = json!(s);
@@ -274,17 +334,18 @@ impl Report {
     fn print_summary(&self) -> Counts {
         println!();
         println!(
-            "{:<20} {:<5} {:>8} {:>8} {:>11} {:>10} {:>7}",
-            "template", "proto", "match", "mismatch", "unsupported", "both_error", "total"
+            "{:<20} {:<5} {:>8} {:>8} {:>6} {:>11} {:>10} {:>7}",
+            "template", "proto", "match", "mismatch", "ruled", "unsupported", "both_error", "total"
         );
         let mut all = Counts::default();
         for ((t, p), c) in &self.counts {
             println!(
-                "{:<20} {:<5} {:>8} {:>8} {:>11} {:>10} {:>7}",
+                "{:<20} {:<5} {:>8} {:>8} {:>6} {:>11} {:>10} {:>7}",
                 t,
                 p,
                 c.matched,
                 c.mismatch,
+                c.ruled,
                 c.unsupported,
                 c.both_error,
                 c.total()
@@ -292,11 +353,12 @@ impl Report {
             all.merge(c);
         }
         println!(
-            "{:<20} {:<5} {:>8} {:>8} {:>11} {:>10} {:>7}",
+            "{:<20} {:<5} {:>8} {:>8} {:>6} {:>11} {:>10} {:>7}",
             "TOTAL",
             "",
             all.matched,
             all.mismatch,
+            all.ruled,
             all.unsupported,
             all.both_error,
             all.total()
@@ -308,11 +370,127 @@ impl Report {
     }
 }
 
-async fn run_case(case: &Case, cli: &Cli, a: &mut Side, b: &mut Side, report: &mut Report) {
+/// How to fetch A's result without the LIMIT (spec §2.4).
+enum Rerun<'a> {
+    Text,
+    Prepared(&'a [mysql_async::Value]),
+}
+
+/// Compares through the comparator: fetches `SHOW WARNINGS` on both sides when either
+/// reports warnings, and A's result without the LIMIT when the class asks for it.
+async fn judge(
+    case: &Case,
+    sql: &str,
+    rerun: Rerun<'_>,
+    a: &mut Side,
+    b: &mut Side,
+    oa: &Outcome,
+    ob: &Outcome,
+) -> Verdict {
+    let (wa, wb) = if needs_warnings(oa, ob) {
+        (a.warnings().await, b.warnings().await)
+    } else {
+        (None, None)
+    };
+    let cols = match oa {
+        Outcome::Rows { columns, .. } => columns.as_slice(),
+        _ => &[],
+    };
+    let class = classify(sql, cols, case.sorted);
+    let (obs_a, obs_b) = (
+        Observed::new(oa, wa.as_deref()),
+        Observed::new(ob, wb.as_deref()),
+    );
+    let v = compare(&class, obs_a, obs_b, None);
+    if !matches!(v, Verdict::Mismatch(_)) || !class.wants_full() {
+        return v;
+    }
+    let Some(full_sql) = strip_limit(sql) else {
+        return v;
+    };
+    let full = match rerun {
+        Rerun::Text => a.query(&full_sql).await,
+        Rerun::Prepared(params) => a.prepared(&full_sql, params).await.1,
+    };
+    match full {
+        Outcome::Rows { rows, .. } => compare(&class, obs_a, obs_b, Some(&rows)),
+        _ => v,
+    }
+}
+
+/// The protocols a case runs with (the census expects one record per protocol).
+fn case_protocols(case: &Case, cli: &Cli) -> Vec<&'static str> {
+    if case.setup || matches!(case.kind, Kind::Other(_)) {
+        return vec!["text"];
+    }
+    let mut v = Vec::new();
+    if cli.protocol != Protocols::Ps || !case.prepared {
+        v.push("text");
+    }
+    if cli.protocol != Protocols::Text && case.prepared {
+        v.push("ps");
+    }
+    v
+}
+
+fn census_record(
+    case: &Case,
+    protocol: &'static str,
+    path: (CensusPath, String),
+    v: &str,
+) -> Record {
+    let (unit, line) = match case.source.as_deref().and_then(|s| s.rsplit_once(':')) {
+        Some((f, l)) => (f.to_string(), l.parse().unwrap_or(0)),
+        None => (case.template.clone(), 0),
+    };
+    Record {
+        unit,
+        line,
+        protocol,
+        path: path.0,
+        reason: path.1,
+        verdict: v.to_string(),
+    }
+}
+
+/// The negative control (census): the control statement on both sides, B's answer falsified,
+/// judged by the comparator like any statement.
+async fn run_control(a: &mut Side, b: &mut Side, census: &mut Census) {
+    if census.fault("skip-negative-control") {
+        return;
+    }
+    let case = Case {
+        template: "negative-control".into(),
+        sql: census::CONTROL_SQL.into(),
+        params: Vec::new(),
+        sorted: false,
+        kind: Kind::Read,
+        source: None,
+        prepared: false,
+        setup: false,
+    };
+    let oa = a.query(&case.sql).await;
+    let mut ob = b.query(&case.sql).await;
+    census::tamper(&mut ob, census.fault("untampered-negative-control"));
+    let v = judge(&case, &case.sql, Rerun::Text, a, b, &oa, &ob).await;
+    census.control = Control::Judged(v.name().to_string());
+}
+
+async fn run_case(
+    case: &Case,
+    cli: &Cli,
+    a: &mut Side,
+    b: &mut Side,
+    report: &mut Report,
+    probe: &RouteProbe,
+    census: &mut Census,
+) {
     let text_sql = case.text_sql();
     if cli.protocol != Protocols::Ps || !case.prepared {
         let oa = a.query(&text_sql).await;
+        let mark = probe.mark(b).await;
         let ob = b.query(&text_sql).await;
+        let route = probe.route(b, mark).await;
         if case.kind == Kind::Session {
             if !matches!(oa, Outcome::Error { .. } | Outcome::Client(_)) {
                 a.log_session(&text_sql);
@@ -321,7 +499,9 @@ async fn run_case(case: &Case, cli: &Cli, a: &mut Side, b: &mut Side, report: &m
                 b.log_session(&text_sql);
             }
         }
-        let v = compare(&oa, &ob, case.ordered);
+        let v = judge(case, &text_sql, Rerun::Text, a, b, &oa, &ob).await;
+        let v = report.rule(case, &text_sql, &oa, &ob, v);
+        census.add(census_record(case, "text", route.path(&ob), v.name()));
         let ra = SideResult {
             prepare: None,
             outcome: &oa,
@@ -337,8 +517,10 @@ async fn run_case(case: &Case, cli: &Cli, a: &mut Side, b: &mut Side, report: &m
     if cli.protocol != Protocols::Text && case.prepared {
         let params: Vec<_> = case.params.iter().map(Param::to_value).collect();
         let (pa, oa) = a.prepared(&case.sql, &params).await;
+        let mark = probe.mark(b).await;
         let (pb, ob) = b.prepared(&case.sql, &params).await;
-        let mut v = compare(&oa, &ob, case.ordered);
+        let route = probe.route(b, mark).await;
+        let mut v = judge(case, &case.sql, Rerun::Prepared(&params), a, b, &oa, &ob).await;
         if let (Some(x), Some(y)) = (&pa, &pb) {
             let mut d = prepare_diffs(x, y);
             d.extend(execute_metadata_diffs((Some(x), &oa), (Some(y), &ob)));
@@ -352,6 +534,8 @@ async fn run_case(case: &Case, cli: &Cli, a: &mut Side, b: &mut Side, report: &m
                 };
             }
         }
+        let v = report.rule(case, &case.sql, &oa, &ob, v);
+        census.add(census_record(case, "ps", route.path(&ob), v.name()));
         let ra = SideResult {
             prepare: pa.as_ref(),
             outcome: &oa,
@@ -424,7 +608,31 @@ async fn table_size(a: &mut Side) -> Result<i64, String> {
     }
 }
 
-async fn run(cli: Cli) -> Result<bool, String> {
+/// What a run found: no mismatches; the census and negative control passed.
+struct RunResult {
+    no_mismatch: bool,
+    gate_ok: bool,
+}
+
+async fn run(cli: Cli) -> Result<RunResult, String> {
+    let layer = cli.census_layer.clone().unwrap_or_else(|| {
+        match cli.workload {
+            Workload::Integrationtest { .. } => "integrationtest",
+            _ => "workload",
+        }
+        .to_string()
+    });
+    let mut census = Census::new(&layer, &cli.gate_fault)?;
+    let mut ledger = match &cli.rulings {
+        Some(p) => Ledger::load(p)?,
+        None => Ledger::parse(rulings::BUILT_IN)
+            .map_err(|e| format!("{}: {e}", rulings::DEFAULT_PATH))?,
+    };
+    let probe = RouteProbe::new(cli.b_status.clone());
+    probe
+        .check()
+        .await
+        .map_err(|e| format!("route trace of B: {e}"))?;
     if let Workload::Integrationtest { dir, tests } = &cli.workload {
         let ep = integration::Endpoints {
             a: cli.a.clone(),
@@ -441,7 +649,13 @@ async fn run(cli: Cli) -> Result<bool, String> {
             report_rows: cli.report_rows,
             verbose: cli.verbose,
         };
-        return integration::run(&ep, &opts).await;
+        let no_mismatch = integration::run(&ep, &opts, &probe, &mut census, &mut ledger).await?;
+        ledger.write_hits(&cli.out_dir.join(rulings::HITS_FILE))?;
+        let gate_ok = census.write(&cli.out_dir)?;
+        return Ok(RunResult {
+            no_mismatch,
+            gate_ok,
+        });
     }
     let default_db = match &cli.workload {
         Workload::Sysbench { .. } => Some("sbtest".to_string()),
@@ -542,15 +756,32 @@ async fn run(cli: Cli) -> Result<bool, String> {
         results: open("results.jsonl")?,
         report_rows: cli.report_rows,
         verbose: cli.verbose,
+        ledger,
     };
 
     let started = Instant::now();
+    census.expected = cases
+        .iter()
+        .map(|c| case_protocols(c, &cli).len() as u64)
+        .sum();
     for case in &cases {
         if case.setup {
             run_setup(case, &mut a, &mut b).await;
+            census.add(census_record(
+                case,
+                "text",
+                (CensusPath::Skipped, "setup (A only)".into()),
+                "setup",
+            ));
             continue;
         }
         if let Kind::Other(why) = &case.kind {
+            census.add(census_record(
+                case,
+                "text",
+                (CensusPath::Skipped, why.clone()),
+                "skipped",
+            ));
             *report.skipped.entry(why.clone()).or_default() += 1;
             if cli.verbose {
                 eprintln!(
@@ -561,8 +792,9 @@ async fn run(cli: Cli) -> Result<bool, String> {
             }
             continue;
         }
-        run_case(case, &cli, &mut a, &mut b, &mut report).await;
+        run_case(case, &cli, &mut a, &mut b, &mut report, &probe, &mut census).await;
     }
+    run_control(&mut a, &mut b, &mut census).await;
     a.disconnect().await;
     b.disconnect().await;
     report
@@ -580,7 +812,14 @@ async fn run(cli: Cli) -> Result<bool, String> {
         cli.out_dir.join("mismatches.jsonl").display(),
         cli.out_dir.join("unsupported.jsonl").display()
     );
-    Ok(all.mismatch == 0)
+    report
+        .ledger
+        .write_hits(&cli.out_dir.join(rulings::HITS_FILE))?;
+    let gate_ok = census.write(&cli.out_dir)?;
+    Ok(RunResult {
+        no_mismatch: all.mismatch == 0,
+        gate_ok,
+    })
 }
 
 fn main() -> ExitCode {
@@ -596,8 +835,15 @@ fn main() -> ExitCode {
         }
     };
     match rt.block_on(run(cli)) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => {
+        Ok(r) if !r.gate_ok => {
+            if !r.no_mismatch {
+                println!("RESULT: MISMATCH");
+            }
+            println!("RESULT: GATE FAILED (census / negative control)");
+            ExitCode::from(census::EXIT_GATE)
+        }
+        Ok(r) if r.no_mismatch => ExitCode::SUCCESS,
+        Ok(_) => {
             println!("RESULT: MISMATCH");
             ExitCode::from(1)
         }

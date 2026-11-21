@@ -1,0 +1,8 @@
+sql: SELECT * FROM nope
+class: unordered
+verdict: mismatch
+diff: error: sqlstate
+[a_error]
+1146|42S02|Table 'test.nope' doesn't exist
+[b_error]
+1146|HY000|Table 'test.nope' doesn't exist

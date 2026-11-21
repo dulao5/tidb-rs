@@ -45,8 +45,9 @@ pub struct Case {
     /// SQL with `?` placeholders when `params` is non-empty.
     pub sql: String,
     pub params: Vec<Param>,
-    /// Rows are compared in order (top-level ORDER BY) rather than as multisets.
-    pub ordered: bool,
+    /// mysqltest `--sorted_result` preceded it: rows compare as a multiset (tolerance T2).
+    /// Otherwise the comparator classifies the statement from its text.
+    pub sorted: bool,
     pub kind: Kind,
     /// Where it came from (file:line), if from a file.
     pub source: Option<String>,
@@ -155,7 +156,7 @@ pub fn sysbench_cases(spec: &SysbenchSpec, rng: &mut Rng) -> Vec<Case> {
         let sql = fmt.replace("{}", &table.to_string());
         Case {
             template: template.to_string(),
-            ordered: sql::has_top_level_order_by(&sql),
+            sorted: false,
             sql,
             params,
             kind: Kind::Read,
@@ -242,7 +243,7 @@ pub fn file_cases(
                 && matches!(first.as_str(), "select" | "with" | "table" | "values");
             cases.push(Case {
                 template: first,
-                ordered: !st.sorted && sql::has_top_level_order_by(&st.sql),
+                sorted: st.sorted,
                 sql: st.sql,
                 params: Vec::new(),
                 kind,
@@ -293,16 +294,7 @@ mod tests {
         );
         assert!(a.iter().any(|c| c.text_sql()
             == "SELECT c FROM sbtest2 WHERE id BETWEEN -9223372036854775808 AND 9223372036854775807 ORDER BY c"));
-        let ordered: Vec<_> = a
-            .iter()
-            .filter(|c| c.ordered)
-            .map(|c| &c.template)
-            .collect();
-        assert!(
-            ordered
-                .iter()
-                .all(|t| *t == "order_range" || *t == "distinct_range")
-        );
+        assert!(a.iter().all(|c| !c.sorted));
     }
 
     #[test]
@@ -312,7 +304,7 @@ mod tests {
         let cases = file_cases("w.sql", src, Some(("s.sql", "set @x = 1")), true);
         let summary: Vec<_> = cases
             .iter()
-            .map(|c| (c.template.as_str(), c.setup, c.prepared, c.ordered))
+            .map(|c| (c.template.as_str(), c.setup, c.prepared, c.sorted))
             .collect();
         assert_eq!(
             summary,
@@ -321,7 +313,7 @@ mod tests {
                 ("create", true, false, false),
                 ("insert", true, false, false),
                 ("use", false, false, false),
-                ("select", false, true, true),
+                ("select", false, true, false),
                 ("show", false, false, false),
                 ("delete", false, false, false),
             ]

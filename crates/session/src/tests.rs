@@ -1060,7 +1060,7 @@ fn max_prepared_stmt_count_counts_closed_stmts() {
 }
 
 /// The real `PrepareStmt` runs the prepare executor: a SELECT without a table stops at the
-/// plan builder (D09.1), one with a table that the (empty) InfoSchema does not have at the
+/// plan builder's planning context (D09.13: PREPARE has none yet), one with a table that the (empty) InfoSchema does not have at the
 /// privilege check of a missing table (D04.1); two
 /// statements are Go's `ErrPrepareMulti`; nothing is added to the session.
 #[test]
@@ -1069,7 +1069,7 @@ fn prepare_stmt_runs_the_prepare_executor() {
     let mut s = session(&store);
     s.vars_mut().current_db = "test".to_owned();
     let e = block_on(s.prepare_stmt("select ?")).unwrap_err();
-    assert_eq!(blocked_by(&e), Some("D09.1"), "{e}");
+    assert_eq!(blocked_by(&e), Some("D09.13"), "{e}");
     let e = block_on(s.prepare_stmt("select c from sbtest1 where id = ?")).unwrap_err();
     assert_eq!(blocked_by(&e), Some("D04.1"), "{e}");
     let e = block_on(s.prepare_stmt("select 1; select 2")).unwrap_err();
@@ -1183,8 +1183,8 @@ fn prepare_of_the_sbtest_point_select_stops_after_the_lock() {
     let Err(e) = block_on(s.prepare_stmt(SBTEST_POINT)) else {
         panic!("PREPARE reached past the plan builder");
     };
-    // The plan builder (`buildSelect`, D09.1) is next.
-    assert_eq!(blocked_by(&e), Some("D09.1"), "{e}");
+    // The plan builder needs the planning context the optimizer driver sets up (D09.13).
+    assert_eq!(blocked_by(&e), Some("D09.13"), "{e}");
     assert_eq!(mdl_entries(&s), None);
     // EXECUTE: no statement was prepared, so it is Go's 8111 here (an EXECUTE of a prepared
     // statement reaches the planner: `execute_of_a_prepared_stmt_reaches_the_planner`).
