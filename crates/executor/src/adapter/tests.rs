@@ -110,6 +110,14 @@ impl SessionContext for MockSession {
     fn get_expr_ctx(&self) -> tidb_sessionctx::exprctx::ExprContextRef {
         Arc::clone(&self.expr_ctx)
     }
+    fn get_plan_ctx(&self) -> tidb_planner::planctx::SessionPlanCtx {
+        tidb_planner::planctx::SessionPlanCtx {
+            expr_ctx: Arc::clone(&self.expr_ctx),
+            client: None,
+            has_dirty_content: None,
+            advise_txn_warmup: None,
+        }
+    }
     fn get_snapshot_with_stmt_read_ts(
         &mut self,
     ) -> futures::future::BoxFuture<'_, Result<Arc<dyn tidb_kv::kv::Snapshot>, Error>> {

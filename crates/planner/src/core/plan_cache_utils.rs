@@ -34,7 +34,6 @@ use tidb_parser::ast::{ExecuteStmt, Stmt};
 use tidb_parser::model::CIStr;
 use tidb_sessionctx::variable::session::SessionVars;
 
-use crate::PhysicalPlanRef;
 use crate::core::plan_cacheable_checker::{CNode, Visit, Walker, is_ast_cacheable};
 use crate::core::planbuilder::new_plan_builder;
 use crate::core::preprocess::{
@@ -42,6 +41,7 @@ use crate::core::preprocess::{
     with_domain_info_schema, with_preprocessor_return,
 };
 use crate::core::resolve::{ContextRef, new_node_w};
+use crate::planctx::PlanCtx;
 use crate::util::fixcontrol;
 
 /// The `infoschema.InfoSchema` methods the plan cache calls (see the module doc).
@@ -284,8 +284,10 @@ pub fn statement_table_names(stmt: &Stmt) -> Vec<(String, String)> {
 /// paramSQL is the corresponding parameterized sql like 'select * from t where a<? and b>?'.
 /// paramStmt is the Node of paramSQL.
 ///
-/// Returns the statement, the plan of `PlanBuilder.Build` (Go's `base.Plan`; the builder
-/// returns no plan before D09.1, VS1-21, and fails first) and the parameter count.
+/// Returns the statement, what PREPARE reads of the plan `PlanBuilder.Build` returns (Go's
+/// `base.Plan`: its schema and output names, [`BuiltPlanInfo`]) and the parameter count.
+/// The plan is built in the statement's planning context `ctx`, built by the caller from the
+/// session's parts like `planner.Optimize`'s ([`crate::planctx::SessionPlanCtx`]).
 ///
 /// Differences (all boundary stubs, see the spec): the statement label is `"Select"` for a
 /// SELECT and `blocked-by:D12.0` otherwise; `parser.NormalizeDigest` is not ported (D02.2)
@@ -295,13 +297,14 @@ pub fn statement_table_names(stmt: &Stmt) -> Vec<(String, String)> {
 /// has no privilege manager (D04.1) and no table locks (write path).
 // go: GeneratePlanCacheStmtWithAST L2 (label / NormalizeDigest / privileges: see the doc comment)
 pub fn generate_plan_cache_stmt_with_ast(
-    vars: &mut SessionVars,
+    ctx: &mut PlanCtx<'_>,
     is_prep_stmt: bool,
     param_sql: &str,
     param_stmt: Stmt,
     is: &dyn InfoSchemaLookup,
     domain_is: Option<&dyn InfoSchemaLookup>,
-) -> Result<(PlanCacheStmt, Option<PhysicalPlanRef>, usize), Error> {
+) -> Result<(PlanCacheStmt, Option<BuiltPlanInfo>, usize), Error> {
+    let vars = &mut *ctx.vars;
     let mut extractor = ParamMarkerExtractor::default();
     Walker(&mut extractor).stmt(&param_stmt);
     if let Some(e) = extractor.err {
@@ -405,21 +408,20 @@ pub fn generate_plan_cache_stmt_with_ast(
     // value (see the module doc), and the parameter list is reset by EXECUTE.
 
     let mut dest_builder = new_plan_builder(&[]);
-    let _ = dest_builder.init(vars, Some(InfoSchemaHandle(is.snapshot())));
-    // p, err := destBuilder.Build(ctx, nodeW): the builder needs the planning context
-    // (`PlanCtx`: the statement's arena and expression context) that the session sets up
-    // for the optimizer (VS1-24); PREPARE has none yet, so this is a boundary stub, not a
-    // missing plan (the prepare executor would send no column definitions).
-    // glue: blocked-by:D09.13 (the planning context of PREPARE's PlanBuilder.Build)
-    let p: Option<PhysicalPlanRef> = None;
-    if p.is_none() {
-        return Err(blocked(
-            "D09.13",
-            "the planning context of PlanBuilder.Build in PREPARE",
-        ));
-    }
+    let _ = dest_builder.init(vars, Some(InfoSchemaHandle(is.snapshot())), None);
+    // The Rust AST keeps byte spans into the text it was parsed from (Go: ast.Node.Text).
+    dest_builder.sql_text = param_sql;
+    let built = dest_builder.build(ctx, &prepared.stmt)?;
+    let p = Some(BuiltPlanInfo {
+        schema: ctx.arena.get(built).schema(&ctx.arena).clone(),
+        output_names: ctx.arena.get(built).output_names(&ctx.arena).clone(),
+    });
+    let opt_flag = dest_builder.get_opt_flag();
+    let for_update_read = dest_builder.get_is_for_update_read();
+    drop(dest_builder);
+    let vars = &mut *ctx.vars;
 
-    if cacheable && dest_builder.get_opt_flag() & FLAG_PARTITION_PROCESSOR > 0 {
+    if cacheable && opt_flag & FLAG_PARTITION_PROCESSOR > 0 {
         // dynamic prune mode is not used, could be that global statistics not yet available!
         cacheable = false;
         reason = "static partition prune mode used".to_owned();
@@ -453,7 +455,7 @@ pub fn generate_plan_cache_stmt_with_ast(
         stmt_text: param_sql.to_owned(),
         normalized_sql,
         sql_digest: digest,
-        for_update_read: dest_builder.get_is_for_update_read(),
+        for_update_read,
         stmt_cacheable: cacheable,
         uncacheable_reason: reason,
         db_name,
@@ -470,6 +472,18 @@ pub fn generate_plan_cache_stmt_with_ast(
 
     crate::core::plan_cache::check_prepared_priv(&prepared_obj)?;
     Ok((prepared_obj, p, param_count))
+}
+
+/// What PREPARE reads of the plan `PlanBuilder.Build` returns (Go's `base.Plan`): the
+/// schema and output names, for the column definitions of the prepare response. The
+/// logical plan itself lives in the statement's arena, which ends with PREPARE.
+// glue: the parts of base.Plan that PrepareExec reads (the logical plan stays in its arena, N1)
+#[derive(Clone, Debug, Default)]
+pub struct BuiltPlanInfo {
+    /// `p.Schema()`.
+    pub schema: tidb_expression::Schema,
+    /// `p.OutputNames()`.
+    pub output_names: tidb_types::field_name::NameSlice,
 }
 
 /// `rule.FlagPartitionProcessor` (the partition pruning rule, D09.12): not set by any rule

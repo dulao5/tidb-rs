@@ -40,6 +40,8 @@ tidb-execdetails = { workspace = true }
 tidb-statistics = { workspace = true }
 # paging.CalculateSeekCnt (calcPagingCost of the cop task).
 tidb-store = { workspace = true }
+# memory.MemTotal (the chunk-reuse check of postOptimize).
+tidb-memory = { workspace = true }
 # tipb.Executor (ToPB), tipb.ExchangeType.
 tipb = { workspace = true }
 # log.Warn.

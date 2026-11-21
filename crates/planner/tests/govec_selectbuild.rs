@@ -59,6 +59,9 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
 /// stands for. Set `GOVEC_SELECTBUILD_BLOCKED=1` to list the statements (except the built-in
 /// function families of D08.9).
 const EXPECTED_BLOCKED: &[(&str, usize)] = &[
+    // Comment-style optimizer hints (`/*+ ... */`): the Rust parser does not parse the hint
+    // grammar, so the hint skeleton stops at a non-empty hint list.
+    ("D02.2", 2),
     // The preprocessor's missing table check (the privilege manager decides the error).
     ("D04.1", 2),
     // Built-in function families not ported yet (IN, ANY_VALUE, user variables, ...).
@@ -79,8 +82,8 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.5", 4),
     // Subqueries.
     ("D09.6", 2),
-    // Index and table hints.
-    ("D13.3", 4),
+    // Index hints (USE / FORCE / IGNORE INDEX).
+    ("D13.3", 2),
 ];
 
 fn vectors() -> String {
@@ -435,7 +438,7 @@ fn run(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     vars.state.plan_id.0.store(0, Ordering::SeqCst);
     vars.state.plan_column_id.0.store(0, Ordering::SeqCst);
     let mut builder = new_plan_builder(&[]);
-    builder.init(&mut vars, Some(is));
+    builder.init(&mut vars, Some(is), None);
     builder.sql_text = sql;
 
     let wh = Arc::new(new_static_warn_handler(0));

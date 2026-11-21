@@ -234,7 +234,8 @@ impl Storage for MockStore {
         Arc::new(NoSnapshot)
     }
     fn get_client(&self) -> Arc<dyn Client> {
-        unimplemented!()
+        // The planning context takes the store's client (GetPlanCtx); nothing sends with it.
+        Arc::new(MockClient)
     }
     fn close(&self) -> Result<(), Error> {
         Ok(())
@@ -1059,22 +1060,31 @@ fn max_prepared_stmt_count_counts_closed_stmts() {
     assert!(s.vars().state.prepared_stmts.is_empty());
 }
 
-/// The real `PrepareStmt` runs the prepare executor: a SELECT without a table stops at the
-/// plan builder's planning context (D09.13: PREPARE has none yet), one with a table that the (empty) InfoSchema does not have at the
-/// privilege check of a missing table (D04.1); two
-/// statements are Go's `ErrPrepareMulti`; nothing is added to the session.
+/// The real `PrepareStmt` runs the prepare executor: a SELECT without a table is built by
+/// `PlanBuilder.Build` in the planning context the session hands the planner (the prepared
+/// statement is added with its column definitions), one with a table that the (empty)
+/// InfoSchema does not have stops at the privilege check of a missing table (D04.1); two
+/// statements are Go's `ErrPrepareMulti`.
 #[test]
 fn prepare_stmt_runs_the_prepare_executor() {
+    let _serial = PREPARED_COUNT.lock();
     let store = MockStore::new(10);
     let mut s = session(&store);
     s.vars_mut().current_db = "test".to_owned();
-    let e = block_on(s.prepare_stmt("select ?")).unwrap_err();
-    assert_eq!(blocked_by(&e), Some("D09.13"), "{e}");
+    let info = block_on(s.prepare_stmt("select ?")).unwrap();
+    assert_eq!(info.param_count, 1);
+    let names: Vec<&str> = info
+        .fields
+        .iter()
+        .map(|f| f.column_name.o.as_str())
+        .collect();
+    assert_eq!(names, ["?"]);
+    assert_eq!(s.vars().state.prepared_stmts.len(), 1);
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
     let e = block_on(s.prepare_stmt("select c from sbtest1 where id = ?")).unwrap_err();
     assert_eq!(blocked_by(&e), Some("D04.1"), "{e}");
     let e = block_on(s.prepare_stmt("select 1; select 2")).unwrap_err();
     assert_eq!(e.code(), 8115, "{e}");
-    assert!(s.vars().state.prepared_stmts.is_empty());
     assert!(s.is_idle());
 }
 
@@ -1098,6 +1108,8 @@ fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
     };
     let t = TableInfo {
         id: 110,
+        // The database's id, as the InfoSchema loader sets it.
+        dbid: 2,
         name: CIStr::new("sbtest1"),
         columns: Some(vec![
             col(1, "id", tidb_base::mysql::TypeLonglong),
@@ -1174,24 +1186,31 @@ fn prepare_registers_the_table_and_clears_it_at_the_end() {
     assert_eq!(mdl_entries(&s), None);
 }
 
-/// Where `PREPARE` + `EXECUTE` of the sysbench point select stops now on the real session
-/// over the sbtest InfoSchema (mock store): past the metadata lock.
+/// `PREPARE` + `EXECUTE` of the sysbench point select on the real session over the sbtest
+/// InfoSchema (mock store): PREPARE passes the metadata lock and builds the plan (the column
+/// `c` of `sbtest1`); EXECUTE reaches the compiler's planner, which is not wired into
+/// `Compile` yet (`blocked-by:D09.13`).
 #[test]
-fn prepare_of_the_sbtest_point_select_stops_after_the_lock() {
+fn prepare_of_the_sbtest_point_select_builds_the_plan() {
+    let _serial = PREPARED_COUNT.lock();
     let store = MockStore::new(10);
     let mut s = sbtest_session(&store);
-    let Err(e) = block_on(s.prepare_stmt(SBTEST_POINT)) else {
-        panic!("PREPARE reached past the plan builder");
-    };
-    // The plan builder needs the planning context the optimizer driver sets up (D09.13).
-    assert_eq!(blocked_by(&e), Some("D09.13"), "{e}");
+    let info = block_on(s.prepare_stmt(SBTEST_POINT)).unwrap();
+    let names: Vec<&str> = info
+        .fields
+        .iter()
+        .map(|f| f.column_name.o.as_str())
+        .collect();
+    assert_eq!(names, ["c"]);
+    assert_eq!(info.fields[0].table_name.o, "sbtest1");
     assert_eq!(mdl_entries(&s), None);
-    // EXECUTE: no statement was prepared, so it is Go's 8111 here (an EXECUTE of a prepared
-    // statement reaches the planner: `execute_of_a_prepared_stmt_reaches_the_planner`).
-    let Err(e) = block_on(s.execute_prepared_stmt(1, vec![])) else {
-        panic!("no statement 1");
+    let Err(e) =
+        block_on(s.execute_prepared_stmt(info.stmt_id, vec![tidb_types::datum::new_int_datum(1)]))
+    else {
+        panic!("EXECUTE has no planner yet");
     };
-    assert_eq!(e.code(), 8111, "{e}");
+    assert_eq!(blocked_by(&e), Some("D09.13"), "{e}");
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
 }
 
 /// An autocommit read (`EXECUTE`, a plain SELECT) registers nothing: its statement context is
@@ -1400,4 +1419,23 @@ fn execute_of_a_prepared_stmt_reaches_the_planner() {
     s.vars_mut().add_prepared_stmt(3, Arc::new(())).unwrap();
     let e = block_on(s.execute_prepared_stmt(3, vec![])).err().unwrap();
     assert!(e.to_string().contains("invalid PlanCacheStmt type"), "{e}");
+}
+
+/// The coprocessor client of [`MockStore`]: the planner keeps it in the planning context;
+/// no test sends a request.
+struct MockClient;
+
+impl Client for MockClient {
+    fn send(
+        &self,
+        _: &tidb_kv::Context,
+        _: &tidb_kv::kv::Request,
+        _: Option<tidb_kv::kv::OptionValue>,
+        _: &tidb_kv::kv::ClientSendOption,
+    ) -> Box<dyn tidb_kv::kv::Response> {
+        unimplemented!("no test sends a coprocessor request")
+    }
+    fn is_request_type_supported(&self, _: i64, _: i64) -> bool {
+        true
+    }
 }

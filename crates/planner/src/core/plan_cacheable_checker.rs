@@ -110,7 +110,7 @@ struct CacheableChecker<'a> {
 pub(crate) enum CNode<'n> {
     Select(&'n SelectStmt),
     PatternIn(&'n ast::PatternInExpr),
-    Variable,
+    Variable(&'n ast::VariableExpr),
     Subquery,
     FuncCall(&'n ast::FuncCallExpr),
     OrderBy(&'n [ast::ByItem]),
@@ -177,7 +177,7 @@ impl CacheableChecker<'_> {
                     return true;
                 }
             }
-            CNode::Variable => {
+            CNode::Variable(_) => {
                 self.cacheable = false;
                 self.reason = "query has user-defined variables is un-cacheable".to_owned();
                 return true;
@@ -373,7 +373,7 @@ impl<V: Visit> Walker<'_, V> {
 
     /// `SelectStmt.Accept`.
     // glue: AST walk (Go Accept)
-    fn select(&mut self, n: &SelectStmt) -> bool {
+    pub(crate) fn select(&mut self, n: &SelectStmt) -> bool {
         self.node(CNode::Select(n), |w| {
             if let Some(with) = &n.with
                 && !w.with(with)
@@ -549,7 +549,7 @@ impl<V: Visit> Walker<'_, V> {
                 self.node(CNode::FuncCall(f), |w| f.args.iter().all(|a| w.expr(a)))
             }
             Expr::FuncCast(c) => self.node(CNode::Other, |w| w.expr(&c.expr)),
-            Expr::Variable(v) => self.node(CNode::Variable, |w| {
+            Expr::Variable(v) => self.node(CNode::Variable(v), |w| {
                 v.value.as_ref().is_none_or(|x| w.expr(x))
             }),
             Expr::Subquery(s) => self.node(CNode::Subquery, |w| w.result_set(&s.query)),

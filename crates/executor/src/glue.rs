@@ -82,6 +82,11 @@ pub trait SessionContext: Send {
     /// moment it is built (N2: executors do not hold the session).
     // glue: interface method sessionctx.Context.GetExprCtx (VS1-14)
     fn get_expr_ctx(&self) -> ExprContextRef;
+    /// `GetPlanCtx()`: what the session hands the planner for a statement (its expression
+    /// context, store client, the transaction's dirty-table check), from which
+    /// `planner.Optimize` and PREPARE build the same planning context.
+    // glue: interface method sessionctx.Context.GetPlanCtx (the session's parts of the planning context, N2)
+    fn get_plan_ctx(&self) -> tidb_planner::planctx::SessionPlanCtx;
     /// `sessiontxn.GetTxnManager(sctx).GetSnapshotWithStmtReadTS()`. Async like
     /// [`SessionContext::get_stmt_read_ts`]: the provider may wait for the TSO.
     // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS (D05.4, VS1-14)
