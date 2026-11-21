@@ -62,6 +62,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The TiDB commit the test files come from. The default directory is in the reference tree, which
+# tidb-reference.sh verified against the lock: its commit is the lock's. `git -C <dir> rev-parse`
+# would name the commit of whatever repository encloses the tree (e.g. a dotfiles repo holding
+# ~/.cache). A -d directory counts only if it is tests/integrationtest/t of its own git checkout.
+tests_commit() {
+    if [ "$tests_dir" -ef "$tidb_src/tests/integrationtest/t" ]; then
+        sed -n 's/^commit=//p' "$repo/tidb-reference.lock"
+    elif [ "$(git -C "$tests_dir" rev-parse --show-toplevel 2>/dev/null)/tests/integrationtest/t" -ef \
+        "$tests_dir" ]; then
+        git -C "$tests_dir" rev-parse HEAD
+    else
+        echo unknown
+    fi
+}
+
 # Recorded before the run, so later edits to the checkout do not change it.
 commit=$(git -C "$repo" rev-parse HEAD)
 dirty=$(git -C "$repo" status --porcelain --untracked-files=no | grep -q . && echo yes || echo no)
@@ -97,8 +112,7 @@ tidb_version=$(mysql -h 127.0.0.1 -P "$a_port" -u root -N -e 'SELECT version()' 
     printf 'tidb_rs_commit\t%s\n' "$commit"
     printf 'tidb_rs_dirty\t%s\n' "$dirty"
     printf 'tidb_version\t%s\n' "${tidb_version:-$version}"
-    printf 'tests_commit\t%s\n' "$(git -C "$tests_dir" rev-parse HEAD 2>/dev/null ||
-        cut -d' ' -f3 "$tidb_src/.tidb-reference-stamp" 2>/dev/null || echo unknown)"
+    printf 'tests_commit\t%s\n' "$(tests_commit)"
     printf 'date\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'runner\t%s\n' "$(uname -sm) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -n)"
     printf 'seconds\t%s\n' "$seconds"

@@ -15,21 +15,22 @@
 | `scripts/tidb-reference.sh` | 没有就下载、校验、解开，打印树的路径（已经有且未过期时不联网） |
 | `scripts/tidb-reference.sh --check` | 只检查，从不下载：树缺失或与 lock 不符时退出码 1 |
 | `TIDB_REFERENCE_CACHE=<目录>` | 源码包和默认树的位置，默认 `~/.cache/tidb-rs`（树在 `<目录>/tidb-v8.5.8`，约 130 MB） |
-| `TIDB_REFERENCE_DIR=<目录>` | 改用这个树。可以是已有的 git 克隆：HEAD 必须是固定的 commit，已跟踪文件不能有改动；脚本只检查，不会覆盖它 |
+| `TIDB_REFERENCE_DIR=<目录>` | 改用这个树。可以是已有的 git 克隆：HEAD 必须是固定的 commit，已跟踪文件不能有改动，也不能有未跟踪的文件（被 `.gitignore` 忽略的 `.go` 文件也算；其他被忽略的文件是构建产物，不算）；脚本只检查，不会覆盖它 |
 
-解开的树里有一个 `.tidb-reference-stamp`，记录它来自哪个 lock；lock 改了，旧树就是"过期"，`--check` 报错，不带参数运行会重新解开。
+解开的树里有一个 `.tidb-reference-stamp`，记录它来自哪个 lock；lock 改了，旧树就是"过期"，`--check` 报错，不带参数运行会重新解开。解开时先放在临时目录 `<树>.tmp.<进程号>`，完成后再改名；中途被打断（Ctrl-C、出错退出）时，脚本先恢复写权限再删掉临时目录，不会留下删不掉的只读目录。
 
-解开的树是**只读的**（`chmod -R a-w`），任何人都不能往这棵共享的树里写文件。`--check` 发现可写的文件就报错（树可能被改过），不带参数运行会把它恢复成只读。需要给某个 Go 包加文件的工具，用 `go test -overlay` 叠加进去，不写进树里：`eval-gate.sh` 就是这样加入 `gate_vec_test.go` 的。
+解开的树是**只读的**（`chmod -R a-w`），不能随手往这棵共享的树里写文件。只读用来防止误写（工具生成的测试文件、不小心的编辑），不防有意的修改：有人先 `chmod u+w` 再改，只读挡不住，只能靠 `--check` 在下次检查时发现权限变了。`--check` 发现可写的文件就报错（树可能被改过），不带参数运行会把它恢复成只读。需要给某个 Go 包加文件的工具，用 `go test -overlay` 叠加进去，不写进树里：`eval-gate.sh` 就是这样加入 `gate_vec_test.go` 的。
 
 在 shell 里取路径：`go_tree=$(scripts/tidb-reference.sh)`，然后读 `$go_tree/pkg/...`。
 
 已经改用它的地方：
 
 - `scripts/eval-gate.sh`、`scripts/integrationtest.sh`：`TIDB_SRC` 不给时用参照树；给了就先用 `--check` 核对，不符直接退出。
+  - integrationtest 在 `run.tsv` 的 `tests_commit` 中记录测试文件来自哪个 commit：默认目录记 lock 的 commit（不用 `git -C <目录> rev-parse`，那样参照树放在别的 git 仓库下面时，记下的是那个仓库的 commit）；`-d` 给的目录只有在它是某个 git 克隆的 `tests/integrationtest/t` 时才记那个克隆的 HEAD，否则记 `unknown`。
   - integrationtest 的测试文件原来取自本机停在 master 的克隆，从 #269 起取自 v8.5.8。所以那以后的运行中，文件数、语句总数和各类计数会跳一下。这是分母变了，不是退化，也不是进步。tracker 的报表在每次运行的说明里写明测试文件来自哪个版本。
 - CI `ci.yml` 的 `reference tree lock` 任务：按 lock 的哈希缓存源码包，缓存为空时下载一次（脚本校验 sha256 和 commit），然后运行 `--check`，并核对 lock 与宪章第一条写的 tag、commit 一致。
 - CI `eval-gate.yml`：Go 一侧的源码从参照树来，不再单独 checkout。
-- tracker 的 govec 通过 Go 模块代理引用 TiDB（`govec/go.mod` 中的伪版本 `...-8b857efa2036`），tracker CI 核对这个伪版本与本 lock 的 commit 一致。
+- tracker 的 govec 通过 Go 模块代理引用 TiDB（`govec/go.mod` 中的伪版本 `...-8b857efa2036`），tracker CI 核对这个伪版本与本 lock 的 commit 一致。tracker 的 integration 报表判断测试文件是否来自参照树时，也从 `govec/go.mod` 取这个 commit，不另存一份。
 
 更换基线：改 lock 的四行，运行脚本，按上游同步流程（[sync-drill-8.5.x.md](sync-drill-8.5.x.md)）处理，同时更新宪章第一条和 tracker 的 `govec/go.mod`。
 
