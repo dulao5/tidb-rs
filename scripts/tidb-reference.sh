@@ -9,12 +9,14 @@
 #   TIDB_REFERENCE_CACHE  directory for the tarball and the default tree
 #                         (default ~/.cache/tidb-rs; the tree is <cache>/tidb-<tag>)
 #   TIDB_REFERENCE_DIR    use this tree instead. It may be a git checkout: then HEAD must be the
-#                         pinned commit and tracked files unmodified; it is never fetched over.
+#                         pinned commit, tracked files unmodified, and no untracked file (nor an
+#                         ignored .go file) present; it is never fetched over.
 #
 # A fetched tree is the source archive of the tag, verified by sha256 and by the commit id in the
 # archive header, and carries a stamp (.tidb-reference-stamp) of the pin it was built from; a
 # changed pin makes it stale. The fetched tree is read-only (chmod a-w); --check fails on a
-# writable file, the ensure mode makes it read-only again. Tools that need extra Go files in a
+# writable file, the ensure mode makes it read-only again. Read-only guards against accidental
+# writes (a test file, a stray edit), not against someone who deliberately chmods it back. Tools that need extra Go files in a
 # package use `go build/test -overlay` (scripts/eval-gate.sh), not files written into the tree.
 set -euo pipefail
 
@@ -52,6 +54,13 @@ if [ -e "$dest/.git" ]; then
   dirty=$(git -C "$dest" status --porcelain --untracked-files=no)
   [ -z "$dirty" ] || fail "$dest has modified tracked files:
 $dirty"
+  # An added file (a Go file in a package, a .test file of integrationtest) changes what is read
+  # as much as an edited one, and the status above does not show it: fail on any untracked file,
+  # and on ignored ones too when they are Go files (other ignored files are build output).
+  extra=$({ git -C "$dest" ls-files --others --exclude-standard
+    git -C "$dest" ls-files --others --ignored --exclude-standard -- '*.go'; } | head -20)
+  [ -z "$extra" ] || fail "$dest has files that are not in $tag (untracked, or ignored Go files):
+$extra"
   echo "$dest"
   exit 0
 fi
@@ -98,6 +107,18 @@ fi
 
 echo "tidb-reference: extracting to $dest" >&2
 work="$dest.tmp.$$"
+# An interrupted run must not leave a half-extracted (possibly already read-only, so not
+# removable with a plain rm -rf) directory next to the tree: restore write permission and
+# remove it on any exit. After the final mv the directory no longer exists.
+remove_work() {
+  if [ -e "$work" ]; then
+    chmod -R u+w "$work" 2>/dev/null || true
+    rm -rf "$work"
+  fi
+}
+trap remove_work EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 rm -rf "$work"
 mkdir -p "$work"
 tar -xzf "$tarball" -C "$work" --strip-components=1
