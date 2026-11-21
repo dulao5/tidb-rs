@@ -405,14 +405,18 @@ pub fn generate_plan_cache_stmt_with_ast(
     // value (see the module doc), and the parameter list is reset by EXECUTE.
 
     let mut dest_builder = new_plan_builder(&[]);
-    let _ = dest_builder.init(vars);
-    dest_builder.build(&prepared.stmt)?;
-    // p: Build returns no plan before buildSelect (D09.1, VS1-21); without it the prepare
-    // executor would send no column definitions, so this is a boundary stub, not `None`.
-    // glue: blocked-by:D09.1 (the plan of PlanBuilder.Build)
+    let _ = dest_builder.init(vars, Some(InfoSchemaHandle(is.snapshot())));
+    // p, err := destBuilder.Build(ctx, nodeW): the builder needs the planning context
+    // (`PlanCtx`: the statement's arena and expression context) that the session sets up
+    // for the optimizer (VS1-24); PREPARE has none yet, so this is a boundary stub, not a
+    // missing plan (the prepare executor would send no column definitions).
+    // glue: blocked-by:D09.13 (the planning context of PREPARE's PlanBuilder.Build)
     let p: Option<PhysicalPlanRef> = None;
     if p.is_none() {
-        return Err(blocked("D09.1", "the plan of PlanBuilder.Build"));
+        return Err(blocked(
+            "D09.13",
+            "the planning context of PlanBuilder.Build in PREPARE",
+        ));
     }
 
     if cacheable && dest_builder.get_opt_flag() & FLAG_PARTITION_PROCESSOR > 0 {

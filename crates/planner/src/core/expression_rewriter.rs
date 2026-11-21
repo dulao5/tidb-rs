@@ -9,13 +9,17 @@
 //!   walk at the next `Leave`; here the first error is returned with `?` (spec §3 item 1).
 //! - `rewrite` takes the schema and output names of the plan instead of the plan (the Rust
 //!   logical plans have no output names yet, spec §3 item 2).
-//! - The AST-node-keyed maps (`aggMapper`, `windowMapper`, `colMapper`) use the node's
-//!   address (spec §3 item 4).
+//! - The AST-node-keyed maps (`aggMapper`, `windowMapper`, `colMapper`) key by
+//!   [`ByAddr`]: the node's identity, borrowed so that a key cannot outlive its node
+//!   (spec §3 item 4).
 //! - Subqueries are boundary stubs `blocked-by:D09.6` (spec §4).
 
 #![allow(non_upper_case_globals)]
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use tidb_base::Error;
@@ -86,16 +90,67 @@ use crate::core::logical_plan_builder::append_visit_info;
 use crate::core::planbuilder::{PlanBuilder, VisitInfo};
 use crate::core::point_get_plan::value_expr_datum;
 
-/// The address of an AST node: the key of Go's pointer-keyed maps (spec §3 item 4).
+/// An AST node as the key of Go's pointer-keyed maps (spec §3 item 4): equal and hashed by
+/// the node's address, and holding a borrow of the node, so that the borrow checker keeps
+/// every keyed node alive as long as the map (Go's map holds the pointer, which keeps the
+/// node alive). A key therefore never meets a later node allocated at a freed node's
+/// address. Lookups pass the address of a live node ([`node_addr`]).
+pub struct ByAddr<'a, T> {
+    addr: usize,
+    _node: PhantomData<&'a T>,
+}
+
+impl<'a, T> ByAddr<'a, T> {
+    /// The key of `node`.
+    // glue: Go map keyed by an AST node pointer
+    pub fn new(node: &'a T) -> ByAddr<'a, T> {
+        ByAddr {
+            addr: node_addr(node),
+            _node: PhantomData,
+        }
+    }
+}
+
+impl<T> PartialEq for ByAddr<'_, T> {
+    // glue: pointer equality of Go map keys
+    fn eq(&self, other: &Self) -> bool {
+        self.addr == other.addr
+    }
+}
+
+impl<T> Eq for ByAddr<'_, T> {}
+
+impl<T> Hash for ByAddr<'_, T> {
+    // glue: pointer hash of Go map keys (the same as the address's, see `Borrow`)
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.addr.hash(state);
+    }
+}
+
+impl<T> Borrow<usize> for ByAddr<'_, T> {
+    // glue: lookup of a Go map key by the address of a live node
+    fn borrow(&self) -> &usize {
+        &self.addr
+    }
+}
+
+impl<T> std::fmt::Debug for ByAddr<'_, T> {
+    // glue: Debug of a map key
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ByAddr({:#x})", self.addr)
+    }
+}
+
+/// The address of a live AST node: looks a [`ByAddr`] key up.
 // glue: Go map keyed by an AST node pointer
 pub fn node_addr<T>(n: &T) -> usize {
     n as *const T as usize
 }
 
 /// `map[*ast.AggregateFuncExpr]int`: the offset of each aggregate in the plan's schema.
-pub type AggMapper = HashMap<usize, isize>;
+pub type AggMapper<'a> = HashMap<ByAddr<'a, ast::AggregateFuncExpr>, isize>;
 /// `map[*ast.WindowFuncExpr]int`.
-pub type WindowMapper = HashMap<usize, isize>;
+pub type WindowMapper<'a> = HashMap<ByAddr<'a, ast::WindowFuncExpr>, isize>;
 
 /// clauseCode (planbuilder.go): which part of the query is being processed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -172,17 +227,17 @@ pub struct RewritePlan<'a> {
 ///
 /// `insertPlan` (INSERT ... ON DUPLICATE KEY UPDATE) and `rollExpand` (ROLLUP) are not
 /// here: their branches are stubs (spec §4).
-pub struct ExprRewriterPlanCtx<'b> {
+pub struct ExprRewriterPlanCtx<'b, 'ast> {
     /// plan (see [`RewritePlan`]).
     pub plan: Option<PlanId>,
     /// builder.
-    pub builder: &'b mut PlanBuilder,
+    pub builder: &'b mut PlanBuilder<'ast>,
     /// curClause tracks which part of the query is being processed
     pub cur_clause: ClauseCode,
     /// aggrMap.
-    pub aggr_map: Option<&'b AggMapper>,
+    pub aggr_map: Option<&'b AggMapper<'b>>,
     /// windowMap.
-    pub window_map: Option<&'b WindowMapper>,
+    pub window_map: Option<&'b WindowMapper<'b>>,
     /// colNamesForLazilyPrivilegeCheck pre-collects the visited columns during rewriting, These columns
     /// will be added to PlanBuilder.visitInfo, and be later checked in CheckPrivilege after building plan.
     pub col_names_for_lazily_privilege_check: Vec<VisitedColumn>,
@@ -192,7 +247,7 @@ pub struct ExprRewriterPlanCtx<'b> {
 ///
 /// `ctx` (`context.Context`) is not needed outside subqueries; `preprocess` is the hook of
 /// `rewriteWithPreprocess` (a closure over the AST, D09.4's resolver passes it).
-pub struct ExpressionRewriter<'a, 'b> {
+pub struct ExpressionRewriter<'a, 'b, 'ast> {
     ctx_stack: Vec<ExprRef>,
     ctx_name_stk: Vec<Arc<FieldName>>,
     schema: &'a Schema,
@@ -216,12 +271,12 @@ pub struct ExpressionRewriter<'a, 'b> {
     disable_fold_counter: i32,
     try_fold_counter: i32,
 
-    plan_ctx: Option<ExprRewriterPlanCtx<'b>>,
+    plan_ctx: Option<ExprRewriterPlanCtx<'b, 'ast>>,
 }
 
 /// The plan builder's state the rewriter reads (Go reads `b.*` through `planCtx.builder`).
 /// `outerSchemas` / `outerNames` exist only inside a subquery (D09.6) and are not here.
-impl PlanBuilder {
+impl<'ast> PlanBuilder<'ast> {
     /// rewrite function rewrites ast expr to expression.Expression.
     /// aggMapper maps ast.AggregateFuncExpr to the columns offset in p's output schema.
     /// asScalar means whether this expression must be treated as a scalar expression.
@@ -235,7 +290,7 @@ impl PlanBuilder {
         sctx: &dyn BuildContext,
         expr_node: &AstExpr,
         p: RewritePlan<'_>,
-        agg_mapper: Option<&AggMapper>,
+        agg_mapper: Option<&AggMapper<'_>>,
         as_scalar: bool,
     ) -> Result<Option<ExprRef>, Error> {
         self.rewrite_with_preprocess(sctx, expr_node, p, agg_mapper, None, as_scalar)
@@ -253,8 +308,8 @@ impl PlanBuilder {
         sctx: &dyn BuildContext,
         expr_node: &AstExpr,
         p: RewritePlan<'_>,
-        agg_mapper: Option<&AggMapper>,
-        window_mapper: Option<&WindowMapper>,
+        agg_mapper: Option<&AggMapper<'_>>,
+        window_mapper: Option<&WindowMapper<'_>>,
         as_scalar: bool,
     ) -> Result<Option<ExprRef>, Error> {
         // b.rewriterCounter++ / the pool: M-POOL (spec §3 item 3).
@@ -276,7 +331,7 @@ impl PlanBuilder {
         &'b mut self,
         sctx: &'a dyn BuildContext,
         p: RewritePlan<'a>,
-    ) -> ExpressionRewriter<'a, 'b>
+    ) -> ExpressionRewriter<'a, 'b, 'ast>
     where
         'a: 'b,
     {
@@ -447,7 +502,7 @@ pub fn rewrite_ast_expr_with_plan_ctx(
 /// columns to the plan (spec §3 item 2): not ported.
 // go: rewriteExprNode L2 (no output-name reset: only subqueries add columns, spec §3)
 pub fn rewrite_expr_node(
-    rewriter: &mut ExpressionRewriter<'_, '_>,
+    rewriter: &mut ExpressionRewriter<'_, '_, '_>,
     expr_node: &AstExpr,
     as_scalar: bool,
 ) -> Result<Option<ExprRef>, Error> {
@@ -616,7 +671,7 @@ fn cast_target_type(tp: &ast::FieldType) -> Result<FieldType, Error> {
     Ok(ft)
 }
 
-impl<'a, 'b> ExpressionRewriter<'a, 'b> {
+impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     /// A rewriter without a plan context (`buildSimpleExpr`): only the schema and names.
     // glue: the expressionRewriter literal of buildSimpleExpr
     pub fn new_simple(
@@ -625,7 +680,7 @@ impl<'a, 'b> ExpressionRewriter<'a, 'b> {
         names: &'a [Arc<FieldName>],
         source_table: Option<&'a TableInfo>,
         allow_cast_array: bool,
-    ) -> ExpressionRewriter<'a, 'b> {
+    ) -> ExpressionRewriter<'a, 'b, 'ast> {
         ExpressionRewriter {
             ctx_stack: Vec::new(),
             ctx_name_stk: Vec::new(),

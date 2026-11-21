@@ -26,6 +26,7 @@ pub mod planbuilder;
 pub mod point_get_plan;
 pub mod preprocess;
 pub mod resolve;
+pub mod rule;
 pub mod rule_column_pruning;
 pub mod rule_eliminate_projection;
 pub mod rule_predicate_push_down;

@@ -63,8 +63,47 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
 /// first compared as a string (implicit coercibility) and then cast to INT keeps "implicit"
 /// on the cast's clone, where tidb-rs derives "numeric" from the INT-flagged type. The value
 /// only matters for string collation derivation, which an INT context never does.
-const KNOWN_ALIASING_DIFFS: &[&str] =
-    &["((('10' = j) >= f) <= ((cast(h as signed)) div (j << true)))"];
+///
+/// Each entry is the expression and the JSON pointer of the one value that differs (the
+/// coercibility of the ENUM column under the cast); the record must match Go with that value blanked out on both
+/// sides (review of the expression rewriter, point 3).
+const KNOWN_ALIASING_DIFFS: &[(&str, &str)] = &[(
+    "((('10' = j) >= f) <= ((cast(h as signed)) div (j << true)))",
+    "/e/f/4/1/f/4/1/f/4/0/col/5",
+)];
+
+/// `got` and `want` with the known aliasing difference of `expr` blanked out, when `expr` has
+/// one.
+fn without_known_aliasing(expr: &str, got: &Value, want: &Value) -> Option<(Value, Value)> {
+    let (_, ptr) = KNOWN_ALIASING_DIFFS.iter().find(|(e, _)| *e == expr)?;
+    let (mut g, mut w) = (got.clone(), want.clone());
+    for v in [&mut g, &mut w] {
+        *v.pointer_mut(ptr)
+            .unwrap_or_else(|| panic!("{expr}: no value at {ptr}")) = Value::Null;
+    }
+    Some((g, w))
+}
+
+/// The JSON pointers where two values differ (to locate a known difference).
+fn diff_paths(a: &Value, b: &Value, path: String, out: &mut Vec<String>) {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            for (k, v) in x {
+                match y.get(k) {
+                    Some(w) => diff_paths(v, w, format!("{path}/{k}"), out),
+                    None => out.push(format!("{path}/{k}")),
+                }
+            }
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+            for (i, (v, w)) in x.iter().zip(y).enumerate() {
+                diff_paths(v, w, format!("{path}/{i}"), out);
+            }
+        }
+        _ if a == b => {}
+        _ => out.push(path),
+    }
+}
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -301,7 +340,7 @@ fn run(rec: &Value) -> Outcome {
                         v.db,
                         v.table,
                         v.column,
-                        gs(v.err.as_deref().unwrap_or("").as_bytes())
+                        gs(&v.err.as_ref().map(|e| e.error()).unwrap_or_default())
                     ])
                 })
                 .collect();
@@ -339,8 +378,14 @@ fn govec_rewrite() {
             Outcome::Unparsed => unparsed.push(e),
             Outcome::Blocked(b) => blocked.entry(b).or_default().push(e),
             Outcome::Value(got) if got == *out => matched += 1,
-            Outcome::Value(_) if KNOWN_ALIASING_DIFFS.contains(&e.as_str()) => aliasing += 1,
+            Outcome::Value(got)
+                if without_known_aliasing(&e, &got, out).is_some_and(|(g, w)| g == w) =>
+            {
+                aliasing += 1
+            }
             Outcome::Value(got) => {
+                let mut paths = Vec::new();
+                diff_paths(out, &got, String::new(), &mut paths);
                 if let Ok(dump) = std::env::var("GOVEC_REWRITE_DUMP") {
                     use std::io::Write;
                     let mut f = std::fs::OpenOptions::new()
@@ -356,7 +401,7 @@ fn govec_rewrite() {
                     .unwrap();
                 }
                 fails.push(format!(
-                    "{e} {}\n    want {out}\n    got  {got}",
+                    "{e} {} (differs at {paths:?})\n    want {out}\n    got  {got}",
                     rec["args"][3]
                 ))
             }

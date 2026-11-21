@@ -8,7 +8,7 @@
 //!   fast plan (`TryFastPlan`, D10.8, VS1-11: `core::point_get_plan::try_fast_plan`; Go tries
 //!   it only when `tidb_isolation_read_engines` holds TiKV, optimize.go:244, a check of this
 //!   driver, not of `TryFastPlan`), the plan cache (D13.1, VS1-15), then `optimize`;
-//! - `optimize` / `buildLogicalPlan`: `PlanBuilder.Build` (D09.1, VS1-21) and `DoOptimize`
+//! - `optimize` / `buildLogicalPlan`: `PlanBuilder.Build` (D09.1, VS1-21: SELECT is built) and `DoOptimize`
 //!   (D09.13 core part, VS1-24);
 //! - `OptimizeExecStmt`: the prepared statement path (D13.1, VS1-15): the `Execute` plan and
 //!   the plan cache's miss path, which ends in `OptimizeAstNode` (the statement's `Optimize`).
@@ -27,6 +27,7 @@ use crate::core::common_plans::Execute;
 use crate::core::plan_cache::get_plan_from_plan_cache;
 use crate::core::plan_cache_utils::{InfoSchemaLookup, get_prepared_stmt};
 use crate::core::planbuilder::new_plan_builder;
+use crate::core::preprocess::InfoSchemaHandle;
 use tidb_sessionctx::variable::variable::get_sys_var;
 
 /// IsReadOnly check whether the ast.Node is a read only statement.
@@ -97,7 +98,7 @@ pub fn optimize_exec_stmt(
     domain_is: Option<&dyn InfoSchemaLookup>,
 ) -> Result<(Execute, NameSlice), Error> {
     let mut builder = new_plan_builder(&[]);
-    builder.init(vars);
+    builder.init(vars, Some(InfoSchemaHandle(is.snapshot())));
 
     let mut exec = builder.build_execute(vars, exec_ast)?;
     let prep_stmt = Arc::clone(&exec.prep_stmt);
@@ -137,11 +138,14 @@ pub fn save_logical_plan_build_ctx() -> Result<(), Error> {
     Err(blocked("D09.13", "saveLogicalPlanBuildCtx"))
 }
 
-/// `buildLogicalPlan` builds the logical plan of a statement (`PlanBuilder.Build`).
-// glue: stub of buildLogicalPlan, blocked-by:D09.1 (VS1-21: PlanBuilder.Build of SELECT)
-// glue: stub of optimize, blocked-by:D09.1 (VS1-21: buildLogicalPlan; then DoOptimize, VS1-24)
+/// `buildLogicalPlan` builds the logical plan of a statement (`PlanBuilder.Build`, whose
+/// SELECT arm is ported). It resets the session's plan ids and the statement's rewrite
+/// state, and needs the planning context (`PlanCtx`) that the optimizer driver sets up for
+/// the routed statement; `optimize` then runs `DoOptimize` (VS1-24).
+// glue: stub of buildLogicalPlan, blocked-by:D09.13 (VS1-24: the planning context of the statement and the rewrite-phase state of the statement context)
+// glue: stub of optimize, blocked-by:D09.13 (VS1-24: buildLogicalPlan, then DoOptimize)
 pub fn build_logical_plan() -> Result<(), Error> {
-    Err(blocked("D09.1", "buildLogicalPlan"))
+    Err(blocked("D09.13", "buildLogicalPlan"))
 }
 
 /// `setVarHintChecker` checks a `SET_VAR` hint: the variable exists and may be set by a
