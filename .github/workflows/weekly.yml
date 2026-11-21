@@ -190,6 +190,25 @@ jobs:
           else
             echo "no earlier $NAME on ${{ github.ref_name }}"
           fi
+      - name: Rulings history
+        # The hit audit of the divergence ledger (#262, docs/testing/rulings.md) looks at the
+        # last N full runs ([audit] runs): this one plus the `weekly-rulings-hits` artifacts of
+        # up to N-1 earlier runs on this branch, newest first (only full runs upload one).
+        if: needs.plan.outputs.mode == 'weekly'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(python3 -c "import tomllib; print(tomllib.load(open('docs/testing/rulings.toml', 'rb'))['audit']['runs'])")
+          i=0
+          for id in $(gh api "repos/${{ github.repository }}/actions/artifacts?name=weekly-rulings-hits&per_page=100" \
+            --jq '.artifacts[] | select(.expired | not)
+                  | select(.workflow_run.id != ${{ github.run_id }})
+                  | select(.workflow_run.head_branch == "${{ github.ref_name }}")
+                  | .workflow_run.id' | head -n $((n - 1))); do
+            gh run download "$id" -n weekly-rulings-hits -D "rulings-history/$(printf %02d "$i")-$id"
+            i=$((i + 1))
+          done
+          echo "$i earlier full run(s) for the hit audit (N = $n)"
       - name: Report
         id: report
         run: |
@@ -199,7 +218,7 @@ jobs:
           parts=$(echo '${{ needs.plan.outputs.parts }}' | tr -d '[]" ')
           rc=0
           python3 tools/weekly/report.py --in results $prev --parts "$parts" --title "$title" \
-            --commit "${{ github.sha }}" --out report.md || rc=$?
+            --commit "${{ github.sha }}" --rulings-history rulings-history --out report.md || rc=$?
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           { echo "rc=$rc"; echo "week=$week"; echo "verdict=$(cat verdict.txt)"; } >> "$GITHUB_OUTPUT"
       - name: Keep the results
@@ -210,6 +229,15 @@ jobs:
             results
             report.md
             census.tsv
+          retention-days: 90
+      # This full run's ruling hits (report.py writes rulings-run.tsv only for a full run), for
+      # the next runs' hit audit; kept whatever the verdict.
+      - name: Keep the ruling hits (full runs)
+        if: hashFiles('rulings-run.tsv') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.plan.outputs.mode }}-rulings-hits
+          path: rulings-run.tsv
           retention-days: 90
       - name: New baseline
         if: steps.report.outputs.rc == '0' || (inputs.accept_baseline && steps.report.outputs.rc != '1')

@@ -2,6 +2,8 @@
 
 tidb-rs is a function-by-function port of Go TiDB **v8.5.8** (`8b857efa2`). By default it behaves exactly like v8.5.8, including its bugs. This page lists the places where a user can see different behavior. Internal deviations that cannot be observed through SQL or the wire protocol are recorded in each block's `specs/<block>/spec.md` §4, not here.
 
+Every row of the go-fix, deliberate-deviation and observability tables below is also a ruling in the machine-readable divergence ledger [`docs/testing/rulings.toml`](testing/rulings.md) (id, approver, re-open trigger). Add a new deviation to both.
+
 ## Upstream fixes ported from TiDB master (go-fix)
 
 Following the constitution (article 1, item 2), tidb-rs ports security and data-correctness fixes that are on TiDB master but were not backported to `release-8.5`. The govec vectors for these cases are generated from a patched v8.5.8 (see `govec/fixes/README.md` in tidb-rs-tracker).
