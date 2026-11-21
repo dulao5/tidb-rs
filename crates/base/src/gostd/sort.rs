@@ -449,23 +449,6 @@ fn reverse_range<T, F: FnMut(&T, &T) -> bool>(data: &mut Data<'_, T, F>, a: usiz
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sorts_like_a_sort() {
-        let mut rng = Xorshift(88172645463325252);
-        for n in [0usize, 1, 2, 7, 12, 13, 49, 50, 51, 200, 1000] {
-            let mut v: Vec<u32> = (0..n).map(|_| (rng.next() % 97) as u32).collect();
-            let mut w = v.clone();
-            sort(&mut v, |a, b| a < b);
-            w.sort();
-            assert_eq!(v, w);
-        }
-    }
-}
-
 /// `sort.Search(n, f)`: the smallest index `i` in `[0, n)` at which `f(i)` is true,
 /// assuming that on `[0, n)`, `f(i) == true` implies `f(i+1) == true`; `n` if there is no
 /// such index. The calls are made in Go's order (callers' `f` may have side effects).
@@ -485,4 +468,21 @@ pub fn search(n: usize, mut f: impl FnMut(usize) -> bool) -> usize {
     }
     // i == j, f(i-1) == false, and f(j) (= f(i)) == true  =>  answer is i.
     i
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sorts_like_a_sort() {
+        let mut rng = Xorshift(88172645463325252);
+        for n in [0usize, 1, 2, 7, 12, 13, 49, 50, 51, 200, 1000] {
+            let mut v: Vec<u32> = (0..n).map(|_| (rng.next() % 97) as u32).collect();
+            let mut w = v.clone();
+            sort(&mut v, |a, b| a < b);
+            w.sort();
+            assert_eq!(v, w);
+        }
+    }
 }

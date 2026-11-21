@@ -382,7 +382,7 @@ pub fn parse_uint_go(s: &[u8], base: i32, bit_size: i32) -> (u64, Result<(), Num
             continue;
         } else if c.is_ascii_digit() {
             c - b'0'
-        } else if (b'a'..=b'z').contains(&lower(c)) {
+        } else if lower(c).is_ascii_lowercase() {
             lower(c) - b'a' + 10
         } else {
             return (0, Err(err(NumErrKind::Syntax)));
