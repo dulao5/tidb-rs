@@ -11,7 +11,7 @@
   3. 共享修改的审计范围扩大到 `FieldType` 和 `Schema` 的别名，新增映射规则 `M-FT`（§1、§3.3、§5）；
   4. 写明 `M-SELF` 的细节（§3.7）；
   5. 登记交给 N4 / A3 的待定项，以及未验证的 §3.2（§7）。
-- 2026-11-21：按 `taskMap` 试点（VS1-26，[报告](../../VS1-vertical-slice/spike-taskmap.md)，#287 评审）补充三条写法规则（§3.9）。只收紧写法，不改表示、语义和范围，由协调人确认（Lucky 评审同意不需要负责人单独确认）；§7 第 3 条关闭。
+- 2026-11-21：按 `taskMap` 试点（VS1-26，[报告](../../VS1-vertical-slice/spike-taskmap.md)，#287 评审）补充三条写法规则（§3 第 9 条）。只收紧写法，不改表示、语义和范围，由协调人确认（Lucky 评审同意不需要负责人单独确认）；§7 第 3 条关闭。
 
 ## 1. 要解决的问题
 
@@ -72,16 +72,13 @@ v8.5.8 中与表示相关的事实：
    - **指针比较**：Go 的 `p.Schema() == child.Schema()` 写成 `std::ptr::eq`，结果相同。
 8. **AST** 维持 parser crate 现有的结构。注意：N2 要求 `Session: Send`，prepared statement 若在会话中保存 AST，AST 中的 `Rc` 要换成 `Arc` 或拥有型结构，或者会话只保存降级后的 IR（D02 中处理）。
 
-### 3.9 物理计划的写法补充规则（2026-11-21，taskMap 试点）
-
-试点验证了 §3.2 的 `taskMap` 旁表：命中时返回同一个 `Arc`，候选之间共享子计划与 Go 一致，代价计算期间不复制节点（代价缓存经 `&self` 写在共享节点上）。在此基础上补充三条规则：
-
-1. **"链"是唯一可写的地方，扁平列表只读。** `PhysicalTableReader` 同时持有 `table_plan`（链）和 `table_plans`（同一批节点展开成的列表），`PhysicalIndexMergeReader` 的 `PartialPlans` 也是同样的结构。经 `make_mut_plan` 写链上的节点会复制它，列表仍指向旧节点；反过来经列表写也会让链失步。Go 里两边看到的是同一个对象：`ResolveIndices` 只改 `tablePlan`，执行器和 `ToPB` 读的是 `TablePlans`；计划缓存重建时 `updateRange(x.TablePlans[0])` / `rebuildRange(x.TablePlans[0])` 又是经列表写。规则：
-   - 只在链上写；Go 经 `TablePlans[i]` 写的地方，翻译成写链上对应的节点；
-   - 写之后重新展开列表（Go 在改链的结构后也会重新展开，如 `SetChildren`、`optimizer.go` L409 等）。
-   - **首选做法**：不保存列表，用到时从链展开。链很短，Go 里对列表的约 20 处使用都是读；这样直接消除这类失步，`strong_count == 1` 的检查也不用特殊处理。VS1-24 / VS1-31 动到这些结构时按首选做法实现。
-2. **试候选时把候选移出列表**（`into_iter()`），不克隆 `Arc`；克隆会让每个候选被复制一次。Go 在 `Attach2Task` 之后不再使用候选。
-3. **`taskMap` 只在 `physicalOptimize` 内部存活**，返回前释放，不挂在 arena 上。否则之后的 `postOptimize` 会复制节点（试点中 3 次 → 释放后 0 次）。Go 的 `taskMap` 在 `physicalOptimize` 之后没有读者。
+9. **物理计划的写法补充规则**（2026-11-21，`taskMap` 试点 VS1-26）。试点验证了第 2 条的 `taskMap` 旁表：命中时返回同一个 `Arc`，候选之间共享子计划与 Go 一致，代价计算期间不复制节点（代价缓存经 `&self` 写在共享节点上）。在此基础上补充三条：
+   1. **"链"是唯一可写的地方，扁平列表只读。** 所有和链持有同一批节点的扁平列表都适用，目前有：`PhysicalTableReader.TablePlans`、`PhysicalIndexReader.IndexPlans`、`PhysicalIndexLookUpReader.IndexPlans` / `TablePlans`、`PhysicalIndexMergeReader.PartialPlans` / `TablePlans`。经 `make_mut_plan` 写链上的节点会复制它，列表仍指向旧节点；反过来经列表写也会让链失步。Go 里两边看到的是同一个对象：`ResolveIndices` 只改链（如 `tablePlan`），执行器和 `ToPB` 读的是列表；计划缓存重建又是经列表写（`plan_cache_rebuild.go` 的 `updateRange(x.TablePlans[0])`、`rebuildRange(x.TablePlans[0])`，以及 L62–64 经 `IndexPlans[0]`）。规则：
+      - 只在链上写；Go 经列表第 i 项写的地方，翻译成写链上对应的节点；
+      - 写之后重新展开列表（Go 在改链的结构后也会重新展开，如 `SetChildren`、`optimizer.go` L409 等）；
+      - **首选做法**：不保存列表，用到时从链展开。链很短，Go 里对这些列表的使用几乎都是读；这样直接消除这类失步，`strong_count == 1` 的检查也不用特殊处理。VS1-24 / VS1-31 以及以后移植索引读时按首选做法实现。
+   2. **试候选时把候选移出列表**（`into_iter()`），不克隆 `Arc`；克隆会让每个候选被复制一次。Go 在 `Attach2Task` 之后不再使用候选。
+   3. **`taskMap` 只在 `physicalOptimize` 内部存活**，返回前释放，不挂在 arena 上。否则之后的 `postOptimize` 会复制节点（试点中 3 次 → 释放后 0 次）。Go 的 `taskMap` 在 `physicalOptimize` 之后没有读者。
 
 ## 4. 固定写法：摘出节点再分派（对 L1 移植的影响）
 
@@ -154,7 +151,7 @@ fn predicate_push_down(&mut self, ctx: &mut PlanCtx<'_>, this: PlanId, predicate
 **仍未完成**：
 
 - 指标：sysbench 只读语句和 TPC-H 22 条查询的优化耗时不高于 Go；每条语句优化结束后没有残留分配（arena 整体释放）。要等 planbuilder（D09.1）可用后测。
-- ~~§3.2 `taskMap` 旁表~~：已由 VS1-26 试点验证（§3.9）。
+- ~~§3.2 `taskMap` 旁表~~：已由 VS1-26 试点验证（§3 第 9 条）。
 
 ## 6. 原待定项的结论
 
@@ -167,4 +164,4 @@ fn predicate_push_down(&mut self, ctx: &mut PlanCtx<'_>, this: PlanId, predicate
 
 1. **N4：`Arc<Column>` 与内嵌 `Column` 两种表示之间的分配开销**。schema 里是 `Arc<Column>`，表达式里是 `Expr::Column(Column)`（列直接内嵌）。`ExtractColumns`、`Column2Exprs`、消除投影时往 replace map 里放列，每次转换都要分配一个新的 `Arc`，Go 在这些地方不分配。试点没有测绝对开销（与规则涉及的列引用数成正比）。规划器全面移植（P3）前在 N4 中测一下，必要时改成 `Expr::Column(Arc<Column>)`。
 2. **N4 / A3：跨会话共享计划时的函数缓存**。Go 的 `BuiltinFuncCache` 按 `ctx_id` 缓存、用 Mutex 保护。实例级 plan cache 让多个会话共享同一个表达式后，会争用这把锁，并因 `ctx_id` 不同而互相冲掉缓存。实例级 plan cache 打开前，要在 N4 或 A3 中决定：改为按执行状态缓存（N4 的 `RpnState`），或命中时复制带缓存的函数节点。A3 还要处理试点报告 §5 的其他风险：计划节点不能保存会话上下文（`p.SCtx()`、`PointGetPlan.ctx`），Go 在执行期修改计划的位置（`generateNewPlan` 注释 "execution (might modify the plan)"）要在 D12 移植时逐处找出。
-3. **（已关闭，2026-11-21，见 §3.9）** **§3.2 `taskMap` / `FindBestTask` 没有验证**。D09.7 用不到 FindBestTask，`taskMap` 旁表、按时间戳回滚、`Arc` 子计划在候选之间的共享都没有被试点覆盖（`memo_shared_child_is_copied_only_while_shared` 只是演示，属推断）。D10.2（约 5.9k 行）开工时补一个小试点，验证这三件事，以及 `postOptimize` 之前释放 `taskMap` 后物理树的引用计数为 1、`make_mut_plan` 没有复制（§3.4）；结论回写本 spec。
+3. **（已关闭，2026-11-21，见 §3 第 9 条）** **§3.2 `taskMap` / `FindBestTask` 没有验证**。D09.7 用不到 FindBestTask，`taskMap` 旁表、按时间戳回滚、`Arc` 子计划在候选之间的共享都没有被试点覆盖（`memo_shared_child_is_copied_only_while_shared` 只是演示，属推断）。D10.2（约 5.9k 行）开工时补一个小试点，验证这三件事，以及 `postOptimize` 之前释放 `taskMap` 后物理树的引用计数为 1、`make_mut_plan` 没有复制（§3.4）；结论回写本 spec。
