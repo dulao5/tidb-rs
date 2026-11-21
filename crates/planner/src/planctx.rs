@@ -4,6 +4,12 @@
 
 use std::sync::Arc;
 
+use tidb_base::Error;
+use tidb_base::blocked::blocked;
+use tidb_expr_pushdown::infer_pushdown::{
+    PushDownContext, new_push_down_context_from_session_vars,
+};
+use tidb_kv::kv::Client;
 use tidb_sessionctx::exprctx::{BuildContextRef, EvalContextRef, ExprContext, ExprContextRef};
 use tidb_sessionctx::ranger::context::RangerContext;
 use tidb_sessionctx::variable::session::SessionVars;
@@ -25,6 +31,10 @@ pub struct PlanCtx<'s> {
     /// `p.SCtx().GetExprCtx()`: a shared `Arc<dyn ExprContext>` whose warnings and
     /// column-id allocator are interior-mutable (N4), so reading it never needs `&mut`.
     pub expr_ctx: ExprContextRef,
+    /// `p.SCtx().GetClient()`: the store's coprocessor client, read by the push down checks
+    /// (`util.GetPushDownCtx`). `None` until the session hands it over with the routed
+    /// statement (VS1-24 / VS1-37); the push down functions then return a boundary error.
+    pub client: Option<Arc<dyn Client>>,
 }
 
 impl<'s> PlanCtx<'s> {
@@ -35,7 +45,25 @@ impl<'s> PlanCtx<'s> {
             arena: PlanArena::new(),
             vars,
             expr_ctx,
+            client: None,
         }
+    }
+
+    /// `util.GetPushDownCtx(p.SCtx())`: the context of the expression push down checks,
+    /// from the session vars, the statement's warning handlers and the store client.
+    // glue: N2 (util.GetPushDownCtx over the PlanCtx; the fields are the BuildPBContext's)
+    pub fn push_down_ctx(&self) -> Result<PushDownContext<'static>, Error> {
+        let Some(client) = &self.client else {
+            return Err(blocked(
+                "D09.13",
+                "the store client of the planning context (GetPushDownCtx)",
+            ));
+        };
+        Ok(new_push_down_context_from_session_vars(
+            self.eval_ctx(),
+            self.vars,
+            Arc::clone(client),
+        ))
     }
 
     /// `p.SCtx().GetExprCtx().GetEvalCtx()`.
