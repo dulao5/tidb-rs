@@ -93,7 +93,7 @@ impl PathAliases {
     /// list of all paths has no Go counterpart in the slice's statements (index merge and
     /// partition alternatives are boundaries): a boundary.
     // glue: Go's pointer identity of the access paths
-    pub(crate) fn of(ds: &DataSource) -> Result<PathAliases, Error> {
+    pub(crate) fn path_aliases_of(ds: &DataSource) -> Result<PathAliases, Error> {
         let mut pos = Vec::with_capacity(ds.possible_access_paths.len());
         let mut used = vec![false; ds.all_possible_access_paths.len()];
         for p in &ds.possible_access_paths {
@@ -163,7 +163,7 @@ pub fn derive_stats4_data_source(
             .expect("runtime error: invalid memory address or nil pointer dereference");
     }
     check_partial_indexes(ds)?;
-    let aliases = PathAliases::of(ds)?;
+    let aliases = PathAliases::path_aliases_of(ds)?;
     // Index pruning is now done earlier in CollectPredicateColumnsPoint to avoid loading stats for pruned indexes.
     // Fill index paths for all paths.
     for i in 0..ds.all_possible_access_paths.len() {
