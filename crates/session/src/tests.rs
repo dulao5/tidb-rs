@@ -476,7 +476,9 @@ fn compile_error_rolls_back() {
     let e = block_on(s.execute_stmt(parse("SELECT a FROM t"), "SELECT a FROM t"))
         .err()
         .unwrap();
-    assert_eq!(blocked(&e), Some("D09.13"));
+    // A plain statement stops in Compile before the preprocessor (compiler.rs
+    // `planner_stmt_node`).
+    assert_eq!(blocked(&e), Some("D05.3"));
     assert!(s.is_idle(), "{}", s.state_snapshot());
     assert_eq!(store.requests.load(SeqCst), 0);
     // ResetContextOfStmt ran: the new statement context is a SELECT's.
@@ -728,8 +730,8 @@ fn every_fallback_point_restores_the_session() {
             let e = block_on(s.execute_stmt(parse("SELECT a FROM t"), "SELECT a FROM t"))
                 .err()
                 .unwrap();
-            assert_eq!(blocked(&e), Some("D09.13"));
-            "D09.13"
+            assert_eq!(blocked(&e), Some("D05.3"));
+            "D05.3"
         }),
         ("after the warm-up (TSO pending)", |s| {
             let _ = compile(s, "SELECT a FROM t", 1);
@@ -1207,9 +1209,95 @@ fn prepare_of_the_sbtest_point_select_builds_the_plan() {
     let Err(e) =
         block_on(s.execute_prepared_stmt(info.stmt_id, vec![tidb_types::datum::new_int_datum(1)]))
     else {
-        panic!("EXECUTE has no planner yet");
+        panic!("the point get of a parameter is not built yet");
     };
-    assert_eq!(blocked_by(&e), Some("D09.13"), "{e}");
+    // Compile reaches the fast plan of planner.Optimize, which stops at the parameter of the
+    // point get condition (getNameValuePairs, D13.1) after the plan cache set the value.
+    assert_eq!(blocked_by(&e), Some("D13.1"), "{e}");
+    assert_eq!(params_of(&s), vec!["1".to_owned()]);
+    assert!(s.is_idle());
+    assert_eq!(s.executed_stmts(), 0);
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
+}
+
+/// The parameter values in the session (`SessionVars.PlanCacheParams`), as text.
+fn params_of(s: &Session) -> Vec<String> {
+    s.vars()
+        .state
+        .plan_cache_params
+        .lock()
+        .all_param_values()
+        .iter()
+        .map(datum_text)
+        .collect()
+}
+
+/// A datum as text (`NULL` for the null datum).
+fn datum_text(d: &tidb_types::datum::Datum) -> String {
+    if d.is_null() {
+        return "NULL".to_owned();
+    }
+    String::from_utf8_lossy(&d.to_string().unwrap()).into_owned()
+}
+
+/// A real-session EXECUTE reads its parameters (D05.3 spec §8–§9): for an int, a string and
+/// NULL, the plan cache's miss path sets the values into the session; the planning context
+/// the session hands the planner (its `sessionexpr` context) reads them, and a `?` the
+/// planner's expression rewriter builds in that context is a constant of the parameter's
+/// value and type (Go's `ParamMarkerExpression`); planning goes on to the physical
+/// optimization boundary, before anything ran.
+#[test]
+fn execute_reads_the_parameters_through_the_session_expression_context() {
+    use tidb_sessionctx::exprctx::BuildContext;
+    use tidb_types::datum::{Datum, new_int_datum, new_string_datum};
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let mut s = sbtest_session(&store);
+    let info = block_on(s.prepare_stmt("SELECT c FROM sbtest1 WHERE id > ?")).unwrap();
+    let select_marker = parse("SELECT ?");
+    let ast::Stmt::Select(sel) = select_marker.as_ref() else {
+        unreachable!()
+    };
+    let marker = sel.fields.fields[0].expr.as_ref().unwrap();
+    let cases: [(Datum, &str, u8); 3] = [
+        (new_int_datum(7), "7", tidb_base::mysql::TypeLonglong),
+        (new_string_datum("a"), "a", tidb_base::mysql::TypeVarString),
+        // Go's InferParamTypeFromUnderlyingValue: a NULL parameter is a VARCHAR.
+        (Datum::default(), "NULL", tidb_base::mysql::TypeVarString),
+    ];
+    for (param, text, tp) in cases {
+        let e = block_on(s.execute_prepared_stmt(info.stmt_id, vec![param]))
+            .err()
+            .unwrap();
+        assert!(
+            PHYSICAL_BOUNDARIES.contains(&blocked(&e).unwrap_or_default()),
+            "{text}: {e}"
+        );
+        assert_eq!(s.executed_stmts(), 0, "{text}");
+        assert!(s.is_idle(), "{text}");
+        // The value the plan cache set (planCachePreprocess) ...
+        let expected = vec![text.to_owned()];
+        assert_eq!(params_of(&s), expected, "{text}");
+        // ... is what the session's planning context reads ...
+        let ctx = s.core.get_plan_ctx().expr_ctx;
+        let v = ctx.get_eval_ctx().get_param_value(0).unwrap();
+        assert_eq!(datum_text(&v), expected[0], "{text}");
+        assert!(ctx.get_eval_ctx().get_param_value(1).is_err());
+        // ... and what the planner builds a parameter marker from.
+        let (expr, _) = tidb_planner::core::expression_rewriter::rewrite_ast_expr_with_plan_ctx(
+            &*ctx as &dyn BuildContext,
+            marker,
+            None,
+            &[],
+            false,
+        )
+        .unwrap();
+        let tidb_expression::Expr::Constant(c) = &*expr else {
+            panic!("{text}: {expr:?}");
+        };
+        assert_eq!(datum_text(&c.value), expected[0], "{text}");
+        assert_eq!(c.ret_type.get_type(), tp, "{text}");
+    }
     s.drop_prepared_stmt(info.stmt_id).unwrap();
 }
 
@@ -1356,34 +1444,61 @@ fn register_prepared(s: &mut Session, id: u32, sql: &str) {
     ps.prepared_ast.stmt = Box::new(Arc::try_unwrap(parse(sql)).unwrap());
     ps.prepared_ast.stmt_type = "Select".to_owned();
     ps.stmt_text = sql.to_owned();
+    ps.params = sql.match_indices('?').map(|(i, _)| i).collect();
     s.vars_mut()
         .add_prepared_stmt(id, Arc::new(parking_lot::Mutex::new(ps)))
         .unwrap();
 }
 
+/// Where planning an EXECUTE stops while physical optimization is not finished: the
+/// statistics derivation (D10.6), FindBestTask (D10.2), ResolveIndices (D10.9) or the cost
+/// (D10.5), in that order; once they are done, running the `Execute` plan (D13.1, raised in
+/// `Compile`). Every one of them comes before anything runs, so the caller falls back.
+const PHYSICAL_BOUNDARIES: [&str; 5] = ["D10.6", "D10.2", "D10.9", "D10.5", "D13.1"];
+
 /// The binary protocol's EXECUTE of a prepared statement runs through `ExecuteStmt` with an
 /// EXECUTE node (Go `ExecutePreparedStmt`): `ResetContextOfStmt` works on the prepared
-/// SELECT and its text, and the statement reaches the compiler's planner (a boundary stub,
-/// so the caller falls back); restoring the checkpoint gives the session back. The
-/// statement-level helpers read the prepared statement too.
+/// SELECT and its text, and `Compile` runs `IsReadOnly`, the preprocessor and
+/// `planner.Optimize` (the plan cache's miss path) up to the physical optimization
+/// boundary, so the caller falls back; restoring the checkpoint gives the session back
+/// exactly (also the parameter values the planner set). The statement-level helpers read the
+/// prepared statement too.
 #[test]
 fn execute_of_a_prepared_stmt_reaches_the_planner() {
     let _serial = PREPARED_COUNT.lock();
     let store = MockStore::new(10);
-    let mut s = session(&store);
-    let sql = "SELECT a FROM t WHERE id = ?";
-    register_prepared(&mut s, 1, sql);
+    let mut s = sbtest_session(&store);
+    let sql = "SELECT c FROM sbtest1 WHERE id > ?";
+    let info = block_on(s.prepare_stmt(sql)).unwrap();
     s.vars().stmt_ctx().append_warning(Error::plain("earlier"));
     let before = s.state_snapshot();
     let cp = s.checkpoint();
-    let e = block_on(s.execute_prepared_stmt(1, vec![tidb_types::datum::new_int_datum(1)]))
-        .err()
-        .unwrap();
-    assert_eq!(blocked(&e), Some("D09.13"), "{e}");
+    let e =
+        block_on(s.execute_prepared_stmt(info.stmt_id, vec![tidb_types::datum::new_int_datum(1)]))
+            .err()
+            .unwrap();
+    assert!(
+        PHYSICAL_BOUNDARIES.contains(&blocked(&e).unwrap_or_default()),
+        "{e}"
+    );
     let sc = s.vars().stmt_ctx();
     assert!(sc.in_select_stmt);
+    assert!(sc.is_read_only, "Compile ran planner.IsReadOnly");
     assert_eq!(sc.original_sql, sql);
     assert_eq!(s.executed_stmts(), 0);
+    assert!(
+        s.is_idle(),
+        "rollbackOnError ended the statement's transaction"
+    );
+    assert_eq!(
+        s.vars()
+            .state
+            .plan_cache_params
+            .lock()
+            .all_param_values()
+            .len(),
+        1
+    );
     s.restore(cp).unwrap();
     assert_eq!(s.state_snapshot(), before);
     assert!(s.is_idle());
@@ -1397,7 +1512,7 @@ fn execute_of_a_prepared_stmt_reaches_the_planner() {
             ..Default::default()
         }))
     };
-    assert!(!crate::session::is_end_txn_stmt(&exec_of(&s, 1), s.vars()).unwrap());
+    assert!(!crate::session::is_end_txn_stmt(&exec_of(&s, info.stmt_id), s.vars()).unwrap());
     register_prepared(&mut s, 2, "COMMIT");
     assert!(crate::session::is_end_txn_stmt(&exec_of(&s, 2), s.vars()).unwrap());
     let by_name = ast::Stmt::Execute(Box::new(ast::ExecuteStmt {
@@ -1438,4 +1553,286 @@ impl Client for MockClient {
     fn is_request_type_supported(&self, _: i64, _: i64) -> bool {
         true
     }
+}
+
+// ---------------------------------------------------------------- sessionexpr (spec §8)
+
+/// Go `TestSessionEvalContextBasic`, on a view built after the variables are set (the
+/// scalar variables are a snapshot, spec §8.1): the fields, and the warnings, which go to the
+/// statement context and back.
+#[test]
+fn session_eval_context_basic() {
+    use tidb_base::contextutil::{WarnAppender, WarnHandler, WarnLevelWarning};
+    use tidb_sessionctx::exprctx::EvalContext as _;
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    s.vars_mut().sql_mode =
+        (tidb_base::mysql::ModeStrictTransTables | tidb_base::mysql::ModeNoZeroDate).0;
+    s.vars_mut().current_db = "db1".to_owned();
+    s.vars_mut().max_allowed_packet = 123456;
+    let ctx = s.core.sctx.expr_ctx();
+    let imp = ctx.eval();
+    assert_eq!(imp.sql_mode().0, s.vars().sql_mode);
+    assert_eq!(imp.current_db(), "db1");
+    assert_eq!(imp.get_max_allowed_packet(), 123456);
+    assert_eq!(
+        imp.location().string(),
+        s.vars().stmt_ctx().time_zone().string()
+    );
+    assert_eq!(imp.get_default_week_format_mode(), "0");
+    s.vars_mut()
+        .set_system_var("default_week_format", "5")
+        .unwrap();
+    assert_eq!(
+        s.core.sctx.expr_ctx().eval().get_default_week_format_mode(),
+        "5"
+    );
+    assert!(Arc::ptr_eq(
+        &(imp.get_user_vars_reader()),
+        &(Arc::clone(&s.vars().state.user_vars)
+            as tidb_sessionctx::variable::uservars::UserVarsReaderRef)
+    ));
+
+    // handle warnings: the statement context's handler, both ways.
+    assert_eq!(imp.warning_count(), 0);
+    imp.append_warning(Error::plain("err1"));
+    assert_eq!(imp.warning_count(), 1);
+    s.vars().stmt_ctx().append_warning(Error::plain("err2"));
+    assert_eq!(imp.warning_count(), 2);
+    assert_eq!(s.vars().stmt_ctx().warning_count(), 2);
+    let warnings = imp.copy_warnings(Vec::new());
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings.iter().all(|w| w.level == WarnLevelWarning));
+    let warnings = imp.truncate_warnings(1);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].err.to_string(), "err2");
+    assert_eq!(imp.warning_count(), 1);
+}
+
+/// Go `TestSessionEvalContextCurrentTime`: the stale read TSO (evaluated once), else the
+/// `timestamp` variable, else the current time.
+#[test]
+fn session_eval_context_current_time() {
+    use tidb_sessionctx::exprctx::EvalContext as _;
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    s.vars()
+        .stmt_ctx()
+        .set_stale_tso_provider_if_not_exist(Box::new(move || {
+            c.fetch_add(1, SeqCst);
+            // oracle.GoTimeToTS(time.UnixMilli(123456789))
+            Ok(123_456_789u64 << 18)
+        }));
+    let imp = s.core.sctx.expr_ctx();
+    for _ in 0..2 {
+        let tm = imp.eval().current_time().unwrap();
+        assert_eq!((tm.unix(), tm.nanosecond()), (123_456, 789_000_000));
+    }
+    assert_eq!(calls.load(SeqCst), 1);
+
+    // The "timestamp" variable when it is set.
+    s.vars_mut().stmt_ctx_mut().reset();
+    s.vars_mut()
+        .set_system_var("timestamp", "7654321.875")
+        .unwrap();
+    let tm = s.core.sctx.expr_ctx().eval().current_time().unwrap();
+    assert_eq!((tm.unix(), tm.nanosecond()), (7_654_321, 875_000_000));
+
+    // The current time otherwise.
+    s.vars_mut().set_system_var("timestamp", "0").unwrap();
+    let tm = s.core.sctx.expr_ctx().eval().current_time().unwrap();
+    let now = tidb_base::gostd::time::now().unix();
+    assert!((tm.unix() - now).abs() <= 5, "{} {now}", tm.unix());
+}
+
+/// Go `TestSessionEvalContextPrivilegeCheck` (no privilege manager: every check passes) and
+/// `TestSessionEvalContextOptProps`: all nine properties exist, the five the session cannot
+/// back answer a boundary error (spec §8.3).
+#[test]
+fn session_eval_context_privileges_and_optional_props() {
+    use tidb_sessionctx::exprctx::{
+        EvalContext as _, OptPropAdvisoryLock, OptPropCurrentUser, OptPropDDLOwnerInfo,
+        OptPropInfoSchema, OptPropKVStore, OptPropPrivilegeChecker, OptPropSQLExecutor,
+        OptPropSequenceOperator, OptPropSessionVars,
+    };
+    use tidb_sessionctx::expropt::{
+        AdvisoryLockPropReader, CurrentUserPropReader, DDLOwnerPropReader, InfoSchemaPropReader,
+        PrivilegeChecker, PrivilegeCheckerPropReader, SQLExecutorPropReader,
+        SequenceOperatorPropReader,
+    };
+    let store = MockStore::new(10);
+    let s = sbtest_session(&store);
+    let ctx = s.core.sctx.expr_ctx();
+    let imp = ctx.eval();
+    assert!(imp.request_verification("test", "tbl1", "col1", tidb_base::mysql::SuperPriv));
+    assert!(imp.request_dynamic_verification("RESTRICTED_TABLES_ADMIN", true));
+
+    // Every property exists (Go code branches on that), as in Go.
+    let set = imp.get_optional_prop_set();
+    assert!(set.is_full());
+    for key in [
+        OptPropInfoSchema,
+        OptPropKVStore,
+        OptPropSQLExecutor,
+        OptPropSequenceOperator,
+        OptPropDDLOwnerInfo,
+        OptPropPrivilegeChecker,
+        OptPropCurrentUser,
+        OptPropSessionVars,
+        OptPropAdvisoryLock,
+    ] {
+        assert!(set.contains(key), "{key}");
+        assert_eq!(
+            imp.get_optional_prop_provider(key).unwrap().desc().key(),
+            key
+        );
+    }
+    let dyn_ctx: &dyn tidb_sessionctx::exprctx::EvalContext = &**imp;
+    // The ones the session cannot back answer a boundary error when taken.
+    let e = CurrentUserPropReader.current_user(dyn_ctx).err().unwrap();
+    assert_eq!(blocked(&e), Some("D04.1"));
+    let e = AdvisoryLockPropReader
+        .advisory_lock_ctx(dyn_ctx)
+        .err()
+        .unwrap();
+    assert_eq!(blocked(&e), Some("D05.3"));
+    let e = tidb_sessionctx::expropt::get_prop_provider::<()>(dyn_ctx, OptPropSessionVars)
+        .err()
+        .unwrap();
+    assert_eq!(blocked(&e), Some("D05.3"));
+    assert_eq!(
+        InfoSchemaPropReader
+            .get_session_info_schema(dyn_ctx)
+            .unwrap()
+            .unwrap()
+            .schema_meta_version(),
+        1
+    );
+    assert!(!DDLOwnerPropReader.is_ddl_owner(dyn_ctx).unwrap());
+    let checker = PrivilegeCheckerPropReader
+        .get_privilege_checker(dyn_ctx)
+        .unwrap();
+    assert!(checker.request_verification("db", "t", "c", tidb_base::mysql::CreatePriv));
+    let e = SQLExecutorPropReader
+        .get_sql_executor(dyn_ctx)
+        .err()
+        .unwrap();
+    assert_eq!(blocked(&e), Some("D00.3"));
+    let e = SequenceOperatorPropReader
+        .get_sequence_operator(dyn_ctx, "test", "seq")
+        .err()
+        .unwrap();
+    assert_eq!(blocked(&e), Some("D06.4"));
+}
+
+/// Go `TestSessionBuildContext`: the build context's variables, and the parts it shares with
+/// the session (the random generator, the plan cache tracker, the plan column ids, the
+/// parameter values) read and write the session's own.
+#[test]
+fn session_build_context_shares_the_session_state() {
+    use tidb_sessionctx::exprctx::{BuildContext, ParamValues, StaticConvertibleExprContext};
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    s.vars_mut().default_collation_for_utf8mb4 = "utf8mb4_0900_ai_ci".to_owned();
+    s.vars_mut().sysdate_is_now = true;
+    s.vars_mut().noop_funcs_mode = 2;
+    s.core.sctx.set_connection_id(123);
+    let imp = s.core.sctx.expr_ctx();
+    assert_eq!(imp.get_charset_info(), s.vars().get_charset_info());
+    assert_eq!(
+        imp.get_default_collation_for_utf8mb4(),
+        "utf8mb4_0900_ai_ci"
+    );
+    assert!(imp.get_sysdate_is_now());
+    assert_eq!(imp.get_noop_funcs_mode(), 2);
+    assert_eq!(imp.connection_id(), 123);
+    assert!(!imp.is_in_null_reject_check());
+    assert!(!imp.is_constant_propagate_check());
+
+    // Rng: the session's generator.
+    assert!(Arc::ptr_eq(&imp.rng(), &s.vars().state.rng.share()));
+
+    // PlanCache: the statement's tracker.
+    s.vars().stmt_ctx().plan_cache_tracker.enable_plan_cache();
+    assert!(imp.is_use_cache());
+    imp.set_skip_plan_cache("mockReason");
+    assert!(!imp.is_use_cache());
+    assert!(!s.vars().stmt_ctx().plan_cache_tracker.use_cache());
+
+    // Alloc column id: the session's counter.
+    let prev = s.vars().state.plan_column_id.0.load(SeqCst);
+    assert_eq!(imp.alloc_plan_column_id(), prev + 1);
+    assert_eq!(imp.alloc_plan_column_id(), prev + 2);
+    s.vars().alloc_plan_column_id();
+    assert_eq!(imp.alloc_plan_column_id(), prev + 4);
+    assert_eq!(imp.get_last_plan_column_id(), prev + 4);
+
+    // The parameter values as they are now (set after the context was built).
+    assert!(imp.eval().get_param_value(0).is_err());
+    s.vars()
+        .state
+        .plan_cache_params
+        .lock()
+        .append(&[tidb_types::datum::new_int_datum(9)]);
+    assert_eq!(imp.eval().get_param_value(0).unwrap().get_int64(), 9);
+
+    // IsReadonlyUserVar: the map the preprocessor handed the session; Reset forgets it.
+    use tidb_executor::glue::SessionContext;
+    s.core
+        .set_readonly_user_var_map(std::collections::HashSet::from(["a".to_owned()]));
+    assert!(s.core.sctx.expr_ctx().is_readonly_user_var("a"));
+    assert!(!s.core.sctx.expr_ctx().is_readonly_user_var("b"));
+    s.core.reset_plan_ctx();
+    assert!(!s.core.sctx.expr_ctx().is_readonly_user_var("a"));
+
+    // IntoStatic keeps the values.
+    let st = imp.into_static();
+    assert_eq!(st.connection_id(), 123);
+}
+
+/// Restoring a checkpoint writes the saved values back into the cells the session shares
+/// with its expression contexts (parameters, plan column ids, `RAND()` generator, user
+/// variables): a context built before the statement sees the restored values.
+#[test]
+fn restore_writes_back_into_the_shared_cells() {
+    use tidb_sessionctx::exprctx::{
+        BuildContext, EvalContext as _, ParamValues, StaticConvertibleExprContext,
+    };
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    s.vars()
+        .state
+        .user_vars
+        .set_user_var_val("a", tidb_types::datum::new_int_datum(1));
+    let holder = s.core.sctx.expr_ctx();
+    let rng_before = s.vars().state.rng.lock().clone();
+    let col_before = holder.alloc_plan_column_id();
+    let cp = s.checkpoint();
+    // What a statement changes before it falls back.
+    s.vars()
+        .state
+        .plan_cache_params
+        .lock()
+        .append(&[tidb_types::datum::new_int_datum(5)]);
+    holder.alloc_plan_column_id();
+    holder.rng().lock().r#gen();
+    s.vars()
+        .state
+        .user_vars
+        .set_user_var_val("a", tidb_types::datum::new_int_datum(2));
+    s.restore(cp).unwrap();
+    // The holder's cells are still the session's, with the values of the checkpoint.
+    assert!(Arc::ptr_eq(&holder.rng(), &s.vars().state.rng.share()));
+    assert_eq!(*holder.rng().lock(), rng_before);
+    assert!(holder.eval().get_param_value(0).is_err());
+    assert_eq!(holder.get_last_plan_column_id(), col_before);
+    assert_eq!(s.vars().state.plan_column_id.0.load(SeqCst), col_before);
+    let a = holder
+        .eval()
+        .get_user_vars_reader()
+        .get_user_var_val("a")
+        .unwrap();
+    assert_eq!(a.get_int64(), 1);
 }

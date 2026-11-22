@@ -604,17 +604,80 @@ impl Clone for AtomicI32Field {
     }
 }
 
-/// A Go `atomic.Int64` field of `SessionVars` (`PlanColumnID`), as [`AtomicI32Field`].
-// glue: Go atomic.Int64 field
+/// A Go `atomic.Int64` field of `SessionVars` (`PlanColumnID`), as [`AtomicI32Field`]. The
+/// counter is also read and advanced by the session's expression context
+/// (`sessionexpr.ExprContext.AllocPlanColumnID`, which Go reads through the session), so it is
+/// shared ([`AtomicI64Field::share`]); cloning still copies the current value into a new
+/// counter.
+// glue: Go atomic.Int64 field (shared with the session's expression context, N2)
 #[derive(Debug, Default)]
-pub struct AtomicI64Field(pub std::sync::atomic::AtomicI64);
+pub struct AtomicI64Field(pub std::sync::Arc<std::sync::atomic::AtomicI64>);
 
 impl Clone for AtomicI64Field {
     // glue: copy of the current value
     fn clone(&self) -> Self {
-        AtomicI64Field(std::sync::atomic::AtomicI64::new(
+        AtomicI64Field(std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
             self.0.load(std::sync::atomic::Ordering::SeqCst),
-        ))
+        )))
+    }
+}
+
+impl AtomicI64Field {
+    /// The counter itself, for the session's expression context (Go reads the field through
+    /// the session pointer).
+    // glue: N2 (the field shared with sessionexpr)
+    pub fn share(&self) -> std::sync::Arc<std::sync::atomic::AtomicI64> {
+        std::sync::Arc::clone(&self.0)
+    }
+}
+
+/// A field of `SessionVars` that Go shares by pointer with the session's expression context
+/// (`sessionexpr` reads `SessionVars.Rng` and `SessionVars.PlanCacheParams` through the
+/// session): the value behind a `parking_lot::Mutex`, shared by `Arc` (N2: the small shared
+/// part). Cloning a `SessionState` copies the current value into a new cell (the fallback
+/// checkpoint is a value copy); [`SharedField::share`] hands out the cell itself.
+// glue: N2 (a SessionVars field shared with sessionexpr)
+#[derive(Default)]
+pub struct SharedField<T>(std::sync::Arc<parking_lot::Mutex<T>>);
+
+impl<T> SharedField<T> {
+    /// A new cell holding `v`.
+    // glue: N2
+    pub fn new(v: T) -> SharedField<T> {
+        SharedField(std::sync::Arc::new(parking_lot::Mutex::new(v)))
+    }
+
+    /// Locks the value (the session thread; Go reads and writes the field directly).
+    // glue: N2
+    pub fn lock(&self) -> parking_lot::MutexGuard<'_, T> {
+        self.0.lock()
+    }
+
+    /// The cell itself, for the session's expression context.
+    // glue: N2
+    pub fn share(&self) -> std::sync::Arc<parking_lot::Mutex<T>> {
+        std::sync::Arc::clone(&self.0)
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for SharedField<T> {
+    // glue: formats the current value (as the field did before it was shared)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&*self.0.lock(), f)
+    }
+}
+
+impl<T: Clone> Clone for SharedField<T> {
+    // glue: copy of the current value
+    fn clone(&self) -> Self {
+        SharedField::new(self.0.lock().clone())
+    }
+}
+
+impl<T: PartialEq> PartialEq for SharedField<T> {
+    // glue: compares the current values
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || *self.0.lock() == *other.0.lock()
     }
 }
 

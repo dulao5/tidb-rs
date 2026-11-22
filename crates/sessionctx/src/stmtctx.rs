@@ -209,6 +209,34 @@ impl StaleTSOProvider {
     }
 }
 
+/// The statement's stale read TSO provider, shared with the session's expression context
+/// (`sessionexpr`'s `getStmtTimestamp` reads `StmtCtx.GetStaleTSO()` through the session; the
+/// expression context keeps this handle rather than the statement context, N2).
+#[derive(Clone)]
+pub struct StaleTSOSource(Arc<Mutex<StaleTSOProvider>>);
+
+impl StaleTSOSource {
+    /// `StmtCtx.GetStaleTSO()` (see [`StatementContext::get_stale_tso`]).
+    // glue: StatementContext.GetStaleTSO through the shared provider
+    pub fn get_stale_tso(&self) -> Result<u64, Error> {
+        get_stale_tso(&self.0)
+    }
+}
+
+// go-part: StatementContext.GetStaleTSO (the body over the provider)
+fn get_stale_tso(provider: &Mutex<StaleTSOProvider>) -> Result<u64, Error> {
+    let mut p = lock(provider);
+    if let Some(v) = p.value {
+        return Ok(v);
+    }
+    let Some(eval) = p.eval.as_mut() else {
+        return Ok(0);
+    };
+    let tso = eval()?;
+    p.value = Some(tso);
+    Ok(tso)
+}
+
 /// A value of the statement cache (Go `any`).
 pub type StmtCacheValue = Arc<dyn Any + Send + Sync>;
 
@@ -251,6 +279,13 @@ pub struct StmtWarnSink {
 }
 
 impl StmtWarnSink {
+    /// The current `WarnHandler` (Go: `sc.WarnHandler`), for the session's expression
+    /// context, which keeps the sink rather than the statement context (N2).
+    // glue: reads sc.WarnHandler (an interface field)
+    pub fn handler(&self) -> WarnHandlerExtRef {
+        self.get()
+    }
+
     // glue: reads sc.WarnHandler (an interface field)
     fn get(&self) -> WarnHandlerExtRef {
         Arc::clone(&self.handler.read().unwrap_or_else(|e| e.into_inner()))
@@ -471,7 +506,7 @@ pub struct StatementContext {
     /// due to strict sql mode.
     pub tiflash_engine_removed_due_to_strict_sql_mode: bool,
     /// StaleTSOProvider is used to provide stale timestamp oracle for read-only queries.
-    stale_tso_provider: Mutex<StaleTSOProvider>,
+    stale_tso_provider: Arc<Mutex<StaleTSOProvider>>,
     /// RelatedTableIDs records all table ids processing in this stmt.
     pub related_table_ids: HashSet<i64>,
     /// ForShareLockEnabledByNoop indicates whether the current statement contains `for
@@ -617,7 +652,7 @@ pub fn new_stmt_ctx_with_time_zone(tz: Arc<Location>) -> StatementContext {
         table_stats: HashMap::new(),
         use_chunk_alloc: Arc::new(AtomicBool::new(false)),
         tiflash_engine_removed_due_to_strict_sql_mode: false,
-        stale_tso_provider: Mutex::new(StaleTSOProvider::default()),
+        stale_tso_provider: Arc::new(Mutex::new(StaleTSOProvider::default())),
         related_table_ids: HashSet::new(),
         for_share_lock_enabled_by_noop: false,
         mem_tracker: None,
@@ -641,11 +676,7 @@ impl StatementContext {
         let mut mu = std::mem::take(self.mu.get_mut().unwrap_or_else(|e| e.into_inner()));
         let mut stmt_cache =
             std::mem::take(self.stmt_cache.get_mut().unwrap_or_else(|e| e.into_inner()));
-        let mut stale = std::mem::take(
-            self.stale_tso_provider
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner()),
-        );
+        let mut stale = std::mem::take(&mut *lock(&self.stale_tso_provider));
         let warn_sink = Arc::clone(&self.warn_sink);
         let use_chunk_alloc = Arc::clone(&self.use_chunk_alloc);
         use_chunk_alloc.store(false, Ordering::SeqCst);
@@ -663,10 +694,7 @@ impl StatementContext {
         stale.reset();
         *self.mu.get_mut().unwrap_or_else(|e| e.into_inner()) = mu;
         *self.stmt_cache.get_mut().unwrap_or_else(|e| e.into_inner()) = stmt_cache;
-        *self
-            .stale_tso_provider
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner()) = stale;
+        *lock(&self.stale_tso_provider) = stale;
         // The contexts and trackers point at the statement context (the shared sink).
         let appender: tidb_types::context::WarnHandler = self.warn_sink.clone();
         self.type_ctx = tidb_types::context::new_context(DefaultStmtFlags, utc(), appender.clone());
@@ -1318,16 +1346,13 @@ impl StatementContext {
     /// response.
     // go: StatementContext.GetStaleTSO L1
     pub fn get_stale_tso(&self) -> Result<u64, Error> {
-        let mut p = lock(&self.stale_tso_provider);
-        if let Some(v) = p.value {
-            return Ok(v);
-        }
-        let Some(eval) = p.eval.as_mut() else {
-            return Ok(0);
-        };
-        let tso = eval()?;
-        p.value = Some(tso);
-        Ok(tso)
+        get_stale_tso(&self.stale_tso_provider)
+    }
+
+    /// The stale read TSO provider, shared (see [`StaleTSOSource`]).
+    // glue: N2 (the provider shared with sessionexpr)
+    pub fn stale_tso_source(&self) -> StaleTSOSource {
+        StaleTSOSource(Arc::clone(&self.stale_tso_provider))
     }
 
     /// AddSetVarHintRestore records the variables which are affected by SET_VAR hint. And

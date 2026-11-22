@@ -109,9 +109,9 @@ pub struct SessCtx {
     /// The transaction ended inside a provider call (`CommitBeforeEnterNewTxn`): the
     /// manager's `OnTxnEnd` is still to run (txnmanager.rs module doc).
     txn_end: bool,
-    /// The expression context the session gives its executors (`GetExprCtx`): a static
-    /// context with the defaults until the session's own (`sessionexpr`, D05.3 tasks P1-1).
-    expr_ctx: tidb_sessionctx::exprctx::ExprContextRef,
+    /// `GetPlanCtx().GetReadonlyUserVarMap()` (Go `PlanCtxExtended.readonlyUserVars`): the
+    /// user variables the statement's preprocessor found read-only; `None` is Go's nil map.
+    readonly_user_vars: Option<std::collections::HashSet<String>>,
     /// `currentPlan`.
     pub(crate) current_plan: Option<Plan>,
     /// `SetProcessInfo` (spec §1.2).
@@ -242,6 +242,20 @@ impl SessCtx {
             return is;
         }
         self.get_domain_info_schema()
+    }
+
+    /// The session's expression context (`sessionexpr.NewExprContext(s)`) over a view of the
+    /// session as it is now (spec §8).
+    // glue: N2 (sessionexpr over a view of the session, built when the context is handed out)
+    pub fn expr_ctx(&self) -> Arc<crate::sessionexpr::ExprContext> {
+        let readonly = self.readonly_user_vars.clone().unwrap_or_default();
+        crate::sessionexpr::new_expr_context(crate::sessionexpr::SessionView::new(
+            &self.vars,
+            &readonly,
+            Arc::clone(&self.store),
+            self.get_info_schema(),
+            self.get_domain_info_schema(),
+        ))
     }
 
     // go: session.isInternal L1
@@ -707,21 +721,9 @@ impl SessionCore {
 }
 
 /// The getters of the session's contexts and of the server's objects that blocks not ported
-/// yet provide (spec §1.2). They are not called: the planner gets a `PlanCtx` (N2) from
-/// `Compile`, which is still a boundary stub.
+/// yet provide (spec §1.2). The planning context is not among them: the planner gets a
+/// `PlanCtx` (N2) built from `SessionContext::get_plan_ctx`.
 impl SessionCore {
-    /// `GetPlanCtx()`.
-    // glue: stub of session.GetPlanCtx, blocked-by:D05.3 (P1-1: the PlanCtx is built over the session's ExprContext)
-    pub fn get_plan_ctx(&self) -> Result<(), Error> {
-        Err(blocked("D05.3", "the session's PlanContext"))
-    }
-
-    /// `GetRangerCtx()`.
-    // glue: stub of session.GetRangerCtx, blocked-by:D05.3 (P1-1: the RangerContext holds the session's ExprContext)
-    pub fn get_ranger_ctx(&self) -> Result<(), Error> {
-        Err(blocked("D05.3", "the session's RangerContext"))
-    }
-
     /// `GetDistSQLCtx()`: the `DistSQLContext` of the coprocessor reads (its KV variables are
     /// [`SessCtx::copr_vars`]).
     // glue: stub of session.GetDistSQLCtx, blocked-by:D07.3 (VS1-33: distsql DistSQLContext)
@@ -837,12 +839,19 @@ impl SessionContext for SessionCore {
         let info = PhysicalPlanInfo::new(plan.as_dyn());
         tidb_sessiontxn::advise_optimize_with_plan_and_then_warm_up(self, Some(&info))
     }
-    /// `GetExprCtx()`: the session's `ExprContext` is `sessionexpr` (D05.3 tasks P1-1, not
-    /// ported): until then a static context with Go's defaults, not the session's variables
-    /// (spec §1.2). No statement reaches the executors yet (`Compile` is a boundary stub).
-    // glue: stub of session.GetExprCtx, blocked-by:D05.3 (P1-1: sessionexpr; a static default context until then)
+    /// `GetExprCtx()`: the session's `sessionexpr.ExprContext`, over a view of the session
+    /// taken now (spec §8: Go keeps one context that reads the session on every call).
+    // go: session.GetExprCtx L2 (a context over a view of the session per call, N2)
     fn get_expr_ctx(&self) -> tidb_sessionctx::exprctx::ExprContextRef {
-        Arc::clone(&self.sctx.expr_ctx) as tidb_sessionctx::exprctx::ExprContextRef
+        self.sctx.expr_ctx() as tidb_sessionctx::exprctx::ExprContextRef
+    }
+    // go: pkg/planner/plannersession/context.go PlanCtxExtended.SetReadonlyUserVarMap L1
+    fn set_readonly_user_var_map(&mut self, readonly_user_vars: std::collections::HashSet<String>) {
+        self.sctx.readonly_user_vars = Some(readonly_user_vars);
+    }
+    // go: pkg/planner/plannersession/context.go PlanCtxExtended.Reset L1
+    fn reset_plan_ctx(&mut self) {
+        self.sctx.readonly_user_vars = None;
     }
     /// `GetPlanCtx()`: the expression context ([`SessionContext::get_expr_ctx`]), the
     /// store client when the session runs over a wired store (`None` over the stand-in
@@ -859,17 +868,8 @@ impl SessionContext for SessionCore {
             !txn.valid() || tidb_sessiontxn::sctx::LazyTxn::is_pipelined(txn) || txn.is_read_only();
         let has_dirty_content: Option<tidb_planner::planctx::HasDirtyContentFn> =
             no_dirty_content.then(|| Arc::new(|_tid: i64| false) as _);
-        // The session's expression context is a static stand-in until sessionexpr (D05.3
-        // P1-1); Go's sessionexpr answers IsUseCache from the statement's plan cache
-        // tracker, so the planning context's expression context shares that tracker (a
-        // PREPARE does not use the cache, an EXECUTE does once the miss path enables it).
-        let expr_ctx = tidb_sessionctx::exprstatic::new_expr_context(vec![
-            tidb_sessionctx::exprstatic::with_plan_cache_tracker(Arc::clone(
-                &self.sctx.vars.stmt_ctx().plan_cache_tracker,
-            )),
-        ]);
         tidb_planner::planctx::SessionPlanCtx {
-            expr_ctx,
+            expr_ctx: self.sctx.expr_ctx() as tidb_sessionctx::exprctx::ExprContextRef,
             client: self.sctx.store_wired.then(|| self.sctx.store.get_client()),
             has_dirty_content,
             advise_txn_warmup: None,
@@ -961,7 +961,7 @@ fn log_general_query(exec_stmt: &ExecStmt, s: &SessionCore, is_prepared: bool) {
         if vars.enable_redact_log != tidb_base::errors::RedactLogEnable {
             query.push_str(&tidb_base::redact::string(
                 &vars.enable_redact_log,
-                &String::from_utf8_lossy(&vars.state.plan_cache_params.string()),
+                &String::from_utf8_lossy(&vars.state.plan_cache_params.lock().string()),
             ));
         }
         log::info!(
@@ -1060,7 +1060,7 @@ impl Session {
                     )),
                     values: HashMap::new(),
                     txn_end: false,
-                    expr_ctx: tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
+                    readonly_user_vars: None,
                     current_plan: None,
                     process: None,
                     start_time: None,

@@ -920,7 +920,7 @@ impl ExecStmt {
         // SensitiveStmtNode: none reaches the new stack (VS1 router: SELECT only).
         let mut sql = sess_vars.stmt_ctx().original_sql.clone();
         sql.push_str(&String::from_utf8_lossy(
-            &sess_vars.state.plan_cache_params.string(),
+            &sess_vars.state.plan_cache_params.lock().string(),
         ));
         Ok(tidb_base::redact::string(rmode, &sql))
     }
@@ -943,7 +943,7 @@ impl ExecStmt {
         let mut s = tidb_sessionctx::variable::lazy_text::LazyStmtText::default();
         s.redact = rmode;
         s.sql = sess_vars.stmt_ctx().original_sql.as_bytes().to_vec();
-        s.params = sess_vars.state.plan_cache_params.clone();
+        s.params = sess_vars.state.plan_cache_params.lock().clone();
         Ok(s)
     }
 

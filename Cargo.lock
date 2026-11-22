@@ -4091,6 +4091,7 @@ dependencies = [
  "tidb-base",
  "tidb-chunk",
  "tidb-executor",
+ "tidb-expression",
  "tidb-infoschema",
  "tidb-kv",
  "tidb-memory",

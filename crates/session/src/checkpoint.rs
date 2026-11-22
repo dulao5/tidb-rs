@@ -15,16 +15,17 @@
 //!   `LastQueryInfo`, the prepared statements);
 //! - `SessionVars.LastQueryInfo`.
 //!
-//! What it does not restore: state changed *through* shared `Arc`s (the interior of
-//! `user_vars`, any cache shared with other sessions). That is correct only while such state
-//! changes after executors open (`SELECT @a := 1` assigns during execution; `set_var` is never
-//! folded at planning time), i.e. never before a `Blocked` can occur. A planner-time cache in
-//! shared state would escape the restore: it must not be added without extending this.
+//! Shared cells (D05.3 spec §8.1): `PlanCacheParams`, `PlanColumnID`, `Rng` and `UserVars`
+//! are shared with the session's expression contexts. The checkpoint copies their values
+//! (the user variables too), and `restore` writes the values back into the same cells, so a
+//! holder of a cell sees the restored value. Not restored: caches shared with other
+//! sessions; a planner-time cache in shared state would escape the restore and must not be
+//! added without extending this.
 //!
 //! Cost (Lucky, #212 review): `checkpoint()` + drop about 330 ns per statement, with
 //! `restore` about 390 ns (release build), against a ~100 µs point select. It stays cheap
-//! because the cloned parts hold `Arc`s (`prepared_stmts`, `user_vars`): O(#prepared)
-//! refcount bumps, no deep copies. Keep it so when the field list is narrowed.
+//! because the cloned parts hold `Arc`s (`prepared_stmts`): O(#prepared) refcount bumps;
+//! the user variables are copied (usually none). Keep it so when the field list is narrowed.
 //!
 //! VS1-14 (spec `specs/D05.3-session/spec.md` §3): the field list of the statement path is in
 //! the spec (§3.1); the checkpoint keeps the whole scalar and non-scalar state rather than
@@ -72,7 +73,7 @@ impl Session {
             extra_warnings: sc.get_extra_warnings(),
             stmt_ctx: sc,
             fields: Box::new(vars.fields.clone()),
-            state: Box::new(vars.state.clone()),
+            state: Box::new(vars.state.checkpoint_copy()),
             last_query_info: vars.last_query_info.clone(),
             idle: self.is_idle(),
         }
@@ -107,7 +108,7 @@ impl Session {
         cp.stmt_ctx.set_extra_warnings(cp.extra_warnings);
         vars.set_stmt_ctx(cp.stmt_ctx);
         vars.fields = *cp.fields;
-        vars.state = *cp.state;
+        vars.state.restore_keeping_shared_cells(*cp.state);
         vars.last_query_info = cp.last_query_info;
         Ok(())
     }

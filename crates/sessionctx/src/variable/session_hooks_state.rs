@@ -221,6 +221,7 @@ pub(super) fn ss_tidb_isolation_read_engines(s: &mut SessionVars, val: &str) -> 
 pub(super) fn ss_rand_seed1(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.state
         .rng
+        .lock()
         .set_seed1(tidb_opt_positive_int32(val, 0) as u32);
     Ok(())
 }
@@ -229,6 +230,7 @@ pub(super) fn ss_rand_seed1(s: &mut SessionVars, val: &str) -> Result<(), Error>
 pub(super) fn ss_rand_seed2(s: &mut SessionVars, val: &str) -> Result<(), Error> {
     s.state
         .rng
+        .lock()
         .set_seed2(tidb_opt_positive_int32(val, 0) as u32);
     Ok(())
 }
@@ -724,12 +726,12 @@ pub(super) fn gv_tx_isolation_one_shot(s: &mut SessionVars) -> Result<(String, b
 
 // go-part: defaultSysVars (sysvar.go:L398 rand_seed1 GetStateValue closure) L1
 pub(super) fn gv_rand_seed1(s: &mut SessionVars) -> Result<(String, bool), Error> {
-    Ok((s.state.rng.get_seed1().to_string(), true))
+    Ok((s.state.rng.lock().get_seed1().to_string(), true))
 }
 
 // go-part: defaultSysVars (sysvar.go:L406 rand_seed2 GetStateValue closure) L1
 pub(super) fn gv_rand_seed2(s: &mut SessionVars) -> Result<(String, bool), Error> {
-    Ok((s.state.rng.get_seed2().to_string(), true))
+    Ok((s.state.rng.lock().get_seed2().to_string(), true))
 }
 
 // go-part: defaultSysVars (sysvar.go:L3677 tidb_slow_log_rules SetSession closure) L1
