@@ -147,6 +147,12 @@ pub struct RootTask {
 }
 
 impl RootTask {
+    /// The root task's plan, moved out of the task.
+    // glue: N1 §3 item 9.3 (the best plan leaves the task before it is written)
+    pub fn take_plan(&mut self) -> Option<PhysicalPlanRef> {
+        self.p.take()
+    }
+
     /// GetPlan returns the root task's plan.
     // go: RootTask.GetPlan L1
     pub fn get_plan(&self) -> Option<&PhysicalPlanRef> {
@@ -430,6 +436,15 @@ impl CopTask {
             return self.table_plan.as_ref();
         }
         self.index_plan.as_ref()
+    }
+
+    /// `Plan()` moved out of the task (the task is consumed).
+    // glue: N1 §3 item 9.3 (the best plan leaves the task before it is written)
+    pub fn into_plan(self) -> Option<PhysicalPlanRef> {
+        if self.index_plan_finished {
+            return self.table_plan;
+        }
+        self.index_plan
     }
 
     /// MemoryUsage return the memory usage of copTask

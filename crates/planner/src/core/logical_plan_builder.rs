@@ -2647,6 +2647,29 @@ fn set_preferred_store_type(ds: &mut DataSource, hint_info: Option<&NoTableHints
     match *hint_info {}
 }
 
+/// getStatsTable gets statistics information for a table specified by "tableID".
+/// A pseudo statistics table is returned in any of the following scenario:
+/// 1. tidb-server started and statistics handle has not been initialized.
+/// 2. table row count from statistics is zero.
+/// 3. statistics is outdated.
+///
+/// The new stack has no statistics handle (VS1 plan §3.2, the statistics cache is D11.2):
+/// Go's first case, the pseudo table. Returns a `Result` for the statistics cache to come.
+// go: getStatsTable L2 (the statistics handle is D11.2; the new stack has none)
+pub fn get_stats_table(
+    ctx: &PlanCtx<'_>,
+    tbl_info: &tidb_model::TableInfo,
+    pid: i64,
+) -> Result<tidb_statistics::Table, Error> {
+    let _ = (ctx, pid);
+    // EnableOptimizerDebugTrace (debugTraceGetStatsTbl): only PLAN REPLAYER switches the
+    // debug trace on, which the Rust AST does not have; physicalOptimize returns its boundary
+    // (D02.2) first.
+    // 1. tidb-server started and statistics handle has not been initialized.
+    // statsHandle := domain.GetDomain(ctx).StatsHandle(): nil in the new stack.
+    Ok(tidb_statistics::table::pseudo_table(tbl_info, false, true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

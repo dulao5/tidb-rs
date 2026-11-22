@@ -8,7 +8,6 @@
 //! [`crate::LogicalPlan`] it overrides (`M-SELF`, N1 §3.7).
 
 pub mod base_logical_plan;
-pub mod derive_stats;
 pub mod logical_datasource;
 pub mod logical_join;
 pub mod logical_limit;
@@ -16,6 +15,7 @@ pub mod logical_plans_misc;
 pub mod logical_projection;
 pub mod logical_schema_producer;
 pub mod logical_selection;
+pub mod logical_show;
 pub mod logical_sort;
 pub mod logical_table_dual;
 pub mod logical_table_scan;

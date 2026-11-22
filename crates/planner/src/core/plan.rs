@@ -127,3 +127,14 @@ pub fn get_actual_probe_cnt_from_probe_parents(
     }
     res
 }
+
+/// `optimizeByShuffle` inserts a `PhysicalShuffle` to optimize performance by running in a
+/// parallel manner. Only `PhysicalWindow`, `PhysicalMergeJoin` and `PhysicalStreamAgg` get a
+/// shuffle; none of them is ported (windows D09.4, joins D09.3, aggregation D09.4), so the
+/// task is returned as is.
+// go: optimizeByShuffle L2 (the window / merge join / stream aggregation arms come with those operators)
+pub fn optimize_by_shuffle(tsk: Task, ctx: &PlanCtx<'_>) -> Task {
+    let _ = ctx;
+    // switch p := tsk.Plan().(type): no ported operator gets a shuffle.
+    tsk
+}

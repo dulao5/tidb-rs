@@ -128,6 +128,12 @@ pub struct HandleColHelper {
 }
 
 impl HandleColHelper {
+    // go: handleColHelper.resetForReuse L1
+    pub fn reset_for_reuse(&mut self) {
+        self.id2_handle_map_stack.clear();
+        self.stack_tail = 0;
+    }
+
     // go: handleColHelper.popMap L1
     pub fn pop_map(&mut self) -> Option<HashMap<i64, Vec<HandleCols>>> {
         let ret = self.id2_handle_map_stack[self.stack_tail - 1].take();
@@ -140,6 +146,28 @@ impl HandleColHelper {
     pub fn push_map(&mut self, m: Option<HashMap<i64, Vec<HandleCols>>>) {
         self.id2_handle_map_stack.push(m);
         self.stack_tail += 1;
+    }
+
+    // go: handleColHelper.mergeAndPush L1
+    pub fn merge_and_push(
+        &mut self,
+        m1: Option<&HashMap<i64, Vec<HandleCols>>>,
+        m2: Option<&HashMap<i64, Vec<HandleCols>>>,
+    ) {
+        let cap = m1.map_or(0, HashMap::len).max(m2.map_or(0, HashMap::len));
+        let mut new_map: HashMap<i64, Vec<HandleCols>> = HashMap::with_capacity(cap);
+        for (k, v) in m1.into_iter().flatten() {
+            new_map.insert(*k, v.clone());
+        }
+        for (k, v) in m2.into_iter().flatten() {
+            new_map.entry(*k).or_default().extend(v.iter().cloned());
+        }
+        self.push_map(Some(new_map));
+    }
+
+    // go: handleColHelper.tailMap L1
+    pub fn tail_map(&self) -> Option<&HashMap<i64, Vec<HandleCols>>> {
+        self.id2_handle_map_stack[self.stack_tail - 1].as_ref()
     }
 }
 
@@ -921,4 +949,68 @@ pub fn split_where(where_: Option<&Expr>) -> Vec<&Expr> {
 // glue: stub of checkHintedSQL, blocked-by:D13.3 (hint.ParseHintsSet)
 pub fn check_hinted_sql() -> Result<(), Error> {
     Err(blocked("D13.3", "checkHintedSQL (hint.ParseHintsSet)"))
+}
+
+// go: isTiKVIndexByName L1
+pub fn is_tikv_index_by_name(
+    idx_name: &CIStr,
+    index_info: Option<&tidb_model::IndexInfo>,
+    tbl_info: &TableInfo,
+) -> bool {
+    // when the PKIsHandle of table is true, the primary key is not in the indices list.
+    if idx_name.l == "primary" && tbl_info.pk_is_handle {
+        return true;
+    }
+    index_info.is_some_and(|i| !i.is_tiflash_local_index())
+}
+
+// go: tryGetPkExtraColumn L1
+pub fn try_get_pk_extra_column(
+    sv: &SessionVars,
+    tbl_info: &TableInfo,
+) -> Option<(tidb_model::ColumnInfo, tidb_expression::Column)> {
+    if tbl_info.is_common_handle || tbl_info.pk_is_handle {
+        return None;
+    }
+    let info = tidb_model::new_extra_handle_col_info();
+    let exp_col = tidb_expression::Column {
+        ret_type: Arc::new(tidb_types::field_type::new_field_type(
+            tidb_base::mysql::TypeLonglong,
+        )),
+        unique_id: sv.alloc_plan_column_id(),
+        id: tidb_model::ExtraHandleID as i64,
+        ..Default::default()
+    };
+    Some((info, exp_col))
+}
+
+// go: tryGetPkHandleCol L1
+pub fn try_get_pk_handle_col(
+    tbl_info: &TableInfo,
+    all_col_schema: &tidb_expression::Schema,
+) -> Option<(Arc<tidb_model::ColumnInfo>, Arc<tidb_expression::Column>)> {
+    if !tbl_info.pk_is_handle {
+        return None;
+    }
+    for (i, c) in tbl_info.columns.iter().flatten().enumerate() {
+        if tidb_base::mysql::has_pri_key_flag(c.get_flag()) {
+            return Some((Arc::clone(c), Arc::clone(&all_col_schema.columns[i])));
+        }
+    }
+    None
+}
+
+// go: getTablePath L1
+pub fn get_table_path(paths: &[AccessPath]) -> Option<&AccessPath> {
+    paths.iter().find(|p| p.is_table_path())
+}
+
+// glue: stub of tryGetCommonHandleCols, blocked-by:D06.4 (tables.TryGetCommonPkColumns; only ADMIN CHECK and the DML statements read it)
+// glue: stub of setExtraPhysTblIDColsOnDataSource, blocked-by:D09.12 (the physical table id column of partitioned tables)
+// glue: stub of PlanBuilder.addColumnsWithVirtualExprs, blocked-by:D09.17 (ANALYZE: the virtual columns of the analyzed indexes)
+// glue: stub of checkIsAllSpecialGlobalIndex, blocked-by:D09.17 (ANALYZE of global indexes)
+/// The planbuilder helpers of ADMIN, ANALYZE, the DML statements and partitioned tables
+/// (registered with the access paths): their callers are outside the first slice.
+pub fn planbuilder_helper_boundary(what: &str, block: &str) -> Error {
+    blocked(block, what)
 }

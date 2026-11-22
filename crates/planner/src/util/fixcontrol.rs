@@ -17,6 +17,15 @@ pub const Fix54337: u64 = 54337;
 /// Fix52592 controls whether to disallow fast path for Get and BatchGet (the point get fast
 /// path, D10.8).
 pub const Fix52592: u64 = 52592;
+/// Fix44830 controls whether to allow to cache Batch/PointGet from some complex scenarios.
+pub const Fix44830: u64 = 44830;
+/// Fix45132 controls whether to use access range row count to determine access path on the Skyline pruning.
+pub const Fix45132: u64 = 45132;
+/// Fix46177 controls whether to explore enforced plans for DataSource if it has already found an unenforced plan.
+pub const Fix46177: u64 = 46177;
+/// Fix52869 controls whether to disable the limitation that index merge path won't be generated automatically when
+/// there exist other single-index access paths that do range scan.
+pub const Fix52869: u64 = 52869;
 /// Fix33031 controls whether to disallow plan cache for partitioned
 /// tables (both prepared statments and non-prepared statements)
 pub const Fix33031: u64 = 33031;

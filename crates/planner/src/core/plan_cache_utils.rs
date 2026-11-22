@@ -625,3 +625,112 @@ fn as_plan_cache_stmt(prep_stmt: Arc<dyn Any + Send + Sync>) -> Result<PlanCache
 pub fn parse_param_types() -> Result<(), Error> {
     Err(blocked("D13.1", "parseParamTypes (the plan cache key)"))
 }
+
+/// `isSafePointGetPath4PlanCache`.
+// go: isSafePointGetPath4PlanCache L1 [M-CTX]
+pub fn is_safe_point_get_path4_plan_cache(
+    sctx: &crate::PlanCtx<'_>,
+    path: &crate::util::AccessPath,
+) -> bool {
+    // PointGet might contain some over-optimized assumptions, like `a>=1 and a<=1` --> `a=1`, but
+    // these assumptions may be broken after parameters change.
+
+    if is_safe_point_get_path4_plan_cache_scenario1(path) {
+        return true;
+    }
+
+    // TODO: enable this fix control switch by default after more test cases are added.
+    let fix_control_ok = crate::util::fixcontrol::get_bool_with_default(
+        sctx.vars.get_optimizer_fix_control_map(),
+        crate::util::fixcontrol::Fix44830,
+        false,
+    );
+    if fix_control_ok
+        && (is_safe_point_get_path4_plan_cache_scenario2(path)
+            || is_safe_point_get_path4_plan_cache_scenario3(path))
+    {
+        return true;
+    }
+
+    false
+}
+
+// go: isSafePointGetPath4PlanCacheScenario1 L1
+fn is_safe_point_get_path4_plan_cache_scenario1(path: &crate::util::AccessPath) -> bool {
+    // safe scenario 1: each column corresponds to a single EQ, `a=1 and b=2 and c=3` --> `[1, 2, 3]`
+    if path.ranges.is_empty() || path.ranges[0].width() != path.access_conds.len() {
+        return false;
+    }
+    for access_cond in &path.access_conds {
+        match &**access_cond {
+            tidb_expression::Expr::ScalarFunction(f)
+                if f.func_name.l == tidb_expression::scalar_function::ast_func::EQ => {}
+            _ => return false, // column = constant
+        }
+    }
+    true
+}
+
+// go: isSafePointGetPath4PlanCacheScenario2 L1
+fn is_safe_point_get_path4_plan_cache_scenario2(path: &crate::util::AccessPath) -> bool {
+    // safe scenario 2: this Batch or PointGet is simply from a single IN predicate, `key in (...)`
+    if path.ranges.is_empty() || path.access_conds.len() != 1 {
+        return false;
+    }
+    let tidb_expression::Expr::ScalarFunction(f) = &*path.access_conds[0] else {
+        return false;
+    };
+    if f.func_name.l != tidb_expression::scalar_function::ast_func::In {
+        return false;
+    }
+    path.ranges.len() == f.get_args().len() - 1 // no duplicated values in this in-list for safety.
+}
+
+// go: isSafePointGetPath4PlanCacheScenario3 L1
+fn is_safe_point_get_path4_plan_cache_scenario3(path: &crate::util::AccessPath) -> bool {
+    use tidb_expression::Expr;
+    // safe scenario 3: this Batch or PointGet is simply from a simple DNF like `key=? or key=? or key=?`
+    if path.ranges.is_empty() || path.access_conds.len() != 1 {
+        return false;
+    }
+    let Expr::ScalarFunction(f) = &*path.access_conds[0] else {
+        return false;
+    };
+    if f.func_name.l != tidb_expression::scalar_function::ast_func::LogicOr {
+        return false;
+    }
+
+    let dnf_exprs = tidb_expression::expression::flatten_dnf_conditions(f);
+    if path.ranges.len() != dnf_exprs.len() {
+        // no duplicated values in this in-list for safety.
+        // e.g. `k=1 or k=2 or k=1` --> [[1, 1], [2, 2]]
+        return false;
+    }
+
+    for expr in &dnf_exprs {
+        let Expr::ScalarFunction(f) = &**expr else {
+            return false;
+        };
+        if f.func_name.l == tidb_expression::scalar_function::ast_func::EQ {
+            // (k=1 or k=2) --> [k=1, k=2]
+        } else if f.func_name.l == tidb_expression::scalar_function::ast_func::LogicAnd {
+            // ((k1=1 and k2=1) or (k1=2 and k2=2)) --> [k1=1 and k2=1, k2=2 and k2=2]
+            let cnf_exprs = tidb_expression::expression::flatten_cnf_conditions(f);
+            if path.ranges[0].width() != cnf_exprs.len() {
+                // not all key columns are specified
+                return false;
+            }
+            for expr in &cnf_exprs {
+                // k1=1 and k2=1
+                match &**expr {
+                    Expr::ScalarFunction(f)
+                        if f.func_name.l == tidb_expression::scalar_function::ast_func::EQ => {}
+                    _ => return false,
+                }
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}

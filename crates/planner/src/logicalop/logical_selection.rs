@@ -68,6 +68,35 @@ pub fn selection_boundary(block: &str, what: &str) -> Error {
 impl LogicalPlan for LogicalSelection {
     crate::logical_plan_boilerplate!(Selection);
 
+    /// DeriveStats implements base.LogicalPlan.<11th> interface.
+    // go: LogicalSelection.DeriveStats L1
+    fn derive_stats(
+        &mut self,
+        _ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        child_stats: &[Arc<crate::property::StatsInfo>],
+        _col_groups: &[Vec<Arc<Column>>],
+    ) -> Result<Arc<crate::property::StatsInfo>, Error> {
+        if let Some(s) = self.base.plan.stats_info() {
+            return Ok(Arc::clone(s));
+        }
+        let mut stats = child_stats[0].scale(crate::core::cost::SelectionFactor);
+        stats.group_ndvs = Vec::new();
+        let stats = Arc::new(stats);
+        self.base.plan.set_stats(Some(Arc::clone(&stats)));
+        Ok(stats)
+    }
+
+    /// PreparePossibleProperties implements base.LogicalPlan.<13th> interface.
+    // go: LogicalSelection.PreparePossibleProperties L1
+    fn prepare_possible_properties(
+        &self,
+        _arena: &crate::PlanArena,
+        mut children_properties: Vec<Vec<Vec<Arc<Column>>>>,
+    ) -> Vec<Vec<Arc<Column>>> {
+        children_properties.swap_remove(0)
+    }
+
     /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
     // go: LogicalSelection.ExhaustPhysicalPlans L1 [M-PLAN]
     fn exhaust_physical_plans(

@@ -97,6 +97,26 @@ pub fn limit_hash_code_boundary() -> Error {
 impl LogicalPlan for LogicalLimit {
     crate::logical_plan_boilerplate!(Limit, producer);
 
+    /// DeriveStats implements base.LogicalPlan.<11th> interface.
+    // go: LogicalLimit.DeriveStats L1
+    fn derive_stats(
+        &mut self,
+        _ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        child_stats: &[Arc<crate::property::StatsInfo>],
+        _col_groups: &[Vec<Arc<Column>>],
+    ) -> Result<Arc<crate::property::StatsInfo>, Error> {
+        if let Some(s) = self.base.plan.stats_info() {
+            return Ok(Arc::clone(s));
+        }
+        let stats = Arc::new(crate::util::misc::derive_limit_stats(
+            &child_stats[0],
+            self.count as f64,
+        ));
+        self.base.plan.set_stats(Some(Arc::clone(&stats)));
+        Ok(stats)
+    }
+
     /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
     // go: LogicalLimit.ExhaustPhysicalPlans L1 [M-PLAN]
     fn exhaust_physical_plans(

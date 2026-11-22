@@ -155,6 +155,41 @@ impl LogicalTopN {
 impl LogicalPlan for LogicalTopN {
     crate::logical_plan_boilerplate!(TopN);
 
+    /// DeriveStats implements base.LogicalPlan.<11th> interface.
+    // go: LogicalTopN.DeriveStats L1
+    fn derive_stats(
+        &mut self,
+        _ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        child_stats: &[Arc<crate::property::StatsInfo>],
+        _col_groups: &[Vec<Arc<Column>>],
+    ) -> Result<Arc<crate::property::StatsInfo>, Error> {
+        if let Some(s) = self.base.plan.stats_info() {
+            return Ok(Arc::clone(s));
+        }
+        let stats = Arc::new(crate::util::misc::derive_limit_stats(
+            &child_stats[0],
+            self.count as f64,
+        ));
+        self.base.plan.set_stats(Some(Arc::clone(&stats)));
+        Ok(stats)
+    }
+
+    /// PreparePossibleProperties implements base.LogicalPlan.<13th> interface.
+    // go: LogicalTopN.PreparePossibleProperties L1
+    fn prepare_possible_properties(
+        &self,
+        _arena: &crate::PlanArena,
+        _children_properties: Vec<Vec<Vec<Arc<Column>>>>,
+    ) -> Vec<Vec<Arc<Column>>> {
+        let prop_cols =
+            crate::logicalop::logical_sort::get_possible_property_from_by_items(&self.by_items);
+        if prop_cols.is_empty() {
+            return Vec::new();
+        }
+        vec![prop_cols]
+    }
+
     /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
     // go: LogicalTopN.ExhaustPhysicalPlans L1 [M-PLAN]
     fn exhaust_physical_plans(

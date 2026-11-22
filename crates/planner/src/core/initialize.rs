@@ -242,11 +242,40 @@ impl PhysicalTableReader {
     }
 }
 
-/// The `Init` of the point-get plans.
-// glue: stub of PointGetPlan.Init, blocked-by:D10.8 (the point get of FindBestTask, VS1-28: ExpandVirtualColumn; the fast path builds with newPointGetPlan)
+impl crate::core::point_get_plan::PointGetPlan {
+    /// Init initializes PointGetPlan (the point get of FindBestTask; the fast path builds
+    /// with `newPointGetPlan`).
+    // go: PointGetPlan.Init L1 [M-SELF, M-CTX]
+    pub fn init(
+        mut self,
+        ctx: &PlanCtx<'_>,
+        stats: Option<Arc<StatsInfo>>,
+        offset: isize,
+    ) -> crate::core::point_get_plan::PointGetPlan {
+        self.base = crate::physicalop::BasePhysicalPlan::default();
+        self.base.plan =
+            crate::baseimpl::new_base_plan(ctx, crate::core::point_get_plan::TypePointGet, offset);
+        self.base.plan.set_stats(stats);
+        let tbl_columns: Vec<Arc<tidb_model::ColumnInfo>> = self
+            .tbl_info
+            .columns
+            .iter()
+            .flatten()
+            .map(Arc::clone)
+            .collect();
+        self.columns = crate::core::physical_plans::expand_virtual_column(
+            &self.columns,
+            &mut self.schema,
+            &tbl_columns,
+        );
+        self
+    }
+}
+
+/// The `Init` of the batch point get plan.
 // glue: stub of BatchPointGetPlan.Init, blocked-by:D10.8 (BatchPointGetPlan)
 pub fn init_point_get_plan() -> Result<(), Error> {
-    Err(blocked("D10.8", "the Init of a point-get plan"))
+    Err(blocked("D10.8", "the Init of a batch point get plan"))
 }
 
 /// flattenPlanWithPreorderTraversal flattens a plan tree to a list with preorder traversal.

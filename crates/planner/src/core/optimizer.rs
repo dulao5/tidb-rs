@@ -62,13 +62,16 @@ use crate::core::rule_predicate_simplification::PredicateSimplification;
 use crate::core::rule_result_reorder::ResultReorder;
 use crate::core::rule_topn_push_down::PushDownTopNOptimizer;
 use crate::core::task::get_avg_row_size;
+use crate::core::task_base::Task;
 use crate::logicalop::DataSource;
+use crate::logicalop::base_logical_plan::TaskMap;
 use crate::physicalop::{PhysicalPlanRef, make_mut_plan, map_children};
 use crate::planctx::PlanCtx;
 use crate::property::{PhysicalProperty, StatsInfo};
 use crate::util::optimizetrace::{
     LogicalOptimizeOp, default_logical_optimize_option, default_physical_optimize_option,
 };
+use tidb_sessionctx::planbase::PlanCounterTp;
 
 /// AllowCartesianProduct means whether tidb allows cartesian join without equal conditions.
 pub static ALLOW_CARTESIAN_PRODUCT: AtomicBool = AtomicBool::new(true);
@@ -201,7 +204,6 @@ pub struct StatsLoadPoint {
 }
 
 impl LogicalOptRule for StatsLoadPoint {
-    // glue: blocked-by:D11.2 (CollectPredicateColumnsPoint.Optimize: statistics usage and sync loading: the new stack has only pseudo statistics, VS1 plan §3.2; the plan is left unchanged)
     // glue: blocked-by:D11.2 (SyncWaitStatsLoadPoint.Optimize: waiting for the sync statistics load: nothing is loaded with pseudo statistics, VS1 plan §3.2)
     fn optimize(
         &self,
@@ -212,16 +214,15 @@ impl LogicalOptRule for StatsLoadPoint {
         Ok((p, false))
     }
 
-    // glue: blocked-by:D11.2 (CollectPredicateColumnsPoint.Name: statistics loading point)
     // glue: blocked-by:D11.2 (SyncWaitStatsLoadPoint.Name: statistics loading point)
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-const COLLECT_PREDICATE_COLUMNS_POINT: StatsLoadPoint = StatsLoadPoint {
-    name: "collect_predicate_columns_point",
-};
+const COLLECT_PREDICATE_COLUMNS_POINT:
+    crate::core::rule_collect_plan_stats::CollectPredicateColumnsPoint =
+    crate::core::rule_collect_plan_stats::CollectPredicateColumnsPoint;
 const SYNC_WAIT_STATS_LOAD_POINT: StatsLoadPoint = StatsLoadPoint {
     name: "sync_wait_stats_load_point",
 };
@@ -890,10 +891,14 @@ fn is_logical_rule_disabled(r: &dyn LogicalOptRule) -> bool {
         .contains(r.name())
 }
 
-/// `physicalOptimize`. The statistics derivation (`RecursiveDeriveStats`, D10.6),
-/// `preparePossibleProperties` and `FindBestTask` (D10.2), `ResolveIndices` (D10.9) and the
-/// plan cost (`getPlanCost`, ported with cost model v2) follow; the first three are the boundaries of the physical optimization; the
-/// first one reached returns its block.
+/// `physicalOptimize`: the statistics derivation (`RecursiveDeriveStats`),
+/// `preparePossibleProperties`, FindBestTask (D10.2), `ResolveIndices` (D10.9) and the plan
+/// cost.
+///
+/// The memo of FindBestTask ([`TaskMap`], Go's `taskMap` on every logical plan) is created
+/// here and dropped before the best plan is written (N1 §3 item 9.3): the plan is moved out
+/// of the best task and the memo, so `ResolveIndices` and `postOptimize` write the nodes in
+/// place (no `clone_node`).
 // go: physicalOptimize L1 [M-CTX]
 pub fn physical_optimize(
     ctx: &mut PlanCtx<'_>,
@@ -907,9 +912,9 @@ pub fn physical_optimize(
             "the optimizer debug trace (PLAN REPLAYER)",
         ));
     }
-    crate::logicalop::derive_stats::recursive_derive_stats(ctx, logic)?;
+    crate::logicalop::base_logical_plan::recursive_derive_stats(ctx, logic, &[])?;
 
-    crate::core::find_best_task::prepare_possible_properties(ctx, logic)?;
+    crate::core::property_cols_prune::prepare_possible_properties(ctx, logic);
 
     let prop = PhysicalProperty {
         task_tp: crate::property::RootTaskType,
@@ -924,8 +929,13 @@ pub fn physical_optimize(
     }
 
     ctx.vars.stmt_ctx_mut().task_map_bak_ts = 0;
-    let (t, _) =
-        crate::core::find_best_task::find_best_task(ctx, logic, &prop, plan_counter, &opt)?;
+    let mut memo = TaskMap::new();
+    let mut counter = PlanCounterTp(*plan_counter);
+    let r = crate::base::find_best_task(ctx, logic, &mut memo, &prop, &mut counter, &opt);
+    *plan_counter = counter.0;
+    let (t, _) = r?;
+    // The memo holds the best task of every node: drop it before writing the plan.
+    drop(memo);
     if *plan_counter > 0 {
         ctx.vars
             .stmt_ctx()
@@ -940,7 +950,8 @@ pub fn physical_optimize(
             .gen_with_stack_by_args(vec![tidb_base::gofmt::Arg::from(err_msg)]));
     }
 
-    let mut plan = Arc::clone(t.plan().expect("the best task's plan"));
+    // Move the plan out of the task (and drop the task) before writing it.
+    let mut plan = take_task_plan(t);
     make_mut_plan(&mut plan).resolve_indices()?;
     let cost = crate::core::plan_cost_ver2::get_plan_cost_impl(
         ctx,
@@ -949,6 +960,17 @@ pub fn physical_optimize(
         &crate::util::optimizetrace::new_default_plan_cost_option(),
     )?;
     Ok((plan, cost))
+}
+
+/// `t.Plan()` of the best task, moved out of it (the task is dropped).
+// glue: N1 §3 item 9.3 (the best plan leaves the task before it is written)
+fn take_task_plan(t: Task) -> PhysicalPlanRef {
+    let plan = match t {
+        Task::Root(mut rt) => rt.take_plan(),
+        Task::Cop(c) => c.into_plan(),
+        Task::Mpp(m) => m.p,
+    };
+    plan.expect("the best task's plan")
 }
 
 /// avoidColumnEvaluatorForProjBelowUnion sets AvoidColumnEvaluator to false for the projection operator which is a child of Union operator.

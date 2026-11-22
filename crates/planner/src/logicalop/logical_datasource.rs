@@ -98,13 +98,34 @@ pub struct DataSource {
     pub contain_expr_prefix_uk: bool,
     /// ColsRequiringFullLen is the columns that must be fetched with full length.
     pub cols_requiring_full_len: Vec<Arc<Column>>,
+    /// Whether `ColsRequiringFullLen` was set (Go: the slice is not nil); column pruning
+    /// sets it.
+    pub cols_requiring_full_len_set: bool,
     /// AccessPathMinSelectivity is the minimal selectivity among the access paths.
     pub access_path_min_selectivity: f64,
     /// InterestingColumns stores columns from this DataSource that are used in the query.
     pub interesting_columns: Vec<Arc<Column>>,
+    /// StatisticTable is the statistics of the table (`getStatsTable`, read by `initStats`).
+    pub statistic_table: Option<Arc<tidb_statistics::Table>>,
+    /// TableStats is the statistics of the whole table (`initStats`).
+    pub table_stats: Option<Arc<crate::property::StatsInfo>>,
+    /// TblColHists contains the Histogram of all original table columns,
+    /// it is converted from StatisticTable, and used for IO/network cost estimating.
+    pub tbl_col_hists: Option<Arc<tidb_statistics::HistColl>>,
 }
 
 impl DataSource {
+    /// IsSingleScan checks whether the access path can be a single scan.
+    // go: DataSource.IsSingleScan L1 [M-PLAN]
+    pub fn is_single_scan(
+        &self,
+        ctx: &PlanCtx<'_>,
+        cols: &[Option<Arc<Column>>],
+        col_lens: &[isize],
+    ) -> bool {
+        crate::core::find_best_task::is_single_scan(self, ctx, cols, col_lens)
+    }
+
     /// Init initializes DataSource. The fields are the struct literal Go's builder writes
     /// before `Init`; the schema is set right after (`SetSchema`).
     // go: DataSource.Init L1 [M-SELF]
@@ -141,8 +162,12 @@ impl DataSource {
             is_for_update_read: false,
             contain_expr_prefix_uk: false,
             cols_requiring_full_len: Vec::new(),
+            cols_requiring_full_len_set: false,
             access_path_min_selectivity: 0.0,
             interesting_columns: Vec::new(),
+            statistic_table: None,
+            table_stats: None,
+            tbl_col_hists: None,
         }
     }
 
@@ -256,6 +281,7 @@ impl LogicalPlan for DataSource {
         let origin_columns = self.columns.clone();
 
         self.cols_requiring_full_len = Vec::with_capacity(used.len());
+        self.cols_requiring_full_len_set = true;
         // N1 (borrow B2): `self.schema()` borrows all of `self`; the loop pushes into another
         // field, so the schema is reached through the embedded producer (a disjoint field).
         for (i, col) in self
@@ -350,6 +376,74 @@ impl LogicalPlan for DataSource {
         Ok(this)
     }
 
+    /// FindBestTask implements the base.LogicalPlan.<3rd> interface.
+    // go: DataSource.FindBestTask L1
+    fn find_best_task(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        this: PlanId,
+        memo: &mut crate::logicalop::base_logical_plan::TaskMap,
+        prop: &crate::property::PhysicalProperty,
+        plan_counter: &mut tidb_sessionctx::planbase::PlanCounterTp,
+        opt: &crate::util::optimizetrace::PhysicalOptimizeOp,
+    ) -> Result<(crate::core::task_base::Task, i64), Error> {
+        crate::core::find_best_task::find_best_task4_logical_data_source(
+            self,
+            ctx,
+            this,
+            memo,
+            prop,
+            plan_counter,
+            opt,
+        )
+    }
+
+    /// DeriveStats implements LogicalPlan.<11th> interface.
+    // go: DataSource.DeriveStats L1
+    fn derive_stats(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        _child_stats: &[Arc<crate::property::StatsInfo>],
+        col_groups: &[Vec<Arc<Column>>],
+    ) -> Result<Arc<crate::property::StatsInfo>, Error> {
+        crate::core::stats::derive_stats4_data_source(self, ctx, col_groups)
+    }
+
+    /// PreparePossibleProperties implements base.LogicalPlan.<13th> interface.
+    // go: DataSource.PreparePossibleProperties L1 [M-PLAN]
+    fn prepare_possible_properties(
+        &self,
+        arena: &crate::PlanArena,
+        _children_properties: Vec<Vec<Vec<Arc<Column>>>>,
+    ) -> Vec<Vec<Arc<Column>>> {
+        let mut result = Vec::with_capacity(self.all_possible_access_paths.len());
+        for path in &self.all_possible_access_paths {
+            if path.is_int_handle_path {
+                let col = get_pk_is_handle_col_from_schema(
+                    &self.columns,
+                    self.schema(arena),
+                    self.table_info.pk_is_handle,
+                );
+                if let Some(col) = col {
+                    result.push(vec![col]);
+                }
+                continue;
+            }
+
+            if path.idx_cols.is_empty() {
+                continue;
+            }
+            result.push(path.idx_cols.clone());
+            let mut i = 0;
+            while (i as isize) < path.eq_cond_count && i + 1 < path.idx_cols.len() {
+                result.push(path.idx_cols[i + 1..].to_vec());
+                i += 1;
+            }
+        }
+        result
+    }
+
     /// ExtractCorrelatedCols implements base.LogicalPlan.<15th> interface.
     // go: DataSource.ExtractCorrelatedCols L1
     fn extract_correlated_cols(&self) -> Vec<Arc<CorrelatedColumn>> {
@@ -363,8 +457,6 @@ impl LogicalPlan for DataSource {
 
 // glue: stub of DataSource.BuildKeyInfo, blocked-by:D09.13 (rule/util CheckIndexCanBeKey and domainmisc.GetLatestIndexInfo come with the key-info rule, VS1-24)
 // glue: stub of DataSource.ExtractFD, blocked-by:D09.14 (pkg/planner/funcdep is not ported)
-// glue: stub of DataSource.IsSingleScan, blocked-by:D10.2 (utilfuncp.IsSingleScan is the access path code)
-// glue: stub of DataSource.CheckPartialIndexes, blocked-by:D10.2 (partial indexes: partidx and the access paths)
 // glue: stub of DataSource.CheckPartialIndexByFilters, blocked-by:D10.2 (partial indexes: partidx and ParseSimpleExpr)
 /// The boundary of the DataSource functions stubbed above (key info, FDs, partial indexes,
 /// single scan): the error they return.

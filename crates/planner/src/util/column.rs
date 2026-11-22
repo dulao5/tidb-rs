@@ -3,6 +3,7 @@
 //! `*expression.Column` is `Arc<Column>`; Go's nil entry of `IndexInfo2FullCols` is `None`.
 //! `intest.Assert` is a `debug_assert!`.
 
+use std::borrow::Borrow;
 use std::sync::Arc;
 
 use tidb_expression::Column;
@@ -12,11 +13,12 @@ use tidb_parser::types::UnspecifiedLength;
 /// indexCol2Col finds the corresponding column of the IndexColumn in a column slice.
 // go: indexCol2Col L1
 fn index_col2_col(
-    col_infos: &[ColumnInfo],
+    col_infos: &[impl Borrow<ColumnInfo>],
     cols: &[Arc<Column>],
     col: &IndexColumn,
 ) -> Option<Arc<Column>> {
     for (i, info) in col_infos.iter().enumerate() {
+        let info: &ColumnInfo = info.borrow();
         if info.name.l == col.name.l {
             if col.length > 0 && info.field_type.get_flen() > col.length {
                 let mut c = (*cols[i]).clone();
@@ -46,7 +48,7 @@ pub type IndexCols = (
 
 // go: indexInfo2ColsImpl L1
 fn index_info2_cols_impl(
-    col_infos: &[ColumnInfo],
+    col_infos: &[impl Borrow<ColumnInfo>],
     cols: &[Arc<Column>],
     index: &IndexInfo,
     flags: IndexInfo2ColsFlags,
@@ -106,7 +108,7 @@ fn index_info2_cols_impl(
 /// TODO: Use a struct to represent {*expression.Column, int}.
 // go: IndexInfo2PrefixCols L1
 pub fn index_info2_prefix_cols(
-    col_infos: &[ColumnInfo],
+    col_infos: &[impl Borrow<ColumnInfo>],
     cols: &[Arc<Column>],
     index: &IndexInfo,
 ) -> (Vec<Arc<Column>>, Vec<isize>) {
@@ -121,7 +123,7 @@ pub fn index_info2_prefix_cols(
 /// the return value will be [col1, nil, col2].
 // go: IndexInfo2FullCols L1
 pub fn index_info2_full_cols(
-    col_infos: &[ColumnInfo],
+    col_infos: &[impl Borrow<ColumnInfo>],
     cols: &[Arc<Column>],
     index: &IndexInfo,
 ) -> (Vec<Option<Arc<Column>>>, Vec<isize>) {
@@ -133,7 +135,7 @@ pub fn index_info2_full_cols(
 /// IndexInfo2Cols returns the combined result of IndexInfo2PrefixCols and IndexInfo2FullCols.
 // go: IndexInfo2Cols L1
 pub fn index_info2_cols(
-    col_infos: &[ColumnInfo],
+    col_infos: &[impl Borrow<ColumnInfo>],
     cols: &[Arc<Column>],
     index: &IndexInfo,
 ) -> IndexCols {

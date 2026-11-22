@@ -35,7 +35,7 @@ Go 范围：`pkg/planner/cardinality`，加上 logicalop 中各算子的 `Derive
 | MV 索引：`collectFilters4MVIndex`、`buildPartialPaths4MVIndex`（及 D11.1 的 `PrepareCols4MVIndex`） | D10.7 | 有 MV 索引的表回退 |
 | `recordUsedItemStatsStatus` | D11.2 | 记录语句用到的统计（慢日志 `Stats:`）；`StatementContext.UsedStatsInfo` 未移植（D11.2 tasks P1-1）。不影响估算 |
 | optimizer debug trace / CE trace（`trace.go`、`debugtrace`） | D10.6 第 2 部分 | 入口（`Selectivity`、`GetRowCountBy*Ranges`）在 `EnableOptimizerDebugTrace` 或 `EnableOptimizerCETrace` 打开时返回 `blocked-by:D10.6`（`TRACE PLAN TARGET='estimation'`、plan replayer，VS1 不路由这些语句），不返回一个缺少 trace 的估算 |
-| 各算子的 `DeriveStats`、`ExtractColGroups`、`RecursiveDeriveStats`（`logicalop/derive_stats.rs`） | D09.14（VS1-21 / VS1-23） | 需要逻辑算子本身和它们的 `StatsInfo` 槽位；算子移植时把这些函数移到算子文件中 |
+| 各算子的 `DeriveStats`、`ExtractColGroups`、`RecursiveDeriveStats` | 已随 FindBestTask 第 1 部分（VS1-28）移植到各算子文件 | 见 `specs/D10.2-find-best-task/spec.md` §1 |
 
 块内其余函数（`cross_estimation.go`、`join.go`、`row_count_index.go` 的其余部分、`trace.go` 的其余部分、其他算子的 `DeriveStats`）是第 2 部分（`blocked-by:D10.6`）。
 
