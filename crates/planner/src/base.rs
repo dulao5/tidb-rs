@@ -28,6 +28,8 @@ use tidb_sessionctx::stmtctx::StatementContext;
 use tidb_types::field_name::NameSlice;
 
 use crate::arena::{PlanArena, PlanId};
+use crate::core::task_base::Task;
+use crate::logicalop::base_logical_plan::TaskMap;
 use crate::logicalop::{self, BaseLogicalPlan, LogicalSchemaProducer};
 use crate::physicalop::PhysicalPlanRef;
 use crate::physicalop::base_physical_plan::{self, BasePhysicalPlan};
@@ -35,6 +37,7 @@ use crate::planctx::PlanCtx;
 use crate::property::{PhysicalProperty, StatsInfo, TaskType};
 use crate::util::costusage::CostVer2;
 use crate::util::optimizetrace::{LogicalOptimizeOp, PhysicalOptimizeOp, PlanCostOption};
+use tidb_sessionctx::planbase::PlanCounterTp;
 
 /// Logical operator kinds, for Go's `switch x := p.(type)` (`M-IFACE`, N1 §6.2). Variants
 /// are added with the operators.
@@ -320,6 +323,62 @@ pub trait LogicalPlan: Any + Send {
         logicalop::base_logical_plan::exhaust_physical_plans()
     }
 
+    /// `DeriveStats` derives statistic info for current plan node given child stats; Go
+    /// also passes `selfSchema` and the children's schemas, which the operator reads from
+    /// the arena.
+    // glue: dispatch (Go BaseLogicalPlan.DeriveStats)
+    fn derive_stats(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        this: PlanId,
+        child_stats: &[Arc<StatsInfo>],
+        col_groups: &[Vec<Arc<Column>>],
+    ) -> Result<Arc<StatsInfo>, Error> {
+        let _ = (this, col_groups);
+        logicalop::base_logical_plan::derive_stats(self, &ctx.arena, child_stats)
+    }
+
+    /// `ExtractColGroups` extracts column groups from child operator whose DNVs are required
+    /// by the current operator.
+    // glue: dispatch (Go BaseLogicalPlan.ExtractColGroups)
+    fn extract_col_groups(
+        &self,
+        arena: &PlanArena,
+        col_groups: &[Vec<Arc<Column>>],
+    ) -> Vec<Vec<Arc<Column>>> {
+        let _ = (arena, col_groups);
+        logicalop::base_logical_plan::extract_col_groups()
+    }
+
+    /// `PreparePossibleProperties` is only used for join and aggregation. Like group by a,b,c,
+    /// all permutation of (a,b,c) is right. So we only need to know the column sets of the
+    /// possible properties.
+    // glue: dispatch (Go BaseLogicalPlan.PreparePossibleProperties)
+    fn prepare_possible_properties(
+        &self,
+        arena: &PlanArena,
+        children_properties: Vec<Vec<Vec<Arc<Column>>>>,
+    ) -> Vec<Vec<Arc<Column>>> {
+        let _ = (arena, children_properties);
+        logicalop::base_logical_plan::prepare_possible_properties()
+    }
+
+    /// `FindBestTask` converts the logical plan to the physical plan. It's a new interface.
+    /// It is called recursively from the parent to the children to create the result
+    /// physical plan. `memo` is the side table of Go's `taskMap` (N1 §3.2).
+    // glue: dispatch (Go BaseLogicalPlan.FindBestTask)
+    fn find_best_task(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        this: PlanId,
+        memo: &mut TaskMap,
+        prop: &PhysicalProperty,
+        plan_counter: &mut PlanCounterTp,
+        opt: &PhysicalOptimizeOp,
+    ) -> Result<(Task, i64), Error> {
+        logicalop::base_logical_plan::find_best_task(self, ctx, this, memo, prop, plan_counter, opt)
+    }
+
     /// `ExtractCorrelatedCols`.
     // glue: dispatch (Go BaseLogicalPlan.ExtractCorrelatedCols)
     fn extract_correlated_cols(&self) -> Vec<Arc<CorrelatedColumn>> {
@@ -398,6 +457,18 @@ crate::logical_dispatch!(
     // glue: N1 (interface dispatch)
     pub fn exhaust_physical_plans(prop: &PhysicalProperty)
         -> Result<(Vec<PhysicalPlanRef>, bool), Error>
+);
+crate::logical_dispatch!(
+    /// `p.DeriveStats(childStats, ...)` on a node in the arena.
+    // glue: N1 (interface dispatch)
+    pub fn derive_stats(child_stats: &[Arc<StatsInfo>], col_groups: &[Vec<Arc<Column>>])
+        -> Result<Arc<StatsInfo>, Error>
+);
+crate::logical_dispatch!(
+    /// `p.FindBestTask(prop, planCounter, opt)` on a node in the arena.
+    // glue: N1 (interface dispatch)
+    pub fn find_best_task(memo: &mut TaskMap, prop: &PhysicalProperty,
+        plan_counter: &mut PlanCounterTp, opt: &PhysicalOptimizeOp) -> Result<(Task, i64), Error>
 );
 crate::logical_dispatch!(
     /// `p.ConvertOuterToInnerJoin(predicates)` on a node in the arena.

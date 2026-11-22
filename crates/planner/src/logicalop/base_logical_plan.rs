@@ -10,8 +10,9 @@
 //! - Go's `self` back-pointer is gone (`M-SELF`): a method that needs the outer operator is a
 //!   generic function over `P: LogicalPlan`, called by the trait's default method with the
 //!   operator itself; `p.self` as a return value is the node's own arena id `this`.
-//! - `taskMap` / `taskMapBak` / `taskMapBakTS` are the memo of `FindBestTask` (D10.2), side
-//!   tables keyed by `PlanId` (N1 §3.2): their functions here are boundary stubs until then.
+//! - `taskMap` / `taskMapBak` / `taskMapBakTS` are the memo of `FindBestTask` (D10.2): one
+//!   side table keyed by `PlanId` ([`TaskMap`], N1 §3.2) that lives only inside
+//!   `physicalOptimize` (N1 §3 item 9.3).
 //! - `fdSet` is the functional dependency set of `pkg/planner/funcdep` (not ported): the FD
 //!   functions are boundary stubs.
 
@@ -300,16 +301,194 @@ pub fn convert_outer_to_inner_join<P: LogicalPlan + ?Sized>(
     this
 }
 
-// glue: stub of BaseLogicalPlan.GetLogicalTS4TaskMap, blocked-by:D10.2 (taskMap is the FindBestTask memo, a side table keyed by PlanId, N1 §3.2)
-// glue: stub of BaseLogicalPlan.GetTask, blocked-by:D10.2 (taskMap is the FindBestTask memo, a side table keyed by PlanId, N1 §3.2)
-// glue: stub of BaseLogicalPlan.StoreTask, blocked-by:D10.2 (taskMap is the FindBestTask memo, a side table keyed by PlanId, N1 §3.2)
-/// The memo of `FindBestTask` (`GetLogicalTS4TaskMap`, `GetTask`, `StoreTask`) comes with
-/// physical optimization (D10.2).
-pub fn task_map() -> Result<(), Error> {
-    Err(blocked(
-        "D10.2",
-        "the FindBestTask memo of a logical plan (taskMap)",
-    ))
+/// The memo of `FindBestTask` (Go's `taskMap`, `taskMapBak` and `taskMapBakTS` fields of
+/// every `BaseLogicalPlan`), as one side table keyed by the node's arena id (N1 §3.2): the
+/// best task found for a node under a required property (`prop.HashCode()`), and the
+/// rollback log of the `nth_plan` hint. Go's `taskMap[key] = nil` after a rollback is a
+/// `None` entry.
+///
+/// N1 §3 item 9.3: the memo lives only inside `physicalOptimize` (it is created there and
+/// dropped before the best plan is written), never on the arena nodes: every entry holds an
+/// `Arc` of a winning plan, so a memo alive during `postOptimize` would make every node look
+/// shared and get copied.
+// glue: N1 §3.2 (the taskMap fields of BaseLogicalPlan as one side table)
+#[derive(Default)]
+pub struct TaskMap {
+    tasks: std::collections::HashMap<(PlanId, Vec<u8>), Option<crate::core::task_base::Task>>,
+    /// Per node: Go's `taskMapBak` (the keys) and `taskMapBakTS` (their time stamps).
+    bak: std::collections::HashMap<PlanId, Vec<(Vec<u8>, u64)>>,
+}
+
+impl TaskMap {
+    /// An empty memo (Go's `make(map[string]base.Task)` of every new logical plan).
+    // glue: N1 §3.2
+    pub fn new() -> TaskMap {
+        TaskMap::default()
+    }
+
+    /// The number of entries (for the tests of the memo's lifetime).
+    // glue: N1 §3.2
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// Whether the memo is empty.
+    // glue: N1 §3.2
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+}
+
+/// GetLogicalTS4TaskMap get the logical TimeStamp now to help rollback the TaskMap changes after that.
+// go: BaseLogicalPlan.GetLogicalTS4TaskMap L1 [M-CTX]
+pub fn get_logical_ts4_task_map(ctx: &mut PlanCtx<'_>) -> u64 {
+    let sc = ctx.vars.stmt_ctx_mut();
+    sc.task_map_bak_ts += 1;
+    sc.task_map_bak_ts
+}
+
+/// GetTask returns the history recorded Task for specified property. Go returns the stored
+/// task pointer (or nil); the stored `Task` is cloned, which clones its plan's `Arc` (the
+/// same node, as Go's pointer).
+// go: BaseLogicalPlan.GetTask L1 [M-PLAN]
+pub fn get_task(
+    memo: &TaskMap,
+    p: PlanId,
+    prop: &crate::property::PhysicalProperty,
+) -> Option<crate::core::task_base::Task> {
+    let key = prop.hash_code();
+    memo.tasks
+        .get(&(p, key.to_vec()))
+        .and_then(|t| t.as_ref().cloned())
+}
+
+/// StoreTask records Task for specified property as <k,v>.
+// go: BaseLogicalPlan.StoreTask L1 [M-PLAN, M-CTX]
+pub fn store_task(
+    memo: &mut TaskMap,
+    ctx: &mut PlanCtx<'_>,
+    p: PlanId,
+    prop: &crate::property::PhysicalProperty,
+    task: crate::core::task_base::Task,
+) {
+    let key = prop.hash_code().to_vec();
+    if ctx.vars.stmt_ctx().stmt_hints.task_map_need_back_up() {
+        // Empty string for useless change.
+        let ts = get_logical_ts4_task_map(ctx);
+        memo.bak.entry(p).or_default().push((key.clone(), ts));
+    }
+    memo.tasks.insert((p, key), Some(task));
+}
+
+/// RollBackTaskMap implements LogicalPlan.<20th> interface.
+// go: BaseLogicalPlan.RollBackTaskMap L1 [M-PLAN, M-CTX]
+pub fn roll_back_task_map(memo: &mut TaskMap, ctx: &PlanCtx<'_>, p: PlanId, ts: u64) {
+    if !ctx.vars.stmt_ctx().stmt_hints.task_map_need_back_up() {
+        return;
+    }
+    if let Some(bak) = memo.bak.get_mut(&p)
+        && !bak.is_empty()
+    {
+        // Rollback all the logs with TimeStamp TS.
+        let mut i = 0;
+        while i < bak.len() {
+            if bak[i].1 < ts {
+                i += 1;
+                continue;
+            }
+            // Remove the i_th log.
+            let (cur, _) = bak.remove(i);
+            // Roll back taskMap.
+            memo.tasks.insert((p, cur), None);
+        }
+    }
+    for &child in ctx.arena.get(p).children() {
+        roll_back_task_map(memo, ctx, child, ts);
+    }
+}
+
+/// FindBestTask implements LogicalPlan.<3rd> interface: `findBestTask` of
+/// `find_best_task.go` (`utilfuncp.FindBestTask`).
+// go: BaseLogicalPlan.FindBestTask L1 [M-SELF]
+pub fn find_best_task<P: LogicalPlan + ?Sized>(
+    p: &mut P,
+    ctx: &mut PlanCtx<'_>,
+    this: PlanId,
+    memo: &mut TaskMap,
+    prop: &crate::property::PhysicalProperty,
+    plan_counter: &mut tidb_sessionctx::planbase::PlanCounterTp,
+    opt: &crate::util::optimizetrace::PhysicalOptimizeOp,
+) -> Result<(crate::core::task_base::Task, i64), Error> {
+    crate::core::find_best_task::find_best_task(p, ctx, this, memo, prop, plan_counter, opt)
+}
+
+/// RecursiveDeriveStats implements LogicalPlan.<10th> interface.
+// go: BaseLogicalPlan.RecursiveDeriveStats L1 [M-SELF, M-PLAN]
+pub fn recursive_derive_stats(
+    ctx: &mut PlanCtx<'_>,
+    p: PlanId,
+    col_groups: &[Vec<Arc<tidb_expression::Column>>],
+) -> Result<Arc<crate::property::StatsInfo>, Error> {
+    let children = ctx.arena.get(p).children().to_vec();
+    let mut child_stats = Vec::with_capacity(children.len());
+    let cum_col_groups = ctx.arena.get(p).extract_col_groups(&ctx.arena, col_groups);
+    for child in children {
+        let child_profile = recursive_derive_stats(ctx, child, &cum_col_groups)?;
+        child_stats.push(child_profile);
+    }
+    base::derive_stats(ctx, p, &child_stats, col_groups)
+}
+
+/// DeriveStats implements LogicalPlan.<11th> interface.
+///
+/// Go also receives `selfSchema` and the children's schemas; the operator reads its own
+/// schema (and its children's) from the arena.
+// go: BaseLogicalPlan.DeriveStats L1 [M-SELF, M-PLAN]
+pub fn derive_stats<P: LogicalPlan + ?Sized>(
+    p: &mut P,
+    arena: &PlanArena,
+    child_stats: &[Arc<crate::property::StatsInfo>],
+) -> Result<Arc<crate::property::StatsInfo>, Error> {
+    if child_stats.len() == 1 {
+        p.base_mut()
+            .plan
+            .set_stats(Some(Arc::clone(&child_stats[0])));
+        return Ok(Arc::clone(&child_stats[0]));
+    }
+    if child_stats.len() > 1 {
+        let err = tidb_base::dbterror::plannererrors::ErrInternal.gen_with_stack(
+            "LogicalPlans with more than one child should implement their own DeriveStats().",
+            Vec::new(),
+        );
+        return Err(err);
+    }
+    if let Some(s) = p.base().plan.stats_info() {
+        return Ok(Arc::clone(s));
+    }
+    let self_schema = p.schema(arena);
+    let mut profile = crate::property::StatsInfo {
+        row_count: 1.0,
+        col_ndvs: std::collections::HashMap::with_capacity(self_schema.len()),
+        ..Default::default()
+    };
+    for col in &self_schema.columns {
+        profile.col_ndvs.insert(col.unique_id, 1.0);
+    }
+    let profile = Arc::new(profile);
+    p.base_mut().plan.set_stats(Some(Arc::clone(&profile)));
+    Ok(profile)
+}
+
+/// ExtractColGroups implements LogicalPlan.<12th> interface.
+// go: BaseLogicalPlan.ExtractColGroups L1
+pub fn extract_col_groups() -> Vec<Vec<Arc<tidb_expression::Column>>> {
+    Vec::new()
+}
+
+/// PreparePossibleProperties implements LogicalPlan.<13th> interface.
+// go: BaseLogicalPlan.PreparePossibleProperties L1
+pub fn prepare_possible_properties() -> Vec<Vec<Arc<tidb_expression::Column>>> {
+    Vec::new()
 }
 
 // go: BaseLogicalPlan.Self L1 [M-SELF]

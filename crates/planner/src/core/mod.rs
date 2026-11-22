@@ -1,9 +1,11 @@
 //! Go package `pkg/planner/core`: the plan builder, the optimizer driver and the physical
 //! plan helpers, ported file by file with the VS1 work items.
 
+pub mod collect_column_stats_usage;
 pub mod common_plans;
 pub mod constraint;
 pub mod core_init;
+pub mod cost;
 pub mod exhaust_physical_plans;
 pub mod explain;
 pub mod expression_codec_fn;
@@ -26,9 +28,11 @@ pub mod plan_cost_ver2;
 pub mod planbuilder;
 pub mod point_get_plan;
 pub mod preprocess;
+pub mod property_cols_prune;
 pub mod resolve;
 pub mod resolve_indices;
 pub mod rule;
+pub mod rule_collect_plan_stats;
 pub mod rule_column_pruning;
 pub mod rule_derive_topn_from_window;
 pub mod rule_eliminate_projection;
@@ -38,6 +42,7 @@ pub mod rule_predicate_simplification;
 pub mod rule_result_reorder;
 pub mod rule_topn_push_down;
 pub mod rule_util;
+pub mod stats;
 pub mod task;
 pub mod task_base;
 pub mod util;

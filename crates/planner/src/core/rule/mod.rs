@@ -5,4 +5,5 @@
 
 pub mod logical_rules;
 pub mod rule_constant_propagation;
+pub mod rule_prune_indexes;
 pub mod util;

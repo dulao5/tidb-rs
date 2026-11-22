@@ -89,7 +89,7 @@ use crate::util::handle_cols::{HandleCols, new_common_handle_cols, new_int_handl
 pub const GlobalWithoutColumnPos: isize = -1;
 
 /// `plancodec.TypePointGet`.
-const TypePointGet: &str = "Point_Get";
+pub(crate) const TypePointGet: &str = "Point_Get";
 
 /// `unsafe.Sizeof(PointGetPlan{})` on 64-bit Go (`emptyPointGetPlanSize`).
 const EMPTY_POINT_GET_PLAN_SIZE: i64 = 528;

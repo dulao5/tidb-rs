@@ -296,11 +296,10 @@ fn miss_path_checks_the_new_plan() {
         ["skip prepared plan-cache: query has 'version' is un-cacheable"]
     );
 
-    // The optimizer's error is returned: `select 1` is built and logically optimized, the
-    // physical optimization stops at the statistics derivation (D10.6).
+    // The optimizer plans `select 1` through the whole DoOptimize (FindBestTask, D10.2).
     let mut v = vars();
     let mut s = stmt("select 1", vec![], 1);
-    let e = get_plan_from_plan_cache(
+    get_plan_from_plan_cache(
         &mut v,
         false,
         &Is(1),
@@ -309,9 +308,7 @@ fn miss_path_checks_the_new_plan() {
         &[],
         &mut |vars, node, is| crate::optimize::optimize_ast_node(&test_parts(), vars, node, is),
     )
-    .err()
     .unwrap();
-    assert_eq!(blocked_by(&e), Some("D10.6"));
 }
 
 #[test]
@@ -639,15 +636,13 @@ fn optimize_exec_stmt_reaches_the_statement_optimizer() {
 
     // The session's expression context reads the parameter values (here a static context
     // that holds them, as the session's sessionexpr context will).
-    let e = optimize_exec_stmt(
+    optimize_exec_stmt(
         &mut test_parts_with_params(&[new_int_datum(5)]).plan_ctx(&mut v),
         &node,
         &Is(1),
         None,
     )
-    .err()
     .unwrap();
-    assert_eq!(blocked_by(&e), Some("D10.6"), "{e}");
     // The miss path ran: the parameter values are in the session, and the statement was
     // being planned (the flag is cleared again).
     assert_eq!(v.state.plan_cache_params.all_param_values().len(), 1);

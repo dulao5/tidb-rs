@@ -1413,3 +1413,27 @@ fn explain_is_never_routed_to_the_new_stack() {
         }
     }
 }
+
+/// `tidb_cost_model_version = 1`: the cost model v1 is not ported (exception B5), and the
+/// new stack's planner answers a SELECT with its boundary (`blocked-by:EXC.B`, pinned by the
+/// planner test `select_with_cost_model_v1_is_the_cost_model_boundary`). The router falls
+/// back to the prototype in `fallback` mode (the new session executed nothing) and returns
+/// the 1235 of the boundary in `strict` mode.
+#[test]
+fn select_with_cost_model_v1_falls_back_to_the_prototype() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().answer = Some(Answer::Blocked("EXC.B"));
+    assert_eq!(
+        rows(&block_on(r.query(&mut p, POINT))).map(|r| r.0),
+        Some(3)
+    );
+    assert!(p.log.iter().any(|l| l.starts_with("run")));
+    assert_eq!(r.new.session().executed_stmts(), 0);
+
+    let mut p = poc();
+    let (mut s, sscript) = scripted(NewStackMode::Strict, &p);
+    sscript.lock().unwrap().answer = Some(Answer::Blocked("EXC.B"));
+    let e = block_on(s.query(&mut p, POINT)).unwrap_err();
+    assert_eq!(e.code, 1235);
+}

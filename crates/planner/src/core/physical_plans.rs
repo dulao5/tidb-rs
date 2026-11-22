@@ -503,6 +503,12 @@ impl PhysicalTableScan {
 impl PhysicalPlan for PhysicalTableScan {
     crate::physical_plan_boilerplate!(TableScan, sp);
 
+    /// `TP()` of the table scan (`explain.go`).
+    // glue: dispatch (Go PhysicalTableScan.TP, ported in core/explain.rs)
+    fn tp(&self) -> &'static str {
+        crate::core::explain::table_scan_tp(self)
+    }
+
     /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
     // glue: dispatch (Go PhysicalTableScan.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
     fn get_plan_cost_ver2(

@@ -43,6 +43,20 @@ impl LogicalSort {
 impl LogicalPlan for LogicalSort {
     crate::logical_plan_boilerplate!(Sort);
 
+    /// PreparePossibleProperties implements base.LogicalPlan.<13th> interface.
+    // go: LogicalSort.PreparePossibleProperties L1
+    fn prepare_possible_properties(
+        &self,
+        _arena: &crate::PlanArena,
+        _children_properties: Vec<Vec<Vec<Arc<Column>>>>,
+    ) -> Vec<Vec<Arc<Column>>> {
+        let prop_cols = get_possible_property_from_by_items(&self.by_items);
+        if prop_cols.is_empty() {
+            return Vec::new();
+        }
+        vec![prop_cols]
+    }
+
     /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
     // go: LogicalSort.ExhaustPhysicalPlans L1 [M-PLAN]
     fn exhaust_physical_plans(

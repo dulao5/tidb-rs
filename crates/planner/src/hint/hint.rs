@@ -9,6 +9,13 @@
 //! non-empty hint list) is a boundary stub `blocked-by:D02.2` at the place Go takes the
 //! branch; an empty list gives exactly Go's values.
 
+/// PreferTiKV indicates that the optimizer prefers to use TiKV layer.
+#[allow(non_upper_case_globals)]
+pub const PreferTiKV: isize = 1;
+/// PreferTiFlash indicates that the optimizer prefers to use TiFlash layer.
+#[allow(non_upper_case_globals)]
+pub const PreferTiFlash: isize = 1 << 1;
+
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_parser::ast::IndexHint;

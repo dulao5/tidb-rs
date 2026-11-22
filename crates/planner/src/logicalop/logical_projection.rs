@@ -226,7 +226,6 @@ impl LogicalProjection {
 // go-exception: EXC.B LogicalProjection.Equals (cascades base.HashEquals; D08.1 spec §4 item 2)
 // glue: stub of LogicalProjection.HashCode, blocked-by:D14.2 (plancodec.TypeStringToPhysicalID, util/plancodec)
 // glue: stub of LogicalProjection.ExtractFD, blocked-by:D09.14 (pkg/planner/funcdep is not ported)
-// glue: stub of LogicalProjection.getGroupNDVs, blocked-by:D10.6 (only DeriveStats, a VS1-29 boundary, calls it)
 /// The boundary of the stubbed `LogicalProjection` functions above.
 pub fn projection_boundary(block: &str, what: &str) -> Error {
     blocked(block, what)
@@ -234,6 +233,122 @@ pub fn projection_boundary(block: &str, what: &str) -> Error {
 
 impl LogicalPlan for LogicalProjection {
     crate::logical_plan_boilerplate!(Projection, producer);
+
+    /// DeriveStats implements base.LogicalPlan.<11th> interface.
+    // go: LogicalProjection.DeriveStats L1 [M-PLAN]
+    fn derive_stats(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        child_stats: &[Arc<crate::property::StatsInfo>],
+        col_groups: &[Vec<Arc<Column>>],
+    ) -> Result<Arc<crate::property::StatsInfo>, Error> {
+        let child_profile = &child_stats[0];
+        if let Some(s) = self.base.plan.stats_info() {
+            // Reload GroupNDVs since colGroups may have changed.
+            let mut stats = crate::property::StatsInfo::clone(s);
+            stats.group_ndvs =
+                self.get_group_ndvs(col_groups, child_profile, self.schema(&ctx.arena));
+            let stats = Arc::new(stats);
+            self.base.plan.set_stats(Some(Arc::clone(&stats)));
+            return Ok(stats);
+        }
+        let mut stats = crate::property::StatsInfo {
+            row_count: child_profile.row_count,
+            col_ndvs: HashMap::with_capacity(self.exprs.len()),
+            ..Default::default()
+        };
+        let child_schema = ctx.arena.get(self.base.children[0]).schema(&ctx.arena);
+        let self_schema = self.sp.schema(&self.base.children, &ctx.arena);
+        let mut cols = Vec::with_capacity(8);
+        for (i, expr) in self.exprs.iter().enumerate() {
+            cols = tidb_expression::util::extract_all_columns_from_expressions_in_used_slices(
+                cols,
+                None,
+                std::slice::from_ref(expr),
+            );
+            let (ndv, _) = crate::cardinality::ndv::estimate_cols_ndv_with_matched_len(
+                &cols,
+                child_schema,
+                child_profile,
+            );
+            stats.col_ndvs.insert(self_schema.columns[i].unique_id, ndv);
+            cols.clear();
+        }
+        stats.group_ndvs = self.get_group_ndvs(col_groups, child_profile, self_schema);
+        let stats = Arc::new(stats);
+        self.base.plan.set_stats(Some(Arc::clone(&stats)));
+        Ok(stats)
+    }
+
+    /// ExtractColGroups implements base.LogicalPlan.<12th> interface.
+    // go: LogicalProjection.ExtractColGroups L1 [M-PLAN]
+    fn extract_col_groups(
+        &self,
+        arena: &crate::PlanArena,
+        col_groups: &[Vec<Arc<Column>>],
+    ) -> Vec<Vec<Arc<Column>>> {
+        if col_groups.is_empty() {
+            return Vec::new();
+        }
+        let (ext_col_groups, _) = self.schema(arena).extract_col_groups(col_groups);
+        let ext_col_groups = ext_col_groups.unwrap_or_default();
+        if ext_col_groups.is_empty() {
+            return Vec::new();
+        }
+        let mut extracted = Vec::with_capacity(ext_col_groups.len());
+        for cols in &ext_col_groups {
+            let mut exprs = Vec::with_capacity(cols.len());
+            let mut all_cols = true;
+            for &offset in cols {
+                // TODO: for functional dependent projections like `col1 + 1` -> `col2`, we can maintain GroupNDVs actually.
+                let Expr::Column(col) = &*self.exprs[offset as usize] else {
+                    all_cols = false;
+                    break;
+                };
+                exprs.push(Arc::new(col.clone()));
+            }
+            if all_cols {
+                extracted.push(tidb_expression::column::sort_columns(&exprs));
+            }
+        }
+        extracted
+    }
+
+    /// PreparePossibleProperties implements base.LogicalPlan.<13th> interface.
+    // go: LogicalProjection.PreparePossibleProperties L1 [M-PLAN]
+    fn prepare_possible_properties(
+        &self,
+        arena: &crate::PlanArena,
+        mut children_properties: Vec<Vec<Vec<Arc<Column>>>>,
+    ) -> Vec<Vec<Arc<Column>>> {
+        let child_properties = children_properties.swap_remove(0);
+        let schema = self.schema(arena);
+        let mut old_cols = Vec::with_capacity(schema.len());
+        let mut new_cols = Vec::with_capacity(schema.len());
+        for (i, expr) in self.exprs.iter().enumerate() {
+            if let Expr::Column(col) = &**expr {
+                new_cols.push(Arc::clone(&schema.columns[i]));
+                old_cols.push(Arc::new(col.clone()));
+            }
+        }
+        let tmp_schema = tidb_expression::new_schema(old_cols);
+        let mut new_properties = Vec::with_capacity(child_properties.len());
+        for child_property in &child_properties {
+            let mut new_child_property = Vec::with_capacity(child_property.len());
+            for col in child_property {
+                let pos = tmp_schema.column_index(col);
+                if pos < 0 {
+                    break;
+                }
+                new_child_property.push(Arc::clone(&new_cols[pos as usize]));
+            }
+            if !new_child_property.is_empty() {
+                new_properties.push(new_child_property);
+            }
+        }
+        new_properties
+    }
 
     /// ExhaustPhysicalPlans implements base.LogicalPlan.<14th> interface.
     // go: LogicalProjection.ExhaustPhysicalPlans L1 [M-PLAN]
@@ -595,4 +710,45 @@ pub fn inject_expr(ctx: &mut PlanCtx<'_>, p: PlanId, expr: ExprRef) -> (PlanId, 
             .append_expr(ctx, expr)
     });
     (proj, col)
+}
+
+impl LogicalProjection {
+    // go: LogicalProjection.getGroupNDVs L1
+    fn get_group_ndvs(
+        &self,
+        col_groups: &[Vec<Arc<Column>>],
+        child_profile: &crate::property::StatsInfo,
+        self_schema: &tidb_expression::Schema,
+    ) -> Vec<crate::property::GroupNDV> {
+        if col_groups.is_empty() || child_profile.group_ndvs.is_empty() {
+            return Vec::new();
+        }
+        let mut expr_col2_proj_col: HashMap<i64, i64> = HashMap::new();
+        for (i, expr) in self.exprs.iter().enumerate() {
+            let Expr::Column(expr_col) = &**expr else {
+                continue;
+            };
+            expr_col2_proj_col.insert(expr_col.unique_id, self_schema.columns[i].unique_id);
+        }
+        let mut ndvs = Vec::with_capacity(child_profile.group_ndvs.len());
+        for child_group_ndv in &child_profile.group_ndvs {
+            let mut proj_cols = Some(vec![0i64; child_group_ndv.cols.len()]);
+            for (i, col) in child_group_ndv.cols.iter().enumerate() {
+                let Some(&proj_col) = expr_col2_proj_col.get(col) else {
+                    proj_cols = None;
+                    break;
+                };
+                proj_cols.as_mut().expect("set above")[i] = proj_col;
+            }
+            let Some(mut proj_cols) = proj_cols else {
+                continue;
+            };
+            proj_cols.sort();
+            ndvs.push(crate::property::GroupNDV {
+                cols: proj_cols,
+                ndv: child_group_ndv.ndv,
+            });
+        }
+        ndvs
+    }
 }

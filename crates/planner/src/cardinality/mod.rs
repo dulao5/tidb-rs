@@ -6,6 +6,7 @@
 //! statistics (TopN, CM sketch, histograms), cross-column estimation and the traces are
 //! D10.6 part 2; ranges are built by `crate::ranger` (D10.4, VS1-25).
 
+pub mod cross_estimation;
 pub mod ndv;
 pub mod pseudo;
 pub mod row_count_column;

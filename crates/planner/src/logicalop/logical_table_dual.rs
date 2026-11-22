@@ -59,6 +59,54 @@ pub fn table_dual_hash_code_boundary() -> Error {
 impl LogicalPlan for LogicalTableDual {
     crate::logical_plan_boilerplate!(TableDual, producer);
 
+    /// DeriveStats implements base.LogicalPlan.<11th> interface.
+    // go: LogicalTableDual.DeriveStats L1 [M-PLAN]
+    fn derive_stats(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        _child_stats: &[Arc<crate::property::StatsInfo>],
+        _col_groups: &[Vec<Arc<Column>>],
+    ) -> Result<Arc<crate::property::StatsInfo>, Error> {
+        if let Some(s) = self.base.plan.stats_info() {
+            return Ok(Arc::clone(s));
+        }
+        let self_schema = self.schema(&ctx.arena);
+        let mut profile = crate::property::StatsInfo {
+            row_count: self.row_count as f64,
+            col_ndvs: std::collections::HashMap::with_capacity(self_schema.len()),
+            ..Default::default()
+        };
+        for col in &self_schema.columns {
+            profile
+                .col_ndvs
+                .insert(col.unique_id, self.row_count as f64);
+        }
+        let profile = Arc::new(profile);
+        self.base.plan.set_stats(Some(Arc::clone(&profile)));
+        Ok(profile)
+    }
+
+    /// FindBestTask implements the base.LogicalPlan.<3rd> interface.
+    // go: LogicalTableDual.FindBestTask L1
+    fn find_best_task(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        _this: PlanId,
+        _memo: &mut crate::logicalop::base_logical_plan::TaskMap,
+        prop: &crate::property::PhysicalProperty,
+        plan_counter: &mut tidb_sessionctx::planbase::PlanCounterTp,
+        opt: &crate::util::optimizetrace::PhysicalOptimizeOp,
+    ) -> Result<(crate::core::task_base::Task, i64), Error> {
+        crate::core::find_best_task::find_best_task4_logical_table_dual(
+            self,
+            ctx,
+            prop,
+            plan_counter,
+            opt,
+        )
+    }
+
     /// ExplainInfo implements Plan interface.
     // go: LogicalTableDual.ExplainInfo L1
     fn explain_info(&self, _ctx: &PlanCtx<'_>) -> Result<String, Error> {
