@@ -73,7 +73,7 @@ tracker 新领域 `findbest`（tidb-rs 回放 `crates/planner/tests/govec_findbe
 
 第 1 条要说明：skyline 之后还留着索引路径时，Go 会算出索引读的代价再与表路径比较；第 1 部分不移植索引读，所以只要留下了能生成 task 的索引路径就返回边界（VS1 plan §3.2 的约定），由路由器回退到原型。计划向量中这样的记录有 668 条，其中 140 条 Go 最后仍选了表路径——第 2 部分移植索引读之后它们会与 Go 相同。第一个纵向切片的语句都不受影响（§2）。
 
-tracker 的桩登记表新增 22 行、删除 6 行（删除的是原来的 FindBestTask、`preparePossibleProperties`、`taskMap`、统计信息推导等整函数桩）。`scripts/stub_ratchet.tsv` 中 planner 一项由 363 变为 369：删掉的整函数桩之外，第 1 部分代码在 Go 的各个分支处写了显式边界（index merge、TiFlash、BatchPointGet、部分索引、索引读等，每处是注释加 `blocked(...)` 调用），以前这些分支所在的函数整体未移植，没有单独计数。
+tracker 的桩登记表新增 22 行、删除 6 行。`scripts/stub_ratchet.tsv` 中 planner 一项由 363 变为 372（planner 目录中 `blocked-by` 标记 +30 / −21，净 +9）。删除的 21 个是原来的整函数桩：统计信息推导 11 个（`derive_stats.rs` 10 个、`LogicalProjection.getGroupNDVs` 1 个）、`taskMap` 3 个、FindBestTask / `preparePossibleProperties` 2 个、`IsSingleScan` / `CheckPartialIndexes` 2 个、`CollectPredicateColumnsPoint` 2 个、`PointGetPlan.Init` 1 个。新增的 30 个是第 1 部分代码在 Go 分支处的显式边界（每处多为注释加 `blocked(...)` 调用两行）：index merge（D10.7）9 个（skyline、候选循环、`generateIndexMergePath`、访问路径别名、三个辅助函数）、TiFlash / MPP / 向量索引（D10.1）4 个、BatchPointGet（D10.8）2 个、分区表点查与 planbuilder 辅助函数（D09.12）3 个、索引读 / `GroupRangesByCols` / 部分索引 / `appendExtraHandleCol`（D10.2）若干、ANALYZE 辅助函数（D09.17）2 个、SHOW（D12.12）3 个，以及 D10.3、D10.6、D06.4、D02.2、D14.2 各 1 个。以前这些分支所在的函数整体未移植，没有单独计数。
 
 ## 6. 已知差异
 
