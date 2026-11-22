@@ -248,25 +248,35 @@ Rust 中表达式上下文是 `Arc<dyn ExprContext>`（`Send + Sync`，可以交
 
 ### 8.3 可选属性（`NewEvalContext`）
 
-Go 注册 9 个 provider（并在测试构建中断言 9 个齐全；生产构建不检查）。这里：
+Go 注册 9 个 provider。这里 9 个**全部注册**，因为 Go 的代码会按"属性是否存在"走不同的分支（例如 `expression_rewriter.go:1759` 的用户变量赋值在没有会话变量属性时返回普通错误，`UNCOMPRESS` 没有它时跳过内存统计，`CURRENT_USER()` / `GET_LOCK()` 取不到属性时是返回给客户端的普通错误）。会话还做不到的那几个，在**取用时**返回边界错误（`blocked-by`），语句回退到 PoC，而不是给出与 Go 不同的结果：
 
 | provider | 做法 |
 |---|---|
-| InfoSchema | 注册：会话的 InfoSchema（事务的，否则 domain 的）与 domain 的 |
-| 存储 | 注册：会话的存储 |
-| SQL 执行器（`GetRestrictedSQLExecutor`） | 注册，取用时返回 `blocked-by:D00.3`（受限 SQL 执行器未移植） |
-| sequence（`util.GetSequenceByName`） | 注册，取用时返回 `blocked-by:D06.4`（Rust InfoSchema 没有 sequence）；`sequenceOperator` 的 3 个方法是桩 |
-| DDL owner | 注册，答 false：tidb-rs 不参加 DDL owner 选举（DDL 由 Go TiDB 执行），本实例不会是 owner |
-| 权限检查 | 注册，就是这个上下文；没有权限管理器（D04.1），按 Go 中管理器为 nil 的分支，检查一律通过 |
-| 当前用户（`currentUserProp`） | **不注册**（桩，`blocked-by:D04.1`）：Rust 的 `SessionVars` 没有 `User` / `ActiveRoles`（VS1 plan §3.2，PoC 单用户） |
-| 会话变量（`NewSessionVarsProvider`） | **不注册**：tasks P1-2，内置函数如何拿到 `SessionVars` 还没定 |
-| advisory lock | **不注册**：会话的锁表没有移植 |
+| InfoSchema | 会话的 InfoSchema（事务的，否则 domain 的）与 domain 的 |
+| 存储 | 会话的存储 |
+| DDL owner | 答 false：tidb-rs 不参加 DDL owner 选举（DDL 由 Go TiDB 执行），本实例不会是 owner |
+| 权限检查 | 就是这个上下文；没有权限管理器（D04.1），按 Go 中管理器为 nil 的分支，检查一律通过 |
+| 当前用户（`currentUserProp`） | 取用时 `blocked-by:D04.1`：Rust 的 `SessionVars` 没有 `User` / `ActiveRoles`（VS1 plan §3.2，PoC 单用户） |
+| 会话变量（`NewSessionVarsProvider`） | 取用时 `blocked-by:D05.3`：tasks P1-2，内置函数如何拿到 `SessionVars` 还没定 |
+| advisory lock | 取用时 `blocked-by:D05.3`：会话的锁表没有移植 |
+| SQL 执行器（`GetRestrictedSQLExecutor`） | 取用时 `blocked-by:D00.3`（受限 SQL 执行器未移植） |
+| sequence（`util.GetSequenceByName`） | 取用时 `blocked-by:D06.4`（Rust InfoSchema 没有 sequence）；`sequenceOperator` 的 3 个方法是桩 |
 
-不注册的三个：需要它们的内置函数（`CURRENT_USER()`、`GET_LOCK()` 等）在取 provider 时得到 Go 的 "optional property not exists" 错误，而不是错误的值。它们都不在第一个纵向切片里。
+实现：前三个"取用时报边界错误"的属性用一个通用的边界 provider（`expropt::BlockedPropProvider`，tidb-rs 的胶水）：它报告自己的属性键（所以属性集合是满的），`getPropProvider` 取到它时返回它记下的 `blocked` 错误。
 
 ### 8.4 测试
 
-`crates/session/src/tests.rs`：`session_eval_context_basic`、`session_eval_context_current_time`、`session_eval_context_privileges_and_optional_props`、`session_build_context_shares_the_session_state`（对应 Go `sessionctx_test.go` 的 5 个测试，按 §8.1 的视图改写：标量变量在建视图前设置；共享的单元在建视图后修改也能读到）。govec 不适用：这些函数只是把会话的状态转交出去，没有可按输入输出对照的计算（tracker 的豁免表改为"已移植，Rust 单测"）。
+`crates/session/src/tests.rs`：`session_eval_context_basic`、`session_eval_context_current_time`、`session_eval_context_privileges_and_optional_props`（9 个属性都存在，5 个取用时是边界错误）、`session_build_context_shares_the_session_state`、`restore_writes_back_into_the_shared_cells`（见 §8.5）（对应 Go `sessionctx_test.go` 的 5 个测试，按 §8.1 的视图改写：标量变量在建视图前设置；共享的单元在建视图后修改也能读到）。govec 不适用：这些函数只是把会话的状态转交出去，没有可按输入输出对照的计算（tracker 的豁免表改为"已移植，Rust 单测"）。
+
+### 8.5 回退恢复与共享单元
+
+检查点（§3）复制这几个共享单元的**值**（用户变量也复制，原来只共享表），恢复时把值写回会话**原来的单元**，而不是换成新单元（`SessionState::restore_keeping_shared_cells`）。所以回退之前建好的表达式上下文（或其他持有这些单元的对象）在恢复之后读到的是恢复后的值，与会话一致。测试：`restore_writes_back_into_the_shared_cells`（参数值、计划列 id、随机数生成器、用户变量）。
+
+### 8.6 已知差异
+
+1. 标量会话变量是交出上下文时的快照，Go 每次实时读（§8.1）。等解析器能解析 hint 之后，`SET_VAR` hint 会在规划中写会话变量：那时快照要在 hint 生效**之后**取（或在写入后重建规划上下文），否则规划读到的是 hint 之前的值。在那之前非空 hint 列表直接回退，看不出差别。
+2. 不做 Go 测试构建中的时区断言（§8.2）。
+3. 会话做不到的 5 个可选属性取用时回退（§8.3），Go 中它们都有值。
 
 ## 9. EXECUTE 经 Compile 进入优化器
 
@@ -283,6 +293,8 @@ Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次
 ### 9.2 只编译 EXECUTE
 
 EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预处理之前停在 `blocked-by:D05.3`：原因同 §9.1 第 2 条，普通语句的 AST 不能逐字段复制（SELECT 的子树很大，且 `Expr` 不能 `Clone`），要等语句的所有权调整（会话把语句交给 `Compile` 时只保留一份，或 AST 支持复制）。原来这些语句停在 `blocked-by:D09.13`，回退的位置和结果不变（都在执行之前）。
+
+接上普通语句的计划（随 VS1-37 集成）：会话把语句**移交**给 `Compile`（不再先克隆 `Arc`）；规划器在 `&mut ast::Stmt` 上写（预处理、`sql_select_limit` 的 LIMIT 等），写完之后冻结成 `Arc<ast::Stmt>`，再交给事务管理器和 `ExecStmt`。Go 中事务管理器在 `Compile` **之前**就由 `OnStmtStart` 拿到语句，所以前提是：事务管理器在 `OnStmtStart` 到 `Compile` 结束之间不读规划器会写的字段（它现在只问语句种类：是不是 SELECT、是不是事务语句、是不是 stale read）。动手时逐个核对 `OnStmtStart`、`AdviseWarmup`、`AdviseOptimizeWithPlan` 读的字段；成立就把 `OnStmtStart` 收到的节点换成"语句种类"的摘要，或在 `Compile` 后补交冻结的 `Arc`。
 
 ### 9.3 停在哪里，怎样回退
 

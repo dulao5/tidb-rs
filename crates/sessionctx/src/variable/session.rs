@@ -230,6 +230,40 @@ impl Default for SessionState {
     }
 }
 
+impl SessionState {
+    /// A copy for the statement checkpoint (VS1 plan §4.6): a `clone`, with the user variables
+    /// copied too (the clone shares their table).
+    // glue: VS1 plan §4.6
+    pub fn checkpoint_copy(&self) -> SessionState {
+        let mut c = self.clone();
+        c.user_vars = Arc::new(self.user_vars.deep_copy());
+        c
+    }
+
+    /// Restores `saved` (a [`SessionState::checkpoint_copy`]) while keeping this state's shared
+    /// cells (`PlanCacheParams`, `PlanColumnID`, `Rng`, `UserVars`): their values are written
+    /// back into the cells, so the session's expression contexts that hold them see the
+    /// restored values (D05.3 spec §8.1).
+    // glue: VS1 plan §4.6
+    pub fn restore_keeping_shared_cells(&mut self, mut saved: SessionState) {
+        *self.plan_cache_params.lock() = saved.plan_cache_params.lock().clone();
+        self.plan_column_id.0.store(
+            saved
+                .plan_column_id
+                .0
+                .load(std::sync::atomic::Ordering::SeqCst),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        *self.rng.lock() = saved.rng.lock().clone();
+        self.user_vars.copy_from(&saved.user_vars);
+        std::mem::swap(&mut saved.plan_cache_params, &mut self.plan_cache_params);
+        std::mem::swap(&mut saved.plan_column_id, &mut self.plan_column_id);
+        std::mem::swap(&mut saved.rng, &mut self.rng);
+        std::mem::swap(&mut saved.user_vars, &mut self.user_vars);
+        *self = saved;
+    }
+}
+
 impl std::ops::Deref for SessionVars {
     type Target = super::session_fields::SessionVarsFields;
     // glue: Go reads the scalar fields on SessionVars itself

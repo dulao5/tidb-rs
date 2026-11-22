@@ -25,16 +25,15 @@
 //!   error context. It does not keep the `StatementContext` itself: the planner writes its
 //!   plain fields through `SessionVars::stmt_ctx_mut`, which needs the context unshared.
 //!
-//! Optional properties (`NewEvalContext`): Go registers all nine. Registered here: the
-//! InfoSchema, the store, the SQL executor and the sequence operator (both answer a boundary
-//! error: the restricted SQL executor and sequences are not ported), the DDL owner
+//! Optional properties (`NewEvalContext`): all nine Go registers are registered (Go code
+//! branches on whether a property exists). Backed: the InfoSchema, the store, the DDL owner
 //! (`false`: tidb-rs never takes part in the DDL owner election) and the privilege checker
 //! (this context; there is no privilege manager, so every check passes as in Go's
-//! nil-manager branch). Not registered (spec §8.3): the current user (the Rust
-//! `SessionVars` has no `User` / `ActiveRoles`, the privilege block D04.1), the session
-//! variables provider (D05.3 tasks P1-2) and the advisory locks (the session's lock table is
-//! not ported). A builtin that needs one of them gets Go's "optional property not exists"
-//! error; none of them is on the first vertical slice.
+//! nil-manager branch). Taking the other five returns a boundary error, so the statement
+//! falls back (spec §8.3): the current user (the Rust `SessionVars` has no `User` /
+//! `ActiveRoles`, D04.1), the session variables provider (D05.3 tasks P1-2), the advisory
+//! locks (the session's lock table, D05.3), the SQL executor (D00.3) and the sequence
+//! operator (D06.4).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -50,12 +49,13 @@ use tidb_kv::kv::Storage;
 use tidb_sessionctx::errctx;
 use tidb_sessionctx::exprctx::{
     BuildContext, EvalContext as EvalContextTrait, EvalContextRef, ExprContext as ExprContextTrait,
-    MysqlRngRef, OptionalEvalPropKey, OptionalEvalPropKeySet, OptionalEvalPropProviderRef,
-    ParamValues, StaticConvertibleEvalContext, StaticConvertibleEvalContextRef,
-    StaticConvertibleExprContext, WarnHandlerRef, err_param_index_exceed_param_counts,
+    MysqlRngRef, OptPropAdvisoryLock, OptPropCurrentUser, OptPropSessionVars, OptionalEvalPropKey,
+    OptionalEvalPropKeySet, OptionalEvalPropProviderRef, ParamValues, StaticConvertibleEvalContext,
+    StaticConvertibleEvalContextRef, StaticConvertibleExprContext, WarnHandlerRef,
+    err_param_index_exceed_param_counts,
 };
 use tidb_sessionctx::expropt::{
-    CurrentUserPropProvider, DDLOwnerInfoProvider, InfoSchemaPropProvider, KVStorePropProvider,
+    BlockedPropProvider, DDLOwnerInfoProvider, InfoSchemaPropProvider, KVStorePropProvider,
     MetaOnlyInfoSchema, MetaOnlyInfoSchemaRef, OptionalEvalPropProviders, PrivilegeChecker,
     PrivilegeCheckerProvider, SQLExecutorPropProvider, SQLExecutorRef, SequenceOperatorProvider,
     SequenceOperatorRef,
@@ -347,10 +347,9 @@ pub struct EvalContext {
 
 /// NewEvalContext creates a new EvalContext.
 ///
-/// The providers Go registers that the Rust session cannot back are left out (module doc,
-/// spec §8.3), so the property set is not full: Go's `intest.Assert` on it is compiled out
-/// of production builds and is not ported.
-// go: NewEvalContext L2 (the current user, session variables and advisory lock providers are not registered: spec §8.3)
+/// All nine providers are registered; five of them answer a boundary error when taken
+/// (module doc, spec §8.3).
+// go: NewEvalContext L2 (five providers answer a boundary error: spec §8.3)
 pub fn new_eval_context(sctx: Arc<SessionView>) -> Arc<EvalContext> {
     Arc::new_cyclic(|me: &std::sync::Weak<EvalContext>| {
         let mut ctx = EvalContext {
@@ -358,10 +357,15 @@ pub fn new_eval_context(sctx: Arc<SessionView>) -> Arc<EvalContext> {
             props: OptionalEvalPropProviders::default(),
         };
         // set all optional properties
-        if let Ok(p) = current_user_prop() {
-            ctx.set_optional_prop(Arc::new(p));
-        }
-        // ctx.setOptionalProp(expropt.NewSessionVarsProvider(sctx)): not registered (P1-2).
+        ctx.set_optional_prop(Arc::new(current_user_prop()));
+        // expropt.NewSessionVarsProvider(sctx): how a builtin reaches SessionVars is not
+        // decided (tasks P1-2); the property exists, taking it is a boundary.
+        // glue: blocked-by:D05.3 (P1-2: the session variables provider of the builtins)
+        ctx.set_optional_prop(Arc::new(BlockedPropProvider::new(
+            OptPropSessionVars,
+            "D05.3",
+            "the session variables of a builtin (expropt.NewSessionVarsProvider)",
+        )));
         ctx.set_optional_prop(Arc::new(info_schema_prop(Arc::clone(&sctx))));
         let store = Arc::clone(&sctx.store);
         ctx.set_optional_prop(Arc::new(KVStorePropProvider(Arc::new(move || {
@@ -369,7 +373,14 @@ pub fn new_eval_context(sctx: Arc<SessionView>) -> Arc<EvalContext> {
         }))));
         ctx.set_optional_prop(Arc::new(sql_executor_prop()));
         ctx.set_optional_prop(Arc::new(sequence_operator_prop()));
-        // ctx.setOptionalProp(expropt.NewAdvisoryLockPropProvider(sctx)): not registered.
+        // expropt.NewAdvisoryLockPropProvider(sctx): the session's advisory lock table is not
+        // ported; the property exists, taking it is a boundary.
+        // glue: blocked-by:D05.3 (the session's advisory locks, GET_LOCK / RELEASE_LOCK)
+        ctx.set_optional_prop(Arc::new(BlockedPropProvider::new(
+            OptPropAdvisoryLock,
+            "D05.3",
+            "advisory locks (the session's lock table, GET_LOCK / RELEASE_LOCK)",
+        )));
         ctx.set_optional_prop(Arc::new(DDLOwnerInfoProvider(Arc::new(is_ddl_owner))));
         let me = std::sync::Weak::clone(me);
         ctx.set_optional_prop(Arc::new(PrivilegeCheckerProvider(Arc::new(move || {
@@ -652,13 +663,14 @@ fn get_stmt_timestamp(ctx: Option<&SessionView>) -> Result<Time, Error> {
 
 /// `currentUserProp`: the session's `User` and `ActiveRoles`, which the Rust `SessionVars`
 /// does not have (the privilege block D04.1; VS1 plan §3.2: the PoC's single user). The
-/// provider is not registered (spec §8.3).
+/// property exists; taking it is a boundary (spec §8.3).
 // glue: stub of currentUserProp, blocked-by:D04.1 (SessionVars.User / ActiveRoles)
-fn current_user_prop() -> Result<CurrentUserPropProvider, Error> {
-    Err(blocked(
+fn current_user_prop() -> BlockedPropProvider {
+    BlockedPropProvider::new(
+        OptPropCurrentUser,
         "D04.1",
         "the current user of the session (SessionVars.User / ActiveRoles)",
-    ))
+    )
 }
 
 /// The InfoSchema as `infoschema/context.MetaOnlyInfoSchema` (the stand-in interface has

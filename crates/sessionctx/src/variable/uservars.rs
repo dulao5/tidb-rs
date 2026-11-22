@@ -70,6 +70,26 @@ impl UserVars {
         inner.types.remove(&var_name);
     }
 
+    /// A new table with copies of both maps (the statement checkpoint keeps the values, not
+    /// the shared table).
+    // glue: VS1 plan §4.6 (checkpoint of the user variables)
+    pub fn deep_copy(&self) -> UserVars {
+        let (values, types) = self.snapshot();
+        UserVars {
+            inner: RwLock::new(UserVarsInner { values, types }),
+        }
+    }
+
+    /// Replaces both maps with copies of `other`'s (restoring a checkpoint into the table
+    /// the expression contexts share).
+    // glue: VS1 plan §4.6 (restore of the user variables)
+    pub fn copy_from(&self, other: &UserVars) {
+        let (values, types) = other.snapshot();
+        let mut inner = self.inner.write();
+        inner.values = values;
+        inner.types = types;
+    }
+
     /// Copies of the values and types maps, read under one lock (Go reads `values` and
     /// `types` while holding `lock.RLock()`).
     // glue: the RLock-guarded map reads of SessionVars.EncodeSessionStates

@@ -1648,7 +1648,8 @@ fn session_eval_context_current_time() {
 }
 
 /// Go `TestSessionEvalContextPrivilegeCheck` (no privilege manager: every check passes) and
-/// `TestSessionEvalContextOptProps` for the providers the session can back (spec §8.3).
+/// `TestSessionEvalContextOptProps`: all nine properties exist, the five the session cannot
+/// back answer a boundary error (spec §8.3).
 #[test]
 fn session_eval_context_privileges_and_optional_props() {
     use tidb_sessionctx::exprctx::{
@@ -1657,8 +1658,9 @@ fn session_eval_context_privileges_and_optional_props() {
         OptPropSequenceOperator, OptPropSessionVars,
     };
     use tidb_sessionctx::expropt::{
-        DDLOwnerPropReader, InfoSchemaPropReader, PrivilegeChecker, PrivilegeCheckerPropReader,
-        SQLExecutorPropReader, SequenceOperatorPropReader,
+        AdvisoryLockPropReader, CurrentUserPropReader, DDLOwnerPropReader, InfoSchemaPropReader,
+        PrivilegeChecker, PrivilegeCheckerPropReader, SQLExecutorPropReader,
+        SequenceOperatorPropReader,
     };
     let store = MockStore::new(10);
     let s = sbtest_session(&store);
@@ -1667,7 +1669,9 @@ fn session_eval_context_privileges_and_optional_props() {
     assert!(imp.request_verification("test", "tbl1", "col1", tidb_base::mysql::SuperPriv));
     assert!(imp.request_dynamic_verification("RESTRICTED_TABLES_ADMIN", true));
 
+    // Every property exists (Go code branches on that), as in Go.
     let set = imp.get_optional_prop_set();
+    assert!(set.is_full());
     for key in [
         OptPropInfoSchema,
         OptPropKVStore,
@@ -1675,6 +1679,9 @@ fn session_eval_context_privileges_and_optional_props() {
         OptPropSequenceOperator,
         OptPropDDLOwnerInfo,
         OptPropPrivilegeChecker,
+        OptPropCurrentUser,
+        OptPropSessionVars,
+        OptPropAdvisoryLock,
     ] {
         assert!(set.contains(key), "{key}");
         assert_eq!(
@@ -1682,11 +1689,19 @@ fn session_eval_context_privileges_and_optional_props() {
             key
         );
     }
-    for key in [OptPropCurrentUser, OptPropSessionVars, OptPropAdvisoryLock] {
-        assert!(!set.contains(key), "{key}");
-        assert!(imp.get_optional_prop_provider(key).is_none());
-    }
     let dyn_ctx: &dyn tidb_sessionctx::exprctx::EvalContext = &**imp;
+    // The ones the session cannot back answer a boundary error when taken.
+    let e = CurrentUserPropReader.current_user(dyn_ctx).err().unwrap();
+    assert_eq!(blocked(&e), Some("D04.1"));
+    let e = AdvisoryLockPropReader
+        .advisory_lock_ctx(dyn_ctx)
+        .err()
+        .unwrap();
+    assert_eq!(blocked(&e), Some("D05.3"));
+    let e = tidb_sessionctx::expropt::get_prop_provider::<()>(dyn_ctx, OptPropSessionVars)
+        .err()
+        .unwrap();
+    assert_eq!(blocked(&e), Some("D05.3"));
     assert_eq!(
         InfoSchemaPropReader
             .get_session_info_schema(dyn_ctx)
@@ -1775,4 +1790,49 @@ fn session_build_context_shares_the_session_state() {
     // IntoStatic keeps the values.
     let st = imp.into_static();
     assert_eq!(st.connection_id(), 123);
+}
+
+/// Restoring a checkpoint writes the saved values back into the cells the session shares
+/// with its expression contexts (parameters, plan column ids, `RAND()` generator, user
+/// variables): a context built before the statement sees the restored values.
+#[test]
+fn restore_writes_back_into_the_shared_cells() {
+    use tidb_sessionctx::exprctx::{
+        BuildContext, EvalContext as _, ParamValues, StaticConvertibleExprContext,
+    };
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    s.vars()
+        .state
+        .user_vars
+        .set_user_var_val("a", tidb_types::datum::new_int_datum(1));
+    let holder = s.core.sctx.expr_ctx();
+    let rng_before = s.vars().state.rng.lock().clone();
+    let col_before = holder.alloc_plan_column_id();
+    let cp = s.checkpoint();
+    // What a statement changes before it falls back.
+    s.vars()
+        .state
+        .plan_cache_params
+        .lock()
+        .append(&[tidb_types::datum::new_int_datum(5)]);
+    holder.alloc_plan_column_id();
+    holder.rng().lock().r#gen();
+    s.vars()
+        .state
+        .user_vars
+        .set_user_var_val("a", tidb_types::datum::new_int_datum(2));
+    s.restore(cp).unwrap();
+    // The holder's cells are still the session's, with the values of the checkpoint.
+    assert!(Arc::ptr_eq(&holder.rng(), &s.vars().state.rng.share()));
+    assert_eq!(*holder.rng().lock(), rng_before);
+    assert!(holder.eval().get_param_value(0).is_err());
+    assert_eq!(holder.get_last_plan_column_id(), col_before);
+    assert_eq!(s.vars().state.plan_column_id.0.load(SeqCst), col_before);
+    let a = holder
+        .eval()
+        .get_user_vars_reader()
+        .get_user_var_val("a")
+        .unwrap();
+    assert_eq!(a.get_int64(), 1);
 }
