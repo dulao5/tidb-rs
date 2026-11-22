@@ -127,7 +127,7 @@ pub struct SessionState {
     /// TxnScope indicates the scope of the transactions.
     pub txn_scope: tidb_kv::txn_scope_var::TxnScopeVar,
     /// Rng stores the rand_seed1 and rand_seed2 for Rand() function
-    pub rng: super::session_state::MysqlRng,
+    pub rng: super::session_state::SharedField<super::session_state::MysqlRng>,
     /// StatsLoadSyncWait indicates how long to wait for stats load before timeout.
     pub stats_load_sync_wait: i64,
     /// The bytes limit of MemTracker (`MemTracker.SetBytesLimit`).
@@ -147,7 +147,8 @@ pub struct SessionState {
     /// UserVars is used to provide user variable operations.
     pub user_vars: Arc<super::uservars::UserVars>,
     /// PlanCacheParams is used to provide parameters for plan cache.
-    pub plan_cache_params: super::plan_cache_params::PlanCacheParamList,
+    pub plan_cache_params:
+        super::session_state::SharedField<super::plan_cache_params::PlanCacheParamList>,
     /// PreparedStmts stores prepared statement (Go `map[uint32]any`; the planner's
     /// `PlanCacheStmt`).
     pub prepared_stmts: HashMap<u32, Arc<dyn std::any::Any + Send + Sync>>,
@@ -202,7 +203,9 @@ impl Default for SessionState {
             allow_fallback_to_tikv: Default::default(),
             partition_prune_mode: super::tidb_defs::DefTiDBPartitionPruneMode.to_owned(),
             txn_scope,
-            rng: super::session_state::MysqlRng::new_with_time(),
+            rng: super::session_state::SharedField::new(
+                super::session_state::MysqlRng::new_with_time(),
+            ),
             stats_load_sync_wait: super::tidb_vars::StatsLoadSyncWait
                 .load(std::sync::atomic::Ordering::SeqCst),
             mem_tracker_bytes_limit: super::tidb_vars::DefTiDBMemQuotaQuery,
@@ -213,7 +216,9 @@ impl Default for SessionState {
             row_encoder_enable: false,
             snapshot_infoschema: false,
             user_vars: super::uservars::new_user_vars(),
-            plan_cache_params: super::plan_cache_params::new_plan_cache_param_list(),
+            plan_cache_params: super::session_state::SharedField::new(
+                super::plan_cache_params::new_plan_cache_param_list(),
+            ),
             prepared_stmts: HashMap::new(),
             prepared_stmt_name_to_id: HashMap::new(),
             plan_id: Default::default(),

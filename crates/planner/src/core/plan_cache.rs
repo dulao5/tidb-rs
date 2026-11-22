@@ -50,16 +50,13 @@ pub type OptimizeAstNodeFn<'f> = &'f mut dyn FnMut(
 /// ported (optimizer debug trace, D09.13).
 // go: SetParameterValuesIntoSCtx L2 (constants only: EXECUTE ... USING needs the expression rewriter)
 pub fn set_parameter_values_into_sctx(vars: &mut SessionVars, is_non_prep: bool, params: &[Datum]) {
-    vars.state.plan_cache_params.reset();
+    let mut plan_cache_params = vars.state.plan_cache_params.lock();
+    plan_cache_params.reset();
     for usage_param in params {
         let val = usage_param.clone();
-        vars.state
-            .plan_cache_params
-            .append(std::slice::from_ref(&val));
+        plan_cache_params.append(std::slice::from_ref(&val));
     }
-    vars.state
-        .plan_cache_params
-        .set_for_non_prep_cache(is_non_prep);
+    plan_cache_params.set_for_non_prep_cache(is_non_prep);
 }
 
 /// planCachePreprocess: the parameter count and values, the metadata lock and schema version

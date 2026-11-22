@@ -89,7 +89,7 @@ pub fn get_min_inner_txn_start_ts(
 
 /// `oracle.GetTimeFromTS`: the physical part of a TSO (milliseconds since the epoch).
 // go-dep: client-go oracle.GetTimeFromTS L1
-fn get_time_from_ts(ts: u64) -> SystemTime {
+pub fn get_time_from_ts(ts: u64) -> SystemTime {
     const PHYSICAL_SHIFT_BITS: u64 = 18;
     let ms = (ts >> PHYSICAL_SHIFT_BITS) as i64;
     UNIX_EPOCH + Duration::from_millis(ms as u64)

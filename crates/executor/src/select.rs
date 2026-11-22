@@ -8,8 +8,7 @@
 //! disk trackers and the OOM action (`SessionVars.MemTracker`, A1), the ANALYZE tracker
 //! (ANALYZE is delegated to Go TiDB), the SQL digest of an `EXECUTE`'s statement (not
 //! computed, `parser.NormalizeDigest`), Top SQL and pprof labels (D14.2), the index usage collector (D11.2), the CTE / union-scan maps (their
-//! executors are not ported: nothing to clear), the plan cache switches (D13.1) and the
-//! planner context reset (N2: a `PlanCtx` is made per optimization). Statements outside the
+//! executors are not ported: nothing to clear), and the plan cache switches (D13.1). Statements outside the
 //! Rust AST (`Stmt::Unported`: INSERT, UPDATE, DELETE, EXPLAIN, ...) are a boundary stub
 //! (D02.2): the new stack only runs SELECT (VS1 router).
 
@@ -230,7 +229,7 @@ pub fn reset_context_of_stmt(
             .with_allow_negative_to_unsigned(allow_negative),
     );
 
-    vars.state.plan_cache_params.reset();
+    vars.state.plan_cache_params.lock().reset();
     let priority = PriorityEnum(
         tidb_sessionctx::variable::tidb_vars::ForcePriority.load(Ordering::SeqCst) as isize,
     );
@@ -275,7 +274,7 @@ pub fn reset_context_of_stmt(
     vars.found_in_binding = false;
     vars.duration_wait_ts = 0;
     // vars.CurrInsertBatchExtraCols / CurrInsertValues: the write path.
-    // ctx.GetPlanCtx().Reset(): N2, a PlanCtx is made per optimization.
+    ctx.reset_plan_ctx();
 
     Ok(())
 }

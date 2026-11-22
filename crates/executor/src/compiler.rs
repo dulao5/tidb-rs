@@ -1,10 +1,13 @@
 //! go-file: pkg/executor/compiler.go
 //!
 //! `Compiler.Compile`: an AST statement to an `ExecStmt` (preprocess, optimize, the
-//! transaction's MaxTS / TSO decision). The preprocessor and `planner.Optimize` are VS1-10
-//! (D09.0 / D09.13) and the prepared statement cache VS1-15 (D13.1): they are boundary stubs
-//! here, so `Compile` fails with `blocked-by:D09.13` until VS1-10 lands, and the session falls
-//! back to the PoC (VS1 plan §4.3).
+//! transaction's MaxTS / TSO decision). `Compile` runs the planner's `IsReadOnly`,
+//! `Preprocess` and `planner.Optimize` over the session's planning context
+//! (`SessionContext::get_plan_ctx`, whose expression context is the session's
+//! `sessionexpr`), D05.3 spec §9. Where the plan is not ready yet (physical optimization
+//! stops at the statistics derivation / FindBestTask boundaries, D10.6 / D10.2), `Optimize`
+//! returns the boundary error and the session falls back to the PoC before anything ran
+//! (VS1 plan §4.3).
 
 use std::sync::Arc;
 
@@ -12,6 +15,13 @@ use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::mysql::NoPriority;
 use tidb_parser::ast;
+use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
+use tidb_planner::core::preprocess::{
+    InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, init_txn_context_provider,
+    with_domain_info_schema, with_preprocessor_return,
+};
+use tidb_planner::core::resolve::{NodeW, new_node_w};
+use tidb_planner::optimize::{OptimizedPlan, optimize_stmt};
 use tidb_types::field_name::FieldName;
 
 use crate::adapter::{ExecStmt, TelemetryInfo};
@@ -23,19 +33,70 @@ use crate::glue::{InfoSchemaRef, Plan, PlanCacheStmtRef, SessionContext};
 #[derive(Default)]
 pub struct Compiler;
 
-/// `plannercore.IsReadOnly(stmtNode, vars)`.
-// glue: stub, blocked-by:D09.13 (plannercore.IsReadOnly)
-fn planner_is_read_only(stmt_node: &ast::Stmt) -> Result<bool, Error> {
-    let _ = stmt_node;
-    Err(blocked("D09.13", "planner.IsReadOnly"))
+/// The statement node the planner works on. Go's preprocessor and optimizer take the node by
+/// pointer and may write to it; the Rust planner takes `&mut ast::Stmt`, while the session
+/// shares the statement (`Arc`) with the transaction manager (`GetCurrentStmt`) and the AST
+/// has no `Clone`. An EXECUTE node is copied field by field: its prepared statement and its
+/// binary-protocol parameters are shared `Arc`s, and nothing the planner writes to it is read
+/// back. `EXECUTE ... USING @v` (the text protocol, which the router never sends to the new
+/// stack) stops where `buildExecute` would (the expression rewriter of the `USING`
+/// variables, D09.2); other statements are a boundary of the session (D05.3 spec §9.2).
+// glue: the planner's own copy of the statement (Go shares the node by pointer)
+fn planner_stmt_node(stmt_node: &ast::Stmt) -> Result<ast::Stmt, Error> {
+    match stmt_node {
+        ast::Stmt::Execute(e) => {
+            if !e.using_vars.is_empty() {
+                // glue: blocked-by:D09.2 (the expression rewriter, b.rewrite of EXECUTE ... USING)
+                return Err(blocked("D09.2", "b.rewrite of EXECUTE ... USING"));
+            }
+            Ok(ast::Stmt::Execute(Box::new(ast::ExecuteStmt {
+                name: e.name.clone(),
+                using_vars: Vec::new(),
+                binary_args: e.binary_args.clone(),
+                prep_stmt: e.prep_stmt.clone(),
+                prep_stmt_id: e.prep_stmt_id,
+                idx_in_multi: e.idx_in_multi,
+                from_general_stmt: e.from_general_stmt,
+            })))
+        }
+        // glue: blocked-by:D05.3 (compiling a statement other than EXECUTE: the planner writes to the AST, which the session shares with the transaction manager)
+        _ => Err(blocked(
+            "D05.3",
+            "compiling a statement other than EXECUTE (the planner needs a statement it can write to)",
+        )),
+    }
 }
 
 /// `plannercore.Preprocess(ctx, sctx, nodeW, WithPreprocessorReturn(ret),
-/// InitTxnContextProvider)`.
-// glue: stub, blocked-by:D09.0 (plannercore.Preprocess, VS1-10)
-fn preprocess(sctx: &mut dyn SessionContext, stmt_node: &ast::Stmt) -> Result<(), Error> {
-    let _ = (sctx, stmt_node);
-    Err(blocked("D09.0", "the preprocessor"))
+/// InitTxnContextProvider)`, then the session's `SetReadonlyUserVarMap` that Go's
+/// `Preprocess` makes.
+///
+/// Go's `ensureInfoSchema` reads the transaction manager's InfoSchema when the return value
+/// has none; the Rust preprocessor takes it in the return value (as PREPARE hands it in), so
+/// the transaction's InfoSchema is set there. The domain's InfoSchema is for the metadata
+/// lock (`with_domain_info_schema`).
+// glue: Compile's plannercore.Preprocess call (the InfoSchemas are handed in, M-CTX)
+fn preprocess(
+    sctx: &mut dyn SessionContext,
+    node_w: &mut NodeW<'_>,
+    txn_is: Option<&InfoSchemaRef>,
+    domain_is: Option<&InfoSchemaRef>,
+) -> Result<(), Error> {
+    let ret = PreprocessorReturn {
+        info_schema: txn_is.map(|is| InfoSchemaHandle(is.snapshot())),
+        ..Default::default()
+    };
+    let mut opts: Vec<PreprocessOpt> = vec![
+        with_preprocessor_return(ret),
+        Box::new(init_txn_context_provider),
+    ];
+    if let Some(d) = domain_is {
+        opts.push(with_domain_info_schema(d.snapshot()));
+    }
+    let (ret, res) =
+        tidb_planner::core::preprocess::preprocess(sctx.get_session_vars_mut(), node_w, opts);
+    sctx.set_readonly_user_var_map(ret.readonly_user_vars);
+    res
 }
 
 /// `plannercore.GetPreparedStmt(execStmt, sessVars)` for an `EXECUTE` statement.
@@ -55,40 +116,65 @@ fn get_prepared_stmt(
     }
 }
 
-/// `planner.Optimize(ctx, sctx, nodeW, is)`: the final plan and its output names.
-// glue: stub, blocked-by:D09.13 (planner.Optimize, VS1-10)
+/// `planner.Optimize(ctx, c.Ctx, nodeW, is)` over the session's planning context
+/// (`GetPlanCtx`). The domain's InfoSchema is for the plan cache's metadata lock. The
+/// transaction's InfoSchema is always there in Go; a session without one stops at the
+/// transaction manager's boundary.
+// glue: Compile's planner.Optimize call (the session's planning context, N2)
 fn planner_optimize(
     sctx: &mut dyn SessionContext,
-    stmt_node: &ast::Stmt,
+    node_w: &mut NodeW<'_>,
     is: Option<&InfoSchemaRef>,
-) -> Result<(Plan, Vec<FieldName>), Error> {
-    let _ = (sctx, stmt_node, is);
-    Err(blocked("D09.13", "planner.Optimize"))
+    domain_is: Option<&InfoSchemaRef>,
+) -> Result<(OptimizedPlan, Vec<FieldName>), Error> {
+    let Some(is) = is else {
+        // glue: blocked-by:D05.4 (sessiontxn GetTxnInfoSchema)
+        return Err(blocked("D05.4", "the transaction's InfoSchema"));
+    };
+    let parts = sctx.get_plan_ctx();
+    let mut ctx = parts.plan_ctx(sctx.get_session_vars_mut());
+    let (p, names) = optimize_stmt(
+        &mut ctx,
+        node_w,
+        is.as_ref(),
+        domain_is.map(|d| d.as_ref() as &dyn InfoSchemaLookup),
+    )?;
+    Ok((p, names.iter().map(|n| (**n).clone()).collect()))
 }
 
 impl Compiler {
     /// Compile compiles an ast.StmtNode to a physical plan.
     ///
     /// `text` is `stmtNode.Text()` (the parser AST does not keep the text, the session
-    /// passes it).
-    // go: Compiler.Compile L2 (panics at the task boundary, M-PANIC; the statement text is passed in)
+    /// passes it). An `Execute` plan (Go's `finalPlan.(*plannercore.Execute)`) does not run
+    /// on the new stack yet: the reuse of the prepared point get
+    /// (`IsSafeToReusePointGetExecutor`) is the plan cache's (A3) and `ExecuteExec` is
+    /// D12.12, so `Compile` stops where Go makes that decision (D05.3 spec §9.3).
+    // go: Compiler.Compile L2 (panics at the task boundary, M-PANIC; the statement text is passed in; an Execute plan is blocked-by:D13.1)
     pub fn compile(
         &self,
         sctx: &mut dyn SessionContext,
         stmt_node: Arc<ast::Stmt>,
         text: &str,
     ) -> Result<ExecStmt, Error> {
-        let is_read_only = planner_is_read_only(&stmt_node)?;
+        let is_read_only =
+            tidb_planner::optimize::is_read_only(&stmt_node, sctx.get_session_vars())?;
         sctx.get_session_vars_mut().stmt_ctx_mut().is_read_only = is_read_only;
 
         // Do preprocess and validate.
-        preprocess(sctx, &stmt_node)?;
+        let mut node = planner_stmt_node(&stmt_node)?;
+        let mut node_w = new_node_w(&mut node);
+        let txn_is = sctx.get_txn_info_schema();
+        let domain_is = sctx.get_domain_info_schema();
+        preprocess(sctx, &mut node_w, txn_is.as_ref(), domain_is.as_ref())?;
 
         let is = sctx.get_txn_info_schema();
         // handle the execute statement
         let prepared_obj = get_prepared_stmt(sctx, &stmt_node)?;
         // Build the final physical plan.
-        let (final_plan, names) = planner_optimize(sctx, &stmt_node, is.as_ref())?;
+        let (final_plan, names) =
+            planner_optimize(sctx, &mut node_w, is.as_ref(), domain_is.as_ref())?;
+        drop(node_w);
 
         let (in_restricted_sql, resource_group) = {
             let vars = sctx.get_session_vars();
@@ -97,22 +183,50 @@ impl Compiler {
                 vars.stmt_ctx().resource_group_name.clone(),
             )
         };
-        count_stmt_node(&stmt_node, in_restricted_sql, &resource_group);
+        if let Some(prepared_obj) = &prepared_obj {
+            count_stmt_node(
+                &prepared_obj.lock().prepared_ast.stmt,
+                in_restricted_sql,
+                &resource_group,
+            );
+        } else {
+            count_stmt_node(&stmt_node, in_restricted_sql, &resource_group);
+        }
         let mut lower_priority = false;
         if sctx.get_session_vars().stmt_ctx().priority == NoPriority {
             lower_priority = need_lower_priority(&final_plan);
         }
-        let plan_any: Arc<dyn std::any::Any + Send + Sync> = Arc::new(Arc::clone(&final_plan));
+        let (plan_any, exec_plan): (Arc<dyn std::any::Any + Send + Sync>, Option<Plan>) =
+            match final_plan {
+                OptimizedPlan::Physical(p) => (Arc::new(Arc::clone(&p)), Some(p)),
+                OptimizedPlan::Execute(exec) => {
+                    let inner = exec.plan.clone();
+                    (Arc::new(*exec), inner)
+                }
+            };
+        let is_execute =
+            prepared_obj.is_some() && plan_any.is::<tidb_planner::core::common_plans::Execute>();
         sctx.get_session_vars_mut()
             .stmt_ctx_mut()
             .set_plan(Some(plan_any));
-        let mut stmt = ExecStmt::new(text.to_owned(), Some(final_plan), is);
+        let mut stmt = ExecStmt::new(text.to_owned(), None, is.clone());
         stmt.lower_priority = lower_priority;
         stmt.stmt_node = Some(stmt_node);
         stmt.output_names = names;
         stmt.ti = Arc::new(TelemetryInfo::default());
-        // Use cached plan if possible: the `Execute` plan of a prepared point get (D13.1).
-        let _ = prepared_obj;
+        if is_execute {
+            // Use cached plan if possible: `IsSafeToReusePointGetExecutor` decides whether
+            // the prepared statement's point get replaces the Execute plan. It belongs to the
+            // plan cache (the plan-cache exception A3, not confirmed), and an Execute plan
+            // that is not replaced runs `ExecuteExec` (D12.12); neither is on the new stack.
+            // glue: blocked-by:D13.1 (IsSafeToReusePointGetExecutor: the plan-cache exception A3)
+            let _ = exec_plan;
+            return Err(blocked(
+                "D13.1",
+                "running an Execute plan (IsSafeToReusePointGetExecutor, the plan-cache exception A3)",
+            ));
+        }
+        stmt.plan = exec_plan;
 
         // Perform optimization and initialization related to the transaction level.
         sctx.advise_optimize_with_plan_and_then_warm_up(stmt.plan.as_ref().expect("plan"))?;
@@ -126,10 +240,17 @@ impl Compiler {
 /// than the specific threshold, we'll set it to lowPriority when sending it to the
 /// coprocessor.
 ///
-/// The new stack's plans are physical (no `Execute`, `Insert`, `Delete`, `Update`).
+/// The new stack's plans are physical or `Execute` (no `Insert`, `Delete`, `Update`: the
+/// write path).
 // go: needLowerPriority L1
-fn need_lower_priority(p: &Plan) -> bool {
-    is_physical_plan_need_lower_priority(p)
+fn need_lower_priority(p: &OptimizedPlan) -> bool {
+    match p {
+        OptimizedPlan::Physical(x) => is_physical_plan_need_lower_priority(x),
+        OptimizedPlan::Execute(x) => match &x.plan {
+            Some(p) => need_lower_priority(&OptimizedPlan::Physical(Arc::clone(p))),
+            None => false,
+        },
+    }
 }
 
 /// `p.StatsCount()` comes with the physical plan base (D10.1, VS1-19): until then no plan is
@@ -172,17 +293,22 @@ mod tests {
     use super::*;
     use crate::adapter::tests::MockSession;
 
-    #[test]
-    fn compile_is_blocked_by_the_planner() {
+    fn compile_err(sql: &str) -> Error {
         let mut s = MockSession::new(u64::MAX);
-        let stmt = tidb_parser::parse("select 1", &Default::default())
+        let stmt = tidb_parser::parse(sql, &Default::default())
             .expect("parse")
             .stmts
             .remove(0);
-        let err = Compiler
-            .compile(&mut s, Arc::new(stmt), "select 1")
-            .err()
-            .unwrap();
-        assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D09.13"));
+        Compiler.compile(&mut s, Arc::new(stmt), sql).err().unwrap()
+    }
+
+    /// A plain statement stops before the preprocessor (`planner_stmt_node`); an EXECUTE of
+    /// an unknown statement is Go's `ErrStmtNotFound` from `planner.IsReadOnly`.
+    #[test]
+    fn compile_plans_only_execute() {
+        let block = |e: &Error| tidb_base::blocked::blocked_by(e).map(str::to_owned);
+        assert_eq!(block(&compile_err("select 1")).as_deref(), Some("D05.3"));
+        let e = compile_err("execute s");
+        assert_eq!(e.code(), 8111, "{e}");
     }
 }

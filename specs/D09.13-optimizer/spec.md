@@ -96,10 +96,10 @@ Go 把同一个 `*Column` 同时放进底层投影的表达式和 schema（子�
 
 - 规划上下文由会话给出：执行器的 `SessionContext::get_plan_ctx()`（Go 的 `GetPlanCtx`）返回 `SessionPlanCtx`（表达式上下文、存储客户端、事务的脏表检查、预热回调），`planner.Optimize` 和 PREPARE 都用它的 `plan_ctx(vars)` 生成 `PlanCtx`。
 - `GeneratePlanCacheStmtWithAST` 改为接收 `PlanCtx`，恢复对 `PlanBuilder.Build` 的调用，返回计划的 schema 和输出列名（`BuiltPlanInfo`；逻辑计划本身在语句的 arena 中，随 PREPARE 结束释放）。构建器的 `sql_text` 设为参数化 SQL，`?` 这种列名才能从原文取出。
-- 会话的表达式上下文目前是静态的替身（sessionexpr，D05.3 继承项 P1-1）。Go 的 sessionexpr 从语句的 plan cache tracker 判断 `IsUseCache`，替身的 tracker 却默认"使用缓存"，会让 PREPARE 中的 `?` 带上参数标记、读取不存在的参数而 panic。所以会话生成规划上下文时，表达式上下文共用语句的 tracker。EXECUTE 读参数值同样需要 sessionexpr；在 `Compile` 接入优化器之前必须解决（测试 `optimize_exec_stmt_reaches_the_statement_optimizer` 用带参数值的上下文验证这条路径）。
+- 会话的表达式上下文现在是会话的 sessionexpr（D05.3 继承项 P1-1，[D05.3 spec](../D05.3-session/spec.md) §8）：plan cache tracker、参数值、计划列 id 都是会话自己的，PREPARE 中的 `?` 按 tracker 判断是否带参数标记，EXECUTE 构建 `?` 时读到 plan cache 写进会话的参数值。（原来是静态替身，只共用语句的 tracker。）
 - 脏表检查：Go 在事务的 membuffer 中查表的 key。没有事务、流水线事务或只读事务的 membuffer 为空，答案对所有表都是 false；写过数据的事务不在新栈上（写入走 PoC），Rust 事务也还没有 membuffer，这时脏表检查为"未知"，构建器返回边界错误。
 - 存储客户端：会话跑在替身存储（`UnwiredStore`）上时没有客户端，规划上下文的 `client` 为 `None`，谓词下推的检查返回边界错误。
-- 结果：路由器测试中真实会话 PREPARE sysbench 点查已经在新栈上成功（两边都准备了语句，列定义来自新栈）；EXECUTE 停在 `Compile` 的规划器桩，回退到 PoC。会话测试的 `sbtest1` 表补上了 `dbid`（InfoSchema 加载器会设置，元数据锁信息需要它）。
+- 结果：路由器测试中真实会话 PREPARE sysbench 点查已经在新栈上成功（两边都准备了语句，列定义来自新栈）。`Compile` 已接入 `planner.Optimize`（D05.3 spec §9）：EXECUTE 走到优化器，点查停在 fast plan 中点查条件的参数（D13.1），其他查询停在物理优化的边界（统计信息推导 D10.6 / FindBestTask D10.2），都在执行之前回退到 PoC。会话测试的 `sbtest1` 表补上了 `dbid`（InfoSchema 加载器会设置，元数据锁信息需要它）。
 - EXPLAIN 在新栈有 EXPLAIN 之前不路由到新栈：路由器测试 `explain_is_never_routed_to_the_new_stack` 固定这一点。
 
 ## 6. hint 骨架（D13.3）
@@ -151,7 +151,7 @@ Go 在 `QBHintHandler.Enter` 中把编号写进 AST 节点（`SelectStmt.QueryBl
 
 1. 统计信息加载点作为"不改计划的空操作"而不是 blocked（§3）；其中的索引裁剪由 VS1-28 移植。用户可见的后果写进 `docs/compatibility.md`：新栈上执行的查询不记录谓词列。
 2. 禁用规则表（`mysql.opt_rule_blacklist`）：是否像 SQL binding 一样，表非空时整体关闭新栈（§3）。
-3. EXECUTE 的参数值需要 sessionexpr（D05.3 P1-1），列为把 `Compile` 接入优化器的前置条件（§7）。
+3. EXECUTE 的参数值需要 sessionexpr（D05.3 P1-1），列为把 `Compile` 接入优化器的前置条件（§7）。**已解决**：sessionexpr 已移植，`Compile` 已接入（D05.3 spec §8、§9）。
 
 ## 本文所用 ID
 
