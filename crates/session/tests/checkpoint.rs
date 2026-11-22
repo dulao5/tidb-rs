@@ -83,6 +83,7 @@ fn mutations() -> Vec<Mutation> {
                 s.vars_mut()
                     .state
                     .plan_cache_params
+                    .lock()
                     .append(&[new_int_datum(1)])
             }),
         ),
@@ -140,7 +141,8 @@ fn restore_undoes_all_groups_together() {
     assert_eq!(s.vars().stmt_ctx().warning_count(), 1);
 }
 
-/// `ExecuteStmt` reaches `Compile`, whose planner is not wired yet (a boundary stub);
+/// `ExecuteStmt` of a plain statement reaches `Compile`, which plans only EXECUTE so far (a
+/// boundary of the session, D05.3 spec §9.2);
 /// `PrepareStmt` runs the prepare executor, whose plan builder builds the statement in the
 /// session's planning context, and ends with the transaction rolled back / finished (Go's
 /// `rollbackOnError` on failure, the statement end on success).
@@ -156,7 +158,7 @@ fn statement_paths_are_blocked() {
     let got = block_on(Box::pin(async {
         s.execute_stmt(Arc::clone(&stmt), "SELECT 1").await.err()
     }));
-    assert_eq!(got.and_then(block), Some("D09.13".to_owned()));
+    assert_eq!(got.and_then(block), Some("D05.3".to_owned()));
     let got = block_on(Box::pin(async { s.prepare_stmt("SELECT 1").await }));
     assert_eq!(got.map(|info| info.fields.len()).ok(), Some(1));
     assert!(s.is_idle());

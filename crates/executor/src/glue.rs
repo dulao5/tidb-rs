@@ -87,6 +87,20 @@ pub trait SessionContext: Send {
     /// `planner.Optimize` and PREPARE build the same planning context.
     // glue: interface method sessionctx.Context.GetPlanCtx (the session's parts of the planning context, N2)
     fn get_plan_ctx(&self) -> tidb_planner::planctx::SessionPlanCtx;
+    /// `GetPlanCtx().SetReadonlyUserVarMap(m)`: the read-only user variables the
+    /// preprocessor found, read by the expression context's `IsReadonlyUserVar`. The default
+    /// is `EmptyPlanContextExtended`'s (nothing kept), for contexts that are not a session.
+    // glue: interface method planctx.PlanContext.SetReadonlyUserVarMap
+    fn set_readonly_user_var_map(&mut self, readonly_user_vars: std::collections::HashSet<String>) {
+        tidb_sessionctx::planctx::EmptyPlanContextExtended
+            .set_readonly_user_var_map(readonly_user_vars);
+    }
+    /// `GetPlanCtx().Reset()`: forgets the read-only user variables (`ResetContextOfStmt`).
+    /// The default is `EmptyPlanContextExtended`'s.
+    // glue: interface method planctx.PlanContext.Reset
+    fn reset_plan_ctx(&mut self) {
+        tidb_sessionctx::planctx::EmptyPlanContextExtended.reset();
+    }
     /// `sessiontxn.GetTxnManager(sctx).GetSnapshotWithStmtReadTS()`. Async like
     /// [`SessionContext::get_stmt_read_ts`]: the provider may wait for the TSO.
     // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS (D05.4, VS1-14)

@@ -127,7 +127,7 @@ pub struct SessionState {
     /// TxnScope indicates the scope of the transactions.
     pub txn_scope: tidb_kv::txn_scope_var::TxnScopeVar,
     /// Rng stores the rand_seed1 and rand_seed2 for Rand() function
-    pub rng: super::session_state::MysqlRng,
+    pub rng: super::session_state::SharedField<super::session_state::MysqlRng>,
     /// StatsLoadSyncWait indicates how long to wait for stats load before timeout.
     pub stats_load_sync_wait: i64,
     /// The bytes limit of MemTracker (`MemTracker.SetBytesLimit`).
@@ -147,7 +147,8 @@ pub struct SessionState {
     /// UserVars is used to provide user variable operations.
     pub user_vars: Arc<super::uservars::UserVars>,
     /// PlanCacheParams is used to provide parameters for plan cache.
-    pub plan_cache_params: super::plan_cache_params::PlanCacheParamList,
+    pub plan_cache_params:
+        super::session_state::SharedField<super::plan_cache_params::PlanCacheParamList>,
     /// PreparedStmts stores prepared statement (Go `map[uint32]any`; the planner's
     /// `PlanCacheStmt`).
     pub prepared_stmts: HashMap<u32, Arc<dyn std::any::Any + Send + Sync>>,
@@ -202,7 +203,9 @@ impl Default for SessionState {
             allow_fallback_to_tikv: Default::default(),
             partition_prune_mode: super::tidb_defs::DefTiDBPartitionPruneMode.to_owned(),
             txn_scope,
-            rng: super::session_state::MysqlRng::new_with_time(),
+            rng: super::session_state::SharedField::new(
+                super::session_state::MysqlRng::new_with_time(),
+            ),
             stats_load_sync_wait: super::tidb_vars::StatsLoadSyncWait
                 .load(std::sync::atomic::Ordering::SeqCst),
             mem_tracker_bytes_limit: super::tidb_vars::DefTiDBMemQuotaQuery,
@@ -213,7 +216,9 @@ impl Default for SessionState {
             row_encoder_enable: false,
             snapshot_infoschema: false,
             user_vars: super::uservars::new_user_vars(),
-            plan_cache_params: super::plan_cache_params::new_plan_cache_param_list(),
+            plan_cache_params: super::session_state::SharedField::new(
+                super::plan_cache_params::new_plan_cache_param_list(),
+            ),
             prepared_stmts: HashMap::new(),
             prepared_stmt_name_to_id: HashMap::new(),
             plan_id: Default::default(),
@@ -222,6 +227,40 @@ impl Default for SessionState {
             plan_replayer_finished_task_key: None,
             retry_info: Default::default(),
         }
+    }
+}
+
+impl SessionState {
+    /// A copy for the statement checkpoint (VS1 plan §4.6): a `clone`, with the user variables
+    /// copied too (the clone shares their table).
+    // glue: VS1 plan §4.6
+    pub fn checkpoint_copy(&self) -> SessionState {
+        let mut c = self.clone();
+        c.user_vars = Arc::new(self.user_vars.deep_copy());
+        c
+    }
+
+    /// Restores `saved` (a [`SessionState::checkpoint_copy`]) while keeping this state's shared
+    /// cells (`PlanCacheParams`, `PlanColumnID`, `Rng`, `UserVars`): their values are written
+    /// back into the cells, so the session's expression contexts that hold them see the
+    /// restored values (D05.3 spec §8.1).
+    // glue: VS1 plan §4.6
+    pub fn restore_keeping_shared_cells(&mut self, mut saved: SessionState) {
+        *self.plan_cache_params.lock() = saved.plan_cache_params.lock().clone();
+        self.plan_column_id.0.store(
+            saved
+                .plan_column_id
+                .0
+                .load(std::sync::atomic::Ordering::SeqCst),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        *self.rng.lock() = saved.rng.lock().clone();
+        self.user_vars.copy_from(&saved.user_vars);
+        std::mem::swap(&mut saved.plan_cache_params, &mut self.plan_cache_params);
+        std::mem::swap(&mut saved.plan_column_id, &mut self.plan_column_id);
+        std::mem::swap(&mut saved.rng, &mut self.rng);
+        std::mem::swap(&mut saved.user_vars, &mut self.user_vars);
+        *self = saved;
     }
 }
 

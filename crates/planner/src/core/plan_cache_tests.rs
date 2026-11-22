@@ -214,7 +214,7 @@ fn execute_checks_the_parameter_count_and_sets_the_values_in_order() {
         &[new_int_datum(1), new_string_datum("a")],
     )
     .unwrap();
-    let vals = v.state.plan_cache_params.all_param_values();
+    let vals = v.state.plan_cache_params.lock().all_param_values().to_vec();
     assert_eq!(vals.len(), 2);
     assert_eq!(vals[0].get_int64(), 1);
     assert_eq!(vals[1].get_string(), b"a");
@@ -645,7 +645,7 @@ fn optimize_exec_stmt_reaches_the_statement_optimizer() {
     .unwrap();
     // The miss path ran: the parameter values are in the session, and the statement was
     // being planned (the flag is cleared again).
-    assert_eq!(v.state.plan_cache_params.all_param_values().len(), 1);
+    assert_eq!(v.state.plan_cache_params.lock().all_param_values().len(), 1);
     assert!(!v.stmt_ctx().in_prepared_plan_building);
 
     // A wrong parameter count is Go's error, before the optimizer.

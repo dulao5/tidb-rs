@@ -736,7 +736,8 @@ fn route_trace_records_each_statement() {
     assert_eq!(super::trace::get(conn).seq, 3);
 }
 
-/// The real session: every candidate reaches `Compile`, whose planner is `blocked-by:D09.13`;
+/// The real session: every candidate reaches `Compile`, which plans only EXECUTE so far
+/// (`blocked-by:D05.3`, D05.3 spec §9.2);
 /// `fallback` falls back with the session unchanged, `strict` returns the 1235 error.
 #[test]
 fn phase0_session_falls_back_or_reports_1235() {
@@ -756,7 +757,7 @@ fn phase0_session_falls_back_or_reports_1235() {
     let mut r = real(NewStackMode::Strict, &p);
     let e = block_on(r.query(&mut p, POINT)).unwrap_err();
     assert_eq!(e.code, 1235);
-    assert!(e.message.contains("blocked-by:D09.13"), "{}", e.message);
+    assert!(e.message.contains("blocked-by:D05.3"), "{}", e.message);
     assert!(!p.log.iter().any(|l| l.starts_with("run")));
     // Not a candidate: still the PoC in strict mode.
     assert!(block_on(r.query(&mut p, "SET NAMES utf8mb4")).is_ok());
@@ -1212,8 +1213,9 @@ fn real_prepare_builds_the_plan_and_execute_falls_back() {
 
 /// Where a real EXECUTE of [`POINT`] stops on the new session: the session hands the
 /// statement to `ExecuteStmt` as an EXECUTE node, `ResetContextOfStmt` reads the prepared
-/// statement, and the compiler's planner (`planner.IsReadOnly` / `Optimize`, not wired into
-/// `Compile` yet) is next.
+/// statement, and `Compile` runs `planner.Optimize`, whose fast plan needs the store client
+/// of the planning context (the push down checks, D09.13): the router's session runs over
+/// the stand-in store, which has none.
 const REAL_EXECUTE_BLOCK: &str = "D09.13";
 
 /// The real new session's `ExecutePreparedStmt` / `DropPreparedStmt` of an id it never

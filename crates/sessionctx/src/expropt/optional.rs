@@ -79,7 +79,12 @@ pub fn get_prop_provider<T: Any + Send + Sync>(
             &[Arg::from(key.string())],
         ));
     };
-    match val.as_any_arc().downcast::<T>() {
+    let val = val.as_any_arc();
+    if let Some(b) = val.downcast_ref::<BlockedPropProvider>() {
+        // glue: the provider of a property the context cannot back yet (see BlockedPropProvider)
+        return Err(tidb_base::blocked::blocked(b.block, b.what));
+    }
+    match val.downcast::<T>() {
         Ok(p) => Ok(p),
         Err(_) => Err(tidb_base::errors::errorf(
             "cannot cast OptionalEvalPropProvider to %s for key '%s'",
@@ -88,5 +93,36 @@ pub fn get_prop_provider<T: Any + Send + Sync>(
                 Arg::from(key.string()),
             ],
         )),
+    }
+}
+
+/// A provider registered for a property the context cannot back yet (tidb-rs): the
+/// property *exists* (`GetOptionalPropSet` contains it, as Go code that branches on its
+/// presence expects), and taking it (`getPropProvider`) returns the boundary error of the
+/// block that will back it, so the statement falls back instead of failing.
+// glue: tidb-rs boundary provider (no Go counterpart)
+pub struct BlockedPropProvider {
+    key: OptionalEvalPropKey,
+    block: &'static str,
+    what: &'static str,
+}
+
+impl BlockedPropProvider {
+    /// The provider of `key`, answering `blocked(block, what)` when taken.
+    // glue: tidb-rs boundary provider
+    pub fn new(key: OptionalEvalPropKey, block: &'static str, what: &'static str) -> Self {
+        BlockedPropProvider { key, block, what }
+    }
+}
+
+impl crate::exprctx::OptionalEvalPropProvider for BlockedPropProvider {
+    // glue: interface method of exprctx.OptionalEvalPropProvider
+    fn desc(&self) -> &'static crate::exprctx::OptionalEvalPropDesc {
+        self.key.desc()
+    }
+
+    // glue: Go type assertion on an interface value
+    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
     }
 }

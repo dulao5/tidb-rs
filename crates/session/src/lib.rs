@@ -30,6 +30,7 @@ pub mod exec_result;
 pub mod glue;
 pub mod metrics;
 pub mod session;
+pub mod sessionexpr;
 pub mod tidb;
 pub mod txn;
 pub mod txnmanager;

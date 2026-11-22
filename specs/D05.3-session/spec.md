@@ -1,6 +1,6 @@
 # D05.3 会话执行主流程（spec）
 
-状态：第 1 部分（VS1-14，会话执行主流程）已合入（#235）；第 2 部分（VS1-14b，预处理语句）评审中（2026-11-15），见 §6。块：D05.3（`pkg/session`），crate `tidb-session`（N0 rank 15）。相关：[VS1 plan](../VS1-vertical-slice/plan.md) §4.1、§4.3、§4.5–§4.7，VS1-14；[D05.4 spec](../D05.4-sessiontxn/spec.md)（sessiontxn，#219）；[D12.0 tasks](../D12.0-executor/tasks.md)（`ExecStmt`，#222）；[N2](../exceptions/N2-session-context/spec.md)；[N11](../exceptions/N11-cluster-readts/spec.md)；ADR 0010（会话与协议无关）。
+状态：第 1 部分（VS1-14，会话执行主流程）已合入（#235）；第 2 部分（VS1-14b，预处理语句）已合入，见 §6；会话的表达式上下文（tasks P1-1）与 EXECUTE 经 `Compile` 进入优化器评审中（2026-11-22），见 §8、§9。块：D05.3（`pkg/session`），crate `tidb-session`（N0 rank 15）。相关：[VS1 plan](../VS1-vertical-slice/plan.md) §4.1、§4.3、§4.5–§4.7，VS1-14；[D05.4 spec](../D05.4-sessiontxn/spec.md)（sessiontxn，#219）；[D12.0 tasks](../D12.0-executor/tasks.md)（`ExecStmt`，#222）；[N2](../exceptions/N2-session-context/spec.md)；[N11](../exceptions/N11-cluster-readts/spec.md)；ADR 0010（会话与协议无关）。
 
 ## 0. 分两个 PR
 
@@ -221,3 +221,104 @@ plan §4.6 第 2 条：新栈已发出的 TSO 请求交给 PoC。PoC 的 `TsFutu
 1. **plan 的排期**：`ResetContextOfStmt` 本应在 C2a 之前（本 PR 已提前）。同样在 C2a 之前、但不在任何 Phase 1 工作项里的还有：新会话接上真正的存储与 oracle（`kv.Storage` 的 `Begin` / `GetOracle`，D07.1），以及 `planner.IsReadOnly` / `ast.IsReadOnly`（D02.2，§5.1）。建议记入 VS1-20 或 VS1-10 的后续。
 2. **TSO 交接**（§3.3）随 VS1-20。
 3. `StmtCtx.StmtType`（`GetStmtLabel`，#222 的待定 3）：`ExecuteStmt` 中 `setRequestSource` 需要语句标签；`GetStmtLabel` 是 D00.1 交给 D12.0 的函数，还没有移植。这里对 SELECT 用 `"Select"`（Go 对 `SelectStmt` 的标签），其他语句 `blocked-by:D12.0`。
+
+## 8. 会话的表达式上下文（sessionexpr，tasks P1-1）
+
+### 8.1 做法
+
+Go 的 `pkg/expression/sessionexpr/sessionctx.go`（57 个函数）：会话建立时创建一个 `ExprContext`，之后表达式的构建和求值每次都通过它**实时**读会话（`sctx.GetSessionVars()`、`StmtCtx`、InfoSchema 等）。移植在 `crates/session/src/sessionexpr.rs`（文件头 `go-file: pkg/expression/sessionexpr/sessionctx.go`；函数在 tracker 中属于 D00.1，由 D00.1 的 P1 收尾移交给本块）。
+
+Rust 中表达式上下文是 `Arc<dyn ExprContext>`（`Send + Sync`，可以交给执行器的 worker），而 `SessionVars` 由会话独占（`&mut`），上下文不能持有会话本身。所以照 N2 §3.1 的三层，上下文持有一个"会话视图"（`SessionView`），在会话交出上下文时（`GetExprCtx` / `GetPlanCtx`，每条语句一次）从会话生成：
+
+| 层 | 内容 | 与 Go 的关系 |
+|---|---|---|
+| 标量会话变量的快照 | `sql_mode`、当前库、字符集与排序规则、`default_collation_for_utf8mb4`、`block_encryption_mode`、`default_week_format`、`div_precision_increment`、`max_allowed_packet`、`tidb_redact_log`、`tidb_sysdate_is_now`、`tidb_enable_noop_functions`、`windowing_use_high_precision`、`group_concat_max_len`、连接 id、`timestamp` 变量、预处理器给出的只读用户变量 | Go 每次读当前值。差别只在"语句执行中途改了这些变量"时可见（N2 §3.2）：新栈上没有这种语句（`SET` 走 PoC；`SET_VAR` hint 会在规划中写变量，但 hint 内容是解析器的边界 D02.2，非空 hint 列表直接回退） |
+| 与会话共享的单元 | EXECUTE 的参数值（`SessionVars.PlanCacheParams`）、计划列 id 计数器（`PlanColumnID`）、`RAND()` 的随机数生成器（`Rng`）、用户变量（`UserVars`） | 与 Go 相同：上下文读写的就是会话的这几个值。参数值在 `Optimize` 里由 plan cache 的未命中路径写入（`SetParameterValuesIntoSCtx`），之后构建 `?` 时读取，所以必须共享。实现：`SessionVars` 的这几个字段改为 `Arc` 共享的单元（`SharedField`、`AtomicI64Field::share`），会话照旧直接读写；克隆 `SessionState`（回退检查点）时复制当前值，不共享 |
+| 语句上下文 | 语句的 warning 汇（共享）、plan cache tracker（共享）、stale read TSO 的 provider（共享），以及语句 id、类型上下文、错误上下文（复制） | 上下文不持有 `StatementContext` 本身：规划器通过 `stmt_ctx_mut()` 写语句上下文的普通字段，要求它没有被共享。warning 计数照 Go 的 `StmtCtx.WarningCount()`（`SHOW WARNINGS` 执行中为 0） |
+
+`getStmtTimestamp`：先看 stale read TSO（有则用它的时间，只求值一次）；否则看 `timestamp` 变量，设了就用它；都没有用当前时间。Go 的 `timestamp` 变量在没设时由 `GetSession` 钩子返回语句缓存的"现在"；Rust 的钩子本来就返回当前时间（D05.2 已登记的 L2），这里一致。
+
+### 8.2 函数
+
+57 个中 53 个移植（47 个 L1，6 个 L2），4 个是边界桩。L2 的 6 个：`NewExprContext`（每条语句按视图新建，而不是每个会话一个）、`NewEvalContext`（见 §8.3）、`EvalContext.Sctx`（返回视图）、`EvalContext.TypeCtx`（不做 Go 只在测试构建里做的时区断言：会话还没执行语句时，语句上下文的时区是零值的 UTC，D05.2 的替身，与 Rust 已有的 `assert_location_with_session_vars` 相同）、`sqlExecutorProp` / `sequenceOperatorProp`（返回边界错误，见下）。
+
+`GetExprCtx` 由原来的桩（静态默认上下文）改为返回这个上下文；`GetPlanCtx` 的表达式上下文也是它（原来是"只共用 plan cache tracker 的静态上下文"，D09.13 spec §7）。会话原来的 `get_plan_ctx` / `get_ranger_ctx` 两个桩删除：规划上下文由 `SessionContext::get_plan_ctx` 给出，ranger 上下文由规划上下文生成（`PlanCtx::ranger_ctx`）。
+
+`PlanCtxExtended.SetReadonlyUserVarMap` / `Reset`（`pkg/planner/plannersession/context.go`，D09.13）一并移植：会话保存预处理器找到的只读用户变量，`IsReadonlyUserVar` 读它，`ResetContextOfStmt` 结束时清空（原来写着"N2：每次优化新建 PlanCtx"而跳过）。执行器框架的 `SessionContext` 加了这两个方法，默认实现是 `EmptyPlanContextExtended` 的（什么也不保存），供不是会话的测试替身使用。
+
+### 8.3 可选属性（`NewEvalContext`）
+
+Go 注册 9 个 provider。这里 9 个**全部注册**，因为 Go 的代码会按"属性是否存在"走不同的分支（例如 `expression_rewriter.go:1759` 的用户变量赋值在没有会话变量属性时返回普通错误，`UNCOMPRESS` 没有它时跳过内存统计，`CURRENT_USER()` / `GET_LOCK()` 取不到属性时是返回给客户端的普通错误）。会话还做不到的那几个，在**取用时**返回边界错误（`blocked-by`），语句回退到 PoC，而不是给出与 Go 不同的结果：
+
+| provider | 做法 |
+|---|---|
+| InfoSchema | 会话的 InfoSchema（事务的，否则 domain 的）与 domain 的 |
+| 存储 | 会话的存储 |
+| DDL owner | 答 false：tidb-rs 不参加 DDL owner 选举（DDL 由 Go TiDB 执行），本实例不会是 owner |
+| 权限检查 | 就是这个上下文；没有权限管理器（D04.1），按 Go 中管理器为 nil 的分支，检查一律通过 |
+| 当前用户（`currentUserProp`） | 取用时 `blocked-by:D04.1`：Rust 的 `SessionVars` 没有 `User` / `ActiveRoles`（VS1 plan §3.2，PoC 单用户） |
+| 会话变量（`NewSessionVarsProvider`） | 取用时 `blocked-by:D05.3`：tasks P1-2，内置函数如何拿到 `SessionVars` 还没定 |
+| advisory lock | 取用时 `blocked-by:D05.3`：会话的锁表没有移植 |
+| SQL 执行器（`GetRestrictedSQLExecutor`） | 取用时 `blocked-by:D00.3`（受限 SQL 执行器未移植） |
+| sequence（`util.GetSequenceByName`） | 取用时 `blocked-by:D06.4`（Rust InfoSchema 没有 sequence）；`sequenceOperator` 的 3 个方法是桩 |
+
+实现：前三个"取用时报边界错误"的属性用一个通用的边界 provider（`expropt::BlockedPropProvider`，tidb-rs 的胶水）：它报告自己的属性键（所以属性集合是满的），`getPropProvider` 取到它时返回它记下的 `blocked` 错误。
+
+### 8.4 测试
+
+`crates/session/src/tests.rs`：`session_eval_context_basic`、`session_eval_context_current_time`、`session_eval_context_privileges_and_optional_props`（9 个属性都存在，5 个取用时是边界错误）、`session_build_context_shares_the_session_state`、`restore_writes_back_into_the_shared_cells`（见 §8.5）（对应 Go `sessionctx_test.go` 的 5 个测试，按 §8.1 的视图改写：标量变量在建视图前设置；共享的单元在建视图后修改也能读到）。govec 不适用：这些函数只是把会话的状态转交出去，没有可按输入输出对照的计算（tracker 的豁免表改为"已移植，Rust 单测"）。
+
+### 8.5 回退恢复与共享单元
+
+检查点（§3）复制这几个共享单元的**值**（用户变量也复制，原来只共享表），恢复时把值写回会话**原来的单元**，而不是换成新单元（`SessionState::restore_keeping_shared_cells`）。所以回退之前建好的表达式上下文（或其他持有这些单元的对象）在恢复之后读到的是恢复后的值，与会话一致。测试：`restore_writes_back_into_the_shared_cells`（参数值、计划列 id、随机数生成器、用户变量）。
+
+### 8.6 已知差异
+
+1. 标量会话变量是交出上下文时的快照，Go 每次实时读（§8.1）。等解析器能解析 hint 之后，`SET_VAR` hint 会在规划中写会话变量：那时快照要在 hint 生效**之后**取（或在写入后重建规划上下文），否则规划读到的是 hint 之前的值。在那之前非空 hint 列表直接回退，看不出差别。
+2. 不做 Go 测试构建中的时区断言（§8.2）。
+3. 会话做不到的 5 个可选属性取用时回退（§8.3），Go 中它们都有值。
+
+## 9. EXECUTE 经 Compile 进入优化器
+
+### 9.1 `Compile`
+
+Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次执行：`plannercore.IsReadOnly`（写入 `StmtCtx.IsReadOnly`）→ `Preprocess`（带 `WithPreprocessorReturn`、`InitTxnContextProvider`；之后会话保存只读用户变量）→ 取事务的 InfoSchema → EXECUTE 时 `GetPreparedStmt` → `planner.Optimize`（规划上下文来自会话的 `get_plan_ctx`，表达式上下文是 §8 的 sessionexpr）→ `CountStmtNode`（EXECUTE 时计它的预处理语句）→ `needLowerPriority` → `StmtCtx.SetPlan` → 生成 `ExecStmt` → `AdviseOptimizeWithPlanAndThenWarmUp`。原来的三个桩（`IsReadOnly`、`Preprocess`、`Optimize`，`blocked-by:D09.13` / `D09.0`）删除。
+
+与 Go 的差异：
+
+1. Go 的预处理器在 `ensureInfoSchema` 中向事务管理器要 InfoSchema；Rust 的预处理器从返回值里拿（PREPARE 也是这样交进去的），所以 `Compile` 把事务的 InfoSchema 放进返回值。会话没有事务 InfoSchema 时停在 `blocked-by:D05.4`（与原来相同）。
+2. 优化器要 `&mut ast::Stmt`，而会话与事务管理器共享语句（`Arc`，Go 共享指针），Rust AST 也不能 `Clone`。EXECUTE 节点逐字段复制一份给优化器（预处理语句与二进制参数本来就是共享的 `Arc`，优化器写到节点上的东西没有人回读）。
+3. 带 `USING @v` 的文本协议 EXECUTE（路由器从不交给新栈）在复制时就停在 `blocked-by:D09.2`，即 `buildExecute` 改写 `USING` 变量的位置；之后还要用户变量函数（D08.9）。Go 会先做预处理再报错，这里的报错位置提前。
+
+### 9.2 只编译 EXECUTE
+
+EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预处理之前停在 `blocked-by:D05.3`：原因同 §9.1 第 2 条，普通语句的 AST 不能逐字段复制（SELECT 的子树很大，且 `Expr` 不能 `Clone`），要等语句的所有权调整（会话把语句交给 `Compile` 时只保留一份，或 AST 支持复制）。原来这些语句停在 `blocked-by:D09.13`，回退的位置和结果不变（都在执行之前）。
+
+接上普通语句的计划（随 VS1-37 集成）：会话把语句**移交**给 `Compile`（不再先克隆 `Arc`）；规划器在 `&mut ast::Stmt` 上写（预处理、`sql_select_limit` 的 LIMIT 等），写完之后冻结成 `Arc<ast::Stmt>`，再交给事务管理器和 `ExecStmt`。Go 中事务管理器在 `Compile` **之前**就由 `OnStmtStart` 拿到语句，所以前提是：事务管理器在 `OnStmtStart` 到 `Compile` 结束之间不读规划器会写的字段（它现在只问语句种类：是不是 SELECT、是不是事务语句、是不是 stale read）。动手时逐个核对 `OnStmtStart`、`AdviseWarmup`、`AdviseOptimizeWithPlan` 读的字段；成立就把 `OnStmtStart` 收到的节点换成"语句种类"的摘要，或在 `Compile` 后补交冻结的 `Arc`。
+
+### 9.3 停在哪里，怎样回退
+
+| 语句 | 停在 | 说明 |
+|---|---|---|
+| 预处理的点查 `SELECT c FROM sbtest1 WHERE id=?` | fast plan 的 `getNameValuePairs`，`blocked-by:D13.1` | plan cache 已把参数写进会话；点查条件里的 `?` 还没有接上参数值（`ParamMarkerExpression` + `Eval`，规划器代码，不在本项范围）。接上之后点查会走到下面"Execute 计划"一行 |
+| 其他预处理 SELECT（如 `id > ?`） | 物理优化：统计信息推导（`blocked-by:D10.6`），之后依次是 FindBestTask（D10.2）、ResolveIndices（D10.9）、代价（D10.5） | 逻辑计划已用参数值建好；FindBestTask 正由另一项工作（VS1-28）移植 |
+| 物理优化完成后的 Execute 计划 | `Compile` 中，`blocked-by:D13.1` | Go 在这里用 `IsSafeToReusePointGetExecutor` 决定是否用预处理语句的点查执行器代替 Execute 计划，否则执行 `ExecuteExec`（D12.12）。前者属于 plan cache（A3 例外，未确认，tracker 豁免表记为不移植），后者未移植 |
+| 路由器测试中的真实会话（替身存储，没有 coprocessor client） | fast plan 的下推检查，`blocked-by:D09.13`（规划上下文没有 store client） | 与原来相同的 1235 / 回退 |
+
+这些位置都在执行器打开之前：会话的 `rollbackOnError` 结束语句的事务，路由器恢复检查点后回退到 PoC，计数器（`executed_stmts`）不增加；panic 由路由器恢复成 1105（原有机制，不变）。默认的 `--new-stack=off` 不建新会话，不经过这里。
+
+### 9.4 测试
+
+- `execute_of_a_prepared_stmt_reaches_the_planner`：真实 PREPARE `id > ?` 后 EXECUTE，`Compile` 设置了 `IsReadOnly`，停在物理优化的边界；会话空闲、`executed_stmts` 为 0，参数值在会话里；恢复检查点后快照与之前逐字相同。
+- `execute_reads_the_parameters_through_the_session_expression_context`：int、字符串、NULL 三种参数，每次 EXECUTE 都停在物理优化的边界；会话里的参数值、会话交给规划器的规划上下文读到的参数值、规划器的表达式改写器在这个上下文里为 `?` 建的常量（值与类型：BIGINT、VARCHAR，NULL 按 Go 的 `InferParamTypeFromUnderlyingValue` 为 VARCHAR）都与参数一致。
+- `prepare_of_the_sbtest_point_select_builds_the_plan`：点查 EXECUTE 停在 `D13.1`，参数已写入会话。
+- `compile_error_rolls_back`、`every_fallback_point_restores_the_session`、`statement_paths_are_blocked`、路由器的 `phase0_session_falls_back_or_reports_1235`：普通 SELECT 改为停在 `D05.3`（§9.2）。
+- 编译器单测 `compile_plans_only_execute`。
+
+## 本文新增部分（§8、§9）所用 ID
+
+- D00.1：上下文类型（exprctx / sessionexpr 的原归属）；D00.3：受限 SQL 执行器；D02.2：解析器的 AST 与 hint
+- D04.1：权限；D05.2：会话变量；D05.3：本块，会话（P1-1：sessionexpr；P1-2：会话变量 provider）；D05.4：sessiontxn
+- D06.4：表与 sequence；D08.9：用户变量函数；D09.2：表达式改写器；D09.13：优化器驱动
+- D10.2 / D10.5 / D10.6 / D10.9：FindBestTask / 代价 / 统计信息推导 / ResolveIndices；D12.12：预处理语句的执行器；D13.1：plan cache
+- VS1-28：FindBestTask 的移植工作项；A3：plan cache 例外；N2：会话上下文的三层结构
