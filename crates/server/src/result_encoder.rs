@@ -4,6 +4,8 @@
 
 #![allow(non_upper_case_globals)]
 
+use std::borrow::Cow;
+
 use tidb_base::mysql::*;
 use tidb_parser::gocharset::encoding::{
     Encoding, OpEncodeReplace, find_encoding_take_utf8_as_noop,
@@ -76,13 +78,13 @@ impl ResultEncoder {
 
     /// EncodeMeta encodes bytes for meta info like column names.
     // go: ResultEncoder.EncodeMeta L1
-    pub fn encode_meta(&self, src: &[u8]) -> Vec<u8> {
+    pub fn encode_meta<'a>(&self, src: &'a [u8]) -> Cow<'a, [u8]> {
         self.encode_with(src, self.encoding)
     }
 
     /// EncodeData encodes bytes for row data.
     // go: ResultEncoder.EncodeData L1
-    pub fn encode_data(&self, src: &[u8]) -> Vec<u8> {
+    pub fn encode_data<'a>(&self, src: &'a [u8]) -> Cow<'a, [u8]> {
         // For the following cases, TiDB encodes the results with column charset
         // instead of @@character_set_results:
         //   - @@character_set_result = null.
@@ -100,12 +102,15 @@ impl ResultEncoder {
 
     /// EncodeWith encodes bytes with the given encoding.
     // go: ResultEncoder.EncodeWith L1
-    pub fn encode_with(&self, src: &[u8], enc: Encoding) -> Vec<u8> {
+    ///
+    /// The result borrows `src` when the encoding leaves it unchanged (Go returns `src`
+    /// itself then, with no copy).
+    pub fn encode_with<'a>(&self, src: &'a [u8], enc: Encoding) -> Cow<'a, [u8]> {
         let (data, err) = enc.transform(src, OpEncodeReplace);
         if let Err(err) = err {
             log::debug!("encode error: {err}");
         }
-        data.into_owned()
+        data
     }
 }
 

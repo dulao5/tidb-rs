@@ -164,7 +164,7 @@ impl NewStack for NewSession {
                 stmt_id: info.stmt_id,
                 info: PreparedInfo {
                     param_count: u16::try_from(info.param_count).unwrap_or(u16::MAX),
-                    columns: columns.iter().map(column_def).collect(),
+                    columns: columns.into_iter().map(column_def).collect(),
                     column_packets,
                 },
             })
@@ -244,7 +244,7 @@ impl NewSession {
         }
         r?;
         Ok(Response::Encoded(EncodedResultSet {
-            columns: out.infos.iter().map(column_def).collect(),
+            columns: out.infos.into_iter().map(column_def).collect(),
             column_packets: out.columns,
             rows: out.rows,
             warnings: self.session.vars().stmt_ctx().warning_count(),
@@ -255,13 +255,13 @@ impl NewSession {
 /// The PoC's description of a column definition the new stack sent, for the router's
 /// metadata checks (VS1 plan §4.7: a fallback must send the definitions of the PREPARE).
 // glue: column.Info → the PoC protocol's ColumnDef
-fn column_def(c: &Info) -> ColumnDef {
+fn column_def(c: Info) -> ColumnDef {
     ColumnDef {
-        schema: c.schema.clone(),
-        table: c.table.clone(),
-        org_table: c.org_table.clone(),
-        name: c.name.clone(),
-        org_name: c.org_name.clone(),
+        schema: c.schema,
+        table: c.table,
+        org_table: c.org_table,
+        name: c.name,
+        org_name: c.org_name,
         charset: c.charset,
         column_length: c.column_length,
         column_type: ColumnType::from_u8(c.tp).unwrap_or(ColumnType::LongBlob),

@@ -217,6 +217,16 @@ pub fn to_lower(s: &str) -> String {
     s.chars().map(to_lower_rune).collect()
 }
 
+/// `strings.ToLower` with Go's fast path kept: an ASCII string without upper-case letters is
+/// returned as it is (Go returns `s` itself, no copy). For lookups by a lowered name.
+// glue: strings.ToLower for lookups (its ASCII no-upper-case fast path as a borrow, else to_lower)
+pub fn to_lower_cow(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.is_ascii() && !s.bytes().any(|c| c.is_ascii_uppercase()) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    std::borrow::Cow::Owned(to_lower(s))
+}
+
 /// `unicode.UpperCase`, `LowerCase`, `TitleCase`: indices into the deltas of a case range.
 const UPPER_CASE: usize = 0;
 const LOWER_CASE: usize = 1;
@@ -349,3 +359,22 @@ pub mod sort;
 pub mod strconv;
 pub mod time;
 pub mod url;
+
+#[cfg(test)]
+mod to_lower_tests {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    #[test]
+    fn to_lower_cow_borrows_only_what_go_returns_unchanged() {
+        assert!(matches!(
+            to_lower_cow("tidb_mem_quota"),
+            Cow::Borrowed("tidb_mem_quota")
+        ));
+        for s in ["Character_Set_Results", "ÄBC", "straße", "", "a\u{0130}"] {
+            assert_eq!(to_lower_cow(s), to_lower(s), "{s}");
+        }
+        assert!(matches!(to_lower_cow("ABC"), Cow::Owned(_)));
+    }
+}

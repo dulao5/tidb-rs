@@ -351,37 +351,24 @@ pub struct EvalContext {
 /// (module doc, spec §8.3).
 // go: NewEvalContext L2 (five providers answer a boundary error: spec §8.3)
 pub fn new_eval_context(sctx: Arc<SessionView>) -> Arc<EvalContext> {
+    let fixed = &*FIXED_PROPS;
     Arc::new_cyclic(|me: &std::sync::Weak<EvalContext>| {
         let mut ctx = EvalContext {
             sctx: Arc::clone(&sctx),
             props: OptionalEvalPropProviders::default(),
         };
         // set all optional properties
-        ctx.set_optional_prop(Arc::new(current_user_prop()));
-        // expropt.NewSessionVarsProvider(sctx): how a builtin reaches SessionVars is not
-        // decided (tasks P1-2); the property exists, taking it is a boundary.
-        // glue: blocked-by:D05.3 (P1-2: the session variables provider of the builtins)
-        ctx.set_optional_prop(Arc::new(BlockedPropProvider::new(
-            OptPropSessionVars,
-            "D05.3",
-            "the session variables of a builtin (expropt.NewSessionVarsProvider)",
-        )));
+        ctx.set_optional_prop(Arc::clone(&fixed.current_user));
+        ctx.set_optional_prop(Arc::clone(&fixed.session_vars));
         ctx.set_optional_prop(Arc::new(info_schema_prop(Arc::clone(&sctx))));
         let store = Arc::clone(&sctx.store);
         ctx.set_optional_prop(Arc::new(KVStorePropProvider(Arc::new(move || {
             Arc::clone(&store)
         }))));
-        ctx.set_optional_prop(Arc::new(sql_executor_prop()));
-        ctx.set_optional_prop(Arc::new(sequence_operator_prop()));
-        // expropt.NewAdvisoryLockPropProvider(sctx): the session's advisory lock table is not
-        // ported; the property exists, taking it is a boundary.
-        // glue: blocked-by:D05.3 (the session's advisory locks, GET_LOCK / RELEASE_LOCK)
-        ctx.set_optional_prop(Arc::new(BlockedPropProvider::new(
-            OptPropAdvisoryLock,
-            "D05.3",
-            "advisory locks (the session's lock table, GET_LOCK / RELEASE_LOCK)",
-        )));
-        ctx.set_optional_prop(Arc::new(DDLOwnerInfoProvider(Arc::new(is_ddl_owner))));
+        ctx.set_optional_prop(Arc::clone(&fixed.sql_executor));
+        ctx.set_optional_prop(Arc::clone(&fixed.sequence_operator));
+        ctx.set_optional_prop(Arc::clone(&fixed.advisory_lock));
+        ctx.set_optional_prop(Arc::clone(&fixed.ddl_owner));
         let me = std::sync::Weak::clone(me);
         ctx.set_optional_prop(Arc::new(PrivilegeCheckerProvider(Arc::new(move || {
             me.upgrade().expect("the context outlives its providers") as Arc<dyn PrivilegeChecker>
@@ -389,6 +376,48 @@ pub fn new_eval_context(sctx: Arc<SessionView>) -> Arc<EvalContext> {
         ctx
     })
 }
+
+/// The providers of `NewEvalContext` that do not depend on the session: built once and
+/// shared by every context (Go builds them once per session, with its `ExprContext`; the
+/// session's context is built per use here, N2, so they would be allocated for every use).
+///
+/// Five of them are boundary stubs (they answer a `blocked-by` error) and stateless only
+/// because of that: when one is ported (the current user, D04.1; the session variables and
+/// the advisory locks, D05.3; the restricted SQL executor, D00.3; sequences, D06.4), it
+/// reads the session and must move out of this shared set (built per context, per session
+/// as in Go). Only the DDL owner answer (always false on tidb-rs) stays shared.
+// glue: the session-independent providers of NewEvalContext, shared (perf, N2); a provider leaves this set when ported
+struct FixedProps {
+    current_user: OptionalEvalPropProviderRef,
+    session_vars: OptionalEvalPropProviderRef,
+    sql_executor: OptionalEvalPropProviderRef,
+    sequence_operator: OptionalEvalPropProviderRef,
+    advisory_lock: OptionalEvalPropProviderRef,
+    ddl_owner: OptionalEvalPropProviderRef,
+}
+
+static FIXED_PROPS: std::sync::LazyLock<FixedProps> = std::sync::LazyLock::new(|| FixedProps {
+    current_user: Arc::new(current_user_prop()),
+    // expropt.NewSessionVarsProvider(sctx): how a builtin reaches SessionVars is not
+    // decided (tasks P1-2); the property exists, taking it is a boundary.
+    // glue: blocked-by:D05.3 (P1-2: the session variables provider of the builtins)
+    session_vars: Arc::new(BlockedPropProvider::new(
+        OptPropSessionVars,
+        "D05.3",
+        "the session variables of a builtin (expropt.NewSessionVarsProvider)",
+    )),
+    sql_executor: Arc::new(sql_executor_prop()),
+    sequence_operator: Arc::new(sequence_operator_prop()),
+    // expropt.NewAdvisoryLockPropProvider(sctx): the session's advisory lock table is not
+    // ported; the property exists, taking it is a boundary.
+    // glue: blocked-by:D05.3 (the session's advisory locks, GET_LOCK / RELEASE_LOCK)
+    advisory_lock: Arc::new(BlockedPropProvider::new(
+        OptPropAdvisoryLock,
+        "D05.3",
+        "advisory locks (the session's lock table, GET_LOCK / RELEASE_LOCK)",
+    )),
+    ddl_owner: Arc::new(DDLOwnerInfoProvider(Arc::new(is_ddl_owner))),
+});
 
 /// `sctx.IsDDLOwner`: tidb-rs never takes part in the DDL owner election (DDL runs on Go
 /// TiDB), so this instance is never the owner.

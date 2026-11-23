@@ -13,6 +13,14 @@
 //! - `Release`'s GC finalizer has no counterpart (A1 3.2, open item 3): memory is freed at
 //!   `Drop`, so the "released but not yet collected" bytes are released at once.
 //! - Go `sync/atomic` operations are sequentially consistent: `SeqCst` throughout.
+//! - Performance deviation from the snapshot mapping (M-SNAP, `atomic.Pointer` → `ArcSwap`):
+//!   `bytesLimit` is not an `ArcSwap`. Every statement creates, initializes and drops two
+//!   trackers (memory and disk), and every `ArcSwap` store and drop walks the reader slots of
+//!   all threads (`arc_swap` debt payment): about 7% of the CPU of a prepared point select
+//!   (specs/VS1-vertical-slice/perf-point-select.md). `bytesLimit` is one `AtomicI64` (the
+//!   hard limit; the soft limit is derived from it on load, so a reader still sees a
+//!   consistent pair). Same observable behaviour.
+//! - `Killer` is a plain pointer in Go (not atomic): a mutex-guarded `Option<Arc<_>>`.
 
 // Labels and process-wide variables keep their Go names (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -69,7 +77,8 @@ pub static EnableGCAwareMemoryTrack: AtomicBool = AtomicBool::new(false);
 /// The scale of the soft limit to the hard limit.
 const softScale: f64 = 0.8;
 
-/// Go `bytesLimits`: limit config, published atomically.
+/// Go `bytesLimits`: limit config, published atomically. Here a value read from the hard
+/// limit (module doc: the soft limit is derived from it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BytesLimits {
     /// `<= 0` means no limit, used for `actionMuForHardLimit`.
@@ -78,26 +87,33 @@ struct BytesLimits {
     bytes_soft_limit: i64,
 }
 
-static unlimitedBytesLimit: LazyLock<Arc<BytesLimits>> = LazyLock::new(|| {
-    Arc::new(BytesLimits {
-        bytes_hard_limit: -1,
-        bytes_soft_limit: -1,
-    })
-});
+/// Go `unlimitedBytesLimit`'s hard limit (its soft limit is -1, derived 0: both no limit).
+const unlimitedBytesHardLimit: i64 = -1;
 
-static defaultQueryQuota: LazyLock<Arc<BytesLimits>> = LazyLock::new(|| {
-    Arc::new(BytesLimits {
-        bytes_hard_limit: DefMemQuotaQuery,
-        bytes_soft_limit: DefMemQuotaQuery * 8 / 10,
-    })
-});
+impl BytesLimits {
+    /// The limits of hard limit `bytes_hard_limit`: Go's soft limit
+    /// `int64(float64(bytesLimit) * softScale)` (M-F2I). For `defaultQueryQuota` Go writes
+    /// `DefMemQuotaQuery * 8 / 10`, the same number; for the unlimited `-1` Go has -1 where
+    /// this gives 0, both "no limit" (the soft limit is only used when `> 0`).
+    // go-part: InitTracker (`int64(float64(bytesLimit) * softScale)`, M-F2I)
+    fn of(bytes_hard_limit: i64) -> BytesLimits {
+        BytesLimits {
+            bytes_hard_limit,
+            bytes_soft_limit: f64_to_i64(bytes_hard_limit as f64 * softScale),
+        }
+    }
+}
 
-// go-part: InitTracker (`int64(float64(bytesLimit) * softScale)`, M-F2I)
-fn new_limits(bytes_limit: i64) -> Arc<BytesLimits> {
-    Arc::new(BytesLimits {
-        bytes_hard_limit: bytes_limit,
-        bytes_soft_limit: f64_to_i64(bytes_limit as f64 * softScale),
-    })
+/// The hard limit `InitTracker` / `SetBytesLimit` store for `bytesLimit`: Go's
+/// `unlimitedBytesLimit` for `<= 0`, `defaultQueryQuota` for `DefMemQuotaQuery`, else the
+/// value itself.
+// go-part: InitTracker (the choice of the bytesLimits stored)
+fn hard_limit_for(bytes_limit: i64) -> i64 {
+    if bytes_limit <= 0 {
+        unlimitedBytesHardLimit
+    } else {
+        bytes_limit
+    }
 }
 
 /// Go `MemUsageTop1Tracker`: the session root tracker using the most memory, for kill.
@@ -113,11 +129,12 @@ type Children = HashMap<isize, Vec<Arc<Tracker>>>;
 /// growth is triggered (`AggSpillDiskAction`); if the hard limit (`tidb_mem_query_quota`) is
 /// exceeded, the action that immediately reduces memory usage (spill, rate limit, panic, log).
 pub struct Tracker {
-    bytes_limit: ArcSwap<BytesLimits>,
+    /// Go `bytesLimit` (module doc: the hard limit only, perf deviation from M-SNAP).
+    bytes_hard_limit: AtomicI64,
     action_mu_for_hard_limit: Mutex<Option<ActionRef>>,
     action_mu_for_soft_limit: Mutex<Option<ActionRef>>,
-    /// Go `Killer`.
-    pub killer: ArcSwapOption<SqlKiller>,
+    /// Go `Killer` (a plain pointer field; the mutex makes the shared tracker writable).
+    killer: Mutex<Option<Arc<SqlKiller>>>,
     /// Go `mu.children`. A global tracker (like `GlobalDiskUsageTracker`) does not keep its
     /// children, to avoid mutex contention.
     children: Mutex<Option<Children>>,
@@ -153,10 +170,10 @@ impl Default for Tracker {
     // glue: zero value
     fn default() -> Self {
         Tracker {
-            bytes_limit: ArcSwap::new(unlimitedBytesLimit.clone()),
+            bytes_hard_limit: AtomicI64::new(unlimitedBytesHardLimit),
             action_mu_for_hard_limit: Mutex::new(None),
             action_mu_for_soft_limit: Mutex::new(None),
-            killer: ArcSwapOption::empty(),
+            killer: Mutex::new(None),
             children: Mutex::new(None),
             parent: Mutex::new(Weak::new()),
             label: AtomicIsize::new(0),
@@ -180,13 +197,8 @@ pub fn init_tracker(t: &Tracker, label: isize, bytes_limit: i64, action: Option<
     *t.parent.lock() = Weak::new();
 
     t.label.store(label, SeqCst);
-    if bytes_limit <= 0 {
-        t.bytes_limit.store(unlimitedBytesLimit.clone());
-    } else if bytes_limit == DefMemQuotaQuery {
-        t.bytes_limit.store(defaultQueryQuota.clone());
-    } else {
-        t.bytes_limit.store(new_limits(bytes_limit));
-    }
+    t.bytes_hard_limit
+        .store(hard_limit_for(bytes_limit), SeqCst);
     t.max_consumed.store(0, SeqCst);
     t.is_global.store(false, SeqCst);
     t.grew.store(false, SeqCst);
@@ -197,7 +209,7 @@ pub fn init_tracker(t: &Tracker, label: isize, bytes_limit: i64, action: Option<
 pub fn new_tracker(label: isize, bytes_limit: i64) -> Arc<Tracker> {
     let t = Tracker::default();
     t.label.store(label, SeqCst);
-    t.bytes_limit.store(new_limits(bytes_limit));
+    t.bytes_hard_limit.store(bytes_limit, SeqCst);
     *t.action_mu_for_hard_limit.lock() = Some(LogOnExceed::new(0));
     Arc::new(t)
 }
@@ -207,7 +219,7 @@ pub fn new_tracker(label: isize, bytes_limit: i64) -> Arc<Tracker> {
 pub fn new_global_tracker(label: isize, bytes_limit: i64) -> Arc<Tracker> {
     let t = Tracker::default();
     t.label.store(label, SeqCst);
-    t.bytes_limit.store(new_limits(bytes_limit));
+    t.bytes_hard_limit.store(bytes_limit, SeqCst);
     *t.action_mu_for_hard_limit.lock() = Some(LogOnExceed::new(0));
     t.is_global.store(true, SeqCst);
     Arc::new(t)
@@ -248,34 +260,41 @@ fn set_metrics(label: isize, inuse: bool, v: i64) {
 }
 
 impl Tracker {
+    /// Go `t.Killer`.
+    // glue: read of the Killer field (module doc)
+    pub fn killer(&self) -> Option<Arc<SqlKiller>> {
+        self.killer.lock().clone()
+    }
+
+    /// Go `t.Killer = k`.
+    // glue: write of the Killer field (module doc)
+    pub fn set_killer(&self, k: Option<Arc<SqlKiller>>) {
+        *self.killer.lock() = k;
+    }
+
     /// Whether the hard limit equals `val`. Only used in tests.
     // go: Tracker.CheckBytesLimit L1
     pub fn check_bytes_limit(&self, val: i64) -> bool {
-        self.bytes_limit.load().bytes_hard_limit == val
+        self.bytes_hard_limit.load(SeqCst) == val
     }
 
     /// Sets the hard limit (`<= 0` means no limit); the soft limit is 0.8 of it.
     // go: Tracker.SetBytesLimit L1
     pub fn set_bytes_limit(&self, bytes_limit: i64) {
-        if bytes_limit <= 0 {
-            self.bytes_limit.store(unlimitedBytesLimit.clone());
-        } else if bytes_limit == DefMemQuotaQuery {
-            self.bytes_limit.store(defaultQueryQuota.clone());
-        } else {
-            self.bytes_limit.store(new_limits(bytes_limit));
-        }
+        self.bytes_hard_limit
+            .store(hard_limit_for(bytes_limit), SeqCst);
     }
 
     /// The hard limit (`<= 0` means no limit).
     // go: Tracker.GetBytesLimit L1
     pub fn get_bytes_limit(&self) -> i64 {
-        self.bytes_limit.load().bytes_hard_limit
+        self.bytes_hard_limit.load(SeqCst)
     }
 
     /// Whether the consumed bytes exceed the hard limit.
     // go: Tracker.CheckExceed L1
     pub fn check_exceed(&self) -> bool {
-        let bytes_hard_limit = self.bytes_limit.load().bytes_hard_limit;
+        let bytes_hard_limit = self.bytes_hard_limit.load(SeqCst);
         self.bytes_consumed.load(SeqCst) >= bytes_hard_limit && bytes_hard_limit > 0
     }
 
@@ -395,8 +414,7 @@ impl Tracker {
             *parent.action_mu_for_hard_limit.lock() = None;
             *parent.action_mu_for_soft_limit.lock() = None;
             parent
-                .killer
-                .load()
+                .killer()
                 .as_ref()
                 .expect("runtime error: invalid memory address or nil pointer dereference")
                 .reset();
@@ -534,7 +552,7 @@ impl Tracker {
                     .wrapping_add(bs)
             };
             let bytes_released = tracker.bytes_released.load(SeqCst);
-            let limits = tracker.bytes_limit.load();
+            let limits = BytesLimits::of(tracker.bytes_hard_limit.load(SeqCst));
             if bytes_consumed.wrapping_add(bytes_released) >= limits.bytes_hard_limit
                 && limits.bytes_hard_limit > 0
             {
@@ -583,12 +601,12 @@ impl Tracker {
         // found walking up).
         let mut session_root_killer: Option<Option<Arc<SqlKiller>>> = None;
         if self.is_root_tracker_of_sess.load(SeqCst) {
-            session_root_killer = Some(self.killer.load_full());
+            session_root_killer = Some(self.killer());
         }
         let mut next = self.get_parent();
         while let Some(tracker) = next {
             if tracker.is_root_tracker_of_sess.load(SeqCst) {
-                session_root_killer = Some(tracker.killer.load_full());
+                session_root_killer = Some(tracker.killer());
             }
             next = tracker.get_parent();
         }
@@ -905,8 +923,7 @@ impl Walk {
         }
 
         if let Some(root) = &self.session_root_tracker {
-            root.killer
-                .load()
+            root.killer()
                 .as_ref()
                 .expect("runtime error: invalid memory address or nil pointer dereference")
                 .handle_signal()?;
@@ -1098,4 +1115,27 @@ enum Grown {
     /// A checkpoint that runs the chain: clear the ancestors' flags; the tracker's own flag
     /// was already taken by the checkpoint and is left alone.
     Clear,
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    /// The derived soft limit is Go's for the stored hard limits (module doc).
+    #[test]
+    fn soft_limit_is_derived_as_go_stores_it() {
+        // Go `defaultQueryQuota`.
+        assert_eq!(
+            BytesLimits::of(DefMemQuotaQuery).bytes_soft_limit,
+            DefMemQuotaQuery * 8 / 10
+        );
+        // Go `unlimitedBytesLimit` {-1, -1}: no soft limit either way.
+        assert!(BytesLimits::of(unlimitedBytesHardLimit).bytes_soft_limit <= 0);
+        assert_eq!(BytesLimits::of(1000).bytes_soft_limit, 800);
+        let t = Tracker::default();
+        init_tracker(&t, 0, 0, None);
+        assert!(t.check_bytes_limit(-1));
+        t.set_bytes_limit(DefMemQuotaQuery);
+        assert_eq!(t.get_bytes_limit(), DefMemQuotaQuery);
+    }
 }

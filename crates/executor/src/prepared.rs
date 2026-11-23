@@ -136,8 +136,7 @@ impl PrepareExec {
         if let Some(p) = &p
             && !p.schema.is_empty()
         {
-            let names: Vec<_> = p.output_names.iter().map(|n| (**n).clone()).collect();
-            self.fields = col_names2_result_fields(&p.schema, &names, &vars.current_db);
+            self.fields = col_names2_result_fields(&p.schema, &p.output_names, &vars.current_db);
         }
         if self.id == 0 {
             self.id = vars.get_next_prepared_stmt_id();
