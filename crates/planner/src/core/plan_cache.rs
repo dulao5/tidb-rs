@@ -1,14 +1,13 @@
 //! go-file: pkg/planner/core/plan_cache.go
 //! go-file: pkg/planner/core/plan_cache_param.go
 //!
-//! The entry of the plan cache for EXECUTE (block D13.1), the miss path only
-//! (prepared-statement planning, VS1-15): the parameters, the schema check before every
-//! execution, and `generateNewPlan`, which calls the optimizer. The new stack caches nothing:
-//! the cache (the key, the lookup, adjusting a cached plan, putting a plan into the cache) is
-//! the plan-cache exception A3, whose spec is not confirmed, and every lookup is a miss.
-//! These boundary stubs (`blocked-by:D13.1`, naming A3) behave like a session
-//! whose cache is always empty; the observable difference to Go is that a repeated EXECUTE is
-//! never `last_plan_from_cache` (spec §4).
+//! The entry of the plan cache for EXECUTE (block D13.1): the parameters, the schema check
+//! before every execution, the cache key, the lookup in the instance-level plan cache and
+//! the rebuild of a hit, and `generateNewPlan`, which calls the optimizer and puts the plan
+//! into the cache. The cache is the plan-cache exception A3
+//! (`specs/exceptions/A3-plan-cache/spec.md`, first stage): only the instance-level cache
+//! exists, the cached plan is shared without a clone, and a hit copies only the nodes whose
+//! ranges change.
 //!
 //! `OptimizeAstNode` is a package variable in Go (set by `pkg/planner` at init); here it is
 //! the `optimize_ast_node` argument, `crate::optimize::optimize_ast_node` in production.
@@ -25,14 +24,22 @@ use tidb_sessionctx::variable::session::SessionVars;
 use tidb_types::datum::Datum;
 use tidb_types::field_name::NameSlice;
 
+use tidb_parser::types::FieldType;
+
 use crate::PhysicalPlanRef;
-use crate::core::plan_cache_utils::{InfoSchemaLookup, PlanCacheStmt, session_plan_cache_key};
+use crate::core::plan_cache_instance::InstancePlanCacheImpl;
+use crate::core::plan_cache_rebuild::rebuild_plan4_cached_plan;
+use crate::core::plan_cache_utils::{
+    InfoSchemaLookup, PlanCacheKeyEnv, PlanCacheStmt, PlanCacheValue, new_plan_cache_key,
+    new_plan_cache_value, parse_param_types,
+};
 use crate::core::plan_cacheable_checker::is_plan_cacheable;
 use crate::core::preprocess::{
     InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, in_prepare, preprocess,
     try_lock_mdl_and_update_schema_if_necessary, with_domain_info_schema, with_preprocessor_return,
 };
 use crate::core::resolve::{NodeW, new_node_w, new_node_w_with_ctx};
+use crate::planctx::SessionPlanCtx;
 
 /// Go's `OptimizeAstNode` function variable (see the module doc).
 pub type OptimizeAstNodeFn<'f> = &'f mut dyn FnMut(
@@ -192,11 +199,13 @@ fn schema_change_caused_error(err: &Error) -> Error {
 /// If there is no such a plan, it'll call the optimizer to generate a new one.
 /// isNonPrepared indicates whether to use the non-prepared plan cache or the prepared plan cache.
 ///
-/// The cache is not ported (A3, see the module doc): `NewPlanCacheKey`, `parseParamTypes`
-/// (the key's parameter types) and `lookupPlanCache` are boundary stubs, the lookup always
-/// misses.
-// go: GetPlanFromPlanCache L2 (the cache key and lookup are the plan-cache exception A3: always a miss)
+/// `parts` is the statement's planning context (Go's `sctx`: the expression context the
+/// rebuild evaluates the parameters in, and the domain's instance plan cache). The only
+/// cache is the instance-level one (the plan-cache exception A3).
+// go: GetPlanFromPlanCache L2 (the planning context is passed as its parts; only the instance cache, A3 spec §1.2)
+#[allow(clippy::too_many_arguments)]
 pub fn get_plan_from_plan_cache(
+    parts: &SessionPlanCtx,
     vars: &mut SessionVars,
     is_non_prepared: bool,
     is: &dyn InfoSchemaLookup,
@@ -225,9 +234,11 @@ pub fn get_plan_from_plan_cache(
         }
     }
 
+    let mut binding = String::new();
     if vars.stmt_ctx().plan_cache_tracker.use_cache() {
-        // NewPlanCacheKey is a stand-in (plan_cache_utils): always cacheable.
-        let (_cache_key, _binding, cacheable, reason) = session_plan_cache_key(stmt)?;
+        let (b, cacheable, reason) =
+            new_plan_cache_key(vars, stmt, &PlanCacheKeyEnv { domain_is })?;
+        binding = b;
         if !cacheable {
             vars.stmt_ctx()
                 .plan_cache_tracker
@@ -235,41 +246,116 @@ pub fn get_plan_from_plan_cache(
         }
     }
 
-    // paramTypes := parseParamTypes(sctx, params): the key's parameter types (A3); only the
-    // count is used below.
-    let param_types = params.len();
-    if vars.stmt_ctx().plan_cache_tracker.use_cache() {
-        // cachedVal, hit := lookupPlanCache(ctx, sctx, cacheKey, paramTypes); a hit goes to
-        // adjustCachedPlan.
-        // glue: stub of lookupPlanCache, blocked-by:D13.1 (the cache is the plan-cache exception A3: always a miss; adjustCachedPlan is not reached)
+    let mut param_types = Vec::with_capacity(params.len());
+    parse_param_types(params, &mut param_types);
+    if vars.stmt_ctx().plan_cache_tracker.use_cache()
+        && let Some(cached_val) = lookup_plan_cache(parts, stmt, &param_types)
+        && let Some(res) =
+            adjust_cached_plan(parts, vars, &cached_val, is_non_prepared, &binding, stmt)?
+    {
+        return Ok(res);
     }
 
     generate_new_plan(
+        parts,
         vars,
         is_non_prepared,
         is,
         stmt,
-        param_types,
+        &param_types,
         optimize_ast_node,
     )
+}
+
+/// instancePlanCacheEnabled: `tidb_enable_instance_plan_cache` (default ON in tidb-rs, A3
+/// decision 1). Go's test context key `PlanCacheKeyEnableInstancePlanCache` is not needed:
+/// tests set the variable.
+// go: instancePlanCacheEnabled L2 (no test context key)
+pub fn instance_plan_cache_enabled() -> bool {
+    tidb_sessionctx::variable::tidb_vars::EnableInstancePlanCache
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The domain's instance plan cache when it is enabled (`None`: off, or no domain).
+// glue: domain.GetDomain(sctx).GetInstancePlanCache() with instancePlanCacheEnabled
+fn instance_plan_cache(parts: &SessionPlanCtx) -> Option<&InstancePlanCacheImpl> {
+    if !instance_plan_cache_enabled() {
+        return None;
+    }
+    parts
+        .instance_plan_cache
+        .as_ref()?
+        .as_any()
+        .downcast_ref::<InstancePlanCacheImpl>()
+}
+
+/// lookupPlanCache: the instance cache's plan for the key and parameter types. With the
+/// instance cache off nothing is cached (A3 decision 2: there is no session-level cache).
+/// The hit is not cloned: the plan is immutable and shared (A3 spec §3.2).
+// go: lookupPlanCache L2 (no clone; no session-level cache, A3 decision 2)
+fn lookup_plan_cache(
+    parts: &SessionPlanCtx,
+    stmt: &PlanCacheStmt,
+    param_types: &[FieldType],
+) -> Option<Arc<PlanCacheValue>> {
+    instance_plan_cache(parts)?.get(&stmt.cache_key, param_types)
+}
+
+/// adjustCachedPlan: the privilege check, the rebuild of the ranges for the current
+/// parameters (path copying, A3 spec §3.2), then what a hit records. `None`: the cached plan
+/// cannot be used (the caller optimizes a new one). The plan digest (`SetPlanDigest`) is not
+/// kept: `NormalizePlan` is not ported (plan digests, D14.x), as on the miss path.
+// go: adjustCachedPlan L2 (the plan digest is not kept, as generateNewPlan)
+fn adjust_cached_plan(
+    parts: &SessionPlanCtx,
+    vars: &mut SessionVars,
+    cached_val: &PlanCacheValue,
+    is_non_prepared: bool,
+    bind_sql: &str,
+    stmt: &PlanCacheStmt,
+) -> Result<Option<(PhysicalPlanRef, NameSlice)>, Error> {
+    check_prepared_priv(stmt)?;
+    let plan = {
+        let mut ctx = parts.plan_ctx(vars);
+        match rebuild_plan4_cached_plan(&mut ctx, &cached_val.plan)? {
+            Some(p) => p,
+            None => return Ok(None),
+        }
+    };
+    vars.found_in_plan_cache = true;
+    if !bind_sql.is_empty() {
+        // We're using binding, set this to true.
+        vars.found_in_binding = true;
+    }
+    if !is_non_prepared {
+        tidb_metrics::plan_cache_hit_prepared();
+    }
+    vars.stmt_ctx_mut().stmt_hints = cached_val.stmt_hints.clone_hints();
+    Ok(Some((plan, cached_val.output_columns.clone())))
 }
 
 /// generateNewPlan call the optimizer to generate a new plan for current statement
 /// and try to add it to cache
 ///
-/// The miss counter (`core_metrics.GetPlanCacheMissCounter`, D14.1) is not ported; putting
-/// the plan into the cache (`NewPlanCacheValue`, `NormalizePlan`, the session or instance
-/// cache's `Put`) is A3.
-// go: generateNewPlan L2 (putting the plan into the cache: the plan-cache exception A3; the miss metric: D14.1)
+/// The plan goes into the instance cache as it is (no clone: it is sealed and shared, A3
+/// spec §3.3); a plan with an operator the instance cache cannot hold is silently not cached
+/// (Go's failed `CloneForPlanCache`). The flush generation is read before optimizing (A3
+/// spec §3.4). `NormalizePlan` and the plan digest are not ported (D14.x); `SetPlan` is
+/// done by `Compile` for the final plan.
+// go: generateNewPlan L2 (no clone; the flush generation; NormalizePlan / SetPlanDigest are not ported)
 pub fn generate_new_plan(
+    parts: &SessionPlanCtx,
     vars: &mut SessionVars,
     is_non_prepared: bool,
     is: &dyn InfoSchemaLookup,
     stmt: &mut PlanCacheStmt,
-    param_types: usize,
+    param_types: &[FieldType],
     optimize_ast_node: OptimizeAstNodeFn<'_>,
 ) -> Result<(PhysicalPlanRef, NameSlice), Error> {
-    let _ = is_non_prepared;
+    if !is_non_prepared {
+        tidb_metrics::plan_cache_miss_prepared();
+    }
+    let flush_gen = instance_plan_cache(parts).map(|c| c.flush_generation());
     vars.stmt_ctx_mut().in_prepared_plan_building = true;
     let resolve_ctx = std::sync::Arc::clone(&stmt.resolve_ctx);
     let stmt_ast: &mut Stmt = &mut stmt.prepared_ast.stmt;
@@ -281,7 +367,7 @@ pub fn generate_new_plan(
     // check whether this plan is cacheable.
     if vars.stmt_ctx().plan_cache_tracker.use_cache() {
         let (cacheable, reason) =
-            is_plan_cacheable(vars, &p, param_types, stmt.limits, stmt.has_subquery)?;
+            is_plan_cacheable(vars, &p, param_types.len(), stmt.limits, stmt.has_subquery)?;
         if !cacheable {
             vars.stmt_ctx()
                 .plan_cache_tracker
@@ -290,24 +376,15 @@ pub fn generate_new_plan(
     }
 
     // put this plan into the plan cache.
-    if vars.stmt_ctx().plan_cache_tracker.use_cache() {
-        // cached := NewPlanCacheValue(...); stmt.NormalizedPlan, stmt.PlanDigest =
-        // NormalizePlan(p); stmtCtx.SetPlan(p); stmtCtx.SetPlanDigest(...); Put(...)
-        // glue: stub of the plan cache Put in generateNewPlan, blocked-by:D13.1 (the cache is the plan-cache exception A3: nothing is cached on the new stack)
+    if vars.stmt_ctx().plan_cache_tracker.use_cache()
+        && let (Some(cache), Some(flush_gen)) = (instance_plan_cache(parts), flush_gen)
+        && let Some(cached) =
+            new_plan_cache_value(&p, &names, param_types, &vars.stmt_ctx().stmt_hints)
+    {
+        cache.put(&stmt.cache_key, Arc::new(cached), param_types, flush_gen);
     }
     vars.found_in_plan_cache = false;
     Ok((p, names))
-}
-
-/// The cache-hit path of `GetPlanFromPlanCache`: the cache is the plan-cache exception A3,
-/// whose spec is not confirmed (see the module doc); nothing on the new stack reaches these.
-// glue: stub of adjustCachedPlan, blocked-by:D13.1 (the cache-hit path: the plan-cache exception A3)
-// glue: stub of instancePlanCacheEnabled, blocked-by:D13.1 (the instance plan cache: the plan-cache exception A3)
-pub fn adjust_cached_plan() -> Result<(), Error> {
-    Err(tidb_base::blocked::blocked(
-        "D13.1",
-        "the plan cache hit path (A3)",
-    ))
 }
 
 /// The parameterization of the non-prepared plan cache (`plan_cache_param.go`): the new stack

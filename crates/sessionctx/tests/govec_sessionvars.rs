@@ -111,6 +111,9 @@ fn restore_process_globals() {
     type Restore = Box<dyn Fn() + Send + Sync>;
     static SNAPSHOT: std::sync::LazyLock<Vec<Restore>> = std::sync::LazyLock::new(|| {
         let mut v: Vec<Restore> = Vec::new();
+        // Go's initial value: tidb-rs defaults to ON (TIDB_RS_DEFAULT_OVERRIDES, the
+        // plan-cache exception A3 decision 1); the vectors start from Go's OFF.
+        tidb_vars::EnableInstancePlanCache.store(false, SeqCst);
         macro_rules! keep {
             ($($a:ident),* $(,)?) => {$(
                 let x = tidb_vars::$a.load(SeqCst);

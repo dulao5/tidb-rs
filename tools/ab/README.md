@@ -80,6 +80,12 @@ Common options (before or after the workload): `-a/-b host:port`, `-u/-p`, `-D d
 `--tls prefer|on|off` (self-signed certificates accepted), `--seed N`, `--protocol both|text|ps`,
 `--out-dir` (default `target/ab`), `--timeout` seconds.
 
+`--plan-cache`: after every prepared `EXECUTE`, read `@@last_plan_from_cache` on both sides
+(right after it: the next statement resets it) and print a per-template table of how often the
+two agree (the instance plan cache, `specs/exceptions/A3-plan-cache/spec.md`). Run Go with
+`SET GLOBAL tidb_enable_instance_plan_cache = ON` (tidb-rs's default). Because of the extra
+read, `SHOW WARNINGS` then shows that read's warnings: compare warnings in a run without it.
+
 ## Workloads
 
 `sysbench [--tables N] [--table-size N] [--range-size 100] [-n 100] [--no-edge-cases]`: the five

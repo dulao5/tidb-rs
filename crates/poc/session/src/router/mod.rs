@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
 use tidb_metrics::StmtType;
-use tidb_mysql_protocol::{ColumnDef, Param, PreparedInfo, RawParams, Response, SqlError};
+use tidb_mysql_protocol::{ColumnDef, OkInfo, Param, PreparedInfo, RawParams, Response, SqlError};
 use tidb_parser::ast;
 use tidb_sql::{Lowered, Statement};
 
@@ -235,6 +235,34 @@ pub trait PocEngine: Send {
     ) -> BoxFut<'_, Result<Response, SqlError>>;
     /// `COM_STMT_CLOSE`.
     fn close(&mut self, stmt_id: u32);
+    /// The previous statement's state (VS1 plan §4.5: the PoC writes it into its own
+    /// fields), before the PoC runs a statement that may read it.
+    fn set_prev_stmt(&mut self, last: &LastStmtInfo) {
+        let _ = last;
+    }
+}
+
+/// The scope of `ADMIN FLUSH <scope> PLAN_CACHE` (`AdminStmt#30` of the grammar; the Rust AST
+/// has no ADMIN statement yet, D02.2), `None` for any other statement.
+// glue: the ADMIN AST is D02.2 (the grammar alternative and its StatementScope child)
+fn admin_flush_plan_cache_scope(stmt: &ast::Stmt) -> Option<tidb_executor::simple::StatementScope> {
+    use tidb_executor::simple::StatementScope;
+    let ast::Stmt::Unported(node) = stmt else {
+        return None;
+    };
+    if node.kind != "AdminStmt#30" {
+        return None;
+    }
+    let scope = node
+        .children
+        .first()?
+        .downcast_ref::<tidb_parser::gen_types::StatementScope>()?;
+    Some(match scope.0.as_ref().map(|n| n.kind) {
+        Some("StatementScope#1") => StatementScope::Global,
+        Some("StatementScope#2") => StatementScope::Instance,
+        // StatementScope#0 (no keyword) and #3 (SESSION): ast.StatementScopeSession
+        _ => StatementScope::Session,
+    })
 }
 
 /// Who owns a prepared statement (§4.7, the four combinations).
@@ -667,6 +695,30 @@ impl Router {
         let stmt = tidb_sql::ir::parse_one(sql)?;
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
+        if let Some(scope) = admin_flush_plan_cache_scope(&stmt) {
+            // The plan cache lives in the new stack (the plan-cache exception A3, decision 8):
+            // the new session runs the statement in every mode (the prototype has no plan
+            // cache and fences ADMIN statements).
+            poc.start_statement(StmtType::General, parse);
+            self.note(Engine::New.label(), "ok");
+            let r = self
+                .new
+                .session_mut()
+                .admin_flush_plan_cache(&stmt, sql, scope);
+            self.finish_new();
+            return match r {
+                Ok(()) => Ok(Response::Ok(OkInfo {
+                    warnings: u16::try_from(self.last.warning_count).unwrap_or(u16::MAX),
+                    ..OkInfo::default()
+                })),
+                // Go's `terror.ToSQLError`: an `errors.New` error is ErrUnknown (1105).
+                Err(e) if !e.is_normalized() => Err(SqlError::new(
+                    tidb_base::mysql::ErrUnknown,
+                    String::from_utf8_lossy(&e.error()).into_owned(),
+                )),
+                Err(e) => Err(sql_error(&e)),
+            };
+        }
         let mut started = false;
         let stmt = match self.route(&stmt, poc, false) {
             Route::New => {
@@ -714,6 +766,7 @@ impl Router {
         {
             return Ok(Response::ResultSet(self.new_stack_warnings(*errors)));
         }
+        poc.set_prev_stmt(&self.last);
         let result = poc.run(&lowered).await;
         if result.is_ok() {
             let vars = self.new.session_mut().vars_mut();

@@ -10,6 +10,7 @@ use tidb_expr_pushdown::infer_pushdown::{
     PushDownContext, new_push_down_context_from_session_vars,
 };
 use tidb_kv::kv::Client;
+use tidb_sessionctx::context::InstancePlanCache;
 use tidb_sessionctx::exprctx::{BuildContextRef, EvalContextRef, ExprContext, ExprContextRef};
 use tidb_sessionctx::ranger::context::RangerContext;
 use tidb_sessionctx::variable::session::SessionVars;
@@ -48,6 +49,9 @@ pub struct PlanCtx<'s> {
     /// replayer capture's `recordSingleTableRuntimeStats`. `None` for a context without a
     /// domain (the test contexts), where that lookup finds no table.
     pub domain_info_schema: Option<Arc<dyn InfoSchemaLookup>>,
+    /// `domain.GetDomain(sctx).GetInstancePlanCache()`: the instance-level plan cache (the
+    /// plan-cache exception A3). `None` without a domain: nothing is cached.
+    pub instance_plan_cache: Option<Arc<dyn InstancePlanCache>>,
 }
 
 /// `HasDirtyContent(tid)` of the session.
@@ -75,6 +79,8 @@ pub struct SessionPlanCtx {
     pub advise_txn_warmup: Option<AdviseTxnWarmupFn>,
     /// `GetDomainInfoSchema()` (`None`: no domain).
     pub domain_info_schema: Option<Arc<dyn InfoSchemaLookup>>,
+    /// `domain.GetDomain(sctx).GetInstancePlanCache()` (`None`: no domain, nothing cached).
+    pub instance_plan_cache: Option<Arc<dyn InstancePlanCache>>,
 }
 
 impl SessionPlanCtx {
@@ -86,6 +92,7 @@ impl SessionPlanCtx {
         ctx.has_dirty_content = self.has_dirty_content.clone();
         ctx.advise_txn_warmup = self.advise_txn_warmup.clone();
         ctx.domain_info_schema = self.domain_info_schema.clone();
+        ctx.instance_plan_cache = self.instance_plan_cache.clone();
         ctx
     }
 
@@ -99,6 +106,7 @@ impl SessionPlanCtx {
             has_dirty_content: ctx.has_dirty_content.clone(),
             advise_txn_warmup: ctx.advise_txn_warmup.clone(),
             domain_info_schema: ctx.domain_info_schema.clone(),
+            instance_plan_cache: ctx.instance_plan_cache.clone(),
         }
     }
 }
@@ -115,6 +123,7 @@ impl<'s> PlanCtx<'s> {
             has_dirty_content: None,
             advise_txn_warmup: None,
             domain_info_schema: None,
+            instance_plan_cache: None,
         }
     }
 

@@ -189,9 +189,9 @@ pub fn reset_context_of_stmt(
         }
         // UPDATE, DELETE, INSERT, CREATE / ALTER TABLE, LOAD DATA, IMPORT INTO, SPLIT
         // REGION, SET SESSION_STATES and the other statements Go distinguishes here are not
-        // in the Rust AST.
+        // in the Rust AST. ADMIN statements (also outside it) take Go's `default` arm.
         // glue: stub, blocked-by:D02.2 (the statements outside the Rust AST)
-        ast::Stmt::Unported(_) => {
+        ast::Stmt::Unported(n) if !n.kind.starts_with("AdminStmt#") => {
             return Err(blocked(
                 "D02.2",
                 "ResetContextOfStmt of a statement outside the Rust AST",

@@ -1,6 +1,6 @@
 # D13.1 Plan Cache（例外 A3）（tasks）
 
-VS1-15（预处理语句的规划）移植了非缓存部分，见 [spec](spec.md)；缓存本身（例外 A3）未开工。
+VS1-15（预处理语句的规划）移植了非缓存部分，见 [spec](spec.md)；缓存本身（例外 A3）第 1 阶段由 VS1-39 实现，见 [A3 spec](../exceptions/A3-plan-cache/spec.md) §7"第 1 阶段实现记录"。
 
 ## 给 VS1-15（预处理语句的规划）的注
 

@@ -1552,3 +1552,85 @@ fn select_with_cost_model_v1_falls_back_to_the_prototype() {
     let e = block_on(s.query(&mut p, POINT)).unwrap_err();
     assert_eq!(e.code, 1235);
 }
+
+/// An instance plan cache that counts its flushes.
+#[derive(Default)]
+struct CountingCache {
+    flushes: std::sync::atomic::AtomicUsize,
+}
+
+impl tidb_sessionctx::context::InstancePlanCache for CountingCache {
+    fn evict(&self) -> (String, usize) {
+        (String::new(), 0)
+    }
+    fn size(&self) -> i64 {
+        0
+    }
+    fn mem_usage(&self) -> i64 {
+        0
+    }
+    fn get_limits(&self) -> (i64, i64) {
+        (0, 0)
+    }
+    fn set_limits(&self, _: i64, _: i64) {}
+    fn delete_all(&self) -> usize {
+        self.flushes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        0
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// `ADMIN FLUSH <scope> PLAN_CACHE` runs on the new session in every routing mode (the plan
+/// cache is the new stack's): INSTANCE clears the instance plan cache (the plan-cache
+/// exception A3, decision 8), SESSION (and no scope) does nothing, GLOBAL is Go's error, and
+/// with `tidb_enable_prepared_plan_cache` off it is Go's warning only, which SHOW WARNINGS
+/// reads from the new session.
+#[test]
+fn admin_flush_plan_cache_clears_the_instance_cache() {
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        let mut p = poc();
+        let (mut r, script) = scripted(mode, &p);
+        let cache = Arc::new(CountingCache::default());
+        r.new
+            .session_mut()
+            .set_instance_plan_cache(Some(Arc::clone(&cache) as _));
+        r.new.session_mut().vars_mut().enable_prepared_plan_cache = true;
+        let flushes = || cache.flushes.load(std::sync::atomic::Ordering::SeqCst);
+
+        let ok = block_on(r.query(&mut p, "ADMIN FLUSH INSTANCE PLAN_CACHE")).unwrap();
+        assert_eq!(ok, Response::Ok(OkInfo::default()));
+        assert_eq!(flushes(), 1);
+        assert_eq!(r.last_stmt().engine, Engine::New);
+        block_on(r.query(&mut p, "ADMIN FLUSH SESSION PLAN_CACHE")).unwrap();
+        block_on(r.query(&mut p, "ADMIN FLUSH PLAN_CACHE")).unwrap();
+        assert_eq!(flushes(), 1);
+        let e = block_on(r.query(&mut p, "ADMIN FLUSH GLOBAL PLAN_CACHE")).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (1105, "Do not support the 'admin flush global scope.'")
+        );
+
+        r.new.session_mut().vars_mut().enable_prepared_plan_cache = false;
+        let ok = block_on(r.query(&mut p, "ADMIN FLUSH INSTANCE PLAN_CACHE")).unwrap();
+        assert_eq!(
+            ok,
+            Response::Ok(OkInfo {
+                warnings: 1,
+                ..OkInfo::default()
+            })
+        );
+        assert_eq!(flushes(), 1);
+        let Ok(Response::ResultSet(rs)) = block_on(r.query(&mut p, "SHOW WARNINGS")) else {
+            panic!("SHOW WARNINGS")
+        };
+        assert_eq!(
+            rs.rows[0][2],
+            Value::from("The plan cache is disable. So there no need to flush the plan cache")
+        );
+        // Nothing reached the scripted new stack's statement path or the PoC.
+        assert!(script.lock().unwrap().log.is_empty());
+    }
+}

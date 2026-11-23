@@ -33,6 +33,10 @@ pub struct ConstEnv<'a> {
     /// `@@character_set_results` etc. as set by `SET NAMES`.
     pub charset: &'a str,
     pub collation: &'a str,
+    /// `@@last_plan_from_cache` / `@@last_plan_from_binding`: the previous statement's, as
+    /// the router recorded it (VS1 plan §4.5; the PoC's own statements never use a cache).
+    pub last_plan_from_cache: bool,
+    pub last_plan_from_binding: bool,
 }
 
 impl ConstEnv<'_> {
@@ -65,6 +69,8 @@ impl ConstEnv<'_> {
             "net_read_timeout" => unsigned(30),
             "auto_increment_increment" | "auto_increment_offset" => unsigned(1),
             "autocommit" => boolean(self.autocommit),
+            "last_plan_from_cache" => boolean(self.last_plan_from_cache),
+            "last_plan_from_binding" => boolean(self.last_plan_from_binding),
             "transaction_read_only" | "tx_read_only" => boolean(false),
             "lower_case_table_names" => string("2"),
             "transaction_isolation" | "tx_isolation" => string("REPEATABLE-READ"),
@@ -247,7 +253,20 @@ mod tests {
             autocommit: true,
             charset: "utf8mb4",
             collation: "utf8mb4_general_ci",
+            last_plan_from_cache: true,
+            last_plan_from_binding: false,
         }
+    }
+
+    /// VS1 plan §4.5: the previous statement's plan-cache state, as the router handed it.
+    #[test]
+    fn last_plan_from_cache_is_the_previous_statements() {
+        let rs = run(
+            "SELECT @@last_plan_from_cache, @@last_plan_from_binding",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(rs.rows, vec![vec![Value::Int(1), Value::Int(0)]]);
     }
 
     fn run(sql: &str, params: &[Literal]) -> Result<ResultSet, SqlError> {
