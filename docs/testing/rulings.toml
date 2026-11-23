@@ -215,3 +215,57 @@ rationale = "宪章第一条：照搬 Go 的行为；是否偏离待与内核团
 approver = "zhigang-du"
 approved = "2026-11-15"
 reopen = "N11 D3 定稿（lease 移到准入），或内核团队给出结论，或出现由此导致的错误结果"
+
+# ---- 例外 A3 plan cache（负责人决定 2026-11-23，#305；docs/compatibility.md "Plan cache (exception A3)"，已决定、未实现）----
+
+[[ruling]]
+id = "R14"
+name = "instance-plan-cache-default-on"
+class = "divergence"
+plane = "session"
+layer = "none"
+source = "specs/exceptions/A3-plan-cache/spec.md §6 决定 1–3、§4；docs/compatibility.md Plan cache 第 1 行；#305"
+evidence = "v8.5.8 中 tidb_enable_instance_plan_cache 默认 OFF，预处理语句用会话级缓存；tidb-rs 没有会话级缓存，该变量默认 ON（各会话共享，新会话第一次 EXECUTE 就可能 last_plan_from_cache = 1）；设为 OFF 时完全不缓存（last_plan_from_cache 恒为 0）；会话级缓存的变量照常接受、不起作用"
+rationale = "特性例外：负责人决定只做实例级缓存（#128），默认 ON 才能保留 Go 默认的预处理语句命中缓存"
+approver = "zhigang-du"
+approved = "2026-11-23"
+reopen = "tidb-rs 实现会话级缓存，或混合集群中默认值不一致造成问题，或负责人改变决定"
+
+[[ruling]]
+id = "R15"
+name = "admin-flush-instance-plan-cache-clears"
+class = "divergence"
+plane = "behaviour"
+layer = "none"
+source = "specs/exceptions/A3-plan-cache/spec.md §6 决定 8、§3.8、§4；docs/compatibility.md Plan cache 第 3 行；#307（upstream-pitfall）；#305"
+evidence = "v8.5.8 打开实例级缓存时 ADMIN FLUSH INSTANCE PLAN_CACHE 只清本会话的会话级缓存并记时间戳，实例级缓存不变：flush 后本会话和新会话的 EXECUTE 仍 last_plan_from_cache = 1（#307 有复现）；tidb-rs 真正清空实例级缓存，flush 后第一次 EXECUTE 为 0"
+rationale = "宪章第一条 2 的例外（2026-11-21 确认）：管理语句静默不起作用是 Go 缺陷，负责人决定（2026-11-23）DCL 应该生效"
+approver = "zhigang-du"
+approved = "2026-11-23"
+reopen = "基线升级到 flush 会清空实例级缓存的版本（差异消失），或负责人决定照 Go"
+
+[[ruling]]
+id = "R16"
+name = "plan-cache-key-length-prefixed"
+class = "divergence"
+plane = "behaviour"
+layer = "none"
+source = "specs/exceptions/A3-plan-cache/spec.md §6 决定 9、§3.4、§4；docs/compatibility.md Plan cache 第 4 行；#308（upstream-pitfall）；#305"
+evidence = "v8.5.8 的 NewPlanCacheKey 直接拼接用户名、主机名、库名，'a127.0.0.'@'%' 与 'a'@'127.0.0.%' 得到同一 key，后者第一次 EXECUTE 就命中前者的计划（#308 有复现）；tidb-rs 的字符串字段带长度前缀，不同账号不共享 key"
+rationale = "Go 的本意是不同用户不共享计划（命中后仍检查权限，不是权限漏洞）；只在名字恰好能拼成相同字符串时可观察"
+approver = "zhigang-du"
+approved = "2026-11-23"
+reopen = "基线升级到 key 无歧义的版本（差异消失），或负责人决定照 Go"
+
+[[ruling]]
+id = "R17"
+name = "instance-plan-cache-evict-interval-sysvar"
+class = "divergence"
+plane = "session"
+layer = "none"
+source = "specs/exceptions/A3-plan-cache/spec.md §6 决定 6、§3.8、§4；docs/compatibility.md Plan cache 第 2 行；#305"
+evidence = "v8.5.8 的淘汰固定每 30 秒检查一次，没有变量；tidb-rs 新增 GLOBAL 变量 tidb_instance_plan_cache_evict_interval（秒，默认 30，范围 [1, 3600]），越界截断并发 1292，SHOW VARIABLES 多一行，SET GLOBAL 后立即按新周期重新计时"
+rationale = "特性例外（新增变量）：负责人决定淘汰周期可配置（2026-11-23）"
+approver = "zhigang-du"
+approved = "2026-11-23"
+reopen = "上游加入同类变量（改为同名同语义），或负责人改变决定"
