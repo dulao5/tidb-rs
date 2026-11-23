@@ -74,14 +74,26 @@ pub struct NewSession {
 }
 
 impl NewSession {
-    /// A new session in the MySQL dialect (the only protocol and front end, ADR 0010).
-    pub fn new(domain: Option<Arc<tidb_domain::Domain>>) -> NewSession {
+    /// A new session in the MySQL dialect (the only protocol and front end, ADR 0010), over
+    /// the ported store driver when given (without one, the session's store is the
+    /// stand-in whose every read is a boundary of the store driver).
+    pub fn new(
+        domain: Option<Arc<tidb_domain::Domain>>,
+        store: Option<Arc<tidb_store::driver::TikvStore>>,
+    ) -> NewSession {
         if domain.is_some() {
             // Go's bootstrap (`InitMDLVariable`); idempotent, so done with each session.
             tidb_session::session::init_mdl_variable();
         }
+        let session = match store {
+            Some(store) => {
+                let oracle = Arc::new(tidb_session::glue::StoreOracle(store.get_oracle()));
+                Session::with_store(Dialect::MySQL, Box::new(DefaultGlobals), store, oracle)
+            }
+            None => Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
+        };
         NewSession {
-            session: Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
+            session,
             domain,
             rs_encoder: None,
         }
@@ -90,7 +102,7 @@ impl NewSession {
 
 impl Default for NewSession {
     fn default() -> Self {
-        NewSession::new(None)
+        NewSession::new(None, None)
     }
 }
 

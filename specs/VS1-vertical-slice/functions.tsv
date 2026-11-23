@@ -2232,3 +2232,4 @@ VS1-20	D07.1	pkg/store/driver/txn/txn_driver.go	tikvTxn.Get	12
 VS1-20	D07.1	pkg/store/driver/txn/txn_driver.go	tikvTxn.SetOption	95	
 VS1-20	D07.1	pkg/store/driver/txn/txn_driver.go	tikvTxn.GetOption	16	
 VS1-20	D07.1	pkg/store/driver/txn/txn_driver.go	tikvTxn.extractKeyErr	6	
+VS1-20	D05.3	pkg/session/session.go	session.loadCommonGlobalVariablesIfNeeded	43	

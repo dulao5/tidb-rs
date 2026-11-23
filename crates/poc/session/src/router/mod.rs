@@ -348,7 +348,16 @@ fn check_columns(prepared: &[ColumnDef], resp: &Response) -> Result<(), SqlError
 
 impl Router {
     /// A router for a session whose PoC state is `poc` (the handshake's charset).
-    pub fn new(mode: NewStackMode, new: Box<dyn NewStack>, poc: &PocValues) -> Router {
+    pub fn new(mode: NewStackMode, mut new: Box<dyn NewStack>, poc: &PocValues) -> Router {
+        // Go's session loads the global values of its variables at its first statement
+        // (`loadCommonGlobalVariablesIfNeeded`); loaded now, step 0 compares
+        // `tidb_txn_mode` with the value the session has then (its default). Go's load skips
+        // the variables already set; the synced ones below are set after it and win the same
+        // way. The values are the compiled defaults, whose hooks do not fail; a failure would
+        // be Go's error at the first statement, here it is only logged (a router bug).
+        if let Err(e) = new.session_mut().load_common_global_variables_if_needed() {
+            log::warn!("VS1 router: loading the global variables of the new session: {e}");
+        }
         let initial_txn_mode = new.session().vars().txn_mode.clone();
         let mut r = Router {
             mode,
@@ -414,7 +423,14 @@ impl Router {
         if vars.read_staleness != 0 {
             return Some("tidb_read_staleness");
         }
-        if vars.state.txn_read_ts.is_some() {
+        // Go's `tx_read_ts` hook keeps a `TxnReadTS` with ts 0 when the variable is empty
+        // (its default, set when the global values are loaded): only a read ts counts.
+        if vars
+            .state
+            .txn_read_ts
+            .as_ref()
+            .is_some_and(|t| t.peak_txn_read_ts() != 0)
+        {
             return Some("tx_read_ts");
         }
         if vars.txn_mode != self.initial_txn_mode {
@@ -671,6 +687,14 @@ impl Router {
         if lowered.param_count > 0 {
             return self.fail(crate::param_in_query());
         }
+        // §4.5: SHOW WARNINGS / SHOW ERRORS go to the engine that ran the previous
+        // statement. Go's SHOW WARNINGS keeps the previous statement's warnings (its
+        // `ResetContextOfStmt` copies them), so the previous statement stays the new stack's.
+        if let Statement::ShowWarnings { errors } = &lowered.stmt
+            && self.last.engine == Engine::New
+        {
+            return Ok(Response::ResultSet(self.new_stack_warnings(*errors)));
+        }
         let result = poc.run(&lowered).await;
         if result.is_ok() {
             let vars = self.new.session_mut().vars_mut();
@@ -684,6 +708,33 @@ impl Router {
         }
         self.finish_poc(&result);
         result
+    }
+
+    /// The rows of `SHOW WARNINGS` (`errors`: `SHOW ERRORS`) for a previous statement the
+    /// new stack ran, from its statement context, as Go's `ShowExec.fetchShowWarnings` makes
+    /// them: a TiDB error is shown with its MySQL code and message (`terror.ToSQLError`),
+    /// any other error with `ErrUnknown` and its text. The columns are the PoC's (the same
+    /// definitions as Go's SHOW WARNINGS).
+    // glue: VS1 plan §4.5 (SHOW WARNINGS answered by the engine that ran the previous statement; rows as Go ShowExec.fetchShowWarnings)
+    fn new_stack_warnings(&self, errors: bool) -> tidb_mysql_protocol::ResultSet {
+        let mut rs = crate::show_warnings();
+        for w in self.new.session().vars().stmt_ctx().get_warnings() {
+            if errors && w.level != tidb_base::contextutil::WarnLevelError {
+                continue;
+            }
+            let (code, message) = if w.err.is_normalized() {
+                let sql_err = tidb_base::terror::to_sql_error(&w.err);
+                (i64::from(sql_err.code), sql_err.message)
+            } else {
+                (i64::from(tidb_base::mysql::ErrUnknown), w.err.error())
+            };
+            rs.rows.push(vec![
+                tidb_mysql_protocol::Value::Bytes(w.level.as_bytes().to_vec()),
+                tidb_mysql_protocol::Value::Int(code),
+                tidb_mysql_protocol::Value::Bytes(message),
+            ]);
+        }
+        rs
     }
 
     /// `COM_INIT_DB` / the handshake's database, after the PoC accepted it.

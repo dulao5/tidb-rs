@@ -56,9 +56,12 @@ pub fn get_snapshot_with_ts(
         snap.set_option(ExplicitRequestSourceType, Box::new(tp));
     }
     if vars.load_based_replica_read_threshold > 0 {
+        // Go's time.Duration (the session keeps nanoseconds) as the option's Duration.
         snap.set_option(
             LoadBasedReplicaReadThreshold,
-            Box::new(vars.load_based_replica_read_threshold),
+            Box::new(std::time::Duration::from_nanos(
+                vars.load_based_replica_read_threshold as u64,
+            )),
         );
     }
     snap

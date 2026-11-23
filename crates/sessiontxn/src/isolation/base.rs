@@ -556,9 +556,10 @@ impl BaseTxnContextProvider {
             txn.set_option(RequestSourceType, Box::new(source));
         }
         if threshold > 0 {
+            // Go's time.Duration (the session keeps nanoseconds) as the option's Duration.
             txn.set_option(
                 tidb_kv::option::LoadBasedReplicaReadThreshold,
-                Box::new(threshold),
+                Box::new(std::time::Duration::from_nanos(threshold as u64)),
             );
         }
         txn.set_option(tidb_kv::option::InfoSchema, Box::new(info_schema));

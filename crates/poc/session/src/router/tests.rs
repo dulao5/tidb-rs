@@ -377,7 +377,7 @@ fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
 fn real(mode: NewStackMode, poc: &FakePoc) -> Router {
     // `tidb_enable_metadata_lock` on, as on a cluster (Go's default).
     tidb_session::session::init_mdl_variable();
-    let mut new = NewSession::new(None);
+    let mut new = NewSession::new(None, None);
     new.session_mut()
         .set_domain_info_schema(sbtest_info_schema());
     Router::new(mode, Box::new(new), &poc.values())
@@ -799,6 +799,65 @@ fn last_stmt_new_then_poc() {
     assert_eq!((last.found_rows, last.last_insert_id), (5, 7));
     assert_eq!(last.affected_rows, 0);
     assert!(!last.plan_from_cache && !last.plan_from_binding && !last.use_chunk_alloc);
+}
+
+/// §4.5: SHOW WARNINGS / SHOW ERRORS go to the engine that ran the previous statement. After
+/// a new-stack statement they are answered from the new session's statement context, with
+/// the rows of Go's `fetchShowWarnings` (a plain error is `ErrUnknown` with its text), and
+/// they stay the new stack's (Go's SHOW WARNINGS keeps the warnings); after a PoC statement
+/// the PoC answers.
+#[test]
+fn show_warnings_go_to_the_engine_that_ran_the_previous_statement() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().answer = Some(Answer::Rows);
+    block_on(r.query(&mut p, POINT)).unwrap();
+    let text = |s: &str| Value::Bytes(s.as_bytes().to_vec());
+    let warning = vec![text("Warning"), Value::Int(1105), text("new-stack warning")];
+    let error = vec![text("Error"), Value::Int(1105), text("new-stack error")];
+    for _ in 0..2 {
+        let Ok(Response::ResultSet(rs)) = block_on(r.query(&mut p, "SHOW WARNINGS")) else {
+            panic!("SHOW WARNINGS");
+        };
+        assert_eq!(rs.rows, vec![warning.clone(), error.clone()]);
+        assert_eq!(rs.columns.len(), 3);
+    }
+    let Ok(Response::ResultSet(rs)) = block_on(r.query(&mut p, "SHOW ERRORS")) else {
+        panic!("SHOW ERRORS");
+    };
+    assert_eq!(rs.rows, vec![error]);
+    assert_eq!(
+        script.lock().unwrap().log,
+        ["execute"],
+        "the new stack ran only the SELECT"
+    );
+    // A PoC statement next: SHOW WARNINGS is the PoC's again.
+    block_on(r.query(&mut p, "SET NAMES utf8mb4")).unwrap();
+    assert!(block_on(r.query(&mut p, "SHOW WARNINGS")).is_err());
+}
+
+/// The router loads the new session's global variables when the session opens (Go loads them
+/// at its first statement): e.g. the prepared plan cache is on, as in Go. Step 0 compares with
+/// the loaded values: `tidb_txn_mode` keeps its default, and `tx_read_ts`, whose hook keeps a
+/// read ts of 0 for the empty default, does not count until a read ts is set.
+#[test]
+fn global_variables_are_loaded_when_the_session_opens() {
+    let p = poc();
+    let (mut r, _script) = scripted(NewStackMode::Strict, &p);
+    let vars = r.new.session().vars();
+    assert!(vars.enable_prepared_plan_cache);
+    assert_eq!(vars.txn_mode, "PESSIMISTIC");
+    assert_eq!(
+        vars.state
+            .txn_read_ts
+            .as_ref()
+            .map(|t| t.peak_txn_read_ts()),
+        Some(0)
+    );
+    assert_eq!(r.session_condition(&p), None);
+    assert_eq!(r.route(&parse(POINT), &p, false), Route::New);
+    r.new.session_mut().vars_mut().state.txn_read_ts = Some(TxnReadTS::new(7));
+    assert_eq!(r.session_condition(&p), Some("tx_read_ts"));
 }
 
 /// PoC, then new stack: the PoC's statement is written into the new session, where Go's

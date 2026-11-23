@@ -346,7 +346,35 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 - `autocommit_read_prefetches_tso_and_ends_idle`、`dropped_result_is_finished_before_the_next_statement`：`IsReadOnly` 不再报错，自动提交的只读事务正常结束（原来按"IsReadOnly 的错误"回滚）。
 - `PHYSICAL_BOUNDARIES` 去掉 `D13.1`（`Compile` 不再停），加上 `D12.1` / `D12.2`：`id > ?` 的计划现在能做完物理优化（FindBestTask 已合入），`Exec` 建表读执行器（VS1-34）或 Projection 执行器（参数为 NULL 时，VS1-35）时停在它们的边界，仍在执行器打开之前。
 
-## 本文新增部分（§8–§10）所用 ID
+## 11. 全局变量的加载与路由器的配套（VS1-20）
+
+### 11.1 `loadCommonGlobalVariablesIfNeeded`
+
+原来是桩（只置"已加载"标志，`blocked-by:D06.5`）。于是新会话的 SetSession 钩子从不运行，`SessionVars` 中由钩子设置的字段停在结构体默认值（Go 的 `NewSessionVars` 也不设它们，靠这次加载）：例如 `tidb_enable_prepared_plan_cache` 为 false，每次 EXECUTE 都多一个 `skip prepared plan-cache: plan cache is disabled` warning（Go 没有）；`tidb_enable_plan_replayer_capture` 为 false（Go 默认 ON）。
+
+现在照 Go 移植（L2）：第一次需要时置标志，取 domain 的会话变量缓存，会话里还没有设置的变量逐个 `SetSystemVarWithRelaxedValidation`（未知变量跳过），客户端带 `CLIENT_INTERACTIVE` 时用 `interactive_timeout` 设 `wait_timeout`。Go 的 bootstrap 分支（`sessionctx.Initing`）不适用。
+
+差异：domain 的 sysvar 缓存（`GetSessionCache`）是 D06.5，这里用替身 `session_cache`：照 `rebuildSysVarCache` 的规则，每个不跳过初始化的变量一项，全局作用域的变量取会话的 `GlobalVarAccessor`（路由器的替身回答编译时的默认值，PoC 同样不读 `mysql.global_variables`），只有会话作用域的变量取默认值。等 D06.5 的 sysvar 缓存接上后换成它，新会话就能看到 Go TiDB 上的 `SET GLOBAL`（VS1-17 的 TODO）。
+
+后果（Go 的真实行为，记在 VS1-20 的集成记录 §5 第 3 条）：计划回放采集开着，非点查语句在 `CollectColumnStatsUsage` 停在 `recordTableRuntimeStats` 的边界桩（D02.2），早于原来的物理优化边界。会话测试的 `PHYSICAL_BOUNDARIES` 因此加上 D02.2。
+
+### 11.2 路由器
+
+1. **会话打开时加载**：路由器建好新会话后立即调用一次加载（Go 在第一条语句时加载）。这样第 0 步的 `tidb_txn_mode` 比较的是加载后的值（默认值）。Go 的加载跳过已经设置的变量；路由器同步的变量在加载之后才写，结果相同。加载出错（钩子拒绝默认值，不会发生）只记日志。
+2. **第 0 步的 `tx_read_ts`**：Go 的钩子对空值也放一个读时间戳为 0 的 `TxnReadTS`（`setTxnReadTS`），所以"有这个对象"不等于"设置了读时间戳"。改为读时间戳非 0 才走 PoC。
+3. **`SHOW WARNINGS` / `SHOW ERRORS`**：VS1 plan §4.5 要求交给上一条语句的执行方回答，原来总由 PoC 回答（PoC 的语句从不留 warning）。现在上一条语句由新栈执行时，路由器用新会话语句上下文中的 warning 回答，行的内容照 Go 的 `ShowExec.fetchShowWarnings`（TiDB 错误取 MySQL 错误码和消息，其他错误为 `ErrUnknown` 和文本；`SHOW ERRORS` 只取 Error 级），列定义用 PoC 的（与 Go 相同）。之后上一条语句仍算新栈的（Go 的 `SHOW WARNINGS` 保留上一条语句的 warning），直到下一条由 PoC 执行的语句。`SHOW COUNT(*) WARNINGS` 和带 `LIMIT` 的形式 PoC 本来就不支持（降级失败），不变。
+
+### 11.3 sessiontxn 的选项类型
+
+`tidb_load_based_replica_read_threshold` 在会话里是纳秒的 `i64`（Go 的 `time.Duration`），sessiontxn 原样作为 `LoadBasedReplicaReadThreshold` 选项值交给事务和 snapshot；存储驱动照 Go 按 `time.Duration` 取（Rust 的 `Duration`），类型不符时 panic（Go 的类型断言）。加载全局变量后这个变量有默认值 1s，第一次就碰到。sessiontxn 的两处（`isolation/base.rs`、`internal.rs`）改为交 `Duration`。
+
+### 11.4 测试
+
+- 路由器：`show_warnings_go_to_the_engine_that_ran_the_previous_statement`（新栈语句之后的 SHOW WARNINGS / SHOW ERRORS 的行，连续两次相同；PoC 语句之后交还 PoC）、`global_variables_are_loaded_when_the_session_opens`（plan cache 开着，`tidb_txn_mode` 为默认值，`tx_read_ts` 为 0 时不算会话条件、为 7 时算）。
+- 会话：`PHYSICAL_BOUNDARIES` 加 D02.2（§11.1）。
+- 端到端：VS1-20 的 ab（集成记录 §2）。
+
+## 本文新增部分（§8–§11）所用 ID
 
 - D00.1：上下文类型（exprctx / sessionexpr 的原归属）；D00.3：受限 SQL 执行器；D02.2：解析器的 AST 与 hint
 - D04.1：权限；D05.2：会话变量；D05.3：本块，会话（P1-1：sessionexpr；P1-2：会话变量 provider）；D05.4：sessiontxn
@@ -354,3 +382,4 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 - D10.2 / D10.5 / D10.6 / D10.9：FindBestTask / 代价 / 统计信息推导 / ResolveIndices；D12.12：预处理语句的执行器；D13.1：plan cache
 - VS1-28：FindBestTask 的移植工作项；VS1-20：点查纵向集成；A3：plan cache 例外；N2：会话上下文的三层结构
 - D10.1：物理算子（TableDual）；D10.8：点查快速路径；D12.0：执行器框架
+- D06.5：domain（sysvar 缓存）；D11.x：统计信息；VS1-17：domain 的接入

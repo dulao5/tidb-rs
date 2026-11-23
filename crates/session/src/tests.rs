@@ -1470,12 +1470,17 @@ fn register_prepared(s: &mut Session, id: u32, sql: &str) {
 }
 
 /// Where an EXECUTE that is not a point get stops while the planner and the executors are not
-/// finished: the statistics derivation (D10.6), FindBestTask (D10.2), ResolveIndices (D10.9)
-/// or the cost (D10.5), in that order; with a finished plan, building an executor not ported
-/// yet in `Exec` (the table reader D12.1, VS1-34; the projection or table dual D12.2,
-/// VS1-35), since `Compile` no longer stops at the Execute plan. Every one of them comes
-/// before an executor opened, so the caller falls back.
-const PHYSICAL_BOUNDARIES: [&str; 6] = ["D10.6", "D10.2", "D10.9", "D10.5", "D12.1", "D12.2"];
+/// finished: first the plan replayer capture of `CollectColumnStatsUsage`
+/// (`recordTableRuntimeStats`, a boundary labelled D02.2): Go's default
+/// `tidb_enable_plan_replayer_capture` is ON and the session has it once it loaded the global
+/// values; then the statistics derivation (D10.6), FindBestTask (D10.2), ResolveIndices
+/// (D10.9) or the cost (D10.5), in that order; with a finished plan, building an executor
+/// not ported yet in `Exec` (the table reader D12.1, VS1-34; the projection or table dual
+/// D12.2, VS1-35). Every one of them comes before an executor opened, so the caller falls
+/// back.
+const PHYSICAL_BOUNDARIES: [&str; 7] = [
+    "D02.2", "D10.6", "D10.2", "D10.9", "D10.5", "D12.1", "D12.2",
+];
 
 /// The binary protocol's EXECUTE of a prepared statement runs through `ExecuteStmt` with an
 /// EXECUTE node (Go `ExecutePreparedStmt`): `ResetContextOfStmt` works on the prepared

@@ -110,6 +110,9 @@ pub struct KvClient {
     /// The coprocessor client's store (D07.2); its workers run on the ExecPool once
     /// [`with_exec_pool`](KvClient::with_exec_pool) is called.
     copr: std::sync::Arc<CoprStore>,
+    /// The ExecPool of [`with_exec_pool`](KvClient::with_exec_pool), for the store driver
+    /// of the new stack ([`KvClient::store_driver`]).
+    pool: Option<tidb_runtime::pool::ExecPool>,
 }
 
 /// Reads `TIDB_RS_POINT_GET`: unset or empty means this crate's own reads, `store-driver`
@@ -182,13 +185,26 @@ impl KvClient {
             retry: tidb_retry_options(),
             driver,
             copr,
+            pool: None,
         })
     }
 
     /// Run the coprocessor client's workers on `pool` (M-GO) instead of the current runtime.
     pub fn with_exec_pool(mut self, pool: tidb_runtime::pool::ExecPool) -> Result<KvClient> {
-        self.copr = std::sync::Arc::new(copr_store(&self.inner, Some(pool))?);
+        self.copr = std::sync::Arc::new(copr_store(&self.inner, Some(pool.clone()))?);
+        self.pool = Some(pool);
         Ok(self)
+    }
+
+    /// The ported store driver (`tidb_store::driver::TikvStore`, D07.1) over this client's
+    /// TiKV connections, for the new stack's sessions (VS1 plan §4.1); its coprocessor
+    /// workers run on the same ExecPool.
+    pub fn store_driver(&self) -> Result<tidb_store::driver::TikvStore> {
+        tidb_store::driver::TikvStore::new(
+            std::sync::Arc::new(self.inner.clone()),
+            self.pool.clone(),
+        )
+        .map_err(Error::Copr)
     }
 
     /// Override the retry budgets used by snapshots created from now on (mainly for tests).

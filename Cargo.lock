@@ -2630,6 +2630,7 @@ dependencies = [
  "tidb-sessionctx",
  "tidb-sessiontxn",
  "tidb-sql",
+ "tidb-store",
  "tokio",
 ]
 

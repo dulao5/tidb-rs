@@ -108,6 +108,35 @@ pub fn get_stmt_label(node: &ast::Stmt) -> Result<String, Error> {
     }
 }
 
+/// The store driver's PD oracle (`tikvStore.GetOracle()`) as the oracle sessiontxn calls.
+// glue: oracle.Oracle of the store driver (the trait is sessiontxn's, the oracle the store's)
+pub struct StoreOracle(pub tidb_store::driver::tikv::PdOracle);
+
+impl Oracle for StoreOracle {
+    // glue: dispatch (client-go pdOracle.GetTimestampAsync)
+    fn get_timestamp_async(&self, txn_scope: &str) -> TsFuture {
+        let oracle = self.0.clone();
+        let scope = txn_scope.to_owned();
+        Box::pin(async move {
+            oracle
+                .get_timestamp(&scope)
+                .await
+                .map_err(tidb_store::driver::error::to_tidb_err)
+        })
+    }
+    // glue: dispatch (client-go pdOracle.GetLowResolutionTimestampAsync)
+    fn get_low_resolution_timestamp_async(&self, txn_scope: &str) -> TsFuture {
+        let oracle = self.0.clone();
+        let scope = txn_scope.to_owned();
+        Box::pin(async move {
+            oracle
+                .get_low_resolution_timestamp(&scope)
+                .await
+                .map_err(tidb_store::driver::error::to_tidb_err)
+        })
+    }
+}
+
 /// The error of the unwired store.
 // glue: the error of the stand-in
 fn unwired() -> Error {
