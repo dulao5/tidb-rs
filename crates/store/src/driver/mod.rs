@@ -152,7 +152,10 @@ impl Storage for TikvStore {
         Ok(())
     }
     /// client-go's `UUID()` is `tikv-<cluster id>`; client-rust does not expose the cluster
-    /// ID. Nothing on the read path calls it.
+    /// ID. Nothing on the read path calls it. The trait returns a `String`, so the boundary is
+    /// a panic carrying the `blocked` text: the connection loop catches it as Go's
+    /// `clientConn.Run` does (1105 to the client, the connection closed; `tidb-mysql-protocol`
+    /// `conn.rs`), it never reaches the router as a fallback.
     // glue: client-go KVStore.UUID (promoted) needs the PD cluster ID, blocked-by:D07.1 (client-rust does not expose it)
     fn uuid(&self) -> String {
         panic!(
@@ -174,7 +177,8 @@ impl Storage for TikvStore {
     }
     /// client-go keeps the minimal safe ts of each store, refreshed in the background
     /// (`updateSafeTS`); client-rust has none. Only stale reads ask, and those never reach
-    /// the new stack (VS1 plan §4.3 step 0).
+    /// the new stack (VS1 plan §4.3 step 0). As for `uuid`, the trait returns a value, so the
+    /// boundary is a panic that the connection loop turns into 1105 and a closed connection.
     // glue: client-go KVStore.GetMinSafeTS (promoted) needs the stores' safe ts, blocked-by:D07.1 (part 2)
     fn get_min_safe_ts(&self, _txn_scope: &str) -> u64 {
         panic!(

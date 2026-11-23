@@ -298,29 +298,30 @@ impl KVTxn {
     /// read-only node takes none.
     // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.Commit
     pub async fn commit(&mut self, _ctx: &Context) -> Result<(), TiKVError> {
-        if !self.valid {
-            return Err(TiKVError::Plain(tidb_kv::error::ErrInvalidTxn.clone()));
-        }
-        self.close();
-        Ok(())
+        end_txn(&mut self.valid)
     }
 
     /// `Rollback`: an invalid transaction is `ErrInvalidTxn`; otherwise it is closed. There
     /// is no committer (no pessimistic locks, no pipelined flush) to clean up.
     // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.Rollback
     pub fn rollback(&mut self) -> Result<(), TiKVError> {
-        if !self.valid {
-            return Err(TiKVError::Plain(tidb_kv::error::ErrInvalidTxn.clone()));
-        }
-        self.close();
-        Ok(())
+        end_txn(&mut self.valid)
     }
+}
 
-    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.close
-    fn close(&mut self) {
-        self.valid = false;
-        // txn.ClearDiskFullOpt(): the disk-full option is a write option, not kept.
+/// The part `Commit` and `Rollback` of a transaction without mutations share: an invalid
+/// transaction is `tikverr.ErrInvalidTxn` (TiDB's `kv.ErrInvalidTxn` after `ToTiDBErr`),
+/// otherwise the transaction is closed (`KVTxn.close`: `valid = false`; the disk-full
+/// option it also clears is a write option, not kept). A transaction ends once: a second
+/// commit or rollback fails. Split out so that the state machine is tested without a TiKV
+/// client.
+// go-l3: ADR-0008 client-go txnkv/transaction KVTxn.close (with the valid check of Commit / Rollback)
+fn end_txn(valid: &mut bool) -> Result<(), TiKVError> {
+    if !*valid {
+        return Err(TiKVError::Plain(tidb_kv::error::ErrInvalidTxn.clone()));
     }
+    *valid = false;
+    Ok(())
 }
 
 /// `txnsnapshot.NewTiKVSnapshot` / `SetSnapshotTS`'s sanity check.
@@ -627,5 +628,37 @@ impl KVSnapshot {
             *inner = Some((generation, self.new_client_snapshot()));
         }
         &mut inner.as_mut().expect("just built").1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::error::to_tidb_err;
+
+    /// `KVTxn`'s valid state: a new transaction is valid; commit or rollback ends it; any
+    /// later commit or rollback is `ErrInvalidTxn` (also after conversion) and leaves it
+    /// ended.
+    #[test]
+    fn transaction_ends_once() {
+        let invalid = |r: Result<(), TiKVError>| {
+            let e = to_tidb_err(r.unwrap_err());
+            assert!(tidb_kv::error::ErrInvalidTxn.equal(&e), "{e}");
+        };
+        // commit, then commit / rollback
+        let mut valid = true;
+        end_txn(&mut valid).unwrap();
+        assert!(!valid);
+        invalid(end_txn(&mut valid));
+        invalid(end_txn(&mut valid));
+        assert!(!valid);
+        // rollback first
+        let mut valid = true;
+        end_txn(&mut valid).unwrap();
+        invalid(end_txn(&mut valid));
+        // TxnOptions: the scope defaults to empty (Begin then uses the global scope).
+        let o = TxnOptions::default();
+        assert!(o.txn_scope.is_empty() && o.start_ts.is_none());
+        assert_eq!(GlobalTxnScope, "global");
     }
 }

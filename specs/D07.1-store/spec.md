@@ -41,11 +41,14 @@ tidb-rs 是只读节点（宪章 §4.3），Rust 的 `kv.Transaction` 没有 `Se
 | `tikvTxn.Iter` / `IterReverse` | union store 的迭代器（scanner，T11），第 2 部分 |
 | `UUID`（client-go `KVStore.UUID`，`tikv-<cluster id>`） | client-rust 不暴露 PD 的 cluster ID；读路径不调用。trait 返回 `String`，桩以带 `blocked` 文本的 panic 表示 |
 | `GetMinSafeTS`（client-go `KVStore.GetMinSafeTS`） | client-go 在后台按 store 维护 safe ts，client-rust 没有；只有 stale read 用，而 stale read 不进新栈（VS1 plan §4.3 第 0 步）。同样以 panic 表示 |
+
+`UUID` / `GetMinSafeTS` 的 panic 由连接循环捕获（`tidb-mysql-protocol` 的 `conn.rs`，照 Go `clientConn.Run` 的 recover）：客户端收到 1105，连接关闭，半途的会话随连接丢弃；它不会作为 `blocked` 交给路由器回退。没有改成返回 `Result`，因为 `kv.Storage` 这两个方法在 Go 中就不返回错误，改 trait 要动所有实现；现在读路径不调用它们。
 | `PdOracle.GetLowResolutionTimestamp` | client-go 保存最近一次的 TSO，后台按 `tidb_low_resolution_tso_update_interval` 刷新；client-rust 没有这个缓存。`tidb_low_resolution_tso` 不在路由器同步的变量里，开着它的会话不进新栈；万一走到，返回 `blocked`，不会拿一个更新的 TSO 冒充 |
 
 ## 5. 测试
 
-- 这些函数都要连真实的 PD / TiKV 才能构造（`KVStore` 包着 client-rust 的 `TransactionClient`），没有单测替身；由 VS1-20 的端到端验证覆盖：ab `strict` 的 sysbench 点查全部在新栈上执行且与 Go 一致，sysbench 点查压测（`specs/VS1-vertical-slice/c2a-integration.md`）。会话层的事务流程（`Begin` 的参数、自动提交时的提交）由 `tidb-session` 的替身存储测试覆盖。
+- `KVTxn` 的 valid 状态机（`Commit` / `Rollback` 共用的 `end_txn`）有单测 `transaction_ends_once`：新事务有效，提交或回滚后结束，再次提交或回滚都是 `ErrInvalidTxn`。
+- 其余函数都要连真实的 PD / TiKV 才能构造（`KVStore` 包着 client-rust 的 `TransactionClient`），没有单测替身；由 VS1-20 的端到端验证覆盖：ab `strict` 的 sysbench 点查全部在新栈上执行且与 Go 一致，sysbench 点查压测（`specs/VS1-vertical-slice/c2a-integration.md`）。会话层的事务流程（`Begin` 的参数、自动提交时的提交）由 `tidb-session` 的替身存储测试覆盖。
 - govec：不适用（存储的调用，没有可按输入输出对照的计算）。
 
 ## 本文所用 ID
