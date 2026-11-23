@@ -90,6 +90,17 @@ sysbench 1.0.20 `oltp_point_select`，`--db-ps-mode=auto`，1 张表 1 万行（
 - **pseudo 表**（D11.1 spec §3）：预处理点查走快速路径，不建统计信息，也不建 pseudo 表；这一项在点查上不发生，要等非点查语句（范围查询）走完整规划器时再测。
 - **InfoSchema 查表的两处额外开销**（D06.3 spec §11.2）：PREPARE 把 SQL 多解析一次（PoC 与新栈各一次，只在 PREPARE 时）；每条语句在规划前提前加载用到的表（`load_stmt_tables`）。profile 中后者的样本可以忽略（10 秒内 1 个样本）。
 
+### 3.4 点查短路径之后（VS1-20b，2026-11-24）
+
+同样的方法（`oltp_point_select`，1 张表 1 万行、4 个 region，`fallback`，每轮 20 秒，3 轮平均；tidb-rs 的 main 为 `f07d50d`，同一台机器同一个 playground）：
+
+| 线程 | Go 实例级缓存 ON | Go 默认 | tidb-rs main | tidb-rs 短路径 | 短路径 / Go ON | 短路径 / Go 默认 |
+|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 8836 | 9580 | 8531 | 8471 | 0.96 | 0.88 |
+| 8 | 32408 | 32936 | 30031 | 29515 | 0.91 | 0.90 |
+
+每轮之间的波动约 ±5%（Go 1 线程 8490–9453），main 与短路径的差在波动之内；1 线程 10 万条语句的进程 CPU 时间：main 75.9 µs / 条，短路径 75.4 µs / 条。每条语句的分配次数（jemalloc `nrequests`，方法同 §3.1）：main 约 505，短路径约 487（少了 `runStmt` / `finishStmt` / `inheritContextFromExecuteStmt` 的约 18 次）；Go 实例级缓存 ON 约 228，默认约 200。
+
 ## 4. `pseudoSelectivity` 的唯一键查找（D10.6 spec §5 第 1 条）
 
 这条路径只在完整规划器的选择率估算中、条件超过 63 个或 `HistColl` 没有列和索引时走到。预处理点查走快速路径，不估算选择率；能走到它的语句（例如带 64 个条件的范围查询）现在停在计划回放的采集（§5 第 3 条），之后还要统计信息推导（D10.6）、FindBestTask（VS1-28）和 Selection / TableReader 执行器（VS1-34 / VS1-35）。所以**这一项本次没有做到**：要等 C2b 的规划器和执行器接通后，在 ab 的 workload 中加一条带 64 个以上条件的点查形状（`id = ? AND k = ? AND ...`），并用路由跟踪确认它由新栈执行。
