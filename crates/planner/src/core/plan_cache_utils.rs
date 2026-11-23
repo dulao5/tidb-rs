@@ -954,7 +954,9 @@ pub fn new_plan_cache_key(
     let (conn_charset, conn_collation) = vars.get_charset_info();
 
     // not allow to share the same plan among different users for safety: the session has no
-    // user identity (SessionVars.User is not carried), as Go's nil User.
+    // user identity (SessionVars.User is not carried), as Go's nil User. With one account this
+    // is Go's key; once identity exists, different users must not share plans.
+    // glue: blocked-by:D04.1 (the user and host of the key: different users must not share plans once identity exists)
     let (user_name, host_name) = ("", "");
 
     // the user might switch the prune mode dynamically
