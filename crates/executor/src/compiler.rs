@@ -207,10 +207,8 @@ impl Compiler {
         stmt.ti = Arc::new(TelemetryInfo::default());
         // Use cached plan if possible.
         // The point plan short path (D05.3 spec §10.1): the session sees `PsStmt` and calls
-        // `ExecStmt.PointGet`. Go's comment says "re-use the cached plan": the executor that
-        // `PointGet` would keep in the prepared statement is not reused here (it is the plan
-        // cache's, the plan-cache exception A3 §1.1), a new one is built every time (D05.3
-        // spec §10.2 item 1).
+        // `ExecStmt.PointGet`, which reuses the point get executor kept in the prepared
+        // statement (MaxTS).
         if let (Some(prepared_obj), Some(is)) = (&prepared_obj, &is) {
             let safe = is_safe_to_reuse_point_get_executor(
                 sctx.get_session_vars(),

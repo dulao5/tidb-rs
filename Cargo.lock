@@ -4097,6 +4097,7 @@ dependencies = [
  "serde_json",
  "tidb-base",
  "tidb-chunk",
+ "tidb-codec",
  "tidb-executor",
  "tidb-expression",
  "tidb-infoschema",
@@ -4109,6 +4110,7 @@ dependencies = [
  "tidb-sessiontxn",
  "tidb-statistics",
  "tidb-store",
+ "tidb-tablecodec",
  "tidb-types",
  "tokio",
 ]

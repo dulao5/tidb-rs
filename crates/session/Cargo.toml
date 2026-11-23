@@ -34,6 +34,9 @@ log = "0.4"
 
 [dev-dependencies]
 tidb-model = { workspace = true }
+# Rows of the mock store (the point get executor reuse tests).
+tidb-tablecodec = { workspace = true }
+tidb-codec = { workspace = true }
 tidb-expression = { workspace = true }
 # The pseudo statistics table the plan replayer capture records.
 tidb-statistics = { workspace = true }

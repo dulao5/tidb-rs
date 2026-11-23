@@ -54,20 +54,29 @@ impl GlobalVarAccessor for Defaults {
     }
 }
 
-struct NoSnapshot;
+/// The rows of the mock store (key → value), shared by its snapshots.
+type MockRows = Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>;
 
-impl Getter for NoSnapshot {
+/// A snapshot of the mock store: it has the rows a test put there (none by default).
+struct MockSnapshot(MockRows);
+
+impl Getter for MockSnapshot {
     fn get<'a>(
         &'a self,
         _: &'a Context,
-        _: &'a Key,
+        k: &'a Key,
         _: &'a [GetOption],
     ) -> KvFuture<'a, ValueEntry> {
-        // The mock store has no rows: a point get finds nothing.
-        Box::pin(async { Err(tidb_kv::error::ErrNotExist.clone()) })
+        let v = self.0.lock().get(&k.0).cloned();
+        Box::pin(async move {
+            match v {
+                Some(v) => Ok(tidb_kv::kv::new_value_entry(v, 0)),
+                None => Err(tidb_kv::error::ErrNotExist.clone()),
+            }
+        })
     }
 }
-impl Retriever for NoSnapshot {
+impl Retriever for MockSnapshot {
     fn iter<'a: 'f, 'f>(
         &'a self,
         _: &'f Key,
@@ -83,7 +92,7 @@ impl Retriever for NoSnapshot {
         unimplemented!()
     }
 }
-impl BatchGetter for NoSnapshot {
+impl BatchGetter for MockSnapshot {
     fn batch_get<'a>(
         &'a self,
         _: &'a Context,
@@ -93,7 +102,7 @@ impl BatchGetter for NoSnapshot {
         unimplemented!()
     }
 }
-impl Snapshot for NoSnapshot {
+impl Snapshot for MockSnapshot {
     fn set_option(&self, _: isize, _: OptionValue) {}
 }
 
@@ -101,6 +110,7 @@ impl Snapshot for NoSnapshot {
 struct MockTxn {
     start_ts: u64,
     log: Arc<Mutex<Vec<String>>>,
+    rows: MockRows,
 }
 
 impl Getter for MockTxn {
@@ -171,7 +181,7 @@ impl Transaction for MockTxn {
         true
     }
     fn get_snapshot(&self) -> Arc<dyn Snapshot> {
-        Arc::new(NoSnapshot)
+        Arc::new(MockSnapshot(Arc::clone(&self.rows)))
     }
     fn is_pessimistic(&self) -> bool {
         false
@@ -187,6 +197,7 @@ struct MockStore {
     requests: AtomicUsize,
     waits: Arc<AtomicUsize>,
     log: Arc<Mutex<Vec<String>>>,
+    rows: MockRows,
 }
 
 impl MockStore {
@@ -229,10 +240,17 @@ impl Storage for MockStore {
             .expect("a start ts");
         self.log.lock().push(format!("begin {start_ts}"));
         let log = Arc::clone(&self.log);
-        Box::pin(async move { Ok(Box::new(MockTxn { start_ts, log }) as Box<dyn Transaction>) })
+        let rows = Arc::clone(&self.rows);
+        Box::pin(async move {
+            Ok(Box::new(MockTxn {
+                start_ts,
+                log,
+                rows,
+            }) as Box<dyn Transaction>)
+        })
     }
     fn get_snapshot(&self, _: Version) -> Arc<dyn Snapshot> {
-        Arc::new(NoSnapshot)
+        Arc::new(MockSnapshot(Arc::clone(&self.rows)))
     }
     fn get_client(&self) -> Arc<dyn Client> {
         // The planning context takes the store's client (GetPlanCtx); nothing sends with it.
@@ -1283,9 +1301,9 @@ fn execute_point_select(s: &mut Session, stmt_id: u32) -> ExecutePath {
 /// `c` of `sbtest1`); EXECUTE plans the point get on the fast path with the parameter's
 /// value. The statement is an autocommit read, not stale, at the schema version it was
 /// prepared with, so `Compile` takes Go's point plan short path (D05.3 spec §10.1): the
-/// session calls `ExecStmt.PointGet`, which builds and opens a new point get executor (it is
-/// not kept for the next EXECUTE), reads the mock store (no row), and the session is idle
-/// after the close. The second EXECUTE takes the same path with a new executor.
+/// session calls `ExecStmt.PointGet`, which builds and opens a point get executor, reads the
+/// mock store (no row), and keeps the executor in the prepared statement (MaxTS); the
+/// session is idle after the close. The second EXECUTE takes the same path and reuses it.
 #[test]
 fn prepare_of_the_sbtest_point_select_builds_the_plan() {
     let _serial = PREPARED_COUNT.lock();
@@ -1309,15 +1327,149 @@ fn prepare_of_the_sbtest_point_select_builds_the_plan() {
         assert_eq!(
             s.executed_stmts(),
             round,
-            "the point get executor was built and opened"
+            "the point get executor was opened"
         );
         assert!(s.is_idle(), "{}", s.state_snapshot());
         assert!(
-            prepared_of(&s, info.stmt_id, |p| p.point_get.executor.is_none()),
-            "the executor is not kept in the prepared statement"
+            prepared_of(&s, info.stmt_id, |p| p.point_get.executor.is_some()),
+            "the MaxTS point get executor is kept in the prepared statement for the next EXECUTE"
         );
     }
     s.drop_prepared_stmt(info.stmt_id).unwrap();
+}
+
+/// Puts the row `(handle, c)` of `table_id` (row format v2, `c` is column 2) into the mock
+/// store.
+fn put_row(store: &MockStore, table_id: i64, handle: i64, col_id: i64, c: &str) {
+    let mut enc = tidb_tablecodec::rowcodec::Encoder::default();
+    enc.enable = true;
+    let mut d = tidb_types::datum::Datum::default();
+    d.set_string(c.as_bytes().to_vec(), "utf8mb4_bin".to_owned());
+    let val = tidb_tablecodec::encode_row(None, &[d], &[col_id], None, Some(&mut enc)).unwrap();
+    let key = tidb_tablecodec::encode_row_key_with_handle(
+        table_id,
+        &tidb_kv::Handle::Int(tidb_kv::key::IntHandle(handle)),
+    );
+    store.rows.lock().insert(key.0, val);
+}
+
+/// EXECUTE of a one-parameter prepared statement read to the end: the first column of every
+/// row as text, and whether the plan came from the instance plan cache.
+fn execute_rows(
+    s: &mut Session,
+    stmt_id: u32,
+    param: tidb_types::datum::Datum,
+) -> (Vec<String>, bool) {
+    let mut rs = block_on(s.execute_prepared_stmt(stmt_id, vec![param]))
+        .unwrap()
+        .expect("a result set");
+    let found = s.vars().found_in_plan_cache;
+    let mut out = Vec::new();
+    loop {
+        let mut chk = rs.new_chunk().unwrap();
+        block_on(rs.next(s, &mut chk)).unwrap();
+        if chk.num_rows() == 0 {
+            break;
+        }
+        for i in 0..chk.num_rows() {
+            out.push(String::from_utf8_lossy(chk.get_row(i).get_string(0)).into_owned());
+        }
+    }
+    block_on(rs.close(s)).unwrap();
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+    (out, found)
+}
+
+/// Go's point get executor reuse (`ExecStmt.PointGet`, D05.3 spec §10.1 item 3): the first
+/// EXECUTE of the autocommit primary-key point get (MaxTS) builds the executor and keeps it
+/// in the session's prepared statement; the next ones take it back and `Init` it from the
+/// current plan, which is the instance plan cache's shared plan (a hit) rebuilt for the
+/// parameter. Every parameter reads its own row (1, 2, a missing id, 1 again: no handle or
+/// `done` flag from the previous execution leaks), only one executor is ever built, and the
+/// cached plan's structural hash never changes (the executor only reads the plan).
+#[test]
+fn point_get_executor_is_reused_with_the_current_plan() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    put_row(&store, 110, 1, 2, "one");
+    put_row(&store, 110, 2, 2, "two");
+    let cache = new_test_cache();
+    let mut s = cached_session(&store, sbtest_info_schema(), &cache);
+    let int = tidb_types::datum::new_int_datum;
+    let p = block_on(s.prepare_stmt(SBTEST_POINT)).unwrap();
+    let kept = |s: &Session| prepared_of(s, p.stmt_id, |p| p.point_get.executor.is_some());
+
+    assert_eq!(
+        execute_rows(&mut s, p.stmt_id, int(1)),
+        (vec!["one".to_owned()], false)
+    );
+    assert!(kept(&s), "kept after the first EXECUTE");
+    let before = cached_hashes(&cache);
+    for (param, want) in [
+        (2, Some("two")),
+        (3, None),
+        (1, Some("one")),
+        (2, Some("two")),
+    ] {
+        let want: Vec<String> = want.into_iter().map(str::to_owned).collect();
+        assert_eq!(
+            execute_rows(&mut s, p.stmt_id, int(param)),
+            (want, true),
+            "id = {param}"
+        );
+        assert!(kept(&s), "given back after id = {param}");
+    }
+    assert_eq!(
+        cached_hashes(&cache),
+        before,
+        "the cached plan is never written"
+    );
+    assert_eq!(s.executed_stmts(), 5);
+    s.drop_prepared_stmt(p.stmt_id).unwrap();
+}
+
+/// A point get by a secondary unique index reads at a TSO (not MaxTS), so its executor is
+/// neither kept nor reused (Go's `useMaxTS`); every EXECUTE builds a new one, reads its own
+/// row through the index, and the cached plan's index values are not written (A3 §2.3 9a).
+#[test]
+fn unique_index_point_get_is_not_reused_and_reads_its_own_row() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    for (k, h, c) in [(7, 1, "seven"), (8, 2, "eight")] {
+        let mut d = tidb_types::datum::Datum::default();
+        d.set_int64(k);
+        let mut enc = Vec::new();
+        tidb_codec::encode_key(&tidb_base::gostd::time::utc(), &mut enc, &[d]).unwrap();
+        let handle = tidb_kv::Handle::Int(tidb_kv::key::IntHandle(h));
+        store.rows.lock().insert(
+            tidb_tablecodec::encode_index_seek_key(111, 1, &enc).0,
+            tidb_tablecodec::encode_handle_in_unique_index_value(&handle, false),
+        );
+        put_row(&store, 111, h, 3, c);
+    }
+    let cache = new_test_cache();
+    let mut s = cached_session(&store, uk_info_schema(), &cache);
+    let int = tidb_types::datum::new_int_datum;
+    let p = block_on(s.prepare_stmt("SELECT c FROM uk1 WHERE k = ?")).unwrap();
+    assert_eq!(
+        execute_rows(&mut s, p.stmt_id, int(7)),
+        (vec!["seven".to_owned()], false)
+    );
+    let before = cached_hashes(&cache);
+    for (param, want) in [(8, Some("eight")), (9, None), (7, Some("seven"))] {
+        let want: Vec<String> = want.into_iter().map(str::to_owned).collect();
+        assert_eq!(
+            execute_rows(&mut s, p.stmt_id, int(param)),
+            (want, true),
+            "k = {param}"
+        );
+        assert!(prepared_of(&s, p.stmt_id, |p| p
+            .point_get
+            .executor
+            .is_none()));
+    }
+    assert_eq!(cached_hashes(&cache), before);
+    s.drop_prepared_stmt(p.stmt_id).unwrap();
 }
 
 /// Outside an autocommit transaction (`autocommit = 0`, or after `BEGIN`) the same EXECUTE

@@ -65,6 +65,9 @@ pub struct RecordSet {
     finished: bool,
     /// The context the executor runs with (N3); dropped by `Finish` with the executor.
     exec_ctx: Option<ExecCtx>,
+    /// The prepared statement whose cache gets the point get executor back when the record
+    /// set finishes (Go caches the executor pointer while it runs, `ExecStmt.PointGet`).
+    point_get_cache: Option<PlanCacheStmtRef>,
 }
 
 impl RecordSet {
@@ -137,7 +140,15 @@ impl RecordSet {
             }
             // resetCTEStorageMap: the CTE storages are created by the CTE executors only,
             // which are not ported: there is nothing to reset.
-            self.executor = None;
+            let executor = self.executor.take();
+            if let (Some(cache), Some(mut e)) = (self.point_get_cache.take(), executor) {
+                // The session writes the statement context after this (`FinishExecuteStmt`):
+                // the kept executor must not hold it (N3; `Init` builds it again).
+                if let Some(pg) = e.as_point_get() {
+                    pg.release_stmt_state();
+                }
+                crate::glue::set_cached_point_get_executor(&mut cache.lock(), Some(e));
+            }
             self.exec_ctx = None;
             let killer = sctx.sql_killer();
             let status = killer.get_kill_signal();
@@ -380,7 +391,7 @@ impl ExecStmt {
     }
 
     /// PointGet short path for point exec directly from plan, keep only necessary steps
-    // go: ExecStmt.PointGet L2 (no tracing region / Top SQL, D14.2; the point get executor is not reused, the plan-cache exception A3)
+    // go: ExecStmt.PointGet L2 (no tracing region / Top SQL, D14.2; executor type checks through Executor::as_point_get)
     pub async fn point_get(&mut self, sctx: &mut dyn SessionContext) -> Result<RecordSet, Error> {
         // a.checkPlanReplayerCapture of FinishExecuteStmt, before anything runs (see the
         // function).
@@ -388,17 +399,59 @@ impl ExecStmt {
         let start_ts = sctx.get_stmt_read_ts().await?;
         Self::stmt_ctx_mut(sctx).priority = HighPriority;
 
-        // try to reuse point get executor: not here. Go reuses the executor kept in the
-        // prepared statement (`a.PsStmt.PointGet.Executor`, only when the read ts is MaxTS)
-        // and keeps a newly built one there for the next execution; that reuse belongs to
-        // the plan cache (the plan-cache exception A3 §1.1), so a new executor is built for
-        // every execution and dropped with the record set (D05.3 spec §10.2 item 1).
-        let mut b = new_executor_builder(sctx, self.info_schema.clone(), Arc::clone(&self.ti));
-        let e = b.build(sctx, self.plan.as_ref()).await;
-        if let Some(err) = b.err {
-            return Err(err);
+        let mut executor: Option<Box<dyn Executor>> = None;
+        let use_max_ts = start_ts == u64::MAX;
+        let mut point_get_cache = None;
+
+        // try to reuse point get executor
+        // We should only use the cached the executor when the startTS is MaxUint64
+        let ps_stmt = self
+            .ps_stmt
+            .clone()
+            .expect("point plan short path has a prepared statement");
+        let cached = if use_max_ts {
+            crate::glue::take_cached_point_get_executor(&mut ps_stmt.lock())
+        } else {
+            None
+        };
+        if let Some(mut cached) = cached {
+            match cached.as_point_get() {
+                None => {
+                    log::error!("invalid executor type, not PointGetExecutor for point get path");
+                }
+                Some(pg) => {
+                    // CachedPlan type is already checked in last step
+                    pg.init(sctx, self.plan.as_ref().expect("point get plan"))?;
+                    executor = Some(cached);
+                    point_get_cache = Some(Arc::clone(&ps_stmt));
+                }
+            }
         }
-        let mut executor = e.expect("built");
+
+        let mut executor = match executor {
+            Some(e) => e,
+            None => {
+                let mut b =
+                    new_executor_builder(sctx, self.info_schema.clone(), Arc::clone(&self.ti));
+                let e = b.build(sctx, self.plan.as_ref()).await;
+                if let Some(err) = b.err {
+                    return Err(err);
+                }
+                let mut e = e.expect("built");
+                // Don't cache the executor for non point-get (table dual) or partitioned tables
+                let cache = match e.as_point_get() {
+                    Some(pg) => use_max_ts && !pg.is_partitioned(),
+                    None => false,
+                };
+                if cache {
+                    // Go keeps the executor in the cache and uses it for this execution too
+                    // (one pointer); here the cache gets it back when the record set
+                    // finishes.
+                    point_get_cache = Some(Arc::clone(&ps_stmt));
+                }
+                e
+            }
+        };
 
         let ctx = Self::exec_ctx(sctx);
         if let Err(err) = exec::open(&ctx, executor.as_mut()).await {
@@ -426,6 +479,7 @@ impl ExecStmt {
             txn_start_ts: start_ts,
             finished: false,
             exec_ctx: Some(ctx),
+            point_get_cache,
         })
     }
 
@@ -569,6 +623,7 @@ impl ExecStmt {
             txn_start_ts,
             finished: false,
             exec_ctx: Some(ctx),
+            point_get_cache: None,
         }))
     }
 

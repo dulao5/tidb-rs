@@ -25,6 +25,8 @@ use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sessionctx::variable::session_state::PlanReplayerTaskKey;
 
+use crate::internal::exec::executor::Executor;
+
 /// `infoschema.InfoSchema` (the new stack only knows v2, VS1 plan §4.1).
 pub type InfoSchemaRef = Arc<tidb_infoschema::InfoSchemaV2>;
 
@@ -157,6 +159,22 @@ pub type PlanCacheStmt = tidb_planner::core::plan_cache_utils::PlanCacheStmt;
 /// execute it.
 pub type PlanCacheStmtRef = tidb_planner::core::plan_cache_utils::PlanCacheStmtRef;
 
+/// `stmt.PointGet.Executor = e`.
+// glue: PointGetExecutorCache.Executor (an Any in the planner)
+pub fn set_cached_point_get_executor(stmt: &mut PlanCacheStmt, e: Option<Box<dyn Executor>>) {
+    stmt.point_get.executor = e.map(|e| Box::new(e) as Box<dyn std::any::Any + Send>);
+}
+
+/// `stmt.PointGet.Executor`, taken out of the statement.
+// glue: PointGetExecutorCache.Executor (an Any in the planner)
+pub fn take_cached_point_get_executor(stmt: &mut PlanCacheStmt) -> Option<Box<dyn Executor>> {
+    stmt.point_get
+        .executor
+        .take()
+        .and_then(|b| b.downcast::<Box<dyn Executor>>().ok())
+        .map(|b| *b)
+}
+
 /// The `*PointGetExecutor` methods `ExecStmt.PointGet` calls on a cached executor (D12.1,
 /// VS1-12): Go type-asserts `exec.Executor` to `*PointGetExecutor`; here the point get
 /// executor returns itself from [`Executor::as_point_get`].
@@ -168,6 +186,14 @@ pub trait PointGetExecutor {
     /// `partitionDefIdx != nil`.
     // glue: Go field PointGetExecutor.partitionDefIdx (D12.1)
     fn is_partitioned(&self) -> bool;
+    /// Drops what the executor holds of the statement that just finished (its statement
+    /// context, runtime stats, index usage reporter) before the executor is kept in the
+    /// prepared statement. Go's executor reaches the statement context through the session
+    /// and `Init` replaces the rest; here the executor holds the statement context itself
+    /// (`Arc`, N3), which the session writes after `Finish` (`FinishExecuteStmt`) and must
+    /// then own alone. `Init` builds all of it again.
+    // glue: N3 (the statement context an executor holds)
+    fn release_stmt_state(&mut self);
 }
 
 /// client-go `txnsnapshot.SnapshotRuntimeStats`: the RPC counts, backoffs and TiKV time

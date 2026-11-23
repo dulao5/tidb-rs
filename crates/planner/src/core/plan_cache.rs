@@ -421,8 +421,8 @@ pub fn check_prepared_priv(stmt: &PlanCacheStmt) -> Result<(), Error> {
 /// Go reads the stale-read flag through `staleread.IsStmtStaleness(sctx)`, which is the
 /// statement context's `IsStaleness`; the planner reads it from the session variables
 /// directly (`sessiontxn` is above the planner). `Compile` calls this for the point plan
-/// short path (D05.3 spec §10.1); the executor it names is not reused yet (the plan-cache
-/// exception A3 §1.1, D05.3 spec §10.2 item 1).
+/// short path (D05.3 spec §10.1), whose `ExecStmt.PointGet` reuses the executor kept in the
+/// prepared statement.
 // go: IsSafeToReusePointGetExecutor L1
 pub fn is_safe_to_reuse_point_get_executor(
     vars: &SessionVars,

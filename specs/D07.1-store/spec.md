@@ -32,6 +32,7 @@ tidb-rs 是只读节点（宪章 §4.3），Rust 的 `kv.Transaction` 没有 `Se
 - `Rollback`：同样先检查 `valid`，然后关闭；没有 committer 要清理。
 - `SetOption`：snapshot 读的选项照 Go 交给 `KVSnapshot`（隔离级别、优先级、not fill cache、snapshot ts、replica read、task id、runtime stats、sample step、staleness、store labels、resource group tag / name、request source、load-based replica read 阈值、读超时），事务自己的（`Pessimistic`、`GuaranteeLinearizability`、`TxnScope`、`SnapInterceptor`）记在事务里。只给 committer 和 MemDB 用的选项（schema checker、InfoSchema、commit hook、async commit、1PC、KV filter、commit ts 上界检查、assertion level、column maps、txn source、size limits、session id、生命周期钩子、prewrite 锁策略）接受但不保存：没有写事务的提交。选项值的 Rust 类型与 snapshot 的 `SetOption` 相同。
 - `GetOption`：`GuaranteeLinearizability`、`TxnScope`、`RequestSourceInternal`、`RequestSourceType` 照 Go 回答；`TableToColumnMaps`（写路径的缓存）为 nil。
+- **MaxTS 的读不缓存**（2026-11-24，点查短路径 VS1-20b）：`KVSnapshot` 底下的 client-rust snapshot 把读到的每个值存进自己的 buffer，之后同一个 key 直接返回 buffer 里的值；client-go 的 `KVSnapshot.Get` 不这样缓存（`s.mu.cached` 只由悲观锁填）。同一个读时间戳下这没有差别，但 MaxTS 的读每次都应读到最新提交的值。预处理语句保存的点查执行器（`ExecStmt.PointGet` 的复用）会拿同一个 MaxTS snapshot 再读：第一次的值会被一直返回（在 playground 上用 Go TiDB 改了那一行之后，tidb-rs 仍返回旧值，已复现）。所以读时间戳为 MaxTS 时，每次读都新建 client-rust snapshot；其他时间戳仍沿用（同一时间戳的值不变）。
 - 事务的 `KVTxn` 只保存读用到的字段（start ts、valid、scope、causal consistency、pessimistic）；committer 才读的字段不保存。
 
 ## 4. 边界桩

@@ -361,6 +361,14 @@ fn top_sql_enabled() -> bool {
 }
 
 impl ExecutorStats {
+    /// Drops the statement context and the runtime stats (a kept point get executor between
+    /// two executions, `glue::PointGetExecutor::release_stmt_state`).
+    // glue: N3 (the statement context an executor holds)
+    pub fn release_stmt_ctx(&mut self) {
+        self.stmt_ctx = None;
+        self.runtime_stats = None;
+    }
+
     /// RuntimeStats returns the runtime stats of an executor.
     // go: executorStats.RuntimeStats L1
     pub fn runtime_stats(&self) -> Option<&Arc<BasicRuntimeStats>> {

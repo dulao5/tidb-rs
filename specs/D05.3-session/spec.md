@@ -331,7 +331,7 @@ Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次
 
 | 语句 | 停在 | 说明 |
 |---|---|---|
-| 预处理的点查 `SELECT c FROM sbtest1 WHERE id=?` | 不再停：快速路径用参数值建点查计划（D10.8 spec §4a）；自动提交时 `Compile` 换成其中的点查、会话走点查短路径，否则 `Exec` 换成其中的点查；两条路都新建执行器（§10） | VS1-20 之前停在 `getNameValuePairs`（`blocked-by:D13.1`） |
+| 预处理的点查 `SELECT c FROM sbtest1 WHERE id=?` | 不再停：快速路径用参数值建点查计划（D10.8 spec §4a）；自动提交时 `Compile` 换成其中的点查、会话走点查短路径，否则 `Exec` 换成其中的点查；短路径在 MaxTS 时复用预处理语句里的点查执行器，普通路径新建执行器（§10） | VS1-20 之前停在 `getNameValuePairs`（`blocked-by:D13.1`） |
 | 其他预处理 SELECT（如 `id > ?`） | 物理优化：统计信息推导（`blocked-by:D10.6`），之后依次是 FindBestTask（D10.2）、ResolveIndices（D10.9）、代价（D10.5） | 逻辑计划已用参数值建好；FindBestTask 正由另一项工作（VS1-28）移植 |
 | 物理优化完成后的 Execute 计划 | 不再停（§10） | VS1-20 之前在 `Compile` 中停在 `blocked-by:D13.1` |
 | 文本协议的点查 `SELECT c FROM sbtest1 WHERE id=10` | 不再停：语句移交给 `Compile`（§9.2），快速路径建点查计划，执行器建好、打开、读完 | 原来在预处理之前停在 `blocked-by:D05.3` |
@@ -368,7 +368,10 @@ Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次
 
 1. `Compile` 把 `ExecStmt.PsStmt` 设为这条预处理语句，`ExecStmt.Plan` 换成 Execute 里面的点查计划（Execute 计划不再交给 `ExecStmt`）。语句上下文里的计划仍是 Execute 计划，与 Go 相同（Go 只换了 `stmt.Plan`）。`AdviseOptimizeWithPlanAndThenWarmUp` 收到点查计划，结果与普通路径相同（自动提交的主键点查用 MaxTS，不取 TSO）。
 2. 会话看到 `PsStmt` 后调用 `ExecStmt.PointGet`（`session.go:2160`），然后立刻让事务变成 invalid（`txn.changeToInvalid()`）。不经过 `runStmt`，也不经过 `ExecStmt.Exec`，所以不调用 `inheritContextFromExecuteStmt`：`isPreparedStmt` 保持 false。
-3. `ExecStmt.PointGet`：取读时间戳，把语句上下文的优先级设为 `HighPriority`，建点查执行器并打开，返回不包 `execStmtResult` 的结果集。结果集关闭时只关闭执行器，不调用 `finishStmt`。
+3. `ExecStmt.PointGet`：取读时间戳，把语句上下文的优先级设为 `HighPriority`。读时间戳是 MaxTS（自动提交的主键点查）时，照 Go 复用预处理语句里存着的点查执行器：取出来，用这次的点查计划 `Init`（表、handle、索引及其值、加锁标志、列、行解码器、执行器基础部分、索引使用统计，全部从这次的计划重新读，不留上一次的任何值）；没有存着的就新建一个，并在结果集结束（`recordSet.Finish`）时放回预处理语句。TableDual（不是点查执行器）和分区表的执行器不存。读时间戳不是 MaxTS 时既不取也不存。返回不包 `execStmtResult` 的结果集，关闭时只关闭执行器，不调用 `finishStmt`。
+   - 与 Go 的写法不同的一处（N3）：Go 的执行器经会话拿到语句上下文，这里执行器自己持有语句上下文的 `Arc`（执行器基础部分的统计、运行时统计、索引使用统计）。会话在 `Finish` 之后还要写语句上下文（`FinishExecuteStmt`），要求只有它一个持有者，所以执行器放回预处理语句之前先丢掉这些（`release_stmt_state`），下一次 `Init` 再建。原来移植的复用代码没有这一步，在真实会话上从未走到；接通短路径后第二次 EXECUTE 就会在关闭时 panic（"statement context is shared"），会话测试发现并修正。
+   - 执行器存在本会话自己的预处理语句里，不在实例级 plan cache 中共享；它只读计划。
+   - 复用的执行器还留着上一次的 snapshot（Go 也是，MaxTS 下 snapshot 与事务无关）。client-rust 的 snapshot 会缓存读到的值，于是复用之后读不到别处新写入的值；存储驱动改为 MaxTS 的读每次新建 client-rust snapshot（D07.1 spec §3）。在 playground 上验证：Go TiDB 改了某一行之后，同一连接上的下一次 EXECUTE 读到新值（修正前一直是旧值）。
 4. 计划可能来自实例级 plan cache（多个会话共享），执行器只读它，不写（`crates/executor/clippy.toml` 禁止取得计划的可写引用）。
 
 **普通路径**（三件中有一件不成立，例如显式事务、`autocommit=0`、schema 变了、stale read；或 Execute 里不是点查）：
@@ -384,18 +387,23 @@ Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次
 
 VS1-20 时记下的三处可观察差别（新栈不走短路径，Lucky 评审 #301）随短路径补上而消失：慢日志与语句摘要的 `Prepared` 现在与 Go 一样为 false；语句上下文的请求优先级现在与 Go 一样为 `HighPriority`；自动提交的预处理点查现在与 Go 一样不经 `runStmt` / `finishStmt`，事务直接变成 invalid。还剩下这些：
 
-1. **不复用点查执行器**：Go 在读时间戳为 MaxTS 时把点查执行器存进预处理语句（`PsStmt.PointGet.Executor`），下一次 EXECUTE 重新初始化（`Init`）后接着用；新栈每次都新建一个，用完即丢。复用是 plan cache 的一部分（A3 例外 §1.1 最后一行），留到 plan cache 的后续阶段。结果相同，只差分配次数。原来 `ExecStmt.PointGet` 里移植了这段复用，现在去掉了（执行器不再放回预处理语句；`planCachePreprocess` 在 schema 变化时清空的那个字段始终是空的）。
-2. `ExecStmt.PointGet` 里的 tracing region 与 Top SQL 没有移植（D14.2），`StmtCtx.StmtType` 为空时用 `GetStmtLabel` 补上的那一步也没有移植（`GetStmtLabel` 在 D00.1）。这些原来就有，与本节无关。
-3. **plan cache 的 warning 可能不同**：Go 命中缓存后重建计划失败时会加 `skip plan-cache: plan rebuild failed, ...` 之类的 warning（`RebuildPlan4CachedPlan`）。只出现在缓存命中之后参数让计划变化的情形（例如前一次 EXECUTE 缓存了点查，这次参数超出列的范围）；这类语句 Go 的计划是 TableDual，新栈停在 TableDual 的边界（D10.1），不在点查的范围内。
-4. `QueryString` 写进会话的值表（`SessionContext::set_query_string`，新增的胶水方法）；现在没有读它的代码。短路径与 Go 一样不写它。
+点查执行器的复用也照 Go 做了（§10.1 短路径第 3 条；A3 例外 §1.1 最后一行要求照 Go 移植），不再是差别。
+
+1. `ExecStmt.PointGet` 里的 tracing region 与 Top SQL 没有移植（D14.2），`StmtCtx.StmtType` 为空时用 `GetStmtLabel` 补上的那一步也没有移植（`GetStmtLabel` 在 D00.1）。这些原来就有，与本节无关。
+2. **plan cache 的 warning 可能不同**：Go 命中缓存后重建计划失败时会加 `skip plan-cache: plan rebuild failed, ...` 之类的 warning（`RebuildPlan4CachedPlan`）。只出现在缓存命中之后参数让计划变化的情形（例如前一次 EXECUTE 缓存了点查，这次参数超出列的范围）；这类语句 Go 的计划是 TableDual，新栈停在 TableDual 的边界（D10.1），不在点查的范围内。
+3. `QueryString` 写进会话的值表（`SessionContext::set_query_string`，新增的胶水方法）；现在没有读它的代码。短路径与 Go 一样不写它。
+
+观察（不是差别）：`IsSafeToReusePointGetExecutor` 的第三个条件（预处理语句的 schema 版本等于当前版本）在正常流程中总是成立。EXECUTE 在 `Compile` 之前先经过 `planCachePreprocess`：schema 变了就用同一个 InfoSchema 重新 preprocess，并把预处理语句的版本改成这个 InfoSchema 的版本（第 4 步）；`Compile` 随后拿同一个 InfoSchema 比较，两者相同。Go 也是这个顺序。所以 schema 变化之后的 EXECUTE 仍走短路径（测试 `prepared_point_get_after_a_schema_change_takes_the_short_path`），只有重新 preprocess 失败（报错，语句不执行）时才走不到这里；同时 schema 变化会清空存着的点查执行器，下一次新建。
 
 ### 10.3 测试
 
-- `prepare_of_the_sbtest_point_select_builds_the_plan`：替身存储上 PREPARE + EXECUTE 点查：连续两次 EXECUTE 都走点查短路径（VS1-20b）：`ExecStmt` 设了 `PsStmt`、计划是点查、没有 Execute 计划，结果集不包 `execStmtResult`，`IsPrepared` 为 false，语句上下文里仍是 Execute 计划，优先级为 High；每次 `executed_stmts` 加一（执行器新建并打开），读替身存储得到 0 行，关闭后会话空闲，预处理语句里不留执行器。测试表的 `id` 原来没有主键标志（`pk_is_handle` 而列没有 `PriKeyFlag`，快速路径找不到 handle），已补上；替身快照的 `Get` 原来是 `unimplemented!`，改为"没有这一行"。
+- `prepare_of_the_sbtest_point_select_builds_the_plan`：替身存储上 PREPARE + EXECUTE 点查：连续两次 EXECUTE 都走点查短路径（VS1-20b）：`ExecStmt` 设了 `PsStmt`、计划是点查、没有 Execute 计划，结果集不包 `execStmtResult`，`IsPrepared` 为 false，语句上下文里仍是 Execute 计划，优先级为 High；每次 `executed_stmts` 加一，读替身存储得到 0 行，关闭后会话空闲，点查执行器（MaxTS）存在预处理语句里。测试表的 `id` 原来没有主键标志（`pk_is_handle` 而列没有 `PriKeyFlag`，快速路径找不到 handle），已补上；替身快照的 `Get` 原来是 `unimplemented!`，改为"没有这一行"。
 - `prepared_point_get_outside_autocommit_takes_the_normal_path`（VS1-20b）：`autocommit = 0` 与 `BEGIN` 之后同样的 EXECUTE 走普通路径：结果集包 `execStmtResult`，`IsPrepared` 为 true，语句上下文与 `ExecStmt` 的计划都换成了点查（`inheritContextFromExecuteStmt`），优先级不是 High。
 - `prepared_point_get_after_a_schema_change_takes_the_short_path`（VS1-20b）：PREPARE 之后 schema 版本从 1 变为 2，EXECUTE 先按新版本重新 preprocess 并记下版本 2（`planCachePreprocess` 第 4 步），`Compile` 再比较时两者相同，所以仍走短路径。Go 也是这个顺序：第三个条件只在 `Compile` 拿到的 InfoSchema 与 preprocess 用的不同时才不成立，正常流程中两者是同一个。
 - `is_safe_to_reuse_point_get_executor_checks_three_conditions`（VS1-20b）：直接调用函数，stale read、显式事务、`autocommit = 0`、预处理语句的 schema 版本不同，各自返回 false。stale read 现在到不了 `Compile`（预处理器的 stale read 分支是边界桩），所以只在这里测。
-- 执行器单测 `point_get_builds_a_new_executor_every_time`、`point_get_with_a_tso_or_a_table_dual`：`ExecStmt.PointGet` 每次新建执行器，预处理语句里不留执行器，语句优先级为 High。
+- `point_get_executor_is_reused_with_the_current_plan`（执行器复用）：替身存储放两行（id 1、2），实例级 plan cache 打开；EXECUTE 依次用 1、2、3（不存在）、1、2：每次读到自己的那一行（3 为空），第一次之后计划都来自缓存，执行器只建一次、之后每次 `Init` 复用，缓存计划的结构哈希始终不变。
+- `unique_index_point_get_is_not_reused_and_reads_its_own_row`：唯一索引点查读 TSO（不是 MaxTS），执行器不存不取；k = 7、8、9（不存在）、7 各自经索引读到自己的行，缓存计划的结构哈希不变（A3 §2.3 第 9a 行）。
+- 执行器单测 `point_get_with_max_ts_caches_the_executor`、`point_get_with_a_tso_does_not_cache`、`point_get_does_not_cache_other_executors`（恢复）：MaxTS 时存并复用（`Init`），TSO 时不存不取，TableDual 不存；语句优先级为 High。
 - `autocommit_read_prefetches_tso_and_ends_idle`、`dropped_result_is_finished_before_the_next_statement`：`IsReadOnly` 不再报错，自动提交的只读事务正常结束（原来按"IsReadOnly 的错误"回滚）。
 - `PHYSICAL_BOUNDARIES` 去掉 `D13.1`（`Compile` 不再停），加上 `D12.1` / `D12.2`：`id > ?` 的计划现在能做完物理优化（FindBestTask 已合入），`Exec` 建表读执行器（VS1-34）或 Projection 执行器（参数为 NULL 时，VS1-35）时停在它们的边界，仍在执行器打开之前。
 
