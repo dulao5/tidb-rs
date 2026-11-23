@@ -37,12 +37,12 @@ pub fn get_history(ctx: &SessionCore) -> StmtHistory {
     StmtHistory::default()
 }
 
-/// `IsReadOnly` of the statement: Go's `planner.IsReadOnly` is a boundary stub
-/// (`blocked-by:D02.2`). Its error becomes the statement's error (`meetsErr`), so an
-/// autocommit transaction is rolled back and the session ends idle.
-// glue: ExecStmt.IsReadOnly (blocked-by:D09.13 / D02.2) as finishStmt's error
-fn is_read_only(sql: &ExecStmt, meets_err: &mut Option<Error>) -> bool {
-    match sql.is_read_only() {
+/// `IsReadOnly` of the statement: the planner's `IsReadOnly` returns a boundary error for a
+/// statement kind the Rust AST cannot decide yet (D02.2). That error becomes the statement's
+/// error (`meetsErr`), so an autocommit transaction is rolled back and the session ends idle.
+// glue: ExecStmt.IsReadOnly's boundary error as finishStmt's error
+fn is_read_only(sql: &ExecStmt, vars: &SessionVars, meets_err: &mut Option<Error>) -> bool {
+    match sql.is_read_only(vars) {
         Ok(read_only) => read_only,
         Err(e) => {
             meets_err.get_or_insert(e);
@@ -58,7 +58,7 @@ pub async fn finish_stmt(
     mut meets_err: Option<Error>,
     sql: &ExecStmt,
 ) -> Result<(), Error> {
-    let read_only = is_read_only(sql, &mut meets_err);
+    let read_only = is_read_only(sql, &se.sctx.vars, &mut meets_err);
     if !read_only {
         // shouldCheckConnectionAliveBeforeCommit, the history (TxnCtx.CouldRetry), and the
         // statement commit / rollback of the statement buffer (StmtCommit / StmtRollback):

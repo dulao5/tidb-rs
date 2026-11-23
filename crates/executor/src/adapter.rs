@@ -39,6 +39,7 @@ use crate::exec::ExecCtx;
 use crate::glue::{InfoSchemaRef, Plan, PlanCacheStmtRef, ResultField, SessionContext};
 use crate::internal::exec::executor::{self as exec, Executor};
 use crate::metrics::{self as executor_metrics, METRICS, Observer};
+use tidb_planner::core::common_plans::Execute;
 
 /// recordSet wraps an executor, implements sqlexec.RecordSet interface
 ///
@@ -299,6 +300,11 @@ pub struct ExecStmt {
     pub info_schema: Option<InfoSchemaRef>,
     /// Plan stores a reference to the final physical plan.
     pub plan: Option<Plan>,
+    /// Go's `Plan` when it is a `*plannercore.Execute` (the EXECUTE of a prepared
+    /// statement): `plan` is then `None` until `inheritContextFromExecuteStmt` replaces the
+    /// Execute plan with the physical plan inside it, as Go does at the start of `Exec`.
+    // glue: the Execute case of Go's `Plan base.Plan` (the physical plan type has no Execute)
+    pub execute_plan: Option<Arc<Execute>>,
     /// Text represents the origin query text.
     pub text: String,
 
@@ -339,6 +345,7 @@ impl ExecStmt {
         ExecStmt {
             info_schema,
             plan,
+            execute_plan: None,
             text,
             stmt_node: None,
             lower_priority: false,
@@ -481,10 +488,19 @@ impl ExecStmt {
     /// IsReadOnly returns true if a statement is read only.
     /// If current StmtNode is an ExecuteStmt, we can get its prepared stmt,
     /// then using ast.IsReadOnly function to determine a statement is read only or not.
-    // go: ExecStmt.IsReadOnly L2 (boundary stub, blocked-by:D09.13)
-    pub fn is_read_only(&self) -> Result<bool, Error> {
-        // planner.IsReadOnly(a.StmtNode, vars)
-        Err(blocked("D09.13", "planner.IsReadOnly"))
+    ///
+    /// The planner's `IsReadOnly` returns an error for a statement kind it cannot decide yet
+    /// (a boundary of the AST, D02.2); a statement without its node (not in Go) is not read
+    /// only.
+    // go: ExecStmt.IsReadOnly L1
+    pub fn is_read_only(
+        &self,
+        vars: &tidb_sessionctx::variable::session::SessionVars,
+    ) -> Result<bool, Error> {
+        match &self.stmt_node {
+            Some(node) => tidb_planner::optimize::is_read_only(node, vars),
+            None => Ok(false),
+        }
     }
 
     /// RebuildPlan rebuilds current execute statement plan.
@@ -516,7 +532,7 @@ impl ExecStmt {
         // HasMemQuotaHint / MemQuotaQuery: the MEMORY_QUOTA hint is D13.3 (A1 sets the limit).
 
         // must set plan according to the `Execute` plan before getting planDigest
-        self.inherit_context_from_execute_stmt();
+        self.inherit_context_from_execute_stmt(sctx);
         // The runaway checker is resource control (N10); Top SQL is D14.2.
 
         let mut e = self.build_executor(sctx).await?;
@@ -598,10 +614,27 @@ impl ExecStmt {
         }))
     }
 
-    /// The `Execute` plan (a prepared statement's execution) is D13.1 (VS1-15): no plan of
-    /// the new stack is one yet, so there is nothing to inherit.
-    // go: ExecStmt.inheritContextFromExecuteStmt L2 (the Execute plan is D13.1; none is built yet)
-    fn inherit_context_from_execute_stmt(&mut self) {}
+    /// The statement text of the Execute plan (`executePlan.Stmt.Text()`) is the binary
+    /// protocol's EXECUTE node, which has no text (Go's is empty too): the router sends no
+    /// text-protocol EXECUTE to the new stack.
+    // go: ExecStmt.inheritContextFromExecuteStmt L1
+    fn inherit_context_from_execute_stmt(&mut self, sctx: &mut dyn SessionContext) {
+        if let Some(execute_plan) = self.execute_plan.take() {
+            sctx.set_query_string(String::new());
+            self.output_names = execute_plan
+                .output_names
+                .iter()
+                .map(|n| (**n).clone())
+                .collect();
+            self.is_prepared_stmt = true;
+            self.plan = execute_plan.plan.clone();
+            let plan = self
+                .plan
+                .as_ref()
+                .map(|p| Arc::new(Arc::clone(p)) as Arc<dyn std::any::Any + Send + Sync>);
+            Self::stmt_ctx_mut(sctx).set_plan(plan);
+        }
+    }
 
     /// The text shown in the process list. `SecureText` of sensitive statements (user and
     /// password statements, IMPORT INTO) does not apply: none reaches the new stack (VS1
@@ -669,14 +702,16 @@ impl ExecStmt {
         Ok(())
     }
 
-    // go: ExecStmt.buildExecutor L2 (no Execute / Analyze plans: D13.1, delegated)
+    // go: ExecStmt.buildExecutor L2 (no Analyze plan: delegated; an Execute plan was replaced before, see the body)
     async fn build_executor(
         &mut self,
         sctx: &mut dyn SessionContext,
     ) -> Result<Box<dyn Executor>, Error> {
         let start = Instant::now();
         let r = async {
-            // `*plannercore.Execute` (D13.1) is not a plan of the new stack.
+            // `Exec` replaced an Execute plan with the plan inside it
+            // (`inheritContextFromExecuteStmt`), so the plan is never `*plannercore.Execute`
+            // here and the priority is always lowered as Go does for a non-Execute plan.
             {
                 let stmt_ctx = Self::stmt_ctx_mut(sctx);
                 if stmt_ctx.priority == NoPriority && self.lower_priority {
@@ -688,7 +723,8 @@ impl ExecStmt {
             if let Some(err) = b.err {
                 return Err(err);
             }
-            // ExecuteExec (D13.1) is not built by the new stack.
+            // `ExecuteExec` is built only for an Execute plan, which `Exec` has already
+            // replaced (above): `executorExec.Build` is never reached from here.
             let stmt_ctx = sctx.get_session_vars().stmt_ctx();
             self.is_select_for_update = b.has_lock
                 && (!stmt_ctx.in_delete_stmt

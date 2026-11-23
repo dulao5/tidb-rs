@@ -2,13 +2,13 @@
 # Regenerate with scripts/check_stub_ratchet.py --write after removing stubs.
 area	stubs
 domain	1
-executor	53
+executor	51
 expr-pushdown	1
 expression	1
 infoschema	17
 planner	371
 poc/session	3
-session	52
+session	51
 sessiontxn	10
 statistics	19
 store	7

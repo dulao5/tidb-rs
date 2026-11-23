@@ -209,7 +209,7 @@ impl ExecStmtResult {
             .as_ref()
             .filter(|r| r.seq == self.seq)
             .ok_or_else(closed_error)?;
-        if !run.stmt.is_read_only()? {
+        if !run.stmt.is_read_only(vars)? {
             return Ok(None);
         }
         if !tidb_planner::core::common_plans::is_auto_commit_txn(vars) {

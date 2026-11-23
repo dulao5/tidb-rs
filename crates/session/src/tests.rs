@@ -63,7 +63,8 @@ impl Getter for NoSnapshot {
         _: &'a Key,
         _: &'a [GetOption],
     ) -> KvFuture<'a, ValueEntry> {
-        unimplemented!()
+        // The mock store has no rows: a point get finds nothing.
+        Box::pin(async { Err(tidb_kv::error::ErrNotExist.clone()) })
     }
 }
 impl Retriever for NoSnapshot {
@@ -380,14 +381,13 @@ fn autocommit_read_prefetches_tso_and_ends_idle() {
     assert!(s.has_unfinished_stmt());
     assert_eq!(drain(&mut s, &mut rs), vec![0, 1]);
     assert_eq!(s.vars().last_found_rows, 2);
-    // `finishStmt` asks `IsReadOnly`, still a boundary stub: its error is the statement's,
-    // and the autocommit transaction is rolled back.
-    let e = block_on(rs.close(&mut s)).unwrap_err();
-    assert_eq!(blocked(&e), Some("D09.13"));
+    // `finishStmt` asks `IsReadOnly` (a SELECT is read only) and the autocommit
+    // transaction is committed.
+    block_on(rs.close(&mut s)).unwrap();
     assert!(s.is_idle(), "{}", s.state_snapshot());
     assert!(!s.in_txn());
     assert_eq!(s.vars().last_query_info.start_ts, 10);
-    assert_eq!(store.log.lock().as_slice(), ["begin 10", "rollback 10"]);
+    assert_eq!(store.log.lock().as_slice(), ["begin 10"]);
     assert_eq!(store.requests.load(SeqCst), 1);
 }
 
@@ -505,12 +505,13 @@ fn dropped_result_is_finished_before_the_next_statement() {
         "the transaction is still open"
     );
 
-    // The next statement (it fails at Compile) finishes the dropped one first.
+    // The next statement (it fails at Compile) finishes the dropped one first: the dropped
+    // SELECT is read only, so its autocommit transaction is committed.
     let _ = block_on(s.execute_stmt(parse("SELECT 1"), "SELECT 1"));
     assert!(!s.has_unfinished_stmt());
     assert!(s.is_idle());
     assert_eq!(s.vars().last_query_info.start_ts, 10);
-    assert_eq!(store.log.lock().as_slice(), ["begin 10", "rollback 10"]);
+    assert_eq!(store.log.lock().as_slice(), ["begin 10"]);
 
     // Same with an explicit call, as the router does before a checkpoint.
     let stmt = compile(&mut s, "SELECT a FROM t", 5);
@@ -1195,8 +1196,11 @@ fn prepare_registers_the_table_and_clears_it_at_the_end() {
 
 /// `PREPARE` + `EXECUTE` of the sysbench point select on the real session over the sbtest
 /// InfoSchema (mock store): PREPARE passes the metadata lock and builds the plan (the column
-/// `c` of `sbtest1`); EXECUTE plans the point get on the fast path with the parameter's value
-/// and stops where `Compile` would run the Execute plan (`blocked-by:D13.1`).
+/// `c` of `sbtest1`); EXECUTE plans the point get on the fast path with the parameter's
+/// value, `Compile` keeps the Execute plan (no reuse of the prepared point get executor:
+/// the plan cache's), `Exec` replaces it with the point get inside and builds and opens a
+/// new point get executor, which reads the mock store (no row). The statement ends with
+/// its autocommit transaction and the session is idle.
 #[test]
 fn prepare_of_the_sbtest_point_select_builds_the_plan() {
     let _serial = PREPARED_COUNT.lock();
@@ -1211,17 +1215,27 @@ fn prepare_of_the_sbtest_point_select_builds_the_plan() {
     assert_eq!(names, ["c"]);
     assert_eq!(info.fields[0].table_name.o, "sbtest1");
     assert_eq!(mdl_entries(&s), None);
-    let Err(e) =
+    let mut rs =
         block_on(s.execute_prepared_stmt(info.stmt_id, vec![tidb_types::datum::new_int_datum(1)]))
-    else {
-        panic!("the point get of a parameter is not built yet");
-    };
-    // The fast plan of planner.Optimize builds the point get with the parameter's value (the
-    // plan cache set it); Compile stops at the Execute plan (D13.1).
-    assert_eq!(blocked_by(&e), Some("D13.1"), "{e}");
+            .unwrap()
+            .expect("a result set");
     assert_eq!(params_of(&s), vec!["1".to_owned()]);
-    assert!(s.is_idle());
-    assert_eq!(s.executed_stmts(), 0);
+    assert_eq!(
+        s.executed_stmts(),
+        1,
+        "the point get executor was built and opened"
+    );
+    assert!(
+        s.vars().stmt_ctx().get_plan().is_some_and(|p| p
+            .downcast_ref::<tidb_planner::PhysicalPlanRef>()
+            .is_some_and(|p| p.kind() == tidb_planner::PhysicalKind::PointGet)),
+        "inheritContextFromExecuteStmt put the point get into the statement context"
+    );
+    let mut chk = rs.new_chunk().unwrap();
+    block_on(rs.next(&mut s, &mut chk)).unwrap();
+    assert_eq!(chk.num_rows(), 0);
+    block_on(rs.close(&mut s)).unwrap();
+    assert!(s.is_idle(), "{}", s.state_snapshot());
     s.drop_prepared_stmt(info.stmt_id).unwrap();
 }
 
@@ -1455,11 +1469,13 @@ fn register_prepared(s: &mut Session, id: u32, sql: &str) {
         .unwrap();
 }
 
-/// Where planning an EXECUTE stops while physical optimization is not finished: the
-/// statistics derivation (D10.6), FindBestTask (D10.2), ResolveIndices (D10.9) or the cost
-/// (D10.5), in that order; once they are done, running the `Execute` plan (D13.1, raised in
-/// `Compile`). Every one of them comes before anything runs, so the caller falls back.
-const PHYSICAL_BOUNDARIES: [&str; 5] = ["D10.6", "D10.2", "D10.9", "D10.5", "D13.1"];
+/// Where an EXECUTE that is not a point get stops while the planner and the executors are not
+/// finished: the statistics derivation (D10.6), FindBestTask (D10.2), ResolveIndices (D10.9)
+/// or the cost (D10.5), in that order; with a finished plan, building an executor not ported
+/// yet in `Exec` (the table reader D12.1, VS1-34; the projection or table dual D12.2,
+/// VS1-35), since `Compile` no longer stops at the Execute plan. Every one of them comes
+/// before an executor opened, so the caller falls back.
+const PHYSICAL_BOUNDARIES: [&str; 6] = ["D10.6", "D10.2", "D10.9", "D10.5", "D12.1", "D12.2"];
 
 /// The binary protocol's EXECUTE of a prepared statement runs through `ExecuteStmt` with an
 /// EXECUTE node (Go `ExecutePreparedStmt`): `ResetContextOfStmt` works on the prepared

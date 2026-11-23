@@ -834,6 +834,10 @@ impl SessionContext for SessionCore {
     fn set_process_info(&mut self, sql: &str, t: SystemTime, command: u8, max_execution_time: u64) {
         SessionCore::set_process_info(self, sql, t, command, max_execution_time);
     }
+    // glue: interface method sessionctx.Context.SetValue with the key sessionctx.QueryString
+    fn set_query_string(&mut self, text: String) {
+        self.sctx.set_value(QueryString, Box::new(text));
+    }
     // glue: sessiontxn.AdviseOptimizeWithPlanAndThenWarmUp (D05.4)
     fn advise_optimize_with_plan_and_then_warm_up(&mut self, plan: &Plan) -> Result<(), Error> {
         let info = PhysicalPlanInfo::new(plan.as_dyn());
@@ -1670,7 +1674,7 @@ pub(crate) async fn run_stmt(
     // Save origTxnCtx here to avoid it reset in the transaction retry.
     let orig_txn_start_ts = se.core.sctx.vars.state.txn_ctx.start_ts;
     // checkTxnAborted: TxnCtx.LockExpire is set by pessimistic locks (write path): never.
-    if se.core.sctx.vars.state.txn_ctx.could_retry && !s.is_read_only()? {
+    if se.core.sctx.vars.state.txn_ctx.could_retry && !s.is_read_only(&se.core.sctx.vars)? {
         // Only when the txn is could retry and the statement is not read only, need to do
         // stmt-count-limit check.
         crate::tidb::check_stmt_limit(&mut se.core, false).await?;
