@@ -21,15 +21,15 @@
 //!   point UPDATE / DELETE (`blocked-by:X`); `PhysicalTableDual` for an impossible condition
 //!   (`blocked-by:D10.1`); the explain / trace text needs the access object (`blocked-by:D10.9`);
 //!   partition pruning by value (`blocked-by:D06.4`); the latest-schema index check of
-//!   `FOR UPDATE` / read-committed sessions (`blocked-by:D06.5`); parameter markers
-//!   (`blocked-by:D13.1`); optimizer hints in comments (`blocked-by:D02.2`).
+//!   `FOR UPDATE` / read-committed sessions (`blocked-by:D06.5`); optimizer hints in comments
+//!   (`blocked-by:D02.2`).
 
 #![allow(non_upper_case_globals)]
 
 use std::sync::Arc;
 
 use tidb_base::Error;
-use tidb_base::blocked::blocked;
+use tidb_base::blocked::{blocked, blocked_by};
 use tidb_base::config::get_global_config;
 use tidb_base::dbterror::plannererrors::{ErrColumnaccessDenied, ErrTableaccessDenied};
 use tidb_base::errors::RedactLogEnable;
@@ -37,9 +37,11 @@ use tidb_base::mysql::{
     self, SelectPriv, TypeBit, TypeLonglong, TypeString, has_pri_key_flag, has_unsigned_flag,
 };
 use tidb_base::redact;
+use tidb_chunk::Row;
 use tidb_execdetails::execdetails::RuntimeStatsColl;
 use tidb_expression::constant::Constant;
-use tidb_expression::expression::ExprRef;
+use tidb_expression::expression::{EvalState, ExprRef};
+use tidb_expression::util::param_marker_expression;
 use tidb_expression::{Column, Schema, new_schema};
 use tidb_infoschema::metadef::is_mem_db;
 use tidb_kv::key::{Handle, IntHandle};
@@ -1413,9 +1415,8 @@ pub fn value_expr_datum(v: &ast::ValueExpr) -> Datum {
 
 /// getNameValuePairs extracts `column = constant/paramMarker` conditions from expr as name value pairs.
 ///
-/// Go's nil pairs are `None`. A parameter marker reads the value `EXECUTE` bound to it,
-/// which the Rust AST does not keep (D13.1): a boundary stub.
-// go: getNameValuePairs L2 (a parameter marker is blocked-by:D13.1)
+/// Go's nil pairs are `None`.
+// go: getNameValuePairs L1
 pub fn get_name_value_pairs(
     ctx: &PlanCtx<'_>,
     tbl: &TableInfo,
@@ -1448,30 +1449,23 @@ pub fn get_name_value_pairs(
                 return Ok((None, false));
             }
             let mut d: Datum;
-            let con: Option<Arc<Constant>> = None;
+            let con: Option<Arc<Constant>>;
             let col_name: &ColumnName;
-            let constant_of = |e: &Expr| -> Result<Datum, Error> {
-                match e {
-                    Expr::Value(x) => Ok(value_expr_datum(x)),
-                    Expr::ParamMarker(_) => {
-                        // con, err = expression.ParamMarkerExpression(ctx, x, false); d = con.Eval(...)
-                        // glue: blocked-by:D13.1 (the value of a parameter marker)
-                        Err(blocked(
-                            "D13.1",
-                            "a parameter marker in a point get condition (the value bound by EXECUTE)",
-                        ))
-                    }
-                    _ => Ok(Datum::default()),
-                }
-            };
-            if let Expr::Column(c) = &bin_op.l {
+            let operand = if let Expr::Column(c) = &bin_op.l {
                 col_name = c;
-                d = constant_of(&bin_op.r)?;
+                name_value_operand(ctx, &bin_op.r)?
             } else if let Expr::Column(c) = &bin_op.r {
                 col_name = c;
-                d = constant_of(&bin_op.l)?;
+                name_value_operand(ctx, &bin_op.l)?
             } else {
                 return Ok((None, false));
+            };
+            match operand {
+                Some((v, c)) => {
+                    d = v;
+                    con = c;
+                }
+                None => return Ok((None, false)),
             }
             if d.is_null() {
                 return Ok((None, false));
@@ -1548,6 +1542,38 @@ pub fn get_name_value_pairs(
             Ok((Some(nv_pairs), false))
         }
         _ => Ok((None, false)),
+    }
+}
+
+/// A `column = constant` condition's value and, for a parameter marker, its constant.
+type NameValueOperand = (Datum, Option<Arc<Constant>>);
+
+/// The constant side of a `column = constant/paramMarker` condition in `getNameValuePairs`:
+/// a literal's datum, or a parameter marker's constant (`expression.ParamMarkerExpression`)
+/// and its value (`con.Eval`). Any other expression is Go's zero datum (NULL, so no pair).
+/// `None` is Go's `return nil, false` when building or evaluating the marker fails; a
+/// boundary error is returned as it is (never a silent "no point get").
+// go-part: getNameValuePairs (the switch on binOp.R / binOp.L)
+fn name_value_operand(
+    ctx: &PlanCtx<'_>,
+    e: &Expr,
+) -> Result<Option<NameValueOperand>, Error> {
+    match e {
+        Expr::Value(x) => Ok(Some((value_expr_datum(x), None))),
+        Expr::ParamMarker(x) => {
+            let con = match param_marker_expression(&*ctx.expr_ctx, x.order, false) {
+                Ok(con) => con,
+                Err(err) if blocked_by(&err).is_some() => return Err(err),
+                Err(_) => return Ok(None),
+            };
+            let eval_ctx = ctx.eval_ctx();
+            match con.eval(&*eval_ctx, &EvalState::new(), Row::default()) {
+                Ok(d) => Ok(Some((d, Some(Arc::new(con))))),
+                Err(err) if blocked_by(&err).is_some() => Err(err),
+                Err(_) => Ok(None),
+            }
+        }
+        _ => Ok(Some((Datum::default(), None))),
     }
 }
 

@@ -300,7 +300,7 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 
 | 语句 | 停在 | 说明 |
 |---|---|---|
-| 预处理的点查 `SELECT c FROM sbtest1 WHERE id=?` | fast plan 的 `getNameValuePairs`，`blocked-by:D13.1` | plan cache 已把参数写进会话；点查条件里的 `?` 还没有接上参数值（`ParamMarkerExpression` + `Eval`，规划器代码，不在本项范围）。接上之后点查会走到下面"Execute 计划"一行 |
+| 预处理的点查 `SELECT c FROM sbtest1 WHERE id=?` | 下面"Execute 计划"一行 | 快速路径用参数值建好点查计划（`ParamMarkerExpression` + `Eval`，D10.8 spec §4a，VS1-20）；之前停在 `getNameValuePairs`（`blocked-by:D13.1`） |
 | 其他预处理 SELECT（如 `id > ?`） | 物理优化：统计信息推导（`blocked-by:D10.6`），之后依次是 FindBestTask（D10.2）、ResolveIndices（D10.9）、代价（D10.5） | 逻辑计划已用参数值建好；FindBestTask 正由另一项工作（VS1-28）移植 |
 | 物理优化完成后的 Execute 计划 | `Compile` 中，`blocked-by:D13.1` | Go 在这里用 `IsSafeToReusePointGetExecutor` 决定是否用预处理语句的点查执行器代替 Execute 计划，否则执行 `ExecuteExec`（D12.12）。前者属于 plan cache（A3 例外，未确认，tracker 豁免表记为不移植），后者未移植 |
 | 路由器测试中的真实会话（替身存储，没有 coprocessor client） | fast plan 的下推检查，`blocked-by:D09.13`（规划上下文没有 store client） | 与原来相同的 1235 / 回退 |
@@ -311,7 +311,7 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 
 - `execute_of_a_prepared_stmt_reaches_the_planner`：真实 PREPARE `id > ?` 后 EXECUTE，`Compile` 设置了 `IsReadOnly`，停在物理优化的边界；会话空闲、`executed_stmts` 为 0，参数值在会话里；恢复检查点后快照与之前逐字相同。
 - `execute_reads_the_parameters_through_the_session_expression_context`：int、字符串、NULL 三种参数，每次 EXECUTE 都停在物理优化的边界；会话里的参数值、会话交给规划器的规划上下文读到的参数值、规划器的表达式改写器在这个上下文里为 `?` 建的常量（值与类型：BIGINT、VARCHAR，NULL 按 Go 的 `InferParamTypeFromUnderlyingValue` 为 VARCHAR）都与参数一致。
-- `prepare_of_the_sbtest_point_select_builds_the_plan`：点查 EXECUTE 停在 `D13.1`，参数已写入会话。
+- `prepare_of_the_sbtest_point_select_builds_the_plan`：点查 EXECUTE 停在 `Compile` 的 Execute 计划（`D13.1`），参数已写入会话。测试表的 `id` 补上主键标志（原来 `pk_is_handle` 而列没有 `PriKeyFlag`，快速路径找不到 handle）。
 - `compile_error_rolls_back`、`every_fallback_point_restores_the_session`、`statement_paths_are_blocked`、路由器的 `phase0_session_falls_back_or_reports_1235`：普通 SELECT 改为停在 `D05.3`（§9.2）。
 - 编译器单测 `compile_plans_only_execute`。
 

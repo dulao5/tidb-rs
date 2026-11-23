@@ -304,3 +304,56 @@ fn point_get_by_auto_commit() {
     vars.set_status_flag(tidb_base::mysql::ServerStatusAutocommit, false);
     assert!(!f(&vars, &p).unwrap());
 }
+
+/// `getNameValuePairs` on `col = ?` / `? = col`: the parameter's value (read through the
+/// expression context, as `ParamMarkerExpression` + `Eval`) gives the same pair as a literal
+/// would, and the pair keeps the constant; a NULL parameter gives no pair; a value beyond
+/// the column's type is the TableDual shape (Go's `ErrOverflow` branch).
+#[test]
+fn name_value_pairs_of_a_parameter_marker() {
+    let t = table();
+    let tbl_name = CIStr::new("t");
+    let pairs_of = |sql: &str, param: Datum| {
+        let mut vars = SessionVars::new(Box::new(Acc));
+        let eval = es::new_eval_context(vec![es::with_param_list(&[param])]);
+        let expr_ctx: tidb_sessionctx::exprctx::ExprContextRef =
+            es::new_expr_context(vec![es::with_eval_ctx(eval)]);
+        let ctx = PlanCtx::new(&mut vars, expr_ctx);
+        let stmt = parse(sql, &ParseOptions::default())
+            .unwrap()
+            .stmts
+            .into_iter()
+            .next()
+            .unwrap();
+        let Stmt::Select(sel) = &stmt else {
+            panic!("{sql}")
+        };
+        get_name_value_pairs(&ctx, &t, &tbl_name, Vec::new(), sel.where_.as_ref()).unwrap()
+    };
+    let mut five = Datum::default();
+    five.set_int64(5);
+    for sql in [
+        "select a from t where a = ?",
+        "select a from t where ? = a",
+        "select a from t where b = ?",
+    ] {
+        let (pairs, dual) = pairs_of(sql, five.clone());
+        let pairs = pairs.expect(sql);
+        assert!(!dual, "{sql}");
+        assert_eq!(pairs.len(), 1, "{sql}");
+        assert_eq!(pairs[0].value.get_int64(), 5, "{sql}");
+        let con = pairs[0].con.as_ref().expect("the parameter's constant");
+        assert_eq!(con.value.get_int64(), 5, "{sql}");
+    }
+    // A literal keeps no constant.
+    let (pairs, _) = pairs_of("select a from t where a = 5", five.clone());
+    assert!(pairs.unwrap()[0].con.is_none());
+    // NULL: no point get.
+    let (pairs, dual) = pairs_of("select a from t where a = ?", Datum::default());
+    assert!(pairs.is_none() && !dual);
+    // b is INT: 2^31 overflows it (Go's ErrOverflow branch, a TableDual).
+    let mut big = Datum::default();
+    big.set_int64(1 << 31);
+    let (pairs, dual) = pairs_of("select a from t where b = ?", big);
+    assert!(pairs.is_some() && dual);
+}

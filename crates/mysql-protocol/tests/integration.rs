@@ -32,6 +32,7 @@ impl SessionFactory for Factory {
         Ok(Session {
             db: info.database.clone(),
             stmts: Default::default(),
+            raw: Default::default(),
         })
     }
 }
@@ -39,6 +40,8 @@ impl SessionFactory for Factory {
 struct Session {
     db: Option<String>,
     stmts: std::collections::HashMap<u32, String>,
+    /// The raw parameter section of the last `COM_STMT_EXECUTE` (`execute_raw_params`).
+    raw: tidb_mysql_protocol::RawParams,
 }
 
 /// One row exercising most column types.
@@ -149,6 +152,20 @@ impl SessionHandler for Session {
         if sql == "select types" {
             return Ok(Response::ResultSet(typed_result()));
         }
+        if sql == "select raw ?" {
+            // The raw parameter section the new stack decodes (types, then values).
+            return Ok(Response::ResultSet(ResultSet {
+                columns: vec![
+                    ColumnDef::new("types", ColumnType::VarString),
+                    ColumnDef::new("values", ColumnType::VarString),
+                ],
+                rows: vec![vec![
+                    Value::Bytes(self.raw.param_types.clone()),
+                    Value::Bytes(self.raw.param_values.clone()),
+                ]],
+                warnings: 0,
+            }));
+        }
         // Echo the parameters, one column each, typed after the value.
         let columns = params
             .iter()
@@ -176,6 +193,10 @@ impl SessionHandler for Session {
             rows: vec![params.into_iter().map(|p| p.value).collect()],
             warnings: 0,
         }))
+    }
+
+    fn execute_raw_params(&mut self, _stmt_id: u32, raw: tidb_mysql_protocol::RawParams) {
+        self.raw = raw;
     }
 
     fn close(&mut self, stmt_id: u32) {
@@ -321,6 +342,26 @@ async fn prepared_statement_params() {
     }
     let v: Option<i64> = conn.query_first("select 1").await.unwrap();
     assert_eq!(v, Some(1));
+}
+
+/// The raw parameter section handed to the session (`execute_raw_params`, read by the new
+/// stack's `parseBinaryParams`) carries the parameter values the client sent, for the first
+/// execute (with types) and a later one (types omitted, kept from the first); the PoC's own
+/// decoding of the same bytes still works.
+#[tokio::test(flavor = "multi_thread")]
+async fn raw_params_carry_the_values() {
+    let addr = start(ServerConfig::default()).await;
+    let mut conn = mysql_async::Conn::new(opts(addr, "root", None, None))
+        .await
+        .unwrap();
+    let stmt = conn.prep("SELECT raw ?").await.unwrap();
+    for i in [42i64, -7] {
+        let v: Option<(Vec<u8>, Vec<u8>)> = conn.exec_first(&stmt, (i,)).await.unwrap();
+        let (types, values) = v.unwrap();
+        assert_eq!(types, [8, 0], "LONGLONG, signed");
+        assert_eq!(values, i.to_le_bytes(), "{i}");
+    }
+    conn.close(stmt).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -77,7 +77,7 @@ Go 的每个"不出点查"的条件，Rust 都按同一顺序移植；govec `fas
 | `TryFastPlan` | `tidb_enable_optimize_trace`：`SetFastPlan(p.BuildPlanTrace())` 要 `ExplainInfo` | `blocked-by:D10.9` |
 | `TryFastPlan` | UPDATE / DELETE（`tryUpdatePointPlan` / `tryDeletePointPlan`） | `blocked-by:X`（写路径，永久） |
 | `tryWhereIn2BatchPointGet` | 通过前置检查后建 `BatchPointGetPlan` | `blocked-by:D10.8`（VS1 不做） |
-| `getNameValuePairs`、`getUintFromNode` | 参数标记（`?`）的值 | `blocked-by:D13.1`（Rust AST 的参数标记不带值，EXECUTE 绑定的值归 VS1-15） |
+| `getUintFromNode` | `LIMIT ?` 中参数标记的值 | `blocked-by:D13.1`（Go 看参数标记的 `InExecute`，Rust AST 没有这个标志；点查路径上的 `LIMIT ?` 很少见，留给预处理语句的规划） |
 | `indexIsAvailableByHints` | 注释形式的 hint、AST 未建模的 index hint | `blocked-by:D02.2` |
 | `checkTblIndexForPointPlan` | `GetLatestIndexInfo` | `blocked-by:D06.5` |
 | `getLockWaitTime` | `PessimisticLockEligible` 在 `pessimistic-auto-commit` 打开时要读 `BulkDMLEnabled` | `blocked-by:X`（D05.2 把这个字段划给写路径） |
@@ -89,6 +89,19 @@ Go 的每个"不出点查"的条件，Rust 都按同一顺序移植；govec `fas
 | `GetAvgRowSize`（`plan_cost_ver1.go`） | `tidb_replica_read=closest-adaptive` 的行大小 | `blocked-by:D10.5` |
 | `getHashOrKeyPartitionColumnName` | 分区表达式（只有 BatchPointGet 用） | `blocked-by:D06.4` |
 | `isExprHasSubQuery`、`subQueryChecker` | 只有点更新 / 点删除用 | `blocked-by:X` |
+
+## 4a. 参数标记（VS1-20，点查纵向集成）
+
+预处理语句的点查 `SELECT c FROM sbtest1 WHERE id=?` 在 EXECUTE 时走快速路径，条件右边是参数标记。`getNameValuePairs` 对参数标记照 Go 处理（L1）：
+
+1. `expression.ParamMarkerExpression(ctx, x, false)` 建一个常量。Go 从 AST 节点读 EXECUTE 写进去的值（`SetParameterValuesIntoSCtx` 写 `ParamMarkerExpr.Datum`）；Rust AST 的参数标记不带值，已移植的 `param_marker_expression` 按标记的序号从会话的 `PlanCacheParams` 读同一个值（D09.2 已登记的 L2，见 `crates/expression/src/util.rs`）。
+2. `con.Eval(evalCtx, chunk.Row{})` 求出值 `d`。plan cache 打开时常量带 `ParamMarker`，求值也读 `PlanCacheParams`，两条路得到同一个值。
+3. 两步任一步出错，Go 返回 `nil, false`（不走点查）；Rust 相同，只有边界错误（`blocked-by`）照常返回，不变成"不走点查"。
+4. 名值对里记下这个常量（`con`），与 Go 相同；之后的类型转换、溢出时的 TableDual、截断时的比较与字面量完全相同。
+
+实现：`get_name_value_pairs` 的两个分支（列在左、列在右）共用一个辅助函数 `name_value_operand`（`// go-part: getNameValuePairs`），它对应 Go 中重复的两段 `switch`。
+
+测试：`point_get_plan/tests.rs` 的 `name_value_pairs_of_a_parameter_marker`（会话里放参数值后对 `id = ?`、`? = id` 建名值对：值与字面量的结果相同、带常量；NULL 参数不出名值对；超出 `INT` 的参数是 TableDual 的形状）。端到端由 VS1-20（点查纵向集成）的 ab 验证。
 
 ## 5. 与 Go 的其他差异
 

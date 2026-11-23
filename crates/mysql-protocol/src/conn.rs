@@ -632,12 +632,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             if r.u8()? == 1 {
                 stmt.param_types = r.take(2 * n)?.to_vec();
             }
-            let result =
-                decode_params(n, &stmt.long_data, null_bitmap, &stmt.param_types, r.rest());
+            // `rest` consumes the reader: the PoC's decoder and the raw section (the new
+            // stack's parseBinaryParams) read the same bytes.
+            let values = r.rest();
+            let result = decode_params(n, &stmt.long_data, null_bitmap, &stmt.param_types, values);
             raw = RawParams {
                 null_bitmap: null_bitmap.to_vec(),
                 param_types: stmt.param_types.clone(),
-                param_values: r.rest().to_vec(),
+                param_values: values.to_vec(),
                 // Long data is consumed by an execute, successful or not (TiDB resets the
                 // stmt).
                 bound: stmt.long_data.iter_mut().map(Option::take).collect(),
