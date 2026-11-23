@@ -963,9 +963,9 @@ impl std::ops::Deref for SysVarRef {
 /// GetSysVar returns sys var info for name as key.
 // go: GetSysVar L2 (static table + instance overlay instead of the locked map)
 pub fn get_sys_var(name: &str) -> Option<SysVarRef> {
-    let name = gostd::to_lower(name);
+    let name = gostd::to_lower_cow(name);
     let reg = &*REGISTRY;
-    let &i = reg.index.get(name.as_str())?;
+    let &i = reg.index.get(&*name)?;
     let sv = &reg.vars[i];
     if let Some(o) = OVERLAY.read().get(sv.name) {
         return Some(SysVarRef::Overlaid(o.clone()));

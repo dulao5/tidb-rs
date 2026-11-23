@@ -34,7 +34,7 @@ use std::sync::{Arc, LazyLock};
 use parking_lot::{RwLock, RwLockReadGuard};
 
 use tidb_base::gofmt::Arg;
-use tidb_base::gostd::to_lower;
+use tidb_base::gostd::{to_lower, to_lower_cow};
 use tidb_base::{Error, errors, mysql, terror};
 
 /// ErrUnknownCollation is unknown collation.
@@ -319,15 +319,15 @@ pub fn get_default_charset_and_collate() -> (&'static str, &'static str) {
 pub fn get_charset_info(cs: &str) -> (Option<Arc<Charset>>, Result<(), Error>) {
     let st = st();
     let mut cs = cs;
-    if to_lower(cs) == CharsetUTF8MB3 {
+    if to_lower_cow(cs) == CharsetUTF8MB3 {
         cs = CharsetUTF8;
     }
 
-    if let Some(c) = CharacterSetInfos.read().get(&to_lower(cs)) {
+    if let Some(c) = CharacterSetInfos.read().get(&*to_lower_cow(cs)) {
         return (Some(Arc::clone(c)), Ok(()));
     }
 
-    if let Some(c) = st.read().charsets.get(&to_lower(cs)) {
+    if let Some(c) = st.read().charsets.get(&*to_lower_cow(cs)) {
         return (
             Some(Arc::clone(c)),
             Err(errors::errorf(
