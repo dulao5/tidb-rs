@@ -1099,11 +1099,16 @@ fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
     use tidb_parser::model::CIStr;
     use tidb_parser::types::FieldType;
     let col = |id: i64, name: &str, tp: u8| {
+        let mut field_type = FieldType::new(tp);
+        if id == 1 {
+            // The handle: `id INT PRIMARY KEY` (pk_is_handle).
+            field_type.add_flag(tidb_base::mysql::PriKeyFlag | tidb_base::mysql::NotNullFlag);
+        }
         Arc::new(ColumnInfo {
             id,
             name: CIStr::new(name),
             offset: (id - 1) as isize,
-            field_type: FieldType::new(tp),
+            field_type,
             state: StatePublic,
             ..Default::default()
         })
@@ -1190,8 +1195,8 @@ fn prepare_registers_the_table_and_clears_it_at_the_end() {
 
 /// `PREPARE` + `EXECUTE` of the sysbench point select on the real session over the sbtest
 /// InfoSchema (mock store): PREPARE passes the metadata lock and builds the plan (the column
-/// `c` of `sbtest1`); EXECUTE reaches the compiler's planner, which is not wired into
-/// `Compile` yet (`blocked-by:D09.13`).
+/// `c` of `sbtest1`); EXECUTE plans the point get on the fast path with the parameter's value
+/// and stops where `Compile` would run the Execute plan (`blocked-by:D13.1`).
 #[test]
 fn prepare_of_the_sbtest_point_select_builds_the_plan() {
     let _serial = PREPARED_COUNT.lock();
@@ -1211,8 +1216,8 @@ fn prepare_of_the_sbtest_point_select_builds_the_plan() {
     else {
         panic!("the point get of a parameter is not built yet");
     };
-    // Compile reaches the fast plan of planner.Optimize, which stops at the parameter of the
-    // point get condition (getNameValuePairs, D13.1) after the plan cache set the value.
+    // The fast plan of planner.Optimize builds the point get with the parameter's value (the
+    // plan cache set it); Compile stops at the Execute plan (D13.1).
     assert_eq!(blocked_by(&e), Some("D13.1"), "{e}");
     assert_eq!(params_of(&s), vec!["1".to_owned()]);
     assert!(s.is_idle());
