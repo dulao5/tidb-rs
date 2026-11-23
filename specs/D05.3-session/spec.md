@@ -325,7 +325,7 @@ Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次
 1. `OnStmtStart` 到 `Compile` 结束之间，事务管理器的当前语句是空的（Go 是节点）。现在没有读者：预处理器的 stale read 分支是边界桩（`blocked-by:D05.4`），路由器也不把 stale read 交给新栈。将来移植那个分支时，要把预处理器手里的节点交给 `OnStmtStart`，而不是取 `GetCurrentStmt`。
 2. `Compile` 出错时事务管理器没有当前语句（Go 有）。出错之后的 `rollbackOnError` 不读它。
 3. 回退时多解析一次（第 1 条）。只影响回退的语句。
-4. Go 的 `ExecStmt.RebuildPlan` 会在 `a.StmtNode` 上再做一次预处理和优化。现在它是桩，唯一的调用方是乐观事务的重试（写路径），不影响只读路径。将来移植时，语句已冻结成 `Arc`，事务管理器也持有一份，`Arc::get_mut` 会失败，AST 又不能 `Clone`。两种做法：先让事务管理器交回它的 `Arc`（`set_current_stmt(None)`），再用 `Arc::try_unwrap` 拿回可写的语句，规划完再冻结、补交；或者按原文重新解析一份。到时按重试路径的代价选择。
+4. Go 的 `ExecStmt.RebuildPlan` 会在 `a.StmtNode` 上再做一次预处理和优化。现在它是桩，唯一的调用方是乐观事务的重试（写路径），不影响只读路径。将来移植时，语句已冻结成 `Arc`，事务管理器也持有一份，`Arc::get_mut` 会失败，AST 又不能 `Clone`。两种做法：先让两处持有者都交回 `Arc`（事务管理器 `set_current_stmt(None)`，以及 `RebuildPlan` 所在的 `ExecStmt` 自己的 `stmt_node.take()`），再用 `Arc::try_unwrap` 拿回可写的语句，规划完再冻结、补交；或者按原文重新解析一份。到时按重试路径的代价选择。
 
 ### 9.3 停在哪里，怎样回退
 
