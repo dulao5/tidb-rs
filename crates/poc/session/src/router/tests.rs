@@ -860,6 +860,49 @@ fn global_variables_are_loaded_when_the_session_opens() {
     assert_eq!(r.session_condition(&p), Some("tx_read_ts"));
 }
 
+/// Global values the new session cannot read (a stand-in that fails).
+struct FailingGlobals;
+
+impl tidb_sessionctx::variable::session::GlobalVarAccessor for FailingGlobals {
+    fn get_global_sys_var(&self, _: &str) -> Result<String, Error> {
+        Err(errors::new("no global values"))
+    }
+    fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
+        Ok(())
+    }
+    fn get_tidb_table_value(&self, _: &str) -> Result<String, Error> {
+        Ok(String::new())
+    }
+    fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+/// A new session whose global variables cannot be loaded is pinned to the PoC (step 0):
+/// strict mode runs the candidate on the PoC too, and the new stack is never called.
+#[test]
+fn failed_global_variable_load_pins_the_session_to_the_poc() {
+    let mut p = poc();
+    let script = Arc::new(Mutex::new(Script {
+        columns: vec![col("c")],
+        answer: Some(Answer::Rows),
+        ..Script::default()
+    }));
+    let new = FakeNew {
+        session: Session::new(Dialect::MySQL, Box::new(FailingGlobals)),
+        script: script.clone(),
+    };
+    let mut r = Router::new(NewStackMode::Strict, Box::new(new), &p.values());
+    assert_eq!(r.session_condition(&p), Some("global variables not loaded"));
+    assert_eq!(
+        r.route(&parse(POINT), &p, false),
+        Route::Poc(Reason::Session("global variables not loaded"))
+    );
+    let res = block_on(r.query(&mut p, POINT));
+    assert_eq!(rows(&res).map(|r| r.0), Some(3));
+    assert!(script.lock().unwrap().log.is_empty());
+}
+
 /// PoC, then new stack: the PoC's statement is written into the new session, where Go's
 /// system variables read it.
 #[test]

@@ -289,6 +289,9 @@ pub struct Router {
     diverged: BTreeSet<String>,
     /// `tidb_txn_mode` when the session opened (step 0 compares with it).
     initial_txn_mode: String,
+    /// The new session's global variables were loaded when it opened (step 0 keeps a session
+    /// whose load failed on the PoC).
+    globals_loaded: bool,
     /// `COM_STMT_EXECUTE` of the current command asked for a cursor.
     cursor: bool,
     /// The raw parameter section of the current `COM_STMT_EXECUTE`.
@@ -353,11 +356,19 @@ impl Router {
         // (`loadCommonGlobalVariablesIfNeeded`); loaded now, step 0 compares
         // `tidb_txn_mode` with the value the session has then (its default). Go's load skips
         // the variables already set; the synced ones below are set after it and win the same
-        // way. The values are the compiled defaults, whose hooks do not fail; a failure would
-        // be Go's error at the first statement, here it is only logged (a router bug).
-        if let Err(e) = new.session_mut().load_common_global_variables_if_needed() {
-            log::warn!("VS1 router: loading the global variables of the new session: {e}");
-        }
+        // way. The values are the compiled defaults, whose hooks do not fail; if loading
+        // does fail (a bug), the session's variables are only partly set, so the session is
+        // pinned to the PoC (step 0, `global variables not loaded`) instead of running
+        // statements on the new stack with them.
+        let globals_loaded = match new.session_mut().load_common_global_variables_if_needed() {
+            Ok(()) => true,
+            Err(e) => {
+                log::error!(
+                    "VS1 router bug: loading the global variables of the new session failed, the session stays on the PoC: {e}"
+                );
+                false
+            }
+        };
         let initial_txn_mode = new.session().vars().txn_mode.clone();
         let mut r = Router {
             mode,
@@ -366,6 +377,7 @@ impl Router {
             last: LastStmtInfo::default(),
             diverged: BTreeSet::new(),
             initial_txn_mode,
+            globals_loaded,
             cursor: false,
             raw_params: RawParams::default(),
             closed: Vec::new(),
@@ -411,6 +423,9 @@ impl Router {
     /// Step 0: the session condition that keeps statements on the PoC, if any.
     pub fn session_condition(&self, poc: &dyn PocEngine) -> Option<&'static str> {
         let vars = self.new.session().vars();
+        if !self.globals_loaded {
+            return Some("global variables not loaded");
+        }
         if poc.in_txn() || vars.in_txn() {
             return Some("explicit transaction");
         }

@@ -543,6 +543,10 @@ impl SessCtx {
             }
         }
         // when client set Capability Flags CLIENT_INTERACTIVE, init wait_timeout with interactive_timeout
+        //
+        // Not reachable on the new stack yet: nothing passes the handshake's capabilities to
+        // the new session (`set_client_capability` has no caller; the PoC's connection keeps
+        // them), so `client_capability` is 0 and `wait_timeout` keeps its global value.
         if vars.client_capability & tidb_base::mysql::ClientInteractive > 0 {
             // variable.InteractiveTimeout / variable.WaitTimeout
             let (var_val, ok) = vars.get_system_var("interactive_timeout");

@@ -100,7 +100,8 @@ sysbench 1.0.20 `oltp_point_select`，`--db-ps-mode=auto`，1 张表 1 万行（
 2. **超出列范围的参数**：Go 给 TableDual（`PhysicalTableDual`，D10.1，VS1-27）。
 3. **加载全局变量之后，非点查语句停得更早**：Go 的默认 `tidb_enable_plan_replayer_capture = ON`，会话加载全局变量后就是开着的，`CollectColumnStatsUsage` 于是走到 `recordTableRuntimeStats`（已有的边界桩，标为 D02.2）。原来新会话从不加载全局变量，这个开关是 false，非点查语句停在后面的物理优化边界。现在它们停在这里（ab 的 D02.2 由 0 变为 380 条，取代原来的 D10.x / D12.x 原因）。这是 Go 的真实行为，桩要由 C2b 移植（`recordSingleTableRuntimeStats` 要统计信息句柄，D11.x）。
 4. **plan cache 相关的 warning**（§2 的 13 条 mismatch，以及 D05.3 spec §10.2 第 2 条）：Go 打开 plan cache 时某些语句有 `skip prepared plan-cache: ...` 或 `plan rebuild failed` 的 warning；PoC 从来没有，新栈在不命中缓存的语句上与 Go 相同，命中缓存之后的情形（A3）不同。
-5. **性能**：0.93× / 0.89×，分配次数约为 Go 的 2.8 倍（§3）。
+5. **全局变量**：新会话的全局值是编译时的默认值；集群上改过全局值、又不在路由器同步白名单里的变量，新会话看不到，也不触发第 0 步（D05.3 spec §11.1 已知限制）。等 D06.5 的 sysvar 缓存（VS1-17）。
+6. **性能**：0.93× / 0.89×，分配次数约为 Go 的 2.8 倍（§3）。
 
 ## 6. PR
 

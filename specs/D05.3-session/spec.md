@@ -356,11 +356,16 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 
 差异：domain 的 sysvar 缓存（`GetSessionCache`）是 D06.5，这里用替身 `session_cache`：照 `rebuildSysVarCache` 的规则，每个不跳过初始化的变量一项，全局作用域的变量取会话的 `GlobalVarAccessor`（路由器的替身回答编译时的默认值，PoC 同样不读 `mysql.global_variables`），只有会话作用域的变量取默认值。等 D06.5 的 sysvar 缓存接上后换成它，新会话就能看到 Go TiDB 上的 `SET GLOBAL`（VS1-17 的 TODO）。
 
+已知限制（Lucky 评审 #303）：
+
+1. **全局值是编译时的默认值**。集群上用 `SET GLOBAL`（在 Go TiDB 上）改过的变量，新会话看不到：路由器只同步白名单里的会话变量（§4.1），白名单之外、被改过全局值的变量在新会话里仍是默认值，**不会触发第 0 步**（第 0 步只看本会话里偏离默认值的变量），所以结果可能与 Go 不同而不报告。要等 D06.5 的 sysvar 缓存接上（VS1-17）才消除。
+2. **`CLIENT_INTERACTIVE` 分支走不到**：握手的 capability 没有交给新会话（`set_client_capability` 没有调用方，capability 留在 PoC 的连接上），`client_capability` 恒为 0，`wait_timeout` 保持全局值。代码中有注释。
+
 后果（Go 的真实行为，记在 VS1-20 的集成记录 §5 第 3 条）：计划回放采集开着，非点查语句在 `CollectColumnStatsUsage` 停在 `recordTableRuntimeStats` 的边界桩（D02.2），早于原来的物理优化边界。会话测试的 `PHYSICAL_BOUNDARIES` 因此加上 D02.2。
 
 ### 11.2 路由器
 
-1. **会话打开时加载**：路由器建好新会话后立即调用一次加载（Go 在第一条语句时加载）。这样第 0 步的 `tidb_txn_mode` 比较的是加载后的值（默认值）。Go 的加载跳过已经设置的变量；路由器同步的变量在加载之后才写，结果相同。加载出错（钩子拒绝默认值，不会发生）只记日志。
+1. **会话打开时加载**：路由器建好新会话后立即调用一次加载（Go 在第一条语句时加载）。这样第 0 步的 `tidb_txn_mode` 比较的是加载后的值（默认值）。Go 的加载跳过已经设置的变量；路由器同步的变量在加载之后才写，结果相同。加载出错（钩子拒绝默认值，不应发生）时会话的变量只设了一部分，路由器记错误日志并把这个会话**固定在 PoC**：第 0 步增加条件 `global variables not loaded`，之后的候选语句都走 PoC（只归新栈的预处理语句按 plan §4.7 报 1235）。
 2. **第 0 步的 `tx_read_ts`**：Go 的钩子对空值也放一个读时间戳为 0 的 `TxnReadTS`（`setTxnReadTS`），所以"有这个对象"不等于"设置了读时间戳"。改为读时间戳非 0 才走 PoC。
 3. **`SHOW WARNINGS` / `SHOW ERRORS`**：VS1 plan §4.5 要求交给上一条语句的执行方回答，原来总由 PoC 回答（PoC 的语句从不留 warning）。现在上一条语句由新栈执行时，路由器用新会话语句上下文中的 warning 回答，行的内容照 Go 的 `ShowExec.fetchShowWarnings`（TiDB 错误取 MySQL 错误码和消息，其他错误为 `ErrUnknown` 和文本；`SHOW ERRORS` 只取 Error 级），列定义用 PoC 的（与 Go 相同）。之后上一条语句仍算新栈的（Go 的 `SHOW WARNINGS` 保留上一条语句的 warning），直到下一条由 PoC 执行的语句。`SHOW COUNT(*) WARNINGS` 和带 `LIMIT` 的形式 PoC 本来就不支持（降级失败），不变。
 
@@ -370,7 +375,7 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 
 ### 11.4 测试
 
-- 路由器：`show_warnings_go_to_the_engine_that_ran_the_previous_statement`（新栈语句之后的 SHOW WARNINGS / SHOW ERRORS 的行，连续两次相同；PoC 语句之后交还 PoC）、`global_variables_are_loaded_when_the_session_opens`（plan cache 开着，`tidb_txn_mode` 为默认值，`tx_read_ts` 为 0 时不算会话条件、为 7 时算）。
+- 路由器：`show_warnings_go_to_the_engine_that_ran_the_previous_statement`（新栈语句之后的 SHOW WARNINGS / SHOW ERRORS 的行，连续两次相同；PoC 语句之后交还 PoC）、`global_variables_are_loaded_when_the_session_opens`（plan cache 开着，`tidb_txn_mode` 为默认值，`tx_read_ts` 为 0 时不算会话条件、为 7 时算）、`failed_global_variable_load_pins_the_session_to_the_poc`（全局值读不到时会话固定在 PoC，strict 下候选语句也由 PoC 执行）。
 - 会话：`PHYSICAL_BOUNDARIES` 加 D02.2（§11.1）。
 - 端到端：VS1-20 的 ab（集成记录 §2）。
 
