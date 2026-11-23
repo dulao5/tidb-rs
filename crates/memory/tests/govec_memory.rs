@@ -237,7 +237,7 @@ impl State {
             "sess_root" => {
                 let t = self.tt(a, 0);
                 t.is_root_tracker_of_sess.store(true, SeqCst);
-                t.killer.store(self.killers.get(&a[1]).cloned());
+                t.set_killer(self.killers.get(&a[1]).cloned());
                 Value::Null
             }
             "session_id" => {

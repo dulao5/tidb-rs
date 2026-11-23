@@ -66,7 +66,11 @@ pub struct SqlKiller {
     finish: Mutex<Option<FinishFn>>,
     /// Go `InWriteResultSet`.
     pub in_write_result_set: AtomicBool,
-    last_check_time: ArcSwapOption<Instant>,
+    /// Go `lastCheckTime atomic.Pointer[time.Time]`. Performance deviation from M-SNAP
+    /// (`ArcSwapOption`): `Reset` writes it for every statement, and an `ArcSwap` store walks
+    /// the reader slots of all threads (specs/VS1-vertical-slice/perf-point-select.md); a
+    /// short mutex holds the same value.
+    last_check_time: Mutex<Option<Instant>>,
     /// Go `IsConnectionAlive`.
     pub is_connection_alive: ArcSwapOption<AliveFn>,
     on_kill: ArcSwapOption<FinishFn>,
@@ -219,10 +223,11 @@ impl SqlKiller {
                 Duration::from_secs(1)
             };
             let now = Instant::now();
-            match self.last_check_time.load().as_ref() {
-                None => self.last_check_time.store(Some(Arc::new(now))),
-                Some(last) if now.duration_since(**last) > check_connection_alive_dur => {
-                    self.last_check_time.store(Some(Arc::new(now)));
+            let last_check_time = *self.last_check_time.lock();
+            match last_check_time {
+                None => *self.last_check_time.lock() = Some(now),
+                Some(last) if now.duration_since(last) > check_connection_alive_dur => {
+                    *self.last_check_time.lock() = Some(now);
                     if !f() {
                         self.send_kill_signal(QueryInterrupted);
                     }
@@ -264,7 +269,7 @@ impl SqlKiller {
         if status != UnspecifiedKillSignal {
             tracing::warn!(conn = self.conn_id.load(SeqCst), "kill finished");
         }
-        self.last_check_time.store(None);
+        *self.last_check_time.lock() = None;
     }
 }
 
