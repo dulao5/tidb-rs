@@ -1470,17 +1470,46 @@ fn register_prepared(s: &mut Session, id: u32, sql: &str) {
 }
 
 /// Where an EXECUTE that is not a point get stops while the planner and the executors are not
-/// finished: first the plan replayer capture of `CollectColumnStatsUsage`
-/// (`recordTableRuntimeStats`, a boundary labelled D02.2): Go's default
-/// `tidb_enable_plan_replayer_capture` is ON and the session has it once it loaded the global
-/// values; then the statistics derivation (D10.6), FindBestTask (D10.2), ResolveIndices
+/// finished: the statistics derivation (D10.6), FindBestTask (D10.2), ResolveIndices
 /// (D10.9) or the cost (D10.5), in that order; with a finished plan, building an executor
 /// not ported yet in `Exec` (the table reader D12.1, VS1-34; the projection or table dual
 /// D12.2, VS1-35). Every one of them comes before an executor opened, so the caller falls
-/// back.
-const PHYSICAL_BOUNDARIES: [&str; 7] = [
-    "D02.2", "D10.6", "D10.2", "D10.9", "D10.5", "D12.1", "D12.2",
-];
+/// back. The plan replayer capture (`recordTableRuntimeStats`) no longer stops it (see
+/// `plan_replayer_capture_records_the_table_stats_and_goes_on`).
+const PHYSICAL_BOUNDARIES: [&str; 6] = ["D10.6", "D10.2", "D10.9", "D10.5", "D12.1", "D12.2"];
+
+/// With the plan replayer capture on (Go's default once the session loaded the global
+/// values), the column statistics usage records the statistics of the visited tables in
+/// `StmtCtx.TableStats` (`recordTableRuntimeStats`: the pseudo table, as Go's nil statistics
+/// handle gives) and the statement goes on: without a capture task (the new stack loads
+/// none) neither the planner nor the capture check of `Exec` stops it, and a non-point
+/// EXECUTE is planned to the end and stops when `Exec` builds the table reader executor
+/// (D12.1), before any executor opened.
+#[test]
+fn plan_replayer_capture_records_the_table_stats_and_goes_on() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let mut s = sbtest_session(&store);
+    s.vars_mut().enable_plan_replayer_capture = true;
+    assert!(s.vars().is_plan_replayer_capture_enabled());
+    let info = block_on(s.prepare_stmt("SELECT c FROM sbtest1 WHERE id > ?")).unwrap();
+    let e =
+        block_on(s.execute_prepared_stmt(info.stmt_id, vec![tidb_types::datum::new_int_datum(1)]))
+            .err()
+            .unwrap();
+    assert_eq!(blocked(&e), Some("D12.1"), "{e}");
+    assert_eq!(s.executed_stmts(), 0);
+    let sc = s.vars().stmt_ctx();
+    assert_eq!(sc.table_stats.len(), 1);
+    let stats = sc.table_stats[&110]
+        .downcast_ref::<Option<Arc<tidb_statistics::Table>>>()
+        .expect("a statistics table")
+        .as_ref()
+        .expect("the pseudo table");
+    assert!(stats.hist_coll.pseudo);
+    assert_eq!(stats.hist_coll.physical_id, 110);
+    assert!(s.is_idle());
+}
 
 /// The binary protocol's EXECUTE of a prepared statement runs through `ExecuteStmt` with an
 /// EXECUTE node (Go `ExecutePreparedStmt`): `ResetContextOfStmt` works on the prepared

@@ -4101,6 +4101,7 @@ dependencies = [
  "tidb-planner",
  "tidb-sessionctx",
  "tidb-sessiontxn",
+ "tidb-statistics",
  "tidb-store",
  "tidb-types",
  "tokio",
