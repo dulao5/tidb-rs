@@ -19,6 +19,11 @@ pub mod physical_plans;
 mod physical_plans_tests;
 pub mod plan;
 pub mod plan_cache;
+pub mod plan_cache_heap_size;
+pub mod plan_cache_instance;
+#[cfg(test)]
+mod plan_cache_instance_tests;
+pub mod plan_cache_rebuild;
 #[cfg(test)]
 mod plan_cache_tests;
 pub mod plan_cache_utils;

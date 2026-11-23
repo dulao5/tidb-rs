@@ -26,7 +26,7 @@ use tidb_types::datum::Datum;
 use tidb_types::field_name::NameSlice;
 
 use crate::PhysicalPlanRef;
-use crate::core::plan_cache_utils::{InfoSchemaLookup, PlanCacheStmt, new_plan_cache_key};
+use crate::core::plan_cache_utils::{InfoSchemaLookup, PlanCacheStmt, session_plan_cache_key};
 use crate::core::plan_cacheable_checker::is_plan_cacheable;
 use crate::core::preprocess::{
     InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, in_prepare, preprocess,
@@ -227,7 +227,7 @@ pub fn get_plan_from_plan_cache(
 
     if vars.stmt_ctx().plan_cache_tracker.use_cache() {
         // NewPlanCacheKey is a stand-in (plan_cache_utils): always cacheable.
-        let (_cache_key, _binding, cacheable, reason) = new_plan_cache_key(stmt)?;
+        let (_cache_key, _binding, cacheable, reason) = session_plan_cache_key(stmt)?;
         if !cacheable {
             vars.stmt_ctx()
                 .plan_cache_tracker

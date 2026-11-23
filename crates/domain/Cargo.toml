@@ -18,8 +18,11 @@ tidb-model = { workspace = true }
 tidb-infoschema = { workspace = true }
 # tidb_schema_cache_size, tidb_schema_version_cache_limit.
 tidb-sessionctx = { workspace = true }
-# Domain.m (Reload runs once at a time, held across the loads' awaits).
-tokio = { workspace = true, features = ["sync"] }
+# Domain.m (Reload runs once at a time, held across the loads' awaits); the instance plan
+# cache's background loops (time, rt).
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+# The instance plan cache gauges.
+tidb-metrics = { workspace = true }
 # The concurrent fetch of schema groups (errgroup).
 futures = { workspace = true }
 log = "0.4"

@@ -160,6 +160,20 @@ pub const TIDB: &[GoMetric] = &[
         "R:pkg/metrics/server.go:190",
     ),
     m(
+        "tidb_server_plan_cache_instance_memory_usage",
+        Gauge,
+        &["type"],
+        None,
+        "R:pkg/metrics/server.go:198",
+    ),
+    m(
+        "tidb_server_plan_cache_instance_plan_num_total",
+        Gauge,
+        &["type"],
+        None,
+        "R:pkg/metrics/server.go:206",
+    ),
+    m(
         "tidb_server_slow_query_process_duration_seconds",
         Histogram,
         &["sql_type"],

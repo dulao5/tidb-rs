@@ -10,5 +10,9 @@
 #![warn(clippy::clone_on_ref_ptr)]
 
 pub mod domain;
+pub mod plan_cache;
 
 pub use domain::{Domain, ErrInfoSchemaChanged, RelatedSchemaChange, new_domain};
+pub use plan_cache::{
+    apply_instance_plan_cache_limits, instance_plan_cache_limits, set_new_instance_plan_cache,
+};

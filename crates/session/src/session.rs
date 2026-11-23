@@ -32,7 +32,7 @@ use tidb_kv::kv::{Client, Storage};
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_parser::ast;
 use tidb_planner::core::plan_cache_utils::{
-    PlanCacheStmt, PlanCacheStmtRef, get_prepared_stmt, new_plan_cache_key,
+    PlanCacheStmt, PlanCacheStmtRef, get_prepared_stmt, session_plan_cache_key,
 };
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 use tidb_sessionctx::variable::session_methods::prepare_dedup_cache_key;
@@ -469,7 +469,7 @@ impl SessCtx {
                     .downcast::<parking_lot::Mutex<PlanCacheStmt>>()
                     .ok();
                 if let Some(obj) = &prepared_obj {
-                    match new_plan_cache_key(&obj.lock()) {
+                    match session_plan_cache_key(&obj.lock()) {
                         Ok((key, ..)) => cache_key = key,
                         Err(e) => {
                             log::warn!("clean cached plan failed: {e}");
@@ -484,7 +484,7 @@ impl SessCtx {
                 if i > 0
                     && let Some(obj) = &prepared_obj
                 {
-                    match new_plan_cache_key(&obj.lock()) {
+                    match session_plan_cache_key(&obj.lock()) {
                         Ok((key, ..)) => cache_key = key,
                         Err(e) => {
                             log::warn!("clean cached plan failed: {e}");

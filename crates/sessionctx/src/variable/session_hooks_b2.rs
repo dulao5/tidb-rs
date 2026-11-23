@@ -507,6 +507,8 @@ pub(super) fn sg_tidb_instance_plan_cache_reserved_percentage(
         ));
     }
     InstancePlanCacheReservedPercentage.store(v);
+    // The plan-cache exception A3 decision 5: the limits apply right away.
+    crate::context::apply_instance_plan_cache_limits();
     Ok(())
 }
 
@@ -524,6 +526,8 @@ pub(super) fn sg_tidb_instance_plan_cache_max_size(
         ));
     }
     InstancePlanCacheMaxMemSize.store(v as i64, SeqCst);
+    // The plan-cache exception A3 decision 5: the limits apply right away.
+    crate::context::apply_instance_plan_cache_limits();
     Ok(())
 }
 

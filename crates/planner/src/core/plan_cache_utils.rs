@@ -32,7 +32,9 @@ use tidb_infoschema::InfoSchemaV2;
 use tidb_model::TableInfo;
 use tidb_parser::ast::{ExecuteStmt, Stmt};
 use tidb_parser::model::CIStr;
+use tidb_parser::types::FieldType;
 use tidb_sessionctx::variable::session::SessionVars;
+use tidb_types::field_name::NameSlice;
 
 use crate::core::plan_cacheable_checker::{CNode, Visit, Walker, is_ast_cacheable};
 use crate::core::planbuilder::new_plan_builder;
@@ -169,6 +171,10 @@ pub struct PlanCacheStmt {
 
     /// `len(limits)`: the number of LIMIT clauses (planCacheStmtProcessor).
     pub limits: usize,
+    /// The parameter markers of the LIMIT clauses' count and offset (Go reads them through
+    /// `limits`, whose markers hold the values): their orders, in Go's order (each clause's
+    /// count, then its offset).
+    pub limit_params: Vec<usize>,
     pub has_subquery: bool,
 
     pub normalized_sql: String,
@@ -182,6 +188,10 @@ pub struct PlanCacheStmt {
     /// dbName and tbls are used to add metadata lock.
     pub db_name: Vec<CIStr>,
     pub tbls: Vec<Arc<TableInfo>>,
+
+    /// The instance plan cache key of the last EXECUTE, reused as the buffer of the next
+    /// one (the plan-cache exception A3 spec §3.4: the lookup does not allocate).
+    pub cache_key: PlanCacheKey,
 }
 
 impl Default for PlanCacheStmt {
@@ -207,6 +217,7 @@ impl Default for PlanCacheStmt {
             stmt_cacheable: false,
             uncacheable_reason: String::new(),
             limits: 0,
+            limit_params: Vec::new(),
             has_subquery: false,
             normalized_sql: String::new(),
             sql_digest: String::new(),
@@ -214,6 +225,7 @@ impl Default for PlanCacheStmt {
             stmt_text: String::new(),
             db_name: Vec::new(),
             tbls: Vec::new(),
+            cache_key: PlanCacheKey::default(),
         }
     }
 }
@@ -465,7 +477,9 @@ pub fn generate_plan_cache_stmt_with_ast(
         params: extractor.markers,
         point_get: PointGetExecutorCache::default(),
         limits: 0,
+        limit_params: Vec::new(),
         has_subquery: false,
+        cache_key: PlanCacheKey::default(),
     };
 
     plan_cache_stmt_process(&mut prepared_obj);
@@ -508,13 +522,23 @@ fn plan_cache_stmt_process(stmt: &mut PlanCacheStmt) {
     #[derive(Default)]
     struct P {
         limits: usize,
+        limit_params: Vec<usize>,
         has_subquery: bool,
     }
     impl Visit for P {
-        // go: planCacheStmtProcessor.Enter L2 (the tables are for the plan cache key, A3)
+        // go: planCacheStmtProcessor.Enter L2 (the tables are for the plan cache key's statistics version, which is 0 without a statistics handle)
         fn enter(&mut self, n: CNode<'_>) -> bool {
             match n {
-                CNode::Limit(_) => self.limits += 1,
+                CNode::Limit(l) => {
+                    self.limits += 1;
+                    // NewPlanCacheKey reads node.Count and node.Offset when they are
+                    // parameter markers.
+                    for val in std::iter::once(&l.count).chain(l.offset.as_ref()) {
+                        if let tidb_parser::ast::Expr::ParamMarker(m) = val {
+                            self.limit_params.push(m.order);
+                        }
+                    }
+                }
                 CNode::Subquery => self.has_subquery = true,
                 _ => {}
             }
@@ -530,16 +554,20 @@ fn plan_cache_stmt_process(stmt: &mut PlanCacheStmt) {
     let mut p = P::default();
     Walker(&mut p).stmt(&stmt.prepared_ast.stmt);
     stmt.limits = p.limits;
+    stmt.limit_params = p.limit_params;
     stmt.has_subquery = p.has_subquery;
 }
 
-/// NewPlanCacheKey creates the plan cache key for this statement: the key itself is the plan
-/// cache (the plan-cache exception A3). The stand-in returns the statement's database and text
-/// as the key, always cacheable: the only user is the deletion of a closed statement's plan
-/// from the session's cache, which holds no plans (`cleanRetryInfo`, whose Go behaviour of
-/// computing every key from the first closed statement is kept, D13.1 tasks).
-// glue: stub of NewPlanCacheKey, blocked-by:D13.1 (the plan cache key is the plan-cache exception A3)
-pub fn new_plan_cache_key(stmt: &PlanCacheStmt) -> Result<(String, String, bool, String), Error> {
+/// The key the session's plan cache stand-in records for `cleanRetryInfo` (Go calls
+/// `NewPlanCacheKey` there to delete the closed statement's plan from the session-level
+/// cache). tidb-rs has no session-level cache (the plan-cache exception A3, §1.2), so the
+/// deletion removes nothing; the key is the statement's database and text, always
+/// cacheable, and Go's behaviour of computing every key from the first closed statement is
+/// kept (D13.1 tasks). The instance cache's key is [`new_plan_cache_key`].
+// glue: the session plan cache stand-in's key (no session-level cache, A3 spec §1.2)
+pub fn session_plan_cache_key(
+    stmt: &PlanCacheStmt,
+) -> Result<(String, String, bool, String), Error> {
     Ok((
         format!("{}\u{0}{}", stmt.stmt_db, stmt.stmt_text),
         String::new(),
@@ -618,12 +646,6 @@ fn as_plan_cache_stmt(prep_stmt: Arc<dyn Any + Send + Sync>) -> Result<PlanCache
     prep_stmt
         .downcast::<parking_lot::Mutex<PlanCacheStmt>>()
         .map_err(|_| tidb_base::errors::new("invalid PlanCacheStmt type".to_owned()))
-}
-
-/// `parseParamTypes`: the parameter types of the plan cache key.
-// glue: stub of parseParamTypes, blocked-by:D13.1 (the plan cache key is the plan-cache exception A3)
-pub fn parse_param_types() -> Result<(), Error> {
-    Err(blocked("D13.1", "parseParamTypes (the plan cache key)"))
 }
 
 /// `isSafePointGetPath4PlanCache`.
@@ -733,4 +755,462 @@ fn is_safe_point_get_path4_plan_cache_scenario3(path: &crate::util::AccessPath) 
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------------------------
+// The instance plan cache's key and value (the plan-cache exception A3 spec §2.1, §3.3, §3.4).
+// ---------------------------------------------------------------------------------------
+
+/// `ast.ReadCommitted`.
+const READ_COMMITTED: &str = "READ-COMMITTED";
+
+/// `MaxCacheableLimitCount`: the largest `LIMIT ?` value a cached plan may be keyed by.
+pub const MAX_CACHEABLE_LIMIT_COUNT: u64 = 10000;
+
+/// The process's random hash state of the plan cache keys (A3 spec §3.4: a seed drawn at
+/// start, so that crafted statement texts cannot pile up in one shard or bucket).
+static KEY_HASH_STATE: std::sync::LazyLock<foldhash::fast::RandomState> =
+    std::sync::LazyLock::new(foldhash::fast::RandomState::default);
+
+/// The instance plan cache key (Go's `string` of `NewPlanCacheKey`).
+///
+/// Go concatenates the user, host, database, statement text and the encoded environment into
+/// one string. Here the statement text is kept apart (its hash is computed once per
+/// statement text, not on every EXECUTE) and the rest is `env`, encoded in Go's order with a
+/// length prefix in front of every string field (A3 decision 9: Go's concatenation lets
+/// `'a127.0.0.'@'%'` and `'a'@'127.0.0.%'` produce the same key). The bytes are compared,
+/// never shown, so integers are fixed-width little-endian rather than Go's `codec` encoding.
+// glue: A3 spec §3.4 (the representation of NewPlanCacheKey's string)
+#[derive(Clone, Default)]
+pub struct PlanCacheKey {
+    stmt_text: Arc<str>,
+    text_hash: u64,
+    env: smallvec::SmallVec<[u8; 128]>,
+    hash: u64,
+}
+
+impl PlanCacheKey {
+    /// The key's hash (shard and bucket selection).
+    // glue: A3 spec §3.4
+    pub fn hash_value(&self) -> u64 {
+        self.hash
+    }
+
+    /// The bytes of the key, for tests and logs (`text` then the environment).
+    // glue: A3 spec §3.4
+    pub fn debug_bytes(&self) -> Vec<u8> {
+        let mut b = self.stmt_text.as_bytes().to_vec();
+        b.extend_from_slice(&self.env);
+        b
+    }
+
+    /// Starts a key for `stmt_text`: the text and its hash are kept from the previous key when
+    /// the text is the same (the usual case: the key buffer is the statement's own).
+    // glue: A3 spec §3.4
+    pub(crate) fn reset(&mut self, stmt_text: &str) {
+        if &*self.stmt_text != stmt_text {
+            self.stmt_text = Arc::from(stmt_text);
+            self.text_hash = std::hash::BuildHasher::hash_one(&*KEY_HASH_STATE, stmt_text);
+        }
+        self.env.clear();
+    }
+
+    /// Appends a string field with its length prefix (A3 decision 9).
+    // glue: A3 decision 9
+    pub(crate) fn push_str(&mut self, v: &str) {
+        self.env.extend_from_slice(&(v.len() as u32).to_le_bytes());
+        self.env.extend_from_slice(v.as_bytes());
+    }
+
+    // glue: codec.EncodeInt / EncodeUint of NewPlanCacheKey (fixed width, see the type doc)
+    fn push_u64(&mut self, v: u64) {
+        self.env.extend_from_slice(&v.to_le_bytes());
+    }
+
+    // go: bool2Byte L2 (writes 0 / 1 into the key; also strconv.FormatBool of NewPlanCacheKey)
+    fn push_bool(&mut self, v: bool) {
+        self.env.push(u8::from(v));
+    }
+
+    /// Ends the key: its hash from the text's hash and the environment.
+    // glue: A3 spec §3.4
+    pub(crate) fn finish(&mut self) {
+        self.hash =
+            std::hash::BuildHasher::hash_one(&*KEY_HASH_STATE, (self.text_hash, &self.env[..]));
+    }
+}
+
+impl PartialEq for PlanCacheKey {
+    // glue: Go compares the key strings
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+            && self.env == other.env
+            && (Arc::ptr_eq(&self.stmt_text, &other.stmt_text) || self.stmt_text == other.stmt_text)
+    }
+}
+
+impl Eq for PlanCacheKey {}
+
+impl std::hash::Hash for PlanCacheKey {
+    // glue: the map hashes the precomputed hash (PassThroughHasher)
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+impl std::fmt::Debug for PlanCacheKey {
+    // glue: Debug of the key
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PlanCacheKey({:?}, {} env bytes)",
+            self.stmt_text,
+            self.env.len()
+        )
+    }
+}
+
+/// `hashInt64Uint64Map`: the map's entries in key order.
+// go: hashInt64Uint64Map L2 (writes into the key; fixed-width integers, see PlanCacheKey)
+fn hash_int64_uint64_map(key: &mut PlanCacheKey, m: &HashMap<i64, u64>) {
+    let mut keys: smallvec::SmallVec<[i64; 4]> = m.keys().copied().collect();
+    keys.sort_unstable();
+    for k in keys {
+        key.push_u64(k as u64);
+        key.push_u64(m[&k]);
+    }
+}
+
+/// What `NewPlanCacheKey` reads besides the session variables and the statement:
+/// `domain.GetDomain(sctx).InfoSchema().SchemaMetaVersion()` (read in RC and for
+/// `FOR UPDATE` reads only).
+// glue: the arguments of NewPlanCacheKey that Go reaches through sctx
+pub struct PlanCacheKeyEnv<'a> {
+    /// The domain's newest InfoSchema (`None`: no domain, version 0).
+    pub domain_is: Option<&'a dyn InfoSchemaLookup>,
+}
+
+/// NewPlanCacheKey creates the plan cache key for this statement.
+/// Note: lastUpdatedSchemaVersion will only be set in the case of rc or for update read in order to
+/// differentiate the cache key. In other cases, it will be 0.
+/// All information that might affect the plan should be considered in this function.
+///
+/// The key is written into `stmt.cache_key` (the statement's reusable buffer); returns
+/// `(binding, cacheable, reason)`. Fields the new stack does not carry take the value Go has
+/// in the same situation: no binding (bindinfo, D13.2: `MatchSQLBindingForPlanCache` finds
+/// none), no user identity (the session has none: Go's nil `User` in tests, empty names),
+/// the statistics version 0 of tables without a statistics handle (pseudo statistics), no
+/// dirty table (`TblInfo2UnionScan`, the write path).
+// go: NewPlanCacheKey L2 (writes into the statement's key buffer; bindings, user identity, statistics versions and dirty tables take Go's values when they are absent)
+pub fn new_plan_cache_key(
+    vars: &mut SessionVars,
+    stmt: &mut PlanCacheStmt,
+    env: &PlanCacheKeyEnv<'_>,
+) -> Result<(String, bool, String), Error> {
+    // binding, ignored := bindinfo.MatchSQLBindingForPlanCache(...): no bindings (D13.2).
+    let binding = String::new();
+
+    // In rc or for update read, we need the latest schema version to decide whether we need to
+    // rebuild the plan. So we set this value in rc or for update read. In other cases, let it be 0.
+    let mut latest_schema_version: i64 = 0;
+    if vars.is_isolation(READ_COMMITTED) || stmt.for_update_read {
+        // In Rc or ForUpdateRead, we should check if the information schema has been changed since
+        // last time. If it changed, we should rebuild the plan. Here, we use a different and more
+        // up-to-date schema version which can lead plan cache miss and thus, the plan will be rebuilt.
+        latest_schema_version = env.domain_is.map_or(0, |is| is.schema_meta_version());
+    }
+
+    // rebuild key to exclude kv.TiFlash when stmt is not read only
+    use tidb_base::kv::{TiDB, TiFlash, TiKV};
+    let engines = &vars.state.isolation_read_engines;
+    let mut has_tiflash = engines.contains(&TiFlash);
+    if has_tiflash && !crate::optimize::ast_is_read_only(&stmt.prepared_ast.stmt)? {
+        has_tiflash = false;
+    }
+    let engine_bits = u8::from(engines.contains(&TiDB))
+        | u8::from(engines.contains(&TiKV)) << 1
+        | u8::from(has_tiflash) << 2;
+
+    if stmt.stmt_text.is_empty() {
+        return Err(tidb_base::errors::new("no statement text"));
+    }
+    if stmt.schema_version == 0 && !cfg!(test) {
+        return Err(tidb_base::errors::new("Schema version uninitialized"));
+    }
+    let stmt_db = if stmt.stmt_db.is_empty() {
+        vars.current_db.as_str()
+    } else {
+        stmt.stmt_db.as_str()
+    };
+    let timezone_offset: i64 = match &vars.time_zone {
+        Some(loc) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            i64::from(loc.lookup(now).offset)
+        }
+        None => 0,
+    };
+    let (conn_charset, conn_collation) = vars.get_charset_info();
+
+    // not allow to share the same plan among different users for safety: the session has no
+    // user identity (SessionVars.User is not carried), as Go's nil User.
+    let (user_name, host_name) = ("", "");
+
+    // the user might switch the prune mode dynamically
+    let prune_mode = vars.state.partition_prune_mode.clone();
+
+    let key = &mut stmt.cache_key;
+    key.reset(&stmt.stmt_text);
+    key.push_str(user_name);
+    key.push_str(host_name);
+    key.push_str(stmt_db);
+    key.push_u64(stmt.schema_version as u64);
+    hash_int64_uint64_map(key, &stmt.relate_version);
+    key.push_str(&prune_mode);
+    // Only be set in rc or for update read and leave it default otherwise.
+    key.push_u64(latest_schema_version as u64);
+    key.push_u64(vars.sql_mode as u64);
+    key.push_u64(timezone_offset as u64);
+    key.env.push(engine_bits);
+    key.push_u64(vars.select_limit);
+    key.push_str(&binding);
+    key.push_str(&conn_charset);
+    key.push_str(&conn_collation);
+    key.push_bool(vars.in_restricted_sql);
+    key.push_bool(
+        tidb_sessionctx::variable::tidb_vars::RestrictedReadOnly
+            .load(std::sync::atomic::Ordering::SeqCst),
+    );
+    key.push_bool(
+        tidb_sessionctx::variable::tidb_vars::VarTiDBSuperReadOnly
+            .load(std::sync::atomic::Ordering::SeqCst),
+    );
+    // expr-pushdown-blacklist can affect query optimization, so we need to consider it in plan cache.
+    key.push_u64(
+        tidb_expr_pushdown::infer_pushdown::ExprPushDownBlackListReloadTimeStamp
+            .load(std::sync::atomic::Ordering::SeqCst) as u64,
+    );
+
+    // whether this query has sub-query
+    if stmt.has_subquery {
+        if !vars.enable_plan_cache_for_subquery {
+            return Ok((
+                binding,
+                false,
+                "the switch 'tidb_enable_plan_cache_for_subquery' is off".to_owned(),
+            ));
+        }
+        key.push_bool(true);
+    } else {
+        key.push_bool(false);
+    }
+
+    // this variable might affect the plan
+    key.push_bool(vars.foreign_key_checks);
+
+    // "limit ?" can affect the cached plan: "limit 1" and "limit 10000" should use different plans.
+    if stmt.limits > 0 {
+        if !vars.enable_plan_cache_for_param_limit {
+            return Ok((
+                binding,
+                false,
+                "the switch 'tidb_enable_plan_cache_for_param_limit' is off".to_owned(),
+            ));
+        }
+        key.env.push(b'|');
+        let params = vars.state.plan_cache_params.lock();
+        for &order in &stmt.limit_params {
+            let (type_expected, val) =
+                crate::core::logical_plan_builder::check_param_type_int64_or_uint64(
+                    &params.get_param_value(order as i64),
+                );
+            if !type_expected {
+                return Ok((binding, false, "unexpected value after LIMIT".to_owned()));
+            }
+            if val > MAX_CACHEABLE_LIMIT_COUNT {
+                return Ok((binding, false, "limit count is too large".to_owned()));
+            }
+            key.push_u64(val);
+        }
+        key.env.push(b'|');
+    }
+
+    // stats ver can affect cached plan
+    if vars.plan_cache_invalidation_on_fresh_stats {
+        // getLatestVersionFromStatsTable of each table: 0 without a statistics handle
+        // (pseudo statistics, the new stack has no statistics handle, D11.x).
+        let stats_ver_hash: u64 = 0;
+        key.push_u64(stats_ver_hash);
+    }
+
+    // handle dirty tables: TblInfo2UnionScan is not carried (the write path), none.
+
+    // txn status
+    key.env.push(b'|');
+    key.push_bool(vars.in_txn());
+    key.push_bool(vars.is_autocommit());
+    key.push_bool(
+        tidb_base::config::get_global_config()
+            .pessimistic_txn
+            .pessimistic_auto_commit
+            .load(),
+    );
+    key.push_bool(vars.stmt_ctx().for_share_lock_enabled_by_noop);
+    key.push_bool(vars.shared_lock_promotion);
+    key.finish();
+
+    Ok((binding, true, String::new()))
+}
+
+/// parseParamTypes get parameters' types in PREPARE statement
+///
+/// The parameters are the binary protocol's constants, whose type is inferred from the
+/// value (`ExecBinaryParam`: `InferParamTypeFromUnderlyingValue` on a new field type); the
+/// session hands the planner the values, so the type is inferred here the same way. The
+/// text protocol's `GetVar` arm (`EXECUTE ... USING @v`) needs the expression rewriter
+/// (D09.2), as `SetParameterValuesIntoSCtx`. `out` is the caller's buffer (A3 spec §3.4).
+// go: parseParamTypes L2 (binary-protocol constants: the type is inferred from the value)
+pub fn parse_param_types(params: &[tidb_types::datum::Datum], out: &mut Vec<FieldType>) {
+    out.clear();
+    for param in params {
+        let mut tp = FieldType::default();
+        tidb_types::field_type::infer_param_type_from_underlying_value(&param.get_value(), &mut tp);
+        out.push(tp);
+    }
+}
+
+/// CheckTypesCompatibility4PC compares FieldSlice with []*types.FieldType
+/// Currently this is only used in plan cache to check whether the types of parameters are compatible.
+/// If the types of parameters are compatible, we can use the cached plan.
+/// tpsExpected is types from cached plan
+// go: checkTypesCompatibility4PC L1
+pub fn check_types_compatibility4_pc(expected: &[FieldType], actual: &[FieldType]) -> bool {
+    use tidb_base::mysql::{TypeNewDecimal, TypeVarString, TypeVarchar, has_unsigned_flag};
+    if expected.len() != actual.len() {
+        return false;
+    }
+    for i in 0..actual.len() {
+        // We only use part of logic of `func (ft *FieldType) Equal(other *FieldType)` here because (1) only numeric and
+        // string types will show up here, and (2) we don't need flen and decimal to be matched exactly to use plan cache
+        let tp_equal = (expected[i].get_type() == actual[i].get_type())
+            || (expected[i].get_type() == TypeVarchar && actual[i].get_type() == TypeVarString)
+            || (expected[i].get_type() == TypeVarString && actual[i].get_type() == TypeVarchar);
+        if !tp_equal
+            || expected[i].get_charset() != actual[i].get_charset()
+            || expected[i].get_collate() != actual[i].get_collate()
+            || (expected[i].eval_type() == tidb_parser::types::ETInt
+                && has_unsigned_flag(expected[i].get_flag())
+                    != has_unsigned_flag(actual[i].get_flag()))
+        {
+            return false;
+        }
+        // When the type is decimal, we should compare the Flen and Decimal.
+        // We can only use the plan when both Flen and Decimal should less equal than the cached one.
+        // We assume here that there is no correctness problem when the precision of the parameters is less than the precision of the parameters in the cache.
+        if tp_equal
+            && expected[i].get_type() == TypeNewDecimal
+            && !(expected[i].get_flen() >= actual[i].get_flen()
+                && expected[i].get_decimal() >= actual[i].get_decimal())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// PlanCacheValue stores the cached Statement and StmtNode.
+///
+/// Go's `Plan` is "not-read-only, session might update it before reusing", so the instance
+/// cache clones it on every hit. Here the plan is the statement's own `Arc` tree, sealed
+/// (A3 spec §3.1, §3.6) and never written: a hit rebuilds the ranges by copying the path
+/// to the rewritten node (`plan_cache_rebuild`). `memoryUsage` is the bytes the entry
+/// holds (A3 decision 4, [`crate::core::plan_cache_heap_size`]), not Go's estimate.
+// glue: Go type PlanCacheValue (an immutable shared plan; memory is the held bytes, A3 decision 4)
+// go-exception: EXC.A3 PlanCacheValue.CloneForInstancePlanCache (a hit is not cloned, A3 spec §1.2)
+pub struct PlanCacheValue {
+    pub plan: crate::PhysicalPlanRef,
+    /// read-only
+    pub output_columns: NameSlice,
+    /// read-only, all parameters' types, different parameters may share same plan
+    pub param_types: Vec<FieldType>,
+    /// read-only, hints which set session variables
+    pub stmt_hints: tidb_sessionctx::hint::StmtHints,
+    /// read-only: the bytes the entry holds.
+    mem_bytes: i64,
+}
+
+impl std::fmt::Debug for PlanCacheValue {
+    // glue: Debug of the cached value
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PlanCacheValue({:?}, {} bytes)",
+            self.plan, self.mem_bytes
+        )
+    }
+}
+
+impl PlanCacheValue {
+    /// MemoryUsage return the memory usage of PlanCacheValue: the bytes it holds, computed
+    /// once when it is built (A3 decision 4).
+    // go: PlanCacheValue.MemoryUsage L2 (the held bytes, A3 decision 4)
+    pub fn memory_usage(&self) -> i64 {
+        self.mem_bytes
+    }
+}
+
+/// NewPlanCacheValue creates a SQLCacheValue, for the instance plan cache: `None` when the
+/// plan cannot go into the instance cache (Go's `CloneForPlanCache` returning `false`, a
+/// silent "not cached", A3 spec §3.3). Otherwise the plan's nodes are sealed (their cost
+/// memo is no longer written, A3 spec §3.6) and the held bytes are counted.
+// go: NewPlanCacheValue L2 (plus the instance cache's CloneForPlanCache check and the seal, A3 spec §3.3)
+pub fn new_plan_cache_value(
+    plan: &crate::PhysicalPlanRef,
+    names: &NameSlice,
+    param_types: &[FieldType],
+    stmt_hints: &tidb_sessionctx::hint::StmtHints,
+) -> Option<PlanCacheValue> {
+    if !plan.instance_cacheable() {
+        return None;
+    }
+    crate::core::plan_cache_heap_size::seal_plan(plan.as_ref());
+    let mut v = PlanCacheValue {
+        plan: Arc::clone(plan),
+        output_columns: names.clone(),
+        param_types: param_types.to_vec(),
+        stmt_hints: stmt_hints.clone_hints(),
+        mem_bytes: 0,
+    };
+    v.mem_bytes = crate::core::plan_cache_heap_size::plan_cache_value_heap_size(&v);
+    Some(v)
+}
+
+#[cfg(test)]
+impl PlanCacheKey {
+    /// A key of `text` with an empty environment (tests).
+    pub(crate) fn for_test(text: &str) -> PlanCacheKey {
+        let mut k = PlanCacheKey::default();
+        k.reset(text);
+        k.finish();
+        k
+    }
+}
+
+#[cfg(test)]
+impl PlanCacheValue {
+    /// A value of `plan` that holds `mem` bytes (Go's tests set `memoryUsage`).
+    pub(crate) fn for_test(
+        plan: crate::PhysicalPlanRef,
+        mem: i64,
+        param_types: Vec<FieldType>,
+    ) -> PlanCacheValue {
+        PlanCacheValue {
+            plan,
+            output_columns: NameSlice::new(),
+            param_types,
+            stmt_hints: Default::default(),
+            mem_bytes: mem,
+        }
+    }
 }

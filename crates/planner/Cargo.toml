@@ -46,8 +46,15 @@ tidb-memory = { workspace = true }
 tipb = { workspace = true }
 # log.Warn.
 log = "0.4"
-# Tracers shared by the optimize options (M-LOCK).
+# Tracers shared by the optimize options (M-LOCK); the instance plan cache's shard locks.
 parking_lot = "0.12"
+# The instance plan cache (A3 spec §3.4): the key's inline buffer, the random-seeded key
+# hash, the cache-line padding of the shards.
+smallvec = "1.16"
+foldhash = "0.2"
+crossbeam-utils = "0.8"
+# The plan cache metrics (A3 spec §1.1).
+tidb-metrics = { workspace = true }
 
 [dev-dependencies]
 # govec replay (tests/govec_planutil.rs).

@@ -1018,7 +1018,7 @@ fn clean_retry_info_deletes_the_first_closed_stmt_plan_each_time() {
             stmt_db: "test".to_owned(),
             ..Default::default()
         };
-        tidb_planner::core::plan_cache_utils::new_plan_cache_key(&st)
+        tidb_planner::core::plan_cache_utils::session_plan_cache_key(&st)
             .unwrap()
             .0
     };

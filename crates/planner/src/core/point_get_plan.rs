@@ -178,6 +178,13 @@ pub struct NameValuePair {
 impl PhysicalPlan for PointGetPlan {
     crate::physical_plan_boilerplate!(PointGet);
 
+    /// CloneForPlanCache of the instance plan cache: the probe parents must be cacheable
+    /// (A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PointGetPlan.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        self.probe_parents.iter().all(|p| p.instance_cacheable())
+    }
+
     /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
     // glue: dispatch (Go PointGetPlan.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
     fn get_plan_cost_ver2(
