@@ -544,7 +544,8 @@ pub(super) fn ss_tidb_analyze_skip_column_types(
     s: &mut SessionVars,
     val: &str,
 ) -> Result<(), Error> {
-    s.state.analyze_skip_column_types = super::varsutil::parse_analyze_skip_column_types(val);
+    s.state.analyze_skip_column_types =
+        std::sync::Arc::new(super::varsutil::parse_analyze_skip_column_types(val));
     Ok(())
 }
 

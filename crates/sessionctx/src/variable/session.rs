@@ -137,7 +137,12 @@ pub struct SessionState {
     /// runtimeFilterTypes the types of runtime filter.
     pub runtime_filter_types: Vec<super::session_state::RuntimeFilterType>,
     /// AnalyzeSkipColumnTypes indicates the column types whose statistics would not be collected when executing the ANALYZE command.
-    pub analyze_skip_column_types: std::collections::BTreeSet<String>,
+    ///
+    /// Performance deviation: shared (`Arc`) and replaced as a whole by its SET hook, the only
+    /// writer. The router's statement checkpoint copies this state for every statement, and
+    /// the set's six strings were most of that copy's allocations
+    /// (specs/VS1-vertical-slice/perf-point-select.md §4).
+    pub analyze_skip_column_types: Arc<std::collections::BTreeSet<String>>,
     /// SlowLogRules holds the slow log rules of the session.
     pub slow_log_rules: super::session_state::SessionSlowLogRules,
     /// RowEncoder is reused in session for encode row data (`RowEncoder.Enable`).
