@@ -166,9 +166,9 @@ tidb-server = { path = "crates/server" }
 # semantics (client-rust#22, D07.2 part 2); `Transaction::coprocessor` retired (client-rust#23,
 # D07.2 final); and a TSO request no longer stranded for 15 s when the oracle's
 # pending-batch lock is busy as the request stream is polled (client-rust#24, #225); a
-# single-region request runs on the calling task instead of a spawned one (client-rust#25,
+# single-region request's first attempt runs on the calling task, not a spawned one (client-rust#25,
 # branch tidb-rs/perf-point-get, specs/VS1-vertical-slice/perf-point-select.md).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "547bb520c54e4226467f183977a628c6760c297f", default-features = false, features = ["client-go-metrics"] }
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "06b7a002d08abc53088a14c928b9bd8d595a65fc", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 async-trait = "0.1"
 bytes = "1.11"
