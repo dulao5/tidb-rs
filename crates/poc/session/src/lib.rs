@@ -94,6 +94,9 @@ pub struct Factory {
     shared: Arc<Shared>,
     /// `--new-stack` (VS1 plan §4.3).
     new_stack: NewStackMode,
+    /// The ported store driver the new stack's sessions read through (`None` with
+    /// `--new-stack=off`: nothing of the new stack is built).
+    new_store: Option<Arc<tidb_store::driver::TikvStore>>,
 }
 
 impl Factory {
@@ -101,14 +104,24 @@ impl Factory {
         Factory {
             shared: Arc::new(shared),
             new_stack: NewStackMode::Off,
+            new_store: None,
         }
     }
 
     /// Sessions route statements the ported stack supports to it (`fallback` / `strict`, [`router`]); with
-    /// `off` (the default) they run everything on the PoC, as before.
-    pub fn with_new_stack(mut self, mode: NewStackMode) -> Factory {
+    /// `off` (the default) they run everything on the PoC, as before. The new stack reads
+    /// through the ported store driver over the PoC's TiKV client.
+    pub fn with_new_stack(mut self, mode: NewStackMode) -> Result<Factory, String> {
         self.new_stack = mode;
-        self
+        if mode != NewStackMode::Off {
+            let store = self
+                .shared
+                .kv
+                .store_driver()
+                .map_err(|e| format!("the store driver of the new stack: {e}"))?;
+            self.new_store = Some(Arc::new(store));
+        }
+        Ok(self)
     }
 
     /// The state shared by this factory's sessions.
@@ -165,7 +178,10 @@ impl SessionFactory for Factory {
                 .sync
                 .as_ref()
                 .and_then(|s| s.ported_domain().cloned());
-            let new = Box::new(router::newstack::NewSession::new(domain));
+            let new = Box::new(router::newstack::NewSession::new(
+                domain,
+                self.new_store.clone(),
+            ));
             let mut r = Router::new(self.new_stack, new, &session.poc_values());
             r.set_connection_id(session.connection_id);
             session.router = Some(Box::new(r));
@@ -772,7 +788,7 @@ impl Session {
 }
 
 /// `SHOW WARNINGS`: statements here never leave warnings.
-fn show_warnings() -> ResultSet {
+pub(crate) fn show_warnings() -> ResultSet {
     use tidb_mysql_protocol::ColumnDef;
     use tidb_mysql_protocol::ColumnType;
     let mut level = ColumnDef::new("Level", ColumnType::VarString).with_length(28);

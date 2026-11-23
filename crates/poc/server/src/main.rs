@@ -308,7 +308,8 @@ fn main() {
             server_version: config.server_version.clone(),
             tls_enabled: config.tls.is_some(),
         })
-        .with_new_stack(new_stack);
+        .with_new_stack(new_stack)
+        .map_err(std::io::Error::other)?;
         if new_stack != poc_session::router::NewStackMode::Off {
             info!(mode = ?new_stack, "VS1 router on: VS1-shaped SELECTs go to the new stack");
         }

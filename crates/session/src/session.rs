@@ -516,12 +516,44 @@ impl SessCtx {
         std::mem::take(&mut self.txn_end).then_some(())
     }
 
-    /// `loadCommonGlobalVariablesIfNeeded`: the PoC router syncs the session variables
-    /// (VS1 plan §4.1) and the global values are the compiled defaults until the domain's
-    /// sysvar cache (D06.5, VS1-17).
-    // glue: stub of session.loadCommonGlobalVariablesIfNeeded, blocked-by:D06.5 (domain.GetSessionCache)
+    /// `loadCommonGlobalVariablesIfNeeded`: copies the global values of the session
+    /// variables into a session that has not set them, running each variable's SetSession
+    /// hook (so e.g. `tidb_enable_prepared_plan_cache` is on as in Go). The bootstrap
+    /// branch (`sessionctx.Initing`) does not apply: the new session never bootstraps.
+    /// The session cache is [`session_cache`]'s stand-in for the domain's.
+    // go: session.loadCommonGlobalVariablesIfNeeded L2 (domain.GetSessionCache is a stand-in: the domain's sysvar cache is D06.5)
+    #[allow(clippy::collapsible_if)] // Go's nested ifs
     fn load_common_global_variables_if_needed(&mut self) -> Result<(), Error> {
+        let vars = &mut self.vars;
+        if self.common_global_loaded {
+            return Ok(());
+        }
         self.common_global_loaded = true;
+
+        // Deep copy sessionvar cache
+        let session_cache = session_cache(vars)?;
+        for (var_name, var_val) in &session_cache {
+            if !vars.get_system_var(var_name).1 {
+                if let Err(err) = vars.set_system_var_with_relaxed_validation(var_name, var_val) {
+                    if tidb_sessionctx::variable::error::ErrUnknownSystemVar.equal(&err) {
+                        continue; // sessionCache is stale; sysvar has likely been unregistered
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        // when client set Capability Flags CLIENT_INTERACTIVE, init wait_timeout with interactive_timeout
+        //
+        // Not reachable on the new stack yet: nothing passes the handshake's capabilities to
+        // the new session (`set_client_capability` has no caller; the PoC's connection keeps
+        // them), so `client_capability` is 0 and `wait_timeout` keeps its global value.
+        if vars.client_capability & tidb_base::mysql::ClientInteractive > 0 {
+            // variable.InteractiveTimeout / variable.WaitTimeout
+            let (var_val, ok) = vars.get_system_var("interactive_timeout");
+            if ok {
+                vars.set_system_var("wait_timeout", &var_val)?;
+            }
+        }
         Ok(())
     }
 
@@ -535,6 +567,29 @@ impl SessCtx {
             killed: Some(self.killer.signal_handle()),
         }
     }
+}
+
+/// `domain.GetDomain(s).GetSessionCache()`: the session values of every variable that is
+/// not skipped at init, as the domain's `rebuildSysVarCache` builds them from
+/// `mysql.global_variables` (a variable without a row keeps its default). The domain's
+/// sysvar cache is D06.5; here a global variable's value comes from the session's
+/// `GlobalVarAccessor` (the PoC router's stand-in answers the compiled defaults, the PoC
+/// reads no `mysql.global_variables` either), and a session-only variable has its default.
+// glue: stand-in for Domain.GetSessionCache (the domain's sysvar cache, D06.5)
+fn session_cache(vars: &SessionVars) -> Result<HashMap<String, String>, Error> {
+    let mut cache = HashMap::new();
+    for sv in tidb_sessionctx::variable::variable::get_sys_vars() {
+        if sv.skip_init() {
+            continue;
+        }
+        let val = if sv.has_global_scope() {
+            vars.global_vars_accessor.get_global_sys_var(sv.name)?
+        } else {
+            sv.value.clone()
+        };
+        cache.insert(sv.name.to_owned(), val);
+    }
+    Ok(cache)
 }
 
 impl SessionCtx for SessCtx {
@@ -1096,6 +1151,14 @@ impl Session {
     // glue: accessor (Go session.GetSessionVars)
     pub fn vars_mut(&mut self) -> &mut SessionVars {
         &mut self.core.sctx.vars
+    }
+
+    /// `loadCommonGlobalVariablesIfNeeded` for a caller that opens the session (the VS1
+    /// router loads the global values when the connection opens, so that its step-0 check
+    /// compares with the values Go's session has after its first statement).
+    // glue: session.loadCommonGlobalVariablesIfNeeded for the router
+    pub fn load_common_global_variables_if_needed(&mut self) -> Result<(), Error> {
+        self.core.sctx.load_common_global_variables_if_needed()
     }
 
     /// The session as the executor framework and the transaction manager see it.
