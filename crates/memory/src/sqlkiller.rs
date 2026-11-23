@@ -66,14 +66,51 @@ pub struct SqlKiller {
     finish: Mutex<Option<FinishFn>>,
     /// Go `InWriteResultSet`.
     pub in_write_result_set: AtomicBool,
-    /// Go `lastCheckTime atomic.Pointer[time.Time]`. Performance deviation from M-SNAP
-    /// (`ArcSwapOption`): `Reset` writes it for every statement, and an `ArcSwap` store walks
-    /// the reader slots of all threads (specs/VS1-vertical-slice/perf-point-select.md); a
-    /// short mutex holds the same value.
-    last_check_time: Mutex<Option<Instant>>,
+    /// Go `lastCheckTime atomic.Pointer[time.Time]`: an atomic time, nil or a point in time
+    /// ([`AtomicInstant`]).
+    last_check_time: AtomicInstant,
     /// Go `IsConnectionAlive`.
     pub is_connection_alive: ArcSwapOption<AliveFn>,
     on_kill: ArcSwapOption<FinishFn>,
+}
+
+/// An `atomic.Pointer[time.Time]` that is nil or holds a monotonic time: nanoseconds since
+/// a process-wide base, plus one, in an `AtomicU64`; 0 is nil. The `+ 1` keeps a time equal
+/// to the base apart from nil.
+// glue: atomic.Pointer[time.Time] as an atomic integer (a time value, no shared object)
+#[derive(Debug, Default)]
+struct AtomicInstant(AtomicU64);
+
+/// The base of [`AtomicInstant`]: the first time one is used.
+static INSTANT_BASE: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+
+impl AtomicInstant {
+    // glue: encoding of AtomicInstant (0 = nil)
+    fn encode(t: Option<Instant>) -> u64 {
+        match t {
+            None => 0,
+            // An Instant taken before the base was set reads as the base (it is only
+            // compared with later times).
+            Some(t) => u64::try_from(t.saturating_duration_since(*INSTANT_BASE).as_nanos())
+                .unwrap_or(u64::MAX - 1)
+                .saturating_add(1),
+        }
+    }
+
+    // glue: decoding of AtomicInstant
+    fn decode(v: u64) -> Option<Instant> {
+        (v != 0).then(|| *INSTANT_BASE + Duration::from_nanos(v - 1))
+    }
+
+    // glue: atomic.Pointer.Load
+    fn load(&self) -> Option<Instant> {
+        Self::decode(self.0.load(SeqCst))
+    }
+
+    // glue: atomic.Pointer.Store
+    fn store(&self, t: Option<Instant>) {
+        self.0.store(Self::encode(t), SeqCst);
+    }
 }
 
 impl std::fmt::Debug for SqlKiller {
@@ -223,11 +260,10 @@ impl SqlKiller {
                 Duration::from_secs(1)
             };
             let now = Instant::now();
-            let last_check_time = *self.last_check_time.lock();
-            match last_check_time {
-                None => *self.last_check_time.lock() = Some(now),
+            match self.last_check_time.load() {
+                None => self.last_check_time.store(Some(now)),
                 Some(last) if now.duration_since(last) > check_connection_alive_dur => {
-                    *self.last_check_time.lock() = Some(now);
+                    self.last_check_time.store(Some(now));
                     if !f() {
                         self.send_kill_signal(QueryInterrupted);
                     }
@@ -269,13 +305,28 @@ impl SqlKiller {
         if status != UnspecifiedKillSignal {
             tracing::warn!(conn = self.conn_id.load(SeqCst), "kill finished");
         }
-        *self.last_check_time.lock() = None;
+        self.last_check_time.store(None);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_instant_keeps_nil_apart_from_the_base() {
+        let t = AtomicInstant::default();
+        assert_eq!(t.load(), None);
+        // A time exactly at the base is not nil.
+        t.store(Some(*INSTANT_BASE));
+        assert_eq!(t.load(), Some(*INSTANT_BASE));
+        assert_eq!(t.0.load(SeqCst), 1);
+        let later = *INSTANT_BASE + Duration::from_nanos(12_345);
+        t.store(Some(later));
+        assert_eq!(t.load(), Some(later));
+        t.store(None);
+        assert_eq!(t.load(), None);
+    }
 
     #[test]
     fn kill_signals_map_to_go_errors() {

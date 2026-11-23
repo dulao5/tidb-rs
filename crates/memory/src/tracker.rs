@@ -14,13 +14,13 @@
 //!   `Drop`, so the "released but not yet collected" bytes are released at once.
 //! - Go `sync/atomic` operations are sequentially consistent: `SeqCst` throughout.
 //! - Performance deviation from the snapshot mapping (M-SNAP, `atomic.Pointer` → `ArcSwap`):
-//!   `bytesLimit` and `Killer` are not `ArcSwap`s. Every statement creates, initializes and
-//!   drops two trackers (memory and disk), and every `ArcSwap` store and drop walks the
-//!   reader slots of all threads (`arc_swap` debt payment): about 7% of the CPU of a prepared
-//!   point select (specs/VS1-vertical-slice/perf-point-select.md). `bytesLimit` is one
-//!   `AtomicI64` (the hard limit; the soft limit is derived from it on load, so a reader still
-//!   sees a consistent pair) and `Killer` a mutex-guarded `Option<Arc<_>>` (Go: a plain
-//!   pointer set once). Same observable behaviour.
+//!   `bytesLimit` is not an `ArcSwap`. Every statement creates, initializes and drops two
+//!   trackers (memory and disk), and every `ArcSwap` store and drop walks the reader slots of
+//!   all threads (`arc_swap` debt payment): about 7% of the CPU of a prepared point select
+//!   (specs/VS1-vertical-slice/perf-point-select.md). `bytesLimit` is one `AtomicI64` (the
+//!   hard limit; the soft limit is derived from it on load, so a reader still sees a
+//!   consistent pair). Same observable behaviour.
+//! - `Killer` is a plain pointer in Go (not atomic): a mutex-guarded `Option<Arc<_>>`.
 
 // Labels and process-wide variables keep their Go names (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -133,7 +133,7 @@ pub struct Tracker {
     bytes_hard_limit: AtomicI64,
     action_mu_for_hard_limit: Mutex<Option<ActionRef>>,
     action_mu_for_soft_limit: Mutex<Option<ActionRef>>,
-    /// Go `Killer` (module doc: a mutex instead of `ArcSwapOption`, perf deviation).
+    /// Go `Killer` (a plain pointer field; the mutex makes the shared tracker writable).
     killer: Mutex<Option<Arc<SqlKiller>>>,
     /// Go `mu.children`. A global tracker (like `GlobalDiskUsageTracker`) does not keep its
     /// children, to avoid mutex contention.
