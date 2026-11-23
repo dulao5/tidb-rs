@@ -22,19 +22,25 @@ STEPS = [
     "reset_context_of_stmt", "finish_stmt", "close", "on_stmt_start", "get_stmt_read_ts",
     "set_process_info", "planner_optimize", "optimize", "new_eval_context", "columns",
 ]
-# Areas: the first rule whose pattern occurs anywhere in the stack (function names) wins.
+# Areas: the first rule whose pattern occurs anywhere in the stack wins. Patterns with a `/`
+# are matched against the source locations too, the others against function names only.
 AREAS = [
     ("TiKV client / gRPC (inside client-rust, tonic, h2, hyper)", ("tikv_client", "tonic::", "tonic[", "h2::", "h2[", "hyper", "tower")),
     ("router checkpoint (PoC fallback glue)", ("checkpoint",)),
     ("eval context built per use (new_eval_context)", ("new_eval_context",)),
-    ("result column metadata (fields / write_column_info)", ("col_names2_result_fields", "write_column_info", "exec_result", "::column::")),
+    ("result column metadata (fields / write_column_info)", ("col_names2_result_fields", "write_column_info", "convert_column_info", "column_def", "columns")),
     ("system variable lookups", ("get_sys_var", "get_system_var", "get_session_or_global_system_var", "get_charset_info")),
     ("plan cache lookup / planner", ("planner_optimize", "get_plan_from_plan_cache", "plan_cache")),
     ("statement context reset", ("reset_context_of_stmt", "new_stmt_ctx")),
     ("point get executor + snapshot", ("point_get", "PointGet", "snapshot")),
     ("transaction / session flow", ("txnmanager", "on_stmt_start", "get_stmt_read_ts", "finish_stmt", "sessiontxn")),
     ("result row encoding", ("dump_binary_row", "write_result_set", "result_encoder")),
-    ("MySQL protocol read/write", ("mysql_protocol",)),
+    ("statement compile (preprocess, plan rebuild)", ("compile", "preprocess")),
+    ("executor build / open / next / close", ("crates/executor/src/",)),
+    ("chunk / row decode", ("crates/chunk/src/", "crates/tablecodec/", "crates/rowcodec")),
+    ("session statement flow", ("crates/session/src/", "crates/sessionctx/src/")),
+    ("router (PoC glue) and the binary protocol params", ("crates/poc/session/", "crates/server/src/")),
+    ("MySQL protocol, TLS and connection loop", ("crates/mysql-protocol/", "rustls")),
 ]
 NOISE = {"clone", "poll", "to_owned", "to_string", "from", "into", "{closure#0}", "{closure#1}",
          "{async_fn#0}", "{async_block#0}", "new", "default", "collect", "extend", "push"}
@@ -88,8 +94,14 @@ def main():
 
     rules = collections.Counter()
     for c, fs in stacks:
-        text = " ".join(re.sub(r"\s+\[.*\]$", "", f) for f in fs)
-        rules[next((a for a, pats in AREAS if any(x in text for x in pats)), "other")] += c
+        names_only = " ".join(re.sub(r"\s+\[.*\]$", "", f) for f in fs)
+        full = " ".join(fs)
+        rules[
+            next(
+                (a for a, pats in AREAS if any(x in (full if "/" in x else names_only) for x in pats)),
+                "other",
+            )
+        ] += c
     print("\n== by area (first matching rule, see AREAS)")
     for k, v in rules.most_common():
         print(f"{v / n:8.2f}  {k}")

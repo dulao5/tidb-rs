@@ -40,6 +40,8 @@ open(p, "w").write(s)
 EOF
     (cd "$root" && CARGO_TARGET_DIR=$root/target/allocprof CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
         cargo build --release -p poc-server --bin tidb-server)
+    # A new file, not an overwrite: macOS kills a binary whose signed pages changed in place.
+    rm -f "$root/target/allocprof/tidb-server"
     cp "$root/target/allocprof/release/tidb-server" "$root/target/allocprof/tidb-server"
     echo "built $root/target/allocprof/tidb-server"
 }
@@ -57,13 +59,17 @@ run() {
     done
     [ -n "$pd" ] || { echo "run needs -p <pd address>" >&2; exit 2; }
     mkdir -p "$out"
+    if mysql -h 127.0.0.1 -P "$port" -u root -N -e 'SELECT 1' >/dev/null 2>&1; then
+        echo "port $port is already serving; stop that server or pass -P" >&2
+        exit 1
+    fi
     local flag=$out/flag
     rm -f "$flag" "$out/stacks.txt"
     ALLOC_PROF_FLAG=$flag ALLOC_PROF_OUT=$out/stacks.txt "$root/target/allocprof/tidb-server" \
         --pd "$pd" --host 127.0.0.1 -P "$port" --status-port 0 --new-stack=fallback \
         >"$out/server.log" 2>&1 &
-    local pid=$!
-    trap 'kill $pid 2>/dev/null || true' EXIT
+    server_pid=$!
+    trap 'kill $server_pid 2>/dev/null || true' EXIT
     until mysql -h 127.0.0.1 -P "$port" -u root -N -e 'SELECT 1' >/dev/null 2>&1; do sleep 0.5; done
     sb() {
         sysbench oltp_point_select --mysql-host=127.0.0.1 --mysql-port="$port" --mysql-user=root \
@@ -75,6 +81,7 @@ run() {
     sb "$n"
     rm -f "$flag"
     until [ -s "$out/stacks.txt" ]; do sleep 1; done
+    kill "$server_pid"
     python3 "$root/tools/perf/alloc_report.py" "$out/stacks.txt" "$n" | tee "$out/report.txt"
 }
 
