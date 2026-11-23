@@ -321,7 +321,7 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 
 预处理语句的 EXECUTE 在 `planner.Optimize` 之后得到一个 Execute 计划（`*plannercore.Execute`，里面是物理计划）。Go 的 `Compile`（`pkg/executor/compiler.go:136`）先问 `IsSafeToReusePointGetExecutor`：可以复用时把预处理语句的点查计划放进 `stmt.Plan`、设 `stmt.PsStmt`，会话随后走 `ExecStmt.PointGet` 的短路径（复用缓存的点查执行器）；否则 `stmt.Plan` 仍是 Execute 计划，会话走 `runStmt` → `ExecStmt.Exec`。
 
-复用属于 plan cache（A3 例外，未确认），tracker 记为不移植。所以新栈**总走 Go 中它回答 false 的那条路**：
+复用属于 plan cache（A3 例外，未确认），tracker 记为不移植。所以新栈**总走 Go 中它回答 false 的那条路**（在 Go 的默认设置下这不是自动提交点查实际走的路，差别见 §10.2 第 1 条）：
 
 1. `Compile` 把 Execute 计划交给 `ExecStmt`（`execute_plan` 字段，对应 Go `Plan` 字段为 Execute 的情形），语句上下文的计划也是这个 Execute 计划（Go 两处存的是同一个指针，这里共享一个 `Arc`）。`AdviseOptimizeWithPlanAndThenWarmUp` 收到 Execute 里面的物理计划：Go 每个事务上下文 provider 的 `AdviseOptimizeWithPlan` 都先把 Execute 拆开（`if execute, ok := plan.(*plannercore.Execute)`），所以结果相同（自动提交的主键点查仍用 MaxTS，不取 TSO）。
 2. `ExecStmt.Exec` 开头的 `inheritContextFromExecuteStmt`（L1）：`QueryString` 设为 EXECUTE 节点的文本（二进制协议的 EXECUTE 节点没有文本，Go 也是空串），`OutputNames` 取 Execute 计划的，`isPreparedStmt = true`，`Plan` 换成 Execute 里面的物理计划，语句上下文的计划也换成它。
@@ -331,7 +331,12 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 
 ### 10.2 与 Go 的差异
 
-1. **不复用点查执行器**（A3）：每次 EXECUTE 都新建点查计划和执行器。结果与 Go 相同，只少了复用。plan cache 本身（缓存计划）同样不移植：Go 打开 plan cache 时命中缓存的计划，新栈每次都重新规划（`lookupPlanCache` 永远未命中，D13.1 spec）。
+1. **Go 走点查短路径，新栈不走**（Lucky 评审 #301）：`IsSafeToReusePointGetExecutor` 只看三件事——不是 stale read、是自动提交事务、预处理语句的 schema 版本等于当前版本（`plan_cache.go:351`），**与 plan cache 是否打开无关**。所以在 Go 的默认设置下，自动提交的预处理点查**每次**都设 `stmt.PsStmt`、走 `ExecStmt.PointGet` 短路径（`session.go:2160`），不只是"复用执行器"这一点不同。与新栈（总走 `runStmt` → `Exec`）相比，有三处可观察的差别：
+   1. **慢日志与语句摘要的 `Prepared`**：短路径不调用 `inheritContextFromExecuteStmt`，`isPreparedStmt` 保持 false，`stmtExecInfo.Prepared`（`adapter.go:2110`）为 false；新栈经 `Exec` 设为 true。新栈还没有慢日志与语句摘要（D14.2），现在看不到，接上之后就会不同。
+   2. **请求优先级**：短路径把语句上下文的优先级设为 `HighPriority`（`ExecStmt.PointGet` 开头），新栈按 `buildExecutor` 的规则（`NoPriority`，`LowerPriority` 时为 Low）。client-rust 的 snapshot 不发送优先级（`client-go-parity.md`），所以现在对 TiKV 没有差别，但语句上下文的值不同。
+   3. **不经过 `runStmt` / `finishStmt`**：短路径返回的结果集不包 `execStmtResult`，语句结束时不调用 `finishStmt`（自动提交事务不在这里提交，Go 在 `ExecuteStmt` 中直接 `txn.changeToInvalid()`），也不做 `runStmt` 中的其他步骤（设置 `QueryString`、清除 `LastExecuteDDL`、保存 `origTxnCtx` 等）。新栈走完整的 `runStmt` → `Exec` → `finishStmt`。
+
+   新栈每次 EXECUTE 都新建点查计划和执行器；plan cache 本身（缓存计划）同样不移植：Go 打开 plan cache 时命中缓存的计划，新栈每次都重新规划（`lookupPlanCache` 永远未命中，D13.1 spec）。补上短路径（不缓存执行器，每次新建）记为 tasks.md 的 VS1-20b：它消除上面三处差别，也少走 `runStmt` / `finishStmt`，减少每条语句的分配。
 2. **plan cache 的 warning 可能不同**：Go 命中缓存后重建计划失败时会加 `skip plan-cache: plan rebuild failed, ...` 之类的 warning（`RebuildPlan4CachedPlan`），新栈从不命中缓存，所以没有这类 warning。只出现在缓存命中之后参数让计划变化的情形（例如前一次 EXECUTE 缓存了点查，这次参数超出列的范围）；这类语句 Go 的计划是 TableDual，新栈停在 TableDual 的边界（D10.1），不在点查的范围内。
 3. `QueryString` 写进会话的值表（`SessionContext::set_query_string`，新增的胶水方法）；现在没有读它的代码。
 

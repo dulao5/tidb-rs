@@ -38,6 +38,7 @@
 | VS1-17 | D06.3 第 2 部分（T8 / T9）；D06.5 `loadInfoSchema` / `tryLoadSchemaDiffs` / validator，由 PoC domain 驱动 | D06.3、D06.5 | breadth | 0.10 | — | schema 同步测试在新 InfoSchema 上通过 | 第 1 部分评审中：`InfoCache`、schema 加载（全量 + diff）、PoC domain 驱动、预处理查表；validator 等留给第 2 部分（VS1-17b，等 N11） |
 | VS1-18 | snapshot `Get` / `BatchGet` / `SetOption`、错误转换 | D07.1 | breadth | 0.04 | — | 故障场景点查与 PoC 相同 | 评审中（#221） |
 | VS1-20 | C2a 集成与 point_select 调优 | glue | depth | 0.08 | Phase 1 其余各项 | ab `strict` 的 `Point_Get` 100%；point_select ≥ 0.9× Go（1 / 8 线程）；ab 包含一个真正走到 `pseudoSelectivity` 唯一键查找的用例（UniqueID 与列 ID 的对应，D10.6 spec §5 第 1 条）；profile：记录每个点查计划的分配次数（每条语句重建 pseudo 表），据此决定是否缓存（D11.1 spec §3）；另记录 InfoSchema 查表的两处额外开销（D06.3 spec §11.2）：PREPARE 把 SQL 多解析一次、每条语句在规划前提前加载用到的表 | 未开始 |
+| VS1-20b | 点查短路径：`Compile` 中按 `IsSafeToReusePointGetExecutor` 的条件（非 stale read、自动提交、schema 版本相同）设 `PsStmt`，会话走 `ExecStmt.PointGet`；**不缓存执行器**，每次新建（缓存是 plan cache 的 A3） | D12.0、D05.3、D13.1 | depth | 0.03 | VS1-20 | 自动提交的预处理点查与 Go 一样走短路径：`Prepared` 为 false、优先级为 High、不经 `runStmt` / `finishStmt`（D05.3 spec §10.2 第 1 条）；ab `strict` 的预处理点查保持全部一致；记录每条语句的分配次数相对 VS1-20 的变化 | 未开始 |
 
 ## Phase 2：规划器主体
 
