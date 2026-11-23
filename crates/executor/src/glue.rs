@@ -186,6 +186,15 @@ pub trait PointGetExecutor {
     /// `partitionDefIdx != nil`.
     // glue: Go field PointGetExecutor.partitionDefIdx (D12.1)
     fn is_partitioned(&self) -> bool;
+    /// Drops what the executor holds of the statement that just finished (its statement
+    /// context, the base executor's runtime stats, the index usage reporter; the snapshot's
+    /// runtime stats stay, as in Go) before the executor is kept in the
+    /// prepared statement. Go's executor reaches the statement context through the session
+    /// and `Init` replaces the rest; here the executor holds the statement context itself
+    /// (`Arc`, N3), which the session writes after `Finish` (`FinishExecuteStmt`) and must
+    /// then own alone. `Init` builds all of it again.
+    // glue: N3 (the statement context an executor holds)
+    fn release_stmt_state(&mut self);
 }
 
 /// client-go `txnsnapshot.SnapshotRuntimeStats`: the RPC counts, backoffs and TiKV time

@@ -414,7 +414,7 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；�
 2. key 中的用户名、主机名为空：新会话还没有 `SessionVars.User`（会话只接受一个账号）。账号只有一个时与 Go 不可区分；会话携带用户身份时按决定 9 写入。
 3. 统计信息版本恒为 0（没有统计信息句柄，同 Go 只有 pseudo 时）；脏表为空（`TblInfo2UnionScan` 是写路径）；绑定为空（D13.2）。
 4. `SET GLOBAL` 还到不了新会话（全局值是编译时默认值，D06.5 / VS1-17），所以 `tidb_enable_instance_plan_cache` 与两个限额在 tidb-rs 上暂时改不了；钩子已接好。
-5. `IsSafeToReusePointGetExecutor`（会话私有的点查执行器复用，§1.1 最后一行）不在本阶段；每次 EXECUTE 仍新建点查执行器。
+5. `IsSafeToReusePointGetExecutor`（会话私有的点查执行器复用，§1.1 最后一行）不在本阶段；每次 EXECUTE 仍新建点查执行器。（更新：VS1-20b 移植了这个函数，自动提交的预处理点查照 Go 走点查短路径，MaxTS 时照 §1.1 最后一行复用会话自己预处理语句里的点查执行器，D05.3 spec §10。）
 6. §3.1 第 2 条（把 `check_model_mutability.py` 扩展到计划与表达式类型）未做；新增的内部可变字段都加了 `// interior:` 注释。
 7. §5.4 的 64 线程争用测量、命中路径计数分配器断言未做（见下面的数字）。
 

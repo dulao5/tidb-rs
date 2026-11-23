@@ -15,7 +15,9 @@ use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::mysql::NoPriority;
 use tidb_parser::ast;
+use tidb_planner::PhysicalKind;
 use tidb_planner::core::common_plans::Execute;
+use tidb_planner::core::plan_cache::is_safe_to_reuse_point_get_executor;
 use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
 use tidb_planner::core::preprocess::{
     InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, init_txn_context_provider,
@@ -130,10 +132,10 @@ impl Compiler {
     /// passes it). The statement is handed over (D05.3 spec §9.2): Go's preprocessor and
     /// optimizer write to the node they share by pointer; here they write to the statement
     /// `Compile` owns, which is then frozen into the `Arc` of `ExecStmt.StmtNode` (the session
-    /// hands the same `Arc` to the transaction manager). An `Execute` plan takes Go's path
-    /// where `IsSafeToReusePointGetExecutor` answers false (the reuse is the plan cache's,
-    /// A3; D05.3 spec §10).
-    // go: Compiler.Compile L2 (panics at the task boundary, M-PANIC; the statement text is passed in; IsSafeToReusePointGetExecutor is the plan cache's, A3)
+    /// hands the same `Arc` to the transaction manager). An `Execute` plan of a point get
+    /// takes the point plan short path when `IsSafeToReusePointGetExecutor` says so (D05.3
+    /// spec §10).
+    // go: Compiler.Compile L2 (panics at the task boundary, M-PANIC; the statement text is passed in)
     pub fn compile(
         &self,
         sctx: &mut dyn SessionContext,
@@ -203,15 +205,29 @@ impl Compiler {
         stmt.stmt_node = Some(stmt_node);
         stmt.output_names = names;
         stmt.ti = Arc::new(TelemetryInfo::default());
-        // Use cached plan if possible: Go asks `IsSafeToReusePointGetExecutor` whether the
-        // prepared statement's point get may replace an Execute plan (`stmt.PsStmt`, the
-        // point plan short path that reuses the cached executor). That reuse belongs to the
-        // plan cache (the plan-cache exception A3, not confirmed; the tracker lists the
-        // function as not ported), so the statement always takes Go's path where it answers
-        // false: `PsStmt` stays nil and `Exec` builds a new executor from the Execute plan
-        // (`inheritContextFromExecuteStmt`). The result is the same; only the reuse is
-        // missing (spec D05.3 §10).
-        let _ = &prepared_obj;
+        // Use cached plan if possible.
+        // The point plan short path (D05.3 spec §10.1): the session sees `PsStmt` and calls
+        // `ExecStmt.PointGet`, which reuses the point get executor kept in the prepared
+        // statement (MaxTS).
+        if let (Some(prepared_obj), Some(is)) = (&prepared_obj, &is) {
+            let safe = is_safe_to_reuse_point_get_executor(
+                sctx.get_session_vars(),
+                is.as_ref(),
+                &prepared_obj.lock(),
+            );
+            if safe
+                && let Some(exec) = &stmt.execute_plan
+                && let Some(point_plan) = exec
+                    .plan
+                    .as_ref()
+                    .filter(|p| p.kind() == PhysicalKind::PointGet)
+            {
+                // notify to re-use the cached plan
+                stmt.ps_stmt = Some(Arc::clone(prepared_obj));
+                stmt.plan = Some(Arc::clone(point_plan));
+                stmt.execute_plan = None;
+            }
+        }
 
         // `AdviseOptimizeWithPlan` of every transaction context provider looks through an
         // Execute plan to the plan inside it (`if execute, ok := plan.(*plannercore.Execute)`),

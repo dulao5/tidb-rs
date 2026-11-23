@@ -7,7 +7,7 @@
 sysbench 的预处理点查 `SELECT c FROM sbtest%u WHERE id=?`（二进制协议 PREPARE / EXECUTE），在 `--new-stack=strict` 和 `fallback` 下都由新栈执行到底：
 
 1. PREPARE：新栈准备（D05.3 第 2 部分、D13.1 的 `PlanCacheStmt`），列定义由新栈给出。
-2. EXECUTE：协议层把二进制参数交给新栈（`parseBinaryParams`）→ `ExecutePreparedStmt` → `Compile` → `planner.Optimize`（plan cache 未命中的路径）→ 快速路径用参数值建点查计划（D10.8 spec §4a）→ `Compile` 保留 Execute 计划 → `ExecStmt.Exec` 换成其中的点查、新建点查执行器（D05.3 spec §10）→ 会话按 Go 的事务流程在 ported 存储驱动上开启只读事务（D07.1 spec），自动提交的主键点查用 MaxTS 读 → 结果由移植的 `writeResultSet` / `DumpBinaryRow` 编码（D03.1）→ `finishStmt` 提交只读事务。
+2. EXECUTE：协议层把二进制参数交给新栈（`parseBinaryParams`）→ `ExecutePreparedStmt` → `Compile` → `planner.Optimize`（plan cache 未命中的路径）→ 快速路径用参数值建点查计划（D10.8 spec §4a）→ `Compile` 保留 Execute 计划 → `ExecStmt.Exec` 换成其中的点查、新建点查执行器（D05.3 spec §10；VS1-20b 之后自动提交时改走点查短路径 `ExecStmt.PointGet`，MaxTS 时复用预处理语句里的执行器）→ 会话按 Go 的事务流程在 ported 存储驱动上开启只读事务（D07.1 spec），自动提交的主键点查用 MaxTS 读 → 结果由移植的 `writeResultSet` / `DumpBinaryRow` 编码（D03.1）→ `finishStmt` 提交只读事务。
 
 一路上找到并修掉的缺口（按碰到的顺序），各自所在的 PR 见 §6：
 
@@ -89,6 +89,19 @@ sysbench 1.0.20 `oltp_point_select`，`--db-ps-mode=auto`，1 张表 1 万行（
 
 - **pseudo 表**（D11.1 spec §3）：预处理点查走快速路径，不建统计信息，也不建 pseudo 表；这一项在点查上不发生，要等非点查语句（范围查询）走完整规划器时再测。
 - **InfoSchema 查表的两处额外开销**（D06.3 spec §11.2）：PREPARE 把 SQL 多解析一次（PoC 与新栈各一次，只在 PREPARE 时）；每条语句在规划前提前加载用到的表（`load_stmt_tables`）。profile 中后者的样本可以忽略（10 秒内 1 个样本）。
+
+### 3.4 点查短路径之后（VS1-20b，2026-11-24）
+
+同样的方法（`oltp_point_select`，1 张表 1 万行、4 个 region，`fallback`，每轮 20 秒，3 轮平均，同一台机器同一个 playground；main 为 `f07d50d`；"短路径、不复用"是本项的第一版，"短路径 + 复用"是最终版）：
+
+| 线程 | Go 实例级缓存 ON | Go 默认 | tidb-rs main | 短路径、不复用 | 短路径 + 复用 | 复用 / Go ON | 复用 / Go 默认 |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 9123 | 9550 | 8372 | 8448 | 8597 | 0.94 | 0.90 |
+| 8 | 32527 | 32782 | 29003 | 29064 | 29743 | 0.91 | 0.91 |
+
+每轮之间的波动约 ±5%（Go 1 线程 8541–9424）。每条语句的分配次数（jemalloc `nrequests`，方法同 §3.1）：main 约 505，短路径不复用约 487，短路径 + 复用约 410；Go 实例级缓存 ON 约 228，默认约 200。
+
+复用第一次接上时 1 线程 QPS 约 28000（Go 的 3 倍）：client-rust 的 snapshot 缓存了读到的值，复用的执行器拿同一个 MaxTS snapshot 再读，根本不访问 TiKV，读到的是旧值（在 playground 上用 Go TiDB 改一行即可复现）。存储驱动改为 MaxTS 的读每次新建 client-rust snapshot 后，读到新值，QPS 回到上表（D07.1 spec §3）。
 
 ## 4. `pseudoSelectivity` 的唯一键查找（D10.6 spec §5 第 1 条）
 

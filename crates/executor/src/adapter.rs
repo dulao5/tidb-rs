@@ -141,7 +141,12 @@ impl RecordSet {
             // resetCTEStorageMap: the CTE storages are created by the CTE executors only,
             // which are not ported: there is nothing to reset.
             let executor = self.executor.take();
-            if let (Some(cache), Some(e)) = (self.point_get_cache.take(), executor) {
+            if let (Some(cache), Some(mut e)) = (self.point_get_cache.take(), executor) {
+                // The session writes the statement context after this (`FinishExecuteStmt`):
+                // the kept executor must not hold it (N3; `Init` builds it again).
+                if let Some(pg) = e.as_point_get() {
+                    pg.release_stmt_state();
+                }
                 crate::glue::set_cached_point_get_executor(&mut cache.lock(), Some(e));
             }
             self.exec_ctx = None;

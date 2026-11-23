@@ -793,6 +793,13 @@ impl glue::PointGetExecutor for PointGetExecutor {
     fn is_partitioned(&self) -> bool {
         self.partition_def_idx.is_some()
     }
+    // glue: N3 (see the trait)
+    fn release_stmt_state(&mut self) {
+        self.base.base.stats.release_stmt_ctx();
+        self.index_usage_reporter = None;
+        // `stats` (the snapshot's runtime stats) is kept, as Go: it is created once by the
+        // build, `Close` registers it again after a reuse, and it holds no statement context.
+    }
 }
 
 // go: shouldFillRowChecksum L1

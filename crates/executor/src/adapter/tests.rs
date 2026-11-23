@@ -325,6 +325,7 @@ impl PointGetExecutor for Numbers {
     fn is_partitioned(&self) -> bool {
         false
     }
+    fn release_stmt_state(&mut self) {}
 }
 
 #[async_trait]

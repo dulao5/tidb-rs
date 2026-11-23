@@ -623,8 +623,16 @@ impl KVSnapshot {
         &self,
         inner: &'s mut Option<(u64, tikv_client::Snapshot)>,
     ) -> &'s mut tikv_client::Snapshot {
-        let generation = self.opts.lock().generation;
-        if inner.as_ref().is_none_or(|(g, _)| *g != generation) {
+        let (generation, version) = {
+            let o = self.opts.lock();
+            (o.generation, o.version)
+        };
+        // A MaxTS read reads the latest committed value every time, and client-go caches no
+        // read (`s.mu.cached` is filled only by pessimistic locks). The client-rust snapshot
+        // keeps every value it read in its buffer, so a MaxTS snapshot that is read again (the
+        // point get executor a prepared statement keeps, `ExecStmt.PointGet`) would return
+        // the first value forever: build a new one for every MaxTS read.
+        if version == u64::MAX || inner.as_ref().is_none_or(|(g, _)| *g != generation) {
             *inner = Some((generation, self.new_client_snapshot()));
         }
         &mut inner.as_mut().expect("just built").1

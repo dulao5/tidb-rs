@@ -24,7 +24,7 @@ P1 收尾（#48）时，各块把剩下的函数移交给真正使用它们的�
 2. **chunk 分配器**：不用 `vars.GetChunkAllocator()`（`M-POOL`）。
 3. **panic**：Go 在 `Open` / `Next` / `Close`、`Exec`、`Compile` 中 recover；这里只在 task 边界 `catch_unwind`（`M-PANIC`）。
 4. **类型断言**：`*PointGetExecutor` 用 `Executor::as_point_get`（`M-IFACE`）；`testutil.MockPhysicalPlan` 是测试中的 `MockPhysicalPlan`。
-5. **点查执行器缓存**：Go 让 `PsStmt.PointGet.Executor` 和本次执行共用一个指针；这里执行器在本次执行结束（`recordSet.Finish`）后放回缓存。只在 MaxTS 时读写缓存，所以行为相同。
+5. **点查执行器缓存**：Go 让 `PsStmt.PointGet.Executor` 和本次执行共用一个指针；这里执行器在本次执行结束（`recordSet.Finish`）后放回缓存。只在 MaxTS 时读写缓存，所以行为相同。放回之前先丢掉它持有的语句上下文、运行时统计和索引使用统计（`release_stmt_state`，N3：会话在 `Finish` 之后还要独占地写语句上下文），下一次 `Init` 重建（D05.3 spec §10.1）。
 6. **暂用的类型**（`glue`）：`ResultField`（`resolve.ResultField`，D09.0）、`PlanCacheStmt`（只有 `PointGet.Executor`，D13.1）、`Plan` = 物理计划（VS1 只有物理计划）。
 
 不在只读节点路径上、未移植的分支（都不是 VS1-13 的函数）：悲观 DML / SELECT FOR UPDATE 的加锁重试（`blocked-by:X`）、外键级联、慢日志 / 语句摘要 / Top SQL（D14.2）、plan replayer、审计插件、runaway（N10）、Analyze（委托 Go TiDB）、`Execute` 计划（D13.1）。
