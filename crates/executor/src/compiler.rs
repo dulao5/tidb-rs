@@ -15,6 +15,7 @@ use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::mysql::NoPriority;
 use tidb_parser::ast;
+use tidb_planner::core::common_plans::Execute;
 use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
 use tidb_planner::core::preprocess::{
     InfoSchemaHandle, PreprocessOpt, PreprocessorReturn, init_txn_context_provider,
@@ -150,7 +151,7 @@ impl Compiler {
     /// on the new stack yet: the reuse of the prepared point get
     /// (`IsSafeToReusePointGetExecutor`) is the plan cache's (A3) and `ExecuteExec` is
     /// D12.12, so `Compile` stops where Go makes that decision (D05.3 spec §9.3).
-    // go: Compiler.Compile L2 (panics at the task boundary, M-PANIC; the statement text is passed in; an Execute plan is blocked-by:D13.1)
+    // go: Compiler.Compile L2 (panics at the task boundary, M-PANIC; the statement text is passed in; IsSafeToReusePointGetExecutor is the plan cache's, A3)
     pub fn compile(
         &self,
         sctx: &mut dyn SessionContext,
@@ -196,40 +197,48 @@ impl Compiler {
         if sctx.get_session_vars().stmt_ctx().priority == NoPriority {
             lower_priority = need_lower_priority(&final_plan);
         }
-        let (plan_any, exec_plan): (Arc<dyn std::any::Any + Send + Sync>, Option<Plan>) =
-            match final_plan {
-                OptimizedPlan::Physical(p) => (Arc::new(Arc::clone(&p)), Some(p)),
-                OptimizedPlan::Execute(exec) => {
-                    let inner = exec.plan.clone();
-                    (Arc::new(*exec), inner)
-                }
-            };
-        let is_execute =
-            prepared_obj.is_some() && plan_any.is::<tidb_planner::core::common_plans::Execute>();
+        let mut stmt = ExecStmt::new(text.to_owned(), None, is.clone());
+        let plan_any: Arc<dyn std::any::Any + Send + Sync> = match final_plan {
+            OptimizedPlan::Physical(p) => {
+                stmt.plan = Some(Arc::clone(&p));
+                Arc::new(p)
+            }
+            OptimizedPlan::Execute(exec) => {
+                // One Execute plan, shared by the statement context and the statement (Go
+                // stores the same pointer in both).
+                let exec: Arc<Execute> = Arc::from(exec);
+                stmt.execute_plan = Some(Arc::clone(&exec));
+                exec
+            }
+        };
         sctx.get_session_vars_mut()
             .stmt_ctx_mut()
             .set_plan(Some(plan_any));
-        let mut stmt = ExecStmt::new(text.to_owned(), None, is.clone());
         stmt.lower_priority = lower_priority;
         stmt.stmt_node = Some(stmt_node);
         stmt.output_names = names;
         stmt.ti = Arc::new(TelemetryInfo::default());
-        if is_execute {
-            // Use cached plan if possible: `IsSafeToReusePointGetExecutor` decides whether
-            // the prepared statement's point get replaces the Execute plan. It belongs to the
-            // plan cache (the plan-cache exception A3, not confirmed), and an Execute plan
-            // that is not replaced runs `ExecuteExec` (D12.12); neither is on the new stack.
-            // glue: blocked-by:D13.1 (IsSafeToReusePointGetExecutor: the plan-cache exception A3)
-            let _ = exec_plan;
-            return Err(blocked(
-                "D13.1",
-                "running an Execute plan (IsSafeToReusePointGetExecutor, the plan-cache exception A3)",
-            ));
-        }
-        stmt.plan = exec_plan;
+        // Use cached plan if possible: Go asks `IsSafeToReusePointGetExecutor` whether the
+        // prepared statement's point get may replace an Execute plan (`stmt.PsStmt`, the
+        // point plan short path that reuses the cached executor). That reuse belongs to the
+        // plan cache (the plan-cache exception A3, not confirmed; the tracker lists the
+        // function as not ported), so the statement always takes Go's path where it answers
+        // false: `PsStmt` stays nil and `Exec` builds a new executor from the Execute plan
+        // (`inheritContextFromExecuteStmt`). The result is the same; only the reuse is
+        // missing (spec D05.3 §10).
+        let _ = &prepared_obj;
 
-        // Perform optimization and initialization related to the transaction level.
-        sctx.advise_optimize_with_plan_and_then_warm_up(stmt.plan.as_ref().expect("plan"))?;
+        // `AdviseOptimizeWithPlan` of every transaction context provider looks through an
+        // Execute plan to the plan inside it (`if execute, ok := plan.(*plannercore.Execute)`),
+        // which is what the session's hook takes.
+        let advised = match (&stmt.plan, &stmt.execute_plan) {
+            (Some(p), _) => Some(p),
+            (None, Some(e)) => e.plan.as_ref(),
+            (None, None) => None,
+        };
+        if let Some(p) = advised {
+            sctx.advise_optimize_with_plan_and_then_warm_up(p)?;
+        }
 
         Ok(stmt)
     }

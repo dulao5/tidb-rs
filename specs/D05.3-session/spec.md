@@ -300,9 +300,9 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 
 | 语句 | 停在 | 说明 |
 |---|---|---|
-| 预处理的点查 `SELECT c FROM sbtest1 WHERE id=?` | 下面"Execute 计划"一行 | 快速路径用参数值建好点查计划（`ParamMarkerExpression` + `Eval`，D10.8 spec §4a，VS1-20）；之前停在 `getNameValuePairs`（`blocked-by:D13.1`） |
+| 预处理的点查 `SELECT c FROM sbtest1 WHERE id=?` | 不再停：快速路径用参数值建点查计划（D10.8 spec §4a），`Compile` 保留 Execute 计划，`Exec` 换成其中的点查并新建执行器（§10） | VS1-20 之前停在 `getNameValuePairs`（`blocked-by:D13.1`） |
 | 其他预处理 SELECT（如 `id > ?`） | 物理优化：统计信息推导（`blocked-by:D10.6`），之后依次是 FindBestTask（D10.2）、ResolveIndices（D10.9）、代价（D10.5） | 逻辑计划已用参数值建好；FindBestTask 正由另一项工作（VS1-28）移植 |
-| 物理优化完成后的 Execute 计划 | `Compile` 中，`blocked-by:D13.1` | Go 在这里用 `IsSafeToReusePointGetExecutor` 决定是否用预处理语句的点查执行器代替 Execute 计划，否则执行 `ExecuteExec`（D12.12）。前者属于 plan cache（A3 例外，未确认，tracker 豁免表记为不移植），后者未移植 |
+| 物理优化完成后的 Execute 计划 | 不再停（§10） | VS1-20 之前在 `Compile` 中停在 `blocked-by:D13.1` |
 | 路由器测试中的真实会话（替身存储，没有 coprocessor client） | fast plan 的下推检查，`blocked-by:D09.13`（规划上下文没有 store client） | 与原来相同的 1235 / 回退 |
 
 这些位置都在执行器打开之前：会话的 `rollbackOnError` 结束语句的事务，路由器恢复检查点后回退到 PoC，计数器（`executed_stmts`）不增加；panic 由路由器恢复成 1105（原有机制，不变）。默认的 `--new-stack=off` 不建新会话，不经过这里。
@@ -311,14 +311,41 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 
 - `execute_of_a_prepared_stmt_reaches_the_planner`：真实 PREPARE `id > ?` 后 EXECUTE，`Compile` 设置了 `IsReadOnly`，停在物理优化的边界；会话空闲、`executed_stmts` 为 0，参数值在会话里；恢复检查点后快照与之前逐字相同。
 - `execute_reads_the_parameters_through_the_session_expression_context`：int、字符串、NULL 三种参数，每次 EXECUTE 都停在物理优化的边界；会话里的参数值、会话交给规划器的规划上下文读到的参数值、规划器的表达式改写器在这个上下文里为 `?` 建的常量（值与类型：BIGINT、VARCHAR，NULL 按 Go 的 `InferParamTypeFromUnderlyingValue` 为 VARCHAR）都与参数一致。
-- `prepare_of_the_sbtest_point_select_builds_the_plan`：点查 EXECUTE 停在 `Compile` 的 Execute 计划（`D13.1`），参数已写入会话。测试表的 `id` 补上主键标志（原来 `pk_is_handle` 而列没有 `PriKeyFlag`，快速路径找不到 handle）。
+- `prepare_of_the_sbtest_point_select_builds_the_plan`：点查 EXECUTE 跑完（§10.3）。
 - `compile_error_rolls_back`、`every_fallback_point_restores_the_session`、`statement_paths_are_blocked`、路由器的 `phase0_session_falls_back_or_reports_1235`：普通 SELECT 改为停在 `D05.3`（§9.2）。
 - 编译器单测 `compile_plans_only_execute`。
 
-## 本文新增部分（§8、§9）所用 ID
+## 10. Execute 计划照 Go 的非缓存路径执行（VS1-20）
+
+### 10.1 做法
+
+预处理语句的 EXECUTE 在 `planner.Optimize` 之后得到一个 Execute 计划（`*plannercore.Execute`，里面是物理计划）。Go 的 `Compile`（`pkg/executor/compiler.go:136`）先问 `IsSafeToReusePointGetExecutor`：可以复用时把预处理语句的点查计划放进 `stmt.Plan`、设 `stmt.PsStmt`，会话随后走 `ExecStmt.PointGet` 的短路径（复用缓存的点查执行器）；否则 `stmt.Plan` 仍是 Execute 计划，会话走 `runStmt` → `ExecStmt.Exec`。
+
+复用属于 plan cache（A3 例外，未确认），tracker 记为不移植。所以新栈**总走 Go 中它回答 false 的那条路**：
+
+1. `Compile` 把 Execute 计划交给 `ExecStmt`（`execute_plan` 字段，对应 Go `Plan` 字段为 Execute 的情形），语句上下文的计划也是这个 Execute 计划（Go 两处存的是同一个指针，这里共享一个 `Arc`）。`AdviseOptimizeWithPlanAndThenWarmUp` 收到 Execute 里面的物理计划：Go 每个事务上下文 provider 的 `AdviseOptimizeWithPlan` 都先把 Execute 拆开（`if execute, ok := plan.(*plannercore.Execute)`），所以结果相同（自动提交的主键点查仍用 MaxTS，不取 TSO）。
+2. `ExecStmt.Exec` 开头的 `inheritContextFromExecuteStmt`（L1）：`QueryString` 设为 EXECUTE 节点的文本（二进制协议的 EXECUTE 节点没有文本，Go 也是空串），`OutputNames` 取 Execute 计划的，`isPreparedStmt = true`，`Plan` 换成 Execute 里面的物理计划，语句上下文的计划也换成它。
+3. 之后 `buildExecutor` 建的就是里面的计划（点查是 `buildPointGet`）。Go 的 `buildExecutor` 里 `ExecuteExec` 那一段只在计划仍是 Execute 时才走到；`Exec` 已经换掉，所以不会走到（Go 也一样），`ExecuteExec` 不需要移植。
+
+`ExecStmt.IsReadOnly`（原为 `blocked-by:D09.13` 的桩）改为 L1：`planner.IsReadOnly(a.StmtNode, vars)`。点查执行器打开之后，`finishStmt` 会问它；原来它在执行器打开之后报 `blocked`，路由器只能报"打开之后的 blocked"（bug 路径）。
+
+### 10.2 与 Go 的差异
+
+1. **不复用点查执行器**（A3）：每次 EXECUTE 都新建点查计划和执行器。结果与 Go 相同，只少了复用。plan cache 本身（缓存计划）同样不移植：Go 打开 plan cache 时命中缓存的计划，新栈每次都重新规划（`lookupPlanCache` 永远未命中，D13.1 spec）。
+2. **plan cache 的 warning 可能不同**：Go 命中缓存后重建计划失败时会加 `skip plan-cache: plan rebuild failed, ...` 之类的 warning（`RebuildPlan4CachedPlan`），新栈从不命中缓存，所以没有这类 warning。只出现在缓存命中之后参数让计划变化的情形（例如前一次 EXECUTE 缓存了点查，这次参数超出列的范围）；这类语句 Go 的计划是 TableDual，新栈停在 TableDual 的边界（D10.1），不在点查的范围内。
+3. `QueryString` 写进会话的值表（`SessionContext::set_query_string`，新增的胶水方法）；现在没有读它的代码。
+
+### 10.3 测试
+
+- `prepare_of_the_sbtest_point_select_builds_the_plan`：替身存储上 PREPARE + EXECUTE 点查：EXECUTE 返回结果集，`executed_stmts` 为 1（执行器建好并打开），语句上下文里是点查计划（`inheritContextFromExecuteStmt`），读替身存储得到 0 行，关闭后会话空闲。测试表的 `id` 原来没有主键标志（`pk_is_handle` 而列没有 `PriKeyFlag`，快速路径找不到 handle），已补上；替身快照的 `Get` 原来是 `unimplemented!`，改为"没有这一行"。
+- `autocommit_read_prefetches_tso_and_ends_idle`、`dropped_result_is_finished_before_the_next_statement`：`IsReadOnly` 不再报错，自动提交的只读事务正常结束（原来按"IsReadOnly 的错误"回滚）。
+- `PHYSICAL_BOUNDARIES` 去掉 `D13.1`（`Compile` 不再停），加上 `D12.1` / `D12.2`：`id > ?` 的计划现在能做完物理优化（FindBestTask 已合入），`Exec` 建表读执行器（VS1-34）或 Projection 执行器（参数为 NULL 时，VS1-35）时停在它们的边界，仍在执行器打开之前。
+
+## 本文新增部分（§8–§10）所用 ID
 
 - D00.1：上下文类型（exprctx / sessionexpr 的原归属）；D00.3：受限 SQL 执行器；D02.2：解析器的 AST 与 hint
 - D04.1：权限；D05.2：会话变量；D05.3：本块，会话（P1-1：sessionexpr；P1-2：会话变量 provider）；D05.4：sessiontxn
 - D06.4：表与 sequence；D08.9：用户变量函数；D09.2：表达式改写器；D09.13：优化器驱动
 - D10.2 / D10.5 / D10.6 / D10.9：FindBestTask / 代价 / 统计信息推导 / ResolveIndices；D12.12：预处理语句的执行器；D13.1：plan cache
-- VS1-28：FindBestTask 的移植工作项；A3：plan cache 例外；N2：会话上下文的三层结构
+- VS1-28：FindBestTask 的移植工作项；VS1-20：点查纵向集成；A3：plan cache 例外；N2：会话上下文的三层结构
+- D10.1：物理算子（TableDual）；D10.8：点查快速路径；D12.0：执行器框架

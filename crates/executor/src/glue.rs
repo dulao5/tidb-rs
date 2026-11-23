@@ -70,6 +70,12 @@ pub trait SessionContext: Send {
     /// `sctx.Txn(false)`: the start ts of the transaction when it is valid, `None` otherwise.
     // glue: interface method sessionctx.Context.Txn (VS1-14)
     fn txn_start_ts(&mut self) -> Result<Option<u64>, Error>;
+    /// `SetValue(sessionctx.QueryString, text)`: the current statement's text in the
+    /// session values. The default (contexts that are not a session) keeps nothing.
+    // glue: interface method sessionctx.Context.SetValue with the key sessionctx.QueryString
+    fn set_query_string(&mut self, text: String) {
+        let _ = text;
+    }
     /// `processinfoSetter.SetProcessInfo` when the session is one (Go type-asserts it).
     // glue: interface method processinfoSetter.SetProcessInfo (D05.3)
     fn set_process_info(&mut self, sql: &str, t: SystemTime, command: u8, max_execution_time: u64);
