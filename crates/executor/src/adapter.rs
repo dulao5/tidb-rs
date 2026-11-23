@@ -944,8 +944,8 @@ impl ExecStmt {
     /// a capture task matches. Here `Exec` and `PointGet` run it before the executor is built
     /// or the start ts is read: a statement that would be captured then stops at the
     /// boundary of the capture while the router can still fall back (nothing has run, the
-    /// session state is unchanged). Without a plan replayer handle (the new stack has none)
-    /// or without a task it does nothing, as in Go, so the decision is the same in both
+    /// session state is unchanged). Without a plan replayer handle (not ported: the new stack
+    /// has none) or without a task it does nothing, so the decision is the same in both
     /// places. The internal source type check (`InternalTxnStats`) is not needed: internal
     /// statements are restricted SQL, which does not reach the new stack.
     // go: ExecStmt.checkPlanReplayerCapture L2 (run before execution so that its boundary can fall back; the dump task's start ts is not known there)
@@ -1198,7 +1198,7 @@ fn check_plan_replayer_continues_capture_valid_stmt(stmt_node: Option<&ast::Stmt
 }
 
 /// checkPlanReplayerCaptureTask: sends a dump task when a capture task matches the
-/// statement's SQL and plan digests. Without a handle or a task it returns, as Go does; with
+/// statement's SQL and plan digests. Without a handle (not ported) or a task it returns; with
 /// tasks the match needs the digests, which are a boundary ([`plan_replayer_task_key`]).
 // go: checkPlanReplayerCaptureTask L2 (the digests and the dump task are a boundary; the start ts is the dump task's)
 fn check_plan_replayer_capture_task(sctx: &mut dyn SessionContext) -> Result<(), Error> {
@@ -1222,7 +1222,7 @@ fn check_plan_replayer_capture_task(sctx: &mut dyn SessionContext) -> Result<(),
 }
 
 /// checkPlanReplayerContinuesCapture: sends a dump task for every statement not captured
-/// yet in this session. Without a handle it returns, as Go does; with one the key needs the
+/// yet in this session. Without a handle (not ported) it returns; with one the key needs the
 /// digests, which are a boundary.
 // go: checkPlanReplayerContinuesCapture L2 (the digests and the dump task are a boundary; the start ts is the dump task's)
 fn check_plan_replayer_continues_capture(sctx: &mut dyn SessionContext) -> Result<(), Error> {
@@ -1256,11 +1256,15 @@ fn plan_replayer_task_key(sctx: &dyn SessionContext) -> Result<PlanReplayerTaskK
     ))
 }
 
-/// sendPlanReplayerDumpTask: unreachable while the digests are a boundary
-/// ([`plan_replayer_task_key`]).
-// go: sendPlanReplayerDumpTask L2 (unreachable: the task key is a boundary)
+/// sendPlanReplayerDumpTask: the dump task (the session bindings, the encoded plan, the
+/// handle's dump worker) is not ported. Not reached while the digests are a boundary
+/// ([`plan_replayer_task_key`]); once they are ported, a statement with a matching task
+/// stops here, still before it executes.
+// go: sendPlanReplayerDumpTask L2 (the dump task is not ported: a boundary)
 fn send_plan_replayer_dump_task(key: &PlanReplayerTaskKey) -> Result<(), Error> {
-    unreachable!("plan replayer dump task {key:?} without the digests")
+    let _ = key;
+    // glue: blocked-by:X (the plan replayer dump task: the handle's dump worker is not ported)
+    Err(blocked("X", "the plan replayer dump task"))
 }
 
 #[cfg(test)]

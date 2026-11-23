@@ -68,10 +68,10 @@ pub trait SessionContext: Send {
         None
     }
     /// `domain.GetDomain(sctx).GetPlanReplayerHandle()`: the plan replayer handle, whose task
-    /// collector loads the capture tasks from `mysql.plan_replayer_task`. None: the new stack
-    /// has no plan replayer handle (its collector and dump worker are not ported), so the
-    /// capture check of a statement finds nothing to do, as Go's does without a handle.
-    // glue: domain.Domain.GetPlanReplayerHandle (the plan replayer handle is not ported)
+    /// collector loads the capture tasks from `mysql.plan_replayer_task`. None: the plan
+    /// replayer handle is not ported (its task collector and dump worker), so no capture task
+    /// is ever loaded and statements on tidb-rs are not captured (docs/compatibility.md).
+    // glue: stub of domain.Domain.GetPlanReplayerHandle, blocked-by:X (the plan replayer handle is not ported: no capture task is loaded)
     fn get_plan_replayer_handle(&self) -> Option<Arc<dyn PlanReplayerHandle>> {
         None
     }
