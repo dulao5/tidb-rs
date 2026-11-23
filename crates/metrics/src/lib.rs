@@ -294,6 +294,36 @@ static PLAN_CACHE_MISS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
 });
 static PLAN_CACHE_MISS_PREPARED: LazyLock<IntCounter> =
     LazyLock::new(|| PLAN_CACHE_MISS_TOTAL.with_label_values(&["prepared"]));
+static PLAN_CACHE_HIT_PREPARED: LazyLock<IntCounter> =
+    LazyLock::new(|| PLAN_CACHE_TOTAL.with_label_values(&["prepared"]));
+static PLAN_CACHE_INSTANCE_MEMORY_USAGE: LazyLock<prometheus::GaugeVec> = LazyLock::new(|| {
+    register(
+        prometheus::GaugeVec::new(
+            Opts::new(
+                "plan_cache_instance_memory_usage",
+                "Total plan cache memory usage of all sessions in a instance",
+            )
+            .namespace("tidb")
+            .subsystem("server"),
+            &["type"],
+        )
+        .expect("valid metric"),
+    )
+});
+static PLAN_CACHE_INSTANCE_PLAN_NUM: LazyLock<prometheus::GaugeVec> = LazyLock::new(|| {
+    register(
+        prometheus::GaugeVec::new(
+            Opts::new(
+                "plan_cache_instance_plan_num_total",
+                "Counter of plan of all prepared plan cache in a instance",
+            )
+            .namespace("tidb")
+            .subsystem("server"),
+            &["type"],
+        )
+        .expect("valid metric"),
+    )
+});
 
 static MEMORY_USAGE: LazyLock<prometheus::GaugeVec> = LazyLock::new(|| {
     register(
@@ -527,6 +557,10 @@ fn register_all() {
     for t in ["prepared", "non-prepared", "non-prepared-unsupported"] {
         PLAN_CACHE_MISS_TOTAL.with_label_values(&[t]);
     }
+    PLAN_CACHE_INSTANCE_MEMORY_USAGE.with_label_values(&[" instance-plan-cache"]);
+    for t in [" instance-plan-cache", " instance-plan-cache-last-evict"] {
+        PLAN_CACHE_INSTANCE_PLAN_NUM.with_label_values(&[t]);
+    }
     LazyLock::force(&GET_TOKEN_DURATION);
     LazyLock::force(&MULTI_QUERY_NUM);
     LazyLock::force(&SLOW_QUERY_PROCESS_GENERAL);
@@ -731,10 +765,37 @@ pub fn slow_query(total: Duration) {
     SLOW_QUERY_PROCESS_GENERAL.observe(total.as_secs_f64());
 }
 
-/// A prepared statement was executed without a cached plan: this node has no plan cache, so
-/// every `COM_STMT_EXECUTE` is a miss (Go `plan_cache.go`: `GetPlanCacheMissCounter`).
+/// A prepared statement was executed without a cached plan (Go `plan_cache.go`:
+/// `GetPlanCacheMissCounter`; the PoC has no plan cache, so every PoC `EXECUTE` is one).
 pub fn plan_cache_miss_prepared() {
     PLAN_CACHE_MISS_PREPARED.inc();
+}
+
+/// A prepared statement used a cached plan (Go `plan_cache.go`: `GetPlanCacheHitCounter`).
+pub fn plan_cache_hit_prepared() {
+    PLAN_CACHE_HIT_PREPARED.inc();
+}
+
+/// The number of plans in the instance plan cache (Go `planCacheMetricsAndVars`; the label
+/// keeps Go's leading space).
+pub fn plan_cache_instance_num(n: i64) {
+    PLAN_CACHE_INSTANCE_PLAN_NUM
+        .with_label_values(&[" instance-plan-cache"])
+        .set(n as f64);
+}
+
+/// The memory of the instance plan cache (Go `planCacheMetricsAndVars`).
+pub fn plan_cache_instance_memory_usage(bytes: i64) {
+    PLAN_CACHE_INSTANCE_MEMORY_USAGE
+        .with_label_values(&[" instance-plan-cache"])
+        .set(bytes as f64);
+}
+
+/// The number of plans the last eviction removed (Go `planCacheEvictTrigger`).
+pub fn plan_cache_instance_last_evict(n: i64) {
+    PLAN_CACHE_INSTANCE_PLAN_NUM
+        .with_label_values(&[" instance-plan-cache-last-evict"])
+        .set(n as f64);
 }
 
 /// An executor Go counts as expensive was built.

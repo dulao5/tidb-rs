@@ -236,6 +236,18 @@ pub fn set_mpp_or_batch_cop_for_table_scan(cur_plan: &mut PhysicalPlanRef) {
 impl PhysicalPlan for PhysicalTableReader {
     crate::physical_plan_boilerplate!(TableReader, sp);
 
+    /// CloneForPlanCache of the instance plan cache: the children and the table plan must be
+    /// cacheable; `TableScanAndPartitionInfos` (MPP) makes it fail and is not carried
+    /// (A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalTableReader.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+            && self
+                .table_plan
+                .as_ref()
+                .is_none_or(|p| p.instance_cacheable())
+    }
+
     /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
     // glue: dispatch (Go PhysicalTableReader.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
     fn get_plan_cost_ver2(
@@ -503,6 +515,14 @@ impl PhysicalTableScan {
 impl PhysicalPlan for PhysicalTableScan {
     crate::physical_plan_boilerplate!(TableScan, sp);
 
+    /// CloneForPlanCache of the instance plan cache: `SampleInfo`, `runtimeFilterList` and
+    /// `AnnIndexExtra` make it fail; none of them is carried (TABLESAMPLE, runtime filters
+    /// and vector indexes are not ported), so only the children decide (A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalTableScan.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+    }
+
     /// `TP()` of the table scan (`explain.go`).
     // glue: dispatch (Go PhysicalTableScan.TP, ported in core/explain.rs)
     fn tp(&self) -> &'static str {
@@ -706,6 +726,13 @@ pub struct PhysicalProjection {
 impl PhysicalPlan for PhysicalProjection {
     crate::physical_plan_boilerplate!(Projection, sp);
 
+    /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
+    /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalProjection.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+    }
+
     /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
     // glue: dispatch (Go PhysicalProjection.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
     fn get_plan_cost_ver2(
@@ -791,6 +818,13 @@ impl PhysicalTopN {
 
 impl PhysicalPlan for PhysicalTopN {
     crate::physical_plan_boilerplate!(TopN);
+
+    /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
+    /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalTopN.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+    }
 
     /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
     // glue: dispatch (Go PhysicalTopN.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
@@ -891,6 +925,13 @@ impl PhysicalLimit {
 impl PhysicalPlan for PhysicalLimit {
     crate::physical_plan_boilerplate!(Limit, sp);
 
+    /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
+    /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalLimit.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+    }
+
     /// Clone implements op.PhysicalPlan interface.
     // go: PhysicalLimit.Clone L1 [M-CTX]
     fn clone_plan(&self) -> Result<PhysicalPlanRef, Error> {
@@ -932,6 +973,13 @@ pub struct PhysicalSort {
 
 impl PhysicalPlan for PhysicalSort {
     crate::physical_plan_boilerplate!(Sort);
+
+    /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
+    /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalSort.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+    }
 
     /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
     // glue: dispatch (Go PhysicalSort.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
@@ -1045,6 +1093,13 @@ pub struct PhysicalSelection {
 impl PhysicalPlan for PhysicalSelection {
     crate::physical_plan_boilerplate!(Selection);
 
+    /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
+    /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalSelection.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+    }
+
     /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
     // glue: dispatch (Go PhysicalSelection.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
     fn get_plan_cost_ver2(
@@ -1119,6 +1174,13 @@ pub struct PhysicalTableDual {
 
 impl PhysicalPlan for PhysicalTableDual {
     crate::physical_plan_boilerplate!(TableDual, sp);
+
+    /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
+    /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalTableDual.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+    }
 
     /// OutputNames returns the outputting names of each column.
     // go: PhysicalTableDual.OutputNames L1

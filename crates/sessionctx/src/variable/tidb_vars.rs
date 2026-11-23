@@ -312,8 +312,9 @@ pub static MaxAutoAnalyzeTime: AtomicI64 = AtomicI64::new(DefTiDBMaxAutoAnalyzeT
 /// variables for plan cache
 pub static PreparedPlanCacheMemoryGuardRatio: AtomicF64 =
     AtomicF64::new(DefTiDBPrepPlanCacheMemoryGuardRatio);
-/// EnableInstancePlanCache.
-pub static EnableInstancePlanCache: AtomicBool = AtomicBool::new(false);
+/// EnableInstancePlanCache: `true` by default in tidb-rs (Go `false`; the plan-cache
+/// exception A3 decision 1, [`super::variable::TIDB_RS_DEFAULT_OVERRIDES`]).
+pub static EnableInstancePlanCache: AtomicBool = AtomicBool::new(true);
 /// InstancePlanCacheReservedPercentage.
 pub static InstancePlanCacheReservedPercentage: AtomicF64 = AtomicF64::new(0.1);
 /// InstancePlanCacheMaxMemSize.

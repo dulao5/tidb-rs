@@ -22,7 +22,7 @@ use tidb_base::gofmt::Arg;
 use tidb_model::TableInfo;
 use tidb_parser::model::CIStr;
 use tidb_parser::{ParseOptions, parse};
-use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
+use tidb_planner::core::plan_cache_utils::{InfoSchemaLookup, check_types_compatibility4_pc};
 use tidb_planner::core::plan_cacheable_checker::is_ast_cacheable;
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 
@@ -94,6 +94,23 @@ enum Outcome {
     Blocked(String),
 }
 
+/// The field types of a `types_compat` record (`{tp, flag, flen, dec, cs, coll}` each).
+fn field_types(v: &Value) -> Vec<tidb_parser::types::FieldType> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            let mut t = tidb_parser::types::FieldType::new(f["tp"].as_u64().unwrap() as u8);
+            t.set_flag(f["flag"].as_u64().unwrap() as usize);
+            t.set_flen(f["flen"].as_i64().unwrap() as isize);
+            t.set_decimal(f["dec"].as_i64().unwrap() as isize);
+            t.set_charset(f["cs"].as_str().unwrap());
+            t.set_collate(f["coll"].as_str().unwrap());
+            t
+        })
+        .collect()
+}
+
 fn run(args: &[Value]) -> Outcome {
     let sess = &args[0];
     let sql = args[2].as_str().unwrap();
@@ -156,10 +173,20 @@ fn govec_plancache() {
     let (mut matched, mut unparsed, mut fails) = (0, Vec::new(), Vec::new());
     let mut blocked: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut n = 0;
+    let (mut types_matched, mut types_fails) = (0, Vec::new());
     for line in lines {
         n += 1;
         let rec: Value = serde_json::from_str(line).unwrap();
         let args = rec["args"].as_array().unwrap();
+        if rec["op"] == "types_compat" {
+            let got = check_types_compatibility4_pc(&field_types(&args[0]), &field_types(&args[1]));
+            if Value::Bool(got) == rec["out"] {
+                types_matched += 1;
+            } else {
+                types_fails.push(format!("{args:?}: go {}, got {got}", rec["out"]));
+            }
+            continue;
+        }
         let sql = args[2].as_str().unwrap();
         if rec["out"].get("parse").is_some() {
             // Go does not parse it either: nothing to compare.
@@ -176,6 +203,13 @@ fn govec_plancache() {
         }
     }
     assert_eq!(n as u64, header["records"].as_u64().unwrap());
+    eprintln!("plancache types_compat: {types_matched} matched");
+    assert!(
+        types_fails.is_empty(),
+        "{} types_compat records differ:\n{}",
+        types_fails.len(),
+        types_fails.join("\n")
+    );
     eprintln!(
         "plancache: {matched} matched, {} blocked ({}), {} not parsed by the Rust parser",
         blocked.values().map(Vec::len).sum::<usize>(),

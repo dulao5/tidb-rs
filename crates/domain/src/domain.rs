@@ -95,6 +95,9 @@ pub struct Domain {
     info_cache: InfoCache,
     /// `m`: Reload runs once at a time (held across the loads' awaits).
     m: tokio::sync::Mutex<()>,
+    /// `instancePlanCache`: set once by `InitInstancePlanCache` (plan_cache.rs).
+    pub(crate) instance_plan_cache:
+        std::sync::OnceLock<Arc<dyn tidb_sessionctx::context::InstancePlanCache>>,
 }
 
 /// `NewDomain`: the part schema loading needs (the store and the InfoCache).
@@ -107,6 +110,7 @@ pub fn new_domain(store: Arc<dyn Storage>) -> Domain {
         requirement,
         store,
         m: tokio::sync::Mutex::new(()),
+        instance_plan_cache: std::sync::OnceLock::new(),
     }
 }
 

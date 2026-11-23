@@ -606,6 +606,14 @@ pub trait PhysicalPlan: Any + Send + Sync {
         None
     }
 
+    /// Whether the plan can go into the instance plan cache (Go: its `CloneForPlanCache`
+    /// succeeds). `false` by default, as Go's `baseimpl.Plan.CloneForPlanCache`: only the
+    /// operators Go generates a clone for override it (A3 spec §3.3).
+    // glue: dispatch (Go baseimpl.Plan.CloneForPlanCache's success, A3 spec §3.3)
+    fn instance_cacheable(&self) -> bool {
+        false
+    }
+
     // ---- base.PhysicalPlan ----
 
     /// `GetPlanCostVer1`; `ctx` is Go's `p.SCtx()` (`M-CTX`).

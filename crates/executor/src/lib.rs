@@ -31,6 +31,7 @@ pub mod metrics;
 pub mod point_get;
 pub mod prepared;
 pub mod select;
+pub mod simple;
 pub mod table_reader;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testutil;

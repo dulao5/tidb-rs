@@ -171,6 +171,7 @@ impl SessionFactory for Factory {
             mdl: None,
             stmt: StmtMetrics::default(),
             router: None,
+            prev_stmt: router::LastStmtInfo::default(),
         };
         if self.new_stack != NewStackMode::Off {
             let domain = self
@@ -209,6 +210,9 @@ pub struct Session {
     collation: String,
     /// `@@character_set_results` (`None` = NULL: columns keep their own charset).
     results_charset: Option<String>,
+    /// The previous statement's state as the router last handed it over (VS1 plan §4.5):
+    /// what `@@last_plan_from_cache` and `@@last_plan_from_binding` read.
+    prev_stmt: router::LastStmtInfo,
     /// Prepared statements by id.
     stmts: HashMap<u32, Arc<Lowered>>,
     /// Phase timing (`timing`), off by default.
@@ -442,6 +446,8 @@ impl Session {
             autocommit: true,
             charset: &self.charset,
             collation: &self.collation,
+            last_plan_from_cache: self.prev_stmt.plan_from_cache,
+            last_plan_from_binding: self.prev_stmt.plan_from_binding,
         }
     }
 
@@ -1079,6 +1085,10 @@ impl router::PocEngine for Session {
 
     fn close(&mut self, stmt_id: u32) {
         self.stmts.remove(&stmt_id);
+    }
+
+    fn set_prev_stmt(&mut self, last: &router::LastStmtInfo) {
+        self.prev_stmt = last.clone();
     }
 }
 

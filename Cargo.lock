@@ -2617,6 +2617,7 @@ dependencies = [
  "tidb-base",
  "tidb-distsql",
  "tidb-domain",
+ "tidb-executor",
  "tidb-expression",
  "tidb-infoschema",
  "tidb-meta",
@@ -3767,6 +3768,7 @@ dependencies = [
  "tidb-base",
  "tidb-infoschema",
  "tidb-kv",
+ "tidb-metrics",
  "tidb-model",
  "tidb-parser",
  "tidb-sessionctx",
@@ -4004,10 +4006,13 @@ dependencies = [
 name = "tidb-planner"
 version = "0.0.0"
 dependencies = [
+ "crossbeam-utils",
  "flate2",
+ "foldhash",
  "log",
  "parking_lot 0.12.5",
  "serde_json",
+ "smallvec",
  "tidb-base",
  "tidb-chunk",
  "tidb-codec",
@@ -4018,6 +4023,7 @@ dependencies = [
  "tidb-infoschema",
  "tidb-kv",
  "tidb-memory",
+ "tidb-metrics",
  "tidb-model",
  "tidb-parser",
  "tidb-sessionctx",

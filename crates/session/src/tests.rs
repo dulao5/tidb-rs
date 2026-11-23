@@ -1018,7 +1018,7 @@ fn clean_retry_info_deletes_the_first_closed_stmt_plan_each_time() {
             stmt_db: "test".to_owned(),
             ..Default::default()
         };
-        tidb_planner::core::plan_cache_utils::new_plan_cache_key(&st)
+        tidb_planner::core::plan_cache_utils::session_plan_cache_key(&st)
             .unwrap()
             .0
     };
@@ -1929,4 +1929,290 @@ fn restore_writes_back_into_the_shared_cells() {
         .get_user_var_val("a")
         .unwrap();
     assert_eq!(a.get_int64(), 1);
+}
+
+// ---------------------------------------------------------------- instance plan cache
+
+/// An InfoSchema (version 1) with `test.uk1 (id BIGINT PRIMARY KEY, k INT NOT NULL, c CHAR,
+/// UNIQUE KEY uk(k))`.
+fn uk_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
+    use tidb_model::{ColumnInfo, DBInfo, IndexColumn, IndexInfo, StatePublic, TableInfo};
+    use tidb_parser::model::CIStr;
+    use tidb_parser::types::FieldType;
+    let col = |id: i64, name: &str, tp: u8, flag: usize| {
+        let mut field_type = FieldType::new(tp);
+        field_type.add_flag(flag);
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset: (id - 1) as isize,
+            field_type,
+            state: StatePublic,
+            ..Default::default()
+        })
+    };
+    use tidb_base::mysql::{NotNullFlag, PriKeyFlag, UniqueKeyFlag};
+    let t = TableInfo {
+        id: 111,
+        dbid: 2,
+        name: CIStr::new("uk1"),
+        columns: Some(vec![
+            col(
+                1,
+                "id",
+                tidb_base::mysql::TypeLonglong,
+                PriKeyFlag | NotNullFlag,
+            ),
+            col(
+                2,
+                "k",
+                tidb_base::mysql::TypeLong,
+                UniqueKeyFlag | NotNullFlag,
+            ),
+            col(3, "c", tidb_base::mysql::TypeString, 0),
+        ]),
+        indices: Some(vec![Arc::new(IndexInfo {
+            id: 1,
+            name: CIStr::new("uk"),
+            table: CIStr::new("uk1"),
+            columns: Some(vec![IndexColumn {
+                name: CIStr::new("k"),
+                offset: 1,
+                length: -1,
+                ..Default::default()
+            }]),
+            state: StatePublic,
+            unique: true,
+            ..Default::default()
+        })]),
+        pk_is_handle: true,
+        state: StatePublic,
+        version: 5,
+        max_column_id: 3,
+        max_index_id: 1,
+        ..Default::default()
+    };
+    let mut db = DBInfo {
+        id: 2,
+        name: CIStr::new("test"),
+        state: StatePublic,
+        ..Default::default()
+    };
+    db.deprecated.tables = Some(vec![Arc::new(t)]);
+    let mut b = tidb_infoschema::new_builder(None, None, tidb_infoschema::new_data());
+    block_on(b.init_with_db_infos(vec![db], vec![], vec![], 1)).unwrap();
+    Arc::new(block_on(b.build(1)))
+}
+
+/// A session over `store` and `is` that uses `cache`, with the prepared plan cache on
+/// (Go's default; the test sessions do not load the global values).
+fn cached_session(
+    store: &Arc<MockStore>,
+    is: Arc<tidb_infoschema::InfoSchemaV2>,
+    cache: &Arc<dyn tidb_sessionctx::context::InstancePlanCache>,
+) -> Session {
+    tidb_sessionctx::variable::tidb_vars::EnableMDL.store(true, SeqCst);
+    let mut s = session(store);
+    s.set_domain_info_schema(is);
+    s.vars_mut().current_db = "test".to_owned();
+    s.vars_mut().enable_prepared_plan_cache = true;
+    s.set_instance_plan_cache(Some(Arc::clone(cache)));
+    s
+}
+
+/// Runs a prepared statement to the end; returns `FoundInPlanCache`.
+fn execute_to_end(s: &mut Session, stmt_id: u32, param: tidb_types::datum::Datum) -> bool {
+    let mut rs = block_on(s.execute_prepared_stmt(stmt_id, vec![param]))
+        .unwrap()
+        .expect("a result set");
+    let found = s.vars().found_in_plan_cache;
+    let mut chk = rs.new_chunk().unwrap();
+    block_on(rs.next(s, &mut chk)).unwrap();
+    block_on(rs.close(s)).unwrap();
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+    found
+}
+
+/// The structural hashes of every plan in the cache.
+fn cached_hashes(cache: &Arc<dyn tidb_sessionctx::context::InstancePlanCache>) -> Vec<u64> {
+    let c = cache
+        .as_any()
+        .downcast_ref::<tidb_planner::core::plan_cache_instance::InstancePlanCacheImpl>()
+        .unwrap();
+    let mut v: Vec<u64> = c
+        .values()
+        .iter()
+        .map(|v| tidb_planner::core::plan_cache_heap_size::plan_structure_hash(v.plan.as_ref()))
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+fn new_test_cache() -> Arc<dyn tidb_sessionctx::context::InstancePlanCache> {
+    Arc::new(tidb_planner::core::plan_cache_instance::new_instance_plan_cache(90 << 20, 100 << 20))
+}
+
+/// The instance plan cache (the plan-cache exception A3, first stage) on the sysbench point
+/// select: the first EXECUTE optimizes and puts the plan, the next ones hit, also in another
+/// session (the cache is per instance); a hit with another parameter copies only the point
+/// get (path copying), one with the cached parameter copies nothing; executing the cached
+/// plan leaves it unchanged (structural hash).
+#[test]
+fn instance_plan_cache_point_get_is_shared_by_sessions() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let cache = new_test_cache();
+    let mut a = cached_session(&store, sbtest_info_schema(), &cache);
+    let mut b = cached_session(&store, sbtest_info_schema(), &cache);
+    let int = tidb_types::datum::new_int_datum;
+
+    let pa = block_on(a.prepare_stmt(SBTEST_POINT)).unwrap();
+    assert!(
+        !execute_to_end(&mut a, pa.stmt_id, int(1)),
+        "the first EXECUTE optimizes"
+    );
+    assert_eq!(cache.size(), 1);
+    assert!(cache.mem_usage() > 0);
+    let before = cached_hashes(&cache);
+
+    let copies = tidb_planner::physicalop::clone_node_calls();
+    assert!(
+        execute_to_end(&mut a, pa.stmt_id, int(1)),
+        "same parameter: a hit"
+    );
+    assert_eq!(tidb_planner::physicalop::clone_node_calls() - copies, 0);
+    let copies = tidb_planner::physicalop::clone_node_calls();
+    assert!(
+        execute_to_end(&mut a, pa.stmt_id, int(2)),
+        "another parameter: a hit"
+    );
+    assert_eq!(
+        tidb_planner::physicalop::clone_node_calls() - copies,
+        1,
+        "the point get only"
+    );
+
+    // Another session: its first EXECUTE hits the plan the first session put.
+    let pb = block_on(b.prepare_stmt(SBTEST_POINT)).unwrap();
+    assert!(execute_to_end(&mut b, pb.stmt_id, int(3)));
+    assert_eq!(cache.size(), 1);
+    assert_eq!(
+        cached_hashes(&cache),
+        before,
+        "the cached plan is never written"
+    );
+
+    // A parameter of another type is another plan of the same key.
+    assert!(!execute_to_end(
+        &mut b,
+        pb.stmt_id,
+        tidb_types::datum::new_string_datum("4")
+    ));
+    assert_eq!(cache.size(), 2);
+
+    // ADMIN FLUSH INSTANCE PLAN_CACHE (A3 decision 8): the next EXECUTE optimizes again.
+    assert_eq!(cache.delete_all(), 2);
+    assert!(!execute_to_end(&mut a, pa.stmt_id, int(1)));
+    assert!(execute_to_end(&mut b, pb.stmt_id, int(1)));
+
+    // tidb_enable_prepared_plan_cache = OFF in a session: no lookup there.
+    b.vars_mut().enable_prepared_plan_cache = false;
+    assert!(!execute_to_end(&mut b, pb.stmt_id, int(1)));
+    a.drop_prepared_stmt(pa.stmt_id).unwrap();
+    b.drop_prepared_stmt(pb.stmt_id).unwrap();
+}
+
+/// A3 spec §2.3 row 9a: the unique-index point get executor converts the index values into
+/// its own vector (`EncodeUniqueIndexValuesForKey`), never into the cached plan's
+/// `IndexValues`: after executing a cached plan with a parameter that needs a conversion
+/// (a string for an INT column), the cached plan's structural hash is unchanged.
+#[test]
+fn unique_index_point_get_does_not_write_the_cached_index_values() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let cache = new_test_cache();
+    let mut s = cached_session(&store, uk_info_schema(), &cache);
+    let p = block_on(s.prepare_stmt("SELECT c FROM uk1 WHERE k = ?")).unwrap();
+    let int = tidb_types::datum::new_int_datum;
+    assert!(!execute_to_end(&mut s, p.stmt_id, int(7)));
+    assert_eq!(cache.size(), 1, "a unique-index point get is cacheable");
+    let before = cached_hashes(&cache);
+    assert!(execute_to_end(&mut s, p.stmt_id, int(8)));
+    assert!(execute_to_end(&mut s, p.stmt_id, int(7)));
+    assert_eq!(cached_hashes(&cache), before);
+    // A string parameter: another plan; executing it twice leaves both plans unchanged.
+    let str_ = tidb_types::datum::new_string_datum;
+    assert!(!execute_to_end(&mut s, p.stmt_id, str_("9")));
+    let before = cached_hashes(&cache);
+    assert!(execute_to_end(&mut s, p.stmt_id, str_("10")));
+    assert_eq!(cached_hashes(&cache), before);
+    s.drop_prepared_stmt(p.stmt_id).unwrap();
+}
+
+/// Counts the bytes this thread frees while [`FREED`] is armed (the accuracy test of the
+/// plan cache's memory accounting).
+struct CountingAlloc;
+
+thread_local! {
+    static FREED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+// SAFETY: forwards every call to the system allocator unchanged.
+#[allow(unsafe_code)]
+unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: the caller's contract is the system allocator's.
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        let _ = FREED.try_with(|f| {
+            if let Some(n) = f.get() {
+                f.set(Some(n + layout.size() as u64));
+            }
+        });
+        // SAFETY: the caller's contract is the system allocator's.
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOC: CountingAlloc = CountingAlloc;
+
+/// A3 spec §3.5, §5.3: the bytes an entry is charged (`PlanCacheValue.MemoryUsage`) are the
+/// bytes freed when its last reference goes (the InfoSchema, whose metadata the plan shares
+/// and is not charged for, stays alive), within 10% (spec §5.3).
+#[test]
+fn plan_cache_entry_memory_is_what_its_drop_frees() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    for (is, sql) in [
+        (sbtest_info_schema(), SBTEST_POINT),
+        (uk_info_schema(), "SELECT c FROM uk1 WHERE k = ?"),
+    ] {
+        let cache = new_test_cache();
+        // The InfoSchema outlives the entry: its metadata (TableInfo, ...) is not the entry's.
+        let mut s = cached_session(&store, Arc::clone(&is), &cache);
+        let p = block_on(s.prepare_stmt(sql)).unwrap();
+        execute_to_end(&mut s, p.stmt_id, tidb_types::datum::new_int_datum(1));
+        let values = cache
+            .as_any()
+            .downcast_ref::<tidb_planner::core::plan_cache_instance::InstancePlanCacheImpl>()
+            .unwrap()
+            .values();
+        assert_eq!(values.len(), 1);
+        drop(s);
+        cache.delete_all();
+        let v = values.into_iter().next().unwrap();
+        assert_eq!(Arc::strong_count(&v), 1, "{sql}");
+        assert_eq!(Arc::strong_count(&v.plan), 1, "{sql}");
+        let charged = v.memory_usage() as f64;
+        FREED.with(|f| f.set(Some(0)));
+        drop(v);
+        let freed = FREED.with(|f| f.replace(None)).unwrap() as f64;
+        eprintln!("{sql}: charged {charged} bytes, freed {freed} bytes");
+        assert!(
+            (charged - freed).abs() <= 0.10 * freed,
+            "{sql}: charged {charged}, freed {freed}"
+        );
+    }
 }

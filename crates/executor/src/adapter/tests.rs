@@ -123,6 +123,7 @@ impl SessionContext for MockSession {
             has_dirty_content: None,
             advise_txn_warmup: None,
             domain_info_schema: None,
+            instance_plan_cache: None,
         }
     }
     fn get_snapshot_with_stmt_read_ts(

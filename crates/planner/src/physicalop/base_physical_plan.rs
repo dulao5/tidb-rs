@@ -87,8 +87,16 @@ pub struct BasePhysicalPlan {
     pub children: Vec<PhysicalPlanRef>,
 
     /// used by the new cost interface: `PlanCostInit`, `PlanCost`, `PlanCostVer2`. Written
-    /// through `&self` (see the module doc).
+    /// through `&self` (see the module doc), never on a sealed node.
+    // interior: (c) the cost memo (A3 spec §3.6: not written once the node is sealed)
     pub cost: Mutex<PlanCostCache>,
+
+    /// Set when the plan goes into the instance plan cache (A3 spec §3.6): from then on the
+    /// node is shared by sessions, and a cost computed on it is returned without being
+    /// written into the memo (Go writes it into a clone it then drops). A copy made by
+    /// `clone_node` is not sealed.
+    // interior: (a) written once before the plan is published, read afterwards
+    sealed: std::sync::atomic::AtomicBool,
 
     /// probeParents records the IndexJoins and Applys with this operator in their inner children.
     /// Please see comments in op.PhysicalPlan for details.
@@ -109,6 +117,7 @@ impl Clone for BasePhysicalPlan {
             children_req_props: self.children_req_props.clone(),
             children: self.children.clone(),
             cost: Mutex::new(self.cost.lock().clone()),
+            sealed: std::sync::atomic::AtomicBool::new(false),
             probe_parents: self.probe_parents.clone(),
             tiflash_fine_grained_shuffle_stream_count: self
                 .tiflash_fine_grained_shuffle_stream_count,
@@ -126,6 +135,20 @@ impl std::fmt::Debug for dyn PhysicalPlan {
 // ******************************* start implementation of Plan interface *******************************
 
 impl BasePhysicalPlan {
+    /// Seals the node (A3 spec §3.6): it is in the instance plan cache.
+    // glue: A3 spec §3.6
+    pub fn seal(&self) {
+        self.sealed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether the node is in the instance plan cache (A3 spec §3.6): its cost memo is not
+    /// written.
+    // glue: A3 spec §3.6
+    pub fn is_sealed(&self) -> bool {
+        self.sealed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// ExplainInfo implements Plan ExplainInfo interface.
     // go: BasePhysicalPlan.ExplainInfo L1
     pub fn explain_info(&self) -> String {
@@ -184,6 +207,9 @@ impl BasePhysicalPlan {
             let child_cost = child.get_plan_cost_ver1(ctx, task_type, option)?;
             plan_cost += child_cost;
         }
+        if self.is_sealed() {
+            return Ok(plan_cost); // A3 spec §3.6: computed, not written
+        }
         let mut c = self.cost.lock();
         c.plan_cost = plan_cost;
         c.plan_cost_init = true;
@@ -210,12 +236,16 @@ impl BasePhysicalPlan {
             let child_cost = child.get_plan_cost_ver2(ctx, task_type, option)?;
             child_costs.push(child_cost);
         }
-        let mut c = self.cost.lock();
-        if child_costs.is_empty() {
-            c.plan_cost_ver2 = new_zero_cost_ver2(trace_cost(Some(option)));
+        let cost = if child_costs.is_empty() {
+            new_zero_cost_ver2(trace_cost(Some(option)))
         } else {
-            c.plan_cost_ver2 = sum_cost_ver2(&child_costs);
+            sum_cost_ver2(&child_costs)
+        };
+        if self.is_sealed() {
+            return Ok(cost); // A3 spec §3.6: computed, not written
         }
+        let mut c = self.cost.lock();
+        c.plan_cost_ver2 = cost;
         c.plan_cost_init = true;
         Ok(c.plan_cost_ver2.clone())
     }

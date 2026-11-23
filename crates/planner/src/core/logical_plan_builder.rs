@@ -1271,13 +1271,21 @@ fn check_order_by_in_distinct(_idx: usize, _length: usize) -> Result<(), Error> 
 }
 
 /// CheckParamTypeInt64orUint64 check param type for plan cache limit, only allow int64 and
-/// uint64 now. The Rust parameter marker carries no value (the plan cache, D13.1).
-// glue: stub of CheckParamTypeInt64orUint64, blocked-by:D13.1 (the value of a parameter marker in EXECUTE)
-pub fn check_param_type_int64_or_uint64() -> Result<(bool, u64), Error> {
-    Err(blocked(
-        "D13.1",
-        "CheckParamTypeInt64orUint64 (the value of a parameter marker)",
-    ))
+/// uint64 now. The Rust parameter marker carries no value: the caller passes the parameter's
+/// value (`SessionVars.PlanCacheParams` at the marker's order).
+// go: CheckParamTypeInt64orUint64 L2 (the parameter's value instead of the marker)
+pub fn check_param_type_int64_or_uint64(val: &tidb_types::datum::Datum) -> (bool, u64) {
+    use tidb_types::datum::{KindInt64, KindUint64};
+    let k = val.kind();
+    if k == KindInt64 {
+        let v = val.get_int64();
+        if v >= 0 {
+            return (true, v as u64);
+        }
+    } else if k == KindUint64 {
+        return (true, val.get_uint64());
+    }
+    (false, 0)
 }
 
 // ---------------------------------------------------------------- HAVING / ORDER BY

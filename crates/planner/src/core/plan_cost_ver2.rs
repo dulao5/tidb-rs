@@ -106,6 +106,9 @@ fn cached_cost(base: &BasePhysicalPlan, option: &PlanCostOption) -> Option<CostV
 /// `p.PlanCostVer2 = cost; p.PlanCostInit = true; return p.PlanCostVer2, nil`.
 // glue: the memo write of every GetPlanCostVer2 (M-LOCK, see the module doc)
 fn set_cost(base: &BasePhysicalPlan, cost: CostVer2) -> Result<CostVer2, Error> {
+    if base.is_sealed() {
+        return Ok(cost); // the plan-cache exception A3 spec §3.6: computed, not written
+    }
     let mut c = base.cost.lock();
     c.plan_cost_ver2 = cost.clone();
     c.plan_cost_init = true;

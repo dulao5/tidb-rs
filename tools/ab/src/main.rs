@@ -91,6 +91,12 @@ struct Cli {
     /// rulings-hits.tsv in --out-dir.
     #[arg(long, global = true)]
     rulings: Option<PathBuf>,
+    /// After every prepared EXECUTE, read `@@last_plan_from_cache` on both sides (right
+    /// after it, as Go resets it with the next statement) and compare it (the plan cache,
+    /// A3). The `SHOW WARNINGS` of such a run follows that read, so the warning texts are
+    /// those of the read: compare warnings in a run without this flag.
+    #[arg(long, global = true)]
+    plan_cache: bool,
     #[command(subcommand)]
     workload: Workload,
 }
@@ -178,6 +184,10 @@ impl Counts {
 }
 
 struct Report {
+    /// `--plan-cache`: per template, (equal, A from cache, B from cache, compared).
+    plan_cache: BTreeMap<String, [u64; 4]>,
+    /// `--plan-cache`: the statements whose `@@last_plan_from_cache` differs.
+    plan_cache_diffs: Vec<String>,
     counts: BTreeMap<(String, &'static str), Counts>,
     skipped: BTreeMap<String, u64>,
     mismatches: BufWriter<File>,
@@ -366,6 +376,19 @@ impl Report {
         for (why, n) in &self.skipped {
             println!("skipped {n} statement(s): {why}");
         }
+        if !self.plan_cache.is_empty() {
+            println!();
+            println!(
+                "{:<20} {:>8} {:>8} {:>8} {:>8}   (@@last_plan_from_cache after EXECUTE)",
+                "template", "equal", "A=1", "B=1", "compared"
+            );
+            for (t, c) in &self.plan_cache {
+                println!("{:<20} {:>8} {:>8} {:>8} {:>8}", t, c[0], c[1], c[2], c[3]);
+            }
+            for d in &self.plan_cache_diffs {
+                println!("last_plan_from_cache differs: {d}");
+            }
+        }
         all
     }
 }
@@ -520,6 +543,9 @@ async fn run_case(
         let mark = probe.mark(b).await;
         let (pb, ob) = b.prepared(&case.sql, &params).await;
         let route = probe.route(b, mark).await;
+        if cli.plan_cache {
+            plan_cache_check(case, &params, a, b, report).await;
+        }
         let mut v = judge(case, &case.sql, Rerun::Prepared(&params), a, b, &oa, &ob).await;
         if let (Some(x), Some(y)) = (&pa, &pb) {
             let mut d = prepare_diffs(x, y);
@@ -547,6 +573,34 @@ async fn run_case(
         if let Err(e) = report.record(case, "ps", &case.sql, ra, rb, &v) {
             eprintln!("cannot write report: {e}");
         }
+    }
+}
+
+/// `--plan-cache`: `@@last_plan_from_cache` right after the EXECUTE, on both sides.
+async fn plan_cache_check(
+    case: &Case,
+    params: &[mysql_async::Value],
+    a: &mut Side,
+    b: &mut Side,
+    report: &mut Report,
+) {
+    const SQL: &str = "SELECT @@last_plan_from_cache";
+    let value = |o: Outcome| match o {
+        Outcome::Rows { rows, .. } => rows.first().and_then(|r| r.first()).cloned(),
+        _ => None,
+    };
+    let (va, vb) = (value(a.query(SQL).await), value(b.query(SQL).await));
+    let c = report.plan_cache.entry(case.template.clone()).or_default();
+    c[3] += 1;
+    let one = |v: &Option<String>| v.as_deref().is_some_and(|v| v.trim_matches('"') == "1");
+    c[1] += u64::from(one(&va));
+    c[2] += u64::from(one(&vb));
+    if va == vb {
+        c[0] += 1;
+    } else {
+        report
+            .plan_cache_diffs
+            .push(format!("{} {:?}: A {va:?}, B {vb:?}", case.sql, params));
     }
 }
 
@@ -749,6 +803,8 @@ async fn run(cli: Cli) -> Result<RunResult, String> {
             .map_err(|e| format!("{}: {e}", p.display()))
     };
     let mut report = Report {
+        plan_cache: BTreeMap::new(),
+        plan_cache_diffs: Vec::new(),
         counts: BTreeMap::new(),
         skipped: BTreeMap::new(),
         mismatches: open("mismatches.jsonl")?,

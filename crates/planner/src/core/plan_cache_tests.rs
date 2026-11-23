@@ -257,6 +257,7 @@ fn miss_path_checks_the_new_plan() {
     let mut s = stmt("select ?", vec![7], 1);
     let mut calls = 0;
     let (p, _) = get_plan_from_plan_cache(
+        &test_parts(),
         &mut v,
         false,
         &Is(1),
@@ -286,9 +287,16 @@ fn miss_path_checks_the_new_plan() {
     let mut s = stmt("select 1", vec![], 1);
     s.stmt_cacheable = false;
     s.uncacheable_reason = "query has 'version' is un-cacheable".to_owned();
-    get_plan_from_plan_cache(&mut v, false, &Is(1), None, &mut s, &[], &mut |_, _, _| {
-        Ok((dual(), Vec::new()))
-    })
+    get_plan_from_plan_cache(
+        &test_parts(),
+        &mut v,
+        false,
+        &Is(1),
+        None,
+        &mut s,
+        &[],
+        &mut |_, _, _| Ok((dual(), Vec::new())),
+    )
     .unwrap();
     assert!(!v.stmt_ctx().plan_cache_tracker.use_cache());
     assert_eq!(
@@ -300,6 +308,7 @@ fn miss_path_checks_the_new_plan() {
     let mut v = vars();
     let mut s = stmt("select 1", vec![], 1);
     get_plan_from_plan_cache(
+        &test_parts(),
         &mut v,
         false,
         &Is(1),
@@ -689,6 +698,7 @@ fn test_parts() -> crate::planctx::SessionPlanCtx {
         has_dirty_content: Some(Arc::new(|_| false)),
         advise_txn_warmup: None,
         domain_info_schema: None,
+        instance_plan_cache: None,
     }
 }
 

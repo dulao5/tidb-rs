@@ -167,6 +167,11 @@ fn registry_out(sv: &SysVar) -> Value {
             assert_eq!(sv.value, go_goarch());
             "<GOARCH>".to_owned()
         }
+        // A default tidb-rs changes on purpose (TIDB_RS_DEFAULT_OVERRIDES): compared as Go's.
+        "tidb_enable_instance_plan_cache" => {
+            assert_eq!(sv.value, "ON");
+            "OFF".to_owned()
+        }
         _ => sv.value.clone(),
     };
     json!({
