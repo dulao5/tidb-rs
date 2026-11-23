@@ -380,7 +380,13 @@ pub fn new_eval_context(sctx: Arc<SessionView>) -> Arc<EvalContext> {
 /// The providers of `NewEvalContext` that do not depend on the session: built once and
 /// shared by every context (Go builds them once per session, with its `ExprContext`; the
 /// session's context is built per use here, N2, so they would be allocated for every use).
-// glue: the session-independent providers of NewEvalContext, shared (perf, N2)
+///
+/// Five of them are boundary stubs (they answer a `blocked-by` error) and stateless only
+/// because of that: when one is ported (the current user, D04.1; the session variables and
+/// the advisory locks, D05.3; the restricted SQL executor, D00.3; sequences, D06.4), it
+/// reads the session and must move out of this shared set (built per context, per session
+/// as in Go). Only the DDL owner answer (always false on tidb-rs) stays shared.
+// glue: the session-independent providers of NewEvalContext, shared (perf, N2); a provider leaves this set when ported
 struct FixedProps {
     current_user: OptionalEvalPropProviderRef,
     session_vars: OptionalEvalPropProviderRef,
