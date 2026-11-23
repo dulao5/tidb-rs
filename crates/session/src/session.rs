@@ -122,6 +122,9 @@ pub struct SessCtx {
     common_global_loaded: bool,
     /// `sessionPlanCache`: built by the first `GetSessionPlanCache`.
     pub(crate) plan_cache: Option<SessionPlanCache>,
+    /// `domain.GetDomain(s).GetInstancePlanCache()`: the instance-level plan cache shared by
+    /// every session (the plan-cache exception A3); `None` without a domain.
+    pub(crate) instance_plan_cache: Option<Arc<dyn tidb_sessionctx::context::InstancePlanCache>>,
 }
 
 /// `sessionctx.SessionPlanCache` (`plannercore.NewLRUPlanCache`): the cache is the plan-cache
@@ -933,6 +936,7 @@ impl SessionContext for SessionCore {
             has_dirty_content,
             advise_txn_warmup: None,
             domain_info_schema: Some(self.sctx.get_domain_info_schema() as _),
+            instance_plan_cache: self.sctx.instance_plan_cache.clone(),
         }
     }
     // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS
@@ -1131,6 +1135,7 @@ impl Session {
                     start_time: None,
                     common_global_loaded: false,
                     plan_cache: None,
+                    instance_plan_cache: None,
                 },
                 txn_manager: new_txn_manager(),
             },
@@ -1195,6 +1200,37 @@ impl Session {
     // glue: stand-in for the domain's InfoSchema (D06.5, VS1-17)
     pub fn set_domain_info_schema(&mut self, is: InfoSchemaRef) {
         self.core.sctx.domain_is = is;
+    }
+
+    /// Hands the session the domain's instance plan cache (`domain.GetDomain(s)`'s, the
+    /// plan-cache exception A3), shared by every session of the process.
+    // glue: domain.GetDomain(s).GetInstancePlanCache() (the session holds no domain)
+    pub fn set_instance_plan_cache(
+        &mut self,
+        cache: Option<Arc<dyn tidb_sessionctx::context::InstancePlanCache>>,
+    ) {
+        self.core.sctx.instance_plan_cache = cache;
+    }
+
+    /// `ADMIN FLUSH <scope> PLAN_CACHE` (Go: a `SimpleExec` statement): the statement context
+    /// is reset as for every statement (`ResetContextOfStmt`), then
+    /// `executeAdminFlushPlanCache` runs on the session's variables and the instance plan
+    /// cache (the plan-cache exception A3, decision 8). The parser has no ADMIN AST yet
+    /// (D02.2): the caller passes the scope it read from the statement.
+    // glue: the SimpleExec of ADMIN FLUSH ... PLAN_CACHE (the ADMIN AST is D02.2)
+    pub fn admin_flush_plan_cache(
+        &mut self,
+        stmt: &ast::Stmt,
+        sql: &str,
+        scope: tidb_executor::simple::StatementScope,
+    ) -> Result<(), Error> {
+        tidb_executor::select::reset_context_of_stmt(&mut self.core, stmt, sql)?;
+        let cache = self.core.sctx.instance_plan_cache.clone();
+        tidb_executor::simple::execute_admin_flush_plan_cache(
+            &mut self.core.sctx.vars,
+            scope,
+            cache.as_deref(),
+        )
     }
 
     /// Whether the session is inside a transaction (ADR 0010 §4.1: state as a query; the

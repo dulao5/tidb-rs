@@ -1,0 +1,9 @@
+# The executor never writes a plan (the plan-cache exception A3, spec §3.1 item 3): a plan
+# the executor runs may be the one in the instance plan cache, shared by every session.
+# These two functions are the only way to get a node for writing; in this crate they are
+# forbidden, so a Go executor that writes its plan has to be ported with executor-local
+# state instead (spec §2.3).
+disallowed-methods = [
+  { path = "tidb_planner::physicalop::make_mut_plan", reason = "the executor must not write a plan: it may be shared by the instance plan cache (A3 spec §3.1); keep the state in the executor" },
+  { path = "tidb_planner::physicalop::map_children", reason = "the executor must not write a plan: it may be shared by the instance plan cache (A3 spec §3.1); keep the state in the executor" },
+]

@@ -2617,6 +2617,7 @@ dependencies = [
  "tidb-base",
  "tidb-distsql",
  "tidb-domain",
+ "tidb-executor",
  "tidb-expression",
  "tidb-infoschema",
  "tidb-meta",

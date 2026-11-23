@@ -81,17 +81,22 @@ impl NewSession {
         domain: Option<Arc<tidb_domain::Domain>>,
         store: Option<Arc<tidb_store::driver::TikvStore>>,
     ) -> NewSession {
-        if domain.is_some() {
+        if let Some(d) = &domain {
             // Go's bootstrap (`InitMDLVariable`); idempotent, so done with each session.
             tidb_session::session::init_mdl_variable();
+            // Go's `init` of planner/core (`domain.NewInstancePlanCache`) and the domain's
+            // `InitInstancePlanCache` at start; both idempotent, so done with each session.
+            tidb_planner::core::plan_cache_instance::register_instance_plan_cache_factory();
+            d.init_instance_plan_cache();
         }
-        let session = match store {
+        let mut session = match store {
             Some(store) => {
                 let oracle = Arc::new(tidb_session::glue::StoreOracle(store.get_oracle()));
                 Session::with_store(Dialect::MySQL, Box::new(DefaultGlobals), store, oracle)
             }
             None => Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
         };
+        session.set_instance_plan_cache(domain.as_ref().and_then(|d| d.get_instance_plan_cache()));
         NewSession {
             session,
             domain,

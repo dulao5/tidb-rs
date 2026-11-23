@@ -576,6 +576,7 @@ pub fn optimize_exec_stmt(
     let prep_stmt = Arc::clone(&exec.prep_stmt);
     let mut prep_stmt = prep_stmt.lock();
     let (plan, names) = get_plan_from_plan_cache(
+        &parts,
         ctx.vars,
         false,
         is,

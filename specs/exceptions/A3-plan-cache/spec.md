@@ -392,6 +392,39 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；�
 - `instance_cacheable` 覆盖 §3.3 字段表中第 1 阶段算子的行（TableScan、TableReader）。
 - 其余分支（IndexScan、IndexReader、IndexLookUp、BatchPointGet、IndexJoin、IndexMerge、DML、分区）是 `blocked-by:<块>` 的边界桩：遇到时**不缓存**（`instance_cacheable` 为 `false`），而不是报错，与 Go 不可克隆时的行为相同，结果仍正确。这一点在 ab 中显示为 `last_plan_from_cache` 与 Go 不同，按"块未到位"登记，不算 bug。
 
+#### 第 1 阶段实现记录（2026-11-23，VS1-39）
+
+已完成（代码位置见各条）：
+
+- 缓存本体 `crates/planner/src/core/plan_cache_instance.rs`：分片 `RwLock` 哈希表（分片数 `max(64, 4 × CPU)` 的 2 的幂，按 key 哈希的第 32 位起选分片），同 key 多计划新的在前，Put 的四个失败条件、写锁下复查 `in_evict` 与 flush 代数，Evict 两遍扫描 + L1 移植的 `calcEvictionThreshold`，被移出的条目在释放全部锁之后才 drop；`delete_all` 与 Evict 共用 `evict_mutex`。
+- key `PlanCacheKey`（`plan_cache_utils.rs`）：语句文本单独保存、哈希按文本缓存；其余字段按 Go 顺序编码，字符串带长度前缀（决定 9），整数为定长小端（key 只比较、不显示）；key 缓冲在 `PlanCacheStmt` 中复用。`parseParamTypes`、`checkTypesCompatibility4PC`、`NewPlanCacheValue`（含 `instance_cacheable` 检查与封存）、`MemoryUsage`（实际字节）。
+- 命中与放入（`plan_cache.rs`）：`lookupPlanCache` / `adjustCachedPlan` / `generateNewPlan` 的 Put，`FoundInPlanCache`、命中 / 未命中 metrics、`StmtHints` 恢复；重建 `plan_cache_rebuild.rs`（PointGet 的三条路径、TableReader → TableScan 的 int handle 与 common handle，其余算子递归子节点；相同参数不写、不复制）。
+- `instance_cacheable`：PointGet、TableReader、TableScan、Selection、Projection、Sort、TopN、Limit、TableDual（§3.3 字段表中第 1 阶段两行的字段 Rust 都不携带，只看子节点）；NominalSort 与其余默认 `false`。
+- `sealed` 位与代价缓存（§3.6）：`BasePhysicalPlan.sealed`，`clone_node` 的副本不带；封存节点算出的代价直接返回、不写 memo。
+- domain（`crates/domain/src/plan_cache.rs`）：持有缓存、30 秒淘汰与 15 秒 metrics 两个后台任务（tokio，淘汰放在 blocking 池）；限额在 `SET GLOBAL` 钩子中立即生效（决定 5，经 `tidb_sessionctx::context` 的登记表）。
+- 默认 ON（决定 1）：`TIDB_RS_DEFAULT_OVERRIDES`（生成的 sysvar 表保留 Go 的值，govec 回放按 Go 值比较）。
+- `ADMIN FLUSH INSTANCE PLAN_CACHE`（决定 8）：`executor/simple.rs` 的 `executeAdminFlushPlanCache`；解析器还没有 ADMIN 的 AST（D02.2），路由器按语法分支 `AdminStmt#30` 识别，在任何路由模式下都交给新会话执行。
+- 执行器 lint（§3.1 第 3 条）：`crates/executor/clippy.toml` 禁止 `make_mut_plan` 与 `map_children`（违规样例已确认报错）。`Arc::get_mut` 不能按类型禁止，没有加（对缓存中的计划它总是返回 `None`）。
+- §2.3 第 9a 行：点查执行器已经持有自己的 `idx_vals`（从计划复制）；回归测试 `unique_index_point_get_does_not_write_the_cached_index_values`（会话级，整数与字符串参数各执行两次，缓存计划结构哈希不变）。第 9b 行：`buildTableReader` 尚未移植（D12.1，VS1-34），先移植它的这一段为 `table_reader_schema`（读、不写），测试 `empty_reader_schema_is_read_from_the_table_plan_not_written`；VS1-34 用它构建执行器。
+- PoC 回答 `@@last_plan_from_cache` / `@@last_plan_from_binding`：读路由器的"上一条语句"状态（VS1 plan §4.5），ab 用它比较。
+
+与本 spec 的差异（实现时的选择，请评审）：
+
+1. `HeapSize` 不是 derive 宏，而是 `plan_cache_heap_size.rs` 中按算子手写的遍历（只覆盖第 1 阶段可缓存的算子；其余算子 `instance_cacheable` 为 `false`，到不了这里）。精度测试用计数分配器比较条目最后一个引用释放时归还的字节：点查两种形状都是 0 误差（2335 / 2718 字节）。新增可缓存算子时要同时扩展这个遍历（§8 风险 4 的缓解改为评审检查项）。
+2. key 中的用户名、主机名为空：新会话还没有 `SessionVars.User`（会话只接受一个账号）。账号只有一个时与 Go 不可区分；会话携带用户身份时按决定 9 写入。
+3. 统计信息版本恒为 0（没有统计信息句柄，同 Go 只有 pseudo 时）；脏表为空（`TblInfo2UnionScan` 是写路径）；绑定为空（D13.2）。
+4. `SET GLOBAL` 还到不了新会话（全局值是编译时默认值，D06.5 / VS1-17），所以 `tidb_enable_instance_plan_cache` 与两个限额在 tidb-rs 上暂时改不了；钩子已接好。
+5. `IsSafeToReusePointGetExecutor`（会话私有的点查执行器复用，§1.1 最后一行）不在本阶段；每次 EXECUTE 仍新建点查执行器。
+6. §3.1 第 2 条（把 `check_model_mutability.py` 扩展到计划与表达式类型）未做；新增的内部可变字段都加了 `// interior:` 注释。
+7. §5.4 的 64 线程争用测量、命中路径计数分配器断言未做（见下面的数字）。
+
+验证：
+
+- 单测：`plan_cache_instance_tests.rs`（Go `plan_cache_instance_test.go` 的 Basic、WithMatchOpts、ConcurrentRead、ConcurrentWriteRead 照搬断言；淘汰 + flush 与命中并发；`calcEvictionThreshold` 逐例；flush 代数的确定性测试；参数类型匹配顺序；key 长度前缀；封存节点不写代价；路径复制只复制被改写的路径）；会话级：两个会话共享、跨会话第一次 EXECUTE 命中、相同参数复制 0 个节点、不同参数复制 1 个、执行后结构哈希不变、flush 后重新优化、会话关闭 `tidb_enable_prepared_plan_cache` 后不查缓存；路由器：`ADMIN FLUSH` 的三种范围与 warning。
+- govec：`plancache` 领域新增 op `types_compat`（`checkTypesCompatibility4PC`，780 条，arm64 本地生成，amd64 取 tracker CI 产物）。其余函数的豁免理由已更新。
+- ab（本地 playground，Go v8.5.8 打开实例级缓存，`strict`，2 张表 × 1 万行、4 个 region）：`point_select / ps` 136 条中 128 条由新栈执行且与 Go 一致，0 不一致，8 条为超出 INT 范围的参数（Go 是 TableDual，`blocked-by:D10.1`，与 #303 相同）；`--plan-cache`（每条 EXECUTE 之后读 `@@last_plan_from_cache`）：`point_select` 136/136 与 Go 相同（双方 128 条为 1）；范围查询由 PoC 回答，Go 为 1、tidb-rs 为 0（新栈还不执行它们，不是本项的差异）。
+- 性能（sysbench `oltp_point_select`，1 张表 1 万行，每轮 20 秒，`fallback`）：对 Go 实例级缓存 ON：1 线程 0.98×、8 线程 0.95× / 0.93×（两轮）；对 Go 默认配置（会话级缓存）：0.95× / 0.91×。之前（无缓存，#303）为 0.93× / 0.89×。每条点查约 506 次分配（jemalloc `nrequests`，10 万条与 1 条两次运行之差），之前约 566，Go 约 200。全部 75.5 万条语句由新栈执行，plan cache 命中 755405、未命中 1。
+
 ### 第 2 阶段：索引与分区（随 VS1-28 第 2 部分、D10.x、D12.x）
 
 `buildRangeForIndexScan`、IndexReader / IndexLookUp（经链写，N1 §3 第 9 条）、BatchPointGet、`PrunePartitions` 改为执行器局部（§2.3 第 2 行）、IndexJoin 的可变 range（`clone_node` 时深拷贝 `mutableIndexJoinRange`）、IndexMerge。

@@ -784,9 +784,21 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| {
     Registry { vars, index }
 });
 
-/// The value of an entry whose Go value depends on the build target.
+/// The defaults tidb-rs deliberately changes (owner decisions; each is a ruling of
+/// `docs/testing/rulings.toml` and a row of `docs/compatibility.md`). The generated table
+/// keeps Go's values; the govec registry check maps these back.
+///
+/// - `tidb_enable_instance_plan_cache`: `ON` (Go `OFF`): the instance-level plan cache is the
+///   only plan cache of tidb-rs (the plan-cache exception A3, decision 1; ruling R14).
+pub const TIDB_RS_DEFAULT_OVERRIDES: &[(&str, &str)] = &[("tidb_enable_instance_plan_cache", "ON")];
+
+/// The value of an entry whose Go value depends on the build target, or whose default
+/// tidb-rs changes ([`TIDB_RS_DEFAULT_OVERRIDES`]).
 // glue: runtime.GOOS / runtime.GOARCH of the Go build, for this Rust build
 fn computed_value(d: &SysVarData) -> String {
+    if let Some((_, v)) = TIDB_RS_DEFAULT_OVERRIDES.iter().find(|(n, _)| *n == d.name) {
+        return (*v).to_owned();
+    }
     match d.computed {
         Some("runtime.GOOS") => go_goos().to_owned(),
         Some("runtime.GOARCH") => go_goarch().to_owned(),
