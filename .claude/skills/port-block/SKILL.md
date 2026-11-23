@@ -52,7 +52,7 @@ description: Port one block (or one part of a block) of Go TiDB v8.5.8 to tidb-r
 - **桩棘轮**（`scripts/check_stub_ratchet.py`，基线 `scripts/stub_ratchet.tsv`）：`blocked-by` 的数量按区域只降不升；移植后桩变少时用 `--write` 调低基线。只有两种情况允许上升，且 PR 正文要逐条列出净增的标注：
   1. 同一个 PR 删掉了覆盖这些分支的整函数桩，新代码在每个跟不了的 Go 分支上各标一个（细化，不是新缺口）；
   2. 同一个 PR 新纳入一个 Go 类型或接口，它超出本切片的方法写成桩，每个都在 tracker 登记并说明不可达的理由。
-  每个桩在棘轮里算两次（注释一次、`blocked()` 调用一次），PR 正文写成"桩 −a / +b，棘轮计数 −2a / +2b"。
+  PR 正文写成"桩 −a / +b（tracker 行数），棘轮计数 −x / +y（以脚本实际报告为准）"。通常每个桩在棘轮里算两次（glue 注释一次、`blocked()` 调用一次），但只有注释、或 `blocked()` 旁边没有 glue 注释的只算一次。
 - 每个桩在 tracker 登记：`python3 scripts/blocks/parts.py scan --write <tidb-rs worktree>`，然后给每一行补 `note`（缺什么、为什么）。tracker PR 必须在 rebase 之后的分支上扫描；如果另一个改桩的 PR 先合了，在最新的 main 上再扫一次。
 - 推迟到后续任务的要求，写进那个任务的完成条件，并写明对应的测试名。
 
