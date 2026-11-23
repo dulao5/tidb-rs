@@ -1554,10 +1554,7 @@ type NameValueOperand = (Datum, Option<Arc<Constant>>);
 /// `None` is Go's `return nil, false` when building or evaluating the marker fails; a
 /// boundary error is returned as it is (never a silent "no point get").
 // go-part: getNameValuePairs (the switch on binOp.R / binOp.L)
-fn name_value_operand(
-    ctx: &PlanCtx<'_>,
-    e: &Expr,
-) -> Result<Option<NameValueOperand>, Error> {
+fn name_value_operand(ctx: &PlanCtx<'_>, e: &Expr) -> Result<Option<NameValueOperand>, Error> {
     match e {
         Expr::Value(x) => Ok(Some((value_expr_datum(x), None))),
         Expr::ParamMarker(x) => {
