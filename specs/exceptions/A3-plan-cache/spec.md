@@ -1,6 +1,6 @@
 # A3（plan cache）：实例级计划缓存（实现例外 spec）
 
-状态：**已确认（2026-11-23，负责人在 #305）**（2026-11-23 起草）。类型：实现例外（A3"缓存"的 plan cache 部分；A3 其余三项 coprocessor cache、infoschema v2、统计信息缓存各自另写 spec），含几处用户可见的特性例外（默认值、OFF 时不缓存、淘汰周期变量、`ADMIN FLUSH INSTANCE PLAN_CACHE` 生效，§4）。所属块：D13.1 plan cache 的缓存部分（VS1-39 起），crate `tidb-planner`（缓存本体与重建）、`tidb-domain`（持有与后台淘汰）、`tidb-sessionctx`（接口）。
+状态：**已确认（2026-11-23，负责人在 #305）**（2026-11-23 起草）。类型：实现例外（A3"缓存"的 plan cache 部分；A3 其余三项 coprocessor cache、infoschema v2、统计信息缓存各自另写 spec），含几处用户可见的特性例外（默认值、OFF 时不缓存、`ADMIN FLUSH INSTANCE PLAN_CACHE` 生效，§4）。所属块：D13.1 plan cache 的缓存部分（VS1-39 起），crate `tidb-planner`（缓存本体与重建）、`tidb-domain`（持有与后台淘汰）、`tidb-sessionctx`（接口）。
 
 修订记录：
 
