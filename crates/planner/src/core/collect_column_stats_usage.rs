@@ -42,6 +42,9 @@ struct ColumnStatsUsageCollector {
     /// visitedPhysTblIDs all ds.PhysicalTableID that have been visited.
     /// It's always collected, even if histogram-needed columns are not collected.
     visited_phys_tbl_ids: HashSet<i64>,
+    /// visitedtbls indicates the visited table (Go's `collectVisitedTable` indicates whether
+    /// to collect visited table: here `Some`).
+    visitedtbls: Option<HashSet<i64>>,
     /// tblID2PartitionIDs is used for tables with static pruning mode.
     tbl_id2_partition_ids: HashMap<i64, Vec<i64>>,
     /// interestingColsByDS tracks all columns of interest for index pruning (WHERE + JOIN + ORDERING)
@@ -51,14 +54,16 @@ struct ColumnStatsUsageCollector {
     col_set: HashSet<i64>,
 }
 
-/// `newColumnStatsUsageCollector`. The plan replayer capture (`collectVisitedTable`) is a
-/// boundary of the caller.
-// go: newColumnStatsUsageCollector L2 (the plan replayer capture's visited tables: the caller's boundary, D02.2)
-fn new_column_stats_usage_collector(collect_index_pruning_cols: bool) -> ColumnStatsUsageCollector {
+// go: newColumnStatsUsageCollector L1
+fn new_column_stats_usage_collector(
+    enabled_plan_capture: bool,
+    collect_index_pruning_cols: bool,
+) -> ColumnStatsUsageCollector {
     ColumnStatsUsageCollector {
         predicate_cols: HashMap::new(),
         col_map: HashMap::new(),
         visited_phys_tbl_ids: HashSet::new(),
+        visitedtbls: enabled_plan_capture.then(HashSet::new),
         tbl_id2_partition_ids: HashMap::new(),
         interesting_cols_by_ds: collect_index_pruning_cols.then(HashMap::new),
         col_set: HashSet::new(),
@@ -138,7 +143,9 @@ impl ColumnStatsUsageCollector {
         // For partition tables, no matter whether it is static or dynamic pruning mode, we use table ID rather than partition ID to
         // set TableColumnID.TableID. In this way, we keep the set of predicate columns consistent between different partitions and global table.
         let tbl_id = ds.table_info.id;
-        // c.collectVisitedTable: the plan replayer capture (the caller's boundary).
+        if let Some(visitedtbls) = &mut self.visitedtbls {
+            visitedtbls.insert(tbl_id);
+        }
         self.visited_phys_tbl_ids.insert(tbl_id);
         if tbl_id != ds.physical_table_id {
             self.tbl_id2_partition_ids
@@ -358,9 +365,10 @@ pub type ColumnStatsUsage = (
 );
 
 /// CollectColumnStatsUsage collects column stats usage from logical plan, and sets the
-/// interesting columns of every DataSource when the index pruning is enabled. The plan
-/// replayer capture (`recordTableRuntimeStats`) is a boundary.
-// go: CollectColumnStatsUsage L2 (the plan replayer capture is a boundary, D02.2)
+/// interesting columns of every DataSource when the index pruning is enabled. With the plan
+/// replayer capture on, the statistics of the visited tables go into `StmtCtx.TableStats`
+/// (`recordTableRuntimeStats`).
+// go: CollectColumnStatsUsage L1
 pub fn collect_column_stats_usage(
     ctx: &mut PlanCtx<'_>,
     lp: PlanId,
@@ -369,15 +377,14 @@ pub fn collect_column_stats_usage(
     let threshold = ctx.vars.opt_index_prune_threshold;
     let collect_index_pruning_cols = threshold >= 0;
 
-    if ctx.vars.is_plan_replayer_capture_enabled() {
-        // glue: blocked-by:D02.2 (the plan replayer capture: recordTableRuntimeStats)
-        return Err(tidb_base::blocked::blocked(
-            "D02.2",
-            "the plan replayer capture (recordTableRuntimeStats)",
-        ));
-    }
-    let mut collector = new_column_stats_usage_collector(collect_index_pruning_cols);
+    let mut collector = new_column_stats_usage_collector(
+        ctx.vars.is_plan_replayer_capture_enabled(),
+        collect_index_pruning_cols,
+    );
     collector.collect_from_plan(ctx, &[], lp, &[], &[]);
+    if let Some(visitedtbls) = collector.visitedtbls.take() {
+        crate::core::rule_collect_plan_stats::record_table_runtime_stats(ctx, &visitedtbls)?;
+    }
 
     // Populate DataSource field with the collected interesting columns (if index pruning is enabled)
     if let Some(m) = collector.interesting_cols_by_ds.take() {

@@ -688,6 +688,7 @@ fn test_parts() -> crate::planctx::SessionPlanCtx {
         client: None,
         has_dirty_content: Some(Arc::new(|_| false)),
         advise_txn_warmup: None,
+        domain_info_schema: None,
     }
 }
 

@@ -57,6 +57,8 @@ pub(crate) struct MockSession {
     pub expr_ctx: tidb_sessionctx::exprctx::ExprContextRef,
     /// The snapshot `GetSnapshotWithStmtReadTS` gives (`None`: an error).
     pub snapshot: Option<Arc<dyn tidb_kv::kv::Snapshot>>,
+    /// `GetPlanReplayerHandle()` (`None`: no handle, as in the new stack).
+    pub plan_replayer_handle: Option<Arc<dyn crate::glue::PlanReplayerHandle>>,
 }
 
 impl MockSession {
@@ -68,6 +70,7 @@ impl MockSession {
             process_info: Vec::new(),
             expr_ctx: tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
             snapshot: None,
+            plan_replayer_handle: None,
         }
     }
 }
@@ -91,6 +94,9 @@ impl SessionContext for MockSession {
     }
     fn get_txn_scope(&self) -> String {
         "global".to_owned()
+    }
+    fn get_plan_replayer_handle(&self) -> Option<Arc<dyn crate::glue::PlanReplayerHandle>> {
+        self.plan_replayer_handle.clone()
     }
     fn get_read_replica_scope(&self) -> String {
         "global".to_owned()
@@ -116,6 +122,7 @@ impl SessionContext for MockSession {
             client: None,
             has_dirty_content: None,
             advise_txn_warmup: None,
+            domain_info_schema: None,
         }
     }
     fn get_snapshot_with_stmt_read_ts(
@@ -627,4 +634,101 @@ async fn next_wrapper_records_stats() {
     assert_eq!(e.base().meta.id(), 5);
     assert_eq!(e.init_cap(), vars.init_chunk_size as isize);
     assert!(e.detach().is_none());
+}
+
+/// A plan replayer handle whose collector loaded `tasks` (a simulated
+/// `mysql.plan_replayer_task`).
+struct MockPlanReplayerHandle {
+    tasks: Vec<PlanReplayerTaskKey>,
+}
+
+impl crate::glue::PlanReplayerHandle for MockPlanReplayerHandle {
+    fn get_tasks(&self) -> Vec<PlanReplayerTaskKey> {
+        self.tasks.clone()
+    }
+}
+
+/// The plan replayer capture check of `Exec` / `PointGet` (Go's `checkPlanReplayerCapture`
+/// of `FinishExecuteStmt`, run before the statement executes). With the capture on (Go's
+/// default) and no handle (the new stack) or a handle without tasks, the statement runs. With
+/// a capture task the match needs the statement's digests: the statement stops at that
+/// boundary before any executor is built or the start ts is read, so the router can fall
+/// back. Restricted SQL is never captured.
+#[tokio::test]
+async fn plan_replayer_capture_stops_only_with_a_task() {
+    let counters = Arc::new(Counters::default());
+    let select = |counters: &Arc<Counters>| {
+        ExecStmt::new(
+            "select".to_owned(),
+            Some(mock_plan(1, 1, false, counters)),
+            None,
+        )
+    };
+    let mut s = MockSession::new(42);
+    s.vars.enable_plan_replayer_capture = true;
+
+    // No handle: the statement runs.
+    let mut stmt = select(&counters);
+    let mut rs = stmt.exec(&mut s).await.unwrap().expect("a record set");
+    rs.close(&mut stmt, &mut s).await.unwrap();
+    assert_eq!(counters.built.load(Ordering::SeqCst), 1);
+
+    // A handle without tasks: the statement runs.
+    s.plan_replayer_handle = Some(Arc::new(MockPlanReplayerHandle { tasks: Vec::new() }));
+    let mut stmt = select(&counters);
+    let mut rs = stmt.exec(&mut s).await.unwrap().expect("a record set");
+    rs.close(&mut stmt, &mut s).await.unwrap();
+    assert_eq!(counters.built.load(Ordering::SeqCst), 2);
+
+    // A capture task: the boundary, before the executor is built.
+    s.plan_replayer_handle = Some(Arc::new(MockPlanReplayerHandle {
+        tasks: vec![PlanReplayerTaskKey {
+            sql_digest: "sql".to_owned(),
+            plan_digest: "*".to_owned(),
+        }],
+    }));
+    let process_info = s.process_info.len();
+    let mut stmt = select(&counters);
+    let err = stmt.exec(&mut s).await.err().unwrap();
+    assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D02.1"), "{err}");
+    assert_eq!(counters.built.load(Ordering::SeqCst), 2);
+    assert!(!stmt.executor_opened);
+    assert_eq!(s.process_info.len(), process_info);
+
+    // The point get short path stops before reading the start ts.
+    s.read_ts = u64::MAX;
+    let mut stmt = point_stmt(mock_plan(1, 1, true, &counters));
+    let err = stmt.point_get(&mut s).await.err().unwrap();
+    assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D02.1"), "{err}");
+    assert_eq!(s.vars.stmt_ctx().priority, NoPriority);
+    assert_eq!(counters.built.load(Ordering::SeqCst), 2);
+
+    // Restricted SQL or the capture off: no check.
+    s.vars.in_restricted_sql = true;
+    let mut stmt = select(&counters);
+    let mut rs = stmt.exec(&mut s).await.unwrap().expect("a record set");
+    rs.close(&mut stmt, &mut s).await.unwrap();
+    s.vars.in_restricted_sql = false;
+    s.vars.enable_plan_replayer_capture = false;
+    let mut stmt = select(&counters);
+    let mut rs = stmt.exec(&mut s).await.unwrap().expect("a record set");
+    rs.close(&mut stmt, &mut s).await.unwrap();
+    assert_eq!(counters.built.load(Ordering::SeqCst), 4);
+
+    // The continuous capture with a handle: SELECT and EXECUTE need the digests; a
+    // statement without a node is not captured.
+    s.vars.enable_plan_replayed_continues_capture = true;
+    s.plan_replayer_handle = Some(Arc::new(MockPlanReplayerHandle { tasks: Vec::new() }));
+    let mut stmt = select(&counters);
+    let mut rs = stmt.exec(&mut s).await.unwrap().expect("a record set");
+    rs.close(&mut stmt, &mut s).await.unwrap();
+    assert_eq!(counters.built.load(Ordering::SeqCst), 5);
+    assert!(check_plan_replayer_continues_capture_valid_stmt(Some(
+        &ast::Stmt::Select(Box::default())
+    )));
+    assert!(!check_plan_replayer_continues_capture_valid_stmt(Some(
+        &ast::Stmt::Begin(Box::default())
+    )));
+    let err = check_plan_replayer_continues_capture(&mut s).err().unwrap();
+    assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D02.1"), "{err}");
 }

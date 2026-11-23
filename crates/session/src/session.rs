@@ -932,6 +932,7 @@ impl SessionContext for SessionCore {
             client: self.sctx.store_wired.then(|| self.sctx.store.get_client()),
             has_dirty_content,
             advise_txn_warmup: None,
+            domain_info_schema: Some(self.sctx.get_domain_info_schema() as _),
         }
     }
     // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS

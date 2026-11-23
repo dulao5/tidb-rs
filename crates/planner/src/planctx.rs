@@ -15,6 +15,7 @@ use tidb_sessionctx::ranger::context::RangerContext;
 use tidb_sessionctx::variable::session::SessionVars;
 
 use crate::arena::PlanArena;
+use crate::core::plan_cache_utils::InfoSchemaLookup;
 
 /// The planning context of one statement.
 ///
@@ -43,6 +44,10 @@ pub struct PlanCtx<'s> {
     /// TSO early). `None` is the mock contexts' `EmptyPlanContextExtended.AdviseTxnWarmup`
     /// (nothing to do).
     pub advise_txn_warmup: Option<AdviseTxnWarmupFn>,
+    /// `p.SCtx().GetDomainInfoSchema()`: the domain's newest InfoSchema, read by the plan
+    /// replayer capture's `recordSingleTableRuntimeStats`. `None` for a context without a
+    /// domain (the test contexts), where that lookup finds no table.
+    pub domain_info_schema: Option<Arc<dyn InfoSchemaLookup>>,
 }
 
 /// `HasDirtyContent(tid)` of the session.
@@ -68,6 +73,8 @@ pub struct SessionPlanCtx {
     pub has_dirty_content: Option<HasDirtyContentFn>,
     /// `AdviseTxnWarmup()`.
     pub advise_txn_warmup: Option<AdviseTxnWarmupFn>,
+    /// `GetDomainInfoSchema()` (`None`: no domain).
+    pub domain_info_schema: Option<Arc<dyn InfoSchemaLookup>>,
 }
 
 impl SessionPlanCtx {
@@ -78,6 +85,7 @@ impl SessionPlanCtx {
         ctx.client = self.client.clone();
         ctx.has_dirty_content = self.has_dirty_content.clone();
         ctx.advise_txn_warmup = self.advise_txn_warmup.clone();
+        ctx.domain_info_schema = self.domain_info_schema.clone();
         ctx
     }
 
@@ -90,6 +98,7 @@ impl SessionPlanCtx {
             client: ctx.client.clone(),
             has_dirty_content: ctx.has_dirty_content.clone(),
             advise_txn_warmup: ctx.advise_txn_warmup.clone(),
+            domain_info_schema: ctx.domain_info_schema.clone(),
         }
     }
 }
@@ -105,6 +114,7 @@ impl<'s> PlanCtx<'s> {
             client: None,
             has_dirty_content: None,
             advise_txn_warmup: None,
+            domain_info_schema: None,
         }
     }
 

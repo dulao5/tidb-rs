@@ -23,6 +23,7 @@ use tidb_parser::model::CIStr;
 use tidb_parser::types::FieldType;
 use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_sessionctx::variable::session::SessionVars;
+use tidb_sessionctx::variable::session_state::PlanReplayerTaskKey;
 
 use crate::internal::exec::executor::Executor;
 
@@ -31,6 +32,14 @@ pub type InfoSchemaRef = Arc<tidb_infoschema::InfoSchemaV2>;
 
 /// Go's `base.Plan` (see the module comment).
 pub type Plan = tidb_planner::PhysicalPlanRef;
+
+/// `*domain.planReplayerHandle` as far as the capture check reads it: the capture tasks its
+/// collector loaded from `mysql.plan_replayer_task`.
+pub trait PlanReplayerHandle: Send + Sync {
+    /// `GetTasks()`.
+    // glue: method planReplayerTaskCollectorHandle.GetTasks
+    fn get_tasks(&self) -> Vec<PlanReplayerTaskKey>;
+}
 
 /// The `sessionctx.Context` surface of the executor framework (see the module comment).
 pub trait SessionContext: Send {
@@ -56,6 +65,14 @@ pub trait SessionContext: Send {
     /// that takes the lock then stops at a boundary stub (D06.5, the session's domain).
     // glue: domain.GetDomain(sctx).InfoSchema() (D06.5)
     fn get_domain_info_schema(&self) -> Option<InfoSchemaRef> {
+        None
+    }
+    /// `domain.GetDomain(sctx).GetPlanReplayerHandle()`: the plan replayer handle, whose task
+    /// collector loads the capture tasks from `mysql.plan_replayer_task`. None: the plan
+    /// replayer handle is not ported (its task collector and dump worker), so no capture task
+    /// is ever loaded and statements on tidb-rs are not captured (docs/compatibility.md).
+    // glue: stub of domain.Domain.GetPlanReplayerHandle, blocked-by:X (the plan replayer handle is not ported: no capture task is loaded)
+    fn get_plan_replayer_handle(&self) -> Option<Arc<dyn PlanReplayerHandle>> {
         None
     }
     /// `sessiontxn.GetTxnManager(sctx).GetTxnScope()`.

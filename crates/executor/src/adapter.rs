@@ -13,8 +13,9 @@
 //!
 //! Not on the read-only node's path, so not ported here (no function of VS1-13): the
 //! pessimistic DML / SELECT FOR UPDATE retry loop, foreign key cascades, the slow log and the
-//! statement summary (D14.2), Top SQL (D14.2), plan replayer capture, audit plugins, the
-//! runaway checker (N10).
+//! statement summary (D14.2), Top SQL (D14.2), the plan replayer dump task, audit plugins,
+//! the runaway checker (N10). The plan replayer capture check is ported and runs before the
+//! statement executes (`check_plan_replayer_capture`).
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -31,6 +32,7 @@ use tidb_parser::model::CIStr;
 use tidb_planner::PhysicalKind;
 use tidb_sessionctx::sessionstates::QueryInfo;
 use tidb_sessionctx::stmtctx::StatementContext;
+use tidb_sessionctx::variable::session_state::PlanReplayerTaskKey;
 use tidb_types::field_name::FieldName;
 
 use crate::builder::new_executor_builder;
@@ -386,6 +388,9 @@ impl ExecStmt {
     /// PointGet short path for point exec directly from plan, keep only necessary steps
     // go: ExecStmt.PointGet L2 (no tracing region / Top SQL, D14.2; executor type checks through Executor::as_point_get)
     pub async fn point_get(&mut self, sctx: &mut dyn SessionContext) -> Result<RecordSet, Error> {
+        // a.checkPlanReplayerCapture of FinishExecuteStmt, before anything runs (see the
+        // function).
+        self.check_plan_replayer_capture(sctx)?;
         let start_ts = sctx.get_stmt_read_ts().await?;
         Self::stmt_ctx_mut(sctx).priority = HighPriority;
 
@@ -533,6 +538,9 @@ impl ExecStmt {
 
         // must set plan according to the `Execute` plan before getting planDigest
         self.inherit_context_from_execute_stmt(sctx);
+        // a.checkPlanReplayerCapture of FinishExecuteStmt, before anything runs (see the
+        // function).
+        self.check_plan_replayer_capture(sctx)?;
         // The runaway checker is resource control (N10); Top SQL is D14.2.
 
         let mut e = self.build_executor(sctx).await?;
@@ -847,7 +855,8 @@ impl ExecStmt {
         has_more_results: bool,
     ) {
         let _ = (txn_ts, has_more_results);
-        // a.checkPlanReplayerCapture(txnTS): plan replayer (D13.x).
+        // a.checkPlanReplayerCapture(txnTS): run before the statement executes, in `Exec` /
+        // `PointGet` (see check_plan_replayer_capture).
         // Commit / lock-keys runtime stats and the write-throughput SLI: the write path.
         if let Some(plan) = &self.plan {
             // If this statement has a Plan, the StmtCtx.plan should have been set when it
@@ -927,6 +936,34 @@ impl ExecStmt {
                 sess_vars.last_query_info.err_msg = err.to_string();
             }
         }
+    }
+
+    /// checkPlanReplayerCapture: whether the plan replayer captures this statement.
+    ///
+    /// Go runs it in `FinishExecuteStmt`, after the statement ran, and sends a dump task when
+    /// a capture task matches. Here `Exec` and `PointGet` run it before the executor is built
+    /// or the start ts is read: a statement that would be captured then stops at the
+    /// boundary of the capture while the router can still fall back (nothing has run, the
+    /// session state is unchanged). Without a plan replayer handle (not ported: the new stack
+    /// has none) or without a task it does nothing, so the decision is the same in both
+    /// places. The internal source type check (`InternalTxnStats`) is not needed: internal
+    /// statements are restricted SQL, which does not reach the new stack.
+    // go: ExecStmt.checkPlanReplayerCapture L2 (run before execution so that its boundary can fall back; the dump task's start ts is not known there)
+    fn check_plan_replayer_capture(&self, sctx: &mut dyn SessionContext) -> Result<(), Error> {
+        let se = sctx;
+        if !se.get_session_vars().in_restricted_sql
+            && se.get_session_vars().is_plan_replayer_capture_enabled()
+        {
+            let stmt_node = self.get_stmt_node().map(|n| &**n);
+            if se.get_session_vars().enable_plan_replayed_continues_capture {
+                if check_plan_replayer_continues_capture_valid_stmt(stmt_node) {
+                    check_plan_replayer_continues_capture(se)?;
+                }
+            } else {
+                check_plan_replayer_capture_task(se)?;
+            }
+        }
+        Ok(())
     }
 
     /// GetOriginalSQL returns the original SQL text (`getLazyStmtText().String()`).
@@ -1146,6 +1183,88 @@ pub fn get_result_rows_count(stmt_ctx: &StatementContext, p: &Plan) -> i64 {
         return 0;
     };
     runtime_stats_coll.get_plan_act_rows(p.id() as i64)
+}
+
+/// only allow select/delete/update/insert/execute stmt captured by continues capture
+///
+/// DELETE / UPDATE / INSERT are `Stmt::Unported`, which stops before `ExecStmt` (the
+/// boundary of `ResetContextOfStmt`), so only SELECT and EXECUTE get here.
+// go: checkPlanReplayerContinuesCaptureValidStmt L1
+fn check_plan_replayer_continues_capture_valid_stmt(stmt_node: Option<&ast::Stmt>) -> bool {
+    matches!(
+        stmt_node,
+        Some(ast::Stmt::Select(_) | ast::Stmt::Execute(_))
+    )
+}
+
+/// checkPlanReplayerCaptureTask: sends a dump task when a capture task matches the
+/// statement's SQL and plan digests. Without a handle (not ported) or a task it returns; with
+/// tasks the match needs the digests, which are a boundary ([`plan_replayer_task_key`]).
+// go: checkPlanReplayerCaptureTask L2 (the digests and the dump task are a boundary; the start ts is the dump task's)
+fn check_plan_replayer_capture_task(sctx: &mut dyn SessionContext) -> Result<(), Error> {
+    // dom := domain.GetDomain(sctx); if dom == nil: the session always has its domain.
+    let Some(handle) = sctx.get_plan_replayer_handle() else {
+        return Ok(());
+    };
+    let tasks = handle.get_tasks();
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    let key = plan_replayer_task_key(sctx)?;
+    for task in &tasks {
+        if task.sql_digest == key.sql_digest
+            && (task.plan_digest == "*" || task.plan_digest == key.plan_digest)
+        {
+            return send_plan_replayer_dump_task(&key);
+        }
+    }
+    Ok(())
+}
+
+/// checkPlanReplayerContinuesCapture: sends a dump task for every statement not captured
+/// yet in this session. Without a handle (not ported) it returns; with one the key needs the
+/// digests, which are a boundary.
+// go: checkPlanReplayerContinuesCapture L2 (the digests and the dump task are a boundary; the start ts is the dump task's)
+fn check_plan_replayer_continues_capture(sctx: &mut dyn SessionContext) -> Result<(), Error> {
+    if sctx.get_plan_replayer_handle().is_none() {
+        return Ok(());
+    }
+    let key = plan_replayer_task_key(sctx)?;
+    let existed = sctx
+        .get_session_vars_mut()
+        .check_plan_replayer_finished_task_key(&key);
+    if existed {
+        return Ok(());
+    }
+    send_plan_replayer_dump_task(&key)?;
+    sctx.get_session_vars_mut()
+        .add_plan_replayer_finished_task_key(key);
+    Ok(())
+}
+
+/// `replayer.PlanReplayerTaskKey{SQLDigest: sqlDigest.String(), PlanDigest:
+/// planDigest.String()}` from `StmtCtx.SQLDigest()` and `StmtCtx.GetPlanDigest()`: the
+/// digests are not computed yet (`parser.NormalizeDigest` and the plan's normalization), so
+/// a statement that needs them for the capture stops here, before it runs.
+// glue: the task key of checkPlanReplayerCaptureTask / checkPlanReplayerContinuesCapture
+fn plan_replayer_task_key(sctx: &dyn SessionContext) -> Result<PlanReplayerTaskKey, Error> {
+    let _ = sctx;
+    // glue: blocked-by:D02.1 (the SQL and plan digests that match a plan replayer capture task)
+    Err(blocked(
+        "D02.1",
+        "the SQL and plan digests of the plan replayer capture",
+    ))
+}
+
+/// sendPlanReplayerDumpTask: the dump task (the session bindings, the encoded plan, the
+/// handle's dump worker) is not ported. Not reached while the digests are a boundary
+/// ([`plan_replayer_task_key`]); once they are ported, a statement with a matching task
+/// stops here, still before it executes.
+// go: sendPlanReplayerDumpTask L2 (the dump task is not ported: a boundary)
+fn send_plan_replayer_dump_task(key: &PlanReplayerTaskKey) -> Result<(), Error> {
+    let _ = key;
+    // glue: blocked-by:X (the plan replayer dump task: the handle's dump worker is not ported)
+    Err(blocked("X", "the plan replayer dump task"))
 }
 
 #[cfg(test)]

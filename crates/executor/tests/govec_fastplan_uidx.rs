@@ -324,6 +324,7 @@ impl SessionContext for Session {
             client: None,
             has_dirty_content: None,
             advise_txn_warmup: None,
+            domain_info_schema: None,
         }
     }
     fn get_snapshot_with_stmt_read_ts(

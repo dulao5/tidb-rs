@@ -32,3 +32,15 @@ P1 收尾（#48）时，各块把剩下的函数移交给真正使用它们的�
 边界桩（`blocked-by`）：`ExecStmt.IsReadOnly`（D09.13）、`RebuildPlan`（D09.0）、`GetTextToLog` / `getLazyStmtText` 在 `tidb_redact_log=ON` 时（D02.1，规范化 SQL）、`updatePrevStmt`（D14.2，`SessionVars.PrevStmt`）、`recordSet.TryDetach` 的静态结果集（D12.12）、`executorBuilder.build` 的各执行器（D12.1 / D12.2 / D12.5）、detach.go 的各执行器方法（D12.1 / D12.2）、`ConstructDAGReq` 与 `ToPB`（D10.9）、`IndexUsageReporter` 的统计信息（D11.2）、`BaseExecutor.GetSysSession` / `ReleaseSysSession`（D06.5）、`UpdateDeltaForTableID`（X）、`encodePassword`（D04.1）、指标向量（D14.1）、Top SQL（D14.2）、`Compile` 中的 `IsReadOnly` / `Preprocess` / `Optimize` / `GetPreparedStmt`、`StatsCount`（D09.13 / D09.0 / D13.1 / D10.1）。
 
 MaxTS 点查的判定：`ExecStmt.PointGet` 中 `useMaxTS := startTs == math.MaxUint64`，只有 MaxTS 时才缓存和复用点查执行器，语句提为高优先级。单测 `adapter::tests::point_get_*` 覆盖 MaxTS / TSO / 非点查三种情况。判定本身（`IsPointGetWithPKOrUniqueKeyByAutoCommit`，VS1-19；optimistic provider 的 `AdviseOptimizeWithPlan`，VS1-14）不在本部分。
+
+## 计划回放采集检查（加载全局变量之后的后续修正）
+
+会话加载全局变量之后，`tidb_enable_plan_replayer_capture` 与 Go 一样默认 ON。Go 在语句结束时（`FinishExecuteStmt` → `checkPlanReplayerCapture`，`adapter.go:1713`）检查 domain 的计划回放句柄里有没有与本语句 SQL digest、plan digest 匹配的采集任务（任务由句柄从 `mysql.plan_replayer_task` 加载），有就发一个 dump 任务。
+
+- [x] 移植 `checkPlanReplayerCapture`、`checkPlanReplayerCaptureTask`、`checkPlanReplayerContinuesCapture`、`checkPlanReplayerContinuesCaptureValidStmt`（`crates/executor/src/adapter.rs`）。句柄的接口是 `glue::PlanReplayerHandle`（只有 `GetTasks`），会话通过 `SessionContext::get_plan_replayer_handle` 给出；新栈没有句柄（采集任务的加载和 dump worker 都没有移植），所以返回 None，检查什么也不做，语句照常执行，与 Go 没有句柄或没有任务时相同。
+- 位置的差异：Go 在语句执行完之后检查；新栈改在 `Exec` 构建执行器之前、`PointGet` 读开始时间戳之前检查。原因是路由器规则：新栈产生副作用（执行器打开、结果发出、会话状态改变）之后再遇到边界就不能回退。没有句柄或没有任务时两个位置的结果相同；有任务时语句在还能回退的地方停下。
+- 边界：有任务时要用 SQL digest 和 plan digest 去匹配，两者都还没有计算（`parser.NormalizeDigest` 与计划的规范化，D02.1），所以在算 digest 的地方返回 `blocked-by:D02.1`（`plan_replayer_task_key`）。连续采集（`tidb_enable_plan_replayer_continuous_capture`，默认 OFF）同样只在有句柄时才走到这里。`sendPlanReplayerDumpTask` 目前走不到。
+- 句柄未移植：`get_plan_replayer_handle` 返回 None 登记为桩（`blocked-by:X`，计划回放句柄未移植）；`sendPlanReplayerDumpTask` 返回边界（`blocked-by:X`），不会 panic。用户可见的限制写进 `docs/compatibility.md`：tidb-rs 节点不执行采集任务。
+- 测试：`adapter::tests::plan_replayer_capture_stops_only_with_a_task`（没有句柄、句柄没有任务：照常执行；模拟一个采集任务：在构建执行器之前、读时间戳之前报边界；受限 SQL、开关关闭不检查）；会话侧 `plan_replayer_capture_records_the_table_stats_and_goes_on`（开关打开、没有任务的非点查 EXECUTE 记录表统计信息后继续，规划完成，停在构建表读取执行器 D12.1）。
+- 桩：去掉规划器里"开关打开就停"的桩（D02.2），新增 digest 一处（D02.1）。棘轮：规划器 371 → 370，执行器 51 → 55（digest 一处是同一个缺口从"所有语句"缩小到"有采集任务的语句"的细化；句柄与 dump 任务两处是如实登记未移植的部分）。
+

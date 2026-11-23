@@ -39,6 +39,7 @@ converge（`--part specs/VS1-vertical-slice/functions.tsv --item VS1-24`）：D0
 3. **两类特殊处理**，需要评审确认：
    - **统计信息加载点**（`CollectPredicateColumnsPoint`、`SyncWaitStatsLoadPoint`）：Go 对每条用户语句都会设置这两个标志，它们收集统计信息的使用情况、同步加载统计信息。`CollectPredicateColumnsPoint` 还会**裁剪索引路径**（`rule_prune_indexes.go`）：索引数超过 `tidb_opt_index_prune_threshold`（默认 20）时按阈值裁剪；**在阈值以下也会裁剪**——只要至少有一个索引得分，就去掉"零分"索引（既不覆盖查询列、也不含 WHERE / ORDER BY 列的索引，`rule_prune_indexes.go:86`）。所以表有两个及以上二级索引时，Go 在逻辑优化中就会去掉候选路径，新栈不去。sbtest（只有 `k_1`）不受影响，而且物理优化目前停在 D10.6，所以本项不改代码；`PruneIndexesByWhereAndOrder`（纯计算）由 VS1-28 移植并配 govec，使两个以上二级索引的表的候选路径与 Go 一致（负责人决定：移植，不作边界）。新栈的统计信息只有 pseudo 表（VS1 plan §3.2 统计信息一行），没有东西可加载，所以这两条规则**直接返回原计划**，不是 blocked。它们在 tracker 中登记为 `blocked-by:D11.2` 的桩，注明行为。差异：Go 会把谓词列写入统计信息使用记录（供自动 analyze），新栈不写。（更新：FindBestTask 第 1 部分（VS1-28）已移植 `CollectPredicateColumnsPoint` 中的感兴趣列收集和索引裁剪，见 `specs/D10.2-find-best-task/spec.md` §4 第 7 条；使用记录和加载部分不变。）
    - **分区裁剪**（`PartitionProcessor`）：`UseDynamicPruneMode` 为 false 时 Go 会跑。构建器遇到分区表已经返回 `blocked-by:D09.12`，Go 对非分区表的数据源原样返回；所以这里遍历计划，遇到分区表才返回 `blocked-by:D09.12`，否则原样返回。
+- **计划回放采集要的表统计信息**（`recordTableRuntimeStats` / `recordSingleTableRuntimeStats`，`rule_collect_plan_stats.go:531`、`:549`）：`tidb_enable_plan_replayer_capture` 打开时（Go 默认 ON，会话加载全局变量后新栈也是 ON），`CollectColumnStatsUsage` 把访问到的每张表的统计信息放进语句上下文的 `TableStats`，供语句结束时的计划回放采集使用。原来这里是桩（标为 D02.2），打开开关的每条非点查语句都停在这里；现在照 Go 移植（`crates/planner/src/core/rule_collect_plan_stats.rs`）。新栈没有统计信息句柄（D11.2），Go 的 `GetPhysicalTableStats` 在句柄为 nil 时给出带物理表 id 的 pseudo 表，新栈放的也是它；domain 的 InfoSchema 里找不到的表放 nil 并记一条 warning 日志，临时表不记日志，与 Go 相同。读 domain InfoSchema 的入口是规划上下文新增的 `domain_info_schema`（会话的 `GetDomainInfoSchema()`）。与 Go 的差异：(1) 查表遇到"表不在 InfoSchema 缓存中"时，这是新栈的边界（D06.3），向上返回而不是像 Go 那样只记日志（Go 的 `TableByID` 不会出错）；(2) 没有 domain 的规划上下文（只有测试用的上下文）当作找不到表，Go 的 mock 上下文此时会 panic。采集本身（语句结束时是否有匹配的采集任务、发送 dump 任务）在执行器一侧，见 `specs/D12.0-executor/tasks.md` 的"计划回放采集检查"。
 - `isLogicalRuleDisabled` 读全局的禁用规则表（Go 由 domain 从 `mysql.opt_rule_blacklist` 加载）。新栈还不读这张表，表为空。差异：集群里配置了禁用规则时，新栈仍会跑这些规则；建议与 SQL binding 一样，由新栈启动时检查（列为开放问题）。
 - `optInteractionRuleList` 在 Go 中是空表，"再跑一次"的列表永远为空，照此移植。
 - trace（`EnableOptimizeTrace` / `EnableOptimizerCETrace` / 调试 trace）只由 `TRACE PLAN`、`PLAN REPLAYER` 打开，Rust AST 没有这些语句；万一被设置，返回 `blocked-by:D02.2`，不静默跳过。
@@ -161,6 +162,6 @@ Go 在 `QBHintHandler.Enter` 中把编号写进 AST 节点（`SelectStmt.QueryBl
 - D02.2：解析器的 AST；D04.1：权限；D05.3：会话（P1-1：sessionexpr）
 - D09.3 / D09.4 / D09.5 / D09.6 / D09.10 / D09.11 / D09.12 / D09.14 / D09.17：join / 聚合 / 集合运算与 CTE / 子查询 / join 重排 / TopN 下推 / 分区 / 逻辑算子 / cascades
 - D10.1 / D10.2 / D10.5 / D10.6 / D10.9：物理算子 / FindBestTask / 代价 / 基数估算 / ResolveIndices 与 EXPLAIN
-- D11.2：统计信息句柄与加载；D15.2：资源管控；DEF.MPP：MPP 与 TiFlash；X：不在移植范围内的功能
+- D11.2：统计信息句柄与加载；D06.3：InfoSchema；D12.0：执行器框架；D15.2：资源管控；DEF.MPP：MPP 与 TiFlash；X：不在移植范围内的功能
 - N1：计划的表示（§3.4 `Arc` 树，§3.9 reader 的链与列表）；A3：plan cache 例外
 - M-CTX / M-EXPR：映射规则（上下文按调用传入 / 表达式的共享与写入）
