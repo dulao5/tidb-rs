@@ -96,7 +96,7 @@ sysbench 1.0.20 `oltp_point_select`，`--db-ps-mode=auto`，1 张表 1 万行（
 
 ## 5. 剩余缺口
 
-1. **文本协议的点查**（`Point_Get` 中最多的一类 unsupported）：普通语句的 `Compile` 需要一份可写的 AST（D05.3 spec §9.2）。路由器在回退时还要用同一个 AST 降级给 PoC，所以不能把它移交给新栈；要么回退时重新解析，要么 AST 支持复制。计划随 VS1-37。
+1. **文本协议的点查**（`Point_Get` 中最多的一类 unsupported）：普通语句的 `Compile` 需要一份可写的 AST（D05.3 spec §9.2）。路由器在回退时还要用同一个 AST 降级给 PoC，所以不能把它移交给新栈；要么回退时重新解析，要么 AST 支持复制。计划随 VS1-37。（更新：已做，见 §7。语句移交给新栈，回退时重新解析。）
 2. **超出列范围的参数**：Go 给 TableDual（`PhysicalTableDual`，D10.1，VS1-27）。
 3. **加载全局变量之后，非点查语句停得更早**：Go 的默认 `tidb_enable_plan_replayer_capture = ON`，会话加载全局变量后就是开着的，`CollectColumnStatsUsage` 于是走到 `recordTableRuntimeStats`（已有的边界桩，标为 D02.2）。原来新会话从不加载全局变量，这个开关是 false，非点查语句停在后面的物理优化边界。现在它们停在这里（ab 的 D02.2 由 0 变为 380 条，取代原来的 D10.x / D12.x 原因）。这是 Go 的真实行为，桩要由 C2b 移植（`recordSingleTableRuntimeStats` 要统计信息句柄，D11.x）。（更新：已移植。`recordTableRuntimeStats` 照 Go 记录 pseudo 表（新栈没有统计信息句柄，与 Go 句柄为 nil 时相同），语句结束时的采集检查移到执行之前，只有存在采集任务时才报边界；新栈不加载采集任务，所以这些语句继续走到后面的边界。见 `specs/D09.13-optimizer/spec.md` §3 与 `specs/D12.0-executor/tasks.md`。）
 4. **plan cache 相关的 warning**（§2 的 13 条 mismatch，以及 D05.3 spec §10.2 第 2 条）：Go 打开 plan cache 时某些语句有 `skip prepared plan-cache: ...` 或 `plan rebuild failed` 的 warning；PoC 从来没有，新栈在不命中缓存的语句上与 Go 相同，命中缓存之后的情形（A3）不同。
@@ -110,8 +110,41 @@ sysbench 1.0.20 `oltp_point_select`，`--db-ps-mode=auto`，1 张表 1 万行（
 3. 存储驱动作为 `kv.Storage`、只读事务、PD oracle（第 4 条，D07.1 spec）。
 4. 集成：服务器与会话接上存储驱动、全局变量的加载、路由器的两处修正、`SHOW WARNINGS`、选项类型、本文（第 4 条的接线与第 6–9 条）。
 
+## 7. 文本协议的点查（普通语句接入 `Compile`，2026-11-23）
+
+做法见 D05.3 spec §9.2：路由器把语句交给新会话、回退时重新解析；`Compile` 收下语句，规划器在它上面写，写完冻结成 `Arc`，再交给 `ExecStmt` 和事务管理器。
+
+同一台机器、同样的命令（weekly 的 `ab` 部分：sysbench `-n 100` 加 3 个 workload；第一个 tidb-rs 用 `--new-stack=fallback`，第二个用 `strict`），main = `6ce3744`：
+
+| | main | 本项 |
+|---|--:|--:|
+| strict：sysbench 文本协议点查（126 条）在新栈执行且与 Go 一致 | 0 | 121 |
+| strict：新栈执行的语句（普查 `new_stack ok`） | 131 | 261 |
+| strict：`Point_Get` 分类 一致 / 不一致 / 1235 | 141 / 0 / 154 | 271 / 0 / 24 |
+| strict：全部 一致 / 不一致 / 1235 / 双方同样报错 | 733 / 13 / 810 / 10 | 863 / 13 / 675 / 15 |
+| fallback：全部 一致 / 不一致 / 1235 / 双方同样报错 | 1495 / 21 / 32 / 18 | 1496 / 21 / 31 / 18 |
+
+fallback 的 21 条不一致在两边是同一批语句（plan cache 的 warning，§2），没有退化。
+
+还没有在新栈上跑的 5 条文本协议点查：3 条常量超出 `BIGINT` 范围（Go 是 TableDual，停在 `D10.1`），2 条负数常量 `id=-1` / `id=-9223372036854775808`（一元负号不走快速路径，完整规划器的计划带 Projection，停在 `D12.2`）。
+
+strict 普查中回退的原因（全部 workload，每条语句一次）：
+
+| 原因 | main | 本项 |
+|---|--:|--:|
+| `D05.3`（普通语句不能编译） | 469 | 0 |
+| `D12.1` TableReader 执行器 | 11 | 158 |
+| `D12.2` Projection / Selection / Limit / TableDual 执行器 | 166 | 200 |
+| `D12.5` Sort / TopN 执行器 | 143 | 284 |
+| `D10.1` / `D10.2` / `D10.8` 物理优化 | 5 / 3 / 1 | 9 / 6 / 3 |
+| `D04.1` 当前用户 | 0 | 3 |
+| `ast` / `kind`（路由器不交给新栈的形状） | 618 / 4 | 618 / 4 |
+
+另有 5 条 sql-layer 的语句由新栈返回与 Go 相同的错误（普查 `new_stack error`，比较器记为双方同样报错）。
+
 ## 本文所用 ID
 
 - C2a / C2b：检查点 2 的点查纵向 / 其余读路径；VS1-20：本项；VS1-27 / VS1-28 / VS1-34 / VS1-35 / VS1-37：物理算子 / FindBestTask / TableReader / Selection 与 Projection / 普通语句的集成
 - A3：plan cache 例外；D02.2：解析器的 AST 与 hint（计划回放采集的桩沿用这个块号）；D03.1：服务器与结果编码；D05.3：会话；D06.3：InfoSchema；D07.1：存储驱动；D09.13：优化器驱动；D10.1：物理算子；D10.6：基数估算；D10.8：点查快速路径；D11.1 / D11.x：统计信息；D12.2：Selection / Projection 执行器；D13.1：plan cache
 - T1：比较器对 1235 的容差（`unsupported`）
+- D04.1：权限（当前用户）；D10.2：FindBestTask；D12.1：TableReader 执行器；D12.5：Sort / TopN 执行器

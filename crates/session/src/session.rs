@@ -726,7 +726,7 @@ impl SessionCore {
     }
 
     // go: session.onTxnManagerStmtStartOrRetry L2 (RetryInfo.Retrying is the write path)
-    fn on_txn_manager_stmt_start_or_retry(&mut self, node: Arc<ast::Stmt>) -> Result<(), Error> {
+    fn on_txn_manager_stmt_start_or_retry(&mut self, node: &ast::Stmt) -> Result<(), Error> {
         // if s.sessionVars.RetryInfo.Retrying { return OnStmtRetry(ctx) }: never.
         self.txn_manager.on_stmt_start(&mut self.sctx, Some(node))
     }
@@ -964,8 +964,13 @@ impl tidb_sessiontxn::TxnManager for SessionCore {
     }
     // glue: interface methods TxnManager.OnStmtStart and TxnManager.GetCurrentStmt
     fn on_stmt_start_with_current_stmt(&mut self) -> Result<(), Error> {
-        let node = self.txn_manager.get_current_stmt().cloned();
-        self.txn_manager.on_stmt_start(&mut self.sctx, node)
+        let node = self.txn_manager.get_current_stmt().map(Arc::clone);
+        let r = self
+            .txn_manager
+            .on_stmt_start(&mut self.sctx, node.as_deref());
+        // The statement stays the current one (Go passes the node it already holds).
+        self.txn_manager.set_current_stmt(node);
+        r
     }
 }
 
@@ -1262,13 +1267,14 @@ impl Session {
 
     /// ExecuteStmt executes a statement (Go `session.ExecuteStmt`, `session.go:2019`).
     ///
-    /// `text` is `stmtNode.Text()` (the AST does not keep it). `Ok(None)` is Go's nil record
-    /// set. A statement whose rows were not read to the end and closed is finished first
+    /// `text` is `stmtNode.Text()` (the AST does not keep it). The statement is handed over:
+    /// the steps before `Compile` borrow it, `Compile` takes it and freezes it into an `Arc`
+    /// after planning (spec §9.2). `Ok(None)` is Go's nil record set. A statement whose rows were not read to the end and closed is finished first
     /// (spec §2.3).
     // go: session.ExecuteStmt L2 (no Top SQL / plan replayer / optimizer debug trace / resource group hint check: D14.2, D13.x, N10; see spec §4)
     pub async fn execute_stmt(
         &mut self,
-        stmt_node: Arc<ast::Stmt>,
+        stmt_node: ast::Stmt,
         text: &str,
     ) -> Result<Option<ExecStmtResult>, Error> {
         self.finish_unfinished_stmt().await;
@@ -1338,15 +1344,14 @@ impl Session {
     // go-part: session.ExecuteStmt
     async fn execute_stmt_started(
         &mut self,
-        stmt_node: Arc<ast::Stmt>,
+        stmt_node: ast::Stmt,
     ) -> Result<Option<ExecStmtResult>, Error> {
-        self.core
-            .on_txn_manager_stmt_start_or_retry(Arc::clone(&stmt_node))?;
+        self.core.on_txn_manager_stmt_start_or_retry(&stmt_node)?;
 
         // failpoint mockStmtSlow: not ported.
 
         let mut stmt_label = String::new();
-        if let ast::Stmt::Execute(exec_stmt) = &*stmt_node
+        if let ast::Stmt::Execute(exec_stmt) = &stmt_node
             && let Ok(prepare_stmt) = get_prepared_stmt(exec_stmt, &self.core.sctx.vars)
         {
             stmt_label = crate::glue::get_stmt_label(&prepare_stmt.lock().prepared_ast.stmt)?;
@@ -1362,10 +1367,18 @@ impl Session {
         // Transform abstract syntax tree to a physical plan(stored in executor.ExecStmt).
         let text = self.core.sctx.vars.stmt_ctx().original_sql.clone();
         let compiler = Compiler;
-        let stmt = compiler.compile(&mut self.core, Arc::clone(&stmt_node), &text);
+        // The statement is handed over to Compile, which freezes it after planning (spec §9.2).
+        let stmt = compiler.compile(&mut self.core, stmt_node, &text);
         // The resource group hint check (StmtCtx.ResourceGroupName): resource control, N10.
         let stmt = match stmt {
-            Ok(stmt) => stmt,
+            Ok(stmt) => {
+                // Go's transaction manager holds the node since OnStmtStart; here it gets the
+                // frozen statement once the planner is done with it (spec §9.2).
+                self.core
+                    .txn_manager
+                    .set_current_stmt(stmt.stmt_node.as_ref().map(Arc::clone));
+                stmt
+            }
             Err(err) => {
                 self.core.rollback_on_error();
 
@@ -1388,7 +1401,7 @@ impl Session {
         self.core.sctx.vars.duration_compile = dur_compile.as_nanos() as i64;
         // SessionExecuteCompileDuration{Internal,General}.Observe: D14.1.
         self.core.sctx.current_plan = stmt.plan.clone();
-        if let ast::Stmt::Execute(exec_stmt) = &*stmt_node
+        if let Some(ast::Stmt::Execute(exec_stmt)) = stmt.stmt_node.as_deref()
             && exec_stmt.name.is_empty()
         {
             // for exec-stmt on bin-protocol, ignore the plan detail in `show process` to gain performance benefits.
@@ -1502,7 +1515,9 @@ impl Session {
         // statement has subquery in int. So we have to call PrepareTxnCtx here.
         core.prepare_txn_ctx().await?;
 
-        core.on_txn_manager_stmt_start_or_retry(Arc::new(prepare_stmt_node()))?;
+        let node = Arc::new(prepare_stmt_node());
+        core.on_txn_manager_stmt_start_or_retry(&node)?;
+        core.txn_manager.set_current_stmt(Some(node));
 
         core.txn_manager.advise_warmup(&mut core.sctx)?;
 
@@ -1591,7 +1606,7 @@ impl Session {
             prep_stmt_id: stmt_id,
             ..Default::default()
         };
-        self.execute_stmt(Arc::new(ast::Stmt::Execute(Box::new(exec_stmt))), "")
+        self.execute_stmt(ast::Stmt::Execute(Box::new(exec_stmt)), "")
             .await
     }
 

@@ -269,13 +269,11 @@ fn session(store: &Arc<MockStore>) -> Session {
     s
 }
 
-fn parse(sql: &str) -> Arc<ast::Stmt> {
-    Arc::new(
-        tidb_parser::parse(sql, &Default::default())
-            .unwrap()
-            .stmts
-            .remove(0),
-    )
+fn parse(sql: &str) -> ast::Stmt {
+    tidb_parser::parse(sql, &Default::default())
+        .unwrap()
+        .stmts
+        .remove(0)
 }
 
 fn block_on<T>(f: impl std::future::Future<Output = T>) -> T {
@@ -301,13 +299,15 @@ fn compile_counted(
     reset_context_of_stmt(&mut s.core, &node, sql).unwrap();
     s.core
         .txn_manager
-        .on_stmt_start(&mut s.core.sctx, Some(Arc::clone(&node)))
+        .on_stmt_start(&mut s.core.sctx, Some(&node))
         .unwrap();
     let (plan, counters) = mock_plan(rows);
     s.core
         .advise_optimize_with_plan_and_then_warm_up(&plan)
         .unwrap();
     let mut stmt = ExecStmt::new(sql.to_owned(), Some(plan), None);
+    let node = Arc::new(node);
+    s.core.txn_manager.set_current_stmt(Some(Arc::clone(&node)));
     stmt.stmt_node = Some(node);
     stmt.output_names = vec![tidb_types::field_name::FieldName {
         col_name: tidb_parser::model::CIStr::new("a"),
@@ -467,7 +467,7 @@ fn unused_prefetched_ts_is_disposed() {
     assert!(store.log.lock().is_empty());
 }
 
-/// `Compile` fails (the planner is a boundary stub): `rollbackOnError` ends the lazy
+/// `Compile` fails (the preprocessor's "No database selected"): `rollbackOnError` ends the lazy
 /// transaction, so the next statement starts a new one; no TSO was requested.
 #[test]
 fn compile_error_rolls_back() {
@@ -476,9 +476,9 @@ fn compile_error_rolls_back() {
     let e = block_on(s.execute_stmt(parse("SELECT a FROM t"), "SELECT a FROM t"))
         .err()
         .unwrap();
-    // A plain statement stops in Compile before the preprocessor (compiler.rs
-    // `planner_stmt_node`).
-    assert_eq!(blocked(&e), Some("D05.3"));
+    // The statement is handed over to Compile (spec §9.2); without a database the
+    // preprocessor answers Go's 1046.
+    assert_eq!(e.code(), 1046, "{e}");
     assert!(s.is_idle(), "{}", s.state_snapshot());
     assert_eq!(store.requests.load(SeqCst), 0);
     // ResetContextOfStmt ran: the new statement context is a SELECT's.
@@ -507,7 +507,10 @@ fn dropped_result_is_finished_before_the_next_statement() {
 
     // The next statement (it fails at Compile) finishes the dropped one first: the dropped
     // SELECT is read only, so its autocommit transaction is committed.
-    let _ = block_on(s.execute_stmt(parse("SELECT 1"), "SELECT 1"));
+    let e = block_on(s.execute_stmt(parse("SELECT b FROM t"), "SELECT b FROM t"))
+        .err()
+        .unwrap();
+    assert_eq!(e.code(), 1046, "{e}");
     assert!(!s.has_unfinished_stmt());
     assert!(s.is_idle());
     assert_eq!(s.vars().last_query_info.start_ts, 10);
@@ -727,12 +730,14 @@ fn every_fallback_point_restores_the_session() {
             assert_eq!(blocked(&e), Some("D02.2"));
             "D02.2"
         }),
-        ("in Compile (planner stub)", |s| {
-            let e = block_on(s.execute_stmt(parse("SELECT a FROM t"), "SELECT a FROM t"))
+        ("after Compile (executor builder stub)", |s| {
+            // The statement is planned (spec §9.2); building its Projection executor is a
+            // boundary, before any executor opened.
+            let e = block_on(s.execute_stmt(parse("SELECT 1"), "SELECT 1"))
                 .err()
                 .unwrap();
-            assert_eq!(blocked(&e), Some("D05.3"));
-            "D05.3"
+            assert_eq!(blocked(&e), Some("D12.2"));
+            "D12.2"
         }),
         ("after the warm-up (TSO pending)", |s| {
             let _ = compile(s, "SELECT a FROM t", 1);
@@ -773,9 +778,9 @@ fn every_fallback_point_restores_the_session() {
 }
 
 /// A statement outside the Rust AST (`Stmt::Unported`).
-fn unported() -> Arc<ast::Stmt> {
+fn unported() -> ast::Stmt {
     let node = parse("INSERT INTO t VALUES (1)");
-    assert!(matches!(*node, ast::Stmt::Unported(_)));
+    assert!(matches!(node, ast::Stmt::Unported(_)));
     node
 }
 
@@ -1239,6 +1244,40 @@ fn prepare_of_the_sbtest_point_select_builds_the_plan() {
     s.drop_prepared_stmt(info.stmt_id).unwrap();
 }
 
+/// The text-protocol point select on the real session over the sbtest InfoSchema (mock store,
+/// spec §9.2): the statement is handed over to `Compile`, planned on the fast path and frozen;
+/// the transaction manager's current statement is then the very `Arc` of the `ExecStmt`. The
+/// point get executor is built and opened, reads the mock store (no row), and the statement
+/// ends with its autocommit transaction.
+#[test]
+fn text_protocol_point_select_runs_to_the_end() {
+    let store = MockStore::new(10);
+    let mut s = sbtest_session(&store);
+    let sql = "SELECT c FROM sbtest1 WHERE id=10";
+    let mut rs = block_on(s.execute_stmt(parse(sql), sql))
+        .unwrap()
+        .expect("a result set");
+    assert_eq!(
+        s.executed_stmts(),
+        1,
+        "the point get executor was built and opened"
+    );
+    assert!(
+        s.vars().stmt_ctx().get_plan().is_some_and(|p| p
+            .downcast_ref::<tidb_planner::PhysicalPlanRef>()
+            .is_some_and(|p| p.kind() == tidb_planner::PhysicalKind::PointGet)),
+        "the fast plan's point get"
+    );
+    let frozen = s.running.as_ref().unwrap().stmt.stmt_node.as_ref().unwrap();
+    let current = s.core.txn_manager.get_current_stmt().unwrap();
+    assert!(Arc::ptr_eq(frozen, current), "one frozen statement");
+    let mut chk = rs.new_chunk().unwrap();
+    block_on(rs.next(&mut s, &mut chk)).unwrap();
+    assert_eq!(chk.num_rows(), 0);
+    block_on(rs.close(&mut s)).unwrap();
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+}
+
 /// The parameter values in the session (`SessionVars.PlanCacheParams`), as text.
 fn params_of(s: &Session) -> Vec<String> {
     s.vars()
@@ -1274,7 +1313,7 @@ fn execute_reads_the_parameters_through_the_session_expression_context() {
     let mut s = sbtest_session(&store);
     let info = block_on(s.prepare_stmt("SELECT c FROM sbtest1 WHERE id > ?")).unwrap();
     let select_marker = parse("SELECT ?");
-    let ast::Stmt::Select(sel) = select_marker.as_ref() else {
+    let ast::Stmt::Select(sel) = &select_marker else {
         unreachable!()
     };
     let marker = sel.fields.fields[0].expr.as_ref().unwrap();
@@ -1443,7 +1482,7 @@ fn autocommit_point_get_by_primary_key_reads_at_max_ts() {
         reset_context_of_stmt(&mut s.core, &node, "").unwrap();
         s.core
             .txn_manager
-            .on_stmt_start(&mut s.core.sctx, Some(node))
+            .on_stmt_start(&mut s.core.sctx, Some(&node))
             .unwrap();
         let plan: tidb_planner::PhysicalPlanRef = Arc::new(plan);
         s.core
@@ -1460,7 +1499,7 @@ fn autocommit_point_get_by_primary_key_reads_at_max_ts() {
 /// still stops at the plan builder, so the test builds the `PlanCacheStmt`).
 fn register_prepared(s: &mut Session, id: u32, sql: &str) {
     let mut ps = tidb_planner::core::plan_cache_utils::PlanCacheStmt::default();
-    ps.prepared_ast.stmt = Box::new(Arc::try_unwrap(parse(sql)).unwrap());
+    ps.prepared_ast.stmt = Box::new(parse(sql));
     ps.prepared_ast.stmt_type = "Select".to_owned();
     ps.stmt_text = sql.to_owned();
     ps.params = sql.match_indices('?').map(|(i, _)| i).collect();

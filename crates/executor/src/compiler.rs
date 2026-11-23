@@ -34,38 +34,18 @@ use crate::glue::{InfoSchemaRef, Plan, PlanCacheStmtRef, SessionContext};
 #[derive(Default)]
 pub struct Compiler;
 
-/// The statement node the planner works on. Go's preprocessor and optimizer take the node by
-/// pointer and may write to it; the Rust planner takes `&mut ast::Stmt`, while the session
-/// shares the statement (`Arc`) with the transaction manager (`GetCurrentStmt`) and the AST
-/// has no `Clone`. An EXECUTE node is copied field by field: its prepared statement and its
-/// binary-protocol parameters are shared `Arc`s, and nothing the planner writes to it is read
-/// back. `EXECUTE ... USING @v` (the text protocol, which the router never sends to the new
-/// stack) stops where `buildExecute` would (the expression rewriter of the `USING`
-/// variables, D09.2); other statements are a boundary of the session (D05.3 spec §9.2).
-// glue: the planner's own copy of the statement (Go shares the node by pointer)
-fn planner_stmt_node(stmt_node: &ast::Stmt) -> Result<ast::Stmt, Error> {
-    match stmt_node {
-        ast::Stmt::Execute(e) => {
-            if !e.using_vars.is_empty() {
-                // glue: blocked-by:D09.2 (the expression rewriter, b.rewrite of EXECUTE ... USING)
-                return Err(blocked("D09.2", "b.rewrite of EXECUTE ... USING"));
-            }
-            Ok(ast::Stmt::Execute(Box::new(ast::ExecuteStmt {
-                name: e.name.clone(),
-                using_vars: Vec::new(),
-                binary_args: e.binary_args.clone(),
-                prep_stmt: e.prep_stmt.clone(),
-                prep_stmt_id: e.prep_stmt_id,
-                idx_in_multi: e.idx_in_multi,
-                from_general_stmt: e.from_general_stmt,
-            })))
-        }
-        // glue: blocked-by:D05.3 (compiling a statement other than EXECUTE: the planner writes to the AST, which the session shares with the transaction manager)
-        _ => Err(blocked(
-            "D05.3",
-            "compiling a statement other than EXECUTE (the planner needs a statement it can write to)",
-        )),
+/// `EXECUTE ... USING @v` (the text protocol, which the router never sends to the new stack)
+/// stops where `buildExecute` would (the expression rewriter of the `USING` variables, D09.2),
+/// before the preprocessor (D05.3 spec §9.1).
+// glue: the USING variables of a text-protocol EXECUTE (D09.2 boundary)
+fn check_execute_using(stmt_node: &ast::Stmt) -> Result<(), Error> {
+    if let ast::Stmt::Execute(e) = stmt_node
+        && !e.using_vars.is_empty()
+    {
+        // glue: blocked-by:D09.2 (the expression rewriter, b.rewrite of EXECUTE ... USING)
+        return Err(blocked("D09.2", "b.rewrite of EXECUTE ... USING"));
     }
+    Ok(())
 }
 
 /// `plannercore.Preprocess(ctx, sctx, nodeW, WithPreprocessorReturn(ret),
@@ -147,15 +127,17 @@ impl Compiler {
     /// Compile compiles an ast.StmtNode to a physical plan.
     ///
     /// `text` is `stmtNode.Text()` (the parser AST does not keep the text, the session
-    /// passes it). An `Execute` plan (Go's `finalPlan.(*plannercore.Execute)`) does not run
-    /// on the new stack yet: the reuse of the prepared point get
-    /// (`IsSafeToReusePointGetExecutor`) is the plan cache's (A3) and `ExecuteExec` is
-    /// D12.12, so `Compile` stops where Go makes that decision (D05.3 spec §9.3).
+    /// passes it). The statement is handed over (D05.3 spec §9.2): Go's preprocessor and
+    /// optimizer write to the node they share by pointer; here they write to the statement
+    /// `Compile` owns, which is then frozen into the `Arc` of `ExecStmt.StmtNode` (the session
+    /// hands the same `Arc` to the transaction manager). An `Execute` plan takes Go's path
+    /// where `IsSafeToReusePointGetExecutor` answers false (the reuse is the plan cache's,
+    /// A3; D05.3 spec §10).
     // go: Compiler.Compile L2 (panics at the task boundary, M-PANIC; the statement text is passed in; IsSafeToReusePointGetExecutor is the plan cache's, A3)
     pub fn compile(
         &self,
         sctx: &mut dyn SessionContext,
-        stmt_node: Arc<ast::Stmt>,
+        mut stmt_node: ast::Stmt,
         text: &str,
     ) -> Result<ExecStmt, Error> {
         let is_read_only =
@@ -163,19 +145,22 @@ impl Compiler {
         sctx.get_session_vars_mut().stmt_ctx_mut().is_read_only = is_read_only;
 
         // Do preprocess and validate.
-        let mut node = planner_stmt_node(&stmt_node)?;
-        let mut node_w = new_node_w(&mut node);
+        check_execute_using(&stmt_node)?;
+        let mut node_w = new_node_w(&mut stmt_node);
         let txn_is = sctx.get_txn_info_schema();
         let domain_is = sctx.get_domain_info_schema();
         preprocess(sctx, &mut node_w, txn_is.as_ref(), domain_is.as_ref())?;
 
         let is = sctx.get_txn_info_schema();
         // handle the execute statement
-        let prepared_obj = get_prepared_stmt(sctx, &stmt_node)?;
+        let prepared_obj = get_prepared_stmt(sctx, node_w.node)?;
         // Build the final physical plan.
         let (final_plan, names) =
             planner_optimize(sctx, &mut node_w, is.as_ref(), domain_is.as_ref())?;
         drop(node_w);
+        // The planner is done writing: from here on the statement is shared (ExecStmt, the
+        // transaction manager), D05.3 spec §9.2.
+        let stmt_node = Arc::new(stmt_node);
 
         let (in_restricted_sql, resource_group) = {
             let vars = sctx.get_session_vars();
@@ -308,15 +293,16 @@ mod tests {
             .expect("parse")
             .stmts
             .remove(0);
-        Compiler.compile(&mut s, Arc::new(stmt), sql).err().unwrap()
+        Compiler.compile(&mut s, stmt, sql).err().unwrap()
     }
 
-    /// A plain statement stops before the preprocessor (`planner_stmt_node`); an EXECUTE of
-    /// an unknown statement is Go's `ErrStmtNotFound` from `planner.IsReadOnly`.
+    /// A plain statement is handed over and planned (D05.3 spec §9.2): the mock session has
+    /// no transaction InfoSchema, so `Optimize` stops at the transaction manager's boundary;
+    /// an EXECUTE of an unknown statement is Go's `ErrStmtNotFound` from `planner.IsReadOnly`.
     #[test]
-    fn compile_plans_only_execute() {
+    fn compile_plans_a_plain_statement() {
         let block = |e: &Error| tidb_base::blocked::blocked_by(e).map(str::to_owned);
-        assert_eq!(block(&compile_err("select 1")).as_deref(), Some("D05.3"));
+        assert_eq!(block(&compile_err("select 1")).as_deref(), Some("D05.4"));
         let e = compile_err("execute s");
         assert_eq!(e.code(), 8111, "{e}");
     }

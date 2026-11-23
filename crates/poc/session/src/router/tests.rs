@@ -268,7 +268,7 @@ impl NewStack for FakeNew {
     }
     fn execute<'a>(
         &'a mut self,
-        _stmt: Arc<ast::Stmt>,
+        _stmt: ast::Stmt,
         _sql: &'a str,
     ) -> BoxFut<'a, Result<Response, Error>> {
         let answer = self.script.lock().unwrap().answer.clone();
@@ -736,16 +736,20 @@ fn route_trace_records_each_statement() {
     assert_eq!(super::trace::get(conn).seq, 3);
 }
 
-/// The real session: every candidate reaches `Compile`, which plans only EXECUTE so far
-/// (`blocked-by:D05.3`, D05.3 spec §9.2);
-/// `fallback` falls back with the session unchanged, `strict` returns the 1235 error.
+/// The real session: a text-protocol candidate is handed over to `Compile` (D05.3 spec §9.2)
+/// and planned; on the stand-in store (no coprocessor client) the fast plan's push-down check
+/// stops (`blocked-by:D09.13`). `fallback` falls back with the session unchanged and the PoC
+/// runs a new parse of the text; `strict` returns the 1235 error. Without a database the
+/// preprocessor answers Go's 1046 itself (a Go error, no fallback).
 #[test]
 fn phase0_session_falls_back_or_reports_1235() {
     let mut p = poc();
+    p.values.current_db = Some("test".into());
     let mut r = real(NewStackMode::Fallback, &p);
     let before = r.new.session().state_snapshot();
     let res = block_on(r.query(&mut p, POINT));
     assert_eq!(rows(&res).map(|r| r.0), Some(3));
+    assert!(p.log.iter().any(|l| l.starts_with("run")));
     // Only the PoC's previous-statement state was written.
     let mut expected = real(NewStackMode::Fallback, &p);
     LastStmtInfo::from_poc(&LastStmtInfo::default(), &res)
@@ -754,14 +758,21 @@ fn phase0_session_falls_back_or_reports_1235() {
     assert_ne!(r.new.session().state_snapshot(), before);
 
     let mut p = poc();
+    p.values.current_db = Some("test".into());
     let mut r = real(NewStackMode::Strict, &p);
     let e = block_on(r.query(&mut p, POINT)).unwrap_err();
     assert_eq!(e.code, 1235);
-    assert!(e.message.contains("blocked-by:D05.3"), "{}", e.message);
+    assert!(e.message.contains("blocked-by:D09.13"), "{}", e.message);
     assert!(!p.log.iter().any(|l| l.starts_with("run")));
     // Not a candidate: still the PoC in strict mode.
     assert!(block_on(r.query(&mut p, "SET NAMES utf8mb4")).is_ok());
     assert!(block_on(r.query(&mut p, "SELECT count(*) FROM t")).is_ok());
+
+    let mut p = poc();
+    let mut r = real(NewStackMode::Fallback, &p);
+    let e = block_on(r.query(&mut p, POINT)).unwrap_err();
+    assert_eq!((e.code, e.state), (1046, "3D000"), "{}", e.message);
+    assert!(!p.log.iter().any(|l| l.starts_with("run")));
 }
 
 // ---------------------------------------------------------------------------------------------
