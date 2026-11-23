@@ -34,6 +34,7 @@ use tidb_sessionctx::sessionstates::QueryInfo;
 use tidb_sessionctx::stmtctx::StatementContext;
 use tidb_sessionctx::variable::session_state::PlanReplayerTaskKey;
 use tidb_types::field_name::FieldName;
+use tidb_types::field_name::NameSlice;
 
 use crate::builder::new_executor_builder;
 use crate::detach::detach;
@@ -237,7 +238,7 @@ fn join_errors(errs: &[Error]) -> Option<Error> {
 #[allow(clippy::needless_range_loop)] // Go's index loop over two slices
 pub(crate) fn col_names2_result_fields(
     schema: &Schema,
-    names: &[FieldName],
+    names: &[Arc<FieldName>],
     default_db: &str,
 ) -> Vec<ResultField> {
     let mut rfs = Vec::with_capacity(schema.len());
@@ -335,7 +336,7 @@ pub struct ExecStmt {
     pub phase_lock_durations: [Duration; 2],
 
     /// OutputNames will be set if using cached plan
-    pub output_names: Vec<FieldName>,
+    pub output_names: NameSlice,
     pub ps_stmt: Option<PlanCacheStmtRef>,
     pub ti: Arc<TelemetryInfo>,
     /// The statement's executor was built and opened (not in Go). The VS1 router (plan
@@ -634,11 +635,7 @@ impl ExecStmt {
     fn inherit_context_from_execute_stmt(&mut self, sctx: &mut dyn SessionContext) {
         if let Some(execute_plan) = self.execute_plan.take() {
             sctx.set_query_string(String::new());
-            self.output_names = execute_plan
-                .output_names
-                .iter()
-                .map(|n| (**n).clone())
-                .collect();
+            self.output_names = execute_plan.output_names.clone();
             self.is_prepared_stmt = true;
             self.plan = execute_plan.plan.clone();
             let plan = self

@@ -327,10 +327,10 @@ fn compile_counted(
     let node = Arc::new(node);
     s.core.txn_manager.set_current_stmt(Some(Arc::clone(&node)));
     stmt.stmt_node = Some(node);
-    stmt.output_names = vec![tidb_types::field_name::FieldName {
+    stmt.output_names = vec![Arc::new(tidb_types::field_name::FieldName {
         col_name: tidb_parser::model::CIStr::new("a"),
         ..Default::default()
-    }];
+    })];
     (stmt, counters)
 }
 

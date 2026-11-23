@@ -25,7 +25,7 @@ use tidb_planner::core::preprocess::{
 };
 use tidb_planner::core::resolve::{NodeW, new_node_w};
 use tidb_planner::optimize::{OptimizedPlan, optimize_stmt};
-use tidb_types::field_name::FieldName;
+use tidb_types::field_name::NameSlice;
 
 use crate::adapter::{ExecStmt, TelemetryInfo};
 use crate::glue::{InfoSchemaRef, Plan, PlanCacheStmtRef, SessionContext};
@@ -109,7 +109,7 @@ fn planner_optimize(
     node_w: &mut NodeW<'_>,
     is: Option<&InfoSchemaRef>,
     domain_is: Option<&InfoSchemaRef>,
-) -> Result<(OptimizedPlan, Vec<FieldName>), Error> {
+) -> Result<(OptimizedPlan, NameSlice), Error> {
     let Some(is) = is else {
         // glue: blocked-by:D05.4 (sessiontxn GetTxnInfoSchema)
         return Err(blocked("D05.4", "the transaction's InfoSchema"));
@@ -122,7 +122,7 @@ fn planner_optimize(
         is.as_ref(),
         domain_is.map(|d| d.as_ref() as &dyn InfoSchemaLookup),
     )?;
-    Ok((p, names.iter().map(|n| (**n).clone()).collect()))
+    Ok((p, names))
 }
 
 impl Compiler {

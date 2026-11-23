@@ -88,6 +88,12 @@ impl ResultSet {
         Ok(self.columns.as_deref().unwrap_or_default())
     }
 
+    /// The cached column definitions, moved out (empty if `columns` was never called).
+    // glue: hands the definitions sent to the router (`ResultPackets.infos`) without a copy
+    pub fn take_columns(&mut self) -> Vec<Info> {
+        self.columns.take().unwrap_or_default()
+    }
+
     // go: tidbResultSet.FieldTypes L1
     pub fn field_types(&mut self, se: &Session) -> Result<Vec<FieldType>, Error> {
         Ok(self

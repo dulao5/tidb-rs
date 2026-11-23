@@ -557,6 +557,7 @@ fn result_fields() {
             ..Default::default()
         },
     ];
+    let names: Vec<_> = names.into_iter().map(Arc::new).collect();
     let rfs = col_names2_result_fields(&schema, &names, "Test");
     assert_eq!(rfs[0].db_name, CIStr::new("Test"));
     assert_eq!(rfs[0].column_name, CIStr::new("a"));

@@ -90,7 +90,6 @@ pub fn write_column_info(columns: &[Info], enc: &mut ResultEncoder, out: &mut Re
         v.dump(&mut data, Some(enc));
         out.columns.push(data);
     }
-    out.infos = columns.to_vec();
 }
 
 /// writeChunks writes data from a Chunk, which filled data by a ResultSet, into a
@@ -115,8 +114,7 @@ pub async fn write_chunks(
         if !got_column_info {
             // We need to call Next before we get columns.
             // Otherwise, we will get incorrect columns info.
-            let columns = rs.columns(se)?.to_vec();
-            write_column_info(&columns, enc, out);
+            write_column_info(rs.columns(se)?, enc, out);
             got_column_info = true;
         }
         let row_count = req.num_rows();
@@ -124,17 +122,21 @@ pub async fn write_chunks(
             break;
         }
         first_next = false;
-        let columns = rs.columns(se)?.to_vec();
+        let columns = rs.columns(se)?;
         for i in 0..row_count {
             let mut data = Vec::with_capacity(64);
             if binary {
-                dump_binary_row(&mut data, &columns, &req.get_row(i), Some(enc))?;
+                dump_binary_row(&mut data, columns, &req.get_row(i), Some(enc))?;
             } else {
-                dump_text_row(&mut data, &columns, &req.get_row(i), Some(enc))?;
+                dump_text_row(&mut data, columns, &req.get_row(i), Some(enc))?;
             }
             out.rows.push(data);
         }
     }
+    // glue: the column definitions as sent, for the router (moved out of the result set,
+    // whose `Columns` cache Go keeps until the result set is closed; nothing reads it after
+    // the last `Next`).
+    out.infos = rs.take_columns();
     rs.finish(se).await?;
     Ok(first_next)
 }
