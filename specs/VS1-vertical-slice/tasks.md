@@ -73,7 +73,7 @@ Phase 2 的待定设计问题（来自 VS1-19 / VS1-10 的评审，#223 / #224�
 | VS1-36 | Sort / TopN（内存中） | D12.5 | depth | 0.08 | VS1-13 | 单测；ab `Sort` / `TopN` | 未开始 |
 | VS1-37 | C2b 集成与 read_only 调优；默认值评审 | glue | depth | 0.10 | Phase 3 其余各项 | ab `strict` 的 VS1 分类 100%；read_only ≥ 0.9× Go；`Compile` 接入 `planner.Optimize` 时加真实会话 EXECUTE 读取参数的测试（需要 sessionexpr，D09.13 spec §7） | 未开始；其中"真实会话 EXECUTE 读取参数的测试"已随 `Compile` 接入优化器完成（`execute_reads_the_parameters_through_the_session_expression_context`：int / 字符串 / NULL，[D05.3 spec](../D05.3-session/spec.md) §9.4）；普通 SELECT 接入 `Compile` 的方案（语句移交给 `Compile`、写完后冻结成 `Arc`，先核对事务管理器不读规划器写的字段）见 D05.3 spec §9.2 |
 | VS1-38 | （可选）EXPLAIN：只支持 VS1 算子 | D10.9、D09.16、D12.12 | depth | 0.05 | VS1-28 | ab 计划级对照 | 未开始 |
-| VS1-39 | （有条件，plan §10-3）实例级 plan cache（VS1 形态）与 [A3 plan cache spec](../exceptions/A3-plan-cache/spec.md)（第 1 阶段，spec §7） | D13.1 | depth | 0.15 | VS1-15、VS1-28 | spec 经负责人确认；read_only 达标 | spec 待确认（2026-11-23；spec 待定 11 建议改为必做） |
+| VS1-39 | 实例级 plan cache（VS1 形态的预处理语句）与 [A3 plan cache spec](../exceptions/A3-plan-cache/spec.md)（第 1 阶段，spec §7；含默认 ON、淘汰周期变量 `tidb_instance_plan_cache_evict_interval`、`ADMIN FLUSH INSTANCE PLAN_CACHE` 清空实例级缓存）。必做（spec §6 决定 11，不再以 plan §10-3 的 read_only < 0.9× 为条件）；排在 VS1-32 的测量之后、默认值切换之前 | D13.1 | depth | 0.15 | VS1-15、VS1-28、VS1-32（测量） | spec §7 第 1 阶段的完成条件；read_only ≥ 1.0× Go（spec §5.4） | 未开始（spec 已确认，2026-11-23，#305） |
 
 ## 合计
 
