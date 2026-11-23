@@ -2,6 +2,10 @@
 
 状态：**待确认（负责人）**（2026-11-23 起草）。类型：实现例外（A3"缓存"的 plan cache 部分；A3 其余三项 coprocessor cache、infoschema v2、统计信息缓存各自另写 spec）。所属块：D13.1 plan cache 的缓存部分（VS1-39 起），crate `tidb-planner`（缓存本体与重建）、`tidb-domain`（持有与后台淘汰）、`tidb-sessionctx`（接口）。
 
+修订记录：
+
+- 2026-11-23：按 Lucky 对 #304 的评审（批准，附修改意见）修订：§2.3 补上漏列的执行期写入，第 1 阶段的两处列入完成条件；§3.3 可缓存条件补上 Go 克隆按字段返回 `false` 的情况；§3.6 代价缓存改为"封存节点上照常计算、不写回"；§3.4 淘汰在锁外释放计划树、Put 在写锁下复查淘汰状态、哈希加随机种子、写明命中路径不分配的前提；§8 风险 1 增加"只换分片内部结构"的后备。§6 的 11 项决定在 #305 等负责人确认（Lucky 全部同意建议）。
+
 负责人的要求（2026-11-23）："concept follows Go's instance-level plan cache design, but make full use of Rust's capabilities"。负责人之前已决定：tidb-rs 只做实例级 plan cache（各会话共享），不做 Go 的会话级 prepared plan cache（#128 §一.5；N1 §3.5 记为 2026-11-14 的决定）。
 
 相关：[N1](../N1-plan-representation/spec.md) §3.4、§3.5（路径复制）、§3 第 9 条（链与扁平列表）、§7 第 2 条（交给本 spec 的待定项）；[N4](../N4-expr-eval/spec.md) §3.5（求值的可变状态）；[N13](../N13-shared-metadata/spec.md)（元数据 `Arc`）；[N3+A1](../N3-A1-concurrency-memory/spec.md) §3.7（后台任务）、A1 §3.5（内存数值的兼容契约）；[N8](../N8-sysvar/spec.md)（系统变量）；[D09.7 试点报告](../../D09.7-column-pruning/pilot-report.md) §5 风险 1–4；[D13.1 spec](../../D13.1-plancache/spec.md)（已移植的非缓存部分）；[VS1 plan](../../VS1-vertical-slice/plan.md) §8 风险 2、§10-3，VS1-39。
@@ -97,9 +101,13 @@ Go 放入前克隆的理由写在 `plan_cache.go:322-326`："execution (might mo
 | 6 | `buildShuffle` 写 `v.Tails[j].SetChildren(stub)`（`builder.go:5457`） | Shuffle 子节点 | 否（`:602-603`） | 执行器自己持有 stub，不写计划 |
 | 7 | 表达式求值的缓存 `builtinFuncCache`（按 `CtxID`，`expression/builtin.go`）；`CorrelatedColumn.Data`（Apply 内层逐行写） | 函数节点内部 | 前者是 | §3.7 |
 | 8 | `RAND()` 的随机数发生器：`builtinRandSig.Clone` 共享 `mysqlRng`（`expression/builtin_math.go:1064`） | 发生器状态（内部加锁） | 是 | 与 Go 相同：多个会话命中同一计划时共享一个发生器（Go 每次命中克隆表达式，但克隆仍共享发生器）。N4 §3.5 已定为 `Arc<Mutex<MysqlRng>>` |
-| 9 | `generateNewPlan` 中 `stmtCtx.SetPlan`、`NormalizePlan` 写入 `PlanCacheStmt`；`planCachePreprocess` 写 `RelateVersion` / `tbls` / `SchemaVersion` | 语句上下文、会话的 `PlanCacheStmt` | — | 都是会话私有对象，不是计划节点，照 Go |
+| 9a | 唯一索引点查执行器：`executor/point_get.go:212` 让 `e.idxVals` 直接引用 `p.IndexValues`，`:303` 调 `EncodeUniqueIndexValuesForKey`（`planner/core/util.go:369`），后者把各值转换成列类型（字符串、ENUM、`table.CastValue`）**写回同一个切片** | `PointGetPlan.IndexValues` 的元素 | 是 | **第 1 阶段完成条件**。执行器持有一份自己的 `Vec<Datum>`（从计划复制，或转换时生成新 `Vec`），转换结果写进它，不写计划。结果与 Go 相同：Go 写回的是本语句私有克隆（命中）或之后不再使用的原计划（未命中，缓存中是放入前的克隆） |
+| 9b | `buildTableReader` 在 reader 的 schema 为空而表计划的 schema 非空时调用 `v.SetSchema(v.GetTablePlan().Schema())`（`executor/builder.go:3840-3843`，上游 `#50358`） | `PhysicalTableReader` 的 schema | 是 | **第 1 阶段完成条件**。执行器构建时用局部变量取"有效 schema"（为空则取表计划的 schema），执行器与结果列都用它，不写计划。若规划侧能保证 reader 的 schema 不为空，改在规划侧补齐（写在语句独占的树上，放入缓存之前），并加断言 |
+| 9c | BatchPointGet：`PrunePartitionsAndValues`（`planner/core/point_get_plan.go:734`，由 `executor/builder.go:5555` 调用）在**非分区表**上也会原地过滤掉含 NULL 的 `IndexValues`（L746-753），分区表上还会原地改 `PartitionIdxs`（L743、L777-780） | `IndexValues`、`PartitionIdxs` | 是 | 第 2 阶段（BatchPointGet）：过滤结果作为返回值交给执行器，计划不变 |
+| 9d | 外键级联：`fkc.plan.CascadePlans = append(...)`（`executor/foreign_key.go:752`） | `FKCascade.CascadePlans` | 否（带外键的 DML 克隆返回 `false`，§3.3） | 执行器局部保存级联计划（写路径阶段） |
+| 10 | `generateNewPlan` 中 `stmtCtx.SetPlan`、`NormalizePlan` 写入 `PlanCacheStmt`；`planCachePreprocess` 写 `RelateVersion` / `tbls` / `SchemaVersion` | 语句上下文、会话的 `PlanCacheStmt` | — | 都是会话私有对象，不是计划节点，照 Go |
 
-除第 1–4 行外，可缓存计划在 v8.5.8 的执行器中没有其他写入（按 `executor/*.go` 对计划类型字段赋值、`SetChild(ren)`、计划方法调用逐个检查；D12 各块移植时用 §3.1 的 lint 兜底，漏掉的写入在编译期或 lint 中暴露，不会静默污染缓存）。
+以上是按 `executor/*.go` 对计划类型字段赋值、`SetChild(ren)`、`SetSchema`、计划方法调用，以及**经别名写入**（执行器字段引用计划中的切片后写元素，如 9a）检查得到的清单；初稿漏了 9a–9d，所以不声称它是完整的。保证缓存不被污染的不是这张清单，而是 §3.1：执行器拿不到 `&mut` 计划节点，`make_mut_plan` 等在执行器 crate 中被 lint 禁止，计划中的 `Vec` 只能经 `&` 读，所以 Go 中这类写入在 Rust 里要么编译不过、要么 lint 报错，只能改写成执行器局部状态（上表最后一列）。D12 各块移植时，块 plan 逐处列出本块遇到的这类写入及其改写方式。
 
 ## 3. Rust 设计
 
@@ -171,6 +179,19 @@ pub struct PlanCacheValue {
 
 - `PlanCacheValue::seal(plan, names, param_types, hints) -> Option<Self>`：先检查 `instance_cacheable`，不满足返回 `None`（对应 Go 的 `CloneForPlanCache` 返回 `false`，静默不放入）；再算 `mem_bytes`。
 - `instance_cacheable`：`PhysicalPlan` trait 的方法，默认 `false`；§1.1 列出的 27 种算子覆盖为 `true` 并递归检查子节点、`probe_parents` 以及读取器内部的计划链（与 Go 克隆递归的范围相同）。新增算子时默认不可缓存，与 Go 一致。
+- **不只看算子种类**：Go 生成的克隆函数在某些字段非空时也返回 `false`，`instance_cacheable` 必须逐条覆盖（`planner/core/plan_clone_generated.go`）：
+
+  | 算子 | 字段非空即不可缓存 | Go 行 |
+  |---|---|---|
+  | `PhysicalTableScan` | `SampleInfo`（TABLESAMPLE）、`runtimeFilterList`、`AnnIndexExtra`（向量索引） | L57、L62、L65 |
+  | `PhysicalIndexScan` | `GenExprs`（表达式索引） | L85 |
+  | `PhysicalHashJoin` | `runtimeFilterList` | L188 |
+  | `PhysicalTableReader` | `TableScanAndPartitionInfos`（分区信息） | L224 |
+  | `Update` | `PartitionedTable`、`FKChecks`、`FKCascades` | L481、L484、L487 |
+  | `Delete` | `FKChecks`、`FKCascades` | L505、L508 |
+  | `Insert` | `FKChecks`、`FKCascades` | L529、L532 |
+
+  另外，各克隆函数中"子计划或附属字段克隆失败则返回 `false`"的分支（如 `clonePhysicalPlansForPlanCache` 对 `probeParents`）按同样的递归范围覆盖。测试：每一行一个用例，Go 侧确认不缓存（第二次 EXECUTE `last_plan_from_cache = 0`、无 warning），Rust 相同；Go 文件升级时用脚本比对生成文件中 `return nil, false` 的条件列表与 Rust 的实现。
 - 放入的就是本语句正在执行的同一个 `Arc` 树，不复制。放入之后本语句同样只读这棵树（§3.1 第 3 条保证）。
 
 ### 3.4 存储与并发
@@ -188,11 +209,11 @@ pub struct InstancePlanCache {
 struct Entry { value: Arc<PlanCacheValue>, last_used: AtomicU64 /* 单调时钟纳秒 */ }
 ```
 
-- **分片**：分片数取 2 的幂，默认 `max(64, 4 × 线程池大小)`，按 key 的哈希选分片。`parking_lot::RwLock`，锁内只做哈希查找、类型匹配和 `Arc::clone`，不分配、不求值、不跨 `.await`（`M-BLOCK`）。
+- **分片**：分片数取 2 的幂，默认 `max(64, 4 × 线程池大小)`，按 key 的哈希选分片。哈希函数带进程启动时随机生成的种子（`foldhash` / `ahash` 的随机状态），避免用户构造的语句文本把条目集中到一个分片或一个桶。`parking_lot::RwLock`，锁内只做哈希查找、类型匹配和 `Arc::clone`，不分配、不求值、不跨 `.await`（`M-BLOCK`）。
 - **同一 key 的多个计划**：`SmallVec` 中按放入顺序倒序保存（新的在前），查找取第一个 `checkTypesCompatibility4PC` 为真的，与 Go 的链表顺序相同。
 - **Get**：命中时更新 `last_used`（正在淘汰时不更新，同 Go L92）。为避免每次命中都写同一条缓存行，只在新值比旧值大 1ms 以上时才写（待定 7）。
-- **Put**：Go 的四个失败条件照做（正在淘汰、超过硬限额、已有兼容计划、并发冲突）。"已有兼容计划"的检查和插入在同一把写锁下完成，所以不存在 Go 的 CAS 失败；结果上是 Go 允许的情况之一。
-- **Evict**（后台任务，§3.8）：第一遍按分片逐个持读锁收集 `last_used`，用 L1 移植的 `calc_eviction_threshold` 算阈值；第二遍按分片逐个持写锁删除 `last_used ≤ 阈值` 的条目并减 `tot_cost` / `tot_plan`，删掉空 key。一次只锁一个分片，命中路径最多等一个分片的扫描。
+- **Put**：Go 的四个失败条件照做（正在淘汰、超过硬限额、已有兼容计划、并发冲突）。"已有兼容计划"的检查和插入在同一把写锁下完成，所以不存在 Go 的 CAS 失败；结果上是 Go 允许的情况之一。拿到写锁后**再查一次 `in_evict`**（同 Go L118 的第二次检查），淘汰已开始就放弃插入。
+- **Evict**（后台任务，§3.8）：第一遍按分片逐个持读锁收集 `last_used`，用 L1 移植的 `calc_eviction_threshold` 算阈值；第二遍按分片逐个持写锁，把 `last_used ≤ 阈值` 的条目**移出到一个 `Vec`** 并减 `tot_cost` / `tot_plan`，删掉空 key，**释放写锁之后再 drop 这个 `Vec`**。计划树可能很大，最后一个引用的释放（递归 drop 整棵树）绝不在分片锁内发生。一次只锁一个分片，命中路径最多等一个分片的扫描（不含释放）。
 - **释放**：条目被删除时只是缓存放掉一个引用。正在执行它的语句仍持有 `Arc`，语句结束时最后一个引用释放，内存确定性归还 jemalloc；不需要 GC，也不会出现悬空引用。`tot_cost` 在删除时立即减少（与 Go 相同：Go 删除节点后计划对象也要等 GC 才真正释放）。
 
 **cache key 的表示**（Rust 的做法，等价于 Go 的字符串比较）：
@@ -205,7 +226,8 @@ pub struct PlanCacheKey {
 }
 ```
 
-- 语句文本可能很长，Go 每次 EXECUTE 都把它复制进新字符串再哈希。Rust 把文本的哈希留在 `PlanCacheStmt` 里，每次只编码几十字节的 `env`，写进会话复用的缓冲区；比较时先比 `Arc` 指针，不同再比内容。命中路径没有堆分配。
+- 语句文本可能很长，Go 每次 EXECUTE 都把它复制进新字符串再哈希。Rust 把文本的哈希留在 `PlanCacheStmt` 里，每次只编码几十字节的 `env`，写进会话复用的缓冲区；比较时先比 `Arc` 指针，不同再比内容。
+- **"命中路径不分配"的前提**：(1) 会话的 key 缓冲区已在之前的 EXECUTE 中增长到足够大（第一次 EXECUTE 或 `env` 变长时会扩容一次）；(2) 不算参数类型数组：`parseParamTypes` 每次构造的 `FieldType` 列表放在会话复用的 `SmallVec` 中，参数个数超过内联容量时扩容一次后复用；(3) 只指查找本身（建 key、选分片、匹配、取 `Arc`）。之后的路径复制按设计要为被改写的节点分配（参数相同时为 0），执行器构建的分配不在此列。基准中用计数分配器只断言 (3) 的范围。
 - 字符串字段带长度前缀，所以不会出现 Go 把用户名、主机名、库名直接拼接造成的串接歧义（用户 `ab`@`c` 与 `a`@`bc` 得到同一个 key）。见待定 9。
 - 时区偏移照 Go 用当前时刻计算（含夏令时切换的效果）。
 
@@ -222,12 +244,15 @@ pub struct PlanCacheKey {
 
 ### 3.6 代价缓存与 EXPLAIN（§2.3 第 4 行）
 
-Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；EXPLAIN 补算或 `true_card_cost` 重算只写这个克隆。Rust 规则：
+Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；之后任何代价计算（EXPLAIN 补算、`true_card_cost` 重算、慢日志和语句摘要生成二进制计划时的代价计算）都只写这个克隆，缓存中的原件永远保持放入时的代价值。未命中的语句在原计划 `p` 上执行，写入也不会到达缓存（缓存中是放入前的克隆）。
+
+不能按"是否来自缓存"（`FoundInPlanCache`）来区分：放入缓存的那条语句本身就在已封存的树上执行；慢日志、语句摘要的二进制计划（默认打开）对普通语句也会算代价；快速路径的 PointGet 正是在那里第一次写代价缓存。Rust 规则：
 
 1. `PlanCacheValue::seal` 时为树中每个节点置 `sealed` 位（`BasePhysicalPlan` 中一个只在发布前写一次的 `AtomicBool`，类别 (a)）；`clone_node` 产生的副本 `sealed = false`。
-2. 写代价缓存的函数（`plan_cost_ver1/ver2` 的 memo 写入）`debug_assert!(!sealed)`。
-3. 对来自缓存的计划（`FoundInPlanCache`）做任何代价计算之前（EXPLAIN / EXPLAIN ANALYZE 的 `getOperatorInfo`、`true_card_cost`、`EXPLAIN FOR CONNECTION`），先 `clone_tree` 做一次全树浅拷贝，使代价值按值复制到语句私有的节点上。这只发生在 EXPLAIN 路径，等价于 Go 的"每次命中克隆"。
-4. 测试：两个代价因子不同的会话交替 `EXPLAIN FORMAT='verbose' EXECUTE` 同一缓存计划，`estCost` 各自与 Go 相同。
+2. **封存的节点上照常计算代价，但不写回**：读代价缓存照旧（已初始化且不要求重算时直接返回放入时的值）；需要计算或重算时算出结果直接返回给调用方，不写入节点的 memo。这正是 Go 的实际语义（写入只落在之后被丢弃的克隆上），不需要复制整棵树。
+3. 未封存的节点（语句独占的树、路径复制产生的副本）照旧写 memo，`FindBestTask` 期间的共享写（N1 §3 第 9 条）不受影响。
+4. 代价：封存节点上同一语句内重复算代价时不能复用，会重算（只在 EXPLAIN、慢日志 / 语句摘要编码时发生，量小）。
+5. 测试：两个代价因子不同的会话交替 `EXPLAIN FORMAT='verbose' EXECUTE` 同一缓存计划，`estCost` 各自与 Go 相同；放入缓存的语句开启慢日志二进制计划后，缓存中节点的 memo 不变；快速路径 PointGet 命中后的慢日志计划与 Go 相同。
 
 ### 3.7 表达式求值的缓存（N1 §7 第 2 条、试点报告 §5 风险 3）
 
@@ -259,6 +284,7 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；EX
 |---|---|---|
 | a. 照 Go：放入和命中都深拷贝 | 实现 `CloneForPlanCache` 的 Rust 版 | 浪费 Rust 的不可变共享；每次命中复制整棵树和全部表达式。**否决** |
 | b. 不可变 `Arc` 树 + 路径复制（本 spec） | §3.2 | N1 已确认的机制；执行器构建逻辑保持 L1 |
+| b′. 只换分片内部结构：分片改为 `ArcSwap<HashMap>`（读用 `arc-swap` 的 guard，不写共享计数器）或 seqlock 式读，`Entry` 中的计划用借用而不是 `Arc::clone` 交给本语句（语句结束前 guard 保证不释放），`last_used` 按待定 7 节流 | 读路径不写任何共享状态 | 写路径（Put、淘汰）要复制分片的表，分片小时代价可控；不改计划表示，也不改执行器。§8 风险 1 的第一后备 |
 | c. 不复制节点，按 plan id 把本次的 range 放进旁表，执行器构建时优先读旁表 | 命中时只一次 `Arc::clone` | 每个读取器的执行器构建都要改成先查旁表，偏离 L1；与 N1 §3.5 不符。作为热点争用的后备，见 §8 风险 1 |
 | d. 每个工作线程一份缓存副本 | 线程本地查找 | 内存乘以线程数，淘汰复杂。只作为 §8 风险 1 的后备 |
 
@@ -308,6 +334,8 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；EX
 
 ## 6. 需要负责人决定
 
+以下 11 项在 #305 等负责人确认；Lucky 评审 #304 时同意全部建议。
+
 1. **`tidb_enable_instance_plan_cache` 的默认值**。Go 默认 OFF（实验特性），因为 Go 默认有会话级缓存。tidb-rs 没有会话级缓存，保持 OFF 就意味着默认完全没有 plan cache。
    - **建议：默认 ON**（特性例外）。用户默认仍然得到"预处理语句命中缓存"，与 Go 的默认体验一致。
    - 代价：`SELECT @@global.tidb_enable_instance_plan_cache` 显示 ON；默认就有跨会话命中（新会话的第一次 EXECUTE 可能就是 `last_plan_from_cache = 1`）。混合集群中这个 GLOBAL 值持久化在 `mysql.global_variables`，由引导集群的节点写入的值为准（N8 中核对加载时是否调用 `SetGlobal` 钩子）。
@@ -346,7 +374,9 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；EX
   - `PhysicalTableReader` → `PhysicalTableScan`：int handle（`BuildTableRange`），common handle 若 VS1 有则走 `DetachCondAndBuildRangeForIndex`；
   - 其余算子（Selection、Projection、Sort、TopN、Limit、StreamAgg、HashAgg、TableDual）走"递归子节点"分支。
 - `instance_cacheable`：上面这些算子与 27 种中已移植的；其余默认 `false`。
-- 代价缓存规则（§3.6）与 `sealed` 位；执行器 lint（§3.1 第 3 条）。
+- 代价缓存规则（§3.6：封存节点不写回）与 `sealed` 位；执行器 lint（§3.1 第 3 条）。
+- **完成条件**：§2.3 第 9a 行（唯一索引点查执行器不写回 `IndexValues`）与第 9b 行（`buildTableReader` 不对计划 `SetSchema`）已按该表改写，各有回归测试：缓存中的计划在执行后结构哈希不变，且结果与 Go 相同。
+- `instance_cacheable` 覆盖 §3.3 字段表中第 1 阶段算子的行（TableScan、TableReader）。
 - 其余分支（IndexScan、IndexReader、IndexLookUp、BatchPointGet、IndexJoin、IndexMerge、DML、分区）是 `blocked-by:<块>` 的边界桩：遇到时**不缓存**（`instance_cacheable` 为 `false`），而不是报错，与 Go 不可克隆时的行为相同，结果仍正确。这一点在 ab 中显示为 `last_plan_from_cache` 与 Go 不同，按"块未到位"登记，不算 bug。
 
 ### 第 2 阶段：索引与分区（随 VS1-28 第 2 部分、D10.x、D12.x）
@@ -359,7 +389,7 @@ Insert / Update / Delete 的 `SelectPlan`（及点更新）、绑定（`FoundInB
 
 ## 8. 风险
 
-1. **热点计划的缓存行争用**。所有会话执行同一语句时，分片读锁、根节点的引用计数、`last_used` 都落在少数几条缓存行上。Go 在这里只有原子读（以及每次命中写 `lastUsed`）。缓解：读锁只在取 `Arc` 的瞬间持有；`last_used` 节流（待定 7）；路径复制在参数相同时为 0。若 §5.4 的争用指标不达标，后备是方案 c（旁表，只一次引用计数）或 d（线程本地副本），届时修订本 spec。
+1. **热点计划的缓存行争用**。所有会话执行同一语句时，分片读锁、根节点的引用计数、`last_used` 都落在少数几条缓存行上。Go 在这里只有原子读（以及每次命中写 `lastUsed`）。缓解：读锁只在取 `Arc` 的瞬间持有；`last_used` 节流（待定 7）；路径复制在参数相同时为 0。定量地看：每次命中有 4 次对共享缓存行的原子读改写（读锁获取、释放，根 `Arc` 的加一、减一），Go 只有 1 次写（`lastUsed`）。64 线程跑同一语句时，这 4 次 RMW 很可能是命中路径的主要开销。若 §5.4 的争用指标不达标，后备依次是：方案 b′（只换分片内部结构，读路径不写共享状态，§3a）；方案 c（旁表）；方案 d（线程本地副本）。采用时修订本 spec。
 2. **路径复制的规模**。range 语句每次命中都要复制根到 reader 的路径，通常是 root task 中的大部分节点（浅拷贝）。节点结构体较大时（如带多个 `Vec` 的 reader），浅拷贝的分配可能成为热点。§5.2 的复制计数和 §5.4 的耗时会暴露。
 3. **执行期写计划的位置可能有遗漏**。§2.3 基于 v8.5.8 执行器的逐处检查；D12 各块移植时，Rust 的所有权与 lint 保证遗漏的写入不会污染缓存（只会多一次复制或编译失败），但代价缓存一类的内部可变性要靠 §3.1 第 2 条的 grep 检查。
 4. **`HeapSize` 的覆盖**。新增计划或表达式字段时忘记 derive 会少计。缓解：derive 是必需的 trait 约束（`PhysicalPlan: HeapSize`），编译期强制；§5.3 的精度测试。
