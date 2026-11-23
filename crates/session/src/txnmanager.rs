@@ -227,29 +227,41 @@ impl TxnManager {
         self.stmt_node.as_ref()
     }
 
+    /// The statement the current one is from now on (`GetCurrentStmt`): the session hands it
+    /// over after `Compile` froze it (spec §9.2), `PrepareStmt` right after `OnStmtStart`.
+    // glue: the second half of Go's `m.stmtNode = node` (the node is shared after planning, spec §9.2)
+    pub fn set_current_stmt(&mut self, node: Option<Arc<ast::Stmt>>) {
+        self.stmt_node = node;
+    }
+
     /// OnStmtStart is the hook that should be called when a new statement started
     ///
     /// The event name is the normalized SQL (`parser.Normalize`, D02.1); until it is ported
     /// the event is the statement kind.
-    // go: txnManager.OnStmtStart L2 (the event name: parser.Normalize is D02.1)
+    ///
+    /// The node is borrowed: the providers read it during the call (the RC provider's
+    /// `IsReadOnly`), and the planner, which writes to it, has not run yet. Go also stores
+    /// it as the current statement (`m.stmtNode = node`); here the current statement is
+    /// cleared and handed over later with [`TxnManager::set_current_stmt`], once the planner
+    /// is done with it (spec §9.2: nothing reads it in between).
+    // go: txnManager.OnStmtStart L2 (the event name: parser.Normalize is D02.1; the node is stored after Compile, spec §9.2)
     pub fn on_stmt_start(
         &mut self,
         sctx: &mut SessCtx,
-        node: Option<Arc<ast::Stmt>>,
+        node: Option<&ast::Stmt>,
     ) -> Result<(), Error> {
-        self.stmt_node = node;
+        self.stmt_node = None;
 
         let Some(p) = self.ctx_provider.as_mut() else {
             return Err(context_provider_not_set());
         };
 
-        let sql = match &self.stmt_node {
+        let sql = match node {
             // node.OriginalText() normalized (parser.Normalize, D02.1).
             Some(n) => crate::glue::stmt_kind(n).to_owned(),
             None => String::new(),
         };
-        let node = self.stmt_node.clone();
-        let r = match &node {
+        let r = match node {
             Some(n) => p.on_stmt_start(sctx, Some(&StmtNode(n))),
             None => p.on_stmt_start(sctx, None),
         };

@@ -287,14 +287,45 @@ Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次
 与 Go 的差异：
 
 1. Go 的预处理器在 `ensureInfoSchema` 中向事务管理器要 InfoSchema；Rust 的预处理器从返回值里拿（PREPARE 也是这样交进去的），所以 `Compile` 把事务的 InfoSchema 放进返回值。会话没有事务 InfoSchema 时停在 `blocked-by:D05.4`（与原来相同）。
-2. 优化器要 `&mut ast::Stmt`，而会话与事务管理器共享语句（`Arc`，Go 共享指针），Rust AST 也不能 `Clone`。EXECUTE 节点逐字段复制一份给优化器（预处理语句与二进制参数本来就是共享的 `Arc`，优化器写到节点上的东西没有人回读）。
-3. 带 `USING @v` 的文本协议 EXECUTE（路由器从不交给新栈）在复制时就停在 `blocked-by:D09.2`，即 `buildExecute` 改写 `USING` 变量的位置；之后还要用户变量函数（D08.9）。Go 会先做预处理再报错，这里的报错位置提前。
+2. 优化器要 `&mut ast::Stmt`（Go 的规划器在共享的节点上写），Rust AST 不能 `Clone`。所以语句由会话**移交**给 `Compile`，规划器直接在它上面写，写完再冻结成 `Arc` 共享（§9.2）。EXECUTE 也是这样（原来逐字段复制一份给优化器，现在不再复制）。
+3. 带 `USING @v` 的文本协议 EXECUTE（路由器从不交给新栈）在预处理之前就停在 `blocked-by:D09.2`，即 `buildExecute` 改写 `USING` 变量的位置；之后还要用户变量函数（D08.9）。Go 会先做预处理再报错，这里的报错位置提前。
 
-### 9.2 只编译 EXECUTE
+### 9.2 普通语句：把语句移交给 `Compile`
 
-EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预处理之前停在 `blocked-by:D05.3`：原因同 §9.1 第 2 条，普通语句的 AST 不能逐字段复制（SELECT 的子树很大，且 `Expr` 不能 `Clone`），要等语句的所有权调整（会话把语句交给 `Compile` 时只保留一份，或 AST 支持复制）。原来这些语句停在 `blocked-by:D09.13`，回退的位置和结果不变（都在执行之前）。
+原来只有 EXECUTE 能编译：会话把语句放进 `Arc`，同时交给事务管理器（`OnStmtStart`）和 `Compile`，规划器拿不到可写的一份，普通语句（`COM_QUERY` 的 SELECT）在预处理之前停在 `blocked-by:D05.3`。现在照下面的顺序做，文本协议的语句与 EXECUTE 走同一条路。
 
-接上普通语句的计划（随 VS1-37 集成）：会话把语句**移交**给 `Compile`（不再先克隆 `Arc`）；规划器在 `&mut ast::Stmt` 上写（预处理、`sql_select_limit` 的 LIMIT 等），写完之后冻结成 `Arc<ast::Stmt>`，再交给事务管理器和 `ExecStmt`。Go 中事务管理器在 `Compile` **之前**就由 `OnStmtStart` 拿到语句，所以前提是：事务管理器在 `OnStmtStart` 到 `Compile` 结束之间不读规划器会写的字段（它现在只问语句种类：是不是 SELECT、是不是事务语句、是不是 stale read）。动手时逐个核对 `OnStmtStart`、`AdviseWarmup`、`AdviseOptimizeWithPlan` 读的字段；成立就把 `OnStmtStart` 收到的节点换成"语句种类"的摘要，或在 `Compile` 后补交冻结的 `Arc`。
+**做法**
+
+1. 路由器把解析好的语句**整个交给**新会话（`NewStack::execute` 收 `ast::Stmt`，不再是 `Arc`），自己不留一份。新栈停在边界、要回退到 PoC 时，路由器按原文**重新解析一次**，再降级给 PoC（PoC 要 AST）。重新解析只发生在回退时；新栈执行的语句只解析一次。
+2. 会话的 `ExecuteStmt` 收下语句。`Compile` 之前的各步只借用它：`ResetContextOfStmt`、事务内 / stale read 的校验、`OnStmtStart`、语句标签、预先加载用到的表。
+3. `Compile` 收下语句（移交）。`IsReadOnly` 读它，预处理器和优化器在 `&mut ast::Stmt` 上写；`planner.Optimize` 之后把它冻结成 `Arc<ast::Stmt>`，放进 `ExecStmt` 的 `StmtNode`。
+4. `Compile` 成功之后，会话把同一个 `Arc` 交给事务管理器，作为它的当前语句（`GetCurrentStmt`）。
+
+**核对：`OnStmtStart` 到 `Compile` 结束之间，谁读语句**（Go v8.5.8，逐个看了实现）
+
+| 位置 | 读语句的什么 | 什么时候读 |
+|---|---|---|
+| 事务管理器的 `OnStmtStart` | 保存节点；事件名用 `OriginalText()`（Rust 用语句种类，§5） | 调用当时 |
+| provider 的 `OnStmtStart`：基础、乐观、悲观 RR、stale read | 不读（参数是 `_`，或只转给基础的） | — |
+| provider 的 `OnStmtStart`：悲观 RC | `NeedSetRCCheckTSFlag` → `IsReadOnly(node)` | 调用当时 |
+| `AdviseWarmup`（基础、RC） | 不读语句：只看事务是否已准备、`StmtCtx.IsStaleness`、`SnapshotTS` | — |
+| `AdviseOptimizeWithPlan`（基础、乐观、RR、RC、stale read） | 不读语句：只看计划和会话变量 | — |
+| `GetCurrentStmt` 的调用者 | 预处理器的 stale read 分支（换成 stale read provider 后再调一次 `OnStmtStart(GetCurrentStmt())`，这个 provider 不读节点）；`NewTxnInStmt`（INSERT / DELETE / DDL / GRANT / REVOKE 和用户管理等语句的执行器，在 `Compile` 之后） | — |
+
+结论：节点只在 `OnStmtStart` 调用的当时被读（种类和是否只读），这时规划器还没有写；`AdviseWarmup`、`AdviseOptimizeWithPlan` 不读语句。
+
+**选择：`OnStmtStart` 借用节点，`Compile` 之后补交冻结的 `Arc`**
+
+- `OnStmtStart` 收 `Option<&ast::Stmt>`，provider 在调用当时读完（RC 的 `IsReadOnly`）。sessiontxn 的接口（`StmtInfo`）不变，provider 看到的仍是语句本身，与 Go 一样。
+- 不选"语句种类摘要"：摘要要把 RC 的 `IsReadOnly` 提前算好、改 sessiontxn 的 `StmtInfo` 接口，而且 `Compile` 之后的读者（`NewTxnInStmt`）仍要真正的节点，最后还是要补交 `Arc`。借用加补交只改会话自己的代码。
+- `Compile` 之后的读者拿到的是规划器写过之后的节点，与 Go 一样（Go 共享指针，读到的也是写过的）。
+
+**与 Go 的差异**
+
+1. `OnStmtStart` 到 `Compile` 结束之间，事务管理器的当前语句是空的（Go 是节点）。现在没有读者：预处理器的 stale read 分支是边界桩（`blocked-by:D05.4`），路由器也不把 stale read 交给新栈。将来移植那个分支时，要把预处理器手里的节点交给 `OnStmtStart`，而不是取 `GetCurrentStmt`。
+2. `Compile` 出错时事务管理器没有当前语句（Go 有）。出错之后的 `rollbackOnError` 不读它。
+3. 回退时多解析一次（第 1 条）。只影响回退的语句。
+4. Go 的 `ExecStmt.RebuildPlan` 会在 `a.StmtNode` 上再做一次预处理和优化。现在它是桩，唯一的调用方是乐观事务的重试（写路径），不影响只读路径。将来移植时，语句已冻结成 `Arc`，事务管理器也持有一份，`Arc::get_mut` 会失败，AST 又不能 `Clone`。两种做法：先让两处持有者都交回 `Arc`（事务管理器 `set_current_stmt(None)`，以及 `RebuildPlan` 所在的 `ExecStmt` 自己的 `stmt_node.take()`），再用 `Arc::try_unwrap` 拿回可写的语句，规划完再冻结、补交；或者按原文重新解析一份。到时按重试路径的代价选择。
 
 ### 9.3 停在哪里，怎样回退
 
@@ -303,7 +334,12 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 | 预处理的点查 `SELECT c FROM sbtest1 WHERE id=?` | 不再停：快速路径用参数值建点查计划（D10.8 spec §4a），`Compile` 保留 Execute 计划，`Exec` 换成其中的点查并新建执行器（§10） | VS1-20 之前停在 `getNameValuePairs`（`blocked-by:D13.1`） |
 | 其他预处理 SELECT（如 `id > ?`） | 物理优化：统计信息推导（`blocked-by:D10.6`），之后依次是 FindBestTask（D10.2）、ResolveIndices（D10.9）、代价（D10.5） | 逻辑计划已用参数值建好；FindBestTask 正由另一项工作（VS1-28）移植 |
 | 物理优化完成后的 Execute 计划 | 不再停（§10） | VS1-20 之前在 `Compile` 中停在 `blocked-by:D13.1` |
-| 路由器测试中的真实会话（替身存储，没有 coprocessor client） | fast plan 的下推检查，`blocked-by:D09.13`（规划上下文没有 store client） | 与原来相同的 1235 / 回退 |
+| 文本协议的点查 `SELECT c FROM sbtest1 WHERE id=10` | 不再停：语句移交给 `Compile`（§9.2），快速路径建点查计划，执行器建好、打开、读完 | 原来在预处理之前停在 `blocked-by:D05.3` |
+| 文本协议的点查，常量超出 `BIGINT` 范围（如 `id=9223372036854775808`） | Go 的计划是 TableDual，新栈停在 `PhysicalTableDual`（`blocked-by:D10.1`） | 与预处理语句的同类参数相同 |
+| 文本协议的点查，负数常量（`id=-1`） | 不走快速路径（`-1` 是一元负号表达式，不是常量），完整规划器的计划带 Projection，建执行器时停在 `blocked-by:D12.2` | 同上，执行器打开之前 |
+| 其他文本协议 SELECT（范围、聚合、排序等） | 规划完成后，建执行器时停在最外层还没有移植的执行器：TableReader（`D12.1`）、Projection / Selection / Limit / TableDual（`D12.2`）、Sort / TopN（`D12.5`）；少数停在物理优化（`D10.1` / `D10.2` / `D10.8`）或取当前用户（`D04.1`）。都在执行器打开之前 | 原来都停在 `D05.3`；分布见 VS1 的集成记录 `c2a-integration.md` §7 |
+| 没有选择数据库时的 `SELECT ... FROM t` | 不回退：预处理器照 Go 返回 1046 | 原来停在 `D05.3` 回退，PoC 也报 1046。现在两种模式下这个错误都由新栈返回，ab 统计里不再算作回退 |
+| 路由器测试中的真实会话（替身存储，没有 coprocessor client） | fast plan 的下推检查，`blocked-by:D09.13`（规划上下文没有 store client） | 原来停在 `D05.3`，1235 / 回退不变 |
 
 这些位置都在执行器打开之前：会话的 `rollbackOnError` 结束语句的事务，路由器恢复检查点后回退到 PoC，计数器（`executed_stmts`）不增加；panic 由路由器恢复成 1105（原有机制，不变）。默认的 `--new-stack=off` 不建新会话，不经过这里。
 
@@ -312,8 +348,9 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 - `execute_of_a_prepared_stmt_reaches_the_planner`：真实 PREPARE `id > ?` 后 EXECUTE，`Compile` 设置了 `IsReadOnly`，停在物理优化的边界；会话空闲、`executed_stmts` 为 0，参数值在会话里；恢复检查点后快照与之前逐字相同。
 - `execute_reads_the_parameters_through_the_session_expression_context`：int、字符串、NULL 三种参数，每次 EXECUTE 都停在物理优化的边界；会话里的参数值、会话交给规划器的规划上下文读到的参数值、规划器的表达式改写器在这个上下文里为 `?` 建的常量（值与类型：BIGINT、VARCHAR，NULL 按 Go 的 `InferParamTypeFromUnderlyingValue` 为 VARCHAR）都与参数一致。
 - `prepare_of_the_sbtest_point_select_builds_the_plan`：点查 EXECUTE 跑完（§10.3）。
-- `compile_error_rolls_back`、`every_fallback_point_restores_the_session`、`statement_paths_are_blocked`、路由器的 `phase0_session_falls_back_or_reports_1235`：普通 SELECT 改为停在 `D05.3`（§9.2）。
-- 编译器单测 `compile_plans_only_execute`。
+- `text_protocol_point_select_runs_to_the_end`（§9.2）：真实会话上的文本协议点查：执行器建好并打开（`executed_stmts` 为 1），语句上下文里是点查计划，事务管理器的当前语句与 `ExecStmt` 的语句是同一个 `Arc`，读替身存储得到 0 行，关闭后会话空闲。
+- 普通语句不再停在 `D05.3`，以下测试改到新的位置：`compile_error_rolls_back`、`dropped_result_is_finished_before_the_next_statement`（没有选择数据库，`Compile` 返回 Go 的 1046）；`every_fallback_point_restores_the_session` 的第二个回退点和 `statement_paths_are_blocked`（`SELECT 1` 规划完成，建 Projection 执行器时停在 `D12.2`，执行器打开之前）；路由器的 `phase0_session_falls_back_or_reports_1235`（选择数据库后停在 `D09.13`；fallback 下 PoC 用重新解析的语句回答；没有数据库时新栈直接返回 1046）。
+- 编译器单测 `compile_plans_a_plain_statement`（原 `compile_plans_only_execute`）：替身会话没有事务的 InfoSchema，`SELECT 1` 停在 `D05.4`。
 
 ## 10. Execute 计划照 Go 的非缓存路径执行（VS1-20）
 
@@ -388,3 +425,4 @@ EXECUTE 以外的语句（`COM_QUERY` 的 SELECT）在 `IsReadOnly` 之后、预
 - VS1-28：FindBestTask 的移植工作项；VS1-20：点查纵向集成；A3：plan cache 例外；N2：会话上下文的三层结构
 - D10.1：物理算子（TableDual）；D10.8：点查快速路径；D12.0：执行器框架
 - D06.5：domain（sysvar 缓存）；D11.x：统计信息；VS1-17：domain 的接入
+- D12.1：TableReader 等读执行器；D12.2：Projection / Selection / Limit / TableDual 执行器；D12.5：Sort / TopN 执行器；VS1-37：普通语句的集成

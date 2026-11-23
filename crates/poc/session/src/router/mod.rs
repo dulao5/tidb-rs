@@ -46,7 +46,6 @@ pub mod trace;
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tidb_base::Error;
@@ -163,10 +162,11 @@ pub trait NewStack: Send {
     /// is then the one the statement plans with (§4.1: compared once, fixed for the
     /// statement).
     fn refresh_info_schema(&mut self) {}
-    /// `COM_QUERY`.
+    /// `COM_QUERY`. The statement is handed over: the new session's `Compile` writes to it
+    /// (D05.3 spec §9.2).
     fn execute<'a>(
         &'a mut self,
-        stmt: Arc<ast::Stmt>,
+        stmt: ast::Stmt,
         sql: &'a str,
     ) -> BoxFut<'a, Result<Response, Error>>;
     /// `COM_STMT_PREPARE` of `sql` (Go's `PrepareStmt` parses the text itself).
@@ -272,8 +272,8 @@ fn fallback_after_open(before: u64, after: u64) -> bool {
 
 /// A statement for the new stack.
 enum NewOp<'a> {
-    /// `COM_QUERY`: the statement and its text.
-    Query(Arc<ast::Stmt>, &'a str),
+    /// `COM_QUERY`: the statement (handed over, D05.3 spec §9.2) and its text.
+    Query(ast::Stmt, &'a str),
     /// `COM_STMT_EXECUTE` of the new session's statement.
     Execute(u32, &'a [Param], &'a RawParams),
 }
@@ -664,19 +664,16 @@ impl Router {
         self.cursor = false;
         poc.begin_command();
         let start = Instant::now();
-        let stmt = Arc::new(tidb_sql::ir::parse_one(sql)?);
+        let stmt = tidb_sql::ir::parse_one(sql)?;
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         let mut started = false;
-        match self.route(&stmt, poc, false) {
+        let stmt = match self.route(&stmt, poc, false) {
             Route::New => {
                 poc.start_statement(StmtType::Select, parse);
                 started = true;
                 let fallback = self.mode != NewStackMode::Strict;
-                match self
-                    .try_new(NewOp::Query(Arc::clone(&stmt), sql), fallback)
-                    .await
-                {
+                match self.try_new(NewOp::Query(stmt, sql), fallback).await {
                     Ok(answered) => return answered,
                     Err(NotRun::Unrestorable(e)) => return Err(e),
                     Err(NotRun::NotIdle) => {}
@@ -689,9 +686,16 @@ impl Router {
                         }
                     }
                 }
+                // The new stack took the statement (its `Compile` writes to it, D05.3 spec
+                // §9.2): the PoC lowers a new parse of the same text. Only statements that
+                // fall back are parsed twice.
+                tidb_sql::ir::parse_one(sql)?
             }
-            Route::Poc(reason) => self.note(Engine::Poc.label(), reason.label()),
-        }
+            Route::Poc(reason) => {
+                self.note(Engine::Poc.label(), reason.label());
+                stmt
+            }
+        };
         let lowered = match tidb_sql::ir::lower_statement(&stmt, sql) {
             Ok(l) => l,
             Err(e) => return self.fail(e),

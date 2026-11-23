@@ -133,7 +133,7 @@ impl NewStack for NewSession {
 
     fn execute<'a>(
         &'a mut self,
-        stmt: Arc<ast::Stmt>,
+        stmt: ast::Stmt,
         sql: &'a str,
     ) -> BoxFut<'a, Result<Response, Error>> {
         Box::pin(async move {

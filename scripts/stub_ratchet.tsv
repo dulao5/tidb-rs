@@ -2,7 +2,7 @@
 # Regenerate with scripts/check_stub_ratchet.py --write after removing stubs.
 area	stubs
 domain	1
-executor	55
+executor	54
 expr-pushdown	1
 expression	1
 infoschema	17
