@@ -7,7 +7,7 @@
 sysbench 的预处理点查 `SELECT c FROM sbtest%u WHERE id=?`（二进制协议 PREPARE / EXECUTE），在 `--new-stack=strict` 和 `fallback` 下都由新栈执行到底：
 
 1. PREPARE：新栈准备（D05.3 第 2 部分、D13.1 的 `PlanCacheStmt`），列定义由新栈给出。
-2. EXECUTE：协议层把二进制参数交给新栈（`parseBinaryParams`）→ `ExecutePreparedStmt` → `Compile` → `planner.Optimize`（plan cache 未命中的路径）→ 快速路径用参数值建点查计划（D10.8 spec §4a）→ `Compile` 保留 Execute 计划 → `ExecStmt.Exec` 换成其中的点查、新建点查执行器（D05.3 spec §10）→ 会话按 Go 的事务流程在 ported 存储驱动上开启只读事务（D07.1 spec），自动提交的主键点查用 MaxTS 读 → 结果由移植的 `writeResultSet` / `DumpBinaryRow` 编码（D03.1）→ `finishStmt` 提交只读事务。
+2. EXECUTE：协议层把二进制参数交给新栈（`parseBinaryParams`）→ `ExecutePreparedStmt` → `Compile` → `planner.Optimize`（plan cache 未命中的路径）→ 快速路径用参数值建点查计划（D10.8 spec §4a）→ `Compile` 保留 Execute 计划 → `ExecStmt.Exec` 换成其中的点查、新建点查执行器（D05.3 spec §10；VS1-20b 之后自动提交时改走点查短路径 `ExecStmt.PointGet`，同样新建执行器）→ 会话按 Go 的事务流程在 ported 存储驱动上开启只读事务（D07.1 spec），自动提交的主键点查用 MaxTS 读 → 结果由移植的 `writeResultSet` / `DumpBinaryRow` 编码（D03.1）→ `finishStmt` 提交只读事务。
 
 一路上找到并修掉的缺口（按碰到的顺序），各自所在的 PR 见 §6：
 

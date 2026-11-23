@@ -2262,3 +2262,4 @@ VS1-39	D13.1	pkg/planner/core/plan_cache_utils.go	PlanCacheValue.CloneForInstanc
 VS1-39	D13.1	pkg/planner/core/plan_cache_utils.go	PlanCacheValue.MemoryUsage	36	
 VS1-39	D13.1	pkg/planner/core/plan_cache_utils.go	NewPlanCacheValue	13	
 VS1-39	D13.1	pkg/planner/core/plan_cache_utils.go	checkTypesCompatibility4PC	28	
+VS1-20b	D13.1	pkg/planner/core/plan_cache.go	IsSafeToReusePointGetExecutor	13	

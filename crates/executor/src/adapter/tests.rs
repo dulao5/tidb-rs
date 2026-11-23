@@ -366,96 +366,59 @@ fn point_stmt(plan: Plan) -> ExecStmt {
     stmt
 }
 
-/// The MaxTS decision of `ExecStmt.PointGet` (`useMaxTS := startTs == math.MaxUint64`): with
-/// MaxTS the point get executor is cached in the prepared statement and reused (re-init) by
-/// the next execution; the statement runs at high priority.
+/// `ExecStmt.PointGet` runs at high priority and builds a new point get executor for every
+/// execution: Go would keep it in the prepared statement at MaxTS and reuse it (re-init), the
+/// plan cache's reuse that is not ported (D05.3 spec §10.2 item 1).
 #[tokio::test]
-async fn point_get_with_max_ts_caches_the_executor() {
+async fn point_get_builds_a_new_executor_every_time() {
     let counters = Arc::new(Counters::default());
     let plan = mock_plan(2, 1, true, &counters);
     let mut s = MockSession::new(u64::MAX);
     let mut stmt = point_stmt(plan);
 
-    let mut rs = stmt.point_get(&mut s).await.unwrap();
-    assert_eq!(s.vars.stmt_ctx().priority, HighPriority);
-    assert_eq!(rs.txn_start_ts(), u64::MAX);
-    assert_eq!(drain(&mut rs, &mut stmt, &mut s).await, vec![0, 1]);
-    assert_eq!(s.vars.last_found_rows, 2);
-    rs.close(&mut stmt, &mut s).await.unwrap();
-    assert!(
-        stmt.ps_stmt
-            .as_ref()
-            .unwrap()
-            .lock()
-            .point_get
-            .executor
-            .is_some()
-    );
-    assert_eq!(counters.built.load(Ordering::SeqCst), 1);
-
-    // The second execution reuses the cached executor.
-    let mut rs = stmt.point_get(&mut s).await.unwrap();
-    assert_eq!(drain(&mut rs, &mut stmt, &mut s).await, vec![0, 1]);
-    rs.close(&mut stmt, &mut s).await.unwrap();
-    assert_eq!(counters.built.load(Ordering::SeqCst), 1);
-    assert_eq!(counters.inits.load(Ordering::SeqCst), 1);
+    for round in 1..=2 {
+        let mut rs = stmt.point_get(&mut s).await.unwrap();
+        assert_eq!(s.vars.stmt_ctx().priority, HighPriority);
+        assert_eq!(rs.txn_start_ts(), u64::MAX);
+        assert_eq!(drain(&mut rs, &mut stmt, &mut s).await, vec![0, 1]);
+        if round == 1 {
+            assert_eq!(s.vars.last_found_rows, 2);
+        }
+        rs.close(&mut stmt, &mut s).await.unwrap();
+        assert!(
+            stmt.ps_stmt
+                .as_ref()
+                .unwrap()
+                .lock()
+                .point_get
+                .executor
+                .is_none(),
+            "nothing is kept in the prepared statement"
+        );
+        assert_eq!(counters.built.load(Ordering::SeqCst), round);
+    }
+    assert_eq!(counters.inits.load(Ordering::SeqCst), 0);
     assert_eq!(s.process_info.len(), 2);
 }
 
-/// With a TSO read ts the executor is neither cached nor reused, even if the cache has one.
+/// With a TSO read ts, or for an executor that is not a point get (table dual), the short
+/// path builds and runs the executor the same way.
 #[tokio::test]
-async fn point_get_with_a_tso_does_not_cache() {
+async fn point_get_with_a_tso_or_a_table_dual() {
     let counters = Arc::new(Counters::default());
-    let plan = mock_plan(1, 1, true, &counters);
     let mut s = MockSession::new(449_000_000_000_000_000);
-    let mut stmt = point_stmt(Arc::clone(&plan));
-    crate::glue::set_cached_point_get_executor(
-        &mut stmt.ps_stmt.as_ref().unwrap().lock(),
-        Some(
-            plan.as_any()
-                .downcast_ref::<MockPhysicalPlan>()
-                .unwrap()
-                .get_executor(),
-        ),
-    );
-    let built_before = counters.built.load(Ordering::SeqCst);
-
+    let mut stmt = point_stmt(mock_plan(1, 1, true, &counters));
     let mut rs = stmt.point_get(&mut s).await.unwrap();
+    assert_eq!(rs.txn_start_ts(), 449_000_000_000_000_000);
     assert_eq!(drain(&mut rs, &mut stmt, &mut s).await, vec![0]);
     rs.close(&mut stmt, &mut s).await.unwrap();
-    assert_eq!(counters.built.load(Ordering::SeqCst), built_before + 1);
-    assert_eq!(counters.inits.load(Ordering::SeqCst), 0);
-    // The cache entry is left alone (it is only read at MaxTS).
-    assert!(
-        stmt.ps_stmt
-            .as_ref()
-            .unwrap()
-            .lock()
-            .point_get
-            .executor
-            .is_some()
-    );
-}
 
-/// A table dual (not a point get executor) is never cached, even at MaxTS.
-#[tokio::test]
-async fn point_get_does_not_cache_other_executors() {
-    let counters = Arc::new(Counters::default());
-    let plan = mock_plan(0, 1, false, &counters);
     let mut s = MockSession::new(u64::MAX);
-    let mut stmt = point_stmt(plan);
+    let mut stmt = point_stmt(mock_plan(0, 1, false, &counters));
     let mut rs = stmt.point_get(&mut s).await.unwrap();
     assert!(drain(&mut rs, &mut stmt, &mut s).await.is_empty());
     rs.close(&mut stmt, &mut s).await.unwrap();
-    assert!(
-        stmt.ps_stmt
-            .as_ref()
-            .unwrap()
-            .lock()
-            .point_get
-            .executor
-            .is_none()
-    );
+    assert_eq!(counters.built.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

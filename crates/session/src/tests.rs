@@ -1101,6 +1101,11 @@ fn prepare_stmt_runs_the_prepare_executor() {
 /// An InfoSchema (version 1) with `test.sbtest1 (id BIGINT PRIMARY KEY, c CHAR)`, the table
 /// resident in the cache (as the router's tests build it).
 fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
+    sbtest_info_schema_at(1)
+}
+
+/// `sbtest_info_schema` at the schema version `version` (as after a DDL).
+fn sbtest_info_schema_at(version: i64) -> Arc<tidb_infoschema::InfoSchemaV2> {
     use tidb_model::{ColumnInfo, DBInfo, StatePublic, TableInfo};
     use tidb_parser::model::CIStr;
     use tidb_parser::types::FieldType;
@@ -1142,7 +1147,7 @@ fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
     };
     db.deprecated.tables = Some(vec![Arc::new(t)]);
     let mut b = tidb_infoschema::new_builder(None, None, tidb_infoschema::new_data());
-    block_on(b.init_with_db_infos(vec![db], vec![], vec![], 1)).unwrap();
+    block_on(b.init_with_db_infos(vec![db], vec![], vec![], version)).unwrap();
     Arc::new(block_on(b.build(1)))
 }
 
@@ -1199,13 +1204,88 @@ fn prepare_registers_the_table_and_clears_it_at_the_end() {
     assert_eq!(mdl_entries(&s), None);
 }
 
+/// Which path an EXECUTE of the session's running statement took (D05.3 spec §10.1).
+#[derive(Debug, PartialEq)]
+enum ExecutePath {
+    /// The point plan short path: `PsStmt` set, `ExecStmt.PointGet`, a bare record set.
+    PointGetShortPath,
+    /// `runStmt` → `ExecStmt.Exec` → `finishStmt`.
+    Normal,
+}
+
+/// The path of the running statement, checked against everything each path leaves behind:
+/// the short path keeps the Execute plan in the statement context, runs at high priority and
+/// is not a prepared statement for the slow log (`isPreparedStmt` false); the normal path
+/// replaced both plans with the point get (`inheritContextFromExecuteStmt`).
+fn execute_path(s: &Session) -> ExecutePath {
+    let run = s.running.as_ref().expect("a running statement");
+    let ctx_plan = s.vars().stmt_ctx().get_plan().expect("a plan");
+    let ctx_plan_is_execute = ctx_plan
+        .downcast_ref::<tidb_planner::core::common_plans::Execute>()
+        .is_some();
+    let ctx_plan_is_point_get = ctx_plan
+        .downcast_ref::<tidb_planner::PhysicalPlanRef>()
+        .is_some_and(|p| p.kind() == tidb_planner::PhysicalKind::PointGet);
+    assert!(
+        run.stmt
+            .plan
+            .as_ref()
+            .is_some_and(|p| p.kind() == tidb_planner::PhysicalKind::PointGet)
+    );
+    assert!(run.stmt.execute_plan.is_none());
+    if run.stmt.ps_stmt.is_some() {
+        assert!(!run.wrapped, "a bare record set");
+        assert!(!run.stmt.is_prepared(), "Prepared is false (slow log)");
+        assert!(
+            ctx_plan_is_execute,
+            "the statement context keeps the Execute plan"
+        );
+        assert_eq!(s.vars().stmt_ctx().priority, tidb_base::mysql::HighPriority);
+        ExecutePath::PointGetShortPath
+    } else {
+        assert!(run.wrapped, "an execStmtResult");
+        assert!(run.stmt.is_prepared(), "inheritContextFromExecuteStmt");
+        assert!(ctx_plan_is_point_get, "inheritContextFromExecuteStmt");
+        assert_ne!(s.vars().stmt_ctx().priority, tidb_base::mysql::HighPriority);
+        ExecutePath::Normal
+    }
+}
+
+/// `f` over the session's prepared statement `stmt_id` (`PlanCacheStmt`).
+fn prepared_of<R>(
+    s: &Session,
+    stmt_id: u32,
+    f: impl FnOnce(&tidb_planner::core::plan_cache_utils::PlanCacheStmt) -> R,
+) -> R {
+    let ps = s.vars().get_prepared_stmt_by_id(stmt_id).unwrap();
+    let ps = ps
+        .downcast_ref::<parking_lot::Mutex<tidb_planner::core::plan_cache_utils::PlanCacheStmt>>()
+        .unwrap();
+    f(&ps.lock())
+}
+
+/// EXECUTE of the prepared point select, read to the end (the mock store has no row).
+fn execute_point_select(s: &mut Session, stmt_id: u32) -> ExecutePath {
+    let mut rs =
+        block_on(s.execute_prepared_stmt(stmt_id, vec![tidb_types::datum::new_int_datum(1)]))
+            .unwrap()
+            .expect("a result set");
+    let path = execute_path(s);
+    let mut chk = rs.new_chunk().unwrap();
+    block_on(rs.next(s, &mut chk)).unwrap();
+    assert_eq!(chk.num_rows(), 0);
+    block_on(rs.close(s)).unwrap();
+    path
+}
+
 /// `PREPARE` + `EXECUTE` of the sysbench point select on the real session over the sbtest
 /// InfoSchema (mock store): PREPARE passes the metadata lock and builds the plan (the column
 /// `c` of `sbtest1`); EXECUTE plans the point get on the fast path with the parameter's
-/// value, `Compile` keeps the Execute plan (no reuse of the prepared point get executor:
-/// the plan cache's), `Exec` replaces it with the point get inside and builds and opens a
-/// new point get executor, which reads the mock store (no row). The statement ends with
-/// its autocommit transaction and the session is idle.
+/// value. The statement is an autocommit read, not stale, at the schema version it was
+/// prepared with, so `Compile` takes Go's point plan short path (D05.3 spec §10.1): the
+/// session calls `ExecStmt.PointGet`, which builds and opens a new point get executor (it is
+/// not kept for the next EXECUTE), reads the mock store (no row), and the session is idle
+/// after the close. The second EXECUTE takes the same path with a new executor.
 #[test]
 fn prepare_of_the_sbtest_point_select_builds_the_plan() {
     let _serial = PREPARED_COUNT.lock();
@@ -1220,28 +1300,107 @@ fn prepare_of_the_sbtest_point_select_builds_the_plan() {
     assert_eq!(names, ["c"]);
     assert_eq!(info.fields[0].table_name.o, "sbtest1");
     assert_eq!(mdl_entries(&s), None);
-    let mut rs =
-        block_on(s.execute_prepared_stmt(info.stmt_id, vec![tidb_types::datum::new_int_datum(1)]))
-            .unwrap()
-            .expect("a result set");
-    assert_eq!(params_of(&s), vec!["1".to_owned()]);
-    assert_eq!(
-        s.executed_stmts(),
-        1,
-        "the point get executor was built and opened"
-    );
-    assert!(
-        s.vars().stmt_ctx().get_plan().is_some_and(|p| p
-            .downcast_ref::<tidb_planner::PhysicalPlanRef>()
-            .is_some_and(|p| p.kind() == tidb_planner::PhysicalKind::PointGet)),
-        "inheritContextFromExecuteStmt put the point get into the statement context"
-    );
-    let mut chk = rs.new_chunk().unwrap();
-    block_on(rs.next(&mut s, &mut chk)).unwrap();
-    assert_eq!(chk.num_rows(), 0);
-    block_on(rs.close(&mut s)).unwrap();
-    assert!(s.is_idle(), "{}", s.state_snapshot());
+    for round in 1..=2 {
+        assert_eq!(
+            execute_point_select(&mut s, info.stmt_id),
+            ExecutePath::PointGetShortPath
+        );
+        assert_eq!(params_of(&s), vec!["1".to_owned()]);
+        assert_eq!(
+            s.executed_stmts(),
+            round,
+            "the point get executor was built and opened"
+        );
+        assert!(s.is_idle(), "{}", s.state_snapshot());
+        assert!(
+            prepared_of(&s, info.stmt_id, |p| p.point_get.executor.is_none()),
+            "the executor is not kept in the prepared statement"
+        );
+    }
     s.drop_prepared_stmt(info.stmt_id).unwrap();
+}
+
+/// Outside an autocommit transaction (`autocommit = 0`, or after `BEGIN`) the same EXECUTE
+/// takes the normal path: `IsSafeToReusePointGetExecutor` answers false, the statement keeps
+/// the Execute plan and `Exec` replaces it with the point get.
+#[test]
+fn prepared_point_get_outside_autocommit_takes_the_normal_path() {
+    let _serial = PREPARED_COUNT.lock();
+    for case in ["autocommit = 0", "begin"] {
+        let store = MockStore::new(10);
+        let mut s = sbtest_session(&store);
+        let info = block_on(s.prepare_stmt(SBTEST_POINT)).unwrap();
+        match case {
+            "begin" => s.vars_mut().set_in_txn(true),
+            _ => s
+                .vars_mut()
+                .set_status_flag(tidb_base::mysql::ServerStatusAutocommit, false),
+        }
+        assert_eq!(
+            execute_point_select(&mut s, info.stmt_id),
+            ExecutePath::Normal,
+            "{case}"
+        );
+        assert_eq!(s.executed_stmts(), 1, "{case}");
+        s.core.rollback_txn();
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+    }
+}
+
+/// After a schema change the EXECUTE re-preprocesses the prepared statement and records the
+/// new schema version (`planCachePreprocess` step 4) before `Compile` compares it, so it
+/// still takes the short path, as Go.
+#[test]
+fn prepared_point_get_after_a_schema_change_takes_the_short_path() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let mut s = sbtest_session(&store);
+    let info = block_on(s.prepare_stmt(SBTEST_POINT)).unwrap();
+    s.set_domain_info_schema(sbtest_info_schema_at(2));
+    assert_eq!(
+        execute_point_select(&mut s, info.stmt_id),
+        ExecutePath::PointGetShortPath
+    );
+    assert_eq!(prepared_of(&s, info.stmt_id, |p| p.schema_version), 2);
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
+}
+
+/// `IsSafeToReusePointGetExecutor`'s three conditions one by one: a stale read, a session
+/// outside an autocommit transaction, and a prepared statement of another schema version
+/// each answer false (stale reads do not reach `Compile` on the new stack yet: the
+/// preprocessor's stale-read branch is a boundary stub).
+#[test]
+fn is_safe_to_reuse_point_get_executor_checks_three_conditions() {
+    use tidb_planner::core::plan_cache::is_safe_to_reuse_point_get_executor as safe;
+    use tidb_planner::core::plan_cache_utils::PlanCacheStmt;
+    let store = MockStore::new(10);
+    let mut s = sbtest_session(&store);
+    let is = sbtest_info_schema();
+    let stmt = PlanCacheStmt {
+        schema_version: 1,
+        ..Default::default()
+    };
+    assert!(safe(s.vars(), is.as_ref(), &stmt));
+
+    s.vars_mut().stmt_ctx_mut().is_staleness = true;
+    assert!(!safe(s.vars(), is.as_ref(), &stmt), "stale read");
+    s.vars_mut().stmt_ctx_mut().is_staleness = false;
+
+    s.vars_mut().set_in_txn(true);
+    assert!(!safe(s.vars(), is.as_ref(), &stmt), "explicit transaction");
+    s.vars_mut().set_in_txn(false);
+    s.vars_mut()
+        .set_status_flag(tidb_base::mysql::ServerStatusAutocommit, false);
+    assert!(!safe(s.vars(), is.as_ref(), &stmt), "autocommit = 0");
+    s.vars_mut()
+        .set_status_flag(tidb_base::mysql::ServerStatusAutocommit, true);
+
+    let old = PlanCacheStmt {
+        schema_version: 0,
+        ..Default::default()
+    };
+    assert!(!safe(s.vars(), is.as_ref(), &old), "another schema version");
+    assert!(safe(s.vars(), is.as_ref(), &stmt));
 }
 
 /// The text-protocol point select on the real session over the sbtest InfoSchema (mock store,

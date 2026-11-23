@@ -25,8 +25,6 @@ use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sessionctx::variable::session_state::PlanReplayerTaskKey;
 
-use crate::internal::exec::executor::Executor;
-
 /// `infoschema.InfoSchema` (the new stack only knows v2, VS1 plan §4.1).
 pub type InfoSchemaRef = Arc<tidb_infoschema::InfoSchemaV2>;
 
@@ -158,22 +156,6 @@ pub type PlanCacheStmt = tidb_planner::core::plan_cache_utils::PlanCacheStmt;
 /// A prepared statement shared by the session's statement map and the statements that
 /// execute it.
 pub type PlanCacheStmtRef = tidb_planner::core::plan_cache_utils::PlanCacheStmtRef;
-
-/// `stmt.PointGet.Executor = e`.
-// glue: PointGetExecutorCache.Executor (an Any in the planner)
-pub fn set_cached_point_get_executor(stmt: &mut PlanCacheStmt, e: Option<Box<dyn Executor>>) {
-    stmt.point_get.executor = e.map(|e| Box::new(e) as Box<dyn std::any::Any + Send>);
-}
-
-/// `stmt.PointGet.Executor`, taken out of the statement.
-// glue: PointGetExecutorCache.Executor (an Any in the planner)
-pub fn take_cached_point_get_executor(stmt: &mut PlanCacheStmt) -> Option<Box<dyn Executor>> {
-    stmt.point_get
-        .executor
-        .take()
-        .and_then(|b| b.downcast::<Box<dyn Executor>>().ok())
-        .map(|b| *b)
-}
 
 /// The `*PointGetExecutor` methods `ExecStmt.PointGet` calls on a cached executor (D12.1,
 /// VS1-12): Go type-asserts `exec.Executor` to `*PointGetExecutor`; here the point get

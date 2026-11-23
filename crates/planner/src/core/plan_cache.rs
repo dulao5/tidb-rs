@@ -415,3 +415,29 @@ pub fn check_prepared_priv(stmt: &PlanCacheStmt) -> Result<(), Error> {
     let _ = stmt;
     Ok(())
 }
+
+/// IsSafeToReusePointGetExecutor checks whether this is a PointGet Plan and safe to reuse its executor.
+///
+/// Go reads the stale-read flag through `staleread.IsStmtStaleness(sctx)`, which is the
+/// statement context's `IsStaleness`; the planner reads it from the session variables
+/// directly (`sessiontxn` is above the planner). `Compile` calls this for the point plan
+/// short path (D05.3 spec §10.1); the executor it names is not reused yet (the plan-cache
+/// exception A3 §1.1, D05.3 spec §10.2 item 1).
+// go: IsSafeToReusePointGetExecutor L1
+pub fn is_safe_to_reuse_point_get_executor(
+    vars: &SessionVars,
+    is: &dyn InfoSchemaLookup,
+    stmt: &PlanCacheStmt,
+) -> bool {
+    if vars.stmt_ctx().is_staleness {
+        return false;
+    }
+    // check auto commit
+    if !crate::core::common_plans::is_auto_commit_txn(vars) {
+        return false;
+    }
+    if stmt.schema_version != is.schema_meta_version() {
+        return false;
+    }
+    true
+}
