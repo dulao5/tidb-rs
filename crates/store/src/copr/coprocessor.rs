@@ -871,6 +871,24 @@ pub struct CopClient<S: TiKVStore> {
     pub(crate) replica_read_seed: u32,
 }
 
+impl<S: TiKVStore> tidb_kv::kv::Client for CopClient<S> {
+    // glue: dispatch (Go CopClient.Send)
+    fn send(
+        &self,
+        _ctx: &tidb_kv::Context,
+        req: &Request,
+        vars: Option<tidb_kv::kv::OptionValue>,
+        option: &tidb_kv::kv::ClientSendOption,
+    ) -> Box<dyn tidb_kv::kv::Response> {
+        CopClient::send(self, req, vars.as_ref(), option)
+    }
+    /// Go's `CopClient` embeds `kv.RequestTypeSupportedChecker`.
+    // glue: dispatch (Go RequestTypeSupportedChecker.IsRequestTypeSupported, embedded in CopClient)
+    fn is_request_type_supported(&self, req_type: i64, sub_type: i64) -> bool {
+        tidb_kv::checker::RequestTypeSupportedChecker.is_request_type_supported(req_type, sub_type)
+    }
+}
+
 impl<S: TiKVStore> CopClient<S> {
     /// Send builds the request and gets the coprocessor iterator response.
     ///

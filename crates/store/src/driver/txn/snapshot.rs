@@ -136,7 +136,7 @@ impl Retriever for TikvSnapshot {
 
 /// `val.(T)`: Go's type assertion, which panics on another type.
 // glue: Go type assertion on SetOption's `any`
-fn assert_type<T: Clone + 'static>(val: &OptionValue, opt: &str) -> T {
+pub(crate) fn assert_type<T: Clone + 'static>(val: &OptionValue, opt: &str) -> T {
     match val.downcast_ref::<T>() {
         Some(v) => v.clone(),
         None => panic!(
@@ -282,7 +282,7 @@ fn to_tikv_keys(keys: &[Key]) -> Vec<Vec<u8>> {
 }
 
 // go: getTiKVIsolationLevel L1
-fn get_tikv_isolation_level(level: IsoLevel) -> tikv::IsoLevel {
+pub(crate) fn get_tikv_isolation_level(level: IsoLevel) -> tikv::IsoLevel {
     match level {
         tidb_kv::kv::SI => tikv::IsoLevel::SI,
         tidb_kv::kv::RC => tikv::IsoLevel::RC,
@@ -292,7 +292,7 @@ fn get_tikv_isolation_level(level: IsoLevel) -> tikv::IsoLevel {
 }
 
 // go: getTiKVPriority L1
-fn get_tikv_priority(pri: isize) -> tikv::Priority {
+pub(crate) fn get_tikv_priority(pri: isize) -> tikv::Priority {
     match pri {
         tidb_kv::kv::PriorityHigh => tikv::Priority::High,
         tidb_kv::kv::PriorityLow => tikv::Priority::Low,

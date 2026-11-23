@@ -101,6 +101,226 @@ impl KVStore {
     pub async fn current_timestamp(&self, _txn_scope: &str) -> Result<u64, TiKVError> {
         Ok(self.client.current_timestamp().await?.version())
     }
+
+    /// `KVStore.Begin(opts...)`: a transaction at the given start ts, or at a new TSO
+    /// (client-go retries the TSO with `TsoMaxBackoff`; client-rust's PD client retries its
+    /// TSO stream itself). The global scope is the default.
+    // go-l3: ADR-0008 client-go tikv KVStore.Begin
+    pub async fn begin(self: &Arc<Self>, mut options: TxnOptions) -> Result<KVTxn, TiKVError> {
+        if options.txn_scope.is_empty() {
+            options.txn_scope = GlobalTxnScope.to_owned();
+        }
+        let start_ts = match options.start_ts {
+            Some(ts) => ts,
+            None => self.current_timestamp(&options.txn_scope).await?,
+        };
+        let snapshot = self.get_snapshot(start_ts);
+        Ok(new_tikv_txn(snapshot, start_ts, &options))
+    }
+
+    /// `KVStore.GetOracle()`: the PD oracle (the TSO client of the store).
+    // go-l3: ADR-0008 client-go tikv KVStore.GetOracle
+    pub fn get_oracle(self: &Arc<Self>) -> PdOracle {
+        PdOracle {
+            store: self.clone(),
+        }
+    }
+}
+
+/// client-go `oracle.GlobalTxnScope`.
+pub const GlobalTxnScope: &str = "global";
+
+/// client-go `transaction.TxnOptions` (the options `tikv.WithStartTS` / `WithTxnScope` set;
+/// the pipelined MemDB is the write path).
+#[derive(Clone, Debug, Default)]
+pub struct TxnOptions {
+    pub txn_scope: String,
+    pub start_ts: Option<u64>,
+}
+
+/// client-go `oracles.pdOracle` as `KVStore.GetOracle()` returns it.
+#[derive(Clone)]
+pub struct PdOracle {
+    store: Arc<KVStore>,
+}
+
+impl PdOracle {
+    /// `GetTimestamp(ctx, &oracle.Option{TxnScope})`: a TSO from PD.
+    // go-l3: ADR-0008 client-go oracle/oracles pdOracle.GetTimestamp
+    pub async fn get_timestamp(&self, txn_scope: &str) -> Result<u64, TiKVError> {
+        self.store.current_timestamp(txn_scope).await
+    }
+
+    /// `GetLowResolutionTimestamp`: client-go keeps the last TSO, refreshed in the
+    /// background every `tidb_low_resolution_tso_update_interval`; client-rust has no such
+    /// cache, so a read with `tidb_low_resolution_tso = ON` cannot get Go's timestamp. The
+    /// variable is not in the router's synced set, so such a session never reaches the new
+    /// stack (VS1 plan §4.3 step 0); a caller that does gets this error, never a newer TSO.
+    // glue: client-go pdOracle.GetLowResolutionTimestamp (L3 boundary) needs the last TSO, blocked-by:D07.1 (client-rust keeps none)
+    pub async fn get_low_resolution_timestamp(&self, _txn_scope: &str) -> Result<u64, TiKVError> {
+        let why = "the low-resolution TSO of the PD oracle (client-rust keeps no last TSO)";
+        Err(TiKVError::Plain(tidb_base::blocked::blocked("D07.1", why)))
+    }
+}
+
+/// client-go `transaction.NewTiKVTxn`: a transaction over `snapshot` at `start_ts`. Its
+/// MemDB stays empty: tidb-rs runs no writes (the read-only node, constitution §4.3), so the
+/// union store, the committer and the write options are not kept (D07.1 part 2 when writes
+/// come). `IsReadOnly`, `Len` and `Size` read that empty buffer.
+// go-l3: ADR-0008 client-go txnkv/transaction NewTiKVTxn
+pub fn new_tikv_txn(snapshot: Arc<KVSnapshot>, start_ts: u64, options: &TxnOptions) -> KVTxn {
+    KVTxn {
+        snapshot,
+        start_ts,
+        valid: true,
+        scope: options.txn_scope.clone(),
+        causal_consistency: false,
+        is_pessimistic: false,
+    }
+}
+
+/// client-go `transaction.KVTxn` without a MemDB (see [`new_tikv_txn`]). The options only
+/// the committer reads (priority, resource group tag and name, async commit, 1PC, txn
+/// source, session id, ...) are not kept: there is no commit of a write; the ones the
+/// snapshot reads are passed to it as client-go does.
+pub struct KVTxn {
+    snapshot: Arc<KVSnapshot>,
+    start_ts: u64,
+    valid: bool,
+    scope: String,
+    causal_consistency: bool,
+    is_pessimistic: bool,
+}
+
+#[allow(clippy::len_without_is_empty)] // client-go has Len and no IsEmpty
+impl KVTxn {
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.GetSnapshot
+    pub fn get_snapshot(&self) -> &Arc<KVSnapshot> {
+        &self.snapshot
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.String
+    pub fn string(&self) -> String {
+        format!("{}", self.start_ts())
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.StartTS
+    pub fn start_ts(&self) -> u64 {
+        self.start_ts
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.Valid
+    pub fn valid(&self) -> bool {
+        self.valid
+    }
+
+    /// The MemDB is empty (see [`new_tikv_txn`]).
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.Len
+    pub fn len(&self) -> isize {
+        0
+    }
+
+    /// The MemDB is empty (see [`new_tikv_txn`]).
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.Size
+    pub fn size(&self) -> isize {
+        0
+    }
+
+    /// The MemDB is never dirty and there is no aggressive locking (see [`new_tikv_txn`]).
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.IsReadOnly
+    pub fn is_read_only(&self) -> bool {
+        true
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.IsPessimistic
+    pub fn is_pessimistic(&self) -> bool {
+        self.is_pessimistic
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.SetPessimistic
+    pub fn set_pessimistic(&mut self, b: bool) {
+        self.is_pessimistic = b;
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.SetPriority
+    pub fn set_priority(&mut self, pri: Priority) {
+        self.snapshot.set_priority(pri);
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.SetResourceGroupTag
+    pub fn set_resource_group_tag(&mut self, tag: Vec<u8>) {
+        self.snapshot.set_resource_group_tag(tag);
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.SetResourceGroupName
+    pub fn set_resource_group_name(&mut self, name: String) {
+        self.snapshot.set_resource_group_name(name);
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.SetCausalConsistency
+    pub fn set_causal_consistency(&mut self, b: bool) {
+        self.causal_consistency = b;
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.IsCasualConsistency
+    pub fn is_casual_consistency(&self) -> bool {
+        self.causal_consistency
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.SetScope
+    pub fn set_scope(&mut self, scope: String) {
+        self.scope = scope;
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.GetScope
+    pub fn get_scope(&self) -> &String {
+        &self.scope
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.SetRequestSourceInternal
+    pub fn set_request_source_internal(&mut self, internal: bool) {
+        self.snapshot.set_request_source_internal(internal);
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.SetRequestSourceType
+    pub fn set_request_source_type(&mut self, tp: String) {
+        self.snapshot.set_request_source_type(tp);
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.SetExplicitRequestSourceType
+    pub fn set_explicit_request_source_type(&mut self, tp: String) {
+        self.snapshot.set_explicit_request_source_type(tp);
+    }
+
+    /// `Commit`: an invalid transaction is `ErrInvalidTxn`; otherwise the transaction is
+    /// closed and, its MemDB being empty, the committer has no mutation and returns at once
+    /// (`committer.mutations.Len() == 0`). There are no pessimistic locks to roll back: the
+    /// read-only node takes none.
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.Commit
+    pub async fn commit(&mut self, _ctx: &Context) -> Result<(), TiKVError> {
+        if !self.valid {
+            return Err(TiKVError::Plain(tidb_kv::error::ErrInvalidTxn.clone()));
+        }
+        self.close();
+        Ok(())
+    }
+
+    /// `Rollback`: an invalid transaction is `ErrInvalidTxn`; otherwise it is closed. There
+    /// is no committer (no pessimistic locks, no pipelined flush) to clean up.
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.Rollback
+    pub fn rollback(&mut self) -> Result<(), TiKVError> {
+        if !self.valid {
+            return Err(TiKVError::Plain(tidb_kv::error::ErrInvalidTxn.clone()));
+        }
+        self.close();
+        Ok(())
+    }
+
+    // go-l3: ADR-0008 client-go txnkv/transaction KVTxn.close
+    fn close(&mut self) {
+        self.valid = false;
+        // txn.ClearDiskFullOpt(): the disk-full option is a write option, not kept.
+    }
 }
 
 /// `txnsnapshot.NewTiKVSnapshot` / `SetSnapshotTS`'s sanity check.
