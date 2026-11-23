@@ -325,6 +325,7 @@ Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次
 1. `OnStmtStart` 到 `Compile` 结束之间，事务管理器的当前语句是空的（Go 是节点）。现在没有读者：预处理器的 stale read 分支是边界桩（`blocked-by:D05.4`），路由器也不把 stale read 交给新栈。将来移植那个分支时，要把预处理器手里的节点交给 `OnStmtStart`，而不是取 `GetCurrentStmt`。
 2. `Compile` 出错时事务管理器没有当前语句（Go 有）。出错之后的 `rollbackOnError` 不读它。
 3. 回退时多解析一次（第 1 条）。只影响回退的语句。
+4. Go 的 `ExecStmt.RebuildPlan` 会在 `a.StmtNode` 上再做一次预处理和优化。现在它是桩，唯一的调用方是乐观事务的重试（写路径），不影响只读路径。将来移植时，语句已冻结成 `Arc`，事务管理器也持有一份，`Arc::get_mut` 会失败，AST 又不能 `Clone`。两种做法：先让事务管理器交回它的 `Arc`（`set_current_stmt(None)`），再用 `Arc::try_unwrap` 拿回可写的语句，规划完再冻结、补交；或者按原文重新解析一份。到时按重试路径的代价选择。
 
 ### 9.3 停在哪里，怎样回退
 
@@ -337,7 +338,7 @@ Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次
 | 文本协议的点查，常量超出 `BIGINT` 范围（如 `id=9223372036854775808`） | Go 的计划是 TableDual，新栈停在 `PhysicalTableDual`（`blocked-by:D10.1`） | 与预处理语句的同类参数相同 |
 | 文本协议的点查，负数常量（`id=-1`） | 不走快速路径（`-1` 是一元负号表达式，不是常量），完整规划器的计划带 Projection，建执行器时停在 `blocked-by:D12.2` | 同上，执行器打开之前 |
 | 其他文本协议 SELECT（范围、聚合、排序等） | 规划完成后，建执行器时停在最外层还没有移植的执行器：TableReader（`D12.1`）、Projection / Selection / Limit / TableDual（`D12.2`）、Sort / TopN（`D12.5`）；少数停在物理优化（`D10.1` / `D10.2` / `D10.8`）或取当前用户（`D04.1`）。都在执行器打开之前 | 原来都停在 `D05.3`；分布见 VS1 的集成记录 `c2a-integration.md` §7 |
-| 没有选择数据库时的 `SELECT ... FROM t` | 不回退：预处理器照 Go 返回 1046 | 原来停在 `D05.3` 回退，PoC 也报 1046 |
+| 没有选择数据库时的 `SELECT ... FROM t` | 不回退：预处理器照 Go 返回 1046 | 原来停在 `D05.3` 回退，PoC 也报 1046。现在两种模式下这个错误都由新栈返回，ab 统计里不再算作回退 |
 | 路由器测试中的真实会话（替身存储，没有 coprocessor client） | fast plan 的下推检查，`blocked-by:D09.13`（规划上下文没有 store client） | 原来停在 `D05.3`，1235 / 回退不变 |
 
 这些位置都在执行器打开之前：会话的 `rollbackOnError` 结束语句的事务，路由器恢复检查点后回退到 PoC，计数器（`executed_stmts`）不增加；panic 由路由器恢复成 1105（原有机制，不变）。默认的 `--new-stack=off` 不建新会话，不经过这里。
