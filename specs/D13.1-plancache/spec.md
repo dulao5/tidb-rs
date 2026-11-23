@@ -1,6 +1,6 @@
 # D13.1 Plan Cache 的预处理语句部分与预处理执行器（spec）
 
-状态：VS1-15（预处理语句的规划）评审中（2026-11-15）。块：D13.1 plan cache（例外 A3）的非缓存部分，crate `tidb-planner`；D12.12 预处理执行器（P5）的 `PrepareExec`，crate `tidb-executor`。相关：[VS1 plan](../VS1-vertical-slice/plan.md) §3（D13.1、D12.12 两行）、§4.7（预处理语句）、§10-2（plan cache 的时机）；[D05.3 spec](../D05.3-session/spec.md) §6（会话的 `PrepareStmt` / `ExecutePreparedStmt`，#247）；[D13.1 tasks](tasks.md)。
+状态：VS1-15（预处理语句的规划）评审中（2026-11-15）。块：D13.1 plan cache（例外 A3）的非缓存部分，crate `tidb-planner`；D12.12 预处理执行器（P5）的 `PrepareExec`，crate `tidb-executor`。相关：[A3 plan cache spec](../exceptions/A3-plan-cache/spec.md)（缓存本身，待确认）；[VS1 plan](../VS1-vertical-slice/plan.md) §3（D13.1、D12.12 两行）、§4.7（预处理语句）、§10-2（plan cache 的时机）；[D05.3 spec](../D05.3-session/spec.md) §6（会话的 `PrepareStmt` / `ExecutePreparedStmt`，#247）；[D13.1 tasks](tasks.md)。
 
 ## 1. 范围
 
@@ -20,7 +20,7 @@ converge：D13.1 `--item VS1-15` 44 个函数，24 个移植（L1 13、L2 11）+
 
 ### 1.2 不做：缓存本身（例外 A3）
 
-例外 A3 的 plan cache spec 还没有经负责人确认，所以本项**不缓存任何东西**（plan §3 D13.1 行："缓存本身是 VS1-39，有条件"）。范围不清的地方一律取窄的一边：
+例外 A3 的 plan cache spec（[spec](../exceptions/A3-plan-cache/spec.md)，2026-11-23 起草）还没有经负责人确认，所以本项**不缓存任何东西**（plan §3 D13.1 行："缓存本身是 VS1-39，有条件"）。范围不清的地方一律取窄的一边：
 
 | 内容 | 做法 |
 |---|---|
