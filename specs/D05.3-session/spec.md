@@ -370,7 +370,8 @@ Go `pkg/executor/compiler.go` 的 `Compiler.Compile`（L45）现在照 Go 依次
 2. 会话看到 `PsStmt` 后调用 `ExecStmt.PointGet`（`session.go:2160`），然后立刻让事务变成 invalid（`txn.changeToInvalid()`）。不经过 `runStmt`，也不经过 `ExecStmt.Exec`，所以不调用 `inheritContextFromExecuteStmt`：`isPreparedStmt` 保持 false。
 3. `ExecStmt.PointGet`：取读时间戳，把语句上下文的优先级设为 `HighPriority`。读时间戳是 MaxTS（自动提交的主键点查）时，照 Go 复用预处理语句里存着的点查执行器：取出来，用这次的点查计划 `Init`（表、handle、索引及其值、加锁标志、列、行解码器、执行器基础部分、索引使用统计，全部从这次的计划重新读，不留上一次的任何值）；没有存着的就新建一个，并在结果集结束（`recordSet.Finish`）时放回预处理语句。TableDual（不是点查执行器）和分区表的执行器不存。读时间戳不是 MaxTS 时既不取也不存。返回不包 `execStmtResult` 的结果集，关闭时只关闭执行器，不调用 `finishStmt`。
    - 与 Go 的写法不同的一处（N3）：Go 的执行器经会话拿到语句上下文，这里执行器自己持有语句上下文的 `Arc`（执行器基础部分的统计、运行时统计、索引使用统计）。会话在 `Finish` 之后还要写语句上下文（`FinishExecuteStmt`），要求只有它一个持有者，所以执行器放回预处理语句之前先丢掉这些（`release_stmt_state`），下一次 `Init` 再建。原来移植的复用代码没有这一步，在真实会话上从未走到；接通短路径后第二次 EXECUTE 就会在关闭时 panic（"statement context is shared"），会话测试发现并修正。
-   - 执行器存在本会话自己的预处理语句里，不在实例级 plan cache 中共享；它只读计划。
+   - 执行器存在本会话自己的预处理语句里，不在实例级 plan cache 中共享；它只读计划。点查执行器自己的快照运行时统计（`stats`）照 Go 保留，不随复用清空（它不持有语句上下文，`Close` 再次登记）。
+   - 复用时 `Init` 不重设 snapshot 的选项：优先级、资源组、replica read 等仍是执行器第一次建立时的值。Go 也是这样（`Init` 不碰 `e.snapshot`），不是缺陷。
    - 复用的执行器还留着上一次的 snapshot（Go 也是，MaxTS 下 snapshot 与事务无关）。client-rust 的 snapshot 会缓存读到的值，于是复用之后读不到别处新写入的值；存储驱动改为 MaxTS 的读每次新建 client-rust snapshot（D07.1 spec §3）。在 playground 上验证：Go TiDB 改了某一行之后，同一连接上的下一次 EXECUTE 读到新值（修正前一直是旧值）。
 4. 计划可能来自实例级 plan cache（多个会话共享），执行器只读它，不写（`crates/executor/clippy.toml` 禁止取得计划的可写引用）。
 

@@ -797,7 +797,8 @@ impl glue::PointGetExecutor for PointGetExecutor {
     fn release_stmt_state(&mut self) {
         self.base.base.stats.release_stmt_ctx();
         self.index_usage_reporter = None;
-        self.stats = None;
+        // `stats` (the snapshot's runtime stats) is kept, as Go: it is created once by the
+        // build, `Close` registers it again after a reuse, and it holds no statement context.
     }
 }
 
