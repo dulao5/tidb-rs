@@ -1,12 +1,13 @@
 # A3（plan cache）：实例级计划缓存（实现例外 spec）
 
-状态：**已确认（2026-11-23，负责人在 #305）**（2026-11-23 起草）。类型：实现例外（A3"缓存"的 plan cache 部分；A3 其余三项 coprocessor cache、infoschema v2、统计信息缓存各自另写 spec），含几处用户可见的特性例外（默认值、OFF 时不缓存、淘汰周期变量、`ADMIN FLUSH INSTANCE PLAN_CACHE` 生效，§4）。所属块：D13.1 plan cache 的缓存部分（VS1-39 起），crate `tidb-planner`（缓存本体与重建）、`tidb-domain`（持有与后台淘汰）、`tidb-sessionctx`（接口）。
+状态：**已确认（2026-11-23，负责人在 #305）**（2026-11-23 起草）。类型：实现例外（A3"缓存"的 plan cache 部分；A3 其余三项 coprocessor cache、infoschema v2、统计信息缓存各自另写 spec），含几处用户可见的特性例外（默认值、OFF 时不缓存、`ADMIN FLUSH INSTANCE PLAN_CACHE` 生效，§4）。所属块：D13.1 plan cache 的缓存部分（VS1-39 起），crate `tidb-planner`（缓存本体与重建）、`tidb-domain`（持有与后台淘汰）、`tidb-sessionctx`（接口）。
 
 修订记录：
 
 - 2026-11-23：按 Lucky 对 #304 的评审（批准，附修改意见）修订：§2.3 补上漏列的执行期写入，第 1 阶段的两处列入完成条件；§3.3 可缓存条件补上 Go 克隆按字段返回 `false` 的情况；§3.6 代价缓存改为"封存节点上照常计算、不写回"；§3.4 淘汰在锁外释放计划树、Put 在写锁下复查淘汰状态、哈希加随机种子、写明命中路径不分配的前提；§8 风险 1 增加"只换分片内部结构"的后备。§6 的 11 项决定在 #305 等负责人确认（Lucky 全部同意建议）。
-- 2026-11-23：按 Lucky 对 #309 的评审（批准，附非阻塞意见）：§3.4 加 flush 代数，防止 flush 之前开始优化的语句在 flush 之后放入，§5.2 加确定性测试；§3.8 写明新变量只在执行 `SET GLOBAL` 的节点上立即生效；§6 决定 6 写明没有按条目的 TTL、默认值待负责人确认。
-- 2026-11-23：负责人在 #305 决定 §6 的 11 项并确认本 spec：1–5、7、9、11 按建议；6 改为淘汰检查周期可配置（新 GLOBAL 变量 `tidb_instance_plan_cache_evict_interval`）；8 改为 `ADMIN FLUSH INSTANCE PLAN_CACHE` 真正清空实例级缓存（按 Go 缺陷修正，#307）；10 改为缓存设计覆盖非预处理语句（Go 中两者共用实例级缓存），先做预处理语句。相应修改 §0、§1、§3.4、§3.8、§4、§6、§7、§8、§9，偏差台账加 R14–R17，`docs/compatibility.md` 加 Plan cache 一节。
+- 2026-11-23：按 Lucky 对 #309 的评审（批准，附非阻塞意见）：§3.4 加 flush 代数，防止 flush 之前开始优化的语句在 flush 之后放入，§5.2 加确定性测试；§6 决定 6 写明没有按条目的 TTL。
+- 2026-11-23：负责人在 #305 决定 §6 的 11 项并确认本 spec：1–5、7、9、11 按建议；6 先改为淘汰检查周期可配置（新变量），当日撤销（见下一条）；8 改为 `ADMIN FLUSH INSTANCE PLAN_CACHE` 真正清空实例级缓存（按 Go 缺陷修正，#307）；10 改为缓存设计覆盖非预处理语句（Go 中两者共用实例级缓存），先做预处理语句。相应修改 §0、§1、§3.4、§3.8、§4、§6、§7、§8、§9，偏差台账加 R14–R16，`docs/compatibility.md` 加 Plan cache 一节。
+- 2026-11-23：负责人在 DM 中确认（"选 a"）：淘汰触发周期照 Go v8.5.8 固定 30 秒，不可配置，撤销新增变量 `tidb_instance_plan_cache_evict_interval`。修改 §1.2、§3.8、§4、§6 决定 6、§7、§9；台账 R17 撤销（编号不复用），`docs/compatibility.md` 去掉该行。
 
 负责人的要求（2026-11-23）："concept follows Go's instance-level plan cache design, but make full use of Rust's capabilities"。负责人之前已决定：tidb-rs 只做实例级 plan cache（各会话共享），不做 Go 的会话级 prepared plan cache（#128 §一.5；N1 §3.5 记为 2026-11-14 的决定）。
 
@@ -45,7 +46,7 @@
 | 淘汰：总量低于软限额时什么也不做；否则按"平均每条大小"算出要淘汰的条数 n，取第 n 小的最近使用时间作阈值，淘汰最近使用时间 ≤ 阈值的条目；删掉变空的 key | `plan_cache_instance.go:137-208` | 软限额 = 硬限额 ×（1 − `tidb_instance_plan_cache_reserved_percentage`）（`domain/domain.go:3436-3438`） |
 | 失效：key 中含 schema 版本、每张表的 revision（`RelateVersion`）、RC / `FOR UPDATE` 读时的最新 schema 版本、统计信息版本（`tidb_plan_cache_invalidation_on_fresh_stats`）等，变化后自然不命中；旧条目留在缓存里直到被淘汰 | `plan_cache.go:114-166`、`plan_cache_utils.go:263-271`、`:381-388` | Go 实例级缓存**没有** Delete 和 DeleteAll（`plan_cache_instance.go` 只有 Get / Put / Evict） |
 | `ADMIN FLUSH ... PLAN_CACHE` 的校验与 warning：`GLOBAL` 报 `Do not support the 'admin flush global scope.'`；本会话 `tidb_enable_prepared_plan_cache` 为 OFF 时发 `The plan cache is disable. So there no need to flush the plan cache` 并返回 | `executor/simple.go:3134-3145` | INSTANCE 范围的效果**不照 Go**：Go 只设置时间戳（各会话下次 EXECUTE 时清空自己的会话级缓存，`plan_cache.go:173-177`），实例级缓存不变；tidb-rs 真正清空实例级缓存（§1.2、决定 8） |
-| 系统变量：`tidb_enable_instance_plan_cache`（GLOBAL，默认 OFF）、`tidb_instance_plan_cache_max_size`（GLOBAL，默认 104857600，`parseByteSize`，负数报错）、`tidb_instance_plan_cache_reserved_percentage`（GLOBAL，默认 0.1，[0, 1]，越界截断并发 1292） | `sessionctx/variable/sysvar.go:1425-1458`、`tidb_vars.go:925-931`、`:1587-1588`、`:1757-1759` | v8.5.8 **没有**淘汰间隔的变量：淘汰固定每 30 秒一次（`domain.go:3483`），限额每 15 秒从变量刷新一次（`domain.go:3452-3467`）。tidb-rs 的默认值（决定 1）与新增的淘汰周期变量（决定 6）见 §1.2、§3.8 |
+| 系统变量：`tidb_enable_instance_plan_cache`（GLOBAL，默认 OFF）、`tidb_instance_plan_cache_max_size`（GLOBAL，默认 104857600，`parseByteSize`，负数报错）、`tidb_instance_plan_cache_reserved_percentage`（GLOBAL，默认 0.1，[0, 1]，越界截断并发 1292） | `sessionctx/variable/sysvar.go:1425-1458`、`tidb_vars.go:925-931`、`:1587-1588`、`:1757-1759` | v8.5.8 **没有**淘汰间隔的变量：淘汰固定每 30 秒一次（`domain.go:3483`），tidb-rs 照 Go 固定、不加变量（决定 6）；限额每 15 秒从变量刷新一次（`domain.go:3452-3467`）。tidb-rs 的默认值见决定 1，§1.2、§3.8 |
 | 可观测面：`@@last_plan_from_cache`（会话只读，取上一条语句的 `FoundInPlanCache`，`executor/select.go:1249-1250`）、`@@last_plan_from_binding`、慢日志 `Plan_from_cache`、语句摘要 `PLAN_IN_CACHE` / `PLAN_CACHE_HITS` / `PLAN_CACHE_UNQUALIFIED` / `PLAN_CACHE_UNQUALIFIED_LAST_REASON`；metrics `tidb_server_plan_cache_total{type="prepared"}`、`tidb_server_plan_cache_miss_total`、`tidb_server_plan_cache_instance_memory_usage` 与 `tidb_server_plan_cache_instance_plan_num_total`（标签带前导空格：`" instance-plan-cache"`、`" instance-plan-cache-last-evict"`） | `sessionctx/variable/sysvar.go:387-392`、`executor/adapter.go:2104`、`adapter_slow_log.go:253`、`infoschema/tables.go:1397-1415`、`planner/core/metrics/metrics.go:44-58` | v8.5.8 没有列出 plan cache 内容的 INFORMATION_SCHEMA 表。metrics 名称和标签照抄（N9） |
 | warning 文本：`skip prepared plan-cache: <原因>`（`util/context/plancache.go:83`）、`skip plan-cache: plan rebuild failed, …`、`force plan-cache: may use risky cached plan: …` | 同左 | |
 | 会话私有的点查执行器复用：`PlanCacheStmt.PointGet.Executor`（只在 autocommit、非 stale read、schema 版本未变、读时间戳为 MaxTS 时） | `plan_cache.go:351-363`、`executor/compiler.go:133-139`、`executor/adapter.go:366-391` | 它属于会话的 `PlanCacheStmt`，不在共享缓存里，照 Go 移植（不在本例外的替换范围） |
@@ -59,7 +60,7 @@
 | `lookupPlanCache` 中命中后的克隆（`plan_cache.go:255`）、`generateNewPlan` 中放入前的克隆（`:321-327`） | 去掉克隆，其余 L1 | 函数 L1，这两行登记为例外 |
 | `PlanCacheValue.MemoryUsage`（Go 的估算公式，`plan_cache_utils.go:456-491`） | 决定 4：条目实际持有的字节（§3.5）。`isPlanCacheable` 中 `tidb_plan_cache_max_plan_size` 的判断**仍用 Go 公式**（各算子 `memory_usage()` 已按 L1 移植），保证 warning 相同 | 例外（A3，决定 4） |
 | `domain.InitInstancePlanCache`、`planCacheMetricsAndVars`、`planCacheEvictTrigger`（`domain.go:3435-3500`） | 运行时上的后台任务（N3 §3.7），逻辑 L1，限额生效时机见决定 5 | L2 |
-| `planCacheEvictTrigger` 的固定周期 `time.NewTicker(time.Second * 30)`（`domain.go:3483`） | 周期取新 GLOBAL 变量 `tidb_instance_plan_cache_evict_interval`（秒，默认 30，§3.8） | 例外（A3，特性例外：新增变量，决定 6；台账 R17） |
+| `planCacheEvictTrigger` 的固定周期 `time.NewTicker(time.Second * 30)`（`domain.go:3483`） | 照 Go：固定 30 秒，不可配置（§3.8，决定 6） | L1（不是例外；负责人 2026-11-23 确认） |
 | `executeAdminFlushPlanCache` 的 INSTANCE 范围（`executor/simple.go:3146-3153`：只清本会话缓存并 `SetExpiredTimeStamp4PC`，实例级缓存从不读这个时间戳） | 另外清空实例级缓存（`delete_all`，§3.4）；校验、warning 照 Go | 例外（A3，Go 缺陷的修正，决定 8；#307，台账 R15） |
 | `tidb_enable_instance_plan_cache` 默认 OFF；OFF 时用会话级缓存 | 默认 ON；OFF 时完全不缓存 | 例外（A3，特性例外，决定 1、2；台账 R14） |
 | `NewPlanCacheKey` 中用户名、主机名、库名、语句文本直接拼接（`plan_cache_utils.go:308-312`） | 字符串字段带长度前缀（§3.4） | 例外（A3，决定 9；#308，台账 R16） |
@@ -280,8 +281,7 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；�
 ### 3.8 后台任务与系统变量
 
 - 缓存由 `Domain` 持有（`Arc<dyn InstancePlanCache>`，接口在 `tidb-sessionctx`，实现在 `tidb-planner`，启动时注入，对应 Go `domain.NewInstancePlanCache` 的 init 注入，按 `layers.toml` 核对方向）。
-- 淘汰任务：周期由 `tidb_instance_plan_cache_evict_interval` 决定（默认 30 秒，即 Go 的固定值），在运行时上运行，每处理一个分片让出一次（N3 §3.7）。记日志 `instance plan eviction` 与 metrics 同 Go。
-- **新变量 `tidb_instance_plan_cache_evict_interval`**（决定 6，特性例外，台账 R17）：GLOBAL，整数，单位秒，默认 30，范围 [1, 3600]，越界截断并发 1292（与其他整数变量相同，N8）。持久化在 `mysql.global_variables`。执行 `SET GLOBAL` 的节点上，钩子立即按新周期重新计时（不等当前周期结束）；其他节点经正常的全局变量同步拿到新值后才重新计时（N8）。名字沿用 Go `tidb_instance_plan_cache_*` 的命名；v8.5.8 没有这个变量，混合集群中 Go 节点忽略它，在 Go 节点上 `SET` 它报 1193（unknown system variable）。缩短周期的代价是淘汰扫描更频繁（每次扫描所有分片，§3.4）。
+- 淘汰任务：周期照 Go 固定 30 秒（`domain.go:3483`），不可配置、没有变量（决定 6），在运行时上运行，每处理一个分片让出一次（N3 §3.7）。记日志 `instance plan eviction` 与 metrics 同 Go。
 - `ADMIN FLUSH INSTANCE PLAN_CACHE`（决定 8）：Go 的校验与 warning 照做，之后调用 `delete_all`（§3.4）。会话级的部分（`LastUpdateTime4PC`、`SetExpiredTimeStamp4PC`）照 Go 保留，因为没有会话级缓存，它们没有可观察的效果。
 - metrics 任务：每 15 秒更新条数与内存 gauge（同 Go）。
 - 限额：`SET GLOBAL` 的钩子（N8）立即更新 `soft_limit` / `hard_limit`（决定 5；Go 最多晚 15 秒）。
@@ -312,8 +312,7 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；�
 4. `last_used` 1ms 内的写节流（决定 7）：同一毫秒内被访问的条目在淘汰阈值上并列。
 5. key 无串接歧义（决定 9）：仅在用户名 / 主机名 / 库名恰好能拼接成相同字符串时，Go 共享而 Rust 不共享（`last_plan_from_cache` 不同）。Go 缺陷的修正，#308，台账 R16，写进 `docs/compatibility.md`。
 6. 默认值与会话级缓存不存在带来的差异：见决定 1、2、3，属**特性例外**，用户可见，台账 R14，写进 `docs/compatibility.md`。
-7. 新增变量 `tidb_instance_plan_cache_evict_interval`（决定 6）：**特性例外**，`SHOW VARIABLES` 多一行；默认值下淘汰周期与 Go 相同。台账 R17，写进 `docs/compatibility.md`。
-8. `ADMIN FLUSH INSTANCE PLAN_CACHE` 清空实例级缓存（决定 8）：Go v8.5.8 不清空（flush 后仍 `last_plan_from_cache = 1`，#307 有复现）。按宪章第一条 2（2026-11-21 确认）作为 Go 缺陷修正，台账 R15，写进 `docs/compatibility.md`。
+7. `ADMIN FLUSH INSTANCE PLAN_CACHE` 清空实例级缓存（决定 8）：Go v8.5.8 不清空（flush 后仍 `last_plan_from_cache = 1`，#307 有复现）。按宪章第一条 2（2026-11-21 确认）作为 Go 缺陷修正，台账 R15，写进 `docs/compatibility.md`。
 
 ## 5. 验收
 
@@ -362,10 +361,7 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；�
 3. **会话级变量照常接受、校验、保存，不起作用，不发 warning**（按建议）。`tidb_enable_prepared_plan_cache` 照 Go 作为"本会话是否用缓存"的开关（Go 实例级模式也看它）；`tidb_session_plan_cache_size`、`tidb_prepared_plan_cache_size`、`tidb_prepared_plan_cache_memory_guard_ratio` 在 Go 实例级模式下同样静默不起作用。不把 `tidb_session_plan_cache_size` 映射成实例级的条数上限。
 4. **`tidb_instance_plan_cache_max_size` 按条目实际持有的字节计量**（按建议，§3.5）。与 A1"按实际分配记账、数值不对照"一致，限额真正约束内存；要为计划和表达式类型 derive `HeapSize`，同一设置下条目数与 Go 不同。`tidb_plan_cache_max_plan_size` 仍按 Go 公式（warning 相同）。
 5. **限额在 `SET GLOBAL` 后立即生效**（按建议）。Go 每 15 秒从变量刷新一次，这个延迟不是设计意图，也不是确定性行为。
-6. **淘汰检查周期可配置**（与原建议不同）。原建议照 Go 固定 30 秒。负责人决定做成可配置：新 GLOBAL 变量 `tidb_instance_plan_cache_evict_interval`，单位秒，默认 30（等于 Go 的固定值；负责人对默认值的确认在 #305 待定），范围 [1, 3600]（§3.8）。注意 30 秒是淘汰**检查周期**，不是条目的 TTL：每次检查只在总量超过软限额时淘汰最久未用的条目，Go 和 tidb-rs 都**没有按条目的 TTL**。
-   - 默认值：30 秒（负责人对默认值的确认在 #305 待定）。负责人"30 秒太短，应该延长"的意见基于把 30 秒理解为 TTL；澄清后他表示其他没问题。
-   - 属特性例外（新增变量）：`SHOW VARIABLES` 多一行；默认值下行为与 Go 相同。
-   - 去处：§1.2、§3.8、§4 第 7 条；台账 R17，`docs/compatibility.md` Plan cache 一节。
+6. **淘汰检查周期照 Go 固定 30 秒，不可配置**（负责人 2026-11-23 确认）。不加变量。注意 30 秒是淘汰**检查周期**，不是条目的 TTL：每次检查只在总量超过软限额时淘汰最久未用的条目，Go 和 tidb-rs 都**没有按条目的 TTL**。
    - "Put 因硬限额失败时提前唤醒淘汰"仍不做；若 §5.3 的测试或线上显示缓存长时间冻结，再按数据考虑。
 7. **`last_used` 1ms 内不重复写**（按建议），避免 64 线程命中同一计划时每次都写同一条缓存行。1ms 内的访问顺序在淘汰阈值上并列，不可观察。
 8. **`ADMIN FLUSH INSTANCE PLAN_CACHE` 真正清空实例级缓存**（与原建议不同）。Go v8.5.8 中它只清本会话的会话级缓存并记一个实例级缓存从不读的时间戳（`executor/simple.go` `executeAdminFlushPlanCache`），打开实例级缓存时等于什么也不做（v8.5.8 上复现：flush 后本会话和新会话的 EXECUTE 仍 `last_plan_from_cache = 1`）。负责人：这是管理语句，应该生效。
@@ -385,7 +381,7 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；�
 
 - key：`NewPlanCacheKey` 全部字段 L1。还没有的块按 Go 在同样条件下的值计算并标注：无绑定（bindinfo 未移植时 `MatchSQLBindingForPlanCache` 返回空，不是 `Blocked`，因为 Go 在没有绑定时就是这个结果）；统计版本取统计句柄的版本（只有 pseudo 时为 0，同 Go `getLatestVersionFromStatsTable` 的第 1 种情况）；表达式下推黑名单时间戳读已移植的值。
 - `parseParamTypes`、`checkTypesCompatibility4PC`、`lookupPlanCache`、`adjustCachedPlan`、`generateNewPlan` 的 Put、`instancePlanCacheEnabled`：L1（去掉克隆）。
-- 缓存本体、淘汰、记账、后台任务、三个变量与新增的 `tidb_instance_plan_cache_evict_interval`（默认 ON 等决定 1–3、6）、`delete_all` 与 `ADMIN FLUSH INSTANCE PLAN_CACHE`（决定 8）、metrics、`FoundInPlanCache` / `last_plan_from_cache`。
+- 缓存本体、淘汰、记账、后台任务、三个变量（默认 ON 等决定 1–3）、`delete_all` 与 `ADMIN FLUSH INSTANCE PLAN_CACHE`（决定 8）、metrics、`FoundInPlanCache` / `last_plan_from_cache`。
 - 重建（`rebuildRange` 中 VS1 用得到的分支）：
   - `PointGetPlan`：`HandleConstant`（int handle，`convertConstant2Datum`）、`IndexConstants`（唯一索引）、`AccessConditions` 非空的两条路径；
   - `PhysicalTableReader` → `PhysicalTableScan`：int handle（`BuildTableRange`），common handle 若 VS1 有则走 `DetachCondAndBuildRangeForIndex`；
@@ -424,4 +420,4 @@ Insert / Update / Delete 的 `SelectPlan`（及点更新）、绑定（`FoundInB
 - [ ] 命中路径不分配（基准中用计数分配器断言），读锁内无求值、无 `.await`。
 - [ ] 执行器 crate 的 `disallowed_methods` lint 已加；计划与表达式类型的内部可变性都有类别注释。
 - [ ] 代价缓存的 `sealed` 规则有测试。
-- [x] 待定 1–11 已由负责人逐项决定（2026-11-23，#305），结果写回本 spec（§6）、`docs/compatibility.md` 与偏差台账（R14–R17）。
+- [x] 待定 1–11 已由负责人逐项决定（2026-11-23，#305），结果写回本 spec（§6）、`docs/compatibility.md` 与偏差台账（R14–R16）。
