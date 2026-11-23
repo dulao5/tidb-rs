@@ -49,6 +49,10 @@ description: Port one block (or one part of a block) of Go TiDB v8.5.8 to tidb-r
 
 - 需要未排期或未完成块的能力时写桩，不要只拉进单个上游函数。桩返回 `tidb_base::blocked::blocked("<块>", "<说明>")`（错误 1235，路由器据此回退），标注 `// glue: stub of <Symbol>, blocked-by:<块> (<缺什么>)`。不用其他错误代替。
 - **不要静默**：Go 会走某个分支、而我们还做不了的地方，必须在 Go 分支的同一位置变成显式的 `blocked-by`，不能留空值、默认值或空列表。
+- **桩棘轮**（`scripts/check_stub_ratchet.py`，基线 `scripts/stub_ratchet.tsv`）：`blocked-by` 的数量按区域只降不升；移植后桩变少时用 `--write` 调低基线。只有两种情况允许上升，且 PR 正文要逐条列出净增的标注：
+  1. 同一个 PR 删掉了覆盖这些分支的整函数桩，新代码在每个跟不了的 Go 分支上各标一个（细化，不是新缺口）；
+  2. 同一个 PR 新纳入一个 Go 类型或接口，它超出本切片的方法写成桩，每个都在 tracker 登记并说明不可达的理由。
+  每个桩在棘轮里算两次（注释一次、`blocked()` 调用一次），PR 正文写成"桩 −a / +b，棘轮计数 −2a / +2b"。
 - 每个桩在 tracker 登记：`python3 scripts/blocks/parts.py scan --write <tidb-rs worktree>`，然后给每一行补 `note`（缺什么、为什么）。tracker PR 必须在 rebase 之后的分支上扫描；如果另一个改桩的 PR 先合了，在最新的 main 上再扫一次。
 - 推迟到后续任务的要求，写进那个任务的完成条件，并写明对应的测试名。
 
