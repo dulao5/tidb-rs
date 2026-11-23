@@ -1634,3 +1634,47 @@ fn admin_flush_plan_cache_clears_the_instance_cache() {
         assert!(script.lock().unwrap().log.is_empty());
     }
 }
+
+/// Only `ADMIN FLUSH INSTANCE PLAN_CACHE` clears the instance plan cache. As in Go:
+/// `SESSION` and no scope (`ast.StatementScopeSession`) clear only the session-level cache,
+/// which tidb-rs does not have, so they return OK with no warning and leave the instance cache
+/// alone; `GLOBAL` is Go's error `Do not support the 'admin flush global scope.'` (1105) and
+/// clears nothing. Each runs in a fresh router.
+#[test]
+fn admin_flush_plan_cache_scopes_as_go() {
+    type Want = Result<OkInfo, (u16, &'static str)>;
+    let cases: [(&str, Want, usize); 4] = [
+        ("ADMIN FLUSH SESSION PLAN_CACHE", Ok(OkInfo::default()), 0),
+        ("ADMIN FLUSH PLAN_CACHE", Ok(OkInfo::default()), 0),
+        (
+            "ADMIN FLUSH GLOBAL PLAN_CACHE",
+            Err((1105, "Do not support the 'admin flush global scope.'")),
+            0,
+        ),
+        ("ADMIN FLUSH INSTANCE PLAN_CACHE", Ok(OkInfo::default()), 1),
+    ];
+    for (sql, want, want_flushes) in cases {
+        let mut p = poc();
+        let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+        let cache = Arc::new(CountingCache::default());
+        r.new
+            .session_mut()
+            .set_instance_plan_cache(Some(Arc::clone(&cache) as _));
+        r.new.session_mut().vars_mut().enable_prepared_plan_cache = true;
+        let got = block_on(r.query(&mut p, sql));
+        match (&got, &want) {
+            (Ok(Response::Ok(ok)), Ok(w)) => assert_eq!(ok, w, "{sql}"),
+            (Err(e), Err((code, msg))) => {
+                assert_eq!((e.code, e.message.as_str()), (*code, *msg), "{sql}")
+            }
+            _ => panic!("{sql}: {got:?}"),
+        }
+        assert_eq!(
+            cache.flushes.load(std::sync::atomic::Ordering::SeqCst),
+            want_flushes,
+            "{sql}"
+        );
+        assert_eq!(r.last_stmt().engine, Engine::New, "{sql}");
+        assert!(script.lock().unwrap().log.is_empty(), "{sql}");
+    }
+}
