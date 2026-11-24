@@ -493,6 +493,22 @@ pub trait LogicalOptRule {
     fn name(&self) -> &'static str;
 }
 
+/// AccessObject represents what is accessed by an operator (`base.AccessObject`,
+/// `base/misc_base.go`). It corresponds to the "access object" column in an EXPLAIN
+/// statement result. The implementations are in `core/access_object.rs`.
+pub trait AccessObject: std::fmt::Debug {
+    /// `String`.
+    // glue: interface method of base.AccessObject
+    fn to_string(&self) -> String;
+    /// `NormalizedString`.
+    // glue: interface method of base.AccessObject
+    fn normalized_string(&self) -> String;
+    /// `SetIntoPB` transforms itself into a protobuf message and sets it into the binary
+    /// plan; `None` is Go's nil `*tipb.ExplainOperator`.
+    // glue: interface method of base.AccessObject
+    fn set_into_pb(&self, pb: Option<&mut tipb::ExplainOperator>);
+}
+
 /// PhysicalPlan is a tree of the physical operators (`base.PhysicalPlan`), shared as an
 /// `Arc` tree from the start (N1 §3.4): `Send + Sync`, so a plan can go into the instance
 /// plan cache and to executor workers as is.
@@ -679,10 +695,10 @@ pub trait PhysicalPlan: Any + Send + Sync {
     fn set_child(&mut self, i: isize, child: PhysicalPlanRef) {
         self.base_physical_mut().set_child(i, child);
     }
-    /// `ResolveIndices`.
+    /// `ResolveIndices`; `ctx` is Go's `p.SCtx()` (`M-CTX`).
     // glue: dispatch (Go BasePhysicalPlan.ResolveIndices)
-    fn resolve_indices(&mut self) -> Result<(), Error> {
-        self.base_physical_mut().resolve_indices()
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        self.base_physical_mut().resolve_indices(ctx)
     }
     /// `SetStats`.
     // glue: dispatch (Go baseimpl.Plan.SetStats)

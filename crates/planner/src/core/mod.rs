@@ -1,6 +1,7 @@
 //! Go package `pkg/planner/core`: the plan builder, the optimizer driver and the physical
 //! plan helpers, ported file by file with the VS1 work items.
 
+pub mod access_object;
 pub mod collect_column_stats_usage;
 pub mod common_plans;
 pub mod constraint;
@@ -30,6 +31,7 @@ pub mod plan_cache_utils;
 pub mod plan_cacheable_checker;
 pub mod plan_cost_ver1;
 pub mod plan_cost_ver2;
+pub mod plan_to_pb;
 pub mod planbuilder;
 pub mod point_get_plan;
 pub mod preprocess;

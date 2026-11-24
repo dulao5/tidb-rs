@@ -91,6 +91,14 @@ impl PhysicalSchemaProducer {
         })
     }
 
+    /// Go's writes through `p.schema` (`p.schema.Columns[i] = ...`, `column.Index = i`):
+    /// the schema for writing, initialized as [`PhysicalSchemaProducer::schema`] first.
+    // glue: M-SELF (the mutable side of the lazily initialized schema)
+    pub fn schema_mut(&mut self) -> &mut Schema {
+        self.schema();
+        self.schema.get_mut().expect("initialized by schema()")
+    }
+
     /// SetSchema implements the Plan.SetSchema interface. `None` is Go's nil.
     // go: physicalSchemaProducer.SetSchema L1
     pub fn set_schema(&mut self, schema: Option<Schema>) {

@@ -269,20 +269,16 @@ impl PhysicalPlan for PointGetPlan {
     // go: PointGetPlan.SetChild L1
     fn set_child(&mut self, _i: isize, _child: PhysicalPlanRef) {}
     /// ResolveIndices resolves the indices for columns. After doing this, the columns can evaluate the rows by their indices.
-    ///
-    /// `resolveIndicesForVirtualColumn` (D10.9) resolves the virtual expressions of the
-    /// schema; the fast path refuses tables with generated columns, so its schema has none, and
-    /// a virtual column is a boundary stub.
-    // go: PointGetPlan.ResolveIndices L2 (a virtual column needs resolveIndicesForVirtualColumn: blocked-by:D10.9)
-    fn resolve_indices(&mut self) -> Result<(), Error> {
-        if self.schema.columns.iter().any(|c| c.virtual_expr.is_some()) {
-            // glue: blocked-by:D10.9 (resolveIndicesForVirtualColumn of a virtual column)
-            return Err(blocked(
-                "D10.9",
-                "resolveIndicesForVirtualColumn (a virtual column of a point get)",
-            ));
-        }
-        Ok(())
+    // go: PointGetPlan.ResolveIndices L1 [M-CTX]
+    fn resolve_indices(&mut self, _ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        // resolveIndicesForVirtualColumn(p.schema.Columns, p.schema): the schema is read
+        // through a shallow copy while its columns are written (column lookup reads only
+        // the unique ids, never a virtual expression).
+        let schema = self.schema.clone();
+        crate::core::resolve_indices::resolve_indices_for_virtual_column(
+            &mut self.schema.columns,
+            &schema,
+        )
     }
     /// Clone implements PhysicalPlan interface.
     // go: PointGetPlan.Clone L1 [M-ERR]

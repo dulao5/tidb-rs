@@ -324,10 +324,10 @@ impl BasePhysicalPlan {
     }
 
     /// ResolveIndices implements the base.PhysicalPlan.<10th> interface.
-    // go: BasePhysicalPlan.ResolveIndices L1 [M-PLAN]
-    pub fn resolve_indices(&mut self) -> Result<(), Error> {
+    // go: BasePhysicalPlan.ResolveIndices L1 [M-PLAN, M-CTX]
+    pub fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
         for child in &mut self.children {
-            make_mut_plan(child).resolve_indices()?;
+            make_mut_plan(child).resolve_indices(ctx)?;
         }
         Ok(())
     }

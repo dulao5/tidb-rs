@@ -115,7 +115,9 @@ fn trivial_methods() {
         p.clone_plan().err().unwrap().to_string(),
         "*core.PointGetPlan doesn't support cloning"
     );
-    p.resolve_indices().unwrap();
+    let mut vars = SessionVars::new(Box::new(Acc));
+    let ctx = crate::PlanCtx::new(&mut vars, es::new_expr_context(Vec::new()));
+    p.resolve_indices(&ctx).unwrap();
     assert_eq!(
         blocked_by(&p.load_table_stats().unwrap_err()),
         Some("D10.2")

@@ -312,7 +312,10 @@ impl PhysicalPlan for Leaf {
     fn schema(&self) -> &Schema {
         &self.schema
     }
-    fn resolve_indices(&mut self) -> Result<(), tidb_base::Error> {
+    fn resolve_indices(
+        &mut self,
+        _ctx: &tidb_planner::PlanCtx<'_>,
+    ) -> Result<(), tidb_base::Error> {
         self.resolved += 1;
         Ok(())
     }
@@ -369,9 +372,15 @@ fn base_physical_plan_methods() {
         (3, "Selection", 2)
     );
 
+    let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
+    let ctx = tidb_planner::PlanCtx::new(
+        &mut vars,
+        tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
+    );
+
     // ResolveIndices reaches every child, in place while the tree is owned.
     tidb_planner::make_mut_plan(&mut p)
-        .resolve_indices()
+        .resolve_indices(&ctx)
         .unwrap();
     for c in p.children() {
         assert_eq!(c.as_any().downcast_ref::<Leaf>().unwrap().resolved, 1);
@@ -379,11 +388,6 @@ fn base_physical_plan_methods() {
 
     // The cost is computed once and reused unless CostFlagRecalculate is set.
     let mut opt = new_default_plan_cost_option();
-    let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
-    let ctx = tidb_planner::PlanCtx::new(
-        &mut vars,
-        tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
-    );
     let node = tidb_planner::make_mut_plan(&mut p);
     let c = node.get_plan_cost_ver2(&ctx, RootTaskType, &opt).unwrap();
     assert_eq!(c.get_cost(), 0.0);

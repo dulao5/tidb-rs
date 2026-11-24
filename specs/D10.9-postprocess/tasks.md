@@ -1,6 +1,6 @@
 # D10.9 后处理与 EXPLAIN 输出（tasks）
 
-本块尚未开工，只有下面从其他块移交来的条目；开工时并入正式的任务列表。
+本块的第一部分是 VS1-31（切片算子的 `ResolveIndices`、`ToPB`、access object），见 [spec.md](spec.md)。EXPLAIN 输出（VS1-38）、plan 编码和克隆尚未开工；下面是从其他块移交来的条目，开工时并入正式的任务列表。
 
 ## 从 P1 继承
 
