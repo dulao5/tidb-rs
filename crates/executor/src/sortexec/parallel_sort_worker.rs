@@ -28,6 +28,7 @@ use tidb_base::gostd::sort::sort;
 use tidb_chunk::chunk::Chunk;
 use tidb_chunk::row::RowHandle;
 use tidb_memory::tracker::Tracker;
+use tidb_runtime::CheckpointStride;
 use tokio::sync::mpsc;
 
 use super::multi_way_merge::{MemorySource, MultiWayMerger, new_multi_way_merger};
@@ -42,6 +43,12 @@ use crate::internal::exec::executor::ExecutorKillerHandler;
 /// SignalCheckpointForSort indicates the times of row comparation that a signal detection
 /// will be triggered.
 pub const SignalCheckpointForSort: u64 = 20000;
+
+/// The merged rows between two reads of the clock in the merge loops of the parallel sort
+/// (`CheckpointStride`, N3-A1 §3.1 item 5): every 100 rows, where the worker's merge checks
+/// the kill signal in Go.
+// glue: N3-A1 §3.1 item 5 (per-row loops)
+pub const MERGE_CHECKPOINT_STRIDE: u32 = 100;
 
 /// The receiving side of the chunk channel, shared by the workers and `Close` (Go's
 /// `chan *chunkWithMemoryUsage` has many receivers; a tokio receiver has one, so it is
@@ -148,8 +155,11 @@ impl ParallelSortWorker {
         inject_parallel_sort_random_fail(trigger_factor);
     }
 
-    // go: parallelSortWorker.multiWayMergeLocalSortedRows L2 (failpoint ParallelSortRandomFail not ported: no failpoints)
-    fn multi_way_merge_local_sorted_rows(&mut self) -> Result<Vec<RowHandle>, Error> {
+    /// The merge yields at a time-sliced checkpoint (N3-A1 §3.1 item 5) where Go checks the
+    /// kill signal, every 100 rows: Rust has no preemption, and a worker merges all its rows
+    /// at the end in one loop.
+    // go: parallelSortWorker.multiWayMergeLocalSortedRows L2 (async: a time-sliced checkpoint where Go checks the kill signal; failpoint ParallelSortRandomFail not ported: no failpoints)
+    async fn multi_way_merge_local_sorted_rows(&mut self) -> Result<Vec<RowHandle>, Error> {
         let mut total_row_num = 0;
         for rows in &self.local_sorted_rows {
             total_row_num += rows.lock().len();
@@ -164,6 +174,7 @@ impl ParallelSortWorker {
         merger.init()?;
 
         let mut loop_cnt: u64 = 0;
+        let mut stride = CheckpointStride::new(MERGE_CHECKPOINT_STRIDE);
 
         loop {
             if loop_cnt.is_multiple_of(100)
@@ -171,6 +182,8 @@ impl ParallelSortWorker {
             {
                 sql_killer.handle_sql_killer_signal()?;
             }
+            // glue: N3-A1 §3.1 item 5 (a time slice in a per-row loop, beside Go's kill check)
+            let Ok(()) = stride.checkpoint(&()).await;
 
             loop_cnt += 1;
 
@@ -229,14 +242,14 @@ impl ParallelSortWorker {
         Ok(())
     }
 
-    // go: parallelSortWorker.sortLocalRows L1
-    fn sort_local_rows(&mut self) -> Result<Vec<RowHandle>, Error> {
+    // go: parallelSortWorker.sortLocalRows L2 (async: the merge has a time-sliced checkpoint)
+    async fn sort_local_rows(&mut self) -> Result<Vec<RowHandle>, Error> {
         // Handle Remaining batchRows whose row number is not over the `maxSortedRowsLimit`
         if self.row_num_in_chunk_iters > 0 {
             self.sort_batch_rows()?;
         }
 
-        self.multi_way_merge_local_sorted_rows()
+        self.multi_way_merge_local_sorted_rows().await
     }
 
     // go: parallelSortWorker.saveChunk L2 (Iterator4Chunk inline: the chunk is kept)
@@ -270,7 +283,7 @@ impl ParallelSortWorker {
         let Some(chk) = received else {
             self.inject_fail_point_for_parallel_sort_worker(100);
             // Put local sorted rows into this iter who will be read by sort executor
-            let sorted_rows = match self.sort_local_rows() {
+            let sorted_rows = match self.sort_local_rows().await {
                 Ok(rows) => rows,
                 Err(err) => {
                     let _ = self
@@ -339,4 +352,186 @@ impl ParallelSortWorker {
 // glue: receive from the shared chunk channel (M-CH)
 async fn recv_chunk(ch: &ChunkReceiver) -> Option<ChunkWithMemoryUsage> {
     ch.lock().await.recv().await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tidb_memory::tracker::new_tracker;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::sortexec::parallel_sort_spill_helper::new_parallel_sort_spill_helper;
+    use crate::sortexec::sort_util::new_finish_ch;
+    use crate::sortexec::sort_util::yield_test::{PollCount, int_keys, runtime, sorted_runs};
+
+    /// The final merge of a worker's sorted runs yields at its time-sliced checkpoints
+    /// (N3-A1 §3.1 item 5) when it runs in an instrumented task: 8 runs of 40000 rows take
+    /// far more than one time slice, and nothing else in the merge awaits. The task runs
+    /// unconstrained (no tokio budget), so every extra poll comes from a checkpoint.
+    #[test]
+    fn merge_of_local_sorted_rows_yields() {
+        let rt = runtime();
+        let pool = rt.pool().clone();
+        let (_chunk_tx, chunk_rx) = mpsc::channel(1);
+        let (result_tx, _result_rx) = mpsc::channel(1);
+        let (_finish_tx, finish_ch) = new_finish_ch();
+        let mut worker = new_parallel_sort_worker(
+            0,
+            int_keys(),
+            Arc::new(tokio::sync::Mutex::new(chunk_rx)),
+            Arc::new(WaitGroup::default()),
+            result_tx,
+            finish_ch,
+            new_tracker(-1, -1),
+            Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
+            32,
+            Arc::new(new_parallel_sort_spill_helper()),
+            None,
+        );
+        worker.local_sorted_rows = sorted_runs(8, 40_000);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let rows = rt.block_on(async move {
+            pool.spawn(
+                "test-merge",
+                tokio::task::unconstrained(PollCount {
+                    inner: Box::pin(async move {
+                        worker.multi_way_merge_local_sorted_rows().await.unwrap()
+                    }),
+                    polls: counted,
+                }),
+            )
+            .await
+            .unwrap()
+        });
+        assert_eq!(rows.len(), 320_000);
+        assert!(
+            rows.iter()
+                .enumerate()
+                .all(|(i, r)| r.row().get_int64(0) == i as i64)
+        );
+        assert!(polls.load(Ordering::SeqCst) > 1, "the merge never yielded");
+    }
+
+    /// The time of one batch sort (`sortBatchRows`, which cannot yield partway through):
+    /// 30 * 1024 rows, two BIGINT keys. A measurement for spec D12.5 §7.8, run by hand in a
+    /// release build: `cargo test --release -p tidb-executor --lib batch_sort_time --
+    /// --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn batch_sort_time() {
+        let ft = tidb_types::field_type::new_field_type(tidb_base::mysql::TypeLonglong);
+        let cmp = || tidb_chunk::compare::get_compare_func(&ft).unwrap();
+        let keys = SortKeys {
+            key_columns: Arc::from(vec![0usize, 1]),
+            key_cmp_funcs: Arc::from(vec![cmp(), cmp()]),
+            descs: Arc::from(vec![false, true]),
+        };
+        let mut times = Vec::new();
+        for round in 0..7u64 {
+            let (_chunk_tx, chunk_rx) = mpsc::channel(1);
+            let (result_tx, _result_rx) = mpsc::channel(1);
+            let (_finish_tx, finish_ch) = new_finish_ch();
+            let mut worker = new_parallel_sort_worker(
+                0,
+                keys.clone(),
+                Arc::new(tokio::sync::Mutex::new(chunk_rx)),
+                Arc::new(WaitGroup::default()),
+                result_tx,
+                finish_ch,
+                new_tracker(-1, -1),
+                Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
+                1024,
+                Arc::new(new_parallel_sort_spill_helper()),
+                None,
+            );
+            let mut x: u64 = 0x2545_f491_4f6c_dd1d ^ round;
+            for _ in 0..30 {
+                let mut chk = tidb_chunk::chunk::new(&[&ft, &ft], 1024, 1024);
+                for _ in 0..1024 {
+                    x = x
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    chk.append_int64(0, ((x >> 33) % 100) as i64);
+                    chk.append_int64(1, ((x >> 13) % 1_000_000) as i64);
+                }
+                worker.save_chunk(Arc::new(chk));
+            }
+            assert_eq!(worker.row_num_in_chunk_iters, worker.max_sorted_rows_limit);
+            let start = std::time::Instant::now();
+            worker.sort_batch_rows().unwrap();
+            times.push(start.elapsed());
+        }
+        times.sort();
+        eprintln!(
+            "batch sort of 30720 rows, 2 BIGINT keys: min {:?}, median {:?}, max {:?}",
+            times[0],
+            times[times.len() / 2],
+            times[times.len() - 1]
+        );
+    }
+
+    /// A sort key function that panics inside a worker's task, end to end: the worker's
+    /// `run` catches the panic at the task boundary and sends it to the result channel as
+    /// an error (Go's recover and `processPanicAndLog`), the counter of the chunk it was
+    /// sorting is released by its drop guard during the unwind (Go's deferred `Done`), and
+    /// the task ends normally.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn panic_of_a_sort_key_function_goes_to_the_result_channel() {
+        let panicking: tidb_chunk::compare::CompareFunc =
+            Box::new(|_, _, _, _| panic!("sort key function panicked"));
+        let keys = SortKeys {
+            key_columns: Arc::from(vec![0usize]),
+            key_cmp_funcs: Arc::from(vec![panicking]),
+            descs: Arc::from(vec![false]),
+        };
+        let (chunk_tx, chunk_rx) = mpsc::channel(1);
+        let (result_tx, mut result_rx) = mpsc::channel(10);
+        let (_finish_tx, finish_ch) = new_finish_ch();
+        let syncer = Arc::new(WaitGroup::default());
+        // Max chunk size 1: the worker sorts a batch every 30 rows, while it holds the chunk.
+        let mut worker = new_parallel_sort_worker(
+            0,
+            keys,
+            Arc::new(tokio::sync::Mutex::new(chunk_rx)),
+            Arc::clone(&syncer),
+            result_tx,
+            finish_ch,
+            new_tracker(-1, -1),
+            Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
+            1,
+            Arc::new(new_parallel_sort_spill_helper()),
+            None,
+        );
+        let task = tokio::spawn(async move {
+            worker.run().await;
+            worker.exit();
+        });
+        let ft = tidb_types::field_type::new_field_type(tidb_base::mysql::TypeLonglong);
+        let mut chk = tidb_chunk::chunk::new(&[&ft], 40, 40);
+        for i in 0..40 {
+            chk.append_int64(0, 40 - i);
+        }
+        syncer.add(1);
+        chunk_tx
+            .send(ChunkWithMemoryUsage {
+                chk: Arc::new(chk),
+                memory_usage: 0,
+            })
+            .await
+            .unwrap();
+        let got = result_rx.recv().await.expect("the panic is sent");
+        assert!(got.row.is_none());
+        assert_eq!(
+            got.err.expect("an error").to_string(),
+            "sort key function panicked"
+        );
+        task.await.expect("the task ends normally");
+        assert_eq!(syncer.count(), 0);
+        // The worker's sender is gone with its task, so the channel is closed.
+        assert!(result_rx.recv().await.is_none());
+    }
 }

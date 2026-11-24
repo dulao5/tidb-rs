@@ -45,6 +45,7 @@ use tidb_memory::tracker::{LabelForRowChunks, Tracker, new_tracker};
 use tidb_parser::types::FieldType;
 use tidb_parser::types::type_str;
 use tidb_planner::util::byitem::ByItems;
+use tidb_runtime::CheckpointStride;
 use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_sessionctx::variable::tidb_vars::EnableTmpStorageOnOOM;
 
@@ -54,7 +55,8 @@ use tokio::task::JoinHandle;
 use super::multi_way_merge::{DiskSource, MemorySource, MultiWayMerger, new_multi_way_merger};
 use super::parallel_sort_spill_helper::{ParallelSortSpillHelper, new_parallel_sort_spill_helper};
 use super::parallel_sort_worker::{
-    ChunkReceiver, ParallelSortWorker, ResultSender, new_parallel_sort_worker,
+    ChunkReceiver, MERGE_CHECKPOINT_STRIDE, ParallelSortWorker, ResultSender,
+    new_parallel_sort_worker,
 };
 use super::sort_partition::{SortPartition, new_sort_partition};
 use super::sort_spill::SortPartitionSpillDiskAction;
@@ -1277,7 +1279,7 @@ impl ResultGenerator {
 
     /// We call this function to generate result when sorted rows are in memory. Return true
     /// when spill is triggered.
-    // go: SortExec.generateResultFromMemory L2 (a method of the generator task's state [M-CH])
+    // go: SortExec.generateResultFromMemory L2 (a method of the generator task's state; a time-sliced checkpoint every 100 merged rows [M-CH])
     async fn generate_result_from_memory(&mut self) -> Result<bool, Error> {
         let Some(merger) = &mut self.merger else {
             // Sort has been closed
@@ -1292,9 +1294,13 @@ impl ResultGenerator {
             .result_channel
             .as_ref()
             .expect("the result channel is open while the generator runs");
+        let mut stride = CheckpointStride::new(MERGE_CHECKPOINT_STRIDE);
         loop {
             res_buf.clear();
             for _ in 0..max_chunk_size {
+                // glue: N3-A1 §3.1 item 5 (a time slice in a per-row loop; a send with room in
+                // the channel does not yield)
+                let Ok(()) = stride.checkpoint(&()).await;
                 // It's impossible to return error here as rows are in memory
                 let row = merger.next().unwrap_or_default();
                 let Some(row) = row else {
@@ -1409,5 +1415,62 @@ impl ResultGenerator {
             .as_mut()
             .expect("invalid memory address or nil pointer dereference");
         self.spill_helper.spill_impl(merger)
+    }
+}
+
+#[cfg(test)]
+mod generator_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::sortexec::sort_util::yield_test::{PollCount, int_keys, runtime, sorted_runs};
+
+    /// The generator's merge yields at its time-sliced checkpoints (N3-A1 §3.1 item 5) in an
+    /// instrumented task, also when every send finds room in the result channel (here the
+    /// channel holds all the rows, and the task runs unconstrained: no tokio budget).
+    #[test]
+    fn generate_result_from_memory_yields() {
+        let rt = runtime();
+        let pool = rt.pool().clone();
+        let runs = sorted_runs(8, 40_000);
+        let (result_tx, mut result_rx) = mpsc::channel(320_001);
+        let (_finish_tx, finish_ch) = new_finish_ch();
+        let mut generator = ResultGenerator {
+            merger: Some(new_multi_way_merger(
+                MemorySource {
+                    sorted_rows_iters: runs.clone(),
+                },
+                int_keys(),
+            )),
+            sorted_rows_iters: runs,
+            result_channel: Some(result_tx),
+            finish_ch,
+            spill_helper: Arc::new(new_parallel_sort_spill_helper()),
+            max_chunk_size: 32,
+            less_row: int_keys(),
+        };
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let spill = rt.block_on(async move {
+            pool.spawn(
+                "test-generate",
+                tokio::task::unconstrained(PollCount {
+                    inner: Box::pin(async move {
+                        generator.generate_result_from_memory().await.unwrap()
+                    }),
+                    polls: counted,
+                }),
+            )
+            .await
+            .unwrap()
+        });
+        assert!(!spill);
+        let mut n = 0i64;
+        while let Ok(r) = result_rx.try_recv() {
+            assert_eq!(r.row.unwrap().row().get_int64(0), n);
+            n += 1;
+        }
+        assert_eq!(n, 320_000);
+        assert!(polls.load(Ordering::SeqCst) > 1, "the merge never yielded");
     }
 }

@@ -423,6 +423,83 @@ pub fn reload_cursor(
     ))
 }
 
+/// Helpers of the tests of the merge loops' time-sliced checkpoints (N3-A1 §3.1 item 5).
+#[cfg(test)]
+pub(crate) mod yield_test {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    use tidb_base::mysql::TypeLonglong;
+    use tidb_chunk::compare::get_compare_func;
+    use tidb_chunk::row::RowHandle;
+    use tidb_runtime::{Runtime, RuntimeConfig, SliceConfig};
+    use tidb_types::field_type::new_field_type;
+
+    use super::{SharedSortedRowsIter, new_sorted_rows_iter};
+    use crate::sortexec::sort::SortKeys;
+
+    /// Counts the polls of the future it wraps.
+    pub struct PollCount<F> {
+        pub inner: Pin<Box<F>>,
+        pub polls: Arc<AtomicUsize>,
+    }
+
+    impl<F: Future> Future for PollCount<F> {
+        type Output = F::Output;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            self.inner.as_mut().poll(cx)
+        }
+    }
+
+    /// An instrumented runtime (`ExecPool`) with one thread and a short time slice.
+    pub fn runtime() -> Runtime {
+        Runtime::new(RuntimeConfig {
+            worker_threads: 1,
+            slice: SliceConfig {
+                quantum: Duration::from_micros(200),
+                ..SliceConfig::default()
+            },
+            ..RuntimeConfig::default()
+        })
+        .unwrap()
+    }
+
+    /// The sort keys of one BIGINT column, ascending.
+    pub fn int_keys() -> SortKeys {
+        SortKeys {
+            key_columns: Arc::from(vec![0usize]),
+            key_cmp_funcs: Arc::from(vec![
+                get_compare_func(&new_field_type(TypeLonglong)).unwrap(),
+            ]),
+            descs: Arc::from(vec![false]),
+        }
+    }
+
+    /// `runs` sorted runs of `len` BIGINT rows each, interleaved (run r holds r, r + runs, ...).
+    pub fn sorted_runs(runs: usize, len: usize) -> Vec<SharedSortedRowsIter> {
+        let ft = new_field_type(TypeLonglong);
+        (0..runs)
+            .map(|r| {
+                let mut chk = tidb_chunk::chunk::new(&[&ft], len, len.max(1));
+                for i in 0..len {
+                    chk.append_int64(0, (i * runs + r) as i64);
+                }
+                let chk = Arc::new(chk);
+                let rows = (0..len)
+                    .map(|i| RowHandle::new(Arc::clone(&chk), i))
+                    .collect();
+                Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(rows)))
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
