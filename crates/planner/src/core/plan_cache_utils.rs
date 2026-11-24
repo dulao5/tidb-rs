@@ -11,9 +11,11 @@
 //!   addresses, stay valid), and the `PlanCacheStmt` sits behind a mutex shared by the
 //!   session's statement map and the statements that execute it ([`PlanCacheStmtRef`]).
 //! - Go's `Params []ast.ParamMarkerExpr` point at the markers, and EXECUTE writes the values
-//!   into them (`param.Datum = val`). The Rust markers are not written: the values go to
+//!   into them (`param.Datum = val`). The Rust markers hold no value: the values go to
 //!   `SessionVars.PlanCacheParams` only, by the marker's order, which is where the expression
-//!   rewriter reads them (D09.2). `params` keeps the markers' offsets in order.
+//!   rewriter reads them (D09.2). PREPARE writes each marker's order as Go's `SetOrder` does
+//!   (`ParamMarkerExpr::set_order`, the only write into the statement). `params` keeps the
+//!   markers' offsets in order.
 //! - `infoschema.InfoSchema` is the narrow [`InfoSchemaLookup`] (the full `InfoSchema`
 //!   interface is D06.3 part 2, task T9). Its table lookups are synchronous and read no
 //!   TiKV: a table not in the InfoSchema's table cache is a boundary stub, and the session
@@ -234,6 +236,40 @@ impl Default for PlanCacheStmt {
 /// and the statements that execute it.
 pub type PlanCacheStmtRef = Arc<parking_lot::Mutex<PlanCacheStmt>>;
 
+/// `markers[i].SetOrder(i)` for the markers of `stmt`, `sorted_offsets` being their offsets
+/// sorted by position (what the extractor collected, sorted).
+///
+/// Go's extractor holds the marker nodes themselves and writes each one's order through
+/// its pointer. The Rust walk lends each node only for the call, so the extractor keeps the
+/// offsets, and this second walk over the same statement gives each marker the index of its
+/// offset among the sorted offsets. A marker has its own byte offset, so the index is the
+/// marker's place in Go's sorted slice: the same numbering. Without it every marker kept the
+/// parser's order 0 and read the first parameter (#352).
+// go-part: GeneratePlanCacheStmtWithAST, ExtractAndSortParamMarkers (the SetOrder loop)
+fn set_param_marker_orders(stmt: &Stmt, sorted_offsets: &[usize]) {
+    struct SetOrder<'a>(&'a [usize]);
+    impl Visit for SetOrder<'_> {
+        // glue: ast.Visitor (the SetOrder loop)
+        fn enter(&mut self, _: CNode<'_>) -> bool {
+            false
+        }
+        // glue: ast.Visitor (the SetOrder loop)
+        fn leave(&mut self, n: CNode<'_>) -> bool {
+            if let CNode::ParamMarker(x) = n {
+                let i = self.0.binary_search(&x.offset);
+                debug_assert!(i.is_ok(), "a marker the extractor did not see");
+                if let Ok(i) = i {
+                    x.set_order(i);
+                }
+            }
+            true
+        }
+        // glue: ast.Visitor (the extractor already walked the same statement without error)
+        fn fail(&mut self, _: Error) {}
+    }
+    Walker(&mut SetOrder(sorted_offsets)).stmt(stmt);
+}
+
 /// paramMarkerExtractor extracts all the param markers in the AST (by `Leave` order).
 #[derive(Default)]
 struct ParamMarkerExtractor {
@@ -369,8 +405,8 @@ pub fn generate_plan_cache_stmt_with_ast(
     // sort it by position.
     extractor.markers.sort();
     let param_count = extractor.markers.len();
-    // extractor.markers[i].SetOrder(i): the Rust parser numbers the markers by position
-    // already (`ParamMarkerExpr.order`).
+    // for i := 0; i < paramCount; i++ { extractor.markers[i].SetOrder(i) }
+    set_param_marker_orders(&stmt, &extractor.markers);
 
     let prepared = Prepared {
         stmt_type: get_stmt_label(&stmt)?,
@@ -535,7 +571,7 @@ fn plan_cache_stmt_process(stmt: &mut PlanCacheStmt) {
                     // parameter markers.
                     for val in std::iter::once(&l.count).chain(l.offset.as_ref()) {
                         if let tidb_parser::ast::Expr::ParamMarker(m) = val {
-                            self.limit_params.push(m.order);
+                            self.limit_params.push(m.order());
                         }
                     }
                 }
@@ -598,9 +634,9 @@ impl PlanCacheStmt {
 }
 
 /// ExtractAndSortParamMarkers extracts ParamMarkerExpr nodes from the AST, sorts them by
-/// position and numbers them (the markers' offsets here; the Rust markers carry their order
-/// and no value, see the module doc).
-// go: ExtractAndSortParamMarkers L2 (offsets: the Rust markers are not written)
+/// position and numbers them (`SetOrder`). Returns the markers' offsets; the Rust markers
+/// carry no value, so Go's `Datum.SetNull` / `InExecute = false` have nothing to reset.
+// go: ExtractAndSortParamMarkers L2 (offsets returned; the Rust markers hold no value to reset)
 pub fn extract_and_sort_param_markers(stmt_node: &Stmt) -> Result<Vec<usize>, Error> {
     let mut extractor = ParamMarkerExtractor::default();
     Walker(&mut extractor).stmt(stmt_node);
@@ -608,6 +644,7 @@ pub fn extract_and_sort_param_markers(stmt_node: &Stmt) -> Result<Vec<usize>, Er
         return Err(e);
     }
     extractor.markers.sort();
+    set_param_marker_orders(stmt_node, &extractor.markers);
     Ok(extractor.markers)
 }
 

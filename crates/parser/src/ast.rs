@@ -4,6 +4,8 @@
 pub mod funcs;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::Relaxed;
 
 use crate::span::Span;
 
@@ -438,11 +440,43 @@ impl FromNode for Expr {
     }
 }
 
+/// `driver.ParamMarkerExpr` (pkg/types/parser_driver/value_expr.go): a `?` of a prepared
+/// statement.
 #[derive(Debug)]
 pub struct ParamMarkerExpr {
     /// Byte offset of the `?`.
     pub offset: usize,
-    pub order: usize,
+    /// `Order`: the marker's position among the statement's markers, by offset. The parser
+    /// leaves it 0; PREPARE numbers the markers (`GeneratePlanCacheStmtWithAST` →
+    /// [`ParamMarkerExpr::set_order`]). Go writes it through the marker pointers the
+    /// extractor collected; the statement here is walked read-only (and shared once
+    /// prepared), so the field is an atomic, written only by the numbering
+    /// (`GeneratePlanCacheStmtWithAST`, `ExtractAndSortParamMarkers`) before the statement
+    /// is shared.
+    order: AtomicUsize,
+}
+
+impl ParamMarkerExpr {
+    /// A marker at byte `offset`, order 0 (Go's parser leaves `Order` zero).
+    // glue: constructor (the grammar's `&driver.ParamMarkerExpr{Offset: ...}`)
+    pub fn new(offset: usize) -> Self {
+        ParamMarkerExpr {
+            offset,
+            order: AtomicUsize::new(0),
+        }
+    }
+
+    /// `n.Order`.
+    // glue: accessor (Go reads the field)
+    pub fn order(&self) -> usize {
+        self.order.load(Relaxed)
+    }
+
+    /// SetOrder implements the ast.ParamMarkerExpr interface.
+    // go: pkg/types/parser_driver/value_expr.go ParamMarkerExpr.SetOrder L1
+    pub fn set_order(&self, order: usize) {
+        self.order.store(order, Relaxed);
+    }
 }
 #[derive(Debug)]
 pub struct BinaryOperationExpr {
