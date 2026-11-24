@@ -1,6 +1,6 @@
 # D08.11 聚合函数描述（expression/aggregation）：spec
 
-状态：草案，只写 spec（#333），待评审（Lucky）和负责人确认。确认之前不写代码；确认后按 §2 的部分拆成实现任务。第 9 节列出需要负责人决定的点。
+状态：**已确认**（负责人 2026-11-24 在 Raft 上确认，§9 全部选 A，由 Maya 在 PR #341 转达；只写 spec，#333）。按 §2 的部分拆成实现任务。
 
 块：D08.11（ROADMAP P3 的第 1 层；Go 函数体约 1,592 行，16 个文件），crate `tidb-expression`（N0 rank 8，`layers.toml` 已登记）。
 
@@ -288,6 +288,8 @@ M-FT 疑似 V1（§5）用规划器的计划向量（`selectbuild` 领域或 VS1
 6. `NewWindowFuncDesc` 先用 `base.RetTp` 再检查 `err`（`window_func.go:60-81`）：`TypeInfer` 出错且没设 `RetTp` 时会 nil 解引用。范围内能走到的只有第 4 条；`approx_percentile` 不能带窗口子句（parser 中没有 `OptWindowingClause`，`pkg/parser/parser.y:8487`），到不了。
 
 ## 9. 需要负责人决定的点
+
+**负责人 2026-11-24 确认：全部选 A**（Raft，由 Maya 在 PR #341 转达）。
 
 Duet 不能确认 spec，下面每一点都请负责人决定；括号内是建议。
 
