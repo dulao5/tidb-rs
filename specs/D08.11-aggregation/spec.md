@@ -56,7 +56,7 @@ sysbench `oltp_read_only` 的 `SELECT SUM(k) ... WHERE id BETWEEN ? AND ?` 和 `
 | D01.1 / D02.3 类型 | `FieldType` 的 setter、`UpdateFlenAndDecimalUnderLimit`、`SetBinChsClnFlag`、`NewFieldTypeBuilder`、`GetDefaultFieldLengthAndDecimal`、`GetDefaultCharsetAndCollate`、`Datum` | `crates/types`、`crates/parser`、`crates/base` |
 | D00.1 上下文 | `BuildContext`、`EvalContext.GetDivPrecisionIncrement` | `crates/sessionctx` |
 | D02.1 parser | 函数名常量（`ast::AggFuncSum` 等）、`ast.FrameClause` | `crates/parser` |
-| D10.10 `pkg/planner/util.ByItems` | `AggFuncDesc.OrderByItems` 的元素类型 | 目前在 `crates/planner/src/util/byitem.rs`，**在本块之上**，见 §4.7 和决定点 2 |
+| `pkg/planner/util.ByItems`（原归 D10.10 计划工具，现归本块） | `AggFuncDesc.OrderByItems` 的元素类型 | 已移到 `crates/expression/src/byitem.rs`，规划器 `pub use`，见 §4.7 和决定点 2 |
 
 未移植、要写成边界的：
 
@@ -105,7 +105,7 @@ sysbench 的 SUM 下推到 TiKV 要用 `CheckAggPushDown` 和 `AggFuncToPBExpr`�
 
 ### 2.2 不在本块、但与本块绑在一起的函数
 
-- **`pkg/planner/util/byitem.go`（7 个函数，tracker 当前归 D10.10）**：N0 §4 的反向引用表已决定把 `ByItems` "下沉到 D08.11"，但 tracker 和代码都还没有执行（`crates/planner/src/util/byitem.rs`，rank 13）。`AggFuncDesc.OrderByItems` 是 `[]*util.ByItems`，`tidb-expression`（rank 8）不能依赖 `tidb-planner`。第 A 部分开工前要先移过来，见 §4.7 和决定点 2。
+- **`pkg/planner/util/byitem.go`（7 个函数，原归 D10.10 计划工具）**：N0 §4 的反向引用表已决定把 `ByItems` "下沉到 D08.11"。`AggFuncDesc.OrderByItems` 是 `[]*util.ByItems`，`tidb-expression`（rank 8）不能依赖 `tidb-planner`。第 A + B 部分的第一个提交已执行：tracker 改归 D08.11，Rust 文件移到 `crates/expression/src/byitem.rs`，见 §4.7 和决定点 2。
 
 ### 2.3 归 X：旧求值器（49 个）
 
@@ -222,6 +222,7 @@ tracker 中这 10 个函数归哪个块（留在 D08.11 还是改归 D08.3）见
 | `base_func.go:248` `TypeInfer4AvgSum` 原地改 `a.RetTp` | 调用方（`pkg/planner/core/task.go:1577-1587`）先 `TypeInfer` 重建了类型 | S | 照抄 | |
 | `descriptor.go:164`、`:174`、`:188` `Split` 让 final 描述和新建的 `Column` 共享 `a.RetTp` | 之后没有人通过它们写类型（D12.4 只读） | V0 | 共享同一个 `Arc` | |
 | `base_func.go:297` `BuildCastFunction(ctx, a.Args[i], tp)`，`tp` 是参数自己的类型指针 | `BuildCastFunctionWithCheck` 只在参数可空时 `DelFlag(NotNullFlag)`（`pkg/expression/builtin_cast.go:2469-2471`），对这个 `tp` 是空操作 | S | Rust 的 `build_cast_function` 按值接收类型 | |
+| `base_func.go:445`、`:456` `WrapCastForAggArgs` 的时间分支把 `retTp`（就是 `a.RetTp` 本身）交给 `WrapWithCastAsTime` | `WrapWithCastAsTime` 就地改这个类型（decimal、flen、flag），`BuildCastFunctionWithCheck` 在参数可空时再 `DelFlag(NotNullFlag)`，建出的 CAST 节点也指向同一个类型；所以循环中后面的参数看到的是前面改过的类型，最后描述的返回类型和每个 CAST 的类型是同一个值。CAST 被折叠成常量时，常量得到的是一份复制（`pkg/expression/constant_fold.go:234`） | **V1**（govec `wrap` / `new` 记录可见：返回类型的 decimal、NOT NULL 与逐个复制不同） | 按 M-FT 模拟（`// Go aliasing (M-FT): base_func.go:456`，`shared_time_tp_after`）：循环中带着同一个可变类型，结束后把它写回描述的 `ret_tp` 和每个被包的 CAST 的类型；由 govec `aggdesc` 的 `wrap` / `new` 记录钉住 | 实现时发现，待负责人确认 |
 | `base_func.go:332` `WrapWithCastAsInt` 对 ENUM 参数 | D08.8 已处理（Go 对 `Column` 先复制，其他节点原地改） | 随 D08.8 | 不另做 | |
 
 调用方对 `desc.RetTp` 的原地写入（如 D09.9 的聚合下推、D09.4 的 grouping sets 可空性调整）由各自的 spec 审计。
@@ -260,6 +261,8 @@ tracker 中这 10 个函数归哪个块（留在 D08.11 还是改归 D08.3）见
 
 领域的 `Coverage` 覆盖第 A–D 部分的 58 个函数；`Exempt` 登记 EXC.B 的 4 个和归 X 的 49 个（理由写明"只有 mock store 调用"）。Go panic 的记录（§8 第 4 条那类）按 govec README 记为 `panic`，Rust 侧的要求见决定点 8。
 
+实现（第 A + B 部分）：op 的名字取得更短，对应关系是 `new`（`new_agg_desc`）、`wrap`、`notnull`、`default`、`outer`、`split`、`avgsum` / `finalcount`、`string` / `equal` / `mem`、`names` / `mode` / `allfirst`（`misc`）、`window`（`NewAggFuncDescForWindowFunc`）、`push`、`topb` / `tipb`、`mode2pb` / `pb2mode`、`frompb`；格式见 tracker `govec/domains/aggdesc.go` 的文件头。种子 20261124，5575 条记录（第 A 部分 4531 条，第 B 部分 1044 条），两个目标的记录相同。第 C 部分的窗口函数和第 D 部分的 `ExplainAggFunc` 暂时登记在 `Exempt` 中（理由写明部分），随各自的部分移入 `Coverage`。
+
 M-FT 疑似 V1（§5）用规划器的计划向量（`selectbuild` 领域或 VS1 plan §7.1 的 `plan` 领域）确认：查询的输出列类型（含 flag）与 Go 逐列比较。这要等 D09.4 的窗口构建，在第 C 部分处理。
 
 ### 6.3 其他
@@ -270,7 +273,7 @@ M-FT 疑似 V1（§5）用规划器的计划向量（`selectbuild` 领域或 VS1
 ## 7. 与 Go 的已知差异
 
 1. **CAST 构建失败时**：Go 的 `BuildCastFunction` 记日志后返回签名为 nil 的节点（`pkg/expression/builtin_cast.go:2459-2463`），本包把它放进参数（`base_func.go:297`、`:312`、`:332`、`:343`、`:475`），之后求值时才出错或 panic；Rust 沿用 D08.8 的 L2，`type_infer` / `wrap_cast_for_agg_args` 直接返回这个错误。只在 CAST 本身构建失败时不同，govec 未必能构造出来（如构造得出，按错误记录钉住）。
-2. **`RetTp` 不为 nil**：Go 的 `RetTp` 可以是 nil（`base_func.go:57` 的 `Hash64`、`descriptor.go:57` 的检查），Rust 的 `ret_tp` 总有值。`NewAggFuncDescForWindowFunc` 的 nil 分支（`descriptor.go:57-59`）不可达（L2）。lead / lag 那一处见 §8 第 4 条和决定点 8。
+2. **`RetTp` 为 nil 的表示**：Go 的 `RetTp` 可以是 nil（`base_func.go:57` 的 `Hash64`、`descriptor.go:57` 的检查）。按决定点 8 的 A，Rust 的 `ret_tp` 不做成 `Option`，而用内部标记 `ret_tp_is_nil()` 表示 Go 的 nil（只有 `typeInfer4LeadLag` 的错误路径会设）；`NewAggFuncDescForWindowFunc` 的 nil 分支（`descriptor.go:57-59`）因此照 Go 逐行移植（L1），`MemoryUsage` 同样跳过 nil 的类型，`WrapCastForAggArgs` 在 nil 上以 Go 的空指针文本 panic。只是表示方式不同，没有可见差异。
 3. **`Clone` 不深拷贝**：Go 的 `clone` 复制 `FieldType` 值、对每个参数调 `Clone()`（`base_func.go:98-107`、`descriptor.go:138-146`）；Rust 共享 `Arc`，靠写时复制（M-FT、M-EXPR），之后的修改互不影响，结果相同。
 4. **`NewWindowFuncDesc` 返回 `nil, nil`**（`window_func.go:41`、`:47`、`:55`，参数不合法，调用方报 `ErrWrongArguments`，`pkg/planner/core/logical_plan_builder.go:7264-7266`）：Rust 返回 `Ok(None)`，只是表示方式不同。
 5. **不移植的部分**：cascades 的 `Hash64` / `Equals`（§2.4）；旧求值器（§2.3，决定点 1）；failpoint `show-agg-mode`（`explain.go:30-34`）。tidb-rs 没有 cascades、没有 mock store，所以没有用户可见的影响。

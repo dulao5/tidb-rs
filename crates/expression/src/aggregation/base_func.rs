@@ -120,6 +120,28 @@ fn arg_type_arc(ctx: &dyn EvalContext, e: &Expr) -> Arc<FieldType> {
     }
 }
 
+/// The shared `retTp` of WrapCastForAggArgs's time branch after WrapWithCastAsTime wrapped
+/// `arg` into `res` (Go aliasing, M-FT, base_func.go:456): the CAST's type is that `tp`
+/// itself. A CAST folded to a constant has a copy of it (constant_fold.go:234), with NOT NULL
+/// set from the value; `tp` keeps NOT NULL only when it had it and the argument is not
+/// nullable (BuildCastFunctionWithCheck's `tp.DelFlag(NotNullFlag)`).
+// glue: Go aliasing of the *FieldType WrapWithCastAsTime changes (M-FT)
+fn shared_time_tp_after(ctx: &dyn EvalContext, prev: &FieldType, arg: &Expr, res: &Expr) -> FieldType {
+    match res {
+        Expr::Constant(c) => {
+            let mut tp = c.ret_type.clone();
+            let arg_not_null = mysql::has_not_null_flag(arg.get_type(ctx).get_flag());
+            if mysql::has_not_null_flag(prev.get_flag()) && arg_not_null {
+                tp.add_flag(NotNullFlag);
+            } else {
+                tp.del_flag(NotNullFlag);
+            }
+            tp
+        }
+        _ => res.get_type(ctx).into_owned(),
+    }
+}
+
 // go: newBaseFuncDesc L2 (Go returns the descriptor and the error together; the Rust tuple keeps both, as NewWindowFuncDesc reads RetTp before the error)
 pub(crate) fn new_base_func_desc(
     ctx: &dyn BuildContext,
@@ -610,7 +632,7 @@ impl BaseFuncDesc {
     /// WrapCastForAggArgs wraps the args of an aggregate function with a cast function.
     ///
     /// Returns the error of building a CAST (spec §4.2, §7 item 1).
-    // go: baseFuncDesc.WrapCastForAggArgs L1 [M-ERR, M-PANIC]
+    // go: baseFuncDesc.WrapCastForAggArgs L1 [M-ERR, M-PANIC, M-FT]
     pub fn wrap_cast_for_agg_args(&mut self, ctx: &dyn BuildContext) -> Result<(), Error> {
         if self.args.is_empty() {
             return Ok(());
@@ -618,9 +640,19 @@ impl BaseFuncDesc {
         if noNeedCastAggFuncs.contains(&self.name.as_str()) {
             return Ok(());
         }
+        if self.ret_tp_nil {
+            // `retTp.EvalType()` on Go's nil RetTp.
+            panic!("runtime error: invalid memory address or nil pointer dereference");
+        }
         type CastFunc = Box<dyn Fn(&dyn BuildContext, ExprRef) -> Result<ExprRef, Error>>;
-        let ret_tp = Arc::clone(&self.ret_tp);
-        let et = ret_tp.eval_type();
+        let et = self.ret_tp.eval_type();
+        // Go aliasing (M-FT): base_func.go:456 passes `retTp`, which is `a.RetTp` itself, to
+        // WrapWithCastAsTime, which changes it in place (decimal, flen, flags) for every
+        // argument it wraps; the CAST it builds keeps that same *FieldType as its RetType
+        // (builtin_cast.go BuildCastFunctionWithCheck, `RetType: tp`). So each wrap starts from
+        // the type the previous one left, and the descriptor and every CAST built here end
+        // with the last one (spec §5). `time_tp` is that shared type.
+        let mut time_tp: Option<FieldType> = None;
         let cast_func: CastFunc = if et == ETInt {
             Box::new(wrap_with_cast_as_int)
         } else if et == ETReal {
@@ -630,9 +662,8 @@ impl BaseFuncDesc {
         } else if et == ETDecimal {
             Box::new(wrap_with_cast_as_decimal)
         } else if et == ETDatetime || et == ETTimestamp {
-            Box::new(move |ctx: &dyn BuildContext, expr: ExprRef| {
-                wrap_with_cast_as_time(ctx, expr, (*ret_tp).clone())
-            })
+            time_tp = Some((*self.ret_tp).clone());
+            Box::new(|_: &dyn BuildContext, _: ExprRef| unreachable!("the time cast uses time_tp"))
         } else if et == ETDuration {
             Box::new(wrap_with_cast_as_duration)
         } else if et == ETJson {
@@ -644,6 +675,7 @@ impl BaseFuncDesc {
             // returns another value, so this is unreachable.
             panic!("unsupported type {} during evaluation", et.0);
         };
+        let mut time_wrapped = vec![];
         for i in 0..self.args.len() {
             // Do not cast the second args of these functions, as they are simply non-negative numbers.
             if i == 1
@@ -656,7 +688,27 @@ impl BaseFuncDesc {
             if self.args[i].get_type(&*ctx.get_eval_ctx()).get_type() == TypeNull {
                 continue;
             }
+            if let Some(tp) = time_tp.as_mut() {
+                let arg = Arc::clone(&self.args[i]);
+                let res = wrap_with_cast_as_time(ctx, Arc::clone(&arg), tp.clone())?;
+                if !Arc::ptr_eq(&res, &arg) {
+                    *tp = shared_time_tp_after(&*ctx.get_eval_ctx(), tp, &arg, &res);
+                    time_wrapped.push(i);
+                }
+                self.args[i] = res;
+                continue;
+            }
             self.args[i] = cast_func(ctx, Arc::clone(&self.args[i]))?;
+        }
+        if let Some(tp) = time_tp {
+            if !time_wrapped.is_empty() {
+                for i in time_wrapped {
+                    if let Expr::ScalarFunction(f) = Arc::make_mut(&mut self.args[i]) {
+                        *f.ret_type_mut() = tp.clone();
+                    }
+                }
+                self.set_ret_tp(Arc::new(tp));
+            }
         }
         Ok(())
     }
