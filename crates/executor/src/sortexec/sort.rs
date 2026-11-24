@@ -343,7 +343,7 @@ impl SortExec {
                 .expect("Open made the disk tracker");
             cur.get_disk_tracker().attach_to(disk_tracker)?;
             cur.get_disk_tracker().set_label(LabelForRowChunks)?;
-            // glue: blocked-by:D01.10 (e.Ctx().GetSessionVars().MemTracker.FallbackOldAndSetNewAction(e.Unparallel.spillAction): the spill to disk is not ported, and the session memory tracker it hangs on is not in the Rust session yet (exception A1), so a sort never spills)
+            // glue: blocked-by:D01.10 (e.Ctx().GetSessionVars().MemTracker.FallbackOldAndSetNewAction(e.Unparallel.spillAction): the spill to disk is not ported, and the session memory tracker it hangs on is not in the Rust session yet (exception A1; the missing session memory tracker is issue #344), so a sort never spills)
         }
         self.cur_partition = Some(cur);
         Ok(())

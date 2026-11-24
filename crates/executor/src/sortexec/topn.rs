@@ -510,7 +510,7 @@ impl Executor for TopNExec {
 
             // The `Concurrency` workers (topNWorker, each with its own heap) and the spill
             // action serve the spill only, which starts when the action runs.
-            // glue: blocked-by:D01.10 (e.Ctx().GetSessionVars().MemTracker.FallbackOldAndSetNewAction(e.spillAction): the spill to disk is not ported, and the session memory tracker it hangs on is not in the Rust session yet (exception A1), so a top-n never spills)
+            // glue: blocked-by:D01.10 (e.Ctx().GetSessionVars().MemTracker.FallbackOldAndSetNewAction(e.spillAction): the spill to disk is not ported, and the session memory tracker it hangs on is not in the Rust session yet (exception A1; the missing session memory tracker is issue #344), so a top-n never spills)
             self.spill_helper = Some(new_top_n_spiller_helper());
         } else {
             self.spill_helper = Some(new_top_n_spiller_helper());
