@@ -240,7 +240,7 @@ Go 的 `select` 写成没有 `biased;` 的 `tokio::select!`：两边都就绪时
 ### 4.5 panic、错误与 `defer` 的顺序（`M-PANIC`、`M-DEFER`）
 
 - **panic**：Go 的 worker 和 fetcher 用 `defer recover()` + `recoveryHashAgg`（agg_util.go:90-94）把 panic 写进 `finalOutputCh`。Rust 的 task 用 `catch_unwind`（`spawn_with_recover`），把 panic 变成同样文本的错误写进 `finalOutputCh`。日志没有栈（`catch_unwind` 拿不到 panic 处的栈，与 D12.2 相同）。
-- **内存超限**：Go 的 `Consume` 在动作中 panic；Rust 的 `consume` 返回 `Err`。在 task 中按 panic 同样处理（写进 `finalOutputCh`，接着走清理）；在执行器自己的 `Next` / `Open` 中用 `?` 返回，最终给客户端的错误相同（与 D12.2 §2 第 3 条相同）。
+- **内存超限**：Go 的 `Consume` 在动作中 panic；Rust 的 `mem.checkpoint()` 返回 `Err`。在 task 中按 panic 同样处理（写进 `finalOutputCh`，接着走清理）；在执行器自己的 `Next` / `Open` 中用 `?` 返回，最终给客户端的错误相同（与 D12.2 §2 第 3 条相同）。
 - **`defer` → drop guard**：下面每一处的清理在正常结束、返回错误、panic 三种情况下都要按 Go 的顺序执行，每一处配一个测试（含出错和提前返回）：
 
 | Go 位置 | 清理内容（按 Go 的执行顺序） |
@@ -259,7 +259,7 @@ Go 的 `select` 写成没有 `biased;` 的 `tokio::select!`：两边都就绪时
 
 ### 4.6 内存记账与落盘（`M-MEM`、A1）
 
-- 记账照 Go 的位置显式调用 `consume`（与 D12.2 的并行投影相同），数值来自 `Chunk::memory_usage`、聚合函数返回的 `memDelta`、分组键的容量（`getGroupKeyMemUsage`）和部分结果表的增量。部分结果表与 `groupSet` 的增量怎么算见决定点 8；按 A1 的设计，数值可以与 Go 不同（A1 方案 c："记的是真实容量……数值与 Go 不同"）。
+- 记账按 A1（`specs/exceptions/N3-A1-concurrency-memory/spec.md` §3.2 第一行、§3.3）：删除 Go 的 delta 计算（包括聚合函数返回的 `memDelta`、`getGroupKeyMemUsage`、部分结果表与 `groupSet` 的增量估算）；会增长的容器（分组键、部分结果表、`groupSet`、聚合状态）用 `TrackedAlloc` 分配，按实际字节数自动记进 tracker；Go 中正向 `Consume` 的位置改为 `mem.checkpoint()?`，在同一位置执行动作链（所以"在哪一步报错"与 Go 相同）；负向 `Consume`（释放）删除，由 Drop 完成。这与 D12.4（#342）决定点 1 的建议 B 是同一套机制：D12.4 不再返回 `memDelta`，本块也不再 `consume` 它。按 A1，记的数值与 Go 不同。每个调用点在 tracker 中按例外（A1）登记。部分结果表的内存怎么计入见决定点 8。
 - 两个动作的优先级都是 `DefSpillPriority`（agg_spill.go:353、380），在 `TrackAggregateMemoryUsage && EnableTmpStorageOnOOM`（并行方式还要 `EnableParallelHashaggSpill`）时注册到会话 tracker 的软限额动作上（:286-295、418-427）。
 - 落盘：第 B 部分照移植触发落盘的状态机（动作、`needSpill`、`inSpillMode`），真正写盘的地方停在 `blocked-by:D01.10`（§3）。不允许不注册动作（那样内存超限时会直接走 fallback 取消语句，是静默的行为差异）。
 
@@ -272,7 +272,7 @@ Go 的 `select` 写成没有 `biased;` 的 `tokio::select!`：两边都就绪时
 - **`M-POOL`**：`partialResultsBufferPool`、`groupKeyPool`（agg_util.go:47-79）删除，`getBuffer` 直接分配，`tryRecycleBuffer` 什么都不做（两者仍标 `go:`，L1 [M-POOL]）；`expression.GetColumn` / `PutColumn`（agg_util.go:121、139、152、155）直接分配列；`e.AllocPool.Alloc`（builder.go:2053、2122）直接建 chunk。
 - **`M-IFACE`**：D12.6 对 `*HashAggExec` / `*StreamAggExec` 的类型断言是 `Executor` trait 上的方法（如 `is_child_return_empty_agg() -> Option<bool>`，默认 `None`），D12.6 移植时加；builder 中 group_concat 的 `SetTruncated` / `GetTruncated` 接口断言（builder.go:2084-2089）是 D12.4 `AggFunc` trait 上的方法。
 - **`M-INT`**：`int(murmur3.Sum32(key)) % finalConcurrency`（partial_worker.go:226）：`uint32` 转 64 位 `int` 不会为负，Rust 写 `as isize`；`length + length&1`（base_worker.go:47）照写。
-- **`M-MAPORDER`**：Go 遍历 map 的地方——final worker 输出（final_worker.go:124）、合并（:84）、第 C 部分的落盘（partial_worker.go:338）与恢复。Go 的输出顺序本来就不确定，Rust 取确定的顺序（每个 final worker 按插入顺序遍历自己的表）；多个 final worker 之间的先后取决于调度，与 Go 一样不确定。对照测试按多重集比较（`docs/testing/result-comparison.md` §2.2）。合并的顺序不影响结果，除了下面两类与顺序有关的聚合（Go 同样不确定，govec 生成器按结构排除，§5.2）：非分组列上的 FIRST_ROW，浮点数的 SUM / AVG（加法顺序不同，末位可能不同）。
+- **`M-MAPORDER`**：Go 遍历 map 的地方——final worker 输出（final_worker.go:124）、合并（:84）、第 C 部分的落盘（partial_worker.go:338）与恢复。Go 的输出顺序本来就不确定，Rust 取某种确定的顺序（不限定为插入顺序，免得给表的数据结构和 N6 增加约束）；多个 final worker 之间的先后取决于调度，与 Go 一样不确定。对照测试按多重集比较（`docs/testing/result-comparison.md` §2.2）。合并的顺序不影响结果，除了下面两类与顺序有关的聚合（Go 同样不确定，govec 生成器按结构排除，§5.2）：非分组列上的 FIRST_ROW，浮点数的 SUM / AVG（加法顺序不同，末位可能不同）。
 - **`M-ERR`**：`errors.New("partialConcurrency or finalConcurrency is 0")`（:378）、`errors.NewNoStackError("len(aggFuncsForRestoring) != len(finalWorkerAggFuncs)")`（agg_spill.go:82）照文本移植。前者在 builder 已把非正并发度改为单线程（builder.go:2064-2066）之后不可达，照样移植。
 
 ### 4.9 共享修改的审计（M-FT，N1 §5）
@@ -355,7 +355,7 @@ sysbench 的 SUM / DISTINCT 要等 D09.4、D09.9、D10.1、D10.3、D12.3、D12.4
 按 CLAUDE.md，issue 要写清在 v8.5.8 上怎么复现；本任务没有运行中的集群，也不改 tracker，所以下面几条由实现任务复现后再开 issue（标签 `upstream-pitfall`），并更新本 spec（决定点 10）。
 
 1. **并行方式吞掉输出时的错误**：final worker 的 `generateResultAndSend` 在 `AppendFinalResult2Chunk` 出错时只记日志、继续（final_worker.go:125-129）；单线程方式（agg_hash_executor.go:687-691）和 StreamAgg（agg_stream_executor.go:238-242）返回这个错误。出错的函数如果没有往输出列追加值，这一行的各列长度就不一致，可能输出错误的结果。哪些聚合函数会在这里出错属于 D12.4：例如 avg 的 decimal 路径中 `DecimalDiv` / `Round` 的错误（aggfuncs/func_avg.go:92-105）。如果复现为结果错误，属于宪章第一条 2 的情况，要负责人裁定。
-2. **StreamAgg 的初始内存在每次重新打开时累加**：`OpenSelf` 中 `memUsageOfInitialPartialResult += memDelta`（agg_stream_executor.go:90），这个字段从不清零。Apply 对每一行外表都重新 `Open` 内表的执行器（join/hash_join_v1.go:1308），所以第 n 次打开时记账的初始内存是第一次的 n 倍（:103、:248），外表行数多时可能因为记账虚高而触发内存超限。只影响内存记账，不影响结果；照 Go 移植。
+2. **StreamAgg 的初始内存在每次重新打开时累加**：`OpenSelf` 中 `memUsageOfInitialPartialResult += memDelta`（agg_stream_executor.go:90），这个字段从不清零。Apply 对每一行外表都重新 `Open` 内表的执行器（join/hash_join_v1.go:1308），所以第 n 次打开时记账的初始内存是第一次的 n 倍（:103、:248），外表行数多时可能因为记账虚高而触发内存超限。只影响内存记账，不影响结果。按 A1 删除 delta 计算后（§4.6），Rust 记的是实际字节数，这个累加不存在，所以不照搬；这是 A1 带来的记账差异，不单独登记裁定。
 3. **builder 给 avg 的 ordinal**（builder.go:2073-2078）：avg 得到 `[p, p+2]`（不是 `[p, p+1]`），下一个函数从 `p+2` 开始。这些 ordinal 只用作 final 描述参数列的 `Index`（D08.11 descriptor.go:168-175），而并行方式的 final 函数只做 `MergePartialResult` / `AppendFinalResult2Chunk`，不对参数求值，所以看起来没有影响。照 Go 移植，govec `hash_agg_parallel` 含多个 avg 的用例来确认。
 
 ## 8. 需要负责人决定的点
@@ -390,13 +390,13 @@ Duet 不能确认 spec，下面每一点都请负责人决定；括号内是建�
    - B：拿不到时返回 `blocked-by:D05.3`：默认设置下每一个 HashAgg 都会停下。
    - （建议 A：差别来自 A1 的接入，影响所有执行器的内存限额，应在 A1 接入会话的任务中一次解决。）
 7. **跨 task 的计数等待（Go 的 `sync.WaitGroup`）怎么表示？**（`M-WG` 只覆盖 `Close` 等 task，§4.3。）
-   - A：在 `tidb-runtime` 中加一个异步的 `WaitGroup`（`add` / `done` / `wait().await`），并把 `M-WG` 扩展为"跨 task 等待用它，`Close` 仍等 `JoinHandle`"。修改映射规则需要负责人确认（mappings.md"用途"一节）。
+   - A：在 `tidb-runtime` 中加一个异步的 `WaitGroup`（`add` / `done` / `wait().await`），并把 `M-WG` 扩展为"跨 task 等待用它，`Close` 仍等 `JoinHandle`"。修改映射规则需要负责人确认（mappings.md"用途"一节）。实现要求：计数已经为 0 时 `wait()` 立即返回；先登记等待、再检查计数，避免 `add`/`done` 与 `wait` 之间漏掉通知；按 port-block 的要求配一个在等待中途 drop 的测试。
    - B：每一处单独改写（final worker 等 partial worker 改成 `watch` 通知，`inflightChunkSync` 改成计数器加 `Notify`），各标 L2。
    - （建议 A：hash join（build / probe worker）、IndexLookUp 等后续的并行执行器都有同样的写法；按 mappings.md，同一种 L2 出现第三次时应提升为规则，不如现在一次定下。）
-8. **部分结果表和 `groupSet` 的内存增量怎么算？**（Go 的 `MemAwareMap` 读 Go runtime swiss map 的内部字段估算，`util/hack/map_abi.go`；需要与 D12.4 #336 一起定，因为 `AggPartialResultMapper` 是 D12.4 的类型。）
-   - A：按 `M-MEM`：Rust 的表按真实分配的容量记账（容量变化时报告增量），`map_abi.go` 中依赖 Go runtime 布局的部分不移植（tracker 登记为例外或改归 X）。
-   - B：照 Go 的估算公式（`approxSize` 等）算出与 Go 相同的数值，与 Rust 表的实际内存无关。
-   - （建议 A：A1 已决定记真实容量、数值与 Go 不同；B 记的数既不是 Rust 的真实内存，也不能保证与 Go 一致（Go 的数取决于 Go 版本的 map 实现）。）
+8. **内存怎么记账？（与 D12.4 #342 的决定点 1 是同一个决定，请合在一起定）**（Go 显式 `Consume` 各处算出的 delta：聚合函数返回的 `memDelta`、分组键容量，以及 `MemAwareMap` 读 Go runtime swiss map 内部字段的估算，`util/hack/map_abi.go`。）
+   - A：按 A1：删除所有 delta 计算，会增长的容器用 `TrackedAlloc` 分配、按实际字节数自动记账，Go 正向 `Consume` 的位置改为 `mem.checkpoint()?`，负向 `Consume` 由 Drop 完成；`map_abi.go` 中依赖 Go runtime 布局的部分不移植（tracker 登记为例外或改归 X）。
+   - B：照 Go 在原位置显式 `consume` delta，数值来自 D12.4 返回的 `memDelta` 和照 Go 公式（`approxSize` 等）算出的表增量。
+   - （建议 A：这是 A1 spec 的表里已经写定的做法，也和 D12.4 的建议一致；B 记的数既不是 Rust 的真实内存，也不能保证与 Go 一致（Go 的数取决于 Go 版本的 map 实现），还要求 D12.4 保留 `memDelta`。）
 9. **N6（哈希聚合的数据结构，例外"原则同意"、还没有 spec）与本块的关系？**
    - A：本块照 Go 的结构移植（分组键先编码成字节串、再进哈希表），N6 以后作为实现例外替换内部结构。
    - B：等 N6 的 spec 确认后再移植第 B 部分。
