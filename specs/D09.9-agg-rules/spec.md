@@ -15,7 +15,7 @@
 | `MaxMinEliminator`（`max_min_eliminate`） | `rule_max_min_eliminate.go` | 没有 GROUP BY、只有 max/min 的聚合：一个函数时在下面加 `Selection(not(isnull(x)))` + `Sort` + `Limit 1`；多个函数且每个列都能用索引保序时，拆成多个单函数聚合，用笛卡尔积 join 连起来 |
 | `AggregationPushDownSolver`（`aggregation_push_down`） | `rule_aggregation_push_down.go` | 先试一次聚合消除；子节点是 join 且 `tidb_opt_agg_push_down = ON` 时把可分解的聚合推到 join 的一侧（eager aggregation）；子节点是投影时把投影合并进聚合；子节点是 UNION ALL 时把部分聚合推到每个分支 |
 
-**谁调用**：只有优化器驱动。四条规则在规则表 `optRuleList`（`optimizer.go:78`）中的位置是第 6、7、9、16 项（`optimizer.go:85`、`:86`、`:88`、`:95`），标志位是 `rule.FlagEliminateAgg`、`FlagSkewDistinctAgg`、`FlagMaxMinEliminate`、`FlagPushDownAgg`（`rule/logical_rules.go:26`、`:27`、`:29`、`:36`）。`logicalOptimize`（`optimizer.go:992`）按标志位依次调用规则的 `Optimize`。设置标志位的地方：
+**谁调用**：只有优化器驱动。四条规则在规则表 `optRuleList`（`optimizer.go:78`）中的下标是 6、7、9、16（`optimizer.go:85`、`:86`、`:88`、`:95`），标志位是 `rule.FlagEliminateAgg`、`FlagSkewDistinctAgg`、`FlagMaxMinEliminate`、`FlagPushDownAgg`（`rule/logical_rules.go:26`、`:27`、`:29`、`:36`）。`logicalOptimize`（`optimizer.go:992`）按标志位依次调用规则的 `Optimize`。设置标志位的地方：
 
 - `buildAggregation`（`logical_plan_builder.go:249-270`）：设置 key-info、聚合下推、max/min 消除、TopN 下推、谓词下推、聚合消除、投影消除；`tidb_opt_skew_distinct_agg` 打开时再设置 skew 改写；
 - `buildDistinct`（`logical_plan_builder.go:1960-1962`）：只设置 key-info 和聚合下推；
@@ -182,7 +182,7 @@ tracker `data/func_blocks.tsv` 中 block 为 D09.9 的函数共 50 个，全部�
   - 随机生成的单表聚合语句（与 `logicalrules` 相同的生成器思路，可带派生表）。
 - 第 1 部分中停在边界的记录（`count` / `bit_*` 消除的 D08.9、多个 max/min 的 D09.3）按块计数并钉住（`EXPECTED_BLOCKED`），以免本应通过的路径悄悄变成 `blocked`。
 - 每个移植函数都要有覆盖（领域的 `Coverage`）；第 2、3 部分的函数在对应部分之前登记为豁免（"本块后续部分"），对应部分时删除。
-- amd64 向量来自 tracker CI 的产物；回放也在 arm64 job 中运行。
+- 向量在本地生成（作者的环境下载不到 CI 的产物：amd64 文件在本地 x86_64 上生成，arm64 文件由为 linux/arm64 编译的同一个生成器在 qemu-user 下生成）；CI 在两个架构的 runner 上各自重新生成，用 `scripts/govec.sh --check` 逐字节核对已提交的文件；回放也在 arm64 job 中运行。
 
 ### 7.3 单元测试
 
