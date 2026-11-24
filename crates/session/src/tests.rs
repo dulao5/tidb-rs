@@ -1124,6 +1124,21 @@ fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
 
 /// `sbtest_info_schema` at the schema version `version` (as after a DDL).
 fn sbtest_info_schema_at(version: i64) -> Arc<tidb_infoschema::InfoSchemaV2> {
+    sbtest_info_schema_with(version, None)
+}
+
+/// `sbtest_info_schema` with `c CHAR CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`: a condition
+/// on `c` needs the column's collation (the ranger builds a field type from it; the plain
+/// fixture's `c` has none).
+fn sbtest_info_schema_collated() -> Arc<tidb_infoschema::InfoSchemaV2> {
+    sbtest_info_schema_with(1, Some(("utf8mb4", "utf8mb4_bin")))
+}
+
+/// `sbtest_info_schema_at(version)`, `c` with the charset and collation `c_collation`.
+fn sbtest_info_schema_with(
+    version: i64,
+    c_collation: Option<(&str, &str)>,
+) -> Arc<tidb_infoschema::InfoSchemaV2> {
     use tidb_model::{ColumnInfo, DBInfo, StatePublic, TableInfo};
     use tidb_parser::model::CIStr;
     use tidb_parser::types::FieldType;
@@ -1132,6 +1147,9 @@ fn sbtest_info_schema_at(version: i64) -> Arc<tidb_infoschema::InfoSchemaV2> {
         if id == 1 {
             // The handle: `id INT PRIMARY KEY` (pk_is_handle).
             field_type.add_flag(tidb_base::mysql::PriKeyFlag | tidb_base::mysql::NotNullFlag);
+        } else if let Some((charset, collation)) = c_collation {
+            field_type.set_charset(charset);
+            field_type.set_collate(collation);
         }
         Arc::new(ColumnInfo {
             id,
@@ -1638,18 +1656,21 @@ fn range_and_order_by_limit_queries_still_fall_back() {
         let r = block_on(s.execute_stmt(parse(sql), sql));
         assert_eq!(assert_falls_back(&s, sql, before, r), stop, "{sql}");
     }
-    // The prepared range keeps its projection above the reader (D12.2).
+    // The prepared ranges stop at the table reader like the text queries (D12.1), below the
+    // sort and top-n executors. Before #352 was fixed both markers read the first
+    // parameter, the range was a point and the point get needed a projection above it,
+    // which stopped first (D12.2).
     let prepared = [
-        ("SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?", 2, "D12.2"),
+        ("SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?", 2, "D12.1"),
         (
             "SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c",
             2,
-            "D12.2",
+            "D12.1",
         ),
         (
             "SELECT id, c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c LIMIT 3",
             2,
-            "D12.5",
+            "D12.1",
         ),
         (
             "SELECT c FROM sbtest1 WHERE id > ? ORDER BY id LIMIT 5",
@@ -1675,6 +1696,133 @@ fn range_and_order_by_limit_queries_still_fall_back() {
     let r = block_on(s.prepare_stmt(sql));
     assert_eq!(assert_falls_back(&s, sql, before, r), "D13.1", "{sql}");
     assert_eq!(s.executed_stmts(), 0, "no statement opened an executor");
+}
+
+/// What an EXECUTE of a prepared statement did: the rows `(id, c)` it returned when it ran
+/// to the end on the new stack, or the block of the boundary stub it fell back at (checked
+/// with [`assert_falls_back`]: no executor opened, the session idle); with
+/// `FoundInPlanCache`.
+fn execute_id_c_rows(
+    s: &mut Session,
+    stmt_id: u32,
+    params: Vec<tidb_types::datum::Datum>,
+    what: &str,
+) -> (Result<Vec<(i64, String)>, String>, bool) {
+    let before = s.executed_stmts();
+    let r = block_on(s.execute_prepared_stmt(stmt_id, params));
+    let found = s.vars().found_in_plan_cache;
+    let mut rs = match r {
+        Ok(rs) => rs.expect("a result set"),
+        Err(e) => {
+            let block = assert_falls_back::<()>(s, what, before, Err(e));
+            return (Err(block), found);
+        }
+    };
+    let mut out = Vec::new();
+    loop {
+        let mut chk = rs.new_chunk().unwrap();
+        block_on(rs.next(s, &mut chk)).unwrap();
+        if chk.num_rows() == 0 {
+            break;
+        }
+        for i in 0..chk.num_rows() {
+            let row = chk.get_row(i);
+            let c = String::from_utf8_lossy(row.get_string(1)).into_owned();
+            out.push((row.get_int64(0), c));
+        }
+    }
+    block_on(rs.close(s)).unwrap();
+    assert!(s.is_idle(), "{what}: {}", s.state_snapshot());
+    (Ok(out), found)
+}
+
+/// Every `?` of a prepared statement reads its own parameter (Go numbers the markers by
+/// position in `GeneratePlanCacheStmtWithAST`, `SetOrder`; #352: every marker read the first
+/// parameter, so `id BETWEEN ? AND ?` became the range `[first, first]` and a point get that
+/// returned one row). The table has the rows 1..=10 (`c` = "c<id>"). Each statement runs
+/// twice with different values: the first EXECUTE optimizes (a plan cache miss), the second
+/// meets the cached plan where it is cacheable (a hit, its ranges rebuilt for the new
+/// values). Each EXECUTE either returns exactly the rows Go returns or falls back before any
+/// executor opened, at the stub pinned here (the router then runs it on Go TiDB): it never
+/// returns other rows.
+#[test]
+fn prepared_statement_markers_read_their_own_parameters() {
+    use tidb_types::datum::{Datum, new_int_datum, new_string_datum};
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    for id in 1..=10 {
+        put_row(&store, 110, id, 2, &format!("c{id}"));
+    }
+    let cache = new_test_cache();
+    let mut s = cached_session(&store, sbtest_info_schema_collated(), &cache);
+    let int = new_int_datum;
+    let str = new_string_datum;
+    let rows = |ids: std::ops::RangeInclusive<i64>| -> Vec<(i64, String)> {
+        ids.map(|id| (id, format!("c{id}"))).collect()
+    };
+    type Round = (Vec<Datum>, Vec<(i64, String)>, Option<&'static str>, bool);
+    let cases: Vec<(&str, Vec<Round>)> = vec![
+        // A table range scan [3, 7], then [2, 9] (Go: TableReader > TableRangeScan); the table
+        // reader is not ported (D12.1), so both fall back; the second is a plan cache hit.
+        (
+            "SELECT id, c FROM sbtest1 WHERE id BETWEEN ? AND ?",
+            vec![
+                (vec![int(3), int(7)], rows(3..=7), Some("D12.1"), false),
+                (vec![int(2), int(9)], rows(2..=9), Some("D12.1"), true),
+            ],
+        ),
+        (
+            "SELECT id, c FROM sbtest1 WHERE id >= ? AND id <= ?",
+            vec![
+                (vec![int(3), int(7)], rows(3..=7), Some("D12.1"), false),
+                (vec![int(2), int(9)], rows(2..=9), Some("D12.1"), true),
+            ],
+        ),
+        // Markers not all in the range: the third parameter is the upper bound.
+        (
+            "SELECT id, c FROM sbtest1 WHERE c = ? AND id BETWEEN ? AND ?",
+            vec![
+                (
+                    vec![str("c5"), int(3), int(7)],
+                    rows(5..=5),
+                    Some("D12.1"),
+                    false,
+                ),
+                (
+                    vec![str("c8"), int(2), int(9)],
+                    rows(8..=8),
+                    Some("D12.1"),
+                    true,
+                ),
+            ],
+        ),
+        // Two equal conditions on the handle: the same value is a point get of that row,
+        // run to the end on the new stack; different values are an empty range (Go: a
+        // TableDual, not cached, D12.2). With every marker reading the first parameter, the
+        // second EXECUTE returned the row 5.
+        (
+            "SELECT id, c FROM sbtest1 WHERE id = ? AND id = ?",
+            vec![
+                (vec![int(4), int(4)], rows(4..=4), None, false),
+                (vec![int(5), int(6)], vec![], Some("D12.2"), false),
+            ],
+        ),
+    ];
+    for (sql, rounds) in cases {
+        let info = block_on(s.prepare_stmt(sql)).unwrap();
+        for (round, (params, want, stop, hit)) in rounds.into_iter().enumerate() {
+            let what = format!("EXECUTE {sql} (round {})", round + 1);
+            let (got, found) = execute_id_c_rows(&mut s, info.stmt_id, params, &what);
+            match got {
+                Ok(got) => assert_eq!(got, want, "{what}: the rows"),
+                Err(block) => {
+                    assert_eq!(Some(block.as_str()), stop, "{what}: Go returns {want:?}")
+                }
+            }
+            assert_eq!(found, hit, "{what}: FoundInPlanCache");
+        }
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+    }
 }
 
 /// The parameter values in the session (`SessionVars.PlanCacheParams`), as text.
