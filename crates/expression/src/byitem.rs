@@ -10,11 +10,8 @@
 
 use std::sync::Arc;
 
+use crate::{EvalContext, ExprRef, ParamValues, size};
 use tidb_base::errors::RedactLogDisable;
-use crate::{EvalContext, ExprRef, ParamValues};
-
-/// `size.SizeOfBool`.
-const SIZE_OF_BOOL: i64 = 1;
 
 // go-exception: EXC.B ByItems.Hash64 (cascades base.HashEquals; D08.1 spec §4 item 2)
 // go-exception: EXC.B ByItems.Equals (cascades base.HashEquals; D08.1 spec §4 item 2)
@@ -57,7 +54,7 @@ impl ByItems {
     /// MemoryUsage return the memory usage of ByItems.
     // go: ByItems.MemoryUsage L1
     pub fn memory_usage(&self) -> i64 {
-        SIZE_OF_BOOL + self.expr.memory_usage()
+        size::SizeOfBool + self.expr.memory_usage()
     }
 }
 

@@ -712,6 +712,12 @@ impl<'a> PushDownContext<'a> {
         self.group_concat_max_len
     }
 
+    /// The correlated columns' values the conversion reads (see the `st` field).
+    // glue: Go's SortByItemToPB reads CorrelatedColumn.Data itself
+    pub(crate) fn eval_state(&self) -> &EvalState {
+        self.st
+    }
+
     /// AppendWarning appends a warning to be handled by the internal handler
     // go: PushDownContext.AppendWarning L1
     pub fn append_warning(&self, err: Error) {
