@@ -148,7 +148,7 @@ tidb-planner = { path = "crates/planner" }
 tidb-executor = { path = "crates/executor" }
 tidb-session = { path = "crates/session" }
 tidb-server = { path = "crates/server" }
-# TiKV Rust client: our fork (dulao5/client-rust, branch tidb-rs/metrics): `Snapshot::coprocessor`,
+# TiKV Rust client: our fork (dulao5/client-rust, branch tidb-rs/batch-commands): `Snapshot::coprocessor`,
 # several connections per store, client-go/PD metrics (feature client-go-metrics), and
 # client-go's lock resolution (#101 R1-R7, R12: lock hints, background cleanup,
 # TTL-capped lock backoff, shared lock wrappers in the coprocessor, lite resolve, shared
@@ -167,8 +167,10 @@ tidb-server = { path = "crates/server" }
 # D07.2 final); and a TSO request no longer stranded for 15 s when the oracle's
 # pending-batch lock is busy as the request stream is polled (client-rust#24, #225); a
 # single-region request's first attempt runs on the calling task, not a spawned one (client-rust#25,
-# branch tidb-rs/perf-point-get, specs/VS1-vertical-slice/perf-point-select.md).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "4d81d4e7a99890ae277acbdf4078863cb6c7d723", default-features = false, features = ["client-go-metrics"] }
+# branch tidb-rs/perf-point-get, specs/VS1-vertical-slice/perf-point-select.md); TiKV requests over
+# BatchCommands streams as client-go sends them, TiKV stores only (client-rust#26,
+# specs/D07.1-store/batch-commands.md).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "186d1944dcbe48b5f16d5a2f27ab7d1bd9b97dc3", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 async-trait = "0.1"
 bytes = "1.11"
