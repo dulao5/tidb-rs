@@ -258,3 +258,16 @@ approved = "2026-11-23"
 reopen = "基线升级到 key 无歧义的版本（差异消失），或负责人决定照 Go"
 
 # R17 retired 2026-11-23: owner chose Go's fixed 30s, no variable
+
+[[ruling]]
+id = "R18"
+name = "admin-flush-instance-plan-cache-requires-super"
+class = "divergence"
+plane = "behaviour"
+layer = "none"
+source = "specs/exceptions/A3-plan-cache/spec.md §6 决定 8 补充；docs/compatibility.md Plan cache 第 2 行；Lucky 对 #319 的评审；负责人 2026-11-24 的决定"
+evidence = "v8.5.8 的 buildAdmin 遇到 AdminFlushPlanCache 在加 SUPER 检查之前就返回，任何用户都能执行；其余 ADMIN 语句都要 SUPER。tidb-rs 让该语句真正清空实例级缓存（R15）后，要求 SUPER；权限检查随用户身份与权限的移植生效，在那之前任何用户都能执行"
+rationale = "清空整个节点的计划缓存影响所有会话，应与其他 ADMIN 语句一样要求 SUPER；Go 不检查是因为它本来清不掉实例级缓存"
+approver = "zhigang-du"
+approved = "2026-11-24"
+reopen = "R15 取消（照 Go 不清空），或负责人改变决定"
