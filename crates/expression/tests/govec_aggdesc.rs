@@ -260,10 +260,7 @@ fn ad_desc(ctx: &dyn BuildContext, s: &Value) -> Result<AggFuncDesc, Error> {
     let name = s["n"].as_str().unwrap();
     let d = s["d"].as_bool().unwrap();
     let mut desc = if s["raw"].as_bool().unwrap() {
-        AggFuncDesc::from_base(
-            BaseFuncDesc::from_parts(name.to_owned(), args, rt_of(s)),
-            d,
-        )
+        AggFuncDesc::from_base(BaseFuncDesc::from_parts(name.to_owned(), args, rt_of(s)), d)
     } else {
         new_agg_func_desc(ctx, name, args, d)?
     };
@@ -385,7 +382,11 @@ fn exec(op: &str, p: &[Value]) -> Value {
                     })
                 }
                 "mem" => {
-                    let items: Vec<i64> = d.order_by_items.iter().map(|it| it.memory_usage()).collect();
+                    let items: Vec<i64> = d
+                        .order_by_items
+                        .iter()
+                        .map(|it| it.memory_usage())
+                        .collect();
                     json!([d.memory_usage(), ad_window(&d).memory_usage(), items])
                 }
                 _ => unreachable!(),
@@ -400,7 +401,10 @@ fn exec(op: &str, p: &[Value]) -> Value {
             ft_out(&d.ret_tp)
         }
         "finalcount" => {
-            let mut d = AggFuncDesc::from_base(BaseFuncDesc::from_parts(String::new(), vec![], None), false);
+            let mut d = AggFuncDesc::from_base(
+                BaseFuncDesc::from_parts(String::new(), vec![], None),
+                false,
+            );
             d.type_infer4_final_count(&ft_in(&p[0]));
             ft_out(&d.ret_tp)
         }

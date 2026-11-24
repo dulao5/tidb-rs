@@ -268,10 +268,7 @@ fn ad_desc(ctx: &dyn BuildContext, s: &Value) -> Result<AggFuncDesc, Error> {
     let name = s["n"].as_str().unwrap();
     let d = s["d"].as_bool().unwrap();
     let mut desc = if s["raw"].as_bool().unwrap() {
-        AggFuncDesc::from_base(
-            BaseFuncDesc::from_parts(name.to_owned(), args, rt_of(s)),
-            d,
-        )
+        AggFuncDesc::from_base(BaseFuncDesc::from_parts(name.to_owned(), args, rt_of(s)), d)
     } else {
         new_agg_func_desc(ctx, name, args, d)?
     };
@@ -346,7 +343,10 @@ fn set_blacklist(v: &Value) {
     let mut m = HashMap::new();
     for e in v.as_array().map(|a| a.as_slice()).unwrap_or_default() {
         let e = e.as_array().unwrap();
-        m.insert(e[0].as_str().unwrap().to_owned(), e[1].as_u64().unwrap() as u32);
+        m.insert(
+            e[0].as_str().unwrap().to_owned(),
+            e[1].as_u64().unwrap() as u32,
+        );
     }
     DefaultExprPushDownBlacklist.store(Arc::new(m));
 }
@@ -370,8 +370,14 @@ fn exec(op: &str, p: &[Value]) -> Value {
                 return json!({"push": push, "flash": ex_try(|| json!(check_agg_push_flash(&*ectx, &d)))});
             }
             let client: Arc<dyn Client> = Arc::new(PdClient(p[1].as_u64().unwrap()));
-            let pctx =
-                new_push_down_context(Arc::clone(&ectx), client, false, None, None, p[2].as_u64().unwrap());
+            let pctx = new_push_down_context(
+                Arc::clone(&ectx),
+                client,
+                false,
+                None,
+                None,
+                p[2].as_u64().unwrap(),
+            );
             match agg_func_to_pb_expr(&pctx, &d, StoreType(p[3].as_u64().unwrap() as u8)) {
                 Ok(pb) => json!({"pb": hex(&pb.write_to_bytes().unwrap())}),
                 Err(e) => ex_err(&e),
@@ -380,14 +386,17 @@ fn exec(op: &str, p: &[Value]) -> Value {
         "mode2pb" => json!(agg_function_mode_to_pb(mode_of(p[0].as_i64().unwrap())) as i32),
         "pb2mode" => {
             let m = (!p[0].is_null()).then(|| {
-                <tipb::AggFunctionMode as protobuf::ProtobufEnum>::from_i32(p[0].as_i64().unwrap() as i32)
+                <tipb::AggFunctionMode as protobuf::ProtobufEnum>::from_i32(
+                    p[0].as_i64().unwrap() as i32
+                )
             });
             // A value the enum does not know is not kept in the field (Go's switch keeps the
             // default for it too).
             json!(pb_agg_func_mode_to_agg_func_mode(m.flatten()) as isize)
         }
         "frompb" => {
-            let pb: tipb::Expr = protobuf::parse_from_bytes(&unhex(p[0].as_str().unwrap())).unwrap();
+            let pb: tipb::Expr =
+                protobuf::parse_from_bytes(&unhex(p[0].as_str().unwrap())).unwrap();
             let fts: Vec<FieldType> = p[1].as_array().unwrap().iter().map(ft_in).collect();
             set_new_collation_enabled_for_test(p[2].as_bool().unwrap());
             let ctx = ad_ctx(&json!({}));

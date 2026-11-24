@@ -126,7 +126,12 @@ fn arg_type_arc(ctx: &dyn EvalContext, e: &Expr) -> Arc<FieldType> {
 /// set from the value; `tp` keeps NOT NULL only when it had it and the argument is not
 /// nullable (BuildCastFunctionWithCheck's `tp.DelFlag(NotNullFlag)`).
 // glue: Go aliasing of the *FieldType WrapWithCastAsTime changes (M-FT)
-fn shared_time_tp_after(ctx: &dyn EvalContext, prev: &FieldType, arg: &Expr, res: &Expr) -> FieldType {
+fn shared_time_tp_after(
+    ctx: &dyn EvalContext,
+    prev: &FieldType,
+    arg: &Expr,
+    res: &Expr,
+) -> FieldType {
     match res {
         Expr::Constant(c) => {
             let mut tp = c.ret_type.clone();
