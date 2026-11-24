@@ -17,17 +17,12 @@
 // Go identifiers for package constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::config;
 use tidb_chunk::chunk::Chunk;
-use tidb_chunk::chunk_util::new_column_swap_helper;
-use tidb_expression::eval::RpnState;
-use tidb_expression::evaluator::new_evaluator_suite;
-use tidb_expression::expression::EvalState;
 use tidb_expression::{Column, Schema};
 use tidb_infoschema::table::column::get_col_origin_default_value;
 use tidb_infoschema::tables::{find_primary_index, try_get_common_pk_column_ids};
@@ -38,10 +33,6 @@ use tidb_model::{
     ColumnInfo, ExtraHandleID, TableCacheStatusDisable, TableInfo, TempTableLocal, TempTableNone,
 };
 use tidb_planner::PhysicalKind;
-use tidb_planner::base::PhysicalPlan;
-use tidb_planner::core::physical_plans::{
-    PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalTableDual,
-};
 use tidb_planner::util::handle_cols::{HandleCols, new_common_handle_cols, new_int_handle_cols};
 use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_tablecodec::rowcodec::decoder::{ChunkDecoder, ColInfo, DefDatumFn, new_chunk_decoder};
@@ -50,10 +41,8 @@ use tikv_client::proto::metapb;
 
 use crate::adapter::TelemetryInfo;
 use crate::glue::{InfoSchemaRef, Plan, SessionContext};
-use crate::internal::exec::executor::{Executor, new_base_executor, new_base_executor_v2};
+use crate::internal::exec::executor::Executor;
 use crate::internal::exec::indexusage::IndexUsageReporter;
-use crate::projection::{ProjectionExec, new_projection_executor_context};
-use crate::select::{LimitExec, SelectionExec, TableDualExec, new_selection_executor_context};
 use tidb_planner::core::point_get_plan::PointGetPlan;
 
 /// `placement.DCLabelKey` (`pkg/ddl/placement/common.go`): the store label of a zone.
@@ -153,48 +142,21 @@ impl ExecutorBuilder {
             };
             return self.build_point_get(sctx, pg).await;
         }
-        match v.kind() {
-            PhysicalKind::Limit => {
-                if let Some(v) = v.as_any().downcast_ref::<PhysicalLimit>() {
-                    return self.build_limit(sctx, v).await;
-                }
-            }
-            PhysicalKind::Selection => {
-                if let Some(v) = v.as_any().downcast_ref::<PhysicalSelection>() {
-                    return self.build_selection(sctx, v).await;
-                }
-            }
-            PhysicalKind::Projection => {
-                if let Some(v) = v.as_any().downcast_ref::<PhysicalProjection>() {
-                    return self.build_projection(sctx, v).await;
-                }
-            }
-            PhysicalKind::TableDual => {
-                if let Some(v) = v.as_any().downcast_ref::<PhysicalTableDual>() {
-                    return self.build_table_dual(sctx, v);
-                }
-            }
-            _ => {}
-        }
-        // glue: stub, blocked-by:D12.1, D12.5, D12.0 (the buildXxx of each executor)
+        // glue: stub, blocked-by:D12.1, D12.2, D12.5, D12.0 (the buildXxx of each executor)
         let (block, what) = match v.kind() {
             PhysicalKind::PointGet => unreachable!("built above"),
-            // A plan of these kinds that is not their physical plan type (only a test mock):
-            // Go's type switch takes the `default` branch.
-            PhysicalKind::Limit
-            | PhysicalKind::Selection
-            | PhysicalKind::Projection
-            | PhysicalKind::TableDual => {
-                self.err = Some(Error::plain(format!(
-                    "a {:?} plan of another plan type",
-                    v.kind()
-                )));
-                return None;
-            }
+            // b.buildLimit(v)
+            PhysicalKind::Limit => ("D12.2", "the limit executor (VS1-35)"),
             // b.buildSort(v)
             PhysicalKind::Sort => ("D12.5", "the sort executor (VS1-36)"),
             // b.buildTopN(v)
             PhysicalKind::TopN => ("D12.5", "the top-n executor (VS1-36)"),
+            // b.buildSelection(v)
+            PhysicalKind::Selection => ("D12.2", "the selection executor (VS1-35)"),
+            // b.buildProjection(v)
+            PhysicalKind::Projection => ("D12.2", "the projection executor (VS1-35)"),
+            // b.buildTableDual(v)
+            PhysicalKind::TableDual => ("D12.2", "the table dual executor (VS1-35)"),
             // b.buildTableReader(v)
             PhysicalKind::TableReader => ("D12.1", "the table reader executor (VS1-34)"),
             // A table scan is pushed down inside a reader, never built on its own: Go's
@@ -216,207 +178,6 @@ impl ExecutorBuilder {
         self.err = Some(blocked(block, what));
         None
     }
-}
-
-impl ExecutorBuilder {
-    /// The child's executor of a plan with one child (Go `b.build(v.Children()[0])`).
-    // glue: the recursive build of an executor's child (boxed: an async fn cannot recurse)
-    async fn build_child(
-        &mut self,
-        sctx: &mut dyn SessionContext,
-        v: &dyn PhysicalPlan,
-    ) -> Option<Box<dyn Executor>> {
-        let child = v.children().first().cloned();
-        Box::pin(self.build(sctx, child.as_ref())).await
-    }
-
-    // go: executorBuilder.buildLimit L1 [M-INT]
-    pub async fn build_limit(
-        &mut self,
-        sctx: &mut dyn SessionContext,
-        v: &PhysicalLimit,
-    ) -> Option<Box<dyn Executor>> {
-        let child_exec = self.build_child(sctx, v).await;
-        if self.err.is_some() {
-            return None;
-        }
-        let vars = sctx.get_session_vars();
-        let n = v.count.min(vars.max_chunk_size as u64) as isize;
-        let mut base = new_base_executor(
-            vars,
-            &sctx.sql_killer(),
-            Some(v.schema().clone()),
-            v.id() as isize,
-            child_exec.into_iter().collect(),
-        );
-        base.base.alloc.set_init_cap(n);
-        let mut e = LimitExec {
-            base,
-            begin: v.offset,
-            end: v.offset.wrapping_add(v.count),
-            cursor: 0,
-            meet_first_batch: false,
-            child_result: None,
-            column_idxs_used_by_child: None,
-            column_swap_helper: None,
-        };
-
-        let child_schema = v.children()[0].schema();
-        let child_schema_len = child_schema.len();
-        let child_used_schema =
-            mark_children_used_cols(&v.schema().columns, &[child_schema]).swap_remove(0);
-        if child_used_schema.len() == child_schema_len {
-            // indicates that all columns are used. LimitExec will improve performance for this condition.
-            e.column_idxs_used_by_child = None;
-        } else {
-            // construct a project evaluator to do the inline projection
-            e.column_swap_helper = Some(new_column_swap_helper(&child_used_schema));
-            e.column_idxs_used_by_child = Some(child_used_schema);
-        }
-        Some(Box::new(e))
-    }
-
-    // go: executorBuilder.buildSelection L1
-    pub async fn build_selection(
-        &mut self,
-        sctx: &mut dyn SessionContext,
-        v: &PhysicalSelection,
-    ) -> Option<Box<dyn Executor>> {
-        let child_exec = self.build_child(sctx, v).await;
-        if self.err.is_some() {
-            return None;
-        }
-        let e = SelectionExec {
-            ctx: new_selection_executor_context(&*sctx),
-            base: new_base_executor_v2(
-                sctx.get_session_vars(),
-                &sctx.sql_killer(),
-                Some(v.schema().clone()),
-                v.id() as isize,
-                child_exec.into_iter().collect(),
-            ),
-            batched: false,
-            filters: v.conditions.clone(),
-            selected: Vec::new(),
-            input_row: None,
-            child_result: None,
-            mem_tracker: None,
-            eval_state: EvalState::new(),
-            rpn: RpnState::default(),
-        };
-        Some(Box::new(e))
-    }
-
-    // go: executorBuilder.buildProjection L1
-    pub async fn build_projection(
-        &mut self,
-        sctx: &mut dyn SessionContext,
-        v: &PhysicalProjection,
-    ) -> Option<Box<dyn Executor>> {
-        let child_exec = self.build_child(sctx, v).await;
-        if self.err.is_some() {
-            return None;
-        }
-        let vars = sctx.get_session_vars();
-        let mut e = ProjectionExec::new(
-            new_projection_executor_context(&*sctx),
-            new_base_executor_v2(
-                vars,
-                &sctx.sql_killer(),
-                Some(v.schema().clone()),
-                v.id() as isize,
-                child_exec.into_iter().collect(),
-            ),
-            vars.projection_concurrency(),
-            new_evaluator_suite(&v.exprs, v.avoid_column_evaluator),
-            v.calculate_no_delay,
-        );
-
-        // If the calculation row count for this Projection operator is smaller
-        // than a Chunk size, we turn back to the un-parallel Projection
-        // implementation to reduce the goroutine overhead.
-        if (v.stats_count() as i64) < vars.max_chunk_size {
-            e.num_workers = 0;
-        }
-
-        // Use un-parallel projection for query that write on memdb to avoid data race.
-        // See also `26832` (upstream issue).
-        if self.in_update_stmt || self.in_delete_stmt || self.in_insert_stmt || self.has_lock {
-            e.num_workers = 0;
-        }
-        Some(Box::new(e))
-    }
-
-    // go: executorBuilder.buildTableDual L1
-    pub fn build_table_dual(
-        &mut self,
-        sctx: &dyn SessionContext,
-        v: &PhysicalTableDual,
-    ) -> Option<Box<dyn Executor>> {
-        if v.row_count != 0 && v.row_count != 1 {
-            self.err = Some(Error::plain(format!(
-                "buildTableDual failed, invalid row count for dual table: {}",
-                v.row_count
-            )));
-            return None;
-        }
-        let mut base = new_base_executor_v2(
-            sctx.get_session_vars(),
-            &sctx.sql_killer(),
-            Some(v.schema().clone()),
-            v.id() as isize,
-            Vec::new(),
-        );
-        base.alloc.set_init_cap(v.row_count);
-        let e = TableDualExec {
-            base,
-            num_dual_rows: v.row_count,
-            num_returned: 0,
-        };
-        Some(Box::new(e))
-    }
-}
-
-/// markChildrenUsedCols compares each child with the output schema, and mark
-/// each column of the child is used by output or not.
-///
-/// Listed with the table reader (D12.1); ported here with its first caller, the limit
-/// executor's builder.
-// go: markChildrenUsedCols L1
-pub fn mark_children_used_cols(
-    output_cols: &[Arc<Column>],
-    child_schemas: &[&Schema],
-) -> Vec<Vec<usize>> {
-    let mut children_used = Vec::with_capacity(child_schemas.len());
-    let mut marked_offsets: HashMap<isize, usize> = HashMap::new();
-    // keep the original maybe reversed order.
-    for (original_idx, col) in output_cols.iter().enumerate() {
-        marked_offsets.insert(col.index, original_idx);
-    }
-    let mut prefix_len: isize = 0;
-    // for example here.
-    // left child schema: [col11]
-    // right child schema: [col21, col22]
-    // output schema is [col11, col22, col21], if not records the original derived order after physical resolve index.
-    // the lused will be [0], the rused will be [0,1], while the actual order is dismissed, [1,0] is correct for rused.
-    for child_schema in child_schemas {
-        // intPair{first, second}
-        let mut used_idx_pair: Vec<(usize, usize)> = Vec::with_capacity(child_schema.columns.len());
-        for i in 0..child_schema.columns.len() {
-            if let Some(&original_idx) = marked_offsets.get(&(prefix_len + i as isize)) {
-                used_idx_pair.push((original_idx, i));
-            }
-        }
-        // sort the used idxes according their original indexes derived after resolveIndex.
-        used_idx_pair.sort_by_key(|a| a.0);
-        let mut used_idx = Vec::with_capacity(child_schema.columns.len());
-        for one in &used_idx_pair {
-            used_idx.push(one.1);
-        }
-        children_used.push(used_idx);
-        prefix_len += child_schema.len() as isize;
-    }
-    children_used
 }
 
 /// buildHandleColsForExec: the handle columns of an executor reading `allColInfo` of
@@ -776,7 +537,7 @@ mod tests {
         assert!(b.err.is_none());
         for (kind, block) in [
             (PhysicalKind::TableReader, "D12.1"),
-            (PhysicalKind::Sort, "D12.5"),
+            (PhysicalKind::Selection, "D12.2"),
             (PhysicalKind::TopN, "D12.5"),
         ] {
             let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
