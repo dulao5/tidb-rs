@@ -26,7 +26,7 @@ Maya 的子 agent 用 Maya 的身份提交。模型分工（2026-11-24 试点）
    - Lucky 对**当前 head** 的 review 是 Approved（之后又有新 push 就要复审）；成对的 tracker PR 也要在**它自己的**当前 head 上被批准；
    - CI 全部通过（push 和 pull_request 两次运行都算）；
    - **基于最新的 main**：上次 CI 之后 main 前进了，并且动到同一个 crate、桩棘轮基线（`scripts/stub_ratchet.tsv`）或 tracker 的桩登记，就要 rebase、重跑 CI，tracker 那边在最新 main 上重新扫桩（`parts.py scan`）。`merge_pair.sh` 只核对两边一致，替代不了这一步；
-   - **端到端对比在合并前**（2026-11-24，#338 回归之后）：凡是会让原来回退的语句改走新栈执行的 PR（新的执行器、构建器分派、路由改动），不论作者是谁，合并前都要有一次 `tools/ab` 的结果（`tools/weekly/run.sh ab`，fallback 和 strict 各一轮），并且 **fallback 的一致数不下降、strict 没有新的不一致**；结果写进 PR。Duet 的环境跑不了集群，由 Maya 在本机跑。Lucky 审这类 PR 时先确认哪些语句会从回退改成执行，没有 ab 结果不批准；会话层测试要同时检查列名和列类型；
+   - **端到端对比在合并前**（2026-11-24，#338 回归之后）：凡是会让原来回退的语句改走新栈执行的 PR（新的执行器、构建器分派、路由改动），不论作者是谁，合并前都要有一次 `tools/ab` 的结果（`tools/weekly/run.sh ab`，fallback 和 strict 各一轮），并且 **fallback 的一致数不下降、strict 没有新的不一致**；结果写进 PR，并**注明是在哪个 commit 上跑的**，之后再 push 改了代码就要重跑。运行中出现**任何 panic、连接断开或新的 1105 错误都算不通过**，与一致数无关。Duet 的环境跑不了集群，由 Maya 在本机跑。Lucky 审这类 PR 时先确认哪些语句会从回退改成执行，没有 ab 结果不批准；会话层测试要同时检查列名和列类型；
    - 成对的 PR 按 "tracker#N → #M" 的顺序，用 tracker 仓库的 `scripts/merge_pair.sh` 依次合并；
    - **没有待决定的事**：没有 `approver = "pending-owner"` 的裁定；依赖的 spec 没有标"待确认"；没有未关闭的 block issue；没有未解决的 Request changes；PR 的"Not checked"里每一项都有评审的回应；
    - **client-rust**：先合 client-rust 的 PR（用 merge commit，不 squash），再把 tidb-rs 固定的 client-rust 版本更新到合并后 main 上可达的 commit，重跑 CI，最后合 tidb-rs。
