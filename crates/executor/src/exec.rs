@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use tidb_runtime::ExecPool;
 use tidb_sessionctx::stmtctx::StatementContext;
 
 /// What an executor (and any worker task it spawns) may use while the statement runs (N3
@@ -19,16 +18,13 @@ use tidb_sessionctx::stmtctx::StatementContext;
 pub struct ExecCtx {
     /// The statement context, frozen for the execution (N2 `Arc<StmtCtx>`).
     pub stmt: Arc<StatementContext>,
-    /// Where an executor's worker tasks run (`go f()`, M-GO). `None`: on the current tokio
-    /// runtime, the one the statement runs on (the session does not hand the pool over yet).
-    pub pool: Option<ExecPool>,
 }
 
 impl ExecCtx {
     /// A context for the statement `stmt`.
     // glue: N3
     pub fn new(stmt: Arc<StatementContext>) -> ExecCtx {
-        ExecCtx { stmt, pool: None }
+        ExecCtx { stmt }
     }
 }
 

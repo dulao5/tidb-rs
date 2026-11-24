@@ -411,8 +411,7 @@ fn autocommit_read_prefetches_tso_and_ends_idle() {
 
 /// VS1 plan §4.3: the executed-statement count (the router's "an executor opened" check)
 /// moves only after the executor was built and opened. A builder that stops at a boundary
-/// stub (here a plan kind with no executor yet, `blocked-by:D12.0` — the executor builder's
-/// remaining plan types; the cached-table, locking-read
+/// stub (here the table dual executor, `blocked-by:D12.2`; the cached-table, locking-read
 /// and txn-scope stubs of the builder are the same path) is a normal fallback.
 #[test]
 fn executed_stmts_counts_only_opened_executors() {
@@ -420,11 +419,11 @@ fn executed_stmts_counts_only_opened_executors() {
     let mut s = session(&store);
     assert_eq!(s.executed_stmts(), 0);
     let mut stmt = compile(&mut s, "SELECT a FROM t", 0);
-    stmt.plan = Some(mock_plan_of_kind(0, tidb_planner::PhysicalKind::NominalSort).0);
+    stmt.plan = Some(mock_plan_of_kind(0, tidb_planner::PhysicalKind::TableDual).0);
     let Err(e) = block_on(run_stmt(&mut s, stmt)) else {
-        panic!("an executor of a plan kind not ported yet is a boundary stub");
+        panic!("the table dual executor is a boundary stub");
     };
-    assert_eq!(blocked(&e), Some("D12.0"));
+    assert_eq!(blocked(&e), Some("D12.2"));
     assert_eq!(
         s.executed_stmts(),
         0,
@@ -435,29 +434,6 @@ fn executed_stmts_counts_only_opened_executors() {
     let rs = block_on(run_stmt(&mut s, stmt)).unwrap().expect("rows");
     assert_eq!(s.executed_stmts(), 1);
     let _ = block_on(rs.close(&mut s));
-}
-
-/// Statements that read no table run on the basic executors (D12.2, VS1-35) through the
-/// session: Projection over TableDual, with LIMIT 0 and a WHERE folded to false (an empty
-/// TableDual). Each opened an executor, returns its rows and leaves the session idle.
-#[test]
-fn statements_without_a_table_run_on_the_basic_executors() {
-    let cases: [(&str, Vec<i64>); 3] = [
-        ("SELECT 1", vec![1]),
-        ("SELECT 1 LIMIT 0", vec![]),
-        ("SELECT 1 FROM DUAL WHERE 1 = 0", vec![]),
-    ];
-    for (sql, rows) in cases {
-        let store = MockStore::new(10);
-        let mut s = session(&store);
-        let mut rs = block_on(s.execute_stmt(parse(sql), sql))
-            .unwrap_or_else(|e| panic!("{sql}: {e}"))
-            .unwrap_or_else(|| panic!("{sql}: no record set"));
-        assert_eq!(s.executed_stmts(), 1, "{sql}");
-        assert_eq!(drain(&mut s, &mut rs), rows, "{sql}");
-        block_on(rs.close(&mut s)).unwrap();
-        assert!(s.is_idle(), "{sql}: {}", s.state_snapshot());
-    }
 }
 
 /// `autoCommitAfterStmt` without an error commits the autocommit transaction (`CommitTxn`):
@@ -773,12 +749,13 @@ fn every_fallback_point_restores_the_session() {
             "D02.2"
         }),
         ("after Compile (executor builder stub)", |s| {
-            // The statement is planned (spec §9.2); its Sort executor stops at the
-            // parallel sort's boundary in Open (D12.5 spec §3), before any executor opened.
-            let sql = "SELECT 1 FROM DUAL ORDER BY RAND()";
-            let e = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
-            assert_eq!(blocked(&e), Some("D12.5"));
-            "D12.5"
+            // The statement is planned (spec §9.2); building its Projection executor is a
+            // boundary, before any executor opened.
+            let e = block_on(s.execute_stmt(parse("SELECT 1"), "SELECT 1"))
+                .err()
+                .unwrap();
+            assert_eq!(blocked(&e), Some("D12.2"));
+            "D12.2"
         }),
         ("after the warm-up (TSO pending)", |s| {
             let _ = compile(s, "SELECT a FROM t", 1);
@@ -1658,26 +1635,14 @@ fn execute_reads_the_parameters_through_the_session_expression_context() {
         (Datum::default(), "NULL", tidb_base::mysql::TypeVarString),
     ];
     for (param, text, tp) in cases {
-        match block_on(s.execute_prepared_stmt(info.stmt_id, vec![param])) {
-            Err(e) => {
-                assert!(
-                    PHYSICAL_BOUNDARIES.contains(&blocked(&e).unwrap_or_default()),
-                    "{text}: {e}"
-                );
-                assert_eq!(s.executed_stmts(), 0, "{text}");
-            }
-            // `id > NULL` is folded to a table dual: the Projection over it runs (D12.2,
-            // VS1-35) and returns an empty result set.
-            Ok(rs) => {
-                assert_eq!(
-                    text, "NULL",
-                    "only the NULL parameter plans to a table dual"
-                );
-                let mut rs = rs.expect("rows");
-                assert_eq!(drain(&mut s, &mut rs), Vec::<i64>::new(), "{text}");
-                block_on(rs.close(&mut s)).unwrap();
-            }
-        }
+        let e = block_on(s.execute_prepared_stmt(info.stmt_id, vec![param]))
+            .err()
+            .unwrap();
+        assert!(
+            PHYSICAL_BOUNDARIES.contains(&blocked(&e).unwrap_or_default()),
+            "{text}: {e}"
+        );
+        assert_eq!(s.executed_stmts(), 0, "{text}");
         assert!(s.is_idle(), "{text}");
         // The value the plan cache set (planCachePreprocess) ...
         let expected = vec![text.to_owned()];
@@ -1857,10 +1822,11 @@ fn register_prepared(s: &mut Session, id: u32, sql: &str) {
 /// Where an EXECUTE that is not a point get stops while the planner and the executors are not
 /// finished: the statistics derivation (D10.6), FindBestTask (D10.2), ResolveIndices
 /// (D10.9) or the cost (D10.5), in that order; with a finished plan, building an executor
-/// not ported yet in `Exec` (the table reader D12.1, VS1-34). Every one of them comes before an executor opened, so the caller falls
+/// not ported yet in `Exec` (the table reader D12.1, VS1-34; the projection or table dual
+/// D12.2, VS1-35). Every one of them comes before an executor opened, so the caller falls
 /// back. The plan replayer capture (`recordTableRuntimeStats`) no longer stops it (see
 /// `plan_replayer_capture_records_the_table_stats_and_goes_on`).
-const PHYSICAL_BOUNDARIES: [&str; 5] = ["D10.6", "D10.2", "D10.9", "D10.5", "D12.1"];
+const PHYSICAL_BOUNDARIES: [&str; 6] = ["D10.6", "D10.2", "D10.9", "D10.5", "D12.1", "D12.2"];
 
 /// With the plan replayer capture on (Go's default once the session loaded the global
 /// values), the column statistics usage records the statistics of the visited tables in
