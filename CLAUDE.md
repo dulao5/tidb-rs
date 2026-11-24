@@ -10,6 +10,11 @@ file and over any task description.
 - **Go source**: only the pinned v8.5.8 tree. `go_tree=$(scripts/tidb-reference.sh)`, then read
   `$go_tree/pkg/...`. Never read master or another branch
   ([docs/porting/reference-tree.md](docs/porting/reference-tree.md)).
+  If the script cannot download the tarball (an environment that only reaches authorized GitHub
+  repos), use the read-only fork instead — the script accepts a clone at the pinned commit:
+  `git clone --depth 1 --branch v8.5.8 https://github.com/dulao5/tidb ../tidb-v8.5.8 &&
+  export TIDB_REFERENCE_DIR=$PWD/../tidb-v8.5.8 && scripts/tidb-reference.sh --check`.
+  Never push to that fork.
 - **Process**: porting work follows the skill [`.claude/skills/port-block`](.claude/skills/port-block/SKILL.md);
   check your work with [`audit-block`](.claude/skills/audit-block/SKILL.md) before opening a PR.
   Background: [docs/porting/](docs/porting/) (methodology, provenance markers, Go → Rust mappings),
