@@ -1627,8 +1627,9 @@ fn assert_falls_back<T>(s: &Session, what: &str, before: u64, r: Result<T, Error
 /// Range scans and `ORDER BY ... LIMIT` over the sbtest table are planned to the end
 /// (`physicalOptimize` resolves the column indices of the whole plan, D10.9) and still fall
 /// back where `Exec` builds the first executor that is not ported yet, before any executor
-/// opened: the table reader (D12.1), the projection above it (D12.2), or the sort / top-n
-/// (D12.5); as text queries and as prepared statements. A plan whose schemas differ from
+/// opened: the table reader (D12.1) or a projection (D12.2); the sort and top-n executors
+/// (D12.5) are ported and build their child first, so a statement with one stops below it;
+/// as text queries and as prepared statements. A plan whose schemas differ from
 /// Go's would end in a plain error (1105) from `ResolveIndices` here instead of a fallback.
 /// The stop of each statement is pinned: a statement that starts to run, or stops
 /// elsewhere, fails here.
@@ -1642,12 +1643,12 @@ fn range_and_order_by_limit_queries_still_fall_back() {
         ("SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10", "D12.1"),
         (
             "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c",
-            "D12.5",
+            "D12.1",
         ),
         ("SELECT c FROM sbtest1 ORDER BY id LIMIT 5", "D12.2"),
         (
             "SELECT id, c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c LIMIT 3",
-            "D12.5",
+            "D12.1",
         ),
     ];
     for (sql, stop) in text {
@@ -1655,20 +1656,21 @@ fn range_and_order_by_limit_queries_still_fall_back() {
         let r = block_on(s.execute_stmt(parse(sql), sql));
         assert_eq!(assert_falls_back(&s, sql, before, r), stop, "{sql}");
     }
-    // The prepared range stops at the table reader like the text query (D12.1). Before
-    // #352 was fixed both markers read the first parameter, the range was a point and the
-    // point get needed a projection above it, which stopped first (D12.2).
+    // The prepared ranges stop at the table reader like the text queries (D12.1), below the
+    // sort and top-n executors. Before #352 was fixed both markers read the first
+    // parameter, the range was a point and the point get needed a projection above it,
+    // which stopped first (D12.2).
     let prepared = [
         ("SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?", 2, "D12.1"),
         (
             "SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c",
             2,
-            "D12.5",
+            "D12.1",
         ),
         (
             "SELECT id, c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c LIMIT 3",
             2,
-            "D12.5",
+            "D12.1",
         ),
         (
             "SELECT c FROM sbtest1 WHERE id > ? ORDER BY id LIMIT 5",
