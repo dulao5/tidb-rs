@@ -705,15 +705,15 @@ impl BaseFuncDesc {
             }
             self.args[i] = cast_func(ctx, Arc::clone(&self.args[i]))?;
         }
-        if let Some(tp) = time_tp {
-            if !time_wrapped.is_empty() {
-                for i in time_wrapped {
-                    if let Expr::ScalarFunction(f) = Arc::make_mut(&mut self.args[i]) {
-                        *f.ret_type_mut() = tp.clone();
-                    }
+        if let Some(tp) = time_tp
+            && !time_wrapped.is_empty()
+        {
+            for i in time_wrapped {
+                if let Expr::ScalarFunction(f) = Arc::make_mut(&mut self.args[i]) {
+                    *f.ret_type_mut() = tp.clone();
                 }
-                self.set_ret_tp(Arc::new(tp));
             }
+            self.set_ret_tp(Arc::new(tp));
         }
         Ok(())
     }
