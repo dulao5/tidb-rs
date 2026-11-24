@@ -79,8 +79,11 @@ python3 scripts/converge.py --block <Dxx.y> --part <functions.tsv> --item <task>
     --func-blocks ../tidb-rs-tracker/data/func_blocks.tsv <your Rust files>   # exact form: port-block §5
 ```
 
-No local TiDB cluster is needed: these checks plus CI are the acceptance for `duet-ready` tasks; the
-maintainer runs the end-to-end comparison against Go (`tools/ab`) after merge.
+No local TiDB cluster is needed for these checks. But a PR that makes statements which used to fall
+back now **execute** on the new stack (a new executor, builder dispatch, routing) also needs the
+end-to-end comparison against Go (`tools/ab`) **before merge**; the maintainer runs it (see
+docs/process/agent-workflow.md). Session-level tests must check result rows **and** column metadata
+(names and types), not only values.
 
 Build in your worktree's own `target/` (a target shared between worktrees can pick up another
 worktree's sources). Check free disk before a full build: with less than 10 GB free, stop and
