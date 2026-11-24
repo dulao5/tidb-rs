@@ -94,3 +94,26 @@ fn parser_is_reusable_after_errors() {
         assert!(out.warnings.is_empty());
     }
 }
+
+#[test]
+fn counts_the_parameter_markers_it_builds() {
+    let count = |sql: &str| parse(sql, &ParseOptions::default()).unwrap().param_markers;
+    assert_eq!(count("SELECT 1"), 0);
+    // A `?` inside a string or a comment is not a marker.
+    assert_eq!(count("SELECT '?' /* ? */ FROM t"), 0);
+    assert_eq!(count("SELECT c FROM t WHERE id BETWEEN ? AND ?"), 2);
+    // Every production that builds a marker: an expression, LIMIT, a window frame bound,
+    // LEAD / LAG's offset.
+    assert_eq!(count("SELECT a FROM t LIMIT ?, ?"), 2);
+    assert_eq!(
+        count("SELECT SUM(a) OVER (ORDER BY a ROWS BETWEEN ? PRECEDING AND ? FOLLOWING) FROM t"),
+        2
+    );
+    assert_eq!(count("SELECT LAG(a, ?) OVER (ORDER BY a) FROM t"), 1);
+    // Over all the statements of the input; a fresh count on every parse.
+    assert_eq!(count("SELECT ?; SELECT ?, ?"), 3);
+    let mut p = Parser::new();
+    let opts = ParseOptions::default();
+    assert_eq!(p.parse("SELECT ?, ?", &opts).unwrap().param_markers, 2);
+    assert_eq!(p.parse("SELECT ?", &opts).unwrap().param_markers, 1);
+}

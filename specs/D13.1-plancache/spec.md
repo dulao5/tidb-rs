@@ -36,6 +36,7 @@ converge：D13.1 `--item VS1-15` 44 个函数，24 个移植（L1 13、L2 11）+
 
 1. **AST 归 `PlanCacheStmt` 所有。** Rust 的 preprocess 要 `&mut Stmt`，resolve context 以节点地址为 key，所以语句放在 `Box<Stmt>` 里由 `PlanCacheStmt` 独占；`PlanCacheStmt` 放在 `Arc<parking_lot::Mutex<_>>`（`PlanCacheStmtRef`）里，会话的语句表和执行它的语句共享。执行器原来的 `glue::PlanCacheStmt`（只有缓存的点查执行器）换成 planner 的类型，点查执行器以 `Any` 存在 `PointGet.Executor` 里（planner 在执行器下层）。
 2. **参数。** Go 的 `Params` 是指向 `?` 节点的指针，EXECUTE 把值写进节点。Rust 的 `?` 节点不存值，值只写进 `SessionVars.PlanCacheParams`，表达式改写（D09.2）和点查的快速计划（D10.8，`getNameValuePairs`）按节点的 `order` 读。`order` 与 Go 一样由 PREPARE 写：解析器把每个 `?` 的 order 都留为 0，`GeneratePlanCacheStmtWithAST`（以及 `ExtractAndSortParamMarkers`）把 extractor 收集的 `?` 按 offset 排序后逐个 `SetOrder(i)`（Go `plan_cache_utils.go` 122–129 行、603–616 行）。Rust 的 AST 遍历只借出只读的节点，extractor 存的是 offset，所以第二遍遍历同一条语句，给每个 `?` 写入它的 offset 在排好序的 offset 中的下标（一个 offset 只有一个 `?`，编号与 Go 相同）；`order` 是原子整数（`ParamMarkerExpr::set_order`，只在 PREPARE 独占语句时写一次）。`PlanCacheStmt.params` 存排好序的 offset，个数即参数个数。
+   - 个数核对（#356，Go 没有，见 §5 第 9 条）：解析器数出它生成了多少个 `?`（`ParseOutput::param_markers`），PREPARE 把这个数传给 `generate_plan_cache_stmt_with_ast`；extractor 遍历找到的个数与它不同，就返回边界桩 `blocked-by:D02.2`，不编号、不继续。
    - 修正记录（#352）：原来以为解析器已按位置编号，PREPARE 没有写 order，结果每个 `?` 都读第一个参数。`id BETWEEN ? AND ?`（3, 7）变成范围 [3, 3]，规划成点查，只返回一行；两个及以上 `?` 的预处理语句都受影响（`fallback` / `strict` 模式下新栈执行时结果错误，默认 `off` 模式不走新栈）。回归测试见 §7。
 3. **`infoschema.InfoSchema`** 是窄接口 `InfoSchemaLookup`（`TableByName`、`TableByID`、`SchemaByID`、`SchemaMetaVersion`）。真正会话的 `InfoSchemaV2` 实现它：按名 / 按 ID 查表是 `blocked-by:D06.3`（InfoSchema 接口，VS1-17），与 preprocess 相同。govec 用按 JSON 建的 mock。
 4. **`OptimizeAstNode`** 在 Go 是包变量（`pkg/planner` 初始化时设置），Rust 是 `get_plan_from_plan_cache` 的参数；生产用 `optimize::optimize_ast_node`，它与 `planner.Optimize` 一样是 `blocked-by:D13.3` 的桩（先要 hint 提取，VS1-24）。
@@ -99,6 +100,7 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 6. `PrepareExec`：解析错误 / warning 交给 PoC（`D02.1`）；语句文本用整个 SQL（只允许一条语句）；Top SQL 未移植（D14.3）。
 7. `planCacheStmtProcessor` 不收集表列表（只给 cache key 的统计信息用，A3）。
 8. 元数据锁（已照 Go 移植，见 D05.4 事务上下文 spec §3a，#252）中的边界桩（没有 domain、会话扩展的 InfoSchema 未移植）返回 `Blocked`，而不是像 Go 那样把错误记日志后吞掉（§3.3）；Go 的普通错误照 Go 记日志、让缓存失效。
+9. PREPARE 核对 `?` 的个数（#356，Go 没有这一步）：Go 的 `GeneratePlanCacheStmtWithAST`（`pkg/planner/core/plan_cache_utils.go` 122–129 行，排序后逐个 `SetOrder(i)`）和 `ExtractAndSortParamMarkers`（同文件 603–616 行）直接给 extractor 找到的 `?` 编号，不检查是否漏了。Rust 的 extractor 用的是本项的 `Walker`（§2 第 5 条，代替还没有的 visitor），它进不去而表达式改写却会读到的节点里的 `?` 会保持 order 0、读第一个参数（#352 那样的错误结果）。所以解析器数出它生成的 `?` 个数（`ParseOutput::param_markers`），`generate_plan_cache_stmt_with_ast` 在 extractor 遍历之后、第一次用到个数（`ErrPsManyParam` 检查）之前比较两者，不同就返回 `blocked-by:D02.2`（"a parameter marker the AST walk does not reach"），语句回退。只有 Rust 的 `Walker` 漏掉某个节点时才会触发；触发时行为是回退，不是错误的结果；正常语句两个数相同，路径不变。Go 先报的错误（`SELECT ... INTO` 的 `ErrUnsupportedPs`）仍然先报。`ExtractAndSortParamMarkers` 拿不到解析器的个数，不核对（Rust 里只有测试调用它）。
 
 ## 6. 边界桩（登记在 tracker `data/stubs.tsv`）
 
@@ -113,9 +115,10 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 | `IsASTCacheable` 的 hint、`Unported` 节点 | D13.3、D02.2 | hint 解析、Rust AST |
 | `PrepareExec` 的解析错误 / warning | D02.1 | 错误文本 |
 | `NormalizeDigest`、`GetStmtLabel` | D02.2、D12.0 | 见 §5 |
+| `GeneratePlanCacheStmtWithAST` 的 `?` 个数核对（Go 没有，§5 第 9 条） | D02.2 | `Walker` 代替 visitor，漏掉的 `?` 会编错号；只在遍历与解析器的个数不同时触发 |
 
 ## 7. 验收
 
 - govec `plancache`：见 §3.1。
-- 单测：planner `plan_cache_tests`（PREPARE 停在 plan builder 之前发出的 warning、参数个数 8112 与顺序、PREPARE 后 `?` 按位置编号为 0..n（`prepare_numbers_the_markers_by_position`，含 `LIMIT ?, ?` 遍历顺序与位置不同的情形）、schema 变化后重新 preprocess 与 8113、未命中路径的 `UseCache` / `InPreparedPlanBuilding` / `isPlanCacheable` warning、`isPlanCacheable` 的开关与大小）；session（`cleanRetryInfo` 的坑、1461 计入已关闭语句、真正的 `PrepareStmt` 停在 D09.1 / D06.3 / 8115；`prepared_statement_markers_read_their_own_parameters`：表里有 1..10 行，`BETWEEN ? AND ?`、`>= ? AND <= ?`、`c = ? AND id BETWEEN ? AND ?`、`id = ? AND id = ?` 各执行两次（第一次未命中，第二次换参数、可缓存的命中），每次要么返回与 Go 相同的行，要么在固定的边界桩回退、没有执行器打开，#352）；路由器（§4.2）。
+- 单测：planner `plan_cache_tests`（PREPARE 停在 plan builder 之前发出的 warning、参数个数 8112 与顺序、PREPARE 后 `?` 按位置编号为 0..n（`prepare_numbers_the_markers_by_position`，含 `LIMIT ?, ?` 遍历顺序与位置不同的情形）、`?` 个数核对（`prepare_stops_when_the_walk_misses_a_marker`：传入的解析器个数比遍历多一个或少一个时 PREPARE 返回 `blocked-by:D02.2`、不发 warning；`SELECT ... INTO` 仍先报 `ErrUnsupportedPs`；多个 `?` 的正常语句照常 PREPARE、编号 0..n，`LIMIT ?, ?` 通过核对、停在 plan builder 后面的 `D13.1` 边界，#356；解析器计数见 parser `counts_the_parameter_markers_it_builds`）、schema 变化后重新 preprocess 与 8113、未命中路径的 `UseCache` / `InPreparedPlanBuilding` / `isPlanCacheable` warning、`isPlanCacheable` 的开关与大小）；session（`cleanRetryInfo` 的坑、1461 计入已关闭语句、真正的 `PrepareStmt` 停在 D09.1 / D06.3 / 8115；`prepared_statement_markers_read_their_own_parameters`：表里有 1..10 行，`BETWEEN ? AND ?`、`>= ? AND <= ?`、`c = ? AND id BETWEEN ? AND ?`、`id = ? AND id = ?` 各执行两次（第一次未命中，第二次换参数、可缓存的命中），每次要么返回与 Go 相同的行，要么在固定的边界桩回退、没有执行器打开，#352）；路由器（§4.2）。
 - **预处理点查（`SELECT c FROM sbtest1 WHERE id=?`）在 `strict` 模式下由新栈执行：本项做不到**。这条路径还被以下各项挡住：preprocess 查表（D06.3，VS1-17）、`PlanBuilder.Build`（D09.1，VS1-21）、`planner.Optimize`（D13.3，VS1-24；点查的 `TryFastPlan` 由它调用）、结果集与二进制参数的编码（D03.1，VS1-16）。本项完成后，PREPARE 在新会话中走到 preprocess 查表，`strict` 模式下 EXECUTE 报 `1235 blocked-by:D06.3`。

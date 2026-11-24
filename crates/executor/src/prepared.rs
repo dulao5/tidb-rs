@@ -92,6 +92,7 @@ impl PrepareExec {
             // glue: blocked-by:D02.1 (the parser's warning text differs from Go's)
             return Err(blocked("D02.1", "parser warnings"));
         }
+        let param_markers = out.param_markers;
         let mut stmts = out.stmts;
         if stmts.len() != 1 {
             return Err(ErrPrepareMulti.clone());
@@ -112,6 +113,7 @@ impl PrepareExec {
             true,
             &self.sql_text,
             stmt0,
+            param_markers,
             is.as_ref(),
             domain_is
                 .as_deref()
