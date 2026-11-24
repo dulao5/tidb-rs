@@ -59,6 +59,7 @@ MAX ONE ROW、UNION ALL（`unionexec/`）、TABLESAMPLE、内存表扫描（`Tab
 4. **`ExecCtx.pool` 为 `None`**（§2 第 2 条）：Go 的 goroutine 在 Go runtime 上调度，Rust 的 task 在语句所在的 runtime 上；会话接上 N3 的 `ExecPool` 后改为池上执行，行为不变。
 5. **`checkMaxExecutionTimeExceeded` 的签名**（select.go:307）：见 §2 第 1 条。Go 的 `sctx == nil` 对应 `sess_vars` 为 `None`，进程信息为空或开始时间为零值对应 `process_time` 为 `None`。
 6. **`isNoResultPlan`**（adapter.go）：Go 对 `*logicalop.LogicalProjection` 也检查 `CalculateNoDelay`，Rust 的计划都是物理计划，只检查 `PhysicalProjection`。
+7. **预处理语句的列定义不沿用第一次 EXECUTE 的（待负责人裁决，#367，upstream-pitfall）**：Go 的连接把预处理语句第一次 EXECUTE 的列定义存进 `PointGet.ColumnInfos`，之后每次 EXECUTE 都沿用（`pkg/server/internal/resultset/resultset.go:108-131`，只在 schema 版本变化时清空，`pkg/planner/core/plan_cache.go:151`），即使后来的 EXECUTE 绑定的参数类型不同；`DumpBinaryRow` 按 `GetUint64` 写 `TypeLonglong` 的 8 个字节而不看符号（`pkg/server/internal/column/column.go:252-253`）。于是把参数选作列时，先用有符号整数、再用无符号 64 位的 `18446744073709551615` 执行，Go 仍描述为有符号 `BIGINT`（flags 0x0081），客户端读到 -1；先用整数、再用字符串执行，字符串按 `BIGINT` 写出，是乱码。tidb-rs 的 server 不移植这个缓存（`crates/server/src/resultset.rs` `ResultSet::columns`，L2），每次 EXECUTE 按自己的参数类型描述列（无符号时 flags 0x00a1），与 Go 对一条语句第一次 EXECUTE 的输出相同。这是错误结果，按 CONSTITUTION 第 1 条第 2 项不默认照搬，**保持现状，等负责人裁决**（没有写入 `docs/testing/rulings.toml`）。这个差别在本块之前就存在，基础算子让这些预处理语句（投影、排序）改走新栈之后，维护者的端到端比较才看到。会话测试 `prepared_unsigned_parameter_selected_as_a_column` 固定当前行为。
 
 ## 5. 待定与可能的上游问题
 

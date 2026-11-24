@@ -784,3 +784,120 @@ fn prepared_sort_and_top_n_over_dual_and_point_get() {
     assert_eq!(blocked(&e), Some("D13.1"), "{sql}: {e}");
     assert!(s.is_idle(), "{}", s.state_snapshot());
 }
+
+/// An unsigned 64-bit parameter selected as a column (the binary protocol's
+/// `MYSQL_TYPE_LONGLONG` with the unsigned flag, decoded to a `uint64` datum): each EXECUTE's
+/// column follows its own parameter, `BIGINT UNSIGNED NOT NULL BINARY` (wire flags 0x00a1)
+/// for `18446744073709551615` and `BIGINT NOT NULL BINARY` (0x0081) for a signed value.
+///
+/// A v8.5.8 server sends the same for the first EXECUTE of a statement, but its connection
+/// keeps the column definitions of that first EXECUTE in the prepared statement
+/// (`tidbResultSet.Columns`, `pkg/server/internal/resultset/resultset.go:108-131`, until a
+/// schema change, `pkg/planner/core/plan_cache.go:151`) and reuses them when a later EXECUTE
+/// binds a parameter of another type: after a signed first EXECUTE it describes
+/// `18446744073709551615` as signed, and a client reads -1. tidb-rs keeps no such cache (its
+/// server's `ResultSet::columns`, an L2 difference), so the flags below are the current
+/// behaviour, kept until the owner rules on it (issue #367; the basic executors spec, D12.2,
+/// §4 known differences).
+#[test]
+fn prepared_unsigned_parameter_selected_as_a_column() {
+    use tidb_base::mysql::{BinaryFlag, NotNullFlag, TypeLonglong, UnsignedFlag};
+    use tidb_types::datum::new_uint_datum;
+    let _serial = PREPARED_COUNT.lock();
+    let rt = multi_thread_runtime();
+    let _rt = rt.enter();
+    let (_store, mut s) = sysbench_cached_session();
+    let signed = expr_col(
+        "?",
+        TypeLonglong,
+        -1,
+        0,
+        (NotNullFlag | BinaryFlag) as u32,
+        "binary",
+    );
+    let unsigned = expr_col(
+        "?",
+        TypeLonglong,
+        -1,
+        0,
+        (NotNullFlag | BinaryFlag | UnsignedFlag) as u32,
+        "binary",
+    );
+    let max = || new_uint_datum(u64::MAX);
+    let five = || new_int_datum(5);
+    let id = || new_int_datum(1);
+    let with_c = |p: Col| vec![p, col_c()];
+    type Exec = (Vec<Datum>, Vec<Col>, Vec<Vec<String>>);
+    let cases: Vec<(&str, Vec<Exec>)> = vec![
+        // Unsigned first, then signed (Go: both described as unsigned).
+        (
+            "SELECT ?, c FROM sbtest1 WHERE id=?",
+            vec![
+                (
+                    vec![max(), id()],
+                    with_c(unsigned.clone()),
+                    texts(&[&["18446744073709551615", "c1"]]),
+                ),
+                (
+                    vec![five(), id()],
+                    with_c(signed.clone()),
+                    texts(&[&["5", "c1"]]),
+                ),
+            ],
+        ),
+        // Signed first, then unsigned (Go: both described as signed, the second read as -1).
+        (
+            "SELECT ?, c FROM sbtest1 WHERE id=?",
+            vec![
+                (
+                    vec![five(), id()],
+                    with_c(signed.clone()),
+                    texts(&[&["5", "c1"]]),
+                ),
+                (
+                    vec![max(), id()],
+                    with_c(unsigned.clone()),
+                    texts(&[&["18446744073709551615", "c1"]]),
+                ),
+            ],
+        ),
+        (
+            "SELECT ?, c FROM sbtest1 WHERE id=? ORDER BY c LIMIT 1",
+            vec![
+                (
+                    vec![five(), id()],
+                    with_c(signed.clone()),
+                    texts(&[&["5", "c1"]]),
+                ),
+                (
+                    vec![max(), id()],
+                    with_c(unsigned.clone()),
+                    texts(&[&["18446744073709551615", "c1"]]),
+                ),
+            ],
+        ),
+        (
+            "SELECT ? FROM DUAL ORDER BY RAND()",
+            vec![
+                (vec![five()], vec![signed], texts(&[&["5"]])),
+                (
+                    vec![max()],
+                    vec![unsigned],
+                    texts(&[&["18446744073709551615"]]),
+                ),
+            ],
+        ),
+    ];
+    for (sql, execs) in cases {
+        let info = block_on(s.prepare_stmt(sql)).unwrap();
+        for (params, cols, rows) in execs {
+            let what = format!("EXECUTE {sql} {params:?}");
+            let (got_cols, got_rows) = run_prepared(&mut s, info.stmt_id, params)
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(got_cols, cols, "{what}");
+            assert_eq!(got_rows, rows, "{what}");
+        }
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+        s.clean_closed_prepared_stmts();
+    }
+}
