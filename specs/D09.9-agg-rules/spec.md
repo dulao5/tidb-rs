@@ -1,6 +1,6 @@
 # D09.9 聚合相关的逻辑优化规则（spec）
 
-状态：**待确认**（只有 spec，没有代码；2026-11-24，issue #334）。块：D09.9（聚合相关规则：下推、消除、skew 改写、max/min 消除，ROADMAP P3），crate `tidb-planner`。相关：[D09.14 spec](../D09.14-logical-operators/spec.md)（逻辑算子与基本规则，写法照它）、[D09.13 spec](../D09.13-optimizer/spec.md)（优化器驱动与规则表）、[D10.2 spec](../D10.2-find-best-task/spec.md) §4 第 2 条（访问路径的指针共享）、[N1 计划表示](../exceptions/N1-plan-representation/spec.md)、[映射规则](../../docs/porting/mappings.md)；同批的 spec：聚合函数描述 D08.11（`specs/D08.11-aggregation/spec.md`，#333）、聚合执行器 D12.3（#335）、聚合函数实现 D12.4（#336）。
+状态：**已确认**（负责人 2026-11-24 在 Raft 上确认，§10 全部选 A，由 Maya 在 PR #340 转达；只有 spec，没有代码；issue #334）。块：D09.9（聚合相关规则：下推、消除、skew 改写、max/min 消除，ROADMAP P3），crate `tidb-planner`。相关：[D09.14 spec](../D09.14-logical-operators/spec.md)（逻辑算子与基本规则，写法照它）、[D09.13 spec](../D09.13-optimizer/spec.md)（优化器驱动与规则表）、[D10.2 spec](../D10.2-find-best-task/spec.md) §4 第 2 条（访问路径的指针共享）、[N1 计划表示](../exceptions/N1-plan-representation/spec.md)、[映射规则](../../docs/porting/mappings.md)；同批的 spec：聚合函数描述 D08.11（`specs/D08.11-aggregation/spec.md`，#333）、聚合执行器 D12.3（#335）、聚合函数实现 D12.4（#336）。
 
 引用：TiDB `v8.5.8`（`8b857efa2`），路径相对于 `pkg/planner/core/`，另有说明的除外。
 
@@ -206,6 +206,8 @@ tracker `data/func_blocks.tsv` 中 block 为 D09.9 的函数共 50 个，全部�
 2. **join 下推先改旧聚合、后放弃**：`tryToPushDownAgg` 先调用 `makeNewAgg`（其中 `decompose` 已经把旧聚合的函数改成最终模式、参数换成新聚合的列，`rule_aggregation_push_down.go:235-249`、`:274`），然后在外连接的空值侧取不到默认值时返回原来的子节点（`:286-291`），旧聚合的参数就指向了计划中不存在的列。按 `collectAggFuncs` 的限制（空值侧的参数都是列，`:118-125`），`EvalNullValueInOuterJoin` 总能得到常量，这一支看起来走不到，只有 `EvaluateExprWithNull` 出错时可能发生。
 
 ## 10. 需要负责人决定的点
+
+**负责人 2026-11-24 确认：全部选 A**（Raft，由 Maya 在 PR #340 转达；第 3 点即 `blocked` 向上返回、其他错误照 Go 吞掉）。
 
 1. **分几部分、按什么顺序移植。**
    - 选项 A：按 §3 分三部分。第 1 部分（28 个）在 D09.4、D08.11 合并后开工，随 sysbench 聚合链一起验收；第 2 部分（17 个）等 D09.3；第 3 部分（5 个）等 D09.5 和 D10.1 的 `BuildFinalModeAggregation`。
