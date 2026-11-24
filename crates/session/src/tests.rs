@@ -411,19 +411,19 @@ fn autocommit_read_prefetches_tso_and_ends_idle() {
 
 /// VS1 plan §4.3: the executed-statement count (the router's "an executor opened" check)
 /// moves only after the executor was built and opened. A builder that stops at a boundary
-/// stub (here the sort executor, `blocked-by:D12.5`; the cached-table, locking-read
-/// and txn-scope stubs of the builder are the same path) is a normal fallback.
+/// stub (here a plan kind without an executor yet, `blocked-by:D12.0`; the cached-table,
+/// locking-read and txn-scope stubs of the builder are the same path) is a normal fallback.
 #[test]
 fn executed_stmts_counts_only_opened_executors() {
     let store = MockStore::new(10);
     let mut s = session(&store);
     assert_eq!(s.executed_stmts(), 0);
     let mut stmt = compile(&mut s, "SELECT a FROM t", 0);
-    stmt.plan = Some(mock_plan_of_kind(0, tidb_planner::PhysicalKind::Sort).0);
+    stmt.plan = Some(mock_plan_of_kind(0, tidb_planner::PhysicalKind::NominalSort).0);
     let Err(e) = block_on(run_stmt(&mut s, stmt)) else {
-        panic!("the sort executor is a boundary stub");
+        panic!("a plan kind without an executor is a boundary stub");
     };
-    assert_eq!(blocked(&e), Some("D12.5"));
+    assert_eq!(blocked(&e), Some("D12.0"));
     assert_eq!(
         s.executed_stmts(),
         0,
@@ -1649,8 +1649,9 @@ fn assert_falls_back<T>(s: &Session, what: &str, before: u64, r: Result<T, Error
 /// Range scans and `ORDER BY ... LIMIT` over the sbtest table are planned to the end
 /// (`physicalOptimize` resolves the column indices of the whole plan, D10.9) and still fall
 /// back where `Exec` builds the first executor that is not ported yet, before any executor
-/// opened: the table reader (D12.1) or a projection (D12.2); the sort and top-n executors
-/// (D12.5) are ported and build their child first, so a statement with one stops below it;
+/// opened: the table reader (D12.1); the sort and top-n executors (D12.5) and the limit,
+/// selection and projection executors (D12.2) are ported and build their child first, so a
+/// statement with one stops below it;
 /// as text queries and as prepared statements. A plan whose schemas differ from
 /// Go's would end in a plain error (1105) from `ResolveIndices` here instead of a fallback.
 /// The stop of each statement is pinned: a statement that starts to run, or stops
@@ -1667,7 +1668,7 @@ fn range_and_order_by_limit_queries_still_fall_back() {
             "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c",
             "D12.1",
         ),
-        ("SELECT c FROM sbtest1 ORDER BY id LIMIT 5", "D12.2"),
+        ("SELECT c FROM sbtest1 ORDER BY id LIMIT 5", "D12.1"),
         (
             "SELECT id, c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c LIMIT 3",
             "D12.1",
@@ -1681,7 +1682,8 @@ fn range_and_order_by_limit_queries_still_fall_back() {
     // The prepared ranges stop at the table reader like the text queries (D12.1), below the
     // sort and top-n executors. Before #352 was fixed both markers read the first
     // parameter, the range was a point and the point get needed a projection above it,
-    // which stopped first (D12.2).
+    // which stopped first while the projection executor was a stub (D12.2); with the
+    // projection ported that point get ran (see `sbtest_results`).
     let prepared = [
         ("SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?", 2, "D12.1"),
         (
@@ -1697,7 +1699,7 @@ fn range_and_order_by_limit_queries_still_fall_back() {
         (
             "SELECT c FROM sbtest1 WHERE id > ? ORDER BY id LIMIT 5",
             1,
-            "D12.2",
+            "D12.1",
         ),
     ];
     for (sql, n, stop) in prepared {
@@ -2796,3 +2798,5 @@ fn plan_cache_entry_memory_is_what_its_drop_frees() {
         );
     }
 }
+
+mod sbtest_results;

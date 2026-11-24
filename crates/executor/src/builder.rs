@@ -440,7 +440,6 @@ pub fn mark_children_used_cols(
         prefix_len += child_schema.len() as isize;
     }
     children_used
-
 }
 
 impl ExecutorBuilder {
@@ -880,9 +879,7 @@ mod tests {
         let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
         assert!(b.build(&mut s, None).await.is_none());
         assert!(b.err.is_none());
-        for (kind, block) in [
-            (PhysicalKind::TableReader, "D12.1"),
-        ] {
+        for (kind, block) in [(PhysicalKind::TableReader, "D12.1")] {
             let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
             assert!(b.build(&mut s, Some(&test_plan(kind))).await.is_none());
             let err = b.err.expect("blocked");
