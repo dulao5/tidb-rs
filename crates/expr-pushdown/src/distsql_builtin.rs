@@ -238,7 +238,7 @@ pub fn pb_to_exprs(
 /// The value of an enum field as Go sees it: Go keeps a value its tipb does not know, the
 /// Rust message keeps it in the unknown fields (`None` when the field is absent).
 // glue: proto2 enum values unknown to the Rust tipb crate
-fn raw_enum(m: &tipb::Expr, known: Option<i32>, field: u32) -> Option<i32> {
+pub(crate) fn raw_enum(m: &tipb::Expr, known: Option<i32>, field: u32) -> Option<i32> {
     if known.is_some() {
         return known;
     }
@@ -253,7 +253,7 @@ fn raw_enum(m: &tipb::Expr, known: Option<i32>, field: u32) -> Option<i32> {
 
 /// Go dereferences a nil `FieldType` of a constant or function.
 // glue: Go's nil *tipb.FieldType dereference
-fn field_type(expr: &tipb::Expr) -> &tipb::FieldType {
+pub(crate) fn field_type(expr: &tipb::Expr) -> &tipb::FieldType {
     if !expr.has_field_type() {
         panic!("runtime error: invalid memory address or nil pointer dereference");
     }

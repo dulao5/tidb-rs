@@ -7,7 +7,8 @@
 //! signature's base (type, collation, NOT NULL flag) and the collation derivation of
 //! functions (spec `specs/D08.2-funcs`) — and block D08.8 (CAST) parts 1, 2a and 2b-1: CAST to
 //! INT/REAL/DECIMAL/STRING, the internal to_binary/from_binary functions and constant folding
-//! (spec `specs/D08.8-cast`).
+//! (spec `specs/D08.8-cast`) — and block D08.11 part A: the aggregate function descriptors
+//! (`aggregation`, spec `specs/D08.11-aggregation`).
 
 #![deny(unsafe_code)]
 // N13 rule 5 (M-SHARE): a clone of an `Arc` is written `Arc::clone(&x)`, so a bare `.clone()`
@@ -21,6 +22,7 @@ extern crate self as tidb_expression;
 /// The function-name constants of `pkg/parser/ast/functions.go`, generated into tidb-parser
 /// (the parser uses them too); re-exported here so callers keep `ast_funcs`.
 pub use tidb_parser::ast::funcs as ast_funcs;
+pub mod aggregation;
 pub mod builtin;
 pub mod builtin_arithmetic;
 pub mod builtin_cast;
@@ -33,6 +35,7 @@ pub mod builtin_registry;
 pub mod builtin_registry_blocks;
 mod builtin_registry_gen;
 pub mod builtin_vec;
+pub mod byitem;
 pub mod chunk_executor;
 pub mod collation;
 pub mod column;
