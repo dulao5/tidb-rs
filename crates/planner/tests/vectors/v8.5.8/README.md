@@ -38,3 +38,19 @@ The estimation formulas have multiply-adds that gc fuses on arm64 only (D10.6 sp
 so the two targets differ in the last bits of 8 records (7 `hist`, 1 `mv_sel`; tracker `targetdiffs_test.go`). `tests/govec_cardinality.rs` counts the
 `selectivity` records whose Rust result is a boundary (D10.4 range building, D08.9 IN) instead
 of failing on them; any other difference fails.
+
+## Domain "postprocess" (block D10.9, VS1-31 part)
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/postprocess.jsonl.gz` (branch `claude/issue-330`, generator commit `ad85251`) |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261124), 1033 records |
+| `amd64/postprocess.jsonl.gz` sha256 | `bfa826d85ef68fbb9ec026affe04f0921c4411fe5a4ded13289c016191ac6254` (generated locally on x86_64, GOAMD64=v1) |
+| `arm64/postprocess.jsonl.gz` sha256 | `a44040d435dbdcb327529ad55b40e69af251d9352f98b323ce165a437d93a2d3` (the same generator built for linux/arm64 and run under qemu-user) |
+
+The tracker CI artifacts could not be downloaded from the environment that made this change,
+so both files were generated locally (the owner's choice in #329); the tracker CI's
+`govec.sh --check` regenerates each file on its own architecture and compares it byte for byte.
+The two targets hold the same records. `tests/govec_postprocess.rs` counts the records whose
+Rust result is a boundary stub before post-processing (string functions, virtual generated
+columns, partitioned tables, index paths, BatchPointGet) and pins the count per block.

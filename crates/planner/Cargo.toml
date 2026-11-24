@@ -60,6 +60,8 @@ tidb-metrics = { workspace = true }
 # govec replay (tests/govec_planutil.rs).
 serde_json = { workspace = true }
 flate2 = "1.0"
+# The protobuf bytes of ToPB / SetIntoPB (tests/govec_postprocess.rs).
+protobuf = { workspace = true }
 
 [lints]
 workspace = true

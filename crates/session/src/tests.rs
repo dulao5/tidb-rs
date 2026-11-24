@@ -1589,6 +1589,93 @@ fn text_protocol_point_select_runs_to_the_end() {
     assert!(s.is_idle(), "{}", s.state_snapshot());
 }
 
+/// The outcome the router takes for a fallback (VS1 plan §4.3): the statement ends with a
+/// boundary stub's error and the executed-statement count did not move (no executor opened).
+/// Any other error (such as a 1105 "cannot find the reference" from `ResolveIndices`) would
+/// reach the client instead of falling back. Returns the stub's block.
+fn assert_falls_back<T>(s: &Session, what: &str, before: u64, r: Result<T, Error>) -> String {
+    let e = match r {
+        Ok(_) => panic!("{what}: ran on the new stack, expected a fallback"),
+        Err(e) => e,
+    };
+    let Some(block) = blocked(&e) else {
+        panic!("{what}: an error ({}) instead of a fallback: {e}", e.code());
+    };
+    assert_eq!(s.executed_stmts(), before, "{what}: an executor opened");
+    assert!(s.is_idle(), "{what}: {}", s.state_snapshot());
+    block.to_owned()
+}
+
+/// Range scans and `ORDER BY ... LIMIT` over the sbtest table are planned to the end
+/// (`physicalOptimize` resolves the column indices of the whole plan, D10.9) and still fall
+/// back where `Exec` builds the first executor that is not ported yet, before any executor
+/// opened: the table reader (D12.1), the projection above it (D12.2), or the sort / top-n
+/// (D12.5); as text queries and as prepared statements. A plan whose schemas differ from
+/// Go's would end in a plain error (1105) from `ResolveIndices` here instead of a fallback.
+/// The stop of each statement is pinned: a statement that starts to run, or stops
+/// elsewhere, fails here.
+#[test]
+fn range_and_order_by_limit_queries_still_fall_back() {
+    use tidb_types::datum::new_int_datum;
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let mut s = sbtest_session(&store);
+    let text = [
+        ("SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10", "D12.1"),
+        (
+            "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c",
+            "D12.5",
+        ),
+        ("SELECT c FROM sbtest1 ORDER BY id LIMIT 5", "D12.2"),
+        (
+            "SELECT id, c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c LIMIT 3",
+            "D12.5",
+        ),
+    ];
+    for (sql, stop) in text {
+        let before = s.executed_stmts();
+        let r = block_on(s.execute_stmt(parse(sql), sql));
+        assert_eq!(assert_falls_back(&s, sql, before, r), stop, "{sql}");
+    }
+    // The prepared range keeps its projection above the reader (D12.2).
+    let prepared = [
+        ("SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?", 2, "D12.2"),
+        (
+            "SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c",
+            2,
+            "D12.5",
+        ),
+        (
+            "SELECT id, c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c LIMIT 3",
+            2,
+            "D12.5",
+        ),
+        (
+            "SELECT c FROM sbtest1 WHERE id > ? ORDER BY id LIMIT 5",
+            1,
+            "D12.2",
+        ),
+    ];
+    for (sql, n, stop) in prepared {
+        let info = block_on(s.prepare_stmt(sql)).unwrap();
+        // Twice: the second EXECUTE may meet what the first one left in the plan cache.
+        for round in 1..=2 {
+            let what = format!("EXECUTE {sql} (round {round})");
+            let params = (0..n).map(|i| new_int_datum(1 + 9 * i)).collect();
+            let before = s.executed_stmts();
+            let r = block_on(s.execute_prepared_stmt(info.stmt_id, params));
+            assert_eq!(assert_falls_back(&s, &what, before, r), stop, "{what}");
+        }
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+    }
+    // A parameter marker in LIMIT falls back already at PREPARE (D13.1).
+    let sql = "SELECT c FROM sbtest1 ORDER BY id LIMIT ?";
+    let before = s.executed_stmts();
+    let r = block_on(s.prepare_stmt(sql));
+    assert_eq!(assert_falls_back(&s, sql, before, r), "D13.1", "{sql}");
+    assert_eq!(s.executed_stmts(), 0, "no statement opened an executor");
+}
+
 /// The parameter values in the session (`SessionVars.PlanCacheParams`), as text.
 fn params_of(s: &Session) -> Vec<String> {
     s.vars()

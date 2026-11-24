@@ -4011,6 +4011,7 @@ dependencies = [
  "foldhash",
  "log",
  "parking_lot 0.12.5",
+ "protobuf",
  "serde_json",
  "smallvec",
  "tidb-base",
