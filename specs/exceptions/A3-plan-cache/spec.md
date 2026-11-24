@@ -366,6 +366,7 @@ Go 中每次命中都得到私有克隆，克隆带着放入时的代价值；�
 7. **`last_used` 1ms 内不重复写**（按建议），避免 64 线程命中同一计划时每次都写同一条缓存行。1ms 内的访问顺序在淘汰阈值上并列，不可观察。
 8. **`ADMIN FLUSH INSTANCE PLAN_CACHE` 真正清空实例级缓存**（与原建议不同）。Go v8.5.8 中它只清本会话的会话级缓存并记一个实例级缓存从不读的时间戳（`executor/simple.go` `executeAdminFlushPlanCache`），打开实例级缓存时等于什么也不做（v8.5.8 上复现：flush 后本会话和新会话的 EXECUTE 仍 `last_plan_from_cache = 1`）。负责人：这是管理语句，应该生效。
    - 按宪章第一条 2 的例外（2026-11-21 确认）作为 Go 缺陷修正：开 issue #307（`upstream-pitfall`，含 v8.5.8 复现），台账 R15，`docs/compatibility.md` Plan cache 一节。
+   - 补充（2026-11-24 负责人决定，台账 R18）：执行该语句要求 `SUPER`，和多数 ADMIN 语句一样，理由是它影响整个节点的所有会话（Go 对这条语句和另外几条 ADMIN 语句不检查；对这条无所谓，因为它清不掉实例级缓存）。权限检查随用户身份与权限的移植生效，在那之前任何用户都能执行。
    - 设计：`delete_all`（§3.4）；校验、warning 照 Go（§1.1、§3.8）。
 9. **key 的字符串字段带长度前缀**（按建议）。Go 直接拼接用户名、主机名、库名、语句文本，不同账号可以得到相同的 key（v8.5.8 上复现：`'a127.0.0.'@'%'` 与 `'a'@'127.0.0.%'`，后者第一次 EXECUTE 就命中前者的计划；命中后仍会再检查权限，不是权限漏洞）。开 issue #308（`upstream-pitfall`），台账 R16，`docs/compatibility.md` Plan cache 一节。只在名字恰好能拼成相同字符串时可观察。
 10. **缓存设计覆盖非预处理语句**（与原建议不同）。原建议本 spec 不做。负责人指出 Go 中非预处理语句也能用实例级缓存；核对 v8.5.8：`lookupPlanCache` 由两者共用，打开实例级缓存时非预处理语句（`tidb_enable_non_prepared_plan_cache = ON`，默认 OFF）的计划也放在实例级缓存中。
