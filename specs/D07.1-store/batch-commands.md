@@ -59,7 +59,7 @@
 | `entry.canceled` | 调用方放弃等待（超时，或它的 future 被丢弃）时 oneshot 的接收端随之丢弃；发送循环看到 `is_closed()` 就跳过，响应到了直接丢掉。**取消安全**：调用方在任何 `.await` 点被丢弃都不会留下悬挂状态，`batched` 里的项在响应到达或流失败时清掉（与 Go 相同） |
 | `tryLock` / `reCreating` | `Mutex<StreamState>`：发送时持锁；重建时置 `recreating`，发送循环跳过 |
 | 超时计时器 | `tokio::time::timeout_at`，同一个截止时间覆盖两段；错误是 `Status::deadline_exceeded`，进入现有的重试逻辑（`grpc_error_action`：换副本，不清缓存），与一元 RPC 超时相同 |
-| 流失败 | 在途请求立即以流的错误失败（`Status`，保留传输层的 source），重试逻辑按连接级失败处理（换副本并清 store 缓存、查 store 存活），与一元 RPC 遇到同样的连接错误时相同 |
+| 流失败 | 在途请求立即失败，错误统一是连接级的 `Unavailable`（消息里带流本身的 Status）。原因：client-go 对 `failPendingRequests` 失败的请求一律走 `onSendFail`（`internal/locate/region_request.go:1599-1700`），换副本重试；client-rust 的重试按 Status 判断（`grpc_error_action`），如果原样传流的 Status（例如一条超大消息导致的 `ResourceExhausted`），同一条流上最多 128 × 连接数个无关请求都会不重试直接失败。`Unavailable` 的处理是换副本并清 store 缓存、查 store 存活，与一元 RPC 遇到连接错误时相同。请求自己的超时（`DeadlineExceeded`）和响应自己的内容不变 |
 | `batchConn.Close` | 最后一个 `KvRpcClient` 句柄丢弃时（store 缓存失效后），`watch` 发送端随之丢弃：两个任务退出，流关闭，剩下的请求以 "batch client closed" 失败 |
 | 配置 | `Config::batch`（`BatchConfig`）：`max_batch_size` 128、`batch_policy` "standard"、`max_batch_wait_time` 0、`batch_wait_size` 8、`overload_threshold` 200、`max_concurrency_request_limit` 不限，名字和默认值同 client-go（`config/client.go:50-51`、`:170-175`、`:194`）。`max_batch_size = 0` 时全部走一元 RPC |
 | 走批量的请求 | `Request::batch_cmd` / `batch_response`：client-go 列表中 client-rust 有的类型全部走批量（含 coprocessor）；其余仍是一元 RPC。RPC 耗时指标（`tidb_tikvclient_request_seconds` 等）两条路记法相同 |
@@ -76,11 +76,15 @@
 
 ## 4. 与 client-go 的差异（含 file:line）
 
-1. **100 µs 的等待**（`standard` 策略，`C/client_batch.go:491`、`:650-653`）：tokio 的计时器精度是 1 ms，所以 1 ms 以下的等待改为"查一次队列、让出一次"循环直到截止时间或凑够数量（`R/store/batch.rs` `fetch_more_pending`）。效果相同，等待期间这个任务会占着一个工作线程（Go 的 `time.Timer` 不占）。1 ms 及以上的等待（过载等待）用普通计时器。
+1. **100 µs 的等待**（`standard` 策略，`C/client_batch.go:491`、`:650-653`）：tokio 的计时器精度是 1 ms，所以 1 ms 以下的等待改为"查一次队列、让出一次"循环直到截止时间或凑够数量（`R/store/batch.rs` `fetch_more_pending`）。效果相同，等待期间这个任务会占着一个工作线程空转（Go 的 `time.Timer` 不占）。**以后测 16 / 32 线程时要同时记录每条语句的 CPU**（进程 CPU 时间 / 语句数），确认这段空转在高并发下没有变成明显的 CPU 开销。1 ms 及以上的等待（过载等待）用普通计时器。
    "让出一次"（Go 的 `runtime.Gosched`，`:479`）用任务自己唤醒自己、返回一次 Pending 实现（`yield_once`），不用 `tokio::task::yield_now`：后者把唤醒推迟到工作线程轮询完 I/O 驱动之后，每批多一次系统调用和一段延迟。实测用 `yield_now` 时 `standard` 策略在 8 线程下比不等待的 `basic` 慢约 6%，改成 `yield_once` 后差距约 4%（§7）。实际负载下 Go 的平均批大小约 1.4，"凑够平均批大小"的条件通常已经满足，`standard` 的主要开销就是这一次让出。
 2. **重建流前的"等连接就绪"**（`waitConnReady`，`:966-994`）：tonic 的 `Channel` 不暴露连接状态，断开后在下一次调用时自动重连。所以第一次重建立即进行；重建出的流在收到任何响应之前又失败时，才按 `BoTiKVRPC` 退避（`R/store/batch.rs` `recv_loop`）。退避期间这条连接不可用，与 Go 相同。
 3. **流的建立是惰性的**：grpc-go 的 `NewStream` 在连接就绪时立即返回；tonic 的双向流在第一次发送时才真正发出请求头，建立失败表现为这条流上第一批请求的失败（随后按第 2 条重建）。
-4. **panic**：Go 的发送 / 接收循环 recover 后重启自己（`:611-621`、`:1020-1031`）；Rust 的任务 panic 会结束该任务：发送循环结束后这个 store 的请求以 "batchConn closed" 失败，直到 store 缓存失效、句柄重建。两个循环里没有会 panic 的业务代码（只有锁中毒）。
+4. **panic**：Go 的发送 / 接收循环 recover 后重启自己（`:611-621`、`:1020-1031`）；Rust 的任务 panic 会结束该任务，但会自愈：
+   - 发送循环结束后，新请求放不进队列、已在队列里的请求等不到结果，都以 `Unavailable`（"batchConn closed"）失败；
+   - 接收循环结束时，一个 drop guard 让这条连接上还在等的请求立即以 `Unavailable` 失败（不等到超时），之后写这条流也失败；
+   - `Unavailable` 让重试逻辑换副本并清掉这个 store 的缓存，`KvRpcClient` 随之被丢弃，下次使用时重建，包括新的发送循环和流。
+   两个循环里的锁都忽略中毒（锁里只有发送端和标志，别处 panic 之后仍然有效）：否则 guard 在展开时再次 panic 会让整个进程 abort。有单元测试。
 5. **leftover 的发送顺序**：没有优先级，同一批里按到达顺序（Go 的堆不保证顺序）。
 
 ## 5. 待负责人决定的事
@@ -98,7 +102,7 @@
 
 ### 7.1 预处理点查（`tools/perf/point_select_gate.py`）
 
-client-rust `186d194`（本分支最终提交）。"改之前"是同一份 tidb-rs 源码、只把 client-rust 换回 main 固定的 `4d81d4e`，在同一时段测。
+client-rust `186d194`（5 轮）；评审后的修改（流失败时在途请求按连接失败处理、接收循环的 drop guard、锁忽略中毒）之后，在最终提交 `a9d4a6b` 上又跑了 3 轮：1 线程 1.064 [0.950, 1.181]，8 线程 1.057 [1.025, 1.089]，p50 0.946 / 0.951，p99 0.741 / 0.909，分配 301.9（Go 225.4），没有退步。"改之前"是同一份 tidb-rs 源码、只把 client-rust 换回 main 固定的 `4d81d4e`，在同一时段测。
 
 | 指标（新栈 / Go，Go 实例级 plan cache ON） | 改之前（3 轮） | 改之后（5 轮） | 门槛 |
 |---|--:|--:|--:|
@@ -126,7 +130,7 @@ client-rust `186d194`（本分支最终提交）。"改之前"是同一份 tidb-
 
 ### 7.3 端到端对比
 
-最终提交（tidb-rs 本分支 + client-rust `186d194`）与只换回旧 client-rust 的同一源码，分别跑 `tools/weekly/run.sh ab`（`RS_STATUS_PORT=10581`），prototype 模式和 `--new-stack=fallback` 两次，每次都带 strict 一轮：
+tidb-rs 本分支 + client-rust `186d194`（fallback 一轮在最终提交 `a9d4a6b` 上重跑，结果与下表逐条相同，无 panic、断连、1105）与只换回旧 client-rust 的同一源码，分别跑 `tools/weekly/run.sh ab`（`RS_STATUS_PORT=10581`），prototype 模式和 `--new-stack=fallback` 两次，每次都带 strict 一轮：
 
 | 运行 | 两边逐条结果 |
 |---|---|
@@ -136,6 +140,8 @@ client-rust `186d194`（本分支最终提交）。"改之前"是同一份 tidb-
 | 锁解析（`run.sh locks`：CheckTxnStatus、ResolveLock、CheckSecondaryLocks、ScanLock 都走批量流） | 18 个用例，新、旧都是 18 个与 Go 结果相同、15 个符合预期，逐项相同 |
 
 没有 panic、断开的连接或新的 1105；strict 一轮的路由计数只差 3 条：旧版本有 3 条语句因 schema 版本还没追上而交给 prototype（`schema_version`），新版本这 3 条走了新栈，属于时序差别。
+
+**TiKV 被 kill -9**（perf 集群只有 1 个 TiKV；8 线程预处理点查同时压 Go 和 tidb-rs，第 12 秒 `kill -9 tikv-server`，2 秒后用同样的命令行重启）：两边在同一秒（第 16 秒）恢复到正常 QPS，中断约 3 秒；两边都没有报错（sysbench ignored errors 0、reconnects 0），最长单条延迟 Go 3.12 s、tidb-rs 3.15 s。tidb-rs 没有 panic。
 
 **写路径**：tidb-rs 服务端没有 SQL 写路径（只读节点；`SET GLOBAL` 返回 1235，DML 不在新栈上执行），所以 ab 不覆盖写。tidb-rs 中唯一通过 client-rust 写 TiKV 的代码是 `SET GLOBAL` 的写入器（`crates/poc/domain/src/systable_io.rs`，乐观事务的 prewrite + commit），服务端还没有接上它。用它的命令行（`systable_cli <pd> loop 200 ...`）对 perf 集群单独测了：串行 200 次写入新、旧版本都全部成功，Go 读到最后的值；两个进程并发写同一行时新、旧版本相同，都是一方遇到 WriteConflict 后退出（命令行不重试）。悲观锁（`SELECT ... FOR UPDATE`）tidb-rs 不执行。
 
