@@ -273,7 +273,11 @@ impl PhysicalPlan for PointGetPlan {
     fn resolve_indices(&mut self, _ctx: &PlanCtx<'_>) -> Result<(), Error> {
         // resolveIndicesForVirtualColumn(p.schema.Columns, p.schema): the schema is read
         // through a shallow copy while its columns are written (column lookup reads only
-        // the unique ids, never a virtual expression).
+        // the unique ids, never a virtual expression). Without a virtual column Go's loop
+        // writes nothing, so the copy is skipped (the point-select path plans this often).
+        if !self.schema.columns.iter().any(|c| c.virtual_expr.is_some()) {
+            return Ok(());
+        }
         let schema = self.schema.clone();
         crate::core::resolve_indices::resolve_indices_for_virtual_column(
             &mut self.schema.columns,

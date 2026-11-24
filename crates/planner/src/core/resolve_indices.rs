@@ -14,7 +14,8 @@
 //! - Go writes `Column.Index` / `Column.VirtualExpr` into column objects that several
 //!   schemas share (the table reader's schema is its table plan's schema object). In Rust
 //!   every node owns its schema (N1 §3.3, D10.1 spec §5 item 2), so such a write reaches only
-//!   the node that makes it: spec §5 item 1 lists what the other holders do not see.
+//!   the node that makes it. The table reader copies the resolved `Index` values of its table
+//!   plan's schema back into its own; spec §5 item 1 lists what the other holders do not see.
 //! - The operators' `ResolveIndices` are inherent methods here; the `PhysicalPlan` trait
 //!   methods in `core/physical_plans.rs` dispatch to them.
 
@@ -130,6 +131,12 @@ impl PhysicalTableReader {
     /// the list is cleared so that the chain is owned alone and resolved in place, and is
     /// flattened again afterwards, as `rewrite_table_plan` does (N1 §3.4). A nil table plan
     /// panics as in Go.
+    ///
+    /// In Go the reader's schema is the table plan's schema object (`Init`:
+    /// `p.schema = p.tablePlan.Schema()`), so resolving the table plan also sets `Index` on
+    /// the reader's columns. Here the reader owns a copy, and the resolved `Index` values of
+    /// the table plan's schema are copied back into it afterwards, so the reader's schema
+    /// reads as Go's (spec §5 item 1).
     // go: PhysicalTableReader.ResolveIndices L1 [M-PLAN, M-CTX]
     pub fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
         let schema = self.sp.schema().clone();
@@ -138,7 +145,23 @@ impl PhysicalTableReader {
         let table_plan = self.table_plan.as_mut().expect("tablePlan");
         let res = make_mut_plan(table_plan).resolve_indices(ctx);
         self.table_plans = flatten_list_push_down_plan(table_plan);
+        copy_resolved_indices(&mut self.sp.schema_mut().columns, table_plan.schema());
         res
+    }
+}
+
+/// Copies the `Index` of each column of `resolved` (the table plan's schema) into the column
+/// of `reader` (the table reader's own copy of that schema) at the same position. Go's two
+/// schemas are one object, so a write to one is a write to the other; a column is copied only
+/// when both positions hold the same column (equal unique ids), which is every position
+/// while the reader's copy comes from the table plan's schema at `Init`. The copy also runs
+/// when resolving failed: Go's writes made before the error are visible through the reader.
+// glue: N1 §3.3 (the table reader and its table plan share one schema object in Go)
+fn copy_resolved_indices(reader: &mut [Arc<Column>], resolved: &Schema) {
+    for (col, resolved_col) in reader.iter_mut().zip(&resolved.columns) {
+        if col.unique_id == resolved_col.unique_id && col.index != resolved_col.index {
+            Arc::make_mut(col).index = resolved_col.index;
+        }
     }
 }
 

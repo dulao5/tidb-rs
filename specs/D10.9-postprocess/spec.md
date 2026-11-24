@@ -79,7 +79,9 @@
 
 ## 5. 与 Go 的已知差异
 
-1. **列对象共享**（resolve_indices.go:394–401、:835–840；initialize.go:256）：Go 中 TableReader 的 schema 就是 table plan 的 schema（同一个 `*Schema`、同一批 `*Column`），`PhysicalTableScan.ResolveIndicesItself` 写 `column.Index = i` 时，TableReader 的 schema 列也跟着变；TableReader 的 `resolveIndicesForVirtualColumn` 写 `col.VirtualExpr` 时，扫描的列也跟着变。Rust 每个节点有自己的 schema（D10.1 spec §5 第 2 条），各节点在自己的副本上按 Go 的语句写：扫描的 schema 列得到 `Index = i`，TableReader 的 schema 列保持原值；虚拟列表达式在 TableReader 的副本上解析。执行器读的是 TableReader 自己的 `VirtualExpr`，schema 列的 `Index` 不参与求值，所以结果相同。govec 只比较每个节点自己的表达式和 schema，不比较 TableReader schema 列的 `Index`（回放文件头注释说明）。
+1. **列对象共享**（resolve_indices.go:394–401、:835–840；initialize.go:256）：Go 中 TableReader 的 schema 就是 table plan 的 schema（同一个 `*Schema`、同一批 `*Column`），`PhysicalTableScan.ResolveIndicesItself` 写 `column.Index = i` 时，TableReader 的 schema 列也跟着变；TableReader 的 `resolveIndicesForVirtualColumn` 写 `col.VirtualExpr` 时，扫描的列也跟着变。Rust 每个节点有自己的 schema（D10.1 spec §5 第 2 条），TableReader 在 `Init` 时拿到 table plan schema 的一份副本。
+   - **`Index`：与 Go 相同。** TableReader 解析完 table plan 以后，把 table plan schema 各列解析后的 `Index` 按位置抄回自己的 schema（同一位置的两列 unique id 相同时才抄；副本来自 `Init` 时的 table plan schema，所以每个位置都相同）。table plan 出错时也照样抄，对应 Go 中出错前已经写进共享列对象的值。之后 TableReader 的 schema 列与 table plan 的 schema 列逐列相同，与 Go 读到的一样（govec 回放对每条规划成功的记录检查这一点，见 §6）。之后的 postOptimize 即使换掉 table plan 的根（TiFlash 下注入投影、合并 Selection），Go 的 TableReader 仍指向原来那批列对象，Rust 的 TableReader 也保留抄好的值，两者仍相同。
+   - **`VirtualExpr`：仍有差异。** 虚拟列表达式只在 TableReader 自己的副本上解析，table plan 中扫描的 schema 列保留未解析的表达式（Go 中扫描的列也是解析后的）。执行器读的是 TableReader 自己的 `VirtualExpr`，扫描的 `ToPB` 不读 `VirtualExpr`，所以结果相同；而且虚拟生成列在 SELECT 构建时就停在 `blocked-by:D09.1`，切片的计划里没有带 `VirtualExpr` 的列。
 2. **出错时留下的值**（resolve_indices.go:494、:713）：Go 的 `p.Conditions[i], err = expr.ResolveIndices(...)` 在出错时把条件写成 nil，TopN 的 `item.Expr` 同样；Rust 出错时不写，保留原表达式。出错时整条语句失败，计划不再使用。
 3. **`ResolveIndices` 的 ctx 参数**：见 §3。`PhysicalSelection.ResolveIndices` 的回退（`ResolveIndicesByVirtualExpr`）用 `ctx.eval_ctx()`，对应 Go 的 `p.SCtx().GetExprCtx().GetEvalCtx()`。
 4. **关联列**（plan_to_pb.go:170、:192、:248、:278）：Go 的 `ExpressionsToPBList` 对关联列读 `*col.Data`；tidb-rs 把关联列的值放在求值状态里，`ToPB` 传空的 `EvalState`。关联列只出现在 Apply 下，切片不建 Apply。
@@ -96,6 +98,8 @@
   - `missing` 360 条：给计划中第 k 个算子加一个子节点没有的列（条件、表达式、ByItem 或 Limit 的 schema 列），再调它的 `ResolveIndices`，比较错误文本（`Can't find column ... in schema ...`、`Some columns of Limit_N cannot find the reference from its child(ren)`）。294 条相同，66 条停在上面同样的边界。
   - `access` 52 条：直接用字段构造 4 种 access object（多个动态分区对象、带错误的对象、聚簇索引、空表名等），全部相同。
   - 覆盖：本任务 37 个函数都列在某个 op 的 `GoFuncs` 中；块 D10.9 其余函数在豁免表中写明理由（`postprocess_exempt.go`）。
+- **TableReader 的 schema**：govec 回放中每条规划成功的 `plan` 记录都检查每个 TableReader 的 schema 列（unique id、`Index`）与其 table plan 的 schema 列逐列相同（`check_reader_schemas`，§5 第 1 条）。去掉抄回的那一步时这项检查在 444 条记录上失败。
+- **回退的会话测试**（`crates/session/src/tests.rs` 的 `range_and_order_by_limit_queries_still_fall_back`）：`physicalOptimize` 现在对每个计划都跑真正的 `ResolveIndices`，如果 Rust 构建的 schema 与 Go 有出入，语句会以普通错误（1105，找不到列）结束，而不是回退。测试在 sbtest 表上用文本协议和预处理语句（`id BETWEEN ? AND ?` 等，每条 EXECUTE 两次）执行范围查询和 `ORDER BY ... LIMIT`，断言结果是回退信号（边界桩的 `blocked` 错误，固定每条语句停在哪个块：TableReader 执行器 D12.1、Projection 执行器 D12.2、Sort / TopN 执行器 D12.5），且已执行语句数（`executed_stmts`）不变、会话回到空闲；`LIMIT ?` 在 PREPARE 时就回退（D13.1）。
 - **单元测试**：`core/access_object/tests.rs`（4 个：各类型的 `String` / `NormalizedString` / `SetIntoPB`，nil 的 `ExplainOperator`）；`tests/util_test.rs` 的 `base_physical_plan_methods`（`ResolveIndices` 递归到每个子节点、计划独占时原地写）；`point_get_plan/tests.rs`。
 - 未在本地集群上做端到端比较（tidb-rs 还没有 TableReader 执行器，VS1-34）。
 
@@ -117,5 +121,9 @@
 - D10.2：FindBestTask 与访问路径
 - D10.8：点查快速路径
 - D10.9：后处理（resolve indices、plan → pb、EXPLAIN 输出、plan 编码）
+- D12.1：TableReader 等读执行器
+- D12.2：Projection / Selection / Limit / TableDual 执行器
+- D12.5：Sort / TopN 执行器
+- D13.1：plan cache（`LIMIT ?` 绑定 EXECUTE 的值，在这里是边界）
 - N1：计划表示（物理计划是 `Arc` 树）
 - A3：plan cache 的例外

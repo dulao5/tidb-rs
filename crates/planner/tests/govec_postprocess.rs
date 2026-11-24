@@ -13,13 +13,15 @@
 //!   `ResolveIndices` must fail with Go's error.
 //! - `access`: access objects built from their fields.
 //!
-//! The schema columns of a table reader are not compared: Go shares them with the table plan
-//! (whose `ResolveIndicesItself` writes their `Index`), tidb-rs copies them (D10.9 spec §5).
+//! The schema columns of a table reader are not in the records: Go's reader schema is its
+//! table plan's schema object. tidb-rs gives the reader a copy and copies the resolved `Index`
+//! values back into it (the post-processing spec D10.9 §5 item 1); every planned record checks
+//! that the reader's columns equal its table plan's ([`check_reader_schemas`]).
 
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use protobuf::Message;
 use serde_json::{Value, json};
@@ -509,9 +511,34 @@ fn with_plan(
 
 fn run_plan(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     with_plan(tables, args, &mut |ctx, plan| {
+        check_reader_schemas(&*plan, args[1].as_str().unwrap());
         let bctx = build_pb_ctx(ctx);
         Ok(json!({ "plan": dump(ctx, &bctx, &*plan, true)? }))
     })
+}
+
+/// The table readers [`check_reader_schemas`] checked.
+static READERS_CHECKED: AtomicUsize = AtomicUsize::new(0);
+
+/// Go's table reader schema is its table plan's schema object (`PhysicalTableReader.Init`),
+/// so after `ResolveIndices` the reader's columns are the table plan's, `Index` included.
+/// tidb-rs's reader owns a copy; after resolving, it must read the same column by column.
+fn check_reader_schemas(p: &dyn PhysicalPlan, sql: &str) {
+    if let Some(r) = p.as_any().downcast_ref::<PhysicalTableReader>() {
+        let tbl = r.table_plan.as_ref().expect("tablePlan").schema();
+        let ids = |s: &Schema| -> Vec<(i64, isize)> {
+            s.columns.iter().map(|c| (c.unique_id, c.index)).collect()
+        };
+        assert_eq!(
+            ids(r.schema()),
+            ids(tbl),
+            "{sql}: the reader's schema columns (unique id, index) differ from its table plan's"
+        );
+        READERS_CHECKED.fetch_add(1, Ordering::Relaxed);
+    }
+    for c in p.children() {
+        check_reader_schemas(&**c, sql);
+    }
 }
 
 /// A step from a node to the next one of the Go generator's ppPreorder.
@@ -771,6 +798,10 @@ fn govec_postprocess() {
         eprintln!("{d}");
     }
     assert!(diffs.is_empty(), "{} differences", diffs.len());
+    assert!(
+        READERS_CHECKED.load(Ordering::Relaxed) > 0,
+        "no table reader checked"
+    );
     assert!(
         unparsed.is_empty(),
         "Go parses, Rust does not: {unparsed:?}"
