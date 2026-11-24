@@ -406,6 +406,7 @@ pub fn generate_plan_cache_stmt_with_ast(
     };
     let resolve_ctx = {
         let mut node_w = new_node_w(&mut stmt);
+        node_w.set_text(param_sql);
         let mut opts: Vec<PreprocessOpt> =
             vec![Box::new(in_prepare), with_preprocessor_return(ret)];
         // domain.GetDomain(sctx), for the metadata lock (preprocess module doc).

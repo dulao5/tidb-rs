@@ -129,7 +129,8 @@ impl Compiler {
     /// Compile compiles an ast.StmtNode to a physical plan.
     ///
     /// `text` is `stmtNode.Text()` (the parser AST does not keep the text, the session
-    /// passes it). The statement is handed over (D05.3 spec §9.2): Go's preprocessor and
+    /// passes it); the node wrapper carries it to the planner, whose builder reads the
+    /// select fields' text in it (expression column names). The statement is handed over (D05.3 spec §9.2): Go's preprocessor and
     /// optimizer write to the node they share by pointer; here they write to the statement
     /// `Compile` owns, which is then frozen into the `Arc` of `ExecStmt.StmtNode` (the session
     /// hands the same `Arc` to the transaction manager). An `Execute` plan of a point get
@@ -149,6 +150,7 @@ impl Compiler {
         // Do preprocess and validate.
         check_execute_using(&stmt_node)?;
         let mut node_w = new_node_w(&mut stmt_node);
+        node_w.set_text(text);
         let txn_is = sctx.get_txn_info_schema();
         let domain_is = sctx.get_domain_info_schema();
         preprocess(sctx, &mut node_w, txn_is.as_ref(), domain_is.as_ref())?;
