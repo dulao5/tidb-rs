@@ -15,11 +15,12 @@
 //! - Go's `Clone(newCtx)` is [`PhysicalPlan::clone_plan`]: a deep copy, as Go (the context
 //!   argument is dropped, `M-CTX`); the structural copy used for copy-on-write is
 //!   `clone_node` (N1 §3.5).
-//! - `ExplainInfo` / `ExplainNormalizedInfo` (`explain.go`) and the access object
-//!   (`access_object.go`) are block D10.9 (the `ResolveIndices` / `ToPB` / access object task
-//!   of the slice): boundary stubs that panic with the `blocked` error like
-//!   `PointGetPlan.ExplainInfo`. `PhysicalTableScan.TP` / `ExplainID` (explain.go) are not
-//!   overridden yet, so a scan's TP is `TableScan` until then (spec §5).
+//! - `ResolveIndices` (`resolve_indices.go`), `ToPB` (`plan_to_pb.go`) and the access objects
+//!   (`access_object.go`) are ported in their own files (`core/resolve_indices.rs`,
+//!   `core/plan_to_pb.rs`, `core/access_object.rs`); the trait methods here dispatch to them.
+//!   `ExplainInfo` / `ExplainNormalizedInfo` (`explain.go`, the EXPLAIN output task of block
+//!   D10.9) are boundary stubs that panic with the `blocked` error like
+//!   `PointGetPlan.ExplainInfo`; `PhysicalTableScan.TP` / `ExplainID` are in `core/explain.rs`.
 //! - Fields Go uses only outside the slice are not carried: `TableScanAndPartitionInfos`
 //!   (MPP), `SampleInfo` (TABLESAMPLE), `usedStatsInfo` (EXPLAIN of the stats status),
 //!   `runtimeFilterList` / `maxWaitTimeMs` (TiFlash runtime filter), `AnnIndexExtra`
@@ -39,14 +40,17 @@ use tidb_base::kv::StoreType;
 use tidb_execdetails::tracing::opt_trace::{CandidatePlanTrace, PlanTrace};
 use tidb_expression::util::{extract_cor_columns, extract_dependent_columns};
 use tidb_expression::{Column, CorrelatedColumn, ExprRef, Schema};
-use tidb_model::{ColumnInfo, ExtraHandleID, ExtraPhysTblID, TableInfo, find_column_info_by_id};
+use tidb_model::{ColumnInfo, ExtraHandleID, ExtraPhysTblID, TableInfo};
 use tidb_parser::model::CIStr;
+use tidb_sessionctx::planctx::BuildPBContext;
 use tidb_sessionctx::ranger::Range;
+use tidb_sessionctx::stmtctx::StatementContext;
 use tidb_statistics::HistColl;
 use tidb_types::field_name::NameSlice;
 
 use crate::base::{PhysicalKind, PhysicalPlan};
 use crate::core::initialize::flatten_list_push_down_plan;
+use crate::core::plan_to_pb::find_column_info_by_id;
 use crate::core::util::PhysicalSchemaProducer;
 use crate::physicalop::{BasePhysicalPlan, PhysicalPlanRef, base_physical_plan, make_mut_plan};
 use crate::planctx::PlanCtx;
@@ -235,6 +239,12 @@ pub fn set_mpp_or_batch_cop_for_table_scan(cur_plan: &mut PhysicalPlanRef) {
 
 impl PhysicalPlan for PhysicalTableReader {
     crate::physical_plan_boilerplate!(TableReader, sp);
+
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go PhysicalTableReader.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalTableReader::resolve_indices(self, ctx)
+    }
 
     /// CloneForPlanCache of the instance plan cache: the children and the table plan must be
     /// cacheable; `TableScanAndPartitionInfos` (MPP) makes it fail and is not carried
@@ -515,6 +525,24 @@ impl PhysicalTableScan {
 impl PhysicalPlan for PhysicalTableScan {
     crate::physical_plan_boilerplate!(TableScan, sp);
 
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go PhysicalTableScan.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalTableScan::resolve_indices(self, ctx)
+    }
+
+    /// `ToPB` (`plan_to_pb.go`).
+    // glue: dispatch (Go PhysicalTableScan.ToPB, ported in core/plan_to_pb.rs)
+    fn to_pb(&self, ctx: &BuildPBContext, store_type: StoreType) -> Result<tipb::Executor, Error> {
+        PhysicalTableScan::to_pb(self, ctx, store_type)
+    }
+
+    /// `ExplainID()` of the table scan (`explain.go`).
+    // glue: dispatch (Go PhysicalTableScan.ExplainID, ported in core/explain.rs)
+    fn explain_id(&self, sc: Option<&StatementContext>) -> String {
+        crate::core::explain::table_scan_explain_id(self, sc)
+    }
+
     /// CloneForPlanCache of the instance plan cache: `SampleInfo`, `runtimeFilterList` and
     /// `AnnIndexExtra` make it fail; none of them is carried (TABLESAMPLE, runtime filters
     /// and vector indexes are not ported), so only the children decide (A3 spec §3.3).
@@ -726,6 +754,18 @@ pub struct PhysicalProjection {
 impl PhysicalPlan for PhysicalProjection {
     crate::physical_plan_boilerplate!(Projection, sp);
 
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go PhysicalProjection.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalProjection::resolve_indices(self, ctx)
+    }
+
+    /// `ToPB` (`plan_to_pb.go`).
+    // glue: dispatch (Go PhysicalProjection.ToPB, ported in core/plan_to_pb.rs)
+    fn to_pb(&self, ctx: &BuildPBContext, store_type: StoreType) -> Result<tipb::Executor, Error> {
+        PhysicalProjection::to_pb(self, ctx, store_type)
+    }
+
     /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
     /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
     // glue: A3 spec §3.3 (whether Go's PhysicalProjection.CloneForPlanCache succeeds; nothing is cloned)
@@ -818,6 +858,18 @@ impl PhysicalTopN {
 
 impl PhysicalPlan for PhysicalTopN {
     crate::physical_plan_boilerplate!(TopN);
+
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go PhysicalTopN.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalTopN::resolve_indices(self, ctx)
+    }
+
+    /// `ToPB` (`plan_to_pb.go`).
+    // glue: dispatch (Go PhysicalTopN.ToPB, ported in core/plan_to_pb.rs)
+    fn to_pb(&self, ctx: &BuildPBContext, store_type: StoreType) -> Result<tipb::Executor, Error> {
+        PhysicalTopN::to_pb(self, ctx, store_type)
+    }
 
     /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
     /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
@@ -925,6 +977,18 @@ impl PhysicalLimit {
 impl PhysicalPlan for PhysicalLimit {
     crate::physical_plan_boilerplate!(Limit, sp);
 
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go PhysicalLimit.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalLimit::resolve_indices(self, ctx)
+    }
+
+    /// `ToPB` (`plan_to_pb.go`).
+    // glue: dispatch (Go PhysicalLimit.ToPB, ported in core/plan_to_pb.rs)
+    fn to_pb(&self, ctx: &BuildPBContext, store_type: StoreType) -> Result<tipb::Executor, Error> {
+        PhysicalLimit::to_pb(self, ctx, store_type)
+    }
+
     /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
     /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
     // glue: A3 spec §3.3 (whether Go's PhysicalLimit.CloneForPlanCache succeeds; nothing is cloned)
@@ -973,6 +1037,18 @@ pub struct PhysicalSort {
 
 impl PhysicalPlan for PhysicalSort {
     crate::physical_plan_boilerplate!(Sort);
+
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go PhysicalSort.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalSort::resolve_indices(self, ctx)
+    }
+
+    /// `ToPB` (`plan_to_pb.go`).
+    // glue: dispatch (Go PhysicalSort.ToPB, ported in core/plan_to_pb.rs)
+    fn to_pb(&self, ctx: &BuildPBContext, store_type: StoreType) -> Result<tipb::Executor, Error> {
+        PhysicalSort::to_pb(self, ctx, store_type)
+    }
 
     /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
     /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).
@@ -1055,6 +1131,12 @@ pub struct NominalSort {
 impl PhysicalPlan for NominalSort {
     crate::physical_plan_boilerplate!(NominalSort);
 
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go NominalSort.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        NominalSort::resolve_indices(self, ctx)
+    }
+
     /// MemoryUsage return the memory usage of NominalSort
     // go: NominalSort.MemoryUsage L1
     fn memory_usage(&self) -> i64 {
@@ -1092,6 +1174,18 @@ pub struct PhysicalSelection {
 
 impl PhysicalPlan for PhysicalSelection {
     crate::physical_plan_boilerplate!(Selection);
+
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go PhysicalSelection.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalSelection::resolve_indices(self, ctx)
+    }
+
+    /// `ToPB` (`plan_to_pb.go`).
+    // glue: dispatch (Go PhysicalSelection.ToPB, ported in core/plan_to_pb.rs)
+    fn to_pb(&self, ctx: &BuildPBContext, store_type: StoreType) -> Result<tipb::Executor, Error> {
+        PhysicalSelection::to_pb(self, ctx, store_type)
+    }
 
     /// CloneForPlanCache of the instance plan cache: whether the node can be cached, as the
     /// generated `CloneForPlanCache` succeeds (the children, A3 spec §3.3).

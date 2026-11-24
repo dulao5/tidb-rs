@@ -1881,6 +1881,7 @@ VS1-31	D10.9	pkg/planner/core/access_object.go	DynamicPartitionAccessObject.Stri
 VS1-31	D10.9	pkg/planner/core/access_object.go	DynamicPartitionAccessObjects.NormalizedString	3	
 VS1-31	D10.9	pkg/planner/core/access_object.go	DynamicPartitionAccessObjects.SetIntoPB	25	
 VS1-31	D10.9	pkg/planner/core/access_object.go	DynamicPartitionAccessObjects.String	17	
+VS1-31	D10.9	pkg/planner/core/access_object.go	IndexAccess.ToPB	10	
 VS1-31	D10.9	pkg/planner/core/access_object.go	OtherAccessObject.NormalizedString	3	
 VS1-31	D10.9	pkg/planner/core/access_object.go	OtherAccessObject.SetIntoPB	13	
 VS1-31	D10.9	pkg/planner/core/access_object.go	OtherAccessObject.String	3	
@@ -1891,6 +1892,7 @@ VS1-31	D10.9	pkg/planner/core/access_object.go	ScanAccessObject.NormalizedString
 VS1-31	D10.9	pkg/planner/core/access_object.go	ScanAccessObject.SetIntoPB	18	
 VS1-31	D10.9	pkg/planner/core/access_object.go	ScanAccessObject.String	18	
 VS1-31	D10.9	pkg/planner/core/access_object.go	getDynamicAccessPartition	40	
+VS1-31	D10.9	pkg/planner/core/explain.go	PhysicalTableScan.ExplainID	8	
 VS1-31	D10.9	pkg/planner/core/plan_to_pb.go	FindColumnInfoByID	8	
 VS1-31	D10.9	pkg/planner/core/plan_to_pb.go	PhysicalLimit.ToPB	27	
 VS1-31	D10.9	pkg/planner/core/plan_to_pb.go	PhysicalProjection.ToPB	20	

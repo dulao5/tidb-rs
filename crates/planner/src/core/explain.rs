@@ -1,10 +1,11 @@
 //! go-file: pkg/planner/core/explain.go
 //!
 //! The EXPLAIN text of the physical operators (`ExplainInfo`, `ExplainNormalizedInfo`,
-//! `OperatorInfo`, the table scan's `TP` / `ExplainID`) is block D10.9 (the `ResolveIndices`
-//! / `ToPB` / access object task of the first vertical slice). Until then the operators'
-//! methods are boundary stubs that panic with the `blocked` error, like
-//! `PointGetPlan.ExplainInfo` (the trait methods return a `String`).
+//! `OperatorInfo`) is block D10.9 (the EXPLAIN output task of the first vertical slice).
+//! Until then the operators' methods are boundary stubs that panic with the `blocked` error,
+//! like `PointGetPlan.ExplainInfo` (the trait methods return a `String`). The table scan's
+//! `TP` and `ExplainID` are ported: the executor ids of `ToPB` and the optimizer trace use
+//! them.
 
 use tidb_base::blocked::blocked;
 
@@ -23,6 +24,22 @@ use tidb_base::blocked::blocked;
 // glue: stub of PhysicalTableDual.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 pub fn explain_stub(what: &str) -> ! {
     panic!("{}", blocked("D10.9", what));
+}
+
+/// ExplainID overrides the ExplainID in order to match different range.
+///
+/// `sc` is the statement context of Go's stored `ctx` (`M-CTX`); `None` is Go's nil context.
+// go: PhysicalTableScan.ExplainID L1 [M-CTX]
+pub fn table_scan_explain_id(
+    p: &crate::core::physical_plans::PhysicalTableScan,
+    sc: Option<&tidb_sessionctx::stmtctx::StatementContext>,
+) -> String {
+    if let Some(sc) = sc
+        && sc.ignore_explain_id_suffix
+    {
+        return table_scan_tp(p).to_owned();
+    }
+    format!("{}_{}", table_scan_tp(p), crate::PhysicalPlan::id(p))
 }
 
 /// TP overrides the TP in order to match different range. The memory and cluster tables of
