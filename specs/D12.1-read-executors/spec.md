@@ -40,7 +40,7 @@ BatchPointGet、TableReader（VS1-34）、IndexReader、IndexLookUp、IndexMerge
 | `lockKeyBase` | `e.lock` 为真 | `blocked-by:X`（不可达，build 已拒绝） |
 | `get` | 事务的 mem buffer / 悲观锁缓存 | tidb-rs 的事务从不写，`txn.Valid() && !txn.IsReadOnly()` 恒为假，直接读快照 |
 | `get` | `LOCK TABLES ... READ` 且 `tidb_enable_point_get_cache` | `cacheDB.UnionGet` 是 X 块：`blocked-by:X` |
-| `buildPointGet` | 分区被裁剪为空（`TableDualExec`，D12.2） | 返回 0 行的 `TableDualExec`（VS1-35 之后，[D12.2 spec](../D12.2-basic-executors/spec.md) §3）；目前到不了（分区表在 `PrunePartitions` 已停） |
+| `buildPointGet` | 分区被裁剪为空（`TableDualExec`，D12.2） | `blocked-by:D12.2`；目前到不了（分区表在 `PrunePartitions` 已停） |
 | `buildPointGet` | 缓存表（`getCacheTable`） | `blocked-by:D06.4`（第 2 部分） |
 | `buildPointGet` | `tidb_replica_read=closest-adaptive`（`GetAvgRowSize`） | `blocked-by:D10.8` |
 | `verifyTxnScope` | 非 global 的 txn scope（`distsql.VerifyTxnScope`） | `blocked-by:D07.3` |
