@@ -2776,7 +2776,10 @@ fn compiled_column_names(s: &mut Session, node: ast::Stmt, text: &str) -> Vec<St
     block_on(s.finish_unfinished_stmt());
     block_on(s.core.prepare_txn_ctx()).unwrap();
     reset_context_of_stmt(&mut s.core, &node, text).unwrap();
-    s.core.on_txn_manager_stmt_start_or_retry(&node).unwrap();
+    s.core
+        .txn_manager
+        .on_stmt_start(&mut s.core.sctx, Some(&node))
+        .unwrap();
     let text = s.vars().stmt_ctx().original_sql.clone();
     let stmt = tidb_executor::compiler::Compiler
         .compile(&mut s.core, node, &text)
@@ -2794,7 +2797,7 @@ fn compiled_column_names(s: &mut Session, node: ast::Stmt, text: &str) -> Vec<St
 fn execute_node(stmt_id: u32, s: &Session) -> ast::Stmt {
     let prep_stmt = s.vars().get_prepared_stmt_by_id(stmt_id).unwrap();
     ast::Stmt::Execute(Box::new(ast::ExecuteStmt {
-        binary_args: Some(Arc::new(Vec::new())),
+        binary_args: Some(Arc::new(Vec::<tidb_types::datum::Datum>::new())),
         prep_stmt: Some(prep_stmt),
         prep_stmt_id: stmt_id,
         ..Default::default()
@@ -2809,7 +2812,8 @@ fn execute_node(stmt_id: u32, s: &Session) -> ast::Stmt {
 /// into the statement's text, which the node wrapper carries to the planner (D09.13 spec
 /// §5.1); without it the text protocol and EXECUTE gave empty names. The expected names are
 /// what a v8.5.8 server sent for each statement (text, `COM_STMT_PREPARE`,
-/// `COM_STMT_EXECUTE`).
+/// `COM_STMT_EXECUTE`); that server also missed the plan cache on the first EXECUTE and hit
+/// it on the second (`@@last_plan_from_cache` 0, then 1), as the session does here.
 #[test]
 fn expression_columns_are_named_by_their_text() {
     let _serial = PREPARED_COUNT.lock();
@@ -2837,24 +2841,21 @@ fn expression_columns_are_named_by_their_text() {
             .collect();
         assert_eq!(got, names, "PREPARE: {sql}");
 
-        let got = compiled_column_names(&mut s, execute_node(info.stmt_id, &s), "");
+        let node = execute_node(info.stmt_id, &s);
+        let got = compiled_column_names(&mut s, node, "");
         assert!(
             !s.vars().found_in_plan_cache,
             "the first EXECUTE misses: {sql}"
         );
         assert_eq!(got, names, "EXECUTE (miss): {sql}");
 
-        let got = compiled_column_names(&mut s, execute_node(info.stmt_id, &s), "");
-        assert_eq!(
-            got,
-            names,
-            "EXECUTE ({}): {sql}",
-            if s.vars().found_in_plan_cache {
-                "hit"
-            } else {
-                "miss again"
-            }
+        let node = execute_node(info.stmt_id, &s);
+        let got = compiled_column_names(&mut s, node, "");
+        assert!(
+            s.vars().found_in_plan_cache,
+            "the second EXECUTE hits (as in Go): {sql}"
         );
+        assert_eq!(got, names, "EXECUTE (hit): {sql}");
         s.drop_prepared_stmt(info.stmt_id).unwrap();
         s.clean_closed_prepared_stmts();
     }
