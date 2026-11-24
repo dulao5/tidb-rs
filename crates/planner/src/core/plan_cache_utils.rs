@@ -343,12 +343,18 @@ pub fn statement_table_names(stmt: &Stmt) -> Vec<(String, String)> {
 /// and the plan cache key, none of which the new stack has); `planCacheStmtProcessor` is
 /// ported except the table list it keeps for the plan cache key (A3); `checkPreparedPriv`
 /// has no privilege manager (D04.1) and no table locks (write path).
-// go: GeneratePlanCacheStmtWithAST L2 (label / NormalizeDigest / privileges: see the doc comment)
+///
+/// `parsed_param_markers` is the number of `?` the parser built for `param_stmt`
+/// (`ParseOutput::param_markers`), which Go does not have: if the AST walk finds a
+/// different number, the walk missed a marker that would keep order 0, and PREPARE stops at
+/// a boundary instead of numbering the markers wrongly (#356, plan cache spec §5).
+// go: GeneratePlanCacheStmtWithAST L2 (label / NormalizeDigest / privileges / marker count guard: see the doc comment)
 pub fn generate_plan_cache_stmt_with_ast(
     ctx: &mut PlanCtx<'_>,
     is_prep_stmt: bool,
     param_sql: &str,
     param_stmt: Stmt,
+    parsed_param_markers: usize,
     is: &dyn InfoSchemaLookup,
     domain_is: Option<&dyn InfoSchemaLookup>,
 ) -> Result<(PlanCacheStmt, Option<BuiltPlanInfo>, usize), Error> {
@@ -376,6 +382,17 @@ pub fn generate_plan_cache_stmt_with_ast(
         _ => return Err(blocked("D02.2", "preparing statements other than SELECT")),
     }
 
+    // Not in Go: the walk must have reached every marker the parser built, or a marker it
+    // missed keeps order 0 and reads the first parameter (#352, #356). Checked before the
+    // count is first used.
+    if extractor.markers.len() != parsed_param_markers {
+        // glue: blocked-by:D02.2 (the AST walk stands in for the visitor; a marker it does not reach would be numbered wrongly)
+        return Err(blocked(
+            "D02.2",
+            "a parameter marker the AST walk does not reach",
+        ));
+    }
+
     // Prepare parameters should NOT over 2 bytes(MaxUint16)
     // https://dev.mysql.com/doc/internals/en/com-stmt-prepare-response.html#packet-COM_STMT_PREPARE_OK.
     if extractor.markers.len() > u16::MAX as usize {
@@ -389,6 +406,7 @@ pub fn generate_plan_cache_stmt_with_ast(
     };
     let resolve_ctx = {
         let mut node_w = new_node_w(&mut stmt);
+        node_w.set_text(param_sql);
         let mut opts: Vec<PreprocessOpt> =
             vec![Box::new(in_prepare), with_preprocessor_return(ret)];
         // domain.GetDomain(sctx), for the metadata lock (preprocess module doc).

@@ -2799,4 +2799,103 @@ fn plan_cache_entry_memory_is_what_its_drop_frees() {
     }
 }
 
+// ------------------------------------------------- expression column names (statement text)
+
+/// Runs a statement through the session's steps up to and including `Compile` (the same
+/// steps as `ExecuteStmt`), ends its transaction as a failed statement does, and returns the
+/// names of the result columns (`ExecStmt.OutputNames`, whose `ColName` the result fields
+/// take as their names). The names are fixed by the planner, before any executor is built;
+/// the same names read from the record sets of these statements, which now run (the basic
+/// executors, D12.2), are checked in `sbtest_results`.
+fn compiled_column_names(s: &mut Session, node: ast::Stmt, text: &str) -> Vec<String> {
+    block_on(s.finish_unfinished_stmt());
+    block_on(s.core.prepare_txn_ctx()).unwrap();
+    reset_context_of_stmt(&mut s.core, &node, text).unwrap();
+    s.core
+        .txn_manager
+        .on_stmt_start(&mut s.core.sctx, Some(&node))
+        .unwrap();
+    let text = s.vars().stmt_ctx().original_sql.clone();
+    let stmt = tidb_executor::compiler::Compiler
+        .compile(&mut s.core, node, &text)
+        .unwrap_or_else(|e| panic!("{text}: {e}"));
+    s.core.rollback_on_error();
+    s.core.txn_manager.on_stmt_end();
+    assert!(s.is_idle(), "{text}: {}", s.state_snapshot());
+    stmt.output_names
+        .iter()
+        .map(|n| n.col_name.o.clone())
+        .collect()
+}
+
+/// The EXECUTE node of the prepared statement `stmt_id`, as `ExecutePreparedStmt` builds it.
+fn execute_node(stmt_id: u32, s: &Session) -> ast::Stmt {
+    let prep_stmt = s.vars().get_prepared_stmt_by_id(stmt_id).unwrap();
+    ast::Stmt::Execute(Box::new(ast::ExecuteStmt {
+        binary_args: Some(Arc::new(Vec::<tidb_types::datum::Datum>::new())),
+        prep_stmt: Some(prep_stmt),
+        prep_stmt_id: stmt_id,
+        ..Default::default()
+    }))
+}
+
+/// The name of an expression column is the text of its select field, as Go v8.5.8 sends it
+/// (`buildProjectionFieldNameFromExpressions` takes `SelectField.Text()`,
+/// `pkg/planner/core/logical_plan_builder.go:1462`): on the text protocol, at PREPARE, and
+/// at EXECUTE both when the plan cache misses (the prepared statement is planned again from
+/// its text) and when it hits (the names cached by the miss). The Rust AST keeps byte spans
+/// into the statement's text, which the node wrapper carries to the planner (D09.13 spec
+/// §5.1); without it the text protocol and EXECUTE gave empty names. The expected names are
+/// what a v8.5.8 server sent for each statement (text, `COM_STMT_PREPARE`,
+/// `COM_STMT_EXECUTE`); that server also missed the plan cache on the first EXECUTE and hit
+/// it on the second (`@@last_plan_from_cache` 0, then 1), as the session does here.
+#[test]
+fn expression_columns_are_named_by_their_text() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let cache = new_test_cache();
+    let mut s = cached_session(&store, sbtest_info_schema(), &cache);
+    for (sql, names) in [
+        ("SELECT 1", vec!["1"]),
+        ("SELECT -42", vec!["-42"]),
+        ("SELECT 1, 2, 3", vec!["1", "2", "3"]),
+        ("SELECT 1 + 1", vec!["1 + 1"]),
+        // Leading whitespace and a comment are not part of the select field's text.
+        ("  /* x */ SELECT 1 + 1", vec!["1 + 1"]),
+        ("SELECT 1.5", vec!["1.5"]),
+        ("SELECT 1 LIMIT 1", vec!["1"]),
+        ("SELECT id + 1 FROM sbtest1 WHERE id = 1", vec!["id + 1"]),
+        ("SELECT c, 1 FROM sbtest1 WHERE id = 1", vec!["c", "1"]),
+    ] {
+        let got = compiled_column_names(&mut s, parse(sql), sql);
+        assert_eq!(got, names, "text: {sql}");
+
+        let info = block_on(s.prepare_stmt(sql)).unwrap();
+        let got: Vec<&str> = info
+            .fields
+            .iter()
+            .map(|f| f.column_as_name.o.as_str())
+            .collect();
+        assert_eq!(got, names, "PREPARE: {sql}");
+
+        let node = execute_node(info.stmt_id, &s);
+        let got = compiled_column_names(&mut s, node, "");
+        assert!(
+            !s.vars().found_in_plan_cache,
+            "the first EXECUTE misses: {sql}"
+        );
+        assert_eq!(got, names, "EXECUTE (miss): {sql}");
+
+        let node = execute_node(info.stmt_id, &s);
+        let got = compiled_column_names(&mut s, node, "");
+        assert!(
+            s.vars().found_in_plan_cache,
+            "the second EXECUTE hits (as in Go): {sql}"
+        );
+        assert_eq!(got, names, "EXECUTE (hit): {sql}");
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+        s.clean_closed_prepared_stmts();
+    }
+}
+
 mod sbtest_results;

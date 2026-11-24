@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
+use tidb_base::dbterror::plannererrors::ErrUnsupportedPs;
 use tidb_parser::model::CIStr;
 use tidb_parser::{ParseOptions, parse};
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
@@ -124,6 +125,12 @@ fn warnings(v: &SessionVars) -> Vec<String> {
         .collect()
 }
 
+/// The number of parameter markers the parser built for `sql` (`ParseOutput::param_markers`),
+/// what PREPARE passes to `generate_plan_cache_stmt_with_ast`.
+fn markers(sql: &str) -> usize {
+    parse(sql, &ParseOptions::default()).unwrap().param_markers
+}
+
 #[test]
 fn prepare_builds_the_plan_after_the_cacheability_warning() {
     let mut v = vars();
@@ -139,6 +146,7 @@ fn prepare_builds_the_plan_after_the_cacheability_warning() {
         true,
         sql,
         st,
+        markers(sql),
         &Is(1),
         None,
     )
@@ -161,6 +169,7 @@ fn prepare_builds_the_plan_after_the_cacheability_warning() {
         true,
         sql,
         st,
+        markers(sql),
         &Is(1),
         None,
     )
@@ -182,6 +191,7 @@ fn prepare_builds_the_plan_after_the_cacheability_warning() {
         true,
         sql,
         st,
+        markers(sql),
         &Is(1),
         None,
     )
@@ -764,6 +774,7 @@ fn prepare_numbers_the_markers_by_position() {
         true,
         sql,
         st,
+        markers(sql),
         &Is(1),
         None,
     )
@@ -779,4 +790,102 @@ fn prepare_numbers_the_markers_by_position() {
     let offsets = crate::core::plan_cache_utils::extract_and_sort_param_markers(&st).unwrap();
     assert_eq!(offsets, [7, 25, 28]);
     assert_eq!(marker_orders(&st), [(7, 0), (25, 1), (28, 2)]);
+}
+
+/// Not in Go (#356): PREPARE compares the markers the parser built with the markers its walk
+/// found. A difference means the walk missed a marker, which would keep order 0 and read the
+/// first parameter (#352), so PREPARE stops at a boundary (the statement falls back) before
+/// preprocessing, planning or numbering anything. The test passes a parser count that differs
+/// from the walk's, as a node the walk does not reach would.
+#[test]
+fn prepare_stops_when_the_walk_misses_a_marker() {
+    let parse1 = |sql: &str| {
+        parse(sql, &ParseOptions::default())
+            .unwrap()
+            .stmts
+            .remove(0)
+    };
+    let sql = "select ? between ? and ?, ? + ?";
+    for parsed in [markers(sql) + 1, markers(sql) - 1] {
+        let mut v = vars();
+        let e = generate_plan_cache_stmt_with_ast(
+            &mut test_parts().plan_ctx(&mut v),
+            true,
+            sql,
+            parse1(sql),
+            parsed,
+            &Is(1),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(blocked_by(&e), Some("D02.2"), "{e}");
+        assert!(
+            e.to_string()
+                .contains("a parameter marker the AST walk does not reach"),
+            "{e}"
+        );
+        // Stopped before preprocess and the cacheability check: no warning.
+        assert!(warnings(&v).is_empty());
+    }
+
+    // Go's own errors before the count is used still come first.
+    let sql = "select ? into outfile '/tmp/x'";
+    let mut v = vars();
+    let e = generate_plan_cache_stmt_with_ast(
+        &mut test_parts().plan_ctx(&mut v),
+        true,
+        sql,
+        parse1(sql),
+        markers(sql) + 1,
+        &Is(1),
+        None,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(blocked_by(&e), None, "{e}");
+    assert_eq!(e.to_string(), ErrUnsupportedPs.clone().to_string());
+
+    // Statements whose walk reaches every marker prepare as before.
+    for (sql, n) in [
+        ("select ? between ? and ?, ? + ?", 5),
+        ("select ?, 1 as b", 1),
+    ] {
+        assert_eq!(markers(sql), n);
+        let mut v = vars();
+        let (ps, _, param_count) = generate_plan_cache_stmt_with_ast(
+            &mut test_parts().plan_ctx(&mut v),
+            true,
+            sql,
+            parse1(sql),
+            markers(sql),
+            &Is(1),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert_eq!(param_count, n);
+        let orders: Vec<usize> = marker_orders(&ps.prepared_ast.stmt)
+            .iter()
+            .map(|&(_, o)| o)
+            .collect();
+        assert_eq!(orders, (0..n).collect::<Vec<_>>(), "{sql}");
+    }
+    // Also where the walk meets them out of position (`LIMIT ?, ?`): the count matches and
+    // PREPARE goes on to the plan builder, which stops at its own later boundary (the LIMIT
+    // value bound by EXECUTE).
+    let sql = "select ? from dual limit ?, ?";
+    assert_eq!(markers(sql), 3);
+    let mut v = vars();
+    let e = generate_plan_cache_stmt_with_ast(
+        &mut test_parts().plan_ctx(&mut v),
+        true,
+        sql,
+        parse1(sql),
+        markers(sql),
+        &Is(1),
+        None,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(blocked_by(&e), Some("D13.1"), "{e}");
 }

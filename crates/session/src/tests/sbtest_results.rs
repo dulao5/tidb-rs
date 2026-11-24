@@ -198,18 +198,6 @@ fn int_col(name: &str, flen: isize) -> Col {
     )
 }
 
-/// Leaves the name of each expression column out: the name of an expression column is the
-/// expression's text in Go, which the new stack does not give yet (the question in issue
-/// #328; see [`expression_columns_are_named_by_their_text`]). Every other field is compared.
-fn without_expr_names(mut cols: Vec<Col>) -> Vec<Col> {
-    for c in &mut cols {
-        if c.org_name.is_empty() {
-            c.name.clear();
-        }
-    }
-    cols
-}
-
 /// The result of a statement that ran: its columns and its rows.
 type Ran = (Vec<Col>, Vec<Vec<String>>);
 
@@ -305,11 +293,7 @@ fn projection_over_point_get_reads_its_columns() {
     ];
     for (sql, (cols, rows)) in cases {
         let (got_cols, got_rows) = run_text(&mut s, sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
-        assert_eq!(
-            without_expr_names(got_cols),
-            without_expr_names(cols),
-            "{sql}"
-        );
+        assert_eq!(got_cols, cols, "{sql}");
         assert_eq!(got_rows, rows, "{sql}");
     }
 }
@@ -363,11 +347,7 @@ fn prepared_projection_over_point_get_reads_its_columns() {
         let what = format!("{sql} {params:?}");
         let (cols, got) =
             run_prepared(&mut s, info.stmt_id, params).unwrap_or_else(|e| panic!("{what}: {e}"));
-        assert_eq!(
-            without_expr_names(cols),
-            without_expr_names(vec![col, col_c()]),
-            "{what}"
-        );
+        assert_eq!(cols, vec![col, col_c()], "{what}");
         assert_eq!(got, rows, "{what}");
     }
 }
@@ -458,11 +438,7 @@ fn constant_and_empty_results() {
     ];
     for (sql, (cols, rows)) in cases {
         let (got_cols, got_rows) = run_text(&mut s, sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
-        assert_eq!(
-            without_expr_names(got_cols),
-            without_expr_names(cols),
-            "{sql}"
-        );
+        assert_eq!(got_cols, cols, "{sql}");
         assert_eq!(got_rows, rows, "{sql}");
     }
 }
@@ -534,49 +510,63 @@ fn sum_range_falls_back_at_planning() {
     }
 }
 
-/// The name of an expression column is the expression's text, as Go v8.5.8 sends it
-/// (`buildProjectionFieldNameFromExpressions` takes `SelectField.Text()`), on the text
-/// protocol and at both PREPARE and EXECUTE. The new stack gives an empty name on the text
-/// protocol and at EXECUTE: the logical plan builder of those paths has no statement text
-/// for the select fields to point into (only PREPARE sets it). The fix is in the planner,
-/// outside the basic executors; it waits for the answer in issue #328.
+/// The name of an expression column is the text of its select field, as Go v8.5.8 sends it
+/// (`buildProjectionFieldNameFromExpressions` takes `SelectField.Text()`), read here from
+/// the result fields of the record sets these statements now produce: on the text protocol,
+/// at PREPARE, and at EXECUTE when the plan cache misses and when it hits (asserted, as the
+/// v8.5.8 server does: `@@last_plan_from_cache` 0, then 1). Before the statement text reached
+/// the planner on every path (#361), the text protocol and EXECUTE gave empty names.
+/// Leading whitespace and a comment are not part of the field's text
+/// (`  /* x */ SELECT 1 + 1` is named `1 + 1` by the same server, on every path). The rows
+/// are Go's too.
 #[test]
-#[ignore = "needs the statement text in the planner on the text and EXECUTE paths, issue #328"]
-fn expression_columns_are_named_by_their_text() {
+fn record_sets_name_expression_columns_by_their_text() {
     let _serial = PREPARED_COUNT.lock();
     let (_store, mut s) = sysbench_cached_session();
-    for (sql, names) in [
-        ("SELECT 1", vec!["1"]),
-        ("SELECT -42", vec!["-42"]),
-        ("SELECT 1, 2, 3", vec!["1", "2", "3"]),
-        ("SELECT 1 + 1", vec!["1 + 1"]),
-        ("SELECT 1.5", vec!["1.5"]),
-        ("SELECT 1 LIMIT 1", vec!["1"]),
-        ("SELECT id + 1 FROM sbtest1 WHERE id = 1", vec!["id + 1"]),
-        ("SELECT 'x', c FROM sbtest1 WHERE id=1", vec!["x", "c"]),
+    let names_of = |cols: &[Col]| cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+    for (sql, names, rows) in [
+        ("SELECT 1", vec!["1"], texts(&[&["1"]])),
+        ("SELECT -42", vec!["-42"], texts(&[&["-42"]])),
+        (
+            "SELECT 1, 2, 3",
+            vec!["1", "2", "3"],
+            texts(&[&["1", "2", "3"]]),
+        ),
+        ("SELECT 1 + 1", vec!["1 + 1"], texts(&[&["2"]])),
+        ("  /* x */ SELECT 1 + 1", vec!["1 + 1"], texts(&[&["2"]])),
+        ("SELECT 1.5", vec!["1.5"], texts(&[&["1.5"]])),
+        ("SELECT 1 LIMIT 1", vec!["1"], texts(&[&["1"]])),
+        (
+            "SELECT id + 1 FROM sbtest1 WHERE id = 1",
+            vec!["id + 1"],
+            texts(&[&["2"]]),
+        ),
+        (
+            "SELECT 'x', c FROM sbtest1 WHERE id=1",
+            vec!["x", "c"],
+            texts(&[&["x", "c1"]]),
+        ),
     ] {
-        let (cols, _) = run_text(&mut s, sql).unwrap();
-        let got: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(got, names, "text {sql}");
+        let (cols, got) = run_text(&mut s, sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert_eq!(names_of(&cols), names, "text: {sql}");
+        assert_eq!(got, rows, "text: {sql}");
+
         let info = block_on(s.prepare_stmt(sql)).unwrap();
-        let got: Vec<&str> = info
-            .fields
-            .iter()
-            .map(|f| f.column_as_name.o.as_str())
-            .collect();
-        assert_eq!(got, names, "PREPARE {sql}");
-        for _ in 0..2 {
-            let (cols, _) = run_prepared(&mut s, info.stmt_id, vec![]).unwrap();
-            let got: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
-            assert_eq!(got, names, "EXECUTE {sql}");
+        let prepared: Vec<Col> = info.fields.iter().map(col_of).collect();
+        assert_eq!(names_of(&prepared), names, "PREPARE: {sql}");
+
+        for (what, hit) in [("EXECUTE (miss)", false), ("EXECUTE (hit)", true)] {
+            let (cols, got) = run_prepared(&mut s, info.stmt_id, vec![])
+                .unwrap_or_else(|e| panic!("{what}: {sql}: {e}"));
+            assert_eq!(s.vars().found_in_plan_cache, hit, "{what}: {sql}");
+            assert_eq!(names_of(&cols), names, "{what}: {sql}");
+            assert_eq!(
+                cols, prepared,
+                "{what}: the columns PREPARE described: {sql}"
+            );
+            assert_eq!(got, rows, "{what}: {sql}");
         }
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+        s.clean_closed_prepared_stmts();
     }
-    let info = block_on(s.prepare_stmt("SELECT ?, c FROM sbtest1 WHERE id=?")).unwrap();
-    let (cols, _) = run_prepared(
-        &mut s,
-        info.stmt_id,
-        vec![new_int_datum(7), new_int_datum(1)],
-    )
-    .unwrap();
-    assert_eq!(cols[0].name, "?");
 }
