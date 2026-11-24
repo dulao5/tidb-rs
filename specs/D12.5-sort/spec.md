@@ -65,8 +65,8 @@ converge：`scripts/converge.py --block D12.5 --part specs/VS1-vertical-slice/fu
 ## 5. 待定与可能的上游问题
 
 1. **并行 sort 的处理**（已决定，#329 的评论，2026-11-24）：选 (a) 照 Go：`Open` 走并行路径，在并行 sort 移植之前返回 `blocked(D12.5)`（当前实现），没有偏离，不需要裁定。(b) 生产路径改走 unparallel 模式是偏离，不采用；(c) 并行 sort（worker 与多路归并）另立任务 #339，在本 PR 合并后开始。
-2. **比较函数按 by-item 下标取**（可能的上游问题，未提交）：`lessRow`、`compareRow`、`greaterRow`、`keyColumnsLess` 用 `keyColumns` 的下标 `i` 去取 `keyCmpFuncs[i]` 和 `ByItems[i].Desc`（`sort.go:804-818`、`topn.go:188-202`），而 `buildKeyColumns` 跳过常量 by-item，`initCompareFuncs` 不跳过。常量排在列前面时，比较函数和 DESC 标志会错位到后面的列上；类型不同时会用错误的比较函数读列（可能读错或越界 panic）。Rust 照搬（govec 的 `gen leading constant` 记录用同类型的常量和列检验错位）。planner 是否会产生带常量 by-item 的 Sort / TopN 没有在集群上验证（见 PR 的 "Not checked"）；若能从 SQL 触发，应按 CLAUDE.md §2 第 6 条另开 `upstream-pitfall` issue 并请负责人裁决。
-3. **`Offset + Count` 回绕**：`LIMIT` 的 offset 与 count 之和超过 `uint64` 时，Go 的 topn 堆上限回绕；堆为空时 `processChk` 访问 `rowPtrs[0]` 会 panic。是否能从 SQL 触发（planner 可能先把这种 limit 改写掉）没有验证，govec 的生成器不生成这种记录。
+2. **比较函数按 by-item 下标取**（可能的上游问题，未提交）：`lessRow`、`compareRow`、`greaterRow`、`keyColumnsLess` 用 `keyColumns` 的下标 `i` 去取 `keyCmpFuncs[i]` 和 `ByItems[i].Desc`（`sort.go:804-818`、`topn.go:188-202`），而 `buildKeyColumns` 跳过常量 by-item，`initCompareFuncs` 不跳过。常量排在列前面时，比较函数和 DESC 标志会错位到后面的列上；类型不同时会用错误的比较函数读列（可能读错或越界 panic）。Rust 照搬（govec 的 `gen leading constant` 记录用同类型的常量和列检验错位）。从 SQL 很难触发：`LogicalSort.PruneColumns` → `pruneByItems`（`pkg/planner/core/operator/logicalop/logical_plans_misc.go:128-157`）会去掉没有列、且是运行时常量的 by-item，TopN 的 `ByItems` 取自剪枝之后的 Sort；`RAND()` 这类没有列但不是运行时常量的项会经注入的 projection 变成列。所以预计只有把 `column_prune` 写进 `mysql.opt_rule_blacklist` 时才会出现（未在集群上验证）。已按 CLAUDE.md §2 第 6 条记为 `upstream-pitfall` issue #358（Lucky 在 #349 的评审意见）；照 Go 移植，不需要裁定。
+3. **`Offset + Count` 回绕**：`LIMIT` 的 offset 与 count 之和超过 `uint64` 时，Go 的 topn 堆上限回绕；堆为空时 `processChk` 访问 `rowPtrs[0]` 会 panic。是否能从 SQL 触发（planner 可能先把这种 limit 改写掉）没有验证，govec 的生成器不生成这种记录。一并记在 #358。
 
 ## 6. 测试
 
