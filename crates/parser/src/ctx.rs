@@ -34,6 +34,9 @@ pub struct Ctx {
     /// Set by an action that did `return 1` in goyacc. The driver checks it after every
     /// reduction and stops immediately, like goyacc.
     pub abort: Cell<bool>,
+    /// How many parameter markers (`?`) the actions built, over the whole input. No Go
+    /// counterpart: PREPARE compares it with the markers its AST walk finds (#356).
+    pub param_markers: Cell<usize>,
 }
 
 impl Ctx {

@@ -6,7 +6,7 @@ executor	82
 expr-pushdown	1
 expression	1
 infoschema	17
-planner	368
+planner	369
 poc/session	3
 session	50
 sessiontxn	10

@@ -2548,7 +2548,7 @@ SimpleExpr -> Expr:
   | SimpleExpr collate CollationName { Expr::SetCollation(Box::new(SetCollationExpr { expr: $1, collate: $3 })) }
   | WindowFuncCall { $1 }
   | Literal { $1 }
-  | paramMarker { Expr::ParamMarker(Box::new(ParamMarkerExpr::new(tok_span(&$1).start()))) }
+  | paramMarker { param_marker(&$1, p) }
   | Variable { $1 }
   | SumExpr { $1 }
   | '!' SimpleExpr %prec neg { Expr::Unary(Box::new(UnaryOperationExpr { op: Op::Not2, v: $2 })) }
@@ -3305,7 +3305,7 @@ WindowFrameExtent -> FrameExtent:
 WindowFrameStart -> FrameBound:
     unbounded preceding { FrameBound { tp: BoundType::Preceding, unbounded: true, ..Default::default() } }
   | NumLiteral preceding { FrameBound { tp: BoundType::Preceding, expr: Some(val($1, p)), ..Default::default() } }
-  | paramMarker preceding { FrameBound { tp: BoundType::Preceding, expr: Some(Expr::ParamMarker(Box::new(ParamMarkerExpr::new(tok_span(&$1).start())))), ..Default::default() } }
+  | paramMarker preceding { FrameBound { tp: BoundType::Preceding, expr: Some(param_marker(&$1, p)), ..Default::default() } }
   | interval Expression TimeUnit preceding { FrameBound { tp: BoundType::Preceding, expr: Some($2), unit: $3, ..Default::default() } }
   | current row { FrameBound { tp: BoundType::CurrentRow, ..Default::default() } }
   ;
@@ -3316,7 +3316,7 @@ WindowFrameBound -> FrameBound:
     WindowFrameStart { $1 }
   | unbounded following { FrameBound { tp: BoundType::Following, unbounded: true, ..Default::default() } }
   | NumLiteral following { FrameBound { tp: BoundType::Following, expr: Some(val($1, p)), ..Default::default() } }
-  | paramMarker following { FrameBound { tp: BoundType::Following, expr: Some(Expr::ParamMarker(Box::new(ParamMarkerExpr::new(tok_span(&$1).start())))), ..Default::default() } }
+  | paramMarker following { FrameBound { tp: BoundType::Following, expr: Some(param_marker(&$1, p)), ..Default::default() } }
   | interval Expression TimeUnit following { FrameBound { tp: BoundType::Following, expr: Some($2), unit: $3, ..Default::default() } }
   ;
 OptWindowingClause -> Option<Box<WindowSpec>>:
@@ -3355,7 +3355,7 @@ OptLeadLagInfo -> Vec<Expr>:
      { Vec::new() }
   | ',' NumLiteral OptLLDefault { { let mut args = vec![val($2, p)]; if let Some(d) = $3 { args.push(d); } args } }
   | ',' paramMarker OptLLDefault { {
-        let mut args = vec![Expr::ParamMarker(Box::new(ParamMarkerExpr::new(tok_span(&$2).start())))];
+        let mut args = vec![param_marker(&$2, p)];
         if let Some(d) = $3 { args.push(d); }
         args
     } }
@@ -3505,7 +3505,7 @@ LimitClause -> Option<Box<Limit>>:
   ;
 LimitOption -> Expr:
     LengthNum { val(Datum::Uint($1), p) }
-  | paramMarker { Expr::ParamMarker(Box::new(ParamMarkerExpr::new(tok_span(&$1).start()))) }
+  | paramMarker { param_marker(&$1, p) }
   ;
 RowOrRows -> String:
     row { tok_text($lexer, &$1) }
@@ -5684,6 +5684,14 @@ fn position_expr(e: Expr) -> Expr {
 /// ast.NewValueExpr(x, parser.charset, parser.collation)
 fn val(d: Datum, p: &Ctx) -> Expr {
     Expr::Value(Box::new(ValueExpr::new(d, p.charset, p.collation)))
+}
+
+/// `ast.NewParamMarkerExpr(yyS[yypt].offset)`: a `?` at the token's byte offset.
+/// Counts the markers built (`Ctx::param_markers`), so PREPARE can check that its AST walk
+/// reached every one (#356).
+fn param_marker(t: &Tok, p: &Ctx) -> Expr {
+    p.param_markers.set(p.param_markers.get() + 1);
+    Expr::ParamMarker(Box::new(ParamMarkerExpr::new(tok_span(t).start())))
 }
 
 /// ast.NewValueExpr(x, "", "")
