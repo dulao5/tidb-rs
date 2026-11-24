@@ -436,6 +436,29 @@ fn executed_stmts_counts_only_opened_executors() {
     let _ = block_on(rs.close(&mut s));
 }
 
+/// Statements that read no table run on the basic executors (D12.2, VS1-35) through the
+/// session: Projection over TableDual, with LIMIT 0 and a WHERE folded to false (an empty
+/// TableDual). Each opened an executor, returns its rows and leaves the session idle.
+#[test]
+fn statements_without_a_table_run_on_the_basic_executors() {
+    let cases: [(&str, Vec<i64>); 3] = [
+        ("SELECT 1", vec![1]),
+        ("SELECT 1 LIMIT 0", vec![]),
+        ("SELECT 1 FROM DUAL WHERE 1 = 0", vec![]),
+    ];
+    for (sql, rows) in cases {
+        let store = MockStore::new(10);
+        let mut s = session(&store);
+        let mut rs = block_on(s.execute_stmt(parse(sql), sql))
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+            .unwrap_or_else(|| panic!("{sql}: no record set"));
+        assert_eq!(s.executed_stmts(), 1, "{sql}");
+        assert_eq!(drain(&mut s, &mut rs), rows, "{sql}");
+        block_on(rs.close(&mut s)).unwrap();
+        assert!(s.is_idle(), "{sql}: {}", s.state_snapshot());
+    }
+}
+
 /// `autoCommitAfterStmt` without an error commits the autocommit transaction (`CommitTxn`):
 /// the transaction ends, the manager's provider is cleared, `TxnCtx` is cleaned up.
 #[test]
@@ -1649,9 +1672,9 @@ fn execute_reads_the_parameters_through_the_session_expression_context() {
                     text, "NULL",
                     "only the NULL parameter plans to a table dual"
                 );
-                if let Some(rs) = rs {
-                    block_on(rs.close(&mut s)).unwrap();
-                }
+                let mut rs = rs.expect("rows");
+                assert_eq!(drain(&mut s, &mut rs), Vec::<i64>::new(), "{text}");
+                block_on(rs.close(&mut s)).unwrap();
             }
         }
         assert!(s.is_idle(), "{text}");

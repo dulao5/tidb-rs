@@ -238,8 +238,35 @@ async fn parallel_projection_dropped_without_close_stops_its_tasks() {
     assert_eq!(probe.closed.load(Ordering::SeqCst), 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_projection_close_dropped_halfway_still_stops_its_tasks() {
+    let sctx = default_ctx();
+    let ctx = exec_ctx(&sctx);
+    let (child, probe) = source(&sctx, 100_000, Fault::Hang(2));
+    let mut e = projection_over(&sctx, child, 2);
+    e.open(&ctx).await.unwrap();
+    let mut chk = exec::new_first_chunk(e.as_ref());
+    exec::next(&ctx, e.as_mut(), &mut chk).await.unwrap();
+    // The fetcher waits for the child forever, so Close waits for the fetcher forever; the
+    // statement is cancelled while Close waits. The handles are still in the executor, and
+    // dropping it aborts the tasks.
+    let r = tokio::time::timeout(Duration::from_millis(50), e.close()).await;
+    assert!(r.is_err(), "close cannot finish while the child hangs");
+    drop(e);
+    for _ in 0..100 {
+        if probe.dropped.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        probe.dropped.load(Ordering::SeqCst),
+        "the fetcher task kept the child"
+    );
+}
+
 #[tokio::test]
-async fn unparallel_projection_without_vectorizable_exprs() {
+async fn parallel_projection_runs_on_a_current_thread_runtime() {
     // A projection asked for workers falls back to one task when its expressions cannot be
     // vectorized; here they can, so the parallel path runs on a current-thread runtime too.
     let sctx = default_ctx();

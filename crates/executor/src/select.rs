@@ -286,11 +286,15 @@ impl LimitExec {
         }
         self.cursor = self.cursor.wrapping_add(batch_size);
 
-        match &self.column_swap_helper {
-            Some(helper) if self.column_idxs_used_by_child.is_some() => {
-                helper.swap_columns(child_result, req)?;
-            }
-            _ => req.swap_columns(child_result),
+        if self.column_idxs_used_by_child.is_some() {
+            // buildLimit sets the helper together with the used columns (Go dereferences it).
+            let helper = self
+                .column_swap_helper
+                .as_ref()
+                .expect("buildLimit sets the column swap helper with the used columns");
+            helper.swap_columns(child_result, req)?;
+        } else {
+            req.swap_columns(child_result);
         }
         Ok(())
     }

@@ -18,7 +18,7 @@ Go 范围：`pkg/executor` 的 `select.go`、`projection.go`、`unionexec/` 和 
 
 converge：`scripts/converge.py --block D12.2 --part specs/VS1-vertical-slice/functions.tsv --item VS1-35 --func-blocks ../tidb-rs-tracker/data/func_blocks.tsv crates/executor/src/{select,projection,builder}.rs` 为 35/35，没有桩。
 
-清单外顺带移植：`markChildrenUsedCols`（`builder.go`，tracker 中属 D12.1，`buildLimit` 要用，标注 `go: markChildrenUsedCols L1`）。`executorBuilder.build` 的分派（D12.0）增加这四种计划；`ExecStmt.handleNoDelay` 与 `isNoResultPlan`（D12.0）补上 Projection 的 `calculateNoDelay`（DO 语句）分支，原来写的是"D12.2"。
+清单外顺带移植：`markChildrenUsedCols`（`builder.go`，tracker 中属 D12.1，`buildLimit` 要用，标注 `go: markChildrenUsedCols L1`）。`executorBuilder.build` 的分派（D12.0）增加这四种计划；`ExecStmt.handleNoDelay` 与 `isNoResultPlan`（D12.0）补上 Projection 的 `calculateNoDelay`（DO 语句）分支，原来写的是"D12.2"。这两个分支已照 Go 移植，但目前不可达：tidb-rs 的 AST 还没有 DO 语句，planner 也没有地方把 `calculate_no_delay` 设为 true；DO 语句进入新栈之前没有测试。
 
 ### 1.2 块内其余（`blocked-by:D12.2`）
 
@@ -28,11 +28,11 @@ MAX ONE ROW、UNION ALL（`unionexec/`）、TABLESAMPLE、内存表扫描（`Tab
 
 1. **执行器不持有会话（N2）。** Go 的 `projectionExecutorContext` / `selectionExecutorContext` 从会话取语句的内存 tracker、求值上下文、`EnableVectorizedExpression` 和运行时统计集合，Rust 在建执行器时取一份（`M-CTX`），之后不读会话。`checkMaxExecutionTimeExceeded` 因此由调用方传入会话变量和进程开始时间（L2）；它的调用方都是加锁读（写路径 X），目前没有调用。
 2. **并行投影（`M-GO`、`M-CH`、`M-WG`）。** Go 的 fetcher 与 worker 是 goroutine，通道是带缓冲的 channel，`finishCh` 是关闭即广播的 channel。Rust：
-   - fetcher 与 worker 是 tokio task。`ExecCtx.pool`（新字段，N3 的 `ExecPool`）有值时在池上 spawn，否则在当前 runtime 上 `tokio::spawn`。会话目前不传池（`None`），所以都在语句所在的 runtime 上运行；单线程 runtime 上也能运行（单测）。
-   - 输入、输出通道是容量与 Go 相同的 `tokio::sync::mpsc`（`numWorkers`、每个 worker 1）；`finishCh` 是 `watch::channel(false)`，关闭即发送 `true`，`readProjection` 用 `select!` 同时等它和数据通道（Go 的 `select` 是随机选择，Rust 偏向先看 finish，结果相同：关闭后不再处理数据）。
+   - fetcher 与 worker 是 tokio task。`ExecCtx.pool`（新字段，N3 的 `ExecPool`）有值时在池上 spawn，否则在当前 runtime 上 `tokio::spawn`。会话目前不传池（`None`），所以都在语句所在的 runtime 上运行；单线程 runtime 上也能运行（单测）。`tokio::spawn` 要求当前线程在 tokio runtime 中：在 runtime 之外（例如会话单测用的 `futures::executor::block_on`）走到并行路径会 panic。会话单测的行数估计都不到一个 chunk（0 个 worker，串行），不会走到；生产路径的语句总在 runtime 中执行。
+   - 输入、输出通道是容量与 Go 相同的 `tokio::sync::mpsc`（`numWorkers`、每个 worker 1）；`finishCh` 是 `watch::channel(false)`，关闭即发送 `true`，`readProjection` 用 `select!` 同时等它和数据通道；`tokio::select!` 没有 `biased;`，两边都就绪时随机选择，与 Go 的 `select` 相同，关闭后不再处理数据。
    - `projectionOutput` 由 Arc 共享：chunk 在 `parking_lot::Mutex` 中，`done` 是容量 1 的通道。
    - 子执行器：Go 的 fetcher 通过 `proj.Children(0)` 读子执行器，Rust 的子执行器只能有一个所有者，`prepare` 用 `take_all_children`（新的 `ExecutorMeta` 方法，`M-WG`）把它交给 fetcher task，fetcher 退出时把自己连同子执行器作为 task 的返回值交回；`Close` 等所有 task 结束（Go 的 `wg.Wait()`）后用 `set_all_children` 放回，再由 `BaseExecutorV2.Close` 关闭。
-   - `Drop`：语句的 future 被取消、执行器没有 `Close` 就被丢弃时，发送 finish 并 abort 所有 task（`M-DEFER`），不会有 task 比执行器活得久。Go 没有这条路径（goroutine 不会被丢弃）。
+   - `Drop`：语句的 future 被取消、执行器没有 `Close` 就被丢弃时，发送 finish 并 abort 所有 task（`M-DEFER`），不会有 task 比执行器活得久。Go 没有这条路径（goroutine 不会被丢弃）。`Close` 等 task 时，每个 handle 在它的 task 结束之后才从执行器中移走，所以 `Close` 的 future 中途被丢弃时，还在运行的 task 仍由 `Drop` abort。task 没有交回结果就结束（在 `catch_unwind` 之外 panic，或 runtime 正在关闭）时记一条 warn 日志，fetcher 手里的子执行器此时无法关闭；Go 的 goroutine 不会这样结束。
 3. **panic（`M-PANIC`）。** fetcher 与 worker 的 `defer recover()` 是 `catch_unwind`：panic 变成 `Err` 写进输出的 `done`，与 Go 的 `recoveryProjection` 相同，并且 task 照样把子执行器交回。memory tracker 超限时 Go 的动作是 panic，Rust 的 `Consume` 返回 `Err`，按 panic 同样处理（`util.GetRecoverError` 的结果就是这个错误）。`globalPanicOnExceed.Action` 的 `panic(msg)` 同样是返回 `Err(msg)`。
 4. **类型断言（`M-IFACE`）。** `ExecStmt.handleNoDelay` 中 `toCheck.(*ProjectionExec)` 是新的 trait 方法 `Executor::as_projection`（默认 `None`，`ProjectionExec` 返回自己）。
 5. **计划不可变。** 执行器只读计划（`PhysicalLimit`、`PhysicalSelection`、`PhysicalProjection`、`PhysicalTableDual`），每次执行的状态（`cursor`、`childResult`、`selected`、`inputRow` 等）在执行器中。`executorBuilder.build` 对子计划的递归调用用 `Box::pin`（D12.1 spec §2 第 3 条）。
@@ -71,7 +71,7 @@ MAX ONE ROW、UNION ALL（`unionexec/`）、TABLESAMPLE、内存表扫描（`Tab
   - `selection`（318 条）：Go 的 `TestSelectionRequiredRows`、八种比较函数（`eq ne lt le gt ge nulleq isnull`）与 NULL、没有行通过、全部通过、多个条件、300 条随机；比较同上。
   - `adjust_required_rows`（3885 条）：cursor 在 begin 前、上、后，接近 `MaxUint64` 的 begin / end，requiredRows 越界；直接比较调整后的 requiredRows。
   - `table_dual`（12 条）：0 行、1 行（没有列时是一个虚拟行）、构建器对其他行数的报错。
-  - 回放：`crates/executor/src/govec_basicexec_test.rs`（crate 内的测试模块，要用 `pub(crate)` 字段），同样由 `ExecutorBuilder` 构建再换子节点，全部一致。向量 `crates/executor/tests/vectors/v8.5.8/{amd64,arm64}/basicexec.jsonl.gz` 取自 tracker CI 的产物；两个目标的记录相同（只有整数运算）。
+  - 回放：`crates/executor/src/govec_basicexec_test.rs`（crate 内的测试模块，要用 `pub(crate)` 字段），同样由 `ExecutorBuilder` 构建再换子节点，全部一致。向量 `crates/executor/tests/vectors/v8.5.8/{amd64,arm64}/basicexec.jsonl.gz` 与 tracker 中的文件相同。作者的环境下载不到 tracker CI 的产物：amd64 文件在本地 x86_64 上生成，arm64 文件由为 linux/arm64 编译的同一个生成器在 qemu-user 下生成；tracker CI 在两个架构的 runner 上各自重新生成，用 `scripts/govec.sh --check` 逐字节核对已提交的文件。两个目标的记录相同（只有整数运算）。
 - **Go 单测的移植**（`executor_required_rows_test.rs`）：`TestLimitRequiredRows`、`TestSelectionRequiredRows`、`TestProjectionUnparallelRequiredRows`、`TestProjectionParallelRequiredRows`（Go 中 `t.Skip`，这里 `#[ignore]`，手动运行通过）。
 - **其他单测**（`basic_executors_test.rs`）：
   - 并行投影：输出保持子节点的顺序，结束后内存 tracker 归零；读完之前 `Close`；子执行器 panic 变成错误且子执行器照样被关闭；子执行器报错；没有 `Close` 就丢弃时 task 停止；在单线程 runtime 上运行；构建器按估计行数（不足一个 chunk 为 0 个 worker）和加锁语句决定 worker 数。
@@ -79,5 +79,7 @@ MAX ONE ROW、UNION ALL（`unionexec/`）、TABLESAMPLE、内存表扫描（`Tab
   - `checkMaxExecutionTimeExceeded`（govec 豁免：依赖时钟）：没有会话、不是 SELECT、没有进程信息、开始时间在未来、未超时、`max_execution_time = 0` 都不报错，超时报 `ErrMaxExecTimeExceeded`。
   - `globalPanicOnExceed`：按 tracker 标签返回的消息、优先级。
   - TableDual 的行数、LIMIT 的内联投影、`markChildrenUsedCols`、构建器的四种计划与 TableDual 的报错。
-- **会话测试的改动**（`crates/session`）：原来用 `SELECT 1`（Projection over TableDual）和 TableDual 的 mock 计划作为"执行器构建器的边界"的例子，现在它们能执行；改用 `SELECT 1 FROM DUAL ORDER BY RAND()`（Sort，`blocked-by:D12.5`）和 Sort 的 mock 计划。参数测试中 `id > NULL` 被折叠为 TableDual，现在返回空结果集。
+- **会话测试**（`crates/session`）：
+  - 正向：`SELECT 1` 经 `execute_stmt` 返回一行 1，`SELECT 1 LIMIT 0` 和 `SELECT 1 FROM DUAL WHERE 1 = 0` 返回 0 行；三者都使 `executed_stmts()` 加 1，读完并 close 之后会话空闲（`statements_without_a_table_run_on_the_basic_executors`）。参数测试中 `id > NULL` 被折叠为 TableDual，读出来是 0 行。
+  - 原来用 `SELECT 1`（Projection over TableDual）和 TableDual 的 mock 计划作为"执行器构建器的边界"的例子，现在它们能执行；改用 `SELECT 1 FROM DUAL ORDER BY RAND()`（Sort，`blocked-by:D12.5`）和 Sort 的 mock 计划。
 - ab：`SELECT 1`、`SELECT ... LIMIT`、带条件的子查询等不读表的语句现在由新栈执行；按 CLAUDE.md §3，端到端比较由维护者在合并后运行（`tools/ab`）。

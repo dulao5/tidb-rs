@@ -254,14 +254,22 @@ impl Executor for ProjectionExec {
             if let Some(finish) = &self.finish_tx {
                 finish.send_replace(true);
             }
-            // Wait for fetcher and workers to finish and exit.
-            let fetcher = match self.fetcher_handle.take() {
-                Some(h) => h.await.ok(),
+            // Wait for fetcher and workers to finish and exit. Each handle leaves `self`
+            // only once its task has ended, so a close dropped halfway still leaves the
+            // running tasks to `Drop`, which aborts them.
+            let fetcher = match self.fetcher_handle.as_mut() {
+                Some(h) => {
+                    let r = h.await;
+                    self.fetcher_handle = None;
+                    joined(r, "fetcher")
+                }
                 None => None,
             };
             let mut workers = Vec::with_capacity(self.worker_handles.len());
-            for h in self.worker_handles.drain(..) {
-                workers.push(h.await.ok());
+            while let Some(h) = self.worker_handles.first_mut() {
+                let r = h.await;
+                self.worker_handles.remove(0);
+                workers.push(joined(r, "worker"));
             }
 
             // clear fetcher
@@ -745,6 +753,20 @@ async fn recovery_projection(output: Option<&OutputRef>, r: Error) {
         let _ = output.done_tx.send(Err(r)).await;
     }
     log::warn!("projection executor panicked, error={msg}");
+}
+
+/// The value a fetcher or worker task handed back. A task that ended without one (it
+/// panicked outside `catch_unwind`, or the runtime is shutting down) is logged: the
+/// fetcher's child is then lost and not closed. Go's goroutines cannot end this way.
+// glue: Rust only (JoinHandle)
+fn joined<T>(r: Result<T, tokio::task::JoinError>, task: &str) -> Option<T> {
+    match r {
+        Ok(v) => Some(v),
+        Err(e) => {
+            log::warn!("projection {task} task ended without returning, error={e}");
+            None
+        }
+    }
 }
 
 /// A dropped `watch` sender (the executor dropped without `Close`) also reads as finished.
