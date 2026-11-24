@@ -12,7 +12,7 @@ description: Port one block (or one part of a block) of Go TiDB v8.5.8 to tidb-r
 ## 0. 开工前
 
 1. **Go 源码只读参照树**：`go_tree=$(scripts/tidb-reference.sh)`，然后读 `$go_tree/pkg/...`。不要读 master 或其他分支的克隆（见 [reference-tree.md](../../../docs/porting/reference-tree.md)）。
-2. **worktree 与构建目录**：在主 checkout 的同级目录建 worktree，`git worktree add ../tidb-rs-<名字> -b <分支> origin/main`；tracker 同理（`../tracker-<名字>`）。所有 worktree 共用一个 target（`scripts/shared-target.sh --check`）。构建前看 `df -h /`，剩余不到 10 GB 就停下报告，不要删别人的目录。
+2. **worktree 与构建目录**：在主 checkout 的同级目录建 worktree，`git worktree add ../tidb-rs-<名字> -b <分支> origin/main`；tracker 同理（`../tracker-<名字>`）。每个 worktree 用自己的 `target/`（共用 target 会读到别的 worktree 的源码，2026-11-22 起停用，#282）；PR 合并后删掉自己的 `target/`。构建前看 `df -h /`，剩余不到 10 GB 就停下报告，不要删别人的目录。
 3. **读**：本块（或任务行）的 spec、plan、tasks；`specs/ROADMAP.md` 中的块定义；最近合并的同类块的 spec 和 PR（照它们的写法）。
 4. **禁止**：`cargo fmt --all`（会改 third_party），用 `cargo fmt -p <crate>`；裸 `git stash`；在代码、spec、提交、PR 中写上游链接（上游编号只写成反引号里的纯文本）。
 
