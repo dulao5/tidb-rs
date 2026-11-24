@@ -192,7 +192,7 @@ tracker `data/func_blocks.tsv` 中 block 为 D09.9 的函数共 50 个，全部�
 
 ## 8. 与 Go 的已知差异
 
-1. **规则对象上的状态不再跨会话共享**（`rule_aggregation_push_down.go:36-38`、`:529-535`；规则表 `optimizer.go:78-104`）。Go 的 `AggregationPushDownSolver` 是全局单例，join 一支在它上面写 `oldAggEliminationCheck`，同时优化的另一个会话可能读到 true（于是 `rule_aggregation_push_down.go:487` 的消除要多过一道 `CheckCanConvertAggToProj`，子节点是外连接时可能不再消除），或者在本会话的二次消除期间被另一个会话恢复成 false（于是跳过上游 issue `44795` 修复的检查，外连接下的旧聚合可能被错误地消除）。这是 Go 的数据竞争，只在 `tidb_opt_agg_push_down = ON` 且有并发的 join 聚合查询时出现。Rust 每次调用用自己的状态，结果等于 Go 单会话时的结果；govec 由单线程生成，不受影响。怎么登记见 §10 第 2 点。
+1. **规则对象上的状态不再跨会话共享**（`rule_aggregation_push_down.go:36-38`、`:529-535`；规则表 `optimizer.go:78-104`）。Go 的 `AggregationPushDownSolver` 是全局单例，join 一支在它上面写 `oldAggEliminationCheck`，同时优化的另一个会话可能读到 true（于是 `rule_aggregation_push_down.go:487` 的消除要多过一道 `CheckCanConvertAggToProj`，子节点是外连接时可能不再消除），或者在本会话的二次消除期间被另一个会话恢复成 false（于是跳过上游 issue `44795` 修复的检查，外连接下的旧聚合可能被错误地消除）。这是 Go 的数据竞争，只在 `tidb_opt_agg_push_down = ON` 且有并发的 join 聚合查询时出现。Rust 每次调用用自己的状态，结果等于 Go 单会话时的结果；govec 由单线程生成，不受影响。按 §10 第 2 点（选 A）登记为本仓库 issue #346（`upstream-pitfall`），不进裁定台账。
 2. **Go 吞掉的错误中，`blocked` 改为向上返回**（位置见 §4.4）。只影响 Rust 还做不了的分支：Go 会给出计划，Rust 返回 `blocked`、语句回退到 PoC。这是边界，不是行为差异，列在这里是因为它改变了这些函数的控制流。
 3. **聚合函数描述的指针别名改为下标**（`rule_aggregation_push_down.go:107-143`、`:224-251`，第 2 部分），没有可见差异。
 4. **`cloneSubPlans` 的浅拷贝改为值复制**（`rule_max_min_eliminate.go:123-137`），审计结论见 §6，没有可见差异；克隆的 `PossibleAccessPaths` 是全部路径（照 Go）。
