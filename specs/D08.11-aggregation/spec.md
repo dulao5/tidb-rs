@@ -165,7 +165,7 @@ sysbench 的 SUM 下推到 TiKV 要用 `CheckAggPushDown` 和 `AggFuncToPBExpr`�
 
 Go 的计划节点持有 `[]*AggFuncDesc`。多数从逻辑计划到物理计划的地方先 `Clone`（如 `NewPhysicalHashAgg`，`pkg/planner/core/physical_plans.go:2320-2327`，注释说明是为了避免原地改写影响逻辑计划），之后原地改：`WrapCastForAggFuncs`（`pkg/planner/util/coreusage/cast_misc.go:24-31`，由 `InjectProjBelowAgg` 在后优化阶段调用，`pkg/planner/core/rule_inject_extra_projection.go:121`）、`TypeInfer4AvgSum`（`pkg/planner/core/task.go:1587`）、列下标的解析等。
 
-建议：计划节点**按值**持有 `Vec<AggFuncDesc>`。`AggFuncDesc` 的字段都是 `Arc` 或小值，克隆便宜；Go 调 `Clone()` 的地方对应 `clone_desc()`，其余 Go 原地改的地方在 Rust 中改本节点的副本：逻辑计划在 arena 中可直接改（N1），物理计划经 `make_mut_plan` 拿到可写节点后改（N1、`crates/executor/clippy.toml` 禁止执行器这样做）。Go 中有没有"依赖多个计划节点共享同一个 `*AggFuncDesc`、改一处其他地方都看得到"的写法，属于调用方的审计（D09.4、D09.9、D10.1、D10.3 的 spec 逐处列出），本块只提供类型。备选是 `Vec<Arc<AggFuncDesc>>`，见决定点 4。
+建议：计划节点**按值**持有 `Vec<AggFuncDesc>`。`AggFuncDesc` 的字段都是 `Arc` 或小值，克隆便宜；Go 调 `Clone()` 的地方对应 `clone_desc()`，其余 Go 原地改的地方在 Rust 中改本节点的副本：逻辑计划在 arena 中可直接改（N1），物理计划经 `make_mut_plan` 拿到可写节点后改（N1、`crates/executor/clippy.toml` 禁止执行器这样做）。Go 中有没有"依赖多个计划节点共享同一个 `*AggFuncDesc`、改一处其他地方都看得到"的写法，属于调用方的审计（D09.4、D09.9、D10.1、D10.3 的 spec 逐处列出），本块只提供类型。物理计划会进实例级 plan cache、跨会话共享，所以**执行期只读**：执行器不改描述（Go 的执行器构建中 `Split` 是新建描述而不是原地改，与按值持有相容）。备选是 `Vec<Arc<AggFuncDesc>>`，见决定点 4。
 
 ### 4.4 并发、取消与 KILL
 
@@ -239,7 +239,7 @@ tracker 中这 10 个函数归哪个块（留在 D08.11 还是改归 D08.3）见
 
 ### 6.2 govec
 
-新领域 `aggdesc`（tracker `govec/domains/aggdesc.go`，Rust 回放 `crates/expression/tests/govec_aggdesc.rs`，第 B、C 部分的 pb 相关记录回放在 `crates/expr-pushdown/tests/`）。Go 侧直接调用 v8.5.8 的函数（未导出的经 `go:linkname`，与 `pointget` 领域的做法相同）。每条记录输出完整的返回类型（tp、flag、flen、decimal、charset、collate、elems）、改写后的参数（`StringWithCtx` 和类型）、错误。两个目标（amd64 / arm64）分别生成，amd64 的来自 tracker CI。
+新领域 `aggdesc`（tracker `govec/domains/aggdesc.go`，Rust 回放 `crates/expression/tests/govec_aggdesc.rs`，第 B、C 部分的 pb 相关记录回放在 `crates/expr-pushdown/tests/`）。Go 侧直接调用 v8.5.8 的函数（未导出的经 `go:linkname`，与 `pointget` 领域的做法相同）。每条记录输出完整的返回类型（tp、flag、flen、decimal、charset、collate、elems）、改写后的参数（`StringWithCtx` 和类型）、错误。两个目标（amd64 / arm64）的向量都在本地生成（作者的环境下载不到 CI 的产物），由 CI 的 `scripts/govec.sh --check` 在两个架构的 runner 上各自重新生成、逐字节核对已提交的文件。
 
 | op | 覆盖 | 输入 |
 |---|---|---|
@@ -280,7 +280,7 @@ M-FT 疑似 V1（§5）用规划器的计划向量（`selectbuild` 领域或 VS1
 
 按宪章第一条 2，默认照 Go 移植。每条都要在 v8.5.8 上复现后，按 CLAUDE.md 规则 6 在本仓库开英文 issue（标签 `upstream-pitfall`），再在这里引用 issue 号。本 spec 没有开 issue（理由见决定点 9）。
 
-1. **`typeInfer4PercentRank` 把长度写成了 flag**：`a.RetTp.SetFlag(mysql.MaxRealWidth)`（`base_func.go:368`），应是 `SetFlen`。`MaxRealWidth` = 23 = NOT_NULL | PRI_KEY | UNIQUE_KEY | BINARY。`percent_rank` 只能作窗口函数，函数名是小写 `percent_rank` 时 `window_func.go:66` 的 `SetFlag(NotNullFlag)` 又把 flag 整体换成 NOT NULL，剩下的影响是 flen 为 -1（同类的 `cume_dist` 是 23）；写成大写 `PERCENT_RANK` 时走 `:76` 的 `DelFlag`，flag 剩 PRI_KEY | UNIQUE_KEY | BINARY（见下一条）。只影响结果的列定义。
+1. **`typeInfer4PercentRank` 把长度写成了 flag**：`a.RetTp.SetFlag(mysql.MaxRealWidth)`（`base_func.go:368`），应是 `SetFlen`。`MaxRealWidth` = 23 = NOT_NULL | PRI_KEY | UNIQUE_KEY | BLOB（`BlobFlag` = 1<<4，`pkg/parser/mysql/type.go:58`）。`percent_rank` 只能作窗口函数，函数名是小写 `percent_rank` 时 `window_func.go:66` 的 `SetFlag(NotNullFlag)` 又把 flag 整体换成 NOT NULL，剩下的影响是 flen 为 -1（同类的 `cume_dist` 是 23）；写成大写 `PERCENT_RANK` 时走 `:76` 的 `DelFlag`，flag 剩 PRI_KEY | UNIQUE_KEY | BLOB（见下一条）。只影响结果的列定义。
 2. **窗口函数的 NOT NULL 调整区分函数名大小写**：`NewWindowFuncDesc` 做参数检查时用 `strings.ToLower(name)`（`window_func.go:36`），调整 NOT NULL 时却用原样的 `name`（`:63`）。`name` 来自 `ast.WindowFuncExpr.Name`，即 SQL 中原样的写法（lexer 的 `v.ident = lit`，`pkg/parser/lexer.go:246`；规划器不转小写，`pkg/planner/core/logical_plan_builder.go:7260`）。所以 `ROW_NUMBER() OVER ()` 的结果列可空，`row_number() over ()` 的不可空；`COUNT(a) OVER ()` 与 `count(a) over ()` 的 flag 也不同。影响列定义的 NOT NULL，可能还影响依赖可空性的改写。Rust 要照抄：传给 `NewWindowFuncDesc` 的名字必须是原样的写法（实现时核对 tidb-rs parser 的 `WindowFuncExpr.name` 是否保留大小写），govec 的 `new_window_desc` 两种都测。
 3. **`bit_and` / `bit_or` / `bit_xor` 作窗口函数时丢掉 UNSIGNED（疑似结果错误）**：`typeInfer4BitFuncs` 设了 UNSIGNED | NOT NULL（`base_func.go:331`），小写函数名时 `window_func.go:66` 的 `SetFlag(NotNullFlag)` 整体替换，UNSIGNED 没了。窗口算子输出列的类型就是 `desc.RetTp`（`pkg/planner/core/logical_plan_builder.go:7273` `RetType: desc.RetTp`），执行器的 `bitAndUint64` 等写入 uint64（`pkg/executor/aggfuncs/builder.go:540-546`；`pkg/executor/aggfuncs/func_bitfuncs.go:44-48` 的 `baseBitAggFunc.AppendFinalResult2Chunk`），而服务端按有符号输出 LONGLONG（`pkg/server/internal/column/column.go:174-179`）。因此 `bit_and(a) over ()` 在结果 ≥ 2^63 时（例如帧内全是 NULL 时的 18446744073709551615）可能显示为负数，MySQL 显示无符号值。大写函数名走 `DelFlag`，不受影响。如果复现，这属于宪章第一条 2 的"结果错误"，要负责人裁定，见决定点 7。
 4. **lead / lag 三个参数时忽略类型推导的错误，随后解引用 nil**：`a.RetTp, _ = expression.InferType4ControlFuncs(...)`（`base_func.go:378`，旁边的 FIXME 就是这个例子）。第一个和第三个参数的 collation 不能合并时（如 `lead(b COLLATE utf8mb4_unicode_ci, 1, 'x' COLLATE utf8mb4_general_ci) OVER ()`），`InferType4ControlFuncs` 返回 `nil, err`（`pkg/expression/builtin_control.go:284-287`），`RetTp` 为 nil，`newBaseFuncDesc` 不报错，`NewWindowFuncDesc` 在 `window_func.go:71` 或 `:74` 对 nil 调 `SetFlag` / `DelFlag` 而 panic，被 `planner.Optimize` 的 `recover` 转成错误（`pkg/planner/optimize.go:139-143`，`util.GetRecoverError`），客户端收到 1105 `runtime error: invalid memory address or nil pointer dereference`，而不是 collation 冲突的错误。见决定点 8。
