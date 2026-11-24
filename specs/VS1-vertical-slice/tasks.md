@@ -69,7 +69,7 @@ Phase 2 的待定设计问题（来自 VS1-19 / VS1-10 的评审，#223 / #224�
 |---|---|---|---|--:|---|---|---|
 | VS1-33 | coprocessor 客户端与 distsql（表路径）；P2 没赶上时用 glue 适配器 | D07.2、D07.3 | breadth | 0.20 | — | 故障场景 GREEN | 未开始 |
 | VS1-34 | TableReader 执行器 | D12.1 | depth | 0.04 | VS1-13、VS1-31、VS1-33 | ab `TableReader` / `TableFullScan` / `TableRangeScan` | 未开始 |
-| VS1-35 | Selection / Limit / Projection / TableDual 执行器（`ResetContextOfStmt`、`isWeakConsistencyRead` 已由 VS1-14 提前移植） | D12.2 | depth | 0.07 | VS1-13 | 单测；ab 对应分类 | 未开始 |
+| VS1-35 | Selection / Limit / Projection / TableDual 执行器（`ResetContextOfStmt`、`isWeakConsistencyRead` 已由 VS1-14 提前移植） | D12.2 | depth | 0.07 | VS1-13 | 单测；ab 对应分类 | 评审中：35 个函数全部移植（converge 35/35，没有桩）；govec `basicexec` 4532 条全部一致；Go 的 required-rows 单测已移植；ab 由维护者合并后运行（[D12.2 spec](../D12.2-basic-executors/spec.md)） |
 | VS1-36 | Sort / TopN（内存中） | D12.5 | depth | 0.08 | VS1-13 | 单测；ab `Sort` / `TopN` | 评审中（#329；D12.5 59/65 + 6 桩，govec sortexec 1164 条；Sort 照 Go 走并行路径、停在 `Open` 的边界（负责人已决定），并行 sort 另立 #339，见 [D12.5 spec](../D12.5-sort/spec.md) §5） |
 | VS1-37 | C2b 集成与 read_only 调优；默认值评审 | glue | depth | 0.10 | Phase 3 其余各项 | ab `strict` 的 VS1 分类 100%；read_only ≥ 0.9× Go；`Compile` 接入 `planner.Optimize` 时加真实会话 EXECUTE 读取参数的测试（需要 sessionexpr，D09.13 spec §7） | 未开始；其中"真实会话 EXECUTE 读取参数的测试"已随 `Compile` 接入优化器完成（`execute_reads_the_parameters_through_the_session_expression_context`：int / 字符串 / NULL，[D05.3 spec](../D05.3-session/spec.md) §9.4）；普通 SELECT 已接入 `Compile`（语句移交给 `Compile`、写完后冻结成 `Arc`；事务管理器的 `OnStmtStart` 借用语句、`Compile` 之后补交，D05.3 spec §9.2）：文本协议点查在新栈上跑到底，ab 结果见 `c2a-integration.md` §7 |
 | VS1-38 | （可选）EXPLAIN：只支持 VS1 算子 | D10.9、D09.16、D12.12 | depth | 0.05 | VS1-28 | ab 计划级对照 | 未开始 |

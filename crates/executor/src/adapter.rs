@@ -656,7 +656,7 @@ impl ExecStmt {
 
     /// `(handled, err)`: Go's `(handled, rs, err)` where `rs` is always nil on the read path
     /// (`handleNoDelayExecutor` returns no record set).
-    // go: ExecStmt.handleNoDelay L2 (no EXPLAIN ANALYZE / DO / pessimistic DML: D12.12, D12.2, X)
+    // go: ExecStmt.handleNoDelay L2 (no EXPLAIN ANALYZE / pessimistic DML: D12.12, X)
     async fn handle_no_delay(
         &mut self,
         sctx: &mut dyn SessionContext,
@@ -686,7 +686,16 @@ impl ExecStmt {
             }
             return (handled, r);
         }
-        // `*ProjectionExec` with calculateNoDelay (DO) is D12.2 (VS1-35).
+        if to_check
+            .as_projection()
+            .is_some_and(|proj| proj.calculate_no_delay)
+        {
+            // Currently this is only for the "DO" statement. Take "DO 1, @a=2;" as an example:
+            // the Projection has two expressions and two columns in the schema, but we should
+            // not return the result of the two expressions.
+            let r = self.handle_no_delay_executor(sctx, ctx, to_check).await;
+            return (true, r);
+        }
 
         (false, Ok(()))
     }
@@ -1053,11 +1062,22 @@ pub fn is_fast_plan(p: &Plan) -> bool {
     }
 }
 
-/// `isNoResultPlan`. Go also returns true for a projection with `CalculateNoDelay` (DO),
-/// whose field comes with the projection operator (D10.1 / D09.x).
-// go: isNoResultPlan L2 (CalculateNoDelay comes with the projection operators)
+/// `isNoResultPlan`. The plans here are physical: Go's `*logicalop.LogicalProjection` case
+/// never matches one.
+// go: isNoResultPlan L2 (physical plans only: no logical projection case)
 pub fn is_no_result_plan(p: &Plan) -> bool {
     if p.schema().is_empty() {
+        return true;
+    }
+
+    // Currently this is only for the "DO" statement. Take "DO 1, @a=2;" as an example:
+    // the Projection has two expressions and two columns in the schema, but we should
+    // not return the result of the two expressions.
+    if let Some(raw) = p
+        .as_any()
+        .downcast_ref::<tidb_planner::core::physical_plans::PhysicalProjection>()
+        && raw.calculate_no_delay
+    {
         return true;
     }
     false
