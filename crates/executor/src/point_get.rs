@@ -62,8 +62,11 @@ use crate::builder::{
 use crate::consistency::Reporter;
 use crate::exec::ExecCtx;
 use crate::glue::{self, Plan, SessionContext, SnapshotRuntimeStats};
-use crate::internal::exec::executor::{BaseExecutor, BaseExecutorV2, Executor, new_base_executor};
+use crate::internal::exec::executor::{
+    BaseExecutor, BaseExecutorV2, Executor, new_base_executor, new_base_executor_v2,
+};
 use crate::internal::exec::indexusage::IndexUsageReporter;
+use crate::select::{TableDualExec, set_option_for_top_sql};
 use crate::table_reader::build_virtual_column_index;
 use tidb_planner::PhysicalPlan;
 use tidb_planner::core::point_get_plan::PointGetPlan;
@@ -103,9 +106,18 @@ impl ExecutorBuilder {
                 .use_cache();
             match q.prune_partitions(use_cache) {
                 Ok(true) => {
-                    // TableDualExec with no rows (D12.2, VS1-35).
-                    self.err = Some(blocked("D12.2", "the table dual executor (VS1-35)"));
-                    return None;
+                    // Every partition is pruned away: a table dual with no rows.
+                    return Some(Box::new(TableDualExec {
+                        base: new_base_executor_v2(
+                            sctx.get_session_vars(),
+                            &sctx.sql_killer(),
+                            Some(p.schema().clone()),
+                            p.id() as isize,
+                            Vec::new(),
+                        ),
+                        num_dual_rows: 0,
+                        num_returned: 0,
+                    }));
                 }
                 Ok(false) => {}
                 Err(err) => {
@@ -532,12 +544,11 @@ impl Executor for PointGetExecutor {
     /// Open implements the Executor interface.
     ///
     /// Go reads `e.Ctx().Txn(false)` for the mem buffer of `get` (none in tidb-rs, see the
-    /// module comment) and sets the Top SQL options of the snapshot (`setOptionForTopSQL`,
-    /// D12.2: the resource group tagger is Top SQL's, D14.2, not recorded; the snapshot
-    /// ignores it).
-    // go: PointGetExecutor.Open L2 (no transaction read: no mem buffer; no Top SQL options, D14.2)
-    async fn open(&mut self, _ctx: &ExecCtx) -> Result<(), Error> {
+    /// module comment); the statement context is the execution's (`ExecCtx`, N2).
+    // go: PointGetExecutor.Open L2 (no transaction read: no mem buffer)
+    async fn open(&mut self, ctx: &ExecCtx) -> Result<(), Error> {
         self.verify_txn_scope()?;
+        set_option_for_top_sql(&ctx.stmt, self.snapshot.as_deref());
         Ok(())
     }
 
