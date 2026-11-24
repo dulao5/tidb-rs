@@ -1822,13 +1822,13 @@ fn prepared_statement_markers_read_their_own_parameters() {
         ),
         // Two equal conditions on the handle: the same value is a point get of that row,
         // run to the end on the new stack; different values are an empty range (Go: a
-        // TableDual, not cached, D12.2). With every marker reading the first parameter, the
-        // second EXECUTE returned the row 5.
+        // TableDual, not cached), now run by the basic executors (D12.2) and read as no rows.
+        // With every marker reading the first parameter, the second EXECUTE returned the row 5.
         (
             "SELECT id, c FROM sbtest1 WHERE id = ? AND id = ?",
             vec![
                 (vec![int(4), int(4)], rows(4..=4), None, false),
-                (vec![int(5), int(6)], vec![], Some("D12.2"), false),
+                (vec![int(5), int(6)], vec![], None, false),
             ],
         ),
     ];

@@ -1,6 +1,6 @@
 # D12.2 基础算子执行器（spec）
 
-状态：第 1 部分（VS1-35：Selection、LIMIT、Projection、TableDual）评审中（2026-11-24）。块：D12.2（ROADMAP P4），crate `tidb-executor`（N0 rank 14）。相关：[VS1 plan](../VS1-vertical-slice/plan.md) §3（D12.2 一行）、§3.2（边界桩）；[D12.0 tasks](../D12.0-executor/tasks.md)（执行器框架，VS1-13）；[D12.1 spec](../D12.1-read-executors/spec.md)（读取类执行器，本 spec 的格式来源）；[D05.3 spec](../D05.3-session/spec.md) §2.4（`ResetContextOfStmt` 已由 VS1-14 提前移植）；[N3](../exceptions/N3-async-runtime/spec.md)（异步运行时）。
+状态：第 1 部分（VS1-35：Selection、LIMIT、Projection、TableDual）重新评审中（2026-11-24）：第一次移植（#338）合并后因三个回归被撤回（#345），回归的原因与修复见 §7。块：D12.2（ROADMAP P4），crate `tidb-executor`（N0 rank 14）。相关：[VS1 plan](../VS1-vertical-slice/plan.md) §3（D12.2 一行）、§3.2（边界桩）；[D12.0 tasks](../D12.0-executor/tasks.md)（执行器框架，VS1-13）；[D12.1 spec](../D12.1-read-executors/spec.md)（读取类执行器，本 spec 的格式来源）；[D05.3 spec](../D05.3-session/spec.md) §2.4（`ResetContextOfStmt` 已由 VS1-14 提前移植）；[N3](../exceptions/N3-async-runtime/spec.md)（异步运行时）。
 
 ## 1. 范围
 
@@ -81,5 +81,22 @@ MAX ONE ROW、UNION ALL（`unionexec/`）、TABLESAMPLE、内存表扫描（`Tab
   - TableDual 的行数、LIMIT 的内联投影、`markChildrenUsedCols`、构建器的四种计划与 TableDual 的报错。
 - **会话测试**（`crates/session`）：
   - 正向：`SELECT 1` 经 `execute_stmt` 返回一行 1，`SELECT 1 LIMIT 0` 和 `SELECT 1 FROM DUAL WHERE 1 = 0` 返回 0 行；三者都使 `executed_stmts()` 加 1，读完并 close 之后会话空闲（`statements_without_a_table_run_on_the_basic_executors`）。参数测试中 `id > NULL` 被折叠为 TableDual，读出来是 0 行。
-  - 原来用 `SELECT 1`（Projection over TableDual）和 TableDual 的 mock 计划作为"执行器构建器的边界"的例子，现在它们能执行；改用 `SELECT 1 FROM DUAL ORDER BY RAND()`（Sort，`blocked-by:D12.5`）和 Sort 的 mock 计划。
-- ab：`SELECT 1`、`SELECT ... LIMIT`、带条件的子查询等不读表的语句现在由新栈执行；按 CLAUDE.md §3，端到端比较由维护者在合并后运行（`tools/ab`）。
+  - 原来用 `SELECT 1`（Projection over TableDual）和 TableDual 的 mock 计划作为"执行器构建器的边界"的例子，现在它们能执行。回退点的例子改用 `SELECT 1 FROM DUAL ORDER BY RAND()`（Sort，`blocked-by:D12.5`，排序执行器），"只计打开过的执行器"的 mock 计划改用 NominalSort（执行器框架 D12.0 的桩）。
+  - 预处理语句中 `id = ? AND id = ?` 取不同值时是空范围（Go：TableDual，不进计划缓存），原来停在 `blocked-by:D12.2`，现在执行，读出 0 行。
+  - **与 Go 逐列比较结果和列元数据**（`crates/session/src/tests/sbtest_results.rs`，见 §7）：表 `sbtest1` 的 TableInfo 取自 Go v8.5.8（`crates/session/src/tests/sbtest1_table_info.json`，v8.5.8 服务器状态端口 `/schema/test/sbtest1` 返回的值），期望的行与列元数据（名字、类型、flen、decimal、flag、字符集）都在 Go v8.5.8 上用同样的语句跑出来。
+- ab：`SELECT 1`、`SELECT ... LIMIT`、点查上的投影等语句现在由新栈执行。按 [agent-workflow](../../docs/process/agent-workflow.md)，把语句从回退移到执行的 PR 要在合并前由维护者跑 `tools/ab`；第一次移植正是合并后由 ab 发现回归的。
+
+## 7. 第一次移植的回归（#338 撤回的原因）
+
+维护者在 #338 合并后的端到端比较中发现三个问题，#345 撤回。这一次执行器的代码与 #338 相同（执行器本身没有错；构建器的边界只随 main 上已合入的排序执行器 D12.5 调整），三个问题的根源都在执行器之外，已分别在 main 上修好；本 PR 加会话层的测试，使它们不会再回来。
+
+| 现象 | 根源 | 修复 | 测试（`sbtest_results.rs`） |
+|---|---|---|---|
+| `SELECT c FROM sbtest1 WHERE id = 1` 在 `GoSlice::i64_at` panic | 投影的列引用没有经过投影自己的 `ResolveIndices`（物理计划后处理 D10.9 中的列下标解析），下标都停在 0：把整数列 `id`（定长、没有 offsets）当字符串列 `c` 读。投影执行器打开之后的 panic 无法回退 | #351（`PhysicalProjection.ResolveIndices`） | `projection_over_point_get_reads_its_columns`、`prepared_…`、`parallel_…`（多线程 runtime，行 id 取 `i64::MIN`，投影走并行路径） |
+| 预处理的 `BETWEEN ? AND ?` 结果错 | 参数标记的序号都是 0（#352），每个标记都读第一个参数 | #354；在 main 上范围扫描在任何执行器打开之前就停在 TableReader（读取类执行器 D12.1）回退 | `ranges_fall_back_before_any_executor_opened`；`prepared_statement_markers_read_their_own_parameters`（`tests.rs`） |
+| 表达式列的列名为空（如 `SELECT 1 + 1`） | 规划器拿不到语句文本，`SelectField.Text()`（Go `pkg/planner/core/logical_plan_builder.go:1462`）为空 | #364（语句文本经编译、计划缓存和 PREPARE 各条路径到达规划器） | `record_sets_name_expression_columns_by_their_text`：文本协议、PREPARE、EXECUTE 未命中与命中（`found_in_plan_cache` 依次为假、真），比较记录集的列名、行，以及 EXECUTE 与 PREPARE 的列相同；含评审补充的 `  /* x */ SELECT 1 + 1`（列名 `1 + 1`） |
+
+每个测试都在模拟旧错误时失败（列下标固定为 0、标记序号固定为 0、语句文本为空），修复后通过。
+
+期望值是同一台 v8.5.8 服务器（unistore，同样的表和行）对每条语句（文本协议、`COM_STMT_PREPARE`、`COM_STMT_EXECUTE`）发出的列定义。测试比较的是会话的结果列（`ResultField`），线协议上的列定义是它们经 `ConvertColumnInfo`（`crates/server`）转换的结果：字符串列的长度是 flen × 4（utf8mb4），decimal 是 flen + 1（有小数再 + 1），flen 未指定时取类型的默认长度，decimal 未指定时为 31（`NotFixedDec`）；期望值按这些规则从 Go 发出的定义反推。
+
