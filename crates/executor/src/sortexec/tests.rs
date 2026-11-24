@@ -1,8 +1,10 @@
 //! The non-spill unit tests of Go's `sortexec`: `TestInterruptedDuringSort`
 //! (sortexec_pkg_test.go), `onePartitionAndAllDataInMemoryCase` (sort_spill_test.go),
-//! `topNNoSpillCase` (topn_spill_test.go) with Go's result checker, and the executor paths
-//! they do not reach (the parallel path's boundary, unsupported sort keys, count 0, offsets
-//! past the end, compaction of the top-n heap).
+//! `topNNoSpillCase` (topn_spill_test.go), `TestParallelSort` and `TestFailpoint`
+//! (parallel_sort_test.go, without failpoints) with Go's result checker, and the executor
+//! paths they do not reach (unsupported sort keys, count 0, offsets past the end, compaction
+//! of the top-n heap; the parallel sort's tasks ending on close, on an error, on an early
+//! stop and on a drop, a kill signal, both runtime topologies).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -65,6 +67,10 @@ struct MockDataSource {
     next_row: usize,
     nexts: Arc<AtomicUsize>,
     opened: Arc<AtomicBool>,
+    /// `Next` fails once it has been called this many times.
+    fail_after: Option<usize>,
+    /// Dropped with the source (its strong count tells whether the source is alive).
+    _alive: Arc<()>,
 }
 
 #[async_trait]
@@ -81,7 +87,10 @@ impl Executor for MockDataSource {
         Ok(())
     }
     async fn next(&mut self, _ctx: &ExecCtx, req: &mut Chunk) -> Result<(), Error> {
-        self.nexts.fetch_add(1, Ordering::SeqCst);
+        let n = self.nexts.fetch_add(1, Ordering::SeqCst);
+        if self.fail_after.is_some_and(|f| n >= f) {
+            return Err(Error::plain("mock child failed"));
+        }
         req.reset();
         while self.next_row < self.data.num_rows() && req.num_rows() < req.required_rows() {
             req.append_row(self.data.get_row(self.next_row));
@@ -151,22 +160,31 @@ struct Child {
     exec: Box<dyn Executor>,
     nexts: Arc<AtomicUsize>,
     opened: Arc<AtomicBool>,
+    alive: Arc<()>,
 }
 
 fn data_source(vars: &SessionVars, data: Chunk) -> Child {
+    failing_data_source(vars, data, None)
+}
+
+fn failing_data_source(vars: &SessionVars, data: Chunk, fail_after: Option<usize>) -> Child {
     let nexts = Arc::new(AtomicUsize::new(0));
     let opened = Arc::new(AtomicBool::new(false));
+    let alive = Arc::new(());
     let exec = Box::new(MockDataSource {
         base: new_base_executor_v2(vars, &SqlKiller::new(), Some(schema()), 1, Vec::new()),
         data,
         next_row: 0,
         nexts: Arc::clone(&nexts),
         opened: Arc::clone(&opened),
+        fail_after,
+        _alive: Arc::clone(&alive),
     });
     Child {
         exec,
         nexts,
         opened,
+        alive,
     }
 }
 
@@ -186,12 +204,22 @@ fn by_items(items: &[(ExprRef, bool)]) -> Vec<ByItems> {
 }
 
 fn build_sort_exec(vars: &SessionVars, child: Box<dyn Executor>, items: Vec<ByItems>) -> SortExec {
+    build_sort_exec_with_killer(vars, child, items, &SqlKiller::new())
+}
+
+fn build_sort_exec_with_killer(
+    vars: &SessionVars,
+    child: Box<dyn Executor>,
+    items: Vec<ByItems>,
+    killer: &Arc<SqlKiller>,
+) -> SortExec {
     new_sort_exec(
-        new_base_executor(vars, &SqlKiller::new(), Some(schema()), 2, vec![child]),
+        new_base_executor(vars, killer, Some(schema()), 2, vec![child]),
         items,
         schema(),
         tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
         1 << 30,
+        vars.executor_concurrency,
     )
 }
 
@@ -360,21 +388,6 @@ async fn one_partition_and_all_data_in_memory() {
         -1,
         -1
     ));
-}
-
-/// Go's `Open` always takes the parallel path (sort.go:170): it stops there with `Blocked`
-/// before the child is opened.
-#[tokio::test]
-async fn open_takes_the_parallel_path() {
-    let vars = vars(32);
-    let child = data_source(&vars, gen_data(10, false));
-    let mut exe = build_sort_exec(&vars, child.exec, by_items(&[(col(0), false)]));
-    let (ctx, _) = exec_ctx();
-    let err = exe.open(&ctx).await.unwrap_err();
-    assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D12.5"));
-    assert!(!exe.is_unparallel);
-    assert!(!child.opened.load(Ordering::SeqCst));
-    exe.close().await.unwrap();
 }
 
 /// An empty child: no partition rows, no result.
@@ -607,4 +620,264 @@ async fn top_n_respects_required_rows() {
     exe.next(&ctx, &mut chk).await.unwrap();
     assert_eq!(chk.num_rows(), 7);
     exe.close().await.unwrap();
+}
+
+/// Go's `resultChecker` for the parallel sort, which compares whole rows; the rows here have
+/// a payload column that is not a sort key, so rows with equal keys come in the order the
+/// workers were scheduled (as in Go). The check is: the same rows (as a multiset), in
+/// non-decreasing key order.
+fn check_parallel(data: &Chunk, exe: &SortExec, result: &[Chunk]) -> bool {
+    let (key_columns, key_cmp_funcs, descs) = exe.get_sort_meta_for_test();
+    let keys = super::sort::SortKeys {
+        key_columns,
+        key_cmp_funcs,
+        descs: Arc::from(descs),
+    };
+    let mut got = Vec::new();
+    let mut prev: Option<(usize, usize)> = None;
+    for (c, chk) in result.iter().enumerate() {
+        for i in 0..chk.num_rows() {
+            if let Some((pc, pi)) = prev
+                && keys.compare_row(result[pc].get_row(pi), chk.get_row(i)) > 0
+            {
+                return false;
+            }
+            prev = Some((c, i));
+            got.push(row_string(chk.get_row(i)));
+        }
+    }
+    let mut want: Vec<String> = (0..data.num_rows())
+        .map(|i| row_string(data.get_row(i)))
+        .collect();
+    got.sort();
+    want.sort();
+    got == want
+}
+
+/// Go's `parallelSortTest`: open, read every row, close, check.
+async fn parallel_sort_round(
+    exe: &mut SortExec,
+    ctx: &ExecCtx,
+    data: &Chunk,
+    stmt_tracker: &Tracker,
+) {
+    exe.open(ctx).await.unwrap();
+    assert!(!exe.is_unparallel);
+    let result = execute(exe, ctx).await.unwrap();
+    assert!(result.iter().all(|c| c.num_rows() <= 32));
+    exe.close().await.unwrap();
+    assert!(check_parallel(data, exe, &result));
+    assert_eq!(exe.parallel_state_for_test(), (0, 0, 1));
+    assert!(!exe.is_spill_triggered_in_parallel_sort_for_test());
+    assert_eq!(exe.get_spilled_row_num_in_parallel_sort_for_test(), 0);
+    assert_eq!(stmt_tracker.bytes_consumed(), 0);
+}
+
+/// `TestParallelSort` without its failpoints (slow workers, a kill check every few
+/// comparisons): 30000 rows, max chunk size 32, a new executor and a reused one per round,
+/// with several worker counts (`tidb_executor_concurrency`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_sort() {
+    let data = gen_data(30000, true);
+    for concurrency in [5, 1, 2, 8] {
+        let mut vars = vars(32);
+        vars.executor_concurrency = concurrency;
+        let items = by_items(&[(col(0), false), (col(1), true)]);
+        let reused_child = data_source(&vars, data.clone());
+        let mut reused = build_sort_exec(&vars, reused_child.exec, items.clone());
+        let (ctx, stmt_tracker) = exec_ctx();
+        for _ in 0..3 {
+            let child = data_source(&vars, data.clone());
+            let mut exe = build_sort_exec(&vars, child.exec, items.clone());
+            parallel_sort_round(&mut exe, &ctx, &data, &stmt_tracker).await;
+            assert!(!child.opened.load(Ordering::SeqCst));
+            parallel_sort_round(&mut reused, &ctx, &data, &stmt_tracker).await;
+            assert!(!reused_child.opened.load(Ordering::SeqCst));
+        }
+    }
+}
+
+/// `TestFailpoint` without its failpoints (random errors, slow workers, kill checks): 20
+/// workers (twice the result channel's capacity) over 65536 rows, a new executor and a
+/// reused one per round; also with a single key column, so that many rows tie.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_sort_many_workers() {
+    let data = gen_data(65536, false);
+    let mut vars = vars(32);
+    vars.executor_concurrency = (super::sort::ResultChannelCapacity * 2) as i64;
+    for items in [
+        by_items(&[(col(0), false), (col(1), false)]),
+        by_items(&[(col(0), true)]),
+    ] {
+        let reused_child = data_source(&vars, data.clone());
+        let mut reused = build_sort_exec(&vars, reused_child.exec, items.clone());
+        let (ctx, stmt_tracker) = exec_ctx();
+        for _ in 0..2 {
+            let child = data_source(&vars, data.clone());
+            let mut exe = build_sort_exec(&vars, child.exec, items.clone());
+            parallel_sort_round(&mut exe, &ctx, &data, &stmt_tracker).await;
+            parallel_sort_round(&mut reused, &ctx, &data, &stmt_tracker).await;
+        }
+    }
+}
+
+/// The parallel sort on the N3 runtime's ExecPool, in both topologies (the tasks of a
+/// NoSteal runtime stay on the connection's thread).
+#[test]
+fn parallel_sort_on_the_exec_pool() {
+    for topology in [
+        tidb_runtime::pool::Topology::Steal,
+        tidb_runtime::pool::Topology::NoSteal,
+    ] {
+        let rt = tidb_runtime::pool::Runtime::new(tidb_runtime::pool::RuntimeConfig {
+            topology,
+            worker_threads: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        let pool = rt.pool().clone();
+        rt.block_on(async move {
+            let data = gen_data(5000, true);
+            let mut vars = vars(32);
+            vars.executor_concurrency = 3;
+            let child = data_source(&vars, data.clone());
+            let mut exe = build_sort_exec(&vars, child.exec, by_items(&[(col(1), false)]));
+            let (mut ctx, stmt_tracker) = exec_ctx();
+            ctx.pool = Some(pool);
+            parallel_sort_round(&mut exe, &ctx, &data, &stmt_tracker).await;
+        });
+    }
+}
+
+/// An empty child, and `Close` right after `Open` (no task was started).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_sort_of_no_rows_and_close_without_next() {
+    let vars = vars(32);
+    let child = data_source(&vars, gen_data(0, false));
+    let mut exe = build_sort_exec(&vars, child.exec, by_items(&[(col(0), false)]));
+    let (ctx, _) = exec_ctx();
+    exe.open(&ctx).await.unwrap();
+    assert!(execute(&mut exe, &ctx).await.unwrap().is_empty());
+    exe.close().await.unwrap();
+    assert_eq!(exe.parallel_state_for_test(), (0, 0, 1));
+
+    exe.open(&ctx).await.unwrap();
+    assert!(child.opened.load(Ordering::SeqCst));
+    let nexts = child.nexts.load(Ordering::SeqCst);
+    exe.close().await.unwrap();
+    assert!(!child.opened.load(Ordering::SeqCst));
+    assert_eq!(child.nexts.load(Ordering::SeqCst), nexts);
+    assert_eq!(exe.parallel_state_for_test(), (0, 0, 1));
+}
+
+/// An early stop: the reader takes one chunk and closes. `Close` stops the fetcher, the
+/// workers and the generator through `finishCh`, drains the channels, awaits every task
+/// (none is left), gets the child back and closes it, and the memory goes back to 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_sort_early_stop_ends_the_tasks() {
+    for concurrency in [1, 4, 20] {
+        let data = gen_data(20000, true);
+        let mut vars = vars(32);
+        vars.executor_concurrency = concurrency;
+        let child = data_source(&vars, data.clone());
+        let mut exe = build_sort_exec(&vars, child.exec, by_items(&[(col(1), false)]));
+        let (ctx, stmt_tracker) = exec_ctx();
+        exe.open(&ctx).await.unwrap();
+        let mut chk = new_first_chunk(&exe);
+        exe.next(&ctx, &mut chk).await.unwrap();
+        assert_eq!(chk.num_rows(), 32);
+        exe.close().await.unwrap();
+        assert_eq!(exe.parallel_state_for_test(), (0, 0, 1));
+        assert!(!child.opened.load(Ordering::SeqCst));
+        assert_eq!(stmt_tracker.bytes_consumed(), 0);
+        // The child is back in the executor and can run again.
+        parallel_sort_round(&mut exe, &ctx, &data, &stmt_tracker).await;
+    }
+}
+
+/// The child fails in the middle of the stream: `Next` returns its error (the fetcher sends
+/// it before the generator starts), and `Close` still ends every task and closes the child.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_sort_child_error() {
+    let vars = vars(32);
+    let child = failing_data_source(&vars, gen_data(5000, false), Some(20));
+    let mut exe = build_sort_exec(&vars, child.exec, by_items(&[(col(0), false)]));
+    let (ctx, stmt_tracker) = exec_ctx();
+    exe.open(&ctx).await.unwrap();
+    let mut chk = new_first_chunk(&exe);
+    let err = exe.next(&ctx, &mut chk).await.unwrap_err();
+    assert_eq!(err.to_string(), "mock child failed");
+    exe.close().await.unwrap();
+    assert_eq!(exe.parallel_state_for_test(), (0, 0, 1));
+    assert!(!child.opened.load(Ordering::SeqCst));
+    assert_eq!(stmt_tracker.bytes_consumed(), 0);
+}
+
+/// A kill signal: the workers check it when they merge their sorted runs, and `Next` returns
+/// the kill error; `Close` ends every task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_sort_killed() {
+    let mut vars = vars(32);
+    vars.executor_concurrency = 4;
+    let killer = SqlKiller::new();
+    let child = data_source(&vars, gen_data(5000, false));
+    let mut exe =
+        build_sort_exec_with_killer(&vars, child.exec, by_items(&[(col(0), false)]), &killer);
+    let (ctx, _) = exec_ctx();
+    exe.open(&ctx).await.unwrap();
+    killer.send_kill_signal(QueryInterrupted);
+    let mut chk = new_first_chunk(&exe);
+    let err = exe.next(&ctx, &mut chk).await.unwrap_err();
+    assert!(
+        tidb_base::dbterror::exeerrors::ErrQueryInterrupted.equal(&err),
+        "{err}"
+    );
+    exe.close().await.unwrap();
+    assert_eq!(exe.parallel_state_for_test(), (0, 0, 1));
+    assert!(!child.opened.load(Ordering::SeqCst));
+}
+
+/// Dropping the executor without `Close` (the safety net of N3 3.5): its tasks are aborted
+/// and the child the fetcher owns is dropped with them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_sort_drop_aborts_the_tasks() {
+    let mut vars = vars(32);
+    vars.executor_concurrency = 4;
+    let child = data_source(&vars, gen_data(20000, false));
+    let alive = child.alive;
+    let mut exe = build_sort_exec(&vars, child.exec, by_items(&[(col(0), false)]));
+    let (ctx, _) = exec_ctx();
+    exe.open(&ctx).await.unwrap();
+    let mut chk = new_first_chunk(&exe);
+    exe.next(&ctx, &mut chk).await.unwrap();
+    assert!(Arc::strong_count(&alive) > 1);
+    drop(exe);
+    for _ in 0..1000 {
+        if Arc::strong_count(&alive) == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(Arc::strong_count(&alive), 1);
+}
+
+/// Outside a tokio runtime and without a pool the tasks cannot start: `Next` returns an
+/// error and `Close` still closes the child.
+#[test]
+fn parallel_sort_without_a_runtime() {
+    let vars = vars(32);
+    let child = data_source(&vars, gen_data(10, false));
+    let mut exe = build_sort_exec(&vars, child.exec, by_items(&[(col(0), false)]));
+    let (ctx, _) = exec_ctx();
+    futures::executor::block_on(async {
+        exe.open(&ctx).await.unwrap();
+        let mut chk = new_first_chunk(&exe);
+        let err = exe.next(&ctx, &mut chk).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the parallel sort needs a tokio runtime to run its tasks"
+        );
+        exe.close().await.unwrap();
+    });
+    assert!(!child.opened.load(Ordering::SeqCst));
 }

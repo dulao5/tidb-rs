@@ -282,6 +282,14 @@ impl ExecutorMeta {
         &self.children
     }
 
+    /// Takes the children out, for a task that owns one while it runs (Go's goroutine uses
+    /// `e.Children(0)` while the executor keeps it: the parallel sort's workers, the parallel
+    /// projection's fetcher); [`ExecutorMeta::set_all_children`] puts them back.
+    // glue: M-GO (a child moves into the task that reads it)
+    pub fn take_all_children(&mut self) -> Vec<Box<dyn Executor>> {
+        std::mem::take(&mut self.children)
+    }
+
     /// SetAllChildren sets the children for an executor.
     // go: executorMeta.SetAllChildren L1
     pub fn set_all_children(&mut self, children: Vec<Box<dyn Executor>>) {
@@ -304,13 +312,6 @@ impl ExecutorMeta {
     // go: executorMeta.SetChildren L1
     pub fn set_children(&mut self, idx: isize, ex: Box<dyn Executor>) {
         self.children[idx as usize] = ex;
-    }
-
-    /// Takes the children out: a worker task that runs a child owns it (the parallel
-    /// projection's fetcher); `SetAllChildren` puts them back.
-    // glue: M-WG (a child owned by a worker task while it runs)
-    pub fn take_all_children(&mut self) -> Vec<Box<dyn Executor>> {
-        std::mem::take(&mut self.children)
     }
 
     /// Children returns the children for an executor.

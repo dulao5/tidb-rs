@@ -30,6 +30,7 @@ pub use list::List;
 pub use list::RowPtr;
 pub use mutrow::MutRow;
 pub use row::Row;
+pub use row::RowHandle;
 
 /// The shared handle of a chunk column (N5a 3.2: `MakeRef` / `SwapColumns` share a column).
 /// `triomphe::Arc` has no weak count, so `make_mut`'s uniqueness check is one load instead of

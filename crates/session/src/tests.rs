@@ -772,12 +772,15 @@ fn every_fallback_point_restores_the_session() {
             "D02.2"
         }),
         ("after Compile (executor builder stub)", |s| {
-            // The statement is planned (spec §9.2); building its Sort executor is a
-            // boundary, before any executor opened.
-            let sql = "SELECT 1 FROM DUAL ORDER BY RAND()";
+            // The statement is planned (spec §9.2); building its table reader (the read
+            // executors, D12.1) is a boundary, before any executor opened. A statement
+            // without a table no longer stops in the builder: `SELECT 1` and `ORDER BY
+            // RAND()` over a dual table run on the basic executors (D12.2) and the sort
+            // executors (D12.5), so this point runs on the sysbench schema.
+            let sql = "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10";
             let e = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
-            assert_eq!(blocked(&e), Some("D12.5"));
-            "D12.5"
+            assert_eq!(blocked(&e), Some("D12.1"), "{e:?}");
+            "D12.1"
         }),
         ("after the warm-up (TSO pending)", |s| {
             let _ = compile(s, "SELECT a FROM t", 1);
@@ -793,7 +796,11 @@ fn every_fallback_point_restores_the_session() {
     ];
     for (name, step) in points {
         let store = MockStore::new(10);
-        let mut s = session(&store);
+        let mut s = if name.starts_with("after Compile") {
+            sbtest_session(&store)
+        } else {
+            session(&store)
+        };
         // Some state left by earlier statements.
         s.vars_mut().last_found_rows = 3;
         s.vars().stmt_ctx().append_warning(Error::plain("earlier"));

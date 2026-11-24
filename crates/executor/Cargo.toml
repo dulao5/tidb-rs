@@ -32,6 +32,11 @@ tipb = { workspace = true }
 futures = { workspace = true }
 parking_lot = "0.12"
 log = "0.4"
+# The tasks of the parallel sort (D12.5) and of the parallel projection (the basic executors,
+# D12.2): spawned on the N3 ExecPool or the current runtime (M-GO), their channels (M-CH),
+# `select!` and the wait groups' notifications.
+tidb-runtime = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 # VS1-12 (D12.1 point get): snapshots and handles (D07.0), the row decoders and record keys
 # (D01.11), the old row format's chunk decoder (D01.8), the session's store labels of a
 # closest replica read (kvproto `metapb.StoreLabel` is client-rust's, ADR 0008).
@@ -39,10 +44,6 @@ tidb-kv = { workspace = true }
 tidb-tablecodec = { workspace = true }
 tidb-codec = { workspace = true }
 tikv-client = { workspace = true }
-# The basic executors (D12.2): the parallel projection's tasks and channels (M-GO, M-CH) on
-# the N3 ExecPool.
-tokio = { workspace = true, features = ["sync", "macros", "rt"] }
-tidb-runtime = { workspace = true }
 
 [features]
 # Test doubles for the crates above (the session's tests): `testutil`.

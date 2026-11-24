@@ -81,7 +81,7 @@ MAX ONE ROW、UNION ALL（`unionexec/`）、TABLESAMPLE、内存表扫描（`Tab
   - TableDual 的行数、LIMIT 的内联投影、`markChildrenUsedCols`、构建器的四种计划与 TableDual 的报错。
 - **会话测试**（`crates/session`）：
   - 正向：`SELECT 1` 经 `execute_stmt` 返回一行 1，`SELECT 1 LIMIT 0` 和 `SELECT 1 FROM DUAL WHERE 1 = 0` 返回 0 行；三者都使 `executed_stmts()` 加 1，读完并 close 之后会话空闲（`statements_without_a_table_run_on_the_basic_executors`）。参数测试中 `id > NULL` 被折叠为 TableDual，读出来是 0 行。
-  - 原来用 `SELECT 1`（Projection over TableDual）和 TableDual 的 mock 计划作为"执行器构建器的边界"的例子，现在它们能执行。回退点的例子改用 `SELECT 1 FROM DUAL ORDER BY RAND()`（Sort，`blocked-by:D12.5`，排序执行器），"只计打开过的执行器"的 mock 计划改用 NominalSort（执行器框架 D12.0 的桩）。
+  - 原来用 `SELECT 1`（Projection over TableDual）和 TableDual 的 mock 计划作为"执行器构建器的边界"的例子，现在它们能执行。排序执行器（D12.5）的并行 sort 也已合入，`SELECT 1 FROM DUAL ORDER BY RAND()` 同样能执行；回退点的例子改用 sysbench 表上的范围扫描 `SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10`（TableReader，`blocked-by:D12.1`，读取类执行器），"只计打开过的执行器"的 mock 计划改用 NominalSort（执行器框架 D12.0 的桩）。
   - 预处理语句中 `id = ? AND id = ?` 取不同值时是空范围（Go：TableDual，不进计划缓存），原来停在 `blocked-by:D12.2`，现在执行，读出 0 行。
   - **与 Go 逐列比较结果和列元数据**（`crates/session/src/tests/sbtest_results.rs`，见 §7）：表 `sbtest1` 的 TableInfo 取自 Go v8.5.8（`crates/session/src/tests/sbtest1_table_info.json`，v8.5.8 服务器状态端口 `/schema/test/sbtest1` 返回的值），期望的行与列元数据（名字、类型、flen、decimal、flag、字符集）都在 Go v8.5.8 上用同样的语句跑出来。
 - ab：`SELECT 1`、`SELECT ... LIMIT`、点查上的投影等语句现在由新栈执行。按 [agent-workflow](../../docs/process/agent-workflow.md)，把语句从回退移到执行的 PR 要在合并前由维护者跑 `tools/ab`；第一次移植正是合并后由 ab 发现回归的。
