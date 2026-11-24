@@ -44,8 +44,8 @@ converge：`scripts/converge.py --block D12.5 --part specs/VS1-vertical-slice/fu
 
 | 位置 | 情况 | 处理 |
 |---|---|---|
-| `SortExec.Open`（`sort.go:170`） | Go 无条件设 `e.IsUnparallel = false`，生产路径**总是**走并行 sort | 并行 sort 是本部分以外的 D12.5：`Open` 在打开子执行器之前返回 `blocked(D12.5)`，所以 `ORDER BY`（没有 LIMIT 的 Sort）目前停在边界。单分区（unparallel）路径完整移植，经测试钩子 `set_unparallel_for_test` 进入（Go 的测试在 `Open` 之后改 `IsUnparallel`）。这一点已在 #329 请负责人决定（见 §5 第 1 条） |
-| `SortExec.Open`（`sort.go:186-188`）、`switchToNewSortPartition`（`sort.go:553`）、`TopNExec.Open`（`topn.go:121-157`） | `tidb_enable_tmp_storage_on_oom` 时把落盘动作挂到会话 tracker 上（`FallbackOldAndSetNewAction`），并建 topn worker / spill helper | Rust 的会话还没有内存 tracker（A1 的会话根 tracker 未接入 `SessionVars`），落盘容器也没有移植：这几处是 `blocked-by:D01.10` 的行内桩，动作不挂，所以**永远不会落盘**；内存超限时按语句 tracker 上已有的动作（取消 / 日志）处理 |
+| `SortExec.Open`（`sort.go:170`） | Go 无条件设 `e.IsUnparallel = false`，生产路径**总是**走并行 sort | 并行 sort 是本部分以外的 D12.5：`Open` 在打开子执行器之前返回 `blocked(D12.5)`，所以 `ORDER BY`（没有 LIMIT 的 Sort）目前停在边界。单分区（unparallel）路径完整移植，经测试钩子 `set_unparallel_for_test` 进入（Go 的测试在 `Open` 之后改 `IsUnparallel`）。负责人已决定照 Go（#329 的评论，2026-11-24，§5 第 1 条的选项 (a)）；并行 sort 另立任务 #339 |
+| `SortExec.Open`（`sort.go:186-188`）、`switchToNewSortPartition`（`sort.go:553`）、`TopNExec.Open`（`topn.go:121-157`） | `tidb_enable_tmp_storage_on_oom` 时把落盘动作挂到会话 tracker 上（`FallbackOldAndSetNewAction`），并建 topn worker / spill helper | Rust 的会话还没有内存 tracker（A1 的会话根 tracker 未接入 `SessionVars`），落盘容器也没有移植：这几处是 `blocked-by:D01.10` 的行内桩，动作不挂，所以**永远不会落盘**（负责人在 #329 的评论里写的是“挂动作的地方记为 `blocked-by:D15.1`”；tracker 的 `parts.py` 不接受指向已完成块的桩，D15.1 已完成，所以挂动作的两处和动作本身一样记为 D01.10，原因写在桩的说明里：会话 tracker 没有接入，见 A1）；内存超限时按语句 tracker 上已有的动作（取消 / 日志）处理 |
 | `externalSorting`、`reloadCursor`、`sortPartitionSpillDiskAction.Action`、`TopNExec.fetchChunksFromChild` / `spillTopNExecHeap` / `executeTopNWhenSpillTriggered` / `generateTopNResultsWhenSpillTriggered`、`TestKillSignalInTopN` | 落盘路径 | `blocked-by:D01.10`，返回错误、不静默跳过；没有落盘时到不了 |
 | `fetchChunksParallel`、`fetchChunksFromChild`、`generateResult(FromMemory)`、`appendResultToChunkInParallelMode` | 并行 sort | `blocked-by:D12.5`；`Open` 已停，到不了 |
 | `TopNExec.Open`（`topn.go:117-119`）、`initBeforeLoadingChunks`、`fetchChunks` 等（`RankInfo` 非空） | rank topn（planner 给 `PhysicalTopN.PrefixCol`） | `Open` 中 Go 为 rank topn 取 `typeCtx` 的分支处返回 `blocked(D12.5)`，在打开子执行器之前：路由器只在执行器打开之前回退到 Go（VS1 plan §4.3），停在 `Next` 会让语句在本节点以 1235 结束。后面的 rank 分支保留为桩（到不了） |
@@ -53,7 +53,7 @@ converge：`scripts/converge.py --block D12.5 --part specs/VS1-vertical-slice/fu
 
 ## 4. 与 Go 的其他差异（已知差异）
 
-1. **并行路径**：见 §3 第一行（`sort.go:170`）。在负责人决定之前，Sort 的 `Open` 返回 `blocked(D12.5)`；TopN 不受影响（Go 的 TopN 本来就不用并行 sort）。
+1. **并行路径**：见 §3 第一行（`sort.go:170`）。负责人决定照 Go（#329），Sort 的 `Open` 返回 `blocked(D12.5)`，直到并行 sort（#339）移植；TopN 不受影响（Go 的 TopN 本来就不用并行 sort）。
 2. **不落盘**：见 §3 第二行（`sort.go:187`、`sort.go:553`、`topn.go:149`）。同一查询在 Go 里内存超过 `tidb_mem_quota_query` 时会落盘并成功，在 Rust 里按语句 tracker 的动作处理（默认取消，8175）。
 3. **TopN 的 `executeTopN` 不在 goroutine 里跑**（`topn.go:310`）：见 §2 第 2 条。Go 中 goroutine 的 panic 由 `processPanicAndLog` 写进 `resultChannel`；Rust 中没有 panic 路径（错误按 `Result` 返回），`process_panic_and_log` 仍然移植（L2），只在调用方捕获到 panic 时用。
 4. **`closeChannels`**（`sort.go:103`）：Go 的 `Open` 总会建并行 sort 的 channel，排序键被拒绝时 `Next` 关闭它们。Rust 不建这些 channel，`close_channels` 是空函数；unparallel 模式下之后没有人读这些 channel，结果相同（govec 的错误记录覆盖这一路径）。
@@ -64,7 +64,7 @@ converge：`scripts/converge.py --block D12.5 --part specs/VS1-vertical-slice/fu
 
 ## 5. 待定与可能的上游问题
 
-1. **并行 sort 的处理**（等负责人决定，#329 的评论）：(a) 照 Go：`Open` 走并行路径，在并行 sort 移植之前返回 `blocked(D12.5)`（当前实现）；(b) 在并行 sort 移植之前让生产路径走 unparallel 模式（结果相同，但与 Go 的执行方式不同，需要记录为偏离）；(c) 把并行 sort 并入本任务。
+1. **并行 sort 的处理**（已决定，#329 的评论，2026-11-24）：选 (a) 照 Go：`Open` 走并行路径，在并行 sort 移植之前返回 `blocked(D12.5)`（当前实现），没有偏离，不需要裁定。(b) 生产路径改走 unparallel 模式是偏离，不采用；(c) 并行 sort（worker 与多路归并）另立任务 #339，在本 PR 合并后开始。
 2. **比较函数按 by-item 下标取**（可能的上游问题，未提交）：`lessRow`、`compareRow`、`greaterRow`、`keyColumnsLess` 用 `keyColumns` 的下标 `i` 去取 `keyCmpFuncs[i]` 和 `ByItems[i].Desc`（`sort.go:804-818`、`topn.go:188-202`），而 `buildKeyColumns` 跳过常量 by-item，`initCompareFuncs` 不跳过。常量排在列前面时，比较函数和 DESC 标志会错位到后面的列上；类型不同时会用错误的比较函数读列（可能读错或越界 panic）。Rust 照搬（govec 的 `gen leading constant` 记录用同类型的常量和列检验错位）。planner 是否会产生带常量 by-item 的 Sort / TopN 没有在集群上验证（见 PR 的 "Not checked"）；若能从 SQL 触发，应按 CLAUDE.md §2 第 6 条另开 `upstream-pitfall` issue 并请负责人裁决。
 3. **`Offset + Count` 回绕**：`LIMIT` 的 offset 与 count 之和超过 `uint64` 时，Go 的 topn 堆上限回绕；堆为空时 `processChk` 访问 `rowPtrs[0]` 会 panic。是否能从 SQL 触发（planner 可能先把这种 limit 改写掉）没有验证，govec 的生成器不生成这种记录。
 
