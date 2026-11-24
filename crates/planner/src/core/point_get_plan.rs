@@ -1565,7 +1565,7 @@ fn name_value_operand(ctx: &PlanCtx<'_>, e: &Expr) -> Result<Option<NameValueOpe
     match e {
         Expr::Value(x) => Ok(Some((value_expr_datum(x), None))),
         Expr::ParamMarker(x) => {
-            let con = match param_marker_expression(&*ctx.expr_ctx, x.order, false) {
+            let con = match param_marker_expression(&*ctx.expr_ctx, x.order(), false) {
                 Ok(con) => con,
                 Err(err) if blocked_by(&err).is_some() => return Err(err),
                 Err(_) => return Ok(None),

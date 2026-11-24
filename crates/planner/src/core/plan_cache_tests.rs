@@ -711,3 +711,72 @@ fn test_parts_with_params(params: &[Datum]) -> crate::planctx::SessionPlanCtx {
         ..test_parts()
     }
 }
+
+/// The `(offset, order)` of every parameter marker of `stmt`, by offset.
+fn marker_orders(stmt: &tidb_parser::ast::Stmt) -> Vec<(usize, usize)> {
+    use crate::core::plan_cacheable_checker::{CNode, Visit, Walker};
+    struct Collect(Vec<(usize, usize)>);
+    impl Visit for Collect {
+        fn enter(&mut self, _: CNode<'_>) -> bool {
+            false
+        }
+        fn leave(&mut self, n: CNode<'_>) -> bool {
+            if let CNode::ParamMarker(x) = n {
+                self.0.push((x.offset, x.order()));
+            }
+            true
+        }
+        fn fail(&mut self, e: Error) {
+            panic!("{e}");
+        }
+    }
+    let mut c = Collect(Vec::new());
+    Walker(&mut c).stmt(stmt);
+    c.0.sort_unstable();
+    c.0
+}
+
+/// PREPARE numbers the markers 0..n by position (`GeneratePlanCacheStmtWithAST`'s
+/// `SetOrder` loop): the parser leaves every marker at order 0, and without the numbering
+/// every `?` read the first parameter (#352). `ExtractAndSortParamMarkers` numbers them the
+/// same way, also where the walk meets them out of position (`LIMIT ?, ?`: Go's `Limit`
+/// visits the count before the offset).
+#[test]
+fn prepare_numbers_the_markers_by_position() {
+    let parse1 = |sql: &str| {
+        parse(sql, &ParseOptions::default())
+            .unwrap()
+            .stmts
+            .remove(0)
+    };
+    let orders = |m: &[(usize, usize)]| m.iter().map(|&(_, o)| o).collect::<Vec<_>>();
+
+    let sql = "select ? between ? and ?, ? + ?";
+    let st = parse1(sql);
+    assert_eq!(
+        orders(&marker_orders(&st)),
+        [0, 0, 0, 0, 0],
+        "the parser's order"
+    );
+    let mut v = vars();
+    let (ps, _, param_count) = generate_plan_cache_stmt_with_ast(
+        &mut test_parts().plan_ctx(&mut v),
+        true,
+        sql,
+        st,
+        &Is(1),
+        None,
+    )
+    .unwrap();
+    assert_eq!(param_count, 5);
+    let m = marker_orders(&ps.prepared_ast.stmt);
+    assert_eq!(orders(&m), [0, 1, 2, 3, 4]);
+    let offsets: Vec<usize> = m.iter().map(|&(o, _)| o).collect();
+    assert_eq!(offsets, ps.params, "Params: the offsets in order");
+    assert_eq!(offsets, [7, 17, 23, 26, 30]);
+
+    let st = parse1("select ? from dual limit ?, ?");
+    let offsets = crate::core::plan_cache_utils::extract_and_sort_param_markers(&st).unwrap();
+    assert_eq!(offsets, [7, 25, 28]);
+    assert_eq!(marker_orders(&st), [(7, 0), (25, 1), (28, 2)]);
+}

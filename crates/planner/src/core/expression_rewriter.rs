@@ -2101,7 +2101,7 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     // go: expressionRewriter.toParamMarker L1
     #[allow(clippy::wrong_self_convention)] // the Go method name
     fn to_param_marker(&mut self, v: &ast::ParamMarkerExpr) -> Result<(), Error> {
-        let mut value = param_marker_expression(self.sctx, v.order, false)?;
+        let mut value = param_marker_expression(self.sctx, v.order(), false)?;
         init_constant_repertoire(&*self.eval_ctx(), &mut value);
         let mut tp = std::mem::take(&mut value.ret_type);
         self.adjust_utf8mb4_collation(&mut tp);
