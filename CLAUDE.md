@@ -107,8 +107,8 @@ Issues labelled `duet-ready` are self-contained tasks. To take one:
 1. Pick the oldest `duet-ready` issue whose "Depends on" issues are closed; relabel it
    `duet-claimed` and comment that you started. Work on at most 2 at a time.
 2. Use any branch name (your environment may pick it); if the two repos' branch names differ,
-   the "tracker#N → #M" line in the PR body is what pairs them; follow the issue's scope, done criteria and
-   verification exactly; do not change files outside the listed areas.
+   the "tracker#N → #M" line in the PR body is what pairs them. Follow the issue's scope, done
+   criteria and verification exactly; do not change files outside the listed areas.
 3. Open the PRs with `Closes #<issue>` and the issue's checklist ticked. Before asking for review,
    add to the PR body a section **"Not checked"**: what you did not verify or were unsure about.
 4. If blocked, comment on the issue with what you need and relabel it `duet-blocked`.
