@@ -8,6 +8,10 @@
 # Environment:
 #   TIDB_REFERENCE_CACHE  directory for the tarball and the default tree
 #                         (default ~/.cache/tidb-rs; the tree is <cache>/tidb-<tag>)
+#   TIDB_REFERENCE_MIRROR=release  fetch the same archive from this repository's release
+#                         `reference-tidb-<tag>` through the GitHub REST API (`gh api`) (for environments
+#                         that can only reach dulao5/tidb-rs); sha256 and commit are checked
+#                         exactly as for the GitHub archive
 #   TIDB_REFERENCE_DIR    use this tree instead. It may be a git checkout: then HEAD must be the
 #                         pinned commit, tracked files unmodified, and no untracked file (nor an
 #                         ignored .go file) present; it is never fetched over.
@@ -46,6 +50,10 @@ stamp_file="$dest/.tidb-reference-stamp"
 want="$repo $tag $commit $sha"
 
 fail() { echo "tidb-reference: $*" >&2; exit 1; }
+case "${TIDB_REFERENCE_MIRROR:-}" in
+  ""|release) ;;
+  *) fail "TIDB_REFERENCE_MIRROR must be empty or 'release', got '$TIDB_REFERENCE_MIRROR'" ;;
+esac
 
 # A git checkout (e.g. a local full clone): verify, never modify.
 if [ -e "$dest/.git" ]; then
@@ -92,7 +100,16 @@ mkdir -p "$cache"
 tarball="$cache/tidb-$tag.tar.gz"
 if ! { [ -f "$tarball" ] && [ "$(sha256_of "$tarball")" = "$sha" ]; }; then
   echo "tidb-reference: fetching $repo $tag" >&2
-  curl -fsSL --retry 3 -o "$tarball.part" "https://github.com/$repo/archive/refs/tags/$tag.tar.gz"
+  if [ "${TIDB_REFERENCE_MIRROR:-}" = release ]; then
+    rm -f "$tarball.part"
+    # REST only (gh release download uses GraphQL, which some sandboxes block).
+    asset=$(gh api "repos/dulao5/tidb-rs/releases/tags/reference-tidb-$tag" \
+      --jq ".assets[] | select(.name==\"tidb-$tag.tar.gz\") | .id") || fail "release reference-tidb-$tag not found"
+    [ -n "$asset" ] || fail "release reference-tidb-$tag has no tidb-$tag.tar.gz"
+    gh api -H 'Accept: application/octet-stream' "repos/dulao5/tidb-rs/releases/assets/$asset" > "$tarball.part"
+  else
+    curl -fsSL --retry 3 -o "$tarball.part" "https://github.com/$repo/archive/refs/tags/$tag.tar.gz"
+  fi
   got=$(sha256_of "$tarball.part")
   if [ "$got" != "$sha" ]; then
     rm -f "$tarball.part"
