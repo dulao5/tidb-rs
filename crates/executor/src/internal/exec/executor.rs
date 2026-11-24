@@ -142,6 +142,12 @@ pub trait Executor: Send {
     fn as_point_get(&mut self) -> Option<&mut dyn crate::glue::PointGetExecutor> {
         None
     }
+    /// Go's type assertion `e.(*ProjectionExec)` (`M-IFACE`): the projection executor
+    /// (D12.2) returns itself.
+    // glue: M-IFACE (type assertion to *ProjectionExec)
+    fn as_projection(&self) -> Option<&crate::projection::ProjectionExec> {
+        None
+    }
 }
 
 /// Go's `retFieldTypes []*types.FieldType`, shared by an executor's meta and its chunk
@@ -298,6 +304,13 @@ impl ExecutorMeta {
     // go: executorMeta.SetChildren L1
     pub fn set_children(&mut self, idx: isize, ex: Box<dyn Executor>) {
         self.children[idx as usize] = ex;
+    }
+
+    /// Takes the children out: a worker task that runs a child owns it (the parallel
+    /// projection's fetcher); `SetAllChildren` puts them back.
+    // glue: M-WG (a child owned by a worker task while it runs)
+    pub fn take_all_children(&mut self) -> Vec<Box<dyn Executor>> {
+        std::mem::take(&mut self.children)
     }
 
     /// Children returns the children for an executor.
