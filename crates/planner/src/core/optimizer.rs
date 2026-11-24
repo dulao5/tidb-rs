@@ -952,7 +952,7 @@ pub fn physical_optimize(
 
     // Move the plan out of the task (and drop the task) before writing it.
     let mut plan = take_task_plan(t);
-    make_mut_plan(&mut plan).resolve_indices()?;
+    make_mut_plan(&mut plan).resolve_indices(ctx)?;
     let cost = crate::core::plan_cost_ver2::get_plan_cost_impl(
         ctx,
         &*plan,
