@@ -570,3 +570,217 @@ fn record_sets_name_expression_columns_by_their_text() {
         s.clean_closed_prepared_stmts();
     }
 }
+
+/// The column `id` as Go v8.5.8 describes it: `INT NOT NULL AUTO_INCREMENT PRIMARY KEY`
+/// (wire: charset 63, length 11, type 3, flags 515, decimals 0).
+fn col_id() -> Col {
+    use tidb_base::mysql::{AutoIncrementFlag, NotNullFlag, PriKeyFlag, TypeLong};
+    Col {
+        name: "id".to_owned(),
+        org_name: "id".to_owned(),
+        table: "sbtest1".to_owned(),
+        org_table: "sbtest1".to_owned(),
+        schema: "test".to_owned(),
+        tp: TypeLong,
+        flen: 11,
+        decimal: 0,
+        flag: (NotNullFlag | PriKeyFlag | AutoIncrementFlag) as u32,
+        charset: "binary".to_owned(),
+    }
+}
+
+/// A multi-threaded runtime for the statements whose plans hold a sort: the sort executors
+/// (D12.5) take the parallel path, whose workers are tasks spawned on the runtime the
+/// statement runs on.
+fn multi_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// `ORDER BY` over the table dual and over a point get, and `ORDER BY ... LIMIT` (a top-n),
+/// on the text protocol: with the parallel sort (#362) and the basic executors both on
+/// main, these plans run to the end on the new stack. The rows and the columns are what a
+/// Go v8.5.8 server (unistore, the same table and rows) returned for each statement; its
+/// plans (`EXPLAIN`) are in the comments. Each input holds at most one row, so the order of
+/// the rows is fixed and `ORDER BY RAND()` is checked by its rows and columns alone.
+#[test]
+fn sort_and_top_n_over_dual_and_point_get() {
+    let rt = multi_thread_runtime();
+    let _rt = rt.enter();
+    let (_store, mut s) = sysbench_session();
+    let cases: Vec<(&str, Ran)> = vec![
+        // Sort > Projection > Point_Get.
+        (
+            "SELECT c FROM sbtest1 WHERE id = 1 ORDER BY c",
+            (vec![col_c()], texts(&[&["c1"]])),
+        ),
+        // Projection > Sort > Projection > Projection > TableDual.
+        (
+            "SELECT 1 FROM DUAL ORDER BY RAND()",
+            (vec![int_col("1", 1)], texts(&[&["1"]])),
+        ),
+        // The same plan, no row.
+        (
+            "SELECT 1 FROM DUAL WHERE 1 = 0 ORDER BY RAND()",
+            (vec![int_col("1", 1)], vec![]),
+        ),
+        // Projection > Sort > Projection > Projection > Point_Get.
+        (
+            "SELECT c FROM sbtest1 WHERE id = 1 ORDER BY RAND()",
+            (vec![col_c()], texts(&[&["c1"]])),
+        ),
+        // Projection > Projection > Sort > Projection > Projection > Point_Get.
+        (
+            "SELECT c, k + 1 FROM sbtest1 WHERE id = 7 ORDER BY k + 1",
+            (vec![col_c(), int_col("k + 1", 20)], texts(&[&["c7", "71"]])),
+        ),
+        // Projection > TopN > Point_Get.
+        (
+            "SELECT c FROM sbtest1 WHERE id = 1 ORDER BY c LIMIT 1",
+            (vec![col_c()], texts(&[&["c1"]])),
+        ),
+        // Projection > TopN > Projection > Projection > TableDual.
+        (
+            "SELECT 1 AS a FROM DUAL ORDER BY RAND() LIMIT 1",
+            (vec![int_col("a", 1)], texts(&[&["1"]])),
+        ),
+        // Limit > Point_Get (the order is the handle's).
+        (
+            "SELECT id, c FROM sbtest1 WHERE id = 5 ORDER BY id DESC LIMIT 1",
+            (vec![col_id(), col_c()], texts(&[&["5", "c5"]])),
+        ),
+        // TableDual.
+        (
+            "SELECT c FROM sbtest1 WHERE id = 1 ORDER BY c LIMIT 0",
+            (vec![col_c()], vec![]),
+        ),
+    ];
+    for (sql, (cols, rows)) in cases {
+        let (got_cols, got_rows) = run_text(&mut s, sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert_eq!(got_cols, cols, "{sql}");
+        assert_eq!(got_rows, rows, "{sql}");
+    }
+}
+
+/// The prepared forms, with the plan cache on: each EXECUTE's columns, rows and
+/// `@@last_plan_from_cache` are the v8.5.8 server's. The point get under a sort or a top-n
+/// is cached and reused with other ids (an id with no row reads none); `ORDER BY RAND()` is
+/// never cached, and its column follows each EXECUTE's parameter. `LIMIT ?` still falls back
+/// at PREPARE.
+#[test]
+fn prepared_sort_and_top_n_over_dual_and_point_get() {
+    use tidb_base::mysql::{BinaryFlag, NotNullFlag, TypeLonglong, TypeVarString};
+    let _serial = PREPARED_COUNT.lock();
+    let rt = multi_thread_runtime();
+    let _rt = rt.enter();
+    let (_store, mut s) = sysbench_cached_session();
+    let int = new_int_datum;
+    let param = |tp, decimal, flag, charset| expr_col("?", tp, -1, decimal, flag, charset);
+    let at_prepare = param(TypeVarString, -1, 0, "utf8mb4");
+    let int_param = param(TypeLonglong, 0, (NotNullFlag | BinaryFlag) as u32, "binary");
+    let str_param = param(TypeVarString, -1, NotNullFlag as u32, "utf8mb4");
+    type Exec = (Vec<Datum>, Vec<Col>, Vec<Vec<String>>, bool);
+    let cases: Vec<(&str, Vec<Col>, Vec<Exec>)> = vec![
+        (
+            "SELECT c FROM sbtest1 WHERE id = ? ORDER BY c",
+            vec![col_c()],
+            vec![
+                (vec![int(1)], vec![col_c()], texts(&[&["c1"]]), false),
+                (vec![int(42)], vec![col_c()], texts(&[&["c42"]]), true),
+                (vec![int(101)], vec![col_c()], vec![], true),
+            ],
+        ),
+        (
+            "SELECT c FROM sbtest1 WHERE id = ? ORDER BY c LIMIT 1",
+            vec![col_c()],
+            vec![
+                (vec![int(1)], vec![col_c()], texts(&[&["c1"]]), false),
+                (vec![int(42)], vec![col_c()], texts(&[&["c42"]]), true),
+                (vec![int(101)], vec![col_c()], vec![], true),
+            ],
+        ),
+        (
+            "SELECT ?, c FROM sbtest1 WHERE id = ? ORDER BY c LIMIT 1",
+            vec![at_prepare.clone(), col_c()],
+            vec![
+                (
+                    vec![int(7), int(1)],
+                    vec![int_param.clone(), col_c()],
+                    texts(&[&["7", "c1"]]),
+                    false,
+                ),
+                (
+                    vec![int(8), int(42)],
+                    vec![int_param.clone(), col_c()],
+                    texts(&[&["8", "c42"]]),
+                    true,
+                ),
+            ],
+        ),
+        (
+            "SELECT ? FROM DUAL ORDER BY RAND()",
+            vec![at_prepare.clone()],
+            vec![
+                (
+                    vec![int(7)],
+                    vec![int_param.clone()],
+                    texts(&[&["7"]]),
+                    false,
+                ),
+                (vec![int(8)], vec![int_param], texts(&[&["8"]]), false),
+            ],
+        ),
+        // A new statement for a string parameter: Go's columns are `VARCHAR NOT NULL`
+        // (charset 46, length 5, type 253, flags 1, decimals 31).
+        (
+            "SELECT ? FROM DUAL ORDER BY RAND()",
+            vec![at_prepare],
+            vec![
+                (
+                    vec![new_string_datum("x")],
+                    vec![str_param.clone()],
+                    texts(&[&["x"]]),
+                    false,
+                ),
+                (
+                    vec![new_string_datum("y")],
+                    vec![str_param],
+                    texts(&[&["y"]]),
+                    false,
+                ),
+            ],
+        ),
+    ];
+    for (sql, prepared, execs) in cases {
+        let info = block_on(s.prepare_stmt(sql)).unwrap();
+        let got: Vec<Col> = info.fields.iter().map(col_of).collect();
+        assert_eq!(got, prepared, "PREPARE {sql}");
+        for (params, cols, rows, hit) in execs {
+            let what = format!("EXECUTE {sql} {params:?}");
+            let (got_cols, got_rows) = run_prepared(&mut s, info.stmt_id, params)
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(
+                s.vars().found_in_plan_cache,
+                hit,
+                "{what}: FoundInPlanCache"
+            );
+            assert_eq!(got_cols, cols, "{what}");
+            assert_eq!(got_rows, rows, "{what}");
+        }
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+        s.clean_closed_prepared_stmts();
+    }
+    // `LIMIT ?` is not taken yet: PREPARE falls back (the parameter of a limit is bound by
+    // the plan cache's EXECUTE path, D13.1), and Go answers it. (The v8.5.8 server keys the
+    // cached plan by the count: ids 1, 42, 3, 4 with counts 1, 2, 0, 1 miss, miss, miss,
+    // hit.)
+    let sql = "SELECT c FROM sbtest1 WHERE id = ? ORDER BY c LIMIT ?";
+    let Err(e) = block_on(s.prepare_stmt(sql)) else {
+        panic!("{sql}: PREPARE falls back");
+    };
+    assert_eq!(blocked(&e), Some("D13.1"), "{sql}: {e}");
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+}
