@@ -444,7 +444,11 @@ pub fn save_logical_plan_build_ctx() -> Result<(), Error> {
 /// check needs the privilege manager, which the new stack does not have (VS1 plan §3.2):
 /// Go skips it when no manager is registered. The cascades planner (`tidb_enable_cascades_planner`
 /// / the `USE_CASCADES` hint) is a boundary. Returns the best plan, its names and cost.
-// go: buildAndOptimizeLogicalPlanRound L2 (Build returns only logical plans; no privilege manager, D04.1; cascades is blocked-by:D09.17)
+///
+/// Go's builder reads each node's own text (`SelectField.Text()` names an expression
+/// column); the Rust AST keeps spans into the statement's text, which the node wrapper
+/// carries, so the builder's `sql_text` is set from it after `Init`.
+// go: buildAndOptimizeLogicalPlanRound L2 (Build returns only logical plans; no privilege manager, D04.1; cascades is blocked-by:D09.17; the builder takes the node's text)
 fn build_and_optimize_logical_plan_round(
     ctx: &mut PlanCtx<'_>,
     node: &NodeW<'_>,
@@ -458,6 +462,8 @@ fn build_and_optimize_logical_plan_round(
         Some(InfoSchemaHandle(is.snapshot())),
         Some(Arc::clone(hint_processor)),
     );
+    // The Rust AST keeps byte spans into the text it was parsed from (Go: ast.Node.Text).
+    builder.sql_text = node.text();
 
     let res = build_and_optimize_with_builder(ctx, node, is, &mut builder, checked);
     // defer builder.HandleUnusedViewHints()

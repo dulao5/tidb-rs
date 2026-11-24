@@ -65,6 +65,14 @@ converge：D13.1 `--item VS1-15` 44 个函数，24 个移植（L1 13、L2 11）+
 
 `PrepareExec` 用 `colNames2ResultFields` 生成 `Fields`，返回给会话（`PreparedStmtInfo.fields`）。计划由 `PlanBuilder.Build` 产生，在 D09.1（VS1-21）之前构建就失败，所以现在拿不到列定义。ab 的 sysbench 用例增加选择列表里有 `?` 的语句（`SELECT ?, c FROM sbtest1 WHERE id=?`，整数 / 无符号最大值 / 字符串三种参数），由 #247 的 PREPARE-vs-EXECUTE 元数据检查比较。
 
+**列名取预处理语句的原文（#361）。** 表达式列的列名是选择字段的原文（Go `SelectField.Text()`，见 D09.13 spec §5.1）。Rust AST 只存字节区间，规划时要知道区间所指的文本：
+
+- PREPARE：构建器的 `sql_text` 是参数化 SQL（D09.13 spec §7）。
+- EXECUTE 未命中：`generateNewPlan` 把预处理语句交给 `OptimizeAstNode` 时，在节点包装 `NodeW` 上设置 `PlanCacheStmt.stmt_text`（Go 的 `StmtText`，就是 PREPARE 解析的那段文本）。以前没有设置，EXECUTE 的表达式列名是空串，于是和 PREPARE 的列定义不同（`SELECT 1 + 1` 在 PREPARE 时列名是 `1 + 1`，EXECUTE 时是空串）。
+- EXECUTE 命中：沿用未命中时放进缓存的列名（`PlanCacheValue.OutputColumns`），所以也是正确的。
+
+`?` 列在 PREPARE 和 EXECUTE 的类型本来就不同（Go 同样如此，§3.5 开头），但列名两次都是 `?`。
+
 ## 4. 会话与路由器
 
 ### 4.1 PREPARE / EXECUTE 走到哪里
@@ -117,5 +125,5 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 ## 7. 验收
 
 - govec `plancache`：见 §3.1。
-- 单测：planner `plan_cache_tests`（PREPARE 停在 plan builder 之前发出的 warning、参数个数 8112 与顺序、PREPARE 后 `?` 按位置编号为 0..n（`prepare_numbers_the_markers_by_position`，含 `LIMIT ?, ?` 遍历顺序与位置不同的情形）、schema 变化后重新 preprocess 与 8113、未命中路径的 `UseCache` / `InPreparedPlanBuilding` / `isPlanCacheable` warning、`isPlanCacheable` 的开关与大小）；session（`cleanRetryInfo` 的坑、1461 计入已关闭语句、真正的 `PrepareStmt` 停在 D09.1 / D06.3 / 8115；`prepared_statement_markers_read_their_own_parameters`：表里有 1..10 行，`BETWEEN ? AND ?`、`>= ? AND <= ?`、`c = ? AND id BETWEEN ? AND ?`、`id = ? AND id = ?` 各执行两次（第一次未命中，第二次换参数、可缓存的命中），每次要么返回与 Go 相同的行，要么在固定的边界桩回退、没有执行器打开，#352）；路由器（§4.2）。
+- 单测：planner `plan_cache_tests`（PREPARE 停在 plan builder 之前发出的 warning、参数个数 8112 与顺序、PREPARE 后 `?` 按位置编号为 0..n（`prepare_numbers_the_markers_by_position`，含 `LIMIT ?, ?` 遍历顺序与位置不同的情形）、schema 变化后重新 preprocess 与 8113、未命中路径的 `UseCache` / `InPreparedPlanBuilding` / `isPlanCacheable` warning、`isPlanCacheable` 的开关与大小）；session（`cleanRetryInfo` 的坑、1461 计入已关闭语句、真正的 `PrepareStmt` 停在 D09.1 / D06.3 / 8115；`prepared_statement_markers_read_their_own_parameters`：表里有 1..10 行，`BETWEEN ? AND ?`、`>= ? AND <= ?`、`c = ? AND id BETWEEN ? AND ?`、`id = ? AND id = ?` 各执行两次（第一次未命中，第二次换参数、可缓存的命中），每次要么返回与 Go 相同的行，要么在固定的边界桩回退、没有执行器打开，#352）；表达式列名在 PREPARE、EXECUTE 未命中、EXECUTE 命中三处都和 Go 相同（会话测试 `expression_columns_are_named_by_their_text`，#361）；路由器（§4.2）。
 - **预处理点查（`SELECT c FROM sbtest1 WHERE id=?`）在 `strict` 模式下由新栈执行：本项做不到**。这条路径还被以下各项挡住：preprocess 查表（D06.3，VS1-17）、`PlanBuilder.Build`（D09.1，VS1-21）、`planner.Optimize`（D13.3，VS1-24；点查的 `TryFastPlan` 由它调用）、结果集与二进制参数的编码（D03.1，VS1-16）。本项完成后，PREPARE 在新会话中走到 preprocess 查表，`strict` 模式下 EXECUTE 报 `1235 blocked-by:D06.3`。

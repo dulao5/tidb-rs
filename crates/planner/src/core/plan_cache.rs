@@ -162,6 +162,7 @@ pub fn plan_cache_preprocess(
             ..Default::default()
         };
         let mut node_w = new_node_w(&mut stmt.prepared_ast.stmt);
+        node_w.set_text(&stmt.stmt_text);
         let mut opts: Vec<PreprocessOpt> =
             vec![Box::new(in_prepare), with_preprocessor_return(ret)];
         if let Some(d) = domain_is {
@@ -341,8 +342,10 @@ fn adjust_cached_plan(
 /// spec §3.3); a plan with an operator the instance cache cannot hold is silently not cached
 /// (Go's failed `CloneForPlanCache`). The flush generation is read before optimizing (A3
 /// spec §3.4). `NormalizePlan` and the plan digest are not ported (D14.x); `SetPlan` is
-/// done by `Compile` for the final plan.
-// go: generateNewPlan L2 (no clone; the flush generation; NormalizePlan / SetPlanDigest are not ported)
+/// done by `Compile` for the final plan. The prepared statement's AST keeps spans into the
+/// text PREPARE parsed (`StmtText`), which the node wrapper carries to the planner (Go's
+/// nodes keep their own text).
+// go: generateNewPlan L2 (no clone; the flush generation; NormalizePlan / SetPlanDigest are not ported; the node carries the statement text)
 pub fn generate_new_plan(
     parts: &SessionPlanCtx,
     vars: &mut SessionVars,
@@ -360,6 +363,7 @@ pub fn generate_new_plan(
     let resolve_ctx = std::sync::Arc::clone(&stmt.resolve_ctx);
     let stmt_ast: &mut Stmt = &mut stmt.prepared_ast.stmt;
     let mut node_w = new_node_w_with_ctx(stmt_ast, resolve_ctx);
+    node_w.set_text(&stmt.stmt_text);
     let res = optimize_ast_node(vars, &mut node_w, is);
     vars.stmt_ctx_mut().in_prepared_plan_building = false;
     let (p, names) = res?;

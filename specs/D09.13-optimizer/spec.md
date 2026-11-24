@@ -93,6 +93,23 @@ Go 把同一个 `*Column` 同时放进底层投影的表达式和 schema（子�
 - `PlanCacheStmt` 不保存 `VisitInfos`（只用于有权限管理器时的检查），所以 EXECUTE 的 `StmtCtx.Tables` 为空。
 - 执行器的 `Compile` 还没有接入 `planner.Optimize`（它的预处理和优化仍是 `blocked-by:D09.0` / `D09.13` 的桩，属于把新栈接上执行器的任务）。本项不改 `Compile`，所以通过会话执行的 SELECT / EXECUTE 仍停在那里。
 
+### 5.1 语句原文与表达式列名（#361）
+
+Go 的每个 AST 节点都带着自己的原文（`ast.Node.Text()`）。表达式列的列名取自 `SelectField.Text()`：`buildProjectionFieldNameFromExpressions`（`pkg/planner/core/logical_plan_builder.go:1462`）把它去掉注释后作为列名，例如 `SELECT 1 + 1` 的列名是 `1 + 1`。
+
+Rust 的 AST 只存字节区间，所以构建器另有 `sql_text`（D09.1 spec §3 第 1 条），区间要在它上面取。以前只有 PREPARE（`GeneratePlanCacheStmtWithAST`，§7）设置了 `sql_text`。`buildAndOptimizeLogicalPlanRound` 用 `new_plan_builder` 新建构建器，没有原文，所以文本协议和 EXECUTE（计划缓存未命中时）的表达式列名都是空串。这些语句当时在执行器之前回退，Go 会给出正确的列名，所以以前看不出问题；投影执行器一旦移植（D12.2，#328），差异就会出现在结果里。
+
+做法：
+
+- 节点包装 `NodeW` 带上节点区间所指的原文（`NodeW::text`，对应 Go 的 `Node.Text()`）。`new_node_w` / `new_node_w_with_ctx` 构造的节点原文为空串，由创建者用 `set_text` 设置：
+  - 文本协议：编译器（`Compile`）用会话交给它的语句文本（D05.3 spec §9.1）；
+  - EXECUTE 的计划缓存未命中：`generateNewPlan` 用预处理语句的原文 `PlanCacheStmt.stmt_text`，也就是 PREPARE 解析的文本（D13.1 spec §3.5）。
+- `buildAndOptimizeLogicalPlanRound` 在 `builder.Init` 之后把 `node.text()` 设为构建器的 `sql_text`。PREPARE 仍是自己设置（它不经过 `NodeW` 构建）。
+- `CloneWithNewNode` 换了节点，新节点的原文由调用方设置。Go 中新节点带着自己的原文；Rust 不知道新节点的原文，所以克隆后为空串。这个函数现在没有调用方。
+- `OptimizeExecStmt` 的构建器只构建 EXECUTE 节点（`buildExecute`），不构建选择列表，不需要原文。
+
+这只是表示方式不同（原文放在包装里，而不是放在每个节点上），行为与 Go 相同：文本协议、PREPARE、EXECUTE 未命中、EXECUTE 命中的列名都和 Go v8.5.8 一致。命中时沿用未命中时放进缓存的列名。会话测试 `expression_columns_are_named_by_their_text` 逐条核对（D05.3 spec §9.4）。
+
 ## 7. PREPARE 使用同一个规划上下文
 
 - 规划上下文由会话给出：执行器的 `SessionContext::get_plan_ctx()`（Go 的 `GetPlanCtx`）返回 `SessionPlanCtx`（表达式上下文、存储客户端、事务的脏表检查、预热回调），`planner.Optimize` 和 PREPARE 都用它的 `plan_ctx(vars)` 生成 `PlanCtx`。
