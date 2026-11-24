@@ -99,7 +99,8 @@ sha256_of() {
 mkdir -p "$cache"
 tarball="$cache/tidb-$tag.tar.gz"
 if ! { [ -f "$tarball" ] && [ "$(sha256_of "$tarball")" = "$sha" ]; }; then
-  echo "tidb-reference: fetching $repo $tag" >&2
+  if [ "${TIDB_REFERENCE_MIRROR:-}" = release ]; then src="the release mirror in dulao5/tidb-rs"; else src="GitHub"; fi
+  echo "tidb-reference: fetching $repo $tag from $src" >&2
   if [ "${TIDB_REFERENCE_MIRROR:-}" = release ]; then
     rm -f "$tarball.part"
     # REST only (gh release download uses GraphQL, which some sandboxes block).

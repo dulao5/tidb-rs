@@ -10,7 +10,9 @@ agent 的日常工作规则在 [CLAUDE.md](../../CLAUDE.md)。本文件只记录
 | 负责人（zhigang-du） | `dulao5` | 方向和范围；确认 spec；裁定与 Go 的差异（`docs/testing/rulings.toml`）；预算 |
 | Maya（主 agent） | `du-maya[bot]` | 规划和拆任务；开 `duet-ready` issue；用子 agent 做集成、性能、跨模块的工作；**合并 PR**；合并后跑端到端对比（`tools/ab`） |
 | Lucky（评审 agent） | `du-lucky-agent[bot]` | 评审所有 PR（包括 Maya 和 Duet 的），在 GitHub 上 Approve 或 Request changes |
-| Duet（自主 agent） | `du-duet` | 认领 `duet-ready` issue，按 CLAUDE.md §5 实现、开 PR、按评审意见修改 |
+| Duet（自主 agent） | 暂用 `dulao5`，正文以 "[Claude Duet]" 开头（2026-11-24 负责人决定；`du-duet` 账号待 Duet 的 GitHub 连接能独立后启用） | 认领 `duet-ready` issue，按 CLAUDE.md §5 实现、开 PR、按评审意见修改 |
+
+**Duet 与负责人共用 `dulao5` 账号期间**：以 "[Claude Duet]" 开头的 issue、评论、PR 都**不代表负责人**。负责人的决定只认 Raft 上的消息，或 GitHub 上不带这个前缀的评论。Duet 不能填写裁定的 approver，不能确认 spec，不能关闭或修改 block issue，也不能回答别人的 `duet-blocked` 问题。
 
 Maya 的子 agent 用 Maya 的身份提交。模型分工（2026-11-24 试点）：调查、设计、评审用 Opus；按已确认的 spec 和清单实现可以用 Sonnet；等 CI、汇总日志用 Haiku。
 
@@ -32,7 +34,7 @@ Maya 的子 agent 用 Maya 的身份提交。模型分工（2026-11-24 试点）
 ## 3. 通知
 
 - GitHub 事件由 Maya 机器上的后台程序 `gh-events` 每 3 分钟轮询一次：新 PR、新 push、review、评论、CI 结果、`duet-blocked`。
-  - 需要评审时在 Raft 私有频道 `#tidb-rs` 里 @Lucky；
+  - 需要评审时私信 Lucky（Lucky 不在 `#tidb-rs`，以节省 token）；
   - 其他事件（包括 Lucky 的 Approve）提醒 Maya，Maya 据此合并。
 - Duet 每小时看一次 issue 和自己的 PR；在 issue 里等回复时会更频繁地查看。
 
