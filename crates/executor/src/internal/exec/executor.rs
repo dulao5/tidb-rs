@@ -276,6 +276,14 @@ impl ExecutorMeta {
         &self.children
     }
 
+    /// Takes the children out, for a task that owns one while it runs (Go's goroutine uses
+    /// `e.Children(0)` while the executor keeps it); [`ExecutorMeta::set_all_children`] puts
+    /// them back.
+    // glue: M-GO (a child moves into the task that reads it)
+    pub fn take_all_children(&mut self) -> Vec<Box<dyn Executor>> {
+        std::mem::take(&mut self.children)
+    }
+
     /// SetAllChildren sets the children for an executor.
     // go: executorMeta.SetAllChildren L1
     pub fn set_all_children(&mut self, children: Vec<Box<dyn Executor>>) {

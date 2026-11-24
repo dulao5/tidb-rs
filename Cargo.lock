@@ -3807,6 +3807,7 @@ dependencies = [
  "tidb-model",
  "tidb-parser",
  "tidb-planner",
+ "tidb-runtime",
  "tidb-sessionctx",
  "tidb-tablecodec",
  "tidb-types",

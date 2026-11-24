@@ -1,4 +1,4 @@
-//! Go's `container/heap` (the functions the top-n heap uses): a min-heap over any type that
+//! Go's `container/heap` (the functions the top-n heap and the multi-way merge use): a min-heap over any type that
 //! implements [`Interface`], ordered by its `less`.
 //!
 //! glue: a port of the Go standard library package for this module (the workspace has no
@@ -40,6 +40,23 @@ pub fn pop(h: &mut impl Interface) {
     let n = h.len() as isize - 1;
     h.swap(0, n as usize);
     down(h, 0, n);
+    h.pop();
+}
+
+/// Remove removes and returns the element at index i from the heap. The complexity is
+/// O(log n) where n = h.Len().
+///
+/// The removed element is dropped by the `Pop` of [`Interface`] (Go returns it; the
+/// multi-way merge does not use it).
+// go-std: heap.Remove L1
+pub fn remove(h: &mut impl Interface, i: usize) {
+    let n = h.len() - 1;
+    if n != i {
+        h.swap(i, n);
+        if !down(h, i as isize, n as isize) {
+            up(h, i as isize);
+        }
+    }
     h.pop();
 }
 

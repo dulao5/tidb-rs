@@ -20,7 +20,7 @@ use tidb_base::gostd::sort::sort;
 use tidb_chunk::chunk::Chunk;
 use tidb_chunk::compare::CompareFunc;
 use tidb_chunk::list::RowPtr;
-use tidb_chunk::row::{Row, RowSize};
+use tidb_chunk::row::{Row, RowHandle, RowSize};
 use tidb_memory::tracker::{LabelForSortPartition, Tracker, new_tracker};
 use tidb_parser::types::FieldType;
 
@@ -181,15 +181,18 @@ impl SortPartition {
         Ok(())
     }
 
-    /// The next sorted row; the empty row once all rows have been returned.
-    // go: sortPartition.getNextSortedRow L2 (no lock: one owner; Iterator4Slice.Next inline)
-    pub fn get_next_sorted_row(&mut self) -> Result<Row<'_>, Error> {
+    /// The next sorted row; `None` (Go's empty row) once all rows have been returned.
+    ///
+    /// The row is a handle on its chunk (mapping rule M-ROW), so that the multi-way merge of
+    /// several partitions (`sortPartitionSource`) can keep it.
+    // go: sortPartition.getNextSortedRow L2 (no lock: one owner; Iterator4Slice.Next inline; the row is a handle [M-ROW])
+    pub fn get_next_sorted_row(&mut self) -> Result<Option<RowHandle>, Error> {
         if self.is_spill_triggered() {
             if self.cursor.next().is_empty() {
                 let success = reload_cursor(&mut self.cursor, self.in_disk.as_ref())?;
                 if !success {
                     // All data has been consumed
-                    return Ok(Row::default());
+                    return Ok(None);
                 }
 
                 if self.cursor.begin().is_empty() {
@@ -207,11 +210,14 @@ impl SortPartition {
         let l = self.saved_rows.len();
         if *it >= l {
             *it = l + 1;
-            return Ok(Row::default());
+            return Ok(None);
         }
         let ptr = self.saved_rows[*it];
         *it += 1;
-        Ok(self.chunks[ptr.chk_idx as usize].get_row(ptr.row_idx as usize))
+        Ok(Some(RowHandle::new(
+            Arc::clone(&self.chunks[ptr.chk_idx as usize]),
+            ptr.row_idx as usize,
+        )))
     }
 
     // go: sortPartition.actionSpill L1

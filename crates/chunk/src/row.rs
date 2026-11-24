@@ -399,3 +399,28 @@ impl<'a> Row<'a> {
         buf
     }
 }
+
+/// A row kept across `Next` calls or handed to another task (mapping rule M-ROW): Go keeps
+/// `chunk.Row{c, idx}` and the garbage collector keeps its chunk alive; here the handle holds
+/// the chunk (`Arc<Chunk>`) and the index, and [`RowHandle::row`] lends the `Row`.
+#[derive(Clone, Debug)]
+pub struct RowHandle {
+    chk: std::sync::Arc<Chunk>,
+    idx: usize,
+}
+
+impl RowHandle {
+    /// The row `idx` of `chk`.
+    // glue: M-ROW (chunk.Row{c, idx} kept across calls)
+    #[inline]
+    pub fn new(chk: std::sync::Arc<Chunk>, idx: usize) -> RowHandle {
+        RowHandle { chk, idx }
+    }
+
+    /// The row this handle keeps.
+    // glue: M-ROW (the borrowed Row of a handle)
+    #[inline]
+    pub fn row(&self) -> Row<'_> {
+        Row::new(&self.chk, self.idx)
+    }
+}
