@@ -68,3 +68,23 @@ follows its own Go version. Part 2b-1 records may carry a sixth `cast` argument
 (`isExplicitCharset`) and `castCtx` entries 3–4 (`max_allowed_packet`, SQL mode); part 2b-2b-i
 records a fifth `castCtx` entry (the statement time, unix nanoseconds UTC, `WithCurrentTime`) and
 an argument `["cast", tpIn, colArg]` (the argument is itself a CAST of the column).
+
+# Domain "aggdesc" (block D08.11 parts A and B: the aggregate function descriptors)
+
+`<target>/aggdesc.jsonl.gz` are copied unmodified from the tidb-rs-tracker repository. The same
+files are in `crates/expr-pushdown/tests/vectors/v8.5.8/`: this crate replays the part A records
+(`tests/govec_aggdesc.rs`), tidb-expr-pushdown the part B records.
+
+| | |
+|---|---|
+| source | `tidb-rs-tracker` `vectors/v8.5.8/<target>/aggdesc.jsonl.gz` (branch `claude/issue-348`) |
+| tracker commit | `9d637b2` |
+| generator | `govec` (Go TiDB v8.5.8 `8b857efa2`, go1.25.12, seed 20261124), 5,575 records: part A 4,531 — `new` 2,444, `wrap` 546, `outer` 220, `notnull` 208, `equal` 200, `split` 185, `string` 180, `default` 175, `mem` 152, `avgsum` 66, `window` 60, `names` 37, `finalcount` 33, `allfirst` 20, `mode` 5; part B 1,044 — `topb` 428, `push` 387, `frompb` 143, `tipb` 74, `pb2mode` 7, `mode2pb` 5 |
+| `amd64/aggdesc.jsonl.gz` sha256 | `d2178ddda504714fe9f3485d2da75056668eb08c8dacdbb78d1b454b00448bc9` (GOARCH=amd64, GOAMD64=v1; generated natively on x86_64) |
+| `arm64/aggdesc.jsonl.gz` sha256 | `536bfe1a878a47c0eaeccedf3abe0f969c6746417d4729464e51001f9c7a0cc9` (GOARCH=arm64; the same generator built for linux/arm64, run under qemu-user: `GOVEC_RUN_arm64=/usr/bin/qemu-aarch64-static scripts/govec.sh aggdesc`) |
+
+Both targets hold the same records; tracker CI checks each file byte for byte on its own
+architecture (`scripts/govec.sh --check`). Records give a recipe of the arguments (columns,
+constants, CASTs, functions) that both sides build, then the descriptor and its outputs: name,
+return type, arguments after `WrapCastForAggArgs`, mode, errors and Go panics. Spec
+`specs/D08.11-aggregation` §6.2.

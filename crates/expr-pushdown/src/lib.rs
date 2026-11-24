@@ -11,6 +11,7 @@
 // is always a value clone (Go `Clone`).
 #![warn(clippy::clone_on_ref_ptr)]
 
+pub mod aggregation;
 pub mod distsql_builtin;
 pub mod expr_to_pb;
 pub mod infer_pushdown;

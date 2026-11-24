@@ -489,11 +489,11 @@ async fn exec_returns_a_record_set_or_runs_without_delay() {
     // A plan without an executor yet fails with its block.
     let mut stmt = ExecStmt::new(
         "select".to_owned(),
-        Some(test_plan(PhysicalKind::Sort)),
+        Some(test_plan(PhysicalKind::TableReader)),
         None,
     );
     let err = stmt.exec(&mut s).await.err().unwrap();
-    assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D12.5"));
+    assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D12.1"));
 }
 
 #[tokio::test]

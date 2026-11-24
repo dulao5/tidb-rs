@@ -3,7 +3,7 @@
 //! The executor builder: a physical plan to an executor tree. Part VS1-13 has the builder
 //! itself and its dispatch (`build`); each `buildXxx` comes with its executor (VS1-12 point
 //! get, VS1-34 table reader, VS1-35 selection / projection / limit / table dual, VS1-36 sort
-//! / top-n) and is a boundary stub until then.
+//! / top-n) and is a boundary stub until then. VS1-36 adds `buildSort` / `buildTopN`.
 //!
 //! VS1-12 adds the point get (`buildPointGet` is in [`crate::point_get`], as in Go) and the
 //! helpers of this file it uses: `NewRowDecoder`, the snapshot (`getSnapshot`,
@@ -23,7 +23,7 @@ use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::config;
 use tidb_chunk::chunk::Chunk;
-use tidb_expression::{Column, Schema};
+use tidb_expression::{Column, Expr, Schema};
 use tidb_infoschema::table::column::get_col_origin_default_value;
 use tidb_infoschema::tables::{find_primary_index, try_get_common_pk_column_ids};
 use tidb_kv::kv::Snapshot;
@@ -43,7 +43,14 @@ use crate::adapter::TelemetryInfo;
 use crate::glue::{InfoSchemaRef, Plan, SessionContext};
 use crate::internal::exec::executor::Executor;
 use crate::internal::exec::indexusage::IndexUsageReporter;
+use tidb_planner::core::physical_plans::{PhysicalLimit, PhysicalSort, PhysicalTopN};
 use tidb_planner::core::point_get_plan::PointGetPlan;
+use tidb_planner::util::byitem::ByItems;
+
+use crate::internal::exec::executor::new_base_executor;
+use crate::sortexec::SortExec;
+use crate::sortexec::sort::new_sort_exec;
+use crate::sortexec::topn::new_top_n_exec;
 
 /// `placement.DCLabelKey` (`pkg/ddl/placement/common.go`): the store label of a zone.
 const DCLabelKey: &str = "zone";
@@ -142,15 +149,32 @@ impl ExecutorBuilder {
             };
             return self.build_point_get(sctx, pg).await;
         }
-        // glue: stub, blocked-by:D12.1, D12.2, D12.5, D12.0 (the buildXxx of each executor)
+        if v.kind() == PhysicalKind::Sort {
+            // b.buildSort(v): `case *plannercore.PhysicalSort`.
+            let Some(sort) = v.as_any().downcast_ref::<PhysicalSort>() else {
+                self.err = Some(Error::plain(
+                    "a Sort plan that is not a *core.PhysicalSort".to_owned(),
+                ));
+                return None;
+            };
+            return self.build_sort(sctx, sort).await;
+        }
+        if v.kind() == PhysicalKind::TopN {
+            // b.buildTopN(v): `case *plannercore.PhysicalTopN`.
+            let Some(top_n) = v.as_any().downcast_ref::<PhysicalTopN>() else {
+                self.err = Some(Error::plain(
+                    "a TopN plan that is not a *core.PhysicalTopN".to_owned(),
+                ));
+                return None;
+            };
+            return self.build_top_n(sctx, top_n).await;
+        }
+        // glue: stub, blocked-by:D12.1, D12.2, D12.0 (the buildXxx of each executor)
         let (block, what) = match v.kind() {
             PhysicalKind::PointGet => unreachable!("built above"),
             // b.buildLimit(v)
             PhysicalKind::Limit => ("D12.2", "the limit executor (VS1-35)"),
-            // b.buildSort(v)
-            PhysicalKind::Sort => ("D12.5", "the sort executor (VS1-36)"),
-            // b.buildTopN(v)
-            PhysicalKind::TopN => ("D12.5", "the top-n executor (VS1-36)"),
+            PhysicalKind::Sort | PhysicalKind::TopN => unreachable!("built above"),
             // b.buildSelection(v)
             PhysicalKind::Selection => ("D12.2", "the selection executor (VS1-35)"),
             // b.buildProjection(v)
@@ -178,6 +202,88 @@ impl ExecutorBuilder {
         self.err = Some(blocked(block, what));
         None
     }
+}
+
+impl ExecutorBuilder {
+    /// buildSort: a sort executor over the executor of the plan's child.
+    ///
+    /// Go keeps the session in the executor; here the executor gets the session values it
+    /// reads (the expression context, the memory limit). The executor counter
+    /// (`executor_metrics.ExecutorCounterSortExec`) is not in the executor's metrics yet (the
+    /// metric vectors of D14.1).
+    // go: executorBuilder.buildSort L2 (the executor gets the session values it reads; the executor counter is not ported, see the comment)
+    async fn build_sort(
+        &mut self,
+        sctx: &mut dyn SessionContext,
+        v: &PhysicalSort,
+    ) -> Option<Box<dyn Executor>> {
+        use tidb_planner::PhysicalPlan as _;
+        let child_exec = Box::pin(self.build(sctx, Some(&v.children()[0]))).await;
+        if self.err.is_some() {
+            return None;
+        }
+        let sort_exec = new_sort_exec_of(sctx, v.schema(), v.id(), child_exec, &v.by_items);
+        Some(Box::new(sort_exec))
+    }
+
+    /// buildTopN: a top-n executor over the executor of the plan's child. See `build_sort` for
+    /// the session values and the executor counter (`ExecutorCounterTopNExec`).
+    // go: executorBuilder.buildTopN L2 (the executor gets the session values it reads; the executor counter is not ported, see build_sort)
+    async fn build_top_n(
+        &mut self,
+        sctx: &mut dyn SessionContext,
+        v: &PhysicalTopN,
+    ) -> Option<Box<dyn Executor>> {
+        use tidb_planner::PhysicalPlan as _;
+        let child_exec = Box::pin(self.build(sctx, Some(&v.children()[0]))).await;
+        if self.err.is_some() {
+            return None;
+        }
+        let sort_exec = new_sort_exec_of(sctx, v.schema(), v.id(), child_exec, &v.by_items);
+        let mut t = new_top_n_exec(
+            sort_exec,
+            PhysicalLimit {
+                count: v.count,
+                offset: v.offset,
+                ..PhysicalLimit::default()
+            },
+            sctx.get_session_vars().executor_concurrency as isize,
+        );
+        if let Some(prefix_col) = &v.prefix_col {
+            t.rank_info.truncate_key_exprs = vec![Expr::Column((**prefix_col).clone()).into_ref()];
+            t.rank_info.truncate_key_prefix_char_counts = vec![v.prefix_len];
+        }
+        Some(Box::new(t))
+    }
+}
+
+/// `sortexec.SortExec{BaseExecutor: exec.NewBaseExecutor(b.sctx, v.Schema(), v.ID(),
+/// childExec), ByItems: v.ByItems, ExecSchema: v.Schema()}`, shared by `buildSort` and
+/// `buildTopN`.
+// glue: the SortExec composite literal of buildSort / buildTopN
+fn new_sort_exec_of(
+    sctx: &dyn SessionContext,
+    schema: &Schema,
+    id: i32,
+    child_exec: Option<Box<dyn Executor>>,
+    by_items: &[ByItems],
+) -> SortExec {
+    let killer = sctx.sql_killer();
+    let vars = sctx.get_session_vars();
+    let child_exec = child_exec.expect("invalid memory address or nil pointer dereference");
+    new_sort_exec(
+        new_base_executor(
+            vars,
+            &killer,
+            Some(schema.clone()),
+            id as isize,
+            vec![child_exec],
+        ),
+        by_items.to_vec(),
+        schema.clone(),
+        sctx.get_expr_ctx(),
+        vars.state.mem_tracker_bytes_limit,
+    )
 }
 
 /// buildHandleColsForExec: the handle columns of an executor reading `allColInfo` of
@@ -538,7 +644,6 @@ mod tests {
         for (kind, block) in [
             (PhysicalKind::TableReader, "D12.1"),
             (PhysicalKind::Selection, "D12.2"),
-            (PhysicalKind::TopN, "D12.5"),
         ] {
             let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
             assert!(b.build(&mut s, Some(&test_plan(kind))).await.is_none());
@@ -558,6 +663,67 @@ mod tests {
         assert_eq!(
             b.err.unwrap().to_string(),
             "[executor:8114]Unknown Plan *core.PhysicalTableScan"
+        );
+    }
+
+    /// `buildSort` / `buildTopN` build the executor over the child's executor; the top-n
+    /// runs, the sort stops at the parallel path of `Open` (sort.go:170).
+    #[tokio::test]
+    async fn builds_sort_and_top_n() {
+        use tidb_planner::physicalop::BasePhysicalPlan;
+
+        let mut s = MockSession::new(u64::MAX);
+        let (child, _) = crate::testutil::mock_plan(5);
+        let key = Expr::Column((*child.schema().columns[0]).clone()).into_ref();
+        let by_items = vec![ByItems {
+            expr: key,
+            desc: true,
+        }];
+        let base = || {
+            let mut base = BasePhysicalPlan::default();
+            base.children = vec![Arc::clone(&child)];
+            base
+        };
+        let ctx = crate::exec::ExecCtx::new(Arc::new(tidb_sessionctx::stmtctx::new_stmt_ctx()));
+
+        let top_n: Plan = Arc::new(PhysicalTopN {
+            base: base(),
+            by_items: by_items.clone(),
+            offset: 1,
+            count: 2,
+            ..PhysicalTopN::default()
+        });
+        let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
+        let mut e = b.build(&mut s, Some(&top_n)).await.expect("built");
+        assert!(b.err.is_none());
+        e.open(&ctx).await.unwrap();
+        let mut chk = crate::internal::exec::executor::new_first_chunk(e.as_ref());
+        e.next(&ctx, &mut chk).await.unwrap();
+        let got: Vec<i64> = (0..chk.num_rows())
+            .map(|i| chk.get_row(i).get_int64(0))
+            .collect();
+        assert_eq!(got, vec![3, 2]);
+        e.close().await.unwrap();
+
+        let sort: Plan = Arc::new(PhysicalSort {
+            base: base(),
+            by_items,
+            is_partial_sort: false,
+        });
+        let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
+        let mut e = b.build(&mut s, Some(&sort)).await.expect("built");
+        let err = e.open(&ctx).await.unwrap_err();
+        assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D12.5"));
+
+        let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
+        assert!(
+            b.build(&mut s, Some(&test_plan(PhysicalKind::TopN)))
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            b.err.unwrap().to_string(),
+            "a TopN plan that is not a *core.PhysicalTopN"
         );
     }
 }

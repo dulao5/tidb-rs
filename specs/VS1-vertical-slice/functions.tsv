@@ -911,13 +911,6 @@ VS1-19	D10.10	pkg/planner/property/stats_info.go	StatsInfo.ScaleByExpectCnt	9
 VS1-19	D10.10	pkg/planner/property/stats_info.go	StatsInfo.String	3	
 VS1-19	D10.10	pkg/planner/property/stats_info.go	ToString	3	
 VS1-19	D10.10	pkg/planner/property/task_type.go	TaskType.String	13	
-VS1-19	D10.10	pkg/planner/util/byitem.go	ByItems.Clone	3	
-VS1-19	D10.10	pkg/planner/util/byitem.go	ByItems.Equal	3	
-VS1-19	D10.10	pkg/planner/util/byitem.go	ByItems.Equals	10	
-VS1-19	D10.10	pkg/planner/util/byitem.go	ByItems.Hash64	4	
-VS1-19	D10.10	pkg/planner/util/byitem.go	ByItems.MemoryUsage	11	
-VS1-19	D10.10	pkg/planner/util/byitem.go	ByItems.StringWithCtx	6	
-VS1-19	D10.10	pkg/planner/util/byitem.go	StringifyByItemsWithCtx	12	
 VS1-19	D10.10	pkg/planner/util/column.go	IndexInfo2Cols	6	
 VS1-19	D10.10	pkg/planner/util/column.go	IndexInfo2FullCols	6	
 VS1-19	D10.10	pkg/planner/util/column.go	IndexInfo2PrefixCols	6	

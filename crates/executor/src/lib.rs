@@ -14,6 +14,9 @@
 //!
 //! VS1-12 (block D12.1): the point get executor ([`point_get`]) and the builder helpers it
 //! needs (`NewRowDecoder`, the snapshot, ... in [`builder`]).
+//!
+//! VS1-36 (block D12.5): the in-memory sort and top-n executors ([`sortexec`]) and their
+//! `buildSort` / `buildTopN` in [`builder`].
 #![deny(unsafe_code)]
 // N13 rule 5 (M-SHARE): a clone of an `Arc` is written `Arc::clone(&x)`, so a bare `.clone()`
 // is always a value clone (Go `Clone`).
@@ -32,6 +35,7 @@ pub mod point_get;
 pub mod prepared;
 pub mod select;
 pub mod simple;
+pub mod sortexec;
 pub mod table_reader;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testutil;
