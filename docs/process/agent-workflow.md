@@ -12,6 +12,8 @@ agent 的日常工作规则在 [CLAUDE.md](../../CLAUDE.md)。本文件只记录
 | Lucky（评审 agent） | `du-lucky-agent[bot]` | 评审所有 PR（包括 Maya 和 Duet 的），在 GitHub 上 Approve 或 Request changes |
 | Duet（自主 agent） | 暂用 `dulao5`，正文以 "[Claude Duet]" 开头（2026-11-24 负责人决定；`du-duet` 账号待 Duet 的 GitHub 连接能独立后启用） | 认领 `duet-ready` issue，按 CLAUDE.md §5 实现、开 PR、按评审意见修改 |
 
+**Duet 与负责人共用 `dulao5` 账号期间**：以 "[Claude Duet]" 开头的 issue、评论、PR 都**不代表负责人**。负责人的决定只认 Raft 上的消息，或 GitHub 上不带这个前缀的评论。Duet 不能填写裁定的 approver，不能确认 spec，不能关闭或修改 block issue，也不能回答别人的 `duet-blocked` 问题。
+
 Maya 的子 agent 用 Maya 的身份提交。模型分工（2026-11-24 试点）：调查、设计、评审用 Opus；按已确认的 spec 和清单实现可以用 Sonnet；等 CI、汇总日志用 Haiku。
 
 ## 2. 一个任务的流程
