@@ -12,7 +12,8 @@ file and over any task description.
   ([docs/porting/reference-tree.md](docs/porting/reference-tree.md)).
   If the script cannot download the tarball (an environment that only reaches this repository),
   run it as `TIDB_REFERENCE_MIRROR=release scripts/tidb-reference.sh`: it fetches the same archive
-  from this repository's release `reference-tidb-v8.5.8` with `gh` and verifies it identically.
+  from this repository's release `reference-tidb-v8.5.8` through the REST API (`gh api`) and
+  verifies it identically.
 - **Process**: porting work follows the skill [`.claude/skills/port-block`](.claude/skills/port-block/SKILL.md);
   check your work with [`audit-block`](.claude/skills/audit-block/SKILL.md) before opening a PR.
   Background: [docs/porting/](docs/porting/) (methodology, provenance markers, Go → Rust mappings),
