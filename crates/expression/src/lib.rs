@@ -33,6 +33,7 @@ pub mod builtin_registry;
 pub mod builtin_registry_blocks;
 mod builtin_registry_gen;
 pub mod builtin_vec;
+pub mod byitem;
 pub mod chunk_executor;
 pub mod collation;
 pub mod column;

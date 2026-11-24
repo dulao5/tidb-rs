@@ -3,11 +3,15 @@
 //! `ByItems.Hash64` / `ByItems.Equals` implement cascades' `base.HashEquals`
 //! (`pkg/planner/cascades/base` is EXC.B, not ported; as `Column.Hash64` in D08.1 spec §4
 //! item 2). The expression is an `ExprRef` (`M-EXPR`): `Clone` shares it.
+//!
+//! The file lives in tidb-expression, below the planner, because the aggregate function
+//! descriptors (`AggFuncDesc.OrderByItems`, D08.11) hold ByItems (N0 §4, D08.11 spec §4.7);
+//! `tidb_planner::util` re-exports it.
 
 use std::sync::Arc;
 
 use tidb_base::errors::RedactLogDisable;
-use tidb_expression::{EvalContext, ExprRef, ParamValues};
+use crate::{EvalContext, ExprRef, ParamValues};
 
 /// `size.SizeOfBool`.
 const SIZE_OF_BOOL: i64 = 1;
