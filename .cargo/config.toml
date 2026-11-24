@@ -2,3 +2,6 @@
 # grpcio-sys (pulled in by tipb) bundles c-ares/abseil CMake projects that
 # declare cmake_minimum_required < 3.5, which CMake 4 rejects.
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# GCC 13 no longer includes <cstdint> transitively; the abseil copy bundled in grpcio-sys relies
+# on it (error: "found ':' in nested-name-specifier" in str_format/extension.h). Harmless with clang.
+CXXFLAGS = "-include cstdint"

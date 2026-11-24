@@ -19,13 +19,14 @@ Maya 的子 agent 用 Maya 的身份提交。模型分工（2026-11-24 试点）
 1. **开任务**：Maya 按 [ROADMAP](../../specs/ROADMAP.md) 和依赖关系开 issue。适合 Duet 的（边界清楚、靠 govec / CI 就能验收、不需要本地集群）用 `duet-ready` 模板；其余由 Maya 的子 agent 做。
 2. **实现**：实现者开 tracker PR 和 tidb-rs PR，正文写 `Closes #<issue>` 和"Not checked"一节，等 CI 通过。
 3. **评审**：Lucky 在 GitHub 上评审。要改的用 Request changes；实现者在同一分支上改，Lucky 复审。
-4. **批准**：Lucky 在最新的 commit 上 Approve。
+4. **批准**：Lucky 在最新的 commit 上 Approve。批准时附带"小改动"意见的，改完 push 后**由 Lucky 在新 head 上再批准一次**（只看改动部分）；`gh-events` 在已批准的 PR 又有新 push 时会 @Lucky。
 5. **合并**：**由 Maya 合并**，实现者（包括 Duet）和 Lucky 都不合并。合并条件全部满足才合：
-   - Lucky 对**当前 head** 的 review 是 Approved（之后又有新 push 就要复审）；
+   - Lucky 对**当前 head** 的 review 是 Approved（之后又有新 push 就要复审）；成对的 tracker PR 也要在**它自己的**当前 head 上被批准；
    - CI 全部通过（push 和 pull_request 两次运行都算）；
-   - 成对的 PR 按 "tracker#N → #M" 的顺序，用 tracker 仓库的 `scripts/merge_pair.sh`（核对两边的桩登记一致后依次合并）；
-   - 没有等负责人决定的问题；
-   - client-rust 的 PR 用 merge commit（不 squash），因为 tidb-rs 按 commit 固定它。
+   - **基于最新的 main**：上次 CI 之后 main 前进了，并且动到同一个 crate、桩棘轮基线（`scripts/stub_ratchet.tsv`）或 tracker 的桩登记，就要 rebase、重跑 CI，tracker 那边在最新 main 上重新扫桩（`parts.py scan`）。`merge_pair.sh` 只核对两边一致，替代不了这一步；
+   - 成对的 PR 按 "tracker#N → #M" 的顺序，用 tracker 仓库的 `scripts/merge_pair.sh` 依次合并；
+   - **没有待决定的事**：没有 `approver = "pending-owner"` 的裁定；依赖的 spec 没有标"待确认"；没有未关闭的 block issue；没有未解决的 Request changes；PR 的"Not checked"里每一项都有评审的回应；
+   - **client-rust**：先合 client-rust 的 PR（用 merge commit，不 squash），再把 tidb-rs 固定的 client-rust 版本更新到合并后 main 上可达的 commit，重跑 CI，最后合 tidb-rs。
 6. **合并后**：Maya 跑端到端对比（`tools/ab`）。发现与 Go 不一致的，开新的 `duet-ready`（或子 agent）issue，引用原 PR。
 
 ## 3. 通知

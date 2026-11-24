@@ -50,6 +50,10 @@ stamp_file="$dest/.tidb-reference-stamp"
 want="$repo $tag $commit $sha"
 
 fail() { echo "tidb-reference: $*" >&2; exit 1; }
+case "${TIDB_REFERENCE_MIRROR:-}" in
+  ""|release) ;;
+  *) fail "TIDB_REFERENCE_MIRROR must be empty or 'release', got '$TIDB_REFERENCE_MIRROR'" ;;
+esac
 
 # A git checkout (e.g. a local full clone): verify, never modify.
 if [ -e "$dest/.git" ]; then
