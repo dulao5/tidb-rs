@@ -3,12 +3,19 @@
 //!
 //! A record is a source of fixed chunks (one per `Next`, every chunk type), by-items
 //! (columns with mixed ASC / DESC, constants, a correlated column), the chunk sizes, the
-//! required rows of each result chunk, and for a top-n its offset and count. Go ran
-//! `SortExec` in its unparallel mode (switched after `Open`, as its tests do) or `TopNExec`
-//! without spill; the replay runs the same executors here (the sort through its test hook
-//! `set_unparallel_for_test`, since `Open` stops at the parallel sort's boundary) and
+//! required rows of each result chunk, and for a top-n its offset and count, for a parallel
+//! sort its worker count. Go ran `SortExec` in its unparallel mode (op `sort`, switched
+//! after `Open`, as its tests do), in its parallel mode (op `psort`, with
+//! `tidb_executor_concurrency` workers) or `TopNExec` without spill; the replay runs the same
+//! executors here (the unparallel sort through its test hook `set_unparallel_for_test`) and
 //! compares every result chunk cell by cell (`Row.GetRaw` and the null flag), and the
 //! error and the step that returned it.
+//!
+//! In a parallel sort the order of rows whose sort keys compare equal depends on which
+//! worker sorted which chunk. Go's records and this replay both put each run of such rows in
+//! the order of their cells' encoding (`sortexecTieOrder` in the domain, [`tie_order`]
+//! here), so the key order, the chunk sizes and the set of rows are compared, not the order
+//! of ties.
 //!
 //! `GOVEC_SORTEXEC_FILES` (comma-separated paths) replays these files instead of the
 //! committed one (other seeds, a fresh artifact).
@@ -21,6 +28,7 @@ use serde_json::{Value, json};
 use tidb_base::Error;
 use tidb_base::mysql;
 use tidb_chunk::chunk::{self, Chunk};
+use tidb_chunk::compare::CompareFunc;
 use tidb_executor::exec::ExecCtx;
 use tidb_executor::internal::exec::executor::{
     BaseExecutorV2, Executor, new_base_executor, new_base_executor_v2, new_first_chunk,
@@ -326,6 +334,9 @@ async fn run(op: &str, a: &[Value]) -> (Vec<Value>, &'static str, Option<Error>)
     let mut vars = SessionVars::new(Box::new(NoGlobals));
     vars.init_chunk_size = sizes[0];
     vars.max_chunk_size = sizes[1];
+    if op == "psort" {
+        vars.executor_concurrency = a[5].as_i64().unwrap();
+    }
     let killer = SqlKiller::new();
     let src = Box::new(Source {
         base: new_base_executor_v2(&vars, &killer, Some(schema.clone()), 1, Vec::new()),
@@ -338,10 +349,12 @@ async fn run(op: &str, a: &[Value]) -> (Vec<Value>, &'static str, Option<Error>)
         schema,
         tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
         -1,
+        vars.executor_concurrency,
     );
-    let mut e: Box<dyn Executor> = if op == "topn" {
+    let max = sizes[1] as usize;
+    if op == "topn" {
         let lim = a[5].as_array().unwrap();
-        Box::new(new_top_n_exec(
+        let mut e = new_top_n_exec(
             sort,
             PhysicalLimit {
                 offset: s_u64(&lim[0]),
@@ -349,12 +362,31 @@ async fn run(op: &str, a: &[Value]) -> (Vec<Value>, &'static str, Option<Error>)
                 ..PhysicalLimit::default()
             },
             5,
-        ))
-    } else {
+        );
+        let (chunks, step, err) = drive(&mut e, &reqs, max).await;
+        return (encode(&chunks), step, err);
+    }
+    if op != "psort" {
         sort.set_unparallel_for_test();
-        Box::new(sort)
-    };
+    }
+    let (chunks, step, err) = drive(&mut sort, &reqs, max).await;
+    let mut out = encode(&chunks);
+    if op == "psort" {
+        // The domain's sortexecTieOrder, with the keys Next built (GetSortMetaForTest).
+        // A Desc flag only flips the sign of a compare, so the runs do not depend on it.
+        let (key_columns, cmps, _) = sort.get_sort_meta_for_test();
+        tie_order(&chunks, &mut out, &key_columns, &cmps);
+    }
+    (out, step, err)
+}
 
+/// The shim's `govecRun`: opens e, reads it with the required rows of `reqs` and closes it;
+/// the result chunks and the step of the first error.
+async fn drive(
+    e: &mut dyn Executor,
+    reqs: &[usize],
+    max: usize,
+) -> (Vec<Chunk>, &'static str, Option<Error>) {
     // The statement tracker under a session tracker without a limit (mock.Context).
     let session = new_tracker(LabelForSQLText, -1);
     let mut stmt = new_stmt_ctx();
@@ -368,7 +400,6 @@ async fn run(op: &str, a: &[Value]) -> (Vec<Value>, &'static str, Option<Error>)
         return (out, "open", Some(err));
     }
     let mut chk = new_first_chunk(&*e);
-    let max = sizes[1] as usize;
     for i in 0.. {
         if i < reqs.len() && reqs[i] > 0 {
             chk.set_required_rows(reqs[i] as isize, max);
@@ -380,22 +411,88 @@ async fn run(op: &str, a: &[Value]) -> (Vec<Value>, &'static str, Option<Error>)
         if chk.num_rows() == 0 {
             break;
         }
-        let rows: Vec<Value> = (0..chk.num_rows())
-            .map(|r| {
-                let row = chk.get_row(r);
-                Value::Array(
-                    (0..chk.num_cols())
-                        .map(|col| json!({"null": row.is_null(col), "raw": hex(row.get_raw(col))}))
-                        .collect(),
-                )
-            })
-            .collect();
-        out.push(Value::Array(rows));
+        out.push(chk.copy_construct());
     }
     if let Err(err) = e.close().await {
         return (out, "close", Some(err));
     }
     (out, "", None)
+}
+
+/// The cells of every row of chunks, as govec writes them.
+fn encode(chunks: &[Chunk]) -> Vec<Value> {
+    chunks
+        .iter()
+        .map(|chk| {
+            Value::Array(
+                (0..chk.num_rows())
+                    .map(|r| {
+                        let row = chk.get_row(r);
+                        Value::Array(
+                            (0..chk.num_cols())
+                                .map(|col| {
+                                    json!({"null": row.is_null(col), "raw": hex(row.get_raw(col))})
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// The domain's `sortexecCellsKey`: "n" for a NULL and "v" otherwise, each followed by the
+/// hex of the cell's bytes, joined by ",".
+fn cells_key(cells: &Value) -> String {
+    cells
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            let tag = if c["null"].as_bool().unwrap() {
+                "n"
+            } else {
+                "v"
+            };
+            format!("{tag}{}", c["raw"].as_str().unwrap())
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The domain's `sortexecTieOrder`: reorders, in place, the encoded rows within each run of
+/// consecutive rows whose sort keys compare equal (compare function i with key column i, as
+/// Go's `compareRow`), by [`cells_key`]. The chunk sizes do not change.
+fn tie_order(chunks: &[Chunk], out: &mut [Value], key_columns: &[usize], cmps: &[CompareFunc]) {
+    let refs: Vec<(usize, usize)> = chunks
+        .iter()
+        .enumerate()
+        .flat_map(|(c, chk)| (0..chk.num_rows()).map(move |r| (c, r)))
+        .collect();
+    let equal = |a: (usize, usize), b: (usize, usize)| {
+        let (ra, rb) = (chunks[a.0].get_row(a.1), chunks[b.0].get_row(b.1));
+        key_columns
+            .iter()
+            .enumerate()
+            .all(|(i, &col)| cmps[i](ra, col, rb, col) == 0)
+    };
+    let mut start = 0;
+    while start < refs.len() {
+        let mut end = start + 1;
+        while end < refs.len() && equal(refs[end - 1], refs[end]) {
+            end += 1;
+        }
+        let mut group: Vec<Value> = refs[start..end]
+            .iter()
+            .map(|&(c, r)| out[c][r].take())
+            .collect();
+        group.sort_by_cached_key(cells_key);
+        for (&(c, r), cells) in refs[start..end].iter().zip(group) {
+            out[c][r] = cells;
+        }
+        start = end;
+    }
 }
 
 async fn check(rec: &Value) -> Option<String> {
@@ -447,7 +544,8 @@ async fn replay(path: &str) {
     );
 }
 
-#[tokio::test]
+// A multi-thread runtime, so the parallel sort's workers run in parallel as Go's goroutines.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn govec_sortexec() {
     match std::env::var("GOVEC_SORTEXEC_FILES") {
         Ok(files) => {

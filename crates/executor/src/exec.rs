@@ -5,26 +5,31 @@
 
 use std::sync::Arc;
 
+use tidb_runtime::pool::ExecPool;
 use tidb_sessionctx::stmtctx::StatementContext;
 
 /// What an executor (and any worker task it spawns) may use while the statement runs (N3
 /// §3.1, N2): cheap to clone, `Send + Sync`, no `SessionVars`.
 ///
 /// The other fields of foundation-interfaces §2 (cancellation token, statement `MemTracker`,
-/// `ExecPool` handle, resource group, CPU recorder, store windows) and `checkpoint()` arrive
-/// with the first executors that use them (VS1-34…VS1-36), wired to `tidb-runtime`. The SQL
-/// killer is in the base executor (`executorKillerHandler`), as in Go.
+/// resource group, CPU recorder, store windows) and `checkpoint()` arrive with the first
+/// executors that use them, wired to `tidb-runtime`. The SQL killer is in the base executor
+/// (`executorKillerHandler`), as in Go.
 #[derive(Clone)]
 pub struct ExecCtx {
     /// The statement context, frozen for the execution (N2 `Arc<StmtCtx>`).
     pub stmt: Arc<StatementContext>,
+    /// The `ExecPool` the tasks of an executor are spawned on (mapping rule M-GO; the parallel
+    /// sort's workers, D12.5). `None` spawns them on the current tokio runtime, as the
+    /// coprocessor client does without a pool; the session does not pass its pool here yet.
+    pub pool: Option<ExecPool>,
 }
 
 impl ExecCtx {
     /// A context for the statement `stmt`.
     // glue: N3
     pub fn new(stmt: Arc<StatementContext>) -> ExecCtx {
-        ExecCtx { stmt }
+        ExecCtx { stmt, pool: None }
     }
 }
 

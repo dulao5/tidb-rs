@@ -283,6 +283,7 @@ fn new_sort_exec_of(
         schema.clone(),
         sctx.get_expr_ctx(),
         vars.state.mem_tracker_bytes_limit,
+        vars.executor_concurrency,
     )
 }
 
@@ -666,8 +667,8 @@ mod tests {
         );
     }
 
-    /// `buildSort` / `buildTopN` build the executor over the child's executor; the top-n
-    /// runs, the sort stops at the parallel path of `Open` (sort.go:170).
+    /// `buildSort` / `buildTopN` build the executor over the child's executor; both run (the
+    /// sort on its parallel path, sort.go:170, with the session's worker count).
     #[tokio::test]
     async fn builds_sort_and_top_n() {
         use tidb_planner::physicalop::BasePhysicalPlan;
@@ -712,8 +713,17 @@ mod tests {
         });
         let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
         let mut e = b.build(&mut s, Some(&sort)).await.expect("built");
-        let err = e.open(&ctx).await.unwrap_err();
-        assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D12.5"));
+        e.open(&ctx).await.unwrap();
+        let mut got = Vec::new();
+        loop {
+            e.next(&ctx, &mut chk).await.unwrap();
+            if chk.num_rows() == 0 {
+                break;
+            }
+            got.extend((0..chk.num_rows()).map(|i| chk.get_row(i).get_int64(0)));
+        }
+        assert_eq!(got, vec![4, 3, 2, 1, 0]);
+        e.close().await.unwrap();
 
         let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
         assert!(

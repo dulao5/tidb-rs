@@ -1,8 +1,11 @@
-//! The sort and top-n executors (D12.5, part VS1-36: the in-memory paths), Go's
-//! `pkg/executor/sortexec`.
+//! The sort and top-n executors (D12.5, the sort executors: part VS1-36, the in-memory
+//! paths, and the parallel sort part), Go's `pkg/executor/sortexec`.
 //!
-//! - [`sort`]: `SortExec` (sort.go); the unparallel path is ported, the parallel path (the
-//!   one Go's `Open` always takes, sort.go:170) stops at `Open` with `Blocked`.
+//! - [`sort`]: `SortExec` (sort.go): the parallel path (the one Go's `Open` always takes,
+//!   sort.go:170) and the unparallel path of Go's tests, both in memory.
+//! - [`parallel_sort_worker`]: the workers of the parallel sort.
+//! - [`multi_way_merge`]: the k-way merge of sorted row sources.
+//! - [`parallel_sort_spill_helper`]: the spill state of the parallel sort.
 //! - [`sort_partition`]: `sortPartition`, the rows of one partition, sorted in memory.
 //! - [`topn`] / [`topn_chunk_heap`]: `TopNExec` and its row heap.
 //! - [`sort_util`]: shared helpers and the cursor over spilled chunks.
@@ -16,6 +19,9 @@
 //! the in-memory paths are kept and stop with `Blocked` (D01.10).
 
 pub mod heap;
+pub mod multi_way_merge;
+pub mod parallel_sort_spill_helper;
+pub mod parallel_sort_worker;
 pub mod sort;
 pub mod sort_partition;
 pub mod sort_spill;
