@@ -114,6 +114,10 @@ pub struct ParseOutput {
     pub stmts: Vec<Stmt>,
     /// Warnings reported by semantic actions (goyacc `AppendWarn`).
     pub warnings: Vec<Diagnostic>,
+    /// How many parameter markers (`?`) the parser built, over all the statements. Go's
+    /// parser does not count them; PREPARE (one statement) checks that its walk of the AST
+    /// reached as many (#356).
+    pub param_markers: usize,
 }
 
 // The AST can be kept in a session across statements (prepared statements, VS1 plan §4.4):
@@ -203,6 +207,7 @@ impl Parser {
                 Ok(ParseOutput {
                     stmts,
                     warnings: ctx.warnings.take(),
+                    param_markers: ctx.param_markers.get(),
                 })
             }
             driver::Outcome::Aborted => {
