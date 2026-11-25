@@ -26,28 +26,41 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
+use tidb_base::contextutil::WarnHandler;
 use tidb_base::mysql;
 use tidb_chunk::chunk::{self, Chunk};
 use tidb_chunk::row::Row;
+use tidb_executor::aggfuncs::func_count_distinct::write_time;
 use tidb_executor::aggfuncs::{AggFunc, PartialResult, build};
 use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode, BaseFuncDesc};
+use tidb_expression::byitem::ByItems;
 use tidb_expression::context::BuildContext;
 use tidb_expression::expression::EvalState;
-use tidb_expression::{Column, Expr, ExprRef};
+use tidb_expression::{Column, Constant, Expr, ExprRef};
 use tidb_parser::types::FieldType;
 use tidb_sessionctx::exprstatic as es;
 use tidb_types::MyDecimal;
+use tidb_types::context::FlagTruncateAsWarning;
 use tidb_types::core_time::CoreTime;
+use tidb_types::datum::new_string_datum;
 use tidb_types::enum_type::Enum;
+use tidb_types::field_type::new_field_type;
 use tidb_types::json::parse_binary_json_from_string;
 use tidb_types::set_type::Set;
 use tidb_types::time::{Duration, new_time};
 use tidb_types::vector::zero_copy_deserialize_vector_float32;
 
-/// The records whose function `build` reports as not ported yet (the later parts of the
-/// block): COUNT(DISTINCT) in the complete and partial-1 modes (part B1) and the names of the
-/// parts B1 and B2, in every op that builds them.
-const EXPECTED_BLOCKED: usize = 4295;
+/// The records whose function `build` reports as not ported yet (part B2 of the block:
+/// `APPROX_COUNT_DISTINCT` and `APPROX_PERCENTILE`), in every op that builds them.
+const EXPECTED_BLOCKED: usize = 560;
+
+/// Records intentionally diverging from Go v8.5.8 under ruling R23 (#390, constitution art. 9.3):
+/// `countOriginalWithDistinct` keys on canonical values in Rust (folding `-0.0` to `+0.0`,
+/// ignoring `Duration.Fsp`, and ignoring `Time.Type`/`Time.Fsp`) instead of Go's raw bytes.
+/// Across the 19,222 records on both arm64 and amd64, exactly 3 records contain distinct raw
+/// representations of equal values (`reset_reuse` TIMESTAMP, `count_distinct_encode` multi-arg
+/// `{+0.0, -0.0}`, and `count_distinct_encode` DATETIME differing in `Type`).
+const EXPECTED_CANONICAL_DISTINCT_DIFFS: usize = 3;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -212,6 +225,7 @@ fn append(c: &mut Chunk, ft: &FieldType, col: usize, v: &Value) {
 
 struct Built {
     ctx: Arc<es::ExprContext>,
+    eval_ctx: Arc<es::EvalContext>,
     desc: AggFuncDesc,
     fts: Vec<FieldType>,
     func: Option<Box<dyn AggFunc>>,
@@ -234,17 +248,46 @@ fn mode_of(m: i64) -> AggFunctionMode {
     }
 }
 
+fn warnings_of(ec: &es::EvalContext) -> Value {
+    let ws: Vec<Value> = ec
+        .copy_warnings(vec![])
+        .into_iter()
+        .map(|w| Value::String(w.err.to_string()))
+        .collect();
+    Value::Array(ws)
+}
+
 /// The domain's afDesc.make, then `build`.
 fn build_desc(d: &Value) -> Outcome {
     let dpi = d["dpi"].as_i64().unwrap();
-    let ctx = es::new_expr_context(vec![
-        es::with_eval_ctx(es::new_eval_context(vec![
-            es::with_div_precision_increment(dpi),
-        ])),
+    let mut eval_opts = vec![es::with_div_precision_increment(dpi)];
+    if d.get("trunc_warn")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        eval_opts.push(es::with_type_flags(FlagTruncateAsWarning));
+    }
+    let eval_ctx = es::new_eval_context(eval_opts);
+    let mut expr_opts = vec![
+        es::with_eval_ctx(Arc::clone(&eval_ctx)),
         es::with_windowing_use_high_precision(d["hp"].as_bool().unwrap()),
-    ]);
-    let fts: Vec<FieldType> = d["args"].as_array().unwrap().iter().map(ft_of).collect();
-    let args: Vec<ExprRef> = fts
+    ];
+    if let Some(max_len) = d.get("max_len").and_then(Value::as_u64)
+        && max_len > 0
+    {
+        expr_opts.push(es::with_group_concat_max_len(max_len));
+    }
+    let ctx = es::new_expr_context(expr_opts);
+    let arg_fts: Vec<FieldType> = d["args"].as_array().unwrap().iter().map(ft_of).collect();
+    let extra_fts: Vec<FieldType> = d
+        .get("extra_cols")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(ft_of).collect())
+        .unwrap_or_default();
+    let mut fts = arg_fts.clone();
+    fts.extend(extra_fts);
+
+    let mut args: Vec<ExprRef> = arg_fts
         .iter()
         .enumerate()
         .map(|(i, ft)| {
@@ -256,6 +299,16 @@ fn build_desc(d: &Value) -> Outcome {
             .into_ref()
         })
         .collect();
+    if d.get("has_sep").and_then(Value::as_bool).unwrap_or(false) {
+        let sep_bytes = unhex(d.get("sep").and_then(Value::as_str).unwrap_or(""));
+        args.push(
+            Expr::Constant(Constant::new(
+                new_string_datum(sep_bytes),
+                new_field_type(mysql::TypeString),
+            ))
+            .into_ref(),
+        );
+    }
     let base = BaseFuncDesc::from_parts(
         d["name"].as_str().unwrap().to_owned(),
         args,
@@ -263,9 +316,27 @@ fn build_desc(d: &Value) -> Outcome {
     );
     let mut desc = AggFuncDesc::from_base(base, d["distinct"].as_bool().unwrap());
     desc.mode = mode_of(d["mode"].as_i64().unwrap());
+    if let Some(obs) = d.get("order_by").and_then(Value::as_array) {
+        desc.order_by_items = obs
+            .iter()
+            .map(|o| {
+                let col = o["col"].as_u64().unwrap() as usize;
+                ByItems {
+                    expr: Expr::Column(Column {
+                        ret_type: Arc::new(fts[col].clone()),
+                        index: col as isize,
+                        ..Column::default()
+                    })
+                    .into_ref(),
+                    desc: o["desc"].as_bool().unwrap(),
+                }
+            })
+            .collect();
+    }
     match build(&*ctx, &desc, 0) {
         Ok(func) => Outcome::Built(Built {
             ctx,
+            eval_ctx,
             desc,
             fts,
             func,
@@ -327,6 +398,173 @@ fn final_cells(b: &Built, f: &dyn AggFunc, pr: &mut PartialResult) -> (Value, Op
 
 /// Runs one record: (out, error), or None when a function is not ported yet.
 fn run(op: &str, a: &[Value]) -> Option<(Value, Option<Error>)> {
+    match op {
+        "json_agg" => {
+            let action = a[0].as_str().unwrap();
+            return run(action, &a[1..]);
+        }
+        "count_distinct_encode" => {
+            let action = a[0].as_str().unwrap();
+            return match action {
+                "run" => run("update_final", &a[1..]),
+                "write_time" => {
+                    let tv = a[1].as_array().unwrap();
+                    let t = new_time(
+                        CoreTime(s_u64(&tv[0])),
+                        tv[1].as_u64().unwrap() as u8,
+                        tv[2].as_i64().unwrap() as isize,
+                    );
+                    let mut buf = [0xffu8; 16];
+                    write_time(&mut buf, t);
+                    Some((json!({"raw": hex(&buf)}), None))
+                }
+                _ => panic!("unknown count_distinct_encode action {action}"),
+            };
+        }
+        "group_concat" => {
+            let action = a[0].as_str().unwrap();
+            return match action {
+                "run" => {
+                    let mut b = match build_desc(&a[1]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let tname = type_name(&b.func);
+                    let has_trunc = {
+                        let f = b.func.as_deref_mut().expect("group_concat builds");
+                        if let Some(t) = f.get_truncated() {
+                            f.set_truncated(t);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    let f = b.func.as_deref().expect("group_concat builds");
+                    let mut pr = f.alloc_partial_result();
+                    let mut groups = vec![];
+                    for (gi, g) in a[2].as_array().unwrap().iter().enumerate() {
+                        if let Err((step, e)) = update(&b, f, g, &mut pr) {
+                            return Some((
+                                json!({
+                                    "type": tname,
+                                    "has_trunc": has_trunc,
+                                    "groups": groups,
+                                    "warnings": warnings_of(&b.eval_ctx),
+                                    "step": format!("group {gi} {step}"),
+                                }),
+                                Some(e),
+                            ));
+                        }
+                        let (cells, err) = final_cells(&b, f, &mut pr);
+                        groups.push(cells);
+                        if let Some(e) = err {
+                            return Some((
+                                json!({
+                                    "type": tname,
+                                    "has_trunc": has_trunc,
+                                    "groups": groups,
+                                    "warnings": warnings_of(&b.eval_ctx),
+                                    "step": format!("group {gi} final"),
+                                }),
+                                Some(e),
+                            ));
+                        }
+                        f.reset_partial_result(&mut pr);
+                    }
+                    Some((
+                        json!({
+                            "type": tname,
+                            "has_trunc": has_trunc,
+                            "groups": groups,
+                            "warnings": warnings_of(&b.eval_ctx),
+                            "step": "",
+                        }),
+                        None,
+                    ))
+                }
+                "merge" => {
+                    let pb = match build_desc(&a[1]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let mut fb = match build_desc(&a[2]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    // Wire shared truncated sentinel and share the warning sink (as Go does).
+                    let pf = pb.func.as_deref().expect("partial group_concat builds");
+                    let ff = fb.func.as_deref_mut().expect("final group_concat builds");
+                    if let Some(t) = pf.get_truncated() {
+                        ff.set_truncated(t);
+                    }
+                    let types = json!([type_name(&pb.func), type_name(&fb.func)]);
+                    let pf = pb.func.as_deref().unwrap();
+                    let ff = fb.func.as_deref().unwrap();
+                    let mut out = json!({
+                        "type": types,
+                        "partials": [],
+                        "final": null,
+                        "warnings": [],
+                        "step": "",
+                    });
+                    let mut fpr = ff.alloc_partial_result();
+                    let mut partials = vec![];
+                    let ec = pb.ctx.get_eval_ctx();
+                    for (i, part) in a[3].as_array().unwrap().iter().enumerate() {
+                        let mut pr = pf.alloc_partial_result();
+                        if let Err((step, e)) = update(&pb, pf, part, &mut pr) {
+                            out["partials"] = Value::Array(partials);
+                            out["warnings"] = warnings_of(&pb.eval_ctx);
+                            out["step"] = json!(format!("part {i} {step}"));
+                            return Some((out, Some(e)));
+                        }
+                        let (cells, err) = final_cells(&pb, pf, &mut pr);
+                        partials.push(cells);
+                        if let Some(e) = err {
+                            out["partials"] = Value::Array(partials);
+                            out["warnings"] = warnings_of(&pb.eval_ctx);
+                            out["step"] = json!(format!("part {i} final"));
+                            return Some((out, Some(e)));
+                        }
+                        if let Err(e) = ff.merge_partial_result(&*ec, &mut pr, &mut fpr) {
+                            out["partials"] = Value::Array(partials);
+                            out["warnings"] = warnings_of(&pb.eval_ctx);
+                            out["step"] = json!(format!("merge {i}"));
+                            return Some((out, Some(e)));
+                        }
+                    }
+                    let (cells, err) = final_cells(&pb, ff, &mut fpr);
+                    out["partials"] = Value::Array(partials);
+                    out["final"] = cells;
+                    out["warnings"] = warnings_of(&pb.eval_ctx);
+                    if err.is_some() {
+                        out["step"] = json!("final");
+                    }
+                    Some((out, err))
+                }
+                "merge_err" => {
+                    let b = match build_desc(&a[1]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let tname = type_name(&b.func);
+                    let f = b.func.as_deref().expect("group_concat builds");
+                    let mut pr1 = f.alloc_partial_result();
+                    let mut pr2 = f.alloc_partial_result();
+                    let ec = b.ctx.get_eval_ctx();
+                    let err = f.merge_partial_result(&*ec, &mut pr1, &mut pr2).err();
+                    Some((json!({"type": tname, "step": "merge"}), err))
+                }
+                _ => panic!("unknown group_concat action {action}"),
+            };
+        }
+        _ => {}
+    }
+
     let b = match build_desc(&a[0]) {
         Outcome::Built(b) => b,
         Outcome::Blocked => return None,
@@ -433,11 +671,173 @@ fn run(op: &str, a: &[Value]) -> Option<(Value, Option<Error>)> {
     }
 }
 
-/// Compares one record; Err(why) on a difference, Ok(false) when its function is blocked.
-fn check(rec: &Value) -> Result<bool, String> {
+enum CheckResult {
+    Matched,
+    Blocked,
+    CanonicalDistinctDiff,
+}
+
+fn decode_count_cell(cell: &Value) -> Option<i64> {
+    if cell["null"] != false {
+        return None;
+    }
+    let hex = cell["raw"].as_str()?;
+    let bytes: [u8; 8] = unhex(hex).try_into().ok()?;
+    Some(i64::from_le_bytes(bytes))
+}
+
+/// Computes `(raw_distinct, canonical_distinct)` for a `countOriginalWithDistinct` group
+/// whose arguments are scalar types covered by ruling R23 (#390). Returns `None` if an
+/// argument type is outside that set.
+fn count_distinct_raw_and_canonical(arg_types: &[u8], chunks: &[Value]) -> Option<(i64, i64)> {
+    let mut raw_set: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
+    let mut canon_set: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
+    for ch in chunks {
+        for row in ch.as_array()? {
+            let cells = row.as_array()?;
+            if cells.len() != arg_types.len() || cells.iter().any(Value::is_null) {
+                continue;
+            }
+            let mut raw_row = Vec::with_capacity(arg_types.len());
+            let mut canon_row = Vec::with_capacity(arg_types.len());
+            for (tp, cell) in arg_types.iter().zip(cells.iter()) {
+                match *tp {
+                    mysql::TypeLonglong => {
+                        let s = cell.to_string();
+                        raw_row.push(s.clone());
+                        canon_row.push(s);
+                    }
+                    mysql::TypeDouble | mysql::TypeFloat => {
+                        let bits = cell.as_str()?;
+                        raw_row.push(bits.to_owned());
+                        // Fold -0.0 (sign bit only) to +0.0.
+                        let canon = if bits == "9223372036854775808" {
+                            "0"
+                        } else {
+                            bits
+                        };
+                        canon_row.push(canon.to_owned());
+                    }
+                    mysql::TypeDate | mysql::TypeDatetime | mysql::TypeTimestamp => {
+                        let arr = cell.as_array()?;
+                        let core = arr.first()?.as_str()?;
+                        raw_row.push(cell.to_string());
+                        canon_row.push(core.to_owned());
+                    }
+                    mysql::TypeDuration => {
+                        let arr = cell.as_array()?;
+                        let dur = arr.first()?.as_str()?;
+                        raw_row.push(cell.to_string());
+                        canon_row.push(dur.to_owned());
+                    }
+                    _ => return None,
+                }
+            }
+            raw_set.insert(raw_row);
+            canon_set.insert(canon_row);
+        }
+    }
+    Some((raw_set.len() as i64, canon_set.len() as i64))
+}
+
+/// Returns true when `rec` differs from `got_out` solely because Go v8.5.8's
+/// `countOriginalWithDistinct` hashes raw bytes (under #390 / ruling R23) while Rust keys on
+/// canonical values, verifying that Go's output matches the raw count and Rust's output matches
+/// the canonical count for every group.
+fn is_canonical_distinct_diff(rec: &Value, got_out: &Value) -> bool {
+    let want_out = &rec["out"];
+    if want_out["type"] != "*aggfuncs.countOriginalWithDistinct"
+        || got_out["type"] != want_out["type"]
+        || want_out["step"] != ""
+        || got_out["step"] != ""
+    {
+        return false;
+    }
+    let op = rec["op"].as_str().unwrap_or("");
+    let (desc, groups, want_cells, got_cells): (&Value, Vec<&[Value]>, Vec<&Value>, Vec<&Value>) =
+        match op {
+            "count_distinct_encode" if rec["args"][0] == "run" => {
+                let Some(chunks) = rec["args"][2].as_array() else {
+                    return false;
+                };
+                let (Some(wc), Some(gc)) = (
+                    want_out["cells"].as_array().and_then(|a| a.first()),
+                    got_out["cells"].as_array().and_then(|a| a.first()),
+                ) else {
+                    return false;
+                };
+                (&rec["args"][1], vec![chunks.as_slice()], vec![wc], vec![gc])
+            }
+            "reset_reuse" => {
+                let Some(raw_groups) = rec["args"][1].as_array() else {
+                    return false;
+                };
+                let (Some(wg), Some(gg)) =
+                    (want_out["groups"].as_array(), got_out["groups"].as_array())
+                else {
+                    return false;
+                };
+                if raw_groups.len() != wg.len() || wg.len() != gg.len() {
+                    return false;
+                }
+                let mut groups = Vec::with_capacity(raw_groups.len());
+                let mut wc = Vec::with_capacity(wg.len());
+                let mut gc = Vec::with_capacity(gg.len());
+                for ((rg, w), g) in raw_groups.iter().zip(wg.iter()).zip(gg.iter()) {
+                    let Some(chunks) = rg.as_array() else {
+                        return false;
+                    };
+                    let (Some(w0), Some(g0)) = (
+                        w.as_array().and_then(|a| a.first()),
+                        g.as_array().and_then(|a| a.first()),
+                    ) else {
+                        return false;
+                    };
+                    groups.push(chunks.as_slice());
+                    wc.push(w0);
+                    gc.push(g0);
+                }
+                (&rec["args"][0], groups, wc, gc)
+            }
+            _ => return false,
+        };
+    if desc["name"] != "count" || desc["distinct"] != true {
+        return false;
+    }
+    let Some(arg_fts) = desc["args"].as_array() else {
+        return false;
+    };
+    let Some(arg_types): Option<Vec<u8>> = arg_fts
+        .iter()
+        .map(|ft| ft[0].as_u64().and_then(|v| u8::try_from(v).ok()))
+        .collect()
+    else {
+        return false;
+    };
+    let mut saw_diff = false;
+    for ((chunks, wc), gc) in groups.iter().zip(want_cells.iter()).zip(got_cells.iter()) {
+        let Some((raw_cnt, canon_cnt)) = count_distinct_raw_and_canonical(&arg_types, chunks)
+        else {
+            return false;
+        };
+        let (Some(want_cnt), Some(got_cnt)) = (decode_count_cell(wc), decode_count_cell(gc)) else {
+            return false;
+        };
+        if want_cnt != raw_cnt || got_cnt != canon_cnt {
+            return false;
+        }
+        if raw_cnt != canon_cnt {
+            saw_diff = true;
+        }
+    }
+    saw_diff
+}
+
+/// Compares one record; Err(why) on a difference.
+fn check(rec: &Value) -> Result<CheckResult, String> {
     let op = rec["op"].as_str().unwrap();
     let Some((out, err)) = run(op, rec["args"].as_array().unwrap()) else {
-        return Ok(false);
+        return Ok(CheckResult::Blocked);
     };
     let got_err = err.map(|e| e.to_string());
     let want_err = rec["err"]["msg"].as_str().map(str::to_owned);
@@ -445,12 +845,15 @@ fn check(rec: &Value) -> Result<bool, String> {
         return Err(format!("error: got {got_err:?}, want {want_err:?}"));
     }
     if out != rec["out"] {
+        if is_canonical_distinct_diff(rec, &out) {
+            return Ok(CheckResult::CanonicalDistinctDiff);
+        }
         return Err(format!(
             "out differs: got {}",
             serde_json::to_string(&out).unwrap()
         ));
     }
-    Ok(true)
+    Ok(CheckResult::Matched)
 }
 
 fn replay(path: &str, pin_blocked: bool) {
@@ -458,11 +861,13 @@ fn replay(path: &str, pin_blocked: bool) {
     tidb_types::collate::set_new_collation_enabled_for_test(true);
     let mut fails = vec![];
     let mut blocked = 0;
+    let mut canonical_distinct_diffs = 0;
     for line in &lines {
         let rec: Value = serde_json::from_str(line).unwrap();
         match check(&rec) {
-            Ok(true) => {}
-            Ok(false) => blocked += 1,
+            Ok(CheckResult::Matched) => {}
+            Ok(CheckResult::Blocked) => blocked += 1,
+            Ok(CheckResult::CanonicalDistinctDiff) => canonical_distinct_diffs += 1,
             Err(why) => {
                 let cut = line
                     .char_indices()
@@ -486,9 +891,16 @@ fn replay(path: &str, pin_blocked: bool) {
         fails.len(),
         lines.len()
     );
-    eprintln!("{path}: {} records, {blocked} blocked", lines.len());
+    eprintln!(
+        "{path}: {} records, {blocked} blocked, {canonical_distinct_diffs} ruled (R23)",
+        lines.len()
+    );
     if pin_blocked {
         assert_eq!(blocked, EXPECTED_BLOCKED, "{path}: blocked records");
+        assert_eq!(
+            canonical_distinct_diffs, EXPECTED_CANONICAL_DISTINCT_DIFFS,
+            "{path}: ruled R23 records"
+        );
     }
 }
 

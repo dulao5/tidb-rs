@@ -20,6 +20,7 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI32;
 
 use allocator_api2::alloc::{Allocator, Global};
 use allocator_api2::boxed::Box as AllocBox;
@@ -125,6 +126,20 @@ pub trait AggFunc: Send + Sync {
     /// allocator. Functions whose partial results do not grow ignore it.
     // glue: A1 3.3 TrackedAlloc of the partial results (spec §5.3), no Go counterpart
     fn set_alloc(&mut self, _alloc: ColAlloc) {}
+
+    /// Go's `GetTruncated() *int32` duck-typed interface on `GROUP_CONCAT` functions
+    /// (`builder.go:2084-2089`, spec §5.1). Implemented by `groupConcat`, `groupConcatDistinct`,
+    /// and `groupConcatOrder` (not `groupConcatDistinctOrder`, matching Go).
+    // glue: M-IFACE duck-typed GetTruncated on AggFunc (spec §5.1)
+    fn get_truncated(&self) -> Option<Arc<AtomicI32>> {
+        None
+    }
+
+    /// Go's `SetTruncated(*int32)` duck-typed interface on `GROUP_CONCAT` functions
+    /// (`builder.go:2084-2089`, spec §5.1). Implemented by `groupConcat`, `groupConcatDistinct`,
+    /// and `groupConcatOrder` (not `groupConcatDistinctOrder`, matching Go).
+    // glue: M-IFACE duck-typed SetTruncated on AggFunc (spec §5.1)
+    fn set_truncated(&mut self, _t: Arc<AtomicI32>) {}
 
     /// The implementation's type name (Go's `%T` of the built function, read by the
     /// differential vectors and the tests).
