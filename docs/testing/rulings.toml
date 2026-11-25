@@ -282,6 +282,7 @@ unit = '^(prepared_type_change|param_in_select_list)$'
 stmt = '^SELECT \?'
 detail = '^(?:(?:(?:B execute vs its prepare: |prepare: )?col\[0\]\.(?:type|length|decimals|flags|charset): [^;]*); )*(?:first differing row #0: A=-1 B=18446744073709551615u|first differing row #0: A=-?[0-9]+ B="x"|1 row\(s\) only in A, e\.g\. \((?:-1|-?[0-9]+), "[^"]*"\)|1 row\(s\) only in B, e\.g\. \((?:18446744073709551615u|"x"), "[^"]*"\))(?:; (?:(?:first differing row #0: A=-1 B=18446744073709551615u|first differing row #0: A=-?[0-9]+ B="x"|1 row\(s\) only in A, e\.g\. \((?:-1|-?[0-9]+), "[^"]*"\)|1 row\(s\) only in B, e\.g\. \((?:18446744073709551615u|"x"), "[^"]*"\))|(?:(?:B execute vs its prepare: |prepare: )?col\[0\]\.(?:type|length|decimals|flags|charset): [^;]*)))*$'
 example = "tools/ab/workloads/prepared_type_change.sql:19"
+test = "crates/session/src/tests/sbtest_results.rs::prepared_unsigned_parameter_selected_as_a_column"
 source = "#367（upstream-pitfall）；#366 的端到端对比；负责人 2026-11-25 在 Raft 上的裁定（选 A）"
 evidence = "Go v8.5.8 在一个连接上缓存预处理语句第一次 EXECUTE 的结果列定义（pkg/server/internal/resultset/resultset.go:108-131），之后参数类型变了也沿用：先有符号后 u64::MAX 时列仍是有符号（flags 0x81），客户端读到 -1；先整数后字符串时列类型仍是 LONGLONG。tidb-rs 每次 EXECUTE 按本次参数给出列定义（u64::MAX 为 UNSIGNED 0xa1，字符串为 VAR_STRING），与 Go 对新语句的结果相同，也与 MySQL 8.0.22 起参数类型变化时重新准备语句的行为一致"
 rationale = "宪章第一条 2 的例外：Go 的缓存产生错误结果（-1、乱码），负责人决定保留正确行为"
@@ -299,6 +300,7 @@ unit = '^(prepared_type_change|param_in_select_list)$'
 stmt = '^SELECT \?'
 detail = '^(?:(?:B execute vs its prepare: |prepare: )?col\[0\]\.(?:type|length|decimals|flags|charset): [^;]*)(?:; (?:(?:B execute vs its prepare: |prepare: )?col\[0\]\.(?:type|length|decimals|flags|charset): [^;]*))*$'
 example = "tools/ab/workloads/prepared_type_change.sql:19"
+test = "crates/session/src/tests/sbtest_results.rs::prepared_unsigned_parameter_selected_as_a_column"
 source = "#367（upstream-pitfall）；#366 的端到端对比；负责人 2026-11-25 在 Raft 上的裁定（选 A）"
 evidence = "Go v8.5.8 在一个连接上缓存预处理语句第一次 EXECUTE 的结果列定义（pkg/server/internal/resultset/resultset.go:108-131），之后参数类型变了也沿用：先有符号后 u64::MAX 时列仍是有符号（flags 0x81），客户端读到 -1；先整数后字符串时列类型仍是 LONGLONG。tidb-rs 每次 EXECUTE 按本次参数给出列定义（u64::MAX 为 UNSIGNED 0xa1，字符串为 VAR_STRING），与 Go 对新语句的结果相同，也与 MySQL 8.0.22 起参数类型变化时重新准备语句的行为一致"
 rationale = "宪章第一条 2 的例外：Go 的缓存产生错误结果（-1、乱码），负责人决定保留正确行为"
