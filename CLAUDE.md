@@ -51,8 +51,12 @@ file and over any task description.
    cause a security problem, wrong results or data loss, do not decide yourself: describe it in
    the issue and **stop and ask** (it needs an entry in `docs/testing/rulings.toml` approved by the
    owner). Exception, CONSTITUTION art. 9.3: a wrong-rows or panic bug you reproduced on v8.5.8,
-   where MySQL or another Go path is correct, is implemented correctly once the maintainer
-   (`@du-maya`) confirms in the issue — ask the maintainer, not the owner.
+   where another Go path, or MySQL outside TiDB's documented compatibility differences, is
+   correct, is implemented correctly once the maintainer (`@du-maya`) confirms in the issue and
+   the reviewer has no objection — ask them, not the owner. It does not apply (ask the owner) when
+   only metadata, warnings or error text differ, when it is disputed whether Go is wrong, when the
+   fix changes performance or resource behaviour, written data or encodings, or interaction with
+   TiKV / TiFlash / Go TiDB in the same cluster, or when either of them has doubts.
 7. **Do not touch** `third_party/` (vendored TiKV code) and never run `cargo fmt --all` (it reformats
    third_party) — use `cargo fmt -p <crate>`.
 8. **Every difference from Go is written down**: the spec's "known differences" section names the
