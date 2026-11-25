@@ -510,6 +510,30 @@ fn sum_range_falls_back_at_planning() {
     }
 }
 
+/// The stream aggregation executor (the aggregation executors D12.3, part A) is ported, but no
+/// aggregate reaches it yet: the physical aggregation plans (D10.1) are not ported and every
+/// statement with an aggregate, a GROUP BY or a DISTINCT falls back at planning (the
+/// aggregation rules, D09.4), before any executor opened; also the shapes Go plans as a stream
+/// aggregation (an aggregate over a point get or a range of the clustered index). The stop of
+/// each statement is pinned, so the first statement that reaches the new executor fails here
+/// and gets a row and column check instead.
+#[test]
+fn aggregates_fall_back_at_planning() {
+    let _serial = PREPARED_COUNT.lock();
+    let (_store, mut s) = sysbench_cached_session();
+    for sql in [
+        "SELECT COUNT(*) FROM sbtest1 WHERE id = 1",
+        "SELECT MAX(k), MIN(k) FROM sbtest1 WHERE id BETWEEN 1 AND 10",
+        "SELECT COUNT(k) FROM sbtest1 WHERE id BETWEEN 1 AND 10",
+        "SELECT id, COUNT(*) FROM sbtest1 WHERE id BETWEEN 1 AND 10 GROUP BY id",
+        "SELECT DISTINCT c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c",
+    ] {
+        let before = s.executed_stmts();
+        let r = run_text(&mut s, sql);
+        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.4", "{sql}");
+    }
+}
+
 /// The name of an expression column is the text of its select field, as Go v8.5.8 sends it
 /// (`buildProjectionFieldNameFromExpressions` takes `SelectField.Text()`), read here from
 /// the result fields of the record sets these statements now produce: on the text protocol,

@@ -17,6 +17,10 @@
 //!
 //! VS1-36 (block D12.5): the in-memory sort and top-n executors ([`sortexec`]) and their
 //! `buildSort` / `buildTopN` in [`builder`].
+//!
+//! D12.3 part A (the aggregation executors): the stream aggregation ([`aggregate`]), its
+//! group checker (`internal::vecgroupchecker`, counted in D12.0) and
+//! `buildStreamAggFromChildExec` in [`builder`].
 #![deny(unsafe_code)]
 // N13 rule 5 (M-SHARE): a clone of an `Arc` is written `Arc::clone(&x)`, so a bare `.clone()`
 // is always a value clone (Go `Clone`).
@@ -24,6 +28,7 @@
 
 pub mod adapter;
 pub mod aggfuncs;
+pub mod aggregate;
 #[cfg(test)]
 mod basic_executors_test;
 pub mod builder;
@@ -34,6 +39,8 @@ pub mod exec;
 #[cfg(test)]
 mod executor_required_rows_test;
 pub mod glue;
+#[cfg(test)]
+mod govec_aggexec_test;
 #[cfg(test)]
 mod govec_basicexec_test;
 pub mod internal;
