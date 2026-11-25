@@ -407,8 +407,14 @@ async fn memory_quota_exceeded_in_a_group() {
 async fn build_errors() {
     let sctx = ctx();
     let tps = child_types();
-    // An aggregate function of a later part of D12.4 (GROUP_CONCAT): `b.err`, no executor.
-    let gc = desc(&sctx, ast::AggFuncGroupConcat, col(&tps[1], 1), false);
+    // An aggregate function of a later part of D12.4 (APPROX_COUNT_DISTINCT, part B2): `b.err`,
+    // no executor.
+    let gc = desc(
+        &sctx,
+        ast::AggFuncApproxCountDistinct,
+        col(&tps[1], 1),
+        false,
+    );
     let src = BatchSource {
         base: new_base_executor_v2(
             sctx.get_session_vars(),

@@ -48,16 +48,17 @@ pub fn push<H: PushInterface>(h: &mut H, x: H::Item) {
     up(h, h.len() as isize - 1);
 }
 
-/// Pop removes the minimum element (according to Less) from the heap. The complexity is
-/// O(log n) where n = h.Len(). Pop is equivalent to Remove(h, 0).
-// go-std: heap.Pop L1
+/// Pop removes the minimum element (according to Less) from the heap, discarding the popped
+/// value. The complexity is O(log n) where n = h.Len(). Pop is equivalent to Remove(h, 0).
+// glue: heap.Pop discarding the popped element (delegates to pop_with)
 pub fn pop(h: &mut impl Interface) {
     pop_with(h, |h| h.pop());
 }
 
-/// Like [`pop`], returning the value taken from the last slot by `pop_last` (matching Go's
-/// `heap.Pop(h)` returning `h.Pop()`).
-// glue: heap.Pop returning the popped element
+/// Pop removes and returns the minimum element (according to Less) from the heap, taking the
+/// value from the last slot with `pop_last` (matching Go's `heap.Pop(h)` returning `h.Pop()`).
+/// The complexity is O(log n) where n = h.Len(). Pop is equivalent to Remove(h, 0).
+// go-std: heap.Pop L1
 pub fn pop_with<H: Interface, T>(h: &mut H, pop_last: impl FnOnce(&mut H) -> T) -> T {
     let n = h.len() as isize - 1;
     h.swap(0, n as usize);

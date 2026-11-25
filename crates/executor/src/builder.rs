@@ -582,10 +582,8 @@ impl ExecutorBuilder {
     /// Go's `buildHashAgg` (build the child, then this function) is not ported yet:
     /// `PhysicalHashAgg` (D10.1) does not exist yet, so no plan kind dispatches to it and
     /// `build`'s default arm already returns `blocked` (same as `buildStreamAgg`, spec §6
-    /// item 16). `group_concat`'s shared `truncated` flag wiring (`builder.go:2084-2089`) is
-    /// unreachable until D12.4 ports `group_concat`, because `aggfuncs::build` returns
-    /// `blocked-by:D12.4` first. The executor counter (`ExecutorCounterHashAggExec`) is not
-    /// ported (D14.1 metrics).
+    /// item 16). The executor counter (`ExecutorCounterHashAggExec`) is not ported
+    /// (D14.1 metrics).
     // go: executorBuilder.buildHashAggFromChildExec L2 (plan fields passed in, PhysicalHashAgg is D10.1; Build's temporary blocked error sets b.err; executor counter not ported)
     pub fn build_hash_agg_from_child_exec(
         &mut self,
@@ -665,13 +663,20 @@ impl ExecutorBuilder {
                             return None;
                         }
                     };
-                let final_agg_func = match aggfuncs::build(&*expr_ctx, &final_desc, i as isize) {
+                let mut final_agg_func = match aggfuncs::build(&*expr_ctx, &final_desc, i as isize)
+                {
                     Ok(agg_func) => agg_func,
                     Err(err) => {
                         self.err = Some(err);
                         return None;
                     }
                 };
+                if let (Some(partial_fn), Some(final_fn)) =
+                    (partial_agg_func.as_ref(), final_agg_func.as_mut())
+                    && let Some(truncated) = partial_fn.get_truncated()
+                {
+                    final_fn.set_truncated(truncated);
+                }
                 e.push_partial_agg_func(partial_agg_func);
                 e.push_final_agg_func(final_agg_func);
             }

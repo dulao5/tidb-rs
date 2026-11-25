@@ -26,28 +26,33 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
+use tidb_base::contextutil::WarnHandler;
 use tidb_base::mysql;
 use tidb_chunk::chunk::{self, Chunk};
 use tidb_chunk::row::Row;
+use tidb_executor::aggfuncs::func_count_distinct::write_time;
 use tidb_executor::aggfuncs::{AggFunc, PartialResult, build};
 use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode, BaseFuncDesc};
+use tidb_expression::byitem::ByItems;
 use tidb_expression::context::BuildContext;
 use tidb_expression::expression::EvalState;
-use tidb_expression::{Column, Expr, ExprRef};
+use tidb_expression::{Column, Constant, Expr, ExprRef};
 use tidb_parser::types::FieldType;
 use tidb_sessionctx::exprstatic as es;
 use tidb_types::MyDecimal;
+use tidb_types::context::FlagTruncateAsWarning;
 use tidb_types::core_time::CoreTime;
+use tidb_types::datum::new_string_datum;
 use tidb_types::enum_type::Enum;
+use tidb_types::field_type::new_field_type;
 use tidb_types::json::parse_binary_json_from_string;
 use tidb_types::set_type::Set;
 use tidb_types::time::{Duration, new_time};
 use tidb_types::vector::zero_copy_deserialize_vector_float32;
 
-/// The records whose function `build` reports as not ported yet (the later parts of the
-/// block): COUNT(DISTINCT) in the complete and partial-1 modes (part B1) and the names of the
-/// parts B1 and B2, in every op that builds them.
-const EXPECTED_BLOCKED: usize = 4295;
+/// The records whose function `build` reports as not ported yet (part B2 of the block:
+/// `APPROX_COUNT_DISTINCT` and `APPROX_PERCENTILE`), in every op that builds them.
+const EXPECTED_BLOCKED: usize = 560;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -212,6 +217,7 @@ fn append(c: &mut Chunk, ft: &FieldType, col: usize, v: &Value) {
 
 struct Built {
     ctx: Arc<es::ExprContext>,
+    eval_ctx: Arc<es::EvalContext>,
     desc: AggFuncDesc,
     fts: Vec<FieldType>,
     func: Option<Box<dyn AggFunc>>,
@@ -234,17 +240,46 @@ fn mode_of(m: i64) -> AggFunctionMode {
     }
 }
 
+fn warnings_of(ec: &es::EvalContext) -> Value {
+    let ws: Vec<Value> = ec
+        .copy_warnings(vec![])
+        .into_iter()
+        .map(|w| Value::String(w.err.to_string()))
+        .collect();
+    Value::Array(ws)
+}
+
 /// The domain's afDesc.make, then `build`.
 fn build_desc(d: &Value) -> Outcome {
     let dpi = d["dpi"].as_i64().unwrap();
-    let ctx = es::new_expr_context(vec![
-        es::with_eval_ctx(es::new_eval_context(vec![
-            es::with_div_precision_increment(dpi),
-        ])),
+    let mut eval_opts = vec![es::with_div_precision_increment(dpi)];
+    if d.get("trunc_warn")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        eval_opts.push(es::with_type_flags(FlagTruncateAsWarning));
+    }
+    let eval_ctx = es::new_eval_context(eval_opts);
+    let mut expr_opts = vec![
+        es::with_eval_ctx(Arc::clone(&eval_ctx)),
         es::with_windowing_use_high_precision(d["hp"].as_bool().unwrap()),
-    ]);
-    let fts: Vec<FieldType> = d["args"].as_array().unwrap().iter().map(ft_of).collect();
-    let args: Vec<ExprRef> = fts
+    ];
+    if let Some(max_len) = d.get("max_len").and_then(Value::as_u64)
+        && max_len > 0
+    {
+        expr_opts.push(es::with_group_concat_max_len(max_len));
+    }
+    let ctx = es::new_expr_context(expr_opts);
+    let arg_fts: Vec<FieldType> = d["args"].as_array().unwrap().iter().map(ft_of).collect();
+    let extra_fts: Vec<FieldType> = d
+        .get("extra_cols")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(ft_of).collect())
+        .unwrap_or_default();
+    let mut fts = arg_fts.clone();
+    fts.extend(extra_fts);
+
+    let mut args: Vec<ExprRef> = arg_fts
         .iter()
         .enumerate()
         .map(|(i, ft)| {
@@ -256,6 +291,16 @@ fn build_desc(d: &Value) -> Outcome {
             .into_ref()
         })
         .collect();
+    if d.get("has_sep").and_then(Value::as_bool).unwrap_or(false) {
+        let sep_bytes = unhex(d.get("sep").and_then(Value::as_str).unwrap_or(""));
+        args.push(
+            Expr::Constant(Constant::new(
+                new_string_datum(sep_bytes),
+                new_field_type(mysql::TypeString),
+            ))
+            .into_ref(),
+        );
+    }
     let base = BaseFuncDesc::from_parts(
         d["name"].as_str().unwrap().to_owned(),
         args,
@@ -263,9 +308,27 @@ fn build_desc(d: &Value) -> Outcome {
     );
     let mut desc = AggFuncDesc::from_base(base, d["distinct"].as_bool().unwrap());
     desc.mode = mode_of(d["mode"].as_i64().unwrap());
+    if let Some(obs) = d.get("order_by").and_then(Value::as_array) {
+        desc.order_by_items = obs
+            .iter()
+            .map(|o| {
+                let col = o["col"].as_u64().unwrap() as usize;
+                ByItems {
+                    expr: Expr::Column(Column {
+                        ret_type: Arc::new(fts[col].clone()),
+                        index: col as isize,
+                        ..Column::default()
+                    })
+                    .into_ref(),
+                    desc: o["desc"].as_bool().unwrap(),
+                }
+            })
+            .collect();
+    }
     match build(&*ctx, &desc, 0) {
         Ok(func) => Outcome::Built(Built {
             ctx,
+            eval_ctx,
             desc,
             fts,
             func,
@@ -327,6 +390,173 @@ fn final_cells(b: &Built, f: &dyn AggFunc, pr: &mut PartialResult) -> (Value, Op
 
 /// Runs one record: (out, error), or None when a function is not ported yet.
 fn run(op: &str, a: &[Value]) -> Option<(Value, Option<Error>)> {
+    match op {
+        "json_agg" => {
+            let action = a[0].as_str().unwrap();
+            return run(action, &a[1..]);
+        }
+        "count_distinct_encode" => {
+            let action = a[0].as_str().unwrap();
+            return match action {
+                "run" => run("update_final", &a[1..]),
+                "write_time" => {
+                    let tv = a[1].as_array().unwrap();
+                    let t = new_time(
+                        CoreTime(s_u64(&tv[0])),
+                        tv[1].as_u64().unwrap() as u8,
+                        tv[2].as_i64().unwrap() as isize,
+                    );
+                    let mut buf = [0xffu8; 16];
+                    write_time(&mut buf, t);
+                    Some((json!({"raw": hex(&buf)}), None))
+                }
+                _ => panic!("unknown count_distinct_encode action {action}"),
+            };
+        }
+        "group_concat" => {
+            let action = a[0].as_str().unwrap();
+            return match action {
+                "run" => {
+                    let mut b = match build_desc(&a[1]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let tname = type_name(&b.func);
+                    let has_trunc = {
+                        let f = b.func.as_deref_mut().expect("group_concat builds");
+                        if let Some(t) = f.get_truncated() {
+                            f.set_truncated(t);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    let f = b.func.as_deref().expect("group_concat builds");
+                    let mut pr = f.alloc_partial_result();
+                    let mut groups = vec![];
+                    for (gi, g) in a[2].as_array().unwrap().iter().enumerate() {
+                        if let Err((step, e)) = update(&b, f, g, &mut pr) {
+                            return Some((
+                                json!({
+                                    "type": tname,
+                                    "has_trunc": has_trunc,
+                                    "groups": groups,
+                                    "warnings": warnings_of(&b.eval_ctx),
+                                    "step": format!("group {gi} {step}"),
+                                }),
+                                Some(e),
+                            ));
+                        }
+                        let (cells, err) = final_cells(&b, f, &mut pr);
+                        groups.push(cells);
+                        if let Some(e) = err {
+                            return Some((
+                                json!({
+                                    "type": tname,
+                                    "has_trunc": has_trunc,
+                                    "groups": groups,
+                                    "warnings": warnings_of(&b.eval_ctx),
+                                    "step": format!("group {gi} final"),
+                                }),
+                                Some(e),
+                            ));
+                        }
+                        f.reset_partial_result(&mut pr);
+                    }
+                    Some((
+                        json!({
+                            "type": tname,
+                            "has_trunc": has_trunc,
+                            "groups": groups,
+                            "warnings": warnings_of(&b.eval_ctx),
+                            "step": "",
+                        }),
+                        None,
+                    ))
+                }
+                "merge" => {
+                    let pb = match build_desc(&a[1]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let mut fb = match build_desc(&a[2]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    // Wire shared truncated sentinel and share the warning sink (as Go does).
+                    let pf = pb.func.as_deref().expect("partial group_concat builds");
+                    let ff = fb.func.as_deref_mut().expect("final group_concat builds");
+                    if let Some(t) = pf.get_truncated() {
+                        ff.set_truncated(t);
+                    }
+                    let types = json!([type_name(&pb.func), type_name(&fb.func)]);
+                    let pf = pb.func.as_deref().unwrap();
+                    let ff = fb.func.as_deref().unwrap();
+                    let mut out = json!({
+                        "type": types,
+                        "partials": [],
+                        "final": null,
+                        "warnings": [],
+                        "step": "",
+                    });
+                    let mut fpr = ff.alloc_partial_result();
+                    let mut partials = vec![];
+                    let ec = pb.ctx.get_eval_ctx();
+                    for (i, part) in a[3].as_array().unwrap().iter().enumerate() {
+                        let mut pr = pf.alloc_partial_result();
+                        if let Err((step, e)) = update(&pb, pf, part, &mut pr) {
+                            out["partials"] = Value::Array(partials);
+                            out["warnings"] = warnings_of(&pb.eval_ctx);
+                            out["step"] = json!(format!("part {i} {step}"));
+                            return Some((out, Some(e)));
+                        }
+                        let (cells, err) = final_cells(&pb, pf, &mut pr);
+                        partials.push(cells);
+                        if let Some(e) = err {
+                            out["partials"] = Value::Array(partials);
+                            out["warnings"] = warnings_of(&pb.eval_ctx);
+                            out["step"] = json!(format!("part {i} final"));
+                            return Some((out, Some(e)));
+                        }
+                        if let Err(e) = ff.merge_partial_result(&*ec, &mut pr, &mut fpr) {
+                            out["partials"] = Value::Array(partials);
+                            out["warnings"] = warnings_of(&pb.eval_ctx);
+                            out["step"] = json!(format!("merge {i}"));
+                            return Some((out, Some(e)));
+                        }
+                    }
+                    let (cells, err) = final_cells(&pb, ff, &mut fpr);
+                    out["partials"] = Value::Array(partials);
+                    out["final"] = cells;
+                    out["warnings"] = warnings_of(&pb.eval_ctx);
+                    if err.is_some() {
+                        out["step"] = json!("final");
+                    }
+                    Some((out, err))
+                }
+                "merge_err" => {
+                    let b = match build_desc(&a[1]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let tname = type_name(&b.func);
+                    let f = b.func.as_deref().expect("group_concat builds");
+                    let mut pr1 = f.alloc_partial_result();
+                    let mut pr2 = f.alloc_partial_result();
+                    let ec = b.ctx.get_eval_ctx();
+                    let err = f.merge_partial_result(&*ec, &mut pr1, &mut pr2).err();
+                    Some((json!({"type": tname, "step": "merge"}), err))
+                }
+                _ => panic!("unknown group_concat action {action}"),
+            };
+        }
+        _ => {}
+    }
+
     let b = match build_desc(&a[0]) {
         Outcome::Built(b) => b,
         Outcome::Blocked => return None,

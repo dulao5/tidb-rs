@@ -1,19 +1,20 @@
-//! The unit tests of Go's `aggfuncs` for the functions of part A (spec D12.4 §6, the core
-//! aggregate functions): `TestCount`, `TestSum`, `TestAvg`, `TestMaxMin` and
-//! `TestMergePartialResult4{Count,Sum,Avg,FirstRow,MaxMin,BitFuncs}` with Go's helpers
-//! `testAggFunc`, `testMultiArgsAggFunc` and `testMergePartialResult` (aggfunc_test.go), and
-//! the `TestMem*` tests as properties of the Rust memory accounting.
+//! The unit tests of Go's `aggfuncs` for the functions of parts A and B1 (spec D12.4 §6):
+//! `TestCount`, `TestSum`, `TestAvg`, `TestMaxMin`, `TestGroupConcat`, `TestJsonArrayagg`,
+//! `TestJsonObjectagg`, `TestVarpop`, `TestVarsamp`, `TestStddevpop`, `TestStddevsamp`,
+//! `TestWriteTime`, and `TestMergePartialResult4*`, with Go's helpers `testAggFunc`,
+//! `testMultiArgsAggFunc`, and `testMergePartialResult` (`aggfunc_test.go`), plus the
+//! `TestMem*` tests as properties of the Rust memory accounting.
 //!
 //! Differences from the Go tests:
 //! - Go's `messUpChunk` overwrites the source chunk after each update, to catch partial
 //!   results that keep a reference into it. A Rust partial result cannot borrow the chunk
 //!   (`PartialResult` is `'static`), so the helpers drop it instead.
-//! - COUNT(DISTINCT) is part B1 of the block: where Go's helpers build it, the Rust helpers
-//!   assert the temporary `blocked` error. The APPROX_COUNT_DISTINCT cases (part B2) are left
-//!   out.
+//! - The APPROX_COUNT_DISTINCT and APPROX_PERCENTILE cases (part B2) are left out; a
+//!   dedicated test asserts they still return the temporary `blocked-by:D12.4`.
 //! - `TestMem*` check Go's estimated `memDelta`, which Rust does not return (the memory
-//!   exception A1): the DISTINCT sets grow a memory tracker through the allocator and give it
-//!   back when dropped, and every function's reset partial result behaves as a fresh one.
+//!   exception A1): the growing partial result containers grow a memory tracker through the
+//!   allocator and give it back when dropped, and every function's reset partial result
+//!   behaves as a fresh one.
 
 // Go identifiers for the type constants in patterns (M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -24,6 +25,8 @@ use std::sync::Arc;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
+use tidb_base::contextutil::WarnHandler;
+use tidb_base::dbterror::plannererrors;
 use tidb_base::mysql::{
     self, TypeDate, TypeDouble, TypeDuration, TypeEnum, TypeFloat, TypeJSON, TypeLonglong,
     TypeNewDecimal, TypeSet, TypeString, UnsignedFlag,
@@ -33,9 +36,11 @@ use tidb_chunk::chunk::{Chunk, new_chunk_with_capacity};
 use tidb_chunk::row::Row;
 use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode, new_agg_func_desc};
 use tidb_expression::ast_funcs as ast;
+use tidb_expression::byitem::ByItems;
 use tidb_expression::context::{BuildContext, EvalContext, type_ctx};
+use tidb_expression::errors::ErrCutValueGroupConcat;
 use tidb_expression::expression::EvalState;
-use tidb_expression::{Column, Expr, ExprRef};
+use tidb_expression::{Column, Constant, Expr, ExprRef};
 use tidb_kv::set::new_string_set_with_memory_usage;
 use tidb_memory::TrackedAlloc;
 use tidb_memory::tracker::new_tracker;
@@ -43,6 +48,7 @@ use tidb_parser::gocharset::CharsetBin;
 use tidb_parser::types::FieldType;
 use tidb_sessionctx::exprstatic as es;
 use tidb_types::collate::get_collator;
+use tidb_types::context::{FlagTruncateAsWarning, Flags};
 use tidb_types::datum::{
     Datum, new_collate_mysql_enum_datum, new_decimal_datum, new_duration_datum, new_float32_datum,
     new_float64_datum, new_int_datum, new_json_datum, new_mysql_set_datum, new_string_datum,
@@ -56,12 +62,15 @@ use tidb_types::json::{
 };
 use tidb_types::mydecimal::new_dec_from_int;
 use tidb_types::set_type::{parse_set, parse_set_name, parse_set_value};
-use tidb_types::time::{Duration, time_from_days};
+use tidb_types::time::{Duration, parse_date, time_from_days};
 
+use super::func_count_distinct::write_time;
 use super::{
     AggFunc, PartialResult, build, new_agg_partial_result_mapper,
     new_agg_partial_result_mapper_with_cap,
 };
+
+const SEPARATOR: &str = " ";
 
 // aggTest (aggfunc_test.go).
 struct AggTest {
@@ -69,6 +78,7 @@ struct AggTest {
     num_rows: usize,
     func_name: &'static str,
     results: Vec<Datum>,
+    order_by: bool,
 }
 
 // multiArgsAggTest (aggfunc_test.go).
@@ -77,6 +87,7 @@ struct MultiArgsAggTest {
     num_rows: usize,
     func_name: &'static str,
     results: Vec<Datum>,
+    order_by: bool,
 }
 
 fn elems() -> Vec<Vec<u8>> {
@@ -150,6 +161,7 @@ fn agg_tester_with_field_type(
         num_rows,
         func_name,
         results,
+        order_by: false,
     }
 }
 
@@ -165,7 +177,16 @@ fn multi_args_agg_tester(
         num_rows,
         func_name,
         results,
+        order_by: false,
     }
+}
+
+fn sep_const(sep: &str) -> ExprRef {
+    Expr::Constant(Constant::new(
+        new_string_datum(sep),
+        new_field_type(TypeString),
+    ))
+    .into_ref()
 }
 
 // aggTest.genSrcChk (aggfunc_test.go): the rows 0..numRows and a NULL.
@@ -252,10 +273,19 @@ fn test_agg_func_without_distinct(p: &AggTest) {
     let ctx = es::new_expr_context(vec![]);
     let ec = ctx.get_eval_ctx();
     let ec: &dyn EvalContext = &*ec;
-    let args = vec![column(&p.data_type, 0)];
+    let mut args = vec![column(&p.data_type, 0)];
     let collate = p.data_type.get_collate();
+    if p.func_name == ast::AggFuncGroupConcat {
+        args.push(sep_const(SEPARATOR));
+    }
 
-    let desc = new_agg_func_desc(&*ctx, p.func_name, args, false).unwrap();
+    let mut desc = new_agg_func_desc(&*ctx, p.func_name, args.clone(), false).unwrap();
+    if p.order_by {
+        desc.order_by_items = vec![ByItems {
+            expr: Arc::clone(&args[0]),
+            desc: true,
+        }];
+    }
     let final_func = built(&ctx, &desc);
     let mut final_pr = final_func.alloc_partial_result();
     let src = gen_src_chk(p);
@@ -277,14 +307,19 @@ fn test_agg_func(p: &AggTest) {
     let ctx = es::new_expr_context(vec![]);
     let ec = ctx.get_eval_ctx();
     let ec: &dyn EvalContext = &*ec;
-    let args = vec![column(&p.data_type, 0)];
+    let mut args = vec![column(&p.data_type, 0)];
     let collate = p.data_type.get_collate();
+    if p.func_name == ast::AggFuncGroupConcat {
+        args.push(sep_const(SEPARATOR));
+    }
 
     // test the agg func with distinct
-    let desc = new_agg_func_desc(&*ctx, p.func_name, args, true).unwrap();
-    if p.func_name == ast::AggFuncCount {
-        assert_blocked(build(&*ctx, &desc, 0));
-        return;
+    let mut desc = new_agg_func_desc(&*ctx, p.func_name, args.clone(), true).unwrap();
+    if p.order_by {
+        desc.order_by_items = vec![ByItems {
+            expr: Arc::clone(&args[0]),
+            desc: true,
+        }];
     }
     let final_func = built(&ctx, &desc);
     let mut final_pr = final_func.alloc_partial_result();
@@ -299,18 +334,31 @@ fn test_agg_func(p: &AggTest) {
 // testMultiArgsAggFunc (aggfunc_test.go).
 fn test_multi_args_agg_func(p: &MultiArgsAggTest) {
     let ctx = es::new_expr_context(vec![]);
+    test_multi_args_agg_func_with_ctx(&ctx, p);
+}
+
+fn test_multi_args_agg_func_with_ctx(ctx: &es::ExprContext, p: &MultiArgsAggTest) {
     let ec = ctx.get_eval_ctx();
     let ec: &dyn EvalContext = &*ec;
-    let args: Vec<ExprRef> = p
+    let mut args: Vec<ExprRef> = p
         .data_types
         .iter()
         .enumerate()
         .map(|(k, ft)| column(ft, k as isize))
         .collect();
+    if p.func_name == ast::AggFuncGroupConcat {
+        args.push(sep_const(SEPARATOR));
+    }
 
-    let desc = new_agg_func_desc(&*ctx, p.func_name, args.clone(), false).unwrap();
+    let mut desc = new_agg_func_desc(ctx, p.func_name, args.clone(), false).unwrap();
+    if p.order_by {
+        desc.order_by_items = vec![ByItems {
+            expr: Arc::clone(&args[0]),
+            desc: true,
+        }];
+    }
     let collate = args[0].get_type(ec).get_collate();
-    let final_func = built(&ctx, &desc);
+    let final_func = built(ctx, &desc);
     let mut final_pr = final_func.alloc_partial_result();
     let src = gen_multi_src_chk(p);
     let st = EvalState::new();
@@ -327,12 +375,14 @@ fn test_multi_args_agg_func(p: &MultiArgsAggTest) {
     assert_datum_eq(ec, &dt, &p.results[0], collate);
 
     // test the agg func with distinct
-    let desc = new_agg_func_desc(&*ctx, p.func_name, args, true).unwrap();
-    if p.func_name == ast::AggFuncCount {
-        assert_blocked(build(&*ctx, &desc, 0));
-        return;
+    let mut desc = new_agg_func_desc(ctx, p.func_name, args.clone(), true).unwrap();
+    if p.order_by {
+        desc.order_by_items = vec![ByItems {
+            expr: Arc::clone(&args[0]),
+            desc: true,
+        }];
     }
-    let final_func = built(&ctx, &desc);
+    let final_func = built(ctx, &desc);
     let mut final_pr = final_func.alloc_partial_result();
     for _ in 0..2 {
         let src = gen_multi_src_chk(p);
@@ -349,9 +399,18 @@ fn test_merge_partial_result(p: &AggTest) {
     let ctx = es::new_expr_context(vec![]);
     let ec = ctx.get_eval_ctx();
     let ec: &dyn EvalContext = &*ec;
-    let args = vec![column(&p.data_type, 0)];
+    let mut args = vec![column(&p.data_type, 0)];
     let collate = p.data_type.get_collate();
-    let desc = new_agg_func_desc(&*ctx, p.func_name, args, false).unwrap();
+    if p.func_name == ast::AggFuncGroupConcat {
+        args.push(sep_const(SEPARATOR));
+    }
+    let mut desc = new_agg_func_desc(&*ctx, p.func_name, args.clone(), false).unwrap();
+    if p.order_by {
+        desc.order_by_items = vec![ByItems {
+            expr: Arc::clone(&args[0]),
+            desc: true,
+        }];
+    }
     let (partial_desc, final_desc) = desc.split(&[0, 1]);
 
     // build partial func for partial phase.
@@ -791,9 +850,6 @@ fn reset_partial_result_is_fresh() {
     for name in names {
         for &tp in &types {
             for distinct in [false, true] {
-                if distinct && name == ast::AggFuncCount {
-                    continue; // part B1
-                }
                 let p = agg_tester(name, tp, 5, vec![]);
                 let ctx = es::new_expr_context(vec![]);
                 let ec = ctx.get_eval_ctx();
@@ -1198,6 +1254,7 @@ fn merge_partial_result_json_objectagg() {
                     new_json_datum(create_binary_json(JSONValue::Object(entries2))),
                     new_json_datum(create_binary_json(JSONValue::Object(entries1))),
                 ],
+                order_by: false,
             };
             test_multi_args_merge_partial_result(&p, &json_ft);
         }
@@ -1229,6 +1286,7 @@ fn json_objectagg() {
                     null(),
                     new_json_datum(create_binary_json(JSONValue::Object(entries))),
                 ],
+                order_by: false,
             };
             test_multi_args_agg_func(&p);
         }
@@ -1411,4 +1469,275 @@ fn var_stddev_and_json_agg_memory_accounted() {
         );
     }
     assert_eq!(t.bytes_consumed(), 0, "JSON_OBJECTAGG: memory not returned");
+}
+
+// TestMergePartialResult4GroupConcat (func_group_concat_test.go).
+#[test]
+fn merge_partial_result_group_concat() {
+    let s = |v: &str| new_string_datum(v);
+    test_merge_partial_result(&agg_tester(
+        ast::AggFuncGroupConcat,
+        TypeString,
+        5,
+        vec![s("0 1 2 3 4"), s("2 3 4"), s("0 1 2 3 4 2 3 4")],
+    ));
+}
+
+// TestGroupConcat (func_group_concat_test.go).
+#[test]
+fn group_concat() {
+    let s = |v: &str| new_string_datum(v);
+    test_agg_func(&agg_tester(
+        ast::AggFuncGroupConcat,
+        TypeString,
+        5,
+        vec![null(), s("0 1 2 3 4")],
+    ));
+
+    let mut test2 = multi_args_agg_tester(
+        ast::AggFuncGroupConcat,
+        &[TypeString, TypeString],
+        5,
+        vec![null(), s("44 33 22 11 00")],
+    );
+    test2.order_by = true;
+    test_multi_args_agg_func(&test2);
+
+    // minimum GroupConcatMaxLen is 4
+    let full = "44 33 22 11 00";
+    for i in 4..=7usize {
+        let ctx = es::new_expr_context(vec![
+            es::with_eval_ctx(es::new_eval_context(vec![es::with_type_flags(
+                Flags::default().with_truncate_as_warning(true),
+            )])),
+            es::with_group_concat_max_len(i as u64),
+        ]);
+        let mut t = multi_args_agg_tester(
+            ast::AggFuncGroupConcat,
+            &[TypeString, TypeString],
+            5,
+            vec![null(), s(&full[..i])],
+        );
+        t.order_by = true;
+        test_multi_args_agg_func_with_ctx(&ctx, &t);
+    }
+}
+
+// Spec §5.1 / §5.2 / §5.5 / §6.1: GROUP_CONCAT truncation error vs warning, shared truncated
+// flag firing once across partial + final, GetTruncated absent on groupConcatDistinctOrder,
+// and ErrInternal on ORDER BY MergePartialResult.
+#[test]
+fn group_concat_truncation_and_errors() {
+    let str_ft = new_field_type(TypeString);
+    let args = vec![column(&str_ft, 0), sep_const(",")];
+
+    // 1. TruncateAsWarning = false -> returns ErrCutValueGroupConcat on first truncation,
+    // then Ok(()) on subsequent truncations because the sentinel is already set.
+    let ctx_err = es::new_expr_context(vec![
+        es::with_eval_ctx(es::new_eval_context(vec![es::with_type_flags(
+            Flags::default().with_truncate_as_warning(false),
+        )])),
+        es::with_group_concat_max_len(4),
+    ]);
+    let desc = new_agg_func_desc(&*ctx_err, ast::AggFuncGroupConcat, args.clone(), false).unwrap();
+    let f = built(&ctx_err, &desc);
+    let mut pr = f.alloc_partial_result();
+    let mut chk = new_chunk_with_capacity(std::slice::from_ref(&str_ft), 2);
+    chk.append_string(0, b"abc");
+    chk.append_string(0, b"def");
+    let ec = ctx_err.get_eval_ctx();
+    let err = f
+        .update_partial_result(&*ec, &EvalState::new(), &rows(&chk), &mut pr)
+        .unwrap_err();
+    assert!(ErrCutValueGroupConcat.equal(&err), "{err:?}");
+    let dt = final_datum(&*ec, &*f, &mut pr, &desc.ret_tp);
+    assert_datum_eq(&*ec, &dt, &new_string_datum("abc,"), str_ft.get_collate());
+    // Second group truncates without erroring again.
+    f.reset_partial_result(&mut pr);
+    f.update_partial_result(&*ec, &EvalState::new(), &rows(&chk), &mut pr)
+        .unwrap();
+
+    // 2. TruncateAsWarning = true + shared truncated sentinel across partial & final:
+    // generates exactly one warning across both objects.
+    let eval_warn = es::new_eval_context(vec![es::with_type_flags(FlagTruncateAsWarning)]);
+    let ctx_warn = es::new_expr_context(vec![
+        es::with_eval_ctx(Arc::clone(&eval_warn)),
+        es::with_group_concat_max_len(4),
+    ]);
+    let desc = new_agg_func_desc(&*ctx_warn, ast::AggFuncGroupConcat, args.clone(), false).unwrap();
+    let (partial_desc, final_desc) = desc.split(&[0, 1]);
+    let partial_f = built(&ctx_warn, &partial_desc);
+    let mut final_f = built(&ctx_warn, &final_desc);
+    let shared = partial_f
+        .get_truncated()
+        .expect("groupConcat has truncated");
+    final_f.set_truncated(shared);
+    let mut p1 = partial_f.alloc_partial_result();
+    let mut p2 = partial_f.alloc_partial_result();
+    let mut fpr = final_f.alloc_partial_result();
+    partial_f
+        .update_partial_result(&*eval_warn, &EvalState::new(), &rows(&chk), &mut p1)
+        .unwrap();
+    partial_f
+        .update_partial_result(&*eval_warn, &EvalState::new(), &rows(&chk), &mut p2)
+        .unwrap();
+    final_f
+        .merge_partial_result(&*eval_warn, &mut p1, &mut fpr)
+        .unwrap();
+    final_f
+        .merge_partial_result(&*eval_warn, &mut p2, &mut fpr)
+        .unwrap();
+    assert_eq!(eval_warn.warning_count(), 1);
+    let warns = eval_warn.copy_warnings(vec![]);
+    assert!(ErrCutValueGroupConcat.equal(&warns[0].err));
+
+    // 3. groupConcatOrder / groupConcatDistinctOrder MergePartialResult -> ErrInternal;
+    // groupConcatDistinctOrder omits GetTruncated (matching Go).
+    for distinct in [false, true] {
+        let mut desc =
+            new_agg_func_desc(&*ctx_warn, ast::AggFuncGroupConcat, args.clone(), distinct).unwrap();
+        desc.order_by_items = vec![ByItems {
+            expr: Arc::clone(&args[0]),
+            desc: false,
+        }];
+        let f = built(&ctx_warn, &desc);
+        if distinct {
+            assert!(f.get_truncated().is_none());
+        } else {
+            assert!(f.get_truncated().is_some());
+        }
+        let mut a = f.alloc_partial_result();
+        let mut b = f.alloc_partial_result();
+        let err = f
+            .merge_partial_result(&*eval_warn, &mut a, &mut b)
+            .unwrap_err();
+        assert!(plannererrors::ErrInternal.equal(&err), "{err:?}");
+    }
+}
+
+// TestWriteTime (func_count_test.go).
+#[test]
+fn write_time_fills_all_bytes() {
+    let ec = es::new_eval_context(vec![]);
+    let (tt, err) = parse_date(&ec.type_ctx(), b"2020-11-11");
+    err.unwrap();
+    let mut buf = [255u8; 16];
+    write_time(&mut buf, tt);
+    for (i, &b) in buf.iter().enumerate() {
+        assert_ne!(b, 255, "byte {i} was not written");
+    }
+}
+
+// TestMemCount (DISTINCT cases) and TestMemGroupConcat (all 4 variants) as A1 property tests
+// (spec §5.3): growing partial results account through ColAlloc / TrackedAlloc and release on drop.
+#[test]
+fn count_distinct_and_group_concat_memory_accounted() {
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+
+    // 1. COUNT(DISTINCT) single-arg (every specialized type + fallback Date/JSON) and multi-arg.
+    for tp in ALL_TYPES {
+        let ft = new_field_type(tp);
+        let desc = new_agg_func_desc(&*ctx, ast::AggFuncCount, vec![column(&ft, 0)], true).unwrap();
+        let t = new_tracker(1, -1);
+        {
+            let a = TrackedAlloc::new(Arc::clone(&t));
+            let mut f = built(&ctx, &desc);
+            f.set_alloc(ColAlloc::Tracked(a.clone()));
+            let mut pr = f.alloc_partial_result();
+            let p = agg_tester(ast::AggFuncCount, tp, 500, vec![]);
+            let src = gen_src_chk(&p);
+            update_each(ec, &*f, &rows(&src), &mut pr).unwrap();
+            a.flush();
+            assert!(
+                t.bytes_consumed() > 0,
+                "COUNT(DISTINCT) tp={tp}: no growth accounted"
+            );
+            f.reset_partial_result(&mut pr);
+            update_each(ec, &*f, &rows(&src), &mut pr).unwrap();
+            a.flush();
+            assert!(t.bytes_consumed() > 0);
+        }
+        assert_eq!(
+            t.bytes_consumed(),
+            0,
+            "COUNT(DISTINCT) tp={tp}: memory not returned"
+        );
+    }
+
+    // 2. GROUP_CONCAT (plain, DISTINCT, ORDER BY, DISTINCT ORDER BY).
+    let str_ft = new_field_type(TypeString);
+    let ctx_gc = es::new_expr_context(vec![es::with_group_concat_max_len(1024 * 1024)]);
+    let ec_gc = ctx_gc.get_eval_ctx();
+    for (distinct, order_by) in [(false, false), (true, false), (false, true), (true, true)] {
+        let args = vec![column(&str_ft, 0), column(&str_ft, 1), sep_const(SEPARATOR)];
+        let mut desc =
+            new_agg_func_desc(&*ctx_gc, ast::AggFuncGroupConcat, args.clone(), distinct).unwrap();
+        if order_by {
+            desc.order_by_items = vec![ByItems {
+                expr: Arc::clone(&args[0]),
+                desc: true,
+            }];
+        }
+        let t = new_tracker(1, -1);
+        {
+            let a = TrackedAlloc::new(Arc::clone(&t));
+            let mut f = built(&ctx_gc, &desc);
+            f.set_alloc(ColAlloc::Tracked(a.clone()));
+            let mut pr = f.alloc_partial_result();
+            let p = multi_args_agg_tester(
+                ast::AggFuncGroupConcat,
+                &[TypeString, TypeString],
+                500,
+                vec![],
+            );
+            let src = gen_multi_src_chk(&p);
+            update_each(&*ec_gc, &*f, &rows(&src), &mut pr).unwrap();
+            a.flush();
+            assert!(
+                t.bytes_consumed() > 0,
+                "GROUP_CONCAT distinct={distinct} order_by={order_by}: no growth accounted"
+            );
+            f.reset_partial_result(&mut pr);
+            update_each(&*ec_gc, &*f, &rows(&src), &mut pr).unwrap();
+            a.flush();
+            assert!(t.bytes_consumed() > 0);
+        }
+        assert_eq!(
+            t.bytes_consumed(),
+            0,
+            "GROUP_CONCAT distinct={distinct} order_by={order_by}: memory not returned"
+        );
+    }
+}
+
+// Part B2 functions (APPROX_COUNT_DISTINCT, APPROX_PERCENTILE) remain on the temporary
+// blocked-by:D12.4 stub until part B2 is ported (spec §4).
+#[test]
+fn part_b2_names_remain_blocked() {
+    let ctx = es::new_expr_context(vec![]);
+    let int_ft = new_field_type(TypeLonglong);
+    let approx_cd = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncApproxCountDistinct,
+        vec![column(&int_ft, 0)],
+        false,
+    )
+    .unwrap();
+    assert_blocked(build(&*ctx, &approx_cd, 0));
+
+    let pct_const = Expr::Constant(Constant::new(
+        new_int_datum(50),
+        new_field_type(TypeLonglong),
+    ))
+    .into_ref();
+    let approx_pct = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncApproxPercentile,
+        vec![column(&int_ft, 0), pct_const],
+        false,
+    )
+    .unwrap();
+    assert_blocked(build(&*ctx, &approx_pct, 0));
 }

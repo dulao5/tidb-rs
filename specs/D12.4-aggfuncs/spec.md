@@ -285,7 +285,7 @@ Go 的单测都基于 `aggfunc_test.go` / `window_func_test.go` 的帮助函数�
 8. **`Build` 的 nil** 表示为 `Ok(None)`，`baseAggFunc.retTp` 的 nil 表示为 `None`，只是表示方式不同。
 9. 第 B 部分合并前 `Build` 对那 9 个函数名返回 `blocked`（路由器回退到 PoC），不是用户可见的差异。
 10. 如果 §8 的某条复现后经负责人裁定不照搬，在这里补上差异和 `docs/testing/rulings.toml` 的条目。
-11. **两个 NaN 相加时得到哪一个**：SUM / AVG 的浮点累加（`func_sum.go:100`、`:111`、`:348`，`func_avg.go:377`、`:438`、`:446`、`:486`）在两个操作数都是 NaN 时，硬件返回按机器码操作数顺序的第一个（x86 的目的寄存器、ARM 的 Rn），gc 和 Rust 的编译器（LLVM 认为浮点加法可交换）排的顺序可能不同，所以结果的 NaN 位模式（符号、payload）可能不同（第 A 部分的 govec 在 amd64 上看到 12 条 DISTINCT 求和的记录不同）。只有一个 NaN 时、以及 Inf - Inf 的默认 NaN 都与 Go 相同。Go 写入时拒绝 NaN，计算也不产生 NaN 输入，所以从 SQL 到不了；govec 的 SUM / AVG 记录不含 NaN 输入。维护者已定不逐位跟随 gc（§9.2 第 12 条），保持现在的写法。
+11. **两个 NaN 相加时得到哪一个**：SUM / AVG 的浮点累加（`func_sum.go:100`、`:111`、`:348`，`func_avg.go:377`、`:438`、`:446`、`:486`）以及 VAR / STDDEV 的方差累加（`func_varpop.go:70`、`:98`）在两个操作数都是 NaN 时，硬件返回按机器码操作数顺序的第一个（x86 的目的寄存器、ARM 的 Rn），gc 和 Rust 的编译器（LLVM 认为浮点加法可交换）排的顺序可能不同，所以结果的 NaN 位模式（符号、payload）可能不同（第 A 部分的 govec 在 amd64 上看到 12 条 DISTINCT 求和的记录不同；第 B1 部分在同组同时出现 `+Inf` 与 `-Inf` 时，`variance` 为 `+NaN`、`FNMSUBD` 算出的 `t` 为 `-NaN`，`variance += (t*t)/...` 同样触发两个 NaN 相加）。只有一个 NaN 时、以及 Inf - Inf 的默认 NaN 都与 Go 相同。Go 写入时拒绝 NaN 与 ±Inf，计算也不产生 NaN / ±Inf 输入，所以从 SQL 到不了；govec 的 SUM / AVG 记录不含 NaN 输入，VAR / STDDEV 记录不含 NaN 和 ±Inf 输入。维护者已定不逐位跟随 gc（§9.2 第 12 条），保持现在的写法。
 12. **`UpdatePartialResult` 多一个参数** `st: &EvalState`（§5.1），只是 Rust 表达式求值的接口，结果相同。
 
 ## 8. 可能的 Go 问题（读代码发现，尚未在运行中的 v8.5.8 上复现）
@@ -294,7 +294,7 @@ Go 的单测都基于 `aggfunc_test.go` / `window_func_test.go` 的帮助函数�
 
 1. **LEAD 的偏移量很大时回绕（疑似结果错误）**：`p.curIdx+v.offset < uint64(len(p.rows))`（`func_lead_lag.go:66`）。偏移量只检查"非负整数常量"（`pkg/expression/aggregation/window_func.go:50-56`，`GetUint64FromConstant` 接受 UINT64 字面量），`LEAD(a, 18446744073709551615) OVER (ORDER BY a)` 在第 2 行时 `1 + (2^64 - 1)` 回绕成 0，返回第 1 行的值而不是默认值 NULL。LAG 有 `p.curIdx >= v.offset` 的判断，没有这个问题。如果复现，属于宪章第一条 2 的"结果错误"，要负责人裁定。
 2. **没有序列化方法的聚合函数在并行 hash agg 落盘时（疑似崩溃）**：VAR_POP / VAR_SAMP / STDDEV_POP / STDDEV_SAMP（非 DISTINCT）、APPROX_COUNT_DISTINCT、APPROX_PERCENTILE、VECTOR 类型的 FIRST_ROW / MAX / MIN 都可以并行执行（并行只排除 DISTINCT 和 ORDER BY，`pkg/executor/builder.go:2056-2066`），但它们用 `baseAggFunc` 的空序列化（`aggfuncs.go:229-235`）：落盘时这一列不写任何行（`agg_hash_partial_worker.go:351-353`），恢复时 `DeserializePartialResult` 返回空切片，`partialResultsRestored[aggPos][rowPos]` 越界（`agg_spill.go:301`、`:315`）。要在 `tidb_mem_quota_query` 很小、`tidb_enable_parallel_hashagg_spill = ON` 时复现。这是 D12.3 与本块共同的路径，在第 S 部分和 D12.3 的落盘部分一起复现；如果复现，属于安全 / 正确性问题，要负责人裁定（Rust 可能的处理：对这些函数禁止落盘，或补序列化）。
-3. **多参数 COUNT(DISTINCT) 与单参数的去重标准不同**：单参数 REAL 用 `map[float64]`（`+0 == -0`），多参数按位编码（`func_count_distinct.go:431-436`），所以 `COUNT(DISTINCT x)` 与 `COUNT(DISTINCT x, 1)` 在 `x` 含 `0` 和 `-0` 时结果不同；单参数 Duration 只比较 `Duration`（`:233-237`），多参数还比较 `Fsp`（`:466-471`）。只在同一列出现不同 fsp 或 `-0` 时可见；按 Go 移植，复现后开 issue。
+3. **多参数 COUNT(DISTINCT) 与单参数的去重标准不同**（#390）：单参数 REAL 用 `map[float64]`（`+0 == -0`），多参数按位编码（`func_count_distinct.go:431-436`），所以 `COUNT(DISTINCT x)` 与 `COUNT(DISTINCT x, 1)` 在 `x` 含 `0` 和 `-0` 时结果不同；单参数 Duration 只比较 `Duration`（`:233-237`），多参数还比较 `Fsp`（`:466-471`）。已在 v8.5.8 上复现（#390），按 Go 移植并用 govec `count_distinct_encode` 固定。
 4. **GROUP_CONCAT ORDER BY 忽略比较错误**（`func_group_concat.go:330-342`）：Go 自己的注释已经指出（上游 issue `52449`）。照抄，只记录。
 
 ## 9. 已决定的点
