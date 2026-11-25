@@ -1,6 +1,6 @@
 # D12.3 聚合执行器框架（hash agg / stream agg）：spec
 
-状态：草案，只写 spec（#335），待评审（Lucky）和负责人确认。确认之前不写代码；确认后按 §2 的部分拆成实现任务。第 8 节列出需要负责人决定的点。
+状态：已确认（2026-11-25），只写 spec（#335）。第 8 节记录各决定点的结论：全部按本 spec 的建议，由维护者按宪章第九条（谁来决定，#374）决定。下一步按 §2 的部分拆成实现任务。
 
 块：D12.3（ROADMAP P4 的第 2 层；Go 约 1,959 行，8 个文件），crate `tidb-executor`（N0 rank 14）。
 
@@ -82,7 +82,7 @@ sysbench `oltp_read_only` 的两条聚合语句：`SELECT SUM(k) ... WHERE id BE
 | D12.4 聚合函数实现（#336） | `AggFunc` trait、`aggfuncs.Build`、`PartialResult`、`AggPartialResultMapper`、`SerializeHelper`（只有第 C 部分用）、group_concat 的 `SetTruncated` / `GetTruncated` | **硬依赖**：没有它两个执行器都无法计算。第 A、B 部分的实现排在 D12.4 中 count / sum / avg / max / min / first_row 那一部分之后。对 D12.4 的要求见 §4.10 |
 | D08.11 聚合函数描述（PR #341） | `AggFuncDesc`（`Name`、`HasDistinct`、`OrderByItems`、`Split`、`GetDefaultValue`）、`IsAllFirstRow` | 硬依赖（只读）。计划节点按值还是按 `Arc` 持有描述（D08.11 决定点 4）**本块不需要选**：执行器只通过 `&AggFuncDesc` 读，`Split` 返回新的描述，两种表示下写法相同；跟随负责人对 D08.11 决定点 4 的结论 |
 | D10.1 物理算子 | `PhysicalHashAgg` / `PhysicalStreamAgg`（`GroupByItems`、`AggFuncs`、`IsFinalAgg`） | 4 个 builder 函数要它们。D10.1 的聚合算子移植之前，builder 分派仍停在现有的 `blocked-by` 桩（改成指向 D10.1）；执行器本身的测试直接构造执行器，不经过 builder（Go 的 `agg_spill_test.go:194` 就是这样做的） |
-| D12.0 的 `vecgroupchecker`（8 个函数，未移植） | `VecGroupChecker` | StreamAgg 要它（builder.go:2113）。建议随第 A 部分一起移植、计入 D12.0（决定点 3） |
+| D12.0 的 `vecgroupchecker`（8 个函数，未移植） | `VecGroupChecker` | StreamAgg 要它（builder.go:2113）。随第 A 部分一起移植、计入 D12.0（决定点 3） |
 | D12.2 第 1 部分（PR #338） | `ExecCtx.pool`、`take_all_children` / `set_all_children`、并行执行器的固定写法（watch 通道作 finish、`Drop` 时 abort） | 第 B 部分照它写，所以排在 #338 合并之后 |
 | D01.10 落盘容器 | `chunk.DataInDiskByChunks`（`chunk_in_disk.go`，23 个函数） | 落盘全部停在 `blocked-by:D01.10`（§3、决定点 4、5）。单线程方式在 `Open` 时无条件 `NewDataInDiskByChunks`（agg_hash_executor.go:283）、`resetSpillMode` 读 `NumChunks`（:723）、`Close` 调 `Close`（:177），这几个方法在没有文件时不做 I/O |
 | D00.3 工具文件 | `util/set/set_with_memory_usage.go`（`StringSetWithMemoryUsage`）、`util/hack/map_abi.go`（`MemAwareMap`，读 Go runtime 的 swiss map 内部结构估算内存）、`util/channel/channel.go`（`Clear`） | 按宪章第四条 4 整文件移植，或按映射规则替换；`MemAwareMap` 的处理见决定点 8 |
@@ -101,7 +101,7 @@ sysbench `oltp_read_only` 的两条聚合语句：`SELECT SUM(k) ... WHERE id BE
 | C | 15 | 并行方式的落盘与恢复 | D01.10 |
 | X | 7 | 只在测试中有作用的钩子 | — |
 
-第 B 部分较大。如果评审希望 PR 小一些，可以再拆成 B1（单线程，19 个）和 B2（并行，55 个），见决定点 1。
+第 B 部分较大，但作为一个任务移植，不再拆成单线程和并行两部分（决定点 1）。
 
 ### 2.1 第 A 部分（11）
 
@@ -259,7 +259,7 @@ Go 的 `select` 写成没有 `biased;` 的 `tokio::select!`：两边都就绪时
 
 ### 4.6 内存记账与落盘（`M-MEM`、A1）
 
-- 记账按 A1（`specs/exceptions/N3-A1-concurrency-memory/spec.md` §3.2 第一行、§3.3）：删除 Go 的 delta 计算（包括聚合函数返回的 `memDelta`、`getGroupKeyMemUsage`、部分结果表与 `groupSet` 的增量估算）；会增长的容器（分组键、部分结果表、`groupSet`、聚合状态）用 `TrackedAlloc` 分配，按实际字节数自动记进 tracker；Go 中正向 `Consume` 的位置改为 `mem.checkpoint()?`，在同一位置执行动作链（所以"在哪一步报错"与 Go 相同）；负向 `Consume`（释放）删除，由 Drop 完成。这与 D12.4（#342）决定点 1 的建议 B 是同一套机制：D12.4 不再返回 `memDelta`，本块也不再 `consume` 它。按 A1，记的数值与 Go 不同。每个调用点在 tracker 中按例外（A1）登记。部分结果表的内存怎么计入见决定点 8。
+- 记账按 A1（`specs/exceptions/N3-A1-concurrency-memory/spec.md` §3.2 第一行、§3.3）：删除 Go 的 delta 计算（包括聚合函数返回的 `memDelta`、`getGroupKeyMemUsage`、部分结果表与 `groupSet` 的增量估算）；会增长的容器（分组键、部分结果表、`groupSet`、聚合状态）用 `TrackedAlloc` 分配，按实际字节数自动记进 tracker；Go 中正向 `Consume` 的位置改为 `mem.checkpoint()?`，在同一位置执行动作链（所以"在哪一步报错"与 Go 相同）；负向 `Consume`（释放）删除，由 Drop 完成。这与 D12.4（#342）决定点 1 定下的 B 是同一套机制：D12.4 不再返回 `memDelta`，本块也不再 `consume` 它。按 A1，记的数值与 Go 不同。每个调用点在 tracker 中按例外（A1）登记。部分结果表的内存怎么计入见决定点 8。
 - 两个动作的优先级都是 `DefSpillPriority`（agg_spill.go:353、380），在 `TrackAggregateMemoryUsage && EnableTmpStorageOnOOM`（并行方式还要 `EnableParallelHashaggSpill`）时注册到会话 tracker 的软限额动作上（:286-295、418-427）。
 - 落盘：第 B 部分照移植触发落盘的状态机（动作、`needSpill`、`inSpillMode`），真正写盘的地方停在 `blocked-by:D01.10`（§3）。不允许不注册动作（那样内存超限时会直接走 fallback 取消语句，是静默的行为差异）。
 
@@ -306,7 +306,7 @@ Go 的 `select` 写成没有 `biased;` 的 `tokio::select!`：两边都就绪时
 
 ### 5.2 govec
 
-新领域 `aggexec`（tracker `govec/domains/aggexec.go`，决定点 9）。Go 侧不经过 planner，像 `agg_spill_test.go:194` 那样直接构造执行器（字段都是导出的），子节点是内存数据源；Rust 侧同样直接构造后回放。要等 D12.4 的基本聚合函数移植后才能回放。
+新领域 `aggexec`（tracker `govec/domains/aggexec.go`，决定点 11）。Go 侧不经过 planner，像 `agg_spill_test.go:194` 那样直接构造执行器（字段都是导出的），子节点是内存数据源；Rust 侧同样直接构造后回放。要等 D12.4 的基本聚合函数移植后才能回放。
 
 | op | 覆盖 | 比较 |
 |---|---|---|
@@ -358,57 +358,25 @@ sysbench 的 SUM / DISTINCT 要等 D09.4、D09.9、D10.1、D10.3、D12.3、D12.4
 2. **StreamAgg 的初始内存在每次重新打开时累加**：`OpenSelf` 中 `memUsageOfInitialPartialResult += memDelta`（agg_stream_executor.go:90），这个字段从不清零。Apply 对每一行外表都重新 `Open` 内表的执行器（join/hash_join_v1.go:1308），所以第 n 次打开时记账的初始内存是第一次的 n 倍（:103、:248），外表行数多时可能因为记账虚高而触发内存超限。只影响内存记账，不影响结果。按 A1 删除 delta 计算后（§4.6），Rust 记的是实际字节数，这个累加不存在，所以不照搬；这是 A1 带来的记账差异，不单独登记裁定。
 3. **builder 给 avg 的 ordinal**（builder.go:2073-2078）：avg 得到 `[p, p+2]`（不是 `[p, p+1]`），下一个函数从 `p+2` 开始。这些 ordinal 只用作 final 描述参数列的 `Index`（D08.11 descriptor.go:168-175），而并行方式的 final 函数只做 `MergePartialResult` / `AppendFinalResult2Chunk`，不对参数求值，所以看起来没有影响。照 Go 移植，govec `hash_agg_parallel` 含多个 avg 的用例来确认。
 
-## 8. 需要负责人决定的点
+## 8. 已决定的点
 
-Duet 不能确认 spec，下面每一点都请负责人决定；括号内是建议。
+### 8.1 负责人已定
 
-1. **部分怎么拆成实现任务？**
-   - A：第 A 部分一个任务（含 vecgroupchecker）；第 B 部分一个任务（74 个）；第 C 部分等 D01.10 移植后一个任务。
-   - B：同 A，但第 B 部分拆成 B1（单线程，19 个）和 B2（并行，55 个）两个任务。B1 合并时 `Close` / `OpenSelf` / `Next` / `ActionSpill` 中的并行分支是 `blocked-by:D12.3` 的临时桩，B2 时去掉。
-   - （建议 A：sysbench 的 DISTINCT 默认走并行方式，只有 B1 不能让它跑通；B1 的临时桩还要在 B2 中再拆一次。如果评审认为 74 个函数的 PR 太大，选 B。）
-2. **7 个测试钩子函数（§2.4）在 tracker 中怎么登记？**
-   - A：tracker 改归 X（"测试工具"），不移植。
-   - B：移植成什么都不做的函数（failpoint 关闭时 Go 也什么都不做），配向量豁免。
-   - C：登记为例外。
-   - （建议 A：它们只服务于 Go 的 failpoint 测试，与 D12.1 / D12.2 不移植 failpoint 的做法一致；与 D08.11 决定点 1 的处理方式相同。）
-3. **D12.0 的 vecgroupchecker（8 个函数，未移植）怎么办？**
-   - A：随第 A 部分整文件移植，计入 D12.0（照 D09.14 spec §2 "增加"表的做法），配它自己的 Go 单测（`vec_group_checker_test.go`）。
-   - B：先单独开一个 D12.0 的任务。
-   - （建议 A：只有 566 行，依赖都已移植（表达式、chunk、codec），StreamAgg 是它的第一个调用者。）
-4. **落盘容器的边界放在哪一层？**（单线程 HashAgg 每次 `Open` 都建一个空的 `DataInDiskByChunks`。）
-   - A：把 `chunk_in_disk.go` 中没有文件时不做 I/O 的 5 个方法（`NewDataInDiskByChunks`、`GetDiskTracker`、`NumChunks`、`NumRows`、`Close`）提前按 L1 移植到 chunk crate、计入 D01.10，其余（`Add`、`GetChunk`、`FillChunk` 等）为 `blocked-by:D01.10` 的桩。
-   - B：本块用 `Option<DataInDiskByChunks>`，没有落盘时为 `None`（结构与 Go 不同，L2）。
-   - C：`NewDataInDiskByChunks` 本身是桩：单线程 HashAgg 的每次 `Open` 都报 `blocked`（不可接受，列出只为完整）。
-   - （建议 A。这些方法不完全是宪章第四条 5 所说的"没有出边"的函数（`NewDataInDiskByChunks` 调用已移植的 `disk.NewTracker`），所以请负责人确认可以提前移植。）
-5. **并行方式的落盘边界放在哪里？**
-   - A：`HashAggExec.spill` 是整函数桩，按 Go 中 worker 写盘失败的路径报 `blocked-by:D01.10`（§3）；触发状态机（动作、`setNeedSpill`、`checkNeedSpill`）照移植。
-   - B：动作被调用时就记下 `blocked`，执行器在下一次检查时返回。
-   - C：不注册落盘动作。
-   - （建议 A：报错的位置与 Go 第一次真正写盘的位置相同，第 C 部分只需替换桩。C 会让内存超限时直接取消语句，是静默的差异，不符合宪章第五条。）
-6. **会话还没有内存 tracker（A1 尚未接入会话）时，软限额动作注册到哪里？**
-   - A：`SessionContext` 增加取会话 tracker 的方法（会话接入 A1 后提供）；拿不到时不注册，登记为只有注释的临时桩，并在已知差异中写明（§6 第 11 条）。拿不到时也没有任何限额，Go 的动作在没有超限时同样不会运行。
-   - B：拿不到时返回 `blocked-by:D05.3`：默认设置下每一个 HashAgg 都会停下。
-   - （建议 A：差别来自 A1 的接入，影响所有执行器的内存限额，应在 A1 接入会话的任务中一次解决。）
-7. **跨 task 的计数等待（Go 的 `sync.WaitGroup`）怎么表示？**（`M-WG` 只覆盖 `Close` 等 task，§4.3。）
-   - A：在 `tidb-runtime` 中加一个异步的 `WaitGroup`（`add` / `done` / `wait().await`），并把 `M-WG` 扩展为"跨 task 等待用它，`Close` 仍等 `JoinHandle`"。修改映射规则需要负责人确认（mappings.md"用途"一节）。实现要求：计数已经为 0 时 `wait()` 立即返回；先登记等待、再检查计数，避免 `add`/`done` 与 `wait` 之间漏掉通知；按 port-block 的要求配一个在等待中途 drop 的测试。
-   - B：每一处单独改写（final worker 等 partial worker 改成 `watch` 通知，`inflightChunkSync` 改成计数器加 `Notify`），各标 L2。
-   - （建议 A：hash join（build / probe worker）、IndexLookUp 等后续的并行执行器都有同样的写法；按 mappings.md，同一种 L2 出现第三次时应提升为规则，不如现在一次定下。）
-8. **内存怎么记账？（与 D12.4 #342 的决定点 1 是同一个决定，请合在一起定）**（Go 显式 `Consume` 各处算出的 delta：聚合函数返回的 `memDelta`、分组键容量，以及 `MemAwareMap` 读 Go runtime swiss map 内部字段的估算，`util/hack/map_abi.go`。）
-   - A：按 A1：删除所有 delta 计算，会增长的容器用 `TrackedAlloc` 分配、按实际字节数自动记账，Go 正向 `Consume` 的位置改为 `mem.checkpoint()?`，负向 `Consume` 由 Drop 完成；`map_abi.go` 中依赖 Go runtime 布局的部分不移植（tracker 登记为例外或改归 X）。
-   - B：照 Go 在原位置显式 `consume` delta，数值来自 D12.4 返回的 `memDelta` 和照 Go 公式（`approxSize` 等）算出的表增量。
-   - （建议 A：这是 A1 spec 的表里已经写定的做法，也和 D12.4 的建议一致；B 记的数既不是 Rust 的真实内存，也不能保证与 Go 一致（Go 的数取决于 Go 版本的 map 实现），还要求 D12.4 保留 `memDelta`。）
-9. **N6（哈希聚合的数据结构，例外"原则同意"、还没有 spec）与本块的关系？**
-   - A：本块照 Go 的结构移植（分组键先编码成字节串、再进哈希表），N6 以后作为实现例外替换内部结构。
-   - B：等 N6 的 spec 确认后再移植第 B 部分。
-   - （建议 A：sysbench 链路不必等一个还没有写的例外；N6 替换的是表和键的表示，Go 的调度结构和对外行为不变。）
-10. **§7 的可能问题现在开 issue，还是复现后再开？**
-    - A：由实现任务在 v8.5.8 上复现（govec 可以直接构造执行器，第 1 条需要一个会在 `AppendFinalResult2Chunk` 中出错的输入），复现后开 issue 并更新本 spec；第 1 条如果是结果错误，按宪章第一条 2 请负责人裁定（`docs/testing/rulings.toml`）。
-    - B：现在按读代码的结论开 issue，注明尚未复现。
-    - （建议 A，与 D08.11 决定点 9 一致。）
-11. **govec 用新领域 `aggexec` 吗？**
-    - A：新领域（§5.2），并行方式按多重集比较，生成器按结构排除与合并顺序有关的用例。
-    - B：扩展 D12.2 的 `basicexec` 领域。
-    - （建议 A：聚合要依赖 D12.4 的函数，与基础算子的回放分开，便于按 `blocked` 计数。）
+本 spec 没有需要负责人决定的点。相关的一点在 D12.4：负责人 2026-11-24 决定落盘字节与 Go 的内存布局逐字节相同（照 A1，D12.4 spec §9 第 5 条，由维护者 du-maya 在 #342、#343 转达）；本块第 C 部分写盘的就是 D12.4 序列化出的字节。
+
+### 8.2 维护者已定（宪章第九条，#374：全部按本 spec 的建议）
+
+1. **实现任务的拆分**：A，第 A 部分一个任务（含 vecgroupchecker），第 B 部分一个任务（74 个），第 C 部分在 D01.10 移植后一个任务。
+2. **7 个测试钩子函数（§2.4）**：A，tracker 改归 X（测试工具），不移植。
+3. **D12.0 的 vecgroupchecker**：A，随第 A 部分提前整文件移植，计入 D12.0。
+4. **落盘容器的边界**：A，`chunk_in_disk.go` 中没有文件时不做 I/O 的 5 个方法提前按 L1 移植到 chunk crate、计入 D01.10，其余是 `blocked-by:D01.10` 的桩。
+5. **并行方式的落盘边界**：A，`HashAggExec.spill` 是整函数桩，在 Go 第一次真正写盘的位置报 `blocked-by:D01.10`。
+6. **会话还没有内存 tracker 时**：A，不注册软限额动作，只有注释的临时桩，写进 §6 第 11 条；在 A1 接入会话的任务中解决。
+7. **跨 task 的计数等待**：A，`tidb-runtime` 加异步 `WaitGroup`，`M-WG` 扩展为"跨 task 等待用它，`Close` 仍等 `JoinHandle`"，实现要求：计数已经为 0 时 `wait()` 立即返回；先登记等待、再检查计数，避免漏掉通知；按 port-block 配一个在等待中途 drop 的测试。
+8. **内存记账**：A，按 A1 的 `TrackedAlloc` 按实际分配记账，`map_abi.go` 依赖 Go runtime 布局的部分不移植（与 D12.4 决定点 1 相同）。
+9. **N6**：A，不等 N6，照 Go 的结构移植，N6 以后作为实现例外替换内部结构。
+10. **§7 的可能问题**：A，由实现任务在 v8.5.8 上复现后开 issue；第 1 条若是结果错误，按宪章第一条 2 请负责人裁定。
+11. **govec**：A，新领域 `aggexec`。
 
 D08.11 决定点 4（计划节点按值还是按 `Arc` 持有聚合函数描述）不需要本块另行决定，见 §1.4。
 
