@@ -126,6 +126,10 @@ impl HashAggFinalWorker {
         &mut self,
         input: AggPartialResultMapper<ColAlloc>,
     ) -> Result<(), Error> {
+        // Do not remove this guard: hashbrown 0.17's `HashMap::into_iter()` forgets its custom
+        // allocator `A` on a zero-capacity map without running `Drop`, which permanently leaks
+        // `ColAlloc::Tracked` (`Arc<Account>` -> `Arc<Tracker>`) when an empty partition map is
+        // merged into a non-empty worker. Returning early drops `input` directly instead.
         if input.m.is_empty() {
             return Ok(());
         }
