@@ -6,8 +6,9 @@
 # sysbench's prepared point get has one parameter, and its range queries fell back at the
 # Projection. Each statement below runs once per `-- ab:execute` line: via the text protocol
 # with the values as literals, and as EXECUTEs of one PREPARE (the first EXECUTE plans, the
-# later ones execute the same statement again, so the plan cache can hit). The values of one
-# EXECUTE differ from each other, so a parameter read from the wrong position gives other rows.
+# later ones execute the same statement again, so the plan cache can hit). Most EXECUTEs bind
+# distinct values, so a parameter read from the wrong position gives other rows; a few repeat
+# one value on purpose (a single-row range, duplicates in IN).
 # Every statement binds the same types on every EXECUTE; a later EXECUTE with another type is
 # in prepared_type_change.sql.
 
