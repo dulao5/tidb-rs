@@ -187,6 +187,10 @@ jobs:
       # The point get fast path and its unique-index path (govec fastplan, VS1-11).
       - name: test (govec_fastplan)
         run: cargo test --locked -p tidb-planner --test govec_fastplan && cargo test --locked -p tidb-executor --test govec_fastplan_uidx
+      # The core aggregate functions (govec aggfuncs, part A of the aggregate functions D12.4):
+      # NaN results of float sums differ between the targets (the hardware's default NaN).
+      - name: test (govec_aggfuncs)
+        run: cargo test --locked -p tidb-executor --test govec_aggfuncs
       - name: test (release-checked)
         run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-expr-pushdown -p tidb-execdetails -p tidb-infoschema -p tidb-store -p tidb-sessiontxn
       # The cardinality vectors (VS1-29) differ by target (M-FMA in the estimation formulas).

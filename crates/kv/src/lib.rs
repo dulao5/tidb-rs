@@ -17,6 +17,7 @@ pub mod key;
 pub mod kv;
 pub mod mpp;
 pub mod option;
+pub mod set;
 pub mod txn;
 pub mod txn_scope_var;
 pub mod version;
