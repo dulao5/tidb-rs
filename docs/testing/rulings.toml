@@ -321,3 +321,17 @@ rationale = "宪章第一条 2 的例外：Go 吞掉输出错误导致静默结�
 approver = "zhigang-du"
 approved = "2026-11-25"
 reopen = "基线升级到并行 HashAgg 返回 AppendFinalResult2Chunk 错误的版本，或负责人决定照 Go；聚合接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"
+
+[[ruling]]
+id = "R22"
+name = "unparallel-hashagg-clear-state-on-reopen"
+class = "divergence"
+plane = "rows"
+layer = "none"
+test = "crates/executor/src/aggregate/tests.rs::hash_agg_reopen_asymmetric_concurrency_nil_and_kill"
+source = "#385（upstream-pitfall）；负责人 2026-11-25 在 Raft 上的裁定（选 A）"
+evidence = "Go v8.5.8 的 HashAggExec.Close（pkg/executor/aggregate/agg_hash_executor.go:169-188）和 initForUnparallelExec（:270-296）清空了 groupSet 与 partialResultMap，但未清空 groupKeys、cursor4GroupKey 和 inSpillMode（仅在读完触发 resetSpillMode 时清空）。在单线程 HashAgg 提前 Close 后重新 Open 时，unparallelExec 从上一轮残留的 cursor4GroupKey 继续遍历 groupKeys，在 Go v8.5.8 上复现出重叠键重复输出（预期 2 行输出 4 行）以及不相交键输出 COUNT=0 幽灵行（预期 1 行输出 3 行 [0, 0, 1]）。tidb-rs 在 Close 与 initForUnparallelExec 中清空上述状态，结果与单次执行一致"
+rationale = "宪章第一条 2 的例外：Go 遗漏清空重开状态导致静默重复行或幽灵空组行，负责人裁定保留正确行为"
+approver = "zhigang-du"
+approved = "2026-11-25"
+reopen = "基线升级到单线程 HashAgg 在 Close/Open 时清空 groupKeys、cursor4GroupKey 和 inSpillMode 的版本，或负责人决定照 Go；聚合接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"
