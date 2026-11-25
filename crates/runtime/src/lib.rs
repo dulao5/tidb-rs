@@ -22,12 +22,14 @@
 
 pub mod admission;
 pub mod blocking;
+pub mod channel;
 pub mod local;
 pub mod metrics;
 pub mod pool;
 pub mod slice;
 pub mod stall;
 pub mod store_window;
+pub mod wait_group;
 
 pub use admission::Admission;
 pub use admission::AdmissionConfig;
@@ -49,6 +51,8 @@ pub use store_window::InflightPermit;
 pub use store_window::StoreTokenLimitError;
 pub use store_window::StoreWindows;
 pub use store_window::StoreWindowsConfig;
+pub use wait_group::DoneGuard;
+pub use wait_group::WaitGroup;
 
 /// A configuration switch of a functional exception (N3 3.6) that has not been implemented:
 /// the default (Go) behaviour is the only one available until its benchmark decides.

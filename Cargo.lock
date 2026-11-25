@@ -3793,6 +3793,7 @@ dependencies = [
 name = "tidb-executor"
 version = "0.0.0"
 dependencies = [
+ "allocator-api2",
  "async-trait",
  "flate2",
  "futures",

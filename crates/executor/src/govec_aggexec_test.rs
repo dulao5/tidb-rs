@@ -1,30 +1,33 @@
 //! Replays the govec `aggexec` vectors (tidb-rs-tracker `govec/domains/aggexec.go`): the
-//! stream aggregation executor of part A of the aggregation executors block (D12.3) and the
-//! vectorized group checker (D12.0), built by the executor builder and run Open-Next-Close
-//! over a source of fixed chunks, against Go TiDB v8.5.8.
+//! stream and hash aggregation executors (Parts A & B of the aggregation executors block, D12.3),
+//! the vectorized group checker (D12.0), `GetGroupKey`, and `HashAggRuntimeStats`, against Go TiDB
+//! v8.5.8.
 //!
-//! A record carries the source's column types and chunks, the GROUP BY columns, the complete
-//! aggregate function descriptors (built here without type inference, as in the `aggfuncs`
-//! replay), the output types, the chunk sizes, the required rows of each `Next`, the
-//! vectorized-expression switch and the `Next` of the source that fails. Go builds the
-//! executor from a `PhysicalStreamAgg` (`buildStreamAgg`); the physical plan is not ported
-//! (the planner falls back before it), so the replay calls `buildStreamAggFromChildExec` with
-//! the plan's fields and the source as the child, which is what `buildStreamAgg` does after
-//! building the child. The result chunks (`Row.GetRaw` and the null flag of each cell), the
-//! error and the step that returned it are compared.
+//! Supported ops:
+//! - `stream_agg`: `StreamAggExec` built via `buildStreamAggFromChildExec`
+//! - `group_key`: `GetGroupKey` across column types, collations, time zones, and vectorized toggle
+//! - `hash_agg_unparallel`: single-threaded `HashAggExec` built via `buildHashAggFromChildExec`
+//! - `hash_agg_parallel`: parallel `HashAggExec` across `(partial_con, final_con)` pairs (multiset
+//!   row comparison)
+//! - `runtime_stats`: `HashAggRuntimeStats` `String` / `Clone` / `Merge` / `Tp`
 //!
 //! `GOVEC_AGGEXEC_FILES` (comma-separated paths) replays these files instead of the
 //! committed one (other seeds, a fresh artifact).
 
 use std::io::Read;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tidb_base::Error;
+use tidb_base::gostd::time::fixed_zone;
 use tidb_base::mysql;
 use tidb_chunk::chunk::{self, Chunk};
+use tidb_execdetails::execdetails::{RuntimeStats, RuntimeStatsColl};
 use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode, BaseFuncDesc};
+use tidb_expression::eval::RpnState;
+use tidb_expression::expression::EvalState;
 use tidb_expression::schema::new_schema;
 use tidb_expression::{Column, Expr, ExprRef, Schema};
 use tidb_memory::tracker::new_tracker;
@@ -39,6 +42,7 @@ use tidb_types::vector::zero_copy_deserialize_vector_float32;
 
 use crate::adapter::TelemetryInfo;
 use crate::adapter::tests::MockSession;
+use crate::aggregate::{AggWorkerStat, HashAggRuntimeStats, get_group_key};
 use crate::builder::new_executor_builder;
 use crate::exec::ExecCtx;
 use crate::glue::SessionContext;
@@ -301,6 +305,41 @@ fn encode(c: &Chunk) -> Value {
     )
 }
 
+fn encode_parallel(c: &Chunk, fts: &[FieldType]) -> Value {
+    Value::Array(
+        (0..c.num_rows())
+            .map(|r| {
+                let row = c.get_row(r);
+                Value::Array(
+                    (0..c.num_cols())
+                        .map(|col| {
+                            if row.is_null(col) {
+                                json!({"null": true, "raw": ""})
+                            } else {
+                                match fts[col].get_type() {
+                                    mysql::TypeNewDecimal => {
+                                        let d = row.get_my_decimal(col);
+                                        json!({"null": false, "raw": String::from_utf8(d.to_string()).unwrap()})
+                                    }
+                                    mysql::TypeDate | mysql::TypeDatetime | mysql::TypeTimestamp => {
+                                        let t = row.get_time(col);
+                                        json!({"null": false, "raw": t.core_time().0.to_string()})
+                                    }
+                                    mysql::TypeDuration => {
+                                        let d = row.get_duration(col, fts[col].get_decimal());
+                                        json!({"null": false, "raw": d.duration.to_string()})
+                                    }
+                                    _ => json!({"null": false, "raw": hex(row.get_raw(col))}),
+                                }
+                            }
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
 /// The govec `aggexecExec`: (out, error).
 async fn run(cfg: &Value) -> (Value, Option<Error>) {
     let fts: Vec<FieldType> = cfg["types"].as_array().unwrap().iter().map(ft_of).collect();
@@ -414,10 +453,319 @@ async fn run(cfg: &Value) -> (Value, Option<Error>) {
     (result(out, ""), None)
 }
 
+fn row_sort_key(row: &Value) -> String {
+    let mut out = String::new();
+    for (i, c) in row.as_array().unwrap().iter().enumerate() {
+        if i > 0 {
+            out.push('|');
+        }
+        if c["null"].as_bool().unwrap() {
+            out.push_str("N:");
+        } else {
+            out.push_str("V:");
+            out.push_str(c["raw"].as_str().unwrap());
+        }
+    }
+    out
+}
+
+fn parse_aggs_group_batches(
+    cfg: &Value,
+    fts: &[FieldType],
+) -> (Vec<AggFuncDesc>, Vec<ExprRef>, Vec<Chunk>) {
+    let aggs: Vec<AggFuncDesc> = cfg["aggs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            let args = a["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| column(fts, c.as_u64().unwrap() as usize))
+                .collect();
+            let base = BaseFuncDesc::from_parts(
+                a["name"].as_str().unwrap().to_owned(),
+                args,
+                Some(Arc::new(ft_of(&a["ret"]))),
+            );
+            let mut d = AggFuncDesc::from_base(base, a["distinct"].as_bool().unwrap());
+            d.mode = mode_of(a["mode"].as_i64().unwrap());
+            d
+        })
+        .collect();
+    let group_by: Vec<ExprRef> = cfg["group_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| column(fts, c.as_u64().unwrap() as usize))
+        .collect();
+    let batches: Vec<Chunk> = cfg["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|rows| {
+            let rows = rows.as_array().unwrap();
+            let mut c = chunk::new_chunk_with_capacity(fts, rows.len());
+            for row in rows {
+                for (col, v) in row.as_array().unwrap().iter().enumerate() {
+                    append(&mut c, &fts[col], col, v);
+                }
+            }
+            c
+        })
+        .collect();
+    (aggs, group_by, batches)
+}
+
+fn run_group_key(cfg: &Value) -> (Value, Option<Error>) {
+    let fts: Vec<FieldType> = cfg["types"].as_array().unwrap().iter().map(ft_of).collect();
+    let mut sctx = MockSession::new(1);
+    let vec_enabled = cfg["vec"].as_bool().unwrap();
+    let tz_offset = cfg["tz_offset"].as_i64().unwrap() as i32;
+    let loc = fixed_zone("UTC", tz_offset);
+    sctx.vars.enable_vectorized_expression = vec_enabled;
+    sctx.vars.time_zone = Some(Arc::clone(&loc));
+    sctx.vars.stmt_ctx_mut().set_time_zone(Arc::clone(&loc));
+
+    let group_by: Vec<ExprRef> = cfg["group_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| column(&fts, c.as_u64().unwrap() as usize))
+        .collect();
+    let rows = cfg["rows"].as_array().unwrap();
+    let mut c = chunk::new_chunk_with_capacity(&fts, rows.len());
+    for row in rows {
+        for (col, v) in row.as_array().unwrap().iter().enumerate() {
+            append(&mut c, &fts[col], col, v);
+        }
+    }
+
+    let expr_ctx = sctx.get_expr_ctx();
+    let eval_ctx = expr_ctx.get_eval_ctx();
+    let err_ctx = sctx.vars.stmt_ctx().err_ctx();
+    let st = EvalState::default();
+    let mut rpn = RpnState::default();
+    match get_group_key(
+        &*eval_ctx,
+        &err_ctx,
+        &loc,
+        vec_enabled,
+        &st,
+        &mut rpn,
+        &c,
+        Vec::new(),
+        &group_by,
+    ) {
+        Ok(keys) => {
+            let encoded: Vec<Value> = keys.iter().map(|k| json!(hex(k))).collect();
+            (json!({"keys": encoded}), None)
+        }
+        Err(err) => (json!({"keys": []}), Some(err)),
+    }
+}
+
+async fn run_hash_agg_unparallel(cfg: &Value) -> (Value, Option<Error>) {
+    let fts: Vec<FieldType> = cfg["types"].as_array().unwrap().iter().map(ft_of).collect();
+    let out_fts: Vec<FieldType> = cfg["out"].as_array().unwrap().iter().map(ft_of).collect();
+    let sizes = cfg["sizes"].as_array().unwrap();
+    let max = sizes[1].as_i64().unwrap();
+
+    let mut sctx = MockSession::new(1);
+    let vars = &mut sctx.vars;
+    vars.init_chunk_size = sizes[0].as_i64().unwrap();
+    vars.max_chunk_size = max;
+    vars.enable_vectorized_expression = cfg["vec"].as_bool().unwrap();
+    vars.set_hash_agg_partial_concurrency(1);
+    vars.set_hash_agg_final_concurrency(1);
+    vars.stmt_ctx_mut().mem_tracker = Some(new_tracker(-1, -1));
+
+    let (aggs, group_by, batches) = parse_aggs_group_batches(cfg, &fts);
+    let src = Source {
+        base: new_base_executor_v2(
+            sctx.get_session_vars(),
+            &sctx.sql_killer(),
+            Some(schema_of(&fts)),
+            1,
+            Vec::new(),
+        ),
+        batches,
+        ptr: 0,
+        nexts: 0,
+        err_at: cfg["err_at"].as_i64().unwrap(),
+    };
+
+    let mut out = vec![];
+    let result = |out: Vec<Value>, step: &str| json!({"chunks": out, "step": step});
+    let mut b = new_executor_builder(&sctx, None, Arc::new(TelemetryInfo::default()));
+    let Some(mut e) = b.build_hash_agg_from_child_exec(
+        &sctx,
+        Some(Box::new(src)),
+        &schema_of(&out_fts),
+        2,
+        &group_by,
+        &aggs,
+    ) else {
+        return (Value::Null, b.err.take());
+    };
+    let ctx = ExecCtx::new(sctx.vars.stmt_ctx_arc());
+    if let Err(err) = e.open(&ctx).await {
+        return (result(out, "open"), Some(err));
+    }
+    let mut chk = exec::new_first_chunk(&e);
+    let reqs = cfg["reqs"].as_array().unwrap();
+    let mut i = 0;
+    loop {
+        if let Some(r) = reqs.get(i).and_then(Value::as_i64)
+            && r > 0
+        {
+            chk.set_required_rows(r as isize, max as usize);
+        }
+        i += 1;
+        if let Err(err) = e.next(&ctx, &mut chk).await {
+            let _ = e.close().await;
+            return (result(out, "next"), Some(err));
+        }
+        if chk.num_rows() == 0 {
+            break;
+        }
+        out.push(encode(&chk));
+    }
+    if let Err(err) = e.close().await {
+        return (result(out, "close"), Some(err));
+    }
+    assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+    (result(out, ""), None)
+}
+
+async fn run_hash_agg_parallel(cfg: &Value) -> (Value, Option<Error>) {
+    let fts: Vec<FieldType> = cfg["types"].as_array().unwrap().iter().map(ft_of).collect();
+    let out_fts: Vec<FieldType> = cfg["out"].as_array().unwrap().iter().map(ft_of).collect();
+    let sizes = cfg["sizes"].as_array().unwrap();
+    let max = sizes[1].as_i64().unwrap();
+
+    let mut sctx = MockSession::new(1);
+    let vars = &mut sctx.vars;
+    vars.init_chunk_size = sizes[0].as_i64().unwrap();
+    vars.max_chunk_size = max;
+    vars.enable_vectorized_expression = cfg["vec"].as_bool().unwrap();
+    vars.set_hash_agg_partial_concurrency(cfg["partial_con"].as_i64().unwrap());
+    vars.set_hash_agg_final_concurrency(cfg["final_con"].as_i64().unwrap());
+    vars.stmt_ctx_mut().mem_tracker = Some(new_tracker(-1, -1));
+    vars.stmt_ctx_mut().runtime_stats_coll = Some(RuntimeStatsColl::new(None));
+
+    let (aggs, group_by, batches) = parse_aggs_group_batches(cfg, &fts);
+    let src = Source {
+        base: new_base_executor_v2(
+            sctx.get_session_vars(),
+            &sctx.sql_killer(),
+            Some(schema_of(&fts)),
+            1,
+            Vec::new(),
+        ),
+        batches,
+        ptr: 0,
+        nexts: 0,
+        err_at: cfg["err_at"].as_i64().unwrap(),
+    };
+
+    let mut b = new_executor_builder(&sctx, None, Arc::new(TelemetryInfo::default()));
+    let Some(mut e) = b.build_hash_agg_from_child_exec(
+        &sctx,
+        Some(Box::new(src)),
+        &schema_of(&out_fts),
+        2,
+        &group_by,
+        &aggs,
+    ) else {
+        return (Value::Null, b.err.take());
+    };
+    let ctx = ExecCtx::new(sctx.vars.stmt_ctx_arc());
+    if let Err(err) = e.open(&ctx).await {
+        return (json!({"rows": [], "step": "open"}), Some(err));
+    }
+    let mut chk = exec::new_first_chunk(&e);
+    let reqs = cfg["reqs"].as_array().unwrap();
+    let mut rows: Vec<Value> = Vec::new();
+    let mut i = 0;
+    loop {
+        if let Some(r) = reqs.get(i).and_then(Value::as_i64)
+            && r > 0
+        {
+            chk.set_required_rows(r as isize, max as usize);
+        }
+        i += 1;
+        if let Err(err) = e.next(&ctx, &mut chk).await {
+            let _ = e.close().await;
+            assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+            return (json!({"rows": [], "step": "next"}), Some(err));
+        }
+        if chk.num_rows() == 0 {
+            break;
+        }
+        if let Value::Array(chunk_rows) = encode_parallel(&chk, &out_fts) {
+            rows.extend(chunk_rows);
+        }
+    }
+    if let Err(err) = e.close().await {
+        return (json!({"rows": [], "step": "close"}), Some(err));
+    }
+    assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+    rows.sort_by_key(row_sort_key);
+    (json!({"rows": rows, "step": ""}), None)
+}
+
+fn make_stats(v: &Value) -> HashAggRuntimeStats {
+    let mk = |arr: &Value| -> Vec<Arc<AggWorkerStat>> {
+        arr.as_array()
+            .unwrap()
+            .iter()
+            .map(|w| {
+                let a = w.as_array().unwrap();
+                Arc::new(AggWorkerStat::new(
+                    a[0].as_i64().unwrap(),
+                    a[1].as_i64().unwrap(),
+                    a[2].as_i64().unwrap(),
+                    a[3].as_i64().unwrap(),
+                ))
+            })
+            .collect()
+    };
+    HashAggRuntimeStats {
+        partial_concurrency: v["p_con"].as_u64().unwrap() as usize,
+        partial_wall_time: AtomicI64::new(v["p_wall"].as_i64().unwrap()),
+        final_concurrency: v["f_con"].as_u64().unwrap() as usize,
+        final_wall_time: AtomicI64::new(v["f_wall"].as_i64().unwrap()),
+        partial_stats: mk(&v["p_stats"]),
+        final_stats: mk(&v["f_stats"]),
+    }
+}
+
+fn run_runtime_stats(cfg: &Value) -> (Value, Option<Error>) {
+    let mut s1 = make_stats(&cfg["base"]);
+    let s2 = make_stats(&cfg["other"]);
+    let str1 = s1.string();
+    let cloned = s1.clone_stats().string();
+    let tp = s1.tp();
+    s1.merge(&s2);
+    let merged = s1.string();
+    (
+        json!({"str": str1, "clone": cloned, "merged": merged, "tp": tp}),
+        None,
+    )
+}
+
 /// Compares one record; Err(why) on a difference.
 async fn check(rec: &Value) -> Result<(), String> {
-    assert_eq!(rec["op"], "stream_agg");
-    let (out, err) = run(&rec["args"][0]).await;
+    let (out, err) = match rec["op"].as_str().unwrap() {
+        "stream_agg" => run(&rec["args"][0]).await,
+        "group_key" => run_group_key(&rec["args"][0]),
+        "hash_agg_unparallel" => run_hash_agg_unparallel(&rec["args"][0]).await,
+        "hash_agg_parallel" => run_hash_agg_parallel(&rec["args"][0]).await,
+        "runtime_stats" => run_runtime_stats(&rec["args"][0]),
+        other => panic!("unexpected aggexec op {other}"),
+    };
     let got_err = err.map(|e| e.to_string());
     let want_err = rec["err"]["msg"].as_str().map(str::to_owned);
     if got_err != want_err {
@@ -436,7 +784,7 @@ async fn replay(path: &str) {
     let lines = read_records(path, "aggexec");
     tidb_types::collate::set_new_collation_enabled_for_test(true);
     let mut fails = vec![];
-    for line in &lines {
+    for (idx, line) in lines.iter().enumerate() {
         let rec: Value = serde_json::from_str(line).unwrap();
         if let Err(why) = check(&rec).await {
             let cut = line
@@ -444,7 +792,7 @@ async fn replay(path: &str) {
                 .nth(600)
                 .map(|(i, _)| i)
                 .unwrap_or(line.len());
-            fails.push(format!("{}\n    {why}", &line[..cut]));
+            fails.push(format!("line {}: {}\n    {why}", idx + 1, &line[..cut]));
         }
     }
     let show = std::env::var("GOVEC_SHOW")

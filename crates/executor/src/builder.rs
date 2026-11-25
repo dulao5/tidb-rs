@@ -62,8 +62,9 @@ use tidb_planner::core::point_get_plan::PointGetPlan;
 use tidb_planner::util::byitem::ByItems;
 
 use crate::aggfuncs;
-use crate::aggregate::StreamAggExec;
+use crate::aggregate::agg_hash_executor::new_hash_agg_exec;
 use crate::aggregate::agg_stream_executor::new_stream_agg_exec;
+use crate::aggregate::{HashAggExec, StreamAggExec};
 use crate::internal::vecgroupchecker::vec_group_checker::new_vec_group_checker;
 use crate::sortexec::SortExec;
 use crate::sortexec::sort::new_sort_exec;
@@ -567,6 +568,113 @@ impl ExecutorBuilder {
                 }
             };
             e.agg_funcs.push(agg_func);
+            if let Some(default_val) = &mut e.default_val {
+                let value = agg_desc.get_default_value();
+                default_val.append_datum(i, &value);
+            }
+        }
+
+        Some(e)
+    }
+
+    /// buildHashAggFromChildExec: the hash aggregation executor over `child_exec`.
+    ///
+    /// Go's `buildHashAgg` (build the child, then this function) is not ported yet:
+    /// `PhysicalHashAgg` (D10.1) does not exist yet, so no plan kind dispatches to it and
+    /// `build`'s default arm already returns `blocked` (same as `buildStreamAgg`, spec §6
+    /// item 16). `group_concat`'s shared `truncated` flag wiring (`builder.go:2084-2089`) is
+    /// unreachable until D12.4 ports `group_concat`, because `aggfuncs::build` returns
+    /// `blocked-by:D12.4` first. The executor counter (`ExecutorCounterHashAggExec`) is not
+    /// ported (D14.1 metrics).
+    // go: executorBuilder.buildHashAggFromChildExec L2 (plan fields passed in, PhysicalHashAgg is D10.1; Build's temporary blocked error sets b.err; executor counter not ported)
+    pub fn build_hash_agg_from_child_exec(
+        &mut self,
+        sctx: &dyn SessionContext,
+        child_exec: Option<Box<dyn Executor>>,
+        schema: &Schema,
+        id: i32,
+        group_by_items: &[ExprRef],
+        agg_funcs: &[AggFuncDesc],
+    ) -> Option<HashAggExec> {
+        let expr_ctx = sctx.get_expr_ctx();
+        let killer = sctx.sql_killer();
+        let vars = sctx.get_session_vars();
+        let child_exec = child_exec.expect("invalid memory address or nil pointer dereference");
+        let final_con = vars.hash_agg_final_concurrency();
+        let partial_con = vars.hash_agg_partial_concurrency();
+
+        let mut e = new_hash_agg_exec(
+            new_base_executor(
+                vars,
+                &killer,
+                Some(schema.clone()),
+                id as isize,
+                vec![child_exec],
+            ),
+            group_by_items.to_vec(),
+            expr_ctx.get_eval_ctx(),
+            vars.enable_vectorized_expression,
+            vars.track_aggregate_memory_usage,
+            vars.enable_parallel_hashagg_spill,
+            partial_con.max(0) as usize,
+            final_con.max(0) as usize,
+        );
+        e.partial_agg_funcs = Vec::with_capacity(agg_funcs.len());
+
+        if !group_by_items.is_empty() || is_all_first_row(agg_funcs) {
+            e.default_val = None;
+        } else if is_final_agg(agg_funcs) {
+            e.default_val = Some(chunk::new(exec::ret_types(&e), 1, 1));
+        }
+
+        for agg_desc in agg_funcs {
+            if agg_desc.has_distinct || !agg_desc.order_by_items.is_empty() {
+                e.is_unparallel_exec = true;
+            }
+        }
+        // When both tidb_hashagg_final_concurrency and tidb_hashagg_partial_concurrency are
+        // 1 (or either is <= 0), execute single-threaded.
+        if final_con <= 0 || partial_con <= 0 || (final_con == 1 && partial_con == 1) {
+            e.is_unparallel_exec = true;
+        }
+
+        let mut partial_ordinal: isize = 0;
+        for (i, agg_desc) in agg_funcs.iter().enumerate() {
+            if e.is_unparallel_exec {
+                let agg_func = match aggfuncs::build(&*expr_ctx, agg_desc, i as isize) {
+                    Ok(agg_func) => agg_func,
+                    Err(err) => {
+                        self.err = Some(err);
+                        return None;
+                    }
+                };
+                e.push_partial_agg_func(agg_func);
+            } else {
+                let mut ordinal = vec![partial_ordinal];
+                partial_ordinal += 1;
+                if agg_desc.base.name == tidb_expression::ast_funcs::AggFuncAvg {
+                    ordinal.push(partial_ordinal + 1);
+                    partial_ordinal += 1;
+                }
+                let (partial_agg_desc, final_desc) = agg_desc.split(&ordinal);
+                let partial_agg_func =
+                    match aggfuncs::build(&*expr_ctx, &partial_agg_desc, i as isize) {
+                        Ok(agg_func) => agg_func,
+                        Err(err) => {
+                            self.err = Some(err);
+                            return None;
+                        }
+                    };
+                let final_agg_func = match aggfuncs::build(&*expr_ctx, &final_desc, i as isize) {
+                    Ok(agg_func) => agg_func,
+                    Err(err) => {
+                        self.err = Some(err);
+                        return None;
+                    }
+                };
+                e.push_partial_agg_func(partial_agg_func);
+                e.push_final_agg_func(final_agg_func);
+            }
             if let Some(default_val) = &mut e.default_val {
                 let value = agg_desc.get_default_value();
                 default_val.append_datum(i, &value);

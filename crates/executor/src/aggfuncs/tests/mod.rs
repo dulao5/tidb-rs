@@ -786,8 +786,13 @@ fn partial_result_mapper() {
     let ft = new_field_type(TypeLonglong);
     let desc = new_agg_func_desc(&*ctx, ast::AggFuncCount, vec![column(&ft, 0)], false).unwrap();
     let f = built(&ctx, &desc);
-    m.set(b"group".to_vec(), vec![f.alloc_partial_result()]);
-    assert!(m.exist(&b"group".to_vec()));
+    let mut key = allocator_api2::vec::Vec::new();
+    key.extend_from_slice(b"group");
+    let key = key.into_boxed_slice();
+    let mut prs = allocator_api2::vec::Vec::new();
+    prs.push(f.alloc_partial_result());
+    m.set(key, prs);
+    assert!(m.m.contains_key(b"group".as_slice()));
     assert_eq!(m.len(), 1);
     assert!(new_agg_partial_result_mapper_with_cap(0).empty());
 }
