@@ -191,6 +191,9 @@ jobs:
       # NaN results of float sums differ between the targets (the hardware's default NaN).
       - name: test (govec_aggfuncs)
         run: cargo test --locked -p tidb-executor --test govec_aggfuncs
+      # The stream aggregation executor (govec aggexec, part A of the aggregation executors D12.3).
+      - name: test (govec_aggexec)
+        run: cargo test --locked -p tidb-executor --lib govec_aggexec
       - name: test (release-checked)
         run: cargo test --profile release-checked --locked -p tidb-types -p tidb-memory -p tidb-chunk -p tidb-kv -p tidb-codec -p tidb-sessionctx -p tidb-tablecodec -p tidb-systable -p tidb-expression -p tidb-expr-pushdown -p tidb-execdetails -p tidb-infoschema -p tidb-store -p tidb-sessiontxn
       # The cardinality vectors (VS1-29) differ by target (M-FMA in the estimation formulas).
