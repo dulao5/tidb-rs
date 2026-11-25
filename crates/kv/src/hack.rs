@@ -13,14 +13,20 @@
 //!   Go size is the map header plus one group (`swissMap.Size` with `dirLen == 0`);
 //! - `Used` is the element count.
 //!
-//! The Rust `HashMap` itself is accounted by nobody (the numbers are Go's, as the trackers
-//! that consume them expect).
+//! The Rust map is a `hashbrown::HashMap` in an allocator `A` (the global allocator by
+//! default). The numbers returned are Go's, as the trackers that consume them expect; a map
+//! in a `TrackedAlloc` (A1 3.3, the DISTINCT sets of the aggregate functions) is in addition
+//! accounted by its real allocations.
 
 // Go identifiers for the constants (M-GONAME).
 #![allow(non_upper_case_globals)]
 
-use std::collections::HashMap;
 use std::hash::Hash;
+
+use allocator_api2::alloc::Allocator;
+use allocator_api2::alloc::Global;
+use hashbrown::DefaultHashBuilder;
+use hashbrown::HashMap;
 
 /// The Go type layout of a key or element type, for the map accounting.
 pub trait GoLayout {
@@ -48,6 +54,13 @@ impl GoLayout for bool {
 /// A byte-string key is a Go `string` (pointer and length).
 impl GoLayout for Vec<u8> {
     const GO_SIZE: u64 = 16;
+    const GO_ALIGN: u64 = 8;
+}
+
+/// A Go slice of pointers (`[]unsafe.Pointer`, the aggregate functions' `[]PartialResult`):
+/// pointer, length and capacity.
+impl<T: ?Sized> GoLayout for Vec<Box<T>> {
+    const GO_SIZE: u64 = 24;
     const GO_ALIGN: u64 = 8;
 }
 
@@ -95,19 +108,21 @@ fn approx_size(group_size: u64, max_len: u64) -> u64 {
 }
 
 /// MemAwareMap is a map with memory usage tracking.
+///
+/// `A` is the allocator of the map's table (A1 3.3); Go has no counterpart.
 #[derive(Debug)]
-pub struct MemAwareMap<K, V> {
-    pub m: HashMap<K, V>,
+pub struct MemAwareMap<K, V, A: Allocator + Clone = Global> {
+    pub m: HashMap<K, V, DefaultHashBuilder, A>,
     group_size: u64,
     next_checkpoint: u64, // every `maxTableCapacity` increase in Used
     pub bytes: u64,
 }
 
-impl<K, V> Default for MemAwareMap<K, V> {
+impl<K, V, A: Allocator + Clone + Default> Default for MemAwareMap<K, V, A> {
     // glue: Go zero value of MemAwareMap (Init must be called)
     fn default() -> Self {
         MemAwareMap {
-            m: HashMap::new(),
+            m: HashMap::with_hasher_in(DefaultHashBuilder::default(), A::default()),
             group_size: 0,
             next_checkpoint: 0,
             bytes: 0,
@@ -115,12 +130,37 @@ impl<K, V> Default for MemAwareMap<K, V> {
     }
 }
 
-#[allow(clippy::len_without_is_empty)] // Go has Len and no IsEmpty
-impl<K: Eq + Hash + GoLayout, V: GoLayout> MemAwareMap<K, V> {
+impl<K, V, A: Allocator + Clone> MemAwareMap<K, V, A> {
+    /// The Go zero value with the table in `alloc` (`Init` must be called).
+    // glue: Go zero value of MemAwareMap in an allocator (A1 3.3)
+    pub fn zero_in(alloc: A) -> Self {
+        MemAwareMap {
+            m: HashMap::with_hasher_in(DefaultHashBuilder::default(), alloc),
+            group_size: 0,
+            next_checkpoint: 0,
+            bytes: 0,
+        }
+    }
+}
+
+#[allow(clippy::len_without_is_empty)] // Go has Len and Empty, no IsEmpty
+impl<K: Eq + Hash + GoLayout, V: GoLayout, A: Allocator + Clone> MemAwareMap<K, V, A> {
     /// Count returns the number of elements in the map.
     // go: MemAwareMap.Count L1
     pub fn count(&self) -> isize {
         self.m.len() as isize
+    }
+
+    /// Empty returns true if the map is empty.
+    // go: MemAwareMap.Empty L1
+    pub fn empty(&self) -> bool {
+        self.m.is_empty()
+    }
+
+    /// Exist returns true if the key exists in the map.
+    // go: MemAwareMap.Exist L1
+    pub fn exist(&self, val: &K) -> bool {
+        self.m.contains_key(val)
     }
 
     /// Set sets the value for the key in the map and returns the memory delta.
@@ -138,12 +178,22 @@ impl<K: Eq + Hash + GoLayout, V: GoLayout> MemAwareMap<K, V> {
         delta_bytes
     }
 
+    /// SetExt sets the value for the key in the map and returns the memory delta and whether
+    /// it's an insert.
+    // go: MemAwareMap.SetExt L1
+    pub fn set_ext(&mut self, key: K, value: V) -> (i64, bool) {
+        let ori_used = self.m.len();
+        let delta_bytes = self.set(key, value);
+        let insert = ori_used != self.m.len();
+        (delta_bytes, insert)
+    }
+
     /// Init initializes the MemAwareMap with the given map and returns the initial memory
     /// size. The input map should NOT be nil.
     ///
     /// Only an empty map with no size hint is supported (module docs).
     // go: MemAwareMap.Init L2 (empty, unhinted maps only: their Go size is a formula)
-    pub fn init(&mut self, v: HashMap<K, V>) -> i64 {
+    pub fn init(&mut self, v: HashMap<K, V, DefaultHashBuilder, A>) -> i64 {
         assert!(
             v.is_empty(),
             "MemAwareMap.Init: only empty maps are supported"
@@ -192,7 +242,7 @@ pub fn new_mem_aware_map<K: Eq + Hash + GoLayout, V: GoLayout>(
         "NewMemAwareMap: only capacity 0 is supported"
     );
     let mut m = MemAwareMap::default();
-    m.init(HashMap::new());
+    m.init(HashMap::default());
     m
 }
 

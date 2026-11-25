@@ -958,8 +958,8 @@ pub fn new_mem_aware_handle_map<V: GoLayout>() -> MemAwareHandleMap<V> {
         partition_ints: HashMap::new(),
         partition_strs: HashMap::new(),
     };
-    res.ints.init(HashMap::new());
-    res.strs.init(HashMap::new());
+    res.ints.init(Default::default());
+    res.strs.init(Default::default());
     res
 }
 

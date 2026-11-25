@@ -23,6 +23,7 @@
 #![warn(clippy::clone_on_ref_ptr)]
 
 pub mod adapter;
+pub mod aggfuncs;
 #[cfg(test)]
 mod basic_executors_test;
 pub mod builder;
