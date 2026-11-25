@@ -1724,11 +1724,17 @@ fn range_and_order_by_limit_queries_still_fall_back() {
         }
         s.drop_prepared_stmt(info.stmt_id).unwrap();
     }
-    // A parameter marker in LIMIT falls back already at PREPARE (D13.1).
+    // A parameter marker in LIMIT prepares on the new stack; EXECUTE falls back at the
+    // table reader executor (D12.1).
     let sql = "SELECT c FROM sbtest1 ORDER BY id LIMIT ?";
-    let before = s.executed_stmts();
-    let r = block_on(s.prepare_stmt(sql));
-    assert_eq!(assert_falls_back(&s, sql, before, r), "D13.1", "{sql}");
+    let info = block_on(s.prepare_stmt(sql)).unwrap();
+    for round in 1..=2 {
+        let what = format!("EXECUTE {sql} (round {round})");
+        let before = s.executed_stmts();
+        let r = block_on(s.execute_prepared_stmt(info.stmt_id, vec![new_int_datum(5)]));
+        assert_eq!(assert_falls_back(&s, &what, before, r), "D12.1", "{what}");
+    }
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
     assert_eq!(s.executed_stmts(), 0, "no statement opened an executor");
 }
 
