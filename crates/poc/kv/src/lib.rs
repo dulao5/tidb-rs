@@ -196,6 +196,12 @@ impl KvClient {
         Ok(self)
     }
 
+    /// The ExecPool of [`with_exec_pool`](KvClient::with_exec_pool), if any: the new stack's
+    /// sessions start their executors' tasks on it (N3 ExecPool).
+    pub fn exec_pool(&self) -> Option<tidb_runtime::pool::ExecPool> {
+        self.pool.clone()
+    }
+
     /// The ported store driver (`tidb_store::driver::TikvStore`, D07.1) over this client's
     /// TiKV connections, for the new stack's sessions (VS1 plan §4.1); its coprocessor
     /// workers run on the same ExecPool.

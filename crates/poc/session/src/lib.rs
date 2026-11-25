@@ -182,6 +182,7 @@ impl SessionFactory for Factory {
             let new = Box::new(router::newstack::NewSession::new(
                 domain,
                 self.new_store.clone(),
+                self.shared.kv.exec_pool(),
             ));
             let mut r = Router::new(self.new_stack, new, &session.poc_values());
             r.set_connection_id(session.connection_id);

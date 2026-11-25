@@ -107,7 +107,7 @@ Rust 的结构逐个对应（`sort.rs`、`parallel_sort_worker.rs`、`multi_way_
 
 | Go | Rust |
 |---|---|
-| `workersWaiter.Run(worker.run)`、`fetcherWaiter.Run(e.fetchChunksFromChild)`、`go e.generateResult(...)`（`sort.go:667-680`） | 每个 goroutine 一个 task（M-GO），数量与 Go 相同。task 交给 `ExecCtx` 的 `ExecPool`（`ExecPool::spawn`）；`ExecCtx` 没有池时交给当前的 tokio 运行时（N3-A1 §3.2 第 2 条：进程只有一个运行时）。会话目前还不把它的池放进 `ExecCtx`（`ExecCtx::new` 给 `None`），所以生产中 task 在当前运行时上，见 §7.8 第 2 条。`WaitGroupWrapper.Run` 是 `Spawner::run_in`：先 `add(1)`，再把一个 drop guard（`DoneGuard`）移进 task，task 结束、panic 或被取消时都会 `Done` |
+| `workersWaiter.Run(worker.run)`、`fetcherWaiter.Run(e.fetchChunksFromChild)`、`go e.generateResult(...)`（`sort.go:667-680`） | 每个 goroutine 一个 task（M-GO），数量与 Go 相同。task 交给 `ExecCtx` 的 `ExecPool`（`ExecPool::spawn`）：会话把连接所在的池放进 `ExecCtx`（#363，`SessionContext::exec_pool`，D05.3 spec §2.6），所以生产中 task 都在池上，受 N3-A1 §3.6 的插桩（时间片让出、停顿检测、CPU 记账）。`ExecCtx` 没有池时（不是会话的上下文、测试）交给当前的 tokio 运行时（N3-A1 §3.2 第 2 条：进程只有一个运行时），见 §7.8 第 2 条。`WaitGroupWrapper.Run` 是 `Spawner::run_in`：先 `add(1)`，再把一个 drop guard（`DoneGuard`）移进 task，task 结束、panic 或被取消时都会 `Done` |
 | fetcher goroutine 读 `e.Children(0)` | 子执行器移进 fetcher task，task 结束时作为 `JoinHandle` 的返回值交回（N3-A1 §3.5 第 1 条的模板），`Close` 取回后放回执行器再关闭 |
 | `chunkChannel`：容量 `ExecutorConcurrency`，多个 worker 接收（`sort.go:176`） | tokio 有界 `mpsc`，容量相同；tokio 的接收端只有一个，所以放在 tokio 的异步锁后面，由各 worker 和 `Close` 共享（M-CH） |
 | `resultChannel`：容量 `ResultChannelCapacity` = 10（`sort.go:179`） | tokio 有界 `mpsc`，容量 10 |
@@ -117,7 +117,7 @@ Rust 的结构逐个对应（`sort.rs`、`parallel_sort_worker.rs`、`multi_way_
 | `chunk.Row`（指向 chunk 内部）、`chunk.Iterator4Slice` | `RowHandle`（`Arc<Chunk>` 加行号，M-ROW）：worker 保留它收到的 chunk，有序序列里的行和结果行都指向这些 chunk；每个 worker 的迭代器是 `Arc<Mutex<SortedRowsIter>>`，与生成器、多路归并器共享（M-SHARE，`parking_lot`，M-LOCK） |
 | `slices.SortFunc(rows, p.keyColumnsLess)` | `tidb_base::gostd::sort`（Go pdqsort 的逐行移植），同一个 worker 内相等键的次序与 Go 相同 |
 | 归并器的 `e.lessRow`（闭包，读 `Next` 之后才建好的 `e.keyColumns`） | `SortKeys` 值：`Open` 建的归并器在 `fetchChunksParallel` 里换成 `Next` 建好的排序键，比较结果相同 |
-| Go 的抢占式调度（逐行循环不需要让出） | 两个逐行的归并循环有时间片检查点（N3-A1 §3.1 第 5 条，`CheckpointStride`，每 100 行读一次时钟）：worker 结束时归并本地各段（`multiWayMergeLocalSortedRows`，放在 Go 每 100 行检查 kill 信号的位置，`parallel_sort_worker.go:139`）和生成器的归并（`generateResultFromMemory`，每归并一行；结果 channel 有空位时发送不会让出）。task 在 `ExecPool` 的插桩下运行时，当前 poll 超过时间片（默认 1 ms）就让出；不经过池时（§7.8 第 2 条，接入池之前）检查点不让出。每批排序（`sortBatchRows`）中间不能让出，耗时见 §7.8 第 9 条 |
+| Go 的抢占式调度（逐行循环不需要让出） | 两个逐行的归并循环有时间片检查点（N3-A1 §3.1 第 5 条，`CheckpointStride`，每 100 行读一次时钟）：worker 结束时归并本地各段（`multiWayMergeLocalSortedRows`，放在 Go 每 100 行检查 kill 信号的位置，`parallel_sort_worker.go:139`）和生成器的归并（`generateResultFromMemory`，每归并一行；结果 channel 有空位时发送不会让出）。task 在 `ExecPool` 的插桩下运行时（会话给了池时总是如此，#363），当前 poll 超过时间片（默认 1 ms）就让出；不经过池时（§7.8 第 2 条）检查点不让出。每批排序（`sortBatchRows`）中间不能让出，耗时见 §7.8 第 9 条 |
 
 ### 7.3 worker 数
 
@@ -163,7 +163,7 @@ spill helper 移植了不落盘时用到的部分（状态、`isSpillNeeded`、`
 ### 7.8 与 Go 的差异（并行 sort）
 
 1. **没有 tokio 运行时也没有池时不能启动 task**（`sort.go:661-681`：Go 总能启动 goroutine）：`fetchChunksParallel` 关闭两个 channel 并返回错误 `the parallel sort needs a tokio runtime to run its tasks`，`Next` 返回它，`Close` 照常关闭子执行器。生产中执行器总在运行时上，只有测试能走到。
-2. **task 不经过会话的 `ExecPool`**：会话还不把池放进 `ExecCtx`，task 由当前运行时的 `spawn` 启动，N3 的 task 计数和停顿检测看不到它们（N3-A1 §3.6 的插桩只覆盖经 `ExecPool` 启动的 task）。不影响结果；`ExecCtx.pool` 接入之后自动改走池（单测在两种拓扑的池上都跑过）。
+2. **`ExecCtx` 没有池时 task 不经过 `ExecPool`**：会话把它的池放进 `ExecCtx`（#363 起；服务器给新栈的会话的是连接所在的池），这时 task 都在池上。只有不是会话的上下文（测试）没有池，task 由当前运行时的 `spawn` 启动，N3 的 task 计数和停顿检测看不到它们，检查点也不让出（N3-A1 §3.6 的插桩只覆盖经 `ExecPool` 启动的 task）。不影响结果。会话一侧的测试见 D05.3 spec §2.6。
 3. **`Close` await 所有 task**（`sort.go:131-134` 只等生成器退出）：比 Go 严格，N3-A1 §3.5 第 1 条的规则；task 没有正常结束时 `Close` 返回一个 Go 没有的错误（`a task of the parallel sort did not complete`），只在 task 被取消或运行时关闭时出现。
 4. **不 `Close` 就 drop 时只取消、不 join**：见 §7.4。Go 没有对应（goroutine 继续运行直到 `finishCh` 或 channel 让它们退出）。
 5. **最后一段排序中的 kill**（`parallel_sort_worker.go:214-217`）：Go 在通道关闭后的 `sortLocalRows` 里因 kill 信号 panic，经 `run` 的 recover 送出并记 `executor panicked` 日志；Rust 中这次排序返回的错误走 `fetchChunksAndSortImpl` 送出其他错误的那条路，不记这条警告日志。送进结果 channel 的错误相同，只差一条日志。攒满一段时的排序（`parallel_sort_worker.go:228-230`）中的 kill 与 Go 相同，经 `run` 送出并记日志。
@@ -171,3 +171,7 @@ spill helper 移植了不落盘时用到的部分（状态、`isSpillNeeded`、`
 7. **内存数值**：fetcher 按 Go 的公式（`chk.MemoryUsage() + RowSize*行数`）记账，数值是 Rust 的 chunk 大小，不与 Go 逐字节相同（A1 §3.5）。
 8. **`multiWayMerger.next`**（`multi_way_merge.go:183-200`，L2）：取出堆顶的行时把它移出元素，来源出错时放回去，堆不变；Go 复制行。只有 `diskSource` 会出错，落盘前到不了。
 9. **一批排序不能中途让出**（`parallel_sort_worker.go:173-177`，`slices.SortFunc`）：Go 的 goroutine 在排序中途可以被抢占，Rust 的 task 在一次 poll 里排完一批（`maxChunkSize*30` 行）。实测（2026-11-24，release 构建，`parallel_sort_worker.rs` 中被忽略的测试 `batch_sort_time`，两个 BIGINT 键，30720 行，4 vCPU 的 Xeon 2.1 GHz，同时有另一个构建在跑）：中位数 8.6–11.2 ms（三轮，每轮 7 次），最小 8.2 ms，最大 17 ms。这已接近 N3-A1 的 10 ms 停顿阈值。是否需要改变批大小或在排序中加检查点（偏离 Go），**尚未决定**，已在 #362 的评审回复中提出，等负责人决定；目前照 Go。
+   #363 让 task 走会话的池之后重测（2026-11-25，release 构建，同一台 4 vCPU 的机器，负载 1.5–4）：
+   - 一批排序（`batch_sort_time`、`batch_sort_time_general_ci`，每项 7 次的中位数）：两个 BIGINT 键，30720 / 15360 / 7680 行分别约 10.4 / 5.0 / 2.3 ms；一个 `utf8mb4_general_ci` 的 VARCHAR 键（新排序规则），sysbench 的 `c`（119 个字符）约 29.7 / 12.7 / 5.6 ms，8–23 个字母的大小写混合单词约 24.6 / 11.2 / 5.1 ms。
+   - 整个并行 sort 在停顿检测下（`sortexec/tests.rs` 中被忽略的测试 `string_key_sort_under_the_stall_check`：30 万行、`utf8mb4_general_ci` 键，池的默认时间片 1 ms、阈值 10 ms，5 个 worker）：`max_chunk_size` 为 1024 时每批排序都是一次停顿（约 10 次，平均 22–34 ms，全部是 `parallel sort worker` 的 `on_cpu`）；512 时每批仍超过阈值（16–20 次，平均 11–12 ms）；256（每批 7680 行）时没有停顿。总耗时三者相近（sysbench `c` 约 0.9 s，单词约 0.65–0.7 s）。其他循环（worker 的最后归并、生成器的归并、fetcher）没有停顿。
+   数据已贴到 #363，等负责人决定（批大小不由实现者决定）。

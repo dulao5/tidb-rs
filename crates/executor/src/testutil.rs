@@ -2,9 +2,18 @@
 //! `testutil.MockPhysicalPlan`, a physical plan that builds its own executor, here one that
 //! returns the integers `0..rows` in one `BIGINT` column, one row per `Next`. The session's
 //! tests (VS1-14) run statements with it while the real executors are not ported.
+//!
+//! The mock's executor can also do some CPU work in each `Next` ([`MockWork`]), with or
+//! without time-sliced checkpoints, and counts whether it ran inside a task of an `ExecPool`:
+//! the session's tests of the executors' tasks on the session's pool (N3-A1 §3.1 item 5,
+//! §3.6) use it.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tidb_base::Error;
@@ -53,6 +62,29 @@ pub struct MockCounters {
     pub nexts: AtomicUsize,
     /// `Close` calls.
     pub closed: AtomicUsize,
+    /// `Next` calls that ran inside a task started through an `ExecPool` (instrumented: its
+    /// checkpoints can yield, its stalls are detected; N3-A1 §3.1 item 5, §3.6).
+    pub instrumented_nexts: AtomicUsize,
+    /// Polls of the [`MockWork`] loops, summed: more polls than loops means a loop yielded
+    /// at its checkpoints.
+    pub work_polls: AtomicUsize,
+    /// [`MockWork`] loops run (one per `Next` that returns a row).
+    pub work_loops: AtomicUsize,
+}
+
+/// CPU work the mock's executor does in each `Next` that returns a row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MockWork {
+    /// None.
+    #[default]
+    None,
+    /// A busy loop of `per_next`, with a time-sliced checkpoint (`CheckpointStride`, the
+    /// clock read every 16 iterations; N3-A1 §3.1 item 5) in each iteration when
+    /// `checkpoints`, or none at all.
+    Loop {
+        per_next: Duration,
+        checkpoints: bool,
+    },
 }
 
 /// Go's `testutil.MockPhysicalPlan`: the executor builder returns [`MockPhysicalPlan::get_executor`].
@@ -68,6 +100,8 @@ pub struct MockPhysicalPlan {
     pub kind: PhysicalKind,
     /// What the executors did.
     pub counters: Arc<MockCounters>,
+    /// The work of each `Next` of the executors built from now on.
+    pub work: MockWork,
 }
 
 /// A plan whose executor returns `0..rows`.
@@ -92,8 +126,22 @@ pub fn mock_plan_of_kind(rows: i64, kind: PhysicalKind) -> (Plan, Arc<MockCounte
         rows,
         kind,
         counters: Arc::clone(&counters),
+        work: MockWork::None,
     });
     (plan, counters)
+}
+
+/// [`mock_plan`] whose executors do `work` in each `Next` that returns a row.
+// glue: test double
+pub fn mock_plan_with_work(rows: i64, work: MockWork) -> (Plan, Arc<MockCounters>) {
+    let (plan, counters) = mock_plan(rows);
+    let mut mock = plan
+        .as_any()
+        .downcast_ref::<MockPhysicalPlan>()
+        .expect("mock_plan builds a MockPhysicalPlan")
+        .clone();
+    mock.work = work;
+    (Arc::new(mock), counters)
 }
 
 impl MockPhysicalPlan {
@@ -113,6 +161,7 @@ impl MockPhysicalPlan {
             next: 0,
             n: self.rows,
             counters: Arc::clone(&self.counters),
+            work: self.work,
         })
     }
 }
@@ -174,6 +223,40 @@ struct Rows {
     next: i64,
     n: i64,
     counters: Arc<MockCounters>,
+    work: MockWork,
+}
+
+/// A busy loop of `per_next`, with a time-sliced checkpoint in each iteration when
+/// `checkpoints` (the hook is `()`: only the time slice).
+// glue: test double
+async fn busy_loop(per_next: Duration, checkpoints: bool) {
+    let mut stride = tidb_runtime::CheckpointStride::new(16);
+    let until = Instant::now() + per_next;
+    while Instant::now() < until {
+        std::hint::spin_loop();
+        if checkpoints {
+            let Ok(()) = stride.checkpoint(&()).await;
+        }
+    }
+}
+
+/// Counts the polls of the future it wraps.
+struct PollCount<F> {
+    inner: Pin<Box<F>>,
+    polls: usize,
+}
+
+impl<F: Future> Future for PollCount<F> {
+    type Output = usize;
+
+    // glue: test double
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
+        self.polls += 1;
+        match self.inner.as_mut().poll(cx) {
+            Poll::Ready(_) => Poll::Ready(self.polls),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 #[async_trait]
@@ -189,8 +272,26 @@ impl Executor for Rows {
     // glue: test double
     async fn next(&mut self, _ctx: &ExecCtx, req: &mut Chunk) -> Result<(), Error> {
         self.counters.nexts.fetch_add(1, Ordering::SeqCst);
+        if tidb_runtime::slice::task_cpu_time().is_some() {
+            self.counters
+                .instrumented_nexts
+                .fetch_add(1, Ordering::SeqCst);
+        }
         req.reset();
         if self.next < self.n {
+            if let MockWork::Loop {
+                per_next,
+                checkpoints,
+            } = self.work
+            {
+                let polls = PollCount {
+                    inner: Box::pin(busy_loop(per_next, checkpoints)),
+                    polls: 0,
+                }
+                .await;
+                self.counters.work_polls.fetch_add(polls, Ordering::SeqCst);
+                self.counters.work_loops.fetch_add(1, Ordering::SeqCst);
+            }
             req.append_int64(0, self.next);
         }
         self.next += 1;

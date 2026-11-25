@@ -28,6 +28,8 @@ tidb-infoschema = { workspace = true }
 tidb-chunk = { workspace = true }
 # The SQL killer (N2 SessionShared).
 tidb-memory = { workspace = true }
+# The ExecPool the executors' tasks run on (N3).
+tidb-runtime = { workspace = true }
 futures = { workspace = true }
 parking_lot = "0.12"
 log = "0.4"
