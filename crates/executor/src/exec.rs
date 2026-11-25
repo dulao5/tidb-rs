@@ -20,10 +20,10 @@ pub struct ExecCtx {
     /// The statement context, frozen for the execution (N2 `Arc<StmtCtx>`).
     pub stmt: Arc<StatementContext>,
     /// The `ExecPool` the tasks of an executor are spawned on (mapping rule M-GO; the parallel
-    /// sort's workers, D12.5): the session's pool (`SessionContext::exec_pool`), so that the
-    /// tasks' checkpoints yield and their stalls are detected (N3-A1 §3.1 item 5, §3.6).
-    /// `None` spawns them on the current tokio runtime, as the coprocessor client does
-    /// without a pool: contexts that are not a session, and tests.
+    /// sort's workers, D12.5, and the parallel projection's, D12.2): the session's pool
+    /// (`SessionContext::exec_pool`), so that the tasks' checkpoints yield and their stalls are
+    /// detected (N3-A1 §3.1 item 5, §3.6). `None` spawns them on the current tokio runtime, as
+    /// the coprocessor client does without a pool: contexts that are not a session, and tests.
     pub pool: Option<ExecPool>,
 }
 

@@ -414,19 +414,19 @@ fn autocommit_read_prefetches_tso_and_ends_idle() {
 
 /// VS1 plan §4.3: the executed-statement count (the router's "an executor opened" check)
 /// moves only after the executor was built and opened. A builder that stops at a boundary
-/// stub (here the table dual executor, `blocked-by:D12.2`; the cached-table, locking-read
-/// and txn-scope stubs of the builder are the same path) is a normal fallback.
+/// stub (here a plan kind without an executor yet, `blocked-by:D12.0`; the cached-table,
+/// locking-read and txn-scope stubs of the builder are the same path) is a normal fallback.
 #[test]
 fn executed_stmts_counts_only_opened_executors() {
     let store = MockStore::new(10);
     let mut s = session(&store);
     assert_eq!(s.executed_stmts(), 0);
     let mut stmt = compile(&mut s, "SELECT a FROM t", 0);
-    stmt.plan = Some(mock_plan_of_kind(0, tidb_planner::PhysicalKind::TableDual).0);
+    stmt.plan = Some(mock_plan_of_kind(0, tidb_planner::PhysicalKind::NominalSort).0);
     let Err(e) = block_on(run_stmt(&mut s, stmt)) else {
-        panic!("the table dual executor is a boundary stub");
+        panic!("a plan kind without an executor is a boundary stub");
     };
-    assert_eq!(blocked(&e), Some("D12.2"));
+    assert_eq!(blocked(&e), Some("D12.0"));
     assert_eq!(
         s.executed_stmts(),
         0,
@@ -437,6 +437,29 @@ fn executed_stmts_counts_only_opened_executors() {
     let rs = block_on(run_stmt(&mut s, stmt)).unwrap().expect("rows");
     assert_eq!(s.executed_stmts(), 1);
     let _ = block_on(rs.close(&mut s));
+}
+
+/// Statements that read no table run on the basic executors (D12.2, VS1-35) through the
+/// session: Projection over TableDual, with LIMIT 0 and a WHERE folded to false (an empty
+/// TableDual). Each opened an executor, returns its rows and leaves the session idle.
+#[test]
+fn statements_without_a_table_run_on_the_basic_executors() {
+    let cases: [(&str, Vec<i64>); 3] = [
+        ("SELECT 1", vec![1]),
+        ("SELECT 1 LIMIT 0", vec![]),
+        ("SELECT 1 FROM DUAL WHERE 1 = 0", vec![]),
+    ];
+    for (sql, rows) in cases {
+        let store = MockStore::new(10);
+        let mut s = session(&store);
+        let mut rs = block_on(s.execute_stmt(parse(sql), sql))
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+            .unwrap_or_else(|| panic!("{sql}: no record set"));
+        assert_eq!(s.executed_stmts(), 1, "{sql}");
+        assert_eq!(drain(&mut s, &mut rs), rows, "{sql}");
+        block_on(rs.close(&mut s)).unwrap();
+        assert!(s.is_idle(), "{sql}: {}", s.state_snapshot());
+    }
 }
 
 /// `autoCommitAfterStmt` without an error commits the autocommit transaction (`CommitTxn`):
@@ -752,13 +775,15 @@ fn every_fallback_point_restores_the_session() {
             "D02.2"
         }),
         ("after Compile (executor builder stub)", |s| {
-            // The statement is planned (spec §9.2); building its Projection executor is a
-            // boundary, before any executor opened.
-            let e = block_on(s.execute_stmt(parse("SELECT 1"), "SELECT 1"))
-                .err()
-                .unwrap();
-            assert_eq!(blocked(&e), Some("D12.2"));
-            "D12.2"
+            // The statement is planned (spec §9.2); building its table reader (the read
+            // executors, D12.1) is a boundary, before any executor opened. A statement
+            // without a table no longer stops in the builder: `SELECT 1` and `ORDER BY
+            // RAND()` over a dual table run on the basic executors (D12.2) and the sort
+            // executors (D12.5), so this point runs on the sysbench schema.
+            let sql = "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10";
+            let e = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
+            assert_eq!(blocked(&e), Some("D12.1"), "{e:?}");
+            "D12.1"
         }),
         ("after the warm-up (TSO pending)", |s| {
             let _ = compile(s, "SELECT a FROM t", 1);
@@ -774,7 +799,11 @@ fn every_fallback_point_restores_the_session() {
     ];
     for (name, step) in points {
         let store = MockStore::new(10);
-        let mut s = session(&store);
+        let mut s = if name.starts_with("after Compile") {
+            sbtest_session(&store)
+        } else {
+            session(&store)
+        };
         // Some state left by earlier statements.
         s.vars_mut().last_found_rows = 3;
         s.vars().stmt_ctx().append_warning(Error::plain("earlier"));
@@ -1630,8 +1659,9 @@ fn assert_falls_back<T>(s: &Session, what: &str, before: u64, r: Result<T, Error
 /// Range scans and `ORDER BY ... LIMIT` over the sbtest table are planned to the end
 /// (`physicalOptimize` resolves the column indices of the whole plan, D10.9) and still fall
 /// back where `Exec` builds the first executor that is not ported yet, before any executor
-/// opened: the table reader (D12.1) or a projection (D12.2); the sort and top-n executors
-/// (D12.5) are ported and build their child first, so a statement with one stops below it;
+/// opened: the table reader (D12.1); the sort and top-n executors (D12.5) and the limit,
+/// selection and projection executors (D12.2) are ported and build their child first, so a
+/// statement with one stops below it;
 /// as text queries and as prepared statements. A plan whose schemas differ from
 /// Go's would end in a plain error (1105) from `ResolveIndices` here instead of a fallback.
 /// The stop of each statement is pinned: a statement that starts to run, or stops
@@ -1648,7 +1678,7 @@ fn range_and_order_by_limit_queries_still_fall_back() {
             "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c",
             "D12.1",
         ),
-        ("SELECT c FROM sbtest1 ORDER BY id LIMIT 5", "D12.2"),
+        ("SELECT c FROM sbtest1 ORDER BY id LIMIT 5", "D12.1"),
         (
             "SELECT id, c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c LIMIT 3",
             "D12.1",
@@ -1662,7 +1692,8 @@ fn range_and_order_by_limit_queries_still_fall_back() {
     // The prepared ranges stop at the table reader like the text queries (D12.1), below the
     // sort and top-n executors. Before #352 was fixed both markers read the first
     // parameter, the range was a point and the point get needed a projection above it,
-    // which stopped first (D12.2).
+    // which stopped first while the projection executor was a stub (D12.2); with the
+    // projection ported that point get ran (see `sbtest_results`).
     let prepared = [
         ("SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?", 2, "D12.1"),
         (
@@ -1678,7 +1709,7 @@ fn range_and_order_by_limit_queries_still_fall_back() {
         (
             "SELECT c FROM sbtest1 WHERE id > ? ORDER BY id LIMIT 5",
             1,
-            "D12.2",
+            "D12.1",
         ),
     ];
     for (sql, n, stop) in prepared {
@@ -1801,13 +1832,13 @@ fn prepared_statement_markers_read_their_own_parameters() {
         ),
         // Two equal conditions on the handle: the same value is a point get of that row,
         // run to the end on the new stack; different values are an empty range (Go: a
-        // TableDual, not cached, D12.2). With every marker reading the first parameter, the
-        // second EXECUTE returned the row 5.
+        // TableDual, not cached), now run by the basic executors (D12.2) and read as no rows.
+        // With every marker reading the first parameter, the second EXECUTE returned the row 5.
         (
             "SELECT id, c FROM sbtest1 WHERE id = ? AND id = ?",
             vec![
                 (vec![int(4), int(4)], rows(4..=4), None, false),
-                (vec![int(5), int(6)], vec![], Some("D12.2"), false),
+                (vec![int(5), int(6)], vec![], None, false),
             ],
         ),
     ];
@@ -1874,14 +1905,26 @@ fn execute_reads_the_parameters_through_the_session_expression_context() {
         (Datum::default(), "NULL", tidb_base::mysql::TypeVarString),
     ];
     for (param, text, tp) in cases {
-        let e = block_on(s.execute_prepared_stmt(info.stmt_id, vec![param]))
-            .err()
-            .unwrap();
-        assert!(
-            PHYSICAL_BOUNDARIES.contains(&blocked(&e).unwrap_or_default()),
-            "{text}: {e}"
-        );
-        assert_eq!(s.executed_stmts(), 0, "{text}");
+        match block_on(s.execute_prepared_stmt(info.stmt_id, vec![param])) {
+            Err(e) => {
+                assert!(
+                    PHYSICAL_BOUNDARIES.contains(&blocked(&e).unwrap_or_default()),
+                    "{text}: {e}"
+                );
+                assert_eq!(s.executed_stmts(), 0, "{text}");
+            }
+            // `id > NULL` is folded to a table dual: the Projection over it runs (D12.2,
+            // VS1-35) and returns an empty result set.
+            Ok(rs) => {
+                assert_eq!(
+                    text, "NULL",
+                    "only the NULL parameter plans to a table dual"
+                );
+                let mut rs = rs.expect("rows");
+                assert_eq!(drain(&mut s, &mut rs), Vec::<i64>::new(), "{text}");
+                block_on(rs.close(&mut s)).unwrap();
+            }
+        }
         assert!(s.is_idle(), "{text}");
         // The value the plan cache set (planCachePreprocess) ...
         let expected = vec![text.to_owned()];
@@ -2061,11 +2104,10 @@ fn register_prepared(s: &mut Session, id: u32, sql: &str) {
 /// Where an EXECUTE that is not a point get stops while the planner and the executors are not
 /// finished: the statistics derivation (D10.6), FindBestTask (D10.2), ResolveIndices
 /// (D10.9) or the cost (D10.5), in that order; with a finished plan, building an executor
-/// not ported yet in `Exec` (the table reader D12.1, VS1-34; the projection or table dual
-/// D12.2, VS1-35). Every one of them comes before an executor opened, so the caller falls
+/// not ported yet in `Exec` (the table reader D12.1, VS1-34). Every one of them comes before an executor opened, so the caller falls
 /// back. The plan replayer capture (`recordTableRuntimeStats`) no longer stops it (see
 /// `plan_replayer_capture_records_the_table_stats_and_goes_on`).
-const PHYSICAL_BOUNDARIES: [&str; 6] = ["D10.6", "D10.2", "D10.9", "D10.5", "D12.1", "D12.2"];
+const PHYSICAL_BOUNDARIES: [&str; 5] = ["D10.6", "D10.2", "D10.9", "D10.5", "D12.1"];
 
 /// With the plan replayer capture on (Go's default once the session loaded the global
 /// values), the column statistics usage records the statistics of the visited tables in
@@ -2772,9 +2814,9 @@ fn plan_cache_entry_memory_is_what_its_drop_frees() {
 /// Runs a statement through the session's steps up to and including `Compile` (the same
 /// steps as `ExecuteStmt`), ends its transaction as a failed statement does, and returns the
 /// names of the result columns (`ExecStmt.OutputNames`, whose `ColName` the result fields
-/// take as their names). The statements below stop when their first executor is built
-/// (the projection executor, D12.2), so their result fields cannot be read from a record
-/// set yet; the names are fixed by the planner before that.
+/// take as their names). The names are fixed by the planner, before any executor is built;
+/// the same names read from the record sets of these statements, which now run (the basic
+/// executors, D12.2), are checked in `sbtest_results`.
 fn compiled_column_names(s: &mut Session, node: ast::Stmt, text: &str) -> Vec<String> {
     block_on(s.finish_unfinished_stmt());
     block_on(s.core.prepare_txn_ctx()).unwrap();
@@ -2828,6 +2870,8 @@ fn expression_columns_are_named_by_their_text() {
         ("SELECT -42", vec!["-42"]),
         ("SELECT 1, 2, 3", vec!["1", "2", "3"]),
         ("SELECT 1 + 1", vec!["1 + 1"]),
+        // Leading whitespace and a comment are not part of the select field's text.
+        ("  /* x */ SELECT 1 + 1", vec!["1 + 1"]),
         ("SELECT 1.5", vec!["1.5"]),
         ("SELECT 1 LIMIT 1", vec!["1"]),
         ("SELECT id + 1 FROM sbtest1 WHERE id = 1", vec!["id + 1"]),
@@ -2863,3 +2907,5 @@ fn expression_columns_are_named_by_their_text() {
         s.clean_closed_prepared_stmts();
     }
 }
+
+mod sbtest_results;

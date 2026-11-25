@@ -141,24 +141,25 @@ fn restore_undoes_all_groups_together() {
     assert_eq!(s.vars().stmt_ctx().warning_count(), 1);
 }
 
-/// `ExecuteStmt` of a plain statement is handed over to `Compile` and planned (D05.3 spec
-/// §9.2); building its Projection executor is a boundary (`blocked-by:D12.2`), before any
-/// executor opened;
+/// `ExecuteStmt` of a plain statement is handed over to `Compile` (D05.3 spec §9.2); the
+/// planner stops at the aggregation (`blocked-by:D09.4`, the logical plan builder's
+/// aggregation), before any executor was built. (A statement without a table no longer
+/// stops in the executor builder: `SELECT 1 FROM DUAL ORDER BY RAND()` runs on the sort
+/// executors, D12.5, and the basic executors, D12.2.)
 /// `PrepareStmt` runs the prepare executor, whose plan builder builds the statement in the
 /// session's planning context, and ends with the transaction rolled back / finished (Go's
 /// `rollbackOnError` on failure, the statement end on success).
 #[test]
 fn statement_paths_are_blocked() {
     let mut s = session();
-    let stmt = tidb_parser::parse("SELECT 1", &Default::default())
+    let sql = "SELECT COUNT(1)";
+    let stmt = tidb_parser::parse(sql, &Default::default())
         .unwrap()
         .stmts
         .remove(0);
     let block = |e: Error| tidb_base::blocked::blocked_by(&e).map(str::to_owned);
-    let got = block_on(Box::pin(async {
-        s.execute_stmt(stmt, "SELECT 1").await.err()
-    }));
-    assert_eq!(got.and_then(block), Some("D12.2".to_owned()));
+    let got = block_on(Box::pin(async { s.execute_stmt(stmt, sql).await.err() }));
+    assert_eq!(got.and_then(block), Some("D09.4".to_owned()));
     let got = block_on(Box::pin(async { s.prepare_stmt("SELECT 1").await }));
     assert_eq!(got.map(|info| info.fields.len()).ok(), Some(1));
     assert!(s.is_idle());

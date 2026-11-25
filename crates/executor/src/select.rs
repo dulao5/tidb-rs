@@ -12,8 +12,27 @@
 //! Rust AST (`Stmt::Unported`: INSERT, UPDATE, DELETE, EXPLAIN, ...) are a boundary stub
 //! (D02.2): the new stack only runs SELECT (VS1 router).
 
+// Constants keep their Go names (mapping rule M-GONAME).
+#![allow(non_upper_case_globals)]
+
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant, SystemTime};
+
+use async_trait::async_trait;
+use tidb_base::dbterror::exeerrors::ErrMaxExecTimeExceeded;
+use tidb_chunk::chunk::{self, Chunk};
+use tidb_chunk::chunk_util::ColumnSwapHelper;
+use tidb_expression::ExprRef;
+use tidb_expression::chunk_executor::{vectorizable, vectorized_filter};
+use tidb_expression::eval::RpnState;
+use tidb_expression::expression::{EvalState, eval_bool};
+use tidb_kv::kv::Snapshot;
+use tidb_memory::action::{ActionOnExceed, ActionRef, BaseOOMAction, DefPanicPriority};
+use tidb_memory::tracker::{
+    LabelForGlobalAnalyzeMemory, LabelForGlobalMemory, LabelForGlobalStorage, Tracker, new_tracker,
+};
+use tidb_sessionctx::exprctx::EvalContextRef;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
@@ -26,7 +45,534 @@ use tidb_sessionctx::errctx;
 use tidb_sessionctx::stmtctx::{StatementContext, allocate_task_id};
 use tidb_sessionctx::variable::session::SessionVars;
 
+use crate::exec::ExecCtx;
 use crate::glue::SessionContext;
+use crate::internal::exec::executor::{self as exec, BaseExecutor, BaseExecutorV2, Executor};
+
+// Panic messages of the global trackers' action (Go `const` block of select.go).
+/// globalPanicStorageExceed represents the panic message when out of storage quota.
+const globalPanicStorageExceed: &str = "Out Of Quota For Local Temporary Space!";
+/// globalPanicMemoryExceed represents the panic message when out of memory limit.
+const globalPanicMemoryExceed: &str = "Out Of Global Memory Limit!";
+/// globalPanicAnalyzeMemoryExceed represents the panic message when out of analyze memory limit.
+const globalPanicAnalyzeMemoryExceed: &str = "Out Of Global Analyze Memory Limit!";
+
+/// globalPanicOnExceed panics when GlobalDisTracker storage usage exceeds storage quota.
+///
+/// Go installs it on the process-wide trackers in `init()` (`GlobalMemoryUsageTracker`,
+/// `GlobalDiskUsageTracker`, `GlobalAnalyzeMemoryTracker`), which are not part of this port
+/// yet (memory control, A1): the action exists, nothing installs it.
+#[derive(Default)]
+pub struct GlobalPanicOnExceed {
+    base: BaseOOMAction,
+    /// For synchronization.
+    mutex: parking_lot::Mutex<()>,
+}
+
+impl ActionOnExceed for GlobalPanicOnExceed {
+    /// Action panics when storage usage exceeds storage quota.
+    ///
+    /// Go's `panic(msg)` is the error its recovery (`util.GetRecoverError`) makes of it: the
+    /// message as a plain error (M-PANIC, as `PanicOnExceed.Action` of the memory crate).
+    // go: globalPanicOnExceed.Action L1 [M-PANIC, M-LOCK]
+    fn action(&self, t: &Arc<Tracker>) -> Result<(), Error> {
+        let _guard = self.mutex.lock();
+        let msg = match t.label() {
+            LabelForGlobalStorage => globalPanicStorageExceed,
+            LabelForGlobalMemory => globalPanicMemoryExceed,
+            LabelForGlobalAnalyzeMemory => globalPanicAnalyzeMemoryExceed,
+            _ => "Out of Unknown Resource Quota!",
+        };
+        // TODO(hawkingrei): should return error instead.
+        Err(Error::plain(msg))
+    }
+    // glue: Go embeds BaseOOMAction; forwarded to its SetFallback
+    fn set_fallback(&self, a: Option<ActionRef>) {
+        self.base.set_fallback(a)
+    }
+    // glue: Go embeds BaseOOMAction; forwarded to its GetFallback
+    fn get_fallback(&self) -> Option<ActionRef> {
+        self.base.get_fallback()
+    }
+    /// GetPriority get the priority of the Action
+    // go: globalPanicOnExceed.GetPriority L1
+    fn get_priority(&self) -> i64 {
+        DefPanicPriority
+    }
+    // glue: Go embeds BaseOOMAction; forwarded to its SetFinished
+    fn set_finished(&self) {
+        self.base.set_finished()
+    }
+    // glue: Go embeds BaseOOMAction; forwarded to its IsFinished
+    fn is_finished(&self) -> bool {
+        self.base.is_finished()
+    }
+}
+
+/// checkMaxExecutionTimeExceeded validates whether the current statement already hit the
+/// max_execution_time limit. Centralized here so different executors share the same behaviour.
+///
+/// Go reads the session (`sctx`, which may be nil) and its process info
+/// (`sctx.ShowProcess()`); the executors do not hold the session (N2), so the caller passes
+/// the session variables and the process info's start time (`None`: no process info, or a
+/// zero time). Its callers are the locking reads (`SELECT ... FOR UPDATE`, the write path X),
+/// none of which is ported yet.
+// go: checkMaxExecutionTimeExceeded L2 (the session variables and the process start time are passed in: executors do not hold the session, N2)
+pub fn check_max_execution_time_exceeded(
+    sess_vars: Option<&SessionVars>,
+    process_time: Option<SystemTime>,
+) -> Result<(), Error> {
+    let Some(sess_vars) = sess_vars else {
+        return Ok(());
+    };
+
+    if !sess_vars.stmt_ctx().in_select_stmt {
+        return Ok(());
+    }
+
+    let max_exec_time_ms = sess_vars.get_max_execution_time();
+    if max_exec_time_ms == 0 {
+        return Ok(());
+    }
+
+    let Some(process_time) = process_time else {
+        return Ok(());
+    };
+
+    // time.Since: a start time in the future gives a negative duration (never exceeded).
+    let elapsed = SystemTime::now()
+        .duration_since(process_time)
+        .unwrap_or(Duration::ZERO);
+    if elapsed >= Duration::from_millis(max_exec_time_ms) {
+        return Err(ErrMaxExecTimeExceeded.gen_with_stack_by_args(Vec::new()));
+    }
+
+    Ok(())
+}
+
+/// LimitExec represents limit executor
+/// It ignores 'Offset' rows from src, then returns 'Count' rows at maximum.
+pub struct LimitExec {
+    pub(crate) base: BaseExecutor,
+
+    pub(crate) begin: u64,
+    pub(crate) end: u64,
+    pub(crate) cursor: u64,
+
+    /// meetFirstBatch represents whether we have met the first valid Chunk from child.
+    pub(crate) meet_first_batch: bool,
+
+    /// Go's `nil` (before `Open`, after `Close`) is `None`.
+    pub(crate) child_result: Option<Chunk>,
+
+    /// columnIdxsUsedByChild keep column indexes of child executor used for inline projection
+    pub(crate) column_idxs_used_by_child: Option<Vec<usize>>,
+    pub(crate) column_swap_helper: Option<ColumnSwapHelper>,
+    // Go's `span` (opentracing) is not kept: tidb-rs has no opentracing spans.
+}
+
+#[async_trait]
+impl Executor for LimitExec {
+    // glue: M-SELF
+    fn base(&self) -> &BaseExecutorV2 {
+        &self.base.base
+    }
+    // glue: M-SELF
+    fn base_mut(&mut self) -> &mut BaseExecutorV2 {
+        &mut self.base.base
+    }
+
+    /// Next implements the Executor Next interface.
+    ///
+    /// The child's chunk is taken out of the executor while `Next` runs, so that
+    /// `adjustRequiredRows` (a method of the executor) can be given it; it is put back
+    /// whatever `Next` returns.
+    // go: LimitExec.Next L1
+    async fn next(&mut self, ctx: &ExecCtx, req: &mut Chunk) -> Result<(), Error> {
+        req.reset();
+        if self.cursor >= self.end {
+            return Ok(());
+        }
+        let mut child_result = self
+            .child_result
+            .take()
+            .expect("LimitExec.Next before Open or after Close (Go: nil chunk)");
+        let r = self.next_with(ctx, req, &mut child_result).await;
+        self.child_result = Some(child_result);
+        r
+    }
+
+    /// Open implements the Executor Open interface.
+    // go: LimitExec.Open L2 (no opentracing span)
+    async fn open(&mut self, ctx: &ExecCtx) -> Result<(), Error> {
+        self.base.base.open(ctx).await?;
+        self.child_result = Some(exec::try_new_cache_chunk(
+            self.base.base.meta.children(0).as_ref(),
+        ));
+        self.cursor = 0;
+        self.meet_first_batch = self.begin == 0;
+        Ok(())
+    }
+
+    /// Close implements the Executor Close interface.
+    // go: LimitExec.Close L2 (no opentracing span: only the log)
+    async fn close(&mut self) -> Result<(), Error> {
+        let start = Instant::now();
+
+        self.child_result = None;
+        let err = self.base.base.close().await;
+
+        let elapsed = start.elapsed();
+        if elapsed > Duration::from_millis(1) {
+            log::info!("limit executor close takes a long time, elapsed={elapsed:?}");
+        }
+        err
+    }
+}
+
+impl LimitExec {
+    /// The body of `Next` after its first check, with the child's chunk (see `Next`).
+    // go-part: LimitExec.Next
+    async fn next_with(
+        &mut self,
+        ctx: &ExecCtx,
+        req: &mut Chunk,
+        child_result: &mut Chunk,
+    ) -> Result<(), Error> {
+        let max_chunk_size = self.max_chunk_size().max(0) as usize;
+        while !self.meet_first_batch {
+            // transfer req's requiredRows to childResult and then adjust it in childResult
+            child_result.set_required_rows(req.required_rows() as isize, max_chunk_size);
+            self.adjust_required_rows(child_result);
+            exec::next(ctx, self.base.base.meta.children(0).as_mut(), child_result).await?;
+            let batch_size = child_result.num_rows() as u64;
+            // no more data.
+            if batch_size == 0 {
+                return Ok(());
+            }
+            let new_cursor = self.cursor.wrapping_add(batch_size);
+            if new_cursor >= self.begin {
+                self.meet_first_batch = true;
+                let (begin, mut end) = (self.begin.wrapping_sub(self.cursor), batch_size);
+                if new_cursor > self.end {
+                    end = self.end.wrapping_sub(self.cursor);
+                }
+                self.cursor = self.cursor.wrapping_add(end);
+                if begin == end {
+                    break;
+                }
+                match &self.column_idxs_used_by_child {
+                    Some(cols) => {
+                        req.append(&child_result.prune(cols), begin as usize, end as usize)
+                    }
+                    None => req.append(child_result, begin as usize, end as usize),
+                }
+                return Ok(());
+            }
+            self.cursor = self.cursor.wrapping_add(batch_size);
+        }
+        child_result.reset();
+        child_result.set_required_rows(req.required_rows() as isize, max_chunk_size);
+        self.adjust_required_rows(child_result);
+        exec::next(ctx, self.base.base.meta.children(0).as_mut(), child_result).await?;
+        let mut batch_size = child_result.num_rows() as u64;
+        // no more data.
+        if batch_size == 0 {
+            return Ok(());
+        }
+        if self.cursor.wrapping_add(batch_size) > self.end {
+            child_result.truncate_to(self.end.wrapping_sub(self.cursor) as usize);
+            batch_size = self.end.wrapping_sub(self.cursor);
+        }
+        self.cursor = self.cursor.wrapping_add(batch_size);
+
+        if self.column_idxs_used_by_child.is_some() {
+            // buildLimit sets the helper together with the used columns (Go dereferences it).
+            let helper = self
+                .column_swap_helper
+                .as_ref()
+                .expect("buildLimit sets the column swap helper with the used columns");
+            helper.swap_columns(child_result, req)?;
+        } else {
+            req.swap_columns(child_result);
+        }
+        Ok(())
+    }
+
+    /// Go converts the unsigned cursor to `int` (M-INT: wrapping, as Go).
+    // go: LimitExec.adjustRequiredRows L1 [M-INT]
+    pub(crate) fn adjust_required_rows<'a>(&self, chk: &'a mut Chunk) -> &'a mut Chunk {
+        // the limit of maximum number of rows the LimitExec should read
+        let limit_total = self.end.wrapping_sub(self.cursor) as isize;
+
+        let limit_required = if self.cursor < self.begin {
+            // if cursor is less than begin, it have to read (begin-cursor) rows to ignore
+            // and then read chk.RequiredRows() rows to return,
+            // so the limit is (begin-cursor)+chk.RequiredRows().
+            (self.begin as isize)
+                .wrapping_sub(self.cursor as isize)
+                .wrapping_add(chk.required_rows() as isize)
+        } else {
+            // if cursor is equal or larger than begin, just read chk.RequiredRows() rows to return.
+            chk.required_rows() as isize
+        };
+
+        let max_chunk_size = self.max_chunk_size().max(0) as usize;
+        chk.set_required_rows(limit_total.min(limit_required), max_chunk_size)
+    }
+}
+
+/// TableDualExec represents a dual table executor.
+pub struct TableDualExec {
+    pub(crate) base: BaseExecutorV2,
+
+    /// numDualRows can only be 0 or 1.
+    pub(crate) num_dual_rows: isize,
+    pub(crate) num_returned: isize,
+}
+
+#[async_trait]
+impl Executor for TableDualExec {
+    // glue: M-SELF
+    fn base(&self) -> &BaseExecutorV2 {
+        &self.base
+    }
+    // glue: M-SELF
+    fn base_mut(&mut self) -> &mut BaseExecutorV2 {
+        &mut self.base
+    }
+
+    /// Open implements the Executor Open interface.
+    // go: TableDualExec.Open L1
+    async fn open(&mut self, _ctx: &ExecCtx) -> Result<(), Error> {
+        self.num_returned = 0;
+        Ok(())
+    }
+
+    /// Next implements the Executor Next interface.
+    // go: TableDualExec.Next L1
+    async fn next(&mut self, _ctx: &ExecCtx, req: &mut Chunk) -> Result<(), Error> {
+        req.reset();
+        if self.num_returned >= self.num_dual_rows {
+            return Ok(());
+        }
+        let schema_len = self.base.meta.get_schema().map_or(0, |s| s.len());
+        if schema_len == 0 {
+            req.set_num_virtual_rows(1);
+        } else {
+            for i in 0..schema_len {
+                req.append_null(i);
+            }
+        }
+        self.num_returned = self.num_dual_rows;
+        Ok(())
+    }
+}
+
+/// selectionExecutorContext is the execution context for the `SelectionExec`
+pub struct SelectionExecutorContext {
+    /// `nil` (no statement tracker: contexts that did not run `ResetContextOfStmt`) is `None`.
+    pub(crate) stmt_mem_tracker: Option<Arc<Tracker>>,
+    pub(crate) eval_ctx: EvalContextRef,
+    pub(crate) enable_vectorized_expression: bool,
+}
+
+// go: newSelectionExecutorContext L1 [M-CTX]
+pub fn new_selection_executor_context(sctx: &dyn SessionContext) -> SelectionExecutorContext {
+    SelectionExecutorContext {
+        stmt_mem_tracker: sctx.get_session_vars().stmt_ctx().mem_tracker.clone(),
+        eval_ctx: sctx.get_expr_ctx().get_eval_ctx(),
+        enable_vectorized_expression: sctx.get_session_vars().enable_vectorized_expression,
+    }
+}
+
+/// SelectionExec represents a filter executor.
+///
+/// Go keeps an iterator over `childResult` and the current row (`inputIter`, `inputRow`)
+/// across `Next` calls; here the current row is its index in `childResult` (`None` is the
+/// iterator's `End()`), the iterator is not kept (M-ROW: no row borrowed across calls).
+/// The evaluation state of the filters (no correlated values: Apply is not ported, and the
+/// vector evaluation's scratch columns) belongs to the executor (N4 §3.4).
+pub struct SelectionExec {
+    pub(crate) ctx: SelectionExecutorContext,
+    pub(crate) base: BaseExecutorV2,
+
+    pub(crate) batched: bool,
+    pub(crate) filters: Vec<ExprRef>,
+    pub(crate) selected: Vec<bool>,
+    pub(crate) input_row: Option<usize>,
+    pub(crate) child_result: Option<Chunk>,
+
+    pub(crate) mem_tracker: Option<Arc<Tracker>>,
+
+    pub(crate) eval_state: EvalState,
+    pub(crate) rpn: RpnState,
+}
+
+#[async_trait]
+impl Executor for SelectionExec {
+    // glue: M-SELF
+    fn base(&self) -> &BaseExecutorV2 {
+        &self.base
+    }
+    // glue: M-SELF
+    fn base_mut(&mut self) -> &mut BaseExecutorV2 {
+        &mut self.base
+    }
+
+    /// Open implements the Executor Open interface.
+    // go: SelectionExec.Open L2 (no failpoint)
+    async fn open(&mut self, ctx: &ExecCtx) -> Result<(), Error> {
+        self.base.open(ctx).await?;
+        self.open_inner(ctx)
+    }
+
+    /// Close implements plannercore.Plan Close interface.
+    // go: SelectionExec.Close L1
+    async fn close(&mut self) -> Result<(), Error> {
+        if let Some(child_result) = self.child_result.take()
+            && let Some(t) = &self.mem_tracker
+        {
+            // Releasing memory never runs an action.
+            let _ = t.consume(-child_result.memory_usage());
+        }
+        self.selected = Vec::new();
+        self.base.close().await
+    }
+
+    /// Next implements the Executor Next interface.
+    // go: SelectionExec.Next L1 [M-ROW]
+    async fn next(&mut self, ctx: &ExecCtx, req: &mut Chunk) -> Result<(), Error> {
+        req.grow_and_reset(self.max_chunk_size().max(0) as usize);
+
+        if !self.batched {
+            return self.un_batched_next(ctx, req).await;
+        }
+
+        let child_result = self
+            .child_result
+            .as_mut()
+            .expect("SelectionExec.Next before Open or after Close (Go: nil chunk)");
+        loop {
+            while let Some(i) = self.input_row {
+                if req.is_full() {
+                    return Ok(());
+                }
+
+                if self.selected[i] {
+                    req.append_row(child_result.get_row(i));
+                }
+                self.input_row = iter_next(i, child_result);
+            }
+            let m_size = child_result.memory_usage();
+            let r = exec::next(ctx, self.base.meta.children(0).as_mut(), child_result).await;
+            consume(&self.mem_tracker, child_result.memory_usage() - m_size)?;
+            r?;
+            // no more data.
+            if child_result.num_rows() == 0 {
+                return Ok(());
+            }
+            self.selected = vectorized_filter(
+                &*self.ctx.eval_ctx,
+                &self.eval_state,
+                &mut self.rpn,
+                self.ctx.enable_vectorized_expression,
+                &self.filters,
+                child_result,
+                std::mem::take(&mut self.selected),
+            )?;
+            self.input_row = iter_begin(child_result);
+        }
+    }
+}
+
+impl SelectionExec {
+    // go: SelectionExec.open L1
+    fn open_inner(&mut self, _ctx: &ExecCtx) -> Result<(), Error> {
+        let mem_tracker = match &self.mem_tracker {
+            Some(t) => {
+                t.reset()?;
+                Arc::clone(t)
+            }
+            None => {
+                let t = new_tracker(self.base.meta.id(), -1);
+                self.mem_tracker = Some(Arc::clone(&t));
+                t
+            }
+        };
+        if let Some(parent) = &self.ctx.stmt_mem_tracker {
+            mem_tracker.attach_to(parent)?;
+        }
+        let child_result = exec::try_new_cache_chunk(self.base.meta.children(0).as_ref());
+        mem_tracker.consume(child_result.memory_usage())?;
+        self.batched = vectorizable(&self.filters);
+        if self.batched {
+            self.selected = Vec::with_capacity(chunk::InitialCapacity);
+        }
+        self.input_row = None;
+        self.child_result = Some(child_result);
+        Ok(())
+    }
+
+    /// unBatchedNext filters input rows one by one and returns once an input row is selected.
+    /// For sql with "SETVAR" in filter and "GETVAR" in projection, for example: "SELECT @a FROM t WHERE (@a := 2) > 0",
+    /// we have to set batch size to 1 to do the evaluation of filter and projection.
+    // go: SelectionExec.unBatchedNext L1 [M-ROW]
+    async fn un_batched_next(&mut self, ctx: &ExecCtx, chk: &mut Chunk) -> Result<(), Error> {
+        let eval_ctx = &*self.ctx.eval_ctx;
+        let child_result = self
+            .child_result
+            .as_mut()
+            .expect("SelectionExec.Next before Open or after Close (Go: nil chunk)");
+        loop {
+            while let Some(i) = self.input_row {
+                let (selected, _) = eval_bool(
+                    eval_ctx,
+                    &self.eval_state,
+                    &self.filters,
+                    child_result.get_row(i),
+                )?;
+                if selected {
+                    chk.append_row(child_result.get_row(i));
+                    self.input_row = iter_next(i, child_result);
+                    return Ok(());
+                }
+                self.input_row = iter_next(i, child_result);
+            }
+            let m_size = child_result.memory_usage();
+            let r = exec::next(ctx, self.base.meta.children(0).as_mut(), child_result).await;
+            consume(&self.mem_tracker, child_result.memory_usage() - m_size)?;
+            r?;
+            self.input_row = iter_begin(child_result);
+            // no more data.
+            if child_result.num_rows() == 0 {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// `inputIter.Begin()` of an `Iterator4Chunk` over `chk`, as a row index (`None`: `End()`).
+// glue: Iterator4Chunk.Begin as a row index (M-ROW)
+fn iter_begin(chk: &Chunk) -> Option<usize> {
+    (chk.num_rows() > 0).then_some(0)
+}
+
+/// `inputIter.Next()` after row `i`, as a row index (`None`: `End()`).
+// glue: Iterator4Chunk.Next as a row index (M-ROW)
+fn iter_next(i: usize, chk: &Chunk) -> Option<usize> {
+    (i + 1 < chk.num_rows()).then_some(i + 1)
+}
+
+/// `e.memTracker.Consume(bs)`: an action of the tracker (Go: a panic, recovered into the
+/// statement's error) is an error here (M-PANIC).
+// glue: memory.Tracker.Consume of an executor's tracker (M-PANIC)
+pub(crate) fn consume(t: &Option<Arc<Tracker>>, bs: i64) -> Result<(), Error> {
+    match t {
+        Some(t) => t.consume(bs),
+        None => Ok(()),
+    }
+}
 
 /// ResetContextOfStmt resets the StmtContext and session variables.
 /// Before every execution, we must clear statement context.
@@ -277,6 +823,23 @@ pub fn reset_context_of_stmt(
     ctx.reset_plan_ctx();
 
     Ok(())
+}
+
+/// setOptionForTopSQL: the Top SQL options of a snapshot (or transaction).
+///
+/// The resource group tagger (`sc.GetResourceGroupTagger()`) and the KV exec counter's RPC
+/// interceptor (`sc.KvExecCounter`) are Top SQL's (D14.2), which tidb-rs does not record
+/// (ROADMAP §3; D12.1 spec §3, the `Open` row): the statement context has neither, and the
+/// store ignores both options, so nothing is set. A pipelined transaction (Go returns early)
+/// does not exist: tidb-rs transactions never write.
+// go: setOptionForTopSQL L2 (no Top SQL options: D14.2 is not recorded; no pipelined transaction)
+pub fn set_option_for_top_sql(sc: &StatementContext, snapshot: Option<&dyn Snapshot>) {
+    let Some(_snapshot) = snapshot else {
+        return;
+    };
+    // snapshot.SetOption(kv.ResourceGroupTagger, sc.GetResourceGroupTagger()) and, with
+    // sc.KvExecCounter, snapshot.SetOption(kv.RPCInterceptor, ...): Top SQL (D14.2).
+    let _ = sc;
 }
 
 /// `plannercore.IsReadOnly(node, vars)` is a boundary stub (`blocked-by:D02.2`), reached only

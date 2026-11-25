@@ -23,16 +23,23 @@
 #![warn(clippy::clone_on_ref_ptr)]
 
 pub mod adapter;
+#[cfg(test)]
+mod basic_executors_test;
 pub mod builder;
 pub mod compiler;
 pub mod consistency;
 pub mod detach;
 pub mod exec;
+#[cfg(test)]
+mod executor_required_rows_test;
 pub mod glue;
+#[cfg(test)]
+mod govec_basicexec_test;
 pub mod internal;
 pub mod metrics;
 pub mod point_get;
 pub mod prepared;
+pub mod projection;
 pub mod select;
 pub mod simple;
 pub mod sortexec;
