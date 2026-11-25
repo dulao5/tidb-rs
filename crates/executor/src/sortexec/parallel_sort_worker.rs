@@ -283,7 +283,7 @@ impl ParallelSortWorker {
     ///
     /// The kill error of the last batch's sort (sorted after the channel is closed) is sent
     /// with the errors of the merge, without the warning Go logs for a recovered panic.
-    // go: parallelSortWorker.fetchChunksAndSortImpl L2 (the kill error of a full batch's sort is returned, see the comment [M-PANIC, M-CH])
+    // go: parallelSortWorker.fetchChunksAndSortImpl L2 (the kill error of a full batch's sort is returned, see the comment; a time-sliced checkpoint after each batch sort, #371 [M-PANIC, M-CH])
     async fn fetch_chunks_and_sort_impl(&mut self) -> Result<bool, Error> {
         let received = tokio::select! {
             _ = self.finish_ch.closed() => return Ok(false),
@@ -320,6 +320,9 @@ impl ParallelSortWorker {
 
         if self.row_num_in_chunk_iters >= self.max_sorted_rows_limit {
             self.sort_batch_rows()?;
+            // glue: N3-A1 §3.1 item 5 (a time slice after each batch sort: with chunks already
+            // queued, `recv` returns at once and the next batch would follow in the same poll)
+            let Ok(()) = tidb_runtime::slice::checkpoint(&()).await;
         }
 
         self.inject_fail_point_for_parallel_sort_worker(3);
@@ -426,6 +429,81 @@ mod tests {
                 .all(|(i, r)| r.row().get_int64(0) == i as i64)
         );
         assert!(polls.load(Ordering::SeqCst) > 1, "the merge never yielded");
+    }
+
+    /// A worker whose chunk channel already holds four batches' worth of chunks yields
+    /// between batch sorts (#371): `recv` returns at once while chunks are queued, so only
+    /// the time-sliced checkpoint after each batch sort (N3-A1 §3.1 item 5) ends the poll.
+    /// Each batch is 7680 BIGINT rows (30 chunks of 256), far more than the test runtime's
+    /// time slice. The sender stays alive, so the end-of-input merge (which has its own
+    /// checkpoints) never runs; the task is unconstrained (no tokio budget), so every extra
+    /// poll comes from the checkpoint.
+    #[test]
+    fn worker_yields_between_batch_sorts() {
+        let rt = runtime();
+        let pool = rt.pool().clone();
+        let ft = tidb_types::field_type::new_field_type(tidb_base::mysql::TypeLonglong);
+        let max_chunk_size = 256usize;
+        let chunks = 4 * 30;
+        let (chunk_tx, chunk_rx) = mpsc::channel(chunks);
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..chunks {
+            let mut chk = tidb_chunk::chunk::new(&[&ft], max_chunk_size, max_chunk_size);
+            for _ in 0..max_chunk_size {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                chk.append_int64(0, (x >> 1) as i64);
+            }
+            chunk_tx
+                .try_send(ChunkWithMemoryUsage {
+                    chk: Arc::new(chk),
+                    memory_usage: 0,
+                })
+                .unwrap();
+        }
+        let (result_tx, _result_rx) = mpsc::channel(1);
+        let (_finish_tx, finish_ch) = new_finish_ch();
+        let syncer = Arc::new(WaitGroup::default());
+        syncer.add(chunks as i64);
+        let mut worker = new_parallel_sort_worker(
+            0,
+            int_keys(),
+            Arc::new(tokio::sync::Mutex::new(chunk_rx)),
+            Arc::clone(&syncer),
+            result_tx,
+            finish_ch,
+            new_tracker(-1, -1),
+            Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
+            max_chunk_size,
+            Arc::new(new_parallel_sort_spill_helper()),
+            None,
+        );
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let batches = rt.block_on(async move {
+            pool.spawn(
+                "test-batches",
+                tokio::task::unconstrained(PollCount {
+                    inner: Box::pin(async move {
+                        for _ in 0..chunks {
+                            assert!(worker.fetch_chunks_and_sort_impl().await.unwrap());
+                        }
+                        worker.local_sorted_rows.len()
+                    }),
+                    polls: counted,
+                }),
+            )
+            .await
+            .unwrap()
+        });
+        drop(chunk_tx);
+        assert_eq!(batches, 4);
+        assert!(
+            polls.load(Ordering::SeqCst) > 3,
+            "the worker did not yield between batch sorts: {} polls",
+            polls.load(Ordering::SeqCst)
+        );
     }
 
     /// The time of one batch sort (`sortBatchRows`, which cannot yield partway through):
