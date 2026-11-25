@@ -335,6 +335,9 @@ impl Report {
         }
         if protocol == "ps" {
             rec["params"] = json!(case.params.iter().map(Param::to_json).collect::<Vec<_>>());
+            if case.execute > 0 {
+                rec["execute"] = json!(case.execute);
+            }
             rec["a"]["prepare"] = prepare_json(a.prepare);
             rec["b"]["prepare"] = prepare_json(b.prepare);
         }
@@ -433,7 +436,7 @@ async fn judge(
     };
     let full = match rerun {
         Rerun::Text => a.query(&full_sql).await,
-        Rerun::Prepared(params) => a.prepared(&full_sql, params).await.1,
+        Rerun::Prepared(params) => a.prepared(&full_sql, params, false).await.1,
     };
     match full {
         Outcome::Rows { rows, .. } => compare(&class, obs_a, obs_b, Some(&rows)),
@@ -491,6 +494,7 @@ async fn run_control(a: &mut Side, b: &mut Side, census: &mut Census) {
         source: None,
         prepared: false,
         setup: false,
+        execute: 0,
     };
     let oa = a.query(&case.sql).await;
     let mut ob = b.query(&case.sql).await;
@@ -539,9 +543,10 @@ async fn run_case(
     }
     if cli.protocol != Protocols::Text && case.prepared {
         let params: Vec<_> = case.params.iter().map(Param::to_value).collect();
-        let (pa, oa) = a.prepared(&case.sql, &params).await;
+        let fresh = case.execute == 1;
+        let (pa, oa) = a.prepared(&case.sql, &params, fresh).await;
         let mark = probe.mark(b).await;
-        let (pb, ob) = b.prepared(&case.sql, &params).await;
+        let (pb, ob) = b.prepared(&case.sql, &params, fresh).await;
         let route = probe.route(b, mark).await;
         if cli.plan_cache {
             plan_cache_check(case, &params, a, b, report).await;
@@ -790,7 +795,7 @@ async fn run(cli: Cli) -> Result<RunResult, String> {
             let setup_src = setup.as_ref().map(read).transpose()?;
             let setup_name = setup.as_ref().map(|p| p.display().to_string());
             let extra = setup_name.as_deref().zip(setup_src.as_deref());
-            workload::file_cases(&path.display().to_string(), &src, extra, !no_prepared)
+            workload::file_cases(&path.display().to_string(), &src, extra, !no_prepared)?
         }
         Workload::Integrationtest { .. } => unreachable!("handled above"),
     };

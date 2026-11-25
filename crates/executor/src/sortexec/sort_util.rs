@@ -481,6 +481,42 @@ pub(crate) mod yield_test {
         }
     }
 
+    /// Sysbench's `c` value from the pseudo-random `x`: ten groups of 11 digits joined by
+    /// `-`.
+    pub fn sysbench_c(mut x: u64) -> String {
+        let mut s = String::with_capacity(119);
+        for g in 0..10 {
+            if g > 0 {
+                s.push('-');
+            }
+            for _ in 0..11 {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                s.push(char::from(b'0' + ((x >> 33) % 10) as u8));
+            }
+        }
+        s
+    }
+
+    /// A word of 8 to 23 letters in mixed case from the pseudo-random `x`.
+    pub fn mixed_case_word(mut x: u64) -> String {
+        let len = 8 + (x >> 59) as usize;
+        let mut s = String::with_capacity(len);
+        for _ in 0..len {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let c = b'a' + ((x >> 33) % 26) as u8;
+            s.push(char::from(if (x >> 40) & 1 == 1 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }));
+        }
+        s
+    }
+
     /// `runs` sorted runs of `len` BIGINT rows each, interleaved (run r holds r, r + runs, ...).
     pub fn sorted_runs(runs: usize, len: usize) -> Vec<SharedSortedRowsIter> {
         let ft = new_field_type(TypeLonglong);

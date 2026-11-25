@@ -76,10 +76,13 @@ pub struct NewSession {
 impl NewSession {
     /// A new session in the MySQL dialect (the only protocol and front end, ADR 0010), over
     /// the ported store driver when given (without one, the session's store is the
-    /// stand-in whose every read is a boundary of the store driver).
+    /// stand-in whose every read is a boundary of the store driver). Its executors start
+    /// their tasks on `pool`, the ExecPool the connection runs on (N3; without one, on the
+    /// current tokio runtime, uninstrumented).
     pub fn new(
         domain: Option<Arc<tidb_domain::Domain>>,
         store: Option<Arc<tidb_store::driver::TikvStore>>,
+        pool: Option<tidb_runtime::pool::ExecPool>,
     ) -> NewSession {
         if let Some(d) = &domain {
             // Go's bootstrap (`InitMDLVariable`); idempotent, so done with each session.
@@ -97,6 +100,7 @@ impl NewSession {
             None => Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
         };
         session.set_instance_plan_cache(domain.as_ref().and_then(|d| d.get_instance_plan_cache()));
+        session.set_exec_pool(pool);
         NewSession {
             session,
             domain,
@@ -107,7 +111,7 @@ impl NewSession {
 
 impl Default for NewSession {
     fn default() -> Self {
-        NewSession::new(None, None)
+        NewSession::new(None, None, None)
     }
 }
 

@@ -125,6 +125,9 @@ pub struct SessCtx {
     /// `domain.GetDomain(s).GetInstancePlanCache()`: the instance-level plan cache shared by
     /// every session (the plan-cache exception A3); `None` without a domain.
     pub(crate) instance_plan_cache: Option<Arc<dyn tidb_sessionctx::context::InstancePlanCache>>,
+    /// The `ExecPool` the connection runs on, which the statement's executors start their
+    /// tasks on (N3-A1 §3.1 items 3 and 5); `None` until the server sets it.
+    pub(crate) exec_pool: Option<tidb_runtime::pool::ExecPool>,
 }
 
 /// `sessionctx.SessionPlanCache` (`plannercore.NewLRUPlanCache`): the cache is the plan-cache
@@ -950,6 +953,10 @@ impl SessionContext for SessionCore {
         }
         .boxed()
     }
+    // glue: N3 ExecPool handle of the session (N3-A1 §3.1)
+    fn exec_pool(&self) -> Option<tidb_runtime::pool::ExecPool> {
+        self.sctx.exec_pool.clone()
+    }
 }
 
 impl tidb_sessiontxn::TxnManager for SessionCore {
@@ -1136,6 +1143,7 @@ impl Session {
                     common_global_loaded: false,
                     plan_cache: None,
                     instance_plan_cache: None,
+                    exec_pool: None,
                 },
                 txn_manager: new_txn_manager(),
             },
@@ -1144,6 +1152,15 @@ impl Session {
             executed_stmts: 0,
             dialect,
         }
+    }
+
+    /// Sets the `ExecPool` the connection runs on (N3-A1 §3.1 items 3 and 5): the
+    /// statement's executors start their tasks on it (`ExecCtx.pool`), so that their
+    /// time-sliced checkpoints yield and their stalls are detected. `None`: the tasks go to
+    /// the current tokio runtime, uninstrumented.
+    // glue: N3 ExecPool handle of the session (N3-A1 §3.1)
+    pub fn set_exec_pool(&mut self, pool: Option<tidb_runtime::pool::ExecPool>) {
+        self.core.sctx.exec_pool = pool;
     }
 
     /// The connection's dialect (ADR 0010 §4.4).

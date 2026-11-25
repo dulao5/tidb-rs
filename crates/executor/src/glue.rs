@@ -129,6 +129,17 @@ pub trait SessionContext: Send {
     // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS (D05.4, VS1-14)
     fn get_snapshot_with_stmt_read_ts(&mut self)
     -> BoxFuture<'_, Result<Arc<dyn Snapshot>, Error>>;
+    /// The `ExecPool` the statement's executors start their tasks on (N3-A1 §3.1 items 3
+    /// and 5, mapping rule M-GO): the pool the session's connection runs on, so that the
+    /// executors' tasks get the time-sliced checkpoints, the stall detection and the CPU
+    /// accounting of the pool's instrumentation. Go has no counterpart (its goroutines all
+    /// run on the Go scheduler). `None` (the default, for contexts that are not a session and
+    /// a session given no pool): the tasks go to the current tokio runtime, without that
+    /// instrumentation.
+    // glue: N3 ExecPool handle of the session (N3-A1 §3.1)
+    fn exec_pool(&self) -> Option<tidb_runtime::pool::ExecPool> {
+        None
+    }
 }
 
 /// `resolve.ResultField`: one column of a result set, as the protocol layer describes it.

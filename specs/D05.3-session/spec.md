@@ -67,7 +67,8 @@ Session
  │     ├── killer: Arc<SqlKiller>（N2 SessionShared；KILL、max_execution_time）
  │     ├── store: Arc<dyn Storage>、oracle: Arc<dyn Oracle>
  │     ├── domain_is: InfoSchema（VS1-17 之前是空的 v2）
- │     └── values: Go 的 session.mu.values
+ │     ├── values: Go 的 session.mu.values
+ │     └── exec_pool: 连接所在的 ExecPool（N3，§2.6）
  └── running: Option<RunningStmt>  正在返回行的语句（ExecStmt + 补做所需的状态，§2.3）
 ```
 
@@ -112,6 +113,15 @@ Go 的 `SessionVars.KVVars = tikvstore.NewVariables(&vars.SQLKiller.Signal)`：c
 - `poc-kv` 的 `KvSnapshot::coprocessor` 增加 `killed` 参数，调用方把语句的 kill 标志传进去；PoC 自己没有 KILL，传 `None`，与现在相同。
 
 测试：KILL 之后 `copr_vars().killed` 读到信号，下一条语句的 `ResetContextOfStmt` 清零（`tests.rs`）；`tidb-store` 的 `copr_iter.rs` 新增 `kill_signal_stops_the_workers`：卡在锁上的 worker 在信号置位后停止访问存储。
+
+### 2.6 执行器的 task 走会话的 ExecPool（#363）
+
+Go 的执行器起 goroutine，由 Go 运行时调度和抢占；Rust 的执行器起 tokio task（N3-A1 §3.2 的 M-GO）。只有经 `ExecPool` 启动的 task 才有 N3-A1 §3.6 的插桩：时间片检查点（§3.1 第 5 条，`CheckpointStride`）在一次 poll 超过时间片时让出，poll 超过阈值时记为停顿，poll 时间记进 CPU 记账。#362 的评审发现执行器的 task 没有经过池（`ExecCtx.pool` 总是 `None`，task 由当前运行时的 `spawn` 启动），所以这些都不生效。
+
+- 会话持有连接所在的 `ExecPool`（`Session::set_exec_pool`，没有 Go 对应，glue）。PoC 服务器给新栈的每个会话的是运行连接 task 的那个池（`KvClient` 的 `exec_pool`，与 coprocessor 客户端的 worker 同一个池）。
+- `glue::SessionContext` 加一个方法 `exec_pool`（默认 `None`，给不是会话的上下文用），会话返回它持有的池；`ExecStmt` 打开执行器时建的 `ExecCtx` 带上它（`ExecCtx.pool`）。执行器起 task 时用这个池：并行 sort 的 worker、fetcher、结果生成器（D12.5 spec §7.2）；并行 projection（D12.2，#366）用同一个字段。
+- 不改变结果，只改变 task 在哪里、是否被插桩。连接 task 本身由 `spawn_connection` 起，原来就有插桩；task 继续留在连接所在的运行时上（NoSteal 拓扑下留在同一线程）。
+- 测试（`tests/exec_pool.rs`，`executor_tasks_run_on_the_session_exec_pool`）：会话在插桩的运行时上执行一条排序语句（计划是 sort 套 `testutil` 的 mock 计划），sort 走并行路径，mock 的 `Next` 在 sort 的 fetcher task 中运行，每返回一行做一个 100 ms 的忙循环。两种拓扑各三轮：（1）会话有池、循环中有时间片检查点：每次 `Next` 都在池的 task 中，循环多次让出，没有代码造成的停顿；（2）会话有池、循环中没有检查点：循环不让出（fetcher 在 chunk channel 有空位时可能在一次 poll 里跑完几个循环），超过阈值（50 ms）的 poll 被停顿检测报出；（3）会话没有池（#363 之前的情况）：`Next` 不在池的 task 中，检查点一次也不让出，停顿也没有报出。去掉 `ExecStmt` 中把池放进 `ExecCtx` 的一行，测试在第（1）轮失败（`Next` 都不在池的 task 中）。
 
 ## 3. 回退时的检查点与恢复（plan §4.6）
 
