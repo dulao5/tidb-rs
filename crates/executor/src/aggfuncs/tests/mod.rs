@@ -34,6 +34,7 @@ use tidb_expression::ast_funcs as ast;
 use tidb_expression::context::{BuildContext, EvalContext, type_ctx};
 use tidb_expression::expression::EvalState;
 use tidb_expression::{Column, Expr, ExprRef};
+use tidb_kv::set::new_string_set_with_memory_usage;
 use tidb_memory::TrackedAlloc;
 use tidb_memory::tracker::new_tracker;
 use tidb_parser::types::FieldType;
@@ -658,6 +659,27 @@ fn distinct_sets_are_accounted() {
             );
         }
     }
+
+    // The keys of a string set are in the set's allocator too (Go adds `len(decStr)` to
+    // memDelta, func_sum.go:400, func_avg.go:268): 1000 keys of 1 KiB account at least 1 MiB.
+    let t = new_tracker(1, -1);
+    {
+        let a = TrackedAlloc::new(Arc::clone(&t));
+        let (mut s, _) = new_string_set_with_memory_usage(a.clone());
+        for i in 0..1000u32 {
+            let mut key = vec![0u8; 1024];
+            key[..4].copy_from_slice(&i.to_le_bytes());
+            s.insert(&key);
+        }
+        assert_eq!(s.count(), 1000);
+        a.flush();
+        assert!(
+            t.bytes_consumed() >= 1 << 20,
+            "string set keys not accounted: {} bytes",
+            t.bytes_consumed()
+        );
+    }
+    assert_eq!(t.bytes_consumed(), 0, "string set keys not given back");
 }
 
 // TestMemCount / TestMemSum / TestMemAvg / TestMemFirstRow / TestMemMaxMin / TestMemBitFunc:

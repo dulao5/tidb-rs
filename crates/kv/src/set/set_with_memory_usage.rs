@@ -8,11 +8,17 @@
 //! Go's constructors are variadic (`ss ...string`) and size the map with `len(ss)`; every
 //! caller passes no argument, and `MemAwareMap.Init` only models an unhinted empty map, so
 //! the ports take no elements (L2).
+//!
+//! The keys of the string set are boxed in the set's allocator, so that a set in a
+//! `TrackedAlloc` accounts the key bytes too (Go's callers add `len(key)` to memDelta, e.g.
+//! `func_sum.go:400`). `Insert` therefore takes the key bytes and copies them (L2).
 
 use std::sync::Arc;
 
 use allocator_api2::alloc::Allocator;
 use allocator_api2::alloc::Global;
+use allocator_api2::boxed::Box;
+use allocator_api2::vec::Vec;
 use tidb_memory::Tracker;
 
 use super::float64_set::Float64Key;
@@ -24,7 +30,7 @@ use crate::hack::MemAwareMap;
 /// StringSetWithMemoryUsage is a string set with memory usage.
 #[derive(Debug, Default)]
 pub struct StringSetWithMemoryUsage<A: Allocator + Clone = Global> {
-    pub map: MemAwareMap<Vec<u8>, (), A>,
+    pub map: MemAwareMap<Box<[u8], A>, (), A>,
 
     // For tracking large memory usage in time.
     // If tracker is non-nil, memDelta will track immediately and reset to 0. Otherwise,
@@ -50,9 +56,12 @@ pub fn new_string_set_with_memory_usage<A: Allocator + Clone>(
 impl<A: Allocator + Clone> StringSetWithMemoryUsage<A> {
     /// Insert inserts `val` into `s` and return memDelta.
     // go: StringSetWithMemoryUsage.Insert L2 (Consume → record: Insert cannot fail, the
-    // actions run at the caller's next checkpoint, A1 3.3)
-    pub fn insert(&mut self, val: Vec<u8>) -> i64 {
-        let mut delta = self.map.set(val, ());
+    // actions run at the caller's next checkpoint, A1 3.3; the key is copied into the set's
+    // allocator, module docs)
+    pub fn insert(&mut self, val: &[u8]) -> i64 {
+        let mut key = Vec::with_capacity_in(val.len(), self.map.m.allocator().clone());
+        key.extend_from_slice(val);
+        let mut delta = self.map.set(key.into_boxed_slice(), ());
         if delta != 0
             && let Some(t) = &self.tracker
         {
@@ -191,7 +200,7 @@ mod tests {
             let (mut f, _) = new_float64_set_with_memory_usage(a.clone());
             let (mut i, _) = new_int64_set_with_memory_usage(a.clone());
             for n in 0..1000i64 {
-                s.insert(n.to_string().into_bytes());
+                s.insert(n.to_string().as_bytes());
                 f.insert(n as f64);
                 i.insert(n);
             }

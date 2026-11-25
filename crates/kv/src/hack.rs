@@ -17,6 +17,11 @@
 //! default). The numbers returned are Go's, as the trackers that consume them expect; a map
 //! in a `TrackedAlloc` (A1 3.3, the DISTINCT sets of the aggregate functions) is in addition
 //! accounted by its real allocations.
+//!
+//! The hasher is hashbrown's default (foldhash with a per-map random seed), not the
+//! standard library's SipHash. This is deliberate: the keys can come from user data, and
+//! like Go's maps (aeshash with a per-map random seed) the table relies on the seed, not on
+//! a cryptographically strong hash, against collision attacks.
 
 // Go identifiers for the constants (M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -53,6 +58,12 @@ impl GoLayout for bool {
 
 /// A byte-string key is a Go `string` (pointer and length).
 impl GoLayout for Vec<u8> {
+    const GO_SIZE: u64 = 16;
+    const GO_ALIGN: u64 = 8;
+}
+
+/// A byte-string key boxed in an allocator (the keys of `set.StringSet`): a Go `string`.
+impl<A: Allocator> GoLayout for allocator_api2::boxed::Box<[u8], A> {
     const GO_SIZE: u64 = 16;
     const GO_ALIGN: u64 = 8;
 }

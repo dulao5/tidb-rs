@@ -271,7 +271,7 @@ impl AggFunc for AvgOriginal4DistinctDecimal {
             if p.val_set.exist(&dec_str) {
                 continue;
             }
-            p.val_set.insert(dec_str);
+            p.val_set.insert(&dec_str);
             let mut new_sum = MyDecimal::default();
             decimal_add(&p.base.sum, &input, &mut new_sum)?;
             p.base.sum = new_sum;

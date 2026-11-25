@@ -191,7 +191,7 @@ tracker `data/func_blocks.tsv` 中 block 为 D12.4 的函数共 **663** 个，�
 Go 的每个方法返回按 Go 结构大小估算的 `memDelta`（`unsafe.Sizeof` 常量 `DefPartialResult4XxxSize`、`cap()` 的增减、`GetDatumMemSize` 等），由 D12.3 `Consume`。A1 已定"算子中的 `Consume(±delta)` 和估算公式：删除 delta 计算；正向 Consume 的位置改为 `mem.checkpoint()?`"，而且"所有大块内存（……聚合状态……）通过 `TrackedAlloc` 分配"（A1 spec §3.2 表、§3.3）。另一方面，`crates/kv/src/hack.rs` 移植 `MemAwareMap` 时保留了 Go 的估算数字。本块按 A1 做（§9 第 1 条，决定点 1 定为 B）：
 
 - `memDelta` 不再返回，trait 方法的返回值去掉这一项（L2，按调用点在 tracker 登记为 A1 例外）；
-- 部分结果中会增长的容器（DISTINCT 的集合、GROUP_CONCAT 的缓冲区与堆、APPROX_PERCENTILE 的数组、APPROX_COUNT_DISTINCT 的哈希表、JSON_*AGG 的数组与 map、窗口函数保存的行）用 `TrackedAlloc`（`Vec<_, TrackedAlloc>`、`hashbrown::HashSet<_, _, TrackedAlloc>`），分配器的 tracker 由 D12.3 / D12.9 在 `Build` 后交给函数对象：trait 方法 `set_alloc(&mut self, ColAlloc)`（默认什么也不做；DISTINCT 的 SUM / AVG 保存它，之后分配的集合用它；没调用时用全局分配器）。集合的移植仍按 Go 算出估算值，本块丢弃它；
+- 部分结果中会增长的容器（DISTINCT 的集合、GROUP_CONCAT 的缓冲区与堆、APPROX_PERCENTILE 的数组、APPROX_COUNT_DISTINCT 的哈希表、JSON_*AGG 的数组与 map、窗口函数保存的行）用 `TrackedAlloc`（`Vec<_, TrackedAlloc>`、`hashbrown::HashSet<_, _, TrackedAlloc>`），分配器的 tracker 由 D12.3 / D12.9 在 `Build` 后交给函数对象：trait 方法 `set_alloc(&mut self, ColAlloc)`（默认什么也不做；DISTINCT 的 SUM / AVG 保存它，之后分配的集合用它；没调用时用全局分配器）。字符串集合的键也在同一个分配器里（`Box<[u8], A>`），所以键的字节也记账（Go 由调用方把 `len(key)` 加进 `memDelta`，如 `func_sum.go:400`、`func_avg.go:268`）。集合的移植仍按 Go 算出估算值，本块丢弃它；
 - 定长的部分结果本身（`Box`）记在哪一层，与 N6 一起定（D12.3）；
 - Go 的 `TestMemXxx` 按 A1 的"数值不对照"规则改写成性质测试（§6.1）。
 
@@ -285,7 +285,7 @@ Go 的单测都基于 `aggfunc_test.go` / `window_func_test.go` 的帮助函数�
 8. **`Build` 的 nil** 表示为 `Ok(None)`，`baseAggFunc.retTp` 的 nil 表示为 `None`，只是表示方式不同。
 9. 第 B 部分合并前 `Build` 对那 9 个函数名返回 `blocked`（路由器回退到 PoC），不是用户可见的差异。
 10. 如果 §8 的某条复现后经负责人裁定不照搬，在这里补上差异和 `docs/testing/rulings.toml` 的条目。
-11. **两个 NaN 相加时得到哪一个**：SUM / AVG 的浮点累加（`func_sum.go:100`、`:111`、`:348`，`func_avg.go:377`、`:438`、`:446`、`:486`）在两个操作数都是 NaN 时，硬件返回按机器码操作数顺序的第一个（x86 的目的寄存器、ARM 的 Rn），gc 和 Rust 的编译器（LLVM 认为浮点加法可交换）排的顺序可能不同，所以结果的 NaN 位模式（符号、payload）可能不同（第 A 部分的 govec 在 amd64 上看到 12 条 DISTINCT 求和的记录不同）。只有一个 NaN 时、以及 Inf - Inf 的默认 NaN 都与 Go 相同。Go 写入时拒绝 NaN，计算也不产生 NaN 输入，所以从 SQL 到不了；govec 的 SUM / AVG 记录不含 NaN 输入。如果要逐位相同，可以照 `crates/types/src/vector_functions.rs` 的做法按 gc 的操作数顺序选 NaN（需要维护者决定，见实现 PR）。
+11. **两个 NaN 相加时得到哪一个**：SUM / AVG 的浮点累加（`func_sum.go:100`、`:111`、`:348`，`func_avg.go:377`、`:438`、`:446`、`:486`）在两个操作数都是 NaN 时，硬件返回按机器码操作数顺序的第一个（x86 的目的寄存器、ARM 的 Rn），gc 和 Rust 的编译器（LLVM 认为浮点加法可交换）排的顺序可能不同，所以结果的 NaN 位模式（符号、payload）可能不同（第 A 部分的 govec 在 amd64 上看到 12 条 DISTINCT 求和的记录不同）。只有一个 NaN 时、以及 Inf - Inf 的默认 NaN 都与 Go 相同。Go 写入时拒绝 NaN，计算也不产生 NaN 输入，所以从 SQL 到不了；govec 的 SUM / AVG 记录不含 NaN 输入。维护者已定不逐位跟随 gc（§9.2 第 12 条），保持现在的写法。
 12. **`UpdatePartialResult` 多一个参数** `st: &EvalState`（§5.1），只是 Rust 表达式求值的接口，结果相同。
 
 ## 8. 可能的 Go 问题（读代码发现，尚未在运行中的 v8.5.8 上复现）
@@ -312,6 +312,13 @@ Go 的单测都基于 `aggfunc_test.go` / `window_func_test.go` 的帮助函数�
 4. **第 S 部分的时间**：A，与 D12.3 的落盘部分同时（在 D01.10 之后）。
 6. **LEAD / LAG 的值求值器**：A，放进部分结果（L2）。
 8. **§8 的可能问题**：A，由对应部分的实现任务在 v8.5.8 上复现后开 issue；第 1、2 条若复现，按宪章第一条 2 请负责人裁定。
+
+以下由维护者 du-lucky-agent 在第 A 部分的实现 PR #378 的评审中决定（宪章第九条，内部实现，不改变结果）：
+
+9. **`update_partial_result` 加 `st: &EvalState`**（§5.1）：可以。关联列的值从这里来，与其他执行器的求值方式一致。
+10. **COUNT(DISTINCT) 与第 B 部分的 9 个函数名共用一个桩站点**（§4）：可以，第 B1 部分合并时一起移除。
+11. **`set_alloc(&mut self, ColAlloc)`，`MemAwareMap` 对分配器泛型**（§5.3）：可以，前提是字符串集合的键也在同一个分配器里（已照做）。`&mut self` 保证只能在函数对象被多个 worker 共享之前设置。
+12. **两个 NaN 相加时得到哪一个**（§7 第 11 条）：不逐位跟随 gc，保持现在的写法。只有 NaN 的位模式可能不同，输出给客户端时都格式化为 `NaN`；SQL 中只能由 Inf - Inf 得到 NaN，同一架构上两边是同一个默认 NaN。
 
 ## 本文所用 ID
 

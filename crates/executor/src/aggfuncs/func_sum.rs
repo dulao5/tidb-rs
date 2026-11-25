@@ -435,7 +435,7 @@ impl AggFunc for Sum4DistinctDecimal {
             if p.val_set.exist(&dec_str) {
                 continue;
             }
-            p.val_set.insert(dec_str);
+            p.val_set.insert(&dec_str);
             if p.is_null {
                 p.val = input;
                 p.is_null = false;
