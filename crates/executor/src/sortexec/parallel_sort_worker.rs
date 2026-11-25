@@ -91,8 +91,18 @@ pub struct ParallelSortWorker {
     sql_killer: Option<ExecutorKillerHandler>,
 }
 
+/// The most rows one batch sort (`sortBatchRows`) takes, whatever the max chunk size. Go
+/// sorts `maxChunkSize * 30` rows (`parallel_sort_worker.go:82`, 30720 with the default
+/// `tidb_max_chunk_size`), but a Rust task cannot yield partway through a sort, and a batch
+/// that large with a collated string key keeps the worker thread past the stall threshold
+/// (the concurrency and memory design, N3-A1, §3.6): 25-30 ms per batch, while 7680 rows
+/// take about 5-6 ms. The owner's decision of 2026-11-25 (#371), spec D12.5 §7.8 item 9:
+/// the order of equal keys in Go's parallel sort already depends on scheduling, so the
+/// batch size is not visible to users.
+pub const MAX_SORTED_ROWS_PER_BATCH: usize = 7680;
+
+// go: newParallelSortWorker L2 (the batch size is capped at MAX_SORTED_ROWS_PER_BATCH, owner's decision #371)
 #[allow(clippy::too_many_arguments)] // Go's parameter list
-// go: newParallelSortWorker L1
 pub fn new_parallel_sort_worker(
     worker_id_for_test: usize,
     less_row_func: SortKeys,
@@ -117,7 +127,7 @@ pub fn new_parallel_sort_worker(
         mem_tracker,
         total_memory_usage: 0,
         sorted_rows_iter: Some(sorted_rows_iter),
-        max_sorted_rows_limit: max_chunk_size * 30,
+        max_sorted_rows_limit: (max_chunk_size * 30).min(MAX_SORTED_ROWS_PER_BATCH),
         spill_helper,
         local_sorted_rows: Vec::new(),
         chunk_iters: Vec::new(),
@@ -273,7 +283,7 @@ impl ParallelSortWorker {
     ///
     /// The kill error of the last batch's sort (sorted after the channel is closed) is sent
     /// with the errors of the merge, without the warning Go logs for a recovered panic.
-    // go: parallelSortWorker.fetchChunksAndSortImpl L2 (the kill error of a full batch's sort is returned, see the comment [M-PANIC, M-CH])
+    // go: parallelSortWorker.fetchChunksAndSortImpl L2 (the kill error of a full batch's sort is returned, see the comment; a time-sliced checkpoint after each batch sort, #371 [M-PANIC, M-CH])
     async fn fetch_chunks_and_sort_impl(&mut self) -> Result<bool, Error> {
         let received = tokio::select! {
             _ = self.finish_ch.closed() => return Ok(false),
@@ -310,6 +320,9 @@ impl ParallelSortWorker {
 
         if self.row_num_in_chunk_iters >= self.max_sorted_rows_limit {
             self.sort_batch_rows()?;
+            // glue: N3-A1 §3.1 item 5 (a time slice after each batch sort: with chunks already
+            // queued, `recv` returns at once and the next batch would follow in the same poll)
+            let Ok(()) = tidb_runtime::slice::checkpoint(&()).await;
         }
 
         self.inject_fail_point_for_parallel_sort_worker(3);
@@ -418,6 +431,81 @@ mod tests {
         assert!(polls.load(Ordering::SeqCst) > 1, "the merge never yielded");
     }
 
+    /// A worker whose chunk channel already holds four batches' worth of chunks yields
+    /// between batch sorts (#371): `recv` returns at once while chunks are queued, so only
+    /// the time-sliced checkpoint after each batch sort (N3-A1 §3.1 item 5) ends the poll.
+    /// Each batch is 7680 BIGINT rows (30 chunks of 256), far more than the test runtime's
+    /// time slice. The sender stays alive, so the end-of-input merge (which has its own
+    /// checkpoints) never runs; the task is unconstrained (no tokio budget), so every extra
+    /// poll comes from the checkpoint.
+    #[test]
+    fn worker_yields_between_batch_sorts() {
+        let rt = runtime();
+        let pool = rt.pool().clone();
+        let ft = tidb_types::field_type::new_field_type(tidb_base::mysql::TypeLonglong);
+        let max_chunk_size = 256usize;
+        let chunks = 4 * 30;
+        let (chunk_tx, chunk_rx) = mpsc::channel(chunks);
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..chunks {
+            let mut chk = tidb_chunk::chunk::new(&[&ft], max_chunk_size, max_chunk_size);
+            for _ in 0..max_chunk_size {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                chk.append_int64(0, (x >> 1) as i64);
+            }
+            chunk_tx
+                .try_send(ChunkWithMemoryUsage {
+                    chk: Arc::new(chk),
+                    memory_usage: 0,
+                })
+                .unwrap();
+        }
+        let (result_tx, _result_rx) = mpsc::channel(1);
+        let (_finish_tx, finish_ch) = new_finish_ch();
+        let syncer = Arc::new(WaitGroup::default());
+        syncer.add(chunks as i64);
+        let mut worker = new_parallel_sort_worker(
+            0,
+            int_keys(),
+            Arc::new(tokio::sync::Mutex::new(chunk_rx)),
+            Arc::clone(&syncer),
+            result_tx,
+            finish_ch,
+            new_tracker(-1, -1),
+            Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
+            max_chunk_size,
+            Arc::new(new_parallel_sort_spill_helper()),
+            None,
+        );
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let batches = rt.block_on(async move {
+            pool.spawn(
+                "test-batches",
+                tokio::task::unconstrained(PollCount {
+                    inner: Box::pin(async move {
+                        for _ in 0..chunks {
+                            assert!(worker.fetch_chunks_and_sort_impl().await.unwrap());
+                        }
+                        worker.local_sorted_rows.len()
+                    }),
+                    polls: counted,
+                }),
+            )
+            .await
+            .unwrap()
+        });
+        drop(chunk_tx);
+        assert_eq!(batches, 4);
+        assert!(
+            polls.load(Ordering::SeqCst) > 3,
+            "the worker did not yield between batch sorts: {} polls",
+            polls.load(Ordering::SeqCst)
+        );
+    }
+
     /// The time of one batch sort (`sortBatchRows`, which cannot yield partway through):
     /// 30 * max chunk size rows (1024, the default `tidb_max_chunk_size`, and the smaller
     /// 512 and 256), two BIGINT keys. A measurement for spec D12.5 §7.8, run by hand in a
@@ -508,6 +596,8 @@ mod tests {
                 Arc::new(new_parallel_sort_spill_helper()),
                 None,
             );
+            // Measures Go's batch of 30 chunks, above the cap of `MAX_SORTED_ROWS_PER_BATCH`.
+            worker.max_sorted_rows_limit = max_chunk_size * 30;
             let mut x: u64 = 0x2545_f491_4f6c_dd1d ^ round;
             for _ in 0..30 {
                 let mut chk = tidb_chunk::chunk::new(fts, max_chunk_size, max_chunk_size);

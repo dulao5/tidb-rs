@@ -948,9 +948,9 @@ fn stall_report(
 /// shapes (sysbench's `c`; mixed-case words), on the parallel sort whose tasks run on an
 /// instrumented ExecPool (Steal, one worker thread per CPU) with the default time slice and
 /// stall threshold (1 ms, 10 ms) and stalls classified by cause; 5 workers (the default
-/// `tidb_executor_concurrency`). Max chunk size 1024 (one batch is 30720 rows, as with the
-/// default `tidb_max_chunk_size`), then 512 and 256 (smaller batches; the chunks get smaller
-/// too). Prints, per round, the wall time and the stalls the round added: by task and cause,
+/// `tidb_executor_concurrency`). Max chunk size 1024 (the default `tidb_max_chunk_size`;
+/// one batch is 7680 rows, capped by `MAX_SORTED_ROWS_PER_BATCH`, #371, where Go's would be
+/// 30720), then 512 and 256 (smaller chunks; batches of 7680 rows at both). Prints, per round, the wall time and the stalls the round added: by task and cause,
 /// and the stalled polls' durations (the stall histogram).
 #[test]
 #[ignore]
@@ -1049,7 +1049,8 @@ fn string_key_sort_under_the_stall_check() {
             let after = stall_metrics();
             eprintln!(
                 "{shape}, max chunk size {max_chunk_size} (batches of {} rows), round {round}: {rows} rows sorted in {wall:?}, {} stall(s)\n{}",
-                30 * max_chunk_size,
+                (30 * max_chunk_size)
+                    .min(super::parallel_sort_worker::MAX_SORTED_ROWS_PER_BATCH as i64),
                 check.stalls(),
                 stall_report(&before, &after)
             );
