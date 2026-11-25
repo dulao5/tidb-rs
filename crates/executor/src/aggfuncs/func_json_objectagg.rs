@@ -265,7 +265,7 @@ impl AggFunc for JsonObjectAgg {
     }
 }
 
-// go: getRealJSONValue L2 (allocates String/Opaque/BinaryJSON payloads in ColAlloc for A1 memory accounting; copies Opaque bytes instead of aliasing child chunk)
+// go: getRealJSONValue L2 (allocates String/Opaque/BinaryJSON payloads in ColAlloc for A1 memory accounting; R24 #392: copies Opaque bytes instead of aliasing reused child chunk)
 pub(crate) fn get_real_json_value(
     value: &Datum,
     ft: &FieldType,

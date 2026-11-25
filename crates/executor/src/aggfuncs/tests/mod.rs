@@ -2108,3 +2108,96 @@ fn json_agg_and_group_concat_order_payloads_accounted() {
     }
     assert_eq!(t.bytes_consumed(), 0);
 }
+
+// Ruling R24 (#392, constitution art. 9.3): get_real_json_value copies Opaque bytes into owned
+// ColAlloc storage instead of aliasing the child chunk, so reusing a child chunk across multiple
+// batches in one group never corrupts earlier VARBINARY entries in JSON_ARRAYAGG / JSON_OBJECTAGG.
+#[test]
+fn json_agg_opaque_survives_chunk_reuse() {
+    use tidb_parser::gocharset;
+    use tidb_types::json::parse_binary_json_from_string;
+
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let st = EvalState::new();
+
+    let mut vb_ft = new_field_type(mysql::TypeVarString);
+    vb_ft.set_charset(gocharset::CharsetBin);
+    vb_ft.set_collate(gocharset::CollationBin);
+    vb_ft.set_flen(16);
+    let key_ft = new_field_type(mysql::TypeVarString);
+
+    let batches: [&[(&[u8], &[u8])]; 3] = [
+        &[(b"k0", b"AAAA"), (b"k1", b"BBBB")],
+        &[(b"k2", b"CCCC"), (b"k3", b"DDDD")],
+        &[(b"k4", b"XXXX"), (b"k5", b"YYYY")],
+    ];
+
+    // 1. JSON_ARRAYAGG over a single Chunk reset and overwritten 3 times.
+    let arr_desc = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncJsonArrayagg,
+        vec![column(&vb_ft, 1)],
+        false,
+    )
+    .unwrap();
+    let arr_f = built(&ctx, &arr_desc);
+    let mut arr_pr = arr_f.alloc_partial_result();
+
+    // 2. JSON_OBJECTAGG over the same reused Chunk.
+    let obj_desc = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncJsonObjectAgg,
+        vec![column(&key_ft, 0), column(&vb_ft, 1)],
+        false,
+    )
+    .unwrap();
+    let obj_f = built(&ctx, &obj_desc);
+    let mut obj_pr = obj_f.alloc_partial_result();
+
+    let mut reused = new_chunk_with_capacity(&[key_ft.clone(), vb_ft.clone()], 2);
+    for batch in batches {
+        reused.reset();
+        for &(k, v) in batch {
+            reused.append_string(0, k);
+            reused.append_bytes(1, v);
+        }
+        let rs = rows(&reused);
+        arr_f
+            .update_partial_result(ec, &st, &rs, &mut arr_pr)
+            .unwrap();
+        obj_f
+            .update_partial_result(ec, &st, &rs, &mut obj_pr)
+            .unwrap();
+    }
+
+    let json_ft = new_field_type(TypeJSON);
+    let mut arr_out = new_chunk_with_capacity(std::slice::from_ref(&json_ft), 1);
+    arr_f
+        .append_final_result2_chunk(ec, &mut arr_pr, &mut arr_out)
+        .unwrap();
+    let expected_arr = parse_binary_json_from_string(
+        br#"["base64:type253:QUFBQQ==", "base64:type253:QkJCQg==", "base64:type253:Q0NDQw==", "base64:type253:RERERA==", "base64:type253:WFhYWA==", "base64:type253:WVlZWQ=="]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        arr_out.get_row(0).get_json(0).string(),
+        expected_arr.string(),
+        "JSON_ARRAYAGG must preserve earlier reused-chunk Opaque bytes (R24)"
+    );
+
+    let mut obj_out = new_chunk_with_capacity(std::slice::from_ref(&json_ft), 1);
+    obj_f
+        .append_final_result2_chunk(ec, &mut obj_pr, &mut obj_out)
+        .unwrap();
+    let expected_obj = parse_binary_json_from_string(
+        br#"{"k0": "base64:type253:QUFBQQ==", "k1": "base64:type253:QkJCQg==", "k2": "base64:type253:Q0NDQw==", "k3": "base64:type253:RERERA==", "k4": "base64:type253:WFhYWA==", "k5": "base64:type253:WVlZWQ=="}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        obj_out.get_row(0).get_json(0).string(),
+        expected_obj.string(),
+        "JSON_OBJECTAGG must preserve earlier reused-chunk Opaque bytes (R24)"
+    );
+}
