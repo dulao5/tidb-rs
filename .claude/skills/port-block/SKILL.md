@@ -18,6 +18,8 @@ description: Port one block (or one part of a block) of Go TiDB v8.5.8 to tidb-r
 
 ## 1. spec 先行
 
+- spec 的"决定"一节按宪章第九条分两部分：**需要负责人决定**只列第九条 1 的四类，其余写进**维护者已定**，不去问负责人。
+
 - 在 `specs/<块 ID>-<名称>/` 写 `spec.md`（中文、平实，负责人评审的是 spec 不是代码），格式照 `specs/D06.1-model/spec.md`；planner / expression 类的块用 `specs/templates/plan.md` 写 plan。
 - spec 必须与 Go 源码逐条核对（评审多次发现正负号写反、声称 Go 做了实际没做的事）。引用 Go 代码写文件和行号（基于参照树）。
 - **与 Go 的每一处差异**都写进 spec 的"已知差异"一节或代码的文档注释。没有登记的用户可见差异不允许以"写路径"之类的理由带过。

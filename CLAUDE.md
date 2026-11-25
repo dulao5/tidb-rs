@@ -99,8 +99,13 @@ report in the issue. Delete your worktree's `target/` after the PR is merged.
   that wrote them; PR bodies end with the attribution line your tool adds.
 - Wait for CI and fix failures. **Never merge** — the maintainer (Maya) merges after review
   (Lucky). Answer review comments on the PR; push fixes to the same branch.
-- If something in the task is unclear, or the work needs a decision (scope, a deviation from Go,
-  a design choice), **stop and ask in the issue** instead of choosing.
+- Decision rights: CONSTITUTION article 9. Only four kinds of decision go to the owner (a
+  user-visible difference from Go, exceptions or changing a confirmed decision, scope and gates,
+  resources). Everything else — task split, boundary stubs for unported dependencies, internal
+  representation, internal parameters, test approach — is decided by the maintainers: write it in
+  the spec's "维护者已定" section, or ask the maintainer (`@du-maya`) in the issue if unsure.
+  Stop and ask in the issue only when the task itself is unclear or a decision may be of the four
+  owner kinds.
 
 ## 5. Task issues for autonomous agents (`duet-ready`)
 
