@@ -2,10 +2,11 @@
 //!
 //! `JSON_ARRAYAGG` (part B1 of D12.4).
 //!
-//! The growing `entries` slice allocates through [`AggFunc::set_alloc`] (A1, spec §5.3); the
-//! manual `memDelta` Go adds up via `getValMemDelta` is dropped (spec §3.6, §9 item 1). The
-//! spill serialization methods (`SerializePartialResult`, `DeserializePartialResult`,
-//! `deserializeForSpill`) belong to part S.
+//! The growing `entries` slice and variable-length JSON value payloads (`String`, `Opaque`,
+//! `BinaryJSON`) allocate through [`AggFunc::set_alloc`] (A1, spec §5.3); the manual `memDelta`
+//! Go adds up via `getValMemDelta` is dropped (spec §3.6, §9 item 1). The spill serialization
+//! methods (`SerializePartialResult`, `DeserializePartialResult`, `deserializeForSpill`) belong
+//! to part S.
 
 use allocator_api2::vec::Vec as AllocVec;
 use tidb_base::Error;
@@ -20,13 +21,13 @@ use tidb_types::json::{
 use super::aggfuncs::{
     AggFunc, AggFuncUpdateContext, BaseAggFunc, PartialResult, partial_result_mut,
 };
-use super::func_json_objectagg::{RealJsonValue, get_real_json_value};
+use super::func_json_objectagg::{RealJsonValue, TrackedJsonValue, get_real_json_value};
 
 /// jsonArrayagg.
 #[derive(Clone, Debug)]
 pub struct JsonArrayagg {
     pub base: BaseAggFunc,
-    /// The allocator of the partial result's `entries` buffer (A1, spec §5.3).
+    /// The allocator of the partial result's `entries` buffer and payloads (A1, spec §5.3).
     alloc: ColAlloc,
 }
 
@@ -43,7 +44,7 @@ impl JsonArrayagg {
 
 #[derive(Debug)]
 struct PartialResult4JsonArrayagg {
-    entries: AllocVec<JSONValue<'static>, ColAlloc>,
+    entries: AllocVec<TrackedJsonValue, ColAlloc>,
 }
 
 impl AggFunc for JsonArrayagg {
@@ -73,7 +74,11 @@ impl AggFunc for JsonArrayagg {
             return Ok(());
         }
 
-        let entries: Vec<JSONValue<'static>> = p.entries.iter().cloned().collect();
+        let entries: Vec<JSONValue<'_>> = p
+            .entries
+            .iter()
+            .map(TrackedJsonValue::as_json_value)
+            .collect();
         let json = create_binary_json_with_check(&JSONValue::Array(entries))?;
         chk.append_json(self.base.col(), &json);
         Ok(())
@@ -90,7 +95,8 @@ impl AggFunc for JsonArrayagg {
         let p = partial_result_mut::<PartialResult4JsonArrayagg>(pr);
         for &row in rows_in_group {
             let item = self.base.args[0].eval(ctx, st, row)?;
-            let real_item = get_real_json_value(&item, &self.base.args[0].get_type(ctx))?;
+            let real_item =
+                get_real_json_value(&item, &self.base.args[0].get_type(ctx), &self.alloc)?;
             match real_item {
                 RealJsonValue::Supported(val) => p.entries.push(val),
                 RealJsonValue::Unsupported(val) => {
@@ -112,11 +118,14 @@ impl AggFunc for JsonArrayagg {
     ) -> Result<(), Error> {
         let p1 = partial_result_mut::<PartialResult4JsonArrayagg>(src);
         let p2 = partial_result_mut::<PartialResult4JsonArrayagg>(dst);
-        p2.entries.extend(p1.entries.iter().cloned());
+        p2.entries.reserve(p1.entries.len());
+        for v in &p1.entries {
+            p2.entries.push(v.clone_in(&self.alloc));
+        }
         Ok(())
     }
 
-    // glue: A1 3.3 TrackedAlloc of the partial result entries (spec §5.3)
+    // glue: A1 3.3 TrackedAlloc of the partial result entries and payloads (spec §5.3)
     fn set_alloc(&mut self, alloc: ColAlloc) {
         self.alloc = alloc;
     }

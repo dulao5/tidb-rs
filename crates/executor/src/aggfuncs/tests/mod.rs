@@ -1845,3 +1845,266 @@ fn count_distinct_canonical_keys() {
     );
     assert_eq!(k_dt0, k_dt3, "Datetime with differing Fsp must match (R23)");
 }
+
+// A1 payload accounting (spec §5.3): large payloads in JSON_ARRAYAGG / JSON_OBJECTAGG
+// (String, Opaque VARBINARY, BinaryJSON) and GROUP_CONCAT ORDER BY (SortRow.by_items Datum
+// payloads) must be accounted on the operator tracker, trigger memory-quota checkpoints, and
+// return cleanly to 0 on overwrite, eviction, reset, and drop.
+#[test]
+fn json_agg_and_group_concat_order_payloads_accounted() {
+    use tidb_memory::action::PanicOnExceed;
+    use tidb_parser::gocharset;
+    use tidb_types::json::parse_binary_json_from_string;
+
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let n: usize = 200;
+    let payload_len: usize = 1024;
+    let expected_min = (n * payload_len) as i64;
+
+    // 1. JSON_ARRAYAGG across String, Opaque (VARBINARY), and BinaryJSON payloads.
+    let mut vb_ft = new_field_type(mysql::TypeVarString);
+    vb_ft.set_charset(gocharset::CharsetBin);
+    vb_ft.set_collate(gocharset::CollationBin);
+    let str_ft = new_field_type(mysql::TypeVarString);
+    let json_ft = new_field_type(TypeJSON);
+
+    for (label, ft) in [
+        ("string", str_ft.clone()),
+        ("opaque_varbinary", vb_ft.clone()),
+        ("binary_json", json_ft.clone()),
+    ] {
+        let mut chk = new_chunk_with_capacity(std::slice::from_ref(&ft), n);
+        for i in 0..n {
+            let body = format!("{i:04}{}", "a".repeat(payload_len - 4));
+            if ft.get_type() == TypeJSON {
+                let bj = parse_binary_json_from_string(format!("\"{body}\"").as_bytes()).unwrap();
+                chk.append_json(0, &bj);
+            } else {
+                chk.append_bytes(0, body.as_bytes());
+            }
+        }
+        let desc = new_agg_func_desc(&*ctx, ast::AggFuncJsonArrayagg, vec![column(&ft, 0)], false)
+            .unwrap();
+
+        let t = new_tracker(1, -1);
+        t.set_bytes_limit(expected_min / 2);
+        t.set_action_on_exceed(Some(PanicOnExceed::new(
+            Some(Arc::new(tidb_memory::SqlKiller::default())),
+            0,
+        )));
+        {
+            let a = TrackedAlloc::new(Arc::clone(&t));
+            let mut f = built(&ctx, &desc);
+            f.set_alloc(ColAlloc::Tracked(a.clone()));
+            let mut pr = f.alloc_partial_result();
+            update_each(ec, &*f, &rows(&chk), &mut pr).unwrap();
+            a.flush();
+            assert!(
+                t.bytes_consumed() >= expected_min,
+                "JSON_ARRAYAGG {label}: tracked {} < {expected_min}",
+                t.bytes_consumed()
+            );
+            assert!(
+                t.checkpoint().is_err(),
+                "JSON_ARRAYAGG {label}: quota checkpoint must fire"
+            );
+
+            // Merge into a second tracked destination and verify dst accounts the merged payloads.
+            let t_dst = new_tracker(2, -1);
+            {
+                let a_dst = TrackedAlloc::new(Arc::clone(&t_dst));
+                let mut f_dst = built(&ctx, &desc);
+                f_dst.set_alloc(ColAlloc::Tracked(a_dst.clone()));
+                let mut pr_dst = f_dst.alloc_partial_result();
+                f_dst
+                    .merge_partial_result(ec, &mut pr, &mut pr_dst)
+                    .unwrap();
+                a_dst.flush();
+                assert!(
+                    t_dst.bytes_consumed() >= expected_min,
+                    "JSON_ARRAYAGG {label} merge: tracked {} < {expected_min}",
+                    t_dst.bytes_consumed()
+                );
+            }
+            assert_eq!(t_dst.bytes_consumed(), 0);
+
+            f.reset_partial_result(&mut pr);
+            a.flush();
+            assert!(
+                t.bytes_consumed() < expected_min,
+                "JSON_ARRAYAGG {label}: reset must release payload bytes"
+            );
+        }
+        assert_eq!(
+            t.bytes_consumed(),
+            0,
+            "JSON_ARRAYAGG {label}: memory not returned on drop"
+        );
+    }
+
+    // 2. JSON_OBJECTAGG across String, Opaque, BinaryJSON + duplicate-key overwrite release.
+    for (label, val_ft) in [
+        ("string", str_ft.clone()),
+        ("opaque_varbinary", vb_ft.clone()),
+        ("binary_json", json_ft.clone()),
+    ] {
+        let mut chk_big = new_chunk_with_capacity(&[str_ft.clone(), val_ft.clone()], n);
+        let mut chk_small = new_chunk_with_capacity(&[str_ft.clone(), val_ft.clone()], n);
+        for i in 0..n {
+            let k = format!("k{i:04}");
+            let big = format!("{i:04}{}", "b".repeat(payload_len - 4));
+            chk_big.append_string(0, k.as_bytes());
+            chk_small.append_string(0, k.as_bytes());
+            if val_ft.get_type() == TypeJSON {
+                chk_big.append_json(
+                    1,
+                    &parse_binary_json_from_string(format!("\"{big}\"").as_bytes()).unwrap(),
+                );
+                chk_small.append_json(1, &parse_binary_json_from_string(b"\"s\"").unwrap());
+            } else {
+                chk_big.append_bytes(1, big.as_bytes());
+                chk_small.append_bytes(1, b"s");
+            }
+        }
+        let desc = new_agg_func_desc(
+            &*ctx,
+            ast::AggFuncJsonObjectAgg,
+            vec![column(&str_ft, 0), column(&val_ft, 1)],
+            false,
+        )
+        .unwrap();
+
+        let t = new_tracker(1, -1);
+        t.set_bytes_limit(expected_min / 2);
+        t.set_action_on_exceed(Some(PanicOnExceed::new(
+            Some(Arc::new(tidb_memory::SqlKiller::default())),
+            0,
+        )));
+        {
+            let a = TrackedAlloc::new(Arc::clone(&t));
+            let mut f = built(&ctx, &desc);
+            f.set_alloc(ColAlloc::Tracked(a.clone()));
+            let mut pr = f.alloc_partial_result();
+            update_each(ec, &*f, &rows(&chk_big), &mut pr).unwrap();
+            a.flush();
+            let peak = t.bytes_consumed();
+            assert!(
+                peak >= expected_min,
+                "JSON_OBJECTAGG {label}: tracked {peak} < {expected_min}"
+            );
+            assert!(
+                t.checkpoint().is_err(),
+                "JSON_OBJECTAGG {label}: quota checkpoint must fire"
+            );
+
+            // Overwriting every key with a tiny value must release the old payloads.
+            update_each(ec, &*f, &rows(&chk_small), &mut pr).unwrap();
+            a.flush();
+            assert!(
+                t.bytes_consumed() < peak / 2,
+                "JSON_OBJECTAGG {label}: overwrite did not release old payloads (peak={peak}, now={})",
+                t.bytes_consumed()
+            );
+        }
+        assert_eq!(
+            t.bytes_consumed(),
+            0,
+            "JSON_OBJECTAGG {label}: memory not returned on drop"
+        );
+    }
+
+    // 3. GROUP_CONCAT(a ORDER BY long_text): SortRow.by_items payloads tracked & released on
+    // eviction, reset, and drop (both plain ORDER BY and DISTINCT ORDER BY).
+    let gc_n: usize = 100;
+    let by_len: usize = 2048;
+    let gc_expected_min = (gc_n * by_len) as i64;
+    let ctx_gc = es::new_expr_context(vec![es::with_group_concat_max_len(1024 * 1024)]);
+    let ec_gc = ctx_gc.get_eval_ctx();
+
+    let mut chk_gc = new_chunk_with_capacity(&[str_ft.clone(), str_ft.clone()], gc_n);
+    for i in 0..gc_n {
+        chk_gc.append_string(0, format!("v{i:03}").as_bytes());
+        chk_gc.append_string(1, format!("{i:04}{}", "z".repeat(by_len - 4)).as_bytes());
+    }
+
+    for distinct in [false, true] {
+        let args = vec![column(&str_ft, 0), sep_const(SEPARATOR)];
+        let mut desc =
+            new_agg_func_desc(&*ctx_gc, ast::AggFuncGroupConcat, args, distinct).unwrap();
+        desc.order_by_items = vec![ByItems {
+            expr: column(&str_ft, 1),
+            desc: true,
+        }];
+
+        let t = new_tracker(1, -1);
+        t.set_bytes_limit(gc_expected_min / 2);
+        t.set_action_on_exceed(Some(PanicOnExceed::new(
+            Some(Arc::new(tidb_memory::SqlKiller::default())),
+            0,
+        )));
+        {
+            let a = TrackedAlloc::new(Arc::clone(&t));
+            let mut f = built(&ctx_gc, &desc);
+            f.set_alloc(ColAlloc::Tracked(a.clone()));
+            let mut pr = f.alloc_partial_result();
+            update_each(&*ec_gc, &*f, &rows(&chk_gc), &mut pr).unwrap();
+            a.flush();
+            assert!(
+                t.bytes_consumed() >= gc_expected_min,
+                "GROUP_CONCAT ORDER BY distinct={distinct}: tracked {} < {gc_expected_min}",
+                t.bytes_consumed()
+            );
+            assert!(
+                t.checkpoint().is_err(),
+                "GROUP_CONCAT ORDER BY distinct={distinct}: quota checkpoint must fire"
+            );
+
+            f.reset_partial_result(&mut pr);
+            a.flush();
+            assert!(
+                t.bytes_consumed() < gc_expected_min / 4,
+                "GROUP_CONCAT ORDER BY distinct={distinct}: reset must release by_items payloads (now={})",
+                t.bytes_consumed()
+            );
+        }
+        assert_eq!(
+            t.bytes_consumed(),
+            0,
+            "GROUP_CONCAT ORDER BY distinct={distinct}: memory not returned on drop"
+        );
+    }
+
+    // Also verify heap eviction under a tight group_concat_max_len drops evicted by_items payloads.
+    let ctx_tight = es::new_expr_context(vec![
+        es::with_eval_ctx(es::new_eval_context(vec![es::with_type_flags(
+            Flags::default().with_truncate_as_warning(true),
+        )])),
+        es::with_group_concat_max_len(16),
+    ]);
+    let ec_tight = ctx_tight.get_eval_ctx();
+    let args = vec![column(&str_ft, 0), sep_const(SEPARATOR)];
+    let mut desc = new_agg_func_desc(&*ctx_tight, ast::AggFuncGroupConcat, args, false).unwrap();
+    desc.order_by_items = vec![ByItems {
+        expr: column(&str_ft, 1),
+        desc: true,
+    }];
+    let t = new_tracker(1, -1);
+    {
+        let a = TrackedAlloc::new(Arc::clone(&t));
+        let mut f = built(&ctx_tight, &desc);
+        f.set_alloc(ColAlloc::Tracked(a.clone()));
+        let mut pr = f.alloc_partial_result();
+        update_each(&*ec_tight, &*f, &rows(&chk_gc), &mut pr).unwrap();
+        a.flush();
+        // Only a few rows fit in max_len=16, so tracked bytes must stay far below all 100 rows.
+        assert!(t.bytes_consumed() > 0);
+        assert!(
+            t.bytes_consumed() < gc_expected_min / 4,
+            "evicted by_items payloads were not released: {}",
+            t.bytes_consumed()
+        );
+    }
+    assert_eq!(t.bytes_consumed(), 0);
+}

@@ -10,7 +10,8 @@
 //! part S.
 
 // go-exception: A1 GetDatumMemSize (only computes Go's manual memDelta for GROUP_CONCAT ORDER BY;
-// Rust accounts the growing partial result containers through ColAlloc / TrackedAlloc, spec §3.6)
+// Rust accounts the growing partial result containers and SortRow.by_items Datum payloads through
+// ColAlloc / TrackedAlloc, spec §3.6)
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -393,10 +394,52 @@ impl AggFunc for GroupConcatDistinct {
     }
 }
 
+/// RAII wrapper that accounts a `Datum`'s owned heap payload (bytes/strings/JSON/vectors/
+/// boxed decimals) on `ColAlloc::Tracked`'s tracker so heap insertions, evictions, resets, and
+/// drops balance automatically (A1, spec §5.3).
+#[derive(Debug)]
+struct TrackedDatum {
+    datum: Datum,
+    payload_bytes: i64,
+    alloc: ColAlloc,
+}
+
+impl TrackedDatum {
+    // glue: A1 payload accounting for Datum owned by topNRows.SortRow.by_items
+    fn new(datum: Datum, alloc: ColAlloc) -> Self {
+        let mut bytes = datum.get_bytes().len();
+        if datum.kind() == tidb_types::datum::KindMysqlDecimal {
+            bytes += std::mem::size_of::<tidb_types::MyDecimal>();
+        }
+        let payload_bytes = bytes as i64;
+        if payload_bytes > 0
+            && let ColAlloc::Tracked(ref ta) = alloc
+        {
+            ta.tracker().record(payload_bytes);
+        }
+        Self {
+            datum,
+            payload_bytes,
+            alloc,
+        }
+    }
+}
+
+impl Drop for TrackedDatum {
+    // glue: release tracked Datum payload bytes on eviction, reset, or drop
+    fn drop(&mut self) {
+        if self.payload_bytes > 0
+            && let ColAlloc::Tracked(ref ta) = self.alloc
+        {
+            ta.tracker().record(-self.payload_bytes);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct SortRow {
     buffer: AllocVec<u8, ColAlloc>,
-    by_items: AllocVec<Datum, ColAlloc>,
+    by_items: AllocVec<TrackedDatum, ColAlloc>,
 }
 
 /// Compares two `SortRow`s using the `topNRows.Less` order (max-heap order: returns true when
@@ -411,7 +454,9 @@ fn compare_sort_row(
 ) -> bool {
     let n = a.by_items.len();
     for k in 0..n {
-        let (mut ret, err) = a.by_items[k].compare(tc, &b.by_items[k], collators[k]);
+        let (mut ret, err) = a.by_items[k]
+            .datum
+            .compare(tc, &b.by_items[k].datum, collators[k]);
         if err.is_err() {
             // Go ignores comparison errors here (spec §8 item 4).
             return false;
@@ -692,7 +737,7 @@ impl AggFunc for GroupConcatOrder {
                 AllocVec::with_capacity_in(self.base.by_items.len(), self.alloc.clone());
             for by_item in &self.base.by_items {
                 let d = by_item.expr.eval(sctx, st, row)?;
-                by_items.push(d.clone_datum());
+                by_items.push(TrackedDatum::new(d.clone_datum(), self.alloc.clone()));
             }
             let sort_row = SortRow { buffer, by_items };
             let truncated = p.top_n.try_to_add(&tc, sort_row);
@@ -866,7 +911,7 @@ impl AggFunc for GroupConcatDistinctOrder {
                 AllocVec::with_capacity_in(self.base.by_items.len(), self.alloc.clone());
             for by_item in &self.base.by_items {
                 let d = by_item.expr.eval(sctx, st, row)?;
-                by_items.push(d.clone_datum());
+                by_items.push(TrackedDatum::new(d.clone_datum(), self.alloc.clone()));
             }
             let sort_row = SortRow { buffer, by_items };
             let truncated = p.top_n.try_to_add(&tc, sort_row);
