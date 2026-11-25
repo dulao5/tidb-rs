@@ -121,15 +121,14 @@ impl HashAggFinalWorker {
         }
     }
 
-    // go: HashAggFinalWorker.mergeInputIntoResultMap L2 (async: CheckpointStride in merge loop per spec §4.7; A1 TrackedAlloc checkpoint; skip empty input map to avoid hashbrown 0.17 empty IntoIter leaking ColAlloc)
+    // go: HashAggFinalWorker.mergeInputIntoResultMap L2 (async: CheckpointStride in merge loop per spec §4.7; A1 TrackedAlloc checkpoint; fast path skips empty input maps)
     async fn merge_input_into_result_map(
         &mut self,
         input: AggPartialResultMapper<ColAlloc>,
     ) -> Result<(), Error> {
-        // Do not remove this guard: hashbrown 0.17's `HashMap::into_iter()` forgets its custom
-        // allocator `A` on a zero-capacity map without running `Drop`, which permanently leaks
-        // `ColAlloc::Tracked` (`Arc<Account>` -> `Arc<Tracker>`) when an empty partition map is
-        // merged into a non-empty worker. Returning early drops `input` directly instead.
+        // Fast path: skip iterating, flushing, and checkpointing empty partition maps.
+        // (This also originally avoided a hashbrown 0.17.1 allocator leak on zero-capacity
+        // `HashMap::into_iter()`, which is fixed at the root by bumping hashbrown to 0.17.2.)
         if input.m.is_empty() {
             return Ok(());
         }

@@ -2004,11 +2004,25 @@ async fn hash_agg_parallel_concurrent_data_and_child_error() {
     }
 }
 
-/// Regression test: merging an empty `AggPartialResultMapper<ColAlloc>` into a non-empty final
-/// worker must not leak `TrackedAlloc` / `Arc<Tracker>` (hashbrown 0.17's `HashMap::into_iter`
-/// leaks the allocator when called on a zero-capacity map).
+/// Regression test: consuming an unallocated `MemAwareMap<..., ColAlloc>` via `into_iter()`
+/// (fixed in hashbrown 0.17.2) and merging an empty `AggPartialResultMapper<ColAlloc>` into a
+/// non-empty final worker both drop `TrackedAlloc` / `Arc<Tracker>` with no leaked handles.
 #[tokio::test]
 async fn hash_agg_final_worker_empty_map_merge_drops_tracked_alloc() {
+    use tidb_chunk::ColAlloc;
+    use tidb_memory::TrackedAlloc;
+
+    // Directly pin hashbrown >= 0.17.2: into_iter() on a zero-capacity map must drop ColAlloc.
+    {
+        let tr = new_tracker(1, -1);
+        let alloc = TrackedAlloc::new(Arc::clone(&tr));
+        let empty =
+            crate::aggfuncs::new_agg_partial_result_mapper_in(ColAlloc::Tracked(alloc.clone()), 0);
+        for _ in empty.m {}
+        drop(alloc);
+        assert_eq!(Arc::strong_count(&tr), 1);
+    }
+
     let tps = child_types();
     let sctx = parallel_ctx(4, 4);
     let ectx = exec_ctx(&sctx);
