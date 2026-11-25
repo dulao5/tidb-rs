@@ -22,11 +22,12 @@ use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_chunk::ColAlloc;
 use tidb_chunk::chunk::Chunk;
-use tidb_runtime::{CheckpointStride, DoneGuard, WaitGroup};
+use tidb_runtime::{CheckpointHook, CheckpointStride, DoneGuard, WaitGroup};
 use tidb_sessionctx::exprctx::EvalContextRef;
 use tokio::sync::mpsc;
 
 use crate::aggfuncs::AggPartialResultMapper;
+use crate::internal::exec::executor::ExecutorKillerHandler;
 
 use super::agg_hash_base_worker::{BaseHashAggWorker, wait_finish};
 use super::agg_hash_executor::nil_agg_func;
@@ -79,6 +80,18 @@ impl Drop for WaitTimeGuard<'_> {
     }
 }
 
+/// `CheckpointHook` checking the statement's `SqlKiller` inside final-worker loops (spec §4.7).
+struct KillerHook<'a>(&'a ExecutorKillerHandler);
+
+impl CheckpointHook for KillerHook<'_> {
+    type Error = Error;
+
+    // glue: M-KILL CheckpointHook checking ExecutorKillerHandler
+    fn check(&self) -> Result<(), Error> {
+        self.0.handle_sql_killer_signal()
+    }
+}
+
 /// `HashAggFinalWorker` indicates the final workers of parallel hash agg execution,
 /// the number of which is controlled by `tidb_hashagg_final_concurrency`.
 pub struct HashAggFinalWorker {
@@ -92,6 +105,7 @@ pub struct HashAggFinalWorker {
 
     pub(crate) spill_helper: Arc<ParallelHashAggSpillHelper>,
     pub(crate) eval_ctx: EvalContextRef,
+    pub(crate) sql_killer: ExecutorKillerHandler,
 }
 
 impl HashAggFinalWorker {
@@ -120,10 +134,12 @@ impl HashAggFinalWorker {
 
         let exec_start = Instant::now();
         let eval_ctx = &*self.eval_ctx;
+        let killer = self.sql_killer.clone();
+        let kill_hook = KillerHook(&killer);
         let mut stride = CheckpointStride::new(FINAL_WORKER_CHECKPOINT_STRIDE);
 
         for (key, mut value) in input.m {
-            let Ok(()) = stride.checkpoint(&()).await;
+            stride.checkpoint(&kill_hook).await?;
             if let Some(dst_val) = self.partial_result_map.m.get_mut(&key) {
                 for (j, af) in self.base.agg_funcs.iter().enumerate() {
                     nil_agg_func(af)?.merge_partial_result(
@@ -154,7 +170,7 @@ impl HashAggFinalWorker {
     /// Appends finalized results to `result`, flushing whenever `result.is_full()`. Returns
     /// `Some(result)` with the remaining unflushed chunk, or `None` if `finish_ch` closed
     /// while waiting for a fresh result holder.
-    // go: HashAggFinalWorker.generateResultAndSend L2 (async: CheckpointStride in output loop per spec §4.7; finishCh-aware sends; returns Result so #384 ruling can switch to propagating AppendFinalResult2Chunk errors)
+    // go: HashAggFinalWorker.generateResultAndSend L2 (async: CheckpointStride with KillerHook M-KILL per spec §4.7; finishCh-aware sends; R21 / #384: propagates AppendFinalResult2Chunk errors instead of swallowing them)
     async fn generate_result_and_send(
         &mut self,
         mut result: Chunk,
@@ -169,20 +185,17 @@ impl HashAggFinalWorker {
                 0,
             ),
         );
+        let killer = self.sql_killer.clone();
+        let kill_hook = KillerHook(&killer);
         for (_, mut results) in map.m.drain() {
-            let Ok(()) = stride.checkpoint(&()).await;
+            stride.checkpoint(&kill_hook).await?;
             let eval_ctx = &*self.eval_ctx;
             for (j, af) in self.base.agg_funcs.iter().enumerate() {
-                let res = nil_agg_func(af).and_then(|f| {
-                    f.append_final_result2_chunk(eval_ctx, &mut results[j], &mut result)
-                });
-                if let Err(err) = res {
-                    // Pending owner ruling on #384: Go v8.5.8 logs and continues here, which
-                    // misaligns chunk columns when AppendFinalResult2Chunk fails. To propagate
-                    // the error (matching unparallelExec and StreamAggExec), replace the log
-                    // below with `return Err(err);`.
-                    log::error!("HashAggFinalWorker failed to append final result to Chunk: {err}");
-                }
+                let f = nil_agg_func(af)?;
+                // Ruling R21 (#384, owner 2026-11-25): propagate AppendFinalResult2Chunk errors
+                // instead of Go v8.5.8's log-and-continue (which misaligns chunk columns or
+                // panics on out-of-range reads), matching unparallelExec and StreamAggExec.
+                f.append_final_result2_chunk(eval_ctx, &mut results[j], &mut result)?;
             }
 
             if self.base.agg_funcs.is_empty() {
@@ -231,7 +244,6 @@ impl HashAggFinalWorker {
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    self.spill_helper.set_error();
                     tokio::select! {
                         _ = wait_finish(&mut self.base.finish_ch) => {}
                         _ = self.output_tx.send(AfFinalResult::err(err)) => {}

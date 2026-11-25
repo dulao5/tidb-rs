@@ -403,11 +403,16 @@ impl Executor for HashAggExec {
             // any remaining task (spec §4.4).
             let mut returned_input_rx: Option<mpsc::Receiver<HashAggInput>> = None;
             if let Some(h) = self.tasks.fetcher.as_mut() {
-                if let Ok((child, input_rx)) = h.await {
-                    let mut children = self.base.base.meta.take_all_children();
-                    children.insert(0, child);
-                    self.base.base.meta.set_all_children(children);
-                    returned_input_rx = Some(input_rx);
+                match h.await {
+                    Ok((child, input_rx)) => {
+                        let mut children = self.base.base.meta.take_all_children();
+                        children.insert(0, child);
+                        self.base.base.meta.set_all_children(children);
+                        returned_input_rx = Some(input_rx);
+                    }
+                    Err(join_err) => {
+                        log::error!("HashAggExec fetcher task failed to join: {join_err}");
+                    }
                 }
                 self.tasks.fetcher = None;
             }
@@ -495,6 +500,11 @@ impl HashAggExec {
     /// OpenSelf just opens the hash aggregation executor.
     // go: HashAggExec.OpenSelf L2 (A1: tracker and TrackedAlloc set up at construction; resets tracker before init)
     pub fn open_self(&mut self, ctx: &ExecCtx) -> Result<(), Error> {
+        if self.base.base.meta.children_len() == 0 {
+            return Err(Error::plain(
+                "HashAggExec child executor missing after aborted task",
+            ));
+        }
         self.prepared = false;
         self.runtime_stats_coll = ctx.stmt.runtime_stats_coll.clone();
 
@@ -776,6 +786,7 @@ impl HashAggExec {
                 final_result_holder_tx: holder_tx,
                 spill_helper: Arc::clone(&spill_helper),
                 eval_ctx: Arc::clone(&self.eval_ctx),
+                sql_killer: self.base.base.killer.clone(),
             };
             self.final_workers.push(worker);
             self.checkpoint_mem()?;
@@ -1250,7 +1261,7 @@ impl HashAggExec {
                     }
                     self.cursor4_group_key += 1;
                 }
-                self.reset_spill_mode()?;
+                self.reset_spill_mode();
             }
             if self.executed {
                 return Ok(());
@@ -1278,8 +1289,8 @@ impl HashAggExec {
         }
     }
 
-    // go: HashAggExec.resetSpillMode L2 (A1: drops old tracked containers instead of ReplaceBytesUsed)
-    fn reset_spill_mode(&mut self) -> Result<(), Error> {
+    // go: HashAggExec.resetSpillMode L2 (A1: drops old tracked containers and flushes without OOM checkpoint, matching Go ReplaceBytesUsed)
+    fn reset_spill_mode(&mut self) {
         self.cursor4_group_key = 0;
         self.drop_unparallel_tracked_state();
         let alloc = self.col_alloc();
@@ -1296,9 +1307,8 @@ impl HashAggExec {
         // No data is spilling again, all data have been processed.
         self.executed = self.num_of_spilled_chks == num_chunks;
         self.num_of_spilled_chks = num_chunks;
-        self.checkpoint_mem()?;
+        self.alloc.flush();
         self.in_spill_mode.store(0, Ordering::SeqCst);
-        Ok(())
     }
 
     /// execute fetches Chunks from src and updates each aggregate function for each row in Chunk.

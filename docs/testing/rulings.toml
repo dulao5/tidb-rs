@@ -307,3 +307,17 @@ rationale = "宪章第一条 2 的例外：Go 的缓存产生错误结果（-1�
 approver = "zhigang-du"
 approved = "2026-11-25"
 reopen = "基线升级到不再缓存列定义的版本，或负责人决定照 Go"
+
+[[ruling]]
+id = "R21"
+name = "parallel-hashagg-propagate-append-final-error"
+class = "divergence"
+plane = "error"
+layer = "none"
+test = "crates/executor/src/aggregate/tests.rs::hash_agg_parallel_propagates_decimal_append_final_error"
+source = "#384（upstream-pitfall）；负责人 2026-11-25 在 Raft 上的裁定（选 A）"
+evidence = "Go v8.5.8 的 HashAggFinalWorker.generateResultAndSend（pkg/executor/aggregate/agg_hash_final_worker.go:125-129）对 AppendFinalResult2Chunk 返回的错误只记日志、继续执行，不往该列追加单元格，导致多分组时各列错位（静默错误结果且结果随 map 顺序变化）或单分组/越界时 panic（runtime error: index out of range）；单线程 HashAggExec.unparallelExec 和 StreamAggExec.appendResult2Chunk 均返回该错误。tidb-rs 在并行 HashAgg 同样将该错误经 finalOutputCh 返回给语句，不错位、不 panic"
+rationale = "宪章第一条 2 的例外：Go 吞掉输出错误导致静默结果错位或 panic，负责人裁定照单线程与 StreamAgg 返回错误"
+approver = "zhigang-du"
+approved = "2026-11-25"
+reopen = "基线升级到并行 HashAgg 返回 AppendFinalResult2Chunk 错误的版本，或负责人决定照 Go；聚合接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"

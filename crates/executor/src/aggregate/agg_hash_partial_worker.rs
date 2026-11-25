@@ -44,6 +44,14 @@ use super::agg_util::{
     update_exec_time, update_wait_time, update_worker_time,
 };
 
+/// Distinguishes regular evaluation/aggregation errors from A1 memory-quota checkpoint errors
+/// inside `HashAggPartialWorker` so memory-quota errors follow Go's `Consume` panic →
+/// `recoveryHashAgg` path (no `setError`, does not set `has_error`) per spec §4.5.
+enum PartialUpdateErr {
+    Regular(Error),
+    MemQuota(Error),
+}
+
 /// `HashAggPartialWorker` indicates the partial workers of parallel hash agg execution,
 /// the number of which is controlled by `tidb_hashagg_partial_concurrency`.
 pub struct HashAggPartialWorker {
@@ -128,10 +136,23 @@ impl HashAggPartialWorker {
 
         let exec_start = Instant::now();
         let final_concurrency = self.partial_results_map.len();
-        if let Err(err) = self.update_partial_result(ctx, final_concurrency) {
-            *has_error = true;
-            self.process_error(err).await;
-            return false;
+        match self.update_partial_result(ctx, final_concurrency) {
+            Ok(()) => {}
+            Err(PartialUpdateErr::Regular(err)) => {
+                *has_error = true;
+                self.process_error(err).await;
+                return false;
+            }
+            Err(PartialUpdateErr::MemQuota(err)) => {
+                // Go's Consume panics and is recovered by recoveryHashAgg: reports the error
+                // to globalOutputCh without calling spillHelper.setError() or setting hasError
+                // (consistent with fetchChildData and spec §4.5).
+                tokio::select! {
+                    _ = wait_finish(&mut self.base.finish_ch) => {}
+                    _ = self.global_output_tx.send(AfFinalResult::err(err)) => {}
+                }
+                return false;
+            }
         }
         update_exec_time(self.base.stats.as_deref(), exec_start);
 
@@ -216,7 +237,10 @@ impl HashAggPartialWorker {
     /// If the group key has appeared before, reuse its partial result; otherwise allocate
     /// empty partial results in the target final worker's map.
     // go: HashAggPartialWorker.getPartialResultsOfEachRow L2 (A1 TrackedAlloc checkpoint; returns Result for nil AggFunc/quota; stores target final-worker indices)
-    fn get_partial_results_of_each_row(&mut self, final_concurrency: usize) -> Result<(), Error> {
+    fn get_partial_results_of_each_row(
+        &mut self,
+        final_concurrency: usize,
+    ) -> Result<(), PartialUpdateErr> {
         let num_rows = self.group_key_buf.len();
         self.partial_results_buffer.clear();
         let alloc = ColAlloc::Tracked(self.base.alloc.clone());
@@ -239,7 +263,11 @@ impl HashAggPartialWorker {
             let mut prs: AllocVec<PartialResult, ColAlloc> =
                 AllocVec::with_capacity_in(self.partial_result_num_in_row, alloc.clone());
             for af in &self.base.agg_funcs {
-                prs.push(nil_agg_func(af)?.alloc_partial_result());
+                prs.push(
+                    nil_agg_func(af)
+                        .map_err(PartialUpdateErr::Regular)?
+                        .alloc_partial_result(),
+                );
             }
             let key_box = tracked_key_box(key, alloc.clone());
             self.partial_results_map[final_worker_idx].set(key_box, prs);
@@ -247,7 +275,10 @@ impl HashAggPartialWorker {
 
         if any_new {
             self.base.alloc.flush();
-            self.base.mem_tracker.checkpoint()?;
+            self.base
+                .mem_tracker
+                .checkpoint()
+                .map_err(PartialUpdateErr::MemQuota)?;
         }
         Ok(())
     }
@@ -257,7 +288,7 @@ impl HashAggPartialWorker {
         &mut self,
         ctx: &ExecCtx,
         final_concurrency: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<(), PartialUpdateErr> {
         let _old_mem = get_group_key_mem_usage(&self.group_key_buf);
         let buf = std::mem::take(&mut self.group_key_buf);
         let loc = ctx.stmt.time_zone();
@@ -277,11 +308,17 @@ impl HashAggPartialWorker {
             Ok(gk) => {
                 self.group_key_buf = gk;
                 let _new_mem = get_group_key_mem_usage(&self.group_key_buf);
-                self.base.mem_tracker.checkpoint()?;
+                self.base
+                    .mem_tracker
+                    .checkpoint()
+                    .map_err(PartialUpdateErr::MemQuota)?;
             }
             Err(err) => {
-                self.base.mem_tracker.checkpoint()?;
-                return Err(err);
+                self.base
+                    .mem_tracker
+                    .checkpoint()
+                    .map_err(PartialUpdateErr::MemQuota)?;
+                return Err(PartialUpdateErr::Regular(err));
             }
         }
 
@@ -298,17 +335,23 @@ impl HashAggPartialWorker {
                 .expect("get_partial_results_of_each_row inserted key");
             let rows = [self.chk.get_row(i)];
             for (j, af) in self.base.agg_funcs.iter().enumerate() {
-                nil_agg_func(af)?.update_partial_result(
-                    eval_ctx,
-                    &self.eval_state,
-                    &rows,
-                    &mut partial_result[j],
-                )?;
+                nil_agg_func(af)
+                    .map_err(PartialUpdateErr::Regular)?
+                    .update_partial_result(
+                        eval_ctx,
+                        &self.eval_state,
+                        &rows,
+                        &mut partial_result[j],
+                    )
+                    .map_err(PartialUpdateErr::Regular)?;
             }
         }
 
         self.base.alloc.flush();
-        self.base.mem_tracker.checkpoint()
+        self.base
+            .mem_tracker
+            .checkpoint()
+            .map_err(PartialUpdateErr::MemQuota)
     }
 
     // go: HashAggPartialWorker.shuffleIntermData L2 (async mpsc send with finishCh select, M-CH)
@@ -328,10 +371,10 @@ impl HashAggPartialWorker {
 
     // go: HashAggPartialWorker.processError L2 (async mpsc send with finishCh select, M-CH)
     pub(crate) async fn process_error(&mut self, err: Error) {
-        self.spill_helper.set_error();
         tokio::select! {
             _ = wait_finish(&mut self.base.finish_ch) => {}
             _ = self.global_output_tx.send(AfFinalResult::err(err)) => {}
         }
+        self.spill_helper.set_error();
     }
 }
