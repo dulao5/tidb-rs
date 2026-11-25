@@ -18,8 +18,14 @@ pub mod func_avg;
 pub mod func_bitfuncs;
 pub mod func_count;
 pub mod func_first_row;
+pub mod func_json_arrayagg;
+pub mod func_json_objectagg;
 pub mod func_max_min;
+pub mod func_stddevpop;
+pub mod func_stddevsamp;
 pub mod func_sum;
+pub mod func_varpop;
+pub mod func_varsamp;
 
 pub use aggfuncs::{
     AggFunc, AggFuncUpdateContext, AggPartialResultMapper, BaseAggFunc, PartialResult,

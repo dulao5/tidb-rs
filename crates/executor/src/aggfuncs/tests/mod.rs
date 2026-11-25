@@ -18,6 +18,8 @@
 // Go identifiers for the type constants in patterns (M-GONAME).
 #![allow(non_upper_case_globals)]
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tidb_base::Error;
@@ -37,6 +39,7 @@ use tidb_expression::{Column, Expr, ExprRef};
 use tidb_kv::set::new_string_set_with_memory_usage;
 use tidb_memory::TrackedAlloc;
 use tidb_memory::tracker::new_tracker;
+use tidb_parser::gocharset::CharsetBin;
 use tidb_parser::types::FieldType;
 use tidb_sessionctx::exprstatic as es;
 use tidb_types::collate::get_collator;
@@ -47,7 +50,10 @@ use tidb_types::datum::{
 };
 use tidb_types::enum_type::{parse_enum, parse_enum_name, parse_enum_value};
 use tidb_types::field_type::new_field_type;
-use tidb_types::json::{JSONValue, create_binary_json};
+use tidb_types::json::{
+    ErrInvalidJSONCharset, ErrJSONDocumentNULLKey, ErrUnsupportedSecondArgumentType, JSONValue,
+    Opaque, create_binary_json,
+};
 use tidb_types::mydecimal::new_dec_from_int;
 use tidb_types::set_type::{parse_set, parse_set_name, parse_set_value};
 use tidb_types::time::{Duration, time_from_days};
@@ -241,15 +247,15 @@ fn assert_datum_eq(ec: &dyn EvalContext, got: &Datum, want: &Datum, collate: &st
     assert_eq!(cmp, 0, "{got:?} != {want:?}");
 }
 
-// testAggFunc (aggfunc_test.go).
-fn test_agg_func(p: &AggTest) {
+// testAggFuncWithoutDistinct (aggfunc_test.go).
+fn test_agg_func_without_distinct(p: &AggTest) {
     let ctx = es::new_expr_context(vec![]);
     let ec = ctx.get_eval_ctx();
     let ec: &dyn EvalContext = &*ec;
     let args = vec![column(&p.data_type, 0)];
     let collate = p.data_type.get_collate();
 
-    let desc = new_agg_func_desc(&*ctx, p.func_name, args.clone(), false).unwrap();
+    let desc = new_agg_func_desc(&*ctx, p.func_name, args, false).unwrap();
     let final_func = built(&ctx, &desc);
     let mut final_pr = final_func.alloc_partial_result();
     let src = gen_src_chk(p);
@@ -262,6 +268,17 @@ fn test_agg_func(p: &AggTest) {
     final_func.reset_partial_result(&mut final_pr);
     let dt = final_datum(ec, &*final_func, &mut final_pr, &desc.ret_tp);
     assert_datum_eq(ec, &dt, &p.results[0], collate);
+}
+
+// testAggFunc (aggfunc_test.go).
+fn test_agg_func(p: &AggTest) {
+    test_agg_func_without_distinct(p);
+
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let args = vec![column(&p.data_type, 0)];
+    let collate = p.data_type.get_collate();
 
     // test the agg func with distinct
     let desc = new_agg_func_desc(&*ctx, p.func_name, args, true).unwrap();
@@ -296,8 +313,11 @@ fn test_multi_args_agg_func(p: &MultiArgsAggTest) {
     let final_func = built(&ctx, &desc);
     let mut final_pr = final_func.alloc_partial_result();
     let src = gen_multi_src_chk(p);
-    // Go ignores the update errors (its FIXME); COUNT has none.
-    update_each(ec, &*final_func, &rows(&src), &mut final_pr).unwrap();
+    let st = EvalState::new();
+    for row in rows(&src) {
+        // As Go's FIXME: JSON_OBJECTAGG rejects the trailing NULL key row from genSrcChk.
+        let _ = final_func.update_partial_result(ec, &st, &[row], &mut final_pr);
+    }
     let dt = final_datum(ec, &*final_func, &mut final_pr, &desc.ret_tp);
     assert_datum_eq(ec, &dt, &p.results[1], collate);
 
@@ -306,10 +326,22 @@ fn test_multi_args_agg_func(p: &MultiArgsAggTest) {
     let dt = final_datum(ec, &*final_func, &mut final_pr, &desc.ret_tp);
     assert_datum_eq(ec, &dt, &p.results[0], collate);
 
-    // test the agg func with distinct: COUNT(DISTINCT) is part B1.
+    // test the agg func with distinct
     let desc = new_agg_func_desc(&*ctx, p.func_name, args, true).unwrap();
-    assert_eq!(p.func_name, ast::AggFuncCount);
-    assert_blocked(build(&*ctx, &desc, 0));
+    if p.func_name == ast::AggFuncCount {
+        assert_blocked(build(&*ctx, &desc, 0));
+        return;
+    }
+    let final_func = built(&ctx, &desc);
+    let mut final_pr = final_func.alloc_partial_result();
+    for _ in 0..2 {
+        let src = gen_multi_src_chk(p);
+        for row in rows(&src) {
+            let _ = final_func.update_partial_result(ec, &st, &[row], &mut final_pr);
+        }
+    }
+    let dt = final_datum(ec, &*final_func, &mut final_pr, &desc.ret_tp);
+    assert_datum_eq(ec, &dt, &p.results[1], collate);
 }
 
 // testMergePartialResult (aggfunc_test.go).
@@ -329,12 +361,17 @@ fn test_merge_partial_result(p: &AggTest) {
     // build final func for final phase.
     let final_func = built(&ctx, &final_desc);
     let mut final_pr = final_func.alloc_partial_result();
+    let out_ft = if p.func_name == ast::AggFuncJsonArrayagg {
+        new_field_type(TypeJSON)
+    } else {
+        p.data_type.clone()
+    };
 
     // update partial result.
     let src = gen_src_chk(p);
     update_each(ec, &*partial_func, &rows(&src), &mut partial_result).unwrap();
     drop(src);
-    let dt = final_datum(ec, &*partial_func, &mut partial_result, &p.data_type);
+    let dt = final_datum(ec, &*partial_func, &mut partial_result, &out_ft);
     assert_datum_eq(ec, &dt, &p.results[0], collate);
 
     final_func
@@ -345,13 +382,63 @@ fn test_merge_partial_result(p: &AggTest) {
     let src = gen_src_chk(p);
     update_each(ec, &*partial_func, &rows(&src)[2..], &mut partial_result).unwrap();
     drop(src);
-    let dt = final_datum(ec, &*partial_func, &mut partial_result, &p.data_type);
+    let dt = final_datum(ec, &*partial_func, &mut partial_result, &out_ft);
     assert_datum_eq(ec, &dt, &p.results[1], collate);
     final_func
         .merge_partial_result(ec, &mut partial_result, &mut final_pr)
         .unwrap();
 
-    let dt = final_datum(ec, &*final_func, &mut final_pr, &p.data_type);
+    let dt = final_datum(ec, &*final_func, &mut final_pr, &out_ft);
+    assert_datum_eq(ec, &dt, &p.results[2], collate);
+}
+
+// testMultiArgsMergePartialResult (aggfunc_test.go).
+fn test_multi_args_merge_partial_result(p: &MultiArgsAggTest, ret_tp: &FieldType) {
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let args: Vec<ExprRef> = p
+        .data_types
+        .iter()
+        .enumerate()
+        .map(|(k, ft)| column(ft, k as isize))
+        .collect();
+    let desc = new_agg_func_desc(&*ctx, p.func_name, args.clone(), false).unwrap();
+    let collate = args[0].get_type(ec).get_collate();
+    let (partial_desc, final_desc) = desc.split(&[0, 1]);
+
+    let partial_func = built(&ctx, &partial_desc);
+    let mut partial_result = partial_func.alloc_partial_result();
+
+    let final_func = built(&ctx, &final_desc);
+    let mut final_pr = final_func.alloc_partial_result();
+    let st = EvalState::new();
+
+    let src = gen_multi_src_chk(p);
+    for row in rows(&src) {
+        let _ = partial_func.update_partial_result(ec, &st, &[row], &mut partial_result);
+    }
+    drop(src);
+    let dt = final_datum(ec, &*partial_func, &mut partial_result, ret_tp);
+    assert_datum_eq(ec, &dt, &p.results[0], collate);
+
+    final_func
+        .merge_partial_result(ec, &mut partial_result, &mut final_pr)
+        .unwrap();
+    partial_func.reset_partial_result(&mut partial_result);
+
+    let src = gen_multi_src_chk(p);
+    for row in &rows(&src)[2..] {
+        let _ = partial_func.update_partial_result(ec, &st, &[*row], &mut partial_result);
+    }
+    drop(src);
+    let dt = final_datum(ec, &*partial_func, &mut partial_result, ret_tp);
+    assert_datum_eq(ec, &dt, &p.results[1], collate);
+
+    final_func
+        .merge_partial_result(ec, &mut partial_result, &mut final_pr)
+        .unwrap();
+    let dt = final_datum(ec, &*final_func, &mut final_pr, ret_tp);
     assert_datum_eq(ec, &dt, &p.results[2], collate);
 }
 
@@ -826,4 +913,502 @@ fn original_functions_merge_nothing() {
         &new_int_datum(5),
         "binary",
     );
+}
+
+// TestMergePartialResult4Varpop (func_varpop_test.go).
+#[test]
+fn merge_partial_result_varpop() {
+    let f = new_float64_datum;
+    test_merge_partial_result(&agg_tester(
+        ast::AggFuncVarPop,
+        TypeDouble,
+        5,
+        vec![
+            f(2.0),
+            f(2.0 / 3.0),
+            f(59.0 / 8.0 - (19.0 * 19.0) / (8.0 * 8.0)),
+        ],
+    ));
+}
+
+// TestVarpop (func_varpop_test.go).
+#[test]
+fn varpop() {
+    test_agg_func(&agg_tester(
+        ast::AggFuncVarPop,
+        TypeDouble,
+        5,
+        vec![null(), new_float64_datum(2.0)],
+    ));
+}
+
+// TestMergePartialResult4Varsamp (func_varsamp_test.go).
+#[test]
+fn merge_partial_result_varsamp() {
+    let f = new_float64_datum;
+    test_merge_partial_result(&agg_tester(
+        ast::AggFuncVarSamp,
+        TypeDouble,
+        5,
+        vec![f(2.5), f(1.0), f(1.9821428571428572)],
+    ));
+}
+
+// TestVarsamp (func_varsamp_test.go).
+#[test]
+fn varsamp() {
+    test_agg_func(&agg_tester(
+        ast::AggFuncVarSamp,
+        TypeDouble,
+        5,
+        vec![null(), new_float64_datum(2.5)],
+    ));
+}
+
+// TestMergePartialResult4Stddevpop (func_stddevpop_test.go).
+#[test]
+fn merge_partial_result_stddevpop() {
+    let f = new_float64_datum;
+    test_merge_partial_result(&agg_tester(
+        ast::AggFuncStddevPop,
+        TypeDouble,
+        5,
+        vec![
+            f(std::f64::consts::SQRT_2),
+            f(0.816496580927726),
+            f(1.3169567191065923),
+        ],
+    ));
+}
+
+// TestStddevpop (func_stddevpop_test.go).
+#[test]
+fn stddevpop() {
+    test_agg_func(&agg_tester(
+        ast::AggFuncStddevPop,
+        TypeDouble,
+        5,
+        vec![null(), new_float64_datum(std::f64::consts::SQRT_2)],
+    ));
+}
+
+// TestMergePartialResult4Stddevsamp (func_stddevsamp_test.go).
+#[test]
+fn merge_partial_result_stddevsamp() {
+    let f = new_float64_datum;
+    test_merge_partial_result(&agg_tester(
+        ast::AggFuncStddevSamp,
+        TypeDouble,
+        5,
+        vec![f(1.5811388300841898), f(1.0), f(1.407885953173359)],
+    ));
+}
+
+// TestStddevsamp (func_stddevsamp_test.go).
+#[test]
+fn stddevsamp() {
+    test_agg_func(&agg_tester(
+        ast::AggFuncStddevSamp,
+        TypeDouble,
+        5,
+        vec![null(), new_float64_datum(1.5811388300841898)],
+    ));
+}
+
+// Single-row VAR_SAMP / STDDEV_SAMP returns NULL (count <= 1), while VAR_POP / STDDEV_POP returns 0.
+#[test]
+fn var_stddev_single_row_and_distinct() {
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let ft = new_field_type(TypeDouble);
+    for distinct in [false, true] {
+        for (name, expect_null) in [
+            (ast::AggFuncVarPop, false),
+            (ast::AggFuncStddevPop, false),
+            (ast::AggFuncVarSamp, true),
+            (ast::AggFuncStddevSamp, true),
+        ] {
+            let desc = new_agg_func_desc(&*ctx, name, vec![column(&ft, 0)], distinct).unwrap();
+            let f = built(&ctx, &desc);
+            let mut pr = f.alloc_partial_result();
+            let mut chk = new_chunk_with_capacity(std::slice::from_ref(&ft), 2);
+            chk.append_float64(0, 42.0);
+            if distinct {
+                chk.append_float64(0, 42.0);
+            }
+            update_each(ec, &*f, &rows(&chk), &mut pr).unwrap();
+            let dt = final_datum(ec, &*f, &mut pr, &desc.ret_tp);
+            if expect_null {
+                assert!(dt.is_null(), "{name} distinct={distinct}: expected NULL");
+            } else {
+                assert_datum_eq(ec, &dt, &new_float64_datum(0.0), ft.get_collate());
+            }
+        }
+    }
+}
+
+// getJSONValue (func_json_objectagg_test.go).
+fn test_json_value(d: &Datum, ft: &FieldType) -> JSONValue<'static> {
+    if ft.get_type() == TypeString && ft.get_charset() == CharsetBin {
+        let mut buf = vec![0u8; ft.get_flen() as usize];
+        let src = d.get_bytes();
+        let n = src.len().min(buf.len());
+        buf[..n].copy_from_slice(&src[..n]);
+        return JSONValue::Opaque(Opaque {
+            type_code: TypeString,
+            buf: Cow::Owned(buf),
+        });
+    }
+    match ft.get_type() {
+        TypeLonglong => JSONValue::Int64(d.get_int64()),
+        TypeFloat => JSONValue::Float64(f64::from(d.get_float32())),
+        TypeDouble => JSONValue::Float64(d.get_float64()),
+        TypeString => JSONValue::String(d.get_bytes().to_vec()),
+        TypeJSON => JSONValue::BinaryJSON(d.get_mysql_json().into_owned()),
+        TypeDate => JSONValue::Time(d.get_mysql_time()),
+        TypeDuration => JSONValue::Duration(d.get_mysql_duration()),
+        tp => panic!("unexpected json test type {tp}"),
+    }
+}
+
+// TestMergePartialResult4JsonArrayagg (func_json_arrayagg_test.go).
+#[test]
+fn merge_partial_result_json_arrayagg() {
+    let type_list = [
+        TypeLonglong,
+        TypeDouble,
+        TypeFloat,
+        TypeString,
+        TypeJSON,
+        TypeDate,
+        TypeDuration,
+    ];
+    let num_rows = 5;
+    for arg_type in type_list {
+        let arg_ft = new_field_type(arg_type);
+        let mut entries1 = Vec::new();
+        for m in 0..num_rows {
+            entries1.push(test_json_value(&data_gen(&arg_ft, m), &arg_ft));
+        }
+        entries1.push(JSONValue::Nil);
+
+        let mut entries2 = Vec::new();
+        for m in 2..num_rows {
+            entries2.push(test_json_value(&data_gen(&arg_ft, m), &arg_ft));
+        }
+        entries2.push(JSONValue::Nil);
+
+        let mut entries3 = entries1.clone();
+        entries3.extend(entries2.iter().cloned());
+
+        test_merge_partial_result(&agg_tester(
+            ast::AggFuncJsonArrayagg,
+            arg_type,
+            num_rows,
+            vec![
+                new_json_datum(create_binary_json(JSONValue::Array(entries1))),
+                new_json_datum(create_binary_json(JSONValue::Array(entries2))),
+                new_json_datum(create_binary_json(JSONValue::Array(entries3))),
+            ],
+        ));
+    }
+}
+
+// TestJsonArrayagg (func_json_arrayagg_test.go).
+#[test]
+fn json_arrayagg() {
+    let type_list = [
+        TypeLonglong,
+        TypeDouble,
+        TypeFloat,
+        TypeString,
+        TypeJSON,
+        TypeDate,
+        TypeDuration,
+    ];
+    let num_rows = 5;
+    for arg_type in type_list {
+        let arg_ft = new_field_type(arg_type);
+        let mut entries = Vec::new();
+        for m in 0..num_rows {
+            entries.push(test_json_value(&data_gen(&arg_ft, m), &arg_ft));
+        }
+        entries.push(JSONValue::Nil);
+
+        test_agg_func_without_distinct(&agg_tester(
+            ast::AggFuncJsonArrayagg,
+            arg_type,
+            num_rows,
+            vec![
+                null(),
+                new_json_datum(create_binary_json(JSONValue::Array(entries))),
+            ],
+        ));
+    }
+}
+
+fn json_objectagg_types() -> Vec<FieldType> {
+    let mut bin_str = new_field_type(TypeString);
+    bin_str.set_flen(10);
+    bin_str.set_charset(CharsetBin);
+    vec![
+        new_field_type(TypeLonglong),
+        new_field_type(TypeDouble),
+        new_field_type(TypeFloat),
+        new_field_type(TypeString),
+        new_field_type(TypeJSON),
+        bin_str,
+        new_field_type(TypeDate),
+        new_field_type(TypeDuration),
+    ]
+}
+
+// TestMergePartialResult4JsonObjectagg (func_json_objectagg_test.go).
+#[test]
+fn merge_partial_result_json_objectagg() {
+    let type_list = json_objectagg_types();
+    let num_rows = 5;
+    let json_ft = new_field_type(TypeJSON);
+    for key_ft in &type_list {
+        if key_ft.get_charset() == CharsetBin {
+            continue;
+        }
+        for val_ft in &type_list {
+            let mut entries1 = BTreeMap::new();
+            let mut entries2 = BTreeMap::new();
+            for m in 0..num_rows {
+                let first = data_gen(key_ft, m);
+                let second = data_gen(val_ft, m);
+                let key = first.to_string().unwrap();
+                entries1.insert(key, test_json_value(&second, val_ft));
+            }
+            for m in 2..num_rows {
+                let first = data_gen(key_ft, m);
+                let second = data_gen(val_ft, m);
+                let key = first.to_string().unwrap();
+                entries2.insert(key, test_json_value(&second, val_ft));
+            }
+            let p = MultiArgsAggTest {
+                data_types: vec![key_ft.clone(), val_ft.clone()],
+                num_rows,
+                func_name: ast::AggFuncJsonObjectAgg,
+                results: vec![
+                    new_json_datum(create_binary_json(JSONValue::Object(entries1.clone()))),
+                    new_json_datum(create_binary_json(JSONValue::Object(entries2))),
+                    new_json_datum(create_binary_json(JSONValue::Object(entries1))),
+                ],
+            };
+            test_multi_args_merge_partial_result(&p, &json_ft);
+        }
+    }
+}
+
+// TestJsonObjectagg (func_json_objectagg_test.go).
+#[test]
+fn json_objectagg() {
+    let type_list = json_objectagg_types();
+    let num_rows = 5;
+    for key_ft in &type_list {
+        if key_ft.get_charset() == CharsetBin {
+            continue;
+        }
+        for val_ft in &type_list {
+            let mut entries = BTreeMap::new();
+            for m in 0..num_rows {
+                let first = data_gen(key_ft, m);
+                let second = data_gen(val_ft, m);
+                let key = first.to_string().unwrap();
+                entries.insert(key, test_json_value(&second, val_ft));
+            }
+            let p = MultiArgsAggTest {
+                data_types: vec![key_ft.clone(), val_ft.clone()],
+                num_rows,
+                func_name: ast::AggFuncJsonObjectAgg,
+                results: vec![
+                    null(),
+                    new_json_datum(create_binary_json(JSONValue::Object(entries))),
+                ],
+            };
+            test_multi_args_agg_func(&p);
+        }
+    }
+}
+
+// Error paths of JSON_OBJECTAGG (NULL key, binary charset key, unsupported value type) and
+// JSON_ARRAYAGG (unsupported value type).
+#[test]
+fn json_agg_error_paths() {
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let st = EvalState::new();
+
+    // 1. NULL key -> ErrJSONDocumentNULLKey
+    let str_ft = new_field_type(TypeString);
+    let int_ft = new_field_type(TypeLonglong);
+    let desc = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncJsonObjectAgg,
+        vec![column(&str_ft, 0), column(&int_ft, 1)],
+        false,
+    )
+    .unwrap();
+    let f = built(&ctx, &desc);
+    let mut pr = f.alloc_partial_result();
+    let mut chk = new_chunk_with_capacity(&[str_ft.clone(), int_ft.clone()], 1);
+    chk.append_null(0);
+    chk.append_int64(1, 1);
+    let err = f
+        .update_partial_result(ec, &st, &rows(&chk), &mut pr)
+        .unwrap_err();
+    assert!(ErrJSONDocumentNULLKey.equal(&err), "{err:?}");
+
+    // 2. Binary charset key -> ErrInvalidJSONCharset
+    let mut bin_ft = new_field_type(TypeString);
+    bin_ft.set_charset(CharsetBin);
+    let desc = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncJsonObjectAgg,
+        vec![column(&bin_ft, 0), column(&int_ft, 1)],
+        false,
+    )
+    .unwrap();
+    let f = built(&ctx, &desc);
+    let mut pr = f.alloc_partial_result();
+    let mut chk = new_chunk_with_capacity(&[bin_ft, int_ft], 1);
+    chk.append_bytes(0, b"k");
+    chk.append_int64(1, 1);
+    let err = f
+        .update_partial_result(ec, &st, &rows(&chk), &mut pr)
+        .unwrap_err();
+    assert!(ErrInvalidJSONCharset.equal(&err), "{err:?}");
+
+    // 3. Unsupported value type (Enum) -> ErrUnsupportedSecondArgumentType
+    let enum_ft = new_field_type(TypeEnum);
+    for name in [ast::AggFuncJsonArrayagg, ast::AggFuncJsonObjectAgg] {
+        let args = if name == ast::AggFuncJsonArrayagg {
+            vec![column(&enum_ft, 0)]
+        } else {
+            vec![column(&str_ft, 0), column(&enum_ft, 1)]
+        };
+        let desc = new_agg_func_desc(&*ctx, name, args, false).unwrap();
+        let f = built(&ctx, &desc);
+        let mut pr = f.alloc_partial_result();
+        let chk = if name == ast::AggFuncJsonArrayagg {
+            let mut c = new_chunk_with_capacity(std::slice::from_ref(&enum_ft), 1);
+            c.append_datum(0, &data_gen(&enum_ft, 0));
+            c
+        } else {
+            let mut c = new_chunk_with_capacity(&[str_ft.clone(), enum_ft.clone()], 1);
+            c.append_string(0, b"k");
+            c.append_datum(1, &data_gen(&enum_ft, 0));
+            c
+        };
+        let err = f
+            .update_partial_result(ec, &st, &rows(&chk), &mut pr)
+            .unwrap_err();
+        assert!(
+            ErrUnsupportedSecondArgumentType.equal(&err),
+            "{name}: {err:?}"
+        );
+    }
+}
+
+// TestMemVarpop / TestMemJsonArrayagg / TestMemJsonObjectagg (A1 property tests, spec §5.3):
+// growing partial results account through ColAlloc / TrackedAlloc and release on drop.
+#[test]
+fn var_stddev_and_json_agg_memory_accounted() {
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+
+    // 1. VAR_POP / VAR_SAMP / STDDEV_POP / STDDEV_SAMP DISTINCT
+    let dbl_ft = new_field_type(TypeDouble);
+    for name in [
+        ast::AggFuncVarPop,
+        ast::AggFuncVarSamp,
+        ast::AggFuncStddevPop,
+        ast::AggFuncStddevSamp,
+    ] {
+        let desc = new_agg_func_desc(&*ctx, name, vec![column(&dbl_ft, 0)], true).unwrap();
+        let t = new_tracker(1, -1);
+        {
+            let a = TrackedAlloc::new(Arc::clone(&t));
+            let mut f = built(&ctx, &desc);
+            f.set_alloc(ColAlloc::Tracked(a.clone()));
+            let mut pr = f.alloc_partial_result();
+            let p = agg_tester(name, TypeDouble, 1000, vec![]);
+            let src = gen_src_chk(&p);
+            update_each(ec, &*f, &rows(&src), &mut pr).unwrap();
+            a.flush();
+            assert!(
+                t.bytes_consumed() > 0,
+                "{name} DISTINCT: no growth accounted"
+            );
+            f.reset_partial_result(&mut pr);
+            update_each(ec, &*f, &rows(&src), &mut pr).unwrap();
+            a.flush();
+            assert!(t.bytes_consumed() > 0);
+        }
+        assert_eq!(
+            t.bytes_consumed(),
+            0,
+            "{name} DISTINCT: memory not returned"
+        );
+    }
+
+    // 2. JSON_ARRAYAGG
+    let int_ft = new_field_type(TypeLonglong);
+    let desc = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncJsonArrayagg,
+        vec![column(&int_ft, 0)],
+        false,
+    )
+    .unwrap();
+    let t = new_tracker(1, -1);
+    {
+        let a = TrackedAlloc::new(Arc::clone(&t));
+        let mut f = built(&ctx, &desc);
+        f.set_alloc(ColAlloc::Tracked(a.clone()));
+        let mut pr = f.alloc_partial_result();
+        let p = agg_tester(ast::AggFuncJsonArrayagg, TypeLonglong, 1000, vec![]);
+        let src = gen_src_chk(&p);
+        update_each(ec, &*f, &rows(&src), &mut pr).unwrap();
+        a.flush();
+        assert!(t.bytes_consumed() > 0, "JSON_ARRAYAGG: no growth accounted");
+    }
+    assert_eq!(t.bytes_consumed(), 0, "JSON_ARRAYAGG: memory not returned");
+
+    // 3. JSON_OBJECTAGG (map table + boxed keys accounted)
+    let str_ft = new_field_type(TypeString);
+    let desc = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncJsonObjectAgg,
+        vec![column(&str_ft, 0), column(&int_ft, 1)],
+        false,
+    )
+    .unwrap();
+    let t = new_tracker(1, -1);
+    {
+        let a = TrackedAlloc::new(Arc::clone(&t));
+        let mut f = built(&ctx, &desc);
+        f.set_alloc(ColAlloc::Tracked(a.clone()));
+        let mut pr = f.alloc_partial_result();
+        let mut chk = new_chunk_with_capacity(&[str_ft.clone(), int_ft.clone()], 1000);
+        for i in 0..1000i64 {
+            let key = format!("k{i:01024}");
+            chk.append_string(0, key.as_bytes());
+            chk.append_int64(1, i);
+        }
+        update_each(ec, &*f, &rows(&chk), &mut pr).unwrap();
+        a.flush();
+        assert!(
+            t.bytes_consumed() >= 1 << 20,
+            "JSON_OBJECTAGG keys not accounted: {} bytes",
+            t.bytes_consumed()
+        );
+    }
+    assert_eq!(t.bytes_consumed(), 0, "JSON_OBJECTAGG: memory not returned");
 }

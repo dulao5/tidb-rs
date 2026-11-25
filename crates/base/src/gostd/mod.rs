@@ -350,6 +350,7 @@ pub mod bytes;
 pub mod cmp;
 pub mod conv;
 pub mod crc32;
+pub mod heap;
 pub mod json;
 pub mod math;
 pub mod os;

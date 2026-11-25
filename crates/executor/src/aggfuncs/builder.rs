@@ -45,15 +45,21 @@ use super::func_first_row::{
     FirstRow4Int, FirstRow4JSON, FirstRow4Set, FirstRow4String, FirstRow4Time,
     FirstRow4VectorFloat32,
 };
+use super::func_json_arrayagg::JsonArrayagg;
+use super::func_json_objectagg::JsonObjectAgg;
 use super::func_max_min::{
     BaseMaxMinAggFunc, MaxMin4Decimal, MaxMin4Duration, MaxMin4Enum, MaxMin4Float32,
     MaxMin4Float64, MaxMin4Int, MaxMin4JSON, MaxMin4Set, MaxMin4String, MaxMin4Time, MaxMin4Uint,
     MaxMin4VectorFloat32,
 };
+use super::func_stddevpop::{StdDevPop4DistinctFloat64, StdDevPop4Float64};
+use super::func_stddevsamp::{StddevSamp4DistinctFloat64, StddevSamp4Float64};
 use super::func_sum::{
     BaseSum4Float64, Sum4Decimal, Sum4DistinctDecimal, Sum4DistinctFloat64, Sum4Float64,
     Sum4Float64HighPrecision,
 };
+use super::func_varpop::{BaseVarPopAggFunc, VarPop4DistinctFloat64, VarPop4Float64};
+use super::func_varsamp::{VarSamp4DistinctFloat64, VarSamp4Float64};
 
 /// AggFuncBuildContext is used to build aggregation functions.
 pub use tidb_expression::context::AggFuncBuildContext;
@@ -112,14 +118,14 @@ pub fn build(ctx: &dyn AggFuncBuildContext, agg_func_desc: &AggFuncDesc, ordinal
         ast::AggFuncBitOr => build_bit_or(agg_func_desc, ordinal),
         ast::AggFuncBitXor => build_bit_xor(agg_func_desc, ordinal),
         ast::AggFuncBitAnd => build_bit_and(agg_func_desc, ordinal),
-        ast::AggFuncVarPop => build_not_ported(ast::AggFuncVarPop),
-        ast::AggFuncStddevPop => build_not_ported(ast::AggFuncStddevPop),
-        ast::AggFuncJsonArrayagg => build_not_ported(ast::AggFuncJsonArrayagg),
-        ast::AggFuncJsonObjectAgg => build_not_ported(ast::AggFuncJsonObjectAgg),
+        ast::AggFuncVarPop => build_var_pop(agg_func_desc, ordinal),
+        ast::AggFuncStddevPop => build_std_dev_pop(agg_func_desc, ordinal),
+        ast::AggFuncJsonArrayagg => build_json_arrayagg(agg_func_desc, ordinal),
+        ast::AggFuncJsonObjectAgg => build_json_object_agg(agg_func_desc, ordinal),
         ast::AggFuncApproxCountDistinct => build_not_ported(ast::AggFuncApproxCountDistinct),
         ast::AggFuncApproxPercentile => build_not_ported(ast::AggFuncApproxPercentile),
-        ast::AggFuncVarSamp => build_not_ported(ast::AggFuncVarSamp),
-        ast::AggFuncStddevSamp => build_not_ported(ast::AggFuncStddevSamp),
+        ast::AggFuncVarSamp => build_var_samp(agg_func_desc, ordinal),
+        ast::AggFuncStddevSamp => build_stddev_samp(agg_func_desc, ordinal),
         _ => Ok(None),
     }
 }
@@ -398,4 +404,122 @@ fn build_bit_and(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
     some(BitAndUint64 {
         base: BaseBitAggFunc { base },
     })
+}
+
+// go: buildVarPop L1
+fn build_var_pop(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseVarPopAggFunc {
+        base: BaseAggFunc {
+            args: agg_func_desc.base.args.clone(),
+            ordinal,
+            ret_tp: None,
+        },
+    };
+    match agg_func_desc.mode {
+        AggFunctionMode::DedupMode => Ok(None),
+        _ => {
+            if agg_func_desc.has_distinct {
+                return some(VarPop4DistinctFloat64::new(base));
+            }
+            some(VarPop4Float64 { base })
+        }
+    }
+}
+
+// go: buildStdDevPop L1
+fn build_std_dev_pop(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseVarPopAggFunc {
+        base: BaseAggFunc {
+            args: agg_func_desc.base.args.clone(),
+            ordinal,
+            ret_tp: None,
+        },
+    };
+    match agg_func_desc.mode {
+        AggFunctionMode::DedupMode => Ok(None),
+        _ => {
+            if agg_func_desc.has_distinct {
+                return some(StdDevPop4DistinctFloat64 {
+                    base: VarPop4DistinctFloat64::new(base),
+                });
+            }
+            some(StdDevPop4Float64 {
+                base: VarPop4Float64 { base },
+            })
+        }
+    }
+}
+
+// go: buildVarSamp L1
+fn build_var_samp(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseVarPopAggFunc {
+        base: BaseAggFunc {
+            args: agg_func_desc.base.args.clone(),
+            ordinal,
+            ret_tp: None,
+        },
+    };
+    match agg_func_desc.mode {
+        AggFunctionMode::DedupMode => Ok(None),
+        _ => {
+            if agg_func_desc.has_distinct {
+                return some(VarSamp4DistinctFloat64 {
+                    base: VarPop4DistinctFloat64::new(base),
+                });
+            }
+            some(VarSamp4Float64 {
+                base: VarPop4Float64 { base },
+            })
+        }
+    }
+}
+
+// go: buildStddevSamp L1
+fn build_stddev_samp(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseVarPopAggFunc {
+        base: BaseAggFunc {
+            args: agg_func_desc.base.args.clone(),
+            ordinal,
+            ret_tp: None,
+        },
+    };
+    match agg_func_desc.mode {
+        AggFunctionMode::DedupMode => Ok(None),
+        _ => {
+            if agg_func_desc.has_distinct {
+                return some(StddevSamp4DistinctFloat64 {
+                    base: VarPop4DistinctFloat64::new(base),
+                });
+            }
+            some(StddevSamp4Float64 {
+                base: VarPop4Float64 { base },
+            })
+        }
+    }
+}
+
+// go: buildJSONArrayagg L1
+fn build_json_arrayagg(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseAggFunc {
+        args: agg_func_desc.base.args.clone(),
+        ordinal,
+        ret_tp: None,
+    };
+    match agg_func_desc.mode {
+        AggFunctionMode::DedupMode => Ok(None),
+        _ => some(JsonArrayagg::new(base)),
+    }
+}
+
+// go: buildJSONObjectAgg L1
+fn build_json_object_agg(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseAggFunc {
+        args: agg_func_desc.base.args.clone(),
+        ordinal,
+        ret_tp: None,
+    };
+    match agg_func_desc.mode {
+        AggFunctionMode::DedupMode => Ok(None),
+        _ => some(JsonObjectAgg::new(base)),
+    }
 }
