@@ -425,3 +425,248 @@ async fn build_errors() {
     assert!(e.is_none());
     assert_eq!(blocked_by(b.err.as_ref().unwrap()), Some("D12.4"));
 }
+
+// ---------------------------------------------------------------- HashAgg (Part B1)
+
+fn build_hash_agg(
+    sctx: &MockSession,
+    input: Vec<Chunk>,
+    err_at: Option<usize>,
+    group_by: Vec<ExprRef>,
+    aggs: &[AggFuncDesc],
+) -> (super::HashAggExec, Arc<AtomicBool>, Arc<AtomicBool>) {
+    let opened = Arc::new(AtomicBool::new(false));
+    let closed = Arc::new(AtomicBool::new(false));
+    let src = BatchSource {
+        base: new_base_executor_v2(
+            sctx.get_session_vars(),
+            &sctx.sql_killer(),
+            Some(schema_of(&child_types())),
+            1,
+            Vec::new(),
+        ),
+        batches: input,
+        ptr: 0,
+        err_at,
+        opened: Arc::clone(&opened),
+        closed: Arc::clone(&closed),
+    };
+    let out: Vec<FieldType> = aggs.iter().map(|d| (*d.base.ret_tp).clone()).collect();
+    let mut b = new_executor_builder(sctx, None, Arc::new(TelemetryInfo::default()));
+    let e = b
+        .build_hash_agg_from_child_exec(
+            sctx,
+            Some(Box::new(src)),
+            &schema_of(&out),
+            2,
+            &group_by,
+            aggs,
+        )
+        .expect("built hash agg");
+    assert!(b.err.is_none());
+    (e, opened, closed)
+}
+
+async fn run_exec(ctx: &ExecCtx, e: &mut dyn Executor) -> (Vec<String>, Option<Error>) {
+    let mut out = Vec::new();
+    let mut chk = exec::new_first_chunk(e);
+    let types: Vec<FieldType> = exec::ret_types(e).iter().map(|t| (**t).clone()).collect();
+    loop {
+        if let Err(err) = e.next(ctx, &mut chk).await {
+            return (out, Some(err));
+        }
+        if chk.num_rows() == 0 {
+            return (out, None);
+        }
+        for i in 0..chk.num_rows() {
+            let row = chk.get_row(i);
+            let cells: Vec<String> = types
+                .iter()
+                .enumerate()
+                .map(|(c, tp)| {
+                    let d = row.get_datum(c, tp);
+                    if d.is_null() {
+                        "NULL".to_string()
+                    } else {
+                        String::from_utf8(d.to_string().unwrap()).unwrap()
+                    }
+                })
+                .collect();
+            out.push(cells.join(","));
+        }
+    }
+}
+
+fn unparallel_ctx() -> MockSession {
+    let mut sctx = ctx();
+    sctx.vars.set_hash_agg_partial_concurrency(1);
+    sctx.vars.set_hash_agg_final_concurrency(1);
+    sctx
+}
+
+#[tokio::test]
+async fn hash_agg_unparallel_groups_and_order() {
+    let sctx = unparallel_ctx();
+    let ctx = exec_ctx(&sctx);
+    let tps = child_types();
+    let aggs = [
+        desc(&sctx, ast::AggFuncFirstRow, col(&tps[0], 0), false),
+        desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false),
+        desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false),
+    ];
+    // Groups arrive interleaved across chunks; unparallel HashAgg emits in first-seen order.
+    let input = batches(&[
+        &[(2, 10.0), (1, 1.0), (2, 20.0)],
+        &[(3, 5.0), (1, 2.0), (1, 3.0)],
+    ]);
+    let (mut e, _, closed) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+    assert!(e.is_unparallel_exec);
+    e.open(&ctx).await.unwrap();
+    let (rows, err) = run_exec(&ctx, &mut e).await;
+    assert!(err.is_none());
+    assert_eq!(rows, ["2,2,30", "1,3,6", "3,1,5"]);
+    e.close().await.unwrap();
+    assert!(closed.load(Ordering::SeqCst));
+    assert_eq!(e.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+}
+
+#[tokio::test]
+async fn hash_agg_unparallel_empty_input_and_distinct() {
+    let sctx = unparallel_ctx();
+    let ectx = exec_ctx(&sctx);
+    let tps = child_types();
+    let count = desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false);
+    let sum_distinct = desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), true);
+
+    // No GROUP BY, empty input: emits empty-key default row.
+    let (mut e, _, _) = build_hash_agg(
+        &sctx,
+        Vec::new(),
+        None,
+        Vec::new(),
+        std::slice::from_ref(&count),
+    );
+    e.open(&ectx).await.unwrap();
+    assert_eq!(run_exec(&ectx, &mut e).await.0, ["0"]);
+    e.close().await.unwrap();
+
+    // With GROUP BY, empty input: no rows.
+    let (mut e, _, _) = build_hash_agg(&sctx, Vec::new(), None, vec![col(&tps[0], 0)], &[count]);
+    e.open(&ectx).await.unwrap();
+    assert!(run_exec(&ectx, &mut e).await.0.is_empty());
+    e.close().await.unwrap();
+
+    // DISTINCT forces unparallel even when concurrency > 1.
+    let mut par_sctx = ctx();
+    par_sctx.vars.set_hash_agg_partial_concurrency(4);
+    par_sctx.vars.set_hash_agg_final_concurrency(4);
+    let par_ctx = exec_ctx(&par_sctx);
+    let input = batches(&[&[(1, 2.0), (1, 2.0), (1, 5.0)], &[(2, 3.0), (2, 3.0)]]);
+    let (mut e, _, _) = build_hash_agg(
+        &par_sctx,
+        input,
+        None,
+        vec![col(&tps[0], 0)],
+        &[sum_distinct],
+    );
+    assert!(e.is_unparallel_exec);
+    e.open(&par_ctx).await.unwrap();
+    let (rows, err) = run_exec(&par_ctx, &mut e).await;
+    assert!(err.is_none());
+    assert_eq!(rows, ["7", "3"]);
+    e.close().await.unwrap();
+    assert_eq!(e.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+}
+
+#[tokio::test]
+async fn hash_agg_unparallel_spill_action_and_boundary() {
+    use std::sync::atomic::AtomicUsize;
+    use tidb_memory::action::{ActionOnExceed, BaseOOMAction, DefSpillPriority};
+    use tidb_memory::tracker::Tracker;
+
+    // 1. Verify AggSpillDiskAction: 20% threshold, maxSpillTimes, fallback, priority.
+    struct CountFallback {
+        base: BaseOOMAction,
+        hits: Arc<AtomicUsize>,
+    }
+    impl ActionOnExceed for CountFallback {
+        fn action(&self, _t: &Arc<Tracker>) -> Result<(), Error> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn set_fallback(&self, a: Option<tidb_memory::action::ActionRef>) {
+            self.base.set_fallback(a)
+        }
+        fn get_fallback(&self) -> Option<tidb_memory::action::ActionRef> {
+            self.base.get_fallback()
+        }
+        fn get_priority(&self) -> i64 {
+            0
+        }
+        fn set_finished(&self) {
+            self.base.set_finished()
+        }
+        fn is_finished(&self) -> bool {
+            self.base.is_finished()
+        }
+    }
+
+    let in_spill = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let agg_t = new_tracker(2, -1);
+    let sess_t = new_tracker(1, 1000);
+    let action = Arc::new(super::agg_spill::AggSpillDiskAction::new(
+        Arc::clone(&in_spill),
+        Arc::clone(&agg_t),
+    ));
+    let fb_hits = Arc::new(AtomicUsize::new(0));
+    let fb = Arc::new(CountFallback {
+        base: BaseOOMAction::default(),
+        hits: Arc::clone(&fb_hits),
+    });
+    action.set_fallback(Some(fb));
+    assert_eq!(action.get_priority(), DefSpillPriority);
+
+    // Below 20% (199 < 200): falls back instead of entering spill mode.
+    agg_t.record(199);
+    action.action(&sess_t).unwrap();
+    assert_eq!(in_spill.load(Ordering::SeqCst), 0);
+    assert_eq!(fb_hits.load(Ordering::SeqCst), 1);
+
+    // At >= 20% (200 >= 200): enters spill mode up to maxSpillTimes (10), then falls back.
+    agg_t.record(1);
+    for _ in 0..super::agg_spill::maxSpillTimes {
+        in_spill.store(0, Ordering::SeqCst);
+        action.action(&sess_t).unwrap();
+        assert_eq!(in_spill.load(Ordering::SeqCst), 1);
+    }
+    assert_eq!(fb_hits.load(Ordering::SeqCst), 1);
+    in_spill.store(0, Ordering::SeqCst);
+    action.action(&sess_t).unwrap();
+    assert_eq!(in_spill.load(Ordering::SeqCst), 0);
+    assert_eq!(fb_hits.load(Ordering::SeqCst), 2);
+
+    // 2. End-to-end unparallel spill boundary: soft limit triggers inSpillMode ->
+    //    DataInDiskByChunks.Add returns blocked-by:D01.10 with zero rows emitted and
+    //    tracker back to 0 on Close.
+    let mut sctx = unparallel_ctx();
+    let sess_tracker = new_tracker(1, 16 << 10);
+    let stmt_tracker = new_tracker(2, -1);
+    stmt_tracker.attach_to(&sess_tracker).unwrap();
+    sctx.vars.stmt_ctx_mut().mem_tracker = Some(Arc::clone(&stmt_tracker));
+    let ctx = exec_ctx(&sctx);
+    let tps = child_types();
+    let aggs = [desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false)];
+    let rows: Vec<(i64, f64)> = (0..2000).map(|i| (i, i as f64)).collect();
+    let input: Vec<Chunk> = rows.chunks(64).flat_map(|c| batches(&[c])).collect();
+    let (mut e, _, _) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+    e.session_mem_tracker = Some(Arc::clone(&sess_tracker));
+    e.open(&ctx).await.unwrap();
+    let (out, err) = run_exec(&ctx, &mut e).await;
+    assert!(out.is_empty(), "must emit zero rows before spill error");
+    let err = err.expect("spill must stop at D01.10 boundary");
+    assert_eq!(blocked_by(&err), Some("D01.10"), "{err}");
+    e.close().await.unwrap();
+    assert_eq!(e.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+    assert_eq!(stmt_tracker.bytes_consumed(), 0);
+    assert_eq!(sess_tracker.bytes_consumed(), 0);
+}

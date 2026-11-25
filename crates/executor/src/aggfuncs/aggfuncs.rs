@@ -21,12 +21,15 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use allocator_api2::alloc::{Allocator, Global};
+use allocator_api2::boxed::Box as AllocBox;
+use allocator_api2::vec::Vec as AllocVec;
 use tidb_base::Error;
 use tidb_chunk::ColAlloc;
 use tidb_chunk::chunk::Chunk;
 use tidb_chunk::row::Row;
 use tidb_expression::expression::{EvalState, ExprRef};
-use tidb_kv::hack::{MemAwareMap, new_mem_aware_map};
+use tidb_kv::hack::{MemAwareMap, new_mem_aware_map_in};
 use tidb_parser::types::FieldType;
 
 pub use tidb_expression::context::EvalContext as AggFuncUpdateContext;
@@ -36,8 +39,9 @@ pub use tidb_expression::context::EvalContext as AggFuncUpdateContext;
 pub type PartialResult = Box<dyn Any + Send>;
 
 /// AggPartialResultMapper contains aggregate function results (keys are Go strings, i.e.
-/// bytes, M-BYTES).
-pub type AggPartialResultMapper = MemAwareMap<Vec<u8>, Vec<PartialResult>>;
+/// bytes, M-BYTES; allocated in `A` for A1 real memory accounting).
+pub type AggPartialResultMapper<A = Global> =
+    MemAwareMap<AllocBox<[u8], A>, AllocVec<PartialResult, A>, A>;
 
 /// NewAggPartialResultMapper creates a new AggPartialResultMapper
 // go: NewAggPartialResultMapper L1
@@ -50,7 +54,16 @@ pub fn new_agg_partial_result_mapper() -> AggPartialResultMapper {
 /// (`hack.NewMemAwareMap`, see `tidb_kv::hack`).
 // go: NewAggPartialResultMapperWithCap L1
 pub fn new_agg_partial_result_mapper_with_cap(capacity: isize) -> AggPartialResultMapper {
-    new_mem_aware_map(capacity)
+    new_agg_partial_result_mapper_in(Global, capacity)
+}
+
+/// NewAggPartialResultMapper in an allocator `A` (A1 3.3).
+// glue: NewAggPartialResultMapper in an allocator (A1 3.3)
+pub fn new_agg_partial_result_mapper_in<A: Allocator + Clone>(
+    alloc: A,
+    capacity: isize,
+) -> AggPartialResultMapper<A> {
+    new_mem_aware_map_in(capacity, alloc)
 }
 
 /// AggFunc is the interface to evaluate the aggregate functions.

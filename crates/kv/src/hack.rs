@@ -75,6 +75,13 @@ impl<T: ?Sized> GoLayout for Vec<Box<T>> {
     const GO_ALIGN: u64 = 8;
 }
 
+/// A Go slice of pointers allocated in an allocator `A` (`[]PartialResult` in `TrackedAlloc`,
+/// A1 3.3).
+impl<T: ?Sized, A: Allocator> GoLayout for allocator_api2::vec::Vec<Box<T>, A> {
+    const GO_SIZE: u64 = 24;
+    const GO_ALIGN: u64 = 8;
+}
+
 /// A Go `struct{}`.
 impl GoLayout for () {
     const GO_SIZE: u64 = 0;
@@ -248,12 +255,24 @@ impl<K: Eq + Hash + GoLayout, V: GoLayout, A: Allocator + Clone> MemAwareMap<K, 
 pub fn new_mem_aware_map<K: Eq + Hash + GoLayout, V: GoLayout>(
     capacity: isize,
 ) -> MemAwareMap<K, V> {
+    new_mem_aware_map_in(capacity, Global)
+}
+
+/// NewMemAwareMap in an allocator `A` (A1 3.3).
+// glue: NewMemAwareMap in an allocator (A1 3.3)
+pub fn new_mem_aware_map_in<K: Eq + Hash + GoLayout, V: GoLayout, A: Allocator + Clone>(
+    capacity: isize,
+    alloc: A,
+) -> MemAwareMap<K, V, A> {
     assert!(
         capacity == 0,
         "NewMemAwareMap: only capacity 0 is supported"
     );
-    let mut m = MemAwareMap::default();
-    m.init(HashMap::default());
+    let mut m = MemAwareMap::zero_in(alloc.clone());
+    m.init(HashMap::with_hasher_in(
+        DefaultHashBuilder::default(),
+        alloc,
+    ));
     m
 }
 

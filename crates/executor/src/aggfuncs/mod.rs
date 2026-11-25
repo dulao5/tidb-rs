@@ -23,7 +23,8 @@ pub mod func_sum;
 
 pub use aggfuncs::{
     AggFunc, AggFuncUpdateContext, AggPartialResultMapper, BaseAggFunc, PartialResult,
-    new_agg_partial_result_mapper, new_agg_partial_result_mapper_with_cap,
+    new_agg_partial_result_mapper, new_agg_partial_result_mapper_in,
+    new_agg_partial_result_mapper_with_cap,
 };
 pub use builder::{AggFuncBuildContext, build};
 

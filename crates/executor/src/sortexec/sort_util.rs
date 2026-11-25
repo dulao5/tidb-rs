@@ -114,70 +114,7 @@ impl SortedRowsIter {
 /// `*chunk.Iterator4Slice`; mapping rule M-LOCK, never held across an await).
 pub type SharedSortedRowsIter = Arc<parking_lot::Mutex<SortedRowsIter>>;
 
-/// Go's `sync.WaitGroup` for tasks (mapping rule M-WG): a counter, and waiters woken when it
-/// drops to zero. The parallel sort counts with it what Go counts with a `WaitGroup`
-/// (`fetcherAndWorkerSyncer`: the chunks sent and not yet processed) and with a
-/// `util.WaitGroupWrapper` (the running worker tasks, the running fetcher task), which the
-/// result generator waits for. The JoinHandles of the tasks are awaited by `Close` instead
-/// (N3 3.5).
-#[derive(Debug, Default)]
-pub struct WaitGroup {
-    count: parking_lot::Mutex<i64>,
-    zero: tokio::sync::Notify,
-}
-
-impl WaitGroup {
-    /// `Add`: a negative counter panics, as Go's does.
-    // glue: sync.WaitGroup.Add (M-WG)
-    pub fn add(&self, delta: i64) {
-        let mut count = self.count.lock();
-        *count += delta;
-        if *count < 0 {
-            panic!("sync: negative WaitGroup counter");
-        }
-        if *count == 0 {
-            self.zero.notify_waiters();
-        }
-    }
-
-    /// `Done`.
-    // glue: sync.WaitGroup.Done (M-WG)
-    pub fn done(&self) {
-        self.add(-1);
-    }
-
-    /// `Wait`: returns once the counter is zero.
-    // glue: sync.WaitGroup.Wait (M-WG)
-    pub async fn wait(&self) {
-        loop {
-            let notified = self.zero.notified();
-            tokio::pin!(notified);
-            // Registered before the counter is read, so a drop to zero after the read wakes it.
-            notified.as_mut().enable();
-            if *self.count.lock() == 0 {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    /// The counter, for tests.
-    // glue: test accessor
-    pub fn count(&self) -> i64 {
-        *self.count.lock()
-    }
-}
-
-/// Calls `Done` on its wait group when dropped: Go's `defer wg.Done()`, which also runs when
-/// the function panics; here also when the task is cancelled (CLAUDE.md §2 rule 8).
-pub struct DoneGuard(pub Arc<WaitGroup>);
-
-impl Drop for DoneGuard {
-    // glue: defer wg.Done() (M-WG)
-    fn drop(&mut self) {
-        self.0.done();
-    }
-}
+pub use tidb_runtime::wait_group::{DoneGuard, WaitGroup};
 
 /// The receiving side of Go's `finishCh` (`chan struct{}` that is only ever closed): a
 /// watch channel whose value turns true when `Close` closes it. A dropped sender (the
@@ -299,33 +236,7 @@ pub fn inject_error_for_issue59655(_trigger_factor: i32) -> Result<(), Error> {
 // go: injectPanicForIssue63216 L2 (failpoint Issue63216 not ported: no failpoints)
 pub fn inject_panic_for_issue63216() {}
 
-/// `chunk.DataInDiskByChunks`, the chunks a partition spilled to disk: the disk container
-/// (D01.10) is not ported, so no value of this type exists.
-#[derive(Debug)]
-pub enum DataInDiskByChunks {}
-
-impl DataInDiskByChunks {
-    /// `NumChunks`.
-    // glue: method of the unported chunk.DataInDiskByChunks (no value exists)
-    pub fn num_chunks(&self) -> usize {
-        match *self {}
-    }
-    /// `Close`.
-    // glue: method of the unported chunk.DataInDiskByChunks (no value exists)
-    pub fn close(&self) {
-        match *self {}
-    }
-    /// `NumRows`.
-    // glue: method of the unported chunk.DataInDiskByChunks (no value exists)
-    pub fn num_rows(&self) -> i64 {
-        match *self {}
-    }
-    /// `GetChunk`.
-    // glue: method of the unported chunk.DataInDiskByChunks (no value exists)
-    pub fn get_chunk(&self, _chk_idx: usize) -> Result<Chunk, Error> {
-        match *self {}
-    }
-}
+pub use tidb_chunk::chunk_in_disk::DataInDiskByChunks;
 
 /// dataCursor: it's used only when spill is triggered.
 ///
