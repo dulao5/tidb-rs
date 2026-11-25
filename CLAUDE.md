@@ -50,7 +50,9 @@ file and over any task description.
    and cited in the spec's known-differences section; never filed upstream. If copying Go would
    cause a security problem, wrong results or data loss, do not decide yourself: describe it in
    the issue and **stop and ask** (it needs an entry in `docs/testing/rulings.toml` approved by the
-   owner).
+   owner). Exception, CONSTITUTION art. 9.3: a wrong-rows or panic bug you reproduced on v8.5.8,
+   where MySQL or another Go path is correct, is implemented correctly once the maintainer
+   (`@du-maya`) confirms in the issue — ask the maintainer, not the owner.
 7. **Do not touch** `third_party/` (vendored TiKV code) and never run `cargo fmt --all` (it reformats
    third_party) — use `cargo fmt -p <crate>`.
 8. **Every difference from Go is written down**: the spec's "known differences" section names the
