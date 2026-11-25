@@ -91,8 +91,18 @@ pub struct ParallelSortWorker {
     sql_killer: Option<ExecutorKillerHandler>,
 }
 
+/// The most rows one batch sort (`sortBatchRows`) takes, whatever the max chunk size. Go
+/// sorts `maxChunkSize * 30` rows (`parallel_sort_worker.go:82`, 30720 with the default
+/// `tidb_max_chunk_size`), but a Rust task cannot yield partway through a sort, and a batch
+/// that large with a collated string key keeps the worker thread past the stall threshold
+/// (the concurrency and memory design, N3-A1, §3.6): 25-30 ms per batch, while 7680 rows
+/// take about 5-6 ms. The owner's decision of 2026-11-25 (#371), spec D12.5 §7.8 item 9:
+/// the order of equal keys in Go's parallel sort already depends on scheduling, so the
+/// batch size is not visible to users.
+pub const MAX_SORTED_ROWS_PER_BATCH: usize = 7680;
+
+// go: newParallelSortWorker L2 (the batch size is capped at MAX_SORTED_ROWS_PER_BATCH, owner's decision #371)
 #[allow(clippy::too_many_arguments)] // Go's parameter list
-// go: newParallelSortWorker L1
 pub fn new_parallel_sort_worker(
     worker_id_for_test: usize,
     less_row_func: SortKeys,
@@ -117,7 +127,7 @@ pub fn new_parallel_sort_worker(
         mem_tracker,
         total_memory_usage: 0,
         sorted_rows_iter: Some(sorted_rows_iter),
-        max_sorted_rows_limit: max_chunk_size * 30,
+        max_sorted_rows_limit: (max_chunk_size * 30).min(MAX_SORTED_ROWS_PER_BATCH),
         spill_helper,
         local_sorted_rows: Vec::new(),
         chunk_iters: Vec::new(),
@@ -508,6 +518,8 @@ mod tests {
                 Arc::new(new_parallel_sort_spill_helper()),
                 None,
             );
+            // Measures Go's batch of 30 chunks, above the cap of `MAX_SORTED_ROWS_PER_BATCH`.
+            worker.max_sorted_rows_limit = max_chunk_size * 30;
             let mut x: u64 = 0x2545_f491_4f6c_dd1d ^ round;
             for _ in 0..30 {
                 let mut chk = tidb_chunk::chunk::new(fts, max_chunk_size, max_chunk_size);
