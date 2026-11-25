@@ -11,6 +11,7 @@ agent 的日常工作规则在 [CLAUDE.md](../../CLAUDE.md)。本文件只记录
 | Maya（主 agent） | `du-maya[bot]` | 规划和拆任务；开 `duet-ready` issue；用子 agent 做集成、性能、跨模块的工作；**合并 PR**；合并后跑端到端对比（`tools/ab`） |
 | Lucky（评审 agent） | `du-lucky-agent[bot]` | 评审所有 PR（包括 Maya 和 Duet 的），在 GitHub 上 Approve 或 Request changes |
 | Duet（自主 agent） | 暂用 `dulao5`，正文以 "[Claude Duet]" 开头（2026-11-24 负责人决定；`du-duet` 账号待 Duet 的 GitHub 连接能独立后启用） | 认领 `duet-ready` issue，按 CLAUDE.md §5 实现、开 PR、按评审意见修改 |
+| Nora（试用的自主 agent，2026-11-25 起） | `du-nora[bot]` | 与 Duet 相同：认领 Maya 指派的 issue（标签 `nora-claimed`），按 CLAUDE.md §5 实现、开 PR、按评审意见修改；在 Raft 上通过私信和 Maya 沟通 |
 
 **Duet 与负责人共用 `dulao5` 账号期间**：以 "[Claude Duet]" 开头的 issue、评论、PR 都**不代表负责人**。负责人的决定只认 Raft 上的消息，或 GitHub 上不带这个前缀的评论。Duet 不能填写裁定的 approver，不能确认 spec，不能关闭或修改 block issue，也不能回答别人的 `duet-blocked` 问题。
 
@@ -52,4 +53,5 @@ Maya 的子 agent 用 Maya 的身份提交。模型分工（2026-11-24 试点）
 | `duet-claimed` | Duet 正在做 |
 | `duet-blocked` | Duet 需要回答，问题写在 issue 里 |
 | `duet-paused` | 额度原因暂停，不要认领 |
+| `nora-claimed` | 已指派给 Nora |
 | `upstream-pitfall` / `go-gap` | Go 本身的问题（行为有错 / 缺功能），见 port-block skill |
