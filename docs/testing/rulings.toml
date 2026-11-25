@@ -335,3 +335,17 @@ rationale = "宪章第一条 2 的例外：Go 遗漏清空重开状态导致静�
 approver = "zhigang-du"
 approved = "2026-11-25"
 reopen = "基线升级到单线程 HashAgg 在 Close/Open 时清空 groupKeys、cursor4GroupKey 和 inSpillMode 的版本，或负责人决定照 Go；聚合接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"
+
+[[ruling]]
+id = "R23"
+name = "count-distinct-multi-arg-canonical-keys"
+class = "divergence"
+plane = "rows"
+layer = "none"
+test = "crates/executor/src/aggfuncs/tests/mod.rs::count_distinct_canonical_keys"
+source = "宪章第九条 3，#390"
+evidence = "Go v8.5.8 的多参数/回退 COUNT(DISTINCT)（pkg/executor/aggfuncs/func_count_distinct.go:431-471）按内存原始字节构造去重键：appendFloat64 未将 -0.0 归一化为 +0.0（导致在 v8.5.8 SQL 上 COUNT(DISTINCT x)=1 而 COUNT(DISTINCT x,1)=2，尽管 -0e0=0e0 为真）；appendDuration 写入含 Fsp 的完整 16 字节 Duration 结构（导致 COUNT(DISTINCT TIME(s))=1 而 COUNT(DISTINCT TIME(s),1)=2）；appendTime 经 WriteTime 写入 Type 与 Fsp 字节（导致 COUNT(DISTINCT TIMESTAMP(s))=2 与 COUNT(DISTINCT COALESCE(date, dt))=2，尽管比较忽略 Type 与 Fsp）。tidb-rs 在 append_float64 中将 -0.0 归一化为 +0.0、在 append_duration 中只编 Duration 值、在 append_time 中将 Type 与 Fsp 字节清零，与单参数路径和 SQL 相等语义一致"
+rationale = "宪章第九条 3：可复现的 Go 结果错误（同值在 SQL 比较相等且单参数路径正确），维护者与评审一致同意保留正确行为"
+approver = "zhigang-du"
+approved = "2026-11-25"
+reopen = "基线升级到多参数 COUNT(DISTINCT) 按逻辑值编码（忽略 -0.0 符号与 Time/Duration 的 Type、Fsp）的版本，或负责人决定照 Go；聚合接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"

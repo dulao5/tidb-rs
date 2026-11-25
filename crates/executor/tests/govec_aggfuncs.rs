@@ -54,6 +54,14 @@ use tidb_types::vector::zero_copy_deserialize_vector_float32;
 /// `APPROX_COUNT_DISTINCT` and `APPROX_PERCENTILE`), in every op that builds them.
 const EXPECTED_BLOCKED: usize = 560;
 
+/// Records intentionally diverging from Go v8.5.8 under ruling R23 (#390, constitution art. 9.3):
+/// `countOriginalWithDistinct` keys on canonical values in Rust (folding `-0.0` to `+0.0`,
+/// ignoring `Duration.Fsp`, and ignoring `Time.Type`/`Time.Fsp`) instead of Go's raw bytes.
+/// Across the 19,222 records on both arm64 and amd64, exactly 3 records contain distinct raw
+/// representations of equal values (`reset_reuse` TIMESTAMP, `count_distinct_encode` multi-arg
+/// `{+0.0, -0.0}`, and `count_distinct_encode` DATETIME differing in `Type`).
+const EXPECTED_CANONICAL_DISTINCT_DIFFS: usize = 3;
+
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
 } else if cfg!(target_arch = "aarch64") {
@@ -663,11 +671,173 @@ fn run(op: &str, a: &[Value]) -> Option<(Value, Option<Error>)> {
     }
 }
 
-/// Compares one record; Err(why) on a difference, Ok(false) when its function is blocked.
-fn check(rec: &Value) -> Result<bool, String> {
+enum CheckResult {
+    Matched,
+    Blocked,
+    CanonicalDistinctDiff,
+}
+
+fn decode_count_cell(cell: &Value) -> Option<i64> {
+    if cell["null"] != false {
+        return None;
+    }
+    let hex = cell["raw"].as_str()?;
+    let bytes: [u8; 8] = unhex(hex).try_into().ok()?;
+    Some(i64::from_le_bytes(bytes))
+}
+
+/// Computes `(raw_distinct, canonical_distinct)` for a `countOriginalWithDistinct` group
+/// whose arguments are scalar types covered by ruling R23 (#390). Returns `None` if an
+/// argument type is outside that set.
+fn count_distinct_raw_and_canonical(arg_types: &[u8], chunks: &[Value]) -> Option<(i64, i64)> {
+    let mut raw_set: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
+    let mut canon_set: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
+    for ch in chunks {
+        for row in ch.as_array()? {
+            let cells = row.as_array()?;
+            if cells.len() != arg_types.len() || cells.iter().any(Value::is_null) {
+                continue;
+            }
+            let mut raw_row = Vec::with_capacity(arg_types.len());
+            let mut canon_row = Vec::with_capacity(arg_types.len());
+            for (tp, cell) in arg_types.iter().zip(cells.iter()) {
+                match *tp {
+                    mysql::TypeLonglong => {
+                        let s = cell.to_string();
+                        raw_row.push(s.clone());
+                        canon_row.push(s);
+                    }
+                    mysql::TypeDouble | mysql::TypeFloat => {
+                        let bits = cell.as_str()?;
+                        raw_row.push(bits.to_owned());
+                        // Fold -0.0 (sign bit only) to +0.0.
+                        let canon = if bits == "9223372036854775808" {
+                            "0"
+                        } else {
+                            bits
+                        };
+                        canon_row.push(canon.to_owned());
+                    }
+                    mysql::TypeDate | mysql::TypeDatetime | mysql::TypeTimestamp => {
+                        let arr = cell.as_array()?;
+                        let core = arr.first()?.as_str()?;
+                        raw_row.push(cell.to_string());
+                        canon_row.push(core.to_owned());
+                    }
+                    mysql::TypeDuration => {
+                        let arr = cell.as_array()?;
+                        let dur = arr.first()?.as_str()?;
+                        raw_row.push(cell.to_string());
+                        canon_row.push(dur.to_owned());
+                    }
+                    _ => return None,
+                }
+            }
+            raw_set.insert(raw_row);
+            canon_set.insert(canon_row);
+        }
+    }
+    Some((raw_set.len() as i64, canon_set.len() as i64))
+}
+
+/// Returns true when `rec` differs from `got_out` solely because Go v8.5.8's
+/// `countOriginalWithDistinct` hashes raw bytes (under #390 / ruling R23) while Rust keys on
+/// canonical values, verifying that Go's output matches the raw count and Rust's output matches
+/// the canonical count for every group.
+fn is_canonical_distinct_diff(rec: &Value, got_out: &Value) -> bool {
+    let want_out = &rec["out"];
+    if want_out["type"] != "*aggfuncs.countOriginalWithDistinct"
+        || got_out["type"] != want_out["type"]
+        || want_out["step"] != ""
+        || got_out["step"] != ""
+    {
+        return false;
+    }
+    let op = rec["op"].as_str().unwrap_or("");
+    let (desc, groups, want_cells, got_cells): (&Value, Vec<&[Value]>, Vec<&Value>, Vec<&Value>) =
+        match op {
+            "count_distinct_encode" if rec["args"][0] == "run" => {
+                let Some(chunks) = rec["args"][2].as_array() else {
+                    return false;
+                };
+                let (Some(wc), Some(gc)) = (
+                    want_out["cells"].as_array().and_then(|a| a.first()),
+                    got_out["cells"].as_array().and_then(|a| a.first()),
+                ) else {
+                    return false;
+                };
+                (&rec["args"][1], vec![chunks.as_slice()], vec![wc], vec![gc])
+            }
+            "reset_reuse" => {
+                let Some(raw_groups) = rec["args"][1].as_array() else {
+                    return false;
+                };
+                let (Some(wg), Some(gg)) =
+                    (want_out["groups"].as_array(), got_out["groups"].as_array())
+                else {
+                    return false;
+                };
+                if raw_groups.len() != wg.len() || wg.len() != gg.len() {
+                    return false;
+                }
+                let mut groups = Vec::with_capacity(raw_groups.len());
+                let mut wc = Vec::with_capacity(wg.len());
+                let mut gc = Vec::with_capacity(gg.len());
+                for ((rg, w), g) in raw_groups.iter().zip(wg.iter()).zip(gg.iter()) {
+                    let Some(chunks) = rg.as_array() else {
+                        return false;
+                    };
+                    let (Some(w0), Some(g0)) = (
+                        w.as_array().and_then(|a| a.first()),
+                        g.as_array().and_then(|a| a.first()),
+                    ) else {
+                        return false;
+                    };
+                    groups.push(chunks.as_slice());
+                    wc.push(w0);
+                    gc.push(g0);
+                }
+                (&rec["args"][0], groups, wc, gc)
+            }
+            _ => return false,
+        };
+    if desc["name"] != "count" || desc["distinct"] != true {
+        return false;
+    }
+    let Some(arg_fts) = desc["args"].as_array() else {
+        return false;
+    };
+    let Some(arg_types): Option<Vec<u8>> = arg_fts
+        .iter()
+        .map(|ft| ft[0].as_u64().and_then(|v| u8::try_from(v).ok()))
+        .collect()
+    else {
+        return false;
+    };
+    let mut saw_diff = false;
+    for ((chunks, wc), gc) in groups.iter().zip(want_cells.iter()).zip(got_cells.iter()) {
+        let Some((raw_cnt, canon_cnt)) = count_distinct_raw_and_canonical(&arg_types, chunks)
+        else {
+            return false;
+        };
+        let (Some(want_cnt), Some(got_cnt)) = (decode_count_cell(wc), decode_count_cell(gc)) else {
+            return false;
+        };
+        if want_cnt != raw_cnt || got_cnt != canon_cnt {
+            return false;
+        }
+        if raw_cnt != canon_cnt {
+            saw_diff = true;
+        }
+    }
+    saw_diff
+}
+
+/// Compares one record; Err(why) on a difference.
+fn check(rec: &Value) -> Result<CheckResult, String> {
     let op = rec["op"].as_str().unwrap();
     let Some((out, err)) = run(op, rec["args"].as_array().unwrap()) else {
-        return Ok(false);
+        return Ok(CheckResult::Blocked);
     };
     let got_err = err.map(|e| e.to_string());
     let want_err = rec["err"]["msg"].as_str().map(str::to_owned);
@@ -675,12 +845,15 @@ fn check(rec: &Value) -> Result<bool, String> {
         return Err(format!("error: got {got_err:?}, want {want_err:?}"));
     }
     if out != rec["out"] {
+        if is_canonical_distinct_diff(rec, &out) {
+            return Ok(CheckResult::CanonicalDistinctDiff);
+        }
         return Err(format!(
             "out differs: got {}",
             serde_json::to_string(&out).unwrap()
         ));
     }
-    Ok(true)
+    Ok(CheckResult::Matched)
 }
 
 fn replay(path: &str, pin_blocked: bool) {
@@ -688,11 +861,13 @@ fn replay(path: &str, pin_blocked: bool) {
     tidb_types::collate::set_new_collation_enabled_for_test(true);
     let mut fails = vec![];
     let mut blocked = 0;
+    let mut canonical_distinct_diffs = 0;
     for line in &lines {
         let rec: Value = serde_json::from_str(line).unwrap();
         match check(&rec) {
-            Ok(true) => {}
-            Ok(false) => blocked += 1,
+            Ok(CheckResult::Matched) => {}
+            Ok(CheckResult::Blocked) => blocked += 1,
+            Ok(CheckResult::CanonicalDistinctDiff) => canonical_distinct_diffs += 1,
             Err(why) => {
                 let cut = line
                     .char_indices()
@@ -716,9 +891,16 @@ fn replay(path: &str, pin_blocked: bool) {
         fails.len(),
         lines.len()
     );
-    eprintln!("{path}: {} records, {blocked} blocked", lines.len());
+    eprintln!(
+        "{path}: {} records, {blocked} blocked, {canonical_distinct_diffs} ruled (R23)",
+        lines.len()
+    );
     if pin_blocked {
         assert_eq!(blocked, EXPECTED_BLOCKED, "{path}: blocked records");
+        assert_eq!(
+            canonical_distinct_diffs, EXPECTED_CANONICAL_DISTINCT_DIFFS,
+            "{path}: ruled R23 records"
+        );
     }
 }
 

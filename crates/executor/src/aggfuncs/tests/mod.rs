@@ -64,7 +64,7 @@ use tidb_types::mydecimal::new_dec_from_int;
 use tidb_types::set_type::{parse_set, parse_set_name, parse_set_value};
 use tidb_types::time::{Duration, parse_date, time_from_days};
 
-use super::func_count_distinct::write_time;
+use super::func_count_distinct::{eval_and_encode, write_time};
 use super::{
     AggFunc, PartialResult, build, new_agg_partial_result_mapper,
     new_agg_partial_result_mapper_with_cap,
@@ -1715,7 +1715,7 @@ fn count_distinct_and_group_concat_memory_accounted() {
 // Part B2 functions (APPROX_COUNT_DISTINCT, APPROX_PERCENTILE) remain on the temporary
 // blocked-by:D12.4 stub until part B2 is ported (spec §4).
 #[test]
-fn part_b2_names_remain_blocked() {
+fn approx_agg_names_remain_blocked() {
     let ctx = es::new_expr_context(vec![]);
     let int_ft = new_field_type(TypeLonglong);
     let approx_cd = new_agg_func_desc(
@@ -1740,4 +1740,108 @@ fn part_b2_names_remain_blocked() {
     )
     .unwrap();
     assert_blocked(build(&*ctx, &approx_pct, 0));
+}
+
+// Ruling R23 (#390, constitution art. 9.3): COUNT(DISTINCT) deduplicates equal values
+// consistently across single-argument and multi-argument paths:
+// - {+0.0, -0.0} counts as 1 in both COUNT(DISTINCT x) and COUNT(DISTINCT x, 1).
+// - Duration values with equal nanoseconds and differing Fsp (e.g. TIME(str) on '00:00:01' vs
+//   '00:00:01.000') encode to the same key and count as 1 in both single- and multi-arg paths.
+// - Time values with equal CoreTime and differing Type or Fsp (e.g. COALESCE(date, datetime) or
+//   TIMESTAMP(str)) encode to the same key and count as 1.
+#[test]
+fn count_distinct_canonical_keys() {
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let st = EvalState::new();
+
+    // 1. {+0.0, -0.0}: single-arg COUNT(DISTINCT x) and multi-arg COUNT(DISTINCT x, 1) both == 1.
+    let dbl_ft = new_field_type(TypeDouble);
+    let int_ft = new_field_type(TypeLonglong);
+    let mut chk = new_chunk_with_capacity(&[dbl_ft.clone(), int_ft.clone()], 2);
+    chk.append_float64(0, 0.0);
+    chk.append_int64(1, 1);
+    chk.append_float64(0, -0.0);
+    chk.append_int64(1, 1);
+
+    for args in [
+        vec![column(&dbl_ft, 0)],
+        vec![column(&dbl_ft, 0), column(&int_ft, 1)],
+    ] {
+        let desc = new_agg_func_desc(&*ctx, ast::AggFuncCount, args, true).unwrap();
+        let f = built(&ctx, &desc);
+        let mut pr = f.alloc_partial_result();
+        f.update_partial_result(ec, &st, &rows(&chk), &mut pr)
+            .unwrap();
+        let dt = final_datum(ec, &*f, &mut pr, &desc.ret_tp);
+        assert_datum_eq(ec, &dt, &new_int_datum(1), "binary");
+    }
+
+    // 2. Duration with equal value and differing Fsp (0 vs 3): both single-arg and multi-arg
+    // produce identical encoded keys and count as 1.
+    let mut dur_ft0 = new_field_type(TypeDuration);
+    dur_ft0.set_decimal(0);
+    let mut dur_ft3 = new_field_type(TypeDuration);
+    dur_ft3.set_decimal(3);
+    let dur_val = 1_000_000_000i64; // 00:00:01
+    let c_dur0 = Expr::Constant(Constant::new(
+        new_duration_datum(Duration {
+            duration: dur_val,
+            fsp: 0,
+        }),
+        dur_ft0,
+    ))
+    .into_ref();
+    let c_dur3 = Expr::Constant(Constant::new(
+        new_duration_datum(Duration {
+            duration: dur_val,
+            fsp: 3,
+        }),
+        dur_ft3,
+    ))
+    .into_ref();
+    let collator = get_collator("binary");
+    let mut buf = [0u8; 16];
+    let (k_dur0, null0) =
+        eval_and_encode(ec, &st, &c_dur0, collator, Row::default(), &mut buf, vec![]).unwrap();
+    let (k_dur3, null3) =
+        eval_and_encode(ec, &st, &c_dur3, collator, Row::default(), &mut buf, vec![]).unwrap();
+    assert!(!null0 && !null3);
+    assert_eq!(
+        k_dur0, k_dur3,
+        "Duration with differing Fsp must encode to the same key (R23)"
+    );
+
+    // 3. Time with equal CoreTime and differing Type (Date vs Datetime) and Fsp (0 vs 3):
+    // encodes to the same key under R23.
+    let (t_date, err) = parse_date(&ec.type_ctx(), b"2020-01-01");
+    err.unwrap();
+    let t_dt0 = tidb_types::time::new_time(t_date.core_time(), mysql::TypeDatetime, 0);
+    let t_dt3 = tidb_types::time::new_time(t_date.core_time(), mysql::TypeDatetime, 3);
+    let c_date = Expr::Constant(Constant::new(
+        new_time_datum(t_date),
+        new_field_type(TypeDate),
+    ))
+    .into_ref();
+    let c_dt0 = Expr::Constant(Constant::new(
+        new_time_datum(t_dt0),
+        new_field_type(mysql::TypeDatetime),
+    ))
+    .into_ref();
+    let mut dt3_ft = new_field_type(mysql::TypeDatetime);
+    dt3_ft.set_decimal(3);
+    let c_dt3 = Expr::Constant(Constant::new(new_time_datum(t_dt3), dt3_ft)).into_ref();
+
+    let (k_date, _) =
+        eval_and_encode(ec, &st, &c_date, collator, Row::default(), &mut buf, vec![]).unwrap();
+    let (k_dt0, _) =
+        eval_and_encode(ec, &st, &c_dt0, collator, Row::default(), &mut buf, vec![]).unwrap();
+    let (k_dt3, _) =
+        eval_and_encode(ec, &st, &c_dt3, collator, Row::default(), &mut buf, vec![]).unwrap();
+    assert_eq!(
+        k_date, k_dt0,
+        "Date and Datetime of same instant must match (R23)"
+    );
+    assert_eq!(k_dt0, k_dt3, "Datetime with differing Fsp must match (R23)");
 }

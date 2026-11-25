@@ -603,8 +603,11 @@ fn append_int64(mut encoded_bytes: Vec<u8>, buf: &mut [u8], val: i64) -> Vec<u8>
     encoded_bytes
 }
 
-// go: appendFloat64 L1
+// go: appendFloat64 L2 (R23 #390: fold -0.0 to +0.0 so multi-arg matches single-arg Float64Set)
 fn append_float64(mut encoded_bytes: Vec<u8>, buf: &mut [u8], val: f64) -> Vec<u8> {
+    // Ruling R23 (#390, constitution art. 9.3): -0.0 == +0.0 in SQL and single-arg Float64Set,
+    // so canonicalize -0.0 to +0.0 before writing the 8-byte key.
+    let val = if val == 0.0 { 0.0 } else { val };
     buf[..8].copy_from_slice(&val.to_bits().to_ne_bytes());
     encoded_bytes.extend_from_slice(&buf[..8]);
     encoded_bytes
@@ -636,18 +639,23 @@ pub fn write_time(buf: &mut [u8], t: Time) {
     buf[15] = 0;
 }
 
-// go: appendTime L1
+// go: appendTime L2 (R23 #390: zero Type/Fsp bytes so equal times of different Type/Fsp match)
 fn append_time(mut encoded_bytes: Vec<u8>, buf: &mut [u8], val: Time) -> Vec<u8> {
     write_time(buf, val);
+    // Ruling R23 (#390, constitution art. 9.3): Time comparison ignores Type and Fsp, while
+    // expressions such as TIMESTAMP(str) and COALESCE(date, datetime) can yield equal times
+    // with differing Fsp or Type in one argument column. Clear bytes 12..14 to key on value only.
+    buf[12] = 0;
+    buf[13] = 0;
     encoded_bytes.extend_from_slice(&buf[..16]);
     encoded_bytes
 }
 
-// go: appendDuration L1
+// go: appendDuration L2 (R23 #390: encode Duration value only, omitting Fsp to match single-arg)
 fn append_duration(mut encoded_bytes: Vec<u8>, buf: &mut [u8], val: Duration) -> Vec<u8> {
-    // Go `types.Duration` is `struct { Duration int64; Fsp int }` (16 bytes on 64-bit).
+    // Ruling R23 (#390, constitution art. 9.3): Duration comparison and single-arg
+    // CountOriginalWithDistinct4Duration key on Duration only, ignoring Fsp.
     buf[..8].copy_from_slice(&val.duration.to_ne_bytes());
-    buf[8..16].copy_from_slice(&val.fsp.to_ne_bytes());
-    encoded_bytes.extend_from_slice(&buf[..16]);
+    encoded_bytes.extend_from_slice(&buf[..8]);
     encoded_bytes
 }
