@@ -121,11 +121,14 @@ impl HashAggFinalWorker {
         }
     }
 
-    // go: HashAggFinalWorker.mergeInputIntoResultMap L2 (async: CheckpointStride in merge loop per spec §4.7; A1 TrackedAlloc checkpoint)
+    // go: HashAggFinalWorker.mergeInputIntoResultMap L2 (async: CheckpointStride in merge loop per spec §4.7; A1 TrackedAlloc checkpoint; skip empty input map to avoid hashbrown 0.17 empty IntoIter leaking ColAlloc)
     async fn merge_input_into_result_map(
         &mut self,
         input: AggPartialResultMapper<ColAlloc>,
     ) -> Result<(), Error> {
+        if input.m.is_empty() {
+            return Ok(());
+        }
         // As w.partialResultMap is empty when we get the first input, directly assign it.
         if self.partial_result_map.m.is_empty() {
             self.partial_result_map = input;

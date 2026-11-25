@@ -1859,3 +1859,180 @@ async fn hash_agg_parallel_propagates_decimal_append_final_error() {
         assert_eq!(e.mem_tracker.bytes_consumed(), 0);
     }
 }
+
+/// Concurrent error sources in parallel `HashAggExec`: a partial worker hits a data error
+/// (`SUM(DECIMAL)` overflow) while the fetcher hits a child `Next` error (`err_at`). Either
+/// error may win the race to `finalOutputCh`; verify that one of the two is returned, all
+/// workers terminate cleanly on `Close`, and the memory tracker drops back to zero with no
+/// leaked `Arc<Tracker>` / `TrackedAlloc` handles.
+#[tokio::test]
+async fn hash_agg_parallel_concurrent_data_and_child_error() {
+    use tidb_base::mysql::TypeNewDecimal;
+    use tidb_types::MyDecimal;
+
+    let mut dec65_0 = new_field_type(TypeNewDecimal);
+    dec65_0.set_flen(65);
+    dec65_0.set_decimal(0);
+    let int_ft = new_field_type(TypeLonglong);
+    let src_types = vec![int_ft.clone(), dec65_0.clone()];
+
+    // 81 nines (max MyDecimal word buffer); adding two of them overflows DecimalAdd in the
+    // partial worker's UpdatePartialResult with ErrOverflow ("DECIMAL value is out of range").
+    let mut huge = MyDecimal::default();
+    huge.from_string(&[b'9'; 81]).unwrap();
+    let mut one = MyDecimal::default();
+    one.from_string(b"1").unwrap();
+
+    // First confirm batch 0 alone reliably produces the data overflow error (with err_at = None).
+    {
+        let sctx = parallel_ctx(2, 2);
+        let ectx = exec_ctx(&sctx);
+        let mut c = new_chunk_with_capacity(&src_types, 2);
+        c.append_int64(0, 1);
+        c.append_my_decimal(1, &huge);
+        c.append_int64(0, 1);
+        c.append_my_decimal(1, &huge);
+        let src = BatchSource {
+            base: new_base_executor_v2(
+                sctx.get_session_vars(),
+                &sctx.sql_killer(),
+                Some(schema_of(&src_types)),
+                1,
+                Vec::new(),
+            ),
+            batches: vec![c],
+            ptr: 0,
+            err_at: None,
+            opened: Arc::new(AtomicBool::new(false)),
+            closed: Arc::new(AtomicBool::new(false)),
+            dropped: None,
+        };
+        let aggs = [desc(&sctx, ast::AggFuncSum, col(&dec65_0, 1), false)];
+        let out_types: Vec<FieldType> = aggs.iter().map(|d| (*d.base.ret_tp).clone()).collect();
+        let mut b = new_executor_builder(&sctx, None, Arc::new(TelemetryInfo::default()));
+        let mut e = b
+            .build_hash_agg_from_child_exec(
+                &sctx,
+                Some(Box::new(src)),
+                &schema_of(&out_types),
+                2,
+                &[col(&int_ft, 0)],
+                &aggs,
+            )
+            .unwrap();
+        e.open(&ectx).await.unwrap();
+        let (_, err) = run_exec(&ectx, &mut e).await;
+        let err = err.expect("huge + huge DECIMAL sum must overflow");
+        assert!(
+            err.to_string().contains("out of range"),
+            "expected DECIMAL overflow, got: {err}"
+        );
+        e.close().await.unwrap();
+        assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+    }
+
+    // Now race the data overflow in batch 0 against mock child errors in subsequent batches.
+    for round in 0..8 {
+        let sctx = parallel_ctx(4, 4);
+        let ectx = exec_ctx(&sctx);
+
+        let mut input = Vec::with_capacity(16);
+        for b in 0..16 {
+            let mut c = new_chunk_with_capacity(&src_types, 2);
+            if b == 0 {
+                c.append_int64(0, 1);
+                c.append_my_decimal(1, &huge);
+                c.append_int64(0, 1);
+                c.append_my_decimal(1, &huge);
+            } else {
+                c.append_int64(0, (b % 4) as i64);
+                c.append_my_decimal(1, &one);
+            }
+            input.push(c);
+        }
+
+        let closed = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let src = BatchSource {
+            base: new_base_executor_v2(
+                sctx.get_session_vars(),
+                &sctx.sql_killer(),
+                Some(schema_of(&src_types)),
+                1,
+                Vec::new(),
+            ),
+            batches: input,
+            ptr: 0,
+            err_at: Some(1 + (round % 4)),
+            opened: Arc::new(AtomicBool::new(false)),
+            closed: Arc::clone(&closed),
+            dropped: Some(Arc::clone(&dropped)),
+        };
+        let aggs = [desc(&sctx, ast::AggFuncSum, col(&dec65_0, 1), false)];
+        let out_types: Vec<FieldType> = aggs.iter().map(|d| (*d.base.ret_tp).clone()).collect();
+        let mut b = new_executor_builder(&sctx, None, Arc::new(TelemetryInfo::default()));
+        let mut e = b
+            .build_hash_agg_from_child_exec(
+                &sctx,
+                Some(Box::new(src)),
+                &schema_of(&out_types),
+                2,
+                &[col(&int_ft, 0)],
+                &aggs,
+            )
+            .unwrap();
+        assert!(!e.is_unparallel_exec);
+        let tracker = Arc::clone(&e.mem_tracker);
+
+        e.open(&ectx).await.unwrap();
+        let (_, err) = run_exec(&ectx, &mut e).await;
+        let err = err.expect("concurrent data + child errors must fail execution");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("out of range") || msg.contains("mock child error"),
+            "round {round}: expected DECIMAL overflow or child error, got: {msg}"
+        );
+        e.close().await.unwrap();
+        assert!(closed.load(Ordering::SeqCst), "child must be closed");
+        assert_eq!(tracker.bytes_consumed(), 0);
+        drop(e);
+        drop(ectx);
+        drop(sctx);
+        assert!(dropped.load(Ordering::SeqCst), "child must be dropped");
+        // Strong count == 1 proves every worker exited and released all TrackedAlloc / Tracker refs.
+        assert_eq!(Arc::strong_count(&tracker), 1);
+    }
+}
+
+/// Regression test: merging an empty `AggPartialResultMapper<ColAlloc>` into a non-empty final
+/// worker must not leak `TrackedAlloc` / `Arc<Tracker>` (hashbrown 0.17's `HashMap::into_iter`
+/// leaks the allocator when called on a zero-capacity map).
+#[tokio::test]
+async fn hash_agg_final_worker_empty_map_merge_drops_tracked_alloc() {
+    let tps = child_types();
+    let sctx = parallel_ctx(4, 4);
+    let ectx = exec_ctx(&sctx);
+    let aggs = [desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false)];
+    // Two distinct keys in separate batches across 4 partial/final workers ensure at least one
+    // final worker receives a non-empty map followed by an empty map from another partial worker.
+    let input = vec![
+        batches(&[&[(1, 1.0)]]).pop().unwrap(),
+        batches(&[&[(3, 2.0)]]).pop().unwrap(),
+    ];
+    let (mut e, _, closed) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+    assert!(!e.is_unparallel_exec);
+    let tracker = Arc::clone(&e.mem_tracker);
+
+    e.open(&ectx).await.unwrap();
+    let (mut out, err) = run_exec(&ectx, &mut e).await;
+    assert!(err.is_none(), "unexpected error: {err:?}");
+    out.sort();
+    assert_eq!(out, vec!["1", "1"]);
+    e.close().await.unwrap();
+    assert!(closed.load(Ordering::SeqCst));
+    assert_eq!(tracker.bytes_consumed(), 0);
+    drop(e);
+    drop(ectx);
+    drop(sctx);
+    assert_eq!(Arc::strong_count(&tracker), 1);
+}
