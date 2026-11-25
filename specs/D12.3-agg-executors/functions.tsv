@@ -1,0 +1,20 @@
+item	block	file	function	go_lines	not_ported
+D12.3-A	D12.3	pkg/executor/aggregate/agg_stream_executor.go	StreamAggExec.Open	14	
+D12.3-A	D12.3	pkg/executor/aggregate/agg_stream_executor.go	StreamAggExec.OpenSelf	27	
+D12.3-A	D12.3	pkg/executor/aggregate/agg_stream_executor.go	StreamAggExec.Close	8	
+D12.3-A	D12.3	pkg/executor/aggregate/agg_stream_executor.go	StreamAggExec.Next	11	
+D12.3-A	D12.3	pkg/executor/aggregate/agg_stream_executor.go	StreamAggExec.consumeOneGroup	45	
+D12.3-A	D12.3	pkg/executor/aggregate/agg_stream_executor.go	StreamAggExec.consumeGroupRows	26	
+D12.3-A	D12.3	pkg/executor/aggregate/agg_stream_executor.go	StreamAggExec.consumeCurGroupRowsAndFetchChild	30	
+D12.3-A	D12.3	pkg/executor/aggregate/agg_stream_executor.go	StreamAggExec.appendResult2Chunk	18	
+D12.3-A	D12.3	pkg/executor/aggregate/agg_util.go	closeBaseExecutor	8	
+D12.3-A	D12.3	pkg/executor/builder.go	executorBuilder.buildStreamAgg	7	the physical stream aggregation plan (PhysicalStreamAgg, physical operators D10.1) is not ported: no plan kind dispatches to it and aggregates fall back at planning (D09.4); the builder's default arm already returns blocked, so a stub would be unreachable
+D12.3-A	D12.3	pkg/executor/builder.go	executorBuilder.buildStreamAggFromChildExec	28	
+D12.3-A	D12.0	pkg/executor/internal/vecgroupchecker/vec_group_checker.go	NewVecGroupChecker	10	
+D12.3-A	D12.0	pkg/executor/internal/vecgroupchecker/vec_group_checker.go	VecGroupChecker.SplitIntoGroups	79	
+D12.3-A	D12.0	pkg/executor/internal/vecgroupchecker/vec_group_checker.go	VecGroupChecker.getFirstAndLastRowDatum	187	
+D12.3-A	D12.0	pkg/executor/internal/vecgroupchecker/vec_group_checker.go	VecGroupChecker.evalGroupItemsAndResolveGroups	172	
+D12.3-A	D12.0	pkg/executor/internal/vecgroupchecker/vec_group_checker.go	VecGroupChecker.GetNextGroup	10	
+D12.3-A	D12.0	pkg/executor/internal/vecgroupchecker/vec_group_checker.go	VecGroupChecker.IsExhausted	3	
+D12.3-A	D12.0	pkg/executor/internal/vecgroupchecker/vec_group_checker.go	VecGroupChecker.Reset	21	
+D12.3-A	D12.0	pkg/executor/internal/vecgroupchecker/vec_group_checker.go	VecGroupChecker.GroupCount	3	

@@ -1,6 +1,6 @@
 # D12.3 聚合执行器框架（hash agg / stream agg）：spec
 
-状态：已确认（2026-11-25），只写 spec（#335）。第 8 节记录各决定点的结论：全部按本 spec 的建议，由维护者按宪章第九条（谁来决定，#374）决定。下一步按 §2 的部分拆成实现任务。
+状态：已确认（2026-11-25），只写 spec（#335）。第 8 节记录各决定点的结论：全部按本 spec 的建议，由维护者按宪章第九条（谁来决定，#374）决定。下一步按 §2 的部分拆成实现任务。第 A 部分（StreamAgg 与 vecgroupchecker）由 #376 实现，实现中新增的差异见 §6 第 16-21 条。
 
 块：D12.3（ROADMAP P4 的第 2 层；Go 约 1,959 行，8 个文件），crate `tidb-executor`（N0 rank 14）。
 
@@ -349,6 +349,15 @@ sysbench 的 SUM / DISTINCT 要等 D09.4、D09.9、D10.1、D10.3、D12.3、D12.4
 13. **新增的 KILL 检查点**（final_worker.go:84-100、124-142，§4.7）：tidb-rs 在 final worker 的长循环中检查 KILL，可能比 Go 更早响应 KILL（N3 第二部分第 5 条）。
 14. **failpoint 不移植**（测试钩子）：agg_hash_executor.go:226-232、238-242、274、334、515、640-644、743、749-753、797、856；final_worker.go:113、153；partial_worker.go:259；agg_stream_executor.go:64-68、102、190、194、212、245。
 15. **`HashAggExec.Sc` 字段与 `invalidMemoryUsageForTrackingTest` 字段不保留**（agg_hash_executor.go:96、158）：前者本包中没有读者，后者只有测试读（§2.4）。
+
+第 A 部分（StreamAgg 与 vecgroupchecker，#376）实现时新增的差异：
+
+16. **`buildStreamAgg` 不移植，§3 的分派桩不加**（builder.go:280、2101-2107）：Rust 还没有 `PhysicalStreamAgg`（D10.1，物理算子定义），聚合语句在构建逻辑计划时就回退（D09.4，聚合的构建），没有任何计划会分派到这里；`build` 的默认分支本来就返回 `blocked`，再加一个桩不可达，还会让桩棘轮在 port-block §2 允许的两种情况之外上升。所以 `buildStreamAgg` 在 `functions.tsv` 中记为 not_ported（理由同上），只移植 `buildStreamAggFromChildExec`：它在 Rust 中接收计划的各字段（schema、id、`GroupByItems`、`AggFuncs`）作参数，`IsFinalAgg` 写成本文件中的 glue（与 Go 的 `basePhysicalAgg.IsFinalAgg` 同一判断）。D10.1 有了 `PhysicalStreamAgg` 之后再移植 `buildStreamAgg`，并把分派接上。`executor_metrics.ExecutorStreamAggExec.Inc()`（builder.go:2134）不移植（D14.1，metrics）。
+17. **`aggfuncs.Build` 返回 nil 时**（builder.go:2127-2128；agg_stream_executor.go:157、173、238）：Go 把 nil 放进 `AggFuncs`，之后调用它的方法时 nil 指针 panic。Rust 存 `None`，用到它的地方返回同样文本的错误 `runtime error: invalid memory address or nil pointer dereference`（M-PANIC）。在 Go 中这个 panic 不被本执行器恢复，可能使连接断开；Rust 只让这条语句失败。D12.4 第 A 部分的函数中，govec 生成器只用 `Build` 返回非 nil 的描述，这条路径没有向量。
+18. **内存记账（A1，§4.6）在 StreamAgg 中的具体做法**（agg_stream_executor.go:83-103、113-118、186-198、246-250）：`memUsageOfInitialPartialResult`、`pendingMemDelta` 和它的 1 KiB 批量阈值、`ReplaceBytesUsed` 都删除；部分结果和子 chunk 用 `TrackedAlloc` 记实际字节数；Go 每组 `Consume` 正数的位置（:191-198 的批量刷新）改为每组更新之后 `checkpoint()?`，所以超限报错的那一组可能比 Go 早（Go 要攒够 1 KiB）。`OpenSelf` 中先重置或新建 tracker、再分配部分结果（Go 先分配、后重置，:85-96），这样分配的字节记在重置之后的 tracker 上。Go 的 `TestStreamAggPendingMemDeltaBatching` 数的是批量刷新的次数，Rust 没有这个批量，改为执行器级单测：记账随数据增长、`Close` 后归零、只在 `TrackAggregateMemoryUsage` 为真时挂到语句的 tracker 下、组内超限时返回 8175 错误。
+19. **`inputIter` / `inputRow` 不保留**（agg_stream_executor.go:49-50、82-83）：Rust 按行下标遍历子 chunk（M-ROW），`consumeOneGroup` 中 Go 用迭代器取的行改为下标。
+20. **vecgroupchecker 的缓冲区钩子不移植**（vec_group_checker.go:31、34、354-359 的 `allocateBuffer` / `releaseBuffer`）：Rust 直接分配列（M-POOL）。Go 的 `TestVecGroupCheckerDATARACE` 用这两个钩子让求值写进输入 chunk 的列，再改写这一列检查首尾 datum 不变；Rust 版改为在 split 之后改写输入列，检查同样的内容。`Reset` 中 Go 只在 `groupOffset` 等非空时才清空，Rust 无条件清空，结果相同。
+21. **会话值的读取时刻**（agg_stream_executor.go:98）：`TrackAggregateMemoryUsage` 与求值上下文在建执行器时读（N2），语句的 tracker 在 `Open` 时从 `ExecCtx` 取。同一条语句中不变（与第 9 条相同）。
 
 ## 7. 可能的 Go 问题（读代码发现，尚未在运行中的 v8.5.8 上复现）
 

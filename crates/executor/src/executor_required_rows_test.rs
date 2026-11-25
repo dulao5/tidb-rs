@@ -1,5 +1,5 @@
 //! Go `pkg/executor/executor_required_rows_test.go`: the basic executors (limit, selection,
-//! projection) on a data source that checks how many rows each `Next` returns.
+//! projection) and the stream aggregation (D12.3 part A) on a data source that checks how many rows each `Next` returns.
 //!
 //! Go generates random values; here the default generator counts (the values are never
 //! checked, only the number of rows).
@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use tidb_base::Error;
 use tidb_base::mysql::{TypeDouble, TypeLonglong, TypeTiny};
 use tidb_chunk::chunk::Chunk;
+use tidb_expression::aggregation::{AggFuncDesc, new_agg_func_desc};
 use tidb_expression::eval::RpnState;
 use tidb_expression::evaluator::new_evaluator_suite;
 use tidb_expression::expression::{EvalState, Expr};
@@ -25,7 +26,9 @@ use tidb_parser::types::FieldType;
 use tidb_types::datum::new_int_datum;
 use tidb_types::field_type::new_field_type;
 
+use crate::adapter::TelemetryInfo;
 use crate::adapter::tests::MockSession;
+use crate::builder::new_executor_builder;
 use crate::exec::ExecCtx;
 use crate::glue::SessionContext;
 use crate::internal::exec::executor::{
@@ -579,4 +582,115 @@ pub(crate) fn build_projection_exec(
         new_evaluator_suite(&exprs, false),
         false,
     ))
+}
+
+/// Go `divGenerator`: the integer value advances one step every `factor` rows. Go's double
+/// branch reads the integer counter (and advances its own, unused one): kept.
+fn div_generator(factor: i64) -> Generator {
+    let mut closure_count_int = 0i64;
+    let mut closure_count_double = 0i64;
+    Box::new(move |val_type: &FieldType| match val_type.get_type() {
+        TypeLonglong => {
+            let ret = closure_count_int / factor;
+            closure_count_int += 1;
+            Value::Int(ret)
+        }
+        TypeDouble => {
+            let ret = (closure_count_int / factor) as f64;
+            closure_count_double += 1;
+            let _ = closure_count_double;
+            Value::Float(ret)
+        }
+        _ => panic!("not implement"),
+    })
+}
+
+#[tokio::test]
+async fn stream_agg_required_rows() {
+    let max_chunk_size = DefMaxChunkSize as usize;
+    struct Case {
+        total_rows: usize,
+        agg_func: &'static str,
+        required_rows: Vec<usize>,
+        expected_rows: Vec<usize>,
+        expected_rows_ds: Vec<usize>,
+        factor: i64,
+    }
+    let test_cases = [
+        Case {
+            total_rows: 1000000,
+            agg_func: tidb_expression::ast_funcs::AggFuncSum,
+            required_rows: vec![1, 2, 3, 4, 5, 6, 7],
+            expected_rows: vec![1, 2, 3, 4, 5, 6, 7],
+            expected_rows_ds: vec![max_chunk_size],
+            factor: 1,
+        },
+        Case {
+            total_rows: max_chunk_size * 3,
+            agg_func: tidb_expression::ast_funcs::AggFuncAvg,
+            required_rows: vec![1, 3],
+            expected_rows: vec![1, 2],
+            expected_rows_ds: vec![max_chunk_size, max_chunk_size, max_chunk_size, 0],
+            factor: max_chunk_size as i64,
+        },
+        Case {
+            total_rows: max_chunk_size * 2 - 1,
+            agg_func: tidb_expression::ast_funcs::AggFuncMax,
+            required_rows: vec![max_chunk_size / 2 + 1],
+            expected_rows: vec![max_chunk_size / 2 + 1],
+            expected_rows_ds: vec![max_chunk_size, max_chunk_size - 1],
+            factor: 2,
+        },
+    ];
+
+    for test_case in test_cases {
+        let sctx = default_ctx();
+        let ctx = exec_ctx(&sctx);
+        let (ds, num_next_called) = new_required_rows_data_source_with_generator(
+            &sctx,
+            test_case.total_rows,
+            Some(test_case.expected_rows_ds.clone()),
+            div_generator(test_case.factor),
+        );
+        let child_cols = ds.base.meta.schema().columns.clone();
+        let schema = new_schema(child_cols.clone());
+        let group_by = vec![Expr::Column(Column::clone(&child_cols[1])).into_ref()];
+        let agg_func = new_agg_func_desc(
+            &*sctx.get_expr_ctx(),
+            test_case.agg_func,
+            vec![Expr::Column(Column::clone(&child_cols[0])).into_ref()],
+            true,
+        )
+        .unwrap();
+        let agg_funcs = vec![agg_func];
+        let mut executor =
+            build_stream_agg_executor(&sctx, Box::new(ds), &schema, &agg_funcs, &group_by);
+        executor.open(&ctx).await.unwrap();
+        let mut chk = exec::new_first_chunk(executor.as_ref());
+        for i in 0..test_case.required_rows.len() {
+            chk.set_required_rows(test_case.required_rows[i] as isize, max_chunk_size);
+            executor.next(&ctx, &mut chk).await.unwrap();
+            assert_eq!(test_case.expected_rows[i], chk.num_rows());
+        }
+        executor.close().await.unwrap();
+        check_num_next_called(&num_next_called, &test_case.expected_rows_ds).unwrap();
+    }
+}
+
+/// Go `buildStreamAggExecutor` (benchmark_test.go) with `concurrency` 1 and a sorted data
+/// source, the only form `TestStreamAggRequiredRows` uses: the stream aggregation directly
+/// over the data source (Go builds the plan over a mock data plan and runs the builder; the
+/// plan, D10.1, is not ported, so the builder's function is called with its fields).
+pub(crate) fn build_stream_agg_executor(
+    ctx: &dyn SessionContext,
+    src_exec: Box<dyn Executor>,
+    schema: &Schema,
+    agg_funcs: &[AggFuncDesc],
+    group_items: &[ExprRef],
+) -> Box<dyn Executor> {
+    let mut b = new_executor_builder(ctx, None, Arc::new(TelemetryInfo::default()));
+    let e = b
+        .build_stream_agg_from_child_exec(ctx, Some(src_exec), schema, 0, group_items, agg_funcs)
+        .expect("the aggregate functions of the test build");
+    Box::new(e)
 }

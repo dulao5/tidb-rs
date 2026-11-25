@@ -23,12 +23,13 @@ use std::sync::Arc;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::config;
-use tidb_chunk::chunk::Chunk;
+use tidb_chunk::chunk::{self, Chunk};
 use tidb_chunk::chunk_util::new_column_swap_helper;
+use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode, is_all_first_row};
 use tidb_expression::eval::RpnState;
 use tidb_expression::evaluator::new_evaluator_suite;
 use tidb_expression::expression::EvalState;
-use tidb_expression::{Column, Expr, Schema};
+use tidb_expression::{Column, Expr, ExprRef, Schema};
 use tidb_infoschema::table::column::get_col_origin_default_value;
 use tidb_infoschema::tables::{find_primary_index, try_get_common_pk_column_ids};
 use tidb_kv::kv::Snapshot;
@@ -50,7 +51,9 @@ use tikv_client::proto::metapb;
 
 use crate::adapter::TelemetryInfo;
 use crate::glue::{InfoSchemaRef, Plan, SessionContext};
-use crate::internal::exec::executor::{Executor, new_base_executor, new_base_executor_v2};
+use crate::internal::exec::executor::{
+    self as exec, Executor, new_base_executor, new_base_executor_v2,
+};
 use crate::internal::exec::indexusage::IndexUsageReporter;
 use crate::projection::{ProjectionExec, new_projection_executor_context};
 use crate::select::{LimitExec, SelectionExec, TableDualExec, new_selection_executor_context};
@@ -58,6 +61,10 @@ use tidb_planner::core::physical_plans::{PhysicalSort, PhysicalTopN};
 use tidb_planner::core::point_get_plan::PointGetPlan;
 use tidb_planner::util::byitem::ByItems;
 
+use crate::aggfuncs;
+use crate::aggregate::StreamAggExec;
+use crate::aggregate::agg_stream_executor::new_stream_agg_exec;
+use crate::internal::vecgroupchecker::vec_group_checker::new_vec_group_checker;
 use crate::sortexec::SortExec;
 use crate::sortexec::sort::new_sort_exec;
 use crate::sortexec::topn::new_top_n_exec;
@@ -493,6 +500,92 @@ impl ExecutorBuilder {
         }
         Some(Box::new(t))
     }
+
+    /// buildStreamAggFromChildExec: the stream aggregation executor over `child_exec`.
+    ///
+    /// Go's `buildStreamAgg` (build the child, then this function) is not ported: the
+    /// physical stream aggregation plan (`PhysicalStreamAgg`, the physical operators D10.1)
+    /// does not exist yet, so no plan kind dispatches to it, and the planner falls back
+    /// before an aggregate reaches the builder (the aggregation rules, D09.4); `build`'s
+    /// default arm returns `blocked` for any plan it cannot build
+    /// (`specs/D12.3-agg-executors/functions.tsv`, its `not_ported` column).
+    ///
+    /// Go takes the `*PhysicalStreamAgg`; it is not ported (D10.1), so the caller passes the
+    /// fields Go reads: the schema, the plan id, the group-by items and the aggregate
+    /// functions. `v.IsFinalAgg()` (D10.1) is computed on the aggregate functions as Go does.
+    /// The executor gets the session values it reads (N2). An aggregate function that
+    /// `aggfuncs.Build` cannot build yet (its temporary `blocked` error, the aggregate
+    /// functions D12.4) sets `b.err` and builds nothing; Go's `Build` has no error. The
+    /// executor counter (`executor_metrics.ExecutorStreamAggExec`) is not ported (the metric
+    /// vectors of D14.1), as `buildSort`'s.
+    // go: executorBuilder.buildStreamAggFromChildExec L2 (the plan's fields are passed in, PhysicalStreamAgg is D10.1; Build's temporary blocked error sets b.err; the executor counter is not ported)
+    pub fn build_stream_agg_from_child_exec(
+        &mut self,
+        sctx: &dyn SessionContext,
+        child_exec: Option<Box<dyn Executor>>,
+        schema: &Schema,
+        id: i32,
+        group_by_items: &[ExprRef],
+        agg_funcs: &[AggFuncDesc],
+    ) -> Option<StreamAggExec> {
+        let expr_ctx = sctx.get_expr_ctx();
+        let killer = sctx.sql_killer();
+        let vars = sctx.get_session_vars();
+        let child_exec = child_exec.expect("invalid memory address or nil pointer dereference");
+        let mut e = new_stream_agg_exec(
+            new_base_executor(
+                vars,
+                &killer,
+                Some(schema.clone()),
+                id as isize,
+                vec![child_exec],
+            ),
+            new_vec_group_checker(
+                expr_ctx.get_eval_ctx(),
+                vars.enable_vectorized_expression,
+                group_by_items.to_vec(),
+            ),
+            expr_ctx.get_eval_ctx(),
+            vars.track_aggregate_memory_usage,
+        );
+        e.agg_funcs = Vec::with_capacity(agg_funcs.len());
+
+        if !group_by_items.is_empty() || is_all_first_row(agg_funcs) {
+            e.default_val = None;
+        } else {
+            // Only do this for final agg, see issue `#35295`, `#30923`
+            if is_final_agg(agg_funcs) {
+                e.default_val = Some(chunk::new(exec::ret_types(&e), 1, 1));
+            }
+        }
+        for (i, agg_desc) in agg_funcs.iter().enumerate() {
+            let agg_func = match aggfuncs::build(&*expr_ctx, agg_desc, i as isize) {
+                Ok(agg_func) => agg_func,
+                Err(err) => {
+                    self.err = Some(err);
+                    return None;
+                }
+            };
+            e.agg_funcs.push(agg_func);
+            if let Some(default_val) = &mut e.default_val {
+                let value = agg_desc.get_default_value();
+                default_val.append_datum(i, &value);
+            }
+        }
+
+        Some(e)
+    }
+}
+
+/// `v.IsFinalAgg()` of the stream aggregation plan: the plan (D10.1) is not ported, so it is
+/// computed on the plan's aggregate functions, as Go's `basePhysicalAgg.IsFinalAgg` does.
+// glue: basePhysicalAgg.IsFinalAgg on the plan's aggregate functions (the plan is D10.1)
+fn is_final_agg(agg_funcs: &[AggFuncDesc]) -> bool {
+    if let Some(first) = agg_funcs.first() {
+        return first.mode == AggFunctionMode::FinalMode
+            || first.mode == AggFunctionMode::CompleteMode;
+    }
+    false
 }
 
 /// `sortexec.SortExec{BaseExecutor: exec.NewBaseExecutor(b.sctx, v.Schema(), v.ID(),
