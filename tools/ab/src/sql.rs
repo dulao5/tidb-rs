@@ -306,23 +306,46 @@ pub struct Statement {
     pub section: Section,
     /// mysqltest `--sorted_result` preceded it: compare rows as a multiset.
     pub sorted: bool,
+    /// The `-- ab:template NAME` in force: the statement's summary group (default: its first
+    /// keyword).
+    pub template: Option<String>,
+    /// The `-- ab:execute PARAMS` lines right before it, as (line, parameter list): one EXECUTE
+    /// each, in order, all of the same PREPARE.
+    pub executes: Vec<(usize, String)>,
 }
 
 /// Splits a workload file. Statements end at `;` outside quotes and comments; a file with no
 /// such `;` at all has one statement per non-empty line. Lines starting with `--` or `#` between
-/// statements are comments; among them `-- ab:setup` / `-- ab:test` switch sections and
-/// `--sorted_result` (mysqltest) marks the next statement as unordered. Other mysqltest
-/// directives (`--error`, `--enable_warnings`, ...) are ignored.
-pub fn split_statements(src: &str) -> Vec<Statement> {
+/// statements are comments; among them `-- ab:setup` / `-- ab:test` switch sections,
+/// `--sorted_result` (mysqltest) marks the next statement as unordered, `-- ab:template NAME`
+/// names the summary group of the statements after it (a bare `-- ab:template` goes back to the
+/// first keyword), and each `-- ab:execute PARAMS` line adds one EXECUTE with that parameter
+/// list to the next statement. Other mysqltest directives (`--error`, `--enable_warnings`, ...)
+/// are ignored. An `ab:execute` line with no statement after it in its section, or a template
+/// name with spaces, is an error.
+pub fn split_statements(src: &str) -> Result<Vec<Statement>, String> {
     let line_mode = !has_terminator(src);
     let b = src.as_bytes();
     let mut out = Vec::new();
     let mut section = Section::Test;
     let mut sorted = false;
+    let mut template: Option<String> = None;
+    let mut executes: Vec<(usize, String)> = Vec::new();
     let mut start: Option<usize> = None;
     let mut i = 0;
     let line_of = |pos: usize| src[..pos].bytes().filter(|&c| c == b'\n').count() + 1;
-    let mut finish = |from: usize, to: usize, section: Section, sorted: &mut bool| {
+    let dangling = |executes: &[(usize, String)]| match executes.first() {
+        Some((line, _)) => Err(format!(
+            "line {line}: ab:execute without a statement after it"
+        )),
+        None => Ok(()),
+    };
+    let mut finish = |from: usize,
+                      to: usize,
+                      section: Section,
+                      sorted: &mut bool,
+                      template: &Option<String>,
+                      executes: &mut Vec<(usize, String)>| {
         let sql = src[from..to].trim();
         if !sql.is_empty() {
             out.push(Statement {
@@ -330,6 +353,8 @@ pub fn split_statements(src: &str) -> Vec<Statement> {
                 line: line_of(from),
                 section,
                 sorted: *sorted,
+                template: template.clone(),
+                executes: std::mem::take(executes),
             });
         }
         *sorted = false;
@@ -346,10 +371,27 @@ pub fn split_statements(src: &str) -> Vec<Statement> {
                 let end = skip_line(b, i);
                 let line = src[i..end].trim();
                 let directive = line.trim_start_matches(['-', '#']).trim();
-                match directive {
-                    "ab:setup" => section = Section::Setup,
-                    "ab:test" => section = Section::Test,
-                    "sorted_result" => sorted = true,
+                match directive_arg(directive) {
+                    ("ab:setup", "") => {
+                        dangling(&executes)?;
+                        section = Section::Setup;
+                    }
+                    ("ab:test", "") => {
+                        dangling(&executes)?;
+                        section = Section::Test;
+                    }
+                    ("sorted_result", "") => sorted = true,
+                    ("ab:template", "") => template = None,
+                    ("ab:template", name) if name.split_whitespace().nth(1).is_none() => {
+                        template = Some(name.to_string());
+                    }
+                    ("ab:template", name) => {
+                        return Err(format!(
+                            "line {}: template name {name:?} has spaces",
+                            line_of(i)
+                        ));
+                    }
+                    ("ab:execute", params) => executes.push((line_of(i), params.to_string())),
                     _ => {}
                 }
                 i = end;
@@ -363,20 +405,32 @@ pub fn split_statements(src: &str) -> Vec<Statement> {
             b'-' if is_dash_comment(b, i) => i = skip_line(b, i),
             b'/' if b.get(i + 1) == Some(&b'*') => i = skip_block(b, i),
             b';' if !line_mode => {
-                finish(start.take().unwrap_or(i), i, section, &mut sorted);
+                let from = start.take().unwrap_or(i);
+                finish(from, i, section, &mut sorted, &template, &mut executes);
                 i += 1;
             }
             b'\n' if line_mode => {
-                finish(start.take().unwrap_or(i), i, section, &mut sorted);
+                let from = start.take().unwrap_or(i);
+                finish(from, i, section, &mut sorted, &template, &mut executes);
                 i += 1;
             }
             _ => i += 1,
         }
     }
     if let Some(s) = start {
-        finish(s, b.len(), section, &mut sorted);
+        finish(s, b.len(), section, &mut sorted, &template, &mut executes);
     }
-    out
+    dangling(&executes)?;
+    Ok(out)
+}
+
+/// A comment line's directive word and the rest of the line (trimmed): `ab:execute 1, 2` ->
+/// (`ab:execute`, `1, 2`).
+fn directive_arg(directive: &str) -> (&str, &str) {
+    match directive.split_once(char::is_whitespace) {
+        Some((word, rest)) => (word, rest.trim()),
+        None => (directive, ""),
+    }
 }
 
 /// Whether `src` has a `;` outside quotes and comments.
@@ -394,6 +448,14 @@ fn has_terminator(src: &str) -> bool {
         }
     }
     false
+}
+
+/// Number of `?` placeholders outside quotes and comments.
+pub fn placeholders(sql: &str) -> usize {
+    tokens(sql)
+        .iter()
+        .filter(|t| t.kind == TokenKind::Punct && t.text(sql) == "?")
+        .count()
 }
 
 /// Replaces each `?` placeholder outside quotes and comments with the given literals.
@@ -463,7 +525,7 @@ mod tests {
     fn splits() {
         let src = "-- comment\nselect 1;\n--sorted_result\nselect 'a;b'\n  from t; # trailing\n\
                    -- ab:setup\ncreate table t (a int);\n-- ab:test\nselect /* ; */ 2;";
-        let s = split_statements(src);
+        let s = split_statements(src).unwrap();
         let sqls: Vec<_> = s.iter().map(|s| s.sql.as_str()).collect();
         assert_eq!(
             sqls,
@@ -480,10 +542,85 @@ mod tests {
         assert_eq!(s[2].section, Section::Setup);
         assert_eq!(s[3].section, Section::Test);
 
-        let lines = split_statements("select 1\n\n# c\nselect 2\n");
+        assert!(
+            s.iter()
+                .all(|s| s.template.is_none() && s.executes.is_empty())
+        );
+
+        let lines = split_statements("select 1\n\n# c\nselect 2\n").unwrap();
         let sqls: Vec<_> = lines.iter().map(|s| s.sql.as_str()).collect();
         assert_eq!(sqls, vec!["select 1", "select 2"]);
         assert_eq!(lines[1].line, 4);
+    }
+
+    #[test]
+    fn execute_and_template_directives() {
+        let src = "select 1;\n-- ab:template two_params\n-- ab:execute 1, 'a'\n\
+                   --ab:execute  -2 , 3u\nselect ?, ? from t;\n# ab:execute\nselect 2;\n\
+                   -- ab:template\n-- ab:executes 1\nselect 3;";
+        let s = split_statements(src).unwrap();
+        let got: Vec<_> = s
+            .iter()
+            .map(|s| {
+                (
+                    s.sql.as_str(),
+                    s.line,
+                    s.template.as_deref(),
+                    s.executes.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("select 1", 1, None, vec![]),
+                (
+                    "select ?, ? from t",
+                    5,
+                    Some("two_params"),
+                    vec![(3, "1, 'a'".to_string()), (4, "-2 , 3u".to_string())]
+                ),
+                // An empty parameter list is one EXECUTE without parameters; the template
+                // stays in force until a bare `ab:template`.
+                ("select 2", 7, Some("two_params"), vec![(6, String::new())]),
+                // Not a directive: `ab:executes`.
+                ("select 3", 10, None, vec![]),
+            ]
+        );
+        // Line mode (no `;`) reads the directives too.
+        let lines = split_statements("-- ab:execute 4\nselect ?\nselect 5\n").unwrap();
+        assert_eq!(lines[0].executes, vec![(1, "4".to_string())]);
+        assert!(lines[1].executes.is_empty());
+    }
+
+    #[test]
+    fn dangling_execute_is_an_error() {
+        for (src, line) in [
+            ("select 1;\n-- ab:execute 1\n", 2),
+            ("-- ab:execute 1\n-- ab:setup\ncreate table t (a int);", 1),
+            ("-- ab:setup\n-- ab:execute 1\n-- ab:test\nselect ?;", 2),
+        ] {
+            let err = split_statements(src).unwrap_err();
+            assert_eq!(
+                err,
+                format!("line {line}: ab:execute without a statement after it"),
+                "{src:?}"
+            );
+        }
+        assert_eq!(
+            split_statements("-- ab:template a b\nselect 1;").unwrap_err(),
+            "line 1: template name \"a b\" has spaces"
+        );
+    }
+
+    #[test]
+    fn counts_placeholders() {
+        assert_eq!(placeholders("select 1"), 0);
+        assert_eq!(
+            placeholders("select '?', ? from t where a in (?, ?) /* ? */ -- ?\n limit ?"),
+            4
+        );
+        assert_eq!(placeholders("select `a?` from t where b = \"?\""), 0);
     }
 
     #[test]
