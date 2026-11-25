@@ -1,5 +1,6 @@
 //! Running statements on one server and capturing everything the comparison looks at.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use mysql_async::prelude::*;
@@ -110,6 +111,9 @@ pub struct Side {
     tls: TlsMode,
     timeout: Duration,
     conn: Option<Conn>,
+    /// Texts prepared on the current connection (the driver's statement cache may still hold
+    /// them; see [`Side::prepared`]).
+    prepared_texts: HashSet<String>,
     session_log: Vec<String>,
     /// Whether the current connection uses TLS (for the banner).
     pub using_tls: bool,
@@ -161,6 +165,7 @@ impl Side {
             tls,
             timeout,
             conn: None,
+            prepared_texts: HashSet::new(),
             session_log: Vec::new(),
             using_tls: false,
         })
@@ -197,6 +202,7 @@ impl Side {
             },
         };
         self.conn = Some(conn);
+        self.prepared_texts.clear();
         self.using_tls = tls;
         for stmt in self.session_log.clone() {
             // Best effort: it succeeded before on this server.
@@ -251,12 +257,18 @@ impl Side {
         out
     }
 
-    /// Prepares `sql` (COM_STMT_PREPARE) and executes it with `params`. A prepare failure is
-    /// returned as the outcome (with no metadata).
+    /// Prepares `sql` (COM_STMT_PREPARE) and executes it with `params` (COM_STMT_EXECUTE, each
+    /// parameter with its own binary type). The driver's statement cache keeps the prepared
+    /// statement per text, so a later call with the same text executes the same server-side
+    /// statement again without a new PREPARE; with `fresh`, a statement this connection
+    /// prepared before with the same text is closed first (COM_STMT_CLOSE), so the EXECUTE is
+    /// the first of a new statement. A prepare failure is returned as the outcome (with no
+    /// metadata).
     pub async fn prepared(
         &mut self,
         sql: &str,
         params: &[Value],
+        fresh: bool,
     ) -> (Option<PrepareMeta>, Outcome) {
         if let Err(o) = self.connect_if_needed().await {
             return (None, o);
@@ -265,6 +277,31 @@ impl Side {
         let Some(conn) = self.conn.as_mut() else {
             return (None, Outcome::Client("not connected".into()));
         };
+        if fresh && self.prepared_texts.remove(sql) {
+            // From the cache, without a round trip (unless the cache dropped it already: then
+            // this prepares it, and the close below drops that one again).
+            let close = async {
+                let old = conn.prep(sql).await?;
+                conn.close(old).await
+            };
+            match tokio::time::timeout(timeout, close).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    let out = server_outcome(e);
+                    self.drop_conn_on_client_error(&out);
+                    return (None, out);
+                }
+                Err(_) => {
+                    self.conn = None;
+                    return (
+                        None,
+                        Outcome::Client(format!(
+                            "closing the statement timed out after {timeout:?}"
+                        )),
+                    );
+                }
+            }
+        }
         let stmt = match tokio::time::timeout(timeout, conn.prep(sql)).await {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
@@ -280,6 +317,7 @@ impl Side {
                 );
             }
         };
+        self.prepared_texts.insert(sql.to_string());
         let meta = PrepareMeta {
             param_count: stmt.params().len(),
             columns: stmt.columns().iter().map(ColumnMeta::from_column).collect(),

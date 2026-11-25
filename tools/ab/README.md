@@ -108,6 +108,35 @@ and USE also run on B so both sessions stay in sync. SELECT-like statements also
 prepared statements without parameters unless `--no-prepared`. Examples:
 `workloads/constants.sql` (no data needed), `workloads/sample.sql` (setup section).
 
+Prepared statements with parameters: each `-- ab:execute PARAMS` comment line right before a
+SELECT-like statement (test section) adds one EXECUTE of it with that parameter list, one value
+per `?`, comma-separated, each bound with its own binary type: `42` / `-7` signed 64-bit
+(`MYSQL_TYPE_LONGLONG`), `18446744073709551615u` unsigned 64-bit (`MYSQL_TYPE_LONGLONG` with the
+unsigned flag), `'abc'` a string (`MYSQL_TYPE_VAR_STRING`; `''` is a quote, a backslash takes
+the next character as it is); an empty list is an EXECUTE without parameters. The statement is
+compared once per line, via the text protocol with the values as literals and (unless
+`--no-prepared`) as EXECUTEs of one PREPARE on each side: the first line's EXECUTE prepares the
+statement afresh (an earlier statement with the same text on that connection is closed first),
+the later lines execute that same statement again, so the plan cache can hit and the statement
+keeps whatever its first EXECUTE left behind. Records in mismatches.jsonl / unsupported.jsonl
+carry the EXECUTE's number as `execute`. A wrong count of values, an unparsable value, or an
+`ab:execute` line with no statement after it is a setup error (exit 2). `-- ab:template NAME`
+puts the statements after it into the summary group (and the rulings' unit) `NAME` instead of
+their first keyword; a bare `-- ab:template` goes back to the keyword. Outside `ab:execute`,
+statements with the same text share one prepared statement per connection (the driver's
+statement cache), as in the sysbench workload. Examples:
+
+- `workloads/prepared.sql`: statements with two or more parameters (`BETWEEN ? AND ?`, `>= ?
+  AND <= ?`, `k = ? AND id = ?`, `IN (?, ?, ?)`), ranges selecting only the primary key (no
+  Projection, so the new stack reaches the table reader), parameters in the select list and in
+  `LIMIT`, each executed two or more times with other values and the same types (#353; #352
+  read every parameter from position 0).
+- `workloads/prepared_type_change.sql`: a later EXECUTE binding another signedness or type
+  than the first (unsigned `u64::MAX` after a signed value and the reverse, a string after an
+  int and the reverse), with the parameter selected as a column. Go v8.5.8 reuses the first
+  EXECUTE's column definitions (#367, owner ruling pending), so these are expected mismatches;
+  their template is the file's name, `prepared_type_change`, for a ruling to match.
+
 ## Integration tests
 
 `integrationtest --dir <tidb>/tests/integrationtest/t [tests...]` runs TiDB's integration tests
