@@ -894,16 +894,17 @@ pub fn try_point_get_plan(
     if sel_stmt.having.is_some() || sel_stmt.order_by.is_some() {
         return Ok(None);
     } else if let Some(limit) = &sel_stmt.limit {
-        match extract_limit_count_offset(&*ctx.expr_ctx, limit) {
+        match extract_limit_count_offset(
+            &*ctx.expr_ctx,
+            limit,
+            ctx.vars.stmt_ctx().in_prepared_plan_building,
+        ) {
             Ok((count, offset)) => {
                 if count == 0 || offset > 0 {
                     return Ok(None);
                 }
             }
-            Err(err) => {
-                if tidb_base::blocked::blocked_by(&err).is_some() {
-                    return Err(err);
-                }
+            Err(_) => {
                 return Ok(None);
             }
         }

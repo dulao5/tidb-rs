@@ -39,7 +39,9 @@ use tidb_expression::expression::{EvalState, split_cnf_items};
 use tidb_expression::simple_rewriter::{
     column_name_orig_col_name, column_name_string, find_field_name,
 };
-use tidb_expression::util::const_expr_consider_plan_cache;
+use tidb_expression::util::{
+    const_expr_consider_plan_cache, get_string_from_constant, param_marker_expression,
+};
 use tidb_expression::{
     Column, Expr as PExpr, ExprRef, Schema, column2_exprs, eval_bool, gc_column_expr_is_tidb_shard,
     new_schema,
@@ -89,63 +91,83 @@ use crate::util::{ByItems, HandleCols};
 /// For ordinary statement, node should be uint64 constant value.
 /// For prepared statement, node is string. We should convert it to uint64.
 ///
-/// Returns `(uVal, isNull, isExpectedType)`. A parameter marker (`LIMIT ?`) reads the value
-/// `EXECUTE` bound to it; the Rust AST keeps no value on the marker (the plan cache, D13.1,
-/// VS1-15), so that case is a boundary stub.
-// go: getUintFromNode L2 (a parameter marker is blocked-by:D13.1)
+/// Returns `(uVal, isNull, isExpectedType)`. Go's `ParamMarkerExpr.InExecute` lives on the
+/// AST node (false during PREPARE, true during EXECUTE); the Rust AST keeps no value or flag
+/// on the marker, so callers pass `in_execute` (`StmtContext.in_prepared_plan_building`) and
+/// the parameter value is read from `PlanCacheParams` by `m.order()`.
+// go: getUintFromNode L2 (in_execute passed by caller; parameter value read from PlanCacheParams)
 pub fn get_uint_from_node(
     ctx: &dyn BuildContext,
     n: &Expr,
     must_int64_or_uint64: bool,
-) -> Result<(u64, bool, bool), Error> {
-    let _ = must_int64_or_uint64;
-    let val = match n {
+    in_execute: bool,
+) -> (u64, bool, bool) {
+    match n {
         // val = v.GetValue()
-        Expr::Value(v) => &v.datum,
-        Expr::ParamMarker(_) => {
-            // glue: blocked-by:D13.1 (the value of a parameter marker in EXECUTE)
-            return Err(blocked(
-                "D13.1",
-                "a parameter marker in LIMIT (the value bound by EXECUTE)",
-            ));
-        }
-        _ => return Ok((0, false, false)),
-    };
-    match val {
-        ast::Datum::Uint(v) => return Ok((*v, false, true)),
-        ast::Datum::Int(v) => {
-            if *v >= 0 {
-                return Ok((*v as u64, false, true));
+        Expr::Value(v) => match &v.datum {
+            ast::Datum::Uint(v) => (*v, false, true),
+            ast::Datum::Int(v) if *v >= 0 => (*v as u64, false, true),
+            // TRUE / FALSE are int64 datums in Go (Datum.SetValue of a bool).
+            ast::Datum::Bool(b) => (u64::from(*b), false, true),
+            ast::Datum::Str(v) => {
+                let (u_val, err) = str_to_uint(&ctx.get_eval_ctx().type_ctx(), v.as_bytes(), false);
+                if err.is_err() {
+                    return (0, false, false);
+                }
+                (u_val, false, true)
             }
-        }
-        // TRUE / FALSE are int64 datums in Go (Datum.SetValue of a bool).
-        ast::Datum::Bool(b) => return Ok((u64::from(*b), false, true)),
-        ast::Datum::Str(v) => {
-            let (u_val, err) = str_to_uint(&ctx.get_eval_ctx().type_ctx(), v.as_bytes(), false);
+            _ => (0, false, false),
+        },
+        Expr::ParamMarker(m) => {
+            if !in_execute {
+                return (0, false, true);
+            }
+            if must_int64_or_uint64 {
+                let datum = ctx
+                    .get_eval_ctx()
+                    .get_param_value(m.order() as i64)
+                    .unwrap_or_default();
+                let (expected, _) = check_param_type_int64_or_uint64(&datum);
+                if !expected {
+                    return (0, false, false);
+                }
+            }
+            let Ok(param) = param_marker_expression(ctx, m.order(), false) else {
+                return (0, false, false);
+            };
+            let Ok((s, is_null)) =
+                get_string_from_constant(&*ctx.get_eval_ctx(), &PExpr::Constant(param))
+            else {
+                return (0, false, false);
+            };
+            if is_null {
+                return (0, true, true);
+            }
+            let (u_val, err) = str_to_uint(&ctx.get_eval_ctx().type_ctx(), &s, false);
             if err.is_err() {
-                return Ok((0, false, false));
+                return (0, false, false);
             }
-            return Ok((u_val, false, true));
+            (u_val, false, true)
         }
-        _ => {}
+        _ => (0, false, false),
     }
-    Ok((0, false, false))
 }
 
 // go: extractLimitCountOffset L1
 pub fn extract_limit_count_offset(
     ctx: &dyn BuildContext,
     limit: &ast::Limit,
+    in_execute: bool,
 ) -> Result<(u64, u64), Error> {
     let mut offset = 0;
     // limit.Count != nil: always set by the parser.
-    let (c, _, is_expected_type) = get_uint_from_node(ctx, &limit.count, true)?;
+    let (c, _, is_expected_type) = get_uint_from_node(ctx, &limit.count, true, in_execute);
     if !is_expected_type {
         return Err(ErrWrongArguments.gen_with_stack_by_args(tidb_base::go_args!["LIMIT"]));
     }
     let count = c;
     if let Some(o) = &limit.offset {
-        let (o, _, is_expected_type) = get_uint_from_node(ctx, o, true)?;
+        let (o, _, is_expected_type) = get_uint_from_node(ctx, o, true, in_execute);
         if !is_expected_type {
             return Err(ErrWrongArguments.gen_with_stack_by_args(tidb_base::go_args!["LIMIT"]));
         }
@@ -1115,7 +1137,11 @@ impl<'ast> PlanBuilder<'ast> {
     ) -> Result<PlanId, Error> {
         self.opt_flag |= FlagPushDownTopN;
         // flag it if cte contain limit (no CTE is being built, D09.5)
-        let (mut count, offset) = extract_limit_count_offset(&*ctx.expr_ctx, limit)?;
+        let (mut count, offset) = extract_limit_count_offset(
+            &*ctx.expr_ctx,
+            limit,
+            ctx.vars.stmt_ctx().in_prepared_plan_building,
+        )?;
 
         if count > u64::MAX - offset {
             count = u64::MAX - offset;

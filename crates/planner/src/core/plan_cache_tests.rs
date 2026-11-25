@@ -870,13 +870,12 @@ fn prepare_stops_when_the_walk_misses_a_marker() {
             .collect();
         assert_eq!(orders, (0..n).collect::<Vec<_>>(), "{sql}");
     }
-    // Also where the walk meets them out of position (`LIMIT ?, ?`): the count matches and
-    // PREPARE goes on to the plan builder, which stops at its own later boundary (the LIMIT
-    // value bound by EXECUTE).
+    // Also where the walk meets them out of position (`LIMIT ?, ?`): the count matches,
+    // PREPARE succeeds, and the markers are numbered 0..3 by source position.
     let sql = "select ? from dual limit ?, ?";
     assert_eq!(markers(sql), 3);
     let mut v = vars();
-    let e = generate_plan_cache_stmt_with_ast(
+    let (ps, _, param_count) = generate_plan_cache_stmt_with_ast(
         &mut test_parts().plan_ctx(&mut v),
         true,
         sql,
@@ -885,7 +884,92 @@ fn prepare_stops_when_the_walk_misses_a_marker() {
         &Is(1),
         None,
     )
-    .err()
-    .unwrap();
-    assert_eq!(blocked_by(&e), Some("D13.1"), "{e}");
+    .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    assert_eq!(param_count, 3);
+    let orders: Vec<usize> = marker_orders(&ps.prepared_ast.stmt)
+        .iter()
+        .map(|&(_, o)| o)
+        .collect();
+    assert_eq!(orders, vec![0, 1, 2], "{sql}");
+    assert_eq!(ps.limits, 1);
+    // `LIMIT ?, ?` is `LIMIT offset, count`; `planCacheStmtProcessor` records count then offset.
+    assert_eq!(ps.limit_params, vec![2, 1]);
+}
+
+/// `getUintFromNode` for parameter markers: `!in_execute` (PREPARE) returns `(0, false, true)`
+/// without reading parameters; `in_execute` (EXECUTE) checks `CheckParamTypeInt64orUint64`
+/// when `must_int64_or_uint64` is set and converts the parameter value through
+/// `ParamMarkerExpression` / `GetStringFromConstant` / `StrToUint`, matching Go
+/// `logical_plan_builder.go:2491-2530`.
+#[test]
+fn get_uint_from_node_param_marker_matches_go() {
+    use crate::core::logical_plan_builder::get_uint_from_node;
+    use tidb_parser::ast::{Expr, ParamMarkerExpr};
+    use tidb_types::datum::new_uint_datum;
+
+    let m = ParamMarkerExpr::new(0);
+    m.set_order(0);
+    let expr = Expr::ParamMarker(Box::new(m));
+
+    // PREPARE (`in_execute = false`): succeeds with (0, false, true) even if params hold a
+    // non-integer or stale value.
+    let parts = test_parts_with_params(&[new_string_datum("bad")]);
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, true, false),
+        (0, false, true)
+    );
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, false, false),
+        (0, false, true)
+    );
+
+    // EXECUTE (`in_execute = true`): non-negative int64 and uint64.
+    let parts = test_parts_with_params(&[new_int_datum(0)]);
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, true, true),
+        (0, false, true)
+    );
+    let parts = test_parts_with_params(&[new_int_datum(42)]);
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, true, true),
+        (42, false, true)
+    );
+    let parts = test_parts_with_params(&[new_uint_datum(u64::MAX)]);
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, true, true),
+        (u64::MAX, false, true)
+    );
+
+    // Negative int64: rejected regardless of must_int64_or_uint64.
+    let parts = test_parts_with_params(&[new_int_datum(-1)]);
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, true, true),
+        (0, false, false)
+    );
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, false, true),
+        (0, false, false)
+    );
+
+    // Numeric string: rejected when must_int64_or_uint64, accepted via StrToUint when false.
+    let parts = test_parts_with_params(&[new_string_datum("12")]);
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, true, true),
+        (0, false, false)
+    );
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, false, true),
+        (12, false, true)
+    );
+
+    // NULL: rejected when must_int64_or_uint64, returns isNull=true when false.
+    let parts = test_parts_with_params(&[Datum::default()]);
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, true, true),
+        (0, false, false)
+    );
+    assert_eq!(
+        get_uint_from_node(&*parts.expr_ctx, &expr, false, true),
+        (0, true, true)
+    );
 }

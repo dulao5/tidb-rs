@@ -692,8 +692,8 @@ fn sort_and_top_n_over_dual_and_point_get() {
 /// The prepared forms, with the plan cache on: each EXECUTE's columns, rows and
 /// `@@last_plan_from_cache` are the v8.5.8 server's. The point get under a sort or a top-n
 /// is cached and reused with other ids (an id with no row reads none); `ORDER BY RAND()` is
-/// never cached, and its column follows each EXECUTE's parameter. `LIMIT ?` still falls back
-/// at PREPARE.
+/// never cached, and its column follows each EXECUTE's parameter. `LIMIT ?` keys the cached
+/// plan by the count, and `LIMIT 0` plans as `TableDual` (not cached, with Go's warning).
 #[test]
 fn prepared_sort_and_top_n_over_dual_and_point_get() {
     use tidb_base::mysql::{BinaryFlag, NotNullFlag, TypeLonglong, TypeVarString};
@@ -797,16 +797,181 @@ fn prepared_sort_and_top_n_over_dual_and_point_get() {
         s.drop_prepared_stmt(info.stmt_id).unwrap();
         s.clean_closed_prepared_stmts();
     }
-    // `LIMIT ?` is not taken yet: PREPARE falls back (the parameter of a limit is bound by
-    // the plan cache's EXECUTE path, D13.1), and Go answers it. (The v8.5.8 server keys the
-    // cached plan by the count: ids 1, 42, 3, 4 with counts 1, 2, 0, 1 miss, miss, miss,
-    // hit.)
+    // `LIMIT ?` keys the cached plan by the count: ids 1, 42, 3, 4 with counts 1, 2, 0, 1
+    // miss, miss, miss (TableDual, not cached, with warning), hit.
     let sql = "SELECT c FROM sbtest1 WHERE id = ? ORDER BY c LIMIT ?";
-    let Err(e) = block_on(s.prepare_stmt(sql)) else {
-        panic!("{sql}: PREPARE falls back");
+    let info = block_on(s.prepare_stmt(sql)).unwrap();
+    let prepared: Vec<Col> = info.fields.iter().map(col_of).collect();
+    assert_eq!(prepared, vec![col_c()], "PREPARE {sql}");
+    type LimitExec = (Vec<Datum>, Vec<Vec<String>>, bool, Vec<&'static str>);
+    let limit_execs: Vec<LimitExec> = vec![
+        (vec![int(1), int(1)], texts(&[&["c1"]]), false, vec![]),
+        (vec![int(42), int(2)], texts(&[&["c42"]]), false, vec![]),
+        (
+            vec![int(3), int(0)],
+            vec![],
+            false,
+            vec!["skip prepared plan-cache: get a TableDual plan"],
+        ),
+        (vec![int(4), int(1)], texts(&[&["c4"]]), true, vec![]),
+    ];
+    for (params, rows, hit, expected_warns) in limit_execs {
+        let what = format!("EXECUTE {sql} {params:?}");
+        let (got_cols, got_rows) =
+            run_prepared(&mut s, info.stmt_id, params).unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(
+            s.vars().found_in_plan_cache,
+            hit,
+            "{what}: FoundInPlanCache"
+        );
+        assert_eq!(got_cols, vec![col_c()], "{what}");
+        assert_eq!(got_rows, rows, "{what}");
+        let warns: Vec<String> = s
+            .vars()
+            .stmt_ctx()
+            .get_warnings()
+            .iter()
+            .map(|w| String::from_utf8_lossy(&w.err.error()).into_owned())
+            .collect();
+        assert_eq!(warns, expected_warns, "{what}: warnings");
+    }
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
+}
+
+/// Regression for #370 (`tools/ab/workloads/prepared.sql:92`): `SELECT c FROM sbtest1 WHERE
+/// id = ? LIMIT ?` with `LIMIT 0` misses the `LIMIT 1` cache entry, builds `TableDual`, emits
+/// Go's `Warning 1105 skip prepared plan-cache: get a TableDual plan`, and does not cache the
+/// plan (`@@last_plan_from_cache = 0`). Also covers `LIMIT ?, ?` (offset + count) and a
+/// negative limit argument (warning + error 1210), and checks that a later `PREPARE ... LIMIT ?`
+/// in the same session does not read stale parameters left by an earlier `EXECUTE`.
+#[test]
+fn prepared_limit_param_zero_warns_and_skips_plan_cache() {
+    use tidb_base::contextutil::WarnLevelWarning;
+    let _serial = PREPARED_COUNT.lock();
+    let (_store, mut s) = sysbench_cached_session();
+    let int = new_int_datum;
+    let warnings_of = |s: &Session| -> Vec<(String, String)> {
+        s.vars()
+            .stmt_ctx()
+            .get_warnings()
+            .iter()
+            .map(|w| {
+                (
+                    w.level.as_ref().to_owned(),
+                    String::from_utf8_lossy(&w.err.error()).into_owned(),
+                )
+            })
+            .collect()
     };
-    assert_eq!(blocked(&e), Some("D13.1"), "{sql}: {e}");
-    assert!(s.is_idle(), "{}", s.state_snapshot());
+
+    // Exact sequence of prepared.sql:90-94 plus cache-hit and repeat-zero checks.
+    let sql = "SELECT c FROM sbtest1 WHERE id = ? LIMIT ?";
+    let info = block_on(s.prepare_stmt(sql)).unwrap();
+    assert_eq!(
+        info.fields.iter().map(col_of).collect::<Vec<_>>(),
+        vec![col_c()],
+        "PREPARE {sql}"
+    );
+    assert!(warnings_of(&s).is_empty(), "PREPARE warnings");
+
+    type WarnExec = (
+        Vec<Datum>,
+        Vec<Vec<String>>,
+        bool,
+        Vec<(&'static str, &'static str)>,
+    );
+    let execs: Vec<WarnExec> = vec![
+        (vec![int(5), int(1)], texts(&[&["c5"]]), false, vec![]),
+        (
+            vec![int(6), int(0)],
+            vec![],
+            false,
+            vec![(
+                WarnLevelWarning,
+                "skip prepared plan-cache: get a TableDual plan",
+            )],
+        ),
+        (vec![int(7), int(10)], texts(&[&["c7"]]), false, vec![]),
+        // Same LIMIT 1 key as EXECUTE 1: cache hit, no warning.
+        (vec![int(8), int(1)], texts(&[&["c8"]]), true, vec![]),
+        // Repeat LIMIT 0: TableDual was not cached, so miss + same warning again.
+        (
+            vec![int(9), int(0)],
+            vec![],
+            false,
+            vec![(
+                WarnLevelWarning,
+                "skip prepared plan-cache: get a TableDual plan",
+            )],
+        ),
+    ];
+    for (params, rows, hit, expected_warns) in execs {
+        let what = format!("EXECUTE {sql} {params:?}");
+        let (got_cols, got_rows) =
+            run_prepared(&mut s, info.stmt_id, params).unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(got_cols, vec![col_c()], "{what}");
+        assert_eq!(got_rows, rows, "{what}");
+        assert_eq!(
+            s.vars().found_in_plan_cache,
+            hit,
+            "{what}: last_plan_from_cache"
+        );
+        let expected: Vec<(String, String)> = expected_warns
+            .into_iter()
+            .map(|(lvl, m)| (lvl.to_owned(), m.to_owned()))
+            .collect();
+        assert_eq!(warnings_of(&s), expected, "{what}: warnings");
+    }
+
+    // Negative LIMIT argument: NewPlanCacheKey skips cache with warning, build_limit rejects
+    // with 1210 (ErrWrongArguments: Incorrect arguments to LIMIT).
+    let err = run_prepared(&mut s, info.stmt_id, vec![int(5), int(-1)]).unwrap_err();
+    assert_eq!(err.code(), 1210, "negative LIMIT: {err}");
+    assert_eq!(
+        warnings_of(&s),
+        vec![(
+            WarnLevelWarning.to_owned(),
+            "skip prepared plan-cache: unexpected value after LIMIT".to_owned()
+        )]
+    );
+
+    // A fresh PREPARE after an EXECUTE with an invalid (-1) parameter still succeeds because
+    // get_uint_from_node checks in_execute (false during PREPARE).
+    let sql2 = "SELECT c FROM sbtest1 WHERE id = ? LIMIT ?, ?";
+    let info2 = block_on(s.prepare_stmt(sql2)).unwrap();
+    assert_eq!(
+        info2.fields.iter().map(col_of).collect::<Vec<_>>(),
+        vec![col_c()],
+        "PREPARE {sql2}"
+    );
+    // offset = 0, count = 0 -> TableDual (warning, not cached).
+    let (cols, rows) = run_prepared(&mut s, info2.stmt_id, vec![int(5), int(0), int(0)]).unwrap();
+    assert_eq!(cols, vec![col_c()]);
+    assert!(rows.is_empty());
+    assert!(!s.vars().found_in_plan_cache);
+    assert_eq!(
+        warnings_of(&s),
+        vec![(
+            WarnLevelWarning.to_owned(),
+            "skip prepared plan-cache: get a TableDual plan".to_owned()
+        )]
+    );
+    // offset = 1, count = 1 -> PhysicalLimit over PointGet (0 rows, cached on second EXECUTE).
+    let (cols, rows) = run_prepared(&mut s, info2.stmt_id, vec![int(5), int(1), int(1)]).unwrap();
+    assert_eq!(cols, vec![col_c()]);
+    assert!(rows.is_empty());
+    assert!(!s.vars().found_in_plan_cache);
+    assert!(warnings_of(&s).is_empty());
+    let (cols, rows) = run_prepared(&mut s, info2.stmt_id, vec![int(6), int(1), int(1)]).unwrap();
+    assert_eq!(cols, vec![col_c()]);
+    assert!(rows.is_empty());
+    assert!(s.vars().found_in_plan_cache);
+    assert!(warnings_of(&s).is_empty());
+
+    s.drop_prepared_stmt(info2.stmt_id).unwrap();
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
 }
 
 /// An unsigned 64-bit parameter selected as a column (the binary protocol's
