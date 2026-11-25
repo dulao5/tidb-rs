@@ -53,6 +53,8 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 # The govec vectors (pointget, and tablecodec's record keys) are .jsonl.gz.
 flate2 = "1.0"
 serde_json = { workspace = true }
+# The runtime's stall metrics in a measurement of the parallel sort (D12.5).
+tidb-metrics = { workspace = true }
 
 [lints]
 workspace = true

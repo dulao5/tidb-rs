@@ -33,6 +33,9 @@ use tidb_sessiontxn::sctx::{Oracle, TsFuture};
 use crate::session::run_stmt;
 use crate::{Dialect, Session};
 
+/// The executors' tasks on the session's ExecPool (#363).
+mod exec_pool;
+
 // ---------------------------------------------------------------- mocks
 
 struct Defaults;

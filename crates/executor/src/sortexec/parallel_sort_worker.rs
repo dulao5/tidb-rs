@@ -365,7 +365,9 @@ mod tests {
     use super::*;
     use crate::sortexec::parallel_sort_spill_helper::new_parallel_sort_spill_helper;
     use crate::sortexec::sort_util::new_finish_ch;
-    use crate::sortexec::sort_util::yield_test::{PollCount, int_keys, runtime, sorted_runs};
+    use crate::sortexec::sort_util::yield_test::{
+        PollCount, int_keys, mixed_case_word, runtime, sorted_runs, sysbench_c,
+    };
 
     /// The final merge of a worker's sorted runs yields at its time-sliced checkpoints
     /// (N3-A1 §3.1 item 5) when it runs in an instrumented task: 8 runs of 40000 rows take
@@ -417,7 +419,8 @@ mod tests {
     }
 
     /// The time of one batch sort (`sortBatchRows`, which cannot yield partway through):
-    /// 30 * 1024 rows, two BIGINT keys. A measurement for spec D12.5 §7.8, run by hand in a
+    /// 30 * max chunk size rows (1024, the default `tidb_max_chunk_size`, and the smaller
+    /// 512 and 256), two BIGINT keys. A measurement for spec D12.5 §7.8, run by hand in a
     /// release build: `cargo test --release -p tidb-executor --lib batch_sort_time --
     /// --ignored --nocapture`.
     #[test]
@@ -430,6 +433,63 @@ mod tests {
             key_cmp_funcs: Arc::from(vec![cmp(), cmp()]),
             descs: Arc::from(vec![false, true]),
         };
+        for max_chunk_size in [1024, 512, 256] {
+            let times = time_batch_sorts(&keys, &[&ft, &ft], max_chunk_size, |chk, x| {
+                chk.append_int64(0, ((x >> 33) % 100) as i64);
+                chk.append_int64(1, ((x >> 13) % 1_000_000) as i64);
+            });
+            report_batch_sort_times(max_chunk_size, "2 BIGINT keys", &times);
+        }
+    }
+
+    /// [`batch_sort_time`] with one `utf8mb4_general_ci` VARCHAR key (new collations on), in
+    /// two shapes: sysbench's `c` column (ten groups of 11 digits joined by `-`, 119
+    /// characters, so equal prefixes are long) and short mixed-case words (8 to 23
+    /// letters). For spec D12.5 §7.8 item 9 (#363): string keys with a collation cost more
+    /// per comparison. Run by hand in a release build: `cargo test --release -p
+    /// tidb-executor --lib batch_sort_time -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn batch_sort_time_general_ci() {
+        tidb_types::collate::set_new_collation_enabled_for_test(true);
+        let ft = tidb_types::field_type::new_field_type_with_collation(
+            tidb_base::mysql::TypeVarchar,
+            "utf8mb4_general_ci",
+            120,
+        );
+        let keys = SortKeys {
+            key_columns: Arc::from(vec![0usize]),
+            key_cmp_funcs: Arc::from(vec![tidb_chunk::compare::get_compare_func(&ft).unwrap()]),
+            descs: Arc::from(vec![false]),
+        };
+        for max_chunk_size in [1024, 512, 256] {
+            let times = time_batch_sorts(&keys, &[&ft], max_chunk_size, |chk, x| {
+                chk.append_string(0, sysbench_c(x).as_bytes());
+            });
+            report_batch_sort_times(
+                max_chunk_size,
+                "1 utf8mb4_general_ci key, sysbench c",
+                &times,
+            );
+            let times = time_batch_sorts(&keys, &[&ft], max_chunk_size, |chk, x| {
+                chk.append_string(0, mixed_case_word(x).as_bytes());
+            });
+            report_batch_sort_times(
+                max_chunk_size,
+                "1 utf8mb4_general_ci key, mixed-case words",
+                &times,
+            );
+        }
+    }
+
+    /// Seven rounds of one batch sort of 30 * `max_chunk_size` rows with `keys`; `fill`
+    /// appends one row from a pseudo-random number. The times, sorted.
+    fn time_batch_sorts(
+        keys: &SortKeys,
+        fts: &[&tidb_parser::types::FieldType],
+        max_chunk_size: usize,
+        fill: impl Fn(&mut tidb_chunk::chunk::Chunk, u64),
+    ) -> Vec<std::time::Duration> {
         let mut times = Vec::new();
         for round in 0..7u64 {
             let (_chunk_tx, chunk_rx) = mpsc::channel(1);
@@ -444,19 +504,18 @@ mod tests {
                 finish_ch,
                 new_tracker(-1, -1),
                 Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
-                1024,
+                max_chunk_size,
                 Arc::new(new_parallel_sort_spill_helper()),
                 None,
             );
             let mut x: u64 = 0x2545_f491_4f6c_dd1d ^ round;
             for _ in 0..30 {
-                let mut chk = tidb_chunk::chunk::new(&[&ft, &ft], 1024, 1024);
-                for _ in 0..1024 {
+                let mut chk = tidb_chunk::chunk::new(fts, max_chunk_size, max_chunk_size);
+                for _ in 0..max_chunk_size {
                     x = x
                         .wrapping_mul(6364136223846793005)
                         .wrapping_add(1442695040888963407);
-                    chk.append_int64(0, ((x >> 33) % 100) as i64);
-                    chk.append_int64(1, ((x >> 13) % 1_000_000) as i64);
+                    fill(&mut chk, x);
                 }
                 worker.save_chunk(Arc::new(chk));
             }
@@ -466,8 +525,14 @@ mod tests {
             times.push(start.elapsed());
         }
         times.sort();
+        times
+    }
+
+    // glue: test output
+    fn report_batch_sort_times(max_chunk_size: usize, what: &str, times: &[std::time::Duration]) {
         eprintln!(
-            "batch sort of 30720 rows, 2 BIGINT keys: min {:?}, median {:?}, max {:?}",
+            "batch sort of {} rows, {what}: min {:?}, median {:?}, max {:?}",
+            30 * max_chunk_size,
             times[0],
             times[times.len() / 2],
             times[times.len() - 1]

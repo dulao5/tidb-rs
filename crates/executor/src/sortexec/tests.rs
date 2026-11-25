@@ -881,3 +881,178 @@ fn parallel_sort_without_a_runtime() {
     });
     assert!(!child.opened.load(Ordering::SeqCst));
 }
+
+/// The runtime's stall metrics (prometheus text) as numbers: the stalled polls by task and
+/// cause, and the stall-duration histogram's buckets, sum and count.
+fn stall_metrics() -> std::collections::BTreeMap<String, f64> {
+    tidb_metrics::gather_text()
+        .lines()
+        .filter(|l| {
+            l.starts_with("tidb_rs_runtime_poll_stalls_total")
+                || l.starts_with("tidb_rs_runtime_poll_stall_seconds")
+        })
+        .filter_map(|l| {
+            let (k, v) = l.rsplit_once(' ')?;
+            Some((k.to_owned(), v.parse().ok()?))
+        })
+        .collect()
+}
+
+/// What the stall metrics gained from `before` to `after`, in one line each: the stalls by
+/// task and cause, their mean duration, and how many fell in each histogram bucket (the
+/// buckets double from 1 ms; the threshold is 10 ms, so stalls start in the 16 ms bucket).
+fn stall_report(
+    before: &std::collections::BTreeMap<String, f64>,
+    after: &std::collections::BTreeMap<String, f64>,
+) -> String {
+    let delta =
+        |k: &str| after.get(k).copied().unwrap_or(0.0) - before.get(k).copied().unwrap_or(0.0);
+    let by_task: Vec<String> = after
+        .keys()
+        .filter(|k| k.starts_with("tidb_rs_runtime_poll_stalls_total{"))
+        .filter_map(|k| {
+            let d = delta(k);
+            (d != 0.0).then(|| format!("{} {d}", &k["tidb_rs_runtime_poll_stalls_total".len()..]))
+        })
+        .collect();
+    let count = delta("tidb_rs_runtime_poll_stall_seconds_count");
+    let sum = delta("tidb_rs_runtime_poll_stall_seconds_sum");
+    let mut buckets = Vec::new();
+    let mut prev = 0.0;
+    for le in ["0.016", "0.032", "0.064", "0.128", "+Inf"] {
+        let n = delta(&format!(
+            "tidb_rs_runtime_poll_stall_seconds_bucket{{le=\"{le}\"}}"
+        ));
+        if n - prev != 0.0 {
+            buckets.push(format!("<= {le} s: {}", n - prev));
+        }
+        prev = n;
+    }
+    format!(
+        "  by task and cause: {}\n  mean {:.1} ms; {}",
+        by_task.join(", "),
+        if count > 0.0 {
+            sum / count * 1000.0
+        } else {
+            0.0
+        },
+        buckets.join(", ")
+    )
+}
+
+/// A measurement for spec D12.5 §7.8 item 9 (#363), run by hand in a release build:
+/// `cargo test --release -p tidb-executor --lib string_key_sort_under_the_stall_check --
+/// --ignored --nocapture`.
+///
+/// `ORDER BY` one `utf8mb4_general_ci` VARCHAR key (new collations on), 300000 rows, in two
+/// shapes (sysbench's `c`; mixed-case words), on the parallel sort whose tasks run on an
+/// instrumented ExecPool (Steal, one worker thread per CPU) with the default time slice and
+/// stall threshold (1 ms, 10 ms) and stalls classified by cause; 5 workers (the default
+/// `tidb_executor_concurrency`). Max chunk size 1024 (one batch is 30720 rows, as with the
+/// default `tidb_max_chunk_size`), then 512 and 256 (smaller batches; the chunks get smaller
+/// too). Prints, per round, the wall time and the stalls the round added: by task and cause,
+/// and the stalled polls' durations (the stall histogram).
+#[test]
+#[ignore]
+fn string_key_sort_under_the_stall_check() {
+    use super::sort_util::yield_test::{mixed_case_word, sysbench_c};
+
+    tidb_types::collate::set_new_collation_enabled_for_test(true);
+    let ft = tidb_types::field_type::new_field_type_with_collation(
+        tidb_base::mysql::TypeVarchar,
+        "utf8mb4_general_ci",
+        120,
+    );
+    let col = Arc::new(Column {
+        unique_id: 1,
+        index: 0,
+        ret_type: Arc::new(ft.clone()),
+        ..Column::default()
+    });
+    let schema = new_schema(vec![Arc::clone(&col)]);
+    let rt = tidb_runtime::Runtime::new(tidb_runtime::RuntimeConfig {
+        slice: tidb_runtime::SliceConfig {
+            classify_stalls: true,
+            ..tidb_runtime::SliceConfig::default()
+        },
+        ..tidb_runtime::RuntimeConfig::default()
+    })
+    .unwrap();
+    let rows = 300_000usize;
+    type RowGen = fn(u64) -> String;
+    let shapes: [(&str, RowGen); 2] = [
+        ("sysbench c", sysbench_c),
+        ("mixed-case words", mixed_case_word),
+    ];
+    for (shape, gen_row) in shapes {
+        let mut data = chunk::new(&[&ft], rows, rows);
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..rows {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            data.append_string(0, gen_row(x).as_bytes());
+        }
+        for (max_chunk_size, round) in [1024, 512, 256].into_iter().flat_map(|m| [(m, 0), (m, 1)]) {
+            let mut vars = vars(max_chunk_size);
+            vars.executor_concurrency = 5;
+            let child = Box::new(MockDataSource {
+                base: new_base_executor_v2(
+                    &vars,
+                    &SqlKiller::new(),
+                    Some(schema.clone()),
+                    1,
+                    Vec::new(),
+                ),
+                data: data.clone(),
+                next_row: 0,
+                nexts: Arc::new(AtomicUsize::new(0)),
+                opened: Arc::new(AtomicBool::new(false)),
+                fail_after: None,
+                _alive: Arc::new(()),
+            });
+            let mut exe = new_sort_exec(
+                new_base_executor(
+                    &vars,
+                    &SqlKiller::new(),
+                    Some(schema.clone()),
+                    2,
+                    vec![child],
+                ),
+                vec![ByItems {
+                    expr: Expr::Column((*col).clone()).into_ref(),
+                    desc: false,
+                }],
+                schema.clone(),
+                tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
+                1 << 30,
+                vars.executor_concurrency,
+            );
+            let (mut ctx, _) = exec_ctx();
+            ctx.pool = Some(rt.pool().clone());
+            let before = stall_metrics();
+            let check = tidb_runtime::slice::StallCheck::start();
+            let (n, wall) = rt.block_on(async move {
+                let start = std::time::Instant::now();
+                exe.open(&ctx).await.unwrap();
+                assert!(!exe.is_unparallel);
+                let n: usize = execute(&mut exe, &ctx)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|c| c.num_rows())
+                    .sum();
+                exe.close().await.unwrap();
+                (n, start.elapsed())
+            });
+            assert_eq!(n, rows);
+            let after = stall_metrics();
+            eprintln!(
+                "{shape}, max chunk size {max_chunk_size} (batches of {} rows), round {round}: {rows} rows sorted in {wall:?}, {} stall(s)\n{}",
+                30 * max_chunk_size,
+                check.stalls(),
+                stall_report(&before, &after)
+            );
+        }
+    }
+}

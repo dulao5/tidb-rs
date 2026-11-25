@@ -377,7 +377,7 @@ fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
 fn real(mode: NewStackMode, poc: &FakePoc) -> Router {
     // `tidb_enable_metadata_lock` on, as on a cluster (Go's default).
     tidb_session::session::init_mdl_variable();
-    let mut new = NewSession::new(None, None);
+    let mut new = NewSession::new(None, None, None);
     new.session_mut()
         .set_domain_info_schema(sbtest_info_schema());
     Router::new(mode, Box::new(new), &poc.values())

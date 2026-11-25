@@ -37,6 +37,8 @@ tidb-planner = { workspace = true }
 # ADMIN FLUSH ... PLAN_CACHE (the executor's statement scope).
 tidb-executor = { workspace = true }
 tidb-sessionctx = { workspace = true }
+# The ExecPool the new sessions' executors start their tasks on (N3).
+tidb-runtime = { workspace = true }
 
 [dev-dependencies]
 tidb-distsql = { workspace = true }

@@ -378,10 +378,13 @@ impl ExecStmt {
         self.stmt_node.as_ref()
     }
 
-    /// The statement context the executors share (N2), for `ExecCtx`.
+    /// The context the executors run with (N3): the statement context they share (N2) and
+    /// the session's `ExecPool`, on which they start their tasks.
     // glue: N3 ExecCtx of the statement
     fn exec_ctx(sctx: &dyn SessionContext) -> ExecCtx {
-        ExecCtx::new(sctx.get_session_vars().stmt_ctx_arc())
+        let mut ctx = ExecCtx::new(sctx.get_session_vars().stmt_ctx_arc());
+        ctx.pool = sctx.exec_pool();
+        ctx
     }
 
     /// The statement context for writing its plain fields: only while no executor shares it
