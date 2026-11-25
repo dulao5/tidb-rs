@@ -612,7 +612,7 @@ impl ExecutorBuilder {
                 vec![child_exec],
             ),
             group_by_items.to_vec(),
-            Arc::clone(&expr_ctx),
+            expr_ctx.get_eval_ctx(),
             vars.enable_vectorized_expression,
             vars.track_aggregate_memory_usage,
             vars.enable_parallel_hashagg_spill,
@@ -642,13 +642,13 @@ impl ExecutorBuilder {
         for (i, agg_desc) in agg_funcs.iter().enumerate() {
             if e.is_unparallel_exec {
                 let agg_func = match aggfuncs::build(&*expr_ctx, agg_desc, i as isize) {
-                    Ok(agg_func) => agg_func.map(Arc::from),
+                    Ok(agg_func) => agg_func,
                     Err(err) => {
                         self.err = Some(err);
                         return None;
                     }
                 };
-                e.partial_agg_funcs.push(agg_func);
+                e.push_partial_agg_func(agg_func);
             } else {
                 let mut ordinal = vec![partial_ordinal];
                 partial_ordinal += 1;
@@ -659,21 +659,21 @@ impl ExecutorBuilder {
                 let (partial_agg_desc, final_desc) = agg_desc.split(&ordinal);
                 let partial_agg_func =
                     match aggfuncs::build(&*expr_ctx, &partial_agg_desc, i as isize) {
-                        Ok(agg_func) => agg_func.map(Arc::from),
+                        Ok(agg_func) => agg_func,
                         Err(err) => {
                             self.err = Some(err);
                             return None;
                         }
                     };
                 let final_agg_func = match aggfuncs::build(&*expr_ctx, &final_desc, i as isize) {
-                    Ok(agg_func) => agg_func.map(Arc::from),
+                    Ok(agg_func) => agg_func,
                     Err(err) => {
                         self.err = Some(err);
                         return None;
                     }
                 };
-                e.partial_agg_funcs.push(partial_agg_func);
-                e.final_agg_funcs.push(final_agg_func);
+                e.push_partial_agg_func(partial_agg_func);
+                e.push_final_agg_func(final_agg_func);
             }
             if let Some(default_val) = &mut e.default_val {
                 let value = agg_desc.get_default_value();

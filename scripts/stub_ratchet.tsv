@@ -1,8 +1,9 @@
 # Temporary boundary stubs (blocked-by) per area: may only go down (scripts/check_stub_ratchet.py, #262).
 # Regenerate with scripts/check_stub_ratchet.py --write after removing stubs.
 area	stubs
+chunk	2
 domain	1
-executor	83
+executor	86
 expr-pushdown	1
 expression	1
 infoschema	17

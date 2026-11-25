@@ -527,7 +527,7 @@ async fn hash_agg_unparallel_groups_and_order() {
     assert_eq!(rows, ["2,2,30", "1,3,6", "3,1,5"]);
     e.close().await.unwrap();
     assert!(closed.load(Ordering::SeqCst));
-    assert_eq!(e.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+    assert_eq!(e.mem_tracker.bytes_consumed(), 0);
 }
 
 #[tokio::test]
@@ -575,7 +575,7 @@ async fn hash_agg_unparallel_empty_input_and_distinct() {
     assert!(err.is_none());
     assert_eq!(rows, ["7", "3"]);
     e.close().await.unwrap();
-    assert_eq!(e.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+    assert_eq!(e.mem_tracker.bytes_consumed(), 0);
 }
 
 #[tokio::test]
@@ -666,7 +666,716 @@ async fn hash_agg_unparallel_spill_action_and_boundary() {
     let err = err.expect("spill must stop at D01.10 boundary");
     assert_eq!(blocked_by(&err), Some("D01.10"), "{err}");
     e.close().await.unwrap();
-    assert_eq!(e.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+    assert_eq!(e.mem_tracker.bytes_consumed(), 0);
     assert_eq!(stmt_tracker.bytes_consumed(), 0);
     assert_eq!(sess_tracker.bytes_consumed(), 0);
+}
+
+// ---------------------------------------------------------------- HashAgg (Part B2)
+
+fn parallel_ctx(partial: i64, final_c: i64) -> MockSession {
+    let mut sctx = ctx();
+    sctx.vars.set_hash_agg_partial_concurrency(partial);
+    sctx.vars.set_hash_agg_final_concurrency(final_c);
+    sctx.vars.enable_parallel_hashagg_spill = true;
+    sctx
+}
+
+/// Port of Go's `TestHashAggRuntimeStat` (`pkg/executor/test/aggregate/aggregate_test.go:38`).
+#[test]
+fn test_hash_agg_runtime_stat() {
+    use tidb_execdetails::execdetails::{RuntimeStats, TpHashAggRuntimeStat};
+
+    use super::{AggWorkerInfo, AggWorkerStat, HashAggRuntimeStats};
+
+    const SEC: i64 = 1_000_000_000;
+    const MSEC: i64 = 1_000_000;
+
+    let partial_info = AggWorkerInfo {
+        concurrency: 5,
+        wall_time: 0,
+    };
+    let final_info = AggWorkerInfo {
+        concurrency: 8,
+        wall_time: 0,
+    };
+    let mut stats = HashAggRuntimeStats {
+        partial_concurrency: 5,
+        partial_wall_time: std::sync::atomic::AtomicI64::new(20 * SEC),
+        final_concurrency: 8,
+        final_wall_time: std::sync::atomic::AtomicI64::new(10 * SEC),
+        partial_stats: Vec::new(),
+        final_stats: Vec::new(),
+    };
+    for i in 0..partial_info.concurrency as i64 {
+        stats
+            .partial_stats
+            .push(Arc::new(AggWorkerStat::new(5, 2 * SEC, SEC, i * SEC)));
+    }
+    for i in 0..final_info.concurrency as i64 {
+        stats
+            .final_stats
+            .push(Arc::new(AggWorkerStat::new(5, 2 * MSEC, MSEC, i * MSEC)));
+    }
+    assert_eq!(stats.tp(), TpHashAggRuntimeStat);
+    let expect = "partial_worker:{wall_time:20s, concurrency:5, task_num:25, tot_wait:10s, tot_exec:5s, tot_time:10s, max:4s, p95:4s}, final_worker:{wall_time:10s, concurrency:8, task_num:40, tot_wait:16ms, tot_exec:8ms, tot_time:28ms, max:7ms, p95:7ms}";
+    assert_eq!(stats.string(), expect);
+    let cloned = stats.clone_stats();
+    assert_eq!(cloned.string(), expect);
+    stats.merge(cloned.as_ref());
+    let expect_merged = "partial_worker:{wall_time:40s, concurrency:5, task_num:50, tot_wait:20s, tot_exec:10s, tot_time:20s, max:4s, p95:4s}, final_worker:{wall_time:20s, concurrency:8, task_num:80, tot_wait:32ms, tot_exec:16ms, tot_time:56ms, max:7ms, p95:7ms}";
+    assert_eq!(stats.string(), expect_merged);
+}
+
+/// Executor-level port of Go's `TestParallelHashAgg` case-variant keys (`aggregate_test.go:388`).
+#[tokio::test]
+async fn test_parallel_hash_agg_case_variants() {
+    use tidb_base::mysql::TypeVarchar;
+
+    let mut sctx = parallel_ctx(4, 4);
+    sctx.vars.max_chunk_size = 32;
+    let ectx = exec_ctx(&sctx);
+
+    let mut str_ft = new_field_type(TypeVarchar);
+    str_ft.set_flen(30);
+    str_ft.set_charset("utf8mb4");
+    str_ft.set_collate("utf8mb4_bin");
+    let int_ft = new_field_type(TypeLonglong);
+    let src_types = vec![str_ft.clone(), int_ft.clone()];
+
+    let keys = [
+        "aa", "AA", "aA", "Aa", "bb", "BB", "bB", "Bb", "cc", "CC", "cC", "Cc", "dd", "DD", "dD",
+        "Dd", "ee", "EE", "eE", "Ee",
+    ];
+    let mut input = Vec::new();
+    for _ in 0..20 {
+        let mut chk = new_chunk_with_capacity(&src_types, keys.len());
+        for k in keys {
+            chk.append_string(0, k.as_bytes());
+            chk.append_int64(1, 1);
+        }
+        input.push(chk);
+    }
+
+    let src = BatchSource {
+        base: new_base_executor_v2(
+            sctx.get_session_vars(),
+            &sctx.sql_killer(),
+            Some(schema_of(&src_types)),
+            1,
+            Vec::new(),
+        ),
+        batches: input,
+        ptr: 0,
+        err_at: None,
+        opened: Arc::new(AtomicBool::new(false)),
+        closed: Arc::new(AtomicBool::new(false)),
+    };
+    let mut sum_desc = desc(&sctx, ast::AggFuncSum, col(&int_ft, 1), false);
+    sum_desc
+        .wrap_cast_for_agg_args(&*sctx.get_expr_ctx())
+        .unwrap();
+    let aggs = [
+        desc(&sctx, ast::AggFuncFirstRow, col(&str_ft, 0), false),
+        sum_desc,
+    ];
+    let out: Vec<FieldType> = aggs.iter().map(|d| (*d.base.ret_tp).clone()).collect();
+    let mut b = new_executor_builder(&sctx, None, Arc::new(TelemetryInfo::default()));
+    let mut e = b
+        .build_hash_agg_from_child_exec(
+            &sctx,
+            Some(Box::new(src)),
+            &schema_of(&out),
+            2,
+            &[col(&str_ft, 0)],
+            &aggs,
+        )
+        .expect("built parallel hash agg");
+    assert!(!e.is_unparallel_exec);
+    e.open(&ectx).await.unwrap();
+    let (mut rows, err) = run_exec(&ectx, &mut e).await;
+    assert!(err.is_none());
+    e.close().await.unwrap();
+    assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+
+    rows.sort();
+    let mut expected: Vec<String> = keys.iter().map(|k| format!("{k},20")).collect();
+    expected.sort();
+    assert_eq!(rows, expected);
+}
+
+#[tokio::test]
+async fn hash_agg_parallel_multi_agg_avg_empty_and_stats() {
+    use tidb_execdetails::execdetails::RuntimeStatsColl;
+
+    let mut sctx = parallel_ctx(3, 3);
+    let coll = RuntimeStatsColl::new(None);
+    sctx.vars.stmt_ctx_mut().runtime_stats_coll = Some(Arc::clone(&coll));
+    let ectx = exec_ctx(&sctx);
+    let tps = child_types();
+    let aggs = [
+        desc(&sctx, ast::AggFuncFirstRow, col(&tps[0], 0), false),
+        desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false),
+        desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false),
+        desc(&sctx, ast::AggFuncAvg, col(&tps[1], 1), false),
+        desc(&sctx, ast::AggFuncMin, col(&tps[1], 1), false),
+        desc(&sctx, ast::AggFuncMax, col(&tps[1], 1), false),
+    ];
+
+    let input = batches(&[
+        &[(1, 10.0), (2, 4.0), (1, 20.0)],
+        &[(3, 7.0), (2, 6.0), (1, 30.0)],
+    ]);
+    let (mut e, _, closed) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+    assert!(!e.is_unparallel_exec);
+    e.open(&ectx).await.unwrap();
+    let (mut rows, err) = run_exec(&ectx, &mut e).await;
+    assert!(err.is_none());
+    e.close().await.unwrap();
+    assert!(closed.load(Ordering::SeqCst));
+    assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+
+    rows.sort();
+    assert_eq!(rows, ["1,3,60,20,10,30", "2,2,10,5,4,6", "3,1,7,7,7,7"]);
+    // Runtime stats were registered in Close.
+    let stat_str = coll.get_root_stats(2).string();
+    assert!(
+        stat_str.contains("partial_worker:") && stat_str.contains("final_worker:"),
+        "{stat_str}"
+    );
+
+    // Empty input without GROUP BY emits DefaultVal.
+    let count = desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false);
+    let sum = desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false);
+    let (mut e, _, _) = build_hash_agg(&sctx, Vec::new(), None, Vec::new(), &[count, sum]);
+    e.open(&ectx).await.unwrap();
+    let (rows, err) = run_exec(&ectx, &mut e).await;
+    assert!(err.is_none());
+    assert_eq!(rows, ["0,NULL"]);
+    e.close().await.unwrap();
+    assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+}
+
+/// Child that panics on its `panic_at`-th `Next` call, and optionally fails `Close`.
+struct FaultySource {
+    base: BaseExecutorV2,
+    batches: Vec<Chunk>,
+    ptr: usize,
+    panic_at: Option<usize>,
+    close_err: bool,
+    closed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Executor for FaultySource {
+    fn base(&self) -> &BaseExecutorV2 {
+        &self.base
+    }
+    fn base_mut(&mut self) -> &mut BaseExecutorV2 {
+        &mut self.base
+    }
+    async fn open(&mut self, _ctx: &ExecCtx) -> Result<(), Error> {
+        Ok(())
+    }
+    async fn next(&mut self, _ctx: &ExecCtx, req: &mut Chunk) -> Result<(), Error> {
+        req.reset();
+        if self.panic_at == Some(self.ptr) {
+            panic!("mock child panic");
+        }
+        if self.ptr >= self.batches.len() {
+            return Ok(());
+        }
+        let b = &self.batches[self.ptr];
+        req.append(b, 0, b.num_rows());
+        self.ptr += 1;
+        Ok(())
+    }
+    async fn close(&mut self) -> Result<(), Error> {
+        self.closed.store(true, Ordering::SeqCst);
+        if self.close_err {
+            return Err(Error::plain("mock close error"));
+        }
+        Ok(())
+    }
+}
+
+/// Drop guards under all 4 outcomes (normal, child error, child panic, memory quota
+/// exceeded) plus stats registration on Close error (spec §4.5, §5.3).
+#[tokio::test]
+async fn hash_agg_parallel_error_panic_quota_and_close_stats() {
+    use tidb_execdetails::execdetails::RuntimeStatsColl;
+
+    let tps = child_types();
+
+    // 1. Child error mid-stream.
+    {
+        let sctx = parallel_ctx(3, 3);
+        let ectx = exec_ctx(&sctx);
+        let aggs = [desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false)];
+        let input = batches(&[&[(1, 1.0)], &[(2, 2.0)], &[(3, 3.0)]]);
+        let (mut e, _, closed) =
+            build_hash_agg(&sctx, input, Some(1), vec![col(&tps[0], 0)], &aggs);
+        e.open(&ectx).await.unwrap();
+        let (_, err) = run_exec(&ectx, &mut e).await;
+        assert_eq!(err.unwrap().to_string(), "mock child error");
+        e.close().await.unwrap();
+        assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+    }
+
+    // 2. Child panic mid-stream -> recovered via recoveryHashAgg, workers exit, Close works
+    //    and registers stats even if child Close fails.
+    {
+        let mut sctx = parallel_ctx(2, 2);
+        let coll = RuntimeStatsColl::new(None);
+        sctx.vars.stmt_ctx_mut().runtime_stats_coll = Some(Arc::clone(&coll));
+        let ectx = exec_ctx(&sctx);
+        let aggs = [desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false)];
+        let closed = Arc::new(AtomicBool::new(false));
+        let src = FaultySource {
+            base: new_base_executor_v2(
+                sctx.get_session_vars(),
+                &sctx.sql_killer(),
+                Some(schema_of(&tps)),
+                1,
+                Vec::new(),
+            ),
+            batches: batches(&[&[(1, 1.0)], &[(2, 2.0)]]),
+            ptr: 0,
+            panic_at: Some(1),
+            close_err: true,
+            closed: Arc::clone(&closed),
+        };
+        let out: Vec<FieldType> = aggs.iter().map(|d| (*d.base.ret_tp).clone()).collect();
+        let mut b = new_executor_builder(&sctx, None, Arc::new(TelemetryInfo::default()));
+        let mut e = b
+            .build_hash_agg_from_child_exec(
+                &sctx,
+                Some(Box::new(src)),
+                &schema_of(&out),
+                7,
+                &[col(&tps[0], 0)],
+                &aggs,
+            )
+            .unwrap();
+        e.open(&ectx).await.unwrap();
+        let (_, err) = run_exec(&ectx, &mut e).await;
+        assert_eq!(err.unwrap().to_string(), "mock child panic");
+        let close_err = e.close().await.unwrap_err();
+        assert_eq!(close_err.to_string(), "mock close error");
+        assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+        // Stats were registered despite Close returning an error (defer RegisterStats).
+        assert!(coll.get_root_stats(7).string().contains("partial_worker:"));
+    }
+
+    // 3. Hard memory quota exceeded (PanicOnExceed) in parallel mode -> [executor:8175].
+    {
+        let sctx = parallel_ctx(2, 2);
+        let stmt_tracker = sctx.vars.stmt_ctx().mem_tracker.clone().unwrap();
+        stmt_tracker.set_bytes_limit(32 << 10);
+        stmt_tracker.set_action_on_exceed(Some(PanicOnExceed::new(Some(sctx.sql_killer()), 0)));
+        let ectx = exec_ctx(&sctx);
+        let aggs = [desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false)];
+        let rows: Vec<(i64, f64)> = (0..5000).map(|i| (i, i as f64)).collect();
+        let input: Vec<Chunk> = rows.chunks(64).flat_map(|c| batches(&[c])).collect();
+        let (mut e, _, closed) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+        e.open(&ectx).await.unwrap();
+        let (_, err) = run_exec(&ectx, &mut e).await;
+        let err = err.expect("quota error");
+        assert!(err.to_string().starts_with("[executor:8175]"), "{err}");
+        e.close().await.unwrap();
+        assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+        assert_eq!(stmt_tracker.bytes_consumed(), 0);
+    }
+}
+
+/// Lifecycle edge cases (spec §5.3): Close before Next, early Close mid-stream, Drop without
+/// Close, and Close future dropped mid-await.
+#[tokio::test]
+async fn hash_agg_parallel_lifecycle_and_cancellation() {
+    use std::pin::Pin;
+    use std::task::{Context, Waker};
+
+    let tps = child_types();
+
+    // 1. Close after Open without calling Next.
+    {
+        let sctx = parallel_ctx(4, 4);
+        let ectx = exec_ctx(&sctx);
+        let aggs = [desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false)];
+        let (mut e, _, closed) = build_hash_agg(
+            &sctx,
+            batches(&[&[(1, 1.0)]]),
+            None,
+            vec![col(&tps[0], 0)],
+            &aggs,
+        );
+        e.open(&ectx).await.unwrap();
+        e.close().await.unwrap();
+        assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+    }
+
+    // 2. Early Close after reading only the first chunk.
+    {
+        let mut sctx = parallel_ctx(3, 3);
+        sctx.vars.init_chunk_size = 4;
+        sctx.vars.max_chunk_size = 4;
+        let ectx = exec_ctx(&sctx);
+        let aggs = [desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false)];
+        let rows: Vec<(i64, f64)> = (0..500).map(|i| (i, i as f64)).collect();
+        let input: Vec<Chunk> = rows.chunks(32).flat_map(|c| batches(&[c])).collect();
+        let (mut e, _, closed) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+        e.open(&ectx).await.unwrap();
+        let mut chk = exec::new_first_chunk(&e);
+        e.next(&ectx, &mut chk).await.unwrap();
+        assert!(chk.num_rows() > 0);
+        e.close().await.unwrap();
+        assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+    }
+
+    // 3. Drop without Close after Next started tasks -> ParallelTasks::drop aborts tasks.
+    {
+        let mut sctx = parallel_ctx(2, 2);
+        sctx.vars.init_chunk_size = 2;
+        sctx.vars.max_chunk_size = 2;
+        let ectx = exec_ctx(&sctx);
+        let aggs = [desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false)];
+        let rows: Vec<(i64, f64)> = (0..200).map(|i| (i, i as f64)).collect();
+        let input: Vec<Chunk> = rows.chunks(16).flat_map(|c| batches(&[c])).collect();
+        let (mut e, _, _) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+        e.open(&ectx).await.unwrap();
+        let mut chk = exec::new_first_chunk(&e);
+        e.next(&ectx, &mut chk).await.unwrap();
+        drop(e);
+        tokio::task::yield_now().await;
+    }
+
+    // 4. Close future dropped mid-await -> remaining tasks aborted on Drop.
+    {
+        let mut sctx = parallel_ctx(2, 2);
+        sctx.vars.init_chunk_size = 2;
+        sctx.vars.max_chunk_size = 2;
+        let ectx = exec_ctx(&sctx);
+        let aggs = [desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false)];
+        let rows: Vec<(i64, f64)> = (0..200).map(|i| (i, i as f64)).collect();
+        let input: Vec<Chunk> = rows.chunks(16).flat_map(|c| batches(&[c])).collect();
+        let (mut e, _, _) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+        e.open(&ectx).await.unwrap();
+        let mut chk = exec::new_first_chunk(&e);
+        e.next(&ectx, &mut chk).await.unwrap();
+        {
+            let mut close_fut = e.close();
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            let _ = Pin::as_mut(&mut close_fut).poll(&mut cx);
+        }
+        drop(e);
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Runs parallel HashAgg on a single-threaded current_thread runtime AND with an instrumented
+/// 1-thread `tidb_runtime::Runtime` (`ExecPool`, spec §5.3).
+#[tokio::test(flavor = "current_thread")]
+async fn hash_agg_parallel_on_single_thread_runtime() {
+    use tidb_runtime::{Runtime, RuntimeConfig};
+
+    let tps = child_types();
+    let sctx = parallel_ctx(4, 4);
+    let aggs = [
+        desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false),
+        desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false),
+    ];
+    let rows: Vec<(i64, f64)> = (0..1000).map(|i| (i % 50, 1.0)).collect();
+    let input: Vec<Chunk> = rows.chunks(32).flat_map(|c| batches(&[c])).collect();
+
+    // A. Direct current_thread tokio runtime (pool = None).
+    let ectx = exec_ctx(&sctx);
+    let (mut e, _, _) = build_hash_agg(&sctx, input.clone(), None, vec![col(&tps[0], 0)], &aggs);
+    e.open(&ectx).await.unwrap();
+    let (out, err) = run_exec(&ectx, &mut e).await;
+    assert!(err.is_none());
+    assert_eq!(out.len(), 50);
+    for r in &out {
+        assert_eq!(r, "20,20");
+    }
+    e.close().await.unwrap();
+    assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+
+    // B. Instrumented 1-thread ExecPool.
+    let rt = Runtime::new(RuntimeConfig {
+        worker_threads: 1,
+        ..RuntimeConfig::default()
+    })
+    .unwrap();
+    let mut ectx_pool = exec_ctx(&sctx);
+    ectx_pool.pool = Some(rt.pool().clone());
+    let (mut e2, _, _) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+    e2.open(&ectx_pool).await.unwrap();
+    let (out2, err2) = run_exec(&ectx_pool, &mut e2).await;
+    assert!(err2.is_none());
+    assert_eq!(out2.len(), 50);
+    e2.close().await.unwrap();
+    assert_eq!(e2.mem_tracker.bytes_consumed(), 0);
+}
+
+/// Converted parallel spill tests (Go `TestGetCorrectResult` & `TestFallBackAction` in
+/// `agg_spill_test.go`, spec §5.1 & §5.3):
+/// 1. Tight soft limit triggers `ParallelAggSpillDiskAction` -> `needSpill` ->
+///    `HashAggExec.spill` returns `blocked-by:D01.10`, zero rows emitted, all workers exit,
+///    tracker returns to 0.
+/// 2. Pre-consumed 80% of limit -> agg tracker < 20% -> fallback action fires instead of
+///    spilling.
+#[tokio::test]
+async fn hash_agg_parallel_spill_boundary_and_fallback() {
+    use std::sync::atomic::AtomicUsize;
+    use tidb_memory::action::{ActionOnExceed, ActionRef, BaseOOMAction, DefSpillPriority};
+    use tidb_memory::tracker::Tracker;
+
+    struct CountFallback {
+        base: BaseOOMAction,
+        hits: Arc<AtomicUsize>,
+    }
+    impl ActionOnExceed for CountFallback {
+        fn action(&self, _t: &Arc<Tracker>) -> Result<(), Error> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn set_fallback(&self, a: Option<ActionRef>) {
+            self.base.set_fallback(a)
+        }
+        fn get_fallback(&self) -> Option<ActionRef> {
+            self.base.get_fallback()
+        }
+        fn get_priority(&self) -> i64 {
+            0
+        }
+        fn set_finished(&self) {
+            self.base.set_finished()
+        }
+        fn is_finished(&self) -> bool {
+            self.base.is_finished()
+        }
+    }
+
+    let tps = child_types();
+
+    // 1. Trigger parallel spill -> blocked-by:D01.10, zero rows, workers exit, tracker == 0.
+    {
+        let mut sctx = parallel_ctx(4, 4);
+        let sess_tracker = new_tracker(1, 32 << 10);
+        let stmt_tracker = new_tracker(2, -1);
+        stmt_tracker.attach_to(&sess_tracker).unwrap();
+        sctx.vars.stmt_ctx_mut().mem_tracker = Some(Arc::clone(&stmt_tracker));
+        let ectx = exec_ctx(&sctx);
+        let aggs = [
+            desc(&sctx, ast::AggFuncFirstRow, col(&tps[0], 0), false),
+            desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false),
+            desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false),
+            desc(&sctx, ast::AggFuncAvg, col(&tps[1], 1), false),
+            desc(&sctx, ast::AggFuncMin, col(&tps[1], 1), false),
+            desc(&sctx, ast::AggFuncMax, col(&tps[1], 1), false),
+        ];
+        let rows: Vec<(i64, f64)> = (0..4000).map(|i| (i, i as f64)).collect();
+        let input: Vec<Chunk> = rows.chunks(64).flat_map(|c| batches(&[c])).collect();
+        let (mut e, _, closed) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+        e.session_mem_tracker = Some(Arc::clone(&sess_tracker));
+        e.open(&ectx).await.unwrap();
+        assert_eq!(
+            e.parallel_agg_spill_action.as_ref().unwrap().get_priority(),
+            DefSpillPriority
+        );
+        let (out, err) = run_exec(&ectx, &mut e).await;
+        assert!(out.is_empty(), "must emit zero rows before spill error");
+        let err = err.expect("parallel spill must stop at D01.10 boundary");
+        assert_eq!(blocked_by(&err), Some("D01.10"), "{err}");
+        e.close().await.unwrap();
+        assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+        assert_eq!(stmt_tracker.bytes_consumed(), 0);
+        assert_eq!(sess_tracker.bytes_consumed(), 0);
+    }
+
+    // 2. Fallback action when agg tracker holds < 20% of session limit (TestFallBackAction).
+    {
+        let mut sctx = parallel_ctx(3, 3);
+        let limit: i64 = 10 << 20; // 10 MiB
+        let sess_tracker = new_tracker(1, limit);
+        let fb_hits = Arc::new(AtomicUsize::new(0));
+        sess_tracker.set_action_on_exceed(Some(Arc::new(CountFallback {
+            base: BaseOOMAction::default(),
+            hits: Arc::clone(&fb_hits),
+        })));
+        let stmt_tracker = new_tracker(2, -1);
+        stmt_tracker.attach_to(&sess_tracker).unwrap();
+        sctx.vars.stmt_ctx_mut().mem_tracker = Some(Arc::clone(&stmt_tracker));
+        // Pre-consume ~99% of limit on session tracker so agg uses << 20% when limit trips.
+        sess_tracker.record(limit - 1024);
+
+        let ectx = exec_ctx(&sctx);
+        let aggs = [desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false)];
+        let rows: Vec<(i64, f64)> = (0..1000).map(|i| (i, i as f64)).collect();
+        let input: Vec<Chunk> = rows.chunks(64).flat_map(|c| batches(&[c])).collect();
+        let (mut e, _, _) = build_hash_agg(&sctx, input, None, vec![col(&tps[0], 0)], &aggs);
+        e.session_mem_tracker = Some(Arc::clone(&sess_tracker));
+        e.open(&ectx).await.unwrap();
+        let (out, err) = run_exec(&ectx, &mut e).await;
+        assert!(err.is_none(), "expected fallback (not spill): {err:?}");
+        assert_eq!(out.len(), 1000);
+        assert!(fb_hits.load(Ordering::SeqCst) > 0);
+        e.close().await.unwrap();
+        assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+        assert_eq!(stmt_tracker.bytes_consumed(), 0);
+    }
+}
+
+/// Tests `GetGroupKey` for ENUM (`EnumSetAsIntFlag`) and DECIMAL (`flen = 0`), both
+/// vectorized and non-vectorized (spec §4.9).
+#[test]
+fn test_get_group_key_enum_and_decimal() {
+    use tidb_base::mysql::{TypeEnum, TypeNewDecimal};
+    use tidb_expression::eval::RpnState;
+    use tidb_expression::expression::EvalState;
+    use tidb_types::MyDecimal;
+    use tidb_types::enum_type::Enum;
+
+    let sctx = ctx();
+    let ectx = sctx.get_expr_ctx();
+    let eval_ctx = ectx.get_eval_ctx();
+    let sc = sctx.vars.stmt_ctx();
+    let loc = sc.time_zone();
+    let err_ctx = sc.err_ctx();
+
+    // ENUM column: value 0 ("") and valid value 1 ("") must produce DIFFERENT group keys
+    // because EnumSetAsIntFlag encodes the integer value (0 vs 1) instead of the empty name.
+    let mut enum_ft = new_field_type(TypeEnum);
+    enum_ft.set_elems(Some(vec![b"".to_vec(), b"a".to_vec()]));
+    let mut dec_ft = new_field_type(TypeNewDecimal);
+    dec_ft.set_flen(10);
+    dec_ft.set_decimal(2);
+    let types = vec![enum_ft.clone(), dec_ft.clone()];
+
+    let mut chk = new_chunk_with_capacity(&types, 3);
+    chk.append_enum(
+        0,
+        &Enum {
+            name: vec![],
+            value: 0,
+        },
+    );
+    let mut d1 = MyDecimal::default();
+    let _ = d1.from_string(b"12.34");
+    chk.append_my_decimal(1, &d1);
+
+    chk.append_enum(
+        0,
+        &Enum {
+            name: vec![],
+            value: 1,
+        },
+    );
+    chk.append_my_decimal(1, &d1);
+
+    chk.append_null(0);
+    chk.append_null(1);
+
+    let items = vec![col(&enum_ft, 0), col(&dec_ft, 1)];
+    let st = EvalState::default();
+    let mut rpn = RpnState::default();
+    let keys_vec = super::get_group_key(
+        &*eval_ctx,
+        &err_ctx,
+        &loc,
+        true,
+        &st,
+        &mut rpn,
+        &chk,
+        Vec::new(),
+        &items,
+    )
+    .unwrap();
+    let keys_row = super::get_group_key(
+        &*eval_ctx,
+        &err_ctx,
+        &loc,
+        false,
+        &st,
+        &mut rpn,
+        &chk,
+        Vec::new(),
+        &items,
+    )
+    .unwrap();
+    assert_eq!(keys_vec, keys_row);
+    assert_eq!(keys_vec.len(), 3);
+    assert_ne!(keys_vec[0], keys_vec[1], "enum 0 vs enum 1 must differ");
+    assert_ne!(keys_vec[0], keys_vec[2]);
+}
+
+/// Repeated mixed failure/early-close/reopen runs (converted from Go's `TestRandomFail` in
+/// `agg_spill_test.go`, spec §5.1): verifies no hangs and tracker returns to 0 on every run.
+#[tokio::test]
+async fn hash_agg_parallel_random_fail_and_reopen_stress() {
+    let tps = child_types();
+    let rows: Vec<(i64, f64)> = (0..1000).map(|i| (i % 200, i as f64)).collect();
+    let input: Vec<Chunk> = rows.chunks(32).flat_map(|c| batches(&[c])).collect();
+
+    for iter in 0..10usize {
+        let mut sctx = parallel_ctx(3, 3);
+        sctx.vars.init_chunk_size = 16;
+        sctx.vars.max_chunk_size = 16;
+        let ectx = exec_ctx(&sctx);
+        let aggs = [
+            desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false),
+            desc(&sctx, ast::AggFuncSum, col(&tps[1], 1), false),
+        ];
+        let err_at = if iter % 3 == 0 { Some(iter % 5) } else { None };
+        let (mut e, _, closed) =
+            build_hash_agg(&sctx, input.clone(), err_at, vec![col(&tps[0], 0)], &aggs);
+        e.open(&ectx).await.unwrap();
+        if iter % 3 == 1 {
+            // Early Close after reading one chunk.
+            let mut chk = exec::new_first_chunk(&e);
+            let _ = e.next(&ectx, &mut chk).await;
+        } else {
+            let (_, err) = run_exec(&ectx, &mut e).await;
+            assert_eq!(err.is_some(), err_at.is_some());
+        }
+        e.close().await.unwrap();
+        assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(e.mem_tracker.bytes_consumed(), 0);
+    }
+
+    // Verify error paths of initForParallelExec (zero concurrency) and newSpillHelper
+    // (mismatched agg lengths).
+    let sctx = parallel_ctx(0, 0);
+    let ectx = exec_ctx(&sctx);
+    let aggs = [desc(&sctx, ast::AggFuncCount, col(&tps[1], 1), false)];
+    let (mut e, _, _) = build_hash_agg(&sctx, Vec::new(), None, Vec::new(), &aggs);
+    e.is_unparallel_exec = false;
+    e.partial_concurrency = 0;
+    let err = e.open(&ectx).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "partialConcurrency or finalConcurrency is 0"
+    );
+
+    let t = new_tracker(1, -1);
+    let err = super::agg_spill::new_spill_helper(
+        t,
+        vec![None],
+        Vec::new(),
+        Box::new(|| new_chunk_with_capacity::<FieldType>(&[], 1)),
+        Vec::new(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        err.to_string(),
+        "len(aggFuncsForRestoring) != len(finalWorkerAggFuncs)"
+    );
 }

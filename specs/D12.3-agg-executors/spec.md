@@ -1,6 +1,6 @@
 # D12.3 聚合执行器框架（hash agg / stream agg）：spec
 
-状态：已确认（2026-11-25），只写 spec（#335）。第 8 节记录各决定点的结论：全部按本 spec 的建议，由维护者按宪章第九条（谁来决定，#374）决定。下一步按 §2 的部分拆成实现任务。第 A 部分（StreamAgg 与 vecgroupchecker）由 #376 实现，实现中新增的差异见 §6 第 16-21 条。
+状态：已确认（2026-11-25），只写 spec（#335）。第 8 节记录各决定点的结论：全部按本 spec 的建议，由维护者按宪章第九条（谁来决定，#374）决定。下一步按 §2 的部分拆成实现任务。第 A 部分（StreamAgg 与 vecgroupchecker）由 #376 实现，实现中新增的差异见 §6 第 16-21 条；第 B 部分（单线程与并行 HashAgg）由 #382（PR #383）实现，实现中新增的差异见 §6 第 22-26 条。
 
 块：D12.3（ROADMAP P4 的第 2 层；Go 约 1,959 行，8 个文件），crate `tidb-executor`（N0 rank 14）。
 
@@ -359,11 +359,19 @@ sysbench 的 SUM / DISTINCT 要等 D09.4、D09.9、D10.1、D10.3、D12.3、D12.4
 20. **vecgroupchecker 的缓冲区钩子不移植**（vec_group_checker.go:31、34、354-359 的 `allocateBuffer` / `releaseBuffer`）：Rust 直接分配列（M-POOL）。Go 的 `TestVecGroupCheckerDATARACE` 用这两个钩子让求值写进输入 chunk 的列，再改写这一列检查首尾 datum 不变；Rust 版改为在 split 之后改写输入列，检查同样的内容。`Reset` 中 Go 只在 `groupOffset` 等非空时才清空，Rust 无条件清空，结果相同。
 21. **会话值的读取时刻**（agg_stream_executor.go:98）：`TrackAggregateMemoryUsage` 与求值上下文在建执行器时读（N2），语句的 tracker 在 `Open` 时从 `ExecCtx` 取。同一条语句中不变（与第 9 条相同）。
 
-## 7. 可能的 Go 问题（读代码发现，尚未在运行中的 v8.5.8 上复现）
+第 B 部分（单线程与并行 HashAgg，#382 / PR #383）实现时新增的差异：
+
+22. **`buildHashAgg` 不移植，§3 的分派桩不加**（builder.go:278-279、2014-2020）：与第 16 条（`buildStreamAgg`）相同，Rust 还没有 `PhysicalHashAgg`（D10.1，物理算子定义），`build` 的默认分支已返回 `blocked`，再加分派桩不可达。`buildHashAgg` 在 `functions.tsv` 中记为 `not_ported`，只移植 `buildHashAggFromChildExec`（参数为子执行器、schema、id、`GroupByItems`、`AggFuncs`）。`executor_metrics.ExecutorHashAggExec.Inc()`（builder.go:2097）不移植（D14.1，metrics）。
+23. **`aggfuncs.Build` 返回 nil 时**（builder.go:2038-2090）：与第 17 条相同，单线程和并行模式下的 partial / final 聚合函数列表遇到 `Build` 返回 `None` 时保留 `None`，并在调用点返回与 Go 相同文本的错误，不导致进程崩溃。
+24. **内存记账（A1，§4.6）在 HashAgg 中的具体做法**：`AggPartialResultMapper` 改为 `MemAwareMap<AllocBox<[u8], A>, AllocVec<PartialResult, A>, A>`，与单线程 `groupSet`（`MemAwareMap<AllocBox<[u8], A>, (), A>`）和 `PartialResult` 一样共用执行器的 `TrackedAlloc` 自动记账；`getPartialResults` / `getPartialResultsOfEachRow` 只在插入新分组时调用 `mem_tracker.checkpoint()?`（命中已有分组零分配、不查限额），chunk 结尾再检查一次；`getGroupKeyMemUsage` 与 `memDelta` 估算删除（`getGroupKeyMemUsage` 保留签名与 `go:` 标注，返回 0，按 A1 解释）。
+25. **`WaitGroup` 与 `DataInDiskByChunks` 共享到基础 crate**：异步 `WaitGroup` / `DoneGuard` 和 `channel::clear`（`pkg/util/channel/channel.go`，D00.3）落入 `tidb-runtime`，`DataInDiskByChunks` 的 5 个非 I/O 方法与 2 个 `blocked-by:D01.10` 桩落入 `tidb-chunk`；`sortexec/sort_util.rs` 改为重导出它们，避免重复翻译。
+26. **`ParallelAggSpillDiskAction.actionImpl` 的阻塞等待**（agg_spill.go:374-377）：按 §2.3，第 B 部分中 `spill` 是 `blocked-by:D01.10` 桩，状态永远不会进入 `inSpilling`，`waitForTheEndOfSpill` 不会阻塞 runtime 线程。第 C 部分移植真实写盘时需按 M-BLOCK 处理。
+
+## 7. 可能的 Go 问题（读代码发现，部分已在 v8.5.8 上复现）
 
 按 CLAUDE.md，issue 要写清在 v8.5.8 上怎么复现；本任务没有运行中的集群，也不改 tracker，所以下面几条由实现任务复现后再开 issue（标签 `upstream-pitfall`），并更新本 spec（决定点 10）。
 
-1. **并行方式吞掉输出时的错误**：final worker 的 `generateResultAndSend` 在 `AppendFinalResult2Chunk` 出错时只记日志、继续（final_worker.go:125-129）；单线程方式（agg_hash_executor.go:687-691）和 StreamAgg（agg_stream_executor.go:238-242）返回这个错误。出错的函数如果没有往输出列追加值，这一行的各列长度就不一致，可能输出错误的结果。哪些聚合函数会在这里出错属于 D12.4：例如 avg 的 decimal 路径中 `DecimalDiv` / `Round` 的错误（aggfuncs/func_avg.go:92-105）。如果复现为结果错误，属于宪章第一条 2 的情况，要负责人裁定。
+1. **并行方式吞掉输出时的错误**（已复现，见 **#384**）：final worker 的 `generateResultAndSend` 在 `AppendFinalResult2Chunk` 出错时只记日志、继续（final_worker.go:125-129）；单线程方式（agg_hash_executor.go:687-691）和 StreamAgg（agg_stream_executor.go:238-242）返回这个错误。已在 Go TiDB v8.5.8 上经由 `govec` `aggexec` 的 `hash_agg_parallel` 复现：`baseAvgDecimal`、`sum4Decimal` 与 `maxMin4Decimal` 的 `AppendFinalResult2Chunk` 在 `DecimalDiv` / `Round` 溢出或截断时返回错误而不向该列追加值，导致多分组场景下各列错位（静默错误结果，且结果随 Go map 顺序变化）以及单分组或读越界场景下 Go 自身 panic（`runtime error: index out of range [0] with length 0`）。已开 `upstream-pitfall` issue #384 按宪章第一条 2 请负责人裁定；PR #383 暂照 Go 实现（记日志继续），待裁定后再按需调整。
 2. **StreamAgg 的初始内存在每次重新打开时累加**：`OpenSelf` 中 `memUsageOfInitialPartialResult += memDelta`（agg_stream_executor.go:90），这个字段从不清零。Apply 对每一行外表都重新 `Open` 内表的执行器（join/hash_join_v1.go:1308），所以第 n 次打开时记账的初始内存是第一次的 n 倍（:103、:248），外表行数多时可能因为记账虚高而触发内存超限。只影响内存记账，不影响结果。按 A1 删除 delta 计算后（§4.6），Rust 记的是实际字节数，这个累加不存在，所以不照搬；这是 A1 带来的记账差异，不单独登记裁定。
 3. **builder 给 avg 的 ordinal**（builder.go:2073-2078）：avg 得到 `[p, p+2]`（不是 `[p, p+1]`），下一个函数从 `p+2` 开始。这些 ordinal 只用作 final 描述参数列的 `Index`（D08.11 descriptor.go:168-175），而并行方式的 final 函数只做 `MergePartialResult` / `AppendFinalResult2Chunk`，不对参数求值，所以看起来没有影响。照 Go 移植，govec `hash_agg_parallel` 含多个 avg 的用例来确认。
 
