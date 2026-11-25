@@ -121,11 +121,17 @@ impl HashAggFinalWorker {
         }
     }
 
-    // go: HashAggFinalWorker.mergeInputIntoResultMap L2 (async: CheckpointStride in merge loop per spec §4.7; A1 TrackedAlloc checkpoint)
+    // go: HashAggFinalWorker.mergeInputIntoResultMap L2 (async: CheckpointStride in merge loop per spec §4.7; A1 TrackedAlloc checkpoint; fast path skips empty input maps)
     async fn merge_input_into_result_map(
         &mut self,
         input: AggPartialResultMapper<ColAlloc>,
     ) -> Result<(), Error> {
+        // Fast path: skip iterating, flushing, and checkpointing empty partition maps.
+        // (This also originally avoided a hashbrown 0.17.1 allocator leak on zero-capacity
+        // `HashMap::into_iter()`, which is fixed at the root by bumping hashbrown to 0.17.2.)
+        if input.m.is_empty() {
+            return Ok(());
+        }
         // As w.partialResultMap is empty when we get the first input, directly assign it.
         if self.partial_result_map.m.is_empty() {
             self.partial_result_map = input;
