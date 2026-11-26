@@ -48,8 +48,9 @@ file and over any task description.
    filed as an **English issue in this repo** (how to reproduce on v8.5.8), labelled
    `upstream-pitfall` (Go behaves wrongly) or `go-gap` (Go lacks a feature). Every
    `upstream-pitfall` issue also gets exactly one of `go-bug-kept` (tidb-rs copies Go: technical
-   debt to fix later) or `go-bug-fixed` (tidb-rs is correct; recorded as a ruling when users can
-   see it),
+   debt to fix later) or `go-bug-fixed` (tidb-rs is correct; a difference users can see — rows,
+   errors, warnings, metadata — gets a ruling, an internal-only one is a known difference in the
+   spec),
    and cited in the spec's known-differences section; never filed upstream. If copying Go would
    cause a security problem, wrong results or data loss, do not decide yourself: describe it in
    the issue and **stop and ask** (it needs an entry in `docs/testing/rulings.toml` approved by the
