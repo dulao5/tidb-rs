@@ -69,10 +69,10 @@ impl PlanInfo for PhysicalPlanInfo<'_> {
             },
         }
     }
-    /// The planner's function is still partly a boundary stub (D10.1 / D10.8): its error
-    /// answers "no", and the statement reads at a TSO instead of MaxTS (same rows, one TSO
-    /// more).
-    // glue: planner/core IsPointGetWithPKOrUniqueKeyByAutoCommit (D10.1; blocked answers false)
+    /// Checks whether an autocommit single-point plan (`PointGet`, single-point `TableReader`,
+    /// unique single-point `IndexReader`, or a `Projection` over one) may read at `MaxTS`
+    /// (`common_plans.go:IsPointGetWithPKOrUniqueKeyByAutoCommit`).
+    // glue: planner/core IsPointGetWithPKOrUniqueKeyByAutoCommit
     fn is_point_get_with_pk_or_unique_key_by_auto_commit(&self, vars: &SessionVars) -> bool {
         tidb_planner::core::common_plans::is_point_get_with_pk_or_unique_key_by_auto_commit(
             vars, self.plan,

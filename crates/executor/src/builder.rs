@@ -228,8 +228,10 @@ impl ExecutorBuilder {
             PhysicalKind::Sort | PhysicalKind::TopN => unreachable!("built above"),
             // b.buildTableReader(v)
             PhysicalKind::TableReader => ("D12.1", "the table reader executor (VS1-34)"),
-            // A table scan is pushed down inside a reader, never built on its own: Go's
-            // `default` branch.
+            // b.buildIndexReader(v): blocked before any StatementContext mutation (D12.1 part 2B).
+            PhysicalKind::IndexReader => ("D12.1", "the index reader executor (D12.1 part 2B)"),
+            // A table scan or index scan is pushed down inside a reader, never built on its own:
+            // Go's `default` branch.
             PhysicalKind::TableScan => {
                 self.err = Some(
                     tidb_base::dbterror::exeerrors::ErrUnknownPlan.gen_with_stack(
@@ -237,6 +239,18 @@ impl ExecutorBuilder {
                         vec![tidb_base::gofmt::Arg::Stringer(
                             Vec::new(),
                             "*core.PhysicalTableScan",
+                        )],
+                    ),
+                );
+                return None;
+            }
+            PhysicalKind::IndexScan => {
+                self.err = Some(
+                    tidb_base::dbterror::exeerrors::ErrUnknownPlan.gen_with_stack(
+                        "Unknown Plan %T",
+                        vec![tidb_base::gofmt::Arg::Stringer(
+                            Vec::new(),
+                            "*core.PhysicalIndexScan",
                         )],
                     ),
                 );
@@ -1086,7 +1100,10 @@ mod tests {
         let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
         assert!(b.build(&mut s, None).await.is_none());
         assert!(b.err.is_none());
-        for (kind, block) in [(PhysicalKind::TableReader, "D12.1")] {
+        for (kind, block) in [
+            (PhysicalKind::TableReader, "D12.1"),
+            (PhysicalKind::IndexReader, "D12.1"),
+        ] {
             let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
             assert!(b.build(&mut s, Some(&test_plan(kind))).await.is_none());
             let err = b.err.expect("blocked");
@@ -1096,16 +1113,20 @@ mod tests {
                 "{kind:?}"
             );
         }
-        let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
-        assert!(
-            b.build(&mut s, Some(&test_plan(PhysicalKind::TableScan)))
-                .await
-                .is_none()
-        );
-        assert_eq!(
-            b.err.unwrap().to_string(),
-            "[executor:8114]Unknown Plan *core.PhysicalTableScan"
-        );
+        for (kind, expected) in [
+            (
+                PhysicalKind::TableScan,
+                "[executor:8114]Unknown Plan *core.PhysicalTableScan",
+            ),
+            (
+                PhysicalKind::IndexScan,
+                "[executor:8114]Unknown Plan *core.PhysicalIndexScan",
+            ),
+        ] {
+            let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
+            assert!(b.build(&mut s, Some(&test_plan(kind))).await.is_none());
+            assert_eq!(b.err.unwrap().to_string(), expected, "{kind:?}");
+        }
     }
 
     /// `buildSort` / `buildTopN` build the executor over the child's executor; both run (the

@@ -11,11 +11,15 @@
 // The model version constants keep their Go names (M-GONAME).
 #![allow(non_upper_case_globals)]
 
+use std::sync::Arc;
+
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::gostd::math;
+use tidb_statistics::HistColl;
 
-use crate::base::PhysicalPlan;
+use crate::base::{PhysicalKind, PhysicalPlan};
+use crate::core::physical_plans::{PhysicalIndexReader, PhysicalIndexScan, PhysicalTableScan};
 use crate::core::point_get_plan::PointGetPlan;
 use crate::planctx::PlanCtx;
 use crate::util::costusage::CostFlagUseTrueCardinality;
@@ -99,4 +103,47 @@ pub fn get_cardinality(ctx: &PlanCtx<'_>, operator: &dyn PhysicalPlan, cost_flag
         rows = 1.0;
     }
     rows
+}
+
+/// getTblStats returns the tbl-stats of this plan, which contains all columns before pruning.
+// go: getTblStats L1 [M-IFACE]
+pub fn get_tbl_stats(cop_task_plan: &dyn PhysicalPlan) -> Option<&Arc<HistColl>> {
+    match cop_task_plan.kind() {
+        PhysicalKind::TableScan => cop_task_plan
+            .as_any()
+            .downcast_ref::<PhysicalTableScan>()
+            .expect("PhysicalTableScan")
+            .tbl_col_hists
+            .as_ref(),
+        PhysicalKind::IndexScan => cop_task_plan
+            .as_any()
+            .downcast_ref::<PhysicalIndexScan>()
+            .expect("PhysicalIndexScan")
+            .tbl_col_hists
+            .as_ref(),
+        _ => get_tbl_stats(cop_task_plan.children()[0].as_ref()),
+    }
+}
+
+impl PhysicalIndexReader {
+    /// GetNetDataSize calculates the cost of the plan in network data transfer.
+    // go: PhysicalIndexReader.GetNetDataSize L1 [M-CTX]
+    pub fn get_net_data_size(&self, ctx: &PlanCtx<'_>) -> f64 {
+        let index_plan = self
+            .index_plan
+            .as_deref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let default_coll = HistColl::default();
+        let tbl_stats = get_tbl_stats(index_plan)
+            .map(Arc::as_ref)
+            .unwrap_or(&default_coll);
+        let row_size = crate::cardinality::row_size::get_avg_row_size(
+            ctx,
+            tbl_stats,
+            &index_plan.schema().columns,
+            true,
+            false,
+        );
+        index_plan.stats_count() * row_size
+    }
 }

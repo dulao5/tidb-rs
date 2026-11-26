@@ -687,6 +687,33 @@ pub fn is_physical_plan_cacheable(
                 sub_plans.push(table_plan);
             }
         }
+        PhysicalKind::IndexReader => {
+            let x = p
+                .as_any()
+                .downcast_ref::<crate::core::physical_plans::PhysicalIndexReader>()
+                .expect("PhysicalIndexReader");
+            if let Some(index_plan) = &x.index_plan {
+                sub_plans.push(index_plan);
+            }
+        }
+        PhysicalKind::IndexScan => {
+            let x = p
+                .as_any()
+                .downcast_ref::<crate::core::physical_plans::PhysicalIndexScan>()
+                .expect("PhysicalIndexScan");
+            if under_index_merge && crate::core::explain::index_scan_is_full_scan(x) {
+                return Ok((
+                    false,
+                    "IndexMerge plan with full-scan is un-cacheable".to_owned(),
+                ));
+            }
+            if x.index.has_condition() && x.not_always_valid {
+                return Ok((
+                    false,
+                    "IndexScan of partial index is un-cacheable".to_owned(),
+                ));
+            }
+        }
         PhysicalKind::TableScan => {
             if under_index_merge {
                 // glue: blocked-by:D10.9 (PhysicalTableScan.isFullScan of explain.go; no index merge on the new stack)

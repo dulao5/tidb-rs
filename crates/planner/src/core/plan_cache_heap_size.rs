@@ -28,8 +28,8 @@ use tidb_types::field_name::NameSlice;
 use crate::PhysicalKind;
 use crate::base::PhysicalPlan;
 use crate::core::physical_plans::{
-    PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalSort, PhysicalTableDual,
-    PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
+    PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit, PhysicalProjection, PhysicalSelection,
+    PhysicalSort, PhysicalTableDual, PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
 };
 use crate::core::plan_cache_utils::PlanCacheValue;
 use crate::core::point_get_plan::PointGetPlan;
@@ -45,27 +45,35 @@ pub fn children_instance_cacheable(p: &dyn PhysicalPlan) -> bool {
     p.children().iter().all(|c| c.instance_cacheable())
 }
 
-/// The plans below `p` that are not its children: a reader's pushed-down plan.
+/// The plans below `p` that are not its children: a reader's pushed-down plan(s).
 // glue: N1 §3 item 9 (the reader's chain is not a child)
-fn inner_plans(p: &dyn PhysicalPlan) -> Option<&crate::PhysicalPlanRef> {
+fn inner_plans(p: &dyn PhysicalPlan) -> Vec<&crate::PhysicalPlanRef> {
     match p.kind() {
         PhysicalKind::TableReader => p
             .as_any()
             .downcast_ref::<PhysicalTableReader>()
-            .and_then(|r| r.table_plan.as_ref()),
-        _ => None,
+            .and_then(|r| r.table_plan.as_ref())
+            .into_iter()
+            .collect(),
+        PhysicalKind::IndexReader => p
+            .as_any()
+            .downcast_ref::<PhysicalIndexReader>()
+            .and_then(|r| r.index_plan.as_ref())
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
 /// Seals every node of the plan (A3 spec §3.6): the children, the probe parents and the
-/// reader's pushed-down plan.
+/// reader's pushed-down plan(s).
 // glue: A3 spec §3.6
 pub fn seal_plan(p: &dyn PhysicalPlan) {
     p.base_physical().seal();
     for c in p.children() {
         seal_plan(c.as_ref());
     }
-    if let Some(inner) = inner_plans(p) {
+    for inner in inner_plans(p) {
         seal_plan(inner.as_ref());
     }
     if let Some(pg) = p.as_any().downcast_ref::<PointGetPlan>() {
@@ -152,6 +160,55 @@ impl HeapSizer {
                 for tp in &x.table_plans {
                     self.plan(tp);
                 }
+            }
+            PhysicalKind::IndexReader => {
+                let Some(x) = any.downcast_ref::<PhysicalIndexReader>() else {
+                    return; // a test double of the kind
+                };
+                self.schema(p.schema());
+                if let Some(ip) = &x.index_plan {
+                    self.plan(ip);
+                }
+                self.bytes +=
+                    (x.index_plans.capacity() * size_of::<crate::PhysicalPlanRef>()) as i64;
+                for ip in &x.index_plans {
+                    self.plan(ip);
+                }
+                self.bytes += (x.output_columns.capacity() * size_of::<usize>()) as i64;
+                for c in &x.output_columns {
+                    self.column(c);
+                }
+            }
+            PhysicalKind::IndexScan => {
+                let Some(x) = any.downcast_ref::<PhysicalIndexScan>() else {
+                    return; // a test double of the kind
+                };
+                self.schema(p.schema());
+                self.exprs(&x.access_condition);
+                self.bytes += (x.idx_cols.capacity() * size_of::<usize>()) as i64;
+                for c in &x.idx_cols {
+                    self.column(c);
+                }
+                self.bytes += (x.idx_col_lens.capacity() * size_of::<isize>()) as i64;
+                self.ranges(&x.ranges);
+                self.bytes += (x.columns.capacity() * size_of::<usize>()) as i64;
+                self.cistr(&x.db_name);
+                if let Some(n) = &x.table_as_name {
+                    self.cistr(n);
+                }
+                if let Some(s) = &x.data_source_schema {
+                    self.schema(s);
+                }
+                self.bytes += x.range_info.capacity() as i64;
+                self.by_items(&x.by_items);
+                if let Some(c) = &x.pk_is_handle_col {
+                    self.column(c);
+                }
+                self.bytes += x.const_cols_by_cond.capacity() as i64;
+                for g in &x.grouped_ranges {
+                    self.ranges(g);
+                }
+                self.bytes += (x.group_by_col_idxs.capacity() * size_of::<isize>()) as i64;
             }
             PhysicalKind::TableScan => {
                 let Some(x) = any.downcast_ref::<PhysicalTableScan>() else {
@@ -466,11 +523,19 @@ pub fn plan_structure_hash(p: &dyn PhysicalPlan) -> u64 {
         }
         if let Some(x) = p.as_any().downcast_ref::<PhysicalTableScan>() {
             format!("{:?}", x.ranges).hash(h);
+            format!("{:?}", x.grouped_ranges).hash(h);
         }
         if let Some(x) = p.as_any().downcast_ref::<PhysicalTableReader>() {
             x.table_plans.len().hash(h);
         }
-        if let Some(inner) = inner_plans(p) {
+        if let Some(x) = p.as_any().downcast_ref::<PhysicalIndexScan>() {
+            format!("{:?}", x.ranges).hash(h);
+            format!("{:?}", x.grouped_ranges).hash(h);
+        }
+        if let Some(x) = p.as_any().downcast_ref::<PhysicalIndexReader>() {
+            x.index_plans.len().hash(h);
+        }
+        for inner in inner_plans(p) {
             structure_into(inner.as_ref(), h);
         }
         for c in p.children() {

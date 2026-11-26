@@ -74,6 +74,10 @@ pub enum PhysicalKind {
     TableReader,
     /// `*PhysicalTableScan`.
     TableScan,
+    /// `*PhysicalIndexReader`.
+    IndexReader,
+    /// `*PhysicalIndexScan`.
+    IndexScan,
     /// `*PhysicalSelection`.
     Selection,
     /// `*PhysicalProjection`.

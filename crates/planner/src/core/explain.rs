@@ -13,6 +13,11 @@ use tidb_base::blocked::blocked;
 // glue: stub of PhysicalTableReader.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalTableScan.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalTableScan.ExplainNormalizedInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
+// glue: stub of PhysicalIndexReader.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
+// glue: stub of PhysicalIndexReader.ExplainNormalizedInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
+// glue: stub of PhysicalIndexScan.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
+// glue: stub of PhysicalIndexScan.ExplainNormalizedInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
+// glue: stub of PhysicalIndexScan.OperatorInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalProjection.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalProjection.ExplainNormalizedInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalTopN.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
@@ -24,6 +29,54 @@ use tidb_base::blocked::blocked;
 // glue: stub of PhysicalTableDual.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 pub fn explain_stub(what: &str) -> ! {
     panic!("{}", blocked("D10.9", what));
+}
+
+/// ExplainID overrides the ExplainID in order to match different range.
+///
+/// `sc` is the statement context of Go's stored `ctx` (`M-CTX`); `None` is Go's nil context.
+// go: PhysicalIndexScan.ExplainID L1 [M-CTX]
+pub fn index_scan_explain_id(
+    p: &crate::core::physical_plans::PhysicalIndexScan,
+    sc: Option<&tidb_sessionctx::stmtctx::StatementContext>,
+) -> String {
+    if let Some(sc) = sc
+        && sc.ignore_explain_id_suffix
+    {
+        return index_scan_tp(p).to_owned();
+    }
+    format!("{}_{}", index_scan_tp(p), crate::PhysicalPlan::id(p))
+}
+
+/// TP overrides the TP in order to match different range.
+// go: PhysicalIndexScan.TP L1
+pub fn index_scan_tp(p: &crate::core::physical_plans::PhysicalIndexScan) -> &'static str {
+    if index_scan_is_full_scan(p) {
+        return "IndexFullScan";
+    }
+    "IndexRangeScan"
+}
+
+// go: PhysicalIndexScan.haveCorCol L1
+pub(crate) fn index_scan_have_cor_col(p: &crate::core::physical_plans::PhysicalIndexScan) -> bool {
+    for cond in &p.access_condition {
+        if !tidb_expression::util::extract_cor_columns(cond).is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+// go: PhysicalIndexScan.isFullScan L1
+pub(crate) fn index_scan_is_full_scan(p: &crate::core::physical_plans::PhysicalIndexScan) -> bool {
+    if !p.range_info.is_empty() || index_scan_have_cor_col(p) {
+        return false;
+    }
+    for ran in &p.ranges {
+        if !ran.is_full_range(false) {
+            return false;
+        }
+    }
+    true
 }
 
 /// ExplainID overrides the ExplainID in order to match different range.

@@ -422,7 +422,8 @@ fn selectivity_fn(
 }
 
 /// `z - x * y` the way Go gc compiles selectivity.go:370 and :535: fused (`FMSUBD`) on
-/// arm64, riscv64, loong64; not on amd64 (GOAMD64=v1), ppc64le, s390x (mapping rule `M-FMA`).
+/// arm64, riscv64, loong64 only — unlike `madd` (`z + x * y`), `msub` is not fused on amd64
+/// (GOAMD64=v1), ppc64le, or s390x (mapping rule `M-FMA`, per the tracker's `go_fma_sites.tsv`).
 // glue: M-FMA helper
 #[inline(always)]
 fn msub(z: f64, x: f64, y: f64) -> f64 {

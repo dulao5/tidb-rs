@@ -24,8 +24,8 @@ use tidb_statistics::HistColl;
 
 use crate::base::{PhysicalKind, PhysicalPlan};
 use crate::core::physical_plans::{
-    PhysPlanPartInfo, PhysicalProjection, PhysicalTableReader, PhysicalTableScan,
-    expand_virtual_column,
+    PhysPlanPartInfo, PhysicalIndexReader, PhysicalProjection, PhysicalTableReader,
+    PhysicalTableScan, expand_virtual_column,
 };
 use crate::physicalop::PhysicalPlanRef;
 use crate::planctx::PlanCtx;
@@ -544,12 +544,15 @@ impl CopTask {
                 "D10.1",
                 "convertToRootTask of an index lookup (PhysicalIndexLookUpReader)",
             ));
-        } else if self.index_plan.is_some() {
-            // glue: blocked-by:D10.1 (PhysicalIndexReader is outside the first slice)
-            return Err(blocked(
-                "D10.1",
-                "convertToRootTask of an index read (PhysicalIndexReader)",
-            ));
+        } else if let Some(index_plan) = &self.index_plan {
+            let mut p = PhysicalIndexReader {
+                index_plan: Some(Arc::clone(index_plan)),
+                ..Default::default()
+            }
+            .init(ctx, index_plan.query_block_offset());
+            p.plan_part_info = self.phys_plan_part_info.as_ref().map(Arc::clone);
+            p.set_stats(index_plan.stats_info().map(Arc::clone));
+            new_task.set_plan(Arc::new(p));
         } else {
             let table_plan = task_plan(self.table_plan.as_ref());
             let ts = leaf_table_scan(table_plan)?;

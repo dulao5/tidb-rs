@@ -44,8 +44,8 @@ use tidb_planner::core::access_object::{
 };
 use tidb_planner::core::optimizer::{adjust_optimization_flags, do_optimize_plan};
 use tidb_planner::core::physical_plans::{
-    NominalSort, PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalSort,
-    PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
+    NominalSort, PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit, PhysicalProjection,
+    PhysicalSelection, PhysicalSort, PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
 };
 use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
 use tidb_planner::core::planbuilder::new_plan_builder;
@@ -87,15 +87,11 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("missing D09.1", 18),
     // Partitioned tables (table tp).
     ("missing D09.12", 18),
-    // An index path left after the skyline pruning (sbtest1's k_1 covering `id`, tc's
-    // secondary indexes).
-    ("missing D10.2", 12),
     // BatchPointGet (`id = 3 OR id = 9`).
     ("missing D10.8", 6),
     ("plan D08.6", 4),
     ("plan D09.1", 6),
     ("plan D09.12", 6),
-    ("plan D10.2", 11),
     ("plan D10.8", 2),
 ];
 
@@ -439,6 +435,25 @@ fn dump(
             o.insert("cols".into(), cols(x.schema()));
             o.insert("acc".into(), acc(&*x.access_object()));
         }
+        PhysicalKind::IndexReader => {
+            let x = any.downcast_ref::<PhysicalIndexReader>().unwrap();
+            let idx = x.index_plans.last().expect("indexPlan");
+            o.insert("idx".into(), dump(ctx, bctx, &**idx, false)?);
+            o.insert("out".into(), cols(&new_schema(x.output_columns.clone())));
+            let pbs = x
+                .index_plans
+                .iter()
+                .map(|ip| pb(ip.to_pb(bctx, TiKV)))
+                .collect::<Result<Vec<_>, _>>()?;
+            o.insert("pb".into(), Value::Array(pbs));
+            o.insert("acc".into(), acc(&*x.access_object(ctx)?));
+        }
+        PhysicalKind::IndexScan => {
+            let x = any.downcast_ref::<PhysicalIndexScan>().unwrap();
+            o.insert("cols".into(), cols(x.schema()));
+            o.insert("acc".into(), acc(&*x.access_object()));
+            o.insert("eid".into(), json!(x.explain_id(Some(ctx.vars.stmt_ctx()))));
+        }
         PhysicalKind::PointGet => {
             let x = any.downcast_ref::<PointGetPlan>().unwrap();
             o.insert("virt".into(), virt(&x.schema));
@@ -519,24 +534,46 @@ fn run_plan(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     })
 }
 
-/// The table readers [`check_reader_schemas`] checked.
+/// The table and index readers [`check_reader_schemas`] checked.
 static READERS_CHECKED: AtomicUsize = AtomicUsize::new(0);
+static INDEX_READERS_CHECKED: AtomicUsize = AtomicUsize::new(0);
 
 /// Go's table reader schema is its table plan's schema object (`PhysicalTableReader.Init`),
 /// so after `ResolveIndices` the reader's columns are the table plan's, `Index` included.
 /// tidb-rs's reader owns a copy; after resolving, it must read the same column by column.
+/// Likewise, for `PhysicalIndexReader`, when `index_plan` is a `Projection` (or aggregation),
+/// its schema matches `index_plan.schema()`, and all `output_columns` are resolved (`index >= 0`).
 fn check_reader_schemas(p: &dyn PhysicalPlan, sql: &str) {
+    let ids = |s: &Schema| -> Vec<(i64, isize)> {
+        s.columns.iter().map(|c| (c.unique_id, c.index)).collect()
+    };
     if let Some(r) = p.as_any().downcast_ref::<PhysicalTableReader>() {
         let tbl = r.table_plan.as_ref().expect("tablePlan").schema();
-        let ids = |s: &Schema| -> Vec<(i64, isize)> {
-            s.columns.iter().map(|c| (c.unique_id, c.index)).collect()
-        };
         assert_eq!(
             ids(r.schema()),
             ids(tbl),
             "{sql}: the reader's schema columns (unique id, index) differ from its table plan's"
         );
         READERS_CHECKED.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Some(r) = p.as_any().downcast_ref::<PhysicalIndexReader>() {
+        let ip = r.index_plan.as_ref().expect("indexPlan");
+        if ip.kind() == PhysicalKind::Projection {
+            assert_eq!(
+                ids(r.schema()),
+                ids(ip.schema()),
+                "{sql}: the index reader's schema columns differ from its Projection index plan's"
+            );
+        }
+        for c in &r.output_columns {
+            assert!(
+                c.index >= 0,
+                "{sql}: unresolved index reader output column {} (index={})",
+                c.unique_id,
+                c.index
+            );
+        }
+        INDEX_READERS_CHECKED.fetch_add(1, Ordering::Relaxed);
     }
     for c in p.children() {
         check_reader_schemas(&**c, sql);
@@ -547,6 +584,7 @@ fn check_reader_schemas(p: &dyn PhysicalPlan, sql: &str) {
 #[derive(Clone, Copy)]
 enum Step {
     Table,
+    Index,
     Child(usize),
 }
 
@@ -555,6 +593,13 @@ fn preorder(p: &dyn PhysicalPlan, path: &mut Vec<Step>, out: &mut Vec<Vec<Step>>
     if let Some(r) = p.as_any().downcast_ref::<PhysicalTableReader>() {
         path.push(Step::Table);
         preorder(&**r.table_plan.as_ref().unwrap(), path, out);
+        path.pop();
+    }
+    if let Some(r) = p.as_any().downcast_ref::<PhysicalIndexReader>()
+        && let Some(ip) = r.index_plan.as_ref()
+    {
+        path.push(Step::Index);
+        preorder(&**ip, path, out);
         path.pop();
     }
     for (i, c) in p.children().iter().enumerate() {
@@ -576,6 +621,15 @@ fn node_at<'a>(p: &'a mut PhysicalPlanRef, path: &[Step]) -> &'a mut dyn Physica
             // The flattened list shares the table plan's nodes.
             r.table_plans.clear();
             node_at(r.table_plan.as_mut().unwrap(), &path[1..])
+        }
+        Some(Step::Index) => {
+            let r = node
+                .as_any_mut()
+                .downcast_mut::<PhysicalIndexReader>()
+                .unwrap();
+            // The flattened list shares the index plan's nodes.
+            r.index_plans.clear();
+            node_at(r.index_plan.as_mut().unwrap(), &path[1..])
         }
         Some(Step::Child(i)) => node_at(&mut node.children_mut()[*i], &path[1..]),
     }
@@ -603,6 +657,11 @@ fn run_missing(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
         let kind = p.kind();
         let any = p.as_any_mut();
         match kind {
+            PhysicalKind::IndexReader => any
+                .downcast_mut::<PhysicalIndexReader>()
+                .unwrap()
+                .output_columns
+                .push(Arc::new(missing_col())),
             PhysicalKind::Selection => any
                 .downcast_mut::<PhysicalSelection>()
                 .unwrap()
@@ -803,6 +862,10 @@ fn govec_postprocess() {
     assert!(
         READERS_CHECKED.load(Ordering::Relaxed) > 0,
         "no table reader checked"
+    );
+    assert!(
+        INDEX_READERS_CHECKED.load(Ordering::Relaxed) > 0,
+        "no index reader checked"
     );
     assert!(
         unparsed.is_empty(),
