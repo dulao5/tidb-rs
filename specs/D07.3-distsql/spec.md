@@ -143,8 +143,8 @@ tracker `data/func_blocks.tsv` 中 D07.3 共 **118 个函数**，分布在 3 个
 | `placement.Bundle.GetLeaderDC` | X（`pkg/ddl/placement`） | `crates/infoschema/src/placement.rs` 不构建规则（X）；tidb-rs 不支持本地 TSO | `VerifyTxnScope` 遇到非空、非 `global` 的 `txn_scope` 且表存在 placement bundle 时返回 `blocked("X", ...)`（见 §5） |
 | **`client-rust` `CopRpcContext.addr`（硬前置任务）** | ADR 0008（`dulao5/client-rust`） | 目前 `CopRpcContext.addr` 为空且无 `RegionRequestRuntimeStats`，导致 `updateCopRuntimeStats`（`select_result.go:625`）对**每个**响应提前返回，丢失 `EXPLAIN ANALYZE` `cop_task`/`tikv_task`、`actRows`、慢日志 `Tikv_cpu_time`、`statements_summary` `SumTikvCPU` 与 processlist TiKV CPU | **维护者已定：将"在 `dulao5/client-rust` 填上被调用 TiKV store 的 `addr`"列为本块第 1 部分的前置任务**（见 §7 第 5 条、§9.2） |
 | `tikv.RegionRequestRuntimeStats` | ADR 0008（client-rust） | client-rust 不产生 client-go 的 `RegionRequestRuntimeStats`（D07.2 §6.3 第 4 条） | 填上 `addr` 后 `updateCopRuntimeStats` 正常运行，仅 `rpc_info:{...}` 子段缺失（§7 第 4 条） |
-| **`ResourceGroupTagger`（D07.0 T8，临时缺口）** | D07.0 / D05.2 / D07.2（N9） | Go 对每个 cop 请求均设置 `kvrpcpb.Context.ResourceGroupTag`（`copr/coprocessor.go:1350`、`stmtctx.go:868`、`kv/kv.go:872-899`，不受 Top SQL 开关控制，改变发给 TiKV 的请求字节）；`kv::Request` 与 `copr/coprocessor.rs:1789` 尚未接入 | **非永久空操作，属临时缺口（D07.0 T8）**：随本块第 1 部分补齐 `tidb-kv` 的 `ResourceGroupTagger`、`StatementContext::get_resource_group_tagger`、`RequestBuilder::set_resource_group_tagger` 与 `copr/coprocessor.rs:1789` 接线（见 §7 第 7 条、§9.2） |
-| **`RunawayChecker`** | N10（未定） | `runaway/checker.go:179-222` 的 `BeforeCopRequest` 会改写 `OverridePriority`、`MaxExecutionDurationMs`、切换 `ResourceGroupName`、返回错误 8253，COOLDOWN 还会把并发度压到 1（`coprocessor.go:229`），配置了 runaway 规则时用户可见且改请求字节 | N10 尚未定稿；N10 决定前若存在 runaway 规则（通过会话/资源组检查）返回 `blocked("N10", ...)` 而非静默忽略（宪章第五条，§5、§7 第 8 条） |
+| **`ResourceGroupTagger`（D07.0 T8，依赖 `D02.2` `parser.Digest`）** | D07.0 / D05.2 / D07.2 / D02.2 / D00.3（N9） | Go 对每个 cop 请求均设置 `kvrpcpb.Context.ResourceGroupTag`（`copr/coprocessor.go:1350`、`stmtctx.go:868`、`kv/kv.go:872-899`，不受 Top SQL 开关控制，`EncodeTagWithKey` 写入 `SqlDigest`、`PlanDigest`、`TableId`、`Label`，改变发往 TiKV 的请求字节）；`pkg/util/resourcegrouptag`（D00.3，4 函数）与 **`parser.Digest`（D02.2，40 函数，尚未移植）**、`Session`/`ExecStmt`/`StmtCtx` 的 digest 生成均未就绪 | **交 §9.1 决定点 2**：建议第 1 部分先补齐 `pkg/util/resourcegrouptag`、`tidb-kv` `ResourceGroupTagger`、`RequestBuilder::set_resource_group_tagger` 与 `copr/coprocessor.rs:1789` 接线（填 `TableId`/`Label`），`SqlDigest`/`PlanDigest` 暂留空作临时缺口（D07.0 T8，待 `D02.2` 补齐，**不在 `D02.2` 之前宣称字节与 Go 一致**）；或将 `D02.2` `digester.go` 提前至第 1 部分前 |
+| **`RunawayChecker`** | N10（未定） | `runaway/checker.go:179-222` 的 `BeforeCopRequest` 会改写 `OverridePriority`、`MaxExecutionDurationMs`、切换 `ResourceGroupName`、返回错误 8253，COOLDOWN 还会把并发度压到 1（`coprocessor.go:229`），配置了 runaway 规则时用户可见且改请求字节；Go 中 `SetFromSessionVars` 直接读 `dctx.RunawayChecker`（由 `ExecStmt.Exec` 经 `Domain.RunawayManager` 汇总资源组配置与 `QUERY WATCH`） | N10 尚未定稿：在 `DistSQLContext` 增设 `has_runaway_rule: bool`（由 `SessionCore::get_dist_sql_ctx` 按当前资源组是否存在 runaway 配置填充），`SetFromSessionVars` 见到 `has_runaway_rule == true` 返回 `blocked("N10", ...)`（宪章第五条）；`QUERY WATCH` 规则在 `Domain`/`DDL`/`D06.5` 层已围栏，不通过 `SetFromSessionVars` 检测（§5、§7 第 8 条） |
 | `stmtstats.KvExecCounter` | D14.2（Top SQL） | Top SQL 不记录（ROADMAP §3） | `WithSQLKvExecCounterInterceptor` 为 L2 空操作（§7 第 6 条） |
 | `telemetry.CurrentCoprCacheHitRatio*` / `telemetryStoreBatched*` | X（`pkg/telemetry`） | 遥测包全属 X，不移植 | 省略遥测计数（§7 第 9 条） |
 | `tikvmetrics.ObserveReadSLI` | client-go metrics（N9） | client-rust 无对应 SLI 指标 | 省略（§7 第 10 条） |
@@ -159,17 +159,17 @@ tracker `data/func_blocks.tsv` 中 `D07.3` 共 **118 个函数**，划分为 **2
 
 | 类别 | D07.3 函数数 | 另含（非 D07.3） | 内容 | 目标场景 / 依赖 |
 |---|--:|--:|---|---|
-| **第 1 部分** | **73** | D00.1 (3) + D00.3 (7) | `DistSQLContext` + `GetOrInitDistSQLFromCache` + `ppcpuusage`；`RequestBuilder`（TableReader 全套 setter、`Build`、`verifyTxnScope`）、表/公共句柄区间编码、`SplitRangesAcrossInt64Boundary`、`VerifyTxnScope`、`EncodeIndexKey`；`Select` / `SelectWithRuntimeStats`（async，即时建 `CopIterator`）、`SetEncodeType` 族、`selectResult`（`Next`/`NextRaw`/`Close`/`readFromChunk`/`readFromDefault`/统计）、`selectResultRuntimeStats`、`serialSelectResults` | **sysbench `oltp_read_only`**（`TableReader` 范围/全表扫描、保序、分页、`TypeChunk`/`TypeDefault`）、解除 `get_dist_sql_ctx` 与 `verify_txn_scope` 桩，前置 `client-rust` 填 `addr` |
+| **第 1 部分** | **66** | D00.1 (3) + D00.3 (7) | `DistSQLContext` + `GetOrInitDistSQLFromCache` + `ppcpuusage`；`RequestBuilder`（TableReader 只读全套 setter、`Build`、`verifyTxnScope`）、表/公共句柄区间编码、`SplitRangesAcrossInt64Boundary`、`VerifyTxnScope`、`EncodeIndexKey`；`Select` / `SelectWithRuntimeStats`（async，即时建 `CopIterator`）、`SetEncodeType` 族、`selectResult`（`Next`/`NextRaw`/`Close`/`readFromChunk`/`readFromDefault`/统计）、`selectResultRuntimeStats` | **sysbench `oltp_read_only`**（`TableReader` 范围/全表扫描、保序、分页、`TypeChunk`/`TypeDefault`）、解除 `get_dist_sql_ctx` 与 `verify_txn_scope` 桩，前置 `client-rust` 填 `addr` |
 | **第 2 部分** | **31** | — | 只读路径索引区间与句柄集合编码（`SetTableHandles`、`SetPartitionsAndHandles`、`TableHandles*`、`PartitionHandles*`、`IndexRangesToKVRanges`、`IndexRangesToKVRangesWithInterruptSignal`、`indexRangesToKVRangesForTablesWithInterruptSignal`、`indexRangesToKVWithoutSplit`）；`Request.copr_request_rate_limit` 与 `CopIterator` 限速接线；`sortedSelectResults`（最小堆多路归并）；`SelectResultIter` / `selRespChannelIter`（IndexLookUp 下推中间结果） | `IndexReader`、`IndexLookUp`、`IndexMerge`、多分区保序读（D12.1 2B/2C、D12.7、D12.11） |
-| **不移植 / 豁免** | **14** | — | DEF.MPP（4）+ 委托/非只读 Analyze & Checksum & BR/Lightning 专用（9）+ 编译期替代 `init`（1） | 见 §3.3 逐条理由 |
+| **不移植 / 豁免** | **21** | — | DEF.MPP（10：原 4 个 + `SetPartitionIDAndRanges` + `serialSelectResults` 5 个，与 #411 一致）+ 委托/非只读 Analyze & Checksum & Admin & BR/Lightning 专用（10：含 `SetWrappedKeyRanges`）+ 编译期替代 `init`（1） | 见 §3.3 逐条理由 |
 | **合计** | **118** | **10** | 13（`distsql.go`）+ 57（`request_builder.go`）+ 48（`select_result.go`）= **118** | — |
 
 **与 `VS1-33`（tracker `data/part_funcs.tsv`，69 个函数）的精确差异说明**：
 
 `VS1-33` 清单原本由静态调用图粗抽得到，存在调用闭环缺口（例如收了 `CommonHandleRangesToKVRanges` 却漏了它调用的 `EncodeIndexKey`；收了 `selectResultIter.Next` 却漏了它调用的 `newSelRespChannelIter` / `selRespChannelIter.*`；收了仅 BR 备份调用的 `BuildTableRanges` / `appendRanges`）。本划分修正为真正的自洽闭环：
-- 相比 `VS1-33`（69 个）：**移入第 2 部分 4 个**（`selectResult.IntoIter`、`newSelectResultIter`、`selectResultIter.Next`、`selectResultIter.Close`）；**改归不移植 3 个**（`distsql.go:init` 改编译期 `cfg(target_endian)`，`BuildTableRanges` / `appendRanges` 仅 BR 调用归 X）；**补入第 1 部分 11 个**（`EncodeIndexKey`、`tablesRangesToKVRanges`、`SetAllowBatchCop`、`SetPartitionIDAndRanges`、`SetPartitionKeyRanges`、`SetWrappedKeyRanges`、`NewSerialSelectResults`、`serialSelectResults.{NextRaw,Next,IntoIter,Close}`，均为第 1 部分内部调用或 `TableReaderExecutor.buildKVReq*` 直接调用）。`69 - 4 - 3 + 11 = 73`。
+- 相比 `VS1-33`（69 个）：**移入第 2 部分 4 个**（`selectResult.IntoIter`、`newSelectResultIter`、`selectResultIter.Next`、`selectResultIter.Close`）；**改归不移植 3 个**（`distsql.go:init` 改编译期 `cfg(target_endian)`，`BuildTableRanges` / `appendRanges` 仅 BR 调用归 X）；**补入第 1 部分 4 个**（`EncodeIndexKey`、`tablesRangesToKVRanges`、`SetAllowBatchCop`、`SetPartitionKeyRanges`，均为第 1 部分内部调用或 `TableReaderExecutor.buildKVReq*` 直接调用；注：`SetTableRanges` / `TableRangesToKVRanges` 本就位于 `VS1-33`，虽无非测试调用方但保留作 `VS1-33` 与单测对齐）。`69 - 4 - 3 + 4 = 66`。（而仅由 TiFlash 调用的 `NewSerialSelectResults` / `serialSelectResults.*` 5 个与 `SetPartitionIDAndRanges` 1 个归 `DEF.MPP`，仅由 `admin.go` 调用的 `SetWrappedKeyRanges` 归 `D12.14`，均不纳入第 1 部分，与 #411 严格一致。）
 
-### 3.1 第 1 部分（73 个 D07.3 + 3 个 P1-1 D00.1 + 7 个 D00.3）
+### 3.1 第 1 部分（66 个 D07.3 + 3 个 P1-1 D00.1 + 7 个 D00.3）
 
 **`pkg/distsql/distsql.go`（8 个）**：
 1. `Select`（L58）
@@ -181,8 +181,8 @@ tracker `data/func_blocks.tsv` 中 `D07.3` 共 **118 个函数**，划分为 **2
 7. `GetSystemEndian`（L264）
 8. `WithSQLKvExecCounterInterceptor`（L280，L2 空操作）
 
-**`pkg/distsql/request_builder.go`（42 个）**：
-- `RequestBuilder` 方法（33 个）：
+**`pkg/distsql/request_builder.go`（40 个）**：
+- `RequestBuilder` 方法（31 个）：
   9. `RequestBuilder.Build`（L61）
   10. `RequestBuilder.SetMemTracker`（L120）
   11. `RequestBuilder.SetTableRanges`（L129）
@@ -191,69 +191,61 @@ tracker `data/func_blocks.tsv` 中 `D07.3` 共 **118 个函数**，划分为 **2
   14. `RequestBuilder.SetDAGRequest`（L190）
   15. `RequestBuilder.SetKeyRanges`（L258）
   16. `RequestBuilder.SetKeyRangesWithHints`（L264）
-  17. `RequestBuilder.SetWrappedKeyRanges`（L270）
-  18. `RequestBuilder.SetPartitionKeyRanges`（L276）
-  19. `RequestBuilder.SetStartTS`（L282）
-  20. `RequestBuilder.SetDesc`（L288）
-  21. `RequestBuilder.SetKeepOrder`（L294）
-  22. `RequestBuilder.SetStoreType`（L300）
-  23. `RequestBuilder.SetAllowBatchCop`（L306）
-  24. `RequestBuilder.SetPartitionIDAndRanges`（L312）
-  25. `RequestBuilder.getIsolationLevel`（L317）
-  26. `RequestBuilder.getKVPriority`（L324）
-  27. `RequestBuilder.SetFromSessionVars`（L339）
-  28. `RequestBuilder.SetPaging`（L379）
-  29. `RequestBuilder.SetConcurrency`（L385）
-  30. `RequestBuilder.SetCoprRequestRateLimit`（L391）
-  31. `RequestBuilder.SetTiDBServerID`（L400）
-  32. `RequestBuilder.SetFromInfoSchema`（L407）
-  33. `RequestBuilder.SetResourceGroupTagger`（L414，随第 1 部分按 D07.0 T8 接线）
-  34. `RequestBuilder.SetResourceGroupName`（L420）
-  35. `RequestBuilder.SetExplicitRequestSourceType`（L426）
-  36. `RequestBuilder.verifyTxnScope`（L431）
-  37. `RequestBuilder.SetTxnScope`（L470）
-  38. `RequestBuilder.SetReadReplicaScope`（L476）
-  39. `RequestBuilder.SetIsStaleness`（L482）
-  40. `RequestBuilder.SetClosestReplicaReadAdjuster`（L488）
-  41. `RequestBuilder.SetConnIDAndConnAlias`（L494）
+  17. `RequestBuilder.SetPartitionKeyRanges`（L276）
+  18. `RequestBuilder.SetStartTS`（L282）
+  19. `RequestBuilder.SetDesc`（L288）
+  20. `RequestBuilder.SetKeepOrder`（L294）
+  21. `RequestBuilder.SetStoreType`（L300）
+  22. `RequestBuilder.SetAllowBatchCop`（L306）
+  23. `RequestBuilder.getIsolationLevel`（L317）
+  24. `RequestBuilder.getKVPriority`（L324）
+  25. `RequestBuilder.SetFromSessionVars`（L339）
+  26. `RequestBuilder.SetPaging`（L379）
+  27. `RequestBuilder.SetConcurrency`（L385）
+  28. `RequestBuilder.SetCoprRequestRateLimit`（L391）
+  29. `RequestBuilder.SetTiDBServerID`（L400）
+  30. `RequestBuilder.SetFromInfoSchema`（L407）
+  31. `RequestBuilder.SetResourceGroupTagger`（L414，随第 1 部分按 §9.1 决定点 2 接线）
+  32. `RequestBuilder.SetResourceGroupName`（L420）
+  33. `RequestBuilder.SetExplicitRequestSourceType`（L426）
+  34. `RequestBuilder.verifyTxnScope`（L431）
+  35. `RequestBuilder.SetTxnScope`（L470）
+  36. `RequestBuilder.SetReadReplicaScope`（L476）
+  37. `RequestBuilder.SetIsStaleness`（L482）
+  38. `RequestBuilder.SetClosestReplicaReadAdjuster`（L488）
+  39. `RequestBuilder.SetConnIDAndConnAlias`（L494）
 - 区间与校验函数（9 个）：
-  42. `TableHandleRangesToKVRanges`（L501）
-  43. `TableRangesToKVRanges`（L511）
-  44. `tablesRangesToKVRanges`（L519）
-  45. `tableRangesToKVRangesWithoutSplit`（L523）
-  46. `encodeHandleKey`（L539）
-  47. `SplitRangesAcrossInt64Boundary`（L565）
-  48. `CommonHandleRangesToKVRanges`（L731）
-  49. `VerifyTxnScope`（L766）
-  50. `EncodeIndexKey`（L830）
+  40. `TableHandleRangesToKVRanges`（L501）
+  41. `TableRangesToKVRanges`（L511）
+  42. `tablesRangesToKVRanges`（L519）
+  43. `tableRangesToKVRangesWithoutSplit`（L523）
+  44. `encodeHandleKey`（L539）
+  45. `SplitRangesAcrossInt64Boundary`（L565）
+  46. `CommonHandleRangesToKVRanges`（L731）
+  47. `VerifyTxnScope`（L766）
+  48. `EncodeIndexKey`（L830）
 
-**`pkg/distsql/select_result.go`（23 个）**：
+**`pkg/distsql/select_result.go`（18 个）**：
 - `selectResult` 与并发查询（12 个）：
-  51. `GetSelectResultConcurrency`（L85）
-  52. `selectResult.fetchResp`（L370）
-  53. `selectResult.fetchRespWithIntermediateResults`（L374）
-  54. `selectResult.Next`（L490）
-  55. `selectResult.NextRaw`（L524）
-  56. `selectResult.readFromDefault`（L543）
-  57. `selectResult.readFromChunk`（L562）
-  58. `selectResult.updateCopRuntimeStats`（L623）
-  59. `selectResult.readRowsData`（L703）
-  60. `selectResult.memConsume`（L718）
-  61. `selectResult.Close`（L725）
-  62. `selectResult.close`（L732）
+  49. `GetSelectResultConcurrency`（L85）
+  50. `selectResult.fetchResp`（L370）
+  51. `selectResult.fetchRespWithIntermediateResults`（L374）
+  52. `selectResult.Next`（L490）
+  53. `selectResult.NextRaw`（L524）
+  54. `selectResult.readFromDefault`（L543）
+  55. `selectResult.readFromChunk`（L562）
+  56. `selectResult.updateCopRuntimeStats`（L623）
+  57. `selectResult.readRowsData`（L703）
+  58. `selectResult.memConsume`（L718）
+  59. `selectResult.Close`（L725）
+  60. `selectResult.close`（L732）
 - `selectResultRuntimeStats`（6 个）：
-  63. `selectResultRuntimeStats.mergeCopRuntimeStats`（L979）
-  64. `selectResultRuntimeStats.Clone`（L1002）
-  65. `selectResultRuntimeStats.Merge`（L1026）
-  66. `selectResultRuntimeStats.String`（L1057）
-  67. `selectResultRuntimeStats.Tp`（L1142）
-  68. `selectResultRuntimeStats.calcCacheHit`（L1146）
-- `serialSelectResults`（5 个）：
-  69. `NewSerialSelectResults`（L281）
-  70. `serialSelectResults.NextRaw`（L294）
-  71. `serialSelectResults.Next`（L308）
-  72. `serialSelectResults.IntoIter`（L321）
-  73. `serialSelectResults.Close`（L325）
+  61. `selectResultRuntimeStats.mergeCopRuntimeStats`（L979）
+  62. `selectResultRuntimeStats.Clone`（L1002）
+  63. `selectResultRuntimeStats.Merge`（L1026）
+  64. `selectResultRuntimeStats.String`（L1057）
+  65. `selectResultRuntimeStats.Tp`（L1142）
+  66. `selectResultRuntimeStats.calcCacheHit`（L1146）
 
 **随第 1 部分一起移植的非 D07.3 函数（10 个）**：
 - **P1-1（D00.1，3 个，完成后从 tracker `ctx2b_pending.go` 与 `stmtctx_pending.go` 删除豁免）**：
@@ -305,24 +297,31 @@ tracker `data/func_blocks.tsv` 中 `D07.3` 共 **118 个函数**，划分为 **2
 30. `selectResultIter.Next`（L912）
 31. `selectResultIter.Close`（L954）
 
-### 3.3 不移植 / 豁免（14 个 D07.3 函数，逐条写理由）
+### 3.3 不移植 / 豁免（21 个 D07.3 函数，逐条写理由）
 
 | # | Go 文件与行号 | Go 函数 | 类别 | 理由 |
 |--:|---|---|---|---|
 | 1 | `distsql.go:42` | `GenSelectResultFromMPPResponse` | 豁免（`DEF.MPP`） | 唯一调用方是 `pkg/executor/mpp_gather.go:107`（MPP / TiFlash 推迟范围） |
-| 2 | `distsql.go:136` | `SetTiFlashConfVarsInContext` | 豁免（`DEF.MPP`） | 向 TiFlash gRPC outgoing context 写 `tidb_max_tiflash_threads` 等头；唯一调用方是 `local_mpp_coordinator.go:812` 与 `Select` 的 `StoreType == TiFlash` 分支 |
-| 3 | `select_result.go:600` | `FillDummySummariesForTiFlashTasks` | 豁免（`DEF.MPP`） | 为 TiFlash MPP 任务补齐空执行摘要，唯一调用方是 `local_mpp_coordinator.go:638` 与 `recordExecutionSummariesForTiFlashTasks` |
+| 2 | `distsql.go:136` | `SetTiFlashConfVarsInContext` | 豁免（`DEF.MPP`） | 向 TiFlash gRPC outgoing context 写 `tidb_max_tiflash_threads` 等头；唯一调用方是 `pkg/executor/internal/mpp/local_mpp_coordinator.go:812` 与 `Select` 的 `StoreType == TiFlash` 分支 |
+| 3 | `select_result.go:600` | `FillDummySummariesForTiFlashTasks` | 豁免（`DEF.MPP`） | 为 TiFlash MPP 任务补齐空执行摘要，唯一调用方是 `pkg/executor/internal/mpp/local_mpp_coordinator.go:638` 与 `recordExecutionSummariesForTiFlashTasks` |
 | 4 | `select_result.go:611` | `recordExecutionSummariesForTiFlashTasks` | 豁免（`DEF.MPP`） | 仅在 `updateCopRuntimeStats` 检测到 TiFlash 执行摘要（`ExecutorId != nil`）时调用 |
-| 5 | `distsql.go:175` | `Analyze` | 委托 / 不移植（`X`） | `ANALYZE TABLE` 由集群中的 Go TiDB 承担（宪章第四条 3）；唯一调用方是 `analyze_col.go`、`analyze_idx.go`（X） |
-| 6 | `request_builder.go:234` | `RequestBuilder.SetAnalyzeRequest` | 委托 / 不移植（`X`） | 仅服务于 `Analyze`（`analyze_col.go`、`analyze_idx.go`） |
-| 7 | `distsql.go:208` | `Checksum` | 不移植（`D12.14` / `X`） | 仅由 `pkg/executor/checksum.go`（`ADMIN CHECKSUM TABLE`，不移植的 `D12.14`，N0 §3）与 `br/pkg/checksum/executor.go:292`（X）调用 |
-| 8 | `request_builder.go:247` | `RequestBuilder.SetChecksumRequest` | 不移植（`D12.14` / `X`） | 仅服务于 `checksum.go`（`D12.14`）与 `br/pkg/checksum/executor.go`（X） |
-| 9 | `request_builder.go:138` | `RequestBuilder.SetIndexRanges` | 不移植（`D12.14` / `X`） | 全库非测试调用方仅有 `checksum.go:309`（`D12.14`）、`admin.go:125`（`D12.14`）、`br/pkg/checksum/executor.go:280`（X），无只读 SQL 调用方 |
-| 10 | `request_builder.go:147` | `RequestBuilder.SetIndexRangesForTables` | 委托 / 不移植（`X`） | 全库非测试调用方仅有 `pkg/executor/analyze_idx.go:151`（X），无只读 SQL 调用方 |
-| 11 | `request_builder.go:720` | `IndexRangesToKVRangesForTables` | 不移植（`X`） | 全库非测试调用方仅有 `SetIndexRangesForTables`（`:149`，X）与 `pkg/lightning/backend/local/duplicate.go:237`（X），无只读 SQL 调用方 |
-| 12 | `request_builder.go:860` | `BuildTableRanges` | 不移植（`X`） | 全库非测试调用方仅有 `br/pkg/backup/client.go:796`（BR 备份，X），无只读 SQL 调用方 |
-| 13 | `request_builder.go:890` | `appendRanges` | 不移植（`X`） | 仅被 `BuildTableRanges` 调用（BR 备份，X） |
-| 14 | `distsql.go:268` | `init` | 不移植（编译期替代） | Go 在运行时用 `unsafe.Pointer` 探测字节序赋给包级变量 `systemEndian`；Rust 中 `get_system_endian()` 用 `#[cfg(target_endian = "big")]` 编译期常量实现，无需 `unsafe` 与运行时 `init`（与 D07.2 `coprocessor.go:init` 同理） |
+| 5 | `request_builder.go:312` | `RequestBuilder.SetPartitionIDAndRanges` | 豁免（`DEF.MPP`） | 全库唯一非测试调用方是 `pkg/executor/table_reader.go:553`（`buildKVReqForPartitionTableScan`，TiFlash BatchCop 专用，#411 §9.4 已归 `DEF.MPP`） |
+| 6 | `select_result.go:281` | `NewSerialSelectResults` | 豁免（`DEF.MPP`） | 全库唯一非测试调用方是 `pkg/executor/table_reader.go:421`（`e.storeType == kv.TiFlash && !e.batchCop`），#411 §8.3 已在 `buildTableReader` 被 `DEF.MPP` 拦截 |
+| 7 | `select_result.go:294` | `serialSelectResults.NextRaw` | 豁免（`DEF.MPP`） | 仅属 `NewSerialSelectResults`（同上） |
+| 8 | `select_result.go:308` | `serialSelectResults.Next` | 豁免（`DEF.MPP`） | 仅属 `NewSerialSelectResults`（同上） |
+| 9 | `select_result.go:321` | `serialSelectResults.IntoIter` | 豁免（`DEF.MPP`） | 仅属 `NewSerialSelectResults`（同上） |
+| 10 | `select_result.go:325` | `serialSelectResults.Close` | 豁免（`DEF.MPP`） | 仅属 `NewSerialSelectResults`（同上） |
+| 11 | `distsql.go:175` | `Analyze` | 委托 / 不移植（`X`） | `ANALYZE TABLE` 由集群中的 Go TiDB 承担（宪章第四条 3）；唯一调用方是 `analyze_col.go`、`analyze_idx.go`（X） |
+| 12 | `request_builder.go:234` | `RequestBuilder.SetAnalyzeRequest` | 委托 / 不移植（`X`） | 仅服务于 `Analyze`（`analyze_col.go`、`analyze_idx.go`） |
+| 13 | `distsql.go:208` | `Checksum` | 不移植（`D12.14` / `X`） | 仅由 `pkg/executor/checksum.go`（`ADMIN CHECKSUM TABLE`，不移植的 `D12.14`，N0 §3）与 `br/pkg/checksum/executor.go:292`（X）调用 |
+| 14 | `request_builder.go:247` | `RequestBuilder.SetChecksumRequest` | 不移植（`D12.14` / `X`） | 仅服务于 `checksum.go`（`D12.14`）与 `br/pkg/checksum/executor.go`（X） |
+| 15 | `request_builder.go:138` | `RequestBuilder.SetIndexRanges` | 不移植（`D12.14` / `X`） | 全库非测试调用方仅有 `checksum.go:309`（`D12.14`）、`admin.go:125`（`D12.14`）、`br/pkg/checksum/executor.go:280`（X），无只读 SQL 调用方 |
+| 16 | `request_builder.go:270` | `RequestBuilder.SetWrappedKeyRanges` | 不移植（`D12.14`） | 全库唯一非测试调用方是 `pkg/executor/admin.go:831`（`D12.14`），无只读 SQL 调用方 |
+| 17 | `request_builder.go:147` | `RequestBuilder.SetIndexRangesForTables` | 委托 / 不移植（`X`） | 全库非测试调用方仅有 `pkg/executor/analyze_idx.go:151`（X），无只读 SQL 调用方 |
+| 18 | `request_builder.go:720` | `IndexRangesToKVRangesForTables` | 不移植（`X`） | 全库非测试调用方仅有 `SetIndexRangesForTables`（`:149`，X）与 `pkg/lightning/backend/local/duplicate.go:237`（X），无只读 SQL 调用方 |
+| 19 | `request_builder.go:860` | `BuildTableRanges` | 不移植（`X`） | 全库非测试调用方仅有 `br/pkg/backup/client.go:796`（BR 备份，X），无只读 SQL 调用方 |
+| 20 | `request_builder.go:890` | `appendRanges` | 不移植（`X`） | 仅被 `BuildTableRanges` 调用（BR 备份，X） |
+| 21 | `distsql.go:268` | `init` | 不移植（编译期替代） | Go 在运行时用 `unsafe.Pointer` 探测字节序赋给包级变量 `systemEndian`；Rust 中 `get_system_endian()` 用 `#[cfg(target_endian = "big")]` 编译期常量实现，无需 `unsafe` 与运行时 `init`（与 D07.2 `coprocessor.go:init` 同理） |
 
 ---
 
@@ -348,7 +347,7 @@ tracker `data/func_blocks.tsv` 中 `D07.3` 共 **118 个函数**，划分为 **2
 ### 4.2 `DistSQLContext` 与 `StatementContext` 缓存（P1-1，`M-CTX`）
 
 - `DistSQLContext` 是 `Send + Sync`，通过 `Arc<DistSQLContext>` 在语句与各 `SelectResult` 间共享（对应 Go `*distsqlctx.DistSQLContext`）。
-- 共享可变句柄均采用线程安全引用：`warn_handler: Option<WarnAppenderRef>`、`client: Option<Arc<dyn kv::Client>>`、`session_mem_tracker: Option<Arc<Tracker>>`、`runtime_stats_coll: Option<Arc<RuntimeStatsColl>>`、`sql_killer: Option<Arc<SqlKiller>>`、`cpu_usage: Arc<SQLCPUUsages>`、`exec_details: Arc<SyncExecDetails>`、`try_cop_lite_worker: Arc<AtomicU32>`。
+- 共享可变句柄均采用线程安全引用：`warn_handler: Option<WarnAppenderRef>`、`client: Option<Arc<dyn kv::Client>>`、`session_mem_tracker: Option<Arc<Tracker>>`、`runtime_stats_coll: Option<Arc<RuntimeStatsColl>>`、`sql_killer: Option<Arc<SqlKiller>>`、`cpu_usage: Arc<SQLCPUUsages>`、`exec_details: Arc<SyncExecDetails>`、`try_cop_lite_worker: Arc<AtomicU32>`；另增 `has_runaway_rule: bool`（由 `SessionCore::get_dist_sql_ctx` 按当前资源组是否配置了 runaway 规则填充，供 `SetFromSessionVars` 返回 `blocked("N10", ...)`）。Go 中的 `KvExecCounter`（D14.2 Top SQL 空操作）与 7 个 `TiFlash*` 字段（`DEF.MPP`）不在只读 TiKV 路径生效，省略不存。
   - `StatementContext.sync_exec_details`（`crates/sessionctx/src/stmtctx.rs:419`）改为 `Arc<SyncExecDetails>`（对外访问方法不变），使 `DistSQLContext` 共享同一份语句执行明细（与 Go `&sc.SyncExecDetails` 等价）。
 - `DistSQLContext::detach(&self) -> DistSQLContext`：照 `context.go:103-119` 逐字段复制，并新建独立的 `SQLCPUUsages`（复制当前 CPUUsages 快照）、独立的 `kv_vars`（`killed` 仍指向同一个 `sql_killer` 原子信号）与独立的 `try_cop_lite_worker`（`Arc::new(AtomicU32::new(self.try_cop_lite_worker.load(Ordering::Relaxed)))`，对应 Go 值语义复制 `newCtx := *dctx`，避免与原上下文共享同一原子计数）。
 - `StatementContext::get_or_init_dist_sql_from_cache`：在 `StatementContext` 上加 `dist_sql_ctx_cache: OnceLock<Arc<DistSQLContext>>`，写法与已有的 `get_or_init_ranger_ctx_from_cache`（`stmtctx.rs:1372`）完全一致。
@@ -486,9 +485,8 @@ pub trait SelectResult: Send {
    - `pub fn table_ranges_to_kv_ranges(tid: i64, ranges: &[Range]) -> Vec<KeyRange>`
    - `pub fn common_handle_ranges_to_kv_ranges(dctx: Option<&DistSQLContext>, tids: &[i64], ranges: &[Range]) -> Result<KeyRanges, Error>`
    - `pub fn encode_index_key(dctx: Option<&DistSQLContext>, ran: &Range) -> Result<(Vec<u8>, Vec<u8>), Error>`
-   - `pub fn verify_txn_scope(txn_scope: &str, physical_table_id: i64, is: &dyn MetaOnlyInfoSchema) -> Result<bool, Error>`（**L2**：Go `request_builder.go:766` 返回 `bool`，Rust 改为 `Result<bool, Error>` 以在命中 placement bundle 时显式返回 `blocked("X", ...)`；第 1 部分解除 `PointGetExecutor::verify_txn_scope` 桩）
+   - `pub fn verify_txn_scope(txn_scope: &str, physical_table_id: i64, is: &dyn MetaOnlyInfoSchema) -> Result<bool, Error>`（**L2**：Go `request_builder.go:766` 返回 `bool`，Rust 改为 `Result<bool, Error>` 以在命中 placement bundle 时显式返回 `blocked("X", ...)`；第 1 部分解除 `PointGetExecutor::verify_txn_scope` 桩，同步在 `PointGetExecutor` 捕获 `info_schema` 引用）
    - `pub fn get_select_result_concurrency(sr: &dyn SelectResult) -> Option<(isize, isize)>`
-   - `pub fn new_serial_select_results(select_results: Vec<Box<dyn SelectResult>>) -> Box<dyn SelectResult>`
    - `SelectResult` trait（见 §4.5）：`async fn next`、`async fn next_raw`、`fn into_iter`、`fn close`、`fn cop_concurrency`；对象安全且 `Send`。
 5. **`tidb_store::distsql` 第 2 部分补充契约（完整签名）**：
    - `RequestBuilder::{set_table_handles(&mut self, tid: i64, handles: &[Handle]) -> &mut Self, set_partitions_and_handles(&mut self, handles: &[PartitionHandle]) -> &mut Self}`；`kv::Request.copr_request_rate_limit: Option<Arc<RateLimit>>` 字段 + `CopIterator` 限速接线（`coprocessor.rs:1309, 1804`）。
@@ -509,11 +507,11 @@ pub trait SelectResult: Send {
 | `Select` 中 `kvReq.StoreType == kv.TiFlash` 分支 | `distsql.go:102-106` | 永久 `blocked-by:DEF.MPP`（防御性，与 #411 一致） | #411 已在 `buildTableReader` 提前返回 `blocked("DEF.MPP", ...)`；此处防御性同样返回 `blocked("DEF.MPP", ...)` 而非普通错误，确保一旦可达仍按路由器规则处理 |
 | `updateCopRuntimeStats` 中 `hasExecutor == true` 分支 | `select_result.go:668-672` | 永久 `DEF.MPP` | 仅 TiFlash 执行摘要带 `ExecutorId`；不调用 `recordExecutionSummariesForTiFlashTasks` |
 | `VerifyTxnScope` 中 `bundle` 存在且 `txn_scope` 非空、非 `global` | `request_builder.go:770-780` | 永久 `blocked-by:X` | `placement.Bundle` 规则属 X（未构建）且 tidb-rs 无本地 TSO；非 global scope 命中带 placement policy 的表时显式返回 `blocked("X", ...)`，绝不静默返回 `true`。空或 `global` scope 以及无 placement policy 的表均按 L1 返回 `Ok(true)` |
-| `SetFromSessionVars` 中配置了 runaway 规则时 | `request_builder.go:373` | 临时 `blocked-by:N10` | N10 决定前若会话/资源组存在生效的 runaway 规则，显式返回 `blocked("N10", ...)` 而非静默忽略（宪章第五条）；未配置 runaway 规则时正常执行 |
+| `SetFromSessionVars` 中 `dctx.has_runaway_rule == true` | `request_builder.go:373` | 临时 `blocked-by:N10` | N10 决定前若资源组存在 runaway 规则（由 `SessionCore::get_dist_sql_ctx` 写入 `dctx.has_runaway_rule`），显式返回 `blocked("N10", ...)` 而非静默忽略（宪章第五条）；`QUERY WATCH` 已在 `D06.5`/`N10` 层围栏；无规则时正常执行 |
 
 **本块第 1 部分解除的既有边界桩（净减 2 个；另 1 个交 #411 2A）**：
 - `crates/session/src/session.rs:791`（`get_dist_sql_ctx`，`blocked-by:D07.3`）——由本块第 1 部分解除；
-- `crates/executor/src/point_get.rs:524`（`verify_txn_scope`，`blocked-by:D07.3`）——由本块第 1 部分解除；
+- `crates/executor/src/point_get.rs:524`（`verify_txn_scope`，`blocked-by:D07.3`）——由本块第 1 部分解除（需在 `PointGetExecutor` 构造/初始化时补存 `info_schema` 引用）；
 - `crates/executor/src/builder.rs:955`（`new_closest_read_adjuster`，`blocked-by:D07.3`）——本块提供 `Request.match_store_labels`，由 #411（D12.1 第 2A 部分）解除。
 
 ---
@@ -552,12 +550,12 @@ pub trait SelectResult: Send {
 |---|---|---|---|
 | `split_int64` | 第 1 部分 | `SplitRangesAcrossInt64Boundary`：有符号/无符号/common handle、空切片、全在左/全在右/跨 `MaxInt64`、边界开闭组合（含单边为空）、`keepOrder × desc` 四组合、随机多区间 | 返回的两组 `Range` 逐项一致 |
 | `table_ranges` | 第 1 部分 | `TableHandleRangesToKVRanges` / `TableRangesToKVRanges` / `CommonHandleRangesToKVRanges` / `EncodeIndexKey` / `encodeHandleKey`：单表/多分区、整型（含 `MinInt64`/`MaxInt64`/开闭区间/空区间）、common handle（多列混合类型：INT/VARCHAR 带 collation/DECIMAL/TIMESTAMP 跨时区/NULL/严格模式错误） | 生成的 `KeyRanges` 字节与错误逐字节一致 |
-| `request_builder` | 第 1 部分 | `RequestBuilder` 全部第 1 部分 setter + `Build` + `SetEncodeType`：`Scan -> Limit`（临界 99999 / 100000）、`IndexScan -> Limit -> IndexLookup`、单算子 `KeepOrder` 默认并发 15 vs 自定义并发、`WeakConsistency`/`RCCheckTS`/`SI`、各 `Priority`、paging/storeBatch/readReplicaScope/matchStoreLabels；**特别覆盖 `tipb.DAGRequest` 字段 3、4、8、11 为零值的情形**（Go gogoproto `nullable=false` 总写出，而 `rust-protobuf 2.8` 默认省略未显式设置的字段，须确认序列化 `Data` 逐字节一致） | 产出 `kv.Request` 各字段与序列化 `Data` 字节一致 |
+| `request_builder` | 第 1 部分 | `RequestBuilder` 全部第 1 部分 setter + `Build` + `SetEncodeType`：`Scan -> Limit`（临界 99999 / 100000）、`IndexScan -> Limit -> IndexLookup`、单算子 `KeepOrder` 默认并发 15 vs 自定义并发、`WeakConsistency`/`RCCheckTS`/`SI`、各 `Priority`、paging/storeBatch/readReplicaScope/matchStoreLabels；**特别覆盖 `tipb.DAGRequest` 字段 3、4、8、11 为零值的情形**（Go gogoproto `nullable=false` 总写出，而 `rust-protobuf 2.8` 默认省略未显式调用 `set_*` 的字段，须在 `ConstructDAGReq` / `set_dag_request` 显式填齐并确认序列化 `Data` 逐字节一致） | 产出 `kv.Request` 各字段与序列化 `Data` 字节一致 |
 | `select_decode` | 第 1 部分 | `selectResult.Next`（`TypeChunk` 与 `TypeDefault`）+ `selectResultRuntimeStats.{String,Clone,Merge,calcCacheHit}`：多类型列（INT/UINT/DOUBLE/DECIMAL/VARCHAR/TIMESTAMP/NULL）、多 chunk 拼接与 `0.8` 复用边界、各种 `RequiredRows`、TiKV error/warning；runtime stats 随机样本（排除多键 `backoffSleep` 的随机 map 顺序差异，单键及合并后按确定顺序比对） | 每次 `Next` 输出的 chunk 行值、warning、错误、统计文本 |
 | `index_and_handles` | 第 2 部分 | `TableHandlesToKVRanges`、`PartitionHandlesToKVRanges`、`IndexRangesToKVRanges*`：连续/非连续/`MaxInt64`/跨分区整型与 common handle、多列索引、全局/本地索引分区表 | `KeyRanges` 与 `hints` 逐字节一致 |
 | `sorted_and_iter` | 第 2 部分 | `NewSortedSelectResults`（多分区 ASC/DESC/多列/NULL/含空子结果）、`selectResultIter`（主输出 + 多个 `IntermediateOutputs`，混合 `TypeChunk`/`TypeDefault`） | 输出行序列与 `ChannelIndex` 逐行一致 |
 
-不适合 govec 的函数在 tracker 豁免表中登记并指向对应单测（如依赖时钟测量的 `fetchDuration` 上报、`DistSQLContext.Detach` 指针语义、`WithSQLKvExecCounterInterceptor` 空操作，以及 §3.3 的 14 个不移植函数）。
+不适合 govec 的函数在 tracker 豁免表中登记并指向对应单测（如依赖时钟测量的 `fetchDuration` 上报、`DistSQLContext.Detach` 指针语义、`WithSQLKvExecCounterInterceptor` 空操作，以及 §3.3 的 21 个不移植函数）。
 
 ### 6.3 端到端 `tools/ab` 对比验收（吸取 #338 回归教训）
 
@@ -577,22 +575,22 @@ pub trait SelectResult: Send {
 
 1. **字节序探测改为编译期常量**（`distsql.go:268-276`）：Go 在 `init()` 中通过 `unsafe.Pointer` 判断大小端；Rust `get_system_endian()` 用 `#[cfg(target_endian = "big")]` 编译期决定，行为完全等价，无 `unsafe`。
 2. **`checkAlignment` 用 `std::mem::size_of`**（`distsql.go:247-254`）：Go 用 `unsafe.Sizeof(types.MyDecimal{}) == 40`；Rust `MyDecimal` 为 `#[repr(C)]` 且 `size_of::<MyDecimal>() == 40`（`crates/types/src/mydecimal.rs:288`），在 64 位目标上与 Go 同样恒为 `true`。
-3. **TiFlash / MPP 与 Analyze / Checksum / BR 专用路径不移植**（`distsql.go:42-54, 102-106, 136-156, 175-222`、`request_builder.go:138-154, 234-255, 720-722, 860-917`、`select_result.go:600-621, 660-664, 668-672`）：属 `DEF.MPP` / `X`（委托/BR/Lightning）/ `D12.14`，见 §3.3；`Select` 收到 `kv.TiFlash` 时防御性返回 `blocked("DEF.MPP", ...)`（与 #411 一致）。
-4. **`RegionRequestRuntimeStats`（`rpc_info`）缺失**（`select_result.go:625, 970, 990-996, 1007, 1022, 1044, 1119-1124`）：沿用 D07.2 §6.3 第 4 条（client-rust 不提供 client-go 的 `RegionRequestRuntimeStats`），真实 TiKV 查询的 `EXPLAIN ANALYZE` 不输出 `rpc_info:{...}` 子段（用户可观测性差异）。
+3. **TiFlash / MPP 与 Analyze / Checksum / Admin / BR 专用路径不移植**（`distsql.go:42-54, 102-106, 136-156, 175-222`、`request_builder.go:138-154, 234-255, 270-274, 312-315, 720-722, 860-917`、`select_result.go:281-334, 600-621, 660-664, 668-672`）：属 `DEF.MPP` / `X`（委托/BR/Lightning）/ `D12.14`，共 20 个（另 1 个编译期替代 `init`，合计 21 个，见 §3.3）；`Select` 收到 `kv.TiFlash` 时防御性返回 `blocked("DEF.MPP", ...)`（与 #411 一致）。
+4. **`RegionRequestRuntimeStats`（`rpc_info`）与 `CoprCache` 命中率差异**（`select_result.go:625, 970, 990-996, 1007, 1022, 1044, 1119-1124, 1146`）：沿用 D07.2 §6.3 第 4 条（client-rust 不提供 `RegionRequestRuntimeStats`，真实 TiKV `EXPLAIN ANALYZE` 无 `rpc_info:{...}` 子段）与 D07.2 §6.3 第 9 条（`CoprCache` 推迟至 D07.4 / A3，默认 `capacity_mb = 1000.0` 下重复查询的 `EXPLAIN ANALYZE` 输出 `copr_cache_hit_ratio: 0.00` 而非命中缓存），均属已知用户可观测性差异。
 5. **`CopRuntimeStats.CalleeAddress` 须由前置任务在 `dulao5/client-rust` 补齐**（`select_result.go:624-627`）：若 `CalleeAddress` 为空且 `RegionRequestRuntimeStats` 为空，L625 守卫会对**每个**响应提前返回，不仅丢失 `EXPLAIN ANALYZE` 的 `cop_task`/`tikv_task`，还会跳过 `CPUUsage.MergeTikvCPUTime`（慢日志 `Tikv_cpu_time`、`statements_summary` `SumTikvCPU`、processlist TiKV CPU 全部缺失）与 `RecordCopStats`/`RecordOneCopTask`（cop 算子 `actRows` 全部缺失）。维护者已定将"在 `client-rust` 填上 `CopRpcContext.addr`"列为本块第 1 部分的前置任务，补齐后该整段统计正常产出，不存在此差异。
 6. **`WithSQLKvExecCounterInterceptor` 为空操作**（`distsql.go:79, 280-288`）：Top SQL（D14.2）不记录（ROADMAP §3），且 client-rust 无 RPC interceptor（同 `crates/store/src/driver/txn/snapshot.rs:227`）。
-7. **`ResourceGroupTagger`（D07.0 T8，随第 1 部分补齐，非永久省略）**（`request_builder.go:361, 414-417`、`copr/coprocessor.go:1350`）：Go 对每个 cop 请求均设置 `kvrpcpb.Context.ResourceGroupTag`（`stmtctx.go:868` 不受 Top SQL 开关控制，`EncodeTagWithKey` 写入 SQL digest、plan digest、table id 与 label，改变发往 TiKV 的请求字节）。第 1 部分实现时一并补齐 `tidb-kv` / `StatementContext` / `copr` 接线，消除此临时缺口。
-8. **`RunawayChecker`（N10 未定，遇到配置规则时返回 `blocked("N10", ...)`）**（`request_builder.go:373`）：Go 中 `runaway/checker.go:179-222` 的 `BeforeCopRequest` 会改写 `OverridePriority`、`MaxExecutionDurationMs`、切换 `ResourceGroupName` 并可能返回错误 8253，COOLDOWN 还会把并发度压到 1（`coprocessor.go:229`），配置了 runaway 规则时对用户与发往 TiKV 的请求字节均可见。N10 决定前若检测到生效的 runaway 规则返回 `blocked("N10", ...)`（不静默忽略，宪章第五条）；无规则时不触发。
+7. **`ResourceGroupTagger`（D07.0 T8，受 `D02.2` `parser.Digest` 制约，交 §9.1 决定点 2）**（`request_builder.go:361, 414-417`、`copr/coprocessor.go:1350`）：Go 对每个 cop 请求均设置 `kvrpcpb.Context.ResourceGroupTag`（`stmtctx.go:868` 不受 Top SQL 开关控制，`EncodeTagWithKey` 写入 `SqlDigest`、`PlanDigest`、`TableId` 与 `Label`，改变发往 TiKV 的请求字节）。但 `SqlDigest`/`PlanDigest` 依赖尚未移植的 `D02.2` `pkg/parser/digester.go`（40 函数）及 `Session`/`ExecStmt` 接线；若第 1 部分先行上线（仅填 `TableId`/`Label`），发往 TiKV 的 `ResourceGroupTag` 字节在 `D02.2` 合入前仍与 Go 存在临时缺口（交 §9.1 决定点 2）。
+8. **`RunawayChecker`（N10 未定，遇到资源组规则时返回 `blocked("N10", ...)`）**（`request_builder.go:373`）：Go 中 `runaway/checker.go:179-222` 的 `BeforeCopRequest` 会改写 `OverridePriority`、`MaxExecutionDurationMs`、切换 `ResourceGroupName` 并可能返回错误 8253，COOLDOWN 还会把并发度压到 1（`coprocessor.go:229`），配置了 runaway 规则时对用户与发往 TiKV 的请求字节均可见。N10 决定前通过 `DistSQLContext.has_runaway_rule` 检测资源组 runaway 配置并返回 `blocked("N10", ...)`（不静默忽略，宪章第五条）；`QUERY WATCH` 已在 `D06.5`/`N10` 层围栏；无规则时不触发。
 9. **遥测计数器省略**（`select_result.go:59-63, 375-403, 754-756`）：`pkg/telemetry` 属 X，不移植。
 10. **`tikvmetrics.ObserveReadSLI` 与 `EventCb` 省略**（`select_result.go:629-634`、`distsql.go:69-77, 83`）：client-rust 无 ReadSLI 指标；`trxevents` 回调未移植（D07.2 §6.3 第 10 条已在 `handleLockErr` 中直接打 debug 日志）。
 11. **failpoint 与测试 hook 不移植**（`distsql.go:63-65, 89-100`、`request_builder.go:77-82, 105-110`、`select_result.go:525-529`）：测试钩子，不移植；`tracing.StartRegionEx`（`distsql.go:59-60`）属 Go runtime trace，不移植。
 12. **`VerifyTxnScope` 返回 `Result<bool, Error>` 并在命中 placement bundle 时返回边界桩错误**（`request_builder.go:766-780`）：见 §4.9、§5（L2）。
 13. **`backoffSleep` 与 `visitPhysicalTableID` 遍历顺序确定**（`select_result.go:1129`、`request_builder.go:445`）：Go 遍历 map 顺序随机；Rust 用 `BTreeMap` / `BTreeSet` 按键序/表 ID 升序输出（`M-MAPORDER`）。
-14. **`indexRangesToKVWithoutSplit` 与 `sortedSelectResults` 内存记账数值（可见，依据 A1）**（`request_builder.go:791, 816`、`select_result.go:181, 234, 274`）：按已确认基础设计 A1 §3.2，`sortedSelectResults` 的缓存 chunk 走 `TrackedAlloc`、`indexRangesToKVWithoutSplit` 记实际 `KeyRange` 字节容量（与 Go 采样估算数值不同，影响 `tidb_mem_quota_query` 触发点与内存观测列，依据已确认的 A1）。
-15. **`Drop` 安全网与 `HandleKillSignal` / `Consume` 改走 `Result`**（`select_result.go:718-722, 732-763`、`request_builder.go:791, 816, 822`）：按 N3+A1 统一规则，`Drop` 释放资源但不注册 stats；OOM / KILL 通过 `Result` 返回而非 panic（`M-PANIC`、`M-MEM`、`M-DEFER`）。
+14. **`indexRangesToKVWithoutSplit` 与 `sortedSelectResults` 内存记账数值（可见，依据 P0 D4–D9 与 N3/A1 草案）**（`request_builder.go:791, 816`、`select_result.go:181, 234, 274`）：按 `P0 D4–D9` 及 `N3`/`A1`（当前 spec 草案，D12.3/D12.4 已沿用）§3.2，`sortedSelectResults` 的缓存 chunk 走 `TrackedAlloc`、`indexRangesToKVWithoutSplit` 记实际 `KeyRange` 字节容量（与 Go 采样估算数值不同，影响 `tidb_mem_quota_query` 触发点与内存观测列）。
+15. **`Drop` 安全网与 `HandleKillSignal` / `Consume` 改走 `Result`**（`select_result.go:718-722, 732-763`、`request_builder.go:791, 816, 822`）：按 `P0 D4–D9` 与 `N3`/`A1` 草案统一规则，`Drop` 释放资源但不注册 stats；OOM / KILL 通过 `Result` 返回而非 panic（`M-PANIC`、`M-MEM`、`M-DEFER`）。
 16. **`SelectResult::IntoIter` 消耗内部状态而非保留指针**（`select_result.go:516-521, 902-909`）：对外错误文案与 Go 一致（§4.5）。
-17. **内存记账在 `selectResultIter` 下正确归零（依据 A1 §5）**（`select_result.go:949`）：关闭后内存记账必归零，不照搬 Go 语句内漏减记账的缺陷（§8 第 1 条）。
-18. **`sortedSelectResults.Close` 关闭全部子结果（依据 N3 §3.5）**（`select_result.go:268-278`）：遇错后仍关闭剩余子结果避免 worker 泄漏，返回第一个错误（§8 第 4 条）。
+17. **内存记账在 `selectResultIter` 下是否修正（交 §9.1 决定点 1）**（`select_result.go:949`）：`tipb::SelectResponse` 手工调用 `mem_tracker.consume`，该 Go 缺陷 SQL 可达且影响 `tidb_mem_quota_query` 触发点，交 §9.1 决定点 1 确认后落 `rulings.toml`（§8 第 1 条）。
+18. **`sortedSelectResults.Close` 关闭全部子结果（依据 N3 草案 §3.5）**（`select_result.go:268-278`）：遇错后仍关闭剩余子结果避免 worker 泄漏，返回第一个错误（生产 SQL 不可达，§8 第 4 条）。
 
 ---
 
@@ -600,11 +598,11 @@ pub trait SelectResult: Send {
 
 以下 8 项问题（原读码发现 7 项 + 核验时新发现第 8 项）均已于 2026-11-26 在真实 Go TiDB `v8.5.8`（commit `8b857efa2`，`go1.25.12`）上运行复现并逐项核验可达性与宪章第九条归属：
 
-1. **`selectResultIter.Next` 导致语句执行期间 `memTracker` 漏减全部已消费 `SelectResponse` 大小**（**已实测复现，SQL 可达**）
+1. **`selectResultIter.Next` 导致语句执行期间 `memTracker` 漏减全部已消费 `SelectResponse` 大小**（**已实测复现，SQL 可达，交 §9.1 决定点 1**）
    - **位置**：`pkg/distsql/select_result.go:949` 与 `:413-418, 439-440, 734-737`。
    - **机制**：每消费完一个 `selectResp` 后，`selectResultIter.Next` 在 L949 执行 `iter.result.selectResp = nil`，但未扣减 `selectRespSize` 也未清零它。下一轮进入 `fetchRespWithIntermediateResults` 时，L413 的 `if r.selectResp != nil` 为假，跳过 `r.memConsume(-selectRespSize)`；随后 L439-440 覆盖 `selectRespSize` 并再次 `Consume(+newSize)`；到 EOF 时 L413 仍为假且 L418 把 `selectRespSize` 置 0；最终 `iter.Close()` 在 L734 读到 0，所有已消费响应的字节数残留在 `memTracker` 中直至语句结束 `DetachMemDiskTracker` 摘除（非跨语句永久泄漏，但语句执行期间记账虚高，可能误触发 `tidb_mem_quota_query`）。
    - **Go v8.5.8 实测结果**：通过导出 API `distsql.Select` + `sr.IntoIter(nil)` 消费 3 批 `SelectResponse`（`size1=10, size2=12, size3=8`，合计 30 字节）：第 1 批后 `BytesConsumed=10`、第 2 批后 `22`、第 3 批后 `30`；读至 EOF 并调用 `iter.Close()` 后仍为 **`BytesConsumed=30`**（普通 `Next` 路径为 0）。SQL 层经 `/*+ INDEX_LOOKUP_PUSHDOWN(t, ia) */` 走 `LocalIndexLookUp` → `IntoIter` 可达。
-   - **tidb-rs 处理与归属**：按已确认基础设计 **A1 §3.5 / §5**（宪章第九条 2：每个 tracker 在关闭后必须归零），在切换/丢弃 `selectResp` 时正确归还记账，关闭后恒为 0；第 2 部分开 `upstream-pitfall` 标 `go-bug-fixed`。
+   - **tidb-rs 处理与归属**：因 `tipb::SelectResponse` 手工调 `mem_tracker.consume`，修正会影响 SQL 可达的 `tidb_mem_quota_query` 内存配额资源行为（落宪章第一条 2 与第九条 1(a) / 第九条 3 资源行为排除条款，且 N3/A1 spec 尚为草案），**交 §9.1 决定点 1 由负责人决定**；第 2 部分开 `upstream-pitfall` 并登记 `rulings.toml`。
 
 2. **`RequestBuilder.SetHandleRanges` 未检查 `builder.err`，触发 nil 指针 panic 或静默吞掉前置错误**（**Go 单测已复现，SQL 不可达**）
    - **位置**：`pkg/distsql/request_builder.go:156-160` 与 `pkg/kv/kv.go:473-479`。
@@ -621,16 +619,16 @@ pub trait SelectResult: Send {
 4. **`sortedSelectResults.Close` 遇首个错误提前返回，泄漏后续子 `SelectResult` 与缓存内存**（**Go 单测已复现，生产 SQL 不可达**）
    - **位置**：`pkg/distsql/select_result.go:268-278`（对比 `serialSelectResults.Close` L325-332）。
    - **Go v8.5.8 实测结果**：构造 2 个 mock `SelectResult`（`sr0.Close()` 返回 `"close err on sr0"`，`sr1.Close()` 返回 `nil`），调用一次 `Next` 后调用 `Close()`：`sr0.closed=true`、**`sr1.closed=false`**，`memBeforeClose=272`、**`memAfterClose=272`**。另实测未调 `Next` 直接 `Close()` 不 panic。
-   - **可达性与处理**：**生产 SQL 不可达**（Go 中 `copIterator.Close` 与 `copErrorResponse.Close` 恒返回 `nil`）。按已确认基础设计 **N3 §3.5 + A1 §5**，Rust 关闭全部子结果并释放全部缓存内存、返回第一个错误；第 2 部分开 `upstream-pitfall`（`go-bug-fixed`）并注明生产不可达。
+   - **可达性与处理**：**生产 SQL 不可达**（Go 中 `copIterator.Close` 与 `copErrorResponse.Close` 恒返回 `nil`）。按 `P0 D4–D9` 与 `N3`/`A1` 草案，Rust 关闭全部子结果并释放全部缓存内存、返回第一个错误；第 2 部分开 `upstream-pitfall`（`go-bug-fixed`）并注明生产不可达。
 
 5. **`RequestBuilder.verifyTxnScope` 在 `TableInfoByID` 未命中时 nil 指针 panic**（**仅 mock 不一致 InfoSchema 复现，真实集群不可达**）
    - **位置**：`pkg/distsql/request_builder.go:455-456`。
    - **Go v8.5.8 实测结果**：mock `MetaOnlyInfoSchema` 返回 bundle 但 `FindTableInfoByPartitionID` / `TableInfoByID` 未命中时 panic。真实 `InfoSchemaV2` 不可达，且 tidb-rs 在 `VerifyTxnScope` 命中 bundle 时已返回 `blocked("X", ...)`，不开 `upstream-pitfall`。
 
-6. **`PartitionHandlesToKVRanges` 对 `CommonHandle.Encoded()` 原地 `append(..., 0)` 篡改底层数组**（**Go 单测已复现，SQL 不可达**）
+6. **`PartitionHandlesToKVRanges` 对 `CommonHandle.Encoded()` 原地 `append(..., 0)` 篡改底层数组**（**已实测复现，SQL 可达，但对外字节零差异**）
    - **位置**：`pkg/distsql/request_builder.go:675`（对比 `TableHandlesToKVRanges` L634 使用 `kv.Key(commonHandle.Encoded()).Next()`）。
-   - **Go v8.5.8 实测结果**：对编码长 19 字节、`cap=23` 的 `CommonHandle` 切片末尾写哨兵 `0xAA, 0xBB, 0xCC, 0xDD`，调用 `PartitionHandlesToKVRanges` 后被原地改写为 `0x00, 0xBB, 0xCC, 0xDD`（`TableHandlesToKVRanges` 不覆写）。
-   - **可达性与处理**：**SQL 不可达**（`pkg/executor/builder.go:4716-4724` 中 common handle 不走 `PartitionHandlesToKVRanges`）。Rust 使用 `Key::next()` 分配独立 `Vec<u8>`，输出字节与 Go 100% 一致，不开 `upstream-pitfall`。
+   - **Go v8.5.8 实测结果**：(a) 单测中对长 19 字节、`cap=23` 的 `CommonHandle` 切片末尾写哨兵 `0xAA, 0xBB, 0xCC, 0xDD`，调用 `PartitionHandlesToKVRanges` 后被原地改写为 `0x00, 0xBB, 0xCC, 0xDD`；(b) **SQL 可达已实测**：`IndexLookUpExecutor.buildTableReader`（`pkg/executor/distsql.go:1193`）经 `buildTableReaderFromHandles`（`pkg/executor/builder.go:4951-4952`）调用 `SetPartitionsAndHandles` → `PartitionHandlesToKVRanges`（`builder.go:4716-4724` 仅限 IndexJoin）；在 Go v8.5.8 `testkit` 对 4 分区 `PRIMARY KEY (id, d) CLUSTERED, KEY idx_v(v)` 执行 `SELECT * FROM t_part_ch USE INDEX(idx_v) WHERE v = 3 ORDER BY v` 实测走 `IndexLookUp` (`keep order:true`)，`codec.EncodeKey` 产出 `len=17, cap=50` 且 `kv.NewCommonHandle` 直接复用该切片，`append(commonHandle.Encoded(), 0)` 确实原地写 `Encoded()[len]`。
+   - **处理**：属 `V0`（`Encoded()[len]` 之后的冗余容量没有任何读方，产出 `StartKey`/`EndKey` 字节与 Rust `Key::next()` 分配独立 `Vec<u8>` 100% 一致，无用户或线协议差异），第 2 部分开一条 `upstream-pitfall` 备注（或仅文档留档，无行为偏差）。
 
 7. **`indexRangesToKVWithoutSplit` 切片头估算未乘 `len(tids)`**（**仅未导出函数内部复现，v8.5.8 全部导出 API 与 SQL 不可达**）
    - **位置**：`pkg/distsql/request_builder.go:791`。
@@ -646,43 +644,59 @@ pub trait SelectResult: Send {
 
 ## 9. 决定点（按宪章第九条）
 
-### 9.1 需要负责人决定
+### 9.1 需要负责人决定（宪章第九条 1）
 
-无。
+以下 2 点涉及 SQL 可达的内存配额资源行为或发往 TiKV 的临时 wire 字段缺口，按宪章第一条 2 与第九条 1(a) / 第九条 3 提请负责人确认：
 
-说明：本块前置补齐 `client-rust` 的 `CopRpcContext.addr`（避免 `updateCopRuntimeStats` 整段丢失统计）、随第 1 部分补齐 `ResourceGroupTagger`（D07.0 T8）、将 `select` 改为 async 即时建 `CopIterator`（保持首次 `Next` 前并发度与 Go 一致），对 N10 runaway 规则存在时显式返回 `blocked("N10", ...)`，因此不引入任何新的长期用户可见或 TiKV 线协议行为差异；`DEF.MPP`、`Analyze`（委托）、`Checksum` / BR / Lightning 专用函数（N0 §3 / X）、client-rust `rpc_info` 缺口（D07.2 §6.3）与 N3+A1 均为已确认规则。
+1. **第 2 部分 `selectResultIter.Next` 漏减 `memTracker` 记账是否修正（§8 第 1 条，宪章第九条 1(a) 资源行为）**
+   - **背景**：`selectResultIter.Next`（`select_result.go:949`）在丢弃 `selectResp` 前未归还 `selectRespSize`，SQL 经 `/*+ INDEX_LOOKUP_PUSHDOWN */` 可达，语句执行期间 `memTracker` 虚高可能误触发 `tidb_mem_quota_query`。`tipb::SelectResponse` 使用 `rust-protobuf` 并手工调用 `mem_tracker.consume`，且 N3/A1 spec 当前仍为草案（仅 P0 D4–D9 已决定），按宪章第九条 3 涉及内存配额资源行为须先问负责人。
+   - **选项**：
+     - **A（建议）**：在切换/丢弃 `selectResp` 时正确归还记账，使关闭后 `mem_tracker.bytes_consumed() == 0`（符合 A1 §5 不变式），第 2 部分开 `upstream-pitfall`（`go-bug-fixed`）并登记 `docs/testing/rulings.toml`。
+     - **B**：照 Go 保留语句内漏减行为（`go-bug-kept`）。
+   - **建议与理由**：选 **A**。保持每个算子关闭后内存记账归零是 A1 的核心不变式，可避免大范围 `INDEX_LOOKUP_PUSHDOWN` 误报 OOM。
+
+2. **第 1 部分 `ResourceGroupTagger`（D07.0 T8）在 `D02.2` `parser.Digest`（40 函数）合入前的接线范围（宪章第九条 1(a) 发往 TiKV 的请求字节）**
+   - **背景**：Go 对每个 cop 请求都经 `EncodeTagWithKey` 写入 `kvrpcpb.Context.ResourceGroupTag`（含 `SqlDigest`、`PlanDigest`、`TableId`、`Label`），改变发往 TiKV 的请求字节；但 `SqlDigest`/`PlanDigest` 依赖尚未移植的 `D02.2` `pkg/parser/digester.go`（40 函数）以及 `Session`/`ExecStmt`/`StmtCtx` 的 digest 填充。
+   - **选项**：
+     - **A（建议）**：第 1 部分先补齐 `pkg/util/resourcegrouptag`（D00.3，4 函数）、`tidb-kv` `ResourceGroupTagger`、`RequestBuilder::set_resource_group_tagger` 与 `copr/coprocessor.rs:1789` 接线，先填 `TableId`/`Label`，将空 `SqlDigest`/`PlanDigest` 显式登记为临时缺口（D07.0 T8，待 `D02.2` 合入后立即补齐完整字节），不阻塞 sysbench / `TableReader` 闭环。
+     - **B**：将 `D02.2` `digester.go`（40 函数）及 `Session`/`ExecStmt` digest 填充提前作为 D07.3 第 1 部分前置，确保上线首日 `ResourceGroupTag` 逐字节与 Go 一致。
+   - **建议与理由**：选 **A**。`TableId`/`Label` 接线一次到位，不因 40 个 digest 函数阻塞 VS1 / sysbench 范围查询闭环，同时诚实记录临时缺口待 `D02.2` 补齐。
+
+其余各项（前置补齐 `client-rust` `CopRpcContext.addr`、`select*` 改 async 即时建 `CopIterator`、遇资源组 runaway 规则返回 `blocked("N10", ...)`、`DEF.MPP`/`Analyze`/`Checksum`/`Admin`/BR 豁免、D07.2 §6.3 的 `rpc_info`/`CoprCache` 缺口、P0 D4–D9 并发/取消规则）均落在既有裁决或维护者范围内。
 
 ### 9.2 维护者已定（宪章第九条 2）
 
 1. **前置任务：`dulao5/client-rust` 填上 `CopRpcContext.addr`**：本块第 1 部分实现前先在 `client-rust` 补齐被调用 TiKV store 的地址，确保 `updateCopRuntimeStats` 正常运行，不丢失 `EXPLAIN ANALYZE` `cop_task`/`tikv_task`、`actRows`、慢日志 `Tikv_cpu_time` 与 `statements_summary` `SumTikvCPU`。
-2. **随第 1 部分补齐 `ResourceGroupTagger`（D07.0 T8）**：补齐 `tidb-kv` 的 `ResourceGroupTagger`、`StatementContext::get_resource_group_tagger`、`RequestBuilder::set_resource_group_tagger` 与 `copr/coprocessor.rs:1789` 接线，使发往 TiKV 的 `kvrpcpb.Context.ResourceGroupTag` 字节与 Go 一致。
+2. **第 1 部分 `ResourceGroupTagger`（D07.0 T8）接线**：按 §9.1 决定点 2 裁定推进（选项 A 下先补 `pkg/util/resourcegrouptag` + `tidb-kv` + `copr/coprocessor.rs:1789` 接线，待 `D02.2` 补齐 digest）。
 3. **`select` / `select_with_runtime_stats` 改为 `async fn` 并即时构造 `CopIterator`**：在 `kv::Client` 上新增 `send_async` 供 `CopClient` 立即构建并打开 `CopIterator`，使 `GetSelectResultConcurrency` 在首次 `Next` 之前即返回与 Go 一致的 `(concurrency, small_task_concurrency)`，不改变 `IndexLookUp` 限流调度。
-4. **分两部分交付与桩归属**：第 1 部分 73 个 D07.3 函数（+ P1-1 的 3 个 D00.1 函数与 D00.3 的 `ppcpuusage` 7 个函数）覆盖 `TableReader` / sysbench 闭环，解除 `get_dist_sql_ctx` 与 `verify_txn_scope` 桩（`new_closest_read_adjuster` 桩由 #411 第 2A 部分解除）；第 2 部分 31 个 D07.3 函数覆盖只读 `IndexReader` / `IndexLookUp` / `IndexMerge`、多分区归并排序，并负责 `Request.copr_request_rate_limit` 字段与 `CopIterator` 限速接线；另 14 个归豁免/不移植（§3.3）。同步在 tracker 修正 `VS1-33` 与本划分的对应关系。
+4. **分两部分交付与桩归属**：第 1 部分 **66 个** D07.3 函数（+ P1-1 的 3 个 D00.1 函数与 D00.3 的 `ppcpuusage` 7 个函数）覆盖 `TableReader` / sysbench 闭环，解除 `get_dist_sql_ctx` 与 `verify_txn_scope` 桩（`new_closest_read_adjuster` 桩由 #411 第 2A 部分解除）；第 2 部分 **31 个** D07.3 函数覆盖只读 `IndexReader` / `IndexLookUp` / `IndexMerge`、多分区归并排序，并负责 `Request.copr_request_rate_limit` 字段与 `CopIterator` 限速接线；另 **21 个**归豁免/不移植（§3.3，含 `NewSerialSelectResults` 5 个、`SetPartitionIDAndRanges` 1 个归 `DEF.MPP` 与 `SetWrappedKeyRanges` 1 个归 `D12.14`，与 #411 严格对齐）。同步在 tracker 修正 `VS1-33` 与本划分的对应关系。
 5. **`Variables`、`RateLimit`、`StoreLabel` 下沉到 `tidb-kv`（rank 5）**：按 N0 §4 规则 1 消除反向引用，`tidb-store::copr::tikv` 原名重导出；`ppcpuusage`（86 行）整文件移入 `tidb-execdetails`（rank 4）。
 6. **`ResultSubset` / `Response` 统计访问走 trait 默认方法（`M-IFACE`）**：`tidb-kv`（rank 5）依赖 `tidb-execdetails`（rank 4），移入 `CopRuntimeStats`；响应外层在 `close()` 丢弃 `CopIterator` 前缓存最终 `build_task_elapsed` / `store_batch_info`。
-7. **`MetaOnlyInfoSchema` 在 `tidb-infoschema::context`（rank 9）扩展同步 `placement_bundle_by_physical_table_id`**：与同步 `VerifyTxnScope` 匹配，不依赖异步 `table_info_by_id`；命中 bundle 返回 `blocked("X", ...)`（`VerifyTxnScope` 改为 `Result<bool, Error>`，标 L2）。
-8. **`SelectResult::into_iter` 用内部 `Option<SelectResultInner>` 转移所有权**：保留 `"selectResult is invalid after IntoIter()"` 语义且出错不破坏自身状态；`Select` 的 `kv.TiFlash` 分支防御性返回 `blocked("DEF.MPP", ...)`；存在 runaway 规则时返回 `blocked("N10", ...)`。
+7. **`MetaOnlyInfoSchema` 在 `tidb-infoschema::context`（rank 9）扩展同步 `placement_bundle_by_physical_table_id`**：与同步 `VerifyTxnScope` 匹配，不依赖异步 `table_info_by_id`；命中 bundle 返回 `blocked("X", ...)`（`VerifyTxnScope` 改为 `Result<bool, Error>`，标 L2）；解除 `PointGetExecutor::verify_txn_scope` 时同步补存 `info_schema`。
+8. **`SelectResult::into_iter` 用内部 `Option<SelectResultInner>` 转移所有权**：保留 `"selectResult is invalid after IntoIter()"` 语义且出错不破坏自身状态；`Select` 的 `kv.TiFlash` 分支防御性返回 `blocked("DEF.MPP", ...)`；`DistSQLContext.has_runaway_rule == true` 时返回 `blocked("N10", ...)`（`QUERY WATCH` 在 `D06.5`/`N10` 围栏）。
 9. **PoC `tidb-distsql` 隔离保留**：正式代码落 `crates/store/src/distsql/`，默认 `--new-stack=off` 路径零改动；`chunk::codec::new_decoder` 放宽为借用 `FieldType` 或按次拷贝。
-10. **govec 新领域 `distsql` 与 §8 登记**：双架构向量在 tracker CI 核对（`request_builder` op 覆盖 `DAGRequest` 字段 3/4/8/11 零值）；32 个 Go 单测全量移植（`Analyze`/`Checksum` 除外）；合入 #411 联调前在真实 TiKV `v8.5.8` 上以 `TypeChunk` / `TypeDefault` 跑 `tools/ab`；§8 已核验问题按各条结论登记 `upstream-pitfall`（仅第 1、3 条 SQL 可达，第 2、4、8 条仅 Go API / mock 可达，第 5、6、7 条不开 issue）。
+10. **govec 新领域 `distsql` 与 §8 登记**：双架构向量在 tracker CI 核对（`request_builder` op 覆盖 `DAGRequest` 字段 3/4/8/11 零值）；32 个 Go 单测全量移植（`Analyze`/`Checksum` 除外）；合入 #411 联调前在真实 TiKV `v8.5.8` 上以 `TypeChunk` / `TypeDefault` 跑 `tools/ab`；§8 已核验问题按各条结论登记 `upstream-pitfall`（第 1 条交 §9.1、第 3 条 SQL 可达标 `go-bug-kept`、第 6 条 SQL 可达但对外零差异、第 2/4/8 条仅 Go API / mock 可达、第 5/7 条不开 issue）。
 
 ---
 
 ## 本文所用 ID
 
-- A1：统一内存记账与配额设计（`TrackedAlloc`、tracker 树、动作链），并入 N3 spec
+- A1：统一内存记账与配额设计（`TrackedAlloc`、tracker 树、动作链），并入 N3 spec（当前草案）
 - ADR 0008：以 `client-rust` 替代 `client-go`（L3 同源替换）
 - D00.1：上下文接口骨架（`sessionctx`、`stmtctx`、`distsql/context`、`ranger` 类型等）
 - D00.2：基础常量、错误码与配置（`tidb-base`）
-- D00.3：`util/*` 叶子工具文件（按需整文件移植）
+- D00.3：`util/*` 叶子工具文件（按需整文件移植，含 `ppcpuusage`、`resourcegrouptag`）
 - D00.4：`contextutil`（warning 收集器等）
 - D01.1–D01.6, D01.9：数据类型与排序规则（`tidb-types`）
 - D01.7：Chunk 与列存解码器（`tidb-chunk`）
 - D01.8：Datum 编解码（`util/codec`，`tidb-codec`）
 - D01.11：表/索引键与行编解码（`tablecodec` / `rowcodec`，`tidb-tablecodec`）
+- D02.2：parser 扩展与 SQL digest（`pkg/parser/digester.go` 等）
 - D05.1 / D05.2：系统变量定义与 `SessionVars` / `StatementContext`（`tidb-sessionctx`）
 - D05.3：会话（`tidb-session`）
 - D06.1：元数据模型（`tidb-model`）
 - D06.3：InfoSchema 构建与缓存（`tidb-infoschema`）
+- D06.5：Domain 与后台元数据/规则同步（含 `RunawayManager`）
 - D07.0：KV 抽象与键/区间类型（`tidb-kv`）
 - D07.1：TiKV 存储驱动（`tidb-store::driver`）
 - D07.2：coprocessor 客户端（`tidb-store::copr`）
@@ -697,6 +711,7 @@ pub trait SelectResult: Send {
 - D12.7：IndexJoin 系列执行器
 - D12.11：IndexMerge 执行器
 - D12.12：简单执行器
+- D12.3 / D12.4：聚合执行器与聚合/窗口函数
 - D12.14：管理/校验类执行器（`ADMIN`、`CHECKSUM` 等，不在只读范围）
 - D14.0：执行统计数据结构（`util/execdetails`，`tidb-execdetails`）
 - D14.1：Prometheus 指标（`tidb-metrics`）
@@ -711,6 +726,7 @@ pub trait SelectResult: Send {
 - N3：并发、取消、错误边界与统一内存模型（含 A1、A2）
 - N9 / N10：观测/指标与资源管控（Runaway）相关例外
 - N13：长期共享元数据与 `Arc<FieldType>` 写时复制
+- P0 / P1 / P2：路线图阶段编号（P0 基础决定含 D4–D9；P1 基础设施；P2 查询引擎只读核心）
 - P1-1：P1 收尾移交到本块的 D00.1 函数条目（`tasks.md`）
 - PoC：原型实现（`[legacy]` crate，`--new-stack=off` 默认路径）
 - T8：D07.0 规格中记录的 `ResourceGroupTagger` 临时缺口编号
