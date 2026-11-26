@@ -9,13 +9,13 @@ use std::sync::Arc;
 use tidb_base::kv::UnSpecified;
 use tidb_base::mysql::{TypeDouble, TypeLonglong, TypeVarchar};
 use tidb_expr_pushdown::aggregation::{
-    agg_func_to_pb_expr, agg_function_mode_to_pb, pb_agg_func_mode_to_agg_func_mode,
-    pb_expr_to_agg_func_desc,
+    agg_func_to_pb_expr, agg_function_mode_to_pb, can_push_down_to_tiflash,
+    pb_agg_func_mode_to_agg_func_mode, pb_expr_to_agg_func_desc, window_func_to_pb_expr,
 };
 use tidb_expr_pushdown::new_push_down_context;
-use tidb_expression::aggregation::{AggFunctionMode, new_agg_func_desc};
+use tidb_expression::aggregation::{AggFunctionMode, new_agg_func_desc, new_window_func_desc};
 use tidb_expression::ast_funcs as ast;
-use tidb_expression::{BuildContext, Column, Expr, ExprRef};
+use tidb_expression::{BuildContext, Column, EvalState, Expr, ExprRef};
 use tidb_kv::checker::RequestTypeSupportedChecker;
 use tidb_kv::kv::{Client, ClientSendOption, Request, Response};
 use tidb_sessionctx::exprstatic as es;
@@ -200,4 +200,62 @@ fn pb_to_agg_func_desc_round_trip() {
             mode
         );
     }
+}
+
+#[test]
+fn window_func_to_pb_and_tiflash_pushdown() {
+    set_new_collation_enabled_for_test(true);
+    let ctx = es::new_expr_context(vec![]);
+    let ectx = ctx.get_eval_ctx();
+    let st = EvalState::default();
+    let client: Arc<dyn Client> = Arc::new(MockClient);
+    let push_ctx = new_push_down_context(
+        Arc::clone(&ectx),
+        Arc::clone(&client),
+        false,
+        None,
+        None,
+        1024,
+    );
+
+    let rn = new_window_func_desc(&*ctx, ast::WindowFuncRowNumber, vec![], false)
+        .unwrap()
+        .unwrap();
+    let pb = window_func_to_pb_expr(&*ectx, &st, &*client, &rn).unwrap();
+    assert_eq!(pb.get_tp(), tipb::ExprType::RowNumber);
+    assert!(pb.get_children().is_empty());
+    assert!(pb.has_sig());
+    assert!(pb.has_has_distinct());
+    assert!(!pb.get_has_distinct());
+    assert!(!pb.has_agg_func_mode());
+    assert!(can_push_down_to_tiflash(&rn, &push_ctx));
+
+    let fv = new_window_func_desc(
+        &*ctx,
+        ast::WindowFuncFirstValue,
+        vec![gen_column(TypeDouble, 1)],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let pb_fv = window_func_to_pb_expr(&*ectx, &st, &*client, &fv).unwrap();
+    assert_eq!(pb_fv.get_tp(), tipb::ExprType::FirstValue);
+    assert_eq!(pb_fv.get_children().len(), 1);
+    assert!(can_push_down_to_tiflash(&fv, &push_ctx));
+
+    // Functions not supported for TiFlash window push-down.
+    let cd = new_window_func_desc(&*ctx, ast::WindowFuncCumeDist, vec![], false)
+        .unwrap()
+        .unwrap();
+    assert!(!can_push_down_to_tiflash(&cd, &push_ctx));
+
+    let sum_w = new_window_func_desc(
+        &*ctx,
+        ast::AggFuncSum,
+        vec![gen_column(TypeDouble, 1)],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!can_push_down_to_tiflash(&sum_w, &push_ctx));
 }

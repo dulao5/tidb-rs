@@ -61,3 +61,9 @@ D08.11-AB	D08.11	pkg/planner/util/byitem.go	ByItems.Hash64	2
 D08.11-AB	D08.11	pkg/planner/util/byitem.go	ByItems.MemoryUsage	9	
 D08.11-AB	D08.11	pkg/planner/util/byitem.go	ByItems.StringWithCtx	4	
 D08.11-AB	D08.11	pkg/planner/util/byitem.go	StringifyByItemsWithCtx	10	
+D08.11-C	D08.11	pkg/expression/aggregation/window_func.go	NeedFrame	2	
+D08.11-C	D08.11	pkg/expression/aggregation/window_func.go	NewWindowFuncDesc	49	
+D08.11-C	D08.11	pkg/expression/aggregation/window_func.go	UseDefaultFrame	2	
+D08.11-C	D08.11	pkg/expression/aggregation/window_func.go	WindowFuncDesc.CanPushDownToTiFlash	15	
+D08.11-C	D08.11	pkg/expression/aggregation/window_func.go	WindowFuncDesc.Clone	1	
+D08.11-C	D08.11	pkg/expression/aggregation/window_func.go	WindowFuncToPBExpr	15	

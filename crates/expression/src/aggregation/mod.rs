@@ -2,11 +2,12 @@
 //! aggregate and window functions the planner builds and the executors read (spec
 //! `specs/D08.11-aggregation`).
 //!
-//! So far part A: `baseFuncDesc` with the return type inference, `AggFuncDesc`, the modes and
-//! the name helpers. Part B (the tipb conversion and push-down checks) lives in
-//! tidb-expr-pushdown (`tidb_expr_pushdown::aggregation`, spec §4.8). Part C (the window
-//! function descriptor's functions) and part D (`ExplainAggFunc`) come later; the legacy
-//! evaluators only the mock store uses are not ported (spec §2.3).
+//! Parts A and C live here: `baseFuncDesc` with return type inference, `AggFuncDesc`, the
+//! modes and name helpers, and `WindowFuncDesc` (`NewWindowFuncDesc`, `UseDefaultFrame`,
+//! `NeedFrame`, `Clone`). Part B and the tipb/TiFlash functions of part C live in
+//! tidb-expr-pushdown (`tidb_expr_pushdown::aggregation`, spec §4.8). Part D
+//! (`ExplainAggFunc`) comes after D10.9 P1-1; the legacy evaluators only the mock store uses
+//! are not ported (spec §2.3).
 
 // The Go package `aggregation` has a file `aggregation.go` (file-for-file, constitution §2).
 #[allow(clippy::module_inception)]
@@ -18,7 +19,7 @@ pub mod window_func;
 pub use aggregation::{AggFunctionMode, is_all_first_row, need_count, need_value};
 pub use base_func::BaseFuncDesc;
 pub use descriptor::{AggFuncDesc, new_agg_func_desc, new_agg_func_desc_for_window_func};
-pub use window_func::WindowFuncDesc;
+pub use window_func::{WindowFuncDesc, need_frame, new_window_func_desc, use_default_frame};
 
 #[cfg(test)]
 mod tests;

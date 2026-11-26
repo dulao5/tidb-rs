@@ -363,3 +363,17 @@ rationale = "宪章第九条 3：可复现的 Go 结果错误（跨复用 chunk 
 approver = "zhigang-du"
 approved = "2026-11-25"
 reopen = "基线升级到 getRealJSONValue 拷贝 Opaque.Buf 字节的版本，或负责人决定照 Go；聚合接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"
+
+[[ruling]]
+id = "R25"
+name = "window-bit-and-lead-lag-keep-unsigned"
+class = "divergence"
+plane = "rows"
+layer = "none"
+test = "crates/expression/src/aggregation/tests.rs::window_bit_and_lead_lag_preserve_unsigned_flag"
+source = "宪章第九条 3；D08.11 spec §9 决定 7；#398"
+evidence = "Go v8.5.8 的 NewWindowFuncDesc（pkg/expression/aggregation/window_func.go:66、:71）对小写 bit_and/bit_or/bit_xor 和 3 参数 NOT NULL 的 lead/lag 调用 base.RetTp.SetFlag(mysql.NotNullFlag) 整体替换 flag，抹掉 UnsignedFlag（及 BinaryFlag）。已在本地 v8.5.8 SQL 上复现：全 NULL 时 SELECT bit_and(a) OVER () 返回 -1（而非 18446744073709551615），{u64::MAX, 2^63} 上 bit_and(a) OVER () 返回 -9223372036854775808 且 bit_and(a) OVER () > 0 为 0；UNSIGNED NOT NULL 列上 lead(a, 1, b) OVER () 返回 -2 且 > 0 为 0；而大写 BIT_AND/LEAD 窗口调用、非窗口 bit_and 和 MySQL 均返回正确无符号值。tidb-rs 在这两处改用 add_flag(NotNullFlag) 保留 UnsignedFlag 等原有 flag"
+rationale = "宪章第九条 3 与 D08.11 spec §9 决定 7：可复现的 Go 结果错误且大写窗口调用、非窗口路径和 MySQL 均正确；修改不涉及落盘编码或与 TiKV/TiFlash 的交互。协调人与评审人已确认保留正确行为"
+approver = "zhigang-du"
+approved = "2026-11-26"
+reopen = "基线升级到 NewWindowFuncDesc 使用 AddFlag(NotNullFlag) 的版本，或负责人决定照 Go；窗口算子接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"

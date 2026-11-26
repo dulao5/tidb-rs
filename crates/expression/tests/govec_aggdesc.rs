@@ -1,7 +1,8 @@
-//! Replays the govec `aggdesc` vectors, part A (tidb-rs-tracker `govec/domains/aggdesc.go`):
-//! the aggregate function descriptors of block D08.11 (`pkg/expression/aggregation`) and the
-//! `ByItems` they hold, against Go TiDB v8.5.8. The part B records (push-down, tipb) are
-//! replayed by `crates/expr-pushdown/tests/govec_aggdesc_pb.rs`.
+//! Replays the govec `aggdesc` vectors, parts A and C (tidb-rs-tracker `govec/domains/aggdesc.go`):
+//! the aggregate and window function descriptors of block D08.11 (`pkg/expression/aggregation`)
+//! and the `ByItems` they hold, against Go TiDB v8.5.8. The push-down and tipb records (part B
+//! and part C `window_to_pb`/`window_tiflash`) are replayed by
+//! `crates/expr-pushdown/tests/govec_aggdesc_pb.rs`.
 //!
 //! A record gives a descriptor spec (name, argument recipes, DISTINCT, mode, ORDER BY items,
 //! or the raw fields); the replay builds the arguments with the real function families
@@ -16,7 +17,8 @@ use serde_json::{Value, json};
 use tidb_base::Error;
 use tidb_expression::aggregation::{
     AggFuncDesc, AggFunctionMode, BaseFuncDesc, WindowFuncDesc, is_all_first_row, need_count,
-    need_value, new_agg_func_desc, new_agg_func_desc_for_window_func,
+    need_frame, need_value, new_agg_func_desc, new_agg_func_desc_for_window_func,
+    new_window_func_desc, use_default_frame,
 };
 use tidb_expression::builtin_cast::build_cast_function;
 use tidb_expression::byitem::{ByItems, stringify_by_items_with_ctx};
@@ -47,8 +49,22 @@ fn vectors() -> String {
     )
 }
 
-/// The ops of part B (tidb-expr-pushdown).
-const PART_B: &[&str] = &["push", "topb", "mode2pb", "pb2mode", "frompb", "tipb"];
+/// Exact count of `new_window_desc` records covered by ruling R25 (#398): lowercase
+/// `bit_and`/`bit_or`/`bit_xor` and 3-arg NOT NULL `lead`/`lag` preserve existing flags via
+/// `AddFlag(NotNullFlag)` instead of Go's `SetFlag(NotNullFlag)`.
+const EXPECTED_WINDOW_FLAG_RULED: usize = 45;
+
+/// The ops replayed by tidb-expr-pushdown (parts B and C).
+const PUSHDOWN_OPS: &[&str] = &[
+    "push",
+    "topb",
+    "mode2pb",
+    "pb2mode",
+    "frompb",
+    "tipb",
+    "window_to_pb",
+    "window_tiflash",
+];
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -310,6 +326,75 @@ fn ad_window(d: &AggFuncDesc) -> WindowFuncDesc {
     }
 }
 
+fn ad_dump_window(w: &WindowFuncDesc) -> Value {
+    let args: Vec<Value> = w.args.iter().map(|a| ad_arg(a)).collect();
+    let rt = if w.ret_tp_is_nil() {
+        Value::Null
+    } else {
+        ft_out(&w.ret_tp)
+    };
+    json!({"n": gs(w.name.as_bytes()), "a": args, "rt": rt})
+}
+
+fn frame_type_code(tp: tidb_parser::ast::FrameType) -> i32 {
+    match tp {
+        tidb_parser::ast::FrameType::Rows => 0,
+        tidb_parser::ast::FrameType::Ranges => 1,
+        tidb_parser::ast::FrameType::Groups => 2,
+    }
+}
+
+fn bound_type_code(tp: tidb_parser::ast::BoundType) -> i32 {
+    match tp {
+        tidb_parser::ast::BoundType::Following => 0,
+        tidb_parser::ast::BoundType::Preceding => 1,
+        tidb_parser::ast::BoundType::CurrentRow => 2,
+    }
+}
+
+/// Checks whether a `new_window_desc` difference against Go v8.5.8 is solely the intentional
+/// flag preservation of ruling R25 (#398): lowercase `bit_and`/`bit_or`/`bit_xor` and 3-arg
+/// NOT NULL `lead`/`lag` use `AddFlag(NotNullFlag)` instead of Go's `SetFlag(NotNullFlag)`.
+fn is_window_flag_ruling_diff(rec: &Value, got: &Value) -> bool {
+    use tidb_base::mysql::{BinaryFlag, NotNullFlag, UnsignedFlag};
+    if rec["op"] != "new_window_desc" {
+        return false;
+    }
+    let spec = &rec["args"][0];
+    let Some(name) = spec["n"].as_str() else {
+        return false;
+    };
+    let is_bit = matches!(name, "bit_and" | "bit_or" | "bit_xor");
+    let is_lead_lag3 =
+        matches!(name, "lead" | "lag") && spec["a"].as_array().is_some_and(|a| a.len() == 3);
+    if !is_bit && !is_lead_lag3 {
+        return false;
+    }
+    let want = &rec["out"];
+    let Some(want_flag) = want["w"]["rt"][1].as_u64() else {
+        return false;
+    };
+    let Some(got_flag) = got["w"]["rt"][1].as_u64() else {
+        return false;
+    };
+    if want_flag != NotNullFlag as u64 {
+        return false;
+    }
+    if is_bit && got_flag != (NotNullFlag | UnsignedFlag | BinaryFlag) as u64 {
+        return false;
+    }
+    if is_lead_lag3 && ((got_flag as usize & NotNullFlag) == 0 || got_flag == want_flag) {
+        return false;
+    }
+    if got["clone"]["rt"][1].as_u64() != Some(got_flag) {
+        return false;
+    }
+    let mut patched = want.clone();
+    patched["w"]["rt"][1] = json!(got_flag);
+    patched["clone"]["rt"][1] = json!(got_flag);
+    got == &patched
+}
+
 // ---- the domain ------------------------------------------------------------------------------
 
 fn exec(op: &str, p: &[Value]) -> Value {
@@ -464,6 +549,37 @@ fn exec(op: &str, p: &[Value]) -> Value {
                 Err(e) => ex_err(&e),
             }
         }
+        "new_window_desc" => {
+            let s = &p[0];
+            let ctx = ad_ctx(s);
+            let ectx = ctx.get_eval_ctx();
+            set_new_collation_enabled_for_test(s["nc"].as_bool().unwrap());
+            let args = ad_args(&*ctx, s);
+            let skip = p[1].as_bool().unwrap();
+            match new_window_func_desc(&*ctx, s["n"].as_str().unwrap(), args, skip) {
+                Err(e) => ex_err(&e),
+                Ok(None) => Value::Null,
+                Ok(Some(w)) => {
+                    let c = w.clone_desc();
+                    json!({
+                        "w": ad_dump_window(&w),
+                        "clone": ad_dump_window(&c),
+                        "s": gs(&w.string_with_ctx(&*ectx, tidb_base::errors::RedactLogDisable)),
+                    })
+                }
+            }
+        }
+        "window_frame" => {
+            let n = p[0].as_str().unwrap();
+            let (use_def, frame) = use_default_frame(n);
+            json!({
+                "use": use_def,
+                "tp": frame_type_code(frame.tp),
+                "start": [bound_type_code(frame.extent.start.tp), frame.extent.start.unbounded],
+                "end": [bound_type_code(frame.extent.end.tp), frame.extent.end.unbounded],
+                "need": need_frame(n),
+            })
+        }
         _ => panic!("aggdesc: unknown op {op}"),
     }
 }
@@ -478,12 +594,12 @@ fn replay(path: &str) {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let mut fails = vec![];
-    let (mut n, mut replayed) = (0, 0);
+    let (mut n, mut replayed, mut ruled) = (0, 0, 0);
     for line in lines {
         n += 1;
         let rec: Value = serde_json::from_str(line).unwrap();
         let op = rec["op"].as_str().unwrap();
-        if PART_B.contains(&op) {
+        if PUSHDOWN_OPS.contains(&op) {
             continue;
         }
         replayed += 1;
@@ -494,7 +610,14 @@ fn replay(path: &str) {
             Err(_) => go_panicked,
             Ok(v) => {
                 let v: Value = serde_json::from_str(&v.to_string()).unwrap();
-                !go_panicked && v == rec["out"]
+                if !go_panicked && v == rec["out"] {
+                    true
+                } else if !go_panicked && is_window_flag_ruling_diff(&rec, &v) {
+                    ruled += 1;
+                    true
+                } else {
+                    false
+                }
             }
         };
         if !ok {
@@ -524,7 +647,12 @@ fn replay(path: &str) {
         shown.join("\n")
     );
     assert_eq!(n as u64, header["records"].as_u64().unwrap());
-    assert!(replayed > 4000, "{replayed} part A records");
+    assert!(replayed > 5000, "{replayed} part A+C records");
+    assert_eq!(
+        ruled, EXPECTED_WINDOW_FLAG_RULED,
+        "{path}: ruled window flag records"
+    );
+    eprintln!("{path}: {replayed} records replayed, {ruled} ruled (R25)");
 }
 
 #[test]
