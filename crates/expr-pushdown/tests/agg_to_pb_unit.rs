@@ -259,3 +259,72 @@ fn window_func_to_pb_and_tiflash_pushdown() {
     .unwrap();
     assert!(!can_push_down_to_tiflash(&sum_w, &push_ctx));
 }
+
+// Pins the TiFlash push-down request change of ruling R25 (#398): a 3-arg `lead` over
+// UNSIGNED NOT NULL columns keeps UnsignedFlag in the pushed-down tipb FieldType.
+#[test]
+fn window_lead_unsigned_pb_preserves_unsigned_flag() {
+    use tidb_base::mysql::{BinaryFlag, NotNullFlag, UnsignedFlag};
+    use tidb_types::datum::Datum;
+
+    set_new_collation_enabled_for_test(true);
+    let ctx = es::new_expr_context(vec![]);
+    let ectx = ctx.get_eval_ctx();
+    let st = EvalState::default();
+    let client: Arc<dyn Client> = Arc::new(MockClient);
+    let push_ctx = new_push_down_context(
+        Arc::clone(&ectx),
+        Arc::clone(&client),
+        false,
+        None,
+        None,
+        1024,
+    );
+
+    let mut unsigned_nn = new_field_type(TypeLonglong);
+    unsigned_nn.add_flag(UnsignedFlag | NotNullFlag | BinaryFlag);
+    let col_a = Expr::Column(Column {
+        ret_type: Arc::new(unsigned_nn.clone()),
+        id: 1,
+        index: 1,
+        ..Column::default()
+    })
+    .into_ref();
+    let col_b = Expr::Column(Column {
+        ret_type: Arc::new(unsigned_nn),
+        id: 2,
+        index: 2,
+        ..Column::default()
+    })
+    .into_ref();
+    let mut one = Datum::default();
+    one.set_int64(1);
+    let offset = Expr::Constant(tidb_expression::Constant::new(
+        one,
+        new_field_type(TypeLonglong),
+    ))
+    .into_ref();
+
+    let desc = new_window_func_desc(
+        &*ctx,
+        ast::WindowFuncLead,
+        vec![col_a, offset, col_b],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(can_push_down_to_tiflash(&desc, &push_ctx));
+    let pb = window_func_to_pb_expr(&*ectx, &st, &*client, &desc).unwrap();
+    assert_eq!(pb.get_tp(), tipb::ExprType::Lead);
+    let flag = pb.get_field_type().get_flag() as usize;
+    assert_ne!(
+        flag & UnsignedFlag,
+        0,
+        "pushed-down lead must keep UnsignedFlag"
+    );
+    assert_ne!(
+        flag & NotNullFlag,
+        0,
+        "pushed-down lead must keep NotNullFlag"
+    );
+}
