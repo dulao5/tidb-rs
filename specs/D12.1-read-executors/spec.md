@@ -191,7 +191,7 @@ tracker `data/func_blocks.tsv` 中 `D12.1` 共 **245** 个函数，分布在 9 �
 | **D12.0 `ConstructDAGReq` 与 `to_pb`** | `crates/executor/src/internal/builder/builder_utils.rs:18,58` 目前仍是 `blocked-by:D10.9` 的桩（写于 D10.9 之前），但 `PhysicalTableScan` 等的 `ToPB` 已在 `crates/planner/src/core/plan_to_pb.rs` 完成 | **2A**（硬依赖） | 随第 2A 部分解除桩并按 L1 移植 `ConstructDAGReq`（同时补 `D00.3` `timeutil.Zone`），计入 D12.0 |
 | **D07.0 `kv::Request` 缺字段与 D07.2 接线** | `crates/kv/src/kv.rs:580` 尚缺 `match_store_labels: Vec<StoreLabel>`（2A `newClosestReadAdjuster` 与 `RequestBuilder.Build` 写入）和 `copr_request_rate_limit`（2C 归并限速），且 D07.2 `CopIterator`（`coprocessor.rs:1309, 1804`）尚未读取 `copr_request_rate_limit` | **2A**（`match_store_labels`）、**2C**（`copr_request_rate_limit`） | 由 **D07.3（#410）** 负责：D07.3 第 1 部分下沉 `Variables`/`RateLimit` 至 `tidb-kv` 并补 `StoreLabel` + `match_store_labels`；D07.3 第 2 部分补 `copr_request_rate_limit` 字段并完成 `CopIterator` 限速接线（2C 排在 D07.3 第 2 部分之后） |
 | **D05.3 `SessionCore` 桩** | `crates/session/src/session.rs:790,797` 的 `get_dist_sql_ctx`、`get_build_pb_ctx` 是临时桩；`SessionContext`（`crates/executor/src/glue.rs`）需新增对应访问方法 | **2A**（硬依赖） | `get_dist_sql_ctx` 由 D07.3 第 1 部分实现；`get_build_pb_ctx` 与 `SessionContext` 访问方法随第 2A 部分接入（计入 D05.3 / glue） |
-| **EXC.B `PhysicalTableReader.GetNetDataSize`、`PhysicalIndexReader.GetNetDataSize` 与 `getTblStats`** | `buildNoRangeTableReader`（`builder.go:3708`）与 `buildNoRangeIndexReader`（`:4073`）无条件调用 `v.GetNetDataSize()`；但这 3 个函数（`plan_cost_ver1.go:327, 243, 1284`，共 15 行）在 tracker `func_blocks.tsv` 中归 **`EXC.B`**（cost model v1，不移植）而非 D10.5 | **2A / 2B** | 改动已确认例外须按宪章第九条 1(b) **交 §15.1 由项目负责人决定**（建议从 `EXC.B` 移出并按 L1 移植，或按负责人选定的替代方案处理） |
+| **D10.1 / D10.5 `PhysicalTableReader.GetNetDataSize`、`PhysicalIndexReader.GetNetDataSize` 与 `getTblStats`** | `buildNoRangeTableReader`（`builder.go:3708`）与 `buildNoRangeIndexReader`（`:4073`）在代价模型 v2 下无条件调用 `v.GetNetDataSize()`，`getTblStats` 也在 `plan_cost_ver2.go:301-302` 被调用；这 3 个函数（`plan_cost_ver1.go:327, 243, 1284`，共 15 行）原在 tracker `func_blocks.tsv` 机械归入 `EXC.B` 属归类错误 | **2A / 2B** | **维护者已定（宪章第九条 2）**：在 tracker 中将 `getTblStats` 改归 `D10.5`（与 `physical_plans.rs:213` 现有桩一致）、两处 `GetNetDataSize` 改归 `D10.1`（与 `GetIndexNetDataSize` 一致），随第 2A / 2B 部分按 L1 移植（见 §15.2） |
 | **D12.0 `assertByItemsAreColumns` 与 `detach.rs`** | `builder.go:3814`（10 行）；`detach.rs:36,71` 的 `TableReaderExecutor.Detach` 桩 | **2A** | `assertByItemsAreColumns` 随第 2A 部分移植、计入 D12.0；`TableReaderExecutor.Detach` 一并解除桩（游标仍停在 `D12.12`） |
 | **D12.10 `corColInDistPlan` / `corColInAccess`** | `builder.go:3349,3382`（共 40 行），检查 `PhysicalSelection` / `Projection` / `TopN` / `TableScan` / `IndexScan` 是否含相关列 | **2A / 2B / 2C** | 依赖 `expression::util::extract_cor_columns` 已在 `tidb-expression` 就绪；随第 2A 部分移植（未移植的 `PhysicalIndexScan` 分支等 2B 补上），计入 D12.10 |
 | **D12.14 `normalizeCtxErrWithCause`** | `analyze_utils.go:112`（11 行），被 `tableResultHandler.nextRaw` 调用 | **2A** | 无出边小函数，在 `M-GOCTX` 下检查取消原因；随第 2A 部分移植或按 `M-GOCTX` 映射，计入 D12.14 |
@@ -258,7 +258,7 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 
 随第 2A 部分跨块顺带解除/移植的小函数（计入各自所属块）：
 - D12.0：`ConstructDAGReq`、`ConstructListBasedDistExec`、`ConstructTreeBasedDistExec` 的 `to_pb` 解除桩（`builder_utils.rs`）、`assertByItemsAreColumns`（`builder.go:3814`）、`UpdateExecutorTableID`（`internal/util/partition_table.go:26`）、`TableReaderExecutor.Detach` / `tableReaderExecutorContext.Detach`（`detach.rs`）；
-- EXC.B → 待负责人决定（§15.1）：`getTblStats`（`plan_cost_ver1.go:1284`）与 `PhysicalTableReader.GetNetDataSize`（`plan_cost_ver1.go:327`；2B 同涉 `PhysicalIndexReader.GetNetDataSize` :243）；
+- D10.5 / D10.1（tracker 从 `EXC.B` 修正归属，见 §15.2）：`getTblStats`（`plan_cost_ver1.go:1284`，改归 `D10.5`）与 `PhysicalTableReader.GetNetDataSize`（`plan_cost_ver1.go:327`，改归 `D10.1`；2B 同涉 `PhysicalIndexReader.GetNetDataSize` :243，改归 `D10.1`），并按需解除 `crates/planner/src/core/physical_plans.rs:213` 桩；
 - D12.10：`executorBuilder.corColInDistPlan`（:3349）与 `corColInAccess`（:3382）；
 - D12.14：`normalizeCtxErrWithCause`（`analyze_utils.go:112`）；
 - D00.3：`timeutil.Zone`（`pkg/util/timeutil/time_zone.go:189`，`ConstructDAGReq` 编码时区名与偏移用）。
@@ -503,7 +503,7 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 4. **`TableReaderExecutor.Open` 与 `IndexReaderExecutor.open` 中途出错时关闭已建 `SelectResult`**（`table_reader.go:333-348,413-420,450-457`、`distsql.go:428-435`）：Rust 经 `Drop` 自动关闭并中止底层 worker，避免 Go 的资源泄漏（§14 第 1 条），错误返回值与 Go 相同。
 5. **`IndexLookUpExecutor` 的 `lookupTableTask` 所有权与 `oneshot` 通道**（`distsql.go:81-117,742,1300-1324,1850,1898`）：Rust 用 `oneshot` 将已完成结果交回主线程、`rows` 用 `Vec<Arc<Chunk>> + Vec<(usize, usize)>`（`M-ROW`）、`workCh` 多消费者用 `Arc<tokio::sync::Mutex<mpsc::Receiver>>`（`L2 [M-CH]`），不改变批次顺序和输出行。
 6. **`IndexLookUpExecutor` `Drop` 安全网与 `Close` 等全部 task**（`distsql.go:1225-1253`）：语句取消或未 `Close` 被丢弃时 `Drop` 通知 `finished` 并中止全部 worker，不会遗留后台 task；按 `crates/kv/src/context.rs` 通过 `select!` 丢弃在途 `SelectResult` future 取消请求，不引入 `CancellationToken`。
-7. **内存记账数值与超限走错误而非 panic（用户可见，依据已确认的 A1）**（`table_reader.go:214-226`、`distsql.go:1320-1322,2175-2236`）：按已确认的 A1 例外用 `TrackedAlloc` 记实际分配（会影响 `tidb_mem_quota_query` 触发点、`EXPLAIN ANALYZE` 内存列与慢日志 `Mem_max`），正向 `Consume` 改为 `checkpoint()?` 返回错误，worker 内按与 Go 相同的错误通道返回；`catch_unwind` 恢复日志不含 Go 堆栈（与 D12.2 / D12.3 相同）。表侧回表 reader（`buildTableReaderBase`）照 Go 不设 tracker。
+7. **内存记账数值与超限走错误而非 panic（用户可见，依据 A1（草案）及 P0 D8）**（`table_reader.go:214-226`、`distsql.go:1320-1322,2175-2236`）：按 A1（草案）及 P0 D8（负责人已决定）用 `TrackedAlloc` 记实际分配（会影响 `tidb_mem_quota_query` 触发点、`EXPLAIN ANALYZE` 内存列与慢日志 `Mem_max`），正向 `Consume` 改为 `checkpoint()?` 返回错误，worker 内按与 Go 相同的错误通道返回；`catch_unwind` 恢复日志不含 Go 堆栈（与 D12.2 / D12.3 相同）。表侧回表 reader（`buildTableReaderBase`）照 Go 不设 tracker。
 8. **内存复用池删除与新增 `M-KILL` 检查点**（`distsql.go:1575,1779-1795,2224-2250`）：`AllocPool.Alloc` 直接分配（`M-POOL`）；`indexWorker` / `tableWorker` 内层循环加 `CheckpointStride` 可能比 Go 更早响应 KILL（N3 第二部分第 5 条）。
 9. **一致性报错无 MVCC 调试 dump**（`distsql.go:2040-2068,2252-2267`）：沿用 `crates/executor/src/consistency.rs`（第 1 部分已确认），错误码 8133 和消息文本与 Go 相同，日志不含 TiKV debug MVCC dump。
 10. **failpoint、Go runtime trace 与未移植的 D14.1 执行器指标**（`table_reader.go:230-235`、`distsql.go:856,1164,1210-1222,1615-1628,2216`、`builder.go:3830-3839,4379`）：failpoint 与 trace 不移植；D14.1 执行器指标缺失对运维可观测性可见，属 D14.1 临时缺口（待 D14.1 统一接入）。
@@ -539,7 +539,7 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 
 6. **`indexLookUpExecutorContext.Detach` 返回未分离的旧值 `iluCtx`（已确认成立，属 D12.0，游标路径可达）**：
    - **位置**：`pkg/executor/detach.go:83-88`。
-   - **核验结果**：第 85 行改了 `newCtx.tableReaderExecutorContext`，但第 87 行写成 `return iluCtx` 而非 `return newCtx`。已在 Go v8.5.8 unistore 实测复现：开启 `tidb_enable_lazy_cursor_fetch = 'ON'`、打开 `CURSOR_TYPE_READ_ONLY` 游标对 4,000 行 `IndexLookUp` 含虚拟列 `HOUR(FROM_UNIXTIME(...))` 先在 `+00:00` 下 fetch 10 行（得 `22`），随后同会话切 `SET SESSION time_zone = '+05:00'` 并继续 fetch 剩余 3,990 行，结果混杂两套时区值（`{22: 118, 3: 3872}`）。在 N2 下 Rust 执行器不持有会话（上下文天然是静态快照），游标支持（D12.12）时自然不存在该竞争；由第 2C 部分开 `upstream-pitfall` 记录。
+   - **核验结果**：第 85 行改了 `newCtx.tableReaderExecutorContext`，但第 87 行写成 `return iluCtx` 而非 `return newCtx`。已在 Go v8.5.8 unistore 实测复现：开启 `tidb_enable_lazy_cursor_fetch = 'ON'`、打开 `CURSOR_TYPE_READ_ONLY` 游标对 4,000 行 `IndexLookUp` 含虚拟列 `HOUR(FROM_UNIXTIME(...))` 先在 `+00:00` 下 fetch 10 行（得 `22`），随后同会话切 `SET SESSION time_zone = '+05:00'` 并继续 fetch 剩余 3,990 行，结果混杂两套时区值（`{22: 118, 3: 3872}`）；而 Go 非延迟取数路径返回一致结果，属可复现的 Go 结果错误。在 N2 下 Rust 执行器不持有会话（上下文天然是静态快照），游标支持（D12.12）时自然不存在该竞争；D12.12 移植游标时须按宪章第九条 3 走流程（开 `upstream-pitfall` 标 `go-bug-fixed` 并在 `docs/testing/rulings.toml` 登记裁定），不止于记录 issue。
 
 7. **`tableWorker.pickAndExecTask` 的 recover 闭包未判 `task != nil`（不可达）**：
    - **位置**：`distsql.go:1873-1878`。
@@ -551,25 +551,21 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 
 ### 15.1 需要负责人决定（宪章第九条 1）
 
-1. **是否将 `EXC.B`（cost model v1）中的 3 个 `GetNetDataSize` 辅助函数移出例外并移植（宪章第九条 1(b)）**
-   - **背景**：`buildNoRangeTableReader`（`builder.go:3708`，第 2A 部分）和 `buildNoRangeIndexReader`（`builder.go:4073`，第 2B 部分）在 cost model v2 下也**无条件调用** `v.GetNetDataSize()`，以向 `newClosestReadAdjuster` 传入估算传输字节数（决定 `tidb_replica_read = 'closest-adaptive'` 是否路由至同可用区副本）。但这 3 个函数——`getTblStats`（`plan_cost_ver1.go:1284`，9 行）、`PhysicalTableReader.GetNetDataSize`（`:327`，3 行）、`PhysicalIndexReader.GetNetDataSize`（`:243`，3 行）——在 tracker `data/func_blocks.tsv` 中被整体划归 **`EXC.B`**（cost model v1，已确认不移植）。直接移植会改动已确认例外 `EXC.B` 的范围，按宪章第九条 1(b) 需负责人确认。
-   - **选项**：
-     - **A（建议）**：将这 3 个共 15 行的函数从 `EXC.B` 改归 `D10.1`（与同用途的 `PhysicalIndexLookUpReader.GetIndexNetDataSize`，`physical_plans.go:562`，归 `D10.1` 一致），随第 2A / 2B 部分按 L1 移植到 `tidb-planner`（其依赖 `cardinality::get_avg_row_size` 与 `tbl_col_hists` 均已就绪；因 `get_avg_row_size` 仅从 `&PlanCtx` 读 `enable_chunk_rpc`，补一个接 `&SessionVars` / `enable_chunk_rpc: bool` 的小辅助即可）。
-     - **B**：维持 3 个函数留在 `EXC.B` 不移植；在 `buildNoRangeTableReader` / `buildNoRangeIndexReader` 中仅当 `tidb_replica_read = 'closest-adaptive'` 时返回 `blocked("EXC.B", ...)`，其余副本读模式置 `net_data_size = 0.0`（注：当前 D07.2 `client-rust` 只支持读 leader，`closest-adaptive` 在发送阶段本就报错，D07.2 §6.3 第 1 条）。
-   - **建议与理由**：选 **A**。这 3 个函数只是碰巧定义在 `plan_cost_ver1.go` 里，实质是执行器构建的现役依赖（与 cost model v1 的代价公式无关），仅 15 行且依赖已全部就绪；归回 `D10.1` 按 L1 移植最干净，待未来 `client-rust` 支持 replica read 时无需再返工。
+无。
 
-其余各项（内存记账 A1、并发与取消 N3/A2、计划只读 A3、共享元数据 N13、9 个 `X`/`DEF.MPP` 函数）均遵循已确认基础设计或既有裁决，不新增需要负责人决定的点。
+说明：原列出的 3 个位于 `plan_cost_ver1.go` 的函数属 tracker 归类错误，已由维护者按宪章第九条 2 裁定改归 `D10.5`/`D10.1` 并移入 §15.2（代价模型 v1 / B5 仍不支持，不改动任何用户可见行为或已确认例外）；其余各项（内存记账 A1 草案与 P0 D8、并发与取消 N3 草案与 P0 D4–D9、计划只读 A3、共享元数据 N13、9 个 `X`/`DEF.MPP` 函数）均遵循既有裁决或维护者范围。
 
 ### 15.2 维护者已定（宪章第九条 2）
 
-1. **第 2 部分拆分与实现顺序**：按依赖拆为 2A（TableReader / VS1-34，28 个函数，同步更新 tracker `data/part_funcs.tsv` 的 `VS1-34`）、2B（IndexReader，14 个函数）、2C（IndexLookUp，60 个函数）三个独立实现任务；2A 排在 D07.3（#410）第 1 部分合入之后立即推进，优先打通 sysbench `simple_ranges` / `order_ranges`；2B / 2C 排在 D10.1 / D10.2 / D10.9 索引算子与 D07.3 第 2 部分合入之后。
-2. **D12.1 其余函数归属**：95 个剩余函数分为 3A（BatchPointGet，6）、3B（分区裁剪与 IndexJoin 辅助，6）、3C（缓存表与 UnionScan / MemReader，52，保留供 D06.4 第 2 部分而非归 `X`）、3D（TABLESAMPLE，17）、3E（集群内存表 Coprocessor 与 Join 辅助，14）；8 个写路径/DDL 运维/测试钩子归 `X`，1 个 TiFlash BatchCop 专属函数归 `DEF.MPP`。245 个函数 100% 对账。
-3. **与 D07.3（#410）的边界与桩归属**：`verify_txn_scope` 桩由 D07.3 第 1 部分解除；`new_closest_read_adjuster` 桩由本块 2A 解除（D07.3 只提供 `match_store_labels`）；`copr_request_rate_limit` 字段与 `CopIterator` 接线归 D07.3 第 2 部分；`distsql::select*` 改为 `async fn` 即时构造 `CopIterator`，消除 2C `GetSelectResultConcurrency` 差异；执行器从 `dctx` 构造 `tidb_kv::Context`。
-4. **随第 2A / 2C 部分跨块顺带移植/解除桩的小函数**：2A 解除 D12.0 `builder_utils.rs`（`ConstructDAGReq`、`to_pb`）和 `detach.rs`（`TableReaderExecutor.Detach`）的桩，顺带移植 D12.0 `assertByItemsAreColumns` / `UpdateExecutorTableID`、D12.10 `corColInDistPlan` / `corColInAccess`、D12.14 `normalizeCtxErrWithCause`、D00.3 `timeutil.Zone`（`time_zone.go:189`）；2C 顺带移植 D12.7 `dataReaderBuilder.{buildTableReaderBase, buildTableReaderFromHandles}`（`getTblStats` / `GetNetDataSize` 见 §15.1 待负责人定）。
-5. **边界桩放置层级（防止执行后无法回退）**：所有 2A 尚未支持的路径（分区表、`TiFlash`/`MPP`、相关列访问条件、多组 `groupedRanges`）统一在 `executorBuilder.buildTableReader`（任何执行器 `Open` 之前）返回 `blocked-by:<块>`，确保路由器可安全回退到 PoC。
-6. **并发与取消内部设计**：`IndexLookUpExecutor` 使用 `Arc<IndexLookUpShared>` + `workCh`（容量 1 `mpsc` + `Arc<tokio::sync::Mutex<Receiver>>`）+ `resultCh`（容量 50 `mpsc`）+ `oneshot` 交回 `LookupTableTaskResult` + `M-ROW`（`Vec<Arc<Chunk>> + Vec<(usize, usize)>`）+ `watch` + `tokio::select!` 丢弃在途 future 取消 + `Drop` 中止全部 worker（不引入 `CancellationToken`），`Close` 顺序严格按 Go（index usage → 通知退出与排空等待 → 注册 stats）。
-7. **测试、govec 与合并前真实 TiKV 门禁**：新建 govec 领域 `readexec`（含批大小与 `c = 1` 并发度边界）；2A 合并前必须由维护者在真实 TiKV 集群跑 `tools/ab`（含 `copr.sql` 与 sysbench 范围查询）并验证 `sbtest_results.rs` 逐列元数据，防止重演 #338 回归。
-8. **§14 已核验的 Go 问题**：仅第 4、6 条在第 2C 部分开 `upstream-pitfall`（第 4 条 `go-bug-kept`，第 6 条属 D12.0）；第 1、2、3、5、7 条均已确认生产不可达，不开 issue。
+1. **修正 tracker 归属并随 2A / 2B 移植 `getTblStats` 与 `GetNetDataSize`（选 A）**：`getTblStats`（`plan_cost_ver1.go:1284`）在代价模型 v2（`plan_cost_ver2.go:301-302`）被调用，两处 `GetNetDataSize`（`plan_cost_ver1.go:327, 243`）在 `builder.go:3708, 4073` 被无条件调用，与代价模型 v1（B5）无关；原归 `EXC.B` 是 tracker 按文件机械归类的错误。在 tracker PR 中将 `getTblStats` 改归 `D10.5`（与 `crates/planner/src/core/physical_plans.rs:213` 现有桩一致）、`PhysicalTableReader.GetNetDataSize` 与 `PhysicalIndexReader.GetNetDataSize` 改归 `D10.1`（与 `GetIndexNetDataSize` 一致），随第 2A / 2B 部分按 L1 移植（为 `cardinality::get_avg_row_size` 补接 `&SessionVars`/`enable_chunk_rpc: bool` 辅助），并按需解除 `physical_plans.rs:213` 桩。
+2. **第 2 部分拆分与实现顺序**：按依赖拆为 2A（TableReader / VS1-34，28 个函数，同步更新 tracker `data/part_funcs.tsv` 的 `VS1-34`）、2B（IndexReader，14 个函数）、2C（IndexLookUp，60 个函数）三个独立实现任务；2A 排在 D07.3（#410）第 1 部分合入之后立即推进，优先打通 sysbench `simple_ranges` / `order_ranges`；2B / 2C 排在 D10.1 / D10.2 / D10.9 索引算子与 D07.3 第 2 部分合入之后。
+3. **D12.1 其余函数归属**：95 个剩余函数分为 3A（BatchPointGet，6）、3B（分区裁剪与 IndexJoin 辅助，6）、3C（缓存表与 UnionScan / MemReader，52，保留供 D06.4 第 2 部分而非归 `X`）、3D（TABLESAMPLE，17）、3E（集群内存表 Coprocessor 与 Join 辅助，14）；8 个写路径/DDL 运维/测试钩子归 `X`，1 个 TiFlash BatchCop 专属函数归 `DEF.MPP`。245 个函数 100% 对账。
+4. **与 D07.3（#410）的边界与桩归属**：`verify_txn_scope` 桩由 D07.3 第 1 部分解除；`new_closest_read_adjuster` 桩由本块 2A 解除（D07.3 只提供 `match_store_labels`）；`copr_request_rate_limit` 字段与 `CopIterator` 接线归 D07.3 第 2 部分；`distsql::select*` 改为 `async fn` 即时构造 `CopIterator`，消除 2C `GetSelectResultConcurrency` 差异；执行器从 `dctx` 构造 `tidb_kv::Context`。
+5. **随第 2A / 2C 部分跨块顺带移植/解除桩的小函数**：2A 解除 D12.0 `builder_utils.rs`（`ConstructDAGReq`、`to_pb`）和 `detach.rs`（`TableReaderExecutor.Detach`）的桩，顺带移植 D12.0 `assertByItemsAreColumns` / `UpdateExecutorTableID`、D12.10 `corColInDistPlan` / `corColInAccess`、D12.14 `normalizeCtxErrWithCause`、D00.3 `timeutil.Zone`（`time_zone.go:189`）及上述改归后的 `getTblStats` / `GetNetDataSize`；2C 顺带移植 D12.7 `dataReaderBuilder.{buildTableReaderBase, buildTableReaderFromHandles}`。
+6. **边界桩放置层级（防止执行后无法回退）**：所有 2A 尚未支持的路径（分区表、`TiFlash`/`MPP`、相关列访问条件、多组 `groupedRanges`）统一在 `executorBuilder.buildTableReader`（任何执行器 `Open` 之前）返回 `blocked-by:<块>`，确保路由器可安全回退到 PoC。
+7. **并发与取消内部设计**：`IndexLookUpExecutor` 使用 `Arc<IndexLookUpShared>` + `workCh`（容量 1 `mpsc` + `Arc<tokio::sync::Mutex<Receiver>>`）+ `resultCh`（容量 50 `mpsc`）+ `oneshot` 交回 `LookupTableTaskResult` + `M-ROW`（`Vec<Arc<Chunk>> + Vec<(usize, usize)>`）+ `watch` + `tokio::select!` 丢弃在途 future 取消 + `Drop` 中止全部 worker（不引入 `CancellationToken`），`Close` 顺序严格按 Go（index usage → 通知退出与排空等待 → 注册 stats）。
+8. **测试、govec 与合并前真实 TiKV 门禁**：新建 govec 领域 `readexec`（含批大小与 `c = 1` 并发度边界）；2A 合并前必须由维护者在真实 TiKV 集群跑 `tools/ab`（含 `copr.sql` 与 sysbench 范围查询）并验证 `sbtest_results.rs` 逐列元数据，防止重演 #338 回归。
+9. **§14 已核验的 Go 问题**：第 4 条在第 2C 部分开 `upstream-pitfall`（`go-bug-kept`）；第 6 条（属 D12.0，游标延迟取数混入两套时区值）由 D12.12 移植游标时按宪章第九条 3 走 `upstream-pitfall`（`go-bug-fixed`）+ `rulings.toml` 裁定；第 1、2、3、5、7 条均已确认生产不可达，不开 issue。
 
 ---
 
@@ -600,7 +596,7 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 - L1 / L2：来源标注等级（L1 按映射规则忠实移植；L2 有理由的 Rust 化改写）
 - M-BYTES、M-CH、M-CTX、M-DEFER、M-FMA、M-FT、M-GO、M-GOCTX、M-INT、M-KILL、M-MAPORDER、M-MEM、M-PANIC、M-POOL、M-ROW、M-WG：`docs/porting/mappings.md` 中的全局映射规则
 - N0 / N1 / N2 / N3 / N5a / N13：基础设计 spec（crate 分层、计划表示、会话与语句上下文、并发取消与内存、Chunk 表示、共享元数据 `Arc` 与写时复制）
-- P4：路线图阶段编号（后续完整覆盖阶段）
+- P0 / P4：路线图阶段编号（P0 基础决定含 D4–D9；P4 后续完整覆盖阶段）
 - VS1-11 / VS1-12 / VS1-13 / VS1-14 / VS1-18 / VS1-20 / VS1-33 / VS1-34 / VS1-35：第一条纵向切片（VS1）的各工作项编号
 - X：不在 tidb-rs 范围内的代码（写路径、加锁、DDL 运维、测试钩子等）
 - PoC：原型实现（新栈路由器回退的目标）
