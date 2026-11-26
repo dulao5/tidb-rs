@@ -671,7 +671,7 @@ pub struct Request {
     pub match_store_labels: Vec<StoreLabel>,
     /// ResourceGroupTagger builds `kvrpcpb.Context.ResourceGroupTag` for each cop request.
     pub resource_group_tagger: Option<Arc<ResourceGroupTagBuilder>>,
-    /// CoprRequestRateLimit limits in-flight cop requests across readers (wired in D07.3 Part 2).
+    /// CoprRequestRateLimit limits in-flight cop requests across readers.
     pub copr_request_rate_limit: Option<Arc<RateLimit>>,
 }
 

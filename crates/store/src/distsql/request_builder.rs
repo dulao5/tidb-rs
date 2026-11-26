@@ -1,15 +1,17 @@
 //! go-file: pkg/distsql/request_builder.go
 //!
-//! Port of Go TiDB v8.5.8 `pkg/distsql/request_builder.go` (block D07.3, Part 1: 40 functions):
-//! `RequestBuilder` (TableReader read-path setters, `Build`, `verifyTxnScope`), handle /
-//! common-handle range encoding, `SplitRangesAcrossInt64Boundary`, `VerifyTxnScope`, and
-//! `EncodeIndexKey`.
+//! Port of Go TiDB v8.5.8 `pkg/distsql/request_builder.go` (block D07.3, Parts 1 & 2: 48
+//! functions): `RequestBuilder` (read-path setters, `Build`, `verifyTxnScope`), table /
+//! handle / partition-handle / common-handle / index range encoding,
+//! `SplitRangesAcrossInt64Boundary`, `VerifyTxnScope`, and `EncodeIndexKey`.
 
 // Package-level consts keep their Go names (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
 use std::collections::BTreeSet;
+use std::mem::size_of;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use protobuf::Message;
 use tidb_base::Error;
@@ -22,7 +24,7 @@ use tidb_codec::codec::encode_key;
 use tidb_codec::number::encode_int;
 use tidb_infoschema::context::MetaOnlyInfoSchema;
 use tidb_kv::copr::{RateLimit, ResourceGroupTagBuilder, StoreLabel};
-use tidb_kv::key::{Key, KeyRange};
+use tidb_kv::key::{Handle, Key, KeyRange};
 use tidb_kv::kv::{
     CoprRequestAdjuster, GlobalReplicaScope, IsoLevel, KeyRanges, PriorityHigh, PriorityLow,
     PriorityNormal, RC, RCCheckTS, ReqTypeAnalyze, ReqTypeDAG, Request, SI,
@@ -36,7 +38,9 @@ use tidb_sessionctx::distsql_ctx::DistSQLContext;
 use tidb_sessionctx::errctx::StrictNoWarningContext;
 use tidb_sessionctx::ranger::Range;
 use tidb_sessionctx::variable::tidb_defs::DefDistSQLScanConcurrency;
-use tidb_tablecodec::tablecodec::{encode_row_key, verify_table_id_for_ranges};
+use tidb_tablecodec::tablecodec::{
+    encode_index_seek_key, encode_row_key, verify_table_id_for_ranges,
+};
 use tidb_types::collate::get_binary_collator_slice;
 use tidb_types::datum::{KindInt64, new_bytes_datum, new_uint_datum};
 
@@ -217,6 +221,30 @@ impl RequestBuilder {
                 Err(e) => self.err = Some(e),
             }
         }
+        self
+    }
+
+    /// SetTableHandles sets `KeyRanges` for `kv.Request` by converting table handles
+    /// `handles` to `KeyRanges` firstly.
+    // go: RequestBuilder.SetTableHandles L1
+    pub fn set_table_handles(&mut self, tid: i64, handles: &[Handle]) -> &mut Self {
+        let (key_ranges, hints) = table_handles_to_kv_ranges(tid, handles);
+        self.request.key_ranges = Some(new_non_paritioned_key_ranges_with_hint(
+            key_ranges,
+            Some(hints),
+        ));
+        self
+    }
+
+    /// SetPartitionsAndHandles sets `KeyRanges` for `kv.Request` by converting
+    /// `PartitionHandle`s to `KeyRanges`. Handles in slice must be `Handle::Partition`.
+    // go: RequestBuilder.SetPartitionsAndHandles L1
+    pub fn set_partitions_and_handles(&mut self, handles: &[Handle]) -> &mut Self {
+        let (key_ranges, hints) = partition_handles_to_kv_ranges(handles);
+        self.request.key_ranges = Some(new_non_paritioned_key_ranges_with_hint(
+            key_ranges,
+            Some(hints),
+        ));
         self
     }
 
@@ -674,6 +702,163 @@ pub fn split_ranges_across_int64_boundary(
     (signed_ranges, unsigned_ranges)
 }
 
+/// TableHandlesToKVRanges converts sorted handles to KV ranges.
+/// For continuous integer handles, merges them into a single key range and records row count
+/// hints.
+// go: TableHandlesToKVRanges L1
+pub fn table_handles_to_kv_ranges(mut tid: i64, handles: &[Handle]) -> (Vec<KeyRange>, Vec<isize>) {
+    let mut krs = Vec::with_capacity(handles.len());
+    let mut hints = Vec::with_capacity(handles.len());
+    let mut i = 0;
+    while i < handles.len() {
+        let common_handle = match &handles[i] {
+            Handle::Partition(ph) => {
+                tid = ph.partition_id;
+                match ph.handle.as_ref() {
+                    Handle::Common(ch) => Some(ch.as_ref()),
+                    _ => None,
+                }
+            }
+            Handle::Common(ch) => Some(ch.as_ref()),
+            Handle::Int(_) => None,
+        };
+        if let Some(common_handle) = common_handle {
+            let encoded = common_handle.encoded();
+            let ran = KeyRange {
+                start_key: encode_row_key(tid, encoded),
+                end_key: encode_row_key(tid, &Key::from(encoded).next()),
+            };
+            krs.push(ran);
+            hints.push(1);
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < handles.len() && handles[j - 1].int_value() != i64::MAX {
+            if let Handle::Partition(p) = &handles[j]
+                && p.partition_id != tid
+            {
+                break;
+            }
+            if handles[j].int_value() != handles[j - 1].int_value() + 1 {
+                break;
+            }
+            j += 1;
+        }
+        let mut low = Vec::with_capacity(8);
+        encode_int(&mut low, handles[i].int_value());
+        let mut high = Vec::with_capacity(8);
+        encode_int(&mut high, handles[j - 1].int_value());
+        high = Key(high).prefix_next().0;
+        let start_key = encode_row_key(tid, &low);
+        let end_key = encode_row_key(tid, &high);
+        krs.push(KeyRange { start_key, end_key });
+        hints.push((j - i) as isize);
+        i = j;
+    }
+    (krs, hints)
+}
+
+/// PartitionHandlesToKVRanges converts `PartitionHandle`s to KV ranges.
+/// Handles in `handles` must be `Handle::Partition`.
+// go: PartitionHandlesToKVRanges L1
+pub fn partition_handles_to_kv_ranges(handles: &[Handle]) -> (Vec<KeyRange>, Vec<isize>) {
+    let mut krs = Vec::with_capacity(handles.len());
+    let mut hints = Vec::with_capacity(handles.len());
+    let mut i = 0;
+    while i < handles.len() {
+        let Handle::Partition(ph) = &handles[i] else {
+            panic!("handle in PartitionHandlesToKVRanges must be PartitionHandle");
+        };
+        let pid = ph.partition_id;
+        if let Handle::Common(common_handle) = ph.handle.as_ref() {
+            let encoded = common_handle.encoded();
+            // Go uses `append(commonHandle.Encoded(), 0)` (spec §4.8 / §8 item 6);
+            // `Key::next()` produces identical bytes without aliasing `encoded`'s spare cap.
+            let ran = KeyRange {
+                start_key: encode_row_key(pid, encoded),
+                end_key: encode_row_key(pid, &Key::from(encoded).next()),
+            };
+            krs.push(ran);
+            hints.push(1);
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < handles.len() && handles[j - 1].int_value() != i64::MAX {
+            if handles[j].int_value() != handles[j - 1].int_value() + 1 {
+                break;
+            }
+            let Handle::Partition(next_ph) = &handles[j] else {
+                panic!("handle in PartitionHandlesToKVRanges must be PartitionHandle");
+            };
+            if next_ph.partition_id != pid {
+                break;
+            }
+            j += 1;
+        }
+        let mut low = Vec::with_capacity(8);
+        encode_int(&mut low, handles[i].int_value());
+        let mut high = Vec::with_capacity(8);
+        encode_int(&mut high, handles[j - 1].int_value());
+        high = Key(high).prefix_next().0;
+        let start_key = encode_row_key(pid, &low);
+        let end_key = encode_row_key(pid, &high);
+        krs.push(KeyRange { start_key, end_key });
+        hints.push((j - i) as isize);
+        i = j;
+    }
+    (krs, hints)
+}
+
+/// IndexRangesToKVRanges converts index ranges to [`KeyRanges`].
+// go: IndexRangesToKVRanges L1
+pub fn index_ranges_to_kv_ranges(
+    dctx: Option<&DistSQLContext>,
+    tid: i64,
+    idx_id: i64,
+    ranges: &[Range],
+) -> Result<KeyRanges, Error> {
+    index_ranges_to_kv_ranges_with_interrupt_signal(dctx, tid, idx_id, ranges, None, None)
+}
+
+/// IndexRangesToKVRangesWithInterruptSignal converts index ranges to [`KeyRanges`].
+/// The process can be interrupted by setting `interrupt_signal` to `true`.
+// go: IndexRangesToKVRangesWithInterruptSignal L2 (interrupt_signal is Option<&AtomicBool> instead of *atomic.Value; OOM/KILL via Result, A1 / M-PANIC)
+pub fn index_ranges_to_kv_ranges_with_interrupt_signal(
+    dctx: Option<&DistSQLContext>,
+    tid: i64,
+    idx_id: i64,
+    ranges: &[Range],
+    mem_tracker: Option<&Arc<Tracker>>,
+    interrupt_signal: Option<&AtomicBool>,
+) -> Result<KeyRanges, Error> {
+    let mut key_ranges = index_ranges_to_kv_ranges_for_tables_with_interrupt_signal(
+        dctx,
+        &[tid],
+        idx_id,
+        ranges,
+        mem_tracker,
+        interrupt_signal,
+    )?;
+    key_ranges.set_to_non_partitioned()?;
+    Ok(key_ranges)
+}
+
+/// indexRangesToKVRangesForTablesWithInterruptSignal converts index ranges to [`KeyRanges`]
+/// for multiple physical tables.
+// go: indexRangesToKVRangesForTablesWithInterruptSignal L1
+pub(crate) fn index_ranges_to_kv_ranges_for_tables_with_interrupt_signal(
+    dctx: Option<&DistSQLContext>,
+    tids: &[i64],
+    idx_id: i64,
+    ranges: &[Range],
+    mem_tracker: Option<&Arc<Tracker>>,
+    interrupt_signal: Option<&AtomicBool>,
+) -> Result<KeyRanges, Error> {
+    index_ranges_to_kv_without_split(dctx, tids, idx_id, ranges, mem_tracker, interrupt_signal)
+}
+
 /// CommonHandleRangesToKVRanges converts common handle ranges to [`KeyRanges`].
 // go: CommonHandleRangesToKVRanges L1
 pub fn common_handle_ranges_to_kv_ranges(
@@ -736,6 +921,67 @@ pub fn verify_txn_scope(
         ));
     }
     Ok(true)
+}
+
+// go: indexRangesToKVWithoutSplit L2 (A1 / M-MEM / M-PANIC: accounts actual built KeyRange byte capacity and returns Result on OOM/KILL)
+fn index_ranges_to_kv_without_split(
+    dctx: Option<&DistSQLContext>,
+    tids: &[i64],
+    idx_id: i64,
+    ranges: &[Range],
+    mem_tracker: Option<&Arc<Tracker>>,
+    interrupt_signal: Option<&AtomicBool>,
+) -> Result<KeyRanges, Error> {
+    let mut krs: Vec<Vec<KeyRange>> = (0..tids.len())
+        .map(|_| Vec::with_capacity(ranges.len()))
+        .collect();
+
+    if let Some(tracker) = mem_tracker {
+        let header_bytes = (size_of::<KeyRange>() * ranges.len() * tids.len()) as i64;
+        if header_bytes > 0 {
+            tracker.consume(header_bytes)?;
+        }
+    }
+
+    const checkSignalStep: usize = 8;
+    let mut pending_bytes: i64 = 0;
+    // encode_index_key and encode_index_seek_key are time-consuming, thus we check the
+    // interrupt signal and memory/kill state periodically.
+    for (i, ran) in ranges.iter().enumerate() {
+        let (low, high) = encode_index_key(dctx, ran)?;
+        for (j, &tid) in tids.iter().enumerate() {
+            let start_key = encode_index_seek_key(tid, idx_id, &low);
+            let end_key = encode_index_seek_key(tid, idx_id, &high);
+            if mem_tracker.is_some() {
+                pending_bytes += (start_key.0.capacity() + end_key.0.capacity()) as i64;
+            }
+            krs[j].push(KeyRange { start_key, end_key });
+        }
+        if i % checkSignalStep == 0 {
+            if let Some(tracker) = mem_tracker {
+                if pending_bytes > 0 {
+                    tracker.consume(pending_bytes)?;
+                    pending_bytes = 0;
+                }
+                tracker.checkpoint()?;
+            }
+            if let Some(sig) = interrupt_signal
+                && sig.load(Ordering::Relaxed)
+            {
+                return Ok(new_partitioned_key_ranges(Vec::new()));
+            }
+            if let Some(tracker) = mem_tracker {
+                tracker.handle_kill_signal()?;
+            }
+        }
+    }
+    if let Some(tracker) = mem_tracker
+        && pending_bytes > 0
+    {
+        tracker.consume(pending_bytes)?;
+        tracker.checkpoint()?;
+    }
+    Ok(new_partitioned_key_ranges(krs))
 }
 
 /// EncodeIndexKey gets encoded keys containing low and high.
