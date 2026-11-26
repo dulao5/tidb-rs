@@ -141,6 +141,12 @@ pub trait AggFunc: Send + Sync {
     // glue: M-IFACE duck-typed SetTruncated on AggFunc (spec §5.1)
     fn set_truncated(&mut self, _t: Arc<AtomicI32>) {}
 
+    /// Injects a deterministic PRNG seed for `APPROX_PERCENTILE`'s `selection::select` pivot
+    /// in unit tests and `govec` replay (spec D12.4 §5.6, §9.1 item 7). Production callers
+    /// leave it unset so `APPROX_PERCENTILE` uses `rand::thread_rng()`.
+    // glue: deterministic seed injection for APPROX_PERCENTILE tests/govec (spec §5.6, §9.1 item 7)
+    fn set_rng_seed_for_test(&mut self, _seed: u64) {}
+
     /// The implementation's type name (Go's `%T` of the built function, read by the
     /// differential vectors and the tests).
     // glue: the implementation's type name, no Go counterpart

@@ -404,12 +404,11 @@ async fn memory_quota_exceeded_in_a_group() {
 }
 
 #[tokio::test]
-async fn build_errors() {
+async fn build_stream_agg_approx_count_distinct() {
     let sctx = ctx();
     let tps = child_types();
-    // An aggregate function of a later part of D12.4 (APPROX_COUNT_DISTINCT, part B2): `b.err`,
-    // no executor.
-    let gc = desc(
+    // Part B2 (APPROX_COUNT_DISTINCT) is now ported and builds without returning blocked.
+    let acd = desc(
         &sctx,
         ast::AggFuncApproxCountDistinct,
         col(&tps[1], 1),
@@ -423,7 +422,7 @@ async fn build_errors() {
             1,
             Vec::new(),
         ),
-        batches: Vec::new(),
+        batches: batches(&[&[(1, 1.0), (1, 2.0), (1, 1.0)]]),
         ptr: 0,
         err_at: None,
         opened: Arc::default(),
@@ -431,17 +430,24 @@ async fn build_errors() {
         dropped: None,
     };
     let mut b = new_executor_builder(&sctx, None, Arc::new(TelemetryInfo::default()));
-    let out = [(*gc.base.ret_tp).clone()];
-    let e = b.build_stream_agg_from_child_exec(
-        &sctx,
-        Some(Box::new(src)),
-        &schema_of(&out),
-        2,
-        &[],
-        &[gc],
-    );
-    assert!(e.is_none());
-    assert_eq!(blocked_by(b.err.as_ref().unwrap()), Some("D12.4"));
+    let out = [(*acd.base.ret_tp).clone()];
+    let mut e = b
+        .build_stream_agg_from_child_exec(
+            &sctx,
+            Some(Box::new(src)),
+            &schema_of(&out),
+            2,
+            &[],
+            &[acd],
+        )
+        .expect("APPROX_COUNT_DISTINCT builds after part B2");
+    assert!(b.err.is_none());
+    let ec = exec_ctx(&sctx);
+    e.open(&ec).await.unwrap();
+    let (rows, err) = run(&ec, &mut e).await;
+    assert!(err.is_none());
+    assert_eq!(rows, vec!["2"]);
+    e.close().await.unwrap();
 }
 
 // ---------------------------------------------------------------- HashAgg (Part B1)

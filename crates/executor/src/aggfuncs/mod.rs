@@ -1,12 +1,11 @@
 //! The aggregate functions (D12.4, the implementations of the aggregate functions), Go's
 //! `pkg/executor/aggfuncs`, one Rust file per Go file (spec `specs/D12.4-aggfuncs`, §5.1).
 //!
-//! Part A (spec §3.1) and part B1 (spec §3.2) are ported: the [`AggFunc`] interface,
-//! [`build`], COUNT (including DISTINCT), SUM, AVG, FIRST_ROW, MAX / MIN (not sliding),
-//! BIT_OR / BIT_XOR / BIT_AND, GROUP_CONCAT, VAR_POP / VAR_SAMP, STDDEV_POP / STDDEV_SAMP,
-//! JSON_ARRAYAGG, and JSON_OBJECTAGG. The functions of part B2 (APPROX_COUNT_DISTINCT and
-//! APPROX_PERCENTILE) return `blocked` from [`build`] until they are ported (spec §4); the
-//! window functions (part W) and the spill serialization (part S) come later and have no
+//! Parts A (spec §3.1), B1 (spec §3.2), and B2 (spec §3.3) are ported: the [`AggFunc`]
+//! interface, [`build`], COUNT (including DISTINCT), SUM, AVG, FIRST_ROW, MAX / MIN (not
+//! sliding), BIT_OR / BIT_XOR / BIT_AND, GROUP_CONCAT, VAR_POP / VAR_SAMP, STDDEV_POP /
+//! STDDEV_SAMP, JSON_ARRAYAGG, JSON_OBJECTAGG, APPROX_COUNT_DISTINCT, and APPROX_PERCENTILE.
+//! The window functions (part W) and the spill serialization (part S) come later and have no
 //! entry point yet.
 //!
 //! Callers: the aggregation executors (D12.3) and the window executor (D12.9).
@@ -23,6 +22,7 @@ pub mod func_group_concat;
 pub mod func_json_arrayagg;
 pub mod func_json_objectagg;
 pub mod func_max_min;
+pub mod func_percentile;
 pub mod func_stddevpop;
 pub mod func_stddevsamp;
 pub mod func_sum;

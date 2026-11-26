@@ -3799,6 +3799,7 @@ dependencies = [
  "futures",
  "log",
  "parking_lot 0.12.5",
+ "rand 0.8.8",
  "serde_json",
  "tidb-base",
  "tidb-chunk",

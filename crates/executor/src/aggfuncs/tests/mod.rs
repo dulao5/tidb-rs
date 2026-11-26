@@ -1,16 +1,15 @@
-//! The unit tests of Go's `aggfuncs` for the functions of parts A and B1 (spec D12.4 §6):
+//! The unit tests of Go's `aggfuncs` for the functions of parts A, B1, and B2 (spec D12.4 §6):
 //! `TestCount`, `TestSum`, `TestAvg`, `TestMaxMin`, `TestGroupConcat`, `TestJsonArrayagg`,
 //! `TestJsonObjectagg`, `TestVarpop`, `TestVarsamp`, `TestStddevpop`, `TestStddevsamp`,
-//! `TestWriteTime`, and `TestMergePartialResult4*`, with Go's helpers `testAggFunc`,
-//! `testMultiArgsAggFunc`, and `testMergePartialResult` (`aggfunc_test.go`), plus the
-//! `TestMem*` tests as properties of the Rust memory accounting.
+//! `TestWriteTime`, `TestPercentile`, `TestFix26807`, `TestFix40463`, and
+//! `TestMergePartialResult4*`, with Go's helpers `testAggFunc`, `testMultiArgsAggFunc`, and
+//! `testMergePartialResult` (`aggfunc_test.go`), plus the `TestMem*` tests as properties of
+//! the Rust memory accounting.
 //!
 //! Differences from the Go tests:
 //! - Go's `messUpChunk` overwrites the source chunk after each update, to catch partial
 //!   results that keep a reference into it. A Rust partial result cannot borrow the chunk
 //!   (`PartialResult` is `'static`), so the helpers drop it instead.
-//! - The APPROX_COUNT_DISTINCT and APPROX_PERCENTILE cases (part B2) are left out; a
-//!   dedicated test asserts they still return the temporary `blocked-by:D12.4`.
 //! - `TestMem*` check Go's estimated `memDelta`, which Rust does not return (the memory
 //!   exception A1): the growing partial result containers grow a memory tracker through the
 //!   allocator and give it back when dropped, and every function's reset partial result
@@ -24,13 +23,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tidb_base::Error;
-use tidb_base::blocked::blocked_by;
 use tidb_base::contextutil::WarnHandler;
 use tidb_base::dbterror::plannererrors;
+use tidb_base::farm;
 use tidb_base::mysql::{
     self, TypeDate, TypeDouble, TypeDuration, TypeEnum, TypeFloat, TypeJSON, TypeLonglong,
     TypeNewDecimal, TypeSet, TypeString, UnsignedFlag,
 };
+use tidb_base::selection;
 use tidb_chunk::ColAlloc;
 use tidb_chunk::chunk::{Chunk, new_chunk_with_capacity};
 use tidb_chunk::row::Row;
@@ -50,9 +50,9 @@ use tidb_sessionctx::exprstatic as es;
 use tidb_types::collate::get_collator;
 use tidb_types::context::{FlagTruncateAsWarning, Flags};
 use tidb_types::datum::{
-    Datum, new_collate_mysql_enum_datum, new_decimal_datum, new_duration_datum, new_float32_datum,
-    new_float64_datum, new_int_datum, new_json_datum, new_mysql_set_datum, new_string_datum,
-    new_time_datum,
+    Datum, new_bytes_datum, new_collate_mysql_enum_datum, new_decimal_datum, new_duration_datum,
+    new_float32_datum, new_float64_datum, new_int_datum, new_json_datum, new_mysql_set_datum,
+    new_string_datum, new_time_datum,
 };
 use tidb_types::enum_type::{parse_enum, parse_enum_name, parse_enum_value};
 use tidb_types::field_type::new_field_type;
@@ -64,7 +64,10 @@ use tidb_types::mydecimal::new_dec_from_int;
 use tidb_types::set_type::{parse_set, parse_set_name, parse_set_value};
 use tidb_types::time::{Duration, parse_date, time_from_days};
 
-use super::func_count_distinct::{eval_and_encode, write_time};
+use super::func_count_distinct::{
+    eval_and_encode, eval_and_encode_go_raw, new_partial_result_4_approx_count_distinct, write_time,
+};
+use super::func_percentile::percentile;
 use super::{
     AggFunc, PartialResult, build, new_agg_partial_result_mapper,
     new_agg_partial_result_mapper_with_cap,
@@ -226,16 +229,8 @@ fn column(ft: &FieldType, index: isize) -> ExprRef {
 
 fn built(ctx: &es::ExprContext, desc: &AggFuncDesc) -> Box<dyn AggFunc> {
     build(ctx, desc, 0)
-        .expect("the function of part A builds")
+        .expect("the aggregate function builds")
         .expect("the descriptor has a function")
-}
-
-// Asserts the temporary error of a function of a later part of the block.
-fn assert_blocked(res: Result<Option<Box<dyn AggFunc>>, Error>) {
-    match res {
-        Err(e) => assert_eq!(blocked_by(&e), Some("D12.4"), "{e:?}"),
-        Ok(_) => panic!("a function of a later part of the block was built"),
-    }
 }
 
 fn update_each(
@@ -278,6 +273,15 @@ fn test_agg_func_without_distinct(p: &AggTest) {
     if p.func_name == ast::AggFuncGroupConcat {
         args.push(sep_const(SEPARATOR));
     }
+    if p.func_name == ast::AggFuncApproxPercentile {
+        args.push(
+            Expr::Constant(Constant::new(
+                new_int_datum(50),
+                new_field_type(mysql::TypeLong),
+            ))
+            .into_ref(),
+        );
+    }
 
     let mut desc = new_agg_func_desc(&*ctx, p.func_name, args.clone(), false).unwrap();
     if p.order_by {
@@ -286,7 +290,10 @@ fn test_agg_func_without_distinct(p: &AggTest) {
             desc: true,
         }];
     }
-    let final_func = built(&ctx, &desc);
+    let mut final_func = built(&ctx, &desc);
+    if p.func_name == ast::AggFuncApproxPercentile {
+        final_func.set_rng_seed_for_test(42);
+    }
     let mut final_pr = final_func.alloc_partial_result();
     let src = gen_src_chk(p);
     update_each(ec, &*final_func, &rows(&src), &mut final_pr).unwrap();
@@ -312,6 +319,15 @@ fn test_agg_func(p: &AggTest) {
     if p.func_name == ast::AggFuncGroupConcat {
         args.push(sep_const(SEPARATOR));
     }
+    if p.func_name == ast::AggFuncApproxPercentile {
+        args.push(
+            Expr::Constant(Constant::new(
+                new_int_datum(50),
+                new_field_type(mysql::TypeLong),
+            ))
+            .into_ref(),
+        );
+    }
 
     // test the agg func with distinct
     let mut desc = new_agg_func_desc(&*ctx, p.func_name, args.clone(), true).unwrap();
@@ -321,7 +337,10 @@ fn test_agg_func(p: &AggTest) {
             desc: true,
         }];
     }
-    let final_func = built(&ctx, &desc);
+    let mut final_func = built(&ctx, &desc);
+    if p.func_name == ast::AggFuncApproxPercentile {
+        final_func.set_rng_seed_for_test(42);
+    }
     let mut final_pr = final_func.alloc_partial_result();
     for _ in 0..2 {
         let src = gen_src_chk(p);
@@ -420,7 +439,16 @@ fn test_merge_partial_result(p: &AggTest) {
     // build final func for final phase.
     let final_func = built(&ctx, &final_desc);
     let mut final_pr = final_func.alloc_partial_result();
-    let out_ft = if p.func_name == ast::AggFuncJsonArrayagg {
+    let partial_out_ft = if p.func_name == ast::AggFuncApproxCountDistinct {
+        new_field_type(TypeString)
+    } else if p.func_name == ast::AggFuncJsonArrayagg {
+        new_field_type(TypeJSON)
+    } else {
+        p.data_type.clone()
+    };
+    let final_out_ft = if p.func_name == ast::AggFuncApproxCountDistinct {
+        new_field_type(TypeLonglong)
+    } else if p.func_name == ast::AggFuncJsonArrayagg {
         new_field_type(TypeJSON)
     } else {
         p.data_type.clone()
@@ -430,7 +458,7 @@ fn test_merge_partial_result(p: &AggTest) {
     let src = gen_src_chk(p);
     update_each(ec, &*partial_func, &rows(&src), &mut partial_result).unwrap();
     drop(src);
-    let dt = final_datum(ec, &*partial_func, &mut partial_result, &out_ft);
+    let dt = final_datum(ec, &*partial_func, &mut partial_result, &partial_out_ft);
     assert_datum_eq(ec, &dt, &p.results[0], collate);
 
     final_func
@@ -441,13 +469,13 @@ fn test_merge_partial_result(p: &AggTest) {
     let src = gen_src_chk(p);
     update_each(ec, &*partial_func, &rows(&src)[2..], &mut partial_result).unwrap();
     drop(src);
-    let dt = final_datum(ec, &*partial_func, &mut partial_result, &out_ft);
+    let dt = final_datum(ec, &*partial_func, &mut partial_result, &partial_out_ft);
     assert_datum_eq(ec, &dt, &p.results[1], collate);
     final_func
         .merge_partial_result(ec, &mut partial_result, &mut final_pr)
         .unwrap();
 
-    let dt = final_datum(ec, &*final_func, &mut final_pr, &out_ft);
+    let dt = final_datum(ec, &*final_func, &mut final_pr, &final_out_ft);
     assert_datum_eq(ec, &dt, &p.results[2], collate);
 }
 
@@ -518,7 +546,17 @@ const ALL_TYPES: [u8; 8] = [
     TypeJSON,
 ];
 
-// TestMergePartialResult4Count (func_count_test.go), without APPROX_COUNT_DISTINCT (part B2).
+// genApproxDistinctMergePartialResult (func_count_test.go).
+fn gen_approx_distinct_merge_partial_result(begin: u64, end: u64) -> Vec<u8> {
+    let mut o = new_partial_result_4_approx_count_distinct();
+    for i in begin..end {
+        let x = farm::hash64(&i.to_le_bytes());
+        o.insert_hash64(x);
+    }
+    o.serialize()
+}
+
+// TestMergePartialResult4Count (func_count_test.go), including APPROX_COUNT_DISTINCT.
 #[test]
 fn merge_partial_result_count() {
     let i = new_int_datum;
@@ -528,9 +566,19 @@ fn merge_partial_result_count() {
         5,
         vec![i(5), i(3), i(8)],
     ));
+    test_merge_partial_result(&agg_tester(
+        ast::AggFuncApproxCountDistinct,
+        TypeLonglong,
+        5,
+        vec![
+            new_bytes_datum(gen_approx_distinct_merge_partial_result(0, 5)),
+            new_bytes_datum(gen_approx_distinct_merge_partial_result(2, 5)),
+            i(5),
+        ],
+    ));
 }
 
-// TestCount (func_count_test.go), without APPROX_COUNT_DISTINCT (part B2).
+// TestCount (func_count_test.go), including APPROX_COUNT_DISTINCT.
 #[test]
 fn count() {
     for tp in ALL_TYPES {
@@ -541,6 +589,15 @@ fn count() {
         let results = vec![new_int_datum(0), new_int_datum(5)];
         test_multi_args_agg_func(&multi_args_agg_tester(
             ast::AggFuncCount,
+            &[tp, tp],
+            5,
+            results,
+        ));
+    }
+    for tp in ALL_TYPES {
+        let results = vec![new_int_datum(0), new_int_datum(5)];
+        test_multi_args_agg_func(&multi_args_agg_tester(
+            ast::AggFuncApproxCountDistinct,
             &[tp, tp],
             5,
             results,
@@ -1712,34 +1769,385 @@ fn count_distinct_and_group_concat_memory_accounted() {
     }
 }
 
-// Part B2 functions (APPROX_COUNT_DISTINCT, APPROX_PERCENTILE) remain on the temporary
-// blocked-by:D12.4 stub until part B2 is ported (spec §4).
+// TestPercentile (func_percentile_test.go).
 #[test]
-fn approx_agg_names_remain_blocked() {
+fn percentile_agg_func() {
+    for p in [
+        agg_tester(
+            ast::AggFuncApproxPercentile,
+            TypeLonglong,
+            5,
+            vec![null(), new_int_datum(2)],
+        ),
+        agg_tester(
+            ast::AggFuncApproxPercentile,
+            TypeFloat,
+            5,
+            vec![null(), new_float32_datum(2.0)],
+        ),
+        agg_tester(
+            ast::AggFuncApproxPercentile,
+            TypeDouble,
+            5,
+            vec![null(), new_float64_datum(2.0)],
+        ),
+        agg_tester(
+            ast::AggFuncApproxPercentile,
+            TypeNewDecimal,
+            5,
+            vec![null(), dec(2)],
+        ),
+        agg_tester(
+            ast::AggFuncApproxPercentile,
+            TypeDate,
+            5,
+            vec![null(), new_time_datum(time_from_days(367))],
+        ),
+        agg_tester(
+            ast::AggFuncApproxPercentile,
+            TypeDuration,
+            5,
+            vec![
+                null(),
+                new_duration_datum(Duration {
+                    duration: 2,
+                    fsp: 0,
+                }),
+            ],
+        ),
+    ] {
+        test_agg_func(&p);
+    }
+}
+
+// TestFix26807 (func_percentile_test.go): verifies k = Ceil(100/100 * N) selects the max element,
+// exercising both seeded and production (thread_rng) paths.
+#[test]
+fn percentile_fix_26807() {
+    struct TestSlice(Vec<isize>);
+    impl selection::Interface for TestSlice {
+        fn len(&self) -> isize {
+            self.0.len() as isize
+        }
+        fn less(&self, i: isize, j: isize) -> bool {
+            self.0[i as usize] < self.0[j as usize]
+        }
+        fn swap(&mut self, i: isize, j: isize) {
+            self.0.swap(i as usize, j as usize);
+        }
+    }
+
+    let want: isize = 28;
+    let mut data = TestSlice((1..=want).collect());
+    for i in 0..10u64 {
+        let index = percentile(&mut data, 100, Some(i));
+        assert_eq!(data.0[index as usize], want);
+        let index_prod = percentile(&mut data, 100, None);
+        assert_eq!(data.0[index_prod as usize], want);
+    }
+}
+
+// TestFix40463 (func_percentile_test.go): ENUM / SET with EnumSetAsIntFlag map to basePercentile
+// (returning NULL) instead of percentileOriginal4Int.
+#[test]
+fn percentile_fix_40463() {
+    for tp in [TypeEnum, TypeSet] {
+        let mut p = agg_tester(ast::AggFuncApproxPercentile, tp, 5, vec![null(), null()]);
+        p.data_type.add_flag(mysql::EnumSetAsIntFlag);
+        test_agg_func(&p);
+    }
+}
+
+// APPROX_PERCENTILE merge + A1 memory accounting across all five typed implementations and
+// BasePercentile, including split-pair compatibility (Partial1 -> Final).
+#[test]
+fn approx_percentile_merge_and_mem() {
     let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let pct = Expr::Constant(Constant::new(
+        new_int_datum(50),
+        new_field_type(mysql::TypeLong),
+    ))
+    .into_ref();
+
+    for tp in [
+        TypeLonglong,
+        TypeDouble,
+        TypeNewDecimal,
+        TypeDate,
+        TypeDuration,
+    ] {
+        let ft = new_field_type(tp);
+        let desc = new_agg_func_desc(
+            &*ctx,
+            ast::AggFuncApproxPercentile,
+            vec![column(&ft, 0), Arc::clone(&pct)],
+            false,
+        )
+        .unwrap();
+        let (partial_desc, final_desc) = desc.split(&[0, 1]);
+
+        let t = new_tracker(1, -1);
+        {
+            let a = TrackedAlloc::new(Arc::clone(&t));
+            let mut pf = built(&ctx, &partial_desc);
+            let mut ff = built(&ctx, &final_desc);
+            pf.set_alloc(ColAlloc::Tracked(a.clone()));
+            ff.set_alloc(ColAlloc::Tracked(a.clone()));
+            ff.set_rng_seed_for_test(99);
+
+            let mut ppr1 = pf.alloc_partial_result();
+            let mut ppr2 = pf.alloc_partial_result();
+            let mut fpr = ff.alloc_partial_result();
+
+            let src = gen_src_chk(&agg_tester(ast::AggFuncApproxPercentile, tp, 200, vec![]));
+            let rs = rows(&src);
+            update_each(ec, &*pf, &rs[..100], &mut ppr1).unwrap();
+            update_each(ec, &*pf, &rs[100..], &mut ppr2).unwrap();
+            a.flush();
+            assert!(
+                t.bytes_consumed() > 0,
+                "APPROX_PERCENTILE tp={tp}: buffer growth not accounted"
+            );
+
+            ff.merge_partial_result(ec, &mut ppr1, &mut fpr).unwrap();
+            ff.merge_partial_result(ec, &mut ppr2, &mut fpr).unwrap();
+            let dt = final_datum(ec, &*ff, &mut fpr, &desc.ret_tp);
+            assert!(!dt.is_null(), "APPROX_PERCENTILE tp={tp}: expected value");
+
+            ff.reset_partial_result(&mut fpr);
+            let dt_empty = final_datum(ec, &*ff, &mut fpr, &desc.ret_tp);
+            assert!(dt_empty.is_null());
+        }
+        assert_eq!(
+            t.bytes_consumed(),
+            0,
+            "APPROX_PERCENTILE tp={tp}: memory not returned on drop"
+        );
+    }
+}
+
+// Maintainer decision in #393 / upstream-pitfall #394 (Constitution art. 1.2 & art. 9.3):
+// APPROX_COUNT_DISTINCT uses a separate Go-raw encoding path (`eval_and_encode_go_raw`) so
+// ruling R23 (#390) canonicalization does NOT leak into APPROX_COUNT_DISTINCT.
+#[test]
+fn approx_count_distinct_keeps_go_raw_encoding() {
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let st = EvalState::new();
+
+    // 1. Float +0.0 vs -0.0: APPROX_COUNT_DISTINCT hashes raw IEEE-754 bits -> 2 (Go v8.5.8).
+    let dbl_ft = new_field_type(TypeDouble);
+    let mut chk_f = new_chunk_with_capacity(std::slice::from_ref(&dbl_ft), 2);
+    chk_f.append_float64(0, 0.0);
+    chk_f.append_float64(0, -0.0);
+    let desc_f = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncApproxCountDistinct,
+        vec![column(&dbl_ft, 0)],
+        false,
+    )
+    .unwrap();
+    let f = built(&ctx, &desc_f);
+    let mut pr = f.alloc_partial_result();
+    f.update_partial_result(ec, &st, &rows(&chk_f), &mut pr)
+        .unwrap();
+    let dt = final_datum(ec, &*f, &mut pr, &desc_f.ret_tp);
+    assert_datum_eq(ec, &dt, &new_int_datum(2), "binary");
+
+    // 2. Time with equal CoreTime and differing Type / Fsp: APPROX_COUNT_DISTINCT hashes
+    // full 16-byte WriteTime output -> 3 distinct entries (Date/0, Datetime/0, Datetime/3).
+    let (t_date, err) = parse_date(&ec.type_ctx(), b"2020-01-01");
+    err.unwrap();
+    let t_dt0 = tidb_types::time::new_time(t_date.core_time(), mysql::TypeDatetime, 0);
+    let t_dt3 = tidb_types::time::new_time(t_date.core_time(), mysql::TypeDatetime, 3);
+    let mut dt_ft = new_field_type(mysql::TypeDatetime);
+    dt_ft.set_decimal(3);
+    let mut chk_t = new_chunk_with_capacity(std::slice::from_ref(&dt_ft), 3);
+    chk_t.append_time(0, t_date);
+    chk_t.append_time(0, t_dt0);
+    chk_t.append_time(0, t_dt3);
+    let desc_t = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncApproxCountDistinct,
+        vec![column(&dt_ft, 0)],
+        false,
+    )
+    .unwrap();
+    let ft_agg = built(&ctx, &desc_t);
+    let mut pr_t = ft_agg.alloc_partial_result();
+    ft_agg
+        .update_partial_result(ec, &st, &rows(&chk_t), &mut pr_t)
+        .unwrap();
+    let dt = final_datum(ec, &*ft_agg, &mut pr_t, &desc_t.ret_tp);
+    assert_datum_eq(ec, &dt, &new_int_datum(3), "binary");
+
+    // 3. Duration with equal nanoseconds and differing Fsp (0 vs 3): Go raw encoding writes
+    // 16 bytes (Duration + Fsp), whereas R23 `eval_and_encode` writes 8 bytes (Duration only).
+    // (Chunk columns store only the int64 nanoseconds and derive Fsp from FieldType.decimal, so
+    // per-value Fsp differences arise from expressions such as Constant / scalar functions.)
+    let mut dur_ft0 = new_field_type(TypeDuration);
+    dur_ft0.set_decimal(0);
+    let mut dur_ft3 = new_field_type(TypeDuration);
+    dur_ft3.set_decimal(3);
+    let c_dur0 = Expr::Constant(Constant::new(
+        new_duration_datum(Duration {
+            duration: 1_000_000_000,
+            fsp: 0,
+        }),
+        dur_ft0,
+    ))
+    .into_ref();
+    let c_dur3 = Expr::Constant(Constant::new(
+        new_duration_datum(Duration {
+            duration: 1_000_000_000,
+            fsp: 3,
+        }),
+        dur_ft3,
+    ))
+    .into_ref();
+    let collator = get_collator("binary");
+    let mut buf = [0u8; 16];
+    let (raw0, null0) =
+        eval_and_encode_go_raw(ec, &st, &c_dur0, collator, Row::default(), &mut buf, vec![])
+            .unwrap();
+    let (raw3, null3) =
+        eval_and_encode_go_raw(ec, &st, &c_dur3, collator, Row::default(), &mut buf, vec![])
+            .unwrap();
+    assert!(!null0 && !null3);
+    assert_eq!(raw0.len(), 16);
+    assert_eq!(raw3.len(), 16);
+    assert_ne!(
+        raw0, raw3,
+        "Go raw encoding for APPROX_COUNT_DISTINCT must preserve Duration.Fsp (isolated from R23)"
+    );
+    // And verify APPROX_COUNT_DISTINCT Partial1 hashes those exact 16-byte buffers differently.
+    let mut p_d0 = new_partial_result_4_approx_count_distinct();
+    p_d0.insert_hash64(farm::hash64(&raw0));
+    let mut p_d3 = new_partial_result_4_approx_count_distinct();
+    p_d3.insert_hash64(farm::hash64(&raw3));
+    assert_ne!(p_d0.serialize(), p_d3.serialize());
+}
+
+// APPROX_COUNT_DISTINCT: resize, skip_degree > 0 (> 65536 distinct items), has_zero,
+// read_and_merge error ("too large size degree"), Partial1/Partial2/Final wire round-trip,
+// and A1 TrackedAlloc memory accounting.
+#[test]
+fn approx_count_distinct_sketch_modes_and_mem() {
+    let ctx = es::new_expr_context(vec![]);
+    let ec = ctx.get_eval_ctx();
+    let ec: &dyn EvalContext = &*ec;
+    let st = EvalState::new();
+
+    // 1. Cross uniquesHashMaxSize (65536) to trigger skip_degree > 0, rehash, and fixed_size.
+    let mut sketch = new_partial_result_4_approx_count_distinct();
+    sketch.insert_hash64(0); // exercises has_zero branch
+    for i in 0..70_000u64 {
+        sketch.insert_hash64(farm::hash64(&i.to_le_bytes()));
+    }
+    let est = sketch.fixed_size();
+    assert!(
+        (65_000..=75_000).contains(&est),
+        "BJKST estimate {est} out of expected range around 70,000"
+    );
+    let bytes = sketch.serialize();
+    assert!(bytes[0] > 0, "skip_degree should have incremented");
+
+    // 2. Round-trip through Partial2 -> Final (wire read_and_merge + Serialize).
+    let str_ft = new_field_type(TypeString);
+    let mut p2_desc = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncApproxCountDistinct,
+        vec![column(&str_ft, 0)],
+        false,
+    )
+    .unwrap();
+    p2_desc.mode = AggFunctionMode::Partial2Mode;
+    let mut fin_desc = new_agg_func_desc(
+        &*ctx,
+        ast::AggFuncApproxCountDistinct,
+        vec![column(&str_ft, 0)],
+        false,
+    )
+    .unwrap();
+    fin_desc.mode = AggFunctionMode::FinalMode;
+
+    let p2 = built(&ctx, &p2_desc);
+    let fin = built(&ctx, &fin_desc);
+    let mut p2_pr = p2.alloc_partial_result();
+    let mut chk_in = new_chunk_with_capacity(std::slice::from_ref(&str_ft), 1);
+    chk_in.append_bytes(0, &bytes);
+    p2.update_partial_result(ec, &st, &rows(&chk_in), &mut p2_pr)
+        .unwrap();
+    let p2_out = final_datum(ec, &*p2, &mut p2_pr, &str_ft);
+
+    let mut fin_pr = fin.alloc_partial_result();
+    let mut chk_p2 = new_chunk_with_capacity(std::slice::from_ref(&str_ft), 1);
+    chk_p2.append_bytes(0, p2_out.get_bytes());
+    fin.update_partial_result(ec, &st, &rows(&chk_p2), &mut fin_pr)
+        .unwrap();
+    let fin_out = final_datum(ec, &*fin, &mut fin_pr, &fin_desc.ret_tp);
+    assert_datum_eq(ec, &fin_out, &new_int_datum(est as i64), "binary");
+
+    // 3. read_and_merge rejects rhsSize > uniquesHashMaxSize (65536).
+    let mut bad = vec![0u8]; // skip_degree = 0
+    tidb_codec::number::encode_uvarint(&mut bad, 65537);
+    let mut chk_bad = new_chunk_with_capacity(std::slice::from_ref(&str_ft), 1);
+    chk_bad.append_bytes(0, &bad);
+    let mut bad_pr = fin.alloc_partial_result();
+    let err = fin
+        .update_partial_result(ec, &st, &rows(&chk_bad), &mut bad_pr)
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Cannot read partialResult4ApproxCountDistinct: too large size degree"
+    );
+
+    // 4. A1 TrackedAlloc memory accounting across resizes, reset, and drop.
     let int_ft = new_field_type(TypeLonglong);
-    let approx_cd = new_agg_func_desc(
+    let desc = new_agg_func_desc(
         &*ctx,
         ast::AggFuncApproxCountDistinct,
         vec![column(&int_ft, 0)],
         false,
     )
     .unwrap();
-    assert_blocked(build(&*ctx, &approx_cd, 0));
-
-    let pct_const = Expr::Constant(Constant::new(
-        new_int_datum(50),
-        new_field_type(TypeLonglong),
-    ))
-    .into_ref();
-    let approx_pct = new_agg_func_desc(
-        &*ctx,
-        ast::AggFuncApproxPercentile,
-        vec![column(&int_ft, 0), pct_const],
-        false,
-    )
-    .unwrap();
-    assert_blocked(build(&*ctx, &approx_pct, 0));
+    let t = new_tracker(1, -1);
+    {
+        let a = TrackedAlloc::new(Arc::clone(&t));
+        let mut f = built(&ctx, &desc);
+        f.set_alloc(ColAlloc::Tracked(a.clone()));
+        let mut pr = f.alloc_partial_result();
+        a.flush();
+        let initial = t.bytes_consumed();
+        assert!(initial > 0, "initial hash table buffer must be accounted");
+        let mut chk = new_chunk_with_capacity(std::slice::from_ref(&int_ft), 200);
+        for i in 0..200i64 {
+            chk.append_int64(0, i);
+        }
+        f.update_partial_result(ec, &st, &rows(&chk), &mut pr)
+            .unwrap();
+        a.flush();
+        let grown = t.bytes_consumed();
+        assert!(
+            grown > initial,
+            "hash table resize must grow tracker ({grown} <= {initial})"
+        );
+        f.reset_partial_result(&mut pr);
+        a.flush();
+        assert_eq!(
+            t.bytes_consumed(),
+            initial,
+            "reset must shrink buffer back to initial size degree"
+        );
+    }
+    assert_eq!(
+        t.bytes_consumed(),
+        0,
+        "APPROX_COUNT_DISTINCT memory not returned on drop"
+    );
 }
 
 // Ruling R23 (#390, constitution art. 9.3): COUNT(DISTINCT) deduplicates equal values
