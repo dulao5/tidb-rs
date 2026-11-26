@@ -28,6 +28,12 @@ file and over any task description.
 
 1. **Spec first**, in `specs/<Dxx.y-name>/spec.md`, in plain Chinese (the owner reviews specs, not
    code). Copy the shape of an existing spec of the same kind.
+   **Language** (owner decision 2026-11-26): issues, PR titles and bodies, review comments and
+   commit messages are written in **English**; code comments are in **English**; specs and the
+   other documents (`specs/`, `docs/`, CONSTITUTION) stay in **Chinese** where they are Chinese now.
+   Existing Chinese issues, PRs and comments are not rewritten. When an English text uses a
+   project term defined in Chinese (e.g. a constitution article), cite it with its number and
+   meaning, e.g. "CONSTITUTION art. 9.3 (maintainer may fix a reproduced wrong-rows/panic bug)".
 2. **Provenance**: every ported Go function carries `// go: <Func> L1|L2` (L1 = line-by-line,
    L2 = restructured, say why). One Rust translation per Go symbol (`scripts/check_one_translation.py`).
 3. **Boundaries**: anything not ported yet is a stub `// glue: stub of <Sym>, blocked-by:<block>`
