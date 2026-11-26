@@ -7,5 +7,6 @@
 //! reached through the [`driver::tikv`] and [`copr::tikv`] boundaries.
 
 pub mod copr;
+pub mod distsql;
 pub mod driver;
 pub mod util;

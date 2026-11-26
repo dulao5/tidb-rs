@@ -787,9 +787,82 @@ impl SessionCore {
 impl SessionCore {
     /// `GetDistSQLCtx()`: the `DistSQLContext` of the coprocessor reads (its KV variables are
     /// [`SessCtx::copr_vars`]).
-    // glue: stub of session.GetDistSQLCtx, blocked-by:D07.3 (VS1-33: distsql DistSQLContext)
-    pub fn get_dist_sql_ctx(&self) -> Result<(), Error> {
-        Err(blocked("D07.3", "the session's DistSQLContext"))
+    // go: session.GetDistSQLCtx L2 (omits Top SQL KvExecCounter and DEF.MPP TiFlash fields; computes has_runaway_rule for N10 fence; passes stmt mem_tracker until A1 session tracker lands, D07.3 spec §7 item 18)
+    pub fn get_dist_sql_ctx(&self) -> Arc<tidb_sessionctx::distsql_ctx::DistSQLContext> {
+        let vars = &self.sctx.vars;
+        let sc = vars.stmt_ctx();
+        let has_runaway_rule = self.has_runaway_rule();
+        sc.get_or_init_dist_sql_from_cache(|| {
+            let client = self.sctx.store_wired.then(|| self.sctx.get_client());
+            let warn_handler: tidb_base::contextutil::WarnAppenderRef = sc.warn_handler();
+            Arc::new(tidb_sessionctx::distsql_ctx::DistSQLContext {
+                warn_handler: Some(warn_handler),
+                in_restricted_sql: sc.in_restricted_sql,
+                client,
+                enabled_rate_limit_action: vars.enabled_rate_limit_action,
+                enable_chunk_rpc: vars.enable_chunk_rpc,
+                original_sql: sc.original_sql.clone(),
+                kv_vars: self.sctx.copr_vars(),
+                // glue: A1 session-tracker gap (same as D12.3): the new stack has no session
+                // tracker yet, so this passes the statement tracker (limit -1); CopIterator's
+                // rate-limit OOM action does not fire under tidb_enable_rate_limit_action=ON
+                // until A1 session tracker wiring lands (D07.3 spec §7 item 18).
+                session_mem_tracker: sc.mem_tracker.clone(),
+                location: sc.time_zone(),
+                runtime_stats_coll: sc.runtime_stats_coll.clone(),
+                sql_killer: Some(Arc::clone(&self.sctx.killer)),
+                cpu_usage: Arc::clone(&vars.sql_cpu_usages),
+                err_ctx: sc.err_ctx(),
+                dist_sql_concurrency: vars.dist_sql_scan_concurrency() as isize,
+                replica_read_type: vars.get_replica_read(),
+                weak_consistency: sc.weak_consistency,
+                rc_check_ts: sc.rc_check_ts,
+                not_fill_cache: sc.not_fill_cache,
+                task_id: sc.task_id,
+                priority: sc.priority,
+                resource_group_tagger: Some(sc.get_resource_group_tagger()),
+                enable_paging: vars.enable_paging,
+                min_paging_size: vars.min_paging_size as isize,
+                max_paging_size: vars.max_paging_size as isize,
+                request_source_type: vars.request_source_type.clone(),
+                explicit_request_source_type: vars.explicit_request_source_type.clone(),
+                store_batch_size: vars.store_batch_size as isize,
+                resource_group_name: sc.resource_group_name.clone(),
+                load_based_replica_read_threshold: std::time::Duration::from_nanos(
+                    vars.load_based_replica_read_threshold.max(0) as u64,
+                ),
+                has_runaway_rule,
+                tikv_client_read_timeout: vars.get_tikv_client_read_timeout(),
+                replica_closest_read_threshold: vars.replica_closest_read_threshold,
+                connection_id: vars.connection_id,
+                session_alias: vars.session_alias.clone(),
+                exec_details: Arc::clone(&sc.sync_exec_details),
+                try_cop_lite_worker: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            })
+        })
+    }
+
+    /// O(1) check whether the statement/session's bound resource group configures a runaway
+    /// rule (D07.3 spec §2.2 & §5: N10 fence).
+    // glue: N10 runaway rule check on bound resource group
+    fn has_runaway_rule(&self) -> bool {
+        let sc_rg = &self.sctx.vars.stmt_ctx().resource_group_name;
+        let rg_name = if !sc_rg.is_empty() {
+            sc_rg.as_str()
+        } else {
+            self.sctx.vars.resource_group_name.as_str()
+        };
+        if rg_name.is_empty() {
+            return false;
+        }
+        let is = self.sctx.get_info_schema();
+        is.base()
+            .resource_group_by_name(&tidb_parser::model::CIStr::new(rg_name))
+            .is_some_and(|rg| {
+                rg.resource_group_settings
+                    .as_ref()
+                    .is_some_and(|s| s.runaway.is_some())
+            })
     }
 
     /// `GetBuildPBCtx()`.

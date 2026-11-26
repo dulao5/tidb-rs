@@ -558,3 +558,108 @@ async fn kill_signal_stops_the_workers() {
     );
     drop(it);
 }
+
+/// D07.3 spec §4.3 & §9.2: `distsql::select` uses `CopClient::send_async` to build and open
+/// `CopIterator` eagerly, so `get_select_result_concurrency` returns `(concurrency, small)`
+/// before the first `next()`, `kvrpcpb::Context.resource_group_tag` carries the table ID and
+/// row label, and `LazyCopResponse::close` caches `build_task_elapsed` so `selectResult.close`
+/// still registers it after `resp.close()`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn distsql_select_eager_concurrency_tagger_and_post_close_stats() {
+    use protobuf::Message;
+    use tidb_execdetails::execdetails::RuntimeStatsColl;
+    use tidb_kv::copr::new_resource_group_tag_builder;
+    use tidb_sessionctx::distsql_ctx::DistSQLContext;
+    use tidb_store::distsql::{
+        RequestBuilder, get_select_result_concurrency, select_with_runtime_stats,
+    };
+
+    let captured_tags: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let tags_for_hook = Arc::clone(&captured_tags);
+
+    let row_key_1 = tidb_tablecodec::tablecodec::encode_row_key(15, &[0x80, 0, 0, 0, 0, 0, 0, 1]);
+    let row_key_2 = tidb_tablecodec::tablecodec::encode_row_key(15, &[0x80, 0, 0, 0, 0, 0, 0, 5]);
+    let row_key_3 = tidb_tablecodec::tablecodec::encode_row_key(15, &[0x80, 0, 0, 0, 0, 0, 0, 9]);
+
+    let mock = Arc::new(MockStore::new(
+        &[row_key_2.0.as_slice()],
+        move |_, req, _| {
+            if let Some(ctx) = &req.context {
+                tags_for_hook
+                    .lock()
+                    .unwrap()
+                    .push(ctx.resource_group_tag.clone());
+            }
+            let mut sr = tipb::SelectResponse::default();
+            sr.set_encode_type(tipb::EncodeType::TypeChunk);
+            let mut c = tipb::Chunk::default();
+            c.set_rows_data(Vec::new());
+            sr.mut_chunks().push(c);
+            coprocessor::Response {
+                data: sr.write_to_bytes().unwrap(),
+                ..Default::default()
+            }
+        },
+    ));
+    let store = Arc::new(new_store(Arc::new(Shared(mock)), None, 0));
+    let client: Arc<dyn tidb_kv::kv::Client> = Arc::new(store.get_client());
+    let coll = Arc::new(RuntimeStatsColl::default());
+    let mut dctx = DistSQLContext {
+        client: Some(client),
+        dist_sql_concurrency: 15,
+        runtime_stats_coll: Some(Arc::clone(&coll)),
+        resource_group_tagger: Some(Arc::new(new_resource_group_tag_builder())),
+        ..Default::default()
+    };
+    dctx.enable_chunk_rpc = true;
+
+    // 2 regions -> concurrency clamped from 15 to 2 immediately upon select()!
+    let req = RequestBuilder::default()
+        .set_key_ranges(vec![KeyRange {
+            start_key: row_key_1,
+            end_key: row_key_3,
+        }])
+        .set_dag_request(tipb::DagRequest::default())
+        .set_from_session_vars(&dctx)
+        .build()
+        .unwrap();
+
+    let mut sr = select_with_runtime_stats(
+        &tidb_kv::Context::background(),
+        Arc::new(dctx),
+        &req,
+        Vec::new(),
+        Vec::new(),
+        10,
+    )
+    .await
+    .unwrap();
+
+    // Eager CopIterator build: concurrency is already clamped to 2 BEFORE first next()!
+    assert_eq!(get_select_result_concurrency(sr.as_ref()), Some((2, 0)));
+
+    // Drain raw responses so workers actually send requests with resource_group_tag.
+    let mut count = 0;
+    while sr
+        .next_raw(&tidb_kv::Context::background())
+        .await
+        .unwrap()
+        .is_some()
+    {
+        count += 1;
+    }
+    assert_eq!(count, 2);
+    sr.close().unwrap();
+
+    let tags = captured_tags.lock().unwrap();
+    assert_eq!(tags.len(), 2);
+    for raw in tags.iter() {
+        let mut tag = tipb::ResourceGroupTag::default();
+        tag.merge_from_bytes(raw).unwrap();
+        assert_eq!(tag.get_table_id(), 15);
+        assert_eq!(
+            tag.get_label(),
+            tipb::ResourceGroupTagLabel::ResourceGroupTagLabelRow
+        );
+    }
+}

@@ -42,7 +42,9 @@ use tidb_types::context::{
     Context as TypeContext, DefaultStmtFlags, DefaultStmtNoWarningContext, Flags,
 };
 
+use crate::distsql_ctx::DistSQLContext;
 use crate::errctx;
+use tidb_kv::copr::{ResourceGroupTagBuilder, new_resource_group_tag_builder};
 use tidb_memory::action::LogOnExceed;
 use tidb_memory::tracker::{Tracker, init_tracker};
 use tidb_model::TableItemID;
@@ -328,6 +330,7 @@ pub struct StatementContext {
     err_ctx: errctx::Context,
     ranger_ctx_cache: OnceLock<Arc<dyn Any + Send + Sync>>,
     build_pb_ctx_cache: OnceLock<Arc<dyn Any + Send + Sync>>,
+    dist_sql_ctx_cache: OnceLock<Arc<DistSQLContext>>,
 
     /// IsDDLJobInQueue is used to mark whether the DDL job is put into the queue. If
     /// IsDDLJobInQueue is true, it means the DDL job is in the queue of storage, and it can
@@ -416,7 +419,7 @@ pub struct StatementContext {
     /// statement context; here they are called through this field). Read the details through
     /// [`StatementContext::get_exec_details`], not `sync_exec_details.get_exec_details()`: in Go
     /// the outer `GetExecDetails` shadows the promoted method and also fills `LockKeysDuration`.
-    pub sync_exec_details: SyncExecDetails,
+    pub sync_exec_details: Arc<SyncExecDetails>,
     /// RuntimeStatsColl collects the executors' runtime stats (`EXPLAIN ANALYZE`); `nil` in Go
     /// until the executor builder sets it. Go REUSES the object (spec §4): `ResetContextOfStmt`
     /// (select.go:1229) passes the previous statement's collector to `NewRuntimeStatsColl` for
@@ -563,6 +566,7 @@ pub fn new_stmt_ctx_with_time_zone(tz: Arc<Location>) -> StatementContext {
         err_ctx,
         ranger_ctx_cache: OnceLock::new(),
         build_pb_ctx_cache: OnceLock::new(),
+        dist_sql_ctx_cache: OnceLock::new(),
         is_ddl_job_in_queue: false,
         ddl_job_id: 0,
         in_insert_stmt: false,
@@ -611,7 +615,7 @@ pub fn new_stmt_ctx_with_time_zone(tz: Arc<Location>) -> StatementContext {
         index_force: false,
         flat_plan: None,
         plan: None,
-        sync_exec_details: SyncExecDetails::default(),
+        sync_exec_details: Arc::new(SyncExecDetails::default()),
         runtime_stats_coll: None,
         tables: Vec::new(),
         lock_wait_start_time: AtomicI64::new(0),
@@ -1241,9 +1245,7 @@ impl StatementContext {
     }
 
     /// ResetForRetry resets the changed states during execution.
-    ///
-    /// The DistSQL context cache (`distSQLCtxCache`, D07.2) is not here.
-    // go: StatementContext.ResetForRetry L2 (no DistSQL context cache yet)
+    // go: StatementContext.ResetForRetry L1
     pub fn reset_for_retry(&mut self) {
         self.reset_mu_for_retry();
         self.reserved_row_id_alloc.reset(0, 0);
@@ -1253,6 +1255,8 @@ impl StatementContext {
         self.sync_exec_details.reset();
         self.warn_handler().truncate_warnings(0);
         self.extra_warn_handler.truncate_warnings(0);
+        // `TaskID` is reset, we'll need to reset distSQLCtx
+        self.dist_sql_ctx_cache = OnceLock::new();
     }
 
     /// GetExecDetails gets the execution details for the statement.
@@ -1363,6 +1367,25 @@ impl StatementContext {
             .get_or_insert_with(HashMap::new)
             .entry(name)
             .or_insert(val);
+    }
+
+    /// GetOrInitDistSQLFromCache returns the `DistSQLContext` inside cache. If it didn't
+    /// exist, return a new one created by the `create` function.
+    // go: StatementContext.GetOrInitDistSQLFromCache L1
+    pub fn get_or_init_dist_sql_from_cache(
+        &self,
+        create: impl FnOnce() -> Arc<DistSQLContext>,
+    ) -> Arc<DistSQLContext> {
+        Arc::clone(self.dist_sql_ctx_cache.get_or_init(create))
+    }
+
+    /// GetResourceGroupTagger returns a [`ResourceGroupTagBuilder`] for the statement.
+    ///
+    /// `sql_digest` and `plan_digest` remain empty until `parser.Digest` (D02.2) is ported
+    /// (tracking issue `#416`, `blocked-by:D02.2`).
+    // go: StatementContext.GetResourceGroupTagger L2 (sql_digest/plan_digest empty until D02.2, #416)
+    pub fn get_resource_group_tagger(&self) -> Arc<ResourceGroupTagBuilder> {
+        Arc::new(new_resource_group_tag_builder())
     }
 
     /// GetOrInitRangerCtxFromCache returns the `RangerContext` inside cache. If it didn't

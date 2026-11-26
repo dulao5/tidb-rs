@@ -17,6 +17,20 @@ use tidb_base::Error;
 use tidb_model::{DBInfo, StatePublic, TableInfo};
 use tidb_parser::model::CIStr;
 
+use crate::placement::Bundle;
+
+/// `infoschema/context.MetaOnlyInfoSchema` extended with the synchronous placement-bundle
+/// lookup needed by `distsql::verify_txn_scope` (D07.3 spec §2.2, §4.9).
+///
+/// `InfoSchemaV2::table_info_by_id` / `find_table_info_by_partition_id` are async (table
+/// cache refill), whereas `placement_bundle_by_physical_table_id` is synchronous; when a
+/// bundle is present for a non-global txn scope, `verify_txn_scope` stops at `blocked("X", ...)`
+/// before any table-name lookup is needed.
+pub trait MetaOnlyInfoSchema: tidb_sessionctx::expropt::MetaOnlyInfoSchema + Send + Sync {
+    // glue: Go interface method MetaOnlyInfoSchema.PlacementBundleByPhysicalTableID
+    fn placement_bundle_by_physical_table_id(&self, id: i64) -> Option<Arc<Bundle>>;
+}
+
 /// SpecialAttributeFilter is used to filter tables with special attributes.
 pub type SpecialAttributeFilter = fn(&TableInfo) -> bool;
 

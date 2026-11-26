@@ -94,6 +94,8 @@ pub struct SessionVars {
     pub hypo_indexes: Option<crate::sessionstates::HypoIndexes>,
     /// HypoTiFlashReplicas are for the Index Advisor (`None`: Go's nil map).
     pub hypo_tiflash_replicas: Option<crate::sessionstates::HypoTiFlashReplicas>,
+    /// SQLCPUUsages records per-SQL TiDB and TiKV CPU usage (Go `SessionVars.SQLCPUUsages`).
+    pub sql_cpu_usages: Arc<tidb_execdetails::ppcpuusage::SQLCPUUsages>,
 }
 
 /// The value type of the session's statement caches (Go `any`: planner objects).
@@ -369,6 +371,7 @@ impl SessionVars {
             last_ddl_info: Default::default(),
             hypo_indexes: None,
             hypo_tiflash_replicas: None,
+            sql_cpu_usages: Arc::new(tidb_execdetails::ppcpuusage::SQLCPUUsages::default()),
         }
     }
 

@@ -169,8 +169,9 @@ tidb-server = { path = "crates/server" }
 # single-region request's first attempt runs on the calling task, not a spawned one (client-rust#25,
 # branch tidb-rs/perf-point-get, specs/VS1-vertical-slice/perf-point-select.md); TiKV requests over
 # BatchCommands streams as client-go sends them, TiKV stores only (client-rust#26, merged,
-# specs/D07.1-store/batch-commands.md).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "0b5a3e15b7337e088c432e50466c4371bcdd5353", default-features = false, features = ["client-go-metrics"] }
+# specs/D07.1-store/batch-commands.md); `CopRpcContext.addr` populated from resolved store
+# address (client-rust#27, merged, #418).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "5cbc0d7fa3dece01002730d02e4ac3b3d13ab9c0", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 async-trait = "0.1"
 bytes = "1.11"

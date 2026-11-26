@@ -14,6 +14,7 @@
 
 pub mod context;
 pub mod debugtrace;
+pub mod distsql_ctx;
 pub mod errctx;
 pub mod exprctx;
 pub mod expropt;

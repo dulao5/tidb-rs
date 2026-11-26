@@ -590,6 +590,8 @@ pub trait SelectResult: Send {
 15. **`Drop` 安全网与 `HandleKillSignal` / `Consume` 改走 `Result`**（`select_result.go:718-722, 732-763`、`request_builder.go:791, 816, 822`）：按 `P0 D4–D9` 与 `N3`/`A1` 草案统一规则，`Drop` 释放资源但不注册 stats；OOM / KILL 通过 `Result` 返回而非 panic（`M-PANIC`、`M-MEM`、`M-DEFER`）。
 16. **`SelectResult::IntoIter` 消耗内部状态而非保留指针**（`select_result.go:516-521, 902-909`）：对外错误文案与 Go 一致（§4.5）。
 17. **`sortedSelectResults.Close` 关闭全部子结果（依据 N3 草案 §3.5）**（`select_result.go:268-278`）：遇错后仍关闭剩余子结果避免 worker 泄漏，返回第一个错误（生产 SQL 不可达，§8 第 4 条）。
+18. **`DistSQLContext.session_mem_tracker` 暂传语句级 tracker（A1 会话级 tracker 临时缺口）**（`pkg/session/session.go:2797`、`crates/session/src/session.rs:806`）：Go 传入 `vars.MemTracker`（受 `tidb_mem_quota_query` 约束的会话 tracker），而新栈尚未建立会话级 `MemTracker`（与 D12.3 同源的 A1 临时缺口），目前由 `SessionCore::get_dist_sql_ctx` 传入 `sc.mem_tracker`（上限 `-1`）。因此在开启 `tidb_enable_rate_limit_action=ON` 时，挂在该 tracker 上的 `CopIterator` rate-limit OOM action 暂不会触发；待 A1 会话级 tracker 落地后同步切换。
+19. **`SelectResult::close` 幂等（Go `selectResult.Close` 非幂等）**（`select_result.go:731-761`）：Go 重复调用 `Close()` 会再次执行 `RegisterStats` 导致统计重复累计；Rust 保持幂等（二次调用直接返回 `Ok(())`），现有执行器均不重复关闭，无可见 SQL 差异。
 
 ---
 

@@ -459,3 +459,53 @@ fn index_info_is_shared() {
     p.index_info = Some(Arc::clone(idx));
     assert!(Arc::ptr_eq(p.index_info.as_ref().unwrap(), idx));
 }
+
+#[test]
+fn verify_txn_scope_uses_distsql_and_blocks_on_placement_bundle() {
+    struct MockMetaIS {
+        bundle_for: Option<i64>,
+    }
+    impl tidb_sessionctx::expropt::MetaOnlyInfoSchema for MockMetaIS {
+        fn schema_meta_version(&self) -> i64 {
+            1
+        }
+    }
+    impl tidb_infoschema::context::MetaOnlyInfoSchema for MockMetaIS {
+        fn placement_bundle_by_physical_table_id(
+            &self,
+            id: i64,
+        ) -> Option<Arc<tidb_infoschema::placement::Bundle>> {
+            (self.bundle_for == Some(id)).then(|| {
+                Arc::new(tidb_infoschema::placement::Bundle {
+                    policy_id: 1,
+                    ids: vec![id],
+                })
+            })
+        }
+    }
+
+    let tbl = table();
+    let mut s = MockSession::new(1);
+    let mut exec = PointGetExecutor::new(&mut s, &plan(&tbl, &[0], 1), None);
+
+    // Empty and "global" txn_scope pass even with a placement bundle.
+    exec.info_schema = Some(Arc::new(MockMetaIS {
+        bundle_for: Some(100),
+    }));
+    exec.txn_scope = String::new();
+    assert!(exec.verify_txn_scope().is_ok());
+    exec.txn_scope = "global".to_string();
+    assert!(exec.verify_txn_scope().is_ok());
+
+    // Non-global txn_scope without placement bundle passes.
+    exec.txn_scope = "dc-west".to_string();
+    exec.info_schema = Some(Arc::new(MockMetaIS { bundle_for: None }));
+    assert!(exec.verify_txn_scope().is_ok());
+
+    // Non-global txn_scope with a placement bundle on table 100 returns blocked("X", ...).
+    exec.info_schema = Some(Arc::new(MockMetaIS {
+        bundle_for: Some(100),
+    }));
+    let err = exec.verify_txn_scope().unwrap_err();
+    assert_eq!(blocked_by(&err), Some("X"));
+}
