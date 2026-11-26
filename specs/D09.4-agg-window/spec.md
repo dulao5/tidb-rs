@@ -462,7 +462,7 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
 7. **预处理语句 `GROUP BY <位置项>` 指向 SELECT 列表中的 `ParamMarkerExpr` 时 Go 改写 AST 漏设 `UseAsValueInGbyByClause`（已复现，第 A 部分即生效，交 §9.1 决定点 3）**
    - **位置**：`logical_plan_builder.go:3503-3505, 3532, 4140`、`pkg/executor/prepared.go:131`。
    - **机制与 v8.5.8 实测结果**：见 §4.3 第 2 条。此处 `?` 位于 SELECT 列表（`Expr::ParamMarker`）、`GROUP BY 1` 是字面整数位置项（`Expr::Position(1)`），**不受 `blocked-by:D02.2` 阻塞，第 A 部分即生效**。`PREPARE s FROM 'SELECT ? AS z FROM t GROUP BY 1'; SET @p = 99; EXECUTE s USING @p;`（plan cache OFF）在 Go v8.5.8 报 `ERROR 1105 (HY000): Unknown column '99' in 'group statement'`（而 `GROUP BY z` 和非预处理 `SELECT 99 AS z FROM t GROUP BY 1` 均成功返回 `99`）。
-   - **走向**：Rust 不可变 AST 在第 A 部分即天然返回正确结果 `99`（Go 报错 vs Rust 成功，超出宪章第九条 3 仅涵盖错行/panic 的范围），**交 §9.1 决定点 3 由负责人决定**，第 A 部分同步开 `upstream-pitfall` 与 `rulings.toml` 登记。
+   - **走向**：Rust 不可变 AST 在第 A 部分即天然返回正确结果 `99`（Go 报错 vs Rust 成功，超出宪章第九条 3 仅涵盖错行/panic 的范围），已开 `upstream-pitfall` issue **#425**（`go-bug-fixed`），**§9.1 决定点 3 负责人已定选 A（2026-11-26）**，第 A 部分实现时在 `docs/testing/rulings.toml` 登记。
 
 ## 9. 决定点
 
@@ -470,28 +470,28 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
 
 ### 9.1 需要负责人决定（宪章第九条 1）
 
-以下 3 点均为本地 Go TiDB v8.5.8 上实测复现的用户可见差异，且超出宪章第九条 3 维护者默认裁定范围（第 1、2 点触及 TiFlash 下推排除条款；第 3 点在 D09.4 第 A 部分即生效，表现为 Go 报 1105 错误 vs Rust 正常返回结果），须按第九条 1(a) 由项目负责人决定：
+以下 3 点均为本地 Go TiDB v8.5.8 上实测复现的用户可见差异，且超出宪章第九条 3 维护者默认裁定范围（第 1、2 点触及 TiFlash 下推排除条款；第 3 点在 D09.4 第 A 部分即生效，表现为 Go 报 1105 错误 vs Rust 正常返回结果）；**三条均已由项目负责人决定（2026-11-26，全选 A）**，`docs/testing/rulings.toml` 对应条目在第 A / B / C 部分实现时随代码登记：
 
-1. **ROLLUP 含 ≥ 64 项且去重后 ≤ 63 列时 Go v8.5.8 越界 panic（#412，§8 第 1 条）**
+1. **ROLLUP 含 ≥ 64 项且去重后 ≤ 63 列时 Go v8.5.8 越界 panic（#412，§8 第 1 条）——负责人已定：A（2026-11-26）**
    - **背景**：`SELECT COUNT(*) FROM t GROUP BY a, a, ...（64 个 a）WITH ROLLUP` 在 Go v8.5.8 中因 `buildExpand`（按未去重长度 > 64 切 `ModeNumericSet`）与 `DistinctSize`（按去重后数量 > 64 才分配 `RollupGroupingIDs`）阈值不一致，在 `ResolveExpand` 阶段触发 `index out of range [0] with length 0` panic（返回错误 1105）；而 63 个 `a`、64 个不同列、64 个不同列 + 1 个重复均正常执行。Rust 无法照搬 Go 越界 panic，且 `LogicalExpand` 的 `GroupingMode` / `LevelExprs` 在 MPP 下会下推给 TiFlash（触发第九条 3 排除条款）。
    - **选项**：
-     - **A（建议）**：统一两处阈值为去重后数量（即 `DistinctSize > 64` 时才启用 `ModeNumericSet`；≤ 64 时保持 `ModeBitAnd`），使该类查询正常执行不 panic，并在 `docs/testing/rulings.toml` 登记偏差裁定（#412 标 `go-bug-fixed`）。
+     - **A（已定）**：统一两处阈值为去重后数量（即 `DistinctSize > 64` 时才启用 `ModeNumericSet`；≤ 64 时保持 `ModeBitAnd`），使该类查询正常执行不 panic，接受下推给 TiFlash 的 Expand 随之改变；并在实现时于 `docs/testing/rulings.toml` 登记偏差裁定（#412 已标 `go-bug-fixed`）。
      - **B**：在 `buildExpand` 检测到 `len(RollupGroupingSets) > 64 && distinctSize <= 64` 时返回一个明确的错误（避免 panic，不改变 TiFlash 路径；#412 标 `go-bug-kept` 或记录裁定）。
-   - **建议与理由**：选 **A**。`ModeBitAnd` 本就支持最多 64 个不同的 grouping sets（`uint64` 位图），统一按去重后数量判断正是 `DistinctSizeWithThreshold(64)` 的原意；tidb-rs 不启用 TiFlash MPP，且即使未来接入 TiFlash，`ModeBitAnd` 也是 TiFlash 支持的标准编码，能彻底消除 1105 崩溃并返回正确结果。
+   - **结论**：**负责人已定：A（2026-11-26）**。`ModeBitAnd` 本就支持最多 64 个不同的 grouping sets（`uint64` 位图），统一按去重后数量判断正是 `DistinctSizeWithThreshold(64)` 的原意；接受下推给 TiFlash 的 Expand 随之改变，彻底消除 1105 崩溃并返回正确结果。
 
-2. **窗口 `RANGE BETWEEN INTERVAL <复合小数表达式>` 因零值 `FieldType` 按整数截断返回错行（#413，§8 第 5 条）**
+2. **窗口 `RANGE BETWEEN INTERVAL <复合小数表达式>` 因零值 `FieldType` 按整数截断返回错行（#413，§8 第 5 条）——负责人已定：A（2026-11-26）**
    - **背景**：`SUM(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1.0+0.5 DAY PRECEDING AND CURRENT ROW)` 在 Go v8.5.8 中因 `buildWindowFunctionFrameBound`（`logical_plan_builder.go:7042`）对复合常量表达式使用未推导 AST 的零值 `FieldType`（`TypeUnspecified` → `ETInt`），使 `DateSub` 选中 `SubDateDatetimeInt` 而把 1.5 天截断为 1 天（返回 `6`）；而字面量 `INTERVAL 1.5 DAY` 与 `DATE_SUB('2024-01-03', INTERVAL 1.0+0.5 DAY)` 均按 2 天计算（返回 `7`），且两者 `EXPLAIN` 文本完全相同。由于 `SubDateDatetimeInt` 在 TiFlash 下推白名单中而 `SubDateDatetimeDecimal` 不在，修正 `Constant.RetType` 会改变 `FrameBound.ToPB` 产物及窗口是否下推 TiFlash（触发第九条 3 排除条款）。
    - **选项**：
-     - **A（建议）**：按 `evalAstExprWithPlanCtx` 实际求出的 `Datum` 类型推导 `Constant.RetType`（如 `KindMysqlDecimal` → `TypeNewDecimal`），使 `INTERVAL 1.0+0.5 DAY` 与字面量 `INTERVAL 1.5 DAY` 及 `DATE_SUB` 一致返回正确结果，在 `docs/testing/rulings.toml` 登记偏差裁定（#413 标 `go-bug-fixed`）。
+     - **A（已定）**：按 `evalAstExprWithPlanCtx` 实际求出的 `Datum` 类型推导 `Constant.RetType`（如 `KindMysqlDecimal` → `TypeNewDecimal`），修正为 2 天，接受这类窗口不再下推 TiFlash；在实现时于 `docs/testing/rulings.toml` 登记偏差裁定（#413 已标 `go-bug-fixed`）。
      - **B**：照 Go 保留零值 `FieldType`（对复合常量表达式按 `ETInt` 截断），#413 标 `go-bug-kept`。
-   - **建议与理由**：选 **A**。这是用户可见的静默错行（且与 `EXPLAIN` 自相矛盾）；tidb-rs 只读计算节点不走 TiFlash MPP，在 TiDB 侧执行 `SubDateDatetimeDecimal` 结果正确且与字面量及 `DATE_SUB` 行为统一。
+   - **结论**：**负责人已定：A（2026-11-26）**。修正为 2 天，接受这类窗口不再下推 TiFlash，消除与 `EXPLAIN` 自相矛盾的静默错行。
 
-3. **预处理语句 `PREPARE s FROM 'SELECT ? AS z FROM t GROUP BY 1'` 在 Go 报 1105 错误而 Rust 不可变 AST 正常返回结果（§8 第 7 条，第 A 部分即生效）**
+3. **预处理语句 `PREPARE s FROM 'SELECT ? AS z FROM t GROUP BY 1'` 在 Go 报 1105 错误而 Rust 不可变 AST 正常返回结果（#425，§8 第 7 条，第 A 部分即生效）——负责人已定：A（2026-11-26）**
    - **背景**：Go `PrepareExec` 在准备阶段运行一次 `GeneratePlanCacheStmtWithAST`，`gbyResolver` 的 `PositionExpr` 分支（`:3532`）就地将 `GROUP BY 1` 替换为 `ParamMarkerExpr` 却漏设 `UseAsValueInGbyByClause = true`，导致 `EXECUTE s USING @p`（plan cache OFF、`@p = 99`）把参数值 `99` 误当位置编号报 `ERROR 1105: Unknown column '99' in 'group statement'`；而等价的 `GROUP BY z` 与非预处理 `SELECT 99 AS z FROM t GROUP BY 1` 均返回 `99`。Rust 不可变 AST（D09.1 §3）天然不改写 AST，在第 A 部分直接返回正确结果 `99`。
    - **选项**：
-     - **A（建议）**：保持 Rust 不可变 AST 返回正确结果 `99`，第 A 部分开 `upstream-pitfall`（`go-bug-fixed`）并在 `docs/testing/rulings.toml` 登记偏差裁定。
+     - **A（已定）**：保持 Rust 不可变 AST 正常返回结果 `99`，已开 `upstream-pitfall` issue **#425**（`go-bug-fixed`），第 A 部分实现时在 `docs/testing/rulings.toml` 登记偏差裁定。
      - **B**：在预处理语句重规划中刻意模拟 Go 漏设 `UseAsValueInGbyByClause` 的缺陷以复现 `ERROR 1105`（标 `go-bug-kept`）。
-   - **建议与理由**：选 **A**。模拟 Go 的非幂等 AST 篡改不仅破坏只读 AST 架构，而且同 SQL 的非预处理执行和 `GROUP BY z` 在 Go 自身也成功返回 `99`，保持正确行为最合理。
+   - **结论**：**负责人已定：A（2026-11-26）**。正常返回结果 `99`，保持只读 AST 架构与非预处理 / `GROUP BY z` 一致。
 
 ### 9.2 维护者已定（宪章第九条 2）
 
@@ -506,7 +506,7 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
 9. **`tidb-parser` 补精确对齐 Go 的 flags=0 `Restore` 模式**：在 `crates/parser/src/restore.rs` 为 `Expr` / `WindowSpec` 提供无反引号且保留大小写的标识符、无引号且不转义的字符串、按字面保留大小写的关键字恢复入口（不改现有 `DefaultRestoreFlags`）。理由：保证第 B 部分 `sortWindowSpecs` 排序与 `specEqual` 和 Go 完全一致。
 10. **map 遍历顺序按 `M-MAPORDER` 确定化**：§4.6 五处（含 `allColFromExprNode` `colMap` 与 `ExtractTableList`）改用输入声明序 / 首次出现序 / schema 列序。理由：Go 本身结果不确定，取确定结果符合 `M-MAPORDER`。
 11. **govec 扩展 `selectbuild` 领域**：在已有 `selectbuild` 领域扩展聚合 / 窗口 / ROLLUP 输出快照与用例，按部分从 `selectbuild_exempt.go`、`logicalrules_exempt.go`、`cardinality_exempt.go`、`findbest_exempt.go`、`cast_pending_d0812.go`、`funcs_pending.go` 移出豁免，同时在 tracker `part_funcs.tsv` 中对齐 `VS1-21` 与第 A 部分；`grouping_sets.go` 29 个函数在 `expr` 领域新增 op 覆盖。理由：`selectbuild` 已声明 `D09.4` 并钉住了 15 条 `D09.4` 边界记录。
-12. **§8 第 2、3、4、6 条照 Go 移植，实现时补开 `upstream-pitfall`（`go-bug-kept`）**：均已实测确认仅影响报错文案/序号或 SQL 不可达，按宪章第一条 2 与第九条 2 照 Go 移植；§8 第 1、5、7 条交 §9.1（#412、#413 已开，第 7 条第 A 部分补开）。
+12. **§8 第 2、3、4、6 条照 Go 移植，实现时补开 `upstream-pitfall`（`go-bug-kept`）**：均已实测确认仅影响报错文案/序号或 SQL 不可达，按宪章第一条 2 与第九条 2 照 Go 移植；§8 第 1、5、7 条对应 #412、#413、#425（均已标 `go-bug-fixed`，§9.1 负责人已定全选 A，实现时在 `docs/testing/rulings.toml` 登记）。
 
 ## 本文所用 ID
 
