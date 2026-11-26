@@ -30,6 +30,7 @@ tidb-memory = { workspace = true }
 tidb-model = { workspace = true }
 tidb-infoschema = { workspace = true }
 tipb = { workspace = true }
+protobuf = { workspace = true }
 # The boxed future of SessionContext::get_stmt_read_ts (the provider waits for the TSO).
 futures = { workspace = true }
 parking_lot = "0.12"
@@ -55,12 +56,13 @@ tikv-client = { workspace = true }
 test-util = []
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 # The govec vectors (pointget, and tablecodec's record keys) are .jsonl.gz.
 flate2 = "1.0"
 serde_json = { workspace = true }
 # The runtime's stall metrics in a measurement of the parallel sort (D12.5).
 tidb-metrics = { workspace = true }
+tidb-statistics = { workspace = true }
 
 [lints]
 workspace = true

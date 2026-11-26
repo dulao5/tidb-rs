@@ -46,6 +46,23 @@ impl GlobalVarAccessor for Acc {
     }
 }
 
+pub(crate) struct MockKvClient;
+
+impl tidb_kv::kv::Client for MockKvClient {
+    fn send(
+        &self,
+        _: &tidb_kv::Context,
+        _: &tidb_kv::kv::Request,
+        _: Option<tidb_kv::kv::OptionValue>,
+        _: &tidb_kv::kv::ClientSendOption,
+    ) -> Box<dyn tidb_kv::kv::Response> {
+        unimplemented!("MockKvClient.send")
+    }
+    fn is_request_type_supported(&self, _: i64, _: i64) -> bool {
+        true
+    }
+}
+
 /// A session whose transaction manager reads at `read_ts` (`u64::MAX`: the MaxTS of an
 /// autocommit point get).
 pub(crate) struct MockSession {
@@ -59,6 +76,10 @@ pub(crate) struct MockSession {
     pub snapshot: Option<Arc<dyn tidb_kv::kv::Snapshot>>,
     /// `GetPlanReplayerHandle()` (`None`: no handle, as in the new stack).
     pub plan_replayer_handle: Option<Arc<dyn crate::glue::PlanReplayerHandle>>,
+    /// Optional `DistSQLContext` override for tests.
+    pub dist_sql_ctx: Option<Arc<tidb_sessionctx::distsql_ctx::DistSQLContext>>,
+    /// Optional `InfoSchemaV2` for tests.
+    pub info_schema: Option<InfoSchemaRef>,
 }
 
 impl MockSession {
@@ -71,6 +92,8 @@ impl MockSession {
             expr_ctx: tidb_sessionctx::exprstatic::new_expr_context(Vec::new()),
             snapshot: None,
             plan_replayer_handle: None,
+            dist_sql_ctx: None,
+            info_schema: None,
         }
     }
 }
@@ -115,6 +138,60 @@ impl SessionContext for MockSession {
     }
     fn get_expr_ctx(&self) -> tidb_sessionctx::exprctx::ExprContextRef {
         Arc::clone(&self.expr_ctx)
+    }
+    fn get_dist_sql_ctx(&self) -> Arc<tidb_sessionctx::distsql_ctx::DistSQLContext> {
+        if let Some(dctx) = &self.dist_sql_ctx {
+            return Arc::clone(dctx);
+        }
+        let sc = self.vars.stmt_ctx();
+        Arc::new(tidb_sessionctx::distsql_ctx::DistSQLContext {
+            enable_chunk_rpc: self.vars.enable_chunk_rpc,
+            dist_sql_concurrency: self.vars.dist_sql_scan_concurrency() as isize,
+            replica_read_type: self.vars.get_replica_read(),
+            enable_paging: self.vars.enable_paging,
+            min_paging_size: self.vars.min_paging_size as isize,
+            max_paging_size: self.vars.max_paging_size as isize,
+            replica_closest_read_threshold: self.vars.replica_closest_read_threshold,
+            runtime_stats_coll: sc.runtime_stats_coll.clone(),
+            location: self.vars.location(),
+            err_ctx: sc.err_ctx(),
+            ..Default::default()
+        })
+    }
+    fn get_build_pb_ctx(&self) -> Result<Arc<tidb_sessionctx::planctx::BuildPBContext>, Error> {
+        let sc = self.vars.stmt_ctx();
+        Ok(Arc::new(tidb_sessionctx::planctx::BuildPBContext {
+            expr_ctx: Arc::clone(&self.expr_ctx) as tidb_sessionctx::exprctx::BuildContextRef,
+            client: Arc::new(MockKvClient),
+            tiflash_fast_scan: self.vars.tiflash_fast_scan,
+            tiflash_fine_grained_shuffle_batch_size: self
+                .vars
+                .tiflash_fine_grained_shuffle_batch_size,
+            group_concat_max_len: self.vars.group_concat_max_len,
+            in_explain_stmt: sc.in_explain_stmt,
+            warn_handler: Some(sc.warn_handler() as tidb_base::contextutil::WarnAppenderRef),
+            extra_warnghandler: Some(
+                Arc::clone(&sc.extra_warn_handler) as tidb_base::contextutil::WarnAppenderRef
+            ),
+        }))
+    }
+    fn get_ranger_ctx(&self) -> Arc<tidb_sessionctx::ranger::context::RangerContext> {
+        let sc = self.vars.stmt_ctx();
+        Arc::new(tidb_sessionctx::ranger::context::RangerContext {
+            type_ctx: sc.type_ctx(),
+            err_ctx: sc.err_ctx(),
+            expr_ctx: Arc::clone(&self.expr_ctx) as tidb_sessionctx::exprctx::BuildContextRef,
+            range_fallback_handler: Arc::clone(&sc.range_fallback_handler),
+            plan_cache_tracker: Arc::clone(&sc.plan_cache_tracker),
+            optimizer_fix_control: self.vars.get_optimizer_fix_control_map().clone(),
+            use_cache: false,
+            in_prepared_plan_building: sc.in_prepared_plan_building,
+            regard_null_as_point: self.vars.regard_null_as_point,
+            opt_prefix_index_single_scan: self.vars.opt_prefix_index_single_scan,
+        })
+    }
+    fn get_info_schema(&self) -> Option<InfoSchemaRef> {
+        self.info_schema.clone()
     }
     fn get_plan_ctx(&self) -> tidb_planner::planctx::SessionPlanCtx {
         tidb_planner::planctx::SessionPlanCtx {
@@ -489,11 +566,11 @@ async fn exec_returns_a_record_set_or_runs_without_delay() {
     // A plan without an executor yet fails with its block.
     let mut stmt = ExecStmt::new(
         "select".to_owned(),
-        Some(test_plan(PhysicalKind::TableReader)),
+        Some(test_plan(PhysicalKind::NominalSort)),
         None,
     );
     let err = stmt.exec(&mut s).await.err().unwrap();
-    assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D12.1"));
+    assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D12.0"));
 }
 
 #[tokio::test]

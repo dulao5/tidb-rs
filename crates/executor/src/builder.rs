@@ -19,21 +19,31 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::config;
+use tidb_base::gostd::conv::f64_to_i64;
+use tidb_base::kv::{TiFlash, TiKV};
 use tidb_chunk::chunk::{self, Chunk};
 use tidb_chunk::chunk_util::new_column_swap_helper;
 use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode, is_all_first_row};
 use tidb_expression::eval::RpnState;
 use tidb_expression::evaluator::new_evaluator_suite;
 use tidb_expression::expression::EvalState;
+use tidb_expression::util::extract_cor_columns;
 use tidb_expression::{Column, Expr, ExprRef, Schema};
+use tidb_infoschema::infoschema_v2::Ctx as IsCtx;
+use tidb_infoschema::table::PhysicalTable;
 use tidb_infoschema::table::column::get_col_origin_default_value;
 use tidb_infoschema::tables::{find_primary_index, try_get_common_pk_column_ids};
-use tidb_kv::kv::Snapshot;
-use tidb_kv::option::{self as kvopt, ReplicaReadLeader, ReplicaReadMixed, ReplicaReadType};
+use tidb_kv::copr::StoreLabel;
+use tidb_kv::key::KeyRange;
+use tidb_kv::kv::{CoprRequestAdjuster, Request, Snapshot};
+use tidb_kv::option::{
+    self as kvopt, ReplicaReadClosestAdaptive, ReplicaReadLeader, ReplicaReadMixed, ReplicaReadType,
+};
 use tidb_kv::txn_scope_var::GlobalTxnScope;
 use tidb_model::{
     ColumnInfo, ExtraHandleID, TableCacheStatusDisable, TableInfo, TempTableLocal, TempTableNone,
@@ -41,22 +51,31 @@ use tidb_model::{
 use tidb_planner::PhysicalKind;
 use tidb_planner::base::PhysicalPlan;
 use tidb_planner::core::physical_plans::{
-    PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalTableDual,
+    BatchCop, Cop, PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalTableDual,
+    PhysicalTableReader, PhysicalTableScan,
 };
 use tidb_planner::util::handle_cols::{HandleCols, new_common_handle_cols, new_int_handle_cols};
+use tidb_sessionctx::distsql_ctx::DistSQLContext;
 use tidb_sessionctx::exprctx::ExprContextRef;
+use tidb_sessionctx::ranger::Range;
+use tidb_store::distsql::table_handle_ranges_to_kv_ranges;
 use tidb_tablecodec::rowcodec::decoder::{ChunkDecoder, ColInfo, DefDatumFn, new_chunk_decoder};
 use tidb_types::field_type::new_field_type;
 use tikv_client::proto::metapb;
 
 use crate::adapter::TelemetryInfo;
 use crate::glue::{InfoSchemaRef, Plan, SessionContext};
+use crate::internal::builder::builder_utils::construct_dag_req;
 use crate::internal::exec::executor::{
     self as exec, Executor, new_base_executor, new_base_executor_v2,
 };
 use crate::internal::exec::indexusage::IndexUsageReporter;
 use crate::projection::{ProjectionExec, new_projection_executor_context};
 use crate::select::{LimitExec, SelectionExec, TableDualExec, new_selection_executor_context};
+use crate::table_reader::{
+    KvRangeBuilder, SelectResultHook, TableReaderExecutor, new_table_reader_executor_context,
+    table_reader_schema,
+};
 use tidb_planner::core::physical_plans::{PhysicalSort, PhysicalTopN};
 use tidb_planner::core::point_get_plan::PointGetPlan;
 use tidb_planner::util::byitem::ByItems;
@@ -167,6 +186,19 @@ impl ExecutorBuilder {
             };
             return self.build_point_get(sctx, pg).await;
         }
+        if v.kind() == PhysicalKind::TableReader {
+            // b.buildTableReader(v): `case *plannercore.PhysicalTableReader`.
+            let Some(tr) = v.as_any().downcast_ref::<PhysicalTableReader>() else {
+                self.err = Some(Error::plain(
+                    "a TableReader plan that is not a *core.PhysicalTableReader".to_owned(),
+                ));
+                return None;
+            };
+            return self
+                .build_table_reader(sctx, tr)
+                .await
+                .map(|e| Box::new(e) as Box<dyn Executor>);
+        }
         if v.kind() == PhysicalKind::Sort {
             // b.buildSort(v): `case *plannercore.PhysicalSort`.
             let Some(sort) = v.as_any().downcast_ref::<PhysicalSort>() else {
@@ -225,9 +257,9 @@ impl ExecutorBuilder {
                 )));
                 return None;
             }
-            PhysicalKind::Sort | PhysicalKind::TopN => unreachable!("built above"),
-            // b.buildTableReader(v)
-            PhysicalKind::TableReader => ("D12.1", "the table reader executor (VS1-34)"),
+            PhysicalKind::Sort | PhysicalKind::TopN | PhysicalKind::TableReader => {
+                unreachable!("built above")
+            }
             // b.buildIndexReader(v): blocked before any StatementContext mutation (D12.1 part 2B).
             PhysicalKind::IndexReader => ("D12.1", "the index reader executor (D12.1 part 2B)"),
             // A table scan or index scan is pushed down inside a reader, never built on its own:
@@ -869,7 +901,7 @@ impl ExecutorBuilder {
     pub fn build_index_usage_reporter(
         &self,
         sctx: &dyn SessionContext,
-        plan: &PointGetPlan,
+        plan: &dyn PhysicalPlan,
     ) -> Option<IndexUsageReporter> {
         build_index_usage_reporter(sctx, plan)
     }
@@ -953,24 +985,391 @@ impl ExecutorBuilder {
 // go: buildIndexUsageReporter L2 (no statement has an index usage collector: D11.2)
 pub fn build_index_usage_reporter(
     sctx: &dyn SessionContext,
-    plan: &PointGetPlan,
+    plan: &dyn PhysicalPlan,
 ) -> Option<IndexUsageReporter> {
     let _ = (sctx, plan);
     // sc.IndexUsageCollector != nil && sc.RuntimeStatsColl != nil: never (D11.2).
     None
 }
 
-/// newClosestReadAdjuster let the request be sent to closest replica(within the same zone)
-/// if response size exceeds certain threshold.
+impl ExecutorBuilder {
+    /// corColInDistPlan checks whether there is a correlated column in any pushed-down plan's
+    /// filter or projection expressions (block D12.10, carried with D12.1 Part 2A).
+    // go: executorBuilder.corColInDistPlan L1
+    pub fn cor_col_in_dist_plan(&self, plans: &[Plan]) -> bool {
+        for p in plans {
+            if let Some(x) = p.as_any().downcast_ref::<PhysicalSelection>() {
+                for cond in &x.conditions {
+                    if !extract_cor_columns(cond).is_empty() {
+                        return true;
+                    }
+                }
+            } else if let Some(x) = p.as_any().downcast_ref::<PhysicalProjection>() {
+                for expr in &x.exprs {
+                    if !extract_cor_columns(expr).is_empty() {
+                        return true;
+                    }
+                }
+            } else if let Some(x) = p.as_any().downcast_ref::<PhysicalTopN>() {
+                for by_item in &x.by_items {
+                    if !extract_cor_columns(&by_item.expr).is_empty() {
+                        return true;
+                    }
+                }
+            } else if let Some(x) = p.as_any().downcast_ref::<PhysicalTableScan>() {
+                for cond in &x.late_materialization_filter_condition {
+                    if !extract_cor_columns(cond).is_empty() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// corColInAccess checks whether there is a correlated column in access conditions
+    /// (block D12.10, carried with D12.1 Part 2A; `PhysicalIndexScan` arm added in Part 2B).
+    // go: executorBuilder.corColInAccess L1
+    pub fn cor_col_in_access(&self, p: &dyn PhysicalPlan) -> bool {
+        let access: &[ExprRef] = if let Some(x) = p.as_any().downcast_ref::<PhysicalTableScan>() {
+            &x.access_condition
+        } else {
+            &[]
+        };
+        for cond in access {
+            if !extract_cor_columns(cond).is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// buildNoRangeTableReader constructs a [`TableReaderExecutor`] without setting its ranges.
 ///
-/// Only the table reader (VS1-34) uses it, with its `DistSQLContext` (D07.3) and the
-/// request's `MatchStoreLabels` (not in `kv.Request` yet).
-// glue: stub of newClosestReadAdjuster, blocked-by:D07.3 (the closest replica read adjuster of a coprocessor request)
-pub fn new_closest_read_adjuster() -> Result<(), Error> {
-    Err(blocked(
-        "D07.3",
-        "the closest replica read adjuster of a coprocessor request",
-    ))
+/// Uses [`table_reader_schema`] instead of mutating `v`'s schema (exception A3: shared plans
+/// are immutable). Static partitioned tables and cached tables stop at `blocked("D06.4", ...)`.
+/// TiDB cluster memory table `User` identity propagation is omitted (`User` is D04.1).
+// go: buildNoRangeTableReader L2 (read-only table_reader_schema per A3; static partition and cached table stop at blocked-by:D06.4; cluster table User is D04.1)
+pub async fn build_no_range_table_reader(
+    b: &mut ExecutorBuilder,
+    sctx: &mut dyn SessionContext,
+    v: &PhysicalTableReader,
+) -> Result<TableReaderExecutor, Error> {
+    let table_plans: Vec<Plan> = if v.store_type == TiFlash {
+        v.get_table_plan().into_iter().cloned().collect()
+    } else {
+        v.table_plans.clone()
+    };
+    let dag_req = construct_dag_req(sctx, &table_plans, v.store_type)?;
+    let ts = v.get_table_scan()?;
+    b.valid_can_read_temporary_or_cache_table(sctx, &ts.table)?;
+
+    let tbl = match &b.is {
+        Some(is) => is.table_by_id(IsCtx::background(), ts.table.id).await,
+        None => None,
+    };
+    let (is_partition, _physical_table_id) = ts.is_partition();
+    if is_partition {
+        // glue: stub, blocked-by:D06.4 (PartitionedTable.GetPartition for static partition read)
+        return Err(blocked(
+            "D06.4",
+            "static partitioned table read (PartitionedTable.GetPartition)",
+        ));
+    }
+    if ts.table.table_cache_status_type != TableCacheStatusDisable
+        || tbl.as_ref().is_some_and(|t| t.as_cached_table().is_some())
+    {
+        // Cached table read in TableReader requires cached table support (D06.4).
+        return Err(blocked("D06.4", "reading a cached table in TableReader"));
+    }
+
+    let start_ts = b.get_snapshot_ts(sctx).await?;
+    let schema = table_reader_schema(v);
+    let vars = sctx.get_session_vars();
+    let paging = vars.enable_paging;
+    let net_data_size = v.get_net_data_size(vars);
+    let base = new_base_executor_v2(
+        vars,
+        &sctx.sql_killer(),
+        Some(schema.clone()),
+        v.id() as isize,
+        Vec::new(),
+    );
+    let tre_ctx = new_table_reader_executor_context(sctx)?;
+    let index_usage_reporter = b.build_index_usage_reporter(sctx, v);
+
+    let cor_col_in_filter = b.cor_col_in_dist_plan(&v.table_plans);
+    let cor_col_in_access = v
+        .table_plans
+        .first()
+        .is_some_and(|p| b.cor_col_in_access(p.as_ref()));
+
+    let mut e = TableReaderExecutor {
+        ctx: tre_ctx,
+        base,
+        index_usage_reporter,
+        dag_pb: dag_req,
+        start_ts,
+        txn_scope: b.txn_scope.clone(),
+        read_replica_scope: b.read_replica_scope.clone(),
+        is_staleness: b.is_staleness,
+        net_data_size,
+        table: tbl,
+        kv_range_builder: None,
+        ranges: Vec::new(),
+        grouped_ranges: Vec::new(),
+        group_by_col_idxs: Vec::new(),
+        kv_ranges: Vec::new(),
+        keep_order: ts.keep_order,
+        desc: ts.desc,
+        by_items: ts.by_items.clone(),
+        columns: ts.columns.clone(),
+        result_handler: None,
+        paging,
+        cor_col_in_filter,
+        cor_col_in_access,
+        plans: v.table_plans.clone(),
+        table_plan: v.get_table_plan().cloned(),
+        mem_tracker: None,
+        select_result_hook: SelectResultHook::default(),
+        store_type: v.store_type,
+        virtual_column_index: Vec::new(),
+        virtual_column_ret_field_types: Vec::new(),
+        batch_cop: v.read_req_type == BatchCop,
+        dummy: false,
+    };
+    e.build_virtual_column_info();
+
+    for i in 0..schema.columns.len() {
+        e.dag_pb.mut_output_offsets().push(i as u32);
+    }
+
+    if let Some(tbl) = &e.table
+        && tbl.meta().temp_table_type != TempTableNone
+    {
+        e.dummy = true;
+    }
+
+    Ok(e)
+}
+
+/// assertByItemsAreColumns asserts that all expressions in `by_items` are `Column` types.
+/// This function is used to validate `PhysicalIndexScan` and `PhysicalTableScan` `ByItems`
+/// (block D12.0, carried with D12.1 Part 2A).
+// go: assertByItemsAreColumns L1
+pub fn assert_by_items_are_columns(by_items: &[ByItems]) {
+    debug_assert!(
+        by_items
+            .iter()
+            .all(|by_item| matches!(by_item.expr.as_ref(), Expr::Column(_))),
+        "The executor only supports Column type in ByItems"
+    );
+}
+
+impl ExecutorBuilder {
+    /// buildTableReader builds a table reader executor. It first builds a no-range table
+    /// reader, and then updates its ranges from the table scan plan.
+    ///
+    /// Unsupported branches (TiFlash/MPP, static/dynamic partitioned tables, correlated
+    /// columns in access conditions, multi-group `grouped_ranges`) stop here before any
+    /// executor opens so the router can fall back cleanly (spec §11.1, §11.2).
+    // go: executorBuilder.buildTableReader L2 (A3 read-only table_reader_schema; TiFlash/MPP blocked-by:DEF.MPP; dynamic partition pruning blocked-by:D09.12; pre-Open fallback guards)
+    pub async fn build_table_reader(
+        &mut self,
+        sctx: &mut dyn SessionContext,
+        v: &PhysicalTableReader,
+    ) -> Option<TableReaderExecutor> {
+        // Check TiFlash / MPP before mutating statement state so fallback leaves SessionVars clean.
+        if v.store_type == TiFlash || v.read_req_type != Cop {
+            // TiFlash / MPP / BatchCop TableReader is not ported (DEF.MPP).
+            self.err = Some(blocked("DEF.MPP", "TiFlash / MPP / BatchCop TableReader"));
+            return None;
+        }
+
+        let ts = match v.get_table_scan() {
+            Ok(ts) => ts,
+            Err(err) => {
+                self.err = Some(err);
+                return None;
+            }
+        };
+        assert_by_items_are_columns(&ts.by_items);
+
+        // Pre-Open fallback guards (spec §11.1, §11.2): detect unsupported branches before
+        // sharing StatementContext or opening any executor.
+        if ts.is_partition().0 {
+            self.err = Some(blocked(
+                "D06.4",
+                "static partitioned table read (PartitionedTable.GetPartition)",
+            ));
+            return None;
+        }
+        if sctx
+            .get_session_vars()
+            .stmt_ctx()
+            .use_dynamic_partition_prune()
+            && ts.table.get_partition_info().is_some()
+        {
+            // glue: stub, blocked-by:D09.12 (dynamic partition pruning in buildTableReader)
+            self.err = Some(blocked(
+                "D09.12",
+                "dynamic partition pruning in buildTableReader",
+            ));
+            return None;
+        }
+        if v.table_plans
+            .first()
+            .is_some_and(|p| self.cor_col_in_access(p.as_ref()))
+        {
+            self.err = Some(blocked(
+                "D10.1",
+                "PhysicalTableScan.ResolveCorrelatedColumns (correlated column in TableReader access condition)",
+            ));
+            return None;
+        }
+        if ts.grouped_ranges.len() > 1 {
+            self.err = Some(blocked(
+                "D07.3",
+                "distsql.NewSortedSelectResults for multi-group TableReader",
+            ));
+            return None;
+        }
+        if let Err(err) = self.valid_can_read_temporary_or_cache_table(sctx, &ts.table) {
+            self.err = Some(err);
+            return None;
+        }
+
+        // Write StatementContext.TableIDs before build_no_range_table_reader shares
+        // StatementContext with BaseExecutorV2 (same N2 pattern as buildPointGet, spec §4).
+        let prev_is_tikv = sctx
+            .get_session_vars()
+            .stmt_ctx()
+            .is_tikv
+            .load(Ordering::SeqCst);
+        if v.store_type == TiKV {
+            sctx.get_session_vars()
+                .stmt_ctx()
+                .is_tikv
+                .store(true, Ordering::SeqCst);
+        }
+        let prev_table_ids_len = sctx.get_session_vars().stmt_ctx().table_ids.len();
+        sctx.get_session_vars_mut()
+            .stmt_ctx_mut()
+            .table_ids
+            .push(ts.table.id);
+
+        let mut ret = match build_no_range_table_reader(self, sctx, v).await {
+            Ok(e) => e,
+            Err(err) => {
+                // Restore StatementContext on error/fallback (spec §11.2).
+                sctx.get_session_vars()
+                    .stmt_ctx()
+                    .is_tikv
+                    .store(prev_is_tikv, Ordering::SeqCst);
+                sctx.get_session_vars_mut()
+                    .stmt_ctx_mut()
+                    .table_ids
+                    .truncate(prev_table_ids_len);
+                self.err = Some(err);
+                return None;
+            }
+        };
+
+        ret.ranges = ts.ranges.clone();
+        ret.grouped_ranges = ts.grouped_ranges.clone();
+        ret.group_by_col_idxs = ts.group_by_col_idxs.clone();
+
+        Some(ret)
+    }
+}
+
+/// Go `kvRangeBuilderFromRangeAndPartition`: builds per-partition KV key ranges from logical
+/// ranges (used when dynamic partition pruning selects partitions).
+pub struct KvRangeBuilderFromRangeAndPartition {
+    pub partitions: Vec<Arc<dyn PhysicalTable>>,
+}
+
+impl KvRangeBuilder for KvRangeBuilderFromRangeAndPartition {
+    // go: kvRangeBuilderFromRangeAndPartition.buildKeyRangeSeparately L1
+    fn build_key_range_separately(
+        &self,
+        dctx: &DistSQLContext,
+        ranges: &[Range],
+    ) -> Result<(Vec<i64>, Vec<Vec<KeyRange>>), Error> {
+        let mut ret: Vec<Vec<KeyRange>> = vec![Vec::new(); self.partitions.len()];
+        let mut pids: Vec<i64> = Vec::with_capacity(self.partitions.len());
+        for (i, p) in self.partitions.iter().enumerate() {
+            let pid = p.get_physical_id();
+            pids.push(pid);
+            let meta = p.meta();
+            if ranges.is_empty() {
+                continue;
+            }
+            let kv_range = table_handle_ranges_to_kv_ranges(
+                Some(dctx),
+                &[pid],
+                meta.is_common_handle,
+                ranges,
+            )?;
+            let existing = std::mem::take(&mut ret[i]);
+            ret[i] = kv_range.append_self_to(existing);
+        }
+        Ok((pids, ret))
+    }
+
+    // go: kvRangeBuilderFromRangeAndPartition.buildKeyRange L1
+    fn build_key_range(
+        &self,
+        dctx: &DistSQLContext,
+        ranges: &[Range],
+    ) -> Result<Vec<Vec<KeyRange>>, Error> {
+        let mut ret: Vec<Vec<KeyRange>> = vec![Vec::new(); self.partitions.len()];
+        if ranges.is_empty() {
+            return Ok(ret);
+        }
+        for (i, p) in self.partitions.iter().enumerate() {
+            let pid = p.get_physical_id();
+            let meta = p.meta();
+            let kv_range = table_handle_ranges_to_kv_ranges(
+                Some(dctx),
+                &[pid],
+                meta.is_common_handle,
+                ranges,
+            )?;
+            let existing = std::mem::take(&mut ret[i]);
+            ret[i] = kv_range.append_self_to(existing);
+        }
+        Ok(ret)
+    }
+}
+
+/// newClosestReadAdjuster lets the request be sent to the closest replica (within the same
+/// zone) if the estimated response size per coprocessor task reaches the configured threshold.
+// go: newClosestReadAdjuster L1 [M-F2I]
+pub fn new_closest_read_adjuster(
+    dctx: &Arc<DistSQLContext>,
+    req: &Request,
+    net_data_size: f64,
+) -> Option<CoprRequestAdjuster> {
+    if req.replica_read != ReplicaReadClosestAdaptive {
+        return None;
+    }
+    let dctx = Arc::clone(dctx);
+    Some(Arc::new(move |req: &mut Request, cop_task_count: isize| {
+        // copTaskCount is the number of coprocessor requests
+        if f64_to_i64(net_data_size / cop_task_count as f64) >= dctx.replica_closest_read_threshold
+        {
+            req.match_store_labels.push(StoreLabel {
+                key: DCLabelKey.to_owned(),
+                value: config::get_txn_scope_from_config(),
+            });
+            return true;
+        }
+        // reset to read from leader when the data size is small.
+        req.replica_read = ReplicaReadLeader;
+        false
+    }))
 }
 
 /// NewRowDecoder creates a chunk decoder for new row format row value decode.
@@ -1100,10 +1499,17 @@ mod tests {
         let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
         assert!(b.build(&mut s, None).await.is_none());
         assert!(b.err.is_none());
-        for (kind, block) in [
-            (PhysicalKind::TableReader, "D12.1"),
-            (PhysicalKind::IndexReader, "D12.1"),
-        ] {
+        let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
+        assert!(
+            b.build(&mut s, Some(&test_plan(PhysicalKind::TableReader)))
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            b.err.unwrap().to_string(),
+            "a TableReader plan that is not a *core.PhysicalTableReader"
+        );
+        for (kind, block) in [(PhysicalKind::IndexReader, "D12.1")] {
             let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
             assert!(b.build(&mut s, Some(&test_plan(kind))).await.is_none());
             let err = b.err.expect("blocked");

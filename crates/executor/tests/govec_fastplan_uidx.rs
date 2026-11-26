@@ -318,6 +318,27 @@ impl SessionContext for Session {
     fn get_expr_ctx(&self) -> ExprContextRef {
         Arc::clone(&self.expr_ctx)
     }
+    fn get_dist_sql_ctx(&self) -> Arc<tidb_sessionctx::distsql_ctx::DistSQLContext> {
+        Arc::new(tidb_sessionctx::distsql_ctx::DistSQLContext::default())
+    }
+    fn get_build_pb_ctx(&self) -> Result<Arc<tidb_sessionctx::planctx::BuildPBContext>, Error> {
+        Err(Error::plain("govec_fastplan_uidx: BuildPBContext unused"))
+    }
+    fn get_ranger_ctx(&self) -> Arc<tidb_sessionctx::ranger::context::RangerContext> {
+        let sc = self.vars.stmt_ctx();
+        Arc::new(tidb_sessionctx::ranger::context::RangerContext {
+            type_ctx: sc.type_ctx(),
+            err_ctx: sc.err_ctx(),
+            expr_ctx: Arc::clone(&self.expr_ctx) as tidb_sessionctx::exprctx::BuildContextRef,
+            range_fallback_handler: Arc::clone(&sc.range_fallback_handler),
+            plan_cache_tracker: Arc::clone(&sc.plan_cache_tracker),
+            optimizer_fix_control: std::collections::HashMap::new(),
+            use_cache: false,
+            in_prepared_plan_building: false,
+            regard_null_as_point: false,
+            opt_prefix_index_single_scan: false,
+        })
+    }
     fn get_plan_ctx(&self) -> tidb_planner::planctx::SessionPlanCtx {
         tidb_planner::planctx::SessionPlanCtx {
             expr_ctx: Arc::clone(&self.expr_ctx),

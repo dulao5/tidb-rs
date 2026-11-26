@@ -1,38 +1,37 @@
 //! go-file: pkg/executor/internal/builder/builder_utils.go
 //!
-//! The DAG request of a reader executor from its pushed-down physical plans. The plans'
-//! `ToPB` is D10.9 (VS1-31): it is a boundary stub, so the list builders fail with
-//! `blocked-by:D10.9` until then; `ConstructDAGReq` (time zone, flags, encode type: D00.3
-//! `timeutil.Zone`, D07.3 `distsql.SetEncodeType`) comes with the table reader (VS1-34).
+//! The DAG request of a reader executor from its pushed-down physical plans (block D12.0).
 
 use std::collections::HashMap;
 
 use tidb_base::Error;
-use tidb_base::blocked::blocked;
-use tidb_base::kv::StoreType;
+use tidb_base::kv::{StoreType, TiFlash, TiKV};
+use tidb_base::timeutil;
+use tidb_sessionctx::planctx::BuildPBContext;
+use tidb_sessionctx::variable::tidb_defs::DefDivPrecisionIncrement;
+use tidb_store::distsql;
 
-use crate::glue::Plan;
-
-/// `p.ToPB(pctx, storeType)`.
-// glue: stub, blocked-by:D10.9 (PhysicalPlan.ToPB, VS1-31)
-fn to_pb(p: &Plan, store_type: StoreType) -> Result<tipb::Executor, Error> {
-    let _ = (p, store_type);
-    Err(blocked("D10.9", "PhysicalPlan.ToPB"))
-}
+use crate::glue::{Plan, SessionContext};
 
 /// ConstructTreeBasedDistExec constructs tree based DAGRequest
 // go: ConstructTreeBasedDistExec L1
-pub fn construct_tree_based_dist_exec(p: &Plan) -> Result<Vec<tipb::Executor>, Error> {
-    let exec_pb = to_pb(p, tidb_base::kv::TiFlash)?;
+pub fn construct_tree_based_dist_exec(
+    pctx: &BuildPBContext,
+    p: &Plan,
+) -> Result<Vec<tipb::Executor>, Error> {
+    let exec_pb = p.to_pb(pctx, TiFlash)?;
     Ok(vec![exec_pb])
 }
 
 /// ConstructListBasedDistExec constructs list based DAGRequest
 // go: ConstructListBasedDistExec L1
-pub fn construct_list_based_dist_exec(plans: &[Plan]) -> Result<Vec<tipb::Executor>, Error> {
+pub fn construct_list_based_dist_exec(
+    pctx: &BuildPBContext,
+    plans: &[Plan],
+) -> Result<Vec<tipb::Executor>, Error> {
     let mut executors = Vec::with_capacity(plans.len());
     for p in plans {
-        let exec_pb = to_pb(p, tidb_base::kv::TiKV)?;
+        let exec_pb = p.to_pb(pctx, TiKV)?;
         executors.push(exec_pb);
     }
     Ok(executors)
@@ -42,10 +41,11 @@ pub fn construct_list_based_dist_exec(plans: &[Plan]) -> Result<Vec<tipb::Execut
 /// ParentIdx for those executors whose parent is not the next one in the list.
 // go: ConstructListBasedDistExecForUnNatureOrderPlans L1 [M-MAPORDER]
 pub fn construct_list_based_dist_exec_for_un_nature_order_plans(
+    pctx: &BuildPBContext,
     plans: &[Plan],
     un_nature_orders: &HashMap<isize, isize>,
 ) -> Result<Vec<tipb::Executor>, Error> {
-    let mut executors = construct_list_based_dist_exec(plans)?;
+    let mut executors = construct_list_based_dist_exec(pctx, plans)?;
     for (&i, &j) in un_nature_orders {
         let parent_idx = j as u32;
         executors[i as usize].set_parent_idx(parent_idx);
@@ -54,10 +54,41 @@ pub fn construct_list_based_dist_exec_for_un_nature_order_plans(
 }
 
 /// ConstructDAGReq constructs DAGRequest for physical plans
-// go: ConstructDAGReq L2 (boundary stub, blocked-by:D10.9)
-pub fn construct_dag_req(plans: &[Plan], store_type: StoreType) -> Result<tipb::DagRequest, Error> {
-    let _ = (plans, store_type);
-    Err(blocked("D10.9", "the DAG request of a reader executor"))
+// go: ConstructDAGReq L1
+pub fn construct_dag_req(
+    ctx: &dyn SessionContext,
+    plans: &[Plan],
+    store_type: StoreType,
+) -> Result<tipb::DagRequest, Error> {
+    let mut dag_req = tipb::DagRequest::default();
+    let vars = ctx.get_session_vars();
+    let (tz_name, tz_offset) = timeutil::zone(&vars.location());
+    dag_req.set_time_zone_name(tz_name);
+    dag_req.set_time_zone_offset(tz_offset);
+    let sc = vars.stmt_ctx();
+    if sc.runtime_stats_coll.is_some() {
+        dag_req.set_collect_execution_summaries(true);
+    }
+    dag_req.set_flags(sc.push_down_flags());
+    let div_prec_incr = vars.get_div_precision_increment();
+    if div_prec_incr != DefDivPrecisionIncrement {
+        dag_req.set_div_precision_increment(div_prec_incr as u32);
+    }
+    let build_pb_ctx = ctx.get_build_pb_ctx()?;
+    let res = if store_type == TiFlash {
+        construct_tree_based_dist_exec(&build_pb_ctx, &plans[0]).map(|mut executors| {
+            dag_req.set_root_executor(executors.remove(0));
+        })
+    } else {
+        construct_list_based_dist_exec(&build_pb_ctx, plans).map(|executors| {
+            dag_req.set_executors(executors.into());
+        })
+    };
+
+    let dctx = ctx.get_dist_sql_ctx();
+    distsql::set_encode_type(&dctx, &mut dag_req);
+    res?;
+    Ok(dag_req)
 }
 
 /// ConstructDAGReqForUnNatureOrderPlans constructs DAGRequest for physical plans.
@@ -66,11 +97,12 @@ pub fn construct_dag_req(plans: &[Plan], store_type: StoreType) -> Result<tipb::
 /// indexes whose parent is not the next one.
 // go: ConstructDAGReqForUnNatureOrderPlans L1 [M-MAPORDER]
 pub fn construct_dag_req_for_un_nature_order_plans(
+    ctx: &dyn SessionContext,
     plans: &[Plan],
     un_nature_orders: &HashMap<isize, isize>,
     store_type: StoreType,
 ) -> Result<tipb::DagRequest, Error> {
-    let mut dag_req = construct_dag_req(plans, store_type)?;
+    let mut dag_req = construct_dag_req(ctx, plans, store_type)?;
 
     for (&i, &j) in un_nature_orders {
         let parent_idx = j as u32;

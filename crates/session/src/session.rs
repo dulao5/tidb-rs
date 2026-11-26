@@ -865,10 +865,48 @@ impl SessionCore {
             })
     }
 
-    /// `GetBuildPBCtx()`.
-    // glue: stub of session.GetBuildPBCtx, blocked-by:D10.9 (planctx.BuildPBContext of ToPB)
-    pub fn get_build_pb_ctx(&self) -> Result<(), Error> {
-        Err(blocked("D10.9", "the session's BuildPBContext"))
+    /// `GetBuildPBCtx()` returns the context used in `PhysicalPlan.ToPB`.
+    // go: session.GetBuildPBCtx L1
+    pub fn get_build_pb_ctx(&self) -> Arc<tidb_sessionctx::planctx::BuildPBContext> {
+        let vars = &self.sctx.vars;
+        let sc = vars.stmt_ctx();
+        let cached = sc.get_or_init_build_pb_ctx_from_cache(|| {
+            Arc::new(tidb_sessionctx::planctx::BuildPBContext {
+                expr_ctx: self.sctx.expr_ctx() as tidb_sessionctx::exprctx::BuildContextRef,
+                client: self.sctx.get_client(),
+                tiflash_fast_scan: vars.tiflash_fast_scan,
+                tiflash_fine_grained_shuffle_batch_size: vars
+                    .tiflash_fine_grained_shuffle_batch_size,
+                group_concat_max_len: vars.group_concat_max_len,
+                in_explain_stmt: sc.in_explain_stmt,
+                warn_handler: Some(sc.warn_handler() as tidb_base::contextutil::WarnAppenderRef),
+                extra_warnghandler: Some(
+                    Arc::clone(&sc.extra_warn_handler) as tidb_base::contextutil::WarnAppenderRef
+                ),
+            })
+        });
+        cached
+            .downcast::<tidb_sessionctx::planctx::BuildPBContext>()
+            .expect("StatementContext build_pb_ctx_cache holds BuildPBContext")
+    }
+
+    /// `GetRangerCtx()` returns the ranger context of the current statement.
+    // glue: N2 (planctx.PlanContext.GetRangerCtx on SessionCore)
+    pub fn get_ranger_ctx(&self) -> Arc<tidb_sessionctx::ranger::context::RangerContext> {
+        let vars = &self.sctx.vars;
+        let sc = vars.stmt_ctx();
+        Arc::new(tidb_sessionctx::ranger::context::RangerContext {
+            type_ctx: sc.type_ctx(),
+            err_ctx: sc.err_ctx(),
+            expr_ctx: self.sctx.expr_ctx() as tidb_sessionctx::exprctx::BuildContextRef,
+            range_fallback_handler: Arc::clone(&sc.range_fallback_handler),
+            plan_cache_tracker: Arc::clone(&sc.plan_cache_tracker),
+            optimizer_fix_control: vars.get_optimizer_fix_control_map().clone(),
+            use_cache: false,
+            in_prepared_plan_building: sc.in_prepared_plan_building,
+            regard_null_as_point: vars.regard_null_as_point,
+            opt_prefix_index_single_scan: vars.opt_prefix_index_single_scan,
+        })
     }
 
     /// `GetTableCtx()`.
@@ -982,6 +1020,22 @@ impl SessionContext for SessionCore {
     // go: session.GetExprCtx L2 (a context over a view of the session per call, N2)
     fn get_expr_ctx(&self) -> tidb_sessionctx::exprctx::ExprContextRef {
         self.sctx.expr_ctx() as tidb_sessionctx::exprctx::ExprContextRef
+    }
+    // glue: interface method sessionctx.Context.GetDistSQLCtx
+    fn get_dist_sql_ctx(&self) -> Arc<tidb_sessionctx::distsql_ctx::DistSQLContext> {
+        SessionCore::get_dist_sql_ctx(self)
+    }
+    // glue: interface method sessionctx.Context.GetBuildPBCtx
+    fn get_build_pb_ctx(&self) -> Result<Arc<tidb_sessionctx::planctx::BuildPBContext>, Error> {
+        Ok(SessionCore::get_build_pb_ctx(self))
+    }
+    // glue: interface method planctx.PlanContext.GetRangerCtx
+    fn get_ranger_ctx(&self) -> Arc<tidb_sessionctx::ranger::context::RangerContext> {
+        SessionCore::get_ranger_ctx(self)
+    }
+    // glue: interface method planctx.PlanContext.GetInfoSchema
+    fn get_info_schema(&self) -> Option<InfoSchemaRef> {
+        Some(self.sctx.get_info_schema())
     }
     // go: pkg/planner/plannersession/context.go PlanCtxExtended.SetReadonlyUserVarMap L1
     fn set_readonly_user_var_map(&mut self, readonly_user_vars: std::collections::HashSet<String>) {

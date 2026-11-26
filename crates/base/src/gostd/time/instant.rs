@@ -291,6 +291,14 @@ impl Time {
         AbsDays(abs_seconds_days(self.abs_sec())).year_yday().1
     }
 
+    /// Zone computes the time zone in effect at time t, returning the abbreviated
+    /// name of the zone (such as "CET") and its offset in seconds east of UTC.
+    // go-std: time.Time.Zone L1
+    pub fn zone(&self) -> (&str, i32) {
+        let z = self.lookup();
+        (z.name, z.offset)
+    }
+
     /// Location returns the time zone information associated with t.
     // go-std: time.Time.Location L1
     pub fn location(&self) -> Arc<Location> {

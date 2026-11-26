@@ -3,4 +3,5 @@
 
 pub mod builder;
 pub mod exec;
+pub mod util;
 pub mod vecgroupchecker;

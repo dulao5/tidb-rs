@@ -21,7 +21,10 @@ use tidb_kv::kv::Snapshot;
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_parser::model::CIStr;
 use tidb_parser::types::FieldType;
+use tidb_sessionctx::distsql_ctx::DistSQLContext;
 use tidb_sessionctx::exprctx::ExprContextRef;
+use tidb_sessionctx::planctx::BuildPBContext;
+use tidb_sessionctx::ranger::context::RangerContext;
 use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sessionctx::variable::session_state::PlanReplayerTaskKey;
 
@@ -105,6 +108,21 @@ pub trait SessionContext: Send {
     /// moment it is built (N2: executors do not hold the session).
     // glue: interface method sessionctx.Context.GetExprCtx (VS1-14)
     fn get_expr_ctx(&self) -> ExprContextRef;
+    /// `GetDistSQLCtx()`: the session's `DistSQLContext` for coprocessor reads.
+    // glue: interface method sessionctx.Context.GetDistSQLCtx (D05.3 / D07.3)
+    fn get_dist_sql_ctx(&self) -> Arc<DistSQLContext>;
+    /// `GetBuildPBCtx()`: the session's `BuildPBContext` for `PhysicalPlan.ToPB`.
+    // glue: interface method sessionctx.Context.GetBuildPBCtx (D05.3 / D10.9)
+    fn get_build_pb_ctx(&self) -> Result<Arc<BuildPBContext>, Error>;
+    /// `GetRangerCtx()`: the session's `RangerContext` for range building.
+    // glue: interface method planctx.PlanContext.GetRangerCtx (D05.3 / D12.1)
+    fn get_ranger_ctx(&self) -> Arc<RangerContext>;
+    /// `GetInfoSchema()`: the active info schema of the statement (transaction's if present,
+    /// otherwise domain's).
+    // glue: interface method planctx.PlanContext.GetInfoSchema (D05.3 / D12.1)
+    fn get_info_schema(&self) -> Option<InfoSchemaRef> {
+        self.get_domain_info_schema()
+    }
     /// `GetPlanCtx()`: what the session hands the planner for a statement (its expression
     /// context, store client, the transaction's dirty-table check), from which
     /// `planner.Optimize` and PREPARE build the same planning context.

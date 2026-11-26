@@ -3799,6 +3799,7 @@ dependencies = [
  "futures",
  "log",
  "parking_lot 0.12.5",
+ "protobuf",
  "rand 0.8.8",
  "serde_json",
  "tidb-base",
@@ -3815,6 +3816,7 @@ dependencies = [
  "tidb-planner",
  "tidb-runtime",
  "tidb-sessionctx",
+ "tidb-statistics",
  "tidb-store",
  "tidb-tablecodec",
  "tidb-types",
@@ -4108,6 +4110,7 @@ dependencies = [
  "futures",
  "log",
  "parking_lot 0.12.5",
+ "protobuf",
  "serde_json",
  "tidb-base",
  "tidb-chunk",
@@ -4127,6 +4130,7 @@ dependencies = [
  "tidb-store",
  "tidb-tablecodec",
  "tidb-types",
+ "tipb",
  "tokio",
 ]
 

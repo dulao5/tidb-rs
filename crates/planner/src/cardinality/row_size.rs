@@ -12,6 +12,7 @@ use tidb_base::kv::{StoreType, TiFlash, TiKV};
 use tidb_base::mysql::*;
 use tidb_chunk::codec::{estimate_type_width, get_fixed_len_pub as get_fixed_len};
 use tidb_expression::Column as ExprColumn;
+use tidb_sessionctx::variable::session::SessionVars;
 use tidb_statistics::{Column, HistColl};
 use tidb_tablecodec::tablecodec::RecordRowKeyLen;
 
@@ -81,7 +82,19 @@ pub fn get_avg_row_size(
     is_encoded_key: bool,
     is_for_scan: bool,
 ) -> f64 {
-    let session_vars = &*ctx.vars;
+    get_avg_row_size_with_vars(ctx.vars, coll, cols, is_encoded_key, is_for_scan)
+}
+
+/// Helper for callers (such as `PhysicalTableReader::get_net_data_size` and
+/// `PhysicalTableReader::get_avg_row_size`) that hold `&SessionVars` without a `&PlanCtx`.
+// go-part: GetAvgRowSize (shared implementation over &SessionVars, M-CTX)
+pub fn get_avg_row_size_with_vars(
+    session_vars: &SessionVars,
+    coll: &HistColl,
+    cols: &[Arc<ExprColumn>],
+    is_encoded_key: bool,
+    is_for_scan: bool,
+) -> f64 {
     let mut size = 0.0;
     if coll.pseudo || coll.col_num() == 0 || coll.realtime_count == 0 {
         size = pseudoColSize * cols.len() as f64;

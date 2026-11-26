@@ -46,6 +46,8 @@ tidb-executor = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 flate2 = "1.0"
 serde_json = { workspace = true }
+tipb = { workspace = true }
+protobuf = { workspace = true }
 
 [lints]
 workspace = true
