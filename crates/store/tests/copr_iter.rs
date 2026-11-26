@@ -28,6 +28,9 @@ struct MockStore {
     resolved: AtomicUsize,
     sends: AtomicUsize,
     region_miss_backoffs: Arc<AtomicUsize>,
+    send_delay: Option<Duration>,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
 }
 
 impl MockStore {
@@ -50,6 +53,9 @@ impl MockStore {
             resolved: AtomicUsize::new(0),
             sends: AtomicUsize::new(0),
             region_miss_backoffs: Arc::new(AtomicUsize::new(0)),
+            send_delay: None,
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
         }
     }
 
@@ -165,6 +171,18 @@ impl ClientHelper for Helper {
         region: RegionVerID,
         _timeout: Duration,
     ) -> Result<(coprocessor::Response, Option<RPCContext>, String), Error> {
+        let cur = self.0.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.0.max_in_flight.fetch_max(cur, Ordering::SeqCst);
+        struct InFlightGuard<'a>(&'a AtomicUsize);
+        impl Drop for InFlightGuard<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _guard = InFlightGuard(&self.0.in_flight);
+        if let Some(delay) = self.0.send_delay {
+            tokio::time::sleep(delay).await;
+        }
         self.0.sends.fetch_add(1, Ordering::SeqCst);
         if !self.0.current(region) {
             // SendReqCtx's genRegionErrorResp for a stale epoch.
@@ -662,4 +680,71 @@ async fn distsql_select_eager_concurrency_tagger_and_post_close_stats() {
             tipb::ResourceGroupTagLabel::ResourceGroupTagLabelRow
         );
     }
+}
+
+/// D07.3 spec §2.2: `kv::Request.copr_request_rate_limit` caps aggregate in-flight cop
+/// requests across workers/readers, is exposed via `CopIterator::get_request_rate_limit`,
+/// and releases tokens on completion, error, and cancellation/drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn copr_request_rate_limit_caps_inflight_and_releases_tokens() {
+    let mut mock = MockStore::new(&[b"d", b"h", b"m"], echo);
+    mock.send_delay = Some(Duration::from_millis(15));
+    let mock = Arc::new(mock);
+
+    let rl = Arc::new(RateLimit::new(1));
+    let store = Arc::new(new_store(Arc::new(Shared(mock.clone())), None, 0));
+    let client = store.get_client();
+
+    let mut req = request(&[b"a", b"z"]);
+    req.concurrency = 4;
+    req.copr_request_rate_limit = Some(Arc::clone(&rl));
+
+    let mut it = client
+        .build_cop_iterator(req, Variables::default(), &ClientSendOption::default())
+        .await
+        .unwrap();
+    assert!(
+        it.get_request_rate_limit()
+            .is_some_and(|r| Arc::ptr_eq(r, &rl))
+    );
+    it.open(None);
+
+    let ctx = tidb_kv::Context::background();
+    let mut got = Vec::new();
+    while let Some(r) = it.next(&ctx).await.unwrap() {
+        got.push(String::from_utf8(r.get_data().to_vec()).unwrap());
+    }
+    it.close().await.unwrap();
+    got.sort();
+    assert_eq!(got, vec!["1:a-d", "2:d-h", "3:h-m", "4:m-z"]);
+    assert_eq!(
+        mock.max_in_flight.load(Ordering::SeqCst),
+        1,
+        "RateLimit(1) must cap concurrent in-flight cop requests to 1"
+    );
+
+    // Token must be available again (all tokens released).
+    let (_tx, mut done) = tokio::sync::watch::channel(false);
+    assert!(!rl.get_token(&mut done).await);
+    rl.put_token();
+
+    // Error path must also release the token via drop guard.
+    let err_mock = Arc::new(MockStore::new(&[b"d"], |_, _, _| coprocessor::Response {
+        other_error: "boom".into(),
+        ..Default::default()
+    }));
+    let err_store = Arc::new(new_store(Arc::new(Shared(err_mock)), None, 0));
+    let mut err_req = request(&[b"a", b"z"]);
+    err_req.concurrency = 2;
+    err_req.copr_request_rate_limit = Some(Arc::clone(&rl));
+    let mut err_it = err_store
+        .get_client()
+        .build_cop_iterator(err_req, Variables::default(), &ClientSendOption::default())
+        .await
+        .unwrap();
+    err_it.open(None);
+    let _ = err_it.next(&ctx).await;
+    err_it.close().await.unwrap();
+    assert!(!rl.get_token(&mut done).await);
+    rl.put_token();
 }

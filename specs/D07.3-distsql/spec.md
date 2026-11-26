@@ -489,12 +489,12 @@ pub trait SelectResult: Send {
    - `pub fn get_select_result_concurrency(sr: &dyn SelectResult) -> Option<(isize, isize)>`
    - `SelectResult` trait（见 §4.5）：`async fn next`、`async fn next_raw`、`fn into_iter`、`fn close`、`fn cop_concurrency`；对象安全且 `Send`。
 5. **`tidb_store::distsql` 第 2 部分补充契约（完整签名）**：
-   - `RequestBuilder::{set_table_handles(&mut self, tid: i64, handles: &[Handle]) -> &mut Self, set_partitions_and_handles(&mut self, handles: &[PartitionHandle]) -> &mut Self}`；`kv::Request.copr_request_rate_limit: Option<Arc<RateLimit>>` 字段 + `CopIterator` 限速接线（`coprocessor.rs:1309, 1804`）。
-   - `pub fn table_handles_to_kv_ranges(tid: i64, handles: &[Handle]) -> (KeyRanges, Vec<isize>)`
-   - `pub fn partition_handles_to_kv_ranges(handles: &[PartitionHandle]) -> (KeyRanges, Vec<isize>)`
-   - `pub fn index_ranges_to_kv_ranges(dctx: Option<&DistSQLContext>, tid: i64, idx_id: i64, ranges: &[Range], mem_tracker: Option<&Tracker>) -> Result<KeyRanges, Error>`
-   - `pub fn index_ranges_to_kv_ranges_with_interrupt_signal(dctx: Option<&DistSQLContext>, pid: i64, idx_id: i64, ranges: &[Range], mem_tracker: Option<&Tracker>, interrupt_signal: Option<&AtomicBool>) -> Result<KeyRanges, Error>`
-   - `pub fn new_sorted_select_results(eval_ctx: &EvalContext, select_results: Vec<Box<dyn SelectResult>>, schema: Option<&Schema>, by_items: Vec<ByItems>, mem_tracker: Option<Arc<Tracker>>) -> Result<Box<dyn SelectResult>, Error>`（`schema` 允许 `None`，对应 `pkg/executor/distsql.go:974` 按前若干列归并）
+   - `RequestBuilder::{set_table_handles(&mut self, tid: i64, handles: &[Handle]) -> &mut Self, set_partitions_and_handles(&mut self, handles: &[Handle]) -> &mut Self}`；`kv::Request.copr_request_rate_limit: Option<Arc<RateLimit>>` 字段 + `CopIterator` 限速接线（`coprocessor.rs:1368, 1870`）。
+   - `pub fn table_handles_to_kv_ranges(tid: i64, handles: &[Handle]) -> (Vec<KeyRange>, Vec<isize>)`
+   - `pub fn partition_handles_to_kv_ranges(handles: &[Handle]) -> (Vec<KeyRange>, Vec<isize>)`
+   - `pub fn index_ranges_to_kv_ranges(dctx: Option<&DistSQLContext>, tid: i64, idx_id: i64, ranges: &[Range]) -> Result<KeyRanges, Error>`
+   - `pub fn index_ranges_to_kv_ranges_with_interrupt_signal(dctx: Option<&DistSQLContext>, tid: i64, idx_id: i64, ranges: &[Range], mem_tracker: Option<&Arc<Tracker>>, interrupt_signal: Option<&AtomicBool>) -> Result<KeyRanges, Error>`
+   - `pub fn new_sorted_select_results(eval_ctx: &dyn EvalContext, select_results: Vec<Box<dyn SelectResult>>, schema: Option<&Schema>, by_items: Vec<ByItems>, mem_tracker: Option<Arc<Tracker>>) -> Result<Box<dyn SelectResult>, Error>`（`schema` 允许 `None`，对应 `pkg/executor/distsql.go:974` 按前若干列归并）
    - `#[async_trait] pub trait SelectResultIter: Send { async fn next(&mut self, ctx: &tidb_kv::Context) -> Result<Option<SelectResultRow>, Error>; fn close(&mut self) -> Result<(), Error>; }` 与 `pub struct SelectResultRow { pub channel_index: isize, pub row: RowHandle }`。
 
 ---
