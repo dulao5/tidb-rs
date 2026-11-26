@@ -17,7 +17,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use tidb_base::Error;
@@ -25,28 +25,37 @@ use tidb_base::blocked::{blocked, blocked_by};
 use tidb_base::dbterror::plannererrors::{
     ErrAggregateInOrderNotSelect, ErrAggregateOrderNonAggQuery, ErrAmbiguous, ErrBadTable,
     ErrDupFieldName, ErrFieldInGroupingNotGroupBy, ErrFieldInOrderNotSelect, ErrFieldNotInGroupBy,
-    ErrIllegalReference, ErrInvalidWildCard, ErrMixOfGroupFuncAndFields,
+    ErrIllegalReference, ErrInvalidWildCard, ErrMixOfGroupFuncAndFields, ErrNotSupportedYet,
     ErrPartitionClauseOnNonpartitioned, ErrUnknown, ErrUnknownColumn, ErrUnsupportedType,
-    ErrWindowInvalidWindowFuncAliasUse, ErrWindowInvalidWindowFuncUse, ErrWrongArguments,
-    ErrWrongGroupField,
+    ErrWindowCircularityInWindowGraph, ErrWindowDuplicateName, ErrWindowFrameEndIllegal,
+    ErrWindowFrameIllegal, ErrWindowFrameStartIllegal, ErrWindowFunctionIgnoresFrame,
+    ErrWindowInvalidWindowFuncAliasUse, ErrWindowInvalidWindowFuncUse,
+    ErrWindowNoChildPartitioning, ErrWindowNoInherentFrame, ErrWindowNoRedefineOrderBy,
+    ErrWindowNoSuchWindow, ErrWindowRangeBoundNotConstant, ErrWindowRangeFrameNumericType,
+    ErrWindowRangeFrameOrderType, ErrWindowRangeFrameTemporalType, ErrWindowRowsIntervalUse,
+    ErrWrongArguments, ErrWrongGroupField,
 };
 use tidb_base::go_args;
 use tidb_base::gostd::is_one_of;
 use tidb_base::mysql::{
-    ExtendedPriv, MaxRealWidth, RangeGraph, SQLMode, TypeDouble, has_not_null_flag,
-    has_pri_key_flag,
+    DefaultCharset, DefaultCollationName, ExtendedPriv, MaxRealWidth, NotNullFlag, RangeGraph,
+    SQLMode, TypeDouble, TypeNull, TypeVarchar, has_not_null_flag, has_pri_key_flag,
 };
 use tidb_chunk::Row;
-use tidb_expression::aggregation::new_agg_func_desc;
+use tidb_expression::aggregation::{
+    need_frame, new_agg_func_desc, new_window_func_desc, use_default_frame,
+};
 use tidb_expression::builtin_cast::try_push_cast_into_control_function_for_hybrid_type;
-use tidb_expression::constant::new_zero;
+use tidb_expression::builtin_compare::{get_accurate_cmp_type, get_cmp_function};
+use tidb_expression::constant::{Constant, new_zero};
 use tidb_expression::expression::{EvalState, split_cnf_items};
+use tidb_expression::scalar_function::new_function_base;
 use tidb_expression::simple_rewriter::{
     column_name_orig_col_name, column_name_string, find_field_name,
 };
 use tidb_expression::util::{
-    PositionExpr, const_expr_consider_plan_cache, extract_columns, get_string_from_constant,
-    param_marker_expression, pos_from_position_expr,
+    ParamMarkerInPrepareChecker, PositionExpr, const_expr_consider_plan_cache, extract_columns,
+    get_string_from_constant, param_marker_expression, pos_from_position_expr,
 };
 use tidb_expression::{
     Column, Expr as PExpr, ExprRef, Schema, column2_exprs, eval_bool, gc_column_expr_is_tidb_shard,
@@ -60,24 +69,30 @@ use tidb_model::{
 };
 use tidb_parser::ast::{self, Expr, expression_deep_equal_with};
 use tidb_parser::model::CIStr;
+use tidb_parser::restore_window_spec_raw;
 use tidb_parser::types::ETString;
 use tidb_parser::types::UnspecifiedLength;
-use tidb_sessionctx::exprctx::BuildContext;
+use tidb_sessionctx::errctx;
+use tidb_sessionctx::exprctx::{BuildContext, ctx_with_handle_truncate_err_level};
 use tidb_types::convert::str_to_uint;
-use tidb_types::etc::FieldType;
+use tidb_types::datum::new_string_datum;
+use tidb_types::etc::{FieldType, is_type_numeric, is_type_temporal};
 use tidb_types::field_name::{EmptyName, FieldName, NameSlice};
-use tidb_types::field_type::set_bin_chs_cln_flag;
+use tidb_types::field_type::{default_type_for_value, new_field_type, set_bin_chs_cln_flag};
 
 use crate::arena::{PlanArena, PlanId};
 use crate::base::{LogicalKind, LogicalPlan};
 use crate::core::expression_rewriter::{
     AggMapper, ByAddr, CheckSelectColumnPrivOption, ClauseCode, ColReplacements, RewritePlan,
-    WindowMapper, clause_msg, eval_ast_expr, node_addr,
+    WindowMapper, clause_msg, eval_ast_expr, eval_ast_expr_with_plan_ctx, node_addr,
+    value_expr_go_value,
 };
+use crate::core::find_best_task::compare_bool;
 use crate::core::planbuilder::{
-    PlanBuilder, VisitInfo, filter_path_by_isolation_read, get_possible_access_paths,
+    PlanBuilder, VisitInfo, filter_path_by_isolation_read, get_possible_access_paths, has_agg_flag,
     has_window_flag, is_for_update_read_select_lock, split_where,
 };
+use crate::core::point_get_plan::value_expr_datum;
 use crate::core::preprocess::try_lock_mdl_and_update_schema_if_necessary;
 use crate::core::resolve::ContextRef;
 use crate::core::rule::logical_rules::{
@@ -85,13 +100,14 @@ use crate::core::rule::logical_rules::{
     FlagEliminateProjection, FlagGcSubstitute, FlagMaxMinEliminate, FlagPredicatePushDown,
     FlagPredicateSimplification, FlagPushDownAgg, FlagPushDownTopN, FlagSkewDistinctAgg,
 };
-use crate::core::util::{AggregateFuncExtractor, table_has_dirty_content};
+use crate::core::util::{AggregateFuncExtractor, WindowFuncExtractor, table_has_dirty_content};
 use crate::hint::parse_plan_hints;
 use crate::logicalop::{
-    DataSource, LogicalAggregation, LogicalLimit, LogicalProjection, LogicalSelection, LogicalSort,
-    LogicalTableDual,
+    DataSource, FrameBound, LogicalAggregation, LogicalLimit, LogicalProjection, LogicalSelection,
+    LogicalSort, LogicalTableDual, LogicalTopN, LogicalWindow, WindowFrame,
 };
 use crate::planctx::PlanCtx;
+use crate::property::SortItem;
 use crate::util::column::index_info2_full_cols;
 use crate::util::handle_cols::{new_common_handle_cols, new_int_handle_cols};
 use crate::util::{ByItems, HandleCols};
@@ -947,9 +963,9 @@ impl<'ast> PlanBuilder<'ast> {
         &mut self,
         ctx: &mut PlanCtx<'_>,
         p: PlanId,
-        fields: &[SelectFieldW<'_>],
+        fields: &[SelectFieldW<'ast>],
         mapper: Option<&AggMapper<'_>>,
-        window_mapper: Option<&mut WindowMapper<'_>>,
+        mut window_mapper: Option<&mut WindowMapper<'ast>>,
         consider_window: bool,
         expand_generate_column: bool,
     ) -> Result<(PlanId, Vec<ExprRef>, usize), Error> {
@@ -964,7 +980,6 @@ impl<'ast> PlanBuilder<'ast> {
         let mut schema = new_schema(Vec::with_capacity(fields.len()));
         let mut old_len = 0;
         let mut new_names: NameSlice = Vec::with_capacity(fields.len());
-        let window_mapper_ro = window_mapper.as_deref();
         for (i, field) in fields.iter().enumerate() {
             if !field.auxiliary {
                 old_len += 1;
@@ -1003,7 +1018,7 @@ impl<'ast> PlanBuilder<'ast> {
                 fexpr,
                 rewrite_plan(&ctx.arena, p),
                 mapper,
-                window_mapper_ro,
+                window_mapper.as_deref(),
                 true,
             );
             self.check_col_priv = origin_col_priv;
@@ -1016,7 +1031,14 @@ impl<'ast> PlanBuilder<'ast> {
 
             // For window functions in the order by clause, we will append an field for it.
             // We need rewrite the window mapper here so order by clause could find the added field.
-            // (Windows are blocked-by:D09.4 before the projection that considers them.)
+            if consider_window
+                && is_window_func_field
+                && field.auxiliary
+                && let Some(FieldExpr::Ast(Expr::Window(window_expr))) = &field.expr
+                && let Some(wm) = window_mapper.as_deref_mut()
+            {
+                wm.insert(ByAddr::new(&**window_expr), i as isize);
+            }
 
             // p = np: outside subqueries the plan never changes (D09.2 spec §3 item 2).
             proj.exprs.push(Arc::clone(&new_expr));
@@ -1025,7 +1047,6 @@ impl<'ast> PlanBuilder<'ast> {
             schema.append(col);
             new_names.push(Arc::new(name));
         }
-        let _ = window_mapper;
         // implicitly project expand grouping set cols, if not used later, it will being pruned out in logical column pruner.
         // (b.implicitProjectGroupingSetCols: no Expand here, ROLLUP is blocked-by:D09.4.)
 
@@ -1386,12 +1407,35 @@ fn accept_agg_extractor<'a>(extractor: &mut AggregateFuncExtractor<'a>, expr: &'
         for c in expr_children(expr) {
             accept_agg_extractor(extractor, c);
         }
-        if let Expr::Aggregate(a) = expr
-            && let Some(o) = &a.order
-        {
-            for item in &o.items {
-                accept_agg_extractor(extractor, &item.expr);
+        match expr {
+            Expr::Aggregate(a) => {
+                if let Some(o) = &a.order {
+                    for item in &o.items {
+                        accept_agg_extractor(extractor, &item.expr);
+                    }
+                }
             }
+            Expr::Window(w) => {
+                if let Some(pb) = &w.spec.partition_by {
+                    for item in &pb.items {
+                        accept_agg_extractor(extractor, &item.expr);
+                    }
+                }
+                if let Some(ob) = &w.spec.order_by {
+                    for item in &ob.items {
+                        accept_agg_extractor(extractor, &item.expr);
+                    }
+                }
+                if let Some(fr) = &w.spec.frame {
+                    if let Some(e) = &fr.extent.start.expr {
+                        accept_agg_extractor(extractor, e);
+                    }
+                    if let Some(e) = &fr.extent.end.expr {
+                        accept_agg_extractor(extractor, e);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     let _ = extractor.leave(expr);
@@ -3608,12 +3652,1530 @@ pub fn all_col_from_agg_expr_node() -> Result<(), Error> {
     ))
 }
 
-/// The window grouping helpers of `groupWindowFuncs`.
-// glue: stub of getAllByItems, blocked-by:D09.4 (window functions)
-// glue: stub of restoreByItemText, blocked-by:D09.4 (window functions)
-// glue: stub of compareItems, blocked-by:D09.4 (window functions)
-pub fn compare_items() -> Result<(), Error> {
-    Err(blocked("D09.4", "compareItems (window functions)"))
+// ---------------------------------------------------------------- window plan building (D09.4 part B)
+
+/// Frame clause held by [`WindowSpecW`]: either borrowed from the statement AST or owned
+/// (synthesized by `handle_default_frame` without mutating the AST, D09.4 spec §4.3).
+#[derive(Debug)]
+pub enum CowFrame<'ast> {
+    /// Borrowed from the parsed statement AST.
+    Borrowed(&'ast ast::FrameClause),
+    /// Synthesized default frame clause (`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`
+    /// or `ROWS BETWEEN CURRENT ROW AND CURRENT ROW`).
+    Owned(ast::FrameClause),
+}
+
+impl CowFrame<'_> {
+    /// Borrow the underlying [`ast::FrameClause`].
+    // glue: accessor for CowFrame
+    pub fn as_frame(&self) -> &ast::FrameClause {
+        match self {
+            CowFrame::Borrowed(f) => f,
+            CowFrame::Owned(f) => f,
+        }
+    }
+}
+
+/// Builder-local view of `*ast.WindowSpec` so `merge_window_spec` and `handle_default_frame`
+/// never mutate the statement AST (D09.4 spec §4.3 item 4).
+#[derive(Debug, Default)]
+pub struct WindowSpecW<'ast> {
+    /// Window name (`spec.Name`).
+    pub name: ast::CIStr,
+    /// Referenced window name (`spec.Ref`); cleared after merging.
+    pub ref_: ast::CIStr,
+    /// Partition-by clause borrowed from the AST.
+    pub partition_by: Option<&'ast ast::PartitionByClause>,
+    /// Order-by clause borrowed from the AST.
+    pub order_by: Option<&'ast ast::OrderByClause>,
+    /// Frame clause (borrowed from AST or owned default frame).
+    pub frame: Option<CowFrame<'ast>>,
+    /// Whether `OVER w` (alias only) vs `OVER (...)`.
+    pub only_alias: bool,
+}
+
+impl<'ast> WindowSpecW<'ast> {
+    /// Construct a builder-local view of an AST `WindowSpec`.
+    // glue: constructor for WindowSpecW
+    pub fn of_ast(spec: &'ast ast::WindowSpec) -> Self {
+        WindowSpecW {
+            name: spec.name.clone(),
+            ref_: spec.ref_.clone(),
+            partition_by: spec.partition_by.as_deref(),
+            order_by: spec.order_by.as_deref(),
+            frame: spec.frame.as_deref().map(CowFrame::Borrowed),
+            only_alias: spec.only_alias,
+        }
+    }
+
+    /// Shallow-copy metadata + clause pointers with a replacement frame (never clones AST exprs).
+    // glue: copy helper for handleDefaultFrame (immutable AST)
+    fn with_frame(&self, frame: Option<CowFrame<'ast>>) -> Self {
+        WindowSpecW {
+            name: self.name.clone(),
+            ref_: self.ref_.clone(),
+            partition_by: self.partition_by,
+            order_by: self.order_by,
+            frame,
+            only_alias: self.only_alias,
+        }
+    }
+
+    /// Restore using Go's `format.NewRestoreCtx(0, ...)` (flags = 0).
+    // glue: flags=0 restore of WindowSpecW for specEqual
+    fn restore_raw(&self, out: &mut String) -> Result<(), String> {
+        restore_window_spec_raw(
+            &self.name.o,
+            self.only_alias,
+            &self.ref_.o,
+            self.partition_by,
+            self.order_by,
+            self.frame.as_ref().map(CowFrame::as_frame),
+            out,
+        )
+    }
+}
+
+/// Identity handle for a [`WindowSpecW`] in `group_window_funcs` / `build_window_functions`
+/// (replaces Go's `*ast.WindowSpec` pointer keys under an immutable AST).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WindowSpecId {
+    /// Index into `PlanBuilder.window_specs` (named window specs of the SELECT).
+    Named(usize),
+    /// Index into the local `local_specs` pool created by `group_window_funcs`.
+    Local(usize),
+}
+
+// glue: resolve WindowSpecId against PlanBuilder.window_specs and local_specs
+fn resolve_spec_id<'a, 'ast>(
+    id: WindowSpecId,
+    named_specs: &'a [WindowSpecW<'ast>],
+    local_specs: &'a [WindowSpecW<'ast>],
+) -> &'a WindowSpecW<'ast> {
+    match id {
+        WindowSpecId::Named(i) => &named_specs[i],
+        WindowSpecId::Local(i) => &local_specs[i],
+    }
+}
+
+/// Walk `expr` with a [`WindowFuncExtractor`].
+// glue: ast.Node.Accept for WindowFuncExtractor (the Rust AST has no visitor, D02.2)
+fn accept_window_extractor<'a>(extractor: &mut WindowFuncExtractor<'a>, expr: &'a Expr) {
+    if !extractor.enter(expr) {
+        for c in expr_children(expr) {
+            accept_window_extractor(extractor, c);
+        }
+        match expr {
+            Expr::Aggregate(a) => {
+                if let Some(o) = &a.order {
+                    for item in &o.items {
+                        accept_window_extractor(extractor, &item.expr);
+                    }
+                }
+            }
+            Expr::Window(w) => {
+                if let Some(pb) = &w.spec.partition_by {
+                    for item in &pb.items {
+                        accept_window_extractor(extractor, &item.expr);
+                    }
+                }
+                if let Some(ob) = &w.spec.order_by {
+                    for item in &ob.items {
+                        accept_window_extractor(extractor, &item.expr);
+                    }
+                }
+                if let Some(fr) = &w.spec.frame {
+                    if let Some(e) = &fr.extent.start.expr {
+                        accept_window_extractor(extractor, e);
+                    }
+                    if let Some(e) = &fr.extent.end.expr {
+                        accept_window_extractor(extractor, e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let _ = extractor.leave(expr);
+}
+
+// go: getWindowName L1
+fn get_window_name(name: &str) -> &str {
+    if name.is_empty() {
+        return "<unnamed window>";
+    }
+    name
+}
+
+// go: getAllByItems L1
+pub fn get_all_by_items<'a, 'ast>(
+    items_buf: &'a mut Vec<&'ast ast::ByItem>,
+    spec: &WindowSpecW<'ast>,
+) -> &'a [&'ast ast::ByItem] {
+    items_buf.clear();
+    if let Some(pb) = spec.partition_by {
+        items_buf.extend(pb.items.iter());
+    }
+    if let Some(ob) = spec.order_by {
+        items_buf.extend(ob.items.iter());
+    }
+    items_buf.as_slice()
+}
+
+// go: restoreByItemText L1
+pub fn restore_by_item_text(item: &ast::ByItem) -> String {
+    let mut sb = String::new();
+    if item.expr.restore_raw(&mut sb).is_err() {
+        return String::new();
+    }
+    sb
+}
+
+// go: compareItems L1
+pub fn compare_items(l_items: &[&ast::ByItem], r_items: &[&ast::ByItem]) -> bool {
+    let min_len = l_items.len().min(r_items.len());
+    for i in 0..min_len {
+        let cmp = restore_by_item_text(l_items[i]).cmp(&restore_by_item_text(r_items[i]));
+        if cmp != std::cmp::Ordering::Equal {
+            return cmp == std::cmp::Ordering::Less;
+        }
+        let res = compare_bool(l_items[i].desc, r_items[i].desc);
+        if res != 0 {
+            return res < 0;
+        }
+    }
+    l_items.len() < r_items.len()
+}
+
+/// Grouped window specification and its associated window functions.
+struct WindowFuncsGroup<'ast> {
+    spec: WindowSpecId,
+    funcs: Vec<&'ast ast::WindowFuncExpr>,
+}
+
+/// sortWindowSpecs sorts the window specifications by reversed alphabetical order, then we could add less `Sort` operator
+/// in physical plan because the window functions with the same partition by and order by clause will be at near places.
+// go: sortWindowSpecs L1 [M-PLAN]
+fn sort_window_specs<'ast>(
+    grouped_funcs: &HashMap<WindowSpecId, Vec<&'ast ast::WindowFuncExpr>>,
+    ordered_spec: &[WindowSpecId],
+    named_specs: &[WindowSpecW<'ast>],
+    local_specs: &[WindowSpecW<'ast>],
+) -> Vec<WindowFuncsGroup<'ast>> {
+    let mut windows = Vec::with_capacity(grouped_funcs.len());
+    for &spec in ordered_spec {
+        windows.push(WindowFuncsGroup {
+            spec,
+            funcs: grouped_funcs.get(&spec).cloned().unwrap_or_default(),
+        });
+    }
+    let mut l_items_buf = Vec::with_capacity(4);
+    let mut r_items_buf = Vec::with_capacity(4);
+    windows.sort_by(|a, b| {
+        let sa = resolve_spec_id(a.spec, named_specs, local_specs);
+        let sb = resolve_spec_id(b.spec, named_specs, local_specs);
+        let l_less = {
+            let l_items = get_all_by_items(&mut l_items_buf, sa);
+            let r_items = get_all_by_items(&mut r_items_buf, sb);
+            !compare_items(l_items, r_items)
+        };
+        if l_less {
+            return std::cmp::Ordering::Less;
+        }
+        let r_less = {
+            let l_items = get_all_by_items(&mut l_items_buf, sb);
+            let r_items = get_all_by_items(&mut r_items_buf, sa);
+            !compare_items(l_items, r_items)
+        };
+        if r_less {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    windows
+}
+
+// go: extractWindowFuncs L1
+fn extract_window_funcs<'ast>(fields: &[SelectFieldW<'ast>]) -> Vec<&'ast ast::WindowFuncExpr> {
+    let mut extractor = WindowFuncExtractor::default();
+    for f in fields {
+        // Window functions only come from parsed AST expressions (built fields are bare ColumnName).
+        if let Some(FieldExpr::Ast(e)) = &f.expr {
+            accept_window_extractor(&mut extractor, e);
+        }
+    }
+    extractor.window_funcs
+}
+
+/// append WindowSpecId to Vec<WindowSpecId> if absent.
+// go: appendIfAbsentWindowSpec L1
+fn append_if_absent_window_spec(specs: &mut Vec<WindowSpecId>, ns: WindowSpecId) {
+    if !specs.contains(&ns) {
+        specs.push(ns);
+    }
+}
+
+// go: specEqual L1
+fn spec_equal(s1: Option<&WindowSpecW<'_>>, s2: Option<&WindowSpecW<'_>>) -> Result<bool, Error> {
+    let (Some(s1), Some(s2)) = (s1, s2) else {
+        return Ok(s1.is_none() && s2.is_none());
+    };
+    let mut sb1 = String::new();
+    let mut sb2 = String::new();
+    s1.restore_raw(&mut sb1).map_err(Error::plain)?;
+    s2.restore_raw(&mut sb2).map_err(Error::plain)?;
+    Ok(sb1 == sb2)
+}
+
+/// resolveWindowSpec resolve window specifications for sql like `select ... from t window w1 as (w2), w2 as (partition by a)`.
+/// We need to resolve the referenced window to get the definition of current window spec.
+// go: resolveWindowSpec L1
+fn resolve_window_spec<'ast>(
+    spec_idx: usize,
+    specs: &mut [WindowSpecW<'ast>],
+    index: &BTreeMap<String, usize>,
+    in_stack: &mut HashMap<String, bool>,
+) -> Result<(), Error> {
+    let spec_name_l = specs[spec_idx].name.l();
+    if in_stack.get(&spec_name_l).copied().unwrap_or(false) {
+        return Err(ErrWindowCircularityInWindowGraph.clone());
+    }
+    let ref_l = specs[spec_idx].ref_.l();
+    if ref_l.is_empty() {
+        return Ok(());
+    }
+    let Some(&ref_idx) = index.get(&ref_l) else {
+        let ref_o = specs[spec_idx].ref_.o.clone();
+        return Err(ErrWindowNoSuchWindow.gen_with_stack_by_args(go_args![ref_o]));
+    };
+    in_stack.insert(spec_name_l.clone(), true);
+    resolve_window_spec(ref_idx, specs, index, in_stack)?;
+    in_stack.insert(spec_name_l, false);
+    // Copy the read-only fields from `specs[ref_idx]` before mutating `specs[spec_idx]`.
+    let ref_snapshot = WindowSpecW {
+        name: specs[ref_idx].name.clone(),
+        ref_: specs[ref_idx].ref_.clone(),
+        partition_by: specs[ref_idx].partition_by,
+        order_by: specs[ref_idx].order_by,
+        frame: specs[ref_idx].frame.as_ref().map(|f| match f {
+            CowFrame::Borrowed(b) => CowFrame::Borrowed(b),
+            CowFrame::Owned(_) => unreachable!("buildWindowSpecs only holds borrowed frames"),
+        }),
+        only_alias: specs[ref_idx].only_alias,
+    };
+    merge_window_spec(&mut specs[spec_idx], &ref_snapshot)
+}
+
+// go: mergeWindowSpec L1
+fn merge_window_spec<'ast>(
+    spec: &mut WindowSpecW<'ast>,
+    ref_spec: &WindowSpecW<'ast>,
+) -> Result<(), Error> {
+    if ref_spec.frame.is_some() {
+        return Err(
+            ErrWindowNoInherentFrame.gen_with_stack_by_args(go_args![ref_spec.name.o.clone()])
+        );
+    }
+    if spec.partition_by.is_some() {
+        return Err(ErrWindowNoChildPartitioning.clone());
+    }
+    if ref_spec.order_by.is_some() {
+        if spec.order_by.is_some() {
+            return Err(ErrWindowNoRedefineOrderBy.gen_with_stack_by_args(go_args![
+                get_window_name(&spec.name.o).to_owned(),
+                ref_spec.name.o.clone()
+            ]));
+        }
+        spec.order_by = ref_spec.order_by;
+    }
+    spec.partition_by = ref_spec.partition_by;
+    spec.ref_ = ast::CIStr::default();
+    Ok(())
+}
+
+// go: buildWindowSpecs L2 (deterministic declaration-order iteration, M-MAPORDER; immutable AST via WindowSpecW)
+fn build_window_specs<'ast>(
+    specs: &'ast [ast::WindowSpec],
+) -> Result<(Vec<WindowSpecW<'ast>>, BTreeMap<String, usize>), Error> {
+    let mut specs_vec = Vec::with_capacity(specs.len());
+    let mut index = BTreeMap::new();
+    for spec in specs {
+        let key = spec.name.l();
+        if index.contains_key(&key) {
+            return Err(
+                ErrWindowDuplicateName.gen_with_stack_by_args(go_args![spec.name.o.clone()])
+            );
+        }
+        let idx = specs_vec.len();
+        specs_vec.push(WindowSpecW::of_ast(spec));
+        index.insert(key, idx);
+    }
+    let mut in_stack = HashMap::with_capacity(specs.len());
+    for i in 0..specs_vec.len() {
+        resolve_window_spec(i, &mut specs_vec, &index, &mut in_stack)?;
+    }
+    Ok((specs_vec, index))
+}
+
+/// Evaluate a RANGE window frame bound expression into a [`Constant`] with an accurate
+/// [`FieldType`].
+///
+/// For compound expressions (e.g. `INTERVAL 1.0+0.5 DAY`), derives `RetType` from the
+/// evaluated `Datum` via `default_type_for_value` instead of Go's zero-value `FieldType`
+/// (Divergence ruling R28 / #413, owner decision 2026-11-26 option A).
+// go-part: PlanBuilder.buildWindowFunctionFrameBound
+pub(crate) fn eval_window_range_bound_constant(
+    ctx: &dyn BuildContext,
+    bound_expr: &Expr,
+    spec_name: &str,
+    in_prepare_stmt: bool,
+) -> Result<Constant, Error> {
+    if let Expr::Value(v) = bound_expr {
+        let go_val = value_expr_go_value(v);
+        let mut ret_type = FieldType::default();
+        default_type_for_value(&go_val, &mut ret_type, v.charset, v.collate);
+        let mut val = value_expr_datum(v);
+        let gv = val.get_value();
+        val.set_value(gv, &ret_type);
+        return Ok(Constant::new(val, ret_type));
+    }
+    let val = match eval_ast_expr_with_plan_ctx(ctx, bound_expr) {
+        Ok(v) => v,
+        Err(e) if blocked_by(&e).is_some() => return Err(e),
+        Err(_) => {
+            return Err(ErrWindowRangeBoundNotConstant
+                .gen_with_stack_by_args(go_args![get_window_name(spec_name).to_owned()]));
+        }
+    };
+    let mut ret_type = FieldType::default();
+    if !(matches!(bound_expr, Expr::ParamMarker(_)) && in_prepare_stmt) {
+        // Divergence ruling R28 (#413, owner decision 2026-11-26 option A): infer Constant.RetType
+        // from the evaluated Datum (e.g. KindMysqlDecimal -> TypeNewDecimal for `INTERVAL 1.0+0.5 DAY`)
+        // so DateAdd/DateSub selects AddDateDatetimeDecimal/SubDateDatetimeDecimal instead of
+        // truncating via ETInt (such windows are no longer pushed down to TiFlash).
+        default_type_for_value(
+            &val.get_value(),
+            &mut ret_type,
+            DefaultCharset,
+            DefaultCollationName,
+        );
+    }
+    Ok(Constant::new(val, ret_type))
+}
+
+/// Clear `NotNullFlag` on any column matching `target_uid` inside an expression tree.
+// glue: Go aliasing (M-FT) helper for window_func.go:76 & logical_plan_builder.go:7251 (#402)
+fn clear_not_null_in_expr(expr: &mut ExprRef, target_uid: i64) {
+    match Arc::make_mut(expr) {
+        PExpr::Column(c) if c.unique_id == target_uid => {
+            Arc::make_mut(&mut c.ret_type).del_flag(NotNullFlag);
+        }
+        PExpr::ScalarFunction(sf) => {
+            for arg in &mut sf.function.args {
+                clear_not_null_in_expr(arg, target_uid);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Clear `NotNullFlag` on any column matching `target_uid` inside a `WindowFrame`.
+// glue: Go aliasing (M-FT) helper for window_func.go:76 & logical_plan_builder.go:7251 (#402)
+fn clear_not_null_in_frame(frame: &mut Option<WindowFrame>, target_uid: i64) {
+    if let Some(fr) = frame {
+        for bound in [&mut fr.start, &mut fr.end].into_iter().flatten() {
+            for e in bound
+                .calc_funcs
+                .iter_mut()
+                .chain(bound.compare_cols.iter_mut())
+            {
+                clear_not_null_in_expr(e, target_uid);
+            }
+        }
+    }
+}
+
+/// Propagate `NotNullFlag` removal on `target_uid` through the subtree below a `LogicalWindow`
+/// (`np` down to `DataSource`), emulating Go's shared `*FieldType` pointer mutation in
+/// `NewWindowFuncDesc` for `first_value` / `last_value` / `nth_value` (`M-FT`, confirmed V1 #402).
+/// Does not modify `TableInfo` or `ColumnInfo`.
+// glue: Go aliasing (M-FT): window_func.go:76 & logical_plan_builder.go:7251 (#402)
+fn clear_not_null_in_subtree(arena: &mut PlanArena, root: PlanId, target_uid: i64) {
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let children = arena.get(id).children().to_vec();
+        stack.extend(children);
+
+        if arena.get(id).schema_producer().is_some() {
+            let schema = arena.schema_mut(id);
+            for col in &mut schema.columns {
+                if col.unique_id == target_uid && has_not_null_flag(col.ret_type.get_flag()) {
+                    Arc::make_mut(&mut Arc::make_mut(col).ret_type).del_flag(NotNullFlag);
+                }
+            }
+        }
+
+        let node = arena.get_mut(id);
+        match node.kind() {
+            LogicalKind::DataSource => {
+                let ds = node.as_any_mut().downcast_mut::<DataSource>().unwrap();
+                for col in &mut ds.tbl_cols {
+                    if col.unique_id == target_uid && has_not_null_flag(col.ret_type.get_flag()) {
+                        Arc::make_mut(&mut Arc::make_mut(col).ret_type).del_flag(NotNullFlag);
+                    }
+                }
+                for col in &mut ds.common_handle_cols {
+                    if col.unique_id == target_uid && has_not_null_flag(col.ret_type.get_flag()) {
+                        Arc::make_mut(&mut Arc::make_mut(col).ret_type).del_flag(NotNullFlag);
+                    }
+                }
+                for path in ds
+                    .all_possible_access_paths
+                    .iter_mut()
+                    .chain(ds.possible_access_paths.iter_mut())
+                {
+                    for col_opt in &mut path.full_idx_cols {
+                        if let Some(col) = col_opt
+                            && col.unique_id == target_uid
+                            && has_not_null_flag(col.ret_type.get_flag())
+                        {
+                            Arc::make_mut(&mut Arc::make_mut(col).ret_type).del_flag(NotNullFlag);
+                        }
+                    }
+                }
+                for hc in [&mut ds.handle_cols, &mut ds.un_mutable_handle_cols]
+                    .into_iter()
+                    .flatten()
+                {
+                    hc.clear_col_not_null_flag(target_uid);
+                }
+                for cond in ds
+                    .pushed_down_conds
+                    .iter_mut()
+                    .chain(ds.all_conds.iter_mut())
+                {
+                    clear_not_null_in_expr(cond, target_uid);
+                }
+            }
+            LogicalKind::Projection => {
+                let proj = node
+                    .as_any_mut()
+                    .downcast_mut::<LogicalProjection>()
+                    .unwrap();
+                let schema_uids: Vec<i64> = proj
+                    .sp
+                    .schema_opt()
+                    .map(|s| s.columns.iter().map(|c| c.unique_id).collect())
+                    .unwrap_or_default();
+                for (idx, expr) in proj.exprs.iter_mut().enumerate() {
+                    clear_not_null_in_expr(expr, target_uid);
+                    if schema_uids.get(idx).copied() == Some(target_uid)
+                        && let PExpr::ScalarFunction(sf) = Arc::make_mut(expr)
+                        && has_not_null_flag(sf.function.tp.get_flag())
+                    {
+                        Arc::make_mut(&mut sf.function.tp).del_flag(NotNullFlag);
+                    }
+                }
+            }
+            LogicalKind::Selection => {
+                let sel = node
+                    .as_any_mut()
+                    .downcast_mut::<LogicalSelection>()
+                    .unwrap();
+                for cond in &mut sel.conditions {
+                    clear_not_null_in_expr(cond, target_uid);
+                }
+            }
+            LogicalKind::Aggregation => {
+                let agg = node
+                    .as_any_mut()
+                    .downcast_mut::<LogicalAggregation>()
+                    .unwrap();
+                for item in &mut agg.group_by_items {
+                    clear_not_null_in_expr(item, target_uid);
+                }
+                for desc in &mut agg.agg_funcs {
+                    for arg in &mut desc.base.args {
+                        clear_not_null_in_expr(arg, target_uid);
+                    }
+                    for item in &mut desc.order_by_items {
+                        clear_not_null_in_expr(&mut item.expr, target_uid);
+                    }
+                }
+            }
+            LogicalKind::Window => {
+                let win = node.as_any_mut().downcast_mut::<LogicalWindow>().unwrap();
+                for item in win.partition_by.iter_mut().chain(win.order_by.iter_mut()) {
+                    if item.col.unique_id == target_uid
+                        && has_not_null_flag(item.col.ret_type.get_flag())
+                    {
+                        Arc::make_mut(&mut Arc::make_mut(&mut item.col).ret_type)
+                            .del_flag(NotNullFlag);
+                    }
+                }
+                for desc in &mut win.window_func_descs {
+                    for arg in &mut desc.base.args {
+                        clear_not_null_in_expr(arg, target_uid);
+                    }
+                }
+                clear_not_null_in_frame(&mut win.frame, target_uid);
+            }
+            LogicalKind::Sort => {
+                let sort = node.as_any_mut().downcast_mut::<LogicalSort>().unwrap();
+                for item in &mut sort.by_items {
+                    clear_not_null_in_expr(&mut item.expr, target_uid);
+                }
+            }
+            LogicalKind::TopN => {
+                let topn = node.as_any_mut().downcast_mut::<LogicalTopN>().unwrap();
+                for item in &mut topn.by_items {
+                    clear_not_null_in_expr(&mut item.expr, target_uid);
+                }
+            }
+            LogicalKind::Limit | LogicalKind::TableDual => {}
+        }
+    }
+}
+
+impl<'ast> PlanBuilder<'ast> {
+    /// resolveWindowFunction will process window functions and resolve the columns that don't exist in select fields.
+    // go: PlanBuilder.resolveWindowFunction L2 (immutable AST returns updated fields and agg_col_replacements)
+    #[allow(clippy::type_complexity)]
+    pub fn resolve_window_function(
+        &mut self,
+        ctx: &PlanCtx<'_>,
+        sel: &'ast ast::SelectStmt,
+        p: PlanId,
+        fields: Vec<SelectFieldW<'ast>>,
+    ) -> Result<
+        (
+            AggMapper<'ast>,
+            Vec<SelectFieldW<'ast>>,
+            HashMap<ByAddr<'ast, ast::ColumnName>, usize>,
+        ),
+        Error,
+    > {
+        let orig_len = fields.len();
+        let mut agg_col_replacements = HashMap::new();
+        let empty_gby_repl = HashMap::new();
+        let mut extractor = HavingWindowAndOrderbyExprResolver {
+            in_agg_func: false,
+            in_window_func: false,
+            in_window_spec: false,
+            in_expr: false,
+            p,
+            arena: &ctx.arena,
+            select_fields: fields,
+            agg_mapper: AggMapper::new(),
+            col_mapper: &mut self.col_mapper,
+            agg_col_replacements: &mut agg_col_replacements,
+            gby_items: &[],
+            gby_col_replacements: &empty_gby_repl,
+            cur_clause: ClauseCode::FieldList,
+            prev_clause: Vec::new(),
+        };
+        for i in 0..orig_len {
+            let Some(FieldExpr::Ast(e)) = extractor.select_fields[i].expr else {
+                continue;
+            };
+            if !has_window_flag(e) {
+                continue;
+            }
+            extractor.accept(e)?;
+        }
+        for spec in &sel.window_specs {
+            extractor.accept_window_spec(spec)?;
+        }
+        if let Some(o) = &sel.order_by {
+            extractor.cur_clause = ClauseCode::OrderByClause;
+            for item in &o.items {
+                if !has_window_flag(&item.expr) {
+                    continue;
+                }
+                extractor.accept(&item.expr)?;
+            }
+        }
+        Ok((
+            extractor.agg_mapper,
+            extractor.select_fields,
+            agg_col_replacements,
+        ))
+    }
+
+    /// buildProjectionForWindow builds the projection for expressions in the window specification that is not an column,
+    /// so after the projection, window functions only needs to deal with columns.
+    // go: PlanBuilder.buildProjectionForWindow L1 [M-PLAN, M-CTX]
+    #[allow(clippy::type_complexity)]
+    fn build_projection_for_window(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        mut p: PlanId,
+        spec: &WindowSpecW<'ast>,
+        args: &[&'ast Expr],
+        agg_map: Option<&AggMapper<'_>>,
+    ) -> Result<(PlanId, Vec<SortItem>, Vec<SortItem>, Vec<ExprRef>), Error> {
+        self.opt_flag |= FlagEliminateProjection;
+
+        let partition_items: &[ast::ByItem] = spec.partition_by.map_or(&[], |pb| &pb.items);
+        let order_items: &[ast::ByItem] = spec.order_by.map_or(&[], |ob| &ob.items);
+
+        let p_schema_cols = schema_of(&ctx.arena, p).columns.clone();
+        let p_names = names_of(&ctx.arena, p).clone();
+        let proj_len = p_schema_cols.len() + partition_items.len() + order_items.len() + args.len();
+        let mut proj =
+            LogicalProjection::init(Vec::with_capacity(proj_len), ctx, self.get_select_offset());
+        let mut proj_schema = new_schema(Vec::with_capacity(proj_len));
+        let mut proj_names = Vec::with_capacity(proj_len);
+        for col in &p_schema_cols {
+            proj.exprs
+                .push(PExpr::Column(Column::clone(col)).into_ref());
+            proj_schema.append([Arc::clone(col)]);
+        }
+        proj_names.extend(p_names);
+
+        let mut property_items = Vec::with_capacity(partition_items.len() + order_items.len());
+        p = self.build_by_items_for_window(
+            ctx,
+            p,
+            &mut proj,
+            &mut proj_schema,
+            &mut proj_names,
+            partition_items,
+            &mut property_items,
+            agg_map,
+        )?;
+        let len_partition = property_items.len();
+        p = self.build_by_items_for_window(
+            ctx,
+            p,
+            &mut proj,
+            &mut proj_schema,
+            &mut proj_names,
+            order_items,
+            &mut property_items,
+            agg_map,
+        )?;
+
+        let mut new_arg_list = Vec::with_capacity(args.len());
+        for &arg in args {
+            let new_arg = self
+                .rewrite(
+                    &*ctx.expr_ctx,
+                    arg,
+                    rewrite_plan(&ctx.arena, p),
+                    agg_map,
+                    true,
+                )?
+                .expect("asScalar rewrite returns an expression");
+            if matches!(&*new_arg, PExpr::Column(_) | PExpr::Constant(_)) {
+                new_arg_list.push(Arc::new((*new_arg).clone()));
+                continue;
+            }
+            let ret_type = Arc::new(new_arg.get_type(&*ctx.eval_ctx()).into_owned());
+            proj.exprs.push(new_arg);
+            proj_names.push(EmptyName.clone());
+            let col = Arc::new(Column {
+                unique_id: ctx.vars.alloc_plan_column_id(),
+                ret_type,
+                ..Column::default()
+            });
+            proj_schema.append([Arc::clone(&col)]);
+            new_arg_list.push(PExpr::Column(Column::clone(&col)).into_ref());
+        }
+
+        proj.sp.set_schema(Some(proj_schema));
+        proj.sp.set_output_names(proj_names);
+        proj.set_children(vec![p]);
+        let order_by = property_items.split_off(len_partition);
+        let partition_by = property_items;
+        Ok((
+            ctx.arena.alloc(Box::new(proj)),
+            partition_by,
+            order_by,
+            new_arg_list,
+        ))
+    }
+
+    // go: PlanBuilder.buildArgs4WindowFunc L1 [M-CTX]
+    fn build_args4_window_func(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        p: PlanId,
+        args: &[Expr],
+        agg_map: Option<&AggMapper<'_>>,
+    ) -> Result<Vec<ExprRef>, Error> {
+        self.opt_flag |= FlagEliminateProjection;
+
+        let mut new_arg_list = Vec::with_capacity(args.len());
+        for arg in args {
+            let new_arg = self
+                .rewrite(
+                    &*ctx.expr_ctx,
+                    arg,
+                    rewrite_plan(&ctx.arena, p),
+                    agg_map,
+                    true,
+                )?
+                .expect("asScalar rewrite returns an expression");
+            if matches!(&*new_arg, PExpr::Column(_) | PExpr::Constant(_)) {
+                new_arg_list.push(Arc::new((*new_arg).clone()));
+                continue;
+            }
+            let ret_type = Arc::new(new_arg.get_type(&*ctx.eval_ctx()).into_owned());
+            let col = Column {
+                unique_id: ctx.vars.alloc_plan_column_id(),
+                ret_type,
+                ..Column::default()
+            };
+            new_arg_list.push(PExpr::Column(col).into_ref());
+        }
+        Ok(new_arg_list)
+    }
+
+    // go: PlanBuilder.buildByItemsForWindow L1 [M-CTX]
+    #[allow(clippy::too_many_arguments)]
+    fn build_by_items_for_window(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        p: PlanId,
+        proj: &mut LogicalProjection,
+        proj_schema: &mut Schema,
+        proj_names: &mut NameSlice,
+        items: &[ast::ByItem],
+        ret_items: &mut Vec<SortItem>,
+        agg_map: Option<&AggMapper<'_>>,
+    ) -> Result<PlanId, Error> {
+        for item in items {
+            ItemTransformer.accept(&item.expr)?;
+            let it = self
+                .rewrite(
+                    &*ctx.expr_ctx,
+                    &item.expr,
+                    rewrite_plan(&ctx.arena, p),
+                    agg_map,
+                    true,
+                )?
+                .expect("asScalar rewrite returns an expression");
+            if it.get_type(&*ctx.eval_ctx()).get_type() == TypeNull {
+                continue;
+            }
+            if let PExpr::Column(col) = &*it {
+                let col_arc = Arc::new(col.clone());
+                ret_items.push(SortItem {
+                    col: Arc::clone(&col_arc),
+                    desc: item.desc,
+                });
+                // We need to attempt to add this column because a subquery may be created during the expression rewrite process.
+                // Therefore, we need to ensure that the column from the newly created query plan is added.
+                // If the column is already in the schema, we don't need to add it again.
+                if !proj_schema.contains(&col_arc) {
+                    proj.exprs.push(it);
+                    proj_names.push(EmptyName.clone());
+                    proj_schema.append([col_arc]);
+                }
+                continue;
+            }
+            let ret_type = Arc::new(it.get_type(&*ctx.eval_ctx()).into_owned());
+            proj.exprs.push(it);
+            proj_names.push(EmptyName.clone());
+            let col = Arc::new(Column {
+                unique_id: ctx.vars.alloc_plan_column_id(),
+                ret_type,
+                ..Column::default()
+            });
+            proj_schema.append([Arc::clone(&col)]);
+            ret_items.push(SortItem {
+                col,
+                desc: item.desc,
+            });
+        }
+        Ok(p)
+    }
+
+    /// buildWindowFunctionFrameBound builds the bounds of window function frames.
+    /// For type `Rows`, the bound expr must be an unsigned integer.
+    /// For type `Range`, the bound expr must be temporal or numeric types.
+    // go: PlanBuilder.buildWindowFunctionFrameBound L1 [M-CTX]
+    fn build_window_function_frame_bound(
+        &self,
+        ctx: &PlanCtx<'_>,
+        spec: &WindowSpecW<'ast>,
+        order_by_items: &[SortItem],
+        bound_clause: &ast::FrameBound,
+    ) -> Result<FrameBound, Error> {
+        let frame_type = spec.frame.as_ref().expect("frame").as_frame().tp;
+        let mut bound = FrameBound {
+            tp: bound_clause.tp,
+            unbounded: bound_clause.unbounded,
+            is_explicit_range: false,
+            ..FrameBound::default()
+        };
+        if bound.unbounded {
+            return Ok(bound);
+        }
+
+        let in_execute = ctx.vars.stmt_ctx().in_prepared_plan_building;
+        if frame_type == ast::FrameType::Rows {
+            if bound.tp == ast::BoundType::CurrentRow {
+                return Ok(bound);
+            }
+            let (num_rows, _, _) = get_uint_from_node(
+                &*ctx.expr_ctx,
+                bound_clause.expr.as_ref().expect("rows bound expr"),
+                false,
+                in_execute,
+            );
+            bound.num = num_rows;
+            return Ok(bound);
+        }
+
+        bound.calc_funcs = Vec::with_capacity(order_by_items.len());
+        bound.cmp_funcs = vec![None; order_by_items.len()];
+        if bound.tp == ast::BoundType::CurrentRow {
+            for (i, item) in order_by_items.iter().enumerate() {
+                let col_expr = PExpr::Column(Column::clone(&item.col)).into_ref();
+                bound.cmp_funcs[i] = Some(get_cmp_function(&*ctx.expr_ctx, &col_expr, &col_expr));
+                bound.calc_funcs.push(col_expr);
+            }
+            return Ok(bound);
+        }
+
+        let col = &order_by_items[0].col;
+        let bound_expr = bound_clause.expr.as_ref().expect("range bound expr");
+
+        let mut checker = ParamMarkerInPrepareChecker::new(in_execute);
+        checker.accept(bound_expr);
+
+        let expr = eval_window_range_bound_constant(
+            &*ctx.expr_ctx,
+            bound_expr,
+            &spec.name.o,
+            checker.in_prepare_stmt,
+        )?;
+
+        // If it has paramMarker and is in prepare stmt. We don't need to eval it since its value is not decided yet.
+        if !checker.in_prepare_stmt {
+            // Do not raise warnings for truncate.
+            let expr_ctx = ctx_with_handle_truncate_err_level(
+                Arc::clone(&ctx.expr_ctx) as tidb_sessionctx::exprctx::BuildContextRef,
+                errctx::LevelIgnore,
+            );
+            match expr.eval_int(&*expr_ctx.get_eval_ctx(), &EvalState::new(), Row::default()) {
+                Ok(Some(u_val)) if u_val >= 0 => {}
+                Err(e) if blocked_by(&e).is_some() => return Err(e),
+                _ => {
+                    return Err(ErrWindowFrameIllegal.gen_with_stack_by_args(go_args![
+                        get_window_name(&spec.name.o).to_owned()
+                    ]));
+                }
+            }
+        }
+
+        bound.is_explicit_range = true;
+        let desc = order_by_items[0].desc;
+        let col_expr = PExpr::Column(Column::clone(col)).into_ref();
+        let const_expr = PExpr::Constant(expr).into_ref();
+        let calc_func = if bound_clause.unit != ast::TimeUnitType::Invalid {
+            let unit_val = bound_clause.unit.as_str();
+            let unit = PExpr::Constant(Constant::new(
+                new_string_datum(unit_val),
+                new_field_type(TypeVarchar),
+            ))
+            .into_ref();
+
+            // When the order is asc:
+            //   `+` for following, and `-` for the preceding
+            // When the order is desc, `+` becomes `-` and vice-versa.
+            let func_name = if (!desc && bound.tp == ast::BoundType::Preceding)
+                || (desc && bound.tp == ast::BoundType::Following)
+            {
+                ast::funcs::DateSub
+            } else {
+                ast::funcs::DateAdd
+            };
+
+            new_function_base(
+                &*ctx.expr_ctx,
+                func_name,
+                (*col.ret_type).clone(),
+                vec![Arc::clone(&col_expr), const_expr, unit],
+            )?
+        } else {
+            // When the order is asc:
+            //   `+` for following, and `-` for the preceding
+            // When the order is desc, `+` becomes `-` and vice-versa.
+            let func_name = if (!desc && bound.tp == ast::BoundType::Preceding)
+                || (desc && bound.tp == ast::BoundType::Following)
+            {
+                ast::funcs::Minus
+            } else {
+                ast::funcs::Plus
+            };
+
+            new_function_base(
+                &*ctx.expr_ctx,
+                func_name,
+                (*col.ret_type).clone(),
+                vec![Arc::clone(&col_expr), const_expr],
+            )?
+        };
+        bound.calc_funcs.push(calc_func);
+
+        let cmp_data_type =
+            get_accurate_cmp_type(&*ctx.eval_ctx(), &col_expr, &bound.calc_funcs[0]);
+        bound.update_cmp_funcs_and_cmp_data_type(cmp_data_type);
+        Ok(bound)
+    }
+
+    /// buildWindowFunctionFrame builds the window function frames.
+    // go: PlanBuilder.buildWindowFunctionFrame L1 [M-CTX]
+    fn build_window_function_frame(
+        &self,
+        ctx: &PlanCtx<'_>,
+        spec: &WindowSpecW<'ast>,
+        order_by_items: &[SortItem],
+    ) -> Result<Option<WindowFrame>, Error> {
+        let Some(frame_clause) = spec.frame.as_ref().map(CowFrame::as_frame) else {
+            return Ok(None);
+        };
+        let start = self.build_window_function_frame_bound(
+            ctx,
+            spec,
+            order_by_items,
+            &frame_clause.extent.start,
+        )?;
+        let end = self.build_window_function_frame_bound(
+            ctx,
+            spec,
+            order_by_items,
+            &frame_clause.extent.end,
+        )?;
+        Ok(Some(WindowFrame {
+            tp: frame_clause.tp,
+            start: Some(start),
+            end: Some(end),
+        }))
+    }
+
+    // go: PlanBuilder.checkWindowFuncArgs L1 [M-DEFER, M-CTX]
+    fn check_window_func_args(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        p: PlanId,
+        window_func_exprs: &[&'ast ast::WindowFuncExpr],
+        window_agg_map: Option<&AggMapper<'_>>,
+    ) -> Result<(), Error> {
+        let origin_col_priv = self.check_col_priv;
+        self.check_col_priv = CheckSelectColumnPrivOption::ReportColumnErrOption;
+        let res = self.check_window_func_args_inner(ctx, p, window_func_exprs, window_agg_map);
+        self.check_col_priv = origin_col_priv;
+        res
+    }
+
+    // go-part: PlanBuilder.checkWindowFuncArgs
+    fn check_window_func_args_inner(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        p: PlanId,
+        window_func_exprs: &[&'ast ast::WindowFuncExpr],
+        window_agg_map: Option<&AggMapper<'_>>,
+    ) -> Result<(), Error> {
+        let in_execute = ctx.vars.stmt_ctx().in_prepared_plan_building;
+        let mut checker = ParamMarkerInPrepareChecker::new(in_execute);
+        for window_func_expr in window_func_exprs {
+            if window_func_expr.name.to_lowercase() == ast::funcs::AggFuncGroupConcat {
+                return Err(ErrNotSupportedYet
+                    .gen_with_stack_by_args(go_args!["group_concat as window function"]));
+            }
+            let args =
+                self.build_args4_window_func(ctx, p, &window_func_expr.args, window_agg_map)?;
+            checker.in_prepare_stmt = false;
+            for expr in &window_func_expr.args {
+                checker.accept(expr);
+            }
+            let desc = new_window_func_desc(
+                &*ctx.expr_ctx,
+                &window_func_expr.name,
+                args,
+                checker.in_prepare_stmt,
+            )?;
+            if desc.is_none() {
+                return Err(ErrWrongArguments
+                    .gen_with_stack_by_args(go_args![window_func_expr.name.to_lowercase()]));
+            }
+        }
+        Ok(())
+    }
+
+    // go: PlanBuilder.buildWindowFunctions L1 [M-DEFER, M-FT, M-PLAN, M-CTX]
+    #[allow(clippy::too_many_arguments)]
+    fn build_window_functions(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        p: PlanId,
+        grouped_funcs: &HashMap<WindowSpecId, Vec<&'ast ast::WindowFuncExpr>>,
+        ordered_spec: &[WindowSpecId],
+        local_specs: &[WindowSpecW<'ast>],
+        agg_map: Option<&AggMapper<'_>>,
+    ) -> Result<(PlanId, WindowMapper<'ast>), Error> {
+        // b.buildingCTE: no CTE is built yet (D09.5).
+        let origin_col_priv = self.check_col_priv;
+        self.check_col_priv = CheckSelectColumnPrivOption::ReportColumnErrOption;
+        let res = self.build_window_functions_inner(
+            ctx,
+            p,
+            grouped_funcs,
+            ordered_spec,
+            local_specs,
+            agg_map,
+        );
+        self.check_col_priv = origin_col_priv;
+        res
+    }
+
+    // go-part: PlanBuilder.buildWindowFunctions
+    #[allow(clippy::too_many_arguments)]
+    fn build_window_functions_inner(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        mut p: PlanId,
+        grouped_funcs: &HashMap<WindowSpecId, Vec<&'ast ast::WindowFuncExpr>>,
+        ordered_spec: &[WindowSpecId],
+        local_specs: &[WindowSpecW<'ast>],
+        agg_map: Option<&AggMapper<'_>>,
+    ) -> Result<(PlanId, WindowMapper<'ast>), Error> {
+        let mut args: Vec<&'ast Expr> = Vec::with_capacity(4);
+        let mut window_map: WindowMapper<'ast> = WindowMapper::new();
+        let in_execute = ctx.vars.stmt_ctx().in_prepared_plan_building;
+        let sorted =
+            sort_window_specs(grouped_funcs, ordered_spec, &self.window_specs, local_specs);
+        for window_group in sorted {
+            args.clear();
+            let funcs = window_group.funcs;
+            for window_func in &funcs {
+                args.extend(window_func.args.iter());
+            }
+            // Borrow spec by copying its lightweight handles before calling `&mut self` methods.
+            let spec_view = {
+                let s = resolve_spec_id(window_group.spec, &self.window_specs, local_specs);
+                WindowSpecW {
+                    name: s.name.clone(),
+                    ref_: s.ref_.clone(),
+                    partition_by: s.partition_by,
+                    order_by: s.order_by,
+                    frame: None,
+                    only_alias: s.only_alias,
+                }
+            };
+            let (np, partition_by, order_by, mut built_args) =
+                self.build_projection_for_window(ctx, p, &spec_view, &args, agg_map)?;
+            if funcs.is_empty() {
+                // len(funcs) == 0 indicates this an unused named window spec,
+                // so we just check for its validity and don't have to build plan for it.
+                let spec = resolve_spec_id(window_group.spec, &self.window_specs, local_specs);
+                self.check_origin_window_spec(ctx, spec, &order_by)?;
+                continue;
+            }
+            self.check_origin_window_funcs(ctx, &funcs, &order_by)?;
+            let frame = {
+                let spec = resolve_spec_id(window_group.spec, &self.window_specs, local_specs);
+                self.build_window_function_frame(ctx, spec, &order_by)?
+            };
+
+            let mut window = LogicalWindow::init(
+                Vec::new(),
+                partition_by,
+                order_by,
+                frame,
+                ctx,
+                self.get_select_offset(),
+            );
+            let mut window_names = names_of(&ctx.arena, np).clone();
+            let mut schema = schema_of(&ctx.arena, np).clone_schema();
+            let mut descs: Vec<tidb_expression::aggregation::WindowFuncDesc> =
+                Vec::with_capacity(funcs.len());
+            let mut pre_args = 0usize;
+            let mut checker = ParamMarkerInPrepareChecker::new(in_execute);
+            for window_func in funcs {
+                checker.in_prepare_stmt = false;
+                for expr in &window_func.args {
+                    checker.accept(expr);
+                }
+                let next_pre = pre_args + window_func.args.len();
+                let wf_args: Vec<ExprRef> = built_args[pre_args..next_pre].to_vec();
+                let arg0_not_null_uid = wf_args.first().and_then(|e| match &**e {
+                    PExpr::Column(c) if has_not_null_flag(c.ret_type.get_flag()) => {
+                        Some(c.unique_id)
+                    }
+                    _ => None,
+                });
+                let Some(mut desc) = new_window_func_desc(
+                    &*ctx.expr_ctx,
+                    &window_func.name,
+                    wf_args,
+                    checker.in_prepare_stmt,
+                )?
+                else {
+                    return Err(ErrWrongArguments
+                        .gen_with_stack_by_args(go_args![window_func.name.to_lowercase()]));
+                };
+                // Go aliasing (M-FT): window_func.go:76 & logical_plan_builder.go:7251 (#402).
+                // For first_value/last_value/nth_value (non-enum/set), Go's DelFlag(NotNullFlag)
+                // mutates the shared *FieldType pointer of args[0], clearing NotNullFlag on the
+                // source column across the LogicalWindow schema and all descendants down to
+                // DataSource (without touching TableInfo). Propagate it so ColumnPruner and
+                // ProjectionEliminator cannot restore NotNullFlag from child schemas.
+                if let Some(uid) = arg0_not_null_uid
+                    && desc.base.args.first().is_some_and(|e| {
+                        !has_not_null_flag(e.get_type(&*ctx.eval_ctx()).get_flag())
+                    })
+                {
+                    for col in &mut schema.columns {
+                        if col.unique_id == uid && has_not_null_flag(col.ret_type.get_flag()) {
+                            Arc::make_mut(&mut Arc::make_mut(col).ret_type).del_flag(NotNullFlag);
+                        }
+                    }
+                    for item in window
+                        .partition_by
+                        .iter_mut()
+                        .chain(window.order_by.iter_mut())
+                    {
+                        if item.col.unique_id == uid
+                            && has_not_null_flag(item.col.ret_type.get_flag())
+                        {
+                            Arc::make_mut(&mut Arc::make_mut(&mut item.col).ret_type)
+                                .del_flag(NotNullFlag);
+                        }
+                    }
+                    for prev_desc in &mut descs {
+                        for arg in &mut prev_desc.base.args {
+                            clear_not_null_in_expr(arg, uid);
+                        }
+                    }
+                    for rem_arg in &mut built_args[next_pre..] {
+                        clear_not_null_in_expr(rem_arg, uid);
+                    }
+                    clear_not_null_in_frame(&mut window.frame, uid);
+                    clear_not_null_in_subtree(&mut ctx.arena, np, uid);
+                }
+                pre_args = next_pre;
+                desc.wrap_cast_for_agg_args(&*ctx.expr_ctx)?;
+                let ret_tp = Arc::clone(&desc.base.ret_tp);
+                descs.push(desc);
+                window_map.insert(ByAddr::new(window_func), schema.len() as isize);
+                schema.append([Arc::new(Column {
+                    unique_id: ctx.vars.alloc_plan_column_id(),
+                    ret_type: ret_tp,
+                    ..Column::default()
+                })]);
+                window_names.push(EmptyName.clone());
+            }
+            window.window_func_descs = descs;
+            window.set_children(vec![np]);
+            window.sp.set_schema(Some(schema));
+            window.sp.set_output_names(window_names);
+            p = ctx.arena.alloc(Box::new(window));
+        }
+        Ok((p, window_map))
+    }
+
+    /// checkOriginWindowFuncs checks the validity for original window specifications for a group of functions.
+    /// Because the grouped specification is different from them, we should especially check them before build window frame.
+    // go: PlanBuilder.checkOriginWindowFuncs L1
+    fn check_origin_window_funcs(
+        &self,
+        ctx: &PlanCtx<'_>,
+        funcs: &[&'ast ast::WindowFuncExpr],
+        order_by_items: &[SortItem],
+    ) -> Result<(), Error> {
+        for f in funcs {
+            if f.ignore_null {
+                return Err(ErrNotSupportedYet.gen_with_stack_by_args(go_args!["IGNORE NULLS"]));
+            }
+            if f.distinct {
+                return Err(ErrNotSupportedYet
+                    .gen_with_stack_by_args(go_args!["<window function>(DISTINCT ..)"]));
+            }
+            if f.from_last {
+                return Err(ErrNotSupportedYet.gen_with_stack_by_args(go_args!["FROM LAST"]));
+            }
+            let name_l = f.spec.name.l();
+            if !name_l.is_empty() {
+                let spec = &self.window_specs[self.window_spec_index[&name_l]];
+                self.check_origin_window_spec(ctx, spec, order_by_items)?;
+            } else {
+                let spec = WindowSpecW::of_ast(&f.spec);
+                self.check_origin_window_spec(ctx, &spec, order_by_items)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// checkOriginWindowSpec checks the validity for given window specification.
+    // go: PlanBuilder.checkOriginWindowSpec L1
+    fn check_origin_window_spec(
+        &self,
+        ctx: &PlanCtx<'_>,
+        spec: &WindowSpecW<'ast>,
+        order_by_items: &[SortItem],
+    ) -> Result<(), Error> {
+        let Some(frame) = spec.frame.as_ref().map(CowFrame::as_frame) else {
+            return Ok(());
+        };
+        if frame.tp == ast::FrameType::Groups {
+            return Err(ErrNotSupportedYet.gen_with_stack_by_args(go_args!["GROUPS"]));
+        }
+        let (start, end) = (&frame.extent.start, &frame.extent.end);
+        if start.tp == ast::BoundType::Following && start.unbounded {
+            return Err(ErrWindowFrameStartIllegal
+                .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+        }
+        if end.tp == ast::BoundType::Preceding && end.unbounded {
+            return Err(ErrWindowFrameEndIllegal
+                .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+        }
+        if start.tp == ast::BoundType::Following
+            && (end.tp == ast::BoundType::Preceding || end.tp == ast::BoundType::CurrentRow)
+        {
+            return Err(ErrWindowFrameIllegal
+                .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+        }
+        if (start.tp == ast::BoundType::Following || start.tp == ast::BoundType::CurrentRow)
+            && end.tp == ast::BoundType::Preceding
+        {
+            return Err(ErrWindowFrameIllegal
+                .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+        }
+
+        self.check_origin_window_frame_bound(ctx, start, spec, order_by_items)?;
+        self.check_origin_window_frame_bound(ctx, end, spec, order_by_items)?;
+        Ok(())
+    }
+
+    // go: PlanBuilder.checkOriginWindowFrameBound L1 [M-CTX]
+    fn check_origin_window_frame_bound(
+        &self,
+        ctx: &PlanCtx<'_>,
+        bound: &ast::FrameBound,
+        spec: &WindowSpecW<'ast>,
+        order_by_items: &[SortItem],
+    ) -> Result<(), Error> {
+        if bound.tp == ast::BoundType::CurrentRow || bound.unbounded {
+            return Ok(());
+        }
+
+        let frame_type = spec.frame.as_ref().expect("frame").as_frame().tp;
+        if frame_type == ast::FrameType::Rows {
+            if bound.unit != ast::TimeUnitType::Invalid {
+                return Err(ErrWindowRowsIntervalUse
+                    .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+            }
+            let in_execute = ctx.vars.stmt_ctx().in_prepared_plan_building;
+            let (_, is_null, is_expected_type) = get_uint_from_node(
+                &*ctx.expr_ctx,
+                bound.expr.as_ref().expect("rows bound expr"),
+                false,
+                in_execute,
+            );
+            if is_null || !is_expected_type {
+                return Err(ErrWindowFrameIllegal
+                    .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+            }
+            return Ok(());
+        }
+
+        if order_by_items.len() != 1 {
+            return Err(ErrWindowRangeFrameOrderType
+                .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+        }
+        let order_item_type = order_by_items[0].col.ret_type.get_type();
+        let (is_numeric, is_temporal) = (
+            is_type_numeric(order_item_type),
+            is_type_temporal(order_item_type),
+        );
+        if !is_numeric && !is_temporal {
+            return Err(ErrWindowRangeFrameOrderType
+                .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+        }
+        if bound.unit != ast::TimeUnitType::Invalid && !is_temporal {
+            return Err(ErrWindowRangeFrameNumericType
+                .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+        }
+        if bound.unit == ast::TimeUnitType::Invalid && !is_numeric {
+            return Err(ErrWindowRangeFrameTemporalType
+                .gen_with_stack_by_args(go_args![get_window_name(&spec.name.o).to_owned()]));
+        }
+        Ok(())
+    }
+
+    // go: PlanBuilder.handleDefaultFrame L1 [M-CTX]
+    fn handle_default_frame(
+        &self,
+        ctx: &PlanCtx<'_>,
+        spec: &WindowSpecW<'ast>,
+        window_func_name: &str,
+    ) -> Option<WindowSpecW<'ast>> {
+        let need = need_frame(window_func_name);
+        // According to MySQL, In the absence of a frame clause, the default frame depends on whether an ORDER BY clause is present:
+        //   (1) With order by, the default frame is equivalent to "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW";
+        //   (2) Without order by, the default frame includes all partition rows, equivalent to "RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING",
+        //       or "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING", which is the same as an empty frame.
+        if need && spec.frame.is_none() && spec.order_by.is_some() {
+            return Some(spec.with_frame(Some(CowFrame::Owned(ast::FrameClause {
+                tp: ast::FrameType::Ranges,
+                extent: ast::FrameExtent {
+                    start: ast::FrameBound {
+                        tp: ast::BoundType::Preceding,
+                        unbounded: true,
+                        ..Default::default()
+                    },
+                    end: ast::FrameBound {
+                        tp: ast::BoundType::CurrentRow,
+                        ..Default::default()
+                    },
+                },
+            }))));
+        }
+        // "RANGE/ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING" is equivalent to empty frame.
+        if need
+            && let Some(f) = spec.frame.as_ref().map(CowFrame::as_frame)
+            && f.extent.start.unbounded
+            && f.extent.end.unbounded
+        {
+            return Some(spec.with_frame(None));
+        }
+        if !need {
+            let mut updated = false;
+            let mut new_frame: Option<CowFrame<'ast>> = None;
+
+            // For functions that operate on the entire partition, the frame clause will be ignored.
+            if spec.frame.is_some() {
+                let spec_name = &spec.name.o;
+                ctx.vars
+                    .stmt_ctx()
+                    .append_note(ErrWindowFunctionIgnoresFrame.fast_gen_by_args(go_args![
+                        window_func_name.to_owned(),
+                        get_window_name(spec_name).to_owned()
+                    ]));
+                updated = true;
+            }
+            if ctx.vars.enable_pipelined_window_exec {
+                let (use_def, default_frame) = use_default_frame(window_func_name);
+                if use_def {
+                    new_frame = Some(CowFrame::Owned(default_frame));
+                    updated = true;
+                }
+            }
+            if updated {
+                return Some(spec.with_frame(new_frame));
+            }
+        }
+        None
+    }
+
+    /// groupWindowFuncs groups the window functions according to the window specification name.
+    // go: PlanBuilder.groupWindowFuncs L2 (immutable AST uses WindowSpecId and local_specs; deterministic unused-window order, M-MAPORDER)
+    #[allow(clippy::type_complexity)]
+    fn group_window_funcs(
+        &self,
+        ctx: &PlanCtx<'_>,
+        window_funcs: &[&'ast ast::WindowFuncExpr],
+    ) -> Result<
+        (
+            HashMap<WindowSpecId, Vec<&'ast ast::WindowFuncExpr>>,
+            Vec<WindowSpecId>,
+            Vec<WindowSpecW<'ast>>,
+        ),
+        Error,
+    > {
+        // updatedSpecMap is used to handle the specifications that have frame clause changed.
+        let mut updated_spec_map: HashMap<String, Vec<WindowSpecId>> = HashMap::new();
+        let mut grouped_window: HashMap<WindowSpecId, Vec<&'ast ast::WindowFuncExpr>> =
+            HashMap::new();
+        let mut ordered_spec: Vec<WindowSpecId> = Vec::with_capacity(window_funcs.len());
+        let mut local_specs: Vec<WindowSpecW<'ast>> = Vec::new();
+
+        for &window_func in window_funcs {
+            if window_func.spec.name.l().is_empty() {
+                let mut spec = WindowSpecW::of_ast(&window_func.spec);
+                let ref_l = spec.ref_.l();
+                if !ref_l.is_empty() {
+                    let Some(&ref_idx) = self.window_spec_index.get(&ref_l) else {
+                        return Err(ErrWindowNoSuchWindow.gen_with_stack_by_args(go_args![
+                            get_window_name(&spec.ref_.o).to_owned()
+                        ]));
+                    };
+                    merge_window_spec(&mut spec, &self.window_specs[ref_idx])?;
+                }
+                if let Some(new_spec) = self.handle_default_frame(ctx, &spec, &window_func.name) {
+                    spec = new_spec;
+                }
+                let id = WindowSpecId::Local(local_specs.len());
+                local_specs.push(spec);
+                grouped_window.entry(id).or_default().push(window_func);
+                append_if_absent_window_spec(&mut ordered_spec, id);
+                continue;
+            }
+
+            let name = window_func.spec.name.l();
+            let Some(&named_idx) = self.window_spec_index.get(&name) else {
+                return Err(ErrWindowNoSuchWindow
+                    .gen_with_stack_by_args(go_args![window_func.spec.name.o.clone()]));
+            };
+            let named_id = WindowSpecId::Named(named_idx);
+            let spec = &self.window_specs[named_idx];
+            match self.handle_default_frame(ctx, spec, &window_func.name) {
+                None => {
+                    grouped_window
+                        .entry(named_id)
+                        .or_default()
+                        .push(window_func);
+                    append_if_absent_window_spec(&mut ordered_spec, named_id);
+                }
+                Some(new_spec) => {
+                    let updated_id = if let Some(existing_ids) = updated_spec_map.get_mut(&name) {
+                        let mut found = None;
+                        for &cand_id in existing_ids.iter() {
+                            let cand = resolve_spec_id(cand_id, &self.window_specs, &local_specs);
+                            if spec_equal(Some(cand), Some(&new_spec))? {
+                                found = Some(cand_id);
+                                break;
+                            }
+                        }
+                        if let Some(id) = found {
+                            id
+                        } else {
+                            let id = WindowSpecId::Local(local_specs.len());
+                            local_specs.push(new_spec);
+                            existing_ids.push(id);
+                            id
+                        }
+                    } else {
+                        let id = WindowSpecId::Local(local_specs.len());
+                        local_specs.push(new_spec);
+                        updated_spec_map.insert(name, vec![id]);
+                        id
+                    };
+                    grouped_window
+                        .entry(updated_id)
+                        .or_default()
+                        .push(window_func);
+                    append_if_absent_window_spec(&mut ordered_spec, updated_id);
+                }
+            }
+        }
+        // Unused window specs should also be checked in b.buildWindowFunctions,
+        // so we add them to `groupedWindow` with empty window functions (declaration order, M-MAPORDER).
+        for (i, spec) in self.window_specs.iter().enumerate() {
+            let id = WindowSpecId::Named(i);
+            if !grouped_window.contains_key(&id) && !updated_spec_map.contains_key(&spec.name.l()) {
+                grouped_window.insert(id, Vec::new());
+                append_if_absent_window_spec(&mut ordered_spec, id);
+            }
+        }
+        Ok((grouped_window, ordered_spec, local_specs))
+    }
 }
 
 /// addExtraPhysTblIDColumn4DS for partition table (SELECT FOR UPDATE and union scans of
@@ -3836,15 +5398,17 @@ impl<'ast> PlanBuilder<'ast> {
         // Some SQL statements define WINDOW but do not use them. But we also need to check the window specification list.
         // For example: select id from t group by id WINDOW w AS (ORDER BY uids DESC) ORDER BY id;
         // We don't use the WINDOW w, but if the 'uids' column is not in the table t, we still need to report an error.
-        if has_window_func_field || !sel.window_specs.is_empty() {
-            // windowAggMap, err = b.resolveWindowFunction(sel, p)
-            // glue: blocked-by:D09.4 (window functions: resolveWindowFunction)
-            return Err(blocked("D09.4", "window functions (resolveWindowFunction)"));
-        }
+        let (window_agg_map, fields, window_agg_col_replacements) =
+            if has_window_func_field || !sel.window_specs.is_empty() {
+                // b.buildingRecursivePartForCTE: no CTE is built yet (D09.5).
+                self.resolve_window_function(ctx, sel, p, fields)?
+            } else {
+                (AggMapper::new(), fields, HashMap::new())
+            };
         // We must resolve having and order by clause before build projection,
         // because when the query is "select a+1 as b from t having sum(b) < 0", we must replace sum(b) to sum(a+1),
         // which only can be done before building projection and extracting Agg functions.
-        let (having_map, order_map, fields, agg_col_replacements) = self
+        let (having_map, order_map, fields, mut agg_col_replacements) = self
             .resolve_having_and_order_by(
                 ctx,
                 sel,
@@ -3853,6 +5417,7 @@ impl<'ast> PlanBuilder<'ast> {
                 &resolved_gby_items,
                 &gby_col_replacements,
             )?;
+        agg_col_replacements.extend(window_agg_col_replacements);
 
         // We have to resolve correlated aggregate inside sub-queries before building aggregation and building projection,
         // for instance, count(a) inside the sub-query of "select (select count(a)) from t" should be evaluated within
@@ -3874,6 +5439,8 @@ impl<'ast> PlanBuilder<'ast> {
             &fields,
             gby_cols,
             rollup,
+            has_window_func_field,
+            &window_agg_map,
             &having_map,
             &order_map,
             &agg_col_replacements,
@@ -3892,6 +5459,8 @@ impl<'ast> PlanBuilder<'ast> {
         fields: &[SelectFieldW<'ast>],
         gby_cols: Vec<ExprRef>,
         rollup: bool,
+        has_window_func_field: bool,
+        window_agg_map: &AggMapper<'ast>,
         having_map: &AggMapper<'ast>,
         order_map: &AggMapper<'ast>,
         agg_col_replacements: &HashMap<ByAddr<'ast, ast::ColumnName>, usize>,
@@ -3912,7 +5481,12 @@ impl<'ast> PlanBuilder<'ast> {
         self.handle_helper.pop_map();
         self.handle_helper.push_map(None);
 
-        let has_agg = self.detect_select_agg(sel);
+        // Include auxiliary fields appended by resolveWindowFunction / resolveHavingAndOrderBy
+        // (Go's detectSelectAgg sees them because Go appends into sel.Fields.Fields in place).
+        let has_agg = self.detect_select_agg(sel)
+            || fields
+                .iter()
+                .any(|f| f.wild_card.is_none() && f.expr().is_some_and(has_agg_flag));
         let mut need_build_agg = has_agg;
         let mut agg_funcs = Vec::new();
         let mut total_map = AggMapper::new();
@@ -3941,7 +5515,7 @@ impl<'ast> PlanBuilder<'ast> {
 
         // According to https://dev.mysql.com/doc/refman/8.0/en/window-functions-usage.html,
         // we can only process window functions after having clause, so `considerWindow` is false now.
-        let (np, proj_exprs, old_len) = self.build_projection(
+        let (np, mut proj_exprs, mut old_len) = self.build_projection(
             ctx,
             p,
             fields,
@@ -3957,9 +5531,45 @@ impl<'ast> PlanBuilder<'ast> {
             p = self.build_selection(ctx, p, &h.expr, Some(having_map))?;
         }
 
-        // b.windowSpecs, err = buildWindowSpecs(sel.WindowSpecs): no window specification
-        // here (windows stopped before), so the map is empty and the window branch is not
-        // taken.
+        let (window_specs, window_spec_index) = build_window_specs(&sel.window_specs)?;
+        self.window_specs = window_specs;
+        self.window_spec_index = window_spec_index;
+
+        let mut window_mapper: Option<WindowMapper<'ast>> = None;
+        if has_window_func_field || !sel.window_specs.is_empty() {
+            let window_funcs = extract_window_funcs(fields);
+            // we need to check the func args first before we check the window spec
+            self.check_window_func_args(ctx, p, &window_funcs, Some(window_agg_map))?;
+            let (grouped_funcs, ordered_spec, local_specs) =
+                self.group_window_funcs(ctx, &window_funcs)?;
+            let (np, mut wm) = self.build_window_functions(
+                ctx,
+                p,
+                &grouped_funcs,
+                &ordered_spec,
+                &local_specs,
+                Some(window_agg_map),
+            )?;
+            p = np;
+            // `hasWindowFuncField == false` means there's only unused named window specs without window functions.
+            // In such case plan `p` is not changed, so we don't have to build another projection.
+            if has_window_func_field {
+                // Now we build the window function fields.
+                let (np, pe, ol) = self.build_projection(
+                    ctx,
+                    p,
+                    fields,
+                    Some(window_agg_map),
+                    Some(&mut wm),
+                    true,
+                    false,
+                )?;
+                p = np;
+                proj_exprs = pe;
+                old_len = ol;
+            }
+            window_mapper = Some(wm);
+        }
 
         if sel.distinct {
             p = self.build_distinct(ctx, p, old_len)?;
@@ -3982,13 +5592,14 @@ impl<'ast> PlanBuilder<'ast> {
                         p,
                         &o.items,
                         Some(order_map),
-                        None,
+                        window_mapper.as_ref(),
                         Some(&proj_exprs),
                         old_len,
                         sel.distinct,
                     )?;
                 } else {
-                    p = self.build_sort(ctx, p, &o.items, Some(order_map), None)?;
+                    p =
+                        self.build_sort(ctx, p, &o.items, Some(order_map), window_mapper.as_ref())?;
                 }
             }
         }
@@ -4804,6 +6415,10 @@ mod tests {
             "SELECT SUM(missing) FROM t",
             // Fails inside resolve_gby_exprs on out-of-range position 9.
             "SELECT a FROM t GROUP BY 9",
+            // Fails inside check_window_func_args (NTILE requires positive argument).
+            "SELECT NTILE(0) OVER () FROM t",
+            // Fails inside build_window_functions (unknown column in ORDER BY).
+            "SELECT ROW_NUMBER() OVER (ORDER BY missing) FROM t",
         ] {
             let (stmt, rctx) = parse_and_preprocess_t(sql, &is);
             let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(TestAcc));
@@ -4908,5 +6523,330 @@ mod tests {
             .map(|c| c.column.unique_id)
             .collect();
         assert_eq!(uids, vec![10, 20, 30]);
+    }
+
+    /// Ruling R28 (#413, D09.4 spec §7 item 7 & §9.1 item 2, owner decision 2026-11-26):
+    /// A compound decimal expression in a window RANGE INTERVAL bound (e.g. `INTERVAL 1.0+0.5 DAY`)
+    /// derives `Constant.ret_type` from the evaluated `Datum` (`TypeNewDecimal` / `ETDecimal`),
+    /// matching literal `INTERVAL 1.5 DAY` and `DATE_SUB` (2 days) rather than Go's `TypeUnspecified`
+    /// (`ETInt`, 1 day). As a consequence, `SubDateDatetimeDecimal` / `AddDateDatetimeDecimal`
+    /// is selected, and such windows are not pushed down to TiFlash.
+    #[test]
+    fn window_range_compound_decimal_interval_uses_decimal_date_func() {
+        use tidb_expression::eval::{ArgsFallback, BuiltinFunc, SigDesc, SigDrivers};
+        use tidb_expression::scalar_function::ScalarFunction;
+        use tidb_sessionctx::exprstatic as es;
+
+        let ev = es::new_eval_context(vec![
+            es::with_type_flags(tidb_types::context::DefaultStmtFlags),
+            es::with_location(Some(tidb_base::gostd::time::utc())),
+            es::with_current_db("test".to_owned()),
+        ]);
+        let expr_ctx = es::new_expr_context(vec![
+            es::with_eval_ctx(ev),
+            es::with_charset("utf8mb4".to_owned(), "utf8mb4_bin".to_owned()),
+            es::with_default_collation_for_utf8mb4("utf8mb4_bin".to_owned()),
+        ]);
+
+        let extract_start_bound_expr = |sql: &str| -> ast::Expr {
+            let stmt = tidb_parser::parse(sql, &tidb_parser::ParseOptions::default())
+                .unwrap()
+                .stmts
+                .remove(0);
+            let ast::Stmt::Select(mut sel) = stmt else {
+                panic!("expected SELECT");
+            };
+            let Some(ast::Expr::Window(wf)) = sel.fields.fields.remove(0).expr else {
+                panic!("expected window function");
+            };
+            wf.spec.frame.unwrap().extent.start.expr.unwrap()
+        };
+
+        let compound_expr = extract_start_bound_expr(
+            "SELECT SUM(a) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1.0+0.5 DAY PRECEDING AND CURRENT ROW) FROM t",
+        );
+        let literal_expr = extract_start_bound_expr(
+            "SELECT SUM(a) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1.5 DAY PRECEDING AND CURRENT ROW) FROM t",
+        );
+
+        let compound_const =
+            eval_window_range_bound_constant(&*expr_ctx, &compound_expr, "", false).unwrap();
+        let literal_const =
+            eval_window_range_bound_constant(&*expr_ctx, &literal_expr, "", false).unwrap();
+
+        assert_eq!(
+            compound_const.ret_type.get_type(),
+            tidb_base::mysql::TypeNewDecimal
+        );
+        assert_eq!(
+            compound_const.ret_type.eval_type(),
+            tidb_parser::types::ETDecimal
+        );
+        assert_eq!(
+            compound_const.ret_type.get_type(),
+            literal_const.ret_type.get_type()
+        );
+        assert_eq!(
+            compound_const.value.to_string().unwrap(),
+            literal_const.value.to_string().unwrap()
+        );
+
+        // Verify the TiFlash pushdown consequence: SubDateDatetimeInt is pushable to TiFlash,
+        // whereas SubDateDatetimeDecimal (selected for ETDecimal interval) is not.
+        static SIG_SUB_INT: SigDesc = SigDesc {
+            name: "builtinSubDateDatetimeIntSig",
+            pb_code: tipb::ScalarFuncSig::SubDateDatetimeInt as i32,
+            vectorized: false,
+            drivers: SigDrivers::None,
+            args_fallback: ArgsFallback::None,
+        };
+        static SIG_SUB_DEC: SigDesc = SigDesc {
+            name: "builtinSubDateDatetimeDecimalSig",
+            pb_code: tipb::ScalarFuncSig::SubDateDatetimeDecimal as i32,
+            vectorized: false,
+            drivers: SigDrivers::None,
+            args_fallback: ArgsFallback::None,
+        };
+        let dt_ft = new_field_type(tidb_base::mysql::TypeDatetime);
+        let sf_int = ScalarFunction::new(
+            tidb_parser::ast::funcs::DateSub,
+            dt_ft.clone(),
+            BuiltinFunc::new(&SIG_SUB_INT, vec![], dt_ft.clone(), "binary", "binary"),
+        );
+        let sf_dec = ScalarFunction::new(
+            tidb_parser::ast::funcs::DateSub,
+            dt_ft.clone(),
+            BuiltinFunc::new(&SIG_SUB_DEC, vec![], dt_ft, "binary", "binary"),
+        );
+        let ectx = expr_ctx.get_eval_ctx();
+        assert!(tidb_expr_pushdown::scalar_expr_supported_by_flash(
+            &*ectx, &sf_int
+        ));
+        assert!(!tidb_expr_pushdown::scalar_expr_supported_by_flash(
+            &*ectx, &sf_dec
+        ));
+
+        // Verify full plan building reaches DateSub (blocked-by:D08.7 until time funcs land).
+        let mut dt_col_ft = FieldType::default();
+        dt_col_ft.set_type(tidb_base::mysql::TypeDatetime);
+        dt_col_ft.set_charset("binary");
+        dt_col_ft.set_collate("binary");
+        let mut tbl = (*make_test_table_t()).clone();
+        tbl.columns.as_mut().unwrap().push(Arc::new(ColumnInfo {
+            id: 3,
+            name: CIStr::new("d"),
+            offset: 2,
+            field_type: dt_col_ft,
+            state: tidb_model::StatePublic,
+            ..ColumnInfo::default()
+        }));
+        let is =
+            crate::core::preprocess::InfoSchemaHandle(Arc::new(SingleTableIS(Arc::new(tbl))) as _);
+        let sql = "SELECT SUM(a) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1.0+0.5 DAY PRECEDING AND CURRENT ROW) FROM t";
+        let (stmt, rctx) = parse_and_preprocess_t(sql, &is);
+        let err = build_stmt_once(&stmt, sql, &rctx, &is, 0, vec![], false).unwrap_err();
+        assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D08.7"));
+    }
+
+    /// Emulation of Go's shared `*FieldType` mutation (`M-FT`, #402): `first_value` / `last_value` /
+    /// `nth_value` strip `NotNullFlag` from the source column in `LogicalWindow.schema` and
+    /// descendants down to `DataSource` (without mutating `TableInfo`), and that persists across
+    /// `ColumnPruner` and `ProjectionEliminator`. Other window functions (e.g. `max`, `lead`) do not.
+    #[test]
+    fn window_first_last_nth_value_clears_schema_source_col_not_null() {
+        use tidb_sessionctx::exprstatic as es;
+
+        let make_nn_table = || {
+            let mut ft = FieldType::default();
+            ft.set_type(tidb_base::mysql::TypeLong);
+            ft.set_flen(11);
+            ft.add_flag(NotNullFlag);
+            ft.set_charset("binary");
+            ft.set_collate("binary");
+            Arc::new(tidb_model::TableInfo {
+                id: 100,
+                name: CIStr::new("t"),
+                columns: Some(vec![
+                    Arc::new(ColumnInfo {
+                        id: 1,
+                        name: CIStr::new("a"),
+                        offset: 0,
+                        field_type: ft.clone(),
+                        state: tidb_model::StatePublic,
+                        ..ColumnInfo::default()
+                    }),
+                    Arc::new(ColumnInfo {
+                        id: 2,
+                        name: CIStr::new("b"),
+                        offset: 1,
+                        field_type: ft,
+                        state: tidb_model::StatePublic,
+                        ..ColumnInfo::default()
+                    }),
+                ]),
+                state: tidb_model::StatePublic,
+                ..tidb_model::TableInfo::default()
+            })
+        };
+
+        let check = |sql: &str, expect_a_not_null: bool| {
+            let tbl = make_nn_table();
+            let is = crate::core::preprocess::InfoSchemaHandle(Arc::new(SingleTableIS(Arc::clone(
+                &tbl,
+            ))) as _);
+            let (stmt, rctx) = parse_and_preprocess_t(sql, &is);
+            let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(TestAcc));
+            vars.current_db = "test".to_owned();
+            let mut builder = new_plan_builder(&[]);
+            builder.init(&mut vars, Some(is), None);
+            builder.sql_text = sql;
+            builder.resolve_ctx = Some(rctx);
+            let ev = es::new_eval_context(vec![
+                es::with_type_flags(tidb_types::context::DefaultStmtFlags),
+                es::with_location(Some(tidb_base::gostd::time::utc())),
+                es::with_current_db("test".to_owned()),
+            ]);
+            let expr_ctx = es::new_expr_context(vec![
+                es::with_eval_ctx(ev),
+                es::with_charset("utf8mb4".to_owned(), "utf8mb4_bin".to_owned()),
+                es::with_default_collation_for_utf8mb4("utf8mb4_bin".to_owned()),
+            ]);
+            let mut ctx = PlanCtx::new(&mut vars, expr_ctx);
+            ctx.has_dirty_content = Some(Arc::new(|_| false));
+            let root = builder.build(&mut ctx, &stmt).unwrap();
+
+            // TableInfo must never be mutated.
+            assert!(has_not_null_flag(
+                tbl.columns.as_ref().unwrap()[0].field_type.get_flag()
+            ));
+
+            // Check DataSource and LogicalWindow schemas before optimization.
+            let mut stack = vec![root];
+            let mut saw_win = false;
+            let mut saw_ds = false;
+            while let Some(id) = stack.pop() {
+                let node = ctx.arena.get(id);
+                stack.extend(node.children().iter().copied());
+                if matches!(
+                    node.kind(),
+                    crate::LogicalKind::Window | crate::LogicalKind::DataSource
+                ) {
+                    if node.kind() == crate::LogicalKind::Window {
+                        saw_win = true;
+                    } else {
+                        saw_ds = true;
+                    }
+                    let a_col = node
+                        .schema(&ctx.arena)
+                        .columns
+                        .iter()
+                        .find(|c| c.orig_name.ends_with(".a"))
+                        .expect("column a in schema");
+                    assert_eq!(
+                        has_not_null_flag(a_col.ret_type.get_flag()),
+                        expect_a_not_null,
+                        "before opt ({:?}) for {sql}",
+                        node.kind()
+                    );
+                }
+            }
+            assert!(saw_win && saw_ds);
+
+            // Check after ColumnPruner + ProjectionEliminator.
+            use crate::base::LogicalOptRule;
+            let opt = crate::util::optimizetrace::default_logical_optimize_option();
+            let used = ctx.arena.get(root).schema(&ctx.arena).columns.clone();
+            let pruned = crate::base::prune_columns(&mut ctx, root, used, &opt).unwrap();
+            let (elim, _) = crate::core::rule_eliminate_projection::ProjectionEliminator
+                .optimize(&mut ctx, pruned, &opt)
+                .unwrap();
+            let a_col = ctx
+                .arena
+                .get(elim)
+                .schema(&ctx.arena)
+                .columns
+                .iter()
+                .find(|c| c.orig_name.ends_with(".a"))
+                .expect("column a in final schema");
+            assert_eq!(
+                has_not_null_flag(a_col.ret_type.get_flag()),
+                expect_a_not_null,
+                "after prune+elim for {sql}"
+            );
+        };
+
+        check("SELECT a, FIRST_VALUE(a) OVER (ORDER BY b) FROM t", false);
+        check("SELECT a, LAST_VALUE(a) OVER (ORDER BY b) FROM t", false);
+        check("SELECT a, NTH_VALUE(a, 1) OVER (ORDER BY b) FROM t", false);
+        check("SELECT a, MAX(a) OVER (ORDER BY b) FROM t", true);
+        check("SELECT a, LEAD(a, 1) OVER (ORDER BY b) FROM t", true);
+    }
+
+    #[test]
+    fn prepared_repeated_execute_named_window_idempotent() {
+        let is = crate::core::preprocess::InfoSchemaHandle(Arc::new(SingleTableIS(
+            make_test_table_t(),
+        )) as _);
+        for sql in [
+            "SELECT SUM(a) OVER (w ORDER BY b) FROM t WINDOW w AS (PARTITION BY a)",
+            "SELECT ROW_NUMBER() OVER w, SUM(a) OVER (w1 ROWS 1 PRECEDING) FROM t WINDOW w AS (PARTITION BY a ORDER BY b), w1 AS (w)",
+        ] {
+            let (stmt, rctx) = parse_and_preprocess_t(sql, &is);
+            let run = || {
+                let mut vars =
+                    tidb_sessionctx::variable::session::SessionVars::new(Box::new(TestAcc));
+                vars.current_db = "test".to_owned();
+                vars.sql_mode = tidb_base::mysql::ModeOnlyFullGroupBy.0;
+                vars.state
+                    .plan_id
+                    .0
+                    .store(0, std::sync::atomic::Ordering::SeqCst);
+                vars.state
+                    .plan_column_id
+                    .0
+                    .store(0, std::sync::atomic::Ordering::SeqCst);
+                vars.stmt_ctx_mut().in_prepared_plan_building = true;
+                let mut builder = new_plan_builder(&[]);
+                builder.init(&mut vars, Some(is.clone()), None);
+                builder.sql_text = sql;
+                builder.resolve_ctx = Some(Arc::clone(&rctx));
+                let ev = tidb_sessionctx::exprstatic::new_eval_context(vec![
+                    tidb_sessionctx::exprstatic::with_type_flags(
+                        tidb_types::context::DefaultStmtFlags,
+                    ),
+                    tidb_sessionctx::exprstatic::with_sql_mode(SQLMode(
+                        tidb_base::mysql::ModeOnlyFullGroupBy.0,
+                    )),
+                    tidb_sessionctx::exprstatic::with_location(Some(tidb_base::gostd::time::utc())),
+                    tidb_sessionctx::exprstatic::with_current_db("test".to_owned()),
+                ]);
+                let expr_ctx = tidb_sessionctx::exprstatic::new_expr_context(vec![
+                    tidb_sessionctx::exprstatic::with_eval_ctx(ev),
+                    tidb_sessionctx::exprstatic::with_charset(
+                        "utf8mb4".to_owned(),
+                        "utf8mb4_bin".to_owned(),
+                    ),
+                    tidb_sessionctx::exprstatic::with_default_collation_for_utf8mb4(
+                        "utf8mb4_bin".to_owned(),
+                    ),
+                ]);
+                let mut ctx = PlanCtx::new(&mut vars, expr_ctx);
+                ctx.has_dirty_content = Some(Arc::new(|_| false));
+                let root = builder.build(&mut ctx, &stmt).unwrap();
+                let mut summary = Vec::new();
+                let mut stack = vec![root];
+                while let Some(id) = stack.pop() {
+                    let node = ctx.arena.get(id);
+                    summary.push((
+                        node.tp().to_owned(),
+                        node.id(),
+                        node.schema(&ctx.arena).len(),
+                    ));
+                    stack.extend(node.children().iter().copied());
+                }
+                summary
+            };
+            assert_eq!(run(), run(), "repeated EXECUTE must be identical for {sql}");
+        }
     }
 }

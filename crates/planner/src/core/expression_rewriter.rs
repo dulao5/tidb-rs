@@ -674,7 +674,7 @@ fn init_constant_repertoire(ctx: &dyn tidb_expression::context::EvalContext, c: 
 /// The literal's Go value (`driver.ValueExpr` holds it as `Datum`, the parser built it from
 /// this value), for `DefaultTypeForValue` (spec §3 item 7).
 // glue: the value the parser passes to ast.NewValueExpr
-fn value_expr_go_value(v: &ast::ValueExpr) -> GoValue {
+pub(crate) fn value_expr_go_value(v: &ast::ValueExpr) -> GoValue {
     use tidb_types::binary_literal::{BitLiteral, HexLiteral};
     match &v.datum {
         ast::Datum::Null => GoValue::Nil,

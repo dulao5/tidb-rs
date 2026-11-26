@@ -425,7 +425,8 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
 4. **7 个 cascades 专用方法不移植**（`logical_aggregation.go:68, 87, 535, 552`；`logical_window.go:367, 384, 398`）：见 §3.6（EXC.B / B3），tidb-rs 不支持 `tidb_enable_cascades_planner=1`，无用户可见影响。
 5. **`intset.FastIntSet` 改为 `BTreeSet<i64>`**（`grouping_sets.go`、`logical_expand.go`）：无可见差异（L2）。
 6. **`GroupingSet.MemoryUsage` / `GroupingExprs.MemoryUsage`**：按 Go 64 位结构尺寸常量计算（`grouping_sets.go:279, 406`，L2），数值与 Go 64 位一致。
-7. **临时边界差异（随对应块消失）**：`GROUP BY ?` / `GROUP_CONCAT(... ORDER BY ?)`（`blocked-by:D02.2`）、`LogicalAggregation.ExplainInfo`（`blocked-by:D10.9`）、`ExtractFD`（`blocked-by:D09.14`）、窗口 `RANGE INTERVAL`（`blocked-by:D08.7`）、`GROUPING()` 函数体（`blocked-by:D08.9`）、物理聚合枚举（`blocked-by:D10.3`）。
+7. **窗口 `RANGE BETWEEN INTERVAL <复合小数表达式>` 的 `Constant.RetType` 推导与 TiFlash 下推差异（裁定 R28，#413，负责人已定 2026-11-26 选 A）**（`logical_plan_builder.go:7042, 7071-7076`、`operator/logicalop/logical_window.go:131`、`pkg/expression/infer_pushdown.go:356-364`）：Go 对复合常量表达式使用未推导 AST 的零值 `FieldType`（`TypeUnspecified` → `ETInt`），误选 `SubDateDatetimeInt` / `AddDateDatetimeInt` 并将 1.5 天截断为 1 天；tidb-rs 按 `evalAstExprWithPlanCtx` 求出的 `Datum` 类型推导 `Constant.RetType`（如 `KindMysqlDecimal` → `TypeNewDecimal`），使 `DateSub` / `DateAdd` 选中 `SubDateDatetimeDecimal` / `AddDateDatetimeDecimal`（按 2 天计算，与 `DATE_SUB` 及字面量 `INTERVAL 1.5 DAY` 一致）。**TiFlash 下推影响**：由于 `SubDateDatetimeInt` / `AddDateDatetimeInt` 在 TiFlash 下推白名单中，而 `SubDateDatetimeDecimal` / `AddDateDatetimeDecimal` 不在白名单中，因此携带复合小数 `INTERVAL` 帧边界的窗口在 tidb-rs 中**不再下推到 TiFlash**（见 `docs/testing/rulings.toml` `R28`）。
+8. **临时边界差异（随对应块消失）**：`GROUP BY ?` / `GROUP_CONCAT(... ORDER BY ?)`（`blocked-by:D02.2`）、`LogicalAggregation.ExplainInfo`（`blocked-by:D10.9`）、`ExtractFD`（`blocked-by:D09.14`）、窗口 `RANGE INTERVAL`（`blocked-by:D08.7`）、`GROUPING()` 函数体（`blocked-by:D08.9`）、物理聚合/窗口枚举（`blocked-by:D10.3`）。
 
 ## 8. 读代码发现的 Go 问题（已在本地 Go TiDB v8.5.8 实跑核验）
 

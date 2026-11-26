@@ -48,6 +48,12 @@ impl LogicalSchemaProducer {
         })
     }
 
+    /// The schema if already initialized, without triggering lazy init.
+    // glue: N1
+    pub fn schema_opt(&self) -> Option<&Schema> {
+        self.schema.get()
+    }
+
     /// The schema for writing; [`Self::schema`] must have run (callers go through
     /// `LogicalPlan::schema_mut` / `PlanArena::schema_mut`, which ensure it).
     // glue: N1

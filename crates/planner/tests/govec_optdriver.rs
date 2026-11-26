@@ -56,8 +56,8 @@ use tidb_planner::core::rule::util::build_key_info_misc::{
 };
 use tidb_planner::hint::hint_query_block::new_qb_hint_handler;
 use tidb_planner::logicalop::{
-    DataSource, LogicalLimit, LogicalProjection, LogicalSelection, LogicalSort, LogicalTableDual,
-    LogicalTopN,
+    DataSource, FrameBound, LogicalLimit, LogicalProjection, LogicalSelection, LogicalSort,
+    LogicalTableDual, LogicalTopN, LogicalWindow,
 };
 use tidb_planner::property::{PhysicalProperty, StatsInfo};
 use tidb_planner::util::fixcontrol;
@@ -87,6 +87,8 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D02.2", 2),
     // The preprocessor's missing table check (the privilege manager decides the error).
     ("D04.1", 2),
+    // Time functions not ported yet (DATE_ADD / DATE_SUB for window RANGE INTERVAL bounds).
+    ("D08.7", 2),
     // Built-in function families not ported yet (IN, ANY_VALUE, user variables, ...).
     ("D08.9", 61),
     // Virtual generated columns.
@@ -94,15 +96,15 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     // Partitioned tables (2 of them: Go's mock context panics in the partition pruning).
     ("D09.12", 4),
     // BuildKeySolver in logicalOptimize (reached by aggregation / GROUP BY / DISTINCT queries).
-    ("D09.13", 99),
+    ("D09.13", 103),
     // The lock operator (SELECT ... FOR UPDATE).
     ("D09.14", 2),
     // System variables in expressions.
     ("D09.2", 2),
     // Joins.
     ("D09.3", 6),
-    // Window functions / unported aggregation paths (D09.4 part B).
-    ("D09.4", 6),
+    // GROUP BY ... WITH ROLLUP (D09.4 part C).
+    ("D09.4", 2),
     // WITH and set operations.
     ("D09.5", 4),
     // Subqueries.
@@ -411,6 +413,67 @@ fn dump(ctx: &PlanCtx<'_>, p: PlanId) -> Value {
             o.insert("by".into(), by_out(ectx, &x.by_items));
             o.insert("offset".into(), json!(x.offset));
             o.insert("count".into(), json!(x.count));
+        }
+        LogicalKind::Window => {
+            let x = node.as_any().downcast_ref::<LogicalWindow>().unwrap();
+            let wfs: Vec<Value> = x
+                .window_func_descs
+                .iter()
+                .map(|w| {
+                    json!([
+                        w.base.name,
+                        exprs_out(ectx, &w.base.args),
+                        ft_out(&w.base.ret_tp),
+                    ])
+                })
+                .collect();
+            let pby: Vec<Value> = x
+                .partition_by
+                .iter()
+                .map(|it| {
+                    json!([
+                        expr_out(ectx, &Expr::Column(Column::clone(&it.col))),
+                        it.desc
+                    ])
+                })
+                .collect();
+            let oby: Vec<Value> = x
+                .order_by
+                .iter()
+                .map(|it| {
+                    json!([
+                        expr_out(ectx, &Expr::Column(Column::clone(&it.col))),
+                        it.desc
+                    ])
+                })
+                .collect();
+            let frame = match &x.frame {
+                None => Value::Null,
+                Some(fr) => {
+                    let dump_bound = |b: &Option<FrameBound>| -> Value {
+                        match b {
+                            None => Value::Null,
+                            Some(b) => json!([
+                                b.tp as i32,
+                                b.unbounded,
+                                b.num,
+                                exprs_out(ectx, &b.calc_funcs),
+                                b.cmp_data_type as i32,
+                                b.is_explicit_range,
+                            ]),
+                        }
+                    };
+                    json!({
+                        "type": fr.tp as i32,
+                        "start": dump_bound(&fr.start),
+                        "end": dump_bound(&fr.end),
+                    })
+                }
+            };
+            o.insert("wfs".into(), Value::Array(wfs));
+            o.insert("pby".into(), Value::Array(pby));
+            o.insert("oby".into(), Value::Array(oby));
+            o.insert("frame".into(), frame);
         }
         k => panic!("dump {k:?}"),
     }

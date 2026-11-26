@@ -2188,6 +2188,169 @@ pub fn pos_from_position_expr(
     Ok((pos as isize, false))
 }
 
+/// ParamMarkerInPrepareChecker checks whether the given ast tree has paramMarker and is in
+/// prepare statement.
+///
+/// Go reads `v.InExecute` on `*driver.ParamMarkerExpr`. The Rust AST does not store
+/// `InExecute` on the marker node, so callers pass `in_execute`
+/// (`StmtContext.in_prepared_plan_building`) when constructing the checker.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParamMarkerInPrepareChecker {
+    /// Whether any visited parameter marker is in PREPARE (`!in_execute`).
+    pub in_prepare_stmt: bool,
+    /// Whether the statement is currently in EXECUTE (`!InPrepare`).
+    pub in_execute: bool,
+}
+
+impl ParamMarkerInPrepareChecker {
+    /// Create a checker for a statement with the given `in_execute` flag.
+    // glue: constructor for ParamMarkerInPrepareChecker (in_execute passed instead of on AST node)
+    pub fn new(in_execute: bool) -> Self {
+        Self {
+            in_prepare_stmt: false,
+            in_execute,
+        }
+    }
+
+    /// Walk an AST expression tree (`expr.Accept(checker)`).
+    // glue: ast.Node.Accept for ParamMarkerInPrepareChecker (Rust AST has no visitor, D02.2)
+    pub fn accept(&mut self, expr: &tidb_parser::ast::Expr) {
+        use tidb_parser::ast::Expr as AstExpr;
+        if !self.enter(expr) {
+            match expr {
+                AstExpr::Binary(b) => {
+                    self.accept(&b.l);
+                    self.accept(&b.r);
+                }
+                AstExpr::Unary(u) => self.accept(&u.v),
+                AstExpr::FuncCall(f) => {
+                    for a in &f.args {
+                        self.accept(a);
+                    }
+                }
+                AstExpr::FuncCast(c) => self.accept(&c.expr),
+                AstExpr::JSONSumCrc32(c) => self.accept(&c.expr),
+                AstExpr::Aggregate(a) => {
+                    for arg in &a.args {
+                        self.accept(arg);
+                    }
+                    if let Some(o) = &a.order {
+                        for item in &o.items {
+                            self.accept(&item.expr);
+                        }
+                    }
+                }
+                AstExpr::Window(w) => {
+                    for arg in &w.args {
+                        self.accept(arg);
+                    }
+                    if let Some(pb) = &w.spec.partition_by {
+                        for item in &pb.items {
+                            self.accept(&item.expr);
+                        }
+                    }
+                    if let Some(ob) = &w.spec.order_by {
+                        for item in &ob.items {
+                            self.accept(&item.expr);
+                        }
+                    }
+                    if let Some(f) = &w.spec.frame {
+                        if let Some(e) = &f.extent.start.expr {
+                            self.accept(e);
+                        }
+                        if let Some(e) = &f.extent.end.expr {
+                            self.accept(e);
+                        }
+                    }
+                }
+                AstExpr::Paren(p) => self.accept(p),
+                AstExpr::PatternIn(p) => {
+                    self.accept(&p.expr);
+                    for e in &p.list {
+                        self.accept(e);
+                    }
+                    if let Some(s) = &p.sel {
+                        self.accept(s);
+                    }
+                }
+                AstExpr::PatternLike(p) => {
+                    self.accept(&p.expr);
+                    self.accept(&p.pattern);
+                }
+                AstExpr::PatternRegexp(p) => {
+                    self.accept(&p.expr);
+                    self.accept(&p.pattern);
+                }
+                AstExpr::Between(b) => {
+                    self.accept(&b.expr);
+                    self.accept(&b.left);
+                    self.accept(&b.right);
+                }
+                AstExpr::IsNull(x) => self.accept(&x.expr),
+                AstExpr::IsTruth(x) => self.accept(&x.expr),
+                AstExpr::Case(c) => {
+                    if let Some(v) = &c.value {
+                        self.accept(v);
+                    }
+                    for w in &c.when_clauses {
+                        self.accept(&w.expr);
+                        self.accept(&w.result);
+                    }
+                    if let Some(e) = &c.else_clause {
+                        self.accept(e);
+                    }
+                }
+                AstExpr::Exists(x) => self.accept(&x.sel),
+                AstExpr::CompareSubquery(x) => {
+                    self.accept(&x.l);
+                    self.accept(&x.r);
+                }
+                AstExpr::Variable(v) => {
+                    if let Some(val) = &v.value {
+                        self.accept(val);
+                    }
+                }
+                AstExpr::Row(r) => {
+                    for v in &r.values {
+                        self.accept(v);
+                    }
+                }
+                AstExpr::SetCollation(s) => self.accept(&s.expr),
+                AstExpr::MatchAgainst(m) => self.accept(&m.against),
+                AstExpr::Column(_)
+                | AstExpr::Value(_)
+                | AstExpr::ParamMarker(_)
+                | AstExpr::Subquery(_)
+                | AstExpr::Values(_)
+                | AstExpr::Default(_)
+                | AstExpr::TableName(_)
+                | AstExpr::TimeUnit(_)
+                | AstExpr::GetFormatSelector(_)
+                | AstExpr::TrimDirection(_)
+                | AstExpr::Position(_)
+                | AstExpr::Unported(_) => {}
+            }
+        }
+        let _ = self.leave(expr);
+    }
+
+    /// Enter implements Visitor Interface. Returns whether to skip children.
+    // go: ParamMarkerInPrepareChecker.Enter L2 (in_execute lives on checker because Rust ast::ParamMarkerExpr has no InExecute field)
+    pub fn enter(&mut self, in_node: &tidb_parser::ast::Expr) -> bool {
+        if matches!(in_node, tidb_parser::ast::Expr::ParamMarker(_)) {
+            self.in_prepare_stmt = !self.in_execute;
+            return true;
+        }
+        false
+    }
+
+    /// Leave implements Visitor Interface.
+    // go: ParamMarkerInPrepareChecker.Leave L1
+    pub fn leave(&mut self, _in_node: &tidb_parser::ast::Expr) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod position_expr_tests {
     use super::*;
@@ -2196,6 +2359,33 @@ mod position_expr_tests {
         new_eval_context, new_expr_context, with_eval_ctx, with_param_list,
     };
     use tidb_types::datum::{Datum, new_int_datum, new_string_datum};
+
+    #[test]
+    fn param_marker_in_prepare_checker_prepare_vs_execute() {
+        let stmt = tidb_parser::parse("SELECT ? + 1, 2 + 3", &Default::default())
+            .unwrap()
+            .stmts
+            .remove(0);
+        let tidb_parser::ast::Stmt::Select(sel) = stmt else {
+            panic!("expected SELECT");
+        };
+        let with_param = sel.fields.fields[0].expr.as_ref().unwrap();
+        let without_param = sel.fields.fields[1].expr.as_ref().unwrap();
+
+        // In PREPARE (in_execute = false): marker sets in_prepare_stmt = true.
+        let mut c_prep = ParamMarkerInPrepareChecker::new(false);
+        c_prep.accept(with_param);
+        assert!(c_prep.in_prepare_stmt);
+
+        let mut c_prep_no = ParamMarkerInPrepareChecker::new(false);
+        c_prep_no.accept(without_param);
+        assert!(!c_prep_no.in_prepare_stmt);
+
+        // In EXECUTE (in_execute = true): marker sets in_prepare_stmt = false.
+        let mut c_exec = ParamMarkerInPrepareChecker::new(true);
+        c_exec.accept(with_param);
+        assert!(!c_exec.in_prepare_stmt);
+    }
 
     #[test]
     fn pos_from_position_expr_literal_and_param() {

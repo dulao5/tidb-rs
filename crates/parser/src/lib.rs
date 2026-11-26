@@ -86,6 +86,7 @@ pub use actions_rt::Node;
 /// Statistics of the generated LR tables (states, table sizes, reducer count; informational).
 pub const TABLE_STATS: &str = token_map::BUILD_REPORT;
 pub use ctx::Diagnostic;
+pub use restore::restore_window_spec_raw;
 pub use span::Span;
 
 use ast::Stmt;

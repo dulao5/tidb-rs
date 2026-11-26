@@ -60,6 +60,8 @@ pub enum LogicalKind {
     TableDual,
     /// `*logicalop.LogicalAggregation`.
     Aggregation,
+    /// `*logicalop.LogicalWindow`.
+    Window,
 }
 
 /// Physical operator kinds (`M-IFACE`). Variants are added with the operators.

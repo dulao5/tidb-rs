@@ -638,7 +638,7 @@ pub struct CandidatePath {
 }
 
 // go: compareBool L1
-fn compare_bool(l: bool, r: bool) -> isize {
+pub(crate) fn compare_bool(l: bool, r: bool) -> isize {
     if l == r {
         return 0;
     }
