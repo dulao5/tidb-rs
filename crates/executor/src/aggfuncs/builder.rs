@@ -1,11 +1,10 @@
 //! go-file: pkg/executor/aggfuncs/builder.go
 //!
-//! `Build` and the builders of parts A, B1, and B2 (spec D12.4 §3.1, §3.2, §3.3). `Build`
-//! keeps Go's exact order of branches. `BuildWindowFunctions` comes with the window
-//! functions (part W).
+//! `Build`, `BuildWindowFunctions`, and the builders of parts A, B1, B2, and W (spec
+//! D12.4 §3.1–§3.4). `Build` and `BuildWindowFunctions` keep Go's exact order of branches.
 //!
-//! Go's `Build` returns nil for an unknown name, the dedup mode or an unmatched type; Rust
-//! returns `Ok(None)` (spec §5.1).
+//! Go's `Build` / `BuildWindowFunctions` return nil for an unknown name, the dedup mode or
+//! an unmatched type; Rust returns `Ok(None)` (spec §5.1).
 
 // Go identifiers for the evaluation type constants in patterns (M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -15,12 +14,15 @@ use std::sync::atomic::AtomicI32;
 
 use tidb_base::Error;
 use tidb_base::mysql;
+use tidb_chunk::ColAlloc;
 use tidb_chunk::row::Row;
-use tidb_expression::Expr;
 use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode};
 use tidb_expression::ast_funcs as ast;
+use tidb_expression::constant::new_null;
 use tidb_expression::context::EvalContext;
-use tidb_expression::expression::EvalState;
+use tidb_expression::expression::{EvalState, ExprRef};
+use tidb_expression::util::get_uint64_from_constant;
+use tidb_expression::{Column, Constant, Expr};
 use tidb_parser::types::{
     ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
     ETVectorFloat32, EvalType, FieldType,
@@ -46,6 +48,7 @@ use super::func_count_distinct::{
     CountOriginalWithDistinct4Int, CountOriginalWithDistinct4Real,
     CountOriginalWithDistinct4String,
 };
+use super::func_cume_dist::CumeDist;
 use super::func_first_row::{
     FirstRow4Decimal, FirstRow4Duration, FirstRow4Enum, FirstRow4Float32, FirstRow4Float64,
     FirstRow4Int, FirstRow4JSON, FirstRow4Set, FirstRow4String, FirstRow4Time,
@@ -57,23 +60,31 @@ use super::func_group_concat::{
 };
 use super::func_json_arrayagg::JsonArrayagg;
 use super::func_json_objectagg::JsonObjectAgg;
+use super::func_lead_lag::{BaseLeadLag, Lag, Lead};
 use super::func_max_min::{
-    BaseMaxMinAggFunc, MaxMin4Decimal, MaxMin4Duration, MaxMin4Enum, MaxMin4Float32,
-    MaxMin4Float64, MaxMin4Int, MaxMin4JSON, MaxMin4Set, MaxMin4String, MaxMin4Time, MaxMin4Uint,
+    BaseMaxMinAggFunc, MaxMin4Decimal, MaxMin4DecimalSliding, MaxMin4Duration,
+    MaxMin4DurationSliding, MaxMin4Enum, MaxMin4Float32, MaxMin4Float32Sliding, MaxMin4Float64,
+    MaxMin4Float64Sliding, MaxMin4Int, MaxMin4IntSliding, MaxMin4JSON, MaxMin4Set, MaxMin4String,
+    MaxMin4StringSliding, MaxMin4Time, MaxMin4TimeSliding, MaxMin4Uint, MaxMin4UintSliding,
     MaxMin4VectorFloat32,
 };
+use super::func_ntile::Ntile;
+use super::func_percent_rank::PercentRank;
 use super::func_percentile::{
     BasePercentile, PercentileOriginal4Decimal, PercentileOriginal4Duration,
     PercentileOriginal4Int, PercentileOriginal4Real, PercentileOriginal4Time,
 };
+use super::func_rank::{Rank, build_row_comparer};
 use super::func_stddevpop::{StdDevPop4DistinctFloat64, StdDevPop4Float64};
 use super::func_stddevsamp::{StddevSamp4DistinctFloat64, StddevSamp4Float64};
 use super::func_sum::{
     BaseSum4Float64, Sum4Decimal, Sum4DistinctDecimal, Sum4DistinctFloat64, Sum4Float64,
     Sum4Float64HighPrecision,
 };
+use super::func_value::{FirstValue, LastValue, NthValue, build_value_evaluator};
 use super::func_varpop::{BaseVarPopAggFunc, VarPop4DistinctFloat64, VarPop4Float64};
 use super::func_varsamp::{VarSamp4DistinctFloat64, VarSamp4Float64};
+use super::row_number::RowNumber;
 
 /// AggFuncBuildContext is used to build aggregation functions.
 pub use tidb_expression::context::AggFuncBuildContext;
@@ -130,6 +141,33 @@ pub fn build(ctx: &dyn AggFuncBuildContext, agg_func_desc: &AggFuncDesc, ordinal
         ast::AggFuncVarSamp => build_var_samp(agg_func_desc, ordinal),
         ast::AggFuncStddevSamp => build_stddev_samp(agg_func_desc, ordinal),
         _ => Ok(None),
+    }
+}
+
+/// `BuildWindowFunctions` builds a specific window function according to function
+/// description and order-by columns.
+// go: BuildWindowFunctions L2 (nil → Ok(None), spec §5.1)
+pub fn build_window_functions(
+    ctx: &dyn AggFuncBuildContext,
+    window_func_desc: &AggFuncDesc,
+    ordinal: isize,
+    order_by_cols: &[Column],
+) -> Built {
+    match window_func_desc.base.name.as_str() {
+        ast::WindowFuncRank => build_rank(ordinal, order_by_cols, false),
+        ast::WindowFuncDenseRank => build_rank(ordinal, order_by_cols, true),
+        ast::WindowFuncRowNumber => build_row_number(window_func_desc, ordinal),
+        ast::WindowFuncFirstValue => build_first_value(window_func_desc, ordinal),
+        ast::WindowFuncLastValue => build_last_value(window_func_desc, ordinal),
+        ast::WindowFuncCumeDist => build_cume_dist(ordinal, order_by_cols),
+        ast::WindowFuncNthValue => build_nth_value(ctx, window_func_desc, ordinal),
+        ast::WindowFuncNtile => build_ntile(ctx, window_func_desc, ordinal),
+        ast::WindowFuncPercentRank => build_percent_rank(ordinal, order_by_cols),
+        ast::WindowFuncLead => build_lead(ctx, window_func_desc, ordinal),
+        ast::WindowFuncLag => build_lag(ctx, window_func_desc, ordinal),
+        ast::AggFuncMax => build_max_min_in_window_function(ctx, window_func_desc, ordinal, true),
+        ast::AggFuncMin => build_max_min_in_window_function(ctx, window_func_desc, ordinal, false),
+        _ => build(ctx, window_func_desc, ordinal),
     }
 }
 
@@ -451,8 +489,30 @@ fn build_first_row(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
     Ok(None)
 }
 
-// go: buildMaxMin L1
-fn build_max_min(agg_func_desc: &AggFuncDesc, ordinal: isize, is_max: bool) -> Built {
+/// Typed result of `build_max_min` before boxing, so [`build_max_min_in_window_function`]
+/// can wrap the 8 sliding-capable variants without downcasting.
+// glue: Go type switch on base.(type) in buildMaxMinInWindowFunction
+enum MaxMinBuilt {
+    Int(MaxMin4Int),
+    Uint(MaxMin4Uint),
+    Float32(MaxMin4Float32),
+    Float64(MaxMin4Float64),
+    Decimal(MaxMin4Decimal),
+    String(MaxMin4String),
+    Time(MaxMin4Time),
+    Duration(MaxMin4Duration),
+    Json(MaxMin4JSON),
+    VectorFloat32(MaxMin4VectorFloat32),
+    Enum(MaxMin4Enum),
+    Set(MaxMin4Set),
+}
+
+// glue: shared dispatch for buildMaxMin and buildMaxMinInWindowFunction
+fn build_max_min_typed(
+    agg_func_desc: &AggFuncDesc,
+    ordinal: isize,
+    is_max: bool,
+) -> Option<MaxMinBuilt> {
     let field_type = deref_ret_tp(agg_func_desc);
     let base = BaseMaxMinAggFunc {
         base: BaseAggFunc {
@@ -471,39 +531,92 @@ fn build_max_min(agg_func_desc: &AggFuncDesc, ordinal: isize, is_max: bool) -> B
         AggFunctionMode::DedupMode => {}
         _ => {
             match field_type.get_type() {
-                mysql::TypeEnum => return some(MaxMin4Enum { base }),
-                mysql::TypeSet => return some(MaxMin4Set { base }),
+                mysql::TypeEnum => return Some(MaxMinBuilt::Enum(MaxMin4Enum { base })),
+                mysql::TypeSet => return Some(MaxMinBuilt::Set(MaxMin4Set { base })),
                 _ => {}
             }
 
             match eval_type {
                 ETInt => {
                     if mysql::has_unsigned_flag(field_type.get_flag()) {
-                        return some(MaxMin4Uint { base });
+                        return Some(MaxMinBuilt::Uint(MaxMin4Uint { base }));
                     }
-                    return some(MaxMin4Int { base });
+                    return Some(MaxMinBuilt::Int(MaxMin4Int { base }));
                 }
                 ETReal => match field_type.get_type() {
-                    mysql::TypeFloat => return some(MaxMin4Float32 { base }),
-                    mysql::TypeDouble => return some(MaxMin4Float64 { base }),
+                    mysql::TypeFloat => return Some(MaxMinBuilt::Float32(MaxMin4Float32 { base })),
+                    mysql::TypeDouble => {
+                        return Some(MaxMinBuilt::Float64(MaxMin4Float64 { base }));
+                    }
                     _ => {}
                 },
-                ETDecimal => return some(MaxMin4Decimal { base }),
+                ETDecimal => return Some(MaxMinBuilt::Decimal(MaxMin4Decimal { base })),
                 ETString => {
-                    return some(MaxMin4String {
+                    return Some(MaxMinBuilt::String(MaxMin4String {
                         base,
                         ret_tp: ret_tp(agg_func_desc),
-                    });
+                    }));
                 }
-                ETDatetime | ETTimestamp => return some(MaxMin4Time { base }),
-                ETDuration => return some(MaxMin4Duration { base }),
-                ETJson => return some(MaxMin4JSON { base }),
-                ETVectorFloat32 => return some(MaxMin4VectorFloat32 { base }),
+                ETDatetime | ETTimestamp => return Some(MaxMinBuilt::Time(MaxMin4Time { base })),
+                ETDuration => return Some(MaxMinBuilt::Duration(MaxMin4Duration { base })),
+                ETJson => return Some(MaxMinBuilt::Json(MaxMin4JSON { base })),
+                ETVectorFloat32 => {
+                    return Some(MaxMinBuilt::VectorFloat32(MaxMin4VectorFloat32 { base }));
+                }
                 _ => {}
             }
         }
     }
-    Ok(None)
+    None
+}
+
+// go: buildMaxMin L1
+fn build_max_min(agg_func_desc: &AggFuncDesc, ordinal: isize, is_max: bool) -> Built {
+    match build_max_min_typed(agg_func_desc, ordinal, is_max) {
+        Some(MaxMinBuilt::Int(f)) => some(f),
+        Some(MaxMinBuilt::Uint(f)) => some(f),
+        Some(MaxMinBuilt::Float32(f)) => some(f),
+        Some(MaxMinBuilt::Float64(f)) => some(f),
+        Some(MaxMinBuilt::Decimal(f)) => some(f),
+        Some(MaxMinBuilt::String(f)) => some(f),
+        Some(MaxMinBuilt::Time(f)) => some(f),
+        Some(MaxMinBuilt::Duration(f)) => some(f),
+        Some(MaxMinBuilt::Json(f)) => some(f),
+        Some(MaxMinBuilt::VectorFloat32(f)) => some(f),
+        Some(MaxMinBuilt::Enum(f)) => some(f),
+        Some(MaxMinBuilt::Set(f)) => some(f),
+        None => Ok(None),
+    }
+}
+
+// go: buildMaxMinInWindowFunction L1
+fn build_max_min_in_window_function(
+    ctx: &dyn AggFuncBuildContext,
+    agg_func_desc: &AggFuncDesc,
+    ordinal: isize,
+    is_max: bool,
+) -> Built {
+    match build_max_min_typed(agg_func_desc, ordinal, is_max) {
+        Some(MaxMinBuilt::Int(f)) => some(MaxMin4IntSliding::new(f)),
+        Some(MaxMinBuilt::Uint(f)) => some(MaxMin4UintSliding::new(f)),
+        Some(MaxMinBuilt::Float32(f)) => some(MaxMin4Float32Sliding::new(f)),
+        Some(MaxMinBuilt::Float64(f)) => some(MaxMin4Float64Sliding::new(f)),
+        Some(MaxMinBuilt::Decimal(f)) => some(MaxMin4DecimalSliding::new(f)),
+        Some(MaxMinBuilt::String(f)) => {
+            let collate = f.base.base.args[0]
+                .get_type(&*ctx.get_eval_ctx())
+                .get_collate()
+                .to_owned();
+            some(MaxMin4StringSliding::new(f, collate))
+        }
+        Some(MaxMinBuilt::Time(f)) => some(MaxMin4TimeSliding::new(f)),
+        Some(MaxMinBuilt::Duration(f)) => some(MaxMin4DurationSliding::new(f)),
+        Some(MaxMinBuilt::Json(f)) => some(f),
+        Some(MaxMinBuilt::VectorFloat32(f)) => some(f),
+        Some(MaxMinBuilt::Enum(f)) => some(f),
+        Some(MaxMinBuilt::Set(f)) => some(f),
+        None => Ok(None),
+    }
 }
 
 // go: buildGroupConcat L1
@@ -724,4 +837,148 @@ fn build_json_object_agg(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
         AggFunctionMode::DedupMode => Ok(None),
         _ => some(JsonObjectAgg::new(base)),
     }
+}
+
+// go: buildRowNumber L1
+fn build_row_number(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseAggFunc {
+        args: agg_func_desc.base.args.clone(),
+        ordinal,
+        ret_tp: None,
+    };
+    some(RowNumber { base })
+}
+
+// go: buildRank L1
+fn build_rank(ordinal: isize, order_by_cols: &[Column], is_dense: bool) -> Built {
+    let base = BaseAggFunc {
+        args: Vec::new(),
+        ordinal,
+        ret_tp: None,
+    };
+    some(Rank::new(base, is_dense, build_row_comparer(order_by_cols)))
+}
+
+// go: buildFirstValue L1
+fn build_first_value(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseAggFunc {
+        args: agg_func_desc.base.args.clone(),
+        ordinal,
+        ret_tp: None,
+    };
+    some(FirstValue::new(base, ret_tp(agg_func_desc)))
+}
+
+// go: buildLastValue L1
+fn build_last_value(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseAggFunc {
+        args: agg_func_desc.base.args.clone(),
+        ordinal,
+        ret_tp: None,
+    };
+    some(LastValue::new(base, ret_tp(agg_func_desc)))
+}
+
+// go: buildCumeDist L1
+fn build_cume_dist(ordinal: isize, order_by_cols: &[Column]) -> Built {
+    let base = BaseAggFunc {
+        args: Vec::new(),
+        ordinal,
+        ret_tp: None,
+    };
+    some(CumeDist::new(base, build_row_comparer(order_by_cols)))
+}
+
+// go: buildNthValue L1
+fn build_nth_value(
+    ctx: &dyn AggFuncBuildContext,
+    agg_func_desc: &AggFuncDesc,
+    ordinal: isize,
+) -> Built {
+    let base = BaseAggFunc {
+        args: agg_func_desc.base.args.clone(),
+        ordinal,
+        ret_tp: None,
+    };
+    // Already checked when building the function description.
+    let (nth, _, _) = get_uint64_from_constant(&*ctx.get_eval_ctx(), &agg_func_desc.base.args[1]);
+    some(NthValue::new(base, ret_tp(agg_func_desc), nth))
+}
+
+// go: buildNtile L1
+fn build_ntile(
+    ctx: &dyn AggFuncBuildContext,
+    agg_func_desc: &AggFuncDesc,
+    ordinal: isize,
+) -> Built {
+    let base = BaseAggFunc {
+        args: agg_func_desc.base.args.clone(),
+        ordinal,
+        ret_tp: None,
+    };
+    let (n, _, _) = get_uint64_from_constant(&*ctx.get_eval_ctx(), &agg_func_desc.base.args[0]);
+    some(Ntile { n, base })
+}
+
+// go: buildPercentRank L1
+fn build_percent_rank(ordinal: isize, order_by_cols: &[Column]) -> Built {
+    let base = BaseAggFunc {
+        args: Vec::new(),
+        ordinal,
+        ret_tp: None,
+    };
+    some(PercentRank::new(base, build_row_comparer(order_by_cols)))
+}
+
+// go: buildLeadLag L2 (evaluator constructed per partial result, spec §5.2 & §9.2 #6; validates ret_tp eagerly like Go)
+fn build_lead_lag(
+    ctx: &dyn AggFuncBuildContext,
+    agg_func_desc: &AggFuncDesc,
+    ordinal: isize,
+) -> BaseLeadLag {
+    let mut offset: u64 = 1;
+    if agg_func_desc.base.args.len() >= 2 {
+        (offset, _, _) =
+            get_uint64_from_constant(&*ctx.get_eval_ctx(), &agg_func_desc.base.args[1]);
+    }
+    let mut default_expr: ExprRef = Expr::Constant(new_null()).into_ref();
+    if agg_func_desc.base.args.len() == 3 {
+        default_expr = Arc::clone(&agg_func_desc.base.args[2]);
+        if let Expr::Constant(et) = default_expr.as_ref() {
+            let eval_ctx = ctx.get_eval_ctx();
+            let target_tp = deref_ret_tp(agg_func_desc);
+            let mut val = et.value.clone();
+            let (res, err1) = val.convert_to(&eval_ctx.type_ctx(), target_tp);
+            if err1.is_ok() {
+                default_expr = Expr::Constant(Constant::new(res, target_tp.clone())).into_ref();
+            }
+        }
+    }
+    let base = BaseAggFunc {
+        args: agg_func_desc.base.args.clone(),
+        ordinal,
+        ret_tp: None,
+    };
+    let target_tp = deref_ret_tp(agg_func_desc);
+    let _ = build_value_evaluator(target_tp, ColAlloc::Global);
+    BaseLeadLag::new(
+        base,
+        Arc::clone(&agg_func_desc.base.ret_tp),
+        default_expr,
+        offset,
+    )
+}
+
+// go: buildLead L1
+fn build_lead(ctx: &dyn AggFuncBuildContext, agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    some(Lead {
+        base: build_lead_lag(ctx, agg_func_desc, ordinal),
+    })
+}
+
+// go: buildLag L1
+fn build_lag(ctx: &dyn AggFuncBuildContext, agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    some(Lag {
+        base: build_lead_lag(ctx, agg_func_desc, ordinal),
+    })
 }

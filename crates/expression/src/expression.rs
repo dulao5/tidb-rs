@@ -88,7 +88,7 @@ pub enum Expr {
 
 /// Per-execution state of row evaluation (N4 §3.4). Part 1: the values of correlated
 /// columns, by slot (spec §3.2); Go keeps them behind `CorrelatedColumn.Data`.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct EvalState {
     corr: HashMap<i64, Datum>,
 }

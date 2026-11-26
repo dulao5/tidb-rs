@@ -14,9 +14,11 @@
 //! - Row-by-row evaluation needs the per-execution state of the expressions (correlated
 //!   column values, N4 §3.4), so `UpdatePartialResult` takes an [`EvalState`] besides the
 //!   evaluation context (L2).
-//! - The spill serialization (`serializer`, part S of the block) and the sliding windows
-//!   (`SlidingWindowAggFunc`, `MaxMinSlidingWindowAggFunc`, part W) are not ported yet; the
-//!   trait has no methods for them, so nothing can call an empty implementation (spec §5.4).
+//! - The spill serialization (`serializer`, part S of the block) is not ported yet; the
+//!   trait has no methods for it, so nothing can call an empty implementation (spec §5.4).
+//! - The sliding-window interfaces ([`SlidingWindowAggFunc`], [`MaxMinSlidingWindowAggFunc`])
+//!   are ported in part W and accessed through [`AggFunc::as_sliding_window`] and
+//!   [`AggFunc::as_max_min_sliding_mut`].
 
 use std::any::Any;
 use std::sync::Arc;
@@ -27,8 +29,8 @@ use allocator_api2::boxed::Box as AllocBox;
 use allocator_api2::vec::Vec as AllocVec;
 use tidb_base::Error;
 use tidb_chunk::ColAlloc;
-use tidb_chunk::chunk::Chunk;
-use tidb_chunk::row::Row;
+use tidb_chunk::chunk::{Chunk, renew_with_capacity_in};
+use tidb_chunk::row::{Row, RowHandle};
 use tidb_expression::expression::{EvalState, ExprRef};
 use tidb_kv::hack::{MemAwareMap, new_mem_aware_map_in};
 use tidb_parser::types::FieldType;
@@ -94,6 +96,22 @@ pub trait AggFunc: Send + Sync {
         pr: &mut PartialResult,
     ) -> Result<(), Error>;
 
+    /// Zero-copy [`RowHandle`] ingestion for callers that already hold `Arc<Chunk>` rows
+    /// (such as the window executor, M-ROW spec §5.2). Functions that store rows (`RANK`,
+    /// `PERCENT_RANK`, `CUME_DIST`, `LEAD`, `LAG`) clone the handles without copying cells;
+    /// all other functions borrow the rows and delegate to [`Self::update_partial_result`].
+    // glue: M-ROW zero-copy RowHandle ingestion for WindowExec (spec §5.2)
+    fn update_partial_result_handles(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        rows_in_group: &[RowHandle],
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let rows: Vec<Row<'_>> = rows_in_group.iter().map(RowHandle::row).collect();
+        self.update_partial_result(sctx, st, &rows, pr)
+    }
+
     /// MergePartialResult will be called in the final phase when parallelly executing. It
     /// converts the PartialResult `src`, `dst` to the same specific data structure which
     /// stores the partial results, and then evaluate the final result using the partial
@@ -147,12 +165,53 @@ pub trait AggFunc: Send + Sync {
     // glue: deterministic seed injection for APPROX_PERCENTILE tests/govec (spec §5.6, §9.1 item 7)
     fn set_rng_seed_for_test(&mut self, _seed: u64) {}
 
+    /// Go's `agg.(SlidingWindowAggFunc)` type assertion (spec §5.1).
+    // glue: M-IFACE type assertion to SlidingWindowAggFunc (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        None
+    }
+
+    /// Go's `agg.(MaxMinSlidingWindowAggFunc)` type assertion (spec §5.1).
+    // glue: M-IFACE type assertion to MaxMinSlidingWindowAggFunc (spec §5.1)
+    fn as_max_min_sliding_mut(&mut self) -> Option<&mut dyn MaxMinSlidingWindowAggFunc> {
+        None
+    }
+
     /// The implementation's type name (Go's `%T` of the built function, read by the
     /// differential vectors and the tests).
     // glue: the implementation's type name, no Go counterpart
     fn type_name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
+}
+
+/// `SlidingWindowAggFunc` is the interface to evaluate aggregate functions using a sliding
+/// window (part W of D12.4, spec §5.1).
+pub trait SlidingWindowAggFunc {
+    /// `Slide` evaluates the aggregate function using a sliding window. `last_start` and
+    /// `last_end` are the interval of the former sliding window, and `shift_start` /
+    /// `shift_end` are the sliding window offsets.
+    // glue: interface method of SlidingWindowAggFunc (`st` added, N4 §3.4)
+    #[allow(clippy::too_many_arguments)]
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error>;
+}
+
+/// `MaxMinSlidingWindowAggFunc` is the interface to evaluate the max/min agg function using
+/// a sliding window (part W of D12.4, spec §5.1).
+pub trait MaxMinSlidingWindowAggFunc {
+    /// `SetWindowStart` sets the start position of the window.
+    // glue: interface method of MaxMinSlidingWindowAggFunc
+    fn set_window_start(&mut self, start: u64);
 }
 
 /// baseAggFunc, embedded in every implementation (M-SELF: a field of the implementations).
@@ -195,5 +254,63 @@ pub(crate) fn partial_result_mut<T: Any>(pr: &mut PartialResult) -> &mut T {
             "aggregate function partial result is not a {}",
             std::any::type_name::<T>()
         ),
+    }
+}
+
+/// Copies `bytes` into a boxed slice allocated through `alloc` (A1 3.3).
+// glue: A1 3.3 TrackedAlloc boxed byte slice helper
+pub(crate) fn box_bytes_in(bytes: &[u8], alloc: ColAlloc) -> AllocBox<[u8], ColAlloc> {
+    let mut v = AllocVec::with_capacity_in(bytes.len(), alloc);
+    v.extend_from_slice(bytes);
+    v.into_boxed_slice()
+}
+
+/// Borrows the [`Row`] from an optional [`RowHandle`] (`None` corresponds to Go's zero
+/// `chunk.Row{}`).
+// glue: M-ROW borrow helper for stored window rows
+#[inline]
+pub(crate) fn row_of(h: &Option<RowHandle>) -> Row<'_> {
+    match h {
+        Some(handle) => handle.row(),
+        None => Row::default(),
+    }
+}
+
+/// Copies borrowed `rows` into an `alloc`-backed `Arc<Chunk>` and appends their
+/// [`RowHandle`]s to `dst` (M-ROW + A1 3.3).
+// glue: M-ROW / A1 3.3 copy borrowed rows into ColAlloc-backed Arc<Chunk> for window partial results
+pub(crate) fn push_rows_in(
+    dst: &mut AllocVec<Option<RowHandle>, ColAlloc>,
+    rows: &[Row<'_>],
+    alloc: &ColAlloc,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    let Some(first_non_empty) = rows.iter().find(|r| !r.is_empty()) else {
+        dst.extend(std::iter::repeat_n(None, rows.len()));
+        return;
+    };
+    let non_empty_count = rows.iter().filter(|r| !r.is_empty()).count();
+    let mut owned = renew_with_capacity_in(
+        first_non_empty.chunk(),
+        non_empty_count,
+        non_empty_count,
+        alloc.clone(),
+    );
+    let mut indices = Vec::with_capacity(rows.len());
+    for &row in rows {
+        if row.is_empty() {
+            indices.push(None);
+        } else {
+            let idx = owned.num_rows();
+            owned.append_row(row);
+            indices.push(Some(idx));
+        }
+    }
+    let arc_chk = Arc::new(owned);
+    dst.reserve(rows.len());
+    for idx in indices {
+        dst.push(idx.map(|i| RowHandle::new(Arc::clone(&arc_chk), i)));
     }
 }

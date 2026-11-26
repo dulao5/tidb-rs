@@ -9,7 +9,8 @@ use tidb_chunk::row::Row;
 use tidb_expression::expression::EvalState;
 
 use super::aggfuncs::{
-    AggFunc, AggFuncUpdateContext, BaseAggFunc, PartialResult, partial_result_mut,
+    AggFunc, AggFuncUpdateContext, BaseAggFunc, PartialResult, SlidingWindowAggFunc,
+    partial_result_mut,
 };
 
 /// baseBitAggFunc, embedded in the bit functions.
@@ -157,6 +158,45 @@ impl AggFunc for BitXorUint64 {
         let p1 = *partial_result_mut::<PartialResult4BitFunc>(src);
         let p2 = partial_result_mut::<PartialResult4BitFunc>(dst);
         *p2 ^= p1;
+        Ok(())
+    }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for BitXorUint64 {
+    // go: bitXorUint64.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4BitFunc>(pr);
+        for i in 0..shift_start {
+            let Some(input_value) =
+                self.base.base.args[0].eval_int(sctx, st, get_row(last_start + i))?
+            else {
+                continue;
+            };
+            *p ^= input_value as u64;
+        }
+        for i in 0..shift_end {
+            let Some(input_value) =
+                self.base.base.args[0].eval_int(sctx, st, get_row(last_end + i))?
+            else {
+                continue;
+            };
+            *p ^= input_value as u64;
+        }
         Ok(())
     }
 }
