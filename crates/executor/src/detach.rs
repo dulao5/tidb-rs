@@ -89,7 +89,7 @@ pub fn table_reader_executor_detach(e: &TableReaderExecutor) -> Option<Box<dyn E
     let new_exec = TableReaderExecutor {
         ctx: table_reader_executor_context_detach(&e.ctx),
         base: e.base.clone_without_children(),
-        index_usage_reporter: None,
+        index_usage_reporter: e.index_usage_reporter.clone(),
         table: e.table.clone(),
         kv_range_builder: e.kv_range_builder.clone(),
         ranges: e.ranges.clone(),

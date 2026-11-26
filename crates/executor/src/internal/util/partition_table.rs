@@ -54,8 +54,18 @@ pub fn update_executor_table_id(
         ExecType::TypeExchangeReceiver => None,
         ExecType::TypeJoin => {
             let join = exec.mut_join();
-            let probe_idx = (1 - join.get_inner_idx()) as usize;
-            join.mut_children().get_mut(probe_idx)
+            let raw_idx = 1_i64 - join.get_inner_idx();
+            let children_len = join.get_children().len();
+            let probe_idx = usize::try_from(raw_idx).ok();
+            match probe_idx.and_then(|idx| join.mut_children().get_mut(idx)) {
+                Some(c) => Some(c),
+                None => {
+                    return Err(errors::errorf(
+                        "join executor probe child index %d out of range (children len %d)",
+                        &[Arg::from(raw_idx), Arg::from(children_len)],
+                    ));
+                }
+            }
         }
         ExecType::TypeProjection => opt_child!(exec.mut_projection()),
         ExecType::TypeWindow => opt_child!(exec.mut_window()),

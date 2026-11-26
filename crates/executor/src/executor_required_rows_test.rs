@@ -799,12 +799,15 @@ async fn table_reader_required_rows() {
         let expected_rows_ds = tc.expected_rows_ds.clone();
         let called_clone = Arc::clone(&num_next_called);
 
+        let tbl_info = Arc::new(TableInfo {
+            id: 12345,
+            pk_is_handle: false,
+            ..Default::default()
+        });
+        let tbl_ref = tidb_infoschema::table::mock_table_from_meta(Arc::clone(&tbl_info))
+            .expect("mock table from meta");
         let ts: crate::glue::Plan = Arc::new(PhysicalTableScan {
-            table: Arc::new(TableInfo {
-                id: 12345,
-                pk_is_handle: false,
-                ..Default::default()
-            }),
+            table: tbl_info,
             ..Default::default()
         });
         let dag_pb = construct_dag_req(&sctx, &[ts], TiKV).unwrap();
@@ -819,7 +822,7 @@ async fn table_reader_required_rows() {
                 Vec::new(),
             ),
             index_usage_reporter: None,
-            table: None,
+            table: Some(tbl_ref),
             kv_range_builder: None,
             ranges: Vec::new(),
             grouped_ranges: Vec::new(),

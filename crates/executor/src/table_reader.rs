@@ -336,6 +336,8 @@ impl TableReaderExecutor {
             }
         }
 
+        // kv_ctx carries DistSQL request-source metadata rather than ExecCtx; KILL is checked
+        // after each response (Go select_result.go:454), and dropping the future closes workers via Drop.
         let kv_ctx = kv_ctx_from_dctx(&self.ctx.dctx);
 
         // Treat temporary table as dummy table, avoid sending distsql request to TiKV.
@@ -404,6 +406,8 @@ impl TableReaderExecutor {
             return Ok(());
         }
 
+        // kv_ctx carries DistSQL request-source metadata rather than ExecCtx; KILL is checked
+        // after each response (Go select_result.go:454), and dropping the future closes workers via Drop.
         let kv_ctx = kv_ctx_from_dctx(&self.ctx.dctx);
         self.result_handler
             .as_mut()
@@ -625,15 +629,18 @@ impl TableReaderExecutor {
             let kv_range = krb.build_key_range(&self.ctx.dctx, ranges)?;
             builder.set_partition_key_ranges(kv_range);
         } else {
-            let (tid, is_common_handle) = match &self.table {
-                Some(tbl) => (
-                    get_physical_table_id(tbl.as_ref()),
-                    tbl.meta().is_common_handle,
-                ),
-                None => (0, false),
+            let Some(tbl) = &self.table else {
+                return Err(Error::plain(
+                    "TableReaderExecutor.buildKVReq: table is None",
+                ));
             };
+            let tid = get_physical_table_id(tbl.as_ref());
+            let is_common_handle = tbl.meta().is_common_handle;
             builder.set_handle_ranges(Some(&self.ctx.dctx), tid, is_common_handle, ranges);
         }
+        // TODO(D10.11): port GetClusterTableCopDestination (Go only requests DDLOwner when
+        // destination == DDLOwner, not for all-TiDB cluster tables) and move this boundary
+        // into build_table_reader's pre-Open guards.
         if let Some(tbl) = &self.table
             && tbl.type_().is_cluster_table()
         {
@@ -1571,7 +1578,7 @@ mod tests {
         assert!(reader.dummy);
         assert_eq!(get_physical_plan_ids(&reader.plans), vec![2]);
 
-        // UpdateExecutorTableID recursive traversal.
+        // UpdateExecutorTableID recursive traversal and out-of-range TypeJoin check.
         let mut scan_pb = tipb::Executor::default();
         scan_pb.set_tp(tipb::ExecType::TypeTableScan);
         scan_pb.mut_tbl_scan().set_table_id(1);
@@ -1587,6 +1594,11 @@ mod tests {
                 .get_table_id(),
             555
         );
+        let mut join_pb = tipb::Executor::default();
+        join_pb.set_tp(tipb::ExecType::TypeJoin);
+        join_pb.mut_join().set_inner_idx(0);
+        // probe_idx = 1, but join has 0 children -> error (Go panics on slice out of bounds).
+        assert!(update_executor_table_id(&kv_ctx, Some(&mut join_pb), true, &[555]).is_err());
 
         // KvRangeBuilderFromRangeAndPartition.
         struct DummyPhysTable(TableRef, i64);
@@ -1794,6 +1806,70 @@ mod tests {
         assert_eq!(err.code(), tidb_base::errno::ErrQueryInterrupted as isize);
         reader2.close().await.unwrap();
         let _ = (PhysicalLimit::default(), PhysicalSort::default());
+    }
+
+    #[tokio::test]
+    async fn missing_table_in_infoschema_and_none_table_in_build_kv_req_error() {
+        let tbl = test_table_info(42, false);
+        let plan = make_table_reader_plan(Arc::clone(&tbl), vec![], false, false);
+        let plan_ref: Plan = Arc::new(plan);
+
+        // 1. Builder without an InfoSchema fails instead of silently reading table id 0.
+        {
+            let mut s = MockSession::new(10);
+            let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
+            assert!(b.build(&mut s, Some(&plan_ref)).await.is_none());
+            let err = b.err.as_ref().expect("expected error when b.is is None");
+            assert!(
+                err.to_string()
+                    .contains("table id 42 not found in infoschema"),
+                "unexpected error: {err}"
+            );
+            assert!(s.vars.stmt_ctx().table_ids.is_empty());
+        }
+
+        // 2. Builder whose InfoSchema cannot resolve table_id (e.g. lazy-load miss) fails.
+        {
+            let mut s = MockSession::new(10);
+            let other_tbl = test_table_info(99, false);
+            let is = info_schema_with_table(other_tbl).await;
+            let mut b = new_executor_builder(&s, Some(is), Arc::new(TelemetryInfo::default()));
+            assert!(b.build(&mut s, Some(&plan_ref)).await.is_none());
+            let err = b
+                .err
+                .as_ref()
+                .expect("expected error when table_by_id returns None");
+            assert!(
+                err.to_string()
+                    .contains("table id 42 not found in infoschema"),
+                "unexpected error: {err}"
+            );
+            assert!(s.vars.stmt_ctx().table_ids.is_empty());
+        }
+
+        // 3. Direct build_kv_req with table == None returns an error (no table id 0 fallback).
+        {
+            let s = MockSession::new(10);
+            let tbl_ref = mock_table_from_meta(tbl).unwrap();
+            let mut reader = bare_reader(
+                &s,
+                tbl_ref,
+                vec![],
+                false,
+                false,
+                SelectResultHook::default(),
+            );
+            reader.table = None;
+            let kv_ctx = tidb_kv::Context::background();
+            let err = reader
+                .build_kv_req(&kv_ctx, &[])
+                .err()
+                .expect("expected error when table is None");
+            assert!(
+                err.to_string().contains("table is None"),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     #[tokio::test]

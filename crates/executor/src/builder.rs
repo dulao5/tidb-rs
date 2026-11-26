@@ -1069,6 +1069,12 @@ pub async fn build_no_range_table_reader(
         Some(is) => is.table_by_id(IsCtx::background(), ts.table.id).await,
         None => None,
     };
+    let Some(tbl) = tbl else {
+        return Err(Error::plain(format!(
+            "table id {} not found in infoschema",
+            ts.table.id
+        )));
+    };
     let (is_partition, _physical_table_id) = ts.is_partition();
     if is_partition {
         // glue: stub, blocked-by:D06.4 (PartitionedTable.GetPartition for static partition read)
@@ -1078,7 +1084,7 @@ pub async fn build_no_range_table_reader(
         ));
     }
     if ts.table.table_cache_status_type != TableCacheStatusDisable
-        || tbl.as_ref().is_some_and(|t| t.as_cached_table().is_some())
+        || tbl.as_cached_table().is_some()
     {
         // Cached table read in TableReader requires cached table support (D06.4).
         return Err(blocked("D06.4", "reading a cached table in TableReader"));
@@ -1115,7 +1121,7 @@ pub async fn build_no_range_table_reader(
         read_replica_scope: b.read_replica_scope.clone(),
         is_staleness: b.is_staleness,
         net_data_size,
-        table: tbl,
+        table: Some(tbl),
         kv_range_builder: None,
         ranges: Vec::new(),
         grouped_ranges: Vec::new(),
@@ -1235,13 +1241,12 @@ impl ExecutorBuilder {
             ));
             return None;
         }
-        if let Err(err) = self.valid_can_read_temporary_or_cache_table(sctx, &ts.table) {
-            self.err = Some(err);
-            return None;
-        }
 
         // Write StatementContext.TableIDs before build_no_range_table_reader shares
         // StatementContext with BaseExecutorV2 (same N2 pattern as buildPointGet, spec §4).
+        // `valid_can_read_temporary_or_cache_table` runs inside `build_no_range_table_reader`
+        // after `construct_dag_req` to preserve Go's error precedence; on any error we restore
+        // `is_tikv` and `table_ids` below before returning.
         let prev_is_tikv = sctx
             .get_session_vars()
             .stmt_ctx()
@@ -1254,6 +1259,9 @@ impl ExecutorBuilder {
                 .store(true, Ordering::SeqCst);
         }
         let prev_table_ids_len = sctx.get_session_vars().stmt_ctx().table_ids.len();
+        // TODO(D09.3/D09.5): stmt_ctx_mut() uses Arc::get_mut and would panic if an earlier
+        // executor already holds StatementContext; switch table_ids to interior mutability
+        // before multi-child builders (Join/Union/Apply) land.
         sctx.get_session_vars_mut()
             .stmt_ctx_mut()
             .table_ids
@@ -1267,6 +1275,7 @@ impl ExecutorBuilder {
                     .stmt_ctx()
                     .is_tikv
                     .store(prev_is_tikv, Ordering::SeqCst);
+                // TODO(D09.3/D09.5): see table_ids interior-mutability note above.
                 sctx.get_session_vars_mut()
                     .stmt_ctx_mut()
                     .table_ids
