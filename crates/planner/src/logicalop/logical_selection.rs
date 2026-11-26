@@ -90,7 +90,7 @@ impl LogicalPlan for LogicalSelection {
     /// PreparePossibleProperties implements base.LogicalPlan.<13th> interface.
     // go: LogicalSelection.PreparePossibleProperties L1
     fn prepare_possible_properties(
-        &self,
+        &mut self,
         _arena: &crate::PlanArena,
         mut children_properties: Vec<Vec<Vec<Arc<Column>>>>,
     ) -> Vec<Vec<Arc<Column>>> {

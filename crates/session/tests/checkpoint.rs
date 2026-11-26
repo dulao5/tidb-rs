@@ -142,8 +142,8 @@ fn restore_undoes_all_groups_together() {
 }
 
 /// `ExecuteStmt` of a plain statement is handed over to `Compile` (D05.3 spec §9.2); the
-/// planner stops at the aggregation (`blocked-by:D09.4`, the logical plan builder's
-/// aggregation), before any executor was built. (A statement without a table no longer
+/// planner builds the logical aggregation (D09.4 part A) and stops at `BuildKeySolver`
+/// (`blocked-by:D09.13`), before any executor is built. (A statement without a table no longer
 /// stops in the executor builder: `SELECT 1 FROM DUAL ORDER BY RAND()` runs on the sort
 /// executors, D12.5, and the basic executors, D12.2.)
 /// `PrepareStmt` runs the prepare executor, whose plan builder builds the statement in the
@@ -159,7 +159,7 @@ fn statement_paths_are_blocked() {
         .remove(0);
     let block = |e: Error| tidb_base::blocked::blocked_by(&e).map(str::to_owned);
     let got = block_on(Box::pin(async { s.execute_stmt(stmt, sql).await.err() }));
-    assert_eq!(got.and_then(block), Some("D09.4".to_owned()));
+    assert_eq!(got.and_then(block), Some("D09.13".to_owned()));
     let got = block_on(Box::pin(async { s.prepare_stmt("SELECT 1").await }));
     assert_eq!(got.map(|info| info.fields.len()).ok(), Some(1));
     assert!(s.is_idle());

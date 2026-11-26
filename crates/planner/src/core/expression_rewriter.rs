@@ -111,6 +111,14 @@ impl<'a, T> ByAddr<'a, T> {
     }
 }
 
+impl<T> Clone for ByAddr<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for ByAddr<'_, T> {}
+
 impl<T> PartialEq for ByAddr<'_, T> {
     // glue: pointer equality of Go map keys
     fn eq(&self, other: &Self) -> bool {
@@ -243,6 +251,11 @@ pub struct ExprRewriterPlanCtx<'b, 'ast> {
     pub col_names_for_lazily_privilege_check: Vec<VisitedColumn>,
 }
 
+/// `map[*ast.ColumnNameExpr]ast.ExprNode`: local AST column-alias replacements for an
+/// immutable AST (`havingWindowAndOrderbyExprResolver.Leave` inside aggregates, and
+/// `gbyResolver` for `GROUP BY` aliases/positions, D09.4 spec §4.3).
+pub type ColReplacements<'a> = HashMap<ByAddr<'a, ast::ColumnName>, &'a AstExpr>;
+
 /// expressionRewriter.
 ///
 /// `ctx` (`context.Context`) is not needed outside subqueries; `preprocess` is the hook of
@@ -270,6 +283,9 @@ pub struct ExpressionRewriter<'a, 'b, 'ast> {
     /// NOTE: This value can be changed during expression rewritten.
     disable_fold_counter: i32,
     try_fold_counter: i32,
+
+    /// Optional local column-alias replacement table for immutable ASTs (D09.4 spec §4.3).
+    col_replacements: Option<&'a ColReplacements<'a>>,
 
     plan_ctx: Option<ExprRewriterPlanCtx<'b, 'ast>>,
 }
@@ -324,6 +340,29 @@ impl<'ast> PlanBuilder<'ast> {
         rewrite_expr_node(&mut rewriter, expr_node, as_scalar)
     }
 
+    /// Variant of [`PlanBuilder::rewrite`] that applies local AST column-alias replacements
+    /// without mutating the AST (`agg_col_replacements` and `gby_col_replacements`, D09.4 §4.3).
+    // glue: immutable-AST helper for PlanBuilder.rewrite with local column replacements
+    pub fn rewrite_with_col_replacements<'a>(
+        &mut self,
+        sctx: &'a dyn BuildContext,
+        expr_node: &'a AstExpr,
+        p: RewritePlan<'a>,
+        agg_mapper: Option<&AggMapper<'_>>,
+        col_replacements: Option<&'a ColReplacements<'a>>,
+        as_scalar: bool,
+    ) -> Result<Option<ExprRef>, Error> {
+        let allow_build_cast_array = self.allow_build_cast_array;
+        let mut rewriter = self.get_expression_rewriter(sctx, p);
+        if let Some(pc) = rewriter.plan_ctx.as_mut() {
+            pc.aggr_map = agg_mapper;
+        }
+        rewriter.as_scalar = as_scalar;
+        rewriter.allow_build_cast_array = allow_build_cast_array;
+        rewriter.col_replacements = col_replacements;
+        rewrite_expr_node(&mut rewriter, expr_node, as_scalar)
+    }
+
     /// getExpressionRewriter: a fresh rewriter (Go reuses pooled ones and resets every
     /// field, which is the same thing, M-POOL).
     // go: PlanBuilder.getExpressionRewriter L2 (no pool, M-POOL)
@@ -348,6 +387,7 @@ impl<'ast> PlanBuilder<'ast> {
             source_table: None,
             disable_fold_counter: 0,
             try_fold_counter: 0,
+            col_replacements: None,
             plan_ctx: Some(ExprRewriterPlanCtx {
                 plan: p.id,
                 builder: self,
@@ -693,6 +733,7 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
             source_table,
             disable_fold_counter: 0,
             try_fold_counter: 0,
+            col_replacements: None,
             plan_ctx: None,
         }
     }
@@ -827,6 +868,16 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     /// in `Accept`'s order unless `Enter` skips them, `Leave`).
     // glue: ast.Node.Accept (the Rust AST has no visitor, spec §3 item 1)
     pub fn visit(&mut self, node: &AstExpr) -> Result<(), Error> {
+        if let AstExpr::Column(v) = node
+            && let Some(repl) = self
+                .col_replacements
+                .and_then(|m| m.get(&node_addr(&**v)).copied())
+        {
+            let saved = self.col_replacements.take();
+            let res = self.visit(repl);
+            self.col_replacements = saved;
+            return res;
+        }
         let skip = self.enter(node)?;
         if !skip {
             self.visit_children(node)?;
@@ -1082,7 +1133,8 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     fn leave(&mut self, in_node: &AstExpr) -> Result<(), Error> {
         match in_node {
             AstExpr::Aggregate(v) => {
-                if v.f.eq_ignore_ascii_case(fnames::AggFuncCount) {
+                // Go checks `v.F == ast.AggFuncCount` (case-sensitive, expression_rewriter.go:1517).
+                if v.f == fnames::AggFuncCount {
                     self.collect_privs_for_count();
                 }
             }

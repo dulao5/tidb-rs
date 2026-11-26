@@ -2831,8 +2831,8 @@ SumExpr -> Expr:
   | jsonObjectAgg '(' all Expression ',' all Expression ')' OptWindowingClause { agg_or_window(tok_text($lexer, &$1), vec![$4, $7], false, $9) }
   ;
 OptGConcatSeparator -> Expr:
-     { val(Datum::Str(",".into()), p) }
-  | separator stringLit { val(Datum::Str(tok_text($lexer, &$2)), p) }
+     { val_nocs(Datum::Str(",".into())) }
+  | separator stringLit { val_nocs(Datum::Str(tok_text($lexer, &$2))) }
   ;
 FunctionCallGeneric -> Expr:
     identifier '(' ExpressionListOpt ')' { call(tok_text($lexer, &$1), $3) }

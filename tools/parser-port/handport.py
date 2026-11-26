@@ -686,8 +686,8 @@ agg("jsonObjectAgg '(' Expression ',' Expression ')' OptWindowingClause", T1, "v
 agg("jsonObjectAgg '(' all Expression ',' Expression ')' OptWindowingClause", T1, "vec![$4, $6]", win=8)
 agg("jsonObjectAgg '(' Expression ',' all Expression ')' OptWindowingClause", T1, "vec![$3, $6]", win=8)
 agg("jsonObjectAgg '(' all Expression ',' all Expression ')' OptWindowingClause", T1, "vec![$4, $7]", win=9)
-act("OptGConcatSeparator", "", "val(Datum::Str(\",\".into()), p)")
-act("OptGConcatSeparator", "separator stringLit", "val(Datum::Str(tok_text($lexer, &$2)), p)")
+act("OptGConcatSeparator", "", "val_nocs(Datum::Str(\",\".into()))")
+act("OptGConcatSeparator", "separator stringLit", "val_nocs(Datum::Str(tok_text($lexer, &$2)))")
 
 # --- cast types ----------------------------------------------------------------------------------
 act("CastType", "binaryType OptFieldLen", """{

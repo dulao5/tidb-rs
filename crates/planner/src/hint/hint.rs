@@ -9,6 +9,13 @@
 //! non-empty hint list) is a boundary stub `blocked-by:D02.2` at the place Go takes the
 //! branch; an empty list gives exactly Go's values.
 
+/// PreferHashAgg indicates that the optimizer prefers to use hash aggregation.
+#[allow(non_upper_case_globals)]
+pub const PreferHashAgg: u64 = 1 << 25;
+/// PreferStreamAgg indicates that the optimizer prefers to use stream aggregation.
+#[allow(non_upper_case_globals)]
+pub const PreferStreamAgg: u64 = 1 << 26;
+
 /// PreferTiKV indicates that the optimizer prefers to use TiKV layer.
 #[allow(non_upper_case_globals)]
 pub const PreferTiKV: isize = 1;

@@ -12,7 +12,7 @@
 //!   unique-index key of a point get, D12.1 spec §5) take the statement context, SQL mode and
 //!   connection ID instead of the session (`M-CTX`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
 
 use tidb_base::Error;
@@ -33,7 +33,39 @@ use tidb_types::errors as terr;
 use tidb_types::field_name::NameSlice;
 
 use crate::baseimpl::Plan;
+use crate::core::expression_rewriter::ByAddr;
 use crate::physicalop::{BasePhysicalPlan, PhysicalPlanRef};
+use tidb_parser::ast::{AggregateFuncExpr, Expr as AstExpr};
+
+/// AggregateFuncExtractor visits Expr tree.
+/// It collects AggregateFuncExpr from AST Node.
+#[derive(Debug, Default)]
+pub struct AggregateFuncExtractor<'a> {
+    /// skipAggMap stores correlated aggregate functions which have been built in outer query,
+    /// so extractor in sub-query will skip these aggregate functions.
+    pub skip_agg_map: HashSet<ByAddr<'a, AggregateFuncExpr>>,
+    /// AggFuncs is the collected AggregateFuncExprs.
+    pub agg_funcs: Vec<&'a AggregateFuncExpr>,
+}
+
+impl<'a> AggregateFuncExtractor<'a> {
+    /// Enter implements Visitor interface. Returns whether to skip children.
+    // go: AggregateFuncExtractor.Enter L1
+    pub fn enter(&mut self, n: &'a AstExpr) -> bool {
+        matches!(n, AstExpr::Subquery(_))
+    }
+
+    /// Leave implements Visitor interface.
+    // go: AggregateFuncExtractor.Leave L1
+    pub fn leave(&mut self, n: &'a AstExpr) -> bool {
+        if let AstExpr::Aggregate(v) = n
+            && !self.skip_agg_map.contains(&ByAddr::new(&**v))
+        {
+            self.agg_funcs.push(v);
+        }
+        true
+    }
+}
 
 /// `size.SizeOfPointer`.
 const SIZE_OF_POINTER: i64 = 8;

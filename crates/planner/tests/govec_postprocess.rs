@@ -243,7 +243,7 @@ fn with_built(
         Some(b) => Outcome::Blocked(b.to_string()),
         None => Outcome::Value(err_out(&e)),
     };
-    {
+    let resolve_ctx = {
         let mut node = new_node_w(&mut stmt);
         let (_, res) = preprocess(
             &mut vars,
@@ -256,7 +256,8 @@ fn with_built(
         if let Err(e) = res {
             return blocked_or(e);
         }
-    }
+        node.get_resolve_context()
+    };
     let mut hint_processor = new_qb_hint_handler();
     if let Err(e) = hint_processor.accept(&stmt, Some(vars.stmt_ctx())) {
         return blocked_or(e);
@@ -267,6 +268,7 @@ fn with_built(
     let mut builder = new_plan_builder(&[]);
     builder.init(&mut vars, Some(is), Some(Arc::new(hint_processor)));
     builder.sql_text = sql;
+    builder.resolve_ctx = Some(resolve_ctx);
 
     let wh = Arc::new(new_static_warn_handler(0));
     let mut ctx = PlanCtx::new(&mut vars, new_expr_ctx(mode, &wh));

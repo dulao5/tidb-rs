@@ -391,3 +391,17 @@ rationale = "宪章第九条 3：可复现的 Go 结果错误（uint64 加法回
 approver = "zhigang-du"
 approved = "2026-11-26"
 reopen = "基线升级到 lead.AppendFinalResult2Chunk 避免 curIdx+offset 无符号回绕的版本，或负责人决定照 Go；窗口算子接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"
+
+[[ruling]]
+id = "R27"
+name = "prepared-group-by-pos-param-marker"
+class = "divergence"
+plane = "error"
+layer = "none"
+test = "crates/planner/src/core/logical_plan_builder.rs::prepared_group_by_position_pointing_to_param_marker"
+source = "Constitution Article 9.1 (owner decision 2026-11-26, option A); D09.4 spec §8 item 7 and §9.1 item 3; #425"
+evidence = "In Go TiDB v8.5.8, gbyResolver.Leave (pkg/planner/core/logical_plan_builder.go:3532) writes item.Expr = ParamMarkerExpr for a GROUP BY position pointing to a SELECT-list parameter marker without setting UseAsValueInGbyByClause = true (unlike the alias branch at :3504). With prepared plan cache OFF, PREPARE s FROM 'SELECT ? AS z FROM t GROUP BY 1'; SET @p = 99; EXECUTE s USING @p fails with ERROR 1105: Unknown column '99' in 'group statement' (while @p = 1 only succeeds by coincidence, and non-prepared or GROUP BY z succeeds). With tidb-rs immutable AST resolution, repeated EXECUTE runs succeed and group by the bound parameter constant."
+rationale = "Owner decision (2026-11-26, option A on #425): Go's in-place AST mutation bug causes valid prepared statements to fail with error 1105 on parameter values outside 1..len(fields); keeping the correct immutable-AST behavior matches non-prepared SQL and GROUP BY alias."
+approver = "zhigang-du"
+approved = "2026-11-26"
+reopen = "Baseline upgraded to a Go TiDB version that sets UseAsValueInGbyByClause on the PositionExpr branch, or owner changes the decision; add layer/unit/stmt if ab tests hit it once aggregation execution is wired."

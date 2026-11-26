@@ -58,6 +58,8 @@ pub enum LogicalKind {
     TopN,
     /// `*logicalop.LogicalTableDual`.
     TableDual,
+    /// `*logicalop.LogicalAggregation`.
+    Aggregation,
 }
 
 /// Physical operator kinds (`M-IFACE`). Variants are added with the operators.
@@ -355,7 +357,7 @@ pub trait LogicalPlan: Any + Send {
     /// possible properties.
     // glue: dispatch (Go BaseLogicalPlan.PreparePossibleProperties)
     fn prepare_possible_properties(
-        &self,
+        &mut self,
         arena: &PlanArena,
         children_properties: Vec<Vec<Vec<Arc<Column>>>>,
     ) -> Vec<Vec<Arc<Column>>> {

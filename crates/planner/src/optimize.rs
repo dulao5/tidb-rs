@@ -633,6 +633,7 @@ pub fn build_logical_plan<'ast>(
     builder: &mut PlanBuilder<'ast>,
 ) -> Result<crate::PlanId, Error> {
     reset_for_build(ctx.vars);
+    builder.resolve_ctx = Some(node.get_resolve_context());
     let begin_rewrite = std::time::Instant::now();
     let p = builder.build(ctx, node.node)?;
     ctx.vars.duration_rewrite = begin_rewrite.elapsed().as_nanos() as i64;

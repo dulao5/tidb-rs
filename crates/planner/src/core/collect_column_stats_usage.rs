@@ -14,12 +14,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tidb_expression::util::{extract_columns, extract_columns_and_cor_columns_from_expressions};
+use tidb_expression::util::{
+    extract_columns, extract_columns_and_cor_columns_from_expressions,
+    extract_columns_from_expressions,
+};
 use tidb_expression::{Column, ExprRef};
+use tidb_parser::ast::funcs as ast_funcs;
 
 use crate::arena::PlanId;
 use crate::base::{LogicalKind, LogicalPlan};
-use crate::logicalop::{DataSource, LogicalProjection, LogicalSelection, LogicalSort, LogicalTopN};
+use crate::logicalop::{
+    DataSource, LogicalAggregation, LogicalProjection, LogicalSelection, LogicalSort, LogicalTopN,
+};
 use crate::planctx::PlanCtx;
 
 /// `model.TableItemID` without its load-failure flag (the map key of Go's predicate
@@ -264,7 +270,31 @@ impl ColumnStatsUsageCollector {
                         current_ordering_cols.extend(extract_columns(&item.expr));
                     }
                 }
-                // LogicalJoin / LogicalApply / LogicalWindow / LogicalAggregation: not ported.
+                LogicalKind::Aggregation => {
+                    let x = node
+                        .as_any()
+                        .downcast_ref::<LogicalAggregation>()
+                        .expect("LogicalAggregation");
+                    // GROUP BY columns benefit from indexes (similar to ordering)
+                    current_ordering_cols = extract_columns_from_expressions(
+                        current_ordering_cols,
+                        &x.group_by_items,
+                        None,
+                    );
+                    // MIN/MAX aggregates can benefit from ordered indexes
+                    for agg_func in &x.agg_funcs {
+                        if agg_func.base.name == ast_funcs::AggFuncMin
+                            || agg_func.base.name == ast_funcs::AggFuncMax
+                        {
+                            current_ordering_cols = extract_columns_from_expressions(
+                                current_ordering_cols,
+                                &agg_func.base.args,
+                                None,
+                            );
+                        }
+                    }
+                }
+                // LogicalJoin / LogicalApply / LogicalWindow: not ported.
                 _ => {}
             }
         }
@@ -320,6 +350,19 @@ impl ColumnStatsUsageCollector {
                 // Though the conditions in LogicalSelection are complex conditions which cannot be pushed down to DataSource, we still
                 // regard statistics of the columns in the conditions as needed.
                 self.add_predicate_columns_from_expressions(&x.conditions, false);
+            }
+            LogicalKind::Aggregation => {
+                let x = node
+                    .as_any()
+                    .downcast_ref::<LogicalAggregation>()
+                    .expect("LogicalAggregation");
+                // Just assume statistics of all the columns in GroupByItems are needed.
+                self.add_predicate_columns_from_expressions(&x.group_by_items, false);
+                // Schema change from children to self.
+                let schema = x.schema(&ctx.arena);
+                for (i, agg_func) in x.agg_funcs.iter().enumerate() {
+                    self.update_col_map_from_expressions(&schema.columns[i], &agg_func.base.args);
+                }
             }
             LogicalKind::Sort => {
                 let x = node

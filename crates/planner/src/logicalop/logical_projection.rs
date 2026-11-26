@@ -318,7 +318,7 @@ impl LogicalPlan for LogicalProjection {
     /// PreparePossibleProperties implements base.LogicalPlan.<13th> interface.
     // go: LogicalProjection.PreparePossibleProperties L1 [M-PLAN]
     fn prepare_possible_properties(
-        &self,
+        &mut self,
         arena: &crate::PlanArena,
         mut children_properties: Vec<Vec<Vec<Arc<Column>>>>,
     ) -> Vec<Vec<Arc<Column>>> {

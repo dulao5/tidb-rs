@@ -41,6 +41,7 @@ use tidb_sessionctx::stmtctx::TableEntry;
 use tidb_sessionctx::variable::session::SessionVars;
 
 use crate::core::expression_rewriter::{ByAddr, CheckSelectColumnPrivOption, ClauseCode};
+use crate::core::resolve::ContextRef;
 
 /// visitInfo is used for privilege check.
 #[derive(Clone, Debug, Default)]
@@ -238,6 +239,10 @@ pub struct PlanBuilder<'ast> {
     /// hintState: the per-build state of the query block hints (`hint.QBHintBuildState`),
     /// created by `Init` when there is a hint processor.
     pub hint_state: Option<QBHintBuildState>,
+    /// resolveCtx: the statement's semantic resolve context (`resolve.Context`), populated by
+    /// the preprocessor and read by `tblInfoFromCol` for `ONLY_FULL_GROUP_BY` functional
+    /// dependency checks.
+    pub resolve_ctx: Option<ContextRef>,
 }
 
 /// PlanBuilderOpt is used to adjust the plan builder.

@@ -2138,3 +2138,98 @@ pub fn param_marker_expression(
     }
     Ok(value)
 }
+
+/// Go's `*ast.PositionExpr` (`N int`, `P ast.ExprNode`): either a literal 1-based position
+/// (`p == None`) or a parameter marker (`p == Some(order)`).
+// glue: ast.PositionExpr with optional parameter marker (Rust ast::Expr::Position only holds i64)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PositionExpr {
+    /// Literal 1-based position (`ast.PositionExpr.N`).
+    pub n: isize,
+    /// Optional parameter marker order (`ast.PositionExpr.P.(*driver.ParamMarkerExpr).Order`).
+    pub p: Option<usize>,
+}
+
+impl PositionExpr {
+    /// Literal position item (`GROUP BY 1`, `ORDER BY 2`).
+    // glue: constructor for literal ast.PositionExpr{N: n}
+    pub fn from_num(n: i64) -> Self {
+        PositionExpr {
+            n: n as isize,
+            p: None,
+        }
+    }
+}
+
+/// ConstructPositionExpr constructs PositionExpr with the given ParamMarkerExpr.
+// go: ConstructPositionExpr L2 (returns expression::util::PositionExpr because Rust ast::Expr::Position only holds i64)
+pub fn construct_position_expr(p: &tidb_parser::ast::ParamMarkerExpr) -> PositionExpr {
+    PositionExpr {
+        n: 0,
+        p: Some(p.order()),
+    }
+}
+
+/// PosFromPositionExpr generates a position value from PositionExpr.
+/// Returns `Ok((pos, is_null))`.
+// go: PosFromPositionExpr L1
+pub fn pos_from_position_expr(
+    ctx: &dyn BuildContext,
+    v: &PositionExpr,
+) -> Result<(isize, bool), Error> {
+    let Some(order) = v.p else {
+        return Ok((v.n, false));
+    };
+    let value = param_marker_expression(ctx, order, false)?;
+    let (pos, is_null) = get_int_from_constant(&*ctx.get_eval_ctx(), &Expr::Constant(value))?;
+    if is_null {
+        return Ok((0, true));
+    }
+    Ok((pos as isize, false))
+}
+
+#[cfg(test)]
+mod position_expr_tests {
+    use super::*;
+    use tidb_parser::ast::ParamMarkerExpr;
+    use tidb_sessionctx::exprstatic::{
+        new_eval_context, new_expr_context, with_eval_ctx, with_param_list,
+    };
+    use tidb_types::datum::{Datum, new_int_datum, new_string_datum};
+
+    #[test]
+    fn pos_from_position_expr_literal_and_param() {
+        let params = [
+            new_int_datum(3),
+            Datum::default(),
+            new_string_datum("not_an_int"),
+        ];
+        let ev = new_eval_context(vec![with_param_list(&params)]);
+        let bc = new_expr_context(vec![with_eval_ctx(ev)]);
+
+        // Literal position
+        assert_eq!(
+            pos_from_position_expr(&*bc, &PositionExpr::from_num(2)).unwrap(),
+            (2, false)
+        );
+
+        // Parameter marker with int value
+        let p0 = ParamMarkerExpr::new(0);
+        p0.set_order(0);
+        let pos0 = construct_position_expr(&p0);
+        assert_eq!(pos0, PositionExpr { n: 0, p: Some(0) });
+        assert_eq!(pos_from_position_expr(&*bc, &pos0).unwrap(), (3, false));
+
+        // Parameter marker with NULL value
+        let p1 = ParamMarkerExpr::new(1);
+        p1.set_order(1);
+        let pos1 = construct_position_expr(&p1);
+        assert_eq!(pos_from_position_expr(&*bc, &pos1).unwrap(), (0, true));
+
+        // Parameter marker with non-integer string -> is_null = true (GetIntFromConstant returns isNull)
+        let p2 = ParamMarkerExpr::new(2);
+        p2.set_order(2);
+        let pos2 = construct_position_expr(&p2);
+        assert_eq!(pos_from_position_expr(&*bc, &pos2).unwrap(), (0, true));
+    }
+}

@@ -22,24 +22,35 @@ use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
 use tidb_base::contextutil::{StaticWarnHandler, WarnHandler, new_static_warn_handler};
 use tidb_base::errors::RedactLogDisable;
+use tidb_base::gostd::strconv::format_float;
 use tidb_base::gostd::time::utc;
+use tidb_base::kv::{TiFlash, TiKV};
 use tidb_base::mysql::SQLMode;
+use tidb_expression::aggregation::AggFunctionMode;
 use tidb_expression::{Column, Expr};
+use tidb_kv::checker::RequestTypeSupportedChecker;
+use tidb_kv::kv::{Client, ClientSendOption, Request, Response};
 use tidb_model::TableInfo;
 use tidb_parser::model::CIStr;
 use tidb_parser::types::FieldType;
 use tidb_parser::{ParseOptions, parse};
+use tidb_planner::arena::with_detached;
+use tidb_planner::base as pbase;
 use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
 use tidb_planner::core::planbuilder::new_plan_builder;
 use tidb_planner::core::preprocess::{
     InfoSchemaHandle, PreprocessorReturn, preprocess, with_preprocessor_return,
 };
 use tidb_planner::core::resolve::new_node_w;
+use tidb_planner::hint::hint::{PreferHashAgg, PreferStreamAgg};
 use tidb_planner::logicalop::{
-    DataSource, LogicalLimit, LogicalProjection, LogicalSelection, LogicalSort, LogicalTableDual,
+    DataSource, LogicalAggregation, LogicalLimit, LogicalProjection, LogicalSelection, LogicalSort,
+    LogicalTableDual,
 };
+use tidb_planner::property::{GroupNDV, StatsInfo};
+use tidb_planner::util::optimizetrace::default_logical_optimize_option;
 use tidb_planner::util::{AccessPath, ByItems, HandleCols};
-use tidb_planner::{LogicalKind, PlanCtx, PlanId};
+use tidb_planner::{LogicalKind, LogicalPlan, PlanCtx, PlanId};
 use tidb_sessionctx::exprstatic as es;
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 use tidb_types::collate;
@@ -65,7 +76,7 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     // The preprocessor's missing table check (the privilege manager decides the error).
     ("D04.1", 2),
     // Built-in function families not ported yet (IN, ANY_VALUE, user variables, ...).
-    ("D08.9", 53),
+    ("D08.9", 63),
     // Virtual generated columns.
     ("D09.1", 2),
     // Partitioned tables.
@@ -76,8 +87,8 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.2", 2),
     // Joins.
     ("D09.3", 6),
-    // Aggregation, GROUP BY, DISTINCT, windows.
-    ("D09.4", 15),
+    // Window functions (D09.4 part B) and GROUP BY ... WITH ROLLUP (D09.4 part C).
+    ("D09.4", 6),
     // WITH and set operations.
     ("D09.5", 4),
     // Subqueries.
@@ -365,6 +376,27 @@ fn dump(ctx: &PlanCtx<'_>, p: PlanId) -> Value {
             let x = node.as_any().downcast_ref::<LogicalTableDual>().unwrap();
             o.insert("rows".into(), json!(x.row_count));
         }
+        LogicalKind::Aggregation => {
+            let x = node.as_any().downcast_ref::<LogicalAggregation>().unwrap();
+            let aggs: Vec<Value> = x
+                .agg_funcs
+                .iter()
+                .map(|a| {
+                    json!([
+                        a.base.name,
+                        exprs_out(ectx, &a.base.args),
+                        a.has_distinct,
+                        a.mode as i32,
+                        by_out(ectx, &a.order_by_items),
+                        ft_out(&a.base.ret_tp),
+                    ])
+                })
+                .collect();
+            o.insert("aggs".into(), Value::Array(aggs));
+            o.insert("gby".into(), exprs_out(ectx, &x.group_by_items));
+            o.insert("prefer_agg_type".into(), json!(x.prefer_agg_type));
+            o.insert("prefer_agg_to_cop".into(), json!(x.prefer_agg_to_cop));
+        }
         k => panic!("dump {k:?}"),
     }
     let children: Vec<Value> = node.children().iter().map(|&c| dump(ctx, c)).collect();
@@ -416,7 +448,7 @@ fn run(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     vars.remove_orderby_in_subquery = !opts["keep_order"].as_bool().unwrap();
     let is = InfoSchemaHandle(Arc::clone(tables) as Arc<dyn InfoSchemaLookup>);
 
-    {
+    let resolve_ctx = {
         let mut node = new_node_w(&mut stmt);
         let (_, res) = preprocess(
             &mut vars,
@@ -432,7 +464,8 @@ fn run(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
             }
             return Outcome::Value(err_out(&e));
         }
-    }
+        node.get_resolve_context()
+    };
 
     // BuildLogicalPlanForTest: plan and column ids from 0.
     vars.state.plan_id.0.store(0, Ordering::SeqCst);
@@ -440,6 +473,7 @@ fn run(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     let mut builder = new_plan_builder(&[]);
     builder.init(&mut vars, Some(is), None);
     builder.sql_text = sql;
+    builder.resolve_ctx = Some(resolve_ctx);
 
     let wh = Arc::new(new_static_warn_handler(0));
     let ev = es::new_eval_context(vec![
@@ -496,6 +530,383 @@ fn run(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     }
 }
 
+struct MockClient;
+
+impl Client for MockClient {
+    fn send(
+        &self,
+        _: &tidb_kv::Context,
+        _: &Request,
+        _: Option<tidb_kv::kv::OptionValue>,
+        _: &ClientSendOption,
+    ) -> Box<dyn Response> {
+        unreachable!("MockClient.send")
+    }
+
+    fn is_request_type_supported(&self, req_type: i64, sub_type: i64) -> bool {
+        RequestTypeSupportedChecker.is_request_type_supported(req_type, sub_type)
+    }
+}
+
+fn find_agg(ctx: &PlanCtx<'_>, p: PlanId) -> Option<PlanId> {
+    let node = ctx.arena.get(p);
+    if node.kind() == LogicalKind::Aggregation {
+        return Some(p);
+    }
+    node.children().iter().find_map(|&c| find_agg(ctx, c))
+}
+
+fn run_aggop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
+    collate::set_new_collation_enabled_for_test(true);
+    let sql = args[1].as_str().unwrap();
+    let spec = &args[2];
+    let Ok(out) = parse(sql, &ParseOptions::default()) else {
+        return Outcome::Unparsed;
+    };
+    let Some(mut stmt) = out.stmts.into_iter().next() else {
+        return Outcome::Unparsed;
+    };
+    let mode = tidb_base::mysql::ModeOnlyFullGroupBy.0;
+    let mut vars = SessionVars::new(Box::new(Acc));
+    vars.current_db = "test".to_owned();
+    vars.sql_mode = mode;
+    let is = InfoSchemaHandle(Arc::clone(tables) as Arc<dyn InfoSchemaLookup>);
+    let resolve_ctx = {
+        let mut node = new_node_w(&mut stmt);
+        let (_, res) = preprocess(
+            &mut vars,
+            &mut node,
+            vec![with_preprocessor_return(PreprocessorReturn {
+                info_schema: Some(is.clone()),
+                ..Default::default()
+            })],
+        );
+        if let Err(e) = res {
+            return Outcome::Value(err_out(&e));
+        }
+        node.get_resolve_context()
+    };
+    vars.state.plan_id.0.store(0, Ordering::SeqCst);
+    vars.state.plan_column_id.0.store(0, Ordering::SeqCst);
+    let mut builder = new_plan_builder(&[]);
+    builder.init(&mut vars, Some(is), None);
+    builder.sql_text = sql;
+    builder.resolve_ctx = Some(resolve_ctx);
+
+    let wh = Arc::new(new_static_warn_handler(0));
+    let ev = es::new_eval_context(vec![
+        es::with_type_flags(tidb_types::context::DefaultStmtFlags),
+        es::with_sql_mode(SQLMode(mode)),
+        es::with_location(Some(utc())),
+        es::with_current_db("test".to_owned()),
+        es::with_warn_handler(Some(Arc::clone(&wh) as _)),
+    ]);
+    let expr_ctx = es::new_expr_context(vec![
+        es::with_eval_ctx(ev),
+        es::with_charset("utf8mb4".to_owned(), "utf8mb4_bin".to_owned()),
+        es::with_default_collation_for_utf8mb4("utf8mb4_bin".to_owned()),
+    ]);
+    let mut ctx = PlanCtx::new(&mut vars, expr_ctx);
+    ctx.has_dirty_content = Some(Arc::new(|_| false));
+    ctx.client = Some(Arc::new(MockClient));
+    let lp = match builder.build(&mut ctx, &stmt) {
+        Ok(p) => p,
+        Err(e) => {
+            if let Some(b) = blocked_by(&e) {
+                return Outcome::Blocked(b.to_string());
+            }
+            return Outcome::Value(err_out(&e));
+        }
+    };
+    let agg_id = find_agg(&ctx, lp).unwrap_or_else(|| {
+        panic!(
+            "no LogicalAggregation in {sql} ({spec}): {}",
+            dump(&ctx, lp)
+        )
+    });
+    let kind = spec["kind"].as_str().unwrap();
+    match kind {
+        "inspect" => {
+            let agg = ctx
+                .arena
+                .downcast_ref::<LogicalAggregation>(agg_id)
+                .unwrap();
+            let gby_cols: Vec<Value> = agg
+                .get_group_by_cols()
+                .iter()
+                .map(|c| json!(c.unique_id))
+                .collect();
+            let part_keys: Vec<Value> = agg
+                .get_potential_partition_keys()
+                .iter()
+                .map(|k| json!([k.col.unique_id, k.collate_id]))
+                .collect();
+            let used_cols: Vec<Value> = agg
+                .get_used_cols()
+                .iter()
+                .map(|c| json!(c.unique_id))
+                .collect();
+            let col_groups: Vec<Value> = agg
+                .extract_col_groups(&ctx.arena, &[])
+                .iter()
+                .map(|g| Value::Array(g.iter().map(|c| json!(c.unique_id)).collect()))
+                .collect();
+            let cor_cols: Vec<Value> = agg
+                .extract_correlated_cols()
+                .iter()
+                .map(|c| json!(c.column.unique_id))
+                .collect();
+            let cop_tikv = agg.can_push_to_cop(&ctx, TiKV);
+            let cop_tiflash = agg.can_push_to_cop(&ctx, TiFlash);
+            let can_pull_up = agg.can_pull_up(&ctx).unwrap();
+            let distinct_meets = agg.distinct_args_meets_property(&ctx);
+            let has_distinct = agg.has_distinct();
+            let has_order_by = agg.has_order_by();
+            let is_partial = !agg.agg_funcs.is_empty() && agg.is_partial_mode_agg();
+            ctx.arena
+                .downcast_mut::<LogicalAggregation>(agg_id)
+                .unwrap()
+                .no_cop_push_down = true;
+            let cop_blocked = ctx
+                .arena
+                .downcast_ref::<LogicalAggregation>(agg_id)
+                .unwrap()
+                .can_push_to_cop(&ctx, TiKV);
+            Outcome::Value(json!({
+                "has_distinct": has_distinct,
+                "has_order_by": has_order_by,
+                "is_partial": is_partial,
+                "gby_cols": gby_cols,
+                "part_keys": part_keys,
+                "used_cols": used_cols,
+                "cop_tikv": cop_tikv,
+                "cop_tiflash": cop_tiflash,
+                "cop_blocked": cop_blocked,
+                "can_pull_up": can_pull_up,
+                "distinct_meets": distinct_meets,
+                "col_groups": col_groups,
+                "cor_cols": cor_cols,
+            }))
+        }
+        "hints" => {
+            let prefer = match spec["prefer"].as_str().unwrap_or("") {
+                "hash" => PreferHashAgg,
+                "stream" => PreferStreamAgg,
+                "both" => PreferHashAgg | PreferStreamAgg,
+                _ => 0,
+            };
+            ctx.arena
+                .downcast_mut::<LogicalAggregation>(agg_id)
+                .unwrap()
+                .prefer_agg_type = prefer;
+            let (ph, ps, final_pref) = with_detached(&mut ctx, agg_id, |node, ctx| {
+                let agg = node
+                    .as_any_mut()
+                    .downcast_mut::<LogicalAggregation>()
+                    .unwrap();
+                let (ph, ps) = agg.reset_hint_if_conflicted(ctx);
+                (ph, ps, agg.prefer_agg_type)
+            });
+            let w = warns(ctx.vars, &wh);
+            Outcome::Value(json!({
+                "hash": ph,
+                "stream": ps,
+                "prefer": final_pref,
+                "w": w,
+            }))
+        }
+        "keyinfo" => {
+            let partial = spec["partial"].as_bool().unwrap_or(false);
+            let self_only = spec["self_only"].as_bool().unwrap_or(false);
+            let (keys, max_one_row) = with_detached(&mut ctx, agg_id, |node, ctx| {
+                let agg = node
+                    .as_any_mut()
+                    .downcast_mut::<LogicalAggregation>()
+                    .unwrap();
+                if partial && !agg.agg_funcs.is_empty() {
+                    agg.agg_funcs[0].mode = AggFunctionMode::Partial1Mode;
+                }
+                if self_only {
+                    let mut s = agg.schema(&ctx.arena).clone();
+                    agg.build_self_key_info(&mut s);
+                    agg.sp.set_schema(Some(s));
+                } else {
+                    agg.build_key_info(&mut ctx.arena);
+                }
+                let keys: Vec<Value> = agg
+                    .schema(&ctx.arena)
+                    .keys
+                    .iter()
+                    .map(|k| Value::Array(k.iter().map(|c| json!(c.unique_id)).collect()))
+                    .collect();
+                (keys, agg.max_one_row())
+            });
+            Outcome::Value(json!({
+                "keys": keys,
+                "max_one_row": max_one_row,
+            }))
+        }
+        "replace" => {
+            let child_id = ctx.arena.get(agg_id).children()[0];
+            let old_col = Arc::clone(&ctx.arena.get(child_id).schema(&ctx.arena).columns[0]);
+            let mut new_col = (*old_col).clone();
+            new_col.unique_id = 9999;
+            let mut replace = std::collections::HashMap::new();
+            replace.insert(old_col.hash_code().to_vec(), Arc::new(new_col));
+            ctx.arena.get_mut(agg_id).replace_expr_columns(&replace);
+            Outcome::Value(json!({"plan": dump(&ctx, agg_id)}))
+        }
+        "ppd" => {
+            let opt = default_logical_optimize_option();
+            let mut preds = Vec::new();
+            if spec["const_pred"].as_bool().unwrap_or(false) {
+                preds.push(Arc::new(Expr::Constant(tidb_expression::new_zero())));
+            }
+            match pbase::predicate_push_down(&mut ctx, lp, preds, &opt) {
+                Ok((rem, new_p)) => {
+                    let ectx = ctx.eval_ctx();
+                    let rem_val = exprs_out(&*ectx, &rem);
+                    drop(ectx);
+                    Outcome::Value(json!({"plan": dump(&ctx, new_p), "rem": rem_val}))
+                }
+                Err(e) => Outcome::Value(err_out(&e)),
+            }
+        }
+        "prune" => {
+            let opt = default_logical_optimize_option();
+            let used: Vec<Arc<Column>> = spec["keep"]
+                .as_array()
+                .map(|arr| {
+                    let cols = &ctx.arena.get(lp).schema(&ctx.arena).columns;
+                    arr.iter()
+                        .map(|i| Arc::clone(&cols[i.as_u64().unwrap() as usize]))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match pbase::prune_columns(&mut ctx, lp, used, &opt) {
+                Ok(new_p) => Outcome::Value(json!({"plan": dump(&ctx, new_p)})),
+                Err(e) => Outcome::Value(err_out(&e)),
+            }
+        }
+        "stats" => {
+            let child_id = ctx.arena.get(agg_id).children()[0];
+            let child_cols = ctx.arena.get(child_id).schema(&ctx.arena).columns.clone();
+            let mut col_ndvs = std::collections::HashMap::new();
+            for (i, c) in child_cols.iter().enumerate() {
+                col_ndvs.insert(c.unique_id, (10 * (i + 1)) as f64);
+            }
+            let group_ndvs: Vec<GroupNDV> = spec["group_ndvs"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|g| GroupNDV {
+                            cols: g
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|i| child_cols[i.as_u64().unwrap() as usize].unique_id)
+                                .collect(),
+                            ndv: 42.0,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let child_stats = Arc::new(StatsInfo {
+                row_count: 1000.0,
+                col_ndvs,
+                group_ndvs,
+                ..Default::default()
+            });
+            let col_groups: Vec<Vec<Arc<Column>>> = spec["col_groups"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|g| {
+                            g.as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|i| Arc::clone(&child_cols[i.as_u64().unwrap() as usize]))
+                                .collect()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (s1, s2, input_count) = with_detached(&mut ctx, agg_id, |node, ctx| {
+                let s1 = node.derive_stats(ctx, agg_id, std::slice::from_ref(&child_stats), &[])?;
+                let s2 = node.derive_stats(
+                    ctx,
+                    agg_id,
+                    std::slice::from_ref(&child_stats),
+                    &col_groups,
+                )?;
+                let input_count = node
+                    .as_any()
+                    .downcast_ref::<LogicalAggregation>()
+                    .unwrap()
+                    .input_count;
+                Ok::<_, Error>((s1, s2, input_count))
+            })
+            .unwrap();
+            let mut uids: Vec<i64> = s2.col_ndvs.keys().copied().collect();
+            uids.sort();
+            let ndv_out: Vec<Value> = uids
+                .iter()
+                .map(|&k| json!([k, format_float(s2.col_ndvs[&k], b'g', -1, 64)]))
+                .collect();
+            let gndv_out = |gs: &[GroupNDV]| -> Vec<Value> {
+                gs.iter()
+                    .map(|g| json!([g.cols, format_float(g.ndv, b'g', -1, 64)]))
+                    .collect()
+            };
+            Outcome::Value(json!({
+                "row_count": format_float(s2.row_count, b'g', -1, 64),
+                "input_count": format_float(input_count, b'g', -1, 64),
+                "col_ndvs": ndv_out,
+                "gndvs1": gndv_out(&s1.group_ndvs),
+                "gndvs2": gndv_out(&s2.group_ndvs),
+            }))
+        }
+        "props" => {
+            let child_id = ctx.arena.get(agg_id).children()[0];
+            let child_cols = ctx.arena.get(child_id).schema(&ctx.arena).columns.clone();
+            let child_props: Vec<Vec<Arc<Column>>> = spec["child_props"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|g| {
+                            g.as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|i| Arc::clone(&child_cols[i.as_u64().unwrap() as usize]))
+                                .collect()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (ret, possible) = with_detached(&mut ctx, agg_id, |node, ctx| {
+                let ret = node.prepare_possible_properties(&ctx.arena, vec![child_props]);
+                let possible = node
+                    .as_any()
+                    .downcast_ref::<LogicalAggregation>()
+                    .unwrap()
+                    .possible_properties
+                    .clone();
+                (ret, possible)
+            });
+            let dump_props = |ps: &[Vec<Arc<Column>>]| -> Vec<Value> {
+                ps.iter()
+                    .map(|p| Value::Array(p.iter().map(|c| json!(c.unique_id)).collect()))
+                    .collect()
+            };
+            Outcome::Value(json!({
+                "ret": dump_props(&ret),
+                "possible": dump_props(&possible),
+            }))
+        }
+        other => panic!("unknown aggop kind {other}"),
+    }
+}
+
 /// The first path where two JSON values differ, with both sides (for the report).
 fn first_diff(a: &Value, b: &Value, path: String) -> Option<String> {
     match (a, b) {
@@ -539,6 +950,7 @@ fn govec_selectbuild() {
     let (mut diffs, mut unparsed) = (Vec::new(), Vec::new());
     for line in lines {
         let rec: Value = serde_json::from_str(line).unwrap();
+        assert!(rec["err"].is_null(), "Go error in record: {rec}");
         records += 1;
         let args = rec["args"].as_array().unwrap();
         let out = &rec["out"];
@@ -556,11 +968,20 @@ fn govec_selectbuild() {
             tables = Some(Arc::new(Tables(ts)));
             continue;
         }
+        let op = rec["op"].as_str().unwrap();
         let sql = args[1].as_str().unwrap();
-        match run(
-            tables.as_ref().expect("the tables record comes first"),
-            args,
-        ) {
+        let outcome = match op {
+            "build" => run(
+                tables.as_ref().expect("the tables record comes first"),
+                args,
+            ),
+            "aggop" => run_aggop(
+                tables.as_ref().expect("the tables record comes first"),
+                args,
+            ),
+            other => panic!("unknown op {other}"),
+        };
+        match outcome {
             Outcome::Unparsed => {
                 // A syntax error on both sides is the same outcome.
                 if out["code"] != 1064 {

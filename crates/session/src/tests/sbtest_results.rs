@@ -480,10 +480,10 @@ fn ranges_fall_back_before_any_executor_opened() {
     }
 }
 
-/// `SUM(k)` over a range (sysbench's sum range) needs the aggregation (D09.4) and falls back
-/// at planning, before any executor opened, as a text query and as a prepared statement,
-/// also for a range of one point, which Go plans as a stream aggregation over a projection
-/// over a point get.
+/// `SUM(k)` over a range (sysbench's sum range) builds the logical aggregation (D09.4 part A)
+/// and falls back at logical optimization (`BuildKeySolver`, D09.13), before any executor
+/// opened, as a text query and as a prepared statement, also for a range of one point, which
+/// Go plans as a stream aggregation over a projection over a point get.
 #[test]
 fn sum_range_falls_back_at_planning() {
     let _serial = PREPARED_COUNT.lock();
@@ -494,7 +494,7 @@ fn sum_range_falls_back_at_planning() {
     ] {
         let before = s.executed_stmts();
         let r = run_text(&mut s, sql);
-        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.4");
+        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.13");
     }
     let sql = "SELECT SUM(k) FROM sbtest1 WHERE id BETWEEN ? AND ?";
     let before = s.executed_stmts();
@@ -503,20 +503,21 @@ fn sum_range_falls_back_at_planning() {
         for (lo, hi) in [(1, 10), (5, 5)] {
             let what = format!("{sql} ({lo}, {hi})");
             let r = run_prepared(&mut s, stmt_id, vec![new_int_datum(lo), new_int_datum(hi)]);
-            assert_eq!(assert_falls_back(&s, &what, before, r), "D09.4");
+            assert_eq!(assert_falls_back(&s, &what, before, r), "D09.13");
         }
     } else {
-        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.4");
+        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.13");
     }
 }
 
-/// The stream aggregation executor (the aggregation executors D12.3, part A) is ported, but no
-/// aggregate reaches it yet: the physical aggregation plans (D10.1) are not ported and every
-/// statement with an aggregate, a GROUP BY or a DISTINCT falls back at planning (the
-/// aggregation rules, D09.4), before any executor opened; also the shapes Go plans as a stream
-/// aggregation (an aggregate over a point get or a range of the clustered index). The stop of
-/// each statement is pinned, so the first statement that reaches the new executor fails here
-/// and gets a row and column check instead.
+/// The stream aggregation executor (the aggregation executors D12.3, part A) and logical
+/// aggregation builder (D09.4, part A) are ported, but no aggregate reaches the executor yet:
+/// `BuildKeySolver` (D09.13), aggregation optimization rules (D09.9), and physical aggregation
+/// plans / enumeration (D10.1 / D10.3) are not ported yet, so every statement with an
+/// aggregate, a GROUP BY or a DISTINCT falls back at logical optimization (`BuildKeySolver`,
+/// D09.13), before any executor opened; also the shapes Go plans as a stream aggregation (an
+/// aggregate over a point get or a range of the clustered index). The stop of each statement
+/// is pinned, so the first statement that reaches the next stage fails here and gets updated.
 #[test]
 fn aggregates_fall_back_at_planning() {
     let _serial = PREPARED_COUNT.lock();
@@ -530,7 +531,7 @@ fn aggregates_fall_back_at_planning() {
     ] {
         let before = s.executed_stmts();
         let r = run_text(&mut s, sql);
-        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.4", "{sql}");
+        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.13", "{sql}");
     }
 }
 
