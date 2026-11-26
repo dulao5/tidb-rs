@@ -35,12 +35,13 @@ pub fn has_max_one_row(p: LogicalKind, child_max_one_row: &[bool]) -> bool {
         return false;
     }
     match p {
-        // *LogicalLock, *LogicalApply, *LogicalWindow: not ported yet.
+        // *LogicalLock, *LogicalApply: not ported yet.
         LogicalKind::Limit
         | LogicalKind::Sort
         | LogicalKind::Selection
         | LogicalKind::Projection
-        | LogicalKind::Aggregation => child_max_one_row[0],
+        | LogicalKind::Aggregation
+        | LogicalKind::Window => child_max_one_row[0],
         // *LogicalMaxOneRow: true; *LogicalJoin: by join type (not ported yet).
         _ => false,
     }
@@ -205,8 +206,8 @@ pub fn can_push_to_cop_impl<P: LogicalPlan + ?Sized>(
             LogicalKind::TableDual => {
                 return store_tp == kv::TiFlash && consider_dual;
             }
-            // *LogicalJoin, *LogicalWindow: not ported yet (default arm).
-            LogicalKind::Aggregation | LogicalKind::Selection => {
+            // *LogicalJoin: not ported yet (default arm).
+            LogicalKind::Aggregation | LogicalKind::Selection | LogicalKind::Window => {
                 if store_tp != kv::TiFlash {
                     return false;
                 }

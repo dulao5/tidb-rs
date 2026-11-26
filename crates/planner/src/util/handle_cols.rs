@@ -111,6 +111,28 @@ impl HandleCols {
         }
     }
 
+    /// Clear `NotNullFlag` on any handle column matching `target_uid` (emulates Go's shared
+    /// `*FieldType` mutation in `NewWindowFuncDesc` for `first_value`/`last_value`/`nth_value`,
+    /// `M-FT`, #402).
+    // glue: Go aliasing (M-FT) helper for window_func.go:76 (#402)
+    pub(crate) fn clear_col_not_null_flag(&mut self, target_uid: i64) {
+        use tidb_base::mysql::{NotNullFlag, has_not_null_flag};
+        match self {
+            HandleCols::Int(c) => {
+                if c.col.unique_id == target_uid && has_not_null_flag(c.col.ret_type.get_flag()) {
+                    Arc::make_mut(&mut Arc::make_mut(&mut c.col).ret_type).del_flag(NotNullFlag);
+                }
+            }
+            HandleCols::Common(c) => {
+                for col in &mut c.columns {
+                    if col.unique_id == target_uid && has_not_null_flag(col.ret_type.get_flag()) {
+                        Arc::make_mut(&mut Arc::make_mut(col).ret_type).del_flag(NotNullFlag);
+                    }
+                }
+            }
+        }
+    }
+
     /// IsInt returns if the HandleCols is a single int column.
     // glue: M-IFACE (dispatch of HandleCols.IsInt)
     pub fn is_int(&self) -> bool {

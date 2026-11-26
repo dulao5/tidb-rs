@@ -11,7 +11,7 @@
 //!   `SessionVars.PlannerSelectBlockAsName` (the query block names the hints generated from a
 //!   plan read, SQL bindings D13.2) is not on the Rust session vars.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use std::sync::Arc;
 use tidb_base::Error;
@@ -41,6 +41,7 @@ use tidb_sessionctx::stmtctx::TableEntry;
 use tidb_sessionctx::variable::session::SessionVars;
 
 use crate::core::expression_rewriter::{ByAddr, CheckSelectColumnPrivOption, ClauseCode};
+use crate::core::logical_plan_builder::WindowSpecW;
 use crate::core::resolve::ContextRef;
 
 /// visitInfo is used for privilege check.
@@ -243,6 +244,11 @@ pub struct PlanBuilder<'ast> {
     /// the preprocessor and read by `tblInfoFromCol` for `ONLY_FULL_GROUP_BY` functional
     /// dependency checks.
     pub resolve_ctx: Option<ContextRef>,
+    /// windowSpecs: resolved named window specifications of the current SELECT in declaration
+    /// order (`M-MAPORDER`), indexed by lower-case window name via `window_spec_index`.
+    pub window_specs: Vec<WindowSpecW<'ast>>,
+    /// Index from lower-case window name to position in `window_specs`.
+    pub window_spec_index: BTreeMap<String, usize>,
 }
 
 /// PlanBuilderOpt is used to adjust the plan builder.
@@ -904,9 +910,10 @@ fn is_sys_db(db_lower_name: &str) -> bool {
 /// `ast.HasAggFlag`: whether an aggregate function is in `e`, outside subqueries (the parser
 /// sets `FlagHasAggregateFunc` bottom-up; the Rust AST has no flags, D02.2).
 // glue: ast.HasAggFlag over the Rust AST (parser flags, D02.2)
-fn has_agg_flag(e: &Expr) -> bool {
+pub(crate) fn has_agg_flag(e: &Expr) -> bool {
     match e {
         Expr::Aggregate(_) => true,
+        Expr::Window(w) => w.args.iter().any(has_agg_flag),
         Expr::Binary(b) => has_agg_flag(&b.l) || has_agg_flag(&b.r),
         Expr::Unary(u) => has_agg_flag(&u.v),
         Expr::Paren(p) => has_agg_flag(p),
@@ -918,7 +925,12 @@ fn has_agg_flag(e: &Expr) -> bool {
             has_agg_flag(&x.expr) || has_agg_flag(&x.left) || has_agg_flag(&x.right)
         }
         Expr::PatternIn(x) => has_agg_flag(&x.expr) || x.list.iter().any(has_agg_flag),
+        Expr::PatternLike(x) => has_agg_flag(&x.expr) || has_agg_flag(&x.pattern),
+        Expr::PatternRegexp(x) => has_agg_flag(&x.expr) || has_agg_flag(&x.pattern),
         Expr::Row(r) => r.values.iter().any(has_agg_flag),
+        // Go's flagSetter.Leave (parser/ast/flag.go) has no case for SetCollateExpr, so
+        // `SELECT GROUP_CONCAT(c) COLLATE utf8mb4_bin FROM t` is not marked as an aggregate.
+        Expr::Variable(v) => v.value.as_ref().is_some_and(has_agg_flag),
         Expr::Case(c) => {
             c.value.as_ref().is_some_and(has_agg_flag)
                 || c.when_clauses

@@ -181,8 +181,8 @@ impl ProjectionEliminator {
         let kind = ctx.arena.get(p).kind();
         let is_proj = kind == LogicalKind::Projection;
         let mut child_flag = can_eliminate;
-        // *LogicalUnionAll → false; *LogicalWindow → true (not ported yet).
-        if is_proj || kind == LogicalKind::Aggregation {
+        // *LogicalUnionAll → false (not ported yet).
+        if is_proj || kind == LogicalKind::Aggregation || kind == LogicalKind::Window {
             child_flag = true;
         }
         // The child list is read by index because `ctx` is lent to the recursive call.

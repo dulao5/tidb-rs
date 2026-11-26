@@ -601,6 +601,129 @@ fn prepared_repeated_execute_having_and_group_by_alias_through_session() {
     }
 }
 
+/// Pin PREPARE column metadata for window statements against live Go TiDB v8.5.8 (unistore),
+/// including the cross-group #402 case (`LEAD` built before `FIRST_VALUE`, where `LEAD` must
+/// be nullable without `NotNullFlag`), and drive real session PREPARE + two EXECUTEs (plan
+/// cache OFF) for named windows to verify repeated-EXECUTE idempotence.
+#[test]
+fn window_prepare_metadata_and_repeated_execute_through_session() {
+    let _serial = PREPARED_COUNT.lock();
+    let (_store, mut s) = sysbench_session(); // plan cache OFF
+
+    // 1. Plain window query: ROW_NUMBER() + SUM(k) OVER (...).
+    let sql_plain =
+        "SELECT ROW_NUMBER() OVER (ORDER BY id), SUM(k) OVER (PARTITION BY k) FROM sbtest1";
+    let before = s.executed_stmts();
+    let info_plain = block_on(s.prepare_stmt(sql_plain)).expect("PREPARE plain window query");
+    assert_eq!(s.executed_stmts(), before);
+    let cols_plain: Vec<Col> = info_plain.fields.iter().map(col_of).collect();
+    assert_eq!(
+        cols_plain,
+        vec![
+            Col {
+                name: "ROW_NUMBER() OVER (ORDER BY id)".to_owned(),
+                org_name: String::new(),
+                table: String::new(),
+                org_table: String::new(),
+                schema: String::new(),
+                tp: tidb_base::mysql::TypeLonglong,
+                flen: 21,
+                decimal: 0,
+                flag: tidb_base::mysql::BinaryFlag as u32,
+                charset: "binary".to_owned(),
+            },
+            Col {
+                name: "SUM(k) OVER (PARTITION BY k)".to_owned(),
+                org_name: String::new(),
+                table: String::new(),
+                org_table: String::new(),
+                schema: String::new(),
+                tp: tidb_base::mysql::TypeNewDecimal,
+                flen: 32,
+                decimal: 0,
+                flag: tidb_base::mysql::BinaryFlag as u32,
+                charset: "binary".to_owned(),
+            },
+        ],
+        "PREPARE column metadata for {sql_plain}"
+    );
+    s.drop_prepared_stmt(info_plain.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
+
+    // 2. Cross-group #402 case: LEAD's group is built before FIRST_VALUE's group; Go strips
+    // NotNullFlag in checkWindowFuncArgs, so LEAD(k, 1, 0) is nullable (flag = BinaryFlag,
+    // without NotNullFlag) and FIRST_VALUE(k) has MultipleKeyFlag (without NotNullFlag).
+    let sql_cross =
+        "SELECT LEAD(k, 1, 0) OVER (ORDER BY k), FIRST_VALUE(k) OVER (ORDER BY id) FROM sbtest1";
+    let info_cross = block_on(s.prepare_stmt(sql_cross)).expect("PREPARE cross-group window query");
+    let cols_cross: Vec<Col> = info_cross.fields.iter().map(col_of).collect();
+    assert_eq!(
+        cols_cross,
+        vec![
+            Col {
+                name: "LEAD(k, 1, 0) OVER (ORDER BY k)".to_owned(),
+                org_name: String::new(),
+                table: String::new(),
+                org_table: String::new(),
+                schema: String::new(),
+                tp: tidb_base::mysql::TypeLonglong,
+                flen: 11,
+                decimal: 0,
+                flag: tidb_base::mysql::BinaryFlag as u32,
+                charset: "binary".to_owned(),
+            },
+            Col {
+                name: "FIRST_VALUE(k) OVER (ORDER BY id)".to_owned(),
+                org_name: String::new(),
+                table: String::new(),
+                org_table: String::new(),
+                schema: String::new(),
+                tp: tidb_base::mysql::TypeLong,
+                flen: 11,
+                decimal: 0,
+                flag: tidb_base::mysql::MultipleKeyFlag as u32,
+                charset: "binary".to_owned(),
+            },
+        ],
+        "PREPARE column metadata for {sql_cross}"
+    );
+    s.drop_prepared_stmt(info_cross.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
+
+    // 3. Named WINDOW spec: pin PREPARE metadata and drive two real session EXECUTEs (plan cache
+    // OFF) to confirm repeated EXECUTE passes D09.4 cleanly and falls back at D10.3.
+    let sql_named = "SELECT SUM(k) OVER (w ORDER BY id) FROM sbtest1 WINDOW w AS (PARTITION BY k)";
+    let info_named = block_on(s.prepare_stmt(sql_named)).expect("PREPARE named window query");
+    let cols_named: Vec<Col> = info_named.fields.iter().map(col_of).collect();
+    assert_eq!(
+        cols_named,
+        vec![Col {
+            name: "SUM(k) OVER (w ORDER BY id)".to_owned(),
+            org_name: String::new(),
+            table: String::new(),
+            org_table: String::new(),
+            schema: String::new(),
+            tp: tidb_base::mysql::TypeNewDecimal,
+            flen: 32,
+            decimal: 0,
+            flag: tidb_base::mysql::BinaryFlag as u32,
+            charset: "binary".to_owned(),
+        }],
+        "PREPARE column metadata for {sql_named}"
+    );
+    for run in 1..=2 {
+        let before = s.executed_stmts();
+        let r = run_prepared(&mut s, info_named.stmt_id, vec![]);
+        assert_eq!(
+            assert_falls_back(&s, &format!("{sql_named} (EXECUTE #{run})"), before, r),
+            "D10.3",
+            "EXECUTE #{run} must pass D09.4 cleanly for {sql_named}"
+        );
+    }
+    s.drop_prepared_stmt(info_named.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
+}
+
 /// The stream aggregation executor (the aggregation executors D12.3, part A) and logical
 /// aggregation builder (D09.4, part A) are ported, but no aggregate reaches the executor yet:
 /// `BuildKeySolver` (D09.13), aggregation optimization rules (D09.9), and physical aggregation

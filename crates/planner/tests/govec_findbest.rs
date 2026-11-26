@@ -73,6 +73,8 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D02.2", 2),
     // The preprocessor's missing table check (the privilege manager decides the error).
     ("D04.1", 2),
+    // Time functions not ported yet (DATE_ADD / DATE_SUB for window RANGE INTERVAL bounds).
+    ("D08.7", 2),
     // Built-in function families not ported yet (IN, ANY_VALUE, user variables, ...).
     ("D08.9", 40),
     // Virtual generated columns.
@@ -80,25 +82,27 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     // Partitioned tables.
     ("D09.12", 4),
     // BuildKeySolver in logicalOptimize (reached by aggregation / GROUP BY / DISTINCT queries).
-    ("D09.13", 99),
+    ("D09.13", 103),
     // The lock operator (SELECT ... FOR UPDATE).
     ("D09.14", 2),
     // System variables in expressions.
     ("D09.2", 2),
     // Joins.
     ("D09.3", 6),
-    // Window functions / unported aggregation paths (D09.4 part B).
-    ("D09.4", 6),
+    // GROUP BY ... WITH ROLLUP (D09.4 part C).
+    ("D09.4", 2),
     // WITH and set operations.
     ("D09.5", 4),
     // Subqueries.
     ("D09.6", 2),
     // An index path left after the skyline pruning where Go plans an index reader
     // (IndexReader / IndexLookUp, part 2 of FindBestTask).
-    ("D10.2", 528),
+    ("D10.2", 530),
     // An index path left after the skyline pruning where Go keeps the table path by cost:
     // the index reader's cost is part 2.
     ("D10.2 (Go: table)", 140),
+    // LogicalWindow.ExhaustPhysicalPlans (physical window enumeration).
+    ("D10.3", 48),
     // `OR` conditions over two or more paths, or multi-valued indexes: index merge paths.
     ("D10.7", 60),
     // BatchPointGet (several point ranges on a unique key).

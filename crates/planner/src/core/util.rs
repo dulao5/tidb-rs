@@ -35,7 +35,7 @@ use tidb_types::field_name::NameSlice;
 use crate::baseimpl::Plan;
 use crate::core::expression_rewriter::ByAddr;
 use crate::physicalop::{BasePhysicalPlan, PhysicalPlanRef};
-use tidb_parser::ast::{AggregateFuncExpr, Expr as AstExpr};
+use tidb_parser::ast::{AggregateFuncExpr, Expr as AstExpr, WindowFuncExpr};
 
 /// AggregateFuncExtractor visits Expr tree.
 /// It collects AggregateFuncExpr from AST Node.
@@ -62,6 +62,31 @@ impl<'a> AggregateFuncExtractor<'a> {
             && !self.skip_agg_map.contains(&ByAddr::new(&**v))
         {
             self.agg_funcs.push(v);
+        }
+        true
+    }
+}
+
+/// WindowFuncExtractor visits Expr tree.
+/// It converts ColumnNameExpr to WindowFuncExpr and collects WindowFuncExpr.
+#[derive(Debug, Default)]
+pub struct WindowFuncExtractor<'a> {
+    /// WindowFuncs is the collected WindowFuncExprs.
+    pub window_funcs: Vec<&'a WindowFuncExpr>,
+}
+
+impl<'a> WindowFuncExtractor<'a> {
+    /// Enter implements Visitor interface. Returns whether to skip children.
+    // go: WindowFuncExtractor.Enter L1
+    pub fn enter(&mut self, n: &'a AstExpr) -> bool {
+        matches!(n, AstExpr::Subquery(_))
+    }
+
+    /// Leave implements Visitor interface.
+    // go: WindowFuncExtractor.Leave L1
+    pub fn leave(&mut self, n: &'a AstExpr) -> bool {
+        if let AstExpr::Window(v) = n {
+            self.window_funcs.push(v);
         }
         true
     }

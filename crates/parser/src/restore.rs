@@ -14,6 +14,15 @@ fn name(out: &mut String, s: &str) {
     out.push('`');
 }
 
+/// `ctx.WriteName` with either `DefaultRestoreFlags` (`raw = false`) or `flags = 0` (`raw = true`).
+fn name_ctx(out: &mut String, s: &str, raw: bool) {
+    if raw {
+        out.push_str(s);
+    } else {
+        name(out, s);
+    }
+}
+
 /// `ctx.WriteString` (single quotes, no backslash escaping).
 fn string(out: &mut String, s: &str) {
     out.push('\'');
@@ -21,17 +30,39 @@ fn string(out: &mut String, s: &str) {
     out.push('\'');
 }
 
+/// `ctx.WriteString` with either `DefaultRestoreFlags` (`raw = false`) or `flags = 0` (`raw = true`).
+fn string_ctx(out: &mut String, s: &str, raw: bool) {
+    if raw {
+        out.push_str(s);
+    } else {
+        string(out, s);
+    }
+}
+
 /// `ctx.WriteKeyWord`.
 fn keyword(out: &mut String, s: &str) {
     out.push_str(&s.to_uppercase());
 }
 
+/// `ctx.WriteKeyWord` with either `DefaultRestoreFlags` (`raw = false`) or `flags = 0` (`raw = true`).
+fn keyword_ctx(out: &mut String, s: &str, raw: bool) {
+    if raw {
+        out.push_str(s);
+    } else {
+        keyword(out, s);
+    }
+}
+
 fn list(out: &mut String, items: &[Expr], sep: &str) -> R {
+    list_ctx(out, items, sep, false)
+}
+
+fn list_ctx(out: &mut String, items: &[Expr], sep: &str, raw: bool) -> R {
     for (i, e) in items.iter().enumerate() {
         if i != 0 {
             out.push_str(sep);
         }
-        e.restore(out)?;
+        e.restore_ctx(out, raw)?;
     }
     Ok(())
 }
@@ -51,6 +82,11 @@ fn go_float_e(f: f64) -> String {
 impl ValueExpr {
     /// test_driver `ValueExpr.Restore`; `without_charset` = `RestoreStringWithoutCharset`.
     pub fn restore_with(&self, out: &mut String, without_charset: bool) -> R {
+        self.restore_with_ctx(out, without_charset, false)
+    }
+
+    /// `ValueExpr.Restore` with `DefaultRestoreFlags` (`raw = false`) or `flags = 0` (`raw = true`).
+    fn restore_with_ctx(&self, out: &mut String, without_charset: bool, raw: bool) -> R {
         match &self.datum {
             Datum::Null => out.push_str("NULL"),
             Datum::Bool(b) => out.push_str(if *b { "TRUE" } else { "FALSE" }),
@@ -61,9 +97,16 @@ impl ValueExpr {
             Datum::Str(s) => {
                 if !self.charset.is_empty() && !without_charset {
                     out.push('_');
-                    keyword(out, self.charset);
+                    keyword_ctx(out, self.charset, raw);
                 }
-                string(out, s);
+                if raw {
+                    // Go ValueExpr.Restore (pkg/types/parser_driver/value_expr.go:113) escapes
+                    // backslashes before calling ctx.WriteString; under flags=0 WriteString adds
+                    // no quotes and no further escaping.
+                    string_ctx(out, &s.replace('\\', "\\\\"), true);
+                } else {
+                    string(out, s);
+                }
             }
             Datum::Hex(b) | Datum::Bit(b) => {
                 if !self.charset.is_empty()
@@ -155,6 +198,10 @@ impl TrimDirectionType {
 impl FieldType {
     /// `FieldType.RestoreAsCastType`.
     pub fn restore_as_cast_type(&self, out: &mut String, explicit_charset: bool) -> R {
+        self.restore_as_cast_type_ctx(out, explicit_charset, false)
+    }
+
+    fn restore_as_cast_type_ctx(&self, out: &mut String, explicit_charset: bool, raw: bool) -> R {
         use crate::charset::{CHARSET_BIN, COLLATION_BIN, DEFAULT_CHARSET};
         use mysql_type::*;
         if let Some(kind) = self.unported {
@@ -178,7 +225,7 @@ impl FieldType {
                     }
                     if self.charset != CHARSET_BIN && self.charset != DEFAULT_CHARSET {
                         out.push_str(" CHARSET ");
-                        keyword(out, &self.charset);
+                        keyword_ctx(out, &self.charset, raw);
                     }
                 }
             }
@@ -224,15 +271,25 @@ impl FieldType {
 
 impl Expr {
     pub fn restore(&self, out: &mut String) -> R {
+        self.restore_ctx(out, false)
+    }
+
+    /// Restore with Go's `format.NewRestoreCtx(0, ...)` (flags = 0: unquoted identifiers
+    /// preserving original case, unquoted strings, keywords verbatim).
+    pub fn restore_raw(&self, out: &mut String) -> R {
+        self.restore_ctx(out, true)
+    }
+
+    fn restore_ctx(&self, out: &mut String, raw: bool) -> R {
         match self {
-            Expr::Column(c) => c.restore(out),
-            Expr::Value(v) => v.restore_with(out, false),
+            Expr::Column(c) => c.restore_ctx(out, raw),
+            Expr::Value(v) => v.restore_with_ctx(out, false, raw),
             Expr::ParamMarker(_) => {
                 out.push('?');
                 Ok(())
             }
             Expr::Binary(b) => {
-                b.l.restore(out)?;
+                b.l.restore_ctx(out, raw)?;
                 let (lit, kw) = b.op.literal();
                 if kw {
                     out.push(' ');
@@ -241,47 +298,47 @@ impl Expr {
                 if kw {
                     out.push(' ');
                 }
-                b.r.restore(out)
+                b.r.restore_ctx(out, raw)
             }
             Expr::Unary(u) => {
                 out.push_str(u.op.literal().0);
-                u.v.restore(out)
+                u.v.restore_ctx(out, raw)
             }
-            Expr::FuncCall(f) => f.restore(out),
+            Expr::FuncCall(f) => f.restore_ctx(out, raw),
             Expr::FuncCast(c) => {
                 match c.function_type {
                     CastFunctionType::Cast => {
                         out.push_str("CAST(");
-                        c.expr.restore(out)?;
+                        c.expr.restore_ctx(out, raw)?;
                         out.push_str(" AS ");
-                        c.tp.restore_as_cast_type(out, c.explicit_char_set)?;
+                        c.tp.restore_as_cast_type_ctx(out, c.explicit_char_set, raw)?;
                         out.push(')');
                     }
                     CastFunctionType::Convert => {
                         out.push_str("CONVERT(");
-                        c.expr.restore(out)?;
+                        c.expr.restore_ctx(out, raw)?;
                         out.push_str(", ");
-                        c.tp.restore_as_cast_type(out, c.explicit_char_set)?;
+                        c.tp.restore_as_cast_type_ctx(out, c.explicit_char_set, raw)?;
                         out.push(')');
                     }
                     CastFunctionType::BinaryOperator => {
                         out.push_str("BINARY ");
-                        c.expr.restore(out)?;
+                        c.expr.restore_ctx(out, raw)?;
                     }
                 }
                 Ok(())
             }
             Expr::JSONSumCrc32(j) => {
                 out.push_str("JSON_SUM_CRC32(");
-                j.expr.restore(out)?;
+                j.expr.restore_ctx(out, raw)?;
                 out.push_str(" AS ");
-                j.tp.restore_as_cast_type(out, j.explicit_char_set)?;
+                j.tp.restore_as_cast_type_ctx(out, j.explicit_char_set, raw)?;
                 out.push(')');
                 Ok(())
             }
-            Expr::Aggregate(a) => a.restore(out),
+            Expr::Aggregate(a) => a.restore_ctx(out, raw),
             Expr::Window(w) => {
-                keyword(out, &w.name);
+                keyword_ctx(out, &w.name, raw);
                 out.push('(');
                 for (i, a) in w.args.iter().enumerate() {
                     if i != 0 {
@@ -289,7 +346,7 @@ impl Expr {
                     } else if w.distinct {
                         out.push_str("DISTINCT ");
                     }
-                    a.restore(out)?;
+                    a.restore_ctx(out, raw)?;
                 }
                 out.push(')');
                 if w.from_last {
@@ -299,64 +356,64 @@ impl Expr {
                     out.push_str(" IGNORE NULLS");
                 }
                 out.push_str(" OVER ");
-                w.spec.restore(out)
+                w.spec.restore_ctx(out, raw)
             }
             Expr::Paren(e) => {
                 out.push('(');
-                e.restore(out)?;
+                e.restore_ctx(out, raw)?;
                 out.push(')');
                 Ok(())
             }
             Expr::PatternIn(p) => {
-                p.expr.restore(out)?;
+                p.expr.restore_ctx(out, raw)?;
                 out.push_str(if p.not { " NOT IN " } else { " IN " });
                 if let Some(sel) = &p.sel {
-                    return sel.restore(out);
+                    return sel.restore_ctx(out, raw);
                 }
                 out.push('(');
-                list(out, &p.list, ",")?;
+                list_ctx(out, &p.list, ",", raw)?;
                 out.push(')');
                 Ok(())
             }
             Expr::PatternLike(p) => {
-                p.expr.restore(out)?;
+                p.expr.restore_ctx(out, raw)?;
                 out.push_str(match (p.is_like, p.not) {
                     (true, false) => " LIKE ",
                     (true, true) => " NOT LIKE ",
                     (false, false) => " ILIKE ",
                     (false, true) => " NOT ILIKE ",
                 });
-                p.pattern.restore(out)?;
+                p.pattern.restore_ctx(out, raw)?;
                 if p.escape_explicit && p.escape != b'\\' {
                     out.push_str(" ESCAPE ");
                     if p.escape == 0 {
-                        string(out, "");
+                        string_ctx(out, "", raw);
                     } else {
                         // Go: ctx.WriteString(string(n.Escape)) -- a byte converted as a rune
-                        string(out, &char::from(p.escape).to_string());
+                        string_ctx(out, &char::from(p.escape).to_string(), raw);
                     }
                 }
                 Ok(())
             }
             Expr::PatternRegexp(p) => {
-                p.expr.restore(out)?;
+                p.expr.restore_ctx(out, raw)?;
                 out.push_str(if p.not { " NOT REGEXP " } else { " REGEXP " });
-                p.pattern.restore(out)
+                p.pattern.restore_ctx(out, raw)
             }
             Expr::Between(b) => {
-                b.expr.restore(out)?;
+                b.expr.restore_ctx(out, raw)?;
                 out.push_str(if b.not { " NOT BETWEEN " } else { " BETWEEN " });
-                b.left.restore(out)?;
+                b.left.restore_ctx(out, raw)?;
                 out.push_str(" AND ");
-                b.right.restore(out)
+                b.right.restore_ctx(out, raw)
             }
             Expr::IsNull(n) => {
-                n.expr.restore(out)?;
+                n.expr.restore_ctx(out, raw)?;
                 out.push_str(if n.not { " IS NOT NULL" } else { " IS NULL" });
                 Ok(())
             }
             Expr::IsTruth(t) => {
-                t.expr.restore(out)?;
+                t.expr.restore_ctx(out, raw)?;
                 out.push_str(if t.not { " IS NOT" } else { " IS" });
                 out.push_str(if t.true_ > 0 { " TRUE" } else { " FALSE" });
                 Ok(())
@@ -365,33 +422,34 @@ impl Expr {
                 out.push_str("CASE");
                 if let Some(v) = &c.value {
                     out.push(' ');
-                    v.restore(out)?;
+                    v.restore_ctx(out, raw)?;
                 }
                 for w in &c.when_clauses {
                     out.push_str(" WHEN ");
-                    w.expr.restore(out)?;
+                    w.expr.restore_ctx(out, raw)?;
                     out.push_str(" THEN ");
-                    w.result.restore(out)?;
+                    w.result.restore_ctx(out, raw)?;
                 }
                 if let Some(e) = &c.else_clause {
                     out.push_str(" ELSE ");
-                    e.restore(out)?;
+                    e.restore_ctx(out, raw)?;
                 }
                 out.push_str(" END");
                 Ok(())
             }
             Expr::Subquery(s) => {
                 out.push('(');
+                // Note: subqueries use default restore even in raw mode (affects compareItems only).
                 s.query.restore(out)?;
                 out.push(')');
                 Ok(())
             }
             Expr::Exists(e) => {
                 out.push_str(if e.not { "NOT EXISTS " } else { "EXISTS " });
-                e.sel.restore(out)
+                e.sel.restore_ctx(out, raw)
             }
             Expr::CompareSubquery(c) => {
-                c.l.restore(out)?;
+                c.l.restore_ctx(out, raw)?;
                 let (lit, kw) = c.op.literal();
                 if kw {
                     out.push(' ');
@@ -401,7 +459,7 @@ impl Expr {
                     out.push(' ');
                 }
                 out.push_str(if c.all { "ALL " } else { "ANY " });
-                c.r.restore(out)
+                c.r.restore_ctx(out, raw)
             }
             Expr::Variable(v) => {
                 if v.is_system {
@@ -419,21 +477,21 @@ impl Expr {
                 } else {
                     out.push('@');
                 }
-                name(out, &v.name);
+                name_ctx(out, &v.name, raw);
                 if let Some(val) = &v.value {
                     out.push_str(":=");
-                    val.restore(out)?;
+                    val.restore_ctx(out, raw)?;
                 }
                 Ok(())
             }
             Expr::Row(r) => {
                 out.push_str("ROW(");
-                list(out, &r.values, ",")?;
+                list_ctx(out, &r.values, ",", raw)?;
                 out.push(')');
                 Ok(())
             }
             Expr::SetCollation(s) => {
-                s.expr.restore(out)?;
+                s.expr.restore_ctx(out, raw)?;
                 out.push_str(" COLLATE ");
                 out.push_str(&s.collate);
                 Ok(())
@@ -442,14 +500,14 @@ impl Expr {
                 out.push_str("DEFAULT");
                 if let Some(n) = &d.name {
                     out.push('(');
-                    n.restore(out)?;
+                    n.restore_ctx(out, raw)?;
                     out.push(')');
                 }
                 Ok(())
             }
             Expr::Values(c) => {
                 out.push_str("VALUES(");
-                c.restore(out)?;
+                c.restore_ctx(out, raw)?;
                 out.push(')');
                 Ok(())
             }
@@ -460,10 +518,10 @@ impl Expr {
                     if i != 0 {
                         out.push(',');
                     }
-                    c.restore(out)?;
+                    c.restore_ctx(out, raw)?;
                 }
                 out.push_str(") AGAINST (");
-                m.against.restore(out)?;
+                m.against.restore_ctx(out, raw)?;
                 if m.modifier & MODE_MASK == BOOLEAN_MODE {
                     out.push_str(" IN BOOLEAN MODE");
                     if m.modifier & WITH_QUERY_EXPANSION != 0 {
@@ -498,7 +556,7 @@ impl Expr {
 }
 
 impl FuncCallExpr {
-    fn restore(&self, out: &mut String) -> R {
+    fn restore_ctx(&self, out: &mut String, raw: bool) -> R {
         let l = self.fn_name.l();
         // customRestore
         let special = match l.as_str() {
@@ -513,7 +571,7 @@ impl FuncCallExpr {
                 .args
                 .first()
                 .ok_or("literal without argument")?
-                .restore(out);
+                .restore_ctx(out, raw);
         }
         if l == JSON_MEMBER_OF {
             if self.args.len() != 2 {
@@ -522,21 +580,21 @@ impl FuncCallExpr {
                         .into(),
                 );
             }
-            self.args[0].restore(out)?;
+            self.args[0].restore_ctx(out, raw)?;
             out.push_str(" MEMBER OF (");
-            self.args[1].restore(out)?;
+            self.args[1].restore_ctx(out, raw)?;
             out.push(')');
             return Ok(());
         }
 
         if !self.schema.o.is_empty() {
-            name(out, &self.schema.o);
+            name_ctx(out, &self.schema.o, raw);
             out.push('.');
         }
         if self.tp == FuncCallExprType::Generic {
-            name(out, &self.fn_name.o);
+            name_ctx(out, &self.fn_name.o, raw);
         } else {
-            keyword(out, &self.fn_name.o);
+            keyword_ctx(out, &self.fn_name.o, raw);
         }
         out.push('(');
         let arg = |i: usize| {
@@ -546,66 +604,66 @@ impl FuncCallExpr {
         };
         match l.as_str() {
             "convert" => {
-                arg(0)?.restore(out)?;
+                arg(0)?.restore_ctx(out, raw)?;
                 out.push_str(" USING ");
-                arg(1)?.restore(out)?;
+                arg(1)?.restore_ctx(out, raw)?;
             }
             crate::ast::funcs::AddDate
             | crate::ast::funcs::SubDate
             | crate::ast::funcs::DateAdd
             | crate::ast::funcs::DateSub => {
-                arg(0)?.restore(out)?;
+                arg(0)?.restore_ctx(out, raw)?;
                 out.push_str(", INTERVAL ");
-                arg(1)?.restore(out)?;
+                arg(1)?.restore_ctx(out, raw)?;
                 out.push(' ');
-                arg(2)?.restore(out)?;
+                arg(2)?.restore_ctx(out, raw)?;
             }
             "extract" => {
-                arg(0)?.restore(out)?;
+                arg(0)?.restore_ctx(out, raw)?;
                 out.push_str(" FROM ");
-                arg(1)?.restore(out)?;
+                arg(1)?.restore_ctx(out, raw)?;
             }
             "position" => {
-                arg(0)?.restore(out)?;
+                arg(0)?.restore_ctx(out, raw)?;
                 out.push_str(" IN ");
-                arg(1)?.restore(out)?;
+                arg(1)?.restore_ctx(out, raw)?;
             }
             "trim" => {
                 let n = self.args.len();
                 if n == 3 {
-                    arg(2)?.restore(out)?;
+                    arg(2)?.restore_ctx(out, raw)?;
                     out.push(' ');
                 }
                 if n >= 2 {
                     let is_nil_value =
                         matches!(&self.args[1], Expr::Value(v) if v.datum == Datum::Null);
                     if !is_nil_value {
-                        self.args[1].restore(out)?;
+                        self.args[1].restore_ctx(out, raw)?;
                         out.push(' ');
                     }
                     out.push_str("FROM ");
                 }
                 if (1..=3).contains(&n) {
-                    arg(0)?.restore(out)?;
+                    arg(0)?.restore_ctx(out, raw)?;
                 }
             }
             WEIGHT_STRING => {
-                arg(0)?.restore(out)?;
+                arg(0)?.restore_ctx(out, raw)?;
                 if self.args.len() == 3 {
                     out.push_str(" AS ");
                     match &self.args[1] {
                         Expr::Value(v) => match &v.datum {
-                            Datum::Str(s) => keyword(out, s),
+                            Datum::Str(s) => keyword_ctx(out, s, raw),
                             _ => return Err("weight_string: non-string type".into()),
                         },
                         _ => return Err("weight_string: non-value type".into()),
                     }
                     out.push('(');
-                    self.args[2].restore(out)?;
+                    self.args[2].restore_ctx(out, raw)?;
                     out.push(')');
                 }
             }
-            _ => list(out, &self.args, ", ")?,
+            _ => list_ctx(out, &self.args, ", ", raw)?,
         }
         out.push(')');
         Ok(())
@@ -613,8 +671,8 @@ impl FuncCallExpr {
 }
 
 impl AggregateFuncExpr {
-    fn restore(&self, out: &mut String) -> R {
-        keyword(out, &self.f);
+    fn restore_ctx(&self, out: &mut String, raw: bool) -> R {
+        keyword_ctx(out, &self.f, raw);
         out.push('(');
         if self.distinct {
             out.push_str("DISTINCT ");
@@ -624,19 +682,19 @@ impl AggregateFuncExpr {
                 .args
                 .split_last()
                 .ok_or("group_concat without separator")?;
-            list(out, args, ", ")?;
+            list_ctx(out, args, ", ", raw)?;
             if let Some(o) = &self.order {
                 out.push(' ');
-                o.restore(out)?;
+                o.restore_ctx(out, raw)?;
             }
             out.push_str(" SEPARATOR ");
             // The separator is restored with RestoreStringWithoutCharset.
             match sep {
-                Expr::Value(v) => v.restore_with(out, true)?,
-                other => other.restore(out)?,
+                Expr::Value(v) => v.restore_with_ctx(out, true, raw)?,
+                other => other.restore_ctx(out, raw)?,
             }
         } else {
-            list(out, &self.args, ", ")?;
+            list_ctx(out, &self.args, ", ", raw)?;
         }
         out.push(')');
         Ok(())
@@ -645,15 +703,19 @@ impl AggregateFuncExpr {
 
 impl ColumnName {
     pub fn restore(&self, out: &mut String) -> R {
+        self.restore_ctx(out, false)
+    }
+
+    fn restore_ctx(&self, out: &mut String, raw: bool) -> R {
         if !self.schema.o.is_empty() {
-            name(out, &self.schema.o);
+            name_ctx(out, &self.schema.o, raw);
             out.push('.');
         }
         if !self.table.o.is_empty() {
-            name(out, &self.table.o);
+            name_ctx(out, &self.table.o, raw);
             out.push('.');
         }
-        name(out, &self.name.o);
+        name_ctx(out, &self.name.o, raw);
         Ok(())
     }
 }
@@ -1339,59 +1401,114 @@ impl WithClause {
     }
 }
 
+/// Restore a decomposed `WindowSpec` (name, only_alias, ref, partition_by, order_by, frame)
+/// using Go's `format.NewRestoreCtx(0, ...)` (flags = 0).
+pub fn restore_window_spec_raw(
+    spec_name: &str,
+    only_alias: bool,
+    ref_name: &str,
+    partition_by: Option<&PartitionByClause>,
+    order_by: Option<&OrderByClause>,
+    frame: Option<&FrameClause>,
+    out: &mut String,
+) -> R {
+    restore_window_spec_parts(
+        spec_name,
+        only_alias,
+        ref_name,
+        partition_by,
+        order_by,
+        frame,
+        out,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_window_spec_parts(
+    spec_name: &str,
+    only_alias: bool,
+    ref_name: &str,
+    partition_by: Option<&PartitionByClause>,
+    order_by: Option<&OrderByClause>,
+    frame: Option<&FrameClause>,
+    out: &mut String,
+    raw: bool,
+) -> R {
+    if !spec_name.is_empty() {
+        name_ctx(out, spec_name, raw);
+        if only_alias {
+            return Ok(());
+        }
+        out.push_str(" AS ");
+    }
+    out.push('(');
+    let mut sep = "";
+    if !ref_name.is_empty() {
+        name_ctx(out, ref_name, raw);
+        sep = " ";
+    }
+    if let Some(pb) = partition_by {
+        out.push_str(sep);
+        out.push_str("PARTITION BY ");
+        for (i, it) in pb.items.iter().enumerate() {
+            if i != 0 {
+                out.push_str(", ");
+            }
+            it.restore_ctx(out, raw)?;
+        }
+        sep = " ";
+    }
+    if let Some(ob) = order_by {
+        out.push_str(sep);
+        ob.restore_ctx(out, raw)?;
+        sep = " ";
+    }
+    if let Some(f) = frame {
+        out.push_str(sep);
+        match f.tp {
+            FrameType::Rows => out.push_str("ROWS"),
+            FrameType::Ranges => out.push_str("RANGE"),
+            FrameType::Groups => return Err("Unsupported window function frame type".into()),
+        }
+        out.push_str(" BETWEEN ");
+        f.extent.start.restore_ctx(out, raw)?;
+        out.push_str(" AND ");
+        f.extent.end.restore_ctx(out, raw)?;
+    }
+    out.push(')');
+    Ok(())
+}
+
 impl WindowSpec {
     fn restore(&self, out: &mut String) -> R {
+        self.restore_ctx(out, false)
+    }
+
+    /// Restore with Go's `format.NewRestoreCtx(0, ...)` (flags = 0).
+    pub fn restore_raw(&self, out: &mut String) -> R {
+        self.restore_ctx(out, true)
+    }
+
+    fn restore_ctx(&self, out: &mut String, raw: bool) -> R {
         if let Some(kind) = self.unported {
             return Err(format!("unported window spec {kind}"));
         }
-        if !self.name.o.is_empty() {
-            name(out, &self.name.o);
-            if self.only_alias {
-                return Ok(());
-            }
-            out.push_str(" AS ");
-        }
-        out.push('(');
-        let mut sep = "";
-        if !self.ref_.o.is_empty() {
-            name(out, &self.ref_.o);
-            sep = " ";
-        }
-        if let Some(pb) = &self.partition_by {
-            out.push_str(sep);
-            out.push_str("PARTITION BY ");
-            for (i, it) in pb.items.iter().enumerate() {
-                if i != 0 {
-                    out.push_str(", ");
-                }
-                it.restore(out)?;
-            }
-            sep = " ";
-        }
-        if let Some(ob) = &self.order_by {
-            out.push_str(sep);
-            ob.restore(out)?;
-            sep = " ";
-        }
-        if let Some(f) = &self.frame {
-            out.push_str(sep);
-            match f.tp {
-                FrameType::Rows => out.push_str("ROWS"),
-                FrameType::Ranges => out.push_str("RANGE"),
-                FrameType::Groups => return Err("Unsupported window function frame type".into()),
-            }
-            out.push_str(" BETWEEN ");
-            f.extent.start.restore(out)?;
-            out.push_str(" AND ");
-            f.extent.end.restore(out)?;
-        }
-        out.push(')');
-        Ok(())
+        restore_window_spec_parts(
+            &self.name.o,
+            self.only_alias,
+            &self.ref_.o,
+            self.partition_by.as_deref(),
+            self.order_by.as_deref(),
+            self.frame.as_deref(),
+            out,
+            raw,
+        )
     }
 }
 
 impl FrameBound {
-    fn restore(&self, out: &mut String) -> R {
+    fn restore_ctx(&self, out: &mut String, raw: bool) -> R {
         if self.unbounded {
             out.push_str("UNBOUNDED");
         }
@@ -1402,7 +1519,7 @@ impl FrameBound {
                     out.push_str("INTERVAL ");
                 }
                 if let Some(e) = &self.expr {
-                    e.restore(out)?;
+                    e.restore_ctx(out, raw)?;
                 }
                 if self.unit != TimeUnitType::Invalid {
                     out.push(' ');
@@ -1421,12 +1538,16 @@ impl FrameBound {
 
 impl OrderByClause {
     fn restore(&self, out: &mut String) -> R {
+        self.restore_ctx(out, false)
+    }
+
+    fn restore_ctx(&self, out: &mut String, raw: bool) -> R {
         out.push_str("ORDER BY ");
         for (i, it) in self.items.iter().enumerate() {
             if i != 0 {
                 out.push(',');
             }
-            it.restore(out)?;
+            it.restore_ctx(out, raw)?;
         }
         Ok(())
     }
@@ -1458,7 +1579,11 @@ impl SelectField {
 
 impl ByItem {
     fn restore(&self, out: &mut String) -> R {
-        self.expr.restore(out)?;
+        self.restore_ctx(out, false)
+    }
+
+    fn restore_ctx(&self, out: &mut String, raw: bool) -> R {
+        self.expr.restore_ctx(out, raw)?;
         if self.desc {
             out.push_str(" DESC");
         }
@@ -1720,5 +1845,40 @@ impl Join {
             out.push(')');
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod raw_restore_tests {
+    use crate::{ParseOptions, ast, parse, restore_window_spec_raw};
+
+    #[test]
+    fn restore_window_spec_raw_matches_go_flags_zero() {
+        let sql = "SELECT SUM(a) OVER (PARTITION BY t.AbC, 'x\\'y', 'a\\\\b' ORDER BY b DESC ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t";
+        let stmt = parse(sql, &ParseOptions::default())
+            .unwrap()
+            .stmts
+            .remove(0);
+        let ast::Stmt::Select(sel) = stmt else {
+            panic!("expected SELECT");
+        };
+        let Some(ast::Expr::Window(wf)) = &sel.fields.fields[0].expr else {
+            panic!("expected WindowFuncExpr");
+        };
+        let mut raw = String::new();
+        restore_window_spec_raw(
+            &wf.spec.name.o,
+            wf.spec.only_alias,
+            &wf.spec.ref_.o,
+            wf.spec.partition_by.as_deref(),
+            wf.spec.order_by.as_deref(),
+            wf.spec.frame.as_deref(),
+            &mut raw,
+        )
+        .unwrap();
+        assert_eq!(
+            raw,
+            "(PARTITION BY t.AbC, _utf8mb4x'y, _utf8mb4a\\\\b ORDER BY b DESC ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+        );
     }
 }

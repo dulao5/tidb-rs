@@ -25,6 +25,7 @@ use crate::arena::PlanId;
 use crate::base::{LogicalKind, LogicalPlan};
 use crate::logicalop::{
     DataSource, LogicalAggregation, LogicalProjection, LogicalSelection, LogicalSort, LogicalTopN,
+    LogicalWindow,
 };
 use crate::planctx::PlanCtx;
 
@@ -270,6 +271,15 @@ impl ColumnStatsUsageCollector {
                         current_ordering_cols.extend(extract_columns(&item.expr));
                     }
                 }
+                LogicalKind::Window => {
+                    let x = node
+                        .as_any()
+                        .downcast_ref::<LogicalWindow>()
+                        .expect("LogicalWindow");
+                    for item in &x.order_by {
+                        current_ordering_cols.push(Arc::clone(&item.col));
+                    }
+                }
                 LogicalKind::Aggregation => {
                     let x = node
                         .as_any()
@@ -294,7 +304,7 @@ impl ColumnStatsUsageCollector {
                         }
                     }
                 }
-                // LogicalJoin / LogicalApply / LogicalWindow: not ported.
+                // LogicalJoin / LogicalApply: not ported.
                 _ => {}
             }
         }
@@ -362,6 +372,22 @@ impl ColumnStatsUsageCollector {
                 let schema = x.schema(&ctx.arena);
                 for (i, agg_func) in x.agg_funcs.iter().enumerate() {
                     self.update_col_map_from_expressions(&schema.columns[i], &agg_func.base.args);
+                }
+            }
+            LogicalKind::Window => {
+                let x = node
+                    .as_any()
+                    .downcast_ref::<LogicalWindow>()
+                    .expect("LogicalWindow");
+                // Statistics of the columns in LogicalWindow.PartitionBy are used in optimizeByShuffle4Window.
+                // We don't use statistics of the columns in LogicalWindow.OrderBy currently.
+                for item in &x.partition_by {
+                    self.add_predicate_column(&item.col, false);
+                }
+                // Schema change from children to self.
+                let window_columns = x.get_window_result_columns(&ctx.arena);
+                for (i, col) in window_columns.iter().enumerate() {
+                    self.update_col_map_from_expressions(col, &x.window_func_descs[i].base.args);
                 }
             }
             LogicalKind::Sort => {
