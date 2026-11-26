@@ -4,12 +4,15 @@
 //! layer above the descriptors in tidb-expression (D08.11 spec §4.8). The tracker keeps them
 //! in block D08.11 (decision point 3).
 //!
-//! So far part B: `agg_to_pb.go` and the push-down checks of `aggregation.go`.
+//! Parts B and C: `agg_to_pb.go`, the push-down checks of `aggregation.go`, and the tipb /
+//! TiFlash functions of `window_func.go`.
 
 pub mod agg_to_pb;
 // The Go package `aggregation` has a file `aggregation.go` (file-for-file, constitution §2).
 #[allow(clippy::module_inception)]
 pub mod aggregation;
+pub mod window_func;
 
 pub use agg_to_pb::*;
 pub use aggregation::*;
+pub use window_func::*;

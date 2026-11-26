@@ -9,13 +9,13 @@ use std::sync::Arc;
 use tidb_base::kv::UnSpecified;
 use tidb_base::mysql::{TypeDouble, TypeLonglong, TypeVarchar};
 use tidb_expr_pushdown::aggregation::{
-    agg_func_to_pb_expr, agg_function_mode_to_pb, pb_agg_func_mode_to_agg_func_mode,
-    pb_expr_to_agg_func_desc,
+    agg_func_to_pb_expr, agg_function_mode_to_pb, can_push_down_to_tiflash,
+    pb_agg_func_mode_to_agg_func_mode, pb_expr_to_agg_func_desc, window_func_to_pb_expr,
 };
 use tidb_expr_pushdown::new_push_down_context;
-use tidb_expression::aggregation::{AggFunctionMode, new_agg_func_desc};
+use tidb_expression::aggregation::{AggFunctionMode, new_agg_func_desc, new_window_func_desc};
 use tidb_expression::ast_funcs as ast;
-use tidb_expression::{BuildContext, Column, Expr, ExprRef};
+use tidb_expression::{BuildContext, Column, EvalState, Expr, ExprRef};
 use tidb_kv::checker::RequestTypeSupportedChecker;
 use tidb_kv::kv::{Client, ClientSendOption, Request, Response};
 use tidb_sessionctx::exprstatic as es;
@@ -200,4 +200,131 @@ fn pb_to_agg_func_desc_round_trip() {
             mode
         );
     }
+}
+
+#[test]
+fn window_func_to_pb_and_tiflash_pushdown() {
+    set_new_collation_enabled_for_test(true);
+    let ctx = es::new_expr_context(vec![]);
+    let ectx = ctx.get_eval_ctx();
+    let st = EvalState::default();
+    let client: Arc<dyn Client> = Arc::new(MockClient);
+    let push_ctx = new_push_down_context(
+        Arc::clone(&ectx),
+        Arc::clone(&client),
+        false,
+        None,
+        None,
+        1024,
+    );
+
+    let rn = new_window_func_desc(&*ctx, ast::WindowFuncRowNumber, vec![], false)
+        .unwrap()
+        .unwrap();
+    let pb = window_func_to_pb_expr(&*ectx, &st, &*client, &rn).unwrap();
+    assert_eq!(pb.get_tp(), tipb::ExprType::RowNumber);
+    assert!(pb.get_children().is_empty());
+    assert!(pb.has_sig());
+    assert!(pb.has_has_distinct());
+    assert!(!pb.get_has_distinct());
+    assert!(!pb.has_agg_func_mode());
+    assert!(can_push_down_to_tiflash(&rn, &push_ctx));
+
+    let fv = new_window_func_desc(
+        &*ctx,
+        ast::WindowFuncFirstValue,
+        vec![gen_column(TypeDouble, 1)],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let pb_fv = window_func_to_pb_expr(&*ectx, &st, &*client, &fv).unwrap();
+    assert_eq!(pb_fv.get_tp(), tipb::ExprType::FirstValue);
+    assert_eq!(pb_fv.get_children().len(), 1);
+    assert!(can_push_down_to_tiflash(&fv, &push_ctx));
+
+    // Functions not supported for TiFlash window push-down.
+    let cd = new_window_func_desc(&*ctx, ast::WindowFuncCumeDist, vec![], false)
+        .unwrap()
+        .unwrap();
+    assert!(!can_push_down_to_tiflash(&cd, &push_ctx));
+
+    let sum_w = new_window_func_desc(
+        &*ctx,
+        ast::AggFuncSum,
+        vec![gen_column(TypeDouble, 1)],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!can_push_down_to_tiflash(&sum_w, &push_ctx));
+}
+
+// Pins the TiFlash push-down request change of ruling R25 (#398): a 3-arg `lead` over
+// UNSIGNED NOT NULL columns keeps UnsignedFlag in the pushed-down tipb FieldType.
+#[test]
+fn window_lead_unsigned_pb_preserves_unsigned_flag() {
+    use tidb_base::mysql::{BinaryFlag, NotNullFlag, UnsignedFlag};
+    use tidb_types::datum::Datum;
+
+    set_new_collation_enabled_for_test(true);
+    let ctx = es::new_expr_context(vec![]);
+    let ectx = ctx.get_eval_ctx();
+    let st = EvalState::default();
+    let client: Arc<dyn Client> = Arc::new(MockClient);
+    let push_ctx = new_push_down_context(
+        Arc::clone(&ectx),
+        Arc::clone(&client),
+        false,
+        None,
+        None,
+        1024,
+    );
+
+    let mut unsigned_nn = new_field_type(TypeLonglong);
+    unsigned_nn.add_flag(UnsignedFlag | NotNullFlag | BinaryFlag);
+    let col_a = Expr::Column(Column {
+        ret_type: Arc::new(unsigned_nn.clone()),
+        id: 1,
+        index: 1,
+        ..Column::default()
+    })
+    .into_ref();
+    let col_b = Expr::Column(Column {
+        ret_type: Arc::new(unsigned_nn),
+        id: 2,
+        index: 2,
+        ..Column::default()
+    })
+    .into_ref();
+    let mut one = Datum::default();
+    one.set_int64(1);
+    let offset = Expr::Constant(tidb_expression::Constant::new(
+        one,
+        new_field_type(TypeLonglong),
+    ))
+    .into_ref();
+
+    let desc = new_window_func_desc(
+        &*ctx,
+        ast::WindowFuncLead,
+        vec![col_a, offset, col_b],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(can_push_down_to_tiflash(&desc, &push_ctx));
+    let pb = window_func_to_pb_expr(&*ectx, &st, &*client, &desc).unwrap();
+    assert_eq!(pb.get_tp(), tipb::ExprType::Lead);
+    let flag = pb.get_field_type().get_flag() as usize;
+    assert_ne!(
+        flag & UnsignedFlag,
+        0,
+        "pushed-down lead must keep UnsignedFlag"
+    );
+    assert_ne!(
+        flag & NotNullFlag,
+        0,
+        "pushed-down lead must keep NotNullFlag"
+    );
 }

@@ -1,8 +1,10 @@
-//! Replays the govec `aggdesc` vectors, part B (tidb-rs-tracker `govec/domains/aggdesc.go`):
-//! the push-down decisions and the tipb conversions of the aggregate function descriptors
-//! (block D08.11, `agg_to_pb.go` and the push-down checks of `aggregation.go`), against Go TiDB
-//! v8.5.8. The part A records are replayed by `crates/expression/tests/govec_aggdesc.rs`; the
-//! vector file is the same (a copy, see the vectors README), and so are the spec helpers.
+//! Replays the govec `aggdesc` vectors, parts B and C push-down/tipb (tidb-rs-tracker
+//! `govec/domains/aggdesc.go`): the push-down decisions and tipb conversions of aggregate and
+//! window function descriptors (block D08.11: `agg_to_pb.go`, the push-down checks of
+//! `aggregation.go`, and `WindowFuncToPBExpr` / `CanPushDownToTiFlash` of `window_func.go`),
+//! against Go TiDB v8.5.8. The part A and part C descriptor records are replayed by
+//! `crates/expression/tests/govec_aggdesc.rs`; the vector file is the same (a copy, see the
+//! vectors README), and so are the spec helpers.
 //!
 //! The test changes the global push-down blacklist, so it is the only test of this binary.
 
@@ -16,11 +18,14 @@ use serde_json::{Value, json};
 use tidb_base::Error;
 use tidb_base::kv::{StoreType, TiDB, TiFlash, TiKV, UnSpecified};
 use tidb_expr_pushdown::aggregation::{
-    agg_func_to_pb_expr, agg_function_mode_to_pb, check_agg_push_down, check_agg_push_flash,
-    get_tipb_expr, pb_agg_func_mode_to_agg_func_mode, pb_expr_to_agg_func_desc,
+    agg_func_to_pb_expr, agg_function_mode_to_pb, can_push_down_to_tiflash, check_agg_push_down,
+    check_agg_push_flash, get_tipb_expr, pb_agg_func_mode_to_agg_func_mode,
+    pb_expr_to_agg_func_desc, window_func_to_pb_expr,
 };
 use tidb_expr_pushdown::{DefaultExprPushDownBlacklist, new_push_down_context};
-use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode, BaseFuncDesc, new_agg_func_desc};
+use tidb_expression::aggregation::{
+    AggFuncDesc, AggFunctionMode, BaseFuncDesc, WindowFuncDesc, new_agg_func_desc,
+};
 use tidb_expression::builtin_cast::build_cast_function;
 use tidb_expression::byitem::ByItems;
 use tidb_expression::collation::Coercibility;
@@ -51,8 +56,17 @@ fn vectors() -> String {
     )
 }
 
-/// The ops of part B.
-const PART_B: &[&str] = &["push", "topb", "mode2pb", "pb2mode", "frompb", "tipb"];
+/// The ops of parts B and C replayed in tidb-expr-pushdown.
+const PUSHDOWN_OPS: &[&str] = &[
+    "push",
+    "topb",
+    "mode2pb",
+    "pb2mode",
+    "frompb",
+    "tipb",
+    "window_to_pb",
+    "window_tiflash",
+];
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -409,6 +423,42 @@ fn exec(op: &str, p: &[Value]) -> Value {
             let d = BaseFuncDesc::from_parts(p[0].as_str().unwrap().to_owned(), vec![], None);
             json!(get_tipb_expr(&d, p[1].as_bool().unwrap()) as i32)
         }
+        "window_to_pb" => {
+            let s = &p[0];
+            let ctx = ad_ctx(s);
+            let ectx = ctx.get_eval_ctx();
+            set_new_collation_enabled_for_test(s["nc"].as_bool().unwrap());
+            let w = WindowFuncDesc {
+                base: BaseFuncDesc::from_parts(
+                    s["n"].as_str().unwrap().to_owned(),
+                    ad_args(&*ctx, s),
+                    rt_of(s),
+                ),
+            };
+            let client = PdClient(p[1].as_u64().unwrap());
+            let st = EvalState::default();
+            match window_func_to_pb_expr(&*ectx, &st, &client, &w) {
+                None => Value::Null,
+                Some(pb) => json!({"pb": hex(&pb.write_to_bytes().unwrap())}),
+            }
+        }
+        "window_tiflash" => {
+            let s = &p[0];
+            let ctx = ad_ctx(s);
+            let ectx = ctx.get_eval_ctx();
+            set_new_collation_enabled_for_test(s["nc"].as_bool().unwrap());
+            set_blacklist(&p[1]);
+            let w = WindowFuncDesc {
+                base: BaseFuncDesc::from_parts(
+                    s["n"].as_str().unwrap().to_owned(),
+                    ad_args(&*ctx, s),
+                    rt_of(s),
+                ),
+            };
+            let client: Arc<dyn Client> = Arc::new(PdClient(0));
+            let pctx = new_push_down_context(Arc::clone(&ectx), client, false, None, None, 1024);
+            json!(can_push_down_to_tiflash(&w, &pctx))
+        }
         _ => panic!("aggdesc: unknown op {op}"),
     }
 }
@@ -428,7 +478,7 @@ fn replay(path: &str) {
         n += 1;
         let rec: Value = serde_json::from_str(line).unwrap();
         let op = rec["op"].as_str().unwrap();
-        if !PART_B.contains(&op) {
+        if !PUSHDOWN_OPS.contains(&op) {
             continue;
         }
         replayed += 1;
@@ -470,7 +520,7 @@ fn replay(path: &str) {
         shown.join("\n")
     );
     assert_eq!(n as u64, header["records"].as_u64().unwrap());
-    assert!(replayed > 1000, "{replayed} part B records");
+    assert!(replayed > 1500, "{replayed} part B+C records");
 }
 
 #[test]
