@@ -51,7 +51,8 @@ fn sysbench_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
     Arc::new(block_on(b.build(1)))
 }
 
-/// Puts the row `(id, 10 × id, "c<id>", "p<id>")` into the mock store.
+/// Puts the row `(id, 10 × id, "c<id>", "p<id>")` and its secondary index `k_1` (index id 1)
+/// entry `(k, id)` into the mock store.
 fn put_sbtest1_row(store: &MockStore, table_id: i64, id: i64) {
     let mut enc = tidb_tablecodec::rowcodec::Encoder::default();
     enc.enable = true;
@@ -59,13 +60,24 @@ fn put_sbtest1_row(store: &MockStore, table_id: i64, id: i64) {
     c.set_string(format!("c{id}").into_bytes(), "utf8mb4_bin".to_owned());
     let mut pad = Datum::default();
     pad.set_string(format!("p{id}").into_bytes(), "utf8mb4_bin".to_owned());
-    let row = [new_int_datum(id.wrapping_mul(10)), c, pad];
+    let k_val = id.wrapping_mul(10);
+    let row = [new_int_datum(k_val), c, pad];
     let val = tidb_tablecodec::encode_row(None, &row, &[2, 3, 4], None, Some(&mut enc)).unwrap();
     let key = tidb_tablecodec::encode_row_key_with_handle(
         table_id,
         &tidb_kv::Handle::Int(tidb_kv::key::IntHandle(id)),
     );
-    store.rows.lock().insert(key.0, val);
+    let mut idx_val = Vec::new();
+    tidb_codec::codec::encode_key(
+        &tidb_base::gostd::time::utc(),
+        &mut idx_val,
+        &[new_int_datum(k_val), new_int_datum(id)],
+    )
+    .unwrap();
+    let idx_key = tidb_tablecodec::encode_index_seek_key(table_id, 1, &idx_val);
+    let mut rows = store.rows.lock();
+    rows.insert(key.0, val);
+    rows.insert(idx_key.0, vec![b'0']);
 }
 
 /// A session over a mock store with the sysbench table and its 100 rows; the prepared plan
@@ -520,6 +532,270 @@ fn ranges_run_on_new_stack_with_exact_rows_and_column_metadata() {
     assert_eq!(rows.len(), 100);
     assert_eq!(rows[0], vec!["1".to_owned(), "c1".to_owned()]);
     assert_eq!(rows[99], vec!["100".to_owned(), "c100".to_owned()]);
+}
+
+/// Single-read covering `IndexReader` queries over `sbtest1` (`KEY k_1 (k)`) and multi-point
+/// `OR` grouped-range `IndexReader` queries with `ORDER BY` (`needMergeSort`) execute
+/// end-to-end on the Rust stack against the in-memory coprocessor store, checking BOTH exact
+/// rows AND exact column metadata across text protocol and `PREPARE`/`EXECUTE` (plan cache
+/// miss and hit with varying bounds).
+#[test]
+fn index_reader_runs_on_new_stack_with_exact_rows_and_column_metadata() {
+    use tidb_base::mysql::{MultipleKeyFlag, NotNullFlag, PriKeyFlag, TypeLong};
+    use tidb_model::{ColumnInfo, DBInfo, IndexColumn, IndexInfo, StatePublic, TableInfo};
+    use tidb_parser::model::CIStr;
+    use tidb_parser::types::{FieldType, UnspecifiedLength};
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _enter = rt.enter();
+    let _serial = PREPARED_COUNT.lock();
+    let (_store, mut s) = sysbench_cached_session();
+
+    let col_k = Col {
+        name: "k".to_owned(),
+        org_name: "k".to_owned(),
+        table: "sbtest1".to_owned(),
+        org_table: "sbtest1".to_owned(),
+        schema: "test".to_owned(),
+        tp: TypeLong,
+        flen: 11,
+        decimal: 0,
+        flag: (NotNullFlag | MultipleKeyFlag) as u32,
+        charset: "binary".to_owned(),
+    };
+
+    // 1. SELECT k FROM sbtest1 WHERE k BETWEEN ... (text + prepared with plan cache hit/miss).
+    let expected_k = |lo: i64, hi: i64| -> Vec<Vec<String>> {
+        (1..=100_i64)
+            .map(|id| id * 10)
+            .filter(|&k| k >= lo && k <= hi)
+            .map(|k| vec![k.to_string()])
+            .collect()
+    };
+    let bounds = [(10, 50), (25, 85), (1000, 1000), (2000, 3000), (10, 50)];
+    for (lo, hi) in bounds {
+        let sql = format!("SELECT k FROM sbtest1 WHERE k BETWEEN {lo} AND {hi}");
+        let (cols, rows) = run_text(&mut s, &sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert_eq!(cols, vec![col_k.clone()], "{sql}");
+        assert_eq!(rows, expected_k(lo, hi), "{sql}");
+    }
+    let sql_k = "SELECT k FROM sbtest1 WHERE k BETWEEN ? AND ?";
+    let info_k = block_on(s.prepare_stmt(sql_k)).unwrap();
+    let prepared_k: Vec<Col> = info_k.fields.iter().map(col_of).collect();
+    assert_eq!(prepared_k, vec![col_k.clone()]);
+    for (idx, (lo, hi)) in bounds.into_iter().enumerate() {
+        let what = format!("{sql_k} ({lo}, {hi})");
+        let (cols, rows) = run_prepared(
+            &mut s,
+            info_k.stmt_id,
+            vec![new_int_datum(lo), new_int_datum(hi)],
+        )
+        .unwrap_or_else(|e| panic!("{what}: {e}"));
+        // Equal bounds (1000, 1000) collapse a range predicate into a point range, which causes
+        // TiDB's range builder to skip plan-cache reuse for safety; non-point bounds hit cache.
+        assert_eq!(
+            s.vars().found_in_plan_cache,
+            idx > 0 && lo != hi,
+            "{what}: FoundInPlanCache"
+        );
+        assert_eq!(cols, prepared_k, "{what}");
+        assert_eq!(rows, expected_k(lo, hi), "{what}");
+    }
+    s.drop_prepared_stmt(info_k.stmt_id).unwrap();
+
+    // 2. SELECT id, k FROM sbtest1 WHERE k BETWEEN ... (exercises OutputOffsets [1, 0] since
+    // index scan schema is [k, id] while output schema is [id, k]).
+    let expected_id_k = |lo: i64, hi: i64| -> Vec<Vec<String>> {
+        (1..=100_i64)
+            .filter(|&id| {
+                let k = id * 10;
+                k >= lo && k <= hi
+            })
+            .map(|id| vec![id.to_string(), (id * 10).to_string()])
+            .collect()
+    };
+    let sql_idk = "SELECT id, k FROM sbtest1 WHERE k BETWEEN ? AND ?";
+    let info_idk = block_on(s.prepare_stmt(sql_idk)).unwrap();
+    let prepared_idk: Vec<Col> = info_idk.fields.iter().map(col_of).collect();
+    assert_eq!(prepared_idk, vec![col_id(), col_k.clone()]);
+    for (idx, (lo, hi)) in [(10, 30), (950, 1000), (15, 25)].into_iter().enumerate() {
+        let what = format!("{sql_idk} ({lo}, {hi})");
+        let (cols, rows) = run_prepared(
+            &mut s,
+            info_idk.stmt_id,
+            vec![new_int_datum(lo), new_int_datum(hi)],
+        )
+        .unwrap_or_else(|e| panic!("{what}: {e}"));
+        // Equal bounds (1000, 1000) collapse a range predicate into a point range, which causes
+        // TiDB's range builder to skip plan-cache reuse for safety; non-point bounds hit cache.
+        assert_eq!(
+            s.vars().found_in_plan_cache,
+            idx > 0 && lo != hi,
+            "{what}: FoundInPlanCache"
+        );
+        assert_eq!(cols, prepared_idk, "{what}");
+        assert_eq!(rows, expected_id_k(lo, hi), "{what}");
+    }
+    s.drop_prepared_stmt(info_idk.stmt_id).unwrap();
+
+    // 3. SELECT k FROM sbtest1 ORDER BY k LIMIT 3 (and DESC LIMIT 3).
+    let (cols, rows) = run_text(&mut s, "SELECT k FROM sbtest1 ORDER BY k LIMIT 3").unwrap();
+    assert_eq!(cols, vec![col_k.clone()]);
+    assert_eq!(rows, texts(&[&["10"], &["20"], &["30"]]));
+
+    let (cols, rows) = run_text(&mut s, "SELECT k FROM sbtest1 ORDER BY k DESC LIMIT 3").unwrap();
+    assert_eq!(cols, vec![col_k]);
+    assert_eq!(rows, texts(&[&["1000"], &["990"], &["980"]]));
+
+    // 4. Multi-point OR grouped-range IndexReader with ORDER BY (exercises needMergeSort +
+    // NewSortedSelectResults end-to-end on composite secondary index idx_ab (a, b)).
+    let mk_int = |id: i64, name: &str, offset: isize, flags: usize| {
+        let mut ft = FieldType::new(TypeLong);
+        ft.set_flen(11);
+        ft.set_decimal(0);
+        ft.set_charset("binary");
+        ft.set_collate("binary");
+        ft.add_flag(flags);
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset,
+            field_type: ft,
+            state: StatePublic,
+            ..Default::default()
+        })
+    };
+    let t_idx = TableInfo {
+        id: 210,
+        dbid: TEST_DB_ID,
+        name: CIStr::new("t_idx"),
+        columns: Some(vec![
+            mk_int(1, "id", 0, NotNullFlag | PriKeyFlag),
+            mk_int(2, "a", 1, NotNullFlag | MultipleKeyFlag),
+            mk_int(3, "b", 2, NotNullFlag),
+        ]),
+        indices: Some(vec![Arc::new(IndexInfo {
+            id: 1,
+            name: CIStr::new("idx_ab"),
+            table: CIStr::new("t_idx"),
+            columns: Some(vec![
+                IndexColumn {
+                    name: CIStr::new("a"),
+                    offset: 1,
+                    length: UnspecifiedLength,
+                    ..Default::default()
+                },
+                IndexColumn {
+                    name: CIStr::new("b"),
+                    offset: 2,
+                    length: UnspecifiedLength,
+                    ..Default::default()
+                },
+            ]),
+            state: StatePublic,
+            ..Default::default()
+        })]),
+        pk_is_handle: true,
+        state: StatePublic,
+        version: 5,
+        max_column_id: 3,
+        max_index_id: 1,
+        ..Default::default()
+    };
+    let mut db = DBInfo {
+        id: TEST_DB_ID,
+        name: CIStr::new("test"),
+        state: StatePublic,
+        ..Default::default()
+    };
+    db.deprecated.tables = Some(vec![Arc::new(t_idx)]);
+    let mut isb = tidb_infoschema::new_builder(None, None, tidb_infoschema::new_data());
+    block_on(isb.init_with_db_infos(vec![db], vec![], vec![], 1)).unwrap();
+    let is_idx = Arc::new(block_on(isb.build(1)));
+
+    let store_idx = MockStore::new(10);
+    // Insert interleaved b values across a = 1 and a = 3 so merge sort across groups is required:
+    // a=1: b in {10, 40, 70}; a=3: b in {20, 30, 50}.
+    for (id, a, b) in [
+        (1_i64, 1_i64, 10_i64),
+        (2, 1, 40),
+        (3, 1, 70),
+        (4, 3, 20),
+        (5, 3, 30),
+        (6, 3, 50),
+    ] {
+        let mut encoded = Vec::new();
+        tidb_codec::codec::encode_key(
+            &tidb_base::gostd::time::utc(),
+            &mut encoded,
+            &[new_int_datum(a), new_int_datum(b), new_int_datum(id)],
+        )
+        .unwrap();
+        let idx_key = tidb_tablecodec::encode_index_seek_key(210, 1, &encoded);
+        store_idx.rows.lock().insert(idx_key.0, vec![b'0']);
+    }
+    let cache_idx = new_test_cache();
+    let mut s_idx = cached_session(&store_idx, is_idx, &cache_idx);
+    // Disable index merge (D10.7) via the real system variable so the OR predicate stays on a
+    // single composite index scan and exercises grouped-range IndexReader + needMergeSort.
+    s_idx
+        .vars_mut()
+        .set_system_var("tidb_enable_index_merge", "OFF")
+        .unwrap();
+
+    // 4a. Multi-point OR grouped-range IndexReader with ORDER BY ASC: verify the compiled plan
+    // is Limit > IndexReader > Limit > IndexScan with 2 grouped ranges and non-empty by_items.
+    let merge_asc_sql = "SELECT a, b FROM t_idx WHERE (a = 1 OR a = 3) ORDER BY b LIMIT 4";
+    {
+        use tidb_planner::base::PhysicalPlan;
+        use tidb_planner::core::physical_plans::{PhysicalIndexReader, PhysicalIndexScan};
+        block_on(s_idx.finish_unfinished_stmt());
+        block_on(s_idx.core.prepare_txn_ctx()).unwrap();
+        let node = parse(merge_asc_sql);
+        reset_context_of_stmt(&mut s_idx.core, &node, merge_asc_sql).unwrap();
+        s_idx
+            .core
+            .txn_manager
+            .on_stmt_start(&mut s_idx.core.sctx, Some(&node))
+            .unwrap();
+        let stmt = tidb_executor::compiler::Compiler
+            .compile(&mut s_idx.core, node, merge_asc_sql)
+            .unwrap();
+        let plan = stmt.plan.as_ref().expect("compiled plan");
+        fn find_index_reader(p: &dyn PhysicalPlan) -> Option<&PhysicalIndexReader> {
+            if let Some(ir) = p.as_any().downcast_ref::<PhysicalIndexReader>() {
+                return Some(ir);
+            }
+            p.children().iter().find_map(|c| find_index_reader(&**c))
+        }
+        let ir = find_index_reader(&**plan).expect("expected IndexReader in plan");
+        let is = ir.index_plans[0]
+            .as_any()
+            .downcast_ref::<PhysicalIndexScan>()
+            .expect("expected IndexScan inside IndexReader");
+        assert_eq!(is.grouped_ranges.len(), 2);
+        assert!(!is.by_items.is_empty());
+        s_idx.core.rollback_on_error();
+        s_idx.core.txn_manager.on_stmt_end();
+    }
+    let (cols, rows) = run_text(&mut s_idx, merge_asc_sql).unwrap();
+    assert_eq!(cols.len(), 2);
+    assert_eq!(cols[0].name, "a");
+    assert_eq!(cols[1].name, "b");
+    assert_eq!(
+        rows,
+        texts(&[&["1", "10"], &["3", "20"], &["3", "30"], &["1", "40"]])
+    );
+
+    // 4b. Multi-point OR grouped-range IndexReader with ORDER BY DESC.
+    let merge_desc_sql = "SELECT a, b FROM t_idx WHERE (a = 1 OR a = 3) ORDER BY b DESC LIMIT 3";
+    let (cols, rows) = run_text(&mut s_idx, merge_desc_sql).unwrap();
+    assert_eq!(cols.len(), 2);
+    assert_eq!(rows, texts(&[&["1", "70"], &["3", "50"], &["1", "40"]]));
 }
 
 /// `SUM(k)` over a range (sysbench's sum range) builds the logical aggregation (D09.4 part A)

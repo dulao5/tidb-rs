@@ -17,7 +17,7 @@
 // Go identifiers for package constants (mapping rule M-GONAME).
 #![allow(non_upper_case_globals)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -51,8 +51,8 @@ use tidb_model::{
 use tidb_planner::PhysicalKind;
 use tidb_planner::base::PhysicalPlan;
 use tidb_planner::core::physical_plans::{
-    BatchCop, Cop, PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalTableDual,
-    PhysicalTableReader, PhysicalTableScan,
+    BatchCop, Cop, PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit, PhysicalProjection,
+    PhysicalSelection, PhysicalTableDual, PhysicalTableReader, PhysicalTableScan,
 };
 use tidb_planner::util::handle_cols::{HandleCols, new_common_handle_cols, new_int_handle_cols};
 use tidb_sessionctx::distsql_ctx::DistSQLContext;
@@ -64,6 +64,7 @@ use tidb_types::field_type::new_field_type;
 use tikv_client::proto::metapb;
 
 use crate::adapter::TelemetryInfo;
+use crate::distsql::{IndexReaderExecutor, new_index_reader_executor_context};
 use crate::glue::{InfoSchemaRef, Plan, SessionContext};
 use crate::internal::builder::builder_utils::construct_dag_req;
 use crate::internal::exec::executor::{
@@ -199,6 +200,19 @@ impl ExecutorBuilder {
                 .await
                 .map(|e| Box::new(e) as Box<dyn Executor>);
         }
+        if v.kind() == PhysicalKind::IndexReader {
+            // b.buildIndexReader(v): `case *plannercore.PhysicalIndexReader`.
+            let Some(ir) = v.as_any().downcast_ref::<PhysicalIndexReader>() else {
+                self.err = Some(Error::plain(
+                    "an IndexReader plan that is not a *core.PhysicalIndexReader".to_owned(),
+                ));
+                return None;
+            };
+            return self
+                .build_index_reader(sctx, ir)
+                .await
+                .map(|e| Box::new(e) as Box<dyn Executor>);
+        }
         if v.kind() == PhysicalKind::Sort {
             // b.buildSort(v): `case *plannercore.PhysicalSort`.
             let Some(sort) = v.as_any().downcast_ref::<PhysicalSort>() else {
@@ -257,11 +271,12 @@ impl ExecutorBuilder {
                 )));
                 return None;
             }
-            PhysicalKind::Sort | PhysicalKind::TopN | PhysicalKind::TableReader => {
+            PhysicalKind::Sort
+            | PhysicalKind::TopN
+            | PhysicalKind::TableReader
+            | PhysicalKind::IndexReader => {
                 unreachable!("built above")
             }
-            // b.buildIndexReader(v): blocked before any StatementContext mutation (D12.1 part 2B).
-            PhysicalKind::IndexReader => ("D12.1", "the index reader executor (D12.1 part 2B)"),
             // A table scan or index scan is pushed down inside a reader, never built on its own:
             // Go's `default` branch.
             PhysicalKind::TableScan => {
@@ -1028,10 +1043,12 @@ impl ExecutorBuilder {
     }
 
     /// corColInAccess checks whether there is a correlated column in access conditions
-    /// (block D12.10, carried with D12.1 Part 2A; `PhysicalIndexScan` arm added in Part 2B).
+    /// (block D12.10, carried with D12.1 Part 2A/2B).
     // go: executorBuilder.corColInAccess L1
     pub fn cor_col_in_access(&self, p: &dyn PhysicalPlan) -> bool {
         let access: &[ExprRef] = if let Some(x) = p.as_any().downcast_ref::<PhysicalTableScan>() {
+            &x.access_condition
+        } else if let Some(x) = p.as_any().downcast_ref::<PhysicalIndexScan>() {
             &x.access_condition
         } else {
             &[]
@@ -1293,6 +1310,230 @@ impl ExecutorBuilder {
     }
 }
 
+/// buildNoRangeIndexReader constructs an [`IndexReaderExecutor`] without setting its ranges.
+///
+/// Static partitioned tables and cached tables stop at `blocked("D06.4", ...)` before any
+/// `StatementContext` mutation (spec §11.1–§11.2).
+// go: buildNoRangeIndexReader L2 (static partition and cached table stop at blocked-by:D06.4 before mutating StatementContext)
+pub async fn build_no_range_index_reader(
+    b: &mut ExecutorBuilder,
+    sctx: &mut dyn SessionContext,
+    v: &PhysicalIndexReader,
+) -> Result<IndexReaderExecutor, Error> {
+    let dag_req = construct_dag_req(sctx, &v.index_plans, TiKV)?;
+    let Some(is) = v
+        .index_plans
+        .first()
+        .and_then(|p| p.as_any().downcast_ref::<PhysicalIndexScan>())
+    else {
+        return Err(Error::plain(
+            "buildNoRangeIndexReader: IndexPlans[0] is not *core.PhysicalIndexScan",
+        ));
+    };
+    let tbl = match &b.is {
+        Some(is_schema) => {
+            is_schema
+                .table_by_id(IsCtx::background(), is.table.id)
+                .await
+        }
+        None => None,
+    };
+    let Some(tbl) = tbl else {
+        return Err(Error::plain(format!(
+            "table id {} not found in infoschema",
+            is.table.id
+        )));
+    };
+    let (is_partition, physical_table_id) = is.is_partition();
+    let physical_table_id = if is_partition {
+        return Err(blocked(
+            "D06.4",
+            "static partitioned table read in IndexReader (PartitionedTable.GetPartition)",
+        ));
+    } else {
+        let _ = physical_table_id;
+        is.table.id
+    };
+    if is.table.table_cache_status_type != TableCacheStatusDisable
+        || tbl.as_cached_table().is_some()
+    {
+        return Err(blocked("D06.4", "reading a cached table in IndexReader"));
+    }
+
+    let start_ts = b.get_snapshot_ts(sctx).await?;
+    let vars = sctx.get_session_vars();
+    let paging = vars.enable_paging;
+    let net_data_size = v.get_net_data_size(vars);
+    let ire_ctx = new_index_reader_executor_context(sctx)?;
+    let base = new_base_executor_v2(
+        sctx.get_session_vars(),
+        &sctx.sql_killer(),
+        Some(v.schema().clone()),
+        v.id() as isize,
+        Vec::new(),
+    );
+    let index_usage_reporter = b.build_index_usage_reporter(sctx, v);
+    let cor_col_in_filter = b.cor_col_in_dist_plan(&v.index_plans);
+    let cor_col_in_access = v
+        .index_plans
+        .first()
+        .is_some_and(|p| b.cor_col_in_access(p.as_ref()));
+
+    sctx.get_session_vars()
+        .stmt_ctx()
+        .is_tikv
+        .store(true, Ordering::SeqCst);
+
+    let mut e = IndexReaderExecutor {
+        ctx: ire_ctx,
+        base,
+        index_usage_reporter,
+        dag_pb: dag_req,
+        start_ts,
+        txn_scope: b.txn_scope.clone(),
+        read_replica_scope: b.read_replica_scope.clone(),
+        is_staleness: b.is_staleness,
+        net_data_size,
+        physical_table_id,
+        table: Some(tbl),
+        index: Arc::clone(&is.index),
+        ranges: Vec::new(),
+        grouped_ranges: is.grouped_ranges.clone(),
+        partitions: Vec::new(),
+        part_range_map: HashMap::new(),
+        kv_ranges: Vec::new(),
+        result: None,
+        columns: is.columns.clone(),
+        output_columns: v.output_columns.clone(),
+        partition_id_map: HashSet::new(),
+        paging,
+        keep_order: is.keep_order,
+        desc: is.desc,
+        by_items: is.by_items.clone(),
+        cor_col_in_filter,
+        cor_col_in_access,
+        idx_cols: is.idx_cols.clone(),
+        col_lens: is.idx_col_lens.clone(),
+        plans: v.index_plans.clone(),
+        mem_tracker: None,
+        select_result_hook: SelectResultHook::default(),
+        dummy: false,
+    };
+
+    for col in &v.output_columns {
+        e.dag_pb.mut_output_offsets().push(col.index as u32);
+    }
+
+    if let Some(tbl) = &e.table
+        && tbl.meta().temp_table_type != TempTableNone
+    {
+        e.dummy = true;
+    }
+
+    Ok(e)
+}
+
+impl ExecutorBuilder {
+    /// buildIndexReader builds an index reader executor. It first validates pre-Open
+    /// boundaries, builds a no-range index reader, and then populates its ranges and
+    /// `StatementContext.IndexNames`.
+    ///
+    /// Unsupported branches (static/dynamic partitioned tables, cached tables, correlated
+    /// columns in access conditions) stop here before any `StatementContext` mutation or
+    /// executor open so the router can fall back cleanly (spec §11.1, §11.2).
+    // go: executorBuilder.buildIndexReader L2 (static/dynamic partition pruning, cached tables, and corColInAccess stop at pre-Open boundary guards before mutating StatementContext)
+    pub async fn build_index_reader(
+        &mut self,
+        sctx: &mut dyn SessionContext,
+        v: &PhysicalIndexReader,
+    ) -> Option<IndexReaderExecutor> {
+        let Some(is) = v
+            .index_plans
+            .first()
+            .and_then(|p| p.as_any().downcast_ref::<PhysicalIndexScan>())
+        else {
+            self.err = Some(Error::plain(
+                "buildIndexReader: IndexPlans[0] is not *core.PhysicalIndexScan",
+            ));
+            return None;
+        };
+        assert_by_items_are_columns(&is.by_items);
+        if let Err(err) = self.valid_can_read_temporary_or_cache_table(sctx, &is.table) {
+            self.err = Some(err);
+            return None;
+        }
+
+        // Pre-Open fallback guards (spec §11.1, §11.2): detect unsupported branches before
+        // mutating StatementContext or opening any executor.
+        if is.is_partition().0 {
+            self.err = Some(blocked(
+                "D06.4",
+                "static partitioned table read in IndexReader (PartitionedTable.GetPartition)",
+            ));
+            return None;
+        }
+        if sctx
+            .get_session_vars()
+            .stmt_ctx()
+            .use_dynamic_partition_prune()
+            && is.table.get_partition_info().is_some()
+        {
+            self.err = Some(blocked(
+                "D09.12",
+                "dynamic partition pruning in buildIndexReader",
+            ));
+            return None;
+        }
+        if is.table.table_cache_status_type != TableCacheStatusDisable {
+            self.err = Some(blocked("D06.4", "reading a cached table in IndexReader"));
+            return None;
+        }
+        if v.index_plans
+            .first()
+            .is_some_and(|p| self.cor_col_in_access(p.as_ref()))
+        {
+            self.err = Some(blocked(
+                "D10.1",
+                "rebuildIndexRanges (correlated column in IndexReader access condition)",
+            ));
+            return None;
+        }
+
+        // Write StatementContext.IndexNames before build_no_range_index_reader shares
+        // StatementContext with BaseExecutorV2 (same N2 pattern as buildPointGet /
+        // buildTableReader); restore on error so fallback leaves StatementContext clean.
+        let prev_is_tikv = sctx
+            .get_session_vars()
+            .stmt_ctx()
+            .is_tikv
+            .load(Ordering::SeqCst);
+        let prev_index_names_len = sctx.get_session_vars().stmt_ctx().index_names.len();
+        sctx.get_session_vars_mut()
+            .stmt_ctx_mut()
+            .index_names
+            .push(format!("{}:{}", is.table.name.o, is.index.name.o));
+
+        let mut ret = match build_no_range_index_reader(self, sctx, v).await {
+            Ok(e) => e,
+            Err(err) => {
+                sctx.get_session_vars()
+                    .stmt_ctx()
+                    .is_tikv
+                    .store(prev_is_tikv, Ordering::SeqCst);
+                sctx.get_session_vars_mut()
+                    .stmt_ctx_mut()
+                    .index_names
+                    .truncate(prev_index_names_len);
+                self.err = Some(err);
+                return None;
+            }
+        };
+
+        ret.ranges = is.ranges.clone();
+        Some(ret)
+    }
+}
+
 /// Go `kvRangeBuilderFromRangeAndPartition`: builds per-partition KV key ranges from logical
 /// ranges (used when dynamic partition pruning selects partitions).
 pub struct KvRangeBuilderFromRangeAndPartition {
@@ -1518,16 +1759,16 @@ mod tests {
             b.err.unwrap().to_string(),
             "a TableReader plan that is not a *core.PhysicalTableReader"
         );
-        for (kind, block) in [(PhysicalKind::IndexReader, "D12.1")] {
-            let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
-            assert!(b.build(&mut s, Some(&test_plan(kind))).await.is_none());
-            let err = b.err.expect("blocked");
-            assert_eq!(
-                tidb_base::blocked::blocked_by(&err),
-                Some(block),
-                "{kind:?}"
-            );
-        }
+        let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
+        assert!(
+            b.build(&mut s, Some(&test_plan(PhysicalKind::IndexReader)))
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            b.err.unwrap().to_string(),
+            "an IndexReader plan that is not a *core.PhysicalIndexReader"
+        );
         for (kind, expected) in [
             (
                 PhysicalKind::TableScan,

@@ -499,7 +499,7 @@ fn plan(c: &Value) -> Result<Value, Error> {
                 }
                 .init(&ctx, 0);
                 reader.set_stats(stats(&c["reader_rows"]));
-                reader_size = Some(f(reader.get_net_data_size(&ctx)));
+                reader_size = Some(f(reader.get_net_data_size(ctx.vars)));
                 cur = Arc::new(reader);
             } else {
                 let mut reader = PhysicalTableReader {

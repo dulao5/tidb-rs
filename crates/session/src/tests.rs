@@ -2412,31 +2412,6 @@ impl Client for MockClient {
         let mut dag = tipb::DagRequest::default();
         dag.merge_from_bytes(&req.data).expect("valid DAGRequest");
         let execs = dag.get_executors();
-        let scan = execs[0].get_tbl_scan();
-        let cols = scan.get_columns();
-        let mut col_fts: Vec<tidb_parser::types::FieldType> =
-            cols.iter().map(tipb_col_to_field_type).collect();
-        let pk_col_ids: Vec<i64> = cols
-            .iter()
-            .filter(|c| c.get_pk_handle())
-            .map(|c| c.get_column_id())
-            .collect();
-        let decoder_cols: Vec<tidb_tablecodec::rowcodec::decoder::ColInfo> = cols
-            .iter()
-            .zip(col_fts.iter())
-            .map(|(c, ft)| tidb_tablecodec::rowcodec::decoder::ColInfo {
-                id: c.get_column_id(),
-                ft: Arc::new(ft.clone()),
-                ..Default::default()
-            })
-            .collect();
-        let decoder = tidb_tablecodec::rowcodec::decoder::new_chunk_decoder(
-            decoder_cols,
-            pk_col_ids,
-            None,
-            None,
-        );
-
         let key_ranges = req
             .key_ranges
             .as_ref()
@@ -2461,21 +2436,68 @@ impl Client for MockClient {
             matched.sort_by(|a, b| a.0.cmp(&b.0));
         }
 
+        let mut col_fts: Vec<tidb_parser::types::FieldType>;
         let mut rows: Vec<Vec<tidb_types::datum::Datum>> = Vec::with_capacity(matched.len());
-        let mut tmp_chk = tidb_chunk::chunk::new_chunk_with_capacity(&col_fts, 1);
-        for (k, v) in &matched {
-            let handle = tidb_tablecodec::decode_row_key(&tidb_kv::key::Key(k.clone())).unwrap();
-            tmp_chk.reset();
-            decoder
-                .decode_to_chunk(v, 0, Some(&handle), &mut tmp_chk)
-                .unwrap();
-            let row = tmp_chk.get_row(0);
-            let datums = col_fts
-                .iter()
-                .enumerate()
-                .map(|(i, ft)| row.get_datum(i, ft))
-                .collect();
-            rows.push(datums);
+        match execs[0].get_tp() {
+            tipb::ExecType::TypeTableScan => {
+                let scan = execs[0].get_tbl_scan();
+                let cols = scan.get_columns();
+                col_fts = cols.iter().map(tipb_col_to_field_type).collect();
+                let pk_col_ids: Vec<i64> = cols
+                    .iter()
+                    .filter(|c| c.get_pk_handle())
+                    .map(|c| c.get_column_id())
+                    .collect();
+                let decoder_cols: Vec<tidb_tablecodec::rowcodec::decoder::ColInfo> = cols
+                    .iter()
+                    .zip(col_fts.iter())
+                    .map(|(c, ft)| tidb_tablecodec::rowcodec::decoder::ColInfo {
+                        id: c.get_column_id(),
+                        ft: Arc::new(ft.clone()),
+                        ..Default::default()
+                    })
+                    .collect();
+                let decoder = tidb_tablecodec::rowcodec::decoder::new_chunk_decoder(
+                    decoder_cols,
+                    pk_col_ids,
+                    None,
+                    None,
+                );
+                let mut tmp_chk = tidb_chunk::chunk::new_chunk_with_capacity(&col_fts, 1);
+                for (k, v) in &matched {
+                    let handle =
+                        tidb_tablecodec::decode_row_key(&tidb_kv::key::Key(k.clone())).unwrap();
+                    tmp_chk.reset();
+                    decoder
+                        .decode_to_chunk(v, 0, Some(&handle), &mut tmp_chk)
+                        .unwrap();
+                    let row = tmp_chk.get_row(0);
+                    let datums = col_fts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ft)| row.get_datum(i, ft))
+                        .collect();
+                    rows.push(datums);
+                }
+            }
+            tipb::ExecType::TypeIndexScan => {
+                let scan = execs[0].get_idx_scan();
+                let cols = scan.get_columns();
+                col_fts = cols.iter().map(tipb_col_to_field_type).collect();
+                for (k, _v) in &matched {
+                    // Strip 't'(1) + table_id(8) + "_i"(2) + index_id(8) = 19-byte prefix.
+                    let mut rest = &k[19..];
+                    let mut datums = Vec::with_capacity(cols.len());
+                    for _ in 0..cols.len() {
+                        let (next_rest, d, err) = tidb_codec::codec::decode_one(rest);
+                        err.unwrap();
+                        datums.push(d);
+                        rest = next_rest;
+                    }
+                    rows.push(datums);
+                }
+            }
+            other => panic!("MockClient: unsupported scan executor {other:?}"),
         }
 
         for exec in &execs[1..] {
@@ -3494,18 +3516,34 @@ fn prepare_index_reader_column_metadata_matches_tidb_v858() {
     assert!(s.is_idle(), "{}", s.state_snapshot());
 }
 
-/// Executing an `IndexReader` query plans a `PhysicalIndexReader` and stops cleanly at the
-/// executor builder boundary (`D12.1`) without mutating `StatementContext` (`warnings`,
-/// `table_ids`, `is_tikv`) and leaves the session idle.
+/// Executing a covering `IndexReader` query plans a `PhysicalIndexReader`, builds and runs
+/// `IndexReaderExecutor` end-to-end on the Rust stack, populates `StatementContext.is_tikv`
+/// and `index_names`, returns exact rows, and leaves the session idle.
+/// Unported double-read queries (`SELECT c FROM sbtest1 WHERE k BETWEEN 1 AND 100`) still
+/// stop before any executor opens without mutating `StatementContext`.
 #[test]
-fn index_reader_execute_stops_at_executor_boundary_without_mutating_stmt_ctx() {
+fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
     use std::sync::atomic::Ordering;
     use tidb_planner::base::PhysicalKind;
+    use tidb_types::datum::new_int_datum;
 
     let store = MockStore::new(10);
+    // Seed secondary index k_1 (index_id=1) entries for sbtest1 (table_id=110): (k=10*id, id).
+    for id in 1..=5_i64 {
+        let mut encoded = Vec::new();
+        tidb_codec::codec::encode_key(
+            &tidb_base::gostd::time::utc(),
+            &mut encoded,
+            &[new_int_datum(id * 10), new_int_datum(id)],
+        )
+        .unwrap();
+        let idx_key = tidb_tablecodec::encode_index_seek_key(110, 1, &encoded);
+        store.rows.lock().insert(idx_key.0, vec![b'0']);
+    }
+
     let cache = new_test_cache();
     let mut s = cached_session(&store, sbtest_with_secondary_index_info_schema(), &cache);
-    let sql = "SELECT k FROM sbtest1 WHERE k BETWEEN 1 AND 100";
+    let sql = "SELECT k FROM sbtest1 WHERE k BETWEEN 20 AND 40";
 
     // Compile produces a PhysicalIndexReader.
     block_on(s.finish_unfinished_stmt());
@@ -3521,37 +3559,46 @@ fn index_reader_execute_stops_at_executor_boundary_without_mutating_stmt_ctx() {
         .unwrap_or_else(|e| panic!("{sql}: {e}"));
     let plan = stmt.plan.as_ref().expect("compiled plan");
     assert_eq!(plan.kind(), PhysicalKind::IndexReader);
-
-    let warnings_before = s.vars().stmt_ctx().warning_count();
-    let table_ids_before = s.vars().stmt_ctx().related_table_ids.clone();
-    let is_tikv_before = s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed);
-    let mut b = tidb_executor::builder::new_executor_builder(
-        &s.core,
-        None,
-        Arc::new(tidb_executor::adapter::TelemetryInfo::default()),
-    );
-    assert!(block_on(b.build(&mut s.core, Some(plan))).is_none());
-    let err = b.err.expect("executor boundary error");
-    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
-    assert_eq!(s.vars().stmt_ctx().warning_count(), warnings_before);
-    assert_eq!(s.vars().stmt_ctx().related_table_ids, table_ids_before);
-    assert_eq!(
-        s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed),
-        is_tikv_before
-    );
     s.core.rollback_on_error();
     s.core.txn_manager.on_stmt_end();
     assert!(s.is_idle(), "{}", s.state_snapshot());
 
-    // End-to-end execute_stmt also returns blocked-by:D12.1 and leaves session idle.
-    let err = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
-    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+    // End-to-end execute_stmt runs IndexReaderExecutor and returns exact rows [20, 30, 40].
+    let mut rs = block_on(s.execute_stmt(parse(sql), sql))
+        .unwrap()
+        .expect("result set");
+    assert!(s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed));
+    assert_eq!(s.vars().stmt_ctx().index_names, vec!["sbtest1:k_1"]);
+    let mut chk = rs.new_chunk().unwrap();
+    let mut got = Vec::new();
+    loop {
+        block_on(rs.next(&mut s, &mut chk)).unwrap();
+        if chk.num_rows() == 0 {
+            break;
+        }
+        for i in 0..chk.num_rows() {
+            got.push(chk.get_row(i).get_int64(0));
+        }
+    }
+    block_on(rs.close(&mut s)).unwrap();
+    assert_eq!(got, vec![20, 30, 40]);
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+
+    // Unported double-read (needs column c not in index k_1) stops before any executor opens
+    // without mutating StatementContext.
+    let double_read_sql = "SELECT c FROM sbtest1 WHERE k BETWEEN 20 AND 40";
+    let err = block_on(s.execute_stmt(parse(double_read_sql), double_read_sql))
+        .err()
+        .unwrap();
+    assert!(blocked_by(&err).is_some(), "{err}");
+    assert!(!s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed));
+    assert!(s.vars().stmt_ctx().index_names.is_empty());
     assert!(s.is_idle(), "{}", s.state_snapshot());
 }
 
 /// Multi-group `GroupRangesByCols` on a clustered common-handle `TableReader` produces
 /// grouped ranges in the planner and falls back cleanly at the executor builder boundary
-/// (`D12.1`) without mutating `StatementContext` or leaving session state behind.
+/// (`D07.3`) without mutating `StatementContext` or leaving session state behind.
 #[test]
 fn multi_group_table_reader_fallback_leaves_stmt_ctx_untouched() {
     use std::sync::atomic::Ordering;
