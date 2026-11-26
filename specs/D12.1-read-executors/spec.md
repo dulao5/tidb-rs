@@ -132,11 +132,11 @@ tracker `data/func_blocks.tsv` 中 `D12.1` 共 **245** 个函数，分布在 9 �
    - `workCh` 容量为 1，由 1 个 `indexWorker` 写、由 `indexLookupConcurrency`（`tidb_index_lookup_concurrency`，未设时取 `tidb_executor_concurrency` 默认 5）个 `tableWorker` 竞争消费；`resultCh` 由 `indexWorker` 写、主线程 `Next` 读。
    - **保序关键**：`indexWorker.buildAndDispatchLookupTasks`（:1653-1662）把同一个 `*lookupTableTask` 先发进 `workCh`、再发进 `resultCh`。主线程 `getResultTask`（:1288）从 `resultCh` 按索引扫描产出的批次顺序取 task，再等 `<-task.doneCh`，从而既让多个 `tableWorker` 并发回表，又保证输出批次严格按索引顺序。
    - **`indexWorker` 限流与批大小**：
-     - 批大小由 `calculateBatchSize` / `CalculateBatchSize`（:1118-1144）从 `min(initBatchSize, maxBatchSize)` 起步（开启 `indexPaging` 即有 LIMIT 时不倍增），每次拉满一批后翻倍直到 `tidb_index_lookup_size`（默认 20000）。
-     - 不需归并时走 `fetchHandlesRolling`（:1495），按 `maxInFlight = getIndexScanMaxInFlight(DistSQLConcurrency)`（`2 * c`）与 `getSelectResultInFlightCost`（调 `distsql.GetSelectResultConcurrency`）滚动创建区间 `SelectResult`，避免多分区/多分组一次性并发爆棚；需归并（`keepOrder && needMergeSort`）时用共享限速器 `getMergeSortSharedCoprRequestRateLimit`（容量 `2 * c`）和分摊并发 `getMergeSortIndexScanConcurrency`（`clamp(4*c/n, 2, c)`）建全部 `SelectResult` 并交给 `NewSortedSelectResults` 再 `fetchHandles`（:1454）。
+     - 批大小以首次 `Next` 传入的 `req.RequiredRows()` 为基准（`distsql.go:1263`），经 `calculateBatchSize` / `CalculateBatchSize`（:1118-1144）在 `[initBatchSize, maxBatchSize]` 内计算：非 `indexPaging` 时先按估算行数倍增起步，`indexPaging`（带 `LIMIT`）只跳过起步倍增；后续每拉满一批仍执行翻倍直到 `tidb_index_lookup_size`（:1741、:1797，默认 20000）。该起步逻辑会直接影响 `EXPLAIN ANALYZE` 中的 `table_task num`（Go v8.5.8 unistore 实测：900 行、`tidb_index_lookup_size=100` 时，`tidb_max_chunk_size=1024` 为 9，`64` 为 8）。
+     - 不需归并时走 `fetchHandlesRolling`（:1495），按 `maxInFlight = getIndexScanMaxInFlight(DistSQLConcurrency)`（`2 * c`）与 `getSelectResultInFlightCost`（调 `distsql.GetSelectResultConcurrency`）滚动创建区间 `SelectResult`，避免多分区/多分组一次性并发爆棚；需归并（`keepOrder && needMergeSort`）时用共享限速器 `getMergeSortSharedCoprRequestRateLimit`（容量 `2 * c`）和分摊并发 `getMergeSortIndexScanConcurrency`（Go 写为 `min(max(4*c/n, 2), c)`，Rust 必须写 `x.max(2).min(c)`，不可写 `.clamp(2, c)` 否则 `c = 1` 时 panic）建全部 `SelectResult` 并交给 `NewSortedSelectResults` 再 `fetchHandles`（:1454）。
      - 支持 `PushedLimit`（跳过前 `Offset` 个键、超过 `Offset+Count` 停止）与 `indexLookUpPushDown`（经 `SelectResult.IntoIter` 分流：TiKV 本地命中的完整行 `channelIdxRow` 直接包成已完成 task 进 `resultCh`，跨 region 未命中的 handle `channelIdxIndex` 发给 `tableWorker` 回表）。
    - **`tableWorker`**（`pickAndExecTask` :1870 → `executeTask` :2160）：从 `workCh` 取 task → `buildTableReader`（:1172，经 `dataReaderBuilder.buildTableReaderFromHandles` 把 handle 排序并合并连续整数 handle 为 KV range，立即发 DAG）→ 循环 `exec.Next` 收集行 → `keepOrder` 时按 `task.indexOrder`（`HandleMap`）填 `rowIdx` 并 `sort.Sort(task)` 恢复索引序 → 非 `weakConsistency` 且 `len(tblPlans) == 1` 且未取消时校验 `len(task.rows) == handleCnt`，缺失行用 `GetLackHandles`（:2275）查出并经 `consistency.Reporter.ReportLookupInconsistent` 报 8133 错误 → 把结果错误写入容量 1 的 `task.doneCh`。
-4. **`Close`**（:1204-1254）：延迟注册 `IndexLookUpRunTimeStats`（及指标）；上报 index usage；若已启动 worker，调用 `cancelFunc()` → `close(e.finished)` → `channel.Clear(e.resultCh)` → `idxWorkerWg.Wait()` → `tblWorkerWg.Wait()`。
+4. **`Close`**（:1204-1254）：以 `defer` 最后注册 `IndexLookUpRunTimeStats`（及指标）；函数体先上报 index usage；若已启动 worker，调用 `cancelFunc()` → `close(e.finished)` → `channel.Clear(e.resultCh)` → `idxWorkerWg.Wait()` → `tblWorkerWg.Wait()`；最后执行 `defer` 中的 stats 注册。
 
 ### 7.3 调用方（tracker `data/block_edges.tsv` 与源码核对）
 
@@ -189,13 +189,14 @@ tracker `data/func_blocks.tsv` 中 `D12.1` 共 **245** 个函数，分布在 9 �
 |---|---|---|---|
 | **D07.3 distsql（#407）** | `DistSQLContext`、`RequestBuilder`、`SelectWithRuntimeStats`、`SelectResult`、`SplitRangesAcrossInt64Boundary`、`SetEncodeType`、`TableHandleRangesToKVRanges`、`NewSortedSelectResults` 等（完整清单见 §8.3） | **2A / 2B / 2C**（硬依赖） | 第 2A 部分实现排在 D07.3（#407）表路径合入之后；第 2B / 2C 部分需 D07.3 的索引/handle 编码、归并结果与 `SelectResultIter` |
 | **D12.0 `ConstructDAGReq` 与 `to_pb`** | `crates/executor/src/internal/builder/builder_utils.rs:18,58` 目前仍是 `blocked-by:D10.9` 的桩（写于 D10.9 之前），但 `PhysicalTableScan` 等的 `ToPB` 已在 `crates/planner/src/core/plan_to_pb.rs` 完成 | **2A**（硬依赖） | 随第 2A 部分解除桩并按 L1 移植 `ConstructDAGReq`（同时补 `D00.3` `timeutil.Zone`），计入 D12.0 |
-| **D07.0 `kv::Request` 缺字段** | `crates/kv/src/kv.rs:580` 尚缺 `match_store_labels: Vec<StoreLabel>`（`newClosestReadAdjuster` 与 `RequestBuilder.Build` 写入）和 `copr_request_rate_limit`（2C 归并限速） | **2A**（`match_store_labels`）、**2C**（`copr_request_rate_limit`） | 随 D07.3（#407 §4.1）将 `Variables`、`RateLimit` 下沉到 `tidb-kv`（rank 5）并新增轻量 `StoreLabel { key, value }` 与上述两个字段（不引入 `tikv-client` 依赖） |
-| **D05.3 `SessionCore` 桩** | `crates/session/src/session.rs:790,797` 的 `get_dist_sql_ctx`、`get_build_pb_ctx` 是临时桩；`SessionContext`（`crates/executor/src/glue.rs`）需新增对应访问方法 | **2A**（硬依赖） | 随 D07.3（`get_dist_sql_ctx`）与第 2A 部分（`get_build_pb_ctx`）实现并接入 `Session`（计入 D05.3 / glue） |
-| **D10.5 `PhysicalTableReader.GetNetDataSize` 与 `getTblStats`** | `buildNoRangeTableReader`（`builder.go:3708`）无条件调用 `v.GetNetDataSize()`，Rust 侧 `PhysicalTableReader` 尚未实现该方法 | **2A** | `getTblStats`（`plan_cost_ver1.go:1284`，9 行）与 `PhysicalTableReader.GetNetDataSize`（:327，3 行）的依赖（`cardinality::get_avg_row_size`、`PhysicalTableScan.tbl_col_hists`）**均已就绪**，随第 2A 部分提前按 L1 移植到 `tidb-planner`、计入 D10.5（宪章第四条 5 / 第九条 2） |
+| **D07.0 `kv::Request` 缺字段与 D07.2 接线** | `crates/kv/src/kv.rs:580` 尚缺 `match_store_labels: Vec<StoreLabel>`（2A `newClosestReadAdjuster` 与 `RequestBuilder.Build` 写入）和 `copr_request_rate_limit`（2C 归并限速），且 D07.2 `CopIterator`（`coprocessor.rs:1309, 1804`）尚未读取 `copr_request_rate_limit` | **2A**（`match_store_labels`）、**2C**（`copr_request_rate_limit`） | 由 **D07.3（#410）** 负责：D07.3 第 1 部分下沉 `Variables`/`RateLimit` 至 `tidb-kv` 并补 `StoreLabel` + `match_store_labels`；D07.3 第 2 部分补 `copr_request_rate_limit` 字段并完成 `CopIterator` 限速接线（2C 排在 D07.3 第 2 部分之后） |
+| **D05.3 `SessionCore` 桩** | `crates/session/src/session.rs:790,797` 的 `get_dist_sql_ctx`、`get_build_pb_ctx` 是临时桩；`SessionContext`（`crates/executor/src/glue.rs`）需新增对应访问方法 | **2A**（硬依赖） | `get_dist_sql_ctx` 由 D07.3 第 1 部分实现；`get_build_pb_ctx` 与 `SessionContext` 访问方法随第 2A 部分接入（计入 D05.3 / glue） |
+| **EXC.B `PhysicalTableReader.GetNetDataSize`、`PhysicalIndexReader.GetNetDataSize` 与 `getTblStats`** | `buildNoRangeTableReader`（`builder.go:3708`）与 `buildNoRangeIndexReader`（`:4073`）无条件调用 `v.GetNetDataSize()`；但这 3 个函数（`plan_cost_ver1.go:327, 243, 1284`，共 15 行）在 tracker `func_blocks.tsv` 中归 **`EXC.B`**（cost model v1，不移植）而非 D10.5 | **2A / 2B** | 改动已确认例外须按宪章第九条 1(b) **交 §15.1 由项目负责人决定**（建议从 `EXC.B` 移出并按 L1 移植，或按负责人选定的替代方案处理） |
 | **D12.0 `assertByItemsAreColumns` 与 `detach.rs`** | `builder.go:3814`（10 行）；`detach.rs:36,71` 的 `TableReaderExecutor.Detach` 桩 | **2A** | `assertByItemsAreColumns` 随第 2A 部分移植、计入 D12.0；`TableReaderExecutor.Detach` 一并解除桩（游标仍停在 `D12.12`） |
 | **D12.10 `corColInDistPlan` / `corColInAccess`** | `builder.go:3349,3382`（共 40 行），检查 `PhysicalSelection` / `Projection` / `TopN` / `TableScan` / `IndexScan` 是否含相关列 | **2A / 2B / 2C** | 依赖 `expression::util::extract_cor_columns` 已在 `tidb-expression` 就绪；随第 2A 部分移植（未移植的 `PhysicalIndexScan` 分支等 2B 补上），计入 D12.10 |
 | **D12.14 `normalizeCtxErrWithCause`** | `analyze_utils.go:112`（11 行），被 `tableResultHandler.nextRaw` 调用 | **2A** | 无出边小函数，在 `M-GOCTX` 下检查取消原因；随第 2A 部分移植或按 `M-GOCTX` 映射，计入 D12.14 |
 | **D12.0 `UpdateExecutorTableID`** | `pkg/executor/internal/util/partition_table.go:26`（42 行），被 `TableReaderExecutor.buildKVReqSeparately`（:508）调用 | **2A**（仅分区表/TiFlash 路径） | 无出边纯 protobuf 遍历，随第 2A 部分整文件移植到 `crates/executor/src/internal/util/partition_table.rs`、计入 D12.0（与 `buildKVReqSeparately` 一致） |
+| **D00.3 `timeutil.Zone`** | `pkg/util/timeutil/time_zone.go:189`，被 `ConstructDAGReq` 编码时区名与偏移调用 | **2A** | 叶子工具函数，随第 2A 部分移植 |
 | **D10.1 / D10.2 / D10.9 索引计划** | `PhysicalIndexReader`、`PhysicalIndexScan`、`PhysicalIndexLookUpReader`（含 `ToPB`、`GetNetDataSize`、`GetAvgTableRowSize`、`NeedExtraOutputCol`、`ResolveIndices`、`convertToIndexScan`） | **2B / 2C**（硬依赖） | 第 2B / 2C 部分排在索引物理算子合入之后；在此之前 `executorBuilder.build` 对索引路径仍回退（且 D10.2 `convert_to_index_scan` 在规划阶段已停在 `blocked-by:D10.2`） |
 | **D12.7 `dataReaderBuilder.buildTableReaderFromHandles` / `buildTableReaderBase`** | `builder.go:4911-4960`（50 行），被 `IndexLookUpExecutor.buildTableReader`（`distsql.go:1193`）调用 | **2C**（硬依赖） | 随第 2C 部分提前按 L1 移植到 `builder.rs`、计入 D12.7（它们不依赖 IndexJoin 其余部分，只依赖 2A 和 D07.3） |
 | **D09.12 分区裁剪 / D06.4 缓存表与 `CompareIndexAndVal` / D06.5 `GetDDLOwner` / D10.1 `ResolveCorrelatedColumns` / D10.2 `GroupRangesByCols` / D00.3 `ReportAdminCheckInconsistent`** | 各自对应非 sysbench 分支 | 2A / 2B / 2C 的非默认分支 | 保留边界桩 `blocked-by:<块>`（详见 §11），在进入不可达或未支持分支时显式报错 |
@@ -213,11 +214,12 @@ tracker `data/func_blocks.tsv` 中 `D12.1` 共 **245** 个函数，分布在 9 �
 | **区间编码（表）** | `distsql.TableHandleRangesToKVRanges(dctx, tids, isCommonHandle, ranges) -> Result<KeyRanges>` | `builder.go:4864,4881`（`kvRangeBuilderFromRangeAndPartition`）及 `RequestBuilder.SetHandleRanges` 内部 | **2A** | 支持 int handle 与 common handle，以及多分区表 ID |
 | **区间编码（索引与 handle）** | `distsql.CommonHandleRangesToKVRanges(dctx, tids, ranges)`、`distsql.IndexRangesToKVRangesWithInterruptSignal(dctx, pid, idxID, ranges, memTracker, interruptSignal)` | `distsql.go:639,645`（`buildKeyRanges`） | **2B / 2C** | 2B 只需 `interruptSignal = None`；支持 `memTracker` 检查点 |
 | **handle 转区间** | `distsql.TableHandlesToKVRanges(tid, handles)`、`distsql.PartitionHandlesToKVRanges(handles)`（经 `RequestBuilder.SetTableHandles` / `SetPartitionsAndHandles`） | `builder.go:4813,4818,4952,4954`（2C 回表与 3B IndexJoin） | **2C** | 合并连续 int handle 并返回 row count hints |
-| **TxnScope 校验** | `distsql.VerifyTxnScope(txnScope, physicalTableID, is) -> Result<bool, Error>` | `point_get.go:702`（第 1 部分桩 `verify_txn_scope`）、`RequestBuilder.Build` 内部 | **2A**（D07.3 第 1 部分同时解除第 1 部分桩） | 非 global txn scope 时经 `tidb_infoschema::context::MetaOnlyInfoSchema` 查询 placement bundle；命中 bundle 时返回 `blocked("X", ...)`（对齐 #407 §4.9 / §5） |
-| **请求构建器** | `distsql.RequestBuilder`：公开 `pub request: tidb_kv::kv::Request` 与链式方法 `SetHandleRanges`、`SetPartitionKeyRanges`、`SetKeyRanges`、`SetPartitionIDAndRanges`（TiFlash）、`SetTableHandles`（2C）、`SetPartitionsAndHandles`（2C）、`SetDAGRequest`（含小 LIMIT 降并发度为 1/分区数）、`SetStartTS`、`SetDesc`、`SetKeepOrder`、`SetTxnScope`、`SetReadReplicaScope`、`SetIsStaleness`、`SetFromSessionVars`、`SetFromInfoSchema`、`SetMemTracker`、`SetStoreType`、`SetPaging`、`SetAllowBatchCop`、`SetClosestReplicaReadAdjuster`、`SetConnIDAndConnAlias`、`SetTiDBServerID`、`SetConcurrency`（2C）、`SetCoprRequestRateLimit`（2C）、`Build()`；以及 2C 直接读写 `builder.request.paging` / `cacheable`、2A 传 `&builder.request` 给 `newClosestReadAdjuster` | `table_reader.go:511-528,552-569,577-614`；`distsql.go:361-375,1071-1110`；`builder.go:4916-4929,4949-4959` | **2A**（D07.3 第 1 部分）、**2B**（`SetKeyRanges` 已在 D07.3 第 1 部分）、**2C**（`SetTableHandles`、`SetPartitionsAndHandles` 在 D07.3 第 2 部分） | 公开 `pub request: tidb_kv::kv::Request`（对齐 #407 §4.4 / §4.9）；注意 `SetConcurrency` 必须在 `SetDAGRequest` 之前可设且 `SetDAGRequest` 可覆盖它（`distsql.go:1072-1076`） |
-| **执行入口** | `distsql::select_with_runtime_stats(ctx: &tidb_kv::Context, dctx: Arc<DistSQLContext>, kv_req: &tidb_kv::kv::Request, field_types: Vec<Arc<FieldType>>, cop_plan_ids: Vec<isize>, root_plan_id: isize) -> Result<Box<dyn SelectResult>, Error>` | `table_reader.go:71`（经 `selectResultHook`）、`distsql.go:1114` | **2A / 2B / 2C**（D07.3 第 1 部分） | 同步函数（`LazyCopResponse` 把定位 region 推迟到首次 `next`）；接收 `Vec<Arc<FieldType>>`（N13 §8，不复制 `FieldType`）；返回 `Box<dyn SelectResult>`（`Send`，不要求 `Sync`） |
-| **结果接口** | `distsql.SelectResult` trait：`async fn next(&mut self, ctx: &tidb_kv::Context, chk: &mut Chunk) -> Result<()>`、`async fn next_raw(&mut self, ctx: &tidb_kv::Context) -> Result<Option<Vec<u8>>>`、`fn into_iter(&mut self, intermediate_field_types: Vec<Vec<Arc<FieldType>>>) -> Result<Box<dyn SelectResultIter>>`（2C 下推用）、`fn close(&mut self) -> Result<()>`（同步，与 `kv::Response::close` 一致）、`fn cop_concurrency(&self) -> Option<(isize, isize)>` | `table_reader.go:333,342,655-708`；`distsql.go:235,281,298,910,1380,1412,1766` | **2A**（`next`/`next_raw`/`close`/`cop_concurrency`，D07.3 第 1 部分）、**2C**（`into_iter`，D07.3 第 2 部分） | **`SelectResult` 必须 `Send`** 且实现 `Drop` 安全网（取消时不泄漏底层 `CopIterator` worker）；`close` 同步且幂等；`into_iter` 经内部 `Option<SelectResultInner>` 移出状态，出错时不破坏 `self`（对齐 #407 §4.5） |
-| **复合结果与内省** | `distsql.NewSerialSelectResults(results)`（D07.3 第 1 部分）、`distsql.NewSortedSelectResults(evalCtx, results, schema, byItems, memTracker)`（D07.3 第 2 部分，多分区/多分组归并）、`distsql.GetSelectResultConcurrency(sr) -> Option<(isize, isize)>`（D07.3 第 1 部分，2C 滚动限流）、`distsql.SelectResultIter` & `SelectResultRow`（D07.3 第 2 部分，2C 下推模式） | `table_reader.go:421,464`；`distsql.go:436,910,974,1009,1381,1706` | **2A**（`NewSerialSelectResults` 已在 D07.3 第 1 部分；`len(groupedRanges) > 1` 在 2A 提前停在 `blocked-by:D07.3` 直到 D07.3 第 2 部分提供 `NewSortedSelectResults`）、**2B**（`NewSortedSelectResults`）、**2C**（`GetSelectResultConcurrency`、`SelectResultIter`） | `NewSortedSelectResults` 接收 `Option<&Schema>`（`distsql.go:974` 传 `None` 表示按前几列排序） |
+| **KV Context 来源** | `tidb_kv::Context`（`crates/kv/src/context.rs`，`M-GOCTX`） | `table_reader.go:334,672`；`distsql.go:292,370,1114,1460` | **2A / 2B / 2C** | `tidb_kv::Context` 只携带可选 `RequestSource`（取消靠丢弃 future，不走 Context）。执行器在调用 `distsql::select*` 与 `SelectResult::{next, next_raw}` 时，由 `dctx` 构造轻量 `tidb_kv::Context`（常规 SQL 用 `Context::background()`，受限 SQL 或显式来源用 `with_request_source(...)`，与第 1 部分 §2 第 7 条及 #410 §4.9 一致） |
+| **TxnScope 校验** | `distsql::verify_txn_scope(txn_scope, physical_table_id, is) -> Result<bool, Error>`（L2） | `point_get.go:704`（第 1 部分桩 `verify_txn_scope`）、`RequestBuilder.Build` 内部 | **由 D07.3 第 1 部分（#410）直接解除第 1 部分桩** | 非 global txn scope 时经 `tidb_infoschema::context::MetaOnlyInfoSchema` 同步查询 `placement_bundle_by_physical_table_id`；命中 bundle 时返回 `blocked("X", ...)`（对齐 #410 §4.9 / §5） |
+| **请求构建器** | `distsql.RequestBuilder`：公开 `pub request: tidb_kv::kv::Request` 与链式方法 `SetHandleRanges`、`SetPartitionKeyRanges`、`SetKeyRanges`、`SetPartitionIDAndRanges`（TiFlash）、`SetTableHandles`（2C）、`SetPartitionsAndHandles`（2C）、`SetDAGRequest`（含小 LIMIT 降并发度为 1/分区数）、`SetStartTS`、`SetDesc`、`SetKeepOrder`、`SetTxnScope`、`SetReadReplicaScope`、`SetIsStaleness`、`SetFromSessionVars`、`SetFromInfoSchema`、`SetMemTracker`、`SetStoreType`、`SetPaging`、`SetAllowBatchCop`、`SetClosestReplicaReadAdjuster`、`SetConnIDAndConnAlias`、`SetTiDBServerID`、`SetConcurrency`（2C）、`SetCoprRequestRateLimit`（2C）、`Build()`；以及 2C 直接读写 `builder.request.paging` / `cacheable`、2A 传 `&builder.request` 给 `newClosestReadAdjuster` | `table_reader.go:511-528,552-569,577-614`；`distsql.go:361-375,1071-1110`；`builder.go:4916-4929,4949-4959` | **2A**（D07.3 第 1 部分）、**2B**（`SetKeyRanges` 已在 D07.3 第 1 部分）、**2C**（`SetTableHandles`、`SetPartitionsAndHandles` 及 `copr_request_rate_limit` 字段与 `CopIterator` 接线由 D07.3 第 2 部分提供） | 公开 `pub request: tidb_kv::kv::Request`（对齐 #410 §4.4 / §4.9）；`new_closest_read_adjuster` 桩由本块 **2A** 解除（D07.3 只提供 `match_store_labels`）；`SetConcurrency` 必须在 `SetDAGRequest` 之前可设且 `SetDAGRequest` 可覆盖它（`distsql.go:1072-1076`） |
+| **执行入口** | `pub async fn distsql::select_with_runtime_stats(ctx: &tidb_kv::Context, dctx: Arc<DistSQLContext>, kv_req: &tidb_kv::kv::Request, field_types: Vec<Arc<FieldType>>, cop_plan_ids: Vec<isize>, root_plan_id: isize) -> Result<Box<dyn SelectResult>, Error>` | `table_reader.go:71`（经 `selectResultHook`）、`distsql.go:1114` | **2A / 2B / 2C**（D07.3 第 1 部分） | **异步函数（维护者已定）**：内部经 `CopClient::send_async` 立即完成 region 定位并构造/打开 `CopIterator`，使 2C `fetchHandlesRolling` 在首次 `Next` 之前调用 `GetSelectResultConcurrency` 时与 Go 100% 一致；接收 `Vec<Arc<FieldType>>`（N13 §8）；返回 `Box<dyn SelectResult>`（`Send`） |
+| **结果接口** | `distsql.SelectResult` trait：`async fn next(&mut self, ctx: &tidb_kv::Context, chk: &mut Chunk) -> Result<()>`、`async fn next_raw(&mut self, ctx: &tidb_kv::Context) -> Result<Option<Vec<u8>>>`、`fn into_iter(&mut self, intermediate_field_types: Vec<Vec<Arc<FieldType>>>) -> Result<Box<dyn SelectResultIter>>`（2C 下推用）、`fn close(&mut self) -> Result<()>`（同步，与 `kv::Response::close` 一致）、`fn cop_concurrency(&self) -> Option<(isize, isize)>` | `table_reader.go:333,342,655-708`；`distsql.go:235,281,298,910,1380,1412,1766` | **2A**（`next`/`next_raw`/`close`/`cop_concurrency`，D07.3 第 1 部分）、**2C**（`into_iter`，D07.3 第 2 部分） | **`SelectResult` 必须 `Send`** 且实现 `Drop` 安全网（取消时不泄漏底层 `CopIterator` worker）；`close` 同步且幂等；`into_iter` 经内部 `Option<SelectResultInner>` 移出状态，出错时不破坏 `self`（对齐 #410 §4.5） |
+| **复合结果与内省** | `distsql.NewSerialSelectResults(results)`（**本块不可达**：唯一调用点在 `table_reader.go:421` TiFlash 分支，已在 `buildTableReader` 被 `blocked-by:DEF.MPP` 拦截）、`distsql.NewSortedSelectResults(evalCtx, results, schema, byItems, memTracker)`（D07.3 第 2 部分，多分区/多分组归并）、`distsql.GetSelectResultConcurrency(sr) -> Option<(isize, isize)>`（D07.3 第 1 部分，因 `select` 即时构造 `CopIterator`，首次 `Next` 前即返回准确值）、`distsql.SelectResultIter`（`Send`）& `SelectResultRow`（D07.3 第 2 部分，2C 下推模式） | `table_reader.go:421,464`；`distsql.go:436,910,974,1009,1381,1706` | **2A**（`NewSerialSelectResults` 不可达；`len(groupedRanges) > 1` 在 2A 提前停在 `blocked-by:D07.3` 直到 D07.3 第 2 部分提供 `NewSortedSelectResults`）、**2B**（`NewSortedSelectResults`）、**2C**（`GetSelectResultConcurrency`、`SelectResultIter`） | `NewSortedSelectResults` 接收 `Option<&Schema>`（`distsql.go:974` 传 `None` 表示按前几列排序） |
 
 ---
 
@@ -242,7 +244,7 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 | **归 `DEF.MPP`（TiFlash BatchCop 专属）** | 1 | `table_reader.go` 1 | 不移植，见 §9.5 |
 | **合计** | **245** | 9 个 Go 文件 | 39 + 28 + 14 + 60 + 6 + 6 + 52 + 17 + 14 + 8 + 1 = **245** |
 
-**与 `specs/VS1-vertical-slice/functions.tsv` 中 VS1-34（26 个）的对照**：
+**与 `specs/VS1-vertical-slice/functions.tsv` 中 VS1-34（26 个）的对照**（tracker `data/part_funcs.tsv` 的 `VS1-34` 将随第 2A 部分实现 PR 同步更新为此 28 个函数清单）：
 - 已移植（2）：`buildVirtualColumnIndex`（第 1 部分）、`markChildrenUsedCols`（D12.2 顺带移植）；
 - 归入第 2A 部分（21）：`buildNoRangeTableReader`、`executorBuilder.buildTableReader`、`kvRangeBuilderFromRangeAndPartition.{buildKeyRange,buildKeyRangeSeparately}`、`TableReaderExecutor.{Close,Next,Open,Table,buildKVReq,buildVirtualColumnInfo,memUsage,setDummy}`、`buildVirtualColumnInfo`、`newTableReaderExecutorContext`、`selectResultHook.SelectResult`、`sortAndGetKVRangesFromReqs`、`tableReaderExecutorContext.GetInfoSchema`、`tableResultHandler.{Close,nextChunk,nextRaw,open}`；
 - 调出 VS1-34（3）：`buildTableReq`（仅 IndexLookUp / IndexMerge 调用，归 2C）、`collectColIdxFromByItems`（仅 UnionScan 调用，归 3C）、`collectColumnIndexFromExpr`（仅 MergeJoin / HashJoin 调用，归 3E）；
@@ -256,10 +258,10 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 
 随第 2A 部分跨块顺带解除/移植的小函数（计入各自所属块）：
 - D12.0：`ConstructDAGReq`、`ConstructListBasedDistExec`、`ConstructTreeBasedDistExec` 的 `to_pb` 解除桩（`builder_utils.rs`）、`assertByItemsAreColumns`（`builder.go:3814`）、`UpdateExecutorTableID`（`internal/util/partition_table.go:26`）、`TableReaderExecutor.Detach` / `tableReaderExecutorContext.Detach`（`detach.rs`）；
-- D10.5：`getTblStats`（`plan_cost_ver1.go:1284`）与 `PhysicalTableReader.GetNetDataSize`（`plan_cost_ver1.go:327`）；
+- EXC.B → 待负责人决定（§15.1）：`getTblStats`（`plan_cost_ver1.go:1284`）与 `PhysicalTableReader.GetNetDataSize`（`plan_cost_ver1.go:327`；2B 同涉 `PhysicalIndexReader.GetNetDataSize` :243）；
 - D12.10：`executorBuilder.corColInDistPlan`（:3349）与 `corColInAccess`（:3382）；
 - D12.14：`normalizeCtxErrWithCause`（`analyze_utils.go:112`）；
-- D00.3：`timeutil.Zone`（`pkg/util/timeutil/time.go`，`ConstructDAGReq` 编码时区名与偏移用）。
+- D00.3：`timeutil.Zone`（`pkg/util/timeutil/time_zone.go:189`，`ConstructDAGReq` 编码时区名与偏移用）。
 
 ### 9.3 第 2B 部分：IndexReader（14 个函数）
 
@@ -354,18 +356,17 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 | Go 原语 | 容量 | 发送方 → 接收方 | Rust 对应物 |
 |---|---|---|---|
 | `indexWorker` goroutine（:855） | 1 个 | — | 在 `ExecCtx.pool`（`None` 时当前 runtime）上 `spawn_with_recover` |
-| `tableWorker` goroutines（:1150） | `indexLookupConcurrency` 个 | — | 同上，`Vec<JoinHandle<()>>` |
+| `tableWorker` goroutines（:1163） | `indexLookupConcurrency` 个 | — | 同上，`Vec<JoinHandle<()>>` |
 | `workCh chan *lookupTableTask`（:742） | 1 | `indexWorker` → 多个 `tableWorker` | `tokio::sync::mpsc::channel(1)`；接收端用 `Arc<tokio::sync::Mutex<mpsc::Receiver<LookupTableTask>>>` 在多个 `tableWorker` 间共享（与 D07.2 `copr/coprocessor.rs:1131` `task_ch` 完全同构；`tokio::sync::Mutex` 可跨 `await`，不触发 `await_holding_lock`） |
-| `resultCh chan *lookupTableTask`（:711） | `LookupTableTaskChannelSize`（50） | `indexWorker` → `Next` | `tokio::sync::mpsc::channel(50)`，发的是 `ResultTaskHandle`（或 `Arc<Mutex<...>>` / 经 `done_rx` 传回已完成任务） |
+| `resultCh chan *lookupTableTask`（:711） | `LookupTableTaskChannelSize`（50） | `indexWorker` → `Next` | `tokio::sync::mpsc::channel(50)`，发的是 `ResultTaskHandle`（经 `done_rx` 传回已完成任务） |
 | `task.doneCh chan error`（:1850） | 1 | `tableWorker`（或已完成 task / `syncErr`）→ `Next` | **`tokio::sync::oneshot::channel::<Result<LookupTableTaskResult, Error>>()`**：`workCh` 传任务输入（`handles`、`index_order`、`partition_table`、`done_tx`），`resultCh` 只传 `done_rx`（与 `build_done_time` 一起经 `oneshot` 交回结果行），彻底消除 `lookupTableTask` 在 `tableWorker` 与主线程之间的共享可变指针！这是安全 Rust 下的零锁所有权移交（`L2 [M-CH]`） |
-| `finished chan struct{}`（:710） | 关闭广播 | `Close` / `Drop` → 全部 worker | `tokio::sync::watch::channel(false)`（发送 `true` 即关闭） |
-| `cancelFunc`（:740） | 取消子树 | `Close` / `Drop` → 全部在途 cop 请求 | 子 `CancellationToken`（挂在语句级取消令牌下，`M-GOCTX`） |
+| `finished chan struct{}`（:710）与 `cancelFunc`（:740） | 关闭广播 + 丢弃 future 取消 | `Close` / `Drop` → 全部 worker 及在途 `SelectResult` | **`tokio::sync::watch::channel(false)` + `tokio::select!` 丢弃 future + `JoinHandle::abort()`**（`crates/` 中没有 `CancellationToken`，`crates/kv/src/context.rs` 与 N3 §3.1 第 6 条规定取消靠丢弃 future，与 D12.2 / D12.3 / D07.2 完全一致）：`Close` 发送 `finished_tx.send(true)`；`indexWorker` 与 `tableWorker` 对每个 `distsql::select*` / `SelectResult::next` future 与 `finished_rx.changed()` 做 `tokio::select!`，收到退出信号即丢弃在途 future 并立即关闭/丢弃所持 `SelectResult`（触发 `CopIterator::drop` 中止底层 TiKV cop worker） |
 
 3. **`lookupTableTask.rows` 的行表示（`M-ROW`，N5a）**：Go 的 `task.rows []chunk.Row` 保存指向多个 `Chunk` 内部缓冲区的行视图，并在 `keepOrder` 时按 `rowIdx` 排序后跨多次 `Next` 调用输出。Rust 中 `LookupTableTaskResult` 持有 `chunks: Vec<Arc<Chunk>>` 与 `rows: Vec<(usize, usize)>`（`(chunk_idx, row_idx)`），`keepOrder` 排序只交换 `(row_idx_key, (chunk_idx, row_idx))`，写入输出 chunk 时直接按索引取行，零行拷贝且无悬垂借用。
-4. **`tableWorker` 不检查 `ctx.Done()` 的微妙语义**（`distsql.go:1881-1891`）：Go 注释特意强调 `pickAndExecTask` 的 `select` 只监听 `workCh` 和 `finished`，不监听 `ctx.Done()`，防止语句取消时 worker 提前退出导致主线程永久卡在 `<-task.doneCh`。在 Rust 使用 `oneshot` 后，若 `tableWorker` 退出并 drop `done_tx`，主线程 `done_rx.await` 会立即收到 `RecvError`（不会永久卡住）；同时我们依然在 `pick_and_exec_task` 循环只 `select!` `workCh` 与 `finished`（保留与 Go 一致的退出语义），并在 `execute_task` 内部透传取消令牌让在途 TiKV 请求及时中止。
-5. **`Close` 与 `Drop`**：
-   - `Close`：取消子令牌 → `finished_tx.send(true)` → 排空并丢弃 `result_rx`（唤醒可能阻塞在 `result_tx.send` 的 `indexWorker`）→ `await` `idx_worker_handle` → `await` 全部 `tbl_worker_handles` → 清理 `result_curr` → 注册 `IndexLookUpRunTimeStats` → 上报 index usage。与 Go `distsql.go:1240-1253` 顺序完全一致，且无论 `startWorkers` 是否中途出错都会调用取消（修复 §14 第 2 条）。
-   - `Drop`：取消子令牌 → `finished_tx.send(true)` → `abort()` 全部尚未结束的 `JoinHandle`。`Close` 等待 handle 时只在每个 handle `await` 完成后再移除，确保 `Close` future 中途被 drop 时剩余 task 仍被 `Drop` 中止（与 D12.2 §2 第 2 条、D12.3 §4.4 相同）。
+4. **`tableWorker` 监听退出信号的语义**（`distsql.go:1881-1891`）：Go 注释强调 `pickAndExecTask` 的 `select` 只监听 `workCh` 和 `finished`，不监听 `ctx.Done()`，防止语句取消时 worker 提前退出导致主线程永久卡在 `<-task.doneCh`。在 Rust 使用 `oneshot` 后，若 `tableWorker` 退出并 drop `done_tx`，主线程 `done_rx.await` 会立即收到 `RecvError`（不会永久卡住）；同时 `pick_and_exec_task` 循环依然只 `select!` `workCh` 与 `finished`，在 `execute_task` 内部对在途 `tableReader` 的 `next` 与 `finished` 做 `select!`，使 `Close` / `Drop` 及时中止在途回表请求。
+5. **`Close` 与 `Drop`（顺序严格对齐 §10.5 与 Go `distsql.go:1204-1254`）**：
+   - `Close`：**先上报 index usage（`:1225-1230`）** →（若已启动 worker）`finished_tx.send(true)`（等价于 Go `cancelFunc()` + `close(e.finished)`）→ 排空并丢弃 `result_rx`（唤醒可能阻塞在 `result_tx.send` 的 `indexWorker`）→ `await` `idx_worker_handle` → `await` 全部 `tbl_worker_handles` → 清理 `result_curr` → **最后注册 `IndexLookUpRunTimeStats`**（对应 Go `defer` LIFO 在函数退出时执行）。
+   - `Drop`：`finished_tx.send(true)` → `abort()` 全部尚未结束的 `JoinHandle`（同时触发每个 task 持有的 `SelectResult` / `CopIterator` 的 `Drop`）。`Close` 等待 handle 时只在每个 handle `await` 完成后再移除，确保 `Close` future 中途被 drop 时剩余 task 仍被 `Drop` 中止（与 D12.2 §2 第 2 条、D12.3 §4.4 相同）。
 
 ### 10.5 `defer` 清理顺序清单（`M-DEFER`、`M-PANIC`）
 
@@ -383,12 +384,14 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 | `tableWorker.pickAndExecTask`（`distsql.go:1873-1879`） | `catch_unwind` 捕获 `executeTask` 中的 panic，若存在当前 `done_tx` 则发送恢复后的错误（避免 §14 第 7 条 nil 崩溃） |
 | `tableWorker.executeTask`（`distsql.go:2169`） | 无论成功或失败都关闭临时构造的 `tableReader`（记录错误日志，不覆盖主返回错） |
 
-### 10.6 内存记账（`M-MEM`、A1）与 KILL 检查点（`M-KILL`）
+### 10.6 内存记账（`M-MEM`、A1）、运行时统计与 KILL 检查点（`M-KILL`）
 
-- **内存记账（A1）**：
+- **内存记账（A1）与 Go 记账边界**：
   - `TableReaderExecutor.Open`、`IndexReaderExecutor.open`、`IndexLookUpExecutor.Open` / `open` 照 Go 建执行器级 `Tracker` 并挂到 `stmt_mem_tracker`（`ExecCtx` 传入），经 `RequestBuilder.SetMemTracker` 传给 D07.3 / D07.2 的 `selectResult` 与 `CopIterator`。
-  - `IndexLookUpExecutor` 中 `tableWorker.executeTask`（`distsql.go:2175-2236`）与 `getResultTask`（:1320-1322）对 `task.handles`、`tableReader.memUsage()`、`task.rows`、`chk.MemoryUsage()`、`task.rowIdx` 的手工估算 `Consume(±delta)` 按 A1 映射规则处理：容器经 `TrackedAlloc` 自动记实际容量、Drop 自动归零；Go 正向 `Consume` 的位置改为 `mem_tracker.checkpoint()?`，返回 `Err` 经 `task.done_tx` 交回 `Next`（而非 panic，与 D12.3 §4.5、§4.6 一致）。
+  - **`IndexLookUpExecutor` 各子 tracker（照 Go 树形结构）**：`startIndexWorker` 在 `distsql.go:819-820` 建子 tracker（标签 `LabelForIndexWorker`）挂到 `e.memTracker` 供索引侧 `SelectResult` 与 `indexWorker` 使用；`startTableWorker`（`:1159`）为每个 `tableWorker` 建独立子 tracker 挂到 `e.memTracker`。**注意**：Go 中回表侧的 `TableReaderExecutor`（由 `dataReaderBuilder.buildTableReaderBase`，`builder.go:4911` 构造）**不设置 `memTracker`**，因此表侧 cop 响应在 Go 中不记账，Rust 照抄此行为并注明。
+  - `IndexLookUpExecutor` 中 `tableWorker.executeTask`（`distsql.go:2175-2236`）与 `getResultTask`（:1320-1322）对 `task.handles`、`tableReader.memUsage()`、`task.rows`、`chk.MemoryUsage()`、`task.rowIdx` 的手工估算 `Consume(±delta)` 按已确认的 A1 例外映射：容器经 `TrackedAlloc` 自动记实际容量、Drop 自动归零；Go 正向 `Consume` 的位置改为 `mem_tracker.checkpoint()?`，返回 `Err` 经 `task.done_tx` 交回 `Next`（而非 panic，与 D12.3 §4.5、§4.6 一致）。记账数值与 Go 不同，用户可见（影响 `tidb_mem_quota_query` 触发点、`EXPLAIN ANALYZE` 内存列与慢日志 `Mem_max`，依据已确认的 A1）。
   - `TableReaderExecutor.memUsage`（`table_reader.go:214`）保留函数及 `// go:` 标注供 `converge` 与 2C 调用，按 A1 返回估算值或实际容量（不用于手工扣减）。
+- **`IndexLookUpExecutor` 索引侧 `BasicRuntimeStats`（`distsql.go:1580-1584`）**：`prepareHandleFetch` 在语句开了 `RuntimeStatsColl` 时会把索引计划根 ID 的 `BasicRuntimeStats` 替换为语句级 stats（决定 `EXPLAIN ANALYZE` 中 `IndexRangeScan` 的 `time` / `loops`）；Rust 中共享的 `IndexLookUpShared` 需通过内部可变（原子计数或 `OnceLock` / `parking_lot::Mutex`）支持该统计更新。
 - **KILL 检查点（`M-KILL`）**：
   - `TableReaderExecutor.Next` / `IndexReaderExecutor.Next` / `IndexLookUpExecutor.Next` 外层已有 `exec::next` 检查点，且底层 `CopIterator` 在每次响应检查 `SQLKiller`。
   - 另外按 N3 第二部分第 5 条，在不经过 `exec::next` 的内层循环加 `CheckpointStride::new(32)`：`indexWorker.extractTaskHandles` 的逐行 decode handle 循环（`distsql.go:1779-1795`）、`tableWorker.executeTask` 收集行后构 `rowIdx`（:2224-2231）与一致性校验构 `obtainedHandlesMap` 循环（:2244-2250）。
@@ -431,7 +434,7 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 | `TableReaderExecutor.Open`：`e.storeType == TiKV && len(e.groupedRanges) > 1`（或动态分区 `byItems != nil`）需 `NewSortedSelectResults` | `table_reader.go:462-464` | 依赖 D07.3；若 D07.3 第 1 批尚未含 `NewSortedSelectResults`，则临时 `blocked-by:D07.3` | 在 build 阶段若 `len(grouped_ranges) > 1` 提前报 `blocked-by:D07.3`（sysbench 单表扫描永远只有 1 组区间） |
 | `IndexLookUpExecutor`：`tableWorker.compareData`（`checkIndexValue != nil`，`ADMIN CHECK` 专用） | `distsql.go:2029-2144` | 临时 `blocked-by:D06.4`（`tables.CompareIndexAndVal`）/ `D00.3`（`ReportAdminCheckInconsistent`） | 仅 2C；SELECT 路径 `checkIndexValue` 恒为 `None`，不可达 |
 | `IndexLookUpExecutor`：`indexLookUpPushDown` 若 D07.3 暂未提供 `SelectResultIter` | `distsql.go:909-915,979-986` | 临时 `blocked-by:D07.3`（在 `buildNoRangeIndexLookUpReader` 检测到 `v.IndexLookUpPushDown` 时提前拦截） | 仅 2C；`tidb_index_lookup_pushdown_policy` 默认 `hint-only`，常规查询不触发 |
-| `PointGetExecutor.verifyTxnScope`（第 1 部分遗留桩） | `crates/executor/src/point_get.rs:523` | **随 2A 解除** | D07.3 提供 `distsql::verify_txn_scope` 后一并消除该桩，调低桩棘轮基线 |
+| `PointGetExecutor.verifyTxnScope`（第 1 部分遗留桩） | `crates/executor/src/point_get.rs:523` | **由 D07.3 第 1 部分（#410）解除** | D07.3 第 1 部分提供 `distsql::verify_txn_scope` 并一并消除该桩；本块 2A 负责解除 `crates/executor/src/builder.rs:955` 的 `new_closest_read_adjuster` 桩 |
 
 ### 11.2 路由器与回退纪律（吸取 D12.2 #338 / #345 回归教训）
 
@@ -467,7 +470,7 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 | `table_reader` | **2A** | `TableReaderExecutor`（mock `SelectResult`）：普通 int handle、unsigned int handle 跨 `MaxInt64` 边界（正序 / 逆序 / 不保序，验证两次 `SelectResult` 请求的 `KeyRanges`、`Desc`、`KeepOrder` 与 `tableResultHandler` 衔接输出）、common handle、空范围、虚拟生成列求值（含依赖列顺序）、`RequiredRows` 变化、中途中止与 `Close`、错误传播 | 生成的 `kv.Request`（ranges、desc、keep_order、concurrency、paging）与每次 `Next` 的输出行和错误 |
 | `closest_read_adjuster` | **2A** | `newClosestReadAdjuster`：`ReplicaReadLeader` / `ClosestAdaptive`、`netDataSize / copTaskCount` 边界（阈值上下、整数截断） | 返回布尔值、`MatchStoreLabels` 与改写后的 `ReplicaRead` |
 | `index_reader` | **2B** | `IndexReaderExecutor`（mock `SelectResult`）：单区间与多区间、`needMergeSort` 开/关、common handle 与普通索引 `buildKeyRanges`、`OutputOffsets` | `kv.Request`、输出行、错误 |
-| `index_lookup_helpers` | **2C** | `CalculateBatchSize`、`getIndexScanMaxInFlight`、`getMergeSortIndexScanConcurrency`、`GetLackHandles`、`buildIndexScanOutputOffsets`、`IndexLookUpRunTimeStats.{String,Clone,Merge}` | 精确返回值与文本 |
+| `index_lookup_helpers` | **2C** | `CalculateBatchSize`（含首次 `Next` `RequiredRows` 起步、非 paging 初始倍增、`indexPaging` 跳过初始倍增但保留每批倍增，以及 900 行 / `index_lookup_size=100` 下 `max_chunk_size=1024` vs `64` 的 `table_task num` 9 vs 8）、`getIndexScanMaxInFlight`、`getMergeSortIndexScanConcurrency`（含 `c = 1` 边界不 panic）、`GetLackHandles`、`buildIndexScanOutputOffsets`、`IndexLookUpRunTimeStats.{String,Clone,Merge}` | 精确返回值与文本 |
 | `index_lookup` | **2C** | `IndexLookUpExecutor`（mock 索引侧与表侧 `SelectResult`）：`keepOrder=true/false`、`desc=true/false`、int handle 与 common handle（含 `CommonHandleVersion=0` 非二进制 collation 字符串 sortKey 处理）、`PushedLimit`（offset + count）、多批翻倍 `batchSize`、索引表数据不一致（8133 错误，含 `weakConsistency=true` 豁免）、`indexLookUpPushDown` 双通道分流 | `keepOrder=true` 逐行比序，`keepOrder=false` 按多重集比对，错误码与错误文本 |
 
 ### 12.3 Rust 专项单元测试（不依赖存储）
@@ -499,59 +502,48 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 3. **集群内存表 `GetDDLOwner` 与 TiFlash / MPP 路径**（`table_reader.go:98-121,400-434,537-574,588-597`、`builder.go:3853-3863`）：TiFlash / BatchCop / MPP 属 `DEF.MPP` 永久报错；cluster 表 `DDLOwner` 停在 `blocked-by:D06.5`。
 4. **`TableReaderExecutor.Open` 与 `IndexReaderExecutor.open` 中途出错时关闭已建 `SelectResult`**（`table_reader.go:333-348,413-420,450-457`、`distsql.go:428-435`）：Rust 经 `Drop` 自动关闭并中止底层 worker，避免 Go 的资源泄漏（§14 第 1 条），错误返回值与 Go 相同。
 5. **`IndexLookUpExecutor` 的 `lookupTableTask` 所有权与 `oneshot` 通道**（`distsql.go:81-117,742,1300-1324,1850,1898`）：Rust 用 `oneshot` 将已完成结果交回主线程、`rows` 用 `Vec<Arc<Chunk>> + Vec<(usize, usize)>`（`M-ROW`）、`workCh` 多消费者用 `Arc<tokio::sync::Mutex<mpsc::Receiver>>`（`L2 [M-CH]`），不改变批次顺序和输出行。
-6. **`IndexLookUpExecutor` `Drop` 安全网与 `Close` 等全部 task**（`distsql.go:1236-1253`）：语句取消或未 `Close` 被丢弃时 `Drop` 中止全部 worker，不会遗留后台 task；`startWorkers` 中途出错时也会取消上下文（§14 第 2 条）。
-7. **内存记账数值（A1）与超限走错误而非 panic**（`table_reader.go:214-226`、`distsql.go:1320-1322,2175-2236`）：按已确认的 A1 例外用 `TrackedAlloc` 记实际分配，正向 `Consume` 改为 `checkpoint()?` 返回错误，worker 内按与 Go 相同的错误通道返回；`catch_unwind` 恢复日志不含 Go 堆栈（与 D12.2 / D12.3 相同）。
+6. **`IndexLookUpExecutor` `Drop` 安全网与 `Close` 等全部 task**（`distsql.go:1225-1253`）：语句取消或未 `Close` 被丢弃时 `Drop` 通知 `finished` 并中止全部 worker，不会遗留后台 task；按 `crates/kv/src/context.rs` 通过 `select!` 丢弃在途 `SelectResult` future 取消请求，不引入 `CancellationToken`。
+7. **内存记账数值与超限走错误而非 panic（用户可见，依据已确认的 A1）**（`table_reader.go:214-226`、`distsql.go:1320-1322,2175-2236`）：按已确认的 A1 例外用 `TrackedAlloc` 记实际分配（会影响 `tidb_mem_quota_query` 触发点、`EXPLAIN ANALYZE` 内存列与慢日志 `Mem_max`），正向 `Consume` 改为 `checkpoint()?` 返回错误，worker 内按与 Go 相同的错误通道返回；`catch_unwind` 恢复日志不含 Go 堆栈（与 D12.2 / D12.3 相同）。表侧回表 reader（`buildTableReaderBase`）照 Go 不设 tracker。
 8. **内存复用池删除与新增 `M-KILL` 检查点**（`distsql.go:1575,1779-1795,2224-2250`）：`AllocPool.Alloc` 直接分配（`M-POOL`）；`indexWorker` / `tableWorker` 内层循环加 `CheckpointStride` 可能比 Go 更早响应 KILL（N3 第二部分第 5 条）。
 9. **一致性报错无 MVCC 调试 dump**（`distsql.go:2040-2068,2252-2267`）：沿用 `crates/executor/src/consistency.rs`（第 1 部分已确认），错误码 8133 和消息文本与 Go 相同，日志不含 TiKV debug MVCC dump。
-10. **failpoint、Go runtime trace 与未移植的 D14.1 执行器指标不移植**（`table_reader.go:230-235`、`distsql.go:856,1164,1210-1222,1615-1628,2216`、`builder.go:3830-3839,4379`）：测试钩子与追踪区域不移植；D14.1 指标待 D14.1 统一接入。
+10. **failpoint、Go runtime trace 与未移植的 D14.1 执行器指标**（`table_reader.go:230-235`、`distsql.go:856,1164,1210-1222,1615-1628,2216`、`builder.go:3830-3839,4379`）：failpoint 与 trace 不移植；D14.1 执行器指标缺失对运维可观测性可见，属 D14.1 临时缺口（待 D14.1 统一接入）。
 11. **`tableResultHandler.nextRaw` 的上下文取消原因归一化**（`table_reader.go:686-702`、`analyze_utils.go:112`）：在 `M-GOCTX` 下保留 `next_raw` 方法并归一化取消错误（第 2A 部分常规 SQL 只走 `next_chunk`，`next_raw` 供后续 `ANALYZE` / `CHECKSUM` 调用）。
+12. **`GetSelectResultConcurrency` 对 2C 限流无差异**：按维护者决定，D07.3（#410）已将 `distsql::select*` 改为 `async fn` 并即时构造 `CopIterator`，因此 2C `fetchHandlesRolling` 在首次 `Next` 之前读到的并发度与 Go 100% 一致，不改变发往 TiKV 的请求数量与时机。
 
 ---
 
-## 14. 读代码发现的可能的 Go 问题
+## 14. 读代码发现并在 Go v8.5.8 上核验的 Go 问题
 
-以下问题均在阅读 `v8.5.8`（`8b857efa2`）源码时发现，尚未在真实 Go 进程上复现，由对应实现任务在 v8.5.8 上复现后再在 tidb-rs 开 `upstream-pitfall` issue（不向上游提交），并按宪章第一条 2 与第九条处理：
+以下 7 条均已对照 Go TiDB `v8.5.8`（`8b857efa2`，unistore）核验机制与可达性：
 
-1. **`TableReaderExecutor.Open`、`buildRespForGroupedRanges` 与 `IndexReaderExecutor.open` 中途出错时泄漏已打开的 `SelectResult`**：
+1. **`TableReaderExecutor.Open`、`buildRespForGroupedRanges` 与 `IndexReaderExecutor.open` 中途出错时泄漏已打开的 `SelectResult`（生产不可达）**：
    - **位置**：`table_reader.go:333-348`、`413-420`、`450-457`；`distsql.go:428-435`。
-   - **机制**：无符号整数主键跨 `MaxInt64` 拆为两段时，`:334` 建好 `firstResult` 后若 `:343` 建 `secondResult` 返回错误，函数直接 `return err`，`firstResult` 既没有 `Close()` 也没有挂进 `e.resultHandler`，导致后续 `e.Close()` 也无法关闭它，后台 `copIterator` goroutine 泄漏。同理，多分区/多 `groupedRanges` 循环创建多个 `SelectResult` 时，第 k 个失败不会关闭前 `0..k-1` 个（对比 `IndexLookUpExecutor.startIndexWorker` 在 `distsql.go:959-962` 显式循环关闭了已建的 `results`）。
-   - **复现思路**：使用 `selectResultHook` 让第 1 次调用返回真实 `copIterator`、第 2 次返回错误，调用 `TableReaderExecutor.Open` + `Close`，观察第 1 个 `SelectResult` 从未被 `Close`（goroutine 泄漏）。
-   - **处理建议**：纯内部资源管理，不影响正常查询结果；Rust 经 `Drop` 自动安全关闭（§13 第 4 条）。
+   - **核验结果**：`CopClient.Send`（`copr/coprocessor.go:87`）从不返回错误，`distsql.Select` 仅在响应为 `nil` 时报错，因此**只能经测试钩子注入，生产 SQL 不可达**。Rust 经 `Drop` 自动关闭，无泄漏，不开 `upstream-pitfall`。
 
-2. **`IndexLookUpExecutor.startWorkers` 失败时泄漏 `cancelFunc`**：
+2. **`IndexLookUpExecutor.startWorkers` 失败时泄漏 `cancelFunc`（不可达）**：
    - **位置**：`distsql.go:737-749`、`1236-1244`。
-   - **机制**：`startWorkers` 在 `:740-741` 创建 `ctx, cancel := context.WithCancel(ctx)` 并赋给 `e.cancelFunc`，若 `:743` `startIndexWorker` 返回错误（例如 `:846` 分区下推找不到 `TypeTableScan`），函数返回错误且 `e.workerStarted` 保持 `false`；随后 `Close()` 在 `:1236` 命中 `if !e.workerStarted || e.finished == nil { return nil }` 直接返回，从不调用 `e.cancelFunc()`。
-   - **复现思路**：构造 `indexLookUpPushDown = true && partitionTableMode = true` 且 `dagPB.Executors` 无 `TypeTableScan` 的 `IndexLookUpExecutor`，调 `Open` → `Next`（报错）→ `Close`，`cancelFunc` 未被调用、context 泄漏。
-   - **处理建议**：纯内部资源管理，Rust 在 `startWorkers` 失败路径与 `Close` / `Drop` 均会释放取消令牌。
+   - **核验结果**：`startIndexWorker` 中唯一能返回错误的分支 `:846` 被 `intest.Assert(false)` 守卫，**不可达**；Rust 中使用 `watch` + `Drop` 也不会泄漏，不开 `upstream-pitfall`。
 
-3. **`IndexLookUpExecutor.startIndexWorker` 破坏性清空 `e.byItems` 并重切片 `e.dagPB.OutputOffsets`**：
+3. **`IndexLookUpExecutor.startIndexWorker` 在 `len(kvRanges) == 1` 时清空 `e.byItems` 并重切片 `e.dagPB.OutputOffsets`（机制成立但不可达）**：
    - **位置**：`distsql.go:829-832`。
-   - **机制**：`if len(kvRanges) == 1 { e.dagPB.OutputOffsets = e.dagPB.OutputOffsets[len(e.byItems):]; e.byItems = nil }`。如果同一个 `IndexLookUpExecutor` 在同一语句中被多次 `Open`（例如 `Apply` 内表带相关列访问条件 `corColInAccess`，首次执行裁剪后只有 1 个区间 `len(kvRanges) == 1`，第二次执行裁剪出多个区间 `len(kvRanges) > 1`），第二次 `Open` 时 `e.byItems` 已被清为 `nil`，`:853` 的 `needMergeSort(e.byItems, len(kvRanges))` 恒为 `false`，跳过多区间归并排序，且 `OutputOffsets` 缺少排序列，导致结果顺序错误！
-   - **复现思路**：构造外层 2 行的 `Apply` + 内层分区表/多分组 `IndexLookUp` 带 `ORDER BY` 与相关列，第 1 行相关列命中 1 个区间、第 2 行命中 2 个区间，在 Go v8.5.8 上检查第 2 行对应结果是否乱序。
-   - **处理建议**：属于潜在结果顺序错误；第 2C 部分实现时在 Go v8.5.8 上复现，若成立则按宪章第九条 3 处理（Rust 本身在 worker 局部克隆 `dag_pb` 与 `by_items`，不破坏执行器状态）。
+   - **核验结果**：代码机制确实会原地改写执行器字段，但在 v8.5.8 SQL 上**不可达**——相关列的 `IN` / `OR` 不会成为索引访问条件（`order_index` + 相关 `=` + `b IN (1,2)` 报 1815），且分区数在构建阶段固定，各次 `Open` 的 `len(kvRanges)` 不会在 1 与 >1 之间切换。Rust 在 worker 局部克隆 `dag_pb` 与 `by_items`（§10.4），无此隐患，不开 `upstream-pitfall`。
 
-4. **`buildNoRangeIndexLookUpReader` 把 `idxNetDataSize` 误设为单行平均大小 `GetAvgTableRowSize()`**：
-   - **位置**：`builder.go:4335`、`distsql.go:1086`。
-   - **机制**：`TableReader`（`builder.go:3708`）和 `IndexReader`（`builder.go:4073`）传给 `newClosestReadAdjuster` 的都是估算总传输量 `v.GetNetDataSize()`（行数 × 平均行宽），而 `buildNoRangeIndexLookUpReader` 在 `:4335` 把 `idxNetDataSize` 设成了 `v.GetAvgTableRowSize()`（单行宽度，且是表行而非索引行，未乘行数），导致 `distsql.go:1086` 传入 `e.idxNetDataSize / float64(totalRanges)` 时几乎总远小于 `tidb_adaptive_closest_read_threshold`（默认 1 MiB），`closest-adaptive` 策略在索引侧几乎永不生效。
-   - **复现思路**：开启 `tidb_replica_read = 'closest-adaptive'`，对大表执行 `IndexLookUp` 并检查索引侧 `kv.Request` 的 `ReplicaRead` / `MatchStoreLabels`。
-   - **处理建议**：只影响副本路由阈值、不影响结果正确性，第 2C 部分照 Go 移植并开 `upstream-pitfall`（`go-bug-kept`）。
+4. **`buildNoRangeIndexLookUpReader` 把 `idxNetDataSize` 误设为单行平均大小 `GetAvgTableRowSize()`（已确认成立，照 Go 移植）**：
+   - **位置**：`builder.go:4335`、`distsql.go:1086`（对比同文件旁已有未被调用的 `PhysicalIndexLookUpReader.GetIndexNetDataSize()`，`pkg/planner/core/physical_plans.go:562`，D10.1）。
+   - **机制**：`TableReader`（`builder.go:3708`）和 `IndexReader`（`builder.go:4073`）传给 `newClosestReadAdjuster` 的都是估算总传输量 `v.GetNetDataSize()`，而 `buildNoRangeIndexLookUpReader` 在 `:4335` 把 `idxNetDataSize` 误设成了单行表宽 `v.GetAvgTableRowSize()`（未乘行数，且不用现成的 `GetIndexNetDataSize()`），导致 `distsql.go:1086` 传入 `e.idxNetDataSize / float64(totalRanges)` 时远小于 `tidb_adaptive_closest_read_threshold`（默认 **4096** 字节）。
+   - **处理**：只影响副本路由阈值、不影响结果正确性，第 2C 部分照 Go 移植并开 `upstream-pitfall`（`go-bug-kept`）。
 
-5. **`IndexLookUpRunTimeStats.String` 在前两项为 0 时遗漏 `next` 等待统计**：
+5. **`IndexLookUpRunTimeStats.String` 在前两项为 0 时遗漏 `next` 等待统计（机制成立，实际不可达）**：
    - **位置**：`distsql.go:1990-1998`。
-   - **机制**：`fmt.Fprintf(&buf, " next: ...")` 写在 `if buf.Len() > 0` 分支内部；当 `indexScan == 0 && tableScan == 0` 而 `NextWait* > 0` 时，输出为空字符串而非 `next: {...}`。
-   - **复现思路**：直接构造仅 `NextWaitIndexScan > 0` 的 `IndexLookUpRunTimeStats` 调用 `String()`。
-   - **处理建议**：仅影响观测文案、不影响结果，第 2C 部分照 Go 移植并开 `upstream-pitfall`（`go-bug-kept`）。
+   - **核验结果**：`fmt.Fprintf(&buf, " next: ...")` 确实错写在 `if buf.Len() > 0` 内，但实际运行中只要存在任务必有 `FetchHandle > 0`，**生产不可达**；第 2C 部分照 Go 移植（单测可覆盖）。
 
-6. **`indexLookUpExecutorContext.Detach` 返回未分离的旧值 `iluCtx`（属 D12.0，顺带发现）**：
+6. **`indexLookUpExecutorContext.Detach` 返回未分离的旧值 `iluCtx`（已确认成立，属 D12.0，游标路径可达）**：
    - **位置**：`pkg/executor/detach.go:83-88`。
-   - **机制**：第 85 行 `newCtx.tableReaderExecutorContext = newCtx.tableReaderExecutorContext.Detach()`，但第 87 行写成 `return iluCtx` 而非 `return newCtx`，导致游标分离 `IndexLookUpExecutor` 时底层 `dctx`/`rctx`/`ectx` 仍指向会话对象而非静态快照。
-   - **复现思路**：对 `IndexLookUpExecutor` 调用 `Detach()`，检查返回的 `indexLookUpExecutorContext.ectx` 是否仍为 `*sessionexpr.ExprContext`（未转为 static）。
-   - **处理建议**：在 N2 下 Rust 执行器本来就不持有会话（上下文天然是静态快照），游标支持（D12.12）时自然不存在该竞争；由第 2C 部分开 `upstream-pitfall` 记录。
+   - **核验结果**：第 85 行改了 `newCtx.tableReaderExecutorContext`，但第 87 行写成 `return iluCtx` 而非 `return newCtx`，游标延迟取数路径可达（具体用户可见后果尚未实测）。在 N2 下 Rust 执行器本来就不持有会话（上下文天然是静态快照），游标支持（D12.12）时自然不存在该竞争；由第 2C 部分开 `upstream-pitfall` 记录。
 
-7. **`tableWorker.pickAndExecTask` 的 recover 闭包未判 `task != nil`**：
+7. **`tableWorker.pickAndExecTask` 的 recover 闭包未判 `task != nil`（不可达）**：
    - **位置**：`distsql.go:1873-1878`。
-   - **机制**：`defer recover()` 直接执行 `task.doneCh <- err`；虽然正常循环中 panic 几乎总发生在 `executeTask(ctx, task)` 内（此时 `task != nil`），但未做 nil 保护。
-   - **处理建议**：Rust 经 `oneshot` 拥有 `done_tx`，天然只在持有 `Some(done_tx)` 时发送错误，不会二次 panic。
+   - **核验结果**：panic 仅可能发生在 `executeTask(ctx, task)` 内（此时 `task != nil`），**不可达**；Rust 经 `oneshot` 拥有 `Option<done_tx>` 天然安全，不开 `upstream-pitfall`。
 
 ---
 
@@ -559,18 +551,25 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 
 ### 15.1 需要负责人决定（宪章第九条 1）
 
-**无。** 本部分不引入新的长期用户可见行为差异、不申请新的例外 spec、也不新增"整项能力不做"的范围裁减：内存记账按已确认的 A1、并发与取消按已确认的 N3/A2、计划只读按已确认的 A3、共享元数据按已确认的 N13，9 个不移植函数（8 个 `X` + 1 个 `DEF.MPP`）全部沿用 ROADMAP / D12.1 第 1 部分 / D07.2 既有口径。§14 中如第 3 条在后续第 2C 实现阶段于 Go v8.5.8 复现出真实结果顺序错误，再按宪章第九条 3（或第九条 1）处理。
+1. **是否将 `EXC.B`（cost model v1）中的 3 个 `GetNetDataSize` 辅助函数移出例外并移植（宪章第九条 1(b)）**
+   - **背景**：`buildNoRangeTableReader`（`builder.go:3708`，第 2A 部分）和 `buildNoRangeIndexReader`（`builder.go:4073`，第 2B 部分）在 cost model v2 下也**无条件调用** `v.GetNetDataSize()`，以向 `newClosestReadAdjuster` 传入估算传输字节数（决定 `tidb_replica_read = 'closest-adaptive'` 是否路由至同可用区副本）。但这 3 个函数——`getTblStats`（`plan_cost_ver1.go:1284`，9 行）、`PhysicalTableReader.GetNetDataSize`（`:327`，3 行）、`PhysicalIndexReader.GetNetDataSize`（`:243`，3 行）——在 tracker `data/func_blocks.tsv` 中被整体划归 **`EXC.B`**（cost model v1，已确认不移植）。直接移植会改动已确认例外 `EXC.B` 的范围，按宪章第九条 1(b) 需负责人确认。
+   - **选项**：
+     - **A（建议）**：将这 3 个共 15 行的函数从 `EXC.B` 改归 `D10.1`（与同用途的 `PhysicalIndexLookUpReader.GetIndexNetDataSize`，`physical_plans.go:562`，归 `D10.1` 一致），随第 2A / 2B 部分按 L1 移植到 `tidb-planner`（其依赖 `cardinality::get_avg_row_size` 与 `tbl_col_hists` 均已就绪）。
+     - **B**：维持 3 个函数留在 `EXC.B` 不移植；在 `buildNoRangeTableReader` / `buildNoRangeIndexReader` 中仅当 `tidb_replica_read = 'closest-adaptive'` 时返回 `blocked("EXC.B", ...)`，其余副本读模式置 `net_data_size = 0.0`（注：当前 D07.2 `client-rust` 只支持读 leader，`closest-adaptive` 在发送阶段本就报错，D07.2 §6.3 第 1 条）。
+   - **建议与理由**：选 **A**。这 3 个函数只是碰巧定义在 `plan_cost_ver1.go` 里，实质是执行器构建的现役依赖（与 cost model v1 的代价公式无关），仅 15 行且依赖已全部就绪；归回 `D10.1` 按 L1 移植最干净，待未来 `client-rust` 支持 replica read 时无需再返工。
+
+其余各项（内存记账 A1、并发与取消 N3/A2、计划只读 A3、共享元数据 N13、9 个 `X`/`DEF.MPP` 函数）均遵循已确认基础设计或既有裁决，不新增需要负责人决定的点。
 
 ### 15.2 维护者已定（宪章第九条 2）
 
-1. **第 2 部分拆分与实现顺序**：按依赖拆为 2A（TableReader / VS1-34，28 个函数）、2B（IndexReader，14 个函数）、2C（IndexLookUp，60 个函数）三个独立实现任务；2A 排在 D07.3（#407）表路径合入之后立即推进，优先打通 sysbench `simple_ranges` / `order_ranges`，不等索引物理算子；2B / 2C 排在 D10.1 / D10.2 / D10.9 索引算子合入之后。
+1. **第 2 部分拆分与实现顺序**：按依赖拆为 2A（TableReader / VS1-34，28 个函数，同步更新 tracker `data/part_funcs.tsv` 的 `VS1-34`）、2B（IndexReader，14 个函数）、2C（IndexLookUp，60 个函数）三个独立实现任务；2A 排在 D07.3（#410）第 1 部分合入之后立即推进，优先打通 sysbench `simple_ranges` / `order_ranges`；2B / 2C 排在 D10.1 / D10.2 / D10.9 索引算子与 D07.3 第 2 部分合入之后。
 2. **D12.1 其余函数归属**：95 个剩余函数分为 3A（BatchPointGet，6）、3B（分区裁剪与 IndexJoin 辅助，6）、3C（缓存表与 UnionScan / MemReader，52，保留供 D06.4 第 2 部分而非归 `X`）、3D（TABLESAMPLE，17）、3E（集群内存表 Coprocessor 与 Join 辅助，14）；8 个写路径/DDL 运维/测试钩子归 `X`，1 个 TiFlash BatchCop 专属函数归 `DEF.MPP`。245 个函数 100% 对账。
-3. **随第 2A 部分跨块顺带移植/解除桩的小函数**：解除 D12.0 `builder_utils.rs`（`ConstructDAGReq`、`to_pb`）和 `detach.rs`（`TableReaderExecutor.Detach`）的桩，顺带移植依赖已全部就绪的 D10.5 `getTblStats` / `PhysicalTableReader.GetNetDataSize`、D12.0 `assertByItemsAreColumns` / `UpdateExecutorTableID`、D12.10 `corColInDistPlan` / `corColInAccess`、D12.14 `normalizeCtxErrWithCause`、D00.3 `timeutil.Zone`，并解除第 1 部分 `point_get.rs` 中 `verify_txn_scope` 的 D07.3 桩，各自计入所属块。
-4. **随第 2C 部分提前移植 `dataReaderBuilder` 两个表读方法**：`buildTableReaderBase` 与 `buildTableReaderFromHandles`（D12.7）只依赖 2A 与 D07.3，随 2C 移植并计入 D12.7，避免引入不必要的边界桩。
+3. **与 D07.3（#410）的边界与桩归属**：`verify_txn_scope` 桩由 D07.3 第 1 部分解除；`new_closest_read_adjuster` 桩由本块 2A 解除（D07.3 只提供 `match_store_labels`）；`copr_request_rate_limit` 字段与 `CopIterator` 接线归 D07.3 第 2 部分；`distsql::select*` 改为 `async fn` 即时构造 `CopIterator`，消除 2C `GetSelectResultConcurrency` 差异；执行器从 `dctx` 构造 `tidb_kv::Context`。
+4. **随第 2A / 2C 部分跨块顺带移植/解除桩的小函数**：2A 解除 D12.0 `builder_utils.rs`（`ConstructDAGReq`、`to_pb`）和 `detach.rs`（`TableReaderExecutor.Detach`）的桩，顺带移植 D12.0 `assertByItemsAreColumns` / `UpdateExecutorTableID`、D12.10 `corColInDistPlan` / `corColInAccess`、D12.14 `normalizeCtxErrWithCause`、D00.3 `timeutil.Zone`（`time_zone.go:189`）；2C 顺带移植 D12.7 `dataReaderBuilder.{buildTableReaderBase, buildTableReaderFromHandles}`（`getTblStats` / `GetNetDataSize` 见 §15.1 待负责人定）。
 5. **边界桩放置层级（防止执行后无法回退）**：所有 2A 尚未支持的路径（分区表、`TiFlash`/`MPP`、相关列访问条件、多组 `groupedRanges`）统一在 `executorBuilder.buildTableReader`（任何执行器 `Open` 之前）返回 `blocked-by:<块>`，确保路由器可安全回退到 PoC。
-6. **并发与所有权内部设计**：`IndexLookUpExecutor` 使用 `Arc<IndexLookUpShared>` + `workCh`（容量 1 `mpsc` + `Arc<tokio::sync::Mutex<Receiver>>`，复用 D07.2 `copr` 写法）+ `resultCh`（容量 50 `mpsc`）+ `oneshot` 交回 `LookupTableTaskResult`（消除共享可变 task 指针）+ `M-ROW`（`Vec<Arc<Chunk>> + Vec<(usize, usize)>`）+ `watch` 通知退出 + 子 `CancellationToken` + `Drop` 中止全部 worker。
-7. **测试、govec 与合并前真实 TiKV 门禁**：新建 govec 领域 `readexec`（覆盖表/索引/回表执行器与辅助函数）；2A 合并前必须由维护者在真实 TiKV 集群跑 `tools/ab`（含 `copr.sql` 与 sysbench 范围查询）并验证 `sbtest_results.rs` 逐列元数据，防止重演 #338 回归。
-8. **§14 可能的 Go 问题**：由对应实现任务（2A / 2C）在 Go v8.5.8 上复现后再开 `upstream-pitfall` issue，标记 `go-bug-kept` 或 `go-bug-fixed`。
+6. **并发与取消内部设计**：`IndexLookUpExecutor` 使用 `Arc<IndexLookUpShared>` + `workCh`（容量 1 `mpsc` + `Arc<tokio::sync::Mutex<Receiver>>`）+ `resultCh`（容量 50 `mpsc`）+ `oneshot` 交回 `LookupTableTaskResult` + `M-ROW`（`Vec<Arc<Chunk>> + Vec<(usize, usize)>`）+ `watch` + `tokio::select!` 丢弃在途 future 取消 + `Drop` 中止全部 worker（不引入 `CancellationToken`），`Close` 顺序严格按 Go（index usage → 通知退出与排空等待 → 注册 stats）。
+7. **测试、govec 与合并前真实 TiKV 门禁**：新建 govec 领域 `readexec`（含批大小与 `c = 1` 并发度边界）；2A 合并前必须由维护者在真实 TiKV 集群跑 `tools/ab`（含 `copr.sql` 与 sysbench 范围查询）并验证 `sbtest_results.rs` 逐列元数据，防止重演 #338 回归。
+8. **§14 已核验的 Go 问题**：仅第 4、6 条在第 2C 部分开 `upstream-pitfall`（第 4 条 `go-bug-kept`，第 6 条属 D12.0）；第 1、2、3、5、7 条均已确认生产不可达，不开 issue。
 
 ---
 
@@ -596,6 +595,7 @@ D12.1 全部 **245** 个 Go 函数（来自 tracker `origin/main:data/func_block
 - D14.0 / D14.1 / D14.2：执行统计结构、metrics、Top SQL / 慢日志
 - D15.1：内存统计与配额实现
 - DEF.MPP：TiFlash / BatchCop / MPP（不移植）
+- EXC.B：已批准例外块，旧代价模型 v1（`cost_model_version = 1` 不支持）
 - L1 / L2：来源标注等级（L1 按映射规则忠实移植；L2 有理由的 Rust 化改写）
 - M-BYTES、M-CH、M-CTX、M-DEFER、M-ERR、M-FMA、M-FT、M-GO、M-GOCTX、M-IFACE、M-INT、M-KILL、M-MAPORDER、M-MEM、M-PANIC、M-POOL、M-ROW、M-SHARE、M-WG：`docs/porting/mappings.md` 中的全局映射规则
 - N0 / N1 / N2 / N3 / N5a / N13：基础设计 spec（crate 分层、计划表示、会话与语句上下文、并发取消与内存、Chunk 表示、共享元数据 `Arc` 与写时复制）
