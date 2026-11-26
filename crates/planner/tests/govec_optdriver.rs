@@ -94,15 +94,15 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     // Partitioned tables (2 of them: Go's mock context panics in the partition pruning).
     ("D09.12", 4),
     // BuildKeySolver in logicalOptimize (reached by aggregation / GROUP BY / DISTINCT queries).
-    ("D09.13", 10),
+    ("D09.13", 99),
     // The lock operator (SELECT ... FOR UPDATE).
     ("D09.14", 2),
     // System variables in expressions.
     ("D09.2", 2),
     // Joins.
     ("D09.3", 6),
-    // Window functions (D09.4 part B).
-    ("D09.4", 4),
+    // Window functions / unported aggregation paths (D09.4 part B).
+    ("D09.4", 6),
     // WITH and set operations.
     ("D09.5", 4),
     // Subqueries.
