@@ -54,4 +54,6 @@ Maya 的子 agent 用 Maya 的身份提交。模型分工（2026-11-24 试点）
 | `duet-blocked` | Duet 需要回答，问题写在 issue 里 |
 | `duet-paused` | 额度原因暂停，不要认领 |
 | `nora-claimed` | 已指派给 Nora |
+| `go-bug-kept` | 与 `upstream-pitfall` 同用：tidb-rs 照搬了 Go 的行为，是技术负债，将来要修（负责人 2026-11-26） |
+| `go-bug-fixed` | 与 `upstream-pitfall` 同用：tidb-rs 没有照搬、行为正确；用户看得到的差异（结果、错误、warning、元数据）在 `docs/testing/rulings.toml` 登记裁定，只是内部实现不同的写进 spec 的已知差异 |
 | `upstream-pitfall` / `go-gap` | Go 本身的问题（行为有错 / 缺功能），见 port-block skill |
