@@ -1675,7 +1675,7 @@ impl<'ast> PlanBuilder<'ast> {
         Ok(())
     }
 
-    // go: PlanBuilder.extractAggFuncsInExprs L1
+    // go: PlanBuilder.extractAggFuncsInExprs L2 (skip map starts empty; correlated subqueries are blocked-by:D09.6)
     pub fn extract_agg_funcs_in_exprs<'a>(
         &self,
         exprs: &'a [Expr],
@@ -1692,7 +1692,7 @@ impl<'ast> PlanBuilder<'ast> {
         (agg_list, total_agg_mapper)
     }
 
-    // go: PlanBuilder.extractAggFuncsInSelectFields L1
+    // go: PlanBuilder.extractAggFuncsInSelectFields L2 (skip map starts empty; correlated subqueries are blocked-by:D09.6)
     pub fn extract_agg_funcs_in_select_fields<'a>(
         &self,
         fields: &'a [SelectFieldW<'_>],
@@ -1711,7 +1711,7 @@ impl<'ast> PlanBuilder<'ast> {
         (agg_list, total_agg_mapper)
     }
 
-    // go: PlanBuilder.extractAggFuncsInByItems L1
+    // go: PlanBuilder.extractAggFuncsInByItems L2 (skip map starts empty; correlated subqueries are blocked-by:D09.6)
     pub fn extract_agg_funcs_in_by_items<'a>(
         &self,
         by_items: &'a [ast::ByItem],
@@ -2174,6 +2174,8 @@ impl ColResolverForOnlyFullGroupBy {
             Expr::Aggregate(_) => {
                 self.has_agg_func_or_any_value = true;
                 if self.cur_clause == ClauseCode::OrderByClause {
+                    // Go overwrites on every aggregate in ORDER BY, reporting the last one
+                    // (go-bug-kept, #428, D09.4 spec §8 item 3).
                     self.first_order_by_agg_col_idx = self.expr_idx as isize;
                 }
                 return true;
@@ -3266,7 +3268,7 @@ impl<'ast> PlanBuilder<'ast> {
                 ErrExprInOrderBy => {
                     // Go passes `sel.OrderBy.Items[errExprLoc.Offset].Expr.Text()`, which is
                     // always empty in v8.5.8 because parser does not call SetText on ORDER BY
-                    // item expressions (go-bug-kept, D09.4 spec §8 item 4).
+                    // item expressions (go-bug-kept, #429, D09.4 spec §8 item 4).
                     return Err(ErrFieldNotInGroupBy.gen_with_stack_by_args(go_args![
                         err_expr_loc.offset as i64 + 1,
                         err_expr_loc.loc,
@@ -3303,6 +3305,8 @@ impl<'ast> PlanBuilder<'ast> {
         }
         if !resolver.non_agg_cols.is_empty() {
             if let Some(h) = &sel.having {
+                // Go leaves curClause=FieldList and exprIdx at the last SELECT field index
+                // when walking HAVING (go-bug-kept, #428, D09.4 spec §8 item 3).
                 resolver.accept(&h.expr);
             }
             if let Some(o) = &sel.order_by {
@@ -4722,6 +4726,35 @@ mod tests {
         .unwrap();
         assert_eq!(r2a, r2b);
         assert!(r2a.contains("sum(plus(test.t.a, 1))"), "got {r2a}");
+
+        // R27 (#437): Go TiDB v8.5.8 fails with ERROR 1055 from the second EXECUTE onward
+        // because resolving `x` inside `SUM(x)` shares the SELECT field's AST node and mutates
+        // it in place. tidb-rs keeps the AST immutable so every build succeeds identically.
+        let sql3 = "SELECT a+1 AS x FROM t GROUP BY a+1 HAVING SUM(x) > 0";
+        let (stmt3, rctx3) = parse_and_preprocess_t(sql3, &is);
+        let r3a = build_stmt_once(
+            &stmt3,
+            sql3,
+            &rctx3,
+            &is,
+            tidb_base::mysql::ModeOnlyFullGroupBy.0,
+            vec![],
+            true,
+        )
+        .unwrap();
+        let r3b = build_stmt_once(
+            &stmt3,
+            sql3,
+            &rctx3,
+            &is,
+            tidb_base::mysql::ModeOnlyFullGroupBy.0,
+            vec![],
+            true,
+        )
+        .unwrap();
+        assert_eq!(r3a, r3b);
+        assert!(r3a.contains("sum(plus(test.t.a, 1))"), "got {r3a}");
+        assert!(r3a.contains("gby=[plus(test.t.a, 1)]"), "got {r3a}");
     }
 
     /// Ruling R27 (#425, D09.4 spec §8 item 7 & §9.1 item 3, owner decision 2026-11-26 option A):

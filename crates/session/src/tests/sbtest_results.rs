@@ -498,15 +498,106 @@ fn sum_range_falls_back_at_planning() {
     }
     let sql = "SELECT SUM(k) FROM sbtest1 WHERE id BETWEEN ? AND ?";
     let before = s.executed_stmts();
-    let r = block_on(s.prepare_stmt(sql)).map(|info| info.stmt_id);
-    if let Ok(stmt_id) = r {
-        for (lo, hi) in [(1, 10), (5, 5)] {
-            let what = format!("{sql} ({lo}, {hi})");
-            let r = run_prepared(&mut s, stmt_id, vec![new_int_datum(lo), new_int_datum(hi)]);
-            assert_eq!(assert_falls_back(&s, &what, before, r), "D09.13");
+    // PREPARE of an aggregate statement completes on the Rust stack (plan_cache_utils.rs);
+    // pin the exact column metadata against Go TiDB v8.5.8 (SUM(INT) -> DECIMAL(32, 0),
+    // nullable with BinaryFlag, name "SUM(k)").
+    let info = block_on(s.prepare_stmt(sql)).expect("PREPARE of aggregate succeeds on Rust stack");
+    assert_eq!(s.executed_stmts(), before);
+    let prepared: Vec<Col> = info.fields.iter().map(col_of).collect();
+    assert_eq!(
+        prepared,
+        vec![Col {
+            name: "SUM(k)".to_owned(),
+            org_name: String::new(),
+            table: String::new(),
+            org_table: String::new(),
+            schema: String::new(),
+            tp: tidb_base::mysql::TypeNewDecimal,
+            flen: 32,
+            decimal: 0,
+            flag: tidb_base::mysql::BinaryFlag as u32,
+            charset: "binary".to_owned(),
+        }],
+        "PREPARE column metadata for {sql}"
+    );
+    for (lo, hi) in [(1, 10), (5, 5)] {
+        let what = format!("{sql} ({lo}, {hi})");
+        let r = run_prepared(
+            &mut s,
+            info.stmt_id,
+            vec![new_int_datum(lo), new_int_datum(hi)],
+        );
+        assert_eq!(assert_falls_back(&s, &what, before, r), "D09.13");
+    }
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
+
+    // Also pin PREPARE metadata for COUNT(*) + MAX(k) against Go TiDB v8.5.8.
+    let sql2 = "SELECT COUNT(*), MAX(k) FROM sbtest1 WHERE id BETWEEN ? AND ?";
+    let info2 = block_on(s.prepare_stmt(sql2)).expect("PREPARE COUNT(*), MAX(k)");
+    let prepared2: Vec<Col> = info2.fields.iter().map(col_of).collect();
+    assert_eq!(
+        prepared2,
+        vec![
+            Col {
+                name: "COUNT(*)".to_owned(),
+                org_name: String::new(),
+                table: String::new(),
+                org_table: String::new(),
+                schema: String::new(),
+                tp: tidb_base::mysql::TypeLonglong,
+                flen: 21,
+                decimal: 0,
+                flag: (tidb_base::mysql::NotNullFlag | tidb_base::mysql::BinaryFlag) as u32,
+                charset: "binary".to_owned(),
+            },
+            Col {
+                name: "MAX(k)".to_owned(),
+                org_name: String::new(),
+                table: String::new(),
+                org_table: String::new(),
+                schema: String::new(),
+                tp: tidb_base::mysql::TypeLong,
+                flen: 11,
+                decimal: 0,
+                flag: tidb_base::mysql::MultipleKeyFlag as u32,
+                charset: "binary".to_owned(),
+            },
+        ],
+        "PREPARE column metadata for {sql2}"
+    );
+    s.drop_prepared_stmt(info2.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
+}
+
+/// R27 (#437): Drive real session PREPARE + two EXECUTEs (with plan cache disabled) for
+/// statements whose SELECT alias is rewritten inside HAVING/GROUP BY. On Go v8.5.8,
+/// `SELECT k+1 AS x FROM sbtest1 GROUP BY k+1 HAVING SUM(x) > 0` fails with ERROR 1055
+/// starting on the second EXECUTE due to in-place AST mutation. In tidb-rs, both EXECUTEs
+/// pass D09.4 aggregation building cleanly and stop at D09.13 (BuildKeySolver).
+#[test]
+fn prepared_repeated_execute_having_and_group_by_alias_through_session() {
+    let _serial = PREPARED_COUNT.lock();
+    let (_store, mut s) = sysbench_session(); // plan cache OFF
+    for sql in [
+        "SELECT k+1 AS x FROM sbtest1 GROUP BY k+1 HAVING SUM(x) > 0",
+        "SELECT k+1 AS x FROM sbtest1 GROUP BY x HAVING SUM(x) > 0",
+    ] {
+        let info = block_on(s.prepare_stmt(sql)).unwrap_or_else(|e| panic!("PREPARE {sql}: {e}"));
+        let prepared: Vec<Col> = info.fields.iter().map(col_of).collect();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].name, "x");
+        for run in 1..=2 {
+            let before = s.executed_stmts();
+            let r = run_prepared(&mut s, info.stmt_id, vec![]);
+            assert_eq!(
+                assert_falls_back(&s, &format!("{sql} (EXECUTE #{run})"), before, r),
+                "D09.13",
+                "EXECUTE #{run} must pass D09.4 without ERROR 1055 for {sql}"
+            );
         }
-    } else {
-        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.13");
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+        s.clean_closed_prepared_stmts();
     }
 }
 
