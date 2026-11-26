@@ -15,8 +15,8 @@
 | Go 文件 | D09.4 函数数 | 内容 |
 |---|--:|---|
 | `logical_plan_builder.go` | 64 | `buildSelect` 调用的各阶段构建与解析：GROUP BY 解析与改写（`resolveGbyExprs`、`rewriteGbyExprs`、`gbyResolver`）、`ONLY_FULL_GROUP_BY` 检查（有 / 无 GROUP BY、WHERE 等值依赖与唯一键函数依赖）、HAVING / ORDER BY / 窗口表达式列解析（`havingWindowAndOrderbyExprResolver`、`resolveHavingAndOrderBy`、`resolveWindowFunction`）、聚合函数提取与构建（`extractAggFuncsIn*`、`buildAggregation`、`aggOrderByResolver`）、子查询相关聚合提取（`resolveCorrelatedAggregates`、`correlatedAggregateResolver`、`extractCorrelatedAggFuncs`、`aggColNameResolver`）、`SELECT DISTINCT` 构建与 ORDER BY 冲突检查（`buildDistinct`、`checkOrderByInDistinct`）、ROLLUP 展开构建与 `GROUPING()` 替换（`buildExpand`、`buildExpandFieldName`、`replaceGroupingFunc`、`implicitProjectGroupingSetCols`）、窗口规范解析 / 合并 / 分组 / 排序 / 帧校验与构建（`buildWindowSpecs`、`resolveWindowSpec`、`mergeWindowSpec`、`groupWindowFuncs`、`handleDefaultFrame`、`sortWindowSpecs`、`checkWindowFuncArgs`、`checkOriginWindow*`、`buildProjectionForWindow`、`buildByItemsForWindow`、`buildWindowFunctionFrame*`、`buildWindowFunctions`） |
-| `operator/logicalop/logical_aggregation.go` | 25 | `LogicalAggregation` 算子：`Init`、`ExplainInfo`、`ReplaceExprColumns`、`BuildKeyInfo` / `BuildSelfKeyInfo`、`CanPushToCop`、`ExtractFD`、`HasDistinct` / `HasOrderBy` / `IsPartialModeAgg` / `GetGroupByCols` / `GetPotentialPartitionKeys` / `GetUsedCols` / `ResetHintIfConflicted` / `DistinctArgsMeetsProperty` / `CanPullUp` / `getGroupNDVs`、聚合谓词下推辅助（`splitCondForAggregation`、`pushDown*PredicatesForAggregation`），以及 4 个仅旧 cascades 优化器用的方法（豁免） |
-| `operator/logicalop/logical_window.go` | 17 | `LogicalWindow`、`WindowFrame`、`FrameBound`：`Init`、`Clone`、`UpdateCmpFuncsAndCmpDataType`、`UpdateCompareCols`、`ToPB`、`ReplaceExprColumns`、`GetPartitionBy` / `GetPartitionByCols` / `GetPartitionKeys` / `GetWindowResultColumns` / `CheckComparisonForTiFlash` / `extractUsedCols` / `GetGroupNDVs`，以及 3 个仅旧 cascades 优化器用的方法（豁免） |
+| `operator/logicalop/logical_aggregation.go` | 25 | `LogicalAggregation` 算子：`Init`、`ExplainInfo`、`ReplaceExprColumns`、`BuildKeyInfo` / `BuildSelfKeyInfo`、`CanPushToCop`、`ExtractFD`、`HasDistinct` / `HasOrderBy` / `IsPartialModeAgg` / `GetGroupByCols` / `GetPotentialPartitionKeys` / `GetUsedCols` / `ResetHintIfConflicted` / `DistinctArgsMeetsProperty` / `CanPullUp` / `getGroupNDVs`、聚合谓词下推辅助（`splitCondForAggregation`、`pushDown*PredicatesForAggregation`），以及 4 个仅 cascades 优化器（新 cascades memo 与旧 cascades 规则）用的方法（豁免） |
+| `operator/logicalop/logical_window.go` | 17 | `LogicalWindow`、`WindowFrame`、`FrameBound`：`Init`、`Clone`、`UpdateCmpFuncsAndCmpDataType`、`UpdateCompareCols`、`ToPB`、`ReplaceExprColumns`、`GetPartitionBy` / `GetPartitionByCols` / `GetPartitionKeys` / `GetWindowResultColumns` / `CheckComparisonForTiFlash` / `extractUsedCols` / `GetGroupNDVs`，以及 3 个仅旧 cascades 规则用的方法（豁免） |
 | `operator/logicalop/logical_expand.go` | 10 | `LogicalExpand` 算子：`Init`、`ExtractFD`、`GetUsedCols`、`GenLevelProjections`、`GenerateGroupingMarks`、`TrySubstituteExprWithGroupingSetCol`、`ResolveGroupingFuncArgsInGroupBy`、`GenerateGroupingIDModeBitAnd`、`GenerateGroupingIDIncrementModeNumericSet`、`BuildKeyInfo` |
 
 此外，本块承接 P1 收尾移交的两批表达式侧函数（见 `specs/D09.4-agg-window/tasks.md`）：
@@ -82,7 +82,7 @@ sysbench 只读基准中有两条聚合查询目前在 `crates/session/src/tests
 | D09.0 / D09.1 / D09.2 | `PlanBuilder`、`SelectFieldW`、`ByAddr`、`detectSelectAgg`、`detectSelectWindow`、`splitWhere`、`getUintFromNode`、`resolveFromSelectFields`、`getInnerFromParenthesesAndUnaryPlus`、`itemTransformer`、`rewrite` / `rewriteWithPreprocess`、`evalAstExprWithPlanCtx`、`ResolveContext` / `TableNameW` | `crates/planner/src/core/` |
 | D09.13 / D09.14 | `LogicalPlan` trait、`BaseLogicalPlan`、`LogicalSchemaProducer`、`LogicalProjection`（已有 `proj4_expand` 字段）、`LogicalSelection`、`LogicalSort`、`pruneByItems`、`ResolveExprAndReplace`、`ResolveColumnAndReplace`、`logicaltrace`、规则标志常量（`FlagBuildKeyInfo`、`FlagPushDownAgg`、`FlagMaxMinEliminate`、`FlagPushDownTopN`、`FlagPredicatePushDown`、`FlagEliminateAgg`、`FlagEliminateProjection`、`FlagSkewDistinctAgg`、`FlagResolveExpand`） | `crates/planner/src/logicalop/`、`core/`、`util/` |
 | D10.2 / D10.10 / D13.3 | `compareBool`、`GetMaxSortPrefix`、`SortItem`、`MPPPartitionColumn`、`GetCollateIDByNameForPartition`、`StatsInfo::get_group_ndv4_cols`、`PlanHints.prefer_agg_type` / `prefer_agg_to_cop` | `crates/planner/src/core/find_best_task.rs`、`property/`、`util/`、`hint/` |
-| D00.1 / D02.1 / D05.2 | 全部 31 个 `plannererrors` 常量（已逐个核对 0 缺失）；parser 已解析 `AggregateFuncExpr`（含 `GROUP_CONCAT ... ORDER BY`）、`WindowFuncExpr`（保留原始函数名大小写）、`WindowSpec`、`FrameClause` / `FrameBound`、`GroupByClause.rollup`；`SessionVars` 已有 `enable_skew_distinct_agg`、`enable_pipelined_window_exec`、`optimizer_enable_new_only_full_group_by_check`、`alloc_plan_column_id`；`tipb` 已在 workspace 中 | `crates/base`、`crates/parser`、`crates/sessionctx` |
+| D00.1 / D02.1 / D05.2 | 全部 30 个 `plannererrors` 常量（已在 116 个 D09.4 函数体中逐个核对，0 缺失）；parser 已解析 `AggregateFuncExpr`（含 `GROUP_CONCAT ... ORDER BY`）、`WindowFuncExpr`（保留原始函数名大小写）、`WindowSpec`、`FrameClause` / `FrameBound`、`GroupByClause.rollup`；`SessionVars` 已有 `enable_skew_distinct_agg`、`enable_pipelined_window_exec`、`optimizer_enable_new_only_full_group_by_check`、`alloc_plan_column_id`；`tipb` 已在 workspace 中 | `crates/base`、`crates/parser`、`crates/sessionctx` |
 
 ### 2.2 未移植（前置条件、一起移植的辅助函数，或 `blocked-by` 边界）
 
@@ -93,7 +93,7 @@ sysbench 只读基准中有两条聚合查询目前在 `crates/session/src/tests
 | `pkg/planner/funcdep`（`FDSet`）与 `util.IsNullRejected` | D09.14 / D10.10 | `LogicalAggregation.ExtractFD`、`LogicalExpand.ExtractFD` | 与 `DataSource` / `LogicalSelection` / `LogicalProjection` 现有写法一致，暂作 `blocked-by:D09.14` 桩（默认 `tidb_enable_new_only_full_group_by_check = OFF`，不会调用） |
 | `BuildKeySolver` 与 `DataSource` / `LogicalSelection` 的 `BuildKeyInfo` | D09.13 / D09.14 | `buildAggregation` / `buildDistinct` 设置 `FlagBuildKeyInfo`，端到端优化时触发 `BuildKeySolver` | `BuildKeySolver` 在 `optimizer.rs:112` 仍为 `UnportedRule`（`blocked-by:D09.13`）；规划器构建测试不经优化器，端到端聚合链须解除它（§6.4） |
 | `LogicalAggregation.PruneColumns` / `PredicatePushDown` / `DeriveStats` / `ExtractColGroups` / `PreparePossibleProperties` / `ExtractCorrelatedCols` | D09.7 / D09.8 / D10.6 / D10.2 / D09.6 | `LogicalAggregation` 进入 `DoOptimize` 后立即被调用（D09.9 也直接调用 `PruneColumns`） | 依赖均已就绪，随第 A 部分一并移植到 `logical_aggregation.rs` 并计入各自块（§3.6、§9.2）；`ExhaustPhysicalPlans` 留作 `blocked-by:D10.3` 桩 |
-| `LogicalWindow` / `LogicalExpand` 上同名的规则接口方法（`PruneColumns`、`PredicatePushDown`、`DeriveStats`、`ExtractColGroups`、`PreparePossibleProperties`、`ExtractCorrelatedCols`） | D09.7 / D09.8 / D10.6 / D10.2 / D09.6 | 分别在第 B / C 部分进入优化器时被调用 | 同上，依赖均已就绪，随第 B / C 部分一并移植并计入各自块；`ExhaustPhysicalPlans` 为 `blocked-by:D10.3` 桩 |
+| `LogicalWindow` 的 `PruneColumns` / `PredicatePushDown` / `DeriveStats` / `ExtractColGroups` / `PreparePossibleProperties` / `ExtractCorrelatedCols`，以及 `LogicalExpand` 的 `PruneColumns` / `PredicatePushDown` / `ExtractCorrelatedCols` | D09.7 / D09.8 / D10.6 / D10.2 / D09.6 | 分别在第 B / C 部分进入优化器时被调用（注：v8.5.8 `LogicalExpand` 无 `DeriveStats` / `ExtractColGroups` / `PreparePossibleProperties`） | 同上，依赖均已就绪，随第 B / C 部分一并移植并计入各自块；`ExhaustPhysicalPlans` 为 `blocked-by:D10.3` 桩 |
 | `AggregateFuncExtractor`、`WindowFuncExtractor`（`pkg/planner/core/util.go`） | D09.0 | 第 A 部分 `extractAggFuncsIn*` / `gbyResolver`；第 B 部分 `extractWindowFuncs` | 无出边小工具（各 2 个方法），按宪章第四条 5 随第 A / B 部分移植并计入 D09.0 |
 | `extractSingeValueColNamesFromWhere`、`colNameResolver.Enter/Leave`、`allColFromExprNode`、`allColFromAggExprNode`、`getAllByItems`、`restoreByItemText`、`compareItems` | D09.1（tracker 归属，当前在 `logical_plan_builder.rs` 标为 `blocked-by:D09.4` 桩） | 第 A 部分 `ONLY_FULL_GROUP_BY`、第 B 部分窗口排序、第 D 部分相关聚合 | 随对应部分移植并计入 D09.1（消除现有 `blocked-by:D09.4` 桩） |
 | `tblInfoFromCol`、`ExtractTableList` | D09.15 | 第 A 部分 `checkOnlyFullGroupByWithGroupClause` / `WithOutGroupClause` | 随第 A 部分移植其读路径（单表、派生表、join 递归，计入 D09.15）；`PlanBuilder` 补存 `resolve_ctx` |
@@ -110,31 +110,31 @@ sysbench 只读基准中有两条聚合查询目前在 `crates/session/src/tests
 
 ## 3. 函数清单与划分
 
-tracker `data/func_blocks.tsv` 中 block 为 `D09.4` 的函数共 **116** 个，全部属于只读 SELECT 计划构建与逻辑算子。**归 X 为 0 个**，**豁免（EXC.B / B3，仅旧 cascades 优化器调用）7 个**，其余 109 个按依赖与 sysbench 优先级划分为：已移植（VS1-21）+ A / B / C / D 四部分。
+tracker `data/func_blocks.tsv` 中 block 为 `D09.4` 的函数共 **116** 个，全部属于只读 SELECT 计划构建与逻辑算子。**归 X 为 0 个**，**豁免（EXC.B / B3，仅新/旧 cascades 优化器调用）7 个**，其余 109 个按依赖与 sysbench 优先级划分为：已移植（VS1-21）+ A / B / C / D 四部分。
 
 | 类别 | D09.4 函数数 | P1 移交函数数 | 内容 | 前置条件 |
 |---|--:|--:|---|---|
-| 已移植（VS1-21 完成） | 6 | 0 | `havingWindowAndOrderbyExprResolver`（除 `Leave`）、`resolveHavingAndOrderBy`、`colResolverForOnlyFullGroupBy.Enter` | 已合并（#284） |
-| 第 A 部分：聚合、DISTINCT、GROUP BY、`ONLY_FULL_GROUP_BY`、`LogicalAggregation` | 43 | 2（P1-2 位置项） | sysbench `SUM(k)` 与 `DISTINCT c ... ORDER BY c` 所需全部构建与逻辑算子 | 无未满足的前置块（D08.11 A+B 已合并） |
-| 第 B 部分：窗口函数与 `LogicalWindow` | 35 | 2（P1-2 参数检查） | `OVER` / `WINDOW`、`WindowFrame` / `FrameBound`、`LogicalWindow` | D08.11 第 C 部分（`window_func.go`） |
+| 已移植（VS1-21 登记） | 6 | 0 | `havingWindowAndOrderbyExprResolver.{pushCurClause,popCurClause,Enter,Leave,resolveFromPlan}`、`resolveHavingAndOrderBy`（`Leave` 的 `inAggFunc` 支在第 A 部分由 L2 补全为 L1） | 已合并（#284） |
+| 第 A 部分：聚合、DISTINCT、GROUP BY、`ONLY_FULL_GROUP_BY`、`LogicalAggregation` | 43 | 2（P1-2 位置项） | sysbench `SUM(k)` 与 `DISTINCT c ... ORDER BY c` 所需全部构建与逻辑算子（含补全 `colResolverForOnlyFullGroupBy.Enter/Leave` 与 `checkOnlyFullGroupBy*` 的 tracker 登记） | 无未满足的前置块（D08.11 A+B 已合并） |
+| 第 B 部分：窗口函数与 `LogicalWindow` | 35 | 2（P1-2 参数检查） | `OVER` / `WINDOW`、`WindowFrame` / `FrameBound`、`LogicalWindow` | D08.11 第 C 部分（`window_func.go`，已于 #403 合并） |
 | 第 C 部分：ROLLUP 与 `LogicalExpand` | 15 | 29（P1-1 `grouping_sets.go`） | `GROUP BY ... WITH ROLLUP`、`LogicalExpand`、`GroupingSets` | 第 A 部分 |
 | 第 D 部分：子查询相关聚合 | 10 | 0 | 子查询中引用外层表的聚合提取与回填 | 第 A 部分、D09.6（子查询） |
-| 豁免（EXC.B / B3） | 7 | 0 | 仅旧 cascades 优化器调用的 7 个算子方法 | 不移植 |
+| 豁免（EXC.B / B3） | 7 | 0 | 仅新 cascades memo（2）与旧 cascades 规则（5）调用的方法 | 不移植 |
 | 归 X | 0 | 0 | 无写路径或测试专用钩子 | — |
 | **合计** | **116** | **33** | `6 + 43 + 35 + 15 + 10 + 7 = 116`（P1 移交 `2 + 2 + 29 = 33`） | — |
 
-### 3.1 已移植（VS1-21 完成，6 个）
+### 3.1 已移植（VS1-21 登记，6 个）
 
-均已在 PR #284 移植于 `crates/planner/src/core/logical_plan_builder.rs`，不再需要本块改写（其内残留的 join / 子查询边界归 D09.3 / D09.6）：
+与 tracker `data/part_funcs.tsv` 中 `D09.4` / `VS1-21` 的 6 行完全一致（均已在 PR #284 移植于 `crates/planner/src/core/logical_plan_builder.rs`）：
 
 - `havingWindowAndOrderbyExprResolver.pushCurClause`（`:2643`，L1）
 - `havingWindowAndOrderbyExprResolver.popCurClause`（`:2648`，L1）
 - `havingWindowAndOrderbyExprResolver.Enter`（`:2654`，L1）
 - `havingWindowAndOrderbyExprResolver.resolveFromPlan`（`:2679`，L2：join / apply 为 `blocked-by:D09.3`）
+- `havingWindowAndOrderbyExprResolver.Leave`（`:2757`，L2：聚合内列替换支为 `blocked-by:D09.4`，第 A 部分补全为 L1）
 - `PlanBuilder.resolveHavingAndOrderBy`（`:2876`，L2：ORDER BY 子查询为 `blocked-by:D09.6`）
-- `colResolverForOnlyFullGroupBy.Enter`（`:4023`，L1）
 
-> 注：tracker `data/part_funcs.tsv` 中 `VS1-21` 登记的 6 个函数是前 5 个加上 `havingWindowAndOrderbyExprResolver.Leave`；#284 实际同时移植了 `colResolverForOnlyFullGroupBy.Enter`、`checkOnlyFullGroupBy` 与 `checkOnlyFullGroupByWithOutGroupClause` 的骨架（见 D09.1 spec §2.2 及 `govec/domains/selectbuild.go:95-100`）。因 `Leave`（聚合内列替换）、`checkOnlyFullGroupBy`（GROUP BY 支）、`checkOnlyFullGroupByWithOutGroupClause`（混合聚合函数依赖支）和 `colResolverForOnlyFullGroupBy.Leave`（补显式 `// go:` 标注）都需在第 A 部分补全，故统一计入第 A 部分，不重复计数。
+> 注：#284 实际同时在 `logical_plan_builder.rs` 中写出了 `colResolverForOnlyFullGroupBy.Enter`（已标 `// go:`）、`colResolverForOnlyFullGroupBy.Leave`（目前无 `// go:` 标注）以及 `checkOnlyFullGroupBy` / `checkOnlyFullGroupByWithOutGroupClause` 的无聚合骨架，但 tracker `data/part_funcs.tsv` 的 `VS1-21` 未登记它们。第 A 部分补全这几个函数的完整逻辑和 `colResolverForOnlyFullGroupBy.Leave` 的 `// go:` 标注，并在 tracker `part_funcs.tsv` 中统一归入第 A 部分（`D09.4-A`），与本清单 100% 一致，不重复计数。
 
 ### 3.2 第 A 部分：聚合、DISTINCT、GROUP BY、`ONLY_FULL_GROUP_BY` 与 `LogicalAggregation`（43 个 + P1-2 2 个）
 
@@ -144,10 +144,10 @@ sysbench 聚合链的直接前置。
 
 | 分组 | Go 函数（行号） | 说明 |
 |---|---|---|
-| 聚合与 DISTINCT 构建（6） | `aggOrderByResolver.Enter`（`:101`）、`aggOrderByResolver.Leave`（`:115`）、`PlanBuilder.buildAggregation`（`:249`）、`PlanBuilder.buildDistinct`（`:1960`）、`PlanBuilder.checkOrderByInDistinct`（`:2441`）、`havingWindowAndOrderbyExprResolver.Leave`（`:2757`） | `Leave` 补全 `inAggFunc` 列替换；`buildAggregation` 中 `rollupExpand` 分支待第 C 部分、`correlatedAggMap` 待第 D 部分、`findJoinFullSchema` 待 D09.3 |
+| 聚合与 DISTINCT 构建（5） | `aggOrderByResolver.Enter`（`:101`）、`aggOrderByResolver.Leave`（`:115`）、`PlanBuilder.buildAggregation`（`:249`）、`PlanBuilder.buildDistinct`（`:1960`）、`PlanBuilder.checkOrderByInDistinct`（`:2441`） | 同步补全 §3.1 `havingWindowAndOrderbyExprResolver.Leave` 的 `inAggFunc` 列替换；`buildAggregation` 中 `rollupExpand` 分支待第 C 部分、`correlatedAggMap` 待第 D 部分、`findJoinFullSchema` 待 D09.3 |
 | 聚合提取（3） | `PlanBuilder.extractAggFuncsInExprs`（`:3083`）、`PlanBuilder.extractAggFuncsInSelectFields`（`:3097`）、`PlanBuilder.extractAggFuncsInByItems`（`:3112`） | 基于 `AggregateFuncExtractor` |
 | GROUP BY 解析与改写（4） | `gbyResolver.Enter`（`:3456`）、`gbyResolver.Leave`（`:3478`）、`PlanBuilder.resolveGbyExprs`（`:4107`）、`PlanBuilder.rewriteGbyExprs`（`:4148`） | `GROUP BY ?` 停在 `blocked-by:D02.2`；`GROUP BY ... WITH ROLLUP` 在 `buildSelect:4567` 停在 `blocked-by:D09.4`（第 C 部分解除） |
-| `ONLY_FULL_GROUP_BY`（9） | `buildFuncDependCol`（`:3565`）、`buildWhereFuncDepend`（`:3598`）、`checkColFuncDepend`（`:3651`）、`checkExprInGroupByOrIsSingleValue`（`:3766`）、`PlanBuilder.checkOnlyFullGroupBy`（`:3808`）、`addGbyOrSingleValueColName`（`:3817`）、`PlanBuilder.checkOnlyFullGroupByWithGroupClause`（`:3858`）、`PlanBuilder.checkOnlyFullGroupByWithOutGroupClause`（`:3947`）、`colResolverForOnlyFullGroupBy.Leave`（`:4047`） | 解除 VS1-21 中关于 `ONLY_FULL_GROUP_BY` 的全部 `blocked-by:D09.4` 桩；join 依赖（`buildJoinFuncDepend`）单表时返回空 |
+| `ONLY_FULL_GROUP_BY`（10） | `buildFuncDependCol`（`:3565`）、`buildWhereFuncDepend`（`:3598`）、`checkColFuncDepend`（`:3651`）、`checkExprInGroupByOrIsSingleValue`（`:3766`）、`PlanBuilder.checkOnlyFullGroupBy`（`:3808`）、`addGbyOrSingleValueColName`（`:3817`）、`PlanBuilder.checkOnlyFullGroupByWithGroupClause`（`:3858`）、`PlanBuilder.checkOnlyFullGroupByWithOutGroupClause`（`:3947`）、`colResolverForOnlyFullGroupBy.Enter`（`:4023`）、`colResolverForOnlyFullGroupBy.Leave`（`:4047`，补 `// go:` 标注） | 解除 VS1-21 中关于 `ONLY_FULL_GROUP_BY` 的全部 `blocked-by:D09.4` 桩；join 依赖（`buildJoinFuncDepend`）单表时返回空 |
 
 **`operator/logicalop/logical_aggregation.go`（21 个）**：
 
@@ -185,17 +185,17 @@ sysbench 聚合链的直接前置。
 
 理由：这 10 个函数仅在 SELECT / HAVING / ORDER BY 含子查询时运行（`aggColNameResolver.Enter` 仅被 `allColFromAggExprNode` 调用，后者仅在 `resolveCorrelatedAggregates:3417` 调用），依赖 D09.6 的子查询上下文（`outerSchemas`、`outerNames`、`correlatedAggMapper`）。
 
-### 3.6 豁免（EXC.B / B3：仅旧 cascades 优化器调用，7 个）
+### 3.6 豁免（EXC.B / B3：仅 cascades 优化器调用，7 个）
 
-经全仓库 `pkg/` 检索，以下 7 个函数在非测试代码中**只**被 `pkg/planner/cascades/` 调用，按已确认的例外 B（EXC.B / B3，与 D09.14、D08.11 一致）不移植，在对应 Rust 文件中标注 `// go-exception: EXC.B`：
+经全仓库 `pkg/` 检索，以下 7 个函数在非测试代码中**只**被 cascades 优化器调用（其中前 2 个由**新** cascades 的 memo 经 `base.HashEquals` 调用，后 5 个由旧 cascades 规则调用）。虽然 v8.5.8 仍保留 `tidb_enable_cascades_planner=1` 开关，但 tidb-rs 按已确认的例外 B（EXC.B / B3，覆盖新旧 cascades）不支持该开关、不移植 cascades 路径（与 D09.14、D08.11 一致），在对应 Rust 文件中标注 `// go-exception: EXC.B`：
 
-1. `LogicalAggregation.Hash64`（`logical_aggregation.go:68`）：实现 cascades `base.HashEquals`。
-2. `LogicalAggregation.Equals`（`logical_aggregation.go:87`）：实现 cascades `base.HashEquals`。
-3. `LogicalAggregation.CopyAggHints`（`logical_aggregation.go:535`）：仅 `pkg/planner/cascades/transformation_rules.go:469,475,2081,2425` 调用。
-4. `LogicalAggregation.IsCompleteModeAgg`（`logical_aggregation.go:552`）：仅 `pkg/planner/cascades/transformation_rules.go:1585,2059,2180,2338` 调用。
-5. `LogicalWindow.EqualPartitionBy`（`logical_window.go:367`）：仅 `pkg/planner/cascades/transformation_rules.go:2553` 调用。
-6. `LogicalWindow.EqualOrderBy`（`logical_window.go:384`）：仅 `pkg/planner/cascades/transformation_rules.go:2554` 调用。
-7. `LogicalWindow.EqualFrame`（`logical_window.go:398`）：仅 `pkg/planner/cascades/transformation_rules.go:2555` 调用。
+1. `LogicalAggregation.Hash64`（`logical_aggregation.go:68`）：仅新 cascades memo（`pkg/planner/cascades/memo/group_expr.go:76, 105`，经 `base.HashEquals`）调用。
+2. `LogicalAggregation.Equals`（`logical_aggregation.go:87`）：仅新 cascades memo（`pkg/planner/cascades/memo/group_expr.go:76, 105`，经 `base.HashEquals`）调用。
+3. `LogicalAggregation.CopyAggHints`（`logical_aggregation.go:535`）：仅旧 cascades 规则（`pkg/planner/cascades/transformation_rules.go:469,475,2081,2425`）调用。
+4. `LogicalAggregation.IsCompleteModeAgg`（`logical_aggregation.go:552`）：仅旧 cascades 规则（`pkg/planner/cascades/transformation_rules.go:1585,2059,2180,2338`）调用。
+5. `LogicalWindow.EqualPartitionBy`（`logical_window.go:367`）：仅旧 cascades 规则（`pkg/planner/cascades/transformation_rules.go:2553`）调用。
+6. `LogicalWindow.EqualOrderBy`（`logical_window.go:384`）：仅旧 cascades 规则（`pkg/planner/cascades/transformation_rules.go:2554`）调用。
+7. `LogicalWindow.EqualFrame`（`logical_window.go:398`）：仅旧 cascades 规则（`pkg/planner/cascades/transformation_rules.go:2555`）调用。
 
 ### 3.7 随本块一并移植的其他块函数（计入各自块）
 
@@ -240,21 +240,28 @@ sysbench 聚合链的直接前置。
    - `buildWindowFunctions`：对每个 `sortWindowSpecs` 产出的窗口，**即便 `len(funcs) == 0`（未使用的命名窗口）**也会先调 `buildProjectionForWindow`（分配一个 `LogicalProjection` 的 plan id 及非列排序项的列 id，随后被丢弃，`:7222-7234`），必须照搬以保持后续算子的 plan id 和列 id 与 Go 一致。
 4. **`LogicalPlan` 的 `build_key_info` trait 方法**：目前 `crates/planner/src/base.rs` 尚未把 `build_key_info` 提升为 `LogicalPlan` trait 方法（各算子是固有方法）；本块可按现有风格为 `LogicalAggregation` / `LogicalExpand` 提供 `build_key_info` 方法，并在 `BuildKeySolver`（D09.13）接入时统一挂到 trait 分派。
 
-### 4.3 不可变 AST（`&'ast ast::SelectStmt`）下 Go 就地改写 AST 的承载（L2）
+### 4.3 不可变 AST（`&'ast ast::SelectStmt`）下 Go 就地改写 AST 的承载与预处理语句幂等性分析（L2）
 
-Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectStmt` 并在结束时恢复。Rust 中语句 AST 为只读借用 `&'ast ast::SelectStmt`（D09.1 spec §3 第 2 条，且 `ByAddr<'ast, T>` 依赖 AST 节点地址稳定），本块按以下四处分别映射，**不修改 AST 且保持语义与 Go 100% 等价**：
+Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectStmt` 且不恢复；因此 `PREPARE` / `EXECUTE` 未命中计划缓存（`tidb_enable_prepared_plan_cache = OFF`）时，Go 后续重规划看到的是**已经改写过的 `PreparedAst.Stmt`**，而 Rust 语句 AST 为只读借用 `&'ast ast::SelectStmt`（D09.1 spec §3 第 2 条，且 `ByAddr<'ast, T>` 依赖 AST 节点地址稳定），每次重规划均从原始 AST 出发。下面逐处说明承载方式及在本地 Go TiDB v8.5.8（unistore）实测验证过的幂等性结论：
 
 1. **`havingWindowAndOrderbyExprResolver.Leave` 替换聚合参数内的列（`logical_plan_builder.go:2865-2867`）**：
-   - Go：`if a.inAggFunc { return a.selectFields[index].Expr, true }`，原地把 `HAVING SUM(b)` 中的 `b` 换成 `a + 1`。
-   - Rust：在 `PlanBuilder<'ast>` 上增加按 `ByAddr<'ast, ast::ColumnName>` 索引的**聚合内列表达式替换表** `agg_col_replacements: HashMap<ByAddr<'ast, ast::ColumnName>, usize>`（值为 `select_fields` 下标，或直接 `FieldExpr<'ast>` 的克隆/引用）。`buildAggregation` 改写 `aggFunc.Args` 时，对 `ExpressionRewriter` 在遇到 `AstExpr::Column` 且命中替换表时，直接递归改写被替换的表达式（注意：被替换后的表达式中若还有列，按 Go 逻辑直接从底层计划 `p` 解析，不再二次查 `agg_col_replacements`）。如此既不改 AST，又保持外层 `AggregateFuncExpr` 地址不变（`aggMapper` 的 `ByAddr` 键有效）。
+   - Go：`if a.inAggFunc { return a.selectFields[index].Expr, true }`，原地把 `HAVING SUM(x)` 中的别名 `x` 换成 `a + 1`。
+   - Rust：在 `PlanBuilder<'ast>` 上增加按 `ByAddr<'ast, ast::ColumnName>` 索引的**聚合内列表达式替换表** `agg_col_replacements: HashMap<ByAddr<'ast, ast::ColumnName>, usize>`（值为 `select_fields` 下标）。`buildAggregation` 改写 `aggFunc.Args` 时，遇到 `AstExpr::Column` 且命中替换表即递归改写被替换的表达式（被替换表达式中的列直接从底层计划 `p` 解析，不再二次查替换表）。如此既不改 AST，又保持外层 `AggregateFuncExpr` 地址不变（`aggMapper` 的 `ByAddr` 键有效）。
+   - **幂等性（实测成立）**：被替换进来的 `selectFields[index].Expr` 内部只含表列（不能引用另一选择列别名，否则首轮即报错）；再次进入 `Leave` 时先查底层计划 `p.OutputNames()`（`resolveFromPlan:2679`），即便有同名遮蔽别名（如 `SELECT a + 1 AS x, a + 100 AS a FROM t HAVING SUM(x) = 5`），表列 `a` 仍优先匹配，不会再次被替换为 `a + 100`。已在 v8.5.8（plan cache OFF）连续 `EXECUTE` 3 次验证结果完全一致。
 2. **`gbyResolver` 替换别名与位置项并标记 `UseAsValueInGbyByClause`（`:3463, 3502, 3504, 3532, 4139-4143`）**：
-   - Go：当 `!resolver.isParam` 时写回 `item.Expr = retExpr`（后续 `checkOnlyFullGroupByWithGroupClause` 读的是写回后的 `sel.GroupBy.Items`！），同时返回 `gbyExprs` 供 `rewriteGbyExprs`；若别名指向 `ParamMarkerExpr`，置 `isParam.UseAsValueInGbyByClause = true` 防止再次被当作位置项。
-   - Rust：`resolve_gby_exprs` 返回两份视图：`gby_exprs: Vec<ResolvedExpr<'ast>>`（传给 `rewrite_gby_exprs`）和 `resolved_gby_items: Vec<ResolvedExpr<'ast>>`（即 `!is_param` 时替换、`is_param` 时保留原 `item.expr`，传给 `check_only_full_group_by_with_group_clause` 与 `havingWindowAndOrderbyExprResolver.gby_items`），同时在 `gbyResolver` 内用 `HashSet<ByAddr<'ast, ast::ParamMarkerExpr>>` 记 `use_as_value_in_gby`，完全复现 Go 行为而不改 AST。
-3. **`aggOrderByResolver` 替换 `GROUP_CONCAT(... ORDER BY 1)` 位置项（`:108, 132-133`）**：
-   - Rust：`agg_order_by_resolver` 不改 AST，直接返回替换后的 `&'ast ast::Expr`（位置命中时返回 `&true_args[pos - 1]`，否则原节点）交给 `b.rewrite`。
+   - Go：当 `!resolver.isParam` 时写回 `item.Expr = retExpr`（后续 `checkOnlyFullGroupByWithGroupClause` 读的是写回后的 `sel.GroupBy.Items`），同时返回 `gbyExprs` 供 `rewriteGbyExprs`；若别名指向 `ParamMarkerExpr`，置 `isParam.UseAsValueInGbyByClause = true` 防止下次被当作位置项。
+   - Rust：`resolve_gby_exprs` 返回两份视图：`gby_exprs: Vec<ResolvedExpr<'ast>>`（传给 `rewrite_gby_exprs`）和 `resolved_gby_items: Vec<ResolvedExpr<'ast>>`（即 `!is_param` 时替换、`is_param` 时保留原 `item.expr`，传给 `check_only_full_group_by_with_group_clause` 与 `havingWindowAndOrderbyExprResolver.gby_items`），同时在 `gbyResolver` 内用 `HashSet<ByAddr<'ast, ast::ParamMarkerExpr>>` 记 `use_as_value_in_gby`。
+   - **幂等性（常规路径成立；发现 Go 位置项 + 参数标记的非幂等缺陷）**：
+     - 普通别名 / 位置项指向非参数表达式（如 `GROUP BY x`、`GROUP BY 1` 指向 `a + 1`）：替换后表达式内部只含表列，二次 `EXECUTE` 时表列 `idx >= 0` 不再触发替换，**幂等**。
+     - 别名指向参数标记（`SELECT ? AS z FROM t GROUP BY z`）：Go 在 `:3504` 置 `UseAsValueInGbyByClause = true`，已在 v8.5.8 实测 `@p=1`、`@p=99` 两次 `EXECUTE` 均成功且一致，**幂等**。
+     - **位置项指向参数标记（`SELECT ? AS z FROM t GROUP BY 1`）**：Go 在 `PositionExpr` 分支（`:3532`）写回 `item.Expr = ParamMarkerExpr` 时**漏设** `UseAsValueInGbyByClause = true`！已在 v8.5.8 实测：`PREPARE s FROM 'SELECT ? AS z FROM t GROUP BY 1'`（`tidb_enable_prepared_plan_cache = OFF`）在 `EXECUTE s USING @p`（`@p = 99`）时直接报 `ERROR 1105 (HY000): Unknown column '99' in 'group statement'`（而 `@p = 1` 仅因 `1` 巧合在 `1..1` 范围内侥幸通过，第二次换 `@p = 99` 立刻报错；同查询非预处理与 `GROUP BY z` 均正常，见 §8 第 7 条）。Rust 不可变 AST 天然不触发该 Go 缺陷（当前参数位置项暂停在 `blocked-by:D02.2`，待 D02.2 放开后按 §8 第 7 条处理）。
+3. **`aggOrderByResolver` 替换 `GROUP_CONCAT(... ORDER BY 1)` 位置项（`:108, 132-133, 317`）**：
+   - Go：`buildAggregation:317` 调用 `retExpr, _ := byItem.Expr.Accept(resolver)` 后直接将 `retExpr` 传给 `b.rewrite`，**并未写回 `byItem.Expr`**（已在 v8.5.8 实测 `PREPARE s FROM 'SELECT GROUP_CONCAT(?, a ORDER BY 1) FROM t'`，plan cache OFF，两次 `EXECUTE` `@p = 99` 均正常返回 `991,992`）。
+   - Rust：`agg_order_by_resolver` 同样不改 AST，直接返回替换后的 `&'ast ast::Expr`（位置命中时返回 `&true_args[pos - 1]`，否则原节点）交给 `b.rewrite`，**天然幂等**。
 4. **窗口规范的合并与默认帧调整（`buildWindowSpecs`、`mergeWindowSpec`、`handleDefaultFrame`，`:7385-7591`）**：
-   - Go：复制 `ast.WindowSpec` 值结构体并在副本上改写 `PartitionBy`、`OrderBy`、`Ref`、`Frame`（`mergeWindowSpec` 对未命名内联窗口 `OVER (w)` 直接改写 `windowFunc.Spec`，`:7470-7476`）。
+   - Go：`buildWindowSpecs:7580` 复制 `newSpec := spec`（不改 `sel.WindowSpecs`），`handleDefaultFrame` 每次修改也复制 `newSpec := *spec`；只有内联引用命名窗口的 `windowFunc.Spec`（`Name.L == "" && Ref.L != ""`）会在 `mergeWindowSpec`（`:7470-7476, 7556-7572`）被原地填入 `ref.PartitionBy` / `ref.OrderBy` 并清空 `spec.Ref = ""`。
    - Rust：定义构建器本地结构 `WindowSpecW<'ast>`，借用原始的 `name`、`ref_`、`partition_by: Option<&'ast PartitionByClause>`、`order_by: Option<&'ast OrderByClause>`，以及 `frame: Option<CowFrame<'ast>>`（借用原 `FrameClause` 或持有 `handleDefaultFrame` 新建的默认 `FrameClause`）。`groupedWindow` 与 `orderedSpec` 以 `WindowSpecId(usize)`（在本地 `Vec<WindowSpecW<'ast>>` 中的下标）代替 Go 的 `*ast.WindowSpec` 指针作为键。
+   - **幂等性（实测成立）**：Go 在首次 `mergeWindowSpec` 校验并合入 `ref.PartitionBy` / `ref.OrderBy` 后将 `spec.Ref` 清空；二次 `EXECUTE` 时 `spec.Ref.L == ""` 跳过 `mergeWindowSpec`，直接使用已合入的 `PartitionBy` / `OrderBy`，`handleDefaultFrame` 得到完全相同的 `WindowSpec`；且未被引用的命名窗口校验仍基于未改动的 `sel.WindowSpecs`。已在 v8.5.8（plan cache OFF）对 `SELECT SUM(a) OVER (w ORDER BY b) FROM t WINDOW w AS (PARTITION BY a)` 连续 `EXECUTE` 两次验证一致。
 
 ### 4.4 错误、panic 与 `defer` 顺序
 
@@ -284,7 +291,7 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
   2. `buildWindowSpecs`（`:7584`）：遍历 `specsMap` 调 `resolveWindowSpec`。Rust 按 `sel.window_specs` 的声明顺序遍历（`BTreeMap` 查表 + 按输入切片顺序解析）。
   3. `groupWindowFuncs`（`:7523`）：遍历 `b.windowSpecs` 追加未使用的命名窗口。Rust 按 `sel.window_specs` 的声明顺序追加。
   4. `resolveCorrelatedAggregates`（`:3418`，第 D 部分）：遍历 `colMap` 追加外层辅助列。Rust 按 `p.output_names()` 中的列下标顺序追加，保证列顺序和列 id 确定。
-- **`M-INT`**：`offset`、`pos`、`DistinctSize`、`idx` 等 Go `int` 统一为 `isize`（切片下标处 `as usize`）。`LogicalExpand.GenerateGroupingIDModeBitAnd`（`logical_expand.go:366-373`）和 `GenerateGroupingMarks`（`:272-282`）中的 `res = res << 1` 仅在 `GroupingMode_ModeBitAnd`（≤ 64 个 grouping sets，即最多 63 个 distinct 列）运行，不会溢出；写 `res = res.wrapping_shl(1)` 以防边界测试（见 §8 第 1 条）。
+- **`M-INT`**：`offset`、`pos`、`DistinctSize`、`idx` 等 Go `int` 统一为 `isize`（切片下标处 `as usize`）。`LogicalExpand.GenerateGroupingIDModeBitAnd` 在 `logical_expand.go:234` 于 `:235-237` 判断 `ModeNumericSet` **之前**无条件调用，因此在超过 64 个 grouping sets 时也会运行（高位左移溢出，随后被 `ModeNumericSet` 覆盖）；只有 `GenerateGroupingMarks`（`:272-282`）受 `ModeBitAnd` 限制。Rust 中 `u64 << 1` 在 debug 与 `release-checked` 下都不会因高位丢弃而 panic（仅移位量 ≥ 64 才 panic），与 `res.wrapping_shl(1)` 等价，按 `M-INT` 写 `res << 1` 即可。
 - **`M-NAME`**：`WindowFrame.Clone`、`FrameBound.Clone`、`GroupingSet.Clone`、`GroupingExprs.Clone` 按 D08.11 先例写为固有方法 `clone_frame`、`clone_bound`、`clone_set`、`clone_exprs`（同时 `#[derive(Clone)]`），`StringWithCtx` 为 `string_with_ctx`。
 - **`M-FMA` / `M-F2I`**：tracker `data/go_fma_sites.tsv` 中本块 5 个文件均无位置；本块无浮点转整数。
 - **`Restore` 的 flags=0 模式**：Go 的 `restoreByItemText`（`:7160`）与 `specEqual`（`:7450`）调用 `format.NewRestoreCtx(0, &sb)`，而 `crates/parser/src/restore.rs` 目前硬编码了 `DefaultRestoreFlags`（反引号 + 大写关键字 + 单引号字符串）。第 B 部分在 `crates/parser/src/restore.rs` 为 `Expr` / `WindowSpec` 增加 flags=0（无反引号、小写关键字、双引号字符串）模式，确保 `sortWindowSpecs` 排序与 `specEqual` 去重和 Go 完全一致。
@@ -301,7 +308,7 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
 | `logical_plan_builder.go:214`（`buildExpand`） | `tp := NewFieldType(TypeLonglong); tp.SetFlag(Unsigned \| NotNull)` | **S** | 刚新建的 `FieldType` |
 | `logical_plan_builder.go:2751`（`resolveFromPlan`） | `sf.Expr.SetType(col.GetStaticType())` | **S** | 刚新建的 AST 节点，Rust AST 不存此字段 |
 | **`pkg/expression/grouping_sets.go:506`（`AdjustNullabilityFromGroupingSets`），经 `logical_plan_builder.go:192-193`（`buildExpand`）调用** | `expandSchema := proj.Schema().Clone()` 后原地 `schema.Columns[idx].RetType.SetFlag(... &^ NotNullFlag)`。Go 中 `expandSchema`、`proj.Schema()`（`Proj4Expand`）、`distinctGbyCols`、`newGbyItems`（→ `LogicalAggregation.GroupByItems`）及 `rollupGroupingSets` 共享同一个 `*FieldType` 指针 | **V1**（**进入客户端列定义**！`replaceGroupingFunc` 把 `SELECT a ... GROUP BY a WITH ROLLUP` 中的 `a` 换成 `expand.DistinctGroupByCol[i]`，若不模拟，非空列 `a` 的 ROLLUP 结果在客户端列定义中仍标 `NOT NULL` 且 `GroupByItems` 类型与 Go 不同） | **按 `M-FT` 显式模拟**（`// Go aliasing (M-FT): grouping_sets.go:506, clears NotNullFlag on shared FieldType of Proj4Expand schema, DistinctGroupByCol, RollupGroupingSets and newGbyItems`）：在 `build_expand` 调完 `adjust_nullability_from_grouping_sets` 后，按 `UniqueID` 将被清除的 `NotNullFlag` 同步写回 `proj.schema_mut()`、`distinct_gby_cols`、`new_gby_items` 与 `rollup_grouping_sets`。配回归测试 `rollup_adjust_nullability_syncs_gby_cols` |
-| `logical_plan_builder.go:7251, 7260`（`buildWindowFunctions` → `NewWindowFuncDesc`） | `schema := np.Schema().Clone()` 后，对 `first_value` / `last_value` / `nth_value`，`window_func.go:74,76` 原地 `DelFlag(NotNullFlag)` 会同时清掉 `schema` 中对应源列的 `NOT NULL` | **疑似 V1**（已登记于 D08.11 spec §5 及决定点 6，可能进入客户端列定义） | 第 B 部分随 D08.11 第 C 部分用计划 / 列定义向量确认；确认可见则在 `build_window_functions` 中按 `UniqueID` 同步清 `schema` 对应列的 `NotNullFlag`（`// Go aliasing (M-FT): window_func.go:76 & logical_plan_builder.go:7251`），配回归测试 |
+| **`logical_plan_builder.go:7251, 7260`（`buildWindowFunctions` → `NewWindowFuncDesc`）** | `schema := np.Schema().Clone()` 后，对 `first_value` / `last_value` / `nth_value`，`window_func.go:74,76` 原地 `DelFlag(NotNullFlag)` 会同时清掉 `schema` 中对应源列的 `NOT NULL` | **V1（已实测确认，#402）**（`CREATE TABLE tw(a INT NOT NULL)` 后 `mysql --column-type-info`：`SELECT a FROM tw` 中 `a` 带 `NOT_NULL`，`SELECT a, first_value(a) OVER () FROM tw` 中 `a` 丢掉 `NOT_NULL`，`last_value` / `nth_value` 同；`SELECT a, b, first_value(b) OVER ()` 仅 `b` 丢 `NOT_NULL`；`max`/`min`/`lead`/`lag` 在 `base_func.go:315-318` 先 `Clone()` 再改，源列不受影响） | **必做：按 `M-FT` 显式模拟**（已同步 D08.11 决定点 6 选项 A 与 #403 合并状态：`D08.11-C` 已在 `new_window_func_desc` 内模拟 `desc.args[0]` 的 `NotNullFlag` 清除，本块第 B 部分在 `build_window_functions` 中按 `UniqueID` 同步清除输出 `schema` 对应源列的 `NotNullFlag`，标 `// Go aliasing (M-FT): window_func.go:76 & logical_plan_builder.go:7251`），配回归测试 `window_first_last_nth_value_clears_schema_source_col_not_null` |
 | `logical_plan_builder.go:7268`（`buildWindowFunctions` → `WrapCastForAggArgs`） | 时间分支共享 `a.RetTp` 经 `WrapWithCastAsTime` 修改 | **V1**（已由 D08.11 spec §5 模拟处理） | 由 D08.11 内部完成，本块直接调用 |
 | `logical_plan_builder.go:1699-1703`（`resolveGroupingTraverseAction.Transform`） | 原地改 `ScalarFunction.GetArgs()[i]` | **S**（`M-EXPR`） | 输入 `newExpr` 刚由 `rewrite` 建出，独占；Rust 经 `Arc::make_mut` 修改 |
 | `logical_plan_builder.go:148, 240, 1984`（`OutputNames`） | `buildExpand` 往 `p.OutputNames()` 上 `append`；`buildDistinct` 共享 `child.OutputNames()` | **S** | `buildExpand` 先克隆 `Vec<Arc<FieldName>>` 再 `push`（避免 Go slice 底层数组别名）；`buildDistinct` 克隆 `NameSlice` |
@@ -317,15 +324,21 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
 
 ## 5. 边界桩
 
-### 5.1 本块消除的现有 `blocked-by:D09.4` 桩
+### 5.1 本块消除的现有 `blocked-by:D09.4` 桩与关联引用
 
-按当前仓库 `grep -rn 'D09\.4' crates/` 与 tracker `data/stubs.tsv`：
+按当前仓库 `grep -rn 'D09\.4' crates/` 与 tracker `data/stubs.tsv`（共 16 行）：
 
-- **第 A 部分消除**：`logical_plan_builder.rs` 中 `build_select_inner`（GROUP BY 支）、`build_select_rest`（`buildAggregation`、`buildDistinct`）、`check_only_full_group_by`、`check_only_full_group_by_with_out_group_clause`、`check_order_by_in_distinct`、`extract_singe_value_col_names_from_where`、`all_col_from_expr_node`（含 `colNameResolver`）。
-- **第 B 部分消除**：`logical_plan_builder.rs` 中 `build_select_inner`（窗口支）、`compare_items`（含 `getAllByItems`、`restoreByItemText`）。
-- **第 C 部分消除**：`expression_rewriter.rs:1151`（`GROUPING()` 从 `D09.4` 转为更精确的 `D08.9`）、`optimizer.rs:184-188`（`ResolveExpand`）。
-- **第 D 部分消除**：`logical_plan_builder.rs` 中 `all_col_from_agg_expr_node`。
-- **归其他块、本块不消除（但本块完成后这些桩应改标实际阻塞块）**：`optimizer.rs` 的 4 条聚合规则（实属 **D09.9**，现标 `D09.4`）、`rule_inject_extra_projection.rs:100` 的 `InjectProjBelowAgg`（实属 **D10.1**，现标 `D09.4`）。
+- **第 A 部分消除 `stubs.tsv`（7 行完整消除 + 1 行部分消除）**：`logical_plan_builder.rs` 中 `build_select_rest`（`buildAggregation`、`buildDistinct`）、`check_only_full_group_by`、`check_only_full_group_by_with_out_group_clause`、`check_order_by_in_distinct`、`extract_singe_value_col_names_from_where`、`all_col_from_expr_node`（含 `colNameResolver`），以及 `build_select_inner` 中的 GROUP BY 支（`build_select_inner` 在 `stubs.tsv` 占 1 行，窗口支留至第 B 部分）。
+- **第 B 部分消除 `stubs.tsv`（2 行）**：`logical_plan_builder.rs` 中 `build_select_inner`（窗口支，至此该行彻底消失）、`compare_items`（含 `getAllByItems`、`restoreByItemText`）。
+- **第 C 部分消除 `stubs.tsv`（2 行）**：`expression_rewriter.rs:1151`（`leave` 中 `GROUPING()` 从 `D09.4` 改标更精确的 `D08.9`）、`optimizer.rs:184-188`（`RESOLVE_EXPAND`）。
+- **第 D 部分消除 `stubs.tsv`（1 行）**：`logical_plan_builder.rs` 中 `all_col_from_agg_expr_node`。
+- **归其他块、本块不消除（5 行，本块第 A 部分完成后应改标实际阻塞块）**：`optimizer.rs` 的 4 条聚合规则（`AGGREGATION_ELIMINATOR`、`AGGREGATION_PUSH_DOWN_SOLVER`、`MAX_MIN_ELIMINATOR`、`SKEW_DISTINCT_AGG_REWRITER`，实属 **D09.9**，现标 `D09.4`）、`rule_inject_extra_projection.rs:100` 的 `inject_proj_below_agg`（在 tracker 中属 D09.13，本块完成后应改标 `blocked-by:D10.1`）。
+- **除 `stubs.tsv` 16 行之外，各部分还需同步更新的 `D09.4` 注释与测试断言**：
+  - `crates/planner/src/core/logical_plan_builder.rs:1559, 1819, 1840` 的 `// go:` L2 注释（删去其中的 `blocked-by:D09.4`）；
+  - `crates/planner/src/core/logical_plan_builder.rs:674, 1001, 1005, 1016, 1113` 的分支注释（第 A / B / C 部分分别接入真实逻辑）；
+  - `crates/planner/tests/govec_selectbuild.rs:80`、`govec_optdriver.rs:103`、`govec_findbest.rs:89` 中的 `("D09.4", 15)`（随第 A / B 部分按实际解除数调低至 0）；
+  - `crates/planner/tests/govec_rewrite.rs:56` 中的 `("D09.4", 2)`（第 C 部分将 `GROUPING()` 改标 `D08.9`）；
+  - `crates/session/tests/checkpoint.rs:162` 与 `crates/session/src/tests/sbtest_results.rs:483-533`（第 A 部分完成后聚合语句推进至下游 `D09.13` / `D09.9` / `D10.3`，更新断言块名直至全链路贯通）。
 
 ### 5.2 本块保留或新增的边界桩
 
@@ -341,7 +354,7 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
 | `resolve_correlated_aggregates`（第 A–C 部分期间） | `logical_plan_builder.go:3383-3440` | 临时 `blocked-by:D09.6`（已有） | 无子查询直接返回 `Ok(())`，有子查询返回 1235；第 D 部分随 D09.6 解除 |
 | `build_aggregation` / `resolve_gby_exprs` / `check_only_full_group_by*` 中的 join 支 | `logical_plan_builder.go:381, 4115, 3905, 3982` | 依赖 D09.3（单表不可达，不另增桩；`buildJoin` 先停在 `blocked-by:D09.3`） | D09.3 合并后接通 `findJoinFullSchema` 与 `buildJoinFuncDepend` |
 
-**棘轮说明**（`scripts/check_stub_ratchet.py`）：第 A 部分删掉 `logical_plan_builder.rs` 中 7 处 `blocked-by:D09.4` 桩，新增 `LogicalAggregation` 的 `explain_info`（D10.9）、`extract_fd`（D09.14）、`exhaust_physical_plans`（D10.3）与 `rollup`（D09.4，细化）、`GROUP BY ?` / `GROUP_CONCAT ORDER BY ?`（D02.2），属 port-block §3 允许的两种细化 / 新纳入算子情形；各部分 PR 正文逐条列出实际脚本计数。
+**棘轮说明**（`scripts/check_stub_ratchet.py`）：第 A 部分删掉 `logical_plan_builder.rs` 中 6 行整函数/分支桩并消掉 `build_select_inner` 中的 GROUP BY 支（`build_select_inner` 留待第 B 部分彻底删除），新增 `LogicalAggregation` 的 `explain_info`（D10.9）、`extract_fd`（D09.14）、`exhaust_physical_plans`（D10.3）与 `rollup`（D09.4，细化）、`GROUP BY ?` / `GROUP_CONCAT ORDER BY ?`（D02.2），属 port-block §3 允许的两种细化 / 新纳入算子情形；各部分 PR 正文逐条列出实际脚本计数。
 
 ## 6. 测试计划
 
@@ -368,7 +381,7 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
     - 聚合与去重：单 / 多聚合函数、等价聚合合并、带 `DISTINCT`、带 `GROUP_CONCAT(... ORDER BY 1, a DESC SEPARATOR ';')`、`HAVING` 聚合内别名替换（`SELECT a+1 AS b FROM t HAVING SUM(b) < 0`）、`ORDER BY` 聚合与非聚合混合；
     - `GROUP BY`：列、别名、位置项（`GROUP BY 1`、越界报错、引用聚合/窗口报错）、表达式、带 `HAVING` / `ORDER BY` / `LIMIT`；
     - `SELECT DISTINCT` + `ORDER BY`（`ONLY_FULL_GROUP_BY` 开 / 关：合法表达式匹配、引用列匹配、非法列 / 聚合报错 `12442`）；
-    - `ONLY_FULL_GROUP_BY`（有 / 无 GROUP BY）：单值 WHERE（`a = 1`、`a = -1`、`1 = a`）、主键 / NOT NULL 唯一键函数依赖、可空唯一键（不放行）、WHERE 列等值传递（`a = b AND b = 1`）、复杂表达式 `ExpressionDeepEqual`、`ANY_VALUE()`；
+    - `ONLY_FULL_GROUP_BY`（有 / 无 GROUP BY）：单值 WHERE（`a = 1`、`a = -1`、`1 = a`）、主键 / NOT NULL 唯一键函数依赖、可空唯一键（不放行）、WHERE 列等值传递（`a = b AND b = 1`）、复杂表达式 `ExpressionDeepEqual`、`ANY_VALUE()`、以及 `ORDER BY` 违规时报错中列名固定为空串 `''`（见 §8 第 4 条）；
     - 逻辑算子单测 / op（`LogicalAggregation` 的 `ReplaceExprColumns`、`BuildKeyInfo` / `BuildSelfKeyInfo`、`splitCondForAggregation` / `pushDown*PredicatesForAggregation`、`CanPullUp`、`CanPushToCop`、`HasDistinct` / `HasOrderBy` / `DistinctArgsMeetsProperty` / `ResetHintIfConflicted` / `GetGroupByCols` / `GetUsedCols` / `GetPotentialPartitionKeys` / `getGroupNDVs`）；
     - 随机单表聚合 / GROUP BY / DISTINCT 查询生成器（约 500+ 条，按结构排除 `M-MAPORDER` 多列同时违规的 `ONLY_FULL_GROUP_BY` 报错，见 §4.6）。
   - **第 B 部分**：
@@ -387,8 +400,12 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
 ### 6.3 Rust 单元测试
 
 - `agg_col_replacements`（不可变 AST 下 `SELECT a+1 AS b FROM t HAVING SUM(b) < 0` 聚合参数正确改写且不重复替换）。
+- **预处理语句重复 `EXECUTE` 幂等性测试（关闭计划缓存 `tidb_enable_prepared_plan_cache = OFF` 后同一预处理语句连续 `EXECUTE` 两次，验证计划与结果完全一致，对应 §4.3）**：
+  - 窗口命名引用：`PREPARE s FROM 'SELECT SUM(a) OVER (w ORDER BY b) FROM t WINDOW w AS (PARTITION BY a)'`（第 B 部分）；
+  - `GROUP BY` 别名 / 位置项：`PREPARE s FROM 'SELECT a + 1 AS x FROM t GROUP BY x'` 与 `GROUP BY 1`（第 A 部分）；
+  - `HAVING` 聚合内别名（含遮蔽表列名）：`PREPARE s FROM 'SELECT a + 1 AS x, a + 100 AS a FROM t HAVING SUM(x) = 5'`（第 A 部分）。
 - `rollup_adjust_nullability_syncs_gby_cols`（§4.7 V1 模拟回归测试：非空列 ROLLUP 后 `Proj4Expand`、`LogicalExpand`、`DistinctGroupByCol`、`GroupByItems` 的 `NotNullFlag` 均被清除）。
-- `build_window_functions` 的 `M-FT` 回归测试（若第 B 部分实测确认 `window_func.go:76` 对输出列可见）。
+- `window_first_last_nth_value_clears_schema_source_col_not_null`（§4.7 已确认 V1 #402 的必做回归测试：`first_value` / `last_value` / `nth_value` 同步清除输出 `schema` 对应源列的 `NotNullFlag`，而 `max` / `min` / `lead` / `lag` 不影响源列）。
 - `defer` 守卫测试：各函数提前报错返回后 `PlanBuilder.check_col_priv` 均恢复原值。
 - `PosFromPositionExpr` / `ParamMarkerInPrepareChecker` 单元测试。
 
@@ -398,70 +415,87 @@ Go 的 `PlanBuilder` 在构建期间有多处直接改写传入的 `*ast.SelectS
 
 ## 7. 与 Go 的已知差异
 
-1. **AST 不可变，四处就地修改改为构建器本地覆盖**（`logical_plan_builder.go:108, 133, 2866, 3463, 3502, 3504, 3532, 4140, 7470-7571`）：见 §4.3，纯内部承载差异（L2），对计划、结果、报错无可见影响。
+1. **AST 不可变，三处 Go 就地修改改为构建器本地覆盖（外加 `aggOrderByResolver` 本身不改 AST）**（`logical_plan_builder.go:2866, 3463, 3502, 3504, 3532, 4140, 7470-7571`）：见 §4.3，常规路径与 Go 预处理语句重规划均已实测幂等（L2）；唯一差异是 Go `gbyResolver` 位置项指向 `?` 漏设 `UseAsValueInGbyByClause` 的缺陷（§8 第 7 条）。
 2. **四个 map 遍历改为确定顺序**（`logical_plan_builder.go:3910, 7523, 7584, 3418`）：按 `M-MAPORDER`（§4.6）。仅在 Go 自身行为不确定（多列同时违反 `ONLY_FULL_GROUP_BY`、多个窗口规范同时报错、多个未用命名窗口排序键相同）时，Rust 稳定返回 Go 可能返回的其中一种结果。
 3. **Go 忽略错误的位置遇到 `blocked` 向上返回**（`logical_plan_builder.go:3555, 3675, 3713, 3818, 4087, 7161`；`logical_aggregation.go:294, 763`）：仅在命中尚未移植块的边界桩时生效，确保不静默偏离 Go（与 D09.9 spec §4.4 一致）。
-4. **7 个 cascades 专用方法不移植**（`logical_aggregation.go:68, 87, 535, 552`；`logical_window.go:367, 384, 398`）：见 §3.6（EXC.B / B3），tidb-rs 不含旧 cascades 优化器，无用户可见影响。
+4. **7 个 cascades 专用方法不移植**（`logical_aggregation.go:68, 87, 535, 552`；`logical_window.go:367, 384, 398`）：见 §3.6（EXC.B / B3），tidb-rs 不支持 `tidb_enable_cascades_planner=1`，无用户可见影响。
 5. **`intset.FastIntSet` 改为 `BTreeSet<i64>`**（`grouping_sets.go`、`logical_expand.go`）：无可见差异（L2）。
 6. **`GroupingSet.MemoryUsage` / `GroupingExprs.MemoryUsage`**：按 Go 64 位结构尺寸常量计算（`grouping_sets.go:279, 406`，L2），数值与 Go 64 位一致。
 7. **临时边界差异（随对应块消失）**：`GROUP BY ?` / `GROUP_CONCAT(... ORDER BY ?)`（`blocked-by:D02.2`）、`LogicalAggregation.ExplainInfo`（`blocked-by:D10.9`）、`ExtractFD`（`blocked-by:D09.14`）、窗口 `RANGE INTERVAL`（`blocked-by:D08.7`）、`GROUPING()` 函数体（`blocked-by:D08.9`）、物理聚合枚举（`blocked-by:D10.3`）。
 
-## 8. 读代码发现的可能的 Go 问题
+## 8. 读代码发现的 Go 问题（已在本地 Go TiDB v8.5.8 实跑核验）
 
-以下 7 条均在阅读 Go TiDB v8.5.8 源码时发现，**尚未在运行中的 v8.5.8 上复现**。按 port-block §1，在实现对应部分时先在 v8.5.8 上复现并开英文 `upstream-pitfall` issue（标 `go-bug-kept` 或 `go-bug-fixed`）；若复现不成立则删除对应条目。
+以下 7 条均已在本地 Go TiDB `v8.5.8`（`8b857efa2`，unistore）上实跑验证（原草案第 7 条 `LogicalWindow.EqualFrame` 经核验不成立，已删除）：
 
-1. **`buildExpand` 与 `DistinctSize` 的 64 阈值条件不一致，导致 `GenLevelProjections` 越界 panic（疑似可复现的 panic）**
+1. **`buildExpand` 与 `DistinctSize` 的 64 阈值条件不一致，导致 `GenLevelProjections` 越界 panic（已复现，#412，交 §9.1 决定点 1）**
    - **位置**：`logical_plan_builder.go:205-210`、`operator/logicalop/logical_expand.go:202, 235-237, 389`、`pkg/expression/grouping_sets.go:557-560, 586, 615`。
-   - **机制**：`buildExpand` 按 `len(expand.RollupGroupingSets) > 64` 决定启用 `tipb.GroupingMode_ModeNumericSet`（`:206-208`）；但 `DistinctSize()` 调用 `DistinctSizeWithThreshold(64)`，仅在去重后的 `len(distinctGroupingIDsPos) > 64` 时才分配 `RollupGroupingIDs` 与 `RollupID2GIDS`，否则返回 `nil`（`grouping_sets.go:586, 615`）。当 `GROUP BY ... WITH ROLLUP` 包含 ≥ 64 项且存在语义重复项，使得总 grouping sets 数 > 64 但去重后 ≤ 64 时，`ResolveExpand` 调用 `GenLevelProjections` → `GenerateGroupingIDIncrementModeNumericSet(0)` 读取 `p.RollupGroupingIDs[0]`（`logical_expand.go:389`），触发 `index out of range [0] with length 0` panic（被优化器恢复成 1105）。
-   - **v8.5.8 复现方法**：建表 `CREATE TABLE t(a INT);`，执行 `EXPLAIN SELECT COUNT(*) FROM t GROUP BY a, a, ... (共 64 个 a) WITH ROLLUP;`（或任意 64 项含重复列的 ROLLUP），对比 MySQL 8.0 行为。若复现成立且 MySQL 8.0 正常执行，实现第 C 部分时可按宪章第九条 3 处理。
-2. **`GroupingSets.MergeOne` 中间插入漏检前驱子集关系（疑似逻辑错误）**
+   - **机制**：`buildExpand` 按 `len(expand.RollupGroupingSets) > 64` 决定启用 `tipb.GroupingMode_ModeNumericSet`（`:206-208`）；但 `DistinctSize()` 调用 `DistinctSizeWithThreshold(64)`，仅在去重后的 `len(distinctGroupingIDsPos) > 64` 时才分配 `RollupGroupingIDs` 与 `RollupID2GIDS`，否则返回 `nil`（`grouping_sets.go:586, 615`）。当 `GROUP BY ... WITH ROLLUP` 包含 ≥ 64 项且去重后 ≤ 63 列时，`ResolveExpand` → `GenLevelProjections`（`:236`）→ `GenerateGroupingIDIncrementModeNumericSet(0)`（`:389`）对 `nil` 切片取 `p.RollupGroupingIDs[0]` 触发越界 panic（在 `optimize.go:142` 被 recover 成 1105）。
+   - **v8.5.8 实测结果**：`CREATE TABLE t(a INT); SELECT COUNT(*) FROM t GROUP BY a, a, ...（64 个 a）WITH ROLLUP;` 返回 `ERROR 1105 (HY000): runtime error: index out of range [0] with length 0`；而 63 个 `a`、64 / 65 个不同列、64 个不同列 + 1 个重复均正常执行。
+   - **走向**：已开 `upstream-pitfall` issue **#412**。因修正会改变 `LogicalExpand` 的 grouping mode / `LevelExprs`，而 Expand 在 MPP 下可下推到 TiFlash，落在宪章第九条 3 的 TiFlash 排除条款，**交 §9.1 决定点 1 由负责人决定**。
+2. **`GroupingSets.MergeOne` 中间插入漏检前驱子集关系（机制成立，但 SQL 不可达，照 Go 移植）**
    - **位置**：`pkg/expression/grouping_sets.go:110-142`。
-   - **机制**：从右向左查找插入位置时，对 `j < len(oneNewGroupingSet)-1` 且 `!targetOne.SubSetOf(cur)` 的情况直接落入第 136–141 行将 `targetOne` 插入 `j` 与 `j+1` 之间，未检查 `cur.SubSetOf(targetOne)`。例如已有 `[[a], [a, b, c]]`，合并 `[b]` 会得到 `[[a], [b], [a, b, c]]`，破坏"每个前驱是后继的子集"的前缀不变量。
-   - **v8.5.8 复现方法**：在 `grouping_sets_test.go` 中对 `GroupingSets{{{a}, {a, b, c}}, {{b}}}.Merge()` 调用并检查结果是否满足前缀包含关系；再验证是否可由 3-stage multi-distinct agg（`task.go:1804`）经 SQL 触发错误结果。
-3. **`checkOnlyFullGroupByWithOutGroupClause` 覆盖 `firstOrderByAggColIdx` 且 HAVING 沿用最后 SELECT 列下标**
+   - **机制**：从右向左查找插入位置时，对 `j < len(oneNewGroupingSet)-1` 且 `!targetOne.SubSetOf(cur)` 的情况直接落入第 136–141 行将 `targetOne` 插入 `j` 与 `j+1` 之间，未检查 `cur.SubSetOf(targetOne)`。已确认 `{{a}, {a, b, c}}` 合并 `{b}` 得 `[(a) (b) (a, b, c)]`。
+   - **可达性与走向**：**SQL 不可达**——唯一生产调用方 `task.go:1804`（仅 MPP 3-stage multi-distinct agg）只比较 `Merge()` 结果的长度，一旦发生合并就放弃三阶段聚合并发 warning。按宪章第一条 2 **照 Go 移植**，第 C 部分实现时开 `upstream-pitfall`（`go-bug-kept`）。
+3. **`checkOnlyFullGroupByWithOutGroupClause` 覆盖 `firstOrderByAggColIdx` 且 HAVING 沿用最后 SELECT 列下标（已复现，照 Go 移植）**
    - **位置**：`logical_plan_builder.go:3952-3971, 4027-4029`。
-   - **机制**：(a) `colResolverForOnlyFullGroupBy.Enter` 在 `orderByClause` 每次遇到聚合都覆盖 `c.firstOrderByAggColIdx = c.exprIdx`（`:4028`），记录的实为**最后一个**而非第一个聚合；(b) 遍历 `sel.Having`（`:3957-3959`）未更新 `curClause` 与 `exprIdx`，沿用最后一个 SELECT 列的 `exprIdx`，导致 HAVING 中的违规列在 `ErrMixOfGroupFuncAndFields` 中报出最后一条 SELECT 列的序号。
-   - **v8.5.8 复现方法**：在默认 `ONLY_FULL_GROUP_BY` 下执行 `CREATE TABLE t(a INT PRIMARY KEY, b INT, c INT);` 后跑 `SELECT a FROM t ORDER BY COUNT(a), SUM(b);`（观察是否报 `Expression #2` 而非 `#1`）和 `SELECT a, 1 FROM t WHERE a = 1 HAVING SUM(b) > 0 AND c > 0;`（观察 `ErrMixOfGroupFuncAndFields` 的序号是否为 `2`）。仅影响报错序号，按宪章第一条 2 照 Go 移植。
-4. **`checkOnlyFullGroupByWithGroupClause` 同列在 ORDER BY 覆盖 SELECT 的报错位置**
+   - **机制与 v8.5.8 实测结果**：
+     - (a) `colResolverForOnlyFullGroupBy.Enter` 在 `orderByClause` 每次遇到聚合都覆盖 `c.firstOrderByAggColIdx = c.exprIdx`（`:4028`），记录的实为**最后一个**而非第一个聚合。实测 `SELECT a FROM t ORDER BY COUNT(a), SUM(b);` 报 `Expression #2 of ORDER BY`。
+     - (b) 遍历 `sel.Having`（`:3957-3959`）未更新 `curClause` 与 `exprIdx`，沿用最后一条 SELECT 列的下标。实测在**无主键表** `CREATE TABLE t(a INT, b INT, c INT);` 上跑 `SELECT a, 1 FROM t WHERE a = 1 HAVING SUM(b) > 0 AND c > 0;` 报 `ERROR 8123 (HY000): In aggregated query without GROUP BY, expression #2 of SELECT list contains nonaggregated column 'c'`（错误码为 8123 即 `ErrMixOfGroupFuncAndFieldsIncompatible`，而非 1140）。
+   - **走向**：仅影响报错序号，按宪章第一条 2 **照 Go 移植**，第 A 部分实现时开 `upstream-pitfall`（`go-bug-kept`）。
+4. **`checkOnlyFullGroupByWithGroupClause` 同列在 ORDER BY 覆盖 SELECT 的报错位置，且 ORDER BY 分支报出空列名 `''`（已复现，照 Go 移植）**
    - **位置**：`logical_plan_builder.go:3874-3896`。
-   - **机制**：`notInGbyOrSingleValueColNames` 以 `*types.FieldName` 为键，先写 SELECT 再写 ORDER BY，同一列既在 SELECT 表达式又在 ORDER BY 表达式中违规时，后者覆盖前者的 `ErrExprLoc`，导致本应报 `SELECT list` 改为报 `ORDER BY`。
-   - **v8.5.8 复现方法**：`SELECT b + 1 FROM t GROUP BY a ORDER BY b + 2;`（`a` 非主键/唯一键）。仅影响报错文案，照 Go 移植。
-5. **`buildWindowFunctionFrameBound` 对非字面量常量表达式构造 `Constant` 时使用了零值 `FieldType`**
-   - **位置**：`logical_plan_builder.go:7038-7042`。
-   - **机制**：`evalAstExprWithPlanCtx` 求出 `Datum` 后，`:7042` 将 `RetType` 设为 `boundClause.Expr.GetType()`；当 `boundClause.Expr` 是二元运算等复合常量表达式（如 `1 + 1`）时，AST 节点的 `GetType()` 仍是未推导的零值（`TypeUnspecified`），随后被传给 `expr.EvalInt` 和 `NewFunctionBase(Plus/Minus/DateAdd/DateSub)`。
-   - **v8.5.8 复现方法**：在 v8.5.8 执行 `SELECT SUM(a) OVER (ORDER BY a RANGE BETWEEN 1 + 1 PRECEDING AND CURRENT ROW) FROM t;`（及 `INTERVAL (1 + 1) DAY`），观察是否报错或产生异常类型/结果，并与 MySQL 8.0 对比。
-6. **`LogicalExpand.ResolveGroupingFuncArgsInGroupBy` 报错使用 0-based 序号**
+   - **机制与 v8.5.8 实测结果**：`notInGbyOrSingleValueColNames` 以 `*types.FieldName` 为键，先写 SELECT 再写 ORDER BY，同一列在两处都违规时后者覆盖前者的 `ErrExprLoc`；且 ORDER BY 分支取 `sel.OrderBy.Items[i].Expr.Text()`，报出的列名恒为空串 `''`（即使不涉及覆盖，如 `SELECT a FROM t GROUP BY a ORDER BY b`，同样报空名）。实测 `SELECT b + 1 FROM t GROUP BY a ORDER BY b + 2;`（`a` 非主键/唯一键）返回 `ERROR 1055 (42000): Expression #1 of ORDER BY clause is not in GROUP BY clause and contains nonaggregated column '' which is not functionally dependent on columns in GROUP BY clause`。
+   - **走向**：仅影响报错文案，按宪章第一条 2 **照 Go 移植（含空列名 `''`）**，由第 A 部分 govec 钉住并开 `upstream-pitfall`（`go-bug-kept`）。
+5. **`buildWindowFunctionFrameBound` 对复合小数 `INTERVAL` 表达式构造 `Constant` 时使用零值 `FieldType`，导致截断错行（已复现，#413，交 §9.1 决定点 2）**
+   - **位置**：`logical_plan_builder.go:7038-7042, 7074`、`operator/logicalop/logical_window.go:131`、`pkg/expression/builtin_time.go:3860-3879`、`pkg/expression/infer_pushdown.go:356-364`。
+   - **机制**：parser（`parser.y:9709-9745`）的窗口帧边界只接受数字字面量、`?` 或 `INTERVAL expr unit`。当 `INTERVAL` 后为复合常量表达式（如 `INTERVAL 1.0+0.5 DAY`）时，`evalAstExprWithPlanCtx` 求出 `Decimal(1.5)`，但 `:7042` 用未推导 AST 的零值 `boundClause.Expr.GetType()`（`TypeUnspecified`，`EvalType() == ETInt`）构造 `Constant`，使 `:7074` 的 `DateSub` 选中 `SubDateDatetimeInt` 而非 `SubDateDatetimeDecimal`，将 1.5 天截断为 1 天（而字面量 `INTERVAL 1.5 DAY` 由 parser 填了 `TypeNewDecimal`，按 2 天四舍五入）。
+   - **v8.5.8 实测结果**：`CREATE TABLE td(d DATE, v INT); INSERT INTO td VALUES ('2024-01-01', 1), ('2024-01-02', 2), ('2024-01-03', 4);` 上执行 `SUM(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1.5 DAY PRECEDING AND CURRENT ROW)` 对 `2024-01-03` 返回 **7**（减 2 天，与 `DATE_SUB('2024-01-03', INTERVAL 1.0+0.5 DAY) = '2024-01-01'` 一致），而 `INTERVAL 1.0+0.5 DAY PRECEDING` 返回 **6**（仅减 1 天），且两者 `EXPLAIN` 完全相同（均显示 `range between interval 1.5 "DAY" preceding and current row`）。
+   - **TiFlash 下推影响与走向**：已开 `upstream-pitfall` issue **#413**。核查 `logical_window.go:131`（`FrameBound.ToPB` 将 `CalcFuncs` 序列化为 `pbBound.FrameRange`）与 `exhaust_physical_plans.go:2619-2640` / `infer_pushdown.go:356-364`：`SubDateDatetimeInt` / `AddDateDatetimeInt` 在 TiFlash 下推白名单中，而 `SubDateDatetimeDecimal` / `AddDateDatetimeDecimal` 不在白名单中；因此修正 `Constant.RetType` 会同时改变 `pbBound.FrameRange` 与窗口是否下推到 TiFlash，属于宪章第九条 3 的 TiFlash 排除条款，**交 §9.1 决定点 2 由负责人决定**。
+6. **`LogicalExpand.ResolveGroupingFuncArgsInGroupBy` 报错格式为 `#0` 起（已复现，照 Go 移植）**
    - **位置**：`operator/logicalop/logical_expand.go:346`。
-   - **机制**：传给 `ErrFieldInGroupingNotGroupBy` 的参数为 `fmt.Sprintf("#%d", argIdx)`（从 `#0` 起），而同文件的 `logical_plan_builder.go:3925` 与 MySQL 为 1-based。
-   - **v8.5.8 复现方法**：`SELECT GROUPING(b) FROM t GROUP BY a WITH ROLLUP;`。仅影响报错文案，照 Go 移植。
-7. **`LogicalWindow.EqualFrame` 未校验 `CalcFuncs` 切片长度**
-   - **位置**：`operator/logicalop/logical_window.go:415-424`。
-   - **机制**：遍历 `p.Frame.Start.CalcFuncs`（及 `End`）并按同下标访问 `newWindow.Frame.Start.CalcFuncs[i]`，未先比较切片长度。仅由旧 cascades 调用（EXC.B，不移植），对 tidb-rs 无影响，仅记录。
+   - **机制与 v8.5.8 实测结果**：传给 `ErrFieldInGroupingNotGroupBy` 的参数为 `fmt.Sprintf("#%d", argIdx)`（实测 `SELECT GROUPING(b) FROM t GROUP BY a WITH ROLLUP` 报 `Argument #0 of GROUPING function`，`GROUPING(a, b)` 报 `#1`）；注：`logical_plan_builder.go:3925` 则是另一种格式（无 `#`、用 SELECT 列位置如 `Argument 2 of GROUPING function`）。
+   - **走向**：仅影响报错文案，按宪章第一条 2 **照 Go 移植**，第 C 部分实现时开 `upstream-pitfall`（`go-bug-kept`）。
+7. **预处理语句 `GROUP BY <位置项>` 指向 `ParamMarkerExpr` 时 Go 改写 AST 漏设 `UseAsValueInGbyByClause`（已复现，当前受 `D02.2` 阻塞）**
+   - **位置**：`logical_plan_builder.go:3503-3505, 3532, 4140`。
+   - **机制与 v8.5.8 实测结果**：见 §4.3 第 2 条。`PREPARE s FROM 'SELECT ? AS z FROM t GROUP BY 1'; SET @p = 99; EXECUTE s USING @p;`（plan cache OFF）在 Go v8.5.8 报 `ERROR 1105 (HY000): Unknown column '99' in 'group statement'`（而 `GROUP BY z` 和非预处理 `SELECT 99 AS z FROM t GROUP BY 1` 均成功返回 `99`）。
+   - **走向**：第 A 部分期间参数位置项停在 `blocked-by:D02.2`；待 D02.2 放开参数位置节点时，Rust 因 AST 不可变天然无此改写副作用、行为正确（不涉 TiFlash 线协议变更，届时开 `upstream-pitfall` 按宪章第九条 3 处理）。
 
 ## 9. 决定点
 
 按宪章第九条分为两部分。
 
-### 9.1 需要负责人决定
+### 9.1 需要负责人决定（宪章第九条 1）
 
-无。
+以下 2 点均为本地 Go TiDB v8.5.8 上实测复现的 panic 或结果错误，且修正均会影响下推到 TiFlash 的算子/请求（落在宪章第九条 3 的 TiFlash 排除条款），须按第九条 1(a) 由项目负责人决定：
 
-> 本块严格遵循已确认的基础设计（N0、N1、N13）与已确认的兄弟 spec（D08.11、D09.9），不引入打算长期保留的用户可见差异，也不涉及范围变更或外部资源。实现阶段若 §8 第 1、2、5 条在 v8.5.8 上复现出结果错误或 panic，按宪章第九条 3（可复现结果错误/panic 的默认修正流程）或第九条 1（有争议或仅元数据影响时）另行处理。
+1. **ROLLUP 含 ≥ 64 项且去重后 ≤ 63 列时 Go v8.5.8 越界 panic（#412，§8 第 1 条）**
+   - **背景**：`SELECT COUNT(*) FROM t GROUP BY a, a, ...（64 个 a）WITH ROLLUP` 在 Go v8.5.8 中因 `buildExpand`（按未去重长度 > 64 切 `ModeNumericSet`）与 `DistinctSize`（按去重后数量 > 64 才分配 `RollupGroupingIDs`）阈值不一致，在 `ResolveExpand` 阶段触发 `index out of range [0] with length 0` panic（返回错误 1105）；而 63 个 `a`、64 个不同列、64 个不同列 + 1 个重复均正常执行。Rust 无法照搬 Go 越界 panic，且 `LogicalExpand` 的 `GroupingMode` / `LevelExprs` 在 MPP 下会下推给 TiFlash（触发第九条 3 排除条款）。
+   - **选项**：
+     - **A（建议）**：统一两处阈值为去重后数量（即 `DistinctSize > 64` 时才启用 `ModeNumericSet`；≤ 64 时保持 `ModeBitAnd`），使该类查询正常执行不 panic，并在 `docs/testing/rulings.toml` 登记偏差裁定（#412 标 `go-bug-fixed`）。
+     - **B**：在 `buildExpand` 检测到 `len(RollupGroupingSets) > 64 && distinctSize <= 64` 时返回一个明确的错误（避免 panic，不改变 TiFlash 路径；#412 标 `go-bug-kept` 或记录裁定）。
+   - **建议与理由**：选 **A**。`ModeBitAnd` 本就支持最多 64 个不同的 grouping sets（`uint64` 位图），统一按去重后数量判断正是 `DistinctSizeWithThreshold(64)` 的原意；tidb-rs 不启用 TiFlash MPP，且即使未来接入 TiFlash，`ModeBitAnd` 也是 TiFlash 支持的标准编码，能彻底消除 1105 崩溃并返回正确结果。
+
+2. **窗口 `RANGE BETWEEN INTERVAL <复合小数表达式>` 因零值 `FieldType` 按整数截断返回错行（#413，§8 第 5 条）**
+   - **背景**：`SUM(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1.0+0.5 DAY PRECEDING AND CURRENT ROW)` 在 Go v8.5.8 中因 `buildWindowFunctionFrameBound`（`logical_plan_builder.go:7042`）对复合常量表达式使用未推导 AST 的零值 `FieldType`（`TypeUnspecified` → `ETInt`），使 `DateSub` 选中 `SubDateDatetimeInt` 而把 1.5 天截断为 1 天（返回 `6`）；而字面量 `INTERVAL 1.5 DAY` 与 `DATE_SUB('2024-01-03', INTERVAL 1.0+0.5 DAY)` 均按 2 天计算（返回 `7`），且两者 `EXPLAIN` 文本完全相同。由于 `SubDateDatetimeInt` 在 TiFlash 下推白名单中而 `SubDateDatetimeDecimal` 不在，修正 `Constant.RetType` 会改变 `FrameBound.ToPB` 产物及窗口是否下推 TiFlash（触发第九条 3 排除条款）。
+   - **选项**：
+     - **A（建议）**：按 `evalAstExprWithPlanCtx` 实际求出的 `Datum` 类型推导 `Constant.RetType`（如 `KindMysqlDecimal` → `TypeNewDecimal`），使 `INTERVAL 1.0+0.5 DAY` 与字面量 `INTERVAL 1.5 DAY` 及 `DATE_SUB` 一致返回正确结果，在 `docs/testing/rulings.toml` 登记偏差裁定（#413 标 `go-bug-fixed`）。
+     - **B**：照 Go 保留零值 `FieldType`（对复合常量表达式按 `ETInt` 截断），#413 标 `go-bug-kept`。
+   - **建议与理由**：选 **A**。这是用户可见的静默错行（且与 `EXPLAIN` 自相矛盾）；tidb-rs 只读计算节点不走 TiFlash MPP，在 TiDB 侧执行 `SubDateDatetimeDecimal` 结果正确且与字面量及 `DATE_SUB` 行为统一。
 
 ### 9.2 维护者已定（宪章第九条 2）
 
-1. **拆分与顺序**：按 §3 分为 A（聚合 / DISTINCT / GROUP BY / `ONLY_FULL_GROUP_BY` / `LogicalAggregation`，43+2 个）、B（窗口 / `LogicalWindow`，35+2 个）、C（ROLLUP / `LogicalExpand` + `grouping_sets.go`，15+29 个）、D（子查询相关聚合，10 个）四部分，优先实施第 A 部分以解锁 sysbench 聚合链与 D09.9 第 1 部分。理由：第 A 部分零未满足前置块，B / D 分别受限于 D08.11 第 C 部分与 D09.6。
-2. **cascades 专用方法豁免**：§3.6 的 7 个方法（`Hash64`、`Equals`、`CopyAggHints`、`IsCompleteModeAgg`、`EqualPartitionBy`、`EqualOrderBy`、`EqualFrame`）按已确认的 EXC.B / B3 不移植。理由：全仓库仅 `pkg/planner/cascades/` 调用，与 D09.14、D08.11 处理一致。
+1. **拆分与顺序**：按 §3 分为 A（聚合 / DISTINCT / GROUP BY / `ONLY_FULL_GROUP_BY` / `LogicalAggregation`，43+2 个）、B（窗口 / `LogicalWindow`，35+2 个）、C（ROLLUP / `LogicalExpand` + `grouping_sets.go`，15+29 个）、D（子查询相关聚合，10 个）四部分，优先实施第 A 部分以解锁 sysbench 聚合链与 D09.9 第 1 部分。理由：第 A 部分零未满足前置块，D 受限于 D09.6；B 的前置 D08.11 第 C 部分已合并。
+2. **cascades 专用方法豁免**：§3.6 的 7 个方法（新 cascades memo 的 `Hash64`/`Equals` 与旧 cascades 规则的 `CopyAggHints`/`IsCompleteModeAgg`/`EqualPartitionBy`/`EqualOrderBy`/`EqualFrame`）按已确认的 EXC.B / B3 不移植，tidb-rs 不支持 `tidb_enable_cascades_planner=1`。理由：与 D09.14、D08.11 口径一致。
 3. **聚合与窗口函数描述按值持有**：`LogicalAggregation.agg_funcs: Vec<AggFuncDesc>`、`LogicalWindow.window_func_descs: Vec<WindowFuncDesc>`。理由：沿用负责人已确认的 D08.11 决定点 4 与 D09.9 决定点 5。
-4. **不可变 AST 的改写承载**：用构建器本地的 `agg_col_replacements`、`ResolvedExpr<'ast>`、`WindowSpecW<'ast>` 替代 Go 对 AST 的原地修改（§4.3）。理由：保持 `&'ast ast::SelectStmt` 只读和 `ByAddr<'ast, T>` 键身份，无用户可见差异。
-5. **同算子 / 直接依赖的其他块函数提前随部分移植**：§3.7 所列的算子规则方法（`PruneColumns`、`PredicatePushDown`、`DeriveStats`、`ExtractColGroups`、`PreparePossibleProperties`、`ExtractCorrelatedCols`）与无出边 / 仅本块调用的辅助函数（`AggregateFuncExtractor`、`WindowFuncExtractor`、`extractSingeValueColNamesFromWhere`、`colNameResolver`、`allColFromExprNode`、`getAllByItems`、`restoreByItemText`、`compareItems`、`tblInfoFromCol` 读路径、`ExpressionDeepEqual`、`ResolveExpand`）随对应部分移植并计入各自块；`LogicalAggregation.ExplainInfo`（D10.9）、`ExtractFD`（D09.14）、`ExhaustPhysicalPlans`（D10.3）暂作边界桩。理由：依赖已就绪且 `DoOptimize` 立即可达，避免出现不可用的半成品算子。
+4. **不可变 AST 的改写承载**：用构建器本地的 `agg_col_replacements`、`ResolvedExpr<'ast>`、`WindowSpecW<'ast>` 替代 Go 对 AST 的原地修改（§4.3），配预处理语句关闭计划缓存后重复 `EXECUTE` 测试。理由：保持 `&'ast ast::SelectStmt` 只读和 `ByAddr<'ast, T>` 键身份，常规路径已实测幂等。
+5. **同算子 / 直接依赖的其他块函数提前随部分移植**：§3.7 所列的算子规则方法（`LogicalAggregation` 与 `LogicalWindow` 的 6 个、`LogicalExpand` 的 3 个）与无出边 / 仅本块调用的辅助函数随对应部分移植并计入各自块；`LogicalAggregation.ExplainInfo`（D10.9）、`ExtractFD`（D09.14）、`ExhaustPhysicalPlans`（D10.3）暂作边界桩。理由：依赖已就绪且 `DoOptimize` 立即可达，避免出现不可用的半成品算子。
 6. **P1-1 `grouping_sets.go` 的 `ToPB` 放在 `tidb-expr-pushdown`**：`GroupingSet.ToPB` / `GroupingSets.ToPB` 按 N0 规则 6 放入 `tidb-expr-pushdown`，其余 27 个放入 `tidb-expression/src/grouping_sets.rs`。理由：`tidb-expression` 不依赖 `tipb` 和 `ExpressionsToPBList`，与 D08.11 §4.8 一致。
 7. **`GROUP BY ?` 与 `GROUP_CONCAT(... ORDER BY ?)` 暂作 `blocked-by:D02.2`**：`PosFromPositionExpr` 先实现字面数字路径，参数标记形式与现有 `ORDER BY ?` 一致停在 `D02.2` 边界。理由：Rust AST `Expr::Position(i64)` 尚未扩展参数节点。
-8. **`AdjustNullabilityFromGroupingSets` 按 `M-FT` 显式模拟**：按 §4.7 在 `build_expand` 同步清除 `Proj4Expand`、`DistinctGroupByCol`、`RollupGroupingSets`、`newGbyItems` 的 `NotNullFlag` 并配回归测试。理由：影响发给客户端的列定义，属已确认 N1 §3.3 / `M-FT` 的规定行为。
+8. **两处已确认 V1 按 `M-FT` 显式模拟（必做）**：(a) `AdjustNullabilityFromGroupingSets`（`grouping_sets.go:506`，第 C 部分）在 `build_expand` 同步清除 `Proj4Expand`、`DistinctGroupByCol`、`RollupGroupingSets`、`newGbyItems` 的 `NotNullFlag`；(b) `window_func.go:76`（#402，第 B 部分，同步 D08.11 决定点 6 选项 A）在 `build_window_functions` 按 `UniqueID` 同步清除输出 `schema` 中对应源列的 `NotNullFlag`。理由：两者均已实测影响客户端列定义，按已确认 N1 §3.3 / `M-FT` 必须模拟。
 9. **`tidb-parser` 补 flags=0 的 `Restore` 模式**：在 `crates/parser/src/restore.rs` 为 `Expr` / `WindowSpec` 提供无反引号、小写关键字、双引号字符串的恢复入口（不改现有 `DefaultRestoreFlags`）。理由：保证第 B 部分 `sortWindowSpecs` 排序与 `specEqual` 和 Go 一致。
 10. **map 遍历顺序按 `M-MAPORDER` 确定化**：§4.6 四处改用输入声明序 / 首次出现序 / schema 列序。理由：Go 本身结果不确定，取确定结果符合 `M-MAPORDER`。
-11. **govec 扩展 `selectbuild` 领域**：在已有 `selectbuild` 领域扩展聚合 / 窗口 / ROLLUP 输出快照与用例，按部分从 `selectbuild_exempt.go`、`cast_pending_d0812.go`、`funcs_pending.go` 移出豁免；`grouping_sets.go` 29 个函数在 `expr` 领域新增 op 覆盖。理由：`selectbuild` 已声明 `D09.4` 并钉住了 15 条 `D09.4` 边界记录，直接延续可自然解除边界并避免重复建域。
-12. **§8 疑似 Go 问题延至实现阶段复现并登记**：在实现各部分时于 v8.5.8 实测复现，确认后开英文 `upstream-pitfall` issue 并按宪章第一条 2 / 第九条 3 决定 `go-bug-kept` 或 `go-bug-fixed`。理由：当前只写 spec，不改动代码或运行集群。
+11. **govec 扩展 `selectbuild` 领域**：在已有 `selectbuild` 领域扩展聚合 / 窗口 / ROLLUP 输出快照与用例，按部分从 `selectbuild_exempt.go`、`cast_pending_d0812.go`、`funcs_pending.go` 移出豁免，同时在 tracker `part_funcs.tsv` 中对齐 `VS1-21` 与 `D09.4-A`；`grouping_sets.go` 29 个函数在 `expr` 领域新增 op 覆盖。理由：`selectbuild` 已声明 `D09.4` 并钉住了 15 条 `D09.4` 边界记录。
+12. **§8 第 2、3、4、6 条照 Go 移植，实现时补开 `upstream-pitfall`（`go-bug-kept`）**：均已实测确认仅影响报错文案/序号或 SQL 不可达，按宪章第一条 2 与第九条 2 照 Go 移植；§8 第 1、5 条已开 #412、#413 交 §9.1。
 
 ## 本文所用 ID
 
