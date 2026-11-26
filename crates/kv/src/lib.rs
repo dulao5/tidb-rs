@@ -10,6 +10,7 @@
 
 pub mod checker;
 pub mod context;
+pub mod copr;
 pub mod error;
 pub mod hack;
 pub mod iter;

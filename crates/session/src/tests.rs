@@ -2301,6 +2301,39 @@ fn session_eval_context_basic() {
     assert_eq!(imp.warning_count(), 1);
 }
 
+#[test]
+fn session_get_dist_sql_ctx_caches_and_resets_on_retry() {
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    s.vars_mut().enable_chunk_rpc = true;
+    s.vars_mut().set_dist_sql_scan_concurrency(7);
+    s.vars_mut().stmt_ctx_mut().task_id = 42;
+
+    let dctx1 = s.core.get_dist_sql_ctx();
+    let dctx2 = s.core.get_dist_sql_ctx();
+    assert!(Arc::ptr_eq(&dctx1, &dctx2));
+    assert_eq!(dctx1.dist_sql_concurrency, 7);
+    assert_eq!(dctx1.task_id, 42);
+    assert!(dctx1.enable_chunk_rpc);
+    assert!(!dctx1.has_runaway_rule);
+    assert!(dctx1.resource_group_tagger.is_some());
+    assert!(Arc::ptr_eq(
+        dctx1.kv_vars.killed.as_ref().unwrap(),
+        &s.core.sctx.killer.signal_handle()
+    ));
+
+    dctx1.append_warning(Error::plain("distsql warn"));
+    assert_eq!(s.vars().stmt_ctx().warning_count(), 1);
+
+    // Drop shared Arcs so reset_for_retry can mutate StmtCtx, then verify cache invalidates.
+    let old_task_id = dctx1.task_id;
+    drop(dctx1);
+    drop(dctx2);
+    s.vars_mut().stmt_ctx_mut().reset_for_retry();
+    let dctx3 = s.core.get_dist_sql_ctx();
+    assert_ne!(dctx3.task_id, old_task_id);
+}
+
 /// Go `TestSessionEvalContextCurrentTime`: the stale read TSO (evaluated once), else the
 /// `timestamp` variable, else the current time.
 #[test]

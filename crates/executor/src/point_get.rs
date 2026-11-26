@@ -284,6 +284,9 @@ pub struct PointGetExecutor {
 
     stats: Option<RuntimeStatsWithSnapshot>,
 
+    /// Transaction/domain InfoSchema captured at build/init for `verify_txn_scope` (N2).
+    info_schema: Option<Arc<dyn tidb_infoschema::context::MetaOnlyInfoSchema>>,
+
     sess: SessionState,
 }
 
@@ -360,6 +363,10 @@ impl PointGetExecutor {
             virtual_column_index: Vec::new(),
             virtual_column_ret_field_types: Vec::new(),
             stats: None,
+            info_schema: sctx
+                .get_txn_info_schema()
+                .or_else(|| sctx.get_domain_info_schema())
+                .map(|is| is as Arc<dyn tidb_infoschema::context::MetaOnlyInfoSchema>),
             sess: SessionState::of(sctx),
         }
     }
@@ -369,6 +376,10 @@ impl PointGetExecutor {
     // go: PointGetExecutor.Init L1 [M-CTX, M-SHARE]
     pub fn init(&mut self, sctx: &mut dyn SessionContext, p: &PointGetPlan) {
         self.sess = SessionState::of(sctx);
+        self.info_schema = sctx
+            .get_txn_info_schema()
+            .or_else(|| sctx.get_domain_info_schema())
+            .map(|is| is as Arc<dyn tidb_infoschema::context::MetaOnlyInfoSchema>);
         let decoder = new_row_decoder(
             &self.sess.expr_ctx,
             Arc::clone(&self.sess.location),
@@ -520,13 +531,27 @@ impl PointGetExecutor {
     }
 
     /// The transaction scope check of a local (non-global) transaction.
-    // go: PointGetExecutor.verifyTxnScope L2 (a local txn scope needs distsql.VerifyTxnScope: blocked-by:D07.3)
+    // go: PointGetExecutor.verifyTxnScope L1
     fn verify_txn_scope(&self) -> Result<(), Error> {
         if self.txn_scope.is_empty() || self.txn_scope == GlobalTxnScope {
             return Ok(());
         }
-        // is.TableByID + distsql.VerifyTxnScope (placement rules of local transactions).
-        Err(blocked("D07.3", "a point get in a local transaction scope"))
+        let Some(is) = &self.info_schema else {
+            return Ok(());
+        };
+        let physical_table_id = get_phys_id(&self.tbl_info, self.partition_def_idx);
+        let valid =
+            tidb_store::distsql::verify_txn_scope(&self.txn_scope, physical_table_id, is.as_ref())?;
+        if !valid {
+            return Err(tidb_base::errors::errorf(
+                "table %v can not be read by %v txn_scope",
+                &[
+                    tidb_base::gofmt::Arg::Str(self.tbl_info.name.o.as_bytes().to_vec().into()),
+                    tidb_base::gofmt::Arg::Str(self.txn_scope.as_bytes().to_vec().into()),
+                ],
+            ));
+        }
+        Ok(())
     }
 }
 

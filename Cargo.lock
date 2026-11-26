@@ -1084,7 +1084,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1833,7 +1833,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.3",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2169,7 +2169,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3152,7 +3152,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3611,7 +3611,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3815,6 +3815,7 @@ dependencies = [
  "tidb-planner",
  "tidb-runtime",
  "tidb-sessionctx",
+ "tidb-store",
  "tidb-tablecodec",
  "tidb-types",
  "tikv-client",
@@ -3910,12 +3911,15 @@ dependencies = [
  "hashbrown 0.17.2",
  "log",
  "parking_lot 0.12.5",
+ "protobuf",
  "rand 0.8.8",
  "serde_json",
  "tidb-base",
  "tidb-codec",
+ "tidb-execdetails",
  "tidb-memory",
  "tidb-types",
+ "tipb",
  "tokio",
 ]
 
@@ -4189,6 +4193,8 @@ dependencies = [
 name = "tidb-store"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "flate2",
  "futures",
  "log",
@@ -4197,12 +4203,20 @@ dependencies = [
  "protobuf",
  "serde_json",
  "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
  "tidb-execdetails",
+ "tidb-expression",
+ "tidb-infoschema",
  "tidb-kv",
  "tidb-memory",
+ "tidb-metrics",
  "tidb-model",
+ "tidb-parser",
  "tidb-runtime",
+ "tidb-sessionctx",
  "tidb-tablecodec",
+ "tidb-types",
  "tikv-client",
  "tipb",
  "tokio",
@@ -4394,7 +4408,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.4.0"
-source = "git+https://github.com/dulao5/client-rust.git?rev=0b5a3e15b7337e088c432e50466c4371bcdd5353#0b5a3e15b7337e088c432e50466c4371bcdd5353"
+source = "git+https://github.com/dulao5/client-rust.git?rev=5cbc0d7fa3dece01002730d02e4ac3b3d13ab9c0#5cbc0d7fa3dece01002730d02e4ac3b3d13ab9c0"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -5057,7 +5071,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

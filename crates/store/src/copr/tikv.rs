@@ -8,12 +8,11 @@
 //! (`internal/locate/region_cache.go`), because copr's task splitting reads them.
 
 use std::future::Future;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use tidb_base::errors::Error;
 use tidb_kv::KeyRange;
+pub use tidb_kv::copr::{RateLimit, Variables};
 use tidb_kv::option::ReplicaReadType;
 use tikv_client::proto::{coprocessor, kvrpcpb, metapb};
 
@@ -232,25 +231,6 @@ pub trait TiKVRegionCache: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<RPCContext>, Error>> + Send;
 }
 
-/// `tikv.Variables`: the per-session values the client reads.
-#[derive(Clone, Debug)]
-pub struct Variables {
-    /// `BackoffWeight`: multiplies every backoff budget (`tidb_backoff_weight`, default 2).
-    pub backoff_weight: i64,
-    /// `Killed`: non-zero once the statement is killed.
-    pub killed: Option<Arc<AtomicU32>>,
-}
-
-impl Default for Variables {
-    // go-l3: ADR-0008 client-go kv NewVariables
-    fn default() -> Self {
-        Variables {
-            backoff_weight: 2,
-            killed: None,
-        }
-    }
-}
-
 /// TiDB's `backoff.Backoffer` (`pkg/store/driver/backoff`, block D07.1) over client-go's
 /// `retry.Backoffer`: the methods copr calls. Errors are already TiDB errors.
 pub trait Backoffer: Send + Sync + 'static {
@@ -315,50 +295,6 @@ pub trait TiKVStore: TiKVRegionCache {
     /// `KVStore.CheckVisibility(startTS)`: fails when the GC safe point passed `start_ts`.
     // go-l3: ADR-0008 client-go tikv KVStore.CheckVisibility
     fn check_visibility(&self, start_ts: u64) -> Result<(), Error>;
-}
-
-/// client-go `util.RateLimit`: a token bucket of fixed capacity.
-pub struct RateLimit {
-    sem: tokio::sync::Semaphore,
-    capacity: usize,
-}
-
-impl RateLimit {
-    // go-l3: ADR-0008 client-go util NewRateLimit
-    pub fn new(n: usize) -> RateLimit {
-        if n == 0 {
-            panic!("invalid rate limit capacity");
-        }
-        RateLimit {
-            sem: tokio::sync::Semaphore::new(n),
-            capacity: n,
-        }
-    }
-
-    /// `GetToken(done)`: waits for a token; `true` (exit) when `done` fires first.
-    // go-l3: ADR-0008 client-go util RateLimit.GetToken
-    pub async fn get_token(&self, done: &mut tokio::sync::watch::Receiver<bool>) -> bool {
-        if *done.borrow() {
-            return true;
-        }
-        tokio::select! {
-            permit = self.sem.acquire() => {
-                permit.expect("rate limit semaphore closed").forget();
-                false
-            }
-            _ = done.wait_for(|d| *d) => true,
-        }
-    }
-
-    // go-l3: ADR-0008 client-go util RateLimit.PutToken
-    pub fn put_token(&self) {
-        self.sem.add_permits(1);
-    }
-
-    // go-l3: ADR-0008 client-go util RateLimit.GetCapacity
-    pub fn get_capacity(&self) -> usize {
-        self.capacity
-    }
 }
 
 /// client-go `util.RequestSource.GetRequestSource`.

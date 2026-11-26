@@ -59,3 +59,13 @@ impl tidb_sessionctx::expropt::MetaOnlyInfoSchema for InfoSchemaV2 {
         self.base().schema_meta_version()
     }
 }
+
+impl context::MetaOnlyInfoSchema for InfoSchemaV2 {
+    // glue: interface method MetaOnlyInfoSchema.PlacementBundleByPhysicalTableID (infoSchemaMisc.PlacementBundleByPhysicalTableID)
+    fn placement_bundle_by_physical_table_id(
+        &self,
+        id: i64,
+    ) -> Option<std::sync::Arc<placement::Bundle>> {
+        self.base().placement_bundle_by_physical_table_id(id)
+    }
+}

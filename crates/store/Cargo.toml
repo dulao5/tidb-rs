@@ -38,6 +38,18 @@ tidb-model = { workspace = true }
 tidb-tablecodec = { workspace = true }
 parking_lot = "0.12"
 serde_json = { workspace = true }
+# distsql (D07.3): async SelectResult trait, zero-copy chunk bytes, metrics, types, chunk
+# decoding, datum decoding, DistSQLContext, InfoSchema placement check.
+async-trait = { workspace = true }
+bytes = { workspace = true }
+tidb-metrics = { workspace = true }
+tidb-parser = { workspace = true }
+tidb-types = { workspace = true }
+tidb-chunk = { workspace = true }
+tidb-codec = { workspace = true }
+tidb-sessionctx = { workspace = true }
+tidb-expression = { workspace = true }
+tidb-infoschema = { workspace = true }
 
 [dev-dependencies]
 # Multi-threaded runtime for the drop test.

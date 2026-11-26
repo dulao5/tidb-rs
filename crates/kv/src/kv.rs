@@ -38,6 +38,7 @@ use tidb_memory::Tracker;
 
 use crate::context::Context;
 use crate::context::RequestSource;
+use crate::copr::{CopRuntimeStats, RateLimit, ResourceGroupTagBuilder, StoreLabel};
 use crate::error::ErrNotExist;
 use crate::key::Key;
 use crate::key::KeyRange;
@@ -307,6 +308,20 @@ pub trait Client: Send + Sync {
         vars: Option<OptionValue>,
         option: &ClientSendOption,
     ) -> Box<dyn Response>;
+
+    // glue: async eager send (D07.3 spec §4.3: CopClient builds and opens CopIterator immediately)
+    /// Async counterpart of [`Client::send`]: `CopClient` overrides this to build and open
+    /// the `CopIterator` eagerly so `cop_concurrency()` is available before the first `next()`.
+    fn send_async<'a>(
+        &'a self,
+        ctx: &'a Context,
+        req: &'a Request,
+        vars: Option<OptionValue>,
+        option: &'a ClientSendOption,
+    ) -> KvFuture<'a, Box<dyn Response>> {
+        let resp = self.send(ctx, req, vars, option);
+        Box::pin(async move { Ok(resp) })
+    }
 
     // glue: Go interface method Client.IsRequestTypeSupported
     /// IsRequestTypeSupported checks if reqType and subType is supported.
@@ -652,6 +667,12 @@ pub struct Request {
     pub conn_id: u64,
     /// ConnAlias stores the session connection alias.
     pub conn_alias: String,
+    /// MatchStoreLabels is used to match TiKV store labels (e.g. closest replica read zone).
+    pub match_store_labels: Vec<StoreLabel>,
+    /// ResourceGroupTagger builds `kvrpcpb.Context.ResourceGroupTag` for each cop request.
+    pub resource_group_tagger: Option<Arc<ResourceGroupTagBuilder>>,
+    /// CoprRequestRateLimit limits in-flight cop requests across readers (wired in D07.3 Part 2).
+    pub copr_request_rate_limit: Option<Arc<RateLimit>>,
 }
 
 /// The `Paging` field of [`Request`].
@@ -689,6 +710,11 @@ pub trait ResultSubset: Send {
     // glue: Go interface method ResultSubset.RespTime
     /// RespTime returns the response time for the request.
     fn resp_time(&self) -> Duration;
+    // glue: M-IFACE (Go CopRuntimeStats interface assertion on ResultSubset)
+    /// Coprocessor execution statistics attached to this subset, if any.
+    fn get_cop_runtime_stats(&self) -> Option<&CopRuntimeStats> {
+        None
+    }
 }
 
 /// Response represents the response returned from KV layer.
@@ -700,6 +726,26 @@ pub trait Response: Send {
     // glue: Go interface method Response.Close
     /// Close response.
     fn close(&mut self) -> Result<(), Error>;
+    // glue: M-IFACE (Go copr.CopInfo.GetConcurrency)
+    /// Returns `(concurrency, small_task_concurrency)` if this response exposes `CopInfo`.
+    fn cop_concurrency(&self) -> Option<(isize, isize)> {
+        None
+    }
+    // glue: M-IFACE (Go copr.CopInfo.GetStoreBatchInfo)
+    /// Returns `(store_batched_num, store_batched_fallback_num)` if this response exposes `CopInfo`.
+    fn cop_store_batch_info(&self) -> Option<(u64, u64)> {
+        None
+    }
+    // glue: M-IFACE (Go copr.CopInfo.GetBuildTaskElapsed)
+    /// Returns task-build duration if this response exposes `CopInfo`.
+    fn cop_build_task_elapsed(&self) -> Option<Duration> {
+        None
+    }
+    // glue: M-IFACE (Go copr.HasUnconsumedCopRuntimeStats.CollectUnconsumedCopRuntimeStats)
+    /// Returns unconsumed coprocessor runtime stats, if any.
+    fn collect_unconsumed_cop_runtime_stats(&self) -> Vec<CopRuntimeStats> {
+        Vec::new()
+    }
 }
 
 /// Snapshot defines the interface for the snapshot fetched from KV store.

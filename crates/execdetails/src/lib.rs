@@ -9,5 +9,6 @@
 
 pub mod clientgo;
 pub mod execdetails;
+pub mod ppcpuusage;
 pub mod tdigest;
 pub mod tracing;

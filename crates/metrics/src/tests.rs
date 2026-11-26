@@ -26,6 +26,8 @@ fn exposition_matches_go_definitions() {
     plan_cache_miss_prepared();
     expensive(ExpensiveExec::Sort);
     distsql_query(Duration::from_millis(2), true);
+    distsql_query_with_labels("dag", "internal", false, Duration::from_millis(3));
+    distsql_partial_num(4.0);
     multi_query(2);
     command_finished(0x17, StmtType::Select, Duration::from_millis(1), None);
     token_released();
@@ -46,6 +48,8 @@ fn exposition_matches_go_definitions() {
         r#"tidb_executor_statement_total{db="",resource_group="default",type="Select"} 1"#,
         r#"tidb_session_transaction_duration_seconds_count{scope="general",txn_mode="optimistic",type="commit"} 1"#,
         r#"tidb_distsql_handle_query_duration_seconds_count{copr_type="paging",sql_type="general",type="dag"} 1"#,
+        r#"tidb_distsql_handle_query_duration_seconds_count{copr_type="common",sql_type="internal",type="dag"} 1"#,
+        r#"tidb_distsql_partial_num_count 1"#,
         r#"tidb_server_conn_idle_duration_seconds_count{in_txn="0"} 1"#,
         r#"tidb_server_get_token_duration_seconds_bucket{le="1"} 1"#,
         r#"tidb_server_info{hash="0123456789abcdef",version="v8.5.8-tidb-rs-test"}"#,

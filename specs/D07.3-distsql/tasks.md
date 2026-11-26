@@ -6,4 +6,4 @@
 
 P1 收尾（#48）时，各块把剩下的函数移交给真正使用它们的块。每个函数在 tracker 的豁免表中写的是"owned by <本块>"，本块完成前要移植并由 govec 覆盖（或改为正式豁免），然后从 tracker 豁免表中删除。
 
-- [ ] P1-1 （D00.1）`DistSQLContext.AppendWarning`、`DistSQLContext.Detach`、`StatementContext.GetOrInitDistSQLFromCache`：`pkg/distsql/context` 的字段类型属于 D14.0（runtime stats）和 D07.2（coprocessor 客户端）
+- [x] P1-1 （D00.1）`DistSQLContext.AppendWarning`、`DistSQLContext.Detach`、`StatementContext.GetOrInitDistSQLFromCache`：`pkg/distsql/context` 的字段类型属于 D14.0（runtime stats）和 D07.2（coprocessor 客户端）——已随 D07.3 第 1 部分（#418）移植到 `tidb-sessionctx`（`distsql_ctx.rs`、`stmtctx.rs`）并补单测

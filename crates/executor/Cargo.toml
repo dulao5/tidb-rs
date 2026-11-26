@@ -45,6 +45,7 @@ tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 # (D01.11), the old row format's chunk decoder (D01.8), the session's store labels of a
 # closest replica read (kvproto `metapb.StoreLabel` is client-rust's, ADR 0008).
 tidb-kv = { workspace = true }
+tidb-store = { workspace = true }
 tidb-tablecodec = { workspace = true }
 tidb-codec = { workspace = true }
 tikv-client = { workspace = true }

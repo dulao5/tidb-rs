@@ -503,6 +503,13 @@ static DISTSQL_DAG_PAGING: LazyLock<Histogram> =
     LazyLock::new(|| DISTSQL_QUERY.with_label_values(&["dag", GENERAL, "paging"]));
 static DISTSQL_DAG_COMMON: LazyLock<Histogram> =
     LazyLock::new(|| DISTSQL_QUERY.with_label_values(&["dag", GENERAL, "common"]));
+static DISTSQL_PARTIAL_NUM: LazyLock<Histogram> = LazyLock::new(|| {
+    histogram(
+        ("tidb", "distsql", "partial_num"),
+        "number of partial results for each query.",
+        prometheus::DEFAULT_BUCKETS.to_vec(),
+    )
+});
 
 // ---------------------------------------------------------------------------------------------
 // Start-up.
@@ -577,6 +584,7 @@ fn register_all() {
     LazyLock::force(&EXPENSIVE_CHILDREN);
     LazyLock::force(&STATEMENT_TOTAL);
     LazyLock::force(&DISTSQL_QUERY);
+    LazyLock::force(&DISTSQL_PARTIAL_NUM);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -811,6 +819,24 @@ pub fn distsql_query(d: Duration, paging: bool) {
     } else {
         DISTSQL_DAG_COMMON.observe(d.as_secs_f64());
     }
+}
+
+/// Observe `tidb_distsql_handle_query_duration_seconds` with explicit `type` and `sql_type`
+/// labels (Go `DistSQLQueryHistogram.WithLabelValues(label, sqlType, coprType)`).
+pub fn distsql_query_with_labels(label: &str, sql_type: &str, paging: bool, d: Duration) {
+    if label == "dag" && sql_type == GENERAL {
+        distsql_query(d, paging);
+        return;
+    }
+    let copr_type = if paging { "paging" } else { "common" };
+    DISTSQL_QUERY
+        .with_label_values(&[label, sql_type, copr_type])
+        .observe(d.as_secs_f64());
+}
+
+/// Observe `tidb_distsql_partial_num` (Go `metrics.DistSQLPartialCountHistogram`).
+pub fn distsql_partial_num(n: f64) {
+    DISTSQL_PARTIAL_NUM.observe(n);
 }
 
 #[cfg(test)]

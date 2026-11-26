@@ -782,15 +782,8 @@ pub enum RespMsg {
     Fin,
 }
 
-/// CopRuntimeStats contains execution detail information.
-///
-/// `ReqStats` (client-go `RegionRequestRuntimeStats`) has no client-rust counterpart and is
-/// never set (D07.2 spec §6).
-#[derive(Clone, Debug, Default)]
-pub struct CopRuntimeStats {
-    pub cop_exec_details: tidb_execdetails::execdetails::CopExecDetails,
-    pub copr_cache_hit: bool,
-}
+/// CopRuntimeStats contains execution detail information (re-exported from `tidb-kv`).
+pub use tidb_kv::copr::CopRuntimeStats;
 
 /// `unsafe.Sizeof(execdetails.ExecDetails{})` on 64-bit Go (v8.5.8).
 const sizeofExecDetails: i64 = 384;
@@ -856,6 +849,10 @@ impl tidb_kv::kv::ResultSubset for CopResponse {
     fn resp_time(&self) -> Duration {
         CopResponse::resp_time(self)
     }
+    // glue: kv.ResultSubset implementation (GetCopRuntimeStats, M-IFACE)
+    fn get_cop_runtime_stats(&self) -> Option<&CopRuntimeStats> {
+        CopResponse::get_cop_runtime_stats(self)
+    }
 }
 
 const minLogCopTaskTime: Duration = Duration::from_millis(300);
@@ -881,6 +878,16 @@ impl<S: TiKVStore> tidb_kv::kv::Client for CopClient<S> {
         option: &tidb_kv::kv::ClientSendOption,
     ) -> Box<dyn tidb_kv::kv::Response> {
         CopClient::send(self, req, vars.as_ref(), option)
+    }
+    // glue: async eager CopClient.Send (D07.3 spec §4.3: builds and opens CopIterator immediately)
+    fn send_async<'a>(
+        &'a self,
+        _ctx: &'a tidb_kv::Context,
+        req: &'a Request,
+        vars: Option<tidb_kv::kv::OptionValue>,
+        option: &'a tidb_kv::kv::ClientSendOption,
+    ) -> tidb_kv::kv::KvFuture<'a, Box<dyn tidb_kv::kv::Response>> {
+        Box::pin(async move { Ok(CopClient::send_async(self, req, vars.as_ref(), option).await) })
     }
     /// Go's `CopClient` embeds `kv.RequestTypeSupportedChecker`.
     // glue: dispatch (Go RequestTypeSupportedChecker.IsRequestTypeSupported, embedded in CopClient)
@@ -920,7 +927,51 @@ impl<S: TiKVStore> CopClient<S> {
             replica_read_seed: self.replica_read_seed,
             it: None,
             err: None,
+            final_build_task_elapsed: None,
+            final_store_batch_info: None,
+            final_concurrency: None,
         })
+    }
+
+    /// Async counterpart of [`CopClient::send`]: builds and opens the `CopIterator` eagerly
+    /// so `cop_concurrency()` matches Go before the first `Next` (D07.3 spec §4.3).
+    // go-part: CopClient.Send (async eager build + open, D07.3 spec §4.3)
+    pub async fn send_async(
+        &self,
+        req: &Request,
+        variables: Option<&tidb_kv::kv::OptionValue>,
+        option: &tidb_kv::kv::ClientSendOption,
+    ) -> Box<dyn tidb_kv::kv::Response> {
+        let Some(vars) = variables.and_then(|v| v.downcast_ref::<Variables>()) else {
+            return Box::new(CopErrorResponse(Some(tidb_base::errors::errorf(
+                "unsupported variables:%+v",
+                &[Arg::Str(b"<nil>".to_vec().into())],
+            ))));
+        };
+        if req.store_type == tidb_base::kv::TiFlash && req.batch_cop {
+            return Box::new(CopErrorResponse(Some(Error::plain(
+                "batch coprocessor requests to TiFlash are not supported (DEF.MPP)",
+            ))));
+        }
+        match self
+            .build_cop_iterator(req.clone(), vars.clone(), option)
+            .await
+        {
+            Ok(mut it) => {
+                it.open(option.try_cop_lite_worker.as_ref());
+                Box::new(LazyCopResponse {
+                    pending: None,
+                    store: self.store.clone(),
+                    replica_read_seed: self.replica_read_seed,
+                    it: Some(it),
+                    err: None,
+                    final_build_task_elapsed: None,
+                    final_store_batch_info: None,
+                    final_concurrency: None,
+                })
+            }
+            Err(e) => Box::new(CopErrorResponse(Some(e))),
+        }
     }
 
     /// BuildCopIterator builds the iterator without calling `open`.
@@ -1768,6 +1819,11 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
         }
         // N10: the resource group name only (no RU accounting before resource control).
         let rg_name = req.resource_group_name.clone();
+        // D07.0 T8 / D07.3 #416: encode ResourceGroupTag (TableId + Label; digests wait for D02.2).
+        let rg_tag = req.resource_group_tagger.as_ref().map(|tagger| {
+            let first_key = crate::util::resourcegrouptag::get_first_key_from_cop_request(&cop_req);
+            crate::util::resourcegrouptag::encode_tag_with_key(tagger, first_key)
+        });
         let ctx = cop_req.context.get_or_insert_with(Default::default);
         ctx.isolation_level = isolation_level_to_pb(req.isolation_level) as i32;
         ctx.priority = priority_to_pb(req.priority) as i32;
@@ -1786,7 +1842,11 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
         if !task.first_read_type.is_empty() {
             ctx.is_retry_request = true;
         }
-        // N9: `ResourceGroupTagger` (Top SQL) is not ported yet (D07.0 T8).
+        if let Some(tag) = rg_tag
+            && !tag.is_empty()
+        {
+            ctx.resource_group_tag = tag;
+        }
         let mut timeout = Duration::from_nanos(
             tidb_base::config::get_global_config()
                 .tikv_client
@@ -2533,14 +2593,19 @@ impl tidb_kv::kv::Response for CopErrorResponse {
     }
 }
 
-/// What `CopClient.Send` returns: the iterator, built and opened at the first `Next`
-/// (see [`CopClient::send`]).
+/// What `CopClient.Send` / `CopClient.send_async` returns: the iterator, built and opened
+/// either eagerly (`send_async`) or at the first `Next` (`send`).
 pub struct LazyCopResponse<S: TiKVStore> {
     pending: Option<(Request, Variables, tidb_kv::kv::ClientSendOption)>,
     store: Arc<Store<S>>,
     replica_read_seed: u32,
     it: Option<CopIterator<S>>,
     err: Option<Error>,
+    /// Cached final `CopInfo` values snapshotted in [`Self::close`] before dropping `it`, so
+    /// `selectResult.close` can read them after `resp.close()` (D07.3 spec §4.3).
+    final_build_task_elapsed: Option<Duration>,
+    final_store_batch_info: Option<(u64, u64)>,
+    final_concurrency: Option<(isize, isize)>,
 }
 
 impl<S: TiKVStore> tidb_kv::kv::Response for LazyCopResponse<S> {
@@ -2579,10 +2644,48 @@ impl<S: TiKVStore> tidb_kv::kv::Response for LazyCopResponse<S> {
 
     // glue: kv.Response.Close of CopClient.Send's result
     fn close(&mut self) -> Result<(), Error> {
-        // `kv.Response.Close` is synchronous: the iterator's `Drop` closes `finishCh` and
-        // stops the workers without waiting for them.
-        drop(self.it.take());
+        // Snapshot final CopInfo before dropping the iterator so `selectResult.close`'s
+        // post-Close stats registration reads the same values as Go's `defer`.
+        if let Some(it) = self.it.take() {
+            self.final_build_task_elapsed = Some(it.get_build_task_elapsed());
+            self.final_store_batch_info = Some(it.get_store_batch_info());
+            self.final_concurrency = Some(it.get_concurrency());
+            // `kv.Response.Close` is synchronous: the iterator's `Drop` closes `finishCh`
+            // and stops the workers without waiting for them.
+            drop(it);
+        }
         Ok(())
+    }
+
+    // glue: M-IFACE (Go copr.CopInfo.GetConcurrency)
+    fn cop_concurrency(&self) -> Option<(isize, isize)> {
+        self.it
+            .as_ref()
+            .map(|it| it.get_concurrency())
+            .or(self.final_concurrency)
+    }
+
+    // glue: M-IFACE (Go copr.CopInfo.GetStoreBatchInfo)
+    fn cop_store_batch_info(&self) -> Option<(u64, u64)> {
+        self.it
+            .as_ref()
+            .map(|it| it.get_store_batch_info())
+            .or(self.final_store_batch_info)
+    }
+
+    // glue: M-IFACE (Go copr.CopInfo.GetBuildTaskElapsed)
+    fn cop_build_task_elapsed(&self) -> Option<Duration> {
+        self.it
+            .as_ref()
+            .map(|it| it.get_build_task_elapsed())
+            .or(self.final_build_task_elapsed)
+    }
+
+    // glue: M-IFACE (Go copr.HasUnconsumedCopRuntimeStats.CollectUnconsumedCopRuntimeStats)
+    fn collect_unconsumed_cop_runtime_stats(&self) -> Vec<CopRuntimeStats> {
+        self.it
+            .as_ref()
+            .map_or_else(Vec::new, |it| it.collect_unconsumed_cop_runtime_stats())
     }
 }
 
