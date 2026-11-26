@@ -40,8 +40,8 @@ use tidb_sessionctx::variable::tidb_vars::EnableTmpStorageOnOOM;
 
 use crate::base::{PhysicalKind, PhysicalPlan};
 use crate::core::physical_plans::{
-    PhysicalProjection, PhysicalSelection, PhysicalSort, PhysicalTableReader, PhysicalTableScan,
-    PhysicalTopN,
+    PhysicalIndexReader, PhysicalIndexScan, PhysicalProjection, PhysicalSelection, PhysicalSort,
+    PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
 };
 use crate::core::plan_cost_ver1::{get_cardinality, has_cost_flag, modelVer2};
 use crate::core::point_get_plan::PointGetPlan;
@@ -213,7 +213,67 @@ pub const TiFlashStartupRowPenalty: f64 = 10000.0;
 /// MaxPenaltyRowCount applies a penalty for high risk scans
 pub const MaxPenaltyRowCount: f64 = 1000.0;
 
-// `PhysicalIndexScan.GetPlanCostVer2`: the index scan is not ported (see the module doc).
+impl PhysicalIndexScan {
+    /// GetPlanCostVer2 returns the plan-cost of this sub-plan, which is:
+    /// plan-cost = rows * log2(row-size) * scan-factor
+    /// log2(row-size) is from experiments.
+    // go: PhysicalIndexScan.GetPlanCostVer2 L1 [M-CTX, M-LOCK]
+    pub fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        let base = &self.sp.base;
+        if let Some(c) = cached_cost(base, option) {
+            return Ok(c);
+        }
+
+        let rows = get_cardinality(ctx, self, option.cost_flag);
+        let row_size = get_avg_row_size(stats_of(self), &self.schema().columns); // consider all index columns
+        let scan_factor = get_task_scan_factor_ver2(self, kv::TiKV, task_type);
+
+        let mut plan_cost = scan_cost_ver2(option, rows, row_size, scan_factor);
+        // Multiply by cost factor - defaults to 1, but can be increased/decreased to influence the cost model
+        plan_cost = mul_cost_ver2(&plan_cost, ctx.vars.index_scan_cost_factor);
+        set_cost(base, plan_cost)
+    }
+}
+
+impl PhysicalIndexReader {
+    /// GetPlanCostVer2 returns the plan-cost of this sub-plan, which is:
+    /// plan-cost = (child-cost + net-cost) / concurrency
+    /// net-cost = rows * row-size * net-factor
+    // go: PhysicalIndexReader.GetPlanCostVer2 L1 [M-CTX, M-LOCK]
+    pub fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        let base = &self.sp.base;
+        if let Some(c) = cached_cost(base, option) {
+            return Ok(c);
+        }
+
+        let index_plan = self
+            .index_plan
+            .as_deref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let rows = get_cardinality(ctx, index_plan, option.cost_flag);
+        let row_size = get_avg_row_size(stats_of(self), &self.schema().columns);
+        let net_factor = get_task_net_factor_ver2(self, task_type);
+        let concurrency = ctx.vars.dist_sql_scan_concurrency() as f64;
+
+        let net_cost = net_cost_ver2(option, rows, row_size, net_factor);
+        let child_cost = index_plan.get_plan_cost_ver2(ctx, CopSingleReadTaskType, option)?;
+
+        let mut plan_cost = div_cost_ver2(&sum_cost_ver2(&[child_cost, net_cost]), concurrency);
+        // Multiply by cost factor - defaults to 1, but can be increased/decreased to influence the cost model
+        plan_cost = mul_cost_ver2(&plan_cost, ctx.vars.index_reader_cost_factor);
+        set_cost(base, plan_cost)
+    }
+}
 
 impl PhysicalTableScan {
     /// GetPlanCostVer2 returns the plan-cost of this sub-plan, which is:
@@ -525,10 +585,28 @@ pub fn get_number_of_ranges(pp: &dyn PhysicalPlan) -> isize {
                     .expect("runtime error: invalid memory address or nil pointer dereference"),
             );
         }
+        PhysicalKind::IndexReader => {
+            let p = pp
+                .as_any()
+                .downcast_ref::<PhysicalIndexReader>()
+                .expect("type assertion");
+            return get_number_of_ranges(
+                p.index_plan
+                    .as_deref()
+                    .expect("runtime error: invalid memory address or nil pointer dereference"),
+            );
+        }
         PhysicalKind::TableScan => {
             let p = pp
                 .as_any()
                 .downcast_ref::<PhysicalTableScan>()
+                .expect("type assertion");
+            return p.ranges.len() as isize;
+        }
+        PhysicalKind::IndexScan => {
+            let p = pp
+                .as_any()
+                .downcast_ref::<PhysicalIndexScan>()
                 .expect("type assertion");
             return p.ranges.len() as isize;
         }
@@ -897,6 +975,9 @@ pub fn get_task_scan_factor_ver2(
         _ => {
             // TiKV
             let mut desc = false;
+            if let Some(index_scan) = p.as_any().downcast_ref::<PhysicalIndexScan>() {
+                desc = index_scan.desc;
+            }
             if let Some(table_scan) = p.as_any().downcast_ref::<PhysicalTableScan>() {
                 desc = table_scan.desc;
             }
@@ -943,6 +1024,17 @@ pub fn is_temporary_table(tbl: Option<&TableInfo>) -> bool {
 // go: getTableInfo L1
 pub fn get_table_info(p: &dyn PhysicalPlan) -> Option<&TableInfo> {
     match p.kind() {
+        PhysicalKind::IndexReader => {
+            let x = p
+                .as_any()
+                .downcast_ref::<PhysicalIndexReader>()
+                .expect("type assertion");
+            get_table_info(
+                x.index_plan
+                    .as_deref()
+                    .expect("runtime error: invalid memory address or nil pointer dereference"),
+            )
+        }
         PhysicalKind::TableReader => {
             let x = p
                 .as_any()
@@ -958,6 +1050,13 @@ pub fn get_table_info(p: &dyn PhysicalPlan) -> Option<&TableInfo> {
             let x = p
                 .as_any()
                 .downcast_ref::<PhysicalTableScan>()
+                .expect("type assertion");
+            Some(&x.table)
+        }
+        PhysicalKind::IndexScan => {
+            let x = p
+                .as_any()
+                .downcast_ref::<PhysicalIndexScan>()
                 .expect("type assertion");
             Some(&x.table)
         }

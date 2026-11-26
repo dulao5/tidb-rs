@@ -18,26 +18,32 @@
 //! - a `candidatePath` owns a copy of its access path (Go points into the DataSource's
 //!   path); `matchProperty`'s writes to the path are written back to the DataSource's path.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
+use tidb_base::gostd::conv::f64_to_u64;
+use tidb_base::gostd::time::utc;
 use tidb_base::kv;
-use tidb_base::mysql::{has_binary_flag, has_pri_key_flag, has_unsigned_flag};
+use tidb_base::mysql::{TypeLonglong, has_binary_flag, has_pri_key_flag, has_unsigned_flag};
 use tidb_expr_pushdown::infer_pushdown::push_down_exprs;
-use tidb_expression::{Column, Expr, ExprRef};
+use tidb_expression::{Column, Expr, ExprRef, new_schema};
 use tidb_kv::key::{Handle, IntHandle};
-use tidb_model::{ExtraHandleID, ExtraHandleName, ExtraPhysTblID, StatePublic};
+use tidb_model::{ExtraHandleID, ExtraHandleName, ExtraPhysTblID, ExtraPhysTblIDName, StatePublic};
 use tidb_parser::types::UnspecifiedLength;
 use tidb_sessionctx::planbase::PlanCounterTp;
+use tidb_sessionctx::ranger::Range;
 use tidb_statistics::Table;
+use tidb_types::datum::Datum;
+use tidb_types::field_type::new_field_type;
 
 use crate::arena::PlanId;
 use crate::base::{self, LogicalPlan, PhysicalPlan};
 use crate::core::cost::{SelectionFactor, ToleranceFactor};
 use crate::core::physical_plans::{
-    PhysPlanPartInfo, PhysicalSelection, PhysicalTableDual, PhysicalTableScan,
+    PhysPlanPartInfo, PhysicalIndexScan, PhysicalSelection, PhysicalTableDual, PhysicalTableScan,
 };
 use crate::core::plan::enforce_property;
 use crate::core::point_get_plan::PointGetPlan;
@@ -55,6 +61,7 @@ use crate::property::{
     PropMatchedNeedMergeSort, PropNotMatched, RootTaskType, SortItem, StatsInfo, TaskType,
 };
 use crate::util::fixcontrol;
+use crate::util::misc::clone_col_infos;
 use crate::util::optimizetrace::{PhysicalOptimizeOp, new_default_plan_cost_option};
 use crate::util::path::{Col2Len, compare_col2_len, extract_col2_len};
 use crate::util::{AccessPath, ByItems};
@@ -638,7 +645,7 @@ pub struct CandidatePath {
 }
 
 // go: compareBool L1
-fn compare_bool(l: bool, r: bool) -> isize {
+pub(crate) fn compare_bool(l: bool, r: bool) -> isize {
     if l == r {
         return 0;
     }
@@ -911,7 +918,7 @@ fn is_full_index_match(candidate: &CandidatePath) -> bool {
 /// `matchProperty`. The vector property (vector indexes) is not ported (TiFlash ANN
 /// indexes, outside the first slice): a property with a vector helper is a boundary.
 // go: matchProperty L2 (the vector index property is a boundary of D10.1)
-fn match_property(
+pub(crate) fn match_property(
     ds: &DataSource,
     ctx: &PlanCtx<'_>,
     path: &mut AccessPath,
@@ -1038,16 +1045,51 @@ fn match_property(
         }
     }
     if !group_by_col_idxs.is_empty() && match_result == PropMatched {
-        // groups, err := GroupRangesByCols(path.Ranges, groupByColIdxs): the merge sort of
-        // grouped ranges is an index path feature (the keep-order index scans of part 2).
-        // glue: blocked-by:D10.2 (GroupRangesByCols: an index path that needs a merge sort of its ranges, part 2 of this block)
-        let _ = PropMatchedNeedMergeSort;
-        return Err(blocked(
-            "D10.2",
-            "an index path that needs a merge sort of its ranges (GroupRangesByCols)",
-        ));
+        let Ok(groups) = group_ranges_by_cols(&path.ranges, &group_by_col_idxs) else {
+            return Ok(PropNotMatched);
+        };
+        const MAX_GROUP_COUNT: usize = 2048;
+        if groups.len() > MAX_GROUP_COUNT {
+            return Ok(PropNotMatched);
+        }
+        if !groups.is_empty() {
+            path.grouped_ranges = groups;
+            path.group_by_col_idxs = group_by_col_idxs;
+            return Ok(PropMatchedNeedMergeSort);
+        }
     }
     Ok(match_result)
+}
+
+/// GroupRangesByCols groups the ranges by the values of the columns specified by groupByColIdxs.
+///
+/// Go collects values from a `map[string][]*ranger.Range` in random order; Rust groups in
+/// deterministic first-appearance order (`M-MAPORDER`), which is always one of Go's valid outputs.
+// go: GroupRangesByCols L2 (M-MAPORDER: groups in deterministic first-appearance order instead of Go map iteration order)
+pub fn group_ranges_by_cols(
+    ranges: &[Range],
+    group_by_col_idxs: &[isize],
+) -> Result<Vec<Vec<Range>>, Error> {
+    let mut group_idx_by_key: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut result: Vec<Vec<Range>> = Vec::new();
+    let utc_loc = utc();
+    for ran in ranges {
+        let mut datums: Vec<Datum> = Vec::with_capacity(group_by_col_idxs.len());
+        for &idx in group_by_col_idxs {
+            datums.push(ran.low_val[idx as usize].clone());
+        }
+        // We just use it to group the values, so any time zone is ok.
+        let mut key_bytes = Vec::new();
+        tidb_codec::encode_value(&utc_loc, &mut key_bytes, &datums)?;
+        if let Some(&pos) = group_idx_by_key.get(&key_bytes) {
+            result[pos].push(ran.clone());
+        } else {
+            let pos = result.len();
+            group_idx_by_key.insert(key_bytes, pos);
+            result.push(vec![ran.clone()]);
+        }
+    }
+    Ok(result)
 }
 
 /// matchPartialOrderProperty checks if the index can provide partial order for TopN
@@ -1814,7 +1856,7 @@ fn convert_candidates(
             continue;
         }
         // TableSample do not support index scan: no table sample (doc).
-        let idx_task = convert_to_index_scan(prop, &candidate)?;
+        let idx_task = convert_to_index_scan(ds, ctx, prop, &candidate, opt)?;
         if !idx_task.invalid() {
             cnt_plan += 1;
             plan_counter.dec(1);
@@ -1831,14 +1873,19 @@ fn convert_candidates(
     Ok(cnt_plan)
 }
 
-/// convertToIndexScan converts the DataSource to index scan with idx. The checks that give
-/// an invalid task are ported; the index reader / index lookup itself (an index path left
-/// after the skyline pruning that can give a task) is part 2 of this block, outside the
-/// first slice (VS1 plan §3.2): a boundary.
-// go: convertToIndexScan L2 (the IndexReader / IndexLookUp is a boundary: D10.2 part 2)
+/// convertToIndexScan converts the DataSource to index scan with idx.
+///
+/// Single-read (`PhysicalIndexReader`) is implemented in part 2A. After all `InvalidTask`
+/// preconditions pass, a double-read (`!path.is_single_scan`) candidate immediately returns
+/// a `D10.2` boundary (part 2B) so part 2A never silently drops a double-read candidate and picks
+/// a different plan than Go.
+// go: convertToIndexScan L2 (double-read PhysicalIndexLookUpReader is a boundary: D10.2 part 2B)
 fn convert_to_index_scan(
+    ds: &mut DataSource,
+    ctx: &PlanCtx<'_>,
     prop: &PhysicalProperty,
     candidate: &CandidatePath,
+    _opt: &PhysicalOptimizeOp,
 ) -> Result<Task, Error> {
     let path = &candidate.path;
     if path.index.as_ref().is_some_and(|i| i.mv_index) {
@@ -1871,12 +1918,381 @@ fn convert_to_index_scan(
     if path.force_partial_order && prop.partial_order_info.is_none() {
         return Ok(Task::invalid_task());
     }
-    // is := getOriginalPhysicalIndexScan(...) and the cop task of the index scan.
-    // glue: blocked-by:D10.2 (convertToIndexScan: the IndexReader / IndexLookUp of an index path left after skyline pruning; part 2 of this block, outside the first slice)
-    Err(blocked(
-        "D10.2",
-        "an index path left after skyline pruning (convertToIndexScan: IndexReader / IndexLookUp)",
-    ))
+    if !path.is_single_scan {
+        // glue: blocked-by:D10.2 (convertToIndexScan: double-read PhysicalIndexLookUpReader is part 2B of this block)
+        return Err(blocked(
+            "D10.2",
+            "a double-read index path (convertToIndexScan: PhysicalIndexLookUpReader)",
+        ));
+    }
+    let mut is = get_original_physical_index_scan(
+        ds,
+        ctx,
+        prop,
+        path,
+        candidate.match_prop_result.matched(),
+        path.is_single_scan,
+    )?;
+    let mut cop = CopTask {
+        tbl_col_hists: ds.tbl_col_hists.clone(),
+        tbl_cols: ds.tbl_cols.clone(),
+        expect_cnt: f64_to_u64(prop.expected_cnt), // [M-F2I]
+        ..Default::default()
+    };
+    if candidate.partial_order_match_result.matched {
+        cop.partial_order_match_result =
+            Some(Arc::new(candidate.partial_order_match_result.clone()));
+    }
+    let pruning_conds = push_down_not_conds(ctx, &mut ds.all_conds);
+    cop.phys_plan_part_info = Some(Arc::new(PhysPlanPartInfo {
+        pruning_conds,
+        partition_names: ds.partition_names.clone(),
+        columns: ds.tbl_cols.clone(),
+        column_names: ds.output_names(&ctx.arena).clone(),
+    }));
+    if prop.need_keep_order() {
+        cop.keep_order = true;
+        // Add sort items for index scan for the merge-sort operation
+        // Case 1: keep order between partitions (only required for local index)
+        // Case 2: keep order between range groups (see comments of PropMatchedNeedMergeSort and
+        // AccessPath.GroupedRanges for details)
+        // Case 3: both
+        if (ds.table_info.get_partition_info().is_some() && !is.index.global)
+            || candidate.match_prop_result == PropMatchedNeedMergeSort
+        {
+            is.by_items = prop
+                .get_sort_items_for_keep_order()
+                .into_iter()
+                .map(|si| ByItems {
+                    expr: Arc::new(Expr::Column(Column::clone(&si.col))),
+                    desc: si.desc,
+                })
+                .collect();
+        }
+        if candidate.match_prop_result == PropMatchedNeedMergeSort {
+            is.grouped_ranges = path.grouped_ranges.clone();
+            is.group_by_col_idxs = path.group_by_col_idxs.clone();
+        }
+    }
+    if cop.need_extra_proj {
+        cop.origin_schema = Some(Arc::new(ds.schema(&ctx.arena).clone_schema()));
+    }
+    // prop.IsSortItemEmpty() would always return true when coming to here,
+    // so we can just use prop.ExpectedCnt as parameter of addPushedDownSelection.
+    let final_stats = ds_stats_of(ds).scale_by_expect_cnt(prop.expected_cnt);
+    is.add_pushed_down_selection(ctx, &mut cop, ds, path, final_stats)?;
+    let mut task = Task::Cop(cop);
+    if prop.task_tp == RootTaskType {
+        task = task.convert_to_root_task(ctx)?;
+    } else if matches!(task, Task::Root(_)) {
+        return Ok(Task::invalid_task());
+    }
+    Ok(task)
+}
+
+impl PhysicalIndexScan {
+    // go: PhysicalIndexScan.getScanRowSize L1 [M-CTX]
+    pub fn get_scan_row_size(&self, ctx: &PlanCtx<'_>) -> f64 {
+        let idx = &self.index;
+        let idx_cols_len = idx.columns.as_deref().map_or(0, <[_]>::len);
+        let mut scan_cols: Vec<Arc<Column>> = Vec::with_capacity(idx_cols_len + 1);
+        // If `initSchema` has already appended the handle column in schema, just use schema columns, otherwise, add extra handle column.
+        if idx_cols_len == self.schema().columns.len() {
+            scan_cols.extend(self.schema().columns.iter().map(Arc::clone));
+            if let Some(handle_col) = &self.pk_is_handle_col {
+                scan_cols.push(Arc::clone(handle_col));
+            }
+        } else {
+            scan_cols.extend(self.schema().columns.iter().map(Arc::clone));
+        }
+        let default_coll = tidb_statistics::HistColl::default();
+        let coll = self.tbl_col_hists.as_deref().unwrap_or(&default_coll);
+        crate::cardinality::row_size::get_index_avg_row_size(ctx, coll, &scan_cols, idx.unique)
+    }
+
+    /// initSchema is used to set the schema of PhysicalIndexScan.
+    // go: PhysicalIndexScan.initSchema L1 [M-CTX]
+    pub fn init_schema(
+        &mut self,
+        ctx: &PlanCtx<'_>,
+        idx_expr_cols: &[Option<Arc<Column>>],
+        is_double_read: bool,
+    ) {
+        let idx_meta_cols = self.index.columns.as_deref().unwrap_or(&[]);
+        let idx_cols_len = idx_meta_cols.len();
+        let table_cols = self.table.columns.as_deref().unwrap_or(&[]);
+        let mut index_cols: Vec<Arc<Column>> = Vec::with_capacity(idx_cols_len + 1);
+        index_cols.extend(self.idx_cols.iter().map(Arc::clone));
+
+        for i in self.idx_cols.len()..idx_cols_len {
+            if let Some(col) = idx_expr_cols.get(i).and_then(|c| c.as_ref()) {
+                index_cols.push(Arc::clone(col));
+            } else {
+                let tbl_col = &table_cols[idx_meta_cols[i].offset as usize];
+                index_cols.push(Arc::new(Column {
+                    id: tbl_col.id,
+                    ret_type: Arc::new(tbl_col.field_type.clone()),
+                    unique_id: ctx.vars.alloc_plan_column_id(),
+                    ..Default::default()
+                }));
+            }
+        }
+        self.need_common_handle = self.table.is_common_handle;
+
+        if self.need_common_handle {
+            for c in idx_expr_cols.iter().skip(idx_cols_len).flatten() {
+                index_cols.push(Arc::clone(c));
+            }
+        }
+        let mut set_handle = index_cols.len() > idx_cols_len;
+        let ds_schema = self
+            .data_source_schema
+            .as_ref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        if !set_handle {
+            for (i, col) in self.columns.iter().enumerate() {
+                if (has_pri_key_flag(col.get_flag()) && self.table.pk_is_handle)
+                    || col.id == ExtraHandleID as i64
+                {
+                    index_cols.push(Arc::clone(&ds_schema.columns[i]));
+                    set_handle = true;
+                    break;
+                }
+            }
+        }
+
+        let mut extra_phys_tbl_col: Option<Arc<Column>> = None;
+        // If `dataSourceSchema` contains `model.ExtraPhysTblID`, we should add it into `indexScan.schema`
+        for col in &ds_schema.columns {
+            if col.id == ExtraPhysTblID as i64 {
+                extra_phys_tbl_col = Some(Arc::new(Column::clone(col)));
+                break;
+            }
+        }
+
+        if is_double_read || self.index.global {
+            // If it's double read case, the first index must return handle. So we should add extra handle column
+            // if there isn't a handle column.
+            if !set_handle && !self.table.is_common_handle {
+                index_cols.push(Arc::new(Column {
+                    ret_type: Arc::new(new_field_type(TypeLonglong)),
+                    id: ExtraHandleID as i64,
+                    unique_id: ctx.vars.alloc_plan_column_id(),
+                    orig_name: ExtraHandleName.o.to_owned(),
+                    ..Default::default()
+                }));
+            }
+            // If it's global index, handle and PhysTblID columns has to be added, so that needed pids can be filtered.
+            if self.index.global && extra_phys_tbl_col.is_none() {
+                index_cols.push(Arc::new(Column {
+                    ret_type: Arc::new(new_field_type(TypeLonglong)),
+                    id: ExtraPhysTblID as i64,
+                    unique_id: ctx.vars.alloc_plan_column_id(),
+                    orig_name: ExtraPhysTblIDName.o.to_owned(),
+                    ..Default::default()
+                }));
+            }
+        }
+
+        if let Some(col) = extra_phys_tbl_col {
+            index_cols.push(col);
+        }
+
+        self.set_schema(new_schema(index_cols));
+    }
+
+    // go: PhysicalIndexScan.addSelectionConditionForGlobalIndex L2 (global index stops at D09.12 PartitionPruning)
+    pub fn add_selection_condition_for_global_index(
+        &self,
+        _ds: &DataSource,
+        _phys_plan_part_info: Option<&PhysPlanPartInfo>,
+        conditions: Vec<ExprRef>,
+    ) -> Result<Vec<ExprRef>, Error> {
+        if !self.index.global {
+            return Ok(conditions);
+        }
+        // glue: blocked-by:D09.12 (PartitionPruning for global index)
+        Err(blocked(
+            "D09.12",
+            "PhysicalIndexScan.addSelectionConditionForGlobalIndex (PartitionPruning)",
+        ))
+    }
+
+    // go: PhysicalIndexScan.addPushedDownSelection L1 [M-PLAN, M-CTX]
+    pub fn add_pushed_down_selection(
+        self,
+        ctx: &PlanCtx<'_>,
+        cop_task: &mut CopTask,
+        ds: &DataSource,
+        path: &AccessPath,
+        final_stats: Arc<StatsInfo>,
+    ) -> Result<(), Error> {
+        // Add filter condition to table plan now.
+        let (mut index_conds, mut table_conds) =
+            (path.index_filters.clone(), path.table_filters.clone());
+        (table_conds, cop_task.root_task_conds) = split_sel_conds_with_virtual_column(&table_conds);
+
+        let pctx = ctx.push_down_ctx()?;
+        let new_root_conds;
+        (index_conds, new_root_conds) = push_down_exprs(&pctx, &index_conds, kv::TiKV);
+        cop_task.root_task_conds.extend(new_root_conds);
+
+        let new_root_conds;
+        (table_conds, new_root_conds) = push_down_exprs(&pctx, &table_conds, kv::TiKV);
+        cop_task.root_task_conds.extend(new_root_conds);
+
+        // Add a `Selection` for `IndexScan` with global index.
+        // It should pushdown to TiKV, DataSource schema doesn't contain partition id column.
+        index_conds = self.add_selection_condition_for_global_index(
+            ds,
+            cop_task.phys_plan_part_info.as_deref(),
+            index_conds,
+        )?;
+
+        let is_qb_offset = self.query_block_offset();
+        let is_row_count = self.stats_info().expect("the scan's stats").row_count;
+        let is_arc: PhysicalPlanRef = Arc::new(self);
+        if !index_conds.is_empty() {
+            let selectivity = if path.count_after_access > 0.0 {
+                path.count_after_index / path.count_after_access
+            } else {
+                0.0
+            };
+            let count = is_row_count * selectivity;
+            let stats = ds
+                .table_stats
+                .as_ref()
+                .expect("initStats")
+                .scale_by_expect_cnt(count);
+            let mut index_sel = PhysicalSelection {
+                conditions: index_conds,
+                ..Default::default()
+            }
+            .init(ctx, Some(stats), is_qb_offset, Vec::new());
+            index_sel.set_children(vec![is_arc]);
+            cop_task.index_plan = Some(Arc::new(index_sel));
+        } else {
+            cop_task.index_plan = Some(is_arc);
+        }
+        if !table_conds.is_empty() {
+            cop_task.finish_index_plan()?;
+            let mut table_sel = PhysicalSelection {
+                conditions: table_conds.clone(),
+                ..Default::default()
+            }
+            .init(ctx, Some(final_stats), is_qb_offset, Vec::new());
+            if !cop_task.root_task_conds.is_empty() {
+                let coll = cop_task
+                    .tbl_col_hists
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_default();
+                let selectivity = match crate::cardinality::selectivity::selectivity(
+                    ctx,
+                    &coll,
+                    &table_conds,
+                    &[],
+                ) {
+                    Ok((s, _)) => s,
+                    Err(e) if tidb_base::blocked::blocked_by(&e).is_some() => return Err(e),
+                    Err(_) => SelectionFactor,
+                };
+                let plan_stats = cop_task
+                    .plan()
+                    .expect("cop task plan")
+                    .stats_info()
+                    .expect("plan stats");
+                table_sel.set_stats(Some(Arc::new(plan_stats.scale(selectivity))));
+            }
+            let table_plan = cop_task.table_plan.take().expect("tablePlan");
+            table_sel.set_children(vec![table_plan]);
+            cop_task.table_plan = Some(Arc::new(table_sel));
+        }
+        Ok(())
+    }
+}
+
+/// `getOriginalPhysicalIndexScan`. The used statistics record (`usedStatsInfo`) is not carried
+/// (stats.rs module doc). Returns a `Result` for the boundary of the row count under a limit.
+// go: getOriginalPhysicalIndexScan L2 (Result for the boundary of AdjustRowCountForIndexScanByLimit)
+fn get_original_physical_index_scan(
+    ds: &DataSource,
+    ctx: &PlanCtx<'_>,
+    prop: &PhysicalProperty,
+    path: &AccessPath,
+    is_match_prop: bool,
+    is_single_scan: bool,
+) -> Result<PhysicalIndexScan, Error> {
+    let idx = Arc::clone(
+        path.index
+            .as_ref()
+            .expect("runtime error: invalid memory address or nil pointer dereference"),
+    );
+    let mut is = PhysicalIndexScan {
+        table: Arc::clone(&ds.table_info),
+        table_as_name: ds.table_as_name.clone(),
+        db_name: ds.db_name.clone(),
+        columns: clone_col_infos(&ds.columns),
+        index: Arc::clone(&idx),
+        idx_cols: path.idx_cols.clone(),
+        idx_col_lens: path.idx_col_lens.clone(),
+        access_condition: path.access_conds.clone(),
+        ranges: path.ranges.clone(),
+        data_source_schema: Some(ds.schema(&ctx.arena).clone_schema()),
+        is_partition: ds.partition_def_idx.is_some(),
+        physical_table_id: ds.physical_table_id,
+        tbl_col_hists: ds.tbl_col_hists.clone(),
+        pk_is_handle_col: ds.get_pk_is_handle_col(ctx),
+        const_cols_by_cond: path.const_cols.clone(),
+        prop: Some(Arc::new(prop.clone())),
+        not_always_valid: path.part_idx_cond_not_always_valid,
+        ..Default::default()
+    }
+    .init(ctx, ds.query_block_offset());
+    let mut row_count = path.count_after_access;
+    let mut idx_expr_cols = path.full_idx_cols.clone();
+    idx_expr_cols.extend(ds.common_handle_cols.iter().map(|c| Some(Arc::clone(c))));
+    is.init_schema(ctx, &idx_expr_cols, !is_single_scan);
+
+    // If (1) tidb_opt_ordering_index_selectivity_threshold is enabled (not 0)
+    // and (2) there exists an index whose selectivity is smaller than or equal to the threshold,
+    // and (3) there is Selection on the IndexScan, we don't use the ExpectedCnt to
+    // adjust the estimated row count of the IndexScan.
+    let ignore_expected_cnt = ctx.vars.opt_ordering_idx_sel_thresh != 0.0
+        && ds.access_path_min_selectivity <= ctx.vars.opt_ordering_idx_sel_thresh
+        && (!path.index_filters.is_empty() || !path.table_filters.is_empty());
+
+    let ds_stats = ds_stats_of(ds);
+    let table_stats = ds.table_stats.as_ref().expect("initStats");
+    if (is_match_prop || prop.is_sort_item_empty())
+        && prop.expected_cnt < ds_stats.row_count
+        && !ignore_expected_cnt
+    {
+        row_count = crate::cardinality::cross_estimation::adjust_row_count_for_index_scan_by_limit(
+            ctx,
+            ds_stats,
+            table_stats,
+            ds.statistic_table.as_deref().expect("initStats"),
+            path,
+            prop.expected_cnt,
+            is_match_prop && prop.sort_items[0].desc,
+        )?;
+    }
+    // ScaleByExpectCnt only allows to scale the row count smaller than the table total row count.
+    // But for MV index, it's possible that the IndexRangeScan row count is larger than the table total row count.
+    if idx.mv_index && row_count > table_stats.row_count {
+        is.set_stats(Some(Arc::new(
+            table_stats.scale(row_count / table_stats.row_count),
+        )));
+    } else {
+        is.set_stats(Some(table_stats.scale_by_expect_cnt(row_count)));
+    }
+    // usedStats := ...GetUsedStatsInfo(false): not carried.
+    if prop.need_keep_order() {
+        is.desc = prop.get_sort_desc_for_keep_order();
+        is.keep_order = true;
+    }
+    Ok(is)
 }
 
 // go: isIndexColsCoveringCol L1

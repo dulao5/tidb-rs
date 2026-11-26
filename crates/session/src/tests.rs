@@ -2947,4 +2947,318 @@ fn expression_columns_are_named_by_their_text() {
     }
 }
 
+/// Full `sbtest1` schema matching sysbench (`id INT NOT NULL AUTO_INCREMENT, k INT NOT NULL
+/// DEFAULT '0', c CHAR(120), pad CHAR(60), PRIMARY KEY (id), KEY k_1 (k)`) plus a single-path
+/// clustered composite-PK table `tc_pk (a INT, b INT, c INT, PRIMARY KEY (a, b) CLUSTERED)`.
+fn sbtest_with_secondary_index_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
+    use tidb_base::mysql::{
+        AutoIncrementFlag, MultipleKeyFlag, NotNullFlag, PriKeyFlag, TypeLong, TypeString,
+    };
+    use tidb_model::{ColumnInfo, DBInfo, IndexColumn, IndexInfo, StatePublic, TableInfo};
+    use tidb_parser::model::CIStr;
+    use tidb_parser::types::{FieldType, UnspecifiedLength};
+
+    let mk_int = |id: i64, name: &str, offset: isize, flags: usize| {
+        let mut ft = FieldType::new(TypeLong);
+        ft.set_flen(11);
+        ft.set_decimal(0);
+        ft.set_charset("binary");
+        ft.set_collate("binary");
+        ft.add_flag(flags);
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset,
+            field_type: ft,
+            state: StatePublic,
+            ..Default::default()
+        })
+    };
+    let mk_char = |id: i64, name: &str, offset: isize, flen: isize| {
+        let mut ft = FieldType::new(TypeString);
+        ft.set_flen(flen);
+        ft.set_decimal(0);
+        ft.set_charset("utf8mb4");
+        ft.set_collate("utf8mb4_bin");
+        ft.add_flag(NotNullFlag);
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset,
+            field_type: ft,
+            state: StatePublic,
+            ..Default::default()
+        })
+    };
+
+    let sbtest1 = TableInfo {
+        id: 110,
+        dbid: 2,
+        name: CIStr::new("sbtest1"),
+        columns: Some(vec![
+            mk_int(1, "id", 0, NotNullFlag | PriKeyFlag | AutoIncrementFlag),
+            mk_int(2, "k", 1, NotNullFlag | MultipleKeyFlag),
+            mk_char(3, "c", 2, 120),
+            mk_char(4, "pad", 3, 60),
+        ]),
+        indices: Some(vec![Arc::new(IndexInfo {
+            id: 1,
+            name: CIStr::new("k_1"),
+            table: CIStr::new("sbtest1"),
+            columns: Some(vec![IndexColumn {
+                name: CIStr::new("k"),
+                offset: 1,
+                length: UnspecifiedLength,
+                ..Default::default()
+            }]),
+            state: StatePublic,
+            ..Default::default()
+        })]),
+        pk_is_handle: true,
+        state: StatePublic,
+        version: 5,
+        max_column_id: 4,
+        max_index_id: 1,
+        ..Default::default()
+    };
+
+    let tc_pk = TableInfo {
+        id: 111,
+        dbid: 2,
+        name: CIStr::new("tc_pk"),
+        columns: Some(vec![
+            mk_int(1, "a", 0, NotNullFlag | PriKeyFlag),
+            mk_int(2, "b", 1, NotNullFlag | PriKeyFlag),
+            mk_int(3, "c", 2, 0),
+        ]),
+        indices: Some(vec![Arc::new(IndexInfo {
+            id: 1,
+            name: CIStr::new("PRIMARY"),
+            table: CIStr::new("tc_pk"),
+            primary: true,
+            unique: true,
+            columns: Some(vec![
+                IndexColumn {
+                    name: CIStr::new("a"),
+                    offset: 0,
+                    length: UnspecifiedLength,
+                    ..Default::default()
+                },
+                IndexColumn {
+                    name: CIStr::new("b"),
+                    offset: 1,
+                    length: UnspecifiedLength,
+                    ..Default::default()
+                },
+            ]),
+            state: StatePublic,
+            ..Default::default()
+        })]),
+        pk_is_handle: false,
+        is_common_handle: true,
+        common_handle_version: 1,
+        state: StatePublic,
+        version: 5,
+        max_column_id: 3,
+        max_index_id: 1,
+        ..Default::default()
+    };
+
+    let mut db = DBInfo {
+        id: 2,
+        name: CIStr::new("test"),
+        state: StatePublic,
+        ..Default::default()
+    };
+    db.deprecated.tables = Some(vec![Arc::new(sbtest1), Arc::new(tc_pk)]);
+    let mut b = tidb_infoschema::new_builder(None, None, tidb_infoschema::new_data());
+    block_on(b.init_with_db_infos(vec![db], vec![], vec![], 1)).unwrap();
+    Arc::new(block_on(b.build(1)))
+}
+
+/// Pinned field-by-field against live Go TiDB v8.5.8 `COM_STMT_PREPARE` column definitions
+/// for single-read `IndexReader` queries on `sbtest1`.
+#[test]
+fn prepare_index_reader_column_metadata_matches_tidb_v858() {
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    let cache = new_test_cache();
+    let mut s = cached_session(&store, sbtest_with_secondary_index_info_schema(), &cache);
+
+    // Live Go TiDB v8.5.8 capture for `SELECT k FROM sbtest1 WHERE k BETWEEN ? AND ?`:
+    //   num_params=2, num_cols=1
+    //   col[0]: schema=test, table=sbtest1, org_table=sbtest1, name=k, org_name=k,
+    //           charset=63 (binary), flen=11, type=3 (TypeLong), flags=9, decimal=0
+    let info1 = block_on(s.prepare_stmt("SELECT k FROM sbtest1 WHERE k BETWEEN ? AND ?")).unwrap();
+    assert_eq!(info1.param_count, 2);
+    assert_eq!(info1.fields.len(), 1);
+    let f = &info1.fields[0];
+    assert_eq!(f.db_name.o, "test");
+    assert_eq!(f.table_name.o, "sbtest1");
+    assert_eq!(f.table_as_name.o, "sbtest1");
+    assert_eq!(f.column_name.o, "k");
+    assert_eq!(f.column_as_name.o, "k");
+    assert_eq!(f.column_type.get_type(), 3);
+    assert_eq!(f.column_type.get_flag(), 9);
+    assert_eq!(f.column_type.get_flen(), 11);
+    assert_eq!(f.column_type.get_decimal(), 0);
+    assert_eq!(f.column_type.get_charset(), "binary");
+    assert_eq!(f.column_type.get_collate(), "binary");
+    s.drop_prepared_stmt(info1.stmt_id).unwrap();
+
+    // Live Go TiDB v8.5.8 capture for `SELECT id, k FROM sbtest1 WHERE k BETWEEN ? AND ?`:
+    //   num_params=2, num_cols=2
+    //   col[0]: name=id, org_name=id, type=3, flags=515, flen=11, decimal=0, binary
+    //   col[1]: name=k,  org_name=k,  type=3, flags=9,   flen=11, decimal=0, binary
+    let info2 =
+        block_on(s.prepare_stmt("SELECT id, k FROM sbtest1 WHERE k BETWEEN ? AND ?")).unwrap();
+    assert_eq!(info2.param_count, 2);
+    assert_eq!(info2.fields.len(), 2);
+    let f0 = &info2.fields[0];
+    assert_eq!(f0.db_name.o, "test");
+    assert_eq!(f0.table_name.o, "sbtest1");
+    assert_eq!(f0.table_as_name.o, "sbtest1");
+    assert_eq!(f0.column_name.o, "id");
+    assert_eq!(f0.column_as_name.o, "id");
+    assert_eq!(f0.column_type.get_type(), 3);
+    assert_eq!(f0.column_type.get_flag(), 515);
+    assert_eq!(f0.column_type.get_flen(), 11);
+    assert_eq!(f0.column_type.get_decimal(), 0);
+    assert_eq!(f0.column_type.get_charset(), "binary");
+    assert_eq!(f0.column_type.get_collate(), "binary");
+    let f1 = &info2.fields[1];
+    assert_eq!(f1.column_name.o, "k");
+    assert_eq!(f1.column_as_name.o, "k");
+    assert_eq!(f1.column_type.get_type(), 3);
+    assert_eq!(f1.column_type.get_flag(), 9);
+    s.drop_prepared_stmt(info2.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+}
+
+/// Executing an `IndexReader` query plans a `PhysicalIndexReader` and stops cleanly at the
+/// executor builder boundary (`D12.1`) without mutating `StatementContext` (`warnings`,
+/// `table_ids`, `is_tikv`) and leaves the session idle.
+#[test]
+fn index_reader_execute_stops_at_executor_boundary_without_mutating_stmt_ctx() {
+    use std::sync::atomic::Ordering;
+    use tidb_planner::base::PhysicalKind;
+
+    let store = MockStore::new(10);
+    let cache = new_test_cache();
+    let mut s = cached_session(&store, sbtest_with_secondary_index_info_schema(), &cache);
+    let sql = "SELECT k FROM sbtest1 WHERE k BETWEEN 1 AND 100";
+
+    // Compile produces a PhysicalIndexReader.
+    block_on(s.finish_unfinished_stmt());
+    block_on(s.core.prepare_txn_ctx()).unwrap();
+    let node = parse(sql);
+    reset_context_of_stmt(&mut s.core, &node, sql).unwrap();
+    s.core
+        .txn_manager
+        .on_stmt_start(&mut s.core.sctx, Some(&node))
+        .unwrap();
+    let stmt = tidb_executor::compiler::Compiler
+        .compile(&mut s.core, node, sql)
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let plan = stmt.plan.as_ref().expect("compiled plan");
+    assert_eq!(plan.kind(), PhysicalKind::IndexReader);
+
+    let warnings_before = s.vars().stmt_ctx().warning_count();
+    let table_ids_before = s.vars().stmt_ctx().related_table_ids.clone();
+    let is_tikv_before = s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed);
+    let mut b = tidb_executor::builder::new_executor_builder(
+        &s.core,
+        None,
+        Arc::new(tidb_executor::adapter::TelemetryInfo::default()),
+    );
+    assert!(block_on(b.build(&mut s.core, Some(plan))).is_none());
+    let err = b.err.expect("executor boundary error");
+    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+    assert_eq!(s.vars().stmt_ctx().warning_count(), warnings_before);
+    assert_eq!(s.vars().stmt_ctx().related_table_ids, table_ids_before);
+    assert_eq!(
+        s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed),
+        is_tikv_before
+    );
+    s.core.rollback_on_error();
+    s.core.txn_manager.on_stmt_end();
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+
+    // End-to-end execute_stmt also returns blocked-by:D12.1 and leaves session idle.
+    let err = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
+    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+}
+
+/// Multi-group `GroupRangesByCols` on a clustered common-handle `TableReader` produces
+/// grouped ranges in the planner and falls back cleanly at the executor builder boundary
+/// (`D12.1`) without mutating `StatementContext` or leaving session state behind.
+#[test]
+fn multi_group_table_reader_fallback_leaves_stmt_ctx_untouched() {
+    use std::sync::atomic::Ordering;
+    use tidb_planner::base::{PhysicalKind, PhysicalPlan};
+    use tidb_planner::core::physical_plans::{PhysicalTableReader, PhysicalTableScan};
+
+    let store = MockStore::new(10);
+    let cache = new_test_cache();
+    let mut s = cached_session(&store, sbtest_with_secondary_index_info_schema(), &cache);
+    // Use non-adjacent keys (1 and 3) so ranger keeps two separate point ranges instead of
+    // coalescing adjacent integers [1,1] U [2,2] into a single range [1,2].
+    let sql = "SELECT * FROM tc_pk WHERE (a = 1 OR a = 3) ORDER BY b LIMIT 3";
+
+    block_on(s.finish_unfinished_stmt());
+    block_on(s.core.prepare_txn_ctx()).unwrap();
+    let node = parse(sql);
+    reset_context_of_stmt(&mut s.core, &node, sql).unwrap();
+    s.core
+        .txn_manager
+        .on_stmt_start(&mut s.core.sctx, Some(&node))
+        .unwrap();
+    let stmt = tidb_executor::compiler::Compiler
+        .compile(&mut s.core, node, sql)
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let plan = stmt.plan.as_ref().expect("compiled plan");
+
+    fn find_table_reader(p: &dyn PhysicalPlan) -> Option<&PhysicalTableReader> {
+        if let Some(tr) = p.as_any().downcast_ref::<PhysicalTableReader>() {
+            return Some(tr);
+        }
+        p.children().iter().find_map(|c| find_table_reader(&**c))
+    }
+    let tr = find_table_reader(&**plan).expect("expected TableReader in plan");
+    let ts = tr.table_plans[0]
+        .as_any()
+        .downcast_ref::<PhysicalTableScan>()
+        .expect("expected TableScan inside TableReader");
+    assert_eq!(ts.group_by_col_idxs, vec![0]);
+    assert_eq!(ts.grouped_ranges.len(), 2);
+    assert_eq!(plan.kind(), PhysicalKind::Limit);
+
+    let warnings_before = s.vars().stmt_ctx().warning_count();
+    let table_ids_before = s.vars().stmt_ctx().related_table_ids.clone();
+    let is_tikv_before = s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed);
+    let mut b = tidb_executor::builder::new_executor_builder(
+        &s.core,
+        None,
+        Arc::new(tidb_executor::adapter::TelemetryInfo::default()),
+    );
+    assert!(block_on(b.build(&mut s.core, Some(plan))).is_none());
+    let err = b.err.expect("executor boundary error");
+    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+    assert_eq!(s.vars().stmt_ctx().warning_count(), warnings_before);
+    assert_eq!(s.vars().stmt_ctx().related_table_ids, table_ids_before);
+    assert_eq!(
+        s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed),
+        is_tikv_before
+    );
+    s.core.rollback_on_error();
+    s.core.txn_manager.on_stmt_end();
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+
+    let err = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
+    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+}
+
 mod sbtest_results;

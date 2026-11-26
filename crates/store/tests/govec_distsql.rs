@@ -1,7 +1,9 @@
 //! Replays the govec `distsql` vectors (tidb-rs-tracker `govec/domains/distsql.go`):
-//! block D07.3 part 1 (`SplitRangesAcrossInt64Boundary`, table/common-handle/index-key
-//! range encoding, `RequestBuilder` + `SetEncodeType` + `ResourceGroupTagger` TableId/Label,
-//! `Select` / `SelectWithRuntimeStats` + `TypeChunk`/`TypeDefault` decoding +
+//! block D07.3 parts 1 & 2 (`SplitRangesAcrossInt64Boundary`, table/common-handle/index-key
+//! range encoding, `TableHandlesToKVRanges`, `PartitionHandlesToKVRanges`,
+//! `IndexRangesToKVRanges*`, `RequestBuilder` + `SetEncodeType` + `ResourceGroupTagger`
+//! TableId/Label, `Select` / `SelectWithRuntimeStats` + `TypeChunk`/`TypeDefault` decoding,
+//! `NewSortedSelectResults`, `SelectResultIter` / `selRespChannelIter`, and
 //! `selectResultRuntimeStats`) against Go TiDB v8.5.8.
 //!
 //! `GOVEC_DISTSQL_FILES` (comma-separated paths) replays extra-seed artifacts as well.
@@ -9,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,9 +27,13 @@ use tidb_execdetails::execdetails::{
     CopExecDetails, RuntimeStats, RuntimeStatsColl, SyncExecDetails,
 };
 use tidb_execdetails::ppcpuusage::SQLCPUUsages;
+use tidb_expression::byitem::ByItems;
+use tidb_expression::column::Column;
+use tidb_expression::expression::Expr;
+use tidb_expression::schema::new_schema;
 use tidb_infoschema::context::MetaOnlyInfoSchema;
 use tidb_kv::copr::{CopRuntimeStats, ResourceGroupTagBuilder, Variables};
-use tidb_kv::key::{Key, KeyRange};
+use tidb_kv::key::{Handle, IntHandle, Key, KeyRange, new_common_handle, new_partition_handle};
 use tidb_kv::kv::{
     Client, ClientSendOption, KeyRanges, KvFuture, RC, RCCheckTS, ReqTypeDAG, Request, Response,
     ResultSubset, SI,
@@ -40,12 +47,15 @@ use tidb_sessionctx::errctx::{
     self, ErrGroupBadNull, ErrGroupDupKey, ErrGroupNoDefault, ErrGroupTruncate, LevelIgnore,
     LevelMap,
 };
+use tidb_sessionctx::exprstatic::evalctx::new_eval_context;
 use tidb_sessionctx::ranger::Range;
 use tidb_store::distsql::{
-    RequestBuilder, SelectResultRuntimeStats, common_handle_ranges_to_kv_ranges, encode_index_key,
-    get_select_result_concurrency, get_system_endian, select, select_with_runtime_stats,
-    set_encode_type, split_ranges_across_int64_boundary, table_handle_ranges_to_kv_ranges,
-    table_ranges_to_kv_ranges, verify_txn_scope,
+    RequestBuilder, SelectResult, SelectResultRuntimeStats, common_handle_ranges_to_kv_ranges,
+    encode_index_key, get_select_result_concurrency, get_system_endian, index_ranges_to_kv_ranges,
+    index_ranges_to_kv_ranges_with_interrupt_signal, new_sorted_select_results,
+    partition_handles_to_kv_ranges, select, select_with_runtime_stats, set_encode_type,
+    split_ranges_across_int64_boundary, table_handle_ranges_to_kv_ranges,
+    table_handles_to_kv_ranges, table_ranges_to_kv_ranges, verify_txn_scope,
 };
 use tidb_store::util::resourcegrouptag::{encode_tag_with_key, get_resource_group_label_by_key};
 use tidb_types::MyDecimal;
@@ -998,6 +1008,404 @@ fn exec_stats(spec: &Value) -> Value {
     })
 }
 
+// ---------------------------------------------------------------- Part 2 replay
+
+fn handle_in(v: &Value) -> Handle {
+    match v["k"].as_str().unwrap() {
+        "int" => Handle::Int(IntHandle(v["v"].as_i64().unwrap_or(0))),
+        "common" => {
+            let raw = unhex(v["hex"].as_str().unwrap_or(""));
+            Handle::Common(Arc::new(new_common_handle(raw).unwrap()))
+        }
+        "part" => {
+            let pid = v["pid"].as_i64().unwrap_or(0);
+            let inner = handle_in(&v["h"]);
+            Handle::Partition(new_partition_handle(pid, inner))
+        }
+        other => panic!("handle_in: unknown kind {other}"),
+    }
+}
+
+fn handles_in(v: &Value) -> Vec<Handle> {
+    v.as_array()
+        .map(|arr| arr.iter().map(handle_in).collect())
+        .unwrap_or_default()
+}
+
+fn exec_index_and_handles(args: &[Value]) -> Value {
+    match args[0].as_str().unwrap() {
+        "table_handles" => {
+            let tid = args[1].as_i64().unwrap();
+            let hs = handles_in(&args[2]);
+            let (krs, hints) = table_handles_to_kv_ranges(tid, &hs);
+            let req = RequestBuilder::default()
+                .set_table_handles(tid, &hs)
+                .build()
+                .unwrap();
+            json!({
+                "ranges": kv_ranges_out(&krs),
+                "hints": hints,
+                "reqKR": key_ranges_out(req.key_ranges.as_ref()),
+            })
+        }
+        "part_handles" => {
+            let hs = handles_in(&args[1]);
+            let (krs, hints) = partition_handles_to_kv_ranges(&hs);
+            let req = RequestBuilder::default()
+                .set_partitions_and_handles(&hs)
+                .build()
+                .unwrap();
+            json!({
+                "ranges": kv_ranges_out(&krs),
+                "hints": hints,
+                "reqKR": key_ranges_out(req.key_ranges.as_ref()),
+            })
+        }
+        "index_ranges" => {
+            let tid = args[1].as_i64().unwrap();
+            let idx_id = args[2].as_i64().unwrap();
+            let rs = ranges_in(&args[3]);
+            let tz_offset = args[4].as_i64().unwrap() as i32;
+            let strict = args[5].as_bool().unwrap();
+            let interrupt = args[6].as_bool().unwrap();
+            let dctx = DistSQLContext {
+                location: loc_of(tz_offset),
+                err_ctx: err_ctx_of(strict),
+                ..Default::default()
+            };
+            let sig = AtomicBool::new(interrupt);
+            let tracker = new_tracker(-1, -1);
+            if interrupt {
+                return match index_ranges_to_kv_ranges_with_interrupt_signal(
+                    Some(&dctx),
+                    tid,
+                    idx_id,
+                    &rs,
+                    Some(&tracker),
+                    Some(&sig),
+                ) {
+                    Ok(kr_sig) => json!({ "krSig": key_ranges_out(Some(&kr_sig)) }),
+                    Err(e) => json!({ "err": e.to_string() }),
+                };
+            }
+            let kr = match index_ranges_to_kv_ranges(Some(&dctx), tid, idx_id, &rs) {
+                Ok(k) => k,
+                Err(e) => return json!({ "err": e.to_string() }),
+            };
+            let kr_sig = match index_ranges_to_kv_ranges_with_interrupt_signal(
+                Some(&dctx),
+                tid,
+                idx_id,
+                &rs,
+                Some(&tracker),
+                Some(&sig),
+            ) {
+                Ok(k) => k,
+                Err(e) => return json!({ "err": e.to_string() }),
+            };
+            json!({
+                "kr": key_ranges_out(Some(&kr)),
+                "krSig": key_ranges_out(Some(&kr_sig)),
+            })
+        }
+        other => panic!("index_and_handles: unknown sub {other}"),
+    }
+}
+
+fn col_spec_to_ft(c: &Value) -> FieldType {
+    let mut ft = FieldType::new(c["tp"].as_u64().unwrap() as u8);
+    ft.set_flag(c["flag"].as_u64().unwrap_or(0) as usize);
+    ft.set_flen(c["flen"].as_i64().unwrap_or(-1) as isize);
+    ft.set_decimal(c["dec"].as_i64().unwrap_or(0) as isize);
+    ft.set_charset(c["cs"].as_str().unwrap_or(""));
+    ft.set_collate(c["coll"].as_str().unwrap_or(""));
+    ft
+}
+
+fn exec_sorted(spec: &Value) -> Value {
+    let fts_owned: Vec<FieldType> = spec["cols"]
+        .as_array()
+        .map(|a| a.iter().map(col_spec_to_ft).collect())
+        .unwrap_or_default();
+    let fts_arc: Vec<Arc<FieldType>> = fts_owned.iter().cloned().map(Arc::new).collect();
+    let cols: Vec<Arc<Column>> = fts_arc
+        .iter()
+        .enumerate()
+        .map(|(i, ft)| {
+            Arc::new(Column {
+                id: (i + 1) as i64,
+                unique_id: (i + 1) as i64,
+                index: i as isize,
+                ret_type: Arc::clone(ft),
+                ..Default::default()
+            })
+        })
+        .collect();
+    let schema = spec["useSchema"]
+        .as_bool()
+        .unwrap_or(false)
+        .then(|| new_schema(cols.clone()));
+    let by_items: Vec<ByItems> = spec["by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            let col_idx = b["col"].as_u64().unwrap() as usize;
+            ByItems {
+                expr: Expr::Column((*cols[col_idx]).clone()).into_ref(),
+                desc: b["desc"].as_bool().unwrap_or(false),
+            }
+        })
+        .collect();
+
+    let tz_offset = spec["tzOffset"].as_i64().unwrap_or(0) as i32;
+    let ctx = tidb_kv::Context::background();
+    let mut children: Vec<Box<dyn SelectResult>> = Vec::new();
+    for ch in spec["children"].as_array().unwrap() {
+        let pkts: Vec<MockPacket> = ch
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| MockPacket {
+                data: unhex(h.as_str().unwrap()),
+                stats: None,
+                resp_time: Duration::ZERO,
+                next_err: None,
+            })
+            .collect();
+        let resp = MockResp {
+            packets: pkts,
+            idx: 0,
+            conc: 1,
+            extra_conc: 0,
+            batch_num: 0,
+            batch_fallback: 0,
+            build_elapsed: Duration::ZERO,
+            unconsumed: Vec::new(),
+        };
+        let dctx = Arc::new(DistSQLContext {
+            client: Some(Arc::new(MockClient(Mutex::new(Some(Box::new(resp)))))),
+            warn_handler: Some(ignore_warn_appender()),
+            location: loc_of(tz_offset),
+            err_ctx: err_ctx_of(true),
+            sql_killer: Some(Arc::new(SqlKiller::default())),
+            cpu_usage: Arc::new(SQLCPUUsages::default()),
+            exec_details: Arc::new(SyncExecDetails::default()),
+            kv_vars: Variables::default(),
+            ..Default::default()
+        });
+        let kv_req = Request {
+            tp: ReqTypeDAG,
+            store_type: tidb_base::kv::TiKV,
+            ..Default::default()
+        };
+        let sr = futures::executor::block_on(select(&ctx, dctx, &kv_req, fts_arc.clone())).unwrap();
+        children.push(sr);
+    }
+
+    let tracker = new_tracker(-1, -1);
+    let ectx = new_eval_context(vec![]);
+    let mut ssr = new_sorted_select_results(
+        ectx.as_ref(),
+        children,
+        schema.as_ref(),
+        by_items,
+        Some(Arc::clone(&tracker)),
+    )
+    .unwrap();
+
+    let into_iter_err = match ssr.into_iter(vec![]) {
+        Ok(_) => String::new(),
+        Err(e) => e.to_string(),
+    };
+
+    let mut next_raw_panic = String::new();
+    if spec["testNextRaw"].as_bool().unwrap_or(false) {
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            let _ = futures::executor::block_on(ssr.next_raw(&ctx));
+        }));
+        if let Err(payload) = res {
+            next_raw_panic = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+        }
+    }
+
+    let req_rows_spec: Vec<usize> = spec["reqRows"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|x| x.as_u64().unwrap_or(32) as usize)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut batches: Vec<Vec<String>> = Vec::new();
+    let mut next_err = String::new();
+    let mut step = 0usize;
+    loop {
+        let rr = if req_rows_spec.is_empty() {
+            32
+        } else if step < req_rows_spec.len() {
+            req_rows_spec[step]
+        } else {
+            *req_rows_spec.last().unwrap()
+        };
+        step += 1;
+        let mut chk = new_chunk_with_capacity(&fts_owned, 32);
+        chk.set_required_rows(rr as isize, 1024);
+        match futures::executor::block_on(ssr.next(&ctx, &mut chk)) {
+            Ok(()) => {
+                if chk.num_rows() == 0 {
+                    break;
+                }
+                let mut rows = Vec::with_capacity(chk.num_rows());
+                for r in 0..chk.num_rows() {
+                    rows.push(
+                        String::from_utf8_lossy(&chk.get_row(r).to_string(&fts_owned)).into_owned(),
+                    );
+                }
+                batches.push(rows);
+            }
+            Err(e) => {
+                next_err = e.to_string();
+                break;
+            }
+        }
+        assert!(step <= 200, "sorted_and_iter: runaway Next loop");
+    }
+    let _ = ssr.close();
+    assert_eq!(tracker.bytes_consumed(), 0);
+    json!({
+        "batches": batches,
+        "err": next_err,
+        "intoIterErr": into_iter_err,
+        "nextRawPanic": next_raw_panic,
+    })
+}
+
+fn exec_iter(spec: &Value) -> Value {
+    let main_owned: Vec<FieldType> = spec["mainCols"]
+        .as_array()
+        .map(|a| a.iter().map(col_spec_to_ft).collect())
+        .unwrap_or_default();
+    let main_arc: Vec<Arc<FieldType>> = main_owned.iter().cloned().map(Arc::new).collect();
+    let all_inter_owned: Vec<Vec<FieldType>> = spec["interCols"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|cols| {
+                    cols.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(col_spec_to_ft)
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let pass_count = spec["passInterCount"].as_i64().unwrap_or(-1);
+    let pass_inter_owned: &[Vec<FieldType>] =
+        if pass_count >= 0 && (pass_count as usize) <= all_inter_owned.len() {
+            &all_inter_owned[..pass_count as usize]
+        } else {
+            &all_inter_owned
+        };
+    let pass_inter_arc: Vec<Vec<Arc<FieldType>>> = pass_inter_owned
+        .iter()
+        .map(|v| v.iter().cloned().map(Arc::new).collect())
+        .collect();
+
+    let pkts: Vec<MockPacket> = spec["packets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| MockPacket {
+            data: unhex(h.as_str().unwrap()),
+            stats: None,
+            resp_time: Duration::ZERO,
+            next_err: None,
+        })
+        .collect();
+    let resp = MockResp {
+        packets: pkts,
+        idx: 0,
+        conc: 1,
+        extra_conc: 0,
+        batch_num: 0,
+        batch_fallback: 0,
+        build_elapsed: Duration::ZERO,
+        unconsumed: Vec::new(),
+    };
+    let warns = WarnRecorder::new();
+    let tz_offset = spec["tzOffset"].as_i64().unwrap_or(0) as i32;
+    let dctx = Arc::new(DistSQLContext {
+        client: Some(Arc::new(MockClient(Mutex::new(Some(Box::new(resp)))))),
+        warn_handler: Some(Arc::clone(&warns) as WarnAppenderRef),
+        location: loc_of(tz_offset),
+        err_ctx: err_ctx_of(true),
+        sql_killer: Some(Arc::new(SqlKiller::default())),
+        cpu_usage: Arc::new(SQLCPUUsages::default()),
+        exec_details: Arc::new(SyncExecDetails::default()),
+        kv_vars: Variables::default(),
+        ..Default::default()
+    });
+    let kv_req = Request {
+        tp: ReqTypeDAG,
+        store_type: tidb_base::kv::TiKV,
+        ..Default::default()
+    };
+    let ctx = tidb_kv::Context::background();
+    let mut sr = futures::executor::block_on(select(&ctx, dctx, &kv_req, main_arc)).unwrap();
+    let mut iter = sr.into_iter(pass_inter_arc.clone()).unwrap();
+
+    let post_errs: Option<Vec<String>> = if spec["checkPostIter"].as_bool().unwrap_or(false) {
+        let e1 = futures::executor::block_on(sr.next_raw(&ctx))
+            .unwrap_err()
+            .to_string();
+        let mut dummy_chk = new_chunk_with_capacity(&main_owned, 1);
+        let e2 = futures::executor::block_on(sr.next(&ctx, &mut dummy_chk))
+            .unwrap_err()
+            .to_string();
+        let e3 = sr.into_iter(pass_inter_arc).err().unwrap().to_string();
+        let e4 = sr.close().unwrap_err().to_string();
+        Some(vec![e1, e2, e3, e4])
+    } else {
+        None
+    };
+
+    let mut rows: Vec<Value> = Vec::new();
+    let mut iter_err = String::new();
+    loop {
+        match futures::executor::block_on(iter.next(&ctx)) {
+            Ok(Some(row)) => {
+                let ch = row.channel_index as usize;
+                let fts = if ch == pass_inter_owned.len() {
+                    &main_owned
+                } else {
+                    &pass_inter_owned[ch]
+                };
+                let s = String::from_utf8_lossy(&row.row.row().to_string(fts)).into_owned();
+                rows.push(json!([row.channel_index, s]));
+            }
+            Ok(None) => break,
+            Err(e) => {
+                iter_err = e.to_string();
+                break;
+            }
+        }
+    }
+    let _ = iter.close();
+    let w = warns.take();
+    json!({
+        "rows": rows,
+        "err": iter_err,
+        "warns": if w.is_empty() { Value::Null } else { json!(w) },
+        "postErrs": post_errs,
+    })
+}
+
 fn exec(op: &str, args: &[Value]) -> Value {
     collate::set_new_collation_enabled_for_test(true);
     match op {
@@ -1051,6 +1459,12 @@ fn exec(op: &str, args: &[Value]) -> Value {
             "select" => exec_select(&args[1]),
             "stats" => exec_stats(&args[1]),
             other => panic!("select_decode: unknown sub {other}"),
+        },
+        "index_and_handles" => exec_index_and_handles(args),
+        "sorted_and_iter" => match args[0].as_str().unwrap() {
+            "sorted" => exec_sorted(&args[1]),
+            "iter" => exec_iter(&args[1]),
+            other => panic!("sorted_and_iter: unknown sub {other}"),
         },
         other => panic!("unknown op {other}"),
     }
@@ -1109,7 +1523,7 @@ fn replay(path: &str) -> usize {
 #[test]
 fn govec_distsql() {
     let n = replay(&vectors());
-    assert!(n >= 650, "{n} records");
+    assert!(n >= 950, "{n} records");
     if let Ok(files) = std::env::var("GOVEC_DISTSQL_FILES") {
         for f in files.split(',').filter(|f| !f.is_empty()) {
             replay(f);

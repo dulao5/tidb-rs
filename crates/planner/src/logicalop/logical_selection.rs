@@ -188,14 +188,20 @@ impl LogicalPlan for LogicalSelection {
     }
 
     /// DeriveTopN implements the base.LogicalPlan.<6th> interface.
-    // go: LogicalSelection.DeriveTopN L2 (windowIsTopN needs a LogicalWindow child: the window operator is block D09.4 and cannot be in the tree, so the derive branch is unreachable)
+    // go: LogicalSelection.DeriveTopN L2 (windowIsTopN over LogicalWindow is blocked-by:D09.11)
     fn derive_top_n(
         &mut self,
-        _ctx: &mut PlanCtx<'_>,
+        ctx: &mut PlanCtx<'_>,
         this: PlanId,
         _opt: &LogicalOptimizeOp,
     ) -> Result<PlanId, Error> {
-        // windowIsTopN, limitValue := utilfuncp.WindowIsTopN(s): false without a window child.
+        if ctx.arena.get(self.children()[0]).kind() == crate::LogicalKind::Window {
+            // glue: blocked-by:D09.11 (windowIsTopN / DeriveTopNFromWindow over LogicalWindow)
+            return Err(tidb_base::blocked::blocked(
+                "D09.11",
+                "LogicalSelection.DeriveTopN over LogicalWindow (windowIsTopN)",
+            ));
+        }
         Ok(this)
     }
 

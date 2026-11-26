@@ -1,11 +1,11 @@
 //! go-file: pkg/distsql/select_result.go
 //!
-//! Port of Go TiDB v8.5.8 `pkg/distsql/select_result.go` (block D07.3, Part 1: 18 functions):
-//! `SelectResult` trait, `GetSelectResultConcurrency`, `selectResult` (`Next`, `NextRaw`,
+//! Port of Go TiDB v8.5.8 `pkg/distsql/select_result.go` (block D07.3, Parts 1 & 2: 41
+//! functions): `SelectResult` / `SelectResultIter` traits, `GetSelectResultConcurrency`,
+//! `chunkRowHeap` + `sortedSelectResults`, `selectResult` (`Next`, `IntoIter`, `NextRaw`,
 //! `fetchResp`, `fetchRespWithIntermediateResults`, `readFromChunk`, `readFromDefault`,
-//! `readRowsData`, `updateCopRuntimeStats`, `memConsume`, `Close`, `close`), and
-//! `selectResultRuntimeStats` (`mergeCopRuntimeStats`, `Clone`, `Merge`, `String`, `Tp`,
-//! `calcCacheHit`).
+//! `readRowsData`, `updateCopRuntimeStats`, `memConsume`, `Close`, `close`),
+//! `selRespChannelIter` + `selectResultIter`, and `selectResultRuntimeStats`.
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -18,31 +18,41 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use protobuf::Message;
 use tidb_base::Error;
-use tidb_base::blocked::blocked;
 use tidb_base::dbterror::ClassTiKV;
+use tidb_base::gostd::heap;
 use tidb_base::gostd::strconv::format_float;
+use tidb_base::gostd::time::Location;
 use tidb_base::kv::{StoreType, TiFlash};
-use tidb_chunk::chunk::{Chunk, new_chunk_with_capacity};
-use tidb_chunk::codec::{Decoder as ChunkDecoder, new_decoder as new_chunk_decoder};
-use tidb_chunk::row::RowHandle;
+use tidb_chunk::ColAlloc;
+use tidb_chunk::chunk::{Chunk, new_chunk_with_capacity, renew_with_capacity_in};
+use tidb_chunk::codec::{
+    Decoder as ChunkDecoder, new_codec as new_chunk_codec, new_decoder as new_chunk_decoder,
+};
+use tidb_chunk::compare::{CompareFunc, get_compare_func};
+use tidb_chunk::list::RowPtr;
+use tidb_chunk::row::{Row, RowHandle};
 use tidb_codec::codec::new_decoder as new_datum_decoder;
 use tidb_execdetails::execdetails::{
     DurationWrapper, Int64, Percentile, RuntimeStats, TpSelectResultRuntimeStats, format_duration,
 };
+use tidb_expression::byitem::ByItems;
+use tidb_expression::{EvalContext, Schema};
 use tidb_kv::copr::CopRuntimeStats;
 use tidb_kv::kv::Response;
+use tidb_memory::TrackedAlloc;
 use tidb_memory::tracker::Tracker;
 use tidb_parser::types::FieldType;
 use tidb_sessionctx::distsql_ctx::DistSQLContext;
+use tidb_sessionctx::variable::tidb_defs::DefInitChunkSize;
 
-/// SelectResultRow indicates the row returned by [`SelectResultIter`] (implemented in Part 2).
+/// SelectResultRow indicates the row returned by [`SelectResultIter`].
 #[derive(Clone, Debug)]
 pub struct SelectResultRow {
     pub channel_index: isize,
     pub row: RowHandle,
 }
 
-/// SelectResultIter is an iterator used to iterate the rows from [`SelectResult`] (Part 2).
+/// SelectResultIter is an iterator used to iterate the rows from [`SelectResult`].
 #[async_trait]
 pub trait SelectResultIter: Send {
     // glue: Go interface method SelectResultIter.Next
@@ -79,6 +89,336 @@ pub fn get_select_result_concurrency(sr: &dyn SelectResult) -> Option<(isize, is
     sr.cop_concurrency()
 }
 
+/// Min-heap view over [`SortedSelectResults`] matching Go's `chunkRowHeap` and
+/// `container/heap` sift order (for exact tie-breaking parity).
+struct ChunkRowHeap<'a> {
+    ssr: &'a mut SortedSelectResults,
+}
+
+impl ChunkRowHeap<'_> {
+    // go: chunkRowHeap.Len L1
+    fn len_impl(&self) -> usize {
+        self.ssr.row_ptrs.len()
+    }
+
+    // go: chunkRowHeap.Less L1
+    fn less_impl(&self, i: usize, j: usize) -> bool {
+        let i_ptr = self.ssr.row_ptrs[i];
+        let j_ptr = self.ssr.row_ptrs[j];
+        let row_i = self.ssr.cached_chunks[i_ptr.chk_idx as usize]
+            .as_ref()
+            .unwrap()
+            .get_row(i_ptr.row_idx as usize);
+        let row_j = self.ssr.cached_chunks[j_ptr.chk_idx as usize]
+            .as_ref()
+            .unwrap()
+            .get_row(j_ptr.row_idx as usize);
+        self.ssr.less_row(row_i, row_j)
+    }
+
+    // go: chunkRowHeap.Swap L1
+    fn swap_impl(&mut self, i: usize, j: usize) {
+        self.ssr.row_ptrs.swap(i, j);
+    }
+
+    // go: chunkRowHeap.Push L1
+    fn push_impl(&mut self, x: RowPtr) {
+        self.ssr.row_ptrs.push(x);
+    }
+
+    // go: chunkRowHeap.Pop L1
+    fn pop_impl(&mut self) -> RowPtr {
+        self.ssr.row_ptrs.pop().expect("chunkRowHeap pop on empty")
+    }
+}
+
+impl heap::Interface for ChunkRowHeap<'_> {
+    // glue: container/heap.Interface.Len -> chunkRowHeap.Len
+    fn len(&self) -> usize {
+        self.len_impl()
+    }
+
+    // glue: container/heap.Interface.Less -> chunkRowHeap.Less
+    fn less(&self, i: usize, j: usize) -> bool {
+        self.less_impl(i, j)
+    }
+
+    // glue: container/heap.Interface.Swap -> chunkRowHeap.Swap
+    fn swap(&mut self, i: usize, j: usize) {
+        self.swap_impl(i, j);
+    }
+
+    // glue: container/heap.Interface.Pop -> chunkRowHeap.Pop
+    fn pop(&mut self) {
+        let _ = self.pop_impl();
+    }
+}
+
+impl heap::PushInterface for ChunkRowHeap<'_> {
+    type Item = RowPtr;
+
+    // glue: container/heap.Interface.Push -> chunkRowHeap.Push
+    fn push(&mut self, x: RowPtr) {
+        self.push_impl(x);
+    }
+}
+
+/// NewSortedSelectResults merges multiple sorted [`SelectResult`] streams (e.g. from
+/// partition tables) in `by_items` order. If `schema` is `None`, sorts by the first
+/// `by_items.len()` columns.
+// go: NewSortedSelectResults L2 (returns Result on unsupported compare type or non-column ByItems; A1 / M-MEM TrackedAlloc)
+pub fn new_sorted_select_results(
+    eval_ctx: &dyn EvalContext,
+    select_results: Vec<Box<dyn SelectResult>>,
+    schema: Option<&Schema>,
+    by_items: Vec<ByItems>,
+    mem_tracker: Option<Arc<Tracker>>,
+) -> Result<Box<dyn SelectResult>, Error> {
+    let n = select_results.len();
+    let tracked_alloc = mem_tracker
+        .as_ref()
+        .map(|t| TrackedAlloc::new(Arc::clone(t)));
+    let mut s = SortedSelectResults {
+        select_results,
+        compare_funcs: Vec::new(),
+        by_items,
+        key_columns: Vec::new(),
+        cached_chunks: (0..n).map(|_| None).collect(),
+        row_ptrs: Vec::new(),
+        mem_tracker,
+        tracked_alloc,
+        closed: false,
+    };
+    s.init_compare_funcs(eval_ctx)?;
+    s.build_key_columns(schema)?;
+    Ok(Box::new(s))
+}
+
+struct SortedSelectResults {
+    select_results: Vec<Box<dyn SelectResult>>,
+    compare_funcs: Vec<CompareFunc>,
+    by_items: Vec<ByItems>,
+    key_columns: Vec<usize>,
+
+    cached_chunks: Vec<Option<Chunk>>,
+    row_ptrs: Vec<RowPtr>,
+
+    mem_tracker: Option<Arc<Tracker>>,
+    tracked_alloc: Option<TrackedAlloc>,
+    closed: bool,
+}
+
+impl Drop for SortedSelectResults {
+    /// N3 §3.5 drop safety net: closes remaining child `SelectResult`s and releases cached
+    /// chunk memory if dropped without an explicit `close()`.
+    // glue: Drop safety net (N3 §3.5)
+    fn drop(&mut self) {
+        if !self.closed {
+            self.closed = true;
+            for (sr, cached) in self
+                .select_results
+                .iter_mut()
+                .zip(self.cached_chunks.iter_mut())
+            {
+                let _ = sr.close();
+                *cached = None;
+            }
+            if let Some(alloc) = &self.tracked_alloc {
+                alloc.flush();
+            }
+        }
+    }
+}
+
+impl SortedSelectResults {
+    // go: sortedSelectResults.updateCachedChunk L2 (A1 / M-MEM: cached chunks use TrackedAlloc + checkpoint)
+    async fn update_cached_chunk(&mut self, ctx: &tidb_kv::Context, idx: u32) -> Result<(), Error> {
+        let i = idx as usize;
+        let chk = self.cached_chunks[i]
+            .as_mut()
+            .expect("cached chunk initialized");
+        self.select_results[i].next(ctx, chk).await?;
+        if let Some(alloc) = &self.tracked_alloc {
+            alloc.flush();
+        }
+        if let Some(tracker) = &self.mem_tracker {
+            tracker.checkpoint()?;
+        }
+        if chk.num_rows() == 0 {
+            return Ok(());
+        }
+        let mut h = ChunkRowHeap { ssr: self };
+        heap::push(
+            &mut h,
+            RowPtr {
+                chk_idx: idx,
+                row_idx: 0,
+            },
+        );
+        Ok(())
+    }
+
+    // go: sortedSelectResults.initCompareFuncs L2 (returns Result if get_compare_func returns None)
+    fn init_compare_funcs(&mut self, eval_ctx: &dyn EvalContext) -> Result<(), Error> {
+        self.compare_funcs = Vec::with_capacity(self.by_items.len());
+        for item in &self.by_items {
+            let key_type = item.expr.get_type(eval_ctx);
+            let cmp = get_compare_func(&key_type).ok_or_else(|| {
+                Error::plain(format!(
+                    "unsupported compare type for sortedSelectResults: {}",
+                    key_type.get_type()
+                ))
+            })?;
+            self.compare_funcs.push(cmp);
+        }
+        Ok(())
+    }
+
+    // go: sortedSelectResults.buildKeyColumns L2 (takes Option<&Schema> directly; returns Result on non-column or missing column)
+    fn build_key_columns(&mut self, schema: Option<&Schema>) -> Result<(), Error> {
+        self.key_columns = Vec::with_capacity(self.by_items.len());
+        for (i, by) in self.by_items.iter().enumerate() {
+            let col = by.expr.as_column().ok_or_else(|| {
+                Error::plain("sortedSelectResults byItem expression must be a Column")
+            })?;
+            match schema {
+                None => self.key_columns.push(i),
+                Some(schema) => {
+                    let idx = schema.column_index(col);
+                    if idx < 0 {
+                        return Err(Error::plain(format!(
+                            "column {} not found in schema for sortedSelectResults",
+                            col.id
+                        )));
+                    }
+                    self.key_columns.push(idx as usize);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // go: sortedSelectResults.lessRow L1
+    fn less_row(&self, row_i: Row<'_>, row_j: Row<'_>) -> bool {
+        for (i, &col_idx) in self.key_columns.iter().enumerate() {
+            let mut cmp = (self.compare_funcs[i])(row_i, col_idx, row_j, col_idx);
+            if self.by_items[i].desc {
+                cmp = -cmp;
+            }
+            if cmp < 0 {
+                return true;
+            } else if cmp > 0 {
+                return false;
+            }
+        }
+        false
+    }
+}
+
+#[async_trait]
+impl SelectResult for SortedSelectResults {
+    // go: sortedSelectResults.NextRaw L1 [M-PANIC]
+    async fn next_raw(&mut self, _ctx: &tidb_kv::Context) -> Result<Option<Vec<u8>>, Error> {
+        panic!("Not support NextRaw for sortedSelectResults");
+    }
+
+    // go: sortedSelectResults.Next L2 (A1 / M-MEM TrackedAlloc + checkpoint; N3 cooperative checkpoint)
+    async fn next(&mut self, ctx: &tidb_kv::Context, c: &mut Chunk) -> Result<(), Error> {
+        c.reset();
+        for cached in &mut self.cached_chunks {
+            if cached.is_none() {
+                let new_chk = match &self.tracked_alloc {
+                    Some(alloc) => renew_with_capacity_in(
+                        c,
+                        c.capacity(),
+                        c.required_rows(),
+                        ColAlloc::Tracked(alloc.clone()),
+                    ),
+                    None => c.copy_construct(),
+                };
+                *cached = Some(new_chk);
+                if let Some(alloc) = &self.tracked_alloc {
+                    alloc.flush();
+                }
+                if let Some(tracker) = &self.mem_tracker {
+                    tracker.checkpoint()?;
+                }
+            }
+        }
+
+        if self.row_ptrs.is_empty() {
+            for i in 0..self.cached_chunks.len() {
+                self.update_cached_chunk(ctx, i as u32).await?;
+            }
+        }
+
+        while c.num_rows() < c.required_rows() {
+            if self.row_ptrs.is_empty() {
+                break;
+            }
+
+            let idx = {
+                let mut h = ChunkRowHeap { ssr: self };
+                heap::pop_with(&mut h, |h| h.pop_impl())
+            };
+            let chk_idx = idx.chk_idx as usize;
+            let row_idx = idx.row_idx as usize;
+            let cached = self.cached_chunks[chk_idx].as_ref().unwrap();
+            c.append_row(cached.get_row(row_idx));
+            if row_idx >= cached.num_rows() - 1 {
+                self.update_cached_chunk(ctx, idx.chk_idx).await?;
+            } else {
+                let mut h = ChunkRowHeap { ssr: self };
+                heap::push(
+                    &mut h,
+                    RowPtr {
+                        chk_idx: idx.chk_idx,
+                        row_idx: idx.row_idx + 1,
+                    },
+                );
+            }
+            let Ok(()) = tidb_runtime::checkpoint(&()).await;
+        }
+        Ok(())
+    }
+
+    // go: sortedSelectResults.IntoIter L1
+    fn into_iter(
+        &mut self,
+        _intermediate_field_types: Vec<Vec<Arc<FieldType>>>,
+    ) -> Result<Box<dyn SelectResultIter>, Error> {
+        Err(Error::plain("not implemented"))
+    }
+
+    // go: sortedSelectResults.Close L2 (N3 §3.5 / spec §8 item 4: closes all children and drops all cached chunks even on error, returning first error)
+    fn close(&mut self) -> Result<(), Error> {
+        if self.closed {
+            return Ok(());
+        }
+        self.closed = true;
+        let mut first_err = None;
+        for (sr, cached) in self
+            .select_results
+            .iter_mut()
+            .zip(self.cached_chunks.iter_mut())
+        {
+            if let Err(e) = sr.close()
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+            *cached = None;
+        }
+        if let Some(alloc) = &self.tracked_alloc {
+            alloc.flush();
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Concrete [`SelectResult`] wrapping a `kv::Response`.
 ///
 /// Wraps `Option<SelectResultInner>` so Part 2's `into_iter` can move the inner state cleanly
@@ -88,16 +428,16 @@ pub struct SelectResultImpl {
     inner: Option<SelectResultInner>,
 }
 
-struct SelectResultInner {
+pub(crate) struct SelectResultInner {
     label: &'static str,
     resp: Box<dyn Response>,
 
     row_len: usize,
     field_types: Vec<Arc<FieldType>>,
-    intermediate_output_types: Vec<Vec<Arc<FieldType>>>,
+    pub(crate) intermediate_output_types: Vec<Vec<Arc<FieldType>>>,
     ctx: Arc<DistSQLContext>,
 
-    select_resp: Option<tipb::SelectResponse>,
+    pub(crate) select_resp: Option<tipb::SelectResponse>,
     select_resp_size: AtomicI64,
     resp_chk_idx: usize,
     rows_data_offset: usize,
@@ -174,6 +514,12 @@ impl SelectResultImpl {
             .as_mut()
             .ok_or_else(|| Error::plain("selectResult is invalid after IntoIter()"))
     }
+
+    #[cfg(test)]
+    // glue: test accessor for unit tests mirroring Go white-box package tests
+    pub(crate) fn inner_mut_for_test(&mut self) -> &mut SelectResultInner {
+        self.inner.as_mut().expect("SelectResultImpl inner present")
+    }
 }
 
 impl Drop for SelectResultInner {
@@ -188,6 +534,8 @@ impl Drop for SelectResultInner {
             if resp_size > 0 {
                 let _ = self.mem_consume(-resp_size);
             }
+            self.resp_chunk_decoder = None;
+            self.select_resp = None;
             let _ = self.resp.close();
         }
     }
@@ -324,7 +672,25 @@ impl SelectResultInner {
             other => Err(Error::plain(format!("unsupported encode type:{other:?}"))),
         }
     }
+}
 
+impl SelectResultImpl {
+    // go: selectResult.IntoIter L2 (transfers Option<SelectResultInner> ownership to SelectResultIter, spec §4.5)
+    fn take_into_iter(
+        &mut self,
+        intermediate_field_types: Vec<Vec<Arc<FieldType>>>,
+    ) -> Result<Box<dyn SelectResultIter>, Error> {
+        let Some(inner) = self.inner.take() else {
+            return Err(Error::plain("selectResult is invalid after IntoIter()"));
+        };
+        Ok(Box::new(new_select_result_iter(
+            inner,
+            intermediate_field_types,
+        )))
+    }
+}
+
+impl SelectResultInner {
     // go: selectResult.NextRaw L1
     async fn next_raw(&mut self, ctx: &tidb_kv::Context) -> Result<Option<Vec<u8>>, Error> {
         let result_subset = self.resp.next(ctx).await;
@@ -553,14 +919,12 @@ impl SelectResult for SelectResultImpl {
         self.inner_mut()?.next(ctx, chk).await
     }
 
-    /// Temporary Part 1 stub; implemented in D07.3 Part 2 (`SelectResultIter`).
-    // glue: stub of selectResult.IntoIter, blocked-by:D07.3 (D07.3 Part 2: push-down IndexLookUp SelectResultIter)
+    // glue: SelectResult trait dispatch to selectResult.IntoIter
     fn into_iter(
         &mut self,
-        _intermediate_field_types: Vec<Vec<Arc<FieldType>>>,
+        intermediate_field_types: Vec<Vec<Arc<FieldType>>>,
     ) -> Result<Box<dyn SelectResultIter>, Error> {
-        let _ = self.inner_mut()?;
-        Err(blocked("D07.3", "SelectResult::into_iter (D07.3 Part 2)"))
+        self.take_into_iter(intermediate_field_types)
     }
 
     // go: selectResult.Close L1
@@ -586,6 +950,10 @@ impl SelectResultInner {
         if resp_size > 0 {
             let _ = self.mem_consume(-resp_size);
         }
+        // Release decoded chunk buffers (including any TrackedAlloc columns swapped in by
+        // `Decoder::reuse_interm_chk`) and cached response protobuf immediately on close.
+        self.resp_chunk_decoder = None;
+        self.select_resp = None;
         let unconsumed_cop_stats = self.resp.collect_unconsumed_cop_runtime_stats();
         for cop_stats in unconsumed_cop_stats {
             let _ = self.update_cop_runtime_stats(&cop_stats, Duration::ZERO, true);
@@ -610,6 +978,251 @@ impl SelectResultInner {
             }
         }
         close_res
+    }
+}
+
+pub(crate) struct SelRespChannelIter {
+    pub(crate) channel: isize,
+    pub(crate) loc: Arc<Location>,
+    pub(crate) row_len: usize,
+    pub(crate) field_types: Vec<Arc<FieldType>>,
+    pub(crate) encode_type: tipb::EncodeType,
+    pub(crate) chk_data: Vec<tipb::Chunk>,
+
+    /// Reserved size for each chunk (only for `TypeDefault` encoding).
+    pub(crate) reserve_chk_size: usize,
+    /// Index of the current chunk in `chk_data`.
+    cur_chk_idx: usize,
+    /// Byte offset within `chk_data[cur_chk_idx].rows_data` (only for `TypeDefault`).
+    cur_rows_offset: usize,
+    /// Buffered decoded chunk for the current response (`Arc` for `RowHandle`, M-ROW).
+    chk: Option<Arc<Chunk>>,
+    /// Next row offset inside `chk`.
+    chk_offset: usize,
+}
+
+// go: newSelRespChannelIter L1
+pub(crate) fn new_sel_resp_channel_iter(
+    result: &SelectResultInner,
+    channel: isize,
+) -> Result<SelRespChannelIter, Error> {
+    let sr = result
+        .select_resp
+        .as_ref()
+        .expect("select_resp must be present");
+    let intermediate_outputs = sr.get_intermediate_outputs();
+    debug_assert_eq!(
+        intermediate_outputs.len(),
+        result.intermediate_output_types.len()
+    );
+
+    let intermediate_outputs_len = intermediate_outputs.len();
+    let (row_len, field_types, encode_type, chk_data) = if channel >= 0
+        && (channel as usize) < intermediate_outputs_len
+    {
+        let idx = channel as usize;
+        let fts = result.intermediate_output_types[idx].clone();
+        let rlen = fts.len();
+        let io = &intermediate_outputs[idx];
+        (rlen, fts, io.get_encode_type(), io.get_chunks().to_vec())
+    } else if channel >= 0 && (channel as usize) == intermediate_outputs_len {
+        (
+            result.row_len,
+            result.field_types.clone(),
+            sr.get_encode_type(),
+            sr.get_chunks().to_vec(),
+        )
+    } else {
+        return Err(Error::plain(format!(
+            "invalid channel {channel} for selectResp with {intermediate_outputs_len} intermediate outputs"
+        )));
+    };
+
+    Ok(SelRespChannelIter {
+        channel,
+        loc: Arc::clone(&result.ctx.location),
+        row_len,
+        field_types,
+        encode_type,
+        chk_data,
+        reserve_chk_size: DefInitChunkSize as usize,
+        cur_chk_idx: 0,
+        cur_rows_offset: 0,
+        chk: None,
+        chk_offset: 0,
+    })
+}
+
+impl SelRespChannelIter {
+    // go: selRespChannelIter.Channel L1
+    pub(crate) fn channel(&self) -> isize {
+        self.channel
+    }
+
+    // go: selRespChannelIter.Next L2 (M-ROW: returns Option<SelectResultRow> carrying RowHandle)
+    pub(crate) fn next(&mut self) -> Result<Option<SelectResultRow>, Error> {
+        if let Some(chk) = &self.chk
+            && self.chk_offset < chk.num_rows()
+        {
+            let idx = self.chk_offset;
+            self.chk_offset += 1;
+            return Ok(Some(SelectResultRow {
+                channel_index: self.channel(),
+                row: RowHandle::new(Arc::clone(chk), idx),
+            }));
+        }
+
+        self.next_chunk()?;
+        let Some(chk) = &self.chk else {
+            return Ok(None);
+        };
+        self.chk_offset = 1;
+        Ok(Some(SelectResultRow {
+            channel_index: self.channel(),
+            row: RowHandle::new(Arc::clone(chk), 0),
+        }))
+    }
+
+    // go: selRespChannelIter.nextChunk L1
+    fn next_chunk(&mut self) -> Result<(), Error> {
+        self.chk = None;
+        let mut working_chk: Option<Chunk> = None;
+        while self.cur_chk_idx < self.chk_data.len() {
+            let remaining_len = self.chk_data[self.cur_chk_idx]
+                .get_rows_data()
+                .len()
+                .saturating_sub(self.cur_rows_offset);
+            if remaining_len == 0 {
+                self.cur_chk_idx += 1;
+                self.cur_rows_offset = 0;
+                continue;
+            }
+
+            match self.encode_type {
+                tipb::EncodeType::TypeDefault => {
+                    let full_data = self.chk_data[self.cur_chk_idx].get_rows_data();
+                    let cur_slice = &full_data[self.cur_rows_offset..];
+                    let (new_chk, left_len) =
+                        self.fill_chunk_from_default(working_chk.take(), cur_slice)?;
+                    self.cur_rows_offset = full_data.len() - left_len;
+                    let is_not_full = new_chk.num_rows() < new_chk.required_rows();
+                    working_chk = Some(new_chk);
+                    if is_not_full {
+                        continue;
+                    }
+                }
+                tipb::EncodeType::TypeChunk => {
+                    let mut chk = new_chunk_with_capacity(&self.field_types, 0);
+                    let col_types: Vec<FieldType> =
+                        self.field_types.iter().map(|ft| (**ft).clone()).collect();
+                    let rows_data = self.chk_data[self.cur_chk_idx].take_rows_data();
+                    self.cur_rows_offset = 0;
+                    new_chunk_codec(col_types).decode_to_chunk(Bytes::from(rows_data), &mut chk);
+                    working_chk = Some(chk);
+                }
+                other => {
+                    return Err(Error::plain(format!("unsupported encode type: {other:?}")));
+                }
+            }
+
+            if working_chk.as_ref().is_some_and(|c| c.num_rows() > 0) {
+                break;
+            }
+        }
+        self.chk = working_chk.filter(|c| c.num_rows() > 0).map(Arc::new);
+        Ok(())
+    }
+
+    // go: selRespChannelIter.fillChunkFromDefault L1
+    fn fill_chunk_from_default(
+        &self,
+        chk: Option<Chunk>,
+        mut rows_data: &[u8],
+    ) -> Result<(Chunk, usize), Error> {
+        let mut chk = chk
+            .unwrap_or_else(|| new_chunk_with_capacity(&self.field_types, self.reserve_chk_size));
+        let mut decoder = new_datum_decoder(&mut chk, Arc::clone(&self.loc));
+        while !rows_data.is_empty() && decoder.chunk().num_rows() < decoder.chunk().required_rows()
+        {
+            for i in 0..self.row_len {
+                rows_data = decoder.decode_one(rows_data, i, &self.field_types[i])?;
+            }
+        }
+        let left_len = rows_data.len();
+        Ok((chk, left_len))
+    }
+}
+
+struct SelectResultIterImpl {
+    result: SelectResultInner,
+    channels: Vec<SelRespChannelIter>,
+    intermediate_output_types: Vec<Vec<Arc<FieldType>>>,
+}
+
+// go: newSelectResultIter L2 (takes ownership of SelectResultInner, spec §4.5)
+fn new_select_result_iter(
+    result: SelectResultInner,
+    intermediate_output_types: Vec<Vec<Arc<FieldType>>>,
+) -> SelectResultIterImpl {
+    SelectResultIterImpl {
+        result,
+        channels: Vec::new(),
+        intermediate_output_types,
+    }
+}
+
+#[async_trait]
+impl SelectResultIter for SelectResultIterImpl {
+    // go: selectResultIter.Next L2 (A1 / #415 go-bug-fixed: decrements select_resp_size before clearing select_resp; N3 cooperative checkpoint)
+    async fn next(&mut self, ctx: &tidb_kv::Context) -> Result<Option<SelectResultRow>, Error> {
+        loop {
+            if self.result.select_resp.is_none() {
+                self.result
+                    .fetch_resp_with_intermediate_results(
+                        ctx,
+                        self.intermediate_output_types.clone(),
+                    )
+                    .await?;
+
+                if self.result.select_resp.is_none() {
+                    return Ok(None);
+                }
+
+                let num_channels = self.intermediate_output_types.len() + 1;
+                if self.channels.capacity() < num_channels {
+                    self.channels.reserve(num_channels - self.channels.len());
+                }
+                for i in 0..num_channels {
+                    let ch = new_sel_resp_channel_iter(&self.result, i as isize)?;
+                    self.channels.push(ch);
+                }
+            }
+
+            while let Some(channel) = self.channels.last_mut() {
+                // Read channels in reverse order so more complete data (e.g. final rows
+                // after push-down IndexLookUp) is consumed before un-looked-up index rows.
+                match channel.next()? {
+                    Some(row) => return Ok(Some(row)),
+                    None => {
+                        self.channels.pop();
+                    }
+                }
+            }
+
+            // A1 / #415 (go-bug-fixed): release the consumed response's mem_tracker accounting
+            // before clearing select_resp so mem_tracker returns to 0 across responses.
+            let prev = self.result.select_resp_size.swap(0, Ordering::SeqCst);
+            if prev > 0 {
+                let _ = self.result.mem_consume(-prev);
+            }
+            self.result.select_resp = None;
+            let Ok(()) = tidb_runtime::checkpoint(&()).await;
+        }
+    }
+
+    // go: selectResultIter.Close L1
+    fn close(&mut self) -> Result<(), Error> {
+        self.result.close_inner()
     }
 }
 

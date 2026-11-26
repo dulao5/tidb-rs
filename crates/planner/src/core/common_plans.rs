@@ -5,7 +5,7 @@
 //! SIMPLE, EXPLAIN, ...) come with their blocks.
 
 use tidb_base::Error;
-use tidb_base::blocked::blocked;
+use tidb_infoschema::tables::find_primary_index;
 use tidb_sessionctx::variable::session::SessionVars;
 
 use tidb_model::TableCacheStatusDisable;
@@ -15,6 +15,10 @@ use tidb_types::field_name::NameSlice;
 
 use crate::PhysicalPlanRef;
 use crate::base::{PhysicalKind, PhysicalPlan};
+use crate::core::physical_plans::{
+    PhysicalIndexReader, PhysicalIndexScan, PhysicalProjection, PhysicalTableReader,
+    PhysicalTableScan,
+};
 use crate::core::plan_cache_utils::PlanCacheStmtRef;
 use crate::core::point_get_plan::PointGetPlan;
 
@@ -40,27 +44,56 @@ pub struct Execute {
 ///  2. session is not InTxn
 ///  3. plan is point get by pk, or point get by unique index (no double read)
 ///
-/// The `PointGetPlan` arm is ported (VS1-11); `PhysicalProjection`, `PhysicalIndexReader` /
-/// `PhysicalIndexScan` and `PhysicalTableReader` / `PhysicalTableScan` (D10.1, VS1-27) are
-/// not, so those plans are reported as blocked and the result is a `Result` for now.
-// go: IsPointGetWithPKOrUniqueKeyByAutoCommit L2 (the reader and projection arms are blocked-by:D10.1)
+/// Keeps the `Result` return type for callers until all plan-level boundaries are retired.
+// go: IsPointGetWithPKOrUniqueKeyByAutoCommit L1
 pub fn is_point_get_with_pk_or_unique_key_by_auto_commit(
     vars: &SessionVars,
-    p: &dyn PhysicalPlan,
+    mut p: &dyn PhysicalPlan,
 ) -> Result<bool, Error> {
     if !is_auto_commit_txn(vars) {
         return Ok(false);
     }
 
     // check plan
+    if p.kind() == PhysicalKind::Projection
+        && let Some(proj) = p.as_any().downcast_ref::<PhysicalProjection>()
+    {
+        p = proj.children()[0].as_ref();
+    }
+
     match p.kind() {
-        PhysicalKind::Projection | PhysicalKind::TableReader => {
-            // `p = proj.Children()[0]`; the reader arms read the scan's ranges.
-            // glue: blocked-by:D10.1 (VS1-27: PhysicalProjection / PhysicalIndexReader / PhysicalTableReader)
-            Err(blocked(
-                "D10.1",
-                "IsPointGetWithPKOrUniqueKeyByAutoCommit (physical operators)",
-            ))
+        PhysicalKind::IndexReader => {
+            let Some(v) = p.as_any().downcast_ref::<PhysicalIndexReader>() else {
+                return Ok(false);
+            };
+            let index_scan = v.index_plans[0]
+                .as_any()
+                .downcast_ref::<PhysicalIndexScan>()
+                .expect("interface conversion: base.PhysicalPlan is not *core.PhysicalIndexScan");
+            Ok(index_scan.is_point_get_by_unique_key(&vars.stmt_ctx().type_ctx()))
+        }
+        PhysicalKind::TableReader => {
+            let Some(v) = p.as_any().downcast_ref::<PhysicalTableReader>() else {
+                return Ok(false);
+            };
+            let Some(table_scan) = v.table_plans[0]
+                .as_any()
+                .downcast_ref::<PhysicalTableScan>()
+            else {
+                return Ok(false);
+            };
+            let is_point_range = table_scan.ranges.len() == 1
+                && table_scan.ranges[0].is_point_non_nullable(&vars.stmt_ctx().type_ctx());
+            if !is_point_range {
+                return Ok(false);
+            }
+            let mut pk_length = 1usize;
+            if table_scan.table.is_common_handle {
+                let pk_idx = find_primary_index(&table_scan.table)
+                    .expect("runtime error: invalid memory address or nil pointer dereference");
+                pk_length = pk_idx.columns.as_deref().map_or(0, <[_]>::len);
+            }
+            Ok(table_scan.ranges[0].low_val.len() == pk_length)
         }
         PhysicalKind::PointGet => {
             let Some(v) = p.as_any().downcast_ref::<PointGetPlan>() else {

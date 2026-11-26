@@ -34,8 +34,8 @@ use tidb_parser::model::CIStr;
 use tidb_parser::{ParseOptions, parse};
 use tidb_planner::core::optimizer::{adjust_optimization_flags, do_optimize_plan};
 use tidb_planner::core::physical_plans::{
-    PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalSort, PhysicalTableDual,
-    PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
+    PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit, PhysicalProjection, PhysicalSelection,
+    PhysicalSort, PhysicalTableDual, PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
 };
 use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
 use tidb_planner::core::planbuilder::new_plan_builder;
@@ -73,6 +73,8 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D02.2", 2),
     // The preprocessor's missing table check (the privilege manager decides the error).
     ("D04.1", 2),
+    // Time functions not ported yet (DATE_ADD / DATE_SUB for window RANGE INTERVAL bounds).
+    ("D08.7", 2),
     // Built-in function families not ported yet (IN, ANY_VALUE, user variables, ...).
     ("D08.9", 40),
     // Virtual generated columns.
@@ -80,25 +82,27 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     // Partitioned tables.
     ("D09.12", 4),
     // BuildKeySolver in logicalOptimize (reached by aggregation / GROUP BY / DISTINCT queries).
-    ("D09.13", 99),
+    ("D09.13", 103),
     // The lock operator (SELECT ... FOR UPDATE).
     ("D09.14", 2),
     // System variables in expressions.
     ("D09.2", 2),
     // Joins.
     ("D09.3", 6),
-    // Window functions / unported aggregation paths (D09.4 part B).
-    ("D09.4", 6),
+    // GROUP BY ... WITH ROLLUP (D09.4 part C).
+    ("D09.4", 2),
     // WITH and set operations.
     ("D09.5", 4),
     // Subqueries.
     ("D09.6", 2),
-    // An index path left after the skyline pruning where Go plans an index reader
-    // (IndexReader / IndexLookUp, part 2 of FindBestTask).
-    ("D10.2", 528),
-    // An index path left after the skyline pruning where Go keeps the table path by cost:
-    // the index reader's cost is part 2.
-    ("D10.2 (Go: table)", 140),
+    // An index path left after the skyline pruning where Go plans a double-read
+    // IndexLookUpReader (part 2B of FindBestTask).
+    ("D10.2", 215),
+    // An index path left after the skyline pruning where Go keeps the table path by cost,
+    // and a double-read index candidate is still pending part 2B.
+    ("D10.2 (Go: table)", 130),
+    // LogicalWindow.ExhaustPhysicalPlans (physical window enumeration).
+    ("D10.3", 48),
     // `OR` conditions over two or more paths, or multi-valued indexes: index merge paths.
     ("D10.7", 60),
     // BatchPointGet (several point ranges on a unique key).
@@ -226,6 +230,28 @@ fn by_out(ctx: &PlanCtx<'_>, by: &[ByItems]) -> Value {
     )
 }
 
+/// Deterministic normalization of GroupedRanges (matching Go fbGroupedRanges, M-MAPORDER).
+fn grouped_ranges_out(groups: &[Vec<tidb_sessionctx::ranger::Range>]) -> Value {
+    if groups.is_empty() {
+        return Value::Array(Vec::new());
+    }
+    let mut entries: Vec<(String, Value)> = groups
+        .iter()
+        .map(|g| {
+            let mut strs = Vec::with_capacity(g.len());
+            let mut vals = Vec::with_capacity(g.len());
+            for r in g {
+                let bytes = r.string();
+                strs.push(String::from_utf8_lossy(&bytes).into_owned());
+                vals.push(gs(&bytes));
+            }
+            (strs.join("\x00"), Value::Array(vals))
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Value::Array(entries.into_iter().map(|(_, v)| v).collect())
+}
+
 /// The Go generator's fbDump.
 fn dump(ctx: &PlanCtx<'_>, p: &dyn PhysicalPlan) -> Value {
     let mut o = serde_json::Map::new();
@@ -249,9 +275,56 @@ fn dump(ctx: &PlanCtx<'_>, p: &dyn PhysicalPlan) -> Value {
                 "ranges".into(),
                 Value::Array(x.ranges.iter().map(|r| gs(&r.string())).collect()),
             );
+            if !x.grouped_ranges.is_empty() || !x.group_by_col_idxs.is_empty() {
+                o.insert(
+                    "groupedRanges".into(),
+                    grouped_ranges_out(&x.grouped_ranges),
+                );
+                o.insert(
+                    "groupByColIdxs".into(),
+                    Value::Array(x.group_by_col_idxs.iter().map(|i| json!(*i)).collect()),
+                );
+            }
             o.insert("access".into(), es_out(ctx, &x.access_condition));
             o.insert("keep".into(), json!(x.keep_order));
             o.insert("desc".into(), json!(x.desc));
+        }
+        PhysicalKind::IndexReader => {
+            let x = any.downcast_ref::<PhysicalIndexReader>().unwrap();
+            o.insert(
+                "indexPlans".into(),
+                Value::Array(
+                    x.index_plans
+                        .iter()
+                        .map(|ip| json!([ip.tp(), ip.id()]))
+                        .collect(),
+                ),
+            );
+            if let Some(ip) = x.index_plans.last() {
+                o.insert("idx".into(), dump(ctx, &**ip));
+            }
+            o.insert("outputCols".into(), cols_out(ctx, &x.output_columns));
+        }
+        PhysicalKind::IndexScan => {
+            let x = any.downcast_ref::<PhysicalIndexScan>().unwrap();
+            o.insert("table".into(), json!(x.table.name.o));
+            o.insert("index".into(), json!(x.index.name.o));
+            o.insert(
+                "ranges".into(),
+                Value::Array(x.ranges.iter().map(|r| gs(&r.string())).collect()),
+            );
+            o.insert(
+                "groupedRanges".into(),
+                grouped_ranges_out(&x.grouped_ranges),
+            );
+            o.insert(
+                "groupByColIdxs".into(),
+                Value::Array(x.group_by_col_idxs.iter().map(|i| json!(*i)).collect()),
+            );
+            o.insert("access".into(), es_out(ctx, &x.access_condition));
+            o.insert("keep".into(), json!(x.keep_order));
+            o.insert("desc".into(), json!(x.desc));
+            o.insert("doubleRead".into(), json!(x.double_read));
         }
         PhysicalKind::PointGet => {
             let x = any.downcast_ref::<PointGetPlan>().unwrap();
@@ -376,6 +449,9 @@ fn with_built(
     vars.remove_orderby_in_subquery = !opts["keep_order"].as_bool().unwrap();
     vars.enable_stable_result_mode = opts["stable"].as_bool().unwrap();
     vars.stmt_ctx_mut().use_dynamic_prune_mode = opts["dynamic"].as_bool().unwrap();
+    if opts["no_index_merge"].as_bool() == Some(true) {
+        vars.set_enable_index_merge(false);
+    }
     let is = InfoSchemaHandle(Arc::clone(tables) as Arc<dyn InfoSchemaLookup>);
 
     let blocked_or = |e: Error| match blocked_by(&e) {
@@ -722,10 +798,10 @@ fn spike_opts() -> Value {
     json!({"mode": 32, "keep_order": false, "stable": false, "dynamic": false})
 }
 
-/// Every node of the tree (and the table plans of the readers) is owned alone, the flat
-/// list of a reader (`table_plans`) excepted (N1 §3 item 9.1).
+/// Every node of the tree (and the table/index plans of the readers) is owned alone, the flat
+/// list of a reader (`table_plans` / `index_plans`) excepted (N1 §3 item 9.1).
 fn owned_alone(p: &tidb_planner::PhysicalPlanRef) -> bool {
-    let reader_extra = p
+    let table_reader_extra = p
         .as_any()
         .downcast_ref::<PhysicalTableReader>()
         .is_none_or(|r| {
@@ -734,7 +810,17 @@ fn owned_alone(p: &tidb_planner::PhysicalPlanRef) -> bool {
                 Arc::strong_count(tp) <= 2 && owned_alone_chain(tp)
             })
         });
-    Arc::strong_count(p) == 1 && reader_extra && p.children().iter().all(owned_alone)
+    let index_reader_extra = p
+        .as_any()
+        .downcast_ref::<PhysicalIndexReader>()
+        .is_none_or(|r| {
+            r.get_index_plan()
+                .is_none_or(|ip| Arc::strong_count(ip) <= 2 && owned_alone_chain(ip))
+        });
+    Arc::strong_count(p) == 1
+        && table_reader_extra
+        && index_reader_extra
+        && p.children().iter().all(owned_alone)
 }
 
 fn owned_alone_chain(p: &tidb_planner::PhysicalPlanRef) -> bool {
@@ -879,13 +965,33 @@ fn memo_rollback_clears_entries_after_the_time_stamp() {
 #[test]
 fn best_plan_is_owned_alone_after_the_memo() {
     let tables = spike_tables();
-    for sql in [
-        "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 100 ORDER BY c LIMIT 10",
-        "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 100",
-        "SELECT id + 1, pad FROM sbtest1 WHERE id >= 10 AND pad = 'a'",
-        "SELECT c FROM sbtest1 WHERE id = 10 AND pad = 'x'",
+    for (sql, no_index_merge) in [
+        (
+            "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 100 ORDER BY c LIMIT 10",
+            false,
+        ),
+        ("SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 100", false),
+        (
+            "SELECT id + 1, pad FROM sbtest1 WHERE id >= 10 AND pad = 'a'",
+            false,
+        ),
+        ("SELECT c FROM sbtest1 WHERE id = 10 AND pad = 'x'", false),
+        ("SELECT k FROM sbtest1 WHERE k BETWEEN 1 AND 100", false),
+        ("SELECT k FROM sbtest1 ORDER BY k LIMIT 3", false),
+        (
+            "SELECT a, b FROM tm WHERE (a = 1 OR a = 3 OR a = 5) ORDER BY b LIMIT 5",
+            true,
+        ),
+        (
+            "SELECT a, b FROM tm WHERE (a = 1 OR a = 3 OR a = 5) ORDER BY b",
+            true,
+        ),
     ] {
-        let out = with_built(&tables, sql, &spike_opts(), &mut |ctx, flag, p| {
+        let mut opts = spike_opts();
+        if no_index_merge {
+            opts["no_index_merge"] = json!(true);
+        }
+        let out = with_built(&tables, sql, &opts, &mut |ctx, flag, p| {
             let p = tidb_planner::core::optimizer::logical_optimize(ctx, flag, p)?;
             let mut counter = -1;
             let copies = tidb_planner::physicalop::clone_node_calls();

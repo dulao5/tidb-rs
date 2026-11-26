@@ -562,6 +562,30 @@ pub(crate) fn rewrite_table_plan(
     Ok(())
 }
 
+/// Rewrites the index plan of a `PhysicalIndexReader`, clearing `IndexPlans` first so the chain
+/// stays owned alone and rebuilding it afterwards (N1 §3.4).
+// glue: N1 §3.4 (the two owners of the nodes under an index reader)
+pub(crate) fn rewrite_index_plan(
+    plan: &mut PhysicalPlanRef,
+    f: impl FnOnce(PhysicalPlanRef) -> Result<PhysicalPlanRef, Error>,
+) -> Result<(), Error> {
+    let ir = make_mut_plan(plan)
+        .as_any_mut()
+        .downcast_mut::<crate::core::physical_plans::PhysicalIndexReader>()
+        .expect("a PhysicalIndexReader");
+    ir.index_plans.clear();
+    let index_plan = ir.index_plan.take().expect("indexPlan");
+    let res = f(index_plan);
+    let ir = make_mut_plan(plan)
+        .as_any_mut()
+        .downcast_mut::<crate::core::physical_plans::PhysicalIndexReader>()
+        .expect("a PhysicalIndexReader");
+    let index_plan = res?;
+    ir.index_plans = flatten_list_push_down_plan(&index_plan);
+    ir.index_plan = Some(index_plan);
+    Ok(())
+}
+
 /// `postOptimize`: the passes over the physical plan, in Go's order.
 // go: postOptimize L1 [M-CTX]
 pub fn post_optimize(
@@ -788,22 +812,40 @@ fn propagate_probe_parents(plan: &mut PhysicalPlanRef, probe_parents: &[Physical
         .expect("propagating probe parents does not fail");
         return;
     }
+    if plan.kind() == PhysicalKind::IndexReader {
+        if probe_parents.is_empty() && !has_probe_parents_below(plan) {
+            return;
+        }
+        rewrite_index_plan(plan, |mut index_plan| {
+            propagate_probe_parents(&mut index_plan, probe_parents);
+            Ok(index_plan)
+        })
+        .expect("propagating probe parents does not fail");
+        return;
+    }
     map_children(plan, |mut child| {
         propagate_probe_parents(&mut child, probe_parents);
         child
     });
 }
 
-/// Whether a node of the reader's table plan has probe parents (to clear).
+/// Whether a node of the reader's pushed-down plan has probe parents (to clear).
 // glue: the no-write shortcut of propagateProbeParents (N1 §3.4)
 fn has_probe_parents_below(plan: &PhysicalPlanRef) -> bool {
-    let Some(tr) = plan.as_any().downcast_ref::<PhysicalTableReader>() else {
-        return false;
+    let inner = if let Some(tr) = plan.as_any().downcast_ref::<PhysicalTableReader>() {
+        tr.table_plan.as_ref()
+    } else if let Some(ir) = plan
+        .as_any()
+        .downcast_ref::<crate::core::physical_plans::PhysicalIndexReader>()
+    {
+        ir.index_plan.as_ref()
+    } else {
+        None
     };
     let mut found = false;
-    if let Some(tp) = &tr.table_plan {
-        iterate_physical_plan(tp, &mut |p| {
-            found |= !p.base_physical().probe_parents().is_empty();
+    if let Some(p) = inner {
+        iterate_physical_plan(p, &mut |node| {
+            found |= !node.base_physical().probe_parents().is_empty();
             !found
         });
     }
@@ -1075,7 +1117,7 @@ fn check_skip_reuse_chunk_for_overlong_type(
     plan: &PhysicalPlanRef,
 ) -> (bool, bool) {
     match plan.kind() {
-        PhysicalKind::TableReader | PhysicalKind::PointGet => {
+        PhysicalKind::TableReader | PhysicalKind::IndexReader | PhysicalKind::PointGet => {
             if should_skip_reuse_chunk_for_physical_plan(ctx, &**plan) {
                 ctx.vars.clear_alloc(None, false);
                 return (true, false);
@@ -1235,7 +1277,7 @@ fn estimate_reusable_chunk_rows_for_overlong_type(plan: &dyn PhysicalPlan) -> (f
 
     match plan.kind() {
         PhysicalKind::PointGet => (stats_info.row_count.ceil(), true),
-        PhysicalKind::TableReader => {
+        PhysicalKind::TableReader | PhysicalKind::IndexReader => {
             // Non-point readers only take the relaxed path when row-count stats are trusted.
             match &stats_info.hist_coll {
                 Some(h) if !h.pseudo && h.realtime_count != 0 && h.col_num() != 0 => {

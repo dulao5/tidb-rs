@@ -305,12 +305,35 @@ fn cop_task_converts_to_a_table_reader() {
     // The cop task is unchanged (Go converts a copy).
     assert!(cop.table_plan.is_some());
 
-    // An index read, an index lookup and an index merge are outside the slice.
-    for cop in [
-        CopTask {
-            index_plan: Some(table_scan(&ctx, 1.0)),
+    // A single-read index cop task converts to a PhysicalIndexReader.
+    let mut is = PhysicalIndexScan {
+        table: Arc::new(TableInfo {
+            name: CIStr::new("t"),
             ..Default::default()
-        },
+        }),
+        data_source_schema: Some(new_schema(vec![col(1)])),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    is.set_schema(new_schema(vec![col(1)]));
+    is.set_stats(stats(4.0));
+    let idx_cop = CopTask {
+        index_plan: Some(Arc::new(is)),
+        ..Default::default()
+    };
+    let idx_root = Task::Cop(idx_cop).convert_to_root_task(&ctx).unwrap();
+    let idx_p = root_plan(&idx_root);
+    assert_eq!(idx_p.kind(), PhysicalKind::IndexReader);
+    let ir = idx_p
+        .as_any()
+        .downcast_ref::<PhysicalIndexReader>()
+        .unwrap();
+    assert_eq!(ir.index_plans.len(), 1);
+    assert_eq!(ir.schema().len(), 1);
+    assert_eq!(ir.output_columns.len(), 1);
+
+    // An index lookup and an index merge are outside part 2A.
+    for cop in [
         CopTask {
             index_plan: Some(table_scan(&ctx, 1.0)),
             table_plan: Some(table_scan(&ctx, 1.0)),
@@ -873,4 +896,619 @@ fn collect_plan_stats_version_reads_the_scans() {
     let mut m = std::collections::HashMap::new();
     collect_plan_stats_version(&reader, &mut m);
     assert_eq!(m.get("T1"), Some(&7));
+}
+
+#[test]
+fn group_ranges_by_cols_deterministic_order() {
+    use crate::core::find_best_task::group_ranges_by_cols;
+    use tidb_sessionctx::ranger::Range;
+    use tidb_types::datum::new_int_datum;
+
+    let mk = |a: i64, b: i64| Range {
+        low_val: vec![new_int_datum(a), new_int_datum(b)],
+        high_val: vec![new_int_datum(a), new_int_datum(b + 10)],
+        collators: vec![
+            tidb_types::collate::get_binary_collator(),
+            tidb_types::collate::get_binary_collator(),
+        ],
+        ..Default::default()
+    };
+
+    // Empty input -> empty output.
+    assert!(group_ranges_by_cols(&[], &[0]).unwrap().is_empty());
+
+    // Multi-group deterministic first-appearance order: 2, 1, 3.
+    let ranges = vec![mk(2, 10), mk(1, 5), mk(2, 20), mk(3, 1), mk(1, 7)];
+    let groups = group_ranges_by_cols(&ranges, &[0]).unwrap();
+    assert_eq!(groups.len(), 3);
+    assert_eq!(groups[0].len(), 2);
+    assert_eq!(groups[0][0].low_val[0].get_int64(), 2);
+    assert_eq!(groups[0][0].low_val[1].get_int64(), 10);
+    assert_eq!(groups[0][1].low_val[1].get_int64(), 20);
+    assert_eq!(groups[1].len(), 2);
+    assert_eq!(groups[1][0].low_val[0].get_int64(), 1);
+    assert_eq!(groups[1][0].low_val[1].get_int64(), 5);
+    assert_eq!(groups[1][1].low_val[1].get_int64(), 7);
+    assert_eq!(groups[2].len(), 1);
+    assert_eq!(groups[2][0].low_val[0].get_int64(), 3);
+
+    // Grouping by multiple columns [0, 1] separates distinct (a, b) pairs.
+    let multi = group_ranges_by_cols(&[mk(2, 10), mk(2, 20), mk(2, 10)], &[0, 1]).unwrap();
+    assert_eq!(multi.len(), 2);
+    assert_eq!(multi[0].len(), 2);
+    assert_eq!(multi[1].len(), 1);
+
+    // Single group preserves all ranges in order.
+    let single = group_ranges_by_cols(&[mk(5, 1), mk(5, 2)], &[0]).unwrap();
+    assert_eq!(single.len(), 1);
+    assert_eq!(single[0].len(), 2);
+}
+
+#[test]
+fn adjust_row_count_for_index_scan_by_limit_matches_go() {
+    use crate::cardinality::cross_estimation::adjust_row_count_for_index_scan_by_limit;
+    use crate::util::AccessPath;
+    use tidb_statistics::table::pseudo_table;
+
+    let mut vars = session();
+    let ctx = ctx_of(&mut vars);
+    let tbl_info = TableInfo {
+        id: 1,
+        name: CIStr::new("t"),
+        ..Default::default()
+    };
+    let stats_tbl = pseudo_table(&tbl_info, false, false);
+    let ds_stats = |rows: f64| StatsInfo {
+        row_count: rows,
+        ..Default::default()
+    };
+
+    // Normal adjustment without filters: min(100, 10) = 10.
+    let path = AccessPath {
+        count_after_access: 100.0,
+        ..Default::default()
+    };
+    let got = adjust_row_count_for_index_scan_by_limit(
+        &ctx,
+        &ds_stats(100.0),
+        &ds_stats(100.0),
+        &stats_tbl,
+        &path,
+        10.0,
+        false,
+    )
+    .unwrap();
+    assert_eq!(got, 10.0);
+
+    // 0/0 produces NaN; Go's math.Min(NaN, 0.0) returns NaN (not 0.0 like Rust f64::min).
+    let zero_path = AccessPath {
+        count_after_access: 0.0,
+        ..Default::default()
+    };
+    let got_nan = adjust_row_count_for_index_scan_by_limit(
+        &ctx,
+        &ds_stats(0.0),
+        &ds_stats(0.0),
+        &stats_tbl,
+        &zero_path,
+        10.0,
+        false,
+    )
+    .unwrap();
+    assert!(
+        got_nan.is_nan(),
+        "Go math.Min(NaN, 0) must return NaN, got {got_nan}"
+    );
+
+    // With table filters and positive order_ratio: exercises the M-FMA branch.
+    let filter_path = AccessPath {
+        count_after_access: 1000.0,
+        count_after_index: 500.0,
+        table_filters: vec![col_expr(&col(1))],
+        ..Default::default()
+    };
+    let mut vars_ratio = session();
+    vars_ratio.correlation_exp_factor = 0;
+    vars_ratio.opt_ordering_idx_sel_ratio = 0.25;
+    let ctx_ratio = ctx_of(&mut vars_ratio);
+    let got_fma = adjust_row_count_for_index_scan_by_limit(
+        &ctx_ratio,
+        &ds_stats(100.0),
+        &ds_stats(1000.0),
+        &stats_tbl,
+        &filter_path,
+        10.0,
+        false,
+    )
+    .unwrap();
+    // sel = 100 / 1000 = 0.1; base = min(10 / 0.1 / 1.0, 1000) = 100;
+    // row_count += (1000 - 100) * 0.25 = 100 + 225 = 325.
+    assert!((got_fma - 325.0).abs() < 1e-9, "got {got_fma}");
+}
+
+#[test]
+fn physical_index_scan_to_pb_and_check_cover_index() {
+    use crate::core::plan_to_pb::check_cover_index;
+    use tidb_model::{IndexColumn, IndexInfo};
+    use tidb_parser::types::UnspecifiedLength;
+    use tidb_sessionctx::planctx::BuildPBContext;
+    use tidb_sessionctx::ranger::Range;
+    use tidb_types::datum::{Datum, new_int_datum};
+
+    let mut vars = session();
+    let ctx = ctx_of(&mut vars);
+
+    let idx_info = Arc::new(IndexInfo {
+        id: 2,
+        name: CIStr::new("uk_a"),
+        unique: true,
+        columns: Some(vec![IndexColumn {
+            name: CIStr::new("a"),
+            offset: 1,
+            length: UnspecifiedLength,
+            ..Default::default()
+        }]),
+        ..Default::default()
+    });
+    let non_unique_idx = IndexInfo {
+        unique: false,
+        ..(*idx_info).clone()
+    };
+    // 2-column unique index queried by only 1 column (prefix of composite unique key) -> false.
+    let composite_uk = IndexInfo {
+        columns: Some(vec![
+            IndexColumn {
+                name: CIStr::new("a"),
+                offset: 1,
+                length: UnspecifiedLength,
+                ..Default::default()
+            },
+            IndexColumn {
+                name: CIStr::new("b"),
+                offset: 2,
+                length: UnspecifiedLength,
+                ..Default::default()
+            },
+        ]),
+        ..(*idx_info).clone()
+    };
+
+    let pt_range = Range {
+        low_val: vec![new_int_datum(5)],
+        high_val: vec![new_int_datum(5)],
+        collators: vec![tidb_types::collate::get_binary_collator()],
+        ..Default::default()
+    };
+    let non_pt_range = Range {
+        low_val: vec![new_int_datum(1)],
+        high_val: vec![new_int_datum(10)],
+        collators: vec![tidb_types::collate::get_binary_collator()],
+        ..Default::default()
+    };
+    let null_range = Range {
+        low_val: vec![Datum::default()],
+        high_val: vec![new_int_datum(5)],
+        collators: vec![tidb_types::collate::get_binary_collator()],
+        ..Default::default()
+    };
+    let high_null_range = Range {
+        low_val: vec![new_int_datum(1)],
+        high_val: vec![Datum::default()],
+        collators: vec![tidb_types::collate::get_binary_collator()],
+        ..Default::default()
+    };
+
+    assert!(!check_cover_index(
+        &non_unique_idx,
+        std::slice::from_ref(&pt_range)
+    ));
+    assert!(check_cover_index(
+        &idx_info,
+        std::slice::from_ref(&pt_range)
+    ));
+    assert!(check_cover_index(&idx_info, &[non_pt_range]));
+    assert!(!check_cover_index(
+        &composite_uk,
+        std::slice::from_ref(&pt_range)
+    ));
+    assert!(!check_cover_index(&idx_info, &[null_range]));
+    assert!(!check_cover_index(&idx_info, &[high_null_range]));
+
+    // ToPB wire bytes: ExecutorId must remain unset (None), fine-grained shuffle fields set to 0.
+    let col_a_info = Arc::new(ColumnInfo {
+        id: 2,
+        name: CIStr::new("a"),
+        state: tidb_model::StatePublic,
+        field_type: new_field_type(TypeLonglong),
+        ..Default::default()
+    });
+    let mut is = PhysicalIndexScan {
+        table: Arc::new(TableInfo {
+            id: 42,
+            name: CIStr::new("t"),
+            pk_is_handle: true,
+            columns: Some(vec![Arc::clone(&col_a_info)]),
+            ..Default::default()
+        }),
+        index: Arc::clone(&idx_info),
+        columns: vec![col_a_info],
+        ranges: vec![pt_range],
+        desc: true,
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    is.set_schema(new_schema(vec![col(2)]));
+
+    let expr_ctx: tidb_sessionctx::exprctx::BuildContextRef =
+        Arc::<dyn tidb_expression::context::AggFuncBuildContext>::clone(&ctx.expr_ctx);
+    let bctx = BuildPBContext {
+        expr_ctx,
+        client: Arc::new(MockClient),
+        tiflash_fast_scan: false,
+        tiflash_fine_grained_shuffle_batch_size: 0,
+        group_concat_max_len: 1024,
+        in_explain_stmt: false,
+        warn_handler: None,
+        extra_warnghandler: None,
+    };
+    let exec = is.to_pb(&bctx, kv::TiKV).unwrap();
+    assert_eq!(exec.get_tp(), tipb::ExecType::TypeIndexScan);
+    assert!(
+        !exec.has_executor_id(),
+        "PhysicalIndexScan::to_pb must leave executor_id unset"
+    );
+    assert_eq!(exec.get_fine_grained_shuffle_stream_count(), 0);
+    assert_eq!(exec.get_fine_grained_shuffle_batch_size(), 0);
+    let idx_pb = exec.get_idx_scan();
+    assert_eq!(idx_pb.get_table_id(), 42);
+    assert_eq!(idx_pb.get_index_id(), 2);
+    assert!(idx_pb.get_desc());
+    assert!(idx_pb.get_unique());
+}
+
+#[test]
+fn physical_index_reader_memory_usage_and_resolve_indices() {
+    let mut vars = session();
+    let ctx = ctx_of(&mut vars);
+
+    let c1 = col(10);
+    let c2 = col(20);
+    let mut is = PhysicalIndexScan {
+        table: Arc::new(TableInfo {
+            id: 7,
+            name: CIStr::new("t"),
+            ..Default::default()
+        }),
+        data_source_schema: Some(new_schema(vec![Arc::clone(&c1)])),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    is.set_schema(new_schema(vec![Arc::clone(&c1), Arc::clone(&c2)]));
+    is.set_stats(Some(Arc::new(StatsInfo {
+        stats_version: 11,
+        ..Default::default()
+    })));
+    let scan_mem = is.memory_usage();
+    let is_ref: PhysicalPlanRef = Arc::new(is);
+
+    // MemoryUsage matches Go physical_plans.go:428-445: sums sp + IndexPlans + OutputColumns
+    // (discarding index_plan.memory_usage()). PhysicalIndexReader::init sets schema and
+    // output_columns from is.data_source_schema.
+    let mut reader = PhysicalIndexReader {
+        index_plan: Some(Arc::clone(&is_ref)),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    assert_eq!(reader.output_columns.len(), 1);
+    let base_mem = reader.sp.memory_usage() + reader.output_columns[0].memory_usage();
+    assert_eq!(reader.memory_usage(), base_mem + scan_mem);
+    reader.index_plans.clear();
+    assert_eq!(reader.memory_usage(), base_mem);
+
+    // collect_plan_stats_version walks IndexReader -> IndexScan.
+    let mut ver_map = std::collections::HashMap::new();
+    collect_plan_stats_version(&reader, &mut ver_map);
+    assert_eq!(ver_map.get("t"), Some(&11));
+
+    // ResolveIndices: when index_plan is IndexScan, reader schema Index is NOT copied from
+    // index_plan; output_columns resolves via virtual_expr fallback when a duplicate virtual
+    // expression column (ScalarFunction) exists in index_plan.schema().
+    let virt_fn = tidb_expression::scalar_function::new_function(
+        &*ctx.expr_ctx,
+        tidb_expression::scalar_function::ast_func::Plus,
+        new_field_type(TypeLonglong),
+        vec![
+            col_expr(&c1),
+            Arc::new(Expr::Constant(tidb_expression::new_one())),
+        ],
+    )
+    .unwrap();
+    let mut idx_virt_col = (*col(20)).clone();
+    idx_virt_col.virtual_expr = Some(Arc::clone(&virt_fn));
+    let mut is_virt = PhysicalIndexScan {
+        table: Arc::new(TableInfo {
+            id: 7,
+            name: CIStr::new("t"),
+            ..Default::default()
+        }),
+        data_source_schema: Some(new_schema(vec![Arc::clone(&c1)])),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    is_virt.set_schema(new_schema(vec![Arc::clone(&c1), Arc::new(idx_virt_col)]));
+    let mut out_virt_col = (*col(99)).clone();
+    out_virt_col.virtual_expr = Some(virt_fn);
+    let mut r_scan = PhysicalIndexReader {
+        index_plan: Some(Arc::new(is_virt)),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    r_scan.output_columns = vec![Arc::new(out_virt_col)];
+    let mut s_col = (*c1).clone();
+    s_col.index = 7;
+    r_scan
+        .sp
+        .set_schema(Some(new_schema(vec![Arc::new(s_col)])));
+    r_scan.resolve_indices(&ctx).unwrap();
+    assert_eq!(r_scan.index_plans.len(), 1);
+    assert_eq!(r_scan.schema().columns[0].index, 7);
+    assert_eq!(
+        r_scan.output_columns[0].index, 1,
+        "virtual_expr fallback resolves to duplicate column at index 1 in index_plan schema"
+    );
+
+    // ResolveIndices: when index_plan is Projection, reader schema copies resolved Index.
+    let mut proj = PhysicalProjection {
+        exprs: vec![col_expr(&c2)],
+        ..Default::default()
+    }
+    .init(&ctx, stats(1.0), 0, Vec::new());
+    proj.set_children(vec![Arc::clone(&is_ref)]);
+    proj.set_schema(new_schema(vec![Arc::clone(&c2)]));
+    let mut r_proj = PhysicalIndexReader {
+        index_plan: Some(Arc::new(proj)),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    let mut r_proj_col = (*c2).clone();
+    r_proj_col.index = 99;
+    r_proj
+        .sp
+        .set_schema(Some(new_schema(vec![Arc::new(r_proj_col)])));
+    r_proj.resolve_indices(&ctx).unwrap();
+    assert_eq!(r_proj.schema().columns[0].index, 0);
+    assert_eq!(r_proj.output_columns[0].index, 0);
+}
+
+#[test]
+fn is_point_get_with_pk_or_unique_key_by_auto_commit_readers() {
+    use crate::core::common_plans::is_point_get_with_pk_or_unique_key_by_auto_commit;
+    use tidb_model::{IndexColumn, IndexInfo};
+    use tidb_parser::types::UnspecifiedLength;
+    use tidb_sessionctx::ranger::Range;
+    use tidb_types::datum::new_int_datum;
+
+    let mut vars = session();
+    vars.set_status_flag(tidb_base::mysql::ServerStatusAutocommit, true);
+    let ctx = ctx_of(&mut vars);
+
+    let pt = Range {
+        low_val: vec![new_int_datum(1)],
+        high_val: vec![new_int_datum(1)],
+        collators: vec![tidb_types::collate::get_binary_collator()],
+        ..Default::default()
+    };
+    let rng = Range {
+        low_val: vec![new_int_datum(1)],
+        high_val: vec![new_int_datum(2)],
+        collators: vec![tidb_types::collate::get_binary_collator()],
+        ..Default::default()
+    };
+    let uk = Arc::new(IndexInfo {
+        unique: true,
+        columns: Some(vec![IndexColumn {
+            name: CIStr::new("a"),
+            offset: 0,
+            length: UnspecifiedLength,
+            ..Default::default()
+        }]),
+        ..Default::default()
+    });
+    let non_uk = Arc::new(IndexInfo {
+        unique: false,
+        ..(*uk).clone()
+    });
+
+    // Unique index point scan -> true; non-unique -> false; unique range -> false.
+    let mk_idx_reader = |idx: Arc<IndexInfo>, ranges: Vec<Range>| -> PhysicalPlanRef {
+        let mut is = PhysicalIndexScan {
+            index: idx,
+            ranges,
+            ..Default::default()
+        }
+        .init(&ctx, 0);
+        is.set_schema(new_schema(vec![col(1)]));
+        Arc::new(
+            PhysicalIndexReader {
+                index_plan: Some(Arc::new(is)),
+                ..Default::default()
+            }
+            .init(&ctx, 0),
+        )
+    };
+    let uk_pt_reader = mk_idx_reader(Arc::clone(&uk), vec![pt.clone()]);
+    assert!(is_point_get_with_pk_or_unique_key_by_auto_commit(ctx.vars, &*uk_pt_reader).unwrap());
+    let non_uk_reader = mk_idx_reader(non_uk, vec![pt.clone()]);
+    assert!(!is_point_get_with_pk_or_unique_key_by_auto_commit(ctx.vars, &*non_uk_reader).unwrap());
+    let uk_rng_reader = mk_idx_reader(uk, vec![rng.clone()]);
+    assert!(!is_point_get_with_pk_or_unique_key_by_auto_commit(ctx.vars, &*uk_rng_reader).unwrap());
+
+    // Projection wrapping unique IndexReader -> true.
+    let mut proj = PhysicalProjection::default().init(&ctx, stats(1.0), 0, Vec::new());
+    proj.set_children(vec![Arc::clone(&uk_pt_reader)]);
+    assert!(is_point_get_with_pk_or_unique_key_by_auto_commit(ctx.vars, &proj).unwrap());
+
+    // TableReader: int PK point -> true; range -> false; 2-col common handle with 1-col point -> false.
+    let mk_tbl_reader = |common_handle: bool, ranges: Vec<Range>| -> PhysicalPlanRef {
+        let indices = if common_handle {
+            Some(vec![Arc::new(IndexInfo {
+                primary: true,
+                unique: true,
+                columns: Some(vec![
+                    IndexColumn {
+                        name: CIStr::new("a"),
+                        offset: 0,
+                        length: UnspecifiedLength,
+                        ..Default::default()
+                    },
+                    IndexColumn {
+                        name: CIStr::new("b"),
+                        offset: 1,
+                        length: UnspecifiedLength,
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            })])
+        } else {
+            None
+        };
+        let mut ts = PhysicalTableScan {
+            table: Arc::new(TableInfo {
+                pk_is_handle: !common_handle,
+                is_common_handle: common_handle,
+                indices,
+                ..Default::default()
+            }),
+            ranges,
+            ..Default::default()
+        }
+        .init(&ctx, 0);
+        ts.set_schema(new_schema(vec![col(1)]));
+        Arc::new(
+            PhysicalTableReader {
+                table_plan: Some(Arc::new(ts)),
+                ..Default::default()
+            }
+            .init(&ctx, 0),
+        )
+    };
+    assert!(
+        is_point_get_with_pk_or_unique_key_by_auto_commit(
+            ctx.vars,
+            &*mk_tbl_reader(false, vec![pt.clone()])
+        )
+        .unwrap()
+    );
+    assert!(
+        !is_point_get_with_pk_or_unique_key_by_auto_commit(
+            ctx.vars,
+            &*mk_tbl_reader(false, vec![rng])
+        )
+        .unwrap()
+    );
+    assert!(
+        !is_point_get_with_pk_or_unique_key_by_auto_commit(
+            ctx.vars,
+            &*mk_tbl_reader(true, vec![pt])
+        )
+        .unwrap()
+    );
+    let pt2 = Range {
+        low_val: vec![new_int_datum(1), new_int_datum(2)],
+        high_val: vec![new_int_datum(1), new_int_datum(2)],
+        collators: vec![
+            tidb_types::collate::get_binary_collator(),
+            tidb_types::collate::get_binary_collator(),
+        ],
+        ..Default::default()
+    };
+    assert!(
+        is_point_get_with_pk_or_unique_key_by_auto_commit(
+            ctx.vars,
+            &*mk_tbl_reader(true, vec![pt2])
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn match_property_group_ranges_guards() {
+    use crate::core::find_best_task::match_property;
+    use crate::property::{
+        PhysicalProperty, PropMatched, PropMatchedNeedMergeSort, PropNotMatched, SortItem,
+    };
+    use crate::util::path::AccessPath;
+    use tidb_parser::types::UnspecifiedLength;
+    use tidb_sessionctx::ranger::Range;
+    use tidb_types::datum::new_int_datum;
+
+    let mut vars = session();
+    let ctx = ctx_of(&mut vars);
+    let c_a = col(1);
+    let c_b = col(2);
+    let ds = DataSource::init(
+        &ctx,
+        Arc::new(TableInfo::default()),
+        CIStr::new("test"),
+        Vec::new(),
+        new_schema(vec![Arc::clone(&c_a), Arc::clone(&c_b)]),
+        0,
+    );
+    let prop = PhysicalProperty {
+        sort_items: vec![SortItem {
+            col: Arc::clone(&c_b),
+            desc: false,
+        }],
+        ..Default::default()
+    };
+    let make_path = |n_points: usize| -> AccessPath {
+        let mut ranges = Vec::with_capacity(n_points);
+        for i in 0..n_points {
+            let d = new_int_datum((i * 2) as i64);
+            ranges.push(Range {
+                low_val: vec![d.clone(), new_int_datum(0)],
+                high_val: vec![d, new_int_datum(100)],
+                collators: vec![
+                    tidb_types::collate::get_binary_collator(),
+                    tidb_types::collate::get_binary_collator(),
+                ],
+                ..Default::default()
+            });
+        }
+        AccessPath {
+            ranges,
+            idx_cols: vec![Arc::clone(&c_a), Arc::clone(&c_b)],
+            idx_col_lens: vec![UnspecifiedLength, UnspecifiedLength],
+            eq_cond_count: 0,
+            ..Default::default()
+        }
+    };
+
+    // Empty ranges: trivially all-point loop, but Go keeps PropMatched without setting group fields.
+    let mut empty = make_path(0);
+    assert_eq!(
+        match_property(&ds, &ctx, &mut empty, &prop).unwrap(),
+        PropMatched
+    );
+    assert!(empty.grouped_ranges.is_empty());
+    assert!(empty.group_by_col_idxs.is_empty());
+
+    // 2048 distinct groups: matched with merge sort.
+    let mut at_cap = make_path(2048);
+    assert_eq!(
+        match_property(&ds, &ctx, &mut at_cap, &prop).unwrap(),
+        PropMatchedNeedMergeSort
+    );
+    assert_eq!(at_cap.grouped_ranges.len(), 2048);
+    assert_eq!(at_cap.group_by_col_idxs, vec![0]);
+
+    // 2049 distinct groups: exceeds maxGroupCount (2048) -> PropNotMatched, fields untouched.
+    let mut over_cap = make_path(2049);
+    assert_eq!(
+        match_property(&ds, &ctx, &mut over_cap, &prop).unwrap(),
+        PropNotMatched
+    );
+    assert!(over_cap.grouped_ranges.is_empty());
+    assert!(over_cap.group_by_col_idxs.is_empty());
 }

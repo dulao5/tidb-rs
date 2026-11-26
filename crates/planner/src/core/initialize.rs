@@ -26,9 +26,9 @@ use tidb_base::kv;
 
 use crate::base::PhysicalKind;
 use crate::core::physical_plans::{
-    BatchCop, Cop, MPP, NominalSort, PhysicalLimit, PhysicalProjection, PhysicalSelection,
-    PhysicalSort, PhysicalTableDual, PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
-    set_mpp_or_batch_cop_for_table_scan,
+    BatchCop, Cop, MPP, NominalSort, PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit,
+    PhysicalProjection, PhysicalSelection, PhysicalSort, PhysicalTableDual, PhysicalTableReader,
+    PhysicalTableScan, PhysicalTopN, set_mpp_or_batch_cop_for_table_scan,
 };
 use crate::physicalop::{PhysicalPlanRef, new_base_physical_plan};
 use crate::planctx::PlanCtx;
@@ -50,6 +50,10 @@ const TypeDual: &str = "TableDual";
 const TypeTableScan: &str = "TableScan";
 /// `plancodec.TypeTableReader`.
 const TypeTableReader: &str = "TableReader";
+/// `plancodec.TypeIdxScan`.
+const TypeIdxScan: &str = "IndexScan";
+/// `plancodec.TypeIndexReader`.
+const TypeIndexReader: &str = "IndexReader";
 
 impl PhysicalSelection {
     /// Init initializes PhysicalSelection.
@@ -173,6 +177,25 @@ impl PhysicalTableScan {
     // go: PhysicalTableScan.Init L1 [M-SELF, M-CTX]
     pub fn init(mut self, ctx: &PlanCtx<'_>, offset: isize) -> PhysicalTableScan {
         self.sp.base = new_base_physical_plan(ctx, TypeTableScan, offset);
+        self
+    }
+}
+
+impl PhysicalIndexScan {
+    /// Init initializes PhysicalIndexScan.
+    // go: PhysicalIndexScan.Init L1 [M-SELF, M-CTX]
+    pub fn init(mut self, ctx: &PlanCtx<'_>, offset: isize) -> PhysicalIndexScan {
+        self.sp.base = new_base_physical_plan(ctx, TypeIdxScan, offset);
+        self
+    }
+}
+
+impl PhysicalIndexReader {
+    /// Init initializes PhysicalIndexReader.
+    // go: PhysicalIndexReader.Init L1 [M-SELF, M-CTX]
+    pub fn init(mut self, ctx: &PlanCtx<'_>, offset: isize) -> PhysicalIndexReader {
+        self.sp.base = new_base_physical_plan(ctx, TypeIndexReader, offset);
+        crate::base::PhysicalPlan::set_schema(&mut self, tidb_expression::Schema::default());
         self
     }
 }

@@ -542,3 +542,310 @@ fn path_copying_copies_only_the_rewritten_path() {
     assert_eq!(plan_structure_hash(cached.as_ref()), before);
     assert!(!p.base_physical().is_sealed());
 }
+
+#[test]
+fn index_reader_seal_hash_heap_size_rebuild_and_cacheable() {
+    use crate::core::physical_plans::{PhysicalIndexReader, PhysicalIndexScan};
+    use crate::core::plan_cache_heap_size::plan_cache_value_heap_size;
+    use crate::core::plan_cache_rebuild::rebuild_range;
+    use crate::property::task_type::CopSingleReadTaskType;
+    use crate::util::optimizetrace::PlanCostOption;
+    use tidb_base::mysql::TypeLonglong;
+    use tidb_expression::constant::{Constant, ParamMarker};
+    use tidb_expression::scalar_function::{ast_func, new_function};
+    use tidb_expression::{Column, Expr, ExprRef, Schema, new_schema};
+    use tidb_model::{ColumnInfo, IndexColumn, IndexInfo, TableInfo};
+    use tidb_parser::model::CIStr;
+    use tidb_parser::types::UnspecifiedLength;
+    use tidb_sessionctx::exprstatic as es;
+    use tidb_sessionctx::ranger::Range;
+    use tidb_types::datum::{Datum, new_int_datum};
+    use tidb_types::field_type::new_field_type;
+
+    fn make_ctx<'a>(
+        vars: &'a mut tidb_sessionctx::variable::session::SessionVars,
+        params: &[Datum],
+    ) -> crate::planctx::PlanCtx<'a> {
+        let ev = es::new_eval_context(vec![es::with_param_list(params)]);
+        let ectx = es::new_expr_context(vec![es::with_eval_ctx(ev)]);
+        crate::planctx::PlanCtx::new(vars, ectx)
+    }
+
+    let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
+    vars.current_db = "test".to_owned();
+    let ctx = make_ctx(&mut vars, &[new_int_datum(1), new_int_datum(10)]);
+
+    let k_col = Arc::new(Column {
+        unique_id: 2,
+        id: 2,
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
+        ..Column::default()
+    });
+    let id_col = Arc::new(Column {
+        unique_id: 1,
+        id: 1,
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
+        ..Column::default()
+    });
+    let mut pk_ft = new_field_type(TypeLonglong);
+    pk_ft.add_flag(tidb_base::mysql::PriKeyFlag | tidb_base::mysql::NotNullFlag);
+    let tbl = Arc::new(TableInfo {
+        id: 10,
+        name: CIStr::new("sbtest1"),
+        pk_is_handle: true,
+        columns: Some(vec![
+            Arc::new(ColumnInfo {
+                id: 1,
+                name: CIStr::new("id"),
+                offset: 0,
+                field_type: pk_ft,
+                ..Default::default()
+            }),
+            Arc::new(ColumnInfo {
+                id: 2,
+                name: CIStr::new("k"),
+                offset: 1,
+                field_type: new_field_type(TypeLonglong),
+                ..Default::default()
+            }),
+        ]),
+        ..Default::default()
+    });
+    let idx = Arc::new(IndexInfo {
+        id: 1,
+        name: CIStr::new("k_1"),
+        columns: Some(vec![IndexColumn {
+            name: CIStr::new("k"),
+            offset: 1,
+            length: UnspecifiedLength,
+            ..Default::default()
+        }]),
+        ..Default::default()
+    });
+
+    // PhysicalIndexScan::instance_cacheable is false when gen_exprs is non-empty.
+    let mut scan_gen = PhysicalIndexScan::default();
+    assert!(scan_gen.instance_cacheable());
+    scan_gen.gen_exprs.insert(
+        tidb_model::TableItemID {
+            table_id: 10,
+            id: 2,
+            is_index: false,
+            is_sync_load_failed: false,
+        },
+        Arc::new(Expr::Column((*k_col).clone())),
+    );
+    assert!(!scan_gen.instance_cacheable());
+
+    let param_expr = |order: i64, val: i64| -> ExprRef {
+        let mut c = Constant::new(new_int_datum(val), new_field_type(TypeLonglong));
+        c.param_marker = Some(ParamMarker { order });
+        Arc::new(Expr::Constant(c))
+    };
+    let ge = new_function(
+        &*ctx.expr_ctx,
+        ast_func::GE,
+        new_field_type(TypeLonglong),
+        vec![Arc::new(Expr::Column((*k_col).clone())), param_expr(0, 1)],
+    )
+    .unwrap();
+    let le = new_function(
+        &*ctx.expr_ctx,
+        ast_func::LE,
+        new_field_type(TypeLonglong),
+        vec![Arc::new(Expr::Column((*k_col).clone())), param_expr(1, 10)],
+    )
+    .unwrap();
+
+    // Build a sealed IndexReader over IndexScan with ranges [1, 10].
+    let r1 = Range {
+        low_val: vec![new_int_datum(1)],
+        high_val: vec![new_int_datum(10)],
+        collators: vec![tidb_types::collate::get_binary_collator()],
+        ..Default::default()
+    };
+    let mut is = PhysicalIndexScan {
+        table: Arc::clone(&tbl),
+        index: Arc::clone(&idx),
+        idx_cols: vec![Arc::clone(&k_col)],
+        idx_col_lens: vec![UnspecifiedLength],
+        access_condition: vec![ge, le],
+        columns: tbl.columns.clone().unwrap(),
+        ranges: vec![r1.clone()],
+        range_info: "[1,10]".to_owned(),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    is.set_schema(new_schema(vec![Arc::clone(&k_col)]));
+    let mut ir = PhysicalIndexReader {
+        index_plan: Some(Arc::new(is)),
+        output_columns: vec![Arc::clone(&k_col)],
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    ir.set_schema(new_schema(vec![Arc::clone(&k_col)]));
+    let cached: PhysicalPlanRef = Arc::new(ir);
+    seal_plan(cached.as_ref());
+
+    // HeapSizer accounts for IndexReader and its inner IndexScan.
+    let val = PlanCacheValue::for_test(Arc::clone(&cached), 0, Vec::new());
+    assert!(plan_cache_value_heap_size(&val) > 0);
+    let before_hash = plan_structure_hash(cached.as_ref());
+
+    // Sealed IndexScan does not mutate cost memo during cost calculation.
+    let inner_scan = {
+        let r = cached
+            .as_any()
+            .downcast_ref::<PhysicalIndexReader>()
+            .unwrap();
+        Arc::clone(&r.index_plans[0])
+    };
+    inner_scan
+        .base_physical()
+        .get_plan_cost_ver1(&ctx, CopSingleReadTaskType, &PlanCostOption::default())
+        .unwrap();
+    assert!(!inner_scan.base_physical().cost.lock().plan_cost_init);
+    assert_eq!(plan_structure_hash(cached.as_ref()), before_hash);
+
+    // rebuild_range with identical params [1, 10] takes the zero-copy shortcut (0 node clones).
+    let mut vars_same = tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
+    let mut ctx_same = make_ctx(&mut vars_same, &[new_int_datum(1), new_int_datum(10)]);
+    let mut p_same = Arc::clone(&cached);
+    let before_clones = clone_node_calls();
+    rebuild_range(&mut ctx_same, &mut p_same).unwrap();
+    assert_eq!(
+        clone_node_calls() - before_clones,
+        0,
+        "identical ranges must take the zero-copy shortcut"
+    );
+    assert!(Arc::ptr_eq(&p_same, &cached));
+
+    // rebuild_range with different params [20, 30] path-copies IndexReader + IndexScan and
+    // leaves the cached tree untouched.
+    let mut vars_diff = tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
+    let mut ctx_diff = make_ctx(&mut vars_diff, &[new_int_datum(20), new_int_datum(30)]);
+    let mut p_diff = Arc::clone(&cached);
+    rebuild_range(&mut ctx_diff, &mut p_diff).unwrap();
+    assert!(!Arc::ptr_eq(&p_diff, &cached));
+    assert_eq!(plan_structure_hash(cached.as_ref()), before_hash);
+    let rebuilt_ir = p_diff
+        .as_any()
+        .downcast_ref::<PhysicalIndexReader>()
+        .unwrap();
+    let rebuilt_is = rebuilt_ir.index_plans[0]
+        .as_any()
+        .downcast_ref::<PhysicalIndexScan>()
+        .unwrap();
+    assert_eq!(rebuilt_is.ranges.len(), 1);
+    assert_eq!(rebuilt_is.ranges[0].low_val[0].get_int64(), 20);
+    assert_eq!(rebuilt_is.ranges[0].high_val[0].get_int64(), 30);
+
+    // GroupRangesByCols rebuild on both IndexScan and TableScan when group_by_col_idxs is set.
+    let eq0 = new_function(
+        &*ctx.expr_ctx,
+        ast_func::EQ,
+        new_field_type(TypeLonglong),
+        vec![Arc::new(Expr::Column((*k_col).clone())), param_expr(0, 1)],
+    )
+    .unwrap();
+    let eq1 = new_function(
+        &*ctx.expr_ctx,
+        ast_func::EQ,
+        new_field_type(TypeLonglong),
+        vec![Arc::new(Expr::Column((*k_col).clone())), param_expr(1, 2)],
+    )
+    .unwrap();
+    let or_cond = new_function(
+        &*ctx.expr_ctx,
+        ast_func::LogicOr,
+        new_field_type(TypeLonglong),
+        vec![eq0, eq1],
+    )
+    .unwrap();
+
+    let mut is_grp = PhysicalIndexScan {
+        table: Arc::clone(&tbl),
+        index: Arc::clone(&idx),
+        idx_cols: vec![Arc::clone(&k_col)],
+        idx_col_lens: vec![UnspecifiedLength],
+        access_condition: vec![Arc::clone(&or_cond)],
+        columns: tbl.columns.clone().unwrap(),
+        ranges: vec![r1.clone()],
+        group_by_col_idxs: vec![0],
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    is_grp.set_schema(Schema::default());
+    let mut ir_grp: PhysicalPlanRef = Arc::new(
+        PhysicalIndexReader {
+            index_plan: Some(Arc::new(is_grp)),
+            ..Default::default()
+        }
+        .init(&ctx, 0),
+    );
+    rebuild_range(&mut ctx_diff, &mut ir_grp).unwrap();
+    let ir_grp = ir_grp
+        .as_any()
+        .downcast_ref::<PhysicalIndexReader>()
+        .unwrap();
+    let is_grp = ir_grp.index_plans[0]
+        .as_any()
+        .downcast_ref::<PhysicalIndexScan>()
+        .unwrap();
+    assert_eq!(is_grp.grouped_ranges.len(), 2);
+    assert_eq!(is_grp.grouped_ranges[0][0].low_val[0].get_int64(), 20);
+    assert_eq!(is_grp.grouped_ranges[1][0].low_val[0].get_int64(), 30);
+
+    // TableScan with pk_is_handle and group_by_col_idxs = [0]: rebuilds grouped_ranges via
+    // GroupRangesByCols.
+    let pk_eq0 = new_function(
+        &*ctx.expr_ctx,
+        ast_func::EQ,
+        new_field_type(TypeLonglong),
+        vec![Arc::new(Expr::Column((*id_col).clone())), param_expr(0, 1)],
+    )
+    .unwrap();
+    let pk_eq1 = new_function(
+        &*ctx.expr_ctx,
+        ast_func::EQ,
+        new_field_type(TypeLonglong),
+        vec![Arc::new(Expr::Column((*id_col).clone())), param_expr(1, 2)],
+    )
+    .unwrap();
+    let pk_or = new_function(
+        &*ctx.expr_ctx,
+        ast_func::LogicOr,
+        new_field_type(TypeLonglong),
+        vec![pk_eq0, pk_eq1],
+    )
+    .unwrap();
+    let mut ts_grp = PhysicalTableScan {
+        table: Arc::clone(&tbl),
+        columns: tbl.columns.clone().unwrap(),
+        access_condition: vec![pk_or],
+        ranges: vec![r1],
+        group_by_col_idxs: vec![0],
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    ts_grp.set_schema(new_schema(vec![Arc::clone(&id_col)]));
+    let mut tr_grp: PhysicalPlanRef = Arc::new(
+        PhysicalTableReader {
+            table_plan: Some(Arc::new(ts_grp)),
+            ..Default::default()
+        }
+        .init(&ctx, 0),
+    );
+    rebuild_range(&mut ctx_diff, &mut tr_grp).unwrap();
+    let tr_grp = tr_grp
+        .as_any()
+        .downcast_ref::<PhysicalTableReader>()
+        .unwrap();
+    let ts_grp = tr_grp.table_plans[0]
+        .as_any()
+        .downcast_ref::<PhysicalTableScan>()
+        .unwrap();
+    assert_eq!(ts_grp.grouped_ranges.len(), 2);
+    assert_eq!(ts_grp.grouped_ranges[0][0].low_val[0].get_int64(), 20);
+    assert_eq!(ts_grp.grouped_ranges[1][0].low_val[0].get_int64(), 30);
+}

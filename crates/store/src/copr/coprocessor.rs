@@ -1362,11 +1362,9 @@ impl<S: TiKVStore> CopIterator<S> {
     }
 
     /// GetRequestRateLimit returns the shared request rate-limit object.
-    ///
-    /// `kv.Request.CoprRequestRateLimit` is not ported yet (D07.0 spec §4 point 3): none.
     // go: copIterator.GetRequestRateLimit L1
     pub fn get_request_rate_limit(&self) -> Option<&Arc<RateLimit>> {
-        None
+        self.shared.req.copr_request_rate_limit.as_ref()
     }
 
     /// GetTasks returns the built tasks (before `open`).
@@ -1867,12 +1865,31 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
         let _ = get_end_point_type(task.store_type);
         // `MatchStoreLabels` / `redirect2Replica` need replica read (§3.1): leader only.
         let start_time = Instant::now();
-        // `requestRateLimit` (`kv.Request.CoprRequestRateLimit`) is not ported yet.
-        let send = self
-            .shared
-            .kvclient
-            .send_req_ctx(bo, cop_req, task.region, timeout)
-            .await;
+        // Keep the request-rate token and send attempt in a small scope so the token is
+        // released immediately after the send attempt returns (and on error, panic, or
+        // future drop/cancellation).
+        let send = {
+            struct RateLimitGuard<'a>(&'a RateLimit);
+            impl Drop for RateLimitGuard<'_> {
+                // glue: M-DEFER for worker.requestRateLimit.PutToken()
+                fn drop(&mut self) {
+                    self.0.put_token();
+                }
+            }
+            let _rate_limit_guard = if let Some(rl) = &req.copr_request_rate_limit {
+                let mut finish = self.shared.finish.clone();
+                if rl.get_token(&mut finish).await {
+                    return Ok(None);
+                }
+                Some(RateLimitGuard(rl))
+            } else {
+                None
+            };
+            self.shared
+                .kvclient
+                .send_req_ctx(bo, cop_req, task.region, timeout)
+                .await
+        };
         let (cop_resp, rpc_ctx, store_addr) = match send {
             Ok(r) => r,
             Err(e) => {

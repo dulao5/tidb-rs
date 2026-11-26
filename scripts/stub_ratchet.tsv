@@ -7,9 +7,9 @@ executor	83
 expr-pushdown	1
 expression	1
 infoschema	17
-planner	358
+planner	355
 poc/session	3
 session	48
 sessiontxn	10
 statistics	19
-store	20
+store	18

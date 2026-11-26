@@ -21,6 +21,7 @@ pub mod logical_sort;
 pub mod logical_table_dual;
 pub mod logical_table_scan;
 pub mod logical_top_n;
+pub mod logical_window;
 
 pub use base_logical_plan::{BaseLogicalPlan, new_base_logical_plan};
 pub use logical_aggregation::LogicalAggregation;
@@ -32,6 +33,7 @@ pub use logical_selection::LogicalSelection;
 pub use logical_sort::LogicalSort;
 pub use logical_table_dual::LogicalTableDual;
 pub use logical_top_n::LogicalTopN;
+pub use logical_window::{FrameBound, LogicalWindow, WindowFrame};
 
 /// The per-type methods of [`crate::LogicalPlan`] (`M-IFACE`, `M-SELF`): `kind`, the type
 /// assertion hooks and the accessors of the embedded structures. The operator has a field

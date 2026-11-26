@@ -44,8 +44,8 @@ use tidb_planner::core::preprocess::{
 use tidb_planner::core::resolve::new_node_w;
 use tidb_planner::hint::hint::{PreferHashAgg, PreferStreamAgg};
 use tidb_planner::logicalop::{
-    DataSource, LogicalAggregation, LogicalLimit, LogicalProjection, LogicalSelection, LogicalSort,
-    LogicalTableDual,
+    DataSource, FrameBound, LogicalAggregation, LogicalLimit, LogicalProjection, LogicalSelection,
+    LogicalSort, LogicalTableDual, LogicalWindow,
 };
 use tidb_planner::property::{GroupNDV, StatsInfo};
 use tidb_planner::util::optimizetrace::default_logical_optimize_option;
@@ -75,8 +75,10 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D02.2", 2),
     // The preprocessor's missing table check (the privilege manager decides the error).
     ("D04.1", 2),
+    // Time functions not ported yet (DATE_ADD / DATE_SUB for window RANGE INTERVAL bounds).
+    ("D08.7", 2),
     // Built-in function families not ported yet (IN, ANY_VALUE, user variables, ...).
-    ("D08.9", 63),
+    ("D08.9", 65),
     // Virtual generated columns.
     ("D09.1", 2),
     // Partitioned tables.
@@ -87,8 +89,8 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.2", 2),
     // Joins.
     ("D09.3", 6),
-    // Window functions (D09.4 part B) and GROUP BY ... WITH ROLLUP (D09.4 part C).
-    ("D09.4", 6),
+    // GROUP BY ... WITH ROLLUP (D09.4 part C).
+    ("D09.4", 2),
     // WITH and set operations.
     ("D09.5", 4),
     // Subqueries.
@@ -396,6 +398,67 @@ fn dump(ctx: &PlanCtx<'_>, p: PlanId) -> Value {
             o.insert("gby".into(), exprs_out(ectx, &x.group_by_items));
             o.insert("prefer_agg_type".into(), json!(x.prefer_agg_type));
             o.insert("prefer_agg_to_cop".into(), json!(x.prefer_agg_to_cop));
+        }
+        LogicalKind::Window => {
+            let x = node.as_any().downcast_ref::<LogicalWindow>().unwrap();
+            let wfs: Vec<Value> = x
+                .window_func_descs
+                .iter()
+                .map(|w| {
+                    json!([
+                        w.base.name,
+                        exprs_out(ectx, &w.base.args),
+                        ft_out(&w.base.ret_tp),
+                    ])
+                })
+                .collect();
+            let pby: Vec<Value> = x
+                .partition_by
+                .iter()
+                .map(|it| {
+                    json!([
+                        expr_out(ectx, &Expr::Column(Column::clone(&it.col))),
+                        it.desc
+                    ])
+                })
+                .collect();
+            let oby: Vec<Value> = x
+                .order_by
+                .iter()
+                .map(|it| {
+                    json!([
+                        expr_out(ectx, &Expr::Column(Column::clone(&it.col))),
+                        it.desc
+                    ])
+                })
+                .collect();
+            let frame = match &x.frame {
+                None => Value::Null,
+                Some(fr) => {
+                    let dump_bound = |b: &Option<FrameBound>| -> Value {
+                        match b {
+                            None => Value::Null,
+                            Some(b) => json!([
+                                b.tp as i32,
+                                b.unbounded,
+                                b.num,
+                                exprs_out(ectx, &b.calc_funcs),
+                                b.cmp_data_type as i32,
+                                b.is_explicit_range,
+                            ]),
+                        }
+                    };
+                    json!({
+                        "type": fr.tp as i32,
+                        "start": dump_bound(&fr.start),
+                        "end": dump_bound(&fr.end),
+                    })
+                }
+            };
+            o.insert("wfs".into(), Value::Array(wfs));
+            o.insert("pby".into(), Value::Array(pby));
+            o.insert("oby".into(), Value::Array(oby));
+            o.insert("frame".into(), frame);
         }
         k => panic!("dump {k:?}"),
     }
@@ -907,6 +970,360 @@ fn run_aggop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     }
 }
 
+fn find_window(ctx: &PlanCtx<'_>, p: PlanId) -> Option<PlanId> {
+    let node = ctx.arena.get(p);
+    if node.kind() == LogicalKind::Window {
+        return Some(p);
+    }
+    node.children().iter().find_map(|&c| find_window(ctx, c))
+}
+
+fn run_winop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
+    collate::set_new_collation_enabled_for_test(true);
+    let sql = args[1].as_str().unwrap();
+    let spec = &args[2];
+    let Ok(out) = parse(sql, &ParseOptions::default()) else {
+        return Outcome::Unparsed;
+    };
+    let Some(mut stmt) = out.stmts.into_iter().next() else {
+        return Outcome::Unparsed;
+    };
+    let mode = tidb_base::mysql::ModeOnlyFullGroupBy.0;
+    let mut vars = SessionVars::new(Box::new(Acc));
+    vars.current_db = "test".to_owned();
+    vars.sql_mode = mode;
+    let is = InfoSchemaHandle(Arc::clone(tables) as Arc<dyn InfoSchemaLookup>);
+    let resolve_ctx = {
+        let mut node = new_node_w(&mut stmt);
+        let (_, res) = preprocess(
+            &mut vars,
+            &mut node,
+            vec![with_preprocessor_return(PreprocessorReturn {
+                info_schema: Some(is.clone()),
+                ..Default::default()
+            })],
+        );
+        if let Err(e) = res {
+            return Outcome::Value(err_out(&e));
+        }
+        node.get_resolve_context()
+    };
+    vars.state.plan_id.0.store(0, Ordering::SeqCst);
+    vars.state.plan_column_id.0.store(0, Ordering::SeqCst);
+    let mut builder = new_plan_builder(&[]);
+    builder.init(&mut vars, Some(is), None);
+    builder.sql_text = sql;
+    builder.resolve_ctx = Some(resolve_ctx);
+
+    let wh = Arc::new(new_static_warn_handler(0));
+    let ev = es::new_eval_context(vec![
+        es::with_type_flags(tidb_types::context::DefaultStmtFlags),
+        es::with_sql_mode(SQLMode(mode)),
+        es::with_location(Some(utc())),
+        es::with_current_db("test".to_owned()),
+        es::with_warn_handler(Some(Arc::clone(&wh) as _)),
+    ]);
+    let expr_ctx = es::new_expr_context(vec![
+        es::with_eval_ctx(ev),
+        es::with_charset("utf8mb4".to_owned(), "utf8mb4_bin".to_owned()),
+        es::with_default_collation_for_utf8mb4("utf8mb4_bin".to_owned()),
+    ]);
+    let mut ctx = PlanCtx::new(&mut vars, expr_ctx);
+    ctx.has_dirty_content = Some(Arc::new(|_| false));
+    ctx.client = Some(Arc::new(MockClient));
+    let lp = match builder.build(&mut ctx, &stmt) {
+        Ok(p) => p,
+        Err(e) => {
+            if let Some(b) = blocked_by(&e) {
+                return Outcome::Blocked(b.to_string());
+            }
+            return Outcome::Value(err_out(&e));
+        }
+    };
+    let win_id = find_window(&ctx, lp)
+        .unwrap_or_else(|| panic!("no LogicalWindow in {sql} ({spec}): {}", dump(&ctx, lp)));
+    let kind = spec["kind"].as_str().unwrap();
+    match kind {
+        "inspect" => {
+            let win = ctx.arena.downcast_ref::<LogicalWindow>(win_id).unwrap();
+            let pby: Vec<Value> = win
+                .get_partition_by()
+                .iter()
+                .map(|it| json!([it.col.unique_id, it.desc]))
+                .collect();
+            let pby_cols: Vec<Value> = win
+                .get_partition_by_cols()
+                .iter()
+                .map(|c| json!(c.unique_id))
+                .collect();
+            let part_keys: Vec<Value> = win
+                .get_partition_keys()
+                .iter()
+                .map(|k| json!([k.col.unique_id, k.collate_id]))
+                .collect();
+            let res_cols: Vec<Value> = win
+                .get_window_result_columns(&ctx.arena)
+                .iter()
+                .map(|c| json!(c.unique_id))
+                .collect();
+            let cor_cols: Vec<Value> = win
+                .extract_correlated_cols()
+                .iter()
+                .map(|c| json!(c.column.unique_id))
+                .collect();
+            let child_id = win.children()[0];
+            let child_cols = ctx.arena.get(child_id).schema(&ctx.arena).columns.clone();
+            let col_groups_in: Vec<Vec<Arc<Column>>> = spec["col_groups"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|g| {
+                            g.as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|i| Arc::clone(&child_cols[i.as_u64().unwrap() as usize]))
+                                .collect()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let col_groups_out: Vec<Value> = win
+                .extract_col_groups(&ctx.arena, &col_groups_in)
+                .iter()
+                .map(|g| Value::Array(g.iter().map(|c| json!(c.unique_id)).collect()))
+                .collect();
+            Outcome::Value(json!({
+                "pby": pby,
+                "pby_cols": pby_cols,
+                "part_keys": part_keys,
+                "res_cols": res_cols,
+                "cor_cols": cor_cols,
+                "col_groups": col_groups_out,
+            }))
+        }
+        "frame" => {
+            let win = ctx.arena.downcast_ref::<LogicalWindow>(win_id).unwrap();
+            let Some(fr) = &win.frame else {
+                return Outcome::Value(json!({"frame": Value::Null}));
+            };
+            let mut cloned = fr.clone_frame();
+            let order_by_cols: Vec<Arc<Column>> =
+                win.order_by.iter().map(|it| Arc::clone(&it.col)).collect();
+            let bctx = tidb_sessionctx::planctx::BuildPBContext {
+                expr_ctx: Arc::clone(&ctx.expr_ctx) as tidb_sessionctx::exprctx::BuildContextRef,
+                client: Arc::new(MockClient),
+                tiflash_fast_scan: ctx.vars.tiflash_fast_scan,
+                tiflash_fine_grained_shuffle_batch_size: ctx
+                    .vars
+                    .tiflash_fine_grained_shuffle_batch_size,
+                group_concat_max_len: ctx.vars.group_concat_max_len,
+                in_explain_stmt: false,
+                warn_handler: None,
+                extra_warnghandler: None,
+            };
+            let ectx = ctx.eval_ctx();
+            let dump_bound_op = |b: Option<&mut FrameBound>| -> Result<Value, Error> {
+                let Some(b) = b else {
+                    return Ok(Value::Null);
+                };
+                b.update_compare_cols(&*ctx.expr_ctx, &order_by_cols)?;
+                let tiflash_ok = win.check_comparison_for_tiflash(&ctx, b);
+                let pb = b.to_pb(&bctx)?;
+                let pb_range = if pb.has_frame_range() {
+                    let r = pb.get_frame_range();
+                    json!([r.get_tp() as i32, r.get_sig() as i32])
+                } else {
+                    Value::Null
+                };
+                let pb_cmp = if pb.has_cmp_data_type() {
+                    json!(pb.get_cmp_data_type() as i32)
+                } else {
+                    Value::Null
+                };
+                let pb_off = if pb.has_offset() {
+                    json!(pb.get_offset())
+                } else {
+                    Value::Null
+                };
+                Ok(json!({
+                    "cmp_cols": exprs_out(&*ectx, &b.compare_cols),
+                    "cmp_data_type": b.cmp_data_type as i32,
+                    "tiflash_ok": tiflash_ok,
+                    "pb": [
+                        pb.get_type() as i32,
+                        pb.get_unbounded(),
+                        pb_off,
+                        pb_cmp,
+                        pb_range,
+                    ],
+                }))
+            };
+            let st = match dump_bound_op(cloned.start.as_mut()) {
+                Ok(v) => v,
+                Err(e) => {
+                    if let Some(b) = blocked_by(&e) {
+                        return Outcome::Blocked(b.to_string());
+                    }
+                    return Outcome::Value(err_out(&e));
+                }
+            };
+            let en = match dump_bound_op(cloned.end.as_mut()) {
+                Ok(v) => v,
+                Err(e) => {
+                    if let Some(b) = blocked_by(&e) {
+                        return Outcome::Blocked(b.to_string());
+                    }
+                    return Outcome::Value(err_out(&e));
+                }
+            };
+            Outcome::Value(json!({
+                "type": cloned.tp as i32,
+                "start": st,
+                "end": en,
+            }))
+        }
+        "replace" => {
+            let child_id = ctx.arena.get(win_id).children()[0];
+            let old_col = Arc::clone(&ctx.arena.get(child_id).schema(&ctx.arena).columns[0]);
+            let mut new_col = (*old_col).clone();
+            new_col.unique_id = 9999;
+            let mut replace = std::collections::HashMap::new();
+            replace.insert(old_col.hash_code().to_vec(), Arc::new(new_col));
+            ctx.arena.get_mut(win_id).replace_expr_columns(&replace);
+            Outcome::Value(json!({"plan": dump(&ctx, win_id)}))
+        }
+        "ppd" => {
+            let opt = default_logical_optimize_option();
+            let win_cols = ctx.arena.get(win_id).schema(&ctx.arena).columns.clone();
+            let mut preds = Vec::new();
+            if let Some(arr) = spec["pred_cols"].as_array() {
+                for i in arr {
+                    let col = Arc::clone(&win_cols[i.as_u64().unwrap() as usize]);
+                    let pred = tidb_expression::scalar_function::new_function(
+                        &*ctx.expr_ctx,
+                        "gt",
+                        tidb_types::field_type::new_field_type(tidb_base::mysql::TypeTiny),
+                        vec![
+                            Arc::new(Expr::Column(Column::clone(&col))),
+                            Arc::new(Expr::Constant(tidb_expression::new_one())),
+                        ],
+                    )
+                    .unwrap();
+                    preds.push(pred);
+                }
+            }
+            match pbase::predicate_push_down(&mut ctx, win_id, preds, &opt) {
+                Ok((rem, new_p)) => {
+                    let ectx = ctx.eval_ctx();
+                    let rem_val = exprs_out(&*ectx, &rem);
+                    drop(ectx);
+                    Outcome::Value(json!({"plan": dump(&ctx, new_p), "rem": rem_val}))
+                }
+                Err(e) => Outcome::Value(err_out(&e)),
+            }
+        }
+        "prune" => {
+            let opt = default_logical_optimize_option();
+            let used: Vec<Arc<Column>> = spec["keep"]
+                .as_array()
+                .map(|arr| {
+                    let cols = &ctx.arena.get(lp).schema(&ctx.arena).columns;
+                    arr.iter()
+                        .map(|i| Arc::clone(&cols[i.as_u64().unwrap() as usize]))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match pbase::prune_columns(&mut ctx, lp, used, &opt) {
+                Ok(new_p) => Outcome::Value(json!({"plan": dump(&ctx, new_p)})),
+                Err(e) => Outcome::Value(err_out(&e)),
+            }
+        }
+        "stats" => {
+            let child_id = ctx.arena.get(win_id).children()[0];
+            let child_cols = ctx.arena.get(child_id).schema(&ctx.arena).columns.clone();
+            let mut col_ndvs = std::collections::HashMap::new();
+            for (i, c) in child_cols.iter().enumerate() {
+                col_ndvs.insert(c.unique_id, (10 * (i + 1)) as f64);
+            }
+            let group_ndvs: Vec<GroupNDV> = spec["group_ndvs"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|g| GroupNDV {
+                            cols: g
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|i| child_cols[i.as_u64().unwrap() as usize].unique_id)
+                                .collect(),
+                            ndv: 42.0,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let child_stats = Arc::new(StatsInfo {
+                row_count: 1000.0,
+                col_ndvs,
+                group_ndvs,
+                ..Default::default()
+            });
+            let col_groups: Vec<Vec<Arc<Column>>> = spec["col_groups"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|g| {
+                            g.as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|i| Arc::clone(&child_cols[i.as_u64().unwrap() as usize]))
+                                .collect()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (s1, s2) = with_detached(&mut ctx, win_id, |node, ctx| {
+                let s1 = node.derive_stats(ctx, win_id, std::slice::from_ref(&child_stats), &[])?;
+                let s2 = node.derive_stats(
+                    ctx,
+                    win_id,
+                    std::slice::from_ref(&child_stats),
+                    &col_groups,
+                )?;
+                Ok::<_, Error>((s1, s2))
+            })
+            .unwrap();
+            let mut uids: Vec<i64> = s2.col_ndvs.keys().copied().collect();
+            uids.sort();
+            let ndv_out: Vec<Value> = uids
+                .iter()
+                .map(|&k| json!([k, format_float(s2.col_ndvs[&k], b'g', -1, 64)]))
+                .collect();
+            let gndv_out = |gs: &[GroupNDV]| -> Vec<Value> {
+                gs.iter()
+                    .map(|g| json!([g.cols, format_float(g.ndv, b'g', -1, 64)]))
+                    .collect()
+            };
+            Outcome::Value(json!({
+                "row_count": format_float(s2.row_count, b'g', -1, 64),
+                "col_ndvs": ndv_out,
+                "gndvs1": gndv_out(&s1.group_ndvs),
+                "gndvs2": gndv_out(&s2.group_ndvs),
+            }))
+        }
+        "props" => {
+            let ret = with_detached(&mut ctx, win_id, |node, ctx| {
+                node.prepare_possible_properties(&ctx.arena, Vec::new())
+            });
+            let res: Vec<Value> = ret
+                .iter()
+                .map(|p| Value::Array(p.iter().map(|c| json!(c.unique_id)).collect()))
+                .collect();
+            Outcome::Value(json!({"ret": res}))
+        }
+        other => panic!("unknown winop kind {other}"),
+    }
+}
+
 /// The first path where two JSON values differ, with both sides (for the report).
 fn first_diff(a: &Value, b: &Value, path: String) -> Option<String> {
     match (a, b) {
@@ -976,6 +1393,10 @@ fn govec_selectbuild() {
                 args,
             ),
             "aggop" => run_aggop(
+                tables.as_ref().expect("the tables record comes first"),
+                args,
+            ),
+            "winop" => run_winop(
                 tables.as_ref().expect("the tables record comes first"),
                 args,
             ),

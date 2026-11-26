@@ -1,8 +1,9 @@
 //! go-file: pkg/distsql/distsql.go
 //!
-//! Port of Go TiDB v8.5.8 `pkg/distsql` (block D07.3, Part 1: 66 functions covering
-//! `RequestBuilder`, range encoding, `Select` / `SelectWithRuntimeStats`, `SetEncodeType`,
-//! `selectResult` and `selectResultRuntimeStats`).
+//! Port of Go TiDB v8.5.8 `pkg/distsql` (block D07.3, Parts 1 & 2: 97 functions covering
+//! `RequestBuilder`, handle/common-handle/index range encoding, `Select` /
+//! `SelectWithRuntimeStats`, `SetEncodeType`, `selectResult`, `sortedSelectResults`,
+//! `selectResultIter` / `selRespChannelIter`, and `selectResultRuntimeStats`).
 //!
 //! Formal code lives in `tidb-store::distsql` (N0 rank 11) so the `--new-stack=off` PoC
 //! crate `tidb-distsql` (`crates/distsql/`) stays untouched (D07.3 spec §1.4).
@@ -24,13 +25,14 @@ use tidb_sessionctx::distsql_ctx::DistSQLContext;
 use tidb_types::mydecimal::MyDecimal;
 
 pub use request_builder::{
-    RequestBuilder, common_handle_ranges_to_kv_ranges, encode_index_key,
+    RequestBuilder, common_handle_ranges_to_kv_ranges, encode_index_key, index_ranges_to_kv_ranges,
+    index_ranges_to_kv_ranges_with_interrupt_signal, partition_handles_to_kv_ranges,
     split_ranges_across_int64_boundary, table_handle_ranges_to_kv_ranges,
-    table_ranges_to_kv_ranges, verify_txn_scope,
+    table_handles_to_kv_ranges, table_ranges_to_kv_ranges, verify_txn_scope,
 };
 pub use select_result::{
     SelectResult, SelectResultImpl, SelectResultIter, SelectResultRow, SelectResultRuntimeStats,
-    get_select_result_concurrency,
+    get_select_result_concurrency, new_sorted_select_results,
 };
 
 /// Select sends a DAG request, returns SelectResult.
