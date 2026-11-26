@@ -1,0 +1,415 @@
+# D04.1 权限检查：Go v8.5.8 SELECT 权限注册审计与 tidb-rs 系统性检查设计（spec）
+
+状态：草案（仅设计规格，对应 `dulao5/tidb-rs#438`，待项目负责人与团队评审；先于 D04.1 完整移植）。
+
+块与依赖模块：主归属 D04.1（权限检查与认证，`layers.toml` 中规划为 `tidb-privilege`，rank 8）；跨模块落地于 `tidb-planner`（rank 13，包含 D09.0 预处理器与计划构建骨架、D09.1 SELECT 构建、D09.2 表达式改写、D09.13 优化器驱动、D10.8 点查快速路径、D13.1 计划缓存；写路径涉及不移植的 D09.15）。
+
+引用与实测口径：
+- 源码基线：Go TiDB **v8.5.8**（`8b857efa2`），路径均相对于参照树根目录（不附带任何上游链接）。
+- 实测环境：本机通过 `tidb-server --store=unistore`（服务端报告版本 `8.0.11-TiDB-v8.5.8`）对全部 SQL 矩阵进行了真实建表、建视图、建账号与执行复现。
+- MySQL 8.0 对照说明：**本机未安装 `mysqld` / MySQL 8.0 服务端**，下文中所有 MySQL 8.0 行为对比均标明“**据 MySQL 8.0 官方文档与源码授权模型推断，未在本机实跑**”。
+
+相关文档：[移植宪章](../../CONSTITUTION.md)（第一条 2 安全例外、第九条 决策分级）、[兼容性差异说明](../../docs/compatibility.md)、[偏差台账规格](../../docs/testing/rulings.md)、[D09.1 SELECT 构建 spec](../D09.1-select-builder/spec.md)、[D09.2 表达式改写 spec](../D09.2-rewriter/spec.md)、[D09.13 优化器驱动 spec](../D09.13-optimizer/spec.md)、[D13.1 Plan Cache 预处理 spec](../D13.1-plancache/spec.md)、[A3 Plan Cache 例外 spec](../exceptions/A3-plan-cache/spec.md)、[N0 crate 分层 spec](../exceptions/N0-crate-layering/spec.md)。
+
+---
+
+## 1. 审计结论总览
+
+Go TiDB v8.5.8 在逻辑计划构建层**没有建立基于“表数据源访问”的统一 `SELECT` 权限登记边界**。`buildDataSource`（`pkg/planner/core/logical_plan_builder.go:5072`）解析并扫描表、视图、分区表、序列与内存表时，**完全不登记任何 `SelectPriv`**；全路径仅依赖表达式改写阶段的“列引用懒收集”和一个仅识别小写 `"count"` 的特例补丁。
+
+这一结构性缺失在 Go v8.5.8 上实测确认了以下 10 类 `SELECT` 权限绕过与信息泄漏：
+
+1. **无列引用的表扫描全部放行**：`SELECT 1 FROM test.t`、`SELECT 'x' FROM test.t LIMIT 1`、`SELECT 1 FROM test.t WHERE 1=0`、`SELECT 1 FROM test.t WHERE 1=1`，以及使用 `EXISTS` / `IN` / 标量子查询 / 派生表 / 无引用列 `JOIN` / `UNION` 的查询，对无任何 `t` 上权限的用户（包括不指定默认库 `db=None` 直连的 `u_none`、仅对 `t` 有 `INSERT/UPDATE` 的 `u_ins`、仅对另一张表 `t2` 有 `SELECT` 的 `u_other`）均直接执行并返回真实行数与行内容（如跨表乘积泄露表行数）。
+2. **仅小写的 `count` 补丁全面失效**：`expressionRewriter.Leave`（`expression_rewriter.go:1517`）用大小写敏感的 `v.F == ast.AggFuncCount`（`"count"`）比对保留了原始词法大小写的 `AggregateFuncExpr.F`。结果 `SELECT count(*)` / `count(1)` 报 `1142`，而 `SELECT COUNT(*)`、`Select Count(*)`、`SELECT COUNT(1)` 以及其他常量聚合 `sum(1)` / `SUM(1)` / `max(1)` / `min(1)` / `avg(1)` / `group_concat('x')`、`HAVING COUNT(*) > 0` **全部绕过**。
+3. **隐藏列 `_tidb_rowid` 完全无权限校验**：`buildDataSource` 为 `_tidb_rowid` 构造 `FieldName` 时遗漏了 `OrigTblName`（`logical_plan_builder.go:5367-5372`），`precollectColNames` 因 `len(colName.Table.L) == 0` 跳过登记。实测 `u_none(db=None)`、`u_ins`、`u_other`、`u_cola` 均可直接执行 `SELECT _tidb_rowid FROM test.t` 与 `SELECT 1 FROM test.t WHERE _tidb_rowid = 1` 并读出全部行 ID。
+4. **CTE 内部常数与引用侧双重绕过**：`WITH c AS (SELECT 1 FROM test.t) SELECT * FROM c` 以及不引用 `c` 的 `WITH c AS (SELECT 1 FROM test.t) SELECT 1` 全数绕过；即便外层写小写 `SELECT count(*) FROM c`，由于 `c` 输出常量列的 `OrigTblName` 为空，`collectPrivsForCount` 同样跳过校验，导致连小写 `count(*)` 也可绕过 CTE 读取 `t`。
+5. **视图权限模型双端漏防（`DEFINER` 与 `INVOKER`）**：`BuildDataSourceFromView`（`logical_plan_builder.go:5740-5750`）在用定义者校验并清空内部 `b.visitInfo` 后，**从不登记调用者对视图自身的 `SelectPriv`**。实测 `u_none(db=None)` 可对 `DEFINER` 视图执行 `SELECT 1 / COUNT(*) FROM test.v_definer`；仅有底层表 `t` 权限、对 `INVOKER` 视图毫无权限的 `u_tbl` 可执行 `SELECT 1 / COUNT(*) FROM test.v_invoker`。
+6. **`EXPLAIN` 与 `EXPLAIN ANALYZE` 泄漏查询计划与实际行数**：`u_none(db=None)`、`u_ins`、`u_other` 均可对 `test.t` / `test.tp` 执行 `EXPLAIN SELECT 1 ...` 与 `EXPLAIN ANALYZE SELECT 1 ...`，实测 `EXPLAIN ANALYZE` 真实扫表并返回 `actual rows = 3`、`cop_task` 等运行时执行细节。
+7. **DML 读侧无需 `SELECT` 权限即可读取他表**：仅有目标表写权限的用户可执行 `INSERT INTO test.t2 SELECT 1 FROM test.t`、`INSERT INTO test.t2 SELECT COUNT(*) FROM test.t`、`REPLACE INTO test.t2 SELECT 1 / COUNT(*) FROM test.t`（将受保护表行数物化写入 `t2`）以及 `UPDATE / DELETE ... WHERE EXISTS (SELECT 1 FROM test.t)`。
+8. **`PREPARE / EXECUTE` 与计划缓存（含会话级、实例级、非预处理缓存）在 `REVOKE` 后继续放行空校验语句**：缓存命中确会通过 `checkPreparedPriv` 重验 `stmt.VisitInfos`，但若 `PREPARE` 时登记到的 `VisitInfos` 为空（如 `SELECT 1 FROM test.t`、`SELECT COUNT(*) FROM test.t`），即使执行了 `REVOKE SELECT ON test.t` 且关闭或开启会话级/实例级计划缓存，已准备的语句仍持续以 `@@last_plan_from_cache = 1` 成功读取数据；而 `SELECT 1 FROM test.t_pk WHERE a = 1` 因 `a` 在 `VisitInfos` 中会在 `REVOKE` 后被拦截（`1143`）。
+9. **表存在性与库权限错误分叉构成探测神谕（Oracle）**：在 `db=None` 环境下，对 `u_none` / `u_other` / `u_cola`，访问不存在的表 `test.nosuch` 时 `tableByName` 统一返回 `1142`（`for table 'nosuch'`），而访问真实存在的 `test.t` 时，`SELECT 1` / `SELECT COUNT(*)` 直接成功（`OK`）、`SELECT a`（或 `u_cola` 查 `b`）报 `1143`（`for column 'a' in table 't'`），仅凭返回码即可准确枚举表是否存在；此外对仅持 `INSERT ON test.*` 的 `u_db_ins`，`tableByName` 使用 `mysql.AllPrivMask` 判定通过并直接暴露 `1146 Table 'test.nosuch' doesn't exist`。
+10. **内存表与 fastplan 边界漏洞**：`buildMemTable`（`logical_plan_builder.go:5492`）未登记 `SelectPriv`，`performance_schema` 与 `metrics_schema` 同样存在无列引用绕过；`tryPointGetPlan` 在矛盾点查条件触发 `isTableDual`（`pairs == nil`）且选择列表无列引用时也会产生空 `visitInfos`。
+
+> 注：以上漏洞在默认以 `-u u_none test` 指定默认数据库连接的客户端下部分被入口 `COM_INIT_DB`（`1044 Access denied ... to database 'test'`）掩盖；但客户端只要**不带默认库连接（`db=None`）直接使用 `test.t` 限定名**，或用户对任意一张其它表拥有任意非 `SELECT` 权限（如 `u_ins`、`u_other`、`u_dml_ins`、`u_cola`），所有绕过全部直接暴露。
+
+---
+
+## 2. Go v8.5.8 权限注册与校验全链路代码审计
+
+### 2.1 权限登记模型与核心判定函数
+
+Go TiDB 将需要检验的权限需求收集到 `PlanBuilder.visitInfo`（`[]visitInfo`，定义于 `pkg/planner/core/planbuilder.go:226`），每条记录包含 `(privilege, db, table, column, err, alterWritable, dynamicPrivs, dynamicWithGrant)`。优化主驱动 `optimize.go:538-543` 在构建完逻辑计划、尚未进入物理优化与执行前，且仅在 `pm := privilege.GetPrivilegeManager(sctx); pm != nil` 时执行一次全量校验：
+
+1. `VisitInfo4PrivCheck`（`pkg/planner/core/optimizer.go:159`）：过滤掉本地临时表（`needCheckTmpTablePriv`：仅当表存在且 `TempTableType == TempTableLocal` 时返回 `false`；表不存在时返回 `true` 以便报 `err` 而不泄密）。
+2. `CheckPrivilege`（`pkg/planner/core/optimizer.go:130-154`）：按 `vs` 切片**顺序遍历**，第一条 `pm.RequestVerification(...)` 返回 `false` 时立即返回该条 `v.err`（因此 `vs` 的顺序直接决定对外错误码与消息）。
+3. `UserPrivileges.RequestVerification`（`pkg/privilege/privileges/privileges.go:160-204`）与 `MySQLPrivilege.RequestVerification`（`pkg/privilege/privileges/cache.go:1621-1673`）对 `column` 参数的语义存在关键区别：
+   - **`column == ""`**（仅表级以上权限）：在 `cache.go:1653` 跳过将 `tableRecord.TablePriv` 提升至 `columnPriv`，仅依次检查全局 `user`、库级 `db`、表级 `tables_priv`；随后虽会调 `MatchColumns(..., "")`，但 `columnsPrivRecord.match`（`cache.go:1427-1434`）对空列名永不匹配。因此 **`column == ""` 会拒绝只有 `SELECT(a)` 列级权限的用户（`u_cola`）**。
+   - **`column == "*"`**（表级或**任一列** `SELECT` 权限）：`tableRecord.TablePriv` 可通过，且 `columnsPrivRecord.match`（`cache.go:1433`）显式特判 `col == "*" && (record.ColumnPriv&mysql.SelectPriv > 0)`。配合 `MatchColumns`（`cache.go:1556-1567`）遍历该用户全部列记录、在 `match` 为真时返回的设计，**只要用户拥有全局、库级、表级 `SELECT`，或对该表任意至少一列拥有列级 `SELECT(col)`，检查即通过**。
+   - **内存库特判**（`privileges.go:174-189`）：对 `IsMemDB(dbLowerName)`，`information_schema` 直接返回 `true`（除非开启 SEM 且命中 `sem.IsInvisibleTable`）；`metrics_schema` 中的指标表将 `SelectPriv` 扩为 `SelectPriv | ProcessPriv`；`performance_schema` 继续走标准 `MySQLPrivilege.RequestVerification`。
+
+### 2.2 全路径注册点与漏网位置逐项审计
+
+| # | Go 位置（文件与行号） | 机制与覆盖范围 | 缺失 / 缺陷原因 | 安全后果 |
+|---|---|---|---|---|
+| 1 | `logical_plan_builder.go:5072-5457` `buildDataSource` | 构建基表、分区表、序列、`LogicalUnionScan` 等数据源 | **全程未向 `b.visitInfo` 追加任何 `SelectPriv`**；遇到序列提前返回 `TableDual`（`:5222`）同样不登记 | 只要查询不在表达式阶段引用实列，整个数据源读取完全脱离权限校验 |
+| 2 | `logical_plan_builder.go:5109-5114, 5492-5604` `buildMemTable` | 处理 `information_schema`、`performance_schema`、`metrics_schema` | 从 `buildDataSource` 提前分流返回且**未登记 `SelectPriv`** | `SELECT 1` / `SELECT COUNT(*)` 读 `performance_schema.*` 或 `metrics_schema.*` 绕过表级 `SELECT` / `PROCESS` 检验 |
+| 3 | `expression_rewriter.go:2577, 2855-2876, 2817-2853, 303-307` `toColumn` / `precollectColNames` / `appendColNamesToVisitInfo` | 仅在表达式改写访问 `*ast.ColumnName` 时收集 `(DBName, OrigTblName, OrigColName)` | (a) 不引用列（常数投影、`EXISTS(SELECT 1 ...)`、`JOIN ... ON 1=1` 等）不触发 `toColumn`；(b) `precollectColNames` 对派生表因 `Schema.L == ""` 跳过、对 CTE 因 `b.nameMapCTE` 命中跳过（`:2869-2873`），假定内层自行校验，一旦内层也无列引用即全链失守 | 全类无列引用 `SELECT` / 子查询 / Join / 派生表 / `UNION` / DML 读侧均可绕过 |
+| 4 | `logical_plan_builder.go:4163-4202, 1794-1801` `unfoldWildStar` / `buildProjection` | 将 `*` / `t.*` 展开为全部非隐藏列并置 `IsUnfoldFromWildCard = true`，`buildProjection` 据此将 `checkColPriv` 设为 `reportTableErrOption` | 对显式 `SELECT *` 或 `TABLE t`（parser 展开为 `*`）有效，但无 `*` 即退化为零校验 | 与 `SELECT 1` / `SELECT COUNT(*)` 行为剧烈割裂 |
+| 5 | `logical_plan_builder.go:5367-5372` 非主键表 `_tidb_rowid` 列 | 为无整数/聚簇主键表构造隐藏行句柄列 | **`FieldName` 仅填 `TblName` 与 `ColName`/`OrigColName`，未填 `OrigTblName`**；`precollectColNames` 检查 `len(colName.Table.L) > 0` 失败直接忽略 | 任意账号可直接读取非主键表 `_tidb_rowid` 全表行号并按 `_tidb_rowid = 1` 过滤探测数据 |
+| 6 | `expression_rewriter.go:1516-1519, 2510-2540` `Leave` + `collectPrivsForCount` | 遇到 `AggregateFuncExpr` 时若 `v.F == ast.AggFuncCount`（`"count"`），按 `er.names` 收集表级 `column = "*"` | (a) parser 保留 SQL 原始大小写，仅小写 `count` 命中，`COUNT(*)` / `Count(*)` / `COUNT(1)` 及 `SUM`/`MAX`/`MIN`/`AVG`/`GROUP_CONCAT` 全部失效；(b) CTE 仅输出常数（`WITH c AS (SELECT 1 FROM t)`) 时 `OrigTblName == ""`，`collectPrivsForCount` 连小写 `count(*)` 也跳过；(c) 视图需依赖 `infoschema.TableIsView` 转用 `TblName` | 大写/混合大小写 `COUNT` 及所有非 `count` 聚合、常数 CTE 内 `count(*)` 均绕过校验 |
+| 7 | `logical_plan_builder.go:1281-1298` `coalesceCommonColumns` | `NATURAL JOIN` / `USING` 合并同名列时手动调用 `appendColNamesToVisitInfo` | 仅覆盖存在合并列的 `NATURAL` / `USING` join；`CROSS JOIN`、逗号连接、`LEFT/INNER JOIN ON 1=1` 无对应检查 | 无权限表参与 Join 可放大/过滤有权限表结果或暴露行数 |
+| 8 | `logical_plan_builder.go:5629-5762` `BuildDataSourceFromView` | 递归构建视图定义 `SelectStmt`；若 `SecurityDefiner` 则用 `view.Definer` 校验内部 `b.visitInfo` 并清空 `b.visitInfo = b.visitInfo[:0]`（`:5740-5750`） | (a) **未向调用者附加视图自身的 `SelectPriv`**；(b) `EXPLAIN` 下仅在 `viewDepth > 0` 时校验嵌套视图 `SelectPriv`（`:5734-5739`），顶层视图仅追加 `ShowViewPriv`（`:5753-5755`）；(c) `INVOKER` 视图仅依赖外层列引用校验视图自身，不引用视图列时（`SELECT 1 / COUNT(*) FROM v_invoker`）仅校验底层表 | `u_none(db=None)` 可直接读 `SELECT 1 / COUNT(*) FROM v_definer`；有底层表权限却无视图权限的 `u_tbl` 可读 `SELECT 1 / COUNT(*) FROM v_invoker` |
+| 9 | `point_get_plan.go:971-1056, 1439-1505` `TryFastPlan` / `getVisitInfo` / `checkFastPlanPrivilege` | `tryWhereIn2BatchPointGet` 与 `tryPointGetPlan` 收集输出列及 `colsInWhereClause` | (a) `checkFastPlanPrivilege` 失败只令 `TryFastPlan` 返回 `nil` 回退常规构建路径（正常情况由常规路径兜底，但遇到 `_tidb_rowid` 等常规路径漏洞仍会放行）；(b) 若 `SELECT 1 FROM t_pk WHERE a = 1 AND a = 2` 命中 `isTableDual`（`pairs == nil`），`outputNames` 与 `colsInWhereClause` 皆为空，产生空 `visitInfos` | 矛盾条件点查走 `PhysicalTableDual` 快速分支时可绕过权限校验 |
+| 10 | `planbuilder.go:5884-5909` `buildExplain` / `parser.y:9478-9499` `TABLE` | `buildExplain` 调 `OptimizeAstNode` 构建目标计划；`TABLE t` 语法由 parser 直接构造 `SelectStmtKindTable` + `*` | `buildExplain` 不附加表级权限，全靠内部 `OptimizeAstNode`；`ANALYZE` 与非 `ANALYZE` 共用同一无表检漏洞 | 未授权用户可执行 `EXPLAIN` 查看表扫描结构，甚至用 `EXPLAIN ANALYZE` 触发真实扫表读出 `actual rows` |
+| 11 | `planbuilder.go:4227` `buildInsert`、`logical_plan_builder.go:6189` `buildUpdate`、`:6600-6665` `buildDelete` | 写语句中的 `SELECT` 子查询 / `WHERE` / `SET` 均复用 `buildSelect` 与 `buildResultSetNode` | (a) 无列引用的读侧（`INSERT ... SELECT 1`、`UPDATE/DELETE ... WHERE EXISTS(SELECT 1 ...)`）因 `buildDataSource` 不登记而漏检；(b) `buildDelete` 第 6663 行有 `if ds.Where == nil && ds.Order == nil { b.popVisitInfo() }`（无条件单表 `DELETE FROM t` 不要求 `t` 的 `SELECT` 权限）——这是后续修补 `buildDataSource` 时**必须精确处理的设计陷阱** | 持单一写表权限即可窃取/统计其他任意无权限表的数据 |
+| 12 | `plan_cache_utils.go:213, 230`、`plan_cache.go:270, 339-348`、`compiler.go:102, 133` | `PREPARE` 保存 `VisitInfos: destBuilder.GetVisitInfo()` 并验权；`EXECUTE` 命中缓存时调用 `adjustCachedPlan -> checkPreparedPriv` 重验 `stmt.VisitInfos` | 机制本身能在命中会话/实例缓存及 `PointGet` 执行器复用前触发重验；**但当 `PREPARE` 阶段登记的 `VisitInfos` 为空时，`checkPreparedPriv` 面对空切片直接通过** | 对 `SELECT 1 FROM t` / `SELECT COUNT(*) FROM t`，`REVOKE SELECT` 后已缓存的会话/实例级计划仍永久可继续执行（`from_cache = 1`） |
+| 13 | `preprocess.go:525-556` `tableByName` | 预处理器查表返回 `ErrTableNotExists` 时检查 `RequestVerification(..., sName.L, tn.Name.O, "", mysql.AllPrivMask)`，不通过则改报 `ErrTableaccessDenied (1142)` | (a) 使用 `AllPrivMask` 过宽（仅 `INSERT` 权限的 `u_db_ins` 在执行 `SELECT` 时也通过此检查，导致直出 `1146`）；(b) `column = ""` 导致只有 `SELECT(a)` 的 `u_cola` 访问不存在表报 `1142`；(c) 存在的表先过 `tableByName`、后在表达式阶段报 `1143` 或放行 | **稳定表存在性神谕**：`test.nosuch` 报 `1142`（`u_db_ins` 报 `1146`），而存在表 `test.t` 报 `1143` 或直接 `OK` |
+| 14 | `planbuilder.go:3664` `buildShow` & `executor/infoschema_reader.go` | `SHOW` 与 `INFORMATION_SCHEMA.TABLES/COLUMNS` 等使用 `AllPrivMask`（`column = ""`） | `INFORMATION_SCHEMA.TABLES` 传 `column=""`，而 `SHOW COLUMNS` 对列逐一核对列级权限 | 同一个 `u_cola` 用户在 `I_S.TABLES` 看不到 `test.t`（0 行），但 `SHOW COLUMNS FROM test.t` 能看到列 `a` |
+
+---
+
+## 3. Go TiDB v8.5.8 实测 SQL 矩阵与 MySQL 8.0 对照
+
+### 3.1 实测环境与数据集
+
+- **测试对象构造**：
+  - 基础表：`test.t(a INT, b INT)` 写入 `(1,1),(2,2),(3,3)`；`test.t_pk(a INT PRIMARY KEY, b INT)` 写入 `(1,10),(2,20),(3,30)`；`test.t2(x INT)` 写入 `(10),(20)`；`test.t_nat(a INT, c INT)` 写入 `(1,100),(2,200)`。
+  - 分区表：`test.tp(a INT, b INT) PARTITION BY RANGE (a) (p0 < 10, p1 MAXVALUE)` 写入 `(1,1),(20,2)`。
+  - 视图：`test.v_definer`（`SQL SECURITY DEFINER`，定义 `SELECT a, b FROM test.t`）、`test.v_invoker`（`SQL SECURITY INVOKER`，定义 `SELECT a, b FROM test.t`）、`test.v_def_on_inv`（`DEFINER` 查 `v_invoker`）、`test.v_inv_on_def`（`INVOKER` 查 `v_definer`）。
+- **测试账号（均为 `'...'@'%'`）**：
+  - `u_none`：无任何授权。矩阵中区分 **`u_none(db=None)`**（连接不设默认库，直写 `test.t`）与 **`u_none(db=test)`**（客户端指定默认库 `test`，在 `COM_INIT_DB` 即报 `1044`）。
+  - `u_ins`：`GRANT INSERT, UPDATE ON test.t`（有非读权限，无 `SELECT`）。
+  - `u_other`：`GRANT SELECT ON test.t2`（有别表 `SELECT`，无 `t` 权限）。
+  - `u_cola`：`GRANT SELECT(a) ON test.t`（仅有单列 `a` 的 `SELECT`）。
+  - `u_tbl`：`GRANT SELECT ON test.t`（整表对照，注意其**无** `t2`、`tp`、`v_definer`、`v_invoker` 权限）。
+  - 补充专用账号：`u_pk_cola`（`SELECT(a) ON t_pk`）、`u_pk_tbl`（`SELECT ON t_pk`）、`u_tp_cola`（`SELECT(a) ON tp`）、`u_vdef_sel`（`SELECT ON v_definer`）、`u_dml_ins`（`INSERT, DELETE ON t2`）、`u_dml_upd`（`UPDATE(x), SELECT(x) ON t2`）、`u_dml_upd_no_sel`（`UPDATE(x) ON t2`）、`u_dml_del`（`DELETE ON t2`）、`u_db_ins`（`INSERT ON test.*`）、`u_rev1`/`u_rev2`/`u_rev_inst`/`u_rev_nonprep`（初始 `SELECT ON test.t, test.t_pk` 随后 `REVOKE`）。
+
+### 3.2 全量 SQL 矩阵对照表
+
+表中 `OK(n)` 表示执行成功并返回 `n` 行；`1142` 表示 `SELECT command denied ... for table '...'`；`1143` 表示 `SELECT command denied ... for column '...' in table '...'`；`1356` 表示 `View '...' references invalid...`；`1345` 表示 `EXPLAIN/SHOW can not be issued...`；`1146` 表示 `Table '...' doesn't exist`。**所有 Go 结果均为本地实测输出；所有 MySQL 8.0 列均为据官方文档与源码规则推断，未在本机实跑。**
+
+| 类别与 SQL 语句 | Go v8.5.8 实测结果（`u_none(db=None)` / `u_ins` / `u_other` / `u_cola` / `u_tbl`） | 泄漏内容 / 异常现象 | Go 根因代码位置 | MySQL 8.0（**文档/源码推断，未在本机实跑**） |
+|---|---|---|---|---|
+| **常量投影** | | | | |
+| `SELECT 1 FROM test.t` | 全 5 账号均为 **`OK(3)`**（`u_none(db=test)` 报 `1044`） | 向零权限/他表用户泄露表精确行数及存在性 | `buildDataSource` 无登记；`toColumn` 未触发 | 无 `t` 上任何 `SELECT` 权限者（`u_none`/`u_ins`/`u_other`）报 **`1142`**；`u_cola` 依赖是否持有任一列权限判定（见 §5.2 与 §6.1 D2） |
+| `SELECT 'x' FROM test.t LIMIT 1` | 全 5 账号均为 **`OK(1)`** | 确认表非空及存在性 | 同上 | 同上（无权者 **`1142`**） |
+| `SELECT 1 FROM test.t WHERE 1=0` | 全 5 账号均为 **`OK(0)`** | 确认表存在且恒假条件通过校验 | 同上 | 同上（无权者 **`1142`**） |
+| `SELECT 1 FROM test.t WHERE 1=1` | 全 5 账号均为 **`OK(3)`** | 泄露表精确行数 | 同上 | 同上（无权者 **`1142`**） |
+| **列引用与通配符** | | | | |
+| `SELECT a FROM test.t` | `u_none`/`u_ins`/`u_other`: **`1143(a)`**；`u_cola`/`u_tbl`: `OK(3)` | 暴露表存在性（对比缺表报 `1142`） | `toColumn -> precollectColNames` | `u_none`/`u_ins`/`u_other` 报 **`1142`**（无表及任意列权限）；`u_cola`/`u_tbl` 放行 |
+| `SELECT 1, a FROM test.t` | `u_none(db=None)`: **`1143(a)`** | 同上 | 同上 | 无权者报 `1142` |
+| `SELECT b FROM test.t` | `u_none`..`u_cola`: **`1143(b)`**；`u_tbl`: `OK(3)` | 正常拦列；零权账号仍暴露表存在 | 同上 | `u_cola` 报 **`1143(b)`**；无权限者报 `1142` |
+| `SELECT 1 FROM test.t WHERE b = 1` | `u_none`..`u_cola`: **`1143(b)`**；`u_tbl`: `OK(1)` | 正常拦列 | `buildSelection` 触发 `toColumn` | `u_cola` 报 `1143(b)`；无权限者报 `1142` |
+| `SELECT * FROM test.t` / `SELECT *, 1 FROM test.t` | `u_none`..`u_cola`: **`1142(t)`**；`u_tbl`: `OK(3)` | 靠 `unfoldWildStar` 设 `reportTableErrOption` 拦截 | `logical_plan_builder.go:1795` | 零权者 `1142`；部分列权限 `u_cola` 报 `1142`/`1143` 拒访问 |
+| **隐藏列 `_tidb_rowid`** | | | | |
+| `SELECT _tidb_rowid FROM test.t` | 全 5 账号均为 **`OK(3)`**（输出 `1,2,3`） | **直接读取受保护表物理行 ID 序列** | `buildDataSource:5367` 未设 `OrigTblName` | MySQL 无 `_tidb_rowid` 隐藏列 |
+| `SELECT 1 FROM test.t WHERE _tidb_rowid = 1` | 全 5 账号均为 **`OK(1)`** | 无权按行号过滤存在性 | 同上（FastPlan 未走或回退后被 `precollectColNames` 丢弃） | MySQL 无 `_tidb_rowid` 隐藏列 |
+| **点查快速路径** | | | | |
+| `SELECT 1 FROM test.t_pk WHERE a = 1` / `SELECT b ...` | `u_none`..`u_tbl`: **`1143(a in t_pk)`**；`u_pk_cola`: `SELECT 1` `OK(1)`、`SELECT b` `1143(b)`；`u_pk_tbl`: `OK(1)` | 主键条件列 `a` 恰好被 `colsInWhereClause` 收集；但 `isTableDual`（如 `a=1 AND a=2`）可空出 `visitInfos` | `point_get_plan.go:1022, 1483` | `a` 受检拒止（无权者 `1142`，`u_pk_cola` 仅能查 `1`/`a`） |
+| **聚合与大小写分裂** | | | | |
+| `SELECT count(*) FROM test.t` / `count(1)` / `HAVING count(*) > 0` | `u_none(db=None)`/`u_ins`/`u_other`: **`1142(t)`**；**`u_cola`/`u_tbl`: `OK`** | 仅小写 `count` 生效；`u_cola` 通过 `"*"` 放行 | `expression_rewriter.go:1517` (`v.F == "count"`) + `cache.go:1433` | 零权者 **`1142`**；`u_cola` 放行或拒止取决于是否认列权限可计数 |
+| `SELECT COUNT(*) FROM test.t` / `Count(*)` / `COUNT(1)` / `HAVING COUNT(*) > 0` | 全 5 账号均为 **`OK`**（返回行数 `3` / `1`） | **大写/首字母大写直接绕过，精准读出表行数** | `expression_rewriter.go:1517` 区分大小写 | 与小写 `count(*)` **严格等价**，绝不因大小写不同出现权限分叉（`1142`） |
+| `SELECT sum(1)` / `SUM(1)` / `max(1)` / `MAX(1)` / `min(1)` / `avg(1)` / `group_concat('x') FROM test.t` | 全 5 账号均为 **`OK`**（输出 `3` / `1` / `1.0000` / `'x,x,x'`） | 除小写 `count` 外**一切无列引用聚合全部绕过**，直接泄漏行数或串拼接行数 | `Leave` 仅特判 `ast.AggFuncCount` | 与 `COUNT(*)` 同等检查表读取 `SELECT` 权限（无权者 **`1142`**） |
+| `SELECT count(a)` / `COUNT(a)` / `count(b)` / `COUNT(b)` / `COUNT(*) WHERE b=1` | 缺列权者报 **`1143`**；有权者 `OK` | 依赖实参或 `WHERE` 中的列引触发 `toColumn` | `precollectColNames` | 需具备对应列（或整表）`SELECT` |
+| **子查询与派生表** | | | | |
+| `SELECT EXISTS(SELECT 1 FROM test.t)` | 全 5 账号均为 **`OK(1)`** | 零权限探测任意表是否非空 | 内层子查询 `buildDataSource` 无登记 | 无权者 **`1142`** |
+| `SELECT 1 IN (SELECT 1 FROM test.t)` | 全 5 账号均为 **`OK(1)`** | 同上 | 同上 | 无权者 **`1142`** |
+| `SELECT (SELECT 1 FROM test.t LIMIT 1)` | 全 5 账号均为 **`OK(1)`** | 探测表非空 | 同上 | 无权者 **`1142`** |
+| `SELECT 1 FROM (SELECT 1 FROM test.t) sub` | 全 5 账号均为 **`OK(3)`** | 派生表未泄 `Schema.L`，内层无校验 | `expression_rewriter.go:2867` + `buildDataSource` | 无权者 **`1142`** |
+| `SELECT x FROM test.t2 WHERE EXISTS(SELECT 1 FROM test.t)` / `WHERE 1 IN (...)` | `u_other`: **`OK(2)`**；其余 4 人: `1143(x in t2)` | 持他表权限 `u_other` 可结合子查询探测 `test.t` 空/非空 | 外层仅查 `t2.x`，内层子查询零校验 | `u_other` 报 **`1142(t)`** |
+| **Join 与集合运算** | | | | |
+| `SELECT t2.x FROM test.t2, test.t` / `LEFT JOIN test.t ON 1=1` / `JOIN test.t ON 1=1` | `u_other`: **`OK(6)`**；其余 4 人: `1143(x in t2)` | `u_other` 借笛卡尔积将 `t2` 翻倍为 6 行，**直接窃取 `t` 的精确行数** | `buildJoin` 与 `buildDataSource` 对未引列的 `t` 零登记 | `u_other` 报 **`1142(t)`** |
+| `SELECT COUNT(*) FROM test.t2 JOIN test.t ON 1=1` | 全 5 账号均为 **`OK(1)`**（返回 `6`） | 无任何两表权限仍可得乘积行数 `6` | `COUNT` 大写跳过 | 无权者 **`1142`** |
+| `SELECT count(*) FROM test.t2 JOIN test.t ON 1=1` | `u_none(db=None)`: `1142(t2)`；`u_other`: **`1142(t)`** | 小写 `count` 通过 `er.names` 对两表均生成 `"*"` | `collectPrivsForCount` | 拒止 `1142` |
+| `SELECT t.a FROM test.t NATURAL JOIN test.t_nat` | `u_none`..`u_ins`/`u_other`: `1143(a in t)`；`u_cola`/`u_tbl`: `1143(a in t_nat)` | `coalesceCommonColumns` 补检了自然连接公共列 | `logical_plan_builder.go:1281` | 拒止无权表（`1142`） |
+| `SELECT 1 FROM test.t UNION SELECT 1 FROM test.t2`（及顺序互换） | `u_ins`/`u_other`/`u_cola`/`u_tbl`/`u_pk_*`: **`OK(1)`** | 集合运算任意分支无列引用即绕过 | 各分支均无 `SelectPriv` | 任一分支无权即报 **`1142`** |
+| **`TABLE` 语句与分区表** | | | | |
+| `TABLE test.t` | `u_none(db=None)`..`u_cola`: **`1142(t)`**；`u_tbl`: `OK(3)` | 未绕过，但仅因其语法树按 `*` 展开 | `parser.y:9478` 构造 `WildCard` | `u_none`..`u_cola` 报 **`1142`**；`u_tbl` `OK` |
+| `SELECT 1 FROM test.tp` / `PARTITION (p0)` / `SELECT COUNT(*) FROM test.tp` | `u_none(db=None)`/`u_ins`/`u_other`/`u_cola`/`u_tbl`: **`OK(2/1)`** | 分区表及其单分区全表扫描绕过 | `buildDataSource` 分区路径无登记 | 无 `tp` 权限者 **`1142`** |
+| `SELECT count(*) FROM test.tp` / `PARTITION (p0)` | `u_none`..`u_tbl`: **`1142(tp)`**；`u_tp_cola`: `OK` | 仅小写 `count(*)` 被拦 | `collectPrivsForCount` | 无权者 **`1142`** |
+| **视图（DEFINER / INVOKER / 嵌套）** | | | | |
+| `SELECT 1 FROM test.v_definer` | 全 5 账号 + `u_vdef_sel`: **`OK(3)`** | **`u_none` 无需视图权限即读取 `DEFINER` 视图行数** | `BuildDataSourceFromView:5749` 清空内部 `visitInfo` 且不加视图自身权限 | 未授权用户报 **`1142(v_definer)`**；`u_vdef_sel` `OK` |
+| `SELECT COUNT(*) FROM test.v_definer` | 全 5 账号 + `u_vdef_sel`: **`OK(1)`（`3`）** | 同上 + 大写 `COUNT` 双重逃逸 | 同上 | 同上（无权者 **`1142`**） |
+| `SELECT count(*) FROM test.v_definer` / `SELECT a FROM test.v_definer` | `u_none`..`u_tbl`: `1142` / `1143(a in v_definer)`；`u_vdef_sel`: `OK` | 仅外层表达式恰好触发检查 | `TableIsView` 改写表名 | 无权者 `1142`；`u_vdef_sel` `OK` |
+| `SELECT 1 / COUNT(*) FROM test.v_invoker` | `u_none`..`u_cola`: `1356`；**`u_tbl`: `OK(3)`** | **持底层 `t` 权限但毫无 `v_invoker` 权限的 `u_tbl` 直接绕过视图校验** | `BuildDataSourceFromView` 合并底层 `t` 权限，不加 `v_invoker` 自身权限 | `u_tbl` 因无视图自身权报 **`1142(v_invoker)`** |
+| `SELECT count(*) / a FROM test.v_invoker` | `u_none`..`u_cola`: `1356`；`u_tbl`: `1142(v_invoker)` / `1143(a)` | 外层表达式拦住了 `u_tbl` | 外层表达式检 `v_invoker` | 无视图权者先报 **`1142(v_invoker)`**；有权缺底层表权报 **`1356`** |
+| `SELECT 1 FROM test.v_inv_on_def` / `count(*) FROM v_def_on_inv` | `v_inv_on_def`: `u_none`..`u_tbl` `1356`，**`u_vdef_sel`（无 `v_inv_on_def` 权）`OK(3)`**；`count(*) FROM v_def_on_inv`: 连 `u_vdef_sel` 均 `1142` | 嵌套 `INVOKER` 外壳仅因未加自身权限被拥有内层 `v_definer` 权的 `u_vdef_sel` 绕过 | 同上 | 调用者必须同时持有目标视图的 `SELECT` 权限（`1142`）及（若 `INVOKER`）内层权限（`1356`） |
+| **CTE（通用表表达式）** | | | | |
+| `WITH c AS (SELECT 1 FROM test.t) SELECT * FROM c` | 全 5 账号均为 **`OK(3)`** | 零权限读全表行数 | `buildWith` 内部无列引用，外部 `*` 对 `c`（`Schema=""`）不触发库表检 | 无 `t` 权限者 **`1142(t)`** |
+| `WITH c AS (SELECT a FROM test.t) SELECT 1 FROM c` | `u_none(db=None)`/`u_ins`/`u_other`: **`1143(a)`**；`u_cola`/`u_tbl`: `OK(3)` | CTE 内部引用实列 `a` 时拦住；但零权者报 `1143` 仍暴露表存在 | `precollectColNames` 在 CTE 定义内部触发 | 无 `t` 权限者报 **`1142(t)`**；`u_cola`/`u_tbl` `OK` |
+| `WITH c AS (SELECT 1 FROM test.t) SELECT 1`（未使用 CTE） | 全 5 账号均为 **`OK(1)`** | 即使未消费 CTE，定义本身仍构建但未验权 | 同上 | 定义引用的表若未访问/构建是否检验视优化阶段定，原则上 CTE 引表须具 `SELECT`（`1142`） |
+| **`WITH c AS (SELECT 1 FROM test.t) SELECT count(*) FROM c`** | 全 5 账号均为 **`OK(1)`（`3`）** | **连小写 `count(*)` 也被绕过** | `c` 输出常量列的 `OrigTblName == ""`，`collectPrivsForCount:2525` 直接跳过 | 无 `t` 权限者 **`1142(t)`** |
+| `WITH RECURSIVE c AS (SELECT 1 AS n FROM test.t UNION ALL ...) SELECT * FROM c` | `u_ins`..`u_tbl`: **`OK(6)`** | 递归 CTE 锚点读 `t` 绕过 | 同上 | 无 `t` 权限者 **`1142(t)`** |
+| **`EXPLAIN` 与 `EXPLAIN ANALYZE`** | | | | |
+| `EXPLAIN SELECT 1 FROM test.t` / `tp` | `u_none(db=None)`/`u_ins`/`u_other`/`u_cola`/`u_tbl`: **`OK`** | 泄露表存储拓扑、估计行数、分区与访问路径 | `buildExplain -> OptimizeAstNode` 无登记 | 需拥有被解释查询全部表的 `SELECT` 权限，否则 **`1142`** |
+| `EXPLAIN SELECT a FROM test.t` | `u_none(db=None)`/`u_ins`/`u_other`: **`1143(a)`**；`u_cola`/`u_tbl`: `OK` | 内部优化触发 `toColumn`；零权者仍暴露表存在性 | 同上 | 无 `t` 权限者报 **`1142(t)`**；`u_cola`/`u_tbl` `OK` |
+| `EXPLAIN ANALYZE SELECT 1 FROM test.t` | `u_none(db=None)`/`u_ins`/`u_other`/`u_cola`/`u_tbl`: **`OK`**（输出 `actual rows = 3`） | **真实触发 Coprocessor 扫描并回传实测行数与统计详情** | 同上 | MySQL `EXPLAIN ANALYZE` 同样要求完整权限，否则 **`1142`** |
+| `EXPLAIN SELECT COUNT(*) FROM test.t` | 全 5 账号均为 **`OK`**（而小写 `count(*)` 报 `1142`） | 仅小写被拦 | `collectPrivsForCount` 大小写分裂 | 均须 **`1142`** |
+| `EXPLAIN SELECT 1 FROM test.v_definer` | `u_ins`..`u_tbl` 及 `u_vdef_sel`: **`1345`** | `BuildDataSourceFromView` 追加了 `ShowViewPriv` | `logical_plan_builder.go:5754` | 无 `SHOW VIEW` 与底层权报 **`1345`** |
+| **DML 读侧（写账号执行）** | | | | |
+| `INSERT / REPLACE INTO test.t2 SELECT 1 FROM test.t` & `SELECT COUNT(*) FROM test.t` | `u_dml_ins`: **`OK`**（真实将 `3` 行或数值 `3` 插入 `t2`；`count(*)` 报 `1142`） | **利用无权限表内容或行数写入自己有写权限的表实现持久外泄** | `buildInsert` 的 `SELECT` 分支无表读登记 | 对 `t` 无 `SELECT` 报 **`1142(t)`** |
+| `UPDATE test.t2 SET x = ... WHERE EXISTS (SELECT 1 FROM test.t)` | `u_dml_upd` / `u_dml_upd_no_sel`: **`OK`** | 利用 `UPDATE` 条件过滤探测 `test.t` 是否为空 | 子查询 `buildDataSource` 无登记 | 对 `t` 无 `SELECT` 报 **`1142(t)`** |
+| `DELETE FROM test.t2 WHERE EXISTS (SELECT 1 FROM test.t)` | `u_dml_del`: **`OK`** | 利用 `DELETE` 影响行数探测 `test.t` 是否为空 | 同上 | 对 `t` 无 `SELECT` 报 **`1142(t)`** |
+| **`PREPARE / EXECUTE` 与 Plan Cache** | | | | |
+| `u_none(db=None)` 执行 `PREPARE s FROM 'SELECT 1 FROM test.t'; EXECUTE s;` | `PREPARE` `OK`，`EXECUTE` **`OK(3)`** | 准备与执行全程绕过 | `VisitInfos == []` | 需具备对应权限，否则准备或执行拒绝（`1142`） |
+| `PREPARE -> REVOKE -> EXECUTE`（分别在会话 cache ON、cache OFF、**实例 cache `SET GLOBAL = ON`** 下实测） | 撤权后 `s_col` / `s_pk` / `s_pk1` / `s_cntL` 均报 `1143`/`1142`（`from_cache=0`）；**`s_const` (`SELECT 1`) 与 `s_cntU` (`SELECT COUNT(*)`) 仍 `OK(3/1)` 且 `from_cache=1`** | 若 `PREPARE` 时未登记任何 `VisitInfo`，**撤权后缓存命中照常放行** | `plan_cache.go:270, 339-348` 重验空切片 | MySQL 权限随执行/重准备生效；撤权后不能继续以缓存越权读取（注：具体 `PREPARE` 后撤权语义随 MySQL 版本重准备策略而异） |
+| 非预处理 Plan Cache（`tidb_enable_non_prepared_plan_cache = ON`）`REVOKE` | 带 `WHERE a = 1` 的查询撤权后被拦（`1143`）；`SELECT 1 FROM test.t` 无 `VisitInfos` 照常放行 | 同上 | 同上 | 同上 |
+| **缺表探测神谕与元数据** | | | | |
+| `SELECT 1 / a / count(*) / COUNT(*) / * FROM test.nosuch` | `u_none(db=None)`/`u_ins`/`u_other`/`u_cola`/`u_tbl`: 全部 **`1142(nosuch)`** | 与真实表 `test.t` 的 `OK` / `1143` 形成明确区分，可逐表爆破库表名 | `preprocess.go:548` 用 `AllPrivMask` 拦住 | MySQL 8.0 在 Stage 2 检查表权限：无 `SELECT` 权限者对存在与不存在表**均先返回 `1142`**，避免泄露存在性 |
+| `SELECT 1 FROM test.nosuch`（`u_db_ins` 持 `INSERT ON test.*`） | `u_db_ins`: **`1146 Table 'test.nosuch' doesn't exist`**（而 `test.t` 返回 `OK(3)`） | `INSERT ON test.*` 允许通过 `AllPrivMask` 校验直接获知任意表不存在 | `preprocess.go:548` `AllPrivMask` 过宽 | 同上：对读语句无 `SELECT` 时不应泄露 `1146` |
+| `INFORMATION_SCHEMA.TABLES` vs `SHOW COLUMNS FROM test.t` | `u_cola`: `I_S.TABLES` `0` 行，但 `SHOW COLUMNS` 返回列 `a` | 两处元数据可见口径不一致 | `infoschema_reader.go` 用 `AllPrivMask` (`col=""`) vs 列权限判定 | MySQL 中持有任一列权限用户在 `I_S.TABLES` 通常仍可见该表基本记录（文档推断） |
+
+---
+
+## 4. `tidb-rs` 现状与向量基线评估
+
+截至当前分支（`nora/issue-438`，Rust 代码未改动），`tidb-rs` 已移植的部分完全镜像了 Go v8.5.8 的架构缺口，且部分边界尚以桩存在：
+
+1. **权限常量（`crates/base/src/mysql/privs_gen.rs`）**：已生成 `SelectPriv = PrivilegeType(4)`（第 22 行）和 `AllPrivMask = PrivilegeType(8589934591)`（第 90 行）。
+2. **语法层（`crates/parser/grammar/tidb_typed.y`）**：`AggregateFuncExpr.f` 保留词法原始大小写；`TABLE tbl` 已展开为 `SelectStmtKind::Table` 并附带 `WildCardField`（第 3198 行），与 Go `parser.y:9478` 同构。
+3. **计划构建器（`crates/planner/src/core/planbuilder.rs`, `logical_plan_builder.rs`）**：
+   - `VisitInfo`（`planbuilder.rs:47-65`）与 `PlanBuilder.visit_info`（`planbuilder.rs:192`）及 `append_visit_info` / `pop_visit_info`（`logical_plan_builder.rs:181-197, 1943`）已存在；
+   - `build_data_source`（`logical_plan_builder.rs:2381-2665`）**同样未登记 `SelectPriv`**，其中 `_tidb_rowid`（第 2556–2562 行）也遗漏 `orig_tbl_name`；目前内存表（`blocked-by:D10.11`）、分区表（`blocked-by:D09.12`）、视图（`blocked-by:D09.1` 第 2 部分）、`CTE`/`UNION`（`blocked-by:D09.5`）、`Join`（`blocked-by:D09.3`）、聚合/窗口（`blocked-by:D09.4`）均处于边界桩，序列在第 2458 行提前返回 `TableDual`。
+4. **表达式改写器（`crates/planner/src/core/expression_rewriter.rs`）**：
+   - 第 1085 行 `leave` 中对聚合 `count` **已经先于 Go 改用了大小写无关匹配** `v.f.eq_ignore_ascii_case(fnames::AggFuncCount)`，调用 `collect_privs_for_count`（第 2044–2083 行，使用 `BTreeMap` 按有序生成 `"*"` 项）；`append_col_names_to_visit_info`（第 368–411 行）目前对 `user/host` 留空串，视图分支尚未接入。
+   - **但仅有 `eq_ignore_ascii_case` 的 `COUNT` 不足以解决问题**：所有无 `COUNT` 的常量投影、`SUM(1)`/`MAX(1)` 等其余聚合、子查询、CTE、Join、`_tidb_rowid`、视图自身权限与 `EXPLAIN` 依然全部漏检。
+5. **点查、优化器驱动、预处理器与计划缓存**：
+   - `point_get_plan.rs`：`get_visit_info`（第 698–755 行）仅收集 `output_names` 与 `cols_in_where_clause`；`check_fast_plan_privilege`（第 1242–1255 行）当前只检 `check_table_lock`，不检 `SelectPriv`。
+   - `optimizer.rs` / `optimize.rs`：`check_privilege`（`optimizer.rs:312-315`）为 `blocked-by:D04.1` 桩；`visit_info4_priv_check`（`optimizer.rs:324-339`）已移植（跳过 `TempTableLocal`）；`build_and_optimize_logical_plan_round`（`optimize.rs:487-498`）因暂无 D04.1 权限管理器而未调用 `visit_info4_priv_check` 与 `check_privilege`；`optimize_exec_stmt` 中的 `prep_stmt_visit_infos`（`optimize.rs:602`）固定返回空 `Vec`。
+   - `plan_cache_utils.rs` / `plan_cache.rs`：`PlanCacheStmt` 尚未保存 `visit_infos`；`check_prepared_priv`（`plan_cache.rs:418-421`）目前直接返回 `Ok(())`。
+   - `preprocess.rs`：`table_by_name`（第 736–762 行）在表不存在时返回 `blocked-by:D04.1`。
+6. **`govec` 向量基线盘点（本地 `arm64` 向量文件实查）**：
+   - `crates/planner/tests/vectors/v8.5.8/arm64/selectbuild.jsonl.gz` 共 **1,743** 条记录，其中含 `"vi"` 字段 **1,539** 条：`1142`-only **143** 条、`1143`-only **1,072** 条、同时含 `1142` 与 `1143` **284** 条、**`vi` 为空 `[]` 共 40 条**（含 `SELECT 1`、`SELECT 1 FROM dual`、常量 derived/CTE 等 12 条非基表查询，以及 **28 条读取真实基表 `t2`/`sbtest1`/`t3`/`tc`/`ti` 却零 `VisitInfo` 的查询**，例如 `SELECT 1 FROM sbtest1`、`SELECT @x := 1 FROM t2`、`SELECT @@sql_mode FROM t2`、`SELECT 's1' FROM tc LIMIT 8 OFFSET 0`）。`star_vi = 0`（2 条大写 `SELECT COUNT(*) FROM t2` 因聚合停在 `unsupported`）。
+   - `crates/planner/tests/vectors/v8.5.8/arm64/rewrite.jsonl.gz` 共 **2,392** 条，含 `"vi"` **2,327** 条（1,770 非空、557 空），`star_vi = 0`（其 2 条 `COUNT(*)` 停在 `D09.4` 桩）。由于 `rewriteAstExprWithPlanCtx` 构造的是假 `TableDual`，不走 `build_data_source`。
+
+---
+
+## 5. `tidb-rs` 系统性权限检查设计
+
+### 5.1 设计原则：数据源 / 表访问边界的单点无遗漏登记
+
+按照宪章第一条 2（安全例外）与第五条（不支持就报错），`tidb-rs` 必须摆脱“靠表达式阶段碰巧遇到列名”的脆弱做法，将 `SELECT` 表访问权限的注册下沉并固定到**所有表数据源构建的唯一入口**，实现“**查询形状无关、优化器剪枝免疫**”的系统性保护：
+
+```text
+任意查询（SELECT / SUBQUERY / JOIN / CTE / VIEW / EXPLAIN / DML 读侧 / PointGet）
+   │
+   ├─► 1. 预处理器 resolve::table_by_name（按语句所需权限防护缺表枚举）
+   │
+   ├─► 2. 计划构建 DataSource / View / FastPlan 边界（单点注册表读 SelectPriv）
+   │        ├─ 基表 / 分区表 / 序列：build_data_source
+   │        ├─ 内存表：build_mem_table（排除 information_schema 普通表，见 §5.2）
+   │        ├─ 视图：BuildDataSourceFromView（外层视图权 + DEFINER/INVOKER 隔离）
+   │        └─ 点查快速路径：point_get_plan::get_visit_info（SelectStmt）
+   │
+   ├─► 3. 表达式改写阶段：仍对实际引用的具体列与通配符列 `*` 注册精确列权（1143 / 1142）
+   │
+   └─► 4. 优化入口 optimize() 与计划缓存命中 adjust_cached_plan()：
+            均执行 visit_info4_priv_check + check_privilege（拒绝前绝不优化执行或泄露 EXPLAIN ANALYZE）
+```
+
+**关键时序保证**：`build_data_source` 位于逻辑优化器（列裁剪 `D09.7`、投影消除、聚合规则、`WHERE 1=0` / `LIMIT 0` 折叠为 `TableDual`）**之前**执行。因此，哪怕整张表最终被常量折叠或列裁剪完全消去，或者输出中未选中任何实际列，表读 `VisitInfo` 均已不可撤销地进入 `PlanBuilder.visit_info` 并接受 `CheckPrivilege` 拦截。
+
+### 5.2 注册规格与各 SQL 结构的精确组合
+
+#### （1）表读 `VisitInfo` 编码与列级 `SELECT(col)` 的协同
+
+在 `logical_plan_builder.rs` 中定义统一辅助函数（如 `append_table_select_visit_info`），按 `(db, table)` 登记：
+
+- `privilege`: `SelectPriv` (`mysql::SELECT_PRIV`)
+- `db`: 已解析的库名小写（`db_name.l`）
+- `table`: 基表/视图/内存表真实物理名小写（`table_info.name.l`，**绝不**用表别名 `as_name`）
+- `column`: **`"*"`** 或 **`""`**（见 §6.1 决策点 D2 对比；若采纳推荐方案 **`"*"`**）：
+  - 若用户拥有全局 `SELECT`、库级 `SELECT ON db.*`、整表 `SELECT ON db.t`，或**至少一列的列级权限 `SELECT(col) ON db.t`**，表读准入可通过；
+  - 凡未获任何 `t` 读权限（或只有 `INSERT`/`UPDATE` 等非 `SELECT` 权限）的用户，执行任何形式的不引用列查询（`SELECT 1`、`COUNT(*)`、`SUM(1)`、`EXISTS(...)`、`JOIN ... ON 1=1`）均直接被拒，报错 **`1142 (42000): SELECT command denied to user ... for table 't'`**；
+  - 若查询同时引用了某具体列 `b`，表达式改写仍会登记 `(db, t, "b")` 并携带 `1143` 错误，使持有 `SELECT(a)` 的用户 `u_cola` 查 `b` 时仍精确保留 `1143`（`for column 'b'`），查 `SELECT *` 时保留 `1142`。
+  - 注：实现 D04.1 的 `MatchColumns` 时必须严格沿用 Go `cache.go:1427-1434, 1556-1567` 的行为——将 `col == "*" && (record.ColumnPriv & SelectPriv > 0)` 写在逐条记录匹配条件内部（而不是先按表返回第一条 `UPDATE(a)` 记录后再判断 `SelectPriv`），避免当用户同时拥有 `UPDATE(a)` 和 `SELECT(b)` 时误判。
+- **`_tidb_rowid` 处理**：在 `build_data_source` 构建隐式 `_tidb_rowid` 的 `FieldName` 时（`logical_plan_builder.rs:2556-2562`），若按 Go 原样保持 `orig_tbl_name` 为空，零权限用户虽已被表读基线 `1142` 拦住，但仅有 `SELECT(a)` 的 `u_cola` 仍可读出 `_tidb_rowid`。若决定一并封堵（见 §6.1 D5），只需为 `_tidb_rowid` 补充 `orig_tbl_name = table_info.name.clone()`（或在 `precollect_col_names` 中对其要求整表 `column = ""` 或 `_tidb_rowid` 列权），即可确保 `u_cola` 无法越权读取隐含物理行号（同时确认此改动只改变权检，不影响 `OutputNames` 展示列名或列解析，因为 `ColName` 与 `TblName` 本就不变，需同步检查派生表/CTE 对 `OrigTblName` 的行为）。
+
+#### （2）数据源各类分支（基表、分区表、序列、内存表）
+
+1. **基表与分区表**：在 `build_data_source` 完成表名解析与 `table_by_name`、确认非视图非内存表非 CTE 后、甚至可以紧随表类型分发各自登记，确保分支路径（无论静态/动态分区裁剪、`PARTITION(p0)` 显式分区指定、本地临时表、缓存表、`TABLESAMPLE`）统一生成 `VisitInfo`；本地临时表由后续 `VisitInfo4PrivCheck` 自动免检，与 Go 语义一致。
+2. **序列（`table_info.is_sequence()`）**：在 `build_data_source` 提前转换为 `build_table_dual` 之前（`logical_plan_builder.rs:2452-2459`），同样登记表读 `SelectPriv`，防止 `SELECT 1 FROM seq` 泄露序列存在性。
+3. **内存表（`build_mem_table`，`logical_plan_builder.rs:2415`）**：当 `D10.11` 落地移植 `build_mem_table` 时，同样在该函数内统一登记 `(db_name, table_info.name, SelectPriv)`（`column = "*"`）。配合 D04.1 `UserPrivileges::request_verification` 复刻 `privileges.go:174-189` 规则——`information_schema` 允许通过（开启 SEM 时不可见表除外）、`metrics_schema` 要求 `SelectPriv | ProcessPriv`、`performance_schema` 走标准表/列授权检验——即可系统性堵住 `SELECT 1 FROM performance_schema.*` 漏洞，同时不影响 `INFORMATION_SCHEMA` 的公开元数据查询。
+
+#### （3）视图（规划用于 `D09.1` 第 2 部分 `BuildDataSourceFromView`）
+
+Go 的漏洞源于两处：清除了 `DEFINER` 内部权限且**漏记调用者对视图自身的 `SelectPriv`**，以及 `INVOKER` 内部表错未统一封装为视图安全语义。设计如下：
+
+1. **调用者对视图自身的 `SelectPriv`**：只要构建视图 `DataSource`，必须为**当前安全上下文（外层调用者，或外层包壳视图的 `DEFINER`）**登记针对目标视图本身 `(db_name, view_name)` 的表读 `SelectPriv`（若当前处于外层视图内部 `len(saved_views) > 0`，则按外层规则封装为外层视图的 `1356 ErrViewInvalid`；若为顶层查询，失败时直接报 `1142` `for table '<view_name>'`）。
+2. **检查顺序与防探测**：将调用者对视图自身的 `SelectPriv` **先于**或放在视图内层 `visit_info` 之前检查（具体做法：在进入 `BuildDataSourceFromView` 展开内部 SQL 前，先把当前视图自身 `SelectPriv` 记入调用方上下文，再切到隔离切片展开内部 `SelectStmt`）。这样，完全无权访问视图的用户直接收获 `1142 (for table 'v')`，不能借 `1356` 探测视图定义内部是否失效或引了哪些表！
+3. **`SECURITY DEFINER` vs `SECURITY INVOKER` 内部检查**：
+   - `DEFINER`：保留与 Go 一致的逻辑——用 `view.definer` 及默认角色通过 `request_verification_with_user` 验证内部收集到的每条 `visit_info`（包括内层 `build_data_source` 生成的表读项），失败一律报 `1356 ErrViewInvalid`，验证通过后清空内部 `visit_info`，仅保留前述调用者对视图自身的 `SelectPriv`；
+   - `INVOKER`：内部 `build_data_source` 若检测到 `len(b.saved_views) > 0`，其生成的 `SelectPriv` `err` 同样设为外层视图的 `1356 ErrViewInvalid`（与 Go `appendColNamesToVisitInfo` 在 `len(views) > 0` 时的 `ErrViewInvalid` 对齐），再合并回外层 `b.visit_info`。如此既补齐视图自身授权，又彻底防止 `u_tbl` 越权读 `v_invoker` 及向 `u_none` 泄漏 `v_invoker` 底层基表名 `'t'`。
+4. **`EXPLAIN` 视图**：继续保留 `ShowViewPriv`（`1345 ErrViewNoExplain`）检查，同时因为视图自身的 `SelectPriv` 已被无条件登记，无需再像 Go 那样只在 `viewDepth > 0` 时打补丁判断 `SelectPriv`。
+
+#### （4）CTE、子查询、派生表与 Join
+
+- **CTE（`D09.5`）**：`build_with` 对 `WITH` 子句中声明的**每一个** CTE 均会构建其逻辑计划，因此无论主查询是否消费该 CTE（`WITH c AS (SELECT 1 FROM t) SELECT 1`），`c` 定义内凡读到基表或视图即进入 `build_data_source` 并登记 `SelectPriv`。对后续从 CTE 读取列或执行 `SELECT count(*) FROM c`，`precollect_col_names` 跳过 CTE 虚拟名不会导致漏洞（已由 CTE 定义侧拦截）。若未来优化器对“完全未引用 CTE”考虑跳过构建，必须保持先构建/先鉴权或由安全策略明确裁定。
+- **递归 CTE**：种子分支与递归分支中读取的每一张基表都在各自 `build_data_source` 时登记，递归迭代引用的 CTE 自身不重复引入基表外权限。
+- **子查询与派生表（`D09.6` / `D09.1`）**：无论是 `EXISTS`、`IN (SELECT ...)`、标量子查询还是 `FROM (SELECT ...) AS s`，全部递归进入 `build_select -> build_table_refs -> build_data_source`，`b.visit_info` 全局累积（注意 `BuildDataSourceFromView` 对 `DEFINER` 视图需用保存/恢复切片隔离，而普通子查询和派生表直接共享外层 `b.visit_info` 即可）。
+- **Join（`D09.3`）**：无论是逗号连表、`INNER JOIN`、`LEFT/RIGHT OUTER JOIN` 还是无列引用条件 `ON 1=1`，每个实表叶节点都独立走过 `build_data_source`，必然全部纳入权限校验。
+
+#### （5）点查快速路径（`D10.8` `point_get_plan`）
+
+- 对 `SelectStmt` 进入 `try_where_in2_batch_point_get` 与 `try_point_get_plan` 时，除收集 `output_names` 与 `cols_in_where_clause` 外，`get_visit_info`（或由 `SelectStmt` 调用方追加）**必须附带表读 `SelectPriv`（`column = "*"`）**，防止矛盾谓词触发 `is_table_dual`（`pairs == None`）且投影为常数时生成空 `visit_infos` 逃逸。
+- 注意 `try_update_point_plan` 与 `try_delete_point_plan`（属 `X` 写路径参考）不应盲目套用“输出列读权”，但带 `WHERE` 的点查删改仍应有条件列（与表读）限制；`check_fast_plan_privilege` 在 `D04.1` 落地后应真实校验 `SelectPriv`（若失败，返回 `None` 回退到常规优化器也将得到完全一致的拒绝结果，无绕过可能）。
+
+#### （6）`EXPLAIN` / `EXPLAIN ANALYZE` 与 `TABLE tbl`
+
+- `TABLE test.t` 在 `tidb-rs` 解析器已转为带通配符的 `SelectStmt`（`crates/parser/grammar/tidb_typed.y:3198`），自然经过 `build_select -> build_data_source` 与 `unfold_wild_star` 校验。
+- `EXPLAIN` / `EXPLAIN ANALYZE`（后续 `D09.16` 移植时）内部通过 `OptimizeAstNode` 构建目标查询计划并调用 `CheckPrivilege`，一旦 `build_data_source` 登记了表读权限，`EXPLAIN` 与 `EXPLAIN ANALYZE` 将在生成计划与真正执行扫描**之前**报错拒绝，不会泄露表统计估算或真实执行行数。
+
+#### （7）DML 读侧（供架构完整性与将来 `D09.15` 参考）
+
+`tidb-rs` 当前只读阶段不移植 `D09.15`（DML 计划构建归 `X`），但为确保架构上没有后续隐患，Spec 需明确以下约束：
+
+1. **`INSERT / REPLACE ... SELECT`** 与 **`UPDATE ... WHERE EXISTS(...)`**：读取来源表与条件子查询都会调用 `build_select` 或 `build_result_set_node -> build_data_source`，自动被单点机制覆盖。
+2. **显式提示 `buildDelete` 的 `popVisitInfo()` 陷阱**：Go 的 `buildDelete`（`logical_plan_builder.go:6663`）在 `ds.Where == nil && ds.Order == nil` 时调用一次 `b.popVisitInfo()`，目的是保证无条件 `DELETE FROM t` 不要求 `SELECT` 权限。一旦 `buildDataSource` 开始统一登记 `SelectPriv`，盲目 `popVisitInfo()` 会在**无条件多表删除 `DELETE t1 FROM t1, t2`** 时漏留一个 `SelectPriv` 或弹出错误的表（仅 `pop` 了 `t2` 而保留 `t1`）。正确设计应为：仅在单表无 `WHERE` 无 `ORDER BY` 删除（`!ds.IsMultiTable && ds.Where == nil && ds.Order == nil`）时通过作用域标记（或传参关闭该目标表的 `SelectPriv` 登记，注意若附带 `WITH` CTE 子句则 CTE 内部仍须正常登记）豁免目标表自身的 `SelectPriv`。
+
+#### （8）`PREPARE / EXECUTE` 与计划缓存（`D13.1` + 例外 `A3`）
+
+结合 `specs/exceptions/A3-plan-cache/spec.md` 与 `specs/D13.1-plancache/spec.md`：
+
+1. `PlanCacheStmt`（`crates/planner/src/core/plan_cache_utils.rs:517`）新增字段 `pub visit_infos: Vec<VisitInfo>`，在 `generate_plan_cache_stmt_with_ast` 调用 `dest_builder.build(...)` 后完整保存 `dest_builder.get_visit_info().to_vec()`。
+2. `generate_plan_cache_stmt_with_ast` 末尾以及 `plan_cache.rs:adjust_cached_plan`（第 318 行）**每次都必须执行** `check_prepared_priv`：调用 `visit_info4_priv_check` + `check_privilege`，且**传入当前执行连接此刻的 `ActiveRoles` 与实时权限缓存快照（`PrivilegeManager`）**，禁止缓存权限判定布尔结果。
+3. 由于 `build_data_source` 与 `point_get_plan` 现在对所有读表语句稳定生成非空的表读 `VisitInfo`，`SELECT 1 FROM t`、`SELECT COUNT(*) FROM t` 的 `PlanCacheStmt.visit_infos` 不再为空；在 `REVOKE` 后重新 `EXECUTE` 任何已缓存的会话/实例级计划，或触发 `Compile` 的 `is_safe_to_reuse_point_get_executor` 短路（`compiler.go:133` 位于 `planner.Optimize -> adjust_cached_plan` 之后）时，都会实时拦截并报 `1142` / `1143`。
+4. 同步修改 `optimize.rs:602` 的 `prep_stmt_visit_infos`，直接返回 `prep_stmt.visit_infos`，修复 `StmtCtx.tables` 对 `EXECUTE` 为空的已知占位问题。
+
+#### （9）`D04.1` 边界接口与分层协同（`N0`）
+
+按 `layers.toml`，`tidb-privilege`（`D04.1`）处于 rank 8，而 `tidb-planner` 处于 rank 13，依赖方向合法（`tidb-planner -> tidb-privilege`）。在 `D04.1` 尚未实现前，规划器内部继续在 `optimize.rs:490` 与 `plan_cache.rs:418` 保持基于 `Option<&dyn PrivilegeManager>` 的桩边界（无管理器时仅构建与记录 `VisitInfo`，不中断未鉴权开发流水线），一旦 `D04.1` 落地即无痛接通；`preprocess.rs:table_by_name` 同样在有 `PrivilegeManager` 时立即启用权限预检，阻止未授权用户识别表是否存在。
+
+---
+
+### 5.3 关键设计权衡与影响分析
+
+#### 1. 错误码排序：`SELECT a FROM test.t` 无权限用户报 `1142` 还是 `1143`
+
+因为 `CheckPrivilege` 按切片先后顺序返回第一个失败项，在 `build_data_source` 插入 `column = "*"`（错误为 `1142` `for table 't'`）与列引用表达式插入 `column = "a"`（错误为 `1143` `for column 'a' in table 't'`）的先后顺序直接决定对全无权限用户（`u_none`、`u_ins`、`u_other`）暴露的错误码：
+
+| 选项 | 实现方式 | `u_none`/`u_ins`/`u_other` 查 `SELECT a FROM t` | `u_none` 查 `SELECT 1 FROM t` | `u_cola` 查 `SELECT b FROM t` | 缺表探测 `SELECT a FROM t` vs `nosuch` | 对已有 Go 行为 / `govec` 的冲击 |
+|---|---|---|---|---|---|---|
+| **方案 A（即时入队，表读检查在先）** | 直接在 `build_data_source` 末尾/前置追加 `("*", 1142)`，`build_selection` / `build_projection` 的列条目 `("a", 1143)` 自然在其后 | **`1142`**（拒绝访问表 `t`） | **`1142`** | **`1143`**（通过了 `"*"`，在 `"b"` 失败） | **完全关闭神谕**：`SELECT a FROM t` 与 `SELECT a FROM nosuch` 均返回 **`1142`** | 对零权限用户访问实列，错误码从 Go 的 `1143` 变为 **`1142`**；`selectbuild` `vi` 切片首元素变为表读项（最符合 MySQL 8.0 逻辑与直观语义） |
+| **方案 B（后置/按表优先排布列检查）** | 表读 `"*"` 暂存，在 `build_select` 结束或由 `CheckPrivilege` 同表先检实列再检 `"*"`（仅在没有任何具体列校验时触发 `"*"` 的 `1142`） | **`1143`**（与 Go v8.5.8 保持一致） | **`1142`** | **`1143`** | **残余神谕**：无权限者查 `SELECT a FROM t` 得 `1143`，查 `SELECT a FROM nosuch` 得 `1142`，仍可枚举表名 | 保留了 `1,072` 条仅含 `1143` 查询的首个报错码，但逻辑绕弯、无法根除表名探测且依赖复杂的块级缓冲 |
+
+**分析结论**：从安全本质与 MySQL 规范一致度看，一个连表级及任意列读权限都没有的用户执行 `SELECT a FROM t`，根本问题在于“无权访问表 `t`”而不是“唯独缺列 `a` 的权限”，且方案 B 仍会通过 `1143` vs `1142` 泄露表存在性。方案 A 实现最简、表存在性完全不可探测、错误语义也最合理；需要负责人按宪章第九条 1(a) 就该用户可见错误码变更做出裁定（详见 §6.1 D3）。
+
+#### 2. `collectPrivsForCount()` 补丁的去留（`expression_rewriter.rs:1085, 2044`）
+
+`expression_rewriter.rs:2044` 的 `collect_privs_for_count` 本质上是 Go 为掩盖 `buildDataSource` 缺失所打的局部补丁。一旦 `build_data_source`（及将来的 `BuildDataSourceFromView` / `build_mem_table`）统一登记了表读 `SelectPriv`：
+- 对所有经过规划器完整构建的 SQL，`collect_privs_for_count` 产生的 `"*"` 记录与数据源登记完全重复（每多写一个 `COUNT(*)` 还会重复 push 一次冗余条目，浪费后续 `RequestVerification` 开销）；
+- 该函数因无 `InfoSchema` 且直接读 `self.names`，还会产生 `rewriteAstExprWithPlanCtx` 视图名退化与 CTE 空 `OrigTblName` 等长期不一致。
+- 实查 `rewrite.jsonl.gz`（共 2,392 条），`star_vi = 0`，移除它也不会造成现有 `govec` 向量回归失败（但在移交修改 `rewrite_ast_expr_with_plan_ctx` 单元测试时需同步确认）。因此推荐在数据源单点注册生效时一并删除 `collect_privs_for_count`（属于不改变 SQL 最终行为的内部清理，记入 §6.2 维护者已定）。
+
+#### 3. 与 Go TiDB v8.5.8 混合集群兼容性
+
+`tidb-rs` 早期定位为与 Go TiDB v8.5.8 节点在同一集群并存的只读节点（`CLAUDE.md` 开头）：
+- **协议、元数据、存储与计算下推零变更**：`VisitInfo` 收集与 `CheckPrivilege` 完全发生在 SQL 节点本地内存中的规划校验阶段，不改动 `mysql.*` 授权系统表格式、不改动 DDL 语义、不改动 TiKV 编解码与 Coprocessor/TiFlash protobuf、不改动 MySQL 协议握手与结果包格式。混合集群可零迁移直接灰度上线或回滚。
+- **行为收敛与混合路由窗口**：在 Go 节点与 `tidb-rs` 节点混跑期间，若同一欠权账号经负载均衡访问上述原本属于 Go 漏洞的查询（如 `u_other` 执行 `SELECT 1 FROM test.t`），落在 `tidb-rs` 节点会被拒绝（`1142`），落在未修复的 Go v8.5.8 节点上仍会成功。这是安全加固向严格方向收敛时的固有中间态（不会误放行越权请求，也不会破坏已有合法业务查询；仅当存在隐含依赖“无权查 `SELECT 1` / `COUNT(*)` 成功”的异常客户端脚本时才会报错），应在 `docs/compatibility.md` 中专门提示混合集群管理员对齐权限授予。
+
+#### 4. `govec` 向量与偏差台账 `docs/testing/rulings.toml` 影响
+
+- **`govec` 向量冲击**：
+  - `selectbuild`（1,743 条，其中 1,539 条带 `vi`）：在 `build_data_source` 加入表读 `SelectPriv` 后，涉及基表扫描的 **1,527 条**记录（`1,499` 非空 + `28` 原为空 `vi` 的基表查询）会在 `vi` 中新增对应基表的 `("*", 1142)` 条目，而其余 12 条 `SELECT 1` / `FROM dual` / 常数 CTE / 常数派生表仍保持 `vi: []`。在未通过上游补丁方式重新生成对照向量前，`crates/planner/tests/govec_selectbuild.rs` 不能直接用 `&got == out` 全等断言，而应采用类似 `govec_rewrite.rs` 的 `KNOWN_*` 结构化归一化辅助（按已定 spec 精确滤除 Go 缺失的基表 `"*"` 项后比对其余计划、标志与 `visitInfo`），或按 `docs/compatibility.md` `go-fix` 流程生成补丁版参照向量。
+  - `rewrite`（2,392 条）：由于使用假 `TableDual` 且 `star_vi = 0`，不受影响。
+- **`docs/testing/rulings.toml` 登记计划**：
+  - 按宪章第一条 2 与 `docs/testing/rulings.md` §1，任何面向 SQL 用户可见的行为差异（`SELECT 1` / `COUNT(*)` / `_tidb_rowid` 拒止、`EXPLAIN` 拒止、视图校验加严、缺表探测收敛、`SELECT a` 错误码如从 `1143` 变为 `1142`）在 `D04.1` 实际接线生效时，均须在 `rulings.toml` 中按顺序新建裁定（当前最新编号为 `R26`，后续从 **`R27`+** 顺延）：
+    - `class = "divergence"`（宪章第一条 2 安全例外），`plane = "error"`；
+    - 初期若 `ab` 端到端对比尚无专门多用户权限 workload，则设 `layer = "none"` 并通过 `test` 字段绑定 Rust 集成测试名；接入权限集成测试或 workload 后切换为对应 `layer` 与匹配规则；
+    - 写入本 spec 评审结论、复现对照与关联的 `upstream-pitfall` issue，并在 `docs/compatibility.md` 同步列明混合集群注意事项。
+
+---
+
+## 6. 决策点（严格按宪章第九条划分）
+
+### 6.1 需要负责人决定（宪章第九条 1）
+
+以下 5 个问题涉及**长期保留、用户可见的与 Go v8.5.8 不同的权限行为与错误码**，按宪章第九条 1(a) 及第九条 4，全部提请项目负责人拍板：
+
+#### D1：是否全面修复 Go v8.5.8 遗漏的 `SELECT` 表级读权限校验（宪章第一条 2 安全例外）
+
+- **背景**：在 Go TiDB v8.5.8 中，当一条查询不引用表的真实列（如 `SELECT 1 FROM t`、大写 `SELECT COUNT(*) FROM t`、`SUM(1)`、`EXISTS(SELECT 1 FROM t)`、`t2 JOIN t ON 1=1`、常数 CTE、`EXPLAIN / EXPLAIN ANALYZE SELECT 1`、只写权限用户跑 `INSERT INTO t2 SELECT 1 FROM t`、视图自身、隐藏列 `_tidb_rowid`、撤权后的空记录缓存复用）时，毫无权限的账号可以探测表存在、读出精确行数与物理行 ID，甚至通过 `INSERT ... SELECT` 持久化窃取内容（详情见 §3.2 实测表）。
+- **选项**：
+  - **选项 A（推荐）：系统性修复（遵循宪章第一条 2 安全例外）** —— 在构建数据源读取表、视图、内存表、快速点查的入口处统一校验 `SELECT` 权限；未授权用户执行上述所有语句均一律拒绝报错，同时在 `docs/compatibility.md`、`rulings.toml` 和 `upstream-pitfall` issue 中登记与 Go v8.5.8 的差异。
+  - **选项 B：照 Go v8.5.8 原样移植（bug-for-bug 一致）** —— 继续仅在列引用与小写 `count` 时校验。
+- **建议与理由**：强烈建议选 **A**。该问题是可稳定跨库窃取数据行数、物化写入及通过 `_tidb_rowid` 读数据的典型多租户安全越权漏洞，符合宪章第一条 2 明确的“照搬会造成安全问题或泄露无关数据的 Go 缺陷可以修正”情形；唯一用户可见代价是原本依赖漏洞越权跑通的异常脚本在升级后会报错，但合规应用均不受影响（滚动混部风险见 §5.3 第 3 点）。
+
+#### D2：仅有列级 `SELECT(col)` 权限的用户，能否执行不指定具体列的整表查询（如 `SELECT 1 FROM t`、`SELECT COUNT(*) FROM t`）
+
+- **背景**：假设用户仅被授予某一列的查询权（`GRANT SELECT(a) ON db.t`，而无整表 `SELECT ON db.t`）。此时他执行 `SELECT 1 FROM db.t` 或 `SELECT COUNT(*) FROM db.t`（语句中未点名列 `a` 也未点名无权的列 `b`，也不包含 `*`）：
+- **选项**：
+  - **选项 A（推荐）：放行（要求用户拥有表级 `SELECT` 或至少一列的 `SELECT` 权限）** —— 内部对应使用通配符策略（`column = "*"`）。与 Go 现有集成测试 `TestSelectColumnPrivilegeInSubqueryAndCTE`（已明确允许 `SELECT(a)` 用户跑 `SELECT count(*) FROM t1`）及常见 MySQL 列级授权兼容性一致；查 `SELECT b`、`SELECT *`、`SELECT COUNT(b)` 仍严格拦截。
+  - **选项 B：拒绝（严格要求整表/整库/全局 `SELECT` 权限）** —— 内部对应只认表级权限（`column = ""`）。持有 `SELECT(a)` 但无整表权限的用户执行 `SELECT 1 FROM t` 与 `SELECT COUNT(*) FROM t` 将收到 `1142` 拒绝访问表的报错（尽管他其实可以运行等价泄露行数的 `SELECT COUNT(a) FROM t` 或 `SELECT 1 FROM (SELECT a FROM t) x`）。
+- **建议与理由**：推荐选 **A**。用户既已有权读出列 `a` 的每一行值，计算该表行数或输出常数并不构成额外信息泄漏；同时能平滑兼容 Go 自身现有集成测试与业务将 `SELECT COUNT(*)` 赋予局部只读账号的习惯。
+
+#### D3：完全无权限用户查询具体列（如 `SELECT a FROM test.t`）时，返回“表拒止 `1142`”还是保持 Go 的“列拒止 `1143`”
+
+- **背景**：当用户对表 `t` **既无整表 `SELECT` 也没有任何一列的 `SELECT`**，却执行 `SELECT a FROM test.t` 时：
+  - Go v8.5.8 当前直接报 **`1143`（`SELECT command denied ... for column 'a' in table 't'`）**；而查询不存在的表 `SELECT a FROM test.nosuch` 时却报 **`1142`（`for table 'nosuch'`）**，由此造成**单靠错误码即可枚举某个表是否真实存在**的漏洞（与本机推断的 MySQL 8.0 “无任何权先报 `1142`”不同）。
+- **选项**：
+  - **选项 A（推荐）：先检表读权限，统一报 `1142`（拒绝访问表 `t`）** —— 数据源阶段登记的表级检查优先生效。零权限用户查 `SELECT a FROM t`、`SELECT 1 FROM t`、`SELECT a FROM nosuch` 全部统一报 `1142`，只在“已经通过表读准入（如拥有 `SELECT(a)`）但访问无权列 `b`”时才报 `1143`（与常见 MySQL 语义对齐，也更符合管理员直觉）。
+  - **选项 B：列检查优先（维持零权限用户查实列时仍报 `1143`）** —— 将表读检查放到列检查之后执行，只有完全不引用任何列的查询（如 `SELECT 1 FROM t`）才触发 `1142`。
+- **建议与理由**：推荐选 **A**。选 B 虽能在“带列引用”的报错号上少一处与 Go 的表面差异，却故意保留了 `1143` vs `1142` 的表存在性探测神谕，且增加了检查顺序维护复杂度；选 A 一步到位封死探测缝隙，语义更一致。
+
+#### D4：是否同步修复预处理缺表检查过于宽松的问题（防止持有非 `SELECT` 权限的用户通过 `1146` 探测表是否存在）
+
+- **背景**：当用户在 `SELECT` 语句中引用一个**不存在的表**（如 `SELECT 1 FROM test.nosuch`）时，Go 的预处理器检查的是“用户对该表是否拥有**任意**权限（`AllPrivMask`）”而非“是否拥有 `SELECT` 权限”。实测表明，若用户只有 `GRANT INSERT ON test.*`（`u_db_ins`，没有任何 `SELECT` 权限），Go 对不存在的表会放行通过权限关卡并直接报错 **`1146 Table 'test.nosuch' doesn't exist`**，从而可借助 `SELECT` 枚举全库是否存在某张表。
+- **选项**：
+  - **选项 A（推荐）：按当前语句实际需要的操作权限做缺表拦截** —— 对 `SELECT`（及 `EXPLAIN SELECT` 等只读语句）检查用户是否具备该表的读权限（与 D2 一致，若 D2 选 A 则用 `SelectPriv` + `"*"`），不具备则返回 `1142` 而非 `1146`；DML 写语句按需检查对应写权限。
+  - **选项 B：保持 Go 现状（`AllPrivMask`，`column = ""`）** —— 维持 `u_db_ins` 在 `SELECT` 下仍看到 `1146`，并且仅拥有列权限 `u_cola` 查不存在表得 `1142`。
+- **建议与理由**：推荐选 **A**。既然通过 D1、D3 着力消除表存在性神谕，不应在 `tableByName` 中留下一个显式的 `INSERT -> 1146` 侧门。
+
+#### D5：仅有部分列权用户（如 `SELECT(a)`）是否可读取无整数/聚簇主键表的隐藏列 `_tidb_rowid`
+
+- **背景**：对于无整数主键且非聚簇主键（`!PKIsHandle && !IsCommonHandle`）的表，TiDB 有一个内部隐藏行号列 `_tidb_rowid`。Go v8.5.8 因遗漏设置它的归属表名，导致不仅零权限用户可直接读取 `_tidb_rowid`，即使将来通过 D1 拦截了零权限用户，在 D2 选 A（有任意列 `SELECT(a)` 即可通过表读准入）的前提下，只有 `SELECT(a)` 的用户依然可以执行 `SELECT _tidb_rowid FROM test.t` 与 `WHERE _tidb_rowid = 1`。
+- **选项**：
+  - **选项 A（推荐）：非整表 `SELECT` 权限用户禁止访问 `_tidb_rowid`** —— 让 `_tidb_rowid` 也受列/表级权限约束（如补全归属表名触发 `1143`，或要求具备整表 `SELECT` 方可读物理行 ID）。
+  - **选项 B：仅拦截零权限用户，持有 `SELECT(a)` 的用户允许继续读取 `_tidb_rowid`** —— 保留 Go 对 `_tidb_rowid` 跳过列检查的逻辑。
+- **建议与理由**：推荐选 **A**。`_tidb_rowid` 是物理存储自增句柄而非列 `a` 的数据，未授权用户不应借单列授权获取全表真实行 ID 分布或做跨列隐蔽关联；实现改动极小且明确安全边界。
+
+---
+
+### 6.2 维护者已定（宪章第九条 2）
+
+以下事项属内部实现、数据结构表示、测试方法与边界面向未移植块的工程组织，不改变前述由负责人裁定的用户可见行为（随整体 spec 评审一并接受审视，负责人若反对可覆盖）：
+
+1. **规划器单点辅助函数布局**：在 `crates/planner/src/core/logical_plan_builder.rs` 抽取统一辅助（例如 `append_table_select_visit_info`），在 `build_data_source` 解析 `table_info` 之后即刻登记（覆盖基表、分区表、序列分支），并在后续 `D10.11` `build_mem_table` 及 `D09.1` 第 2 部分 `BuildDataSourceFromView`（视图自身与内层分支）复用；同步为 `point_get_plan::get_visit_info` 的 `SelectStmt` 路径补齐同一表读条目。
+2. **移除多余且语义不一致的 `collect_privs_for_count` 补丁**：在单点数据源级登记生效后，删除 `expression_rewriter.rs` 第 1085–1087 行与第 2044–2083 行的 `collect_privs_for_count` 调用及实现，避免重复 `VisitInfo` 与无 `InfoSchema` 视图名退化问题（如单独 `rewrite_ast_expr_with_plan_ctx` 接口单测需要保持独立表达式改写测试，可与已确认 `rewrite.jsonl.gz` `star_vi = 0` 基线比对确认无影响）。
+3. **视图内部 `INVOKER` 报错统一归口**：`BuildDataSourceFromView`（后续 `D09.1` 第 2 部分）在 `len(saved_views) > 0` 时，让内层 `build_data_source` 生成的表读条目同样使用外层视图的 `ErrViewInvalid (1356)`，避免将底层基表名泄漏给无底层权限的调用者；`DEFINER` 视图严格使用 `b.visit_info` 快照隔离后经 `request_verification_with_user` 检验再丢弃。
+4. **`PlanCacheStmt.visit_infos` 与实时重验接线**：在 `D13.1` 补回 `PlanCacheStmt.visit_infos` 保存与 `optimize.rs:602` 读取；`adjust_cached_plan -> check_prepared_priv` 每次命中都按当前会话 `ActiveRoles` 与最新 `PrivilegeManager` 重新执行 `visit_info4_priv_check + check_privilege`，并确保校验早于 `is_safe_to_reuse_point_get_executor`。
+5. **非盲弹的 `DELETE` 豁免机制（供将来 `D09.15` 使用）**：不沿用脆弱的 `b.pop_visit_info()`，而以目标表上下文作用域标记精准豁免单表无 `WHERE` 无 `ORDER BY` 的 `DELETE` 目标表 `SelectPriv`，不影响 `WITH` CTE 或多表 `DELETE` 中的其他读表检查。
+6. **在 `D04.1` 落地前维护既有边界桩**：`optimize.rs:490`、`plan_cache.rs:418`、`point_get_plan.rs:1242` 与 `preprocess.rs:756` 在 `tidb-privilege` 尚为规划中 crate（`blocked-by:D04.1`）期间保持边界接口契约不变；规划侧可先落地单点 `VisitInfo` 生成（`govec_selectbuild.rs` 通过明确的 spec 归一化表记录与 Go v8.5.8 差异），待 `D04.1` `PrivilegeManager` 合并后统一激活执行时拒止与 `rulings.toml` 台账 `R27+`。
+
+---
+
+## 7. 后续实施分解与验收清单
+
+spec 经负责人确认后，按块边界分批落地（不在本 spec-only PR 中改 Rust 代码）：
+
+1. **Planning 层 `VisitInfo` 完善（隶属 `D09.1` / `D09.2` / `D10.8` 增量 PR）**：
+   - `build_data_source` 增加单点表读登记，修复 `_tidb_rowid` 归属（若 D5 选 A），补全 `point_get_plan::get_visit_info` 对 `SelectStmt` 的表读条目，移除 `collect_privs_for_count`（若 §6.2 第 2 条生效），并按 §5.3 更新 `govec_selectbuild` 测试比对。
+2. **计划缓存上下文补全（隶属 `D13.1` / `A3` 增量 PR）**：
+   - `PlanCacheStmt` 新增 `visit_infos` 字段并更新 `optimize_exec_stmt` 的 `StmtCtx.tables` 收集，为 `D04.1` 准备非空预处理校验载荷。
+3. **权限管理器与执行校验接线（隶属 `D04.1` 主实现 PR）**：
+   - 落地 `tidb-privilege`（`UserPrivileges`、`MySQLPrivilege`、基于 `catalog`/系统表的授权缓存），确保 `MatchColumns` 支持 `"*"` 遍历谓词语义及内存库规则（`information_schema` / `performance_schema` / `metrics_schema`）；
+   - 接通 `optimize.rs` (`CheckPrivilege`)、`preprocess.rs` (`table_by_name` 防探测)、`plan_cache.rs` (`check_prepared_priv` 每次命中实时重验) 与 `point_get_plan.rs` (`check_fast_plan_privilege`)；
+   - 随未来 `D09.1` 第 2 部分（视图 `BuildDataSourceFromView`）、`D10.11`（内存表 `build_mem_table`）、`D09.16`（`EXPLAIN`）逐步补全对应分支。
+4. **验证与合规动作清单**：
+   - 针对 Go v8.5.8 全部漏洞矩阵建立 SQL 级端到端回归测试（涵盖 `u_none(db=None)`、大写/混写聚合及非 `count` 聚合、`EXISTS`/`IN`/Join/CTE/视图嵌套/`EXPLAIN ANALYZE`/`_tidb_rowid`/`PREPARE -> REVOKE -> EXECUTE` 在实例缓存 ON/OFF 与 PointGet 复用下的即时撤权拦截、`test.nosuch` 缺表无神谕一致返回码）；
+   - 按宪章第一条 2 与 `CLAUDE.md` 开立英文 `upstream-pitfall` issue 汇总并复现 Go v8.5.8 缺陷，并在 `docs/testing/rulings.toml` 登记经负责人批准的 `divergence` 裁定条目（`R27+`）以及更新 `docs/compatibility.md`。
+
+---
+
+## 8. 本文所用 ID
+
+| ID | 含义 |
+|---|---|
+| `D04.1` | 权限检查与认证（ROADMAP P5，`tidb-privilege`） |
+| `D09.0` | 计划构建器骨架与预处理器（`planbuilder`、`preprocess`） |
+| `D09.1` | SELECT 逻辑计划构建（数据源、投影、选择、视图） |
+| `D09.2` | 表达式改写（`expression_rewriter`） |
+| `D09.3` / `D09.4` / `D09.5` / `D09.6` | Join / 聚合与窗口 / 集合运算与 CTE / 子查询与去关联 |
+| `D09.12` / `D09.13` / `D09.15` / `D09.16` | 分区裁剪 / 优化器驱动 / DML 计划构建（`X` 不移植） / SHOW 与 EXPLAIN 构建 |
+| `D10.8` / `D10.11` | 点查快速路径（`point_get_plan`） / 内存表谓词提取（`buildMemTable`） |
+| `D13.1` / `A3` | Plan Cache 实现块 / Plan Cache 例外设计（统一实例级缓存） |
+| `N0` / `X` | crate 依赖分层规范 / 不移植模块集合（DDL、写路径等） |
