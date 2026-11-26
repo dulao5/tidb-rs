@@ -776,11 +776,11 @@ fn every_fallback_point_restores_the_session() {
         ("after Compile (planner boundary stub)", |s| {
             // `SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10` now runs end-to-end on the
             // new stack (D12.1 Part 2A TableReader); use an aggregate query that stops in
-            // planning (D09.4) before any executor opens.
+            // logical optimization (D09.13 BuildKeySolver) before any executor opens.
             let sql = "SELECT COUNT(*) FROM sbtest1 WHERE id BETWEEN 1 AND 10";
             let e = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
-            assert_eq!(blocked(&e), Some("D09.4"), "{e:?}");
-            "D09.4"
+            assert_eq!(blocked(&e), Some("D09.13"), "{e:?}");
+            "D09.13"
         }),
         ("after the warm-up (TSO pending)", |s| {
             let _ = compile(s, "SELECT a FROM t", 1);
