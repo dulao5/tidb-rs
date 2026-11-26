@@ -349,7 +349,7 @@ tracker `data/func_blocks.tsv` 中 `D07.3` 共 **118 个函数**，划分为 **2
 - `DistSQLContext` 是 `Send + Sync`，通过 `Arc<DistSQLContext>` 在语句与各 `SelectResult` 间共享（对应 Go `*distsqlctx.DistSQLContext`）。
 - 共享可变句柄均采用线程安全引用：`warn_handler: Option<WarnAppenderRef>`、`client: Option<Arc<dyn kv::Client>>`、`session_mem_tracker: Option<Arc<Tracker>>`、`runtime_stats_coll: Option<Arc<RuntimeStatsColl>>`、`sql_killer: Option<Arc<SqlKiller>>`、`cpu_usage: Arc<SQLCPUUsages>`、`exec_details: Arc<SyncExecDetails>`、`try_cop_lite_worker: Arc<AtomicU32>`。
   - `StatementContext.sync_exec_details`（`crates/sessionctx/src/stmtctx.rs:419`）改为 `Arc<SyncExecDetails>`（对外访问方法不变），使 `DistSQLContext` 共享同一份语句执行明细（与 Go `&sc.SyncExecDetails` 等价）。
-- `DistSQLContext::detach(&self) -> DistSQLContext`：照 `context.go:103-119` 逐字段复制，并新建独立的 `SQLCPUUsages`（复制当前 CPUUsages 快照）与 `kv_vars`（`killed` 仍指向同一个 `sql_killer` 原子信号）。
+- `DistSQLContext::detach(&self) -> DistSQLContext`：照 `context.go:103-119` 逐字段复制，并新建独立的 `SQLCPUUsages`（复制当前 CPUUsages 快照）、独立的 `kv_vars`（`killed` 仍指向同一个 `sql_killer` 原子信号）与独立的 `try_cop_lite_worker`（`Arc::new(AtomicU32::new(self.try_cop_lite_worker.load(Ordering::Relaxed)))`，对应 Go 值语义复制 `newCtx := *dctx`，避免与原上下文共享同一原子计数）。
 - `StatementContext::get_or_init_dist_sql_from_cache`：在 `StatementContext` 上加 `dist_sql_ctx_cache: OnceLock<Arc<DistSQLContext>>`，写法与已有的 `get_or_init_ranger_ctx_from_cache`（`stmtctx.rs:1372`）完全一致。
 
 ### 4.3 `kv::Response` / `kv::ResultSubset` 的统计接口（`M-IFACE`）
@@ -584,51 +584,59 @@ pub trait SelectResult: Send {
 
 ---
 
-## 8. 读代码发现的可能的 Go 问题
+## 8. 读代码发现并在 Go v8.5.8 上实测核验的 Go 问题
 
-以下问题均在阅读 `v8.5.8`（`8b857efa2`）源码时发现；本任务仅写 spec、未运行 Go 复现，由实现任务在 `v8.5.8` 上复现后按流程开 `upstream-pitfall` issue 并加状态标签（`go-bug-kept` / `go-bug-fixed`）：
+以下 8 项问题（原读码发现 7 项 + 核验时新发现第 8 项）均已于 2026-11-26 在真实 Go TiDB `v8.5.8`（commit `8b857efa2`，`go1.25.12`）上运行复现并逐项核验可达性与宪章第九条归属：
 
-1. **`selectResultIter.Next` 导致 `memTracker` 永久泄漏全部 `SelectResponse` 大小**
+1. **`selectResultIter.Next` 导致 `memTracker` 永久泄漏全部已消费 `SelectResponse` 大小**（**已实测复现**，可从 SQL 触发）
    - **位置**：`pkg/distsql/select_result.go:949` 与 `:413-418, 439-440, 734-737`。
-   - **机制**：每消费完一个 `selectResp` 后，`selectResultIter.Next` 在 L949 执行 `iter.result.selectResp = nil`，但未扣减 `selectRespSize` 也未清零它。下一轮进入 `fetchRespWithIntermediateResults` 时，L413 的 `if r.selectResp != nil` 为假，跳过 `r.memConsume(-selectRespSize)`；随后 L439-440 覆盖 `selectRespSize` 并再次 `Consume(+newSize)`；到 EOF 时 L413 仍为假且 L418 把 `selectRespSize` 置 0；最终 `iter.Close()` 在 L734 读到 0，于是之前所有响应的字节数永久残留在 `memTracker` 中。
-   - **复现方法**：构造带 `memTracker` 的 `selectResult`（类似 `TestSelectMemTracker`），调用 `IntoIter` 消费 ≥ 1 个响应后 `iter.Close()`，检查 `memTracker.BytesConsumed()` 仍大于 0（等于全部响应大小之和）。
-   - **tidb-rs 处理**：不照搬；按 A1 §5 要求在切换/丢弃 `selectResp` 时正确归还记账，关闭后恒为 0（实现时复现开 issue 标 `go-bug-fixed`）。
+   - **机制**：每消费完一个 `selectResp` 后，`selectResultIter.Next` 在 L949 执行 `iter.result.selectResp = nil`，但未扣减 `selectRespSize` 也未清零它。下一轮进入 `fetchRespWithIntermediateResults` 时，L413 的 `if r.selectResp != nil` 为假，跳过 `r.memConsume(-selectRespSize)`；随后 L439-440 覆盖 `selectRespSize` 并再次 `Consume(+newSize)`；到 EOF 时 L413 仍为假且 L418 把 `selectRespSize` 置 0；最终 `iter.Close()` 在 L734 读到 0，所有已消费响应的字节数永久残留在 `memTracker` 中。
+   - **Go v8.5.8 实测结果**：通过导出 API `distsql.Select` + `sr.IntoIter(nil)` 消费 3 批 `SelectResponse`（`size1=10, size2=12, size3=8`，合计 30 字节）：第 1 批后 `BytesConsumed=10`、第 2 批后 `22`、第 3 批后 `30`；读至 EOF 并调用 `iter.Close()` 后仍为 **`BytesConsumed=30`**（100% 泄漏）。提前关闭对照：在第 1 批中途关闭得 `0`（当前批未清 `selectResp`，被 `close()` 扣减）；消费完第 1 批并在第 2 批中途关闭得 **`10`**（仅扣减第 2 批，第 1 批永久泄漏）。SQL 层推下 `IndexLookUp` 经 `IntoIter` 可达。
+   - **tidb-rs 处理与归属**：按已确认基础设计 **A1 §3.5 / §5**（宪章第九条 2：每个 tracker 在语句结束后必须归零），在切换/丢弃 `selectResp` 时正确归还记账，关闭后恒为 0；第 2 部分开 `upstream-pitfall` 标 `go-bug-fixed`。
 
-2. **`RequestBuilder.SetHandleRanges` 未检查 `builder.err`，可触发 nil 指针 panic 或静默吞掉前置错误**
-   - **位置**：`pkg/distsql/request_builder.go:156-160`。
-   - **机制**：`SetHandleRanges` 调用 `SetHandleRangesForTables` 后，无条件执行 `builder.err = builder.Request.KeyRanges.SetToNonPartitioned()`：
-     - 若 `CommonHandleRangesToKVRanges`（经 `EncodeIndexKey`）报错返回 `(nil, err)`，此时 `builder.Request.KeyRanges == nil`，L158 调用 `SetToNonPartitioned()` 解引用 `len(rr.ranges)`（`pkg/kv/kv.go:474`）直接 nil 指针 panic（对比同类函数 `SetIndexRanges` L139、`IndexRangesToKVRangesWithInterruptSignal` L712 均先检查 `err != nil`）；
-     - 若调用 `SetHandleRanges` 前 `builder.err` 已非空且 `KeyRanges` 曾被设为单分区非空值，L158 会把 `builder.err` 覆盖为 `nil`，静默吞掉前置错误。
-   - **复现方法**：(a) 构造 common handle 表与会导致 `codec.EncodeKey` 报错的 `ranger.Range`（如非法 Datum 类型或严格模式编码错误），调用 `(&RequestBuilder{}).SetHandleRanges(dctx, tid, true, ranges)` 观察 panic；(b) 先设置单分区 `KeyRanges` 并令 `SetDAGRequest` 失败，再调 `SetHandleRanges`，观察 `Build()` 返回 `err == nil`。
-   - **tidb-rs 处理**：实现时先在 `v8.5.8` 复现；若确认 panic 属宪章第九条 3（同类路径 `SetHandleRangesForTables` 返回错误而非 panic），开 `upstream-pitfall` + `go-bug-fixed`，Rust 中检查 `if self.err.is_none()` 且仅对 `Some(kr)` 调用 `set_to_non_partitioned()`，并登记裁定。
+2. **`RequestBuilder.SetHandleRanges` 未检查 `builder.err`，触发 nil 指针 panic 或静默吞掉前置错误**（**已实测复现**）
+   - **位置**：`pkg/distsql/request_builder.go:156-160` 与 `pkg/kv/kv.go:473-479`。
+   - **机制**：`SetHandleRanges` 调用 `SetHandleRangesForTables` 后无条件执行 `builder.err = builder.Request.KeyRanges.SetToNonPartitioned()`：
+     - **场景 (a) nil 指针 panic**：若 `CommonHandleRangesToKVRanges`（经 `EncodeIndexKey`）报错返回 `(nil, err)`，`builder.Request.KeyRanges == nil`，L158 调用 `SetToNonPartitioned()` 解引用 `len(rr.ranges)` 直接 nil 指针 panic（对比同类函数 `SetHandleRangesForTables`、`SetIndexRanges` L139、`IndexRangesToKVRangesWithInterruptSignal` L712 以及分区表 `TableReader` 走的 `kvRangeBuilder.buildKeyRange` 均返回错误而不 panic）。
+     - **场景 (b) 静默吞掉前置错误**：若调用 `SetHandleRanges` 前 `builder.err != nil` 且 `KeyRanges` 为单分区非空值，L158 把 `builder.err` 覆盖为 `nil`。
+   - **Go v8.5.8 实测结果**：
+     - 场景 (a)：分别传入非法 `KindInterface` Datum 与 SQL 类型 `KindMysqlDecimal` 溢出值（`999999.99` 编入 `DECIMAL(5,2)`）：`SetHandleRangesForTables(...).Build()` 正常返回 `err="unsupport encode type 14"` / `err="[types:1690]%s value is out of range in '%s'"`；对完全相同的输入调用 `SetHandleRanges(...)` 均直接 panic：`runtime error: invalid memory address or nil pointer dereference`。可达性：Go API / govec 直接可达；SQL 层常规查询由 `ranger` 预先校验/转换常量，仅当非法/溢出区间 datum 绕过 `ranger` 进入非分区聚簇表 `TableReaderExecutor.buildKVReq`（`table_reader.go:586`）时才会命中。
+     - 场景 (b)：先令 `SetIndexRanges` 报错，再调 `SetKeyRanges` 置入单分区区间，随后调 `SetHandleRanges(...).Build()`，返回 `req!=nil=true, err=<nil>`（前置错误被吞）。可达性：**仅 Go API 可达**（TiDB 内全部 3 处调用方 `table_reader.go:586`、`checksum.go:290`、`ddl/reorg.go:747` 均在新 `RequestBuilder` 上首个调用 `SetHandleRanges`）。
+   - **tidb-rs 处理与归属**：属**宪章第九条 3**（可复现的 Go panic，且 Go 同类路径返回错误；修正不改变发往 TiKV/TiFlash 的请求，也不影响性能/资源行为）。第 1 部分实现中仅在 `self.err.is_none()` 时转换并调用 `set_to_non_partitioned()`，立即开 `upstream-pitfall`（`go-bug-fixed`），经协调人与评审人确认后在 `rulings.toml` 登记并在每日汇总告知负责人。
 
-3. **`selectResultRuntimeStats.mergeCopRuntimeStats` 用 `maps.Copy` 覆盖而非累加 `backoffSleep`**
-   - **位置**：`pkg/distsql/select_result.go:982-987`（对比 `Merge` L1038-1040 与 `Clone` L1017-1019 的 `+=`）。
-   - **机制**：同一个 `selectResult` 收到多个 cop task 响应且包含同名 backoff 类型（如 `RegionMiss`）时，`maps.Copy(s.backoffSleep, copStats.BackoffSleep)` 会用最后一个任务的耗时覆盖之前所有任务的耗时，导致 `EXPLAIN ANALYZE` 中 `backoff{...}` 偏小。
-   - **复现方法**：对同一个 `selectResultRuntimeStats` 连续调用两次 `mergeCopRuntimeStats`，均传 `BackoffSleep: map[string]time.Duration{"RegionMiss": time.Millisecond}`，观察 `s.backoffSleep["RegionMiss"] == 1ms` 而非 `2ms`。
-   - **tidb-rs 处理**：只影响可观测性（`EXPLAIN ANALYZE`），不造成宪章第一条 2 所列后果；按宪章第一条 2 与第九条 2 **照 Go 移植**（覆盖写），复现后开 `upstream-pitfall` + `go-bug-kept`。
+3. **`selectResultRuntimeStats.mergeCopRuntimeStats` 用 `maps.Copy` 覆盖而非累加 `backoffSleep`**（**已实测复现**，可从 SQL 触发）
+   - **位置**：`pkg/distsql/select_result.go:982-987`（对比 `Merge` L1038-1040 的 `+=`）。
+   - **Go v8.5.8 实测结果**：经导出 API `distsql.SelectWithRuntimeStats` 返回 2 个带 `CopRuntimeStats` 的子结果——task 1 含 `BackoffSleep: {"RegionMiss": 10ms, "tikvRPC": 3ms}`（`respTime=5ms`）、task 2 含 `BackoffSleep: {"RegionMiss": 2ms}`（`respTime=7ms`），最终 `statsColl.GetRootStats(1).String()` 输出：
+     `"cop_task: {num: 2, max: 7ms, min: 5ms, avg: 6ms, p95: 7ms, copr_cache_hit_ratio: 0.00}, backoff{RegionMiss: 2ms, tikvRPC: 3ms}"`
+     确认 `RegionMiss` 被覆盖为 `2ms` 而非累加后的 `12ms`（`EXPLAIN ANALYZE` 多 region 查询直接可见）。
+   - **tidb-rs 处理与归属**：仅影响可观测性（`EXPLAIN ANALYZE`），不造成宪章第一条 2 所列后果；按宪章第一条 2 与第九条 2 **照 Go 移植**（覆盖写），开 `upstream-pitfall` 标 `go-bug-kept`。
 
-4. **`sortedSelectResults.Close` 遇首个错误提前返回，泄漏后续子 `SelectResult` 与缓存内存**
+4. **`sortedSelectResults.Close` 遇首个错误提前返回，泄漏后续子 `SelectResult` 与缓存内存**（**已实测复现**，可从 SQL 触发）
    - **位置**：`pkg/distsql/select_result.go:268-278`（对比 `serialSelectResults.Close` L325-332）。
-   - **机制**：循环中一旦第 `i` 个 `sr.Close()` 返回非空错误即刻 `return err`，第 `i` 个的 `cachedChunks[i]` 未扣减内存，且第 `i+1..` 个子 `SelectResult`（及其后台 `copIterator` goroutine）全部未关闭。
-   - **复现方法**：构造含 2 个 mock `SelectResult` 的 `sortedSelectResults`，第 0 个 `Close()` 返回错误，观察第 1 个的 `Close()` 未被调用且 `memTracker` 未归零。
-   - **tidb-rs 处理**：不照搬泄漏（违反 N3 §3.5 task 不泄漏与资源释放保证）；Rust 中关闭全部子结果并释放全部内存，仍返回遇到的第一个错误（返回值在单错误时与 Go 相同），复现后开 `upstream-pitfall` + `go-bug-fixed`。
+   - **Go v8.5.8 实测结果**：经导出 API `distsql.NewSortedSelectResults` 构造 2 个 mock `SelectResult`（`sr0.Close()` 返回 `"close err on sr0"`，`sr1.Close()` 返回 `nil`），调用一次 `Next` 后调用 `Close()`：返回 `err="close err on sr0"`，`sr0.closed=true`、**`sr1.closed=false`**，`memBeforeClose=272`、**`memAfterClose=272`**（`sr1` 未关闭且 272 字节缓存未释放）。另实测在未调 `Next` 时直接 `Close()`（`cachedChunks[i] == nil`）**不 panic**（Go `(*chunk.Chunk).MemoryUsage()` 对 nil 返回 0）。
+   - **tidb-rs 处理与归属**：按已确认基础设计 **N3 §3.5 + A1 §5**（宪章第九条 2：关闭时必须终止全部后台 worker 并使内存记账归零），关闭全部子结果并释放全部缓存内存，仍返回遇到的第一个错误（单错误返回值与 Go 一致）；第 2 部分开 `upstream-pitfall` 标 `go-bug-fixed`。
 
-5. **`RequestBuilder.verifyTxnScope` 在 `TableInfoByID` 未命中时 nil 指针 panic**
+5. **`RequestBuilder.verifyTxnScope` 在 `TableInfoByID` 未命中时 nil 指针 panic**（**已实测复现，但仅 mock/不一致 InfoSchema 可达**）
    - **位置**：`pkg/distsql/request_builder.go:455-456`。
-   - **机制**：当 `FindTableInfoByPartitionID` 未命中而回退到 `tblInfo, _ = builder.is.TableInfoByID(phyTableID)` 时忽略了 `ok` 返回值，若 `tblInfo == nil`，下一行 `tblInfo.Name.String()` panic。
-   - **复现方法**：用仅在 `PlacementBundleByPhysicalTableID` 返回不匹配 DC、但 `TableInfoByID` 返回 `(nil, false)` 的 mock `MetaOnlyInfoSchema` 调用 `RequestBuilder.Build()`。
-   - **tidb-rs 处理**：真实 InfoSchema 下不可达；Rust 中若 `TableInfoByID` 返回 `None` 使用空表名（或明确错误）避免 panic，记为低优先级 `upstream-pitfall`。
+   - **Go v8.5.8 实测结果**：构造 mock `MetaOnlyInfoSchema`（`PlacementBundleByPhysicalTableID(42)` 返回 `leaderDC="dc-east"`，`FindTableInfoByPartitionID` 与 `TableInfoByID` 均返回未命中），以 `TxnScope="dc-west"` 调用 `RequestBuilder.Build()`，实测 panic：`runtime error: invalid memory address or nil pointer dereference`。
+   - **可达性与处理**：在一致的真实 `InfoSchemaV2` 下，存在 placement bundle 的物理表必在表/分区元数据中，**真实集群不可达**；且 tidb-rs 当前 `VerifyTxnScope` 命中 placement bundle 时返回 `blocked("X", ...)`（§5），不进入该分支。Rust 中以 `Option` 安全处理（未命中时使用空表名）天然不 panic；因仅限 mock 不可达场景，**不开 `upstream-pitfall`**（同 D12.1 spec §5 第 2 条口径）。
 
-6. **`PartitionHandlesToKVRanges` 对 `CommonHandle.Encoded()` 原地 `append(..., 0)` 存在切片别名风险**
+6. **`PartitionHandlesToKVRanges` 对 `CommonHandle.Encoded()` 原地 `append(..., 0)` 篡改底层数组**（**已实测复现**）
    - **位置**：`pkg/distsql/request_builder.go:675`（对比 `TableHandlesToKVRanges` L634 使用 `kv.Key(commonHandle.Encoded()).Next()`）。
-   - **机制**：若 `commonHandle.Encoded()` 底层数组有富余容量（`cap > len`），`append(commonHandle.Encoded(), 0)` 会直接覆写底层数组下一字节；若该字节属于外部共享缓冲（如相邻编码键），会静默破坏外部数据。
-   - **复现方法**：用一个 `cap > len` 的切片构造 `CommonHandle`，在末尾之后写入哨兵字节，调 `PartitionHandlesToKVRanges` 观察哨兵被改写为 `0`。
-   - **tidb-rs 处理**：Rust 使用 `Key::next()` 分配独立 `Vec<u8>`，天然无别名覆写问题，输出字节完全一致。
+   - **Go v8.5.8 实测结果**：需满足 `len(encoded) >= 9 && cap > len`（实测 `kv.NewCommonHandle` 对 `len < 9` 会拷贝进新的 9 字节定长数组 `cap == 9`）。对编码后长 19 字节的字符串 `"abcdefghijk"` 构造 `cap=23` 的切片并在末尾后写入哨兵 `0xAA, 0xBB, 0xCC, 0xDD`：调用 `PartitionHandlesToKVRanges` 后底层数组末尾被原地改写为 **`0x00, 0xBB, 0xCC, 0xDD`**；对照 `TableHandlesToKVRanges` 哨兵保持 `0xAA` 且 `EndKey` 完全一致。TiDB 内 `tablecodec.go:1505`（`kv.NewCommonHandle(b[:hLen])`）等路径确实可能传入 `cap > len` 的子切片。
+   - **tidb-rs 处理与归属**：Rust 使用 `Key::next()` 分配独立 `Vec<u8>`，输出字节与 Go 100% 一致、无别名覆写问题（零对外行为差异）；第 2 部分可记低优先级 `upstream-pitfall`（`go-bug-fixed`）。
 
-7. **`indexRangesToKVWithoutSplit` 在多表场景低估切片头内存**
+7. **`indexRangesToKVWithoutSplit` 切片头估算未乘 `len(tids)`**（**仅未导出函数内部复现，v8.5.8 全部导出 API 不可达**）
    - **位置**：`pkg/distsql/request_builder.go:791`。
-   - **机制**：`krs` 有 `len(tids)` 个切片、每个容量 `len(ranges)`，但 L791 只计了 `sizeof(kv.KeyRange) * len(ranges)`，漏乘 `len(tids)`。仅影响内存估算值，在 A1 下不复存在。
+   - **Go v8.5.8 实测结果与可达性核验**：直接调用未导出函数 `indexRangesToKVWithoutSplit`（`len(tids)=3, len(ranges)=10, sizeof(kv.KeyRange)=80`），实测 `mt.BytesConsumed()=2660` = L791 的 `800`（`80*10`，少算 2 个表的 `1600` 字节）+ 采样项 `1860`。但全库核验调用链发现：`indexRangesToKVWithoutSplit` 仅由未导出的 `indexRangesToKVRangesForTablesWithInterruptSignal` 调用，后者全库仅有两个导出调用方——`IndexRangesToKVRangesWithInterruptSignal`（L711，固定传 `[]int64{tid}`，`len==1`）与 `IndexRangesToKVRangesForTables`（L721，固定传 `memTracker=nil`）。因此 **`len(tids) > 1 && memTracker != nil` 在 v8.5.8 任何导出 API 与 SQL 中均不可达**；且在 A1 下不复存在，**不开 `upstream-pitfall`**。
+
+8. **（核验新发现）`RequestBuilder.Build` 在 `KeyRanges == nil` 且设了非 global `TxnScope` 时提前调 `verifyTxnScope` 导致 nil 指针 panic**（**已实测复现**）
+   - **位置**：`pkg/distsql/request_builder.go:83-89` 与 `pkg/tablecodec/tablecodec.go:2023`。
+   - **机制**：`Build()` 在 L83 调用 `builder.verifyTxnScope()`（进而调 `tablecodec.VerifyTableIDForRanges(builder.Request.KeyRanges)`，解引用 `keyRanges.PartitionNum()`），却在 L87-89 才把 `KeyRanges == nil` 补成空 `NewNonPartitionedKeyRanges(nil)`，且 L83 前未检查 `builder.err`。因此当 `TxnScope` 非空且非 `"global"`、`is != nil` 时，无论是未设 `KeyRanges`（例如仅设 `SetPartitionIDAndRanges`）还是前置 `SetIndexRanges` 报错留下 `KeyRanges == nil`，调用 `Build()` 均会直接 panic 而非正常构建或返回前置错误。
+   - **Go v8.5.8 实测结果**：(a) `(&RequestBuilder{}).SetTxnScope("dc-west").SetFromInfoSchema(is).Build()` → panic：`runtime error: invalid memory address or nil pointer dereference`；(b) `(&RequestBuilder{}).SetIndexRanges(dctx, 1, 1, badRanges).SetTxnScope("dc-west").SetFromInfoSchema(is).Build()` → 同样 panic，覆盖了 `SetIndexRanges` 的错误。
+   - **tidb-rs 处理与归属**：属**宪章第九条 3**（与第 2 条同属 `RequestBuilder` nil-deref panic，对照设空 `KeyRanges` 或 `TxnScope="global"` 的路径均正常返回 `Ok`/前置 `Err`，不改变发往 TiKV/TiFlash 的请求）。第 1 部分实现中将 `KeyRanges` 空值初始化放在 `verify_txn_scope` 之前且在 `self.err.is_none()` 时才执行 `verify_txn_scope()`，与第 2 条一并开 `upstream-pitfall`（`go-bug-fixed`）并走第九条 3 登记流程。
+
+**`RequestBuilder` 复用与预处理语句重执行审计**：全库核验 `pkg/executor/` 全部调用方（`table_reader.go`、`distsql.go`、`index_merge_reader.go`、`builder.go`），均在每次 `buildKVReq*` 局部声明新的 `var builder distsql.RequestBuilder`，不跨请求或跨 `PREPARE`/`EXECUTE` 复用；`StatementContext.distSQLCtxCache` 随每条语句 `ResetContextOfStmt` 重建。Go v8.5.8 实测 `Build()` 二次调用：带 `-tags intest` 返回 `err="request builder is already used"`，不带 `-tags intest` 返回 `(&builder.Request, nil)`（对应 Rust `#[cfg(test)]` 检查）。
 
 ---
 
@@ -638,7 +646,7 @@ pub trait SelectResult: Send {
 
 无。
 
-说明：本块不改变任何系统变量、默认值、权限或长期用户可见语义；TiFlash/MPP（`DEF.MPP`）、`Analyze`（宪章第四条 3 委托）、`Checksum`（N0 §3 不移植 `D12.14`）及 client-rust 统计缺口（D07.2 §6.3）均已有既定裁决；§8 第 1、4 条属于已确认基础设计 N3+A1 的资源释放/记账归零要求，§8 第 2 条属于宪章第九条 3（实现时复现后再由协调人/评审人确认并在每日汇总告知负责人），§8 第 3 条按宪章第一条 2 照 Go 移植。
+说明：本块不改变任何系统变量、默认值、权限或长期用户可见语义；TiFlash/MPP（`DEF.MPP`）、`Analyze`（宪章第四条 3 委托）、`Checksum`（N0 §3 不移植 `D12.14`）及 client-rust 统计缺口（D07.2 §6.3）均已有既定裁决；§8 全部问题均已在真实 Go `v8.5.8` 上实测核验——第 1、4 条属于已确认基础设计 N3+A1 的资源释放/记账归零要求（宪章第九条 2），第 2、8 条属于宪章第九条 3（可复现 Go nil 指针 panic 且不改变发往 TiKV/TiFlash 的请求，由协调人/评审人确认、登记台账并在每日汇总告知负责人），第 3 条按宪章第一条 2 与第九条 2 照 Go 移植，第 6 条输出字节与 Go 完全一致，第 5、7 条在真实 InfoSchema / v8.5.8 导出 API 中不可达。
 
 ### 9.2 维护者已定（宪章第九条 2）
 
@@ -651,7 +659,7 @@ pub trait SelectResult: Send {
 7. **`VerifyTxnScope` 的 placement bundle 边界桩**：空或 `global` scope 以及无 bundle 表按 L1 返回 `Ok(true)`；非 global scope 命中带 placement bundle 的表返回 `blocked("X", ...)`，遵守宪章第五条。
 8. **PoC `tidb-distsql` 隔离保留**：正式代码落 `crates/store/src/distsql/`，默认 `--new-stack=off` 路径保持零改动，待 PoC 执行器/会话整体下线后再删除 `crates/distsql/`。
 9. **govec 新领域 `distsql`**：双架构向量在 tracker CI 核对；Go 单测全量移植（`Analyze`/`Checksum` 除外）；合入 #408 联调前在真实 TiKV `v8.5.8` 上以 `TypeChunk` 与 `TypeDefault` 两种编码运行 `tools/ab`。
-10. **§8 疑似 Go 问题**：由实现任务在 `v8.5.8` 上复现并开 `upstream-pitfall` issue；第 1、4 条按 N3+A1 正确实现（`go-bug-fixed`），第 2 条复现后按宪章第九条 3 确认（`go-bug-fixed`），第 3 条照 Go 移植（`go-bug-kept`）。
+10. **§8 已实测核验的 Go 问题**：已在真实 Go `v8.5.8` 上全部复现核验。第 1 部分涉及的第 2、8 条按宪章第九条 3 修复（`go-bug-fixed`）并开 `upstream-pitfall` issue，第 3 条照 Go 移植（`go-bug-kept`）并开 `upstream-pitfall` issue；第 2 部分涉及的第 1、4 条按 N3+A1 正确实现（`go-bug-fixed`）、第 6 条天然无别名覆写（输出一致），随实现开 `upstream-pitfall`；第 5、7 条在真实 InfoSchema / v8.5.8 导出 API 中不可达，不开 `upstream-pitfall`。
 
 ---
 
