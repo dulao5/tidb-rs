@@ -424,13 +424,19 @@ impl PhysicalPlan for PhysicalIndexReader {
             self.index_plans = flatten_list_push_down_plan(index_plan);
             let schema = match index_plan.kind() {
                 PhysicalKind::Projection => Some(index_plan.schema().clone_schema()),
-                _ => {
+                PhysicalKind::IndexScan
+                | PhysicalKind::Selection
+                | PhysicalKind::Limit
+                | PhysicalKind::TopN => {
                     let is = self.index_plans[0]
                         .as_any()
                         .downcast_ref::<PhysicalIndexScan>()
                         .expect("interface conversion: base.PhysicalPlan is not *core.PhysicalIndexScan");
                     is.data_source_schema.as_ref().map(Schema::clone_schema)
                 }
+                other => unreachable!(
+                    "unexpected PhysicalIndexReader inner plan {other:?}: HashAgg/StreamAgg must take index_plan.schema() when ported"
+                ),
             };
             self.sp.set_schema(schema);
             self.output_columns = self.sp.schema().clone_schema().columns;

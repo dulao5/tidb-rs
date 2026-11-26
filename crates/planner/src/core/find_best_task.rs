@@ -918,7 +918,7 @@ fn is_full_index_match(candidate: &CandidatePath) -> bool {
 /// `matchProperty`. The vector property (vector indexes) is not ported (TiFlash ANN
 /// indexes, outside the first slice): a property with a vector helper is a boundary.
 // go: matchProperty L2 (the vector index property is a boundary of D10.1)
-fn match_property(
+pub(crate) fn match_property(
     ds: &DataSource,
     ctx: &PlanCtx<'_>,
     path: &mut AccessPath,
@@ -1045,10 +1045,18 @@ fn match_property(
         }
     }
     if !group_by_col_idxs.is_empty() && match_result == PropMatched {
-        let groups = group_ranges_by_cols(&path.ranges, &group_by_col_idxs)?;
-        path.grouped_ranges = groups;
-        path.group_by_col_idxs = group_by_col_idxs;
-        match_result = PropMatchedNeedMergeSort;
+        let Ok(groups) = group_ranges_by_cols(&path.ranges, &group_by_col_idxs) else {
+            return Ok(PropNotMatched);
+        };
+        const MAX_GROUP_COUNT: usize = 2048;
+        if groups.len() > MAX_GROUP_COUNT {
+            return Ok(PropNotMatched);
+        }
+        if !groups.is_empty() {
+            path.grouped_ranges = groups;
+            path.group_by_col_idxs = group_by_col_idxs;
+            return Ok(PropMatchedNeedMergeSort);
+        }
     }
     Ok(match_result)
 }

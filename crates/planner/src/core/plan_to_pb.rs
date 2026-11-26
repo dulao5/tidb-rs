@@ -308,14 +308,17 @@ impl PhysicalIndexScan {
         _store_type: StoreType,
     ) -> Result<tipb::Executor, Error> {
         let mut owned_cols: Vec<Arc<ColumnInfo>> = Vec::with_capacity(self.schema().len());
-        let table_columns = self.table.columns.as_deref().unwrap_or(&[]);
+        let public_cols = self.table.cols();
         for col in &self.schema().columns {
             if col.id == ExtraHandleID as i64 {
                 owned_cols.push(Arc::new(new_extra_handle_col_info()));
             } else if col.id == ExtraPhysTblID as i64 {
                 owned_cols.push(Arc::new(new_extra_phys_tbl_id_col_info()));
             } else {
-                let info = find_column_info_by_id(table_columns, col.id)
+                let info = public_cols
+                    .iter()
+                    .flatten()
+                    .find(|info| info.id == col.id)
                     .expect("runtime error: invalid memory address or nil pointer dereference");
                 owned_cols.push(Arc::clone(info));
             }

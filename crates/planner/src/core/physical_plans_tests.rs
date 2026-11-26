@@ -1118,6 +1118,7 @@ fn physical_index_scan_to_pb_and_check_cover_index() {
     let col_a_info = Arc::new(ColumnInfo {
         id: 2,
         name: CIStr::new("a"),
+        state: tidb_model::StatePublic,
         field_type: new_field_type(TypeLonglong),
         ..Default::default()
     });
@@ -1413,4 +1414,101 @@ fn is_point_get_with_pk_or_unique_key_by_auto_commit_readers() {
         )
         .unwrap()
     );
+    let pt2 = Range {
+        low_val: vec![new_int_datum(1), new_int_datum(2)],
+        high_val: vec![new_int_datum(1), new_int_datum(2)],
+        collators: vec![
+            tidb_types::collate::get_binary_collator(),
+            tidb_types::collate::get_binary_collator(),
+        ],
+        ..Default::default()
+    };
+    assert!(
+        is_point_get_with_pk_or_unique_key_by_auto_commit(
+            ctx.vars,
+            &*mk_tbl_reader(true, vec![pt2])
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn match_property_group_ranges_guards() {
+    use crate::core::find_best_task::match_property;
+    use crate::property::{
+        PhysicalProperty, PropMatched, PropMatchedNeedMergeSort, PropNotMatched, SortItem,
+    };
+    use crate::util::path::AccessPath;
+    use tidb_parser::types::UnspecifiedLength;
+    use tidb_sessionctx::ranger::Range;
+    use tidb_types::datum::new_int_datum;
+
+    let mut vars = session();
+    let ctx = ctx_of(&mut vars);
+    let c_a = col(1);
+    let c_b = col(2);
+    let ds = DataSource::init(
+        &ctx,
+        Arc::new(TableInfo::default()),
+        CIStr::new("test"),
+        Vec::new(),
+        new_schema(vec![Arc::clone(&c_a), Arc::clone(&c_b)]),
+        0,
+    );
+    let prop = PhysicalProperty {
+        sort_items: vec![SortItem {
+            col: Arc::clone(&c_b),
+            desc: false,
+        }],
+        ..Default::default()
+    };
+    let make_path = |n_points: usize| -> AccessPath {
+        let mut ranges = Vec::with_capacity(n_points);
+        for i in 0..n_points {
+            let d = new_int_datum((i * 2) as i64);
+            ranges.push(Range {
+                low_val: vec![d.clone(), new_int_datum(0)],
+                high_val: vec![d, new_int_datum(100)],
+                collators: vec![
+                    tidb_types::collate::get_binary_collator(),
+                    tidb_types::collate::get_binary_collator(),
+                ],
+                ..Default::default()
+            });
+        }
+        AccessPath {
+            ranges,
+            idx_cols: vec![Arc::clone(&c_a), Arc::clone(&c_b)],
+            idx_col_lens: vec![UnspecifiedLength, UnspecifiedLength],
+            eq_cond_count: 0,
+            ..Default::default()
+        }
+    };
+
+    // Empty ranges: trivially all-point loop, but Go keeps PropMatched without setting group fields.
+    let mut empty = make_path(0);
+    assert_eq!(
+        match_property(&ds, &ctx, &mut empty, &prop).unwrap(),
+        PropMatched
+    );
+    assert!(empty.grouped_ranges.is_empty());
+    assert!(empty.group_by_col_idxs.is_empty());
+
+    // 2048 distinct groups: matched with merge sort.
+    let mut at_cap = make_path(2048);
+    assert_eq!(
+        match_property(&ds, &ctx, &mut at_cap, &prop).unwrap(),
+        PropMatchedNeedMergeSort
+    );
+    assert_eq!(at_cap.grouped_ranges.len(), 2048);
+    assert_eq!(at_cap.group_by_col_idxs, vec![0]);
+
+    // 2049 distinct groups: exceeds maxGroupCount (2048) -> PropNotMatched, fields untouched.
+    let mut over_cap = make_path(2049);
+    assert_eq!(
+        match_property(&ds, &ctx, &mut over_cap, &prop).unwrap(),
+        PropNotMatched
+    );
+    assert!(over_cap.grouped_ranges.is_empty());
+    assert!(over_cap.group_by_col_idxs.is_empty());
 }

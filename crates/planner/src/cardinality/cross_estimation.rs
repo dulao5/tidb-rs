@@ -128,9 +128,12 @@ pub fn adjust_row_count_for_index_scan_by_limit(
         let abs = corr.abs();
         if abs < 1.0 {
             // Assume rows are linearly distributed throughout the range - for example: selectivity 0.1 assumes that a
-            // qualified row is found every 10th row.
+            // qualified row is found every 10th row. Note: `powf` is exact while `corr == 0.0` (pseudo stats);
+            // once D10.6 real-stats correlation lands, verify against Go `math.Pow`.
             let correlation_factor = (1.0 - abs).powf(sctx.vars.correlation_exp_factor as f64);
             let selectivity = ds_stats_info.row_count / row_count;
+            // Go uses builtin `min` here; `gostd::math::min` (`math.Min`) matches it for all non-(-Inf, NaN)
+            // pairs (negative infinity cannot occur on non-negative row counts).
             row_count = tidb_base::gostd::math::min(
                 expected_cnt / selectivity / correlation_factor,
                 row_count,

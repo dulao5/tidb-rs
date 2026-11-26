@@ -27,7 +27,7 @@ pub use selectivity::{
 
 /// `z + x * y` the way Go gc compiles row_size.go:89 and cross_estimation.go:110: fused on
 /// arm64, ppc64le, s390x, riscv64, loong64, not on amd64 (GOAMD64=v1) (mapping rule `M-FMA`,
-/// tracker `data/go_fma_sites.tsv`). Rust never contracts by itself.
+/// per the tracker's `go_fma_sites.tsv`). Rust never contracts by itself.
 // glue: M-FMA helper
 #[inline(always)]
 pub(crate) fn madd(z: f64, x: f64, y: f64) -> f64 {
