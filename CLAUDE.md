@@ -46,7 +46,10 @@ file and over any task description.
 6. **No upstream links**: never write github.com/pingcap/… or pingcap/tidb#N in code, specs,
    commits or PRs; upstream numbers only as plain text in backticks. A problem in Go itself is
    filed as an **English issue in this repo** (how to reproduce on v8.5.8), labelled
-   `upstream-pitfall` (Go behaves wrongly: port it as Go does) or `go-gap` (Go lacks a feature),
+   `upstream-pitfall` (Go behaves wrongly) or `go-gap` (Go lacks a feature). Every
+   `upstream-pitfall` issue also gets exactly one of `go-bug-kept` (tidb-rs copies Go: technical
+   debt to fix later) or `go-bug-fixed` (tidb-rs is correct; recorded as a ruling when users can
+   see it),
    and cited in the spec's known-differences section; never filed upstream. If copying Go would
    cause a security problem, wrong results or data loss, do not decide yourself: describe it in
    the issue and **stop and ask** (it needs an entry in `docs/testing/rulings.toml` approved by the
