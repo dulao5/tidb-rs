@@ -131,7 +131,17 @@ tracker 的桩登记表新增 22 行、删除 6 行。`scripts/stub_ratchet.tsv`
 2. **`govec_postprocess`**（共 1,034 条：`plan` 620 + `missing` 360 + `access` 52 + `tables` 1 + 元数据 1）：
    - Go `plan` 中含 `IndexReader` 10 条、`IndexLookUp` 4 条（其中 3 条停在更早边界），对应 `crates/planner/tests/govec_postprocess.rs:92,98` 中的 `("plan D10.2", 11)` 与 `("missing D10.2", 12)`（含 `IndexReader` / `IndexLookUp` 计划节点缺列测试变体）。
    - **第 2A + 2B 部分**合入后，`plan D10.2`（11 条）与 `missing D10.2`（12 条）**全部清零**，同步扩展 `ppDump` 与 `check_reader_schemas`（详见 §13）。
-3. **端到端执行栈（结合 D12.1 2B/2C）**：与 D12.1 第 2B/2C 合入后，原本停在 D10.2 的单索引覆盖读（如仅查 `id`/`k` 的二级索引覆盖扫描）与二级索引回表范围/保序/分页查询正式走通新栈执行；带有 `USE/FORCE/IGNORE INDEX` hint 的语句仍停在 `D13.3`，含 `OR` 多路径/`MVIndex` 的语句仍停在 `D10.7`，部分索引语句仍停在 `D10.2`（第 2C 部分）/`D09.2`。
+3. **2A / 2B 先于 D12.1 2B/2C 合入期间的客户端可见变化（吸取 #431 教训）**：
+   - 第 2A/2B 部分落地后、在 D12.1 第 2B/2C 执行器合入之前，单索引与回表语句已在 Rust 新栈完成完整规划，仅在执行器构建入口（`crates/executor/src/builder.rs:230-245`）的 `blocked-by:D12.1` 处停住并回退。在此窗口期，以下四类客户端可见输出改由 `tidb-rs` 直接产生：
+     1. 索引语句的 **`PREPARE` 列元数据**（`plan_cache_utils.rs` 在规划完成后直接返回列信息）；
+     2. 索引语句在**规划阶段的报错**；
+     3. **实例级计划缓存**中的计划内容；
+     4. 物理优化阶段追加进 `StatementContext` 的 **warnings**。
+   - 实施要求：2A 与 2B 必须分别新增集成测试，将至少一条 `IndexReader` 语句与一条 `IndexLookUp` 语句的 `PREPARE` 列元数据逐字段钉死对照 Go TiDB v8.5.8；同时 `builder.rs` 新增的 `PhysicalKind::IndexReader` / `PhysicalKind::IndexLookUpReader` `blocked-by:D12.1` 守卫必须在任何 `StatementContext` 写入（`warnings`、`table_ids`、`is_tikv`）之前拦截，或像 #430 的 `build_table_reader` 一样在回退前显式还原 `StatementContext`，保证回退不残留副作用。
+4. **与 `distsql` 第 2 部分（#434）在分组表范围上的边界**：
+   - 第 2A 部分移除 `GroupRangesByCols` 边界桩（`find_best_task.rs:1043`、`plan_cache_rebuild.rs:406`）后，带 `PropMatchedNeedMergeSort` 的表扫描会生成 `grouped_ranges.len() > 1` 的 `PhysicalTableReader` 计划并抵达执行器，当前依赖 #430 在 `build_table_reader` 中的打开前 `blocked-by:D07.3` 守卫（"multi-group `grouped_ranges`"）安全回退；2A 须新增集成测试验证触发多组 `grouped_ranges` 的语句在 `D07.3` 干净回退且 session 完整还原。
+   - 待 #434（`distsql` 第 2 部分 `NewSortedSelectResults`）合入并接入执行器后，跨分组在 `ByItems` 键上并列的行的归并顺序会随分组次序而变化；由于 Go 自身 `GroupRangesByCols` 遍历 map 顺序随机，此差异按 `M-MAPORDER` 属合法且可接受范围。
+5. **端到端执行栈（结合 D12.1 2B/2C）**：与 D12.1 第 2B/2C 合入后，原本停在 D10.2 的单索引覆盖读（如仅查 `id`/`k` 的二级索引覆盖扫描）与二级索引回表范围/保序/分页查询正式走通新栈执行；带有 `USE/FORCE/IGNORE INDEX` hint 的语句仍停在 `D13.3`，含 `OR` 多路径/`MVIndex` 的语句仍停在 `D10.7`，部分索引语句仍停在 `D10.2`（第 2C 部分）/`D09.2`。
 
 ---
 
@@ -193,8 +203,8 @@ tracker 的桩登记表新增 22 行、删除 6 行。`scripts/stub_ratchet.tsv`
 
 | 现有桩位置 | 当前阻塞 | 处理子部分 | 变更后状态 |
 |---|---|---|---|
-| `crates/planner/src/core/find_best_task.rs:1043` | `D10.2` (`GroupRangesByCols`) | **2A** | **移除桩**，按 §11.8 (`M-MAPORDER`) 实现确定分组并返回 `PropMatchedNeedMergeSort` |
-| `crates/planner/src/core/plan_cache_rebuild.rs:406` | `D10.2` (`GroupRangesByCols` in TableScan) | **2A** | **移除桩**，当范围变化时调用 `group_ranges_by_cols` 重建 `ts.grouped_ranges` |
+| `crates/planner/src/core/find_best_task.rs:1043` | `D10.2` (`GroupRangesByCols`) | **2A** | **移除桩**，按 §11.8 (`M-MAPORDER`) 实现确定分组并返回 `PropMatchedNeedMergeSort`（多组 `TableReader` 计划交由 #430 `build_table_reader` 打开前 `D07.3` 守卫回退，直至接入 #434 `NewSortedSelectResults`，见 §9.2 第 4 条） |
+| `crates/planner/src/core/plan_cache_rebuild.rs:406` | `D10.2` (`GroupRangesByCols` in TableScan) | **2A** | **移除桩**，当范围变化时调用 `group_ranges_by_cols` 重建 `ts.grouped_ranges`（同受 #430 打开前 `D07.3` 守卫保护） |
 | `crates/planner/src/core/plan_cache_rebuild.rs:435` | `D10.1` (`buildRangeForIndexScan`) | **2A** | **拆分移除索引扫描桩**，实现 `build_range_for_index_scan`（`updateRange` 属 IndexJoin 仍留 `blocked-by:D10.1`） |
 | `crates/planner/src/core/find_best_task.rs:1875` | `D10.2` (`convertToIndexScan`) | **2A → 2B** | 2A 移除单读边界，仅在通过 `InvalidTask` 前置校验且 `!path.is_single_scan` 时暂留 `D10.2`；2B **彻底移除桩** |
 | `crates/planner/src/core/task_base.rs:548` | `D10.1` (`convertToRootTaskImpl` IndexReader) | **2A** | **移除桩**，构造 `PhysicalIndexReader` |
@@ -237,7 +247,7 @@ tracker 的桩登记表新增 22 行、删除 6 行。`scripts/stub_ratchet.tsv`
    Rust `Arc` 树不允许在保留 `tablePlan` 根的同时把父节点 `rootParent` 当游离可变指针借出，按 N1 §3.4 改为纯递归所有权改写 `replace_leaf_table_scan_with_local_lookup`：
    - 先对传入的 `table_plan` 执行 `clone_plan()?` 与 `reset_plan_id_recursively(ctx, &mut cloned_table_plan)`；
    - 计算 `index_handle_offsets`；
-   - 递归沿 `children[0]` 走到底层 `PhysicalTableScan`（如遇到分叉或非单链叶子，按 Go `intest.Assert(l == 1)` / `ok` 同等断言 panic）：把叶子 `TableRowIDScan` 设置 `is_child_of_index_look_up = true` 后，构造 `PhysicalLocalIndexLookUp::init(ctx, index_plan, leaf_table_scan, offset)`；回溯时用 `make_mut_plan` 原地（或按需）把每层父节点的 `children[0]` 替换为新子树返回。**结果计划的节点 ID、拓扑、schema 与 Go 100% 一致，零别名写时复制陷阱。**
+   - 递归沿 `children[0]` 走到底层叶子节点，严格遵循 Go 生产行为（`intest.Assert(l == 1)` 在 Go 生产构建中为空操作：遇多分叉仍只沿 `children[0]` 向下，遇非 `PhysicalTableScan` 叶子在 Go 返回 `nil`）：在 Rust 中用 `debug_assert_eq!(children.len(), 1)` 仅作测试期断言、沿 `children[0]` 递归，遇到非 `PhysicalTableScan` 叶子时返回 `Err(...)`（而非生产 `panic`）；命中 `PhysicalTableScan` 叶子时把 `is_child_of_index_look_up` 设为 `true` 并构造 `PhysicalLocalIndexLookUp::init(ctx, index_plan, leaf_table_scan, offset)`；回溯时用 `make_mut_plan` 原地（或按需）把每层父节点的 `children[0]` 替换为新子树返回。**结果计划的节点 ID、拓扑、schema 与 Go 100% 一致，零别名写时复制陷阱。**
 2. **扁平化、下推 `tryPushDownLookUp` 与 `Arc` 写入顺序（关键）**：
    - `PhysicalIndexLookUpReader::init` 按 N1 `Arc` 所有权约束在 Go `initialize.go:254-263` 基础上调整必须先写的顺序：先 `sp.set_schema(table_plan.schema().clone_schema())` 与 `set_stats(table_plan.stats_info())`；再运行 `try_push_down_look_up`（其内部 `reset_row_count_as_zero_recursively(&mut table_plan)` 也在扁平化之前完成）；**随后必须在 `flatten_list_push_down_plan` 之前**对 `table_plan` 调用 `set_table_scan_to_table_row_id_scan(&mut table_plan)`；最后生成 `table_plans = flatten_list_push_down_plan(&table_plan)` 与 `(index_plans, index_plans_un_nature_orders) = flatten_tree_push_down_plan(&index_plan)`。若按 Go 原顺序把 `set_table_scan_to_table_row_id_scan` 放在 `flatten_list_push_down_plan` 之后，因 `table_plans[0]` 已持有一份 `Arc`，`make_mut_plan` 会写时复制出两份 `is_child_of_index_look_up` 不一致的 `TableScan`！
    - **关键约束**：下推模式下 `index_plan` 是包含双子节点 `PhysicalLocalIndexLookUp` 的树而非单链！凡在构造后需要改写 `index_plan`（如 `ResolveIndices`、`propagate_probe_parents`、`rebuild_range`）之处，都必须先清空 `index_plans`（与 `index_plans_un_nature_orders`），改完后用 **`flatten_tree_push_down_plan`**（而非 `flatten_list_push_down_plan`）重建，以保持后序扁平列表及 `IndexPlansUnNatureOrders` 映射正确。
@@ -256,7 +266,7 @@ Go `CopTask.finishIndexPlan` 与 `PhysicalLimit.sinkIntoIndexLookUp`（`task.go:
 
 `PhysicalIndexLookUpReader.GetPlanCostVer2`（`plan_cost_ver2.go:337-341`）中存在在 `&self` 代价计算阶段直接置 `p.Paging = true` 的副作用。为兼容 `&self` 共享读并在实例计划缓存（A3 spec §3.6）下保证并发安全：
 - `paging` 使用 `std::sync::atomic::AtomicBool`（标注 `// interior: (c)`，与 `BasePhysicalPlan::cost` 同一规则）。
-- **当 `self.sp.base.is_sealed()` 为真时，禁止修改 `paging`**（只读计算 0.6 折扣并按 Go 返回代价）；仅当未封存且 `enable_paging && expected_cnt > 0 && expected_cnt <= paging::THRESHOLD` 时执行 `self.paging.store(true, Ordering::Relaxed)`。对于未封存节点上的 `CostFlagRecalculate`（`EnablePaging` 从开切关后重算），照 Go 行为不将 `Paging` 重置为 `false`（详见 §12 第 2 条）。
+- **当 `self.sp.base.is_sealed()` 为真时，禁止修改 `paging`**（只读计算 0.6 折扣并按 Go 返回代价）；仅当未封存且 `enable_paging && expected_cnt > 0 && expected_cnt <= paging::THRESHOLD` 时执行 `self.paging.store(true, Ordering::Relaxed)`。在计划缓存命中路径中（`EnablePaging` 不在缓存键内，见 §12 第 2 条与 [A3 spec](../exceptions/A3-plan-cache/spec.md) §2.1），`Paging = true` 会随缓存计划在 `SET tidb_enable_paging = OFF` 后继续生效（会话缓存同会话如此，A3 实例缓存跨会话亦如此，与 Go 实例缓存一致）；对于未封存节点上的 `CostFlagRecalculate`，同样照 Go 不清零 `Paging`。
 
 ### 11.6 内存估算（`MemoryUsage` vs A3 `HeapSizer`）
 
@@ -278,7 +288,7 @@ Go `CopTask.finishIndexPlan` 与 `PhysicalLimit.sinkIntoIndexLookUp`（`task.go:
 
 - **`M-MAPORDER`（`GroupRangesByCols`）**：Go `find_best_task.go:1085-1102` 遍历 `map[string][]*ranger.Range` 返回结果顺序随机；Rust 使用辅助 `HashMap<Vec<u8>, usize>`（映射到目标下标）+ `Vec<Vec<Range>>` 按 key 首次在输入 `ranges` 中出现的顺序分组（`L2 [M-MAPORDER]`），保证 100% 确定且等价于 Go 的其中一种合法输出。
 - **浮点 `min` 与 `NaN`（`AdjustRowCountForIndexScanByLimit`、`PhysicalIndexLookUpReader.GetPlanCostVer2`）**：必须使用 `tidb_base::gostd::math::min`（不可用 Rust 原生 `f64::min`，因原生 `NaN.min(x) == x` 而 Go `builtin min(NaN, x) == NaN`）。
-- **`M-FMA` 核对**：核对 tracker `data/go_fma_sites.tsv`，`AdjustRowCountForIndexScanByLimit`（`pkg/planner/cardinality/cross_estimation.go:110`）存在 **1 处**已登记 FMA 位置：`rowCount += (path.CountAfterAccess - rowCount) * orderRatio`（在 `arm64`、`ppc64le`、`s390x`、`riscv64`、`loong64` 上融合为 `FMADDD`/`FMADD`，`amd64` `GOAMD64=v1` 不融合）。实现时必须标注 `// [M-FMA] cross_estimation.go:110` 并按目标平台提供显式 `M-FMA` helper（注意既有 `crates/planner/src/cardinality/mod.rs:34` 的 `madd` 漏了 `target_arch = "s390x"`，须使用包含 `s390x` 的完整目标集合，对齐 `crates/planner/src/core/task.rs:297`）。其余待移植文件（`find_best_task.go`、`plan_cost_ver2.go`、`plan_cost_ver1.go`、`plan_to_pb.go`、`explain.go`、`access_object.go`、`resolve_indices.go`、`physical_plans.go`、`initialize.go`、`plan_cache_rebuild.go`、`plan_cacheable_checker.go`、`planbuilder.go`、`partidx/check_constraint.go`）中本任务涉及的函数均为 **0 处** FMA 位置（`calcPagingCost` 2 处已随 VS1-27 完成）。
+- **`M-FMA` 核对**：核对 tracker `data/go_fma_sites.tsv`，`AdjustRowCountForIndexScanByLimit`（`pkg/planner/cardinality/cross_estimation.go:110`）存在 **1 处**已登记 FMA 位置：`rowCount += (path.CountAfterAccess - rowCount) * orderRatio`（在 `arm64`、`ppc64le`、`s390x`、`riscv64`、`loong64` 上融合为 `FMADDD`/`FMADD`，`amd64` `GOAMD64=v1` 不融合）。实现时必须标注 `// [M-FMA] cross_estimation.go:110`，并在 **2A 中直接修复 `crates/planner/src/cardinality/mod.rs:34` 既有的 `madd` helper**（补上缺失的 `target_arch = "s390x"`，对齐 `crates/planner/src/core/task.rs:297`）后直接复用，避免维护第二份平台列表。其余待移植文件（`find_best_task.go`、`plan_cost_ver2.go`、`plan_cost_ver1.go`、`plan_to_pb.go`、`explain.go`、`access_object.go`、`resolve_indices.go`、`physical_plans.go`、`initialize.go`、`plan_cache_rebuild.go`、`plan_cacheable_checker.go`、`planbuilder.go`、`partidx/check_constraint.go`）中本任务涉及的函数均为 **0 处** FMA 位置（`calcPagingCost` 2 处已随 VS1-27 完成）。
 - **PostOptimize 与驱动（`optimizer.rs`）**：
   - `rule_eliminate_projection.go` / `rule_inject_extra_projection.go` 在 Go 中只改写 `PhysicalTableReader`（TiFlash），不改 `IndexReader` / `IndexLookUpReader`，无需改动这两个规则；
   - `optimizer.rs:772` **`propagate_probe_parents`** 与 `:799` **`has_probe_parents_below`** 须补齐 `PhysicalIndexReader`（递归 `index_plan` 并用 `flatten_list_push_down_plan` 重建）与 `PhysicalIndexLookUpReader`（递归 `index_plan` 与 `table_plan` 并分别用 `flatten_tree_push_down_plan` / `flatten_list_push_down_plan` 重建；可参照 `optimizer.rs:544` `rewrite_table_plan` 模式提炼读写 helper），沿用零拷贝捷径；
@@ -292,23 +302,26 @@ Go `CopTask.finishIndexPlan` 与 `PhysicalLimit.sinkIntoIndexLookUp`（`task.go:
 
 ## 12. 在 Go v8.5.8 上实测核验的 Go 行为与边界
 
-以下行为均已在本地 Go TiDB `v8.5.8`（`go1.25.12` arm64 单元测试或 `tidb-server --store=unistore` SQL 会话）上实测复现，并对照检查 `EXPLAIN`、wire `tipb` 字节与可观测性（慢日志 / 系统表 / warnings / `StmtCtx`）：
+以下行为均已在本地 Go TiDB `v8.5.8`（`8b857efa2`）上实测复现，并对照检查 `EXPLAIN`、wire `tipb` 字节与可观测性（慢日志 / 系统表 / warnings / `StmtCtx`）；各条注明具体复现载体（`go1.25.12` arm64 单元测试 vs `tidb-server --store=unistore` SQL 会话），供实现 PR 与对应 `go-bug-kept` issue 附带完整可复现片段：
 
-1. **`GroupRangesByCols` map 遍历序不确定**：
+1. **`GroupRangesByCols` map 遍历序不确定**（复现方式：Go 单元测试 + `tidb-server` `EXPLAIN`）：
    - **实测**：输入 3 组前缀点 range，在 Go `GroupRangesByCols` 上连续执行 40 次产生 3 种分组排列（`[1,2,3]`: 27 次、`[2,3,1]`: 6 次、`[3,1,2]`: 7 次）。
-   - **可见性核查**：核对 `explain.go:81-156`、live `tidb-server` `EXPLAIN` 输出、`plan_to_pb.go:501` 与 `distsql.go:311`——`EXPLAIN` 仅打印 `p.Ranges`（不打印 `GroupedRanges`），`ToPB` 不读取 `GroupedRanges`，执行器对各分组并行发出请求后按 `ByItems` 归并排序。属于 `M-MAPORDER` 覆盖范围（用户不可见），按首次出现序固定；不开 `upstream-pitfall`。
-2. **`PhysicalIndexLookUpReader.GetPlanCostVer2` 的 `Paging` 粘性副作用**：
-   - **实测**：对 `EnablePaging=true` 的 `SELECT ... LIMIT 10` 算一遍代价后 `Paging` 变为 `true`；随后关掉 `EnablePaging = false` 并带 `CostFlagRecalculate` 重算，代价虽按无 0.6 折扣重算，但 `p.Paging` **保持 `true` 未被清零**（`after recalc with EnablePaging=false: Paging=true`）。
-   - **可见性核查**：全仓唯一带 `CostFlagRecalculate` 调用点为 `EXPLAIN ANALYZE`（`common_plans.go:936`，同一会话中 `EnablePaging` 未变）及 `costver2` 测试；A3 `sealed` 计划禁止在计算代价时写入任何缓存状态（§11.5）。该行为不会造成安全、结果错误、数据丢失或无关数据泄露（不触发宪章第一条 2 的修正例外），按宪章第九条 2 与 `CLAUDE.md` §2.6：未封存节点照 Go 保留以确保 `govec_costver2` 完全一致，并在实现 PR 时于本仓开具英语 `upstream-pitfall`（标签 `go-bug-kept`）issue 及在已知差异中记录 Go `plan_cost_ver2.go:337-341`。
-3. **`PhysicalIndexReader.MemoryUsage` 与 `PhysicalIndexLookUpReader.MemoryUsage` 计量缺陷**：
+   - **可见性核查**：核对 `explain.go:81-156`、live `tidb-server` `EXPLAIN` 输出、`plan_to_pb.go:501` 与 `distsql.go:311`——`EXPLAIN` 仅打印 `p.Ranges`（不打印 `GroupedRanges`），`ToPB` 不读取 `GroupedRanges`，执行器对各分组并行发出请求后按 `ByItems` 归并排序（跨组 `ByItems` 并列行的归并次序随分组顺序变化，Go 本身亦随机，见 §9.2 第 4 条）。属于 `M-MAPORDER` 覆盖范围，按首次出现序固定；不开 `upstream-pitfall`。
+2. **`PhysicalIndexLookUpReader.Paging` 粘性与计划缓存跨开关/跨会话沿用**（复现方式：`tidb-server --store=unistore` SQL 会话 + Go 单元测试）：
+   - **实测（主路径：plan cache，live `tidb-server --store=unistore`）**：建表 `tp(id INT PRIMARY KEY, k INT, v VARCHAR(64), KEY idx_k(k))` 插入 10 行，查询 `SELECT /*+ USE_INDEX(tp, idx_k) */ * FROM tp WHERE k >= ? AND v != 'z' ORDER BY k LIMIT 3`。先以 `EXPLAIN FORMAT='cost_trace'` 确认：`tidb_enable_paging = ON` 时 `IndexLookUp_27` 触发 0.60 分页折扣（`estCost = 5280.65`，即 `p.Paging = true`），`OFF` 时无折扣（`estCost = 8801.09`）。随后实跑：
+     - **会话级计划缓存（`tidb_enable_prepared_plan_cache = ON`）**：`SET tidb_enable_paging = ON; PREPARE s ...; SET @p = 2; EXECUTE s USING @p;`（`@@last_plan_from_cache = 0`）→ `SET tidb_enable_paging = OFF; SET @p = 3; EXECUTE s USING @p;` → **`@@last_plan_from_cache = 1` 且 `@@tidb_enable_paging = 0`**，命中并执行同一个 `Paging = true` 的缓存 `IndexLookUp` 计划。
+     - **实例级计划缓存（`SET GLOBAL tidb_enable_instance_plan_cache = ON`）**：会话 1（`tidb_enable_paging = ON`）`PREPARE`/`EXECUTE` 入缓存（`hit = 0`）→ 会话 2（`tidb_enable_paging = OFF`）执行同 SQL `PREPARE`/`EXECUTE` → **`@@last_plan_from_cache = 1` 且 `@@tidb_enable_paging = 0`**，跨会话同样命中 `Paging = true` 的缓存计划。
+   - **实测（次路径：Go 单元测试 `CostFlagRecalculate`）**：对 `EnablePaging = true` 算代价后 `p.Paging` 置为 `true`；关闭 `EnablePaging = false` 并带 `CostFlagRecalculate` 重算时，代价按无 0.6 折扣重算，但 `p.Paging` 仍保持 `true` 未清零。
+   - **可见性核查与归口**：因为 `EnablePaging` 不在 `NewPlanCacheKey` 中（`plan_cache_utils.go:257-415`），且执行器 `executor/builder.go:4291` 只要 `v.Paging == true` 就会向 TiKV 发送分页请求，所以用户在 `SET tidb_enable_paging = OFF` 后命中缓存仍会发出分页请求——会话缓存在同会话内可见，A3 实例计划缓存（[A3 spec](../exceptions/A3-plan-cache/spec.md) §2.1 刻意不把大多数优化器会话变量放进缓存键以支持跨会话共享，与 Go 实例缓存一致）下跨会话亦可见。结果行完全不受影响（不触发宪章第九条 3 或第一条 2 修正例外），默认照 Go 保留、无需负责人决定；A3 `sealed` 计划继续禁止算代价时回写 `paging`（§11.5）。**实现 2B PR 时按宪章第九条 2 与 `CLAUDE.md` §2.6 开具英语 `upstream-pitfall`（标签 `go-bug-kept`）issue，并将上述 `tidb-server` 计划缓存命中场景作为主复现记录在 issue 中。**
+3. **`PhysicalIndexReader.MemoryUsage` 与 `PhysicalIndexLookUpReader.MemoryUsage` 计量缺陷**（复现方式：Go 单元测试）：
    - **实测**：对同一 `PhysicalIndexReader` 计算 `MemoryUsage`：`IndexPlans` 保留时为 `6935`，置 `nil` 后（保留 `indexPlan`）降为 `3323`（验证 Go `:435` 丢失了 `indexPlan.MemoryUsage()` 返回值，仅累加扁平切片）；64 位实测基大小分别为 `PhysicalIndexScan=560`、`PhysicalIndexReader=264`、`PhysicalIndexLookUpReader=360`、`PhysicalLocalIndexLookUp=216`（与 `physicalSchemaProducer` 差值 `24`）、`PushedDownLimit=16`。
    - **可见性核查**：`MemoryUsage()` 直接控制 `tidb_plan_cache_max_plan_size` 准入开关；为与 Go 准入边界逐条一致，`PhysicalPlan::memory_usage` 严格按 Go 公式，而 A3 实际配额按 `plan_cache_heap_size.rs` 的 `HeapSizer`（独立于 `MemoryUsage()`）精确计算（已由 A3 spec 确定）。
-4. **`checkCoverIndex` 对复合唯一索引非单点非 NULL 范围返回 `true`**：
+4. **`checkCoverIndex` 对复合唯一索引非单点非 NULL 范围返回 `true`**（复现方式：Go 单元测试）：
    - **实测**：2 列 `UNIQUE INDEX (a, b)` 在 `full2`（两列点且非 NULL）与 `nonPoint2`（`(a, b) > (1, 1) AND (a, b) < (2, 2)` 完整两列范围但非单点）上均产出 `idxExec.Unique = true`，仅 `prefix1`（单列）与 `withNull`（含 NULL）产出 `false`。
    - **可见性核查**：直接写入 `tipb.IndexScan.unique` wire 字节，Rust 按 L1 照 Go 移植，实现 wire 100% 一致。
-5. **`AdjustRowCountForIndexScanByLimit` 出现 `0/0 -> NaN`**：
+5. **`AdjustRowCountForIndexScanByLimit` 出现 `0/0 -> NaN`**（复现方式：Go 单元测试 + `tidb-server --store=unistore` SQL 会话）：
    - **实测**：Go 测试传 `dsStatsInfo.RowCount=0, path.CountAfterAccess=0` 时 `selectivity` 为 `NaN`，Go 内置 `min(NaN, 0)` 返回 `NaN`（`got=NaN`）；另在 live `tidb-server --store=unistore` 对清空并 `ANALYZE` 后的表跑 `SELECT b FROM t_zero ORDER BY b LIMIT 1`，观测到 unistore 空表 `ANALYZE` 仍落入 `stats:pseudo` 而显示 `estRows = 1.00`，只有真实 0 行非 pseudo 统计才会进入 `0/0`。Rust 采用 `gostd::math::min` 与 Go 语义一致。
-6. **`PhysicalIndexScan.ToPB` 与 `PhysicalLocalIndexLookUp.ToPB` 省略 `ExecutorId`**：
+6. **`PhysicalIndexScan.ToPB` 与 `PhysicalLocalIndexLookUp.ToPB` 省略 `ExecutorId`**（复现方式：Go 单元测试）：
    - **实测**：Go 编码 hex 分别为 `08011a42...880100900100` 与 `0814880100900100c201020802`，解码后 `ExecutorIdNil=true`、`FGS=(0,0)`、`LocalIndexLookUp.KeepOrderNil=true`（而其余 6 个算子均设 `ExecutorId`）。已在 §11.7 明确禁止调用 `new_executor`。
 
 ---
@@ -332,8 +345,8 @@ Go `CopTask.finishIndexPlan` 与 `PhysicalLimit.sinkIntoIndexLookUp`（`task.go:
 4. **A3 实例计划缓存与内存会计单测（`plan_cache_instance_tests.rs` / `crates/session/src/tests.rs`）**：
    - 覆盖 `SELECT k FROM sbtest1 WHERE k BETWEEN ? AND ?`（`IndexReader`）、`SELECT c FROM sbtest1 WHERE k BETWEEN ? AND ?`（`IndexLookUpReader`）、`GroupRangesByCols` 参数化重建、`LocalIndexLookUp` 下推计划命中 `found_in_plan_cache`：验证二次命中参数相同零拷贝、参数改变正确重建 `Ranges`/`GroupedRanges`/`IndexPlans`、`seal_plan` 后对共享节点算代价不写 `cost` 与 `paging`、`plan_structure_hash` 前后严格不变、`HeapSizer` 误差校验。
    - **第 2C 部分**：新增针对 `IS NOT NULL` 与比较约束、`PartIdxCondNotAlwaysValid` 缓存开关与回退用例（等 `D09.2` `build_simple_expr` 解锁后跑通）。
-5. **路由器与 `tools/ab` 端到端**：
-   - 2A/2B 在 D12.1 第 2B/2C 合入前，集成测试验证所有索引计划稳定在 `executor/builder.rs` 停在 `blocked-by:D12.1` 并无副作用回退 PoC；
+5. **路由器、`PREPARE` 元数据与 `tools/ab` 端到端**：
+   - 2A/2B 在 D12.1 第 2B/2C 合入前，集成测试须覆盖：（a）至少一条 `IndexReader` 语句与一条 `IndexLookUp` 语句的 `PREPARE` 列元数据逐字段对齐 Go TiDB v8.5.8；（b）所有索引计划稳定在 `executor/builder.rs` 停在 `blocked-by:D12.1` 且不修改 `StatementContext`（`warnings`、`table_ids`、`is_tikv`），无副作用回退 PoC；（c）2A 解除 `GroupRangesByCols` 桩后产生多组 `grouped_ranges` 的 `TableReader` 语句稳定停在 #430 的打开前 `blocked-by:D07.3` 守卫并完整还原 session；
    - 与 D12.1 第 2B/2C 合并后，在真实 TiKV 集群（`tools/ab` + sysbench/随机覆盖索引与回表查询）对比 `EXPLAIN` 计划、列元数据与执行结果 0 mismatch。
 
 ---
@@ -352,7 +365,7 @@ Go `CopTask.finishIndexPlan` 与 `PhysicalLimit.sinkIntoIndexLookUp`（`task.go:
 2. **第 2A 阶段 `!is_single_scan` 严格停在 `blocked-by:D10.2`**：先运行 `InvalidTask` 前置校验（如 `CopSingleReadTaskType` 拒绝双读），通过校验后若 `!path.is_single_scan` 仍可构造双读任务则返回 `blocked-by:D10.2`，绝不跳过双读候选而在仅剩的候选里选表路径，确保 2A 合入后的新栈计划与 Go 100% 一致、边界清晰可回退。
 3. **随部分跨块顺带移植既定函数并归口 tracker 计数**：按 §10.2 将 `D10.1`/`D10.5`/`D10.6`/`D10.9`/`D09.0`/`D13.1` 对应的索引算子、代价、基数、后处理与计划缓存函数随 2A/2B 同步移植（各自计入原属块，同时补登第 1 部分既已移植但漏在 `part_funcs.tsv` 的 14 个 `D10.2` 函数），并将 `GetPhysicalIndexScan4LogicalIndexScan` / `deriveStats4LogicalTableScan` / `deriveStats4LogicalIndexScan`（§10.1 3 个 `D10.2`）、`GetPhysicalIndexReader`（`D10.1`）以及 `LogicalIndexScan` 体系的 6 个 `D09.14` 函数/方法 + 1 个 `D10.6` 方法按全仓引用核查归入 `EXC.B`/`B3`。
 4. **`detachRootTableScanPlan` + `buildPushDownIndexLookUpPlan` 与 `PhysicalIndexLookUpReader::init` 的纯 `Arc` 设计**：按 N1 §3.4 以递归重建单一路径 `Arc` 链取代 Go 返回父指针可变别名的写法（§11.3），要求 `PhysicalIndexLookUpReader::init` 在 `flatten_list_push_down_plan` 之前执行 `set_table_scan_to_table_row_id_scan`，并要求所有修改 `table_plan` 或下推 `index_plan` 的路径先清空再重建扁平列表（`flatten_tree_push_down_plan`），杜绝写时复制导致的 `TablePlans`/`IndexPlans` 失步。
-5. **`PhysicalIndexLookUpReader.Paging` 使用 `AtomicBool` 与 `sealed` 保护**：非封存节点照 Go 保留粘性设置（匹配 `costver2`，并在实现 PR 时开具 `upstream-pitfall` / `go-bug-kept` issue 记录之），封存节点依 A3 §3.6 只读不写。
+5. **`PhysicalIndexLookUpReader.Paging` 使用 `AtomicBool` 与 `sealed` 保护**：非封存节点照 Go 保留粘性设置（在计划缓存命中路径中 `EnablePaging` 不在缓存键内，会随缓存计划在 `SET tidb_enable_paging = OFF` 后沿用——会话缓存同会话如此，A3 实例缓存按 A3 §2.1 跨会话亦如此；实现 2B PR 时开具 `upstream-pitfall` / `go-bug-kept` issue 并以该计划缓存场景作为主复现），封存节点依 A3 §3.6 只读不写。
 6. **`PhysicalIndexScan.ToPB` 与 `PhysicalLocalIndexLookUp.ToPB` 绕过 `new_executor`**：按 Go 实测 wire 字节显式省略 `ExecutorId`（及 `LocalIndexLookUp.KeepOrder`），保留 0 值 FGS 标量字段，实现 `ToPB` 逐字节等价。
 7. **`GroupRangesByCols` 确定化（`M-MAPORDER`）、`gostd::math::min`（`NaN` 对齐）与 `M-FMA`**：按输入 range 首次出现顺序分组，不改变 `EXPLAIN`、`ToPB` 与归并语义；基数调整与 `GetPlanCostVer2` 统一用 `gostd::math::min` 保持与 Go `NaN` 一致；`AdjustRowCountForIndexScanByLimit` 按 `go_fma_sites.tsv` 显式对齐 FMA 行为（含 `s390x`）。
 8. **`govec` 扩展与边界清零策略**：升级 `findbest` 与 `postprocess` 的 Go 生成器/Rust 回放器消除 `other: true` 盲区，分阶段直至彻底清零 `findbest`（528 + 140）与 `postprocess`（11 + 12）的 `D10.2` 边界，并扩展 `costver2` 与 `plan_cache_instance_tests`。
