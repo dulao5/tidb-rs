@@ -17,10 +17,11 @@ use tidb_kv::set::{
     Float64SetWithMemoryUsage, StringSetWithMemoryUsage, new_float64_set_with_memory_usage,
     new_string_set_with_memory_usage,
 };
-use tidb_types::{MyDecimal, decimal_add, decimal_div, new_dec_from_int};
+use tidb_types::{MyDecimal, decimal_add, decimal_div, decimal_sub, new_dec_from_int};
 
 use super::aggfuncs::{
-    AggFunc, AggFuncUpdateContext, BaseAggFunc, PartialResult, partial_result_mut,
+    AggFunc, AggFuncUpdateContext, BaseAggFunc, PartialResult, SlidingWindowAggFunc,
+    partial_result_mut,
 };
 use super::func_sum::round_to_ret_tp;
 
@@ -145,6 +146,51 @@ impl AggFunc for AvgOriginal4Decimal {
             decimal_add(&p.sum, &input, &mut new_sum)?;
             p.sum = new_sum;
             p.count += 1;
+        }
+        Ok(())
+    }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for AvgOriginal4Decimal {
+    // go: avgOriginal4Decimal.Slide L1 [M-ERRVAL]
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4AvgDecimal>(pr);
+        for i in 0..shift_end {
+            let Some(input) =
+                self.base.base.args[0].eval_decimal(sctx, st, get_row(last_end + i))?
+            else {
+                continue;
+            };
+            let mut new_sum = MyDecimal::default();
+            decimal_add(&p.sum, &input, &mut new_sum)?;
+            p.sum = new_sum;
+            p.count += 1;
+        }
+        for i in 0..shift_start {
+            let Some(input) =
+                self.base.base.args[0].eval_decimal(sctx, st, get_row(last_start + i))?
+            else {
+                continue;
+            };
+            let mut new_sum = MyDecimal::default();
+            decimal_sub(&p.sum, &input, &mut new_sum)?;
+            p.sum = new_sum;
+            p.count -= 1;
         }
         Ok(())
     }
@@ -419,6 +465,47 @@ impl AggFunc for AvgOriginal4Float64 {
         pr: &mut PartialResult,
     ) -> Result<(), Error> {
         self.base.update_partial_result(sctx, st, rows_in_group, pr)
+    }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for AvgOriginal4Float64 {
+    // go: avgOriginal4Float64.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4AvgFloat64>(pr);
+        for i in 0..shift_end {
+            let Some(input) =
+                self.base.base.base.args[0].eval_real(sctx, st, get_row(last_end + i))?
+            else {
+                continue;
+            };
+            p.sum += input;
+            p.count += 1;
+        }
+        for i in 0..shift_start {
+            let Some(input) =
+                self.base.base.base.args[0].eval_real(sctx, st, get_row(last_start + i))?
+            else {
+                continue;
+            };
+            p.sum -= input;
+            p.count -= 1;
+        }
+        Ok(())
     }
 }
 

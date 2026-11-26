@@ -18,6 +18,8 @@
 // Go identifiers for the type constants in patterns (M-GONAME).
 #![allow(non_upper_case_globals)]
 
+mod window;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;

@@ -377,3 +377,17 @@ rationale = "宪章第九条 3 与 D08.11 spec §9 决定 7：可复现的 Go �
 approver = "zhigang-du"
 approved = "2026-11-26"
 reopen = "基线升级到 NewWindowFuncDesc 使用 AddFlag(NotNullFlag) 的版本，或负责人决定照 Go；窗口算子接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"
+
+[[ruling]]
+id = "R26"
+name = "lead-uint64-offset-no-wraparound"
+class = "divergence"
+plane = "rows"
+layer = "none"
+test = "crates/executor/src/aggfuncs/tests/window.rs::lead_large_uint64_offset_does_not_wrap"
+source = "宪章第九条 3，#405"
+evidence = "Go v8.5.8 的 lead.AppendFinalResult2Chunk（pkg/executor/aggfuncs/func_lead_lag.go:66）直接计算无符号 p.curIdx+v.offset < uint64(len(p.rows))，偏移量接近 2^64 时发生回绕。已在本地 v8.5.8 SQL（SET tidb_executor_concurrency = 1，表含 5 行 {10,20,30,40,50}）上复现：LEAD(a, 18446744073709551615) OVER (ORDER BY a) 返回 [NULL, 10, 20, 30, 40]（行为退化为 LAG(a, 1)），LEAD(a, 18446744073709551614, -1) OVER (ORDER BY a) 返回 [-1, -1, 10, 20, 30]（退化为 LAG(a, 2, -1)）；而 LAG(a, 18446744073709551615) 与不回绕的大偏移量 LEAD(a, 9223372036854775807, -1) 均正常返回默认值。tidb-rs 仅在 Lead::append_final_result2_chunk 中使用 checked_add，溢出时返回默认值，Lag 不动"
+rationale = "宪章第九条 3：可复现的 Go 结果错误（uint64 加法回绕读到前序行），且 Go 自身的 LAG 与不回绕的大偏移量均返回正确默认值；修正只在 TiDB 内存窗口执行阶段生效，不改变持久化数据或下推给 TiFlash 的请求。维护者与评审一致同意保留正确行为"
+approver = "zhigang-du"
+approved = "2026-11-26"
+reopen = "基线升级到 lead.AppendFinalResult2Chunk 避免 curIdx+offset 无符号回绕的版本，或负责人决定照 Go；窗口算子接入规划器后若 ab 测试命中，可补充 layer/unit/stmt"

@@ -35,9 +35,10 @@ use tidb_chunk::row::Row;
 use tidb_executor::aggfuncs::func_count_distinct::{
     new_partial_result_4_approx_count_distinct, write_time,
 };
-use tidb_executor::aggfuncs::{AggFunc, PartialResult, build};
+use tidb_executor::aggfuncs::{AggFunc, PartialResult, build, build_window_functions, new_deque};
 use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode, BaseFuncDesc};
 use tidb_expression::byitem::ByItems;
+use tidb_expression::constant::new_null;
 use tidb_expression::context::BuildContext;
 use tidb_expression::expression::EvalState;
 use tidb_expression::{Column, Constant, Expr, ExprRef};
@@ -46,7 +47,7 @@ use tidb_sessionctx::exprstatic as es;
 use tidb_types::MyDecimal;
 use tidb_types::context::FlagTruncateAsWarning;
 use tidb_types::core_time::CoreTime;
-use tidb_types::datum::{new_int_datum, new_string_datum};
+use tidb_types::datum::{new_int_datum, new_string_datum, new_uint_datum};
 use tidb_types::enum_type::Enum;
 use tidb_types::field_type::new_field_type;
 use tidb_types::json::parse_binary_json_from_string;
@@ -65,6 +66,12 @@ const EXPECTED_BLOCKED: usize = 0;
 /// DATETIME differing in `Type`). `APPROX_COUNT_DISTINCT` uses Go's raw encoding (#393 / #394)
 /// and has 0 diffs.
 const EXPECTED_CANONICAL_DISTINCT_DIFFS: usize = 3;
+
+/// Records intentionally diverging from Go v8.5.8 under ruling R26 (#405, constitution art. 9.3):
+/// `lead.AppendFinalResult2Chunk` in Go adds `curIdx + offset` as wrapping `uint64`, so offsets
+/// `2^64-1` and `2^64-2` wrap around to earlier rows on rows `1..` / `2..`. Rust uses
+/// `checked_add` and returns the default value (NULL or `-1`) on every row.
+const EXPECTED_LEAD_WRAPAROUND_DIFFS: usize = 4;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -282,7 +289,10 @@ fn build_desc(d: &Value) -> Outcome {
         expr_opts.push(es::with_group_concat_max_len(max_len));
     }
     let ctx = es::new_expr_context(expr_opts);
-    let arg_fts: Vec<FieldType> = d["args"].as_array().unwrap().iter().map(ft_of).collect();
+    let arg_fts: Vec<FieldType> = d["args"]
+        .as_array()
+        .map(|a| a.iter().map(ft_of).collect())
+        .unwrap_or_default();
     let extra_fts: Vec<FieldType> = d
         .get("extra_cols")
         .and_then(Value::as_array)
@@ -331,6 +341,56 @@ fn build_desc(d: &Value) -> Outcome {
             .into_ref(),
         );
     }
+    if d.get("u64_arg_null")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        args.push(Expr::Constant(new_null()).into_ref());
+    } else if d
+        .get("has_u64_arg")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let v: u64 = d["u64_arg"].as_str().unwrap().parse().unwrap();
+        let mut u64_ft = new_field_type(mysql::TypeLonglong);
+        u64_ft.add_flag(mysql::UnsignedFlag);
+        args.push(Expr::Constant(Constant::new(new_uint_datum(v), u64_ft)).into_ref());
+    }
+    match d.get("def_kind").and_then(Value::as_str).unwrap_or("") {
+        "null" => args.push(Expr::Constant(new_null()).into_ref()),
+        "const_int" => {
+            let v = d.get("def_int").and_then(Value::as_i64).unwrap_or(0);
+            args.push(
+                Expr::Constant(Constant::new(
+                    new_int_datum(v),
+                    new_field_type(mysql::TypeLonglong),
+                ))
+                .into_ref(),
+            );
+        }
+        "const_str" => {
+            let b = unhex(d.get("def_str").and_then(Value::as_str).unwrap_or(""));
+            args.push(
+                Expr::Constant(Constant::new(
+                    new_string_datum(b),
+                    new_field_type(mysql::TypeVarchar),
+                ))
+                .into_ref(),
+            );
+        }
+        "col" => {
+            let idx = d.get("def_col").and_then(Value::as_u64).unwrap_or(0) as usize;
+            args.push(
+                Expr::Column(Column {
+                    ret_type: Arc::new(fts[idx].clone()),
+                    index: idx as isize,
+                    ..Column::default()
+                })
+                .into_ref(),
+            );
+        }
+        _ => {}
+    }
     let base = BaseFuncDesc::from_parts(
         d["name"].as_str().unwrap().to_owned(),
         args,
@@ -355,7 +415,29 @@ fn build_desc(d: &Value) -> Outcome {
             })
             .collect();
     }
-    match build(&*ctx, &desc, 0) {
+    let is_window = d.get("is_window").and_then(Value::as_bool).unwrap_or(false);
+    let build_res = if is_window {
+        let order_cols: Vec<Column> = d
+            .get("win_order_cols")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|v| {
+                        let idx = v.as_u64().unwrap() as usize;
+                        Column {
+                            ret_type: Arc::new(fts[idx].clone()),
+                            index: idx as isize,
+                            ..Column::default()
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        build_window_functions(&*ctx, &desc, 0, &order_cols)
+    } else {
+        build(&*ctx, &desc, 0)
+    };
+    match build_res {
         Ok(mut func) => {
             if let Some(f) = func.as_deref_mut() {
                 f.set_rng_seed_for_test(20261125);
@@ -429,6 +511,257 @@ fn run(op: &str, a: &[Value]) -> Option<(Value, Option<Error>)> {
         "json_agg" | "percentile" => {
             let action = a[0].as_str().unwrap();
             return run(action, &a[1..]);
+        }
+        "window" => {
+            let action = a[0].as_str().unwrap();
+            return match action {
+                "run" => {
+                    let mut b = match build_desc(&a[1]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let tname = type_name(&b.func);
+                    let f_ref = b.func.as_deref_mut().expect("window func builds");
+                    let is_sliding = f_ref.as_sliding_window().is_some();
+                    let is_mm = f_ref.as_max_min_sliding_mut().is_some();
+                    let f = b.func.as_deref().unwrap();
+                    let mut pr = f.alloc_partial_result();
+                    let ec = b.ctx.get_eval_ctx();
+                    let ret = &*b.desc.ret_tp;
+                    let mut out_parts = vec![];
+                    for (pi, pt) in a[2].as_array().unwrap().iter().enumerate() {
+                        if let Err((step, e)) = update(&b, f, &pt["batches"], &mut pr) {
+                            return Some((
+                                json!({
+                                    "type": tname,
+                                    "sliding": is_sliding,
+                                    "max_min_sliding": is_mm,
+                                    "partitions": out_parts,
+                                    "step": format!("part {pi} {step}"),
+                                }),
+                                Some(e),
+                            ));
+                        }
+                        let finals = pt["finals"].as_u64().unwrap() as usize;
+                        let mut c =
+                            chunk::new_chunk_with_capacity(std::slice::from_ref(ret), finals);
+                        for fi in 0..finals {
+                            if let Err(e) = f.append_final_result2_chunk(&*ec, &mut pr, &mut c) {
+                                return Some((
+                                    json!({
+                                        "type": tname,
+                                        "sliding": is_sliding,
+                                        "max_min_sliding": is_mm,
+                                        "partitions": out_parts,
+                                        "step": format!("part {pi} final {fi}"),
+                                    }),
+                                    Some(e),
+                                ));
+                            }
+                        }
+                        let cells: Vec<Value> = (0..c.num_rows())
+                            .map(|r| {
+                                let row = c.get_row(r);
+                                json!({"null": row.is_null(0), "raw": hex(row.get_raw(0))})
+                            })
+                            .collect();
+                        out_parts.push(Value::Array(cells));
+                        f.reset_partial_result(&mut pr);
+                    }
+                    Some((
+                        json!({
+                            "type": tname,
+                            "sliding": is_sliding,
+                            "max_min_sliding": is_mm,
+                            "partitions": out_parts,
+                            "step": "",
+                        }),
+                        None,
+                    ))
+                }
+                "slide" => {
+                    let mut b = match build_desc(&a[1]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let tname = type_name(&b.func);
+                    let raw_rows = a[2].as_array().unwrap();
+                    let mut src = chunk::new_chunk_with_capacity(&b.fts, raw_rows.len());
+                    for row in raw_rows {
+                        for (col, v) in row.as_array().unwrap().iter().enumerate() {
+                            append(&mut src, &b.fts[col], col, v);
+                        }
+                    }
+                    let all_rows: Vec<Row<'_>> =
+                        (0..src.num_rows()).map(|r| src.get_row(r)).collect();
+                    let get_row = |idx: u64| all_rows[idx as usize];
+                    let f = b.func.as_deref_mut().expect("sliding func builds");
+                    let is_sliding = f.as_sliding_window().is_some();
+                    let is_mm = f.as_max_min_sliding_mut().is_some();
+                    let mut pr = f.alloc_partial_result();
+                    let ec = b.ctx.get_eval_ctx();
+                    let st = EvalState::new();
+                    let ret = &*b.desc.ret_tp;
+                    let mut out_seqs = vec![];
+                    for (si, frames) in a[3].as_array().unwrap().iter().enumerate() {
+                        let frames = frames.as_array().unwrap();
+                        let mut c =
+                            chunk::new_chunk_with_capacity(std::slice::from_ref(ret), frames.len());
+                        let mut prev_start = 0u64;
+                        let mut prev_end = 0u64;
+                        for (fi, fr) in frames.iter().enumerate() {
+                            let fr = fr.as_array().unwrap();
+                            let s = fr[0].as_u64().unwrap();
+                            let e = fr[1].as_u64().unwrap();
+                            if fi == 0 || s > prev_end {
+                                if fi > 0 {
+                                    f.reset_partial_result(&mut pr);
+                                }
+                                if let Some(mm) = f.as_max_min_sliding_mut() {
+                                    mm.set_window_start(s);
+                                }
+                                if let Err(err) = f.update_partial_result(
+                                    &*ec,
+                                    &st,
+                                    &all_rows[s as usize..e as usize],
+                                    &mut pr,
+                                ) {
+                                    return Some((
+                                        json!({
+                                            "type": tname,
+                                            "sliding": is_sliding,
+                                            "max_min_sliding": is_mm,
+                                            "seqs": out_seqs,
+                                            "step": format!("seq {si} frame {fi} update"),
+                                        }),
+                                        Some(err),
+                                    ));
+                                }
+                            } else {
+                                let sw = f.as_sliding_window().expect("sliding window func");
+                                if let Err(err) = sw.slide(
+                                    &*ec,
+                                    &st,
+                                    &get_row,
+                                    prev_start,
+                                    prev_end,
+                                    s - prev_start,
+                                    e - prev_end,
+                                    &mut pr,
+                                ) {
+                                    return Some((
+                                        json!({
+                                            "type": tname,
+                                            "sliding": is_sliding,
+                                            "max_min_sliding": is_mm,
+                                            "seqs": out_seqs,
+                                            "step": format!("seq {si} frame {fi} slide"),
+                                        }),
+                                        Some(err),
+                                    ));
+                                }
+                            }
+                            if let Err(err) = f.append_final_result2_chunk(&*ec, &mut pr, &mut c) {
+                                return Some((
+                                    json!({
+                                        "type": tname,
+                                        "sliding": is_sliding,
+                                        "max_min_sliding": is_mm,
+                                        "seqs": out_seqs,
+                                        "step": format!("seq {si} frame {fi} final"),
+                                    }),
+                                    Some(err),
+                                ));
+                            }
+                            prev_start = s;
+                            prev_end = e;
+                        }
+                        let cells: Vec<Value> = (0..c.num_rows())
+                            .map(|r| {
+                                let row = c.get_row(r);
+                                json!({"null": row.is_null(0), "raw": hex(row.get_raw(0))})
+                            })
+                            .collect();
+                        out_seqs.push(Value::Array(cells));
+                        f.reset_partial_result(&mut pr);
+                    }
+                    Some((
+                        json!({
+                            "type": tname,
+                            "sliding": is_sliding,
+                            "max_min_sliding": is_mm,
+                            "seqs": out_seqs,
+                            "step": "",
+                        }),
+                        None,
+                    ))
+                }
+                "deque" => {
+                    let is_max = a[1].as_bool().unwrap();
+                    let ops = a[2].as_array().unwrap();
+                    let mut dq = new_deque(is_max, |i: &i64, j: &i64| i.cmp(j) as isize);
+                    let mut res = Vec::with_capacity(ops.len());
+                    for op in ops {
+                        let arr = op.as_array().unwrap();
+                        match arr[0].as_str().unwrap() {
+                            "push_back" => {
+                                dq.push_back(arr[1].as_u64().unwrap(), arr[2].as_i64().unwrap());
+                                res.push(Value::Null);
+                            }
+                            "pop_front" => {
+                                let s = dq
+                                    .pop_front()
+                                    .err()
+                                    .map(|e| e.to_string())
+                                    .unwrap_or_default();
+                                res.push(json!(s));
+                            }
+                            "pop_back" => {
+                                let s = dq
+                                    .pop_back()
+                                    .err()
+                                    .map(|e| e.to_string())
+                                    .unwrap_or_default();
+                                res.push(json!(s));
+                            }
+                            "front" => match dq.front() {
+                                None => res.push(Value::Null),
+                                Some(p) => res.push(json!([p.idx, p.item])),
+                            },
+                            "back" => match dq.back() {
+                                None => res.push(Value::Null),
+                                Some(p) => res.push(json!([p.idx, p.item])),
+                            },
+                            "is_empty" => res.push(json!(dq.is_empty())),
+                            "reset" => {
+                                dq.reset();
+                                res.push(json!(dq.is_empty()));
+                            }
+                            "enqueue" => {
+                                let s = dq
+                                    .enqueue(arr[1].as_u64().unwrap(), arr[2].as_i64().unwrap())
+                                    .err()
+                                    .map(|e| e.to_string())
+                                    .unwrap_or_default();
+                                res.push(json!(s));
+                            }
+                            "dequeue" => {
+                                let s = dq
+                                    .dequeue(arr[1].as_u64().unwrap())
+                                    .err()
+                                    .map(|e| e.to_string())
+                                    .unwrap_or_default();
+                                res.push(json!(s));
+                            }
+                            k => panic!("unknown deque op {k}"),
+                        }
+                    }
+                    Some((json!({"res": res}), None))
+                }
+                _ => panic!("unknown window action {action}"),
+            };
         }
         "approx_count_distinct" => {
             let action = a[0].as_str().unwrap();
@@ -873,6 +1206,7 @@ enum CheckResult {
     Matched,
     Blocked,
     CanonicalDistinctDiff,
+    LeadWraparoundDiff,
 }
 
 fn decode_count_cell(cell: &Value) -> Option<i64> {
@@ -1031,6 +1365,90 @@ fn is_canonical_distinct_diff(rec: &Value, got_out: &Value) -> bool {
     saw_diff
 }
 
+/// Returns true when `rec` differs from `got_out` solely because Go v8.5.8's `lead` wraps
+/// `curIdx + offset` as `uint64` (#405 / ruling R26) while Rust uses `checked_add` and returns
+/// the default value on every row.
+fn is_lead_wraparound_diff(rec: &Value, got_out: &Value) -> bool {
+    if rec["op"] != "window" || rec["args"][0] != "run" {
+        return false;
+    }
+    let desc = &rec["args"][1];
+    if desc["name"] != "lead" || desc["has_u64_arg"] != true {
+        return false;
+    }
+    let Ok(offset) = desc["u64_arg"].as_str().unwrap_or("").parse::<u64>() else {
+        return false;
+    };
+    let want_out = &rec["out"];
+    if want_out["type"] != "*aggfuncs.lead"
+        || got_out["type"] != "*aggfuncs.lead"
+        || want_out["step"] != ""
+        || got_out["step"] != ""
+    {
+        return false;
+    }
+    let (Some(w_parts), Some(g_parts), Some(in_parts)) = (
+        want_out["partitions"].as_array(),
+        got_out["partitions"].as_array(),
+        rec["args"][2].as_array(),
+    ) else {
+        return false;
+    };
+    if w_parts.len() != g_parts.len() || w_parts.len() != in_parts.len() {
+        return false;
+    }
+    let def_cell = match desc.get("def_kind").and_then(Value::as_str).unwrap_or("") {
+        "" | "null" => json!({"null": true, "raw": "0000000000000000"}),
+        "const_int" => {
+            let v = desc["def_int"].as_i64().unwrap();
+            json!({"null": false, "raw": hex(&v.to_le_bytes())})
+        }
+        _ => return false,
+    };
+    let mut saw_wrap = false;
+    for ((wp, gp), ip) in w_parts.iter().zip(g_parts.iter()).zip(in_parts.iter()) {
+        let (Some(w_cells), Some(g_cells)) = (wp.as_array(), gp.as_array()) else {
+            return false;
+        };
+        if w_cells.len() != g_cells.len() {
+            return false;
+        }
+        let mut flat_vals: Vec<Value> = vec![];
+        for batch in ip["batches"].as_array().unwrap() {
+            for row in batch.as_array().unwrap() {
+                let cell = &row.as_array().unwrap()[0];
+                if cell.is_null() {
+                    flat_vals.push(json!({"null": true, "raw": ""}));
+                } else {
+                    let v: i64 = cell.as_str().unwrap().parse().unwrap();
+                    flat_vals.push(json!({"null": false, "raw": hex(&v.to_le_bytes())}));
+                }
+            }
+        }
+        let n = flat_vals.len() as u64;
+        for (i, (wc, gc)) in w_cells.iter().zip(g_cells.iter()).enumerate() {
+            let idx = i as u64;
+            let expected_rust = match idx.checked_add(offset) {
+                Some(t) if t < n => &flat_vals[t as usize],
+                _ => &def_cell,
+            };
+            let wrapped = idx.wrapping_add(offset);
+            let expected_go = if wrapped < n {
+                &flat_vals[wrapped as usize]
+            } else {
+                &def_cell
+            };
+            if gc != expected_rust || wc != expected_go {
+                return false;
+            }
+            if expected_rust != expected_go {
+                saw_wrap = true;
+            }
+        }
+    }
+    saw_wrap
+}
+
 /// Compares one record; Err(why) on a difference.
 fn check(rec: &Value) -> Result<CheckResult, String> {
     let op = rec["op"].as_str().unwrap();
@@ -1046,6 +1464,9 @@ fn check(rec: &Value) -> Result<CheckResult, String> {
         if is_canonical_distinct_diff(rec, &out) {
             return Ok(CheckResult::CanonicalDistinctDiff);
         }
+        if is_lead_wraparound_diff(rec, &out) {
+            return Ok(CheckResult::LeadWraparoundDiff);
+        }
         return Err(format!(
             "out differs: got {}",
             serde_json::to_string(&out).unwrap()
@@ -1060,12 +1481,14 @@ fn replay(path: &str, pin_blocked: bool) {
     let mut fails = vec![];
     let mut blocked = 0;
     let mut canonical_distinct_diffs = 0;
+    let mut lead_wraparound_diffs = 0;
     for line in &lines {
         let rec: Value = serde_json::from_str(line).unwrap();
         match check(&rec) {
             Ok(CheckResult::Matched) => {}
             Ok(CheckResult::Blocked) => blocked += 1,
             Ok(CheckResult::CanonicalDistinctDiff) => canonical_distinct_diffs += 1,
+            Ok(CheckResult::LeadWraparoundDiff) => lead_wraparound_diffs += 1,
             Err(why) => {
                 let cut = line
                     .char_indices()
@@ -1090,7 +1513,7 @@ fn replay(path: &str, pin_blocked: bool) {
         lines.len()
     );
     eprintln!(
-        "{path}: {} records, {blocked} blocked, {canonical_distinct_diffs} ruled (R23)",
+        "{path}: {} records, {blocked} blocked, {canonical_distinct_diffs} ruled (R23), {lead_wraparound_diffs} ruled (R26)",
         lines.len()
     );
     if pin_blocked {
@@ -1098,6 +1521,10 @@ fn replay(path: &str, pin_blocked: bool) {
         assert_eq!(
             canonical_distinct_diffs, EXPECTED_CANONICAL_DISTINCT_DIFFS,
             "{path}: ruled R23 records"
+        );
+        assert_eq!(
+            lead_wraparound_diffs, EXPECTED_LEAD_WRAPAROUND_DIFFS,
+            "{path}: ruled R26 records"
         );
     }
 }

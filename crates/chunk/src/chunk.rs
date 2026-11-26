@@ -188,6 +188,38 @@ pub(crate) fn renew_with_capacity(chk: &Chunk, capacity: usize, required_rows: u
     }
 }
 
+/// [`renew_with_capacity`] with the columns allocating through `alloc` (A1 3.3, M-ROW).
+// glue: A1 3.3 / M-ROW renewWithCapacity with a TrackedAlloc
+pub fn renew_with_capacity_in(
+    chk: &Chunk,
+    capacity: usize,
+    required_rows: usize,
+    alloc: ColAlloc,
+) -> Chunk {
+    let Some(columns) = &chk.columns else {
+        return Chunk {
+            in_complete_chunk: chk.in_complete_chunk,
+            ..Chunk::default()
+        };
+    };
+    let mut new_cols = Vec::with_capacity(columns.len());
+    for col in columns {
+        new_cols.push(Arc::new(new_column(
+            col.type_size(),
+            capacity,
+            alloc.clone(),
+        )));
+    }
+    Chunk {
+        columns: Some(new_cols),
+        num_virtual_rows: 0,
+        capacity,
+        required_rows,
+        in_complete_chunk: chk.in_complete_chunk,
+        sel: None,
+    }
+}
+
 /// Renew creates a new Chunk based on an existing Chunk. The newly created Chunk
 /// has the same data schema with the old Chunk. The capacity of the new Chunk
 /// might be doubled based on the capacity of the old Chunk and the maxChunkSize.

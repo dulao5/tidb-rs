@@ -11,7 +11,8 @@ use tidb_chunk::row::Row;
 use tidb_expression::expression::EvalState;
 
 use super::aggfuncs::{
-    AggFunc, AggFuncUpdateContext, BaseAggFunc, PartialResult, partial_result_mut,
+    AggFunc, AggFuncUpdateContext, BaseAggFunc, PartialResult, SlidingWindowAggFunc,
+    partial_result_mut,
 };
 
 /// baseCount, embedded in the COUNT implementations.
@@ -94,6 +95,43 @@ impl AggFunc for CountOriginal4Int {
 
         Ok(())
     }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for CountOriginal4Int {
+    // go: countOriginal4Int.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4Count>(pr);
+        for i in 0..shift_start {
+            let input = self.base.base.args[0].eval_int(sctx, st, get_row(last_start + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p -= 1;
+        }
+        for i in 0..shift_end {
+            let input = self.base.base.args[0].eval_int(sctx, st, get_row(last_end + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p += 1;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +179,43 @@ impl AggFunc for CountOriginal4Real {
             *p += 1;
         }
 
+        Ok(())
+    }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for CountOriginal4Real {
+    // go: countOriginal4Real.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4Count>(pr);
+        for i in 0..shift_start {
+            let input = self.base.base.args[0].eval_real(sctx, st, get_row(last_start + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p -= 1;
+        }
+        for i in 0..shift_end {
+            let input = self.base.base.args[0].eval_real(sctx, st, get_row(last_end + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p += 1;
+        }
         Ok(())
     }
 }
@@ -192,6 +267,43 @@ impl AggFunc for CountOriginal4Decimal {
 
         Ok(())
     }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for CountOriginal4Decimal {
+    // go: countOriginal4Decimal.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4Count>(pr);
+        for i in 0..shift_start {
+            let input = self.base.base.args[0].eval_decimal(sctx, st, get_row(last_start + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p -= 1;
+        }
+        for i in 0..shift_end {
+            let input = self.base.base.args[0].eval_decimal(sctx, st, get_row(last_end + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p += 1;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -239,6 +351,43 @@ impl AggFunc for CountOriginal4Time {
             *p += 1;
         }
 
+        Ok(())
+    }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for CountOriginal4Time {
+    // go: countOriginal4Time.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4Count>(pr);
+        for i in 0..shift_start {
+            let input = self.base.base.args[0].eval_time(sctx, st, get_row(last_start + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p -= 1;
+        }
+        for i in 0..shift_end {
+            let input = self.base.base.args[0].eval_time(sctx, st, get_row(last_end + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p += 1;
+        }
         Ok(())
     }
 }
@@ -290,6 +439,43 @@ impl AggFunc for CountOriginal4Duration {
 
         Ok(())
     }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for CountOriginal4Duration {
+    // go: countOriginal4Duration.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4Count>(pr);
+        for i in 0..shift_start {
+            let input = self.base.base.args[0].eval_duration(sctx, st, get_row(last_start + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p -= 1;
+        }
+        for i in 0..shift_end {
+            let input = self.base.base.args[0].eval_duration(sctx, st, get_row(last_end + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p += 1;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -337,6 +523,43 @@ impl AggFunc for CountOriginal4JSON {
             *p += 1;
         }
 
+        Ok(())
+    }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for CountOriginal4JSON {
+    // go: countOriginal4JSON.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4Count>(pr);
+        for i in 0..shift_start {
+            let input = self.base.base.args[0].eval_json(sctx, st, get_row(last_start + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p -= 1;
+        }
+        for i in 0..shift_end {
+            let input = self.base.base.args[0].eval_json(sctx, st, get_row(last_end + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p += 1;
+        }
         Ok(())
     }
 }
@@ -388,6 +611,45 @@ impl AggFunc for CountOriginal4VectorFloat32 {
 
         Ok(())
     }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for CountOriginal4VectorFloat32 {
+    // go: countOriginal4VectorFloat32.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4Count>(pr);
+        for i in 0..shift_start {
+            let input =
+                self.base.base.args[0].eval_vector_float32(sctx, st, get_row(last_start + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p -= 1;
+        }
+        for i in 0..shift_end {
+            let input =
+                self.base.base.args[0].eval_vector_float32(sctx, st, get_row(last_end + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p += 1;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -435,6 +697,43 @@ impl AggFunc for CountOriginal4String {
             *p += 1;
         }
 
+        Ok(())
+    }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for CountOriginal4String {
+    // go: countOriginal4String.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4Count>(pr);
+        for i in 0..shift_start {
+            let input = self.base.base.args[0].eval_string(sctx, st, get_row(last_start + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p -= 1;
+        }
+        for i in 0..shift_end {
+            let input = self.base.base.args[0].eval_string(sctx, st, get_row(last_end + i))?;
+            if input.is_none() {
+                continue;
+            }
+            *p += 1;
+        }
         Ok(())
     }
 }

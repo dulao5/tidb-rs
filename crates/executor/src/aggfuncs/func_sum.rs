@@ -19,10 +19,11 @@ use tidb_kv::set::{
     Float64SetWithMemoryUsage, StringSetWithMemoryUsage, new_float64_set_with_memory_usage,
     new_string_set_with_memory_usage,
 };
-use tidb_types::{MODE_HALF_UP, MyDecimal, decimal_add};
+use tidb_types::{MODE_HALF_UP, MyDecimal, decimal_add, decimal_sub};
 
 use super::aggfuncs::{
-    AggFunc, AggFuncUpdateContext, BaseAggFunc, PartialResult, partial_result_mut,
+    AggFunc, AggFuncUpdateContext, BaseAggFunc, PartialResult, SlidingWindowAggFunc,
+    partial_result_mut,
 };
 
 #[derive(Debug, Default)]
@@ -138,7 +139,7 @@ pub struct Sum4Float64HighPrecision {
 }
 
 macro_rules! forward_base_sum4_float64 {
-    ($t:ident) => {
+    ($t:ident $(, sliding: $sliding:expr)?) => {
         impl AggFunc for $t {
             // glue: baseSum4Float64.AllocPartialResult through the embedded struct (M-SELF)
             fn alloc_partial_result(&self) -> PartialResult {
@@ -181,12 +182,54 @@ macro_rules! forward_base_sum4_float64 {
             ) -> Result<(), Error> {
                 self.base.merge_partial_result(sctx, src, dst)
             }
+
+            $(
+                // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+                fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+                    if $sliding { Some(self) } else { None }
+                }
+            )?
         }
     };
 }
 
-forward_base_sum4_float64!(Sum4Float64);
+forward_base_sum4_float64!(Sum4Float64, sliding: true);
 forward_base_sum4_float64!(Sum4Float64HighPrecision);
+
+impl SlidingWindowAggFunc for Sum4Float64 {
+    // go: sum4Float64.Slide L1
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4SumFloat64>(pr);
+        for i in 0..shift_end {
+            let Some(input) = self.base.base.args[0].eval_real(sctx, st, get_row(last_end + i))?
+            else {
+                continue;
+            };
+            p.val += input;
+            p.not_null_row_count += 1;
+        }
+        for i in 0..shift_start {
+            let Some(input) =
+                self.base.base.args[0].eval_real(sctx, st, get_row(last_start + i))?
+            else {
+                continue;
+            };
+            p.val -= input;
+            p.not_null_row_count -= 1;
+        }
+        Ok(())
+    }
+}
 
 /// The final DECIMAL of SUM, AVG, FIRST_ROW and MAX / MIN: Go's `retTp` nil check, the
 /// scale of `retTp` (-1: `MaxDecimalScale`) and the in-place `Round` (M-ALIAS).
@@ -290,6 +333,54 @@ impl AggFunc for Sum4Decimal {
         decimal_add(&val, &p2.val, &mut new_sum)?;
         p2.val = new_sum;
         p2.not_null_row_count = p2.not_null_row_count.wrapping_add(count);
+        Ok(())
+    }
+
+    // glue: Go type assertion agg.(SlidingWindowAggFunc) (spec §5.1)
+    fn as_sliding_window(&self) -> Option<&dyn SlidingWindowAggFunc> {
+        Some(self)
+    }
+}
+
+impl SlidingWindowAggFunc for Sum4Decimal {
+    // go: sum4Decimal.Slide L1 [M-ERRVAL]
+    fn slide<'a>(
+        &self,
+        sctx: &dyn AggFuncUpdateContext,
+        st: &EvalState,
+        get_row: &dyn Fn(u64) -> Row<'a>,
+        last_start: u64,
+        last_end: u64,
+        shift_start: u64,
+        shift_end: u64,
+        pr: &mut PartialResult,
+    ) -> Result<(), Error> {
+        let p = partial_result_mut::<PartialResult4SumDecimal>(pr);
+        for i in 0..shift_end {
+            let Some(input) = self.base.args[0].eval_decimal(sctx, st, get_row(last_end + i))?
+            else {
+                continue;
+            };
+            if p.not_null_row_count == 0 {
+                p.val = input;
+                p.not_null_row_count = 1;
+                continue;
+            }
+            let mut new_sum = MyDecimal::default();
+            decimal_add(&p.val, &input, &mut new_sum)?;
+            p.val = new_sum;
+            p.not_null_row_count += 1;
+        }
+        for i in 0..shift_start {
+            let Some(input) = self.base.args[0].eval_decimal(sctx, st, get_row(last_start + i))?
+            else {
+                continue;
+            };
+            let mut new_sum = MyDecimal::default();
+            decimal_sub(&p.val, &input, &mut new_sum)?;
+            p.val = new_sum;
+            p.not_null_row_count -= 1;
+        }
         Ok(())
     }
 }
