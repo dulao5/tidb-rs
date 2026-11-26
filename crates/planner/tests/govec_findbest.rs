@@ -102,7 +102,7 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     // the index reader's cost is part 2.
     ("D10.2 (Go: table)", 140),
     // LogicalWindow.ExhaustPhysicalPlans (physical window enumeration).
-    ("D10.3", 46),
+    ("D10.3", 48),
     // `OR` conditions over two or more paths, or multi-valued indexes: index merge paths.
     ("D10.7", 60),
     // BatchPointGet (several point ranges on a unique key).

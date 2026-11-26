@@ -928,7 +928,8 @@ pub(crate) fn has_agg_flag(e: &Expr) -> bool {
         Expr::PatternLike(x) => has_agg_flag(&x.expr) || has_agg_flag(&x.pattern),
         Expr::PatternRegexp(x) => has_agg_flag(&x.expr) || has_agg_flag(&x.pattern),
         Expr::Row(r) => r.values.iter().any(has_agg_flag),
-        Expr::SetCollation(x) => has_agg_flag(&x.expr),
+        // Go's flagSetter.Leave (parser/ast/flag.go) has no case for SetCollateExpr, so
+        // `SELECT GROUP_CONCAT(c) COLLATE utf8mb4_bin FROM t` is not marked as an aggregate.
         Expr::Variable(v) => v.value.as_ref().is_some_and(has_agg_flag),
         Expr::Case(c) => {
             c.value.as_ref().is_some_and(has_agg_flag)

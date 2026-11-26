@@ -3871,6 +3871,9 @@ fn sort_window_specs<'ast>(
     }
     let mut l_items_buf = Vec::with_capacity(4);
     let mut r_items_buf = Vec::with_capacity(4);
+    // Note: Go uses sort.SliceStable with non-strict `!compareItems`; up to 20 window groups both
+    // Go's sort.SliceStable and Rust's slice::sort_by use insertion sort and match, whereas >20
+    // groups can differ in order because Go uses symMerge while Rust uses a different merge sort.
     windows.sort_by(|a, b| {
         let sa = resolve_spec_id(a.spec, named_specs, local_specs);
         let sb = resolve_spec_id(b.spec, named_specs, local_specs);
@@ -4018,18 +4021,23 @@ fn build_window_specs<'ast>(
     Ok((specs_vec, index))
 }
 
-/// Evaluate a RANGE window frame bound expression into a [`Constant`] with an accurate
-/// [`FieldType`].
+/// Evaluate a RANGE window frame bound expression into a [`Constant`].
 ///
-/// For compound expressions (e.g. `INTERVAL 1.0+0.5 DAY`), derives `RetType` from the
-/// evaluated `Datum` via `default_type_for_value` instead of Go's zero-value `FieldType`
-/// (Divergence ruling R28 / #413, owner decision 2026-11-26 option A).
+/// Strictly for compound decimal `INTERVAL` expressions (e.g. `INTERVAL 1.0+0.5 DAY`),
+/// derives `RetType` from the evaluated `Datum` (`KindMysqlDecimal -> TypeNewDecimal`)
+/// instead of Go's zero-value `FieldType` (`TypeUnspecified -> ETString`, which selects
+/// `SubDateDatetimeString`/`AddDateDatetimeString` and truncates `"1.5"` to 1 day;
+/// Divergence ruling R28 / #413, owner decision 2026-11-26 option A). All other non-literal
+/// bounds (numeric RANGE bounds, non-decimal INTERVALs, parenthesized literals such as
+/// `INTERVAL (1.5) DAY`, and parameter markers such as `INTERVAL ? DAY`) keep Go's
+/// zero-value `FieldType`.
 // go-part: PlanBuilder.buildWindowFunctionFrameBound
 pub(crate) fn eval_window_range_bound_constant(
     ctx: &dyn BuildContext,
     bound_expr: &Expr,
     spec_name: &str,
     in_prepare_stmt: bool,
+    is_interval: bool,
 ) -> Result<Constant, Error> {
     if let Expr::Value(v) = bound_expr {
         let go_val = value_expr_go_value(v);
@@ -4049,11 +4057,18 @@ pub(crate) fn eval_window_range_bound_constant(
         }
     };
     let mut ret_type = FieldType::default();
-    if !(matches!(bound_expr, Expr::ParamMarker(_)) && in_prepare_stmt) {
-        // Divergence ruling R28 (#413, owner decision 2026-11-26 option A): infer Constant.RetType
-        // from the evaluated Datum (e.g. KindMysqlDecimal -> TypeNewDecimal for `INTERVAL 1.0+0.5 DAY`)
-        // so DateAdd/DateSub selects AddDateDatetimeDecimal/SubDateDatetimeDecimal instead of
-        // truncating via ETInt (such windows are no longer pushed down to TiFlash).
+    // Divergence ruling R28 (#413, owner decision 2026-11-26 option A): strictly for a
+    // compound decimal INTERVAL bound (not numeric RANGE, not non-decimal INTERVAL, not a
+    // parenthesized literal like `INTERVAL (1.5) DAY`, and not a ParamMarker like
+    // `INTERVAL ? DAY`), infer Constant.RetType from the evaluated Decimal Datum so
+    // DateSub/DateAdd selects SubDateDatetimeDecimal/AddDateDatetimeDecimal (2 days)
+    // instead of Go's SubDateDatetimeString/AddDateDatetimeString (1 day). Neither String
+    // nor Decimal signatures are pushed down to TiFlash.
+    if is_interval
+        && !in_prepare_stmt
+        && val.kind() == tidb_types::datum::KindMysqlDecimal
+        && !matches!(bound_expr, Expr::ParamMarker(_) | Expr::Paren(_))
+    {
         default_type_for_value(
             &val.get_value(),
             &mut ret_type,
@@ -4552,6 +4567,7 @@ impl<'ast> PlanBuilder<'ast> {
             bound_expr,
             &spec.name.o,
             checker.in_prepare_stmt,
+            bound_clause.unit != ast::TimeUnitType::Invalid,
         )?;
 
         // If it has paramMarker and is in prepare stmt. We don't need to eval it since its value is not decided yet.
@@ -4690,19 +4706,43 @@ impl<'ast> PlanBuilder<'ast> {
             }
             let args =
                 self.build_args4_window_func(ctx, p, &window_func_expr.args, window_agg_map)?;
+            let arg0_not_null_uid = args.first().and_then(|e| match &**e {
+                PExpr::Column(c) if has_not_null_flag(c.ret_type.get_flag()) => Some(c.unique_id),
+                _ => None,
+            });
             checker.in_prepare_stmt = false;
             for expr in &window_func_expr.args {
                 checker.accept(expr);
             }
-            let desc = new_window_func_desc(
+            let Some(desc) = new_window_func_desc(
                 &*ctx.expr_ctx,
                 &window_func_expr.name,
                 args,
                 checker.in_prepare_stmt,
-            )?;
-            if desc.is_none() {
+            )?
+            else {
                 return Err(ErrWrongArguments
                     .gen_with_stack_by_args(go_args![window_func_expr.name.to_lowercase()]));
+            };
+            // Go aliasing (M-FT): window_func.go:76 & logical_plan_builder.go:7136 (#402).
+            // Go strips NotNullFlag via NewWindowFuncDesc inside checkWindowFuncArgs — before ANY
+            // window group is built — mutating the shared *FieldType pointer of args[0]. Clearing
+            // NotNullFlag on `p` right here ensures every window group (even one built before the
+            // first_value/last_value/nth_value group, e.g.
+            // `SELECT LEAD(k,1,0) OVER (ORDER BY k), FIRST_VALUE(k) OVER (ORDER BY id) FROM sbtest1`)
+            // sees the nullable column type when building its own projection and descriptors.
+            // Note: in Go, shared *FieldType aliasing can also reach a DataSource column or an
+            // aggregation's `firstrow` column with a different unique_id (e.g.
+            // `SELECT FIRST_VALUE(a) OVER () FROM t GROUP BY a`, currently blocked at D09.13);
+            // verify that path when D09.13 opens.
+            if let Some(uid) = arg0_not_null_uid
+                && desc
+                    .base
+                    .args
+                    .first()
+                    .is_some_and(|e| !has_not_null_flag(e.get_type(&*ctx.eval_ctx()).get_flag()))
+            {
+                clear_not_null_in_subtree(&mut ctx.arena, p, uid);
             }
         }
         Ok(())
@@ -6527,28 +6567,38 @@ mod tests {
 
     /// Ruling R28 (#413, D09.4 spec §7 item 7 & §9.1 item 2, owner decision 2026-11-26):
     /// A compound decimal expression in a window RANGE INTERVAL bound (e.g. `INTERVAL 1.0+0.5 DAY`)
+    /// R28 (#413): For compound decimal `INTERVAL` bounds (e.g. `INTERVAL 1.0+0.5 DAY`), tidb-rs
     /// derives `Constant.ret_type` from the evaluated `Datum` (`TypeNewDecimal` / `ETDecimal`),
     /// matching literal `INTERVAL 1.5 DAY` and `DATE_SUB` (2 days) rather than Go's `TypeUnspecified`
-    /// (`ETInt`, 1 day). As a consequence, `SubDateDatetimeDecimal` / `AddDateDatetimeDecimal`
-    /// is selected, and such windows are not pushed down to TiFlash.
+    /// (`ETString` -> `SubDateDatetimeString`, which truncates `"1.5"` to 1 day). Neither
+    /// `SubDateDatetimeString` nor `SubDateDatetimeDecimal` is in the TiFlash allowlist, so Go does
+    /// not push these windows down either. All non-ruled shapes (`1+1 PRECEDING`, `INTERVAL 1+1 DAY`,
+    /// `INTERVAL (1.5) DAY`, prepared `INTERVAL ? DAY` with `1.5`) keep Go's zero `FieldType`.
     #[test]
     fn window_range_compound_decimal_interval_uses_decimal_date_func() {
         use tidb_expression::eval::{ArgsFallback, BuiltinFunc, SigDesc, SigDrivers};
         use tidb_expression::scalar_function::ScalarFunction;
         use tidb_sessionctx::exprstatic as es;
 
-        let ev = es::new_eval_context(vec![
-            es::with_type_flags(tidb_types::context::DefaultStmtFlags),
-            es::with_location(Some(tidb_base::gostd::time::utc())),
-            es::with_current_db("test".to_owned()),
-        ]);
-        let expr_ctx = es::new_expr_context(vec![
-            es::with_eval_ctx(ev),
-            es::with_charset("utf8mb4".to_owned(), "utf8mb4_bin".to_owned()),
-            es::with_default_collation_for_utf8mb4("utf8mb4_bin".to_owned()),
-        ]);
+        let make_expr_ctx = |params: Vec<tidb_types::datum::Datum>| {
+            let mut opts = vec![
+                es::with_type_flags(tidb_types::context::DefaultStmtFlags),
+                es::with_location(Some(tidb_base::gostd::time::utc())),
+                es::with_current_db("test".to_owned()),
+            ];
+            if !params.is_empty() {
+                opts.push(es::with_param_list(&params));
+            }
+            let ev = es::new_eval_context(opts);
+            es::new_expr_context(vec![
+                es::with_eval_ctx(ev),
+                es::with_charset("utf8mb4".to_owned(), "utf8mb4_bin".to_owned()),
+                es::with_default_collation_for_utf8mb4("utf8mb4_bin".to_owned()),
+            ])
+        };
+        let expr_ctx = make_expr_ctx(vec![]);
 
-        let extract_start_bound_expr = |sql: &str| -> ast::Expr {
+        let extract_start_bound = |sql: &str| -> (ast::Expr, bool) {
             let stmt = tidb_parser::parse(sql, &tidb_parser::ParseOptions::default())
                 .unwrap()
                 .stmts
@@ -6559,20 +6609,31 @@ mod tests {
             let Some(ast::Expr::Window(wf)) = sel.fields.fields.remove(0).expr else {
                 panic!("expected window function");
             };
-            wf.spec.frame.unwrap().extent.start.expr.unwrap()
+            let start = wf.spec.frame.unwrap().extent.start;
+            (
+                start.expr.unwrap(),
+                start.unit != ast::TimeUnitType::Invalid,
+            )
         };
 
-        let compound_expr = extract_start_bound_expr(
+        // Verify Go's zero-value FieldType evaluates as ETString (field_type.go:429-453), so Go
+        // selects SubDateDatetimeString rather than SubDateDatetimeInt.
+        let go_zero_ft = FieldType::default();
+        assert_eq!(go_zero_ft.get_type(), tidb_base::mysql::TypeUnspecified);
+        assert_eq!(go_zero_ft.eval_type(), tidb_parser::types::ETString);
+
+        let (compound_expr, compound_is_iv) = extract_start_bound(
             "SELECT SUM(a) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1.0+0.5 DAY PRECEDING AND CURRENT ROW) FROM t",
         );
-        let literal_expr = extract_start_bound_expr(
+        let (literal_expr, literal_is_iv) = extract_start_bound(
             "SELECT SUM(a) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1.5 DAY PRECEDING AND CURRENT ROW) FROM t",
         );
+        assert!(compound_is_iv && literal_is_iv);
 
         let compound_const =
-            eval_window_range_bound_constant(&*expr_ctx, &compound_expr, "", false).unwrap();
+            eval_window_range_bound_constant(&*expr_ctx, &compound_expr, "", false, true).unwrap();
         let literal_const =
-            eval_window_range_bound_constant(&*expr_ctx, &literal_expr, "", false).unwrap();
+            eval_window_range_bound_constant(&*expr_ctx, &literal_expr, "", false, true).unwrap();
 
         assert_eq!(
             compound_const.ret_type.get_type(),
@@ -6591,11 +6652,90 @@ mod tests {
             literal_const.value.to_string().unwrap()
         );
 
-        // Verify the TiFlash pushdown consequence: SubDateDatetimeInt is pushable to TiFlash,
-        // whereas SubDateDatetimeDecimal (selected for ETDecimal interval) is not.
-        static SIG_SUB_INT: SigDesc = SigDesc {
-            name: "builtinSubDateDatetimeIntSig",
-            pb_code: tipb::ScalarFuncSig::SubDateDatetimeInt as i32,
+        // Non-ruled shapes MUST keep Go's zero-value FieldType (TypeUnspecified / ETString):
+        // (a) compound integer INTERVAL (`INTERVAL 1+1 DAY`), (b) parenthesized literal
+        // (`INTERVAL (1.5) DAY`), (c) non-INTERVAL numeric RANGE (`1+1` or `?` with is_interval=false),
+        // and (d) prepared `INTERVAL ? DAY` with Decimal(1.5).
+        for (label, sql) in [
+            (
+                "compound integer INTERVAL 1+1 DAY",
+                "SELECT SUM(a) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1+1 DAY PRECEDING AND CURRENT ROW) FROM t",
+            ),
+            (
+                "parenthesized literal INTERVAL (1.5) DAY",
+                "SELECT SUM(a) OVER (ORDER BY d RANGE BETWEEN INTERVAL (1.5) DAY PRECEDING AND CURRENT ROW) FROM t",
+            ),
+        ] {
+            let (expr, is_iv) = extract_start_bound(sql);
+            assert!(is_iv);
+            let c = eval_window_range_bound_constant(&*expr_ctx, &expr, "", false, is_iv).unwrap();
+            assert_eq!(
+                c.ret_type.get_type(),
+                tidb_base::mysql::TypeUnspecified,
+                "{label} must keep Go zero FieldType"
+            );
+            assert_eq!(
+                c.ret_type.eval_type(),
+                tidb_parser::types::ETString,
+                "{label} must keep ETString"
+            );
+        }
+
+        // Non-INTERVAL numeric RANGE bound (e.g. `1+1` or `1.0+0.5` with is_interval = false,
+        // and SQL `RANGE BETWEEN ? PRECEDING`) keeps Go's zero FieldType.
+        let non_interval_const =
+            eval_window_range_bound_constant(&*expr_ctx, &compound_expr, "", false, false).unwrap();
+        assert_eq!(
+            non_interval_const.ret_type.get_type(),
+            tidb_base::mysql::TypeUnspecified,
+            "non-INTERVAL numeric RANGE bound must keep Go zero FieldType"
+        );
+        let (range_param_expr, range_param_is_iv) = extract_start_bound(
+            "SELECT SUM(a) OVER (ORDER BY a RANGE BETWEEN ? PRECEDING AND CURRENT ROW) FROM t",
+        );
+        assert!(!range_param_is_iv);
+        let mut dec_0_3 = tidb_types::MyDecimal::default();
+        dec_0_3.from_string(b"0.3").unwrap();
+        let range_param_ctx = make_expr_ctx(vec![tidb_types::datum::new_decimal_datum(dec_0_3)]);
+        let range_param_const = eval_window_range_bound_constant(
+            &*range_param_ctx,
+            &range_param_expr,
+            "",
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            range_param_const.ret_type.get_type(),
+            tidb_base::mysql::TypeUnspecified,
+            "RANGE BETWEEN ? PRECEDING must keep Go zero FieldType"
+        );
+
+        // Prepared `INTERVAL ? DAY` with bound Decimal(1.5) also stays outside R28 (zero FieldType).
+        let (param_expr, param_is_iv) = extract_start_bound(
+            "SELECT SUM(a) OVER (ORDER BY d RANGE BETWEEN INTERVAL ? DAY PRECEDING AND CURRENT ROW) FROM t",
+        );
+        assert!(param_is_iv);
+        let mut dec_1_5 = tidb_types::MyDecimal::default();
+        dec_1_5.from_string(b"1.5").unwrap();
+        let param_ctx = make_expr_ctx(vec![tidb_types::datum::new_decimal_datum(dec_1_5)]);
+        let param_const =
+            eval_window_range_bound_constant(&*param_ctx, &param_expr, "", false, true).unwrap();
+        assert_eq!(
+            param_const.ret_type.get_type(),
+            tidb_base::mysql::TypeUnspecified,
+            "INTERVAL ? DAY must keep Go zero FieldType"
+        );
+        assert_eq!(
+            param_const.ret_type.eval_type(),
+            tidb_parser::types::ETString
+        );
+
+        // Verify neither Go's SubDateDatetimeString nor tidb-rs's SubDateDatetimeDecimal is in the
+        // TiFlash pushdown allowlist (infer_pushdown.go:356-364), so R28 has no TiFlash pushdown cost.
+        static SIG_SUB_STR: SigDesc = SigDesc {
+            name: "builtinSubDateDatetimeStringSig",
+            pb_code: tipb::ScalarFuncSig::SubDateDatetimeString as i32,
             vectorized: false,
             drivers: SigDrivers::None,
             args_fallback: ArgsFallback::None,
@@ -6608,10 +6748,10 @@ mod tests {
             args_fallback: ArgsFallback::None,
         };
         let dt_ft = new_field_type(tidb_base::mysql::TypeDatetime);
-        let sf_int = ScalarFunction::new(
+        let sf_str = ScalarFunction::new(
             tidb_parser::ast::funcs::DateSub,
             dt_ft.clone(),
-            BuiltinFunc::new(&SIG_SUB_INT, vec![], dt_ft.clone(), "binary", "binary"),
+            BuiltinFunc::new(&SIG_SUB_STR, vec![], dt_ft.clone(), "binary", "binary"),
         );
         let sf_dec = ScalarFunction::new(
             tidb_parser::ast::funcs::DateSub,
@@ -6619,8 +6759,8 @@ mod tests {
             BuiltinFunc::new(&SIG_SUB_DEC, vec![], dt_ft, "binary", "binary"),
         );
         let ectx = expr_ctx.get_eval_ctx();
-        assert!(tidb_expr_pushdown::scalar_expr_supported_by_flash(
-            &*ectx, &sf_int
+        assert!(!tidb_expr_pushdown::scalar_expr_supported_by_flash(
+            &*ectx, &sf_str
         ));
         assert!(!tidb_expr_pushdown::scalar_expr_supported_by_flash(
             &*ectx, &sf_dec
@@ -6780,6 +6920,42 @@ mod tests {
         check("SELECT a, NTH_VALUE(a, 1) OVER (ORDER BY b) FROM t", false);
         check("SELECT a, MAX(a) OVER (ORDER BY b) FROM t", true);
         check("SELECT a, LEAD(a, 1) OVER (ORDER BY b) FROM t", true);
+
+        // Cross-group ordering (#402): LEAD's group is built before FIRST_VALUE's group,
+        // so stripping NotNullFlag during check_window_func_args makes the LEAD output nullable.
+        let tbl = make_nn_table();
+        let is = crate::core::preprocess::InfoSchemaHandle(Arc::new(SingleTableIS(tbl)) as _);
+        let sql = "SELECT LEAD(a, 1, 0) OVER (ORDER BY a), FIRST_VALUE(a) OVER (ORDER BY b) FROM t";
+        let (stmt, rctx) = parse_and_preprocess_t(sql, &is);
+        let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(TestAcc));
+        vars.current_db = "test".to_owned();
+        let mut builder = new_plan_builder(&[]);
+        builder.init(&mut vars, Some(is), None);
+        builder.sql_text = sql;
+        builder.resolve_ctx = Some(rctx);
+        let ev = es::new_eval_context(vec![
+            es::with_type_flags(tidb_types::context::DefaultStmtFlags),
+            es::with_location(Some(tidb_base::gostd::time::utc())),
+            es::with_current_db("test".to_owned()),
+        ]);
+        let expr_ctx = es::new_expr_context(vec![
+            es::with_eval_ctx(ev),
+            es::with_charset("utf8mb4".to_owned(), "utf8mb4_bin".to_owned()),
+            es::with_default_collation_for_utf8mb4("utf8mb4_bin".to_owned()),
+        ]);
+        let mut ctx = PlanCtx::new(&mut vars, expr_ctx);
+        ctx.has_dirty_content = Some(Arc::new(|_| false));
+        let root = builder.build(&mut ctx, &stmt).unwrap();
+        let out_cols = &ctx.arena.get(root).schema(&ctx.arena).columns;
+        assert_eq!(out_cols.len(), 2);
+        assert!(
+            !has_not_null_flag(out_cols[0].ret_type.get_flag()),
+            "LEAD output column must be nullable because FIRST_VALUE cleared NotNullFlag in check_window_func_args"
+        );
+        assert!(
+            !has_not_null_flag(out_cols[1].ret_type.get_flag()),
+            "FIRST_VALUE output column must be nullable"
+        );
     }
 
     #[test]

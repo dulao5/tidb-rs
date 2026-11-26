@@ -439,6 +439,7 @@ impl Expr {
             }
             Expr::Subquery(s) => {
                 out.push('(');
+                // Note: subqueries use default restore even in raw mode (affects compareItems only).
                 s.query.restore(out)?;
                 out.push(')');
                 Ok(())
