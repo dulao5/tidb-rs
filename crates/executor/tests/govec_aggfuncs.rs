@@ -1,6 +1,7 @@
 //! Replays the govec `aggfuncs` vectors (tidb-rs-tracker `govec/domains/aggfuncs.go`): the
-//! core aggregate functions of part A of the block D12.4 (COUNT, SUM, AVG, FIRST_ROW,
-//! MAX / MIN, BIT_*), against Go TiDB v8.5.8.
+//! aggregate functions of parts A, B1, and B2 of block D12.4 (COUNT, SUM, AVG, FIRST_ROW,
+//! MAX / MIN, BIT_*, GROUP_CONCAT, VAR_*, STDDEV_*, JSON_*AGG, APPROX_COUNT_DISTINCT,
+//! APPROX_PERCENTILE), against Go TiDB v8.5.8.
 //!
 //! A record carries the complete descriptor (name, mode, DISTINCT, argument types, return
 //! type, `tidb_window_use_high_precision`, `div_precision_increment`); the replay builds the
@@ -10,12 +11,12 @@
 //! - `update_final`: alloc, one update per batch, append final;
 //! - `reset_reuse`: one partial result over several groups (updates, append final, reset);
 //! - `merge`: the partial function of a split pair over several parts, each merged into the
-//!   final function's partial result, optionally twice with a reset in between.
+//!   final function's partial result, optionally twice with a reset in between;
+//! - `group_concat`, `count_distinct_encode`, `json_agg`, `approx_count_distinct`,
+//!   `percentile`: domain-specific sequences for parts B1 and B2.
 //!
 //! The appended cells (`Row.GetRaw` and the null flag), the error and the step that returned
-//! it are compared. The functions of the later parts of the block (COUNT(DISTINCT),
-//! GROUP_CONCAT, VAR / STDDEV, JSON_*AGG, APPROX_*) return a temporary `blocked` from `build`
-//! (spec §4); their records are counted, and the count is pinned by [`EXPECTED_BLOCKED`].
+//! it are compared.
 //!
 //! `GOVEC_AGGFUNCS_FILES` (comma-separated paths) replays these files instead of the
 //! committed one (other seeds, a fresh artifact).
@@ -27,10 +28,13 @@ use serde_json::{Value, json};
 use tidb_base::Error;
 use tidb_base::blocked::blocked_by;
 use tidb_base::contextutil::WarnHandler;
+use tidb_base::farm;
 use tidb_base::mysql;
 use tidb_chunk::chunk::{self, Chunk};
 use tidb_chunk::row::Row;
-use tidb_executor::aggfuncs::func_count_distinct::write_time;
+use tidb_executor::aggfuncs::func_count_distinct::{
+    new_partial_result_4_approx_count_distinct, write_time,
+};
 use tidb_executor::aggfuncs::{AggFunc, PartialResult, build};
 use tidb_expression::aggregation::{AggFuncDesc, AggFunctionMode, BaseFuncDesc};
 use tidb_expression::byitem::ByItems;
@@ -42,7 +46,7 @@ use tidb_sessionctx::exprstatic as es;
 use tidb_types::MyDecimal;
 use tidb_types::context::FlagTruncateAsWarning;
 use tidb_types::core_time::CoreTime;
-use tidb_types::datum::new_string_datum;
+use tidb_types::datum::{new_int_datum, new_string_datum};
 use tidb_types::enum_type::Enum;
 use tidb_types::field_type::new_field_type;
 use tidb_types::json::parse_binary_json_from_string;
@@ -50,16 +54,16 @@ use tidb_types::set_type::Set;
 use tidb_types::time::{Duration, new_time};
 use tidb_types::vector::zero_copy_deserialize_vector_float32;
 
-/// The records whose function `build` reports as not ported yet (part B2 of the block:
-/// `APPROX_COUNT_DISTINCT` and `APPROX_PERCENTILE`), in every op that builds them.
-const EXPECTED_BLOCKED: usize = 560;
+/// No records remain blocked after part B2 removes `build_not_ported` (spec §4).
+const EXPECTED_BLOCKED: usize = 0;
 
 /// Records intentionally diverging from Go v8.5.8 under ruling R23 (#390, constitution art. 9.3):
 /// `countOriginalWithDistinct` keys on canonical values in Rust (folding `-0.0` to `+0.0`,
 /// ignoring `Duration.Fsp`, and ignoring `Time.Type`/`Time.Fsp`) instead of Go's raw bytes.
-/// Across the 19,222 records on both arm64 and amd64, exactly 3 records contain distinct raw
-/// representations of equal values (`reset_reuse` TIMESTAMP, `count_distinct_encode` multi-arg
-/// `{+0.0, -0.0}`, and `count_distinct_encode` DATETIME differing in `Type`).
+/// Exactly 3 records contain distinct raw representations of equal values (`reset_reuse`
+/// TIMESTAMP, `count_distinct_encode` multi-arg `{+0.0, -0.0}`, and `count_distinct_encode`
+/// DATETIME differing in `Type`). `APPROX_COUNT_DISTINCT` uses Go's raw encoding (#393 / #394)
+/// and has 0 diffs.
 const EXPECTED_CANONICAL_DISTINCT_DIFFS: usize = 3;
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
@@ -309,6 +313,24 @@ fn build_desc(d: &Value) -> Outcome {
             .into_ref(),
         );
     }
+    if d.get("pct_bad").and_then(Value::as_bool).unwrap_or(false) {
+        args.push(
+            Expr::Constant(Constant::new(
+                new_string_datum(b"not-an-int".to_vec()),
+                new_field_type(mysql::TypeString),
+            ))
+            .into_ref(),
+        );
+    } else if d.get("has_pct").and_then(Value::as_bool).unwrap_or(false) {
+        let pct = d.get("pct").and_then(Value::as_i64).unwrap_or(0);
+        args.push(
+            Expr::Constant(Constant::new(
+                new_int_datum(pct),
+                new_field_type(mysql::TypeLong),
+            ))
+            .into_ref(),
+        );
+    }
     let base = BaseFuncDesc::from_parts(
         d["name"].as_str().unwrap().to_owned(),
         args,
@@ -334,13 +356,18 @@ fn build_desc(d: &Value) -> Outcome {
             .collect();
     }
     match build(&*ctx, &desc, 0) {
-        Ok(func) => Outcome::Built(Built {
-            ctx,
-            eval_ctx,
-            desc,
-            fts,
-            func,
-        }),
+        Ok(mut func) => {
+            if let Some(f) = func.as_deref_mut() {
+                f.set_rng_seed_for_test(20261125);
+            }
+            Outcome::Built(Built {
+                ctx,
+                eval_ctx,
+                desc,
+                fts,
+                func,
+            })
+        }
         Err(e) if blocked_by(&e) == Some("D12.4") => Outcome::Blocked,
         Err(e) => Outcome::Failed(e),
     }
@@ -399,9 +426,180 @@ fn final_cells(b: &Built, f: &dyn AggFunc, pr: &mut PartialResult) -> (Value, Op
 /// Runs one record: (out, error), or None when a function is not ported yet.
 fn run(op: &str, a: &[Value]) -> Option<(Value, Option<Error>)> {
     match op {
-        "json_agg" => {
+        "json_agg" | "percentile" => {
             let action = a[0].as_str().unwrap();
             return run(action, &a[1..]);
+        }
+        "approx_count_distinct" => {
+            let action = a[0].as_str().unwrap();
+            return match action {
+                "farm_hash64" => {
+                    let b = unhex(a[1].as_str().unwrap());
+                    Some((json!({"hash": farm::hash64(&b).to_string()}), None))
+                }
+                "update_final" | "read_err" => run("update_final", &a[1..]),
+                "reset_reuse" => run("reset_reuse", &a[1..]),
+                "merge" => run("merge", &a[1..]),
+                "wire" => {
+                    let b1 = match build_desc(&a[1]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let b2 = match build_desc(&a[2]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let bf = match build_desc(&a[3]) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let f1 = b1.func.as_deref().expect("p1 builds");
+                    let f2 = b2.func.as_deref().expect("p2 builds");
+                    let ff = bf.func.as_deref().expect("final builds");
+                    let types = json!([
+                        type_name(&b1.func),
+                        type_name(&b2.func),
+                        type_name(&bf.func)
+                    ]);
+                    let mut out = json!({
+                        "type": types,
+                        "p1": [],
+                        "p2": null,
+                        "final": null,
+                        "step": "",
+                    });
+                    let parts = a[4].as_array().unwrap();
+                    let mut p1_out = vec![];
+                    let mut p2_rows = vec![];
+                    for (i, part) in parts.iter().enumerate() {
+                        let mut pr1 = f1.alloc_partial_result();
+                        if let Err((step, e)) = update(&b1, f1, part, &mut pr1) {
+                            out["p1"] = Value::Array(p1_out);
+                            out["step"] = json!(format!("p1 {i} {step}"));
+                            return Some((out, Some(e)));
+                        }
+                        let (cells1, err) = final_cells(&b1, f1, &mut pr1);
+                        let raw_hex = cells1[0]["raw"].as_str().unwrap().to_owned();
+                        p1_out.push(cells1);
+                        if let Some(e) = err {
+                            out["p1"] = Value::Array(p1_out);
+                            out["step"] = json!(format!("p1 {i} final"));
+                            return Some((out, Some(e)));
+                        }
+                        p2_rows.push(json!([raw_hex]));
+                        if i == 0 && parts.len() > 1 {
+                            p2_rows.push(json!([null]));
+                        }
+                    }
+                    let mut pr2 = f2.alloc_partial_result();
+                    if let Err((step, e)) = update(&b2, f2, &json!([p2_rows]), &mut pr2) {
+                        out["p1"] = Value::Array(p1_out);
+                        out["step"] = json!(format!("p2 {step}"));
+                        return Some((out, Some(e)));
+                    }
+                    let (cells2, err) = final_cells(&b2, f2, &mut pr2);
+                    out["p1"] = Value::Array(p1_out);
+                    out["p2"] = cells2.clone();
+                    if let Some(e) = err {
+                        out["step"] = json!("p2 final");
+                        return Some((out, Some(e)));
+                    }
+                    let p2_hex = cells2[0]["raw"].as_str().unwrap().to_owned();
+                    let mut prf = ff.alloc_partial_result();
+                    if let Err((step, e)) = update(&bf, ff, &json!([[[p2_hex]]]), &mut prf) {
+                        out["step"] = json!(format!("final {step}"));
+                        return Some((out, Some(e)));
+                    }
+                    let (cellsf, err) = final_cells(&bf, ff, &mut prf);
+                    out["final"] = cellsf;
+                    if err.is_some() {
+                        out["step"] = json!("final final");
+                    }
+                    Some((out, err))
+                }
+                "sketch" => {
+                    let n = a[1].as_u64().unwrap();
+                    let base = a[2].as_u64().unwrap();
+                    let include_zero = a[3].as_bool().unwrap();
+                    let mut p = new_partial_result_4_approx_count_distinct();
+                    if include_zero {
+                        p.insert_hash64(0);
+                    }
+                    for i in 0..n {
+                        p.insert_hash64(farm::hash64(&(base + i).to_le_bytes()));
+                    }
+                    let ser = p.serialize();
+                    let str_tp = json!([
+                        mysql::TypeString,
+                        mysql::BinaryFlag,
+                        255,
+                        0,
+                        "binary",
+                        "binary",
+                        []
+                    ]);
+                    let int_tp = json!([mysql::TypeLonglong, 0, 20, 0, "binary", "binary", []]);
+                    let find = json!({
+                        "name": "approx_count_distinct",
+                        "mode": 1,
+                        "distinct": false,
+                        "args": [str_tp],
+                        "ret": int_tp,
+                        "hp": false,
+                        "dpi": 4,
+                    });
+                    let bf = match build_desc(&find) {
+                        Outcome::Built(b) => b,
+                        Outcome::Blocked => return None,
+                        Outcome::Failed(e) => return Some((Value::Null, Some(e))),
+                    };
+                    let ff = bf.func.as_deref().expect("final builds");
+                    let mut prf = ff.alloc_partial_result();
+                    if let Err((_, e)) = update(&bf, ff, &json!([[[hex(&ser)]]]), &mut prf) {
+                        return Some((Value::Null, Some(e)));
+                    }
+                    let (cellsf, err) = final_cells(&bf, ff, &mut prf);
+                    if let Some(e) = err {
+                        return Some((Value::Null, Some(e)));
+                    }
+
+                    let mut p_small = new_partial_result_4_approx_count_distinct();
+                    for i in 0..8u64 {
+                        p_small.insert_hash64(farm::hash64(&(base + i + 1_000_000).to_le_bytes()));
+                    }
+                    let mut pr_dst = ff.alloc_partial_result();
+                    if let Err((_, e)) = update(
+                        &bf,
+                        ff,
+                        &json!([[[hex(&p_small.serialize())]]]),
+                        &mut pr_dst,
+                    ) {
+                        return Some((Value::Null, Some(e)));
+                    }
+                    let fec = bf.ctx.get_eval_ctx();
+                    if let Err(e) = ff.merge_partial_result(&*fec, &mut prf, &mut pr_dst) {
+                        return Some((Value::Null, Some(e)));
+                    }
+                    let (merged_cells, err) = final_cells(&bf, ff, &mut pr_dst);
+                    if let Some(e) = err {
+                        return Some((Value::Null, Some(e)));
+                    }
+                    Some((
+                        json!({
+                            "ser_len": ser.len(),
+                            "skip_degree": ser[0],
+                            "ser_hash": farm::hash64(&ser).to_string(),
+                            "final": cellsf,
+                            "merged": merged_cells,
+                        }),
+                        None,
+                    ))
+                }
+                _ => panic!("unknown approx_count_distinct action {action}"),
+            };
         }
         "count_distinct_encode" => {
             let action = a[0].as_str().unwrap();

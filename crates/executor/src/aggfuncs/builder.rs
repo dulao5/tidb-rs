@@ -1,13 +1,11 @@
 //! go-file: pkg/executor/aggfuncs/builder.go
 //!
-//! `Build` and the builders of parts A and B1 (spec D12.4 §3.1, §3.2). `Build` keeps Go's
-//! order of branches; the two names that lead to part B2 (`APPROX_COUNT_DISTINCT` and
-//! `APPROX_PERCENTILE`) return a temporary `blocked` until part B2 is ported (spec §4, §9
-//! item 3): the router then falls back to the prototype. `BuildWindowFunctions` comes with
-//! the window functions (part W).
+//! `Build` and the builders of parts A, B1, and B2 (spec D12.4 §3.1, §3.2, §3.3). `Build`
+//! keeps Go's exact order of branches. `BuildWindowFunctions` comes with the window
+//! functions (part W).
 //!
 //! Go's `Build` returns nil for an unknown name, the dedup mode or an unmatched type; Rust
-//! returns `Ok(None)` (spec §5.1), and `Err` only for the temporary stub.
+//! returns `Ok(None)` (spec §5.1).
 
 // Go identifiers for the evaluation type constants in patterns (M-GONAME).
 #![allow(non_upper_case_globals)]
@@ -16,7 +14,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 
 use tidb_base::Error;
-use tidb_base::blocked::blocked;
 use tidb_base::mysql;
 use tidb_chunk::row::Row;
 use tidb_expression::Expr;
@@ -26,7 +23,7 @@ use tidb_expression::context::EvalContext;
 use tidb_expression::expression::EvalState;
 use tidb_parser::types::{
     ETDatetime, ETDecimal, ETDuration, ETInt, ETJson, ETReal, ETString, ETTimestamp,
-    ETVectorFloat32, FieldType,
+    ETVectorFloat32, EvalType, FieldType,
 };
 use tidb_types::collate::get_collator;
 
@@ -43,9 +40,11 @@ use super::func_count::{
     CountOriginal4VectorFloat32, CountPartial,
 };
 use super::func_count_distinct::{
-    CountOriginalWithDistinct, CountOriginalWithDistinct4Decimal,
-    CountOriginalWithDistinct4Duration, CountOriginalWithDistinct4Int,
-    CountOriginalWithDistinct4Real, CountOriginalWithDistinct4String,
+    ApproxCountDistinctFinal, ApproxCountDistinctOriginal, ApproxCountDistinctPartial1,
+    ApproxCountDistinctPartial2, BaseApproxCountDistinct, CountOriginalWithDistinct,
+    CountOriginalWithDistinct4Decimal, CountOriginalWithDistinct4Duration,
+    CountOriginalWithDistinct4Int, CountOriginalWithDistinct4Real,
+    CountOriginalWithDistinct4String,
 };
 use super::func_first_row::{
     FirstRow4Decimal, FirstRow4Duration, FirstRow4Enum, FirstRow4Float32, FirstRow4Float64,
@@ -62,6 +61,10 @@ use super::func_max_min::{
     BaseMaxMinAggFunc, MaxMin4Decimal, MaxMin4Duration, MaxMin4Enum, MaxMin4Float32,
     MaxMin4Float64, MaxMin4Int, MaxMin4JSON, MaxMin4Set, MaxMin4String, MaxMin4Time, MaxMin4Uint,
     MaxMin4VectorFloat32,
+};
+use super::func_percentile::{
+    BasePercentile, PercentileOriginal4Decimal, PercentileOriginal4Duration,
+    PercentileOriginal4Int, PercentileOriginal4Real, PercentileOriginal4Time,
 };
 use super::func_stddevpop::{StdDevPop4DistinctFloat64, StdDevPop4Float64};
 use super::func_stddevsamp::{StddevSamp4DistinctFloat64, StddevSamp4Float64};
@@ -103,19 +106,9 @@ fn deref_ret_tp(desc: &AggFuncDesc) -> &FieldType {
     &desc.base.ret_tp
 }
 
-/// The builders of part B2 (`APPROX_COUNT_DISTINCT` and `APPROX_PERCENTILE`), not ported
-/// yet (spec §4, §9 item 3).
-// glue: stub of buildApproxCountDistinct, blocked-by:D12.4 (the aggregate functions of part B2
-// are not ported yet: APPROX_COUNT_DISTINCT and APPROX_PERCENTILE; the router falls back to
-// the prototype)
-fn build_not_ported(what: &str) -> Built {
-    let what = format!("aggregate function {what} (implemented in a later part of the block)");
-    Err(blocked("D12.4", &what))
-}
-
 /// Build is used to build a specific AggFunc implementation according to the input
 /// aggFuncDesc.
-// go: Build L2 (nil → Ok(None); the names of part B2 return blocked, spec §4)
+// go: Build L2 (nil → Ok(None), spec §5.1)
 pub fn build(ctx: &dyn AggFuncBuildContext, agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
     match agg_func_desc.base.name.as_str() {
         ast::AggFuncCount => build_count(&*ctx.get_eval_ctx(), agg_func_desc, ordinal),
@@ -132,12 +125,135 @@ pub fn build(ctx: &dyn AggFuncBuildContext, agg_func_desc: &AggFuncDesc, ordinal
         ast::AggFuncStddevPop => build_std_dev_pop(agg_func_desc, ordinal),
         ast::AggFuncJsonArrayagg => build_json_arrayagg(agg_func_desc, ordinal),
         ast::AggFuncJsonObjectAgg => build_json_object_agg(agg_func_desc, ordinal),
-        ast::AggFuncApproxCountDistinct => build_not_ported(ast::AggFuncApproxCountDistinct),
-        ast::AggFuncApproxPercentile => build_not_ported(ast::AggFuncApproxPercentile),
+        ast::AggFuncApproxCountDistinct => build_approx_count_distinct(agg_func_desc, ordinal),
+        ast::AggFuncApproxPercentile => build_approx_percentile(ctx, agg_func_desc, ordinal),
         ast::AggFuncVarSamp => build_var_samp(agg_func_desc, ordinal),
         ast::AggFuncStddevSamp => build_stddev_samp(agg_func_desc, ordinal),
         _ => Ok(None),
     }
+}
+
+// go: buildApproxCountDistinct L1
+fn build_approx_count_distinct(agg_func_desc: &AggFuncDesc, ordinal: isize) -> Built {
+    let base = BaseApproxCountDistinct::new(BaseAggFunc {
+        args: agg_func_desc.base.args.clone(),
+        ordinal,
+        ret_tp: None,
+    });
+
+    // In partition table, union need to compute partial result into partial result.
+    // We can detect and handle this case by checking whether return type is string.
+
+    match deref_ret_tp(agg_func_desc).get_type() {
+        mysql::TypeLonglong => match agg_func_desc.mode {
+            AggFunctionMode::CompleteMode => return some(ApproxCountDistinctOriginal::new(base)),
+            AggFunctionMode::Partial1Mode => {
+                return some(ApproxCountDistinctPartial1::new(
+                    ApproxCountDistinctOriginal::new(base),
+                ));
+            }
+            AggFunctionMode::Partial2Mode => {
+                return some(ApproxCountDistinctPartial2::new(
+                    ApproxCountDistinctPartial1::new(ApproxCountDistinctOriginal::new(base)),
+                ));
+            }
+            AggFunctionMode::FinalMode => {
+                return some(ApproxCountDistinctFinal::new(
+                    ApproxCountDistinctPartial2::new(ApproxCountDistinctPartial1::new(
+                        ApproxCountDistinctOriginal::new(base),
+                    )),
+                ));
+            }
+            AggFunctionMode::DedupMode => {}
+        },
+        mysql::TypeString => match agg_func_desc.mode {
+            AggFunctionMode::CompleteMode | AggFunctionMode::Partial1Mode => {
+                return some(ApproxCountDistinctPartial1::new(
+                    ApproxCountDistinctOriginal::new(base),
+                ));
+            }
+            AggFunctionMode::Partial2Mode | AggFunctionMode::FinalMode => {
+                return some(ApproxCountDistinctPartial2::new(
+                    ApproxCountDistinctPartial1::new(ApproxCountDistinctOriginal::new(base)),
+                ));
+            }
+            AggFunctionMode::DedupMode => {}
+        },
+        _ => {}
+    }
+
+    Ok(None)
+}
+
+// go: getEvalTypeForApproxPercentile L1
+fn get_eval_type_for_approx_percentile(
+    ctx: &dyn EvalContext,
+    agg_func_desc: &AggFuncDesc,
+) -> EvalType {
+    let mut eval_type = agg_func_desc.base.args[0].get_type(ctx).eval_type();
+    let arg_type = agg_func_desc.base.args[0].get_type(ctx).get_type();
+
+    // Sometimes `mysql.EnumSetAsIntFlag` may be set to true, such as when join,
+    // which is unexpected for `buildApproxPercentile` and `mysql.TypeEnum` and `mysql.TypeSet` will return unexpected `ETInt` here,
+    // so here `evalType` are forcibly set to `ETString`.
+    // For mysql.TypeBit, just same as other aggregate function.
+    if arg_type == mysql::TypeEnum || arg_type == mysql::TypeSet || arg_type == mysql::TypeBit {
+        eval_type = ETString;
+    }
+
+    eval_type
+}
+
+// go: buildApproxPercentile L1
+fn build_approx_percentile(
+    sctx: &dyn AggFuncBuildContext,
+    agg_func_desc: &AggFuncDesc,
+    ordinal: isize,
+) -> Built {
+    if agg_func_desc.mode == AggFunctionMode::DedupMode {
+        return Ok(None);
+    }
+
+    // Checked while building descriptor
+    let eval_ctx = sctx.get_eval_ctx();
+    let percent =
+        match agg_func_desc.base.args[1].eval_int(&*eval_ctx, &EvalState::new(), Row::default()) {
+            Ok(v) => v.unwrap_or(0) as isize,
+            Err(err) => {
+                // Should not reach here
+                log::error!("Error happened when buildApproxPercentile: {err}");
+                return Ok(None);
+            }
+        };
+
+    let base = BasePercentile::new(
+        percent,
+        BaseAggFunc {
+            args: agg_func_desc.base.args.clone(),
+            ordinal,
+            ret_tp: None,
+        },
+    );
+
+    let eval_type = get_eval_type_for_approx_percentile(&*eval_ctx, agg_func_desc);
+    match agg_func_desc.mode {
+        AggFunctionMode::CompleteMode
+        | AggFunctionMode::Partial1Mode
+        | AggFunctionMode::FinalMode => match eval_type {
+            ETInt => return some(PercentileOriginal4Int::new(base)),
+            ETReal => return some(PercentileOriginal4Real::new(base)),
+            ETDecimal => return some(PercentileOriginal4Decimal::new(base)),
+            ETDatetime | ETTimestamp => return some(PercentileOriginal4Time::new(base)),
+            ETDuration => return some(PercentileOriginal4Duration::new(base)),
+            _ => {
+                // Return NULL in any case
+                return some(base);
+            }
+        },
+        AggFunctionMode::Partial2Mode | AggFunctionMode::DedupMode => {}
+    }
+
+    Ok(None)
 }
 
 // go: buildCount L1
