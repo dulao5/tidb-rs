@@ -897,6 +897,26 @@ impl<S: TiKVStore> tidb_kv::kv::Client for CopClient<S> {
 }
 
 impl<S: TiKVStore> CopClient<S> {
+    /// Shared argument validation for [`CopClient::send`] and [`CopClient::send_async`].
+    // glue: shared validation helper for CopClient::send and CopClient::send_async
+    fn prepare_send<'a>(
+        req: &Request,
+        variables: Option<&'a tidb_kv::kv::OptionValue>,
+    ) -> Result<&'a Variables, Error> {
+        let Some(vars) = variables.and_then(|v| v.downcast_ref::<Variables>()) else {
+            return Err(tidb_base::errors::errorf(
+                "unsupported variables:%+v",
+                &[Arg::Str(b"<nil>".to_vec().into())],
+            ));
+        };
+        if req.store_type == tidb_base::kv::TiFlash && req.batch_cop {
+            return Err(Error::plain(
+                "batch coprocessor requests to TiFlash are not supported (DEF.MPP)",
+            ));
+        }
+        Ok(vars)
+    }
+
     /// Send builds the request and gets the coprocessor iterator response.
     ///
     /// Building the tasks locates regions (I/O), which `kv.Client.Send` (a synchronous
@@ -910,17 +930,10 @@ impl<S: TiKVStore> CopClient<S> {
         variables: Option<&tidb_kv::kv::OptionValue>,
         option: &tidb_kv::kv::ClientSendOption,
     ) -> Box<dyn tidb_kv::kv::Response> {
-        let Some(vars) = variables.and_then(|v| v.downcast_ref::<Variables>()) else {
-            return Box::new(CopErrorResponse(Some(tidb_base::errors::errorf(
-                "unsupported variables:%+v",
-                &[Arg::Str(b"<nil>".to_vec().into())],
-            ))));
+        let vars = match Self::prepare_send(req, variables) {
+            Ok(v) => v,
+            Err(e) => return Box::new(CopErrorResponse(Some(e))),
         };
-        if req.store_type == tidb_base::kv::TiFlash && req.batch_cop {
-            return Box::new(CopErrorResponse(Some(Error::plain(
-                "batch coprocessor requests to TiFlash are not supported (DEF.MPP)",
-            ))));
-        }
         Box::new(LazyCopResponse {
             pending: Some((req.clone(), vars.clone(), option.clone())),
             store: self.store.clone(),
@@ -942,17 +955,10 @@ impl<S: TiKVStore> CopClient<S> {
         variables: Option<&tidb_kv::kv::OptionValue>,
         option: &tidb_kv::kv::ClientSendOption,
     ) -> Box<dyn tidb_kv::kv::Response> {
-        let Some(vars) = variables.and_then(|v| v.downcast_ref::<Variables>()) else {
-            return Box::new(CopErrorResponse(Some(tidb_base::errors::errorf(
-                "unsupported variables:%+v",
-                &[Arg::Str(b"<nil>".to_vec().into())],
-            ))));
+        let vars = match Self::prepare_send(req, variables) {
+            Ok(v) => v,
+            Err(e) => return Box::new(CopErrorResponse(Some(e))),
         };
-        if req.store_type == tidb_base::kv::TiFlash && req.batch_cop {
-            return Box::new(CopErrorResponse(Some(Error::plain(
-                "batch coprocessor requests to TiFlash are not supported (DEF.MPP)",
-            ))));
-        }
         match self
             .build_cop_iterator(req.clone(), vars.clone(), option)
             .await

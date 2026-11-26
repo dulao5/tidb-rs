@@ -787,7 +787,7 @@ impl SessionCore {
 impl SessionCore {
     /// `GetDistSQLCtx()`: the `DistSQLContext` of the coprocessor reads (its KV variables are
     /// [`SessCtx::copr_vars`]).
-    // go: session.GetDistSQLCtx L2 (omits Top SQL KvExecCounter and DEF.MPP TiFlash fields; computes has_runaway_rule for N10 fence)
+    // go: session.GetDistSQLCtx L2 (omits Top SQL KvExecCounter and DEF.MPP TiFlash fields; computes has_runaway_rule for N10 fence; passes stmt mem_tracker until A1 session tracker lands, D07.3 spec §7 item 18)
     pub fn get_dist_sql_ctx(&self) -> Arc<tidb_sessionctx::distsql_ctx::DistSQLContext> {
         let vars = &self.sctx.vars;
         let sc = vars.stmt_ctx();
@@ -803,6 +803,10 @@ impl SessionCore {
                 enable_chunk_rpc: vars.enable_chunk_rpc,
                 original_sql: sc.original_sql.clone(),
                 kv_vars: self.sctx.copr_vars(),
+                // glue: A1 session-tracker gap (same as D12.3): the new stack has no session
+                // tracker yet, so this passes the statement tracker (limit -1); CopIterator's
+                // rate-limit OOM action does not fire under tidb_enable_rate_limit_action=ON
+                // until A1 session tracker wiring lands (D07.3 spec §7 item 18).
                 session_mem_tracker: sc.mem_tracker.clone(),
                 location: sc.time_zone(),
                 runtime_stats_coll: sc.runtime_stats_coll.clone(),

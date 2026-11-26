@@ -531,7 +531,7 @@ impl PointGetExecutor {
     }
 
     /// The transaction scope check of a local (non-global) transaction.
-    // go: PointGetExecutor.verifyTxnScope L1
+    // go: PointGetExecutor.verifyTxnScope L2 (uses self.tbl_info instead of async InfoSchema.TableByID; the !valid branch is unreachable while distsql::verify_txn_scope returns blocked("X") on placement bundles)
     fn verify_txn_scope(&self) -> Result<(), Error> {
         if self.txn_scope.is_empty() || self.txn_scope == GlobalTxnScope {
             return Ok(());
@@ -539,19 +539,41 @@ impl PointGetExecutor {
         let Some(is) = &self.info_schema else {
             return Ok(());
         };
+        let tbl_name = self.tbl_info.name.o.as_str();
         let physical_table_id = get_phys_id(&self.tbl_info, self.partition_def_idx);
+        let part_name = if physical_table_id != self.tbl_info.id {
+            self.partition_def_idx
+                .and_then(|idx| usize::try_from(idx).ok())
+                .and_then(|idx| {
+                    self.tbl_info
+                        .get_partition_info()?
+                        .definitions
+                        .as_ref()?
+                        .get(idx)
+                })
+                .map(|def| def.name.o.as_str())
+                .unwrap_or("")
+        } else {
+            ""
+        };
         let valid =
             tidb_store::distsql::verify_txn_scope(&self.txn_scope, physical_table_id, is.as_ref())?;
-        if !valid {
-            return Err(tidb_base::errors::errorf(
-                "table %v can not be read by %v txn_scope",
-                &[
-                    tidb_base::gofmt::Arg::Str(self.tbl_info.name.o.as_bytes().to_vec().into()),
-                    tidb_base::gofmt::Arg::Str(self.txn_scope.as_bytes().to_vec().into()),
-                ],
-            ));
+        if valid {
+            return Ok(());
         }
-        Ok(())
+        let msg = if !part_name.is_empty() {
+            format!(
+                "table {}'s partition {} can not be read by {} txn_scope",
+                tbl_name, part_name, self.txn_scope
+            )
+        } else {
+            format!(
+                "table {} can not be read by {} txn_scope",
+                tbl_name, self.txn_scope
+            )
+        };
+        Err(tidb_base::dbterror::ErrInvalidPlacementPolicyCheck
+            .gen_with_stack_by_args(vec![tidb_base::Arg::from(msg)]))
     }
 }
 

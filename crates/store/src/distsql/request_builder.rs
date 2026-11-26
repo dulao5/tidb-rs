@@ -92,6 +92,11 @@ fn normalize_dag_request_for_marshal(dag: &mut tipb::DagRequest) {
             exec.set_fine_grained_shuffle_batch_size(0);
         }
     }
+    for ch in dag.mut_intermediate_output_channels().iter_mut() {
+        if !ch.has_executor_idx() {
+            ch.set_executor_idx(0);
+        }
+    }
 }
 
 impl RequestBuilder {
@@ -121,6 +126,8 @@ impl RequestBuilder {
         if self.request.key_ranges.is_none() {
             self.request.key_ranges = Some(new_non_partitioned_key_ranges(Vec::new()));
         }
+        // Go calls verifyTxnScope unconditionally and overwrites builder.err; Rust preserves
+        // the first error (e.g. N10 runaway fence) rather than letting verify_txn_scope mask it.
         if self.err.is_none()
             && let Err(e) = self.verify_txn_scope()
         {
