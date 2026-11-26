@@ -46,7 +46,7 @@ impl LogicalPlan for LogicalSort {
     /// PreparePossibleProperties implements base.LogicalPlan.<13th> interface.
     // go: LogicalSort.PreparePossibleProperties L1
     fn prepare_possible_properties(
-        &self,
+        &mut self,
         _arena: &crate::PlanArena,
         _children_properties: Vec<Vec<Vec<Arc<Column>>>>,
     ) -> Vec<Vec<Arc<Column>>> {

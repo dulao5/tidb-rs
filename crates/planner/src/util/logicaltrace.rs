@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use tidb_base::errors::RedactLogDisable;
+use tidb_expression::aggregation::AggFuncDesc;
 use tidb_expression::{Column, ExprRef};
 
 use crate::base::LogicalPlan;
@@ -30,6 +31,7 @@ fn item_string(ctx: &PlanCtx<'_>, item: &PrunedItem<'_>) -> String {
     let ectx = ctx.eval_ctx();
     let b = match item {
         PrunedItem::Column(c) => c.string_with_ctx(&*ectx, RedactLogDisable),
+        PrunedItem::AggFunc(f) => f.string_with_ctx(&*ectx, RedactLogDisable),
         PrunedItem::ByItems(b) => b.string_with_ctx(&*ectx, RedactLogDisable),
         PrunedItem::Expr(e) => e.string_with_ctx(&*ectx, RedactLogDisable),
     };
@@ -39,6 +41,7 @@ fn item_string(ctx: &PlanCtx<'_>, item: &PrunedItem<'_>) -> String {
 /// An `expression.StringerWithCtx` of the pruned items (`M-IFACE`).
 enum PrunedItem<'a> {
     Column(&'a Column),
+    AggFunc(&'a AggFuncDesc),
     ByItems(&'a ByItems),
     Expr(&'a ExprRef),
 }
@@ -87,14 +90,19 @@ pub fn append_column_prune_trace_step<P: LogicalPlan + ?Sized>(
     append_item_prune_trace_step(trace_id(p), ctx, "columns", &s, opt);
 }
 
-// glue: stub of AppendFunctionPruneTraceStep, blocked-by:D08.11 (aggregation.AggFuncDesc is not ported; only the aggregation's column pruning calls it)
-/// AppendFunctionPruneTraceStep appends a trace step for group by pruning: the aggregate
-/// function descriptors are not ported.
-pub fn append_function_prune_trace_step() -> Result<(), tidb_base::Error> {
-    Err(tidb_base::blocked::blocked(
-        "D08.11",
-        "the trace of pruned aggregate functions (AppendFunctionPruneTraceStep)",
-    ))
+/// AppendFunctionPruneTraceStep appends a trace step for group by pruning.
+// go: AppendFunctionPruneTraceStep L1 [M-CTX]
+pub fn append_function_prune_trace_step<P: LogicalPlan + ?Sized>(
+    p: &P,
+    ctx: &PlanCtx<'_>,
+    pruned_functions: &[AggFuncDesc],
+    opt: &LogicalOptimizeOp,
+) {
+    if pruned_functions.is_empty() {
+        return;
+    }
+    let s: Vec<PrunedItem<'_>> = pruned_functions.iter().map(PrunedItem::AggFunc).collect();
+    append_item_prune_trace_step(trace_id(p), ctx, "aggregation functions", &s, opt);
 }
 
 /// AppendByItemsPruneTraceStep appends a trace step for group by pruning.

@@ -477,6 +477,7 @@ pub fn generate_plan_cache_stmt_with_ast(
     let _ = dest_builder.init(vars, Some(InfoSchemaHandle(is.snapshot())), None);
     // The Rust AST keeps byte spans into the text it was parsed from (Go: ast.Node.Text).
     dest_builder.sql_text = param_sql;
+    dest_builder.resolve_ctx = Some(Arc::clone(&resolve_ctx));
     let built = dest_builder.build(ctx, &prepared.stmt)?;
     let p = Some(BuiltPlanInfo {
         schema: ctx.arena.get(built).schema(&ctx.arena).clone(),

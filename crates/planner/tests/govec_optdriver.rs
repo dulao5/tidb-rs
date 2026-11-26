@@ -93,14 +93,16 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.1", 2),
     // Partitioned tables (2 of them: Go's mock context panics in the partition pruning).
     ("D09.12", 4),
+    // BuildKeySolver in logicalOptimize (reached by aggregation / GROUP BY / DISTINCT queries).
+    ("D09.13", 99),
     // The lock operator (SELECT ... FOR UPDATE).
     ("D09.14", 2),
     // System variables in expressions.
     ("D09.2", 2),
     // Joins.
     ("D09.3", 6),
-    // Aggregation, GROUP BY, DISTINCT, windows.
-    ("D09.4", 15),
+    // Window functions / unported aggregation paths (D09.4 part B).
+    ("D09.4", 6),
     // WITH and set operations.
     ("D09.5", 4),
     // Subqueries.
@@ -486,7 +488,7 @@ fn run_optimize(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
         Some(b) => Outcome::Blocked(b.to_string()),
         None => Outcome::Value(err_out(&e)),
     };
-    {
+    let resolve_ctx = {
         let mut node = new_node_w(&mut stmt);
         let (_, res) = preprocess(
             &mut vars,
@@ -499,7 +501,8 @@ fn run_optimize(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
         if let Err(e) = res {
             return blocked_or(e);
         }
-    }
+        node.get_resolve_context()
+    };
     let mut hint_processor = new_qb_hint_handler();
     if let Err(e) = hint_processor.accept(&stmt, Some(vars.stmt_ctx())) {
         return blocked_or(e);
@@ -510,6 +513,7 @@ fn run_optimize(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     let mut builder = new_plan_builder(&[]);
     builder.init(&mut vars, Some(is), Some(Arc::new(hint_processor)));
     builder.sql_text = sql;
+    builder.resolve_ctx = Some(resolve_ctx);
 
     let wh = Arc::new(new_static_warn_handler(0));
     let mut ctx = PlanCtx::new(&mut vars, new_expr_ctx(mode, &wh));

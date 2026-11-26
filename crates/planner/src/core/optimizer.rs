@@ -127,23 +127,23 @@ const SEMI_JOIN_REWRITER: UnportedRule = UnportedRule {
     name: "semi_join_rewrite",
     block: "D09.6",
 };
-// glue: blocked-by:D09.4 (AggregationEliminator.Optimize: aggregation)
-// glue: blocked-by:D09.4 (AggregationEliminator.Name: aggregation)
+// glue: blocked-by:D09.9 (AggregationEliminator.Optimize: aggregation rules)
+// glue: blocked-by:D09.9 (AggregationEliminator.Name: aggregation rules)
 const AGGREGATION_ELIMINATOR: UnportedRule = UnportedRule {
     name: "aggregation_eliminate",
-    block: "D09.4",
+    block: "D09.9",
 };
-// glue: blocked-by:D09.4 (SkewDistinctAggRewriter.Optimize: aggregation)
-// glue: blocked-by:D09.4 (SkewDistinctAggRewriter.Name: aggregation)
+// glue: blocked-by:D09.9 (SkewDistinctAggRewriter.Optimize: aggregation rules)
+// glue: blocked-by:D09.9 (SkewDistinctAggRewriter.Name: aggregation rules)
 const SKEW_DISTINCT_AGG_REWRITER: UnportedRule = UnportedRule {
     name: "skew_distinct_agg_rewrite",
-    block: "D09.4",
+    block: "D09.9",
 };
-// glue: blocked-by:D09.4 (MaxMinEliminator.Optimize: aggregation)
-// glue: blocked-by:D09.4 (MaxMinEliminator.Name: aggregation)
+// glue: blocked-by:D09.9 (MaxMinEliminator.Optimize: aggregation rules)
+// glue: blocked-by:D09.9 (MaxMinEliminator.Name: aggregation rules)
 const MAX_MIN_ELIMINATOR: UnportedRule = UnportedRule {
     name: "max_min_eliminate",
-    block: "D09.4",
+    block: "D09.9",
 };
 // glue: blocked-by:D09.3 (ConvertOuterToInnerJoin.Optimize: joins)
 // glue: blocked-by:D09.3 (ConvertOuterToInnerJoin.Name: joins)
@@ -157,11 +157,11 @@ const OUTER_JOIN_ELIMINATOR: UnportedRule = UnportedRule {
     name: "outer_join_eliminate",
     block: "D09.3",
 };
-// glue: blocked-by:D09.4 (AggregationPushDownSolver.Optimize: aggregation)
-// glue: blocked-by:D09.4 (AggregationPushDownSolver.Name: aggregation)
+// glue: blocked-by:D09.9 (AggregationPushDownSolver.Optimize: aggregation rules)
+// glue: blocked-by:D09.9 (AggregationPushDownSolver.Name: aggregation rules)
 const AGGREGATION_PUSH_DOWN_SOLVER: UnportedRule = UnportedRule {
     name: "aggregation_push_down",
-    block: "D09.4",
+    block: "D09.9",
 };
 // glue: blocked-by:D09.10 (JoinReOrderSolver.Optimize: join reorder)
 // glue: blocked-by:D09.10 (JoinReOrderSolver.Name: join reorder)

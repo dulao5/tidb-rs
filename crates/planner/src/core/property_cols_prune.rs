@@ -9,17 +9,19 @@ use std::sync::Arc;
 
 use tidb_expression::Column;
 
-use crate::arena::PlanId;
+use crate::arena::{PlanId, with_detached};
 use crate::planctx::PlanCtx;
 
 /// preparePossibleProperties traverses the plan tree by a post-order method,
 /// recursively calls LogicalPlan PreparePossibleProperties interface.
 // go: preparePossibleProperties L1 [M-PLAN]
-pub fn prepare_possible_properties(ctx: &PlanCtx<'_>, lp: PlanId) -> Vec<Vec<Arc<Column>>> {
-    let node = ctx.arena.get(lp);
-    let mut children_properties = Vec::with_capacity(node.children().len());
-    for &child in node.children() {
+pub fn prepare_possible_properties(ctx: &mut PlanCtx<'_>, lp: PlanId) -> Vec<Vec<Arc<Column>>> {
+    let child_ids: Vec<PlanId> = ctx.arena.get(lp).children().to_vec();
+    let mut children_properties = Vec::with_capacity(child_ids.len());
+    for child in child_ids {
         children_properties.push(prepare_possible_properties(ctx, child));
     }
-    node.prepare_possible_properties(&ctx.arena, children_properties)
+    with_detached(ctx, lp, |node, ctx| {
+        node.prepare_possible_properties(&ctx.arena, children_properties)
+    })
 }

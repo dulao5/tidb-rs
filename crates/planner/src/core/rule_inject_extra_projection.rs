@@ -95,12 +95,11 @@ pub fn inject_proj_below_union() -> Result<(), Error> {
     Err(blocked("D09.5", "injectProjBelowUnion (PhysicalUnionAll)"))
 }
 
-/// `InjectProjBelowAgg`: needs the physical aggregations and `aggregation.AggFuncDesc`
-/// (D09.4 / D10.1).
-// glue: stub of InjectProjBelowAgg, blocked-by:D09.4 (PhysicalHashAgg / PhysicalStreamAgg and AggFuncDesc are not ported)
+/// `InjectProjBelowAgg`: needs the physical aggregations (D10.1).
+// glue: stub of InjectProjBelowAgg, blocked-by:D10.1 (PhysicalHashAgg / PhysicalStreamAgg are not ported)
 pub fn inject_proj_below_agg() -> Result<(), Error> {
     Err(blocked(
-        "D09.4",
+        "D10.1",
         "InjectProjBelowAgg (the physical aggregations)",
     ))
 }

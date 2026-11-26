@@ -1450,3 +1450,260 @@ impl FromNode for Limit {
         }
     }
 }
+
+/// `ast.ExpressionDeepEqual`: compares the structural equivalence of two expressions,
+/// ignoring source text positions and comparing `FuncCallExpr.fn_name` case-insensitively.
+// go: pkg/parser/ast/expressions.go ExpressionDeepEqual L2 (recursive structural equality; Rust AST is immutable and carries no text positions)
+pub fn expression_deep_equal(a: &Expr, b: &Expr) -> bool {
+    expression_deep_equal_with(a, b, &|e| e)
+}
+
+/// Variant of [`expression_deep_equal`] that applies `resolve_a` to each node of `a` before
+/// comparison, allowing callers with an immutable AST to compare expressions containing
+/// local column-alias substitutions (such as `GROUP BY` resolved expressions).
+// glue: immutable-AST helper for ExpressionDeepEqual with local substitutions
+pub fn expression_deep_equal_with<'a, F>(a: &'a Expr, b: &'a Expr, resolve_a: &F) -> bool
+where
+    F: Fn(&'a Expr) -> &'a Expr,
+{
+    let a = resolve_a(a);
+    match (a, b) {
+        (Expr::Column(x), Expr::Column(y)) => x == y,
+        (Expr::Value(x), Expr::Value(y)) => x == y,
+        (Expr::ParamMarker(x), Expr::ParamMarker(y)) => {
+            x.offset == y.offset && x.order() == y.order()
+        }
+        (Expr::Binary(x), Expr::Binary(y)) => {
+            x.op == y.op
+                && expression_deep_equal_with(&x.l, &y.l, resolve_a)
+                && expression_deep_equal_with(&x.r, &y.r, resolve_a)
+        }
+        (Expr::Unary(x), Expr::Unary(y)) => {
+            x.op == y.op && expression_deep_equal_with(&x.v, &y.v, resolve_a)
+        }
+        (Expr::FuncCall(x), Expr::FuncCall(y)) => {
+            x.tp == y.tp
+                && x.schema == y.schema
+                && x.fn_name.l() == y.fn_name.l()
+                && expr_slice_deep_equal(&x.args, &y.args, resolve_a)
+        }
+        (Expr::FuncCast(x), Expr::FuncCast(y)) => {
+            x.function_type == y.function_type
+                && x.explicit_char_set == y.explicit_char_set
+                && x.tp == y.tp
+                && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+        }
+        (Expr::JSONSumCrc32(x), Expr::JSONSumCrc32(y)) => {
+            x.explicit_char_set == y.explicit_char_set
+                && x.tp == y.tp
+                && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+        }
+        (Expr::Aggregate(x), Expr::Aggregate(y)) => {
+            x.f == y.f
+                && x.distinct == y.distinct
+                && expr_slice_deep_equal(&x.args, &y.args, resolve_a)
+                && opt_order_by_deep_equal(x.order.as_deref(), y.order.as_deref(), resolve_a)
+        }
+        (Expr::Window(x), Expr::Window(y)) => {
+            x.name == y.name
+                && x.distinct == y.distinct
+                && x.ignore_null == y.ignore_null
+                && x.from_last == y.from_last
+                && expr_slice_deep_equal(&x.args, &y.args, resolve_a)
+                && window_spec_deep_equal(&x.spec, &y.spec, resolve_a)
+        }
+        (Expr::Paren(x), Expr::Paren(y)) => expression_deep_equal_with(x, y, resolve_a),
+        (Expr::PatternIn(x), Expr::PatternIn(y)) => {
+            x.not == y.not
+                && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+                && expr_slice_deep_equal(&x.list, &y.list, resolve_a)
+                && opt_expr_deep_equal(x.sel.as_ref(), y.sel.as_ref(), resolve_a)
+        }
+        (Expr::PatternLike(x), Expr::PatternLike(y)) => {
+            x.not == y.not
+                && x.escape == y.escape
+                && x.escape_explicit == y.escape_explicit
+                && x.is_like == y.is_like
+                && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+                && expression_deep_equal_with(&x.pattern, &y.pattern, resolve_a)
+        }
+        (Expr::PatternRegexp(x), Expr::PatternRegexp(y)) => {
+            x.not == y.not
+                && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+                && expression_deep_equal_with(&x.pattern, &y.pattern, resolve_a)
+        }
+        (Expr::Between(x), Expr::Between(y)) => {
+            x.not == y.not
+                && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+                && expression_deep_equal_with(&x.left, &y.left, resolve_a)
+                && expression_deep_equal_with(&x.right, &y.right, resolve_a)
+        }
+        (Expr::IsNull(x), Expr::IsNull(y)) => {
+            x.not == y.not && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+        }
+        (Expr::IsTruth(x), Expr::IsTruth(y)) => {
+            x.not == y.not
+                && x.true_ == y.true_
+                && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+        }
+        (Expr::Case(x), Expr::Case(y)) => {
+            opt_expr_deep_equal(x.value.as_ref(), y.value.as_ref(), resolve_a)
+                && x.when_clauses.len() == y.when_clauses.len()
+                && x.when_clauses.iter().zip(&y.when_clauses).all(|(wx, wy)| {
+                    expression_deep_equal_with(&wx.expr, &wy.expr, resolve_a)
+                        && expression_deep_equal_with(&wx.result, &wy.result, resolve_a)
+                })
+                && opt_expr_deep_equal(x.else_clause.as_ref(), y.else_clause.as_ref(), resolve_a)
+        }
+        (Expr::Variable(x), Expr::Variable(y)) => {
+            x.name == y.name
+                && x.is_global == y.is_global
+                && x.is_instance == y.is_instance
+                && x.is_system == y.is_system
+                && x.explicit_scope == y.explicit_scope
+                && opt_expr_deep_equal(x.value.as_ref(), y.value.as_ref(), resolve_a)
+        }
+        (Expr::Row(x), Expr::Row(y)) => expr_slice_deep_equal(&x.values, &y.values, resolve_a),
+        (Expr::SetCollation(x), Expr::SetCollation(y)) => {
+            x.collate == y.collate && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+        }
+        (Expr::Default(x), Expr::Default(y)) => x.name == y.name,
+        (Expr::Values(x), Expr::Values(y)) => x == y,
+        (Expr::MatchAgainst(x), Expr::MatchAgainst(y)) => {
+            x.column_names == y.column_names
+                && x.modifier == y.modifier
+                && expression_deep_equal_with(&x.against, &y.against, resolve_a)
+        }
+        (Expr::TableName(x), Expr::TableName(y)) => {
+            x.schema == y.schema && x.name == y.name && x.partition_names == y.partition_names
+        }
+        (Expr::TimeUnit(x), Expr::TimeUnit(y)) => x == y,
+        (Expr::GetFormatSelector(x), Expr::GetFormatSelector(y)) => x == y,
+        (Expr::TrimDirection(x), Expr::TrimDirection(y)) => x == y,
+        (Expr::Position(x), Expr::Position(y)) => x == y,
+        (Expr::Exists(x), Expr::Exists(y)) => {
+            x.not == y.not && expression_deep_equal_with(&x.sel, &y.sel, resolve_a)
+        }
+        (Expr::CompareSubquery(x), Expr::CompareSubquery(y)) => {
+            x.op == y.op
+                && x.all == y.all
+                && expression_deep_equal_with(&x.l, &y.l, resolve_a)
+                && expression_deep_equal_with(&x.r, &y.r, resolve_a)
+        }
+        // Subqueries and unported nodes: compare by pointer identity (no two distinct
+        // parsed subqueries in the same statement share an address).
+        (Expr::Subquery(x), Expr::Subquery(y)) => std::ptr::eq(&**x, &**y),
+        (Expr::Unported(x), Expr::Unported(y)) => std::ptr::eq(&**x, &**y),
+        _ => false,
+    }
+}
+
+fn expr_slice_deep_equal<'a, F>(a: &'a [Expr], b: &'a [Expr], resolve_a: &F) -> bool
+where
+    F: Fn(&'a Expr) -> &'a Expr,
+{
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| expression_deep_equal_with(x, y, resolve_a))
+}
+
+fn opt_expr_deep_equal<'a, F>(a: Option<&'a Expr>, b: Option<&'a Expr>, resolve_a: &F) -> bool
+where
+    F: Fn(&'a Expr) -> &'a Expr,
+{
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => expression_deep_equal_with(x, y, resolve_a),
+        _ => false,
+    }
+}
+
+fn by_item_slice_deep_equal<'a, F>(a: &'a [ByItem], b: &'a [ByItem], resolve_a: &F) -> bool
+where
+    F: Fn(&'a Expr) -> &'a Expr,
+{
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.desc == y.desc
+                && x.null_order == y.null_order
+                && expression_deep_equal_with(&x.expr, &y.expr, resolve_a)
+        })
+}
+
+fn opt_order_by_deep_equal<'a, F>(
+    a: Option<&'a OrderByClause>,
+    b: Option<&'a OrderByClause>,
+    resolve_a: &F,
+) -> bool
+where
+    F: Fn(&'a Expr) -> &'a Expr,
+{
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => by_item_slice_deep_equal(&x.items, &y.items, resolve_a),
+        _ => false,
+    }
+}
+
+fn frame_bound_deep_equal<'a, F>(a: &'a FrameBound, b: &'a FrameBound, resolve_a: &F) -> bool
+where
+    F: Fn(&'a Expr) -> &'a Expr,
+{
+    a.tp == b.tp
+        && a.unbounded == b.unbounded
+        && a.unit == b.unit
+        && opt_expr_deep_equal(a.expr.as_ref(), b.expr.as_ref(), resolve_a)
+}
+
+fn window_spec_deep_equal<'a, F>(a: &'a WindowSpec, b: &'a WindowSpec, resolve_a: &F) -> bool
+where
+    F: Fn(&'a Expr) -> &'a Expr,
+{
+    a.name == b.name
+        && a.ref_ == b.ref_
+        && a.only_alias == b.only_alias
+        && a.unported == b.unported
+        && match (a.partition_by.as_deref(), b.partition_by.as_deref()) {
+            (None, None) => true,
+            (Some(x), Some(y)) => by_item_slice_deep_equal(&x.items, &y.items, resolve_a),
+            _ => false,
+        }
+        && opt_order_by_deep_equal(a.order_by.as_deref(), b.order_by.as_deref(), resolve_a)
+        && match (a.frame.as_deref(), b.frame.as_deref()) {
+            (None, None) => true,
+            (Some(x), Some(y)) => {
+                x.tp == y.tp
+                    && frame_bound_deep_equal(&x.extent.start, &y.extent.start, resolve_a)
+                    && frame_bound_deep_equal(&x.extent.end, &y.extent.end, resolve_a)
+            }
+            _ => false,
+        }
+}
+
+#[cfg(test)]
+mod deep_equal_tests {
+    use super::*;
+    use crate::{ParseOptions, parse};
+
+    fn parse_select_exprs(sql: &str) -> Vec<Expr> {
+        let out = parse(sql, &ParseOptions::default()).unwrap();
+        let Stmt::Select(sel) = out.stmts.into_iter().next().unwrap() else {
+            panic!("expected select");
+        };
+        sel.fields
+            .fields
+            .into_iter()
+            .map(|f| f.expr.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn expression_deep_equal_func_case_and_structure() {
+        let exprs = parse_select_exprs("SELECT ABS(a + 1), abs(a + 1), abs(a + 2), ABS(A + 1)");
+        assert!(expression_deep_equal(&exprs[0], &exprs[1]));
+        assert!(!expression_deep_equal(&exprs[0], &exprs[2]));
+        // Go's exprCleaner only folds FuncCallExpr.FnName.O, not ColumnName.Name.O.
+        assert!(!expression_deep_equal(&exprs[0], &exprs[3]));
+    }
+}

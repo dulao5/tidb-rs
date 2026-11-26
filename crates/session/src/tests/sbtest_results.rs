@@ -480,10 +480,10 @@ fn ranges_fall_back_before_any_executor_opened() {
     }
 }
 
-/// `SUM(k)` over a range (sysbench's sum range) needs the aggregation (D09.4) and falls back
-/// at planning, before any executor opened, as a text query and as a prepared statement,
-/// also for a range of one point, which Go plans as a stream aggregation over a projection
-/// over a point get.
+/// `SUM(k)` over a range (sysbench's sum range) builds the logical aggregation (D09.4 part A)
+/// and falls back at logical optimization (`BuildKeySolver`, D09.13), before any executor
+/// opened, as a text query and as a prepared statement, also for a range of one point, which
+/// Go plans as a stream aggregation over a projection over a point get.
 #[test]
 fn sum_range_falls_back_at_planning() {
     let _serial = PREPARED_COUNT.lock();
@@ -494,29 +494,121 @@ fn sum_range_falls_back_at_planning() {
     ] {
         let before = s.executed_stmts();
         let r = run_text(&mut s, sql);
-        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.4");
+        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.13");
     }
     let sql = "SELECT SUM(k) FROM sbtest1 WHERE id BETWEEN ? AND ?";
     let before = s.executed_stmts();
-    let r = block_on(s.prepare_stmt(sql)).map(|info| info.stmt_id);
-    if let Ok(stmt_id) = r {
-        for (lo, hi) in [(1, 10), (5, 5)] {
-            let what = format!("{sql} ({lo}, {hi})");
-            let r = run_prepared(&mut s, stmt_id, vec![new_int_datum(lo), new_int_datum(hi)]);
-            assert_eq!(assert_falls_back(&s, &what, before, r), "D09.4");
+    // PREPARE of an aggregate statement completes on the Rust stack (plan_cache_utils.rs);
+    // pin the exact column metadata against Go TiDB v8.5.8 (SUM(INT) -> DECIMAL(32, 0),
+    // nullable with BinaryFlag, name "SUM(k)").
+    let info = block_on(s.prepare_stmt(sql)).expect("PREPARE of aggregate succeeds on Rust stack");
+    assert_eq!(s.executed_stmts(), before);
+    let prepared: Vec<Col> = info.fields.iter().map(col_of).collect();
+    assert_eq!(
+        prepared,
+        vec![Col {
+            name: "SUM(k)".to_owned(),
+            org_name: String::new(),
+            table: String::new(),
+            org_table: String::new(),
+            schema: String::new(),
+            tp: tidb_base::mysql::TypeNewDecimal,
+            flen: 32,
+            decimal: 0,
+            flag: tidb_base::mysql::BinaryFlag as u32,
+            charset: "binary".to_owned(),
+        }],
+        "PREPARE column metadata for {sql}"
+    );
+    for (lo, hi) in [(1, 10), (5, 5)] {
+        let what = format!("{sql} ({lo}, {hi})");
+        let r = run_prepared(
+            &mut s,
+            info.stmt_id,
+            vec![new_int_datum(lo), new_int_datum(hi)],
+        );
+        assert_eq!(assert_falls_back(&s, &what, before, r), "D09.13");
+    }
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
+
+    // Also pin PREPARE metadata for COUNT(*) + MAX(k) against Go TiDB v8.5.8.
+    let sql2 = "SELECT COUNT(*), MAX(k) FROM sbtest1 WHERE id BETWEEN ? AND ?";
+    let info2 = block_on(s.prepare_stmt(sql2)).expect("PREPARE COUNT(*), MAX(k)");
+    let prepared2: Vec<Col> = info2.fields.iter().map(col_of).collect();
+    assert_eq!(
+        prepared2,
+        vec![
+            Col {
+                name: "COUNT(*)".to_owned(),
+                org_name: String::new(),
+                table: String::new(),
+                org_table: String::new(),
+                schema: String::new(),
+                tp: tidb_base::mysql::TypeLonglong,
+                flen: 21,
+                decimal: 0,
+                flag: (tidb_base::mysql::NotNullFlag | tidb_base::mysql::BinaryFlag) as u32,
+                charset: "binary".to_owned(),
+            },
+            Col {
+                name: "MAX(k)".to_owned(),
+                org_name: String::new(),
+                table: String::new(),
+                org_table: String::new(),
+                schema: String::new(),
+                tp: tidb_base::mysql::TypeLong,
+                flen: 11,
+                decimal: 0,
+                flag: tidb_base::mysql::MultipleKeyFlag as u32,
+                charset: "binary".to_owned(),
+            },
+        ],
+        "PREPARE column metadata for {sql2}"
+    );
+    s.drop_prepared_stmt(info2.stmt_id).unwrap();
+    s.clean_closed_prepared_stmts();
+}
+
+/// R27 (#437): Drive real session PREPARE + two EXECUTEs (with plan cache disabled) for
+/// statements whose SELECT alias is rewritten inside HAVING/GROUP BY. On Go v8.5.8,
+/// `SELECT k+1 AS x FROM sbtest1 GROUP BY k+1 HAVING SUM(x) > 0` fails with ERROR 1055
+/// starting on the second EXECUTE due to in-place AST mutation. In tidb-rs, both EXECUTEs
+/// pass D09.4 aggregation building cleanly and stop at D09.13 (BuildKeySolver).
+#[test]
+fn prepared_repeated_execute_having_and_group_by_alias_through_session() {
+    let _serial = PREPARED_COUNT.lock();
+    let (_store, mut s) = sysbench_session(); // plan cache OFF
+    for sql in [
+        "SELECT k+1 AS x FROM sbtest1 GROUP BY k+1 HAVING SUM(x) > 0",
+        "SELECT k+1 AS x FROM sbtest1 GROUP BY x HAVING SUM(x) > 0",
+    ] {
+        let info = block_on(s.prepare_stmt(sql)).unwrap_or_else(|e| panic!("PREPARE {sql}: {e}"));
+        let prepared: Vec<Col> = info.fields.iter().map(col_of).collect();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].name, "x");
+        for run in 1..=2 {
+            let before = s.executed_stmts();
+            let r = run_prepared(&mut s, info.stmt_id, vec![]);
+            assert_eq!(
+                assert_falls_back(&s, &format!("{sql} (EXECUTE #{run})"), before, r),
+                "D09.13",
+                "EXECUTE #{run} must pass D09.4 without ERROR 1055 for {sql}"
+            );
         }
-    } else {
-        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.4");
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+        s.clean_closed_prepared_stmts();
     }
 }
 
-/// The stream aggregation executor (the aggregation executors D12.3, part A) is ported, but no
-/// aggregate reaches it yet: the physical aggregation plans (D10.1) are not ported and every
-/// statement with an aggregate, a GROUP BY or a DISTINCT falls back at planning (the
-/// aggregation rules, D09.4), before any executor opened; also the shapes Go plans as a stream
-/// aggregation (an aggregate over a point get or a range of the clustered index). The stop of
-/// each statement is pinned, so the first statement that reaches the new executor fails here
-/// and gets a row and column check instead.
+/// The stream aggregation executor (the aggregation executors D12.3, part A) and logical
+/// aggregation builder (D09.4, part A) are ported, but no aggregate reaches the executor yet:
+/// `BuildKeySolver` (D09.13), aggregation optimization rules (D09.9), and physical aggregation
+/// plans / enumeration (D10.1 / D10.3) are not ported yet, so every statement with an
+/// aggregate, a GROUP BY or a DISTINCT falls back at logical optimization (`BuildKeySolver`,
+/// D09.13), before any executor opened; also the shapes Go plans as a stream aggregation (an
+/// aggregate over a point get or a range of the clustered index). The stop of each statement
+/// is pinned, so the first statement that reaches the next stage fails here and gets updated.
 #[test]
 fn aggregates_fall_back_at_planning() {
     let _serial = PREPARED_COUNT.lock();
@@ -530,7 +622,7 @@ fn aggregates_fall_back_at_planning() {
     ] {
         let before = s.executed_stmts();
         let r = run_text(&mut s, sql);
-        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.4", "{sql}");
+        assert_eq!(assert_falls_back(&s, sql, before, r), "D09.13", "{sql}");
     }
 }
 
