@@ -23,7 +23,10 @@ use tidb_model::TableInfo;
 use tipb::ExplainOperator;
 
 use crate::base::AccessObject;
-use crate::core::physical_plans::{PhysPlanPartInfo, PhysicalTableReader, PhysicalTableScan};
+use crate::core::physical_plans::{
+    PhysPlanPartInfo, PhysicalIndexReader, PhysicalIndexScan, PhysicalTableReader,
+    PhysicalTableScan,
+};
 use crate::core::point_get_plan::PointGetPlan;
 use crate::planctx::PlanCtx;
 
@@ -259,6 +262,40 @@ fn index_access_cols(tbl: &TableInfo, index_cols: &[tidb_model::IndexColumn]) ->
     cols
 }
 
+impl PhysicalIndexScan {
+    /// AccessObject implements dataAccesser interface.
+    // go: PhysicalIndexScan.AccessObject L1
+    pub fn access_object(&self) -> Box<dyn AccessObject> {
+        let mut res = ScanAccessObject {
+            database: self.db_name.o.clone(),
+            ..Default::default()
+        };
+        let mut tbl_name = self.table.name.o.clone();
+        if let Some(as_name) = &self.table_as_name
+            && !as_name.o.is_empty()
+        {
+            tbl_name = as_name.o.clone();
+        }
+        res.table = tbl_name;
+        if self.is_partition
+            && let Some(pi) = self.table.get_partition_info()
+        {
+            let partition_name = pi.get_name_by_id(self.physical_table_id);
+            res.partitions = vec![partition_name.to_owned()];
+        }
+        let idx_cols = self.index.columns.as_deref().unwrap_or(&[]);
+        if !idx_cols.is_empty() {
+            let index = IndexAccess {
+                name: self.index.name.o.clone(),
+                cols: index_access_cols(&self.table, idx_cols),
+                is_clustered_index: false,
+            };
+            res.indexes = vec![index];
+        }
+        Box::new(res)
+    }
+}
+
 impl PhysicalTableScan {
     /// AccessObject implements dataAccesser interface.
     // go: PhysicalTableScan.AccessObject L2 (AnnIndexExtra is not carried: its branch sees nil)
@@ -366,6 +403,40 @@ impl PhysicalTableReader {
             None => Ok(Box::new(DynamicPartitionAccessObjects(Vec::new()))),
             Some(res) => Ok(Box::new(DynamicPartitionAccessObjects(vec![res]))),
         }
+    }
+}
+
+// go: getAccessObjectFromIndexScan L2 (Result for the partition pruning boundary of getDynamicAccessPartition)
+pub fn get_access_object_from_index_scan(
+    sctx: &PlanCtx<'_>,
+    is: &PhysicalIndexScan,
+    p: Option<&PhysPlanPartInfo>,
+) -> Result<Box<dyn AccessObject>, Error> {
+    if !sctx.vars.stmt_ctx().use_dynamic_partition_prune() {
+        return Ok(Box::new(DynamicPartitionAccessObjects(Vec::new())));
+    }
+    let mut as_name = "";
+    if let Some(n) = &is.table_as_name
+        && !n.o.is_empty()
+    {
+        as_name = &n.o;
+    }
+    let res = get_dynamic_access_partition(sctx, &is.table, p, as_name)?;
+    match res {
+        None => Ok(Box::new(DynamicPartitionAccessObjects(Vec::new()))),
+        Some(res) => Ok(Box::new(DynamicPartitionAccessObjects(vec![res]))),
+    }
+}
+
+impl PhysicalIndexReader {
+    /// `accessObject` of `partitionAccesser`.
+    // go: PhysicalIndexReader.accessObject L2 (Result for the partition pruning boundary)
+    pub fn access_object(&self, sctx: &PlanCtx<'_>) -> Result<Box<dyn AccessObject>, Error> {
+        let is = self.index_plans[0]
+            .as_any()
+            .downcast_ref::<PhysicalIndexScan>()
+            .expect("interface conversion: base.PhysicalPlan is not *core.PhysicalIndexScan");
+        get_access_object_from_index_scan(sctx, is, self.plan_part_info.as_deref())
     }
 }
 

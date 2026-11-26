@@ -31,8 +31,8 @@ use tidb_expression::{Column, Expr, Schema, new_schema};
 use crate::base::{PhysicalKind, PhysicalPlan};
 use crate::core::initialize::flatten_list_push_down_plan;
 use crate::core::physical_plans::{
-    NominalSort, PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalSort,
-    PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
+    NominalSort, PhysicalIndexReader, PhysicalLimit, PhysicalProjection, PhysicalSelection,
+    PhysicalSort, PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
 };
 use crate::core::util::{BaseSchemaProducer, PhysicalSchemaProducer};
 use crate::physicalop::make_mut_plan;
@@ -147,6 +147,47 @@ impl PhysicalTableReader {
         self.table_plans = flatten_list_push_down_plan(table_plan);
         copy_resolved_indices(&mut self.sp.schema_mut().columns, table_plan.schema());
         res
+    }
+}
+
+impl PhysicalIndexReader {
+    /// ResolveIndices implements Plan interface.
+    ///
+    /// Clears `IndexPlans` before resolving `index_plan` in place (so the chain stays owned alone
+    /// without copy-on-write, N1 §3.4) and rebuilds it afterwards. Copies resolved `Index` values
+    /// back into the reader's schema only when Go's `SetSchema` aliases `indexPlan.Schema()`
+    /// (Projection / HashAgg / StreamAgg); for Limit / TopN / Selection / IndexScan, Go's reader
+    /// schema is `is.dataSourceSchema`, not `indexPlan.Schema()`.
+    // go: PhysicalIndexReader.ResolveIndices L1 [M-PLAN, M-CTX, M-EXPR]
+    pub fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        self.sp.resolve_indices(ctx)?;
+        self.index_plans.clear();
+        let index_plan = self.index_plan.as_mut().expect("indexPlan");
+        let res = make_mut_plan(index_plan).resolve_indices(ctx);
+        self.index_plans = flatten_list_push_down_plan(index_plan);
+        let shared_with_index_plan = matches!(index_plan.kind(), PhysicalKind::Projection);
+        let index_schema = index_plan.schema().clone();
+        if shared_with_index_plan {
+            copy_resolved_indices(&mut self.sp.schema_mut().columns, &index_schema);
+        }
+        res?;
+        for col in &mut self.output_columns {
+            match col.resolve_indices(&index_schema) {
+                Ok(new_col) => *col = Arc::new(new_col),
+                Err(err) => {
+                    // Check if there is duplicate virtual expression column matched.
+                    let eval_ctx = ctx.eval_ctx();
+                    let (new_expr_col, is_ok) =
+                        col.resolve_indices_by_virtual_expr(&*eval_ctx, &index_schema);
+                    if is_ok {
+                        *col = Arc::new(new_expr_col);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
     }
 }
 

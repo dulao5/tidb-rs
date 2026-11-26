@@ -834,6 +834,17 @@ impl Clone for FKInfo {
     }
 }
 
+impl Eq for TableItemID {}
+
+impl std::hash::Hash for TableItemID {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.table_id.hash(state);
+        self.id.hash(state);
+        self.is_index.hash(state);
+        self.is_sync_load_failed.hash(state);
+    }
+}
+
 impl TableItemID {
     /// Key is used to generate unique key for TableItemID to use in the syncload.
     // go: TableItemID.Key L1

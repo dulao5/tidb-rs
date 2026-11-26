@@ -25,15 +25,16 @@ pub use selectivity::{
     get_usable_sets_by_greedy, is_last_bucket_end_value_underrepresented, selectivity,
 };
 
-/// `z + x * y` the way Go gc compiles row_size.go:89: fused on arm64, ppc64le, s390x,
-/// riscv64, loong64, not on amd64 (GOAMD64=v1) (mapping rule `M-FMA`, tracker
-/// `data/go_fma_sites.tsv`). Rust never contracts by itself.
+/// `z + x * y` the way Go gc compiles row_size.go:89 and cross_estimation.go:110: fused on
+/// arm64, ppc64le, s390x, riscv64, loong64, not on amd64 (GOAMD64=v1) (mapping rule `M-FMA`,
+/// tracker `data/go_fma_sites.tsv`). Rust never contracts by itself.
 // glue: M-FMA helper
 #[inline(always)]
 pub(crate) fn madd(z: f64, x: f64, y: f64) -> f64 {
     #[cfg(any(
         target_arch = "aarch64",
         all(target_arch = "powerpc64", target_endian = "little"),
+        target_arch = "s390x",
         target_arch = "riscv64",
         target_arch = "loongarch64"
     ))]
@@ -43,6 +44,7 @@ pub(crate) fn madd(z: f64, x: f64, y: f64) -> f64 {
     #[cfg(not(any(
         target_arch = "aarch64",
         all(target_arch = "powerpc64", target_endian = "little"),
+        target_arch = "s390x",
         target_arch = "riscv64",
         target_arch = "loongarch64"
     )))]

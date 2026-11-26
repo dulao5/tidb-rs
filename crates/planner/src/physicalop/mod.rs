@@ -93,7 +93,7 @@ pub fn clone_node_calls() -> u64 {
 /// generates `schema` / `set_schema` from the producer.
 #[macro_export]
 macro_rules! physical_plan_boilerplate {
-    ($kind:ident, sp) => {
+    ($kind:ident, sp_no_set_schema) => {
         // glue: M-IFACE (generated per operator)
         fn kind(&self) -> $crate::PhysicalKind {
             $crate::PhysicalKind::$kind
@@ -127,6 +127,9 @@ macro_rules! physical_plan_boilerplate {
         fn schema(&self) -> &$crate::Schema {
             self.sp.schema()
         }
+    };
+    ($kind:ident, sp) => {
+        $crate::physical_plan_boilerplate!($kind, sp_no_set_schema);
         // glue: dispatch (Go physicalSchemaProducer.SetSchema, generated per operator)
         fn set_schema(&mut self, schema: $crate::Schema) {
             self.sp.set_schema(Some(schema));

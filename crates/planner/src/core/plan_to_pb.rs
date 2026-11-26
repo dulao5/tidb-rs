@@ -29,15 +29,22 @@ use tidb_expr_pushdown::expr_to_pb::{
     expressions_to_pb_list, projection_expressions_to_pb_list, sort_by_item_to_pb,
 };
 use tidb_expression::{EvalState, Expr, ExprRef};
-use tidb_infoschema::tables::{build_table_scan_from_infos, set_pb_columns_default_value};
-use tidb_model::ColumnInfo;
+use tidb_infoschema::tables::{
+    build_table_scan_from_infos, set_pb_columns_default_value, try_get_common_pk_column_ids,
+};
+use tidb_infoschema::util::misc::columns_to_proto;
+use tidb_model::{
+    ColumnInfo, ExtraHandleID, ExtraPhysTblID, IndexInfo, new_extra_handle_col_info,
+    new_extra_phys_tbl_id_col_info,
+};
 use tidb_sessionctx::planctx::BuildPBContext;
+use tidb_sessionctx::ranger::Range;
 use tipb::ExecType;
 
 use crate::base::PhysicalPlan;
 use crate::core::physical_plans::{
-    PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalSort, PhysicalTableScan,
-    PhysicalTopN,
+    PhysicalIndexScan, PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalSort,
+    PhysicalTableScan, PhysicalTopN,
 };
 
 /// `&tipb.Executor{Tp: tp, ExecutorId: &executorID, ...}`: the fields gogoproto always
@@ -255,6 +262,89 @@ impl PhysicalTableScan {
         let mut e = new_executor(ExecType::TypeTableScan, executor_id);
         e.set_tbl_scan(ts_exec);
         err?;
+        Ok(e)
+    }
+}
+
+/// checkCoverIndex checks whether we can pass unique info to TiKV. We should push it if and only
+/// if the length of range and index are equal.
+// go: checkCoverIndex L1
+pub fn check_cover_index(idx: &IndexInfo, ranges: &[Range]) -> bool {
+    // If the index is (c1, c2) but the query range only contains c1, it is not a unique get.
+    if !idx.unique {
+        return false;
+    }
+    let idx_cols_len = idx.columns.as_deref().map_or(0, <[_]>::len);
+    for rg in ranges {
+        if rg.low_val.len() != idx_cols_len {
+            return false;
+        }
+        for v in &rg.low_val {
+            if v.is_null() {
+                // a unique index may have duplicated rows with NULLs, so we cannot set the unique
+                // attribute to true when the range has NULL (upstream issue `29650`).
+                return false;
+            }
+        }
+        for v in &rg.high_val {
+            if v.is_null() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+impl PhysicalIndexScan {
+    /// ToPB implements PhysicalPlan ToPB interface.
+    ///
+    /// Does NOT call `new_executor`: Go returns `&tipb.Executor{Tp: ..., IdxScan: ...}` with
+    /// `ExecutorId == nil`, while gogoproto still encodes the non-nullable 0-valued
+    /// `FineGrainedShuffleStreamCount` and `FineGrainedShuffleBatchSize` fields.
+    // go: PhysicalIndexScan.ToPB L1 [M-CTX]
+    pub fn to_pb(
+        &self,
+        _ctx: &BuildPBContext,
+        _store_type: StoreType,
+    ) -> Result<tipb::Executor, Error> {
+        let mut owned_cols: Vec<Arc<ColumnInfo>> = Vec::with_capacity(self.schema().len());
+        let table_columns = self.table.columns.as_deref().unwrap_or(&[]);
+        for col in &self.schema().columns {
+            if col.id == ExtraHandleID as i64 {
+                owned_cols.push(Arc::new(new_extra_handle_col_info()));
+            } else if col.id == ExtraPhysTblID as i64 {
+                owned_cols.push(Arc::new(new_extra_phys_tbl_id_col_info()));
+            } else {
+                let info = find_column_info_by_id(table_columns, col.id)
+                    .expect("runtime error: invalid memory address or nil pointer dereference");
+                owned_cols.push(Arc::clone(info));
+            }
+        }
+        let col_refs: Vec<&ColumnInfo> = owned_cols.iter().map(|c| &**c).collect();
+        let mut pk_col_ids: Vec<i64> = Vec::new();
+        if self.need_common_handle {
+            pk_col_ids = try_get_common_pk_column_ids(&self.table).unwrap_or_default();
+        }
+        let mut idx_exec = tipb::IndexScan::default();
+        idx_exec.set_table_id(self.table.id);
+        idx_exec.set_index_id(self.index.id);
+        idx_exec
+            .set_columns(columns_to_proto(&col_refs, self.table.pk_is_handle, true, false).into());
+        idx_exec.set_desc(self.desc);
+        if !pk_col_ids.is_empty() {
+            idx_exec.set_primary_column_ids(pk_col_ids);
+        }
+        if self.is_partition {
+            idx_exec.set_table_id(self.physical_table_id);
+        }
+        let unique = check_cover_index(&self.index, &self.ranges);
+        idx_exec.set_unique(unique);
+
+        let mut e = tipb::Executor::default();
+        e.set_tp(ExecType::TypeIndexScan);
+        e.set_idx_scan(idx_exec);
+        e.set_fine_grained_shuffle_stream_count(0);
+        e.set_fine_grained_shuffle_batch_size(0);
         Ok(e)
     }
 }

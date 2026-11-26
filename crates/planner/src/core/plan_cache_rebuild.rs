@@ -29,8 +29,11 @@ use tidb_types::collate;
 use tidb_types::datum::Datum;
 
 use crate::base::PhysicalPlan;
+use crate::core::find_best_task::group_ranges_by_cols;
 use crate::core::initialize::flatten_list_push_down_plan;
-use crate::core::physical_plans::{PhysicalTableReader, PhysicalTableScan};
+use crate::core::physical_plans::{
+    PhysicalIndexReader, PhysicalIndexScan, PhysicalTableReader, PhysicalTableScan,
+};
 use crate::core::point_get_plan::PointGetPlan;
 use crate::planctx::PlanCtx;
 use crate::ranger::detacher::{DetachRangeResult, detach_cond_and_build_range_for_index};
@@ -95,12 +98,27 @@ pub fn rebuild_range(ctx: &mut PlanCtx<'_>, p: &mut PhysicalPlanRef) -> Result<(
                 .as_any()
                 .downcast_ref::<PhysicalTableScan>()
                 .expect("PhysicalTableScan");
-            if let Some(ranges) = build_range_for_table_scan(ctx, ts)? {
-                make_mut_plan(p)
+            if let Some((ranges, grouped_ranges)) = build_range_for_table_scan(ctx, ts)? {
+                let ts = make_mut_plan(p)
                     .as_any_mut()
                     .downcast_mut::<PhysicalTableScan>()
-                    .expect("PhysicalTableScan")
-                    .ranges = ranges;
+                    .expect("PhysicalTableScan");
+                ts.ranges = ranges;
+                ts.grouped_ranges = grouped_ranges;
+            }
+        }
+        PhysicalKind::IndexScan => {
+            let is = p
+                .as_any()
+                .downcast_ref::<PhysicalIndexScan>()
+                .expect("PhysicalIndexScan");
+            if let Some((ranges, grouped_ranges)) = build_range_for_index_scan(ctx, is)? {
+                let is = make_mut_plan(p)
+                    .as_any_mut()
+                    .downcast_mut::<PhysicalIndexScan>()
+                    .expect("PhysicalIndexScan");
+                is.ranges = ranges;
+                is.grouped_ranges = grouped_ranges;
             }
         }
         PhysicalKind::TableReader => {
@@ -122,6 +140,27 @@ pub fn rebuild_range(ctx: &mut PlanCtx<'_>, p: &mut PhysicalPlanRef) -> Result<(
                     .expect("PhysicalTableReader");
                 x.table_plans = flatten_list_push_down_plan(&new_chain);
                 x.table_plan = Some(new_chain);
+            }
+        }
+        PhysicalKind::IndexReader => {
+            // rebuildRange(x.IndexPlans[0]): the scan at the bottom of the reader's chain;
+            // the chain and the flat list are rebuilt when it changes (N1 §3 item 9).
+            let x = p
+                .as_any()
+                .downcast_ref::<PhysicalIndexReader>()
+                .expect("PhysicalIndexReader");
+            let Some(chain) = &x.index_plan else {
+                return Ok(());
+            };
+            let mut new_chain = Arc::clone(chain);
+            rebuild_chain_bottom(ctx, &mut new_chain)?;
+            if !Arc::ptr_eq(&new_chain, chain) {
+                let x = make_mut_plan(p)
+                    .as_any_mut()
+                    .downcast_mut::<PhysicalIndexReader>()
+                    .expect("PhysicalIndexReader");
+                x.index_plans = flatten_list_push_down_plan(&new_chain);
+                x.index_plan = Some(new_chain);
             }
         }
         PhysicalKind::PointGet => rebuild_point_get(ctx, p)?,
@@ -313,13 +352,16 @@ pub fn convert_constant2_datum(
     Ok(d_val)
 }
 
-/// buildRangeForTableScan: the ranges of `ts` for the current parameters; `None` when they
-/// are the cached ones (nothing to write).
-// go: buildRangeForTableScan L2 (returns the ranges instead of writing them; GroupRangesByCols is blocked-by:D10.2)
+/// Rebuilt scan ranges and grouped ranges for a cached table or index scan.
+type RebuiltRanges = (Vec<Range>, Vec<Vec<Range>>);
+
+/// buildRangeForTableScan: the ranges (and grouped ranges) of `ts` for the current parameters;
+/// `None` when they are the cached ones (nothing to write).
+// go: buildRangeForTableScan L2 (returns the ranges instead of writing them; A3 spec §3.2)
 pub fn build_range_for_table_scan(
     ctx: &PlanCtx<'_>,
     ts: &PhysicalTableScan,
-) -> Result<Option<Vec<Range>>, Error> {
+) -> Result<Option<RebuiltRanges>, Error> {
     let rctx = ctx.ranger_ctx();
     let ranges;
     if ts.table.is_common_handle {
@@ -400,15 +442,16 @@ pub fn build_range_for_table_scan(
         }
     }
 
-    // Rebuild GroupedRanges if GroupByColIdxs is set
-    if !ts.group_by_col_idxs.is_empty() {
-        // glue: blocked-by:D10.2 (GroupRangesByCols, the merge sort of grouped ranges)
-        return Err(blocked("D10.2", "GroupRangesByCols of a cached table scan"));
-    }
     if same_ranges(&ranges, &ts.ranges) {
         return Ok(None);
     }
-    Ok(Some(ranges))
+    // Rebuild GroupedRanges if GroupByColIdxs is set
+    let grouped_ranges = if !ts.group_by_col_idxs.is_empty() {
+        group_ranges_by_cols(&ranges, &ts.group_by_col_idxs)?
+    } else {
+        ts.grouped_ranges.clone()
+    };
+    Ok(Some((ranges, grouped_ranges)))
 }
 
 /// Whether two range lists are the same (A3 spec §3.2: equal ranges are not written).
@@ -426,16 +469,58 @@ fn same_ranges(a: &[Range], b: &[Range]) -> bool {
         })
 }
 
-/// updateRange writes an index join's rebuilt ranges into its inner scan, and
-/// buildRangeForIndexScan rebuilds an index scan's ranges: index joins and index scans are
-/// not ported (the index readers and the index join operators, D10.1), so a plan with them is
-/// not cacheable (`instance_cacheable` is false) and these are never reached.
+/// buildRangeForIndexScan: the ranges (and grouped ranges) of `is` for the current parameters;
+/// `None` when they are the cached ones (nothing to write).
+// go: buildRangeForIndexScan L2 (returns the ranges instead of writing them; A3 spec §3.2)
+pub fn build_range_for_index_scan(
+    ctx: &PlanCtx<'_>,
+    is: &PhysicalIndexScan,
+) -> Result<Option<RebuiltRanges>, Error> {
+    if is.idx_cols.is_empty() {
+        if has_full_range(&is.ranges, false) {
+            // the original range is already a full-range.
+            let ranges = full_range();
+            if same_ranges(&ranges, &is.ranges) {
+                return Ok(None);
+            }
+            return Ok(Some((ranges, is.grouped_ranges.clone())));
+        }
+        return Err(rebuild_err("unexpected range for PhysicalIndexScan"));
+    }
+
+    let rctx = ctx.ranger_ctx();
+    let res = detach_cond_and_build_range_for_index(
+        &rctx,
+        &is.access_condition,
+        &is.idx_cols,
+        &is.idx_col_lens,
+        0,
+    )?;
+    if !is_safe_range(&is.access_condition, &res, false, Some(&is.ranges)) {
+        return Err(rebuild_err("rebuild to get an unsafe range"));
+    }
+    let ranges = res.ranges;
+    if same_ranges(&ranges, &is.ranges) {
+        return Ok(None);
+    }
+
+    // Rebuild GroupedRanges if GroupByColIdxs is set
+    let grouped_ranges = if !is.group_by_col_idxs.is_empty() {
+        group_ranges_by_cols(&ranges, &is.group_by_col_idxs)?
+    } else {
+        is.grouped_ranges.clone()
+    };
+    Ok(Some((ranges, grouped_ranges)))
+}
+
+/// updateRange writes an index join's rebuilt ranges into its inner scan: index joins are not
+/// ported (D10.1), so a plan with them is not cacheable (`instance_cacheable` is false) and
+/// this is never reached.
 // glue: stub of updateRange, blocked-by:D10.1 (index joins are not ported: their plans are not cached)
-// glue: stub of buildRangeForIndexScan, blocked-by:D10.1 (index scans are not ported: their plans are not cached)
-pub fn build_range_for_index_scan() -> Result<(), Error> {
+pub fn update_range() -> Result<(), Error> {
     Err(blocked(
         "D10.1",
-        "the range rebuild of a cached index scan or index join",
+        "the range update of a cached index join (updateRange)",
     ))
 }
 

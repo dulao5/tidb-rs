@@ -40,18 +40,23 @@ use tidb_base::kv::StoreType;
 use tidb_execdetails::tracing::opt_trace::{CandidatePlanTrace, PlanTrace};
 use tidb_expression::util::{extract_cor_columns, extract_dependent_columns};
 use tidb_expression::{Column, CorrelatedColumn, ExprRef, Schema};
-use tidb_model::{ColumnInfo, ExtraHandleID, ExtraPhysTblID, TableInfo};
+use tidb_model::{
+    ColumnInfo, EmptyColumnInfoSize, ExtraHandleID, ExtraPhysTblID, IndexInfo, TableInfo,
+    TableItemID,
+};
 use tidb_parser::model::CIStr;
 use tidb_sessionctx::planctx::BuildPBContext;
 use tidb_sessionctx::ranger::Range;
 use tidb_sessionctx::stmtctx::StatementContext;
 use tidb_statistics::HistColl;
+use tidb_types::context::Context as TypeContext;
 use tidb_types::field_name::NameSlice;
 
 use crate::base::{PhysicalKind, PhysicalPlan};
 use crate::core::initialize::flatten_list_push_down_plan;
+use crate::core::plan_cost_ver1::get_tbl_stats;
 use crate::core::plan_to_pb::find_column_info_by_id;
-use crate::core::util::PhysicalSchemaProducer;
+use crate::core::util::{PhysicalSchemaProducer, clone_physical_plan};
 use crate::physicalop::{BasePhysicalPlan, PhysicalPlanRef, base_physical_plan, make_mut_plan};
 use crate::planctx::PlanCtx;
 use crate::property::{PhysicalProperty, SortItem, TaskType};
@@ -59,7 +64,7 @@ use crate::util::ByItems;
 use crate::util::HandleCols;
 use crate::util::coreusage::extract_correlated_cols4_physical_plan;
 use crate::util::costusage::CostVer2;
-use crate::util::misc::{clone_col_infos, clone_exprs, clone_ranges};
+use crate::util::misc::{clone_col_infos, clone_cols, clone_exprs, clone_ranges};
 use crate::util::optimizetrace::{PhysicalOptimizeOp, PlanCostOption};
 
 /// `size.SizeOfSlice`.
@@ -139,6 +144,7 @@ impl PhysicalTableReader {
 }
 
 /// PhysPlanPartInfo indicates partition helper info in physical plan.
+// go: PhysPlanPartInfo.Clone L2 (N1 immutable Arc<Expr> / Arc<Column> sharing)
 #[derive(Clone, Debug, Default)]
 pub struct PhysPlanPartInfo {
     /// PruningConds.
@@ -210,12 +216,23 @@ impl PhysicalTableReader {
     }
 
     /// GetAvgRowSize return the average row size of this plan.
-    // glue: stub of PhysicalTableReader.GetAvgRowSize, blocked-by:D10.5 (getTblStats of the cost model)
-    pub fn get_avg_row_size(&self) -> Result<f64, Error> {
-        Err(blocked(
-            "D10.5",
-            "PhysicalTableReader.GetAvgRowSize (getTblStats)",
-        ))
+    // go: PhysicalTableReader.GetAvgRowSize L1 [M-CTX]
+    pub fn get_avg_row_size(&self, ctx: &PlanCtx<'_>) -> f64 {
+        let table_plan = self
+            .table_plan
+            .as_deref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let default_coll = HistColl::default();
+        let tbl_stats = get_tbl_stats(table_plan)
+            .map(Arc::as_ref)
+            .unwrap_or(&default_coll);
+        crate::cardinality::row_size::get_avg_row_size(
+            ctx,
+            tbl_stats,
+            &table_plan.schema().columns,
+            false,
+            false,
+        )
     }
 }
 
@@ -235,6 +252,7 @@ pub fn set_mpp_or_batch_cop_for_table_scan(cur_plan: &mut PhysicalPlanRef) {
     });
 }
 
+// go-exception: EXC.B GetPhysicalIndexReader (cascades: the reader of LogicalTiKVSingleGather)
 // go-exception: EXC.B GetPhysicalTableReader (cascades: the reader of LogicalTiKVSingleGather)
 
 impl PhysicalPlan for PhysicalTableReader {
@@ -354,6 +372,407 @@ impl PhysicalPlan for PhysicalTableReader {
     // glue: dispatch (Go PhysicalTableReader.ExplainInfo, explain.go: a boundary stub of block D10.9)
     fn explain_info(&self) -> String {
         crate::core::explain::explain_stub("PhysicalTableReader.ExplainInfo")
+    }
+}
+
+/// PhysicalIndexReader is the index reader in tidb.
+#[derive(Clone, Debug, Default)]
+pub struct PhysicalIndexReader {
+    /// The embedded `physicalSchemaProducer`.
+    pub sp: PhysicalSchemaProducer,
+
+    /// indexPlan.
+    pub index_plan: Option<PhysicalPlanRef>,
+    /// IndexPlans flats the indexPlan to construct executor pb.
+    pub index_plans: Vec<PhysicalPlanRef>,
+
+    /// OutputColumns represents the columns that index reader should return.
+    pub output_columns: Vec<Arc<Column>>,
+
+    /// Used by partition table.
+    pub plan_part_info: Option<Arc<PhysPlanPartInfo>>,
+}
+
+impl PhysicalIndexReader {
+    /// GetIndexPlan exports the indexPlan.
+    // glue: accessor matching PhysicalTableReader::get_table_plan
+    pub fn get_index_plan(&self) -> Option<&PhysicalPlanRef> {
+        self.index_plan.as_ref()
+    }
+
+    /// LoadTableStats preloads the stats data for the physical table.
+    // glue: stub of PhysicalIndexReader.LoadTableStats, blocked-by:D10.2 (loadTableStats of stats.go, the sync stats load of FindBestTask)
+    pub fn load_table_stats(&self) -> Result<(), Error> {
+        Err(blocked(
+            "D10.2",
+            "PhysicalIndexReader.LoadTableStats (loadTableStats)",
+        ))
+    }
+}
+
+impl PhysicalPlan for PhysicalIndexReader {
+    crate::physical_plan_boilerplate!(IndexReader, sp_no_set_schema);
+
+    /// SetSchema overrides op.PhysicalPlan SetSchema interface.
+    ///
+    /// Go ignores its argument and takes the schema from `indexPlan` (for HashAgg / StreamAgg /
+    /// Projection) or `IndexPlans[0].(*PhysicalIndexScan).dataSourceSchema`. Under N1 §3.3 the
+    /// reader holds a copy of that schema and initializes `OutputColumns` from it.
+    // go: PhysicalIndexReader.SetSchema L2 (N1 immutable Schema copy; HashAgg/StreamAgg not ported)
+    fn set_schema(&mut self, _schema: Schema) {
+        if let Some(index_plan) = &self.index_plan {
+            self.index_plans = flatten_list_push_down_plan(index_plan);
+            let schema = match index_plan.kind() {
+                PhysicalKind::Projection => Some(index_plan.schema().clone_schema()),
+                _ => {
+                    let is = self.index_plans[0]
+                        .as_any()
+                        .downcast_ref::<PhysicalIndexScan>()
+                        .expect("interface conversion: base.PhysicalPlan is not *core.PhysicalIndexScan");
+                    is.data_source_schema.as_ref().map(Schema::clone_schema)
+                }
+            };
+            self.sp.set_schema(schema);
+            self.output_columns = self.sp.schema().clone_schema().columns;
+        }
+    }
+
+    /// SetChildren overrides op.PhysicalPlan SetChildren interface.
+    // go: PhysicalIndexReader.SetChildren L1
+    fn set_children(&mut self, children: Vec<PhysicalPlanRef>) {
+        let index_plan = children
+            .into_iter()
+            .next()
+            .expect("runtime error: index out of range [0] with length 0");
+        self.index_plan = Some(index_plan);
+        self.set_schema(Schema::default());
+    }
+
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go PhysicalIndexReader.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalIndexReader::resolve_indices(self, ctx)
+    }
+
+    /// CloneForPlanCache of the instance plan cache: the children and the index plan must be
+    /// cacheable (A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalIndexReader.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+            && self
+                .index_plan
+                .as_ref()
+                .is_none_or(|p| p.instance_cacheable())
+    }
+
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PhysicalIndexReader.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PhysicalIndexReader::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
+
+    /// MemoryUsage return the memory usage of PhysicalIndexReader.
+    ///
+    /// Matches Go `physical_plans.go:428-445` exactly: Go calls `p.indexPlan.MemoryUsage()`
+    /// discarding the return value and sums `p.IndexPlans` instead.
+    // go: PhysicalIndexReader.MemoryUsage L1
+    fn memory_usage(&self) -> i64 {
+        let mut sum =
+            self.sp.memory_usage() + PhysPlanPartInfo::memory_usage(self.plan_part_info.as_deref());
+        if let Some(p) = &self.index_plan {
+            let _ = p.memory_usage();
+        }
+        for plan in &self.index_plans {
+            sum += plan.memory_usage();
+        }
+        for col in &self.output_columns {
+            sum += col.memory_usage();
+        }
+        sum
+    }
+
+    /// Clone implements op.PhysicalPlan interface.
+    // go: PhysicalIndexReader.Clone L1 [M-CTX]
+    fn clone_plan(&self) -> Result<PhysicalPlanRef, Error> {
+        let sp = self.sp.clone_with_self()?;
+        let index_plan = self
+            .index_plan
+            .as_ref()
+            .expect("runtime error: invalid memory address or nil pointer dereference")
+            .clone_plan()?;
+        let index_plans = clone_physical_plan(&self.index_plans)?;
+        let output_columns = clone_cols(&self.output_columns);
+        let cloned = PhysicalIndexReader {
+            sp,
+            index_plan: Some(index_plan),
+            index_plans,
+            output_columns,
+            plan_part_info: None,
+        };
+        Ok(Arc::new(cloned))
+    }
+
+    /// ExtractCorrelatedCols implements op.PhysicalPlan interface.
+    // go: PhysicalIndexReader.ExtractCorrelatedCols L1
+    fn extract_correlated_cols(&self) -> Vec<Arc<CorrelatedColumn>> {
+        let mut cor_cols = Vec::new();
+        for child in &self.index_plans {
+            cor_cols.extend(extract_correlated_cols4_physical_plan(child.as_ref()));
+        }
+        cor_cols
+    }
+
+    /// BuildPlanTrace implements op.PhysicalPlan interface.
+    // go: PhysicalIndexReader.BuildPlanTrace L1 [M-SELF]
+    fn build_plan_trace(&self) -> PlanTrace {
+        let mut rp = base_physical_plan::build_plan_trace(self);
+        if let Some(index_plan) = &self.index_plan {
+            rp.children.push(index_plan.build_plan_trace());
+        }
+        rp
+    }
+
+    /// AppendChildCandidate implements PhysicalPlan interface.
+    // go: PhysicalIndexReader.AppendChildCandidate L1 [M-SELF]
+    fn append_child_candidate(&self, op: &PhysicalOptimizeOp) {
+        base_physical_plan::append_child_candidate(self, op);
+        if let Some(index_plan) = &self.index_plan {
+            append_child_candidate(self, index_plan.as_ref(), op);
+        }
+    }
+
+    /// ExplainInfo implements Plan interface.
+    // glue: dispatch (Go PhysicalIndexReader.ExplainInfo, explain.go: a boundary stub of block D10.9)
+    fn explain_info(&self) -> String {
+        crate::core::explain::explain_stub("PhysicalIndexReader.ExplainInfo")
+    }
+
+    /// ExplainNormalizedInfo implements Plan interface.
+    // glue: dispatch (Go PhysicalIndexReader.ExplainNormalizedInfo, explain.go: a boundary stub of block D10.9)
+    fn explain_normalized_info(&self) -> String {
+        crate::core::explain::explain_stub("PhysicalIndexReader.ExplainNormalizedInfo")
+    }
+}
+
+/// PhysicalIndexScan represents an index scan plan.
+#[derive(Clone, Debug, Default)]
+pub struct PhysicalIndexScan {
+    /// The embedded `physicalSchemaProducer`.
+    pub sp: PhysicalSchemaProducer,
+
+    /// AccessCondition is used to calculate range.
+    pub access_condition: Vec<ExprRef>,
+
+    /// Table.
+    pub table: Arc<TableInfo>,
+    /// Index.
+    pub index: Arc<IndexInfo>,
+    /// IdxCols.
+    pub idx_cols: Vec<Arc<Column>>,
+    /// IdxColLens.
+    pub idx_col_lens: Vec<isize>,
+    /// Ranges.
+    pub ranges: Vec<Range>,
+    /// Columns.
+    pub columns: Vec<Arc<ColumnInfo>>,
+    /// DBName.
+    pub db_name: CIStr,
+
+    /// TableAsName. `None` is Go's nil pointer.
+    pub table_as_name: Option<CIStr>,
+
+    /// dataSourceSchema is the original schema of DataSource. The schema of index scan in KV and
+    /// index reader in TiDB will be different. The schema of index scan will decode all columns
+    /// of index but the TiDB only need some of them.
+    pub data_source_schema: Option<Schema>,
+
+    /// rangeInfo.
+    pub range_info: String,
+
+    /// The index scan may be on a partition.
+    pub physical_table_id: i64,
+
+    /// GenExprs.
+    pub gen_exprs: HashMap<TableItemID, ExprRef>,
+
+    /// isPartition.
+    pub is_partition: bool,
+    /// Desc.
+    pub desc: bool,
+    /// KeepOrder.
+    pub keep_order: bool,
+    /// ByItems only for partition table with orderBy + pushedLimit.
+    pub by_items: Vec<ByItems>,
+
+    /// DoubleRead means if the index executor will read kv two times.
+    /// If the query requires the columns that don't belong to index, DoubleRead will be true.
+    pub double_read: bool,
+
+    /// NeedCommonHandle.
+    pub need_common_handle: bool,
+
+    /// required by cost model: tblColHists contains all columns before pruning, which are used
+    /// to calculate row-size.
+    pub tbl_col_hists: Option<Arc<HistColl>>,
+    /// pkIsHandleCol.
+    pub pk_is_handle_col: Option<Arc<Column>>,
+
+    /// constColsByCond records the constant part of the index columns caused by the access conds.
+    pub const_cols_by_cond: Vec<bool>,
+
+    /// prop.
+    pub prop: Option<Arc<PhysicalProperty>>,
+
+    // usedStatsInfo is not carried, see the module doc.
+    /// For GroupedRanges and GroupByColIdxs, please see comments in struct AccessPath.
+    pub grouped_ranges: Vec<Vec<Range>>,
+    /// GroupByColIdxs.
+    pub group_by_col_idxs: Vec<isize>,
+
+    /// NotAlwaysValid (for partial indexes).
+    pub not_always_valid: bool,
+}
+
+/// `unsafe.Sizeof(PhysicalIndexScan{})` on 64-bit Go (`emptyPhysicalIndexScanSize`).
+const EMPTY_PHYSICAL_INDEX_SCAN_SIZE: i64 = 560;
+/// `unsafe.Sizeof(model.TableItemID{})` on 64-bit Go.
+const TABLE_ITEM_ID_SIZE: i64 = 24;
+
+impl PhysicalIndexScan {
+    /// IsPartition returns true and partition ID if it works on a partition.
+    // go: PhysicalIndexScan.IsPartition L1
+    pub fn is_partition(&self) -> (bool, i64) {
+        (self.is_partition, self.physical_table_id)
+    }
+
+    /// IsPointGetByUniqueKey checks whether is a point get by unique key.
+    // go: PhysicalIndexScan.IsPointGetByUniqueKey L1
+    pub fn is_point_get_by_unique_key(&self, tc: &TypeContext) -> bool {
+        self.ranges.len() == 1
+            && self.index.unique
+            && self.ranges[0].low_val.len() == self.index.columns.as_deref().map_or(0, <[_]>::len)
+            && self.ranges[0].is_point_non_nullable(tc)
+    }
+}
+
+impl PhysicalPlan for PhysicalIndexScan {
+    crate::physical_plan_boilerplate!(IndexScan, sp);
+
+    /// `ToPB` (`plan_to_pb.go`).
+    // glue: dispatch (Go PhysicalIndexScan.ToPB, ported in core/plan_to_pb.rs)
+    fn to_pb(&self, ctx: &BuildPBContext, store_type: StoreType) -> Result<tipb::Executor, Error> {
+        PhysicalIndexScan::to_pb(self, ctx, store_type)
+    }
+
+    /// `ExplainID()` of the index scan (`explain.go`).
+    // glue: dispatch (Go PhysicalIndexScan.ExplainID, ported in core/explain.rs)
+    fn explain_id(&self, sc: Option<&StatementContext>) -> String {
+        crate::core::explain::index_scan_explain_id(self, sc)
+    }
+
+    /// CloneForPlanCache of the instance plan cache: `GenExprs` has `plan-cache-clone:"must-nil"`
+    /// in Go (A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalIndexScan.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        self.gen_exprs.is_empty()
+            && crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+    }
+
+    /// `TP()` of the index scan (`explain.go`).
+    // glue: dispatch (Go PhysicalIndexScan.TP, ported in core/explain.rs)
+    fn tp(&self) -> &'static str {
+        crate::core::explain::index_scan_tp(self)
+    }
+
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PhysicalIndexScan.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PhysicalIndexScan::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
+
+    /// Clone implements op.PhysicalPlan interface.
+    // go: PhysicalIndexScan.Clone L1 [M-CTX]
+    fn clone_plan(&self) -> Result<PhysicalPlanRef, Error> {
+        let mut cloned = self.clone();
+        cloned.sp = self.sp.clone_with_self()?;
+        cloned.access_condition = clone_exprs(&self.access_condition);
+        cloned.table = Arc::new((*self.table).clone());
+        cloned.index = Arc::new((*self.index).clone());
+        cloned.idx_cols = clone_cols(&self.idx_cols);
+        cloned.idx_col_lens = self.idx_col_lens.clone();
+        cloned.ranges = clone_ranges(&self.ranges);
+        cloned.columns = clone_col_infos(&self.columns);
+        cloned.data_source_schema = self.data_source_schema.as_ref().map(Schema::clone_schema);
+        Ok(Arc::new(cloned))
+    }
+
+    /// ExtractCorrelatedCols implements op.PhysicalPlan interface.
+    // go: PhysicalIndexScan.ExtractCorrelatedCols L1
+    fn extract_correlated_cols(&self) -> Vec<Arc<CorrelatedColumn>> {
+        let mut cor_cols = Vec::with_capacity(self.access_condition.len());
+        for expr in &self.access_condition {
+            cor_cols.extend(extract_cor_columns(expr));
+        }
+        cor_cols
+    }
+
+    /// MemoryUsage return the memory usage of PhysicalIndexScan.
+    // go: PhysicalIndexScan.MemoryUsage L2 (unsafe.Sizeof(PhysicalIndexScan{}) is Go's size on 64-bit targets)
+    fn memory_usage(&self) -> i64 {
+        let mut sum = EMPTY_PHYSICAL_INDEX_SCAN_SIZE
+            + self.sp.memory_usage()
+            + self.idx_col_lens.capacity() as i64 * SIZE_OF_INT
+            + self.db_name.memory_usage()
+            + self.range_info.len() as i64
+            + self.columns.len() as i64 * EmptyColumnInfoSize;
+        if let Some(n) = &self.table_as_name {
+            sum += n.memory_usage();
+        }
+        if let Some(col) = &self.pk_is_handle_col {
+            sum += col.memory_usage();
+        }
+        if let Some(prop) = &self.prop {
+            sum += prop.memory_usage();
+        }
+        if let Some(schema) = &self.data_source_schema {
+            sum += schema.memory_usage();
+        }
+        // slice memory usage
+        for cond in &self.access_condition {
+            sum += cond.memory_usage();
+        }
+        for col in &self.idx_cols {
+            sum += col.memory_usage();
+        }
+        for rang in &self.ranges {
+            sum += rang.mem_usage();
+        }
+        for expr in self.gen_exprs.values() {
+            sum += TABLE_ITEM_ID_SIZE + expr.memory_usage();
+        }
+        sum
+    }
+
+    /// ExplainInfo implements Plan interface.
+    // glue: dispatch (Go PhysicalIndexScan.ExplainInfo, explain.go: a boundary stub of block D10.9)
+    fn explain_info(&self) -> String {
+        crate::core::explain::explain_stub("PhysicalIndexScan.ExplainInfo")
+    }
+
+    /// ExplainNormalizedInfo implements Plan interface.
+    // glue: dispatch (Go PhysicalIndexScan.ExplainNormalizedInfo, explain.go: a boundary stub of block D10.9)
+    fn explain_normalized_info(&self) -> String {
+        crate::core::explain::explain_stub("PhysicalIndexScan.ExplainNormalizedInfo")
     }
 }
 
@@ -1331,7 +1750,33 @@ pub fn collect_plan_stats_version(plan: &dyn PhysicalPlan, stats_infos: &mut Has
                 stats_infos,
             );
         }
-        // *PhysicalIndexReader, *PhysicalIndexLookUpReader, *PhysicalIndexScan: not ported.
+        PhysicalKind::IndexReader => {
+            let cop_plan = plan
+                .as_any()
+                .downcast_ref::<PhysicalIndexReader>()
+                .expect("PhysicalIndexReader");
+            collect_plan_stats_version(
+                cop_plan
+                    .index_plan
+                    .as_deref()
+                    .expect("runtime error: invalid memory address or nil pointer dereference"),
+                stats_infos,
+            );
+        }
+        // *PhysicalIndexLookUpReader: part 2B.
+        PhysicalKind::IndexScan => {
+            let cop_plan = plan
+                .as_any()
+                .downcast_ref::<PhysicalIndexScan>()
+                .expect("PhysicalIndexScan");
+            stats_infos.insert(
+                cop_plan.table.name.o.clone(),
+                cop_plan
+                    .stats_info()
+                    .expect("runtime error: invalid memory address or nil pointer dereference")
+                    .stats_version,
+            );
+        }
         PhysicalKind::TableScan => {
             let cop_plan = plan
                 .as_any()
