@@ -188,13 +188,14 @@ impl SqlKiller {
             // may already have cleared the signal).
             inject_call(&BEFORE_LOG_KILL_SIGNAL);
             let err = self.get_kill_error(reason);
-            let reason = err
+            let reason_str = err
+                .as_ref()
                 .map(|e| String::from_utf8_lossy(&e.error()).into_owned())
                 .unwrap_or_else(|| "<nil>".to_owned());
-            tracing::warn!(
-                connection_id = self.conn_id.load(SeqCst),
-                reason = %reason,
-                "kill initiated"
+            tidb_base::log_warn!(
+                "kill initiated",
+                "connection ID" => self.conn_id.load(SeqCst),
+                "reason" => &reason_str,
             );
             if let Some(f) = self.on_kill.load().as_ref() {
                 f();
@@ -275,9 +276,9 @@ impl SqlKiller {
         let status = self.signal.load(SeqCst);
         let err = self.get_kill_error(status);
         if status == ServerMemoryExceeded {
-            tracing::warn!(
-                conn = self.conn_id.load(SeqCst),
-                "global memory controller, NeedKill signal is received successfully"
+            tidb_base::log_warn!(
+                "global memory controller, NeedKill signal is received successfully",
+                "conn" => self.conn_id.load(SeqCst),
             );
         }
         match err {
@@ -303,7 +304,7 @@ impl SqlKiller {
         let status = self.signal.swap(UnspecifiedKillSignal, SeqCst);
         inject_call(&AFTER_RESET_KILL_SIGNAL_SWAP);
         if status != UnspecifiedKillSignal {
-            tracing::warn!(conn = self.conn_id.load(SeqCst), "kill finished");
+            tidb_base::log_warn!("kill finished", "conn" => self.conn_id.load(SeqCst));
         }
         self.last_check_time.store(None);
     }

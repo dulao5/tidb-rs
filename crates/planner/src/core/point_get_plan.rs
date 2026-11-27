@@ -581,7 +581,7 @@ pub fn try_fast_plan(
                 ) else {
                     return Ok(None);
                 };
-                if check_fast_plan_privilege(&visit_infos).is_err() {
+                if check_fast_plan_privilege(ctx, &visit_infos).is_err() {
                     return Ok(None);
                 }
                 if is_mem_db(&fp.db_name) {
@@ -737,10 +737,16 @@ pub fn get_visit_info(
         } else {
             ErrTableaccessDenied.fast_gen_by_args(vec![gs("SELECT"), gs(user), gs(host), gs(tbl)])
         };
+        // R32 (D5 option A): hidden `_tidb_rowid` requires full-table SELECT (`column = ""`).
+        let check_col = if name.orig_col_name.l == ExtraHandleName.l {
+            String::new()
+        } else {
+            name.orig_col_name.l.clone()
+        };
         res.push(VisitInfo {
             db: db.to_owned(),
             table: tbl.to_owned(),
-            column: name.orig_col_name.l.clone(),
+            column: check_col,
             privilege: SelectPriv.0,
             err: Some(auth_err),
             ..Default::default()
@@ -754,10 +760,16 @@ pub fn get_visit_info(
             gs(col),
             gs(tbl),
         ]);
+        // R32 (D5 option A): hidden `_tidb_rowid` in WHERE requires full-table SELECT (`column = ""`).
+        let check_col = if *col == ExtraHandleName.l {
+            String::new()
+        } else {
+            col.clone()
+        };
         res.push(VisitInfo {
             db: db.to_owned(),
             table: tbl.to_owned(),
-            column: col.clone(),
+            column: check_col,
             privilege: SelectPriv.0,
             err: Some(err),
             ..Default::default()
@@ -1341,12 +1353,11 @@ fn new_point_get_plan(
 /// checkFastPlanPrivilege checks two types of privilege:
 /// 1. user meets all visitInfos requirement
 /// 2. all tables can pass the check in CheckTableLock
-///
-/// tidb-rs has no privilege manager until D04.1 (VS1 plan §3.2, the PoC's single-user
-/// model): Go's `pm == nil` branch, every visit info passes the first check.
 // go: checkFastPlanPrivilege L1 [M-CTX]
-fn check_fast_plan_privilege(visit_infos: &[VisitInfo]) -> Result<(), Error> {
-    // pm := privilege.GetPrivilegeManager(ctx): nil.
+fn check_fast_plan_privilege(ctx: &PlanCtx<'_>, visit_infos: &[VisitInfo]) -> Result<(), Error> {
+    if let Some(pm) = ctx.privilege_manager.as_deref() {
+        crate::core::optimizer::check_privilege(&ctx.vars.active_roles, pm, visit_infos)?;
+    }
     let mut lock_visit_infos = Vec::with_capacity(visit_infos.len());
     for vs in visit_infos {
         // This visitInfo is only for table lock check, so we do not need to set column field.

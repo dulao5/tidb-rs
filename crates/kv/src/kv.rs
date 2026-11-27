@@ -328,6 +328,10 @@ pub trait Client: Send + Sync {
     fn is_request_type_supported(&self, req_type: i64, sub_type: i64) -> bool;
 }
 
+/// Callback fired when a coprocessor worker encounters a TiKV lock (Go `EventCb`
+/// `CopMeetLock` arm in `pkg/distsql/distsql.go:70-74`). Receives the formatted lock text.
+pub type CopMeetLockCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// ClientSendOption wraps options during Client Send.
 ///
 /// `EventCb` (`trxevents`) and `TiFlashReplicaRead` (`util/tiflash`, MPP scope) are added
@@ -340,6 +344,8 @@ pub struct ClientSendOption {
     pub append_warning: Option<Arc<dyn Fn(Error) + Send + Sync>>,
     /// TryCopLiteWorker indicates whether try to use coprocessor lite worker.
     pub try_cop_lite_worker: Option<Arc<AtomicU32>>,
+    /// Callback fired when a coprocessor worker encounters a TiKV lock.
+    pub on_cop_meet_lock: Option<CopMeetLockCallback>,
 }
 
 /// ReqTypes.

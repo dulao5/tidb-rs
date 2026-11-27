@@ -15,6 +15,7 @@ members = [
   "crates/metrics",
   "crates/types",
   "crates/base",
+  "crates/log",
   "crates/runtime",
   "crates/memory",
   "crates/model",
@@ -24,6 +25,7 @@ members = [
   "crates/tablecodec",
   "crates/sessionctx",
   "crates/systable",
+  "crates/privilege",
   "crates/expression",
   "crates/expression/macros",
   "crates/expr-pushdown",
@@ -126,6 +128,7 @@ poc-executor = { path = "crates/poc/executor" }
 poc-session = { path = "crates/poc/session" }
 tidb-types = { path = "crates/types" }
 tidb-base = { path = "crates/base" }
+tidb-log = { path = "crates/log" }
 tidb-runtime = { path = "crates/runtime" }
 tidb-memory = { path = "crates/memory" }
 tidb-model = { path = "crates/model" }
@@ -140,6 +143,7 @@ tidb-sessiontxn = { path = "crates/sessiontxn" }
 tidb-domain = { path = "crates/domain" }
 tidb-sessionctx = { path = "crates/sessionctx" }
 tidb-systable = { path = "crates/systable" }
+tidb-privilege = { path = "crates/privilege" }
 tidb-expression = { path = "crates/expression" }
 tidb-expression-macros = { path = "crates/expression/macros" }
 tidb-expr-pushdown = { path = "crates/expr-pushdown" }
@@ -207,6 +211,11 @@ raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 # Parser table generation runs in build.rs; unoptimised it is very slow.
 opt-level = 3
 
+[profile.release]
+# Keep line tables in release builds so Backtrace / errorVerbose frames include `\n\t<file>:<line>`
+# as required by specs/D00.3-logging/spec.md §2.1.
+debug = "line-tables-only"
+
 [profile.release.build-override]
 opt-level = 3
 
@@ -216,3 +225,6 @@ opt-level = 3
 [profile.release-checked]
 inherits = "release"
 overflow-checks = true
+# CI runs 500M-iteration fuzzing under release-checked; keep DWARF line tables disabled here
+# so overflow-fuzz CI binaries stay fast while `[profile.release]` retains `line-tables-only`.
+debug = false

@@ -27,6 +27,7 @@
 
 pub mod checkpoint;
 pub mod exec_result;
+pub mod expensive_query;
 pub mod glue;
 pub mod metrics;
 pub mod session;

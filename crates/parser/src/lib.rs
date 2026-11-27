@@ -45,6 +45,7 @@ pub mod types;
 #[rustfmt::skip]
 mod charset_gen;
 mod ctx;
+mod digester;
 mod driver;
 /// Port of `pkg/parser/charset/charset.go` and the GBK encoder (Go identifiers, M-GONAME).
 #[allow(missing_docs)]
@@ -82,6 +83,14 @@ mod token_map {
 use std::{cell::RefCell, fmt, sync::OnceLock};
 
 pub use actions_rt::Node;
+
+/// Normalize a SQL statement for redacted logging (`OFF` returns verbatim, `ON` replaces literals
+/// with `?`, `MARKER` wraps literals in `‹...›`), matching Go `parser.Normalize(sql, redact)`.
+pub fn normalize(sql: &str, redact: &str) -> String {
+    static TOKENS: OnceLock<TokenTable> = OnceLock::new();
+    let tt = TOKENS.get_or_init(TokenTable::new);
+    digester::normalize(sql, redact, tt)
+}
 
 /// Statistics of the generated LR tables (states, table sizes, reducer count; informational).
 pub const TABLE_STATS: &str = token_map::BUILD_REPORT;

@@ -128,6 +128,8 @@ pub struct SessCtx {
     /// The `ExecPool` the connection runs on, which the statement's executors start their
     /// tasks on (N3-A1 §3.1 items 3 and 5); `None` until the server sets it.
     pub(crate) exec_pool: Option<tidb_runtime::pool::ExecPool>,
+    /// `privilege.GetPrivilegeManager(s)` (D04.1); `None` when unbound.
+    pub(crate) privilege_manager: Option<tidb_privilege::PrivilegeManagerRef>,
 }
 
 /// `sessionctx.SessionPlanCache` (`plannercore.NewLRUPlanCache`): the cache is the plan-cache
@@ -1067,6 +1069,7 @@ impl SessionContext for SessionCore {
             advise_txn_warmup: None,
             domain_info_schema: Some(self.sctx.get_domain_info_schema() as _),
             instance_plan_cache: self.sctx.instance_plan_cache.clone(),
+            privilege_manager: self.sctx.privilege_manager.clone(),
         }
     }
     // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS
@@ -1271,6 +1274,7 @@ impl Session {
                     plan_cache: None,
                     instance_plan_cache: None,
                     exec_pool: None,
+                    privilege_manager: None,
                 },
                 txn_manager: new_txn_manager(),
             },
@@ -1288,6 +1292,18 @@ impl Session {
     // glue: N3 ExecPool handle of the session (N3-A1 §3.1)
     pub fn set_exec_pool(&mut self, pool: Option<tidb_runtime::pool::ExecPool>) {
         self.core.sctx.exec_pool = pool;
+    }
+
+    /// Binds the privilege manager (`privilege.BindPrivilegeManager(s, pm)`, D04.1).
+    // go-part: BindPrivilegeManager L1
+    pub fn set_privilege_manager(&mut self, pm: Option<tidb_privilege::PrivilegeManagerRef>) {
+        self.core.sctx.privilege_manager = pm;
+    }
+
+    /// Returns the bound privilege manager (`privilege.GetPrivilegeManager(s)`, D04.1).
+    // go-part: GetPrivilegeManager L1
+    pub fn privilege_manager(&self) -> Option<&tidb_privilege::PrivilegeManagerRef> {
+        self.core.sctx.privilege_manager.as_ref()
     }
 
     /// The connection's dialect (ADR 0010 §4.4).
@@ -1567,7 +1583,15 @@ impl Session {
                 if !self.core.sctx.vars.in_restricted_sql
                     && !tidb_sessionctx::variable::error::ErrUnknownSystemVar.equal(&err)
                 {
-                    log::warn!("compile SQL failed: {err}, SQL={}", sql_for_log(&text));
+                    let sql_log =
+                        tidb_parser::normalize(&text, &self.core.sctx.vars.enable_redact_log);
+                    tidb_base::log_warn!(
+                        "compile SQL failed",
+                        "conn" => self.core.sctx.vars.connection_id,
+                        "session_alias" => &self.core.sctx.vars.session_alias,
+                        "error" => &err,
+                        "SQL" => &sql_log,
+                    );
                 }
                 return Err(err);
             }
@@ -1615,12 +1639,17 @@ impl Session {
         if let Err(err) = &r
             && !err_is_noisy(err)
         {
-            log::warn!(
-                "run statement failed: schemaVersion={} {err} session={}",
-                tidb_sessionctx::expropt::MetaOnlyInfoSchema::schema_meta_version(
-                    &*self.core.sctx.get_info_schema()
-                ),
-                self.string()
+            let schema_version = tidb_sessionctx::expropt::MetaOnlyInfoSchema::schema_meta_version(
+                &*self.core.sctx.get_info_schema(),
+            );
+            let sess_str = self.string();
+            tidb_base::log_warn!(
+                "run statement failed",
+                "conn" => self.core.sctx.vars.connection_id,
+                "session_alias" => &self.core.sctx.vars.session_alias,
+                "schemaVersion" => schema_version,
+                "error" => err,
+                "session" => &sess_str,
             );
         }
         // Telemetry: not ported.

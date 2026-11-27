@@ -37,35 +37,35 @@ pub struct TokenTable {
 
 /// Frequently used token ids.
 #[derive(Clone, Copy)]
-struct Ids {
-    identifier: u32,
-    string_lit: u32,
-    int_lit: u32,
-    dec_lit: u32,
-    float_lit: u32,
-    hex_lit: u32,
-    bit_lit: u32,
-    single_at: u32,
-    double_at: u32,
-    underscore_cs: u32,
-    hint_comment: u32,
-    invalid: u32,
-    null: u32,
-    pipes_as_or: u32,
-    andand: u32,
-    andnot: u32,
-    assignment_eq: u32,
-    eq: u32,
-    ge: u32,
-    le: u32,
-    jss: u32,
-    juss: u32,
-    lsh: u32,
-    rsh: u32,
-    neq: u32,
-    neq_synonym: u32,
-    nulleq: u32,
-    param_marker: u32,
+pub(crate) struct Ids {
+    pub(crate) identifier: u32,
+    pub(crate) string_lit: u32,
+    pub(crate) int_lit: u32,
+    pub(crate) dec_lit: u32,
+    pub(crate) float_lit: u32,
+    pub(crate) hex_lit: u32,
+    pub(crate) bit_lit: u32,
+    pub(crate) single_at: u32,
+    pub(crate) double_at: u32,
+    pub(crate) underscore_cs: u32,
+    pub(crate) hint_comment: u32,
+    pub(crate) invalid: u32,
+    pub(crate) null: u32,
+    pub(crate) pipes_as_or: u32,
+    pub(crate) andand: u32,
+    pub(crate) andnot: u32,
+    pub(crate) assignment_eq: u32,
+    pub(crate) eq: u32,
+    pub(crate) ge: u32,
+    pub(crate) le: u32,
+    pub(crate) jss: u32,
+    pub(crate) juss: u32,
+    pub(crate) lsh: u32,
+    pub(crate) rsh: u32,
+    pub(crate) neq: u32,
+    pub(crate) neq_synonym: u32,
+    pub(crate) nulleq: u32,
+    pub(crate) param_marker: u32,
     // fusion
     as_: u32,
     of: u32,
@@ -167,6 +167,10 @@ impl TokenTable {
     pub fn name(&self, id: u32) -> &'static str {
         self.names.get(&id).copied().unwrap_or("?")
     }
+
+    pub(crate) fn ids(&self) -> Ids {
+        self.t
+    }
 }
 
 impl Default for TokenTable {
@@ -237,6 +241,18 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn tokenize(mut self) -> Result<Vec<Tok>, LexError> {
+        self.tokenize_inner()?;
+        Ok(self.fuse())
+    }
+
+    /// Tokenize without multi-token fusion and stop cleanly on any lex error, returning all
+    /// tokens scanned before the error (for `digester::normalize`, matching Go `sqlDigester`).
+    pub(crate) fn tokenize_raw_lossy(mut self) -> Vec<Tok> {
+        let _ = self.tokenize_inner();
+        self.out
+    }
+
+    fn tokenize_inner(&mut self) -> Result<(), LexError> {
         let t = self.tt.t;
         loop {
             // whitespace
@@ -311,7 +327,7 @@ impl<'a> Lexer<'a> {
                 _ => self.operator()?,
             }
         }
-        Ok(self.fuse())
+        Ok(())
     }
 
     fn skip_line(&mut self) {

@@ -111,9 +111,18 @@ pub fn print_long_time_internal_txn(now: SystemTime, start_ts: u64, run_by_funct
             }
             let info_header =
                 format!("An internal transaction running by {caller_name} lasts long time");
-            log::info!(
-                "{info_header} time={elapsed:?} startTS={start_ts} start time={:?}",
-                inner_txn_start_time
+            let since_epoch = inner_txn_start_time
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            let start_log_time = tidb_base::structured_log::LogTime::from_local_unix(
+                since_epoch.as_secs() as i64,
+                since_epoch.subsec_nanos(),
+            );
+            tidb_base::log_info!(
+                &info_header,
+                "time" => elapsed,
+                "startTS" => start_ts,
+                "start time" => start_log_time,
             );
         }
     }
@@ -151,7 +160,7 @@ pub async fn run_in_new_txn(
         let mut txn = match store.begin(&[]).await {
             Ok(txn) => txn,
             Err(e) => {
-                log::error!("RunInNewTxn error={}", String::from_utf8_lossy(&e.error()));
+                tidb_base::log_error!("RunInNewTxn", "error" => &e);
                 return Err(e);
             }
         };
@@ -169,11 +178,11 @@ pub async fn run_in_new_txn(
             let err1 = txn.rollback();
             tidb_base::terror::log(err1.err().as_ref());
             if retryable && is_txn_retryable_error(Some(e)) {
-                log::warn!(
-                    "RunInNewTxn retry txn={} original txn={} error={}",
-                    txn.start_ts(),
-                    guard.0,
-                    String::from_utf8_lossy(&e.error())
+                tidb_base::log_warn!(
+                    "RunInNewTxn",
+                    "retry txn" => txn.start_ts(),
+                    "original txn" => guard.0,
+                    "error" => e,
                 );
                 i += 1;
                 continue;
@@ -188,13 +197,11 @@ pub async fn run_in_new_txn(
             }
         }
         if retryable && is_txn_retryable_error(err.as_ref()) {
-            log::warn!(
-                "RunInNewTxn retry txn={} original txn={} error={}",
-                txn.start_ts(),
-                guard.0,
-                err.as_ref()
-                    .map(|e| String::from_utf8_lossy(&e.error()).into_owned())
-                    .unwrap_or_default()
+            tidb_base::log_warn!(
+                "RunInNewTxn",
+                "retry txn" => txn.start_ts(),
+                "original txn" => guard.0,
+                "error" => err.as_ref(),
             );
             back_off(i).await;
             i += 1;
@@ -243,7 +250,7 @@ fn set_request_source_for_inner_txn(ctx: &Context, txn: &mut dyn Transaction) {
         && !request_source.request_source_type.is_empty()
     {
         if !request_source.request_source_internal {
-            log::warn!("`RunInNewTxn` should be used by inner txn only");
+            tidb_base::log_warn!("`RunInNewTxn` should be used by inner txn only");
         }
         txn.set_option(
             RequestSourceInternal,
@@ -264,7 +271,7 @@ fn set_request_source_for_inner_txn(ctx: &Context, txn: &mut dyn Transaction) {
     // panic in test mode in case there are requests without source in the future.
     // log warnings in production mode.
     // (Go: intest.Assert(true, ...), which never fires.)
-    log::warn!(
+    tidb_base::log_warn!(
         "unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"
     );
 }

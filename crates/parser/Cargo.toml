@@ -11,7 +11,6 @@ publish.workspace = true
 parking_lot = "0.12"
 # Errors (M-ERR), Go fmt, encoding/json, strings.ToLower and the mysql constants (N0 rank 0).
 tidb-base = { workspace = true }
-log = "0.4"
 
 [build-dependencies]
 # Only used at build time, to compute the LR automaton from grammar/tidb_typed.y.
