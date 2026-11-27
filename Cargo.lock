@@ -3724,10 +3724,10 @@ dependencies = [
  "codec",
  "criterion 0.5.1",
  "flate2",
- "log",
  "serde_json",
  "tidb-base",
  "tidb-chunk",
+ "tidb-log",
  "tidb-parser",
  "tidb-types",
  "tidb_query_datatype",
@@ -3955,7 +3955,6 @@ dependencies = [
  "tidb-metrics",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
- "tracing",
 ]
 
 [[package]]
@@ -4025,7 +4024,6 @@ version = "0.0.0"
 dependencies = [
  "cfgrammar",
  "flate2",
- "log",
  "lrtable",
  "parking_lot 0.12.5",
  "serde_json",
@@ -4097,8 +4095,6 @@ dependencies = [
  "prometheus",
  "tidb-base",
  "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4287,11 +4283,13 @@ version = "0.0.0"
 dependencies = [
  "criterion 0.5.1",
  "flate2",
- "log",
  "serde_json",
  "sha2",
  "tidb-base",
+ "tidb-log",
+ "tidb-memory",
  "tidb-parser",
+ "tidb-runtime",
  "tikv-jemallocator",
 ]
 

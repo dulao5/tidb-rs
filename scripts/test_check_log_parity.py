@@ -100,12 +100,36 @@ func (c *Cache[T]) Reload() {
 fn run() {
     tidb_base::log_target!(tidb_base::structured_log::LogTarget::Main, tidb_base::structured_log::LogLevel::Error, "panic caught", "stack" => "bt");
     tidb_base::log_err_verbose!(tidb_base::structured_log::LogLevel::Warn, "verbose msg", "k" => 1);
+    tidb_base::log_error!("recoverable panic", "r" => "boom", "stack trace" => "bt2");
 }
 """
         violations, sym_calls = clp.scan_rust_file("tidb-test", "crates/test/src/lib.rs", src)
         self.assertEqual(violations, [])
         calls = sym_calls[("pkg/demo/demo.go", "Demo.Run")]
-        self.assertEqual(calls, [("error", "panic caught", True), ("warn", "verbose msg", False)])
+        self.assertEqual(
+            calls,
+            [
+                ("error", "panic caught", True),
+                ("warn", "verbose msg", False),
+                ("error", "recoverable panic", True),
+            ],
+        )
+
+    def test_extract_go_function_logs_ignores_commented_out_calls(self) -> None:
+        go_src = """
+package demo
+
+func CollationID2Name(id int32) string {
+    // logutil.BgLogger().Warn(
+    //     "Unable to get collation name from ID",
+    //     zap.Int32("ID", id),
+    //     zap.Stack("stack"))
+    /* log.Error("also commented") */
+    return "utf8mb4_bin"
+}
+"""
+        calls = clp.extract_go_function_logs(go_src, "CollationID2Name")
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

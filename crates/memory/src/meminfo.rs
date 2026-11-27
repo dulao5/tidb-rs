@@ -179,7 +179,7 @@ pub fn mem_used_cgroup() -> Result<u64, Error> {
 // go: InitMemoryHook L1
 pub fn init_memory_hook() {
     if cgroup::in_container() {
-        tracing::info!("use cgroup memory hook because TiDB is in the container");
+        tidb_base::log_info!("use cgroup memory hook because TiDB is in the container");
         return;
     }
     let Ok(cgroup_value) = cgroup::get_memory_limit() else {
@@ -190,16 +190,16 @@ pub fn init_memory_hook() {
     };
     if physical_value > cgroup_value && cgroup_value != 0 {
         set_mem_hooks(mem_total_cgroup, mem_used_cgroup);
-        tracing::info!(
-            cgroupMemorySize = cgroup_value as i64,
-            physicalMemorySize = physical_value as i64,
-            "use cgroup memory hook"
+        tidb_base::log_info!(
+            "use cgroup memory hook",
+            "cgroupMemorySize" => cgroup_value as i64,
+            "physicalMemorySize" => physical_value as i64,
         );
     } else {
-        tracing::info!(
-            cgroupMemorySize = cgroup_value as i64,
-            physicalMemorySize = physical_value as i64,
-            "use physical memory hook"
+        tidb_base::log_info!(
+            "use physical memory hook",
+            "cgroupMemorySize" => cgroup_value as i64,
+            "physicalMemorySize" => physical_value as i64,
         );
     }
     if let Err(e) = mem_total() {

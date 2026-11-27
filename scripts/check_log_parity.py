@@ -450,6 +450,8 @@ def scan_rust_file(
                     lvl = "warn"
                 elif "Error" in args[1]:
                     lvl = "error"
+                elif "Panic" in args[1]:
+                    lvl = "panic"
                 elif "Fatal" in args[1]:
                     lvl = "fatal"
                 else:
@@ -462,6 +464,8 @@ def scan_rust_file(
                     lvl = "warn"
                 elif "Error" in args[0]:
                     lvl = "error"
+                elif "Panic" in args[0]:
+                    lvl = "panic"
                 elif "Fatal" in args[0]:
                     lvl = "fatal"
                 else:
@@ -469,7 +473,7 @@ def scan_rust_file(
             else:
                 msg_tok = args[0] if args else ""
             lit = unescape_rust_str_literal(msg_tok) if msg_tok else None
-            has_stack = bool(re.search(r'"stack"\s*=>|\bstack\s*[=:]', inner))
+            has_stack = bool(re.search(r'"stack(?:\s+trace)?"\s*=>|\bstack\s*[=:]', inner))
             fn_calls.append((lvl, lit, has_stack))
         # Also count `// log-skip:` markers inside the function body as intentionally accounted.
         skip_count = len(re.findall(r"//\s*log-skip:", body))
@@ -545,10 +549,55 @@ def extract_go_function_logs(go_src: str, go_sym: str) -> list[tuple[str, str | 
             depth -= 1
         j += 1
     body = go_src[i:j]
+    # Strip Go line/block comments (preserving string and raw-string literals) so commented-out
+    # log calls (e.g. pkg/util/collate/collate.go:191 CollationID2Name) are not counted.
+    clean_chars: list[str] = []
+    k = 0
+    bn = len(body)
+    b_str = False
+    b_raw = False
+    while k < bn:
+        ch = body[k]
+        if b_raw:
+            clean_chars.append(ch)
+            if ch == "`":
+                b_raw = False
+            k += 1
+        elif b_str:
+            clean_chars.append(ch)
+            if ch == "\\" and k + 1 < bn:
+                clean_chars.append(body[k + 1])
+                k += 2
+                continue
+            if ch == '"':
+                b_str = False
+            k += 1
+        elif ch == "/" and k + 1 < bn and body[k + 1] == "/":
+            while k < bn and body[k] != "\n":
+                clean_chars.append(" ")
+                k += 1
+        elif ch == "/" and k + 1 < bn and body[k + 1] == "*":
+            end = body.find("*/", k + 2)
+            stop = bn if end == -1 else end + 2
+            while k < stop:
+                clean_chars.append("\n" if body[k] == "\n" else " ")
+                k += 1
+        elif ch == "`":
+            b_raw = True
+            clean_chars.append(ch)
+            k += 1
+        elif ch == '"':
+            b_str = True
+            clean_chars.append(ch)
+            k += 1
+        else:
+            clean_chars.append(ch)
+            k += 1
+    clean_body = "".join(clean_chars)
     calls: list[tuple[str, str | None, bool]] = []
-    for lm in GO_LOG_CALL_RE.finditer(body):
+    for lm in GO_LOG_CALL_RE.finditer(clean_body):
         lvl = lm.group(1).lower()
-        tail = body[lm.end() : lm.end() + 240]
+        tail = clean_body[lm.end() : lm.end() + 240]
         lit_m = re.match(r'\s*"([^"\\]*(?:\\.[^"\\]*)*)"', tail)
         lit = lit_m.group(1) if lit_m else None
         has_stack = "zap.Stack(" in tail
