@@ -295,6 +295,7 @@ mod tests {
         let s = defaults();
         let mut accepted = 0;
         let mut boundary = 0;
+        let mut unparsed = Vec::new();
         let corpus = corpus();
         let all = corpus
             .iter()
@@ -302,6 +303,7 @@ mod tests {
             .chain(BOUNDARY.iter().copied());
         for sql in all {
             let Ok(stmt) = tidb_sql::ir::parse_one(sql) else {
+                unparsed.push(sql);
                 continue;
             };
             let lowered = tidb_sql::ir::lower_statement(&stmt, sql);
@@ -319,6 +321,13 @@ mod tests {
                 accepted += 1;
             }
         }
+        // Only statements a single-statement PREPARE never sees are skipped: a parser
+        // regression must not shrink the corpus unnoticed.
+        assert_eq!(
+            unparsed,
+            ["begin; select c from sbtest1 where id = 1; commit"],
+            "statements the parser no longer takes as one statement"
+        );
         // The pin means something only while both sides are exercised.
         assert!(accepted >= 100, "only {accepted} accepted statements");
         assert!(
