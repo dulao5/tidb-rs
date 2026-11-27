@@ -2249,6 +2249,61 @@ fn execute_of_a_prepared_stmt_reaches_the_planner() {
     assert!(e.to_string().contains("invalid PlanCacheStmt type"), "{e}");
 }
 
+/// A BIGINT overflow inside a coprocessor request: `id + 9223372036854775807 > 0` is pushed
+/// down, TiKV answers with `SelectResponse.error` (1690 and TiKV's message), and the
+/// statement fails with the error distsql's select result makes of it
+/// (`ClassTiKV.Synthesize`). Go's `terror.ToSQLError`, which `clientConn.writeError` sends,
+/// gives the client code 1690, SQLSTATE `22003` and TiKV's message (#486: tidb-rs sent
+/// `HY000`; the router's conversion is tested in poc-session).
+#[test]
+fn pushed_down_overflow_is_tikv_error_with_sqlstate_22003() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _enter = rt.enter();
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    for id in 1..=3 {
+        put_row(&store, 110, id, 2, &format!("c{id:02}"));
+    }
+    let mut s = sbtest_session(&store);
+    let sql = "SELECT c FROM sbtest1 WHERE id + 9223372036854775807 > 0";
+    let err = match block_on(s.execute_stmt(parse(sql), sql)) {
+        Err(e) => e,
+        Ok(rs) => {
+            let mut rs = rs.expect("a result set");
+            let mut chk = rs.new_chunk().unwrap();
+            let err = loop {
+                match block_on(rs.next(&mut s, &mut chk)) {
+                    Err(e) => break e,
+                    Ok(()) if chk.num_rows() == 0 => panic!("{sql}: no error"),
+                    Ok(()) => {}
+                }
+            };
+            let _ = block_on(rs.close(&mut s));
+            err
+        }
+    };
+    let msg = "BIGINT value is out of range in '(1 + 9223372036854775807)'";
+    assert!(err.is_normalized(), "{err}");
+    assert_eq!(err.code(), 1690, "{err}");
+    // From the coprocessor (TiKV's message, class tikv), not evaluated by TiDB (whose
+    // message names the column: `(test.sbtest1.id + 9223372036854775807)`).
+    assert_eq!(err.rfc_code(), "tikv:1690");
+    assert_eq!(String::from_utf8(err.get_msg()).unwrap(), msg);
+    let m = tidb_base::terror::to_sql_error(&err);
+    assert_eq!(
+        (
+            m.code,
+            m.state.as_str(),
+            String::from_utf8(m.message).unwrap()
+        ),
+        (1690, "22003", msg.to_owned())
+    );
+}
+
 /// The coprocessor client of [`MockStore`]: the planner keeps it in the planning context;
 /// no test sends a request.
 /// In-memory coprocessor client over [`MockRows`]: decodes `tipb::DagRequest`, scans matching
@@ -2310,6 +2365,14 @@ fn tipb_col_to_field_type(col: &tipb::ColumnInfo) -> tidb_parser::types::FieldTy
         ft.set_collate("utf8mb4_bin");
     }
     ft
+}
+
+thread_local! {
+    /// The first evaluation error of the coprocessor request [`MockClient::send`] is running:
+    /// TiKV's `EvaluateError::Custom { code, msg }`, which ends the request with
+    /// `SelectResponse.error` set (TiKV `handle_qe_response`).
+    static COP_EVAL_ERROR: std::cell::RefCell<Option<(i32, String)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn eval_tipb_expr(expr: &tipb::Expr, row: &[tidb_types::datum::Datum]) -> tidb_types::datum::Datum {
@@ -2379,6 +2442,30 @@ fn eval_tipb_expr(expr: &tipb::Expr, row: &[tidb_types::datum::Datum]) -> tidb_t
                     };
                     new_int_datum(i64::from(res))
                 }
+                tipb::ScalarFuncSig::PlusInt => {
+                    let a = eval_tipb_expr(&children[0], row);
+                    let b = eval_tipb_expr(&children[1], row);
+                    if a.is_null() || b.is_null() {
+                        return Datum::default();
+                    }
+                    let (av, bv) = (a.get_int64(), b.get_int64());
+                    match av.checked_add(bv) {
+                        Some(v) => new_int_datum(v),
+                        None => {
+                            // TiKV `IntIntPlus::calc`: `Error::overflow("BIGINT", "(a + b)")`,
+                            // code `ERR_DATA_OUT_OF_RANGE` (1690).
+                            COP_EVAL_ERROR.with_borrow_mut(|e| {
+                                e.get_or_insert_with(|| {
+                                    (
+                                        1690,
+                                        format!("BIGINT value is out of range in '({av} + {bv})'"),
+                                    )
+                                });
+                            });
+                            Datum::default()
+                        }
+                    }
+                }
                 tipb::ScalarFuncSig::LogicalAnd => {
                     let a = eval_tipb_expr(&children[0], row);
                     let b = eval_tipb_expr(&children[1], row);
@@ -2409,6 +2496,7 @@ impl Client for MockClient {
         _: &tidb_kv::kv::ClientSendOption,
     ) -> Box<dyn tidb_kv::kv::Response> {
         use protobuf::Message;
+        COP_EVAL_ERROR.with_borrow_mut(|e| *e = None);
         let mut dag = tipb::DagRequest::default();
         dag.merge_from_bytes(&req.data).expect("valid DAGRequest");
         let execs = dag.get_executors();
@@ -2457,6 +2545,7 @@ impl Client for MockClient {
                         ..Default::default()
                     })
                     .collect();
+                let has_pk_col = !pk_col_ids.is_empty();
                 let decoder = tidb_tablecodec::rowcodec::decoder::new_chunk_decoder(
                     decoder_cols,
                     pk_col_ids,
@@ -2468,8 +2557,9 @@ impl Client for MockClient {
                     let handle =
                         tidb_tablecodec::decode_row_key(&tidb_kv::key::Key(k.clone())).unwrap();
                     tmp_chk.reset();
+                    let pass_handle = has_pk_col.then_some(&handle);
                     decoder
-                        .decode_to_chunk(v, 0, Some(&handle), &mut tmp_chk)
+                        .decode_to_chunk(v, 0, pass_handle, &mut tmp_chk)
                         .unwrap();
                     let row = tmp_chk.get_row(0);
                     let datums = col_fts
@@ -2581,6 +2671,14 @@ impl Client for MockClient {
                 }
                 other => panic!("MockClient: unsupported pushed-down executor {other:?}"),
             }
+        }
+
+        if let Some((code, msg)) = COP_EVAL_ERROR.with_borrow_mut(Option::take) {
+            let mut resp = tipb::SelectResponse::default();
+            resp.mut_error().set_code(code);
+            resp.mut_error().set_msg(msg);
+            let bytes = resp.write_to_bytes().unwrap();
+            return Box::new(MockCopResponse { data: Some(bytes) });
         }
 
         let out_offsets: Vec<usize> = dag
@@ -3528,7 +3626,8 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
     use tidb_types::datum::new_int_datum;
 
     let store = MockStore::new(10);
-    // Seed secondary index k_1 (index_id=1) entries for sbtest1 (table_id=110): (k=10*id, id).
+    // Seed secondary index k_1 (index_id=1) entries and record rows for sbtest1 (table_id=110):
+    // (id, k=10*id, c="row-{id}").
     for id in 1..=5_i64 {
         let mut encoded = Vec::new();
         tidb_codec::codec::encode_key(
@@ -3539,6 +3638,23 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
         .unwrap();
         let idx_key = tidb_tablecodec::encode_index_seek_key(110, 1, &encoded);
         store.rows.lock().insert(idx_key.0, vec![b'0']);
+        let mut enc = tidb_tablecodec::rowcodec::Encoder::default();
+        enc.enable = true;
+        let mut c_val = tidb_types::datum::Datum::default();
+        c_val.set_string(format!("row-{id}").into_bytes(), "utf8mb4_bin".to_owned());
+        let val = tidb_tablecodec::encode_row(
+            None,
+            &[new_int_datum(id * 10), c_val],
+            &[2, 3],
+            None,
+            Some(&mut enc),
+        )
+        .unwrap();
+        let row_key = tidb_tablecodec::encode_row_key_with_handle(
+            110,
+            &tidb_kv::Handle::Int(tidb_kv::key::IntHandle(id)),
+        );
+        store.rows.lock().insert(row_key.0, val);
     }
 
     let cache = new_test_cache();
@@ -3585,9 +3701,8 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
     assert!(s.is_idle(), "{}", s.state_snapshot());
 
     // Double-read IndexLookUp query (needs column c not in index k_1): planned as
-    // Projection(PhysicalIndexLookUpReader) in D10.2 part 2B, stops cleanly at
-    // executor/builder.rs `blocked-by:D12.1` before any executor opens and without
-    // mutating StatementContext.
+    // PhysicalIndexLookUpReader (or Projection over it) and now executed end-to-end by
+    // IndexLookUpExecutor (D12.1 Part 2C).
     let double_read_sql = "SELECT c FROM sbtest1 WHERE k = 20";
     {
         block_on(s.finish_unfinished_stmt());
@@ -3612,30 +3727,110 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
             "expected IndexLookUpReader, got {:?}",
             plan.kind()
         );
-        let warnings_before = s.vars().stmt_ctx().warning_count();
-        let table_ids_before = s.vars().stmt_ctx().related_table_ids.clone();
-        let mut b = tidb_executor::builder::new_executor_builder(
-            &s.core,
-            None,
-            Arc::new(tidb_executor::adapter::TelemetryInfo::default()),
-        );
-        assert!(block_on(b.build(&mut s.core, Some(plan))).is_none());
-        let err = b.err.expect("executor boundary error");
-        assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
-        assert_eq!(s.vars().stmt_ctx().warning_count(), warnings_before);
-        assert_eq!(s.vars().stmt_ctx().related_table_ids, table_ids_before);
-        assert!(!s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed));
-        assert!(s.vars().stmt_ctx().index_names.is_empty());
         s.core.rollback_on_error();
         s.core.txn_manager.on_stmt_end();
         assert!(s.is_idle(), "{}", s.state_snapshot());
     }
-    let err = block_on(s.execute_stmt(parse(double_read_sql), double_read_sql))
-        .err()
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
         .unwrap();
-    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
-    assert!(!s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed));
-    assert!(s.vars().stmt_ctx().index_names.is_empty());
+    let got_c = rt.block_on(async {
+        let mut rs = s
+            .execute_stmt(parse(double_read_sql), double_read_sql)
+            .await
+            .unwrap()
+            .expect("result set");
+        assert!(s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed));
+        assert_eq!(s.vars().stmt_ctx().index_names, vec!["sbtest1:k_1"]);
+        assert_eq!(s.vars().stmt_ctx().table_ids, vec![110]);
+        let mut chk = rs.new_chunk().unwrap();
+        let mut out = Vec::new();
+        loop {
+            rs.next(&mut s, &mut chk).await.unwrap();
+            if chk.num_rows() == 0 {
+                break;
+            }
+            for i in 0..chk.num_rows() {
+                out.push(chk.get_row(i).get_string(0).to_owned());
+            }
+        }
+        rs.close(&mut s).await.unwrap();
+        out
+    });
+    assert_eq!(got_c, vec![b"row-2".to_vec()]);
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+
+    // Double-read IndexLookUp with ORDER BY k DESC LIMIT 3 preserves descending index order
+    // without a Sort/TopN operator (keep_order && desc on IndexLookUpReader).
+    let desc_sql = "SELECT c FROM sbtest1 WHERE k BETWEEN 20 AND 40 ORDER BY k DESC LIMIT 3";
+    {
+        use tidb_planner::core::physical_plans::{PhysicalIndexLookUpReader, PhysicalIndexScan};
+        fn find_lookup(p: &tidb_planner::PhysicalPlanRef) -> Option<&PhysicalIndexLookUpReader> {
+            assert_ne!(
+                p.kind(),
+                PhysicalKind::Sort,
+                "DESC IndexLookUp query must not add Sort"
+            );
+            assert_ne!(
+                p.kind(),
+                PhysicalKind::TopN,
+                "DESC IndexLookUp query must not add TopN"
+            );
+            if let Some(ilu) = p.as_any().downcast_ref::<PhysicalIndexLookUpReader>() {
+                return Some(ilu);
+            }
+            p.children().iter().find_map(find_lookup)
+        }
+        block_on(s.finish_unfinished_stmt());
+        block_on(s.core.prepare_txn_ctx()).unwrap();
+        let node = parse(desc_sql);
+        reset_context_of_stmt(&mut s.core, &node, desc_sql).unwrap();
+        s.core
+            .txn_manager
+            .on_stmt_start(&mut s.core.sctx, Some(&node))
+            .unwrap();
+        let stmt = tidb_executor::compiler::Compiler
+            .compile(&mut s.core, node, desc_sql)
+            .unwrap_or_else(|e| panic!("{desc_sql}: {e}"));
+        let plan = stmt.plan.as_ref().expect("compiled DESC plan");
+        let ilu = find_lookup(plan)
+            .unwrap_or_else(|| panic!("expected PhysicalIndexLookUpReader, got {:?}", plan.kind()));
+        assert!(ilu.keep_order, "DESC IndexLookUpReader must set keep_order");
+        let iscan = ilu.index_plans[0]
+            .as_any()
+            .downcast_ref::<PhysicalIndexScan>()
+            .expect("PhysicalIndexScan downcast");
+        assert!(iscan.desc, "DESC IndexLookUpReader must scan index in DESC");
+        s.core.rollback_on_error();
+        s.core.txn_manager.on_stmt_end();
+        assert!(s.is_idle(), "{}", s.state_snapshot());
+    }
+    let got_desc = rt.block_on(async {
+        let mut rs = s
+            .execute_stmt(parse(desc_sql), desc_sql)
+            .await
+            .unwrap()
+            .expect("result set");
+        let mut chk = rs.new_chunk().unwrap();
+        let mut out = Vec::new();
+        loop {
+            rs.next(&mut s, &mut chk).await.unwrap();
+            if chk.num_rows() == 0 {
+                break;
+            }
+            for i in 0..chk.num_rows() {
+                out.push(chk.get_row(i).get_string(0).to_owned());
+            }
+        }
+        rs.close(&mut s).await.unwrap();
+        out
+    });
+    assert_eq!(
+        got_desc,
+        vec![b"row-4".to_vec(), b"row-3".to_vec(), b"row-2".to_vec()]
+    );
     assert!(s.is_idle(), "{}", s.state_snapshot());
 
     // Pinned field-by-field against Go TiDB v8.5.8 COM_STMT_PREPARE metadata for a
@@ -3662,6 +3857,62 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
         assert_eq!(f.column_type.get_decimal(), 0);
         assert_eq!(f.column_type.get_charset(), "utf8mb4");
         assert_eq!(f.column_type.get_collate(), "utf8mb4_bin");
+        let mut got_prep = rt.block_on(async {
+            let mut rs = s
+                .execute_prepared_stmt(info.stmt_id, vec![new_int_datum(20), new_int_datum(40)])
+                .await
+                .unwrap()
+                .expect("prepared result set");
+            let mut chk = rs.new_chunk().unwrap();
+            let mut out = Vec::new();
+            loop {
+                rs.next(&mut s, &mut chk).await.unwrap();
+                if chk.num_rows() == 0 {
+                    break;
+                }
+                for i in 0..chk.num_rows() {
+                    out.push(chk.get_row(i).get_string(0).to_owned());
+                }
+            }
+            rs.close(&mut s).await.unwrap();
+            out
+        });
+        got_prep.sort();
+        assert_eq!(
+            got_prep,
+            vec![b"row-2".to_vec(), b"row-3".to_vec(), b"row-4".to_vec()]
+        );
+        assert!(
+            !s.vars().found_in_plan_cache,
+            "first EXECUTE should populate plan cache (miss)"
+        );
+        // Second execute exercises cached-plan range rebuild with different parameters.
+        let mut got_prep2 = rt.block_on(async {
+            let mut rs = s
+                .execute_prepared_stmt(info.stmt_id, vec![new_int_datum(10), new_int_datum(20)])
+                .await
+                .unwrap()
+                .expect("prepared result set 2");
+            let mut chk = rs.new_chunk().unwrap();
+            let mut out = Vec::new();
+            loop {
+                rs.next(&mut s, &mut chk).await.unwrap();
+                if chk.num_rows() == 0 {
+                    break;
+                }
+                for i in 0..chk.num_rows() {
+                    out.push(chk.get_row(i).get_string(0).to_owned());
+                }
+            }
+            rs.close(&mut s).await.unwrap();
+            out
+        });
+        assert!(
+            s.vars().found_in_plan_cache,
+            "second EXECUTE must hit instance plan cache and exercise range rebuild"
+        );
+        got_prep2.sort();
+        assert_eq!(got_prep2, vec![b"row-1".to_vec(), b"row-2".to_vec()]);
         s.drop_prepared_stmt(info.stmt_id).unwrap();
         s.clean_closed_prepared_stmts();
         assert!(s.is_idle(), "{}", s.state_snapshot());

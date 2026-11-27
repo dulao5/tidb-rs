@@ -32,7 +32,8 @@ pub struct SqlError {
 }
 
 impl SqlError {
-    /// Builds an error with the SQLSTATE TiDB uses for `code` (`HY000` when it has no mapping).
+    /// Builds an error with the SQLSTATE Go gives `code` ([`sql_state`]: `HY000` when it has
+    /// no entry).
     pub fn new(code: u16, message: impl Into<String>) -> Self {
         SqlError {
             code,
@@ -131,23 +132,53 @@ impl fmt::Display for SqlError {
 
 impl std::error::Error for SqlError {}
 
-/// SQLSTATE for an error code, following TiDB's `pkg/parser/mysql/state.go` for the codes this
-/// crate uses; everything else maps to `HY000`.
+/// SQLSTATE for an error code: Go's `mysql.MySQLState` entry for the code, `HY000`
+/// (`mysql.DefaultMySQLState`) when it has none. Go derives the SQLSTATE of every ERR packet
+/// this way: `clientConn.writeError` builds the packet from `terror.ToSQLError` /
+/// `mysql.NewErrf`, which look the code up in that table (pkg/parser/mysql/state.go).
+// glue: the SQLSTATE step of mysql.NewErr / mysql.NewErrf (pkg/parser/mysql/error.go), over the generated MySQLState table
 pub fn sql_state(code: u16) -> &'static str {
-    match code {
-        code::ER_ACCESS_DENIED => "28000",
-        code::ER_DBACCESS_DENIED | code::ER_TABLEACCESS_DENIED | code::ER_COLUMNACCESS_DENIED => {
-            "42000"
+    match tidb_base::mysql::MySQLState.get(&code) {
+        Some(s) => s,
+        None => tidb_base::mysql::DefaultMySQLState,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Codes with their SQLSTATE in Go v8.5.8 (pkg/parser/mysql/state.go), including the
+    /// coprocessor errors TiKV returns (out of range, division by zero, truncation).
+    #[test]
+    fn sql_state_follows_go_state_table() {
+        for (code, state) in [
+            (1690, "22003"), // ErrDataOutOfRange
+            (1365, "22012"), // ErrDivisionByZero
+            (1292, "22007"), // ErrTruncatedWrongValue
+            (1062, "23000"), // ErrDupEntry
+            (1065, "42000"), // ErrEmptyQuery
+            (1044, "42000"), // ErrDBaccessDenied
+            (1045, "28000"),
+            (1046, "3D000"),
+            (1049, "42000"),
+            (1054, "42S22"),
+            (1064, "42000"),
+            (1142, "42000"), // ErrTableaccessDenied
+            (1143, "42000"), // ErrColumnaccessDenied
+            (1146, "42S02"),
+            (1153, "08S01"),
+            (1235, "42000"),
+            (1251, "08004"),
+            // No entry: HY000.
+            (1105, "HY000"),
+            (1193, "HY000"),
+            (1243, "HY000"),
+            (3118, "HY000"), // ErrAccountHasBeenLocked
+            (9001, "HY000"),
+        ] {
+            assert_eq!(sql_state(code), state, "code {code}");
+            assert_eq!(SqlError::new(code, "m").state, state, "code {code}");
         }
-        code::ER_NO_DB => "3D000",
-        code::ER_BAD_DB => "42000",
-        code::ER_NET_PACKET_TOO_LARGE => "08S01",
-        code::ER_NOT_SUPPORTED_YET => "42000",
-        // ER_PARSE_ERROR, ER_BAD_FIELD_ERROR, ER_BAD_TABLE_ERROR, ER_NO_SUCH_TABLE.
-        1064 => "42000",
-        1054 => "42S22",
-        1051 | 1146 => "42S02",
-        code::ER_NOT_SUPPORTED_AUTH_MODE => "08004",
-        _ => "HY000",
     }
 }

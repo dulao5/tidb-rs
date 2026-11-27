@@ -14,6 +14,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use tidb_meta::InfoSchema;
+use tracing::info;
+use tracing::warn;
 
 use crate::schema_validator::CheckResult;
 use crate::schema_validator::SchemaCheckError;
@@ -141,12 +143,31 @@ impl Health {
     /// Admission also requires that the node is not about to deregister, so the admission
     /// window always lies inside the registration window (see [`Limits::check`]).
     pub(crate) fn admissible(&self, now: Instant, limits: &Limits) -> bool {
-        self.registered_at.is_some()
-            && self.cycle_ok_at.is_some()
-            && self.lease_ok(now, limits)
-            && self.validator.is_started()
-            && !self.validator.is_lease_expired(now)
-            && !self.should_deregister(now, limits)
+        self.not_admissible(now, limits).is_none()
+    }
+
+    /// Why a statement may not start in synced mode now ([`Health::admissible`]), `None`
+    /// when it may.
+    fn not_admissible(&self, now: Instant, limits: &Limits) -> Option<&'static str> {
+        if self.registered_at.is_none() {
+            return Some("not registered");
+        }
+        if !self.lease_ok(now, limits) {
+            return Some("etcd lease not proven alive");
+        }
+        if self.cycle_ok_at.is_none() {
+            return Some("no full cycle since registering");
+        }
+        if !self.validator.is_started() {
+            return Some("schema validator stopped");
+        }
+        if self.validator.is_lease_expired(now) {
+            return Some("schema lease expired");
+        }
+        if self.should_deregister(now, limits) {
+            return Some("about to deregister");
+        }
+        None
     }
 
     /// Whether the node must give up its registration so that DDL is not blocked by it: the
@@ -186,6 +207,13 @@ struct State {
     epoch: u64,
     entries: HashMap<u64, Entry>,
     next_id: u64,
+    /// The ported domain's (the new stack's) last reload failed, and none has succeeded
+    /// since.
+    ported_reload_failed: bool,
+    /// Whether [`Registry::new_stack_schema_version`] last kept statements off the new
+    /// stack, so that each switch between paused and running is logged once (a change of
+    /// the reason while paused is not a switch).
+    new_stack_paused: bool,
 }
 
 /// Counters for tests and logs.
@@ -202,6 +230,9 @@ pub struct SyncStats {
     pub reloads: u64,
     /// `all_schema_by_job_versions` reports written.
     pub mdl_reports: u64,
+    /// Switches of the new stack from running to paused
+    /// ([`Registry::new_stack_schema_version`]; each one is logged).
+    pub new_stack_pauses: u64,
 }
 
 /// Shared schema-sync state.
@@ -333,6 +364,8 @@ impl Registry {
                 epoch: 0,
                 entries: HashMap::new(),
                 next_id: 0,
+                ported_reload_failed: false,
+                new_stack_paused: false,
             }),
             invalidated: AtomicU64::new(0),
             admitted: AtomicU64::new(0),
@@ -397,6 +430,59 @@ impl Registry {
         } else {
             None
         }
+    }
+
+    /// The version of the loaded schema that a statement on the new stack (the ported SQL
+    /// layer) may plan with now, or why none may: synced mode is not admissible
+    /// ([`Registry::admissible`]: the node is not registered, its etcd lease is not proven
+    /// alive, the schema lease has expired, it is about to deregister, ...), or the ported
+    /// domain's last reload failed and none has succeeded since. The router sends a statement
+    /// to the new stack only when this version equals the new stack's InfoSchema version.
+    ///
+    /// The new stack has no schema validator and takes no [`StmtGuard`]: unlike a synced
+    /// statement, nothing re-checks its result against the schema lease or the registration
+    /// epoch. Outside these conditions its statements therefore run on the PoC, whose synced
+    /// path checks them, or whose ADR 0003 path reads the schema at the statement's own
+    /// timestamp. Each switch between the two is logged once.
+    pub fn new_stack_schema_version(&self, now: Instant) -> Result<i64, &'static str> {
+        let mut state = self.lock();
+        let r = match state.health.not_admissible(now, &self.limits) {
+            Some(why) => Err(why),
+            None if state.ported_reload_failed => Err("ported domain reload failed"),
+            None => state
+                .schema
+                .as_ref()
+                .map(|s| s.version())
+                .ok_or("no schema loaded"),
+        };
+        let paused = r.err();
+        let switched = state.new_stack_paused != paused.is_some();
+        state.new_stack_paused = paused.is_some();
+        let loaded = state.schema.as_ref().map_or(0, |s| s.version());
+        drop(state);
+        if switched {
+            match paused {
+                Some(reason) => {
+                    self.count(|s| s.new_stack_pauses += 1);
+                    warn!(
+                        reason,
+                        loaded_version = loaded,
+                        "schema lease is not admissible, statements go to the PoC instead of the new stack"
+                    );
+                }
+                None => info!(
+                    loaded_version = loaded,
+                    "schema lease is admissible again, statements go to the new stack"
+                ),
+            }
+        }
+        r
+    }
+
+    /// A reload of the ported domain at the timestamp of the PoC's reload succeeded (`ok`)
+    /// or failed ([`Registry::new_stack_schema_version`]).
+    pub(crate) fn ported_reloaded(&self, ok: bool) {
+        self.lock().ported_reload_failed = !ok;
     }
 
     /// The newest loaded schema (healthy or not).
@@ -671,6 +757,91 @@ mod tests {
         r.lease_lost(epoch);
         assert!(!r.admissible(t0));
         assert!(r.should_deregister(t0));
+    }
+
+    /// The version the new stack may plan with follows admission, and a failed reload of
+    /// the ported domain withholds it until a later one succeeds.
+    #[test]
+    fn new_stack_schema_version_needs_an_admissible_lease() {
+        let t0 = Instant::now();
+        // Never registered.
+        let r = Registry::new(limits());
+        r.install(schema(10), t0);
+        assert_eq!(r.new_stack_schema_version(t0), Err("not registered"));
+        assert_eq!(r.stats().new_stack_pauses, 1);
+        // Healthy.
+        let r = healthy(t0);
+        assert_eq!(r.new_stack_schema_version(t0), Ok(10));
+        // The schema lease runs out (no reload for a lease) before the node deregisters:
+        // the cycles keep completing, so only the lease stops admission.
+        r.cycle_completed(t0 + 4 * S);
+        assert_eq!(r.new_stack_schema_version(t0 + 4 * S), Ok(10));
+        assert!(!r.should_deregister(t0 + 5 * S));
+        assert_eq!(
+            r.new_stack_schema_version(t0 + 5 * S),
+            Err("schema lease expired")
+        );
+        // A reload renews it.
+        r.reloaded(tso(5.0), t0 + 5 * S, 10, false);
+        assert_eq!(r.new_stack_schema_version(t0 + 5 * S), Ok(10));
+        // The ported domain's reload fails: withheld, though synced mode is admissible.
+        r.ported_reloaded(false);
+        assert!(r.admissible(t0 + 5 * S));
+        assert_eq!(
+            r.new_stack_schema_version(t0 + 5 * S),
+            Err("ported domain reload failed")
+        );
+        r.ported_reloaded(true);
+        assert_eq!(r.new_stack_schema_version(t0 + 5 * S), Ok(10));
+        // Deregistered.
+        assert!(r.deregister());
+        assert_eq!(
+            r.new_stack_schema_version(t0 + 5 * S),
+            Err("not registered")
+        );
+        // Three pauses of this registry (the lease, the ported reload, deregistering), each
+        // logged once.
+        assert_eq!(r.stats().new_stack_pauses, 3);
+        // The etcd lease is gone.
+        let r = healthy(t0);
+        let epoch = r.lock().epoch;
+        r.lease_lost(epoch);
+        assert_eq!(
+            r.new_stack_schema_version(t0),
+            Err("etcd lease not proven alive")
+        );
+    }
+
+    /// One outage is one switch to paused, however often the reason changes during it
+    /// (here the schema lease runs out first, then the node deregisters), and however many
+    /// statements ask.
+    #[test]
+    fn new_stack_pause_is_counted_once_per_outage() {
+        let t0 = Instant::now();
+        let r = healthy(t0);
+        assert_eq!(r.new_stack_schema_version(t0), Ok(10));
+        r.cycle_completed(t0 + 4 * S);
+        for _ in 0..3 {
+            assert_eq!(
+                r.new_stack_schema_version(t0 + 5 * S),
+                Err("schema lease expired")
+            );
+        }
+        assert!(r.deregister());
+        assert_eq!(
+            r.new_stack_schema_version(t0 + 5 * S),
+            Err("not registered")
+        );
+        assert_eq!(r.stats().new_stack_pauses, 1);
+        // Recovery, then a second outage.
+        r.registered(t0 + 6 * S, t0 + 96 * S);
+        r.reloaded(tso(6.0), t0 + 6 * S, 10, false);
+        r.cycle_completed(t0 + 6 * S);
+        assert_eq!(r.new_stack_schema_version(t0 + 6 * S), Ok(10));
+        assert_eq!(r.stats().new_stack_pauses, 1);
+        r.ported_reloaded(false);
+        assert!(r.new_stack_schema_version(t0 + 6 * S).is_err());
+        assert_eq!(r.stats().new_stack_pauses, 2);
     }
 
     #[test]
