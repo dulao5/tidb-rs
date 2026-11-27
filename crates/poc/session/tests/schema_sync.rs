@@ -215,6 +215,7 @@ async fn setup(listening_port: u32) -> Option<Env> {
         credential: Credential::native_from_password(""),
         server_version: "8.0.11-TiDB-tidb-rs".to_owned(),
         tls_enabled: false,
+        privileges: None,
     });
     Some(Env {
         port,

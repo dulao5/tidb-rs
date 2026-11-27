@@ -402,6 +402,7 @@ Go 的漏洞源于两处：清除了 `DEFINER` 内部权限且**漏记调用者�
 5. **`PlanCacheStmt.visit_infos` 与实时重验接线**：在 `D13.1` 补回 `PlanCacheStmt.visit_infos` 保存与 `crates/planner/src/optimize.rs:602` 读取；`adjust_cached_plan -> check_prepared_priv` 每次命中都按当前会话 `ActiveRoles` 与最新 `PrivilegeManager` 重新执行 `visit_info4_priv_check + check_privilege`，并确保校验早于 `is_safe_to_reuse_point_get_executor`。
 6. **非盲弹的 `DELETE` / `UPDATE` 目标表豁免机制（供将来 `D09.15` 使用）**：不沿用脆弱的 `b.pop_visit_info()`，而以目标表上下文作用域标记精准豁免单表无读列 `DELETE`（如 `DELETE FROM t`）与单表无读列 `UPDATE`（如 `UPDATE t SET a = 1`）目标表自身的 `SelectPriv`，一旦进入 `WITH` CTE、多表 Join、`WHERE`、`ORDER BY`、`SET` 右值子查询即恢复正常表读登记，绝不破坏合法纯写权限或放行读侧探测。
 7. **在 `D04.1` 落地前维护既有边界桩**：`crates/planner/src/optimize.rs:490`、`plan_cache.rs:418`、`point_get_plan.rs:1242` 与 `preprocess.rs:756` 在 `tidb-privilege` 尚为规划中 crate（`blocked-by:D04.1`）期间保持边界接口契约不变；规划侧可先落地单点 `VisitInfo` 生成（`govec_selectbuild.rs` 通过明确的 spec 归一化表记录与 Go v8.5.8 差异），待 `D04.1` `PrivilegeManager` 合并后统一激活执行时拒止，并为已登记的 `rulings.toml` 台账 `R29`–`R32` 补填 `test` 字段。
+8. **集群权限表加载与重载失败语义（`PrivilegeSync`）**：服务端启动时在单一 TSO 快照下从 TiKV 加载 `mysql.{user,db,tables_priv,columns_priv,global_grants,default_roles,role_edges}`，**初始加载失败时快速失败退出（fail-fast）**，绝不静默降级为开放访问；运行期通过监听 etcd `/tidb/privilege` 通知、30 秒周期兜底刷新及登录未命中时的按需重载经 `ArcSwap` 原子替换 `Handle` 快照，**运行期瞬态重载失败时记录告警并保留上一份完整快照**（与 Go `LoadPrivilegeLoop` 语义一致）。
 
 ---
 

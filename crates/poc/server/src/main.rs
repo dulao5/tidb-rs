@@ -298,11 +298,17 @@ fn main() {
             info!("schema sync is off: every statement checks the schema version (ADR 0003)");
             None
         };
+        let priv_sync = poc_domain::PrivilegeSync::start(kv.clone(), args.pd.clone())
+            .await
+            .map_err(|e| std::io::Error::other(format!("load mysql.* privilege tables: {e}")))?;
         let factory = Factory::new(Shared {
             kv,
             schema,
             dag,
             sync: sync.clone(),
+            privileges: Some(poc_session::privilege::PrivilegeSource::from_sync(
+                priv_sync.clone(),
+            )),
             user: args.user.clone(),
             credential: Credential::native_from_password(&args.password),
             server_version: config.server_version.clone(),
@@ -358,6 +364,7 @@ fn main() {
                 warn!(error = %e, "signal handling failed; shutting down");
             }
             // Leave the cluster first, so DDL stops waiting for this node at once.
+            priv_sync.shutdown();
             if let Some(sync) = &sync {
                 sync.shutdown().await;
             }

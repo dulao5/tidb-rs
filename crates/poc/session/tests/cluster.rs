@@ -89,6 +89,7 @@ async fn first_statement_after_ddl_takes_the_checked_path() {
         server_version: "8.0.11-TiDB-tidb-rs".to_owned(),
         tls_enabled: false,
         sync: None,
+        privileges: None,
     });
     let mut session = factory
         .open_session(&ConnectionInfo {

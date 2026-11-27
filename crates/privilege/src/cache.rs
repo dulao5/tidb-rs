@@ -240,6 +240,13 @@ impl UserRecord {
         self.auth_string = auth_string.into();
         self
     }
+
+    /// Sets `mysql.user.Account_locked` (roles and locked accounts cannot log in).
+    // glue: builder helper for account_locked
+    pub fn with_account_locked(mut self, locked: bool) -> Self {
+        self.account_locked = locked;
+        self
+    }
 }
 
 /// DbRecord represents a row in `mysql.db`.
@@ -305,6 +312,13 @@ impl TablesPrivRecord {
             table_priv,
             column_priv: PrivilegeType(0),
         }
+    }
+
+    /// Sets `mysql.tables_priv.Column_priv` (checked by `db_is_visible`).
+    // glue: builder helper for column_priv
+    pub fn with_column_priv(mut self, column_priv: PrivilegeType) -> Self {
+        self.column_priv = column_priv;
+        self
     }
 
     // go: tablesPrivRecord.match L1

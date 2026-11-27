@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod constant;
+pub mod privilege;
 pub mod router;
 pub mod timing;
 
@@ -79,13 +80,17 @@ pub struct Shared {
     pub kv: KvClient,
     pub schema: SchemaCache,
     pub dag: DagContext,
-    /// The single account accepted until users are read from the cluster.
+    /// Fallback single account used only when `privileges` is `None` (unit tests without cluster
+    /// `mysql.*` privilege tables).
     pub user: String,
     pub credential: Credential,
     pub server_version: String,
     pub tls_enabled: bool,
     /// Schema sync (ADR 0005); `None` with `--schema-sync=off`.
     pub sync: Option<SchemaSync>,
+    /// Cluster-loaded `mysql.*` privilege cache (D04.1 Part 5/5). When `Some`, drives multi-account
+    /// login authentication and session-level privilege enforcement on both stacks.
+    pub privileges: Option<privilege::PrivilegeSource>,
 }
 
 /// Creates [`Session`]s.
@@ -133,15 +138,31 @@ impl Factory {
 impl SessionFactory for Factory {
     type Session = Session;
 
-    async fn lookup_user(&self, user: &str, _host: &str) -> Option<Credential> {
-        (user == self.shared.user).then(|| self.shared.credential.clone())
+    async fn lookup_user(&self, user: &str, host: &str) -> Option<Credential> {
+        let Some(privs) = &self.shared.privileges else {
+            return (user == self.shared.user).then(|| self.shared.credential.clone());
+        };
+        let lookup = |snap: &tidb_privilege::MySQLPrivilege| -> Option<Credential> {
+            let rec = snap.match_user(user, host)?;
+            if rec.account_locked {
+                return None;
+            }
+            Credential::native_from_authentication_string(&rec.auth_string)
+        };
+        if let Some(cred) = lookup(&privs.handle().get()) {
+            return Some(cred);
+        }
+        // On miss (e.g. account just created on Go TiDB before etcd watch fires), reload once.
+        privs.reload_if_synced().await;
+        lookup(&privs.handle().get())
     }
 
     fn open_session(&self, info: &ConnectionInfo) -> Result<Session, SqlError> {
         let host = info
             .peer
             .rsplit_once(':')
-            .map_or(info.peer.as_str(), |(h, _)| h);
+            .map_or(info.peer.as_str(), |(h, _)| h)
+            .trim_matches(|c| c == '[' || c == ']');
         // Go: the handshake collation sets character_set_client/connection/results and
         // collation_connection; unknown ids fall back to the server default.
         let (charset, collation) = match info.collation {
@@ -153,15 +174,33 @@ impl SessionFactory for Factory {
             63 => ("binary", "binary"),
             _ => ("utf8mb4", "utf8mb4_bin"),
         };
+        let (auth_user, auth_host, active_roles, privilege_manager) =
+            if let Some(privs) = &self.shared.privileges {
+                let snap = privs.handle().get();
+                let (au, ah) = match snap.match_user(&info.user, host) {
+                    Some(rec) => (rec.base.user.clone(), rec.base.host.clone()),
+                    None => (info.user.clone(), "%".to_owned()),
+                };
+                let roles = snap.get_default_roles(&au, &ah);
+                let pm: tidb_privilege::PrivilegeManagerRef =
+                    Arc::new(tidb_privilege::UserPrivileges::new(
+                        au.clone(),
+                        ah.clone(),
+                        Arc::clone(privs.handle()),
+                    ));
+                (au, ah, roles, Some(pm))
+            } else {
+                (info.user.clone(), "%".to_owned(), Vec::new(), None)
+            };
         let mut session = Session {
             shared: self.shared.clone(),
             current_db: None,
-            user: format!(
-                "{}@{}",
-                info.user,
-                host.trim_matches(|c| c == '[' || c == ']')
-            ),
-            current_user: format!("{}@%", info.user),
+            user: format!("{}@{host}", info.user),
+            current_user: format!("{auth_user}@{auth_host}"),
+            auth_user: auth_user.clone(),
+            auth_host: auth_host.clone(),
+            active_roles: active_roles.clone(),
+            privilege_manager: privilege_manager.clone(),
             connection_id: info.connection_id,
             charset: charset.to_owned(),
             collation: collation.to_owned(),
@@ -179,11 +218,23 @@ impl SessionFactory for Factory {
                 .sync
                 .as_ref()
                 .and_then(|s| s.ported_domain().cloned());
-            let new = Box::new(router::newstack::NewSession::new(
+            let mut new = Box::new(router::newstack::NewSession::new(
                 domain,
                 self.new_store.clone(),
                 self.shared.kv.exec_pool(),
             ));
+            if let Some(pm) = privilege_manager {
+                let ns = router::NewStack::session_mut(&mut *new);
+                ns.vars_mut().user = Some(tidb_parser::auth::UserIdentity {
+                    username: info.user.clone(),
+                    hostname: host.to_owned(),
+                    auth_username: auth_user,
+                    auth_hostname: auth_host,
+                    ..Default::default()
+                });
+                ns.vars_mut().active_roles = active_roles;
+                ns.set_privilege_manager(Some(pm));
+            }
             let mut r = Router::new(self.new_stack, new, &session.poc_values());
             r.set_connection_id(session.connection_id);
             session.router = Some(Box::new(r));
@@ -205,6 +256,10 @@ pub struct Session {
     current_db: Option<String>,
     user: String,
     current_user: String,
+    auth_user: String,
+    auth_host: String,
+    active_roles: Vec<tidb_parser::auth::RoleIdentity>,
+    privilege_manager: Option<tidb_privilege::PrivilegeManagerRef>,
     connection_id: u64,
     /// `SET NAMES` charset / collation (`character_set_client`/`connection`).
     charset: String,
@@ -569,6 +624,17 @@ impl Session {
         params: &[Literal],
     ) -> Result<tidb_sql::Plan, SqlError> {
         let start = Instant::now();
+        if let Some(pm) = &self.privilege_manager {
+            privilege::check_poc_select_privilege(
+                pm.as_ref(),
+                &self.active_roles,
+                &self.auth_user,
+                &self.auth_host,
+                self.current_db.as_deref(),
+                sel,
+                is,
+            )?;
+        }
         let plan = tidb_sql::plan_select(
             sel,
             is,
@@ -969,6 +1035,17 @@ impl Session {
             if sel.from.is_some() {
                 // Resolve names now, like Go's prepare: unknown tables/columns fail here.
                 let is = self.name_schema().await?;
+                if let Some(pm) = &self.privilege_manager {
+                    privilege::check_poc_select_privilege(
+                        pm.as_ref(),
+                        &self.active_roles,
+                        &self.auth_user,
+                        &self.auth_host,
+                        self.current_db.as_deref(),
+                        sel,
+                        &is,
+                    )?;
+                }
                 let plan = tidb_sql::plan_select(
                     sel,
                     &is,
@@ -1019,6 +1096,15 @@ impl Session {
     }
 
     async fn use_db_inner(&mut self, db: &str) -> Result<(), SqlError> {
+        if let Some(pm) = &self.privilege_manager
+            && !pm.db_is_visible(&self.active_roles, db)
+        {
+            return Err(SqlError::db_access_denied(
+                &self.auth_user,
+                &self.auth_host,
+                db,
+            ));
+        }
         let is = self.name_schema().await?;
         if is.schema_by_name(db).is_none() {
             return Err(SqlError::bad_db(db));

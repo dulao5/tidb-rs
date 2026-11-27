@@ -19,12 +19,14 @@
 
 pub mod keys;
 pub mod ported_domain;
+pub mod privilege_loader;
 mod registry;
 mod schema_validator;
 pub mod serverinfo;
 mod sync;
 pub mod systable_io;
 
+pub use crate::privilege_loader::PrivilegeSync;
 pub use crate::registry::Admission;
 pub use crate::registry::DEF_SCHEMA_LEASE;
 pub use crate::registry::Limits;
