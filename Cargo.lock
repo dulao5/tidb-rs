@@ -3776,6 +3776,8 @@ dependencies = [
  "tidb-parser",
  "tidb-sessionctx",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
