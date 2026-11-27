@@ -1,7 +1,8 @@
 //! Replays the govec `readexec` vectors (tidb-rs-tracker `govec/domains/readexec.go`):
 //! block D12.1 Part 2A (`TableReaderExecutor`, `buildTableReader`, `buildNoRangeTableReader`,
-//! `newClosestReadAdjuster`, `tableResultHandler`, `closeAll`, `getPhysicalPlanIDs`) against
-//! Go TiDB v8.5.8.
+//! `newClosestReadAdjuster`, `tableResultHandler`, `closeAll`, `getPhysicalPlanIDs`) and
+//! Part 2B (`IndexReaderExecutor`, `buildIndexReader`, `buildNoRangeIndexReader`,
+//! `buildKeyRanges`, `needMergeSort`, `newIndexReaderExecutorContext`) against Go TiDB v8.5.8.
 //!
 //! `GOVEC_READEXEC_FILES` (comma-separated paths) replays extra-seed artifacts as well.
 
@@ -42,8 +43,11 @@ use tidb_model::{
 use tidb_parser::ast::funcs::{Mul, Plus};
 use tidb_parser::model::CIStr;
 use tidb_parser::types::{FieldType, UnspecifiedLength};
-use tidb_planner::core::physical_plans::{Cop, PhysicalTableReader, PhysicalTableScan};
+use tidb_planner::core::physical_plans::{
+    Cop, PhysicalIndexReader, PhysicalIndexScan, PhysicalTableReader, PhysicalTableScan,
+};
 use tidb_planner::property::StatsInfo;
+use tidb_planner::util::byitem::ByItems;
 use tidb_planner::{PhysicalPlan, PhysicalPlanRef};
 use tidb_sessionctx::distsql_ctx::DistSQLContext;
 use tidb_sessionctx::exprctx::{BuildContextRef, ExprContextRef};
@@ -926,6 +930,436 @@ async fn replay_table_reader(args: &[Value]) -> Result<Value, Error> {
     Ok(Value::Object(out))
 }
 
+// ---------------------------------------------------------------- index_reader
+
+struct IndexReaderSpec {
+    table_id: i64,
+    index_id: i64,
+    temp_table: bool,
+    set_dummy_call: bool,
+    keep_order: bool,
+    desc: bool,
+    paging: bool,
+    concurrency: usize,
+    replica_read: String,
+    threshold: i64,
+    max_chunk_size: usize,
+    output_offsets: Vec<usize>,
+    by_items_desc: Vec<bool>,
+    ranges: Vec<RangeSpec>,
+    grouped_ranges: Vec<Vec<RangeSpec>>,
+    streams: Vec<StreamSpec>,
+    required_rows: Vec<isize>,
+}
+
+fn parse_range_specs(v: &Value) -> Vec<RangeSpec> {
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|r| RangeSpec {
+                    low: r["low"].as_array().cloned().unwrap_or_default(),
+                    high: r["high"].as_array().cloned().unwrap_or_default(),
+                    low_exclude: r["low_exclude"].as_bool().unwrap_or(false),
+                    high_exclude: r["high_exclude"].as_bool().unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_index_reader_spec(v: &Value) -> IndexReaderSpec {
+    let ranges = parse_range_specs(&v["ranges"]);
+    let grouped_ranges = v["grouped_ranges"]
+        .as_array()
+        .map(|groups| groups.iter().map(parse_range_specs).collect())
+        .unwrap_or_default();
+    let streams = v["streams"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|s| StreamSpec {
+                    open_err: s["open_err"].as_str().unwrap_or("").to_owned(),
+                    rows: s["rows"]
+                        .as_array()
+                        .map(|rows| {
+                            rows.iter()
+                                .map(|row| {
+                                    row.as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|cell| cell.as_i64())
+                                        .collect()
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    next_err: s["next_err"].as_str().unwrap_or("").to_owned(),
+                    err_after: s["err_after"].as_u64().unwrap_or(0) as usize,
+                    close_err: s["close_err"].as_str().unwrap_or("").to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let required_rows = v["required_rows"]
+        .as_array()
+        .map(|arr| arr.iter().map(|x| x.as_i64().unwrap() as isize).collect())
+        .unwrap_or_default();
+    let output_offsets = v["output_offsets"]
+        .as_array()
+        .map(|arr| arr.iter().map(|x| x.as_u64().unwrap() as usize).collect())
+        .unwrap_or_default();
+    let by_items_desc = v["by_items_desc"]
+        .as_array()
+        .map(|arr| arr.iter().map(|x| x.as_bool().unwrap()).collect())
+        .unwrap_or_default();
+    IndexReaderSpec {
+        table_id: v["table_id"].as_i64().unwrap(),
+        index_id: v["index_id"].as_i64().unwrap(),
+        temp_table: v["temp_table"].as_bool().unwrap_or(false),
+        set_dummy_call: v["set_dummy_call"].as_bool().unwrap_or(false),
+        keep_order: v["keep_order"].as_bool().unwrap_or(false),
+        desc: v["desc"].as_bool().unwrap_or(false),
+        paging: v["paging"].as_bool().unwrap_or(false),
+        concurrency: v["concurrency"].as_u64().unwrap_or(15) as usize,
+        replica_read: v["replica_read"].as_str().unwrap_or("leader").to_owned(),
+        threshold: v["threshold"].as_i64().unwrap_or(0),
+        max_chunk_size: v["max_chunk_size"].as_u64().unwrap() as usize,
+        output_offsets,
+        by_items_desc,
+        ranges,
+        grouped_ranges,
+        streams,
+        required_rows,
+    }
+}
+
+fn build_index_table_and_plan(spec: &IndexReaderSpec) -> (Arc<TableInfo>, PhysicalIndexReader) {
+    let mut pk_ft = int_ft(false);
+    pk_ft.add_flag(PriKeyFlag | NotNullFlag);
+    let c0 = Arc::new(ColumnInfo {
+        id: 1,
+        name: CIStr::new("id"),
+        offset: 0,
+        field_type: pk_ft.clone(),
+        state: StatePublic,
+        ..Default::default()
+    });
+    let c1 = Arc::new(ColumnInfo {
+        id: 2,
+        name: CIStr::new("k1"),
+        offset: 1,
+        field_type: int_ft(false),
+        state: StatePublic,
+        ..Default::default()
+    });
+    let c2 = Arc::new(ColumnInfo {
+        id: 3,
+        name: CIStr::new("k2"),
+        offset: 2,
+        field_type: int_ft(false),
+        state: StatePublic,
+        ..Default::default()
+    });
+    let cols = vec![Arc::clone(&c0), Arc::clone(&c1), Arc::clone(&c2)];
+
+    let is_common = spec.index_id == -1;
+    let idx_name = if is_common { "PRIMARY" } else { "idx_k" };
+    let idx_info = Arc::new(IndexInfo {
+        id: spec.index_id,
+        name: CIStr::new(idx_name),
+        table: CIStr::new("t"),
+        primary: is_common,
+        unique: is_common,
+        state: StatePublic,
+        columns: Some(vec![
+            IndexColumn {
+                name: CIStr::new("k1"),
+                offset: 1,
+                length: UnspecifiedLength,
+                use_changing_type: false,
+            },
+            IndexColumn {
+                name: CIStr::new("k2"),
+                offset: 2,
+                length: UnspecifiedLength,
+                use_changing_type: false,
+            },
+        ]),
+        ..Default::default()
+    });
+
+    let mut tbl = TableInfo {
+        id: spec.table_id,
+        name: CIStr::new("t"),
+        columns: Some(cols),
+        indices: Some(vec![Arc::clone(&idx_info)]),
+        pk_is_handle: !is_common,
+        is_common_handle: is_common,
+        state: StatePublic,
+        ..Default::default()
+    };
+    if spec.temp_table {
+        tbl.temp_table_type = TempTableLocal;
+    }
+    let tbl = Arc::new(tbl);
+
+    let scan_cols = [
+        Arc::new(Column {
+            id: 2,
+            unique_id: 2,
+            index: 0,
+            ret_type: Arc::new(int_ft(false)),
+            ..Default::default()
+        }),
+        Arc::new(Column {
+            id: 3,
+            unique_id: 3,
+            index: 1,
+            ret_type: Arc::new(int_ft(false)),
+            ..Default::default()
+        }),
+        Arc::new(Column {
+            id: 1,
+            unique_id: 1,
+            index: 2,
+            ret_type: Arc::new(pk_ft),
+            ..Default::default()
+        }),
+    ];
+    let scan_schema = new_schema(scan_cols.to_vec());
+
+    let mut out_cols = Vec::with_capacity(spec.output_offsets.len());
+    let mut reader_cols = Vec::with_capacity(spec.output_offsets.len());
+    for (i, &off) in spec.output_offsets.iter().enumerate() {
+        let sc = &scan_cols[off];
+        out_cols.push(Arc::new(Column {
+            id: sc.id,
+            unique_id: sc.unique_id,
+            index: off as isize,
+            ret_type: Arc::clone(&sc.ret_type),
+            ..Default::default()
+        }));
+        reader_cols.push(Arc::new(Column {
+            id: sc.id,
+            unique_id: sc.unique_id,
+            index: i as isize,
+            ret_type: Arc::clone(&sc.ret_type),
+            ..Default::default()
+        }));
+    }
+    let reader_schema = new_schema(reader_cols.clone());
+
+    let by_items: Vec<ByItems> = spec
+        .by_items_desc
+        .iter()
+        .enumerate()
+        .map(|(i, &desc)| ByItems {
+            expr: Expr::Column((*reader_cols[i]).clone()).into_ref(),
+            desc,
+        })
+        .collect();
+
+    let grouped_ranges: Vec<Vec<Range>> = spec
+        .grouped_ranges
+        .iter()
+        .map(|g| build_ranges("int", g))
+        .collect();
+
+    let stats = Arc::new(StatsInfo {
+        row_count: 50.0,
+        ..Default::default()
+    });
+    let mut scan = PhysicalIndexScan {
+        table: Arc::clone(&tbl),
+        index: idx_info,
+        columns: vec![c1, c2, c0],
+        ranges: build_ranges("int", &spec.ranges),
+        grouped_ranges,
+        keep_order: spec.keep_order,
+        desc: spec.desc,
+        by_items,
+        data_source_schema: Some(scan_schema.clone()),
+        tbl_col_hists: Some(Arc::new(HistColl::default())),
+        ..Default::default()
+    };
+    scan.set_id(1);
+    scan.set_schema(scan_schema);
+    scan.set_stats(Some(Arc::clone(&stats)));
+    let scan_ref: PhysicalPlanRef = Arc::new(scan);
+
+    let mut reader = PhysicalIndexReader {
+        index_plan: Some(Arc::clone(&scan_ref)),
+        index_plans: vec![scan_ref],
+        output_columns: out_cols,
+        ..Default::default()
+    };
+    reader.set_id(2);
+    reader.sp.set_schema(Some(reader_schema));
+    reader.set_stats(Some(stats));
+    (tbl, reader)
+}
+
+async fn replay_index_reader(args: &[Value]) -> Result<Value, Error> {
+    let spec = parse_index_reader_spec(&args[0]);
+
+    let expr_ctx: ExprContextRef = es::new_expr_context(Vec::new());
+    let (tbl_info, reader_plan) = build_index_table_and_plan(&spec);
+    let is = info_schema_with_table(Arc::clone(&tbl_info)).await;
+
+    let mut vars = SessionVars::new(Box::new(Acc));
+    vars.init_chunk_size = 32;
+    vars.max_chunk_size = spec.max_chunk_size as i64;
+    vars.enable_chunk_rpc = true;
+    vars.enable_paging = spec.paging;
+    vars.set_dist_sql_scan_concurrency(spec.concurrency as i64);
+    vars.set_replica_read(parse_replica_read(&spec.replica_read));
+    vars.replica_closest_read_threshold = spec.threshold;
+    vars.stmt_ctx_mut().mem_tracker = Some(new_tracker(-1, -1));
+
+    let mut sctx = ReplaySession {
+        vars,
+        killer: SqlKiller::new(),
+        expr_ctx,
+        info_schema: Arc::clone(&is),
+    };
+
+    let mut b = new_executor_builder(
+        &sctx,
+        Some(Arc::clone(&is)),
+        Arc::new(TelemetryInfo::default()),
+    );
+    let mut ir = match b.build_index_reader(&mut sctx, &reader_plan).await {
+        Some(ir) => ir,
+        None => return Err(b.err.take().unwrap_or_else(|| Error::plain("build failed"))),
+    };
+
+    if spec.set_dummy_call {
+        ir.set_dummy();
+    }
+    let tbl_id_check = ir.table().unwrap().meta().id;
+    let index_names = sctx.vars.stmt_ctx().index_names.clone();
+    let output_offsets = ir.dag_pb.get_output_offsets().to_vec();
+
+    let reqs: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let stream_idx = Arc::new(Mutex::new(0usize));
+    let streams = Arc::new(spec.streams);
+
+    let reqs_cb = Arc::clone(&reqs);
+    let idx_cb = Arc::clone(&stream_idx);
+    let streams_cb = Arc::clone(&streams);
+    let offsets_cb = output_offsets.clone();
+    ir.select_result_hook = SelectResultHook {
+        select_result_func: Some(Arc::new(
+            move |_ctx, _dctx, kv_req, field_types, cop_plan_ids| {
+                let krs: Vec<Value> = kv_req
+                    .key_ranges
+                    .as_ref()
+                    .map(|kr| kr.append_self_to(Vec::new()))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|kr| {
+                        json!({
+                            "start": hex(&kr.start_key),
+                            "end": hex(&kr.end_key),
+                        })
+                    })
+                    .collect();
+                reqs_cb.lock().push(json!({
+                    "key_ranges": krs,
+                    "desc": kv_req.desc,
+                    "keep_order": kv_req.keep_order,
+                    "concurrency": kv_req.concurrency,
+                    "paging": kv_req.paging.enable,
+                    "start_ts": kv_req.start_ts,
+                    "replica_read": format_replica_read(kv_req.replica_read),
+                    "output_offsets": offsets_cb,
+                    "cop_plan_ids": cop_plan_ids,
+                }));
+                let mut i = idx_cb.lock();
+                let st = streams_cb.get(*i).cloned().unwrap_or_default();
+                *i += 1;
+                let num_cols = field_types.len();
+                Box::pin(async move {
+                    if !st.open_err.is_empty() {
+                        return Err(Error::plain(st.open_err));
+                    }
+                    Ok(Box::new(MockSelectResult {
+                        spec: st,
+                        num_cols,
+                        pos: 0,
+                        next_calls: 0,
+                    }) as Box<dyn SelectResult>)
+                })
+            },
+        )),
+    };
+
+    let ctx = ExecCtx::new(sctx.vars.stmt_ctx_arc());
+    let mut out = serde_json::Map::new();
+    let open_res = ir.open(&ctx).await;
+
+    let captured_reqs = reqs.lock().clone();
+    let captured_kv_ranges: Vec<Value> = ir
+        .kv_ranges
+        .iter()
+        .map(|kr| json!({ "start": hex(&kr.start_key), "end": hex(&kr.end_key) }))
+        .collect();
+
+    if let Err(err) = open_res {
+        let _ = ir.close().await;
+        out.insert("reqs".into(), Value::Array(captured_reqs));
+        out.insert("kv_ranges".into(), Value::Array(captured_kv_ranges));
+        out.insert("open_err".into(), json!(err.to_string()));
+        out.insert("nexts".into(), Value::Array(Vec::new()));
+        out.insert("table_id_check".into(), json!(tbl_id_check));
+        out.insert("index_names".into(), json!(index_names));
+        return Ok(Value::Object(out));
+    }
+
+    let mut chk = exec::new_first_chunk(&ir);
+    let num_cols = chk.num_cols();
+    let mut nexts = Vec::new();
+    for &req_rows in &spec.required_rows {
+        chk.set_required_rows(req_rows, spec.max_chunk_size);
+        match ir.next(&ctx, &mut chk).await {
+            Err(err) => {
+                nexts.push(json!({ "err": err.to_string() }));
+                break;
+            }
+            Ok(()) => {
+                if chk.num_rows() == 0 {
+                    nexts.push(json!({}));
+                } else {
+                    let mut rows = Vec::with_capacity(chk.num_rows());
+                    for r in 0..chk.num_rows() {
+                        let row = chk.get_row(r);
+                        let mut vals = Vec::with_capacity(num_cols);
+                        for c in 0..num_cols {
+                            if row.is_null(c) {
+                                vals.push(Value::Null);
+                            } else {
+                                vals.push(json!(row.get_int64(c)));
+                            }
+                        }
+                        rows.push(Value::Array(vals));
+                    }
+                    nexts.push(json!({ "rows": rows }));
+                }
+            }
+        }
+    }
+
+    out.insert("reqs".into(), Value::Array(captured_reqs));
+    out.insert("kv_ranges".into(), Value::Array(captured_kv_ranges));
+    out.insert("nexts".into(), Value::Array(nexts));
+    if let Err(err) = ir.close().await {
+        out.insert("close_err".into(), json!(err.to_string()));
+    }
+    out.insert("table_id_check".into(), json!(tbl_id_check));
+    out.insert("index_names".into(), json!(index_names));
+    Ok(Value::Object(out))
+}
+
 #[tokio::test]
 async fn govec_readexec() {
     let mut paths = vec![vectors("readexec")];
@@ -951,6 +1385,7 @@ async fn govec_readexec() {
             let actual: Result<Value, Error> = match op {
                 "closest_read_adjuster" => Ok(replay_closest_read_adjuster(args)),
                 "table_reader" => replay_table_reader(args).await,
+                "index_reader" => replay_index_reader(args).await,
                 other => panic!("unexpected op: {other}"),
             };
 
@@ -995,5 +1430,5 @@ async fn govec_readexec() {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    assert!(total >= 350, "expected >= 350 records, got {total}");
+    assert!(total >= 550, "expected >= 550 records, got {total}");
 }

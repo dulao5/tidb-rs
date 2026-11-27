@@ -880,3 +880,133 @@ async fn table_reader_required_rows() {
         check_num_next_called(&num_next_called, &tc.expected_rows_ds).unwrap();
     }
 }
+
+/// Port of Go `TestIndexReaderRequiredRows` (`pkg/executor/table_readers_required_rows_test.go:225`).
+#[tokio::test]
+async fn index_reader_required_rows() {
+    use std::collections::{HashMap, HashSet};
+
+    use crate::distsql::{IndexReaderExecutor, new_index_reader_executor_context};
+    use crate::internal::builder::builder_utils::construct_dag_req;
+    use crate::table_reader::SelectResultHook;
+    use tidb_base::kv::TiKV;
+    use tidb_model::{IndexInfo, TableInfo};
+    use tidb_planner::core::physical_plans::PhysicalTableScan;
+
+    let max_chunk_size = DefMaxChunkSize as usize;
+    struct Case {
+        total_rows: usize,
+        required_rows: Vec<usize>,
+        expected_rows: Vec<usize>,
+        expected_rows_ds: Vec<usize>,
+    }
+    let test_cases = [
+        Case {
+            total_rows: 10,
+            required_rows: vec![1, 5, 3, 10],
+            expected_rows: vec![1, 5, 3, 1],
+            expected_rows_ds: vec![1, 5, 3, 1],
+        },
+        Case {
+            total_rows: max_chunk_size + 1,
+            required_rows: vec![1, 5, 3, 10, max_chunk_size],
+            expected_rows: vec![1, 5, 3, 10, (max_chunk_size + 1) - 1 - 5 - 3 - 10],
+            expected_rows_ds: vec![1, 5, 3, 10, (max_chunk_size + 1) - 1 - 5 - 3 - 10],
+        },
+        Case {
+            total_rows: 3 * max_chunk_size + 1,
+            required_rows: vec![3, 10, max_chunk_size],
+            expected_rows: vec![3, 10, max_chunk_size],
+            expected_rows_ds: vec![3, 10, max_chunk_size],
+        },
+    ];
+
+    for tc in test_cases {
+        let sctx = default_ctx();
+        let ctx = exec_ctx(&sctx);
+        let schema = data_source_schema();
+        let num_next_called = Arc::new(AtomicUsize::new(0));
+        let total_rows = tc.total_rows;
+        let expected_rows_ds = tc.expected_rows_ds.clone();
+        let called_clone = Arc::clone(&num_next_called);
+
+        let tbl_info = Arc::new(TableInfo {
+            id: 12345,
+            pk_is_handle: false,
+            ..Default::default()
+        });
+        let ts: crate::glue::Plan = Arc::new(PhysicalTableScan {
+            table: tbl_info,
+            ..Default::default()
+        });
+        let dag_pb = construct_dag_req(&sctx, &[ts], TiKV).unwrap();
+        let ire_ctx = new_index_reader_executor_context(&sctx).unwrap();
+        let mut executor = IndexReaderExecutor {
+            ctx: ire_ctx,
+            base: new_base_executor_v2(
+                sctx.get_session_vars(),
+                &sctx.sql_killer(),
+                Some(schema),
+                0,
+                Vec::new(),
+            ),
+            index_usage_reporter: None,
+            table: None,
+            index: Arc::new(IndexInfo::default()),
+            physical_table_id: 0,
+            ranges: Vec::new(),
+            grouped_ranges: Vec::new(),
+            partitions: Vec::new(),
+            part_range_map: HashMap::new(),
+            kv_ranges: Vec::new(),
+            dag_pb,
+            start_ts: 1,
+            txn_scope: "global".to_owned(),
+            read_replica_scope: "global".to_owned(),
+            is_staleness: false,
+            net_data_size: 0.0,
+            result: None,
+            columns: Vec::new(),
+            output_columns: Vec::new(),
+            partition_id_map: HashSet::new(),
+            paging: false,
+            keep_order: false,
+            desc: false,
+            by_items: Vec::new(),
+            cor_col_in_filter: false,
+            cor_col_in_access: false,
+            idx_cols: Vec::new(),
+            col_lens: Vec::new(),
+            plans: Vec::new(),
+            mem_tracker: None,
+            select_result_hook: SelectResultHook {
+                select_result_func: Some(Arc::new(move |_, _, _, field_types, _| {
+                    let expected_rows_ret = expected_rows_ds.clone();
+                    let num_next_called = Arc::clone(&called_clone);
+                    Box::pin(async move {
+                        Ok(Box::new(RequiredRowsSelectResult {
+                            ret_types: field_types,
+                            total_rows,
+                            count: 0,
+                            expected_rows_ret,
+                            num_next_called,
+                            next_val: 0,
+                        })
+                            as Box<dyn tidb_store::distsql::SelectResult>)
+                    })
+                })),
+            },
+            dummy: false,
+        };
+
+        executor.open(&ctx).await.unwrap();
+        let mut chk = exec::new_first_chunk(&executor);
+        for i in 0..tc.required_rows.len() {
+            chk.set_required_rows(tc.required_rows[i] as isize, max_chunk_size);
+            executor.next(&ctx, &mut chk).await.unwrap();
+            assert_eq!(tc.expected_rows[i], chk.num_rows());
+        }
+        executor.close().await.unwrap();
+        check_num_next_called(&num_next_called, &tc.expected_rows_ds).unwrap();
+    }
+}

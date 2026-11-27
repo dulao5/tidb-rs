@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use tidb_sessionctx::exprctx::BuildContextRef;
 
+use crate::distsql::{IndexReaderExecutor, IndexReaderExecutorContext};
 use crate::internal::exec::executor::Executor;
 use crate::table_reader::{TableReaderExecutor, TableReaderExecutorContext};
 
@@ -55,11 +56,22 @@ pub fn table_reader_executor_context_detach(
     }
 }
 
-/// `indexReaderExecutorContext.Detach`: the index reader's context (D12.1).
-// go: indexReaderExecutorContext.Detach L2 (boundary stub, blocked-by:D12.1)
-pub fn index_reader_executor_context_detach() -> Option<()> {
-    // glue: stub, blocked-by:D12.1 (IndexReaderExecutor)
-    None
+/// `indexReaderExecutorContext.Detach`: detaches the index reader's execution context from
+/// the session. Under N2 (`M-CTX`) the expression context is already a static snapshot, so
+/// this detaches `dctx`, `rctx`, and `build_pb_ctx` and clones the shared handles.
+// go: indexReaderExecutorContext.Detach L2 (N2: ExprContext is already static)
+pub fn index_reader_executor_context_detach(
+    ire_ctx: &IndexReaderExecutorContext,
+) -> IndexReaderExecutorContext {
+    let static_expr_ctx: BuildContextRef = Arc::clone(&ire_ctx.ectx) as BuildContextRef;
+    IndexReaderExecutorContext {
+        rctx: Arc::new(ire_ctx.rctx.detach(Arc::clone(&static_expr_ctx))),
+        dctx: Arc::new(ire_ctx.dctx.detach()),
+        ectx: Arc::clone(&ire_ctx.ectx),
+        info_schema: ire_ctx.info_schema.as_ref().map(Arc::clone),
+        build_pb_ctx: Arc::new(ire_ctx.build_pb_ctx.detach(static_expr_ctx)),
+        stmt_mem_tracker: ire_ctx.stmt_mem_tracker.as_ref().map(Arc::clone),
+    }
 }
 
 /// `indexLookUpExecutorContext.Detach`: the index lookup's context (D12.1).
@@ -123,11 +135,45 @@ pub fn table_reader_executor_detach(e: &TableReaderExecutor) -> Option<Box<dyn E
     Some(Box::new(new_exec))
 }
 
-/// `IndexReaderExecutor.Detach` (D12.1).
-// go: IndexReaderExecutor.Detach L2 (boundary stub, blocked-by:D12.1)
-pub fn index_reader_executor_detach() -> Option<Box<dyn Executor>> {
-    // glue: stub, blocked-by:D12.1 (IndexReaderExecutor)
-    None
+/// `IndexReaderExecutor.Detach`: detaches the index reader from the session context.
+// go: IndexReaderExecutor.Detach L1
+pub fn index_reader_executor_detach(e: &IndexReaderExecutor) -> Option<Box<dyn Executor>> {
+    let new_exec = IndexReaderExecutor {
+        ctx: index_reader_executor_context_detach(&e.ctx),
+        base: e.base.clone_without_children(),
+        index_usage_reporter: e.index_usage_reporter.clone(),
+        table: e.table.as_ref().map(Arc::clone),
+        index: Arc::clone(&e.index),
+        physical_table_id: e.physical_table_id,
+        ranges: e.ranges.clone(),
+        grouped_ranges: e.grouped_ranges.clone(),
+        partitions: e.partitions.clone(),
+        part_range_map: e.part_range_map.clone(),
+        kv_ranges: e.kv_ranges.clone(),
+        dag_pb: e.dag_pb.clone(),
+        start_ts: e.start_ts,
+        txn_scope: e.txn_scope.clone(),
+        read_replica_scope: e.read_replica_scope.clone(),
+        is_staleness: e.is_staleness,
+        net_data_size: e.net_data_size,
+        result: None,
+        columns: e.columns.clone(),
+        output_columns: e.output_columns.clone(),
+        partition_id_map: e.partition_id_map.clone(),
+        paging: e.paging,
+        keep_order: e.keep_order,
+        desc: e.desc,
+        by_items: e.by_items.clone(),
+        cor_col_in_filter: e.cor_col_in_filter,
+        cor_col_in_access: e.cor_col_in_access,
+        idx_cols: e.idx_cols.clone(),
+        col_lens: e.col_lens.clone(),
+        plans: e.plans.clone(),
+        mem_tracker: e.mem_tracker.as_ref().map(Arc::clone),
+        select_result_hook: e.select_result_hook.clone(),
+        dummy: e.dummy,
+    };
+    Some(Box::new(new_exec))
 }
 
 /// `IndexLookUpExecutor.Detach` (D12.1).

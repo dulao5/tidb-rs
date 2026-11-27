@@ -132,22 +132,19 @@ pub fn get_tbl_stats(cop_task_plan: &dyn PhysicalPlan) -> Option<&Arc<HistColl>>
 impl PhysicalIndexReader {
     /// GetNetDataSize calculates the cost of the plan in network data transfer.
     // go: PhysicalIndexReader.GetNetDataSize L1 [M-CTX]
-    pub fn get_net_data_size(&self, ctx: &PlanCtx<'_>) -> f64 {
+    pub fn get_net_data_size(&self, vars: &SessionVars) -> f64 {
         let index_plan = self
             .index_plan
             .as_deref()
             .expect("runtime error: invalid memory address or nil pointer dereference");
+        // Intentional: default missing tbl_stats to an empty HistColl instead of Go's nil-deref
+        // (unreachable for initialized scans; avoids an unnecessary panic).
         let default_coll = HistColl::default();
         let tbl_stats = get_tbl_stats(index_plan)
             .map(Arc::as_ref)
             .unwrap_or(&default_coll);
-        let row_size = crate::cardinality::row_size::get_avg_row_size(
-            ctx,
-            tbl_stats,
-            &index_plan.schema().columns,
-            true,
-            false,
-        );
+        let row_size =
+            get_avg_row_size_with_vars(vars, tbl_stats, &index_plan.schema().columns, true, false);
         index_plan.stats_count() * row_size
     }
 }
@@ -160,6 +157,8 @@ impl PhysicalTableReader {
             .table_plan
             .as_deref()
             .expect("runtime error: invalid memory address or nil pointer dereference");
+        // Intentional: default missing tbl_stats to an empty HistColl instead of Go's nil-deref
+        // (unreachable for initialized scans; avoids an unnecessary panic).
         let default_coll = HistColl::default();
         let tbl_stats = get_tbl_stats(table_plan)
             .map(Arc::as_ref)
