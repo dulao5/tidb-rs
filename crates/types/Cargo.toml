@@ -8,14 +8,18 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Logging of terror.Log / logutil (Go: zap).
-log = "0.4"
 # Errors (M-ERR), Go fmt and the Go time package (time.Location, time.Time).
 tidb-base = { workspace = true }
 # pkg/parser/charset (block D02.2): collation registry and the GBK encoder of gbk_bin.
 tidb-parser = { workspace = true }
 
 [dev-dependencies]
+# Whole-line log parity golden tests for rank 1-2 crates (tidb-parser, tidb-memory,
+# tidb-runtime, tidb-types): tidb-memory/tidb-runtime share rank 1 with tidb-log so their
+# real-encoder golden tests live here (rank 2 > rank 1, check_layers.py).
+tidb-log = { workspace = true }
+tidb-memory = { workspace = true }
+tidb-runtime = { workspace = true }
 # The govec replay tests read the JSON records (test code only; the crate's own JSON decoding
 # is tidb-base's port of Go encoding/json).
 serde_json = { workspace = true }

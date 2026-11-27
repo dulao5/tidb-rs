@@ -290,6 +290,37 @@ fn r32_tidb_rowid_requires_full_table_select() {
         );
     }
 
+    // Ordinary column 1143 takes precedence over R32 `_tidb_rowid` 1143: `u_mixed` has
+    // `UPDATE(a) + SELECT(b)`, so queries referencing unauthorized column `a` together with
+    // `_tidb_rowid` must report column `'a'` (matching Go), whereas queries where all ordinary
+    // columns are authorized (`b`) report `'_tidb_rowid'`.
+    for sql in [
+        "SELECT a FROM test.t WHERE _tidb_rowid = 1",
+        "SELECT _tidb_rowid, a FROM test.t",
+        "SELECT a FROM test.t ORDER BY _tidb_rowid",
+    ] {
+        let err = plan_as(&tables, &handle, "u_mixed", sql).unwrap_err();
+        assert_eq!(err.code(), 1143, "u_mixed on `{sql}`: {err}");
+        let raw = err.error();
+        let msg = String::from_utf8_lossy(&raw);
+        assert!(
+            msg.contains("for column 'a' in table 't'"),
+            "u_mixed on `{sql}` must report denied ordinary column 'a' first, got: {msg}"
+        );
+    }
+    let mixed_b_err = plan_as(
+        &tables,
+        &handle,
+        "u_mixed",
+        "SELECT b FROM test.t WHERE _tidb_rowid = 1",
+    )
+    .unwrap_err();
+    assert_eq!(mixed_b_err.code(), 1143);
+    assert!(
+        String::from_utf8_lossy(&mixed_b_err.error())
+            .contains("for column '_tidb_rowid' in table 't'")
+    );
+
     // Full-table (`u_tbl`), DB (`u_db_sel`), and global (`root`) SELECT users succeed.
     for user in ["u_tbl", "u_db_sel", "root"] {
         for sql in rowid_queries {

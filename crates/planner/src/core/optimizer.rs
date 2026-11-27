@@ -307,16 +307,24 @@ pub fn opt_rule_list() -> [&'static dyn LogicalOptRule; 26] {
 
 /// CheckPrivilege checks the privilege for a user in slice order (first failure wins, ensuring
 /// R30 table-denied `1142` precedes column-denied `1143`).
-// go: CheckPrivilege L1
+// go: CheckPrivilege L2 (R32 defers synthetic _tidb_rowid full-table check after ordinary column checks so Go's reported 1143 column is preserved)
 pub fn check_privilege(
     active_roles: &[tidb_parser::auth::RoleIdentity],
     pm: &dyn tidb_privilege::PrivilegeManager,
     vs: &[VisitInfo],
 ) -> Result<(), Error> {
     use tidb_base::dbterror::plannererrors::ErrPrivilegeCheckFail;
-    use tidb_base::mysql::{ExtendedPriv, PrivilegeType};
+    use tidb_base::mysql::{ErrColumnaccessDenied, ExtendedPriv, PrivilegeType, SelectPriv};
 
-    for v in vs {
+    let is_deferred_rowid = |v: &VisitInfo| -> bool {
+        v.privilege == SelectPriv.0
+            && v.column.is_empty()
+            && v.err
+                .as_ref()
+                .is_some_and(|e| e.code() == ErrColumnaccessDenied as isize)
+    };
+
+    let check_one = |v: &VisitInfo| -> Result<(), Error> {
         if v.privilege == ExtendedPriv.0 {
             let mut has_priv = false;
             for priv_name in &v.dynamic_privs {
@@ -346,6 +354,21 @@ pub fn check_privilege(
             }
             let priv_str = PrivilegeType(v.privilege).string();
             return Err(ErrPrivilegeCheckFail.gen_with_stack_by_args(tidb_base::go_args![priv_str]));
+        }
+        Ok(())
+    };
+
+    // Pass 1: check table-level (1142), dynamic, and ordinary column (1143) entries in Go order.
+    for v in vs {
+        if !is_deferred_rowid(v) {
+            check_one(v)?;
+        }
+    }
+    // Pass 2: check R32 `_tidb_rowid` entries only after all ordinary column checks succeed,
+    // so queries like `SELECT a FROM t WHERE _tidb_rowid = 1` still report Go's denied column `a`.
+    for v in vs {
+        if is_deferred_rowid(v) {
+            check_one(v)?;
         }
     }
     Ok(())

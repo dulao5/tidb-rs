@@ -115,7 +115,11 @@ const PiB: i64 = 1 << 50;
 pub(super) fn sg_tidb_log_file_max_days(_s: &mut SessionVars, val: &str) -> Result<(), Error> {
     let max_age = parse_int32(val)?;
     GlobalLogMaxDays.store(max_age as i32, SeqCst);
-    // logutil.ReplaceLogger(cfg with File.MaxDays): the Go logger [runtime-only].
+    if tidb_log::is_initialized() {
+        let mut log_cfg = tidb_base::config::get_global_config().log.to_log_config();
+        log_cfg.file.max_days = max_age as isize;
+        tidb_log::replace_logger(&log_cfg)?;
+    }
     Ok(())
 }
 

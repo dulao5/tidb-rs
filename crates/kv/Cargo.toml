@@ -32,8 +32,6 @@ parking_lot = "0.12"
 # MemAwareMap's table in an allocator (A1 3.3: the DISTINCT sets in a TrackedAlloc).
 hashbrown = "0.17.2"
 allocator-api2 = "0.2"
-# logutil (ported crates log through the `log` facade; the binary bridges it to tracing).
-log = "0.4"
 
 [dev-dependencies]
 # The govec vectors are committed as .jsonl.gz.

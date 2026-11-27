@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod constant;
+pub mod privilege;
 pub mod router;
 pub mod timing;
 
@@ -44,6 +45,7 @@ use tidb_meta::SchemaCache;
 use tidb_meta::SchemaCheck;
 use tidb_metrics::ExpensiveExec;
 use tidb_metrics::StmtType;
+use tidb_mysql_protocol::AccountAuth;
 use tidb_mysql_protocol::ConnectionInfo;
 use tidb_mysql_protocol::Credential;
 use tidb_mysql_protocol::OkInfo;
@@ -79,13 +81,17 @@ pub struct Shared {
     pub kv: KvClient,
     pub schema: SchemaCache,
     pub dag: DagContext,
-    /// The single account accepted until users are read from the cluster.
+    /// Fallback single account used only when `privileges` is `None` (unit tests without cluster
+    /// `mysql.*` privilege tables).
     pub user: String,
     pub credential: Credential,
     pub server_version: String,
     pub tls_enabled: bool,
     /// Schema sync (ADR 0005); `None` with `--schema-sync=off`.
     pub sync: Option<SchemaSync>,
+    /// Cluster-loaded `mysql.*` privilege cache (D04.1 Part 5/5). When `Some`, drives multi-account
+    /// login authentication and session-level privilege enforcement on both stacks.
+    pub privileges: Option<privilege::PrivilegeSource>,
 }
 
 /// Creates [`Session`]s.
@@ -133,15 +139,43 @@ impl Factory {
 impl SessionFactory for Factory {
     type Session = Session;
 
-    async fn lookup_user(&self, user: &str, _host: &str) -> Option<Credential> {
-        (user == self.shared.user).then(|| self.shared.credential.clone())
+    async fn lookup_user(&self, user: &str, host: &str) -> Option<Credential> {
+        self.lookup_account(user, host).await.map(|a| a.credential)
+    }
+
+    async fn lookup_account(&self, user: &str, host: &str) -> Option<AccountAuth> {
+        let Some(privs) = &self.shared.privileges else {
+            return (user == self.shared.user).then(|| AccountAuth {
+                credential: self.shared.credential.clone(),
+                auth_user: Some(self.shared.user.clone()),
+                auth_host: Some("%".to_owned()),
+                account_locked: false,
+            });
+        };
+        // Read directly from the in-memory cache (same as Go's `ConnectionVerification`).
+        // Never trigger an unauthenticated KV scan on miss; privilege updates arrive via the
+        // etcd `/tidb/privilege` watch and periodic background refresh loop.
+        let snap = privs.handle().get();
+        privilege::authenticate_user_record(&snap, user, host)
     }
 
     fn open_session(&self, info: &ConnectionInfo) -> Result<Session, SqlError> {
-        let host = info
-            .peer
-            .rsplit_once(':')
-            .map_or(info.peer.as_str(), |(h, _)| h);
+        let host = {
+            let h = info
+                .peer
+                .rsplit_once(':')
+                .map_or(info.peer.as_str(), |(h, _)| h)
+                .trim_matches(|c| c == '[' || c == ']');
+            if let Some(v4) = h
+                .strip_prefix("::ffff:")
+                .or_else(|| h.strip_prefix("::FFFF:"))
+                .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
+            {
+                v4
+            } else {
+                h
+            }
+        };
         // Go: the handshake collation sets character_set_client/connection/results and
         // collation_connection; unknown ids fall back to the server default.
         let (charset, collation) = match info.collation {
@@ -153,15 +187,34 @@ impl SessionFactory for Factory {
             63 => ("binary", "binary"),
             _ => ("utf8mb4", "utf8mb4_bin"),
         };
+        let (auth_user, auth_host, active_roles, privilege_manager) =
+            if let Some(privs) = &self.shared.privileges {
+                // Bind the exact `(auth_user, auth_host)` matched during `authenticate` with no
+                // TOCTOU re-match and no `(user, "%")` fallback; fail closed if absent.
+                let (Some(au), Some(ah)) = (&info.auth_user, &info.auth_host) else {
+                    return Err(SqlError::access_denied(&info.user, host, false));
+                };
+                let snap = privs.handle().get();
+                let roles = snap.get_default_roles(au, ah);
+                let pm: tidb_privilege::PrivilegeManagerRef =
+                    Arc::new(tidb_privilege::UserPrivileges::new(
+                        au.clone(),
+                        ah.clone(),
+                        Arc::clone(privs.handle()),
+                    ));
+                (au.clone(), ah.clone(), roles, Some(pm))
+            } else {
+                (info.user.clone(), "%".to_owned(), Vec::new(), None)
+            };
         let mut session = Session {
             shared: self.shared.clone(),
             current_db: None,
-            user: format!(
-                "{}@{}",
-                info.user,
-                host.trim_matches(|c| c == '[' || c == ']')
-            ),
-            current_user: format!("{}@%", info.user),
+            user: format!("{}@{host}", info.user),
+            current_user: format!("{auth_user}@{auth_host}"),
+            auth_user: auth_user.clone(),
+            auth_host: auth_host.clone(),
+            active_roles: active_roles.clone(),
+            privilege_manager: privilege_manager.clone(),
             connection_id: info.connection_id,
             charset: charset.to_owned(),
             collation: collation.to_owned(),
@@ -179,11 +232,23 @@ impl SessionFactory for Factory {
                 .sync
                 .as_ref()
                 .and_then(|s| s.ported_domain().cloned());
-            let new = Box::new(router::newstack::NewSession::new(
+            let mut new = Box::new(router::newstack::NewSession::new(
                 domain,
                 self.new_store.clone(),
                 self.shared.kv.exec_pool(),
             ));
+            if let Some(pm) = privilege_manager {
+                let ns = router::NewStack::session_mut(&mut *new);
+                ns.vars_mut().user = Some(tidb_parser::auth::UserIdentity {
+                    username: info.user.clone(),
+                    hostname: host.to_owned(),
+                    auth_username: auth_user,
+                    auth_hostname: auth_host,
+                    ..Default::default()
+                });
+                ns.vars_mut().active_roles = active_roles;
+                ns.set_privilege_manager(Some(pm));
+            }
             let mut r = Router::new(self.new_stack, new, &session.poc_values());
             r.set_connection_id(session.connection_id);
             session.router = Some(Box::new(r));
@@ -205,6 +270,10 @@ pub struct Session {
     current_db: Option<String>,
     user: String,
     current_user: String,
+    auth_user: String,
+    auth_host: String,
+    active_roles: Vec<tidb_parser::auth::RoleIdentity>,
+    privilege_manager: Option<tidb_privilege::PrivilegeManagerRef>,
     connection_id: u64,
     /// `SET NAMES` charset / collation (`character_set_client`/`connection`).
     charset: String,
@@ -569,6 +638,20 @@ impl Session {
         params: &[Literal],
     ) -> Result<tidb_sql::Plan, SqlError> {
         let start = Instant::now();
+        // Match Go's `preprocess -> build_logical_plan -> check_privilege` order:
+        // 1. Preprocess R31 missing-table check (1142 before 1146).
+        if let Some(pm) = &self.privilege_manager {
+            privilege::check_poc_missing_table_privilege(
+                pm.as_ref(),
+                &self.active_roles,
+                &self.auth_user,
+                &self.auth_host,
+                self.current_db.as_deref(),
+                sel,
+                is,
+            )?;
+        }
+        // 2. Plan build (unknown columns, only_full_group_by, unsupported SQL errors come first).
         let plan = tidb_sql::plan_select(
             sel,
             is,
@@ -580,7 +663,20 @@ impl Session {
         );
         let compile = &self.stmt.compile;
         compile.set(compile.get() + start.elapsed());
-        plan
+        let plan = plan?;
+        // 3. Post-build privilege verification (R29/R30/R32).
+        if let Some(pm) = &self.privilege_manager {
+            privilege::check_poc_select_privilege(
+                pm.as_ref(),
+                &self.active_roles,
+                &self.auth_user,
+                &self.auth_host,
+                self.current_db.as_deref(),
+                sel,
+                is,
+            )?;
+        }
+        Ok(plan)
     }
 
     /// Synced mode (ADR 0005): plan with the newest loaded schema, narrow the statement's
@@ -617,7 +713,11 @@ impl Session {
         match guard.check_results(start_ts).await {
             ResultCheck::Valid => {}
             ResultCheck::Fallback => return Ok(None),
-            ResultCheck::Err(e) => return Err(SqlError::new(e.code(), e.to_string())),
+            ResultCheck::Err(e) => {
+                let msg = e.to_string();
+                let src = tidb_base::Error::plain(format!("[domain:{}]{msg}", e.code())).trace();
+                return Err(SqlError::new(e.code(), msg).with_source_err(src));
+            }
         }
         self.mdl = Some(guard);
         Ok(Some((plan, rows?)))
@@ -915,6 +1015,64 @@ impl SessionHandler for Session {
         }
         r
     }
+
+    fn status_flags(&self) -> u16 {
+        if let Some(router) = &self.router {
+            router.new_stack().session().vars().status()
+        } else {
+            tidb_mysql_protocol::constants::status::AUTOCOMMIT
+        }
+    }
+
+    fn session_alias(&self) -> &str {
+        if let Some(router) = &self.router {
+            &router.new_stack().session().vars().session_alias
+        } else {
+            ""
+        }
+    }
+
+    fn txn_mode(&self) -> &str {
+        if let Some(router) = &self.router {
+            let m = &router.new_stack().session().vars().txn_mode;
+            if m.is_empty() {
+                "OPTIMISTIC"
+            } else {
+                m.as_str()
+            }
+        } else {
+            "PESSIMISTIC"
+        }
+    }
+
+    fn txn_timestamp(&self) -> u64 {
+        if let Some(router) = &self.router {
+            let tc = &router.new_stack().session().vars().state.txn_ctx;
+            if tc.start_ts != 0 {
+                tc.start_ts
+            } else {
+                tc.stale_read_ts
+            }
+        } else {
+            0
+        }
+    }
+
+    fn redact_mode(&self) -> &str {
+        if let Some(router) = &self.router {
+            &router.new_stack().session().vars().enable_redact_log
+        } else {
+            tidb_base::errors::redact_log_enabled_load()
+        }
+    }
+
+    fn collation_name(&self) -> &str {
+        if !self.collation.is_empty() {
+            &self.collation
+        } else {
+            "utf8mb4_bin"
+        }
+    }
 }
 
 impl Session {
@@ -923,7 +1081,21 @@ impl Session {
         self.mdl = None;
         self.stmt.stmt_type = None;
         let start = Instant::now();
-        let lowered = tidb_sql::parse_and_lower(sql)?;
+        let lowered = match tidb_sql::parse_and_lower(sql) {
+            Ok(l) => l,
+            Err(e) => {
+                if e.code == tidb_base::errno::ErrParse {
+                    return Err(router::log_and_wrap_parse_error(
+                        self.connection_id,
+                        "",
+                        tidb_base::errors::redact_log_enabled_load(),
+                        sql,
+                        e,
+                    ));
+                }
+                return Err(e);
+            }
+        };
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         self.stmt.start(stmt_type(&lowered.stmt), parse);
@@ -967,8 +1139,20 @@ impl Session {
         let mut columns = Vec::new();
         if let Statement::Select(sel) = &lowered.stmt {
             if sel.from.is_some() {
-                // Resolve names now, like Go's prepare: unknown tables/columns fail here.
+                // Resolve names now, like Go's prepare: preprocess missing-table R31 check,
+                // then plan build (unknown tables/columns & semantic checks), then privilege check.
                 let is = self.name_schema().await?;
+                if let Some(pm) = &self.privilege_manager {
+                    privilege::check_poc_missing_table_privilege(
+                        pm.as_ref(),
+                        &self.active_roles,
+                        &self.auth_user,
+                        &self.auth_host,
+                        self.current_db.as_deref(),
+                        sel,
+                        &is,
+                    )?;
+                }
                 let plan = tidb_sql::plan_select(
                     sel,
                     &is,
@@ -978,6 +1162,17 @@ impl Session {
                         describe_only: true,
                     },
                 )?;
+                if let Some(pm) = &self.privilege_manager {
+                    privilege::check_poc_select_privilege(
+                        pm.as_ref(),
+                        &self.active_roles,
+                        &self.auth_user,
+                        &self.auth_host,
+                        self.current_db.as_deref(),
+                        sel,
+                        &is,
+                    )?;
+                }
                 columns = plan.columns;
                 for c in &mut columns {
                     apply_result_charset(c, self.results_charset.as_deref());
@@ -1019,6 +1214,15 @@ impl Session {
     }
 
     async fn use_db_inner(&mut self, db: &str) -> Result<(), SqlError> {
+        if let Some(pm) = &self.privilege_manager
+            && !pm.db_is_visible(&self.active_roles, db)
+        {
+            return Err(SqlError::db_access_denied(
+                &self.auth_user,
+                &self.auth_host,
+                db,
+            ));
+        }
         let is = self.name_schema().await?;
         if is.schema_by_name(db).is_none() {
             return Err(SqlError::bad_db(db));
@@ -1028,17 +1232,25 @@ impl Session {
     }
 }
 
+/// The schema version the router compares with the new stack's
+/// ([`router::PocEngine::admissible_schema_version`]): the synced schema's, only while the
+/// schema sync admits statements on the new stack ([`poc_domain::Registry::new_stack_schema_version`]);
+/// `None` without schema sync. Never the ADR 0003 cache's newest entry: that one is not
+/// covered by the schema lease or the node's registration.
+// glue: VS1 plan §4.1 (the PoC's side of the router's InfoSchema version check)
+pub(crate) fn router_schema_version(
+    registry: Option<&poc_domain::Registry>,
+    now: Instant,
+) -> Option<i64> {
+    registry?.new_stack_schema_version(now).ok()
+}
+
 impl router::PocEngine for Session {
-    fn schema_version(&self) -> Option<i64> {
-        if let Some(is) = self
-            .shared
-            .sync
-            .as_ref()
-            .and_then(|s| s.registry().schema_if_admissible(Instant::now()))
-        {
-            return Some(is.version());
-        }
-        self.shared.schema.candidate().map(|is| is.version())
+    fn admissible_schema_version(&self) -> Option<i64> {
+        router_schema_version(
+            self.shared.sync.as_ref().map(|s| &**s.registry()),
+            Instant::now(),
+        )
     }
 
     fn in_txn(&self) -> bool {
