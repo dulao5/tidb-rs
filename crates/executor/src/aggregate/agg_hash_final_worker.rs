@@ -13,11 +13,9 @@
 //!   §2.4) are not ported.
 
 use std::any::Any;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::FutureExt;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_chunk::ColAlloc;
@@ -286,7 +284,7 @@ impl HashAggFinalWorker {
         let start = Instant::now();
         let wg_guard = DoneGuard(wait_group);
 
-        let res = AssertUnwindSafe(async {
+        let res = tidb_base::panic_guard::catch_unwind_future(async {
             partial_worker_waiter.wait().await;
 
             if self.spill_helper.is_spilled_chunks_io_empty() {
@@ -314,7 +312,6 @@ impl HashAggFinalWorker {
             }
             self.send_final_result().await;
         })
-        .catch_unwind()
         .await;
 
         self.cleanup(start, res.err(), wg_guard).await;
@@ -324,11 +321,11 @@ impl HashAggFinalWorker {
     async fn cleanup(
         mut self,
         start: Instant,
-        panic_payload: Option<Box<dyn Any + Send>>,
+        panic_info: Option<(Box<dyn Any + Send>, Option<String>)>,
         wg_guard: DoneGuard,
     ) {
-        if let Some(r) = panic_payload {
-            recovery_hash_agg(&self.output_tx, r).await;
+        if let Some((r, bt)) = panic_info {
+            recovery_hash_agg(&self.output_tx, r, bt).await;
         }
         // Release partialResultMap bytes into TrackedAlloc before Done.
         self.partial_result_map.m.clear();

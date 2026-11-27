@@ -30,7 +30,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::collections::HashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -663,6 +663,16 @@ impl PhysicalIndexLookUpReader {
     /// GetAvgTableRowSize return the average row size of each final row.
     // go: PhysicalIndexLookUpReader.GetAvgTableRowSize L1 [M-CTX]
     pub fn get_avg_table_row_size(&self, ctx: &PlanCtx<'_>) -> f64 {
+        self.get_avg_table_row_size_with_vars(ctx.vars)
+    }
+
+    /// `GetAvgTableRowSize` taking `&SessionVars` directly (used by `tidb-executor` where no
+    /// mutable `PlanCtx` is available, matching `PhysicalTableReader::get_net_data_size`).
+    // glue: PhysicalIndexLookUpReader.GetAvgTableRowSize for &SessionVars callers
+    pub fn get_avg_table_row_size_with_vars(
+        &self,
+        vars: &tidb_sessionctx::variable::session::SessionVars,
+    ) -> f64 {
         let table_plan = self
             .table_plan
             .as_deref()
@@ -670,8 +680,8 @@ impl PhysicalIndexLookUpReader {
         let default_coll = HistColl::default();
         let tbl_stats = get_tbl_stats(table_plan);
         let coll = tbl_stats.map_or(&default_coll, |v| &**v);
-        crate::cardinality::row_size::get_avg_row_size(
-            ctx,
+        crate::cardinality::row_size::get_avg_row_size_with_vars(
+            vars,
             coll,
             &table_plan.schema().columns,
             false,
@@ -730,7 +740,7 @@ impl PhysicalIndexLookUpReader {
             Ok(p) => p,
             Err(err) => {
                 // This should not happen, but if it happens, we just log a warning and continue to use the original plan.
-                log::warn!("try to push down index lookup failed: {err}");
+                tidb_base::log_warn!("try to push down index lookup failed", "error" => &err);
                 return;
             }
         };
@@ -2264,7 +2274,7 @@ pub fn collect_plan_stats_version(plan: &dyn PhysicalPlan, stats_infos: &mut Has
 /// Go formats the recovered value with `%v`; the panic payload's message is used.
 // go: SafeClone L1 [M-CTX]
 pub fn safe_clone(v: &dyn PhysicalPlan) -> Result<PhysicalPlanRef, Error> {
-    match catch_unwind(AssertUnwindSafe(|| v.clone_plan())) {
+    match tidb_base::panic_guard::catch_unwind_silent(AssertUnwindSafe(|| v.clone_plan())) {
         Ok(r) => r,
         Err(payload) => {
             let msg = if let Some(s) = payload.downcast_ref::<&str>() {

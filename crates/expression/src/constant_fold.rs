@@ -84,9 +84,15 @@ fn is_null_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
             const_arg.deferred_expr.is_some() || const_arg.param_marker.is_some();
         let value = match sf.eval(&*ectx, &EvalState::new(), Row::default()) {
             Ok(v) => v,
-            // Failed to fold this expr to a constant: return the original expression to let
-            // the error be evaluated again (Go logs it at DEBUG).
-            Err(_) => return (Arc::clone(expr), is_deferred_const),
+            Err(err) => {
+                let info = expr.string_with_ctx(&*ectx, tidb_base::errors::RedactLogDisable);
+                tidb_base::log_debug!(
+                    "fold expression to constant",
+                    "expression" => &info,
+                    "error" => &err,
+                );
+                return (Arc::clone(expr), is_deferred_const);
+            }
         };
         if is_deferred_const {
             return (
@@ -111,7 +117,15 @@ fn if_fold_handler(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool) {
         let ectx = ctx.get_eval_ctx();
         let arg0 = match const_arg.eval_int(&*ectx, &EvalState::new(), Row::default()) {
             Ok(v) => v,
-            Err(_) => return (Arc::clone(expr), false),
+            Err(err) => {
+                let info = expr.string_with_ctx(&*ectx, tidb_base::errors::RedactLogDisable);
+                tidb_base::log_debug!(
+                    "fold expression to constant",
+                    "expression" => &info,
+                    "error" => &err,
+                );
+                return (Arc::clone(expr), false);
+            }
         };
         if matches!(arg0, Some(v) if v != 0) {
             return fold_constant_inner(ctx, &args[1]);
@@ -340,7 +354,15 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
             let mut ret_type = x.ret_type().clone();
             let value = match value {
                 Ok(v) => v,
-                Err(_) => return (Arc::clone(expr), is_deferred_const),
+                Err(err) => {
+                    let info = expr.string_with_ctx(&*ectx, tidb_base::errors::RedactLogDisable);
+                    tidb_base::log_debug!(
+                        "fold expression to constant",
+                        "expression" => &info,
+                        "error" => &err,
+                    );
+                    return (Arc::clone(expr), is_deferred_const);
+                }
             };
             if !has_null_arg {
                 // set right not null flag for constant value
@@ -360,8 +382,10 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
             if let Some(pm) = &x.param_marker {
                 let val = match pm.get_user_var(&*ectx) {
                     Ok(v) => v,
-                    // Go logs a warning ("fail to get param").
-                    Err(_) => return (Arc::clone(expr), true),
+                    Err(err) => {
+                        tidb_base::log_warn!("fail to get param", "error" => &err);
+                        return (Arc::clone(expr), true);
+                    }
                 };
                 let mut c = Constant::new(val, x.ret_type.clone());
                 c.deferred_expr = x.deferred_expr.clone();
@@ -370,7 +394,16 @@ fn fold_constant_inner(ctx: &dyn BuildContext, expr: &ExprRef) -> (ExprRef, bool
             } else if let Some(de) = &x.deferred_expr {
                 let value = match de.eval(&*ectx, &EvalState::new(), Row::default()) {
                     Ok(v) => v,
-                    Err(_) => return (Arc::clone(expr), true),
+                    Err(err) => {
+                        let info =
+                            expr.string_with_ctx(&*ectx, tidb_base::errors::RedactLogDisable);
+                        tidb_base::log_debug!(
+                            "fold expression to constant",
+                            "expression" => &info,
+                            "error" => &err,
+                        );
+                        return (Arc::clone(expr), true);
+                    }
                 };
                 return (
                     new_const(value, x.ret_type.clone(), x.deferred_expr.clone()),

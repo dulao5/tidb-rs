@@ -46,6 +46,9 @@ struct FakePoc {
     prepare_fails: bool,
     prepared: HashMap<u32, Lowered>,
     log: Vec<String>,
+    /// The schema sync's registry: when set, the schema version is the real PoC's
+    /// computation over it, and `schema_version` is ignored.
+    registry: Option<Arc<poc_domain::Registry>>,
 }
 
 fn col(name: &str) -> ColumnDef {
@@ -78,8 +81,11 @@ impl FakePoc {
 }
 
 impl PocEngine for FakePoc {
-    fn schema_version(&self) -> Option<i64> {
-        self.schema_version
+    fn admissible_schema_version(&self) -> Option<i64> {
+        match &self.registry {
+            Some(r) => crate::router_schema_version(Some(r), std::time::Instant::now()),
+            None => self.schema_version,
+        }
     }
     fn in_txn(&self) -> bool {
         self.in_txn
@@ -173,6 +179,11 @@ enum Answer {
     Rows,
     /// A Go-ported error (1054).
     GoError,
+    /// The error distsql's select result makes of a coprocessor response whose
+    /// `SelectResponse.error` TiKV set: `ClassTiKV.Synthesize(code, msg)`.
+    CopError(i32, &'static str),
+    /// A plain Go error (`errors.New`), not a `*terror.Error`.
+    PlainError(&'static str),
     /// The 1235 of `tidb_rc_read_check_ts` (sessiontxn, N11 D11): TiDB's "not supported",
     /// not a boundary stub.
     RcReadCheckTsNotSupported,
@@ -233,10 +244,12 @@ impl FakeNew {
                     warnings: 2,
                 }))
             }
-            Answer::GoError => Err(errors::normalize(
-                "Unknown column 'x' in 'field list'",
-                [errors::mysql_error_code(1054)],
-            )),
+            Answer::GoError => Err(tidb_base::dbterror::plannererrors::ErrUnknownColumn
+                .gen_with_stack_by_args(vec!["x".into(), "field list".into()])),
+            Answer::CopError(code, msg) => {
+                Err(tidb_base::dbterror::ClassTiKV.synthesize(code, msg))
+            }
+            Answer::PlainError(msg) => Err(errors::new(msg)),
             Answer::RcReadCheckTsNotSupported => {
                 Err(tidb_sessiontxn::isolation::err_rc_read_check_ts_not_supported())
             }
@@ -604,13 +617,37 @@ fn step0_schema_versions_must_be_equal() {
         script.lock().unwrap().version = v;
         assert_eq!(r.route(&parse(POINT), &p, false), want, "{v:?}");
     }
+    // No admissible schema lease: the PoC, with its own reason.
     let mut p = poc();
     p.schema_version = None;
     script.lock().unwrap().version = Some(1);
     assert_eq!(
         r.route(&parse(POINT), &p, false),
-        Route::Poc(Reason::SchemaVersion)
+        Route::Poc(Reason::SchemaLease)
     );
+}
+
+/// Step 0: a statement goes to the new stack only while the synced schema is admissible.
+/// Here the node is not registered in the cluster (never registered, or deregistered): the
+/// DDL owner does not wait for it, so the new stack's InfoSchema may be two versions behind
+/// the data. The ADR 0003 cache still holds the new stack's version, and the versions
+/// compare equal; the statement must still run on the PoC, whose path checks the schema at
+/// the statement's own timestamp. (The lease and the ported domain's reload are covered by
+/// the registry's `new_stack_schema_version_needs_an_admissible_lease`.)
+#[test]
+fn step0_unadmissible_schema_lease_goes_to_the_poc() {
+    let mut p = poc();
+    p.registry = Some(poc_domain::Registry::new(poc_domain::Limits::default()));
+    let (mut r, script) = scripted(NewStackMode::Strict, &p);
+    script.lock().unwrap().version = Some(1);
+    assert_eq!(
+        r.route(&parse(POINT), &p, false),
+        Route::Poc(Reason::SchemaLease)
+    );
+    // Even in strict mode the statement runs on the PoC.
+    let res = block_on(r.query(&mut p, POINT));
+    assert_eq!(rows(&res).map(|r| r.0), Some(3));
+    assert!(script.lock().unwrap().log.is_empty());
 }
 
 /// Step 0 comes before the kind and the AST pre-check.
@@ -647,8 +684,82 @@ fn go_ported_error_is_not_a_fallback() {
     let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().answer = Some(Answer::GoError);
     let e = block_on(r.query(&mut p, POINT)).unwrap_err();
-    assert_eq!(e.code, 1054);
+    assert_eq!(
+        e,
+        SqlError {
+            code: 1054,
+            state: "42S22",
+            message: "Unknown column 'x' in 'field list'".into(),
+            source_err: None,
+        }
+    );
     assert!(!p.log.iter().any(|l| l.starts_with("run")));
+}
+
+/// A coprocessor error TiKV returned (a pushed-down `id + 9223372036854775807 > 0`
+/// overflowing) reaches the client as Go's `clientConn.writeError` sends it: TiKV's code
+/// and message, and the SQLSTATE Go's `MySQLState` table gives the code (`22003` for
+/// `ErrDataOutOfRange`, not `HY000`). A code `ClassTiKV` did not register becomes
+/// `ErrUnknown` (`terror.ToSQLError`), as does a plain Go error.
+#[test]
+fn new_stack_errors_get_go_code_sqlstate_and_message() {
+    const OVERFLOW: &str = "BIGINT value is out of range in '(1 + 9223372036854775807)'";
+    let cases = [
+        (
+            Answer::CopError(1690, OVERFLOW),
+            SqlError {
+                code: 1690,
+                state: "22003",
+                message: OVERFLOW.into(),
+                source_err: None,
+            },
+        ),
+        (
+            Answer::CopError(1365, "Division by 0"),
+            SqlError {
+                code: 1365,
+                state: "22012",
+                message: "Division by 0".into(),
+                source_err: None,
+            },
+        ),
+        (
+            Answer::CopError(1406, "Data Too Long, field len 3"),
+            SqlError {
+                code: 1105,
+                state: "HY000",
+                message: "Data Too Long, field len 3".into(),
+                source_err: None,
+            },
+        ),
+        (
+            Answer::PlainError("other error: region unavailable"),
+            SqlError {
+                code: 1105,
+                state: "HY000",
+                message: "other error: region unavailable".into(),
+                source_err: None,
+            },
+        ),
+    ];
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        for (answer, want) in &cases {
+            let mut p = poc();
+            let (mut r, script) = scripted(mode, &p);
+            script.lock().unwrap().answer = Some(answer.clone());
+            let e = block_on(r.query(&mut p, POINT)).unwrap_err();
+            assert_eq!(&e, want, "{mode:?} {answer:?}");
+            assert_eq!(
+                e.to_string(),
+                format!("ERROR {} ({}): {}", want.code, want.state, want.message)
+            );
+            assert!(
+                !p.log.iter().any(|l| l.starts_with("run")),
+                "{mode:?}: no fallback"
+            );
+            assert_eq!(r.last_stmt().engine, Engine::New);
+        }
+    }
 }
 
 /// `tidb_rc_read_check_ts` is rejected by the new stack with a real 1235 (N11 D11,
@@ -1425,6 +1536,57 @@ fn prepare_with_unequal_schema_versions_is_poc_owned() {
     assert!(script.lock().unwrap().log.is_empty());
 }
 
+/// Prepared statements: without an admissible schema lease, PREPARE stays on the PoC, an
+/// EXECUTE of a statement prepared on both sides runs on the PoC, and one only the new stack
+/// prepared gets the 1235 that names the lease.
+#[test]
+fn prepared_without_admissible_schema_lease() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().version = Some(1);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    assert!(matches!(r.owner(1), Some(Owner::Both { .. })));
+    p.schema_version = None;
+    block_on(r.prepare(&mut p, 2, POINT)).unwrap();
+    assert_eq!(r.owner(2), Some(&Owner::Poc(Reason::SchemaLease)));
+    script.lock().unwrap().log.clear();
+    p.log.clear();
+    let res = block_on(r.execute(&mut p, 1, vec![]));
+    assert_eq!(rows(&res).map(|r| r.0), Some(3));
+    assert!(p.log.contains(&"execute 1".to_owned()));
+    assert!(script.lock().unwrap().log.is_empty());
+    // New-only: 1235, counted with the schema lease as its reason.
+    super::trace::enable();
+    let conn = 7_000_475;
+    let mut p = poc();
+    p.prepare_fails = true;
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    r.set_connection_id(conn);
+    script.lock().unwrap().version = Some(1);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    assert_eq!(r.owner(1), Some(&Owner::New { new_id: 101 }));
+    p.schema_version = None;
+    let e = block_on(r.execute(&mut p, 1, vec![])).unwrap_err();
+    assert!(
+        e.code == 1235 && e.message.contains("schema lease"),
+        "{}",
+        e.message
+    );
+    let last = super::trace::get(conn);
+    assert_eq!(
+        (last.engine, last.reason.as_str()),
+        (NOWHERE, "schema_lease")
+    );
+    // Once the lease is admissible again, the same statement runs on the new stack: no
+    // re-PREPARE.
+    p.schema_version = Some(1);
+    script.lock().unwrap().answer = Some(Answer::Rows);
+    let res = block_on(r.execute(&mut p, 1, vec![]));
+    assert_eq!(rows(&res).map(|r| r.0), Some(1));
+}
+
 /// Lucky (#235): the router checks that the new session is idle before it tries a statement
 /// there. A busy session (here a pending transaction) is a router bug: the statement goes to
 /// the PoC (reason `not_idle`) in both modes and the new stack is not asked, so nothing is
@@ -1471,8 +1633,18 @@ fn blocked_after_open_is_an_error_not_a_fallback() {
         let (mut r, script) = scripted(mode, &p);
         script.lock().unwrap().answer = Some(Answer::BlockedAfterOpen("D12.2"));
         let e = block_on(r.query(&mut p, POINT)).unwrap_err();
-        assert_eq!(e.code, 1235, "{mode:?}");
-        assert!(e.message.contains("blocked-by:D12.2"), "{}", e.message);
+        assert_eq!(
+            e,
+            SqlError {
+                code: 1235,
+                state: "42000",
+                message: "This version of TiDB doesn't yet support 'something after the \
+                          executors opened (blocked-by:D12.2)'"
+                    .into(),
+                source_err: None,
+            },
+            "{mode:?}"
+        );
         assert!(
             !p.log.iter().any(|l| l.starts_with("run")),
             "{mode:?}: no fallback"
@@ -1677,4 +1849,33 @@ fn admin_flush_plan_cache_scopes_as_go() {
         assert_eq!(r.last_stmt().engine, Engine::New, "{sql}");
         assert!(script.lock().unwrap().log.is_empty(), "{sql}");
     }
+}
+
+#[test]
+fn parse_error_wrapping_has_no_double_trailing_space() {
+    let msg = "You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use line 3 column 7 near \"FROM nonexistent\" ";
+    let err = log_and_wrap_parse_error(
+        7,
+        "",
+        "OFF",
+        "SELECT\n  1,\n  FROM nonexistent",
+        SqlError::new(1064, msg),
+    );
+    let src = err.source_err.expect("source_err attached");
+    let rendered = src.to_string();
+    assert_eq!(rendered, format!("[parser:1064]{msg}"));
+    assert!(
+        !rendered.ends_with("  "),
+        "must not append a second trailing space: {rendered:?}"
+    );
+}
+
+#[test]
+fn set_connection_id_propagates_to_new_stack_session_vars() {
+    let p = poc();
+    let (mut r, _) = scripted(NewStackMode::Fallback, &p);
+    assert_eq!(r.new.session().vars().connection_id, 0);
+    r.set_connection_id(2097158);
+    assert_eq!(r.conn_id, 2097158);
+    assert_eq!(r.new.session().vars().connection_id, 2097158);
 }

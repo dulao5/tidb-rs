@@ -103,6 +103,9 @@ struct Inner {
     ported: Option<Arc<tidb_domain::Domain>>,
     /// Held while registering or deregistering.
     registration: tokio::sync::Mutex<Option<Registration>>,
+    /// JoinHandle of `sync_loop` so `shutdown()` awaits `"loadSchemaInLoop exited."` before
+    /// logging `"domain closed"`.
+    sync_loop_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     wake: Notify,
     stalled: AtomicBool,
     stop: tokio::sync::watch::Sender<bool>,
@@ -139,12 +142,14 @@ impl SchemaSync {
             kv,
             etcd,
             registration: tokio::sync::Mutex::new(None),
+            sync_loop_handle: tokio::sync::Mutex::new(None),
             wake: Notify::new(),
             stalled: AtomicBool::new(false),
             stop,
         });
         tokio::spawn(inner.clone().watch_global_version());
-        tokio::spawn(inner.clone().sync_loop());
+        let loop_handle = tokio::spawn(inner.clone().sync_loop());
+        *inner.sync_loop_handle.lock().await = Some(loop_handle);
         tokio::spawn(inner.clone().watchdog());
         info!(
             ddl_id = %inner.cfg.info.ddl_id,
@@ -190,9 +195,14 @@ impl SchemaSync {
     /// Graceful shutdown: stop the tasks, leave synced mode and delete this node's keys (by
     /// revoking the lease), so DDL stops waiting for it at once.
     pub async fn shutdown(&self) {
+        let started = Instant::now();
         self.inner.stop.send_replace(true);
         self.inner.wake.notify_one();
+        if let Some(handle) = self.inner.sync_loop_handle.lock().await.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
         self.inner.deregister("shutdown").await;
+        tidb_base::log_info!("domain closed", "take time" => started.elapsed());
     }
 }
 
@@ -296,6 +306,7 @@ impl Inner {
                 }
             }
             if self.stopped() {
+                tidb_base::log_info!("loadSchemaInLoop exited.");
                 return;
             }
             if self.is_stalled() {
@@ -386,12 +397,15 @@ impl Inner {
             .reloaded(ts, requested_at, old_version, full_load);
         // The ported domain loads the same version at the same timestamp (VS1 plan §4.1): a
         // diff load from its cached version, or a full load. A failure leaves the new stack
-        // on its older version, so the router sends statements to the PoC (unequal
-        // versions) until a later reload succeeds.
-        if let Some(ported) = &self.ported
-            && let Err(e) = ported.reload_at(ts).await
-        {
-            warn!(error = %e, "reloading the ported domain's InfoSchema failed");
+        // on its older version; the router sends statements to the PoC until a later reload
+        // of the ported domain succeeds (`Registry::new_stack_schema_version`), even when the
+        // versions compare equal.
+        if let Some(ported) = &self.ported {
+            let r = ported.reload_at(ts).await;
+            if let Err(e) = &r {
+                warn!(error = %e, "reloading the ported domain's InfoSchema failed");
+            }
+            self.registry.ported_reloaded(r.is_ok());
         }
         Ok(())
     }
