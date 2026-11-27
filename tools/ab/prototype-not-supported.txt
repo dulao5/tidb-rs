@@ -45,6 +45,8 @@ WHERE conditions other than comparisons of the integer primary key with constant
 WHERE/GROUP BY/ORDER BY in a SELECT without FROM
 WINDOW
 WITH \(common table expressions\)
+`.*` is a sequence
+`.*` is a view
 a table read without columns
 aggregate arguments other than a column \(or COUNT\(\*\)\)
 aggregate function .*
@@ -76,6 +78,10 @@ reading the virtual generated column '.*'
 returning value .*
 setting system variable '.*'
 subqueries
+table `.*` has a clustered non\-integer primary key \(common handle\)
+table `.*` is a temporary table
+table `.*` is not public \(state .*\)
+table `.*` is partitioned; partitioned tables are not supported
 table scan without columns
 these index hints
 this FROM clause

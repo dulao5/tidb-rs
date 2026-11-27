@@ -45,14 +45,18 @@ pub fn is_not_implemented_answer(message: &str) -> bool {
 }
 
 /// T1: B's answer counts as `unsupported`: B returned a not-implemented 1235 (see
-/// [`is_not_implemented_answer`]) and A did not also return 1235 (then both errors compare in
-/// full).
+/// [`is_not_implemented_answer`]) and A did not return the very same 1235. When A also answers
+/// 1235 with another text, neither side runs the statement: B's not-implemented answer is still
+/// `unsupported`, not a mismatch (#510). The same text on both sides compares in full (equal),
+/// and a 1235 that is not a not-implemented answer (a ported Go `ErrNotSupportedYet` branch)
+/// always compares in full.
 pub fn b_not_implemented(a: &Outcome, b: &Outcome) -> bool {
     let Outcome::Error { code, message, .. } = b else {
         return false;
     };
-    let a_1235 = matches!(a, Outcome::Error { code, .. } if *code == ER_NOT_SUPPORTED_YET);
-    *code == ER_NOT_SUPPORTED_YET && !a_1235 && is_not_implemented_answer(message)
+    let a_same = matches!(a, Outcome::Error { code, message: m, .. }
+        if *code == ER_NOT_SUPPORTED_YET && m == message);
+    *code == ER_NOT_SUPPORTED_YET && !a_same && is_not_implemented_answer(message)
 }
 
 /// The numbered tolerances (`docs/testing/tolerances.toml`; a unit test keeps both in step,
@@ -1017,8 +1021,11 @@ mod tests {
             cmp(&rows(&["a"]), &err(1235), &u),
             Verdict::Mismatch(_)
         ));
-        assert!(matches!(cmp(&err(1235), &stub, &u), Verdict::Mismatch(_)));
+        // A also refuses with another 1235 text: still unsupported (#510); the same text on
+        // both sides is equal; B's unmarked 1235 against A's 1235 compares in full.
+        assert_eq!(cmp(&err(1235), &stub, &u), Verdict::Unsupported);
         assert_eq!(cmp(&stub, &stub, &u), Verdict::BothError);
+        assert!(matches!(cmp(&stub, &err(1235), &u), Verdict::Mismatch(_)));
         assert!(matches!(
             cmp(&rows(&[]), &err(1105), &u),
             Verdict::Mismatch(_)
@@ -1107,6 +1114,42 @@ mod tests {
         ));
         assert!(!is_not_implemented_answer(
             "This version of TiDB doesn't yet support 'something Go says'"
+        ));
+        // The read-only node's reasons a table cannot be read (crates/meta `Unsupported`,
+        // passed on as `unsupported(e.to_string())`): fixed answers too (#510).
+        for what in [
+            "table `tp` is partitioned; partitioned tables are not supported",
+            "`cte.v1` is a view",
+            "table `t` has a clustered non-integer primary key (common handle)",
+        ] {
+            assert!(
+                is_not_implemented_answer(&format!(
+                    "This version of TiDB doesn't yet support '{what}'"
+                )),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_1235() {
+        let e = |m: &str| Outcome::Error {
+            code: ER_NOT_SUPPORTED_YET,
+            state: "42000".into(),
+            message: format!("This version of TiDB doesn't yet support '{m}'"),
+        };
+        // Both refuse with different texts, B's is a not-implemented answer: unsupported.
+        assert!(b_not_implemented(&e("this feature"), &e("joins")));
+        assert!(b_not_implemented(
+            &e("this feature"),
+            &e("x (blocked-by:D09.1)")
+        ));
+        // The same text compares in full (both_error).
+        assert!(!b_not_implemented(&e("joins"), &e("joins")));
+        // B's 1235 is not a not-implemented answer (a ported Go branch): compared in full.
+        assert!(!b_not_implemented(
+            &e("this feature"),
+            &e("something Go says")
         ));
     }
 

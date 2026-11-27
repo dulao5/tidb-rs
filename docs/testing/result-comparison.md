@@ -94,7 +94,8 @@ mysqltest 指令 `--sorted_result` 使下一条语句按 unordered 比较（带 
   不算一致。
 - 一边报错一边不报错：不一致（integrationtest 中 A 成功 B 报错记为 `b_error`，它同样不是一致）。
 - B 返回 1235：只有边界桩的回答（消息带 `blocked-by:`）或原型自己的固定文案（`tools/ab/prototype-not-supported.txt`）
-  才判为 `unsupported`（容差 T1），既不算一致也不算不一致。A 也返回 1235 时按上一条完整比较；其他
+  才判为 `unsupported`（容差 T1），既不算一致也不算不一致。A 也返回 1235、但文案不同时，两边都不执行这条语句，
+  仍判为 `unsupported`（#510）；文案相同时按上一条完整比较（两边同错）；其他
   1235（例如移植来的 Go 代码走到 `ErrNotSupportedYet` 分支）是普通错误，A 成功即不一致。
 - warning：先比 warning 数；任一边大于 0 时，runner 必须在语句之后立即在两边各执行一次
   `SHOW WARNINGS`，比较器按 exact 逐行比较（Level、Code、Message）。warning 数大于 0 而 runner
@@ -113,7 +114,7 @@ mysqltest 指令 `--sorted_result` 使下一条语句按 unordered 比较（带 
 
 | 编号 | 名称 | 规则摘要 |
 |---|---|---|
-| T1 | b-not-supported | B 返回带 `blocked-by:` 的 1235 或原型固定文案的 1235（且 A 不是 1235）判为 unsupported，不算一致，不计入新栈覆盖 |
+| T1 | b-not-supported | B 返回带 `blocked-by:` 的 1235 或原型固定文案的 1235（且 A 不是同一个 1235）判为 unsupported，不算一致，不计入新栈覆盖 |
 | T2 | sorted-result | `--sorted_result` 后按多重集比较 |
 | T3 | replace-directives | `--replace_regex` / `--replace_column` 同时作用于两边 |
 | T4 | result-log-off | `--disable_result_log` 期间只比形状，错误仍完整比较 |

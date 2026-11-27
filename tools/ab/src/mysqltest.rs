@@ -417,7 +417,33 @@ pub fn affects_results(var: &str) -> bool {
                 | "tidb_snapshot"
                 | "tidb_read_staleness"
                 | "tidb_enable_noop_functions"
+                // The seeds of RAND() without an argument (`set @@rand_seed1=..`).
+                | "rand_seed1"
+                | "rand_seed2"
         )
+}
+
+/// Whether a read asks where the last plan came from (`@@last_plan_from_cache`,
+/// `@@last_plan_from_binding`): its answer follows the plan-only session state too (plan
+/// cache switches, fix controls, session bindings), which `affects_results` leaves out.
+pub fn reads_last_plan_source(sql: &str) -> bool {
+    words(sql).iter().any(|x| {
+        matches!(
+            x.text
+                .trim_start_matches("@@SESSION.")
+                .trim_start_matches("@@"),
+            "LAST_PLAN_FROM_CACHE" | "LAST_PLAN_FROM_BINDING"
+        )
+    })
+}
+
+/// Whether a statement creates a session binding (`CREATE [SESSION] BINDING ..`; without a
+/// scope a binding is the session's). It runs on A only (a write), so B's session never has
+/// it.
+pub fn creates_session_binding(sql: &str) -> bool {
+    let w = words(sql);
+    let t = |i: usize| w.get(i).map_or("", |x| x.text.as_str());
+    t(0) == "CREATE" && (t(1) == "BINDING" || (t(1) == "SESSION" && t(2) == "BINDING"))
 }
 
 /// Transaction effect of a statement that succeeded on A.
@@ -717,6 +743,19 @@ mod tests {
         assert!(affects_results("character_set_results"));
         assert!(affects_results("sql_mode"));
         assert!(!affects_results("tidb_cost_model_version"));
+        assert!(affects_results("rand_seed1"));
+        assert!(affects_results("rand_seed2"));
+        assert!(!affects_results("tidb_enable_non_prepared_plan_cache"));
+        assert!(creates_session_binding(
+            "create binding for select a from t using select a from t"
+        ));
+        assert!(creates_session_binding(
+            "CREATE SESSION BINDING FOR select 1 USING select 1"
+        ));
+        assert!(!creates_session_binding(
+            "create global binding for select * from t using select * from t"
+        ));
+        assert!(!creates_session_binding("create table t (a int)"));
     }
 
     #[test]

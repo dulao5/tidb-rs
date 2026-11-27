@@ -6,9 +6,12 @@ is a boundary stub's answer (`blocked-by:<block>`) or one of the prototype's own
 listed in tools/ab/prototype-not-supported.txt (docs/testing/tolerances.toml, T1). Any other 1235
 is a normal error: a ported Go branch returning ErrNotSupportedYet where Go answers is a mismatch.
 
-This script extracts the list from the prototype's sources (string literals passed to
-`not_supported(..)` / `unsupported(..)` / `Unsupported(..)` in crates/poc, crates/sql,
-crates/mysql-protocol, crates/distsql); `{..}` placeholders become `.*`.
+This script extracts the list from the sources of every first-party crate (crates/*): string
+literals passed to `not_supported(..)` / `unsupported(..)` / `Unsupported(..)`, and the
+`#[error("..")]` texts of an `enum Unsupported` (crates/meta's reasons a table cannot be read:
+partitioned, view, common handle, ...; the readers pass them on with `unsupported(e.to_string())`,
+which has no literal at the call). `{..}` placeholders become `.*`. Only crates/ is scanned:
+vendored code (third_party/) and the test tools never answer a client.
 
     scripts/prototype_not_supported.py           rewrite the list
     scripts/prototype_not_supported.py --check   fail if the list is stale (CI)
@@ -21,8 +24,11 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "tools", "ab", "prototype-not-supported.txt")
-DIRS = ["crates/poc", "crates/sql", "crates/mysql-protocol", "crates/distsql"]
+CRATES = os.path.join(ROOT, "crates")
 CALL = re.compile(r'\b(?:not_supported|unsupported|Unsupported)\(\s*(?:&?format!\(\s*)?"((?:[^"\\]|\\.)*)"', re.S)
+# `enum Unsupported { #[error("..")] Variant(..), .. }` (thiserror): the variants' texts.
+ENUM = re.compile(r"\benum\s+Unsupported\s*\{(.*?)\n\}", re.S)
+ERROR_ATTR = re.compile(r'#\[error\(\s*"((?:[^"\\]|\\.)*)"', re.S)
 # The router's own 1235 for a prepared statement only the new stack can run (crates/poc/session).
 EXTRA = [r"this prepared statement on the PoC, and the new stack cannot run it now \(.*\)"]
 HEADER = """\
@@ -49,18 +55,24 @@ def pattern(text):
     return out.replace("\x00", r"\{").replace("\x01", r"\}")
 
 
+def texts(src):
+    """The fixed answers in one source file (test modules already dropped)."""
+    out = [literal(m.group(1)) for m in CALL.finditer(src)]
+    for body in ENUM.finditer(src):
+        out += [literal(m.group(1)) for m in ERROR_ATTR.finditer(body.group(1))]
+    return out
+
+
 def generate():
     pats = set(EXTRA)
-    for d in DIRS:
-        for f in glob.glob(os.path.join(ROOT, d, "**", "*.rs"), recursive=True):
-            rel = os.path.relpath(f, ROOT)
-            if "/tests/" in rel or rel.endswith("tests.rs"):
-                continue
-            src = open(f, encoding="utf-8").read()
-            # Drop #[cfg(test)] modules (test-only answers).
-            src = src.split("#[cfg(test)]\nmod tests")[0]
-            for m in CALL.finditer(src):
-                pats.add(pattern(literal(m.group(1))))
+    for f in glob.glob(os.path.join(CRATES, "**", "*.rs"), recursive=True):
+        rel = os.path.relpath(f, ROOT)
+        if "/tests/" in rel or rel.endswith("tests.rs") or "/benches/" in rel:
+            continue
+        src = open(f, encoding="utf-8").read()
+        # Drop #[cfg(test)] modules (test-only answers).
+        src = src.split("#[cfg(test)]\nmod tests")[0]
+        pats.update(pattern(t) for t in texts(src))
     return HEADER + "".join(p + "\n" for p in sorted(pats))
 
 
