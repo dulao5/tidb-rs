@@ -1475,10 +1475,13 @@ fn prepared_without_admissible_schema_lease() {
     assert_eq!(rows(&res).map(|r| r.0), Some(3));
     assert!(p.log.contains(&"execute 1".to_owned()));
     assert!(script.lock().unwrap().log.is_empty());
-    // New-only.
+    // New-only: 1235, counted with the schema lease as its reason.
+    super::trace::enable();
+    let conn = 7_000_475;
     let mut p = poc();
     p.prepare_fails = true;
     let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    r.set_connection_id(conn);
     script.lock().unwrap().version = Some(1);
     script.lock().unwrap().prepare = Some(Answer::Rows);
     block_on(r.prepare(&mut p, 1, POINT)).unwrap();
@@ -1490,6 +1493,17 @@ fn prepared_without_admissible_schema_lease() {
         "{}",
         e.message
     );
+    let last = super::trace::get(conn);
+    assert_eq!(
+        (last.engine, last.reason.as_str()),
+        (NOWHERE, "schema_lease")
+    );
+    // Once the lease is admissible again, the same statement runs on the new stack: no
+    // re-PREPARE.
+    p.schema_version = Some(1);
+    script.lock().unwrap().answer = Some(Answer::Rows);
+    let res = block_on(r.execute(&mut p, 1, vec![]));
+    assert_eq!(rows(&res).map(|r| r.0), Some(1));
 }
 
 /// Lucky (#235): the router checks that the new session is idle before it tries a statement

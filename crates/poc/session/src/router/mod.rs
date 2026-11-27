@@ -984,19 +984,25 @@ impl Router {
                 }
             }
             Some(Owner::New { new_id }) => {
+                // The metric's reason: the schema lease's like its other routes; any other
+                // step-0 condition is counted as `session`, as before.
                 let why = match self.session_condition(poc) {
-                    Some(c) => Some(format!("session condition: {c}")),
+                    Some(c) => Some((Reason::Session(c), format!("session condition: {c}"))),
                     None => match self.schema_check(poc) {
-                        Err(Reason::SchemaLease) => {
-                            Some("the schema lease is not admissible".to_owned())
-                        }
-                        Err(_) => Some("InfoSchema versions differ".to_owned()),
+                        Err(Reason::SchemaLease) => Some((
+                            Reason::SchemaLease,
+                            "the schema lease is not admissible".to_owned(),
+                        )),
+                        Err(_) => Some((
+                            Reason::Session("schema version"),
+                            "InfoSchema versions differ".to_owned(),
+                        )),
                         Ok(()) => None,
                     },
                 };
                 self.cursor = false;
-                if let Some(why) = why {
-                    self.note(NOWHERE, "session");
+                if let Some((reason, why)) = why {
+                    self.note(NOWHERE, reason.label());
                     return self.fail(nothing_to_fall_back(&why));
                 }
                 poc.begin_command();

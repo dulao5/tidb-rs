@@ -210,9 +210,10 @@ struct State {
     /// The ported domain's (the new stack's) last reload failed, and none has succeeded
     /// since.
     ported_reload_failed: bool,
-    /// Why [`Registry::new_stack_schema_version`] last kept statements off the new stack
-    /// (`None`: it did not), so that the switch is logged once each way.
-    new_stack_paused: Option<&'static str>,
+    /// Whether [`Registry::new_stack_schema_version`] last kept statements off the new
+    /// stack, so that each switch between paused and running is logged once (a change of
+    /// the reason while paused is not a switch).
+    new_stack_paused: bool,
 }
 
 /// Counters for tests and logs.
@@ -229,6 +230,9 @@ pub struct SyncStats {
     pub reloads: u64,
     /// `all_schema_by_job_versions` reports written.
     pub mdl_reports: u64,
+    /// Switches of the new stack from running to paused
+    /// ([`Registry::new_stack_schema_version`]; each one is logged).
+    pub new_stack_pauses: u64,
 }
 
 /// Shared schema-sync state.
@@ -361,7 +365,7 @@ impl Registry {
                 entries: HashMap::new(),
                 next_id: 0,
                 ported_reload_failed: false,
-                new_stack_paused: None,
+                new_stack_paused: false,
             }),
             invalidated: AtomicU64::new(0),
             admitted: AtomicU64::new(0),
@@ -452,17 +456,20 @@ impl Registry {
                 .ok_or("no schema loaded"),
         };
         let paused = r.err();
-        let switched = state.new_stack_paused != paused;
-        state.new_stack_paused = paused;
+        let switched = state.new_stack_paused != paused.is_some();
+        state.new_stack_paused = paused.is_some();
         let loaded = state.schema.as_ref().map_or(0, |s| s.version());
         drop(state);
         if switched {
             match paused {
-                Some(reason) => warn!(
-                    reason,
-                    loaded_version = loaded,
-                    "schema lease is not admissible, statements go to the PoC instead of the new stack"
-                ),
+                Some(reason) => {
+                    self.count(|s| s.new_stack_pauses += 1);
+                    warn!(
+                        reason,
+                        loaded_version = loaded,
+                        "schema lease is not admissible, statements go to the PoC instead of the new stack"
+                    );
+                }
                 None => info!(
                     loaded_version = loaded,
                     "schema lease is admissible again, statements go to the new stack"
@@ -761,6 +768,7 @@ mod tests {
         let r = Registry::new(limits());
         r.install(schema(10), t0);
         assert_eq!(r.new_stack_schema_version(t0), Err("not registered"));
+        assert_eq!(r.stats().new_stack_pauses, 1);
         // Healthy.
         let r = healthy(t0);
         assert_eq!(r.new_stack_schema_version(t0), Ok(10));
@@ -791,6 +799,9 @@ mod tests {
             r.new_stack_schema_version(t0 + 5 * S),
             Err("not registered")
         );
+        // Three pauses of this registry (the lease, the ported reload, deregistering), each
+        // logged once.
+        assert_eq!(r.stats().new_stack_pauses, 3);
         // The etcd lease is gone.
         let r = healthy(t0);
         let epoch = r.lock().epoch;
@@ -799,6 +810,38 @@ mod tests {
             r.new_stack_schema_version(t0),
             Err("etcd lease not proven alive")
         );
+    }
+
+    /// One outage is one switch to paused, however often the reason changes during it
+    /// (here the schema lease runs out first, then the node deregisters), and however many
+    /// statements ask.
+    #[test]
+    fn new_stack_pause_is_counted_once_per_outage() {
+        let t0 = Instant::now();
+        let r = healthy(t0);
+        assert_eq!(r.new_stack_schema_version(t0), Ok(10));
+        r.cycle_completed(t0 + 4 * S);
+        for _ in 0..3 {
+            assert_eq!(
+                r.new_stack_schema_version(t0 + 5 * S),
+                Err("schema lease expired")
+            );
+        }
+        assert!(r.deregister());
+        assert_eq!(
+            r.new_stack_schema_version(t0 + 5 * S),
+            Err("not registered")
+        );
+        assert_eq!(r.stats().new_stack_pauses, 1);
+        // Recovery, then a second outage.
+        r.registered(t0 + 6 * S, t0 + 96 * S);
+        r.reloaded(tso(6.0), t0 + 6 * S, 10, false);
+        r.cycle_completed(t0 + 6 * S);
+        assert_eq!(r.new_stack_schema_version(t0 + 6 * S), Ok(10));
+        assert_eq!(r.stats().new_stack_pauses, 1);
+        r.ported_reloaded(false);
+        assert!(r.new_stack_schema_version(t0 + 6 * S).is_err());
+        assert_eq!(r.stats().new_stack_pauses, 2);
     }
 
     #[test]
