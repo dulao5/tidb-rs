@@ -410,6 +410,12 @@ impl<'ast> PlanBuilder<'ast> {
         match self.check_col_priv {
             CheckSelectColumnPrivOption::ReportTableErrOption => {
                 for col_name in column_visited {
+                    // R32 (D5 option A): hidden `_tidb_rowid` requires full-table SELECT (`column = ""`).
+                    let check_col = if col_name.name == tidb_model::ExtraHandleName.l {
+                        ""
+                    } else {
+                        &col_name.name
+                    };
                     let err = ErrTableaccessDenied.fast_gen_by_args(vec![
                         gs("SELECT"),
                         gs(user),
@@ -421,13 +427,20 @@ impl<'ast> PlanBuilder<'ast> {
                         SelectPriv.0,
                         &col_name.schema,
                         &col_name.table,
-                        &col_name.name,
+                        check_col,
                         Some(err),
                     );
                 }
             }
             _ => {
                 for col_name in column_visited {
+                    // R32 (D5 option A): hidden `_tidb_rowid` requires full-table SELECT (`column = ""`)
+                    // while reporting `1143 for column '_tidb_rowid' in table '...'` for partial-column users.
+                    let check_col = if col_name.name == tidb_model::ExtraHandleName.l {
+                        ""
+                    } else {
+                        &col_name.name
+                    };
                     let err = ErrColumnaccessDenied.fast_gen_by_args(vec![
                         gs("SELECT"),
                         gs(user),
@@ -440,7 +453,7 @@ impl<'ast> PlanBuilder<'ast> {
                         SelectPriv.0,
                         &col_name.schema,
                         &col_name.table,
-                        &col_name.name,
+                        check_col,
                         Some(err),
                     );
                 }

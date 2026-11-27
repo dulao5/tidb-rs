@@ -5896,6 +5896,7 @@ impl<'ast> PlanBuilder<'ast> {
                 names.push(Arc::new(FieldName {
                     db_name: db_name.clone(),
                     tbl_name: table_info.name.clone(),
+                    orig_tbl_name: table_info.name.clone(),
                     col_name: ExtraHandleName.clone(),
                     orig_col_name: ExtraHandleName.clone(),
                     ..FieldName::default()
