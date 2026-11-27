@@ -3603,7 +3603,7 @@ fn multi_group_table_reader_fallback_leaves_stmt_ctx_untouched() {
     );
     assert!(block_on(b.build(&mut s.core, Some(plan))).is_none());
     let err = b.err.expect("executor boundary error");
-    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+    assert_eq!(blocked_by(&err), Some("D07.3"), "{err}");
     assert_eq!(s.vars().stmt_ctx().warning_count(), warnings_before);
     assert_eq!(s.vars().stmt_ctx().related_table_ids, table_ids_before);
     assert_eq!(
@@ -3615,7 +3615,7 @@ fn multi_group_table_reader_fallback_leaves_stmt_ctx_untouched() {
     assert!(s.is_idle(), "{}", s.state_snapshot());
 
     let err = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
-    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+    assert_eq!(blocked_by(&err), Some("D07.3"), "{err}");
     assert!(s.is_idle(), "{}", s.state_snapshot());
 }
 

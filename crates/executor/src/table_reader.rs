@@ -1532,7 +1532,11 @@ mod tests {
             false,
         );
         // Verify GetNetDataSize and GetAvgRowSize on PhysicalTableReader (D10.1 / D10.5).
-        let avg_row_size = plan.get_avg_row_size(&s.vars);
+        let expr_ctx = s.get_expr_ctx();
+        let avg_row_size = {
+            let pctx = tidb_planner::planctx::PlanCtx::new(&mut s.vars, expr_ctx);
+            plan.get_avg_row_size(&pctx)
+        };
         assert!(avg_row_size > 0.0);
         assert!((plan.get_net_data_size(&s.vars) - 100.0 * avg_row_size).abs() < 1e-9);
 
