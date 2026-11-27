@@ -77,12 +77,13 @@ fn runtime_stall_and_panic_logs_match_real_encoder_whole_line() {
     };
     let log_sink = Arc::clone(&sink);
     tidb_log::init_logger_with_sinks(&cfg, "", log_sink, None).unwrap();
+    let prev_hook = std::panic::take_hook();
     tidb_log::set_panic_hook();
 
     let rt = Runtime::new(RuntimeConfig {
         worker_threads: 1,
         slice: SliceConfig {
-            stall_threshold: Duration::from_millis(20),
+            stall_threshold: Duration::from_millis(80),
             classify_stalls: true,
             ..SliceConfig::default()
         },
@@ -90,13 +91,13 @@ fn runtime_stall_and_panic_logs_match_real_encoder_whole_line() {
     })
     .unwrap();
     let pool = rt.pool().clone();
-    rt.block_on(async move {
+    let panic_res = rt.block_on(async move {
         pool.spawn("test-log-stall", async {
-            std::thread::sleep(Duration::from_millis(60));
+            std::thread::sleep(Duration::from_millis(140));
         })
         .await
         .unwrap();
-        let h = pool.spawn_with_recover(
+        pool.spawn_with_recover(
             "test-log-panic",
             async {
                 if std::hint::black_box(true) {
@@ -104,26 +105,51 @@ fn runtime_stall_and_panic_logs_match_real_encoder_whole_line() {
                 }
             },
             |_| {},
-        );
-        assert_eq!(h.await.unwrap(), None);
+        )
+        .await
+        .unwrap()
     });
+    // Restore the test harness panic hook before assertions so any failure prints normally.
+    std::panic::set_hook(prev_hook);
+    assert_eq!(panic_res, None);
 
     let out = String::from_utf8(sink.take()).unwrap();
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 2, "expected 2 structured log lines:\n{out}");
+
+    // Symbolizing a debug backtrace inside `test-log-panic` on a busy CI VM can itself exceed
+    // `stall_threshold`; allow an optional stall warning for `test-log-panic` while still
+    // asserting zero unexpected lines.
+    let stall_lines: Vec<&&str> = lines
+        .iter()
+        .filter(|l| l.contains("[task=test-log-stall]"))
+        .collect();
+    let panic_lines: Vec<&&str> = lines
+        .iter()
+        .filter(|l| l.contains("[\"panic in the recoverable goroutine\"]"))
+        .collect();
+    for line in &lines {
+        assert!(
+            line.contains("[task=test-log-stall]")
+                || line.contains("[task=test-log-panic]")
+                || line.contains("[\"panic in the recoverable goroutine\"]"),
+            "unexpected log line:\n{out}"
+        );
+    }
+    assert_eq!(stall_lines.len(), 1, "expected 1 stall log:\n{out}");
+    assert_eq!(panic_lines.len(), 1, "expected 1 panic log:\n{out}");
 
     // 1. Stall warning (tidb-rs-only): verify real encoder quoting and Go duration formatting.
-    let stall = normalize_field(&normalize_caller(lines[0]), "elapsed", "<DUR>");
+    let stall = normalize_field(&normalize_caller(stall_lines[0]), "elapsed", "<DUR>");
     let stall = normalize_field(&stall, "cause", "<CAUSE>");
     assert_eq!(
         stall,
-        "[WARN] [slice.rs:<LINE>] [\"poll stall: a task ran without yielding\"] [cause=<CAUSE>] [task=test-log-stall] [elapsed=<DUR>] [threshold=20ms]"
+        "[WARN] [slice.rs:<LINE>] [\"poll stall: a task ran without yielding\"] [cause=<CAUSE>] [task=test-log-stall] [elapsed=<DUR>] [threshold=80ms]"
     );
 
     // 2. Recoverable goroutine panic (Go pkg/util/misc.go:95 WithRecovery):
     //    exact whole-line match including `["stack trace"="<STACK>"]` with non-empty frames.
     assert_eq!(
-        normalize_stack_trace(lines[1]),
+        normalize_stack_trace(panic_lines[0]),
         "[ERROR] [pool.rs:<LINE>] [\"panic in the recoverable goroutine\"] [r=\"boom for the log\"] [\"stack trace\"=\"<STACK>\"]"
     );
 }

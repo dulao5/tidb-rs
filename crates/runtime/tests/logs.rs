@@ -48,16 +48,19 @@ fn stall_and_panic_are_logged_through_structured_log() {
     let structured: &'static TestStructuredLogger =
         Box::leak(Box::new(TestStructuredLogger(buf.clone())));
     let _ = tidb_base::structured_log::register_logger(structured);
-    std::panic::set_hook(Box::new(|_| {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
         if current_panic_mode() == PanicMode::CaptureBacktrace {
             store_recovered_backtrace(format_backtrace_string(&Backtrace::force_capture()));
+        } else {
+            prev(info);
         }
     }));
 
     let rt = Runtime::new(RuntimeConfig {
         worker_threads: 1,
         slice: SliceConfig {
-            stall_threshold: Duration::from_millis(20),
+            stall_threshold: Duration::from_millis(80),
             classify_stalls: true,
             ..SliceConfig::default()
         },
@@ -67,7 +70,7 @@ fn stall_and_panic_are_logged_through_structured_log() {
     let pool = rt.pool().clone();
     rt.block_on(async move {
         pool.spawn("test-log-stall", async {
-            std::thread::sleep(Duration::from_millis(60));
+            std::thread::sleep(Duration::from_millis(140));
         })
         .await
         .unwrap();
@@ -84,19 +87,41 @@ fn stall_and_panic_are_logged_through_structured_log() {
     });
     let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 2, "expected 2 structured log lines:\n{out}");
+
+    // Symbolizing a debug backtrace inside `test-log-panic` on a busy CI VM can itself exceed
+    // `stall_threshold`; allow an optional stall warning for `test-log-panic` while still
+    // asserting zero unexpected lines.
+    let stall_lines: Vec<&&str> = lines
+        .iter()
+        .filter(|l| l.contains("[task=Str(\"test-log-stall\")]"))
+        .collect();
+    let panic_lines: Vec<&&str> = lines
+        .iter()
+        .filter(|l| l.starts_with("[ERROR] [panic in the recoverable goroutine]"))
+        .collect();
+    for line in &lines {
+        assert!(
+            line.contains("[task=Str(\"test-log-stall\")]")
+                || line.contains("[task=Str(\"test-log-panic\")]")
+                || line.starts_with("[ERROR] [panic in the recoverable goroutine]"),
+            "unexpected log line:\n{out}"
+        );
+    }
+    assert_eq!(stall_lines.len(), 1, "expected 1 stall log:\n{out}");
+    assert_eq!(panic_lines.len(), 1, "expected 1 panic log:\n{out}");
+
     assert!(
-        lines[0].starts_with("[WARN] [poll stall: a task ran without yielding] [cause=Str(")
-            && lines[0].contains("[task=Str(\"test-log-stall\")] [elapsed=Duration(")
-            && lines[0].ends_with("[threshold=Duration(20000000)]"),
+        stall_lines[0].starts_with("[WARN] [poll stall: a task ran without yielding] [cause=Str(")
+            && stall_lines[0].contains("[task=Str(\"test-log-stall\")] [elapsed=Duration(")
+            && stall_lines[0].ends_with("[threshold=Duration(80000000)]"),
         "unexpected stall log line: {}",
-        lines[0]
+        stall_lines[0]
     );
     let prefix = "[ERROR] [panic in the recoverable goroutine] [r=Str(\"boom for the log\")] [stack trace=Str(\"";
-    let stack_body = lines[1]
+    let stack_body = panic_lines[0]
         .strip_prefix(prefix)
         .and_then(|s| s.strip_suffix("\")]"))
-        .unwrap_or_else(|| panic!("unexpected panic log line: {}", lines[1]));
+        .unwrap_or_else(|| panic!("unexpected panic log line: {}", panic_lines[0]));
     assert!(
         !stack_body.is_empty() && stack_body.contains("\\n"),
         "expected non-empty captured stack trace: {stack_body:?}"
