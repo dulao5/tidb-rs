@@ -2,7 +2,7 @@
 
 tidb-rs is a function-by-function port of Go TiDB **v8.5.8** (`8b857efa2`). By default it behaves exactly like v8.5.8, including its bugs. This page lists the places where a user can see different behavior. Internal deviations that cannot be observed through SQL or the wire protocol are recorded in each block's `specs/<block>/spec.md` §4, not here.
 
-Every row of the go-fix, deliberate-deviation, observability and plan cache tables below is also a ruling in the machine-readable divergence ledger [`docs/testing/rulings.toml`](testing/rulings.md) (id, approver, re-open trigger). Add a new deviation to both.
+Every row of the go-fix, deliberate-deviation, observability, plan cache and privilege-check tables below is also a ruling in the machine-readable divergence ledger [`docs/testing/rulings.toml`](testing/rulings.md) (id, approver, re-open trigger). Add a new deviation to both.
 
 ## Upstream fixes ported from TiDB master (go-fix)
 
@@ -47,6 +47,17 @@ tidb-rs has only the instance-level plan cache, shared by all sessions; Go's ses
 Implemented so far (first stage): prepared statements whose plan runs on the new stack (point gets by primary key or unique index; the plans of table reads are cached but their executor is not ported yet). Statements answered by the prototype use no plan cache (`@@last_plan_from_cache` is 0 after them). The global values of these variables cannot be changed on tidb-rs yet (`SET GLOBAL` does not reach the new stack, it uses the compiled defaults).
 
 The eviction period of the instance plan cache is the same as Go v8.5.8: fixed at 30 seconds, no variable (owner decision, 2026-11-23). The 30 seconds is the period of the check (which evicts the least recently used entries only when the cache is over its soft limit), not a lifetime: there is no per-entry TTL.
+
+## Privilege checks (D04.1, decided, not yet implemented)
+
+Owner decisions of 2026-11-26 ([#438](https://github.com/dulao5/tidb-rs/issues/438)); design in [`specs/D04.1-privilege/spec.md`](../specs/D04.1-privilege/spec.md) §5 and §6. Privilege enforcement will take effect when block `D04.1` (`tidb-privilege`) is ported.
+
+| Area | v8.5.8 behavior | tidb-rs behavior | Reason |
+|---|---|---|---|
+| Table-level `SELECT` check on queries without column references (R29) | `buildDataSource` and `buildMemTable` register no `SelectPriv`; only referenced columns and lowercase `"count"` are checked. Users without `SELECT` on `t` can run `SELECT 1`, uppercase `COUNT(*)`, `SUM(1)`, `EXISTS(SELECT 1 ...)`, unreferenced-column joins/CTEs/unions, `EXPLAIN` / `EXPLAIN ANALYZE SELECT 1`, `INSERT ... SELECT 1`, `CREATE VIEW ... AS SELECT 1`, and view queries without caller grant on the view; secondary-unique-index `PointGet` `IsTableDual` overflow also skips `WHERE` column checks. | Always-on table-read `SelectPriv` (`column = "*"`, satisfied by global/db/table `SELECT` or `SELECT(col)` on at least one column) registered at every data-source, memtable, view, and `PointGet` `SELECT` boundary, with **no compatibility switch**. Unauthorized queries fail with error `1142` (and `PREPARE -> REVOKE -> EXECUTE` re-checks the non-empty `visit_infos`). **Mixed-cluster note:** behind a shared load balancer with unpatched Go v8.5.8 nodes, an under-privileged account running these queries is rejected with `1142` by `tidb-rs` while allowed by Go v8.5.8; this divergence is explicitly accepted by the owner (2026-11-26). | Constitution article 1, item 2 (security exception); owner decision 2026-11-26 (D1 option A, R29, #438). |
+| Table-denied (`1142`) vs column-denied (`1143`) precedence (R30) | A user with zero `SELECT` privilege on `t` gets `1143` (`for column 'a' in table 't'`) on `SELECT a FROM t`, versus `1142` on `SELECT a FROM nosuch`, exposing table existence. | Table/view access (`1142`) is checked first (and before view expansion / `1356`). Users with no `SELECT` access on the table always receive `1142`; error `1143` is returned only when the user already has table read access (e.g. `SELECT(a)`) but lacks privilege on a specific column (e.g. `b`). | Closes the `1143` vs `1142` table-existence oracle; owner decision 2026-11-26 (D3 option A, R30, #438). |
+| Missing-table check on read statements (`1142` vs `1146`, R31) | `tableByName` checks `AllPrivMask` (`column = ""`) when a table does not exist, so a user holding non-`SELECT` grants (e.g. `INSERT ON test.*`) gets `1146 Table 'test.nosuch' doesn't exist` on `SELECT`. | Read statements check `SelectPriv` (`column = "*"`) on missing tables; users without read access always receive `1142` instead of `1146`. | Closes the `1146` missing-table enumeration oracle; owner decision 2026-11-26 (D4 option A, R31, #438). |
+| Reading hidden column `_tidb_rowid` (R32) | `buildDataSource` leaves `OrigTblName` empty on `_tidb_rowid`, so both zero-privilege and partial-column `SELECT(a)` users can read `_tidb_rowid`. | Reading `_tidb_rowid` requires full-table (or db/global) `SELECT` (`column = ""`). Zero-privilege users fail with `1142` (R30); partial-column `SELECT(a)` users fail with `1143` for column `_tidb_rowid`. | Prevents partial-column users from reading internal physical row IDs; owner decision 2026-11-26 (D5 option A, R32, #438). |
 
 ## New stack (first vertical slice) differences
 

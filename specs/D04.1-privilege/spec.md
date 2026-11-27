@@ -1,6 +1,6 @@
 # D04.1 权限检查：Go v8.5.8 SELECT 权限注册审计与 tidb-rs 系统性检查设计（spec）
 
-状态：草案（仅设计规格，对应 `dulao5/tidb-rs#438`，待项目负责人与团队评审；先于 D04.1 完整移植）。
+状态：已确认（仅设计规格，对应 `dulao5/tidb-rs#438`；§6.1 D1、D3、D4、D5 均已由项目负责人 `zhigang-du` 于 2026-11-26 决定并全选 A，裁定已登记至 `docs/testing/rulings.toml` `R29`–`R32` 与 `docs/compatibility.md`；先于 D04.1 完整移植）。
 
 块与依赖模块：主归属 D04.1（权限检查与认证，`layers.toml` 中规划为 `tidb-privilege`，rank 8）；跨模块落地于 `tidb-planner`（rank 13，包含 D09.0 预处理器与计划构建骨架、D09.1 SELECT 构建、D09.2 表达式改写、D09.13 优化器驱动、D10.8 点查快速路径、D13.1 计划缓存；写路径涉及不移植的 D09.15）。
 
@@ -236,7 +236,11 @@ Go TiDB 将需要检验的权限需求收集到 `PlanBuilder.visitInfo`（`[]vis
   - 凡未获任何 `t` 读权限（或只有 `INSERT`/`UPDATE` 等非 `SELECT` 权限）的用户，执行任何形式的不引用列查询（`SELECT 1`、`COUNT(*)`、`SUM(1)`、`EXISTS(...)`、`JOIN ... ON 1=1`）均直接被拒，报错 **`1142 (42000): SELECT command denied to user ... for table 't'`**；
   - 若查询同时引用了某具体列 `b`，表达式改写仍会登记 `(db, t, "b")` 并携带 `1143` 错误，使持有 `SELECT(a)` 的用户 `u_cola` 查 `b` 时仍精确保留 `1143`（`for column 'b'`），查 `SELECT *` 时保留 `1142`。
   - 注：实现 D04.1 的 `MatchColumns` 时必须严格沿用 Go `cache.go:1427-1434, 1556-1567` 的行为——将 `col == "*" && (record.ColumnPriv & SelectPriv > 0)` 写在逐条记录匹配条件内部（而不是先按表返回第一条 `UPDATE(a)` 记录后再判断 `SelectPriv`），避免当用户同时拥有 `UPDATE(a)` 和 `SELECT(b)` 时误判。
-- **`_tidb_rowid` 处理**：在 `build_data_source` 构建隐式 `_tidb_rowid` 的 `FieldName` 时（`logical_plan_builder.rs:2556-2562`），若按 Go 原样保持 `orig_tbl_name` 为空，零权限用户虽已被表读基线 `1142` 拦住，但仅有 `SELECT(a)` 的 `u_cola` 仍可读出 `_tidb_rowid`。若决定一并封堵（见 §6.1 D5），只需为 `_tidb_rowid` 补充 `orig_tbl_name = table_info.name.clone()`（或在 `precollect_col_names` 中对其要求整表 `column = ""` 或 `_tidb_rowid` 列权），即可确保 `u_cola` 无法越权读取隐含物理行号（同时确认此改动只改变权检，不影响 `OutputNames` 展示列名或列解析，因为 `ColName` 与 `TblName` 本就不变，需同步检查派生表/CTE 对 `OrigTblName` 的行为）。
+- **`_tidb_rowid` 处理（D5 A，负责人已定）**：读取隐藏列 `_tidb_rowid` **需要整表（或库级/全局）`SELECT` 权限**。在 `build_data_source` 构建隐式 `_tidb_rowid` 的 `FieldName` 时（`logical_plan_builder.rs:2556-2562`）补全归属表名 `orig_tbl_name = table_info.name.clone()`，并在 `precollect_col_names` 遇到 `_tidb_rowid` 时为其登记**整表级 `SelectPriv`（`column = ""`）**：
+  - 零权限用户（`u_none`、`u_ins`、`u_other`）先在表读基线条目（`column = "*"`）失败并报 **`1142`**（符合 D3 A）；
+  - 仅有部分列权限的用户（`u_cola`，`SELECT(a)`）通过表读准入后，因 `column = ""` 不匹配任何列级授权而在 `_tidb_rowid` 检查失败，报 **`1143`**（`for column '_tidb_rowid' in table 't'`，符合 D3 A 与 D5 A）；
+  - 拥有整表/库级/全局 `SELECT` 的用户（`u_tbl`）正常放行。
+  - 该改动只补全权检归属，不改变 `OutputNames` 展示列名或列解析（`ColName` 与 `TblName` 不变，实现时同步确认派生表/CTE 对 `OrigTblName` 的行为）。
 
 #### （2）数据源各类分支（基表、分区表、序列、内存表）
 
@@ -313,7 +317,7 @@ Go 的漏洞源于两处：清除了 `DEFINER` 内部权限且**漏记调用者�
 | **方案 A（即时入队，表读检查在先）** | 直接在 `build_data_source` 末尾/前置追加 `("*", 1142)`，`build_selection` / `build_projection` 的列条目 `("a", 1143)` 自然在其后 | **`1142`**（拒绝访问表 `t`） | **`1142`** | **`1143`**（通过了 `"*"`，在 `"b"` 失败） | **完全关闭神谕**：`SELECT a FROM t` 与 `SELECT a FROM nosuch` 均返回 **`1142`** | 对零权限用户访问实列，错误码从 Go 的 `1143` 变为 **`1142`**；`selectbuild` `vi` 切片首元素变为表读项（最符合 MySQL 8.0 逻辑与直观语义） |
 | **方案 B（后置/按表优先排布列检查）** | 表读 `"*"` 暂存，在 `build_select` 结束或由 `CheckPrivilege` 同表先检实列再检 `"*"`（仅在没有任何具体列校验时触发 `"*"` 的 `1142`） | **`1143`**（与 Go v8.5.8 保持一致） | **`1142`** | **`1143`** | **残余神谕**：无权限者查 `SELECT a FROM t` 得 `1143`，查 `SELECT a FROM nosuch` 得 `1142`，仍可枚举表名 | 保留了 `1,072` 条仅含 `1143` 查询的首个报错码，但逻辑绕弯、无法根除表名探测且依赖复杂的块级缓冲 |
 
-**分析结论**：从安全本质与 MySQL 规范一致度看，一个连表级及任意列读权限都没有的用户执行 `SELECT a FROM t`，根本问题在于“无权访问表 `t`”而不是“唯独缺列 `a` 的权限”，且方案 B 仍会通过 `1143` vs `1142` 泄露表存在性。方案 A 实现最简、表存在性完全不可探测、错误语义也最合理；需要负责人按宪章第九条 1(a) 就该用户可见错误码变更做出裁定（详见 §6.1 D3）。
+**分析结论**：从安全本质与 MySQL 规范一致度看，一个连表级及任意列读权限都没有的用户执行 `SELECT a FROM t`，根本问题在于“无权访问表 `t`”而不是“唯独缺列 `a` 的权限”，且方案 B 仍会通过 `1143` vs `1142` 泄露表存在性。方案 A 实现最简、表存在性完全不可探测、错误语义也最合理；**项目负责人已于 2026-11-26 裁定选 A（`zhigang-du`，详见 §6.1 D3 与 `rulings.toml` `R30`）**。
 
 #### 2. `collectPrivsForCount()` 补丁的去留（`expression_rewriter.rs`，`2440a7e` `:1085, :2044` / `#431` `:1137, :2096`）
 
@@ -326,68 +330,64 @@ Go 的漏洞源于两处：清除了 `DEFINER` 内部权限且**漏记调用者�
 
 `tidb-rs` 早期定位为与 Go TiDB v8.5.8 节点在同一集群并存的只读节点（`CLAUDE.md` 开头）：
 - **协议、元数据、存储与计算下推零变更**：`VisitInfo` 收集与 `CheckPrivilege` 完全发生在 SQL 节点本地内存中的规划校验阶段，不改动 `mysql.*` 授权系统表格式、不改动 DDL 语义、不改动 TiKV 编解码与 Coprocessor/TiFlash protobuf、不改动 MySQL 协议握手与结果包格式。混合集群可零迁移直接灰度上线或回滚。
-- **混合路由窗口下不同方案（D1 A / B / C）的具体影响**：
-  - **D1 选 A（常开修复）**：在 Go 节点与 `tidb-rs` 节点共挂于同一负载均衡器期间，同一欠权账号执行上述绕过 SQL（如 `u_other` 执行 `SELECT 1 FROM test.t` 或 `SELECT COUNT(*) FROM test.t`），请求落到未修复的 Go v8.5.8 节点会成功、落到 `tidb-rs` 节点会报 `1142`——同一账号+同一 SQL 会按负载均衡落点出现时而成功时而失败的路由漂移，直到业务补齐缺失的 `SELECT` 权限或下线未修复的 Go 节点。合规应用不受影响，但若线上存在隐含依赖“无权查 `SELECT 1` / `COUNT(*)` 成功”的监控/巡检脚本，混部期会间歇报错，需在 `docs/compatibility.md` 中明确预警。
-  - **D1 选 B（照 Go 原样保留漏洞）**：混合集群两侧表现一致、无负载均衡漂移，但 `tidb-rs` 节点同样长期开放所有越权读漏洞。
-  - **D1 选 C（修复但置于兼容性开关之后，默认值由负责人选定）**：例如提供系统变量开关控制数据源表读拦截（严格模式 vs Go 兼容模式）。若混部期默认兼容或允许运维按集群打开兼容开关，可在灰度与权限梳理期间消除负载均衡两侧分裂，待排查清理遗留欠权脚本后再统一切换为严格模式；若默认严格，则新集群开箱安全，同时为存在历史脚本的混部集群保留临时应急退路。代价是需维护双模式分支、开关文档与测试矩阵，并约定后续移除开关的生命周期。
+- **混合集群下的已知差异（D1 选 A，负责人已定：常开修复、不加兼容开关）**：
+  - 项目负责人已于 2026-11-26 裁定 **D1 选 A（常开修复，不增加任何兼容性开关；选项 B 与选项 C 均未采用）**。
+  - 在未修复的 Go TiDB v8.5.8 节点与 `tidb-rs` 节点共挂于同一负载均衡器期间，同一欠权账号执行上述绕过 SQL（如 `u_other` 执行 `SELECT 1 FROM test.t` 或 `SELECT COUNT(*) FROM test.t`），路由到 **`tidb-rs` 节点会被拒绝（报 `1142`）**、路由到**未修复的 Go v8.5.8 节点仍会放行**——直到业务补齐缺失的 `SELECT` 权限或下线未修复的 Go 节点。
+  - **该混合集群差异是项目负责人明确接受的已知差异**（`approver = zhigang-du`，`2026-11-26`），不设兼容开关或降级回退模式；已在 `docs/compatibility.md` 与 `docs/testing/rulings.toml`（`R29`）中公开记录并预警（合规应用不受影响，仅依赖 Go 越权漏洞的欠权脚本需先补齐授权）。
 
 #### 4. `govec` 向量与偏差台账 `docs/testing/rulings.toml` 影响
 
 - **`govec` 向量冲击**：
   - `selectbuild`：在本分支基线（`2440a7e`：1,743 条，其中 1,539 条带 `vi`）上，涉及基表扫描的 **1,527 条**记录（`1,499` 非空 + `28` 原为空 `vi` 的基表查询）会在 `vi` 中新增对应基表的 `("*", 1142)` 条目，而其余 12 条 `SELECT 1` / `FROM dual` / 常数 CTE / 常数派生表仍保持 `vi: []`。在合入 `#431` 后的 `origin/main`（`63adf55`：2,449 条，其中 2,139 条带 `vi`）上，共 **2,119 条**记录（`2,087` 非空 + `32` 原为空 `vi` 的基表查询，其中含 4 条大写 `COUNT(*)`；另有 2 条小写 `count(*)` 原 `star_vi` 合并入单点条目）会体现基表 `("*", 1142)`，其余 20 条非基表查询仍保持 `vi: []`。在未通过上游补丁方式重新生成对照向量前，`crates/planner/tests/govec_selectbuild.rs` 不能直接用 `&got == out` 全等断言，而应采用类似 `govec_rewrite.rs` 的 `KNOWN_*` 结构化归一化辅助（按已定 spec 精确滤除 Go 缺失的基表 `"*"` 项后比对其余计划、标志与 `visitInfo`），或按 `docs/compatibility.md` `go-fix` 流程生成补丁版参照向量。
   - `rewrite`（2,392 条）：由于使用假 `TableDual` 且 `star_vi = 0`，不受影响。
-- **`docs/testing/rulings.toml` 登记计划**：
-  - 按宪章第一条 2 与 `docs/testing/rulings.md` §1，任何面向 SQL 用户可见的行为差异（`SELECT 1` / `COUNT(*)` / `_tidb_rowid` 拒止、`EXPLAIN` 拒止、视图校验加严、缺表探测收敛、`SELECT a` 错误码如从 `1143` 变为 `1142`）在 `D04.1` 实际接线生效时，均须在 `rulings.toml` 中按顺序新建裁定（本分支快照 `2440a7e` 停在 `R26`，但 `origin/main` `#431` 已占用了 `R27`，因此后续基于 `main` 顺延编号为 **`R28+`**）：
-    - `class = "divergence"`（宪章第一条 2 安全例外），`plane = "error"`；
-    - 初期若 `ab` 端到端对比尚无专门多用户权限 workload，则设 `layer = "none"` 并通过 `test` 字段绑定 Rust 集成测试名；接入权限集成测试或 workload 后切换为对应 `layer` 与匹配规则；
-    - 写入本 spec 评审结论、复现对照与关联的 `upstream-pitfall` issue，并在 `docs/compatibility.md` 同步列明混合集群注意事项。
+- **`docs/testing/rulings.toml` 登记状态**：
+  - 按宪章第一条 2 与 `docs/testing/rulings.md` §1，D1、D3、D4、D5 四项负责人已决定的用户可见行为差异（顺延于 `#431` 的 `R27` 与 `#439` 的 `R28` 之后）已直接登记为 **`R29`–`R32`**（`class = "divergence"`，`plane = "error"`，`layer = "none"`，`approver = "zhigang-du"`，`approved = "2026-11-26"`，已决定、未实现），并同步写入 `docs/compatibility.md`（关联 `upstream-pitfall` + `go-bug-fixed` issue `#438`）；
+  - 待 `D04.1` 实际接线生效后，为 `R29`–`R32` 补填 `test` 字段绑定 Rust 集成测试名，如接入多用户权限 `ab` workload 命中则同步切换为对应 `layer` 与匹配规则。
 
 ---
 
 ## 6. 决策点（严格按宪章第九条划分）
 
-### 6.1 需要负责人决定（宪章第九条 1）
+### 6.1 负责人已定（宪章第九条 1）
 
-以下 **4 个问题**（D1、D3、D4、D5；原 D2 属跟随 Go 已有检查路径的既有规则，已按维护者决议移入 §6.2 第 1 项，保留原编号以便评审追踪）涉及**长期保留、用户可见的与 Go v8.5.8 不同的权限行为与错误码**，按宪章第九条 1(a) 及第九条 4，全部提请项目负责人拍板：
+以下 **4 个问题**（D1、D3、D4、D5；原 D2 属跟随 Go 已有检查路径的既有规则，已按维护者决议移入 §6.2 第 1 项，保留原编号以便评审追踪）涉及**长期保留、用户可见的与 Go v8.5.8 不同的权限行为与错误码**，按宪章第九条 1(a) 及第九条 4，**四条均已由项目负责人 `zhigang-du` 于 2026-11-26 拍板定案（全选 A）**，并已登记至 `docs/testing/rulings.toml`（`R29`–`R32`）与 `docs/compatibility.md`：
 
-#### D1：是否全面修复 Go v8.5.8 遗漏的 `SELECT` 表级读权限校验，以及如何处理混合集群过渡窗口（宪章第一条 2 安全例外）
+#### D1：是否全面修复 Go v8.5.8 遗漏的 `SELECT` 表级读权限校验及混合集群策略（宪章第一条 2 安全例外）——负责人已定：A（2026-11-26）
 
 - **背景与分层泄露影响（基于本地 Go v8.5.8 实测）**：在 Go TiDB v8.5.8 中，当一条查询不引用表的真实列（如 `SELECT 1 FROM t`、大写 `SELECT COUNT(*) FROM t`、`SUM(1)`、`EXISTS(SELECT 1 FROM t)`、`t2 JOIN t ON 1=1`、常数 CTE、`EXPLAIN / EXPLAIN ANALYZE SELECT 1`、写权限用户跑 `INSERT INTO t2 SELECT 1 FROM t`、视图自身、隐藏列 `_tidb_rowid`，以及前述无列引用语句在 `PREPARE` 后因 `VisitInfos` 为空在 `REVOKE` 后继续放行）时，权限检查会漏防。按调用者既有权限分层，**实际新增泄露的内容并不相同**：
   - **对该表无任何权限的用户（`u_none(db=None)`、`u_other`）**：实测 `information_schema.TABLES` 返回 **0 行**（表完全不可见）。Go 漏洞向他们泄露了**表存在性、精确实时行数、`_tidb_rowid` 物理行号**，且具备他表写权时可通过 `INSERT ... SELECT` 将行数持久化写入他表。
   - **对该表已持有非 `SELECT` 表级权限的用户（如 `u_ins`，持 `INSERT, UPDATE ON test.t`）**：实测在 `ANALYZE TABLE test.t` 后，其查询 `information_schema.TABLES` **已经可见 `test.t` 并读出估算行数 `TABLE_ROWS = 3`**。因此对这类用户，本修复新增阻断的是**无需 `ANALYZE` 即可读取的精确实时行数**、**`_tidb_rowid` 物理行号**以及 `EXPLAIN ANALYZE` 真实执行详情，而非从零暴露表存在与近似行数。（注：持单列 `SELECT(a)` 的 `u_cola` 虽在 `I_S.TABLES` 不可见，但其本就有权读列 `a` 的全部行。）
-- **选项与混合集群影响**：
-  - **选项 A（系统性修复，常开，遵循宪章第一条 2 安全例外）** —— 在数据源、视图、内存表、快速点查入口统一校验 `SELECT` 权限；未授权用户执行上述所有语句均一律拒绝报错，并在 `docs/compatibility.md`、`rulings.toml` 与 `upstream-pitfall` issue 中登记差异。
-    - *混合集群影响*：在 Go v8.5.8 与 `tidb-rs` 共挂同一负载均衡器期间，同一欠权账号执行上述绕过 SQL 时，路由到 Go 节点成功、路由到 `tidb-rs` 节点报 `1142`（结果随后端落点变化，直到补齐授权或下线未修复 Go 节点）。
-  - **选项 B（照 Go v8.5.8 原样移植，bug-for-bug 一致）** —— 继续仅在列引用与小写 `count` 时校验。
-    - *混合集群影响*：Go 与 `tidb-rs` 节点行为完全一致、无路由漂移，但 `tidb-rs` 长期保留上述越权读漏洞。
-  - **选项 C（修复但置于兼容性开关之后，默认值由负责人指定：默认严格 / 混部期默认兼容 Go）** —— 同样实现完整的表读 `SelectPriv` 检查，但通过一个系统变量开关控制是否对无列引用数据源强制生效。
-    - *混合集群影响*：若选**“默认严格 + 可显式临时关闭兼容”**，新集群默认安全，混部集群如遇历史欠权脚本报错可由运维一键切至 Go 兼容模式平滑过渡；若选**“混部期默认兼容 Go + 显式开启严格”**，混部接入零抖动，待审计清理后再统一切换严格模式。代价是需在 `D04.1` 维护双模式分支与测试，并约定开关的退场计划。
-- **建议与理由**：强烈不建议选 B（对 `u_none` / `u_other` 构成明确的跨表/跨库零权限探测、精确行数与 `_tidb_rowid` 泄露及物化拷贝，符合宪章第一条 2 安全例外）。**在 A 与 C 之间**：若当前部署预期不需兼容依赖 Go 漏洞的遗留欠权脚本，**推荐选 A**（实现与运维最干净，无双模式复杂度）；若规划了与 Go v8.5.8 长期混部且需要平滑灰度窗口避免负载均衡两侧行为分裂，**推荐选 C（默认严格）**，既保证默认安全，又给混部窗口留出受控开关。
+- **选项**：
+  - **选项 A（已定：系统性修复，常开，不加兼容开关，遵循宪章第一条 2 安全例外）** —— 在数据源、视图、内存表、快速点查入口统一校验 `SELECT` 权限；未授权用户执行上述所有语句均一律拒绝报错（`1142`），**不增加任何兼容性开关**。
+    - *混合集群影响（负责人已接受）*：在未修复的 Go v8.5.8 节点与 `tidb-rs` 节点共挂同一负载均衡器期间，同一欠权账号执行上述绕过 SQL 时，落到 `tidb-rs` 节点报 `1142`、落到 Go 节点放行；该差异已由负责人明确接受为已知差异，登记于 `docs/compatibility.md`、`docs/testing/rulings.toml`（`R29`）及 `#438`（`go-bug-fixed`）。
+  - **选项 B（未采用）** —— 照 Go v8.5.8 原样移植、保留漏洞。
+  - **选项 C（未采用）** —— 将修复置于兼容性开关之后（负责人明确否决：不加兼容开关，避免双模式复杂度与安全降级入口）。
+- **结论**：**负责人已定：A（`zhigang-du`，2026-11-26）**。系统性修复，常开，不加兼容开关；混合集群下 `tidb-rs` 拒绝（`1142`）、未修复 Go 放行是负责人接受的已知差异（见 `R29`）。
 
-#### D3：完全无权限用户查询具体列（如 `SELECT a FROM test.t`）时，返回“表拒止 `1142`”还是保持 Go 的“列拒止 `1143`”
+#### D3：完全无权限用户查询具体列（如 `SELECT a FROM test.t`）时，返回“表拒止 `1142`”还是保持 Go 的“列拒止 `1143`”——负责人已定：A（2026-11-26）
 
 - **背景**：当用户对表 `t` **既无整表 `SELECT` 也没有任何一列的 `SELECT`**，却执行 `SELECT a FROM test.t` 时：
   - Go v8.5.8 实测报 **`1143`（`SELECT command denied ... for column 'a' in table 't'`）**；而查询不存在的表 `SELECT a FROM test.nosuch` 时实测报 **`1142`（`for table 'nosuch'`）**，由此造成**单靠错误码即可枚举某个表是否真实存在**的漏洞（按 MySQL 8.0 文档与授权模型推断应先报 `1142`，**未在本机 MySQL 8.0 实测验证**）。
 - **选项**：
-  - **选项 A（推荐）：先检表/视图读权限，统一报 `1142`（拒绝访问表/视图）** —— 数据源阶段登记的表级检查优先生效（视图场景下也在展开或 `DEFINER` 校验 `1356` 之前先检调用者视图 `SelectPriv`）。零权限用户查 `SELECT a FROM t`、`SELECT 1 FROM t`、`SELECT a FROM nosuch`（及无权查任意视图）全部统一报 `1142`，只在“已经通过表读准入（如拥有 `SELECT(a)`）但访问无权列 `b`”时才报 `1143`（据 MySQL 8.0 文档推断一致，**未在本机实测验证**，也更符合管理员直觉）。
-  - **选项 B：列/内层检查优先（维持零权限用户查实列时仍报 `1143`、查 `INVOKER` 视图仍报 `1356`）** —— 将表读检查放到列检查与视图内层之后执行，只有完全不引用任何列的查询（如 `SELECT 1 FROM t`）才触发 `1142`。
-- **建议与理由**：推荐选 **A**。选 B 虽能在“带列引用”的报错号上少一处与 Go 的表面差异，却故意保留了 `1143` vs `1142` 的表存在性探测神谕，且增加了检查顺序维护复杂度；选 A 一步到位封死探测缝隙，语义更一致。
+  - **选项 A（已定）：先检表/视图读权限，统一报 `1142`（拒绝访问表/视图）** —— 数据源阶段登记的表级检查优先生效（视图场景下也在展开或 `DEFINER` 校验 `1356` 之前先检调用者视图 `SelectPriv`）。零权限用户查 `SELECT a FROM t`、`SELECT 1 FROM t`、`SELECT a FROM nosuch`（及无权查任意视图）全部统一报 `1142`，**只有已经能访问表（如拥有 `SELECT(a)`）、但无权访问某具体列（如 `b`）时才报 `1143`**（据 MySQL 8.0 文档推断一致，**未在本机实测验证**）。
+  - **选项 B（未采用）** —— 列/内层检查优先（维持零权限用户查实列时仍报 `1143`、查 `INVOKER` 视图仍报 `1356`）。
+- **结论**：**负责人已定：A（`zhigang-du`，2026-11-26）**。统一先检查表，无表访问权报 `1142`；只有已能访问表、但无权访问某列时才报 `1143`（见 `R30`）。
 
-#### D4：是否同步修复预处理缺表检查过于宽松的问题（防止持有非 `SELECT` 权限的用户通过 `1146` 探测表是否存在）
+#### D4：是否同步修复预处理缺表检查过于宽松的问题（防止持有非 `SELECT` 权限的用户通过 `1146` 探测表是否存在）——负责人已定：A（2026-11-26）
 
 - **背景**：当用户在 `SELECT` 语句中引用一个**不存在的表**（如 `SELECT 1 FROM test.nosuch`）时，Go 的预处理器检查的是“用户对该表是否拥有**任意**权限（`AllPrivMask`）”而非“是否拥有 `SELECT` 权限”。实测表明，若用户只有 `GRANT INSERT ON test.*`（`u_db_ins`，没有任何 `SELECT` 权限），Go 对不存在的表会放行通过权限关卡并直接报错 **`1146 Table 'test.nosuch' doesn't exist`**，从而可借助 `SELECT` 枚举全库是否存在某张表（按 MySQL 8.0 文档推断，无 `SELECT` 权限者应对读语句返回 `1142` 而非 `1146`，**未在本机 MySQL 8.0 实测验证**）。
 - **选项**：
-  - **选项 A（推荐）：按当前语句实际需要的操作权限做缺表拦截** —— 对 `SELECT`（及 `EXPLAIN SELECT` 等只读语句）检查用户是否具备该表的读权限（与 §6.2 第 1 项已定的 `SelectPriv` + `"*"` 一致），不具备则返回 `1142` 而非 `1146`；DML 写语句按需检查对应写权限。
-  - **选项 B：保持 Go 现状（`AllPrivMask`，`column = ""`）** —— 维持 `u_db_ins` 在 `SELECT` 下仍看到 `1146`，并且仅拥有列权限 `u_cola` 查不存在表得 `1142`。
-- **建议与理由**：推荐选 **A**。既然通过 D1、D3 着力消除表存在性神谕，不应在 `tableByName` 中留下一个显式的 `INSERT -> 1146` 侧门。
+  - **选项 A（已定）：按当前语句实际需要的操作权限做缺表拦截** —— 对读语句（`SELECT`、`EXPLAIN SELECT` 等）按 `SELECT` 权限检查（与 §6.2 第 1 项已定的 `SelectPriv` + `"*"` 一致），无权一律报 `1142`（不报 `1146`）；DML 写语句按需检查对应写权限。
+  - **选项 B（未采用）** —— 保持 Go 现状（`AllPrivMask`，`column = ""`）。
+- **结论**：**负责人已定：A（`zhigang-du`，2026-11-26）**。读语句按 `SELECT` 权限检查，无权一律报 `1142`（不报 `1146`）（见 `R31`）。
 
-#### D5：仅有部分列权用户（如 `SELECT(a)`）是否可读取无整数/聚簇主键表的隐藏列 `_tidb_rowid`
+#### D5：仅有部分列权用户（如 `SELECT(a)`）是否可读取无整数/聚簇主键表的隐藏列 `_tidb_rowid`——负责人已定：A（2026-11-26）
 
-- **背景**：对于无整数主键且非聚簇主键（`!PKIsHandle && !IsCommonHandle`）的表，TiDB 有一个内部隐藏行号列 `_tidb_rowid`。Go v8.5.8 因遗漏设置它的归属表名，导致不仅零权限用户可直接读取 `_tidb_rowid`，即使将来通过 D1 拦截了零权限用户，在 §6.2 第 1 项已定采用 `column = "*"`（有任意列 `SELECT(a)` 即可通过表读准入）的前提下，只有 `SELECT(a)` 的用户依然可以执行 `SELECT _tidb_rowid FROM test.t` 与 `WHERE _tidb_rowid = 1`。
+- **背景**：对于无整数主键且非聚簇主键（`!PKIsHandle && !IsCommonHandle`）的表，TiDB 有一个内部隐藏行号列 `_tidb_rowid`。Go v8.5.8 因遗漏设置它的归属表名，导致不仅零权限用户可直接读取 `_tidb_rowid`，即使通过 D1 拦截了零权限用户，在 §6.2 第 1 项已定采用 `column = "*"`（有任意列 `SELECT(a)` 即可通过表读准入）的前提下，只有 `SELECT(a)` 的用户依然可以执行 `SELECT _tidb_rowid FROM test.t` 与 `WHERE _tidb_rowid = 1`。
 - **选项**：
-  - **选项 A（推荐）：非整表 `SELECT` 权限用户禁止访问 `_tidb_rowid`** —— 让 `_tidb_rowid` 也受列/表级权限约束（如补全归属表名触发 `1143`，或要求具备整表 `SELECT` 方可读物理行 ID）。
-  - **选项 B：仅拦截零权限用户，持有 `SELECT(a)` 的用户允许继续读取 `_tidb_rowid`** —— 保留 Go 对 `_tidb_rowid` 跳过列检查的逻辑。
-- **建议与理由**：推荐选 **A**。`_tidb_rowid` 是物理存储自增句柄而非列 `a` 的数据，未授权用户不应借单列授权获取全表真实行 ID 分布或做跨列隐蔽关联；实现改动极小且明确安全边界。
+  - **选项 A（已定）：读 `_tidb_rowid` 需要整表（或库级/全局）`SELECT` 权限** —— 补全 `_tidb_rowid` 归属表名并对其登记整表级 `SelectPriv`（`column = ""`）；仅持部分列 `SELECT(a)` 权限的用户禁止读取 `_tidb_rowid`（报 `1143` `for column '_tidb_rowid' in table 't'`），零权限用户由表读基线报 `1142`。
+  - **选项 B（未采用）** —— 仅拦截零权限用户，允许持有 `SELECT(a)` 的用户继续读取 `_tidb_rowid`。
+- **结论**：**负责人已定：A（`zhigang-du`，2026-11-26）**。读 `_tidb_rowid` 需要整表 `SELECT`（见 `R32`）。
 
 ---
 
@@ -401,25 +401,25 @@ Go 的漏洞源于两处：清除了 `DEFINER` 内部权限且**漏记调用者�
 4. **视图内部 `INVOKER` 报错统一归口**：`BuildDataSourceFromView`（后续 `D09.1` 第 2 部分）在 `len(saved_views) > 0` 时，让内层 `build_data_source` 生成的表读条目同样使用外层视图的 `ErrViewInvalid (1356)`，避免将底层基表名泄漏给有视图权却无底层权限的调用者；`DEFINER` 视图严格使用 `b.visit_info` 快照隔离后经 `request_verification_with_user` 检验再丢弃（顶层对无视图权限的调用者按 D3 处理）。
 5. **`PlanCacheStmt.visit_infos` 与实时重验接线**：在 `D13.1` 补回 `PlanCacheStmt.visit_infos` 保存与 `crates/planner/src/optimize.rs:602` 读取；`adjust_cached_plan -> check_prepared_priv` 每次命中都按当前会话 `ActiveRoles` 与最新 `PrivilegeManager` 重新执行 `visit_info4_priv_check + check_privilege`，并确保校验早于 `is_safe_to_reuse_point_get_executor`。
 6. **非盲弹的 `DELETE` / `UPDATE` 目标表豁免机制（供将来 `D09.15` 使用）**：不沿用脆弱的 `b.pop_visit_info()`，而以目标表上下文作用域标记精准豁免单表无读列 `DELETE`（如 `DELETE FROM t`）与单表无读列 `UPDATE`（如 `UPDATE t SET a = 1`）目标表自身的 `SelectPriv`，一旦进入 `WITH` CTE、多表 Join、`WHERE`、`ORDER BY`、`SET` 右值子查询即恢复正常表读登记，绝不破坏合法纯写权限或放行读侧探测。
-7. **在 `D04.1` 落地前维护既有边界桩**：`crates/planner/src/optimize.rs:490`、`plan_cache.rs:418`、`point_get_plan.rs:1242` 与 `preprocess.rs:756` 在 `tidb-privilege` 尚为规划中 crate（`blocked-by:D04.1`）期间保持边界接口契约不变；规划侧可先落地单点 `VisitInfo` 生成（`govec_selectbuild.rs` 通过明确的 spec 归一化表记录与 Go v8.5.8 差异），待 `D04.1` `PrivilegeManager` 合并后统一激活执行时拒止与 `rulings.toml` 台账 `R28+`。
+7. **在 `D04.1` 落地前维护既有边界桩**：`crates/planner/src/optimize.rs:490`、`plan_cache.rs:418`、`point_get_plan.rs:1242` 与 `preprocess.rs:756` 在 `tidb-privilege` 尚为规划中 crate（`blocked-by:D04.1`）期间保持边界接口契约不变；规划侧可先落地单点 `VisitInfo` 生成（`govec_selectbuild.rs` 通过明确的 spec 归一化表记录与 Go v8.5.8 差异），待 `D04.1` `PrivilegeManager` 合并后统一激活执行时拒止，并为已登记的 `rulings.toml` 台账 `R29`–`R32` 补填 `test` 字段。
 
 ---
 
 ## 7. 后续实施分解与验收清单
 
-spec 经负责人确认后，按块边界分批落地（不在本 spec-only PR 中改 Rust 代码）：
+spec 已由项目负责人确认（2026-11-26），按块边界分批落地（不在本 spec-only PR 中改 Rust 代码）：
 
 1. **Planning 层 `VisitInfo` 完善（隶属 `D09.1` / `D09.2` / `D10.8` 增量 PR）**：
-   - `build_data_source` 增加单点表读登记，修复 `_tidb_rowid` 归属（若 D5 选 A），补全 `point_get_plan::get_visit_info` 对 `SelectStmt` 的表读条目及 `is_table_dual` 的 `db_name` 传参，移除 `collect_privs_for_count`（按 §6.2 第 3 条），并按 §5.3 更新 `govec_selectbuild` 测试比对。
+   - `build_data_source` 增加单点表读登记，修复 `_tidb_rowid` 归属并按 D5 A 对其登记整表级 `SelectPriv`（`column = ""`），补全 `point_get_plan::get_visit_info` 对 `SelectStmt` 的表读条目及 `is_table_dual` 的 `db_name` 传参，移除 `collect_privs_for_count`（按 §6.2 第 3 条），并按 §5.3 更新 `govec_selectbuild` 测试比对。
 2. **计划缓存上下文补全（隶属 `D13.1` / `A3` 增量 PR）**：
    - `PlanCacheStmt` 新增 `visit_infos` 字段并更新 `optimize_exec_stmt` 的 `StmtCtx.tables` 收集，为 `D04.1` 准备非空预处理校验载荷；接入用户身份时同步补全 `new_plan_cache_key` 的 `(user_name, host_name)`。
 3. **权限管理器与执行校验接线（隶属 `D04.1` 主实现 PR）**：
    - 落地 `tidb-privilege`（`UserPrivileges`、`MySQLPrivilege`、基于 `catalog`/系统表的授权缓存），确保 `MatchColumns` 支持 `"*"` 遍历谓词语义及内存库规则（`information_schema` / `performance_schema` / `metrics_schema`）；
-   - 接通 `crates/planner/src/optimize.rs` (`CheckPrivilege`)、`preprocess.rs` (`table_by_name` 防探测)、`plan_cache.rs` (`check_prepared_priv` 每次命中实时重验) 与 `point_get_plan.rs` (`check_fast_plan_privilege`)；
+   - 接通 `crates/planner/src/optimize.rs` (`CheckPrivilege`)、`preprocess.rs` (`table_by_name` 防探测，按 D4 A)、`plan_cache.rs` (`check_prepared_priv` 每次命中实时重验) 与 `point_get_plan.rs` (`check_fast_plan_privilege`)；
    - 随未来 `D09.1` 第 2 部分（视图 `BuildDataSourceFromView`）、`D10.11`（内存表 `build_mem_table`）、`D09.16`（`EXPLAIN`）逐步补全对应分支。
 4. **验证与合规动作清单**：
    - 针对 Go v8.5.8 全部漏洞矩阵建立 SQL 级端到端回归测试（涵盖 `u_none(db=None)`、大写/混写聚合及非 `count` 聚合、`EXISTS`/`IN`/Join/CTE/视图嵌套/`CREATE VIEW ... AS SELECT 1`/`EXPLAIN ANALYZE`/`_tidb_rowid`/PointGet 溢出 `IsTableDual`/`PREPARE -> REVOKE/SET ROLE -> EXECUTE` 在实例缓存 ON/OFF 与 PointGet 复用下的即时撤权拦截、`test.nosuch` 缺表无神谕一致返回码，以及 `DELETE`-only / `UPDATE`-only 无读列纯写的正反回归）；
-   - 按宪章第一条 2 与 `CLAUDE.md` 开立英文 `upstream-pitfall` issue 汇总并复现 Go v8.5.8 缺陷，并在 `docs/testing/rulings.toml` 登记经负责人批准的 `divergence` 裁定条目（`R28+`，顺延于 `#431` 的 `R27` 之后）以及更新 `docs/compatibility.md`。
+   - `upstream-pitfall` issue `#438` 已标 `go-bug-fixed`，`docs/testing/rulings.toml`（`R29`–`R32`）与 `docs/compatibility.md` 已登记；待 `D04.1` 实现落地后为 `R29`–`R32` 补充 `test`（以及在 `ab` 命中时补充 `layer`/`unit`/`stmt`）并更新 `docs/compatibility.md` 的实现状态。
 
 ---
 
