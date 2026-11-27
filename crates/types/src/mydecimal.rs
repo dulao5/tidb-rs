@@ -2800,6 +2800,8 @@ pub fn new_dec_from_float_for_test(f: f64) -> MyDecimal {
             "error" => &err,
             "DecimalStr" => &dec_str,
         );
+        // Test-only helper: keep error detail in the panic message for test output; under
+        // `tidb_log::set_panic_hook` an uncaught call also logs the fatal panic record.
         panic!("encountered error: {err}, DecimalStr: {dec_str}");
     }
     dec
@@ -2817,6 +2819,8 @@ pub fn new_dec_from_string_for_test(s: &str) -> MyDecimal {
             "error" => &err,
             "DecimalStr" => s,
         );
+        // Test-only helper: keep error detail in the panic message for test output; under
+        // `tidb_log::set_panic_hook` an uncaught call also logs the fatal panic record.
         panic!("encountered error: {err}, DecimalStr: {s}");
     }
     dec

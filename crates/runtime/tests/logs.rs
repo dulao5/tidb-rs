@@ -1,11 +1,17 @@
 //! The runtime's structured warnings and panic recovery logs reach `tidb_base::structured_log`
-//! directly (D00.3 Batch 1). Own test binary: it installs the global structured logger.
+//! directly (D00.3 Batch 1). Own test binary: it installs the global structured logger and a
+//! `CaptureBacktrace` panic hook (mirrors `tidb_log::set_panic_hook`; full `tidb-log` text-encoder
+//! whole-line parity is covered by `crates/types/tests/runtime_log_parity.rs` since `tidb-runtime`
+//! and `tidb-log` share rank 1).
 
+use std::backtrace::Backtrace;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use tidb_base::errors::format_backtrace_string;
+use tidb_base::panic_guard::{PanicMode, current_panic_mode, store_recovered_backtrace};
 use tidb_base::structured_log::{LogLevel, LogRecord, LogTarget, StructuredLogger};
 use tidb_runtime::Runtime;
 use tidb_runtime::RuntimeConfig;
@@ -42,6 +48,11 @@ fn stall_and_panic_are_logged_through_structured_log() {
     let structured: &'static TestStructuredLogger =
         Box::leak(Box::new(TestStructuredLogger(buf.clone())));
     let _ = tidb_base::structured_log::register_logger(structured);
+    std::panic::set_hook(Box::new(|_| {
+        if current_panic_mode() == PanicMode::CaptureBacktrace {
+            store_recovered_backtrace(format_backtrace_string(&Backtrace::force_capture()));
+        }
+    }));
 
     let rt = Runtime::new(RuntimeConfig {
         worker_threads: 1,
@@ -81,8 +92,13 @@ fn stall_and_panic_are_logged_through_structured_log() {
         "unexpected stall log line: {}",
         lines[0]
     );
-    assert_eq!(
-        lines[1],
-        "[ERROR] [panic in the recoverable goroutine] [r=Str(\"boom for the log\")] [stack trace=Str(\"\")]"
+    let prefix = "[ERROR] [panic in the recoverable goroutine] [r=Str(\"boom for the log\")] [stack trace=Str(\"";
+    let stack_body = lines[1]
+        .strip_prefix(prefix)
+        .and_then(|s| s.strip_suffix("\")]"))
+        .unwrap_or_else(|| panic!("unexpected panic log line: {}", lines[1]));
+    assert!(
+        !stack_body.is_empty() && stack_body.contains("\\n"),
+        "expected non-empty captured stack trace: {stack_body:?}"
     );
 }

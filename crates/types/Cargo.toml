@@ -14,8 +14,12 @@ tidb-base = { workspace = true }
 tidb-parser = { workspace = true }
 
 [dev-dependencies]
-# Whole-line log parity golden tests for tidb-parser and tidb-types.
+# Whole-line log parity golden tests for rank 1-2 crates (tidb-parser, tidb-memory,
+# tidb-runtime, tidb-types): tidb-memory/tidb-runtime share rank 1 with tidb-log so their
+# real-encoder golden tests live here (rank 2 > rank 1, check_layers.py).
 tidb-log = { workspace = true }
+tidb-memory = { workspace = true }
+tidb-runtime = { workspace = true }
 # The govec replay tests read the JSON records (test code only; the crate's own JSON decoding
 # is tidb-base's port of Go encoding/json).
 serde_json = { workspace = true }
