@@ -26,12 +26,16 @@ tidb-metrics = { workspace = true }
 # The concurrent fetch of schema groups (errgroup).
 futures = { workspace = true }
 log = "0.4"
+# Structured (Go zap style) warnings of schema loading.
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 parking_lot = "0.12"
 # CIStr / FieldType of the test tables.
 tidb-parser = { workspace = true }
+# Captures the schema-loading warnings in a test.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [lints]
 workspace = true
