@@ -230,7 +230,10 @@ pub struct UserRecord {
     pub auth_plugin: String,
     pub account_locked: bool,
     pub password_expired: bool,
-    pub has_password_lifetime: bool,
+    /// `mysql.user.password_lifetime`: `None` (SQL `NULL`) inherits global
+    /// `default_password_lifetime`; `Some(0)` means `PASSWORD EXPIRE NEVER`; `Some(n)` (`n > 0`)
+    /// configures per-account expiration after `n` days.
+    pub password_lifetime: Option<u16>,
     pub has_failed_login_policy: bool,
 }
 
@@ -248,7 +251,7 @@ impl UserRecord {
             auth_plugin: "mysql_native_password".to_owned(),
             account_locked: false,
             password_expired: false,
-            has_password_lifetime: false,
+            password_lifetime: None,
             has_failed_login_policy: false,
         }
     }
@@ -286,10 +289,10 @@ impl UserRecord {
         self
     }
 
-    /// Sets whether `mysql.user.password_lifetime` configures a non-zero expiration window.
+    /// Sets `mysql.user.password_lifetime` (`None` = SQL `NULL`, `Some(0)` = NEVER, `Some(n)` = days).
     // glue: builder helper for password_lifetime
-    pub fn with_password_lifetime(mut self, has_lifetime: bool) -> Self {
-        self.has_password_lifetime = has_lifetime;
+    pub fn with_password_lifetime(mut self, lifetime: Option<u16>) -> Self {
+        self.password_lifetime = lifetime;
         self
     }
 
@@ -531,6 +534,8 @@ pub struct MySQLPrivilege {
     dynamic_priv: HashMap<String, Vec<DynamicPrivRecord>>,
     default_roles: HashMap<String, Vec<DefaultRoleRecord>>,
     role_graph: HashMap<RoleKey, RoleGraphEdgesTable>,
+    /// Cluster `@@global.default_password_lifetime` loaded from `mysql.global_variables` (0 = never).
+    default_password_lifetime: u64,
 }
 
 impl MySQLPrivilege {
@@ -538,6 +543,18 @@ impl MySQLPrivilege {
     // glue: constructor
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the cluster `default_password_lifetime` (days; `0` disables default expiration).
+    // glue: global variable helper
+    pub fn set_default_password_lifetime(&mut self, days: u64) {
+        self.default_password_lifetime = days;
+    }
+
+    /// Returns the cluster `default_password_lifetime` (days; `0` = never expires by default).
+    // glue: global variable helper
+    pub fn default_password_lifetime(&self) -> u64 {
+        self.default_password_lifetime
     }
 
     /// Appends a `mysql.user` record without sorting; caller must invoke [`Self::sort_all`].

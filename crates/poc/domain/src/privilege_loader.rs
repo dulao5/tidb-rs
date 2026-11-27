@@ -153,17 +153,27 @@ impl Inner {
 
     async fn watch_loop(self: Arc<Self>, pd_endpoints: Vec<String>) {
         let mut stop = self.stop.subscribe();
+        let mut backoff = Duration::from_secs(1);
+        const MAX_BACKOFF: Duration = Duration::from_secs(30);
         while !self.stopped() {
-            match self.watch_once(&pd_endpoints, &mut stop).await {
+            match self
+                .watch_once(&pd_endpoints, &mut stop, &mut backoff)
+                .await
+            {
                 Ok(()) => return,
                 Err(e) => {
-                    warn!(error = %e, "privilege etcd watch failed; retrying");
+                    warn!(
+                        error = %e,
+                        retry_in_secs = backoff.as_secs(),
+                        "privilege etcd watch failed; retrying with backoff"
+                    );
                 }
             }
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                _ = tokio::time::sleep(backoff) => {}
                 _ = stop.changed() => return,
             }
+            backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     }
 
@@ -171,6 +181,7 @@ impl Inner {
         &self,
         pd_endpoints: &[String],
         stop: &mut tokio::sync::watch::Receiver<bool>,
+        backoff: &mut Duration,
     ) -> Result<()> {
         let mut etcd = EtcdClient::connect(
             pd_endpoints,
@@ -201,6 +212,7 @@ impl Inner {
         if let Err(e) = self.reload().await {
             warn!(error = %e, "privilege reload on watch connect failed; keeping previous snapshot");
         } else {
+            *backoff = Duration::from_secs(1);
             self.reset_tick.notify_one();
         }
 
@@ -275,7 +287,8 @@ pub async fn load_privileges_from_kv(kv: &KvClient) -> Result<MySQLPrivilege> {
     let user_rows = scan_table_records(kv, ts, user_tbl.id).await?;
     decode_mysql_user(user_tbl, &user_rows, &mut mp)?;
 
-    // Remaining tables: load if present; fail the whole snapshot on decode/KV error.
+    // Remaining tables (7 privilege tables + `mysql.global_variables` for
+    // `default_password_lifetime`): load if present; fail the whole snapshot on decode/KV error.
     type DecoderFn = fn(&TableInfo, &[(Vec<u8>, Vec<u8>)], &mut MySQLPrivilege) -> Result<()>;
     for (name, decoder) in [
         ("global_priv", decode_mysql_global_priv as DecoderFn),
@@ -285,6 +298,7 @@ pub async fn load_privileges_from_kv(kv: &KvClient) -> Result<MySQLPrivilege> {
         ("global_grants", decode_mysql_global_grants),
         ("default_roles", decode_mysql_default_roles),
         ("role_edges", decode_mysql_role_edges),
+        ("global_variables", decode_mysql_global_variables),
     ] {
         match tables.get(name) {
             Some(tbl) => {
@@ -304,8 +318,31 @@ pub async fn load_privileges_from_kv(kv: &KvClient) -> Result<MySQLPrivilege> {
     Ok(mp)
 }
 
-/// Reads `TableInfo` entries under `mysql` DB metadata at `ts`. Fails hard on corrupted JSON
-/// table definitions rather than silently treating the table as missing.
+/// Lowercase names of `mysql.*` tables actually loaded by [`load_privileges_from_kv`].
+/// Unrelated `mysql.*` system tables (e.g. `stats_*`, `bind_info`) are skipped before full
+/// `TableInfo::unmarshal_json` so schema extensions on unrelated tables never break privilege sync.
+const LOADED_MYSQL_TABLES: &[&str] = &[
+    "user",
+    "global_priv",
+    "db",
+    "tables_priv",
+    "columns_priv",
+    "global_grants",
+    "default_roles",
+    "role_edges",
+    "global_variables",
+];
+
+fn peek_mysql_table_lower_name(raw: &[u8]) -> Option<String> {
+    let val: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    val.get("name")
+        .and_then(|n| n.get("L"))
+        .and_then(|s| s.as_str())
+        .map(str::to_lowercase)
+}
+
+/// Reads `TableInfo` entries for [`LOADED_MYSQL_TABLES`] under `mysql` DB metadata at `ts`.
+/// Fails hard on corrupted JSON for any target table rather than silently treating it as missing.
 async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String, TableInfo>> {
     let prefix = meta_keys::hash_data_prefix(&meta_keys::db_key(MYSQL_DB_ID));
     let range = KeyRange::new(prefix.clone(), meta_keys::prefix_next(&prefix));
@@ -318,13 +355,18 @@ async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String
         let Some(table_id) = meta_keys::parse_table_key(&field) else {
             continue;
         };
+        if let Some(lower_name) = peek_mysql_table_lower_name(&v)
+            && !LOADED_MYSQL_TABLES.contains(&lower_name.as_str())
+        {
+            continue;
+        }
         let mut t = TableInfo::default();
         t.unmarshal_json(&v).map_err(|e| {
             Error::Other(format!(
                 "corrupted TableInfo JSON in mysql meta (table_id={table_id}): {e}"
             ))
         })?;
-        if t.state == StatePublic {
+        if t.state == StatePublic && LOADED_MYSQL_TABLES.contains(&t.name.l.as_str()) {
             out.insert(t.name.l.clone(), t);
         }
     }
@@ -472,18 +514,23 @@ fn col_str(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> String {
 }
 
 #[allow(non_upper_case_globals)]
-fn has_nonzero_password_lifetime(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> bool {
-    let Some(d) = col_id.and_then(|id| row.get(&id)) else {
-        return false;
-    };
+fn decode_password_lifetime(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> Option<u16> {
+    let d = col_id.and_then(|id| row.get(&id))?;
     if d.is_null() {
-        return false;
+        return None;
     }
     match d.kind() {
-        KindInt64 => d.get_int64() != 0,
-        KindUint64 => d.get_uint64() != 0,
-        // Unexpected non-null type: fail closed.
-        _ => true,
+        KindInt64 => {
+            let v = d.get_int64();
+            if v <= 0 {
+                Some(0)
+            } else {
+                Some(u16::try_from(v).unwrap_or(u16::MAX))
+            }
+        }
+        KindUint64 => Some(u16::try_from(d.get_uint64()).unwrap_or(u16::MAX)),
+        // Unexpected non-null type: fail closed as positive lifetime.
+        _ => Some(u16::MAX),
     }
 }
 
@@ -598,7 +645,7 @@ pub fn decode_mysql_user(
         let plugin = col_str(&row, plugin_id);
         let account_locked = col_str(&row, locked_id).eq_ignore_ascii_case("Y");
         let password_expired = col_str(&row, pwd_expired_id).eq_ignore_ascii_case("Y");
-        let has_password_lifetime = has_nonzero_password_lifetime(&row, pwd_lifetime_id);
+        let password_lifetime = decode_password_lifetime(&row, pwd_lifetime_id);
         let has_failed_login_policy = has_failed_login_policy_in_attrs(&row, user_attrs_id);
         let mut privs = 0u64;
         for &(cid, p) in &priv_cols {
@@ -612,9 +659,52 @@ pub fn decode_mysql_user(
                 .with_auth_plugin(plugin)
                 .with_account_locked(account_locked)
                 .with_password_expired(password_expired)
-                .with_password_lifetime(has_password_lifetime)
+                .with_password_lifetime(password_lifetime)
                 .with_failed_login_policy(has_failed_login_policy),
         );
+    }
+    Ok(())
+}
+
+/// Decodes `default_password_lifetime` from `mysql.global_variables` into `out`.
+///
+/// Accounts whose `mysql.user.password_lifetime` is `NULL` (the `CREATE USER` default) inherit
+/// `@@global.default_password_lifetime`. Unparseable non-empty values fail closed (`u64::MAX`).
+pub fn decode_mysql_global_variables(
+    tbl: &TableInfo,
+    records: &[(Vec<u8>, Vec<u8>)],
+    out: &mut MySQLPrivilege,
+) -> Result<()> {
+    let name_id = require_col(tbl, "variable_name")?;
+    let val_id = require_col(tbl, "variable_value")?;
+    let decoder = RowDecoder::new(tbl);
+
+    for (k, v) in records {
+        if !tc::is_record_key(k) {
+            continue;
+        }
+        let row = decoder.decode(k, v)?;
+        let name = col_str(&row, Some(name_id));
+        if !name.eq_ignore_ascii_case("default_password_lifetime") {
+            continue;
+        }
+        let val = col_str(&row, Some(val_id));
+        let trimmed = val.trim();
+        let days = if trimmed.is_empty() {
+            0
+        } else {
+            match trimmed.parse::<u64>() {
+                Ok(n) => n,
+                Err(_) => {
+                    warn!(
+                        value = %trimmed,
+                        "unparseable default_password_lifetime in mysql.global_variables; failing closed"
+                    );
+                    u64::MAX
+                }
+            }
+        };
+        out.set_default_password_lifetime(days);
     }
     Ok(())
 }
@@ -1380,6 +1470,28 @@ mod tests {
         )];
         decode_mysql_default_roles(&dr_tbl, &dr_rows, &mut mp).unwrap();
 
+        // 8. mysql.global_variables (`default_password_lifetime`).
+        let gv_tbl = TableInfo {
+            id: 13,
+            name: CIStr::new("global_variables"),
+            columns: Some(vec![
+                varchar_col(1, 0, "VARIABLE_NAME"),
+                varchar_col(2, 1, "VARIABLE_VALUE"),
+            ]),
+            state: StatePublic,
+            ..Default::default()
+        };
+        let gv_rows = vec![encode_v2_record(
+            13,
+            1,
+            &[1, 2],
+            &[
+                new_string_datum("default_password_lifetime".to_owned()),
+                new_string_datum("90".to_owned()),
+            ],
+        )];
+        decode_mysql_global_variables(&gv_tbl, &gv_rows, &mut mp).unwrap();
+
         let handle = Arc::new(Handle::new(mp));
         let snap = handle.get();
 
@@ -1392,7 +1504,7 @@ mod tests {
         assert_eq!(root_rec.auth_plugin, "mysql_native_password");
         assert!(!root_rec.account_locked);
         assert!(!root_rec.password_expired);
-        assert!(!root_rec.has_password_lifetime);
+        assert_eq!(root_rec.password_lifetime, None);
         assert!(!root_rec.has_failed_login_policy);
         assert_eq!(
             root_rec.privileges.0 & (SelectPriv.0 | SuperPriv.0),
@@ -1404,8 +1516,17 @@ mod tests {
 
         let restricted_rec = snap.match_user("u_restricted", "127.0.0.1").unwrap();
         assert!(restricted_rec.password_expired);
-        assert!(restricted_rec.has_password_lifetime);
+        assert_eq!(restricted_rec.password_lifetime, Some(30));
         assert!(restricted_rec.has_failed_login_policy);
+        assert_eq!(snap.default_password_lifetime(), 90);
+
+        // Verify unrelated mysql.* table names are skipped by `peek_mysql_table_lower_name`.
+        assert_eq!(
+            peek_mysql_table_lower_name(br#"{"name":{"O":"stats_meta","L":"stats_meta"}}"#)
+                .as_deref(),
+            Some("stats_meta")
+        );
+        assert!(!LOADED_MYSQL_TABLES.contains(&"stats_meta"));
 
         // Verify mysql.global_priv SSL & broken JSON decoding.
         let gp_ssl = snap.match_global_priv("u_ssl", "127.0.0.1").unwrap();

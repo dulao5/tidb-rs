@@ -294,8 +294,49 @@ async fn cluster_privilege_sync_auth_and_etcd_watch() {
     }
     assert!(granted, "GRANT propagated via etcd /tidb/privilege watch");
 
+    // Verify restricted accounts created via Go SQL are handled fail-closed / 3118-locked.
+    let u_locked = "tidb_rs_priv_it_lock";
+    let u_ssl = "tidb_rs_priv_it_ssl";
+    let u_exp = "tidb_rs_priv_it_exp";
+    let u_lockpol = "tidb_rs_priv_it_lpol";
+    let u_sha2 = "tidb_rs_priv_it_sha2";
     go_sql(
         &port,
-        &format!("DROP USER IF EXISTS '{test_user}'@'%'; DROP DATABASE IF EXISTS {test_db};"),
+        &format!(
+            "DROP USER IF EXISTS '{u_locked}'@'%', '{u_ssl}'@'%', '{u_exp}'@'%', '{u_lockpol}'@'%', '{u_sha2}'@'%'; \
+             CREATE USER '{u_locked}'@'%' IDENTIFIED BY 'pw123' ACCOUNT LOCK; \
+             CREATE USER '{u_ssl}'@'%' IDENTIFIED BY 'pw123' REQUIRE SSL; \
+             CREATE USER '{u_exp}'@'%' IDENTIFIED BY 'pw123' PASSWORD EXPIRE; \
+             CREATE USER '{u_lockpol}'@'%' IDENTIFIED BY 'pw123' FAILED_LOGIN_ATTEMPTS 3 PASSWORD_LOCK_TIME 2; \
+             CREATE USER '{u_sha2}'@'%' IDENTIFIED WITH caching_sha2_password;"
+        ),
+    );
+    let mut saw_locked = false;
+    for _ in 0..40 {
+        if let Some(acc) = factory.lookup_account(u_locked, "127.0.0.1").await
+            && acc.account_locked
+        {
+            saw_locked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(saw_locked, "locked user propagated via etcd watch");
+    for restricted in [u_ssl, u_exp, u_lockpol, u_sha2] {
+        assert!(
+            factory
+                .lookup_account(restricted, "127.0.0.1")
+                .await
+                .is_none(),
+            "restricted account {restricted} must fail closed"
+        );
+    }
+
+    go_sql(
+        &port,
+        &format!(
+            "DROP USER IF EXISTS '{test_user}'@'%', '{u_locked}'@'%', '{u_ssl}'@'%', '{u_exp}'@'%', '{u_lockpol}'@'%', '{u_sha2}'@'%'; \
+             DROP DATABASE IF EXISTS {test_db};"
+        ),
     );
 }

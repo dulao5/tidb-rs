@@ -71,7 +71,14 @@ pub fn authenticate_user_record(
     if !rec.auth_plugin.is_empty() && rec.auth_plugin != "mysql_native_password" {
         return None;
     }
-    if rec.password_expired || rec.has_password_lifetime || rec.has_failed_login_policy {
+    let lifetime_active = match rec.password_lifetime {
+        // `PASSWORD EXPIRE NEVER` explicitly overrides global `default_password_lifetime`.
+        Some(0) => false,
+        Some(_) => true,
+        // SQL `NULL` (CREATE USER default) inherits `@@global.default_password_lifetime`.
+        None => snap.default_password_lifetime() > 0,
+    };
+    if rec.password_expired || lifetime_active || rec.has_failed_login_policy {
         return None;
     }
     if let Some(gp) = snap.match_global_priv(&rec.base.user, &rec.base.host)
@@ -167,8 +174,9 @@ pub fn check_poc_select_privilege(
         }
     }
 
-    // Collect SELECT-list aliases so bare `GROUP BY <alias>` / `ORDER BY <alias>` references do
-    // not falsely check an unrelated table column of the same name.
+    // Collect SELECT-list aliases for `ORDER BY` only: `tidb_sql::plan` resolves `GROUP BY`
+    // directly against table columns (matching Go when a real table column shares the name), so
+    // `GROUP BY` must never skip names that happen to match a `SELECT` alias.
     let mut select_aliases: HashSet<String> = HashSet::new();
     let mut cols: Vec<(&str, bool)> = Vec::new(); // (col_name, is_unqualified)
     for field in &sel.fields {
@@ -182,14 +190,14 @@ pub fn check_poc_select_privilege(
     if let Some(w) = &sel.where_ {
         collect_expr_cols(w, &mut cols);
     }
-    let mut by_cols: Vec<(&str, bool)> = Vec::new();
     for item in &sel.group_by {
-        collect_expr_cols(&item.expr, &mut by_cols);
+        collect_expr_cols(&item.expr, &mut cols);
     }
+    let mut order_cols: Vec<(&str, bool)> = Vec::new();
     for item in &sel.order_by {
-        collect_expr_cols(&item.expr, &mut by_cols);
+        collect_expr_cols(&item.expr, &mut order_cols);
     }
-    for (col_name, unqualified) in by_cols {
+    for (col_name, unqualified) in order_cols {
         if unqualified && select_aliases.contains(&col_name.to_lowercase()) {
             continue;
         }
@@ -453,6 +461,33 @@ mod tests {
             mixed_b.message
         );
 
+        // GROUP BY resolves directly to table columns (never skipped by a SELECT alias):
+        // u_cola (SELECT(a) only) running `SELECT COUNT(*) AS b FROM test.t GROUP BY b` must
+        // fail with 1143 for column 'b'.
+        let gb_alias = check(
+            &handle,
+            &is,
+            "u_cola",
+            "SELECT COUNT(*) AS b FROM test.t GROUP BY b",
+        )
+        .unwrap_err();
+        assert_eq!(gb_alias.code, 1143);
+        assert!(
+            gb_alias.message.contains("for column 'b' in table 't'"),
+            "unexpected message: {}",
+            gb_alias.message
+        );
+        // ORDER BY bare alias resolves to the SELECT item (no check on table column 'b').
+        assert!(
+            check(
+                &handle,
+                &is,
+                "u_cola",
+                "SELECT a AS b FROM test.t ORDER BY b"
+            )
+            .is_ok()
+        );
+
         // u_db_sel and root pass missing-table gate (letting plan_select report 1146).
         assert!(check(&handle, &is, "u_db_sel", "SELECT 1 FROM test.nosuch").is_ok());
         assert!(check(&handle, &is, "root", "SELECT 1 FROM test.nosuch").is_ok());
@@ -488,19 +523,23 @@ mod tests {
                 .with_auth_plugin("authentication_ldap_simple"),
         );
         mp.add_user(UserRecord::new("%", "u_expired", SelectPriv).with_password_expired(true));
-        mp.add_user(UserRecord::new("%", "u_lifetime", SelectPriv).with_password_lifetime(true));
+        mp.add_user(
+            UserRecord::new("%", "u_lifetime", SelectPriv).with_password_lifetime(Some(30)),
+        );
+        mp.add_user(UserRecord::new("%", "u_never_lt", SelectPriv).with_password_lifetime(Some(0)));
         mp.add_user(UserRecord::new("%", "u_lockpol", SelectPriv).with_failed_login_policy(true));
         mp.add_user(UserRecord::new("%", "u_ssl", SelectPriv));
         mp.add_global_priv(GlobalPrivRecord::new("u_ssl", "%", true, false));
         mp.add_user(UserRecord::new("%", "u_broken_gp", SelectPriv));
         mp.add_global_priv(GlobalPrivRecord::new("u_broken_gp", "%", true, true));
 
-        // Normal native user & IPv4-mapped IPv6 host match succeed.
+        // Normal native user & IPv4-mapped IPv6 host match succeed when default_password_lifetime == 0.
         let root_auth = authenticate_user_record(&mp, "root", "127.0.0.1").unwrap();
         assert!(!root_auth.account_locked);
         assert_eq!(root_auth.auth_user.as_deref(), Some("root"));
         assert_eq!(root_auth.auth_host.as_deref(), Some("%"));
         assert!(authenticate_user_record(&mp, "u_net", "::ffff:10.0.0.5").is_some());
+        assert!(authenticate_user_record(&mp, "u_never_lt", "127.0.0.1").is_some());
 
         // Locked account returns Some(AccountAuth { account_locked: true }) so password check runs
         // before returning 3118.
@@ -523,5 +562,12 @@ mod tests {
                 "{denied} must fail closed"
             );
         }
+
+        // When global `default_password_lifetime > 0`, accounts with `password_lifetime IS NULL`
+        // (such as `root` / `u_net`) fail closed, while `PASSWORD EXPIRE NEVER` (`Some(0)`) is allowed.
+        mp.set_default_password_lifetime(90);
+        assert!(authenticate_user_record(&mp, "root", "127.0.0.1").is_none());
+        assert!(authenticate_user_record(&mp, "u_net", "10.0.0.5").is_none());
+        assert!(authenticate_user_record(&mp, "u_never_lt", "127.0.0.1").is_some());
     }
 }

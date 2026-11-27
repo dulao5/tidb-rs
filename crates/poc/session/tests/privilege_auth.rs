@@ -193,7 +193,7 @@ fn build_fixture() -> Arc<Handle> {
     snap.push_user(
         UserRecord::new("%", "u_lifetime", SelectPriv)
             .with_auth_string(pw.clone())
-            .with_password_lifetime(true),
+            .with_password_lifetime(Some(30)),
     );
     snap.push_user(
         UserRecord::new("%", "u_lockout", SelectPriv)
@@ -276,5 +276,35 @@ async fn wire_handshake_enforces_locked_plugins_restrictions_and_use_db() {
     assert_eq!(
         msg,
         "Access denied for user 'u_ok'@'127.0.%' to database 'secret'"
+    );
+
+    // When `@@global.default_password_lifetime > 0`, accounts with `password_lifetime IS NULL`
+    // fail closed (1045) over the wire, while `PASSWORD EXPIRE NEVER` (`Some(0)`) still logs in.
+    let pw = native_hash(PASSWORD);
+    let mut snap2 = MySQLPrivilege::default();
+    snap2.set_default_password_lifetime(90);
+    snap2.push_user(UserRecord::new("%", "u_null_lt", SelectPriv).with_auth_string(pw.clone()));
+    snap2.push_user(
+        UserRecord::new("%", "u_never_lt", SelectPriv)
+            .with_auth_string(pw)
+            .with_password_lifetime(Some(0)),
+    );
+    snap2.sort_all();
+    let handle2 = Arc::new(Handle::new(snap2));
+    let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::new(ServerConfig::default(), PrivTestFactory { handle: handle2 })
+            .serve(listener2, std::future::pending())
+            .await
+            .unwrap();
+    });
+    let (_, reply) = raw_handshake(addr2, "u_null_lt", PASSWORD, None).await;
+    let (code, state, _) = parse_err_packet(&reply);
+    assert_eq!((code, state.as_str()), (1045, "28000"));
+    let (_, reply) = raw_handshake(addr2, "u_never_lt", PASSWORD, None).await;
+    assert_eq!(
+        reply[0], 0x00,
+        "PASSWORD EXPIRE NEVER must succeed: {reply:?}"
     );
 }
