@@ -356,21 +356,35 @@
 4. **Domain / SchemaSync 关闭**（`domain.go:1145,1320`）：Schema sync 后台循环退出输出 `INFO` `"loadSchemaInLoop exited."`（`domain.go:1145`），注销完成后输出 `INFO` `"domain closed"` `["take time"=...]`；
 5. **刷盘**：调用 `tidb_log::sync()` 退出。
 
-> **混部安全顺序差异说明（有意差异）**：与 Go v8.5.8（先排空客户端再关闭 Domain）不同，`tidb-rs` 在 `crates/poc/server/src/main.rs` 中有意先执行 `sync.shutdown()` 退出 etcd 注册（输出 `domain closed` 及 status server 关闭 `WARN`），再进入 `Server::serve` 客户端排空（`start drain clients` → `all sessions quit in drain wait time` → `kill all connections.`）。原因：在混合集群中，让正在下线的 `tidb-rs` 节点第一时间从 etcd 注销，可避免其他 Go TiDB 节点的 DDL 最长空等 15 秒。排空期间正在执行的只读语句依然安全：每条语句在启动时已捕获不可变 `Arc<InfoSchemaV2>` 并在其 MVCC snapshot TS 上读数，当前只读节点不执行写/DDL；未来开放写路径后仍由 schema validator / lease 机制保护在途写入。
+> **混部安全顺序差异说明（有意差异）**：`tidb-rs` 在 `crates/poc/server/src/main.rs` 中先按 Go 顺序在 `setting tidb-server to report unhealthy (shutting-down)` 之后立即关闭 status/RPC 服务并等待其 3 条关闭 `WARN` 输出完成（位于 `domain closed` 之前，与 Go 一致）；但随后有意先执行 `sync.shutdown()` 退出 etcd 注册（输出 `domain closed`），再进入 `Server::serve` 客户端排空（`start drain clients` → `all sessions quit in drain wait time` → `kill all connections.`），与 Go（先排空客户端再关闭 Domain）不同。原因：在混合集群中，让正在下线的 `tidb-rs` 节点第一时间从 etcd 注销，可避免其他 Go TiDB 节点的 DDL 最长空等 15 秒。排空期间正在执行的只读语句依然安全：每条语句在启动时已捕获不可变 `Arc<InfoSchemaV2>` 并在其 MVCC snapshot TS 上读数，当前只读节点不执行写/DDL；未来开放写路径后仍由 schema validator / lease 机制保护在途写入。
 
 Go v8.5.8 实测 `SIGTERM` 核心捕获片段（状态服务默认开启时，3 条 `http_status.go` `WARN` 会穿插在 `unhealthy` 之后，并发顺序不固定）：
 
 ```text
 [2026/11/27 01:26:00.174 +00:00] [INFO] [signal_posix.go:54] ["got signal to exit"] [signal=terminated]
 [2026/11/27 01:26:00.174 +00:00] [INFO] [server.go:591] ["setting tidb-server to report unhealthy (shutting-down)"]
-[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:540] ["http server error"] [error="..."]
-[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:535] ["grpc server error"] [error="..."]
-[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:545] ["start status/rpc server error"] [error="..."]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:540] ["http server error"] [error="http: Server closed"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:535] ["grpc server error"] [error="mux: server closed"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:545] ["start status/rpc server error"] [error="accept tcp [::]:10080: use of closed network connection"]
 [2026/11/27 01:26:00.175 +00:00] [INFO] [server.go:1014] ["start drain clients"]
 [2026/11/27 01:26:00.175 +00:00] [INFO] [server.go:1060] ["all sessions quit in drain wait time"]
 [2026/11/27 01:26:00.175 +00:00] [INFO] [server.go:990] ["kill all connections."] [category=server]
 ... ([INFO] [domain.go:1145] ["loadSchemaInLoop exited."] 等后台循环退出) ...
 [2026/11/27 01:26:00.179 +00:00] [INFO] [domain.go:1320] ["domain closed"] ["take time"=4.636049ms]
+```
+
+对应 `tidb-rs` `SIGTERM` 退出顺序（status `WARN` 位于 `unhealthy` 之后、`domain closed` 之前；仅 `domain closed` 提前至客户端排空之前）：
+
+```text
+[2026/11/27 01:26:00.174 +00:00] [INFO] [main.rs:...] ["got signal to exit"] [signal=terminated]
+[2026/11/27 01:26:00.174 +00:00] [INFO] [main.rs:...] ["setting tidb-server to report unhealthy (shutting-down)"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [status.rs:...] ["grpc server error"] [error="mux: server closed"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [status.rs:...] ["http server error"] [error="http: Server closed"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [status.rs:...] ["start status/rpc server error"] [error="accept tcp [::]:10080: use of closed network connection"]
+... ([INFO] [sync.rs:...] ["loadSchemaInLoop exited."] / ["domain closed"] ["take time"=...]) ...
+[2026/11/27 01:26:00.179 +00:00] [INFO] [server.rs:...] ["start drain clients"]
+[2026/11/27 01:26:00.179 +00:00] [INFO] [server.rs:...] ["all sessions quit in drain wait time"]
+[2026/11/27 01:26:00.179 +00:00] [INFO] [server.rs:...] ["kill all connections."] [category=server]
 ```
 
 ### 4.3 命令分发错误 `["command dispatched failed"]` 与伴随 `session.go` 日志

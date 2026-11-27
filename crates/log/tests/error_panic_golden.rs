@@ -396,3 +396,30 @@ fn error_stack_frames_include_file_and_line() {
         "expected at least one .rs:<line> frame location:\n{verbose}"
     );
 }
+
+/// Ensures workspace `[profile.release]` retains `debug = "line-tables-only"` so production
+/// `--release` binaries emit `\n\t<file>:<line>` stack frames (`error_stack_frames_include_file_and_line`
+/// also passes directly under `cargo test --release -p tidb-log --test error_panic_golden`).
+#[test]
+fn workspace_release_profile_preserves_line_tables() {
+    let root_manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&root_manifest).expect("read workspace Cargo.toml");
+    let mut in_release = false;
+    let mut found_line_tables = false;
+    for raw in manifest.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_release = line == "[profile.release]";
+            continue;
+        }
+        if in_release && line == r#"debug = "line-tables-only""# {
+            found_line_tables = true;
+        }
+    }
+    assert!(
+        found_line_tables,
+        "[profile.release] in workspace Cargo.toml must set debug = \"line-tables-only\""
+    );
+}

@@ -46,19 +46,33 @@ pub struct StatusInfo {
     pub git_hash: String,
 }
 
+/// Formats a bound listen address the way Go's `net.Listen("tcp", ...)` reports it:
+/// unspecified addresses (`0.0.0.0` / `::`) render as `[::]:<port>` because Go opens a dual-stack
+/// listener; specific IP addresses keep their standard `<ip>:<port>` formatting.
+fn format_go_listen_addr(addr: std::net::SocketAddr) -> String {
+    if addr.ip().is_unspecified() {
+        format!("[::]:{}", addr.port())
+    } else {
+        addr.to_string()
+    }
+}
+
 /// Serve the status API on `listener` until `shutdown` completes.
 pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Future<Output = ()>) {
-    match listener.local_addr() {
+    let local_addr = match listener.local_addr() {
         Ok(addr) => {
-            let addr_str = addr.to_string();
+            let addr_str = format_go_listen_addr(addr);
             tidb_base::log_info!(
                 "for status and metrics report",
                 "listening on addr" => &addr_str,
             );
+            Some(addr_str)
         }
-        Err(e) => warn!(error = %e, "status server address unknown"),
-    }
-    let local_addr = listener.local_addr().ok();
+        Err(e) => {
+            warn!(error = %e, "status server address unknown");
+            None
+        }
+    };
     let info = Arc::new(info);
     let mut conns = JoinSet::new();
     tokio::pin!(shutdown);
@@ -652,45 +666,81 @@ mod tests {
         let _ = stop.send(());
     }
 
+    fn normalize_status_caller_line(line: &str) -> String {
+        if let Some(start) = line.find("[status.rs:")
+            && let Some(rel_end) = line[start..].find(']')
+        {
+            let digits = &line[start + "[status.rs:".len()..start + rel_end];
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return format!(
+                    "{}[status.rs:<line>]{}",
+                    &line[..start],
+                    &line[start + rel_end + 1..]
+                );
+            }
+        }
+        line.to_owned()
+    }
+
     #[tokio::test]
     async fn status_shutdown_warns_include_bound_addr() {
         let sink = tidb_log::MemorySink::new();
         let cfg = tidb_base::config::LogConfig {
             level: "info".to_owned(),
             format: "text".to_owned(),
+            disable_timestamp: true,
             disable_error_verbose: true,
             ..tidb_base::config::LogConfig::default()
         };
         tidb_log::init_logger_with_sinks(&cfg, "", sink.clone(), None).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-        let info = StatusInfo {
-            version: "8.5.8-TiDB-v8.5.8".into(),
-            git_hash: "test".into(),
-        };
-        let handle = tokio::spawn(async move {
-            serve(listener, info, async move {
-                let _ = stop_rx.await;
-            })
-            .await;
-        });
-        let _ = stop_tx.send(());
-        handle.await.unwrap();
+        for (bind_addr, expect_unspecified) in [("127.0.0.1:0", false), ("0.0.0.0:0", true)] {
+            let listener = TcpListener::bind(bind_addr).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let port = addr.port();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            let info = StatusInfo {
+                version: "8.5.8-TiDB-v8.5.8".into(),
+                git_hash: "test".into(),
+            };
+            let handle = tokio::spawn(async move {
+                serve(listener, info, async move {
+                    let _ = stop_rx.await;
+                })
+                .await;
+            });
+            let _ = stop_tx.send(());
+            handle.await.unwrap();
 
-        let captured = String::from_utf8(sink.take()).unwrap();
-        assert!(
-            captured.contains(r#"["grpc server error"] [error="mux: server closed"]"#),
-            "{captured}"
-        );
-        assert!(
-            captured.contains(r#"["http server error"] [error="http: Server closed"]"#),
-            "{captured}"
-        );
-        let want = format!(
-            r#"["start status/rpc server error"] [error="accept tcp {addr}: use of closed network connection"]"#
-        );
-        assert!(captured.contains(&want), "missing {want} in:\n{captured}");
+            let captured = String::from_utf8(sink.take()).unwrap();
+            let lines: Vec<String> = captured.lines().map(normalize_status_caller_line).collect();
+            let (want_listen_field, want_accept_addr) = if expect_unspecified {
+                (
+                    format!(r#"["listening on addr"="[::]:{port}"]"#),
+                    format!("[::]:{port}"),
+                )
+            } else {
+                (
+                    format!(r#"["listening on addr"=127.0.0.1:{port}]"#),
+                    format!("127.0.0.1:{port}"),
+                )
+            };
+            assert_eq!(
+                lines,
+                vec![
+                    format!(
+                        r#"[INFO] [status.rs:<line>] ["for status and metrics report"] {want_listen_field}"#
+                    ),
+                    r#"[WARN] [status.rs:<line>] ["grpc server error"] [error="mux: server closed"]"#
+                        .to_owned(),
+                    r#"[WARN] [status.rs:<line>] ["http server error"] [error="http: Server closed"]"#
+                        .to_owned(),
+                    format!(
+                        r#"[WARN] [status.rs:<line>] ["start status/rpc server error"] [error="accept tcp {want_accept_addr}: use of closed network connection"]"#
+                    ),
+                ],
+                "bind_addr={bind_addr}"
+            );
+        }
     }
 }
