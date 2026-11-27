@@ -147,6 +147,123 @@ impl PartialEq for AtomicBool {
     }
 }
 
+/// `json.Marshal` of a config struct in Go struct-declaration field order (`printer.PrintTiDBInfo`
+/// `"loaded config"`). Unlike [`to_json`], this preserves struct field declaration order, keeps
+/// integer fields exact (no `f64` conversion), promotes untagged embedded structs inline, skips
+/// `json:"-"` fields, sorts `map[string]string` keys alphabetically, and HTML-escapes `<`, `>`,
+/// `&` identically to Go's `encoding/json.Marshal`.
+// glue: encoding/json.Marshal struct-order serialization over GoStruct
+pub fn marshal_json_struct_order(s: &dyn GoStruct) -> Result<String, Error> {
+    let mut out = String::new();
+    marshal_struct_order_into(s, &mut out)?;
+    Ok(out)
+}
+
+// glue: see marshal_json_struct_order
+fn marshal_struct_order_into(s: &dyn GoStruct, out: &mut String) -> Result<(), Error> {
+    out.push('{');
+    let mut first = true;
+    marshal_struct_fields_into(s, out, &mut first)?;
+    out.push('}');
+    Ok(())
+}
+
+// glue: see marshal_json_struct_order
+fn marshal_struct_fields_into(
+    s: &dyn GoStruct,
+    out: &mut String,
+    first: &mut bool,
+) -> Result<(), Error> {
+    for (i, f) in s.fields().iter().enumerate() {
+        let Some(name) = f.json else { continue };
+        if f.embedded
+            && name == f.go_name
+            && let ValRef::Struct(sub) = s.field(i)
+        {
+            marshal_struct_fields_into(sub, out, first)?;
+            continue;
+        }
+        if !*first {
+            out.push(',');
+        }
+        *first = false;
+        json::append_string(out, name);
+        out.push(':');
+        marshal_val_into(s.field(i), out)?;
+    }
+    Ok(())
+}
+
+// glue: see marshal_json_struct_order
+fn marshal_val_into(v: ValRef<'_>, out: &mut String) -> Result<(), Error> {
+    use std::fmt::Write as _;
+    match v {
+        ValRef::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        ValRef::Int(i) => {
+            let _ = write!(out, "{i}");
+        }
+        ValRef::I32(i) => {
+            let _ = write!(out, "{i}");
+        }
+        ValRef::I64(i) => {
+            let _ = write!(out, "{i}");
+        }
+        ValRef::Uint(u) => {
+            let _ = write!(out, "{u}");
+        }
+        ValRef::U32(u) => {
+            let _ = write!(out, "{u}");
+        }
+        ValRef::U64(u) => {
+            let _ = write!(out, "{u}");
+        }
+        ValRef::Duration(d) => {
+            let _ = write!(out, "{d}");
+        }
+        ValRef::F64(f) => {
+            if !f.is_finite() {
+                let s = gofmt::sprintf("%v", &[Arg::from(*f)]);
+                let mut msg = b"json: unsupported value: ".to_vec();
+                msg.extend_from_slice(&s);
+                return Err(Error::plain(msg));
+            }
+            out.push_str(&json::format_float(*f));
+        }
+        ValRef::Str(s) => json::append_string(out, s),
+        ValRef::StrSlice(None) | ValRef::StrMap(None) => out.push_str("null"),
+        ValRef::StrSlice(Some(items)) => {
+            out.push('[');
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                json::append_string(out, item);
+            }
+            out.push(']');
+        }
+        ValRef::StrMap(Some(m)) => {
+            out.push('{');
+            for (idx, (k, val)) in m.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                json::append_string(out, k);
+                out.push(':');
+                json::append_string(out, val);
+            }
+            out.push('}');
+        }
+        ValRef::NullableBool(b) => match *b {
+            nbTrue => out.push_str("true"),
+            nbFalse => out.push_str("false"),
+            _ => out.push_str("null"),
+        },
+        ValRef::AtomicBool(b) => out.push_str(if b.load() { "true" } else { "false" }),
+        ValRef::Struct(sub) => marshal_struct_order_into(sub, out)?,
+    }
+    Ok(())
+}
+
 /// `json.Marshal` of a config struct, as the generic value. With `as_float`, numbers are
 /// what `json.Unmarshal` into `map[string]any` gives back (`float64`); otherwise integers
 /// stay exact. Fields tagged `json:"-"` are skipped; untagged embedded structs are promoted

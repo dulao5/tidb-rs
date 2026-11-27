@@ -138,8 +138,17 @@ pub struct Inner {
     args: Vec<Arg>,
     file: &'static str,
     line: i32,
-    /// `AddStack`: captured only if `RUST_BACKTRACE` is set (`M-ERR`).
+    /// `AddStack`: captured via `Backtrace::force_capture()` on `gen_with_stack*` / `plain` /
+    /// `trace` / `annotate` (owner decision D4 = B, `specs/D00.3-logging/spec.md` §2.2).
     stack: Option<Arc<Backtrace>>,
+    /// Whether this error carries a stack (`false` for `FastGen*` / `Synthesize` / prototypes,
+    /// `true` for `GenWithStack*` / `New` / `Errorf` / `plain` or after `trace` / `annotate`).
+    has_stack: bool,
+    /// Annotations added by `annotate`: `(message_bytes, after_stack)`.
+    /// `after_stack` is `true` when the error already carried a stack before `annotate` (Go
+    /// `pingcap/errors` prints pre-stack annotations before frames and post-stack annotations
+    /// after frames).
+    annotations: Vec<(Vec<u8>, bool)>,
 }
 
 impl std::ops::Deref for Error {
@@ -292,6 +301,35 @@ pub fn cause(err: &Error) -> &Error {
     err
 }
 
+/// `errors.HasStack`: returns whether `err` carries a non-empty stack trace (`FastGen*` returns
+/// `false` until wrapped with [`trace`] or [`annotate`]).
+// go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.HasStack L1 [M-ERR]
+pub fn has_stack(err: &Error) -> bool {
+    err.has_stack()
+}
+
+/// `errors.Trace`: ensures `err` carries a stack trace, capturing one if absent (matching Go
+/// `SuspendStack` re-capture semantics on `FastGen*` / `Synthesize` errors).
+// go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Trace L1 [M-ERR]
+#[track_caller]
+pub fn trace(err: Error) -> Error {
+    err.trace()
+}
+
+/// `errors.Annotate`: attaches an annotation message to `err` and captures a stack if absent.
+// go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Annotate L1 [M-ERR]
+#[track_caller]
+pub fn annotate(err: Error, msg: impl IntoGoString) -> Error {
+    err.annotate(msg)
+}
+
+/// `errors.ErrorStack`: formats `err` with its annotations and stack trace (`%+v`) for logging
+/// (used by `conn.rs` `err_str_for_log`).
+// go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.ErrorStack L1 [M-ERR]
+pub fn error_stack(err: &Error) -> Vec<u8> {
+    err.error_stack()
+}
+
 /// `RedactErrorArg` redacts the args by position if RedactLogEnabled is enabled.
 // go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.RedactErrorArg L1
 pub fn redact_error_arg(args: &mut [Arg], position: &[usize]) {
@@ -329,7 +367,7 @@ pub fn error_equal(err1: Option<&Error>, err2: Option<&Error>) -> bool {
     if e1.kind == Kind::Normalized && e2.kind == Kind::Normalized {
         return e1.equal(e2);
     }
-    e1.error() == e2.error()
+    e1.base_error_bytes() == e2.base_error_bytes()
 }
 
 /// `ErrorNotEqual` returns a boolean indicating whether err1 isn't equal to err2.
@@ -352,6 +390,8 @@ impl Error {
             file: "",
             line: 0,
             stack: None,
+            has_stack: false,
+            annotations: Vec::new(),
         })))
     }
 
@@ -440,15 +480,44 @@ impl Error {
         &self.redact_args_pos
     }
 
-    /// The stack captured at creation (`AddStack`), if `RUST_BACKTRACE` was set.
+    /// The stack captured at creation (`AddStack`), if present.
     // glue: M-ERR optional creation-site stack
     pub fn stack(&self) -> Option<&Backtrace> {
         self.stack.as_deref()
     }
 
-    /// `Error` implements error interface (`M-NAME`: also `Display`).
-    // go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Error.Error L1
-    pub fn error(&self) -> Vec<u8> {
+    /// Returns whether this error carries a stack trace (`false` for `FastGen*` / `Synthesize` /
+    /// prototypes until wrapped with [`Error::trace`] or [`Error::annotate`]).
+    // glue: errors.HasStack method form
+    pub fn has_stack(&self) -> bool {
+        self.has_stack
+    }
+
+    /// Ensure this error has a captured stack trace (`errors.Trace`).
+    // glue: errors.Trace method form
+    #[track_caller]
+    pub fn trace(mut self) -> Error {
+        if !self.has_stack {
+            self.fill_line_and_file();
+        }
+        self
+    }
+
+    /// Attach an annotation message and capture a stack trace if absent (`errors.Annotate`).
+    // glue: errors.Annotate method form
+    #[track_caller]
+    pub fn annotate(mut self, msg: impl IntoGoString) -> Error {
+        let had_stack = self.has_stack;
+        if !had_stack {
+            self.fill_line_and_file();
+        }
+        self.annotations
+            .push((msg.into_go_string().into_owned(), had_stack));
+        self
+    }
+
+    /// Core error bytes without outer `annotate` prefixes.
+    fn base_error_bytes(&self) -> Vec<u8> {
         if self.kind == Kind::Plain {
             return self.get_msg();
         }
@@ -462,6 +531,64 @@ impl Error {
             out.extend_from_slice(&c.error());
         }
         out
+    }
+
+    /// `Error` implements error interface (`M-NAME`: also `Display`).
+    // go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Error.Error L1
+    pub fn error(&self) -> Vec<u8> {
+        let base = self.base_error_bytes();
+        if self.annotations.is_empty() {
+            return base;
+        }
+        let mut out = Vec::new();
+        for (ann, _) in self.annotations.iter().rev() {
+            out.extend_from_slice(ann);
+            out.extend_from_slice(b": ");
+        }
+        out.extend_from_slice(&base);
+        out
+    }
+
+    /// Verbose representation (`fmt.Sprintf("%+v", err)`): cause `error()` first, followed by
+    /// pre-stack `\n<annotation>` entries, `\n<func>\n\t<file>:<line>` stack frames, and any
+    /// post-stack `\n<annotation>` entries added on an error that already carried a stack. When
+    /// `!has_stack()` and no annotations exist, returns `self.error()`.
+    // glue: pingcap/errors %+v formatting for [errorVerbose=...]
+    pub fn error_verbose(&self) -> Vec<u8> {
+        if !self.has_stack && self.annotations.is_empty() {
+            return self.error();
+        }
+        let mut out = self.base_error_bytes();
+        for (ann, after_stack) in &self.annotations {
+            if !after_stack {
+                out.push(b'\n');
+                out.extend_from_slice(ann);
+            }
+        }
+        if self.has_stack {
+            if let Some(bt) = &self.stack {
+                format_backtrace_frames(bt, &mut out);
+            } else if !self.file.is_empty() {
+                out.push(b'\n');
+                out.extend_from_slice(b"unknown\n\t");
+                out.extend_from_slice(self.file.as_bytes());
+                out.push(b':');
+                out.extend_from_slice(self.line.to_string().as_bytes());
+            }
+        }
+        for (ann, after_stack) in &self.annotations {
+            if *after_stack {
+                out.push(b'\n');
+                out.extend_from_slice(ann);
+            }
+        }
+        out
+    }
+
+    /// Go `errors.ErrorStack(err)` equivalent used by `conn.rs` `err_str_for_log`.
+    // glue: errors.ErrorStack method form
+    pub fn error_stack(&self) -> Vec<u8> {
+        self.error_verbose()
     }
 
     /// `GetMsg`: the message template formatted with the arguments.
@@ -478,17 +605,19 @@ impl Error {
         self.get_msg()
     }
 
-    /// `fillLineAndFile`: the caller of the public constructor (`#[track_caller]`).
-    // go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Error.fillLineAndFile L2 (#[track_caller] instead of runtime.Caller)
+    /// `fillLineAndFile`: the caller of the public constructor (`#[track_caller]`) plus a forced
+    /// backtrace capture (owner decision D4 = B).
+    // go-dep: github.com/pingcap/errors@v0.11.5-0.20250523034308-74f78ae071ee.Error.fillLineAndFile L2 (#[track_caller] + Backtrace::force_capture instead of runtime.Caller)
     #[track_caller]
     fn fill_line_and_file(&mut self) {
         let loc = Location::caller();
         self.file = loc.file();
         self.line = loc.line() as i32;
-        let bt = Backtrace::capture();
+        let bt = Backtrace::force_capture();
         if bt.status() == std::backtrace::BacktraceStatus::Captured {
             self.stack = Some(Arc::new(bt));
         }
+        self.has_stack = true;
     }
 
     /// `GenWithStack` generates a new *Error with the same class and code, and a new
@@ -524,6 +653,8 @@ impl Error {
         let mut err = self.clone();
         err.message = format.into_go_string();
         err.args = args;
+        err.has_stack = false;
+        err.stack = None;
         err
     }
 
@@ -534,6 +665,8 @@ impl Error {
         redact_error_arg(&mut args, &self.redact_args_pos);
         let mut err = self.clone();
         err.args = args;
+        err.has_stack = false;
+        err.stack = None;
         err
     }
 
@@ -593,6 +726,8 @@ impl Error {
             err.message = Cow::Owned(c.error());
         }
         err.args = args;
+        err.has_stack = false;
+        err.stack = None;
         err
     }
 
@@ -607,6 +742,87 @@ impl Error {
         err.fill_line_and_file();
         err
     }
+}
+
+fn is_internal_backtrace_frame(func: &str) -> bool {
+    let f = func.trim_start_matches('<');
+    f.starts_with("std::backtrace_rs::")
+        || f.starts_with("std::backtrace::")
+        || f.starts_with("std::sys::backtrace::")
+        || f.starts_with("tidb_base::errors::format_backtrace")
+        || f.starts_with("tidb_base::errors::Error>::fill_line_and_file")
+        || f.starts_with("tidb_base::errors::Error::fill_line_and_file")
+        || f.starts_with("tidb_base::structured_log::FallbackStdoutLogger")
+        || f.starts_with("tidb_log::panic_hook::handle_panic")
+        || f.starts_with("tidb_log::logger::UnifiedLoggerCore")
+}
+
+/// Strip trailing `:col` from Rust's `file:line:col` location so frames render `file:line`
+/// matching Go's `<file>:<line>` stack format.
+fn strip_location_col(loc: &str) -> &str {
+    if let Some((prefix, col)) = loc.rsplit_once(':')
+        && !col.is_empty()
+        && col.bytes().all(|b| b.is_ascii_digit())
+        && let Some((_, line)) = prefix.rsplit_once(':')
+        && !line.is_empty()
+        && line.bytes().all(|b| b.is_ascii_digit())
+    {
+        return prefix;
+    }
+    loc
+}
+
+/// Format a captured Rust [`Backtrace`] into Go-style `\n<func>\n\t<file>:<line>` pairs.
+// glue: Go pingcap/errors stack frame layout over std::backtrace::Backtrace
+pub fn format_backtrace_frames(bt: &Backtrace, out: &mut Vec<u8>) {
+    let raw = bt.to_string();
+    let mut lines = raw.lines().peekable();
+    let mut skipping_top = true;
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Standard Rust backtrace format: "   0: func_name" followed by "             at path:line:col"
+        if let Some((idx_part, func_part)) = trimmed.split_once(':')
+            && !idx_part.is_empty()
+            && idx_part.bytes().all(|b| b.is_ascii_digit())
+        {
+            let func = func_part.trim();
+            let loc = lines
+                .peek()
+                .and_then(|next| next.trim().strip_prefix("at "))
+                .map(|s| s.trim());
+            if loc.is_some() {
+                let _ = lines.next();
+            }
+            if skipping_top && is_internal_backtrace_frame(func) {
+                continue;
+            }
+            skipping_top = false;
+            out.push(b'\n');
+            out.extend_from_slice(func.as_bytes());
+            if let Some(loc) = loc {
+                out.extend_from_slice(b"\n\t");
+                out.extend_from_slice(strip_location_col(loc).as_bytes());
+            }
+        } else if !skipping_top {
+            out.push(b'\n');
+            out.extend_from_slice(trimmed.as_bytes());
+        }
+    }
+}
+
+/// Format a [`Backtrace`] as a standalone string of `<func>\n\t<file>:<line>` frames (for
+/// `[stack="..."]` / `["stack trace"="..."]` fields).
+// glue: standalone stack trace string for structured logs
+pub fn format_backtrace_string(bt: &Backtrace) -> String {
+    let mut out = Vec::new();
+    format_backtrace_frames(bt, &mut out);
+    if out.first() == Some(&b'\n') {
+        out.remove(0);
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 impl PartialEq for Error {

@@ -617,7 +617,11 @@ impl Session {
         match guard.check_results(start_ts).await {
             ResultCheck::Valid => {}
             ResultCheck::Fallback => return Ok(None),
-            ResultCheck::Err(e) => return Err(SqlError::new(e.code(), e.to_string())),
+            ResultCheck::Err(e) => {
+                let msg = e.to_string();
+                let src = tidb_base::Error::plain(format!("[domain:{}]{msg}", e.code())).trace();
+                return Err(SqlError::new(e.code(), msg).with_source_err(src));
+            }
         }
         self.mdl = Some(guard);
         Ok(Some((plan, rows?)))
@@ -915,6 +919,64 @@ impl SessionHandler for Session {
         }
         r
     }
+
+    fn status_flags(&self) -> u16 {
+        if let Some(router) = &self.router {
+            router.new_stack().session().vars().status()
+        } else {
+            tidb_mysql_protocol::constants::status::AUTOCOMMIT
+        }
+    }
+
+    fn session_alias(&self) -> &str {
+        if let Some(router) = &self.router {
+            &router.new_stack().session().vars().session_alias
+        } else {
+            ""
+        }
+    }
+
+    fn txn_mode(&self) -> &str {
+        if let Some(router) = &self.router {
+            let m = &router.new_stack().session().vars().txn_mode;
+            if m.is_empty() {
+                "OPTIMISTIC"
+            } else {
+                m.as_str()
+            }
+        } else {
+            "PESSIMISTIC"
+        }
+    }
+
+    fn txn_timestamp(&self) -> u64 {
+        if let Some(router) = &self.router {
+            let tc = &router.new_stack().session().vars().state.txn_ctx;
+            if tc.start_ts != 0 {
+                tc.start_ts
+            } else {
+                tc.stale_read_ts
+            }
+        } else {
+            0
+        }
+    }
+
+    fn redact_mode(&self) -> &str {
+        if let Some(router) = &self.router {
+            &router.new_stack().session().vars().enable_redact_log
+        } else {
+            tidb_base::errors::redact_log_enabled_load()
+        }
+    }
+
+    fn collation_name(&self) -> &str {
+        if !self.collation.is_empty() {
+            &self.collation
+        } else {
+            "utf8mb4_bin"
+        }
+    }
 }
 
 impl Session {
@@ -923,7 +985,21 @@ impl Session {
         self.mdl = None;
         self.stmt.stmt_type = None;
         let start = Instant::now();
-        let lowered = tidb_sql::parse_and_lower(sql)?;
+        let lowered = match tidb_sql::parse_and_lower(sql) {
+            Ok(l) => l,
+            Err(e) => {
+                if e.code == tidb_base::errno::ErrParse {
+                    return Err(router::log_and_wrap_parse_error(
+                        self.connection_id,
+                        "",
+                        tidb_base::errors::redact_log_enabled_load(),
+                        sql,
+                        e,
+                    ));
+                }
+                return Err(e);
+            }
+        };
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         self.stmt.start(stmt_type(&lowered.stmt), parse);

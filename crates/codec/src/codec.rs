@@ -1836,9 +1836,13 @@ pub fn hash_code(b: &mut Vec<u8>, d: &Datum) {
         KindMinNotNull => b.push(bytesFlag),
         KindMaxValue => b.push(maxFlag),
         k => {
-            log::warn!(
-                "trying to calculate HashCode of an unexpected type of Datum; Datum Kind={k}; stack={}",
-                std::backtrace::Backtrace::capture()
+            let stack = tidb_base::errors::format_backtrace_string(
+                &std::backtrace::Backtrace::force_capture(),
+            );
+            tidb_base::log_warn!(
+                "trying to calculate HashCode of an unexpected type of Datum",
+                "Datum Kind" => k,
+                "stack" => &stack,
             );
         }
     }

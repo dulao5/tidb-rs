@@ -31,7 +31,6 @@ futures = { workspace = true }
 # The 200 ms waits of the "in flashback progress" retries (time.Sleep).
 tokio = { workspace = true, features = ["time"] }
 # logutil.BgLogger().Error of the bundle builder.
-log = "0.4"
 # Table abstraction (D06.4): column casts and defaults (CastColumnValue, GetTimeValue),
 # expression.Column of virtual columns, BuildContext.
 tidb-expression = { workspace = true }

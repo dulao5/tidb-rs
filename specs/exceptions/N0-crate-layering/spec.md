@@ -31,6 +31,7 @@
 | 1 | `tidb-parser` | D02.1、D02.2 | parser | 已有 |
 | 1 | `tidb-memory` | D15.1 | util/memory（A1） | 规划 |
 | 1 | `tidb-runtime` | —（N3 运行时；含 D00.3 的 `util/tokenlimiter.go`） | util/tokenlimiter；client-go 的 store token | 已有（N3 运行时骨架）。Q2 窗口类型放在这里，`ExecCtx` 所在的各层都能持有它，不必依赖 `tidb-store` |
+| 1 | `tidb-log` | —（D00.3 日志与版本打印后端，见 `specs/D00.3-logging/spec.md` §3.2） | util/logutil、util/printer、util/versioninfo | 已有（单一职责日志后端 crate，避免将 `chrono`/`flate2`/`tracing-subscriber`/`slog`/`base64`/`serde_json` 引入 rank 0 `tidb-base`） |
 | 2 | `tidb-types` | D01.1–D01.6、D01.9 | types、util/collate、util/charset | 已有（D01.2） |
 | 3 | `tidb-chunk` | D01.7、D01.10 | util/chunk、util/disk | 规划 |
 | 3 | `tidb-model` | D06.1 | meta/model、`resolve.ResultField`、`types.ColumnNeedRestoredData`（D00.2 第二部分评审：model 调用 types，rank 从 2 改为 3） | 规划 |

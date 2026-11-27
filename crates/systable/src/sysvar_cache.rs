@@ -52,6 +52,8 @@ impl SysVarCache {
     /// then rebuilds, since only it can scan the table).
     // go: Domain.rebuildSysVarCacheIfNeeded L2 (returns the condition; the caller, which can scan the table, rebuilds)
     pub fn needs_rebuild(&self) -> bool {
+        // log-skip: pkg/domain/sysvar_cache.go:49 no production caller for needs_rebuild yet (blocked-by:D06.5)
+        // log-skip: pkg/domain/sysvar_cache.go:51 no production caller for needs_rebuild yet (blocked-by:D06.5)
         let m = self.maps.read();
         m.session.is_empty() || m.global.is_empty()
     }
@@ -70,6 +72,7 @@ impl SysVarCache {
         if let Some(v) = self.maps.read().global.get(name) {
             return Ok(v.clone());
         }
+        tidb_base::log_warn!("could not find key in global cache", "name" => name);
         Err(ErrUnknownSystemVar.gen_with_stack_by_args(vec![name.to_owned().into()]))
     }
 
@@ -114,12 +117,14 @@ impl SysVarCache {
                 {
                     s_val = sv.validate_with_relaxed_validation(ctx, &s_val, ScopeGlobal);
                     if let Err(e) = set_global(ctx, &s_val) {
-                        // logutil.BgLogger().Error("load global variable %s error")
+                        let msg = format!("load global variable {} error", sv.name);
+                        tidb_base::log_error!(&msg, "error" => &e);
                         hook_errors.push((sv.name.to_owned(), e));
                     }
                 }
             }
         }
+        tidb_base::log_debug!("rebuilding sysvar cache");
         let mut m = self.maps.write();
         m.session = Arc::new(new_session_cache);
         m.global = Arc::new(new_global_cache);
