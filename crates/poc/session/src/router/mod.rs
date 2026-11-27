@@ -11,7 +11,8 @@
 //! 0. session conditions ([`Router::session_condition`]): an explicit transaction,
 //!    `autocommit = 0`, `tidb_snapshot` / `tidb_read_staleness` / `tx_read_ts` /
 //!    `tidb_txn_mode` off their defaults, a variable the new session does not know
-//!    (diverged in the sync, [`sync`]), a cursor; then equal InfoSchema versions;
+//!    (diverged in the sync, [`sync`]), a cursor; then an admissible schema lease and
+//!    equal InfoSchema versions ([`Router::schema_check`]);
 //! 1. the statement kind (`SELECT` only) and 2. the AST pre-check ([`precheck`]);
 //! 3. the new stack plans; `Blocked(block)` (before any executor opened) restores the new
 //!    session ([`tidb_session::StmtCheckpoint`], §4.6) and falls back to the PoC (`fallback`) or
@@ -105,6 +106,10 @@ pub enum Reason {
     Session(&'static str),
     /// Step 0: the two InfoSchema versions differ.
     SchemaVersion,
+    /// Step 0: the schema sync does not admit statements on the new stack: the schema lease
+    /// has expired, the node is not registered, or the ported domain's last reload failed
+    /// ([`PocEngine::admissible_schema_version`] is `None`).
+    SchemaLease,
     /// Step 1: not a `SELECT`.
     Kind,
     /// Step 2: the AST pre-check (the detail is for tests and logs).
@@ -122,6 +127,7 @@ impl Reason {
         match self {
             Reason::Session(_) => "session",
             Reason::SchemaVersion => "schema_version",
+            Reason::SchemaLease => "schema_lease",
             Reason::Kind => "kind",
             Reason::Ast(_) => "ast",
             Reason::Blocked(block) => block,
@@ -209,8 +215,11 @@ pub struct PocValues {
 
 /// The PoC as the router sees it ([`crate::Session`] implements it).
 pub trait PocEngine: Send {
-    /// The schema version the PoC would plan with, `None` if it has none loaded.
-    fn schema_version(&self) -> Option<i64>;
+    /// The version of the synced schema while the schema sync admits statements on the new
+    /// stack; `None` when it does not (the schema lease has expired, the node is not
+    /// registered, the ported domain's last reload failed) or there is no schema sync. Not
+    /// the version of a schema the PoC would only use on its ADR 0003 path.
+    fn admissible_schema_version(&self) -> Option<i64>;
     /// Whether the PoC session is in an explicit transaction.
     fn in_txn(&self) -> bool;
     /// The state synced into the new session.
@@ -488,14 +497,22 @@ impl Router {
         None
     }
 
-    /// Step 0: the InfoSchema versions are equal. The new stack gets its InfoSchema from
-    /// the ported domain that the PoC domain's sync loop reloads (§4.1); a session without
-    /// a domain (no schema sync) has none, and its planner returns `Blocked`, so the check
-    /// passes.
-    fn schema_versions_equal(&self, poc: &dyn PocEngine) -> bool {
-        match self.new.info_schema_version() {
-            None => true,
-            Some(v) => poc.schema_version() == Some(v),
+    /// Step 0: the new stack may plan with its InfoSchema. The new stack gets it from the
+    /// ported domain that the PoC domain's sync loop reloads (§4.1); a session without a
+    /// domain (no schema sync) has none, and its planner returns `Blocked`, so the check
+    /// passes. Otherwise the schema sync must admit statements on the new stack
+    /// ([`Reason::SchemaLease`]): the new stack has no schema validator and no statement
+    /// guard, so past the schema lease, after deregistering, or after a failed reload of the
+    /// ported domain only the PoC's paths are safe. And the versions must be equal
+    /// ([`Reason::SchemaVersion`]).
+    fn schema_check(&self, poc: &dyn PocEngine) -> Result<(), Reason> {
+        let Some(v) = self.new.info_schema_version() else {
+            return Ok(());
+        };
+        match poc.admissible_schema_version() {
+            None => Err(Reason::SchemaLease),
+            Some(pv) if pv == v => Ok(()),
+            Some(_) => Err(Reason::SchemaVersion),
         }
     }
 
@@ -510,8 +527,8 @@ impl Router {
         if let Some(c) = self.session_condition(poc) {
             return Route::Poc(Reason::Session(c));
         }
-        if !self.schema_versions_equal(poc) {
-            return Route::Poc(Reason::SchemaVersion);
+        if let Err(reason) = self.schema_check(poc) {
+            return Route::Poc(reason);
         }
         match Self::candidate(stmt, allow_params) {
             Ok(()) => Route::New,
@@ -843,13 +860,8 @@ impl Router {
         let stmt = tidb_sql::ir::parse_one(sql)?;
         // Not on the new stack when the InfoSchema versions differ: its column definitions
         // would come from another version, and a later fallback would fail check_columns.
-        let candidate = Self::candidate(&stmt, true).and_then(|()| {
-            if self.schema_versions_equal(poc) {
-                Ok(())
-            } else {
-                Err(Reason::SchemaVersion)
-            }
-        });
+        // Nor when the schema lease is not admissible (step 0).
+        let candidate = Self::candidate(&stmt, true).and_then(|()| self.schema_check(poc));
         let new = match candidate {
             Ok(()) => match self.try_prepare_new(sql).await {
                 Ok(r) => Ok(r),
@@ -931,8 +943,8 @@ impl Router {
                 if let Some(c) = self.session_condition(poc) {
                     self.note(Engine::Poc.label(), Reason::Session(c).label());
                     poc.execute(stmt_id, params).await
-                } else if !self.schema_versions_equal(poc) {
-                    self.note(Engine::Poc.label(), Reason::SchemaVersion.label());
+                } else if let Err(reason) = self.schema_check(poc) {
+                    self.note(Engine::Poc.label(), reason.label());
                     poc.execute(stmt_id, params).await
                 } else {
                     // The statement is started (metrics) only once it is known which engine
@@ -972,16 +984,25 @@ impl Router {
                 }
             }
             Some(Owner::New { new_id }) => {
+                // The metric's reason: the schema lease's like its other routes; any other
+                // step-0 condition is counted as `session`, as before.
                 let why = match self.session_condition(poc) {
-                    Some(c) => Some(format!("session condition: {c}")),
-                    None if !self.schema_versions_equal(poc) => {
-                        Some("InfoSchema versions differ".to_owned())
-                    }
-                    None => None,
+                    Some(c) => Some((Reason::Session(c), format!("session condition: {c}"))),
+                    None => match self.schema_check(poc) {
+                        Err(Reason::SchemaLease) => Some((
+                            Reason::SchemaLease,
+                            "the schema lease is not admissible".to_owned(),
+                        )),
+                        Err(_) => Some((
+                            Reason::Session("schema version"),
+                            "InfoSchema versions differ".to_owned(),
+                        )),
+                        Ok(()) => None,
+                    },
                 };
                 self.cursor = false;
-                if let Some(why) = why {
-                    self.note(NOWHERE, "session");
+                if let Some((reason, why)) = why {
+                    self.note(NOWHERE, reason.label());
                     return self.fail(nothing_to_fall_back(&why));
                 }
                 poc.begin_command();
