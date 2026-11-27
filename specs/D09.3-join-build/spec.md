@@ -285,7 +285,7 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 
 没有需要显式模拟的 `M-FT` 位置（`grep 'Go aliasing (M-FT)'` 不新增）；新增的 `M-SHARE` 模拟只有 `logical_apply.go:104` 一处。
 
-### 4.8 权限检查（裁定 R29–R32）
+### 4.8 权限检查（裁定 R29–R32、R36）
 
 权限检查栈（D04.1，PR #468–#471、#480，写本 spec 时尚未合并）按负责人 2026-11-26 的裁定 R29–R32（`docs/testing/rulings.toml`）与 Go 有意不同：每个数据源登记表级 `SELECT`（R29，`column = "*"`，没有权限报 1142）；先查表级再查列级（R30）；读 `_tidb_rowid` 要整表 `SELECT`（R32，经 `PlanBuilder.rowid_orig_tbl` 按列的 `unique_id` 找到物理表）。本块扩展的正是这些代码，实现时按下面几条做：
 
@@ -294,7 +294,7 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 3. **USING / NATURAL 的列权限**：`coalesceCommonColumns` 对每个共有列的两边各调用一次 `appendColNamesToVisitInfo`（`:1281-1297`），派生表的列 `DBName` 为空，被 `:1291` 的非空检查跳过；`_tidb_rowid` 不会成为共有列（`:1242`）。照 Go 移植，错误按 R30 的顺序给出。
 4. **外层列（第 C 部分，以及 D09.6）**：Go 在 `toColumn` 中遍历 `outerSchemas` 找到外层列后也会登记列权限（`expression_rewriter.go:2625-2631`，`fieldName4PrivilegeCheck = outerName[idx]`，之后进入 `precollectColNames`）；Rust 的这个循环现在是空的。第 C 部分（或 D09.6，先做的那个）补上时，**必须把外层列的 `unique_id` 传给 `precollect_col_names`**。否则 `t1 JOIN LATERAL (SELECT t1._tidb_rowid) d`、关联子查询中的 `t._tidb_rowid` 查不到 `rowid_orig_tbl`，只有 `SELECT(a)` 权限的用户可以读到 `_tidb_rowid`（R32 失效）。配一个 R32 测试。
 5. **govec 计数**：`crates/planner/tests/govec_selectbuild.rs` 中 `EXPECTED_R29_NORMALIZED`（PR #468 / #470 中为 2321）是按 R29 规范化的向量条数；第 A 部分把 6 条 `D09.3` 的 `EXPECTED_BLOCKED` 转为正常比对后，这个数会变，第 A 部分的 PR 按实际结果更新并说明。
-6. **LATERAL 的 ON 子句**：Go 不切换 `checkColPriv`，见 §9.1 第 1 点（需要负责人决定）。
+6. **LATERAL 的 ON 子句（裁定 R36）**：Go 的 `buildLateralJoin` 改写 ON 时不切换 `checkColPriv`（`logical_plan_builder.go:1068-1070`），ON 中引用的列不登记列权限。负责人 2026-11-28 决定 B（§9.1 第 1 点）：第 C 部分在 `build_lateral_join` 改写 ON 时照 `build_join`（Go `buildJoin:923-926`）临时把 `check_col_priv` 改为 `ReportColumnErrOption`，改写返回后（无论成功还是出错）恢复原值，写法与现有的 `build_selection` 相同；没有列权限的用户报 1143。这是有意的与 Go 不同，记在 §7 第 10 条。配一个测试（§6.3）。
 
 ### 4.7 对其他块的要求
 
@@ -362,7 +362,8 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 - `update_eq_cond_reverse_order`（第 B 部分；含 `IsEQCondFromIn` 条件被跳过、NA 等值一轮从前往后）。
 - **权限测试**（§4.8，放在 `crates/planner/tests/` 的权限测试中，按部分）：
   - 第 A 部分：只有 `SELECT(a)` 的用户执行 `SELECT a FROM t1 JOIN t2 USING (b)` → 1143（共有列的两边都登记）；`SELECT t1._tidb_rowid FROM t1 JOIN t2 ON ...` → 1143（R32）；`SELECT * FROM t1 JOIN t2 USING (_tidb_rowid)` → `ErrUnknownColumn`；join 中每个基表恰好一条 `("*", 1142)`（R29）；`EXPECTED_R29_NORMALIZED` 按实际更新。
-  - 第 C 部分（或 D09.6）：`t1 JOIN LATERAL (SELECT t1._tidb_rowid) d`、关联子查询中的 `t._tidb_rowid`，只有 `SELECT(a)` 的用户 → 1143（R32，外层列传 `unique_id`）；LATERAL ON 的列权限按 §9.1 第 1 点的决定。
+  - 第 C 部分（或 D09.6）：`t1 JOIN LATERAL (SELECT t1._tidb_rowid) d`、关联子查询中的 `t._tidb_rowid`，只有 `SELECT(a)` 的用户 → 1143（R32，外层列传 `unique_id`）。
+  - 第 C 部分：`lateral_on_clause_requires_column_privilege`（R36，§9.1 第 1 点）：对 `t1(a, b)` 只有 `SELECT(a)` 的用户执行 `SELECT d.x FROM t1 JOIN LATERAL (SELECT t1.a AS x) d ON t1.b = d.x` → 1143（`for column 'b' in table 't1'`）；同一用户把 ON 换成 `t1.a = d.x` 能执行；有 `SELECT(a, b)` 的用户执行原语句不报错；`build_lateral_join` 改写 ON 成功和出错（例如 ON 里有子查询，`ErrInvalidLateralJoin`）之后，`PlanBuilder.check_col_priv` 都已恢复为调用前的值。会话测试覆盖同样的 1143。
 
 ### 6.4 端到端验收
 
@@ -380,14 +381,15 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 5. **`BuildKeyInfoPortal` 从函数变量钩子改为普通函数**（`rule/util/build_key_info_misc.go:91`）：Go 用钩子只是为了避开包的循环引用，Rust 没有这个问题；L2，没有可见差异。
 6. **`LogicalApply.ReplaceExprColumns` 的关联列共享改为显式同步**（`logical_apply.go:104`）：见 §4.6，结果与 Go 相同。
 7. **第 A、B 部分期间 EXPLAIN 无法比对**：`LogicalJoin.ExplainInfo` 和物理计划要到 D10.9 / D10.3 才有，第 A、B 部分只能比对逻辑计划快照（govec），EXPLAIN 文本只在 §3.8 序列完成后的 `tools/ab` 中比对。这是已知的检查空缺，不是行为差异。
-8. **权限检查按裁定 R29–R32**（§4.8）：join 中的表级 `SELECT`、`_tidb_rowid` 与 Go 有意不同，负责人已裁定。
+8. **权限检查按裁定 R29–R32**（§4.8）：join 中的表级 `SELECT`、`_tidb_rowid` 与 Go 有意不同，负责人已裁定。LATERAL 的 ON 子句见第 10 条（R36）。
 9. **临时边界差异（随对应块消失）**：`FULL OUTER JOIN`（Rust 解析器接受、Go 语法错误；`blocked-by:D02.2`，§4.7）、LATERAL（`blocked-by:D02.2` / 第 C 部分）、ON 里的子查询（`blocked-by:D09.6`，Go 报 1105）、`LogicalJoin.ExplainInfo`（`blocked-by:D10.9`）、`ExtractFD*`（`blocked-by:D09.14`）、物理 join 枚举（`blocked-by:D10.3`）、join 重排（`blocked-by:D09.10`）。
+10. **LATERAL 的 ON 子句登记列权限**（裁定 R36，负责人 2026-11-28 决定 B，§9.1 第 1 点）：Go 的 `buildLateralJoin` 改写 ON 时不切换 `checkColPriv`（`pkg/planner/core/logical_plan_builder.go:1068-1070`；对照普通 join 的切换 `:923-926`），而 `checkColPriv` 的默认值 `noCheckOption`（`planbuilder.go:207`）下改写器收集到的列不登记权限（`expression_rewriter.go:304-305`）。所以 v8.5.8 中只有 `SELECT(a)` 权限的用户可以在 `t1 JOIN LATERAL (...) d ON t1.b = d.x` 中引用 `t1.b`。tidb-rs 与普通 `JOIN ... ON` 一样登记 ON 中的列，没有列权限报 1143（Go 允许的语句 tidb-rs 报错，用户可见的错误差异，权限方向与 R29–R32 相同）。第 C 部分实现；在那之前 LATERAL 在解析阶段就停住（第 9 条），新栈上没有这条路径。
 
 ## 8. 读代码发现的可能的 Go 问题（均未复现）
 
-以下几条只读了 v8.5.8 的代码，**没有在 v8.5.8 上用 SQL 复现**（本次没有集群），不算问题。由对应部分的实现任务先复现：复现成立的按宪章第九条 3 处理并开 `upstream-pitfall` issue；不成立的删掉。涉及权限的一条（原第 1 条，LATERAL 的 ON 子句）属于安全问题，按 CLAUDE.md §2 第 6 条移到 §9.1 由负责人决定，不走第九条 3。
+以下几条只读了 v8.5.8 的代码，**没有在 v8.5.8 上用 SQL 复现**（本次没有集群），不算问题。由对应部分的实现任务先复现：复现成立的按宪章第九条 3 处理并开 `upstream-pitfall` issue；不成立的删掉。涉及权限的一条（原第 1 条，LATERAL 的 ON 子句）属于安全问题，按 CLAUDE.md §2 第 6 条移到 §9.1，负责人已决定 B（2026-11-28，裁定 R36），不走第九条 3。
 
-1. （原第 1 条已移到 §9.1 第 1 点。）
+1. （原第 1 条已移到 §9.1 第 1 点，负责人已决定。）
 2. **`ExtractUsedCols` 只在子节点是 `*LogicalJoin` 时查 `FullSchema`**（`logical_join.go:1124-1134`），而 `findJoinFullSchema`（`logical_plan_builder.go:652`）和 `findChildFullSchema`（`logical_apply.go:121`）会穿过 `LogicalSelection` 并认 `LogicalApply`。当 USING join 的冗余列被上层引用、而左子节点是 apply（LATERAL 叠在 USING join 上）时，列裁剪可能把这一列分给错误的一边或丢掉。复现：`SELECT t2.a FROM (t1 JOIN t2 USING (a)) JOIN LATERAL (SELECT t2.a AS x) d ON TRUE JOIN t3 ON ...` 一类语句，看是否报错或结果错误。第 C 部分。
 3. **`USING (a, a)` 中重复的列名不报错**（`logical_plan_builder.go:1102-1106, 1305`）：`filter` map 去重后只有一项，`len(filter) == commonLen`，不报错。Go 一侧评审人已在 v8.5.8 上确认不报错；是否与 MySQL 8.0 不同仍需对照（不确定 MySQL 的行为）。第 A 部分。
 
@@ -395,16 +397,17 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 
 按宪章第九条分两部分。
 
-### 9.1 需要负责人决定（宪章第九条 1）
+### 9.1 负责人已定（宪章第九条 1）
 
-**1. LATERAL 的 ON 子句是否登记列权限**（第 9.1 款 (a)：用户看得到的、长期保留的与 Go 不同的行为；涉及安全，CLAUDE.md §2 第 6 条）
+**1. LATERAL 的 ON 子句是否登记列权限**（第 9.1 款 (a)：用户看得到的、长期保留的与 Go 不同的行为；涉及安全，CLAUDE.md §2 第 6 条）——**负责人已定：B（2026-11-28）**
 
-- **背景**：Go 的 `checkColPriv` 默认是 `noCheckOption`（`planbuilder.go:207`），这时改写器收集到的列**不登记**权限（`expression_rewriter.go:304`）。`buildJoin` 改写 ON 时临时改为 `reportColumnErrOption`（`logical_plan_builder.go:923-926`），所以普通 `JOIN ... ON` 中引用的列要有列级 `SELECT` 权限，没有报 1143。`buildLateralJoin` 改写 ON 时没有这一步（`:1069-1072`，评审人读代码确认）。因此在 v8.5.8 中，只有 `SELECT(a)` 权限的用户可能在 `t1 JOIN LATERAL (...) d ON t1.b = d.x` 里引用没有权限的 `t1.b`，借过滤结果推断 `b` 的值。表级的 R29 不能挡住这种情况（用户有 `a` 列的权限，就有表的读权限）。**没有在 v8.5.8 上复现**（本次没有集群），只读了代码。
+- **背景**：Go 的 `checkColPriv` 默认是 `noCheckOption`（`planbuilder.go:207`），这时改写器收集到的列**不登记**权限（`expression_rewriter.go:304-305`）。`buildJoin` 改写 ON 时临时改为 `reportColumnErrOption`（`logical_plan_builder.go:923-926`），所以普通 `JOIN ... ON` 中引用的列要有列级 `SELECT` 权限，没有报 1143。`buildLateralJoin` 改写 ON 时没有这一步（`:1068-1072`，评审人读代码确认）。因此在 v8.5.8 中，只有 `SELECT(a)` 权限的用户可能在 `t1 JOIN LATERAL (...) d ON t1.b = d.x` 里引用没有权限的 `t1.b`，借过滤结果推断 `b` 的值。表级的 R29 不能挡住这种情况（用户有 `a` 列的权限，就有表的读权限）。**没有在 v8.5.8 上复现**（本次没有集群），只读了代码。
 - **选项**：
   - A：照 Go，LATERAL 的 ON 不登记列权限。与 Go 节点一致，但保留一个列级权限的旁路。
   - B：与普通 `JOIN ... ON` 一致，LATERAL 的 ON 也临时切换为 `reportColumnErrOption`，没有权限报 1143。与 Go 不同（Go 允许的语句 tidb-rs 报 1143），需要在 `docs/testing/rulings.toml` 加一条裁定。
-- **建议**：B。
-- **理由**：与 R29–R32 的方向一致（负责人已经为同类的权限旁路选了更严格的一边）；改动只是在 `buildLateralJoin` 中加上与 `buildJoin:923-926` 相同的切换和恢复；只影响 LATERAL，第 C 部分才会用到，不影响第 A、B 部分。决定之前第 C 部分不开工这一处；实现任务先在 v8.5.8 上复现，并按 CLAUDE.md §2 第 6 条开英文 issue。
+- **建议**：B。理由：与 R29–R32 的方向一致（负责人已经为同类的权限旁路选了更严格的一边）；改动只是在 `buildLateralJoin` 中加上与 `buildJoin:923-926` 相同的切换和恢复；只影响 LATERAL，第 C 部分才会用到，不影响第 A、B 部分。
+- **结论**：**负责人已定：B（`zhigang-du`，2026-11-28；由维护者 Maya 在 PR #482 转达）**。tidb-rs 像普通 `JOIN ... ON` 一样检查 LATERAL 的 ON 子句中的列权限，用户没有权限时报 1143。这是有意的与 Go 不同（Go 在这里不登记列权限），已登记为裁定 **R36**（`docs/testing/rulings.toml`，`class = "divergence"`，`plane = "error"`，`layer = "none"`，已决定、未实现），写入 `docs/compatibility.md` 的 "Privilege checks" 表和 §7 第 10 条。
+- **实现**（第 C 部分）：按 §4.8 第 6 条在 `build_lateral_join` 中切换并恢复 `check_col_priv`，配 §6.3 的 `lateral_on_clause_requires_column_privilege`，并把这个测试写进 R36 的 `test` 字段。实现任务先在 v8.5.8 上用 SQL 复现 Go 的行为，再按 CLAUDE.md §2 第 6 条在本仓库开英文 issue（`upstream-pitfall`），把 issue 编号补进 R36 的 `source` 和 §7 第 10 条。复现不成立（Go 实际上检查了这些列）时，R36 不再需要，按裁定的重开条件处理。
 
 ### 9.2 维护者已定（宪章第九条 2；以下均为提议，待 Lucky / Maya 确认）
 
@@ -477,6 +480,7 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 - N6：哈希聚合、哈希 join、排序的数据结构（例外，原则同意，尚无 spec）
 - N13：长期共享元数据与 `Arc<FieldType>` 写时复制
 - R29 / R30 / R31 / R32：负责人 2026-11-26 对权限检查的裁定（每个数据源登记表级 `SELECT`；先查表级再查列级；表不存在时按语句的权限检查；读 `_tidb_rowid` 要整表 `SELECT`），见 `docs/testing/rulings.toml`
+- R36：负责人 2026-11-28 的裁定，LATERAL 的 ON 子句像普通 join 的 ON 一样登记列权限（§9.1 第 1 点），见 `docs/testing/rulings.toml`
 - S / V0 / V1：N1 §5 共享修改审计的结论（S：只改本处新建或已复制的对象；V0：共享但没有可见影响；V1：共享且改变计划、结果或客户端列定义）
 - VS1 / VS1-23：第一条纵向切片及其逻辑算子与基本规则任务
 - X：不在 tidb-rs 范围内的代码（写路径等）
