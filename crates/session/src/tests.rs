@@ -3738,4 +3738,119 @@ fn multi_group_table_reader_fallback_leaves_stmt_ctx_untouched() {
     assert!(s.is_idle(), "{}", s.state_snapshot());
 }
 
+/// End-to-end session test for D04.1 / D13.1 (`specs/D04.1-privilege/spec.md` §5.2 item 8):
+/// `PREPARE -> EXECUTE (miss) -> EXECUTE (plan cache hit + PointGet executor reuse) -> live REVOKE
+/// -> EXECUTE` must reject with `1142` BEFORE `is_safe_to_reuse_point_get_executor` / `ExecStmt::point_get`
+/// can reuse the cached PointGet executor, including for `SELECT 1 FROM sbtest1 WHERE id = ?` (R29).
+/// Two sessions with different users sharing one `InstancePlanCacheImpl` must not share cached plans.
+#[test]
+fn point_get_executor_reuse_blocked_immediately_after_revoke() {
+    use tidb_base::mysql::{PrivilegeType, SelectPriv};
+    use tidb_parser::auth::UserIdentity;
+    use tidb_privilege::{Handle, MySQLPrivilege, TablesPrivRecord, UserPrivileges, UserRecord};
+
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    put_row(&store, 110, 1, 2, "one");
+    put_row(&store, 110, 2, 2, "two");
+    let cache = new_test_cache();
+
+    let make_priv = |users: &[&str]| {
+        let mut p = MySQLPrivilege::new();
+        for u in users {
+            p.add_user(UserRecord::new("%", *u, PrivilegeType(0)));
+            p.add_table_priv(TablesPrivRecord::new(
+                *u, "%", "test", "sbtest1", SelectPriv,
+            ));
+        }
+        p
+    };
+
+    let handle = Arc::new(Handle::new(make_priv(&["u_tbl", "u_other"])));
+    let bind_user = |s: &mut Session, user: &str| {
+        s.core.sctx.vars.user = Some(UserIdentity {
+            username: user.to_owned(),
+            hostname: "%".to_owned(),
+            ..Default::default()
+        });
+        let up = UserPrivileges::new(user, "%", Arc::clone(&handle));
+        s.set_privilege_manager(Some(Arc::new(up)));
+    };
+
+    let mut s1 = cached_session(&store, sbtest_info_schema(), &cache);
+    bind_user(&mut s1, "u_tbl");
+    let int = tidb_types::datum::new_int_datum;
+
+    // Prepare both column-reading and constant-projection (R29) point gets.
+    let p_col = block_on(s1.prepare_stmt(SBTEST_POINT)).unwrap();
+    let p_const = block_on(s1.prepare_stmt("SELECT 1 FROM sbtest1 WHERE id = ?")).unwrap();
+
+    // 1st EXECUTE (miss) + 2nd EXECUTE (plan cache hit + cached PointGet executor reuse).
+    assert_eq!(
+        execute_rows(&mut s1, p_col.stmt_id, int(1)),
+        (vec!["one".to_owned()], false)
+    );
+    assert!(prepared_of(&s1, p_col.stmt_id, |p| p
+        .point_get
+        .executor
+        .is_some()));
+    assert_eq!(
+        execute_rows(&mut s1, p_col.stmt_id, int(2)),
+        (vec!["two".to_owned()], true)
+    );
+
+    // Same for R29 constant projection `SELECT 1 FROM sbtest1 WHERE id = ?` (Projection over PointGet).
+    {
+        let mut rs = block_on(s1.execute_prepared_stmt(p_const.stmt_id, vec![int(1)]))
+            .unwrap()
+            .expect("result set");
+        let mut chk = rs.new_chunk().unwrap();
+        block_on(rs.next(&mut s1, &mut chk)).unwrap();
+        assert_eq!(chk.num_rows(), 1);
+        assert_eq!(chk.get_row(0).get_int64(0), 1);
+        block_on(rs.close(&mut s1)).unwrap();
+        assert!(!s1.vars().found_in_plan_cache);
+
+        let mut rs = block_on(s1.execute_prepared_stmt(p_const.stmt_id, vec![int(2)]))
+            .unwrap()
+            .expect("result set");
+        let mut chk = rs.new_chunk().unwrap();
+        block_on(rs.next(&mut s1, &mut chk)).unwrap();
+        assert_eq!(chk.num_rows(), 1);
+        assert_eq!(chk.get_row(0).get_int64(0), 1);
+        block_on(rs.close(&mut s1)).unwrap();
+        assert!(s1.vars().found_in_plan_cache);
+    }
+
+    // Cross-user isolation: u_other sharing the same InstancePlanCacheImpl must miss on 1st EXECUTE.
+    let mut s2 = cached_session(&store, sbtest_info_schema(), &cache);
+    bind_user(&mut s2, "u_other");
+    let p_other = block_on(s2.prepare_stmt(SBTEST_POINT)).unwrap();
+    assert_eq!(
+        execute_rows(&mut s2, p_other.stmt_id, int(1)),
+        (vec!["one".to_owned()], false)
+    );
+
+    // Live REVOKE u_tbl (u_other keeps SELECT): cached PointGetExecutor MUST NOT execute for u_tbl!
+    handle.replace(make_priv(&["u_other"]));
+
+    for stmt_id in [p_col.stmt_id, p_const.stmt_id] {
+        let err = block_on(s1.execute_prepared_stmt(stmt_id, vec![int(1)]))
+            .err()
+            .expect("revoked user must be denied before PointGet executor reuse");
+        assert_eq!(err.code(), 1142, "stmt_id={stmt_id} err={err}");
+        assert!(!s1.vars().found_in_plan_cache);
+        assert!(s1.is_idle(), "{}", s1.state_snapshot());
+    }
+
+    // u_other is unaffected and still hits its own cached plan.
+    assert_eq!(
+        execute_rows(&mut s2, p_other.stmt_id, int(2)),
+        (vec!["two".to_owned()], true)
+    );
+    s1.drop_prepared_stmt(p_col.stmt_id).unwrap();
+    s1.drop_prepared_stmt(p_const.stmt_id).unwrap();
+    s2.drop_prepared_stmt(p_other.stmt_id).unwrap();
+}
+
 mod sbtest_results;

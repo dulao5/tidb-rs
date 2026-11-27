@@ -212,13 +212,22 @@ fn prepare_builds_the_plan_after_the_cacheability_warning() {
 fn execute_checks_the_parameter_count_and_sets_the_values_in_order() {
     let mut v = vars();
     let mut s = stmt("select ?, ?", vec![7, 10], 1);
-    let e = plan_cache_preprocess(&mut v, false, &Is(1), None, &mut s, &[new_int_datum(1)])
-        .unwrap_err();
+    let e = plan_cache_preprocess(
+        &mut v,
+        false,
+        &Is(1),
+        None,
+        None,
+        &mut s,
+        &[new_int_datum(1)],
+    )
+    .unwrap_err();
     assert_eq!(e.code(), 8112, "{e}"); // ErrWrongParamCount
     plan_cache_preprocess(
         &mut v,
         false,
         &Is(1),
+        None,
         None,
         &mut s,
         &[new_int_datum(1), new_string_datum("a")],
@@ -240,17 +249,35 @@ fn execute_after_a_schema_change_preprocesses_again() {
     let mut s = stmt("select ?", vec![7], 1);
     s.point_get.executor = Some(Box::new(1u8));
     let ctx_before = Arc::clone(&s.resolve_ctx);
-    plan_cache_preprocess(&mut v, false, &Is(2), None, &mut s, &[Datum::default()]).unwrap();
+    plan_cache_preprocess(
+        &mut v,
+        false,
+        &Is(2),
+        None,
+        None,
+        &mut s,
+        &[Datum::default()],
+    )
+    .unwrap();
     assert_eq!(s.schema_version, 2);
     assert!(s.point_get.executor.is_none());
     assert!(!Arc::ptr_eq(&ctx_before, &s.resolve_ctx));
     // Same version: nothing is redone.
     s.point_get.executor = Some(Box::new(1u8));
-    plan_cache_preprocess(&mut v, false, &Is(2), None, &mut s, &[Datum::default()]).unwrap();
+    plan_cache_preprocess(
+        &mut v,
+        false,
+        &Is(2),
+        None,
+        None,
+        &mut s,
+        &[Datum::default()],
+    )
+    .unwrap();
     assert!(s.point_get.executor.is_some());
 
     let mut s = stmt("select * from (select 1) a, (select 2) a", vec![], 1);
-    let e = plan_cache_preprocess(&mut v, false, &Is(2), None, &mut s, &[]).unwrap_err();
+    let e = plan_cache_preprocess(&mut v, false, &Is(2), None, None, &mut s, &[]).unwrap_err();
     assert_eq!(e.code(), 8113, "{e}");
     assert_eq!(
         String::from_utf8_lossy(&e.get_msg()),
