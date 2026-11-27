@@ -75,6 +75,11 @@ file and over any task description.
    and early return).
 9. **Shared plans are immutable**: executors never write a plan (`crates/executor/clippy.toml`
    forbids `make_mut_plan` / `map_children`); keep per-execution state in the executor.
+10. **Audit log plugin hooks (#448)**: when porting code in `tidb-server`, `tidb-session`, or
+    `crates/poc/server` that has a Go plugin hook (`plugin.ForeachPlugin(plugin.Audit, ...)`,
+    `OnGeneralEvent`, `OnConnectionEvent`, `OnParseEvent`, `plugin.Load`/`Init`/`Shutdown`),
+    leave `// TODO(audit-plugin #448): Go calls <hook> here (<go-file>:<line>).` at the exact
+    spot instead of silently dropping it.
 
 ## 3. Verify before opening a PR
 
