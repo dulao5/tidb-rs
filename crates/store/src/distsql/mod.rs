@@ -87,7 +87,16 @@ async fn select_impl(
         .instance
         .enable_collect_execution_info
         .load();
-    // log-skip: pkg/distsql/distsql.go:72 eventCb not wired in ClientSendOption (logged directly by coprocessor.rs)
+    let start_ts = kv_req.start_ts;
+    let original_sql = dctx.original_sql.clone();
+    let on_cop_meet_lock: tidb_kv::kv::CopMeetLockCallback = Arc::new(move |lock| {
+        tidb_base::log_debug!(
+            "coprocessor encounters lock",
+            "startTS" => start_ts,
+            "lock" => lock,
+            "stmt" => original_sql.as_str(),
+        );
+    });
     // log-skip: pkg/distsql/distsql.go:97 failpoint setting TryCopLiteWorker not ported
     let option = ClientSendOption {
         session_mem_tracker: dctx.session_mem_tracker.clone(),
@@ -95,6 +104,7 @@ async fn select_impl(
         enable_collect_execution_info,
         append_warning: None,
         try_cop_lite_worker: Some(Arc::clone(&dctx.try_cop_lite_worker)),
+        on_cop_meet_lock: Some(on_cop_meet_lock),
     };
 
     let Some(client) = &dctx.client else {

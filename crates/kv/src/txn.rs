@@ -114,11 +114,10 @@ pub fn print_long_time_internal_txn(now: SystemTime, start_ts: u64, run_by_funct
             let since_epoch = inner_txn_start_time
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default();
-            let start_log_time = tidb_base::structured_log::LogTime {
-                secs: since_epoch.as_secs() as i64,
-                nanos: since_epoch.subsec_nanos(),
-                offset_secs: 0,
-            };
+            let start_log_time = tidb_base::structured_log::LogTime::from_local_unix(
+                since_epoch.as_secs() as i64,
+                since_epoch.subsec_nanos(),
+            );
             tidb_base::log_info!(
                 &info_header,
                 "time" => elapsed,
