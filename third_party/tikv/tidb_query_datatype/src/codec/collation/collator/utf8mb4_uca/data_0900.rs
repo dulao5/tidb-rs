@@ -18,7 +18,8 @@ impl UnicodeVersion for Unicode0900 {
     #[inline]
     fn char_weight(ch: char) -> u128 {
         let r = ch as usize;
-        if r > UNICODE_CI_TABLE.len() {
+        // tidb-rs local patch (#524): `>=`, as in Go TiDB's fix; `>` indexed past the table.
+        if r >= UNICODE_CI_TABLE.len() {
             return (r as u128 >> 15) + 0xFBC0 + (((r as u128 & 0x7FFF) | 0x8000) << 16);
         }
 

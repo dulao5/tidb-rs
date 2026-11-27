@@ -24,7 +24,8 @@ build behaves exactly as before. tidb-rs leaves all three features off.
 
 ## Crates
 
-Each crate below is copied unmodified from `components/<crate>` at the commit above.
+Each crate below is copied from `components/<crate>` at the commit above. Two files carry the
+local patches listed under "Local modifications"; everything else is unmodified.
 
 | Crate | Purpose |
 |---|---|
@@ -40,8 +41,24 @@ Each crate below is copied unmodified from `components/<crate>` at the commit ab
 
 ## Local modifications
 
-None. Every crate directory is byte-identical to the upstream tree at the commit above. Make any
-change to these crates on the TiKV branch, then re-sync.
+Every crate directory is byte-identical to the upstream tree at the commit above, except for the
+local patches in the table below. Make any other change to these crates on the TiKV branch, then
+re-sync.
+
+| Patch | File | Change | Why |
+|---|---|---|---|
+| #523 | `tidb_query_expr/src/impl_arithmetic.rs`, `IntIntMod::calc` | `lhs % rhs` becomes `lhs.wrapping_rem(*rhs)` | `i64::MIN % -1` panicked ("attempt to calculate the remainder with overflow"). Go TiDB v8.5.8 (`a % b` in `builtinArithmeticModIntSignedSignedSig`) and MySQL give 0. |
+| #524 | `tidb_query_datatype/src/codec/collation/collator/utf8mb4_uca/data_0900.rs`, `Unicode0900::char_weight` | the guard `r > UNICODE_CI_TABLE.len()` becomes `r >= …` | U+2CEA1, the first code point past the 0x2CEA1-entry table, indexed past its end ("index out of bounds: the len is 183969"). This is the same off-by-one that upstream Go fixed after v8.5.8 (`pingcap/tidb#67149`, ruling R3 in `docs/testing/rulings.toml`, #294). With `>=` TiKV gives the implicit weight that tidb-rs's collator gives. |
+
+Both patches were decided by the project owner, zhigang-du, on 2026-11-27: fix the problem in the
+local TiKV fork now, open an issue in this repository recording that upstream TiKV is affected,
+and leave reporting it to TiKV to the owner. Upstream TiKV is still affected; the patches are not
+on the TiKV branch above. Each line carries a `tidb-rs local patch (#N)` comment.
+
+`tools/sync-tikv-query.sh` replaces the crate directories, so a re-sync drops both patches.
+Re-apply them, or carry them on the TiKV branch, when re-syncing.
+`crates/query-smoke/tests/tikv_local_patches.rs` and the coprocessor evaluation oracle
+(`crates/query-smoke/tests/copr_eval_oracle.rs`) fail if either patch is lost.
 
 Everything that is specific to tidb-rs lives outside this directory:
 

@@ -342,6 +342,8 @@ const STRING_VALUES: &[&str] = &[
     "ß",
     "ss",
     "中",
+    // U+2CEA1: the first code point past the utf8mb4_0900_ai_ci weight table (ruling R3).
+    "\u{2CEA1}",
     "0",
     "1",
     "-1",
@@ -401,7 +403,10 @@ fn arg_types() -> Vec<ArgType> {
     };
 
     let ft = num_ft(mysql::TypeLonglong, 20, 0, false);
-    let vals = ints(&ft, &[0, 1, 2, -2, 7, i64::MIN, i64::MIN + 1, i64::MAX, 64]);
+    let vals = ints(
+        &ft,
+        &[0, 1, -1, 2, -2, 7, i64::MIN, i64::MIN + 1, i64::MAX, 64],
+    );
     push("bigint", ft, vals);
     let ft = num_ft(mysql::TypeLonglong, 20, 0, true);
     let vals = uints(&ft, &[0, 1, 2, 7, (1 << 63) - 1, 1 << 63, u64::MAX]);

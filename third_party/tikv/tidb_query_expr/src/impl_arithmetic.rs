@@ -221,7 +221,8 @@ impl ArithmeticOp for IntIntMod {
         if *rhs == 0i64 {
             return Ok(None);
         }
-        Ok(Some(lhs % rhs))
+        // tidb-rs local patch (#523): `i64::MIN % -1` is 0, as in Go TiDB; `%` panics.
+        Ok(Some(lhs.wrapping_rem(*rhs)))
     }
 }
 
