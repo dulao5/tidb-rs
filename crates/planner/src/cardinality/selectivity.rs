@@ -354,8 +354,9 @@ pub fn selectivity(
                 // A boundary of the port is not "something wrong": it is returned as is.
                 Err(e) if tidb_base::blocked::blocked_by(&e).is_some() => return Err(e),
                 Err(e) => {
-                    log::debug!(
-                        "something wrong happened, use the default selectivity, error: {e}"
+                    tidb_base::log_debug!(
+                        "something wrong happened, use the default selectivity",
+                        "error" => &e,
                     );
                     selectionFactor
                 }

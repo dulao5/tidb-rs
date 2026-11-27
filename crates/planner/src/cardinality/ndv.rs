@@ -89,10 +89,12 @@ pub fn estimate_cols_ndv_with_matched_len(
         );
     }
     let Some(indices) = schema.columns_indices(cols) else {
-        log::error!(
-            "column not found in schema, columns: {:?}, schema: {}",
-            cols.iter().map(|c| c.unique_id).collect::<Vec<_>>(),
-            String::from_utf8_lossy(&schema.to_string())
+        let col_ids: Vec<i64> = cols.iter().map(|c| c.unique_id).collect();
+        let schema_str = schema.to_string();
+        tidb_base::log_error!(
+            "column not found in schema",
+            "columns" => col_ids.as_slice(),
+            "schema" => tidb_base::structured_log::LogValue::Bytes(&schema_str),
         );
         return (ndv, 1);
     };

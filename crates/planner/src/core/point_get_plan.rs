@@ -705,10 +705,13 @@ pub fn get_visit_info(
     cols_in_where: &[String],
 ) -> Option<Vec<VisitInfo>> {
     if output_names.len() != unfold.len() {
-        log::error!(
-            "outputNames length {} not equal to unfold length {}",
-            output_names.len(),
-            unfold.len()
+        let stack =
+            tidb_base::errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture());
+        tidb_base::log_error!(
+            "outputNames length %d not equal to unfold length %d",
+            "outputNames" => output_names.len() as i64,
+            "unfold" => unfold.len() as i64,
+            "stack" => stack.as_str(),
         );
         return None;
     }
@@ -1038,6 +1041,8 @@ fn check_tbl_index_for_point_plan<T>(
 ) -> Result<Option<PointGetPlan>, Error> {
     let mut check = check || ctx.vars.is_isolation(ReadCommitted);
     check = check && ctx.vars.connection_id > 0;
+    // log-skip: checkTblIndexForPointPlan:1569 domainmisc.GetLatestIndexInfo is blocked-by:D06.5
+    // log-skip: checkTblIndexForPointPlan:1589 domainmisc.GetLatestIndexInfo is blocked-by:D06.5
 
     let tbl = &tbl_name.table_info;
     let mut db_name = tbl_name_schema.l.clone();

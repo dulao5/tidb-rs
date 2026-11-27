@@ -242,6 +242,7 @@ impl SessCtx {
     /// statements run on the PoC), else the transaction's, else the domain's.
     // go: session.GetInfoSchema L2 (no SnapshotInfoschema / temporary tables: D06.5, D06.4)
     pub fn get_info_schema(&self) -> InfoSchemaRef {
+        // log-skip: session.GetInfoSchema:4494 SnapshotInfoschema is blocked-by:D06.5
         if let Some(is) = &self.vars.state.txn_ctx.info_schema
             && let Ok(is) = Arc::clone(&is.0).downcast::<tidb_infoschema::InfoSchemaV2>()
         {
@@ -390,11 +391,43 @@ impl SessCtx {
         } else {
             let err = self.do_commit().await;
             // tryReplaceWriteConflictError / retry: write conflicts (write path).
+            // log-skip: session.doCommitWithRetry:819 write-conflict retry is write path
+            if let Err(e) = &err
+                && !err_is_noisy(e)
+            {
+                let is_batch_insert = tidb_sessionctx::variable::varsutil::tidb_opt_on(
+                    &self.vars.get_system_var("tidb_batch_insert").0,
+                );
+                let retry_limit = self
+                    .vars
+                    .get_system_var("tidb_retry_limit")
+                    .0
+                    .parse::<i64>()
+                    .unwrap_or(10);
+                let disable_txn_auto_retry = tidb_sessionctx::variable::varsutil::tidb_opt_on(
+                    &self.vars.get_system_var("tidb_disable_txn_auto_retry").0,
+                );
+                tidb_base::log_warn!(
+                    "can not retry txn",
+                    "label" => self.get_sql_label(),
+                    "error" => e,
+                    "IsBatchInsert" => is_batch_insert,
+                    "IsPessimistic" => self.vars.state.txn_ctx.is_pessimistic,
+                    "InRestrictedSQL" => self.vars.in_restricted_sql,
+                    "tidb_retry_limit" => retry_limit,
+                    "tidb_disable_txn_auto_retry" => disable_txn_auto_retry,
+                );
+            }
             // recordOnTransactionExecution(err, TxnCtx.StatementCount, ...): D14.1.
             if let Err(e) = &err
                 && !err_is_noisy(e)
             {
-                log::warn!("commit failed: {e}");
+                let finished_txn = self.txn.go_string();
+                tidb_base::log_warn!(
+                    "commit failed",
+                    "finished txn" => finished_txn.as_str(),
+                    "error" => e,
+                );
             }
             // updateStatsDeltaToCollector: table deltas (write path).
             err
@@ -427,10 +460,8 @@ impl SessCtx {
     /// of them).
     // go-part: session.RollbackTxn
     fn rollback_txn_state_in(&mut self, in_close_session: bool) {
-        if self.txn.valid()
-            && let Err(e) = self.txn.rollback()
-        {
-            log::error!("{e}");
+        if self.txn.valid() {
+            tidb_base::terror::log(self.txn.rollback().err().as_ref());
         }
         if !in_close_session {
             self.clean_retry_info();
@@ -478,7 +509,7 @@ impl SessCtx {
                     match session_plan_cache_key(&obj.lock()) {
                         Ok((key, ..)) => cache_key = key,
                         Err(e) => {
-                            log::warn!("clean cached plan failed: {e}");
+                            tidb_base::log_warn!("clean cached plan failed", "error" => &e);
                             return;
                         }
                     }
@@ -493,7 +524,7 @@ impl SessCtx {
                     match session_plan_cache_key(&obj.lock()) {
                         Ok((key, ..)) => cache_key = key,
                         Err(e) => {
-                            log::warn!("clean cached plan failed: {e}");
+                            tidb_base::log_warn!("clean cached plan failed", "error" => &e);
                             return;
                         }
                     }
@@ -534,6 +565,7 @@ impl SessCtx {
         if self.common_global_loaded {
             return Ok(());
         }
+        // log-skip: session.loadCommonGlobalVariablesIfNeeded:4154 bootstrap/upgrade Initing branch does not apply to new session
         self.common_global_loaded = true;
 
         // Deep copy sessionvar cache
@@ -740,7 +772,7 @@ impl SessionCore {
     /// Internal statements read the request source from the context (`kv.RequestSourceKey`):
     /// the new stack runs no internal statement.
     // go: session.setRequestSource L2 (no internal statements on the new stack)
-    fn set_request_source(&mut self, stmt_label: &str) {
+    fn set_request_source(&mut self, stmt_label: &str, stmt_text: &str) {
         if !self.sctx.is_internal() {
             let mut label = stmt_label.to_owned();
             if self.sctx.txn.valid() {
@@ -756,8 +788,10 @@ impl SessionCore {
             self.sctx.vars.request_source_type = label;
             return;
         }
-        log::warn!(
-            "unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"
+        tidb_base::log_warn!(
+            "unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context",
+            "internal" => self.sctx.is_internal(),
+            "sql" => stmt_text,
         );
     }
 
@@ -1140,16 +1174,17 @@ pub fn is_end_txn_stmt(stmt: &ast::Stmt, vars: &SessionVars) -> Result<bool, Err
 /// The crucial operations Go logs (DDL, user and privilege statements) are not in the Rust
 /// AST and never reach the new stack: every statement is a general query.
 // go: logStmt L2 (the crucial statements are not in the Rust AST)
-fn log_stmt(exec_stmt: &ExecStmt, s: &SessionCore) {
+fn log_stmt(exec_stmt: &ExecStmt, s: &mut SessionCore) {
+    // log-skip: logStmt:4322 crucial DDL/user/privilege statements are not in the Rust AST
+    // log-skip: logStmt:4328 crucial DDL/user/privilege statements are not in the Rust AST
     log_general_query(exec_stmt, s, false);
 }
 
 // go: logGeneralQuery L2 (the user's login string comes with D04.1)
-fn log_general_query(exec_stmt: &ExecStmt, s: &SessionCore, is_prepared: bool) {
-    let vars = &s.sctx.vars;
+fn log_general_query(exec_stmt: &ExecStmt, s: &mut SessionCore, is_prepared: bool) {
     if tidb_sessionctx::variable::tidb_vars::ProcessGeneralLog
         .load(std::sync::atomic::Ordering::SeqCst)
-        && !vars.in_restricted_sql
+        && !s.sctx.vars.in_restricted_sql
     {
         let mut query = if is_prepared {
             exec_stmt.origin_text().to_owned()
@@ -1160,29 +1195,32 @@ fn log_general_query(exec_stmt: &ExecStmt, s: &SessionCore, is_prepared: bool) {
             }
         };
 
-        query = tidb_executor::adapter::format_sql(&query);
+        query = tidb_executor::adapter::query_replacer_replace(&query);
+        let schema_version = tidb_sessionctx::expropt::MetaOnlyInfoSchema::schema_meta_version(
+            &*s.sctx.get_info_schema(),
+        );
+        let is_read_consistency = s.sctx.vars.is_isolation("READ-COMMITTED");
+        let vars = &s.sctx.vars;
         if vars.enable_redact_log != tidb_base::errors::RedactLogEnable {
             query.push_str(&tidb_base::redact::string(
                 &vars.enable_redact_log,
                 &String::from_utf8_lossy(&vars.state.plan_cache_params.lock().string()),
             ));
         }
-        log::info!(
-            target: "general_log",
-            "GENERAL_LOG conn={} session_alias={} user={:?} schemaVersion={} txnStartTS={} \
-             forUpdateTS={} isReadConsistency={} currentDB={} isPessimistic={} \
-             sessionTxnMode={} sql={}",
-            vars.connection_id,
-            vars.session_alias,
-            "", // vars.User.LoginString(): the user comes with D04.1
-            tidb_sessionctx::expropt::MetaOnlyInfoSchema::schema_meta_version(&*s.sctx.get_info_schema()),
-            vars.state.txn_ctx.start_ts,
-            vars.state.txn_ctx.get_for_update_ts(),
-            vars.state.txn_ctx.isolation == "READ-COMMITTED",
-            vars.current_db,
-            vars.state.txn_ctx.is_pessimistic,
-            vars.get_readable_txn_mode(),
-            query
+        let txn_mode = vars.get_readable_txn_mode();
+        tidb_base::log_general!(
+            "GENERAL_LOG",
+            "conn" => vars.connection_id,
+            "session_alias" => vars.session_alias.as_str(),
+            "user" => "", // vars.User.LoginString(): the user comes with D04.1
+            "schemaVersion" => schema_version,
+            "txnStartTS" => vars.state.txn_ctx.start_ts,
+            "forUpdateTS" => vars.state.txn_ctx.get_for_update_ts(),
+            "isReadConsistency" => is_read_consistency,
+            "currentDB" => vars.current_db.as_str(),
+            "isPessimistic" => vars.state.txn_ctx.is_pessimistic,
+            "sessionTxnMode" => txn_mode.as_str(),
+            "sql" => query.as_str(),
         );
     }
 }
@@ -1438,6 +1476,7 @@ impl Session {
     // go: session.Close L2 (table / advisory locks, stats and index usage collectors, bindings, plan cache: not on the read-only node or not ported)
     pub fn close(&mut self) {
         self.running = None;
+        // log-skip: session.Close:2724 table locks are not held on the read-only node
         // RollbackTxn(context.WithValue(ctx, inCloseSession{}, struct{}{})).
         self.core.sctx.rollback_txn_state_in(true);
         self.core.txn_manager.on_txn_end(&self.core.sctx);
@@ -1539,17 +1578,18 @@ impl Session {
         if stmt_label.is_empty() {
             stmt_label = crate::glue::get_stmt_label(&stmt_node)?;
         }
-        self.core.set_request_source(&stmt_label);
+        let text = self.core.sctx.vars.stmt_ctx().original_sql.clone();
+        self.core.set_request_source(&stmt_label, &text);
 
         // The planner's table lookups do not read TiKV (D06.3 spec §11.2).
         load_stmt_tables(&self.core.sctx, &stmt_node).await;
 
         // Transform abstract syntax tree to a physical plan(stored in executor.ExecStmt).
-        let text = self.core.sctx.vars.stmt_ctx().original_sql.clone();
         let compiler = Compiler;
         // The statement is handed over to Compile, which freezes it after planning (spec §9.2).
         let stmt = compiler.compile(&mut self.core, stmt_node, &text);
         // The resource group hint check (StmtCtx.ResourceGroupName): resource control, N10.
+        // log-skip: session.ExecuteStmt:2118 resource group hint check is blocked-by:N10
         let stmt = match stmt {
             Ok(stmt) => {
                 // Go's transaction manager holds the node since OnStmtStart; here it gets the
@@ -1597,7 +1637,7 @@ impl Session {
         }
 
         // Execute the physical plan.
-        log_stmt(&stmt, &self.core);
+        log_stmt(&stmt, &mut self.core);
 
         let r = if stmt.ps_stmt.is_some() {
             // point plan short path
@@ -1654,7 +1694,7 @@ impl Session {
         let rs = run.rs.lock().take();
         if let Some(mut rs) = rs {
             if let Err(e) = crate::exec_result::close_running(self, &mut rs).await {
-                log::warn!("finish an unfinished statement: {e}");
+                tidb_base::log_warn!("finish an unfinished statement", "error" => &e);
             }
             return;
         }
@@ -1665,7 +1705,7 @@ impl Session {
         if run.wrapped && !run.finished {
             run.finished = true;
             if let Err(e) = finish_stmt(&mut self.core, None, &run.stmt).await {
-                log::warn!("finish an unfinished statement: {e}");
+                tidb_base::log_warn!("finish an unfinished statement", "error" => &e);
             }
         }
         let last_err = crate::exec_result::join_errors(&run.last_errs);
@@ -1734,6 +1774,7 @@ impl Session {
                 // cache (A3, see above), so this is not reached.
                 core.rollback_on_error();
                 // glue: blocked-by:D13.1 (the prepare dedup cache is the plan-cache exception A3)
+                // log-skip: session.PrepareStmt:2538 prepare dedup cache rebuild is blocked-by:D13.1 (A3)
                 return Err(blocked(
                     "D13.1",
                     "the prepare dedup cache (the plan-cache exception A3)",
@@ -1785,7 +1826,7 @@ impl Session {
         params: Vec<Datum>,
     ) -> Result<Option<ExecStmtResult>, Error> {
         let Ok(prep_stmt) = self.core.sctx.vars.get_prepared_stmt_by_id(stmt_id) else {
-            log::error!("prepared statement not found, stmtID: {stmt_id}");
+            tidb_base::log_error!("prepared statement not found", "stmtID" => u64::from(stmt_id));
             return Err(ErrStmtNotFound.clone());
         };
         if !prep_stmt.is::<parking_lot::Mutex<PlanCacheStmt>>() {
@@ -1980,15 +2021,17 @@ pub(crate) async fn run_stmt(
 /// reports a job as done on this node only if no session still uses an older schema version
 /// of the job's tables. Ported per Go (`session.go:4936-4961`; the gaps of Go's rule are
 /// recorded in #252, `go-gap`). `job2ids` holds each job's table IDs (Go passes the
-/// comma-separated string and parses it here, `util.Str2Int64Map`). Go logs a transaction
-/// that blocks a DDL for over a minute; that log needs `TxnCtx.StartTS` and is left to the
-/// reporting hook ([`report_metadata_locks`]). Nothing calls it yet: see that hook.
-// go: RemoveLockDDLJobs L2 (the log of a long blocking transaction is left to the reporting hook)
+/// comma-separated string and parses it here, `util.Str2Int64Map`). Has no production caller
+/// yet (`mdlCheckLoop` / [`report_metadata_locks`] is `blocked-by:D06.5`); `print_log` is kept
+/// so the long-blocking-txn logs can be enabled when wired.
+// go: RemoveLockDDLJobs L2 (no production caller yet; long-blocking-txn logs blocked-by:D06.5)
 pub fn remove_lock_ddl_jobs(
     vars: &SessionVars,
     job2ver: &mut HashMap<i64, i64>,
     job2ids: &HashMap<i64, std::collections::HashSet<i64>>,
+    print_log: bool,
 ) {
+    let _ = print_log;
     if vars.in_restricted_sql {
         return;
     }
@@ -1996,6 +2039,8 @@ pub fn remove_lock_ddl_jobs(
         return;
     };
     for (tbl_id, value) in mdl.0.lock().iter() {
+        // log-skip: RemoveLockDDLJobs:4953 no production caller yet (mdlCheckLoop is blocked-by:D06.5)
+        // log-skip: RemoveLockDDLJobs:4955 no production caller yet (mdlCheckLoop is blocked-by:D06.5)
         job2ver.retain(|job_id, ver| {
             let holds = job2ids.get(job_id).is_some_and(|ids| ids.contains(tbl_id));
             !(holds && *value < *ver)

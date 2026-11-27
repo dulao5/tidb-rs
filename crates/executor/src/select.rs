@@ -224,7 +224,10 @@ impl Executor for LimitExec {
 
         let elapsed = start.elapsed();
         if elapsed > Duration::from_millis(1) {
-            log::info!("limit executor close takes a long time, elapsed={elapsed:?}");
+            tidb_base::log_info!(
+                "limit executor close takes a long time",
+                "elapsed" => elapsed,
+            );
         }
         err
     }
@@ -587,6 +590,7 @@ pub fn reset_context_of_stmt(
     s: &ast::Stmt,
     text: &str,
 ) -> Result<(), Error> {
+    // log-skip: ResetContextOfStmt:925 panics are caught at the task boundary (M-PANIC)
     let killer = ctx.sql_killer();
     let vars = ctx.get_session_vars_mut();
     let restore: Vec<(String, String)> = vars
@@ -598,8 +602,10 @@ pub fn reset_context_of_stmt(
         .collect();
     for (name, val) in restore {
         if vars.set_system_var(&name, &val).is_err() {
-            log::warn!(
-                "Failed to restore the variable after SET_VAR hint, variable name={name}, expected value={val}"
+            tidb_base::log_warn!(
+                "Failed to restore the variable after SET_VAR hint",
+                "variable name" => name.as_str(),
+                "expected value" => val.as_str(),
             );
         }
     }

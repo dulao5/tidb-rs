@@ -1128,6 +1128,7 @@ fn try_lock_mdl_inner(
             && tbl.update_ts == table_info.update_ts);
     if !same_table {
         // glue: blocked-by:D06.3 (SessionExtendedInfoSchema.UpdateTableInfo: a table newer than the transaction's InfoSchema)
+        // log-skip: tryLockMDLAndUpdateSchemaIfNecessary:2180 SessionExtendedInfoSchema.UpdateTableInfo is blocked-by:D06.3
         return Err(blocked(
             "D06.3",
             "a table definition newer than the transaction's InfoSchema (SessionExtendedInfoSchema.UpdateTableInfo)",
@@ -1183,12 +1184,12 @@ pub fn check_table_change(
         if let Some(&colid) = info_columns.get(&col.name.l)
             && colid != col.id
         {
-            log::info!(
-                "public column changed column={} old_col={} new id={} old id={}",
-                col.name.l,
-                col.name.l,
-                col.id,
-                col.id
+            tidb_base::log_info!(
+                "public column changed",
+                "column" => col.name.l.as_str(),
+                "old_col" => col.name.l.as_str(),
+                "new id" => col.id,
+                "old id" => col.id,
             );
             return Err(tidb_domain::ErrInfoSchemaChanged.gen_with_stack(
                 "public column %s has changed",

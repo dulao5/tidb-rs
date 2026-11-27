@@ -44,8 +44,6 @@ tidb-store = { workspace = true }
 tidb-memory = { workspace = true }
 # tipb.Executor (ToPB), tipb.ExchangeType.
 tipb = { workspace = true }
-# log.Warn.
-log = "0.4"
 # Tracers shared by the optimize options (M-LOCK); the instance plan cache's shard locks.
 parking_lot = "0.12"
 # The instance plan cache (A3 spec §3.4): the key's inline buffer, the random-seeded key

@@ -32,6 +32,7 @@ DEFAULT_RATCHET = ROOT / "scripts" / "log_parity_ratchet.tsv"
 # Dynamic field construction functions verified by byte-exact golden tests (spec §6.2 #3).
 DYNAMIC_GO_SYMBOLS = {
     ("pkg/util/util.go", "GenLogFields"),
+    ("pkg/util/expensivequery/expensivequery.go", "logExpensiveQuery"),
     ("pkg/util/execdetails/execdetails.go", "ExecDetails.ToZapFields"),
     ("pkg/util/execdetails/execdetails.go", "CopTasksDetails.ToZapFields"),
     ("pkg/util/logutil/consistency/reporter.go", "Reporter.ReportAdminCheckInconsistent"),

@@ -34,7 +34,6 @@ protobuf = { workspace = true }
 # The boxed future of SessionContext::get_stmt_read_ts (the provider waits for the TSO).
 futures = { workspace = true }
 parking_lot = "0.12"
-log = "0.4"
 # Production random pivot for APPROX_PERCENTILE (spec D12.4 §5.6, §9.1 item 7).
 rand = "0.8"
 # The tasks of the parallel sort (D12.5) and of the parallel projection (the basic executors,

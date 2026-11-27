@@ -83,7 +83,11 @@ impl PrepareExec {
             // return util.SyntaxError(err)
             // glue: blocked-by:D02.1 (the parser's error text differs from Go's)
             Err(e) => {
-                log::debug!("prepare: the Rust parser rejects the statement: {e:?}");
+                let err_str = format!("{e:?}");
+                tidb_base::log_debug!(
+                    "prepare: the Rust parser rejects the statement",
+                    "error" => err_str.as_str(),
+                );
                 return Err(blocked("D02.1", "syntax error text"));
             }
         };

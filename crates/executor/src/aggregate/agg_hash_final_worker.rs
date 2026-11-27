@@ -199,6 +199,7 @@ impl HashAggFinalWorker {
                 // Ruling R21 (#384, owner 2026-11-25): propagate AppendFinalResult2Chunk errors
                 // instead of Go v8.5.8's log-and-continue (which misaligns chunk columns or
                 // panics on out-of-range reads), matching unparallelExec and StreamAggExec.
+                // log-skip: HashAggFinalWorker.generateResultAndSend:127 Ruling R21 (#384) propagates AppendFinalResult2Chunk errors instead of log-and-continue
                 f.append_final_result2_chunk(eval_ctx, &mut results[j], &mut result)?;
             }
 

@@ -3789,7 +3789,6 @@ dependencies = [
  "async-trait",
  "flate2",
  "futures",
- "log",
  "parking_lot 0.12.5",
  "protobuf",
  "rand 0.8.8",
@@ -4032,7 +4031,6 @@ dependencies = [
  "crossbeam-utils",
  "flate2",
  "foldhash",
- "log",
  "parking_lot 0.12.5",
  "protobuf",
  "serde_json",
@@ -4097,12 +4095,12 @@ name = "tidb-server"
 version = "0.0.0"
 dependencies = [
  "flate2",
- "log",
  "serde_json",
  "tidb-base",
  "tidb-chunk",
  "tidb-executor",
  "tidb-expression",
+ "tidb-log",
  "tidb-parser",
  "tidb-session",
  "tidb-types",
@@ -4114,7 +4112,6 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "futures",
- "log",
  "parking_lot 0.12.5",
  "protobuf",
  "serde_json",

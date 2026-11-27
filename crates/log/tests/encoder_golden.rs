@@ -335,3 +335,81 @@ fn matrix1_all_field_types_text_and_json_and_r34_skip() {
         )
     );
 }
+
+#[test]
+fn objects_array_matches_go_text_and_json_probe() {
+    let ts = DateTime::parse_from_rfc3339("2025-01-02T15:04:05.999+08:00").unwrap();
+    let cfg = EncoderConfig {
+        disable_timestamp: true,
+        disable_caller: false,
+        ..EncoderConfig::default()
+    };
+
+    let ev0 = [
+        LogField::new("event", "enter txn"),
+        LogField::new("gap", std::time::Duration::ZERO),
+    ];
+    let ev1 = [
+        LogField::new("event", "SELECT"),
+        LogField::new("gap", std::time::Duration::from_millis(12)),
+    ];
+    let ev2 = [
+        LogField::new("event", "txn end"),
+        LogField::new("gap", std::time::Duration::from_millis(5)),
+    ];
+    let objs: [&[LogField<'_>]; 3] = [&ev0, &ev1, &ev2];
+    let fields = [
+        LogField::new("duration", std::time::Duration::from_millis(17)),
+        LogField::new("conn", 7_u64),
+        LogField::new("txnStartTS", 123_u64),
+        LogField::new("events", &objs[..]),
+    ];
+    let entry = Entry {
+        time: ts,
+        level: LogLevel::Info,
+        logger_name: "",
+        file: "probe_objects.go",
+        line: 29,
+        msg: "slow transaction",
+        bound_fields: &[],
+        fields: &fields,
+        stack: "",
+    };
+
+    let mut text_out = Vec::new();
+    encoder::text::encode_entry(cfg, &entry, &mut text_out);
+    assert_single_line(&text_out);
+    assert_eq!(
+        String::from_utf8(text_out).unwrap(),
+        "[INFO] [probe_objects.go:29] [\"slow transaction\"] [duration=17ms] [conn=7] [txnStartTS=123] [events=\"[\\\"{event=\\\\\\\"enter txn\\\\\\\",gap=0s}\\\",\\\"{event=SELECT,gap=12ms}\\\",\\\"{event=\\\\\\\"txn end\\\\\\\",gap=5ms}\\\"]\"]\n"
+    );
+
+    let mut json_out = Vec::new();
+    encoder::json::encode_entry(cfg, &entry, &mut json_out);
+    assert_single_line(&json_out);
+    assert_eq!(
+        String::from_utf8(json_out).unwrap(),
+        "{\"level\":\"INFO\",\"caller\":\"probe_objects.go:29\",\"message\":\"slow transaction\",\"duration\":\"17ms\",\"conn\":7,\"txnStartTS\":123,\"events\":[{\"event\":\"enter txn\",\"gap\":\"0s\"},{\"event\":\"SELECT\",\"gap\":\"12ms\"},{\"event\":\"txn end\",\"gap\":\"5ms\"}]}\n"
+    );
+
+    let empty_objs: [&[LogField<'_>]; 0] = [];
+    let empty_fields = [LogField::new("events", &empty_objs[..])];
+    let empty_entry = Entry {
+        msg: "empty events",
+        fields: &empty_fields,
+        line: 30,
+        ..entry
+    };
+    let mut empty_text = Vec::new();
+    encoder::text::encode_entry(cfg, &empty_entry, &mut empty_text);
+    assert_eq!(
+        String::from_utf8(empty_text).unwrap(),
+        "[INFO] [probe_objects.go:30] [\"empty events\"] [events=\"[]\"]\n"
+    );
+    let mut empty_json = Vec::new();
+    encoder::json::encode_entry(cfg, &empty_entry, &mut empty_json);
+    assert_eq!(
+        String::from_utf8(empty_json).unwrap(),
+        "{\"level\":\"INFO\",\"caller\":\"probe_objects.go:30\",\"message\":\"empty events\",\"events\":[]}\n"
+    );
+}

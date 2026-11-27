@@ -1065,6 +1065,8 @@ impl<'ast> PlanBuilder<'ast> {
             && SQLMode(ctx.vars.sql_mode).has_only_full_group_by()
         {
             // glue: blocked-by:D09.14 (proj.ExtractFD: functional dependencies, pkg/planner/funcdep)
+            // log-skip: PlanBuilder.buildProjection:1880 functional dependency maintenance is blocked-by:D09.14
+            // log-skip: PlanBuilder.buildProjection:1945 functional dependency maintenance is blocked-by:D09.14
             return Err(blocked(
                 "D09.14",
                 "the new ONLY_FULL_GROUP_BY check (LogicalProjection.ExtractFD)",

@@ -302,6 +302,37 @@ fn encode_value(value: LogValue<'_>, out: &mut Vec<u8>) {
             sub.push(b']');
             append_quoted_bytes(out, &sub);
         }
+        LogValue::Objects(objs) => {
+            // Go pingcap/log textEncoder AppendArray + AppendObject (zap_text_encoder.go:259-297):
+            // each object formats as `{k=v,...}`, quoted as an array element, then the whole
+            // `[...]` array is quoted for the outer `[key=value]` field.
+            let mut arr = Vec::new();
+            arr.push(b'[');
+            for (i, obj) in objs.iter().enumerate() {
+                if i > 0 {
+                    arr.push(b',');
+                }
+                let mut obj_buf = Vec::new();
+                obj_buf.push(b'{');
+                let mut first = true;
+                for f in *obj {
+                    if matches!(f.value, LogValue::Skip) {
+                        continue;
+                    }
+                    if !first {
+                        obj_buf.push(b',');
+                    }
+                    first = false;
+                    append_quoted_bytes(&mut obj_buf, f.key.as_bytes());
+                    obj_buf.push(b'=');
+                    encode_value(f.value, &mut obj_buf);
+                }
+                obj_buf.push(b'}');
+                append_quoted_bytes(&mut arr, &obj_buf);
+            }
+            arr.push(b']');
+            append_quoted_bytes(out, &arr);
+        }
         LogValue::JsonBytes(b) => append_quoted_bytes(out, b),
         LogValue::Skip => {}
     }
