@@ -39,6 +39,9 @@ async fn blocked_schema_ts_lookup_warns_once() {
         .with_max_level(tracing_subscriber::filter::LevelFilter::WARN)
         .without_time()
         .with_target(false)
+        // `poc-server` turns on tracing-subscriber's `ansi` feature; in a workspace build the
+        // features are unified and the writer would colour the captured line.
+        .with_ansi(false)
         .finish();
     // The current-thread runtime of `#[tokio::test]` polls the loads on this thread.
     let _guard = tracing::subscriber::set_default(subscriber);
