@@ -2027,7 +2027,7 @@ fn autocommit_read_registers_nothing_explicit_txn_does() {
     // Reported per Go: a DDL job on the table at version 2 is held back by this session.
     let mut job2ver = HashMap::from([(7, 2), (8, 2)]);
     let job2ids = HashMap::from([(7, [110].into()), (8, [111].into())]);
-    crate::session::remove_lock_ddl_jobs(s.vars(), &mut job2ver, &job2ids);
+    crate::session::remove_lock_ddl_jobs(s.vars(), &mut job2ver, &job2ids, false);
     assert_eq!(job2ver, HashMap::from([(8, 2)]));
     s.core.rollback_txn();
     assert_eq!(mdl_entries(&s), None);

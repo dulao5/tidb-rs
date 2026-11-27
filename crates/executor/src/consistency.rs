@@ -64,14 +64,19 @@ impl Reporter<'_> {
         let display_full_hd_cnt = full_hd.len().min(MAX_FULL_HANDLE_CNT);
         // if rmode != errors.RedactLogEnable: r.Storage.(helper.Storage) is never ok here.
         let _ = (rmode != RedactLogEnable, miss_row_idx);
-        log::error!(
-            "indexLookup found data inconsistency, table_name: {}, index_name: {}, index_cnt: {}, table_cnt: {}, missing_handles: {}, total_handles: {}",
-            self.tbl.name.o,
-            self.idx.name.o,
-            idx_cnt,
-            tbl_cnt,
-            redact::string(rmode, &sprint_handles(miss_hd)),
-            redact::string(rmode, &sprint_handles(&full_hd[..display_full_hd_cnt])),
+        let missing_handles = redact::string(rmode, &sprint_handles(miss_hd));
+        let total_handles = redact::string(rmode, &sprint_handles(&full_hd[..display_full_hd_cnt]));
+        let stack =
+            tidb_base::errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture());
+        tidb_base::log_error!(
+            "indexLookup found data inconsistency",
+            "table_name" => self.tbl.name.o.as_str(),
+            "index_name" => self.idx.name.o.as_str(),
+            "index_cnt" => idx_cnt,
+            "table_cnt" => tbl_cnt,
+            "missing_handles" => missing_handles.as_str(),
+            "total_handles" => total_handles.as_str(),
+            "stack" => stack.as_str(),
         );
         ErrLookupInconsistent.gen_with_stack_by_args(tidb_base::go_args![
             self.tbl.name.o.clone(),

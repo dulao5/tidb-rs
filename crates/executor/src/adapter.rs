@@ -97,6 +97,7 @@ impl RecordSet {
         sctx: &mut dyn SessionContext,
         req: &mut Chunk,
     ) -> Result<(), Error> {
+        // log-skip: recordSet.Next:164 panics are caught at the task boundary (M-PANIC)
         sctx.sql_killer().handle_signal()?;
 
         let (Some(e), Some(ctx)) = (self.executor.as_deref_mut(), self.exec_ctx.as_ref()) else {
@@ -141,6 +142,7 @@ impl RecordSet {
             }
             // resetCTEStorageMap: the CTE storages are created by the CTE executors only,
             // which are not ported: there is nothing to reset.
+            // log-skip: recordSet.Finish:205 CTE storage map is unported (CTE executors not ported)
             let executor = self.executor.take();
             if let (Some(cache), Some(mut e)) = (self.point_get_cache.take(), executor) {
                 // The session writes the statement context after this (`FinishExecuteStmt`):
@@ -155,10 +157,9 @@ impl RecordSet {
             let status = killer.get_kill_signal();
             let in_write_result_set = killer.in_write_result_set.load(Ordering::SeqCst);
             if status > 0 && in_write_result_set {
-                log::warn!(
-                    "kill, this SQL might be stuck in the network stack while writing packets \
-                     to the client. connection ID={}",
-                    sctx.get_session_vars().connection_id
+                tidb_base::log_warn!(
+                    "kill, this SQL might be stuck in the network stack while writing packets to the client.",
+                    "connection ID" => sctx.get_session_vars().connection_id,
                 );
             }
         }
@@ -176,7 +177,7 @@ impl RecordSet {
     ) -> Result<(), Error> {
         let err = self.finish(sctx).await;
         if let Err(e) = &err {
-            log::error!("close recordSet error: {e}");
+            tidb_base::log_error!("close recordSet error", "error" => e);
         }
         stmt.close_record_set(sctx, self.txn_start_ts, join_errors(&self.last_errs));
         err
@@ -421,7 +422,9 @@ impl ExecStmt {
         if let Some(mut cached) = cached {
             match cached.as_point_get() {
                 None => {
-                    log::error!("invalid executor type, not PointGetExecutor for point get path");
+                    tidb_base::log_error!(
+                        "invalid executor type, not PointGetExecutor for point get path"
+                    );
                 }
                 Some(pg) => {
                     // CachedPlan type is already checked in last step
@@ -459,9 +462,7 @@ impl ExecStmt {
 
         let ctx = Self::exec_ctx(sctx);
         if let Err(err) = exec::open(&ctx, executor.as_mut()).await {
-            if let Err(e) = exec::close(executor.as_mut()).await {
-                log::warn!("close executor: {e}");
-            }
+            tidb_base::terror::log(exec::close(executor.as_mut()).await.err().as_ref());
             return Err(err);
         }
         self.executor_opened = true;
@@ -524,6 +525,7 @@ impl ExecStmt {
     // go: ExecStmt.RebuildPlan L2 (boundary stub, blocked-by:D09.0)
     pub fn rebuild_plan(&mut self) -> Result<i64, Error> {
         // glue: stub, blocked-by:D09.0 (preprocess and optimize, VS1-10)
+        // log-skip: ExecStmt.RebuildPlan:464 boundary stub blocked-by:D09.0
         Err(blocked(
             "D09.0",
             "rebuilding the plan of a retried statement",
@@ -541,6 +543,7 @@ impl ExecStmt {
         &mut self,
         sctx: &mut dyn SessionContext,
     ) -> Result<Option<RecordSet>, Error> {
+        // log-skip: ExecStmt.Exec:539 panics are caught at the task boundary (M-PANIC)
         // The Analyze plan is delegated to Go TiDB (constitution §4.3); no plan of the new
         // stack is one.
         // HasMemQuotaHint / MemQuotaQuery: the MEMORY_QUOTA hint is D13.3 (A1 sets the limit).
@@ -566,9 +569,7 @@ impl ExecStmt {
 
         let ctx = Self::exec_ctx(sctx);
         if let Err(err) = self.open_executor(&ctx, e.as_mut()).await {
-            if let Err(e2) = exec::close(e.as_mut()).await {
-                log::warn!("close executor: {e2}");
-            }
+            tidb_base::terror::log(exec::close(e.as_mut()).await.err().as_ref());
             return Err(err);
         }
         self.executor_opened = true;
@@ -577,9 +578,7 @@ impl ExecStmt {
 
         if self.is_select_for_update {
             if sctx.get_session_vars().use_low_resolution_tso() {
-                if let Err(e2) = exec::close(e.as_mut()).await {
-                    log::warn!("close executor: {e2}");
-                }
+                tidb_base::terror::log(exec::close(e.as_mut()).await.err().as_ref());
                 return Err(Error::plain(
                     "can not execute select for update statement when 'tidb_low_resolution_tso' is set",
                 ));
@@ -587,9 +586,7 @@ impl ExecStmt {
             // Special handle for "select for update statement" in pessimistic transaction.
             if is_pessimistic {
                 // a.handlePessimisticSelectForUpdate(ctx, e): locks keys (the write path).
-                if let Err(e2) = exec::close(e.as_mut()).await {
-                    log::warn!("close executor: {e2}");
-                }
+                tidb_base::terror::log(exec::close(e.as_mut()).await.err().as_ref());
                 // glue: stub, blocked-by:X (pessimistic locks: the write path)
                 return Err(blocked(
                     "X",
@@ -611,9 +608,7 @@ impl ExecStmt {
         let txn_start_ts = match sctx.txn_start_ts() {
             Ok(ts) => ts.unwrap_or(0),
             Err(err) => {
-                if let Err(e2) = exec::close(e.as_mut()).await {
-                    log::warn!("close executor: {e2}");
-                }
+                tidb_base::terror::log(exec::close(e.as_mut()).await.err().as_ref());
                 return Err(err);
             }
         };
@@ -716,9 +711,7 @@ impl ExecStmt {
         let mut chk = exec::try_new_cache_chunk(e);
         let err = self.next(ctx, e, &mut chk).await;
         // defer: exec.Close(e), a.logAudit() (audit plugins are not ported).
-        if let Err(e2) = exec::close(e).await {
-            log::warn!("close executor: {e2}");
-        }
+        tidb_base::terror::log(exec::close(e).await.err().as_ref());
         err?;
         // a.handleStmtForeignKeyTrigger(ctx, e): foreign keys are the write path.
         Ok(())
@@ -1157,7 +1150,7 @@ pub fn format_sql_lazy(sql: String) -> impl Fn() -> String {
 
 /// `QueryReplacer`: replaces new line and tab for grep result including query string.
 // glue: strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace
-fn query_replacer_replace(s: &str) -> String {
+pub fn query_replacer_replace(s: &str) -> String {
     s.chars()
         .map(|c| {
             if matches!(c, '\r' | '\n' | '\t') {
@@ -1289,6 +1282,7 @@ fn plan_replayer_task_key(sctx: &dyn SessionContext) -> Result<PlanReplayerTaskK
 fn send_plan_replayer_dump_task(key: &PlanReplayerTaskKey) -> Result<(), Error> {
     let _ = key;
     // glue: blocked-by:X (the plan replayer dump task: the handle's dump worker is not ported)
+    // log-skip: sendPlanReplayerDumpTask:2373 plan replayer dump task is blocked-by:X
     Err(blocked("X", "the plan replayer dump task"))
 }
 

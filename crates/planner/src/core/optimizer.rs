@@ -716,9 +716,15 @@ fn generate_runtime_filter(ctx: &PlanCtx<'_>, plan: &PhysicalPlanRef) -> Result<
     if !ctx.vars.is_runtime_filter_enabled() || ctx.vars.in_restricted_sql {
         return Ok(());
     }
+    tidb_base::log_debug!("Start runtime filter generator");
+    let start_rf_generator = std::time::Instant::now();
     // rfGenerator.GenerateRuntimeFilter(plan): its PhysicalHashJoin arm is the only source
     // of filters (see the doc).
     let _ = plan;
+    tidb_base::log_debug!(
+        "Finish runtime filter generator",
+        "Cost" => start_rf_generator.elapsed(),
+    );
     Ok(())
 }
 

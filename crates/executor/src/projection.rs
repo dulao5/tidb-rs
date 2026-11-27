@@ -767,7 +767,12 @@ fn joined<T>(r: Result<T, tokio::task::JoinError>, task: &str) -> Option<T> {
     match r {
         Ok(v) => Some(v),
         Err(e) => {
-            log::warn!("projection {task} task ended without returning, error={e}");
+            let err_str = e.to_string();
+            tidb_base::log_warn!(
+                "projection task ended without returning",
+                "task" => task,
+                "error" => err_str.as_str(),
+            );
             None
         }
     }

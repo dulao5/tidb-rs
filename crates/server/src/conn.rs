@@ -34,7 +34,10 @@ pub fn init_result_encoder(se: &mut Session) -> ResultEncoder {
     {
         Ok(chs) => chs,
         Err(err) => {
-            log::warn!("get character_set_results system variable failed: {err}");
+            tidb_base::log_warn!(
+                "get character_set_results system variable failed",
+                "error" => &err,
+            );
             String::new()
         }
     };
@@ -50,7 +53,10 @@ pub fn init_input_encoder(se: &mut Session) -> InputDecoder {
     {
         Ok(chs) => chs,
         Err(err) => {
-            log::warn!("get character_set_client system variable failed: {err}");
+            tidb_base::log_warn!(
+                "get character_set_client system variable failed",
+                "error" => &err,
+            );
             String::new()
         }
     };
@@ -76,6 +82,7 @@ pub async fn write_result_set(
     rs_encoder: &mut Option<ResultEncoder>,
     out: &mut ResultPackets,
 ) -> Result<bool, Error> {
+    // log-skip: clientConn.writeResultSet:2364 quota/kill panics are Result::Err in Rust (A1), no panic recovery boundary here
     let enc = rs_encoder.insert(init_result_encoder(se));
     let r = write_chunks(se, rs, binary, enc, out).await;
     enc.clean();

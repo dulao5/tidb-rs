@@ -2307,7 +2307,13 @@ impl PhysicalIndexScan {
                 ) {
                     Ok((s, _)) => s,
                     Err(e) if tidb_base::blocked::blocked_by(&e).is_some() => return Err(e),
-                    Err(_) => SelectionFactor,
+                    Err(e) => {
+                        tidb_base::log_debug!(
+                            "calculate selectivity failed, use selection factor",
+                            "error" => &e,
+                        );
+                        SelectionFactor
+                    }
                 };
                 let plan_stats = cop_task
                     .plan()
@@ -2900,8 +2906,13 @@ fn add_pushed_down_selection(
                 match crate::cardinality::selectivity::selectivity(ctx, &coll, &conditions, &[]) {
                     Ok((s, _)) => s,
                     Err(e) if tidb_base::blocked::blocked_by(&e).is_some() => return Err(e),
-                    // logutil.BgLogger().Debug("calculate selectivity failed, use selection factor")
-                    Err(_) => SelectionFactor,
+                    Err(e) => {
+                        tidb_base::log_debug!(
+                            "calculate selectivity failed, use selection factor",
+                            "error" => &e,
+                        );
+                        SelectionFactor
+                    }
                 };
             let ts_stats = ts.stats_info().expect("the scan's stats");
             sel.set_stats(Some(Arc::new(ts_stats.scale(selectivity))));

@@ -11,8 +11,10 @@
 //! 0. session conditions ([`Router::session_condition`]): an explicit transaction,
 //!    `autocommit = 0`, `tidb_snapshot` / `tidb_read_staleness` / `tx_read_ts` /
 //!    `tidb_txn_mode` off their defaults, a variable the new session does not know
-//!    (diverged in the sync, [`sync`]), a cursor; then an admissible schema lease and
-//!    equal InfoSchema versions ([`Router::schema_check`]);
+//!    (diverged in the sync, [`sync`]), a cursor; then a `sql_mode` without a bit that
+//!    changes how Go parses ([`parse_sql_mode`]: the Rust parser does not read `sql_mode`);
+//!    then an admissible schema lease and equal InfoSchema versions
+//!    ([`Router::schema_check`]);
 //! 1. the statement kind (`SELECT` only) and 2. the AST pre-check ([`precheck`]);
 //! 3. the new stack plans; `Blocked(block)` (before any executor opened) restores the new
 //!    session ([`tidb_session::StmtCheckpoint`], §4.6) and falls back to the PoC (`fallback`) or
@@ -104,6 +106,9 @@ impl std::str::FromStr for NewStackMode {
 pub enum Reason {
     /// Step 0: a session condition.
     Session(&'static str),
+    /// Step 0: the session's `sql_mode` has a bit that changes how Go parses a statement (the
+    /// bit's name is for tests and logs; [`parse_sql_mode`]).
+    SqlMode(&'static str),
     /// Step 0: the two InfoSchema versions differ.
     SchemaVersion,
     /// Step 0: the schema sync does not admit statements on the new stack: the schema lease
@@ -126,6 +131,7 @@ impl Reason {
     pub fn label(&self) -> &str {
         match self {
             Reason::Session(_) => "session",
+            Reason::SqlMode(_) => "sql_mode",
             Reason::SchemaVersion => "schema_version",
             Reason::SchemaLease => "schema_lease",
             Reason::Kind => "kind",
@@ -244,6 +250,15 @@ pub trait PocEngine: Send {
     ) -> BoxFut<'_, Result<Response, SqlError>>;
     /// `COM_STMT_CLOSE`.
     fn close(&mut self, stmt_id: u32);
+    /// A statement started that the PoC did not run (the router answered it itself, or the
+    /// PoC could not lower it): the PoC's warning list belongs to an older statement and
+    /// goes (#512).
+    fn clear_warnings(&mut self) {}
+    /// The plan-cache decision of a statement the PoC prepared (#512): keep its reason for
+    /// every EXECUTE and add the PREPARE's warnings.
+    fn set_cacheability(&mut self, stmt_id: u32, c: crate::plan_cache::PrepareCacheability) {
+        let _ = (stmt_id, c);
+    }
     /// The previous statement's state (VS1 plan §4.5: the PoC writes it into its own
     /// fields), before the PoC runs a statement that may read it.
     fn set_prev_stmt(&mut self, last: &LastStmtInfo) {
@@ -272,6 +287,44 @@ fn admin_flush_plan_cache_scope(stmt: &ast::Stmt) -> Option<tidb_executor::simpl
         // StatementScope#0 (no keyword) and #3 (SESSION): ast.StatementScopeSession
         _ => StatementScope::Session,
     })
+}
+
+/// The first bit of `mode` that changes how Go v8.5.8 parses a statement, `None` when there
+/// is none. Go's session hands its `sql_mode` to the parser before every parse
+/// (`session.ParseSQL` → `parser.SetSQLMode`), and the parser reads these bits:
+///
+/// - `ANSI_QUOTES`: a `"..."` literal is an identifier (`Scanner.Lex`, lexer.go:256;
+///   in optimizer hints `hintScanner.Lex`, hintparserimpl.go:78);
+/// - `PIPES_AS_CONCAT`: `||` is `CONCAT`, not `OR` (lexer.go:262);
+/// - `HIGH_NOT_PRECEDENCE`: `NOT` binds tighter than `BETWEEN` / comparisons (lexer.go:266,
+///   the `not2` token of parser.y);
+/// - `NO_BACKSLASH_ESCAPES`: `\` is not an escape in string literals (`Scanner.scanString`,
+///   lexer.go:797);
+/// - `IGNORE_SPACE`: a built-in function name followed by a space is still a function name
+///   (`Scanner.isTokenIdentifier`, misc.go:1141);
+/// - `REAL_AS_FLOAT`: `REAL` is `FLOAT`, not `DOUBLE` (`CastType` and `FloatingPointType` of
+///   parser.y).
+///
+/// The only other bits Go's parser reads are the strict modes, and only to turn a literal that
+/// does not decode in a non-UTF-8 client character set into a syntax error
+/// (`Scanner.convert2Connection`, lexer.go:179); that is part of the client character set
+/// decoding the Rust lexer does not do, not of `sql_mode`, so it is not checked here.
+///
+/// The Rust parser takes no `sql_mode` (`tidb_parser::ParseOptions`), so with one of these
+/// bits the statement it builds is not the one Go builds, and the new stack would plan the
+/// wrong statement (#509). Such a statement stays on the PoC ([`Reason::SqlMode`]).
+// glue: the router's guard for the sql_mode the Rust parser does not read (VS1 plan §4.3 step 0, #509)
+fn parse_sql_mode(mode: tidb_base::mysql::SQLMode) -> Option<&'static str> {
+    [
+        (mode.has_ansi_quotes_mode(), "ANSI_QUOTES"),
+        (mode.has_pipes_as_concat_mode(), "PIPES_AS_CONCAT"),
+        (mode.has_high_not_precedence_mode(), "HIGH_NOT_PRECEDENCE"),
+        (mode.has_no_backslash_escapes_mode(), "NO_BACKSLASH_ESCAPES"),
+        (mode.has_ignore_space_mode(), "IGNORE_SPACE"),
+        (mode.has_real_as_float_mode(), "REAL_AS_FLOAT"),
+    ]
+    .into_iter()
+    .find_map(|(on, name)| on.then_some(name))
 }
 
 /// Who owns a prepared statement (§4.7, the four combinations).
@@ -339,6 +392,10 @@ pub struct Router {
     closed: Vec<u32>,
     /// A statement ran (on either engine) since the last transaction-end check.
     stmt_ended: bool,
+    /// The router answered a statement itself ([`Router::fail`]) after the PoC's last one:
+    /// the PoC's warning list (#512) is cleared at the end of the command, so a SHOW
+    /// WARNINGS that goes to the PoC does not show an older statement's warnings.
+    poc_warnings_stale: bool,
     /// The connection's id, for the route trace ([`trace`]).
     conn_id: u64,
 }
@@ -353,7 +410,7 @@ pub struct Router {
 /// `22003`. A boundary stub's error ([`tidb_base::blocked::blocked`]) is tidb-rs's own: it
 /// keeps its 1235 (Go has no such error; its class is not in Go's registry).
 // glue: the error-to-packet-fields step of clientConn.writeError (the function itself is the server block's part 2, D03.1, with the connection loop)
-fn sql_error(e: &Error) -> SqlError {
+pub(crate) fn sql_error(e: &Error) -> SqlError {
     if blocked_by(e).is_some() {
         return SqlError::new(
             tidb_base::mysql::ErrNotSupportedYet,
@@ -475,6 +532,7 @@ impl Router {
             raw_params: RawParams::default(),
             closed: Vec::new(),
             stmt_ended: false,
+            poc_warnings_stale: false,
             conn_id: 0,
         };
         let names = [tidb_sql::ir::SetAssignment::Names {
@@ -554,6 +612,16 @@ impl Router {
         None
     }
 
+    /// Step 0: the session's `sql_mode` (the new session's copy, synced from every `SET` the
+    /// PoC accepted, [`sync`]) has no bit that changes how Go parses ([`parse_sql_mode`]).
+    fn sql_mode_check(&self) -> Result<(), Reason> {
+        let mode = tidb_base::mysql::SQLMode(self.new.session().vars().sql_mode);
+        match parse_sql_mode(mode) {
+            Some(bit) => Err(Reason::SqlMode(bit)),
+            None => Ok(()),
+        }
+    }
+
     /// Step 0: the new stack may plan with its InfoSchema. The new stack gets it from the
     /// ported domain that the PoC domain's sync loop reloads (§4.1); a session without a
     /// domain (no schema sync) has none, and its planner returns `Blocked`, so the check
@@ -583,6 +651,9 @@ impl Router {
     pub fn route(&self, stmt: &ast::Stmt, poc: &dyn PocEngine, allow_params: bool) -> Route {
         if let Some(c) = self.session_condition(poc) {
             return Route::Poc(Reason::Session(c));
+        }
+        if let Err(reason) = self.sql_mode_check() {
+            return Route::Poc(reason);
         }
         if let Err(reason) = self.schema_check(poc) {
             return Route::Poc(reason);
@@ -742,7 +813,16 @@ impl Router {
     fn fail(&mut self, e: SqlError) -> Result<Response, SqlError> {
         let r = Err(e);
         self.finish_poc(&r);
+        self.poc_warnings_stale = true;
         r
+    }
+
+    /// The end of a command: drop the PoC's warnings when the router answered the statement
+    /// itself (see `poc_warnings_stale`).
+    fn flush_poc_warnings(&mut self, poc: &mut dyn PocEngine) {
+        if std::mem::take(&mut self.poc_warnings_stale) {
+            poc.clear_warnings();
+        }
     }
 
     /// `COM_QUERY`.
@@ -753,6 +833,7 @@ impl Router {
     ) -> Result<Response, SqlError> {
         self.new.refresh_info_schema();
         let r = self.query_inner(poc, sql).await;
+        self.flush_poc_warnings(poc);
         self.end_of_command(poc);
         r
     }
@@ -872,26 +953,17 @@ impl Router {
     /// them: a TiDB error is shown with its MySQL code and message (`terror.ToSQLError`),
     /// any other error with `ErrUnknown` and its text. The columns are the PoC's (the same
     /// definitions as Go's SHOW WARNINGS).
-    // glue: VS1 plan §4.5 (SHOW WARNINGS answered by the engine that ran the previous statement; rows as Go ShowExec.fetchShowWarnings)
+    // glue: VS1 plan §4.5 (SHOW WARNINGS answered by the engine that ran the previous statement)
     fn new_stack_warnings(&self, errors: bool) -> tidb_mysql_protocol::ResultSet {
-        let mut rs = crate::show_warnings();
-        for w in self.new.session().vars().stmt_ctx().get_warnings() {
-            if errors && w.level != tidb_base::contextutil::WarnLevelError {
-                continue;
-            }
-            let (code, message) = if w.err.is_normalized() {
-                let sql_err = tidb_base::terror::to_sql_error(&w.err);
-                (i64::from(sql_err.code), sql_err.message)
-            } else {
-                (i64::from(tidb_base::mysql::ErrUnknown), w.err.error())
-            };
-            rs.rows.push(vec![
-                tidb_mysql_protocol::Value::Bytes(w.level.as_bytes().to_vec()),
-                tidb_mysql_protocol::Value::Int(code),
-                tidb_mysql_protocol::Value::Bytes(message),
-            ]);
-        }
-        rs
+        crate::warnings_result_set(
+            self.new
+                .session()
+                .vars()
+                .stmt_ctx()
+                .get_warnings()
+                .as_slice(),
+            errors,
+        )
     }
 
     /// `COM_INIT_DB` / the handshake's database, after the PoC accepted it.
@@ -928,8 +1000,14 @@ impl Router {
         let stmt = tidb_sql::ir::parse_one(sql)?;
         // Not on the new stack when the InfoSchema versions differ: its column definitions
         // would come from another version, and a later fallback would fail check_columns.
-        // Nor when the schema lease is not admissible (step 0).
-        let candidate = Self::candidate(&stmt, true).and_then(|()| self.schema_check(poc));
+        // Nor when the schema lease is not admissible (step 0). Nor when the session's
+        // `sql_mode` changes how Go parses (step 0): Go parses the text of a prepared
+        // statement once, at PREPARE, with the `sql_mode` of that moment (`PrepareExec.Next`
+        // → `session.ParseSQL`), so an EXECUTE does
+        // not check it again (the AST both sides prepared was built without such a bit).
+        let candidate = Self::candidate(&stmt, true)
+            .and_then(|()| self.sql_mode_check())
+            .and_then(|()| self.schema_check(poc));
         let new = match candidate {
             Ok(()) => match self.try_prepare_new(sql).await {
                 Ok(r) => Ok(r),
@@ -941,7 +1019,37 @@ impl Router {
         };
         let old = match tidb_sql::ir::lower_statement(&stmt, sql) {
             Ok(lowered) => poc.prepare(stmt_id, lowered).await,
-            Err(e) => Err(e),
+            Err(e) => {
+                // Go would have started the PREPARE: the PoC's older warnings go.
+                poc.clear_warnings();
+                Err(e)
+            }
+        };
+        // SHOW WARNINGS after the PREPARE goes to the engine whose statement context holds
+        // its warnings: the new session's when it prepared the statement (or returned a
+        // Go-ported error), else the PoC's.
+        self.last.engine = match &new {
+            Ok(_) => Engine::New,
+            Err(_) => Engine::Poc,
+        };
+        // The PoC keeps the statement: take Go's prepare-time plan-cache decision for its
+        // EXECUTEs (#512).
+        let old = match (old, &new) {
+            (Ok(info), Ok(Err(_))) => Ok(info),
+            (Ok(info), _) => match self.prepare_cacheability(poc, &stmt).await {
+                Ok(c) => {
+                    poc.set_cacheability(stmt_id, c);
+                    Ok(info)
+                }
+                // A boundary the decision reaches: the PoC's copy cannot answer as Go
+                // would, so it goes. The new stack keeps the statement when it prepared it
+                // (owner `New`); otherwise the PREPARE fails with the boundary's 1235.
+                Err(e) => {
+                    poc.close(stmt_id);
+                    Err(e)
+                }
+            },
+            (Err(e), _) => Err(e),
         };
         let (owner, result) = match (new, old) {
             (Ok(Ok(n)), Ok(_)) => (
@@ -968,6 +1076,44 @@ impl Router {
         result
     }
 
+    /// Go's prepare-time plan-cache decision for a statement the PoC prepared (#512): with
+    /// the new session's synced variables, and the new session's InfoSchema when it is the
+    /// one the PoC's schema agrees with (step 0's version check); otherwise no InfoSchema,
+    /// which leaves out the table checks (a known difference, plan cache spec §5).
+    // glue: the router's input to the prototype's plan-cache decision (#512)
+    async fn prepare_cacheability(
+        &mut self,
+        poc: &mut dyn PocEngine,
+        stmt: &ast::Stmt,
+    ) -> Result<crate::plan_cache::PrepareCacheability, SqlError> {
+        let with_is = self.new.info_schema_version().is_some() && self.schema_check(poc).is_ok();
+        if with_is {
+            // The decision is synchronous: load the statement's tables first, as the new
+            // session does before planning.
+            let load = tidb_session::session::load_stmt_tables(self.new.session().sctx(), stmt);
+            load.await;
+        }
+        self.decide_cacheability(with_is, stmt)
+    }
+
+    /// [`Router::prepare_cacheability`] after the table loads.
+    fn decide_cacheability(
+        &self,
+        with_is: bool,
+        stmt: &ast::Stmt,
+    ) -> Result<crate::plan_cache::PrepareCacheability, SqlError> {
+        let session = self.new.session();
+        if !with_is {
+            return crate::plan_cache::prepare_time_cacheability(session.vars(), stmt, None);
+        }
+        let is = session.sctx().get_info_schema();
+        crate::plan_cache::prepare_time_cacheability(
+            session.vars(),
+            stmt,
+            Some(is.as_ref() as &dyn tidb_planner::core::plan_cache_utils::InfoSchemaLookup),
+        )
+    }
+
     /// `COM_STMT_EXECUTE` (§4.7).
     pub async fn execute(
         &mut self,
@@ -977,6 +1123,7 @@ impl Router {
     ) -> Result<Response, SqlError> {
         self.new.refresh_info_schema();
         let r = self.execute_inner(poc, stmt_id, params).await;
+        self.flush_poc_warnings(poc);
         self.end_of_command(poc);
         r
     }

@@ -97,7 +97,9 @@ impl MPPPartitionType {
             HashType => tipb::ExchangeType::Hash,
             SinglePartitionType => tipb::ExchangeType::PassThrough,
             _ => {
-                log::warn!("generate an exchange with any partition type, which is illegal.");
+                tidb_base::log_warn!(
+                    "generate an exchange with any partition type, which is illegal."
+                );
                 tipb::ExchangeType::PassThrough
             }
         }

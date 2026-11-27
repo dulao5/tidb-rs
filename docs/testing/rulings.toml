@@ -518,3 +518,18 @@ rationale = "Owner decisions (2026-11-27, §0.2 item 5 and D1 option A1): distin
 approver = "zhigang-du"
 approved = "2026-11-27"
 reopen = "If an external TiUP / TiDB Dashboard / Clinic parser rejects '+' build metadata in mixed-cluster testing (fall back to bare v8.5.8), or owner changes the decision; wire test once tidb-log Batch 0 is implemented."
+
+# ---- D09.3 join building: LATERAL ON column privileges (owner decision 2026-11-28, PR #482; docs/compatibility.md "Privilege checks (D04.1)", decided, not yet implemented) ----
+
+[[ruling]]
+id = "R36"
+name = "lateral-on-clause-checks-column-privilege"
+class = "divergence"
+plane = "error"
+layer = "none"
+source = "Constitution Article 1 item 2 (security exception) and Article 9.1 (owner decision 2026-11-28, option B, relayed by the maintainer on PR #482); specs/D09.3-join-build/spec.md §4.8 item 6, §7 item 10 and §9.1 item 1; docs/compatibility.md Privilege checks row 5; #477"
+evidence = "In Go TiDB v8.5.8, PlanBuilder.checkColPriv defaults to noCheckOption (pkg/planner/core/planbuilder.go:207), under which the expression rewriter registers no column privilege for the columns it resolves (expression_rewriter.go:304-305). buildJoin switches it to reportColumnErrOption around the ON rewrite (logical_plan_builder.go:923-926), so an ordinary JOIN ... ON needs column-level SELECT on every column it references, but buildLateralJoin rewrites the ON clause without that switch (logical_plan_builder.go:1068-1072). A user holding only SELECT(a) on t1 can therefore reference t1.b in t1 JOIN LATERAL (...) d ON t1.b = d.x and infer b from the filtered result; the table-level check of R29 does not stop it because SELECT(a) grants table read access. Read from code and confirmed by the reviewer; not yet reproduced on a v8.5.8 cluster (the LATERAL implementation task reproduces it and files the upstream-pitfall issue). tidb-rs registers the ON clause columns of a LATERAL join like an ordinary JOIN ON and rejects a user without the column privilege with error 1143, where Go v8.5.8 allows the statement."
+rationale = "Owner decision (2026-11-28, option B): closes a column-privilege bypass through the LATERAL ON clause, in the same stricter direction as R29-R32, with no compatibility switch."
+approver = "zhigang-du"
+approved = "2026-11-28"
+reopen = "Baseline upgraded to a Go TiDB version that checks column privileges in the LATERAL ON clause, a v8.5.8 reproduction shows that Go already rejects these statements, or owner changes the decision; wire test (and layer/unit/stmt if hit by ab) once the LATERAL join builder (part C of D09.3) is implemented."

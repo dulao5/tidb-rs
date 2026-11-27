@@ -369,8 +369,11 @@ impl CopTask {
             let sel_factor = match selectivity(ctx, coll, &self.root_task_conds, &[]) {
                 Ok((s, _)) => s,
                 Err(err) if blocked_by(&err).is_some() => return Err(err),
-                Err(_) => {
-                    // calculate selectivity failed, use selection factor
+                Err(err) => {
+                    tidb_base::log_debug!(
+                        "calculate selectivity failed, use selection factor",
+                        "error" => &err,
+                    );
                     SELECTION_FACTOR
                 }
             };

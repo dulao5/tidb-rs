@@ -50,12 +50,12 @@ pub struct Event {
 
 impl Event {
     /// The zap object of the slow transaction log: `{event, gap}`.
-    // go: event.MarshalLogObject L2 (a log string instead of a zap encoder)
-    pub fn marshal_log_object(&self) -> String {
-        format!(
-            "{{\"event\": {:?}, \"gap\": {:?}}}",
-            self.event, self.duration
-        )
+    // go: event.MarshalLogObject L1
+    pub fn marshal_log_object(&self) -> [tidb_base::structured_log::LogField<'_>; 2] {
+        [
+            tidb_base::structured_log::LogField::new("event", self.event.as_str()),
+            tidb_base::structured_log::LogField::new("gap", self.duration),
+        ]
     }
 }
 
@@ -205,17 +205,20 @@ impl TxnManager {
         let duration = self.enter_txn_instant.elapsed();
         let threshold = sctx.vars.slow_txn_threshold;
         if threshold > 0 && duration.as_millis() as u64 >= threshold {
-            let events: Vec<String> = self
+            let event_fields: Vec<[tidb_base::structured_log::LogField<'_>; 2]> = self
                 .events
                 .iter()
                 .flatten()
                 .map(Event::marshal_log_object)
                 .collect();
-            log::info!(
-                "slow transaction duration={duration:?} conn={} txnStartTS={} events=[{}]",
-                sctx.vars.connection_id,
-                sctx.vars.state.txn_ctx.start_ts,
-                events.join(", ")
+            let event_slices: Vec<&[tidb_base::structured_log::LogField<'_>]> =
+                event_fields.iter().map(|f| f.as_slice()).collect();
+            tidb_base::log_info!(
+                "slow transaction",
+                "duration" => duration,
+                "conn" => sctx.vars.connection_id,
+                "txnStartTS" => sctx.vars.state.txn_ctx.start_ts,
+                "events" => event_slices.as_slice(),
             );
         }
 

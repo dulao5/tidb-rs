@@ -82,13 +82,13 @@ pub fn add_prefix4_shard_indexes(
         match add_expr_prefix_cond(ds, sc, path, new_conds) {
             Ok(c) => new_conds = c,
             Err(err) => {
-                log::error!(
-                    "Add tidb_shard expression failed: error={:?} connection id={} database name={} table name={} index name={}",
-                    err,
-                    sc.vars.connection_id,
-                    ds.db_name.l,
-                    ds.table_info.name.l,
-                    path.index.as_ref().map(|i| i.name.l.as_str()).unwrap_or("")
+                tidb_base::log_error!(
+                    "Add tidb_shard expression failed",
+                    "error" => &err,
+                    "connection id" => sc.vars.connection_id,
+                    "database name" => ds.db_name.l.as_str(),
+                    "table name" => ds.table_info.name.l.as_str(),
+                    "index name" => path.index.as_ref().map(|i| i.name.l.as_str()).unwrap_or(""),
                 );
                 return conds;
             }

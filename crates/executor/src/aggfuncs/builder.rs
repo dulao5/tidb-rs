@@ -259,7 +259,10 @@ fn build_approx_percentile(
             Ok(v) => v.unwrap_or(0) as isize,
             Err(err) => {
                 // Should not reach here
-                log::error!("Error happened when buildApproxPercentile: {err}");
+                tidb_base::log_error!(
+                    "Error happened when buildApproxPercentile",
+                    "error" => &err,
+                );
                 return Ok(None);
             }
         };

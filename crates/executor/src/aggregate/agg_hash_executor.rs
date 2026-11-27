@@ -409,7 +409,11 @@ impl Executor for HashAggExec {
                         returned_input_rx = Some(input_rx);
                     }
                     Err(join_err) => {
-                        log::error!("HashAggExec fetcher task failed to join: {join_err}");
+                        let err_str = join_err.to_string();
+                        tidb_base::log_error!(
+                            "HashAggExec fetcher task failed to join",
+                            "error" => err_str.as_str(),
+                        );
                     }
                 }
                 self.tasks.fetcher = None;
@@ -441,7 +445,10 @@ impl Executor for HashAggExec {
             self.executed = false;
             let consumed = self.mem_tracker.bytes_consumed();
             if consumed < 0 {
-                log::warn!("Memory tracker's counter is invalid, counter={consumed}");
+                tidb_base::log_warn!(
+                    "Memory tracker's counter is invalid",
+                    "counter" => consumed,
+                );
             }
             let _ = self.mem_tracker.replace_bytes_used(0);
             self.parallel_exec_valid = false;

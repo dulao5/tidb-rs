@@ -146,6 +146,7 @@ impl Compiler {
         mut stmt_node: ast::Stmt,
         text: &str,
     ) -> Result<ExecStmt, Error> {
+        // log-skip: Compiler.Compile:62 panics are caught at the task boundary (M-PANIC)
         let is_read_only =
             tidb_planner::optimize::is_read_only(&stmt_node, sctx.get_session_vars())?;
         sctx.get_session_vars_mut().stmt_ctx_mut().is_read_only = is_read_only;

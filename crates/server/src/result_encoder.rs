@@ -55,7 +55,7 @@ impl ResultEncoder {
     pub fn update_data_encoding(&mut self, chs_id: u16) {
         let (chs, _, err) = get_charset_info_by_id(chs_id as isize);
         if let Err(err) = err {
-            log::warn!("unknown charset ID: {err}");
+            tidb_base::log_warn!("unknown charset ID", "error" => &err);
         }
         self.data_encoding = Some(find_encoding_take_utf8_as_noop(&chs));
         self.data_is_binary = chs_id == u16::from(BinaryDefaultCollationID);
@@ -108,7 +108,7 @@ impl ResultEncoder {
     pub fn encode_with<'a>(&self, src: &'a [u8], enc: Encoding) -> Cow<'a, [u8]> {
         let (data, err) = enc.transform(src, OpEncodeReplace);
         if let Err(err) = err {
-            log::debug!("encode error: {err}");
+            tidb_base::log_debug!("encode error", "error" => &err);
         }
         data
     }

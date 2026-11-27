@@ -230,11 +230,11 @@ impl ActionOnExceed for AggSpillDiskAction {
             && *spill_times < maxSpillTimes
         {
             *spill_times += 1;
-            log::info!(
-                "{spillLogInfo}, spillTimes={}, consumed={}, quota={}",
-                *spill_times,
-                t.bytes_consumed(),
-                t.get_bytes_limit()
+            tidb_base::log_info!(
+                spillLogInfo,
+                "spillTimes" => u64::from(*spill_times),
+                "consumed" => t.bytes_consumed(),
+                "quota" => t.get_bytes_limit(),
             );
             self.in_spill_mode.store(1, Ordering::SeqCst);
             QueryForceDisk.fetch_add(1, Ordering::SeqCst);

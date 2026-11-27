@@ -147,6 +147,9 @@ pub enum LogValue<'a> {
     F32s(&'a [f32]),
     F64s(&'a [f64]),
     Times(&'a [LogTime]),
+    /// Array of structured objects (`zap.Objects` / `zapcore.ObjectMarshaler`):
+    /// text mode encodes `["{k=v,...}",...]`, JSON mode encodes `[{"k":v,...},...]`.
+    Objects(&'a [&'a [LogField<'a>]]),
     /// Pre-serialized JSON bytes (for `Reflect` / `Object` values).
     JsonBytes(&'a [u8]),
     /// Explicitly skipped field (`zap.Skip()` / `zap.Error(nil)`): silently omitted per R34 (#454).
@@ -305,6 +308,11 @@ impl<'a> IntoLogValue<'a> for &'a [f64] {
 impl<'a> IntoLogValue<'a> for &'a [LogTime] {
     fn into_log_value(self) -> LogValue<'a> {
         LogValue::Times(self)
+    }
+}
+impl<'a> IntoLogValue<'a> for &'a [&'a [LogField<'a>]] {
+    fn into_log_value(self) -> LogValue<'a> {
+        LogValue::Objects(self)
     }
 }
 
@@ -701,6 +709,34 @@ fn append_fallback_value(buf: &mut Vec<u8>, v: LogValue<'_>) {
         LogValue::Times(xs) => {
             let s = format!("{xs:?}");
             append_fallback_bytes(buf, s.as_bytes());
+        }
+        LogValue::Objects(objs) => {
+            let mut arr = Vec::new();
+            arr.push(b'[');
+            for (i, obj) in objs.iter().enumerate() {
+                if i > 0 {
+                    arr.push(b',');
+                }
+                let mut obj_buf = Vec::new();
+                obj_buf.push(b'{');
+                let mut first = true;
+                for f in *obj {
+                    if matches!(f.value, LogValue::Skip) {
+                        continue;
+                    }
+                    if !first {
+                        obj_buf.push(b',');
+                    }
+                    first = false;
+                    append_fallback_bytes(&mut obj_buf, f.key.as_bytes());
+                    obj_buf.push(b'=');
+                    append_fallback_value(&mut obj_buf, f.value);
+                }
+                obj_buf.push(b'}');
+                append_fallback_bytes(&mut arr, &obj_buf);
+            }
+            arr.push(b']');
+            append_fallback_bytes(buf, &arr);
         }
         LogValue::Skip => {}
     }

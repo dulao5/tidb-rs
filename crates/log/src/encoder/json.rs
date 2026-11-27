@@ -231,6 +231,30 @@ fn encode_value(value: LogValue<'_>, out: &mut Vec<u8>) {
             }
             out.push(b']');
         }
+        LogValue::Objects(objs) => {
+            out.push(b'[');
+            for (i, obj) in objs.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                out.push(b'{');
+                let mut first = true;
+                for f in *obj {
+                    if matches!(f.value, LogValue::Skip) {
+                        continue;
+                    }
+                    if !first {
+                        out.push(b',');
+                    }
+                    first = false;
+                    append_json_string(out, f.key.as_bytes());
+                    out.push(b':');
+                    encode_value(f.value, out);
+                }
+                out.push(b'}');
+            }
+            out.push(b']');
+        }
         LogValue::JsonBytes(b) => {
             if serde_json::from_slice::<serde_json::Value>(b).is_ok()
                 && !b.contains(&b'\n')
