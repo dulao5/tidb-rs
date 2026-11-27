@@ -278,7 +278,7 @@ fn append_datum_for_checksum(
     typ: u8,
 ) -> Result<Vec<u8>, Error> {
     // catch panic when datum and type mismatch
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let res = tidb_base::panic_guard::catch_unwind_silent(std::panic::AssertUnwindSafe(|| {
         append_datum_for_checksum_inner(loc, buf, dat, typ)
     }));
     match res {

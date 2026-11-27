@@ -356,19 +356,35 @@
 4. **Domain / SchemaSync 关闭**（`domain.go:1145,1320`）：Schema sync 后台循环退出输出 `INFO` `"loadSchemaInLoop exited."`（`domain.go:1145`），注销完成后输出 `INFO` `"domain closed"` `["take time"=...]`；
 5. **刷盘**：调用 `tidb_log::sync()` 退出。
 
+> **混部安全顺序差异说明（有意差异）**：`tidb-rs` 在 `crates/poc/server/src/main.rs` 中先按 Go 顺序在 `setting tidb-server to report unhealthy (shutting-down)` 之后立即关闭 status/RPC 服务并等待其 3 条关闭 `WARN` 输出完成（位于 `domain closed` 之前，与 Go 一致）；但随后有意先执行 `sync.shutdown()` 退出 etcd 注册（输出 `domain closed`），再进入 `Server::serve` 客户端排空（`start drain clients` → `all sessions quit in drain wait time` → `kill all connections.`），与 Go（先排空客户端再关闭 Domain）不同。原因：在混合集群中，让正在下线的 `tidb-rs` 节点第一时间从 etcd 注销，可避免其他 Go TiDB 节点的 DDL 最长空等 15 秒。排空期间正在执行的只读语句依然安全：每条语句在启动时已捕获不可变 `Arc<InfoSchemaV2>` 并在其 MVCC snapshot TS 上读数，当前只读节点不执行写/DDL；未来开放写路径后仍由 schema validator / lease 机制保护在途写入。
+
 Go v8.5.8 实测 `SIGTERM` 核心捕获片段（状态服务默认开启时，3 条 `http_status.go` `WARN` 会穿插在 `unhealthy` 之后，并发顺序不固定）：
 
 ```text
 [2026/11/27 01:26:00.174 +00:00] [INFO] [signal_posix.go:54] ["got signal to exit"] [signal=terminated]
 [2026/11/27 01:26:00.174 +00:00] [INFO] [server.go:591] ["setting tidb-server to report unhealthy (shutting-down)"]
-[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:540] ["http server error"] [error="..."]
-[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:535] ["grpc server error"] [error="..."]
-[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:545] ["start status/rpc server error"] [error="..."]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:540] ["http server error"] [error="http: Server closed"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:535] ["grpc server error"] [error="mux: server closed"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [http_status.go:545] ["start status/rpc server error"] [error="accept tcp [::]:10080: use of closed network connection"]
 [2026/11/27 01:26:00.175 +00:00] [INFO] [server.go:1014] ["start drain clients"]
 [2026/11/27 01:26:00.175 +00:00] [INFO] [server.go:1060] ["all sessions quit in drain wait time"]
 [2026/11/27 01:26:00.175 +00:00] [INFO] [server.go:990] ["kill all connections."] [category=server]
 ... ([INFO] [domain.go:1145] ["loadSchemaInLoop exited."] 等后台循环退出) ...
 [2026/11/27 01:26:00.179 +00:00] [INFO] [domain.go:1320] ["domain closed"] ["take time"=4.636049ms]
+```
+
+对应 `tidb-rs` `SIGTERM` 退出顺序（status `WARN` 位于 `unhealthy` 之后、`domain closed` 之前；仅 `domain closed` 提前至客户端排空之前）：
+
+```text
+[2026/11/27 01:26:00.174 +00:00] [INFO] [main.rs:...] ["got signal to exit"] [signal=terminated]
+[2026/11/27 01:26:00.174 +00:00] [INFO] [main.rs:...] ["setting tidb-server to report unhealthy (shutting-down)"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [status.rs:...] ["grpc server error"] [error="mux: server closed"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [status.rs:...] ["http server error"] [error="http: Server closed"]
+[2026/11/27 01:26:00.175 +00:00] [WARN] [status.rs:...] ["start status/rpc server error"] [error="accept tcp [::]:10080: use of closed network connection"]
+... ([INFO] [sync.rs:...] ["loadSchemaInLoop exited."] / ["domain closed"] ["take time"=...]) ...
+[2026/11/27 01:26:00.179 +00:00] [INFO] [server.rs:...] ["start drain clients"]
+[2026/11/27 01:26:00.179 +00:00] [INFO] [server.rs:...] ["all sessions quit in drain wait time"]
+[2026/11/27 01:26:00.179 +00:00] [INFO] [server.rs:...] ["kill all connections."] [category=server]
 ```
 
 ### 4.3 命令分发错误 `["command dispatched failed"]` 与伴随 `session.go` 日志
@@ -569,7 +585,7 @@ Go v8.5.8 实测 `SIGTERM` 核心捕获片段（状态服务默认开启时，3 
 
 | 批次 | 范围 | 主要交付物 | 验收标准 |
 |---|---|---|---|
-| **Batch 0：底座、规则与优先运维日志** | `tidb-base`、`tidb-log`（新建）、`CLAUDE.md`、`docs/porting/mappings.md`、`scripts/check_log_parity.py`、`poc-server`/`tidb-server` | 新建 `tidb-log`（编码器/轮转/`general_log`/panic hook/`build.rs` 版本注入）；补齐 `tidb-base` 堆栈/`terror`（保持 `gen_with_stack`/`fast_gen` 不脱敏以对齐 Go）；接入 CI 规则 A/B/C 与棘轮；率先上线启动横幅、关闭、`command dispatched failed`、`expensive_query`/OOM 日志 | `check_layers.py` 通过；`check_log_parity.py` 规则 A 归 0；编码器、error/stack/panic 及优先运维日志黄金测试全绿 |
+| **Batch 0：底座、规则与优先运维日志** | `tidb-base`、`tidb-log`（新建）、`CLAUDE.md`、`docs/porting/mappings.md`、`scripts/check_log_parity.py`、`poc-server`/`tidb-server` | 新建 `tidb-log`（编码器/轮转/`general_log`/panic hook/`build.rs` 版本注入）；补齐 `tidb-base` 堆栈/`terror`（保持 `gen_with_stack`/`fast_gen` 不脱敏以对齐 Go）；接入 CI 规则 A/B/C 与棘轮；率先上线启动横幅、优雅关闭序列、`command dispatched failed`（含 `parse SQL failed` / `compile SQL failed` / `parser::normalize` / 预处理参数）以及 `expensive_query`/OOM 格式化函数（`crates/session/src/expensive_query.rs`）；**说明**：(1) `expensive_query` 100ms 后台轮询与 OOM `set_log_hook` 生产接线依赖 `SessionManager`（D03.1）与 A1 `SessionVars.MemTracker`/`OOMAction`，拆入后续 issue `#464`；(2) `command dispatched failed` 的 `[err="[<class>:<code>]..."]` 及实时 `txn_mode`/`timestamp`/`status`/`redact_mode` 对齐仅在开启新执行栈（`NewStackMode`）时成立，默认 `NewStackMode::Off` 的 PoC 引擎路径无 `source_err` 前缀且会话字段使用兜底值 | `check_layers.py` 通过；`check_log_parity.py` 规则 A 归 0；编码器、error/stack/panic 及上述运维日志整行黄金测试全绿 |
 | **Batch 1：底层 crate**（rank 0–4） | `tidb-base`(10+5), `tidb-parser`(1), `tidb-memory`(9), `tidb-runtime`(3), `tidb-types`(11+9), `tidb-codec`(1+5) | 清零插值；`tidb-memory` 与 `tidb-runtime` 切换至 rank-0 `tidb-base` 结构化宏，修 `sqlkiller.rs` `"connection ID"`、`pool.rs` 补 `["stack trace"=...]` 并改用 `catch_unwind_capture`；回改全部 14 处 `terror::log` | 上述 crate 规则 A/B/C 零违规，下压 `log_parity_ratchet.tsv` |
 | **Batch 2：存储、KV 与元数据**（rank 5–12） | `tidb-kv`(6+1), `tidb-tablecodec`(0+2), `tidb-infoschema`(12+1), `tidb-statistics`(2), `tidb-store`(17), `tidb-sessiontxn`(4), `tidb-expr-pushdown`(5), `tidb-expression`(0+5), `tidb-domain`(9) | `coprocessor.rs` panic/慢 cop 结构化；`Domain.Reload` 等 2 处遗漏补齐；`X` 写路径分支标注 `// log-skip:` | 上述 crate 规则 B/C 零违规，下压棘轮基线 |
 | **Batch 3：规划、执行、会话与服务**（rank 13–16） | `tidb-planner`(12+1), `tidb-executor`(22+1), `tidb-session`(16), `tidb-server`(4) | `consistency.rs` 补 `[stack=...]`；`session.rs` `GENERAL_LOG` 迁入 `GeneralLogger` 与结构化字段；补 `compile SQL failed`/`run statement failed`/`command dispatched failed` 与遗漏分支 | 分层生产代码插值与未登记偏差清零（棘轮归 0） |
@@ -606,6 +622,7 @@ Go v8.5.8 实测 `SIGTERM` 核心捕获片段（状态服务默认开启时，3 
 | 5 | Go `pingcap/log` 文本编码器对 `zap.Skip()` / `zap.Error(nil)` 输出多余 `[]` | `pingcap/log/zap_text_encoder.go:639-641` | `upstream-pitfall` `go-bug-fixed`（`#454`，复现见 `probe` `3_TEXT_FIELDS`），负责人已定 **D3 = A**，已登记 `rulings.toml` **`R34`** |
 | 6 | Go `pingcap/log` `OpenNamespace` 在 text 模式下括号错位 `[ns={] ...}` | `pingcap/log/zap_text_encoder.go:238-242,489-493` | `upstream-pitfall` `go-bug-fixed`（`#454`，复现见 `probe` `3_TEXT_FIELDS [01]`），负责人已定 **D3 = A**，已登记 `rulings.toml` **`R34`** |
 | 7 | Go `pingcap/log` `Complex` 负虚部输出 `1+-2i` 与 `ReplaceLogger` 未更新 `errVerboseLogger` | `zap_text_encoder.go:303-306`、`pkg/util/logutil/log.go:191-217` | `upstream-pitfall`：`ErrVerboseLogger` 在 §3.3 共享全局原子句柄，随 `replace_logger` 自动同步（无对外格式偏差，`go-bug-fixed` 内部同步修复）；`Complex` 日志在 Rust 几乎不用，按需登记 |
+| 8 | Batch 0 `LogValue` 暂不覆盖的 Go/zap 罕见字段类型：`Object`/`Array`（含 `<key>Error`）、`Stringer`、`Complex64`/`Complex128` 与 `multierr` `errorCauses` | `pingcap/log/zap_text_encoder.go` | 已知延后缺口：Rust 现有移植日志点均未使用上述类型；后续批次如遇到 Go 侧调用 `zap.Object`/`zap.Array`/`zap.Stringer` 或 `multierr`，在 `tidb-base`/`tidb-log` 按需扩展 |
 
 ### 9.1 已由负责人决定（2026-11-27）
 

@@ -11,7 +11,7 @@
 |---|---|---|---|
 | R1 | 宪章 2026-11-04 修订：业务逻辑 L1、承载方式按全局映射规则；上游已修复的安全/数据正确性问题移植修复；基础 spec 不可逆；边界桩三类；例外可按批确认；无出边的小函数可提前移植（第四条 5） | 采纳 | 建议 |
 | R2 | 全局映射规则（`docs/porting/mappings.md`，26 条）及移植模块统一约定（lint 豁免清单、注释写法、FMA、jemalloc） | 采纳 | 建议 |
-| R3 | ADR 0007：TiKV crate 只复用字节格式；chunk 解码从 Go 移植；不使用 `tidb_query_expr`；行格式解码只在 coprocessor 边界 | 采纳（状态改为 accepted） | 建议 |
+| R3 | ADR 0007：TiKV crate 只复用字节格式；chunk 解码从 Go 移植；生产代码不使用 `tidb_query_expr`（仅测试用依赖见 D19）；行格式解码只在 coprocessor 边界 | 采纳（状态改为 accepted） | 建议 |
 | R4 | 端到端空窗：不写过渡规划器，每阶段写明端到端覆盖的新代码 | 采纳 | 建议 |
 
 ## 二、基础设计 spec
@@ -36,7 +36,7 @@
 | D16 | A4 | TiKV JSON 差异 | 整理后报给 TiKV 上游 | 已决定 |
 | D17 | A4 | 损坏的 JSON 二进制 | 返回内部错误码 | 已决定 |
 | D18 | N4 | Go 逐行版与向量版"真分歧" | 两种驱动各自与 Go 一致，分歧签名保留第二份函数体，同时报上游 | 建议 |
-| D19 | N4 | 是否依赖 TiKV RPN 框架代码 | 不依赖，只参照设计；删除 vendored `tidb_query_expr` | 建议 |
+| D19 | N4 | 是否依赖 TiKV RPN 框架代码 | 生产代码不依赖，只参照设计。~~删除 vendored `tidb_query_expr`~~ 改为：保留为仅测试用依赖（只在 `[dev-dependencies]`），供协处理器求值对照测试使用。理由：这是唯一自动检查"已修复 Go 缺陷的裁定"与 TiKV 求值是否一致的手段。`scripts/check_test_only_deps.py` 在 CI 中保证它进不了生产构建 | 已决定（项目负责人 zhigang-du，2026-11-28） |
 | D20 | N4 | 阻塞型函数（SLEEP、GET_LOCK） | ~~放阻塞池执行，不把求值做成 async~~ 被 D43 取代（2026-11-07） | 取代 |
 | D21 | N4 | SIMD | 本 spec 只保证单态化循环；手写 SIMD 按 A5 逐个申请 | 建议 |
 | D22 | N4 | 定稿门禁 | 定稿前用宏原型对 5 个热点签名做基准，不低于 Go | 建议 |

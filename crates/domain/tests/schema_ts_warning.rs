@@ -2,49 +2,32 @@
 //! TiKV MVCC API, part of the store driver D07.1): every schema load reaches it, and the
 //! domain warns about it once, not on every reload of the sync loop (#484).
 //!
-//! A test binary of its own: the warning is captured with a thread-local `tracing`
-//! subscriber, and `tracing` caches per call site whether anyone listens, which other tests
-//! running on other threads of the same binary would race with.
+//! A test binary of its own: installs the global `tidb-log` `MemorySink` at `WARN` level.
 
 mod common;
 
 use std::sync::Arc;
 
 use common::{MvccStore, create_diff, has_table, state, table};
+use tidb_base::config::LogConfig;
 use tidb_domain::new_domain;
 use tidb_kv::kv::Storage;
-
-/// A `tracing` writer into a shared buffer.
-#[derive(Clone, Default)]
-struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
+use tidb_log::sink::MemorySink;
 
 /// Drives the first (full) load, cache hits, a diff load and a snapshot load, and compares
 /// the captured WARN lines whole: one line, at the first load.
 #[tokio::test]
 async fn blocked_schema_ts_lookup_warns_once() {
-    let buf = LogBuf::default();
-    let writer = buf.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_max_level(tracing_subscriber::filter::LevelFilter::WARN)
-        .without_time()
-        .with_target(false)
-        // `poc-server` turns on tracing-subscriber's `ansi` feature; in a workspace build the
-        // features are unified and the writer would colour the captured line.
-        .with_ansi(false)
-        .finish();
-    // The current-thread runtime of `#[tokio::test]` polls the loads on this thread.
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let sink = MemorySink::new();
+    let cfg = LogConfig {
+        level: "warn".to_owned(),
+        format: "text".to_owned(),
+        disable_timestamp: true,
+        disable_error_verbose: true,
+        ..LogConfig::default()
+    };
+    let log_sink = Arc::clone(&sink);
+    tidb_log::init_logger_with_sinks(&cfg, "", log_sink, None).unwrap();
 
     let store = Arc::new(MvccStore::default());
     let t1 = table(110, "sbtest1");
@@ -79,17 +62,31 @@ async fn blocked_schema_ts_lookup_warns_once() {
     let is = domain.get_snapshot_info_schema(10).await.unwrap();
     assert_eq!(is.schema_meta_version(), 1);
 
-    let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-    let lines: Vec<&str> = out.lines().collect();
+    let out = String::from_utf8(sink.take()).unwrap();
+    let lines: Vec<String> = out
+        .lines()
+        .map(|l| {
+            // Normalize `[domain.rs:<digits>]` to `[domain.rs:<LINE>]` for whole-line comparison.
+            if let Some((head, tail)) = l.split_once("[domain.rs:")
+                && let Some((digits, rest)) = tail.split_once(']')
+                && !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+            {
+                format!("{head}[domain.rs:<LINE>]{rest}")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
     assert_eq!(
         lines,
         vec![concat!(
-            " WARN schema version commit ts is not available, logged once",
-            " error=[blocked-by:D07.1]This version of TiDB doesn't yet support",
+            "[WARN] [domain.rs:<LINE>] [\"schema version commit ts is not available, logged once\"]",
+            " [error=\"[blocked-by:D07.1]This version of TiDB doesn't yet support",
             " 'the commit ts of a schema version (TiKV MVCC API of store/helper)",
-            " (blocked-by:D07.1)' version=1 reason=\"store/helper",
+            " (blocked-by:D07.1)'\"] [version=1] [reason=\"store/helper",
             " GetMvccByEncodedKeyWithTS (TiKV MVCC API) is not ported; schema versions",
-            " are cached with ts 0, so a snapshot read loads its schema again\"",
+            " are cached with ts 0, so a snapshot read loads its schema again\"]",
         )],
         "the blocked lookup warns once over 21 loads"
     );

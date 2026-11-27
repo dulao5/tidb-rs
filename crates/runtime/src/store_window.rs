@@ -260,5 +260,5 @@ fn release_store_token(st: &StoreState) {
         st.token_count.fetch_sub(1, Ordering::SeqCst);
         return;
     }
-    tracing::warn!("release store token failed, count equals to 0");
+    tidb_base::log_warn!("release store token failed, count equals to 0");
 }

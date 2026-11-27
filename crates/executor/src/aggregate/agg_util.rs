@@ -115,19 +115,28 @@ pub(crate) fn try_recycle_buffer(_buf: &mut Vec<usize>, _group_key: &mut Vec<Vec
 pub(crate) async fn close_base_executor(b: &mut BaseExecutor, err: Error) -> Error {
     // Release the resource, but throw the panic again and let the top level handle it.
     terror::log(b.base.close().await.err().as_ref());
-    log::warn!("panic in Open(), close base executor and throw exception again");
+    tidb_base::log_warn!("panic in Open(), close base executor and throw exception again");
     err
 }
 
-/// Converts a caught task panic into an error, sends it to `output`, and logs a warning.
-// go: recoveryHashAgg L2 (catch_unwind payload; async mpsc send; no stack capture, M-PANIC, M-CH)
+/// Converts a caught task panic into an error, sends it to `output`, and logs a warning with
+/// the captured stack trace (matching Go `agg_util.go:93`).
+// go: recoveryHashAgg L2 (catch_unwind payload + captured stack; async mpsc send; M-PANIC, M-CH)
 pub(crate) async fn recovery_hash_agg(
     output: &mpsc::Sender<AfFinalResult>,
     r: Box<dyn Any + Send>,
+    bt: Option<String>,
 ) {
     let err = get_recover_error(r);
     let _ = output.send(AfFinalResult::err(err.clone())).await;
-    log::warn!("parallel hash aggregation panicked: {err}");
+    let stack = bt.unwrap_or_else(|| {
+        tidb_base::errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture())
+    });
+    tidb_base::log_warn!(
+        "parallel hash aggregation panicked",
+        "error" => &err,
+        "stack" => &stack,
+    );
 }
 
 /// Computes the slice-capacity estimate of `groupKey` (kept L1 alongside A1 accounting).

@@ -662,7 +662,7 @@ fn get_stmt_timestamp(ctx: Option<&SessionView>) -> Result<Time, Error> {
                 ));
             }
             Ok(_) => {}
-            Err(err) => log::error!("get stale tso failed: {err}"),
+            Err(err) => tidb_base::log_error!("get stale tso failed", "error" => &err),
         }
     }
 

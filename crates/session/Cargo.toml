@@ -10,6 +10,10 @@ publish.workspace = true
 [dependencies]
 # Errors (M-ERR), boundary stubs.
 tidb-base = { workspace = true }
+# Unified logging types (ContextLogger / OwnedLogField) for expensive_query (rank 1 < rank 15).
+tidb-log = { workspace = true }
+# Execution statistics (ExecDetails / CopTasksDetails) for expensive_query (rank 4 < rank 15).
+tidb-execdetails = { workspace = true }
 # The AST the session executes (ADR 0010 §4.2: the only boundary to the semantic core).
 tidb-parser = { workspace = true }
 # SessionVars, StatementContext (D05.2, D00.1).
@@ -32,7 +36,6 @@ tidb-memory = { workspace = true }
 tidb-runtime = { workspace = true }
 futures = { workspace = true }
 parking_lot = "0.12"
-log = "0.4"
 
 [dev-dependencies]
 tidb-model = { workspace = true }

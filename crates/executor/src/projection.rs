@@ -16,12 +16,10 @@
 //! - the deferred `recover()` of each goroutine is a `catch_unwind` around the task's loop
 //!   (M-PANIC); an error of a memory tracker's action (Go: a panic) takes the same path.
 
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use async_trait::async_trait;
-use futures::FutureExt;
 use tidb_base::Error;
 use tidb_chunk::chunk::Chunk;
 use tidb_execdetails::execdetails::{
@@ -579,11 +577,9 @@ impl ProjectionInputFetcher {
     // go: projectionInputFetcher.run L2 (the deferred recover is a catch_unwind; no trace region; M-PANIC, M-WG)
     async fn run(mut self, ctx: ExecCtx) -> ProjectionInputFetcher {
         let mut output: Option<OutputRef> = None;
-        let r = AssertUnwindSafe(self.run_loop(&ctx, &mut output))
-            .catch_unwind()
-            .await;
-        if let Some(err) = recovered(r) {
-            recovery_projection(output.as_ref(), err).await;
+        let r = tidb_base::panic_guard::catch_unwind_future(self.run_loop(&ctx, &mut output)).await;
+        if let Some((err, bt)) = recovered(r) {
+            recovery_projection(output.as_ref(), err, bt).await;
         }
         self.global_output_tx = None;
         self
@@ -672,11 +668,9 @@ impl ProjectionWorker {
     // go: projectionWorker.run L2 (the deferred recover is a catch_unwind; no trace region; M-PANIC, M-WG)
     async fn run(mut self, _ctx: ExecCtx) -> ProjectionWorker {
         let mut output: Option<OutputRef> = None;
-        let r = AssertUnwindSafe(self.run_loop(&mut output))
-            .catch_unwind()
-            .await;
-        if let Some(err) = recovered(r) {
-            recovery_projection(output.as_ref(), err).await;
+        let r = tidb_base::panic_guard::catch_unwind_future(self.run_loop(&mut output)).await;
+        if let Some((err, bt)) = recovered(r) {
+            recovery_projection(output.as_ref(), err, bt).await;
         }
         self
     }
@@ -723,14 +717,16 @@ impl ProjectionWorker {
     }
 }
 
-/// What the deferred `recover()` of a goroutine gets: the panic, or the error of a tracker's
-/// action (Go panics there too). `None`: the loop returned.
+type WorkerOutcome = Result<Result<(), Error>, (Box<dyn std::any::Any + Send>, Option<String>)>;
+
+/// What the deferred `recover()` of a goroutine gets: the panic (with its captured backtrace),
+/// or the error of a tracker's action (Go panics there too). `None`: the loop returned.
 // glue: recover() of the deferred function (M-PANIC)
-fn recovered(r: Result<Result<(), Error>, Box<dyn std::any::Any + Send>>) -> Option<Error> {
+fn recovered(r: WorkerOutcome) -> Option<(Error, Option<String>)> {
     match r {
         Ok(Ok(())) => None,
-        Ok(Err(err)) => Some(err),
-        Err(payload) => Some(get_recover_error(payload)),
+        Ok(Err(err)) => Some((err, None)),
+        Err((payload, bt)) => Some((get_recover_error(payload), bt)),
     }
 }
 
@@ -745,14 +741,22 @@ fn get_recover_error(p: Box<dyn std::any::Any + Send>) -> Error {
     Error::plain(msg)
 }
 
-/// Go logs the stack with `zap.Stack`; the log here has the error only.
-// go: recoveryProjection L2 (the recovered value is already an error; no stack in the log)
-async fn recovery_projection(output: Option<&OutputRef>, r: Error) {
+/// Logs `"projection executor panicked"` with `"error"` and `"stack"` (matching Go
+/// `projection.go:488`).
+// go: recoveryProjection L2 (the recovered value is already an error; captured stack logged)
+async fn recovery_projection(output: Option<&OutputRef>, r: Error, bt: Option<String>) {
     let msg = r.to_string();
     if let Some(output) = output {
         let _ = output.done_tx.send(Err(r)).await;
     }
-    log::warn!("projection executor panicked, error={msg}");
+    let stack = bt.unwrap_or_else(|| {
+        tidb_base::errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture())
+    });
+    tidb_base::log_warn!(
+        "projection executor panicked",
+        "error" => &msg,
+        "stack" => &stack,
+    );
 }
 
 /// The value a fetcher or worker task handed back. A task that ended without one (it
@@ -763,7 +767,12 @@ fn joined<T>(r: Result<T, tokio::task::JoinError>, task: &str) -> Option<T> {
     match r {
         Ok(v) => Some(v),
         Err(e) => {
-            log::warn!("projection {task} task ended without returning, error={e}");
+            let err_str = e.to_string();
+            tidb_base::log_warn!(
+                "projection task ended without returning",
+                "task" => task,
+                "error" => err_str.as_str(),
+            );
             None
         }
     }

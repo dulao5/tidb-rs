@@ -852,10 +852,10 @@ impl SelectResultInner {
             // For cop task cases, we still need this protection.
             if summaries.len() != self.cop_plan_ids.len() {
                 if !for_unconsumed_stats && !(self.store_type == TiFlash && summaries.is_empty()) {
-                    log::warn!(
-                        "invalid cop task execution summaries length, expected: {}, received: {}",
-                        self.cop_plan_ids.len(),
-                        summaries.len()
+                    tidb_base::log_warn!(
+                        "invalid cop task execution summaries length",
+                        "expected" => self.cop_plan_ids.len(),
+                        "received" => summaries.len(),
                     );
                 }
                 return Ok(());

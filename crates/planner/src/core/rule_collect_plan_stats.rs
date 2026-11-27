@@ -191,12 +191,19 @@ pub fn record_table_runtime_stats(ctx: &mut PlanCtx<'_>, tbls: &HashSet<i64>) ->
                 return Err(err);
             }
             Err(err) => {
-                log::warn!("record table json stats failed, tblID: {tbl_id}, error: {err}");
+                tidb_base::log_warn!(
+                    "record table json stats failed",
+                    "tblID" => tbl_id,
+                    "error" => &err,
+                );
                 (None, false)
             }
         };
         if tbl_json_stats.is_none() && !skip {
-            log::warn!("record table json stats failed due to empty, tblID: {tbl_id}");
+            tidb_base::log_warn!(
+                "record table json stats failed due to empty",
+                "tblID" => tbl_id,
+            );
         }
         let value: Arc<dyn std::any::Any + Send + Sync> = Arc::new(tbl_json_stats);
         tbl_stats.insert(tbl_id, value);

@@ -94,7 +94,7 @@ impl TxnFuture {
                 if tidb_base::config::get_global_config().store == "unistore" {
                     return Err(err);
                 }
-                log::warn!("wait tso failed: {err}");
+                tidb_base::log_warn!("wait tso failed", "error" => &err);
             }
         }
         // tf.pipelined: tikv.WithPipelinedMemDB() (write path, never set).
@@ -219,6 +219,17 @@ impl LazyTxn {
             return "txnFuture".to_owned();
         }
         "invalid transaction".to_owned()
+    }
+
+    // go: LazyTxn.GoString L1
+    pub fn go_string(&self) -> String {
+        if self.pending() {
+            "Txn{state=pending}".to_owned()
+        } else if let Some(t) = &self.transaction {
+            format!("Txn{{state=valid, txnStartTS={}}}", t.start_ts())
+        } else {
+            "Txn{state=invalid}".to_owned()
+        }
     }
 
     /// GetOption implements the GetOption
@@ -370,7 +381,7 @@ impl LazyTxn {
             let r = self.change_pending_to_valid(rg).await;
             vars.duration_wait_ts = begin.elapsed().as_nanos() as i64;
             if let Err(err) = r {
-                log::warn!("active transaction fail: {err}");
+                tidb_base::log_warn!("active transaction fail", "error" => &err);
                 self.cleanup();
                 vars.state.txn_ctx.start_ts = 0;
                 return Err(err);

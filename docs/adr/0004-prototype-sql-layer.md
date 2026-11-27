@@ -124,8 +124,12 @@ ROLLBACK, `SET autocommit=0`, user variables, SET GLOBAL, any other SET; all oth
 
 - Ties under ORDER BY on non-unique keys may come back in a different order than Go (both are
   valid; Go does not define it either).
-- Warnings: TiKV warnings are dropped and warning counts are always 0 (Go reports e.g. 2
-  truncation warnings for `id='abc'`, which is rejected here anyway).
+- Warnings: TiKV warnings are dropped (Go reports e.g. 2 truncation warnings for
+  `id='abc'`, which is rejected here anyway). The only warning the prototype reports is the
+  plan cache's `skip prepared plan-cache: <reason>` on PREPARE and EXECUTE of an uncacheable
+  prepared statement (#512; plan cache spec `specs/D13.1-plancache/spec.md` §4.4), with the
+  reasons Go decides at PREPARE; reasons Go only finds while optimizing are missing, and with
+  `--new-stack=off` the table checks are left out.
 - Float/double text formatting relies on the protocol layer's port of Go's formatting; not
   covered by the A/B workloads.
 - Errors from TiKV/PD map to 1105 with the client's message, not Go's exact codes; lock waits

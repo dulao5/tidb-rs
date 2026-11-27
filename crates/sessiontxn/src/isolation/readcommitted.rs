@@ -242,9 +242,10 @@ impl BaseTxnContextProvider {
             return no_idea();
         }
 
-        log::info!(
-            "RC read with ts checking has failed, retry RC read, sql: {}, error: {query_err}",
-            vars.stmt_ctx().original_sql
+        tidb_base::log_info!(
+            "RC read with ts checking has failed, retry RC read",
+            "sql" => &vars.stmt_ctx().original_sql,
+            "error" => &query_err,
         );
         retry_ready()
     }

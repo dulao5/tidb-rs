@@ -125,9 +125,10 @@ pub fn plan_cache_preprocess(
                 if blocked_by(&err).is_some() {
                     return Err(err);
                 }
-                log::warn!(
-                    "meet error during tryLockMDLAndUpdateSchemaIfNecessary, table name: {}, error: {err}",
-                    tbl.name.o
+                tidb_base::log_warn!(
+                    "meet error during tryLockMDLAndUpdateSchemaIfNecessary",
+                    "table name" => tbl.name.o.as_str(),
+                    "error" => &err,
                 );
                 // Invalid the cache key related fields to avoid using plan cache.
                 stmt.relate_version.insert(tbl.id, u64::MAX);

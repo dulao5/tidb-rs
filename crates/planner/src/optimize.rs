@@ -69,7 +69,7 @@ pub fn is_read_only(node: &Stmt, vars: &SessionVars) -> Result<bool, Error> {
         let prepare_stmt = match get_prepared_stmt(exec_stmt, vars) {
             Ok(p) => p,
             Err(err) => {
-                log::warn!("GetPreparedStmt failed: {err}");
+                tidb_base::log_warn!("GetPreparedStmt failed", "error" => &err);
                 return Ok(false);
             }
         };
@@ -550,6 +550,7 @@ pub fn optimize(
     ctx.vars.duration_optimization = begin_opt.elapsed().as_nanos() as i64;
 
     // The alternative rounds: none is enabled without tidb_opt_enable_alternative_logical_plans.
+    // log-skip: optimize:769 alternative logical plan rounds are blocked-by:D09.13
     Ok((best_plan, best_names, best_cost))
 }
 

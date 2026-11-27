@@ -366,8 +366,13 @@ pub fn derive_index_path_stats(
             match cardinality::selectivity::selectivity(ctx, &coll, &path.index_filters, &[]) {
                 Ok((s, _)) => s,
                 Err(e) if tidb_base::blocked::blocked_by(&e).is_some() => return Err(e),
-                // logutil.BgLogger().Debug("calculate selectivity failed, use selection factor")
-                Err(_) => SelectionFactor,
+                Err(e) => {
+                    tidb_base::log_debug!(
+                        "calculate selectivity failed, use selection factor",
+                        "error" => &e,
+                    );
+                    SelectionFactor
+                }
             };
         if is_im {
             path.count_after_index = path.count_after_access * selectivity;
@@ -729,8 +734,13 @@ pub fn derive_stats_by_filter(
     let selectivity = match cardinality::selectivity::selectivity(ctx, &coll, conds, filled_paths) {
         Ok((s, _)) => s,
         Err(e) if tidb_base::blocked::blocked_by(&e).is_some() => return Err(e),
-        // logutil.BgLogger().Debug("something wrong happened, use the default selectivity")
-        Err(_) => SelectionFactor,
+        Err(e) => {
+            tidb_base::log_debug!(
+                "something wrong happened, use the default selectivity",
+                "error" => &e,
+            );
+            SelectionFactor
+        }
     };
     // TODO: remove NewHistCollBySelectivity later on.
     Ok(ds

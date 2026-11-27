@@ -13,7 +13,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use clap::CommandFactory;
+use clap::FromArgMatches;
 use clap::Parser;
+use clap::parser::ValueSource;
 use poc_domain::SchemaSync;
 use poc_domain::ServerInfo;
 use poc_domain::SyncConfig;
@@ -32,8 +35,27 @@ use tracing::{error, info, warn};
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Debug, Parser)]
-#[command(name = "tidb-server", about = "tidb-rs read-only SQL node (prototype)")]
+#[command(
+    name = "tidb-server",
+    about = "tidb-rs read-only SQL node (prototype)",
+    disable_version_flag = true
+)]
 struct Args {
+    /// Print TiDB version information and exit (`-V` / `--version`).
+    #[arg(short = 'V', long = "version")]
+    show_version: bool,
+    /// Path to TiDB TOML configuration file (`--config`).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Check config file validity and exit (`--config-check`).
+    #[arg(long)]
+    config_check: bool,
+    /// Enforce strict config file checking (`--config-strict`).
+    #[arg(long)]
+    config_strict: bool,
+    /// Keyspace name (`--keyspace-name`).
+    #[arg(long, default_value = "")]
+    keyspace_name: String,
     /// Address to listen on for MySQL clients.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -65,7 +87,7 @@ struct Args {
     #[arg(long)]
     ssl_ca: Option<PathBuf>,
     /// PD endpoints of the cluster (`host:port`, comma-separated or repeated).
-    #[arg(long, required = true, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',')]
     pd: Vec<String>,
     /// gRPC connections to each TiKV store (TiDB: tikv-client.grpc-connection-count).
     #[arg(long, default_value_t = 4)]
@@ -135,9 +157,21 @@ struct Args {
     /// default). TIDB_RS_ROUTE_TRACE=1 turns it on too.
     #[arg(long)]
     route_trace: bool,
-    /// Log level: error, warn, info, debug or trace.
-    #[arg(long, default_value = "info")]
-    log_level: tracing::Level,
+    /// Log level: debug, info, warn, error, dpanic, panic or fatal (`-L` / `--log-level`).
+    #[arg(short = 'L', long, default_value = "info")]
+    log_level: String,
+    /// Log file path (empty writes to stdout; `--log-file`).
+    #[arg(long, default_value = "")]
+    log_file: String,
+    /// Log format: text or json (`--log-format`).
+    #[arg(long, default_value = "text")]
+    log_format: String,
+    /// General log file path (`--log-general`).
+    #[arg(long, default_value = "")]
+    log_general: String,
+    /// Slow query log file path (`--log-slow-query`).
+    #[arg(long, default_value = "")]
+    log_slow_query: String,
 }
 
 /// `--lease`: Go's `time.ParseDuration`; the lease must be positive.
@@ -159,16 +193,133 @@ fn new_stack_mode(flag: &str) -> Result<poc_session::router::NewStackMode, Strin
 }
 
 fn main() {
-    let args = Args::parse();
-    tracing_subscriber::fmt()
-        .with_max_level(args.log_level)
-        .with_target(false)
-        .init();
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let is_cli = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
 
-    let addr: SocketAddr = match format!("{}:{}", args.host, args.port).parse() {
+    let conf_path = args
+        .config
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let has_config_file = args.config.is_some();
+    if let Err(tidb_base::config::InitializeExit::Exit(code)) = tidb_base::config::initialize_config(
+        &conf_path,
+        args.config_check,
+        args.config_strict,
+        |cfg| {
+            // Match Go cmd/tidb-server/main.go:485-585 (`actualFlags`): CLI flags only override
+            // values from `--config` when explicitly given on the command line. When no config
+            // file is provided, keep tidb-rs's default listen ports (127.0.0.1:4001, status 10081).
+            if is_cli("host") || !has_config_file {
+                cfg.host.clone_from(&args.host);
+            }
+            if is_cli("port") || !has_config_file {
+                cfg.port = usize::from(args.port);
+            }
+            if is_cli("advertise_address")
+                && let Some(ip) = args.advertise_address
+            {
+                cfg.advertise_address = ip.to_string();
+            }
+            if cfg.advertise_address.is_empty() {
+                cfg.advertise_address = advertise_ip(&args, &cfg.host).to_string();
+            }
+            if is_cli("status_host")
+                && let Some(sh) = &args.status_host
+            {
+                cfg.status.status_host.clone_from(sh);
+            } else if !has_config_file {
+                cfg.status.status_host =
+                    args.status_host.clone().unwrap_or_else(|| cfg.host.clone());
+            }
+            if is_cli("status_port") || !has_config_file {
+                cfg.status.status_port = usize::from(args.status_port);
+            }
+            if is_cli("token_limit") {
+                cfg.token_limit = args.token_limit;
+            }
+            if !args.pd.is_empty() {
+                cfg.store = "tikv".to_owned();
+                cfg.path = args.pd.join(",");
+            }
+            if is_cli("log_level") {
+                cfg.log.level.clone_from(&args.log_level);
+            }
+            if is_cli("log_file") && !args.log_file.is_empty() {
+                cfg.log
+                    .file
+                    .file_log_config
+                    .filename
+                    .clone_from(&args.log_file);
+            }
+            if is_cli("log_format") && !args.log_format.is_empty() {
+                cfg.log.format.clone_from(&args.log_format);
+            }
+            if is_cli("log_general") && !args.log_general.is_empty() {
+                cfg.log.general_log_file.clone_from(&args.log_general);
+            }
+            if is_cli("log_slow_query") && !args.log_slow_query.is_empty() {
+                cfg.log.slow_query_file.clone_from(&args.log_slow_query);
+            }
+            if is_cli("keyspace_name") && !args.keyspace_name.is_empty() {
+                cfg.keyspace_name.clone_from(&args.keyspace_name);
+            }
+            // Match Go cmd/tidb-server/main.go:774 & :284 (`setGlobalVars` / `UpdateTempStoragePath`)
+            // so `loaded config` carries resolved socket and tmp-storage-path values.
+            cfg.socket = cfg.socket.replace("{Port}", &cfg.port.to_string());
+            cfg.update_temp_storage_path();
+        },
+    ) {
+        std::process::exit(code);
+    }
+
+    let tidb_cfg = tidb_base::config::get_global_config_arc();
+    if args.show_version {
+        // log-skip: -V CLI version output parity with Go cmd/tidb-server/main.go
+        println!("{}", tidb_log::get_tidb_info(&tidb_cfg));
+        std::process::exit(0);
+    }
+
+    if args.pd.is_empty() {
+        // log-skip: pre-logger CLI argument error
+        eprintln!("error: the following required arguments were not provided:\n  --pd <PD>");
+        std::process::exit(2);
+    }
+
+    tidb_log::init_version(&tidb_cfg);
+    let server_ver = tidb_log::server_version(&tidb_cfg);
+    tidb_sessionctx::variable::set_sys_var("version", &server_ver);
+    if let Some(comment) = tidb_log::version_comment(&tidb_cfg) {
+        tidb_sessionctx::variable::set_sys_var("version_comment", &comment);
+    }
+    if tidb_cfg.log.query_log_max_len > 0 {
+        tidb_sessionctx::variable::tidb_vars::QueryLogMaxLen.store(
+            tidb_cfg.log.query_log_max_len as i32,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+    if let Err(e) = tidb_log::init_logger(&tidb_cfg.log.to_log_config(), &tidb_cfg.keyspace_name) {
+        // log-skip: pre-logger init failure
+        eprintln!("init logger failed: {e}");
+        std::process::exit(1);
+    }
+    tidb_log::print_tidb_info(&tidb_cfg);
+
+    let effective_host = tidb_cfg.host.clone();
+    let effective_port = u16::try_from(tidb_cfg.port).unwrap_or(args.port);
+    let effective_status_host = if tidb_cfg.status.status_host.is_empty() {
+        effective_host.clone()
+    } else {
+        tidb_cfg.status.status_host.clone()
+    };
+    let effective_status_port =
+        u16::try_from(tidb_cfg.status.status_port).unwrap_or(args.status_port);
+    let addr: SocketAddr = match format!("{effective_host}:{effective_port}").parse() {
         Ok(a) => a,
         Err(e) => {
-            error!(host = %args.host, port = args.port, error = %e, "invalid listen address");
+            error!(host = %effective_host, port = effective_port, error = %e, "invalid listen address");
+            let _ = tidb_log::sync();
             std::process::exit(2);
         }
     };
@@ -176,11 +327,13 @@ fn main() {
         Ok(m) => m,
         Err(e) => {
             error!(error = %e, "invalid TIDB_RS_NEW_STACK");
+            let _ = tidb_log::sync();
             std::process::exit(2);
         }
     };
     if let Err(e) = poc_kv::point_get_store_driver_from_env() {
         error!(error = %e, "invalid TIDB_RS_POINT_GET");
+        let _ = tidb_log::sync();
         std::process::exit(2);
     }
     let tls = match tls_config(&args) {
@@ -189,20 +342,19 @@ fn main() {
             // Like TiDB: invalid configured certificates halt startup rather than silently
             // downgrading connections.
             error!(error = %e, "failed to set up TLS");
+            let _ = tidb_log::sync();
             std::process::exit(2);
         }
     };
     let config = ServerConfig {
+        server_version: server_ver.clone(),
         default_auth_plugin: args.default_auth_plugin.clone(),
         tls,
         ..ServerConfig::default()
     };
     tidb_metrics::init(&tidb_metrics::ServerFacts {
-        version: poc_domain::serverinfo::version_string()
-            .split_once("-TiDB-")
-            .map(|(_, v)| v.to_owned())
-            .unwrap_or_default(),
-        git_hash: poc_domain::serverinfo::GIT_HASH.to_owned(),
+        version: tidb_log::release_version(&tidb_cfg),
+        git_hash: tidb_log::TIDB_GIT_HASH.to_owned(),
         maxprocs: worker_threads(),
     });
     let runtime = match tidb_runtime::Runtime::new(tidb_runtime::RuntimeConfig {
@@ -218,6 +370,7 @@ fn main() {
         Ok(rt) => rt,
         Err(e) => {
             error!(error = %e, "failed to start the async runtime");
+            let _ = tidb_log::sync();
             std::process::exit(1);
         }
     };
@@ -234,6 +387,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             error!(error = %e, "invalid admission configuration");
+            let _ = tidb_log::sync();
             std::process::exit(2);
         }
     };
@@ -241,16 +395,15 @@ fn main() {
     poc_kv::register_client_metrics();
     let result = runtime.block_on(async move {
         // Bind the status port first: its real port is what the server info advertises.
-        let status_listener = if args.status_port == 0 {
+        let status_listener = if effective_status_port == 0 {
             None
         } else {
-            let host = args.status_host.as_deref().unwrap_or(&args.host);
-            let listener = tokio::net::TcpListener::bind((host, args.status_port))
+            let host = effective_status_host.as_str();
+            let listener = tokio::net::TcpListener::bind((host, effective_status_port))
                 .await
                 .map_err(|e| {
                     std::io::Error::other(format!(
-                        "listen on status address {host}:{}: {e}",
-                        args.status_port
+                        "listen on status address {host}:{effective_status_port}: {e}",
                     ))
                 })?;
             Some(listener)
@@ -276,12 +429,13 @@ fn main() {
             ..DagContext::select_utc()
         };
         let sync = if args.schema_sync {
-            let ip = advertise_ip(&args);
+            let ip = advertise_ip(&args, &effective_host);
             let info = ServerInfo::new(
                 ip.to_string(),
-                u32::from(args.port),
+                u32::from(effective_port),
                 u32::from(advertised_status_port),
-            );
+            )
+            .with_version(config.server_version.clone());
             let mut cfg = SyncConfig::new(args.pd.clone(), info, dag.clone());
             cfg.limits.schema_lease = args.lease;
             cfg.limits.max_staleness = args
@@ -325,51 +479,75 @@ fn main() {
                 tick.tick().await;
                 loop {
                     tick.tick().await;
-                    info!("statement timing\n{}", poc_session::timing::report());
+                    let report = poc_session::timing::report();
+                    tidb_base::log_info!("statement timing", "report" => &report);
                 }
             });
         }
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let (stop_status, status_stopped) = tokio::sync::oneshot::channel::<()>();
+        let (status_done_tx, status_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let has_status_server = status_listener.is_some();
         if let Some(status_listener) = status_listener {
             let info = status::StatusInfo {
                 version: config.server_version.clone(),
-                git_hash: poc_domain::serverinfo::GIT_HASH.to_owned(),
+                git_hash: tidb_log::TIDB_GIT_HASH.to_owned(),
+                listen_host: effective_status_host.clone(),
             };
-            pool.spawn(
-                "status-server",
+            pool.spawn("status-server", async move {
                 status::serve(status_listener, info, async move {
                     let _ = status_stopped.await;
-                }),
-            );
+                })
+                .await;
+                let _ = status_done_tx.send(());
+            });
         }
         let shutdown = async {
-            let mut term =
+            let mut sig_term =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-            tokio::select! {
-                r = tokio::signal::ctrl_c() => r?,
-                _ = term.recv() => {}
-            }
-            info!("received SIGINT/SIGTERM");
+            let mut sig_hup =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+            let mut sig_quit =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())?;
+            let sig_name = tokio::select! {
+                r = tokio::signal::ctrl_c() => {
+                    r?;
+                    "interrupt"
+                }
+                _ = sig_term.recv() => "terminated",
+                _ = sig_hup.recv() => "hangup",
+                _ = sig_quit.recv() => "quit",
+            };
+            tidb_base::log_info!("got signal to exit", "signal" => sig_name);
             Ok::<(), std::io::Error>(())
         };
         let shutdown = async {
             if let Err(e) = shutdown.await {
                 warn!(error = %e, "signal handling failed; shutting down");
             }
-            // Leave the cluster first, so DDL stops waiting for this node at once.
+            tidb_base::log_info!("setting tidb-server to report unhealthy (shutting-down)");
+            // Stop the status/RPC server and wait for its shutdown WARNs before draining
+            // client connections (matches Go shutdown ordering, spec §4.2).
+            let _ = stop_status.send(());
+            if has_status_server {
+                let _ = tokio::time::timeout(Duration::from_secs(5), status_done_rx).await;
+            }
+            // Leave the cluster before draining clients, so DDL stops waiting for this node at once.
             if let Some(sync) = &sync {
                 sync.shutdown().await;
             }
-            let _ = stop_status.send(());
         };
-        Server::new(config, factory)
+        let serve_res = Server::new(config, factory)
             .with_runtime(pool, admission)
             .serve(listener, shutdown)
-            .await
+            .await;
+        // TODO(audit-plugin #448): Go calls plugin.Shutdown(context.Background()) here (cmd/tidb-server/main.go:926).
+        serve_res
     });
+    let _ = tidb_log::sync();
     if let Err(e) = result {
         error!(%addr, error = %e, "server failed");
+        let _ = tidb_log::sync();
         std::process::exit(1);
     }
 }
@@ -384,13 +562,13 @@ fn worker_threads() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
-/// The IP published in the server info: --advertise-address, else --host unless it is a
+/// The IP published in the server info: --advertise-address, else `host` unless it is a
 /// wildcard, else the local address of a route to the first PD endpoint.
-fn advertise_ip(args: &Args) -> IpAddr {
+fn advertise_ip(args: &Args, host: &str) -> IpAddr {
     if let Some(ip) = args.advertise_address {
         return ip;
     }
-    if let Ok(ip) = args.host.parse::<IpAddr>()
+    if let Ok(ip) = host.parse::<IpAddr>()
         && !ip.is_unspecified()
     {
         return ip;
@@ -417,7 +595,10 @@ fn advertise_ip(args: &Args) -> IpAddr {
 fn tls_config(args: &Args) -> std::io::Result<Option<TlsConfig>> {
     if let (Some(cert), Some(key)) = (&args.ssl_cert, &args.ssl_key) {
         let config = tls::load_tls_config(cert, key, args.ssl_ca.as_deref())?;
-        info!(cert = %cert.display(), client_verification = args.ssl_ca.is_some(), "secure connection is enabled");
+        tidb_base::log_info!(
+            "mysql protocol server secure connection is enabled",
+            "client verification enabled" => args.ssl_ca.is_some(),
+        );
         return Ok(Some(config));
     }
     if !args.auto_tls {
@@ -433,9 +614,9 @@ fn tls_config(args: &Args) -> std::io::Result<Option<TlsConfig>> {
         names.push(&args.host);
     }
     let config = tls::auto_tls_config(&names)?;
-    info!(
-        ?names,
-        "secure connection is enabled with an auto-generated self-signed certificate"
+    tidb_base::log_info!(
+        "mysql protocol server secure connection is enabled",
+        "client verification enabled" => false,
     );
     Ok(Some(config))
 }

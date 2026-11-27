@@ -28,7 +28,6 @@
 //! - Failpoints and test-only hook methods (spec §2.4, §6 item 14) are not ported.
 
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::Instant;
@@ -36,7 +35,6 @@ use std::time::Instant;
 use allocator_api2::boxed::Box as AllocBox;
 use allocator_api2::vec::Vec as AllocVec;
 use async_trait::async_trait;
-use futures::FutureExt;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::mysql;
@@ -411,7 +409,11 @@ impl Executor for HashAggExec {
                         returned_input_rx = Some(input_rx);
                     }
                     Err(join_err) => {
-                        log::error!("HashAggExec fetcher task failed to join: {join_err}");
+                        let err_str = join_err.to_string();
+                        tidb_base::log_error!(
+                            "HashAggExec fetcher task failed to join",
+                            "error" => err_str.as_str(),
+                        );
                     }
                 }
                 self.tasks.fetcher = None;
@@ -443,7 +445,10 @@ impl Executor for HashAggExec {
             self.executed = false;
             let consumed = self.mem_tracker.bytes_consumed();
             if consumed < 0 {
-                log::warn!("Memory tracker's counter is invalid, counter={consumed}");
+                tidb_base::log_warn!(
+                    "Memory tracker's counter is invalid",
+                    "counter" => consumed,
+                );
             }
             let _ = self.mem_tracker.replace_bytes_used(0);
             self.parallel_exec_valid = false;
@@ -920,7 +925,7 @@ impl HashAggExec {
     ) -> (Box<dyn Executor>, mpsc::Receiver<HashAggInput>) {
         let wg_guard = DoneGuard(wait_group);
 
-        let res = AssertUnwindSafe(async {
+        let res = tidb_base::panic_guard::catch_unwind_future(async {
             loop {
                 let input = tokio::select! {
                     _ = wait_finish(&mut finish_rx) => return,
@@ -950,7 +955,7 @@ impl HashAggExec {
                 let new_size = chk.memory_usage();
                 if let Err(err) = mem_tracker.consume(new_size - m_size) {
                     // Quota action error in task is treated like Go's panic (spec §4.5).
-                    recovery_hash_agg(&final_output_tx, Box::new(err)).await;
+                    recovery_hash_agg(&final_output_tx, Box::new(err), None).await;
                     let _ = mem_tracker.consume(-new_size);
                     return;
                 }
@@ -972,13 +977,12 @@ impl HashAggExec {
                 }
             }
         })
-        .catch_unwind()
         .await;
 
         // Ordered cleanup matching Go's defer (spec §4.5):
         // 1. Recover panic -> send to finalOutputCh.
-        if let Err(payload) = res {
-            recovery_hash_agg(&final_output_tx, payload).await;
+        if let Err((payload, bt)) = res {
+            recovery_hash_agg(&final_output_tx, payload, bt).await;
         }
         // 2. Wait for all in-flight chunks to finish in partial workers.
         inflight_chunk_sync.wait().await;

@@ -103,6 +103,9 @@ struct Inner {
     ported: Option<Arc<tidb_domain::Domain>>,
     /// Held while registering or deregistering.
     registration: tokio::sync::Mutex<Option<Registration>>,
+    /// JoinHandle of `sync_loop` so `shutdown()` awaits `"loadSchemaInLoop exited."` before
+    /// logging `"domain closed"`.
+    sync_loop_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     wake: Notify,
     stalled: AtomicBool,
     stop: tokio::sync::watch::Sender<bool>,
@@ -139,12 +142,14 @@ impl SchemaSync {
             kv,
             etcd,
             registration: tokio::sync::Mutex::new(None),
+            sync_loop_handle: tokio::sync::Mutex::new(None),
             wake: Notify::new(),
             stalled: AtomicBool::new(false),
             stop,
         });
         tokio::spawn(inner.clone().watch_global_version());
-        tokio::spawn(inner.clone().sync_loop());
+        let loop_handle = tokio::spawn(inner.clone().sync_loop());
+        *inner.sync_loop_handle.lock().await = Some(loop_handle);
         tokio::spawn(inner.clone().watchdog());
         info!(
             ddl_id = %inner.cfg.info.ddl_id,
@@ -190,9 +195,14 @@ impl SchemaSync {
     /// Graceful shutdown: stop the tasks, leave synced mode and delete this node's keys (by
     /// revoking the lease), so DDL stops waiting for it at once.
     pub async fn shutdown(&self) {
+        let started = Instant::now();
         self.inner.stop.send_replace(true);
         self.inner.wake.notify_one();
+        if let Some(handle) = self.inner.sync_loop_handle.lock().await.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
         self.inner.deregister("shutdown").await;
+        tidb_base::log_info!("domain closed", "take time" => started.elapsed());
     }
 }
 
@@ -296,6 +306,7 @@ impl Inner {
                 }
             }
             if self.stopped() {
+                tidb_base::log_info!("loadSchemaInLoop exited.");
                 return;
             }
             if self.is_stalled() {

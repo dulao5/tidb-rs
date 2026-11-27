@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod constant;
+pub mod plan_cache;
 pub mod router;
 pub mod timing;
 
@@ -38,6 +39,7 @@ use poc_domain::SchemaSync;
 use poc_domain::StmtGuard;
 use poc_executor::ExecContext;
 use poc_kv::KvClient;
+use tidb_base::contextutil::SQLWarn;
 use tidb_distsql::DagContext;
 use tidb_meta::InfoSchema;
 use tidb_meta::SchemaCache;
@@ -167,6 +169,8 @@ impl SessionFactory for Factory {
             collation: collation.to_owned(),
             results_charset: Some(charset.to_owned()),
             stmts: HashMap::new(),
+            warnings: Vec::new(),
+            default_vars: None,
             timer: Timer::default(),
             mdl: None,
             stmt: StmtMetrics::default(),
@@ -216,7 +220,16 @@ pub struct Session {
     /// what `@@last_plan_from_cache` and `@@last_plan_from_binding` read.
     prev_stmt: router::LastStmtInfo,
     /// Prepared statements by id.
-    stmts: HashMap<u32, Arc<Lowered>>,
+    stmts: HashMap<u32, PocStmt>,
+    /// The warnings of the statement the prototype ran last (Go's `StmtCtx` warnings): the
+    /// plan cache's `skip prepared plan-cache` warning (#512, [`plan_cache`]) is the only
+    /// one the prototype reports. Cleared when a statement other than SHOW WARNINGS / SHOW
+    /// ERRORS starts, as Go's `ResetContextOfStmt` does.
+    warnings: Vec<SQLWarn>,
+    /// With `--new-stack=off` (no router, no new session): a session with Go's default
+    /// variables, the input of a PREPARE's plan-cache decision ([`plan_cache`]); made at the
+    /// first PREPARE.
+    default_vars: Option<Box<tidb_session::Session>>,
     /// Phase timing (`timing`), off by default.
     timer: Timer,
     /// Metadata-lock entry of the current synced statement, released once its response has
@@ -229,6 +242,13 @@ pub struct Session {
     /// How many assignments of the current statement's `SET` were applied (`run_set`); 0 for
     /// any other statement.
     set_applied: usize,
+}
+
+/// A statement the prototype prepared.
+struct PocStmt {
+    lowered: Arc<Lowered>,
+    /// Go's `PlanCacheStmt.UncacheableReason` ([`plan_cache`]): warned on every EXECUTE.
+    plan_cache_reason: String,
 }
 
 /// What the Go session metrics need to know about the statement in flight: its type and how
@@ -406,8 +426,8 @@ fn autocommit_fence(normalized: Option<&str>) -> Result<(), SqlError> {
 /// The SET executor (`SetExecutor.setSysVariable`) is D12.12 and not ported: the prototype
 /// runs SET, so the validation runs here, against a session with the compiled defaults
 /// (the prototype keeps no `SessionVars`; the variables it accepts validate the same in any
-/// session). Warnings a validation appends (a truncated number) are dropped: the prototype
-/// keeps no warnings.
+/// session). Warnings a validation appends (a truncated number) are dropped: the only
+/// warning the prototype reports is the plan cache's (`Session::warnings`).
 // glue: the validation step of SetExecutor.setSysVariable → SessionVars.SetSystemVar (D12.12) on the prototype's SET
 fn validated_session_value(name: &str, value: &SetValue) -> Result<Option<String>, SqlError> {
     use tidb_sessionctx::variable::session::SessionVars;
@@ -506,7 +526,34 @@ impl Session {
         Ok((ts, is))
     }
 
+    /// Runs a statement; the response carries the statement's warning count, as Go's OK / EOF
+    /// packets do (`StmtCtx.WarningCount()`).
     async fn run(
+        &mut self,
+        lowered: &Lowered,
+        params: &[Literal],
+        ts: Option<TsFuture>,
+    ) -> Result<Response, SqlError> {
+        let mut r = self.run_stmt(lowered, params, ts).await;
+        let n = u16::try_from(self.warnings.len()).unwrap_or(u16::MAX);
+        match &mut r {
+            Ok(Response::ResultSet(rs)) => rs.warnings = n,
+            Ok(Response::Encoded(rs)) => rs.warnings = n,
+            Ok(Response::Ok(ok)) => ok.warnings = n,
+            Err(_) => {}
+        }
+        r
+    }
+
+    /// A statement starts: Go's `ResetContextOfStmt` drops the previous statement's warnings,
+    /// except for SHOW WARNINGS / SHOW ERRORS, which show them.
+    fn reset_warnings(&mut self, stmt: &Statement) {
+        if !matches!(stmt, Statement::ShowWarnings { .. }) {
+            self.warnings.clear();
+        }
+    }
+
+    async fn run_stmt(
         &mut self,
         lowered: &Lowered,
         params: &[Literal],
@@ -526,7 +573,10 @@ impl Session {
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 Err(txn_fence(&lowered.stmt).unwrap_or_else(|| not_in_txn("this statement")))
             }
-            Statement::ShowWarnings { .. } => Ok(Response::ResultSet(show_warnings())),
+            Statement::ShowWarnings { errors } => Ok(Response::ResultSet(warnings_result_set(
+                &self.warnings,
+                *errors,
+            ))),
         }
     }
 
@@ -637,7 +687,11 @@ impl Session {
         match guard.check_results(start_ts).await {
             ResultCheck::Valid => {}
             ResultCheck::Fallback => return Ok(None),
-            ResultCheck::Err(e) => return Err(SqlError::new(e.code(), e.to_string())),
+            ResultCheck::Err(e) => {
+                let msg = e.to_string();
+                let src = tidb_base::Error::plain(format!("[domain:{}]{msg}", e.code())).trace();
+                return Err(SqlError::new(e.code(), msg).with_source_err(src));
+            }
         }
         self.mdl = Some(guard);
         Ok(Some((plan, rows?)))
@@ -861,8 +915,34 @@ fn check_set(assignments: &[SetAssignment]) -> Result<SetChange, SqlError> {
     Ok(SetChange { names, results })
 }
 
-/// `SHOW WARNINGS`: statements here never leave warnings.
-pub(crate) fn show_warnings() -> ResultSet {
+/// The rows of `SHOW WARNINGS` (`errors`: `SHOW ERRORS`, only the errors) for `warns`, as
+/// Go's `ShowExec.fetchShowWarnings` makes them: a TiDB error is shown with its MySQL code
+/// and message (`terror.ToSQLError`), any other error with `ErrUnknown` and its text. Used for
+/// the prototype's own warnings and, by the router, for the new session's.
+// glue: rows as Go ShowExec.fetchShowWarnings (the prototype's SHOW WARNINGS)
+pub(crate) fn warnings_result_set(warns: &[SQLWarn], errors: bool) -> ResultSet {
+    let mut rs = show_warnings_columns();
+    for w in warns {
+        if errors && w.level != tidb_base::contextutil::WarnLevelError {
+            continue;
+        }
+        let (code, message) = if w.err.is_normalized() {
+            let sql_err = tidb_base::terror::to_sql_error(&w.err);
+            (i64::from(sql_err.code), sql_err.message)
+        } else {
+            (i64::from(tidb_base::mysql::ErrUnknown), w.err.error())
+        };
+        rs.rows.push(vec![
+            Value::Bytes(w.level.as_bytes().to_vec()),
+            Value::Int(code),
+            Value::Bytes(message),
+        ]);
+    }
+    rs
+}
+
+/// The columns of `SHOW WARNINGS` (Go's), with no rows.
+fn show_warnings_columns() -> ResultSet {
     use tidb_mysql_protocol::ColumnDef;
     use tidb_mysql_protocol::ColumnType;
     let mut level = ColumnDef::new("Level", ColumnType::VarString).with_length(28);
@@ -982,6 +1062,64 @@ impl SessionHandler for Session {
         }
         r
     }
+
+    fn status_flags(&self) -> u16 {
+        if let Some(router) = &self.router {
+            router.new_stack().session().vars().status()
+        } else {
+            tidb_mysql_protocol::constants::status::AUTOCOMMIT
+        }
+    }
+
+    fn session_alias(&self) -> &str {
+        if let Some(router) = &self.router {
+            &router.new_stack().session().vars().session_alias
+        } else {
+            ""
+        }
+    }
+
+    fn txn_mode(&self) -> &str {
+        if let Some(router) = &self.router {
+            let m = &router.new_stack().session().vars().txn_mode;
+            if m.is_empty() {
+                "OPTIMISTIC"
+            } else {
+                m.as_str()
+            }
+        } else {
+            "PESSIMISTIC"
+        }
+    }
+
+    fn txn_timestamp(&self) -> u64 {
+        if let Some(router) = &self.router {
+            let tc = &router.new_stack().session().vars().state.txn_ctx;
+            if tc.start_ts != 0 {
+                tc.start_ts
+            } else {
+                tc.stale_read_ts
+            }
+        } else {
+            0
+        }
+    }
+
+    fn redact_mode(&self) -> &str {
+        if let Some(router) = &self.router {
+            &router.new_stack().session().vars().enable_redact_log
+        } else {
+            tidb_base::errors::redact_log_enabled_load()
+        }
+    }
+
+    fn collation_name(&self) -> &str {
+        if !self.collation.is_empty() {
+            &self.collation
+        } else {
+            "utf8mb4_bin"
+        }
+    }
 }
 
 impl Session {
@@ -990,11 +1128,29 @@ impl Session {
         self.mdl = None;
         self.stmt.stmt_type = None;
         let start = Instant::now();
-        let lowered = tidb_sql::parse_and_lower(sql)?;
+        let lowered = match tidb_sql::parse_and_lower(sql) {
+            Ok(l) => l,
+            Err(e) => {
+                if e.code == tidb_base::errno::ErrParse {
+                    // Go fails before `ResetContextOfStmt`: the warnings stay.
+                    return Err(router::log_and_wrap_parse_error(
+                        self.connection_id,
+                        "",
+                        tidb_base::errors::redact_log_enabled_load(),
+                        sql,
+                        e,
+                    ));
+                }
+                // A statement the prototype does not lower: Go would have started it.
+                self.warnings.clear();
+                return Err(e);
+            }
+        };
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         self.stmt.start(stmt_type(&lowered.stmt), parse);
         self.timer.mark(Phase::Parse);
+        self.reset_warnings(&lowered.stmt);
         if lowered.param_count > 0 {
             return Err(param_in_query());
         }
@@ -1003,6 +1159,7 @@ impl Session {
 
     /// A `COM_QUERY` statement after parsing: request the TSO early, then run it.
     async fn run_query(&mut self, lowered: &Lowered) -> Result<Response, SqlError> {
+        self.reset_warnings(&lowered.stmt);
         let ts =
             (needs_ts(lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
         self.run(lowered, &[], ts).await
@@ -1018,9 +1175,51 @@ impl Session {
         }
     }
 
+    /// `COM_STMT_PREPARE` with `--new-stack=off`: prepare on the prototype, then take Go's
+    /// prepare-time plan-cache decision with Go's default variables and no InfoSchema
+    /// ([`plan_cache`], #512).
     async fn prepare_inner(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
-        let lowered = tidb_sql::parse_and_lower(sql)?;
-        self.prepare_lowered(stmt_id, lowered).await
+        // A parse error comes before Go's `ResetContextOfStmt` (`PrepareExec.Next`): the
+        // warnings stay.
+        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let lowered = match tidb_sql::ir::lower_statement(&stmt, sql) {
+            Ok(l) => l,
+            Err(e) => {
+                self.warnings.clear();
+                return Err(e);
+            }
+        };
+        let info = self.prepare_lowered(stmt_id, lowered).await?;
+        let decision = match self.default_vars() {
+            Ok(vars) => plan_cache::prepare_time_cacheability(vars, &stmt, None),
+            Err(e) => Err(e),
+        };
+        match decision {
+            Ok(c) => {
+                router::PocEngine::set_cacheability(self, stmt_id, c);
+                Ok(info)
+            }
+            Err(e) => {
+                self.stmts.remove(&stmt_id);
+                Err(e)
+            }
+        }
+    }
+
+    /// The variables of the off-mode plan-cache decision: a new session's, Go's defaults.
+    fn default_vars(
+        &mut self,
+    ) -> Result<&tidb_sessionctx::variable::session::SessionVars, SqlError> {
+        if self.default_vars.is_none() {
+            let mut s = tidb_session::Session::new(
+                tidb_session::Dialect::MySQL,
+                Box::new(router::newstack::DefaultGlobals),
+            );
+            s.load_common_global_variables_if_needed()
+                .map_err(|e| router::sql_error(&e))?;
+            self.default_vars = Some(Box::new(s));
+        }
+        Ok(self.default_vars.as_ref().expect("set above").vars())
     }
 
     async fn prepare_lowered(
@@ -1028,6 +1227,7 @@ impl Session {
         stmt_id: u32,
         lowered: Lowered,
     ) -> Result<PreparedInfo, SqlError> {
+        self.reset_warnings(&lowered.stmt);
         let param_count = u16::try_from(lowered.param_count).map_err(|_| {
             SqlError::new(1390, "Prepared statement contains too many placeholders")
         })?;
@@ -1053,7 +1253,13 @@ impl Session {
                 columns = self.const_env().select(sel, &[])?.columns;
             }
         }
-        self.stmts.insert(stmt_id, Arc::new(lowered));
+        self.stmts.insert(
+            stmt_id,
+            PocStmt {
+                lowered: Arc::new(lowered),
+                plan_cache_reason: String::new(),
+            },
+        );
         Ok(PreparedInfo {
             param_count,
             columns,
@@ -1067,10 +1273,10 @@ impl Session {
         params: Vec<Param>,
     ) -> Result<Response, SqlError> {
         self.stmt.stmt_type = None;
-        let lowered = self
+        let (lowered, reason) = self
             .stmts
             .get(&stmt_id)
-            .cloned()
+            .map(|s| (Arc::clone(&s.lowered), s.plan_cache_reason.clone()))
             .ok_or_else(|| SqlError::unknown_stmt(stmt_id, "stmt_execute"))?;
         self.timer.begin();
         self.mdl = None;
@@ -1079,6 +1285,10 @@ impl Session {
             (needs_ts(&lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
         let params = params_to_literals(params)?;
         self.stmt.start(stmt_type(&lowered.stmt), start.elapsed());
+        self.reset_warnings(&lowered.stmt);
+        // Go's `GetPlanFromPlanCache` warns `skip prepared plan-cache: <reason>` on every
+        // EXECUTE of a statement prepared as uncacheable (#512).
+        self.warnings.extend(plan_cache::execute_warnings(&reason));
         // No plan cache: every execute plans again (Go counts a prepared plan cache miss).
         tidb_metrics::plan_cache_miss_prepared();
         self.timer.mark(Phase::Parse);
@@ -1165,6 +1375,17 @@ impl router::PocEngine for Session {
 
     fn close(&mut self, stmt_id: u32) {
         self.stmts.remove(&stmt_id);
+    }
+
+    fn clear_warnings(&mut self) {
+        self.warnings.clear();
+    }
+
+    fn set_cacheability(&mut self, stmt_id: u32, c: plan_cache::PrepareCacheability) {
+        if let Some(s) = self.stmts.get_mut(&stmt_id) {
+            s.plan_cache_reason = c.reason;
+        }
+        self.warnings.extend(c.warnings);
     }
 
     fn set_prev_stmt(&mut self, last: &router::LastStmtInfo) {
