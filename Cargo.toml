@@ -24,6 +24,7 @@ members = [
   "crates/tablecodec",
   "crates/sessionctx",
   "crates/systable",
+  "crates/privilege",
   "crates/expression",
   "crates/expression/macros",
   "crates/expr-pushdown",
@@ -140,6 +141,7 @@ tidb-sessiontxn = { path = "crates/sessiontxn" }
 tidb-domain = { path = "crates/domain" }
 tidb-sessionctx = { path = "crates/sessionctx" }
 tidb-systable = { path = "crates/systable" }
+tidb-privilege = { path = "crates/privilege" }
 tidb-expression = { path = "crates/expression" }
 tidb-expression-macros = { path = "crates/expression/macros" }
 tidb-expr-pushdown = { path = "crates/expr-pushdown" }

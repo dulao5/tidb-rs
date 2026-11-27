@@ -305,13 +305,50 @@ pub fn opt_rule_list() -> [&'static dyn LogicalOptRule; 26] {
     ]
 }
 
-/// CheckPrivilege checks the privilege for a user. It needs the privilege manager
-/// (`privilege.Manager`, D04.1); its caller only calls it when a manager is registered, and
-/// the new stack has none (VS1 plan §3.2, the privilege row).
-// glue: stub of CheckPrivilege, blocked-by:D04.1 (the privilege manager)
-pub fn check_privilege(vs: &[VisitInfo]) -> Result<(), Error> {
-    let _ = vs;
-    Err(blocked("D04.1", "CheckPrivilege (the privilege manager)"))
+/// CheckPrivilege checks the privilege for a user in slice order (first failure wins, ensuring
+/// R30 table-denied `1142` precedes column-denied `1143`).
+// go: CheckPrivilege L1
+pub fn check_privilege(
+    active_roles: &[tidb_parser::auth::RoleIdentity],
+    pm: &dyn tidb_privilege::PrivilegeManager,
+    vs: &[VisitInfo],
+) -> Result<(), Error> {
+    use tidb_base::dbterror::plannererrors::ErrPrivilegeCheckFail;
+    use tidb_base::mysql::{ExtendedPriv, PrivilegeType};
+
+    for v in vs {
+        if v.privilege == ExtendedPriv.0 {
+            let mut has_priv = false;
+            for priv_name in &v.dynamic_privs {
+                if pm.request_dynamic_verification(active_roles, priv_name, v.dynamic_with_grant) {
+                    has_priv = true;
+                    break;
+                }
+            }
+            if !has_priv {
+                if let Some(err) = &v.err {
+                    return Err(err.clone());
+                }
+                let formatted = format!("[{}]", v.dynamic_privs.join(" "));
+                return Err(
+                    ErrPrivilegeCheckFail.gen_with_stack_by_args(tidb_base::go_args![formatted])
+                );
+            }
+        } else if !pm.request_verification(
+            active_roles,
+            &v.db,
+            &v.table,
+            &v.column,
+            PrivilegeType(v.privilege),
+        ) {
+            if let Some(err) = &v.err {
+                return Err(err.clone());
+            }
+            let priv_str = PrivilegeType(v.privilege).string();
+            return Err(ErrPrivilegeCheckFail.gen_with_stack_by_args(tidb_base::go_args![priv_str]));
+        }
+    }
+    Ok(())
 }
 
 /// VisitInfo4PrivCheck generates privilege check infos because privilege check of local temporary tables is different

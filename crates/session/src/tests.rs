@@ -1137,7 +1137,7 @@ fn prepare_stmt_runs_the_prepare_executor() {
     assert_eq!(s.vars().state.prepared_stmts.len(), 1);
     s.drop_prepared_stmt(info.stmt_id).unwrap();
     let e = block_on(s.prepare_stmt("select c from sbtest1 where id = ?")).unwrap_err();
-    assert_eq!(blocked_by(&e), Some("D04.1"), "{e}");
+    assert_eq!(e.code(), 1146, "{e}");
     let e = block_on(s.prepare_stmt("select 1; select 2")).unwrap_err();
     assert_eq!(e.code(), 8115, "{e}");
     assert!(s.is_idle());

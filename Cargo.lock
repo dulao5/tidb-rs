@@ -4042,6 +4042,7 @@ dependencies = [
  "tidb-metrics",
  "tidb-model",
  "tidb-parser",
+ "tidb-privilege",
  "tidb-sessionctx",
  "tidb-statistics",
  "tidb-store",
@@ -4059,6 +4060,16 @@ dependencies = [
  "tidb-model",
  "tidb-parser",
  "tidb-sessionctx",
+ "tidb-types",
+]
+
+[[package]]
+name = "tidb-privilege"
+version = "0.0.0"
+dependencies = [
+ "parking_lot 0.12.5",
+ "tidb-base",
+ "tidb-parser",
  "tidb-types",
 ]
 
@@ -4123,6 +4134,7 @@ dependencies = [
  "tidb-model",
  "tidb-parser",
  "tidb-planner",
+ "tidb-privilege",
  "tidb-runtime",
  "tidb-sessionctx",
  "tidb-sessiontxn",

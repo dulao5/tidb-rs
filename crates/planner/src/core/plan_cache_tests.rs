@@ -709,6 +709,7 @@ fn test_parts() -> crate::planctx::SessionPlanCtx {
         advise_txn_warmup: None,
         domain_info_schema: None,
         instance_plan_cache: None,
+        privilege_manager: None,
     }
 }
 

@@ -20,6 +20,8 @@ tidb-expr-pushdown = { workspace = true }
 # SessionVars, StatementContext, PlanContext, ranger types and the expression context of
 # PlanCtx (N2).
 tidb-sessionctx = { workspace = true }
+# PrivilegeManager interface and verification (D04.1).
+tidb-privilege = { workspace = true }
 # Datum, collations, FieldName (D01).
 tidb-types = { workspace = true }
 # FieldType, CIStr (D02.3).

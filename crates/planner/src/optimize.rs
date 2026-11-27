@@ -487,16 +487,17 @@ fn build_and_optimize_with_builder<'ast>(
     if !*checked {
         // Keep privilege and lock checks fail-fast. These depend on visitInfo
         // produced by the logical build, but not on the later cost winner.
-        // if pm := privilege.GetPrivilegeManager(sctx); pm != nil: there is no privilege
-        // manager (D04.1), VisitInfo4PrivCheck / CheckPrivilege are not called.
-        let _ = visit_info4_priv_check;
+        if let Some(pm) = ctx.privilege_manager.as_deref() {
+            let priv_visit_info =
+                visit_info4_priv_check(is, Some(node.node), builder.get_visit_info());
+            crate::core::optimizer::check_privilege(&ctx.vars.active_roles, pm, &priv_visit_info)?;
+        }
 
         check_table_lock(builder.get_visit_info())?;
 
         check_table_mode(node)?;
         *checked = true;
     }
-    let _ = is;
 
     // core.RecheckCTE(logic): CTEs are D09.5 (the builder stops at WITH).
 

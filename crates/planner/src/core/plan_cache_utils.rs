@@ -413,6 +413,11 @@ pub fn generate_plan_cache_stmt_with_ast(
         if let Some(d) = domain_is {
             opts.push(with_domain_info_schema(d.snapshot()));
         }
+        if let Some(pm) = &ctx.privilege_manager {
+            opts.push(crate::core::preprocess::with_privilege_manager(Arc::clone(
+                pm,
+            )));
+        }
         let (_, res) = preprocess(vars, &mut node_w, opts);
         res?;
         node_w.get_resolve_context()

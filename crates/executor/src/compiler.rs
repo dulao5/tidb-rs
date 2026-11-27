@@ -76,6 +76,9 @@ fn preprocess(
     if let Some(d) = domain_is {
         opts.push(with_domain_info_schema(d.snapshot()));
     }
+    if let Some(pm) = sctx.get_plan_ctx().privilege_manager {
+        opts.push(tidb_planner::core::preprocess::with_privilege_manager(pm));
+    }
     let (ret, res) =
         tidb_planner::core::preprocess::preprocess(sctx.get_session_vars_mut(), node_w, opts);
     sctx.set_readonly_user_var_map(ret.readonly_user_vars);
