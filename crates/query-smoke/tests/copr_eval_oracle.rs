@@ -28,6 +28,9 @@
 //! in the families the oracle covers, a pushable signature it does not reach must be listed in
 //! `NOT_COVERED` with the reason.
 //!
+//! The vendored TiKV carries local patches for two upstream TiKV panics (#523, #524); the
+//! inputs that reach them are listed, exactly, in `FORK_DIVERGENCES`.
+//!
 //! The second test (`go_bug_fixed_rulings_stay_off_pushdown_or_match_tikv`) is the rule of
 //! #476 part 2: every ruling of `docs/testing/rulings.toml` is classified in
 //! `docs/testing/rulings_pushdown.tsv`; a ruling that changes a signature Go pushes to TiKV
@@ -171,6 +174,63 @@ const KNOWN_MISMATCHES: &[(&str, &str, &str)] = &[
 /// Issues whose mismatches depend on the platform's libm (TiKV's `f64` math calls it; Go's
 /// `math` package does not), so a listed row may not occur on every architecture.
 const PLATFORM_DEPENDENT_ISSUES: &[&str] = &["#491"];
+
+/// Inputs on which the vendored TiKV fork intentionally differs from upstream TiKV: the local
+/// patches listed in `third_party/tikv/PROVENANCE.md`. Upstream TiKV panics on these inputs, and
+/// the fork returns Go's result. On them the oracle therefore compares tidb-rs with the patched
+/// fork, not with the TiKV a cluster runs, which still panics.
+///
+/// Rows are (issue, signature, the input). The (issue, signature) pairs must be exactly the
+/// ones on which the oracle evaluates such an input (a pushed call of that signature whose
+/// column argument holds it). Each issue's `tidb-rs local patch (#N)` marker must still be in
+/// the vendored source. A re-sync that drops a patch, an upstream fix that makes it redundant,
+/// or a new case that reaches a patched path fails the test, so that someone looks at this
+/// list.
+const FORK_DIVERGENCES: &[(&str, &str, &str)] = &[
+    ("#523", "ModIntSignedSigned", "BIGINT i64::MIN % -1"),
+    ("#524", "EQString", "U+2CEA1 in a utf8mb4_0900_ai_ci column"),
+    ("#524", "GEString", "U+2CEA1 in a utf8mb4_0900_ai_ci column"),
+    ("#524", "GTString", "U+2CEA1 in a utf8mb4_0900_ai_ci column"),
+    ("#524", "LEString", "U+2CEA1 in a utf8mb4_0900_ai_ci column"),
+    ("#524", "LTString", "U+2CEA1 in a utf8mb4_0900_ai_ci column"),
+    ("#524", "NEString", "U+2CEA1 in a utf8mb4_0900_ai_ci column"),
+    (
+        "#524",
+        "NullEQString",
+        "U+2CEA1 in a utf8mb4_0900_ai_ci column",
+    ),
+];
+
+/// The vendored source of each local patch, where its `tidb-rs local patch (#N)` marker lives.
+const FORK_PATCH_SOURCES: &[(&str, &str)] = &[
+    (
+        "#523",
+        include_str!("../../../third_party/tikv/tidb_query_expr/src/impl_arithmetic.rs"),
+    ),
+    (
+        "#524",
+        include_str!(
+            "../../../third_party/tikv/tidb_query_datatype/src/codec/collation/collator/utf8mb4_uca/data_0900.rs"
+        ),
+    ),
+];
+
+/// TiKV signatures whose evaluation looks up `utf8mb4_0900_ai_ci` weights for its string
+/// arguments (`sort_compare` / `like_pattern_compare`), and so reaches the #524 patch.
+const COLLATOR_WEIGHT_SIGS: &[&str] = &[
+    "EQString",
+    "NEString",
+    "LTString",
+    "LEString",
+    "GTString",
+    "GEString",
+    "NullEQString",
+    "InString",
+    "LikeSig",
+    "Strcmp",
+    "FieldString",
+    "FindInSet",
+];
 
 /// Pushable signatures (in the families the oracle covers) that it does not reach, and why.
 /// A listed signature that the oracle now reaches fails the test (remove the row).
@@ -892,6 +952,8 @@ struct Outcome {
     /// For each function name, the build errors (tidb-rs cannot build the signature yet).
     build_errors: BTreeMap<&'static str, BTreeSet<String>>,
     mismatches: Vec<Mismatch>,
+    /// (issue, signature) of the pushed calls that ran on an input of [`FORK_DIVERGENCES`].
+    fork_divergences: BTreeSet<(&'static str, String)>,
     cases_run: usize,
     rows_compared: usize,
 }
@@ -931,6 +993,47 @@ fn root_sig(e: &Expr) -> String {
     match e {
         Expr::ScalarFunction(sf) => sig_name(sf.function.pb_code()),
         _ => "-".into(),
+    }
+}
+
+/// Records the calls in `e` that take, on `row`, an input on which the vendored fork differs
+/// from upstream TiKV (its local patches, [`FORK_DIVERGENCES`]). Only column arguments are
+/// looked at: a patched input reached through another call (a CAST) is not seen.
+fn note_fork_divergences(e: &Expr, row: &[Datum], out: &mut BTreeSet<(&'static str, String)>) {
+    let Expr::ScalarFunction(sf) = e else {
+        return;
+    };
+    let sig = sig_name(sf.function.pb_code());
+    let args = sf.get_args();
+    fn column_value<'a>(a: &'a Expr, row: &'a [Datum]) -> Option<(&'a Datum, &'a FieldType)> {
+        match a {
+            Expr::Column(c) => row.get(c.index as usize).map(|d| (d, &*c.ret_type)),
+            _ => None,
+        }
+    }
+    let int_is = |a: &Expr, v: i64| matches!(column_value(a, row), Some((d, _)) if d.kind() == dm::KindInt64 && d.get_int64() == v);
+    // #523: IntIntMod::calc on i64::MIN % -1.
+    if sig == "ModIntSignedSigned"
+        && args.len() == 2
+        && int_is(&args[0], i64::MIN)
+        && int_is(&args[1], -1)
+    {
+        out.insert(("#523", sig.clone()));
+    }
+    // #524: a utf8mb4_0900_ai_ci weight lookup of U+2CEA1.
+    let u2cea1 = "\u{2CEA1}".as_bytes();
+    if COLLATOR_WEIGHT_SIGS.contains(&sig.as_str())
+        && args.iter().any(|a| {
+            matches!(column_value(a, row), Some((d, ft))
+                if ft.get_collate() == "utf8mb4_0900_ai_ci"
+                    && d.kind() == dm::KindString
+                    && d.get_string().windows(u2cea1.len()).any(|w| w == u2cea1))
+        })
+    {
+        out.insert(("#524", sig.clone()));
+    }
+    for a in args {
+        note_fork_divergences(a, row, out);
     }
 }
 
@@ -1255,6 +1358,9 @@ fn run_case(env: &Env, types: &[ArgType], c: &Case, out: &mut Outcome) {
         })
         .collect();
     let rows = case_rows(types, c);
+    for r in &rows {
+        note_fork_divergences(&expr, r, &mut out.fork_divergences);
+    }
     let mut chk = new_chunk_with_capacity(&col_types, rows.len().max(1));
     for r in &rows {
         for (ci, d) in r.iter().enumerate() {
@@ -1669,6 +1775,32 @@ fn local_and_tikv_evaluation_agree_on_pushable_signatures() {
             failures.push(format!(
                 "{sig} is listed in NOT_COVERED but the oracle covers it (or it is not pushable): remove the row"
             ));
+        }
+    }
+    let declared: BTreeSet<(&str, &str)> =
+        FORK_DIVERGENCES.iter().map(|&(i, s, _)| (i, s)).collect();
+    for (issue, sig) in &o.fork_divergences {
+        if !declared.contains(&(*issue, sig.as_str())) {
+            failures.push(format!(
+                "{sig} runs on an input of the vendored TiKV's local patch {issue}, on which the fork differs from upstream TiKV: add it to FORK_DIVERGENCES"
+            ));
+        }
+    }
+    for &(issue, sig, input) in FORK_DIVERGENCES {
+        if !o.fork_divergences.contains(&(issue, sig.to_owned())) {
+            failures.push(format!(
+                "FORK_DIVERGENCES lists {sig} on {input} ({issue}) but the oracle no longer evaluates it: remove the row"
+            ));
+        }
+    }
+    let issues: BTreeSet<&str> = FORK_DIVERGENCES.iter().map(|&(i, _, _)| i).collect();
+    for issue in issues {
+        let marker = format!("tidb-rs local patch ({issue})");
+        match FORK_PATCH_SOURCES.iter().find(|&&(i, _)| i == issue) {
+            Some((_, src)) if src.contains(&marker) => {}
+            _ => failures.push(format!(
+                "the vendored TiKV no longer carries `{marker}` (a re-sync or an upstream fix?): check third_party/tikv/PROVENANCE.md and FORK_DIVERGENCES"
+            )),
         }
     }
     // Every signature tidb-rs pushed must be one Go pushes too (infer_pushdown is an L1 port).

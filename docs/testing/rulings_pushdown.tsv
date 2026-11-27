@@ -28,7 +28,7 @@
 ruling	sigs	justification	note
 R1	-	none	session variable scope (SET tidb_redact_log)
 R2	-	none	system variable parsing (tidb_opt_fix_control)
-R3	EQString,NEString,LTString,LEString,GTString,GEString,NullEQString	tikv-oracle	utf8mb4_0900_ai_ci string comparisons, U+2CEA1 included; upstream TiKV panics on U+2CEA1 (#524), fixed only in the vendored test-only fork (third_party/tikv/PROVENANCE.md), so a cluster's TiKV still panics when such a comparison is pushed down, as under Go TiDB
+R3	EQString,NEString,LTString,LEString,GTString,GEString,NullEQString	tikv-oracle	utf8mb4_0900_ai_ci string comparisons, U+2CEA1 included, against the vendored TiKV fork; upstream TiKV panics on U+2CEA1 (#524) and the fork's local patch (third_party/tikv/PROVENANCE.md; listed in the oracle's FORK_DIVERGENCES) also fixes the PoC's own collator comparisons, but a cluster's TiKV still panics when such a comparison is pushed down, as under Go TiDB
 R3	InString,LikeSig,Strcmp,FieldString	unported	the same collator in IN, LIKE, STRCMP, FIELD (families not ported yet)
 R4	-	none	KILL signal handling
 R5	-	none	URL redaction in variable output
@@ -61,4 +61,3 @@ R32	-	none	privileges
 R33	-	none	logging
 R34	-	none	logging
 R35	-	none	version banner
-R36	-	none	privileges (column privilege in a LATERAL join ON clause)

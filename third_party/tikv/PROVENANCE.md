@@ -55,6 +55,20 @@ local TiKV fork now, open an issue in this repository recording that upstream Ti
 and leave reporting it to TiKV to the owner. Upstream TiKV is still affected; the patches are not
 on the TiKV branch above. Each line carries a `tidb-rs local patch (#N)` comment.
 
+Where the patches take effect:
+
+- **#524 reaches the `tidb-server` binary.** `tidb_query_datatype` is a normal dependency of
+  `poc-executor` (and of `tidb-distsql`, which uses only its datum and row codecs).
+  `crates/poc/executor/src/compare.rs` compares and sorts strings with its collators (ORDER BY,
+  GROUP BY, joins). So a PoC statement that compares or sorts U+2CEA1 under
+  `utf8mb4_0900_ai_ci` now gets the implicit weight instead of panicking. This is the result of
+  tidb-rs's own collator and of upstream Go's fix (ruling R3); Go v8.5.8 itself returns
+  error 1105 there (#294).
+- **#523 is test-only.** `tidb_query_expr` is only a dev-dependency (ADR 0007 point 3, checked by
+  `scripts/check_test_only_deps.py`), so the patch changes only the coprocessor evaluation oracle.
+- **Neither patch reaches a cluster's TiKV.** A pushed-down expression is evaluated by the
+  cluster's own TiKV, which still panics on these inputs, as under Go TiDB.
+
 `tools/sync-tikv-query.sh` replaces the crate directories, so a re-sync drops both patches.
 Re-apply them, or carry them on the TiKV branch, when re-syncing.
 `crates/query-smoke/tests/tikv_local_patches.rs` and the coprocessor evaluation oracle
