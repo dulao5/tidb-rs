@@ -343,12 +343,38 @@ pub struct Router {
     conn_id: u64,
 }
 
-/// A new-stack error as the client sees it (Go's code and message), preserving the original
-/// `tidb_base::Error` so `command dispatched failed` emits `[component:code]` and stacks.
+/// A new-stack error as the client sees it: the code, SQLSTATE and message Go's
+/// `clientConn.writeError` (pkg/server/conn.go:1580) puts in the ERR packet, while preserving the
+/// original `tidb_base::Error` so `command dispatched failed` emits `[component:code]` and stacks.
+/// A TiDB error goes through `terror.ToSQLError`: its MySQL code if its class registered the code,
+/// else `ErrUnknown` (1105), with its message; any other error is `ErrUnknown` with its text. The
+/// SQLSTATE follows from the code (`mysql.NewErrf`, Go's `MySQLState` table), so a coprocessor
+/// error TiKV returns (`ClassTiKV.Synthesize`, distsql's select result) such as 1690 gets
+/// `22003`. A boundary stub's error ([`tidb_base::blocked::blocked`]) is tidb-rs's own: it
+/// keeps its 1235 (Go has no such error; its class is not in Go's registry).
+// glue: the error-to-packet-fields step of clientConn.writeError (the function itself is the server block's part 2, D03.1, with the connection loop)
 fn sql_error(e: &Error) -> SqlError {
-    let code = u16::try_from(e.code()).unwrap_or(1105);
-    SqlError::new(code, String::from_utf8_lossy(&e.get_msg()).into_owned())
-        .with_source_err(e.clone())
+    if blocked_by(e).is_some() {
+        return SqlError::new(
+            tidb_base::mysql::ErrNotSupportedYet,
+            String::from_utf8_lossy(&e.get_msg()).into_owned(),
+        )
+        .with_source_err(e.clone());
+    }
+    let m = if e.is_normalized() {
+        tidb_base::terror::to_sql_error(e)
+    } else {
+        tidb_base::mysql::new_errf(
+            tidb_base::mysql::ErrUnknown,
+            "%s",
+            &[],
+            vec![tidb_base::gofmt::Arg::go_string(e.error())],
+        )
+    };
+    let err = SqlError::new(m.code, String::from_utf8_lossy(&m.message).into_owned())
+        .with_source_err(e.clone());
+    debug_assert_eq!(err.state, m.state, "the SQLSTATE of code {}", m.code);
+    err
 }
 
 /// Emit Go `session.go:1590` `WARN` `"parse SQL failed"` (preserving raw `\n`, applying
@@ -774,11 +800,7 @@ impl Router {
                     warnings: u16::try_from(self.last.warning_count).unwrap_or(u16::MAX),
                     ..OkInfo::default()
                 })),
-                // Go's `terror.ToSQLError`: an `errors.New` error is ErrUnknown (1105).
-                Err(e) if !e.is_normalized() => Err(SqlError::new(
-                    tidb_base::mysql::ErrUnknown,
-                    String::from_utf8_lossy(&e.error()).into_owned(),
-                )),
+                // Go's `writeError`: an `errors.New` error is ErrUnknown (1105).
                 Err(e) => Err(sql_error(&e)),
             };
         }

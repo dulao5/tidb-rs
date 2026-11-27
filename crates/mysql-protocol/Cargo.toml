@@ -13,6 +13,7 @@ futures = { workspace = true }
 getrandom = "0.3"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 sha1 = "0.10"
+# The SQLSTATE of an error code (Go's `mysql.MySQLState`, pkg/parser/mysql/state.go).
 tidb-base = { workspace = true }
 tidb-metrics = { workspace = true }
 tidb-parser = { workspace = true }
@@ -27,7 +28,6 @@ tracing = "0.1"
 [dev-dependencies]
 # A real panic of the new stack for the connection loop's recovery test (Go clientConn.Run):
 # reading an old-format row with `_tidb_row_checksum` in the schema.
-tidb-base = { workspace = true }
 tidb-chunk = { workspace = true }
 tidb-executor = { workspace = true }
 tidb-expression = { workspace = true }
