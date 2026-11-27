@@ -46,14 +46,35 @@ pub fn edition(cfg: &Config) -> String {
     }
 }
 
-/// Full MySQL-format server version (`cfg.server_version` if explicitly configured, else
-/// `8.0.11-TiDB-<release_version>`).
-// glue: Go cmd/tidb-server/main.go:754-757 + mysql.ServerVersion formatting
+/// Full MySQL-format server version (`cfg.server_version` if explicitly configured, else the
+/// compile-time package default `8.0.11-TiDB-<DEFAULT_RELEASE_VERSION>`).
+///
+/// Matches Go `cmd/tidb-server/main.go:754-768`: `mysql.ServerVersion` is fixed at package init
+/// and only overridden by `cfg.ServerVersion` (not `cfg.TiDBReleaseVersion`).
+// glue: Go cmd/tidb-server/main.go:754-768 + mysql.ServerVersion formatting
 pub fn server_version(cfg: &Config) -> String {
     if !cfg.server_version.is_empty() {
         return cfg.server_version.clone();
     }
-    format_server_version(&release_version(cfg))
+    default_server_version()
+}
+
+/// Resolved `version_comment` system variable matching Go `cmd/tidb-server/main.go:759-765`.
+///
+/// Returns `Some(comment)` when either `cfg.tidb_edition` or `cfg.version_comment` is set
+/// (`cfg.version_comment` takes precedence).
+// glue: Go cmd/tidb-server/main.go:759-765 version_comment resolution
+pub fn version_comment(cfg: &Config) -> Option<String> {
+    if !cfg.version_comment.is_empty() {
+        return Some(cfg.version_comment.clone());
+    }
+    if !cfg.tidb_edition.is_empty() {
+        return Some(format!(
+            "TiDB Server (Apache License 2.0) {} Edition, MySQL 8.0 compatible",
+            cfg.tidb_edition
+        ));
+    }
+    None
 }
 
 /// Default MySQL-format server version without config overrides (`8.0.11-TiDB-v8.5.8+tidb-rs.<7>`).

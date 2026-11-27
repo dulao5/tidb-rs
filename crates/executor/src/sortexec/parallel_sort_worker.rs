@@ -348,12 +348,12 @@ impl ParallelSortWorker {
     // go: parallelSortWorker.run L2 (the panic is a caught unwind or the returned kill error [M-PANIC])
     pub async fn run(&mut self) {
         let ret = tidb_base::panic_guard::catch_unwind_future(self.fetch_chunks_and_sort()).await;
-        let r: Box<dyn Any + Send> = match ret {
+        let (r, bt): (Box<dyn Any + Send>, Option<String>) = match ret {
             Ok(Ok(())) => return,
-            Ok(Err(err)) => Box::new(err),
-            Err((payload, _)) => payload,
+            Ok(Err(err)) => (Box::new(err), None),
+            Err((payload, bt)) => (payload, bt),
         };
-        process_panic_and_log(self.err_output_chan(), r).await;
+        process_panic_and_log(self.err_output_chan(), r, bt).await;
     }
 }
 

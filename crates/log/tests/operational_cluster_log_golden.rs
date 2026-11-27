@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use flate2::read::GzDecoder;
 use tidb_base::config::{Config, LogConfig, ZaplogFileLogConfig};
-use tidb_base::errors::{self, RedactLogDisable, RedactLogEnable};
+use tidb_base::errors;
 use tidb_base::structured_log::{LogLevel, LogRecord, LogTarget};
 use tidb_log::sink::{LogSink, MemorySink, RotatingFileSink};
 
@@ -26,16 +26,27 @@ fn assert_single_line(line: &[u8]) {
     assert!(!body.contains(&b'\r'), "raw \\r inside line");
 }
 
-/// Normalize dynamic tokens (timestamp, `[file:line]`, commit hash, build time, rust version)
-/// for deterministic golden comparison against Go v8.5.8 captures.
-fn normalize_line(line: &str) -> String {
+/// Normalize leading `[YYYY/MM/DD HH:MM:SS.mmm ±HH:MM]` and `[file:line]` caller token so
+/// Rust output can be compared whole-line byte-for-byte against Go v8.5.8 golden captures.
+fn normalize_ts_and_caller(line: &str) -> String {
     let mut s = line.to_owned();
-    // Replace leading `[YYYY/MM/DD HH:MM:SS.mmm ±HH:MM]` with `[<TS>]`.
+    // 1. Replace leading `[YYYY/MM/DD HH:MM:SS.mmm ±HH:MM]` with `[<TS>]`.
     if s.starts_with('[')
         && let Some(end) = s.find(']')
         && end == 31
     {
         s.replace_range(1..end, "<TS>");
+    }
+    // 2. Replace third bracket token `[file:line]` (after `[<TS>] [LEVEL] `) with `[<CALLER>]`.
+    if let Some(lvl_end) = s.find("] [").and_then(|i| {
+        let rest = &s[i + 3..];
+        rest.find("] [").map(|j| i + 3 + j + 3)
+    }) && let Some(caller_end) = s[lvl_end..].find(']')
+    {
+        let caller = &s[lvl_end..lvl_end + caller_end];
+        if caller.contains(':') && !caller.contains(' ') {
+            s.replace_range(lvl_end..lvl_end + caller_end, "<CALLER>");
+        }
     }
     s
 }
@@ -68,56 +79,68 @@ fn matrix3_startup_banner_and_loaded_config_struct_order() {
         assert_single_line(format!("{l}\n").as_bytes());
     }
 
-    // 1. Welcome to TiDB. exact 9-field order with [GoVersion=] empty + ["Rust Version"=...].
-    let welcome = normalize_line(lines[0]);
-    let expected_keys = [
-        "[\"Welcome to TiDB.\"]",
-        "[\"Release Version\"=v8.5.8+tidb-rs.",
-        "[Edition=Community]",
-        "[\"Git Commit Hash\"=",
-        "[\"Git Branch\"=",
-        "[\"UTC Build Time\"=",
-        "[GoVersion=]",
-        "[\"Rust Version\"=",
-        "[\"Race Enabled\"=false]",
-        "[\"Check Table Before Drop\"=false]",
-    ];
-    let mut cursor = 0;
-    for needle in expected_keys {
-        let pos = welcome[cursor..]
-            .find(needle)
-            .unwrap_or_else(|| panic!("missing `{needle}` in order in: {welcome}"));
-        cursor += pos + needle.len();
-    }
-
-    // 2. loaded config: struct declaration order (`"host"` before `"advertise-address"` before
-    // `"port"`), exact integer `"port":4000` (not `4000.0` or alphabetically sorted!).
-    let loaded = lines[1];
-    assert!(
-        loaded.contains("[\"loaded config\"] [config=\""),
-        "{loaded}"
+    // 1. Whole-line normalized byte equality against Go v8.5.8 spec §4.1 `Welcome to TiDB.`
+    // (with D1=A1 Release Version, empty GoVersion, and Rust Version).
+    let expected_welcome = format!(
+        "[<TS>] [INFO] [<CALLER>] [\"Welcome to TiDB.\"] \
+         [\"Release Version\"={}] \
+         [Edition={}] \
+         [\"Git Commit Hash\"={}] \
+         [\"Git Branch\"={}] \
+         [\"UTC Build Time\"=\"{}\"] \
+         [GoVersion=] \
+         [\"Rust Version\"=\"{}\"] \
+         [\"Race Enabled\"=false] \
+         [\"Check Table Before Drop\"=false]",
+        tidb_log::release_version(&cfg),
+        tidb_log::edition(&cfg),
+        tidb_log::TIDB_GIT_HASH,
+        tidb_log::TIDB_GIT_BRANCH,
+        tidb_log::TIDB_BUILD_TS,
+        tidb_log::RUST_VERSION,
     );
+    assert_eq!(normalize_ts_and_caller(lines[0]), expected_welcome);
+
+    // 2. Whole-line normalized byte equality for `loaded config` (struct declaration order + exact
+    // integer representation).
     let json_cfg = tidb_base::config::marshal_json(&cfg).unwrap();
     assert!(
         json_cfg.starts_with(r#"{"host":"0.0.0.0","advertise-address":"","port":4000,"#),
         "must preserve Go struct declaration order & exact int: {}",
         &json_cfg[..json_cfg.len().min(120)]
     );
-    // Must parse as valid JSON.
-    let parsed: serde_json::Value = serde_json::from_str(&json_cfg).unwrap();
-    assert_eq!(parsed["port"], 4000);
+    let mut expected_loaded_buf = Vec::new();
+    tidb_log::encoder::text::safe_add_bytes(&mut expected_loaded_buf, json_cfg.as_bytes());
+    let expected_loaded = format!(
+        "[<TS>] [INFO] [<CALLER>] [\"loaded config\"] [config=\"{}\"]",
+        String::from_utf8(expected_loaded_buf).unwrap()
+    );
+    assert_eq!(normalize_ts_and_caller(lines[1]), expected_loaded);
 
-    // 3. GetTiDBInfo (-V / SELECT tidb_version()) has GoVersion: empty + Rust Version: + Store:.
+    // 3. GetTiDBInfo (-V / SELECT tidb_version()) exact 10-line layout.
     let ver_info = tidb_log::get_tidb_info(&cfg);
-    assert!(
-        ver_info.contains("Release Version: v8.5.8+tidb-rs."),
-        "{ver_info}"
+    assert_eq!(
+        ver_info,
+        format!(
+            "Release Version: {}\n\
+             Edition: {}\n\
+             Git Commit Hash: {}\n\
+             Git Branch: {}\n\
+             UTC Build Time: {}\n\
+             GoVersion: \n\
+             Rust Version: {}\n\
+             Race Enabled: false\n\
+             Check Table Before Drop: false\n\
+             Store: {}",
+            tidb_log::release_version(&cfg),
+            tidb_log::edition(&cfg),
+            tidb_log::TIDB_GIT_HASH,
+            tidb_log::TIDB_GIT_BRANCH,
+            tidb_log::TIDB_BUILD_TS,
+            tidb_log::RUST_VERSION,
+            cfg.store,
+        )
     );
-    assert!(
-        ver_info.contains("GoVersion: \nRust Version: "),
-        "{ver_info}"
-    );
-    assert!(ver_info.contains("Store: "), "{ver_info}");
 }
 
 #[test]
@@ -126,7 +149,7 @@ fn matrix3_general_log_and_bridges_including_slog_order() {
     let main_sink = MemorySink::new();
     let general_sink = MemorySink::new();
     let cfg = LogConfig {
-        level: "warn".to_owned(),
+        level: "debug".to_owned(),
         format: "text".to_owned(),
         disable_timestamp: false,
         disable_error_verbose: true,
@@ -134,6 +157,7 @@ fn matrix3_general_log_and_bridges_including_slog_order() {
     };
     tidb_log::init_logger_with_sinks(&cfg, "ks1", main_sink.clone(), Some(general_sink.clone()))
         .unwrap();
+    tidb_log::set_level("warn").unwrap();
 
     // GeneralLogger logs at INFO even when global level is WARN, and routes to general_sink
     // with bound [keyspaceName=ks1].
@@ -141,65 +165,147 @@ fn matrix3_general_log_and_bridges_including_slog_order() {
     assert!(main_sink.snapshot().is_empty());
     let g = String::from_utf8(general_sink.take()).unwrap();
     assert_single_line(g.as_bytes());
-    assert!(g.contains("[INFO]"), "{g}");
-    assert!(
-        g.contains("[GENERAL_LOG] [keyspaceName=ks1] [conn=42] [sql=\"SELECT 1\"]"),
-        "{g}"
+    assert_eq!(
+        normalize_ts_and_caller(g.trim_end_matches('\n')),
+        "[<TS>] [INFO] [<CALLER>] [GENERAL_LOG] [keyspaceName=ks1] [conn=42] [sql=\"SELECT 1\"]"
     );
 
     // log::warn! bridge
     log::warn!("from std log");
     let l = String::from_utf8(main_sink.take()).unwrap();
     assert_single_line(l.as_bytes());
-    assert!(
-        l.contains("[WARN]")
-            && l.contains("[\"from std log\"]")
-            && l.contains("[keyspaceName=ks1]"),
-        "{l}"
+    assert_eq!(
+        normalize_ts_and_caller(l.trim_end_matches('\n')),
+        "[<TS>] [WARN] [<CALLER>] [\"from std log\"] [keyspaceName=ks1]"
     );
 
-    // tracing::warn! bridge
+    // tracing::warn! bridge & tracing::trace! filtered out even at DEBUG level
     tracing::warn!(conn = 7_u64, "from tracing");
     let t = String::from_utf8(main_sink.take()).unwrap();
     assert_single_line(t.as_bytes());
+    assert_eq!(
+        normalize_ts_and_caller(t.trim_end_matches('\n')),
+        "[<TS>] [WARN] [<CALLER>] [\"from tracing\"] [keyspaceName=ks1] [conn=7]"
+    );
+    tidb_log::set_level("debug").unwrap();
+    tracing::trace!("noisy hyper trace event");
     assert!(
-        t.contains("[WARN]")
-            && t.contains("[\"from tracing\"]")
-            && t.contains("[keyspaceName=ks1] [conn=7]"),
-        "{t}"
+        main_sink.take().is_empty(),
+        "tracing::trace! must be filtered out even at DEBUG level"
     );
 
-    // slog bridge: OwnedKVList must be REVERSED so bound fields appear in declaration order
-    // (a=1 then b=2) BEFORE call-site field c=3!
+    // slog bridge: BOTH OwnedKVList AND call-site kv list must be reversed to preserve Go .With
+    // and call-site declaration order (a=1, b=2, c=3, d=4)!
     let logger = slog_global::borrow_global()
         .new(slog::o!("a" => 1_i64))
         .new(slog::o!("b" => 2_i64));
-    slog::warn!(logger, "from slog"; "c" => 3_i64);
+    slog::warn!(logger, "from slog"; "c" => 3_i64, "d" => 4_i64);
     let sl = String::from_utf8(main_sink.take()).unwrap();
     assert_single_line(sl.as_bytes());
-    assert!(
-        sl.contains("[\"from slog\"] [keyspaceName=ks1] [a=1] [b=2] [c=3]"),
-        "slog OwnedKVList must preserve Go .With order: {sl}"
+    assert_eq!(
+        normalize_ts_and_caller(sl.trim_end_matches('\n')),
+        "[<TS>] [WARN] [<CALLER>] [\"from slog\"] [keyspaceName=ks1] [a=1] [b=2] [c=3] [d=4]"
     );
 }
 
 #[test]
-fn matrix3_command_dispatched_failed_and_redact_helpers() {
+fn matrix3_replace_logger_json_and_fatal_dual_stack_and_timeout_in_hook() {
     let _g = GLOBAL_TEST_LOCK.lock().unwrap();
-    // Verify `format_sql_for_conn_log` folds \r/\n/\t to single spaces and truncates cleanly.
-    let multiline = "SELECT\n  1,\r\n\tFROM nonexistent";
-    assert_eq!(
-        tidb_base::structured_log::LogLevel::parse_level("INFO").unwrap(),
-        LogLevel::Info
+    let sink = MemorySink::new();
+    let cfg = LogConfig {
+        level: "info".to_owned(),
+        format: "text".to_owned(),
+        disable_timestamp: false,
+        disable_error_verbose: true,
+        ..LogConfig::default()
+    };
+    tidb_log::init_logger_with_sinks(&cfg, "", sink.clone(), None).unwrap();
+
+    // 1. Fatal with explicit "stack" field still emits AddStacktrace(FatalLevel) (Go parity).
+    tidb_base::log_fatal!("fatal dual stack", "stack" => "explicit-stack");
+    let fl = String::from_utf8(sink.take()).unwrap();
+    assert_single_line(fl.as_bytes());
+    let norm_fl = normalize_ts_and_caller(fl.trim_end_matches('\n'));
+    assert!(
+        norm_fl.starts_with(
+            "[<TS>] [FATAL] [<CALLER>] [\"fatal dual stack\"] [stack=explicit-stack] [stack=\""
+        ),
+        "expected both explicit stack and auto FatalLevel stack: {norm_fl}"
     );
-    // Exercise tidb_base::errors + RedactLogEnable on syntax error text parity.
-    errors::redact_log_enabled_store(RedactLogEnable);
-    let parse_err = tidb_base::terror::ClassParser
-        .new_std(tidb_base::errno::ErrParse)
-        .fast_gen_by_args(tidb_base::go_args!["bad syntax", 1]);
-    assert!(!parse_err.has_stack());
-    assert!(multiline.contains('\n'));
-    errors::redact_log_enabled_store(RedactLogDisable);
+    // Backtrace frames must strip `:col` and internal wrapper frames.
+    assert!(
+        !norm_fl.contains("std::backtrace::"),
+        "internal std::backtrace frames must be stripped: {norm_fl}"
+    );
+
+    // 2. LockWithTimeoutSink: does NOT panic when inside panic hook (returns TimedOut Err).
+    struct SlowSink;
+    impl LogSink for SlowSink {
+        fn write_entry(&self, _data: &[u8]) -> std::io::Result<()> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(())
+        }
+        fn sync(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let locked = Arc::new(tidb_log::LockWithTimeoutSink::new(
+        Arc::new(SlowSink),
+        Duration::from_millis(30),
+    ));
+    let holder = Arc::clone(&locked);
+    let t = std::thread::spawn(move || {
+        let _ = holder.write_entry(b"hold\n");
+    });
+    std::thread::sleep(Duration::from_millis(20));
+    {
+        let _hook_guard = tidb_base::panic_guard::enter_panic_hook().unwrap();
+        let err = locked.write_entry(b"from hook\n").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+    t.join().unwrap();
+
+    // 3. replace_logger marshals exact Go pingcap/log.Config JSON fields (no slow-query-file /
+    // general-log-file, includes development/disable-caller/disable-stacktrace/sampling/
+    // error-output-path/timeout).
+    let dir = std::env::temp_dir().join(format!(
+        "tidb-log-replace-cfg-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let fpath = dir.join("tidb.log");
+    let mut rcfg = LogConfig {
+        level: "info".to_owned(),
+        format: "text".to_owned(),
+        disable_error_verbose: true,
+        ..LogConfig::default()
+    };
+    rcfg.file.filename = fpath.to_string_lossy().into_owned();
+    tidb_log::replace_logger(&rcfg).unwrap();
+    tidb_log::sync().unwrap();
+    let content = fs::read_to_string(&fpath).unwrap();
+    let line = content.lines().next().unwrap();
+    let expected_json = format!(
+        "{{\"level\":\"info\",\"format\":\"text\",\"disable-timestamp\":false,\
+         \"file\":{{\"filename\":\"{}\",\"max-size\":0,\"max-days\":0,\"max-backups\":0,\
+         \"compression\":\"\",\"is-buffered\":false,\"buffer-size\":0,\"buffer-flush-interval\":0}},\
+         \"development\":false,\"disable-caller\":false,\"disable-stacktrace\":false,\
+         \"disable-error-verbose\":true,\"sampling\":null,\"error-output-path\":\"\",\"timeout\":0}}",
+        fpath.to_string_lossy()
+    );
+    let mut escaped = Vec::new();
+    tidb_log::encoder::text::safe_add_bytes(
+        &mut escaped,
+        format!("replaced global logger with config: {expected_json}").as_bytes(),
+    );
+    let expected_line = format!(
+        "[<TS>] [INFO] [<CALLER>] [\"{}\"]",
+        String::from_utf8(escaped).unwrap()
+    );
+    assert_eq!(normalize_ts_and_caller(line), expected_line);
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Offline port of `pingcap/sysutil@v1.0.1-0.20240311050922-ae81ee01f3a5/search_log.go`

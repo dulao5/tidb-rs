@@ -29,7 +29,10 @@ pub mod tls;
 pub mod value;
 
 pub use auth::Credential;
-pub use conn::{QUERY_LOG_MAX_LEN, err_str_for_log, format_sql_for_conn_log};
+pub use conn::{
+    QUERY_LOG_MAX_LEN, current_query_log_max_len, err_str_for_log, format_sql_for_conn_log,
+    format_stmt_execute_sql_for_log,
+};
 pub use error::SqlError;
 pub use handler::{
     ConnectionInfo, EncodedResultSet, OkInfo, PreparedInfo, RawParams, Response, ResultSet,

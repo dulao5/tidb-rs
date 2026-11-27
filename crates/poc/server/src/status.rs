@@ -96,6 +96,11 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
         });
     }
     conns.shutdown().await;
+    // Emit the three Go status/RPC shutdown WARNs (pkg/server/http_status.go:535,540,545,
+    // spec §4.2) when the status/gRPC server stops.
+    tidb_base::log_warn!("grpc server error", "error" => "mux: server closed");
+    tidb_base::log_warn!("http server error", "error" => "http: Server closed");
+    tidb_base::log_warn!("start status/rpc server error", "error" => "use of closed network connection");
 }
 
 async fn handle(req: Request<Incoming>, info: &StatusInfo) -> Response<Body> {
@@ -155,6 +160,13 @@ async fn handle_settings(req: Request<Incoming>) -> Response<Body> {
         let val = percent_decode_form(v);
         match key.as_str() {
             "log_level" => {
+                if val.is_empty() {
+                    return response(
+                        StatusCode::BAD_REQUEST,
+                        "text/plain; charset=utf-8",
+                        "empty log_level value\n".to_owned(),
+                    );
+                }
                 if let Err(e) = tidb_log::set_level(&val) {
                     return response(
                         StatusCode::BAD_REQUEST,
@@ -168,14 +180,15 @@ async fn handle_settings(req: Request<Incoming>) -> Response<Body> {
                 handled = true;
             }
             "tidb_general_log" => {
-                let on = match val.to_ascii_lowercase().as_str() {
-                    "1" | "on" | "true" => true,
-                    "0" | "off" | "false" => false,
+                // Match Go tikv_handler.go:428-436: strictly "0" or "1", else "illegal argument".
+                let on = match val.as_str() {
+                    "1" => true,
+                    "0" => false,
                     _ => {
                         return response(
                             StatusCode::BAD_REQUEST,
                             "text/plain; charset=utf-8",
-                            format!("invalid tidb_general_log value: {val}\n"),
+                            "illegal argument\n".to_owned(),
                         );
                     }
                 };

@@ -176,11 +176,11 @@ pub fn log_time_to_datetime(t: LogTime) -> DateTime<FixedOffset> {
         })
 }
 
-/// Go `pingcap/log` `ShortCallerEncoder` (`zap_text_encoder.go:68-94`): basename after last `/`
-/// (or `\`), filtering bytes strictly to ASCII `[A-Za-z0-9._-]`, followed by `:<line>`.
+/// Go `pingcap/log` `ShortCallerEncoder` (`zap_text_encoder.go:68-94`): basename after last `/`,
+/// filtering bytes strictly to ASCII `[A-Za-z0-9._-]`, followed by `:<line>`.
 // go-dep: github.com/pingcap/log@v1.1.1-0.20250917021125-19901e015dc9.ShortCallerEncoder L1
 pub fn append_filtered_caller(buf: &mut Vec<u8>, file: &str, line: u32) {
-    let base = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    let base = file.rsplit('/').next().unwrap_or(file);
     for &b in base.as_bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-') {
             buf.push(b);

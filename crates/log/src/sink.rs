@@ -1,14 +1,15 @@
 //! Output sinks for `tidb-log`: stdout, rotating/gzip file writer, buffered writer, timeout guard,
 //! and in-memory test sink.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
 
-use chrono::Local;
+use chrono::{Local, NaiveDateTime};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use parking_lot::{Condvar, Mutex};
@@ -101,28 +102,27 @@ pub struct RotatingFileSink {
     max_days: usize,
     max_backups: usize,
     compress_gzip: bool,
-    timeout: Option<Duration>,
     state: Mutex<RotatingState>,
     cleanup_lock: Arc<Mutex<()>>,
 }
 
 impl RotatingFileSink {
     /// Open or create a rotating file sink from `ZaplogFileLogConfig`.
-    pub fn new(cfg: &ZaplogFileLogConfig, timeout_secs: isize) -> Result<Self, Error> {
+    pub fn new(cfg: &ZaplogFileLogConfig, _timeout_secs: isize) -> Result<Self, Error> {
         let max_mb = if cfg.max_size <= 0 {
             DEFAULT_MAX_SIZE_MB
         } else {
             cfg.max_size
         };
         let max_bytes = (max_mb as u64).saturating_mul(1024 * 1024);
-        Self::new_with_max_bytes(cfg, max_bytes, timeout_secs)
+        Self::new_with_max_bytes(cfg, max_bytes, 0)
     }
 
     /// Constructor accepting an explicit byte rotation threshold (used by rotation tests).
     pub fn new_with_max_bytes(
         cfg: &ZaplogFileLogConfig,
         max_bytes: u64,
-        timeout_secs: isize,
+        _timeout_secs: isize,
     ) -> Result<Self, Error> {
         let compress_gzip = match cfg.compression.as_str() {
             "" => false,
@@ -166,30 +166,11 @@ impl RotatingFileSink {
             max_days: cfg.max_days.max(0) as usize,
             max_backups: cfg.max_backups.max(0) as usize,
             compress_gzip,
-            timeout: if timeout_secs > 0 {
-                Some(Duration::from_secs(timeout_secs as u64))
-            } else {
-                None
-            },
             state: Mutex::new(RotatingState { file, size, seq: 0 }),
             cleanup_lock: Arc::new(Mutex::new(())),
         };
         sink.cleanup_old_archives();
         Ok(sink)
-    }
-
-    fn lock_state(&self) -> parking_lot::MutexGuard<'_, RotatingState> {
-        if let Some(timeout) = self.timeout {
-            self.state.try_lock_for(timeout).unwrap_or_else(|| {
-                panic!(
-                    "write log timeout after {:?} for {}",
-                    timeout,
-                    self.path.display()
-                )
-            })
-        } else {
-            self.state.lock()
-        }
     }
 
     fn rotate_locked(&self, st: &mut RotatingState) -> io::Result<()> {
@@ -217,7 +198,7 @@ impl RotatingFileSink {
                 .spawn(move || {
                     let _ = compress_file_gzip(&src);
                     let _guard = cleanup_lock.lock();
-                    cleanup_archives(&path_for_cleanup, max_days, max_backups);
+                    cleanup_archives(&path_for_cleanup, max_days, max_backups, true);
                 });
         } else {
             self.cleanup_old_archives();
@@ -254,41 +235,32 @@ impl RotatingFileSink {
     }
 
     fn cleanup_old_archives(&self) {
-        if self.max_days == 0 && self.max_backups == 0 {
+        if self.max_days == 0 && self.max_backups == 0 && !self.compress_gzip {
             return;
         }
         let _guard = self.cleanup_lock.lock();
-        cleanup_archives(&self.path, self.max_days, self.max_backups);
+        cleanup_archives(
+            &self.path,
+            self.max_days,
+            self.max_backups,
+            self.compress_gzip,
+        );
     }
 }
 
 impl LogSink for RotatingFileSink {
     fn write_entry(&self, data: &[u8]) -> io::Result<()> {
-        let start = Instant::now();
-        {
-            let mut st = self.lock_state();
-            if st.size > 0 && st.size.saturating_add(data.len() as u64) > self.max_bytes {
-                self.rotate_locked(&mut st)?;
-            }
-            st.file.write_all(data)?;
-            st.size = st.size.saturating_add(data.len() as u64);
+        let mut st = self.state.lock();
+        if st.size > 0 && st.size.saturating_add(data.len() as u64) > self.max_bytes {
+            self.rotate_locked(&mut st)?;
         }
-        // MutexGuard is dropped BEFORE panicking so the global FatalLog panic hook never
-        // deadlocks trying to re-acquire `self.state`.
-        if let Some(timeout) = self.timeout
-            && start.elapsed() > timeout
-        {
-            panic!(
-                "write log exceeded timeout {:?} for {}",
-                timeout,
-                self.path.display()
-            );
-        }
+        st.file.write_all(data)?;
+        st.size = st.size.saturating_add(data.len() as u64);
         Ok(())
     }
 
     fn sync(&self) -> io::Result<()> {
-        let mut st = self.lock_state();
+        let mut st = self.state.lock();
         st.file.flush()?;
         st.file.sync_data()
     }
@@ -316,7 +288,11 @@ fn compress_file_gzip(src: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn cleanup_archives(base_path: &Path, max_days: usize, max_backups: usize) {
+/// Lumberjack-compatible archive retention & leftover compression:
+/// - Ages backups by the timestamp parsed from the filename (not filesystem mtime).
+/// - Deduplicates `<ts>` and `<ts>.gz` so a backup being compressed is not counted twice.
+/// - Compresses any remaining uncompressed backups when `compress_gzip` is enabled.
+fn cleanup_archives(base_path: &Path, max_days: usize, max_backups: usize, compress_gzip: bool) {
     let Some(dir) = base_path.parent() else {
         return;
     };
@@ -336,7 +312,14 @@ fn cleanup_archives(base_path: &Path, max_days: usize, max_backups: usize) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let mut backups: Vec<(SystemTime, PathBuf)> = Vec::new();
+
+    // Group by parsed `(NaiveDateTime, seq)` key so `<ts>` and `<ts>.gz` count as ONE backup.
+    struct BackupGroup {
+        ts: NaiveDateTime,
+        plain: Option<PathBuf>,
+        gz: Option<PathBuf>,
+    }
+    let mut groups: BTreeMap<(NaiveDateTime, u64), BackupGroup> = BTreeMap::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else {
@@ -345,87 +328,88 @@ fn cleanup_archives(base_path: &Path, max_days: usize, max_backups: usize) {
         let Some(after_prefix) = name_str.strip_prefix(&prefix) else {
             continue;
         };
-        let ts_part = if let Some(s) = after_prefix.strip_suffix(&format!("{ext}.gz")) {
-            s
+        let (ts_part, is_gz) = if let Some(s) = after_prefix.strip_suffix(&format!("{ext}.gz")) {
+            (s, true)
         } else if let Some(s) = after_prefix.strip_suffix(ext) {
-            s
+            (s, false)
         } else {
             continue;
         };
-        // Strictly validate the rotated timestamp (`YYYY-MM-DDTHH-MM-SS.mmm` plus optional
-        // `-<seq>`) so sibling logs like `tidb-slow.log` in the same directory are NEVER deleted.
-        if !is_valid_backup_timestamp(ts_part) {
+        // Strictly validate & parse the rotated timestamp (`YYYY-MM-DDTHH-MM-SS.mmm` plus optional
+        // `-<seq>`) so sibling logs like `tidb-slow.log` in the same directory are NEVER touched.
+        let Some((ts, seq)) = parse_backup_timestamp(ts_part) else {
             continue;
+        };
+        let group = groups.entry((ts, seq)).or_insert(BackupGroup {
+            ts,
+            plain: None,
+            gz: None,
+        });
+        if is_gz {
+            group.gz = Some(entry.path());
+        } else {
+            group.plain = Some(entry.path());
         }
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        backups.push((mtime, entry.path()));
     }
-    // Newest first.
-    backups.sort_by_key(|a| std::cmp::Reverse(a.0));
 
-    let now = SystemTime::now();
+    let now_naive = Local::now().naive_local();
     let max_age = if max_days > 0 {
-        Some(Duration::from_secs(
-            (max_days as u64).saturating_mul(86_400),
-        ))
+        Some(chrono::Duration::days(max_days as i64))
     } else {
         None
     };
 
-    for (idx, (mtime, path)) in backups.into_iter().enumerate() {
+    // Iterate newest first (reverse BTreeMap order).
+    let mut to_compress: Vec<PathBuf> = Vec::new();
+    for (idx, (_, grp)) in groups.into_iter().rev().enumerate() {
         let too_many = max_backups > 0 && idx >= max_backups;
-        let too_old =
-            max_age.is_some_and(|limit| now.duration_since(mtime).is_ok_and(|age| age > limit));
+        let too_old = max_age.is_some_and(|limit| now_naive.signed_duration_since(grp.ts) > limit);
         if too_many || too_old {
-            let _ = fs::remove_file(path);
+            if let Some(p) = grp.plain {
+                let _ = fs::remove_file(p);
+            }
+            if let Some(p) = grp.gz {
+                let _ = fs::remove_file(p);
+            }
+        } else if compress_gzip && let Some(plain) = grp.plain {
+            if grp.gz.is_some() {
+                // Already have the .gz archive: remove duplicate uncompressed leftover.
+                let _ = fs::remove_file(plain);
+            } else {
+                to_compress.push(plain);
+            }
         }
+    }
+
+    for leftover in to_compress {
+        let _ = compress_file_gzip(&leftover);
     }
 }
 
-/// Validate rotated archive timestamp suffix: `YYYY-MM-DDTHH-MM-SS.mmm` (23 ASCII bytes)
-/// optionally followed by `-<digits>`.
-fn is_valid_backup_timestamp(s: &str) -> bool {
+/// Parse rotated archive timestamp suffix: `YYYY-MM-DDTHH-MM-SS.mmm` optionally followed by
+/// `-<digits>`.
+fn parse_backup_timestamp(s: &str) -> Option<(NaiveDateTime, u64)> {
     let b = s.as_bytes();
     if b.len() < 23 {
-        return false;
+        return None;
     }
-    let is_d = |i: usize| b[i].is_ascii_digit();
-    let ts_ok = is_d(0)
-        && is_d(1)
-        && is_d(2)
-        && is_d(3)
-        && b[4] == b'-'
-        && is_d(5)
-        && is_d(6)
-        && b[7] == b'-'
-        && is_d(8)
-        && is_d(9)
-        && b[10] == b'T'
-        && is_d(11)
-        && is_d(12)
-        && b[13] == b'-'
-        && is_d(14)
-        && is_d(15)
-        && b[16] == b'-'
-        && is_d(17)
-        && is_d(18)
-        && b[19] == b'.'
-        && is_d(20)
-        && is_d(21)
-        && is_d(22);
-    if !ts_ok {
-        return false;
-    }
+    let ts_str = &s[..23];
+    let ts = NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%dT%H-%M-%S%.3f").ok()?;
     if b.len() == 23 {
-        return true;
+        return Some((ts, 0));
     }
-    b[23] == b'-' && b.len() > 24 && b[24..].iter().all(u8::is_ascii_digit)
+    if b[23] != b'-' || b.len() <= 24 {
+        return None;
+    }
+    let seq = s[24..].parse::<u64>().ok()?;
+    Some((ts, seq))
 }
 
 /// Optional buffered wrapper with periodic background flush (Go `zapcore.BufferedWriteSyncer`).
+///
+/// Holds `self.buf` across `self.inner.write_entry` (matching zap's `BufferedWriteSyncer` mutex)
+/// so concurrent writers and the periodic flusher never reorder chunks and `sync()` guarantees
+/// every previously written entry has reached `inner`.
 pub struct BufferedSink {
     inner: Arc<dyn LogSink>,
     buf: Arc<Mutex<Vec<u8>>>,
@@ -468,18 +452,11 @@ impl BufferedSink {
                             break;
                         }
                     }
-                    // `lock` is released before taking `bg_buf` or performing disk I/O so Drop
-                    // never blocks behind a slow flush.
-                    let chunk = {
-                        let mut b = bg_buf.lock();
-                        if b.is_empty() {
-                            Vec::new()
-                        } else {
-                            std::mem::take(&mut *b)
-                        }
-                    };
-                    if !chunk.is_empty() {
-                        let _ = bg_inner.write_entry(&chunk);
+                    // Hold `bg_buf` across inner write to preserve strict FIFO ordering.
+                    let mut b = bg_buf.lock();
+                    if !b.is_empty() {
+                        let _ = bg_inner.write_entry(&b);
+                        b.clear();
                     }
                 }
             })
@@ -494,40 +471,29 @@ impl BufferedSink {
             flusher: Mutex::new(handle),
         }
     }
-
-    fn flush_buffer(&self) -> io::Result<()> {
-        let chunk = {
-            let mut b = self.buf.lock();
-            if b.is_empty() {
-                return Ok(());
-            }
-            std::mem::take(&mut *b)
-        };
-        self.inner.write_entry(&chunk)
-    }
 }
 
 impl LogSink for BufferedSink {
     fn write_entry(&self, data: &[u8]) -> io::Result<()> {
-        let flush_now = {
-            let mut b = self.buf.lock();
-            if b.len().saturating_add(data.len()) > self.capacity && !b.is_empty() {
-                let chunk = std::mem::take(&mut *b);
-                b.extend_from_slice(data);
-                Some(chunk)
-            } else {
-                b.extend_from_slice(data);
-                None
-            }
-        };
-        if let Some(chunk) = flush_now {
-            self.inner.write_entry(&chunk)?;
+        let mut b = self.buf.lock();
+        if b.len().saturating_add(data.len()) > self.capacity && !b.is_empty() {
+            self.inner.write_entry(&b)?;
+            b.clear();
+        }
+        if data.len() >= self.capacity {
+            self.inner.write_entry(data)?;
+        } else {
+            b.extend_from_slice(data);
         }
         Ok(())
     }
 
     fn sync(&self) -> io::Result<()> {
-        self.flush_buffer()?;
+        let mut b = self.buf.lock();
+        if !b.is_empty() {
+            self.inner.write_entry(&b)?;
+            b.clear();
+        }
         self.inner.sync()
     }
 }
@@ -546,6 +512,57 @@ impl Drop for BufferedSink {
     }
 }
 
+/// Outermost lock-acquisition timeout wrapper matching Go `pingcap/log.LockWithTimeout`
+/// (`pingcap/log/log.go:111-114, 130-190`).
+///
+/// Wraps the final sink (AFTER [`BufferedSink`] when `is-buffered` is enabled) so:
+/// - A timeout panics ONLY when acquiring the lock exceeds `timeout` (never after a write or
+///   rotation already succeeded).
+/// - The background flush thread never owns this wrapper and therefore never panics on timeout.
+/// - While inside the global panic hook (`tidb_base::panic_guard::is_in_panic_hook()`), lock
+///   timeout returns `Err(TimedOut)` instead of panicking so the panic hook can emit its
+///   single-line stderr fallback without aborting the process.
+pub struct LockWithTimeoutSink {
+    inner: Arc<dyn LogSink>,
+    lock: Mutex<()>,
+    timeout: Duration,
+}
+
+impl LockWithTimeoutSink {
+    pub fn new(inner: Arc<dyn LogSink>, timeout: Duration) -> Self {
+        Self {
+            inner,
+            lock: Mutex::new(()),
+            timeout,
+        }
+    }
+
+    fn acquire(&self) -> io::Result<parking_lot::MutexGuard<'_, ()>> {
+        if let Some(guard) = self.lock.try_lock_for(self.timeout) {
+            return Ok(guard);
+        }
+        if tidb_base::panic_guard::is_in_panic_hook() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("write log timeout after {:?}", self.timeout),
+            ));
+        }
+        panic!("write log timeout after {:?}", self.timeout);
+    }
+}
+
+impl LogSink for LockWithTimeoutSink {
+    fn write_entry(&self, data: &[u8]) -> io::Result<()> {
+        let _guard = self.acquire()?;
+        self.inner.write_entry(data)
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        let _guard = self.acquire()?;
+        self.inner.sync()
+    }
+}
+
 /// Build a [`LogSink`] from a [`ZaplogFileLogConfig`] and optional `timeout` (seconds).
 pub fn build_sink(
     cfg: &ZaplogFileLogConfig,
@@ -554,15 +571,23 @@ pub fn build_sink(
     let base: Arc<dyn LogSink> = if cfg.filename.is_empty() {
         Arc::new(StdoutSink)
     } else {
-        Arc::new(RotatingFileSink::new(cfg, timeout_secs)?)
+        Arc::new(RotatingFileSink::new(cfg, 0)?)
     };
-    if cfg.is_buffered {
-        Ok(Arc::new(BufferedSink::new(
+    let buffered: Arc<dyn LogSink> = if cfg.is_buffered && !cfg.filename.is_empty() {
+        Arc::new(BufferedSink::new(
             base,
             cfg.buffer_size,
             cfg.buffer_flush_interval,
+        ))
+    } else {
+        base
+    };
+    if timeout_secs > 0 {
+        Ok(Arc::new(LockWithTimeoutSink::new(
+            buffered,
+            Duration::from_secs(timeout_secs as u64),
         )))
     } else {
-        Ok(base)
+        Ok(buffered)
     }
 }

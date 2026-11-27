@@ -32,6 +32,7 @@ pub enum PanicMode {
 
 thread_local! {
     static PANIC_MODE: Cell<PanicMode> = const { Cell::new(PanicMode::FatalLog) };
+    static SCOPE_PANIC_SEEN: Cell<bool> = const { Cell::new(false) };
     static LAST_RECOVERED_BACKTRACE: RefCell<Option<String>> = const { RefCell::new(None) };
     static IN_PANIC_HOOK: Cell<bool> = const { Cell::new(false) };
 }
@@ -39,12 +40,14 @@ thread_local! {
 /// RAII scope guard that restores the previous [`PanicMode`] on drop (nesting-safe, M-DEFER).
 pub struct PanicScopeGuard {
     prev: PanicMode,
+    prev_seen: bool,
 }
 
 impl Drop for PanicScopeGuard {
     // glue: restore outer PanicMode on normal exit or unwind (M-DEFER)
     fn drop(&mut self) {
         PANIC_MODE.with(|cell| cell.set(self.prev));
+        SCOPE_PANIC_SEEN.with(|cell| cell.set(self.prev_seen));
     }
 }
 
@@ -52,7 +55,17 @@ impl Drop for PanicScopeGuard {
 // glue: nested-safe TLS panic scope
 pub fn enter_panic_mode(mode: PanicMode) -> PanicScopeGuard {
     let prev = PANIC_MODE.with(|cell| cell.replace(mode));
-    PanicScopeGuard { prev }
+    let prev_seen = SCOPE_PANIC_SEEN.with(|cell| cell.replace(false));
+    PanicScopeGuard { prev, prev_seen }
+}
+
+/// Record that the current recoverable scope has entered a panic unwind.
+///
+/// Returns `true` if a panic was ALREADY seen in this active scope (a double panic inside
+/// `Drop` during unwinding, which cannot be caught and will abort the process).
+// glue: stable-Rust detection of non-unwinding double-panic inside Silent/CaptureBacktrace scopes
+pub fn mark_scope_panic_and_check_double() -> bool {
+    SCOPE_PANIC_SEEN.with(|cell| cell.replace(true))
 }
 
 /// Read the active [`PanicMode`] on the current thread.
@@ -108,6 +121,16 @@ pub fn enter_panic_hook() -> Option<PanicHookReentryGuard> {
             Some(PanicHookReentryGuard)
         }
     })
+}
+
+/// Returns `true` while the current thread is executing inside the global panic hook.
+///
+/// Sinks check this flag to avoid panicking (e.g. on `log.timeout`) while the panic hook is
+/// writing its `[FATAL]` record — panicking inside a panic hook causes Rust's `std` to abort
+/// immediately without re-invoking the hook.
+// glue: sink non-panicking guard while inside panic hook
+pub fn is_in_panic_hook() -> bool {
+    IN_PANIC_HOOK.with(Cell::get)
 }
 
 /// Extract a human-readable message from a caught panic payload.

@@ -744,11 +744,40 @@ impl Error {
     }
 }
 
+fn is_internal_backtrace_frame(func: &str) -> bool {
+    let f = func.trim_start_matches('<');
+    f.starts_with("std::backtrace_rs::")
+        || f.starts_with("std::backtrace::")
+        || f.starts_with("std::sys::backtrace::")
+        || f.starts_with("tidb_base::errors::format_backtrace")
+        || f.starts_with("tidb_base::errors::Error>::fill_line_and_file")
+        || f.starts_with("tidb_base::errors::Error::fill_line_and_file")
+        || f.starts_with("tidb_base::structured_log::FallbackStdoutLogger")
+        || f.starts_with("tidb_log::panic_hook::handle_panic")
+        || f.starts_with("tidb_log::logger::UnifiedLoggerCore")
+}
+
+/// Strip trailing `:col` from Rust's `file:line:col` location so frames render `file:line`
+/// matching Go's `<file>:<line>` stack format.
+fn strip_location_col(loc: &str) -> &str {
+    if let Some((prefix, col)) = loc.rsplit_once(':')
+        && !col.is_empty()
+        && col.bytes().all(|b| b.is_ascii_digit())
+        && let Some((_, line)) = prefix.rsplit_once(':')
+        && !line.is_empty()
+        && line.bytes().all(|b| b.is_ascii_digit())
+    {
+        return prefix;
+    }
+    loc
+}
+
 /// Format a captured Rust [`Backtrace`] into Go-style `\n<func>\n\t<file>:<line>` pairs.
 // glue: Go pingcap/errors stack frame layout over std::backtrace::Backtrace
 pub fn format_backtrace_frames(bt: &Backtrace, out: &mut Vec<u8>) {
     let raw = bt.to_string();
     let mut lines = raw.lines().peekable();
+    let mut skipping_top = true;
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -760,17 +789,24 @@ pub fn format_backtrace_frames(bt: &Backtrace, out: &mut Vec<u8>) {
             && idx_part.bytes().all(|b| b.is_ascii_digit())
         {
             let func = func_part.trim();
+            let loc = lines
+                .peek()
+                .and_then(|next| next.trim().strip_prefix("at "))
+                .map(|s| s.trim());
+            if loc.is_some() {
+                let _ = lines.next();
+            }
+            if skipping_top && is_internal_backtrace_frame(func) {
+                continue;
+            }
+            skipping_top = false;
             out.push(b'\n');
             out.extend_from_slice(func.as_bytes());
-            if let Some(next_line) = lines.peek() {
-                let next_trimmed = next_line.trim();
-                if let Some(loc) = next_trimmed.strip_prefix("at ") {
-                    let _ = lines.next();
-                    out.extend_from_slice(b"\n\t");
-                    out.extend_from_slice(loc.trim().as_bytes());
-                }
+            if let Some(loc) = loc {
+                out.extend_from_slice(b"\n\t");
+                out.extend_from_slice(strip_location_col(loc).as_bytes());
             }
-        } else {
+        } else if !skipping_top {
             out.push(b'\n');
             out.extend_from_slice(trimmed.as_bytes());
         }

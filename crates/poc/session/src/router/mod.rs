@@ -334,10 +334,40 @@ pub struct Router {
     conn_id: u64,
 }
 
-/// A new-stack error as the client sees it (Go's code and message).
+/// A new-stack error as the client sees it (Go's code and message), preserving the original
+/// `tidb_base::Error` so `command dispatched failed` emits `[component:code]` and stacks.
 fn sql_error(e: &Error) -> SqlError {
     let code = u16::try_from(e.code()).unwrap_or(1105);
     SqlError::new(code, String::from_utf8_lossy(&e.get_msg()).into_owned())
+        .with_source_err(e.clone())
+}
+
+/// Emit Go `session.go:1590` `WARN` `"parse SQL failed"` (preserving raw `\n`, applying
+/// `redact::string`) and attach a `[parser:1064]` `source_err` on `SqlError` for
+/// `command dispatched failed`.
+pub(crate) fn log_and_wrap_parse_error(
+    conn_id: u64,
+    session_alias: &str,
+    redact_mode: &str,
+    sql: &str,
+    err: SqlError,
+) -> SqlError {
+    let src = err.source_err.clone().unwrap_or_else(|| {
+        // MySQL ErrParse template is "%s %s" (two %s args); pass empty 2nd arg unless message
+        // already ends with the near-clause.
+        tidb_base::terror::ClassParser
+            .new_std(tidb_base::errno::ErrParse)
+            .fast_gen_by_args(tidb_base::go_args![&err.message, ""])
+    });
+    let sql_log = tidb_base::redact::string(redact_mode, sql);
+    tidb_base::log_warn!(
+        "parse SQL failed",
+        "conn" => conn_id,
+        "session_alias" => session_alias,
+        "error" => &src,
+        "SQL" => &sql_log,
+    );
+    err.with_source_err(src)
 }
 
 /// The 1235 error of a statement only the new stack can run when it cannot (§4.7, row 3).
@@ -692,7 +722,22 @@ impl Router {
         self.cursor = false;
         poc.begin_command();
         let start = Instant::now();
-        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let stmt = match tidb_sql::ir::parse_one(sql) {
+            Ok(s) => s,
+            Err(e) => {
+                let vars = self.new.session().vars();
+                if !vars.in_restricted_sql {
+                    return Err(log_and_wrap_parse_error(
+                        self.conn_id,
+                        &vars.session_alias,
+                        &vars.enable_redact_log,
+                        sql,
+                        e,
+                    ));
+                }
+                return Err(e);
+            }
+        };
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         if let Some(scope) = admin_flush_plan_cache_scope(&stmt) {
@@ -840,7 +885,22 @@ impl Router {
         stmt_id: u32,
         sql: &str,
     ) -> Result<PreparedInfo, SqlError> {
-        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let stmt = match tidb_sql::ir::parse_one(sql) {
+            Ok(s) => s,
+            Err(e) => {
+                let vars = self.new.session().vars();
+                if !vars.in_restricted_sql {
+                    return Err(log_and_wrap_parse_error(
+                        self.conn_id,
+                        &vars.session_alias,
+                        &vars.enable_redact_log,
+                        sql,
+                        e,
+                    ));
+                }
+                return Err(e);
+            }
+        };
         // Not on the new stack when the InfoSchema versions differ: its column definitions
         // would come from another version, and a later fallback would fail check_columns.
         let candidate = Self::candidate(&stmt, true).and_then(|()| {

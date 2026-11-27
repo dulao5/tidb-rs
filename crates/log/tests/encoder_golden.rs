@@ -73,14 +73,14 @@ fn matrix1_text_basic_levels_caller_filter_empty_msg_and_bound_order() {
         );
     }
 
-    // Caller filter: /dir/z\test file+1.go:99 -> [testfile1.go:99] (basename after last / or \,
-    // then ASCII [A-Za-z0-9._-] only).
+    // Caller filter: /dir/z_test file+1.rs:99 -> [z_testfile1.rs:99] (basename after last `/`
+    // only, then ASCII [A-Za-z0-9._-] only — backslashes are stripped, not treated as separators).
     let mut out = Vec::new();
     let entry = Entry {
         time: ts,
         level: LogLevel::Info,
         logger_name: "bad\nname",
-        file: "/dir/z_test file+1.rs",
+        file: r"/dir/z\test file+1.rs",
         line: 99,
         msg: "", // empty msg omitted completely in text mode!
         bound_fields: &[
@@ -94,7 +94,7 @@ fn matrix1_text_basic_levels_caller_filter_empty_msg_and_bound_order() {
     assert_single_line(&out);
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        "[2025/01/02 15:04:05.999 +08:00] [INFO] [\"bad\\nname\"] [z_testfile1.rs:99] [bound1=v1] [bound2=2] [call1=c1] [call2=3]\n"
+        "[2025/01/02 15:04:05.999 +08:00] [INFO] [\"bad\\nname\"] [ztestfile1.rs:99] [bound1=v1] [bound2=2] [call1=c1] [call2=3]\n"
     );
 
     // disable-timestamp = true: NO leading space before [INFO].
@@ -183,14 +183,12 @@ fn matrix1_quoting_escaping_del_and_invalid_utf8_bytes() {
     encoder::json::encode_entry(cfg, &entry, &mut json_out);
     assert_single_line(&json_out);
     let json_str = String::from_utf8(json_out).unwrap();
-    assert!(
-        json_str.contains(r#""bad_str":"\ufffd\ufffda""#),
-        "{json_str}"
-    );
-    assert!(json_str.contains(r#""bad_sp":"\ufffd a""#), "{json_str}");
-    assert!(
-        json_str.starts_with(r#"{"level":"INFO","message":"q","#),
-        "{json_str}"
+    assert_eq!(
+        json_str,
+        "{\"level\":\"INFO\",\"message\":\"q\",\"empty\":\"\",\"\":\"emptykey\",\
+         \"utf8_clean\":\"欢迎\",\"utf8_space\":\"欢迎来到 TiDB 💖\",\
+         \"del_only\":\"a\x7fb\",\"bad_str\":\"\\ufffd\\ufffda\",\"bad_sp\":\"\\ufffd a\",\
+         \"ctrl\":\"x\\u0000\\u001by\\tz\\r\\n\\\\\\\"[]=\"}\n"
     );
 }
 
@@ -287,98 +285,53 @@ fn matrix1_all_field_types_text_and_json_and_r34_skip() {
     encoder::text::encode_entry(cfg, &entry, &mut text_out);
     assert_single_line(&text_out);
     let text_s = String::from_utf8(text_out).unwrap();
-    assert!(
-        !text_s.contains(" []"),
-        "R34: Skip must not emit []: {text_s}"
-    );
-    assert!(
-        !text_s.contains("skipped"),
-        "R34: Skip key must be omitted: {text_s}"
-    );
-    assert!(text_s.contains("[null_f=null]"), "{text_s}");
-    assert!(
-        text_s.contains("[f32=1.100000023841858]"),
-        "text AddFloat32 widens to 64-bit: {text_s}"
-    );
-    assert!(
-        text_s.contains(r#"[f32s="[1.1]"]"#),
-        "text AppendFloat32 uses 32-bit: {text_s}"
-    );
-    assert!(
-        text_s.contains("[f_big=1000000000000000000000]"),
-        "{text_s}"
-    );
-    assert!(text_s.contains("[f_neg0=-0]"), "{text_s}");
-    assert!(
-        text_s.contains("[f_nan=NaN] [f_pinf=+Inf] [f_ninf=-Inf]"),
-        "{text_s}"
-    );
-    assert!(
-        text_s.contains("[bin_no_pad=YWJj] [bin_pad=\"YWIxMjM=\"]"),
-        "{text_s}"
-    );
-    assert!(
-        text_s.contains("[dur_0=0s] [dur_1=1.3s] [dur_neg=-5ms]"),
-        "{text_s}"
-    );
-    assert!(
-        text_s.contains("[t_plus9=2025/01/02 15:04:05.999 +09:00]"),
-        "{text_s}"
-    );
-    assert!(
-        text_s.contains(
-            r#"[ts_arr="[2025/01/02 15:04:05.999 +09:002025/01/02 06:04:06.123 +00:00]"]"#
-        ),
-        "{text_s}"
-    );
-    assert!(text_s.contains(r#"[strs_simple="[a,b]"]"#), "{text_s}");
-    assert!(
-        text_s.contains(r#"[strs_complex="[\"a b\",\"c\\\"d\",\"[x]\",]"]"#),
-        "{text_s}"
-    );
-    assert!(text_s.contains(r#"[strs_empty="[]"]"#), "{text_s}");
-    assert!(text_s.contains(r#"[u64s="[1,4,5]"]"#), "{text_s}");
-    assert!(text_s.contains(r#"[bools="[true,false]"]"#), "{text_s}");
-    assert!(
-        text_s.contains("[html=<a>&b]"),
-        "no HTML escaping: {text_s}"
+    assert_eq!(
+        text_s,
+        concat!(
+            "[2025/01/02 15:04:05.999 +08:00] [INFO]",
+            " [null_f=null]",
+            " [b_true=true] [b_false=false]",
+            " [int=-42] [uint64=18446744073709551615]",
+            " [f32=1.100000023841858] [f32s=\"[1.1]\"]",
+            " [f_big=1000000000000000000000] [f_neg0=-0]",
+            " [f_nan=NaN] [f_pinf=+Inf] [f_ninf=-Inf]",
+            " [bin_no_pad=YWJj] [bin_pad=\"YWIxMjM=\"]",
+            " [dur_0=0s] [dur_1=1.3s] [dur_neg=-5ms]",
+            " [t_plus9=2025/01/02 15:04:05.999 +09:00]",
+            " [ts_arr=\"[2025/01/02 15:04:05.999 +09:002025/01/02 06:04:06.123 +00:00]\"]",
+            " [strs_simple=\"[a,b]\"]",
+            " [strs_complex=\"[\\\"a b\\\",\\\"c\\\\\\\"d\\\",\\\"[x]\\\",]\"]",
+            " [strs_empty=\"[]\"]",
+            " [u64s=\"[1,4,5]\"]",
+            " [bools=\"[true,false]\"]",
+            " [html=<a>&b]\n",
+        )
     );
 
     let mut json_out = Vec::new();
     encoder::json::encode_entry(cfg, &entry, &mut json_out);
     assert_single_line(&json_out);
     let json_s = String::from_utf8(json_out).unwrap();
-    // JSON always keeps "message":"" even when empty, and no HTML escaping.
-    assert!(
-        json_s.starts_with(
-            r#"{"level":"INFO","time":"2025/01/02 15:04:05.999 +08:00","message":"","null_f":null,"#
-        ),
-        "{json_s}"
+    assert_eq!(
+        json_s,
+        concat!(
+            "{\"level\":\"INFO\",\"time\":\"2025/01/02 15:04:05.999 +08:00\",\"message\":\"\",",
+            "\"null_f\":null,",
+            "\"b_true\":true,\"b_false\":false,",
+            "\"int\":-42,\"uint64\":18446744073709551615,",
+            "\"f32\":1.1,\"f32s\":[1.1],",
+            "\"f_big\":1000000000000000000000,\"f_neg0\":-0,",
+            "\"f_nan\":\"NaN\",\"f_pinf\":\"+Inf\",\"f_ninf\":\"-Inf\",",
+            "\"bin_no_pad\":\"YWJj\",\"bin_pad\":\"YWIxMjM=\",",
+            "\"dur_0\":\"0s\",\"dur_1\":\"1.3s\",\"dur_neg\":\"-5ms\",",
+            "\"t_plus9\":\"2025/01/02 15:04:05.999 +09:00\",",
+            "\"ts_arr\":[\"2025/01/02 15:04:05.999 +09:00\",\"2025/01/02 06:04:06.123 +00:00\"],",
+            "\"strs_simple\":[\"a\",\"b\"],",
+            "\"strs_complex\":[\"a b\",\"c\\\"d\",\"[x]\",\"\"],",
+            "\"strs_empty\":[],",
+            "\"u64s\":[1,4,5],",
+            "\"bools\":[true,false],",
+            "\"html\":\"<a>&b\"}\n",
+        )
     );
-    assert!(!json_s.contains("skipped"), "{json_s}");
-    assert!(json_s.contains(r#""f32":1.1,"f32s":[1.1]"#), "{json_s}");
-    assert!(
-        json_s.contains(r#""f_big":1000000000000000000000,"f_neg0":-0"#),
-        "{json_s}"
-    );
-    assert!(
-        json_s.contains(r#""f_nan":"NaN","f_pinf":"+Inf","f_ninf":"-Inf""#),
-        "{json_s}"
-    );
-    assert!(json_s.contains(r#""dur_1":"1.3s""#), "{json_s}");
-    assert!(
-        json_s.contains(r#""t_plus9":"2025/01/02 15:04:05.999 +09:00""#),
-        "{json_s}"
-    );
-    assert!(
-        json_s.contains(
-            r#""ts_arr":["2025/01/02 15:04:05.999 +09:00","2025/01/02 06:04:06.123 +00:00"]"#
-        ),
-        "{json_s}"
-    );
-    assert!(json_s.contains(r#""html":"<a>&b""#), "{json_s}");
-    // Valid JSON overall
-    let parsed: serde_json::Value = serde_json::from_str(&json_s).unwrap();
-    assert_eq!(parsed["level"], "INFO");
-    assert_eq!(parsed["message"], "");
 }

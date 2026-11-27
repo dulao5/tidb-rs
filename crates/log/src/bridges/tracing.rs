@@ -25,12 +25,14 @@ pub fn install() {
         .try_init();
 }
 
-fn map_level(level: &Level) -> LogLevel {
+fn map_level(level: &Level) -> Option<LogLevel> {
     match *level {
-        Level::TRACE | Level::DEBUG => LogLevel::Debug,
-        Level::INFO => LogLevel::Info,
-        Level::WARN => LogLevel::Warn,
-        Level::ERROR => LogLevel::Error,
+        // Filter out TRACE events so third-party crates (hyper/h2/tonic) do not flood [DEBUG].
+        Level::TRACE => None,
+        Level::DEBUG => Some(LogLevel::Debug),
+        Level::INFO => Some(LogLevel::Info),
+        Level::WARN => Some(LogLevel::Warn),
+        Level::ERROR => Some(LogLevel::Error),
     }
 }
 
@@ -110,9 +112,18 @@ impl Visit for EventVisitor {
 }
 
 impl<S: Subscriber> Layer<S> for UnifiedTracingLayer {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>, _ctx: Context<'_, S>) -> bool {
+        let Some(level) = map_level(metadata.level()) else {
+            return false;
+        };
+        logger::core().enabled(LogTarget::Main, level)
+    }
+
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let meta = event.metadata();
-        let level = map_level(meta.level());
+        let Some(level) = map_level(meta.level()) else {
+            return;
+        };
         let core = logger::core();
         if !core.enabled(LogTarget::Main, level) {
             return;

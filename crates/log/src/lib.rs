@@ -22,8 +22,11 @@ pub use logger::{
 };
 pub use panic_hook::set_panic_hook;
 pub use printer::{get_tidb_info, print_tidb_info};
-pub use sink::{BufferedSink, LogSink, MemorySink, RotatingFileSink, StdoutSink};
+pub use sink::{
+    BufferedSink, LockWithTimeoutSink, LogSink, MemorySink, RotatingFileSink, StdoutSink,
+};
 pub use versioninfo::{
     DEFAULT_RELEASE_VERSION, RUST_VERSION, TIDB_BUILD_TS, TIDB_EDITION, TIDB_GIT_BRANCH,
     TIDB_GIT_HASH, default_server_version, edition, init_version, release_version, server_version,
+    version_comment,
 };

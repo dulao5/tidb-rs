@@ -1568,7 +1568,7 @@ impl Session {
                     && !tidb_sessionctx::variable::error::ErrUnknownSystemVar.equal(&err)
                 {
                     let sql_log =
-                        tidb_base::redact::string(&self.core.sctx.vars.enable_redact_log, &text);
+                        tidb_parser::normalize(&text, &self.core.sctx.vars.enable_redact_log);
                     tidb_base::log_warn!(
                         "compile SQL failed",
                         "conn" => self.core.sctx.vars.connection_id,

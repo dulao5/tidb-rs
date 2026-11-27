@@ -135,8 +135,18 @@ impl UnifiedLoggerCore {
     /// Encode and emit a record with optional extra bound fields (e.g. from `ContextLogger` or
     /// `slog` `OwnedKVList`).
     pub(crate) fn emit_with_bound(&self, record: &LogRecord<'_>, extra_bound: &[LogField<'_>]) {
+        let _ = self.try_emit_with_bound(record, extra_bound);
+    }
+
+    /// Like [`emit_with_bound`], returning the sink's `io::Result` so the global panic hook can
+    /// fall back to single-line stderr if the sink fails or times out.
+    pub(crate) fn try_emit_with_bound(
+        &self,
+        record: &LogRecord<'_>,
+        extra_bound: &[LogField<'_>],
+    ) -> io::Result<()> {
         if !self.enabled(record.target, record.level) {
-            return;
+            return Ok(());
         }
         let state = self.state.load();
         let mut enc_cfg = state.encoder_cfg;
@@ -151,14 +161,13 @@ impl UnifiedLoggerCore {
         }
         bound.extend_from_slice(extra_bound);
 
-        // TiDB configures zap.AddStacktrace(zapcore.FatalLevel): auto-attach stack only on Fatal
-        // if the caller has not already provided an explicit `"stack"` field.
-        let auto_stack =
-            if record.level == LogLevel::Fatal && !record.fields.iter().any(|f| f.key == "stack") {
-                format_backtrace_string(&std::backtrace::Backtrace::force_capture())
-            } else {
-                String::new()
-            };
+        // TiDB configures zap.AddStacktrace(zapcore.FatalLevel): zap unconditionally attaches
+        // the automatic stack trace on Fatal even when the caller also passed a `"stack"` field.
+        let auto_stack = if record.level == LogLevel::Fatal {
+            format_backtrace_string(&std::backtrace::Backtrace::force_capture())
+        } else {
+            String::new()
+        };
 
         let entry = Entry {
             time: encoder::now_local_fixed(),
@@ -182,7 +191,7 @@ impl UnifiedLoggerCore {
             LogTarget::General => &state.general_sink,
             LogTarget::Main | LogTarget::ErrVerbose | LogTarget::Fatal => &state.main_sink,
         };
-        let _ = sink.write_entry(&buf);
+        sink.write_entry(&buf)
     }
 }
 
@@ -332,9 +341,11 @@ pub fn replace_logger(cfg: &LogConfig) -> Result<(), Error> {
 }
 
 fn marshal_log_config_struct_order(cfg: &LogConfig) -> String {
+    // Matches Go `github.com/pingcap/log.Config` JSON field order verbatim
+    // (pkg/util/logutil/log.go:199 `json.Marshal(&cfg.Config)`).
     use std::fmt::Write as _;
     use tidb_base::gostd::json::append_string;
-    let mut out = String::with_capacity(256);
+    let mut out = String::with_capacity(320);
     out.push_str("{\"level\":");
     append_string(&mut out, &cfg.level);
     out.push_str(",\"format\":");
@@ -355,13 +366,10 @@ fn marshal_log_config_struct_order(cfg: &LogConfig) -> String {
     );
     let _ = write!(
         out,
-        ",\"disable-error-verbose\":{},\"timeout\":{},\"slow-query-file\":",
+        ",\"development\":false,\"disable-caller\":false,\"disable-stacktrace\":false,\
+         \"disable-error-verbose\":{},\"sampling\":null,\"error-output-path\":\"\",\"timeout\":{}}}",
         cfg.disable_error_verbose, cfg.timeout
     );
-    append_string(&mut out, &cfg.slow_query_file);
-    out.push_str(",\"general-log-file\":");
-    append_string(&mut out, &cfg.general_log_file);
-    out.push('}');
     out
 }
 

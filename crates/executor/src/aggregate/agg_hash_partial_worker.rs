@@ -206,8 +206,8 @@ impl HashAggPartialWorker {
         })
         .await;
 
-        if let Err((payload, _)) = res {
-            recovery_hash_agg(&self.global_output_tx, payload).await;
+        if let Err((payload, bt)) = res {
+            recovery_hash_agg(&self.global_output_tx, payload, bt).await;
         }
 
         self.finalize_worker_process(need_shuffle, final_concurrency, has_error)

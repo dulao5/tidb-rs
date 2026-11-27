@@ -948,7 +948,7 @@ impl HashAggExec {
                 let new_size = chk.memory_usage();
                 if let Err(err) = mem_tracker.consume(new_size - m_size) {
                     // Quota action error in task is treated like Go's panic (spec §4.5).
-                    recovery_hash_agg(&final_output_tx, Box::new(err)).await;
+                    recovery_hash_agg(&final_output_tx, Box::new(err), None).await;
                     let _ = mem_tracker.consume(-new_size);
                     return;
                 }
@@ -974,8 +974,8 @@ impl HashAggExec {
 
         // Ordered cleanup matching Go's defer (spec §4.5):
         // 1. Recover panic -> send to finalOutputCh.
-        if let Err((payload, _)) = res {
-            recovery_hash_agg(&final_output_tx, payload).await;
+        if let Err((payload, bt)) = res {
+            recovery_hash_agg(&final_output_tx, payload, bt).await;
         }
         // 2. Wait for all in-flight chunks to finish in partial workers.
         inflight_chunk_sync.wait().await;

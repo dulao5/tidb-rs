@@ -314,19 +314,18 @@ impl HashAggFinalWorker {
         })
         .await;
 
-        self.cleanup(start, res.err().map(|(p, _)| p), wg_guard)
-            .await;
+        self.cleanup(start, res.err(), wg_guard).await;
     }
 
     // go: HashAggFinalWorker.cleanup L2 (async panic recovery send; drops tracked map before Done)
     async fn cleanup(
         mut self,
         start: Instant,
-        panic_payload: Option<Box<dyn Any + Send>>,
+        panic_info: Option<(Box<dyn Any + Send>, Option<String>)>,
         wg_guard: DoneGuard,
     ) {
-        if let Some(r) = panic_payload {
-            recovery_hash_agg(&self.output_tx, r).await;
+        if let Some((r, bt)) = panic_info {
+            recovery_hash_agg(&self.output_tx, r, bt).await;
         }
         // Release partialResultMap bytes into TrackedAlloc before Done.
         self.partial_result_map.m.clear();

@@ -65,7 +65,7 @@ impl LogLevel {
         match s.to_ascii_lowercase().as_str() {
             "debug" => Ok(LogLevel::Debug),
             "info" | "" => Ok(LogLevel::Info),
-            "warn" | "warning" => Ok(LogLevel::Warn),
+            "warn" => Ok(LogLevel::Warn),
             "error" => Ok(LogLevel::Error),
             "dpanic" => Ok(LogLevel::DPanic),
             "panic" => Ok(LogLevel::Panic),
@@ -407,7 +407,15 @@ impl StructuredLogger for FallbackStdoutLogger {
     }
 
     fn log(&self, record: &LogRecord<'_>) {
-        let mut buf = Vec::with_capacity(128);
+        // Align with Go `pingcap/log` default logger (`init()` in pingcap/log/log.go:37-41):
+        // timestamp + level + caller + message + fields (with `errorVerbose` when error has a
+        // stack, since default `DisableErrorVerbose == false`) + automatic stack at ERROR+.
+        let mut buf = Vec::with_capacity(192);
+        let now = now_utc_log_time();
+        buf.push(b'[');
+        append_log_time(&mut buf, now);
+        buf.push(b']');
+        buf.push(b' ');
         buf.push(b'[');
         buf.extend_from_slice(record.level.as_upper_str().as_bytes());
         buf.push(b']');
@@ -439,6 +447,31 @@ impl StructuredLogger for FallbackStdoutLogger {
             buf.push(b'=');
             append_fallback_value(&mut buf, f.value);
             buf.push(b']');
+            if let LogValue::Error(e) = f.value
+                && e.has_stack()
+            {
+                let verbose = e.error_verbose();
+                let mut vkey = String::with_capacity(f.key.len() + 7);
+                vkey.push_str(f.key);
+                vkey.push_str("Verbose");
+                buf.push(b' ');
+                buf.push(b'[');
+                append_fallback_bytes(&mut buf, vkey.as_bytes());
+                buf.push(b'=');
+                append_fallback_bytes(&mut buf, &verbose);
+                buf.push(b']');
+            }
+        }
+        if (record.level as u8) >= (LogLevel::Error as u8) {
+            let stack =
+                crate::errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture());
+            if !stack.is_empty() {
+                buf.push(b' ');
+                buf.push(b'[');
+                buf.extend_from_slice(b"stack=");
+                append_fallback_bytes(&mut buf, stack.as_bytes());
+                buf.push(b']');
+            }
         }
         buf.push(b'\n');
         let stdout = io::stdout();
@@ -451,8 +484,76 @@ impl StructuredLogger for FallbackStdoutLogger {
     }
 }
 
+fn now_utc_log_time() -> LogTime {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    LogTime {
+        secs: dur.as_secs() as i64,
+        nanos: dur.subsec_nanos(),
+        offset_secs: 0,
+    }
+}
+
+/// Howard Hinnant civil-from-days algorithm: format `LogTime` as
+/// `YYYY/MM/DD HH:MM:SS.mmm ±HH:MM` with zero external crate dependencies.
+fn append_log_time(buf: &mut Vec<u8>, t: LogTime) {
+    let adjusted = t.secs.saturating_add(i64::from(t.offset_secs));
+    let days = adjusted.div_euclid(86_400);
+    let secs_of_day = adjusted.rem_euclid(86_400);
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day % 3600) / 60;
+    let ss = secs_of_day % 60;
+    let millis = t.nanos / 1_000_000;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    let sign = if t.offset_secs < 0 { '-' } else { '+' };
+    let abs_off = t.offset_secs.unsigned_abs();
+    let off_h = abs_off / 3600;
+    let off_m = (abs_off % 3600) / 60;
+    let _ = write!(
+        buf,
+        "{y:04}/{m:02}/{d:02} {hh:02}:{mm:02}:{ss:02}.{millis:03} {sign}{off_h:02}:{off_m:02}"
+    );
+}
+
+fn encode_base64_std(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i < input.len() {
+        let b0 = input[i];
+        let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if i + 1 < input.len() {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if i + 2 < input.len() {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        i += 3;
+    }
+    out
+}
+
 fn append_filtered_caller(buf: &mut Vec<u8>, file: &str, line: u32) {
-    let base = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    let base = file.rsplit('/').next().unwrap_or(file);
     for &b in base.as_bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-') {
             buf.push(b);
@@ -532,12 +633,14 @@ fn append_fallback_value(buf: &mut Vec<u8>, v: LogValue<'_>) {
         LogValue::Str(s) => append_fallback_bytes(buf, s.as_bytes()),
         LogValue::Bytes(b) | LogValue::JsonBytes(b) => append_fallback_bytes(buf, b),
         LogValue::Binary(b) => {
-            let s = format!("<binary len={}>", b.len());
-            append_fallback_bytes(buf, s.as_bytes());
+            let encoded = encode_base64_std(b);
+            append_fallback_bytes(buf, encoded.as_bytes());
         }
         LogValue::Duration(d) => buf.extend_from_slice(duration_string(d).as_bytes()),
         LogValue::Time(t) => {
-            let _ = write!(buf, "{}.{:09}", t.secs, t.nanos);
+            let mut ts_buf = Vec::with_capacity(32);
+            append_log_time(&mut ts_buf, t);
+            append_fallback_bytes(buf, &ts_buf);
         }
         LogValue::Error(e) => {
             let raw = e.error();

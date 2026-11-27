@@ -157,6 +157,9 @@ impl Drain for BridgeDrain {
 
         let mut call = SlogCollector { fields: Vec::new() };
         let _ = record.kv().serialize(record, &mut call);
+        // slog::b! / slog::kv! also builds a prepended list (newest first); reverse to restore
+        // declaration order.
+        call.fields.reverse();
 
         let bound_fields: Vec<LogField<'_>> =
             bound.fields.iter().map(OwnedLogField::as_field).collect();

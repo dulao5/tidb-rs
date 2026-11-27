@@ -3,10 +3,12 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::auth::{Credential, generate_salt};
 use crate::codec::{Reader, put_lenenc_int, put_lenenc_str};
@@ -57,7 +59,38 @@ struct StmtState {
     long_data: Vec<Option<Vec<u8>>>,
 }
 
+/// Shared connection status inspected by [`crate::Server::serve`] during graceful drain
+/// (Go `clientConn.status` + `SessionVars.InTxn()`, `server.go:1031`).
+pub(crate) struct ConnStatus {
+    /// True while awaiting the next client packet (`connStatusReading`).
+    idle_reading: AtomicBool,
+    /// True while the connection has an open explicit transaction (`SERVER_STATUS_IN_TRANS`).
+    in_txn: AtomicBool,
+}
+
+impl ConnStatus {
+    pub(crate) fn new() -> Self {
+        Self {
+            idle_reading: AtomicBool::new(false),
+            in_txn: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn set_reading(&self, reading: bool, in_txn: bool) {
+        self.in_txn.store(in_txn, Ordering::Release);
+        self.idle_reading.store(reading, Ordering::Release);
+    }
+
+    /// True if graceful drain must wait for this connection (dispatching a command OR inside
+    /// an explicit transaction). Idle connections outside a transaction are skipped immediately,
+    /// matching Go `server.go:1031`.
+    pub(crate) fn needs_drain_wait(&self) -> bool {
+        !(self.idle_reading.load(Ordering::Acquire) && !self.in_txn.load(Ordering::Acquire))
+    }
+}
+
 /// Runs a connection to completion. Errors are logged, never propagated.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run<S, F>(
     stream: S,
     peer: String,
@@ -66,6 +99,7 @@ pub(crate) async fn run<S, F>(
     config: &ServerConfig,
     factory: &F,
     admission: Option<tidb_runtime::Admission>,
+    status: Arc<ConnStatus>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
@@ -90,6 +124,7 @@ pub(crate) async fn run<S, F>(
                 last_active: accepted,
                 admission,
                 token: None,
+                status,
             }
         }
         Ok((_, None)) => return,
@@ -109,6 +144,12 @@ pub(crate) async fn run<S, F>(
 
 /// Default `QueryLogMaxLen` matching Go `executor.FormatSQL` (4096 bytes).
 pub const QUERY_LOG_MAX_LEN: usize = 4096;
+
+/// Live `tidb_query_log_max_len` read from `tidb_sessionctx::variable::tidb_vars::QueryLogMaxLen`.
+pub fn current_query_log_max_len() -> usize {
+    let v = tidb_sessionctx::variable::tidb_vars::QueryLogMaxLen.load(Ordering::SeqCst);
+    if v <= 0 { 0 } else { v as usize }
+}
 
 /// Format SQL for `command dispatched failed` (Go `executor.FormatSQL` + `QueryReplacer`):
 /// replaces `\r`, `\n`, `\t` with single spaces `' '` and truncates at `max_len` with
@@ -388,27 +429,87 @@ where
     Ok(Some((handler, capability, resp.user)))
 }
 
+/// Format bound `COM_STMT_EXECUTE` parameters matching Go `PlanCacheParamList.String()`
+/// (`pkg/sessionctx/variable/session.go:2092-2098` -> `types.DatumsToStrNoErrSmart`).
+fn format_param_value(p: &crate::params::Param) -> String {
+    use crate::value::Value;
+    match &p.value {
+        Value::Null => "<nil>".to_owned(),
+        Value::Int(i) => i.to_string(),
+        Value::UInt(u) => u.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Double(f) => f.to_string(),
+        Value::Decimal(s) => s.clone(),
+        Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+        Value::DateTime(dt) => {
+            if dt.microsecond > 0 {
+                format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+                    dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.microsecond
+                )
+            } else {
+                format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+                )
+            }
+        }
+        Value::Time(d) => {
+            let sign = if d.negative { "-" } else { "" };
+            if d.microseconds > 0 {
+                format!(
+                    "{sign}{:02}:{:02}:{:02}.{:06}",
+                    d.hours, d.minutes, d.seconds, d.microseconds
+                )
+            } else {
+                format!("{sign}{:02}:{:02}:{:02}", d.hours, d.minutes, d.seconds)
+            }
+        }
+    }
+}
+
+/// Format a `COM_STMT_EXECUTE` statement + parameters for `command dispatched failed`
+/// (Go `conn_stmt.go:660-670` `preparedStmt2String` + `executor.FormatSQL`).
+pub fn format_stmt_execute_sql_for_log(
+    sql: &str,
+    params: &[crate::params::Param],
+    redact_mode: &str,
+) -> String {
+    let mut out = tidb_parser::normalize(sql, redact_mode);
+    if redact_mode != tidb_base::errors::RedactLogEnable && !params.is_empty() {
+        let formatted = if params.len() == 1 {
+            format!(" [arguments: {}]", format_param_value(&params[0]))
+        } else {
+            let joined: Vec<String> = params.iter().map(format_param_value).collect();
+            format!(" [arguments: ({})]", joined.join(", "))
+        };
+        out.push_str(&tidb_base::redact::string(redact_mode, &formatted));
+    }
+    format_sql_for_conn_log(&out, current_query_log_max_len())
+}
+
 /// Format the last command body for `command dispatched failed` (Go `conn.go:2742-2768`),
-/// redacting SQL when `redact_mode != "OFF"`.
+/// normalizing SQL via `tidb_parser::normalize` when `redact_mode != "OFF"`.
 fn format_cmd_sql_for_log(
     cmd: u8,
     body: &[u8],
     stmts: &HashMap<u32, StmtState>,
     redact_mode: &str,
 ) -> String {
+    let max_len = current_query_log_max_len();
     match cmd {
         command::QUERY | command::STMT_PREPARE => {
             let raw = String::from_utf8_lossy(body);
             // Strip at most one trailing NUL (Go `string(data[:len-1])` when NUL-terminated).
             let raw = raw.strip_suffix('\0').unwrap_or(&raw);
-            let redacted = tidb_base::redact::string(redact_mode, raw);
-            format_sql_for_conn_log(&redacted, QUERY_LOG_MAX_LEN)
+            let normalized = tidb_parser::normalize(raw, redact_mode);
+            format_sql_for_conn_log(&normalized, max_len)
         }
         command::STMT_EXECUTE | command::STMT_FETCH if body.len() >= 4 => {
             let id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
             if let Some(st) = stmts.get(&id) {
-                let redacted = tidb_base::redact::string(redact_mode, &st.sql);
-                format_sql_for_conn_log(&redacted, QUERY_LOG_MAX_LEN)
+                let normalized = tidb_parser::normalize(&st.sql, redact_mode);
+                format_sql_for_conn_log(&normalized, max_len)
             } else {
                 tidb_base::mysql::Command2Str
                     .get(&cmd)
@@ -521,14 +622,21 @@ struct Conn<S, H> {
     admission: Option<tidb_runtime::Admission>,
     /// The token of the command in progress (Go: taken in `dispatch`, put back in its defer).
     token: Option<crate::admission::HeldToken>,
+    /// Shared status for graceful drain (reading vs dispatching, in-txn vs autocommit).
+    status: Arc<ConnStatus>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
     async fn command_loop(&mut self, connection_id: u64) {
         loop {
             self.io.reset_sequence();
+            let in_txn = (self.handler.status_flags() & crate::constants::status::IN_TRANS) != 0;
+            self.status.set_reading(true, in_txn);
             let data = match self.io.read_packet().await {
-                Ok(d) => d,
+                Ok(d) => {
+                    self.status.set_reading(false, in_txn);
+                    d
+                }
                 Err(PacketError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
                     // Go: any read failure, a client closing without COM_QUIT included.
                     tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
@@ -544,7 +652,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                     return;
                 }
                 Err(e) => {
-                    warn!(connection_id, error = %e, "read packet failed, closing connection");
+                    let err_str = e.to_string();
+                    if !err_str.contains("use of closed network connection") {
+                        tidb_base::log_warn!(
+                            "read packet failed, close this connection",
+                            "conn" => connection_id,
+                            "session_alias" => self.handler.session_alias(),
+                            "error" => &err_str,
+                        );
+                    }
                     tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
                     return;
                 }
@@ -875,6 +991,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         } else {
             Vec::new()
         };
+        let stmt_sql = stmt.sql.clone();
+        self.last_sql =
+            format_stmt_execute_sql_for_log(&stmt_sql, &params, self.handler.redact_mode());
         self.handler.execute_flags(id, flags);
         self.handler.execute_raw_params(id, raw);
         let resp = self.handler.execute(id, params).await;

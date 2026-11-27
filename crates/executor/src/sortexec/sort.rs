@@ -1080,13 +1080,13 @@ impl ChunkFetcher {
     // go: SortExec.fetchChunksFromChild L2 (a method of the fetcher task's state, which returns the child; failpoint SignalCheckpointForSort not ported: no failpoints [M-PANIC, M-CH])
     async fn run(mut self) -> Box<dyn Executor> {
         let ret = tidb_base::panic_guard::catch_unwind_future(self.fetch_loop()).await;
-        let r: Option<Box<dyn Any + Send>> = match ret {
+        let r: Option<(Box<dyn Any + Send>, Option<String>)> = match ret {
             Ok(Ok(())) => None,
-            Ok(Err(err)) => Some(Box::new(err)),
-            Err((payload, _)) => Some(payload),
+            Ok(Err(err)) => Some((Box::new(err), None)),
+            Err((payload, bt)) => Some((payload, bt)),
         };
-        if let Some(r) = r {
-            process_panic_and_log(&self.result_channel, r).await;
+        if let Some((r, bt)) = r {
+            process_panic_and_log(&self.result_channel, r, bt).await;
         }
 
         self.fetcher_and_worker_syncer.wait().await;
@@ -1236,8 +1236,8 @@ impl ResultGenerator {
         }
 
         let ret = tidb_base::panic_guard::catch_unwind_future(self.generate_result_body()).await;
-        if let Err((r, _)) = ret {
-            process_panic_and_log(self.result_channel(), r).await;
+        if let Err((r, bt)) = ret {
+            process_panic_and_log(self.result_channel(), r, bt).await;
         }
 
         for iter in &self.sorted_rows_iters {

@@ -342,8 +342,29 @@ mod tests {
         );
     }
 
+    fn normalize_ts_and_caller(line: &str) -> String {
+        let mut s = line.trim_end_matches('\n').to_owned();
+        if s.starts_with('[')
+            && let Some(end) = s.find(']')
+            && end == 31
+        {
+            s.replace_range(1..end, "<TS>");
+        }
+        if let Some(lvl_end) = s.find("] [").and_then(|i| {
+            let rest = &s[i + 3..];
+            rest.find("] [").map(|j| i + 3 + j + 3)
+        }) && let Some(caller_end) = s[lvl_end..].find(']')
+        {
+            let caller = &s[lvl_end..lvl_end + caller_end];
+            if caller.contains(':') && !caller.contains(' ') {
+                s.replace_range(lvl_end..lvl_end + caller_end, "<CALLER>");
+            }
+        }
+        s
+    }
+
     #[test]
-    fn log_expensive_query_and_oom_respect_level_gate_and_format() {
+    fn log_expensive_query_and_oom_match_go_golden_samples_byte_for_byte() {
         let sink = tidb_log::MemorySink::new();
         let cfg = tidb_base::config::LogConfig {
             level: "warn".to_owned(),
@@ -360,43 +381,80 @@ mod tests {
         )
         .unwrap();
 
-        let info = ProcessInfoForLog {
+        // Spec §4.4 Golden Sample 1: expensive_query (exact whole-line Go v8.5.8 comparison).
+        let sample1_info = ProcessInfoForLog {
+            conn_id: 2097176,
+            user: "root".to_owned(),
+            db: String::new(),
+            table_ids: vec![112],
+            index_names: Vec::new(),
+            txn_start_ts: 470743179645681664,
+            mem_max_bytes: Some(2146),
+            stats_info: "big:pseudo".to_owned(),
+            sql: "SELECT\n  COUNT(*),\n  SUM(b1.id + SLEEP(1.25 + b1.id * 0.0))\nFROM test.big b1"
+                .to_owned(),
+            session_alias: String::new(),
+            affected_rows: 0,
+            exec_details: Some(ExecDetails {
+                cop_time: 204_207,
+                request_count: 1,
+                ..ExecDetails::default()
+            }),
+            cop_tasks: Some(CopTasksDetails {
+                num_cop_tasks: 1,
+                max_process_address: "store1".to_owned(),
+                max_wait_address: "store1".to_owned(),
+                ..CopTasksDetails::default()
+            }),
+        };
+        log_expensive_query(Duration::from_nanos(10_043_440_202), &sample1_info);
+        let line1 = String::from_utf8(sink.take()).unwrap();
+        let go_sample1 = "[2026/11/27 01:25:30.249 +00:00] [WARN] [expensivequery.go:153] \
+            [expensive_query] [cost_time=10.043440202s] [cop_time=0.000204207s] \
+            [request_count=1] [num_cop_tasks=1] [process_avg_time=0s] [process_p90_time=0s] \
+            [process_max_time=0s] [process_max_addr=store1] [wait_avg_time=0s] \
+            [wait_p90_time=0s] [wait_max_time=0s] [wait_max_addr=store1] [stats=big:pseudo] \
+            [conn=2097176] [user=root] [table_ids=\"[112]\"] [txn_start_ts=470743179645681664] \
+            [mem_max=\"2146 Bytes (2.10 KB)\"] \
+            [sql=\"SELECT\\n  COUNT(*),\\n  SUM(b1.id + SLEEP(1.25 + b1.id * 0.0))\\nFROM test.big b1\"] \
+            [session_alias=] [\"affected rows\"=0]";
+        assert_eq!(
+            normalize_ts_and_caller(&line1),
+            normalize_ts_and_caller(go_sample1)
+        );
+
+        // Spec §4.4 Golden Sample 2: memory exceeds quota (exact whole-line Go v8.5.8 comparison).
+        let sample2_info = ProcessInfoForLog {
             conn_id: 2097198,
             user: "root".to_owned(),
             txn_start_ts: 0,
             mem_max_bytes: Some(2032),
-            sql: "SELECT\n  1".to_owned(),
+            sql: "WITH RECURSIVE cte(n, s) AS (SELECT 1, REPEAT('x', 2048) UNION ALL \
+                  SELECT n + 1, CONCAT(s, REPEAT('x', 2048)) FROM cte WHERE n < 64) \
+                  SELECT COUNT(*), MAX(LENGTH(s)) FROM cte"
+                .to_owned(),
             session_alias: String::new(),
             affected_rows: 0,
             ..ProcessInfoForLog::default()
         };
-        log_expensive_query(Duration::from_nanos(197_248), &info);
-        let line1 = String::from_utf8(sink.take()).unwrap();
-        assert!(line1.contains("[WARN]"), "{line1}");
-        assert!(
-            line1.contains("[expensive_query] [cost_time=0.000197248s]"),
-            "{line1}"
-        );
-        assert!(
-            line1.contains(r#"[mem_max="2032 Bytes (1.98 KB)"]"#),
-            "{line1}"
-        );
-        assert!(
-            line1.contains(r#"[sql="SELECT\n  1"] [session_alias=] ["affected rows"=0]"#),
-            "{line1}"
-        );
-
-        log_on_query_exceed_mem_quota(2097198, Duration::from_nanos(197_248), Some(&info));
+        log_on_query_exceed_mem_quota(2097198, Duration::from_nanos(197_248), Some(&sample2_info));
         let line2 = String::from_utf8(sink.take()).unwrap();
-        assert!(
-            line2.contains(r#"["memory exceeds quota"] [cost_time=0.000197248s]"#),
-            "{line2}"
+        let go_sample2 = "[2026/11/27 01:22:45.887 +00:00] [WARN] [expensivequery.go:153] \
+            [\"memory exceeds quota\"] [cost_time=0.000197248s] [conn=2097198] [user=root] \
+            [txn_start_ts=0] [mem_max=\"2032 Bytes (1.98 KB)\"] \
+            [sql=\"WITH RECURSIVE cte(n, s) AS (SELECT 1, REPEAT('x', 2048) UNION ALL \
+            SELECT n + 1, CONCAT(s, REPEAT('x', 2048)) FROM cte WHERE n < 64) \
+            SELECT COUNT(*), MAX(LENGTH(s)) FROM cte\"] \
+            [session_alias=] [\"affected rows\"=0]";
+        assert_eq!(
+            normalize_ts_and_caller(&line2),
+            normalize_ts_and_caller(go_sample2)
         );
 
         // Level > Warn suppresses both without building fields.
         tidb_log::set_level("error").unwrap();
-        log_expensive_query(Duration::from_secs(10), &info);
-        log_on_query_exceed_mem_quota(2097198, Duration::from_secs(10), Some(&info));
+        log_expensive_query(Duration::from_secs(10), &sample1_info);
+        log_on_query_exceed_mem_quota(2097198, Duration::from_secs(10), Some(&sample2_info));
         assert!(sink.snapshot().is_empty());
         tidb_log::set_level("info").unwrap();
     }
