@@ -23,9 +23,11 @@ pub async fn commit_before_enter_new_txn(sctx: &mut dyn SessionCtx) -> Result<()
         let txn_start_ts = txn.start_ts();
         let txn_scope = sctx.get_session_vars().state.txn_ctx.txn_scope.clone();
         sctx.commit_txn().await?;
-        log::info!(
-            "Try to create a new txn inside a transaction auto commit, schemaVersion: {}, txnStartTS: {txn_start_ts}, txnScope: {txn_scope}",
-            sctx.get_domain_info_schema().base().schema_meta_version()
+        tidb_base::log_info!(
+            "Try to create a new txn inside a transaction auto commit",
+            "schemaVersion" => sctx.get_domain_info_schema().base().schema_meta_version(),
+            "txnStartTS" => txn_start_ts,
+            "txnScope" => &txn_scope,
         );
     }
     Ok(())

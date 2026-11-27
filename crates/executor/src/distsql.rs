@@ -8,13 +8,11 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use futures::FutureExt;
 use parking_lot::Mutex as SyncMutex;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
@@ -1890,9 +1888,15 @@ impl IndexLookUpExecutor {
                 worker.work_tx = None;
                 worker.result_tx = None;
             };
-            if let Err(payload) = AssertUnwindSafe(worker_fut).catch_unwind().await {
+            if let Err((payload, bt)) =
+                tidb_base::panic_guard::catch_unwind_future(worker_fut).await
+            {
+                tidb_base::log_warn!(
+                    "indexWorker in IndexLookupExecutor panicked",
+                    "recover" => tidb_base::panic_guard::panic_payload_log_value(payload.as_ref()),
+                    "stack" => bt.as_deref().unwrap_or(""),
+                );
                 let err = get_recover_error(payload);
-                log::warn!("indexWorker in IndexLookupExecutor panicked: {err}");
                 let (done_tx, done_rx) = oneshot::channel();
                 let _ = done_tx.send(Err(err));
                 if !*panic_finished_rx.borrow() {
@@ -2246,7 +2250,7 @@ impl SelectResultList {
                 Ok(())
             };
             if let Err(e) = err {
-                log::error!("close Select result failed: {e}");
+                tidb_base::log_error!("close Select result failed", "error" => &e);
             }
         }
     }
@@ -2276,7 +2280,7 @@ impl SelectResultWithMeta {
             Ok(())
         };
         if let Err(e) = err {
-            log::error!("close Select result failed: {e}");
+            tidb_base::log_error!("close Select result failed", "error" => &e);
         }
     }
 }
@@ -2333,17 +2337,23 @@ impl IndexWorker {
         mut results: SelectResultList,
         index_types: &[Arc<FieldType>],
     ) -> Result<(), Error> {
-        let res = AssertUnwindSafe(self.fetch_handles_inner(kv_ctx, &mut results, index_types))
-            .catch_unwind()
-            .await;
+        let res = tidb_base::panic_guard::catch_unwind_future(self.fetch_handles_inner(
+            kv_ctx,
+            &mut results,
+            index_types,
+        ))
+        .await;
         // Close results deterministically before returning (Drop also serves as safety net).
         results.close();
         match res {
             Ok(inner) => inner,
-            Err(payload) => {
-                let err = get_recover_error(payload);
-                log::warn!("indexWorker in IndexLookupExecutor panicked: {err}");
-                Err(err)
+            Err((payload, bt)) => {
+                tidb_base::log_warn!(
+                    "indexWorker in IndexLookupExecutor panicked",
+                    "recover" => tidb_base::panic_guard::panic_payload_log_value(payload.as_ref()),
+                    "stack" => bt.as_deref().unwrap_or(""),
+                );
+                Err(get_recover_error(payload))
             }
         }
     }
@@ -2401,21 +2411,23 @@ impl IndexWorker {
         F: FnMut(&tidb_kv::Context, &watch::Receiver<bool>, isize) -> Fut,
         Fut: Future<Output = Result<Option<SelectResultWithMeta>, Error>>,
     {
-        let res = AssertUnwindSafe(self.fetch_handles_rolling_inner(
+        let res = tidb_base::panic_guard::catch_unwind_future(self.fetch_handles_rolling_inner(
             kv_ctx,
             max_in_flight,
             kv_ranges_count,
             index_types,
             build_next,
         ))
-        .catch_unwind()
         .await;
         match res {
             Ok(inner) => inner,
-            Err(payload) => {
-                let err = get_recover_error(payload);
-                log::warn!("indexWorker in IndexLookupExecutor panicked: {err}");
-                Err(err)
+            Err((payload, bt)) => {
+                tidb_base::log_warn!(
+                    "indexWorker in IndexLookupExecutor panicked",
+                    "recover" => tidb_base::panic_guard::panic_payload_log_value(payload.as_ref()),
+                    "stack" => bt.as_deref().unwrap_or(""),
+                );
+                Err(get_recover_error(payload))
             }
         }
     }
@@ -2959,7 +2971,7 @@ impl TableWorker {
             } = task;
 
             let start_time = Instant::now();
-            let exec_res = AssertUnwindSafe(self.execute_task(
+            let exec_res = tidb_base::panic_guard::catch_unwind_future(self.execute_task(
                 exec_ctx,
                 handles,
                 index_order,
@@ -2967,7 +2979,6 @@ impl TableWorker {
                 idx_rows,
                 partition_table,
             ))
-            .catch_unwind()
             .await;
 
             match exec_res {
@@ -2980,9 +2991,13 @@ impl TableWorker {
                     }
                     let _ = done_tx.send(res);
                 }
-                Err(payload) => {
+                Err((payload, bt)) => {
+                    tidb_base::log_error!(
+                        "tableWorker in IndexLookUpExecutor panicked",
+                        "recover" => tidb_base::panic_guard::panic_payload_log_value(payload.as_ref()),
+                        "stack" => bt.as_deref().unwrap_or(""),
+                    );
                     let err = get_recover_error(payload);
-                    log::error!("tableWorker in IndexLookUpExecutor panicked: {err}");
                     let _ = done_tx.send(Err(err));
                     return;
                 }
@@ -3041,7 +3056,7 @@ impl TableWorker {
             Ok(tr) => tr,
             Err(err) => {
                 if !*self.finished_rx.borrow() {
-                    log::error!("build table reader failed: {err}");
+                    tidb_base::log_error!("build table reader failed", "error" => &err);
                 }
                 return Err(err);
             }
@@ -3059,7 +3074,10 @@ impl TableWorker {
             )
             .await;
         if let Err(close_err) = exec::close(&mut table_reader).await {
-            log::error!("close table reader in IndexLookUpExecutor failed: {close_err}");
+            tidb_base::log_error!(
+                "close table reader in IndexLookUpExecutor failed",
+                "error" => &close_err,
+            );
         }
         res
     }
@@ -3111,7 +3129,7 @@ impl TableWorker {
             };
             if let Err(err) = next_res {
                 if !*self.finished_rx.borrow() {
-                    log::warn!("table reader fetch next chunk failed: {err}");
+                    tidb_base::log_warn!("table reader fetch next chunk failed", "error" => &err);
                 }
                 return Err(err);
             }
@@ -4448,8 +4466,61 @@ mod tests {
 
     #[tokio::test]
     async fn index_lookup_lifecycle_panic_oom_cancel_and_detach() {
-        // 1. Index worker panic -> converted to Err, tracker zeroed, mock closed.
+        let sink = tidb_log::sink::MemorySink::new();
+        let cfg = tidb_base::config::LogConfig {
+            level: "info".to_owned(),
+            format: "text".to_owned(),
+            disable_timestamp: false,
+            disable_error_verbose: true,
+            ..tidb_base::config::LogConfig::default()
+        };
+        let log_sink = Arc::clone(&sink);
+        tidb_log::init_logger_with_sinks(&cfg, "", log_sink, None).unwrap();
+        tidb_log::set_panic_hook();
+
+        // Normalizes the dynamic timestamp, caller line number, and captured backtrace in a
+        // panic recovery log line while asserting single-line structure and non-empty Go-style
+        // `\n\t` stack frames, so the entire line can be compared verbatim via `assert_eq!`.
+        let normalize_panic_line = |raw: &str| -> String {
+            assert!(
+                !raw.contains('\n') && !raw.contains('\r'),
+                "log line must be single-line: {raw:?}"
+            );
+            let after_ts = raw
+                .strip_prefix('[')
+                .and_then(|s| s.split_once("] "))
+                .map(|(ts, rest)| {
+                    assert_eq!(ts.len(), 30, "expected pingcap/log timestamp, got: {ts:?}");
+                    rest
+                })
+                .expect("missing leading [timestamp] ");
+            let (before_stack, stack_quoted) = after_ts
+                .split_once(" [stack=\"")
+                .expect("missing [stack=\"...\"] field");
+            let stack_body = stack_quoted
+                .strip_suffix("\"]")
+                .expect("stack field must be the last field");
+            assert!(
+                !stack_body.is_empty() && stack_body.contains("\\n\\t"),
+                "stack must contain Go-style \\n\\t frame locations: {stack_body:?}"
+            );
+            // Replace `[distsql.rs:<digits>]` with `[distsql.rs:<LINE>]`.
+            let normalized_prefix = if let Some((head, tail)) =
+                before_stack.split_once("[distsql.rs:")
+                && let Some((line_no, rest)) = tail.split_once(']')
+                && !line_no.is_empty()
+                && line_no.bytes().all(|b| b.is_ascii_digit())
+            {
+                format!("{head}[distsql.rs:<LINE>]{rest}")
+            } else {
+                before_stack.to_owned()
+            };
+            format!("[<TS>] {normalized_prefix} [stack=\"<STACK>\"]")
+        };
+
+        // 1. Index worker panic -> converted to Err, tracker zeroed, mock closed, whole-line golden log.
         {
+            let _ = sink.take();
             let (tbl, plan) = make_lookup_table_and_plan(true, false, false);
             let is = make_info_schema(tbl).await;
             let mut s = MockSession::new(100);
@@ -4471,10 +4542,24 @@ mod tests {
             exec::close(&mut ilu).await.unwrap();
             assert!(closed.load(Ordering::SeqCst));
             assert_eq!(ilu.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+
+            let logged = String::from_utf8(sink.take()).unwrap();
+            let panic_lines: Vec<&str> =
+                logged.lines().filter(|l| l.contains("panicked")).collect();
+            assert_eq!(
+                panic_lines.len(),
+                1,
+                "expected 1 indexWorker panic log:\n{logged}"
+            );
+            assert_eq!(
+                normalize_panic_line(panic_lines[0]),
+                "[<TS>] [WARN] [distsql.rs:<LINE>] [\"indexWorker in IndexLookupExecutor panicked\"] [recover=\"injected worker panic\"] [stack=\"<STACK>\"]"
+            );
         }
 
-        // 2. Table worker panic -> converted to Err, tracker zeroed, both mocks closed.
+        // 2. Table worker panic -> converted to Err, tracker zeroed, both mocks closed, whole-line golden log.
         {
+            let _ = sink.take();
             let (tbl, plan) = make_lookup_table_and_plan(true, false, false);
             let is = make_info_schema(tbl).await;
             let mut s = MockSession::new(100);
@@ -4513,6 +4598,19 @@ mod tests {
             assert!(idx_closed.load(Ordering::SeqCst));
             assert!(tbl_closed.load(Ordering::SeqCst));
             assert_eq!(ilu.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+
+            let logged = String::from_utf8(sink.take()).unwrap();
+            let panic_lines: Vec<&str> =
+                logged.lines().filter(|l| l.contains("panicked")).collect();
+            assert_eq!(
+                panic_lines.len(),
+                1,
+                "expected 1 tableWorker panic log:\n{logged}"
+            );
+            assert_eq!(
+                normalize_panic_line(panic_lines[0]),
+                "[<TS>] [ERROR] [distsql.rs:<LINE>] [\"tableWorker in IndexLookUpExecutor panicked\"] [recover=\"injected worker panic\"] [stack=\"<STACK>\"]"
+            );
         }
 
         // 3. Memory quota exceeded in tableWorker -> A1 checkpoint returns Err, tracker zeroed after Close.

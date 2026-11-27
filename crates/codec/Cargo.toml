@@ -16,10 +16,10 @@ tidb-parser = { workspace = true }
 tidb-types = { workspace = true }
 # Chunk, Column, Row (block D01.7).
 tidb-chunk = { workspace = true }
-# logutil.BgLogger().Warn in HashCode (the binary bridges `log`, see tidb-server).
-log = "0.4"
 
 [dev-dependencies]
+# Whole-line log parity golden tests for HashCode.
+tidb-log = { workspace = true }
 # The govec vectors are committed as .jsonl.gz.
 flate2 = "1.0"
 serde_json = { workspace = true }

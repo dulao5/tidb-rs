@@ -204,7 +204,7 @@ impl ActionOnExceed for LogOnExceed {
             match hook {
                 None => {
                     let err = mem_exceed_error(t);
-                    tracing::warn!(error = %err, "memory exceeds quota");
+                    tidb_base::log_warn!("memory exceeds quota", "error" => &err);
                 }
                 Some(h) => h(self.conn_id.load(SeqCst)),
             }
@@ -271,7 +271,11 @@ impl ActionOnExceed for PanicOnExceed {
             match hook {
                 None => {
                     let err = mem_exceed_error(t);
-                    tracing::warn!(conn = t.session_id(), error = %err, "memory exceeds quota");
+                    tidb_base::log_warn!(
+                        "memory exceeds quota",
+                        "conn" => t.session_id(),
+                        "error" => &err,
+                    );
                 }
                 Some(h) => h(self.conn_id.load(SeqCst)),
             }

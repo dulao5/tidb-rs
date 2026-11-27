@@ -344,9 +344,10 @@ pub struct Router {
 }
 
 /// A new-stack error as the client sees it: the code, SQLSTATE and message Go's
-/// `clientConn.writeError` (pkg/server/conn.go:1580) puts in the ERR packet. A TiDB error
-/// goes through `terror.ToSQLError`: its MySQL code if its class registered the code, else
-/// `ErrUnknown` (1105), with its message; any other error is `ErrUnknown` with its text. The
+/// `clientConn.writeError` (pkg/server/conn.go:1580) puts in the ERR packet, while preserving the
+/// original `tidb_base::Error` so `command dispatched failed` emits `[component:code]` and stacks.
+/// A TiDB error goes through `terror.ToSQLError`: its MySQL code if its class registered the code,
+/// else `ErrUnknown` (1105), with its message; any other error is `ErrUnknown` with its text. The
 /// SQLSTATE follows from the code (`mysql.NewErrf`, Go's `MySQLState` table), so a coprocessor
 /// error TiKV returns (`ClassTiKV.Synthesize`, distsql's select result) such as 1690 gets
 /// `22003`. A boundary stub's error ([`tidb_base::blocked::blocked`]) is tidb-rs's own: it
@@ -357,7 +358,8 @@ fn sql_error(e: &Error) -> SqlError {
         return SqlError::new(
             tidb_base::mysql::ErrNotSupportedYet,
             String::from_utf8_lossy(&e.get_msg()).into_owned(),
-        );
+        )
+        .with_source_err(e.clone());
     }
     let m = if e.is_normalized() {
         tidb_base::terror::to_sql_error(e)
@@ -369,9 +371,38 @@ fn sql_error(e: &Error) -> SqlError {
             vec![tidb_base::gofmt::Arg::go_string(e.error())],
         )
     };
-    let err = SqlError::new(m.code, String::from_utf8_lossy(&m.message).into_owned());
+    let err = SqlError::new(m.code, String::from_utf8_lossy(&m.message).into_owned())
+        .with_source_err(e.clone());
     debug_assert_eq!(err.state, m.state, "the SQLSTATE of code {}", m.code);
     err
+}
+
+/// Emit Go `session.go:1590` `WARN` `"parse SQL failed"` (preserving raw `\n`, applying
+/// `redact::string`) and attach a `[parser:1064]` `source_err` on `SqlError` for
+/// `command dispatched failed`.
+pub(crate) fn log_and_wrap_parse_error(
+    conn_id: u64,
+    session_alias: &str,
+    redact_mode: &str,
+    sql: &str,
+    err: SqlError,
+) -> SqlError {
+    let src = err.source_err.clone().unwrap_or_else(|| {
+        // `err.message` is already formatted by the parser; use "%s" instead of ErrParse's
+        // "%s %s" template so we do not append an extra trailing space.
+        tidb_base::terror::ClassParser
+            .new_std(tidb_base::errno::ErrParse)
+            .fast_gen("%s", tidb_base::go_args![&err.message])
+    });
+    let sql_log = tidb_base::redact::string(redact_mode, sql);
+    tidb_base::log_warn!(
+        "parse SQL failed",
+        "conn" => conn_id,
+        "session_alias" => session_alias,
+        "error" => &src,
+        "SQL" => &sql_log,
+    );
+    err.with_source_err(src)
 }
 
 /// The 1235 error of a statement only the new stack can run when it cannot (§4.7, row 3).
@@ -456,9 +487,10 @@ impl Router {
         r
     }
 
-    /// The connection's id (the route trace records under it).
+    /// The connection's id (the route trace and new-stack SessionVars record under it).
     pub fn set_connection_id(&mut self, id: u64) {
         self.conn_id = id;
+        self.new.session_mut().vars_mut().connection_id = id;
     }
 
     /// A routing decision: `tidbrs_route_total{engine, reason}` and the route trace.
@@ -734,7 +766,22 @@ impl Router {
         self.cursor = false;
         poc.begin_command();
         let start = Instant::now();
-        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let stmt = match tidb_sql::ir::parse_one(sql) {
+            Ok(s) => s,
+            Err(e) => {
+                let vars = self.new.session().vars();
+                if !vars.in_restricted_sql {
+                    return Err(log_and_wrap_parse_error(
+                        self.conn_id,
+                        &vars.session_alias,
+                        &vars.enable_redact_log,
+                        sql,
+                        e,
+                    ));
+                }
+                return Err(e);
+            }
+        };
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         if let Some(scope) = admin_flush_plan_cache_scope(&stmt) {

@@ -47,6 +47,14 @@ impl RegionVerID {
     pub fn get_conf_ver(&self) -> u64 {
         self.conf_ver
     }
+
+    // go-l3: ADR-0008 client-go internal/locate RegionVerID.String
+    pub fn string(&self) -> String {
+        format!(
+            "{{ region id: {}, ver: {}, confVer: {} }}",
+            self.id, self.ver, self.conf_ver
+        )
+    }
 }
 
 /// `tikv.KeyLocation`: the region a key range falls in, as the region cache knows it.
@@ -73,6 +81,17 @@ fn contains(start_key: &[u8], end_key: &[u8], key: &[u8]) -> bool {
 }
 
 impl KeyLocation {
+    /// String formats this KeyLocation like client-go `KeyLocation.String`.
+    // go-l3: ADR-0008 client-go internal/locate KeyLocation.String
+    pub fn string(&self) -> String {
+        format!(
+            "region {},startKey:{},endKey:{}",
+            self.region.string(),
+            tidb_base::redact::key(&self.start_key),
+            tidb_base::redact::key(&self.end_key),
+        )
+    }
+
     /// Contains checks if key is in [StartKey, EndKey).
     // go-l3: ADR-0008 client-go internal/locate KeyLocation.Contains
     pub fn contains(&self, key: &[u8]) -> bool {
@@ -139,7 +158,13 @@ impl KeyLocation {
                 end_key: self.end_key.clone(),
             });
         }
-        log::info!("Unreachable place");
+        let key_loc = self.string();
+        let key_str = tidb_base::redact::key(key);
+        tidb_base::log_info!(
+            "Unreachable place",
+            "KeyLocation" => key_loc.as_str(),
+            "Key" => key_str.as_str(),
+        );
         panic!("Unreachable");
     }
 

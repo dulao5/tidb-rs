@@ -38,6 +38,13 @@ blocks = ["D15.1", "D15.3"]   # A1; D15.3: memory part of util/cgroup
 rank = 1
 blocks = []
 
+# D00.3 single-responsibility runtime logging and version backend (specs/D00.3-logging/spec.md):
+# unified text/json encoders, rotating/buffered/gzip file sinks, log/tracing/slog bridges, global
+# panic hook, PrintTiDBInfo/GetTiDBInfo. D00.3 remains in [unassigned] (same pattern as tidb-runtime).
+[crate.tidb-log]
+rank = 1
+blocks = []
+
 [crate.tidb-types]
 rank = 2
 blocks = ["D01.1", "D01.2", "D01.3", "D01.4", "D01.5", "D01.6", "D01.9"]

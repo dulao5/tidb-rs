@@ -2164,15 +2164,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nu-ansi-term"
-version = "0.50.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
-dependencies = [
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "num"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2598,15 +2589,16 @@ dependencies = [
  "serde_json",
  "tidb-base",
  "tidb-distsql",
+ "tidb-log",
  "tidb-meta",
  "tidb-metrics",
  "tidb-mysql-protocol",
  "tidb-runtime",
+ "tidb-sessionctx",
  "tikv-jemallocator",
  "tipb",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3736,10 +3728,10 @@ dependencies = [
  "codec",
  "criterion 0.5.1",
  "flate2",
- "log",
  "serde_json",
  "tidb-base",
  "tidb-chunk",
+ "tidb-log",
  "tidb-parser",
  "tidb-types",
  "tidb_query_datatype",
@@ -3770,18 +3762,16 @@ name = "tidb-domain"
 version = "0.0.0"
 dependencies = [
  "futures",
- "log",
  "parking_lot 0.12.5",
  "tidb-base",
  "tidb-infoschema",
  "tidb-kv",
+ "tidb-log",
  "tidb-metrics",
  "tidb-model",
  "tidb-parser",
  "tidb-sessionctx",
  "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3815,6 +3805,7 @@ dependencies = [
  "tidb-expression",
  "tidb-infoschema",
  "tidb-kv",
+ "tidb-log",
  "tidb-memory",
  "tidb-metrics",
  "tidb-model",
@@ -3837,7 +3828,6 @@ version = "0.0.0"
 dependencies = [
  "arc-swap 1.9.3",
  "flate2",
- "log",
  "protobuf",
  "serde_json",
  "tidb-base",
@@ -3887,7 +3877,6 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "futures",
- "log",
  "parking_lot 0.12.5",
  "protobuf",
  "regex",
@@ -3917,7 +3906,6 @@ dependencies = [
  "flate2",
  "futures",
  "hashbrown 0.17.2",
- "log",
  "parking_lot 0.12.5",
  "protobuf",
  "rand 0.8.8",
@@ -3929,6 +3917,25 @@ dependencies = [
  "tidb-types",
  "tipb",
  "tokio",
+]
+
+[[package]]
+name = "tidb-log"
+version = "0.0.0"
+dependencies = [
+ "arc-swap 1.9.3",
+ "base64 0.22.1",
+ "chrono",
+ "flate2",
+ "itoa",
+ "log",
+ "parking_lot 0.12.5",
+ "serde_json",
+ "slog",
+ "slog-global",
+ "tidb-base",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3947,7 +3954,6 @@ dependencies = [
  "tidb-metrics",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
- "tracing",
 ]
 
 [[package]]
@@ -3998,6 +4004,7 @@ dependencies = [
  "tidb-executor",
  "tidb-expression",
  "tidb-kv",
+ "tidb-log",
  "tidb-metrics",
  "tidb-model",
  "tidb-parser",
@@ -4016,7 +4023,6 @@ version = "0.0.0"
 dependencies = [
  "cfgrammar",
  "flate2",
- "log",
  "lrtable",
  "parking_lot 0.12.5",
  "serde_json",
@@ -4099,8 +4105,6 @@ dependencies = [
  "prometheus",
  "tidb-base",
  "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4132,10 +4136,12 @@ dependencies = [
  "tidb-base",
  "tidb-chunk",
  "tidb-codec",
+ "tidb-execdetails",
  "tidb-executor",
  "tidb-expression",
  "tidb-infoschema",
  "tidb-kv",
+ "tidb-log",
  "tidb-memory",
  "tidb-model",
  "tidb-parser",
@@ -4164,6 +4170,7 @@ dependencies = [
  "tidb-codec",
  "tidb-execdetails",
  "tidb-kv",
+ "tidb-log",
  "tidb-memory",
  "tidb-model",
  "tidb-parser",
@@ -4177,7 +4184,6 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "futures",
- "log",
  "parking_lot 0.12.5",
  "serde_json",
  "tidb-base",
@@ -4200,7 +4206,6 @@ dependencies = [
 name = "tidb-statistics"
 version = "0.0.0"
 dependencies = [
- "log",
  "tidb-base",
  "tidb-chunk",
  "tidb-codec",
@@ -4219,7 +4224,6 @@ dependencies = [
  "bytes",
  "flate2",
  "futures",
- "log",
  "parking_lot 0.12.5",
  "prost",
  "protobuf",
@@ -4231,6 +4235,7 @@ dependencies = [
  "tidb-expression",
  "tidb-infoschema",
  "tidb-kv",
+ "tidb-log",
  "tidb-memory",
  "tidb-metrics",
  "tidb-model",
@@ -4287,11 +4292,13 @@ version = "0.0.0"
 dependencies = [
  "criterion 0.5.1",
  "flate2",
- "log",
  "serde_json",
  "sha2",
  "tidb-base",
+ "tidb-log",
+ "tidb-memory",
  "tidb-parser",
+ "tidb-runtime",
  "tikv-jemallocator",
 ]
 
@@ -4797,18 +4804,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
- "valuable",
-]
-
-[[package]]
-name = "tracing-log"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
-dependencies = [
- "log",
- "once_cell",
- "tracing-core",
 ]
 
 [[package]]
@@ -4817,11 +4812,9 @@ version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
- "nu-ansi-term",
  "sharded-slab",
  "thread_local",
  "tracing-core",
- "tracing-log",
 ]
 
 [[package]]
@@ -4921,12 +4914,6 @@ name = "valgrind_request"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0fb139b14473e1350e34439c888e44c805f37b4293d17f87ea920a66a20a99a"
-
-[[package]]
-name = "valuable"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vcpkg"
